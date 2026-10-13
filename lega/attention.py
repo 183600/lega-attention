@@ -182,7 +182,7 @@ class CausalSelfAttention(nn.Module):
 
     def _attend_q_chunk(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         kT: torch.Tensor, v: torch.Tensor,
-                        fill_from: int, band_start: int, band_mask: Optional[torch.Tensor],
+                        band_start: int, band_mask: Optional[torch.Tensor],
                         log_n: Optional[torch.Tensor], collect_stats: bool):
         """单查询块的显式注意力 + 门控；collect_stats=False 时只返回输出。
 
@@ -190,20 +190,18 @@ class CausalSelfAttention(nn.Module):
         q_content 是 RoPE 旋转前且未乘 1/sqrt(Dh) 的查询内容向量，门控查询项
         必须用它（长度/绝对位置只通过显式 log n 进入门控）。
 
-        因果掩码分两段施加，避免对整块 (B,H,C,S) 打分做 masked_fill（读 mask +
-        读 att + 写 att 三遍流量）：
-          * [fill_from, S) 列对本块全部查询不可见：整列 fill_(-inf)，纯写；
-          * [band_start, band_start+cq) 对角带：用平移不变的 (1,1,cq,cq) 三角掩码
-            做 masked_fill_，面积只有 cq² 而非 cq*S。
+        kT/v 已被调用方裁到本块可见前缀（末列即块内最末查询可见的最后一键），
+        全块不可见的尾列既不参与打分也不参与 softmax，数学上与先算全量再做整列
+        -inf 屏蔽完全等价，但省掉这部分 GEMM 列与显存；块内只需对对角带
+        [band_start, band_start+cq) 用平移不变的 (1,1,cq,cq) 三角掩码做
+        masked_fill_，面积只有 cq² 而非 cq*S。
 
         null 变体不把 null 槽拼接进 K/V（避免每层每步复制整个缓存），
         而是把空槽得分 (B,H,C,1) 追加到打分矩阵末尾，输出用
         o = p_real @ v + p_null * v_null 合成，数学上与先拼 K/V 完全等价。
         """
         S = kT.size(-1)
-        att = torch.matmul(q_rot, kT)                               # (B,H,C,S)
-        if fill_from < S:
-            att[..., fill_from:] = float("-inf")
+        att = torch.matmul(q_rot, kT)                               # (B,H,C,S)，S=可见前缀长
         if band_mask is not None:
             att[..., band_start:band_start + band_mask.shape[-1]].masked_fill_(
                 band_mask, float("-inf"))
@@ -264,11 +262,19 @@ class CausalSelfAttention(nn.Module):
             q1 = min(T, q0 + cq)
             qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
             qc = q_content[:, :, q0:q1]  # 未缩放的 RoPE 前查询内容向量块（门控用）
-            # 因果掩码两段式（见 _attend_q_chunk 文档）：
-            #   * [fill_from, S)：超出块内最末查询可见范围的列，整段置 -inf；
+            # 因果掩码两段式：
+            #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
+            #     切片到可见前缀（视图零拷贝），打分矩阵从 (B,H,Cq,S) 缩到
+            #     (B,H,Cq,fill_from)；整段预填充（past=0, S=T）时全部块的打分/
+            #     softmax/输出 GEMM 列数合计约为 T²/2，显存占用同步减半；
             #   * 对角带 [band_start, band_start + (q1-q0))：用全局共享的
             #     严格上三角掩码逐块置 -inf（只依赖块内相对偏移，与 past 无关）。
             fill_from = min(past_len + q1, S)
+            if fill_from < S:
+                kT_c = kT[..., :fill_from]          # kT 布局 (B,H,Dh,S)，键维在末维
+                v_c = v[:, :, :fill_from]           # v 布局 (B,H,S,Dh)
+            else:
+                kT_c, v_c = kT, v
             band_start = past_len + q0
             band_mask = _tri_band(q1 - q0, q1 - q0, q_rot.device)
             logn_c = None if log_n is None else log_n[q0:q1]
@@ -276,13 +282,13 @@ class CausalSelfAttention(nn.Module):
                 # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
                 # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗
                 oc = torch.utils.checkpoint.checkpoint(
-                    self._attend_q_chunk, qr, qc, kT, v, fill_from, band_start,
+                    self._attend_q_chunk, qr, qc, kT_c, v_c, band_start,
                     band_mask, logn_c, False,
                     use_reentrant=False, preserve_rng_state=False)
             else:
                 if collect_stats:
                     oc, mp, qt, lg, gg = self._attend_q_chunk(
-                        qr, qc, kT, v, fill_from, band_start, band_mask,
+                        qr, qc, kT_c, v_c, band_start, band_mask,
                         logn_c, True)
                     if mp is not None:
                         max_ps.append(mp)
@@ -293,7 +299,7 @@ class CausalSelfAttention(nn.Module):
                     if gg is not None:
                         gs.append(gg)
                 else:
-                    oc = self._attend_q_chunk(qr, qc, kT, v, fill_from, band_start,
+                    oc = self._attend_q_chunk(qr, qc, kT_c, v_c, band_start,
                                               band_mask, logn_c, False)
             # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
             # 布局变换在此一次完成，取代末端整表 transpose().contiguous()
