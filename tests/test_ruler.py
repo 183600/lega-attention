@@ -1,0 +1,135 @@
+"""RULER 任务构造器测试：跨度有效性、答案一致性、打分函数。"""
+import random
+
+from lega.data import CharTokenizer
+from lega.ruler import (build_fwe, build_niah, build_vt, score_prediction,
+                        ContextTooSmall, TASKS, _stable_hash)
+
+_TEXT = ("One of the special magic numbers for lyre is: 7021853.\n"
+         "VAR A1 = 48213.\nVAR A2 = A1.\nVAR B1 = 99321.\nVAR B2 = B1.\n"
+         "VAR C1 = 13579.\nVAR C2 = C1.\nVAR D1 = 24680.\nVAR D2 = D1.\n"
+         "VAR E1 = 11235.\nVAR E2 = E1.\nVAR F1 = 81321.\nVAR F2 = F1.\n"
+         "The grass is green. The sky is blue. What are the 10 most common words?\n"
+         "ka ro mi ta lu sen dor vil pen tor nal bes qui mon fel gar hil jas ker lum 0123456789")
+
+
+def _tok():
+    return CharTokenizer(sorted(set(_TEXT)))
+
+
+def _check_common(ex, ctx):
+    assert len(ex["ids"]) <= ctx, f"样例超长: {len(ex['ids'])} > {ctx}"
+    if ex["needle_span"] is not None:
+        s, e = ex["needle_span"]
+        assert 0 <= s < e <= len(ex["ids"])
+    qs, qe = ex["query_span"]
+    assert 0 <= qs < qe <= len(ex["ids"])
+    assert ex["answer"]
+
+
+def test_build_all_tasks():
+    tok = _tok()
+    for task in TASKS:
+        # fwe 的词频表本身需要较大上下文。按任务给足上下文长度，
+        # 任何 ContextTooSmall 都视为失败。
+        ctx = 3072 if task == "fwe" else 400
+        rng = random.Random(1234 + _stable_hash(task) % 1000)
+        if task == "niah_synth":
+            ex = build_niah(tok, ctx, rng, mode="synth")
+        elif task == "niah_corpus":
+            ex = build_niah(tok, ctx, rng, mode="corpus",
+                            corpus_sents=["A quiet river runs through the old town.",
+                                          "Some books are to be tasted, others swallowed."])
+        elif task == "niah_multikey":
+            ex = build_niah(tok, ctx, rng, mode="synth", multikey=True)
+        elif task == "fwe":
+            ex = build_fwe(tok, ctx, rng)
+        elif task == "vt":
+            ex = build_vt(tok, ctx, rng, n_chains=4, depth=4)
+        _check_common(ex, ctx)
+        # needle 跨度解码后应包含答案；value_span 必须精确解码为答案。
+        if ex["needle_span"] is not None:
+            s, e = ex["needle_span"]
+            seg = tok.decode(ex["ids"][s:e])
+            assert ex["answer"] in seg, f"{task}: needle 段不含答案"
+        if ex.get("value_span"):
+            s, e = ex["value_span"]
+            assert tok.decode(ex["ids"][s:e]).strip() == ex["answer"]
+        print(f"  [ok] {task}: n_tokens={ex['meta']['n_tokens']}")
+
+
+def test_niah_needle_span_contains_answer():
+    tok = _tok()
+    for i in range(5):
+        rng = random.Random(500 + i)
+        ex = build_niah(tok, 512, rng, mode="synth")
+        s, e = ex["needle_span"]
+        assert ex["answer"] in tok.decode(ex["ids"][s:e])
+
+
+def test_score_predictions():
+    # NIAH：数值命中
+    sc = score_prediction("niah_synth", "7021853", " The special magic number is 7021853.")
+    assert sc["em"] == 1.0
+    sc = score_prediction("niah_synth", "7021853", " 1234567")
+    assert sc["em"] == 0.0
+    # 先答错、后附正确答案不算命中
+    assert score_prediction("niah_synth", "7021853",
+                            " 1234567, or maybe 7021853")["em"] == 0.0
+    # vt
+    assert score_prediction("vt", "48213", " The value of VAR A4 is 48213.")["em"] == 1.0
+    # fwe: 召回率
+    top = ["ka", "ro", "mi", "ta"]
+    sc = score_prediction("fwe", "ka ro mi ta", " ka ro mi", answer_words=top)
+    assert sc["recall"] == 0.75 and sc["em"] == 0.0
+    sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro", answer_words=top)
+    assert sc["recall"] == 1.0 and sc["em"] == 1.0
+    # fwe 严格 EM：多答无关词不算命中
+    sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro extra", answer_words=top)
+    assert sc["recall"] == 1.0 and sc["em"] == 0.0
+
+
+def test_run_ruler_dedupes_clamped_ctx():
+    """多个 ctx_lens 被 clamp 到同一 room_ctx 时不应重复计算/相互覆盖。"""
+    import torch
+
+    from lega.model import GPT
+    from lega.ruler import run_ruler
+
+    tok = _tok()
+    torch.manual_seed(0)
+    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
+                n_heads=2, ffn_mult=4, variant="standard")
+    model.eval()
+    max_new = 12
+    room = 320 - max_new - 1
+    res = run_ruler(model, tok, "cpu", ctx_lens=[room, room + 100, room + 200],
+                    n_samples=1, max_new=max_new, fwe_max_new=max_new,
+                    tasks=("niah_synth",),
+                    verbose=False)
+    assert list(res["niah_synth"].keys()) == [str(room)], \
+        f"clamp 到同一 room_ctx 的 ctx 档应去重: {list(res['niah_synth'].keys())}"
+    assert 0.0 <= res["niah_synth"][str(room)]["em"] <= 1.0
+
+
+def test_context_too_small():
+    tok = _tok()
+    try:
+        build_vt(tok, 40, random.Random(0), n_chains=4, depth=4)
+        raised = False
+    except ContextTooSmall:
+        raised = True
+    assert raised, "ctx 过小时应抛出 ContextTooSmall"
+
+
+def test_vt_needle_span_is_value_definition_line():
+    """VT 的 gold 跨度应精确落在含答案数值的定义行，而不是整条链的包围盒。"""
+    tok = _tok()
+    for i in range(10):
+        rng = random.Random(900 + i)
+        ex = build_vt(tok, 512, rng, n_chains=4, depth=4)
+        s, e = ex["needle_span"]
+        seg = tok.decode(ex["ids"][s:e])
+        assert seg.startswith(f"VAR {ex['meta']['chain']}1 ="), f"跨度不是定义行: {seg!r}"
+        assert ex["answer"] in seg
+        assert f"VAR {ex['meta']['chain']}4" not in seg

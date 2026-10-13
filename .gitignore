@@ -1,0 +1,30 @@
+# Python 通用
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# 实验产物
+out/
+data/
+results/*
+!results/.gitkeep
+wandb/
+*.pt
+*.bin
+
+# 系统文件
+.DS_Store
+nohup.out
+*.log

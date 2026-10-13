@@ -1,0 +1,8 @@
+torch>=2.1
+numpy>=1.24
+tiktoken>=0.5
+matplotlib>=3.7
+
+# 可选依赖：
+# pyarrow>=14        # scripts/prepare_data.py 的 parquet 下载路径（zip 路径不需要）
+# wandb              # 可选 W&B 日志：pip install wandb && wandb login，训练加 --wandb
