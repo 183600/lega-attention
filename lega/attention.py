@@ -48,18 +48,18 @@ _GATED = ("qgate", "lega", "lega_no_len", "lega_no_conc", "lega_no_query")  # �
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_conc", "lega_no_query")     # 门依赖注意力统计
 
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率，每块约 _CHUNK_TARGET_ELEMS
-# 个元素；训练态配合逐块 checkpoint，长上下文下各层只保留 Q/K/V 与输出。
+# 个元素；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
 
 # 进程级共享缓存：各层（乃至各实例）在同一设备/长度下的因果掩码与 log n
-# 完全相同，按模块共享可避免每层各驻留一份 (1,1,T,S) 布尔掩码。
+# 完全相同，按模块共享。
 # 键内已含 device，跨设备天然隔离；长度变化场景（解码）由容量上限兜底。
-# 只常驻 not_allowed（显式路径直接用）；allowed 仅 SDPA 带掩码的少见分支需要，
+# 只构造 not_allowed（显式路径直接用）；allowed 仅 SDPA 带掩码的少见分支需要，
 # 用时再按位取反。
 _MASK_CACHE: dict = {}   # (past_len, T, S, device) -> [not_allowed, ones_col, allowed]
-                         # allowed 惰性填充并与 not_allowed 一并驻留，避免每层每步
-                         # 在 SDPA 带掩码分支对整块 (1,1,T,S) 掩码重新按位取反
+                         # allowed 惰性填充并与 not_allowed 一并保存，供 SDPA
+                         # 带掩码分支直接使用
 _LOGN_CACHE: dict = {}   # (past_len, T, device) -> (T,) float
 # 查询分块路径使用的三角对角带掩码：块 (r, c) 内掩码只依赖相对偏移（c > r），
 # 与 past 偏移无关，全层/全块共享一份即可；分块步常见 chunk 形状只有一两种。
@@ -192,7 +192,7 @@ class CausalSelfAttention(nn.Module):
 
         kT/v 已被调用方裁到本块可见前缀（末列即块内最末查询可见的最后一键），
         全块不可见的尾列既不参与打分也不参与 softmax，数学上与先算全量再做整列
-        -inf 屏蔽完全等价，但省掉这部分 GEMM 列与显存；块内只需对对角带
+        -inf 屏蔽完全等价；块内只需对对角带
         [band_start, band_start+cq) 用平移不变的 (1,1,cq,cq) 三角掩码做
         masked_fill_，面积只有 cq² 而非 cq*S。
 
@@ -219,7 +219,7 @@ class CausalSelfAttention(nn.Module):
             p = F.dropout(p, p=self.attn_dropout)
         if is_null:
             o = torch.matmul(p[..., :S], v)                           # (B,H,C,Dh)
-            # addcmul_ 融合 p_null(×)v_null 的乘加
+            # addcmul_ 完成 p_null(×)v_null 的乘加
             #（训练态逐块 checkpoint 反向重算时逐块生效）
             o.addcmul_(p[..., S:], self.v_null.to(v.dtype).view(1, self.n_heads, 1, -1))
         else:
@@ -239,10 +239,9 @@ class CausalSelfAttention(nn.Module):
                         k: torch.Tensor, v: torch.Tensor,
                         past_len: int, log_n: Optional[torch.Tensor],
                         B: int, H: int, T: int, collect_stats: bool):
-        """按查询块执行显式注意力；训练态逐块 checkpoint 以消除 T*S 常驻激活。
+        """按查询块执行显式注意力；训练态逐块 checkpoint。
 
-        q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次，
-        避免每个块（以及 checkpoint 的反向重算）重复一次 (B,H,Cq,Dh) 乘法。
+        q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次。
         """
         S = k.shape[2]
         # 目标：每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
@@ -253,8 +252,7 @@ class CausalSelfAttention(nn.Module):
         # 需要统计时必须走普通调用，否则统计会被静默丢弃（g/logit 全为 None）。
         use_ckpt = torch.is_grad_enabled() and q_rot.requires_grad and not collect_stats
         # 输出直接按 (B,T,H,Dh) 连续布局写入预分配缓冲（逐块 copy_ 是 autograd
-        # 安全的）：块输出到多头合并的转置在写块时一次完成，forward 末端无需再
-        # 对整表做一次 transpose().contiguous() 全量拷贝
+        # 安全的）：块输出到多头合并的转置在写块时一次完成
         Dh = v.shape[-1]
         o = v.new_empty(B, T, H, Dh)
         max_ps, qterms, logits, gs = [], [], [], []
@@ -264,9 +262,7 @@ class CausalSelfAttention(nn.Module):
             qc = q_content[:, :, q0:q1]  # 未缩放的 RoPE 前查询内容向量块（门控用）
             # 因果掩码两段式：
             #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
-            #     切片到可见前缀（视图零拷贝），打分矩阵从 (B,H,Cq,S) 缩到
-            #     (B,H,Cq,fill_from)；整段预填充（past=0, S=T）时全部块的打分/
-            #     softmax/输出 GEMM 列数合计约为 T²/2，显存占用同步减半；
+            #     切片到可见前缀，打分矩阵从 (B,H,Cq,S) 缩到 (B,H,Cq,fill_from)；
             #   * 对角带 [band_start, band_start + (q1-q0))：用全局共享的
             #     严格上三角掩码逐块置 -inf（只依赖块内相对偏移，与 past 无关）。
             fill_from = min(past_len + q1, S)
@@ -461,8 +457,8 @@ class CausalSelfAttention(nn.Module):
         else:
             # 显式注意力路径：gated / 需要诊断统计时。
             # 长上下文且不需要 argmax/p_null 完整诊断时，按查询块计算：
-            # 前向只瞬时保留 (B,H,Cq,S)，训练态再由逐块 checkpoint 释放反向图，避免
-            # 每层常驻 (B,H,T,S) 打分与概率张量。逐块 softmax 覆盖完整键行，数学不变。
+            # 前向保持 (B,H,Cq,S) 块级中间量，训练态配合逐块 checkpoint。
+            # 逐块 softmax 覆盖完整键行，数学不变。
             full_stats = bool(need_stats) and stats_argmax
             elems = B * H * T * S
             # attn_dropout>0 的训练步保持原来的单块路径：分块会改变 dropout 的
@@ -574,7 +570,7 @@ class CausalSelfAttention(nn.Module):
                         del att
 
         # 合并多头: (B, H, T, Dh) -> (B, T, C)；分块路径已按 (B,T,H,Dh) 布局
-        # 直接写出，其 o 本身就是合并后的 (B,T,C)，免掉一次整表转置拷贝
+        # 直接写出，其 o 本身就是合并后的 (B,T,C)
         if o.dim() == 4:
             o = o.transpose(1, 2).contiguous().view(B, T, C)
         out = self.wo(o)

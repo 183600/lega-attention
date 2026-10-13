@@ -220,7 +220,7 @@ def _stage_to_device(arr: np.ndarray, device: str) -> torch.Tensor:
     return out if out.dtype == torch.int64 else out.long()
 
 
-# 按 ctx 缓存索引基底，避免训练热循环里每次采样都新建 arange
+# 按 ctx 缓存索引基底，每个 ctx 只需新建一次 arange
 _SPAN_BASE: dict = {}
 
 
@@ -238,7 +238,7 @@ def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
     if len(train) < ctx + 1:
         raise ValueError(f"训练集只有 {len(train)} tokens，不足以采样 ctx={ctx}")
     ix = rng.integers(0, len(train) - ctx, size=batch_size)
-    # 向量化索引：一次性取 (batch_size, ctx+1)，避免逐样本拼接的 Python 循环
+    # 向量化索引：一次性取 (batch_size, ctx+1)
     span = ix[:, None] + _span_base(ctx)
     # 不升 int64：uint16 贯穿到 H2D，设备端再转 long
     buf = np.ascontiguousarray(train[span])         # memmap 花式索引自动拷贝
@@ -257,7 +257,7 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
     n_windows = (len(val) - 1) // ctx
     if n_windows <= 0:
         raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
-    # indices 常已是 np 数组切片：asarray 直接零拷贝，避免 list() 逐元素物化
+    # indices 常已是 np 数组切片：asarray 直接转 int64
     starts = (np.asarray(indices, dtype=np.int64) % n_windows) * ctx
     span = starts[:, None] + _span_base(ctx)
     buf = np.ascontiguousarray(val[span])           # (n, ctx+1) uint16，设备端升 long
