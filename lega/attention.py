@@ -57,7 +57,9 @@ _CHUNK_MIN_T = 64
 # 键内已含 device，跨设备天然隔离；长度变化场景（解码）由容量上限兜底。
 # 只常驻 not_allowed（显式路径直接用）；allowed 仅 SDPA 带掩码的少见分支需要，
 # 用时再按位取反。
-_MASK_CACHE: dict = {}   # (past_len, T, S, device) -> (not_allowed, ones_col)
+_MASK_CACHE: dict = {}   # (past_len, T, S, device) -> [not_allowed, ones_col, allowed]
+                         # allowed 惰性填充并与 not_allowed 一并驻留，避免每层每步
+                         # 在 SDPA 带掩码分支对整块 (1,1,T,S) 掩码重新按位取反
 _LOGN_CACHE: dict = {}   # (past_len, T, device) -> (T,) float
 # 查询分块路径使用的三角对角带掩码：块 (r, c) 内掩码只依赖相对偏移（c > r），
 # 与 past 偏移无关，全层/全块共享一份即可；分块步常见 chunk 形状只有一两种。
@@ -366,11 +368,11 @@ class CausalSelfAttention(nn.Module):
         # 因果掩码：真实键 j 仅当 j <= 查询绝对位置时可见；null 槽对全部查询可见。
         # 单查询步（T==1 的增量解码）：键数 n_real = past_len + 1，查询绝对位置
         # 恰为 past_len，全部键（含 null 槽）必然可见，无需构建掩码。
-        allowed = not_allowed = None
+        allowed = not_allowed = mask_entry = None
         if not single_q and not causal_only:
             mkey = (past_len, T, S, dev)
-            pair = _MASK_CACHE.get(mkey)
-            if pair is None:
+            entry = _MASK_CACHE.get(mkey)
+            if entry is None:
                 # 缓存中的常数张量必须创建于普通模式。若在 inference_mode
                 # （验证/生成）下创建并被随后的训练前向复用，autograd 会拒绝保存
                 # inference tensor。这里显式退出 inference_mode，仅用于创建不依赖
@@ -379,13 +381,14 @@ class CausalSelfAttention(nn.Module):
                     qpos = torch.arange(past_len, past_len + T, device=dev)
                     not_allowed = qpos.view(1, 1, T, 1) < torch.arange(n_real, device=dev).view(1, 1, 1, n_real)
                     # null 槽常数可见列随掩码一起缓存，避免每层每步 ones 列的重复分配
-                    pair = (not_allowed,
-                            torch.ones(1, 1, T, 1, dtype=torch.bool, device=dev))
+                    entry = [not_allowed,
+                             torch.ones(1, 1, T, 1, dtype=torch.bool, device=dev),
+                             None, None]  # allowed / 拼 null 槽的 allowed，惰性填充
                 if len(_MASK_CACHE) < _CACHE_CAP:   # 解码场景键持续变化，限制缓存规模
-                    _MASK_CACHE[mkey] = pair
-            not_allowed, ones_col = pair
-            # 不 expand：masked_fill / SDPA 均支持 (1, 1, T, S) 广播；
-            # allowed 仅在下方 SDPA 带掩码分支需要时按位取反得到
+                    _MASK_CACHE[mkey] = entry
+            not_allowed, ones_col = entry[0], entry[1]
+            mask_entry = entry
+            # 不 expand：masked_fill / SDPA 均支持 (1, 1, T, S) 广播
 
         stats: Optional[dict] = None
         g = qterm = logit = max_p = log_n = None
@@ -398,9 +401,22 @@ class CausalSelfAttention(nn.Module):
                     dropout_p=self.attn_dropout if self.training else 0.0,
                     is_causal=True)
             else:
-                # allowed 只在此分支需要；缓存只常驻 not_allowed，用时取反。
-                # 单查询步（T==1）不建掩码，此处 not_allowed 为 None，attn_mask 传 None。
-                allowed = None if not_allowed is None else ~not_allowed
+                # allowed 只在此分支需要：惰性取反一次后随 not_allowed 一起缓存，
+                # 避免每层每次前向对同一张 (1,1,T,S) 掩码重复按位取反/拼接。
+                # 单查询步（T==1）不建掩码，此处 mask_entry 为 None，attn_mask 传 None。
+                if mask_entry is None:
+                    allowed = None
+                else:
+                    if self.variant == "null":
+                        if mask_entry[3] is None:
+                            with torch.inference_mode(False):
+                                mask_entry[3] = torch.cat([~mask_entry[0], ones_col], dim=3)
+                        allowed = mask_entry[3]
+                    else:
+                        if mask_entry[2] is None:
+                            with torch.inference_mode(False):
+                                mask_entry[2] = ~mask_entry[0]
+                        allowed = mask_entry[2]
                 if self.variant == "null":
                     # SDPA 只接受单张量 K/V，这里一次性拼接（每前向仅一次，
                     # 逐 token 解码已在上面分流到显式路径）
@@ -408,7 +424,6 @@ class CausalSelfAttention(nn.Module):
                     vn = self.v_null.view(1, H, 1, Dh).to(v.dtype).expand(B, H, 1, Dh)
                     k = torch.cat([k, kn], dim=2)
                     v = torch.cat([v, vn], dim=2)
-                    allowed = torch.cat([allowed, ones_col], dim=3)
                 o = F.scaled_dot_product_attention(
                     q, k, v, attn_mask=allowed,
                     dropout_p=self.attn_dropout if self.training else 0.0)
