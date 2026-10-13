@@ -134,11 +134,9 @@ class CausalSelfAttention(nn.Module):
                     log_n: Optional[torch.Tensor], keep_terms: bool = False):
         """按 variant 组合门控 logit；返回 (g, logit, qterm)，不适用项为 None。
 
-        查询项在（可能的 bf16）内容向量上直接归约后再升 fp32，避免把
-        q_content.float() 的 (B,H,T,Dh) fp32 副本留在计算图中。
-        keep_terms=False（训练/普通推理）时各项原地累加进 logit，
-        每个组合项省一份 (B,H,T) fp32 临时张量；keep_terms=True 时
-        qterm 需原样返回给统计，logit 在其副本上累加。
+        查询项在（可能的 bf16）内容向量上直接归约后再升 fp32。
+        keep_terms=False（训练/普通推理）时各项原地累加进 logit；
+        keep_terms=True 时 qterm 需原样返回给统计，logit 在其副本上累加。
         """
         H = self.n_heads
         logit = qterm = None
@@ -197,8 +195,8 @@ class CausalSelfAttention(nn.Module):
             p = F.dropout(p, p=self.attn_dropout)
         if is_null:
             o = torch.matmul(p[..., :S], v)                           # (B,H,C,Dh)
-            # addcmul_ 融合 p_null(×)v_null 的乘加：省一份 (B,H,C,Dh) 临时张量
-            # 与一次逐元素内核（训练态逐块 checkpoint 反向重算时逐块生效）
+            # addcmul_ 融合 p_null(×)v_null 的乘加
+            #（训练态逐块 checkpoint 反向重算时逐块生效）
             o.addcmul_(p[..., S:], self.v_null.to(v.dtype).view(1, self.n_heads, 1, -1))
         else:
             o = torch.matmul(p, v)                                    # (B,H,C,Dh)
@@ -325,7 +323,7 @@ class CausalSelfAttention(nn.Module):
                     and not (self.variant in _USE_CONC)
                     and not (self.variant == "null" and single_q))
         # is_causal=True 快路（无掩码全量前向）由 SDPA 内部保证因果性，
-        # 无需构建显式掩码（省掉每层每步一次 (1,1,T,S) 布尔分配与比较）。
+        # 无需构建显式掩码。
         # 静态 KV 缓存的整段预填充（cache_pos=0）同样满足"无任何历史"，
         # 注意力只在已写入的 T 个前缀键上做全因果，可同走 is_causal 快路。
         causal_only = (use_sdpa and past_kv is None
@@ -399,7 +397,7 @@ class CausalSelfAttention(nn.Module):
                     # SDPA 输出的反向依赖该张量本身，不能原地乘
                     o = o * g.to(o.dtype).unsqueeze(-1)
                 else:
-                    # 推理路径：o 是本次前向新产出张量，原地乘省一份 (B,H,T,Dh) 拷贝
+                    # 推理路径：o 是本次前向新产出张量，可安全原地乘
                     o.mul_(g.to(o.dtype).unsqueeze(-1))
             if need_stats:
                 # 轻量门控诊断：g/qterm/logit 均可从查询与 log n 重组，
@@ -418,9 +416,8 @@ class CausalSelfAttention(nn.Module):
             use_chunk = (T >= _CHUNK_MIN_T and elems >= _CHUNK_TARGET_ELEMS
                          and not full_stats
                          and not (self.training and self.attn_dropout > 0))
-            # 一次性预缩放 q：分块与单块共用，避免每块（及 checkpoint 反向重算）
-            # 重复一遍 (B,H,Cq,Dh) 逐元素乘法。rope 启用时其输出是本层独占的新
-            # 张量（旋转不依赖原地值反向），可直接 mul_ 省下一份 (B,H,T,Dh) 拷贝；
+            # 一次性预缩放 q：分块与单块共用。rope 启用时其输出是本层独占的新
+            # 张量（旋转不依赖原地值反向），可直接 mul_；
             # rope 未启用时 q 与门控内容向量 q_content 共享存储，必须 out-of-place。
             if q is q_content:
                 q = q * self.scale
@@ -486,8 +483,7 @@ class CausalSelfAttention(nn.Module):
                 if self.attn_dropout > 0 and self.training:
                     p = F.dropout(p, p=self.attn_dropout)
                 if self.variant == "null":
-                    # o = p_real @ v + p_null * v_null，免去 K/V 整表拼接复制；
-                    # addcmul_ 融合乘加，省一份 (B,H,T,Dh) 临时张量
+                    # o = p_real @ v + p_null * v_null（addcmul_ 融合乘加）
                     o = torch.matmul(p[..., :n_real], v)               # (B, H, T, Dh)
                     o.addcmul_(p[..., n_real:], self.v_null.to(v.dtype).view(1, H, 1, Dh))
                 else:

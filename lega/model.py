@@ -153,8 +153,7 @@ class Block(nn.Module):
         self.w1 = nn.Linear(d_model, hidden, bias=False)
         self.act = nn.GELU()
         self.w2 = nn.Linear(hidden, d_model, bias=False)
-        # dropout=0（默认配置）时 F.dropout 仍是一次真实算子调用（纯恒等）：
-        # 换成 Identity 在每一步每层省掉 3 次无效果的模块调用/内核调度
+        # dropout=0（默认配置）时直接用 Identity 代替 F.dropout
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x, rope: RoPE, past_kv=None, need_stats: bool = False,
