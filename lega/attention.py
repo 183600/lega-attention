@@ -59,7 +59,22 @@ _CHUNK_MIN_T = 64
 # 用时再按位取反。
 _MASK_CACHE: dict = {}   # (past_len, T, S, device) -> (not_allowed, ones_col)
 _LOGN_CACHE: dict = {}   # (past_len, T, device) -> (T,) float
+# 查询分块路径使用的三角对角带掩码：块 (r, c) 内掩码只依赖相对偏移（c > r），
+# 与 past 偏移无关，全层/全块共享一份即可；分块步常见 chunk 形状只有一两种。
+_TRI_CACHE: dict = {}    # (r, c, device) -> (1, 1, r, c) bool，严格上三角为 True
 _CACHE_CAP = 256
+
+
+def _tri_band(r: int, c: int, dev) -> torch.Tensor:
+    """(1, 1, r, c) 严格上三角布尔掩码：[row, col] = (col > row)。"""
+    key = (r, c, dev)
+    m = _TRI_CACHE.get(key)
+    if m is None:
+        with torch.inference_mode(False):  # 缓存常量不能是 inference tensor
+            m = torch.ones(1, 1, r, c, dtype=torch.bool, device=dev).triu_(1)
+        if len(_TRI_CACHE) < _CACHE_CAP:
+            _TRI_CACHE[key] = m
+    return m
 
 
 class CausalSelfAttention(nn.Module):
@@ -165,13 +180,19 @@ class CausalSelfAttention(nn.Module):
 
     def _attend_q_chunk(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         kT: torch.Tensor, v: torch.Tensor,
-                        not_allowed: Optional[torch.Tensor], log_n: Optional[torch.Tensor],
-                        collect_stats: bool):
+                        fill_from: int, band_start: int, band_mask: Optional[torch.Tensor],
+                        log_n: Optional[torch.Tensor], collect_stats: bool):
         """单查询块的显式注意力 + 门控；collect_stats=False 时只返回输出。
 
         q_rot 是 RoPE 旋转后且已预乘 1/sqrt(Dh) 的查询（打分的 q·k）；
         q_content 是 RoPE 旋转前且未乘 1/sqrt(Dh) 的查询内容向量，门控查询项
         必须用它（长度/绝对位置只通过显式 log n 进入门控）。
+
+        因果掩码分两段施加，避免对整块 (B,H,C,S) 打分做 masked_fill（读 mask +
+        读 att + 写 att 三遍流量）：
+          * [fill_from, S) 列对本块全部查询不可见：整列 fill_(-inf)，纯写；
+          * [band_start, band_start+cq) 对角带：用平移不变的 (1,1,cq,cq) 三角掩码
+            做 masked_fill_，面积只有 cq² 而非 cq*S。
 
         null 变体不把 null 槽拼接进 K/V（避免每层每步复制整个缓存），
         而是把空槽得分 (B,H,C,1) 追加到打分矩阵末尾，输出用
@@ -179,8 +200,11 @@ class CausalSelfAttention(nn.Module):
         """
         S = kT.size(-1)
         att = torch.matmul(q_rot, kT)                               # (B,H,C,S)
-        if not_allowed is not None:
-            att.masked_fill_(not_allowed, float("-inf"))
+        if fill_from < S:
+            att[..., fill_from:] = float("-inf")
+        if band_mask is not None:
+            att[..., band_start:band_start + band_mask.shape[-1]].masked_fill_(
+                band_mask, float("-inf"))
         is_null = self.variant == "null"
         if is_null:
             att_n = torch.matmul(q_rot, self.k_null.to(q_rot.dtype).unsqueeze(-1))
