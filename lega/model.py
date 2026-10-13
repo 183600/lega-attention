@@ -108,9 +108,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, gout):
         x2d, weight, tgt = ctx.saved_tensors
-        # gx 的每一行都会被下方按块整段覆写，无需先零填充；gw 用 add_ 累加必须置零
+        # gx 的每一行都会被下方按块整段覆写，无需先零填充
         gx = torch.empty_like(x2d)
-        gw = torch.zeros_like(weight)
+        gw = None
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
         # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot），
@@ -135,7 +135,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 d.mul_(keep.unsqueeze(1).to(d.dtype))
                 d.mul_(gscale)
                 gx[s:s + ctx.chunk] = torch.matmul(d, weight).to(gx.dtype)
-                gw.add_(torch.matmul(d.transpose(0, 1), xs.to(d.dtype)).to(gw.dtype))
+                gw_chunk = torch.matmul(d.transpose(0, 1), xs.to(d.dtype)).to(weight.dtype)
+                gw = gw_chunk if gw is None else gw.add_(gw_chunk))
         return gx, gw, None, None, None
 
 
