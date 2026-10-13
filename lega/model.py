@@ -111,6 +111,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
         x2d, weight, tgt = ctx.saved_tensors
         # gx 的每一行都会被下方按块整段覆写，无需先零填充
         gx = torch.empty_like(x2d)
+        # gw 直接以计算精度（低精度时为 fp32）预分配并用 addmm_ 原地累加：
+        # 避免每个分块都物化一份 (V, D) 的 gw_chunk 临时张量（大词表下每块
+        # 上百 MB，且每块各分配/释放一次）；同时也比逐块 cast 到 weight.dtype
+        # 再累加更精确（全程高精度累加，只在返回前 cast 一次）。
         gw = None
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
@@ -136,8 +140,13 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 d.mul_(keep.unsqueeze(1).to(d.dtype))
                 d.mul_(gscale)
                 gx[s:s + ctx.chunk] = torch.matmul(d, weight).to(gx.dtype)
-                gw_chunk = torch.matmul(d.transpose(0, 1), xs.to(d.dtype)).to(weight.dtype)
-                gw = gw_chunk if gw is None else gw.add_(gw_chunk)
+                if gw is None:
+                    gw = torch.zeros(weight.shape, dtype=d.dtype,
+                                     device=weight.device)
+                # 原地累加该分块的 dL/dW，不产生 (V, D) 中间结果
+                gw.addmm_(d.transpose(0, 1), xs.to(d.dtype))
+        if gw is not None and gw.dtype != weight.dtype:
+            gw = gw.to(weight.dtype)
         return gx, gw, None, None, None
 
 
@@ -163,8 +172,16 @@ class Block(nn.Module):
         a, cache, stats = self.attn(self.ln1(x), rope=rope, past_kv=past_kv,
                                     need_stats=need_stats, stats_argmax=stats_argmax,
                                     kv_cache=kv_cache, cache_pos=cache_pos)
-        x = x + self.drop(a)
-        x = x + self.drop(self.w2(self.act(self.w1(self.ln2(x)))))
+        # 无梯度（推理/评测）时残差连接用原地加法：x 是本层独占的新张量
+        # （来自上一层输出或嵌入层输出，不被其它子图引用），每层每次前向
+        # 省掉两份 (B, T, C) 输出分配；有梯度时 autograd 需要加法输出做反向，
+        # 必须保持 out-of-place。
+        if torch.is_grad_enabled() and x.requires_grad:
+            x = x + self.drop(a)
+            x = x + self.drop(self.w2(self.act(self.w1(self.ln2(x)))))
+        else:
+            x.add_(self.drop(a))
+            x.add_(self.drop(self.w2(self.act(self.w1(self.ln2(x))))))
         return x, cache, stats
 
 
