@@ -178,7 +178,11 @@ class CausalSelfAttention(nn.Module):
         dterm = self.gate_d.float().view(1, H, 1)
         logit = dterm.expand(q_content.shape[0], H, q_content.shape[2]).clone() \
             if logit is None else logit.add_(dterm)
-        return torch.sigmoid(logit), logit, qterm
+        # keep_terms=False（训练/普通推理）时调用方不消费 logit：
+        # sigmoid 原地写入，省掉一份 (B,H,T) fp32 输出张量
+        # （分块/checkpoint 路径下每块、每次反向重算各一次分配）。
+        g = torch.sigmoid(logit) if keep_terms else logit.sigmoid_()
+        return g, logit, qterm
 
     def _attend_q_chunk(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         kT: torch.Tensor, v: torch.Tensor,
