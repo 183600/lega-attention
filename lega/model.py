@@ -136,7 +136,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 d.mul_(gscale)
                 gx[s:s + ctx.chunk] = torch.matmul(d, weight).to(gx.dtype)
                 gw_chunk = torch.matmul(d.transpose(0, 1), xs.to(d.dtype)).to(weight.dtype)
-                gw = gw_chunk if gw is None else gw.add_(gw_chunk))
+                gw = gw_chunk if gw is None else gw.add_(gw_chunk)
         return gx, gw, None, None, None
 
 
