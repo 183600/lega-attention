@@ -234,6 +234,8 @@ def main():
     t0 = time.time()
     tokens_seen = 0
     best_val = float("inf")
+    # loss 设备端累加器跨步复用（每步 zero_()），避免每步一次标量分配
+    loss_acc_dev = torch.zeros((), device=device)
 
     def do_eval(step):
         nonlocal best_val
@@ -263,7 +265,7 @@ def main():
             g["lr"] = base * lr_f
 
         # 在设备上累积 loss，避免每个 micro-step 一次 .item() 引发的 GPU 同步
-        loss_acc_dev = torch.zeros((), device=device)
+        loss_acc_dev.zero_()
         for _ in range(grad_accum):
             x, y = get_train_batch(train, train_ctx, int(cfg["batch_size"]), device, rng)
             with amp_ctx:

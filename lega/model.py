@@ -116,6 +116,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot），
         # 不搭建逐块 autograd 子图，反向为逐块 3 次 GEMM。
         with torch.no_grad():
+            neg_one = None   # scatter_add_ 的 -1 源张量按块复用，避免每块一次分配
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
                 ts = tgt[s:s + ctx.chunk]
@@ -127,8 +128,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 # 压到 0（其减 1 随后会被 keep 掩码清零），替代原先的
                 # keep.any() 同步 + nonzero 索引分配 + 花式索引写入。
                 ts_safe = torch.where(keep, ts, torch.zeros_like(ts))
+                if neg_one is None or neg_one.size(0) < ts_safe.numel():
+                    neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
                 d.scatter_add_(1, ts_safe.unsqueeze(1),
-                               d.new_full((ts_safe.numel(), 1), -1.0))
+                               neg_one[:ts_safe.numel()])
                 d.mul_(keep.unsqueeze(1).to(d.dtype))
                 d.mul_(gscale)
                 gx[s:s + ctx.chunk] = torch.matmul(d, weight).to(gx.dtype)
@@ -150,7 +153,9 @@ class Block(nn.Module):
         self.w1 = nn.Linear(d_model, hidden, bias=False)
         self.act = nn.GELU()
         self.w2 = nn.Linear(hidden, d_model, bias=False)
-        self.drop = nn.Dropout(dropout)
+        # dropout=0（默认配置）时 F.dropout 仍是一次真实算子调用（纯恒等）：
+        # 换成 Identity 在每一步每层省掉 3 次无效果的模块调用/内核调度
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x, rope: RoPE, past_kv=None, need_stats: bool = False,
                 stats_argmax: bool = True, kv_cache=None, cache_pos: int = 0):
@@ -181,7 +186,7 @@ class GPT(nn.Module):
         self.gate_bias_init = gate_bias_init
 
         self.tok_emb = nn.Embedding(vocab_size, d_model)
-        self.drop = nn.Dropout(dropout)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.rope = RoPE(d_model // n_heads, block_size)
         self.blocks = nn.ModuleList([
             Block(d_model, n_heads, ffn_mult, dropout, attn_dropout, variant,
