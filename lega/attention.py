@@ -237,7 +237,7 @@ class CausalSelfAttention(nn.Module):
 
     def _attend_chunked(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         k: torch.Tensor, v: torch.Tensor,
-                        not_allowed: Optional[torch.Tensor], log_n: Optional[torch.Tensor],
+                        past_len: int, log_n: Optional[torch.Tensor],
                         B: int, H: int, T: int, collect_stats: bool):
         """按查询块执行显式注意力；训练态逐块 checkpoint 以消除 T*S 常驻激活。
 
@@ -262,18 +262,26 @@ class CausalSelfAttention(nn.Module):
             q1 = min(T, q0 + cq)
             qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
             qc = q_content[:, :, q0:q1]  # 未缩放的 RoPE 前查询内容向量块（门控用）
-            mask_c = None if not_allowed is None else not_allowed[:, :, q0:q1]
+            # 因果掩码两段式（见 _attend_q_chunk 文档）：
+            #   * [fill_from, S)：超出块内最末查询可见范围的列，整段置 -inf；
+            #   * 对角带 [band_start, band_start + (q1-q0))：用全局共享的
+            #     严格上三角掩码逐块置 -inf（只依赖块内相对偏移，与 past 无关）。
+            fill_from = min(past_len + q1, S)
+            band_start = past_len + q0
+            band_mask = _tri_band(q1 - q0, q1 - q0, q_rot.device)
             logn_c = None if log_n is None else log_n[q0:q1]
             if use_ckpt:
                 # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
                 # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗
                 oc = torch.utils.checkpoint.checkpoint(
-                    self._attend_q_chunk, qr, qc, kT, v, mask_c, logn_c, False,
+                    self._attend_q_chunk, qr, qc, kT, v, fill_from, band_start,
+                    band_mask, logn_c, False,
                     use_reentrant=False, preserve_rng_state=False)
             else:
                 if collect_stats:
                     oc, mp, qt, lg, gg = self._attend_q_chunk(
-                        qr, qc, kT, v, mask_c, logn_c, True)
+                        qr, qc, kT, v, fill_from, band_start, band_mask,
+                        logn_c, True)
                     if mp is not None:
                         max_ps.append(mp)
                     if qt is not None:
@@ -283,7 +291,8 @@ class CausalSelfAttention(nn.Module):
                     if gg is not None:
                         gs.append(gg)
                 else:
-                    oc = self._attend_q_chunk(qr, qc, kT, v, mask_c, logn_c, False)
+                    oc = self._attend_q_chunk(qr, qc, kT, v, fill_from, band_start,
+                                              band_mask, logn_c, False)
             # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
             # 布局变换在此一次完成，取代末端整表 transpose().contiguous()
             o[:, q0:q1].copy_(oc.transpose(1, 2))
@@ -462,7 +471,7 @@ class CausalSelfAttention(nn.Module):
                             _LOGN_CACHE[lkey] = log_n
                 collect = bool(need_stats)
                 o, max_p, qterm, logit, g = self._attend_chunked(
-                    q, q_content, k, v, not_allowed, log_n, B, H, T, collect)
+                    q, q_content, k, v, past_len, log_n, B, H, T, collect)
             else:
                 # q 已在分块循环外统一预乘 1/sqrt(Dh)；argmax/softmax 对正缩放不敏感。
                 att = torch.matmul(q, k.transpose(-2, -1))             # (B, H, T, S)
