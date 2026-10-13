@@ -192,10 +192,10 @@ jobs:
           DEADLINE=$(( $(date +%s) + 5*3600 - 900 ))
 
           # ================= 四阶段提示词 =================
-          PROMPT_PERF='优化代码的性能和显存占用，不要输出或写入"优化了哪些内容"的报告。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README.md 是项目说明文档，同样绝对不能删除或移动。'
-          PROMPT_BUG='仔细检查代码中是否存在bug或者科研方法层面的问题，如果有就修改代码。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README.md 是项目说明文档，同样绝对不能删除或移动。'
-          PROMPT_CLEAN='不要修改算力申请.md，确保远程仓库里没有实验结果文件、REPORTxx.md 以及 autodl_budgetxx.json；确保 docs 目录只保留 design_notes.md；确保远程仓库中没有任何关于性能、预算、花费、修复了哪些bug和显存占用的记录（包括注释）。删除所有多余的内容。注意：.github 目录是 CI 配置，必须原样保留，绝对不能删除、修改或移动其中任何文件，它不属于“多余的内容”；README.md 是项目说明文档，同样必须原样保留，绝对不能删除或移动，也不属于“多余的内容”。'
-          PROMPT_APPLY='确保算力申请.md没有错误。不要删除或移动 README.md；.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件。'
+          PROMPT_PERF='优化代码的性能和显存占用，不要输出或写入"优化了哪些内容"的报告。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_BUG='仔细检查代码中是否存在bug或者科研方法层面的问题，如果有就修改代码。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_CLEAN='不要修改算力申请.md，确保远程仓库里没有实验结果文件、REPORTxx.md 以及 autodl_budgetxx.json；确保 docs 目录只保留 design_notes.md；确保远程仓库中没有任何关于性能、预算、花费、修复了哪些bug和显存占用的记录（包括注释）。删除所有多余的内容。注意：.github 目录是 CI 配置，必须原样保留，绝对不能删除、修改或移动其中任何文件，它不属于“多余的内容”；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样必须原样保留，绝对不能删除或移动，也不属于“多余的内容”。'
+          PROMPT_APPLY='确保算力申请.md没有错误。不要删除或移动 README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）；.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件。'
 
           # 每阶段单次调用的最大时长（秒）
           PERF_TIMEOUT=$((60*60))     # 1h（性能与显存优化）
@@ -218,19 +218,23 @@ jobs:
           # 每次提交前校验：一旦被删，立即从 HEAD（其次最近一个包含它的历史版本）恢复；
           # 只防删除，允许正常的内容修改。
           ensure_readme() {
-            [ -f README.md ] && return 0
-            if git show HEAD:README.md > /tmp/readme_restore.md 2>/dev/null && [ -s /tmp/readme_restore.md ]; then
-              mv /tmp/readme_restore.md README.md
-              echo "[guard] 检测到 README.md 被删除，已从 HEAD 恢复"
-              return 0
-            fi
-            README_SHA=$(git log --format=%H --diff-filter=AM -- README.md 2>/dev/null | head -1)
-            if [ -n "$README_SHA" ] && git show "${README_SHA}:README.md" > /tmp/readme_restore2.md 2>/dev/null && [ -s /tmp/readme_restore2.md ]; then
-              mv /tmp/readme_restore2.md README.md
-              echo "[guard] 检测到 README.md 被删除，已从历史版本 ${README_SHA:0:7} 恢复"
-              return 0
-            fi
-            echo "[warn] README.md 缺失且找不到可恢复的历史版本"
+            # 保护所有语言版本的 README（README.md / README_zh.md / README_en.md）。
+            # 只防删除；内容修改不受影响。
+            for f in README.md README_zh.md README_en.md; do
+              [ -f "$f" ] && continue
+              if git show "HEAD:$f" > /tmp/readme_restore.md 2>/dev/null && [ -s /tmp/readme_restore.md ]; then
+                mv /tmp/readme_restore.md "$f"
+                echo "[guard] 检测到 $f 被删除，已从 HEAD 恢复"
+                continue
+              fi
+              F_SHA=$(git log --format=%H --diff-filter=AM -- "$f" 2>/dev/null | head -1)
+              if [ -n "$F_SHA" ] && git show "${F_SHA}:$f" > /tmp/readme_restore2.md 2>/dev/null && [ -s /tmp/readme_restore2.md ]; then
+                mv /tmp/readme_restore2.md "$f"
+                echo "[guard] 检测到 $f 被删除，已从历史版本 ${F_SHA:0:7} 恢复"
+              else
+                echo "[warn] $f 缺失且找不到可恢复的历史版本"
+              fi
+            done
           }
           ensure_readme
 
