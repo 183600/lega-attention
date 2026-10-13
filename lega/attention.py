@@ -67,6 +67,29 @@ _TRI_CACHE: dict = {}    # (r, c, device) -> (1, 1, r, c) bool，严格上三角
 _CACHE_CAP = 256
 
 
+def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
+    """log(n) = log(可读取的真实 token 数) = log(past_len + t + 1)，按 (past_len, T, device) 缓存。
+
+    逐 token 解码（T==1，past_len 每步 +1）会让缓存键各不相同并在容量上限之后
+    每步重新执行 arange+log；这里对单查询步直接取标量 log(past_len+1)，
+    语义与通式完全一致但省掉整条 arange 链。
+    """
+    if T == 1:
+        # 单查询步（逐 token 解码）：past_len 每步变化，缓存只会无效增长；
+        # 该标量只在本次前向内消费（不跨调用缓存），无 inference tensor 污染问题
+        return torch.log(torch.tensor(past_len + 1.0, device=dev, dtype=torch.float32).view(1))
+    lkey = (past_len, T, dev)
+    log_n = _LOGN_CACHE.get(lkey)
+    if log_n is None:
+        # 缓存常量需是普通张量：在 inference_mode（评测/生成）下创建的张量
+        # 若被后来的训练前向复用会污染 autograd图。
+        with torch.inference_mode(False):
+            log_n = torch.log((torch.arange(past_len, past_len + T, device=dev) + 1).float())  # (T,)
+        if len(_LOGN_CACHE) < _CACHE_CAP:
+            _LOGN_CACHE[lkey] = log_n
+    return log_n
+
+
 def _tri_band(r: int, c: int, dev) -> torch.Tensor:
     """(1, 1, r, c) 严格上三角布尔掩码：[row, col] = (col > row)。"""
     key = (r, c, dev)
@@ -276,7 +299,9 @@ class CausalSelfAttention(nn.Module):
             else:
                 kT_c, v_c = kT, v
             band_start = past_len + q0
-            band_mask = _tri_band(q1 - q0, q1 - q0, q_rot.device)
+            # 单行块（逐 token 解码）的对角带掩码为全 False（triu(1)），
+            # 逐元素 masked_fill_ 不会对任何元素置 -inf，整块跳过。
+            band_mask = None if q1 - q0 == 1 else _tri_band(q1 - q0, q1 - q0, q_rot.device)
             logn_c = None if log_n is None else log_n[q0:q1]
             if use_ckpt:
                 # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
@@ -436,15 +461,7 @@ class CausalSelfAttention(nn.Module):
             if self.variant in _GATED:
                 # 与显式路径相同的门控公式（qgate: w·q+d；lega_no_conc: w·q+b·log n+d）
                 if self.use_len:
-                    lkey = (past_len, T, dev)
-                    log_n = _LOGN_CACHE.get(lkey)
-                    if log_n is None:
-                        # 同上：缓存常量不能在 inference_mode 下创建，否则会污染
-                        # 评测之后的训练图。
-                        with torch.inference_mode(False):
-                            log_n = torch.log((torch.arange(past_len, past_len + T, device=dev) + 1).float())
-                        if len(_LOGN_CACHE) < _CACHE_CAP:
-                            _LOGN_CACHE[lkey] = log_n
+                    log_n = _log_n(past_len, T, dev)
                 g, logit, qterm = self._gate_logit(q_content, None, log_n,
                                                    keep_terms=bool(need_stats))
                 if torch.is_grad_enabled():
@@ -481,15 +498,7 @@ class CausalSelfAttention(nn.Module):
                 need_logn = self.variant in _LEGA_FAMILY or bool(need_stats)
                 log_n = None
                 if self.use_len or (need_logn and self.variant in _LEGA_FAMILY):
-                    lkey = (past_len, T, dev)
-                    log_n = _LOGN_CACHE.get(lkey)
-                    if log_n is None:
-                        # 同上：缓存常量不能在 inference_mode 下创建，否则会污染
-                        # 评测之后的训练图。
-                        with torch.inference_mode(False):
-                            log_n = torch.log((torch.arange(past_len, past_len + T, device=dev) + 1).float())
-                        if len(_LOGN_CACHE) < _CACHE_CAP:
-                            _LOGN_CACHE[lkey] = log_n
+                    log_n = _log_n(past_len, T, dev)
                 collect = bool(need_stats)
                 o, max_p, qterm, logit, g = self._attend_chunked(
                     q, q_content, k, v, past_len, log_n, B, H, T, collect)
@@ -517,14 +526,7 @@ class CausalSelfAttention(nn.Module):
                 # 此时也不必计算 max_p/log_n。
                 full_stats = bool(need_stats) and stats_argmax
                 if self.variant in _LEGA_FAMILY or full_stats:
-                    lkey = (past_len, T, dev)
-                    log_n = _LOGN_CACHE.get(lkey)
-                    if log_n is None:
-                        # 缓存常量需是普通张量，不能是 inference tensor。
-                        with torch.inference_mode(False):
-                            log_n = torch.log((torch.arange(past_len, past_len + T, device=dev) + 1).float())  # (T,)
-                        if len(_LOGN_CACHE) < _CACHE_CAP:
-                            _LOGN_CACHE[lkey] = log_n
+                    log_n = _log_n(past_len, T, dev)
                     # LEGA 家族无 null 槽时，p 恰好覆盖全部真实键；
                     # null 变体的完整统计在下方 need_stats 分支内单独处理
                     if self.variant != "null" and (self.use_conc or full_stats):

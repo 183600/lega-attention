@@ -247,7 +247,9 @@ class GPT(nn.Module):
             f"输入长度 {past_len}+{T} 超过 block_size={self.block_size}")
 
         x = self.drop(self.tok_emb(idx))
-        new_cache: List = []
+        # 逐层缓存容器预分配为定长列表再按序号写入：逐 token 解码每步都调 forward，
+        # append 的列表扩容开销会按 token × 层数累积
+        new_cache: List = [None] * len(self.blocks)
         stats_all: List = []
         for i, blk in enumerate(self.blocks):
             pk = None if (past_kv is None or kv_cache is not None) else past_kv[i]
@@ -255,7 +257,7 @@ class GPT(nn.Module):
             x, cache, stats = blk(x, self.rope, past_kv=pk, need_stats=need_stats,
                                   stats_argmax=stats_argmax, kv_cache=kc,
                                   cache_pos=cache_pos)
-            new_cache.append(cache)
+            new_cache[i] = cache
             if stats is not None:
                 stats = dict(stats)
                 stats["layer"] = i
