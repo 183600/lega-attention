@@ -47,21 +47,22 @@ class RoPE:
         cos_h = tables[0][past_len:past_len + T].view(1, 1, T, half)
         sin_h = tables[1][past_len:past_len + T].view(1, 1, T, half)
         x1, x2 = x[..., :half], x[..., half:]
-        # 两个半宽子表达式写入预分配输出，替代 cat([-x2, x1]) 与全宽逐元素链；
-        # addcmul 融合"乘加"，每半宽 2 个逐元素内核（mul+addcmul）代替 3 个
+        if torch.is_grad_enabled() and x.requires_grad:
+            # autograd 不支持 out= 写参数：每半宽 mul + 原地 addcmul_（mul 的反向
+            # 不依赖其输出，原地累加安全），最后 cat 合并；相比先 empty 再逐块
+            # 切片写入，省掉整表预分配的一次冗余拷贝
+            o1 = (x1 * cos_h).addcmul_(x2, sin_h, value=-1.0)
+            o2 = (x2 * cos_h).addcmul_(x1, sin_h)
+            return torch.cat((o1, o2), dim=-1)
+        # 推理路径：两个半宽子表达式写入预分配输出，替代 cat([-x2, x1]) 与全宽
+        # 逐元素链；mul(out=) 直接把乘积写进输出缓冲再原地加乘，
+        # 消除 x1*cos_h / x2*cos_h 两份 (B,H,T,half) 临时张量
         out = torch.empty_like(x)
         o1, o2 = out[..., :half], out[..., half:]
-        if torch.is_grad_enabled() and x.requires_grad:
-            # autograd 不支持 out= 写参数：用 addcmul 融合输出后再切片写入
-            out[..., :half] = torch.addcmul(x1 * cos_h, x2, sin_h, value=-1.0)
-            out[..., half:] = torch.addcmul(x2 * cos_h, x1, sin_h)
-        else:
-            # 推理路径：mul(out=) 直接把乘积写进输出缓冲再原地加乘，
-            # 消除 x1*cos_h / x2*cos_h 两份 (B,H,T,half) 临时张量
-            torch.mul(x1, cos_h, out=o1)
-            o1.addcmul_(x2, sin_h, value=-1.0)
-            torch.mul(x2, cos_h, out=o2)
-            o2.addcmul_(x1, sin_h)
+        torch.mul(x1, cos_h, out=o1)
+        o1.addcmul_(x2, sin_h, value=-1.0)
+        torch.mul(x2, cos_h, out=o2)
+        o2.addcmul_(x1, sin_h)
         return out
 
     def __call__(self, q: torch.Tensor, k: torch.Tensor, past_len: int = 0):
