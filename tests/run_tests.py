@@ -1,7 +1,12 @@
-"""极简测试入口（不依赖 pytest）: python -m tests.run_tests"""
+"""极简测试入口（不依赖 pytest）: python -m tests.run_tests（或 python tests/run_tests.py）"""
 import importlib
+import os
 import sys
 import traceback
+
+# 允许以脚本方式直接运行（python tests/run_tests.py）：此时 sys.path[0] 是
+# tests/ 而非仓库根，需要显式把仓库根加入路径才能 import tests.* / lega.*。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler"]
 

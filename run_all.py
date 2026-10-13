@@ -121,13 +121,29 @@ def build_summary(results_dir: str) -> dict:
             row[k] = an.get(key)
         rows.append(row)
 
-    # standard 显式路径为延迟基线，计算额外开销
-    base = next((r for r in rows if r["variant"] == "standard"), None)
+    # 延迟开销基线：优先取 standard_sdpa（SDPA/FlashAttention 是真实部署的对照，
+    # 以更慢的显式 standard 为基线会系统性低估 LEGA 的相对开销）；缺失时退回显式
+    # standard。standard_sdpa 不单独训练/评测、不会出现在 eval_*.json 里，
+    # 因此基线延迟必须从 latency.json 的条目直取而非从 rows 里找。
+    lat_all = lat.get("variants") or {}
+
+    def _prefill_at_common(variant_name):
+        e = lat_all.get(variant_name)
+        if not e or common_ctx is None:
+            return None
+        return (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
+
+    base_ms, base_name = None, None
+    for cand in ("standard_sdpa", "standard"):
+        e = lat_all.get(cand)
+        if e and _prefill_at_common(cand) is not None:
+            base_ms, base_name = _prefill_at_common(cand), cand
+            break
     for r in rows:
-        if base and base.get("prefill_ms") and r.get("prefill_ms") \
+        if base_ms and r.get("prefill_ms") \
                 and r["variant"] not in ("standard", "standard_sdpa"):
             r["prefill_overhead_pct"] = round(
-                (r["prefill_ms"] - base["prefill_ms"]) / base["prefill_ms"] * 100, 2)
+                (r["prefill_ms"] - base_ms) / base_ms * 100, 2)
 
     # Markdown
     cols = [("variant_cn", "变体"), ("params", "参数量"), ("gate_extra", "门控额外参数"),
@@ -157,7 +173,8 @@ def build_summary(results_dir: str) -> dict:
         for r in rows:
             md.append("| " + " | ".join(fmt(r.get(k)) for k, _ in cols) + " |")
         md += ["", "注: niah/fwe/vt 列为各上下文档的 EM/召回平均；",
-               "“集中但看错率”= P(max_p>τ 且注意力落点不在 needle 内)，见机制分析。", ""]
+               f"“开销%”以 {base_name or 'standard'} 为基线；",
+               "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，见机制分析。", ""]
     else:
         md.append("（暂无结果，先运行训练评测）")
     with open(os.path.join(results_dir, "summary.md"), "w", encoding="utf-8") as f:

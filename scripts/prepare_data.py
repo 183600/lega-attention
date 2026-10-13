@@ -6,6 +6,9 @@
   2. Smerity 镜像 zip（zipfile 标准库即可）
   3. rows API（慢，仅适合 --max_tokens 很小的场合）
   4. --local_txt 直接使用本地文本
+     ⚠ 注意：该模式把同一文件的前 10% 作 val、后 90% 作 train，val 与 train
+     来自同一连续文本（近似泄漏，val PPL 偏乐观），仅适合冒烟/调试，
+     正式实验请使用 WikiText-103 官方 split（来源 1-3）。
 
 用法:
   python scripts/prepare_data.py --out_dir data/wikitext103            # 全量
