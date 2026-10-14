@@ -79,9 +79,18 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     # inference_mode：纯前向评测不生成 autograd 元数据（版本计数/保存变量）；
     # 返回的统计只经 .item() 消费。
     with torch.inference_mode():
-        for s in range(0, len(indices), batch_windows):
+        # 预取流水线：下一窗口批的 memmap 收集 + pinned H2D 提交在当前批前向
+        # 之前发起，使 host 端收集与设备端前向重叠；get_val_windows 内部走
+        # _stage_to_device 的乒乓暂存（双槽 + event 保护），两批在途互不干扰。
+        n_batches = (len(indices) + batch_windows - 1) // batch_windows
+        xy = get_val_windows(val, ctx, indices[:batch_windows], device)
+        for bi, s in enumerate(range(0, len(indices), batch_windows)):
             chunk = indices[s:s + batch_windows]
-            x, y = get_val_windows(val, ctx, chunk, device)
+            x, y = xy
+            if bi + 1 < n_batches:
+                xy = get_val_windows(val, ctx,
+                                     indices[s + batch_windows:s + 2 * batch_windows],
+                                     device)
             with amp_ctx:
                 # 验证评测只消费门控均值 g，使用轻量统计
                 out = model(x, targets=y, need_stats=collect_gate, stats_argmax=False)
@@ -236,6 +245,9 @@ def main():
     rng = np.random.default_rng(seed)
     model.train()
     opt.zero_grad(set_to_none=True)
+    # 流水线预取的首批：训练循环内每个 micro-step 再预取下一批
+    batches = [get_train_batch(train, train_ctx, int(cfg["batch_size"]), device, rng)
+               for _ in range(grad_accum)]
     tokens_seen = 0
     best_val = float("inf")
     last_eval_step = None
@@ -279,8 +291,17 @@ def main():
 
         # 在设备上累积 loss，避免每个 micro-step 一次 .item() 引发的 GPU 同步
         loss_acc_dev.zero_()
-        for _ in range(grad_accum):
-            x, y = get_train_batch(train, train_ctx, int(cfg["batch_size"]), device, rng)
+        for mi in range(grad_accum):
+            x, y = batches[mi]
+            # 预取下一 micro-batch：memmap 收集 + pinned H2D 在当前步前向/反向
+            # 之前发起，与仍在排队的 GPU 工作重叠（_stage_to_device 乒乓暂存
+            # 双槽 + event 保护，两批在途互不干扰）。rng 抽取顺序与逐次采样
+            # 完全一致，确定性不变。
+            if step + 1 < steps or mi + 1 < grad_accum:
+                batches[mi] = get_train_batch(train, train_ctx,
+                                              int(cfg["batch_size"]), device, rng)
+            else:
+                batches[mi] = None
             with amp_ctx:
                 out = model(x, targets=y)
                 # grad_accum==1（默认配置）时除法结果就是 loss 本身：
