@@ -165,6 +165,36 @@ class CausalSelfAttention(nn.Module):
         # cat 一份 (3C, C)；训练态不走缓存（cat 必须参与 autograd 图），
         # 且优化器/测试对权重的原地修改会递增 _version 使缓存自动失效。
         self._qkv_fused = None
+        # 推理态参数 dtype 转换缓存（与 _qkv_fused 同失效键口径）：
+        # gate_w / (k_null, v_null)。逐 token 解码时每层每步对每个小参数
+        # 都执行一遍 .to(dtype)，AMP（bf16 前向）下会产生重复分配。
+        self._gate_w_cast = None
+        self._null_cast = None
+
+    def _cast_cached(self, slot: str, params: tuple, dtype):
+        """推理态缓存参数的 dtype 转换结果；训练态每次即时 .to 以参与 autograd。
+
+        键含（参数对象身份, _version, data_ptr, 目标 dtype），与 _qkv_fused
+        相同：优化器/测试对权重的原地修改、.to()/.double()/param.data= 替换
+        都会使缓存自动失效，不会复用陈旧张量。
+        """
+        if torch.is_grad_enabled():
+            return tuple(p.to(dtype) for p in params)
+        key = tuple(v for p in params
+                    for v in (p, p._version, p.data_ptr(), dtype))
+        ent = getattr(self, slot)
+        if ent is not None:
+            o_key = ent[0]
+            # 逐项（含对象身份）比较，避免元组 != 在 Tensor 上触发
+            # "Boolean value of Tensor is ambiguous"
+            if (len(o_key) == len(key) and all(
+                    (o is n) if isinstance(o, torch.Tensor) else o == n
+                    for o, n in zip(o_key, key))):
+                return ent[1]
+        with torch.inference_mode(False), torch.no_grad():
+            casted = tuple(p.detach().to(dtype).contiguous() for p in params)
+        setattr(self, slot, (key, casted))
+        return casted
 
     def init_gate_params_(self, gate_bias_init: float = 2.0) -> None:
         """显式初始化门控参数（在 GPT 的整体初始化之后调用）。"""
@@ -193,8 +223,9 @@ class CausalSelfAttention(nn.Module):
         if self.use_query:
             # 每头契约向量用批量 GEMV（matmul 广播批维）实现（结果与
             # mul+sum/einsum 归约一致，见注释末）。
-            qterm = torch.matmul(q_content, self.gate_w.to(q_content.dtype)
-                                 .unsqueeze(-1)).squeeze(-1).float()      # (B,H,T)
+            qterm = torch.matmul(q_content, self._cast_cached(
+                '_gate_w_cast', (self.gate_w,), q_content.dtype
+            )[0].unsqueeze(-1)).squeeze(-1).float()                       # (B,H,T)
             logit = qterm.clone() if keep_terms else qterm
         # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加，避免先物化
         # a*c / b*log_n 的 (B,H,T) 临时张量再逐项 add_（分块/checkpoint 路径下
@@ -250,8 +281,11 @@ class CausalSelfAttention(nn.Module):
             att[..., band_start:band_start + band_mask.shape[-1]].masked_fill_(
                 band_mask, float("-inf"))
         is_null = self.variant == "null"
+        k_null_c = v_null_c = None
         if is_null:
-            att_n = torch.matmul(q_rot, self.k_null.to(q_rot.dtype).unsqueeze(-1))
+            k_null_c, v_null_c = self._cast_cached(
+                '_null_cast', (self.k_null, self.v_null), v.dtype)
+            att_n = torch.matmul(q_rot, k_null_c.unsqueeze(-1))
             # p_null = 1 / (1 + Z/e^{a_n})，logsumexp 内部做 max 平移，数值稳定；
             # 注意是 a_n - lse（sigmoid(lse - a_n) 得到的是 1 - p_null）
             p_null = torch.sigmoid(att_n - att.logsumexp(dim=-1, keepdim=True))
@@ -271,7 +305,7 @@ class CausalSelfAttention(nn.Module):
             # addcmul_ 再融合 p_null(×)v_null 的乘加（训练态逐块 checkpoint
             # 反向重算时逐块生效）
             o.mul_(1 - p_null)
-            o.addcmul_(p_null, self.v_null.to(v.dtype).view(1, self.n_heads, 1, -1))
+            o.addcmul_(p_null, v_null_c.view(1, self.n_heads, 1, -1))
 
         g = logit = qterm = None
         if self.variant in _GATED:
@@ -514,8 +548,10 @@ class CausalSelfAttention(nn.Module):
                 if self.variant == "null":
                     # SDPA 只接受单张量 K/V，这里一次性拼接（每前向仅一次，
                     # 逐 token 解码已在上面分流到显式路径）
-                    kn = self.k_null.view(1, H, 1, Dh).to(k.dtype).expand(B, H, 1, Dh)
-                    vn = self.v_null.view(1, H, 1, Dh).to(v.dtype).expand(B, H, 1, Dh)
+                    kn, vn = self._cast_cached(
+                        '_null_cast', (self.k_null, self.v_null), k.dtype)
+                    kn = kn.view(1, H, 1, Dh).expand(B, H, 1, Dh)
+                    vn = vn.view(1, H, 1, Dh).expand(B, H, 1, Dh)
                     k = torch.cat([k, kn], dim=2)
                     v = torch.cat([v, vn], dim=2)
                 o = F.scaled_dot_product_attention(
@@ -574,7 +610,9 @@ class CausalSelfAttention(nn.Module):
                 #     逐 token 解码（T==1 走此路径）时省掉每层每步的整行复制。
                 p_null = None
                 if self.variant == "null":
-                    att_n = torch.matmul(q, self.k_null.to(q.dtype).unsqueeze(-1))
+                    k_null_c2, v_null_c2 = self._cast_cached(
+                        '_null_cast', (self.k_null, self.v_null), v.dtype)
+                    att_n = torch.matmul(q, k_null_c2.unsqueeze(-1))
                     if full_stats or (self.training and self.attn_dropout > 0):
                         att = torch.cat([att, att_n], dim=-1)          # (B,H,T,S+1)
                     else:
@@ -619,14 +657,14 @@ class CausalSelfAttention(nn.Module):
                 if self.variant == "null" and p_null is None:
                     # 联合 softmax 全列路径：o = p_real @ v + p_null * v_null
                     o = torch.matmul(p[..., :n_real], v)               # (B, H, T, Dh)
-                    o.addcmul_(p[..., n_real:], self.v_null.to(v.dtype).view(1, H, 1, Dh))
+                    o.addcmul_(p[..., n_real:], v_null_c2.view(1, H, 1, Dh))
                 else:
                     o = torch.matmul(p, v)                             # (B, H, T, Dh)
                 if p_null is not None:
                     # 解析合并路径：真实键部分乘联合尺度因子 (1-p_null)，
                     # 再加 p_null * v_null
                     o.mul_(1 - p_null)
-                    o.addcmul_(p_null, self.v_null.to(v.dtype).view(1, H, 1, Dh))
+                    o.addcmul_(p_null, v_null_c2.view(1, H, 1, Dh))
                 del p
 
                 # 输出门控（惰性累加：仅偏置项 (1,H,1) 参与广播）
