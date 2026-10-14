@@ -308,6 +308,17 @@ def main():
         final_metrics = last_eval_metrics
     else:
         final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        # 最终步评测必须同样参与 best-checkpoint 选择，与训练循环内口径一致：
+        # 否则 steps 非 eval_every 整数倍（或 steps < eval_every）时，更优的最终
+        # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按
+        # “val 上选出的最优 checkpoint”口径报告。
+        if final_metrics["val_loss"] < best_val:
+            best_val = final_metrics["val_loss"]
+            save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
+                            extra={"variant": args.variant, "step": steps,
+                                   "seed": seed, "val_loss": best_val,
+                                   "val_ppl": math.exp(min(20, best_val)),
+                                   "val_ppl_clamped": bool(best_val > 20)})
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
