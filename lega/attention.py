@@ -396,10 +396,11 @@ class CausalSelfAttention(nn.Module):
             if not stale:
                 o_key = ent[0]
                 # 逐项（含对象身份）比较，避免元组不等在 Tensor 上退化为
-                # 逐元素 == 而触发 "Boolean value of Tensor is ambiguous"
+                # 逐元素 == 而触发 "Boolean value of Tensor is ambiguous"；
+                # 任一项不一致（not 匹配）才判为缓存失效
                 stale = len(o_key) != len(key) or any(
-                    (o is n if isinstance(n, torch.Tensor)
-                     else o == n) for o, n in zip(o_key, key))
+                    not (o is n if isinstance(n, torch.Tensor)
+                         else o == n) for o, n in zip(o_key, key))
             if stale:
                 with torch.inference_mode(False), torch.no_grad():
                     fused = torch.cat([wq_w.detach(), wk_w.detach(), wv_w.detach()],
