@@ -81,7 +81,6 @@ def test_gate_formula_components():
     qterm = stats["qterm"].numpy()
     g = stats["g"].numpy()
     c = log_n + np.log(np.clip(max_p, 1e-30, None))
-    expected = 2.0 + 0.05 * 0  # d
     expected_logit = 2.0 + 0.3 * c - 0.1 * log_n
     # qterm 已含 w·q；重新手算: qterm = 0.05 * sum(q)
     # 这里直接验证 g = sigmoid(expected_logit - qterm贡献修正) —— 改为完整验证:
