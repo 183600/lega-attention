@@ -124,6 +124,21 @@ class _ChunkedLinearCE(torch.autograd.Function):
         return logits if logits.dtype in (torch.float32, torch.float64) else logits.float()
 
     @staticmethod
+    def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int) -> torch.Tensor:
+        """sum-CE 的闭式计算：logsumexp - 目标 logit，逐元素掩掉 ignore_index。
+
+        与 F.cross_entropy(reduction="sum") 等价（logsumexp 内部 max 平移，
+        数值稳定），但省去一份 (m, V) 的 log_softmax 中间张量：大词表下每个
+        分块少一次分配 + 一次全表写回。
+        """
+        keep = tgt != ignore_index
+        ts_safe = torch.where(keep, tgt, torch.zeros_like(tgt))
+        nll = torch.logsumexp(lcf, dim=-1)
+        nll -= lcf.gather(1, ts_safe.unsqueeze(1)).squeeze(1)
+        nll *= keep.to(nll.dtype)
+        return nll.sum()
+
+    @staticmethod
     def forward(ctx, x2d, weight, tgt, chunk: int, ignore_index: int = -100):
         ctx.save_for_backward(x2d, weight, tgt)
         ctx.chunk = chunk
@@ -150,10 +165,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
         with torch.no_grad():
             for s in range(0, tgt.numel(), chunk):
                 lc = F.linear(x2d[s:s + chunk], weight)
-                loss.add_(F.cross_entropy(_ChunkedLinearCE._loss_dtype(lc),
-                                          tgt[s:s + chunk],
-                                          ignore_index=ctx.ignore_index,
-                                          reduction="sum"))
+                loss.add_(_ChunkedLinearCE._ce_sum(
+                    _ChunkedLinearCE._loss_dtype(lc), tgt[s:s + chunk],
+                    ctx.ignore_index))
         return loss * ctx.inv_n
 
     @staticmethod
@@ -351,9 +365,8 @@ class GPT(nn.Module):
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
-                    part = F.cross_entropy(lcd, tgt[s:s + CHUNK],
-                                           ignore_index=int(ignore_index),
-                                           reduction="sum")
+                    part = _ChunkedLinearCE._ce_sum(lcd, tgt[s:s + CHUNK],
+                                                    int(ignore_index))
                     total = part if total is None else total.add_(part)
                 # n_valid 保留为设备张量：评测循环无需每窗口批一次 .item() 同步
                 loss = total / (tgt != ignore_index).sum().clamp_min(1)
