@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--out_dir", default="data/dummy")
     ap.add_argument("--train_words", type=int, default=260000)
     ap.add_argument("--val_words", type=int, default=30000)
+    ap.add_argument("--test_words", type=int, default=30000,
+                    help="held-out test 语料词数；<=0 则不生成 test（评测回退 val）")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 
@@ -62,6 +64,10 @@ def main():
         f.write(make_text(args.train_words))
     with open(os.path.join(args.out_dir, "val.txt"), "w", encoding="utf-8") as f:
         f.write(make_text(args.val_words))
+    # 冒烟同样走 held-out test 口径：评测默认 test，与 best-checkpoint 选择集（val）分离
+    if args.test_words > 0:
+        with open(os.path.join(args.out_dir, "test.txt"), "w", encoding="utf-8") as f:
+            f.write(make_text(args.test_words))
 
     from lega.data import prepare_bins
     meta = prepare_bins(args.out_dir, kind="auto", force=True)

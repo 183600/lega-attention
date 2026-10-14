@@ -22,12 +22,26 @@ def main():
     p.add_argument("--out", required=True, help="输出 JSON 路径")
     p.add_argument("--eval_iters", type=int, default=None,
                    help="评测窗口数；默认继承训练配置，训练配置缺失时为 100")
+    p.add_argument("--split", default="auto",
+                   choices=["auto", "test", "val"],
+                   help="默认 auto：存在 test.bin 时用 held-out test（checkpoint 选择在 "
+                        "val 上完成，报告指标必须在独立 split 上），否则回退 val")
     p.add_argument("--device", default="auto")
     args = p.parse_args()
 
     device = get_device(args.device)
     model, ck = load_model(args.ckpt, device=device)
-    val = load_bin(args.data_dir, "val")
+    split = args.split
+    if split == "auto":
+        split = "test" if (os.path.exists(os.path.join(args.data_dir, "test.bin"))
+                           and os.path.getsize(os.path.join(args.data_dir, "test.bin")) > 0) \
+            else "val"
+    if split == "val":
+        # 与 checkpoint 选择（best on val）共用同一 split：报告指标存在选择偏差，
+        # 须明确提示而非静默；正式数据请用 prepare_data.py 生成 held-out test。
+        print("[eval] 警告：正在 val split 上评测——这也是 best checkpoint 的选择集，"
+              "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测")
+    val = load_bin(args.data_dir, split)
     # 与训练时的评估保持一致：优先使用训练配置里的 train_ctx
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
     train_ctx = None
@@ -57,6 +71,9 @@ def main():
     res = {
         "variant": ck.get("variant", model.variant),
         "ckpt": args.ckpt,
+        "split": split,
+        # checkpoint（model_best.pt）在 val 上选出；split=val 时报告指标与选择集同源
+        "selection_set_is_eval_set": bool(split == "val"),
         "val_ppl": ppl,
         "val_loss": vl,
         "val_ppl_clamped": bool(vl > 20),

@@ -421,9 +421,15 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
 
 
 def load_corpus_sents(data_dir: str, max_chars: int = 300000) -> List[str]:
-    """从 val.txt 抽自然句，作为 niah_corpus 的干扰语料。"""
+    """从 train.txt 抽自然句，作为 niah_corpus 的干扰语料。
+
+    旧实现用 val.txt：干扰项虽不直接泄漏答案，但与头条 PPL 共用同一 held-out
+    文本，两项证据不再相互独立；train.txt 模型已见过，作干扰文本更中性。
+    （缺失时回退 val.txt 以兼容旧数据目录。）"""
     import os
-    path = os.path.join(data_dir, "val.txt")
+    path = os.path.join(data_dir, "train.txt")
+    if not os.path.exists(path):
+        path = os.path.join(data_dir, "val.txt")
     if not os.path.exists(path):
         return []
     text = open(path, "r", encoding="utf-8").read(max_chars)

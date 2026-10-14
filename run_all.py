@@ -54,10 +54,12 @@ def build_summary(results_dir: str) -> dict:
             return json.load(f)
 
     variants = []
+    eval_splits = set()
     for fp in sorted(glob.glob(os.path.join(results_dir, "eval_*.json"))):
         d = load(fp)
         if d:
             variants.append(d["variant"])
+            eval_splits.add(d.get("split", "val"))
 
     rows = []
     for v in variants:
@@ -100,7 +102,7 @@ def build_summary(results_dir: str) -> dict:
 
     # Markdown
     cols = [("variant_cn", "变体"), ("params", "参数量"), ("gate_extra", "门控额外参数"),
-            ("val_ppl", "Val PPL↓"), ("ruler_avg", "RULER平均↑"),
+            ("val_ppl", "PPL↓"), ("ruler_avg", "RULER平均↑"),
             ("ruler_niah_synth", "niah_synth↑"), ("ruler_niah_corpus", "niah_corpus↑"),
             ("ruler_niah_multikey", "multikey↑"), ("ruler_fwe", "fwe↑"), ("ruler_vt", "vt↑"),
             ("gate_mean", "门控均值"),
@@ -124,8 +126,15 @@ def build_summary(results_dir: str) -> dict:
         md += [header, sep]
         for r in rows:
             md.append("| " + " | ".join(fmt(r.get(k)) for k, _ in cols) + " |")
-        md += ["", "注: niah/fwe/vt 列为各上下文档的 EM/召回平均；",
-               "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，见机制分析。", ""]
+        split_note = ("PPL 在 held-out test 集上评测（checkpoint 选择在 val 上完成）"
+                      if eval_splits == {"test"} else
+                      "⚠ PPL 在 val 集上评测，该集同时用于 best-checkpoint 选择，"
+                      "数值偏乐观；请用 prepare_data.py 生成 held-out test 后重跑评测")
+        cols_notes = ["注: niah/fwe/vt 列为各上下文档的 EM/召回平均，每格样本数 n 见 ruler_*.json"
+                      "（各变体使用相同 seed 的同一批样本，差异为配对比较）；",
+                      "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，见机制分析。",
+                      split_note, ""]
+        md += [""] + cols_notes
     else:
         md.append("（暂无结果，先运行训练评测）")
     with open(os.path.join(results_dir, "summary.md"), "w", encoding="utf-8") as f:
@@ -157,6 +166,7 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--skip_train", action="store_true")
     p.add_argument("--skip_ruler", action="store_true")
+    p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument("--skip_plots", action="store_true")
     args = p.parse_args()
@@ -175,6 +185,7 @@ def main():
 
     ruler_over = []
     analysis_over = []
+    latency_over = []
     if args.smoke:
         # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
         # 模板约 211 token，128 会让 RULER 全部任务与机制分析被跳过）
@@ -182,6 +193,7 @@ def main():
             smoke_ctx = min(256, int(json.load(cf).get("block_size", 256)))
         ruler_over = ["--n_samples", "2", "--ctx_lens", str(smoke_ctx)]
         analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
+        latency_over = ["--decode_len", "8", "--reps", "1", "--warmup", "1"]
 
     t0 = time.time()
     for v in variants:
@@ -202,6 +214,12 @@ def main():
                 run([py, "-m", "lega.ruler", "--ckpt", ckpt, "--data_dir", args.data_dir,
                      "--out", os.path.join(results_dir, f"ruler_{v}.json"),
                      "--device", args.device] + ruler_over)
+
+    if not args.skip_latency and os.path.isdir(out_root):
+        run([py, "-m", "lega.latency", "--config", args.config,
+             "--data_dir", args.data_dir, "--ckpt_dir", out_root,
+             "--out", os.path.join(results_dir, "latency.json"),
+             "--device", args.device] + latency_over)
 
     if not args.skip_analysis:
         for v in variants:

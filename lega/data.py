@@ -83,14 +83,20 @@ def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
 # ---------------------------------------------------------------- bin 缓存
 
 def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict:
-    """把 train.txt/val.txt 编码为 uint16 bin（已存在则跳过，force=True 重建）。"""
+    """把 train.txt/val.txt（以及若存在的 test.txt）编码为 uint16 bin
+    （已存在则跳过，force=True 重建）。"""
     meta_path = os.path.join(data_dir, "meta.json")
     train_bin = os.path.join(data_dir, "train.bin")
     val_bin = os.path.join(data_dir, "val.bin")
+    test_txt_path = os.path.join(data_dir, "test.txt")
+    has_test_txt = os.path.exists(test_txt_path)
+    test_bin = os.path.join(data_dir, "test.bin")
     if (os.path.exists(meta_path) and os.path.exists(train_bin)
             and os.path.exists(val_bin) and not force):
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
+        # test.txt 存在而 test.bin 缺失/不一致时缓存不完整，必须重建，
+        # 否则评测会静默回退到 val（与 checkpoint 选择同一 split）。
         # 缓存的分词器与本次请求的 kind 不一致时必须重建，
         # 否则会静默沿用旧分词方式产生的 bin。
         cached_kind = meta.get("requested_kind")
@@ -100,7 +106,11 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
             cached_kind = "gpt2" if meta.get("tokenizer") == "gpt2_bpe" else "char"
         train_valid = os.path.getsize(train_bin) == int(meta.get("train_tokens", -1)) * 2
         val_valid = os.path.getsize(val_bin) == int(meta.get("val_tokens", -1)) * 2
-        if (cached_kind == kind or kind == "auto") and train_valid and val_valid:
+        test_valid = (not has_test_txt) or (
+            os.path.exists(test_bin)
+            and os.path.getsize(test_bin) == int(meta.get("test_tokens", -1)) * 2)
+        if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
+                and test_valid:
             if kind == "auto":
                 # auto 的实际分词器取决于当前环境（tiktoken 是否可用），
                 # 直接复用缓存可能与本应使用的分词器不一致，必须提示。
@@ -112,7 +122,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
                     print(f"[data] 警告：kind=auto 复用了 {meta.get('tokenizer')} 缓存，"
                           f"但当前环境 auto 将使用 {now_tok}；如需一致请 force=True 重建")
             return meta
-        if not (train_valid and val_valid):
+        if not (train_valid and val_valid and test_valid):
             print("[data] 缓存 bin/meta 大小不一致，重建 bin")
         else:
             print(f"[data] 缓存分词方式({cached_kind})与请求({kind})不一致，重建 bin")
@@ -121,8 +131,13 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
         train_text = f.read()
     with open(os.path.join(data_dir, "val.txt"), "r", encoding="utf-8") as f:
         val_text = f.read()
+    test_text = None
+    if has_test_txt:
+        with open(test_txt_path, "r", encoding="utf-8") as f:
+            test_text = f.read()
 
-    tok = get_tokenizer(kind, train_text, val_text)
+    # 字符级分词的词表必须覆盖 test.txt，否则 held-out 文本中的新字符无法编码
+    tok = get_tokenizer(kind, train_text, val_text + (test_text or ""))
     print(f"[data] 分词器: {tok.name}, vocab={tok.n_vocab}")
 
     def encode_stream(text: str) -> np.ndarray:
@@ -144,6 +159,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
 
     tr = encode_stream(train_text)
     va = encode_stream(val_text)
+    te = encode_stream(test_text) if test_text is not None else None
     # 原子替换：重建中断时不会让旧 meta 搭配半成品 bin 继续被当作有效缓存。
     train_tmp, val_tmp, meta_tmp = train_bin + ".tmp", val_bin + ".tmp", meta_path + ".tmp"
     tr.tofile(train_tmp)
@@ -151,14 +167,25 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
     meta = {"tokenizer": tok.name, "requested_kind": kind,
             "vocab_size": tok.n_vocab,
             "train_tokens": int(tr.size), "val_tokens": int(va.size)}
+    if te is not None:
+        test_tmp = test_bin + ".tmp"
+        te.tofile(test_tmp)
+        meta["test_tokens"] = int(te.size)
     if tok.name == "char":
         meta["itos"] = tok.itos
     with open(meta_tmp, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
     os.replace(train_tmp, train_bin)
     os.replace(val_tmp, val_bin)
-    os.replace(meta_tmp, meta_path)
-    print(f"[data] train {tr.size:,} tokens / val {va.size:,} tokens -> {data_dir}")
+    if te is not None:
+        os.replace(test_tmp, test_bin)
+    elif os.path.exists(test_bin):
+        # 本次没有 test.txt 但残留旧 test.bin：删除，避免用过期 split 评测
+        os.remove(test_bin)
+    msg = f"[data] train {tr.size:,} tokens / val {va.size:,} tokens"
+    if te is not None:
+        msg += f" / test {te.size:,} tokens"
+    print(f"{msg} -> {data_dir}")
     return meta
 
 
