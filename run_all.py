@@ -191,15 +191,17 @@ def main():
         analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
 
     for v in variants:
-        # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
-        # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型
-        best = os.path.join(out_root, v, "model_best.pt")
-        ckpt = best if os.path.exists(best) else os.path.join(out_root, v, "model.pt")
         if not args.skip_train:
             run([py, "-m", "lega.train", "--config", args.config, "--variant", v,
                  "--data_dir", args.data_dir, "--out_dir", os.path.join(out_root, v),
                  "--device", args.device] + (["--smoke"] if args.smoke else [])
                 + (["--wandb"] if args.wandb else []))
+        # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
+        # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型。
+        # 必须在训练之后再选择：全新训练前 best 尚不存在，提前选择会静默把
+        # 下游 PPL/RULER 评测锁定到最终步 model.pt，绕过 val 上的模型选择。
+        best = os.path.join(out_root, v, "model_best.pt")
+        ckpt = best if os.path.exists(best) else os.path.join(out_root, v, "model.pt")
         if os.path.exists(ckpt):
             run([py, "-m", "lega.evaluate", "--ckpt", ckpt, "--data_dir", args.data_dir,
                  "--out", os.path.join(results_dir, f"eval_{v}.json"),
