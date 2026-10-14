@@ -237,11 +237,11 @@ def test_chunked_full_stats_matches_unchunked():
         assert torch.equal(s_ref["argmax"], s_chk["argmax"]), variant
 
 
-def test_mask_cache_byte_budget_uses_lru():
-    """全局掩码缓存按字节预算驱逐最旧条目，而不是只按条目数驻留。"""
+def test_mask_cache_byte_limit_uses_lru():
+    """全局掩码缓存按字节上限驱逐最旧条目，而不是只按条目数驻留。"""
     old_cap = attention_mod._CACHE_CAP
-    old_budget = attention_mod._MASK_CACHE_MAX_BYTES
-    old_tri_budget = attention_mod._TRI_CACHE_MAX_BYTES
+    old_limit = attention_mod._MASK_CACHE_MAX_BYTES
+    old_tri_limit = attention_mod._TRI_CACHE_MAX_BYTES
     mask0 = None
     try:
         attention_mod._MASK_CACHE.clear()
@@ -270,5 +270,5 @@ def test_mask_cache_byte_budget_uses_lru():
         attention_mod._TRI_CACHE.clear()
         attention_mod._TRI_CACHE_BYTES = 0
         attention_mod._CACHE_CAP = old_cap
-        attention_mod._MASK_CACHE_MAX_BYTES = old_budget
-        attention_mod._TRI_CACHE_MAX_BYTES = old_tri_budget
+        attention_mod._MASK_CACHE_MAX_BYTES = old_limit
+        attention_mod._TRI_CACHE_MAX_BYTES = old_tri_limit

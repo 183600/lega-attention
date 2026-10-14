@@ -28,7 +28,7 @@ from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
-# null 变体虽无 g/logit，仍应纳入；standard 作为无诊断必要基线保持跳过。
+# null 变体虽无 g/logit，仍应纳入；standard 无需诊断，保持跳过。
 GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc", "lega_no_query")
 
 

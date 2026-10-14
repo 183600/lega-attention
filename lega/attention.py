@@ -62,7 +62,7 @@ _MASK_CACHE: OrderedDict = OrderedDict()   # (past_len, T, S, device) ->
                                            # [not_allowed, ones_col, allowed, allowed+null]
 # allowed/allowed+null 惰性填充并与 not_allowed 一并保存，供 SDPA 带掩码分支直接使用。
 # 条目数上限不足以覆盖长上下文：单张布尔掩码可达 T*S 字节。这里再按总字节数做
-# LRU 驱逐，避免多长度评测/解码时掩码无界驻留显存。
+# LRU 驱逐，避免多长度评测/解码时掩码无界增长。
 _MASK_CACHE_BYTES = 0
 _MASK_CACHE_MAX_BYTES = 128 * 1024 * 1024
 # 设备端 log 前缀表：table[n] = log(n+1)，任意 (past_len, T) 的 log n 恒为其
@@ -91,7 +91,7 @@ def _enforce_mask_cache_bounds() -> None:
 
 
 def _mask_cache_store(key, entry) -> None:
-    """按 LRU 插入掩码；超预算的超大掩码不驻留，但仍返回本次使用。"""
+    """按 LRU 插入掩码；超上限的超大掩码不驻留，但仍返回本次使用。"""
     global _MASK_CACHE_BYTES
     if _MASK_CACHE.get(key) is not None:
         return
@@ -602,7 +602,7 @@ class CausalSelfAttention(nn.Module):
                     entry = [not_allowed,
                              torch.ones(1, 1, T, 1, dtype=torch.bool, device=dev),
                              None, None]  # allowed / 拼 null 槽的 allowed，惰性填充
-                _mask_cache_store(mkey, entry)   # 超预算条目仅本次使用，不驻留
+                _mask_cache_store(mkey, entry)   # 超上限条目仅本次使用，不驻留
             not_allowed, ones_col = entry[0], entry[1]
             mask_entry = entry
             # 不 expand：masked_fill / SDPA 均支持 (1, 1, T, S) 广播
