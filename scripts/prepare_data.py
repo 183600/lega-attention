@@ -122,12 +122,27 @@ def from_rows_api(max_rows: int, retries: int = 4) -> dict:
 
 
 def clean_lines(lines, max_tokens: int, tokenizer_kind: str) -> str:
-    lines = [ln.rstrip() for ln in lines if ln.strip()]
-    text = "\n".join(lines)
-    if max_tokens:
-        # 粗略按 1 token ≈ 3.6 字符估算，留 20% 余量
-        text = text[:int(max_tokens * 3.6 * 1.2)]
-    return text
+    if not max_tokens:
+        return "\n".join(ln.rstrip() for ln in lines if ln.strip())
+    # 粗略按 1 token ≈ 3.6 字符估算，留 20% 余量
+    limit = int(max_tokens * 3.6 * 1.2)
+    parts = []
+    used = 0
+    for raw in lines:
+        ln = raw.rstrip()
+        if not ln.strip():
+            continue
+        sep = int(bool(parts))
+        take = min(len(ln), limit - used - sep)
+        if take < 0:
+            break
+        if sep:
+            parts.append("\n")
+        parts.append(ln[:take])
+        used += sep + take
+        if used >= limit:
+            break
+    return "".join(parts)
 
 
 def main():

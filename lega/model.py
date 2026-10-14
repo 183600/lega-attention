@@ -178,7 +178,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 with ac_ctx:
                     lc = F.linear(xs, weight)                        # (m, V)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
-                d = torch.softmax(lcf, dim=-1)
+                d = torch.softmax(lcf, dim=-1, out=lcf)
                 keep = ts != ctx.ignore_index
                 # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
                 # 压到 0（其减 1 随后会被 keep 掩码清零），替代原先的
@@ -188,8 +188,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
                 d.scatter_add_(1, ts_safe.unsqueeze(1),
                                neg_one[:ts_safe.numel()])
-                d.mul_(keep.unsqueeze(1).to(d.dtype))
-                d.mul_(gscale)
+                keep_scale = keep.unsqueeze(1).to(d.dtype)
+                keep_scale.mul_(gscale)
+                d.mul_(keep_scale)
                 gx[s:s + ctx.chunk] = torch.matmul(d, weight).to(gx.dtype)
                 if gw is None:
                     gw = torch.zeros(weight.shape, dtype=d.dtype,

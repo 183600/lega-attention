@@ -234,12 +234,15 @@ def main():
     opt.zero_grad(set_to_none=True)
     tokens_seen = 0
     best_val = float("inf")
+    last_eval_step = None
+    last_eval_metrics = None
     # loss 设备端累加器跨步复用（每步 zero_()），避免每步一次标量分配
     loss_acc_dev = torch.zeros((), device=device)
 
     def do_eval(step):
-        nonlocal best_val
+        nonlocal best_val, last_eval_step, last_eval_metrics
         metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        last_eval_step, last_eval_metrics = step, metrics
         vl = metrics["val_loss"]
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
@@ -300,7 +303,10 @@ def main():
         if (step + 1) % eval_every == 0:
             do_eval(step + 1)
 
-    final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+    if last_eval_step == steps:
+        final_metrics = last_eval_metrics
+    else:
+        final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]

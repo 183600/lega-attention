@@ -175,6 +175,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
         meta["itos"] = tok.itos
     with open(meta_tmp, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
+    os.replace(meta_tmp, meta_path)
     os.replace(train_tmp, train_bin)
     os.replace(val_tmp, val_bin)
     if te is not None:
@@ -214,6 +215,8 @@ def load_bin(data_dir: str, split: str) -> np.memmap:
 # 双槽轮换 + event 保证重写槽位前上一次异步拷贝已完成。
 _H2D_STAGE: dict = {}
 _H2D_TURN: dict = {}
+_H2D_STAGE_BYTES = 0
+_H2D_STAGE_MAX_BYTES = 128 * 1024 * 1024
 
 
 def _stage_to_device(src, device: str) -> torch.Tensor:
@@ -224,6 +227,7 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     参数不产生中间数组），省掉每个训练步先拷出 (n, ctx+1) 临时 NumPy
     数组、再 copy_ 进 pinned 暂存的双重 CPU 拷贝。
     """
+    global _H2D_STAGE_BYTES
     is_span = isinstance(src, tuple)
     shape = src[1].shape if is_span else src.shape
     dtype = np.uint16 if is_span else src.dtype
@@ -234,12 +238,16 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     key = (device, tuple(shape), dtype)
     slots = _H2D_STAGE.get(key)
     if slots is None:
-        if len(_H2D_STAGE) < 32:    # 形状种类有限（训练/验证各一两种）
-            tdtype = torch.from_numpy(np.empty(0, dtype=dtype)).dtype
+        tdtype = torch.from_numpy(np.empty(0, dtype=dtype)).dtype
+        slot_bytes = torch.empty(0, dtype=tdtype).element_size()
+        slot_bytes *= 2 * int(np.prod(shape, dtype=np.int64))
+        if (len(_H2D_STAGE) < 32
+                and _H2D_STAGE_BYTES + slot_bytes <= _H2D_STAGE_MAX_BYTES):
             slots = [(torch.empty(shape, dtype=tdtype).pin_memory(),
                       torch.cuda.Event()) for _ in range(2)]
             _H2D_STAGE[key] = slots
             _H2D_TURN[key] = 0
+            _H2D_STAGE_BYTES += slot_bytes
         else:
             arr = np.take(src[0], src[1]) if is_span else src
             out = torch.from_numpy(np.ascontiguousarray(arr)).to(

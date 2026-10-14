@@ -252,6 +252,12 @@ class CausalSelfAttention(nn.Module):
         g = torch.sigmoid(logit) if keep_terms else logit.sigmoid_()
         return g, logit, qterm
 
+    def _softmax_reuse(self, att: torch.Tensor) -> torch.Tensor:
+        if ((torch.is_grad_enabled() and att.requires_grad)
+                or torch.compiler.is_compiling()):
+            return F.softmax(att, dim=-1)
+        return torch.softmax(att, dim=-1, out=att)
+
     def _attend_q_chunk(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         kT: torch.Tensor, v: torch.Tensor,
                         band_start: int, band_mask: Optional[torch.Tensor],
@@ -290,7 +296,7 @@ class CausalSelfAttention(nn.Module):
             # 注意是 a_n - lse（sigmoid(lse - a_n) 得到的是 1 - p_null）
             p_null = torch.sigmoid(att_n - att.logsumexp(dim=-1, keepdim=True))
             del att_n
-        p = F.softmax(att, dim=-1)
+        p = self._softmax_reuse(att)
         del att
 
         max_p = None
@@ -627,7 +633,7 @@ class CausalSelfAttention(nn.Module):
                 argmax_stat = None
                 if bool(need_stats) and stats_argmax and self.variant != "null":
                     argmax_stat = att[..., :n_real].argmax(dim=-1)
-                p = F.softmax(att, dim=-1)
+                p = self._softmax_reuse(att)
                 del att
 
                 # 门控所需的注意力统计（LEGA 家族训练时也必须计算）。
