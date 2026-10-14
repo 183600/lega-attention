@@ -130,7 +130,7 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     n = len(records)
     if n == 0:
         return {"variant": variant, "n_records": 0}
-    hit = np.array([r["hit"] for r in records], dtype=np.float64)
+    hit = np.array([np.nan if r.get("hit") is None else r["hit"] for r in records], dtype=np.float64)
     max_p = np.array([r["max_p"] for r in records])
     conc = (max_p > tau).astype(np.float64)
     g = np.array([np.nan if r.get("g") is None else r["g"] for r in records], dtype=np.float64)

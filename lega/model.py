@@ -328,6 +328,11 @@ class GPT(nn.Module):
         self.eval()
         try:
             B, T0 = idx.shape
+            # 生成上限受 block_size（RoPE 位置表）约束：在分配缓冲/缓存前
+            # 提前报出清晰错误，避免生成到一半才在 forward 中触发位置断言
+            assert T0 + max_new_tokens <= self.block_size, (
+                f"生成长度超限: 提示 {T0} + 新增 {max_new_tokens} > "
+                f"block_size {self.block_size}，请先截断提示或减少 max_new_tokens")
             # 预分配输出缓冲，逐 token 就地写入
             out_ids = torch.empty(B, T0 + max_new_tokens, dtype=idx.dtype,
                                   device=idx.device)
