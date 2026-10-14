@@ -106,8 +106,9 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
             cached_kind = "gpt2" if meta.get("tokenizer") == "gpt2_bpe" else "char"
         train_valid = os.path.getsize(train_bin) == int(meta.get("train_tokens", -1)) * 2
         val_valid = os.path.getsize(val_bin) == int(meta.get("val_tokens", -1)) * 2
-        test_valid = (not has_test_txt) or (
-            os.path.exists(test_bin)
+        test_valid = (not has_test_txt and not os.path.exists(test_bin)) or (
+            has_test_txt
+            and os.path.exists(test_bin)
             and os.path.getsize(test_bin) == int(meta.get("test_tokens", -1)) * 2)
         if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
                 and test_valid:

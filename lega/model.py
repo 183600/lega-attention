@@ -197,7 +197,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 keep_scale = keep.unsqueeze(1).to(d.dtype)
                 keep_scale.mul_(gscale)
                 d.mul_(keep_scale)
-                gx[s:s + ctx.chunk] = torch.matmul(d, weight).to(gx.dtype)
+                # d 为计算精度（低精度时为 fp32），weight 可能是 bf16/fp16：
+                # 必须先在 d 的精度上做 GEMM（dtype 需一致），再降回 gx 的精度
+                gx[s:s + ctx.chunk] = torch.matmul(d, weight.to(d.dtype)).to(gx.dtype)
                 if gw is None:
                     gw = torch.zeros(weight.shape, dtype=d.dtype,
                                      device=weight.device)
@@ -424,9 +426,12 @@ class GPT(nn.Module):
                     if (i + 1) % _EOS_EVERY == 0 or i + 1 == max_new_tokens:
                         flags = torch.stack(eos_flags)
                         if bool(flags.any()):
-                            # 首个全体同时命中 EOS 的步（与逐步检查的停止条件相同）
+                            # 首个全体同时命中 EOS 的步（与逐步检查的停止条件相同）。
+                            # 注意 eos_flags 在确认无命中的窗口末尾会被 clear()，
+                            # first 是当前窗口内的相对索引，必须加回窗口基址
+                            # （最近 len(eos_flags) 步恰好覆盖到当前步 i）。
                             first = int(flags.long().argmax().item())
-                            cur_len = T0 + first + 1
+                            cur_len = T0 + (i + 1 - len(eos_flags)) + first + 1
                             break
                         eos_flags.clear()
             return out_ids[:, :cur_len]
