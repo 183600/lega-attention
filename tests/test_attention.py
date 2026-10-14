@@ -206,3 +206,69 @@ def test_query_chunked_attention_matches_unchunked():
         assert n0 == n1
         if p0.grad is not None:
             assert torch.allclose(p0.grad, p1.grad, atol=1e-5, rtol=1e-5), n0
+
+
+def test_chunked_full_stats_matches_unchunked():
+    """完整诊断统计也可分块产生，避免机制分析物化整条 T×S 概率矩阵。"""
+    old = attention_mod._CHUNK_TARGET_ELEMS
+    for variant in ("standard", "null", "lega"):
+        torch.manual_seed(4)
+        ref = CausalSelfAttention(32, 2, variant=variant)
+        chk = CausalSelfAttention(32, 2, variant=variant)
+        chk.load_state_dict(ref.state_dict())
+        x = torch.randn(1, 96, 32)
+        try:
+            attention_mod._CHUNK_TARGET_ELEMS = 10**12
+            with torch.no_grad():
+                o_ref, _, s_ref = ref(x, need_stats=True)
+            attention_mod._CHUNK_TARGET_ELEMS = 1024
+            with torch.no_grad():
+                o_chk, _, s_chk = chk(x, need_stats=True)
+        finally:
+            attention_mod._CHUNK_TARGET_ELEMS = old
+
+        assert torch.allclose(o_ref, o_chk, atol=1e-5, rtol=1e-5), variant
+        for key in ("max_p", "log_n", "qterm", "g", "logit", "p_null"):
+            a, b = s_ref.get(key), s_chk.get(key)
+            if a is None:
+                assert b is None, (variant, key)
+            else:
+                assert torch.allclose(a, b, atol=1e-5, rtol=1e-5), (variant, key)
+        assert torch.equal(s_ref["argmax"], s_chk["argmax"]), variant
+
+
+def test_mask_cache_byte_budget_uses_lru():
+    """全局掩码缓存按字节预算驱逐最旧条目，而不是只按条目数驻留。"""
+    old_cap = attention_mod._CACHE_CAP
+    old_budget = attention_mod._MASK_CACHE_MAX_BYTES
+    old_tri_budget = attention_mod._TRI_CACHE_MAX_BYTES
+    mask0 = None
+    try:
+        attention_mod._MASK_CACHE.clear()
+        attention_mod._MASK_CACHE_BYTES = 0
+        attention_mod._TRI_CACHE.clear()
+        attention_mod._TRI_CACHE_BYTES = 0
+        attention_mod._CACHE_CAP = 8
+        attention_mod._MASK_CACHE_MAX_BYTES = 20
+        attention_mod._TRI_CACHE_MAX_BYTES = 6
+        for i in range(2):
+            entry = [torch.ones(1, 1, 4, 4, dtype=torch.bool),
+                     torch.ones(1, 1, 4, 1, dtype=torch.bool), None, None]
+            if i == 0:
+                mask0 = entry
+            attention_mod._mask_cache_store(("cpu", i), entry)
+        assert len(attention_mod._MASK_CACHE) == 1
+        assert attention_mod._MASK_CACHE_BYTES == 20
+        assert not any(entry is mask0 for entry in attention_mod._MASK_CACHE.values())
+        first_tri = attention_mod._tri_band(2, 2, torch.device("cpu"))
+        attention_mod._tri_band(2, 3, torch.device("cpu"))
+        assert len(attention_mod._TRI_CACHE) == 1
+        assert not any(tri is first_tri for tri in attention_mod._TRI_CACHE.values())
+    finally:
+        attention_mod._MASK_CACHE.clear()
+        attention_mod._MASK_CACHE_BYTES = 0
+        attention_mod._TRI_CACHE.clear()
+        attention_mod._TRI_CACHE_BYTES = 0
+        attention_mod._CACHE_CAP = old_cap
+        attention_mod._MASK_CACHE_MAX_BYTES = old_budget
+        attention_mod._TRI_CACHE_MAX_BYTES = old_tri_budget

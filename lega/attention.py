@@ -20,6 +20,7 @@ c 度量的是"超出均匀分布的证据集中度"；b*log n 项让门显式�
 初始时 w=a=b=0、d=2.0，g ≈ 0.88，接近标准注意力，保证训练稳定启动。
 """
 import math
+from collections import OrderedDict
 from typing import Optional, Tuple
 
 import torch
@@ -57,9 +58,13 @@ _CHUNK_MIN_T = 64
 # 键内已含 device，跨设备天然隔离；长度变化场景（解码）由容量上限兜底。
 # 只构造 not_allowed（显式路径直接用）；allowed 仅 SDPA 带掩码的少见分支需要，
 # 用时再按位取反。
-_MASK_CACHE: dict = {}   # (past_len, T, S, device) -> [not_allowed, ones_col, allowed]
-                         # allowed 惰性填充并与 not_allowed 一并保存，供 SDPA
-                         # 带掩码分支直接使用
+_MASK_CACHE: OrderedDict = OrderedDict()   # (past_len, T, S, device) ->
+                                           # [not_allowed, ones_col, allowed, allowed+null]
+# allowed/allowed+null 惰性填充并与 not_allowed 一并保存，供 SDPA 带掩码分支直接使用。
+# 条目数上限不足以覆盖长上下文：单张布尔掩码可达 T*S 字节。这里再按总字节数做
+# LRU 驱逐，避免多长度评测/解码时掩码无界驻留显存。
+_MASK_CACHE_BYTES = 0
+_MASK_CACHE_MAX_BYTES = 128 * 1024 * 1024
 # 设备端 log 前缀表：table[n] = log(n+1)，任意 (past_len, T) 的 log n 恒为其
 # [past_len, past_len+T) 切片。按需倍增扩展：避免按 (past_len, T) 逐键缓存
 # 导致的重复驻留，以及单查询解码步每层每步从主机端新建标量（H2D + 分配）。
@@ -67,8 +72,50 @@ _LOGN_TABLE: dict = {}   # device -> (N,) float
 _LOGN_TABLE_INIT = 4096
 # 查询分块路径使用的三角对角带掩码：块 (r, c) 内掩码只依赖相对偏移（c > r），
 # 与 past 偏移无关，全层/全块共享一份即可；分块步常见 chunk 形状只有一两种。
-_TRI_CACHE: dict = {}    # (r, c, device) -> (1, 1, r, c) bool，严格上三角为 True
+_TRI_CACHE: OrderedDict = OrderedDict()  # (r, c, device) -> (1, 1, r, c) bool
+_TRI_CACHE_BYTES = 0
+_TRI_CACHE_MAX_BYTES = 64 * 1024 * 1024
 _CACHE_CAP = 256
+
+
+def _mask_entry_bytes(entry) -> int:
+    return sum(t.numel() * t.element_size() for t in entry if t is not None)
+
+
+def _enforce_mask_cache_bounds() -> None:
+    global _MASK_CACHE_BYTES
+    while _MASK_CACHE and (len(_MASK_CACHE) > _CACHE_CAP
+                           or _MASK_CACHE_BYTES > _MASK_CACHE_MAX_BYTES):
+        _, old = _MASK_CACHE.popitem(last=False)
+        _MASK_CACHE_BYTES -= _mask_entry_bytes(old)
+
+
+def _mask_cache_store(key, entry) -> None:
+    """按 LRU 插入掩码；超预算的超大掩码不驻留，但仍返回本次使用。"""
+    global _MASK_CACHE_BYTES
+    if _MASK_CACHE.get(key) is not None:
+        return
+    _MASK_CACHE[key] = entry
+    _MASK_CACHE_BYTES += _mask_entry_bytes(entry)
+    _enforce_mask_cache_bounds()
+
+
+def _mask_cache_grow(key, entry, tensor) -> None:
+    """惰性掩码加入已缓存条目时同步记账；条目已被驱逐则不再驻留。"""
+    global _MASK_CACHE_BYTES
+    if _MASK_CACHE.get(key) is not entry:
+        return
+    _MASK_CACHE_BYTES += tensor.numel() * tensor.element_size()
+    _MASK_CACHE.move_to_end(key)
+    _enforce_mask_cache_bounds()
+
+
+def _enforce_tri_cache_bounds() -> None:
+    global _TRI_CACHE_BYTES
+    while _TRI_CACHE and (len(_TRI_CACHE) > _CACHE_CAP
+                          or _TRI_CACHE_BYTES > _TRI_CACHE_MAX_BYTES):
+        _, old = _TRI_CACHE.popitem(last=False)
+        _TRI_CACHE_BYTES -= old.numel() * old.element_size()
 
 
 def _log_n_table(dev, need: int) -> torch.Tensor:
@@ -97,13 +144,17 @@ def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
 
 def _tri_band(r: int, c: int, dev) -> torch.Tensor:
     """(1, 1, r, c) 严格上三角布尔掩码：[row, col] = (col > row)。"""
+    global _TRI_CACHE_BYTES
     key = (r, c, dev)
     m = _TRI_CACHE.get(key)
-    if m is None:
-        with torch.inference_mode(False):  # 缓存常量不能是 inference tensor
-            m = torch.ones(1, 1, r, c, dtype=torch.bool, device=dev).triu_(1)
-        if len(_TRI_CACHE) < _CACHE_CAP:
-            _TRI_CACHE[key] = m
+    if m is not None:
+        _TRI_CACHE.move_to_end(key)
+        return m
+    with torch.inference_mode(False):  # 缓存常量不能是 inference tensor
+        m = torch.ones(1, 1, r, c, dtype=torch.bool, device=dev).triu_(1)
+    _TRI_CACHE[key] = m
+    _TRI_CACHE_BYTES += m.numel() * m.element_size()
+    _enforce_tri_cache_bounds()
     return m
 
 
@@ -299,9 +350,24 @@ class CausalSelfAttention(nn.Module):
         p = self._softmax_reuse(att)
         del att
 
-        max_p = None
-        if self.variant in _LEGA_FAMILY and self.use_conc:
+        # 完整统计也按查询块收集：只在块内瞬时保留 (B,H,C,S)，不再为分析样例
+        # 物化整条序列的 T×S 概率矩阵。
+        max_p = argmax_stat = p_null_stat = None
+        need_p_stats = collect_stats or (self.variant in _LEGA_FAMILY and self.use_conc)
+        if need_p_stats:
             max_p = p.amax(dim=-1).float()                            # (B,H,C)
+        if collect_stats:
+            argmax_real = p.argmax(dim=-1)
+            if is_null:
+                # 解析合并的 null 槽参与联合归一化：真实键概率需乘 (1-p_null)，
+                # argmax 也需与 p_null 比较，结果与 cat 出 S+1 列完全一致。
+                p_null_stat = p_null.squeeze(-1)
+                max_p = max_p * (1 - p_null_stat.float())
+                argmax_stat = torch.where(
+                    p_null_stat > max_p.to(p_null_stat.dtype),
+                    torch.full_like(argmax_real, -1), argmax_real)
+            else:
+                argmax_stat = argmax_real
         if self.attn_dropout > 0 and self.training:
             p = F.dropout(p, p=self.attn_dropout)
         o = torch.matmul(p, v)                                        # (B,H,C,Dh)
@@ -320,7 +386,7 @@ class CausalSelfAttention(nn.Module):
             o.mul_(g.to(o.dtype).unsqueeze(-1))
         if not collect_stats:
             return o
-        return o, max_p, qterm, logit, g
+        return o, max_p, qterm, logit, g, argmax_stat, p_null_stat
 
     def _attend_chunked(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         k: torch.Tensor, v: torch.Tensor,
@@ -354,7 +420,7 @@ class CausalSelfAttention(nn.Module):
         # 安全的）：块输出到多头合并的转置在写块时一次完成
         Dh = v.shape[-1]
         o = v.new_empty(B, T, H, Dh)
-        max_ps, qterms, logits, gs = [], [], [], []
+        max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
         for q0 in range(0, T, cq):
             q1 = min(T, q0 + cq)
             qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
@@ -384,7 +450,7 @@ class CausalSelfAttention(nn.Module):
                     use_reentrant=False, preserve_rng_state=False)
             else:
                 if collect_stats:
-                    oc, mp, qt, lg, gg = self._attend_q_chunk(
+                    oc, mp, qt, lg, gg, am, pnl = self._attend_q_chunk(
                         qr, qc, kT_c, v_c, band_start, band_mask,
                         logn_c, True)
                     if mp is not None:
@@ -395,6 +461,10 @@ class CausalSelfAttention(nn.Module):
                         logits.append(lg)
                     if gg is not None:
                         gs.append(gg)
+                    if am is not None:
+                        argmaxes.append(am)
+                    if pnl is not None:
+                        p_nulls.append(pnl)
                 else:
                     oc = self._attend_q_chunk(qr, qc, kT_c, v_c, band_start,
                                               band_mask, logn_c, False)
@@ -404,9 +474,10 @@ class CausalSelfAttention(nn.Module):
         # 送出的 o 已按 (B,T,H) 布局写满，直接 view 成多头合并的 (B,T,C)
         o = o.view(B, T, H * Dh)
         if not collect_stats:
-            return o, None, None, None, None
+            return o, None, None, None, None, None, None
         cat = lambda xs: torch.cat(xs, dim=2) if xs else None
-        return o, cat(max_ps), cat(qterms), cat(logits), cat(gs)
+        return o, cat(max_ps), cat(qterms), cat(logits), cat(gs), \
+            cat(argmaxes), cat(p_nulls)
 
     def forward(self, x: torch.Tensor, rope=None,
                 past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
@@ -483,7 +554,7 @@ class CausalSelfAttention(nn.Module):
             cache = (k, v)  # KV 缓存不含 null 槽（null 每次前向临时追加）
         n_real = k.shape[2]
         S = n_real   # null 槽不再拼接进 K/V：解析地以 lse(a·w_null) 计入
-                     # softmax 归一化（完整统计/dropout 分支除外，见下）。
+                     # softmax 归一化（非分块完整统计/dropout 分支除外，见下）。
 
         # 集中度门控（lega/lega_no_len/lega_no_query）必须消费注意力概率统计
         # max_j p_j，无法走 SDPA；qgate/lega_no_conc 的门只依赖查询与 log n，
@@ -508,7 +579,6 @@ class CausalSelfAttention(nn.Module):
         elems = B * H * T * S
         will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
                       and elems >= _CHUNK_TARGET_ELEMS
-                      and not full_stats
                       and not (self.training and self.attn_dropout > 0))
 
         # 因果掩码：真实键 j 仅当 j <= 查询绝对位置时可见；null 槽对全部查询可见。
@@ -518,7 +588,9 @@ class CausalSelfAttention(nn.Module):
         if not single_q and not causal_only and not will_chunk:
             mkey = (past_len, T, S, dev)
             entry = _MASK_CACHE.get(mkey)
-            if entry is None:
+            if entry is not None:
+                _MASK_CACHE.move_to_end(mkey)
+            else:
                 # 缓存中的常数张量必须创建于普通模式。若在 inference_mode
                 # （验证/生成）下创建并被随后的训练前向复用，autograd 会拒绝保存
                 # inference tensor。这里显式退出 inference_mode，仅用于创建不依赖
@@ -530,14 +602,14 @@ class CausalSelfAttention(nn.Module):
                     entry = [not_allowed,
                              torch.ones(1, 1, T, 1, dtype=torch.bool, device=dev),
                              None, None]  # allowed / 拼 null 槽的 allowed，惰性填充
-                if len(_MASK_CACHE) < _CACHE_CAP:   # 解码场景键持续变化，限制缓存规模
-                    _MASK_CACHE[mkey] = entry
+                _mask_cache_store(mkey, entry)   # 超预算条目仅本次使用，不驻留
             not_allowed, ones_col = entry[0], entry[1]
             mask_entry = entry
             # 不 expand：masked_fill / SDPA 均支持 (1, 1, T, S) 广播
 
         stats: Optional[dict] = None
         g = qterm = logit = max_p = log_n = None
+        argmax_stat = p_null_stat = None
 
         if use_sdpa:
             # 无诊断需求的路径：SDPA（含 null/qgate/lega_no_conc 变体）
@@ -557,11 +629,13 @@ class CausalSelfAttention(nn.Module):
                         if mask_entry[3] is None:
                             with torch.inference_mode(False):
                                 mask_entry[3] = torch.cat([~mask_entry[0], ones_col], dim=3)
+                            _mask_cache_grow(mkey, mask_entry, mask_entry[3])
                         allowed = mask_entry[3]
                     else:
                         if mask_entry[2] is None:
                             with torch.inference_mode(False):
                                 mask_entry[2] = ~mask_entry[0]
+                            _mask_cache_grow(mkey, mask_entry, mask_entry[2])
                         allowed = mask_entry[2]
                 if self.variant == "null":
                     # SDPA 只接受单张量 K/V，这里一次性拼接（每前向仅一次，
@@ -593,10 +667,9 @@ class CausalSelfAttention(nn.Module):
                 stats = {"max_p": None, "log_n": log_n, "argmax": None,
                          "qterm": qterm, "g": g, "logit": logit}
         else:
-            # 显式注意力路径：gated / 需要诊断统计时。
-            # 长上下文且不需要 argmax/p_null 完整诊断时，按查询块计算：
-            # 前向保持 (B,H,Cq,S) 块级中间量，训练态配合逐块 checkpoint。
-            # 逐块 softmax 覆盖完整键行，数学不变。
+            # 显式注意力路径：gated / 需要诊断统计时。长上下文按查询块计算并
+            # 逐块汇总完整统计，前向保持 (B,H,Cq,S) 块级中间量，训练态配合逐块
+            # checkpoint。逐块 softmax 覆盖完整可见键行，数学不变。
             # attn_dropout>0 的训练步保持原来的单块路径：分块会改变 dropout 的
             # RNG 消耗粒度，虽无系统性偏差，但不逐位一致。
             use_chunk = will_chunk
@@ -608,13 +681,13 @@ class CausalSelfAttention(nn.Module):
             else:
                 q.mul_(self.scale)
             if use_chunk:
-                need_logn = self.variant in _LEGA_FAMILY or bool(need_stats)
                 log_n = None
-                if self.use_len or (need_logn and self.variant in _LEGA_FAMILY):
+                if self.use_len or bool(need_stats):
                     log_n = _log_n(past_len, T, dev)
                 collect = bool(need_stats)
-                o, max_p, qterm, logit, g = self._attend_chunked(
-                    q, q_content, k, v, past_len, log_n, B, H, T, collect)
+                o, max_p, qterm, logit, g, argmax_stat, p_null_stat = \
+                    self._attend_chunked(q, q_content, k, v, past_len,
+                                         log_n, B, H, T, collect)
             else:
                 # q 已在分块循环外统一预乘 1/sqrt(Dh)；argmax/softmax 对正缩放不敏感。
                 att = torch.matmul(q, k.transpose(-2, -1))             # (B, H, T, S)
@@ -702,7 +775,12 @@ class CausalSelfAttention(nn.Module):
                     "logit": logit,
                 }
                 if stats_argmax:
-                    if self.variant == "null":
+                    if use_chunk:
+                        # 完整统计逐块汇总，避免机制分析物化整条 T×S 概率矩阵
+                        stats["argmax"] = argmax_stat
+                        if self.variant == "null":
+                            stats["p_null"] = p_null_stat.float()
+                    elif self.variant == "null":
                         # null 变体的统计必须基于含 null 槽的完整 softmax，
                         # 否则会虚增集中度并错误地把 null 槽落点记为真实键
                         stats["max_p"] = p_pre[..., :n_real].amax(dim=-1).float()
