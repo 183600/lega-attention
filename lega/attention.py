@@ -337,7 +337,10 @@ class CausalSelfAttention(nn.Module):
         # 之后每块切片均为批量维可展平的行主序视图，matmul 直接复用原存储。
         # 序列本身的 Scale 已在调用方按块外完成，此处只做布局规整。
         q_rot = q_rot.contiguous()
-        q_content = q_content.contiguous()
+        # 无查询项的变体（null / lega_no_query）在 _gate_logit 里只读取
+        # q_content.shape，不读取数据：跳过 (B,H,T,Dh) 的整份连续化拷贝。
+        if self.use_query:
+            q_content = q_content.contiguous()
         k = k.contiguous()
         v = v.contiguous()
         # 目标：每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素

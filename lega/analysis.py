@@ -62,7 +62,10 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     variant = model.variant
     records: List[Dict] = []
     for ex_idx, (ex, task, ctx) in enumerate(zip(examples, task_of, ctx_of)):
-        ids = torch.tensor([ex["ids"]], dtype=torch.long, device=device)
+        # 先经 NumPy 物化再转 tensor：torch.tensor(list[, device=cuda]) 会逐元素
+        # 装箱并做一次同步页式拷贝；asarray+from_numpy 减少一半 CPU 开销。
+        ids = torch.from_numpy(np.asarray(ex["ids"], dtype=np.int64)[None])
+        ids = ids.to(device, non_blocking=True) if device.startswith("cuda") else ids
         # logits 不参与机制分析；只算最后位置
         out = model(ids, need_stats=True, last_logits_only=True)
         if not out["gate_stats"]:
