@@ -149,8 +149,6 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     cfg_used = dict(cfg)
     cfg_used.update({"variant": args.variant, "seed": seed, "device": device, "tag": tag})
-    with open(os.path.join(out_dir, "config_used.json"), "w", encoding="utf-8") as f:
-        json.dump(cfg_used, f, ensure_ascii=False, indent=2)
 
     set_seed(seed)
     meta = load_meta(args.data_dir)
@@ -159,6 +157,10 @@ def main():
 
     block_size = int(cfg["block_size"])
     train_ctx = min(int(cfg.get("train_ctx", block_size)), block_size)
+    # 记录实际生效的上下文长度（经过 min 截断），保证下游评测复现同一口径
+    cfg_used["train_ctx"] = train_ctx
+    with open(os.path.join(out_dir, "config_used.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg_used, f, ensure_ascii=False, indent=2)
 
     model_cfg = dict(
         vocab_size=int(meta["vocab_size"]), block_size=block_size,
@@ -231,14 +233,17 @@ def main():
     model.train()
     opt.zero_grad(set_to_none=True)
     t0 = time.time()
+    eval_time = 0.0   # 验证耗时累计：tok/s 只计纯训练吞吐
     tokens_seen = 0
     best_val = float("inf")
     # loss 设备端累加器跨步复用（每步 zero_()），避免每步一次标量分配
     loss_acc_dev = torch.zeros((), device=device)
 
     def do_eval(step):
-        nonlocal best_val
+        nonlocal best_val, eval_time
+        te = time.time()
         metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        eval_time += time.time() - te
         vl = metrics["val_loss"]
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
@@ -287,7 +292,7 @@ def main():
 
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())   # 仅在记录日志时同步
-            dt = time.time() - t0
+            dt = time.time() - t0 - eval_time   # 不含验证耗时
             rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
                    "lr": base_lrs[0] * lr_f, "tok_per_s": tokens_seen / max(dt, 1e-6),
                    "time": now_str()}

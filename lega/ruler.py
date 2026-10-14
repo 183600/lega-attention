@@ -144,7 +144,11 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
         shift = 0
         for sp in slots:
             k2 = rng.choice(others)
+            # 干扰值必须区别于真值，否则看错行的模型会因干扰值碰巧等于
+            # needle 值而获得 EM=1，虚高 multikey 指标
             v2 = _rand_digit(rng, 7, 7)
+            while v2 == value:
+                v2 = _rand_digit(rng, 7, 7)
             line = tok.encode("\n" + NEEDLE_TMPL.format(key=k2, value=v2))
             if sp + shift + len(line) > room:
                 continue  # 该行会越过截断点被截成半句，跳过
@@ -363,8 +367,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     else:
                         raise ValueError(task)
                 except ContextTooSmall as e:
+                    # 样例长度因样例而异（fwe/vt）：跳过该样例而非终止整个任务，
+                    # 避免单个超长样例让不同模型的有效样本量 n 悄悄不同
                     skipped.append(f"{task}@ctx{ctx}: {e}")
-                    break
+                    continue
                 ids = torch.tensor([ex["ids"]], dtype=torch.long, device=device)
                 out_ids = model.generate(ids, max_new_tokens=fwe_max_new if task == "fwe" else max_new)
                 pred_text = tok.decode(out_ids[0, len(ex["ids"]):].tolist())

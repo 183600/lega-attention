@@ -74,15 +74,21 @@ def fig_ppl(rdir):
     for fp in sorted(glob.glob(os.path.join(rdir, "eval_*.json"))):
         d = _load(fp)
         if d:
-            rows.append((d["variant"], d["val_ppl"]))
+            rows.append((d["variant"], d["val_ppl"], bool(d.get("val_ppl_clamped", False))))
     if not rows:
         return False
     rows.sort(key=lambda r: r[1])
     fig, ax = plt.subplots(figsize=(7, 4.2), constrained_layout=True)
-    names = [_label(v) for v, _ in rows]
-    vals = [p for _, p in rows]
-    bars = ax.bar(names, vals, color=[COLORS.get(v, "#34495e") for v, _ in rows])
-    ax.bar_label(bars, fmt="%.2f", fontsize=9)
+    names = [_label(v) for v, _, _ in rows]
+    vals = [p for _, p, _ in rows]
+    # 发散运行的 PPL 被截断到 exp(20)，以斜线纹理区分，避免被当作正常数值解读
+    bars = ax.bar(names, vals,
+                  color=[COLORS.get(v, "#34495e") for v, _, _ in rows])
+    for bar, (_, _, clamped) in zip(bars, rows):
+        if clamped:
+            bar.set_hatch("//")
+    ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c else "%.2f" % p
+                               for (_, p, c) in rows], fontsize=9)
     ax.set_ylabel("验证集困惑度 (PPL, 越低越好)")
     ax.set_title("语言建模困惑度对比（相同参数量级与训练步数）")
     ax.tick_params(axis="x", rotation=20)
@@ -120,7 +126,7 @@ def fig_ruler(rdir):
             ax.plot(xs, ys, marker="o", label=_label(v), color=COLORS.get(v))
         ax.set_title(task)
         ax.set_xlabel("上下文长度 (tokens)")
-        ax.set_ylabel("EM / 命中率 (%)")
+        ax.set_ylabel("Top-10 Recall (%)" if task == "fwe" else "EM (%)")
         ax.grid(alpha=0.3)
     axes[0].legend(fontsize=8, bbox_to_anchor=(0.02, 0.98), loc="upper left")
     fig.suptitle("RULER 长上下文检索表现（贪心解码）", y=1.04)

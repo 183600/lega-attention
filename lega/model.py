@@ -3,6 +3,7 @@
 注意力层可替换为 lega.attention 中的任意变体（standard/qgate/null/lega 及消融）。
 支持增量解码（KV 缓存），供 RULER 生成式评测使用。
 """
+import contextlib
 import math
 from typing import Dict, List, Optional
 
@@ -109,6 +110,15 @@ class _ChunkedLinearCE(torch.autograd.Function):
         ctx.save_for_backward(x2d, weight, tgt)
         ctx.chunk = chunk
         ctx.ignore_index = int(ignore_index)
+        # 记录前向的 autocast 状态：反向重算 logits 必须与前向同精度，
+        # 否则 AMP 下前向用 bf16 logits 报告 loss、反向却按 fp32 logits
+        # 求梯度，二者不再是同一个损失函数。
+        if x2d.is_cuda:
+            ctx.amp_dtype = (torch.get_autocast_dtype("cuda")
+                             if torch.is_autocast_enabled("cuda") else None)
+        else:
+            ctx.amp_dtype = (torch.get_autocast_dtype("cpu")
+                             if torch.is_autocast_enabled("cpu") else None)
         # n_valid 以设备张量保存：前向/反向都不再 .item() 同步，
         # 消除每个训练步的一次 GPU->CPU 阻塞（后续 kernel 可继续流水提交）。
         # clamp_min(1) 同时吸收"全部位置被忽略"的除零情形（此时梯度因
@@ -143,11 +153,18 @@ class _ChunkedLinearCE(torch.autograd.Function):
         # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot），
         # 不搭建逐块 autograd 子图，反向为逐块 3 次 GEMM。
         with torch.no_grad():
+            # 与前向一致的 autocast 上下文，保证反向重算的 logits 精度相同
+            if ctx.amp_dtype is not None:
+                dev_type = "cuda" if x2d.is_cuda else "cpu"
+                ac_ctx = torch.autocast(dev_type, dtype=ctx.amp_dtype)
+            else:
+                ac_ctx = contextlib.nullcontext()
             neg_one = None   # scatter_add_ 的 -1 源张量按块复用，避免每块一次分配
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
                 ts = tgt[s:s + ctx.chunk]
-                lc = F.linear(xs, weight)                            # (m, V)
+                with ac_ctx:
+                    lc = F.linear(xs, weight)                        # (m, V)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
                 d = torch.softmax(lcf, dim=-1)
                 keep = ts != ctx.ignore_index

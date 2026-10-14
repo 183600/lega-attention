@@ -185,7 +185,10 @@ def main():
 
     t0 = time.time()
     for v in variants:
-        ckpt = os.path.join(out_root, v, "model.pt")
+        # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
+        # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型
+        best = os.path.join(out_root, v, "model_best.pt")
+        ckpt = best if os.path.exists(best) else os.path.join(out_root, v, "model.pt")
         if not args.skip_train:
             run([py, "-m", "lega.train", "--config", args.config, "--variant", v,
                  "--data_dir", args.data_dir, "--out_dir", os.path.join(out_root, v),
@@ -204,7 +207,8 @@ def main():
         for v in variants:
             if v not in GATED_FOR_ANALYSIS:
                 continue
-            ckpt = os.path.join(out_root, v, "model.pt")
+            best = os.path.join(out_root, v, "model_best.pt")
+            ckpt = best if os.path.exists(best) else os.path.join(out_root, v, "model.pt")
             if os.path.exists(ckpt):
                 run([py, "-m", "lega.analysis", "--ckpt", ckpt, "--data_dir", args.data_dir,
                      "--out_dir", results_dir, "--device", args.device] + analysis_over)
