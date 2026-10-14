@@ -653,7 +653,7 @@ class CausalSelfAttention(nn.Module):
                 full_stats = bool(need_stats) and stats_argmax
                 # log n 仅在门控需要长度项(use_len)或完整诊断(full_stats)时需要；
                 # 如 lega_no_len 的训练前向（use_len=False 且无统计需求），不计算。
-                need_logn = self.use_len or full_stats
+                need_logn = self.use_len or bool(need_stats)
                 if need_logn:
                     log_n = _log_n(past_len, T, dev)
                 # null 变体虽无 null 槽时 p 恰好覆盖全部真实键；

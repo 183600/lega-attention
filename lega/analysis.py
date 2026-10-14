@@ -264,7 +264,7 @@ def main():
         for task in ANALYSIS_TASKS:
             # 与 lega.ruler.run_ruler 的播种公式完全相同：EM 分数与逐头机制
             # 记录对应到同一批样例，而不是两个独立抽样。
-            rng = Random(ruler_seed * 100003 + _stable_hash(task) % 99991 + i)
+            rng = Random(ruler_seed * 100003 + _stable_hash(task) % 99991 + ctx * 31 + i)
             try:
                 ex = _example(task, tok, ctx, rng, corpus_sents=sents,
                               vt_chains=int(rcfg.get("vt_chains", 4)),

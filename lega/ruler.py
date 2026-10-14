@@ -396,7 +396,11 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                 continue
             seen_rooms.add(room_ctx)
             for i in range(n_samples):
-                rng = random.Random(seed * 100003 + _stable_hash(task) % 99991 + i)
+                # 种子混入 room_ctx：同一 (task, i) 的样例在不同上下文长度下
+                # 若共用同一 rng 构造序列前缀，needle 的 key/value 会跨长度相关，
+                # 长度扫掠曲线各点误差不再独立。
+                rng = random.Random(seed * 100003 + _stable_hash(task) % 99991
+                                    + room_ctx * 31 + i)
                 try:
                     if task == "niah_synth":
                         ex = build_niah(tok, room_ctx, rng, mode="synth")
