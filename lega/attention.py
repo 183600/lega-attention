@@ -195,7 +195,11 @@ class CausalSelfAttention(nn.Module):
         # a*c / b*log_n 的 (B,H,T) 临时张量再逐项 add_（分块/checkpoint 路径下
         # 每个块、每次反向重算都要重复分配）。
         if self.use_conc:
-            c = torch.log(max_p.clamp_min(1e-30))
+            # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
+            # clamp/log 原地完成，省一份 (B,H,T) fp32 临时张量；max_p 为
+            # amax 的反向保存值，需要梯度时必须保持原值。
+            c = torch.log(max_p.clamp_min(1e-30)) if (keep_terms or max_p.requires_grad) \
+                else max_p.clamp_min_(1e-30).log_()
             if self.use_len:
                 c += log_n                                                # c = log(n * max_j p_j)
             a = self.gate_a.float().view(1, H, 1)
@@ -517,12 +521,15 @@ class CausalSelfAttention(nn.Module):
                     att = torch.cat(
                         [att, torch.matmul(q, self.k_null.to(q.dtype).unsqueeze(-1))],
                         dim=-1)
-                # 只有完整诊断统计（非 null 变体的 argmax）还需要保留原始 logit。
-                keep_att = bool(need_stats) and stats_argmax and self.variant != "null"
+                # 只有完整诊断统计（非 null 变体的 argmax）还需要原始 logit。
+                # argmax 落点是 softmax 不变量：在 softmax 前从 att 提取，
+                # softmax 后（其反向只依赖输出 p）即可释放 (B,H,T,S) 打分张量，
+                # 不再让它活到输出投影与门控之后，降低完整统计路径的峰值显存。
+                argmax_stat = None
+                if bool(need_stats) and stats_argmax and self.variant != "null":
+                    argmax_stat = att[..., :n_real].argmax(dim=-1)
                 p = F.softmax(att, dim=-1)
-                if not keep_att:
-                    # softmax 反向只依赖输出 p，att 此后不再使用
-                    del att
+                del att
 
                 # 门控所需的注意力统计（LEGA 家族训练时也必须计算）。
                 # max_j p_j 直接取 softmax 输出的行最大值（在 dropout 之前，与原基于
@@ -576,9 +583,8 @@ class CausalSelfAttention(nn.Module):
                                                       torch.full_like(amax_full, -1))
                         stats["p_null"] = p_pre[..., -1].float()          # 分给 null 槽的概率质量
                     else:
-                        # argmax 结果不受 dtype 影响
-                        stats["argmax"] = att[..., :n_real].argmax(dim=-1)  # 注意力落点（真实键内相对位置）
-                        del att
+                        # argmax 已在 softmax 前提取（softmax 不变量，真实键内相对位置）
+                        stats["argmax"] = argmax_stat
 
         # 合并多头: (B, H, T, Dh) -> (B, T, C)；分块路径已按 (B,T,H,Dh) 布局
         # 直接写出，其 o 本身就是合并后的 (B,T,C)
