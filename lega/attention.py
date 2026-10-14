@@ -331,6 +331,15 @@ class CausalSelfAttention(nn.Module):
         q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次。
         """
         S = k.shape[2]
+        # q/k/v 来自 QKV 融合 GEMM 的 permute().unbind() 视图：批量维步长
+        # 不可展平，matmul 内部会对每个算子各做一次连续化拷贝——分块循环下
+        # k/v 的逐块切片会被每个块重复拷贝一份。进入循环前一次性连续化：
+        # 之后每块切片均为批量维可展平的行主序视图，matmul 直接复用原存储。
+        # 序列本身的 Scale 已在调用方按块外完成，此处只做布局规整。
+        q_rot = q_rot.contiguous()
+        q_content = q_content.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
         # 目标：每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
         cq = max(_CHUNK_MIN_T, min(T, _CHUNK_TARGET_ELEMS // max(1, B * H * S)))
         cq = min(T, max(cq, 1))

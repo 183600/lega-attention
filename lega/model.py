@@ -178,6 +178,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
             else:
                 ac_ctx = contextlib.nullcontext()
             neg_one = None   # scatter_add_ 的 -1 源张量按块复用，避免每块一次分配
+            # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度
+            # 的升精度/转换在每个分块中完全相同，提到循环外只做一次，
+            # 避免低精度权重下每个分块各产生一份 (V, D) 的精度转换副本。
+            w_f = None
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
                 ts = tgt[s:s + ctx.chunk]
@@ -198,8 +202,16 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 keep_scale.mul_(gscale)
                 d.mul_(keep_scale)
                 # d 为计算精度（低精度时为 fp32），weight 可能是 bf16/fp16：
-                # 必须先在 d 的精度上做 GEMM（dtype 需一致），再降回 gx 的精度
-                gx[s:s + ctx.chunk] = torch.matmul(d, weight.to(d.dtype)).to(gx.dtype)
+                # 必须先在 d 的精度上做 GEMM（dtype 需一致）。转换结果按块复用。
+                if w_f is None:
+                    w_f = weight.to(d.dtype)
+                gxs = gx[s:s + ctx.chunk]
+                if gxs.dtype == d.dtype:
+                    # 同精度（常见 fp32 训练）：GEMM 直接写入 gx 的行切片，
+                    # 省掉一份 (m, D) 临时分配与拷贝
+                    torch.matmul(d, w_f, out=gxs)
+                else:
+                    gxs.copy_(torch.matmul(d, w_f))
                 if gw is None:
                     gw = torch.zeros(weight.shape, dtype=d.dtype,
                                      device=weight.device)
