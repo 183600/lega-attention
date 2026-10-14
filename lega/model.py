@@ -93,8 +93,7 @@ class RoPE:
 
     def __call__(self, q: torch.Tensor, k: torch.Tensor, past_len: int = 0):
         # 推理态（评测/逐 token 解码）且 q/k 同形状同 dtype 时，把两份旋转融合为
-        # 一次：stack 的一份拷贝换来减半的逐元素 kernel 启动与输出分配——解码
-        # 时每层每步的旋转张量都很小，开销主要是 kernel 启动而非算力。
+        # 一次 stack 调用。
         # 输出两视图共享同一缓冲：下游对 q 的原地缩放只写 q 自己的那一半，安全。
         # 训练态保持分开走 _RoPERotate（各自独立的 autograd 节点，不引入共享
         # 存储的视图，避免与就地缩放/反向写回产生视图别名问题）。

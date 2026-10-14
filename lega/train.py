@@ -232,18 +232,14 @@ def main():
     rng = np.random.default_rng(seed)
     model.train()
     opt.zero_grad(set_to_none=True)
-    t0 = time.time()
-    eval_time = 0.0   # 验证耗时累计：tok/s 只计纯训练吞吐
     tokens_seen = 0
     best_val = float("inf")
     # loss 设备端累加器跨步复用（每步 zero_()），避免每步一次标量分配
     loss_acc_dev = torch.zeros((), device=device)
 
     def do_eval(step):
-        nonlocal best_val, eval_time
-        te = time.time()
+        nonlocal best_val
         metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
-        eval_time += time.time() - te
         vl = metrics["val_loss"]
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
@@ -292,18 +288,15 @@ def main():
 
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())   # 仅在记录日志时同步
-            dt = time.time() - t0 - eval_time   # 不含验证耗时
             rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
-                   "lr": base_lrs[0] * lr_f, "tok_per_s": tokens_seen / max(dt, 1e-6),
-                   "time": now_str()}
+                   "lr": base_lrs[0] * lr_f, "time": now_str()}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             log_f.flush()
             print(f"[train] step {step+1}/{steps} loss={loss_acc:.4f} "
-                  f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e} "
-                  f"tok/s={tokens_seen/max(dt,1e-6):,.0f}")
+                  f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e}")
             if wb:
-                wb.log({"loss": loss_acc, "lr": base_lrs[0] * lr_f,
-                        "tok_per_s": tokens_seen / max(dt, 1e-6)}, step=step + 1)
+                wb.log({"loss": loss_acc, "lr": base_lrs[0] * lr_f},
+                       step=step + 1)
         if (step + 1) % eval_every == 0:
             do_eval(step + 1)
 
@@ -323,8 +316,7 @@ def main():
                                       ("eval_iters_requested", "eval_iters",
                                        "val_windows", "val_tokens_evaluated")},
                "n_params": n_params, "n_gate_extra": n_extra,
-               "tokens_seen": tokens_seen, "steps": steps, "seed": seed,
-               "wall_time_s": time.time() - t0},
+               "tokens_seen": tokens_seen, "steps": steps, "seed": seed},
               os.path.join(out_dir, "eval.json"))
     log_f.write(json.dumps({"step": steps, **final_metrics,
                             "val_ppl": final_ppl,
@@ -332,7 +324,7 @@ def main():
                             "final": True},
                            ensure_ascii=False) + "\n")
     log_f.close()
-    print(f"[train] 完成: val_ppl={final_ppl:.3f} 用时 {time.time()-t0:.1f}s -> {out_dir}")
+    print(f"[train] 完成: val_ppl={final_ppl:.3f} -> {out_dir}")
     if wb:
         wb.finish()
 

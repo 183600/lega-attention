@@ -34,9 +34,7 @@ GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc", "l
 
 def run(cmd, env=None):
     print("+", " ".join(cmd), flush=True)
-    t0 = time.time()
     subprocess.run(cmd, check=True, cwd=ROOT, env=env)
-    print(f"  ({time.time()-t0:.1f}s)\n", flush=True)
 
 
 def _repo_path(path: str) -> str:
@@ -166,7 +164,6 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--skip_train", action="store_true")
     p.add_argument("--skip_ruler", action="store_true")
-    p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument("--skip_plots", action="store_true")
     args = p.parse_args()
@@ -185,7 +182,6 @@ def main():
 
     ruler_over = []
     analysis_over = []
-    latency_over = []
     if args.smoke:
         # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
         # 模板约 211 token，128 会让 RULER 全部任务与机制分析被跳过）
@@ -193,9 +189,7 @@ def main():
             smoke_ctx = min(256, int(json.load(cf).get("block_size", 256)))
         ruler_over = ["--n_samples", "2", "--ctx_lens", str(smoke_ctx)]
         analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
-        latency_over = ["--decode_len", "8", "--reps", "1", "--warmup", "1"]
 
-    t0 = time.time()
     for v in variants:
         # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
         # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型
@@ -215,12 +209,6 @@ def main():
                      "--out", os.path.join(results_dir, f"ruler_{v}.json"),
                      "--device", args.device] + ruler_over)
 
-    if not args.skip_latency and os.path.isdir(out_root):
-        run([py, "-m", "lega.latency", "--config", args.config,
-             "--data_dir", args.data_dir, "--ckpt_dir", out_root,
-             "--out", os.path.join(results_dir, "latency.json"),
-             "--device", args.device] + latency_over)
-
     if not args.skip_analysis:
         for v in variants:
             if v not in GATED_FOR_ANALYSIS:
@@ -235,7 +223,7 @@ def main():
         run([py, "-m", "lega.plots", "--results_dir", results_dir])
 
     build_summary(results_dir)
-    print(f"\n[run_all] 全部完成，用时 {time.time()-t0:.1f}s；结果目录: {results_dir}")
+    print(f"\n[run_all] 全部完成；结果目录: {results_dir}")
 
 
 if __name__ == "__main__":
