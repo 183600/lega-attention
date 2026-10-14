@@ -138,7 +138,8 @@ def build_summary(results_dir: str) -> dict:
             base_ms, base_name = _prefill_at_common(cand), cand
             break
     for r in rows:
-        if base_ms and r.get("prefill_ms") \
+        if base_ms is not None and base_ms > 0 \
+                and r.get("prefill_ms") is not None and r["prefill_ms"] > 0 \
                 and r["variant"] not in ("standard", "standard_sdpa"):
             r["prefill_overhead_pct"] = round(
                 (r["prefill_ms"] - base_ms) / base_ms * 100, 2)

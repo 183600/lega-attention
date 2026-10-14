@@ -379,14 +379,28 @@ class CausalSelfAttention(nn.Module):
             w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
         else:
             # 推理态（eval/验证/生成/延迟基准，含 inference_mode）：权重不变，
-            # 融合权重按 (参数对象, _version) 缓存复用，省掉每层每次前向一份
-            # (3C, C) 的 cat 分配与拷贝。缓存张量在 inference_mode(False)+no_grad
-            # 下创建：既不在 inference 期现场留下 inference tensor（训练前向若
-            # 误用会被 autograd 拒绝），也不搭建多余计算图。
+            # 融合权重按 (参数对象身份, _version, data_ptr, device, dtype) 缓存
+            # 复用，省掉每层每次前向一份 (3C, C) 的 cat 分配与拷贝。
+            # .to()/.double()/param.data= 替换可能不更新 _version，故必须额外
+            # 核对 data_ptr/device/dtype，否则缓存陈旧会崩溃或静默出错。
+            # 缓存张量在 inference_mode(False)+no_grad 下创建：既不在 inference
+            # 期现场留下 inference tensor（训练前向若误用会被 autograd 拒绝），
+            # 也不搭建多余计算图。逐项身份比较可避免元组 != 在 Tensor 上触发
+            # "Boolean value of Tensor is ambiguous"。
             wq_w, wk_w, wv_w = self.wq.weight, self.wk.weight, self.wv.weight
-            key = (wq_w, wk_w, wv_w, wq_w._version, wk_w._version, wv_w._version)
+            key = tuple(
+                v for w in (wq_w, wk_w, wv_w)
+                for v in (w, w._version, w.data_ptr(), w.device, w.dtype))
             ent = self._qkv_fused
-            if ent is None or ent[0] != key:
+            stale = ent is None
+            if not stale:
+                o_key = ent[0]
+                # 逐项（含对象身份）比较，避免元组不等在 Tensor 上退化为
+                # 逐元素 == 而触发 "Boolean value of Tensor is ambiguous"
+                stale = len(o_key) != len(key) or any(
+                    (o is n if isinstance(n, torch.Tensor)
+                     else o == n) for o, n in zip(o_key, key))
+            if stale:
                 with torch.inference_mode(False), torch.no_grad():
                     fused = torch.cat([wq_w.detach(), wk_w.detach(), wv_w.detach()],
                                       dim=0).contiguous()
@@ -415,8 +429,8 @@ class CausalSelfAttention(nn.Module):
                 v = torch.cat([past_kv[1], v], dim=2)
             cache = (k, v)  # KV 缓存不含 null 槽（null 每次前向临时追加）
         n_real = k.shape[2]
-        S = n_real   # null 槽不再拼接进 K/V：显式路径把空槽得分追加到打分矩阵
-                     # 末尾单独合成输出；SDPA 路径在分支内临时拼接（见下）。
+        S = n_real   # null 槽不再拼接进 K/V：解析地以 lse(a·w_null) 计入
+                     # softmax 归一化（完整统计/dropout 分支除外，见下）。
 
         # 集中度门控（lega/lega_no_len/lega_no_query）必须消费注意力概率统计
         # max_j p_j，无法走 SDPA；qgate/lega_no_conc 的门只依赖查询与 log n，
