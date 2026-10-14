@@ -234,7 +234,9 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     dtype = np.uint16 if is_span else src.dtype
     if not device.startswith("cuda"):
         arr = np.take(src[0], src[1]) if is_span else src
-        out = torch.from_numpy(np.ascontiguousarray(arr))
+        if not arr.flags["C_CONTIGUOUS"]:
+            arr = np.ascontiguousarray(arr)
+        out = torch.from_numpy(arr)
         return out if out.dtype == torch.int64 else out.long()
     key = (device, tuple(shape), dtype)
     slots = _H2D_STAGE.get(key)
@@ -280,6 +282,27 @@ def _span_base(ctx: int) -> np.ndarray:
     return base
 
 
+# 宿主端跨度暂存：按 (n_rows, ctx) 缓存一份 int64 缓冲，训练循环每个 step 的
+# (batch, ctx+1) 跨度数组不再逐次通过 ix[:, None] + base 新建（大 ctx 下每步
+# 数百 KB 的 NumPy 分配/释放）。
+_SPAN_BUF: dict = {}
+
+
+def _make_span(rows: np.ndarray, ctx: int) -> np.ndarray:
+    """row start 一维数组 + 基底 -> (n, ctx+1) 跨度；结果写入按形状缓存的暂存。
+
+    调用方必须在下一次同形状调用之前消费完（np.take / 花式索引均为同步读取），
+    现有 _stage_to_device 的使用方式满足该约定。
+    """
+    key = (rows.shape[0], ctx)
+    buf = _SPAN_BUF.get(key)
+    if buf is None:
+        buf = np.empty((rows.shape[0], ctx + 1), dtype=np.int64)
+        _SPAN_BUF[key] = buf
+    np.add(rows[:, None], _span_base(ctx), out=buf)
+    return buf
+
+
 def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
                     rng: np.random.Generator):
     """随机偏移采样 (x, y)，y 为 x 右移一位。"""
@@ -289,7 +312,7 @@ def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
     # 向量化索引：一次性取 (batch_size, ctx+1)；不升 int64：uint16 贯穿到 H2D，
     # 设备端再转 long；(train, span) 元组让 memmap 花式索引直接写入 pinned
     # 暂存缓冲（CPU 路径则一次拷贝出连续数组），不再产生中间 (B, ctx+1) 数组
-    span = ix[:, None] + _span_base(ctx)
+    span = _make_span(ix, ctx)
     both = _stage_to_device((train, span), device)
     return both[:, :-1], both[:, 1:]
 
@@ -306,7 +329,7 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
         raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
     # indices 常已是 np 数组切片：asarray 直接转 int64
     starts = (np.asarray(indices, dtype=np.int64) % n_windows) * ctx
-    span = starts[:, None] + _span_base(ctx)
+    span = _make_span(starts, ctx)
     # (val, span) 元组：memmap 花式索引直写 pinned 缓冲，设备端升 long 并切 x/y
     both = _stage_to_device((val, span), device)
     return both[:, :-1], both[:, 1:]
