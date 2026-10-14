@@ -62,7 +62,9 @@ class RoPE:
 
     def rotate(self, x: torch.Tensor, past_len: int = 0) -> torch.Tensor:
         """对 (B, H, T, D) 张量在绝对位置 [past_len, past_len+T) 上施加旋转。"""
-        T = x.shape[2]
+        # 末两维固定为 (T, D)，前导维任意（__call__ 的推理融合路径会多一个
+        # (q|k) 堆叠维）：广播视图按 x 的维数展开。
+        T = x.shape[-2]
         assert past_len + T <= self.max_len, (
             f"序列长度 {past_len + T} 超过 RoPE 最大位置 {self.max_len}")
         key = (x.device, x.dtype)
@@ -75,8 +77,9 @@ class RoPE:
                           self.sin_half.to(device=x.device, dtype=x.dtype))
             self._device_cache[key] = tables
         half = x.shape[-1] // 2
-        cos_h = tables[0][past_len:past_len + T].view(1, 1, T, half)
-        sin_h = tables[1][past_len:past_len + T].view(1, 1, T, half)
+        bshape = (1,) * (x.dim() - 2) + (T, half)
+        cos_h = tables[0][past_len:past_len + T].view(bshape)
+        sin_h = tables[1][past_len:past_len + T].view(bshape)
         if torch.is_grad_enabled() and x.requires_grad:
             return _RoPERotate.apply(x, cos_h, sin_h)
         out = torch.empty_like(x)
@@ -89,6 +92,16 @@ class RoPE:
         return out
 
     def __call__(self, q: torch.Tensor, k: torch.Tensor, past_len: int = 0):
+        # 推理态（评测/逐 token 解码）且 q/k 同形状同 dtype 时，把两份旋转融合为
+        # 一次：stack 的一份拷贝换来减半的逐元素 kernel 启动与输出分配——解码
+        # 时每层每步的旋转张量都很小，开销主要是 kernel 启动而非算力。
+        # 输出两视图共享同一缓冲：下游对 q 的原地缩放只写 q 自己的那一半，安全。
+        # 训练态保持分开走 _RoPERotate（各自独立的 autograd 节点，不引入共享
+        # 存储的视图，避免与就地缩放/反向写回产生视图别名问题）。
+        if (not (torch.is_grad_enabled() and (q.requires_grad or k.requires_grad))
+                and q.shape == k.shape and q.dtype == k.dtype):
+            qk = self.rotate(torch.stack((q, k)), past_len)
+            return qk[0], qk[1]
         return self.rotate(q, past_len), self.rotate(k, past_len)
 
 
