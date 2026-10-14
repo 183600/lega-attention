@@ -189,32 +189,44 @@ _H2D_STAGE: dict = {}
 _H2D_TURN: dict = {}
 
 
-def _stage_to_device(arr: np.ndarray, device: str) -> torch.Tensor:
-    # token id 以 uint16 贯穿 CPU 花式索引、pinned 暂存与 H2D 拷贝，
-    # 到目标设备后再升 int64（embedding/交叉熵要求整型索引）。
-    src = torch.from_numpy(arr)
-    if src.dtype != torch.int64:
-        src64 = None
-    else:
-        src64 = src
+def _stage_to_device(src, device: str) -> torch.Tensor:
+    """把 (n, ctx+1) 的 token id 块异步搬运到目标设备，设备端再升 int64。
+
+    src 可以是已物化的 np.ndarray，也可以是 (memmap, span) 二元组：
+    后者把 memmap 的花式索引进 pinned/np 输出缓冲一步完成（np.take 的 out=
+    参数不产生中间数组），省掉每个训练步先拷出 (n, ctx+1) 临时 NumPy
+    数组、再 copy_ 进 pinned 暂存的双重 CPU 拷贝。
+    """
+    is_span = isinstance(src, tuple)
+    shape = src[1].shape if is_span else src.shape
+    dtype = np.uint16 if is_span else src.dtype
     if not device.startswith("cuda"):
-        return src64 if src64 is not None else src.long()
-    key = (device, tuple(arr.shape), src.dtype)
+        arr = np.take(src[0], src[1]) if is_span else src
+        out = torch.from_numpy(np.ascontiguousarray(arr))
+        return out if out.dtype == torch.int64 else out.long()
+    key = (device, tuple(shape), dtype)
     slots = _H2D_STAGE.get(key)
     if slots is None:
         if len(_H2D_STAGE) < 32:    # 形状种类有限（训练/验证各一两种）
-            slots = [(torch.empty(arr.shape, dtype=src.dtype).pin_memory(),
+            tdtype = torch.from_numpy(np.empty(0, dtype=dtype)).dtype
+            slots = [(torch.empty(shape, dtype=tdtype).pin_memory(),
                       torch.cuda.Event()) for _ in range(2)]
             _H2D_STAGE[key] = slots
             _H2D_TURN[key] = 0
         else:
-            out = src.to(device, non_blocking=True)
+            arr = np.take(src[0], src[1]) if is_span else src
+            out = torch.from_numpy(np.ascontiguousarray(arr)).to(
+                device, non_blocking=True)
             return out if out.dtype == torch.int64 else out.long()
     turn = _H2D_TURN[key]
     buf, ev = slots[turn]
     _H2D_TURN[key] = 1 - turn
     ev.synchronize()                # 等待该槽上一轮的 H2D 拷贝读完 buf
-    buf.copy_(src)
+    if is_span:
+        # memmap 花式索引进 pinned 缓冲的 np 视图：不产生 (n, ctx+1) 中间数组
+        np.take(src[0], src[1], out=buf.numpy())
+    else:
+        buf.copy_(torch.from_numpy(src))
     out = buf.to(device, non_blocking=True)
     ev.record()
     return out if out.dtype == torch.int64 else out.long()
@@ -238,12 +250,11 @@ def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
     if len(train) < ctx + 1:
         raise ValueError(f"训练集只有 {len(train)} tokens，不足以采样 ctx={ctx}")
     ix = rng.integers(0, len(train) - ctx, size=batch_size)
-    # 向量化索引：一次性取 (batch_size, ctx+1)
+    # 向量化索引：一次性取 (batch_size, ctx+1)；不升 int64：uint16 贯穿到 H2D，
+    # 设备端再转 long；(train, span) 元组让 memmap 花式索引直接写入 pinned
+    # 暂存缓冲（CPU 路径则一次拷贝出连续数组），不再产生中间 (B, ctx+1) 数组
     span = ix[:, None] + _span_base(ctx)
-    # 不升 int64：uint16 贯穿到 H2D，设备端再转 long
-    buf = np.ascontiguousarray(train[span])         # memmap 花式索引自动拷贝
-    # x/y 合并为一次 pinned H2D 拷贝（(B, ctx+1)），到设备后再切片
-    both = _stage_to_device(buf, device)
+    both = _stage_to_device((train, span), device)
     return both[:, :-1], both[:, 1:]
 
 
@@ -260,6 +271,6 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
     # indices 常已是 np 数组切片：asarray 直接转 int64
     starts = (np.asarray(indices, dtype=np.int64) % n_windows) * ctx
     span = starts[:, None] + _span_base(ctx)
-    buf = np.ascontiguousarray(val[span])           # (n, ctx+1) uint16，设备端升 long
-    both = _stage_to_device(buf, device)            # 单次 H2D，设备上切 x/y
+    # (val, span) 元组：memmap 花式索引直写 pinned 缓冲，设备端升 long 并切 x/y
+    both = _stage_to_device((val, span), device)
     return both[:, :-1], both[:, 1:]
