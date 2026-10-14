@@ -353,6 +353,24 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                 for _ in model.blocks]
             kv_cap = total
         return kv_bufs
+
+    # 逐样例 prompt 的 H2D 走常驻 pinned 缓冲 + non_blocking 异步拷贝：
+    # torch.tensor(list, device=cuda) 会以页式内存做一次同步拷贝，
+    # n_samples × ctx_lens × tasks 次逐样例同步会串行化整个评测。
+    pin_cap = 0
+    pin_buf: Optional[torch.Tensor] = None
+    use_cuda = device.startswith("cuda")
+
+    def _ids_to_device(ids: List[int]) -> torch.Tensor:
+        nonlocal pin_cap, pin_buf
+        n = len(ids)
+        if not use_cuda:
+            return torch.tensor([ids], dtype=torch.long, device=device)
+        if pin_cap < n:
+            pin_buf = torch.empty(n, dtype=torch.long, pin_memory=True)
+            pin_cap = n
+        pin_buf[:n].copy_(torch.as_tensor(ids, dtype=torch.long))
+        return pin_buf[:n].unsqueeze(0).to(device, non_blocking=True)
     for task in tasks:
         results[task] = {}
         seen_rooms: set = set()
@@ -389,7 +407,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 避免单个超长样例让不同模型的有效样本量 n 悄悄不同
                     skipped.append(f"{task}@ctx{ctx}: {e}")
                     continue
-                ids = torch.tensor([ex["ids"]], dtype=torch.long, device=device)
+                ids = _ids_to_device(ex["ids"])
                 gen = fwe_max_new if task == "fwe" else max_new
                 out_ids = model.generate(
                     ids, max_new_tokens=gen,

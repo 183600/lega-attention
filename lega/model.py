@@ -60,8 +60,11 @@ class RoPE:
         # x 的原生 dtype 上完成，避免 AMP 下每层每次前向的 fp32 升精度分配
         self._device_cache: dict = {}    # (device, dtype) -> (cos, sin)
 
-    def rotate(self, x: torch.Tensor, past_len: int = 0) -> torch.Tensor:
-        """对 (B, H, T, D) 张量在绝对位置 [past_len, past_len+T) 上施加旋转。"""
+    def rotate(self, x: torch.Tensor, past_len: int = 0,
+               out: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """对 (B, H, T, D) 张量在绝对位置 [past_len, past_len+T) 上施加旋转。
+
+        out 非空时把结果写入该预分配缓冲（须与 x 同形状同 dtype）。"""
         # 末两维固定为 (T, D)，前导维任意（__call__ 的推理融合路径会多一个
         # (q|k) 堆叠维）：广播视图按 x 的维数展开。
         T = x.shape[-2]
@@ -82,7 +85,8 @@ class RoPE:
         sin_h = tables[1][past_len:past_len + T].view(bshape)
         if torch.is_grad_enabled() and x.requires_grad:
             return _RoPERotate.apply(x, cos_h, sin_h)
-        out = torch.empty_like(x)
+        if out is None:
+            out = torch.empty_like(x)
         x1, x2 = x[..., :half], x[..., half:]
         o1, o2 = out[..., :half], out[..., half:]
         torch.mul(x1, cos_h, out=o1)
@@ -92,14 +96,16 @@ class RoPE:
         return out
 
     def __call__(self, q: torch.Tensor, k: torch.Tensor, past_len: int = 0):
-        # 推理态（评测/逐 token 解码）且 q/k 同形状同 dtype 时，把两份旋转融合为
-        # 一次 stack 调用。
+        # 推理态（评测/逐 token 解码）且 q/k 同形状同 dtype 时，把两份旋转融合到
+        # 同一预分配缓冲（一次分配、两份输出视图），省去 stack 对 q/k 的整份拷贝。
         # 输出两视图共享同一缓冲：下游对 q 的原地缩放只写 q 自己的那一半，安全。
         # 训练态保持分开走 _RoPERotate（各自独立的 autograd 节点，不引入共享
         # 存储的视图，避免与就地缩放/反向写回产生视图别名问题）。
         if (not (torch.is_grad_enabled() and (q.requires_grad or k.requires_grad))
                 and q.shape == k.shape and q.dtype == k.dtype):
-            qk = self.rotate(torch.stack((q, k)), past_len)
+            qk = torch.empty(2, *q.shape, dtype=q.dtype, device=q.device)
+            self.rotate(q, past_len, out=qk[0])
+            self.rotate(k, past_len, out=qk[1])
             return qk[0], qk[1]
         return self.rotate(q, past_len), self.rotate(k, past_len)
 
@@ -392,7 +398,12 @@ class GPT(nn.Module):
                      torch.empty(B, attn0.n_heads, total, attn0.d_head,
                                  dtype=kvdtype, device=idx.device))
                     for _ in self.blocks]
-            for _ in range(max_new_tokens):
+            # EOS 判定标志留在设备端逐 token 记录，每 _EOS_EVERY 步才同步回 CPU：
+            # 逐步走 bool(...all()) 会每步强制一次 GPU→CPU 同步，拖慢解码。
+            # 同步点命中时按首个触发步截断 cur_len，结果与逐步检查完全一致。
+            _EOS_EVERY = 8
+            eos_flags = [] if eos_token_id is not None else None
+            for i in range(max_new_tokens):
                 cur = out_ids[:, :cur_len] if cur_len == T0 else out_ids[:, cur_len - 1:cur_len]
                 out = self.forward(cur, kv_cache=kv_cache,
                                    cache_pos=cur_len - cur.shape[1],
@@ -408,8 +419,16 @@ class GPT(nn.Module):
                     nxt = torch.multinomial(F.softmax(logits, dim=-1), 1)[:, 0]
                 out_ids[:, cur_len] = nxt
                 cur_len += 1
-                if eos_token_id is not None and bool((nxt == eos_token_id).all()):
-                    break
+                if eos_flags is not None:
+                    eos_flags.append((nxt == eos_token_id).all())
+                    if (i + 1) % _EOS_EVERY == 0 or i + 1 == max_new_tokens:
+                        flags = torch.stack(eos_flags)
+                        if bool(flags.any()):
+                            # 首个全体同时命中 EOS 的步（与逐步检查的停止条件相同）
+                            first = int(flags.long().argmax().item())
+                            cur_len = T0 + first + 1
+                            break
+                        eos_flags.clear()
             return out_ids[:, :cur_len]
         finally:
             if was_training:

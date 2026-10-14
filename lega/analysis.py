@@ -77,20 +77,34 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
         for st in out["gate_stats"]:
             layer = st["layer"]
             # 只切片回传 query 区间：长上下文下 T 远大于问题区长度，
-            # 避免每层把整行 (H, T) 统计搬到 CPU
-            max_p = st["max_p"][0][:, qs:qe].float().cpu().numpy()      # (H, width)
-            argmax = st["argmax"][0][:, qs:qe].cpu().numpy()            # (H, width)
-            log_n = st["log_n"][qs:qe].float().cpu().numpy()            # (width,)
-            g = st["g"][0][:, qs:qe].float().cpu().numpy() if st.get("g") is not None else None
-            logit = st["logit"][0][:, qs:qe].float().cpu().numpy() if st.get("logit") is not None else None
-            qterm = st["qterm"][0][:, qs:qe].float().cpu().numpy() if st.get("qterm") is not None else None
-            # hit 向量化判定后随矩阵整体转 Python 标量：逐元素 float(arr[h, i])
-            # 会逐次走 numpy 标量装箱（每条记录 ~10 次），tolist() 一次性转换。
-            if ns is None:
-                hit_l = None
-            else:
-                hit_l = ((argmax >= 0) & (argmax >= ns) & (argmax < ne)
-                         ).astype(np.float64).tolist()
+            # 避免每层把整行 (H, T) 统计搬到 CPU。
+            # 设备端把当层的全部切片统计 + hit 掩码拼为一张 (N, H, width) 张量
+            # 后单次 D2H：原先各 6 次小拷贝各自同步一次，在长上下文逐样例
+            # 评测中会串行化整个分析循环。
+            argmax_d = st["argmax"][0][:, qs:qe]                          # (H, width) 设备端
+            packed = [st["max_p"][0][:, qs:qe].float()]
+            if ns is not None:
+                packed.append(((argmax_d >= 0) & (argmax_d >= ns)
+                               & (argmax_d < ne)).float())
+            if st.get("g") is not None:
+                packed.append(st["g"][0][:, qs:qe].float())
+            if st.get("logit") is not None:
+                packed.append(st["logit"][0][:, qs:qe].float())
+            if st.get("qterm") is not None:
+                packed.append(st["qterm"][0][:, qs:qe].float())
+            # log_n 为 (width,)：设备端广播进同一张表，避免单独一次拷贝
+            packed.append(st["log_n"][qs:qe].float().expand_as(packed[0]))
+            merged = torch.stack(packed).cpu().numpy()                    # (N, H, width)
+            it = iter(merged)
+            max_p = next(it)                                              # (H, width)
+            hit_m = next(it) if ns is not None else None
+            g = next(it) if st.get("g") is not None else None
+            logit = next(it) if st.get("logit") is not None else None
+            qterm = next(it) if st.get("qterm") is not None else None
+            log_n = next(it)[0]                                           # (width,)
+            # hit 掩码已在设备端判好并随合并表一次带回；矩阵整体 tolist()
+            # 转 Python 标量，避免逐元素 numpy 标量装箱（每条记录 ~10 次）。
+            hit_l = hit_m.tolist() if hit_m is not None else None
             mp_l, ln_l = max_p.tolist(), log_n.tolist()
             g_l = g.tolist() if g is not None else None
             logit_l = logit.tolist() if logit is not None else None

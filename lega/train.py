@@ -66,9 +66,10 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
     batch_windows = int(batch_windows)
-    # 设备端累积、循环结束后一次性 .item()：避免每个窗口批一次 GPU 同步
-    loss_acc = None
-    gate_acc = None
+    # 设备端累积、循环结束后一次性 .item()：避免每个窗口批一次 GPU 同步。
+    # 预分配标量累加器并 add_ 就地累加：不再每个窗口批新建一个 0 维张量。
+    loss_acc = torch.zeros((), device=device)
+    gate_acc = torch.zeros((), device=device)
     weights = []
     gate_weights = []
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
@@ -84,14 +85,14 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                 out = model(x, targets=y, need_stats=collect_gate, stats_argmax=False)
             nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
             lt = out["loss"].detach().float() * nb
-            loss_acc = lt if loss_acc is None else loss_acc + lt
+            loss_acc.add_(lt)
             weights.append(nb)
             if collect_gate and out["gate_stats"]:
                 gs = [s_["g"].detach().float().mean()
                       for s_ in out["gate_stats"] if s_.get("g") is not None]
                 if gs:
                     gt = torch.stack(gs).mean() * nb
-                    gate_acc = gt if gate_acc is None else gate_acc + gt
+                    gate_acc.add_(gt)
                     gate_weights.append(nb)
     w = np.asarray(weights, dtype=np.float64)
     # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
