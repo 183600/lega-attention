@@ -429,7 +429,12 @@ class GPT(nn.Module):
             # 逐步走 bool(...all()) 会每步强制一次 GPU→CPU 同步，拖慢解码。
             # 同步点命中时按首个触发步截断 cur_len，结果与逐步检查完全一致。
             _EOS_EVERY = 8
-            eos_flags = [] if eos_token_id is not None else None
+            # 逐 token 的 EOS 判定结果写入预分配设备缓冲，而不是逐步新建 0 维
+            # 张量进 Python 列表后再 torch.stack：消除解码循环里每步一次的
+            # 小张量分配与每窗口一次的 stack kernel。
+            eos_flags = (torch.zeros(max_new_tokens, dtype=torch.bool,
+                                     device=idx.device)
+                         if eos_token_id is not None else None)
             for i in range(max_new_tokens):
                 cur = out_ids[:, :cur_len] if cur_len == T0 else out_ids[:, cur_len - 1:cur_len]
                 out = self.forward(cur, kv_cache=kv_cache,
@@ -447,18 +452,16 @@ class GPT(nn.Module):
                 out_ids[:, cur_len] = nxt
                 cur_len += 1
                 if eos_flags is not None:
-                    eos_flags.append((nxt == eos_token_id).all())
+                    eos_flags[i] = (nxt == eos_token_id).all()
                     if (i + 1) % _EOS_EVERY == 0 or i + 1 == max_new_tokens:
-                        flags = torch.stack(eos_flags)
-                        if bool(flags.any()):
+                        w0 = i - (i % _EOS_EVERY)      # 最近确认边界
+                        window = eos_flags[w0:i + 1]     # 当前未确认窗口（视图）
+                        if bool(window.any()):
                             # 首个全体同时命中 EOS 的步（与逐步检查的停止条件相同）。
-                            # 注意 eos_flags 在确认无命中的窗口末尾会被 clear()，
-                            # first 是当前窗口内的相对索引，必须加回窗口基址
-                            # （最近 len(eos_flags) 步恰好覆盖到当前步 i）。
-                            first = int(flags.long().argmax().item())
-                            cur_len = T0 + (i + 1 - len(eos_flags)) + first + 1
+                            # first 是当前窗口内的相对索引，须加回窗口基址 w0。
+                            first = int(window.long().argmax().item())
+                            cur_len = T0 + w0 + first + 1
                             break
-                        eos_flags.clear()
             return out_ids[:, :cur_len]
         finally:
             if was_training:
