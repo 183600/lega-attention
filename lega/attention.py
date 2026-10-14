@@ -52,42 +52,47 @@ _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_conc", "lega_no_query")     # �
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
 
-# 进程级共享缓存：各层（乃至各实例）在同一设备/长度下的因果掩码与 log n
-# 完全相同，按模块共享。
+# 进程级共享缓存：各层（乃至各实例）在同一设备/长度下的因果掩码完全相同，
+# log n 由设备级前缀表统一切片，按模块共享。
 # 键内已含 device，跨设备天然隔离；长度变化场景（解码）由容量上限兜底。
 # 只构造 not_allowed（显式路径直接用）；allowed 仅 SDPA 带掩码的少见分支需要，
 # 用时再按位取反。
 _MASK_CACHE: dict = {}   # (past_len, T, S, device) -> [not_allowed, ones_col, allowed]
                          # allowed 惰性填充并与 not_allowed 一并保存，供 SDPA
                          # 带掩码分支直接使用
-_LOGN_CACHE: dict = {}   # (past_len, T, device) -> (T,) float
+# 设备端 log 前缀表：table[n] = log(n+1)，任意 (past_len, T) 的 log n 恒为其
+# [past_len, past_len+T) 切片。按需倍增扩展：避免按 (past_len, T) 逐键缓存
+# 导致的重复驻留，以及单查询解码步每层每步从主机端新建标量（H2D + 分配）。
+_LOGN_TABLE: dict = {}   # device -> (N,) float
+_LOGN_TABLE_INIT = 4096
 # 查询分块路径使用的三角对角带掩码：块 (r, c) 内掩码只依赖相对偏移（c > r），
 # 与 past 偏移无关，全层/全块共享一份即可；分块步常见 chunk 形状只有一两种。
 _TRI_CACHE: dict = {}    # (r, c, device) -> (1, 1, r, c) bool，严格上三角为 True
 _CACHE_CAP = 256
 
 
-def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
-    """log(n) = log(可读取的真实 token 数) = log(past_len + t + 1)，按 (past_len, T, device) 缓存。
+def _log_n_table(dev, need: int) -> torch.Tensor:
+    """设备端 log 前缀表（table[i] = log(i+1)），不足 need 时倍增重建。"""
+    table = _LOGN_TABLE.get(dev)
+    if table is None or table.numel() < need:
+        with torch.inference_mode(False):  # 缓存常量不能是 inference tensor
+            n = max(_LOGN_TABLE_INIT, 1 << (need - 1).bit_length())
+            table = torch.log((torch.arange(n, device=dev) + 1).float())
+        _LOGN_TABLE[dev] = table
+    return table
 
-    逐 token 解码（T==1，past_len 每步 +1）会让缓存键各不相同并在容量上限之后
-    每步重新执行 arange+log；这里对单查询步直接取标量 log(past_len+1)，
-    语义与通式完全一致但省掉整条 arange 链。
+
+def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
+    """log(n) = log(可读取的真实 token 数) = log(past_len + t + 1)，为前缀表切片视图。
+
+    通过设备端 log 前缀表切片得到：与原逐次 arange+log 的结果逐项一致（同一
+    查表公式 log(i+1)），但任意 (past_len, T) 组合共享一份表：
+      * 逐 token 解码（T==1，past_len 每步 +1）不再每层每步新建主机端标量并
+        触发 H2D 拷贝，同一步内全部层返回同一视图的连续切片；
+      * 训练/预填充的 (past_len, T) 组合增多时也不再各自驻留一份 (T,) 缓存。
+    表以 inference_mode(False) 创建，不会被推理期现场污染 autograd。
     """
-    if T == 1:
-        # 单查询步（逐 token 解码）：past_len 每步变化，缓存只会无效增长；
-        # 该标量只在本次前向内消费（不跨调用缓存），无 inference tensor 污染问题
-        return torch.log(torch.tensor(past_len + 1.0, device=dev, dtype=torch.float32).view(1))
-    lkey = (past_len, T, dev)
-    log_n = _LOGN_CACHE.get(lkey)
-    if log_n is None:
-        # 缓存常量需是普通张量：在 inference_mode（评测/生成）下创建的张量
-        # 若被后来的训练前向复用会污染 autograd图。
-        with torch.inference_mode(False):
-            log_n = torch.log((torch.arange(past_len, past_len + T, device=dev) + 1).float())  # (T,)
-        if len(_LOGN_CACHE) < _CACHE_CAP:
-            _LOGN_CACHE[lkey] = log_n
-    return log_n
+    return _log_n_table(dev, past_len + T)[past_len:past_len + T]
 
 
 def _tri_band(r: int, c: int, dev) -> torch.Tensor:
@@ -153,7 +158,7 @@ class CausalSelfAttention(nn.Module):
                 torch.randn(n_heads, Dh, generator=gen) * 0.02)
             self.v_null = nn.Parameter(torch.zeros(n_heads, Dh))
 
-        # 因果掩码 / log_n 缓存由模块级 _MASK_CACHE / _LOGN_CACHE 提供，
+        # 因果掩码 / log_n 分别由模块级 _MASK_CACHE / 设备级 _LOGN_TABLE 提供，
         # 全层共享，避免每层各重复驻留一份。
 
     def init_gate_params_(self, gate_bias_init: float = 2.0) -> None:
