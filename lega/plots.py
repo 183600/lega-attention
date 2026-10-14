@@ -129,46 +129,6 @@ def fig_ruler(rdir):
     return True
 
 
-def fig_latency(rdir):
-    d = _load(os.path.join(rdir, "latency.json"))
-    if not d:
-        return False
-    variants = d["variants"]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
-    prefill_bs = None
-    for v, e in variants.items():
-        ctxs = sorted(int(c) for c in e["prefill_ms"].keys())
-        if not ctxs:
-            continue
-        bs_key = "1" if "1" in e["prefill_ms"][str(ctxs[0])] else str(list(e["prefill_ms"][str(ctxs[0])].keys())[0])
-        prefill_bs = prefill_bs or bs_key
-        ax1.plot(ctxs, [e["prefill_ms"][str(c)][bs_key] for c in ctxs],
-                 marker="o", label=_label(v) + ("(SDPA)" if e.get("use_sdpa") and v == "standard_sdpa" else ""),
-                 color=COLORS.get(v))
-    ax1.set_xlabel("上下文长度 (tokens)")
-    ax1.set_ylabel(f"预填充耗时 (ms, batch={prefill_bs})")
-    ax1.set_title("Prefill 延迟")
-    ax1.grid(alpha=0.3)
-    ax1.legend(fontsize=8)
-    for v, e in variants.items():
-        ctx_keys = [str(c) for c in sorted(int(c) for c in e["decode_ms_per_tok"].keys())]
-        if not ctx_keys:
-            continue
-        actual = e.get("decode_prefill_ctx") or {}
-        xs = [int(actual.get(c, c)) for c in ctx_keys]
-        ax2.plot(xs, [e["decode_ms_per_tok"][c] for c in ctx_keys],
-                 marker="s", label=_label(v), color=COLORS.get(v))
-    ax2.set_xlabel("decode 前的实际 KV 上下文长度 (tokens)")
-    ax2.set_ylabel("每 token 解码耗时 (ms)")
-    ax2.set_title("Decode 延迟（KV 缓存，batch=1）")
-    ax2.grid(alpha=0.3)
-    ax2.legend(fontsize=8)
-    fig.suptitle("实际推理延迟对比", y=1.02)
-    fig.savefig(os.path.join(rdir, "fig_latency.png"), dpi=150)
-    plt.close(fig)
-    return True
-
-
 def _read_records(rdir, variant):
     import csv
     path = os.path.join(rdir, f"analysis_records_{variant}.csv")
@@ -318,7 +278,6 @@ def main():
     for name, fn, kw in [
         ("fig_ppl.png", fig_ppl, ()),
         ("fig_ruler_em.png", fig_ruler, ()),
-        ("fig_latency.png", fig_latency, ()),
         ("fig_gate_hist.png", fig_gate_hist, ("lega",)),
         ("fig_calibration.png", fig_calibration, ("lega",)),
         ("fig_misleading.png", fig_misleading, ()),

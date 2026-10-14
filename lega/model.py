@@ -1,7 +1,7 @@
 """GPT 风格因果 Transformer：RoPE + 预归一化 + 词嵌入/lm_head 权重共享。
 
 注意力层可替换为 lega.attention 中的任意变体（standard/qgate/null/lega 及消融）。
-支持增量解码（KV 缓存），供 RULER 生成式评测与延迟基准使用。
+支持增量解码（KV 缓存），供 RULER 生成式评测使用。
 """
 import math
 from typing import Dict, List, Optional
@@ -269,8 +269,7 @@ class GPT(nn.Module):
             f"输入长度 {past_len}+{T} 超过 block_size={self.block_size}")
 
         x = self.drop(self.tok_emb(idx))
-        # 逐层缓存容器预分配为定长列表再按序号写入：逐 token 解码每步都调 forward，
-        # append 的列表扩容开销会按 token × 层数累积
+        # 逐层缓存容器预分配为定长列表再按序号写入：逐 token 解码每步都调 forward
         new_cache: List = [None] * len(self.blocks)
         stats_all: List = []
         for i, blk in enumerate(self.blocks):

@@ -378,7 +378,7 @@ class CausalSelfAttention(nn.Module):
             # 训练态：cat 必须参与 autograd 图，每次前向重建
             w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
         else:
-            # 推理态（eval/验证/生成/延迟基准，含 inference_mode）：权重不变，
+            # 推理态（eval/验证/生成，含 inference_mode）：权重不变，
             # 融合权重按 (参数对象身份, _version, data_ptr, device, dtype) 缓存
             # 复用，省掉每层每次前向一份 (3C, C) 的 cat 分配与拷贝。
             # .to()/.double()/param.data= 替换可能不更新 _version，故必须额外
