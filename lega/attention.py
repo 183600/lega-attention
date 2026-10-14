@@ -396,7 +396,12 @@ class CausalSelfAttention(nn.Module):
             o.mul_(g.to(o.dtype).unsqueeze(-1))
         if not collect_stats:
             return o
-        return o, max_p, qterm, logit, g, argmax_stat, p_null_stat
+        # 轻量统计（keep_gate_terms=False，契约上只消费 g）：集中度门控在
+        # _gate_logit 内对 max_p 原地 clamp_min_/log_（省一份 (B,H,C) fp32 临时），
+        # 此后 max_p 装的已是 log(max_p) 而不再是概率，不能作为统计返回，
+        # 与 SDPA 轻量分支的 max_p=None 口径保持一致。
+        return o, (max_p if keep_gate_terms else None), qterm, logit, g, \
+            argmax_stat, p_null_stat
 
     def _attend_chunked(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         k: torch.Tensor, v: torch.Tensor,
@@ -786,8 +791,11 @@ class CausalSelfAttention(nn.Module):
                     o.mul_(g.to(o.dtype).unsqueeze(-1))                   # o' = g * o
 
             if need_stats:
+                # 轻量统计（stats_argmax=False）只消费 g：LEGA 家族的门控在
+                # _gate_logit 内对 max_p 原地 clamp_min_/log_，此后 max_p 不再是
+                # 概率值，按约定不落进 stats（与上方 SDPA 轻量分支的 max_p=None 一致）。
                 stats = {
-                    "max_p": max_p,
+                    "max_p": max_p if full_stats else None,
                     "log_n": log_n,     # need_stats=True 时上方必然已计算（轻量模式下未用项为 None）
                     "argmax": None,     # 轻量模式不计算 argmax
                     "qterm": qterm,
