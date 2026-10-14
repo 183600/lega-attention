@@ -419,36 +419,29 @@ class CausalSelfAttention(nn.Module):
         # 输出直接按 (B,T,H,Dh) 连续布局写入预分配缓冲（逐块 copy_ 是 autograd
         # 安全的）：块输出到多头合并的转置在写块时一次完成
         Dh = v.shape[-1]
-        o = v.new_empty(B, T, H, Dh)
-        max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
-        for q0 in range(0, T, cq):
-            q1 = min(T, q0 + cq)
-            qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
-            qc = q_content[:, :, q0:q1]  # 未缩放的 RoPE 前查询内容向量块（门控用）
-            # 因果掩码两段式：
-            #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
-            #     切片到可见前缀，打分矩阵从 (B,H,Cq,S) 缩到 (B,H,Cq,fill_from)；
-            #   * 对角带 [band_start, band_start + (q1-q0))：用全局共享的
-            #     严格上三角掩码逐块置 -inf（只依赖块内相对偏移，与 past 无关）。
-            fill_from = min(past_len + q1, S)
-            if fill_from < S:
-                kT_c = kT[..., :fill_from]          # kT 布局 (B,H,Dh,S)，键维在末维
-                v_c = v[:, :, :fill_from]           # v 布局 (B,H,S,Dh)
-            else:
-                kT_c, v_c = kT, v
-            band_start = past_len + q0
-            # 单行块（逐 token 解码）的对角带掩码为全 False（triu(1)），
-            # 逐元素 masked_fill_ 不会对任何元素置 -inf，整块跳过。
-            band_mask = None if q1 - q0 == 1 else _tri_band(q1 - q0, q1 - q0, q_rot.device)
-            logn_c = None if log_n is None else log_n[q0:q1]
-            if use_ckpt:
-                # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
-                # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗
-                oc = torch.utils.checkpoint.checkpoint(
-                    self._attend_q_chunk, qr, qc, kT_c, v_c, band_start,
-                    band_mask, logn_c, False,
-                    use_reentrant=False, preserve_rng_state=False)
-            else:
+
+        def _run_chunks():
+            o = v.new_empty(B, T, H, Dh)
+            for q0 in range(0, T, cq):
+                q1 = min(T, q0 + cq)
+                qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
+                qc = q_content[:, :, q0:q1]  # 未缩放的 RoPE 前查询内容向量块（门控用）
+                # 因果掩码两段式：
+                #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
+                #     切片到可见前缀，打分矩阵从 (B,H,Cq,S) 缩到 (B,H,Cq,fill_from)；
+                #   * 对角带 [band_start, band_start + (q1-q0))：用全局共享的
+                #     严格上三角掩码逐块置 -inf（只依赖块内相对偏移，与 past 无关）。
+                fill_from = min(past_len + q1, S)
+                if fill_from < S:
+                    kT_c = kT[..., :fill_from]      # kT 布局 (B,H,Dh,S)，键维在末维
+                    v_c = v[:, :, :fill_from]       # v 布局 (B,H,S,Dh)
+                else:
+                    kT_c, v_c = kT, v
+                band_start = past_len + q0
+                # 单行块（逐 token 解码）的对角带掩码为全 False（triu(1)），
+                # 逐元素 masked_fill_ 不会对任何元素置 -inf，整块跳过。
+                band_mask = None if q1 - q0 == 1 else _tri_band(q1 - q0, q1 - q0, q_rot.device)
+                logn_c = None if log_n is None else log_n[q0:q1]
                 if collect_stats:
                     oc, mp, qt, lg, gg, am, pnl = self._attend_q_chunk(
                         qr, qc, kT_c, v_c, band_start, band_mask,
@@ -468,11 +461,24 @@ class CausalSelfAttention(nn.Module):
                 else:
                     oc = self._attend_q_chunk(qr, qc, kT_c, v_c, band_start,
                                               band_mask, logn_c, False)
-            # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
-            # 布局变换在此一次完成，取代末端整表 transpose().contiguous()
-            o[:, q0:q1].copy_(oc.transpose(1, 2))
-        # 送出的 o 已按 (B,T,H) 布局写满，直接 view 成多头合并的 (B,T,C)
-        o = o.view(B, T, H * Dh)
+                # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
+                # 布局变换在此一次完成，取代末端整表 transpose().contiguous()
+                o[:, q0:q1].copy_(oc.transpose(1, 2))
+            # 送出的 o 已按 (B,T,H) 布局写满，直接 view 成多头合并的 (B,T,C)
+            return o.view(B, T, H * Dh)
+
+        max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
+        if use_ckpt:
+            # 训练态按层（而非按查询块）包一层 checkpoint：各块的前向中间量
+            # (B,H,cq,S) 无论何种粒度都在前向/反向重算时逐块瞬时生灭，重算
+            # FLOPs 与峰值显存完全一致；粒度粗化只把每层 n_chunks 个 checkpoint
+            # frame 的 SavedTensor 元数据/打包开销降为 1 个。
+            # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
+            # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗。
+            o = torch.utils.checkpoint.checkpoint(
+                _run_chunks, use_reentrant=False, preserve_rng_state=False)
+        else:
+            o = _run_chunks()
         if not collect_stats:
             return o, None, None, None, None, None, None
         cat = lambda xs: torch.cat(xs, dim=2) if xs else None
