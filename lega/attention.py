@@ -232,9 +232,12 @@ class CausalSelfAttention(nn.Module):
         [band_start, band_start+cq) 用平移不变的 (1,1,cq,cq) 三角掩码做
         masked_fill_，面积只有 cq² 而非 cq*S。
 
-        null 变体不把 null 槽拼接进 K/V（避免每层每步复制整个缓存），
-        而是把空槽得分 (B,H,C,1) 追加到打分矩阵末尾，输出用
-        o = p_real @ v + p_null * v_null 合成，数学上与先拼 K/V 完全等价。
+        null 变体不把 null 槽拼接进 K/V（避免每层每步复制整个缓存），也不把空槽
+        得分 cat 到打分矩阵末尾（避免整块复制 (B,H,C,S)），而是解析合并：
+          p_null = e^{a_n} / (Z + e^{a_n}) = sigmoid(logsumexp(att) - a_n)
+          o = (softmax(att) @ v) * (1 - p_null) + p_null * v_null
+        与先 cat 再做联合 softmax 的语义逐项等价（softmax/cat 的尺度因子恰好
+        为 1 - p_null），显存上省掉一份 (B,H,C,S) 的 cat 副本与拷贝。
         """
         S = kT.size(-1)
         att = torch.matmul(q_rot, kT)                               # (B,H,C,S)，S=可见前缀长
@@ -244,7 +247,9 @@ class CausalSelfAttention(nn.Module):
         is_null = self.variant == "null"
         if is_null:
             att_n = torch.matmul(q_rot, self.k_null.to(q_rot.dtype).unsqueeze(-1))
-            att = torch.cat([att, att_n], dim=-1)                   # (B,H,C,S+1)
+            # p_null = 1 / (1 + Z/e^{a_n})，logsumexp 内部做 max 平移，数值稳定
+            p_null = torch.sigmoid(att.logsumexp(dim=-1, keepdim=True) - att_n)
+            del att_n
         p = F.softmax(att, dim=-1)
         del att
 
@@ -253,14 +258,14 @@ class CausalSelfAttention(nn.Module):
             max_p = p.amax(dim=-1).float()                            # (B,H,C)
         if self.attn_dropout > 0 and self.training:
             p = F.dropout(p, p=self.attn_dropout)
-        if is_null:
-            o = torch.matmul(p[..., :S], v)                           # (B,H,C,Dh)
-            # addcmul_ 完成 p_null(×)v_null 的乘加
-            #（训练态逐块 checkpoint 反向重算时逐块生效）
-            o.addcmul_(p[..., S:], self.v_null.to(v.dtype).view(1, self.n_heads, 1, -1))
-        else:
-            o = torch.matmul(p, v)                                    # (B,H,C,Dh)
+        o = torch.matmul(p, v)                                        # (B,H,C,Dh)
         del p
+        if is_null:
+            # 真实键部分整体乘 (1 - p_null)（联合 softmax 的尺度因子），
+            # addcmul_ 再融合 p_null(×)v_null 的乘加（训练态逐块 checkpoint
+            # 反向重算时逐块生效）
+            o.mul_(1 - p_null)
+            o.addcmul_(p_null, self.v_null.to(v.dtype).view(1, self.n_heads, 1, -1))
 
         g = logit = qterm = None
         if self.variant in _GATED:
@@ -405,11 +410,20 @@ class CausalSelfAttention(nn.Module):
                        and (kv_cache is None or cache_pos == 0)
                        and self.variant in ("standard", "qgate", "lega_no_conc"))
 
+        # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码），
+        # 完全不需要 (1,1,T,S) 整表掩码：此时构建+缓存它只会白占一份 T*S 布尔
+        # 显存（每个新的 (past_len, T, S) 组合各驻留一份，直至 _CACHE_CAP）。
+        elems = B * H * T * S
+        will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
+                      and elems >= _CHUNK_TARGET_ELEMS
+                      and not full_stats
+                      and not (self.training and self.attn_dropout > 0))
+
         # 因果掩码：真实键 j 仅当 j <= 查询绝对位置时可见；null 槽对全部查询可见。
         # 单查询步（T==1 的增量解码）：键数 n_real = past_len + 1，查询绝对位置
         # 恰为 past_len，全部键（含 null 槽）必然可见，无需构建掩码。
         allowed = not_allowed = mask_entry = None
-        if not single_q and not causal_only:
+        if not single_q and not causal_only and not will_chunk:
             mkey = (past_len, T, S, dev)
             entry = _MASK_CACHE.get(mkey)
             if entry is None:
@@ -489,13 +503,9 @@ class CausalSelfAttention(nn.Module):
             # 长上下文且不需要 argmax/p_null 完整诊断时，按查询块计算：
             # 前向保持 (B,H,Cq,S) 块级中间量，训练态配合逐块 checkpoint。
             # 逐块 softmax 覆盖完整键行，数学不变。
-            full_stats = bool(need_stats) and stats_argmax
-            elems = B * H * T * S
             # attn_dropout>0 的训练步保持原来的单块路径：分块会改变 dropout 的
             # RNG 消耗粒度，虽无系统性偏差，但不逐位一致。
-            use_chunk = (T >= _CHUNK_MIN_T and elems >= _CHUNK_TARGET_ELEMS
-                         and not full_stats
-                         and not (self.training and self.attn_dropout > 0))
+            use_chunk = will_chunk
             # 一次性预缩放 q：分块与单块共用。rope 启用时其输出是本层独占的新
             # 张量（旋转不依赖原地值反向），可直接 mul_；
             # rope 未启用时 q 与门控内容向量 q_content 共享存储，必须 out-of-place。
@@ -541,11 +551,12 @@ class CausalSelfAttention(nn.Module):
                 need_logn = self.use_len or full_stats
                 if need_logn:
                     log_n = _log_n(past_len, T, dev)
-                    # null 变体虽无 null 槽时 p 恰好覆盖全部真实键；
-
-                    # null 变体的完整统计在下方 need_stats 分支内单独处理
-                    if self.variant != "null" and (self.use_conc or full_stats):
-                        max_p = p.amax(dim=-1).float()                    # max_j p_j ∈ (0, 1]
+                # null 变体虽无 null 槽时 p 恰好覆盖全部真实键；
+                # null 变体的完整统计在下方 need_stats 分支内单独处理。
+                # max_p 是集中度门控（lega/lega_no_len）训练前向的必需输入，
+                # 与 log_n 是否被需要（use_len/full_stats）无关，不能随 need_logn 跳过。
+                if self.variant != "null" and (self.use_conc or full_stats):
+                    max_p = p.amax(dim=-1).float()                    # max_j p_j ∈ (0, 1]
 
                 # 诊断统计（null 变体的 max_p/argmax/p_null 等）必须基于 dropout 之前的
                 # softmax 分布，否则会因 dropout 的 1/(1-p) 重标定与置零而失真；
