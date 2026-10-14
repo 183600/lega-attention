@@ -160,6 +160,11 @@ class CausalSelfAttention(nn.Module):
 
         # 因果掩码 / log_n 分别由模块级 _MASK_CACHE / 设备级 _LOGN_TABLE 提供，
         # 全层共享，避免每层各重复驻留一份。
+        # 推理态融合 QKV 权重缓存：(key, tensor)；key 为三个权重参数对象及其
+        # _version。推理/评测/逐 token 解码时权重不变，每层每次前向不再重新
+        # cat 一份 (3C, C)；训练态不走缓存（cat 必须参与 autograd 图），
+        # 且优化器/测试对权重的原地修改会递增 _version 使缓存自动失效。
+        self._qkv_fused = None
 
     def init_gate_params_(self, gate_bias_init: float = 2.0) -> None:
         """显式初始化门控参数（在 GPT 的整体初始化之后调用）。"""
@@ -369,7 +374,25 @@ class CausalSelfAttention(nn.Module):
             if kv_cache is None else cache_pos
 
         # 三个投影合并为一次 GEMM（参数仍分存于 wq/wk/wv），再按 (q|k|v, H, Dh) 切分
-        w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
+        if torch.is_grad_enabled():
+            # 训练态：cat 必须参与 autograd 图，每次前向重建
+            w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
+        else:
+            # 推理态（eval/验证/生成/延迟基准，含 inference_mode）：权重不变，
+            # 融合权重按 (参数对象, _version) 缓存复用，省掉每层每次前向一份
+            # (3C, C) 的 cat 分配与拷贝。缓存张量在 inference_mode(False)+no_grad
+            # 下创建：既不在 inference 期现场留下 inference tensor（训练前向若
+            # 误用会被 autograd 拒绝），也不搭建多余计算图。
+            wq_w, wk_w, wv_w = self.wq.weight, self.wk.weight, self.wv.weight
+            key = (wq_w, wk_w, wv_w, wq_w._version, wk_w._version, wv_w._version)
+            ent = self._qkv_fused
+            if ent is None or ent[0] != key:
+                with torch.inference_mode(False), torch.no_grad():
+                    fused = torch.cat([wq_w.detach(), wk_w.detach(), wv_w.detach()],
+                                      dim=0).contiguous()
+                ent = (key, fused)
+                self._qkv_fused = ent
+            w_qkv = ent[1]
         q, k, v = (F.linear(x, w_qkv)
                    .view(B, T, 3, H, Dh).permute(2, 0, 3, 1, 4).unbind(0))  # (B, H, T, Dh)
         # 门控的“查询内容”必须使用 RoPE 之前的 q：RoPE 会把绝对位置混入 q，
