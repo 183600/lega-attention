@@ -68,10 +68,12 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     batch_windows = int(batch_windows)
     # 设备端累积、循环结束后一次性 .item()：避免每个窗口批一次 GPU 同步。
     # 预分配标量累加器并 add_ 就地累加：不再每个窗口批新建一个 0 维张量。
+    # 窗口等长，权重即窗口数，用 Python int 就地累计（原先每个窗口批各存一个
+    # 列表元素、结束后再 np.asarray 求和）。
     loss_acc = torch.zeros((), device=device)
     gate_acc = torch.zeros((), device=device)
-    weights = []
-    gate_weights = []
+    total_w = 0
+    gate_w_total = 0
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and device.startswith("cuda")) else contextlib.nullcontext())
     # inference_mode：纯前向评测不生成 autograd 元数据（版本计数/保存变量）；
@@ -86,20 +88,21 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
             nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
             lt = out["loss"].detach().float() * nb
             loss_acc.add_(lt)
-            weights.append(nb)
+            total_w += nb
             if collect_gate and out["gate_stats"]:
+                # 在设备端先 stack 成 (n_layers,) 再一次性求均值：避免对各层
+                # 0 维张量逐个宿主端除法
                 gs = [s_["g"].detach().float().mean()
                       for s_ in out["gate_stats"] if s_.get("g") is not None]
                 if gs:
                     gt = torch.stack(gs).mean() * nb
                     gate_acc.add_(gt)
-                    gate_weights.append(nb)
-    w = np.asarray(weights, dtype=np.float64)
+                    gate_w_total += nb
     # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
     # 使 torch.load(weights_only=True) 反序列化失败且不合法
-    val_loss = float(float(loss_acc.item()) / w.sum())
-    gate_mean = (float(gate_acc.item()) / float(np.sum(gate_weights))
-                 if gate_weights else None)
+    val_loss = float(float(loss_acc.item()) / total_w)
+    gate_mean = (float(gate_acc.item()) / gate_w_total
+                 if gate_w_total else None)
     if was_training:
         model.train()
     return {
@@ -280,7 +283,9 @@ def main():
             x, y = get_train_batch(train, train_ctx, int(cfg["batch_size"]), device, rng)
             with amp_ctx:
                 out = model(x, targets=y)
-                loss = out["loss"] / grad_accum
+                # grad_accum==1（默认配置）时除法结果就是 loss 本身：
+                # 省掉每个 micro-step 一次标量除法 kernel 与一份 0 维张量分配
+                loss = out["loss"] if grad_accum == 1 else out["loss"] / grad_accum
             loss.backward()
             loss_acc_dev.add_(out["loss"].detach(), alpha=1.0 / grad_accum)
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
