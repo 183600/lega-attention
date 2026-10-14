@@ -530,7 +530,6 @@ class CausalSelfAttention(nn.Module):
                 # null 槽的两种合成方式（与 _attend_q_chunk 相同的解析合并）：
                 #   * 需要完整联合 softmax 的场景（null 的 argmax/p_null 诊断、
                 #     训练态 dropout 的 RNG 消耗口径随列数变化）仍 cat 出 S+1 列；
-                #   * 无完整统计需求的训练/推理前向：p_null = sigmoid(lse - a_n)，
                 #   * 无完整统计需求的训练/推理前向：p_null = sigmoid(a_n - lse)，
                 #     softmax 只覆盖真实键，省掉逐次前向的 (B,H,T,S) cat 拷贝——
                 #     逐 token 解码（T==1 走此路径）时省掉每层每步的整行复制。
