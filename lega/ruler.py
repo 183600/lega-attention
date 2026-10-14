@@ -129,15 +129,15 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
         # 在干扰文本中散布同类干扰键值对（键不同、值不同）
         others = [k for k in KEY_WORDS if k != key]
         n_distract = max(4, room // 48)
-        # BPE 下不同干扰键的编码长度可能相差多个 token；按最大真实键成本估算，
+        # BPE 下不同干扰键的编码长度可能相差多个 token；按最大真实键长度估算，
         # 避免用较短的假键高估可放置行数，导致尾部干扰行被截成半句。
-        distract_cost = getattr(tok, "_lega_distract_cost", None)
-        if distract_cost is None:
-            distract_cost = 1 + max(
+        distract_len = getattr(tok, "_lega_distract_len", None)
+        if distract_len is None:
+            distract_len = 1 + max(
                 len(tok.encode(NEEDLE_TMPL.format(key=k, value="0000000")))
                 for k in KEY_WORDS)
-            tok._lega_distract_cost = distract_cost
-        n_distract = min(n_distract, max(1, room // distract_cost))
+            tok._lega_distract_len = distract_len
+        n_distract = min(n_distract, max(1, room // distract_len))
         # 升序插入并跟踪累积位移 shift：保证任何干扰行的结束位置都不越过
         # 最终截断点 room，否则 filler[:room] 会把尾部干扰行截成半句。
         slots = sorted(rng.sample(range(2, room), min(n_distract, room - 2)))
@@ -203,8 +203,8 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
         raise ContextTooSmall(f"fwe 需要 ctx>=~{len(q_ids)+40}, 当前 {ctx}")
     # 根据实测的词均 token 数规划词频结构（高频词 k 次、低频词 2 次），
     # 保证正文能完整放入 token 长度空间，而不是事后硬截断破坏词频分布。
-    avg_cost = max(1.0, len(tok.encode(" " + " ".join(words))) / len(words))
-    k = int(room / avg_cost - 2 * len(words)) // 10
+    avg_len = max(1.0, len(tok.encode(" " + " ".join(words))) / len(words))
+    k = int(room / avg_len - 2 * len(words)) // 10
     if k < 3:  # k 必须 > 2，否则高频词与低频词无法区分
         raise ContextTooSmall(f"fwe 长度空间不足: room={room}, 需要更大 ctx")
     while True:

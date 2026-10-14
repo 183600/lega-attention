@@ -237,7 +237,7 @@ class CausalSelfAttention(nn.Module):
           p_null = e^{a_n} / (Z + e^{a_n}) = sigmoid(logsumexp(att) - a_n)
           o = (softmax(att) @ v) * (1 - p_null) + p_null * v_null
         与先 cat 再做联合 softmax 的语义逐项等价（softmax/cat 的尺度因子恰好
-        为 1 - p_null），显存上省掉一份 (B,H,C,S) 的 cat 副本与拷贝。
+        为 1 - p_null），省掉一份 (B,H,C,S) 的 cat 副本与拷贝。
         """
         S = kT.size(-1)
         att = torch.matmul(q_rot, kT)                               # (B,H,C,S)，S=可见前缀长
@@ -411,8 +411,8 @@ class CausalSelfAttention(nn.Module):
                        and self.variant in ("standard", "qgate", "lega_no_conc"))
 
         # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码），
-        # 完全不需要 (1,1,T,S) 整表掩码：此时构建+缓存它只会白占一份 T*S 布尔
-        # 显存（每个新的 (past_len, T, S) 组合各驻留一份，直至 _CACHE_CAP）。
+        # 完全不需要 (1,1,T,S) 整表掩码：此时无需构建并缓存这份 T*S 布尔表
+        # （每个新的 (past_len, T, S) 组合各驻留一份，直至 _CACHE_CAP）。
         elems = B * H * T * S
         will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
                       and elems >= _CHUNK_TARGET_ELEMS

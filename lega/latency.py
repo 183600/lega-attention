@@ -198,7 +198,7 @@ def main():
                                        model.vocab_size)
             entry["decode_ms_per_tok"][str(ctx)] = round(dms, 4)
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
-            # 较短 KV 前缀的成本标注成原 ctx 的成本。
+            # 较短 KV 前缀的耗时标注成原 ctx 的耗时。
             entry["decode_prefill_ctx"][str(ctx)] = pf_len
             bs1 = entry["prefill_ms"][str(ctx)]
             bs_key = "1" if "1" in bs1 else next(iter(bs1))
