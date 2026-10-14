@@ -470,9 +470,8 @@ class CausalSelfAttention(nn.Module):
         max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
         if use_ckpt:
             # 训练态按层（而非按查询块）包一层 checkpoint：各块的前向中间量
-            # (B,H,cq,S) 无论何种粒度都在前向/反向重算时逐块瞬时生灭，重算
-            # FLOPs 与峰值显存完全一致；粒度粗化只把每层 n_chunks 个 checkpoint
-            # frame 的 SavedTensor 元数据/打包开销降为 1 个。
+            # (B,H,cq,S) 无论何种粒度都在前向/反向重算时逐块瞬时生灭，
+            # 粒度粗化只把每层 n_chunks 个 checkpoint frame 的元数据降为 1 个。
             # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
             # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗。
             o = torch.utils.checkpoint.checkpoint(
