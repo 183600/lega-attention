@@ -13,6 +13,36 @@ import torch.nn.functional as F
 from .attention import CausalSelfAttention, VARIANTS
 
 
+class _RoPERotate(torch.autograd.Function):
+    """RoPE 旋转：前向把两个半宽结果直接写入预分配输出，反向同理写回梯度缓冲。"""
+
+    @staticmethod
+    def forward(ctx, x, cos_h, sin_h):
+        half = x.shape[-1] // 2
+        x1, x2 = x[..., :half], x[..., half:]
+        out = torch.empty_like(x, memory_format=torch.contiguous_format)
+        o1, o2 = out[..., :half], out[..., half:]
+        torch.mul(x1, cos_h, out=o1)            # o1 = x1·cos - x2·sin
+        o1.addcmul_(x2, sin_h, value=-1.0)
+        torch.mul(x2, cos_h, out=o2)            # o2 = x2·cos + x1·sin
+        o2.addcmul_(x1, sin_h)
+        ctx.save_for_backward(cos_h, sin_h)
+        return out
+
+    @staticmethod
+    def backward(ctx, go):
+        cos_h, sin_h = ctx.saved_tensors
+        half = go.shape[-1] // 2
+        go1, go2 = go[..., :half], go[..., half:]
+        gx = torch.empty_like(go, memory_format=torch.contiguous_format)
+        gx1, gx2 = gx[..., :half], gx[..., half:]
+        torch.mul(go1, cos_h, out=gx1)          # gx1 = go1·cos + go2·sin
+        gx1.addcmul_(go2, sin_h)
+        torch.mul(go2, cos_h, out=gx2)          # gx2 = go2·cos - go1·sin
+        gx2.addcmul_(go1, sin_h, value=-1.0)
+        return gx, None, None
+
+
 class RoPE:
     """旋转位置编码（rotate_half 风格），满足平移等变性：score(m, n) 只依赖 m - n。"""
 
@@ -46,18 +76,10 @@ class RoPE:
         half = x.shape[-1] // 2
         cos_h = tables[0][past_len:past_len + T].view(1, 1, T, half)
         sin_h = tables[1][past_len:past_len + T].view(1, 1, T, half)
-        x1, x2 = x[..., :half], x[..., half:]
         if torch.is_grad_enabled() and x.requires_grad:
-            # autograd 不支持 out= 写参数：每半宽 mul + 原地 addcmul_（mul 的反向
-            # 不依赖其输出，原地累加安全），最后 cat 合并；相比先 empty 再逐块
-            # 切片写入，省掉整表预分配的一次冗余拷贝
-            o1 = (x1 * cos_h).addcmul_(x2, sin_h, value=-1.0)
-            o2 = (x2 * cos_h).addcmul_(x1, sin_h)
-            return torch.cat((o1, o2), dim=-1)
-        # 推理路径：两个半宽子表达式写入预分配输出，替代 cat([-x2, x1]) 与全宽
-        # 逐元素链；mul(out=) 直接把乘积写进输出缓冲再原地加乘，
-        # 消除 x1*cos_h / x2*cos_h 两份 (B,H,T,half) 临时张量
+            return _RoPERotate.apply(x, cos_h, sin_h)
         out = torch.empty_like(x)
+        x1, x2 = x[..., :half], x[..., half:]
         o1, o2 = out[..., :half], out[..., half:]
         torch.mul(x1, cos_h, out=o1)
         o1.addcmul_(x2, sin_h, value=-1.0)

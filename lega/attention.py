@@ -368,9 +368,10 @@ class CausalSelfAttention(nn.Module):
         past_len = (0 if past_kv is None else past_kv[0].shape[2]) \
             if kv_cache is None else cache_pos
 
-        q = self.wq(x).view(B, T, H, Dh).transpose(1, 2)   # (B, H, T, Dh)
-        k = self.wk(x).view(B, T, H, Dh).transpose(1, 2)
-        v = self.wv(x).view(B, T, H, Dh).transpose(1, 2)
+        # 三个投影合并为一次 GEMM（参数仍分存于 wq/wk/wv），再按 (q|k|v, H, Dh) 切分
+        w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
+        q, k, v = (F.linear(x, w_qkv)
+                   .view(B, T, 3, H, Dh).permute(2, 0, 3, 1, 4).unbind(0))  # (B, H, T, Dh)
         # 门控的“查询内容”必须使用 RoPE 之前的 q：RoPE 会把绝对位置混入 q，
         # 若用旋转后的 q 计算 w·q，会让本应只负责长度校准的 log n 与位置相互混淆。
         q_content = q
