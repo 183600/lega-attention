@@ -537,9 +537,13 @@ class CausalSelfAttention(nn.Module):
                 # 验证评测只需要 g）时不计算 argmax；不含集中度项的变体（qgate 等）
                 # 此时也不必计算 max_p/log_n。
                 full_stats = bool(need_stats) and stats_argmax
-                if self.variant in _LEGA_FAMILY or full_stats:
+                # log n 仅在门控需要长度项(use_len)或完整诊断(full_stats)时需要；
+                # 如 lega_no_len 的训练前向（use_len=False 且无统计需求），不计算。
+                need_logn = self.use_len or full_stats
+                if need_logn:
                     log_n = _log_n(past_len, T, dev)
-                    # LEGA 家族无 null 槽时，p 恰好覆盖全部真实键；
+                    # null 变体虽无 null 槽时 p 恰好覆盖全部真实键；
+
                     # null 变体的完整统计在下方 need_stats 分支内单独处理
                     if self.variant != "null" and (self.use_conc or full_stats):
                         max_p = p.amax(dim=-1).float()                    # max_j p_j ∈ (0, 1]
