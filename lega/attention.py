@@ -234,7 +234,7 @@ class CausalSelfAttention(nn.Module):
 
         null 变体不把 null 槽拼接进 K/V（避免每层每步复制整个缓存），也不把空槽
         得分 cat 到打分矩阵末尾（避免整块复制 (B,H,C,S)），而是解析合并：
-          p_null = e^{a_n} / (Z + e^{a_n}) = sigmoid(logsumexp(att) - a_n)
+          p_null = e^{a_n} / (Z + e^{a_n}) = sigmoid(a_n - logsumexp(att))
           o = (softmax(att) @ v) * (1 - p_null) + p_null * v_null
         与先 cat 再做联合 softmax 的语义逐项等价（softmax/cat 的尺度因子恰好
         为 1 - p_null），省掉一份 (B,H,C,S) 的 cat 副本与拷贝。
@@ -247,8 +247,9 @@ class CausalSelfAttention(nn.Module):
         is_null = self.variant == "null"
         if is_null:
             att_n = torch.matmul(q_rot, self.k_null.to(q_rot.dtype).unsqueeze(-1))
-            # p_null = 1 / (1 + Z/e^{a_n})，logsumexp 内部做 max 平移，数值稳定
-            p_null = torch.sigmoid(att.logsumexp(dim=-1, keepdim=True) - att_n)
+            # p_null = 1 / (1 + Z/e^{a_n})，logsumexp 内部做 max 平移，数值稳定；
+            # 注意是 a_n - lse（sigmoid(lse - a_n) 得到的是 1 - p_null）
+            p_null = torch.sigmoid(att_n - att.logsumexp(dim=-1, keepdim=True))
             del att_n
         p = F.softmax(att, dim=-1)
         del att
@@ -526,11 +527,24 @@ class CausalSelfAttention(nn.Module):
                 att = torch.matmul(q, k.transpose(-2, -1))             # (B, H, T, S)
                 if not_allowed is not None:
                     att.masked_fill_(not_allowed, float("-inf"))
+                # null 槽的两种合成方式（与 _attend_q_chunk 相同的解析合并）：
+                #   * 需要完整联合 softmax 的场景（null 的 argmax/p_null 诊断、
+                #     训练态 dropout 的 RNG 消耗口径随列数变化）仍 cat 出 S+1 列；
+                #   * 无完整统计需求的训练/推理前向：p_null = sigmoid(lse - a_n)，
+                #   * 无完整统计需求的训练/推理前向：p_null = sigmoid(a_n - lse)，
+                #     softmax 只覆盖真实键，省掉逐次前向的 (B,H,T,S) cat 拷贝——
+                #     逐 token 解码（T==1 走此路径）时省掉每层每步的整行复制。
+                p_null = None
                 if self.variant == "null":
-                    # 追加 null 槽得分列（不复制 K/V），softmax 覆盖 S+1 列
-                    att = torch.cat(
-                        [att, torch.matmul(q, self.k_null.to(q.dtype).unsqueeze(-1))],
-                        dim=-1)
+                    att_n = torch.matmul(q, self.k_null.to(q.dtype).unsqueeze(-1))
+                    if full_stats or (self.training and self.attn_dropout > 0):
+                        att = torch.cat([att, att_n], dim=-1)          # (B,H,T,S+1)
+                    else:
+                        # logsumexp 内部做 max 平移，数值稳定；
+                        # 注意是 a_n - lse（sigmoid(lse - a_n) = 1 - p_null）
+                        p_null = torch.sigmoid(
+                            att_n - att.logsumexp(dim=-1, keepdim=True))
+                        del att_n
                 # 只有完整诊断统计（非 null 变体的 argmax）还需要原始 logit。
                 # argmax 落点是 softmax 不变量（softmax 的反向只依赖输出 p），
                 # 故在 softmax 前从 att 提取即可，随后 att 可释放。
@@ -564,12 +578,18 @@ class CausalSelfAttention(nn.Module):
                 p_pre = p
                 if self.attn_dropout > 0 and self.training:
                     p = F.dropout(p, p=self.attn_dropout)
-                if self.variant == "null":
-                    # o = p_real @ v + p_null * v_null（addcmul_ 融合乘加）
+                if self.variant == "null" and p_null is None:
+                    # 联合 softmax 全列路径：o = p_real @ v + p_null * v_null
                     o = torch.matmul(p[..., :n_real], v)               # (B, H, T, Dh)
                     o.addcmul_(p[..., n_real:], self.v_null.to(v.dtype).view(1, H, 1, Dh))
                 else:
                     o = torch.matmul(p, v)                             # (B, H, T, Dh)
+                if p_null is not None:
+                    # 解析合并路径：真实键部分乘联合尺度因子 (1-p_null)，
+                    # 再加 p_null * v_null
+                    o.mul_(1 - p_null)
+                    o.addcmul_(p_null, self.v_null.to(v.dtype).view(1, H, 1, Dh))
+                del p
 
                 # 输出门控（惰性累加：仅偏置项 (1,H,1) 参与广播）
                 if self.variant in _GATED:
