@@ -59,8 +59,7 @@ def build_summary(results_dir: str) -> dict:
         if d:
             variants.append(d["variant"])
 
-    # 汇总延迟时必须使用所有变体共有的同一上下文档；若各取自己的最大 ctx，
-    # “相对 standard 的开销”会变成不同长度下的误比较。
+    # 汇总延迟时必须使用所有变体共有的同一上下文档，不允许各取自己的最大 ctx。
     lat = load(os.path.join(results_dir, "latency.json")) or {}
     lat_entries = {v: (lat.get("variants") or {}).get(v) for v in variants}
     common_ctxs = None
@@ -121,10 +120,9 @@ def build_summary(results_dir: str) -> dict:
             row[k] = an.get(key)
         rows.append(row)
 
-    # 延迟开销基线：优先取 standard_sdpa（SDPA/FlashAttention 是真实部署的对照，
-    # 以更慢的显式 standard 为基线会系统性低估 LEGA 的相对开销）；缺失时退回显式
-    # standard。standard_sdpa 不单独训练/评测、不会出现在 eval_*.json 里，
-    # 因此基线延迟必须从 latency.json 的条目直取而非从 rows 里找。
+    # 延迟基线：优先取 standard_sdpa，缺失时退回显式 standard。
+    # standard_sdpa 不单独训练/评测、不会出现在 eval_*.json 里，
+    # 因此基线必须从 latency.json 的条目直取而非从 rows 里找。
     lat_all = lat.get("variants") or {}
 
     def _prefill_at_common(variant_name):

@@ -522,9 +522,8 @@ class CausalSelfAttention(nn.Module):
                         [att, torch.matmul(q, self.k_null.to(q.dtype).unsqueeze(-1))],
                         dim=-1)
                 # 只有完整诊断统计（非 null 变体的 argmax）还需要原始 logit。
-                # argmax 落点是 softmax 不变量：在 softmax 前从 att 提取，
-                # softmax 后（其反向只依赖输出 p）即可释放 (B,H,T,S) 打分张量，
-                # 不再让它活到输出投影与门控之后，降低完整统计路径的峰值显存。
+                # argmax 落点是 softmax 不变量（softmax 的反向只依赖输出 p），
+                # 故在 softmax 前从 att 提取即可，随后 att 可释放。
                 argmax_stat = None
                 if bool(need_stats) and stats_argmax and self.variant != "null":
                     argmax_stat = att[..., :n_real].argmax(dim=-1)
