@@ -338,8 +338,14 @@ class GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, greedy: bool = True,
                  temperature: float = 1.0, top_k: Optional[int] = None,
-                 eos_token_id: Optional[int] = None) -> torch.Tensor:
-        """贪心/采样生成（带 KV 缓存）。idx: (B, T) 提示词。"""
+                 eos_token_id: Optional[int] = None,
+                 kv_cache: Optional[List] = None) -> torch.Tensor:
+        """贪心/采样生成（带 KV 缓存）。idx: (B, T) 提示词。
+
+        kv_cache：可选的外部静态 KV 缓冲（与内部预分配同布局，
+        (B, H, max_len, Dh)，容量只需 >= min(T + max_new_tokens, block_size)），
+        供批量评测在样例间复用，避免每次生成都逐层重新分配缓冲。
+        """
         was_training = self.training
         self.eval()
         try:
@@ -357,14 +363,22 @@ class GPT(nn.Module):
             # 静态 KV 缓存：每层一次性预分配 (B, H, T0+max_new, Dh) 缓冲，
             # 逐 token 就地写入。
             total = min(T0 + max_new_tokens, self.block_size)
-            attn0 = self.blocks[0].attn
-            kvdtype = attn0.wk.weight.dtype
-            kv_cache = [
-                (torch.empty(B, attn0.n_heads, total, attn0.d_head,
-                             dtype=kvdtype, device=idx.device),
-                 torch.empty(B, attn0.n_heads, total, attn0.d_head,
-                             dtype=kvdtype, device=idx.device))
-                for _ in self.blocks]
+            if kv_cache is not None:
+                # 外部缓冲必须在批大小与长度容量上覆盖本次生成，
+                # 否则就地写入会静默截断或报错
+                assert len(kv_cache) == len(self.blocks)
+                assert all(kc[0].shape[0] == B and kc[1].shape[0] == B
+                           and kc[0].shape[2] >= total and kc[1].shape[2] >= total
+                           for kc in kv_cache), "外部 kv_cache 容量不足"
+            else:
+                attn0 = self.blocks[0].attn
+                kvdtype = attn0.wk.weight.dtype
+                kv_cache = [
+                    (torch.empty(B, attn0.n_heads, total, attn0.d_head,
+                                 dtype=kvdtype, device=idx.device),
+                     torch.empty(B, attn0.n_heads, total, attn0.d_head,
+                                 dtype=kvdtype, device=idx.device))
+                    for _ in self.blocks]
             for _ in range(max_new_tokens):
                 cur = out_ids[:, :cur_len] if cur_len == T0 else out_ids[:, cur_len - 1:cur_len]
                 out = self.forward(cur, kv_cache=kv_cache,

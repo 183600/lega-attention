@@ -335,6 +335,24 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     """返回 {task: {ctx: {"em":, "recall":, "n":}}} 及跳过说明。"""
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
+    # 静态 KV 缓冲跨样例复用（贪婪解码 B=1 且逐样例串行，无并发写入）：
+    # 每个样例每层两份 (1, H, total, Dh) 缓冲；task × ctx × n_samples 次生成
+    # 各自分配/释放会反复冲击分配器并加剧碎片，按需扩到当前最大 total 复用。
+    attn0 = model.blocks[0].attn
+    kv_cap = 0
+    kv_bufs: Optional[list] = None
+
+    def _get_kv(total: int):
+        nonlocal kv_cap, kv_bufs
+        if kv_cap < total:
+            kv_bufs = [
+                (torch.empty(1, attn0.n_heads, total, attn0.d_head,
+                             dtype=attn0.wk.weight.dtype, device=device),
+                 torch.empty(1, attn0.n_heads, total, attn0.d_head,
+                             dtype=attn0.wk.weight.dtype, device=device))
+                for _ in model.blocks]
+            kv_cap = total
+        return kv_bufs
     for task in tasks:
         results[task] = {}
         seen_rooms: set = set()
@@ -372,7 +390,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     skipped.append(f"{task}@ctx{ctx}: {e}")
                     continue
                 ids = torch.tensor([ex["ids"]], dtype=torch.long, device=device)
-                out_ids = model.generate(ids, max_new_tokens=fwe_max_new if task == "fwe" else max_new)
+                gen = fwe_max_new if task == "fwe" else max_new
+                out_ids = model.generate(
+                    ids, max_new_tokens=gen,
+                    kv_cache=_get_kv(min(len(ex["ids"]) + gen, model.block_size)))
                 pred_text = tok.decode(out_ids[0, len(ex["ids"]):].tolist())
                 sc = score_prediction(task, ex["answer"], pred_text, ex["answer_words"])
                 ems.append(sc["em"])
