@@ -14,6 +14,7 @@
   * 生成采用贪心解码 + KV 缓存，与训练相同的因果语言模型接口；
   * 指标: niah/multikey/vt 用数值命中 EM；fwe 用 top-10 词召回率 recall 与严格 EM。
 """
+import contextlib
 import random
 import re
 import zlib
@@ -328,26 +329,38 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
               seed: int = 1234, max_new: int = 12, fwe_max_new: int = 44,
               vt_chains: int = 4, vt_depth: int = 4,
               corpus_sents: Optional[List[str]] = None,
-              tasks: tuple = TASKS, verbose: bool = True) -> Dict:
-    """返回 {task: {ctx: {"em":, "recall":, "n":}}} 及跳过说明。"""
+              tasks: tuple = TASKS, verbose: bool = True,
+              amp: bool = True, gen_batch: int = 8) -> Dict:
+    """返回 {task: {ctx: {"em":, "recall":, "n"}}} 及跳过说明。
+
+    CUDA 上默认启用 bf16 autocast，与 train/evaluate 的评测精度口径一致。
+    同一任务、同一上下文档下 prompt 等长的样例合并为一次批量贪婪解码：
+    因果注意力与贪婪解码都逐行独立，逐样例评分口径不变。
+    """
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
-    # 静态 KV 缓冲跨样例复用（贪婪解码 B=1 且逐样例串行，无并发写入）：
-    # 每个样例每层两份 (1, H, total, Dh) 缓冲，按需扩到当前最大 total。
+    use_cuda = device.startswith("cuda")
+    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
+               if (amp and use_cuda) else contextlib.nullcontext())
+    gen_batch = max(1, int(gen_batch))
+    # 静态 KV 缓冲跨样例复用：按 (批大小 B, 容量 total) 记住最近一次分配，
+    # B 或容量变化时重建，否则复用同一组缓冲（贪婪解码期间无并发写入）。
     attn0 = model.blocks[0].attn
+    kv_B = 0
     kv_cap = 0
     kv_bufs: Optional[list] = None
+    kv_dtype = torch.bfloat16 if (amp and use_cuda) else attn0.wk.weight.dtype
 
-    def _get_kv(total: int):
-        nonlocal kv_cap, kv_bufs
-        if kv_cap < total:
+    def _get_kv(B: int, total: int):
+        nonlocal kv_B, kv_cap, kv_bufs
+        if kv_B != B or kv_cap < total:
             kv_bufs = [
-                (torch.empty(1, attn0.n_heads, total, attn0.d_head,
-                             dtype=attn0.wk.weight.dtype, device=device),
-                 torch.empty(1, attn0.n_heads, total, attn0.d_head,
-                             dtype=attn0.wk.weight.dtype, device=device))
+                (torch.empty(B, attn0.n_heads, total, attn0.d_head,
+                             dtype=kv_dtype, device=device),
+                 torch.empty(B, attn0.n_heads, total, attn0.d_head,
+                             dtype=kv_dtype, device=device))
                 for _ in model.blocks]
-            kv_cap = total
+            kv_B, kv_cap = B, total
         return kv_bufs
 
     # 逐样例 prompt 的 H2D 走常驻 pinned 缓冲 + non_blocking 异步拷贝。
@@ -355,7 +368,6 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     pin_buf: Optional[torch.Tensor] = None
     pin_np = None          # pinned 缓冲的 NumPy 视图（与 pin_buf 共享存储）
     pin_ev: Optional[torch.cuda.Event] = None
-    use_cuda = device.startswith("cuda")
 
     def _ids_to_device(ids: List[int]) -> torch.Tensor:
         nonlocal pin_cap, pin_buf, pin_np, pin_ev
@@ -382,7 +394,6 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
         results[task] = {}
         seen_rooms: set = set()
         for ctx in ctx_lens:
-            ems, recalls, n = [], [], 0
             # prompt 需为生成预留空间：prompt + max_new ≤ block_size，否则解码时会
             # 越过 block_size/RoPE 最大位置而报错
             max_gen = fwe_max_new if task == "fwe" else max_new
@@ -394,6 +405,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     print(f"[ruler] {task}@ctx{ctx}: 与已处理的 ctx 同为 room_ctx={room_ctx}，跳过")
                 continue
             seen_rooms.add(room_ctx)
+            # 先按原种子顺序构造全部样例（变体间配对比较依赖同一批样本），
+            # 再按 prompt 等长分组做批量贪婪解码。
+            samples: List[Dict] = []
             for i in range(n_samples):
                 # 种子混入 room_ctx：同一 (task, i) 的样例在不同上下文长度下
                 # 若共用同一 rng 构造序列前缀，needle 的 key/value 会跨长度相关，
@@ -418,17 +432,40 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 避免单个超长样例让不同模型的有效样本量 n 悄悄不同
                     skipped.append(f"{task}@ctx{ctx}: {e}")
                     continue
-                ids = _ids_to_device(ex["ids"])
-                gen = fwe_max_new if task == "fwe" else max_new
-                out_ids = model.generate(
-                    ids, max_new_tokens=gen,
-                    kv_cache=_get_kv(min(len(ex["ids"]) + gen, model.block_size)))
-                pred_text = tok.decode(out_ids[0, len(ex["ids"]):].tolist())
-                sc = score_prediction(task, ex["answer"], pred_text, ex["answer_words"])
-                ems.append(sc["em"])
-                if sc["recall"] is not None:
-                    recalls.append(sc["recall"])
-                n += 1
+                samples.append(ex)
+            if not samples:
+                continue
+            by_len: Dict[int, List[Dict]] = {}
+            for ex in samples:
+                by_len.setdefault(len(ex["ids"]), []).append(ex)
+            ems, recalls, n = [], [], 0
+            for length in sorted(by_len):
+                grp = by_len[length]
+                total = min(length + max_gen, model.block_size)
+                for s0 in range(0, len(grp), gen_batch):
+                    part = grp[s0:s0 + gen_batch]
+                    with amp_ctx:
+                        if len(part) == 1:
+                            ids = _ids_to_device(part[0]["ids"])
+                            out_ids = model.generate(
+                                ids, max_new_tokens=max_gen,
+                                kv_cache=_get_kv(1, total))
+                        else:
+                            # 等长 prompt 堆成 (B, L)；批量贪婪解码逐行独立，
+                            # 每行结果与逐样例生成一致。
+                            ids = torch.tensor([e["ids"] for e in part],
+                                               dtype=torch.long, device=device)
+                            out_ids = model.generate(
+                                ids, max_new_tokens=max_gen,
+                                kv_cache=_get_kv(len(part), total))
+                    for r, ex in enumerate(part):
+                        pred_text = tok.decode(out_ids[r, length:].tolist())
+                        sc = score_prediction(task, ex["answer"], pred_text,
+                                              ex["answer_words"])
+                        ems.append(sc["em"])
+                        if sc["recall"] is not None:
+                            recalls.append(sc["recall"])
+                        n += 1
             if n:
                 # 以实际使用的上下文长度记录：若 ctx 超出 block_size 长度空间，
                 # 样本是在缩短后的 room_ctx 上构建的，记入 ctx 会虚增长上下文分数
@@ -475,6 +512,9 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--ctx_lens", default=None, help="逗号分隔，默认用训练配置")
     p.add_argument("--n_samples", type=int, default=None)
+    p.add_argument("--gen_batch", type=int, default=None,
+                   help="等长 prompt 批量贪婪解码的最大批大小")
+    p.add_argument("--no_amp", action="store_true", help="禁用 bf16 autocast（CUDA）")
     p.add_argument("--device", default="auto")
     args = p.parse_args()
 
@@ -491,6 +531,10 @@ def main():
     ctx_lens = ([int(x) for x in args.ctx_lens.split(",")] if args.ctx_lens
                 else rl.get("ctx_lens", [min(256, model.block_size)]))
     n_samples = args.n_samples or int(rl.get("n_samples", 30))
+    gen_batch = (args.gen_batch if args.gen_batch is not None
+                 else int(rl.get("gen_batch", 8)))
+    # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
+    amp = bool(cfg.get("amp", True)) and not args.no_amp
 
     results = run_ruler(model, tok, device, ctx_lens=ctx_lens, n_samples=n_samples,
                         seed=int(rl.get("seed", 1234)),
@@ -498,7 +542,8 @@ def main():
                         fwe_max_new=int(rl.get("fwe_max_new", 44)),
                         vt_chains=int(rl.get("vt_chains", 4)),
                         vt_depth=int(rl.get("vt_depth", 4)),
-                        corpus_sents=load_corpus_sents(args.data_dir))
+                        corpus_sents=load_corpus_sents(args.data_dir),
+                        amp=amp, gen_batch=gen_batch)
     payload = {"variant": ck.get("variant", model.variant), "ctx_lens": ctx_lens,
                "n_samples": n_samples, "results": results}
     save_json(payload, args.out)

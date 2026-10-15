@@ -19,6 +19,7 @@
       --out_dir results/small
 """
 import argparse
+import contextlib
 import csv
 import json
 import math
@@ -57,16 +58,23 @@ def _example(task: str, tok, ctx: int, rng: Random, corpus_sents: Optional[List[
 
 @torch.inference_mode()
 def collect_records(model, tok, device: str, examples: List[Dict], task_of: List[str],
-                    ctx_of: List[int]) -> List[Dict]:
-    """逐样例全量前向，展平出逐 (层,头,查询位) 记录。"""
+                    ctx_of: List[int], amp: bool = True) -> List[Dict]:
+    """逐样例全量前向，展平出逐 (层,头,查询位) 记录。
+
+    CUDA 上默认启用 bf16 autocast（与 train/evaluate 的评测精度口径一致）；
+    统计量在设备端升 fp32 后再聚合，不受 autocast 影响。
+    """
     variant = model.variant
     records: List[Dict] = []
+    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
+               if (amp and device.startswith("cuda")) else contextlib.nullcontext())
     for ex_idx, (ex, task, ctx) in enumerate(zip(examples, task_of, ctx_of)):
         # 先经 NumPy 物化再转 tensor（asarray + from_numpy）。
         ids = torch.from_numpy(np.asarray(ex["ids"], dtype=np.int64)[None])
         ids = ids.to(device, non_blocking=True) if device.startswith("cuda") else ids
         # logits 不参与机制分析；只算最后位置
-        out = model(ids, need_stats=True, last_logits_only=True)
+        with amp_ctx:
+            out = model(ids, need_stats=True, last_logits_only=True)
         if not out["gate_stats"]:
             continue
         qs, qe = ex["query_span"]
@@ -293,7 +301,8 @@ def main():
         return
 
     print(f"[analysis] variant={variant} ctx={ctx} 样例数={len(examples)} tau={tau}")
-    records = collect_records(model, tok, device, examples, task_of, ctx_of)
+    records = collect_records(model, tok, device, examples, task_of, ctx_of,
+                              amp=bool(ckpt_cfg.get("amp", True)))
     summary = summarize(records, variant, tau)
     if skipped_tasks:
         summary["skipped_tasks"] = skipped_tasks
