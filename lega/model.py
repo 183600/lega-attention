@@ -133,9 +133,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         ts_safe = torch.where(keep, tgt, torch.zeros_like(tgt))
         nll = torch.logsumexp(lcf, dim=-1)
         nll -= lcf.gather(1, ts_safe.unsqueeze(1)).squeeze(1)
-        # 布尔掩码直接参与原地乘法（float×bool 提升为 float），省去一次
-        # 等长的显式类型转换。
-        nll *= keep
+        nll *= keep.to(nll.dtype)
         return nll.sum()
 
     @staticmethod
@@ -163,12 +161,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
         with torch.no_grad():
             for s in range(0, tgt.numel(), chunk):
                 lc = F.linear(x2d[s:s + chunk], weight)
-                lcf = _ChunkedLinearCE._loss_dtype(lc)
-                # 升精度副本已生成：解除对低精度分块 logits 的引用
-                # （不升精度时 lcf 与 lc 是同一张量，语义不变）。
-                del lc
                 loss.add_(_ChunkedLinearCE._ce_sum(
-                    lcf, tgt[s:s + chunk], ctx.ignore_index))
+                    _ChunkedLinearCE._loss_dtype(lc), tgt[s:s + chunk],
+                    ctx.ignore_index))
         return loss * ctx.inv_n
 
     @staticmethod
@@ -200,9 +195,6 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 with ac_ctx:
                     lc = F.linear(xs, weight)                        # (m, V)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
-                # softmax 原地写入升精度副本；低精度分块 logits 不再被引用，
-                # 升精度后立即释放。
-                del lc
                 d = torch.softmax(lcf, dim=-1, out=lcf)
                 keep = ts != ctx.ignore_index
                 # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
@@ -363,7 +355,6 @@ class GPT(nn.Module):
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
-                    del lc
                     part = _ChunkedLinearCE._ce_sum(lcd, tgt[s:s + CHUNK],
                                                     int(ignore_index))
                     total = part if total is None else total.add_(part)

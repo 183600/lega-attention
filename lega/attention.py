@@ -290,12 +290,8 @@ class CausalSelfAttention(nn.Module):
             # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
             # clamp/log 原地完成；max_p 为 amax 的反向保存值，需要梯度时
             # 必须保持原值。
-            if keep_terms or max_p.requires_grad:
-                # clamp_min 的输出是一次性中间张量：在其上原地取 log
-                # （输入 max_p 保持为概率值不动）。
-                c = max_p.clamp_min(1e-30).log_()
-            else:
-                c = max_p.clamp_min_(1e-30).log_()
+            c = torch.log(max_p.clamp_min(1e-30)) if (keep_terms or max_p.requires_grad) \
+                else max_p.clamp_min_(1e-30).log_()
             if self.use_len:
                 c += log_n                                                # c = log(n * max_j p_j)
             a = self.gate_a.float().view(1, H, 1)
