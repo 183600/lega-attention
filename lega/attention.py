@@ -375,11 +375,18 @@ class CausalSelfAttention(nn.Module):
         # 完整统计也按查询块收集：只在块内瞬时保留 (B,H,C,S)，不再为分析样例
         # 物化整条序列的 T×S 概率矩阵。
         max_p = argmax_stat = p_null_stat = None
-        need_p_stats = collect_stats or (self.variant in _LEGA_FAMILY and self.use_conc)
+        # keep_gate_terms=False 的轻量统计只消费 g：不为 standard/null 计算
+        # max_p，也不为任何变体计算 argmax/p_null 诊断；完整统计里最大值与
+        # argmax 共用一次 torch.max 归约，避免同一张概率表被扫描两遍。
+        full_diag = collect_stats and keep_gate_terms
+        need_p_stats = full_diag or (self.variant in _LEGA_FAMILY and self.use_conc)
         if need_p_stats:
-            max_p = p.amax(dim=-1).float()                            # (B,H,C)
-        if collect_stats:
-            argmax_real = p.argmax(dim=-1)
+            if full_diag:
+                max_v, argmax_real = torch.max(p, dim=-1)
+                max_p = max_v.float()                                  # (B,H,C)
+            else:
+                max_p = p.amax(dim=-1).float()                         # (B,H,C)
+        if full_diag:
             if is_null:
                 # 解析合并的 null 槽参与联合归一化：真实键概率需乘 (1-p_null)，
                 # argmax 也需与 p_null 比较，结果与 cat 出 S+1 列完全一致。
@@ -750,12 +757,7 @@ class CausalSelfAttention(nn.Module):
                         p_null = torch.sigmoid(
                             att_n - att.logsumexp(dim=-1, keepdim=True))
                         del att_n
-                # 只有完整诊断统计（非 null 变体的 argmax）还需要原始 logit。
-                # argmax 落点是 softmax 不变量（softmax 的反向只依赖输出 p），
-                # 故在 softmax 前从 att 提取即可，随后 att 可释放。
                 argmax_stat = None
-                if bool(need_stats) and stats_argmax and self.variant != "null":
-                    argmax_stat = att[..., :n_real].argmax(dim=-1)
                 p = self._softmax_reuse(att)
                 del att
 
@@ -770,12 +772,20 @@ class CausalSelfAttention(nn.Module):
                 need_logn = self.use_len or bool(need_stats)
                 if need_logn:
                     log_n = _log_n(past_len, T, dev)
-                # null 变体虽无 null 槽时 p 恰好覆盖全部真实键；
-                # null 变体的完整统计在下方 need_stats 分支内单独处理。
-                # max_p 是集中度门控（lega/lega_no_len）训练前向的必需输入，
-                # 与 log_n 是否被需要（use_len/full_stats）无关，不能随 need_logn 跳过。
-                if self.variant != "null" and (self.use_conc or full_stats):
-                    max_p = p.amax(dim=-1).float()                    # max_j p_j ∈ (0, 1]
+                # max_p 与完整诊断的 argmax 共用一次 torch.max 归约，避免对
+                # (B,H,T,S) 概率表分别做 amax/argmax 两遍扫描；两者都必须基于
+                # dropout 前的 softmax 分布。argmax 落点是 softmax 不变量。
+                need_argmax_real = (bool(need_stats) and stats_argmax
+                                    and self.variant != "null")
+                need_max_real = (self.variant != "null"
+                                 and (self.use_conc or full_stats))
+                if need_max_real and need_argmax_real:
+                    max_v, argmax_stat = torch.max(p, dim=-1)
+                    max_p = max_v.float()                    # max_j p_j ∈ (0, 1]
+                elif need_max_real:
+                    max_p = p.amax(dim=-1).float()
+                elif need_argmax_real:
+                    argmax_stat = p.argmax(dim=-1)
 
                 # 诊断统计（null 变体的 max_p/argmax/p_null 等）必须基于 dropout 之前的
                 # softmax 分布，否则会因 dropout 的 1/(1-p) 重标定与置零而失真；
