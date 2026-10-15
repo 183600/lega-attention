@@ -48,8 +48,7 @@ _USE_LEN = ("lega", "lega_no_conc", "lega_no_query")               # log n 项
 _GATED = ("qgate", "lega", "lega_no_len", "lega_no_conc", "lega_no_query")  # 有输出门
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_conc", "lega_no_query")     # 门依赖注意力统计
 
-# 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率，每块约 _CHUNK_TARGET_ELEMS
-# 个元素；训练态配合逐块 checkpoint。
+# 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
 
@@ -61,17 +60,15 @@ _CHUNK_MIN_T = 64
 _MASK_CACHE: OrderedDict = OrderedDict()   # (past_len, T, S, device) ->
                                            # [not_allowed, ones_col, allowed, allowed+null]
 # allowed/allowed+null 惰性填充并与 not_allowed 一并保存，供 SDPA 带掩码分支直接使用。
-# 条目数上限不足以覆盖长上下文：单张布尔掩码可达 T*S 字节。这里再按总字节数做
-# LRU 驱逐，避免多长度评测/解码时掩码无界增长。
+# 缓存条目按条目数与总字节数双重上限做 LRU 驱逐。
 _MASK_CACHE_BYTES = 0
 _MASK_CACHE_MAX_BYTES = 128 * 1024 * 1024
 # 设备端 log 前缀表：table[n] = log(n+1)，任意 (past_len, T) 的 log n 恒为其
-# [past_len, past_len+T) 切片。按需倍增扩展：避免按 (past_len, T) 逐键缓存
-# 导致的重复驻留，以及单查询解码步每层每步从主机端新建标量（H2D + 分配）。
+# [past_len, past_len+T) 切片。按需倍增扩展。
 _LOGN_TABLE: dict = {}   # device -> (N,) float
 _LOGN_TABLE_INIT = 4096
 # 查询分块路径使用的三角对角带掩码：块 (r, c) 内掩码只依赖相对偏移（c > r），
-# 与 past 偏移无关，全层/全块共享一份即可；分块步常见 chunk 形状只有一两种。
+# 与 past 偏移无关。
 _TRI_CACHE: OrderedDict = OrderedDict()  # (r, c, device) -> (1, 1, r, c) bool
 _TRI_CACHE_BYTES = 0
 _TRI_CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -91,7 +88,7 @@ def _enforce_mask_cache_bounds() -> None:
 
 
 def _mask_cache_store(key, entry) -> None:
-    """按 LRU 插入掩码；超上限的超大掩码不驻留，但仍返回本次使用。"""
+    """按 LRU 插入掩码；超上限的超大掩码仅返回本次使用。"""
     global _MASK_CACHE_BYTES
     if _MASK_CACHE.get(key) is not None:
         return
@@ -101,7 +98,7 @@ def _mask_cache_store(key, entry) -> None:
 
 
 def _mask_cache_grow(key, entry, tensor) -> None:
-    """惰性掩码加入已缓存条目时同步记账；条目已被驱逐则不再驻留。"""
+    """惰性掩码加入已缓存条目时同步记账；条目已被驱逐则跳过。"""
     global _MASK_CACHE_BYTES
     if _MASK_CACHE.get(key) is not entry:
         return
@@ -132,23 +129,20 @@ def _log_n_table(dev, need: int) -> torch.Tensor:
 def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
     """log(n) = log(可读取的真实 token 数) = log(past_len + t + 1)，为前缀表切片视图。
 
-    通过设备端 log 前缀表切片得到：与原逐次 arange+log 的结果逐项一致（同一
-    查表公式 log(i+1)），但任意 (past_len, T) 组合共享一份表：
-      * 逐 token 解码（T==1，past_len 每步 +1）不再每层每步新建主机端标量并
-        触发 H2D 拷贝，同一步内全部层返回同一视图的连续切片；
-      * 训练/预填充的 (past_len, T) 组合增多时也不再各自驻留一份 (T,) 缓存。
+    通过设备端 log 前缀表切片得到，与原逐次 arange+log 的结果逐项一致（同一
+    查表公式 log(i+1)），任意 (past_len, T) 组合共享同一份表。
     表以 inference_mode(False) 创建，不会被推理期现场污染 autograd。
     """
     return _log_n_table(dev, past_len + T)[past_len:past_len + T]
 
 
 def _ensure_mm_input(t: torch.Tensor) -> torch.Tensor:
-    """仅当批量 matmul 无法零拷贝消费时才连续化。
+    """仅当批量 matmul 无法直接消费时才连续化。
 
     判定标准：每个 (m, n) 矩阵行主序（末维 stride 1、次末维 stride 恰为行宽），
     批量维步长任意——strided batched GEMM 直接接受。permute().unbind() 之类
     在矩阵维上留下跨步的视图才需要复制；(B,H,S,Dh) 连续张量或其序列维前缀
-    切片（如静态 KV 缓存 [:, :, :end]）已满足条件，不再做整份拷贝。
+    切片（如静态 KV 缓存 [:, :, :end]）已满足条件。
     """
     if t.stride(-1) == 1 and (t.size(-1) <= 1 or t.stride(-2) == t.size(-1)):
         return t
@@ -223,15 +217,13 @@ class CausalSelfAttention(nn.Module):
             self.v_null = nn.Parameter(torch.zeros(n_heads, Dh))
 
         # 因果掩码 / log_n 分别由模块级 _MASK_CACHE / 设备级 _LOGN_TABLE 提供，
-        # 全层共享，避免每层各重复驻留一份。
+        # 全层共享。
         # 推理态融合 QKV 权重缓存：(key, tensor)；key 为三个权重参数对象及其
-        # _version。推理/评测/逐 token 解码时权重不变，每层每次前向不再重新
-        # cat 一份 (3C, C)；训练态不走缓存（cat 必须参与 autograd 图），
-        # 且优化器/测试对权重的原地修改会递增 _version 使缓存自动失效。
+        # _version。训练态不走缓存（cat 必须参与 autograd 图），且优化器/测试
+        # 对权重的原地修改会递增 _version 使缓存自动失效。
         self._qkv_fused = None
         # 推理态参数 dtype 转换缓存（与 _qkv_fused 同失效键口径）：
-        # gate_w / (k_null, v_null)。逐 token 解码时每层每步对每个小参数
-        # 都执行一遍 .to(dtype)，AMP（bf16 前向）下会产生重复分配。
+        # gate_w / (k_null, v_null)。
         self._gate_w_cast = None
         self._null_cast = None
 
@@ -280,8 +272,7 @@ class CausalSelfAttention(nn.Module):
 
         查询项在（可能的 bf16）内容向量上直接归约后再升 fp32。
         keep_terms=False（训练/普通推理/轻量诊断）时各项原地累加进 logit，
-        qterm/logit 不在返回中保留（返回 None）：sigmoid 可直接原地写入，
-        不额外物化 (B,H,T) 的 logit/qterm 副本。
+        qterm/logit 不在返回中保留（返回 None）。
         keep_terms=True（完整机制分析）时 qterm 需原样返回给统计，logit 在其
         副本上累加。
         """
@@ -294,13 +285,11 @@ class CausalSelfAttention(nn.Module):
                 '_gate_w_cast', (self.gate_w,), q_content.dtype
             )[0].unsqueeze(-1)).squeeze(-1).float()                       # (B,H,T)
             logit = qterm.clone() if keep_terms else qterm
-        # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加，避免先物化
-        # a*c / b*log_n 的 (B,H,T) 临时张量再逐项 add_（分块/checkpoint 路径下
-        # 每个块、每次反向重算都要重复分配）。
+        # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加。
         if self.use_conc:
             # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
-            # clamp/log 原地完成，省一份 (B,H,T) fp32 临时张量；max_p 为
-            # amax 的反向保存值，需要梯度时必须保持原值。
+            # clamp/log 原地完成；max_p 为 amax 的反向保存值，需要梯度时
+            # 必须保持原值。
             c = torch.log(max_p.clamp_min(1e-30)) if (keep_terms or max_p.requires_grad) \
                 else max_p.clamp_min_(1e-30).log_()
             if self.use_len:
@@ -314,9 +303,8 @@ class CausalSelfAttention(nn.Module):
         logit = dterm.expand(q_content.shape[0], H, q_content.shape[2]).clone() \
             if logit is None else logit.add_(dterm)
         # keep_terms=False（训练/普通推理/轻量诊断）时调用方不消费 logit：
-        # sigmoid 原地写入，省掉一份 (B,H,T) fp32 输出张量
-        # （分块/checkpoint 路径下每块、每次反向重算各一次分配）。
-        # 此时 qterm/logit 已被原地累加/覆盖，返回 None 表示未保留。
+        # sigmoid 原地写入；此时 qterm/logit 已被原地累加/覆盖，
+        # 返回 None 表示未保留。
         if keep_terms:
             return torch.sigmoid(logit), logit, qterm
         return logit.sigmoid_(), None, None
@@ -347,12 +335,12 @@ class CausalSelfAttention(nn.Module):
         [band_start, band_start+cq) 用平移不变的 (1,1,cq,cq) 三角掩码做
         masked_fill_，面积只有 cq² 而非 cq*S。
 
-        null 变体不把 null 槽拼接进 K/V（避免每层每步复制整个缓存），也不把空槽
-        得分 cat 到打分矩阵末尾（避免整块复制 (B,H,C,S)），而是解析合并：
+        null 变体不把 null 槽拼接进 K/V，也不把空槽得分 cat 到打分矩阵末尾，
+        而是解析合并：
           p_null = e^{a_n} / (Z + e^{a_n}) = sigmoid(a_n - logsumexp(att))
           o = (softmax(att) @ v) * (1 - p_null) + p_null * v_null
         与先 cat 再做联合 softmax 的语义逐项等价（softmax/cat 的尺度因子恰好
-        为 1 - p_null），省掉一份 (B,H,C,S) 的 cat 副本与拷贝。
+        为 1 - p_null）。
         """
         S = kT.size(-1)
         att = torch.matmul(q_rot, kT)                               # (B,H,C,S)，S=可见前缀长
@@ -372,12 +360,11 @@ class CausalSelfAttention(nn.Module):
         p = self._softmax_reuse(att)
         del att
 
-        # 完整统计也按查询块收集：只在块内瞬时保留 (B,H,C,S)，不再为分析样例
-        # 物化整条序列的 T×S 概率矩阵。
+        # 完整统计也按查询块收集：只在块内保留 (B,H,C,S)。
         max_p = argmax_stat = p_null_stat = None
         # keep_gate_terms=False 的轻量统计只消费 g：不为 standard/null 计算
         # max_p，也不为任何变体计算 argmax/p_null 诊断；完整统计里最大值与
-        # argmax 共用一次 torch.max 归约，避免同一张概率表被扫描两遍。
+        # argmax 共用一次 torch.max 归约。
         full_diag = collect_stats and keep_gate_terms
         need_p_stats = full_diag or (self.variant in _LEGA_FAMILY and self.use_conc)
         if need_p_stats:
@@ -417,8 +404,8 @@ class CausalSelfAttention(nn.Module):
         if not collect_stats:
             return o
         # 轻量统计（keep_gate_terms=False，契约上只消费 g）：集中度门控在
-        # _gate_logit 内对 max_p 原地 clamp_min_/log_（省一份 (B,H,C) fp32 临时），
-        # 此后 max_p 装的已是 log(max_p) 而不再是概率，不能作为统计返回，
+        # _gate_logit 内对 max_p 原地 clamp_min_/log_，此后 max_p 装的已是
+        # log(max_p) 而不再是概率，不能作为统计返回，
         # 与 SDPA 轻量分支的 max_p=None 口径保持一致。
         return o, (max_p if keep_gate_terms else None), qterm, logit, g, \
             argmax_stat, p_null_stat
@@ -434,18 +421,17 @@ class CausalSelfAttention(nn.Module):
         """
         S = k.shape[2]
         # q/k/v 来自 QKV 融合 GEMM 的 permute().unbind() 视图：批量维步长
-        # 不可展平，matmul 内部会对每个算子各做一次连续化拷贝——分块循环下
-        # k/v 的逐块切片会被每个块重复拷贝一份。进入循环前一次性连续化：
-        # 之后每块切片均为批量维可展平的行主序视图，matmul 直接复用原存储。
+        # 不可展平。进入循环前统一连续化：之后每块切片均为批量维可展平的
+        # 行主序视图。
         # 序列本身的 Scale 已在调用方按块外完成，此处只做布局规整。
         q_rot = _ensure_mm_input(q_rot)
         # 无查询项的变体（null / lega_no_query）在 _gate_logit 里只读取
-        # q_content.shape，不读取数据：跳过 (B,H,T,Dh) 的整份连续化拷贝。
+        # q_content.shape，不读取数据。
         if self.use_query:
             q_content = _ensure_mm_input(q_content)
         k = _ensure_mm_input(k)
         v = _ensure_mm_input(v)
-        # 目标：每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
+        # 每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
         cq = max(_CHUNK_MIN_T, min(T, _CHUNK_TARGET_ELEMS // max(1, B * H * S)))
         cq = min(T, max(cq, 1))
         kT = k.transpose(-2, -1)
@@ -498,16 +484,14 @@ class CausalSelfAttention(nn.Module):
                     oc = self._attend_q_chunk(qr, qc, kT_c, v_c, band_start,
                                               band_mask, logn_c, False)
                 # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
-                # 布局变换在此一次完成，取代末端整表 transpose().contiguous()
+                # 布局变换在此完成
                 o[:, q0:q1].copy_(oc.transpose(1, 2))
             # 送出的 o 已按 (B,T,H) 布局写满，直接 view 成多头合并的 (B,T,C)
             return o.view(B, T, H * Dh)
 
         max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
         if use_ckpt:
-            # 训练态按层（而非按查询块）包一层 checkpoint：各块的前向中间量
-            # (B,H,cq,S) 无论何种粒度都在前向/反向重算时逐块瞬时生灭，
-            # 粒度粗化只把每层 n_chunks 个 checkpoint frame 的元数据降为 1 个。
+            # 训练态按层（而非按查询块）包一层 checkpoint。
             # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
             # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗。
             o = torch.utils.checkpoint.checkpoint(
@@ -543,8 +527,7 @@ class CausalSelfAttention(nn.Module):
             w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
         else:
             # 推理态（eval/验证/生成，含 inference_mode）：权重不变，
-            # 融合权重按 (参数对象身份, _version, data_ptr, device, dtype) 缓存
-            # 复用，省掉每层每次前向一份 (3C, C) 的 cat 分配与拷贝。
+            # 融合权重按 (参数对象身份, _version, data_ptr, device, dtype) 缓存复用。
             # .to()/.double()/param.data= 替换可能不更新 _version，故必须额外
             # 核对 data_ptr/device/dtype，否则缓存陈旧会崩溃或静默出错。
             # 缓存张量在 inference_mode(False)+no_grad 下创建：既不在 inference
@@ -594,8 +577,8 @@ class CausalSelfAttention(nn.Module):
                 v = torch.cat([past_kv[1], v], dim=2)
             cache = (k, v)  # KV 缓存不含 null 槽（null 每次前向临时追加）
         n_real = k.shape[2]
-        S = n_real   # null 槽不再拼接进 K/V：解析地以 lse(a·w_null) 计入
-                     # softmax 归一化（非分块完整统计/dropout 分支除外，见下）。
+        S = n_real   # null 槽以 lse(a·w_null) 解析地计入 softmax 归一化
+                     # （非分块完整统计/dropout 分支除外，见下）。
 
         # 集中度门控（lega/lega_no_len/lega_no_query）必须消费注意力概率统计
         # max_j p_j，无法走 SDPA；qgate/lega_no_conc 的门只依赖查询与 log n，
@@ -615,8 +598,7 @@ class CausalSelfAttention(nn.Module):
                        and self.variant in ("standard", "qgate", "lega_no_conc"))
 
         # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码），
-        # 完全不需要 (1,1,T,S) 整表掩码：此时无需构建并缓存这份 T*S 布尔表
-        # （每个新的 (past_len, T, S) 组合各驻留一份，直至 _CACHE_CAP）。
+        # 完全不需要 (1,1,T,S) 整表掩码。
         elems = B * H * T * S
         will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
                       and elems >= _CHUNK_TARGET_ELEMS
@@ -639,11 +621,11 @@ class CausalSelfAttention(nn.Module):
                 with torch.inference_mode(False):
                     qpos = torch.arange(past_len, past_len + T, device=dev)
                     not_allowed = qpos.view(1, 1, T, 1) < torch.arange(n_real, device=dev).view(1, 1, 1, n_real)
-                    # null 槽常数可见列随掩码一起缓存，避免每层每步 ones 列的重复分配
+                    # null 槽常数可见列随掩码一起缓存
                     entry = [not_allowed,
                              torch.ones(1, 1, T, 1, dtype=torch.bool, device=dev),
                              None, None]  # allowed / 拼 null 槽的 allowed，惰性填充
-                _mask_cache_store(mkey, entry)   # 超上限条目仅本次使用，不驻留
+                _mask_cache_store(mkey, entry)
             not_allowed, ones_col = entry[0], entry[1]
             mask_entry = entry
             # 不 expand：masked_fill / SDPA 均支持 (1, 1, T, S) 广播
@@ -660,8 +642,7 @@ class CausalSelfAttention(nn.Module):
                     dropout_p=self.attn_dropout if self.training else 0.0,
                     is_causal=True)
             else:
-                # allowed 只在此分支需要：惰性取反一次后随 not_allowed 一起缓存，
-                # 避免每层每次前向对同一张 (1,1,T,S) 掩码重复按位取反/拼接。
+                # allowed 只在此分支需要：惰性取反一次后随 not_allowed 一起缓存。
                 # 单查询步（T==1）不建掩码，此处 mask_entry 为 None，attn_mask 传 None。
                 if mask_entry is None:
                     allowed = None
@@ -679,8 +660,8 @@ class CausalSelfAttention(nn.Module):
                             _mask_cache_grow(mkey, mask_entry, mask_entry[2])
                         allowed = mask_entry[2]
                 if self.variant == "null":
-                    # SDPA 只接受单张量 K/V，这里一次性拼接（每前向仅一次，
-                    # 逐 token 解码已在上面分流到显式路径）
+                    # SDPA 只接受单张量 K/V，这里拼接 null 槽；
+                    # 逐 token 解码已在上面分流到显式路径
                     kn, vn = self._cast_cached(
                         '_null_cast', (self.k_null, self.v_null), k.dtype)
                     kn = kn.view(1, H, 1, Dh).expand(B, H, 1, Dh)
@@ -695,7 +676,7 @@ class CausalSelfAttention(nn.Module):
                 if self.use_len:
                     log_n = _log_n(past_len, T, dev)
                 # 轻量诊断（stats_argmax=False）只消费 g：不保留 qterm/logit，
-                # sigmoid 原地完成，省掉每份 (B,H,T) fp32 的克隆与输出张量
+                # sigmoid 原地完成
                 g, logit, qterm = self._gate_logit(q_content, None, log_n,
                                                    keep_terms=full_stats)
                 if torch.is_grad_enabled():
@@ -711,12 +692,12 @@ class CausalSelfAttention(nn.Module):
                          "qterm": qterm, "g": g, "logit": logit}
         else:
             # 显式注意力路径：gated / 需要诊断统计时。长上下文按查询块计算并
-            # 逐块汇总完整统计，前向保持 (B,H,Cq,S) 块级中间量，训练态配合逐块
-            # checkpoint。逐块 softmax 覆盖完整可见键行，数学不变。
-            # attn_dropout>0 的训练步保持原来的单块路径：分块会改变 dropout 的
+            # 逐块汇总完整统计，训练态配合逐块 checkpoint。
+            # 逐块 softmax 覆盖完整可见键行，数学不变。
+            # attn_dropout>0 的训练步保持单块路径：分块会改变 dropout 的
             # RNG 消耗粒度，虽无系统性偏差，但不逐位一致。
             use_chunk = will_chunk
-            # 一次性预缩放 q：分块与单块共用。rope 启用时其输出是本层独占的新
+            # 预缩放 q：分块与单块共用。rope 启用时其输出是本层独占的新
             # 张量（旋转不依赖原地值反向），可直接 mul_；
             # rope 未启用时 q 与门控内容向量 q_content 共享存储，必须 out-of-place。
             if q is q_content:
@@ -742,8 +723,7 @@ class CausalSelfAttention(nn.Module):
                 #   * 需要完整联合 softmax 的场景（null 的 argmax/p_null 诊断、
                 #     训练态 dropout 的 RNG 消耗口径随列数变化）仍 cat 出 S+1 列；
                 #   * 无完整统计需求的训练/推理前向：p_null = sigmoid(a_n - lse)，
-                #     softmax 只覆盖真实键，省掉逐次前向的 (B,H,T,S) cat 拷贝——
-                #     逐 token 解码（T==1 走此路径）时省掉每层每步的整行复制。
+                #     softmax 只覆盖真实键；逐 token 解码（T==1）走此路径。
                 p_null = None
                 if self.variant == "null":
                     k_null_c2, v_null_c2 = self._cast_cached(
@@ -762,19 +742,18 @@ class CausalSelfAttention(nn.Module):
                 del att
 
                 # 门控所需的注意力统计（LEGA 家族训练时也必须计算）。
-                # max_j p_j 直接取 softmax 输出的行最大值（在 dropout 之前，与原基于
-                # softmax logit 的实现语义一致）。stats_argmax=False（轻量诊断，如
-                # 验证评测只需要 g）时不计算 argmax；不含集中度项的变体（qgate 等）
-                # 此时也不必计算 max_p/log_n。
+                # max_j p_j 直接取 softmax 输出的行最大值（在 dropout 之前）。
+                # stats_argmax=False（轻量诊断，如验证评测只需要 g）时不计算
+                # argmax；不含集中度项的变体（qgate 等）此时也不必计算 max_p/log_n。
                 full_stats = bool(need_stats) and stats_argmax
                 # log n 仅在门控需要长度项(use_len)或完整诊断(full_stats)时需要；
                 # 如 lega_no_len 的训练前向（use_len=False 且无统计需求），不计算。
                 need_logn = self.use_len or bool(need_stats)
                 if need_logn:
                     log_n = _log_n(past_len, T, dev)
-                # max_p 与完整诊断的 argmax 共用一次 torch.max 归约，避免对
-                # (B,H,T,S) 概率表分别做 amax/argmax 两遍扫描；两者都必须基于
-                # dropout 前的 softmax 分布。argmax 落点是 softmax 不变量。
+                # max_p 与完整诊断的 argmax 共用一次 torch.max 归约；
+                # 两者都必须基于 dropout 前的 softmax 分布。
+                # argmax 落点是 softmax 不变量。
                 need_argmax_real = (bool(need_stats) and stats_argmax
                                     and self.variant != "null")
                 need_max_real = (self.variant != "null"
@@ -827,7 +806,7 @@ class CausalSelfAttention(nn.Module):
                 }
                 if stats_argmax:
                     if use_chunk:
-                        # 完整统计逐块汇总，避免机制分析物化整条 T×S 概率矩阵
+                        # 完整统计逐块汇总
                         stats["argmax"] = argmax_stat
                         if self.variant == "null":
                             stats["p_null"] = p_null_stat.float()
@@ -847,8 +826,7 @@ class CausalSelfAttention(nn.Module):
         # 直接写出，其 o 本身就是合并后的 (B,T,C)
         if o.dim() == 4 and T == 1:
             # 单查询步（逐 token 解码）：(B, H, 1, Dh) 的 H×Dh 子块步长连续，
-            # 可零拷贝折成 (B, C) 直接进输出投影，省掉每层每步一次
-            # transpose(1,2).contiguous() 的拷贝与分配。
+            # 可直接折成 (B, C) 进输出投影。
             out = self.wo(o.reshape(B, C)).unsqueeze(1)
         elif o.dim() == 4:
             o = o.transpose(1, 2).contiguous().view(B, T, C)

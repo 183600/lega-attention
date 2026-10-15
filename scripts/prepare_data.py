@@ -166,9 +166,7 @@ def main():
     if args.source == "local" or args.local_txt:
         assert args.local_txt, "--source local 需要 --local_txt"
         text = open(args.local_txt, "r", encoding="utf-8").read()
-        # 前 10% 作 test、次 10% 作 val、其余作 train；test 与 val 都不参与训练
-        # （同一连续文本的近似泄漏风险与旧版相同，仅适合冒烟/调试——只是不再
-        # 让头条 PPL 与 checkpoint 选择共用 val）。
+        # 前 10% 作 test、次 10% 作 val、其余作 train；test 与 val 都不参与训练。
         n = len(text) // 10
         test_text, val_text, train_text = text[:n], text[n:2 * n], text[2 * n:]
     else:

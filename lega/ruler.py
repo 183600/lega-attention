@@ -44,9 +44,7 @@ def _stable_hash(s: str) -> int:
 def _cached_encode(tok, text: str) -> List[int]:
     """按分词器实例缓存稳定文本的编码结果。
 
-    样例构造（尤其 corpus 干扰文本与合成 FILLER）会在 n_samples × ctx_lens
-    个样例间反复编码同一批字符串；缓存挂在 tokenizer 实例上（id 不回收到
-    不同对象），只对固定模板的短串使用。
+    缓存挂在 tokenizer 实例上（id 不回收到不同对象），只对固定模板的短串使用。
     """
     cache = getattr(tok, "_lega_enc_cache", None)
     if cache is None:
@@ -78,9 +76,8 @@ def _token_span_for_text(tok, ids: List[int], text: str) -> tuple:
     """
     n = len(ids)
     # GPT-2 BPE 的 decode 是逐 token 字节拼接，因此对可逐 token 解码的内容，
-    # 窗口解码等价于预计算逐 token 字符串后的 "".join——把 O(n²) 次 decode
-    # 降为 O(n) 次。逐 token 解码失败（理论上的多字节 UTF-8 拆分）或未命中时
-    # 回退到原始的逐窗口 decode，保证语义不变。
+    # 窗口解码等价于预计算逐 token 字符串后的 "".join。逐 token 解码失败
+    # （理论上的多字节 UTF-8 拆分）或未命中时回退到逐窗口 decode，保证语义不变。
     try:
         pieces = [tok.decode(ids[i:i + 1]) for i in range(n)]
     except Exception:
@@ -116,7 +113,7 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
         # 却仍以 niah_corpus 名义写入结果），直接按不可构造样例跳过。
         raise ContextTooSmall("niah_corpus 需要语料句子，但 corpus_sents 为空（val.txt 缺失？）")
     if mode == "corpus":
-        # 语料句子的编码结果按分词器缓存：同一句子会在多样例/多 ctx 下被反复抽中
+        # 语料句子的编码结果按分词器缓存
         filler: List[int] = []
         while len(filler) < room:
             filler.extend(_cached_encode(tok, " " + rng.choice(corpus_sents).strip()))
@@ -284,8 +281,6 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
         raise ContextTooSmall(f"vt 正文 {len(body_ids)} 超过长度空间 {room}，可减小 vt_chains/vt_depth")
     ids = body_ids + question_ids
     # gold 跨度应锁定到“实际包含目标数值”的定义行（VAR {L}1 = value）。
-    # 原先用同一条链所有行的 min/max 包围盒：行被打散后会包住别的链的整行，
-    # 使 analysis 里的 hit 指标把“注意力落到无关行”误判为找对。
     target_prefix = f"VAR {qL}1 ="
     _ln, s, e = next((ln, sp, ep) for ln, sp, ep in line_spans if ln.startswith(target_prefix))
     vs, ve = _token_span_for_text(tok, ids[s:e], values[qL])
@@ -336,8 +331,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
     # 静态 KV 缓冲跨样例复用（贪婪解码 B=1 且逐样例串行，无并发写入）：
-    # 每个样例每层两份 (1, H, total, Dh) 缓冲；task × ctx × n_samples 次生成
-    # 各自分配/释放会反复冲击分配器并加剧碎片，按需扩到当前最大 total 复用。
+    # 每个样例每层两份 (1, H, total, Dh) 缓冲，按需扩到当前最大 total。
     attn0 = model.blocks[0].attn
     kv_cap = 0
     kv_bufs: Optional[list] = None
@@ -354,9 +348,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             kv_cap = total
         return kv_bufs
 
-    # 逐样例 prompt 的 H2D 走常驻 pinned 缓冲 + non_blocking 异步拷贝：
-    # torch.tensor(list, device=cuda) 会以页式内存做一次同步拷贝，
-    # n_samples × ctx_lens × tasks 次逐样例同步会串行化整个评测。
+    # 逐样例 prompt 的 H2D 走常驻 pinned 缓冲 + non_blocking 异步拷贝。
     pin_cap = 0
     pin_buf: Optional[torch.Tensor] = None
     pin_np = None          # pinned 缓冲的 NumPy 视图（与 pin_buf 共享同一份内存）
@@ -379,8 +371,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             # 覆盖常驻 pinned 缓冲前，必须等待上一轮 non_blocking H2D 拷贝
             # 把缓冲读完，否则主机写入与在途 DMA 构成数据竞争
             pin_ev.synchronize()
-        # Python 列表直接写入 pinned 缓冲的 NumPy 视图：省掉原先每样例一次的
-        # torch.as_tensor 主机端 int64 张量分配 + 随后 copy_ 的二次拷贝。
+        # Python 列表直接写入 pinned 缓冲的 NumPy 视图。
         pin_np[:n] = ids
         out = pin_buf[:n].unsqueeze(0).to(device, non_blocking=True)
         pin_ev.record()
@@ -458,9 +449,6 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
 
 def load_corpus_sents(data_dir: str, max_chars: int = 300000) -> List[str]:
     """从 train.txt 抽自然句，作为 niah_corpus 的干扰语料。
-
-    旧实现用 val.txt：干扰项虽不直接泄漏答案，但与头条 PPL 共用同一 held-out
-    文本，两项证据不再相互独立；train.txt 模型已见过，作干扰文本更中性。
     （缺失时回退 val.txt 以兼容旧数据目录。）"""
     import os
     path = os.path.join(data_dir, "train.txt")

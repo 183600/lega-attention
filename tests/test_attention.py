@@ -82,8 +82,7 @@ def test_gate_formula_components():
     g = stats["g"].numpy()
     c = log_n + np.log(np.clip(max_p, 1e-30, None))
     expected_logit = 2.0 + 0.3 * c - 0.1 * log_n
-    # qterm 已含 w·q；重新手算: qterm = 0.05 * sum(q)
-    # 这里直接验证 g = sigmoid(expected_logit - qterm贡献修正) —— 改为完整验证:
+    # qterm 已含 w·q；下面完整复算 qterm 与 g
     q = m.wq(x).view(2, 6, 2, 8).transpose(1, 2).detach().float().numpy()
     qterm_manual = (q * 0.05).sum(-1)
     assert np.allclose(qterm, qterm_manual, atol=1e-5)
@@ -209,7 +208,7 @@ def test_query_chunked_attention_matches_unchunked():
 
 
 def test_chunked_full_stats_matches_unchunked():
-    """完整诊断统计也可分块产生，避免机制分析物化整条 T×S 概率矩阵。"""
+    """完整诊断统计也可分块产生，且与单块结果一致。"""
     old = attention_mod._CHUNK_TARGET_ELEMS
     for variant in ("standard", "null", "lega"):
         torch.manual_seed(4)
@@ -238,7 +237,7 @@ def test_chunked_full_stats_matches_unchunked():
 
 
 def test_mask_cache_byte_limit_uses_lru():
-    """全局掩码缓存按字节上限驱逐最旧条目，而不是只按条目数驻留。"""
+    """全局掩码缓存按字节上限驱逐最旧条目。"""
     old_cap = attention_mod._CACHE_CAP
     old_limit = attention_mod._MASK_CACHE_MAX_BYTES
     old_tri_limit = attention_mod._TRI_CACHE_MAX_BYTES

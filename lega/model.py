@@ -56,8 +56,8 @@ class RoPE:
         self.cos_half = freqs.cos()              # (max_len, head_dim/2)
         self.sin_half = freqs.sin()
         self.max_len = max_len
-        # 按 (device, dtype) 缓存已迁移的表：前向时仅切片，且旋转直接在
-        # x 的原生 dtype 上完成，避免 AMP 下每层每次前向的 fp32 升精度分配
+        # 按 (device, dtype) 缓存已迁移的表：前向时仅切片，旋转直接在
+        # x 的原生 dtype 上完成
         self._device_cache: dict = {}    # (device, dtype) -> (cos, sin)
 
     def rotate(self, x: torch.Tensor, past_len: int = 0,
@@ -96,9 +96,8 @@ class RoPE:
         return out
 
     def __call__(self, q: torch.Tensor, k: torch.Tensor, past_len: int = 0):
-        # 推理态（评测/逐 token 解码）且 q/k 同形状同 dtype 时，把两份旋转融合到
-        # 同一预分配缓冲（一次分配、两份输出视图），省去 stack 对 q/k 的整份拷贝。
-        # 输出两视图共享同一缓冲：下游对 q 的原地缩放只写 q 自己的那一半，安全。
+        # 推理态（评测/逐 token 解码）且 q/k 同形状同 dtype 时，把两份旋转写入
+        # 同一预分配缓冲的两份输出视图：下游对 q 的原地缩放只写 q 自己的那一半，安全。
         # 训练态保持分开走 _RoPERotate（各自独立的 autograd 节点，不引入共享
         # 存储的视图，避免与就地缩放/反向写回产生视图别名问题）。
         if (not (torch.is_grad_enabled() and (q.requires_grad or k.requires_grad))
@@ -128,8 +127,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         """sum-CE 的闭式计算：logsumexp - 目标 logit，逐元素掩掉 ignore_index。
 
         与 F.cross_entropy(reduction="sum") 等价（logsumexp 内部 max 平移，
-        数值稳定），但省去一份 (m, V) 的 log_softmax 中间张量：大词表下每个
-        分块少一次分配 + 一次全表写回。
+        数值稳定）。
         """
         keep = tgt != ignore_index
         ts_safe = torch.where(keep, tgt, torch.zeros_like(tgt))
@@ -152,10 +150,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
         else:
             ctx.amp_dtype = (torch.get_autocast_dtype("cpu")
                              if torch.is_autocast_enabled("cpu") else None)
-        # n_valid 以设备张量保存：前向/反向都不再 .item() 同步，
-        # 消除每个训练步的一次 GPU->CPU 阻塞（后续 kernel 可继续流水提交）。
-        # clamp_min(1) 同时吸收"全部位置被忽略"的除零情形（此时梯度因
-        # keep 掩码全零而天然为 0，无需提前特判）。
+        # n_valid 以设备张量保存；clamp_min(1) 同时吸收"全部位置被忽略"的
+        # 除零情形（此时梯度因 keep 掩码全零而天然为 0，无需提前特判）。
         n_valid = (tgt != ctx.ignore_index).sum()
         ctx.inv_n = n_valid.clamp_min(1).to(
             x2d.dtype if x2d.dtype in (torch.float32, torch.float64)
@@ -176,9 +172,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         # gx 的每一行都会被下方按块整段覆写，无需先零填充
         gx = torch.empty_like(x2d)
         # gw 直接以计算精度（低精度时为 fp32）预分配并用 addmm_ 原地累加：
-        # 避免每个分块都物化一份 (V, D) 的 gw_chunk 临时张量；同时也比逐块
-        # cast 到 weight.dtype
-        # 再累加更精确（全程高精度累加，只在返回前 cast 一次）。
+        # 全程高精度累加，只在返回前 cast 一次。
         gw = None
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
@@ -191,10 +185,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 ac_ctx = torch.autocast(dev_type, dtype=ctx.amp_dtype)
             else:
                 ac_ctx = contextlib.nullcontext()
-            neg_one = None   # scatter_add_ 的 -1 源张量按块复用，避免每块一次分配
-            # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度
-            # 的升精度/转换在每个分块中完全相同，提到循环外只做一次，
-            # 避免低精度权重下每个分块各产生一份 (V, D) 的精度转换副本。
+            neg_one = None   # scatter_add_ 的 -1 源张量按块复用
+            # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度的
+            # 转换在每个分块中完全相同，提到循环外只做一次。
             w_f = None
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
@@ -205,8 +198,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 d = torch.softmax(lcf, dim=-1, out=lcf)
                 keep = ts != ctx.ignore_index
                 # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
-                # 压到 0（其减 1 随后会被 keep 掩码清零），替代原先的
-                # keep.any() 同步 + nonzero 索引分配 + 花式索引写入。
+                # 压到 0（其减 1 随后会被 keep 掩码清零）。
                 ts_safe = torch.where(keep, ts, torch.zeros_like(ts))
                 if neg_one is None or neg_one.size(0) < ts_safe.numel():
                     neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
@@ -221,15 +213,14 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     w_f = weight.to(d.dtype)
                 gxs = gx[s:s + ctx.chunk]
                 if gxs.dtype == d.dtype:
-                    # 同精度（常见 fp32 训练）：GEMM 直接写入 gx 的行切片，
-                    # 省掉一份 (m, D) 临时分配与拷贝
+                    # 同精度（常见 fp32 训练）：GEMM 直接写入 gx 的行切片
                     torch.matmul(d, w_f, out=gxs)
                 else:
                     gxs.copy_(torch.matmul(d, w_f))
                 if gw is None:
                     gw = torch.zeros(weight.shape, dtype=d.dtype,
                                      device=weight.device)
-                # 原地累加该分块的 dL/dW，不产生 (V, D) 中间结果
+                # 原地累加该分块的 dL/dW
                 gw.addmm_(d.transpose(0, 1), xs.to(d.dtype))
         if gw is not None and gw.dtype != weight.dtype:
             gw = gw.to(weight.dtype)
@@ -259,9 +250,8 @@ class Block(nn.Module):
                                     need_stats=need_stats, stats_argmax=stats_argmax,
                                     kv_cache=kv_cache, cache_pos=cache_pos)
         # 无梯度（推理/评测）时残差连接用原地加法：x 是本层独占的新张量
-        # （来自上一层输出或嵌入层输出，不被其它子图引用），每层每次前向
-        # 省掉两份 (B, T, C) 输出分配；有梯度时 autograd 需要加法输出做反向，
-        # 必须保持 out-of-place。
+        # （来自上一层输出或嵌入层输出，不被其它子图引用）；有梯度时 autograd
+        # 需要加法输出做反向，必须保持 out-of-place。
         if torch.is_grad_enabled() and x.requires_grad:
             x = x + self.drop(a)
             x = x + self.drop(self.w2(self.act(self.w1(self.ln2(x)))))
@@ -361,14 +351,14 @@ class GPT(nn.Module):
                 # 训练路径：分块前向 + 分块重算反向
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
-                total = None  # 设备端累加，避免 Python/张量混加与每步同步
+                total = None  # 设备端累加
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
                     part = _ChunkedLinearCE._ce_sum(lcd, tgt[s:s + CHUNK],
                                                     int(ignore_index))
                     total = part if total is None else total.add_(part)
-                # n_valid 保留为设备张量：评测循环无需每窗口批一次 .item() 同步
+                # n_valid 保留为设备张量
                 loss = total / (tgt != ignore_index).sum().clamp_min(1)
             logits = None
         else:
@@ -390,7 +380,7 @@ class GPT(nn.Module):
 
         kv_cache：可选的外部静态 KV 缓冲（与内部预分配同布局，
         (B, H, max_len, Dh)，容量只需 >= min(T + max_new_tokens, block_size)），
-        供批量评测在样例间复用，避免每次生成都逐层重新分配缓冲。
+        供批量评测在样例间复用。
         """
         was_training = self.training
         self.eval()
@@ -425,13 +415,10 @@ class GPT(nn.Module):
                      torch.empty(B, attn0.n_heads, total, attn0.d_head,
                                  dtype=kvdtype, device=idx.device))
                     for _ in self.blocks]
-            # EOS 判定标志留在设备端逐 token 记录，每 _EOS_EVERY 步才同步回 CPU：
-            # 逐步走 bool(...all()) 会每步强制一次 GPU→CPU 同步，拖慢解码。
+            # EOS 判定标志留在设备端逐 token 记录，每 _EOS_EVERY 步检查一次；
             # 同步点命中时按首个触发步截断 cur_len，结果与逐步检查完全一致。
             _EOS_EVERY = 8
-            # 逐 token 的 EOS 判定结果写入预分配设备缓冲，而不是逐步新建 0 维
-            # 张量进 Python 列表后再 torch.stack：消除解码循环里每步一次的
-            # 小张量分配与每窗口一次的 stack kernel。
+            # 逐 token 的 EOS 判定结果写入预分配设备缓冲。
             eos_flags = (torch.zeros(max_new_tokens, dtype=torch.bool,
                                      device=idx.device)
                          if eos_token_id is not None else None)

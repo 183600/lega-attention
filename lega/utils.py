@@ -51,10 +51,7 @@ def get_device(device: str = "auto") -> str:
 
 
 def enable_tf32(device: str) -> None:
-    """CUDA 上启用 TF32 矩阵乘/卷积（与训练进程口径一致），加速 fp32 前向。
-
-    bf16/AMP 路径不受影响；非 CUDA 设备为空操作。
-    """
+    """CUDA 上启用 TF32 矩阵乘/卷积；bf16/AMP 路径不受影响，非 CUDA 设备为空操作。"""
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -85,8 +82,8 @@ def auroc(scores, labels) -> float:
         return float("nan")
     allv = np.concatenate([neg, pos])
     order = np.argsort(allv, kind="mergesort")
-    # 向量化并列取平均秩：在有序数组上用 unique 定位等值组，
-    # 组内平均秩 = 首名次 + (组大小+1)/2 - 0.5，替代原先的 Python 双重循环
+    # 并列取平均秩：在有序数组上用 unique 定位等值组，
+    # 组内平均秩 = 首名次 + (组大小+1)/2 - 0.5
     sorted_v = allv[order]
     first, counts = np.unique(sorted_v, return_index=True, return_counts=True)[1:]
     avg_ranks = first.astype(np.float64) + (counts + 1.0) / 2.0

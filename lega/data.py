@@ -224,9 +224,7 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     """把 (n, ctx+1) 的 token id 块异步搬运到目标设备，设备端再升 int64。
 
     src 可以是已物化的 np.ndarray，也可以是 (memmap, span) 二元组：
-    后者把 memmap 的花式索引进 pinned/np 输出缓冲一步完成（np.take 的 out=
-    参数不产生中间数组），省掉每个训练步先拷出 (n, ctx+1) 临时 NumPy
-    数组、再 copy_ 进 pinned 暂存的双重 CPU 拷贝。
+    后者把 memmap 的花式索引进 pinned 输出缓冲一步完成（np.take 的 out= 参数）。
     """
     global _H2D_STAGE_BYTES
     is_span = isinstance(src, tuple)
@@ -261,7 +259,7 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     _H2D_TURN[key] = 1 - turn
     ev.synchronize()                # 等待该槽上一轮的 H2D 拷贝读完 buf
     if is_span:
-        # memmap 花式索引进 pinned 缓冲的 np 视图：不产生 (n, ctx+1) 中间数组
+        # memmap 花式索引进 pinned 缓冲的 np 视图
         np.take(src[0], src[1], out=buf.numpy())
     else:
         buf.copy_(torch.from_numpy(src))
@@ -282,9 +280,7 @@ def _span_base(ctx: int) -> np.ndarray:
     return base
 
 
-# 宿主端跨度暂存：按 (n_rows, ctx) 缓存一份 int64 缓冲，训练循环每个 step 的
-# (batch, ctx+1) 跨度数组不再逐次通过 ix[:, None] + base 新建（避免每步一次
-# NumPy 分配/释放）。
+# 宿主端跨度暂存：按 (n_rows, ctx) 缓存一份 int64 缓冲，跨度数组经 np.add 就地写入。
 _SPAN_BUF: dict = {}
 
 
@@ -310,8 +306,7 @@ def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
         raise ValueError(f"训练集只有 {len(train)} tokens，不足以采样 ctx={ctx}")
     ix = rng.integers(0, len(train) - ctx, size=batch_size)
     # 向量化索引：一次性取 (batch_size, ctx+1)；不升 int64：uint16 贯穿到 H2D，
-    # 设备端再转 long；(train, span) 元组让 memmap 花式索引直接写入 pinned
-    # 暂存缓冲（CPU 路径则一次拷贝出连续数组），不再产生中间 (B, ctx+1) 数组
+    # 设备端再转 long；(train, span) 元组让 memmap 花式索引直接写入 pinned 暂存缓冲
     span = _make_span(ix, ctx)
     both = _stage_to_device((train, span), device)
     return both[:, :-1], both[:, 1:]
@@ -323,7 +318,7 @@ def get_val_batch(val: np.memmap, ctx: int, idx: int, device: str):
 
 
 def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
-    """一次取多个不重叠窗口拼成批量 (n, ctx)，减少验证前向的调用次数。"""
+    """一次取多个不重叠窗口拼成批量 (n, ctx)。"""
     n_windows = (len(val) - 1) // ctx
     if n_windows <= 0:
         raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")

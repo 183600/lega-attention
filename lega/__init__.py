@@ -6,7 +6,6 @@
 import os as _os
 
 # 包级 CUDA 分配器配置：须在任何 CUDA 初始化之前生效（所有入口脚本都经此导入）。
-# 分段分配（expandable_segments）降低训练/逐样例评测反复分配释放造成的碎片。
 _os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 __version__ = "0.1.0"

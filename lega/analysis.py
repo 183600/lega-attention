@@ -62,8 +62,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     variant = model.variant
     records: List[Dict] = []
     for ex_idx, (ex, task, ctx) in enumerate(zip(examples, task_of, ctx_of)):
-        # 先经 NumPy 物化再转 tensor：torch.tensor(list[, device=cuda]) 会逐元素
-        # 装箱并做一次同步页式拷贝；asarray+from_numpy 避免一次多余的数据复制。
+        # 先经 NumPy 物化再转 tensor（asarray + from_numpy）。
         ids = torch.from_numpy(np.asarray(ex["ids"], dtype=np.int64)[None])
         ids = ids.to(device, non_blocking=True) if device.startswith("cuda") else ids
         # logits 不参与机制分析；只算最后位置
@@ -77,12 +76,9 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
         ns, ne = gold_span if gold_span else (None, None)
         width = qe - qs
         qpos = list(range(qs, qe))
-        # 只切片回传 query 区间：长上下文下 T 远大于问题区长度，
-        # 避免每层把整行 (H, T) 统计搬到 CPU。各层的切片统计 + hit 掩码先在
-        # 设备端各拼为一张 (N, H, width) 张量，再把全部层堆叠一次后单次 D2H：
-        # 原先每层各同步一次（乃至更早逐字段各拷贝一次），逐样例分析长上下文
-        # 时这些同步会串行化整个循环；各层字段完全一致（同模型同变体），堆叠
-        # 维度天然对齐。
+        # 只回传 query 区间的切片统计：各层先在设备端各拼为一张
+        # (N, H, width) 张量，再把全部层堆叠一次后单次 D2H；
+        # 各层字段完全一致（同模型同变体），堆叠维度天然对齐。
         per_layer = []
         for st in out["gate_stats"]:
             argmax_d = st["argmax"][0][:, qs:qe]                          # (H, width) 设备端
@@ -96,7 +92,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                 packed.append(st["logit"][0][:, qs:qe].float())
             if st.get("qterm") is not None:
                 packed.append(st["qterm"][0][:, qs:qe].float())
-            # log_n 为 (width,)：设备端广播进同一张表，避免单独一次拷贝
+            # log_n 为 (width,)：设备端广播进同一张表
             packed.append(st["log_n"][qs:qe].float().expand_as(packed[0]))
             per_layer.append(torch.stack(packed))
         merged_all = torch.stack(per_layer).cpu().numpy()                 # (L, N, H, width)
@@ -109,8 +105,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
             logit = next(it) if st.get("logit") is not None else None
             qterm = next(it) if st.get("qterm") is not None else None
             log_n = next(it)[0]                                           # (width,)
-            # hit 掩码已在设备端判好并随合并表一次带回；矩阵整体 tolist()
-            # 转 Python 标量，避免逐元素 numpy 标量装箱（每条记录 ~10 次）。
+            # hit 掩码随合并表一次带回；矩阵整体 tolist() 转 Python 标量。
             hit_l = hit_m.tolist() if hit_m is not None else None
             mp_l, ln_l = max_p.tolist(), log_n.tolist()
             g_l = g.tolist() if g is not None else None

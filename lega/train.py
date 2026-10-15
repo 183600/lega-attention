@@ -31,8 +31,7 @@ SMOKE_OVERRIDES = {
 def _val_eval_indices(val_len: int, ctx: int, iters: int):
     """均匀覆盖整个验证集的不重复窗口序号。
 
-    旧实现从第 0 个窗口顺序取 idx，且 eval_iters 超过窗口数时循环复用，
-    会得到偏向文本开头、覆盖重复的 PPL/gate 统计。这里改为：
+    规则：
       * iters > 可用窗口数：评估全部窗口（每个只算一次）；
       * iters <= 可用窗口数：在整个验证集上等间隔抽样（含首尾窗口）。
     """
@@ -66,10 +65,8 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
     batch_windows = int(batch_windows)
-    # 设备端累积、循环结束后一次性 .item()：避免每个窗口批一次 GPU 同步。
-    # 预分配标量累加器并 add_ 就地累加：不再每个窗口批新建一个 0 维张量。
-    # 窗口等长，权重即窗口数，用 Python int 就地累计（原先每个窗口批各存一个
-    # 列表元素、结束后再 np.asarray 求和）。
+    # 设备端累积、循环结束后一次性 .item()。
+    # 窗口等长，权重即窗口数，用 Python int 就地累计。
     loss_acc = torch.zeros((), device=device)
     gate_acc = torch.zeros((), device=device)
     total_w = 0
@@ -79,9 +76,9 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     # inference_mode：纯前向评测不生成 autograd 元数据（版本计数/保存变量）；
     # 返回的统计只经 .item() 消费。
     with torch.inference_mode():
-        # 预取流水线：下一窗口批的 memmap 收集 + pinned H2D 提交在当前批前向
-        # 之前发起，使 host 端收集与设备端前向重叠；get_val_windows 内部走
-        # _stage_to_device 的乒乓暂存（双槽 + event 保护），两批在途互不干扰。
+        # 预取流水线：在当前批前向之前发起下一窗口批的 memmap 收集与 H2D
+        # 提交；_stage_to_device 的乒乓暂存（双槽 + event 保护）保证两批
+        # 在途互不干扰。
         n_batches = (len(indices) + batch_windows - 1) // batch_windows
         xy = get_val_windows(val, ctx, indices[:batch_windows], device)
         for bi, s in enumerate(range(0, len(indices), batch_windows)):
@@ -95,13 +92,12 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                 # 验证评测只消费门控均值 g，使用轻量统计
                 out = model(x, targets=y, need_stats=collect_gate, stats_argmax=False)
             nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
-            # add_(alpha=nb) 直接按批大小加权累加：不再为每批新建 *nb 的
-            # 0 维临时张量（loss 前向/门控闭式求和本就以 fp32 返回）。
+            # add_(alpha=nb) 直接按批大小加权累加（loss 前向/门控闭式求和
+            # 本就以 fp32 返回）。
             loss_acc.add_(out["loss"].detach(), alpha=float(nb))
             total_w += nb
             if collect_gate and out["gate_stats"]:
-                # 在设备端先 stack 成 (n_layers,) 再一次性求均值：避免对各层
-                # 0 维张量逐个宿主端除法
+                # 在设备端先 stack 成 (n_layers,) 再求均值
                 gs = [s_["g"].detach().float().mean()
                       for s_ in out["gate_stats"] if s_.get("g") is not None]
                 if gs:
@@ -185,7 +181,7 @@ def main():
         gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
         use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
     )
-    # 对精度不敏感的 fp32 累乘走 TF32（Ampere+）；门控路径在 AMP 下已是 bf16
+    # 按设备启用 TF32（Ampere+）；门控路径在 AMP 下已是 bf16
     enable_tf32(device)
     model = GPT(**model_cfg).to(device)
     if cfg.get("compile", False) and device.startswith("cuda"):
@@ -249,7 +245,7 @@ def main():
     best_val = float("inf")
     last_eval_step = None
     last_eval_metrics = None
-    # loss 设备端累加器跨步复用（每步 zero_()），避免每步一次标量分配
+    # loss 设备端累加器跨步复用（每步 zero_()）
     loss_acc_dev = torch.zeros((), device=device)
 
     def do_eval(step):
@@ -286,14 +282,13 @@ def main():
         for g, base in zip(opt.param_groups, base_lrs):
             g["lr"] = base * lr_f
 
-        # 在设备上累积 loss，避免每个 micro-step 一次 .item() 引发的 GPU 同步
+        # 在设备上累积 loss
         loss_acc_dev.zero_()
         for mi in range(grad_accum):
             x, y = batches[mi]
-            # 预取下一 micro-batch：memmap 收集 + pinned H2D 在当前步前向/反向
-            # 之前发起，与仍在排队的 GPU 工作重叠（_stage_to_device 乒乓暂存
-            # 双槽 + event 保护，两批在途互不干扰）。rng 抽取顺序与逐次采样
-            # 完全一致，确定性不变。
+            # 预取下一 micro-batch：在当前步前向/反向之前发起 memmap 收集与
+            # pinned H2D 提交（_stage_to_device 乒乓暂存双槽 + event 保护，
+            # 两批在途互不干扰）。rng 抽取顺序与逐次采样完全一致，确定性不变。
             if step + 1 < steps or mi + 1 < grad_accum:
                 batches[mi] = get_train_batch(train, train_ctx,
                                               int(cfg["batch_size"]), device, rng)
@@ -301,8 +296,7 @@ def main():
                 batches[mi] = None
             with amp_ctx:
                 out = model(x, targets=y)
-                # grad_accum==1（默认配置）时除法结果就是 loss 本身：
-                # 省掉每个 micro-step 一次标量除法 kernel 与一份 0 维张量分配
+                # grad_accum==1（默认配置）时除法结果就是 loss 本身
                 loss = out["loss"] if grad_accum == 1 else out["loss"] / grad_accum
             loss.backward()
             loss_acc_dev.add_(out["loss"].detach(), alpha=1.0 / grad_accum)
