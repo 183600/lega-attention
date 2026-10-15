@@ -129,11 +129,11 @@ class _ChunkedLinearCE(torch.autograd.Function):
         与 F.cross_entropy(reduction="sum") 等价（logsumexp 内部 max 平移，
         数值稳定）。
         """
-        keep = tgt != ignore_index
-        ts_safe = torch.where(keep, tgt, torch.zeros_like(tgt))
+        ignore = tgt == ignore_index
+        ts_safe = tgt.masked_fill(ignore, 0)
         nll = torch.logsumexp(lcf, dim=-1)
         nll -= lcf.gather(1, ts_safe.unsqueeze(1)).squeeze(1)
-        nll *= keep.to(nll.dtype)
+        nll.masked_fill_(ignore, 0)
         return nll.sum()
 
     @staticmethod
@@ -161,9 +161,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
         with torch.no_grad():
             for s in range(0, tgt.numel(), chunk):
                 lc = F.linear(x2d[s:s + chunk], weight)
+                lcf = _ChunkedLinearCE._loss_dtype(lc)
+                # 升精度副本已生成：立即释放低精度分块 logits
+                # （不升精度时 lcf 与 lc 为同一张量，释放引用不改变语义）。
+                del lc
                 loss.add_(_ChunkedLinearCE._ce_sum(
-                    _ChunkedLinearCE._loss_dtype(lc), tgt[s:s + chunk],
-                    ctx.ignore_index))
+                    lcf, tgt[s:s + chunk], ctx.ignore_index))
         return loss * ctx.inv_n
 
     @staticmethod
@@ -195,11 +198,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 with ac_ctx:
                     lc = F.linear(xs, weight)                        # (m, V)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
+                del lc
                 d = torch.softmax(lcf, dim=-1, out=lcf)
                 keep = ts != ctx.ignore_index
                 # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
                 # 压到 0（其减 1 随后会被 keep 掩码清零）。
-                ts_safe = torch.where(keep, ts, torch.zeros_like(ts))
+                ts_safe = ts.masked_fill(~keep, 0)
                 if neg_one is None or neg_one.size(0) < ts_safe.numel():
                     neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
                 d.scatter_add_(1, ts_safe.unsqueeze(1),
@@ -355,6 +359,7 @@ class GPT(nn.Module):
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
+                    del lc
                     part = _ChunkedLinearCE._ce_sum(lcd, tgt[s:s + CHUNK],
                                                     int(ignore_index))
                     total = part if total is None else total.add_(part)

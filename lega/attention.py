@@ -289,8 +289,9 @@ class CausalSelfAttention(nn.Module):
         if self.use_conc:
             # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
             # clamp/log 原地完成；max_p 为 amax 的反向保存值，需要梯度时
-            # 必须保持原值。
-            c = torch.log(max_p.clamp_min(1e-30)) if (keep_terms or max_p.requires_grad) \
+            # 必须保持原值。clamp_min 的输出是一次性中间张量，在其上原地取
+            # log 不影响反向（反向比较的是 clamp 的输入 max_p）。
+            c = max_p.clamp_min(1e-30).log_() if (keep_terms or max_p.requires_grad) \
                 else max_p.clamp_min_(1e-30).log_()
             if self.use_len:
                 c += log_n                                                # c = log(n * max_j p_j)
@@ -349,15 +350,25 @@ class CausalSelfAttention(nn.Module):
                 band_mask, float("-inf"))
         is_null = self.variant == "null"
         k_null_c = v_null_c = None
+        lse = None
         if is_null:
             k_null_c, v_null_c = self._cast_cached(
                 '_null_cast', (self.k_null, self.v_null), v.dtype)
             att_n = torch.matmul(q_rot, k_null_c.unsqueeze(-1))
             # p_null = 1 / (1 + Z/e^{a_n})，logsumexp 内部做 max 平移，数值稳定；
             # 注意是 a_n - lse（sigmoid(lse - a_n) 得到的是 1 - p_null）
-            p_null = torch.sigmoid(att_n - att.logsumexp(dim=-1, keepdim=True))
+            lse = att.logsumexp(dim=-1, keepdim=True)
+            p_null = torch.sigmoid(att_n - lse)
             del att_n
-        p = self._softmax_reuse(att)
+        # null 变体复用同一次 logsumexp 求 softmax：p = exp(att - lse)，
+        # 省去 softmax 内部再一次整表 max/sum 归约。
+        if lse is None:
+            p = self._softmax_reuse(att)
+        elif (torch.is_grad_enabled() and att.requires_grad) \
+                or torch.compiler.is_compiling():
+            p = (att - lse).exp()
+        else:
+            p = att.sub_(lse).exp_()
         del att
 
         # 完整统计也按查询块收集：只在块内保留 (B,H,C,S)。
@@ -725,6 +736,7 @@ class CausalSelfAttention(nn.Module):
                 #   * 无完整统计需求的训练/推理前向：p_null = sigmoid(a_n - lse)，
                 #     softmax 只覆盖真实键；逐 token 解码（T==1）走此路径。
                 p_null = None
+                lse = None
                 if self.variant == "null":
                     k_null_c2, v_null_c2 = self._cast_cached(
                         '_null_cast', (self.k_null, self.v_null), v.dtype)
@@ -734,11 +746,17 @@ class CausalSelfAttention(nn.Module):
                     else:
                         # logsumexp 内部做 max 平移，数值稳定；
                         # 注意是 a_n - lse（sigmoid(lse - a_n) = 1 - p_null）
-                        p_null = torch.sigmoid(
-                            att_n - att.logsumexp(dim=-1, keepdim=True))
+                        lse = att.logsumexp(dim=-1, keepdim=True)
+                        p_null = torch.sigmoid(att_n - lse)
                         del att_n
                 argmax_stat = None
-                p = self._softmax_reuse(att)
+                if lse is None:
+                    p = self._softmax_reuse(att)
+                elif (torch.is_grad_enabled() and att.requires_grad) \
+                        or torch.compiler.is_compiling():
+                    p = (att - lse).exp()
+                else:
+                    p = att.sub_(lse).exp_()
                 del att
 
                 # 门控所需的注意力统计（LEGA 家族训练时也必须计算）。
@@ -769,7 +787,8 @@ class CausalSelfAttention(nn.Module):
                 # 诊断统计（null 变体的 max_p/argmax/p_null 等）必须基于 dropout 之前的
                 # softmax 分布，否则会因 dropout 的 1/(1-p) 重标定与置零而失真；
                 # dropout 只作用于实际输出路径，因此保留一份 dropout 前的引用。
-                p_pre = p
+                # 无完整统计需求时不保留该引用，让整张概率表在输出投影前即可释放。
+                p_pre = p if full_stats else None
                 if self.attn_dropout > 0 and self.training:
                     p = F.dropout(p, p=self.attn_dropout)
                 if self.variant == "null" and p_null is None:
