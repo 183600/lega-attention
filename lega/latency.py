@@ -1,6 +1,6 @@
 """推理延迟基准：预填充（prefill）与带 KV 缓存的逐 token 解码（decode）。
 
-对比各变体相对标准注意力的实际开销，回答“实际推理延迟”这一评测维度。
+对比各变体的推理耗时，回答“实际推理延迟”这一评测维度。
 用法:
   python -m lega.latency --config configs/small.json --data_dir data/wikitext103 \
       --ckpt_dir out/small --out results/small/latency.json
@@ -202,7 +202,7 @@ def main():
                                        model.vocab_size)
             entry["decode_ms_per_tok"][str(ctx)] = round(dms, 4)
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
-            # 较短 KV 前缀的成本标注成原 ctx 的成本。
+            # 较短 KV 前缀的耗时标注成原 ctx 的耗时。
             entry["decode_prefill_ctx"][str(ctx)] = pf_len
             bs1 = entry["prefill_ms"][str(ctx)]
             bs_key = "1" if "1" in bs1 else next(iter(bs1))

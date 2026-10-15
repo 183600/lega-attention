@@ -1,4 +1,4 @@
-"""评测流水线完整性：延迟基准模块与 run_all 接线是 README 记载的评测维度之一，不得被误删。"""
+"""评测流水线完整性：延迟基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
 import json
 import os
 
@@ -26,7 +26,7 @@ def test_latency_bench_runs_on_cpu():
 
 
 def test_latency_wired_into_configs_and_runner():
-    """延迟配置、run_all 接线与汇总/绘图链路必须保持存在。"""
+    """延迟配置、run_all 接线与汇总/绘图链路均存在。"""
     for name in ("tiny.json", "small.json"):
         with open(os.path.join(ROOT, "configs", name), encoding="utf-8") as f:
             cfg = json.load(f)

@@ -149,11 +149,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
 
     @staticmethod
     def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int) -> torch.Tensor:
-        """sum-CE 的闭式计算：logsumexp - 目标 logit，逐元素掩掉 ignore_index。
+        """sum-CE 的闭式计算：log_softmax - 目标 logit，逐元素掩掉 ignore_index。
 
         与 F.cross_entropy(reduction="sum") 等价（log_softmax 内部 max 平移，
-        数值稳定）。log_softmax 的 CPU 融合核一次遍历同时完成 max 平移与
-        归一化，比 logsumexp + gather 少几遍全词表读写（V 大时约快 3 倍）。
+        数值稳定）。
         """
         ignore = tgt == ignore_index
         ts_safe = tgt.masked_fill(ignore, 0)
@@ -228,7 +227,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 d.scatter_add_(1, ts_safe.unsqueeze(1),
                                neg_one[:ts_safe.numel()])
                 # keep 掩码与 gscale 合并为单次全词表缩放：keep∈{0,1} 时
-                # 1.0*x、0.0*x 均精确，结果与原两次乘法逐位一致，少一遍读写。
+                # 1.0*x、0.0*x 均精确，结果与原两次乘法逐位一致。
                 scale = keep.unsqueeze(1).to(d.dtype)
                 scale.mul_(gscale)
                 d.mul_(scale)
@@ -540,8 +539,8 @@ def configure_optimizer(model: nn.Module, lr: float, weight_decay: float,
         {"params": decay, "weight_decay": weight_decay},
         {"params": no_decay, "weight_decay": 0.0},
     ]
-    # CUDA 用 fused；CPU 显式开 foreach（实测约为单张量内核 2 倍，
-    # 与单张量路径逐元素同序运算，结果一致）。
+    # CUDA 用 fused；CPU 显式开 foreach（与单张量路径逐元素同序运算，
+    # 结果一致）。
     return torch.optim.AdamW(groups, lr=lr, betas=betas, eps=eps, fused=fused,
                              foreach=not fused)
 
