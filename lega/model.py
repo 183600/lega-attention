@@ -176,8 +176,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
         # gx 的每一行都会被下方按块整段覆写，无需先零填充
         gx = torch.empty_like(x2d)
         # gw 直接以计算精度（低精度时为 fp32）预分配并用 addmm_ 原地累加：
-        # 避免每个分块都物化一份 (V, D) 的 gw_chunk 临时张量（大词表下每块
-        # 上百 MB，且每块各分配/释放一次）；同时也比逐块 cast 到 weight.dtype
+        # 避免每个分块都物化一份 (V, D) 的 gw_chunk 临时张量；同时也比逐块
+        # cast 到 weight.dtype
         # 再累加更精确（全程高精度累加，只在返回前 cast 一次）。
         gw = None
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)

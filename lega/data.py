@@ -283,8 +283,8 @@ def _span_base(ctx: int) -> np.ndarray:
 
 
 # 宿主端跨度暂存：按 (n_rows, ctx) 缓存一份 int64 缓冲，训练循环每个 step 的
-# (batch, ctx+1) 跨度数组不再逐次通过 ix[:, None] + base 新建（大 ctx 下每步
-# 数百 KB 的 NumPy 分配/释放）。
+# (batch, ctx+1) 跨度数组不再逐次通过 ix[:, None] + base 新建（避免每步一次
+# NumPy 分配/释放）。
 _SPAN_BUF: dict = {}
 
 
