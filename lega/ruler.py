@@ -374,6 +374,11 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
         n = len(ids)
         if not use_cuda:
             return torch.tensor([ids], dtype=torch.long, device=device)
+        if pin_ev is not None:
+            # 覆盖或替换常驻 pinned 缓冲前，必须等待上一轮 non_blocking H2D
+            # 拷贝把旧缓冲读完：否则主机写入与在途 DMA 构成数据竞争；扩容时
+            # 旧缓冲还可能被 pinned 分配器回收给新缓冲导致数据被踩。
+            pin_ev.synchronize()
         if pin_cap < n:
             pin_buf = torch.empty(n, dtype=torch.long, pin_memory=True)
             # pin_buf.numpy() 与 pin_buf 共享存储；之后 pin_buf 永不重新分配
@@ -381,10 +386,6 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             pin_np = pin_buf.numpy()
             pin_cap = n
             pin_ev = torch.cuda.Event()
-        elif pin_ev is not None:
-            # 覆盖常驻 pinned 缓冲前，必须等待上一轮 non_blocking H2D 拷贝
-            # 把缓冲读完，否则主机写入与在途 DMA 构成数据竞争
-            pin_ev.synchronize()
         # Python 列表直接写入 pinned 缓冲的 NumPy 视图。
         pin_np[:n] = ids
         out = pin_buf[:n].unsqueeze(0).to(device, non_blocking=True)

@@ -8,7 +8,8 @@ import traceback
 # tests/ 而非仓库根，需要显式把仓库根加入路径才能 import tests.* / lega.*。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler"]
+MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
+           "tests.test_latency"]
 
 
 def main() -> int:
