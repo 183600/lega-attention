@@ -77,13 +77,14 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
         ns, ne = gold_span if gold_span else (None, None)
         width = qe - qs
         qpos = list(range(qs, qe))
+        # 只切片回传 query 区间：长上下文下 T 远大于问题区长度，
+        # 避免每层把整行 (H, T) 统计搬到 CPU。各层的切片统计 + hit 掩码先在
+        # 设备端各拼为一张 (N, H, width) 张量，再把全部层堆叠一次后单次 D2H：
+        # 原先每层各同步一次（乃至更早逐字段各拷贝一次），逐样例分析长上下文
+        # 时这些同步会串行化整个循环；各层字段完全一致（同模型同变体），堆叠
+        # 维度天然对齐。
+        per_layer = []
         for st in out["gate_stats"]:
-            layer = st["layer"]
-            # 只切片回传 query 区间：长上下文下 T 远大于问题区长度，
-            # 避免每层把整行 (H, T) 统计搬到 CPU。
-            # 设备端把当层的全部切片统计 + hit 掩码拼为一张 (N, H, width) 张量
-            # 后单次 D2H：原先各 6 次小拷贝各自同步一次，在长上下文逐样例
-            # 评测中会串行化整个分析循环。
             argmax_d = st["argmax"][0][:, qs:qe]                          # (H, width) 设备端
             packed = [st["max_p"][0][:, qs:qe].float()]
             if ns is not None:
@@ -97,7 +98,10 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                 packed.append(st["qterm"][0][:, qs:qe].float())
             # log_n 为 (width,)：设备端广播进同一张表，避免单独一次拷贝
             packed.append(st["log_n"][qs:qe].float().expand_as(packed[0]))
-            merged = torch.stack(packed).cpu().numpy()                    # (N, H, width)
+            per_layer.append(torch.stack(packed))
+        merged_all = torch.stack(per_layer).cpu().numpy()                 # (L, N, H, width)
+        for st, merged in zip(out["gate_stats"], merged_all):
+            layer = st["layer"]
             it = iter(merged)
             max_p = next(it)                                              # (H, width)
             hit_m = next(it) if ns is not None else None
