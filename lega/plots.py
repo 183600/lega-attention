@@ -71,10 +71,16 @@ def _load(path):
 
 def fig_ppl(rdir):
     rows = []
+    splits = set()
     for fp in sorted(glob.glob(os.path.join(rdir, "eval_*.json"))):
         d = _load(fp)
         if d:
-            rows.append((d["variant"], d["val_ppl"], bool(d.get("val_ppl_clamped", False))))
+            # 通用别名 ppl 优先（evaluate.py 约定）；旧文件回退 val_ppl。
+            # split 决定标签用词：默认流水线（auto）在存在 test.bin 时评的是
+            # held-out test，不能一律标成"验证集"。
+            rows.append((d["variant"], d.get("ppl", d["val_ppl"]),
+                         bool(d.get("val_ppl_clamped", False))))
+            splits.add(d.get("split", "val"))
     if not rows:
         return False
     rows.sort(key=lambda r: r[1])
@@ -89,7 +95,13 @@ def fig_ppl(rdir):
             bar.set_hatch("//")
     ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c else "%.2f" % p
                                for (_, p, c) in rows], fontsize=9)
-    ax.set_ylabel("验证集困惑度 (PPL, 越低越好)")
+    if splits == {"test"}:
+        set_name = "测试集"
+    elif len(splits) == 1:
+        set_name = "验证集"
+    else:
+        set_name = "各评测集"   # 混合 split 时不冒充单一集合
+    ax.set_ylabel(f"{set_name}困惑度 (PPL, 越低越好)")
     ax.set_title("语言建模困惑度对比（相同参数量级与训练步数）")
     ax.tick_params(axis="x", rotation=20)
     ax.grid(axis="y", alpha=0.3)
