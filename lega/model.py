@@ -206,9 +206,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
                 d.scatter_add_(1, ts_safe.unsqueeze(1),
                                neg_one[:ts_safe.numel()])
-                keep_scale = keep.unsqueeze(1).to(d.dtype)
-                keep_scale.mul_(gscale)
-                d.mul_(keep_scale)
+                d.mul_(keep.unsqueeze(1))
+                d.mul_(gscale)
                 # d 为计算精度（低精度时为 fp32），weight 可能是 bf16/fp16：
                 # 必须先在 d 的精度上做 GEMM（dtype 需一致）。
                 if w_f is None:

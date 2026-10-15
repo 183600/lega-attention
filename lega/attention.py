@@ -386,10 +386,10 @@ class CausalSelfAttention(nn.Module):
             if is_null:
                 # 解析合并的 null 槽参与联合归一化：真实键概率需乘 (1-p_null)，
                 # argmax 也需与 p_null 比较，结果与 cat 出 S+1 列完全一致。
-                p_null_stat = p_null.squeeze(-1)
-                max_p = max_p * (1 - p_null_stat.float())
+                p_null_stat = p_null.squeeze(-1).float()
+                max_p.mul_(1 - p_null_stat)
                 argmax_stat = torch.where(
-                    p_null_stat > max_p.to(p_null_stat.dtype),
+                    p_null_stat > max_p,
                     torch.full_like(argmax_real, -1), argmax_real)
             else:
                 argmax_stat = argmax_real
@@ -828,12 +828,16 @@ class CausalSelfAttention(nn.Module):
                             stats["p_null"] = p_null_stat.float()
                     elif self.variant == "null":
                         # null 变体的统计必须基于含 null 槽的完整 softmax，
-                        # 否则会虚增集中度并错误地把 null 槽落点记为真实键
-                        stats["max_p"] = p_pre[..., :n_real].amax(dim=-1).float()
-                        amax_full = p_pre.argmax(dim=-1)
-                        stats["argmax"] = torch.where(amax_full < n_real, amax_full,
-                                                      torch.full_like(amax_full, -1))
-                        stats["p_null"] = p_pre[..., -1].float()          # 分给 null 槽的概率质量
+                        # 否则会虚增集中度并错误地把 null 槽落点记为真实键。
+                        # 真实键一次 max 同时给出概率与落点，再与 null 槽比较；
+                        # 与对 S+1 列整体 argmax 后判是否落在 null 槽完全一致。
+                        max_real, amax_real = torch.max(p_pre[..., :n_real], dim=-1)
+                        null_p = p_pre[..., -1]
+                        stats["argmax"] = torch.where(null_p > max_real,
+                                                      torch.full_like(amax_real, -1),
+                                                      amax_real)
+                        stats["max_p"] = max_real.float()
+                        stats["p_null"] = null_p.float()                  # 分给 null 槽的概率质量
                     else:
                         # argmax 已在 softmax 前提取（softmax 不变量，真实键内相对位置）
                         stats["argmax"] = argmax_stat
