@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""一键实验流水线：训练全部变体 → PPL → RULER → 延迟 → 机制分析 → 图表 → 汇总表。
+"""一键实验流水线：训练全部变体 → PPL → RULER → 机制分析 → 图表 → 汇总表。
 
 变体（相同参数量级与训练步数）:
   standard | qgate | null | lega | lega_no_len | lega_no_conc | lega_no_query
@@ -43,7 +43,7 @@ def _repo_path(path: str) -> str:
 
 
 def build_summary(results_dir: str) -> dict:
-    """汇总 PPL / RULER / 延迟 / 参数量为 Markdown + CSV + JSON。"""
+    """汇总 PPL / RULER / 参数量为 Markdown + CSV + JSON。"""
 
     def load(p):
         if not os.path.exists(p):
@@ -58,20 +58,6 @@ def build_summary(results_dir: str) -> dict:
         if d:
             variants.append(d["variant"])
             eval_splits.add(d.get("split", "val"))
-
-    # 汇总延迟时必须使用所有变体共有的同一上下文档，不允许各取自己的最大 ctx。
-    lat = load(os.path.join(results_dir, "latency.json")) or {}
-    lat_entries = {v: (lat.get("variants") or {}).get(v) for v in variants}
-    common_ctxs = None
-    for v in variants:
-        e = lat_entries.get(v)
-        if not e:
-            continue
-        usable = {int(c) for c, by_bs in (e.get("prefill_ms") or {}).items()
-                  if isinstance(by_bs, dict) and by_bs.get("1") is not None
-                  and (e.get("decode_ms_per_tok") or {}).get(c) is not None}
-        common_ctxs = usable if common_ctxs is None else (common_ctxs & usable)
-    common_ctx = max(common_ctxs) if common_ctxs else None
 
     rows = []
     for v in variants:
@@ -104,14 +90,6 @@ def build_summary(results_dir: str) -> dict:
         # 先在每个任务内对上下文档求平均，再对任务求宏平均：避免某任务因
         # block_size/生成余量钳制少跑一档而被隐式降权。
         row["ruler_avg"] = sum(ems) / len(ems) if ems else None
-        # 延迟（取全部变体的最大公共 ctx、batch=1）
-        e = lat_entries.get(v)
-        if e and common_ctx is not None:
-            ckey = str(common_ctx)
-            row["prefill_ms"] = (e.get("prefill_ms") or {}).get(ckey, {}).get("1")
-            row["decode_ms_per_tok"] = (e.get("decode_ms_per_tok") or {}).get(ckey)
-            row["decode_prefill_ctx"] = (e.get("decode_prefill_ctx") or {}).get(ckey)
-            row["latency_ctx"] = common_ctx
         # 机制分析关键指标
         for k, key in [("auroc_logit", "auroc_logit"), ("auroc_qterm", "auroc_qterm"),
                        ("misleading_rate", "misleading_rate"),
@@ -120,37 +98,12 @@ def build_summary(results_dir: str) -> dict:
             row[k] = an.get(key)
         rows.append(row)
 
-    # 延迟基线：优先取 standard_sdpa，缺失时退回显式 standard。
-    # standard_sdpa 不单独训练/评测、不会出现在 eval_*.json 里，
-    # 因此基线必须从 latency.json 的条目直取而非从 rows 里找。
-    lat_all = lat.get("variants") or {}
-
-    def _prefill_at_common(variant_name):
-        e = lat_all.get(variant_name)
-        if not e or common_ctx is None:
-            return None
-        return (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
-
-    base_ms, base_name = None, None
-    for cand in ("standard_sdpa", "standard"):
-        e = lat_all.get(cand)
-        if e and _prefill_at_common(cand) is not None:
-            base_ms, base_name = _prefill_at_common(cand), cand
-            break
-    for r in rows:
-        if base_ms is not None and base_ms > 0 \
-                and r.get("prefill_ms") is not None and r["prefill_ms"] > 0 \
-                and r["variant"] not in ("standard", "standard_sdpa"):
-            r["prefill_overhead_pct"] = round(
-                (r["prefill_ms"] - base_ms) / base_ms * 100, 2)
-
     # Markdown
     cols = [("variant_cn", "变体"), ("params", "参数量"), ("gate_extra", "门控额外参数"),
             ("val_ppl", "PPL↓"), ("ruler_avg", "RULER平均↑"),
             ("ruler_niah_synth", "niah_synth↑"), ("ruler_niah_corpus", "niah_corpus↑"),
             ("ruler_niah_multikey", "multikey↑"), ("ruler_fwe", "fwe↑"), ("ruler_vt", "vt↑"),
-            ("prefill_ms", "Prefill ms↓"), ("prefill_overhead_pct", "开销%"),
-            ("decode_ms_per_tok", "Decode ms/tok↓"), ("gate_mean", "门控均值"),
+            ("gate_mean", "门控均值"),
             ("misleading_rate", "集中但看错率"), ("misleading_given_conc", "集中后看错率"),
             ("auroc_logit", "AUROC(logit)"),
             ("auroc_qterm", "AUROC(仅查询)")]
@@ -163,7 +116,7 @@ def build_summary(results_dir: str) -> dict:
         return str(x)
 
     md = ["# LEGA 实验汇总", "",
-          f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}；PPL/RULER/延迟均在相同配置与步数下测得。",
+          f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}；PPL/RULER 均在相同配置与步数下测得。",
           ""]
     if rows:
         header = "| " + " | ".join(c for _, c in cols) + " |"
@@ -179,9 +132,6 @@ def build_summary(results_dir: str) -> dict:
                       "（各变体使用相同 seed 的同一批样本，差异为配对比较）；",
                       "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，见机制分析。",
                       split_note, ""]
-        if common_ctx is not None:
-            cols_notes.insert(1, f"“开销%”以 {base_name or 'standard'} 的 prefill 为基线"
-                                 f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；")
         md += [""] + cols_notes
     else:
         md.append("（暂无结果，先运行训练评测）")
@@ -214,7 +164,6 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--skip_train", action="store_true")
     p.add_argument("--skip_ruler", action="store_true")
-    p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument("--skip_plots", action="store_true")
     args = p.parse_args()
@@ -261,15 +210,6 @@ def main():
                 run([py, "-m", "lega.ruler", "--ckpt", ckpt, "--data_dir", args.data_dir,
                      "--out", os.path.join(results_dir, f"ruler_{v}.json"),
                      "--device", args.device] + ruler_over)
-
-    if not args.skip_latency:
-        # 显式给出延迟基准的变体清单：lega.latency 的默认值不含消融变体，
-        # 不传会让汇总表的 lega_no_len/no_conc/no_query 延迟列恒为 "-"。
-        lat_variants = ",".join(dict.fromkeys(["standard", "standard_sdpa"] + variants))
-        run([py, "-m", "lega.latency", "--config", args.config, "--data_dir", args.data_dir,
-             "--ckpt_dir", out_root, "--out", os.path.join(results_dir, "latency.json"),
-             "--variants", lat_variants,
-             "--device", args.device] + (["--smoke"] if args.smoke else []))
 
     if not args.skip_analysis:
         for v in variants:

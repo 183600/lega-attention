@@ -272,11 +272,9 @@ class CausalSelfAttention(nn.Module):
                     keep_terms: bool = False):
         """按 variant 组合门控 logit；返回 (g, logit, qterm)，不适用项为 None。
 
-        qterm 为调用方预归约的查询项 w·q（(B,H,T) 或 None）：SDPA 与非分块
-        路径由 forward 在融合 QKV 视图上一次性归约；分块路径逐块从原始视图
-        新建（checkpoint 重算会再次读取闭包张量，逐块新建的张量可原地累加/
-        sigmoid 而不污染重算输入）。
-        keep_terms=False（训练/普通推理/轻量诊断）时各项原地累加进 logit，
+        qterm 为 RoPE 旋转前的查询内容向量与门控权重 w 的归约结果
+        （(B,H,T) 或 None），由调用方在对应路径上计算。
+        keep_terms=False（训练/普通推理/轻量诊断）时各项累加进 logit，
         qterm/logit 不在返回中保留（返回 None）。
         keep_terms=True（完整机制分析）时 qterm 需原样返回给统计，logit 在其
         副本上累加。
@@ -284,8 +282,7 @@ class CausalSelfAttention(nn.Module):
         H = self.n_heads
         logit = None
         if self.use_query:
-            # qterm 已由调用方预归约并升到 fp32；
-            # logit 直接原地累加，避免再乘一份副本。
+            # qterm 已由调用方预归约并升到 fp32。
             logit = qterm.clone() if keep_terms else qterm
         # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加。
         if self.use_conc:
@@ -431,8 +428,7 @@ class CausalSelfAttention(nn.Module):
         """按查询块执行显式注意力；训练态逐块 checkpoint。
 
         q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次。
-        q_content 为 RoPE 前的查询内容视图 (B,H,T,Dh)：门控查询项在其上
-        直接归约，无需连续化或复制。
+        q_content 为 RoPE 前的查询内容视图 (B,H,T,Dh)。
         """
         S = k.shape[2]
         # q/k/v 来自 QKV 融合 GEMM 的 permute().unbind() 视图：批量维步长
@@ -440,7 +436,7 @@ class CausalSelfAttention(nn.Module):
         # 行主序视图。
         # 序列本身的 Scale 已在调用方按块外完成，此处只做布局规整。
         q_rot = _ensure_mm_input(q_rot)
-        # 门控权重按内容 dtype 缓存转换结果（只读，可被闭包安全捕获）。
+        # 门控权重按内容 dtype 转换（只读，可被闭包安全捕获）。
         gw = self._cast_cached(
             '_gate_w_cast', (self.gate_w,), q_content.dtype)[0] \
             if self.use_query else None
@@ -462,9 +458,8 @@ class CausalSelfAttention(nn.Module):
             for q0 in range(0, T, cq):
                 q1 = min(T, q0 + cq)
                 qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
-                # 门控查询项逐块归约：直接在融合 QKV 输出的切片上做 mul+sum，
-                # 无需为整段查询复制连续化副本；逐块新建的张量使 checkpoint
-                # 反向重算读取的始终是原始 q_content（原地 sigmoid 无污染）。
+                # 门控查询项逐块归约；逐块新建的张量使 checkpoint
+                # 反向重算读取的始终是原始 q_content（sigmoid 无污染）。
                 qt_c = None if gw is None else (
                     (q_content[:, :, q0:q1].transpose(1, 2) * gw).sum(dim=-1)
                     .float().transpose(1, 2))
@@ -624,10 +619,8 @@ class CausalSelfAttention(nn.Module):
                       and elems >= _CHUNK_TARGET_ELEMS
                       and not (self.training and self.attn_dropout > 0))
 
-        # 门控查询项 w·q 预计算：在 RoPE 前的融合 QKV 视图上直接归约，避免
-        # 额外复制一份查询内容向量（该副本会随显式路径的反向图存活到整个反
-        # 向结束）。分块路径在 _attend_chunked 内逐块归约（checkpoint 重算
-        # 安全），此处只为 SDPA 与非分块显式路径服务。
+        # 门控查询项 w·q 预计算；分块路径在 _attend_chunked 内逐块归约
+        # （checkpoint 重算安全），此处只为 SDPA 与非分块显式路径服务。
         qterm_pre = None
         if self.use_query and not will_chunk:
             gw_pre = self._cast_cached(

@@ -126,9 +126,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
     def _autocast_dtype(t: torch.Tensor):
         """当前 autocast 的目标 dtype（未启用时为 None）。
 
-        torch.is_autocast_enabled/get_autocast_dtype 的 device_type 参数是
-        torch>=2.4 才提供的，而 requirements.txt 允许 torch>=2.1；旧版
-        回退到无参形式，避免训练在旧版 torch 上直接 TypeError。
+        torch.is_autocast_enabled/get_autocast_dtype 的 device_type 参数
+        自 torch>=2.4 起提供；旧版回退到无参形式。
         """
         if t.is_cuda:
             try:

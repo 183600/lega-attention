@@ -38,13 +38,5 @@
   "analysis": {
     "n_examples": 40,
     "tau": 0.5
-  },
-
-  "latency": {
-    "ctx_lens": [256, 512, 1024],
-    "batch_sizes": [1, 8],
-    "decode_tokens": 64,
-    "iters": 20,
-    "warmup": 5
   }
 }
