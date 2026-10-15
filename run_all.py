@@ -263,8 +263,12 @@ def main():
                      "--device", args.device] + ruler_over)
 
     if not args.skip_latency:
+        # 显式给出延迟基准的变体清单：lega.latency 的默认值不含消融变体，
+        # 不传会让汇总表的 lega_no_len/no_conc/no_query 延迟列恒为 "-"。
+        lat_variants = ",".join(dict.fromkeys(["standard", "standard_sdpa"] + variants))
         run([py, "-m", "lega.latency", "--config", args.config, "--data_dir", args.data_dir,
              "--ckpt_dir", out_root, "--out", os.path.join(results_dir, "latency.json"),
+             "--variants", lat_variants,
              "--device", args.device] + (["--smoke"] if args.smoke else []))
 
     if not args.skip_analysis:

@@ -123,6 +123,32 @@ class _ChunkedLinearCE(torch.autograd.Function):
         return logits if logits.dtype in (torch.float32, torch.float64) else logits.float()
 
     @staticmethod
+    def _autocast_dtype(t: torch.Tensor):
+        """当前 autocast 的目标 dtype（未启用时为 None）。
+
+        torch.is_autocast_enabled/get_autocast_dtype 的 device_type 参数是
+        torch>=2.4 才提供的，而 requirements.txt 允许 torch>=2.1；旧版
+        回退到无参形式，避免训练在旧版 torch 上直接 TypeError。
+        """
+        if t.is_cuda:
+            try:
+                enabled = torch.is_autocast_enabled("cuda")
+            except TypeError:
+                enabled = torch.is_autocast_enabled()
+        else:
+            try:
+                enabled = torch.is_autocast_enabled("cpu")
+            except TypeError:
+                enabled = torch.is_autocast_cpu_enabled()
+        if not enabled:
+            return None
+        try:
+            return torch.get_autocast_dtype("cuda" if t.is_cuda else "cpu")
+        except TypeError:
+            return (torch.get_autocast_gpu_dtype() if t.is_cuda
+                    else torch.get_autocast_cpu_dtype())
+
+    @staticmethod
     def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int) -> torch.Tensor:
         """sum-CE 的闭式计算：logsumexp - 目标 logit，逐元素掩掉 ignore_index。
 
@@ -144,12 +170,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         # 记录前向的 autocast 状态：反向重算 logits 必须与前向同精度，
         # 否则 AMP 下前向用 bf16 logits 报告 loss、反向却按 fp32 logits
         # 求梯度，二者不再是同一个损失函数。
-        if x2d.is_cuda:
-            ctx.amp_dtype = (torch.get_autocast_dtype("cuda")
-                             if torch.is_autocast_enabled("cuda") else None)
-        else:
-            ctx.amp_dtype = (torch.get_autocast_dtype("cpu")
-                             if torch.is_autocast_enabled("cpu") else None)
+        ctx.amp_dtype = _ChunkedLinearCE._autocast_dtype(x2d)
         # n_valid 以设备张量保存；clamp_min(1) 同时吸收"全部位置被忽略"的
         # 除零情形（此时梯度因 keep 掩码全零而天然为 0，无需提前特判）。
         n_valid = (tgt != ctx.ignore_index).sum()

@@ -206,8 +206,11 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
     # 保证正文能完整放入 token 长度空间，而不是事后硬截断破坏词频分布。
     avg_len = max(1.0, len(tok.encode(" " + " ".join(words))) / len(words))
     k = int(room / avg_len - 2 * len(words)) // 10
-    if k < 3:  # k 必须 > 2，否则高频词与低频词无法区分
-        raise ContextTooSmall(f"fwe 长度空间不足: room={room}, 需要更大 ctx")
+    if k < 3:
+        # 按 120 词规划放不下时仍固定 k=3（k 必须 > 2，否则高频/低频无法
+        # 区分），交由下方循环删除低频词压缩正文；直接在这里抛错会让
+        # ctx 偏小的档位整个任务被跳过，长度扫掠曲线出现缺口。
+        k = 3
     while True:
         tokens: List[str] = []
         for w in words:
