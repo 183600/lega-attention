@@ -65,7 +65,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
     batch_windows = int(batch_windows)
-    # 设备端累积、循环结束后一次性 .item()。
+    # 设备端累积，循环结束后统一读取。
     # 窗口等长，权重即窗口数，用 Python int 就地累计。
     loss_acc = torch.zeros((), device=device)
     gate_acc = torch.zeros((), device=device)
@@ -73,8 +73,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     gate_w_total = 0
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and device.startswith("cuda")) else contextlib.nullcontext())
-    # inference_mode：纯前向评测不生成 autograd 元数据（版本计数/保存变量）；
-    # 返回的统计只经 .item() 消费。
+    # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
     with torch.inference_mode():
         # 预取流水线：在当前批前向之前发起下一窗口批的 memmap 收集与 H2D
         # 提交；_stage_to_device 的乒乓暂存（双槽 + event 保护）保证两批
@@ -245,7 +244,7 @@ def main():
     best_val = float("inf")
     last_eval_step = None
     last_eval_metrics = None
-    # loss 设备端累加器跨步复用（每步 zero_()）
+    # loss 设备端累加器（每步 zero_()）
     loss_acc_dev = torch.zeros((), device=device)
 
     def do_eval(step):
@@ -308,7 +307,7 @@ def main():
         tokens_seen += int(cfg["batch_size"]) * train_ctx * grad_accum
 
         if (step + 1) % log_every == 0 or step == 0:
-            loss_acc = float(loss_acc_dev.item())   # 仅在记录日志时同步
+            loss_acc = float(loss_acc_dev.item())
             rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
                    "lr": base_lrs[0] * lr_f, "time": now_str()}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")

@@ -268,7 +268,7 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     return out if out.dtype == torch.int64 else out.long()
 
 
-# 按 ctx 缓存索引基底，每个 ctx 只需新建一次 arange
+# 按 ctx 缓存索引基底
 _SPAN_BASE: dict = {}
 
 
@@ -305,8 +305,8 @@ def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
     if len(train) < ctx + 1:
         raise ValueError(f"训练集只有 {len(train)} tokens，不足以采样 ctx={ctx}")
     ix = rng.integers(0, len(train) - ctx, size=batch_size)
-    # 向量化索引：一次性取 (batch_size, ctx+1)；不升 int64：uint16 贯穿到 H2D，
-    # 设备端再转 long；(train, span) 元组让 memmap 花式索引直接写入 pinned 暂存缓冲
+    # 取 (batch_size, ctx+1) 的索引；uint16 贯穿到 H2D，设备端再转 long；
+    # (train, span) 元组让 memmap 花式索引写入 pinned 暂存缓冲
     span = _make_span(ix, ctx)
     both = _stage_to_device((train, span), device)
     return both[:, :-1], both[:, 1:]

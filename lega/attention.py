@@ -360,8 +360,7 @@ class CausalSelfAttention(nn.Module):
             lse = att.logsumexp(dim=-1, keepdim=True)
             p_null = torch.sigmoid(att_n - lse)
             del att_n
-        # null 变体复用同一次 logsumexp 求 softmax：p = exp(att - lse)，
-        # 省去 softmax 内部再一次整表 max/sum 归约。
+        # null 变体复用同一次 logsumexp 求 softmax：p = exp(att - lse)。
         if lse is None:
             p = self._softmax_reuse(att)
         elif (torch.is_grad_enabled() and att.requires_grad) \
@@ -371,11 +370,10 @@ class CausalSelfAttention(nn.Module):
             p = att.sub_(lse).exp_()
         del att
 
-        # 完整统计也按查询块收集：只在块内保留 (B,H,C,S)。
+        # 完整统计也按查询块收集。
         max_p = argmax_stat = p_null_stat = None
         # keep_gate_terms=False 的轻量统计只消费 g：不为 standard/null 计算
-        # max_p，也不为任何变体计算 argmax/p_null 诊断；完整统计里最大值与
-        # argmax 共用一次 torch.max 归约。
+        # max_p，也不为任何变体计算 argmax/p_null 诊断。
         full_diag = collect_stats and keep_gate_terms
         need_p_stats = full_diag or (self.variant in _LEGA_FAMILY and self.use_conc)
         if need_p_stats:
@@ -449,8 +447,8 @@ class CausalSelfAttention(nn.Module):
         # checkpoint 的前向以 collect_stats=False 运行且返回单个张量，
         # 需要统计时必须走普通调用，否则统计会被静默丢弃（g/logit 全为 None）。
         use_ckpt = torch.is_grad_enabled() and q_rot.requires_grad and not collect_stats
-        # 输出直接按 (B,T,H,Dh) 连续布局写入预分配缓冲（逐块 copy_ 是 autograd
-        # 安全的）：块输出到多头合并的转置在写块时一次完成
+        # 输出按 (B,T,H,Dh) 连续布局写入预分配缓冲（逐块 copy_ 是 autograd
+        # 安全的），块输出到多头合并的转置在此完成
         Dh = v.shape[-1]
 
         def _run_chunks():
@@ -769,8 +767,7 @@ class CausalSelfAttention(nn.Module):
                 need_logn = self.use_len or bool(need_stats)
                 if need_logn:
                     log_n = _log_n(past_len, T, dev)
-                # max_p 与完整诊断的 argmax 共用一次 torch.max 归约；
-                # 两者都必须基于 dropout 前的 softmax 分布。
+                # max_p 与完整诊断的 argmax 都必须基于 dropout 前的 softmax 分布。
                 # argmax 落点是 softmax 不变量。
                 need_argmax_real = (bool(need_stats) and stats_argmax
                                     and self.variant != "null")
@@ -787,7 +784,7 @@ class CausalSelfAttention(nn.Module):
                 # 诊断统计（null 变体的 max_p/argmax/p_null 等）必须基于 dropout 之前的
                 # softmax 分布，否则会因 dropout 的 1/(1-p) 重标定与置零而失真；
                 # dropout 只作用于实际输出路径，因此保留一份 dropout 前的引用。
-                # 无完整统计需求时不保留该引用，让整张概率表在输出投影前即可释放。
+                # 无完整统计需求时不保留该引用。
                 p_pre = p if full_stats else None
                 if self.attn_dropout > 0 and self.training:
                     p = F.dropout(p, p=self.attn_dropout)

@@ -351,7 +351,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     # 逐样例 prompt 的 H2D 走常驻 pinned 缓冲 + non_blocking 异步拷贝。
     pin_cap = 0
     pin_buf: Optional[torch.Tensor] = None
-    pin_np = None          # pinned 缓冲的 NumPy 视图（与 pin_buf 共享同一份内存）
+    pin_np = None          # pinned 缓冲的 NumPy 视图（与 pin_buf 共享存储）
     pin_ev: Optional[torch.cuda.Event] = None
     use_cuda = device.startswith("cuda")
 

@@ -162,8 +162,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
             for s in range(0, tgt.numel(), chunk):
                 lc = F.linear(x2d[s:s + chunk], weight)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
-                # 升精度副本已生成：立即释放低精度分块 logits
-                # （不升精度时 lcf 与 lc 为同一张量，释放引用不改变语义）。
+                # 升精度副本已生成（不升精度时 lcf 与 lc 为同一张量）。
                 del lc
                 loss.add_(_ChunkedLinearCE._ce_sum(
                     lcf, tgt[s:s + chunk], ctx.ignore_index))
@@ -174,13 +173,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
         x2d, weight, tgt = ctx.saved_tensors
         # gx 的每一行都会被下方按块整段覆写，无需先零填充
         gx = torch.empty_like(x2d)
-        # gw 直接以计算精度（低精度时为 fp32）预分配并用 addmm_ 原地累加：
+        # gw 以计算精度（低精度时为 fp32）累加：
         # 全程高精度累加，只在返回前 cast 一次。
         gw = None
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
-        # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot），
-        # 不搭建逐块 autograd 子图，反向为逐块 3 次 GEMM。
+        # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot）。
         with torch.no_grad():
             # 与前向一致的 autocast 上下文，保证反向重算的 logits 精度相同
             if ctx.amp_dtype is not None:
@@ -188,9 +186,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 ac_ctx = torch.autocast(dev_type, dtype=ctx.amp_dtype)
             else:
                 ac_ctx = contextlib.nullcontext()
-            neg_one = None   # scatter_add_ 的 -1 源张量按块复用
+            neg_one = None   # scatter_add_ 的 -1 源张量
             # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度的
-            # 转换在每个分块中完全相同，提到循环外只做一次。
+            # 转换在每个分块中完全相同。
             w_f = None
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
@@ -212,7 +210,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 keep_scale.mul_(gscale)
                 d.mul_(keep_scale)
                 # d 为计算精度（低精度时为 fp32），weight 可能是 bf16/fp16：
-                # 必须先在 d 的精度上做 GEMM（dtype 需一致）。转换结果按块复用。
+                # 必须先在 d 的精度上做 GEMM（dtype 需一致）。
                 if w_f is None:
                     w_f = weight.to(d.dtype)
                 gxs = gx[s:s + ctx.chunk]
