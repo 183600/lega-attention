@@ -477,7 +477,7 @@ def main():
     import argparse
     from .model import load_model
     from .data import load_tokenizer
-    from .utils import get_device
+    from .utils import get_device, enable_tf32
 
     p = argparse.ArgumentParser(description="RULER 5 任务评测")
     p.add_argument("--ckpt", required=True)
@@ -489,6 +489,7 @@ def main():
     args = p.parse_args()
 
     device = get_device(args.device)
+    enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device)
     tok = load_tokenizer(args.data_dir)
 

@@ -845,7 +845,14 @@ class CausalSelfAttention(nn.Module):
 
         # 合并多头: (B, H, T, Dh) -> (B, T, C)；分块路径已按 (B,T,H,Dh) 布局
         # 直接写出，其 o 本身就是合并后的 (B,T,C)
-        if o.dim() == 4:
+        if o.dim() == 4 and T == 1:
+            # 单查询步（逐 token 解码）：(B, H, 1, Dh) 的 H×Dh 子块步长连续，
+            # 可零拷贝折成 (B, C) 直接进输出投影，省掉每层每步一次
+            # transpose(1,2).contiguous() 的拷贝与分配。
+            out = self.wo(o.reshape(B, C)).unsqueeze(1)
+        elif o.dim() == 4:
             o = o.transpose(1, 2).contiguous().view(B, T, C)
-        out = self.wo(o)
+            out = self.wo(o)
+        else:
+            out = self.wo(o)
         return out, cache, stats

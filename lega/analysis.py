@@ -34,7 +34,7 @@ from .data import load_tokenizer
 from .model import load_model
 from .ruler import (build_niah, build_vt, load_corpus_sents,
                     ContextTooSmall, _stable_hash)
-from .utils import auroc, get_device, pearson, save_json
+from .utils import auroc, enable_tf32, get_device, pearson, save_json
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -244,6 +244,7 @@ def main():
     args = p.parse_args()
 
     device = get_device(args.device)
+    enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device, use_sdpa_standard=False)
     tok = load_tokenizer(args.data_dir)
     variant = ck.get("variant", model.variant)

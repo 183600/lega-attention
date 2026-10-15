@@ -50,6 +50,16 @@ def get_device(device: str = "auto") -> str:
     return device
 
 
+def enable_tf32(device: str) -> None:
+    """CUDA 上启用 TF32 矩阵乘/卷积（与训练进程口径一致），加速 fp32 前向。
+
+    bf16/AMP 路径不受影响；非 CUDA 设备为空操作。
+    """
+    if device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+
 def pearson(x, y):
     """Pearson 相关系数；样本不足/零方差/结果非有限时返回 None（调用方以 None 表示不可计算，
     避免 nan 写入 JSON 产生 NaN 字面量——那并非合法 JSON）。"""

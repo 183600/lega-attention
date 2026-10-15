@@ -12,7 +12,7 @@ import os
 from .data import load_bin
 from .model import load_model, count_params, gate_extra_params
 from .train import evaluate_val
-from .utils import get_device, save_json
+from .utils import enable_tf32, get_device, save_json
 
 
 def main():
@@ -30,6 +30,7 @@ def main():
     args = p.parse_args()
 
     device = get_device(args.device)
+    enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device)
     split = args.split
     if split == "auto":

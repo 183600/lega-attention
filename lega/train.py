@@ -20,7 +20,7 @@ import torch
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
-from .utils import set_seed, now_str, save_json
+from .utils import set_seed, now_str, save_json, enable_tf32
 
 SMOKE_OVERRIDES = {
     "steps": 20, "eval_every": 10, "eval_iters": 2, "log_every": 5,
@@ -185,11 +185,8 @@ def main():
         gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
         use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
     )
-    if device.startswith("cuda"):
-        # 对精度不敏感的 fp32 累乘走 TF32（Ampere+）；
-        # 门控路径本身在 AMP 下已是 bf16，不受影响
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # 对精度不敏感的 fp32 累乘走 TF32（Ampere+）；门控路径在 AMP 下已是 bf16
+    enable_tf32(device)
     model = GPT(**model_cfg).to(device)
     if cfg.get("compile", False) and device.startswith("cuda"):
         try:
