@@ -359,23 +359,29 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     # n_samples × ctx_lens × tasks 次逐样例同步会串行化整个评测。
     pin_cap = 0
     pin_buf: Optional[torch.Tensor] = None
+    pin_np = None          # pinned 缓冲的 NumPy 视图（与 pin_buf 共享同一份内存）
     pin_ev: Optional[torch.cuda.Event] = None
     use_cuda = device.startswith("cuda")
 
     def _ids_to_device(ids: List[int]) -> torch.Tensor:
-        nonlocal pin_cap, pin_buf, pin_ev
+        nonlocal pin_cap, pin_buf, pin_np, pin_ev
         n = len(ids)
         if not use_cuda:
             return torch.tensor([ids], dtype=torch.long, device=device)
         if pin_cap < n:
             pin_buf = torch.empty(n, dtype=torch.long, pin_memory=True)
+            # pin_buf.numpy() 与 pin_buf 共享存储；之后 pin_buf 永不重新分配
+            # （容量不足时整体重建），视图生命周期安全。
+            pin_np = pin_buf.numpy()
             pin_cap = n
             pin_ev = torch.cuda.Event()
         elif pin_ev is not None:
             # 覆盖常驻 pinned 缓冲前，必须等待上一轮 non_blocking H2D 拷贝
             # 把缓冲读完，否则主机写入与在途 DMA 构成数据竞争
             pin_ev.synchronize()
-        pin_buf[:n].copy_(torch.as_tensor(ids, dtype=torch.long))
+        # Python 列表直接写入 pinned 缓冲的 NumPy 视图：省掉原先每样例一次的
+        # torch.as_tensor 主机端 int64 张量分配 + 随后 copy_ 的二次拷贝。
+        pin_np[:n] = ids
         out = pin_buf[:n].unsqueeze(0).to(device, non_blocking=True)
         pin_ev.record()
         return out

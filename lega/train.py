@@ -95,8 +95,9 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                 # 验证评测只消费门控均值 g，使用轻量统计
                 out = model(x, targets=y, need_stats=collect_gate, stats_argmax=False)
             nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
-            lt = out["loss"].detach().float() * nb
-            loss_acc.add_(lt)
+            # add_(alpha=nb) 直接按批大小加权累加：不再为每批新建 *nb 的
+            # 0 维临时张量（loss 前向/门控闭式求和本就以 fp32 返回）。
+            loss_acc.add_(out["loss"].detach(), alpha=float(nb))
             total_w += nb
             if collect_gate and out["gate_stats"]:
                 # 在设备端先 stack 成 (n_layers,) 再一次性求均值：避免对各层
@@ -104,8 +105,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                 gs = [s_["g"].detach().float().mean()
                       for s_ in out["gate_stats"] if s_.get("g") is not None]
                 if gs:
-                    gt = torch.stack(gs).mean() * nb
-                    gate_acc.add_(gt)
+                    gate_acc.add_(torch.stack(gs).mean(), alpha=float(nb))
                     gate_w_total += nb
     # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
     # 使 torch.load(weights_only=True) 反序列化失败且不合法

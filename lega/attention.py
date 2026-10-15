@@ -142,6 +142,19 @@ def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
     return _log_n_table(dev, past_len + T)[past_len:past_len + T]
 
 
+def _ensure_mm_input(t: torch.Tensor) -> torch.Tensor:
+    """仅当批量 matmul 无法零拷贝消费时才连续化。
+
+    判定标准：每个 (m, n) 矩阵行主序（末维 stride 1、次末维 stride 恰为行宽），
+    批量维步长任意——strided batched GEMM 直接接受。permute().unbind() 之类
+    在矩阵维上留下跨步的视图才需要复制；(B,H,S,Dh) 连续张量或其序列维前缀
+    切片（如静态 KV 缓存 [:, :, :end]）已满足条件，不再做整份拷贝。
+    """
+    if t.stride(-1) == 1 and (t.size(-1) <= 1 or t.stride(-2) == t.size(-1)):
+        return t
+    return t.contiguous()
+
+
 def _tri_band(r: int, c: int, dev) -> torch.Tensor:
     """(1, 1, r, c) 严格上三角布尔掩码：[row, col] = (col > row)。"""
     global _TRI_CACHE_BYTES
@@ -418,13 +431,13 @@ class CausalSelfAttention(nn.Module):
         # k/v 的逐块切片会被每个块重复拷贝一份。进入循环前一次性连续化：
         # 之后每块切片均为批量维可展平的行主序视图，matmul 直接复用原存储。
         # 序列本身的 Scale 已在调用方按块外完成，此处只做布局规整。
-        q_rot = q_rot.contiguous()
+        q_rot = _ensure_mm_input(q_rot)
         # 无查询项的变体（null / lega_no_query）在 _gate_logit 里只读取
         # q_content.shape，不读取数据：跳过 (B,H,T,Dh) 的整份连续化拷贝。
         if self.use_query:
-            q_content = q_content.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
+            q_content = _ensure_mm_input(q_content)
+        k = _ensure_mm_input(k)
+        v = _ensure_mm_input(v)
         # 目标：每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
         cq = max(_CHUNK_MIN_T, min(T, _CHUNK_TARGET_ELEMS // max(1, B * H * S)))
         cq = min(T, max(cq, 1))
