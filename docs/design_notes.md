@@ -18,4 +18,5 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 - WikiText-103 验证集 PPL（窗口不重复、等间隔抽样）；
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
+- 生成推理口径的延迟测量（prefill 与带 KV 缓存的逐 token decode）；
 - 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC。
