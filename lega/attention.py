@@ -266,24 +266,26 @@ class CausalSelfAttention(nn.Module):
             nn.init.normal_(self.k_null, mean=0.0, std=0.02)
             nn.init.zeros_(self.v_null)
 
-    def _gate_logit(self, q_content: torch.Tensor, max_p: Optional[torch.Tensor],
-                    log_n: Optional[torch.Tensor], keep_terms: bool = False):
+    def _gate_logit(self, qterm: Optional[torch.Tensor],
+                    max_p: Optional[torch.Tensor],
+                    log_n: Optional[torch.Tensor], bht: Tuple[int, int, int],
+                    keep_terms: bool = False):
         """按 variant 组合门控 logit；返回 (g, logit, qterm)，不适用项为 None。
 
-        查询项在（可能的 bf16）内容向量上直接归约后再升 fp32。
+        qterm 为调用方预归约的查询项 w·q（(B,H,T) 或 None）：SDPA 与非分块
+        路径由 forward 在融合 QKV 视图上一次性归约；分块路径逐块从原始视图
+        新建（checkpoint 重算会再次读取闭包张量，逐块新建的张量可原地累加/
+        sigmoid 而不污染重算输入）。
         keep_terms=False（训练/普通推理/轻量诊断）时各项原地累加进 logit，
         qterm/logit 不在返回中保留（返回 None）。
         keep_terms=True（完整机制分析）时 qterm 需原样返回给统计，logit 在其
         副本上累加。
         """
         H = self.n_heads
-        logit = qterm = None
+        logit = None
         if self.use_query:
-            # 每头契约向量用批量 GEMV（matmul 广播批维）实现（结果与
-            # mul+sum/einsum 归约一致，见注释末）。
-            qterm = torch.matmul(q_content, self._cast_cached(
-                '_gate_w_cast', (self.gate_w,), q_content.dtype
-            )[0].unsqueeze(-1)).squeeze(-1).float()                       # (B,H,T)
+            # qterm 已由调用方预归约并升到 fp32；
+            # logit 直接原地累加，避免再乘一份副本。
             logit = qterm.clone() if keep_terms else qterm
         # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加。
         if self.use_conc:
@@ -301,7 +303,8 @@ class CausalSelfAttention(nn.Module):
             b = self.gate_b.float().view(1, H, 1)
             logit = b * log_n if logit is None else logit.addcmul_(b, log_n)
         dterm = self.gate_d.float().view(1, H, 1)
-        logit = dterm.expand(q_content.shape[0], H, q_content.shape[2]).clone() \
+        # 防御分支：当前全部变体至少含一个门控项，logit 不会为 None。
+        logit = dterm.expand(bht[0], H, bht[2]).clone() \
             if logit is None else logit.add_(dterm)
         # keep_terms=False（训练/普通推理/轻量诊断）时调用方不消费 logit：
         # sigmoid 原地写入；此时 qterm/logit 已被原地累加/覆盖，
@@ -316,7 +319,7 @@ class CausalSelfAttention(nn.Module):
             return F.softmax(att, dim=-1)
         return torch.softmax(att, dim=-1, out=att)
 
-    def _attend_q_chunk(self, q_rot: torch.Tensor, q_content: torch.Tensor,
+    def _attend_q_chunk(self, q_rot: torch.Tensor, qterm: Optional[torch.Tensor],
                         kT: torch.Tensor, v: torch.Tensor,
                         band_start: int, band_mask: Optional[torch.Tensor],
                         log_n: Optional[torch.Tensor], collect_stats: bool,
@@ -327,8 +330,8 @@ class CausalSelfAttention(nn.Module):
         qterm/logit 不逐块物化与汇总。
 
         q_rot 是 RoPE 旋转后且已预乘 1/sqrt(Dh) 的查询（打分的 q·k）；
-        q_content 是 RoPE 旋转前且未乘 1/sqrt(Dh) 的查询内容向量，门控查询项
-        必须用它（长度/绝对位置只通过显式 log n 进入门控）。
+        qterm 是 RoPE 旋转前的查询内容向量与门控权重 w 的本块归约
+        （长度/绝对位置只通过显式 log n 进入门控），无查询项时为 None。
 
         kT/v 已被调用方裁到本块可见前缀（末列即块内最末查询可见的最后一键），
         全块不可见的尾列既不参与打分也不参与 softmax，数学上与先算全量再做整列
@@ -404,10 +407,11 @@ class CausalSelfAttention(nn.Module):
             o.mul_(1 - p_null)
             o.addcmul_(p_null, v_null_c.view(1, self.n_heads, 1, -1))
 
-        g = logit = qterm = None
+        g = logit = qterm_out = None
         if self.variant in _GATED:
-            g, logit, qterm = self._gate_logit(
-                q_content, max_p, log_n,
+            g, logit, qterm_out = self._gate_logit(
+                qterm, max_p, log_n,
+                (q_rot.shape[0], self.n_heads, q_rot.shape[2]),
                 keep_terms=collect_stats and keep_gate_terms)
             o.mul_(g.to(o.dtype).unsqueeze(-1))
         if not collect_stats:
@@ -416,7 +420,7 @@ class CausalSelfAttention(nn.Module):
         # _gate_logit 内对 max_p 原地 clamp_min_/log_，此后 max_p 装的已是
         # log(max_p) 而不再是概率，不能作为统计返回，
         # 与 SDPA 轻量分支的 max_p=None 口径保持一致。
-        return o, (max_p if keep_gate_terms else None), qterm, logit, g, \
+        return o, (max_p if keep_gate_terms else None), qterm_out, logit, g, \
             argmax_stat, p_null_stat
 
     def _attend_chunked(self, q_rot: torch.Tensor, q_content: torch.Tensor,
@@ -427,6 +431,8 @@ class CausalSelfAttention(nn.Module):
         """按查询块执行显式注意力；训练态逐块 checkpoint。
 
         q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次。
+        q_content 为 RoPE 前的查询内容视图 (B,H,T,Dh)：门控查询项在其上
+        直接归约，无需连续化或复制。
         """
         S = k.shape[2]
         # q/k/v 来自 QKV 融合 GEMM 的 permute().unbind() 视图：批量维步长
@@ -434,10 +440,10 @@ class CausalSelfAttention(nn.Module):
         # 行主序视图。
         # 序列本身的 Scale 已在调用方按块外完成，此处只做布局规整。
         q_rot = _ensure_mm_input(q_rot)
-        # 无查询项的变体（null / lega_no_query）在 _gate_logit 里只读取
-        # q_content.shape，不读取数据。
-        if self.use_query:
-            q_content = _ensure_mm_input(q_content)
+        # 门控权重按内容 dtype 缓存转换结果（只读，可被闭包安全捕获）。
+        gw = self._cast_cached(
+            '_gate_w_cast', (self.gate_w,), q_content.dtype)[0] \
+            if self.use_query else None
         k = _ensure_mm_input(k)
         v = _ensure_mm_input(v)
         # 每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
@@ -456,7 +462,12 @@ class CausalSelfAttention(nn.Module):
             for q0 in range(0, T, cq):
                 q1 = min(T, q0 + cq)
                 qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
-                qc = q_content[:, :, q0:q1]  # 未缩放的 RoPE 前查询内容向量块（门控用）
+                # 门控查询项逐块归约：直接在融合 QKV 输出的切片上做 mul+sum，
+                # 无需为整段查询复制连续化副本；逐块新建的张量使 checkpoint
+                # 反向重算读取的始终是原始 q_content（原地 sigmoid 无污染）。
+                qt_c = None if gw is None else (
+                    (q_content[:, :, q0:q1].transpose(1, 2) * gw).sum(dim=-1)
+                    .float().transpose(1, 2))
                 # 因果掩码两段式：
                 #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
                 #     切片到可见前缀，打分矩阵从 (B,H,Cq,S) 缩到 (B,H,Cq,fill_from)；
@@ -475,7 +486,7 @@ class CausalSelfAttention(nn.Module):
                 logn_c = None if log_n is None else log_n[q0:q1]
                 if collect_stats:
                     oc, mp, qt, lg, gg, am, pnl = self._attend_q_chunk(
-                        qr, qc, kT_c, v_c, band_start, band_mask,
+                        qr, qt_c, kT_c, v_c, band_start, band_mask,
                         logn_c, True, keep_gate_terms)
                     if mp is not None:
                         max_ps.append(mp)
@@ -490,7 +501,7 @@ class CausalSelfAttention(nn.Module):
                     if pnl is not None:
                         p_nulls.append(pnl)
                 else:
-                    oc = self._attend_q_chunk(qr, qc, kT_c, v_c, band_start,
+                    oc = self._attend_q_chunk(qr, qt_c, kT_c, v_c, band_start,
                                               band_mask, logn_c, False)
                 # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
                 # 布局变换在此完成
@@ -564,8 +575,8 @@ class CausalSelfAttention(nn.Module):
                 ent = (key, fused)
                 self._qkv_fused = ent
             w_qkv = ent[1]
-        q, k, v = (F.linear(x, w_qkv)
-                   .view(B, T, 3, H, Dh).permute(2, 0, 3, 1, 4).unbind(0))  # (B, H, T, Dh)
+        qkv = F.linear(x, w_qkv).view(B, T, 3, H, Dh)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)                     # (B, H, T, Dh)
         # 门控的“查询内容”必须使用 RoPE 之前的 q：RoPE 会把绝对位置混入 q，
         # 若用旋转后的 q 计算 w·q，会让本应只负责长度校准的 log n 与位置相互混淆。
         q_content = q
@@ -592,7 +603,7 @@ class CausalSelfAttention(nn.Module):
         # 集中度门控（lega/lega_no_len/lega_no_query）必须消费注意力概率统计
         # max_j p_j，无法走 SDPA；qgate/lega_no_conc 的门只依赖查询与 log n，
         # 即便 need_stats=True（轻量门控诊断）也可走 SDPA——统计项 qterm/g/logit
-        # 由 q_content 与 log n 单独重组，argmax 等完整诊断仍需显式路径。
+        # 由预计算的 qterm 与 log n 单独重组，argmax 等完整诊断仍需显式路径。
         full_stats = bool(need_stats) and stats_argmax
         single_q = (T == 1)
         use_sdpa = (self.use_sdpa and not full_stats
@@ -612,6 +623,17 @@ class CausalSelfAttention(nn.Module):
         will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
                       and elems >= _CHUNK_TARGET_ELEMS
                       and not (self.training and self.attn_dropout > 0))
+
+        # 门控查询项 w·q 预计算：在 RoPE 前的融合 QKV 视图上直接归约，避免
+        # 额外复制一份查询内容向量（该副本会随显式路径的反向图存活到整个反
+        # 向结束）。分块路径在 _attend_chunked 内逐块归约（checkpoint 重算
+        # 安全），此处只为 SDPA 与非分块显式路径服务。
+        qterm_pre = None
+        if self.use_query and not will_chunk:
+            gw_pre = self._cast_cached(
+                '_gate_w_cast', (self.gate_w,), q_content.dtype)[0]        # (H, Dh)
+            qterm_pre = (q_content.transpose(1, 2) * gw_pre).sum(dim=-1)   # (B, T, H)
+            qterm_pre = qterm_pre.float().transpose(1, 2)                  # (B, H, T) fp32
 
         # 因果掩码：真实键 j 仅当 j <= 查询绝对位置时可见；null 槽对全部查询可见。
         # 单查询步（T==1 的增量解码）：键数 n_real = past_len + 1，查询绝对位置
@@ -686,8 +708,8 @@ class CausalSelfAttention(nn.Module):
                     log_n = _log_n(past_len, T, dev)
                 # 轻量诊断（stats_argmax=False）只消费 g：不保留 qterm/logit，
                 # sigmoid 原地完成
-                g, logit, qterm = self._gate_logit(q_content, None, log_n,
-                                                   keep_terms=full_stats)
+                g, logit, qterm = self._gate_logit(qterm_pre, None, log_n,
+                                                   (B, H, T), keep_terms=full_stats)
                 if torch.is_grad_enabled():
                     # SDPA 输出的反向依赖该张量本身，不能原地乘
                     o = o * g.to(o.dtype).unsqueeze(-1)
@@ -803,8 +825,8 @@ class CausalSelfAttention(nn.Module):
 
                 # 输出门控（惰性累加：仅偏置项 (1,H,1) 参与广播）
                 if self.variant in _GATED:
-                    g, logit, qterm = self._gate_logit(q_content, max_p, log_n,
-                                                       keep_terms=full_stats)
+                    g, logit, qterm = self._gate_logit(qterm_pre, max_p, log_n,
+                                                       (B, H, T), keep_terms=full_stats)
                     # 原地乘法：o 的全部反向依赖 p/v，mul_ 自身被 autograd 正确处理
                     o.mul_(g.to(o.dtype).unsqueeze(-1))                   # o' = g * o
 
