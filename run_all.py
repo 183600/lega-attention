@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""一键实验流水线：训练全部变体 → PPL → RULER → 机制分析 → 图表 → 汇总表。
+"""一键实验流水线：训练全部变体 → PPL → RULER → 延迟 → 机制分析 → 图表 → 汇总表。
 
 变体（相同参数量级与训练步数）:
   standard | qgate | null | lega | lega_no_len | lega_no_conc | lega_no_query
@@ -164,6 +164,7 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--skip_train", action="store_true")
     p.add_argument("--skip_ruler", action="store_true")
+    p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument("--skip_plots", action="store_true")
     args = p.parse_args()
@@ -182,6 +183,7 @@ def main():
 
     ruler_over = []
     analysis_over = []
+    latency_over = []
     if args.smoke:
         # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
         # 模板约 211 token，128 会让 RULER 全部任务与机制分析被跳过）
@@ -189,6 +191,7 @@ def main():
             smoke_ctx = min(256, int(json.load(cf).get("block_size", 256)))
         ruler_over = ["--n_samples", "2", "--ctx_lens", str(smoke_ctx)]
         analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
+        latency_over = ["--decode_len", "8", "--reps", "1", "--warmup", "1"]
 
     for v in variants:
         if not args.skip_train:
@@ -210,6 +213,12 @@ def main():
                 run([py, "-m", "lega.ruler", "--ckpt", ckpt, "--data_dir", args.data_dir,
                      "--out", os.path.join(results_dir, f"ruler_{v}.json"),
                      "--device", args.device] + ruler_over)
+
+    if not args.skip_latency and os.path.isdir(out_root):
+        run([py, "-m", "lega.latency", "--config", args.config,
+             "--data_dir", args.data_dir, "--ckpt_dir", out_root,
+             "--out", os.path.join(results_dir, "latency.json"),
+             "--device", args.device] + latency_over)
 
     if not args.skip_analysis:
         for v in variants:
