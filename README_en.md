@@ -61,7 +61,7 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
   2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
   3. **Actual inference latency**: prefill (last-position logits only) and token-by-token decode with KV cache, compared against the SDPA fast path.
 - **Core-risk checks (not just "attention sink reduced")**: `lega/analysis.py` performs mechanistic analysis on RULER samples with gold spans:
-  - **misleading_rate**: fraction of highly concentrated attention ($\max_j p_j>\tau$) whose landing point is outside the needle — direct evidence that "concentrated ≠ correct";
+  - **misleading_rate**: fraction of highly concentrated attention ($\max_j p_j>\tau$) whose landing point is outside the answer's numeric span (value_span); the hit test uses the exact answer-number token span rather than the whole needle sentence — direct evidence that "concentrated ≠ correct";
   - **P(hit | concentrated)** vs **P(hit | not concentrated)**;
   - **AUROC**: ability of the gate score to separate "hit / miss", plus **the difference between LEGA's full logit and the query-only term $w^\top q$**, directly answering whether length-calibrated attention statistics judge "should we write" better than the query alone.
 
@@ -166,7 +166,7 @@ lega-attention/
 - **KV cache**: gated variants compute the gate token-by-token during incremental decoding; cache equivalence is unit-tested (full forward vs token-by-token).
 - **Tokenization**: default GPT-2 BPE (tiktoken, needs network on first use); offline, `--tokenizer auto` falls back to character level (PPL not directly comparable to literature, but variant comparisons remain valid).
 - **Device**: `small.json` expects GPU + bf16; CPU is only for tiny smoke runs. For full experiments, start with the `lega_no_len` vs `lega` comparison (length calibration is the core claim).
-- **Known limitations**: the 30M model's absolute RULER accuracy is low (small models have limited retrieval ability); the focus is **relative differences between variants** and **mechanistic metrics**, not absolute scores; `fwe` top-10 has minor evaluation noise under frequency ties (identical across variants under the same seed, so comparisons are unaffected).
+- **Known limitations**: the 30M model's absolute RULER accuracy is low (small models have limited retrieval ability); the focus is **relative differences between variants** and **mechanistic metrics**, not absolute scores; `fwe` gives high-frequency words k≥3 occurrences vs 2 for the rest and scores the answer as a word set, so frequency ties are structurally impossible; at very small contexts individual `fwe`/`vt` samples are skipped for lack of room (recorded in the JSON `_skipped` field; the skipped set is identical across variants).
 
 ## 6. License
 
