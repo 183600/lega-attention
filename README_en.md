@@ -107,7 +107,7 @@ Outputs:
 | `out/<tag>/<variant>/model.pt` | Checkpoint + training config |
 | `out/<tag>/<variant>/train_log.jsonl` | Training/validation curves |
 | `results/<tag>/summary.md` | **Summary table (paste into a report/paper draft)** |
-| `results/<tag>/eval_*.json` | Validation PPL per variant |
+| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths |
 | `results/<tag>/latency.json` | prefill / decode latency |
 | `results/<tag>/analysis_*.csv|json` | Per (layer, head, query position) gate records and aggregates |
