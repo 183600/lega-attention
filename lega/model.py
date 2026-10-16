@@ -109,12 +109,20 @@ class RoPE:
         return self.rotate(q, past_len), self.rotate(k, past_len)
 
 
+# 反向复用整段 logits 的体积预算（元素数×计算精度字节），按设备类型取值；
+# 超出预算仍走分块重算。
+_CE_CACHE_BYTES_CPU = 512 * 1024 * 1024
+_CE_CACHE_BYTES_ACCEL = 64 * 1024 * 1024
+
+
 class _ChunkedLinearCE(torch.autograd.Function):
     """分块 lm_head + 交叉熵（支持 PyTorch 默认的 ignore_index=-100）。
 
     前向分块累加 loss，反向再按块重算 logits 并累积 dL/dx、dL/dW。
-    被忽略位置既不计入损失分母，也完全不产生梯度；全部位置被忽略时
-    返回 0 损失（以及零梯度），与监督微调流程中的空有效标签约定一致。
+    需要梯度且整段 logits 体积在设备预算内时，logits 缓存在 ctx 上供
+    反向复用；否则反向逐块重算。被忽略位置既不计入损失分母，也完全不
+    产生梯度；全部位置被忽略时返回 0 损失（以及零梯度），与监督微调
+    流程中的空有效标签约定一致。
     """
 
     @staticmethod
@@ -178,9 +186,29 @@ class _ChunkedLinearCE(torch.autograd.Function):
             else torch.float32).reciprocal()
         loss = torch.zeros((), dtype=x2d.dtype if x2d.dtype in (torch.float32, torch.float64)
                            else torch.float32, device=x2d.device)
+        # 仅在需要 x 的梯度时尝试缓存；预算按首块实际产出的 dtype 计算，
+        # 分配失败则退回重算。
+        budget = (_CE_CACHE_BYTES_CPU if x2d.device.type == "cpu"
+                  else _CE_CACHE_BYTES_ACCEL)
+        cache_try = bool(ctx.needs_input_grad[0])
+        logits_cache = None
+        ctx.logits_cache = None
         with torch.no_grad():
             for s in range(0, tgt.numel(), chunk):
                 lc = F.linear(x2d[s:s + chunk], weight)
+                if cache_try:
+                    cache_try = False
+                    if tgt.numel() * weight.size(0) * lc.element_size() <= budget:
+                        try:
+                            logits_cache = torch.empty(
+                                (tgt.numel(), weight.size(0)),
+                                dtype=lc.dtype, device=lc.device)
+                        except RuntimeError:
+                            logits_cache = None
+                        else:
+                            ctx.logits_cache = logits_cache
+                if logits_cache is not None:
+                    logits_cache[s:s + chunk].copy_(lc)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
                 # 升精度副本已生成（不升精度时 lcf 与 lc 为同一张量）。
                 del lc
@@ -198,10 +226,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
         gw = None
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
+        # 前向若缓存了整段 logits 则反向直接复用，无需重算。
+        cached = ctx.logits_cache
         # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot）。
         with torch.no_grad():
             # 与前向一致的 autocast 上下文，保证反向重算的 logits 精度相同
-            if ctx.amp_dtype is not None:
+            if ctx.amp_dtype is not None and cached is None:
                 dev_type = "cuda" if x2d.is_cuda else "cpu"
                 ac_ctx = torch.autocast(dev_type, dtype=ctx.amp_dtype)
             else:
@@ -217,10 +247,13 @@ class _ChunkedLinearCE(torch.autograd.Function):
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
                 ts = tgt[s:s + ctx.chunk]
-                with ac_ctx:
-                    lc = F.linear(xs, weight)                        # (m, V)
-                lcf = _ChunkedLinearCE._loss_dtype(lc)
-                del lc
+                if cached is not None:
+                    lcf = _ChunkedLinearCE._loss_dtype(cached[s:s + ctx.chunk])
+                else:
+                    with ac_ctx:
+                        lc = F.linear(xs, weight)                    # (m, V)
+                    lcf = _ChunkedLinearCE._loss_dtype(lc)
+                    del lc
                 d = torch.softmax(lcf, dim=-1, out=lcf)
                 keep = ts != ctx.ignore_index
                 # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
@@ -245,11 +278,13 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     gxs.copy_(torch.matmul(d, w_f))
                 # dL/dx 逐块按 gscale 缩放（标量，行切片原地乘）
                 gxs.mul_(gscale)
+                # 首块用 mm 直接产出 gw，后续分块就地累加
+                # （gscale 在循环外统一缩放）
+                xs_f = xs.to(d.dtype)
                 if gw is None:
-                    gw = torch.zeros(weight.shape, dtype=d.dtype,
-                                     device=weight.device)
-                # 原地累加该分块的 dL/dW（gscale 在循环外统一缩放）
-                gw.addmm_(d.transpose(0, 1), xs.to(d.dtype))
+                    gw = torch.mm(d.transpose(0, 1), xs_f)
+                else:
+                    gw.addmm_(d.transpose(0, 1), xs_f)
                 del d, lcf
         if gw is not None:
             gw.mul_(gscale)

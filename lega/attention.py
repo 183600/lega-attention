@@ -544,10 +544,12 @@ class CausalSelfAttention(nn.Module):
         past_len = (0 if past_kv is None else past_kv[0].shape[2]) \
             if kv_cache is None else cache_pos
 
-        # 三个投影合并为一次 GEMM（参数仍分存于 wq/wk/wv），再按 (q|k|v, H, Dh) 切分
+        # 训练态保持三个独立投影（各自的 autograd 路径，避免融合权重常驻
+        # 反向图）；推理态权重不变，走下方融合权重缓存。
         if torch.is_grad_enabled():
-            # 训练态：cat 必须参与 autograd 图，每次前向重建
-            w_qkv = torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
+            q = F.linear(x, self.wq.weight).view(B, T, H, Dh).transpose(1, 2)
+            k = F.linear(x, self.wk.weight).view(B, T, H, Dh).transpose(1, 2)
+            v = F.linear(x, self.wv.weight).view(B, T, H, Dh).transpose(1, 2)
         else:
             # 推理态（eval/验证/生成，含 inference_mode）：权重不变，
             # 融合权重按 (参数对象身份, _version, data_ptr, device, dtype) 缓存复用。
@@ -578,8 +580,8 @@ class CausalSelfAttention(nn.Module):
                 ent = (key, fused)
                 self._qkv_fused = ent
             w_qkv = ent[1]
-        qkv = F.linear(x, w_qkv).view(B, T, 3, H, Dh)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)                     # (B, H, T, Dh)
+            qkv = F.linear(x, w_qkv).view(B, T, 3, H, Dh)
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)                 # (B, H, T, Dh)
         # 门控的“查询内容”必须使用 RoPE 之前的 q：RoPE 会把绝对位置混入 q，
         # 若用旋转后的 q 计算 w·q，会让本应只负责长度校准的 log n 与位置相互混淆。
         q_content = q
