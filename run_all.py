@@ -40,6 +40,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -47,7 +48,8 @@ sys.path.insert(0, ROOT)
 from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
 from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
-from lega.utils import holm_bonferroni, mean_std, paired_t_test, save_json  # noqa: E402
+from lega.utils import (get_device, holm_bonferroni, mean_std, paired_t_test,
+                        save_json)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -89,6 +91,55 @@ _SEED_RE = re.compile(r"_seed(\d+)$")
 def run(cmd, env=None):
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True, cwd=ROOT, env=env)
+
+
+def _resolve_jobs(args) -> int:
+    """并发度：显式 --jobs 优先；未指定时 CPU 取 min(4, 核数)，CUDA/--wandb 取 1。"""
+    if args.jobs is not None:
+        return max(1, int(args.jobs))
+    if args.wandb:
+        return 1
+    if get_device(args.device).startswith("cuda"):
+        return 1
+    return min(4, os.cpu_count() or 1)
+
+
+def _jobs_env(jobs: int):
+    """并发时按 jobs 均分每个子进程的 BLAS 线程配额；jobs<=1 返回 None。"""
+    if jobs <= 1:
+        return None
+    env = os.environ.copy()
+    n = max(1, (os.cpu_count() or 1) // jobs)
+    for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS"):
+        env[k] = str(n)
+    return env
+
+
+def run_many(cmds, jobs: int, env=None) -> None:
+    """顺序或并发执行多条独立子进程命令。
+
+    并发只改变多个独立 run 之间的调度，不改变单个 run 的行为；失败时等待
+    全部命令结束后抛出首个（按提交顺序）非零退出码的 CalledProcessError。
+    """
+    jobs = max(1, int(jobs))
+    if jobs == 1 or len(cmds) <= 1:
+        for cmd in cmds:
+            subprocess.run(cmd, check=True, cwd=ROOT,
+                           env=env if env is not None else os.environ.copy())
+        return
+    rcs = [None] * len(cmds)
+
+    def _one(i, cmd):
+        rcs[i] = subprocess.run(cmd, cwd=ROOT,
+                                env=env if env is not None else os.environ.copy()
+                                ).returncode
+
+    with ThreadPoolExecutor(max_workers=min(jobs, len(cmds))) as ex:
+        list(ex.map(lambda t: _one(*t), enumerate(cmds)))
+    for cmd, rc in zip(cmds, rcs):
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, cmd)
 
 
 def _repo_path(path: str) -> str:
@@ -954,6 +1005,9 @@ def main():
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument("--skip_plots", action="store_true")
+    p.add_argument("--jobs", type=int, default=None,
+                   help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
+                        "min(4, 核数)，CUDA 或 --wandb 下为 1")
     args = p.parse_args()
 
     args.config = _repo_path(args.config)
@@ -985,6 +1039,9 @@ def main():
     n_seeds = len(seeds)
     print(f"[run_all] 变体={variants}")
     print(f"[run_all] 种子={seeds}（{n_seeds} 个）tag={tag}")
+    jobs = _resolve_jobs(args)
+    if jobs > 1:
+        print(f"[run_all] jobs={jobs}（sanity/训练/机制分析并发；--jobs 可覆盖）")
 
     # 子进程随机性/确定性环境：PYTHONHASHSEED 必须由父进程设置才能传给子进程；
     # CUBLAS 工作区配置须在任何 CUDA 初始化前生效。
@@ -1034,6 +1091,7 @@ def main():
     if args.skip_sanity or args.skip_train:
         print("[run_all] sanity check 已跳过（--skip_sanity/--skip_train）")
     else:
+        cmds = []
         for v in variants:
             out_json = os.path.join(results_dir, f"sanity_{v}.json")
             cmd = [py, "-m", "lega.sanity", "--config", args.config,
@@ -1045,41 +1103,55 @@ def main():
             if args.smoke:
                 cmd += ["--smoke"]
             print("+", " ".join(cmd), flush=True)
-            rc = subprocess.run(cmd, cwd=ROOT, env=os.environ.copy()).returncode
-            sanity[v] = "pass" if rc == 0 else "fail"
-            if rc != 0:
-                raise SystemExit(
-                    f"sanity check 失败（变体 {v}，退出码 {rc}）：无法过拟合小批量，"
-                    "说明梯度反传/损失计算/标签对齐存在严重 bug；请先修复再开全量"
-                    f"训练。结果见 {out_json}。")
+            cmds.append(cmd)
+        try:
+            run_many(cmds, jobs, _jobs_env(jobs))
+        except subprocess.CalledProcessError as e:
+            v = variants[cmds.index(e.cmd)]
+            raise SystemExit(
+                f"sanity check 失败（变体 {v}，退出码 {e.returncode}）：无法过拟合小批量，"
+                "说明梯度反传/损失计算/标签对齐存在严重 bug；请先修复再开全量"
+                f"训练。结果见 {os.path.join(results_dir, f'sanity_{v}.json')}。")
+        for v in variants:
+            sanity[v] = "pass"
         print(f"[run_all] sanity check 全部通过: {', '.join(sanity.keys())}")
 
+    # 各 (变体, 种子) 的训练相互独立，可并发；评测按 chain 顺序保持逐条执行
+    # （evaluate 会追加 test 访问账本，并发写会丢记录）。
+    chain = []
+    train_cmds = []
     for v in variants:
         for seed in seeds:
             vdir = _variant_dir(out_root, v, seed, n_seeds)
             suffix = _seed_tag(seed, n_seeds)
+            chain.append((v, seed, vdir, suffix))
             if not args.skip_train:
-                run([py, "-m", "lega.train", "--config", args.config,
-                     "--variant", v, "--data_dir", args.data_dir,
-                     "--out_dir", vdir, "--seed", str(seed),
-                     "--device", args.device] + (["--smoke"] if args.smoke else [])
-                    + (["--wandb"] if args.wandb else []))
-            # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
-            # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型。
-            best = os.path.join(vdir, "model_best.pt")
-            ckpt = best if os.path.exists(best) else os.path.join(vdir, "model.pt")
-            if not os.path.exists(ckpt):
-                print(f"[run_all] 跳过 {v}/seed{seed}：无 checkpoint")
-                continue
-            run([py, "-m", "lega.evaluate", "--ckpt", ckpt,
+                cmd = ([py, "-m", "lega.train", "--config", args.config,
+                        "--variant", v, "--data_dir", args.data_dir,
+                        "--out_dir", vdir, "--seed", str(seed),
+                        "--device", args.device] + (["--smoke"] if args.smoke else [])
+                       + (["--wandb"] if args.wandb else []))
+                print("+", " ".join(cmd), flush=True)
+                train_cmds.append(cmd)
+    if train_cmds:
+        run_many(train_cmds, jobs, _jobs_env(jobs))
+    for v, seed, vdir, suffix in chain:
+        # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
+        # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型。
+        best = os.path.join(vdir, "model_best.pt")
+        ckpt = best if os.path.exists(best) else os.path.join(vdir, "model.pt")
+        if not os.path.exists(ckpt):
+            print(f"[run_all] 跳过 {v}/seed{seed}：无 checkpoint")
+            continue
+        run([py, "-m", "lega.evaluate", "--ckpt", ckpt,
+             "--data_dir", args.data_dir,
+             "--out", os.path.join(results_dir, f"eval_{v}{suffix}.json"),
+             "--device", args.device])
+        if not args.skip_ruler:
+            run([py, "-m", "lega.ruler", "--ckpt", ckpt,
                  "--data_dir", args.data_dir,
-                 "--out", os.path.join(results_dir, f"eval_{v}{suffix}.json"),
-                 "--device", args.device])
-            if not args.skip_ruler:
-                run([py, "-m", "lega.ruler", "--ckpt", ckpt,
-                     "--data_dir", args.data_dir,
-                     "--out", os.path.join(results_dir, f"ruler_{v}{suffix}.json"),
-                     "--device", args.device] + ruler_over)
+                 "--out", os.path.join(results_dir, f"ruler_{v}{suffix}.json"),
+                 "--device", args.device] + ruler_over)
 
     if not args.skip_latency:
         # 显式给出延迟基准的变体清单：lega.latency 的默认值不含消融变体，
@@ -1093,6 +1165,7 @@ def main():
              "--device", args.device] + (["--smoke"] if args.smoke else []))
 
     if not args.skip_analysis:
+        cmds = []
         for v in variants:
             if v not in GATED_FOR_ANALYSIS:
                 continue
@@ -1102,10 +1175,11 @@ def main():
                 ckpt = best if os.path.exists(best) else os.path.join(vdir, "model.pt")
                 if not os.path.exists(ckpt):
                     continue
-                run([py, "-m", "lega.analysis", "--ckpt", ckpt,
-                     "--data_dir", args.data_dir,
-                     "--out_dir", results_dir, "--device", args.device,
-                     "--suffix", _seed_tag(seed, n_seeds)] + analysis_over)
+                cmds.append([py, "-m", "lega.analysis", "--ckpt", ckpt,
+                             "--data_dir", args.data_dir,
+                             "--out_dir", results_dir, "--device", args.device,
+                             "--suffix", _seed_tag(seed, n_seeds)] + analysis_over)
+        run_many(cmds, jobs, _jobs_env(jobs))
 
     if not args.skip_plots:
         run([py, "-m", "lega.plots", "--results_dir", results_dir,

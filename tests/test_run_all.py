@@ -8,10 +8,13 @@
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 
 from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _effect_status,
-                     component_evidence, verify_controlled_setup)
+                     _resolve_jobs, component_evidence, run_many,
+                     verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -23,6 +26,38 @@ def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
 def _write_json(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)
+
+
+def test_resolve_jobs_defaults():
+    class _A:
+        jobs = None
+        wandb = False
+        device = "cpu"
+
+    assert _resolve_jobs(_A()) == min(4, os.cpu_count() or 1)
+    _A.wandb = True
+    assert _resolve_jobs(_A()) == 1
+    _A.wandb = False
+    _A.device = "cuda"
+    assert _resolve_jobs(_A()) == 1
+    _A.device = "cpu"
+    _A.jobs = 7
+    assert _resolve_jobs(_A()) == 7
+    print("  [ok] _resolve_jobs（显式 jobs / CUDA / wandb 默认值）")
+
+
+def test_run_many_sequential_parallel_and_failure():
+    ok = [sys.executable, "-c", "pass"]
+    run_many([ok], 1)
+    run_many([ok, ok], 2)
+    bad = [sys.executable, "-c", "import sys; sys.exit(3)"]
+    for cmds, jobs in (([ok, bad, ok], 2), ([bad], 1)):
+        try:
+            run_many(cmds, jobs)
+            raise AssertionError("非零退出码应触发 CalledProcessError")
+        except subprocess.CalledProcessError as e:
+            assert e.returncode == 3
+    print("  [ok] run_many（顺序/并发/失败传播）")
 
 
 def test_apply_holm_verdicts():
