@@ -138,7 +138,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int) -> dic
               + (" ..." if len(missing) > 6 else ""))
     if mismatches:
         msg = ("受控变量自检失败：对比实验除待验证模块外必须完全一致，"
-               "否则性能差异不能归因于方法本身。\n  - " + "\n  - ".join(mismatches))
+               "否则观测差异不能归因于方法本身。\n  - " + "\n  - ".join(mismatches))
         print(f"[audit] {msg}")
         raise SystemExit(2)
     if checked:
