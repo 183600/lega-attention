@@ -616,6 +616,9 @@ def load_model(ckpt_path: str, device: str = "cpu",
     cfg["use_sdpa_standard"] = use_sdpa_standard
     model = GPT(**cfg)
     model.load_state_dict(ck["state_dict"])
+    # 权重已拷贝进模型，返回的 ckpt 字典不再需要整份 state_dict；
+    # 及时释放可避免每个下游进程多驻留一份权重副本（CPU 内存/页缓存）。
+    ck.pop("state_dict", None)
     model.to(device)
     model.eval()
     return model, ck
