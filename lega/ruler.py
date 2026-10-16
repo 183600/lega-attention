@@ -343,8 +343,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and use_cuda) else contextlib.nullcontext())
     gen_batch = max(1, int(gen_batch))
-    # 静态 KV 缓冲跨样例复用：按 (批大小 B, 容量 total) 记住最近一次分配，
-    # B 或容量变化时重建，否则复用同一组缓冲（贪婪解码期间无并发写入）。
+    # 静态 KV 缓冲跨样例复用：容量只增不减，按历史最大 (B, total) 分配一次，
+    # 之后按所需窗口返回切片视图；不同长度/批大小的样例组之间不再反复重建
+    # 缓冲（CUDA 上避免反复 cudaMalloc/cudaFree 的同步开销）。
     attn0 = model.blocks[0].attn
     kv_B = 0
     kv_cap = 0
@@ -353,27 +354,29 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
 
     def _get_kv(B: int, total: int):
         nonlocal kv_B, kv_cap, kv_bufs
-        if kv_B != B or kv_cap < total:
+        if kv_B < B or kv_cap < total:
+            kv_B, kv_cap = max(kv_B, B), max(kv_cap, total)
             kv_bufs = [
-                (torch.empty(B, attn0.n_heads, total, attn0.d_head,
+                (torch.empty(kv_B, attn0.n_heads, kv_cap, attn0.d_head,
                              dtype=kv_dtype, device=device),
-                 torch.empty(B, attn0.n_heads, total, attn0.d_head,
+                 torch.empty(kv_B, attn0.n_heads, kv_cap, attn0.d_head,
                              dtype=kv_dtype, device=device))
                 for _ in model.blocks]
-            kv_B, kv_cap = B, total
-        return kv_bufs
+        return [(k[:B, :, :total], v[:B, :, :total]) for k, v in kv_bufs]
 
-    # 逐样例 prompt 的 H2D 走常驻 pinned 缓冲 + non_blocking 异步拷贝。
+    # prompt（单样例或等长批量）的 H2D 走常驻 pinned 缓冲 + non_blocking
+    # 异步拷贝：按总元素数扩容，行主序写入 pinned 的 NumPy 视图。
     pin_cap = 0
     pin_buf: Optional[torch.Tensor] = None
     pin_np = None          # pinned 缓冲的 NumPy 视图（与 pin_buf 共享存储）
     pin_ev: Optional[torch.cuda.Event] = None
 
-    def _ids_to_device(ids: List[int]) -> torch.Tensor:
+    def _ids_to_device(rows: List[List[int]]) -> torch.Tensor:
         nonlocal pin_cap, pin_buf, pin_np, pin_ev
-        n = len(ids)
+        R, L = len(rows), len(rows[0])
+        n = R * L
         if not use_cuda:
-            return torch.tensor([ids], dtype=torch.long, device=device)
+            return torch.tensor(rows, dtype=torch.long, device=device)
         if pin_ev is not None:
             # 覆盖或替换常驻 pinned 缓冲前，必须等待上一轮 non_blocking H2D
             # 拷贝把旧缓冲读完：否则主机写入与在途 DMA 构成数据竞争；扩容时
@@ -386,9 +389,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             pin_np = pin_buf.numpy()
             pin_cap = n
             pin_ev = torch.cuda.Event()
-        # Python 列表直接写入 pinned 缓冲的 NumPy 视图。
-        pin_np[:n] = ids
-        out = pin_buf[:n].unsqueeze(0).to(device, non_blocking=True)
+        # 等长行按 (R, L) 写入 pinned 缓冲的 NumPy 视图（切片连续可 reshape）。
+        pin_np[:n].reshape(R, L)[:] = rows
+        out = pin_buf[:n].view(R, L).to(device, non_blocking=True)
         pin_ev.record()
         return out
     for task in tasks:
@@ -445,20 +448,14 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                 total = min(length + max_gen, model.block_size)
                 for s0 in range(0, len(grp), gen_batch):
                     part = grp[s0:s0 + gen_batch]
+                    # 等长 prompt 堆成 (B, L)（单样例即 B=1）统一走 pinned
+                    # 缓冲异步 H2D；批量贪婪解码逐行独立，每行结果与逐样例
+                    # 生成一致。
                     with amp_ctx:
-                        if len(part) == 1:
-                            ids = _ids_to_device(part[0]["ids"])
-                            out_ids = model.generate(
-                                ids, max_new_tokens=max_gen,
-                                kv_cache=_get_kv(1, total))
-                        else:
-                            # 等长 prompt 堆成 (B, L)；批量贪婪解码逐行独立，
-                            # 每行结果与逐样例生成一致。
-                            ids = torch.tensor([e["ids"] for e in part],
-                                               dtype=torch.long, device=device)
-                            out_ids = model.generate(
-                                ids, max_new_tokens=max_gen,
-                                kv_cache=_get_kv(len(part), total))
+                        ids = _ids_to_device([e["ids"] for e in part])
+                        out_ids = model.generate(
+                            ids, max_new_tokens=max_gen,
+                            kv_cache=_get_kv(len(part), total))
                     for r, ex in enumerate(part):
                         pred_text = tok.decode(out_ids[r, length:].tolist())
                         sc = score_prediction(task, ex["answer"], pred_text,
