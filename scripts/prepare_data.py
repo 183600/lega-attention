@@ -81,10 +81,18 @@ def from_zip(out_dir: str) -> dict:
         _download(ZIP_URL, dst, "wikitext zip")
     texts = {}
     with zipfile.ZipFile(dst) as z:
-        for split, name in [("train", "wiki.train.tokens"),
-                            ("val", "wiki.valid.tokens"),
-                            ("test", "wiki.test.tokens")]:
-            with z.open(f"wikitext-103-raw-v1/{name}") as f:
+        names = z.namelist()
+        # 该 zip 内为 wikitext-103-raw/wiki.{train,valid,test}.raw（raw 版后缀是
+        # .raw 而非 .tokens，顶层目录也非 wikitext-103-raw-v1/）。顶层目录名随
+        # 镜像可能变化，按文件名后缀定位而不写死完整路径。
+        for split, base in [("train", "wiki.train.raw"),
+                            ("val", "wiki.valid.raw"),
+                            ("test", "wiki.test.raw")]:
+            cands = [n for n in names if n == base or n.endswith("/" + base)]
+            if not cands:
+                raise FileNotFoundError(
+                    f"zip 中缺少 {base}；现有条目示例: {names[:8]}")
+            with z.open(cands[0]) as f:
                 texts[split] = io.TextIOWrapper(f, encoding="utf-8").read().split("\n")
     return texts
 
