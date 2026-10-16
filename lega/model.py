@@ -406,6 +406,10 @@ class GPT(nn.Module):
         kv_cache：可选的外部静态 KV 缓冲（与内部预分配同布局，
         (B, H, max_len, Dh)，容量只需 >= min(T + max_new_tokens, block_size)），
         供批量评测在样例间复用。
+
+        eos_token_id：各行独立判定 EOS；当批内所有行都已各自命中过 EOS 时
+        停止，返回长度截到「最后一行首次命中 EOS 的步」。提前命中的行在返回
+        张量里仍可能带上其 EOS 之后的采样 token，消费方应按各行首个 EOS 截断。
         """
         was_training = self.training
         self.eval()
@@ -441,10 +445,11 @@ class GPT(nn.Module):
                                  dtype=kvdtype, device=idx.device))
                     for _ in self.blocks]
             # EOS 判定标志留在设备端逐 token 记录，每 _EOS_EVERY 步检查一次；
-            # 同步点命中时按首个触发步截断 cur_len，结果与逐步检查完全一致。
+            # 检查时用累计命中记录回推首达步，结果与逐步检查完全一致。
             _EOS_EVERY = 8
-            # 逐 token 的 EOS 判定结果写入预分配设备缓冲。
-            eos_flags = (torch.zeros(max_new_tokens, dtype=torch.bool,
+            # (max_new, B) 的逐行 EOS 命中记录：各行独立判定，互不影响，
+            # 批内某行命中 EOS 不改变其它行的生成内容与停止判断。
+            eos_flags = (torch.zeros((max_new_tokens, B), dtype=torch.bool,
                                      device=idx.device)
                          if eos_token_id is not None else None)
             for i in range(max_new_tokens):
@@ -464,15 +469,15 @@ class GPT(nn.Module):
                 out_ids[:, cur_len] = nxt
                 cur_len += 1
                 if eos_flags is not None:
-                    eos_flags[i] = (nxt == eos_token_id).all()
+                    eos_flags[i] = nxt == eos_token_id
                     if (i + 1) % _EOS_EVERY == 0 or i + 1 == max_new_tokens:
-                        w0 = i - (i % _EOS_EVERY)      # 最近确认边界
-                        window = eos_flags[w0:i + 1]     # 当前未确认窗口（视图）
-                        if bool(window.any()):
-                            # 首个全体同时命中 EOS 的步（与逐步检查的停止条件相同）。
-                            # first 是当前窗口内的相对索引，须加回窗口基址 w0。
-                            first = int(window.long().argmax().item())
-                            cur_len = T0 + w0 + first + 1
+                        window = eos_flags[:i + 1]                 # (k, B)
+                        if bool(window.any(dim=0).all()):
+                            # 所有行都已命中过 EOS：截到「最后一行首次命中的步」。
+                            # 首个命中步用「前缀全 False 的个数」计算，避免
+                            # argmax 对多个 True 的并列索引依赖后端约定。
+                            first = (window.long().cumsum(dim=0) == 0).sum(dim=0)
+                            cur_len = T0 + int(first.max().item()) + 1
                             break
             return out_ids[:, :cur_len]
         finally:

@@ -16,7 +16,7 @@ import torch
 from .attention import VARIANTS
 from .data import load_meta
 from .model import GPT, load_model, count_params
-from .utils import get_device, set_seed, save_json
+from .utils import enable_tf32, get_device, set_seed, save_json
 
 
 def _sync(device):
@@ -133,6 +133,9 @@ def main():
         cfg = json.load(f)
     meta = load_meta(args.data_dir)
     device = get_device(args.device)
+    # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 上启用 TF32，
+    # 否则基准测的是与流水线其它环节不同的精度设置。
+    enable_tf32(device)
     lcfg = dict(cfg.get("latency", {}))
 
     if args.smoke:

@@ -80,6 +80,48 @@ def test_greedy_generation_deterministic():
     assert torch.equal(a, b)
 
 
+def test_generate_eos_stops_per_row_without_batch_coupling():
+    """提供 eos_token_id 时各行的 EOS 判定必须独立：批内某行的命中/未命中
+    不能改变其它行的生成内容，也不得把「各行不同步命中」误判成不停。"""
+    torch.manual_seed(0)
+    m = GPT(vocab_size=12, block_size=32, d_model=16, n_layers=1, n_heads=2,
+            variant="standard")
+    m.eval()
+    T0, max_new, eos = 6, 10, 5
+    # 以 prompt 首 token 标识行；值 = 产生 EOS 的生成步下标。行 1 第 1 步、
+    # 行 2 第 3 步命中，行 3 从不命中（不同步，无法靠“全体同时命中”停止）。
+    hit_at = {1: 1, 2: 3}
+    state = {"rows": None}
+
+    def fake_forward(cur, kv_cache=None, cache_pos=0, last_logits_only=True):
+        if cur.shape[1] > 1:
+            state["rows"] = cur[:, 0].tolist()
+        step = cache_pos + cur.shape[1] - T0     # 本次将产生的 token 的步下标
+        logits = torch.full((cur.shape[0], 1, m.vocab_size), -5.0)
+        for r, key in enumerate(state["rows"]):
+            t = eos if hit_at.get(key, -1) == step else (key + 6) % m.vocab_size
+            logits[r, 0, t] = 5.0
+        return {"logits": logits, "loss": None, "past_kv": None, "gate_stats": None}
+
+    m.forward = fake_forward
+    idx = torch.tensor([[k, 7, 7, 7, 7, 7] for k in (1, 2, 3)])
+    with torch.no_grad():
+        ref = m.generate(idx, max_new_tokens=max_new)
+        ab = m.generate(idx[:2], max_new_tokens=max_new, eos_token_id=eos)
+        ac = m.generate(idx[::2], max_new_tokens=max_new, eos_token_id=eos)
+        single = m.generate(idx[:1], max_new_tokens=max_new, eos_token_id=eos)
+    assert ref.shape == (3, T0 + max_new)
+    # 所有行都命中后，截到「最后一行首次命中」的步（行 2 第 3 步 → 长度 10）
+    assert ab.shape[1] == T0 + 3 + 1
+    assert torch.equal(ab, ref[:2, :T0 + 3 + 1]), "停止只能裁剪，不能改变生成内容"
+    # 有行从不命中时不得提前停止；行内容不随批内其它行改变
+    assert ac.shape == (2, T0 + max_new)
+    assert torch.equal(ac, ref[::2]), "行内容与批内其它行耦合"
+    # 单行行为保持：首次命中即停（第 1 步 → 长度 8）
+    assert torch.equal(single, ref[:1, :T0 + 1 + 1])
+    print("  [ok] EOS 逐行独立停止：批量截断到最晚命中步，单行不受批内影响")
+
+
 def test_last_logits_only_matches_full_logits():
     """快速路径必须与全量 logits 的最后位置完全一致。"""
     model = _tiny("lega")
