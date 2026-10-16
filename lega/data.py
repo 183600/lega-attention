@@ -1,9 +1,18 @@
 """数据管线：分词器（GPT-2 BPE，tiktoken 不可用时退化为字符级）+ bin 缓存 + 批采样。
 
+防泄露约定（细节见 lega/datacheck.py）:
+  * 先划分 train/val/test，再做编码等预处理；字符级词表**只在 train 上拟合**，
+    val/test 只做 transform，未见字符统一映射 <unk>（BPE 为公开预训练词表，
+    不依赖本项目数据，不存在此问题）；
+  * 编码前后做硬校验（整数、有限、id 越界）与防泄漏诊断（重复行去污染、
+    64-gram 重叠筛查、一元分布漂移），结果写 data_report.json；
+  * val/test 内容绝不被改写；测试集只在最终评估时访问（访问账本）。
+
 约定 data_dir 内文件：
   train.txt / val.txt     原始文本（prepare_data.py 或 make_dummy_data.py 生成）
   train.bin / val.bin     uint16 token 流（prepare_bins 生成）
   meta.json               {"tokenizer": "gpt2_bpe"|"char", "vocab_size": int, ...}
+  data_report.json        防泄漏/清洗/漂移诊断报告
 """
 import json
 import os
@@ -11,6 +20,12 @@ from typing import List
 
 import numpy as np
 import torch
+
+from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
+                        decontaminate_texts, distribution_shift, ngram_overlap,
+                        read_test_access_log, sanitize_text,
+                        summarize_test_access, text_length_stats,
+                        token_stream_stats, unknown_char_rate)
 
 _GPT2_CACHE = {}
 
@@ -37,11 +52,22 @@ class GPT2Tokenizer:
 
 
 class CharTokenizer:
-    """字符级分词（离线兜底）。未知字符映射到 0。"""
+    """字符级分词（离线兜底）。
 
-    def __init__(self, itos: List[str]):
-        self.itos = list(itos)
+    add_unk=True 时把 <unk> 固定在 id 0：词表只在 train 上拟合，val/test 中的
+    未见字符显式映射到 <unk>，而不是静默混入 0 号真实字符（旧缓存以
+    add_unk=False 重建，保持与旧 bin 的编码一致）。
+    """
+
+    def __init__(self, itos: List[str], add_unk: bool = False):
+        itos = list(itos)
+        if add_unk and itos and itos[0] != UNK_TOKEN:
+            itos = [UNK_TOKEN] + itos
+        elif add_unk and not itos:
+            itos = [UNK_TOKEN]
+        self.itos = itos
         self.stoi = {ch: i for i, ch in enumerate(self.itos)}
+        self.unk_id = self.stoi.get(UNK_TOKEN, 0)
 
     @property
     def name(self) -> str:
@@ -52,7 +78,7 @@ class CharTokenizer:
         return len(self.itos)
 
     def encode(self, text: str) -> List[int]:
-        return [self.stoi.get(ch, 0) for ch in text]
+        return [self.stoi.get(ch, self.unk_id) for ch in text]
 
     def decode(self, ids) -> str:
         return "".join(self.itos[int(i)] for i in ids)
@@ -66,7 +92,11 @@ def get_gpt2_tokenizer() -> GPT2Tokenizer:
 
 
 def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
-    """kind ∈ {gpt2, auto}；gpt2 失败时 auto 退化为字符级，gpt2 直接抛错。"""
+    """kind ∈ {gpt2, auto}；gpt2 失败时 auto 退化为字符级，gpt2 直接抛错。
+
+    字符级词表只在 train_text 上拟合（val_text 仅为兼容旧调用保留、不参与），
+    这保证 val/test 不通过词表构造向训练侧泄露统计信息。
+    """
     if kind in ("gpt2", "auto"):
         try:
             return get_gpt2_tokenizer()
@@ -74,18 +104,28 @@ def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
             if kind == "gpt2":
                 raise
             print(f"[data] tiktoken 不可用({e})，退化为字符级分词")
-    chars = sorted(set(train_text) | set(val_text))
+    chars = sorted(set(train_text))
     if not chars:
         chars = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,\n")
-    return CharTokenizer(chars)
+    return CharTokenizer(chars, add_unk=True)
 
 
 # ---------------------------------------------------------------- bin 缓存
 
-def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict:
+def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
+                 report: bool = True, extra_report: dict = None) -> dict:
     """把 train.txt/val.txt（以及若存在的 test.txt）编码为 uint16 bin
-    （已存在则跳过，force=True 重建）。"""
+    （已存在则跳过，force=True 重建）。
+
+    这是所有文本进入训练/评测的唯一入口，因此在此集中执行防泄漏处理：
+      1) 文本清洗（坏字符）与跨 split 重复行去污染（只改 train）；
+      2) 分词器只在 train 上拟合（字符级词表 + <unk>）；
+      3) val/test 只 transform，随后对三条 token 流做硬校验；
+      4) 生成 data_report.json（重复、64-gram 重叠、分布漂移、访问账本）。
+    extra_report 用于记录数据来源/划分协议等上游元数据（原样并入报告）。
+    """
     meta_path = os.path.join(data_dir, "meta.json")
+    report_path = os.path.join(data_dir, "data_report.json")
     train_bin = os.path.join(data_dir, "train.bin")
     val_bin = os.path.join(data_dir, "val.bin")
     test_txt_path = os.path.join(data_dir, "test.txt")
@@ -104,6 +144,9 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
             # 旧版 meta 无 requested_kind：按实际分词器推断，
             # 避免 char 缓存被 gpt2 请求静默复用（反之亦然）。
             cached_kind = "gpt2" if meta.get("tokenizer") == "gpt2_bpe" else "char"
+        # 旧缓存可能是在 val/test 上拟合词表（泄露）或缺少防泄漏报告，必须重建
+        fit_ok = meta.get("fit_on") in ("train", "gpt2_pretrained")
+        report_ok = (not report) or os.path.exists(report_path)
         train_valid = os.path.getsize(train_bin) == int(meta.get("train_tokens", -1)) * 2
         val_valid = os.path.getsize(val_bin) == int(meta.get("val_tokens", -1)) * 2
         test_valid = (not has_test_txt and not os.path.exists(test_bin)) or (
@@ -111,7 +154,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
             and os.path.exists(test_bin)
             and os.path.getsize(test_bin) == int(meta.get("test_tokens", -1)) * 2)
         if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
-                and test_valid:
+                and test_valid and fit_ok and report_ok:
             if kind == "auto":
                 # auto 的实际分词器取决于当前环境（tiktoken 是否可用），
                 # 直接复用缓存可能与本应使用的分词器不一致，必须提示。
@@ -125,6 +168,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
             return meta
         if not (train_valid and val_valid and test_valid):
             print("[data] 缓存 bin/meta 大小不一致，重建 bin")
+        elif not fit_ok:
+            print("[data] 旧缓存词表可能在全量数据上拟合（泄露风险），重建 bin")
+        elif not report_ok:
+            print("[data] 缺少防泄漏诊断报告 data_report.json，重建 bin")
         else:
             print(f"[data] 缓存分词方式({cached_kind})与请求({kind})不一致，重建 bin")
 
@@ -137,9 +184,36 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
         with open(test_txt_path, "r", encoding="utf-8") as f:
             test_text = f.read()
 
-    # 字符级分词的词表必须覆盖 test.txt，否则 held-out 文本中的新字符无法编码
-    tok = get_tokenizer(kind, train_text, val_text + (test_text or ""))
-    print(f"[data] 分词器: {tok.name}, vocab={tok.n_vocab}")
+    # 1) 清洗 + 去污染：坏字符确定性删除/替换；与 val/test 精确重复的长行
+    #    只从 train 移除（val/test 绝不改写，保持尘封）。
+    texts = {"train": train_text, "val": val_text}
+    if test_text is not None:
+        texts["test"] = test_text
+    sanitization = {}
+    for name in list(texts):
+        clean, stats = sanitize_text(texts[name])
+        texts[name] = clean
+        sanitization[name] = stats
+    texts, duplicate_stats = decontaminate_texts(texts, min_chars=40)
+    train_text, val_text = texts["train"], texts["val"]
+    test_text = texts.get("test")
+    if duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]:
+        print(f"[data] 去污染：从 train 移除 "
+              f"{duplicate_stats['train_lines_dropped_as_duplicates_of_eval']:,} "
+              f"条与 val/test 精确重复的长行")
+
+    # 2) 分词器只在 train 上拟合；3) val/test 只做 transform
+    tok = get_tokenizer(kind, train_text)
+    check_vocab_capacity(tok.n_vocab)
+    print(f"[data] 分词器: {tok.name}（词表仅在 train 上拟合）, vocab={tok.n_vocab}")
+
+    unk_rates = {}
+    for name, txt in (("train", train_text), ("val", val_text), ("test", test_text)):
+        if txt is not None:
+            unk_rates[name] = unknown_char_rate(tok, txt)
+    if unk_rates.get("test") is not None and unk_rates["test"] > 0.001:
+        print(f"[data] 提示：test 字符级 OOV 率 {unk_rates['test']:.4%}，"
+              "未见字符映射 <unk>（词表只用 train 拟合，防止泄露）")
 
     def encode_stream(text: str) -> np.ndarray:
         parts: List[np.ndarray] = []
@@ -161,12 +235,46 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
     tr = encode_stream(train_text)
     va = encode_stream(val_text)
     te = encode_stream(test_text) if test_text is not None else None
+
+    # 4) token 流硬校验 + 防泄漏诊断
+    streams = {"train": tr, "val": va}
+    if te is not None:
+        streams["test"] = te
+    stream_stats = {name: token_stream_stats(arr, tok.n_vocab, name)
+                    for name, arr in streams.items()}
+    contamination = {"train_val": ngram_overlap(tr, va)}
+    distribution = {"val_vs_train": distribution_shift(tr, va, tok.n_vocab)}
+    if te is not None:
+        contamination["train_test"] = ngram_overlap(tr, te)
+        distribution["test_vs_train"] = distribution_shift(tr, te, tok.n_vocab)
+    tokenizer_report = {
+        "kind": tok.name,
+        "fit_on": "train" if tok.name == "char" else "gpt2_pretrained",
+        "vocab_size": int(tok.n_vocab),
+        "unk_token": (UNK_TOKEN if getattr(tok, "stoi", {}).get(UNK_TOKEN)
+                      is not None else None),
+        "unk_rate": {k: v for k, v in unk_rates.items() if v is not None},
+    }
+    text_stats = {name: text_length_stats(txt)
+                  for name, txt in (("train", train_text), ("val", val_text),
+                                    ("test", test_text)) if txt is not None}
+    data_report = build_data_report(
+        tokenizer=tokenizer_report, splits=stream_stats,
+        sanitization=sanitization, duplicates=duplicate_stats,
+        contamination={k: v for k, v in contamination.items()},
+        distribution={k: v for k, v in distribution.items()},
+        text_stats=text_stats, extra=extra_report)
+    data_report["test_access"] = summarize_test_access(
+        read_test_access_log(data_dir))
+
     # 原子替换：重建中断时不会让旧 meta 搭配半成品 bin 继续被当作有效缓存。
     train_tmp, val_tmp, meta_tmp = train_bin + ".tmp", val_bin + ".tmp", meta_path + ".tmp"
     tr.tofile(train_tmp)
     va.tofile(val_tmp)
     meta = {"tokenizer": tok.name, "requested_kind": kind,
             "vocab_size": tok.n_vocab,
+            "fit_on": tokenizer_report["fit_on"],
+            "text_sanitized": True,
             "train_tokens": int(tr.size), "val_tokens": int(va.size)}
     if te is not None:
         test_tmp = test_bin + ".tmp"
@@ -174,8 +282,12 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
         meta["test_tokens"] = int(te.size)
     if tok.name == "char":
         meta["itos"] = tok.itos
+        meta["char_unk"] = UNK_TOKEN in tok.stoi
     with open(meta_tmp, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
+    report_tmp = report_path + ".tmp"
+    with open(report_tmp, "w", encoding="utf-8") as f:
+        json.dump(data_report, f, ensure_ascii=False, indent=2)
     os.replace(meta_tmp, meta_path)
     os.replace(train_tmp, train_bin)
     os.replace(val_tmp, val_bin)
@@ -184,10 +296,16 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False) -> dict
     elif os.path.exists(test_bin):
         # 本次没有 test.txt 但残留旧 test.bin：删除，避免用过期 split 评测
         os.remove(test_bin)
+    os.replace(report_tmp, report_path)
     msg = f"[data] train {tr.size:,} tokens / val {va.size:,} tokens"
     if te is not None:
         msg += f" / test {te.size:,} tokens"
     print(f"{msg} -> {data_dir}")
+    ov = contamination.get("train_test", {}).get("overlap_rate")
+    if ov:
+        print(f"[data] 警告：train/test 采样 64-gram 重叠率 {ov:.3%}，"
+              "请人工核查是否存在语料复制")
+    print(f"[data] 防泄漏报告 -> {report_path}")
     return meta
 
 
@@ -200,7 +318,9 @@ def load_tokenizer(data_dir: str):
     meta = load_meta(data_dir)
     if meta["tokenizer"] == "gpt2_bpe":
         return get_gpt2_tokenizer()
-    return CharTokenizer(meta["itos"])
+    # 新缓存显式携带 <unk>（char_unk=True）；旧缓存没有该标记，按原编码方式
+    # 重建（未知字符→0），保证与旧 bin 的 id 一一对应。
+    return CharTokenizer(meta["itos"], add_unk=bool(meta.get("char_unk", False)))
 
 
 def load_bin(data_dir: str, split: str) -> np.memmap:

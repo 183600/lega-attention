@@ -5,10 +5,16 @@
   1. HuggingFace parquet（需 pyarrow）—— Salesforce/wikitext, wikitext-103-raw-v1
   2. Smerity 镜像 zip（zipfile 标准库即可）
   3. rows API（慢，仅适合 --max_tokens 很小的场合）
-  4. --local_txt 直接使用本地文本
-      ⚠ 注意：该模式把同一文件的前 10% 作 test、次 10% 作 val、其余作 train，
-      三个 split 来自同一连续文本（近似泄漏，PPL 偏乐观），仅适合冒烟/调试，
-      正式实验请使用 WikiText-103 官方 split（来源 1-3，天然含 held-out test）。
+  4. --local_txt 直接使用本地文本：按时间先后做叙事性划分——
+     最早 80% 训练、其后 10% 验证、最新 10% 测试；切点对齐文档边界
+     （标题行 > 空行段落 > 换行），绝不随机打乱，保证未来信息不穿越。
+     val/test 不参与任何拟合；分词词表与去污统计只依据 train。
+
+来源 1-3 使用 WikiText-103 官方 split（按文档划分、天然 held-out test）。
+
+所有来源都会经过统一入口 lega.data.prepare_bins：
+  文本坏字符清洗 → 与 val/test 重复的训练行去污染 → 词表只在 train 拟合 →
+  val/test transform → token 流硬校验 → 写 data_report.json（防泄漏自检）。
 
 用法:
   python scripts/prepare_data.py --out_dir data/wikitext103            # 全量
@@ -170,17 +176,30 @@ def main():
     val_txt = os.path.join(args.out_dir, "val.txt")
     test_txt = os.path.join(args.out_dir, "test.txt")
 
+    source_used = args.source
+    split_protocol = None
     if args.source == "local" or args.local_txt:
         assert args.local_txt, "--source local 需要 --local_txt"
         text = open(args.local_txt, "r", encoding="utf-8").read()
-        # 前 10% 作 test、次 10% 作 val、其余作 train；test 与 val 都不参与训练。
-        n = len(text) // 10
-        test_text, val_text, train_text = text[:n], text[n:2 * n], text[2 * n:]
+        # 时序划分：train=最早、val=其后、test=最新；切点对齐文档边界，
+        # 绝不随机打乱。preprocess 级别的清洗/去污/拟合在 prepare_bins 中完成。
+        from lega.datacheck import temporal_split_text
+        train_text, val_text, test_text, split_info = temporal_split_text(text)
+        split_info["mode"] = "local_temporal"
+        split_protocol = split_info
+        source_used = "local"
+        if split_info["fallback_char_cut"]:
+            print("[data] 警告：本地文本缺少可用换行/文档边界，退化为字符切分；"
+                  "同一文档可能跨 split，请检查语料格式")
+        train_text = clean_lines(train_text.split("\n"), args.max_tokens, args.tokenizer)
+        val_text = clean_lines(val_text.split("\n"), args.val_tokens, args.tokenizer)
+        test_text = clean_lines(test_text.split("\n"), args.test_tokens, args.tokenizer)
     else:
         lines = None
         if args.source in ("auto", "parquet"):
             try:
                 lines = from_parquet(args.out_dir)
+                source_used = "parquet"
             except Exception as e:
                 print(f"[data] parquet 路径失败: {e}")
                 if args.source == "parquet":
@@ -188,6 +207,7 @@ def main():
         if lines is None and args.source in ("auto", "zip"):
             try:
                 lines = from_zip(args.out_dir)
+                source_used = "zip"
             except Exception as e:
                 print(f"[data] zip 镜像失败: {e}")
                 if args.source == "zip":
@@ -200,6 +220,7 @@ def main():
                 # 下限 500 保证能抓到东西，上限 20000 防止兜底路径发起海量请求
                 est_rows = min(max(args.max_tokens // 30, 500), 20000)
                 lines = from_rows_api(max_rows=est_rows)
+                source_used = "rows_api"
         if lines is None:
             raise RuntimeError("所有下载路径均失败，请检查网络或使用 --local_txt")
         train_text = clean_lines(lines["train"], args.max_tokens, args.tokenizer)
@@ -207,6 +228,11 @@ def main():
         # 官方 test split 作为 held-out：checkpoint 选择用 val，最终 PPL 报告用 test，
         # 避免「在报告的指标上做模型选择」的乐观偏差。
         test_text = clean_lines(lines["test"], args.test_tokens, args.tokenizer)
+        split_protocol = {
+            "mode": "official_wikitext103",
+            "order": "document_disjoint_official_split(no_shuffle)",
+            "shuffled": False,
+        }
 
     with open(train_txt, "w", encoding="utf-8") as f:
         f.write(train_text)
@@ -218,7 +244,9 @@ def main():
           f" / test.txt {len(test_text):,} 字符")
 
     from lega.data import prepare_bins
-    prepare_bins(args.out_dir, kind=args.tokenizer, force=True)
+    prepare_bins(args.out_dir, kind=args.tokenizer, force=True,
+                 extra_report={"source": source_used,
+                               "split_protocol": split_protocol})
     print("[data] WikiText-103 准备完成")
 
 

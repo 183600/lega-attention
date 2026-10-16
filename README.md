@@ -64,6 +64,12 @@ AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、ABC/`lega`）与
 
 ## 2. 实验设计
 
+- **数据协议（防泄漏，全部可审计）**：
+  1. **先划分后预处理**：先产出 train/val/test 文本再编码；字符级词表（特征工程）只在 train 上拟合，val/test 只做 transform，未见字符统一映射 `<unk>`（GPT-2 BPE 是公开预训练词表，不依赖本项目数据）；
+  2. **时序划分**：`--local_txt` 按时间先后切分——最早 80% 训练、其后 10% 验证、最新 10% 测试；切点对齐文档边界（标题行 > 空行段落 > 换行），划分时绝不随机打乱（训练阶段对训练样本的 batch 级随机采样不构成泄露）；WikiText-103 官方 split 按文档划分，天然 held-out；
+  3. **群组不跨侧**：以文档/段落为整体单位，同一文档只落在一个 split；与 val/test 精确重复的训练长行自动去污染（val/test 保持尘封不改写），并用采样 64-gram 哈希筛查跨 split 的逐 token 复制；
+  4. **清洗与异常检查**：坏字符（U+FFFD/NUL/非法控制符）确定性清除；token 流做整数/有限/id 越界硬校验；重复样本、超长行、train 与 val/test 的一元分布漂移（TV/JS、OOV）全部写入 `data_report.json`；
+  5. **测试集尘封**：checkpoint 选择与早停只用 val，test 只在最终评估时访问；每次 test 评测写入 `data_dir/.test_access_log.jsonl` 账本，汇总表报告累计次数与被重复评测的 checkpoint。
 - **公平对比（受控变量）**：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/训练步数/数据顺序），训练后自动核对各 run 的 `config_used.json`，除变体/种子外任何配置差异都会直接报错——把“公平对比”从口头约定变成可执行断言。
 - **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std**（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对，用双侧配对 t 检验给出显著性（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益。
 - **三个评测维度**：
@@ -121,6 +127,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **溯源清单：git commit/dirty、配置 SHA-256、数据指纹、运行环境、命令行** |
 | `results/<tag>/summary.md` | **汇总表（Mean ± Std + 消融矩阵 + 受控变量自检 + 可复现性/sanity）** |
 | `results/<tag>/repro.json` | 流水线全局溯源（代码版本、数据指纹、种子、运行环境） |
+| `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、p 值、结论） |
 | `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val） |
@@ -167,7 +174,8 @@ lega-attention/
 ├── lega/
 │   ├── attention.py           # 核心：9 个变体的因果注意力（LEGA 门控公式与消融矩阵在此）
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
-│   ├── data.py                # 分词（GPT-2 BPE/字符级兜底）+ bin 缓存 + 批采样
+│   ├── data.py                # 分词（GPT-2 BPE/字符级兜底，词表只在 train 拟合）+ bin 缓存 + 批采样
+│   ├── datacheck.py           # 防泄漏：时序/文档划分、去污染、token 硬校验、漂移筛查、test 访问账本
 │   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）+ 溯源清单
 │   ├── evaluate.py            # held-out test PPL（缺 test.bin 时回退 val）
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
@@ -195,7 +203,7 @@ lega-attention/
 - **torch.compile**：配置 `"compile": true` 可在 CUDA 上启用 torch.compile；保存检查点时统一使用剥离包装前缀后的参数键名，`load_model`（evaluate/ruler/latency/analysis）可直接加载。
 - **标准注意力双路径**：SDPA 快速路径与显式路径数值一致（有单测），显式路径用于需要注意力统计的变体与延迟公平对比（`standard` vs `standard_sdpa` 两者都测）。
 - **KV 缓存**：gated 变体在增量解码时逐 token 计算门控，缓存等价性有单测（全量前向 vs 逐 token）。
-- **分词**：默认 GPT-2 BPE（tiktoken，首用需联网缓存）；无网络时 `--tokenizer auto` 退化为字符级（PPL 不可与文献直接对比，但变体间对比有效）。
+- **分词**：默认 GPT-2 BPE（tiktoken，首用需联网缓存，公开预训练词表不依赖本项目数据）；无网络时 `--tokenizer auto` 退化为字符级，词表只在 train 上拟合、未见字符映射 `<unk>`（PPL 不可与文献直接对比，但变体间对比有效）。数据进入训练前统一经过 `lega.data.prepare_bins`：坏字符清洗 → 跨 split 重复行去污染 → 拟合词表 → token 流硬校验 → 写 `data_report.json`。
 - **设备**：`small.json` 建议 GPU + bf16；CPU 仅适合 tiny 冒烟。正式实验建议先跑 `lega_no_len` 与 `lega` 的对比（长度校准是核心主张）。
 - **已知限制**：30M 模型的 RULER 绝对准确率不高（小模型检索能力有限），关注点是**变体间相对差异**与**机制分析指标**，而非绝对分数；`fwe` 的高频词以 k≥3 次、其它词以 2 次出现，答案按词集合评分，不存在词频并列歧义；ctx 过小时个别 `fwe`/`vt` 样例会因长度空间不足被跳过（JSON `_skipped` 字段如实记录，变体间跳过集合一致）。
 

@@ -64,6 +64,12 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
 
 ## 2. Experimental design
 
+- **Data protocol (leakage-proof, fully auditable)**:
+  1. **Split first, preprocess second**: train/val/test text is produced before encoding; the character-level vocabulary (feature engineering) is fit on train only, val/test are only transformed, and unseen characters map to `<unk>` (GPT-2 BPE is a public pretrained vocabulary, independent of this project's data);
+  2. **Temporal split**: with `--local_txt`, the earliest 80% is train, the next 10% is val and the latest 10% is test; cut points align to document boundaries (heading lines > blank-line paragraphs > newlines) and are never shuffled at split time (batch-level random sampling of training samples during training is allowed and not leakage); the official WikiText-103 split is document-disjoint and inherently held out;
+  3. **Groups never cross sides**: documents/paragraphs are the group unit and land entirely in one split; training lines that exactly duplicate val/test lines are decontaminated (val/test stay sealed and untouched), and sampled 64-gram hashing screens for token-level copies across splits;
+  4. **Cleaning & anomaly checks**: corrupt characters (U+FFFD/NUL/illegal control chars) are deterministically removed; token streams are hard-validated (integer, finite, id range); duplicate samples, overlong lines and train-vs-val/test unigram shift (TV/JS, OOV) are all written to `data_report.json`;
+  5. **Test seal**: checkpoint selection and early stopping use val only; test is accessed for final evaluation only, and every test evaluation appends to the `data_dir/.test_access_log.jsonl` ledger; the summary reports the total count and any repeatedly evaluated checkpoint.
 - **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, each run's `config_used.json` is automatically cross-checked and any difference besides variant/seed fails the pipeline — fairness is an executable assertion, not a verbal promise.
 - **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test (`results/<tag>/significance.json`); with n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%.
 - **Three evaluation axes**:
@@ -121,6 +127,7 @@ Outputs:
 | `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **Provenance: git commit/dirty, config SHA-256, data fingerprint, runtime, command line** |
 | `results/<tag>/summary.md` | **Summary (Mean ± Std + ablation matrix + controlled-variable audit + reproducibility/sanity)** |
 | `results/<tag>/repro.json` | Pipeline-level provenance (code version, data fingerprint, seeds, runtime) |
+| `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, p value, verdict) |
 | `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent) |
@@ -167,7 +174,8 @@ lega-attention/
 ├── lega/
 │   ├── attention.py           # core: causal attention for 9 variants (LEGA gate + ablation matrix)
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
-│   ├── data.py                # tokenization (GPT-2 BPE / char fallback) + bin cache + batch sampling
+│   ├── data.py                # tokenization (GPT-2 BPE / char fallback, vocab fit on train only) + bin cache + batch sampling
+│   ├── datacheck.py           # leakage-proofing: temporal/document split, decontamination, token hard checks, shift screening, test-access ledger
 │   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + provenance manifest
 │   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept

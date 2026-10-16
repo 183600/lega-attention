@@ -10,10 +10,11 @@ import math
 import os
 
 from .data import load_bin
+from .datacheck import append_test_access
 from .model import load_model, count_params, gate_extra_params
-from .repro import load_provenance
+from .repro import load_provenance, sha256_file
 from .train import evaluate_val
-from .utils import enable_tf32, get_device, save_json, set_seed
+from .utils import enable_tf32, get_device, now_str, save_json, set_seed
 
 
 def main():
@@ -47,6 +48,28 @@ def main():
         # 须明确提示而非静默；正式数据请用 prepare_data.py 生成 held-out test。
         print("[eval] 警告：正在 val split 上评测——这也是 best checkpoint 的选择集，"
               "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测")
+    test_access = None
+    if split == "test":
+        # 测试集尘封协议：每次在 test 上评测都写入访问账本（data_dir 下），
+        # 同一 checkpoint 被反复评测会显式报警——反复据 test 调参会把测试集
+        # 变成隐式训练集；账本让这种行为可审计。
+        # 只读数据目录等无法写账本的情况不阻塞评测，但必须显式告警。
+        try:
+            test_access = append_test_access(args.data_dir, {
+                "time": now_str(),
+                "ckpt": os.path.abspath(args.ckpt),
+                "ckpt_sha256": sha256_file(args.ckpt),
+                "variant": ck.get("variant", model.variant),
+                "seed": ck.get("seed"),
+            })
+        except OSError as e:
+            print(f"[eval] 警告：test 访问账本写入失败（{e}）；"
+                  "本次 test 评测未被记录")
+        if test_access and test_access["checkpoints_evaluated_multiple_times"]:
+            print(f"[eval] 警告：同一 checkpoint 在 test 上被重复评测"
+                  f"（累计 {test_access['evaluations']} 次、"
+                  f"{test_access['distinct_checkpoints']} 个 checkpoint）；"
+                  "测试集只能用于最终一次性评估，反复评测/据此调参视为泄露")
     val = load_bin(args.data_dir, split)
     # 与训练时的评估保持一致：优先使用训练配置里的 train_ctx
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
@@ -95,6 +118,8 @@ def main():
         "eval_iters": metrics["eval_iters"],
         "val_windows": metrics["val_windows"],
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
+        # test 访问账本摘要（split=val 时为 None）：审计"测试集被反复评测"
+        "test_access": test_access,
     }
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     res.update(load_provenance(os.path.dirname(os.path.abspath(args.ckpt)),

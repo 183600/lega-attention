@@ -70,7 +70,16 @@ def main():
             f.write(make_text(args.test_words))
 
     from lega.data import prepare_bins
-    meta = prepare_bins(args.out_dir, kind="auto", force=True)
+    meta = prepare_bins(
+        args.out_dir, kind="auto", force=True,
+        extra_report={
+            "source": "dummy_synthetic",
+            "split_protocol": {
+                "mode": "independent_generation",
+                "order": "train/val/test 各自独立生成（共享分布、无共享样本）",
+                "shuffled": False,
+            },
+        })
     print(f"[dummy] 完成: {meta}")
 
 

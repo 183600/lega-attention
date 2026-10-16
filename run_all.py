@@ -42,6 +42,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
+from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
 from lega.utils import mean_std, paired_t_test, save_json  # noqa: E402
 
@@ -265,12 +266,23 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better,
     return out
 
 
-def build_summary(results_dir: str, audit: dict = None) -> dict:
+def _fmt_rate(x) -> str:
+    if x is None:
+        return "-"
+    try:
+        return f"{float(x):.3%}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def build_summary(results_dir: str, audit: dict = None,
+                  data_report: dict = None) -> dict:
     """汇总 PPL / RULER / 延迟 / 参数量为 Markdown + CSV + JSON。
 
     多种子口径：每个变体的每个指标先按种子聚合为 Mean ± Std；变体间比较使用
     同一批种子上的配对 t 检验（同种子共享初始化与数据顺序，配对消除公共方差）。
     消融矩阵显式列出全因子 8 个组合的覆盖情况，缺失组合会被标注。
+    data_report（可选）来自数据目录的防泄漏自检报告，汇总为独立小节。
     """
 
     def load(p):
@@ -490,6 +502,81 @@ def build_summary(results_dir: str, audit: dict = None) -> dict:
                       + (" …" if len(audit["missing_configs"]) > 8 else ""))
     else:
         md.append("- ⚠ 未执行（直接调用 build_summary 或缺少 out 目录）。")
+
+    # --- 数据协议与防泄漏自检（由 lega.data.prepare_bins 生成 data_report.json）
+    md += ["", "## 数据协议与防泄漏自检", ""]
+    if data_report:
+        proto = data_report.get("protocol") or {}
+        md.append(
+            f"- 协议：先划分后预处理={proto.get('split_first_then_preprocess')}、"
+            f"拟合统计只来自 {proto.get('fit_on')}、"
+            f"划分时打乱={proto.get('shuffle_at_split_time')}；"
+            "训练阶段 batch 级随机采样（shuffle）不构成泄露。")
+        sp = data_report.get("split_protocol") or {}
+        if sp:
+            md.append(f"- 划分方式：{sp.get('mode', '-')}；"
+                      f"顺序 {sp.get('order', '-')}；"
+                      f"文档边界回退={sp.get('fallback_char_cut', '-')}"
+                      + ("（⚠ 字符切分可能让同一文档跨 split）"
+                         if sp.get("fallback_char_cut") else ""))
+        tok = data_report.get("tokenizer") or {}
+        unk = tok.get("unk_rate") or {}
+        unk_s = "、".join(f"{k}={_fmt_rate(v)}" for k, v in unk.items())
+        md.append(f"- 分词器：{tok.get('kind')}（vocab={tok.get('vocab_size')}，"
+                  f"拟合集={tok.get('fit_on')}）；OOV 字符率：{unk_s or 'N/A'}"
+                  "（未知字符映射 <unk>，val/test 不参与词表拟合）")
+        splits = data_report.get("splits") or {}
+        md.append("- token 流硬校验：" + "；".join(
+            f"{k} {int(v.get('tokens', 0)):,} tokens"
+            f"（id∈[{v.get('min_id')},{v.get('max_id')}]，"
+            f"NaN={v.get('nan')}，Inf={v.get('inf')}）"
+            for k, v in splits.items()))
+        dup = data_report.get("duplicates") or {}
+        cont = data_report.get("contamination") or {}
+        md.append(
+            f"- 去污染：与 val/test 精确重复的训练长行移除 "
+            f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"
+            f"采样 {cont.get('train_val', {}).get('n', '-')}-gram 重叠率 "
+            f"val={_fmt_rate((cont.get('train_val') or {}).get('overlap_rate'))}、"
+            f"test={_fmt_rate((cont.get('train_test') or {}).get('overlap_rate'))}"
+            "（采样筛查下界，>0 需人工核查）")
+        dist = data_report.get("distribution_shift") or {}
+        dv = dist.get("val_vs_train") or {}
+        dt = dist.get("test_vs_train") or {}
+        md.append(
+            f"- 分布漂移（一元 token，采样估计）：val−train TV={dv.get('tv', 0):.4f}、"
+            f"JS={dv.get('js_bits', 0):.4f} bit；test−train TV={dt.get('tv', 0):.4f}、"
+            f"JS={dt.get('js_bits', 0):.4f} bit；test OOV token 率="
+            f"{_fmt_rate(dt.get('eval_oov_token_rate'))}")
+        san = data_report.get("sanitization") or {}
+        noise = sum(int((san.get(s) or {}).get("replacement_char_replaced_with_space", 0))
+                    for s in san)
+        ctrl = sum(int((san.get(s) or {}).get("control_chars_deleted", 0))
+                   for s in san)
+        md.append(f"- 文本清洗（标签噪声）：U+FFFD 替换 {noise:,} 处、"
+                  f"非法控制符删除 {ctrl:,} 处；清洗为逐字符确定性规则，"
+                  "不依赖跨样本统计量。")
+        ts = data_report.get("text_stats") or {}
+        if ts:
+            md.append("- 行长度异常检查：" + "；".join(
+                f"{k} 行数={int(v.get('lines') or 0):,}、"
+                f"最长行={int(v.get('line_chars_max') or 0):,} 字符、"
+                f"超长行(>10万字符)={int(v.get('lines_gt_huge_threshold') or 0)}"
+                for k, v in ts.items()))
+        ta = data_report.get("test_access") or {}
+        if ta:
+            warn = ("" if not ta.get("checkpoints_evaluated_multiple_times")
+                    else "；⚠ 存在被重复评测的 checkpoint："
+                         + "、".join(ta["checkpoints_evaluated_multiple_times"][:4]))
+            md.append(f"- 测试集尘封账本：累计 test 评测 {ta.get('evaluations', 0)} 次、"
+                      f"不同 checkpoint {ta.get('distinct_checkpoints', 0)} 个"
+                      f"{warn}。测试集只用于最终评估；据此调参即视为泄露。")
+        else:
+            md.append("- 测试集尘封账本：暂无 test 评测记录。")
+    else:
+        md.append("- ⚠ 未找到 `data_report.json`（旧数据或未走统一数据入口）；"
+                  "请用 `scripts/prepare_data.py` / `scripts/make_dummy_data.py` "
+                  "重建数据以生成防泄漏自检。")
 
     # --- 可复现性与 sanity check（代码版本 / 数据指纹 / 过拟合小批量）
     md += ["", "## 可复现性与 sanity check", ""]
@@ -803,8 +890,23 @@ def main():
         run([py, "-m", "lega.plots", "--results_dir", results_dir,
              "--train_root", out_root])
 
+    # 数据协议防泄漏报告（prepare_bins 生成）：在所有评测结束后读取，连同实时
+    # 测试集访问账本复制进 results，供汇总与审计（早读会漏掉本轮 test 评测）。
+    data_report = None
+    dr_path = os.path.join(args.data_dir, "data_report.json")
+    if os.path.exists(dr_path):
+        with open(dr_path, "r", encoding="utf-8") as f:
+            data_report = json.load(f)
+        data_report["test_access"] = summarize_test_access(
+            read_test_access_log(args.data_dir))
+        save_json(data_report, os.path.join(results_dir, "data_report.json"))
+        print(f"[repro] 防泄漏报告 -> {os.path.join(results_dir, 'data_report.json')}")
+    else:
+        print("[repro] 警告：数据目录缺少 data_report.json（旧数据或未走统一入口），"
+              "汇总将标注防泄漏自检缺失")
+
     audit = verify_controlled_setup(out_root, variants, seeds, n_seeds)
-    build_summary(results_dir, audit=audit)
+    build_summary(results_dir, audit=audit, data_report=data_report)
     print(f"\n[run_all] 全部完成；结果目录: {results_dir}")
 
 
