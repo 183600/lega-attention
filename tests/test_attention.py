@@ -155,6 +155,28 @@ def test_standard_sdpa_matches_explicit():
     assert torch.allclose(o1, o2, atol=1e-5), (o1 - o2).abs().max()
 
 
+def test_light_stats_parity_sdpa_vs_explicit():
+    """轻量诊断（need_stats=True, stats_argmax=False）在 SDPA 与显式路径上
+    必须返回相同口径的 stats：log_n 等键的存在性与数值都一致。"""
+    torch.manual_seed(1)
+    x = torch.randn(2, 20, 32)
+    for variant in ("standard", "qgate", "lega_no_conc"):
+        m_fast = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=True)
+        m_slow = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=False)
+        m_slow.load_state_dict(m_fast.state_dict())
+        m_fast.eval()
+        m_slow.eval()
+        with torch.no_grad():
+            o1, _, s1 = m_fast(x, need_stats=True, stats_argmax=False)
+            o2, _, s2 = m_slow(x, need_stats=True, stats_argmax=False)
+        assert torch.allclose(o1, o2, atol=1e-5), variant
+        for key in ("max_p", "log_n", "argmax", "qterm", "g", "logit"):
+            a, b = s1.get(key), s2.get(key)
+            assert (a is None) == (b is None), (variant, key, a is not None, b is not None)
+            if a is not None:
+                assert torch.allclose(a, b, atol=1e-5, rtol=1e-5), (variant, key)
+
+
 def test_standard_sdpa_cache_forwards_dropout_in_training():
     """训练态 + KV 缓存的 SDPA 分支也必须启用 attention dropout。"""
     torch.manual_seed(0)

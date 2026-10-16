@@ -695,10 +695,12 @@ class CausalSelfAttention(nn.Module):
                 o = F.scaled_dot_product_attention(
                     q, k, v, attn_mask=allowed,
                     dropout_p=self.attn_dropout if self.training else 0.0)
+            # 与显式路径一致：need_stats 时即使该变体不用 log n（qgate/standard）
+            # 也计算并记录，保证 SDPA/显式两条路径返回的轻量 stats 口径完全相同。
+            if self.use_len or bool(need_stats):
+                log_n = _log_n(past_len, T, dev)
             if self.variant in _GATED:
                 # 与显式路径相同的门控公式（qgate: w·q+d；lega_no_conc: w·q+b·log n+d）
-                if self.use_len:
-                    log_n = _log_n(past_len, T, dev)
                 # 轻量诊断（stats_argmax=False）只消费 g：不保留 qterm/logit，
                 # sigmoid 原地完成
                 g, logit, qterm = self._gate_logit(qterm_pre, None, log_n,
