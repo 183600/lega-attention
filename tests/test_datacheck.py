@@ -110,11 +110,17 @@ def test_ngram_overlap_detects_and_clears():
 def test_token_stream_hard_checks():
     stats = token_stream_stats(np.array([0, 1, 5], dtype=np.uint16), 10, "train")
     assert stats["max_id"] == 5 and stats["nan"] == 0 and stats["inf"] == 0
+    # 整数值浮点流合法（如从 JSON/缓存读入），非整数必须显式拒绝：
+    # 1.5 截断会静默改 token；-0.5 截断为 0 会绕过越界检查。
+    ok = token_stream_stats(np.array([0.0, 3.0]), 10, "train")
+    assert ok["min_id"] == 0 and ok["max_id"] == 3
     bad_cases = [
         (np.array([0, 10], dtype=np.uint16), "越界"),
         (np.array([1.0, np.nan]), "NaN"),
         (np.array([1.0, np.inf]), "Inf"),
         (np.array([], dtype=np.uint16), "空流"),
+        (np.array([1.5, 2.0]), "非整数"),
+        (np.array([-0.5, 1.0]), "非整数"),
     ]
     for bad, name in bad_cases:
         try:
@@ -128,7 +134,7 @@ def test_token_stream_hard_checks():
         raise AssertionError("超 uint16 容量应抛 ValueError")
     except ValueError:
         pass
-    print("  [ok] token 流硬校验：越界/NaN/Inf/空流/uint16 容量")
+    print("  [ok] token 流硬校验：越界/NaN/Inf/空流/非整数/uint16 容量")
 
 
 def test_char_vocab_fit_on_train_only():

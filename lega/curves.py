@@ -16,7 +16,7 @@ import argparse
 import json
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # 相对变化阈值：低于该幅度视为"没有实质下降/上升"（覆盖常见噪声量级）
 REL_TOL = 0.03
@@ -48,9 +48,10 @@ def load_train_log(path: str) -> List[Dict]:
     return recs
 
 
-def _finite_points(records: List[Dict], key: str) -> List[Dict]:
+def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int]:
     """取出 (step, value) 均有限并按 step 排序的记录点；非有限值单独计数。
 
+    返回 (pts, bad)：pts 为有限点列表，bad 为非有限值个数。
     记录按 step 排序（train/val 两类点在 jsonl 中交错写入，不能假设有序）。
     """
     pts, bad = [], 0
@@ -80,7 +81,8 @@ def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
 
 
 def _rel_change(first: Optional[float], last: Optional[float]) -> Optional[float]:
-    """last 相对 first 的相对变化（正=上升）。first 接近 0 时退化为绝对差。"""
+    """last 相对 first 的相对变化（正=上升）；first 接近 0 时返回 None
+    （相对变化无定义，不回退成绝对差以免口径混淆）。"""
     if first is None or last is None:
         return None
     if abs(first) < 1e-12:

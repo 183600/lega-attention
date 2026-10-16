@@ -175,8 +175,13 @@ def _betai(a: float, b: float, x: float) -> float:
 
 
 def student_t_two_sided_p(t: float, df: float) -> float:
-    """Student-t 分布双侧 p 值（无 scipy 依赖）。"""
-    if not math.isfinite(t):
+    """Student-t 分布双侧 p 值（无 scipy 依赖）。
+
+    NaN 输入返回 NaN（不能当作最显著）；±Inf 返回 0。
+    """
+    if math.isnan(t):
+        return float("nan")
+    if math.isinf(t):
         return 0.0
     x = df / (df + t * t)
     return float(_betai(df / 2.0, 0.5, x))
@@ -190,12 +195,25 @@ def paired_t_test(a, b) -> dict:
     返回 {n, mean_diff, std_diff, t, df, p, d_z}；n<2 时 t/df/p 为 None。
     d_z = mean_diff / std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。
     标准差为 0（所有配对差完全相同）时：均值非 0 记 p=0，否则 p=1。
+
+    配对按位置严格一一对应：两侧长度必须一致，None 也必须成对出现，
+    否则抛 ValueError（None 位置错开意味着种子集合没有对齐，静默过滤会
+    把不同种子的观测配到一起）。任一观测非有限（NaN/Inf）的配对整体剔除。
     """
-    av = np.asarray([v for v in a if v is not None], dtype=np.float64)
-    bv = np.asarray([v for v in b if v is not None], dtype=np.float64)
-    if av.size != bv.size:
-        raise ValueError(f"配对样本长度不一致: {av.size} vs {bv.size}")
-    d = av - bv
+    a_list, b_list = list(a), list(b)
+    if len(a_list) != len(b_list):
+        raise ValueError(f"配对样本长度不一致: {len(a_list)} vs {len(b_list)}")
+    diffs = []
+    for x, y in zip(a_list, b_list):
+        if (x is None) != (y is None):
+            raise ValueError("配对样本 None 位置不一致，无法按位置一一对应")
+        if x is None or y is None:
+            continue
+        xf, yf = float(x), float(y)
+        if not (math.isfinite(xf) and math.isfinite(yf)):
+            continue
+        diffs.append(xf - yf)
+    d = np.asarray(diffs, dtype=np.float64)
     n = int(d.size)
     if n == 0:
         return {"n": 0, "mean_diff": None, "std_diff": None,

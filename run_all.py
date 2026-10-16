@@ -35,6 +35,7 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
 import re
 import subprocess
@@ -308,12 +309,17 @@ def _variant_seed_map(runs: dict, variant: str) -> dict:
 
 
 def _stat(values) -> dict:
-    """跨种子聚合：{mean, std, n}；无有效值时 None。"""
+    """跨种子聚合：{mean, std, n}；无有效值时 None。
+
+    n 只计有限值，与 mean_std 的口径一致：NaN/Inf 不参与统计也不虚增
+    样本量（否则会显示“n=5”但均值实际只来自 4 个种子）。
+    """
     vals = [v for v in values if v is not None]
     m, s = mean_std(vals)
     if m is None:
         return None
-    return {"mean": m, "std": s, "n": len(vals)}
+    return {"mean": m, "std": s,
+            "n": sum(1 for v in vals if math.isfinite(float(v)))}
 
 
 def _ppl_of(d):
@@ -567,7 +573,8 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA) -> str:
       * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
         且增幅 >10% 时直接判不可行；
       * 显著但增幅（参数/计算量等结构指标的最大增幅）>50% → 需审视；
-      * 显著但增幅 >5×收益（收益按 PPL 相对改善计）→ 收益-增幅比不利；
+      * 显著但增幅 >5×收益（收益按 PPL 相对改善计，下限按 0.5% 计，
+        避免收益趋近 0 时比值判定失效）→ 收益-增幅比不利；
       * 其余 → 可接受。
     "提升 0.5% 精度却让计算量增加 10 倍"式的改进在这里会被明确拒绝。
     """
@@ -1189,7 +1196,7 @@ def build_summary(results_dir: str, audit: dict = None,
                     and t.get("mean_diff") is not None}
         for r in rows:
             v = r["variant"]
-            if v == "standard" or v not in lat_entries:
+            if v == "standard" or not lat_entries.get(v):
                 continue
             e = lat_entries[v]
             ppl = r.get("val_ppl")

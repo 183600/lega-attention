@@ -160,6 +160,32 @@ def test_paired_t_effect_size():
     print("  [ok] paired_t_test 配对效应量 d_z")
 
 
+def test_paired_t_nonfinite_and_pairing():
+    """非有限观测与 None 必须按位置成对处理，避免错配种子或污染统计。"""
+    # NaN/Inf 观测的配对整体剔除（同 mean_std 的 NaN 口径）
+    r = paired_t_test([1.0, 2.0, float("nan"), 4.0], [0.0, 0.0, 0.0, 0.0])
+    assert r["n"] == 3 and abs(r["mean_diff"] - 7.0 / 3.0) < 1e-12
+    r = paired_t_test([float("inf"), 2.0], [0.0, 1.0])
+    assert r["n"] == 1 and r["p"] is None
+    # 全为非有限 -> 无样本可检验
+    r = paired_t_test([float("nan")], [float("inf")])
+    assert r["n"] == 0 and r["p"] is None and r["mean_diff"] is None
+    # None 成对出现：整对剔除；位置错开说明种子集合没对齐，必须报错
+    r = paired_t_test([1.0, None, 3.0], [0.0, None, 2.0])
+    assert r["n"] == 2 and abs(r["mean_diff"] - 1.0) < 1e-12
+    r = paired_t_test([None, None], [None, None])
+    assert r["n"] == 0 and r["p"] is None
+    try:
+        paired_t_test([1.0, None], [None, 2.0])
+        raise AssertionError("None 位置不一致应抛 ValueError")
+    except ValueError:
+        pass
+    # NaN 的 t 不能伪装成 p=0（最显著）
+    assert math.isnan(student_t_two_sided_p(float("nan"), 3))
+    assert student_t_two_sided_p(float("inf"), 3) == 0.0
+    print("  [ok] paired_t_test 非有限剔除/None 成对校验；NaN 不伪装显著")
+
+
 def test_holm_bonferroni():
     # 手算：m=4, p=[0.01,0.02,0.03,0.04]，升序各乘以 4,3,2,1 后取前缀最大值
     adj = holm_bonferroni([0.01, 0.02, 0.03, 0.04])

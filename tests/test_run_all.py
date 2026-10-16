@@ -13,8 +13,9 @@ import sys
 import tempfile
 
 from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _cmd_env, _effect_status,
-                     _rel_pct, _resolve_jobs, component_evidence, run_many,
-                     tradeoff_verdict, verify_controlled_setup)
+                     _rel_pct, _resolve_jobs, _stat, build_summary,
+                     component_evidence, run_many, tradeoff_verdict,
+                     verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -257,3 +258,42 @@ def test_verify_controlled_setup_consistency():
     finally:
         shutil.rmtree(tmp2, ignore_errors=True)
     print("  [ok] verify_controlled_setup（数据/代码/步数/超参数双层审计）")
+
+
+def test_stat_counts_finite_only():
+    """_stat 的 n 与 mean/std 口径一致：NaN/Inf 不参与也不虚增样本量。"""
+    st = _stat([1.0, float("nan"), 3.0, None])
+    assert st["n"] == 2 and st["mean"] == 2.0
+    assert abs(st["std"] - 2 ** 0.5) < 1e-12
+    assert _stat([float("nan"), float("inf"), None]) is None
+    assert _stat([2.5]) == {"mean": 2.5, "std": None, "n": 1}
+    print("  [ok] _stat（NaN 不计入 n，与 mean/std 口径一致）")
+
+
+def test_build_summary_missing_latency_entry():
+    """latency.json 缺少某变体条目（--skip_latency 复用旧结果）时不得崩溃。
+
+    回归：lat_entries 对每个变体都建了键，值可能为 None；旧守卫只查
+    `v not in lat_entries`，随后 e.get(...) 直接 AttributeError。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+        # 只有 standard 有运行时基准；lega 无条目（值为 None）
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {"standard": {
+            "prefill_ms": {"256": {"1": 1.0}},
+            "decode_ms_per_tok": {"256": 0.1},
+            "efficiency": {
+                "n_params": 100,
+                "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                "peak_mem_mb_prefill": {"256": 1.0}}}}})
+        out = build_summary(tmp)
+        assert len(out["rows"]) == 2
+        assert "效率-精度权衡" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（latency 缺变体条目时安全跳过）")

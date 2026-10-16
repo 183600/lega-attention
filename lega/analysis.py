@@ -6,7 +6,8 @@
   max_p   本次注意力最大概率（集中度）
   hit     注意力落点 argmax 是否落在答案数值 token 跨度内（是否找对）
   g/logit 门控值与门控 logit（gated 变体）
-  qterm   查询项 w·q（若有）；c = log n + log max_p（LEGA 家族）
+  qterm   查询项 w·q（若有）；c = log n + log max_p（lega/lega_no_query），
+          去长度项或只保留集中度的变体 c = log max_p
 
 关键指标：
   misleading_rate      集中但看错: P(max_p > τ 且 ¬hit)

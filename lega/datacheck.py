@@ -155,7 +155,15 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
         n_inf = int(np.isinf(arr).sum())
         if n_nan or n_inf:
             raise ValueError(f"{split} token 流含 NaN={n_nan}/Inf={n_inf}")
-        arr_i = arr.astype(np.int64)
+        # 非整数浮点 id（如 1.5、-0.5）一旦 astype 截断会静默改变 token，
+        # 必须在范围检查前显式拒绝（-0.5 截断为 0 会绕过越界检查）。
+        arr_r = np.rint(arr)
+        if not np.array_equal(arr, arr_r):
+            bad = arr[arr != arr_r].ravel()[:5]
+            raise ValueError(
+                f"{split} token 流含非整数 id，例如 {bad.tolist()}；"
+                "浮点流必须是整数值")
+        arr_i = arr_r.astype(np.int64)
     elif arr.dtype.kind in "iu":
         arr_i = arr.astype(np.int64, copy=False)
     else:
