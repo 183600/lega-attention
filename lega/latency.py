@@ -63,8 +63,7 @@ def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup
     x = torch.randint(0, vocab, (1, pf_len), device=device)
 
     # 静态 KV 缓存：每层一次性预分配 (1, H, pf_len+decode_tokens-1, Dh)，
-    # 逐 token 就地写入；与 generate 同源。缓存 dtype 与计算精度一致，
-    # 避免注意力在 FP32 缓存与低精度查询之间来回转换。
+    # 逐 token 就地写入；与 generate 同源。缓存 dtype 与计算精度一致。
     attn0 = model.blocks[0].attn
     kvdtype = attn0.wk.weight.dtype if kv_dtype is None else kv_dtype
     total = pf_len + decode_tokens - 1

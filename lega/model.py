@@ -194,9 +194,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
         logits_cache = None
         ctx.logits_cache = None
         with torch.no_grad():
-            # 分块循环共用一份目标精度权重：autocast 会在每次 F.linear 调用时
-            # 重新转换整份权重，而各分块使用的转换结果完全相同，转换一次即可。
-            # 前向与反向重算共用该副本，GEMM 的输入逐位不变。
+            # 分块循环共用一份目标精度权重：前向与反向重算共用该副本，
+            # GEMM 的输入逐位不变。
             ctx.w_fwd = weight if (ctx.amp_dtype is None
                                    or weight.dtype == ctx.amp_dtype) \
                 else weight.to(ctx.amp_dtype)
@@ -303,10 +302,9 @@ def _cast_weight_cached(owner, slot: str, weight: torch.Tensor) -> torch.Tensor:
     """线性层前向权重：无梯度时按 autocast 目标精度缓存。
 
     有梯度时直接返回参数本身，保持反向连通到参数；无梯度路径返回目标精度的
-    缓存副本——autocast 会在每次 F.linear 调用时重新转换权重，而同一权重在
-    多次调用（逐 token 解码、逐分块评测）中的转换结果相同。副本在
-    inference_mode(False)+no_grad 下创建，不会留下会被 autograd 拒绝的
-    inference tensor；权重被替换或原地更新（_version 变化）会使缓存失效。
+    缓存副本。副本在 inference_mode(False)+no_grad 下创建，不会留下会被
+    autograd 拒绝的 inference tensor；权重被替换或原地更新（_version 变化）
+    会使缓存失效。
     """
     if torch.is_grad_enabled():
         return weight
@@ -425,9 +423,8 @@ class GPT(nn.Module):
         """lm_head 前向权重（与 tok_emb 共享参数）。
 
         有梯度时返回参数本身，保证反向经共享参数连回嵌入权重；无梯度
-        （评测/生成，含 inference_mode）时返回目标精度的缓存副本，避免每次
-        F.linear（逐 token 解码、逐分块评测）重复转换整份 (vocab, d_model)
-        权重，见 _cast_weight_cached。
+        （评测/生成，含 inference_mode）时返回目标精度的缓存副本，
+        见 _cast_weight_cached。
         """
         return _cast_weight_cached(self, "_lmhead_cast", self.tok_emb.weight)
 
@@ -672,8 +669,7 @@ def load_model(ckpt_path: str, device: str = "cpu",
     cfg["use_sdpa_standard"] = use_sdpa_standard
     model = GPT(**cfg)
     model.load_state_dict(ck["state_dict"])
-    # 权重已拷贝进模型，返回的 ckpt 字典不再需要整份 state_dict；
-    # 及时释放可避免每个下游进程多驻留一份权重副本（CPU 内存/页缓存）。
+    # 权重已拷贝进模型，返回的 ckpt 字典不再需要整份 state_dict。
     ck.pop("state_dict", None)
     model.to(device)
     model.eval()

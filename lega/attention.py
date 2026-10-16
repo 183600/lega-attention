@@ -373,8 +373,8 @@ class CausalSelfAttention(nn.Module):
             p = self._softmax_reuse(att)
         elif (torch.is_grad_enabled() and att.requires_grad) \
                 or torch.compiler.is_compiling():
-            # 减法结果是本块独占的临时张量：exp_ 原地复用，省一份 (B,H,Cq,S)
-            # 的临时分配；exp 的反向只依赖输出，对 autograd 安全。
+            # 减法结果是本块独占的临时张量：exp_ 原地复用；
+            # exp 的反向只依赖输出，对 autograd 安全。
             p = (att - lse).exp_()
         else:
             p = att.sub_(lse).exp_()
