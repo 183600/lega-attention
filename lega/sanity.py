@@ -45,7 +45,7 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
     """固定批的 loss / 下一 token 准确率 / 整条序列全对率（fp32、逐块计算）。
 
     直接消费 logits 计算指标（而非模型的训练路径），因此同时校验了
-    lm_head 输出与标签的对齐关系；分块只为限制显存/内存峰值。
+    lm_head 输出与标签的对齐关系。
     """
     was_training = model.training
     model.eval()

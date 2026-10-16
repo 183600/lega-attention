@@ -3,7 +3,7 @@
 覆盖三条关键科研口径：
   * 多重比较校正后结论才有效（避免 8 变体两两对比下的假阳性）；
   * “各组件均有用”必须有显著统计证据，组合跑全本身不算证据；
-  * 受控变量审计除超参数外还核对数据指纹/代码版本/训练预算。
+  * 受控变量审计除超参数外还核对数据指纹/代码版本/训练步数。
 """
 import json
 import os
@@ -120,7 +120,7 @@ def test_verify_controlled_setup_consistency():
         except SystemExit:
             pass
 
-        # 训练预算（steps）不一致同样必须报错
+        # 训练步数（steps）不一致同样必须报错
         ev["data_fingerprint"] = "abc123"
         ev["steps"] = 12
         _write_json(ev_path, ev)
@@ -159,4 +159,4 @@ def test_verify_controlled_setup_consistency():
         assert audit["missing_evals"] == ["standard/seed1"]
     finally:
         shutil.rmtree(tmp2, ignore_errors=True)
-    print("  [ok] verify_controlled_setup（数据/代码/预算/超参数双层审计）")
+    print("  [ok] verify_controlled_setup（数据/代码/步数/超参数双层审计）")

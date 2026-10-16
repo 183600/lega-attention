@@ -69,9 +69,7 @@ _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only")
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
 
-# 训练态逐块 checkpoint 的使用下限：不重算时各块 softmax 输出（因果可见
-# 前缀合计约 B*H*T*S/2 个元素）会全部驻留在反向图中；估算省下的字节数
-# 低于该值时改走不重算的分块路径。
+# 训练态逐块 checkpoint 的使用下限：低于该值时改走不重算的分块路径。
 _CKPT_MIN_BYTES = 128 * 1024 * 1024
 
 
@@ -83,7 +81,7 @@ def _chunk_elems(dev: torch.device) -> int:
 
 
 def _ckpt_worthwhile(B: int, H: int, T: int, S: int, dtype: torch.dtype) -> bool:
-    """估算逐块 checkpoint 可省下的激活字节数是否达到启用下限。"""
+    """按打分矩阵元素量估算逐块 checkpoint 是否达到启用下限。"""
     elem = torch.empty((), dtype=dtype).element_size()
     return B * H * T * S * elem // 2 >= _CKPT_MIN_BYTES
 
@@ -356,9 +354,7 @@ class CausalSelfAttention(nn.Module):
                     gw: torch.Tensor) -> torch.Tensor:
         """门控查询项 w·q 的 (B,H,T) 归约，返回 fp32。
 
-        用 (B,H,T,Dh) @ (H,Dh,1) 的批量矩阵乘实现：逐元素乘 + 求和会临时
-        物化 (B,H,T,Dh) 的乘积张量，且在训练态该乘积需为求和反向长期驻留；
-        matmul 直接按点积归约，既省峰值激活也省反向保存量。
+        用 (B,H,T,Dh) @ (H,Dh,1) 的批量矩阵乘按点积归约实现。
         """
         return torch.matmul(q_content, gw.unsqueeze(-1)).squeeze(-1).float()
 
@@ -498,8 +494,7 @@ class CausalSelfAttention(nn.Module):
         gw = self._cast_cached(
             '_gate_w_cast', (self.gate_w,), q_content.dtype)[0] \
             if self.use_query else None
-        # 门控查询项 w·q 在进入分块循环前一次性归约（整段 T 单次批量归约，
-        # 大 M 的批量矩阵乘比逐小块归约更省调度开销，也免去逐块临时张量）；
+        # 门控查询项 w·q 在进入分块循环前一次性归约（整段 T 单次批量归约）；
         # 训练态 checkpoint 反向重算直接复用该结果，不再重算。
         qterm_pre = None if gw is None else self._gate_qterm(q_content, gw)
         k = _ensure_mm_input(k)

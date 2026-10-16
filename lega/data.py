@@ -193,8 +193,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         sanitization[name] = stats
     texts, duplicate_stats = decontaminate_texts(texts, min_chars=40)
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
-    # 原文此后只由局部变量引用：逐段编码完即释放，避免原文与 token 流
-    # 长时间同时驻留（大语料 train 原文可达数百 MB）
+    # 原文此后只由局部变量引用：逐段编码完即释放
     del texts
     if duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]:
         print(f"[data] 去污染：从 train 移除 "

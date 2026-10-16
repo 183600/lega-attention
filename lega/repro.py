@@ -79,7 +79,7 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     """数据目录指纹：对实际参与训练/评测的文件做 SHA-256 并给合并摘要。
 
     缓存写于 <data_dir>/.lega_fingerprint.json：逐文件记录 size/mtime_ns/sha256，
-    任一文件大小或 mtime 变化即整体重算。缓存只加速重复调用（多种子/多脚本），
+    任一文件大小或 mtime 变化即整体重算。缓存仅供重复调用复用（多种子/多脚本），
     不影响正确性——缓存命中要求文件集与 stat 完全一致。
     """
     names = [n for n in ("train.bin", "val.bin", "test.bin", "meta.json")

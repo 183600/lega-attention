@@ -20,7 +20,7 @@
     不足时不会下“各组件均有用”的结论。
 
 用法:
-  # 冒烟测试（tiny 配置 + 伪数据，几分钟内跑通全流程；默认只跑 1 个种子）
+  # 冒烟测试（tiny 配置 + 伪数据，仅验证全流程可跑通；默认只跑 1 个种子）
   python run_all.py --config configs/tiny.json --data_dir data/dummy --smoke
 
   # 正式实验（small 配置 + WikiText-103，默认跑配置中的全部种子）
@@ -113,7 +113,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     """核对所有变体 × 种子确实除待验证模块外使用完全相同的训练条件。
 
     对比实验的公平性前提：优化器/LR 策略/步数/数据顺序等受控变量必须一致，
-    且各 run 必须消费同一份数据、同一代码版本、同样的训练预算。该检查把
+    且各 run 必须消费同一份数据、同一代码版本、同样的训练步数。该检查把
     “公平对比”从口头约定变成可执行断言，分两层：
       1. config_used.json：除 variant/seed/device/tag 外的字段逐项一致；
       2. eval.json 溯源：数据指纹、代码 commit、配置 SHA-256、实际训练
@@ -185,7 +185,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               + (" ..." if len(missing) > 6 else ""))
     if meta_missing:
         print(f"[audit] 警告：缺少 {len(meta_missing)} 个 run 的 eval.json，"
-              f"无法核对数据指纹/代码版本/训练预算: {', '.join(meta_missing[:6])}"
+              f"无法核对数据指纹/代码版本/训练步数: {', '.join(meta_missing[:6])}"
               + (" ..." if len(meta_missing) > 6 else ""))
     if mismatches or meta_mismatches:
         msg = ("受控变量自检失败：对比实验除待验证模块外必须完全一致，"
@@ -197,7 +197,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         print(f"[audit] 受控变量自检通过：{checked} 个 run 的优化器/LR/步数等配置一致")
     if meta_checked:
         print(f"[audit] 训练溯源自检通过：{meta_checked} 个 run 的数据指纹/"
-              f"代码版本/训练预算一致"
+              f"代码版本/训练步数一致"
               + (f"（数据指纹 {expected_data_digest}）"
                  if expected_data_digest else ""))
     return {"ok": not (mismatches or meta_mismatches), "checked": checked,
@@ -662,7 +662,7 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(f"- ⚠ 缺少配置文件的 run：{', '.join(audit['missing_configs'][:8])}"
                       + (" …" if len(audit["missing_configs"]) > 8 else ""))
         if audit.get("missing_evals"):
-            md.append(f"- ⚠ 缺少 eval.json、无法核对数据/代码/训练预算的 run："
+            md.append(f"- ⚠ 缺少 eval.json、无法核对数据/代码/训练步数的 run："
                       f"{', '.join(audit['missing_evals'][:8])}"
                       + (" …" if len(audit["missing_evals"]) > 8 else ""))
     else:
@@ -1028,8 +1028,8 @@ def main():
         analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
 
     # 过拟合小批量 sanity check：全量训练前的代码正确性闸门（梯度/损失/标签）。
-    # 每个变体跑一次（用首个种子），失败立即中止——连小批量都无法过拟合时继续
-    # 全量训练只会烧算力。通过不代表数据增强/对齐/映射等 bug 不存在。
+    # 每个变体跑一次（用首个种子），失败立即中止——连小批量都无法过拟合时不应
+    # 继续全量训练。通过不代表数据增强/对齐/映射等 bug 不存在。
     sanity = {}
     if args.skip_sanity or args.skip_train:
         print("[run_all] sanity check 已跳过（--skip_sanity/--skip_train）")
