@@ -210,10 +210,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
             # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度的
             # 转换在每个分块中完全相同。
             w_f = None
-            # 是否有被忽略的位置（全局判定一次，避免逐块同步）：没有时
-            # 无需逐块把 d 的无效行清零。gscale 是标量，延迟到两个输出端
-            # 缩放（gx 逐块、gw 收尾一次），可省去每块一次 (m, V) 全词表
-            # 逐元素乘法：GPU 上该乘法是纯显存带宽开销。
+            # 是否有被忽略的位置（全局判定一次）：没有时无需逐块把 d 的
+            # 无效行清零。gscale 是标量，延迟到两个输出端缩放
+            # （gx 逐块、gw 收尾一次）。
             has_ignore = not bool((tgt != ctx.ignore_index).all())
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
@@ -251,7 +250,6 @@ class _ChunkedLinearCE(torch.autograd.Function):
                                      device=weight.device)
                 # 原地累加该分块的 dL/dW（gscale 在循环外统一缩放）
                 gw.addmm_(d.transpose(0, 1), xs.to(d.dtype))
-                # 释放本块 d，避免下一块分配 lc 时本块仍占着 (m, V) 缓冲
                 del d, lcf
         if gw is not None:
             gw.mul_(gscale)
