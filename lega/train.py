@@ -137,7 +137,7 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
 
 
 def _abort_on_nan(report: dict, out_dir: str) -> None:
-    """落盘 NaN 排查报告并中止训练：NaN 之后的步数只会浪费算力并污染曲线。"""
+    """落盘 NaN 排查报告并中止训练：NaN 之后的步数只会污染曲线。"""
     path = os.path.join(out_dir, "nan_report.json")
     save_json(report, path)
     print(f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}），"
@@ -398,7 +398,7 @@ def main():
     last_eval_metrics = None
     # loss 设备端累加器（每步 zero_()）
     loss_acc_dev = torch.zeros((), device=device)
-    # pre-clip 梯度范数：设备标量只保留引用，log 点才 .item()（避免逐步同步）；
+    # pre-clip 梯度范数：设备标量只保留引用，log 点才 .item()；
     # 历史尾部供 NaN 排查判断"梯度爆炸 vs 学习率过大"
     gn_dev_recent = []
     gn_hist = []

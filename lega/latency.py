@@ -280,8 +280,7 @@ def main():
         entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa, "weights": src,
                  "n_params": count_params(model), "prefill_ms": {},
                  "decode_ms_per_tok": {}, "decode_prefill_ctx": {}}
-        # 效率侧完整指标：参数量/显存/KV 缓存/FLOPs —— 效率-精度权衡的输入。
-        # 延迟只测一次是不够的：微小的指标涨点可能伴随不成比例的算力/显存代价。
+        # 效率侧完整指标：参数量/KV 缓存/FLOPs/峰值显存 —— 效率-精度权衡的输入。
         entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
                                                  kv_dtype=kv_dtype)
         for ctx in ctx_lens:

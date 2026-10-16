@@ -686,7 +686,7 @@ class CausalSelfAttention(nn.Module):
         if self.use_query and not will_chunk:
             gw_pre = self._cast_cached(
                 '_gate_w_cast', (self.gate_w,), q_content.dtype)[0]        # (H, Dh)
-            # (B, H, T, Dh) @ (H, Dh, 1) -> (B, H, T) fp32；避免物化乘积张量
+            # (B, H, T, Dh) @ (H, Dh, 1) -> (B, H, T) fp32
             qterm_pre = self._gate_qterm(q_content, gw_pre)
 
         # 因果掩码：真实键 j 仅当 j <= 查询绝对位置时可见；null 槽对全部查询可见。
