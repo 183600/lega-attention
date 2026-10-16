@@ -352,6 +352,16 @@ class CausalSelfAttention(nn.Module):
             return torch.sigmoid(logit), logit, qterm
         return logit.sigmoid_(), None, None
 
+    def _gate_qterm(self, q_content: torch.Tensor,
+                    gw: torch.Tensor) -> torch.Tensor:
+        """门控查询项 w·q 的 (B,H,T) 归约，返回 fp32。
+
+        用 (B,H,T,Dh) @ (H,Dh,1) 的批量矩阵乘实现：逐元素乘 + 求和会临时
+        物化 (B,H,T,Dh) 的乘积张量，且在训练态该乘积需为求和反向长期驻留；
+        matmul 直接按点积归约，既省峰值激活也省反向保存量。
+        """
+        return torch.matmul(q_content, gw.unsqueeze(-1)).squeeze(-1).float()
+
     def _softmax_reuse(self, att: torch.Tensor) -> torch.Tensor:
         if ((torch.is_grad_enabled() and att.requires_grad)
                 or torch.compiler.is_compiling()):
@@ -488,6 +498,10 @@ class CausalSelfAttention(nn.Module):
         gw = self._cast_cached(
             '_gate_w_cast', (self.gate_w,), q_content.dtype)[0] \
             if self.use_query else None
+        # 门控查询项 w·q 在进入分块循环前一次性归约（整段 T 单次批量归约，
+        # 大 M 的批量矩阵乘比逐小块归约更省调度开销，也免去逐块临时张量）；
+        # 训练态 checkpoint 反向重算直接复用该结果，不再重算。
+        qterm_pre = None if gw is None else self._gate_qterm(q_content, gw)
         k = _ensure_mm_input(k)
         v = _ensure_mm_input(v)
         cq = max(_CHUNK_MIN_T, min(T, _chunk_elems(q_rot.device) // max(1, B * H * S)))
@@ -502,16 +516,14 @@ class CausalSelfAttention(nn.Module):
         # 安全的），块输出到多头合并的转置在此完成
         Dh = v.shape[-1]
 
-        def _run_chunks():
+        def _run_chunks(qt_full):
             o = v.new_empty(B, T, H, Dh)
             for q0 in range(0, T, cq):
                 q1 = min(T, q0 + cq)
                 qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
-                # 门控查询项逐块归约；逐块新建的张量使 checkpoint
-                # 反向重算读取的始终是原始 q_content（sigmoid 无污染）。
-                qt_c = None if gw is None else (
-                    (q_content[:, :, q0:q1].transpose(1, 2) * gw).sum(dim=-1)
-                    .float().transpose(1, 2))
+                # 逐块取门控查询项切片并克隆：sigmoid 等在原地操作只作用于克隆，
+                # checkpoint 反向重算读取的始终是未受污染的整段归约结果。
+                qt_c = None if qt_full is None else qt_full[:, :, q0:q1].clone()
                 # 因果掩码两段式：
                 #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
                 #     切片到可见前缀，打分矩阵从 (B,H,Cq,S) 缩到 (B,H,Cq,fill_from)；
@@ -555,13 +567,15 @@ class CausalSelfAttention(nn.Module):
 
         max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
         if use_ckpt:
-            # 训练态按层（而非按查询块）包一层 checkpoint。
+            # 训练态按层（而非按查询块）包一层 checkpoint；门控查询项作为
+            # 输入传入（而非闭包捕获），其梯度经输入路径正常回传。
             # preserve_rng_state=False：分块路径仅在 attn_dropout==0 时启用
             # （use_chunk 条件已排除训练态 dropout），块内无 RNG 消耗。
             o = torch.utils.checkpoint.checkpoint(
-                _run_chunks, use_reentrant=False, preserve_rng_state=False)
+                _run_chunks, qterm_pre, use_reentrant=False,
+                preserve_rng_state=False)
         else:
-            o = _run_chunks()
+            o = _run_chunks(qterm_pre)
         if not collect_stats:
             return o, None, None, None, None, None, None
         cat = lambda xs: torch.cat(xs, dim=2) if xs else None
@@ -677,8 +691,8 @@ class CausalSelfAttention(nn.Module):
         if self.use_query and not will_chunk:
             gw_pre = self._cast_cached(
                 '_gate_w_cast', (self.gate_w,), q_content.dtype)[0]        # (H, Dh)
-            qterm_pre = (q_content.transpose(1, 2) * gw_pre).sum(dim=-1)   # (B, T, H)
-            qterm_pre = qterm_pre.float().transpose(1, 2)                  # (B, H, T) fp32
+            # (B, H, T, Dh) @ (H, Dh, 1) -> (B, H, T) fp32；避免物化乘积张量
+            qterm_pre = self._gate_qterm(q_content, gw_pre)
 
         # 因果掩码：真实键 j 仅当 j <= 查询绝对位置时可见；null 槽对全部查询可见。
         # 单查询步（T==1 的增量解码）：键数 n_real = past_len + 1，查询绝对位置
