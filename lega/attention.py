@@ -74,7 +74,7 @@ _CKPT_MIN_BYTES = 128 * 1024 * 1024
 
 
 def _chunk_elems(dev: torch.device) -> int:
-    """当前设备每块打分矩阵的目标元素数（CPU 与加速器取值不同）。"""
+    """当前设备每块打分矩阵的目标元素数（CPU 与 GPU 取值不同）。"""
     if dev.type == "cpu":
         return max(1, _CHUNK_TARGET_ELEMS // 4)
     return _CHUNK_TARGET_ELEMS

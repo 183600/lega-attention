@@ -105,7 +105,7 @@ def test_run_manifest_embeds_seed_report_and_runtime():
 
 
 def test_same_seed_training_is_bitwise_reproducible():
-    """同一台机器上，同 seed 的完整训练必须逐位可复现（回归门槛）。
+    """同一台机器上，同 seed 的完整训练必须逐位可复现（可复现性门槛）。
 
     两次独立子进程运行 `lega.train`，覆盖模型初始化（含门控参数）、
     数据批采样 rng、优化器/反向、checkpoint 序列化整条链路；训练曲线

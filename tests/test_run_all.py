@@ -271,11 +271,7 @@ def test_stat_counts_finite_only():
 
 
 def test_build_summary_missing_latency_entry():
-    """latency.json 缺少某变体条目（--skip_latency 复用旧结果）时不得崩溃。
-
-    回归：lat_entries 对每个变体都建了键，值可能为 None；旧守卫只查
-    `v not in lat_entries`，随后 e.get(...) 直接 AttributeError。
-    """
+    """latency.json 缺少某变体条目（--skip_latency 复用旧结果）时安全跳过该行。"""
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "lega"):
