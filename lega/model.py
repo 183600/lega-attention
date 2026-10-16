@@ -3,7 +3,6 @@
 注意力层可替换为 lega.attention 中的任意变体（standard/qgate/null/lega 及消融）。
 支持增量解码（KV 缓存），供 RULER 生成式评测使用。
 """
-import contextlib
 import math
 from typing import Dict, List, Optional
 
@@ -109,25 +108,19 @@ class RoPE:
         return self.rotate(q, past_len), self.rotate(k, past_len)
 
 
-# 反向复用整段 logits 的体积上限（元素数×计算精度字节），按设备类型取值；
-# 超出上限仍走分块重算。
-_CE_CACHE_BYTES_CPU = 512 * 1024 * 1024
-_CE_CACHE_BYTES_ACCEL = 64 * 1024 * 1024
-
-
 class _ChunkedLinearCE(torch.autograd.Function):
     """分块 lm_head + 交叉熵（支持 PyTorch 默认的 ignore_index=-100）。
 
-    前向分块累加 loss，反向再按块重算 logits 并累积 dL/dx、dL/dW。
-    需要梯度且整段 logits 体积不超过设备上限时，logits 缓存在 ctx 上供
-    反向复用；否则反向逐块重算。被忽略位置既不计入损失分母，也完全不
-    产生梯度；全部位置被忽略时返回 0 损失（以及零梯度），与监督微调
-    流程中的空有效标签约定一致。
+    前向逐块计算 logits 与 loss，并按 softmax - onehot 的闭式解在同一分块
+    内求出 dL/dx、dL/dW；反向只合并上游标量梯度与有效标签数。被忽略位置
+    既不计入损失分母，也完全不产生梯度；全部位置被忽略时返回 0 损失
+    （以及零梯度），与监督微调流程中的空有效标签约定一致。
     """
 
     @staticmethod
     def _loss_dtype(logits: torch.Tensor) -> torch.Tensor:
-        # 高精度输入保持原精度，低精度/16 位输入升到 fp32，与反向严格同口径。
+        # 高精度输入保持原精度，低精度/16 位输入升到 fp32，与前向 loss 及
+        # 梯度计算严格同口径。
         return logits if logits.dtype in (torch.float32, torch.float64) else logits.float()
 
     @staticmethod
@@ -160,7 +153,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         """sum-CE 的闭式计算：log_softmax - 目标 logit，逐元素掩掉 ignore_index。
 
         与 F.cross_entropy(reduction="sum") 等价（log_softmax 内部 max 平移，
-        数值稳定）。
+        数值稳定）。log_softmax 原地写入 lcf，调用方可继续取指数复用。
         """
         ignore = tgt == ignore_index
         ts_safe = tgt.masked_fill(ignore, 0)
@@ -171,12 +164,13 @@ class _ChunkedLinearCE(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x2d, weight, tgt, chunk: int, ignore_index: int = -100):
-        ctx.save_for_backward(x2d, weight, tgt)
+        # weight 参与反向的版本校验（参数被原地改写时能及时报错）；
+        # x2d/tgt 只在本次前向使用，不在 ctx 上保留。
+        ctx.save_for_backward(weight)
         ctx.chunk = chunk
         ctx.ignore_index = int(ignore_index)
-        # 记录前向的 autocast 状态：反向重算 logits 必须与前向同精度，
-        # 否则 AMP 下前向用 bf16 logits 报告 loss、反向却按 fp32 logits
-        # 求梯度，二者不再是同一个损失函数。
+        # 记录前向的 autocast 状态：logits、loss 与 dL/dlogits 全程同一精度，
+        # 反向无需再重建 logits。
         ctx.amp_dtype = _ChunkedLinearCE._autocast_dtype(x2d)
         # n_valid 以设备张量保存；clamp_min(1) 同时吸收"全部位置被忽略"的
         # 除零情形（此时梯度因 keep 掩码全零而天然为 0，无需提前特判）。
@@ -186,116 +180,89 @@ class _ChunkedLinearCE(torch.autograd.Function):
             else torch.float32).reciprocal()
         loss = torch.zeros((), dtype=x2d.dtype if x2d.dtype in (torch.float32, torch.float64)
                            else torch.float32, device=x2d.device)
-        # 仅在需要 x 的梯度时尝试缓存；上限按首块实际产出的 dtype 计算，
-        # 分配失败则退回重算。
-        cache_cap = (_CE_CACHE_BYTES_CPU if x2d.device.type == "cpu"
-                     else _CE_CACHE_BYTES_ACCEL)
-        cache_try = bool(ctx.needs_input_grad[0])
-        logits_cache = None
-        ctx.logits_cache = None
+        # 只计算上游真正需要的梯度张量；dx 的每一行、gw 的每个元素都会在
+        # 分块循环中被完整覆写或累加，无需预置零。
+        need_dx = bool(ctx.needs_input_grad[0])
+        need_gw = bool(ctx.needs_input_grad[1])
+        dx = torch.empty_like(x2d) if need_dx else None
+        gw = None
+        w_f = None
+        # 是否有被忽略的位置（全局判定一次）：没有时无需逐块把无效行清零。
+        has_ignore = (need_dx or need_gw) and not bool(
+            (tgt != ctx.ignore_index).all())
+        # 梯度 GEMM 必须与 logits 同精度：前向处于 autocast 上下文内时显式
+        # 关闭 autocast，避免 fp32/fp64 的 GEMM 被降到低精度。
+        grad_ctx = torch.autocast("cuda" if x2d.is_cuda else "cpu", enabled=False)
         with torch.no_grad():
-            # 分块循环共用一份目标精度权重：前向与反向重算共用该副本，
-            # GEMM 的输入逐位不变。
-            ctx.w_fwd = weight if (ctx.amp_dtype is None
-                                   or weight.dtype == ctx.amp_dtype) \
+            # 分块循环共用一份目标精度权重，各块 GEMM 的输入逐位一致。
+            w_fwd = weight if (ctx.amp_dtype is None
+                               or weight.dtype == ctx.amp_dtype) \
                 else weight.to(ctx.amp_dtype)
+            neg_one = None   # scatter_add_ 的 -1 源张量
             for s in range(0, tgt.numel(), chunk):
-                lc = F.linear(x2d[s:s + chunk], ctx.w_fwd)
-                if cache_try:
-                    cache_try = False
-                    if tgt.numel() * weight.size(0) * lc.element_size() <= cache_cap:
-                        try:
-                            logits_cache = torch.empty(
-                                (tgt.numel(), weight.size(0)),
-                                dtype=lc.dtype, device=lc.device)
-                        except RuntimeError:
-                            logits_cache = None
-                        else:
-                            ctx.logits_cache = logits_cache
-                if logits_cache is not None:
-                    logits_cache[s:s + chunk].copy_(lc)
+                lc = F.linear(x2d[s:s + chunk], w_fwd)               # (m, V)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
                 # 升精度副本已生成（不升精度时 lcf 与 lc 为同一张量）。
                 del lc
+                # _ce_sum 把 log_softmax 原地写在 lcf 上，随后取指数即得
+                # dL/dlogits 的 softmax 项（cross-entropy 对 logits 的梯度
+                # = softmax - onehot）。
                 loss.add_(_ChunkedLinearCE._ce_sum(
                     lcf, tgt[s:s + chunk], ctx.ignore_index))
+                if not (need_dx or need_gw):
+                    continue
+                with grad_ctx:
+                    d = lcf.exp_()
+                    ts = tgt[s:s + chunk]
+                    keep = ts != ctx.ignore_index
+                    # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的
+                    # 索引压到 0（其减 1 随后被 keep 掩码清零）。
+                    ts_safe = ts.masked_fill(~keep, 0)
+                    if neg_one is None or neg_one.size(0) < ts_safe.numel():
+                        neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
+                    d.scatter_add_(1, ts_safe.unsqueeze(1),
+                                   neg_one[:ts_safe.numel()])
+                    # keep∈{0,1}，无效行清零即可。
+                    if has_ignore:
+                        d.mul_(keep.unsqueeze(1).to(d.dtype))
+                    if need_dx:
+                        # d 与权重副本同为计算精度，GEMM 结果与向上游要求的
+                        # 梯度同精度（常见 fp32/fp64 下直接写入 dx 的行切片）。
+                        if w_f is None:
+                            w_f = weight.to(d.dtype)
+                        gxs = dx[s:s + chunk]
+                        if gxs.dtype == d.dtype:
+                            torch.matmul(d, w_f, out=gxs)
+                        else:
+                            gxs.copy_(torch.matmul(d, w_f))
+                    if need_gw:
+                        xs_f = x2d[s:s + chunk].to(d.dtype)
+                        # 首块用 mm 直接产出 gw，后续分块就地累加。
+                        if gw is None:
+                            gw = torch.mm(d.transpose(0, 1), xs_f)
+                        else:
+                            gw.addmm_(d.transpose(0, 1), xs_f)
+                    del d
+        ctx.dx = dx
+        ctx.gw = gw
         return loss * ctx.inv_n
 
     @staticmethod
     def backward(ctx, gout):
-        x2d, weight, tgt = ctx.saved_tensors
-        # gx 的每一行都会被下方按块整段覆写，无需先零填充
-        gx = torch.empty_like(x2d)
-        # gw 以计算精度（低精度时为 fp32）累加：
-        # 全程高精度累加，只在返回前 cast 一次。
-        gw = None
+        # 前向已按 dL/dlogits 求出 dx、gw（含 ignore 掩码），这里只合并
+        # 上游标量梯度与 1/n_valid，并把权重梯度转到参数精度。
+        weight, = ctx.saved_tensors
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
-        # 前向若缓存了整段 logits 则反向直接复用，无需重算。
-        cached = ctx.logits_cache
-        # 闭式求梯度（cross-entropy 对 logits 的梯度 = softmax - onehot）。
-        with torch.no_grad():
-            # 与前向一致的 autocast 上下文，保证反向重算的 logits 精度相同
-            if ctx.amp_dtype is not None and cached is None:
-                dev_type = "cuda" if x2d.is_cuda else "cpu"
-                ac_ctx = torch.autocast(dev_type, dtype=ctx.amp_dtype)
-            else:
-                ac_ctx = contextlib.nullcontext()
-            neg_one = None   # scatter_add_ 的 -1 源张量
-            # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度的
-            # 转换在每个分块中完全相同。
-            w_f = None
-            # 是否有被忽略的位置（全局判定一次）：没有时无需逐块把 d 的
-            # 无效行清零。gscale 是标量，延迟到两个输出端缩放
-            # （gx 逐块、gw 收尾一次）。
-            has_ignore = not bool((tgt != ctx.ignore_index).all())
-            for s in range(0, tgt.numel(), ctx.chunk):
-                xs = x2d[s:s + ctx.chunk]
-                ts = tgt[s:s + ctx.chunk]
-                if cached is not None:
-                    lcf = _ChunkedLinearCE._loss_dtype(cached[s:s + ctx.chunk])
-                else:
-                    with ac_ctx:
-                        lc = F.linear(xs, ctx.w_fwd)                 # (m, V)
-                    lcf = _ChunkedLinearCE._loss_dtype(lc)
-                    del lc
-                d = torch.softmax(lcf, dim=-1, out=lcf)
-                keep = ts != ctx.ignore_index
-                # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
-                # 压到 0（其减 1 随后被 keep 掩码清零）。
-                ts_safe = ts.masked_fill(~keep, 0)
-                if neg_one is None or neg_one.size(0) < ts_safe.numel():
-                    neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
-                d.scatter_add_(1, ts_safe.unsqueeze(1),
-                               neg_one[:ts_safe.numel()])
-                # keep∈{0,1}，无效行清零即可；gscale 合并进输出端缩放。
-                if has_ignore:
-                    d.mul_(keep.unsqueeze(1).to(d.dtype))
-                # d 为计算精度（低精度时为 fp32），weight 可能是 bf16/fp16：
-                # 必须先在 d 的精度上做 GEMM（dtype 需一致）。
-                if w_f is None:
-                    w_f = weight.to(d.dtype)
-                gxs = gx[s:s + ctx.chunk]
-                if gxs.dtype == d.dtype:
-                    # 同精度（常见 fp32 训练）：GEMM 直接写入 gx 的行切片
-                    torch.matmul(d, w_f, out=gxs)
-                else:
-                    gxs.copy_(torch.matmul(d, w_f))
-                # dL/dx 逐块按 gscale 缩放（标量，行切片原地乘）
-                gxs.mul_(gscale)
-                # 首块用 mm 直接产出 gw，后续分块就地累加
-                # （gscale 在循环外统一缩放）
-                xs_f = xs.to(d.dtype)
-                if gw is None:
-                    gw = torch.mm(d.transpose(0, 1), xs_f)
-                else:
-                    gw.addmm_(d.transpose(0, 1), xs_f)
-                del d, lcf
+        dx = ctx.dx
+        if dx is not None:
+            dx.mul_(gscale)
+        gw = ctx.gw
         if gw is not None:
             gw.mul_(gscale)
             if gw.dtype != weight.dtype:
                 gw = gw.to(weight.dtype)
-        return gx, gw, None, None, None
+        return dx, gw, None, None, None
 
 
 def _cast_weight_cached(owner, slot: str, weight: torch.Tensor) -> torch.Tensor:
@@ -467,7 +434,7 @@ class GPT(nn.Module):
             # 每块 logits 为目标数乘以分块大小，分块大小随词表自适应。
             CHUNK = max(256, min(4096, 33_554_432 // self.vocab_size))
             if torch.is_grad_enabled() and x.requires_grad:
-                # 训练路径：分块前向 + 分块重算反向
+                # 训练路径：分块前向，交叉熵闭式梯度在前向内求出
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
                 total = None  # 设备端累加
