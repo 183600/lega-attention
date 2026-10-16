@@ -54,12 +54,7 @@ _CHUNK_MIN_T = 64
 
 
 def _chunk_elems(dev: torch.device) -> int:
-    """当前设备每块打分矩阵的目标元素数。
-
-    CPU 上内存宽裕而缓存/带宽受限：把预算收紧 4 倍（查询块更小、块数更多）
-    可显著提升前向与重算的缓存命中，实测更快；加速器保持原预算，
-    避免把 GEMM 切得过碎。
-    """
+    """当前设备每块打分矩阵的目标元素数（CPU 与加速器取值不同）。"""
     if dev.type == "cpu":
         return max(1, _CHUNK_TARGET_ELEMS // 4)
     return _CHUNK_TARGET_ELEMS
