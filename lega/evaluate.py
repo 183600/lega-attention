@@ -1,4 +1,4 @@
-"""独立困惑度评测：从 checkpoint 计算验证集 PPL。
+"""独立困惑度评测：从 checkpoint 计算 PPL（默认 held-out test，缺 test.bin 时回退 val）。
 
 用法:
   python -m lega.evaluate --ckpt out/tiny/lega/model.pt --data_dir data/dummy \
@@ -16,7 +16,7 @@ from .utils import enable_tf32, get_device, save_json
 
 
 def main():
-    p = argparse.ArgumentParser(description="验证集 PPL 评测")
+    p = argparse.ArgumentParser(description="PPL 评测（默认 held-out test，缺 test.bin 时回退 val）")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True, help="输出 JSON 路径")

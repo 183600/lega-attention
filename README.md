@@ -58,7 +58,7 @@ $$
 
 - **公平对比**：所有变体使用相同参数量级、相同训练步数/数据（同一 config、同一 seed）。
 - **三个评测维度**：
-  1. **困惑度**（WikiText-103 验证集 PPL）；评估窗口不重复，并在整个验证集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；
+  1. **困惑度**（WikiText-103 PPL：checkpoint 选择在 val 上完成，PPL 在 held-out test 上评测，无 test 时回退 val）；评估窗口不重复，并在整个评测集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；
   2. **RULER 长上下文检索**（简化复现 5 任务）：`niah_synth`（合成干扰单键检索）、`niah_corpus`（自然文本干扰）、`niah_multikey`（多键干扰）、`fwe`（高频词提取）、`vt`（变量追踪）；多档上下文长度 + 贪心解码；数值任务 EM **只承认生成内容中的第一个数值回答**，避免"先答错后蒙中"被计分；
   3. **实际推理延迟**：生成推理口径的 prefill（只算最后位置 logits）与带 KV 缓存的逐 token decode，对比 SDPA 快速路径。
 - **核心风险检验（不能只看"注意力沉降减少"）**：`lega/analysis.py` 用带 gold 跨度的 RULER 样例做机制分析：
@@ -108,7 +108,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `out/<tag>/<variant>/model.pt` | 检查点 + 训练配置 |
 | `out/<tag>/<variant>/train_log.jsonl` | 训练/验证曲线数据 |
 | `results/<tag>/summary.md` | **汇总表（可直接贴入周报/论文初稿）** |
-| `results/<tag>/eval_*.json` | 各变体验证集 PPL |
+| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文 |
 | `results/<tag>/latency.json` | prefill / decode 延迟 |
 | `results/<tag>/analysis_*.csv|json` | 逐 (层，头，查询位) 门控记录与汇总 |
@@ -141,7 +141,7 @@ lega-attention/
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底）+ bin 缓存 + 批采样
 │   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）
-│   ├── evaluate.py            # 验证集 PPL
+│   ├── evaluate.py            # held-out test PPL（缺 test.bin 时回退 val）
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
 │   ├── latency.py             # prefill / decode 延迟基准
 │   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC

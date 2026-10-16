@@ -57,7 +57,7 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
 
 - **Fair comparison**: all variants share the same parameter budget and the same training steps/data (same config, same seed).
 - **Three evaluation axes**:
-  1. **Perplexity** (WikiText-103 validation PPL); windows are disjoint and evenly sampled across the whole validation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision;
+  1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision;
   2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
   3. **Actual inference latency**: prefill (last-position logits only) and token-by-token decode with KV cache, compared against the SDPA fast path.
 - **Core-risk checks (not just "attention sink reduced")**: `lega/analysis.py` performs mechanistic analysis on RULER samples with gold spans:
@@ -140,7 +140,7 @@ lega-attention/
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback) + bin cache + batch sampling
 │   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B)
-│   ├── evaluate.py            # validation PPL
+│   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
 │   ├── latency.py             # prefill / decode latency benchmark
 │   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC
