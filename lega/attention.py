@@ -544,8 +544,8 @@ class CausalSelfAttention(nn.Module):
         past_len = (0 if past_kv is None else past_kv[0].shape[2]) \
             if kv_cache is None else cache_pos
 
-        # 训练态保持三个独立投影（各自的 autograd 路径，避免融合权重常驻
-        # 反向图）；推理态权重不变，走下方融合权重缓存。
+        # 训练态使用三个独立投影（各自独立的 autograd 路径）；
+        # 推理态权重不变，走下方融合权重缓存。
         if torch.is_grad_enabled():
             q = F.linear(x, self.wq.weight).view(B, T, H, Dh).transpose(1, 2)
             k = F.linear(x, self.wk.weight).view(B, T, H, Dh).transpose(1, 2)
