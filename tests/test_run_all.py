@@ -13,8 +13,8 @@ import sys
 import tempfile
 
 from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _effect_status,
-                     _resolve_jobs, component_evidence, run_many,
-                     verify_controlled_setup)
+                     _rel_pct, _resolve_jobs, component_evidence, run_many,
+                     tradeoff_verdict, verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -107,6 +107,50 @@ def test_component_evidence_requires_significance():
     assert comp["C 长度校准"]["verdict"] == "证据不足"
     assert "方向相反" in comp["C 长度校准"]["loo"]["PPL"]["reason"]
     print("  [ok] component_evidence（去一法/全因子证据、方向与显著性门槛）")
+
+
+def test_tradeoff_verdict_rejects_bad_deals():
+    """效率-精度权衡判定：不显著涨点说服力有限；大代价小收益被拒绝。"""
+    # 不显著 + 代价 >10% → 不可行（微小且不显著的涨点 + 大代价）
+    v = tradeoff_verdict(benefit_pct=0.3, p_adj=0.4, cost_pct=30.0)
+    assert v.startswith("不可行"), v
+    # 不显著 + 代价小 → 说服力有限
+    v = tradeoff_verdict(benefit_pct=0.3, p_adj=0.4, cost_pct=2.0)
+    assert v.startswith("说服力有限"), v
+    # 显著但代价 >5×收益 → 收益-成本比不利（0.5% 涨点 vs 10 倍计算不可行）
+    v = tradeoff_verdict(benefit_pct=0.5, p_adj=0.01, cost_pct=900.0)
+    assert "收益-成本比不利" in v or "需审视" in v, v
+    # 显著 + 代价温和（<5×收益）→ 可接受
+    v = tradeoff_verdict(benefit_pct=5.0, p_adj=0.01, cost_pct=10.0)
+    assert v == "可接受", v
+    # 显著但代价 >50% → 需审视
+    v = tradeoff_verdict(benefit_pct=5.0, p_adj=0.01, cost_pct=60.0)
+    assert v.startswith("需审视"), v
+    # 数据缺失 → 不下结论
+    assert tradeoff_verdict(None, 0.01, 10.0) == "数据不足"
+    assert tradeoff_verdict(1.0, 0.01, None) == "数据不足"
+    print("  [ok] tradeoff_verdict（不显著/大代价/收益成本比判定）")
+
+
+def test_rel_pct_and_eff_cells():
+    """相对变化计算：缺失与除零安全返回 None。"""
+    assert _rel_pct(100.0, 110.0) == 10.0
+    assert _rel_pct(50.0, 45.0) == -10.0
+    assert _rel_pct(None, 10.0) is None
+    assert _rel_pct(10.0, None) is None
+    assert _rel_pct(0.0, 10.0) is None
+    # _eff_cell 读取 latency 条目的效率字段
+    entry = {"n_params": 100, "efficiency": {
+        "n_params": 100, "params_mb": 0.4,
+        "flops_per_tok": {"256": {"total_flops_per_tok": 12345}},
+        "peak_mem_mb_prefill": {"256": 3.5}}}
+    from run_all import _eff_cell
+    assert _eff_cell(entry, "params", 256) == 100
+    assert _eff_cell(entry, "flops", 256) == 12345
+    assert _eff_cell(entry, "mem", 256) == 3.5
+    assert _eff_cell(None, "flops", 256) is None
+    assert _eff_cell({"efficiency": {}}, "flops", 256) is None
+    print("  [ok] _rel_pct/_eff_cell（缺失安全）")
 
 
 def test_effect_status_directions():

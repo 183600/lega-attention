@@ -9,6 +9,7 @@ import contextlib
 import json
 import math
 import os
+import statistics
 import time
 
 # 须在任何 CUDA 初始化之前生效。
@@ -22,6 +23,137 @@ from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_w
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
 from .repro import build_run_manifest
 from .utils import set_seed, now_str, save_json, enable_tf32
+
+
+# ---------------------------------------------------------------- NaN 排查路径
+
+def run_nan_checklist(model, pending_batches, device: str, step: int, where: str,
+                      loss_value, lr: float, grad_norm_history, amp_dtype,
+                      vocab_size: int) -> dict:
+    """训练出现非有限值时的系统化排查：数据 → 代码 → 混合精度 → 梯度/学习率。
+
+    排查顺序固定（先便宜后昂贵、先外部后内部），每步产出可核对的证据，
+    避免"看到 NaN 就乱调参"。返回可直接写盘的报告 dict。
+    """
+    report = {
+        "time": now_str(), "step": int(step), "where": str(where),
+        "loss_value": (None if loss_value is None else float(loss_value)),
+        "device": str(device), "lr_at_failure": float(lr),
+        "amp_dtype": (str(amp_dtype) if amp_dtype else None),
+    }
+
+    # ---- 1. 数据：输入流是否含非法值（NaN/Inf/越界 id）
+    data_findings = []
+    n_checked = 0
+    for bi, batch in enumerate(pending_batches or []):
+        if batch is None:
+            continue
+        x, y = batch
+        for name, t in (("x", x), ("y", y)):
+            n_checked += 1
+            if not torch.is_floating_point(t) and not torch.is_complex(t):
+                lo, hi = int(t.min()), int(t.max())
+                bad = (lo < 0) or (hi >= vocab_size)
+                data_findings.append(
+                    f"批{bi} {name}: 整数 id 范围 [{lo}, {hi}]，"
+                    + ("**越界 vocab**" if bad else "合法"))
+            else:
+                n_nan = int(torch.isnan(t).sum())
+                n_inf = int(torch.isinf(t).sum())
+                data_findings.append(
+                    f"批{bi} {name}: 浮点输入 NaN={n_nan}/Inf={n_inf}"
+                    + ("（**数据侧混入非法值**）" if n_nan or n_inf else ""))
+    report["checklist_data"] = {
+        "findings": data_findings,
+        "n_tensors_checked": n_checked,
+        "note": ("token 流为 uint16 整数且 prepare_bins 入库时已拒绝 NaN/Inf/"
+                 "越界 id（见 data_report.json 的 token 流硬校验）；"
+                 "浮点输入出现 NaN/Inf 才是数据侧问题"),
+    }
+
+    # ---- 2. 代码：定位已含 NaN/Inf 的参数张量（把锅从"玄学"收敛到具体层）
+    bad_params = []
+    for n, p in model.named_parameters():
+        if not torch.isfinite(p).all():
+            n_nan = int(torch.isnan(p).sum())
+            n_inf = int(torch.isinf(p).sum())
+            bad_params.append(f"{n} (NaN={n_nan}, Inf={n_inf}, shape={list(p.shape)})")
+        if len(bad_params) >= 8:
+            break
+    report["checklist_params"] = {
+        "nonfinite_tensors": bad_params,
+        "note": ("非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
+                 "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
+                 "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"
+                 "交叉熵经 log_softmax（数值稳定），除法处均有 clamp_min 兜底"),
+    }
+
+    # ---- 3. 混合精度：当前 autocast 精度与下溢/溢出风险
+    if amp_dtype is None:
+        prec_note = "未启用 autocast（fp32/TF32 路径）：可排除混合精度下溢因素"
+    elif "bfloat16" in str(amp_dtype):
+        prec_note = ("bf16 autocast：动态范围与 fp32 相同，下溢风险低；"
+                     "极大数据仍可能溢出，可对可疑层加 .float() 升精度复测")
+    else:
+        prec_note = ("fp16 autocast：梯度/激活下溢是常见 NaN 来源，"
+                     "应使用 GradScaler 损失缩放，或改用 bf16 复测")
+    report["checklist_precision"] = {"amp_dtype": (str(amp_dtype) if amp_dtype
+                                                   else None), "note": prec_note}
+
+    # ---- 4. 梯度爆炸 / 学习率：pre-clip 梯度范数历史是否出现尖峰/Inf
+    hist = [g for g in (grad_norm_history or []) if g is not None]
+    opt_findings = []
+    if hist:
+        finite = [g for g in hist if math.isfinite(g)]
+        last = hist[-1]
+        if finite and len(finite) >= 3:
+            med = statistics.median(finite[:-1]) or 1e-12
+            opt_findings.append(
+                f"最近 pre-clip 梯度范数 {last:.3e}，此前中位数 {med:.3e}"
+                + (f"（尖峰 ×{last / med:.0f}，**疑似梯度爆炸**）"
+                   if last > 10 * med else "（未见爆炸性尖峰）"))
+        if not math.isfinite(last):
+            opt_findings.append("最近一次 pre-clip 梯度范数非有限 → 梯度已爆炸")
+    else:
+        opt_findings.append("无梯度范数历史（NaN 出现过早，尚未记录到 log 点）")
+    opt_findings.append(
+        f"失败时学习率 {lr:.2e}（warmup 后峰值 {lr:.2e} 量级；"
+        "过大学习率会在 warmup 结束前后率先炸出 NaN）")
+    report["checklist_optimization"] = {"findings": opt_findings,
+                                        "grad_norm_history_tail": hist[-20:]}
+
+    # ---- 建议动作：按固定排查顺序给出
+    actions = [
+        "1) 数据：核对 data_report.json 的 token 流硬校验与上方批次范围检查；"
+        "浮点输入出现 NaN/Inf 才需回查数据管道",
+        "2) 代码：按上方非有限参数定位层，复核该层 log(0)/除零/softmax 溢出路径"
+        "（本仓库门控 c 项已 clamp_min(1e-30)）",
+        f"3) 精度：{prec_note}",
+        "4) 优化：降低学习率（如减半）、延长 warmup、收紧 grad_clip（如 0.5），"
+        "并观察梯度范数是否再出尖峰",
+    ]
+    report["suggested_actions"] = actions
+    return report
+
+
+def _abort_on_nan(report: dict, out_dir: str) -> None:
+    """落盘 NaN 排查报告并中止训练：NaN 之后的步数只会浪费算力并污染曲线。"""
+    path = os.path.join(out_dir, "nan_report.json")
+    save_json(report, path)
+    print(f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}），"
+          f"排查报告 -> {path}")
+    for key, title in (("checklist_data", "数据"), ("checklist_params", "参数定位"),
+                       ("checklist_precision", "精度"), ("checklist_optimization", "梯度/学习率")):
+        sec = report.get(key) or {}
+        lines = sec.get("findings") or sec.get("nonfinite_tensors") or []
+        print(f"[train] 排查-{title}: " + ("；".join(lines[:3]) if lines
+                                            else sec.get("note", "无异常")))
+    print("[train] 建议动作（按顺序）:")
+    for a in report["suggested_actions"]:
+        print(f"[train]   {a}")
+    raise SystemExit(
+        f"训练在 step {report['step']} 出现 {report['where']} 非有限值，已中止；"
+        f"按 {path} 中的排查路径定位后重跑")
 
 SMOKE_OVERRIDES = {
     "steps": 20, "eval_every": 10, "eval_iters": 2, "log_every": 5,
@@ -266,12 +398,27 @@ def main():
     last_eval_metrics = None
     # loss 设备端累加器（每步 zero_()）
     loss_acc_dev = torch.zeros((), device=device)
+    # pre-clip 梯度范数：设备标量只保留引用，log 点才 .item()（避免逐步同步）；
+    # 历史尾部供 NaN 排查判断"梯度爆炸 vs 学习率过大"
+    gn_dev_recent = []
+    gn_hist = []
+
+    def _nan_guard(where: str, value, step: int):
+        """log/eval 点检查损失与梯度范数的有限性，异常即触发系统排查。"""
+        if value is not None and not math.isfinite(float(value)):
+            report = run_nan_checklist(
+                model, batches, device, step, where, value,
+                lr=base_lrs[0] * lr_factor(max(0, step - 1)),
+                grad_norm_history=gn_hist, amp_dtype=(torch.bfloat16 if use_amp else None),
+                vocab_size=int(meta["vocab_size"]))
+            _abort_on_nan(report, out_dir)
 
     def do_eval(step):
         nonlocal best_val, last_eval_step, last_eval_metrics
         metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
         last_eval_step, last_eval_metrics = step, metrics
         vl = metrics["val_loss"]
+        _nan_guard("val_loss", vl, step)
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
         rec = {"step": step, **metrics, "val_ppl": ppl,
@@ -322,21 +469,36 @@ def main():
             loss_acc_dev.add_(out["loss"].detach(), alpha=1.0 / grad_accum)
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
             del out, loss
-        torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
+        # pre-clip 梯度范数：clip_grad_norm_ 返回裁剪前的总范数，保留设备标量
+        gn_dev = torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
+        gn_dev_recent.append(gn_dev)
+        if len(gn_dev_recent) > log_every + grad_accum + 8:
+            gn_dev_recent.pop(0)
         opt.step()
         opt.zero_grad(set_to_none=True)
         tokens_seen += int(cfg["batch_size"]) * train_ctx * grad_accum
 
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())
+            gn_last = float(gn_dev_recent[-1].item()) if gn_dev_recent else None
+            if gn_last is not None and math.isfinite(gn_last):
+                gn_hist.append(gn_last)
+                if len(gn_hist) > 200:
+                    gn_hist.pop(0)
+            _nan_guard("train_loss", loss_acc, step + 1)
+            _nan_guard("grad_norm", gn_last, step + 1)
             rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
                    "lr": base_lrs[0] * lr_f, "time": now_str()}
+            if gn_last is not None:
+                rec["grad_norm"] = gn_last
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             log_f.flush()
             print(f"[train] step {step+1}/{steps} loss={loss_acc:.4f} "
-                  f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e}")
+                  f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e}"
+                  + (f" gnorm={gn_last:.2f}" if gn_last is not None else ""))
             if wb:
-                wb.log({"loss": loss_acc, "lr": base_lrs[0] * lr_f},
+                wb.log({"loss": loss_acc, "lr": base_lrs[0] * lr_f,
+                        **({"grad_norm": gn_last} if gn_last is not None else {})},
                        step=step + 1)
         if (step + 1) % eval_every == 0:
             do_eval(step + 1)
@@ -345,6 +507,7 @@ def main():
         final_metrics = last_eval_metrics
     else:
         final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        _nan_guard("val_loss(final)", final_metrics["val_loss"], steps)
         # 最终步评测必须同样参与 best-checkpoint 选择，与训练循环内口径一致：
         # 否则 steps 非 eval_every 整数倍（或 steps < eval_every）时，更优的最终
         # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按

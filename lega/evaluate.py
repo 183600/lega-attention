@@ -5,16 +5,58 @@
       --out results/tiny/eval_lega.json
 """
 import argparse
+import contextlib
 import json
 import math
 import os
 
-from .data import load_bin
+import torch
+import torch.nn.functional as F
+
+from .data import get_val_windows, load_bin, load_tokenizer
 from .datacheck import append_test_access
 from .model import load_model, count_params, gate_extra_params
 from .repro import load_provenance, sha256_file
-from .train import evaluate_val
+from .train import evaluate_val, _val_eval_indices
 from .utils import enable_tf32, get_device, now_str, save_json, set_seed
+
+
+@torch.inference_mode()
+def collect_worst_windows(model, val, ctx: int, device: str, tok,
+                          n_worst: int = 3, amp: bool = False,
+                          max_windows: int = 64, batch_windows: int = None) -> list:
+    """语言建模的坏案例：挑出下一 token 预测最差的验证窗口并解码。
+
+    以"窗口末位的下一 token 预测"为坏案例单元（与贪心生成评测口径一致）：
+    损失 = 末位交叉熵；同时给出模型的 top-5 预测与真实 token，用于人工区分
+    "样本本身不可预测（噪声/生僻 token）"与"模型系统性盲区"。
+    """
+    indices, _ = _val_eval_indices(len(val), ctx, max_windows)
+    if batch_windows is None:
+        batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
+    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
+               if (amp and device.startswith("cuda")) else contextlib.nullcontext())
+    rows = []
+    for s in range(0, len(indices), batch_windows):
+        chunk = indices[s:s + batch_windows]
+        x, y = get_val_windows(val, ctx, chunk, device)
+        with amp_ctx:
+            out = model(x, last_logits_only=True)
+        logits = out["logits"][:, -1, :].float()
+        gold = y[:, -1]
+        losses = F.cross_entropy(logits, gold, reduction="none")
+        top_p, top_i = torch.topk(torch.softmax(logits, dim=-1), 5, dim=-1)
+        for r in range(len(chunk)):
+            rows.append({
+                "window": int(chunk[r]),
+                "loss": float(losses[r]),
+                "context_tail": tok.decode(x[r].tolist())[-160:],
+                "gold_next": tok.decode([int(gold[r])]),
+                "pred_top5": [(tok.decode([int(i)]), round(float(p), 4))
+                              for p, i in zip(top_p[r], top_i[r])],
+            })
+    rows.sort(key=lambda r: -r["loss"])
+    return rows[:max(1, int(n_worst))]
 
 
 def main():
@@ -24,6 +66,8 @@ def main():
     p.add_argument("--out", required=True, help="输出 JSON 路径")
     p.add_argument("--eval_iters", type=int, default=None,
                    help="评测窗口数；默认继承训练配置，训练配置缺失时为 100")
+    p.add_argument("--worst_n", type=int, default=0,
+                   help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）")
     p.add_argument("--split", default="auto",
                    choices=["auto", "test", "val"],
                    help="默认 auto：存在 test.bin 时用 held-out test（checkpoint 选择在 "
@@ -121,6 +165,18 @@ def main():
         # test 访问账本摘要（split=val 时为 None）：审计"测试集被反复评测"
         "test_access": test_access,
     }
+    # 坏案例：把预测最差的窗口连同 top-5 预测一起落盘（PPL 只反映平均，
+    # 最差窗口揭示模型盲区——生僻 token？不可预测噪声？特定模式崩溃？）
+    if args.worst_n > 0:
+        try:
+            tok = load_tokenizer(args.data_dir)
+            res["worst_windows"] = collect_worst_windows(
+                model, val, ctx, device, tok, n_worst=int(args.worst_n),
+                amp=use_amp)
+            print(f"[eval] 最差 {len(res['worst_windows'])} 个窗口已随结果落盘"
+                  "（res['worst_windows']）")
+        except Exception as e:  # 坏案例转储失败不应阻塞评测本身
+            print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     res.update(load_provenance(os.path.dirname(os.path.abspath(args.ckpt)),
                                args.data_dir))

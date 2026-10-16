@@ -112,6 +112,41 @@ def test_run_ruler_dedupes_clamped_ctx():
     assert 0.0 <= res["niah_synth"][str(room)]["em"] <= 1.0
 
 
+def test_run_ruler_collects_badcases():
+    """预测错误的样本必须连问题/gold 摘录/上下文数值表一起落盘（坏案例来源）。"""
+    import torch
+
+    from lega.model import GPT
+    from lega.ruler import run_ruler
+
+    tok = _tok()
+    torch.manual_seed(0)
+    # 随机初始化模型几乎必然答错 → badcases 非空；且 gold 必在 prompt 中
+    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
+                n_heads=2, ffn_mult=4, variant="standard")
+    model.eval()
+    res = run_ruler(model, tok, "cpu", ctx_lens=[400], n_samples=2,
+                    max_new=12, fwe_max_new=12, tasks=("niah_synth", "vt"),
+                    verbose=False)
+    bad = res.get("_badcases", [])
+    assert bad, "随机模型应有错误样本被收集"
+    for c in bad:
+        assert c["task"] in ("niah_synth", "vt")
+        assert c["answer"] and isinstance(c["pred"], str)
+        assert c["question"] and "Answer:" in c["question"]
+        assert c["needle_excerpt"] and c["answer"] in c["needle_excerpt"]
+        # 标注自检：gold 必须真的在 prompt 里，否则是构造 bug
+        assert c["answer_in_prompt"] is True
+        assert c["em"] == 0.0
+        assert "context_numbers" in c
+    # 收集开关关闭时不产生 _badcases 键
+    res2 = run_ruler(model, tok, "cpu", ctx_lens=[400], n_samples=1,
+                     max_new=12, fwe_max_new=12, tasks=("niah_synth",),
+                     verbose=False, collect_badcases=False)
+    assert "_badcases" not in res2
+    print(f"  [ok] run_ruler 坏案例收集（{len(bad)} 条，含问题/gold/数值表）")
+
+
 def test_context_too_small():
     tok = _tok()
     try:

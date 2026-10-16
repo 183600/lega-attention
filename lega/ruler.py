@@ -322,6 +322,16 @@ def score_prediction(task: str, answer: str, pred_text: str,
     raise ValueError(f"未知任务 {task}")
 
 
+def _needle_excerpt(tok, ex: Dict, pad: int = 40, max_chars: int = 300) -> Optional[str]:
+    """gold 证据附近的摘录（token 跨度两侧各 pad 个 token），供人工复核。"""
+    span = ex.get("value_span") or ex.get("needle_span")
+    if not span:
+        return None
+    s, e = span
+    seg = tok.decode(ex["ids"][max(0, s - pad):min(len(ex["ids"]), e + pad)])
+    return seg if len(seg) <= max_chars else seg[:max_chars] + "…"
+
+
 # ---------------------------------------------------------------- 运行评测
 
 @torch.inference_mode()
@@ -330,15 +340,20 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
               vt_chains: int = 4, vt_depth: int = 4,
               corpus_sents: Optional[List[str]] = None,
               tasks: tuple = TASKS, verbose: bool = True,
-              amp: bool = True, gen_batch: int = 8) -> Dict:
-    """返回 {task: {ctx: {"em":, "recall":, "n"}}} 及跳过说明。
+              amp: bool = True, gen_batch: int = 8,
+              collect_badcases: bool = True) -> Dict:
+    """返回 {task: {ctx: {"em":, "recall":, "n"}}}、"_skipped" 与 "_badcases"。
 
     CUDA 上默认启用 bf16 autocast，与 train/evaluate 的评测精度口径一致。
     同一任务、同一上下文档下 prompt 等长的样例合并为一次批量贪婪解码：
     因果注意力与贪婪解码都逐行独立，逐样例评分口径不变。
+
+    collect_badcases=True 时，预测错误的样本连同问题、gold 摘录、上下文数值表
+    一起落入 "_badcases"：错误样本是改进思路的最重要来源，不能只留聚合分数。
     """
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
+    badcases: List[Dict] = []
     use_cuda = device.startswith("cuda")
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and use_cuda) else contextlib.nullcontext())
@@ -463,6 +478,28 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         if sc["recall"] is not None:
                             recalls.append(sc["recall"])
                         n += 1
+                        if collect_badcases and sc["em"] < 1.0:
+                            prompt_text = tok.decode(ex["ids"])
+                            prompt_nums = set(_NUM_RE.findall(prompt_text))
+                            qs, qe = ex["query_span"]
+                            badcases.append({
+                                "task": task, "ctx": int(room_ctx),
+                                "answer": ex["answer"],
+                                "answer_words": ex["answer_words"],
+                                "pred": pred_text.strip(),
+                                "em": sc["em"], "recall": sc["recall"],
+                                "question": tok.decode(ex["ids"][qs:qe]),
+                                "needle_excerpt": _needle_excerpt(tok, ex),
+                                "depth": ex.get("meta", {}).get("depth"),
+                                "meta": {k: v for k, v in ex.get("meta", {}).items()
+                                         if k != "n_tokens"},
+                                # 上下文中除 gold 外的全部数值（区分"误抄干扰值"
+                                # 与"幻觉数字"）；gold 是否真的在 prompt 里
+                                #（标注/构造自检：不在即为构造 bug）
+                                "context_numbers": sorted(prompt_nums - {ex["answer"]}),
+                                "answer_in_prompt": (ex["answer"] in prompt_nums
+                                                     if task != "fwe" else None),
+                            })
             if n:
                 # 以实际使用的上下文长度记录：若 ctx 超出 block_size 长度空间，
                 # 样本是在缩短后的 room_ctx 上构建的，记入 ctx 会虚增长上下文分数
@@ -480,6 +517,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
         if verbose:
             for s in skipped[:10]:
                 print(f"[ruler] 跳过: {s}")
+    if badcases:
+        results["_badcases"] = badcases
     return results
 
 
@@ -544,13 +583,19 @@ def main():
                         vt_depth=int(rl.get("vt_depth", 4)),
                         corpus_sents=load_corpus_sents(args.data_dir),
                         amp=amp, gen_batch=gen_batch)
+    # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务
+    badcases = results.pop("_badcases", [])
     payload = {"variant": ck.get("variant", model.variant), "seed": ck.get("seed"),
                "ctx_lens": ctx_lens, "n_samples": n_samples,
-               "sample_seed": int(rl.get("seed", 1234)), "results": results}
+               "sample_seed": int(rl.get("seed", 1234)), "results": results,
+               "badcases": badcases}
     payload.update(load_provenance(
         os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir))
     save_json(payload, args.out)
     print(f"[ruler] 完成 -> {args.out}")
+    if badcases:
+        print(f"[ruler] 预测错误样本 {len(badcases)} 条已随结果落盘"
+              "（payload['badcases']），可用 python -m lega.badcase 生成错误归因报告")
 
 
 if __name__ == "__main__":

@@ -46,6 +46,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
+from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
+                          analyze_badcases, process_ruler_json)
+from lega.curves import STATUS_ORDER, diagnose_run_dir, worst_status  # noqa: E402
 from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
 from lega.utils import (get_device, holm_bonferroni, mean_std, paired_t_test,
@@ -307,7 +310,7 @@ def _ruler_task_means(d):
     """单次 RULER 结果：各任务先在上下文档位求平均（fwe 用 recall，其余 EM）。"""
     out = {}
     for task, by_ctx in ((d or {}).get("results") or {}).items():
-        if task == "_skipped" or not by_ctx:
+        if task.startswith("_") or not isinstance(by_ctx, dict) or not by_ctx:
             continue
         metric = "recall" if task == "fwe" else "em"
         vals = [m[metric] for m in by_ctx.values()
@@ -476,6 +479,88 @@ def _fmt_rate(x) -> str:
         return f"{float(x):.3%}"
     except (TypeError, ValueError):
         return "-"
+
+
+# ---------------------------------------------------------------- 曲线诊断与权衡
+
+def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
+    """对每个 (变体, 种子) run 做训练曲线诊断并落盘汇总。
+
+    只看最终数值会掩盖训练动态：训练降/验证升=过拟合，两者都不降=欠拟合或
+    数据管道问题，NaN=训练失效。诊断结果进入 summary，另存
+    curve_diagnosis.json 供逐 run 复核。
+    """
+    log_vocab = None
+    meta_path = os.path.join(data_dir, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            import math as _math
+            with open(meta_path, "r", encoding="utf-8") as f:
+                log_vocab = _math.log(int(json.load(f)["vocab_size"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            log_vocab = None
+    diag = {}
+    for v, seed, vdir, _suffix in chain:
+        d = diagnose_run_dir(vdir, log_vocab=log_vocab)
+        diag.setdefault(v, {})[str(seed)] = d
+    if diag:
+        save_json(diag, os.path.join(results_dir, "curve_diagnosis.json"))
+        n_bad = sum(1 for vs in diag.values() for d in vs.values()
+                    if d["status"] not in ("正常收敛", "数据不足"))
+        print(f"[curves] 训练曲线诊断完成：{n_bad} 个 run 需要关注"
+              f" -> {os.path.join(results_dir, 'curve_diagnosis.json')}")
+    return diag
+
+
+def _eff_cell(entry, key, ctx):
+    """latency.json 变体条目里的效率字段（flops 取 total，mem 取实测峰值）。"""
+    if not entry:
+        return None
+    eff = entry.get("efficiency") or {}
+    if key == "flops":
+        cell = (eff.get("flops_per_tok") or {}).get(str(ctx))
+        return cell.get("total_flops_per_tok") if cell else None
+    if key == "mem":
+        return (eff.get("peak_mem_mb_prefill") or {}).get(str(ctx))
+    if key == "params":
+        return eff.get("n_params") or entry.get("n_params")
+    if key == "params_mb":
+        return eff.get("params_mb")
+    return None
+
+
+def _rel_pct(base, cand):
+    """cand 相对 base 的百分比变化；任一缺失或 base=0 时返回 None。"""
+    if base is None or cand is None:
+        return None
+    if base == 0:
+        return None
+    return (cand - base) / abs(base) * 100.0
+
+
+def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA) -> str:
+    """效率-精度权衡判定：不看代价的涨点没有意义。
+
+    规则（显式、可审计）：
+      * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
+        且代价 >10% 时直接判不可行；
+      * 显著但代价（延迟/参数/FLOPs/显存的最大增幅）>50% → 需审视收益成本比；
+      * 显著但代价 >5×收益（收益按 PPL 相对改善计）→ 收益-成本比不利；
+      * 其余 → 可接受。
+    "提升 0.5% 精度却让计算时间增加 10 倍"式的改进在这里会被明确拒绝。
+    """
+    if benefit_pct is None or cost_pct is None:
+        return "数据不足"
+    sig = p_adj is not None and p_adj < alpha
+    if not sig:
+        if cost_pct > 10:
+            return f"不可行：涨点不显著且代价 {cost_pct:.0f}%"
+        return "说服力有限：涨点未通过显著性检验"
+    if cost_pct > 50:
+        return f"需审视：显著但代价 {cost_pct:.0f}%"
+    if cost_pct > 5 * max(benefit_pct, 0.5):
+        return f"收益-成本比不利：收益 {benefit_pct:.1f}% vs 代价 {cost_pct:.0f}%"
+    return "可接受"
 
 
 def build_summary(results_dir: str, audit: dict = None,
@@ -849,6 +934,111 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- 训练曲线图：`fig_train_curves.png`（各变体训练 loss 与 val PPL，"
                   "多种子取均值）。")
 
+    # --- 训练曲线诊断：结果分析不能只看最终数值，曲线本身先要过一遍体检
+    md += ["", "## 训练曲线诊断（过拟合/欠拟合/发散/NaN）", ""]
+    curve = load(os.path.join(results_dir, "curve_diagnosis.json"))
+    if curve:
+        md.append("诊断口径：训练降而验证升=过拟合；两者都不降=欠拟合/学习率不当/"
+                  "数据管道问题；出现 NaN=训练失效。逐 run 明细见 "
+                  "`curve_diagnosis.json`。")
+        md.append("")
+        md.append("| 变体 | 状态（最差种子） | 训练损失 首→末 | 验证损失 首→最优→末 "
+                  "| 早停空间 | 关键建议 |")
+        md.append("|---|---|---|---|---|---|")
+        any_nan = False
+        for v in variants:
+            by_seed = curve.get(v) or {}
+            if not by_seed:
+                continue
+            diags = list(by_seed.values())
+            status = worst_status([d["status"] for d in diags])
+            worst = next(d for d in diags if d["status"] == status)
+            any_nan = any_nan or any(d.get("nonfinite_values") for d in diags)
+            es = [d.get("early_stop_gain_rel") for d in diags
+                  if d.get("early_stop_gain_rel") is not None]
+
+            def _f4(x):
+                return "-" if x is None else f"{x:.4f}"
+
+            train_s = (f"{_f4(worst['train_loss_first'])}→"
+                       f"{_f4(worst['train_loss_last'])}")
+            val_s = (f"{_f4(worst['val_loss_first'])}→"
+                     f"{_f4(worst['val_loss_best'])}@s{worst['val_best_step']}"
+                     f"→{_f4(worst['val_loss_last'])}")
+            es_s = ("-" if not es else
+                    f"{sum(es) / len(es):+.1%}"
+                    + ("（最终劣于最优，已用 best checkpoint）"
+                       if sum(es) / len(es) > 0.02 else ""))
+            rec = worst["recommendations"][:1]
+            md.append(f"| {VARIANT_CN.get(v, v)} | {status} | {train_s} | {val_s} "
+                      f"| {es_s} | {rec[0] if rec else '-'} |")
+        md.append("")
+        if any_nan:
+            md.append("⚠ 存在出现非有限损失的 run：训练已失效，"
+                      "对应 run 目录的 `nan_report.json` 给出了"
+                      "数据→代码→混合精度→梯度/学习率的系统排查路径，"
+                      "修复前该变体的一切指标都不可信。")
+        else:
+            md.append("注：全部 run 无 NaN/Inf；有异常状态的变体请按建议处理"
+                      "（过拟合→正则化/增数据/早停，欠拟合→查学习率与数据管道）"
+                      "后重跑，再进入对比结论。")
+    else:
+        md.append("- ⚠ 未找到 `curve_diagnosis.json`：只看最终数值会掩盖训练动态，"
+                  "请先运行训练（或 `python -m lega.curves --run_dir <run 目录>`）。")
+
+    # --- 坏案例分析：预测错误的样本逐一归因（改进思路的最重要来源）
+    md += ["", "## 坏案例分析（预测错误的样本与归因）", ""]
+    bad_rows, bad_example_pool = [], []
+    for v in variants:
+        cases = []
+        for s in _variant_seed_map(runs, v).values():
+            cases += (s.get("ruler") or {}).get("badcases") or []
+        if not cases:
+            continue
+        ana = analyze_badcases(cases, variant=v)
+        cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
+        cat_s = "；".join(f"{BADCASE_CN.get(k, k)}×{n}" for k, n in cats[:3])
+        bad_rows.append((v, ana, cat_s))
+        bad_example_pool += [(v, c) for c in ana["cases"]]
+    if bad_rows:
+        md.append("错误样本不是污点而是信息：逐条区分**标注错误**（gold 不在 "
+                  "prompt 中→修构造）、**难度边界样本**（needle 极深）与"
+                  "**模型盲区**（误抄干扰值/幻觉数字/无数值回答）。"
+                  "逐案例详情见 `badcases_*.md`。")
+        md.append("")
+        md.append("| 变体 | 错误样本数 | 主要归因 | niah 深位(>0.75)失败占比 "
+                  "| 标注/构造错误 |")
+        md.append("|---|---|---|---|---|")
+        for v, ana, cat_s in bad_rows:
+            dfr = ana.get("deep_position_fail_ratio")
+            md.append(f"| {VARIANT_CN.get(v, v)} | {ana['n_badcases']} | {cat_s} "
+                      f"| {'-' if dfr is None else f'{dfr:.0%}'} "
+                      f"| {ana['label_errors'] or 0} |")
+        md.append("")
+        # 摘 3 条代表性个案放进汇总页：错误必须"看得见"，不能只留在文件里
+        shown, seen_cat = 0, set()
+        for v, c in bad_example_pool:
+            if shown >= 3 or c["category"] in seen_cat:
+                continue
+            seen_cat.add(c["category"])
+            shown += 1
+            q = (c.get("question") or "").strip().replace("\n", " ")[:120]
+            pred = (c.get("pred") or "").strip().replace("\n", " ")[:80]
+            md += [f"- **{VARIANT_CN.get(v, v)} · {c['task']}@ctx{c.get('ctx')}** "
+                   f"—— {BADCASE_CN.get(c['category'], c['category'])}",
+                   f"  - 问题：{q}…",
+                   f"  - 输出：`{pred}` vs gold `{c.get('answer')}`；"
+                   f"{c.get('explanation', '')}"]
+        md.append("")
+        n_label = sum(a["label_errors"] for _, a, _ in bad_rows)
+        if n_label:
+            md.append(f"⚠ 共 {n_label} 条 gold 不在 prompt 中的样本：这是"
+                      "构造/标注 bug，不是模型失败，须先修复评测再下结论。")
+    else:
+        md.append("- 暂无错误样本记录（RULER 未运行或全部命中）。"
+                  "全部命中时也建议人工抽查若干正确样本确认没有'碰巧命中'。")
+
+
     # --- 消融矩阵（全因子 + 去一法）
     present = set(runs.keys())
     md += ["", "## 消融矩阵（全因子 + 去一法）", ""]
@@ -954,6 +1144,74 @@ def build_summary(results_dir: str, audit: dict = None,
                   "n<3 只报描述统计、不判定显著性。种子不足时请先补齐种子再下结论。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
+
+    # --- 效率-精度权衡：评价改进不能只看指标涨点
+    md += ["", "## 效率-精度权衡（涨点必须对照代价）", ""]
+    if common_ctx is not None and lat_entries.get("standard"):
+        base_e = lat_entries["standard"]
+        base_prefill = (base_e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
+        base_params = _eff_cell(base_e, "params", common_ctx)
+        base_flops = _eff_cell(base_e, "flops", common_ctx)
+        md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。代价="
+                  "Prefill 延迟/参数量/FLOPs(token)/显存 相对基线增幅的最大值；"
+                  "收益=PPL 相对改善。判定规则：涨点不显著（Holm 校正后 p≥α）"
+                  "→说服力有限（代价>10% 判不可行）；显著但代价>50% 或 >5×收益 "
+                  "→收益-成本比不利。提升 0.5% 却让计算时间增加 10 倍的方案"
+                  "会被明确拒绝。")
+        md.append("")
+        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill 延迟 | 参数量 "
+                  "| FLOPs/token | 峰值显存 | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|")
+        ppl_test = {t["candidate"]: t for t in tests
+                    if t.get("reference") == "standard" and t.get("metric") == "PPL"
+                    and t.get("mean_diff") is not None}
+        for r in rows:
+            v = r["variant"]
+            if v == "standard" or v not in lat_entries:
+                continue
+            e = lat_entries[v]
+            ppl = r.get("val_ppl")
+            std_row = next((x for x in rows if x["variant"] == "standard"), None)
+            std_ppl = (std_row or {}).get("val_ppl")
+            benefit = (-_rel_pct(std_ppl, ppl)) if (ppl is not None and std_ppl) else None
+            t = ppl_test.get(v)
+            p_adj = t.get("p_adj") if t else None
+            pre_delta = _rel_pct(base_prefill,
+                                 (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1"))
+            par_delta = _rel_pct(base_params, _eff_cell(e, "params", common_ctx))
+            flo_delta = _rel_pct(base_flops, _eff_cell(e, "flops", common_ctx))
+            mem_v = _eff_cell(e, "mem", common_ctx)
+            mem_b = _eff_cell(base_e, "mem", common_ctx)
+            mem_delta = _rel_pct(mem_b, mem_v) if (mem_v is not None and mem_b) else None
+            deltas = [d for d in (pre_delta, par_delta, flo_delta, mem_delta)
+                      if d is not None]
+            cost = max(deltas) if deltas else None
+            verdict = tradeoff_verdict(benefit, p_adj, cost)
+            r["eff_cost_max_pct"] = round(cost, 2) if cost is not None else None
+            r["eff_flops_per_tok"] = _eff_cell(e, "flops", common_ctx)
+            r["eff_peak_mem_mb"] = mem_v
+            r["eff_benefit_ppl_pct"] = (round(benefit, 2)
+                                        if benefit is not None else None)
+            r["eff_verdict"] = verdict
+
+            def _d(x, plus=True):
+                if x is None:
+                    return "-"
+                return f"{x:+.1f}%" if plus else f"{x:.1f}%"
+
+            md.append(f"| {VARIANT_CN.get(v, v)} | {_d(benefit)} "
+                      f"| {'-' if p_adj is None else f'{p_adj:.4f}'} "
+                      f"| {_d(pre_delta)} | {_d(par_delta)} | {_d(flo_delta)} "
+                      f"| {'-' if mem_v is None else f'{mem_v:.0f} MB'} "
+                      f"| {verdict} |")
+        md.append("")
+        md.append("注：FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
+                  "+ 门控开销，见 latency.json 的 efficiency 字段）；峰值显存"
+                  "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
+                  "延迟/显存受硬件影响，跨机器对比无效。")
+    else:
+        md.append("- ⚠ 缺少延迟/效率基准（latency.json 或 standard 基线），"
+                  "无法给出权衡判定；没有代价对照的涨点不能作为结论。")
 
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "summary.md"), "w", encoding="utf-8") as f:
@@ -1134,7 +1392,16 @@ def main():
                 print("+", " ".join(cmd), flush=True)
                 train_cmds.append(cmd)
     if train_cmds:
-        run_many(train_cmds, jobs, _jobs_env(jobs))
+        try:
+            run_many(train_cmds, jobs, _jobs_env(jobs))
+        except subprocess.CalledProcessError as e:
+            # 训练中止最常见的原因是 NaN 防护触发（train.py 会先落盘
+            # nan_report.json 再退出）；把排查入口直接指给用户，避免只留堆栈
+            raise SystemExit(
+                f"训练失败（变体命令退出码 {e.returncode}）：若为 NaN 中止，"
+                f"对应 run 目录下已生成 nan_report.json（数据→代码→混合精度→"
+                f"梯度/学习率的系统排查路径），修复后重跑；命令: "
+                f"{' '.join(e.cmd)}")
     for v, seed, vdir, suffix in chain:
         # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
         # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型。
@@ -1146,12 +1413,30 @@ def main():
         run([py, "-m", "lega.evaluate", "--ckpt", ckpt,
              "--data_dir", args.data_dir,
              "--out", os.path.join(results_dir, f"eval_{v}{suffix}.json"),
+             "--worst_n", "3",
              "--device", args.device])
         if not args.skip_ruler:
             run([py, "-m", "lega.ruler", "--ckpt", ckpt,
                  "--data_dir", args.data_dir,
                  "--out", os.path.join(results_dir, f"ruler_{v}{suffix}.json"),
                  "--device", args.device] + ruler_over)
+
+    # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
+    # 错误样本是改进思路的最重要来源，不能只留聚合分数
+    if not args.skip_ruler:
+        for fp in sorted(glob.glob(os.path.join(results_dir, "ruler_*.json"))):
+            try:
+                ana = process_ruler_json(fp)
+            except (OSError, ValueError, KeyError) as e:
+                print(f"[badcase] 跳过 {fp}: {e}")
+                continue
+            if ana["n_badcases"]:
+                top = ", ".join(f"{BADCASE_CN.get(k, k)}×{n}"
+                                for k, n in sorted(ana["category_counts"].items(),
+                                                   key=lambda kv: -kv[1])[:3])
+                print(f"[badcase] {os.path.basename(fp)}: "
+                      f"{ana['n_badcases']} 条错误样本 —— {top}"
+                      f" -> badcases_*.md")
 
     if not args.skip_latency:
         # 显式给出延迟基准的变体清单：lega.latency 的默认值不含消融变体，
@@ -1184,6 +1469,10 @@ def main():
     if not args.skip_plots:
         run([py, "-m", "lega.plots", "--results_dir", results_dir,
              "--train_root", out_root])
+
+    # 训练曲线诊断：曲线体检（过拟合/欠拟合/发散/NaN）在汇总前完成，
+    # 结果落盘 curve_diagnosis.json 并进入 summary.md
+    diagnose_training_curves(chain, args.data_dir, results_dir)
 
     # 数据协议防泄漏报告（prepare_bins 生成）：在所有评测结束后读取，连同实时
     # 测试集访问账本复制进 results，供汇总与审计（早读会漏掉本轮 test 评测）。

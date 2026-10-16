@@ -29,6 +29,76 @@ def _sync(device):
         torch.cuda.synchronize()
 
 
+# ---------------------------------------------------------------- 效率指标
+
+def estimate_flops_per_token(model, kv_len: int) -> dict:
+    """前向 FLOPs/token 的解析估计（增量对比比绝对值更重要）。
+
+    约定（与常见 2*N 口径一致，乘法+加法各计 1 FLOP）：
+      * matmul：逐层 qkv/wo/ffn 权重 MACs×2 + lm_head×2（权重共享只计一次）；
+      * attn：每个 query token 对 kv_len 个 key 的 QK 与 AV 各一次 → 4·kv_len·d/层；
+      * gate：gated 变体额外 w·q（2d）+ 对每头注意力列求 max_j p_j（≈kv_len·H）。
+    """
+    d = model.d_model
+    n_layers = len(model.blocks)
+    blk = model.blocks[0]
+    # 每层 matmul MACs：q/k/v/o 四个 d×d 投影 + FFN 两个 d×(ffn_mult·d)
+    per_layer_macs = sum(lin.weight.numel()
+                         for lin in (blk.attn.wq, blk.attn.wk, blk.attn.wv,
+                                     blk.attn.wo, blk.w1, blk.w2))
+    matmul_macs = per_layer_macs * n_layers \
+        + model.lm_head.weight.numel()   # 与 tok_emb 共享，只计一次
+    attn_flops = 4 * int(kv_len) * d * n_layers
+    variant = model.variant
+    gate_flops = 0
+    if variant not in ("standard", "standard_sdpa", None):
+        # w·q: 2·d；max_j p_j: 每头扫 kv_len 个概率 → kv_len·n_heads
+        gate_flops = 2 * d * n_layers + int(kv_len) * model.n_heads * n_layers
+    return {
+        "matmul_flops_per_tok": int(2 * matmul_macs),
+        "attn_flops_per_tok": int(attn_flops),
+        "gate_extra_flops_per_tok": int(gate_flops),
+        "total_flops_per_tok": int(2 * matmul_macs + attn_flops + gate_flops),
+        "kv_len": int(kv_len),
+        "note": "解析估计：matmul 2·MACs + 注意力 4·kv_len·d/层 + 门控开销；"
+                "变体间相对差比绝对值更可靠",
+    }
+
+
+def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
+    """参数量/显存/KV 缓存/FLOPs：效率-精度权衡的效率侧输入。"""
+    params_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    attn0 = model.blocks[0].attn
+    kv_dtype = kv_dtype or attn0.wk.weight.dtype
+    kv_bytes_per_tok = (2 * len(model.blocks) * attn0.n_heads * attn0.d_head
+                        * torch.empty(0, dtype=kv_dtype).element_size())
+    eff = {
+        "n_params": count_params(model),
+        "params_mb": round(params_bytes / 2**20, 3),
+        "kv_cache_mb_per_tok": round(kv_bytes_per_tok / 2**20, 6),
+        "flops_per_tok": {},
+        "peak_mem_mb_prefill": {},
+    }
+    for ctx in ctxs:
+        if ctx > model.block_size:
+            continue
+        eff["flops_per_tok"][str(ctx)] = estimate_flops_per_token(model, ctx)
+        # 峰值显存：单次 prefill 前向（batch=1）内实测；CPU 无显存语义，
+        # 记 None 并以 params+KV 的解析量供参考（明确标注口径）
+        if device.startswith("cuda"):
+            x = torch.randint(0, model.vocab_size, (1, ctx), device=device)
+            model(x, last_logits_only=True)      # 预热，排除首次启动开销
+            torch.cuda.reset_peak_memory_stats()
+            model(x, last_logits_only=True)
+            torch.cuda.synchronize()
+            eff["peak_mem_mb_prefill"][str(ctx)] = round(
+                torch.cuda.max_memory_allocated() / 2**20, 3)
+            del x
+        else:
+            eff["peak_mem_mb_prefill"][str(ctx)] = None
+    return eff
+
+
 @torch.inference_mode()
 def bench_prefill(model, device, ctx: int, batch_size: int, iters: int, warmup: int,
                   vocab: int) -> float:
@@ -210,6 +280,10 @@ def main():
         entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa, "weights": src,
                  "n_params": count_params(model), "prefill_ms": {},
                  "decode_ms_per_tok": {}, "decode_prefill_ctx": {}}
+        # 效率侧完整指标：参数量/显存/KV 缓存/FLOPs —— 效率-精度权衡的输入。
+        # 延迟只测一次是不够的：微小的指标涨点可能伴随不成比例的算力/显存代价。
+        entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
+                                                 kv_dtype=kv_dtype)
         for ctx in ctx_lens:
             if ctx > model.block_size:
                 # 与 decode 路径的钳制行为一致：超出 block_size 的 ctx 直接跳过，
