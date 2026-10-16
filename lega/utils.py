@@ -83,7 +83,7 @@ def auroc(scores, labels) -> float:
     allv = np.concatenate([neg, pos])
     order = np.argsort(allv, kind="mergesort")
     # 并列取平均秩：在有序数组上用 unique 定位等值组，
-    # 组内平均秩 = 首名次 + (组大小+1)/2 - 0.5
+    # 组内平均秩（1-based）= 首名次（0-based 首个位置）+ (组大小+1)/2
     sorted_v = allv[order]
     first, counts = np.unique(sorted_v, return_index=True, return_counts=True)[1:]
     avg_ranks = first.astype(np.float64) + (counts + 1.0) / 2.0
