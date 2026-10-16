@@ -82,9 +82,8 @@ def from_zip(out_dir: str) -> dict:
     texts = {}
     with zipfile.ZipFile(dst) as z:
         names = z.namelist()
-        # 该 zip 内为 wikitext-103-raw/wiki.{train,valid,test}.raw（raw 版后缀是
-        # .raw 而非 .tokens，顶层目录也非 wikitext-103-raw-v1/）。顶层目录名随
-        # 镜像可能变化，按文件名后缀定位而不写死完整路径。
+        # 该 zip 内为 wikitext-103-raw/wiki.{train,valid,test}.raw；顶层目录名
+        # 随镜像可能变化，按文件名后缀定位而不写死完整路径。
         for split, base in [("train", "wiki.train.raw"),
                             ("val", "wiki.valid.raw"),
                             ("test", "wiki.test.raw")]:

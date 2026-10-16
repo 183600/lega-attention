@@ -203,7 +203,7 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
     room = ctx - len(q_ids)
     if room < 40:
         raise ContextTooSmall(f"fwe 需要 ctx>=~{len(q_ids)+40}, 当前 {ctx}")
-    # 根据实测的词均 token 数规划词频结构（高频词 k 次、低频词 2 次），
+    # 按词均 token 数规划词频结构（高频词 k 次、低频词 2 次），
     # 保证正文能完整放入 token 长度空间，而不是事后硬截断破坏词频分布。
     avg_len = max(1.0, len(tok.encode(" " + " ".join(words))) / len(words))
     k = int(room / avg_len - 2 * len(words)) // 10
@@ -344,8 +344,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                if (amp and use_cuda) else contextlib.nullcontext())
     gen_batch = max(1, int(gen_batch))
     # 静态 KV 缓冲跨样例复用：容量只增不减，按历史最大 (B, total) 分配一次，
-    # 之后按所需窗口返回切片视图；不同长度/批大小的样例组之间不再反复重建
-    # 缓冲（CUDA 上避免反复 cudaMalloc/cudaFree 的同步开销）。
+    # 之后按所需窗口返回切片视图。
     attn0 = model.blocks[0].attn
     kv_B = 0
     kv_cap = 0
