@@ -204,6 +204,11 @@ def main():
             print("[train] torch.compile 已启用")
         except Exception as e:
             print(f"[train] torch.compile 失败（回退 eager）: {e}")
+    # 模型构造会按变体消耗不同数量的全局 RNG（如 null 的 k_null 初始化），
+    # 若不重置，训练期任何随机性（dropout/注意力 dropout 等）在变体间不可比。
+    # 各变体共享的基础权重初始化已完成，这里重放同一 seed，保证同一 seed 下
+    # 所有变体的训练随机流完全一致（数据顺序由独立的 default_rng(seed) 决定）。
+    set_seed(seed)
     n_params = count_params(model)
     n_extra = gate_extra_params(model)
     print(f"[train] variant={args.variant}({VARIANT_CN[args.variant]}) device={device} "

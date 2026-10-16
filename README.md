@@ -55,8 +55,10 @@ $$
 **消融完整性**：设查询项=A、集中度项=B、长度项=C，则
 全因子 8 格（无/`standard`、A/`qgate`、B/`lega_conc_only`、C/`lega_len_only`、
 AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、ABC/`lega`）与
-去一法（Full/Full−A/Full−B/Full−C）全部实现；汇总表会自动列出矩阵并标注缺失组合，
-只报告部分组合时不会给出“各组件均有用”的结论。
+去一法（Full/Full−A/Full−B/Full−C）全部实现；汇总表会自动列出矩阵并标注缺失组合。
+组件是否有用不靠“组合跑全”自证：汇总表基于 Holm 校正后的显著配对检验逐一判定
+A/B/C（去一法：Full−X 显著变差；全因子：仅 X 显著优于无门控），
+组合齐全但证据不足或方向相反时，明确拒绝“各组件均有用”的结论。
 
 参数量差异：门控仅引入**每头 $d_{head}+3$ 个参数**（LEGA），相对模型总量 <0.02%（`null` 为每头 $2d_{head}$）。脚本会在训练开始时打印精确数值。
 
@@ -70,8 +72,8 @@ AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、ABC/`lega`）与
   3. **群组不跨侧**：以文档/段落为整体单位，同一文档只落在一个 split；与 val/test 精确重复的训练长行自动去污染（val/test 保持尘封不改写），并用采样 64-gram 哈希筛查跨 split 的逐 token 复制；
   4. **清洗与异常检查**：坏字符（U+FFFD/NUL/非法控制符）确定性清除；token 流做整数/有限/id 越界硬校验；重复样本、超长行、train 与 val/test 的一元分布漂移（TV/JS、OOV）全部写入 `data_report.json`；
   5. **测试集尘封**：checkpoint 选择与早停只用 val，test 只在最终评估时访问；每次 test 评测写入 `data_dir/.test_access_log.jsonl` 账本，汇总表报告累计次数与被重复评测的 checkpoint。
-- **公平对比（受控变量）**：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/训练步数/数据顺序），训练后自动核对各 run 的 `config_used.json`，除变体/种子外任何配置差异都会直接报错——把“公平对比”从口头约定变成可执行断言。
-- **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std**（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对，用双侧配对 t 检验给出显著性（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益。
+- **公平对比（受控变量）**：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/训练步数/数据顺序），训练后双层自动核对：`config_used.json`（超参数逐项一致）与 `eval.json` 溯源（数据指纹、代码 commit、配置 SHA-256、实际训练步数与 tokens_seen 一致，并与本次流水线数据比对），任何差异都会直接报错；模型初始化完成后统一重放随机种子，使各变体的训练期随机流（dropout 等）也完全一致——把“公平对比”从口头约定变成可执行断言。
+- **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std** 与配对 Cohen's d 效应量（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对的双侧 t 检验在同一指标家族内做 **Holm–Bonferroni 校正**（控制多重比较 FWER），结论一律基于校正后 p 值（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益。
 - **三个评测维度**：
   1. **困惑度**（WikiText-103 PPL：checkpoint 选择在 val 上完成，PPL 在 held-out test 上评测，无 test 时回退 val）；评估窗口不重复，并在整个评测集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；
   2. **RULER 长上下文检索**（简化复现 5 任务）：`niah_synth`（合成干扰单键检索）、`niah_corpus`（自然文本干扰）、`niah_multikey`（多键干扰）、`fwe`（高频词提取）、`vt`（变量追踪）；多档上下文长度 + 贪心解码；数值任务 EM **只承认生成内容中的第一个数值回答**，避免"先答错后蒙中"被计分；
@@ -129,7 +131,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `results/<tag>/repro.json` | 流水线全局溯源（代码版本、数据指纹、种子、运行环境） |
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
-| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、p 值、结论） |
+| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据） |
 | `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文 |
 | `results/<tag>/latency.json` | prefill / decode 延迟 |

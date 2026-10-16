@@ -55,8 +55,11 @@ where $p_j$ are the causal attention weights, $n$ is the number of real tokens r
 factorial (none/`standard`, A/`qgate`, B/`lega_conc_only`, C/`lega_len_only`,
 AB/`lega_no_len`, AC/`lega_no_conc`, BC/`lega_no_query`, ABC/`lega`) and the
 leave-one-out set (Full/Full−A/Full−B/Full−C) are implemented; the summary lists
-the matrix and flags missing cells, so partial combinations can never silently
-support "every component helps".
+the matrix and flags missing cells. Component usefulness is never inferred from
+coverage alone: the summary judges each of A/B/C with Holm-corrected significant
+paired tests (leave-one-out: Full−X significantly worse than Full; factorial:
+X alone significantly better than no gate), and explicitly rejects
+"every component helps" when the evidence is missing or points the other way.
 
 Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA), <0.02% of the model (`null` is $2d_{head}$ per head). Scripts print the exact numbers at the start of training.
 
@@ -70,8 +73,8 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
   3. **Groups never cross sides**: documents/paragraphs are the group unit and land entirely in one split; training lines that exactly duplicate val/test lines are decontaminated (val/test stay sealed and untouched), and sampled 64-gram hashing screens for token-level copies across splits;
   4. **Cleaning & anomaly checks**: corrupt characters (U+FFFD/NUL/illegal control chars) are deterministically removed; token streams are hard-validated (integer, finite, id range); duplicate samples, overlong lines and train-vs-val/test unigram shift (TV/JS, OOV) are all written to `data_report.json`;
   5. **Test seal**: checkpoint selection and early stopping use val only; test is accessed for final evaluation only, and every test evaluation appends to the `data_dir/.test_access_log.jsonl` ledger; the summary reports the total count and any repeatedly evaluated checkpoint.
-- **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, each run's `config_used.json` is automatically cross-checked and any difference besides variant/seed fails the pipeline — fairness is an executable assertion, not a verbal promise.
-- **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test (`results/<tag>/significance.json`); with n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%.
+- **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, two layers are cross-checked automatically: `config_used.json` (hyperparameters item by item) and the `eval.json` provenance (data fingerprint, code commit, config SHA-256, actual steps and tokens_seen, also compared against the pipeline's data fingerprint). Any difference fails the pipeline; the random seed is replayed after model construction so training-time randomness (dropout etc.) is also identical across variants — fairness is an executable assertion, not a verbal promise.
+- **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** plus the paired Cohen's d effect size across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test, and p-values within each metric family are corrected with **Holm–Bonferroni** (controlling the family-wise error rate); verdicts are based on corrected p-values (`results/<tag>/significance.json`). With n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%.
 - **Three evaluation axes**:
   1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision;
   2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
@@ -129,7 +132,7 @@ Outputs:
 | `results/<tag>/repro.json` | Pipeline-level provenance (code version, data fingerprint, seeds, runtime) |
 | `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
-| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, p value, verdict) |
+| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence) |
 | `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths |
 | `results/<tag>/latency.json` | prefill / decode latency |

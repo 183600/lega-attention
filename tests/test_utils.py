@@ -8,8 +8,8 @@ import math
 
 import numpy as np
 
-from lega.utils import (auroc, mean_std, paired_t_test, pearson,
-                        student_t_two_sided_p)
+from lega.utils import (auroc, holm_bonferroni, mean_std, paired_t_test,
+                        pearson, student_t_two_sided_p)
 
 
 def _brute_auroc(scores, labels):
@@ -147,3 +147,36 @@ def test_paired_t_edge_cases():
                           [0.9, -0.9, 0.9, -0.9, 0.9])
     assert noise["p"] > 0.05
     print("  [ok] paired_t_test 边界（全同/零方差/n=1/长度错配/显著与不显著）")
+
+
+def test_paired_t_effect_size():
+    # d_z = mean_diff / std_diff（配对 Cohen's d）；diffs=[1,2,3,4]
+    r = paired_t_test([1, 2, 3, 4], [0, 0, 0, 0])
+    d_ref = 2.5 / math.sqrt(5.0 / 3.0)
+    assert abs(r["d_z"] - d_ref) < 1e-9
+    # 零方差/n<2 时效应量不可估计
+    assert paired_t_test([6.0, 6.0], [5.0, 5.0])["d_z"] is None
+    assert paired_t_test([2.0], [1.0])["d_z"] is None
+    print("  [ok] paired_t_test 配对效应量 d_z")
+
+
+def test_holm_bonferroni():
+    # 手算：m=4, p=[0.01,0.02,0.03,0.04]，升序各乘以 4,3,2,1 后取前缀最大值
+    adj = holm_bonferroni([0.01, 0.02, 0.03, 0.04])
+    assert adj == [0.04, 0.06, 0.06, 0.06], adj
+    # None 不占家族大小：m=2, [0.01, None, 0.04] -> [0.02, None, 0.04]
+    adj = holm_bonferroni([0.01, None, 0.04])
+    assert adj[1] is None
+    assert abs(adj[0] - 0.02) < 1e-12 and abs(adj[2] - 0.04) < 1e-12
+    # 单调不减、不小于原始 p、封顶 1
+    ps = [0.9, 0.001, 0.5, 0.04, None, 0.2]
+    adj = holm_bonferroni(ps)
+    assert all(a >= p and a <= 1.0 for a, p in zip(adj, ps) if p is not None)
+    order = sorted((i for i in range(len(ps)) if ps[i] is not None),
+                   key=lambda i: ps[i])
+    vals = [adj[i] for i in order]
+    assert all(b + 1e-12 >= a for a, b in zip(vals, vals[1:])), vals
+    # 全 None / 空输入
+    assert holm_bonferroni([]) == []
+    assert holm_bonferroni([None, None]) == [None, None]
+    print("  [ok] holm_bonferroni（手算示例/None 不占家族/单调与封顶）")

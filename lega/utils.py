@@ -162,7 +162,8 @@ def paired_t_test(a, b) -> dict:
 
     实验协议中所有变体使用同一组随机种子训练，因此变体间比较天然配对：
     d_i = a_i - b_i 消除“种子运气”的公共方差，统计功效高于独立样本检验。
-    返回 {n, mean_diff, std_diff, t, df, p}；n<2 时 t/df/p 为 None。
+    返回 {n, mean_diff, std_diff, t, df, p, d_z}；n<2 时 t/df/p 为 None。
+    d_z = mean_diff / std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。
     标准差为 0（所有配对差完全相同）时：均值非 0 记 p=0，否则 p=1。
     """
     av = np.asarray([v for v in a if v is not None], dtype=np.float64)
@@ -173,20 +174,46 @@ def paired_t_test(a, b) -> dict:
     n = int(d.size)
     if n == 0:
         return {"n": 0, "mean_diff": None, "std_diff": None,
-                "t": None, "df": None, "p": None}
+                "t": None, "df": None, "p": None, "d_z": None}
     mean_diff = float(d.mean())
     if n < 2:
         return {"n": n, "mean_diff": mean_diff, "std_diff": None,
-                "t": None, "df": None, "p": None}
+                "t": None, "df": None, "p": None, "d_z": None}
     std_diff = float(d.std(ddof=1))
     df = n - 1
     if std_diff == 0.0:
         p = 1.0 if mean_diff == 0.0 else 0.0
         return {"n": n, "mean_diff": mean_diff, "std_diff": 0.0,
-                "t": float("inf") if mean_diff else 0.0, "df": df, "p": p}
+                "t": float("inf") if mean_diff else 0.0, "df": df, "p": p,
+                "d_z": None}
     t = mean_diff / (std_diff / math.sqrt(n))
     return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
-            "t": float(t), "df": df, "p": student_t_two_sided_p(t, df)}
+            "t": float(t), "df": df, "p": student_t_two_sided_p(t, df),
+            "d_z": float(mean_diff / std_diff)}
+
+
+def holm_bonferroni(pvals) -> list:
+    """Holm–Bonferroni 逐步下降法（step-down）校正的单步族错误率 p 值。
+
+    同一次汇总会对多个 (候选, 参照) 配对做显著性检验；不校正时 α=0.05 下
+    检验越多、至少一次假阳性的概率越大（family-wise error）。Holm 法在
+    任意依赖结构下都控制 FWER，且比 Bonferroni 保守度更低。
+
+    输入为 p 值列表（允许 None，表示无法检验，不占家族大小），返回同序列表：
+    p_adj_(i) = max_{j<=i} min(1, (m-j+1) * p_(j))（p 升序的第 j 个观测），
+    保证校正后 p 随原始 p 单调不减且 >= 原始 p。
+    """
+    idx = [i for i, p in enumerate(pvals) if p is not None]
+    m = len(idx)
+    adj = [None] * len(pvals)
+    if m == 0:
+        return adj
+    running = 0.0
+    for rank, i in enumerate(sorted(idx, key=lambda i: pvals[i])):
+        val = min(1.0, float(pvals[i]) * (m - rank))
+        running = max(running, val)
+        adj[i] = running
+    return adj
 
 
 def auroc(scores, labels) -> float:

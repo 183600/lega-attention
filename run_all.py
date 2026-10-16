@@ -7,14 +7,17 @@
 
 对比与消融协议（科研统计口径）:
   * 受控变量：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/
-    训练步数/数据顺序），训练后自动核对各 run 的 config_used.json，任何与
-    “除变体外全部一致”相悖的差异都会直接报错，避免把调参收益误归因给方法；
+    训练步数/数据顺序），训练后自动核对各 run 的 config_used.json 与
+    eval.json 溯源（数据指纹/代码 commit/实际训练步数），任何与“除变体外
+    全部一致”相悖的差异都会直接报错，避免把调参收益或数据差异误归因给方法；
   * 多种子：关键指标跨随机种子报告 Mean ± Std（种子一致 → 变体间配对比较），
-    并用配对 t 检验给出显著性；默认种子数见 configs（tiny 3 / small 5），
-    可用 --seeds 覆盖；
+    配对 t 检验的同指标家族做 Holm–Bonferroni 校正以控制 FWER，并报告
+    Cohen's d_z 效应量；默认种子数见 configs（tiny 3 / small 5），可用
+    --seeds 覆盖；
   * 消融完整性：全因子（无/A/B/C/AB/AC/BC/ABC）与去一法（Full/Full-A/
-    Full-B/Full-C）两套组合全部实现；汇总表显式列出消融矩阵，缺失组合会
-    标注“消融不完整”，不允许部分组合支撑全部组件有效的结论。
+    Full-B/Full-C）两套组合全部实现；汇总表显式列出消融矩阵，并基于
+    Holm 校正后的显著证据逐一判定 A/B/C 组件是否“有用”——组合齐全但证据
+    不足时不会下“各组件均有用”的结论。
 
 用法:
   # 冒烟测试（tiny 配置 + 伪数据，几分钟内跑通全流程；默认只跑 1 个种子）
@@ -44,7 +47,7 @@ sys.path.insert(0, ROOT)
 from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
 from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
-from lega.utils import mean_std, paired_t_test, save_json  # noqa: E402
+from lega.utils import holm_bonferroni, mean_std, paired_t_test, save_json  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -75,6 +78,11 @@ LOO_CELLS = (
 # 受控变量核对时允许逐 run 不同的字段（方法与复现标识，不属于受控变量）
 _AUDIT_EXEMPT_KEYS = {"variant", "seed", "device", "tag"}
 
+# 显著性协议：同一指标家族内 Holm 校正后 p<ALPHA 才判定显著；
+# 少于 MIN_SEEDS 个种子时只报描述统计，不作显著性/组件有效性判定。
+ALPHA = 0.05
+MIN_SEEDS = 3
+
 _SEED_RE = re.compile(r"_seed(\d+)$")
 
 
@@ -100,53 +108,103 @@ def _variant_dir(out_root: str, variant: str, seed: int, n_seeds: int) -> str:
     return os.path.join(out_root, variant)
 
 
-def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int) -> dict:
-    """核对所有变体 × 种子确实除待验证模块外使用完全相同的训练配置。
+def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
+                            expected_data_digest: str = None) -> dict:
+    """核对所有变体 × 种子确实除待验证模块外使用完全相同的训练条件。
 
-    对比实验的公平性前提：优化器/LR 策略/步数/数据顺序等受控变量必须一致。
-    该检查把“公平对比”从口头约定变成可执行断言：任何 config_used.json 中
-    除 variant/seed/device/tag 外的字段不一致都会报错并列出差异。
+    对比实验的公平性前提：优化器/LR 策略/步数/数据顺序等受控变量必须一致，
+    且各 run 必须消费同一份数据、同一代码版本、同样的训练预算。该检查把
+    “公平对比”从口头约定变成可执行断言，分两层：
+      1. config_used.json：除 variant/seed/device/tag 外的字段逐项一致；
+      2. eval.json 溯源：数据指纹、代码 commit、配置 SHA-256、实际训练
+         步数与 tokens_seen 跨 run 一致（并与本次流水线的数据指纹比对），
+         避免“同一 config 跑了不同数据/代码版本”被静默当成可比。
+    任一层不一致都会报错并列出差异。
     """
     ref = None
     ref_name = None
     mismatches = []
     missing = []
     checked = 0
+    meta_keys = ("data_fingerprint", "code_commit", "config_sha256",
+                 "steps", "tokens_seen")
+    meta_ref = None
+    meta_ref_name = None
+    meta_mismatches = []
+    meta_missing = []
+    meta_checked = 0
     for v in variants:
         for seed in seeds:
-            cfg_path = os.path.join(_variant_dir(out_root, v, seed, n_seeds),
-                                    "config_used.json")
+            vdir = _variant_dir(out_root, v, seed, n_seeds)
+            cfg_path = os.path.join(vdir, "config_used.json")
             if not os.path.exists(cfg_path):
                 missing.append(f"{v}/seed{seed}")
+            else:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if int(cfg.get("seed", seed)) != int(seed):
+                    mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
+                ctrl = {k: val for k, val in cfg.items()
+                        if k not in _AUDIT_EXEMPT_KEYS}
+                if ref is None:
+                    ref, ref_name = ctrl, f"{v}/seed{seed}"
+                elif ctrl != ref:
+                    keys = sorted(set(ctrl) | set(ref))
+                    diffs = [f"{k}: {ref.get(k)!r} vs {ctrl.get(k)!r}"
+                             for k in keys if ref.get(k) != ctrl.get(k)]
+                    mismatches.append(f"{v}/seed{seed} 相对 {ref_name} 的差异: "
+                                      + "; ".join(diffs[:8]))
+                checked += 1
+            ev_path = os.path.join(vdir, "eval.json")
+            if not os.path.exists(ev_path):
+                meta_missing.append(f"{v}/seed{seed}")
                 continue
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if int(cfg.get("seed", seed)) != int(seed):
-                mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
-            ctrl = {k: val for k, val in cfg.items()
-                    if k not in _AUDIT_EXEMPT_KEYS}
-            if ref is None:
-                ref, ref_name = ctrl, f"{v}/seed{seed}"
-            elif ctrl != ref:
-                keys = sorted(set(ctrl) | set(ref))
-                diffs = [f"{k}: {ref.get(k)!r} vs {ctrl.get(k)!r}"
-                         for k in keys if ref.get(k) != ctrl.get(k)]
-                mismatches.append(f"{v}/seed{seed} 相对 {ref_name} 的差异: "
-                                  + "; ".join(diffs[:8]))
-            checked += 1
+            with open(ev_path, "r", encoding="utf-8") as f:
+                ev = json.load(f)
+            meta = {k: ev.get(k) for k in meta_keys}
+            here = []
+            if int(ev.get("seed", seed)) != int(seed):
+                here.append(f"eval seed={ev.get('seed')}")
+            if (expected_data_digest is not None
+                    and meta["data_fingerprint"] != expected_data_digest):
+                here.append(f"data_fingerprint={meta['data_fingerprint']!r} "
+                            f"!= 本次流水线数据 {expected_data_digest!r}")
+            if meta_ref is None:
+                meta_ref, meta_ref_name = meta, f"{v}/seed{seed}"
+            else:
+                diffs = [f"{k}: {meta_ref.get(k)!r} vs {meta.get(k)!r}"
+                         for k in meta_keys if meta_ref.get(k) != meta.get(k)]
+                if diffs:
+                    here.append(f"相对 {meta_ref_name} 的差异: " + "; ".join(diffs))
+            if here:
+                meta_mismatches.append(f"{v}/seed{seed}: " + "; ".join(here))
+            meta_checked += 1
     if missing:
         print(f"[audit] 警告：缺少 {len(missing)} 个 run 的 config_used.json，"
               f"无法核对受控变量: {', '.join(missing[:6])}"
               + (" ..." if len(missing) > 6 else ""))
-    if mismatches:
+    if meta_missing:
+        print(f"[audit] 警告：缺少 {len(meta_missing)} 个 run 的 eval.json，"
+              f"无法核对数据指纹/代码版本/训练预算: {', '.join(meta_missing[:6])}"
+              + (" ..." if len(meta_missing) > 6 else ""))
+    if mismatches or meta_mismatches:
         msg = ("受控变量自检失败：对比实验除待验证模块外必须完全一致，"
-               "否则观测差异不能归因于方法本身。\n  - " + "\n  - ".join(mismatches))
+               "否则观测差异不能归因于方法本身。\n  - "
+               + "\n  - ".join(mismatches + meta_mismatches))
         print(f"[audit] {msg}")
         raise SystemExit(2)
     if checked:
         print(f"[audit] 受控变量自检通过：{checked} 个 run 的优化器/LR/步数等配置一致")
-    return {"ok": not mismatches, "checked": checked,
+    if meta_checked:
+        print(f"[audit] 训练溯源自检通过：{meta_checked} 个 run 的数据指纹/"
+              f"代码版本/训练预算一致"
+              + (f"（数据指纹 {expected_data_digest}）"
+                 if expected_data_digest else ""))
+    return {"ok": not (mismatches or meta_mismatches), "checked": checked,
             "missing_configs": missing, "mismatches": mismatches,
+            "meta_checked": meta_checked, "missing_evals": meta_missing,
+            "meta_mismatches": meta_mismatches,
+            "expected_data_digest": expected_data_digest,
             "exempt_keys": sorted(_AUDIT_EXEMPT_KEYS)}
 
 
@@ -231,9 +289,8 @@ def _fmt_stat(st, nd=3) -> str:
     return f"{mean:.{nd}f} ± {st['std']:.{nd}f} (n={st['n']})"
 
 
-def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better,
-                        min_seeds=3) -> list:
-    """对每个 (候选, 参照) 在共同种子上做配对 t 检验。"""
+def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> list:
+    """对每个 (候选, 参照) 在共同种子上做配对 t 检验（原始 p，未校正）。"""
     out = []
     for cand, ref in pairs:
         if cand not in runs or ref not in runs:
@@ -253,16 +310,111 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better,
         res = paired_t_test(a, b)
         res.update({"candidate": cand, "reference": ref, "metric": metric_name,
                     "lower_is_better": bool(lower_better)})
-        if res.get("p") is None:
-            res["verdict"] = f"种子不足（n={res['n']}<{min_seeds}），无法判定"
-        elif res["n"] < min_seeds:
-            res["verdict"] = f"种子不足（n={res['n']}<{min_seeds}），无法判定"
-        elif res["p"] < 0.05:
-            better = (res["mean_diff"] < 0) if lower_better else (res["mean_diff"] > 0)
-            res["verdict"] = "显著优于" if better else "显著劣于"
-        else:
-            res["verdict"] = "不显著"
         out.append(res)
+    return out
+
+
+def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
+    """对同一指标家族内的全部配对检验做 Holm–Bonferroni 校正并给出结论。
+
+    汇总同时检验几十组对比；不校正时 FWER 随检验数上升，名义 p<0.05 极易由
+    运气产生。结论一律基于同一指标家族内校正后的 p_adj；原始 p 仍保留在
+    结果 JSON 中供查阅。
+    """
+    by_metric = {}
+    for t in tests:
+        by_metric.setdefault(t.get("metric"), []).append(t)
+    for group in by_metric.values():
+        pads = holm_bonferroni([t.get("p") for t in group])
+        for t, padj in zip(group, pads):
+            t["p_adj"] = padj
+            if t.get("p") is None:
+                t["verdict"] = f"无法检验（n={t['n']} 或方差退化），不作判定"
+            elif t["n"] < min_seeds:
+                t["verdict"] = f"种子不足（n={t['n']}<{min_seeds}），无法判定"
+            elif t.get("p_adj") is not None and t["p_adj"] < alpha:
+                better = ((t["mean_diff"] < 0) if t["lower_is_better"]
+                          else (t["mean_diff"] > 0))
+                t["verdict"] = ("显著优于（Holm 校正后）" if better
+                                else "显著劣于（Holm 校正后）")
+            else:
+                t["verdict"] = ("不显著（Holm 校正后 p="
+                                f"{t['p_adj']:.4f}）"
+                                if t.get("p_adj") is not None else "不显著")
+    return tests
+
+
+# 组件有效性判定所用的检验对：组件 -> (去一法检验, 全因子检验)。
+# 去一法: Full−X vs Full；全因子: 仅 X vs 无门控（standard）。
+COMPONENT_TESTS = (
+    ("A 查询项", ("lega_no_query", "lega"), ("qgate", "standard")),
+    ("B 集中度证据", ("lega_no_conc", "lega"), ("lega_conc_only", "standard")),
+    ("C 长度校准", ("lega_no_len", "lega"), ("lega_len_only", "standard")),
+)
+_EVIDENCE_METRICS = ("PPL", "RULER平均")
+
+
+def _find_test(tests, pair, metric):
+    for t in tests:
+        if ((t.get("candidate"), t.get("reference")) == pair
+                and t.get("metric") == metric):
+            return t
+    return None
+
+
+def _effect_status(t, removing: bool) -> dict:
+    """单条配对检验 -> “组件有用”的证据状态（须方向正确且 Holm 校正后显著）。
+
+    removing=True（去一法）：候选=去掉组件的 Full−X，显著变差才算证据；
+    removing=False（全因子）：候选=仅含该组件的 X，显著变好才算证据。
+    """
+    if t is None:
+        return {"supported": False, "reason": "无对应检验（变体未运行）",
+                "p_adj": None}
+    if t.get("n") is not None and t["n"] < MIN_SEEDS:
+        return {"supported": False, "reason": f"种子不足（n={t['n']}）",
+                "p_adj": t.get("p_adj")}
+    if (t.get("mean_diff") is None or t.get("p_adj") is None
+            or t.get("p_adj") >= ALPHA):
+        return {"supported": False, "reason": "Holm 校正后不显著",
+                "p_adj": t.get("p_adj")}
+    lb = bool(t.get("lower_is_better"))
+    if removing:
+        evidence = (t["mean_diff"] > 0) if lb else (t["mean_diff"] < 0)
+    else:
+        evidence = (t["mean_diff"] < 0) if lb else (t["mean_diff"] > 0)
+    return {"supported": bool(evidence),
+            "reason": "显著" if evidence else "方向相反（去掉反而更好/加入反而更差）",
+            "p_adj": t.get("p_adj")}
+
+
+def component_evidence(tests) -> list:
+    """由配对检验结果汇总各组件（A/B/C）是否“有用”的统计证据。
+
+    组件有用的判定必须有可检验的显著证据，而不是组合是否跑全：
+    去一法（Full−X 显著变差）或全因子（仅 X 显著优于无门控）任一方向成立
+    才算“有证据支持”；所有方向均不显著/种子不足则记“证据不足”。调用方
+    据此决定能否下“各组件均有用”的结论。
+    """
+    out = []
+    for name, loo_pair, add_pair in COMPONENT_TESTS:
+        item = {"component": name, "loo_pair": list(loo_pair),
+                "add_pair": list(add_pair), "loo": {}, "add": {},
+                "supported": []}
+        best_detail = {}
+        for metric in _EVIDENCE_METRICS:
+            loo = _effect_status(_find_test(tests, loo_pair, metric), True)
+            add = _effect_status(_find_test(tests, add_pair, metric), False)
+            item["loo"][metric] = loo
+            item["add"][metric] = add
+            if loo["supported"] or add["supported"]:
+                item["supported"].append(metric)
+                best_detail[metric] = {
+                    "direction": "loo" if loo["supported"] else "add",
+                    "p_adj": (loo if loo["supported"] else add)["p_adj"]}
+        item["evidence"] = best_detail
+        item["verdict"] = "有证据支持" if item["supported"] else "证据不足"
+        out.append(item)
     return out
 
 
@@ -419,6 +571,8 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _paired_comparisons(
         runs, pairs, "RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
         lower_better=False)
+    tests = _apply_holm(tests)
+    comp = component_evidence(tests)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -448,8 +602,8 @@ def build_summary(results_dir: str, audit: dict = None,
 
     md = ["# LEGA 实验汇总", "",
           f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}；"
-          f"PPL/RULER 为跨随机种子的 Mean ± Std（变体间同种子配对），"
-          f"延迟在相同配置下测得。", ""]
+          f"PPL/RULER 为跨随机种子的 Mean ± Std（变体间同种子配对，"
+          f"显著性经 Holm–Bonferroni 校正），延迟在相同配置下测得。", ""]
     if rows:
         stat_keys = {"val_ppl", "ruler_avg", "gate_mean", "misleading_rate",
                      "misleading_given_conc", "auroc_logit", "auroc_qterm"} \
@@ -495,11 +649,22 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(f"- ✅ 通过：{audit['checked']} 个 run 的优化器、学习率、"
                       f"训练步数、数据顺序等受控设置逐项一致；逐 run 仅 "
                       f"`{'`, `'.join(audit['exempt_keys'])}` 不同。")
+            if audit.get("meta_checked"):
+                digest = audit.get("expected_data_digest")
+                md.append(f"- ✅ 训练溯源一致：{audit['meta_checked']} 个 run 的"
+                          f"数据指纹、代码提交、配置 SHA-256、实际训练步数与 "
+                          f"tokens_seen 逐项一致"
+                          + (f"（数据指纹 `{digest}`，并与本次流水线数据比对）"
+                             if digest else "。"))
         else:
             md.append(f"- ❌ 未通过：{audit.get('mismatches') or audit}")
         if audit.get("missing_configs"):
             md.append(f"- ⚠ 缺少配置文件的 run：{', '.join(audit['missing_configs'][:8])}"
                       + (" …" if len(audit["missing_configs"]) > 8 else ""))
+        if audit.get("missing_evals"):
+            md.append(f"- ⚠ 缺少 eval.json、无法核对数据/代码/训练预算的 run："
+                      f"{', '.join(audit['missing_evals'][:8])}"
+                      + (" …" if len(audit["missing_evals"]) > 8 else ""))
     else:
         md.append("- ⚠ 未执行（直接调用 build_summary 或缺少 out 目录）。")
 
@@ -652,8 +817,8 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(f"| {name} | {v}（未运行） | - | - |")
     if not factorial_missing:
         md.append("")
-        md.append("✅ 全因子消融完整（8/8 组合全部报告），可支撑“各组件均有用”的结论；"
-                  "去一法结果两两一致即可交叉印证。")
+        md.append("全因子组合覆盖 8/8、去一法覆盖完整；但组合覆盖只是必要条件，"
+                  "组件是否有用须以下方统计证据为准。")
     elif not loo_missing:
         md.append("")
         md.append("⚠ 已覆盖去一法（Full/Full−A/Full−B/Full−C），但全因子缺失组合："
@@ -667,11 +832,56 @@ def build_summary(results_dir: str, audit: dict = None,
                   + "、".join(f"{n}({v})" for n, v in loo_missing)
                   + "。仅凭部分组合无法支撑“每个组件都有用”，请补齐后重跑。")
 
+    # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
+    md += ["", "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）", ""]
+    md.append("| 组件 | 去一法 Full−X vs Full | 全因子 X vs 无门控 | 判定 |")
+    md.append("|---|---|---|---|")
+
+    def _fmt_evidence(st):
+        p = st.get("p_adj")
+        ps = f"p_adj={p:.4f}" if p is not None else "p_adj=-"
+        return f"{'✅' if st['supported'] else '—'} {ps}（{st['reason']}）"
+
+    for c in comp:
+        loo_cells = "；".join(f"{m}: {_fmt_evidence(c['loo'][m])}"
+                             for m in _EVIDENCE_METRICS)
+        add_cells = "；".join(f"{m}: {_fmt_evidence(c['add'][m])}"
+                             for m in _EVIDENCE_METRICS)
+        md.append(f"| {c['component']} | {loo_cells} | {add_cells} | "
+                  f"{c['verdict']} |")
+    supported = [c["component"] for c in comp if c["supported"]]
+    unsupported = [c["component"] for c in comp if not c["supported"]]
+    if not comp:
+        md.append("")
+        md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
+    elif not unsupported and not factorial_missing:
+        md.append("")
+        md.append("✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均至少在一个指标上"
+                  "有 Holm 校正后的显著证据，且全因子消融 8/8 完整；"
+                  "去一法与全因子两套消融可交叉印证。")
+    else:
+        md.append("")
+        if unsupported:
+            md.append("⚠ **不能下“各组件均有用”的结论**："
+                      + "、".join(unsupported)
+                      + " 缺少 Holm 校正后的显著证据（幅度不足、方向相反或"
+                      "种子数不够）；组合齐全并不等于组件有效。")
+        if factorial_missing:
+            md.append("⚠ 全因子缺失组合："
+                      + "、".join(f"{n}({v})" for n, v in factorial_missing)
+                      + "，组件单独贡献的覆盖不完整。")
+    md.append("")
+    md.append("注: 去一法证据=去掉该组件的 Full−X 显著差于 Full（去掉有害）；"
+              "全因子证据=仅含该组件的 X 显著优于无门控 standard（只加它也有收益）。"
+              "判定要求方向正确且 Holm 校正后 p<0.05、种子数≥3；"
+              "两套消融结论不一致时应以“证据不足”处理并补实验。")
+
     # --- 配对检验表
-    md += ["", "## 关键对比（同种子配对 t 检验）", ""]
+    md += ["", "## 关键对比（同种子配对 t 检验，Holm 校正）", ""]
     if tests:
-        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | n | p 值 | 结论 |")
-        md.append("|---|---|---|---|---|---|")
+        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | d_z | n | p | "
+                  "p_adj(Holm) | 结论 |")
+        md.append("|---|---|---|---|---|---|---|---|")
         for t in tests:
             if t.get("mean_diff") is None:
                 continue
@@ -679,12 +889,18 @@ def build_summary(results_dir: str, audit: dict = None,
             delta = (f"{t['mean_diff']:+.4f}"
                      + (f" ± {std:.4f}" if std is not None else ""))
             p = f"{t['p']:.4f}" if t.get("p") is not None else "-"
+            padj = (f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-")
+            dz = f"{t['d_z']:+.2f}" if t.get("d_z") is not None else "-"
             md.append(f"| {t['candidate']} vs {t['reference']} | {t['metric']} | "
-                      f"{delta} | {t['n']} | {p} | {t.get('verdict', '-')} |")
+                      f"{delta} | {dz} | {t['n']} | {p} | {padj} | "
+                      f"{t.get('verdict', '-')} |")
         md.append("")
-        md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER 越大越好。"
-                  "p 为双侧配对 t 检验，未做多重比较校正，正负号以 Δ 为准；"
-                  "n<3 不判定显著性。种子不足时请先补齐种子再下结论。")
+        md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER 越大越好；"
+                  "d_z = Δ均值/Δ标准差为配对 Cohen's d 效应量。"
+                  f"p 为双侧配对 t 检验原始值，p_adj 为同一指标家族内 "
+                  f"Holm–Bonferroni 校正值（控制多重比较的 FWER），"
+                  f"结论一律基于 p_adj<{ALPHA} 且 n≥{MIN_SEEDS}；"
+                  "n<3 只报描述统计、不判定显著性。种子不足时请先补齐种子再下结论。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
 
@@ -704,7 +920,12 @@ def build_summary(results_dir: str, audit: dict = None,
         json.dump(rows, f, ensure_ascii=False, indent=2)
     with open(os.path.join(results_dir, "significance.json"), "w",
               encoding="utf-8") as f:
-        json.dump({"pairs": tests, "note": "同种子配对 t 检验；未做多重比较校正"},
+        json.dump({"pairs": tests,
+                   "note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
+                            f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
+                            f"n<{MIN_SEEDS} 不判定显著性；"
+                            "d_z 为配对 Cohen's d 效应量"),
+                   "component_evidence": comp},
                   f, ensure_ascii=False, indent=2)
     print(f"[summary] 汇总 {len(rows)} 个变体 -> {results_dir}/summary.md "
           f"（配对检验 {len(tests)} 组）")
@@ -905,7 +1126,8 @@ def main():
         print("[repro] 警告：数据目录缺少 data_report.json（旧数据或未走统一入口），"
               "汇总将标注防泄漏自检缺失")
 
-    audit = verify_controlled_setup(out_root, variants, seeds, n_seeds)
+    audit = verify_controlled_setup(out_root, variants, seeds, n_seeds,
+                                    expected_data_digest=data_digest)
     build_summary(results_dir, audit=audit, data_report=data_report)
     print(f"\n[run_all] 全部完成；结果目录: {results_dir}")
 
