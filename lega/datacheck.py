@@ -23,6 +23,11 @@ import time
 
 import numpy as np
 
+try:
+    import fcntl
+except ImportError:  # Windows 等无 flock 平台：退化为原行为（单进程安全）
+    fcntl = None
+
 UNK_TOKEN = "<unk>"
 TEST_ACCESS_LOG = ".test_access_log.jsonl"
 
@@ -354,18 +359,33 @@ def read_test_access_log(data_dir: str) -> list:
 
 
 def append_test_access(data_dir: str, record: dict) -> dict:
-    """追加一条 test 访问记录并返回审计摘要（原子写入，避免半行记录）。"""
-    records = read_test_access_log(data_dir)
-    entry = dict(record)
-    entry.setdefault("time", time.strftime("%Y-%m-%d %H:%M:%S"))
-    records.append(entry)
+    """追加一条 test 访问记录并返回审计摘要（原子写入 + 进程间文件锁）。
+
+    读-改-写必须跨进程互斥：run_all 的评测阶段会并发评测多个变体，无锁时
+    两个进程各自读旧账本再覆盖，会互相吞掉记录。锁加在独立的 .lock 文件上
+    （对账本文件本身加锁不可行：os.replace 会更换 inode，后到者锁的是旧文件）；
+    无 fcntl 的平台退化为原行为，不阻塞评测。
+    """
     path = os.path.join(data_dir, TEST_ACCESS_LOG)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
-    return summarize_test_access(records)
+    lock_fp = None
+    if fcntl is not None:
+        lock_fp = open(path + ".lock", "a")
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+    try:
+        records = read_test_access_log(data_dir)
+        entry = dict(record)
+        entry.setdefault("time", time.strftime("%Y-%m-%d %H:%M:%S"))
+        records.append(entry)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+        return summarize_test_access(records)
+    finally:
+        if lock_fp is not None:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+            lock_fp.close()
 
 
 def summarize_test_access(records) -> dict:

@@ -1299,7 +1299,7 @@ def main():
     print(f"[run_all] 种子={seeds}（{n_seeds} 个）tag={tag}")
     jobs = _resolve_jobs(args)
     if jobs > 1:
-        print(f"[run_all] jobs={jobs}（sanity/训练/机制分析并发；--jobs 可覆盖）")
+        print(f"[run_all] jobs={jobs}（sanity/训练/评测/机制分析并发；--jobs 可覆盖）")
 
     # 子进程随机性/确定性环境：PYTHONHASHSEED 必须由父进程设置才能传给子进程；
     # CUBLAS 工作区配置须在任何 CUDA 初始化前生效。
@@ -1374,8 +1374,10 @@ def main():
             sanity[v] = "pass"
         print(f"[run_all] sanity check 全部通过: {', '.join(sanity.keys())}")
 
-    # 各 (变体, 种子) 的训练相互独立，可并发；评测按 chain 顺序保持逐条执行
-    # （evaluate 会追加 test 访问账本，并发写会丢记录）。
+    # 各 (变体, 种子) 的训练相互独立，可并发。评测同样相互独立（evaluate 只
+    # 追加 test 访问账本，append_test_access 已用进程间文件锁保证不丢记录；
+    # ruler 只读数据、各写各的 ruler_*.json），因此一并并发执行，产出物与
+    # 串行逐条执行完全一致。
     chain = []
     train_cmds = []
     for v in variants:
@@ -1402,6 +1404,8 @@ def main():
                 f"对应 run 目录下已生成 nan_report.json（数据→代码→混合精度→"
                 f"梯度/学习率的系统排查路径），修复后重跑；命令: "
                 f"{' '.join(e.cmd)}")
+    eval_cmds, eval_names = [], []
+    ruler_cmds, ruler_names = [], []
     for v, seed, vdir, suffix in chain:
         # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
         # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型。
@@ -1410,16 +1414,34 @@ def main():
         if not os.path.exists(ckpt):
             print(f"[run_all] 跳过 {v}/seed{seed}：无 checkpoint")
             continue
-        run([py, "-m", "lega.evaluate", "--ckpt", ckpt,
-             "--data_dir", args.data_dir,
-             "--out", os.path.join(results_dir, f"eval_{v}{suffix}.json"),
-             "--worst_n", "3",
-             "--device", args.device])
+        cmd = [py, "-m", "lega.evaluate", "--ckpt", ckpt,
+               "--data_dir", args.data_dir,
+               "--out", os.path.join(results_dir, f"eval_{v}{suffix}.json"),
+               "--worst_n", "3",
+               "--device", args.device]
+        print("+", " ".join(cmd), flush=True)
+        eval_cmds.append(cmd)
+        eval_names.append(f"{v}/seed{seed}")
         if not args.skip_ruler:
-            run([py, "-m", "lega.ruler", "--ckpt", ckpt,
-                 "--data_dir", args.data_dir,
-                 "--out", os.path.join(results_dir, f"ruler_{v}{suffix}.json"),
-                 "--device", args.device] + ruler_over)
+            cmd = [py, "-m", "lega.ruler", "--ckpt", ckpt,
+                   "--data_dir", args.data_dir,
+                   "--out", os.path.join(results_dir, f"ruler_{v}{suffix}.json"),
+                   "--device", args.device] + ruler_over
+            print("+", " ".join(cmd), flush=True)
+            ruler_cmds.append(cmd)
+            ruler_names.append(f"{v}/seed{seed}")
+    try:
+        run_many(eval_cmds, jobs, _jobs_env(jobs))
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(
+            f"评测失败（{eval_names[eval_cmds.index(e.cmd)]}，退出码 "
+            f"{e.returncode}）：{' '.join(e.cmd)}")
+    try:
+        run_many(ruler_cmds, jobs, _jobs_env(jobs))
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(
+            f"RULER 评测失败（{ruler_names[ruler_cmds.index(e.cmd)]}，退出码 "
+            f"{e.returncode}）：{' '.join(e.cmd)}")
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
     # 错误样本是改进思路的最重要来源，不能只留聚合分数
