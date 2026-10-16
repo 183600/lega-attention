@@ -175,28 +175,27 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         else:
             print(f"[data] 缓存分词方式({cached_kind})与请求({kind})不一致，重建 bin")
 
+    texts = {}
     with open(os.path.join(data_dir, "train.txt"), "r", encoding="utf-8") as f:
-        train_text = f.read()
+        texts["train"] = f.read()
     with open(os.path.join(data_dir, "val.txt"), "r", encoding="utf-8") as f:
-        val_text = f.read()
-    test_text = None
+        texts["val"] = f.read()
     if has_test_txt:
         with open(test_txt_path, "r", encoding="utf-8") as f:
-            test_text = f.read()
+            texts["test"] = f.read()
 
     # 1) 清洗 + 去污染：坏字符确定性删除/替换；与 val/test 精确重复的长行
     #    只从 train 移除（val/test 绝不改写，保持尘封）。
-    texts = {"train": train_text, "val": val_text}
-    if test_text is not None:
-        texts["test"] = test_text
     sanitization = {}
     for name in list(texts):
         clean, stats = sanitize_text(texts[name])
         texts[name] = clean
         sanitization[name] = stats
     texts, duplicate_stats = decontaminate_texts(texts, min_chars=40)
-    train_text, val_text = texts["train"], texts["val"]
-    test_text = texts.get("test")
+    train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
+    # 原文此后只由局部变量引用：逐段编码完即释放，避免原文与 token 流
+    # 长时间同时驻留（大语料 train 原文可达数百 MB）
+    del texts
     if duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]:
         print(f"[data] 去污染：从 train 移除 "
               f"{duplicate_stats['train_lines_dropped_as_duplicates_of_eval']:,} "
@@ -233,8 +232,16 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         return np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint16)
 
     tr = encode_stream(train_text)
+    text_stats = {"train": text_length_stats(train_text)}
+    train_text = None
     va = encode_stream(val_text)
-    te = encode_stream(test_text) if test_text is not None else None
+    text_stats["val"] = text_length_stats(val_text)
+    val_text = None
+    te = None
+    if test_text is not None:
+        te = encode_stream(test_text)
+        text_stats["test"] = text_length_stats(test_text)
+        test_text = None
 
     # 4) token 流硬校验 + 防泄漏诊断
     streams = {"train": tr, "val": va}
@@ -255,9 +262,6 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                       is not None else None),
         "unk_rate": {k: v for k, v in unk_rates.items() if v is not None},
     }
-    text_stats = {name: text_length_stats(txt)
-                  for name, txt in (("train", train_text), ("val", val_text),
-                                    ("test", test_text)) if txt is not None}
     data_report = build_data_report(
         tokenizer=tokenizer_report, splits=stream_stats,
         sanitization=sanitization, duplicates=duplicate_stats,

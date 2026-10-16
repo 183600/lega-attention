@@ -62,31 +62,46 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     不计入去污染，避免大面积误删；但仍会统计其重复数量供审查。
     返回 (cleaned_texts, stats)。
     """
-    def long_lines(t):
-        return [ln.strip() for ln in t.split("\n")
-                if len(ln.strip()) >= min_chars]
+    min_chars = int(min_chars)
+
+    def scan_long(t):
+        # 单次扫描：每行只 strip 一次，同时得到长行数与去重后的长行集合
+        n_long, seen = 0, set()
+        for ln in (t or "").split("\n"):
+            s = ln.strip()
+            if len(s) >= min_chars:
+                n_long += 1
+                seen.add(s)
+        return n_long, seen
 
     eval_lines = set()
+    eval_counts = {}
     for split in ("val", "test"):
-        eval_lines.update(long_lines(texts.get(split) or ""))
+        n_long, seen = scan_long(texts.get(split))
+        eval_lines.update(seen)
+        eval_counts[split] = (n_long, len(seen))
 
-    train_lines = texts["train"].split("\n")
     kept, dropped = [], 0
-    for ln in train_lines:
-        if len(ln.strip()) >= min_chars and ln.strip() in eval_lines:
-            dropped += 1
-            continue
+    n_train, seen_train = 0, set()
+    for ln in texts["train"].split("\n"):
+        s = ln.strip()
+        if len(s) >= min_chars:
+            n_train += 1
+            seen_train.add(s)
+            if s in eval_lines:
+                dropped += 1
+                continue
         kept.append(ln)
 
     out = dict(texts)
     out["train"] = "\n".join(kept)
-    stats = {"min_chars": int(min_chars),
+    stats = {"min_chars": min_chars,
              "train_lines_dropped_as_duplicates_of_eval": int(dropped)}
     for split in ("train", "val", "test"):
-        lines = long_lines(texts.get(split) or "")
-        stats[f"{split}_long_lines"] = int(len(lines))
-        stats[f"{split}_intra_split_duplicate_lines"] = int(
-            len(lines) - len(set(lines)))
+        n_long, n_uniq = ((n_train, len(seen_train)) if split == "train"
+                          else eval_counts[split])
+        stats[f"{split}_long_lines"] = int(n_long)
+        stats[f"{split}_intra_split_duplicate_lines"] = int(n_long - n_uniq)
     return out, stats
 
 
@@ -98,7 +113,8 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
     """
     if not text:
         return {"lines": 0, "chars": 0}
-    lens = np.asarray([len(ln) for ln in text.split("\n")], dtype=np.int64)
+    lens = np.fromiter((len(ln) for ln in text.split("\n")), dtype=np.int64,
+                       count=text.count("\n") + 1)
     return {
         "lines": int(lens.size),
         "chars": int(len(text)),
