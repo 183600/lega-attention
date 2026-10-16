@@ -194,8 +194,14 @@ class _ChunkedLinearCE(torch.autograd.Function):
         logits_cache = None
         ctx.logits_cache = None
         with torch.no_grad():
+            # 分块循环共用一份目标精度权重：autocast 会在每次 F.linear 调用时
+            # 重新转换整份权重，而各分块使用的转换结果完全相同，转换一次即可。
+            # 前向与反向重算共用该副本，GEMM 的输入逐位不变。
+            ctx.w_fwd = weight if (ctx.amp_dtype is None
+                                   or weight.dtype == ctx.amp_dtype) \
+                else weight.to(ctx.amp_dtype)
             for s in range(0, tgt.numel(), chunk):
-                lc = F.linear(x2d[s:s + chunk], weight)
+                lc = F.linear(x2d[s:s + chunk], ctx.w_fwd)
                 if cache_try:
                     cache_try = False
                     if tgt.numel() * weight.size(0) * lc.element_size() <= cache_cap:
@@ -251,7 +257,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     lcf = _ChunkedLinearCE._loss_dtype(cached[s:s + ctx.chunk])
                 else:
                     with ac_ctx:
-                        lc = F.linear(xs, weight)                    # (m, V)
+                        lc = F.linear(xs, ctx.w_fwd)                 # (m, V)
                     lcf = _ChunkedLinearCE._loss_dtype(lc)
                     del lc
                 d = torch.softmax(lcf, dim=-1, out=lcf)
@@ -293,6 +299,36 @@ class _ChunkedLinearCE(torch.autograd.Function):
         return gx, gw, None, None, None
 
 
+def _cast_weight_cached(owner, slot: str, weight: torch.Tensor) -> torch.Tensor:
+    """线性层前向权重：无梯度时按 autocast 目标精度缓存。
+
+    有梯度时直接返回参数本身，保持反向连通到参数；无梯度路径返回目标精度的
+    缓存副本——autocast 会在每次 F.linear 调用时重新转换权重，而同一权重在
+    多次调用（逐 token 解码、逐分块评测）中的转换结果相同。副本在
+    inference_mode(False)+no_grad 下创建，不会留下会被 autograd 拒绝的
+    inference tensor；权重被替换或原地更新（_version 变化）会使缓存失效。
+    """
+    if torch.is_grad_enabled():
+        return weight
+    amp = _ChunkedLinearCE._autocast_dtype(weight)
+    if amp is None or amp == weight.dtype:
+        return weight
+    key = (weight, weight._version, weight.data_ptr(), weight.device, amp)
+    ent = getattr(owner, slot)
+    if ent is not None:
+        o_key = ent[0]
+        # 逐项（含对象身份）比较，避免元组 != 在 Tensor 上触发
+        # "Boolean value of Tensor is ambiguous"
+        if (len(o_key) == len(key) and all(
+                (o is n) if isinstance(n, torch.Tensor) else o == n
+                for o, n in zip(o_key, key))):
+            return ent[1]
+    with torch.inference_mode(False), torch.no_grad():
+        casted = weight.detach().to(amp)
+    setattr(owner, slot, (key, casted))
+    return casted
+
+
 class Block(nn.Module):
     def __init__(self, d_model: int, n_heads: int, ffn_mult: int, dropout: float,
                  attn_dropout: float, variant: str, gate_bias_init: float,
@@ -309,6 +345,9 @@ class Block(nn.Module):
         self.w2 = nn.Linear(hidden, d_model, bias=False)
         # dropout=0（默认配置）时直接用 Identity 代替 F.dropout
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        # 推理态（无梯度）MLP 权重的 autocast 精度缓存：(key, tensor)
+        self._w1_cast = None
+        self._w2_cast = None
 
     def forward(self, x, rope: RoPE, past_kv=None, need_stats: bool = False,
                 stats_argmax: bool = True, kv_cache=None, cache_pos: int = 0):
@@ -323,7 +362,10 @@ class Block(nn.Module):
             x = x + self.drop(self.w2(self.act(self.w1(self.ln2(x)))))
         else:
             x.add_(self.drop(a))
-            x.add_(self.drop(self.w2(self.act(self.w1(self.ln2(x))))))
+            h = F.linear(self.ln2(x),
+                         _cast_weight_cached(self, "_w1_cast", self.w1.weight))
+            x.add_(self.drop(F.linear(
+                self.act(h), _cast_weight_cached(self, "_w2_cast", self.w2.weight))))
         return x, cache, stats
 
 
@@ -355,6 +397,10 @@ class GPT(nn.Module):
         self.ln_f = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.lm_head.weight = self.tok_emb.weight   # 权重共享
+        # 推理/评测态 lm_head 权重的 autocast 精度缓存：(key, tensor)；
+        # 键含参数身份/_version/data_ptr/device/dtype，权重被替换或原地修改
+        # 时缓存自动失效（与注意力推理态融合权重缓存同一口径）。
+        self._lmhead_cast = None
 
         self.apply(self._init_weights)
         # 残差投影缩放初始化（GPT-2 技巧，稳定深层训练）
@@ -374,6 +420,16 @@ class GPT(nn.Module):
                 nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+    def _lmhead_weight(self) -> torch.Tensor:
+        """lm_head 前向权重（与 tok_emb 共享参数）。
+
+        有梯度时返回参数本身，保证反向经共享参数连回嵌入权重；无梯度
+        （评测/生成，含 inference_mode）时返回目标精度的缓存副本，避免每次
+        F.linear（逐 token 解码、逐分块评测）重复转换整份 (vocab, d_model)
+        权重，见 _cast_weight_cached。
+        """
+        return _cast_weight_cached(self, "_lmhead_cast", self.tok_emb.weight)
 
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None,
                 past_kv: Optional[List] = None, need_stats: bool = False,
@@ -408,7 +464,7 @@ class GPT(nn.Module):
             x = self.ln_f(x)
             # 训练/评测只需 loss：分块过 lm_head 并立即做交叉熵；
             # 分块求和再平均与整批 mean 结果一致；此时不再返回 logits。
-            w = self.tok_emb.weight                       # 权重共享
+            w = self._lmhead_weight()                     # 共享权重
             flat = x.reshape(-1, x.size(-1))
             tgt = targets.reshape(-1)
             # 每块 logits 为目标数乘以分块大小，分块大小随词表自适应。
@@ -434,7 +490,7 @@ class GPT(nn.Module):
             if last_logits_only:
                 x = x[:, -1:, :]
             x = self.ln_f(x)
-            logits = F.linear(x, self.tok_emb.weight)  # 权重共享
+            logits = F.linear(x, self._lmhead_weight())  # 权重共享
         return {"logits": logits, "loss": loss, "past_kv": new_cache,
                 "gate_stats": stats_all if stats_all else None}
 

@@ -1,11 +1,14 @@
 """推理延迟基准：预填充（prefill）与带 KV 缓存的逐 token 解码（decode）。
 
 对比各变体的推理耗时，回答“实际推理延迟”这一评测维度。
+CUDA 上默认与 train/evaluate/ruler/analysis 一样启用 bf16 autocast
+（--no_amp 回退 fp32/TF32）。
 用法:
   python -m lega.latency --config configs/small.json --data_dir data/wikitext103 \
       --ckpt_dir out/small --out results/small/latency.json
 """
 import argparse
+import contextlib
 import json
 import os
 import time
@@ -42,7 +45,7 @@ def bench_prefill(model, device, ctx: int, batch_size: int, iters: int, warmup: 
 
 @torch.inference_mode()
 def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup: int,
-                 vocab: int):
+                 vocab: int, kv_dtype=None):
     """返回 (每 token 解码毫秒, 实际预填充长度)。
 
     逐 token 基线由本函数按实际 pf_len 带缓存复测，不依赖外部
@@ -60,9 +63,10 @@ def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup
     x = torch.randint(0, vocab, (1, pf_len), device=device)
 
     # 静态 KV 缓存：每层一次性预分配 (1, H, pf_len+decode_tokens-1, Dh)，
-    # 逐 token 就地写入；与 generate 同源。
+    # 逐 token 就地写入；与 generate 同源。缓存 dtype 与计算精度一致，
+    # 避免注意力在 FP32 缓存与低精度查询之间来回转换。
     attn0 = model.blocks[0].attn
-    kvdtype = attn0.wk.weight.dtype
+    kvdtype = attn0.wk.weight.dtype if kv_dtype is None else kv_dtype
     total = pf_len + decode_tokens - 1
     kv_cache = [
         (torch.empty(1, attn0.n_heads, total, attn0.d_head,
@@ -126,6 +130,7 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--variants", default="standard,standard_sdpa,qgate,null,lega")
     p.add_argument("--device", default="auto")
+    p.add_argument("--no_amp", action="store_true", help="禁用 bf16 autocast（CUDA）")
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
@@ -133,8 +138,13 @@ def main():
         cfg = json.load(f)
     meta = load_meta(args.data_dir)
     device = get_device(args.device)
-    # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 上启用 TF32，
-    # 否则基准测的是与流水线其它环节不同的精度设置。
+    # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 上启用 bf16
+    # autocast（--no_amp 可回退 fp32/TF32 以便与旧基准对照）；TF32 仅在
+    # 回退的 fp32 路径上生效（enable_tf32 不影响 bf16/AMP 路径）。
+    use_amp = (not args.no_amp) and device.startswith("cuda")
+    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
+               if use_amp else contextlib.nullcontext())
+    kv_dtype = torch.bfloat16 if use_amp else None
     enable_tf32(device)
     lcfg = dict(cfg.get("latency", {}))
 
@@ -195,14 +205,17 @@ def main():
                 continue
             entry["prefill_ms"][str(ctx)] = {}
             for bs in batch_sizes:
-                ms = bench_prefill(model, device, ctx, bs, iters, warmup, model.vocab_size)
+                with amp_ctx:
+                    ms = bench_prefill(model, device, ctx, bs, iters, warmup,
+                                       model.vocab_size)
                 entry["prefill_ms"][str(ctx)][str(bs)] = round(ms, 4)
             # 只有 bs=1 的 prefill 才能作为逐 token decode 的扣除基线；
             # 若 batch_sizes 不含 1，则由 bench_decode 按实际 pf_len 重新测量。
             if not batch_sizes:
                 raise ValueError("latency.batch_sizes 不能为空")
-            dms, pf_len = bench_decode(model, device, ctx, decode_tokens, iters, warmup,
-                                       model.vocab_size)
+            with amp_ctx:
+                dms, pf_len = bench_decode(model, device, ctx, decode_tokens, iters,
+                                           warmup, model.vocab_size, kv_dtype=kv_dtype)
             entry["decode_ms_per_tok"][str(ctx)] = round(dms, 4)
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
             # 较短 KV 前缀的耗时标注成原 ctx 的耗时。
@@ -218,7 +231,7 @@ def main():
     payload = {
         "meta": {"device": device, "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
                  "decode_tokens": decode_tokens, "iters": iters, "warmup": warmup,
-                 "torch": torch.__version__},
+                 "amp": bool(use_amp), "torch": torch.__version__},
         "variants": results,
     }
     save_json(payload, args.out)
