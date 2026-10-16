@@ -210,6 +210,11 @@ class _ChunkedLinearCE(torch.autograd.Function):
             # d 的计算精度（低精度时为 fp32）在整个反向固定：权重到该精度的
             # 转换在每个分块中完全相同。
             w_f = None
+            # 是否有被忽略的位置（全局判定一次，避免逐块同步）：没有时
+            # 无需逐块把 d 的无效行清零。gscale 是标量，延迟到两个输出端
+            # 缩放（gx 逐块、gw 收尾一次），可省去每块一次 (m, V) 全词表
+            # 逐元素乘法：GPU 上该乘法是纯显存带宽开销。
+            has_ignore = not bool((tgt != ctx.ignore_index).all())
             for s in range(0, tgt.numel(), ctx.chunk):
                 xs = x2d[s:s + ctx.chunk]
                 ts = tgt[s:s + ctx.chunk]
@@ -220,17 +225,15 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 d = torch.softmax(lcf, dim=-1, out=lcf)
                 keep = ts != ctx.ignore_index
                 # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的索引
-                # 压到 0（其减 1 随后会被 keep 掩码清零）。
+                # 压到 0（其减 1 随后被 keep 掩码清零）。
                 ts_safe = ts.masked_fill(~keep, 0)
                 if neg_one is None or neg_one.size(0) < ts_safe.numel():
                     neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
                 d.scatter_add_(1, ts_safe.unsqueeze(1),
                                neg_one[:ts_safe.numel()])
-                # keep 掩码与 gscale 合并为单次全词表缩放：keep∈{0,1} 时
-                # 1.0*x、0.0*x 均精确，结果与原两次乘法逐位一致。
-                scale = keep.unsqueeze(1).to(d.dtype)
-                scale.mul_(gscale)
-                d.mul_(scale)
+                # keep∈{0,1}，无效行清零即可；gscale 合并进输出端缩放。
+                if has_ignore:
+                    d.mul_(keep.unsqueeze(1).to(d.dtype))
                 # d 为计算精度（低精度时为 fp32），weight 可能是 bf16/fp16：
                 # 必须先在 d 的精度上做 GEMM（dtype 需一致）。
                 if w_f is None:
@@ -241,13 +244,19 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     torch.matmul(d, w_f, out=gxs)
                 else:
                     gxs.copy_(torch.matmul(d, w_f))
+                # dL/dx 逐块按 gscale 缩放（标量，行切片原地乘）
+                gxs.mul_(gscale)
                 if gw is None:
                     gw = torch.zeros(weight.shape, dtype=d.dtype,
                                      device=weight.device)
-                # 原地累加该分块的 dL/dW
+                # 原地累加该分块的 dL/dW（gscale 在循环外统一缩放）
                 gw.addmm_(d.transpose(0, 1), xs.to(d.dtype))
-        if gw is not None and gw.dtype != weight.dtype:
-            gw = gw.to(weight.dtype)
+                # 释放本块 d，避免下一块分配 lc 时本块仍占着 (m, V) 缓冲
+                del d, lcf
+        if gw is not None:
+            gw.mul_(gscale)
+            if gw.dtype != weight.dtype:
+                gw = gw.to(weight.dtype)
         return gx, gw, None, None, None
 
 
