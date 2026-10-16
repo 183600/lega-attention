@@ -2,7 +2,8 @@
 import torch
 
 from lega.model import GPT
-from lega.sanity import batch_metrics, gradient_coverage, run_overfit_check
+from lega.sanity import (batch_metrics, gradient_coverage, losses_consistent,
+                         run_overfit_check)
 
 
 def _model():
@@ -12,10 +13,10 @@ def _model():
 
 
 def _batch():
+    # 与 get_train_batch 相同的数据契约：y = x 右移一位
     g = torch.Generator().manual_seed(1)
-    x = torch.randint(0, 64, (4, 16), generator=g)
-    y = torch.randint(0, 64, (4, 16), generator=g)
-    return x, y
+    both = torch.randint(0, 64, (4, 17), generator=g)
+    return both[:, :-1], both[:, 1:]
 
 
 def test_batch_metrics_initial_loss_near_log_vocab():
@@ -38,6 +39,9 @@ def test_overfit_check_passes_on_healthy_model():
     assert res["final"]["loss"] < res["initial"]["loss"]
     assert res["final"]["token_acc"] > 0.95
     assert res["first_grad_norm"] and res["first_grad_norm"] > 0
+    # 中间结果核对：训练路径 loss ≡ 直接 logits CE；标签为 next-token 移位
+    assert res["checks"]["train_loss_matches_direct_logits"], res["loss_consistency"]
+    assert res["checks"]["next_token_shift_consistent"]
     assert not model.training  # 检查结束后恢复 eval 态，避免污染调用方
     print(f"  [ok] 健康模型可过拟合固定批: loss="
           f"{res['initial']['loss']:.3f}->{res['final']['loss']:.4f}, "
@@ -102,6 +106,55 @@ def test_overfit_check_detects_detached_submodule():
     assert any(n.startswith("blocks.") for n in missing), missing
     print(f"  [ok] detach 子模块导致 {len(missing)} 个参数收不到梯度，"
           "被逐参数覆盖检查拦下")
+
+
+def test_losses_consistent_tolerance():
+    assert losses_consistent(2.0, 2.0 + 1e-6)
+    assert not losses_consistent(2.0, 2.0 + 0.1)
+    assert not losses_consistent(None, 1.0)
+    assert not losses_consistent(float("nan"), 1.0)
+    assert not losses_consistent(float("inf"), float("inf"))
+    print("  [ok] losses_consistent（容差/None/非有限值判定）")
+
+
+def test_overfit_check_detects_loss_computation_mismatch():
+    """训练路径损失计算错误（如错误缩放/归一化）：仍可能过拟合，但数值对不上。
+
+    这正是“能过拟合 ≠ 损失计算正确”的场景：Adam 对梯度的常数缩放近似
+    不敏感，过拟合照样成功；只有训练路径 loss 与直接 logits CE 的
+    交叉核对能发现。
+    """
+    model = _model()
+    orig_forward = model.forward
+
+    def scaled_loss_forward(idx, targets=None, **kw):
+        out = orig_forward(idx, targets=targets, **kw)
+        if targets is not None and out["loss"] is not None:
+            out["loss"] = out["loss"] * 2.0
+        return out
+
+    model.forward = scaled_loss_forward
+    x, y = _batch()
+    res = run_overfit_check(model, x, y, steps=40, lr=5e-3, device="cpu",
+                            seed=0, log_every=20)
+    assert not res["passed"]
+    assert res["checks"]["train_loss_matches_direct_logits"] is False
+    ratio = (res["loss_consistency"]["train_path"]
+             / res["loss_consistency"]["direct_logits"])
+    assert abs(ratio - 2.0) < 1e-3, ratio
+    print("  [ok] loss 计算错误（训练路径被缩放 2×）被一致性核对拦下")
+
+
+def test_overfit_check_detects_broken_next_token_shift():
+    """标签不是 x 右移一位（错位/换序）必须在消费点被拦下。"""
+    model = _model()
+    x, y = _batch()
+    y_broken = y.flip(1)
+    res = run_overfit_check(model, x, y_broken, steps=5, lr=1e-3, device="cpu",
+                            seed=0, log_every=1)
+    assert not res["passed"]
+    assert res["checks"]["next_token_shift_consistent"] is False
+    print("  [ok] 标签错位（y ≠ x 右移一位）被消费点校验拦下")
 
 
 def test_overfit_check_restores_tf32_flags_independently():

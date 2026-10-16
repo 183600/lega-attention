@@ -2,6 +2,8 @@
 import json
 import os
 import random
+import subprocess
+import sys
 import tempfile
 
 import numpy as np
@@ -100,3 +102,59 @@ def test_run_manifest_embeds_seed_report_and_runtime():
         assert manifest["runtime"]["hostname"]
         json.dumps(manifest)
     print("  [ok] run_manifest 内嵌 seed_report 与机器级 runtime 信息")
+
+
+def test_same_seed_training_is_bitwise_reproducible():
+    """同一台机器上，同 seed 的完整训练必须逐位可复现（回归门槛）。
+
+    两次独立子进程运行 `lega.train`，覆盖模型初始化（含门控参数）、
+    数据批采样 rng、优化器/反向、checkpoint 序列化整条链路；训练曲线
+    （去掉时间戳）与权重必须逐位一致。跨硬件架构不保证一致属预期
+    （见 set_seed 文档），但本测试固定在本机运行，加回该保证。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=4096, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin"))
+        rng.integers(0, 64, size=512, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin"))
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "vocab_size": 64}, f)
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
+                       "block_size": 32, "batch_size": 4, "steps": 2,
+                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
+                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
+                       "seed": 5, "log_every": 1, "eval_every": 2,
+                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+        outs = []
+        for name in ("run_a", "run_b"):
+            out_dir = os.path.join(d, name)
+            r = subprocess.run(
+                [sys.executable, "-m", "lega.train", "--config", cfg_path,
+                 "--variant", "lega", "--data_dir", data_dir,
+                 "--out_dir", out_dir, "--device", "cpu", "--seed", "5"],
+                cwd=root, capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr
+            outs.append(out_dir)
+
+        def curves(p):
+            with open(os.path.join(p, "train_log.jsonl"), encoding="utf-8") as f:
+                recs = [json.loads(ln) for ln in f if ln.strip()]
+            for rec in recs:
+                rec.pop("time", None)      # 时间戳不参与数值比对
+            return recs
+
+        assert curves(outs[0]) == curves(outs[1])
+        w_a = torch.load(os.path.join(outs[0], "model.pt"), map_location="cpu",
+                         weights_only=True)["state_dict"]
+        w_b = torch.load(os.path.join(outs[1], "model.pt"), map_location="cpu",
+                         weights_only=True)["state_dict"]
+        assert w_a.keys() == w_b.keys()
+        diff = [k for k in w_a if not torch.equal(w_a[k], w_b[k])]
+        assert diff == [], diff
+    print("  [ok] 同 seed 两次完整训练：曲线与权重逐位一致")

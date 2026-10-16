@@ -11,6 +11,11 @@
 log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 作为实验记录。
 逐参数梯度覆盖能定位“总梯度范数正常、但某个子模块（如门控）没接进计算
 图”的断流问题：loss 可反传不代表每个参数都能收到梯度。
+此外本检查还做两条中间结果自动核对：
+  * 训练路径 loss（lm_head 分块 + 交叉熵）必须与“直接对完整 logits 算
+    F.cross_entropy”一致——分块/normalization/ignore_index 写错时，
+    loss 仍可反传、仍可能过拟合，但两条路径的数值会对不上；
+  * 固定批必须满足 y = x 右移一位——标签映射在消费点再次硬校验。
 
 用法:
   python -m lega.sanity --config configs/tiny.json --data_dir data/dummy \
@@ -32,6 +37,12 @@ from .data import load_bin, load_meta, get_train_batch
 from .model import GPT, count_params
 from .repro import build_run_manifest
 from .utils import save_json, set_seed
+
+# 训练路径 loss 与直接 logits CE 的一致性容差：实测同一权重/同一批数据下
+# 两条路径差异 ≤1e-7（相对），1e-3 只用于吸收分块/归约顺序的浮点噪声，
+# 真正的计算错误（错误 chunk 边界、错误归一化/ignore 处理）远大于此。
+LOSS_CONSISTENCY_REL_TOL = 1e-3
+LOSS_CONSISTENCY_ABS_TOL = 1e-3
 
 # 冒烟模式：更小批次/更少步数，保持“能快速过拟合”的性质
 SMOKE_OVERRIDES = {"steps": 60, "batch_size": 4, "ctx": 64, "log_every": 10}
@@ -106,6 +117,17 @@ def gradient_coverage(model) -> dict:
             "nonfinite_grad": nonfinite, "zero_grad": zero}
 
 
+def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
+                      abs_tol: float = LOSS_CONSISTENCY_ABS_TOL) -> bool:
+    """训练路径 loss 与直接 logits 交叉熵的数值一致性判定（None/非有限即失败）。"""
+    if a is None or b is None:
+        return False
+    fa, fb = float(a), float(b)
+    return (math.isfinite(fa) and math.isfinite(fb)
+            and math.isclose(fa, fb, rel_tol=float(rel_tol),
+                             abs_tol=float(abs_tol)))
+
+
 def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                       steps: int, lr: float, device: str, seed: int,
                       warmup: int = 10, grad_clip: float = 1.0,
@@ -116,8 +138,17 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
 
     调用方必须已保证 model 的正则化已关闭（dropout=0/attn_dropout=0，
     优化器 weight_decay=0）；本函数只用固定批、无任何数据增强。
+
+    除了“能否过拟合”，本函数还自动核对两条中间结果：
+      * 首步训练路径 loss（模型内部 lm_head 分块 + 交叉熵）与 batch_metrics
+        直接对完整 logits 算 F.cross_entropy 的结果一致——loss 计算错误
+        （分块边界/归一化/ignore_index）未必妨碍过拟合，但数值会对不上；
+      * 标签映射 y == x 右移一位——在数据消费点再次硬校验。
     """
     set_seed(seed)
+    # 标签映射硬校验：固定批必须在消费点满足 next-token 移位关系
+    shift_ok = (x.dim() == 2 and x.shape == y.shape
+                and bool(torch.equal(x[:, 1:], y[:, :-1])))
     # 关闭 TF32：sanity 追求数值上确定地“压到 0”
     prev_tf32_mm = torch.backends.cuda.matmul.allow_tf32
     prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
@@ -131,6 +162,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                                 weight_decay=0.0, betas=(0.9, 0.95))
         history = []
         first_grad_norm = None
+        first_train_loss = None
         nan_seen = False
         loss_no_grad = False
         for step in range(int(steps)):
@@ -143,6 +175,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             if not torch.isfinite(loss):
                 nan_seen = True
                 break
+            # 首步训练路径 loss：与 initial（直接 logits CE）同为“优化前的
+            # 同一模型、同一批数据”，用于核对两条损失计算路径是否一致。
+            if step == 0:
+                first_train_loss = float(loss.detach())
             # 梯度断流的典型表现：loss 不挂在 autograd 图上（如误用 detach、
             # 冻结了全部参数）。直接等价于“梯度没有反向传播”，记为失败而非崩溃。
             if not loss.requires_grad:
@@ -178,6 +214,11 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                                  and not grad_cov["missing_grad"]),
         "grads_finite": (grad_cov is not None
                          and not grad_cov["nonfinite_grad"]),
+        # 中间结果核对：训练路径 loss 与直接 logits CE 数值一致（损失计算正确性）
+        "train_loss_matches_direct_logits": losses_consistent(
+            first_train_loss, initial["loss"]),
+        # 中间结果核对：消费点的标签映射是 next-token 移位（而非错位/换序）
+        "next_token_shift_consistent": bool(shift_ok),
     }
     passed = all(checks.values())
     return {
@@ -190,14 +231,22 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "final": final,
         "log_vocab": math.log(model.vocab_size),
         "first_grad_norm": first_grad_norm,
+        "first_train_loss": first_train_loss,
+        "loss_consistency": {
+            "train_path": first_train_loss,
+            "direct_logits": initial["loss"],
+            "rel_tol": LOSS_CONSISTENCY_REL_TOL,
+            "abs_tol": LOSS_CONSISTENCY_ABS_TOL,
+        },
         "grad_coverage": grad_cov,
         "steps": int(steps),
         "lr": float(lr),
         "history": history,
         "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
-                   "仍可能漏网；请配合中间结果检查（首步 loss≈log(V)、"
-                   "梯度范数>0、逐参数梯度覆盖、逐层统计）并使用真实数据"
-                   "小规模预跑。"),
+                   "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
+                   "logits CE（首步）以及 y=x 右移一位，其余中间结果"
+                   "（首步 loss≈log(V)、梯度范数>0、逐参数梯度覆盖、逐层"
+                   "统计）请结合本 JSON 人工复核，并使用真实数据小规模预跑。"),
     }
 
 
