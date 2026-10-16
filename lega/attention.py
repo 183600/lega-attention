@@ -52,6 +52,19 @@ _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_conc", "lega_no_query")     # �
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
 
+
+def _chunk_elems(dev: torch.device) -> int:
+    """当前设备每块打分矩阵的目标元素数。
+
+    CPU 上内存宽裕而缓存/带宽受限：把预算收紧 4 倍（查询块更小、块数更多）
+    可显著提升前向与重算的缓存命中，实测更快；加速器保持原预算，
+    避免把 GEMM 切得过碎。
+    """
+    if dev.type == "cpu":
+        return max(1, _CHUNK_TARGET_ELEMS // 4)
+    return _CHUNK_TARGET_ELEMS
+
+
 # 进程级共享缓存：各层（乃至各实例）在同一设备/长度下的因果掩码完全相同，
 # log n 由设备级前缀表统一切片，按模块共享。
 # 键内已含 device，跨设备天然隔离；长度变化场景（解码）由容量上限兜底。
@@ -442,8 +455,8 @@ class CausalSelfAttention(nn.Module):
             if self.use_query else None
         k = _ensure_mm_input(k)
         v = _ensure_mm_input(v)
-        # 每块打分矩阵约 <= _CHUNK_TARGET_ELEMS 元素
-        cq = max(_CHUNK_MIN_T, min(T, _CHUNK_TARGET_ELEMS // max(1, B * H * S)))
+        # 每块打分矩阵约 <= 设备对应的目标元素数
+        cq = max(_CHUNK_MIN_T, min(T, _chunk_elems(q_rot.device) // max(1, B * H * S)))
         cq = min(T, max(cq, 1))
         kT = k.transpose(-2, -1)
         # checkpoint 的前向以 collect_stats=False 运行且返回单个张量，
@@ -616,7 +629,7 @@ class CausalSelfAttention(nn.Module):
         # 完全不需要 (1,1,T,S) 整表掩码。
         elems = B * H * T * S
         will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
-                      and elems >= _CHUNK_TARGET_ELEMS
+                      and elems >= _chunk_elems(dev)
                       and not (self.training and self.attn_dropout > 0))
 
         # 门控查询项 w·q 预计算；分块路径在 _attend_chunked 内逐块归约
