@@ -408,9 +408,90 @@ def fig_auroc_heads(rdir, variant="lega"):
     return True
 
 
+def _load_train_logs(train_root):
+    """扫描 out/<tag>/<variant>[/seed<s>]/train_log.jsonl，按变体归组。
+
+    多种子拆分为多份记录；同一步的曲线在画图时取跨种子均值。
+    """
+    series = {}
+    paths = (sorted(glob.glob(os.path.join(train_root, "*", "train_log.jsonl")))
+             + sorted(glob.glob(os.path.join(
+                 train_root, "*", "seed*", "train_log.jsonl"))))
+    for path in paths:
+        parts = os.path.normpath(path).split(os.sep)
+        # 目录结构 .../<variant>/[seed<s>/]train_log.jsonl
+        variant = parts[-2] if not parts[-2].startswith("seed") else parts[-3]
+        recs = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        recs.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except OSError:
+            continue
+        if recs:
+            series.setdefault(variant, []).append(recs)
+    return series
+
+
+def _mean_by_step(runs, key):
+    """把多份 run 的记录按 step 对齐求均值（缺该 key 的记录跳过）。"""
+    acc = {}
+    for recs in runs:
+        for r in recs:
+            if r.get(key) is None or r.get("step") is None:
+                continue
+            acc.setdefault(int(r["step"]), []).append(float(r[key]))
+    xs = sorted(acc)
+    return xs, [float(np.mean(acc[x])) for x in xs]
+
+
+def fig_train_curves(rdir, train_root):
+    """训练 loss 与 val PPL 曲线（训练曲线随实验留档，支持复现与异常排查）。"""
+    if not train_root or not os.path.isdir(train_root):
+        return False
+    series = _load_train_logs(train_root)
+    if not series:
+        return False
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.2), constrained_layout=True)
+    for v in sorted(series):
+        color = COLORS.get(v, "#34495e")
+        xs, ys = _mean_by_step(series[v], "loss")
+        if xs:
+            ax1.plot(xs, ys, label=_label(v), color=color,
+                     lw=2.0 if v == "lega" else 1.2, alpha=0.9)
+        xs2, ys2 = _mean_by_step(series[v], "val_ppl")
+        if xs2:
+            ax2.plot(xs2, ys2, label=_label(v), color=color, marker=".",
+                     lw=2.0 if v == "lega" else 1.2, alpha=0.9)
+    ax1.set_xlabel("训练步数")
+    ax1.set_ylabel("训练 loss")
+    ax1.set_yscale("log")
+    ax1.set_title("训练损失曲线（多种子均值）")
+    ax1.grid(alpha=0.3)
+    ax1.legend(fontsize=7)
+    ax2.set_xlabel("训练步数")
+    ax2.set_ylabel("验证 PPL")
+    ax2.set_yscale("log")
+    ax2.set_title("验证困惑度曲线（多种子均值）")
+    ax2.grid(alpha=0.3)
+    ax2.legend(fontsize=7)
+    fig.suptitle(f"训练过程留档（源目录 {train_root}）", y=1.03)
+    fig.savefig(os.path.join(rdir, "fig_train_curves.png"), dpi=150)
+    plt.close(fig)
+    return True
+
+
 def main():
     p = argparse.ArgumentParser(description="结果画图")
     p.add_argument("--results_dir", required=True)
+    p.add_argument("--train_root", default=None,
+                   help="训练输出根目录（out/<tag>），用于绘制训练曲线")
     args = p.parse_args()
     rdir = args.results_dir
     os.makedirs(rdir, exist_ok=True)
@@ -419,8 +500,7 @@ def main():
         print("[plots] 未安装 matplotlib，跳过全部图表生成（不阻塞流水线）")
         return
 
-    made = []
-    for name, fn, kw in [
+    targets = [
         ("fig_ppl.png", fig_ppl, ()),
         ("fig_ruler_em.png", fig_ruler, ()),
         ("fig_latency.png", fig_latency, ()),
@@ -428,7 +508,12 @@ def main():
         ("fig_calibration.png", fig_calibration, ("lega",)),
         ("fig_misleading.png", fig_misleading, ()),
         ("fig_auroc_heads.png", fig_auroc_heads, ("lega",)),
-    ]:
+    ]
+    if args.train_root:
+        targets.append(("fig_train_curves.png", fig_train_curves, (args.train_root,)))
+
+    made = []
+    for name, fn, kw in targets:
         try:
             ok = fn(rdir, *kw)
         except Exception as e:

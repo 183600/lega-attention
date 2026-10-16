@@ -501,7 +501,8 @@ def main():
     import argparse
     from .model import load_model
     from .data import load_tokenizer
-    from .utils import get_device, enable_tf32
+    from .repro import load_provenance
+    from .utils import get_device, enable_tf32, set_seed
 
     p = argparse.ArgumentParser(description="RULER 5 任务评测")
     p.add_argument("--ckpt", required=True)
@@ -519,6 +520,8 @@ def main():
     enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device)
     tok = load_tokenizer(args.data_dir)
+    seed = ck.get("seed")
+    set_seed(int(seed) if seed is not None else 0)
 
     import json
     import os
@@ -544,6 +547,8 @@ def main():
     payload = {"variant": ck.get("variant", model.variant), "seed": ck.get("seed"),
                "ctx_lens": ctx_lens, "n_samples": n_samples,
                "sample_seed": int(rl.get("seed", 1234)), "results": results}
+    payload.update(load_provenance(
+        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir))
     save_json(payload, args.out)
     print(f"[ruler] 完成 -> {args.out}")
 

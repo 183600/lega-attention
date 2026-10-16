@@ -20,6 +20,7 @@ import torch
 from .attention import VARIANTS
 from .data import load_meta
 from .model import GPT, load_model, count_params
+from .repro import data_fingerprint, git_info, sha256_file
 from .utils import enable_tf32, get_device, set_seed, save_json
 
 
@@ -240,10 +241,18 @@ def main():
                   f"decode={dms:.3f}ms/tok{suffix}")
         results[v] = entry
 
+    git = git_info()
+    try:
+        data_fp = data_fingerprint(args.data_dir)["digest"]
+    except FileNotFoundError:
+        data_fp = None
     payload = {
         "meta": {"device": device, "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
                  "decode_tokens": decode_tokens, "iters": iters, "warmup": warmup,
-                 "amp": bool(use_amp), "torch": torch.__version__},
+                 "amp": bool(use_amp), "torch": torch.__version__,
+                 "code_commit": git["commit"], "code_dirty": git["dirty"],
+                 "data_fingerprint": data_fp,
+                 "config_sha256": sha256_file(args.config)},
         "variants": results,
     }
     save_json(payload, args.out)

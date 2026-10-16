@@ -10,6 +10,20 @@ import torch
 
 
 def set_seed(seed: int) -> None:
+    """固定当前进程内所有随机源，使同一台机器上的同一实验可复现。
+
+    覆盖：Python random、NumPy 全局 RNG、PyTorch（CPU/CUDA）、cuDNN 确定性。
+    本项目的“dataloader”是 data.py 中显式接收 ``np.random.default_rng(seed)`` 的
+    批采样函数（无 torch DataLoader/worker），因此数据顺序由同一 seed 唯一确定；
+    若将来引入 DataLoader，须同时传入该 seed 构造的 ``torch.Generator`` 并设置
+    ``worker_init_fn``（参考 PyTorch 官方可复现性说明）。
+    TensorFlow 不在依赖内，无需 TF seed。
+
+    PYTHONHASHSEED 仅对之后启动的子进程生效（当前进程的哈希盐在解释器启动时已
+    固定）；run_all.py 会在派生子进程前设置。跨硬件架构（不同 GPU 型号、CPU
+    指令集、cuDNN 版本）无法保证逐位一致，本函数只保证同机相对稳定。
+    """
+    os.environ.setdefault("PYTHONHASHSEED", str(int(seed)))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

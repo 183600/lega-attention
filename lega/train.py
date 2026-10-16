@@ -20,6 +20,7 @@ import torch
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
+from .repro import build_run_manifest
 from .utils import set_seed, now_str, save_json, enable_tf32
 
 SMOKE_OVERRIDES = {
@@ -163,6 +164,20 @@ def main():
     train = load_bin(args.data_dir, "train")
     val = load_bin(args.data_dir, "val")
 
+    # 实验溯源：代码版本 + 数据指纹 + 运行环境 + 实际命令行，训练前落盘，
+    # 与 config_used.json（超参数）和 train_log.jsonl（训练曲线）共同构成
+    # 可复现、可追溯的完整记录。
+    manifest = build_run_manifest(
+        tag=tag, variant=args.variant, seed=seed, config_path=args.config,
+        data_dir=args.data_dir, device=device)
+    save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
+    provenance = {
+        "code_commit": manifest["git"]["commit"],
+        "code_dirty": manifest["git"]["dirty"],
+        "data_fingerprint": manifest["data"]["digest"],
+        "config_sha256": manifest["config_sha256"],
+    }
+
     block_size = int(cfg["block_size"])
     train_ctx = min(int(cfg.get("train_ctx", block_size)), block_size)
     # 记录实际生效的上下文长度（经过 min 截断），保证下游评测复现同一口径
@@ -267,7 +282,8 @@ def main():
                             extra={"variant": args.variant, "step": step,
                                    "seed": seed, "val_loss": vl,
                                    "val_ppl": math.exp(min(20, vl)),
-                                   "val_ppl_clamped": bool(vl > 20)})
+                                   "val_ppl_clamped": bool(vl > 20),
+                                   **provenance})
         print(f"[train] step {step}: val_ppl={ppl:.3f}"
               + (f" gate_mean={gmean:.3f}" if gmean is not None else "") + mark)
         if wb:
@@ -334,7 +350,8 @@ def main():
                             extra={"variant": args.variant, "step": steps,
                                    "seed": seed, "val_loss": best_val,
                                    "val_ppl": math.exp(min(20, best_val)),
-                                   "val_ppl_clamped": bool(best_val > 20)})
+                                   "val_ppl_clamped": bool(best_val > 20),
+                                   **provenance})
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
@@ -343,14 +360,16 @@ def main():
                            "val_ppl": final_ppl, "val_loss": final_val_loss,
                            "val_ppl_clamped": bool(final_val_loss > 20),
                            "tokens_seen": tokens_seen,
-                           "n_params": n_params, "n_gate_extra": n_extra})
+                           "n_params": n_params, "n_gate_extra": n_extra,
+                           **provenance})
     save_json({"variant": args.variant, "val_ppl": final_ppl, "val_loss": final_val_loss,
                "val_ppl_clamped": bool(final_val_loss > 20),
                "gate_mean": gmean, **{k: final_metrics[k] for k in
                                       ("eval_iters_requested", "eval_iters",
                                        "val_windows", "val_tokens_evaluated")},
                "n_params": n_params, "n_gate_extra": n_extra,
-               "tokens_seen": tokens_seen, "steps": steps, "seed": seed},
+               "tokens_seen": tokens_seen, "steps": steps, "seed": seed,
+               **provenance},
               os.path.join(out_dir, "eval.json"))
     log_f.write(json.dumps({"step": steps, **final_metrics,
                             "val_ppl": final_ppl,

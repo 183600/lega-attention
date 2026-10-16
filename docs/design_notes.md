@@ -20,3 +20,9 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
 - 生成推理口径的延迟测量（prefill 与带 KV 缓存的逐 token decode）；
 - 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC。
+
+## 可复现性与 sanity check
+
+- **种子**：`set_seed` 覆盖 Python/NumPy/PyTorch（CPU/CUDA）、cuDNN 确定性算法与子进程 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker）。跨硬件架构不保证逐位一致，同机重跑稳定。
+- **过拟合小批量**（`lega/sanity.py`）：训练前在固定小批量、关闭正则化与数据扰动的条件下检查损失能否趋近 0、下一 token 准确率能否接近 100%；不能过拟合说明梯度/损失/标签链路存在严重 bug，`run_all` 会直接中止全量训练。通过是必要非充分条件，需配合中间结果检查。
+- **追踪**：训练写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、环境、命令行），`run_all` 写全局 `repro.json`；评测 JSON 内嵌同一溯源字段；训练曲线 `train_log.jsonl` 汇总为 `fig_train_curves.png`。

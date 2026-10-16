@@ -93,7 +93,7 @@ bash scripts/run_smoke.sh
 # equivalent to: unit tests -> generate dummy data (data/dummy) -> run_all --smoke
 ```
 
-Smoke mode automatically shrinks: 20 steps/variant, a single seed, ctx=min(256, block_size), 2 examples per task — for verifying code correctness, not scientific conclusions.
+Smoke mode automatically shrinks: 20 steps/variant, a single seed, ctx=min(256, block_size), 2 examples per task, and runs the overfit-small-batch sanity check (60 steps) — for verifying code correctness, not scientific conclusions.
 
 ### 3.3 Full experiments (WikiText-103 + small config)
 
@@ -116,17 +116,32 @@ Outputs:
 
 | Path | Content |
 |---|---|
-| `out/<tag>/<variant>[/seed<seed>]/model.pt` | Checkpoint + training config (seeded subdirs for multi-seed runs) |
+| `out/<tag>/<variant>[/seed<seed>]/model.pt` | Checkpoint + training config + code/data provenance fields (seeded subdirs for multi-seed runs) |
 | `out/<tag>/<variant>[/seed<seed>]/train_log.jsonl` | Training/validation curves |
-| `results/<tag>/summary.md` | **Summary (Mean ± Std + ablation matrix + controlled-variable audit)** |
+| `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **Provenance: git commit/dirty, config SHA-256, data fingerprint, runtime, command line** |
+| `results/<tag>/summary.md` | **Summary (Mean ± Std + ablation matrix + controlled-variable audit + reproducibility/sanity)** |
+| `results/<tag>/repro.json` | Pipeline-level provenance (code version, data fingerprint, seeds, runtime) |
+| `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, p value, verdict) |
 | `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths |
 | `results/<tag>/latency.json` | prefill / decode latency |
 | `results/<tag>/analysis_*.csv|json` | Per (layer, head, query position) gate records and aggregates |
-| `results/<tag>/fig_*.png` | All plots |
+| `results/<tag>/fig_*.png` | All plots (including training curves `fig_train_curves.png`) |
 
-### 3.4 Running each stage separately
+### 3.4 Reproducibility, sanity check and experiment tracking
+
+- **Full seed coverage**: `lega.utils.set_seed` fixes Python `random`, NumPy, PyTorch (CPU/CUDA), cuDNN determinism (`warn_only`) and `PYTHONHASHSEED` (for child processes); batch sampling uses an explicit `np.random.default_rng(seed)` (no torch DataLoader/workers), so data order is uniquely determined by the seed — unit-tested in `tests/test_repro.py`. Bit-exact reproducibility across hardware (different GPU/CPU/cuDNN) is not guaranteed, but reruns on the same machine are stable.
+- **Overfit-small-batch sanity check (pre-training gate)**: `lega.sanity` draws a fixed small batch (8 × 128 tokens by default), disables dropout/weight decay and all data perturbation, and optimizes the **same batch**, checking whether the loss can be driven toward 0 and next-token accuracy toward 100% (thresholds adjustable via `--loss_threshold/--acc_threshold` or a `sanity` config block). `run_all.py` runs it per variant before full training and aborts on failure (`--skip_sanity` to skip, `--sanity_steps` to change the budget). This is a **necessary but not sufficient** check: failing it means gradients/loss/labels have a serious bug; passing does not rule out data-augmentation, feature-alignment or label-mapping bugs. The sanity JSON also records the first-step loss (should be ≈log V), the first-step gradient norm and the full loss curve for intermediate inspection.
+- **Experiment tracking / traceability**: every training run writes `run_manifest.json` (git commit/dirty, config SHA-256, data fingerprint, Python/PyTorch/CUDA environment, exact command line), hyperparameters live in `config_used.json`, curves in `train_log.jsonl` (aggregated into `fig_train_curves.png`); `run_all` writes a global `results/<tag>/repro.json`, and all evaluation outputs (eval/ruler/analysis/latency) embed the same code/data provenance fields — no manual bookkeeping.
+
+```bash
+# Run the sanity check standalone (exit code 0 = pass, 1 = fail)
+python -m lega.sanity --config configs/tiny.json --data_dir data/dummy --variant lega \
+    --out results/tiny_sanity/lega.json
+```
+
+### 3.5 Running each stage separately
 
 ```bash
 python -m lega.train     --config configs/small.json --variant lega --data_dir data/wikitext103
@@ -134,7 +149,8 @@ python -m lega.evaluate  --ckpt out/small/lega/model.pt --data_dir data/wikitext
 python -m lega.ruler     --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out results/small/ruler_lega.json
 python -m lega.latency   --config configs/small.json --data_dir data/wikitext103 --ckpt_dir out/small --out results/small/latency.json
 python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
-python -m lega.plots     --results_dir results/small
+python -m lega.plots     --results_dir results/small --train_root out/small
+python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m tests.run_tests   # unit tests (no pytest dependency)
 ```
 
@@ -152,12 +168,14 @@ lega-attention/
 │   ├── attention.py           # core: causal attention for 9 variants (LEGA gate + ablation matrix)
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback) + bin cache + batch sampling
-│   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B)
+│   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + provenance manifest
 │   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
 │   ├── latency.py             # prefill / decode latency benchmark
 │   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC
-│   ├── plots.py               # plots (PNG)
+│   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
+│   ├── repro.py               # code version / data fingerprint / runtime / provenance inheritance
+│   ├── plots.py               # plots (PNG, including training curves)
 │   └── utils.py               # seed/JSON/AUROC/Pearson (no scipy)
 ├── scripts/
 │   ├── prepare_data.py        # WikiText-103 download (parquet→zip→rows fallbacks)
@@ -173,7 +191,7 @@ lega-attention/
 - **Numerical stability of $c$**: `max_p = exp(zmax − LSE)` is always bounded in (0,1]; clamped to `1e-30` before `log`. Uniform attention → `c=0` is unit-tested (`tests/test_attention.py`).
 - **Definition of $n$**: the number of readable tokens for query position $t$ is $t+1$ (causal); null slots don't count; `null`-variant null keys get no RoPE (position-independent slots).
 - **Gate query term**: the gate's $q$ uses the **pre-RoPE** query content vector; attention scoring still uses rotated $q,k$. Length/absolute position thus enters the gate only via the explicit $\log n$, avoiding the causal confounding in the method's claims.
-- **Reproducibility**: `set_seed` disables cudnn benchmark and enables deterministic algorithms (`warn_only`) on CUDA; all variants are trained on the same seed set and compared with same-seed paired statistics (`run_all.py --seeds` / `seeds` in the configs).
+- **Reproducibility**: `set_seed` fixes Python/NumPy/PyTorch (CPU/CUDA) seeds, disables cudnn benchmark and enables deterministic algorithms (`warn_only`) on CUDA, and sets `PYTHONHASHSEED` for child processes; batch sampling is driven by an explicit `np.random.default_rng(seed)` (no DataLoader workers) so data order is reproducible and unit-tested. All variants are trained on the same seed set and compared with same-seed paired statistics (`run_all.py --seeds` / `seeds` in the configs). Bit-exact reproducibility across hardware is not guaranteed, but same-machine reruns are stable; every training run also writes `run_manifest.json` (git/data fingerprint/environment/command) and evaluation JSONs embed the same provenance. An overfit-small-batch sanity check runs by default before training (`--skip_sanity` to skip).
 - **torch.compile**: `"compile": true` enables torch.compile on CUDA; checkpoints are saved with wrapper-stripped parameter keys so `load_model` (evaluate/ruler/latency/analysis) loads them directly.
 - **Dual paths for standard attention**: SDPA fast path and explicit path are numerically identical (unit-tested); the explicit path is used for variants needing attention statistics and for fair latency comparison (`standard` vs `standard_sdpa` both measured).
 - **KV cache**: gated variants compute the gate token-by-token during incremental decoding; cache equivalence is unit-tested (full forward vs token-by-token).

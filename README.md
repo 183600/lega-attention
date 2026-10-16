@@ -93,7 +93,7 @@ bash scripts/run_smoke.sh
 # 等价于: 单元测试 -> 生成伪数据(data/dummy) -> run_all --smoke
 ```
 
-冒烟模式自动缩减：20 步/变体、仅 1 个种子、ctx=min(256, block_size)、每任务 2 个样例，用于验证代码正确性而非科学结论。
+冒烟模式自动缩减：20 步/变体、仅 1 个种子、ctx=min(256, block_size)、每任务 2 个样例，并自动执行过拟合小批量 sanity check（60 步），用于验证代码正确性而非科学结论。
 
 ### 3.3 正式实验（WikiText-103 + small 配置）
 
@@ -116,17 +116,32 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 
 | 路径 | 内容 |
 |---|---|
-| `out/<tag>/<variant>[/seed<seed>]/model.pt` | 检查点 + 训练配置（多种子时按种子分子目录） |
+| `out/<tag>/<variant>[/seed<seed>]/model.pt` | 检查点 + 训练配置 + 代码/数据溯源字段（多种子时按种子分子目录） |
 | `out/<tag>/<variant>[/seed<seed>]/train_log.jsonl` | 训练/验证曲线数据 |
-| `results/<tag>/summary.md` | **汇总表（Mean ± Std + 消融矩阵 + 受控变量自检，可直接贴入周报/论文初稿）** |
+| `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **溯源清单：git commit/dirty、配置 SHA-256、数据指纹、运行环境、命令行** |
+| `results/<tag>/summary.md` | **汇总表（Mean ± Std + 消融矩阵 + 受控变量自检 + 可复现性/sanity）** |
+| `results/<tag>/repro.json` | 流水线全局溯源（代码版本、数据指纹、种子、运行环境） |
+| `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、p 值、结论） |
 | `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文 |
 | `results/<tag>/latency.json` | prefill / decode 延迟 |
 | `results/<tag>/analysis_*.csv|json` | 逐 (层，头，查询位) 门控记录与汇总 |
-| `results/<tag>/fig_*.png` | 全部图表（中文标注） |
+| `results/<tag>/fig_*.png` | 全部图表（中文标注，含训练曲线 `fig_train_curves.png`） |
 
-### 3.4 单独运行各环节
+### 3.4 可复现性、sanity check 与实验追踪
+
+- **随机种子全覆盖**：`lega.utils.set_seed` 固定 Python `random`、NumPy、PyTorch（CPU/CUDA）、cuDNN 确定性算法（`warn_only`）与 `PYTHONHASHSEED`（子进程）；本项目的批采样使用显式 `np.random.default_rng(seed)`（无 torch DataLoader/worker），数据顺序由 seed 唯一确定，单测覆盖（`tests/test_repro.py`）。跨硬件架构（不同 GPU/CPU/cuDNN 版本）无法保证逐位一致，但同一台机器上重跑结果稳定。
+- **过拟合小批量 sanity check（训练前闸门）**：`lega.sanity` 抽取固定小批量（默认 8 条 × 128 token），关闭 dropout/weight decay 与全部数据扰动，在**同一批数据**上优化，检查损失能否迅速趋近 0、下一 token 准确率能否接近 100%（阈值可用 `--loss_threshold/--acc_threshold` 或配置 `sanity` 块调整）。`run_all.py` 在全量训练前对每个变体自动执行，失败立即中止（`--skip_sanity` 跳过，`--sanity_steps` 调节步数）。这是**必要非充分**检查：连小批量都无法过拟合说明梯度反传/损失/标签存在严重 bug；通过也不代表数据增强、特征对齐、标签映射等 bug 不存在，sanity JSON 同时记录首步 loss（应≈log 词表）、首步梯度范数与完整损失曲线，供中间结果复核。
+- **实验追踪/可追溯**：每次训练自动写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、Python/PyTorch/CUDA 环境、完整命令行），超参数在 `config_used.json`，训练曲线在 `train_log.jsonl`（并汇总为 `fig_train_curves.png`）；`run_all` 写全局 `results/<tag>/repro.json`，评测结果（eval/ruler/analysis/latency）均内嵌同一份代码/数据溯源字段，不依赖手工记录。
+
+```bash
+# 单独运行 sanity check（退出码 0=通过，1=未通过）
+python -m lega.sanity --config configs/tiny.json --data_dir data/dummy --variant lega \
+    --out results/tiny_sanity/lega.json
+```
+
+### 3.5 单独运行各环节
 
 ```bash
 python -m lega.train     --config configs/small.json --variant lega --data_dir data/wikitext103
@@ -134,7 +149,8 @@ python -m lega.evaluate  --ckpt out/small/lega/model.pt --data_dir data/wikitext
 python -m lega.ruler     --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out results/small/ruler_lega.json
 python -m lega.latency   --config configs/small.json --data_dir data/wikitext103 --ckpt_dir out/small --out results/small/latency.json
 python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
-python -m lega.plots     --results_dir results/small
+python -m lega.plots     --results_dir results/small --train_root out/small
+python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m tests.run_tests   # 单元测试（不依赖 pytest）
 ```
 
@@ -152,12 +168,14 @@ lega-attention/
 │   ├── attention.py           # 核心：9 个变体的因果注意力（LEGA 门控公式与消融矩阵在此）
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底）+ bin 缓存 + 批采样
-│   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）
+│   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）+ 溯源清单
 │   ├── evaluate.py            # held-out test PPL（缺 test.bin 时回退 val）
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
 │   ├── latency.py             # prefill / decode 延迟基准
 │   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC
-│   ├── plots.py               # 中文标注图表（PNG）
+│   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
+│   ├── repro.py               # 代码版本/数据指纹/运行环境/溯源继承
+│   ├── plots.py               # 中文标注图表（PNG，含训练曲线）
 │   └── utils.py               # 种子/JSON/AUROC/Pearson（无 scipy 依赖）
 ├── scripts/
 │   ├── prepare_data.py        # WikiText-103 下载（parquet→zip→rows 多级回退）
@@ -173,7 +191,7 @@ lega-attention/
 - **c 的数值稳定性**：`max_p = exp(zmax − LSE)`，恒有界 (0,1]；`log` 前 clamp 到 `1e-30`。均匀注意力→`c=0` 有单元测试覆盖（`tests/test_attention.py`）。
 - **n 的定义**：查询位置 $t$ 的可读 token 数为 $t+1$（因果），null 槽不计入 $n$；`null` 变体的 null 键不施加 RoPE（位置无关槽）。
 - **门控查询项的定位**：门控里的 $q$ 使用 **RoPE 旋转前**的查询内容向量；注意力打分仍使用旋转后的 $q,k$。这样长度/绝对位置只通过显式的 $\log n$ 进入门控，避免方法主张中的因果混淆。
-- **可复现性**：`set_seed` 在 CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`）；同一组随机种子训练全部变体，变体间用同种子配对统计（`run_all.py --seeds` / configs 中的 `seeds`）。
+- **可复现性**：`set_seed` 固定 Python/NumPy/PyTorch（CPU/CUDA）种子，CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`），并为子进程设置 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker），数据顺序可复现且有单测。同一组随机种子训练全部变体，变体间用同种子配对统计（`run_all.py --seeds` / configs 中的 `seeds`）。跨硬件架构无法保证逐位一致，同机重跑稳定；每次训练另写 `run_manifest.json`（git/数据指纹/环境/命令行），评测 JSON 内嵌同一溯源字段。训练前默认执行过拟合小批量 sanity check（`--skip_sanity` 可跳过）。
 - **torch.compile**：配置 `"compile": true` 可在 CUDA 上启用 torch.compile；保存检查点时统一使用剥离包装前缀后的参数键名，`load_model`（evaluate/ruler/latency/analysis）可直接加载。
 - **标准注意力双路径**：SDPA 快速路径与显式路径数值一致（有单测），显式路径用于需要注意力统计的变体与延迟公平对比（`standard` vs `standard_sdpa` 两者都测）。
 - **KV 缓存**：gated 变体在增量解码时逐 token 计算门控，缓存等价性有单测（全量前向 vs 逐 token）。

@@ -11,8 +11,9 @@ import os
 
 from .data import load_bin
 from .model import load_model, count_params, gate_extra_params
+from .repro import load_provenance
 from .train import evaluate_val
-from .utils import enable_tf32, get_device, save_json
+from .utils import enable_tf32, get_device, save_json, set_seed
 
 
 def main():
@@ -32,6 +33,10 @@ def main():
     device = get_device(args.device)
     enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device)
+    # 评测同样固定随机源（评测本身无随机性，但保证同一 checkpoint 在任何
+    # 入口下都从同一 RNG 状态出发）。
+    seed = ck.get("seed")
+    set_seed(int(seed) if seed is not None else 0)
     split = args.split
     if split == "auto":
         split = "test" if (os.path.exists(os.path.join(args.data_dir, "test.bin"))
@@ -91,6 +96,9 @@ def main():
         "val_windows": metrics["val_windows"],
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
     }
+    # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
+    res.update(load_provenance(os.path.dirname(os.path.abspath(args.ckpt)),
+                               args.data_dir))
     save_json(res, args.out)
     print(f"[eval] {res['variant']}: val_ppl={ppl:.3f} -> {args.out}")
 

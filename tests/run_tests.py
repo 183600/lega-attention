@@ -9,7 +9,8 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
-           "tests.test_latency", "tests.test_analysis", "tests.test_utils"]
+           "tests.test_latency", "tests.test_analysis", "tests.test_utils",
+           "tests.test_sanity", "tests.test_repro"]
 
 
 def main() -> int:

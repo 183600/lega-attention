@@ -34,9 +34,11 @@ import torch
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_tokenizer
 from .model import load_model
+from .repro import load_provenance
 from .ruler import (build_niah, build_vt, load_corpus_sents,
                     ContextTooSmall, _stable_hash)
-from .utils import auroc, enable_tf32, get_device, pearson, save_json
+from .utils import (auroc, enable_tf32, get_device, pearson, save_json,
+                    set_seed)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -272,6 +274,10 @@ def main():
     model, ck = load_model(args.ckpt, device=device, use_sdpa_standard=False)
     tok = load_tokenizer(args.data_dir)
     variant = ck.get("variant", model.variant)
+    # 固定全局随机源；样例构造本身使用显式种子的 Random，不受影响
+    set_seed(int(ck.get("seed")) if ck.get("seed") is not None else 0)
+    provenance = load_provenance(
+        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir)
 
     ckpt_cfg = json.load(open(os.path.join(
         os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json"),
@@ -317,7 +323,8 @@ def main():
     if not examples:
         print("[analysis] 没有可分析的样例（ctx 过小或缺少语料），跳过")
         save_json({"variant": variant, "seed": ck.get("seed"), "n_records": 0,
-                   "note": "no examples", "skipped_tasks": skipped_tasks},
+                   "note": "no examples", "skipped_tasks": skipped_tasks,
+                   **provenance},
                   os.path.join(args.out_dir,
                                f"analysis_{variant}{args.suffix}.json"))
         return
@@ -328,6 +335,7 @@ def main():
     summary = summarize(records, variant, tau)
     # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
     summary["seed"] = ck.get("seed")
+    summary.update(provenance)
     if skipped_tasks:
         summary["skipped_tasks"] = skipped_tasks
 

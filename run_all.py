@@ -42,7 +42,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
-from lega.utils import mean_std, paired_t_test  # noqa: E402
+from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
+from lega.utils import mean_std, paired_t_test, save_json  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -490,6 +491,61 @@ def build_summary(results_dir: str, audit: dict = None) -> dict:
     else:
         md.append("- ⚠ 未执行（直接调用 build_summary 或缺少 out 目录）。")
 
+    # --- 可复现性与 sanity check（代码版本 / 数据指纹 / 过拟合小批量）
+    md += ["", "## 可复现性与 sanity check", ""]
+    repro = load(os.path.join(results_dir, "repro.json"))
+    if repro:
+        git = repro.get("git") or {}
+        data = repro.get("data") or {}
+        rt = repro.get("runtime") or {}
+        commit = git.get("commit") or "unknown"
+        dirty = git.get("dirty")
+        md.append(f"- 代码版本：`{str(commit)[:12]}`"
+                  + (f"（分支 {git.get('branch')}）" if git.get("branch") else "")
+                  + ("；⚠ 工作区 dirty，结果对应未提交状态" if dirty else
+                     ("" if dirty is None else "；工作区 clean")))
+        files = data.get("files") or []
+        md.append(f"- 数据指纹：`{data.get('digest')}`"
+                  f"（tokenizer={data.get('tokenizer')}，"
+                  + "、".join(f"{e['name']} sha256:{e['sha256'][:12]}…" for e in files)
+                  + "）")
+        md.append(f"- 配置 SHA-256：`{str(repro.get('config_sha256'))[:16]}…`；"
+                  f"种子：{repro.get('seeds')}")
+        md.append(f"- 运行环境：python={rt.get('python')} torch={rt.get('torch')} "
+                  f"device={rt.get('device')} gpu={rt.get('gpu')} cuda={rt.get('cuda')}")
+        md.append("- 完整记录：`repro.json`（全局）、各 run 目录 `run_manifest.json`"
+                  "（代码/数据/环境/命令行）、`config_used.json`（超参数）、"
+                  "`train_log.jsonl`（训练曲线）。")
+    else:
+        md.append("- ⚠ 未找到 `repro.json`（直接调用 build_summary？）；"
+                  "无法核对代码版本与数据指纹。")
+    sanity_files = sorted(glob.glob(os.path.join(results_dir, "sanity_*.json")))
+    if sanity_files:
+        md.append("")
+        md.append("| 变体 | sanity | 初始 loss | 最终 loss | token 准确率 |")
+        md.append("|---|---|---|---|---|")
+        for fp in sanity_files:
+            d = load(fp)
+            if not d:
+                continue
+            ini = (d.get("initial") or {}).get("loss")
+            fin = (d.get("final") or {}).get("loss")
+            acc = (d.get("final") or {}).get("token_acc")
+            md.append(f"| {VARIANT_CN.get(d.get('variant'), d.get('variant'))} | "
+                      f"{'✅ 通过' if d.get('passed') else '❌ 未通过'} | "
+                      f"{'-' if ini is None else f'{ini:.4f}'} | "
+                      f"{'-' if fin is None else f'{fin:.4f}'} | "
+                      f"{'-' if acc is None else f'{acc:.4f}'} |")
+        md.append("")
+        md.append("注: sanity check 只验证固定小批量的前向/反向/损失/标签链路能被"
+                  "优化到接近零损失（必要非充分）；数据增强/特征对齐/标签映射等"
+                  "bug 仍可能漏网，需配合中间结果检查。")
+    else:
+        md.append("- ⚠ 未找到 sanity 结果（本次可能跳过了 sanity check）。")
+    if os.path.exists(os.path.join(results_dir, "fig_train_curves.png")):
+        md.append("- 训练曲线图：`fig_train_curves.png`（各变体训练 loss 与 val PPL，"
+                  "多种子取均值）。")
+
     # --- 消融矩阵（全因子 + 去一法）
     present = set(runs.keys())
     md += ["", "## 消融矩阵（全因子 + 去一法）", ""]
@@ -581,6 +637,11 @@ def main():
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--device", default="auto")
     p.add_argument("--skip_train", action="store_true")
+    p.add_argument("--skip_sanity", action="store_true",
+                   help="跳过过拟合小批量 sanity check（默认每变体训练前必跑，"
+                        "失败即中止全量训练）")
+    p.add_argument("--sanity_steps", type=int, default=None,
+                   help="sanity check 的优化步数（默认 300，冒烟 60）")
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
@@ -617,6 +678,38 @@ def main():
     print(f"[run_all] 变体={variants}")
     print(f"[run_all] 种子={seeds}（{n_seeds} 个）tag={tag}")
 
+    # 子进程随机性/确定性环境：PYTHONHASHSEED 必须由父进程设置才能传给子进程；
+    # CUBLAS 工作区配置须在任何 CUDA 初始化前生效。
+    os.environ.setdefault("PYTHONHASHSEED", str(seeds[0]))
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    # 全局溯源清单：本次流水线的代码版本、数据指纹、运行环境与命令。
+    git = git_info()
+    try:
+        data_fp = data_fingerprint(args.data_dir)
+        data_digest = data_fp["digest"]
+    except FileNotFoundError as e:
+        # 数据 bin 尚未生成（如 --skip_train 复用历史产物）时不阻塞流水线，
+        # 但在计数指纹处显式标注缺失，避免汇总页假装数据版本已知。
+        data_fp, data_digest = None, None
+        print(f"[repro] 警告：无法计算数据指纹（{e}）")
+    repro = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "tag": tag,
+        "argv": sys.argv,
+        "config_file": args.config,
+        "config_sha256": sha256_file(args.config),
+        "seeds": seeds,
+        "variants": variants,
+        "smoke": bool(args.smoke),
+        "git": git,
+        "data": data_fp,
+        "runtime": runtime_info(args.device),
+    }
+    save_json(repro, os.path.join(results_dir, "repro.json"))
+    print(f"[repro] code={git.get('commit_short')} dirty={git.get('dirty')} "
+          f"data={data_digest} -> {os.path.join(results_dir, 'repro.json')}")
+
     ruler_over = []
     analysis_over = []
     if args.smoke:
@@ -625,6 +718,33 @@ def main():
         smoke_ctx = min(256, int(cfg.get("block_size", 256)))
         ruler_over = ["--n_samples", "2", "--ctx_lens", str(smoke_ctx)]
         analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
+
+    # 过拟合小批量 sanity check：全量训练前的代码正确性闸门（梯度/损失/标签）。
+    # 每个变体跑一次（用首个种子），失败立即中止——连小批量都无法过拟合时继续
+    # 全量训练只会烧算力。通过不代表数据增强/对齐/映射等 bug 不存在。
+    sanity = {}
+    if args.skip_sanity or args.skip_train:
+        print("[run_all] sanity check 已跳过（--skip_sanity/--skip_train）")
+    else:
+        for v in variants:
+            out_json = os.path.join(results_dir, f"sanity_{v}.json")
+            cmd = [py, "-m", "lega.sanity", "--config", args.config,
+                   "--data_dir", args.data_dir, "--variant", v,
+                   "--seed", str(seeds[0]), "--out", out_json,
+                   "--device", args.device]
+            if args.sanity_steps is not None:
+                cmd += ["--steps", str(args.sanity_steps)]
+            if args.smoke:
+                cmd += ["--smoke"]
+            print("+", " ".join(cmd), flush=True)
+            rc = subprocess.run(cmd, cwd=ROOT, env=os.environ.copy()).returncode
+            sanity[v] = "pass" if rc == 0 else "fail"
+            if rc != 0:
+                raise SystemExit(
+                    f"sanity check 失败（变体 {v}，退出码 {rc}）：无法过拟合小批量，"
+                    "说明梯度反传/损失计算/标签对齐存在严重 bug；请先修复再开全量"
+                    f"训练。结果见 {out_json}。")
+        print(f"[run_all] sanity check 全部通过: {', '.join(sanity.keys())}")
 
     for v in variants:
         for seed in seeds:
@@ -680,7 +800,8 @@ def main():
                      "--suffix", _seed_tag(seed, n_seeds)] + analysis_over)
 
     if not args.skip_plots:
-        run([py, "-m", "lega.plots", "--results_dir", results_dir])
+        run([py, "-m", "lega.plots", "--results_dir", results_dir,
+             "--train_root", out_root])
 
     audit = verify_controlled_setup(out_root, variants, seeds, n_seeds)
     build_summary(results_dir, audit=audit)
