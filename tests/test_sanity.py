@@ -55,3 +55,28 @@ def test_overfit_check_detects_frozen_params():
     assert res["checks"]["loss_requires_grad"] is False
     assert res["checks"]["gradient_nonzero_first_step"] is False
     print("  [ok] 冻结参数（梯度断流）被 sanity check 判定为失败")
+
+
+def test_overfit_check_restores_tf32_flags_independently():
+    """TF32 开关恢复必须分别处理 matmul 与 cudnn，不能用同一变量互相覆盖。"""
+    model = _model()
+    x, y = _batch()
+    mm = torch.backends.cuda.matmul.allow_tf32
+    cudnn = torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = True
+        run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu", seed=0,
+                          warmup=1, log_every=1)
+        assert torch.backends.cuda.matmul.allow_tf32 is False
+        assert torch.backends.cudnn.allow_tf32 is True, "cudnn 开关被 matmul 的旧值覆盖"
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = False
+        run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu", seed=0,
+                          warmup=1, log_every=1)
+        assert torch.backends.cuda.matmul.allow_tf32 is True
+        assert torch.backends.cudnn.allow_tf32 is False
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = mm
+        torch.backends.cudnn.allow_tf32 = cudnn
+    print("  [ok] TF32 开关分别还原（matmul/cudnn 互不覆盖）")

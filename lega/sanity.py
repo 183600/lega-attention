@@ -89,7 +89,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     """
     set_seed(seed)
     # 关闭 TF32：sanity 追求数值上确定地“压到 0”，与训练速度无关
-    prev_tf32 = torch.backends.cuda.matmul.allow_tf32
+    prev_tf32_mm = torch.backends.cuda.matmul.allow_tf32
+    prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     try:
@@ -126,8 +127,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                 history.append({"step": step + 1, "loss": float(loss.detach())})
         final = batch_metrics(model, x, y)
     finally:
-        torch.backends.cuda.matmul.allow_tf32 = prev_tf32
-        torch.backends.cudnn.allow_tf32 = prev_tf32
+        torch.backends.cuda.matmul.allow_tf32 = prev_tf32_mm
+        torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
         model.eval()
 
     checks = {
