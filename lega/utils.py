@@ -1,5 +1,6 @@
-"""通用工具：随机种子、JSON 读写、指标计算（AUROC/Pearson，无 scipy 依赖）。"""
+"""通用工具：随机种子、JSON 读写、指标计算（AUROC/Pearson/统计检验，无 scipy 依赖）。"""
 import json
+import math
 import os
 import random
 import time
@@ -68,6 +69,110 @@ def pearson(x, y):
         return None
     r = float(np.corrcoef(x, y)[0, 1])
     return r if np.isfinite(r) else None
+
+
+def mean_std(values):
+    """样本均值与样本标准差（ddof=1，无偏）。n<2 时 std 为 None。
+
+    统计学约定：跨随机种子的结果必须报告 Mean ± Std（样本标准差），
+    单种子结果无法评估方差，调用方应显式标注 n=1。
+    """
+    a = np.asarray([v for v in values if v is not None], dtype=np.float64)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return None, None
+    if a.size == 1:
+        return float(a[0]), None
+    return float(a.mean()), float(a.std(ddof=1))
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """正则化不完全 Beta 函数的连分式（Lentz 法，Numerical Recipes 口径）。"""
+    MAXIT, EPS, FPMIN = 200, 3e-14, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        de = d * c
+        h *= de
+        if abs(de - 1.0) < EPS:
+            break
+    return h
+
+
+def _betai(a: float, b: float, x: float) -> float:
+    """正则化不完全 Beta 函数 I_x(a, b)。"""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    front = math.exp(lbeta + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_two_sided_p(t: float, df: float) -> float:
+    """Student-t 分布双侧 p 值（无 scipy 依赖）。"""
+    if not math.isfinite(t):
+        return 0.0
+    x = df / (df + t * t)
+    return float(_betai(df / 2.0, 0.5, x))
+
+
+def paired_t_test(a, b) -> dict:
+    """同种子配对样本的双侧 t 检验：比较 a 与 b 两组一一对应的观测。
+
+    实验协议中所有变体使用同一组随机种子训练，因此变体间比较天然配对：
+    d_i = a_i - b_i 消除“种子运气”的公共方差，统计功效高于独立样本检验。
+    返回 {n, mean_diff, std_diff, t, df, p}；n<2 时 t/df/p 为 None。
+    标准差为 0（所有配对差完全相同）时：均值非 0 记 p=0，否则 p=1。
+    """
+    av = np.asarray([v for v in a if v is not None], dtype=np.float64)
+    bv = np.asarray([v for v in b if v is not None], dtype=np.float64)
+    if av.size != bv.size:
+        raise ValueError(f"配对样本长度不一致: {av.size} vs {bv.size}")
+    d = av - bv
+    n = int(d.size)
+    if n == 0:
+        return {"n": 0, "mean_diff": None, "std_diff": None,
+                "t": None, "df": None, "p": None}
+    mean_diff = float(d.mean())
+    if n < 2:
+        return {"n": n, "mean_diff": mean_diff, "std_diff": None,
+                "t": None, "df": None, "p": None}
+    std_diff = float(d.std(ddof=1))
+    df = n - 1
+    if std_diff == 0.0:
+        p = 1.0 if mean_diff == 0.0 else 0.0
+        return {"n": n, "mean_diff": mean_diff, "std_diff": 0.0,
+                "t": float("inf") if mean_diff else 0.0, "df": df, "p": p}
+    t = mean_diff / (std_diff / math.sqrt(n))
+    return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
+            "t": float(t), "df": df, "p": student_t_two_sided_p(t, df)}
 
 
 def auroc(scores, labels) -> float:

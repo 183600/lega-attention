@@ -142,6 +142,31 @@ def test_all_variants_forward_backward_and_params():
               f"extras={gate_extra_params(model)}")
 
 
+def test_gate_stats_batch_shape_all_variants():
+    """门控统计必须与输入批次对齐 (B,H,T)。
+
+    lega_len_only 只含 b·log n 一项，曾因 (1,H,1) 参数与 (T,) 的 log_n 广播
+    把批次维压成 1，导致机制分析按批次行取统计时越界；该测试同时覆盖
+    显式完整路径（stats_argmax=True）与 SDPA 轻量路径（stats_argmax=False）。
+    """
+    torch.manual_seed(5)
+    x = torch.randn(2, 12, 32)
+    for variant in VARIANTS:
+        for stats_argmax in (True, False):
+            m = _mk_attn(d_model=32, n_heads=2, variant=variant)
+            m.eval()
+            with torch.no_grad():
+                _, _, stats = m(x, rope=None, need_stats=True,
+                                stats_argmax=stats_argmax)
+            if not stats:
+                continue
+            for key in ("g", "logit", "qterm", "max_p", "argmax", "p_null"):
+                v = stats.get(key)
+                if v is None:
+                    continue
+                assert v.shape == (2, 2, 12), (variant, stats_argmax, key, v.shape)
+
+
 def test_standard_sdpa_matches_explicit():
     """standard 的 SDPA 快速路径与显式路径数值一致。"""
     torch.manual_seed(0)

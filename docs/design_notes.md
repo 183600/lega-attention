@@ -12,7 +12,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 ## 变体
 
-`standard`、`qgate`、`null`、`lega` 及三个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`），详见 README。
+`standard`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，详见 README。
 
 ## 评测
 

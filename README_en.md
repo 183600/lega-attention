@@ -44,10 +44,19 @@ where $p_j$ are the causal attention weights, $n$ is the number of real tokens r
 | `standard` | none | Baseline |
 | `qgate` | $g=\sigma(w^\top q+d)$ | Prior-work representative: query-only output gating |
 | `null` | none (extra null KV slots) | Prior-work representative: explicit "choose not to read" |
-| `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **Ours** |
-| `lega_no_len` | $g=\sigma(w^\top q+a\log\max_j p_j+d)$ | Ablation: no length calibration |
-| `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | Ablation: no concentration evidence |
-| `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | Ablation: no query term |
+| `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **Ours** (full factorial A+B+C) |
+| `lega_no_len` | $g=\sigma(w^\top q+a\log\max_j p_j+d)$ | Leave-one-out: no length calibration (A+B) |
+| `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | Leave-one-out: no concentration evidence (A+C) |
+| `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | Leave-one-out: no query term (B+C) |
+| `lega_conc_only` | $g=\sigma(a\log\max_j p_j+d)$ | Factorial: concentration term only (B) |
+| `lega_len_only` | $g=\sigma(b\log n+d)$ | Factorial: length term only (C) |
+
+**Ablation completeness**: with query=A, concentration=B, length=C, both the full
+factorial (none/`standard`, A/`qgate`, B/`lega_conc_only`, C/`lega_len_only`,
+AB/`lega_no_len`, AC/`lega_no_conc`, BC/`lega_no_query`, ABC/`lega`) and the
+leave-one-out set (Full/Full−A/Full−B/Full−C) are implemented; the summary lists
+the matrix and flags missing cells, so partial combinations can never silently
+support "every component helps".
 
 Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA), <0.02% of the model (`null` is $2d_{head}$ per head). Scripts print the exact numbers at the start of training.
 
@@ -55,7 +64,8 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
 
 ## 2. Experimental design
 
-- **Fair comparison**: all variants share the same parameter budget and the same training steps/data (same config, same seed).
+- **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, each run's `config_used.json` is automatically cross-checked and any difference besides variant/seed fails the pipeline — fairness is an executable assertion, not a verbal promise.
+- **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test (`results/<tag>/significance.json`); with n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%.
 - **Three evaluation axes**:
   1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision;
   2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
@@ -83,7 +93,7 @@ bash scripts/run_smoke.sh
 # equivalent to: unit tests -> generate dummy data (data/dummy) -> run_all --smoke
 ```
 
-Smoke mode automatically shrinks: 20 steps/variant, ctx=min(256, block_size), 2 examples per task — for verifying code correctness, not scientific conclusions.
+Smoke mode automatically shrinks: 20 steps/variant, a single seed, ctx=min(256, block_size), 2 examples per task — for verifying code correctness, not scientific conclusions.
 
 ### 3.3 Full experiments (WikiText-103 + small config)
 
@@ -92,10 +102,12 @@ Smoke mode automatically shrinks: 20 steps/variant, ctx=min(256, block_size), 2 
 python scripts/prepare_data.py --out_dir data/wikitext103
 # optional --max_tokens 30000000 to control training size
 
-# 2) Full pipeline: train 7 variants -> PPL -> RULER -> latency -> analysis -> plots -> summary table
+# 2) Full pipeline: 9 variants x multiple seeds (5 by default) -> PPL -> RULER
+#    -> latency -> analysis -> plots -> summary (Mean ± Std + paired tests)
 python run_all.py --config configs/small.json --data_dir data/wikitext103
 
-# optional: W&B logging
+# optional: custom seeds (e.g. 3) or W&B logging
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --seeds 1337,2024,42
 wandb login
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --wandb
 ```
@@ -104,9 +116,10 @@ Outputs:
 
 | Path | Content |
 |---|---|
-| `out/<tag>/<variant>/model.pt` | Checkpoint + training config |
-| `out/<tag>/<variant>/train_log.jsonl` | Training/validation curves |
-| `results/<tag>/summary.md` | **Summary table (paste into a report/paper draft)** |
+| `out/<tag>/<variant>[/seed<seed>]/model.pt` | Checkpoint + training config (seeded subdirs for multi-seed runs) |
+| `out/<tag>/<variant>[/seed<seed>]/train_log.jsonl` | Training/validation curves |
+| `results/<tag>/summary.md` | **Summary (Mean ± Std + ablation matrix + controlled-variable audit)** |
+| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, p value, verdict) |
 | `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths |
 | `results/<tag>/latency.json` | prefill / decode latency |
@@ -136,7 +149,7 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M smoke config (CPU-friendly)
 │   └── small.json             # ~30M full config (hours/variant on one GPU)
 ├── lega/
-│   ├── attention.py           # core: causal attention for 7 variants (LEGA gate lives here)
+│   ├── attention.py           # core: causal attention for 9 variants (LEGA gate + ablation matrix)
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback) + bin cache + batch sampling
 │   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B)
@@ -160,7 +173,7 @@ lega-attention/
 - **Numerical stability of $c$**: `max_p = exp(zmax − LSE)` is always bounded in (0,1]; clamped to `1e-30` before `log`. Uniform attention → `c=0` is unit-tested (`tests/test_attention.py`).
 - **Definition of $n$**: the number of readable tokens for query position $t$ is $t+1$ (causal); null slots don't count; `null`-variant null keys get no RoPE (position-independent slots).
 - **Gate query term**: the gate's $q$ uses the **pre-RoPE** query content vector; attention scoring still uses rotated $q,k$. Length/absolute position thus enters the gate only via the explicit $\log n$, avoiding the causal confounding in the method's claims.
-- **Reproducibility**: `set_seed` disables cudnn benchmark and enables deterministic algorithms (`warn_only`) on CUDA; same-seed reruns are used for fair variant comparison.
+- **Reproducibility**: `set_seed` disables cudnn benchmark and enables deterministic algorithms (`warn_only`) on CUDA; all variants are trained on the same seed set and compared with same-seed paired statistics (`run_all.py --seeds` / `seeds` in the configs).
 - **torch.compile**: `"compile": true` enables torch.compile on CUDA; checkpoints are saved with wrapper-stripped parameter keys so `load_model` (evaluate/ruler/latency/analysis) loads them directly.
 - **Dual paths for standard attention**: SDPA fast path and explicit path are numerically identical (unit-tested); the explicit path is used for variants needing attention statistics and for fair latency comparison (`standard` vs `standard_sdpa` both measured).
 - **KV cache**: gated variants compute the gate token-by-token during incremental decoding; cache equivalence is unit-tested (full forward vs token-by-token).

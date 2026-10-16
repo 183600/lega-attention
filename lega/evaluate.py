@@ -71,6 +71,7 @@ def main():
 
     res = {
         "variant": ck.get("variant", model.variant),
+        "seed": ck.get("seed"),
         "ckpt": args.ckpt,
         "split": split,
         # checkpoint（model_best.pt）在 val 上选出；split=val 时报告指标与选择集同源

@@ -590,6 +590,8 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
         "lega_no_len": d_head + 2,    # w, a, d
         "lega_no_conc": d_head + 2,   # w, b, d
         "lega_no_query": 3,           # a, b, d
+        "lega_conc_only": 2,          # a, d
+        "lega_len_only": 2,           # b, d
     }[variant]
     return per * n_heads * n_layers
 

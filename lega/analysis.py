@@ -74,7 +74,8 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and device.startswith("cuda")) else contextlib.nullcontext())
     use_c_full = variant in ("lega", "lega_no_query")
-    use_c_nolen = not use_c_full and variant == "lega_no_len"
+    use_c_nolen = (not use_c_full
+                   and variant in ("lega_no_len", "lega_conc_only"))
     # 按提示长度分组：只有等长样例可堆叠；每组内再按 batch_size 切批。
     order = sorted(range(len(examples)), key=lambda k: len(examples[k]["ids"]))
     bs = max(1, int(batch_size))
@@ -261,6 +262,8 @@ def main():
     p.add_argument("--n_examples", type=int, default=None)
     p.add_argument("--tau", type=float, default=None)
     p.add_argument("--ctx", type=int, default=None, help="分析用上下文长度，默认取 RULER 最长档")
+    p.add_argument("--suffix", default="",
+                   help="输出文件名后缀（如 _seed1337），多种子运行避免互相覆盖")
     p.add_argument("--device", default="auto")
     args = p.parse_args()
 
@@ -313,28 +316,33 @@ def main():
 
     if not examples:
         print("[analysis] 没有可分析的样例（ctx 过小或缺少语料），跳过")
-        save_json({"variant": variant, "n_records": 0, "note": "no examples",
-                   "skipped_tasks": skipped_tasks}, os.path.join(
-            args.out_dir, f"analysis_{variant}.json"))
+        save_json({"variant": variant, "seed": ck.get("seed"), "n_records": 0,
+                   "note": "no examples", "skipped_tasks": skipped_tasks},
+                  os.path.join(args.out_dir,
+                               f"analysis_{variant}{args.suffix}.json"))
         return
 
     print(f"[analysis] variant={variant} ctx={ctx} 样例数={len(examples)} tau={tau}")
     records = collect_records(model, tok, device, examples, task_of, ctx_of,
                               amp=bool(ckpt_cfg.get("amp", True)))
     summary = summarize(records, variant, tau)
+    # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
+    summary["seed"] = ck.get("seed")
     if skipped_tasks:
         summary["skipped_tasks"] = skipped_tasks
 
     os.makedirs(args.out_dir, exist_ok=True)
     # 逐记录 CSV（供画图与复核）
-    csv_path = os.path.join(args.out_dir, f"analysis_records_{variant}.csv")
+    csv_path = os.path.join(args.out_dir,
+                            f"analysis_records_{variant}{args.suffix}.csv")
     if records:
         fields = sorted({k for r in records for k in r})
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
             w.writerows(records)
-    save_json(summary, os.path.join(args.out_dir, f"analysis_{variant}.json"))
+    save_json(summary,
+              os.path.join(args.out_dir, f"analysis_{variant}{args.suffix}.json"))
 
     def fmt(x):
         return "n/a" if x is None else f"{x:.3f}"

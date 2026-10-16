@@ -20,6 +20,7 @@
   "train_ctx": 256,
   "amp": true,
   "seed": 1337,
+  "seeds": [1337, 2024, 42],
 
   "log_every": 10,
   "eval_every": 250,

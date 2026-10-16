@@ -9,6 +9,7 @@ CUDA 上默认与 train/evaluate/ruler/analysis 一样启用 bf16 autocast
 """
 import argparse
 import contextlib
+import glob
 import json
 import os
 import time
@@ -173,12 +174,24 @@ def main():
         else:
             vname, use_sdpa = v, True
         assert vname in VARIANTS, f"未知变体 {v}"
-        # 与 evaluate/ruler/analysis 口径一致：优先 val 上选出的 best-checkpoint
+        # 与 evaluate/ruler/analysis 口径一致：优先 val 上选出的 best-checkpoint。
+        # 兼容两种布局：单种子 out/<tag>/<variant>/，多种子 out/<tag>/<variant>/seed<seed>/；
+        # 多种子时延迟按最小种子号的 checkpoint 测量（延迟由架构决定，与种子无关）。
         ckpt_path = None
         if args.ckpt_dir:
-            best = os.path.join(args.ckpt_dir, vname, "model_best.pt")
-            ckpt_path = (best if os.path.exists(best)
-                         else os.path.join(args.ckpt_dir, vname, "model.pt"))
+            base = os.path.join(args.ckpt_dir, vname)
+            seed_dirs = sorted(
+                (p for p in glob.glob(os.path.join(base, "seed*"))
+                 if os.path.isdir(p)
+                 and os.path.basename(p)[4:].isdigit()),
+                key=lambda p: int(os.path.basename(p)[4:]))
+            for d in [base] + seed_dirs:
+                best = os.path.join(d, "model_best.pt")
+                ckpt_path = (best if os.path.exists(best)
+                             else os.path.join(d, "model.pt"))
+                if os.path.exists(ckpt_path):
+                    break
+                ckpt_path = None
         if ckpt_path and os.path.exists(ckpt_path):
             model, _ = load_model(ckpt_path, device=device, use_sdpa_standard=use_sdpa)
             src = "ckpt"

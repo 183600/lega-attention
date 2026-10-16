@@ -8,6 +8,7 @@ import argparse
 import glob
 import json
 import os
+import re
 
 try:
     import matplotlib
@@ -55,6 +56,7 @@ COLORS = {
     "standard": "#7f8c8d", "standard_sdpa": "#bdc3c7", "qgate": "#e67e22",
     "null": "#8e44ad", "lega": "#c0392b", "lega_no_len": "#e74c3c",
     "lega_no_conc": "#16a085", "lega_no_query": "#2980b9",
+    "lega_conc_only": "#27ae60", "lega_len_only": "#8e6e00",
 }
 
 
@@ -69,32 +71,69 @@ def _load(path):
         return json.load(f)
 
 
+_SEED_SUFFIX_RE = re.compile(r"_seed(\d+)$")
+
+
+def _prefer_seeded(paths):
+    """存在 _seed<s> 结果文件时忽略无种子的旧文件：否则同一次实验会被多算一次。"""
+    seeded = [p for p in paths
+              if _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(p))[0])]
+    return seeded if seeded else paths
+
+
+def _group_by_variant(pattern):
+    """按变体分组 glob 到的结果文件（自动合并多种子 _seed<seed> 文件）。
+
+    种子识别与 run_all 的汇总口径一致：文件名 _seed<s> 或 JSON 内的 seed 字段；
+    若某变体已有带种子的结果，则忽略完全无种子信息（None）的旧文件，避免同一次
+    实验被重复计为一个额外种子。
+    """
+    groups = {}
+    for fp in sorted(glob.glob(pattern)):
+        d = _load(fp)
+        if not (d and d.get("variant")):
+            continue
+        m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
+        seed = int(m.group(1)) if m else d.get("seed")
+        groups.setdefault(d["variant"], []).append((seed, d))
+    return {v: ([d for s, d in items if s is not None]
+                if any(s is not None for s, _ in items)
+                else [d for _, d in items])
+            for v, items in groups.items()}
+
+
 def fig_ppl(rdir):
+    groups = _group_by_variant(os.path.join(rdir, "eval_*.json"))
+    if not groups:
+        return False
     rows = []
     splits = set()
-    for fp in sorted(glob.glob(os.path.join(rdir, "eval_*.json"))):
-        d = _load(fp)
-        if d:
-            # 通用别名 ppl 优先（evaluate.py 约定）；旧文件回退 val_ppl。
-            # split 决定标签用词：默认流水线（auto）在存在 test.bin 时评的是
-            # held-out test，不能一律标成"验证集"。
-            rows.append((d["variant"], d.get("ppl", d["val_ppl"]),
-                         bool(d.get("val_ppl_clamped", False))))
-            splits.add(d.get("split", "val"))
+    for v, ds in groups.items():
+        # 多种子：每变体取 PPL 均值，误差棒为样本标准差；单种子不画误差棒。
+        ppls = [d.get("ppl", d.get("val_ppl")) for d in ds]
+        ppls = [p for p in ppls if p is not None]
+        if not ppls:
+            continue
+        mean = float(np.mean(ppls))
+        std = float(np.std(ppls, ddof=1)) if len(ppls) > 1 else 0.0
+        rows.append((v, mean, std, any(d.get("val_ppl_clamped", False) for d in ds)))
+        splits.add(ds[0].get("split", "val"))
     if not rows:
         return False
     rows.sort(key=lambda r: r[1])
     fig, ax = plt.subplots(figsize=(7, 4.2), constrained_layout=True)
-    names = [_label(v) for v, _, _ in rows]
-    vals = [p for _, p, _ in rows]
+    names = [_label(v) for v, _, _, _ in rows]
+    vals = [p for _, p, _, _ in rows]
+    errs = [s for _, _, s, _ in rows]
     # 发散运行的 PPL 被截断到 exp(20)，以斜线纹理区分，避免被当作正常数值解读
-    bars = ax.bar(names, vals,
-                  color=[COLORS.get(v, "#34495e") for v, _, _ in rows])
-    for bar, (_, _, clamped) in zip(bars, rows):
+    bars = ax.bar(names, vals, yerr=errs if any(errs) else None, capsize=3,
+                  color=[COLORS.get(v, "#34495e") for v, _, _, _ in rows])
+    for bar, (_, _, _, clamped) in zip(bars, rows):
         if clamped:
             bar.set_hatch("//")
-    ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c else "%.2f" % p
-                               for (_, p, c) in rows], fontsize=9)
+    ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c
+                               else ("%.2f±%.2f" % (p, s) if s else "%.2f" % p)
+                               for (_, p, s, c) in rows], fontsize=9)
     if splits == {"test"}:
         set_name = "测试集"
     elif len(splits) == 1:
@@ -102,7 +141,7 @@ def fig_ppl(rdir):
     else:
         set_name = "各评测集"   # 混合 split 时不冒充单一集合
     ax.set_ylabel(f"{set_name}困惑度 (PPL, 越低越好)")
-    ax.set_title("语言建模困惑度对比（相同参数量级与训练步数）")
+    ax.set_title("语言建模困惑度对比（相同配置与步数；误差棒=跨 seed 标准差）")
     ax.tick_params(axis="x", rotation=20)
     ax.grid(axis="y", alpha=0.3)
     fig.savefig(os.path.join(rdir, "fig_ppl.png"), dpi=150)
@@ -111,14 +150,33 @@ def fig_ppl(rdir):
 
 
 def fig_ruler(rdir):
-    files = sorted(glob.glob(os.path.join(rdir, "ruler_*.json")))
-    if not files:
+    groups = _group_by_variant(os.path.join(rdir, "ruler_*.json"))
+    if not groups:
         return False
+    # 多种子：同一 (task, ctx) 的指标跨 seed 先求均值再画，避免只显示最后一个种子
     data = {}
-    for fp in files:
-        d = _load(fp)
-        if d:
-            data[d["variant"]] = d["results"]
+    for v, ds in groups.items():
+        agg = {}
+        for d in ds:
+            for task, by_ctx in (d.get("results") or {}).items():
+                if task == "_skipped" or not isinstance(by_ctx, dict):
+                    continue
+                for ctx, m in by_ctx.items():
+                    if not isinstance(m, dict):
+                        continue
+                    cell = agg.setdefault(task, {}).setdefault(
+                        ctx, {"em": [], "recall": []})
+                    if m.get("em") is not None:
+                        cell["em"].append(m["em"])
+                    if m.get("recall") is not None:
+                        cell["recall"].append(m["recall"])
+        data[v] = {
+            task: {ctx: {
+                "em": (float(np.mean(cell["em"])) if cell["em"] else None),
+                "recall": (float(np.mean(cell["recall"]))
+                           if cell["recall"] else None)}
+                for ctx, cell in by_ctx.items()}
+            for task, by_ctx in agg.items()}
     tasks = ["niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt"]
     avail = [t for t in tasks if any(t in r and r[t] for r in data.values())]
     if not avail:
@@ -189,14 +247,20 @@ def fig_latency(rdir):
 
 def _read_records(rdir, variant):
     import csv
-    path = os.path.join(rdir, f"analysis_records_{variant}.csv")
-    if not os.path.exists(path):
-        return []
+    # 兼容单种子 analysis_records_<v>.csv 与多种子 analysis_records_<v>_seed<s>.csv，
+    # 多种子记录合并后画图（分布图上的种子差异会自然体现为更宽的分布）。
+    paths = _prefer_seeded(
+        [os.path.join(rdir, f"analysis_records_{variant}.csv")]
+        + sorted(glob.glob(os.path.join(
+            rdir, f"analysis_records_{variant}_seed*.csv"))))
     rows = []
-    with open(path, "r", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            rows.append({k: (float(v) if v not in ("", "None", "nan") else None)
-                         for k, v in r.items() if k not in ("task",)})
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                rows.append({k: (float(v) if v not in ("", "None", "nan") else None)
+                             for k, v in r.items() if k not in ("task",)})
     return rows
 
 
@@ -263,14 +327,21 @@ def fig_calibration(rdir, variant="lega"):
 
 def fig_misleading(rdir):
     """各变体：集中时找对率 vs 集中但看错率 —— “集中≠找对”的直接证据。"""
-    rows = []
-    for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json"))):
-        base = os.path.basename(fp)
-        if "records" in base:
-            continue
+    keys = ("p_hit_given_conc", "p_hit_given_notconc", "misleading_rate")
+    groups = {}
+    files = [fp for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json")))
+             if "records" not in os.path.basename(fp)]
+    for fp in _prefer_seeded(files):
         d = _load(fp)
         if d and d.get("n_records"):
-            rows.append(d)
+            groups.setdefault(d["variant"], []).append(d)
+    rows = []
+    for v, ds in groups.items():
+        row = {"variant": v}
+        for k in keys:
+            vals = [d[k] for d in ds if d.get(k) is not None]
+            row[k] = float(np.mean(vals)) if vals else None
+        rows.append(row)
     if not rows:
         return False
     fig, ax = plt.subplots(figsize=(7.2, 4.4), constrained_layout=True)
@@ -298,11 +369,27 @@ def fig_misleading(rdir):
 
 
 def fig_auroc_heads(rdir, variant="lega"):
-    d = _load(os.path.join(rdir, f"analysis_{variant}.json"))
-    if not d or not d.get("per_head"):
-        return False
-    ph = [h for h in d["per_head"]
-          if h.get("auroc_qterm") is not None and h.get("auroc_logit") is not None]
+    files = _prefer_seeded(
+        [os.path.join(rdir, f"analysis_{variant}.json")]
+        + sorted(glob.glob(os.path.join(
+            rdir, f"analysis_{variant}_seed*.json"))))
+    # 多种子：逐 (层, 头) 的 AUROC 跨 seed 求均值后再画
+    agg = {}
+    for fp in files:
+        d = _load(fp)
+        if not d:
+            continue
+        for h in d.get("per_head") or []:
+            key = (h["layer"], h["head"])
+            cell = agg.setdefault(key, {"qterm": [], "logit": []})
+            if h.get("auroc_qterm") is not None:
+                cell["qterm"].append(h["auroc_qterm"])
+            if h.get("auroc_logit") is not None:
+                cell["logit"].append(h["auroc_logit"])
+    ph = [{"layer": k[0], "head": k[1],
+           "auroc_qterm": float(np.mean(v["qterm"])),
+           "auroc_logit": float(np.mean(v["logit"]))}
+          for k, v in sorted(agg.items()) if v["qterm"] and v["logit"]]
     if not ph:
         return False
     fig, ax = plt.subplots(figsize=(5.6, 5.0), constrained_layout=True)

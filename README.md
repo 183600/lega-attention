@@ -45,10 +45,18 @@ $$
 | `standard` | 无 | 基线 |
 | `qgate` | $g=\sigma(w^\top q+d)$ | 已有工作代表：只看查询的输出门控 |
 | `null` | 无（额外 null KV 槽） | 已有工作代表：显式"选择不读取" |
-| `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **本文方法** |
-| `lega_no_len` | $g=\sigma(w^\top q+a\log\max_j p_j+d)$ | 消融：去掉长度校准 |
-| `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | 消融：去掉集中度证据 |
-| `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | 消融：去掉查询项 |
+| `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **本文方法**（全因子 A+B+C） |
+| `lega_no_len` | $g=\sigma(w^\top q+a\log\max_j p_j+d)$ | 去一法：去掉长度校准（A+B） |
+| `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | 去一法：去掉集中度证据（A+C） |
+| `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | 去一法：去掉查询项（B+C） |
+| `lega_conc_only` | $g=\sigma(a\log\max_j p_j+d)$ | 全因子：仅集中度项（B） |
+| `lega_len_only` | $g=\sigma(b\log n+d)$ | 全因子：仅长度项（C） |
+
+**消融完整性**：设查询项=A、集中度项=B、长度项=C，则
+全因子 8 格（无/`standard`、A/`qgate`、B/`lega_conc_only`、C/`lega_len_only`、
+AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、ABC/`lega`）与
+去一法（Full/Full−A/Full−B/Full−C）全部实现；汇总表会自动列出矩阵并标注缺失组合，
+只报告部分组合时不会给出“各组件均有用”的结论。
 
 参数量差异：门控仅引入**每头 $d_{head}+3$ 个参数**（LEGA），相对模型总量 <0.02%（`null` 为每头 $2d_{head}$）。脚本会在训练开始时打印精确数值。
 
@@ -56,7 +64,8 @@ $$
 
 ## 2. 实验设计
 
-- **公平对比**：所有变体使用相同参数量级、相同训练步数/数据（同一 config、同一 seed）。
+- **公平对比（受控变量）**：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/训练步数/数据顺序），训练后自动核对各 run 的 `config_used.json`，除变体/种子外任何配置差异都会直接报错——把“公平对比”从口头约定变成可执行断言。
+- **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std**（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对，用双侧配对 t 检验给出显著性（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益。
 - **三个评测维度**：
   1. **困惑度**（WikiText-103 PPL：checkpoint 选择在 val 上完成，PPL 在 held-out test 上评测，无 test 时回退 val）；评估窗口不重复，并在整个评测集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；
   2. **RULER 长上下文检索**（简化复现 5 任务）：`niah_synth`（合成干扰单键检索）、`niah_corpus`（自然文本干扰）、`niah_multikey`（多键干扰）、`fwe`（高频词提取）、`vt`（变量追踪）；多档上下文长度 + 贪心解码；数值任务 EM **只承认生成内容中的第一个数值回答**，避免"先答错后蒙中"被计分；
@@ -84,7 +93,7 @@ bash scripts/run_smoke.sh
 # 等价于: 单元测试 -> 生成伪数据(data/dummy) -> run_all --smoke
 ```
 
-冒烟模式自动缩减：20 步/变体、ctx=min(256, block_size)、每任务 2 个样例，用于验证代码正确性而非科学结论。
+冒烟模式自动缩减：20 步/变体、仅 1 个种子、ctx=min(256, block_size)、每任务 2 个样例，用于验证代码正确性而非科学结论。
 
 ### 3.3 正式实验（WikiText-103 + small 配置）
 
@@ -93,10 +102,12 @@ bash scripts/run_smoke.sh
 python scripts/prepare_data.py --out_dir data/wikitext103
 # 可选 --max_tokens 30000000 控制训练规模
 
-# 2) 全流水线：7 变体训练 → PPL → RULER → 延迟 → 机制分析 → 图表 → 汇总表
+# 2) 全流水线：9 变体 × 多种子（默认 5 个）训练 → PPL → RULER → 延迟
+#    → 机制分析 → 图表 → 汇总表（Mean ± Std + 配对显著性检验）
 python run_all.py --config configs/small.json --data_dir data/wikitext103
 
-# 可选：W&B 日志
+# 可选：自定义种子（如 3 个）或 W&B 日志
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --seeds 1337,2024,42
 wandb login
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --wandb
 ```
@@ -105,9 +116,10 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 
 | 路径 | 内容 |
 |---|---|
-| `out/<tag>/<variant>/model.pt` | 检查点 + 训练配置 |
-| `out/<tag>/<variant>/train_log.jsonl` | 训练/验证曲线数据 |
-| `results/<tag>/summary.md` | **汇总表（可直接贴入周报/论文初稿）** |
+| `out/<tag>/<variant>[/seed<seed>]/model.pt` | 检查点 + 训练配置（多种子时按种子分子目录） |
+| `out/<tag>/<variant>[/seed<seed>]/train_log.jsonl` | 训练/验证曲线数据 |
+| `results/<tag>/summary.md` | **汇总表（Mean ± Std + 消融矩阵 + 受控变量自检，可直接贴入周报/论文初稿）** |
+| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、p 值、结论） |
 | `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文 |
 | `results/<tag>/latency.json` | prefill / decode 延迟 |
@@ -137,7 +149,7 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M 参数冒烟配置（CPU 可跑）
 │   └── small.json             # ~30M 参数正式配置（单卡数小时/变体）
 ├── lega/
-│   ├── attention.py           # 核心：7 个变体的因果注意力（LEGA 门控公式在此）
+│   ├── attention.py           # 核心：9 个变体的因果注意力（LEGA 门控公式与消融矩阵在此）
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底）+ bin 缓存 + 批采样
 │   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）
@@ -161,7 +173,7 @@ lega-attention/
 - **c 的数值稳定性**：`max_p = exp(zmax − LSE)`，恒有界 (0,1]；`log` 前 clamp 到 `1e-30`。均匀注意力→`c=0` 有单元测试覆盖（`tests/test_attention.py`）。
 - **n 的定义**：查询位置 $t$ 的可读 token 数为 $t+1$（因果），null 槽不计入 $n$；`null` 变体的 null 键不施加 RoPE（位置无关槽）。
 - **门控查询项的定位**：门控里的 $q$ 使用 **RoPE 旋转前**的查询内容向量；注意力打分仍使用旋转后的 $q,k$。这样长度/绝对位置只通过显式的 $\log n$ 进入门控，避免方法主张中的因果混淆。
-- **可复现性**：`set_seed` 在 CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`）；同 seed 重跑用于变体间公平对比。
+- **可复现性**：`set_seed` 在 CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`）；同一组随机种子训练全部变体，变体间用同种子配对统计（`run_all.py --seeds` / configs 中的 `seeds`）。
 - **torch.compile**：配置 `"compile": true` 可在 CUDA 上启用 torch.compile；保存检查点时统一使用剥离包装前缀后的参数键名，`load_model`（evaluate/ruler/latency/analysis）可直接加载。
 - **标准注意力双路径**：SDPA 快速路径与显式路径数值一致（有单测），显式路径用于需要注意力统计的变体与延迟公平对比（`standard` vs `standard_sdpa` 两者都测）。
 - **KV 缓存**：gated 变体在增量解码时逐 token 计算门控，缓存等价性有单测（全量前向 vs 逐 token）。

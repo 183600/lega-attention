@@ -1,13 +1,15 @@
-"""通用工具测试：AUROC（并列取平均秩）与 Pearson 的边界行为。
+"""通用工具测试：AUROC（并列取平均秩）、Pearson 与统计检验的边界行为。
 
 AUROC 是机制分析的核心指标（门控分数区分 hit/miss），这里用逐对比较的
-定义式独立复算，专门覆盖并列分数的平均秩路径。
+定义式独立复算，专门覆盖并列分数的平均秩路径。paired_t_test 是“多种子
+Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p 值精度。
 """
 import math
 
 import numpy as np
 
-from lega.utils import auroc, pearson
+from lega.utils import (auroc, mean_std, paired_t_test, pearson,
+                        student_t_two_sided_p)
 
 
 def _brute_auroc(scores, labels):
@@ -85,3 +87,63 @@ def test_pearson_guards():
     yn[1] = np.nan
     assert abs(pearson(xn, yn) - 1.0) < 1e-9
     print("  [ok] pearson 边界（常量/样本不足/NaN 成对剔除）")
+
+
+def test_mean_std():
+    # 样本标准差（ddof=1）：np.std([1,2,3,4], ddof=1) = sqrt(5/3)
+    m, s = mean_std([1, 2, 3, 4])
+    assert abs(m - 2.5) < 1e-12
+    assert abs(s - math.sqrt(5.0 / 3.0)) < 1e-12
+    # n=1：std 不可估计（不是 0），调用方据此标注 n=1
+    m1, s1 = mean_std([3.5])
+    assert m1 == 3.5 and s1 is None
+    # 空/全 None/非有限值
+    assert mean_std([]) == (None, None)
+    assert mean_std([None, None]) == (None, None)
+    m2, _ = mean_std([1.0, float("nan"), 3.0])
+    assert m2 == 2.0
+    print("  [ok] mean_std（ddof=1、n=1、空输入、NaN 剔除）")
+
+
+def test_paired_t_matches_t_table():
+    # Student-t 临界值表（双侧）：df=4, t=2.776445 -> p=0.05；df=3, t=3.182446 -> p=0.05
+    assert abs(student_t_two_sided_p(2.776445, 4) - 0.05) < 1e-6
+    assert abs(student_t_two_sided_p(3.182446, 3) - 0.05) < 1e-6
+    assert abs(student_t_two_sided_p(0.0, 5) - 1.0) < 1e-12
+    # 配对检验：diffs=[1,2,3,4] -> t=3.872983, df=3, p≈0.030466
+    r = paired_t_test([1, 2, 3, 4], [0, 0, 0, 0])
+    assert r["n"] == 4 and r["df"] == 3
+    assert abs(r["mean_diff"] - 2.5) < 1e-12
+    assert abs(r["t"] - 3.872983346207417) < 1e-9
+    assert abs(r["p"] - 0.030466291662170977) < 1e-6
+    # 交换顺序只翻符号，p 不变
+    r2 = paired_t_test([0, 0, 0, 0], [1, 2, 3, 4])
+    assert abs(r2["p"] - r["p"]) < 1e-12
+    assert abs(r2["mean_diff"] + r["mean_diff"]) < 1e-12
+    print("  [ok] paired_t_test 与 Student-t 临界值表一致")
+
+
+def test_paired_t_edge_cases():
+    # 完全相同的两组 -> t=0, p=1（不显著）
+    r = paired_t_test([5.0, 5.0, 5.0], [5.0, 5.0, 5.0])
+    assert r["t"] == 0.0 and r["p"] == 1.0
+    # 常数差且方差为 0：均值非 0 记 p=0，均值 0 记 p=1
+    r = paired_t_test([6.0, 6.0, 6.0], [5.0, 5.0, 5.0])
+    assert r["p"] == 0.0 and math.isinf(r["t"])
+    # n=1：无法检验，p 为 None
+    r = paired_t_test([2.0], [1.0])
+    assert r["n"] == 1 and r["p"] is None and r["t"] is None
+    # 长度不一致必须报错，避免静默错配种子
+    try:
+        paired_t_test([1.0, 2.0], [1.0])
+        raise AssertionError("长度不一致应抛 ValueError")
+    except ValueError:
+        pass
+    # 显著 vs 不显著：大效应小方差 vs 小效应大方差
+    sig = paired_t_test([10.5 + i * 0.01 for i in range(5)],
+                        [10.0 + i * 0.01 for i in range(5)])
+    assert sig["p"] < 0.01
+    noise = paired_t_test([1.0, -1.0, 1.0, -1.0, 1.0],
+                          [0.9, -0.9, 0.9, -0.9, 0.9])
+    assert noise["p"] > 0.05
+    print("  [ok] paired_t_test 边界（全同/零方差/n=1/长度错配/显著与不显著）")

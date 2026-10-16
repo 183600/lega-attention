@@ -11,6 +11,15 @@
     lega_no_len   :  g = sigmoid(w·q + a*log max_j p_j + d)        （消融：去掉长度校准）
     lega_no_conc  :  g = sigmoid(w·q + b*log n + d)                （消融：去掉集中度证据）
     lega_no_query :  g = sigmoid(a*c + b*log n + d)                （消融：去掉查询项）
+    lega_conc_only:  g = sigmoid(a*log max_j p_j + d)              （全因子消融：仅集中度项 B）
+    lega_len_only :  g = sigmoid(b*log n + d)                      （全因子消融：仅长度项 C）
+
+全因子消融矩阵（无=standard, A=查询, B=集中度, C=长度）：
+    无   -> standard         A    -> qgate          B   -> lega_conc_only
+    C    -> lega_len_only    A+B  -> lega_no_len    A+C -> lega_no_conc
+    B+C  -> lega_no_query    A+B+C-> lega
+去一法（leave-one-out）：Full=lega, Full-A=lega_no_query,
+Full-B=lega_no_conc, Full-C=lega_no_len。两套消融均被实现，可互相印证。
 
 其中 p_j 为因果注意力权重，n 为该查询可读取的真实 token 数（null 槽不计入 n）。
 q 特指 RoPE 旋转前的查询内容向量；注意力打分仍使用旋转后的 q/k。
@@ -28,7 +37,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # 全部变体名（配置/命令行使用）
-VARIANTS = ("standard", "qgate", "null", "lega", "lega_no_len", "lega_no_conc", "lega_no_query")
+VARIANTS = ("standard", "qgate", "null", "lega", "lega_no_len", "lega_no_conc",
+            "lega_no_query", "lega_conc_only", "lega_len_only")
 
 # 供图表与汇总表使用的中文名
 VARIANT_CN = {
@@ -39,14 +49,21 @@ VARIANT_CN = {
     "lega_no_len": "LEGA去长度项",
     "lega_no_conc": "LEGA去集中度项",
     "lega_no_query": "LEGA去查询项",
+    "lega_conc_only": "仅集中度门控",
+    "lega_len_only": "仅长度门控",
 }
 
 # 各公式项出现的变体
 _USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc")      # w·q 项
-_USE_CONC = ("lega", "lega_no_len", "lega_no_query")               # log max_j p_j 项
-_USE_LEN = ("lega", "lega_no_conc", "lega_no_query")               # log n 项
-_GATED = ("qgate", "lega", "lega_no_len", "lega_no_conc", "lega_no_query")  # 有输出门
-_LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_conc", "lega_no_query")     # 门依赖注意力统计
+_USE_CONC = ("lega", "lega_no_len", "lega_no_query",
+             "lega_conc_only")                                     # log max_j p_j 项
+_USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
+            "lega_len_only")                                       # log n 项
+# 有输出门
+_GATED = ("qgate", "lega", "lega_no_len", "lega_no_conc", "lega_no_query",
+          "lega_conc_only", "lega_len_only")
+# 门依赖注意力统计（需要 max_j p_j）
+_LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only")
 
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
@@ -308,9 +325,15 @@ class CausalSelfAttention(nn.Module):
             b = self.gate_b.float().view(1, H, 1)
             logit = b * log_n if logit is None else logit.addcmul_(b, log_n)
         dterm = self.gate_d.float().view(1, H, 1)
-        # 防御分支：当前全部变体至少含一个门控项，logit 不会为 None。
-        logit = dterm.expand(bht[0], H, bht[2]).clone() \
-            if logit is None else logit.add_(dterm)
+        if logit is None:
+            # 防御分支：当前全部变体至少含一个门控项，logit 不会为 None。
+            logit = dterm.expand(bht[0], H, bht[2]).clone()
+        else:
+            logit.add_(dterm)
+            if logit.shape[0] != bht[0] or logit.shape[2] != bht[2]:
+                # 仅含 log n 的项（lega_len_only）与 (1,H,1) 参数广播后批次维
+                # 为 1；统计消费与原地 sigmoid 都要求与输入批次一致，物化补齐。
+                logit = logit.expand(bht[0], H, bht[2]).clone()
         # keep_terms=False（训练/普通推理/轻量诊断）时调用方不消费 logit：
         # sigmoid 原地写入；此时 qterm/logit 已被原地累加/覆盖，
         # 返回 None 表示未保留。
@@ -606,10 +629,11 @@ class CausalSelfAttention(nn.Module):
         S = n_real   # null 槽以 lse(a·w_null) 解析地计入 softmax 归一化
                      # （非分块完整统计/dropout 分支除外，见下）。
 
-        # 集中度门控（lega/lega_no_len/lega_no_query）必须消费注意力概率统计
-        # max_j p_j，无法走 SDPA；qgate/lega_no_conc 的门只依赖查询与 log n，
-        # 即便 need_stats=True（轻量门控诊断）也可走 SDPA——统计项 qterm/g/logit
-        # 由预计算的 qterm 与 log n 单独重组，argmax 等完整诊断仍需显式路径。
+        # 集中度门控（lega/lega_no_len/lega_no_query/lega_conc_only）必须消费
+        # 注意力概率统计 max_j p_j，无法走 SDPA；qgate/lega_no_conc/lega_len_only
+        # 的门只依赖查询与 log n，即便 need_stats=True（轻量门控诊断）也可走
+        # SDPA——统计项 qterm/g/logit 由预计算的 qterm 与 log n 单独重组，
+        # argmax 等完整诊断仍需显式路径。
         full_stats = bool(need_stats) and stats_argmax
         single_q = (T == 1)
         use_sdpa = (self.use_sdpa and not full_stats
@@ -621,7 +645,8 @@ class CausalSelfAttention(nn.Module):
         # 注意力只在已写入的 T 个前缀键上做全因果，可同走 is_causal 快路。
         causal_only = (use_sdpa and past_kv is None
                        and (kv_cache is None or cache_pos == 0)
-                       and self.variant in ("standard", "qgate", "lega_no_conc"))
+                       and self.variant in ("standard", "qgate", "lega_no_conc",
+                                            "lega_len_only"))
 
         # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码）。
         elems = B * H * T * S

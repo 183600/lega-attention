@@ -541,8 +541,9 @@ def main():
                         vt_depth=int(rl.get("vt_depth", 4)),
                         corpus_sents=load_corpus_sents(args.data_dir),
                         amp=amp, gen_batch=gen_batch)
-    payload = {"variant": ck.get("variant", model.variant), "ctx_lens": ctx_lens,
-               "n_samples": n_samples, "results": results}
+    payload = {"variant": ck.get("variant", model.variant), "seed": ck.get("seed"),
+               "ctx_lens": ctx_lens, "n_samples": n_samples,
+               "sample_seed": int(rl.get("seed", 1234)), "results": results}
     save_json(payload, args.out)
     print(f"[ruler] 完成 -> {args.out}")
 
