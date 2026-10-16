@@ -2,7 +2,7 @@
 import torch
 
 from lega.model import GPT
-from lega.sanity import batch_metrics, run_overfit_check
+from lega.sanity import batch_metrics, gradient_coverage, run_overfit_check
 
 
 def _model():
@@ -55,6 +55,53 @@ def test_overfit_check_detects_frozen_params():
     assert res["checks"]["loss_requires_grad"] is False
     assert res["checks"]["gradient_nonzero_first_step"] is False
     print("  [ok] 冻结参数（梯度断流）被 sanity check 判定为失败")
+
+
+def test_gradient_coverage_classifies_missing_zero_nonfinite():
+    """逐参数覆盖：None/全零/非有限梯度分别归入不同列表。"""
+    model = _model()
+    x, y = _batch()
+    model(x, targets=y)["loss"].backward()
+    cov = gradient_coverage(model)
+    assert cov["n_trainable"] > 0
+    assert cov["missing_grad"] == [] and cov["nonfinite_grad"] == []
+    named = [n for n, p in model.named_parameters() if p.requires_grad]
+    name0, name1, name2 = named[0], named[1], named[2]
+    params = dict(model.named_parameters())
+    params[name0].grad = None
+    params[name1].grad = torch.zeros_like(params[name1].grad)
+    params[name2].grad = torch.full_like(params[name2].grad, float("nan"))
+    cov2 = gradient_coverage(model)
+    assert cov2["missing_grad"] == [name0]
+    assert cov2["zero_grad"] == [name1]
+    assert cov2["nonfinite_grad"] == [name2]
+    print("  [ok] gradient_coverage 区分 missing/zero/nonfinite 梯度")
+
+
+def test_overfit_check_detects_detached_submodule():
+    """总梯度范数正常、但子模块没接进计算图（detach）也必须判失败。
+
+    这是比“全参数冻结”更隐蔽的 bug：loss.requires_grad 与总梯度范数都正常，
+    只有逐参数覆盖能定位到断流参数。
+    """
+    model = _model()
+    orig_forward = model.ln_f.forward
+
+    def detached_forward(x):
+        return orig_forward(x).detach()
+
+    model.ln_f.forward = detached_forward
+    x, y = _batch()
+    res = run_overfit_check(model, x, y, steps=5, lr=1e-3, device="cpu",
+                            seed=0, log_every=1)
+    assert not res["passed"]
+    assert res["checks"]["loss_requires_grad"] is True
+    assert res["checks"]["all_params_get_grads"] is False
+    missing = res["grad_coverage"]["missing_grad"]
+    assert any("ln_f" in n for n in missing), missing
+    assert any(n.startswith("blocks.") for n in missing), missing
+    print(f"  [ok] detach 子模块导致 {len(missing)} 个参数收不到梯度，"
+          "被逐参数覆盖检查拦下")
 
 
 def test_overfit_check_restores_tf32_flags_independently():

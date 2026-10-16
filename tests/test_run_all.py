@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _effect_status,
+from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _cmd_env, _effect_status,
                      _rel_pct, _resolve_jobs, component_evidence, run_many,
                      tradeoff_verdict, verify_controlled_setup)
 
@@ -58,6 +58,24 @@ def test_run_many_sequential_parallel_and_failure():
         except subprocess.CalledProcessError as e:
             assert e.returncode == 3
     print("  [ok] run_many（顺序/并发/失败传播）")
+
+
+def test_cmd_env_sets_pythonhashseed_per_command_seed():
+    """每条命令的 PYTHONHASHSEED 必须等于它自己的 --seed，而不是父进程基准值。"""
+    e = _cmd_env([sys.executable, "-m", "lega.train", "--seed", "2024"])
+    assert e["PYTHONHASHSEED"] == "2024"
+    assert e["CUBLAS_WORKSPACE_CONFIG"]  # CUDA 初始化前必须存在
+    base = dict(os.environ)
+    base["PYTHONHASHSEED"] = "1337"
+    assert _cmd_env([sys.executable, "x.py"], base)["PYTHONHASHSEED"] == "1337"
+    assert _cmd_env([sys.executable, "x.py", "--seed", "notint"], base
+                    )["PYTHONHASHSEED"] == "1337"
+    # 真实子进程验证：退出码非 0 即断言失败
+    code = ("import os,sys;"
+            "assert os.environ['PYTHONHASHSEED']==sys.argv[1], "
+            "os.environ['PYTHONHASHSEED']")
+    run_many([[sys.executable, "-c", code, "42", "--seed", "42"]], 1)
+    print("  [ok] _cmd_env/run_many 逐命令对齐 PYTHONHASHSEED 与 --seed")
 
 
 def test_apply_holm_verdicts():

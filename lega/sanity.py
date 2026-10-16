@@ -8,7 +8,9 @@
 
 通过是**必要不充分**条件：数据增强、特征对齐、标签映射等 bug 仍可能
 漏网（本检查不含增强与真实数据顺序），需配合中间结果检查（首步 loss ≈
-log(V)、梯度范数 > 0、逐层输出统计等），并保留本 JSON 作为实验记录。
+log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 作为实验记录。
+逐参数梯度覆盖能定位“总梯度范数正常、但某个子模块（如门控）没接进计算
+图”的断流 bug：loss 可反传不代表每个参数都能收到梯度。
 
 用法:
   python -m lega.sanity --config configs/tiny.json --data_dir data/dummy \
@@ -76,6 +78,34 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
     }
 
 
+def gradient_coverage(model) -> dict:
+    """逐参数梯度覆盖检查（在第一次 backward 之后调用）。
+
+    只看总梯度范数会漏掉“某个子模块没接进计算图”的 bug：主体梯度正常时
+    总范数依然 >0（如门控参数被 detach/漏传），只有逐参数检查才能发现。
+    分类：
+      * missing_grad —— grad is None：该参数与 loss 之间图断流（严重 bug）；
+      * nonfinite_grad —— grad 含 NaN/Inf：数值故障，继续训练只会污染权重；
+      * zero_grad —— grad 全 0：给出列表供人工判断（首步恰为 0 属于可疑但
+        不一定错误，例如无输入信号的偏置），不单独判失败。
+    """
+    missing, nonfinite, zero = [], [], []
+    n_trainable = 0
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        n_trainable += 1
+        g = p.grad
+        if g is None:
+            missing.append(name)
+        elif not bool(torch.isfinite(g).all()):
+            nonfinite.append(name)
+        elif float(g.detach().abs().max()) == 0.0:
+            zero.append(name)
+    return {"n_trainable": n_trainable, "missing_grad": missing,
+            "nonfinite_grad": nonfinite, "zero_grad": zero}
+
+
 def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                       steps: int, lr: float, device: str, seed: int,
                       warmup: int = 10, grad_clip: float = 1.0,
@@ -93,6 +123,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    grad_cov = None
     try:
         model.train()
         initial = batch_metrics(model, x, y)
@@ -118,6 +149,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                 loss_no_grad = True
                 break
             loss.backward()
+            # 首步逐参数覆盖：总范数正常但个别子模块没拿到梯度（图断流）时，
+            # 这里能定位到具体参数名（见 gradient_coverage 文档）。
+            if step == 0:
+                grad_cov = gradient_coverage(model)
             gn = torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad], grad_clip)
             if first_grad_norm is None:
@@ -139,6 +174,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "loss_requires_grad": not loss_no_grad,
         "gradient_nonzero_first_step": (first_grad_norm is not None
                                         and first_grad_norm > 0.0),
+        "all_params_get_grads": (grad_cov is not None
+                                 and not grad_cov["missing_grad"]),
+        "grads_finite": (grad_cov is not None
+                         and not grad_cov["nonfinite_grad"]),
     }
     passed = all(checks.values())
     return {
@@ -151,12 +190,14 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "final": final,
         "log_vocab": math.log(model.vocab_size),
         "first_grad_norm": first_grad_norm,
+        "grad_coverage": grad_cov,
         "steps": int(steps),
         "lr": float(lr),
         "history": history,
         "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等 bug "
                    "仍可能漏网；请配合中间结果检查（首步 loss≈log(V)、"
-                   "梯度范数>0、逐层统计）并使用真实数据小规模预跑。"),
+                   "梯度范数>0、逐参数梯度覆盖、逐层统计）并使用真实数据"
+                   "小规模预跑。"),
     }
 
 

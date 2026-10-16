@@ -433,7 +433,10 @@ class GPT(nn.Module):
             tgt = targets.reshape(-1)
             # 每块 logits 为目标数乘以分块大小，分块大小随词表自适应。
             CHUNK = max(256, min(4096, 33_554_432 // self.vocab_size))
-            if torch.is_grad_enabled() and x.requires_grad:
+            # 只要计算图需要梯度（输入或共享 lm_head 权重任一 requires_grad，
+            # 如冻结主干只训分类头/detach 上游）就走闭式梯度路径；否则
+            # log_softmax(out=) 在 grad 模式下反传会报“derivative not implemented”。
+            if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
                 # 训练路径：分块前向，交叉熵闭式梯度在前向内求出
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:

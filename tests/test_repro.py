@@ -8,8 +8,9 @@ import numpy as np
 import torch
 
 from lega.data import get_train_batch
-from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file
-from lega.utils import set_seed
+from lega.repro import (build_run_manifest, data_fingerprint, git_info,
+                        runtime_info, sha256_file)
+from lega.utils import set_seed, seed_report
 
 
 def test_set_seed_covers_python_numpy_torch():
@@ -65,5 +66,37 @@ def test_git_and_runtime_info_json_safe():
         assert len(git["commit"]) == 40
     rt = runtime_info("cpu")
     assert rt["torch"] and rt["python"] and rt["numpy"]
+    assert rt["hostname"] and rt["python_executable"] and rt["cpu_count"]
     json.dumps({"git": git, "runtime": rt})  # 必须是 JSON 原生类型
     print(f"  [ok] git/runtime 信息可序列化 (commit={git['commit_short']})")
+
+
+def test_seed_report_covers_all_random_sources():
+    """种子审计：每个随机源以传入 seed 记录在案，且信息可 JSON 序列化。"""
+    set_seed(2024)
+    rep = seed_report(2024)
+    assert rep["seed"] == 2024
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        assert rep[key] == 2024, (key, rep)
+    assert rep["torch_cuda"] in (None, 2024)
+    assert rep["cudnn_deterministic"] is True
+    assert rep["cudnn_benchmark"] is False
+    assert rep["deterministic_algorithms"] is True
+    assert rep["data_order"]
+    json.dumps(rep)
+    print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA) 与确定性开关")
+
+
+def test_run_manifest_embeds_seed_report_and_runtime():
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(8))
+        cfg = os.path.join(d, "cfg.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        manifest = build_run_manifest(tag="t", variant="lega", seed=5,
+                                      config_path=cfg, data_dir=d, device="cpu")
+        assert manifest["seed_report"]["python_random"] == 5
+        assert manifest["runtime"]["hostname"]
+        json.dumps(manifest)
+    print("  [ok] run_manifest 内嵌 seed_report 与机器级 runtime 信息")

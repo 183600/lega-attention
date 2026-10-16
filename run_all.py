@@ -50,6 +50,9 @@ from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           analyze_badcases, process_ruler_json)
 from lega.curves import STATUS_ORDER, diagnose_run_dir, worst_status  # noqa: E402
 from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
+from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
+                             collect_artifacts, ledger_path, new_run_id,
+                             snapshot_train_run)
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
 from lega.utils import (get_device, holm_bonferroni, mean_std, paired_t_test,
                         save_json)  # noqa: E402
@@ -91,9 +94,29 @@ MIN_SEEDS = 3
 _SEED_RE = re.compile(r"_seed(\d+)$")
 
 
+def _cmd_env(cmd, env=None):
+    """为单条子进程命令构造环境：PYTHONHASHSEED 与该命令 --seed 对齐。
+
+    PYTHONHASHSEED 必须在解释器启动前设置才生效，父进程统一设一个值会让
+    所有 (变体, 种子) 子进程共享第一个种子的哈希盐；这里逐命令解析
+    --seed，保证每个 run 的 Python 哈希随机化也由它自己的种子唯一确定
+    （没有 --seed 的命令如 latency/plots 沿用基准值）。
+    """
+    e = dict(env if env is not None else os.environ)
+    if "--seed" in cmd:
+        i = cmd.index("--seed")
+        if i + 1 < len(cmd):
+            try:
+                e["PYTHONHASHSEED"] = str(int(cmd[i + 1]))
+            except (TypeError, ValueError):
+                pass
+    e.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    return e
+
+
 def run(cmd, env=None):
     print("+", " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, cwd=ROOT, env=env)
+    subprocess.run(cmd, check=True, cwd=ROOT, env=_cmd_env(cmd, env))
 
 
 def _resolve_jobs(args) -> int:
@@ -122,20 +145,19 @@ def _jobs_env(jobs: int):
 def run_many(cmds, jobs: int, env=None) -> None:
     """顺序或并发执行多条独立子进程命令。
 
-    并发只改变多个独立 run 之间的调度，不改变单个 run 的行为；失败时等待
-    全部命令结束后抛出首个（按提交顺序）非零退出码的 CalledProcessError。
+    并发只改变多个独立 run 之间的调度，不改变单个 run 的行为；每条命令的
+    PYTHONHASHSEED 按自身 --seed 设置（见 _cmd_env）。失败时等待全部命令
+    结束后抛出首个（按提交顺序）非零退出码的 CalledProcessError。
     """
     jobs = max(1, int(jobs))
     if jobs == 1 or len(cmds) <= 1:
         for cmd in cmds:
-            subprocess.run(cmd, check=True, cwd=ROOT,
-                           env=env if env is not None else os.environ.copy())
+            subprocess.run(cmd, check=True, cwd=ROOT, env=_cmd_env(cmd, env))
         return
     rcs = [None] * len(cmds)
 
     def _one(i, cmd):
-        rcs[i] = subprocess.run(cmd, cwd=ROOT,
-                                env=env if env is not None else os.environ.copy()
+        rcs[i] = subprocess.run(cmd, cwd=ROOT, env=_cmd_env(cmd, env)
                                 ).returncode
 
     with ThreadPoolExecutor(max_workers=min(jobs, len(cmds))) as ex:
@@ -1301,13 +1323,15 @@ def main():
     if jobs > 1:
         print(f"[run_all] jobs={jobs}（sanity/训练/评测/机制分析并发；--jobs 可覆盖）")
 
-    # 子进程随机性/确定性环境：PYTHONHASHSEED 必须由父进程设置才能传给子进程；
-    # CUBLAS 工作区配置须在任何 CUDA 初始化前生效。
+    # 子进程随机性/确定性环境：PYTHONHASHSEED 必须在解释器启动前设置；
+    # 这里给出基准值（无 --seed 的命令用），带 --seed 的命令由 _cmd_env 逐条
+    # 覆盖为自身种子。CUBLAS 工作区配置须在任何 CUDA 初始化前生效。
     os.environ.setdefault("PYTHONHASHSEED", str(seeds[0]))
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
     # 全局溯源清单：本次流水线的代码版本、数据指纹、运行环境与命令。
     git = git_info()
+    config_sha256 = sha256_file(args.config)
     try:
         data_fp = data_fingerprint(args.data_dir)
         data_digest = data_fp["digest"]
@@ -1321,7 +1345,7 @@ def main():
         "tag": tag,
         "argv": sys.argv,
         "config_file": args.config,
-        "config_sha256": sha256_file(args.config),
+        "config_sha256": config_sha256,
         "seeds": seeds,
         "variants": variants,
         "smoke": bool(args.smoke),
@@ -1332,6 +1356,21 @@ def main():
     save_json(repro, os.path.join(results_dir, "repro.json"))
     print(f"[repro] code={git.get('commit_short')} dirty={git.get('dirty')} "
           f"data={data_digest} -> {os.path.join(results_dir, 'repro.json')}")
+
+    # 实验台账：本轮 started 先落盘（崩溃轮次也留痕），结束时追加同一 run_id
+    # 的 completed 记录（含最终指标与产物哈希），跨轮次可追溯，见 lega/experiment.py。
+    ledger = ledger_path()
+    run_id = new_run_id(tag, config_sha256)
+    ledger_common = dict(
+        run_id=run_id, tag=tag, config_path=args.config,
+        config_sha256=config_sha256, variants=variants, seeds=seeds,
+        smoke=bool(args.smoke), argv=sys.argv, git=git,
+        data_fingerprint=data_digest, runtime=repro["runtime"],
+        out_root=out_root, results_dir=results_dir,
+        time_start=repro["time"])
+    append_record(ledger, build_experiment_record(status="started",
+                                                  **ledger_common))
+    print(f"[repro] 实验台账 run_id={run_id} -> {ledger}")
 
     ruler_over = []
     analysis_over = []
@@ -1514,6 +1553,20 @@ def main():
     audit = verify_controlled_setup(out_root, variants, seeds, n_seeds,
                                     expected_data_digest=data_digest)
     build_summary(results_dir, audit=audit, data_report=data_report)
+
+    # 收尾台账：最终指标（逐 run 的 eval.json）+ 全部结果文件的 SHA-256。
+    # 曲线/结果文件后续被覆盖或手改，都能通过哈希与当时记录比对发现。
+    run_snapshots = [snapshot_train_run(v, seed, vdir)
+                     for v, seed, vdir, _suffix in chain]
+    result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
+                    if os.path.isfile(p)]
+    append_record(ledger, build_experiment_record(
+        status="completed", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
+        sanity={"executed": bool(sanity), "verdict": sanity},
+        runs=run_snapshots,
+        artifacts=collect_artifacts(result_files, rel_to=ROOT),
+        **ledger_common))
+    print(f"[repro] 实验台账已记录 completed（run_id={run_id}）-> {ledger}")
     print(f"\n[run_all] 全部完成；结果目录: {results_dir}")
 
 

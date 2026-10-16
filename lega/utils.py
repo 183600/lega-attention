@@ -40,6 +40,31 @@ def set_seed(seed: int) -> None:
         torch.use_deterministic_algorithms(True)
 
 
+def seed_report(seed: int) -> dict:
+    """逐随机源的种子审计记录（写入 run_manifest/实验台账，供事后核对）。
+
+    证明“这个 run 到底固定了哪些种子”，而不是口头声称：set_seed 覆盖的每个
+    随机源都以实际传给它的 seed 记录在案；同时记录确定性开关与数据顺序机制。
+    字段全部为 JSON 原生类型。``pythonhashseed_env`` 来自环境变量：若与 seed
+    不同，说明当前进程的哈希盐在解释器启动时已固定（只能对子进程生效），
+    属于已知边界而非静默失败。
+    """
+    return {
+        "seed": int(seed),
+        "python_random": int(seed),
+        "numpy_global": int(seed),
+        "torch_cpu": int(seed),
+        "torch_cuda": (int(seed) if torch.cuda.is_available() else None),
+        "pythonhashseed_env": os.environ.get("PYTHONHASHSEED"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        "deterministic_algorithms": bool(
+            torch.are_deterministic_algorithms_enabled()),
+        "data_order": "np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
+    }
+
+
 def now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 

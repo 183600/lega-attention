@@ -12,7 +12,8 @@ MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
            "tests.test_latency", "tests.test_analysis", "tests.test_utils",
            "tests.test_sanity", "tests.test_repro", "tests.test_datacheck",
            "tests.test_run_all", "tests.test_curves", "tests.test_badcase",
-           "tests.test_nan_checklist", "tests.test_evaluate"]
+           "tests.test_nan_checklist", "tests.test_evaluate",
+           "tests.test_experiment"]
 
 
 def main() -> int:

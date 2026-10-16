@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import platform
+import socket
 import subprocess
 import sys
 
@@ -147,6 +148,14 @@ def runtime_info(device: str = None) -> dict:
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
         "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
+        # 机器级上下文：同机重跑是否稳定、跨机差异是否来自环境，都靠这些字段判断
+        "hostname": socket.gethostname(),
+        "python_executable": sys.executable,
+        "cpu_count": os.cpu_count(),
+        "threads_env": {k: os.environ.get(k) for k in
+                        ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                         "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+                        if os.environ.get(k) is not None},
     }
     return info
 
@@ -154,13 +163,14 @@ def runtime_info(device: str = None) -> dict:
 def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
                        data_dir: str, device: str, argv=None) -> dict:
     """单个 (变体, 种子) run 的完整溯源清单。"""
-    from .utils import now_str
+    from .utils import now_str, seed_report
     config_path = os.path.abspath(config_path)
     data_dir = os.path.abspath(data_dir)
     return {
         "tag": tag,
         "variant": variant,
         "seed": int(seed),
+        "seed_report": seed_report(seed),
         "time": now_str(),
         "config_file": config_path,
         "config_sha256": sha256_file(config_path),
