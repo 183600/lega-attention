@@ -1,6 +1,7 @@
 """门控行为机制分析 —— 定量检验核心风险：“注意力很集中 ≠ 找对了信息”。
 
-方法：用带精确 gold 答案跨度的 RULER 样例做单次全量前向（need_stats=True），
+方法：用带精确 gold 答案跨度的 RULER 样例做单次全量前向（need_stats=True；
+等长样例合并为一批，因果注意力逐行独立，统计与单样例逐位一致），
 对每个 (层, 头, 问题区查询位) 收集：
   max_p   本次注意力最大概率（集中度）
   hit     注意力落点 argmax 是否落在答案数值 token 跨度内（是否找对）
@@ -58,95 +59,113 @@ def _example(task: str, tok, ctx: int, rng: Random, corpus_sents: Optional[List[
 
 @torch.inference_mode()
 def collect_records(model, tok, device: str, examples: List[Dict], task_of: List[str],
-                    ctx_of: List[int], amp: bool = True) -> List[Dict]:
-    """逐样例全量前向，展平出逐 (层,头,查询位) 记录。
+                    ctx_of: List[int], amp: bool = True,
+                    batch_size: int = 8) -> List[Dict]:
+    """全量前向，展平出逐 (层,头,查询位) 记录。
+
+    等长样例合并成批前向：因果注意力的每行只依赖自身前缀，批内各行
+    统计与单样例前向逐位一致。记录最终按样例原始顺序展平返回。
 
     CUDA 上默认启用 bf16 autocast（与 train/evaluate 的评测精度口径一致）；
     统计量在设备端升 fp32 后再聚合，不受 autocast 影响。
     """
     variant = model.variant
-    records: List[Dict] = []
+    records_by_ex: List[List[Dict]] = [[] for _ in examples]
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and device.startswith("cuda")) else contextlib.nullcontext())
-    for ex_idx, (ex, task, ctx) in enumerate(zip(examples, task_of, ctx_of)):
-        # 先经 NumPy 物化再转 tensor（asarray + from_numpy）。
-        ids = torch.from_numpy(np.asarray(ex["ids"], dtype=np.int64)[None])
-        ids = ids.to(device, non_blocking=True) if device.startswith("cuda") else ids
+    use_c_full = variant in ("lega", "lega_no_query")
+    use_c_nolen = not use_c_full and variant == "lega_no_len"
+    # 按提示长度分组：只有等长样例可堆叠；每组内再按 batch_size 切批。
+    order = sorted(range(len(examples)), key=lambda k: len(examples[k]["ids"]))
+    bs = max(1, int(batch_size))
+    g0 = 0
+    while g0 < len(order):
+        n_len = len(examples[order[g0]]["ids"])
+        g1 = g0 + 1
+        while (g1 < len(order) and len(examples[order[g1]]["ids"]) == n_len
+               and g1 - g0 < bs):
+            g1 += 1
+        idxs = order[g0:g1]
+        g0 = g1
+        ids = torch.tensor([examples[k]["ids"] for k in idxs], dtype=torch.long)
+        if device.startswith("cuda"):
+            ids = ids.to(device, non_blocking=True)
         # logits 不参与机制分析；只算最后位置
         with amp_ctx:
             out = model(ids, need_stats=True, last_logits_only=True)
         if not out["gate_stats"]:
             continue
-        qs, qe = ex["query_span"]
-        # hit 以答案数值的精确 token 跨度为准；needle_span（整句/整行）仅作兼容
-        # 与人工排查用途，避免把注意力落在模板停用词上误判为“找对”。
-        gold_span = ex.get("value_span") or ex.get("needle_span")
-        ns, ne = gold_span if gold_span else (None, None)
-        width = qe - qs
-        qpos = list(range(qs, qe))
-        # 只回传 query 区间的切片统计；各层字段完全一致（同模型同变体），
-        # 堆叠维度天然对齐。
-        per_layer = []
-        for st in out["gate_stats"]:
-            argmax_d = st["argmax"][0][:, qs:qe]                          # (H, width) 设备端
-            packed = [st["max_p"][0][:, qs:qe].float()]
-            if ns is not None:
-                packed.append(((argmax_d >= 0) & (argmax_d >= ns)
-                               & (argmax_d < ne)).float())
-            if st.get("g") is not None:
-                packed.append(st["g"][0][:, qs:qe].float())
-            if st.get("logit") is not None:
-                packed.append(st["logit"][0][:, qs:qe].float())
-            if st.get("qterm") is not None:
-                packed.append(st["qterm"][0][:, qs:qe].float())
-            # log_n 为 (width,)：设备端广播进同一张表
-            packed.append(st["log_n"][qs:qe].float().expand_as(packed[0]))
-            per_layer.append(torch.stack(packed))
-        merged_all = torch.stack(per_layer).cpu().numpy()                 # (L, N, H, width)
-        for st, merged in zip(out["gate_stats"], merged_all):
-            layer = st["layer"]
-            it = iter(merged)
-            max_p = next(it)                                              # (H, width)
-            hit_m = next(it) if ns is not None else None
-            g = next(it) if st.get("g") is not None else None
-            logit = next(it) if st.get("logit") is not None else None
-            qterm = next(it) if st.get("qterm") is not None else None
-            log_n = next(it)[0]                                           # (width,)
-            # hit 掩码随合并表一次带回；矩阵整体 tolist() 转 Python 标量。
-            hit_l = hit_m.tolist() if hit_m is not None else None
-            mp_l, ln_l = max_p.tolist(), log_n.tolist()
-            g_l = g.tolist() if g is not None else None
-            logit_l = logit.tolist() if logit is not None else None
-            qterm_l = qterm.tolist() if qterm is not None else None
-            use_c_full = variant in ("lega", "lega_no_query")
-            use_c_nolen = not use_c_full and variant == "lega_no_len"
-            for h in range(model.n_heads):
-                mp_h = mp_l[h]
-                hit_h = hit_l[h] if hit_l is not None else None
-                g_h = g_l[h] if g_l is not None else None
-                logit_h = logit_l[h] if logit_l is not None else None
-                qterm_h = qterm_l[h] if qterm_l is not None else None
-                for i in range(width):
-                    mp_i, ln_i = mp_h[i], ln_l[i]
-                    rec = {
-                        "task": task, "ctx": ctx, "example": ex_idx, "layer": layer,
-                        "head": h, "query_pos": qpos[i], "max_p": mp_i,
-                        "log_n": ln_i,
-                        "hit": hit_h[i] if hit_h is not None else None,
-                    }
-                    if g_h is not None:
-                        rec["g"] = g_h[i]
-                    if logit_h is not None:
-                        rec["logit"] = logit_h[i]
-                    if qterm_h is not None:
-                        rec["qterm"] = qterm_h[i]
-                    if use_c_full:
-                        rec["c"] = ln_i + math.log(max(mp_i, 1e-30))
-                    elif use_c_nolen:
-                        rec["c"] = math.log(max(mp_i, 1e-30))
-                    records.append(rec)
+        for r, ex_idx in enumerate(idxs):
+            ex = examples[ex_idx]
+            task, ctx = task_of[ex_idx], ctx_of[ex_idx]
+            qs, qe = ex["query_span"]
+            # hit 以答案数值的精确 token 跨度为准；needle_span（整句/整行）仅作兼容
+            # 与人工排查用途，避免把注意力落在模板停用词上误判为“找对”。
+            gold_span = ex.get("value_span") or ex.get("needle_span")
+            ns, ne = gold_span if gold_span else (None, None)
+            width = qe - qs
+            qpos = list(range(qs, qe))
+            # 只回传 query 区间的切片统计；各层字段完全一致（同模型同变体），
+            # 堆叠维度天然对齐。
+            per_layer = []
+            for st in out["gate_stats"]:
+                argmax_d = st["argmax"][r][:, qs:qe]                      # (H, width) 设备端
+                packed = [st["max_p"][r][:, qs:qe].float()]
+                if ns is not None:
+                    packed.append(((argmax_d >= 0) & (argmax_d >= ns)
+                                   & (argmax_d < ne)).float())
+                if st.get("g") is not None:
+                    packed.append(st["g"][r][:, qs:qe].float())
+                if st.get("logit") is not None:
+                    packed.append(st["logit"][r][:, qs:qe].float())
+                if st.get("qterm") is not None:
+                    packed.append(st["qterm"][r][:, qs:qe].float())
+                # log_n 为 (width,)：设备端广播进同一张表
+                packed.append(st["log_n"][qs:qe].float().expand_as(packed[0]))
+                per_layer.append(torch.stack(packed))
+            merged_all = torch.stack(per_layer).cpu().numpy()             # (L, N, H, width)
+            for st, merged in zip(out["gate_stats"], merged_all):
+                layer = st["layer"]
+                it = iter(merged)
+                max_p = next(it)                                          # (H, width)
+                hit_m = next(it) if ns is not None else None
+                g = next(it) if st.get("g") is not None else None
+                logit = next(it) if st.get("logit") is not None else None
+                qterm = next(it) if st.get("qterm") is not None else None
+                log_n = next(it)[0]                                       # (width,)
+                # hit 掩码随合并表一次带回；矩阵整体 tolist() 转 Python 标量。
+                hit_l = hit_m.tolist() if hit_m is not None else None
+                mp_l, ln_l = max_p.tolist(), log_n.tolist()
+                g_l = g.tolist() if g is not None else None
+                logit_l = logit.tolist() if logit is not None else None
+                qterm_l = qterm.tolist() if qterm is not None else None
+                for h in range(model.n_heads):
+                    mp_h = mp_l[h]
+                    hit_h = hit_l[h] if hit_l is not None else None
+                    g_h = g_l[h] if g_l is not None else None
+                    logit_h = logit_l[h] if logit_l is not None else None
+                    qterm_h = qterm_l[h] if qterm_l is not None else None
+                    for i in range(width):
+                        mp_i, ln_i = mp_h[i], ln_l[i]
+                        rec = {
+                            "task": task, "ctx": ctx, "example": ex_idx, "layer": layer,
+                            "head": h, "query_pos": qpos[i], "max_p": mp_i,
+                            "log_n": ln_i,
+                            "hit": hit_h[i] if hit_h is not None else None,
+                        }
+                        if g_h is not None:
+                            rec["g"] = g_h[i]
+                        if logit_h is not None:
+                            rec["logit"] = logit_h[i]
+                        if qterm_h is not None:
+                            rec["qterm"] = qterm_h[i]
+                        if use_c_full:
+                            rec["c"] = ln_i + math.log(max(mp_i, 1e-30))
+                        elif use_c_nolen:
+                            rec["c"] = math.log(max(mp_i, 1e-30))
+                        records_by_ex[ex_idx].append(rec)
         del out
-    return records
+    return [rec for rs in records_by_ex for rec in rs]
 
 
 def summarize(records: List[Dict], variant: str, tau: float) -> Dict:

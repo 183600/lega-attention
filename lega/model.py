@@ -499,7 +499,10 @@ class GPT(nn.Module):
                            for kc in kv_cache), "外部 kv_cache 容量不足"
             else:
                 attn0 = self.blocks[0].attn
-                kvdtype = attn0.wk.weight.dtype
+                # k/v 在 autocast 区按目标精度计算：缓存同精度分配，
+                # 写入与读取均为该精度张量，注意力消费的亦是缓存视图本身。
+                kvdtype = (_ChunkedLinearCE._autocast_dtype(attn0.wk.weight)
+                           or attn0.wk.weight.dtype)
                 kv_cache = [
                     (torch.empty(B, attn0.n_heads, total, attn0.d_head,
                                  dtype=kvdtype, device=idx.device),
