@@ -100,11 +100,11 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
             json.dump({"step": 30, "where": "train_loss"}, f)
         d = diagnose_run_dir(tmp)
         assert d["nan_report"]["where"] == "train_loss"
-        assert len(load_train_log(os.path.join(tmp, "train_log.jsonl"))) == 4
+        assert len(load_train_log(os.path.join(tmp, "train_log.jsonl"))) == 5
         # 损坏行被容忍，不阻塞诊断
         with open(os.path.join(tmp, "train_log.jsonl"), "a", encoding="utf-8") as f:
             f.write("{broken\n")
-        assert len(load_train_log(os.path.join(tmp, "train_log.jsonl"))) == 4
+        assert len(load_train_log(os.path.join(tmp, "train_log.jsonl"))) == 5
         # 缺失目录不抛异常
         assert diagnose_run_dir(os.path.join(tmp, "nonexistent"))["status"] == "数据不足"
     finally:

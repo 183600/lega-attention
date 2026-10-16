@@ -24,10 +24,11 @@ def test_collect_worst_windows():
                           "pred_top5"} for r in rows)
     assert rows[0]["loss"] >= rows[1]["loss"] >= rows[2]["loss"]
     assert all(len(r["pred_top5"]) == 5 for r in rows)
-    # top-5 概率归一（数值容差内）且首候选概率最大
+    # top-5 为全词表 softmax 的截断：逐项概率降序、均在 (0,1]，总和不超过 1
     for r in rows:
         probs = [p for _, p in r["pred_top5"]]
-        assert abs(sum(probs) - 1.0) < 0.05, probs
+        assert all(0.0 < p <= 1.0 for p in probs), probs
+        assert sum(probs) <= 1.0 + 1e-9, probs
         assert probs == sorted(probs, reverse=True)
         assert r["context_tail"] and isinstance(r["gold_next"], str)
     print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"

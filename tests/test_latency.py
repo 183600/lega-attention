@@ -64,9 +64,9 @@ def test_efficiency_metrics_on_cpu():
     eff = efficiency_metrics(model, "cpu", [32, 64])
     assert eff["n_params"] == sum(p.numel() for p in model.parameters())
     assert eff["params_mb"] > 0
-    # KV 缓存：2(K和V)×层数×头数×d_head×每元素字节
-    kv_expect = 2 * 2 * 2 * 16 * model.blocks[0].wk.weight.element_size()
-    assert abs(eff["kv_cache_mb_per_tok"] * 2**20 - kv_expect) < 1e-6
+    # KV 缓存：2(K和V)×层数×头数×d_head×每元素字节（接口按 MB 保留 6 位小数）
+    kv_bytes_expect = 2 * 2 * 2 * 16 * model.blocks[0].attn.wk.weight.element_size()
+    assert abs(eff["kv_cache_mb_per_tok"] - kv_bytes_expect / 2**20) < 1e-6
     assert set(eff["flops_per_tok"]) == {"32", "64"}
     assert all(v["total_flops_per_tok"] > 0 for v in eff["flops_per_tok"].values())
     assert all(v is None for v in eff["peak_mem_mb_prefill"].values()), \

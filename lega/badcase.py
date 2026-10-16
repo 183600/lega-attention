@@ -66,7 +66,6 @@ def categorize_case(rec: Dict) -> Dict:
                 r["missing_words"] = missing
                 r["explanation"] = f"漏答 {len(missing)} 个高频词: {' '.join(missing[:8])}"
                 if spurious:
-                    r["category"] = "fwe_spurious"
                     r["spurious_words"] = spurious
                     r["explanation"] += f"；同时多答无关词: {' '.join(spurious[:8])}"
             else:
