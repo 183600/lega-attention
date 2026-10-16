@@ -495,7 +495,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                                          if k != "n_tokens"},
                                 # 上下文中除 gold 外的全部数值（区分"误抄干扰值"
                                 # 与"幻觉数字"）；gold 是否真的在 prompt 里
-                                #（标注/构造自检：不在即为构造 bug）
+                                #（标注/构造自检：不在即为构造错误）
                                 "context_numbers": sorted(prompt_nums - {ex["answer"]}),
                                 "answer_in_prompt": (ex["answer"] in prompt_nums
                                                      if task != "fwe" else None),

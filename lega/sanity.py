@@ -2,15 +2,15 @@
 
 原理：抽取一个固定小批次（默认 batch_size 条、ctx 个 token），关闭全部
 正则化与数据扰动后反复优化同一批数据。若前向/反向/损失/标签映射任一环节
-有严重 bug（梯度断流、loss 计算错误、label 错位等），训练损失不可能降到
+存在严重问题（梯度断流、loss 计算错误、label 错位等），训练损失不可能降到
 接近 0、下一 token 准确率也不可能接近 100%；反之，能过拟合只能说明
 “这条最小学习链路是通的”。
 
-通过是**必要不充分**条件：数据增强、特征对齐、标签映射等 bug 仍可能
+通过是**必要不充分**条件：数据增强、特征对齐、标签映射等问题仍可能
 漏网（本检查不含增强与真实数据顺序），需配合中间结果检查（首步 loss ≈
 log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 作为实验记录。
 逐参数梯度覆盖能定位“总梯度范数正常、但某个子模块（如门控）没接进计算
-图”的断流 bug：loss 可反传不代表每个参数都能收到梯度。
+图”的断流问题：loss 可反传不代表每个参数都能收到梯度。
 
 用法:
   python -m lega.sanity --config configs/tiny.json --data_dir data/dummy \
@@ -81,10 +81,10 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
 def gradient_coverage(model) -> dict:
     """逐参数梯度覆盖检查（在第一次 backward 之后调用）。
 
-    只看总梯度范数会漏掉“某个子模块没接进计算图”的 bug：主体梯度正常时
+    只看总梯度范数会漏掉“某个子模块没接进计算图”的问题：主体梯度正常时
     总范数依然 >0（如门控参数被 detach/漏传），只有逐参数检查才能发现。
     分类：
-      * missing_grad —— grad is None：该参数与 loss 之间图断流（严重 bug）；
+      * missing_grad —— grad is None：该参数与 loss 之间图断流（严重故障）；
       * nonfinite_grad —— grad 含 NaN/Inf：数值故障，继续训练只会污染权重；
       * zero_grad —— grad 全 0：给出列表供人工判断（首步恰为 0 属于可疑但
         不一定错误，例如无输入信号的偏置），不单独判失败。
@@ -118,7 +118,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     优化器 weight_decay=0）；本函数只用固定批、无任何数据增强。
     """
     set_seed(seed)
-    # 关闭 TF32：sanity 追求数值上确定地“压到 0”，与训练速度无关
+    # 关闭 TF32：sanity 追求数值上确定地“压到 0”
     prev_tf32_mm = torch.backends.cuda.matmul.allow_tf32
     prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -194,7 +194,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "steps": int(steps),
         "lr": float(lr),
         "history": history,
-        "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等 bug "
+        "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
                    "仍可能漏网；请配合中间结果检查（首步 loss≈log(V)、"
                    "梯度范数>0、逐参数梯度覆盖、逐层统计）并使用真实数据"
                    "小规模预跑。"),
@@ -290,8 +290,8 @@ def main():
     if not res["passed"]:
         failed = [k for k, ok in res["checks"].items() if not ok]
         print(f"[sanity] 未通过项: {', '.join(failed)}；"
-              "若无法过拟合小批量，说明梯度/损失/标签存在严重 bug，"
-              "请先修复再开全量训练。")
+              "若无法过拟合小批量，说明梯度/损失/标签存在严重问题，"
+              "请先排查再开全量训练。")
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         save_json(res, args.out)

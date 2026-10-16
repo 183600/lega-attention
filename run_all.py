@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""一键实验流水线：训练全部变体 → PPL → RULER → 延迟 → 机制分析 → 图表 → 汇总表。
+"""一键实验流水线：训练全部变体 → PPL → RULER → 机制分析 → 图表 → 汇总表。
 
 变体（相同参数量级与训练步数）:
   standard | qgate | null | lega | lega_no_len | lega_no_conc | lega_no_query
@@ -535,7 +535,7 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
 
 
 def _eff_cell(entry, key, ctx):
-    """latency.json 变体条目里的效率字段（flops 取 total，mem 取实测峰值）。"""
+    """latency.json 变体条目里的效率字段（flops 取 total，mem 取实测值）。"""
     if not entry:
         return None
     eff = entry.get("efficiency") or {}
@@ -561,33 +561,33 @@ def _rel_pct(base, cand):
 
 
 def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA) -> str:
-    """效率-精度权衡判定：不看代价的涨点没有意义。
+    """效率-精度权衡判定：不看增幅的涨点没有意义。
 
     规则（显式、可审计）：
       * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
-        且代价 >10% 时直接判不可行；
-      * 显著但代价（延迟/参数/FLOPs/显存的最大增幅）>50% → 需审视收益成本比；
-      * 显著但代价 >5×收益（收益按 PPL 相对改善计）→ 收益-成本比不利；
+        且增幅 >10% 时直接判不可行；
+      * 显著但增幅（参数/计算量等结构指标的最大增幅）>50% → 需审视；
+      * 显著但增幅 >5×收益（收益按 PPL 相对改善计）→ 收益-增幅比不利；
       * 其余 → 可接受。
-    "提升 0.5% 精度却让计算时间增加 10 倍"式的改进在这里会被明确拒绝。
+    "提升 0.5% 精度却让计算量增加 10 倍"式的改进在这里会被明确拒绝。
     """
     if benefit_pct is None or cost_pct is None:
         return "数据不足"
     sig = p_adj is not None and p_adj < alpha
     if not sig:
         if cost_pct > 10:
-            return f"不可行：涨点不显著且代价 {cost_pct:.0f}%"
+            return f"不可行：涨点不显著且增幅 {cost_pct:.0f}%"
         return "说服力有限：涨点未通过显著性检验"
     if cost_pct > 50:
-        return f"需审视：显著但代价 {cost_pct:.0f}%"
+        return f"需审视：显著但增幅 {cost_pct:.0f}%"
     if cost_pct > 5 * max(benefit_pct, 0.5):
-        return f"收益-成本比不利：收益 {benefit_pct:.1f}% vs 代价 {cost_pct:.0f}%"
+        return f"收益-增幅比不利：收益 {benefit_pct:.1f}% vs 增幅 {cost_pct:.0f}%"
     return "可接受"
 
 
 def build_summary(results_dir: str, audit: dict = None,
                   data_report: dict = None) -> dict:
-    """汇总 PPL / RULER / 延迟 / 参数量为 Markdown + CSV + JSON。
+    """汇总 PPL / RULER / 参数量等指标为 Markdown + CSV + JSON。
 
     多种子口径：每个变体的每个指标先按种子聚合为 Mean ± Std；变体间比较使用
     同一批种子上的配对 t 检验（同种子共享初始化与数据顺序，配对消除公共方差）。
@@ -630,7 +630,7 @@ def build_summary(results_dir: str, audit: dict = None,
             if s.get("eval"):
                 eval_splits.add(s["eval"].get("split", "val"))
 
-    # 汇总延迟时必须使用所有变体共有的同一上下文档，不允许各取自己的最大 ctx。
+    # 汇总运行时指标时必须使用所有变体共有的同一上下文档，不允许各取自己的最大 ctx。
     lat = load(os.path.join(results_dir, "latency.json")) or {}
     lat_entries = {v: (lat.get("variants") or {}).get(v) for v in variants}
 
@@ -689,7 +689,7 @@ def build_summary(results_dir: str, audit: dict = None,
         row["gate_extra"] = (ev_example or {}).get("n_gate_extra", 0)
         row["val_ppl_clamped"] = any(
             (s.get("eval") or {}).get("val_ppl_clamped") for s in m.values())
-        # 延迟（取全部变体的最大公共 ctx、batch=1）；延迟不受种子影响，测一次
+        # 运行时指标（取全部变体的最大公共 ctx、batch=1）；不受种子影响，测一次
         e = lat_entries.get(v)
         if e and common_ctx is not None:
             ckey = str(common_ctx)
@@ -699,7 +699,7 @@ def build_summary(results_dir: str, audit: dict = None,
             row["latency_ctx"] = common_ctx
         rows.append(row)
 
-    # 延迟基线：优先取 standard_sdpa，缺失时退回显式 standard。
+    # 运行时基线：优先取 standard_sdpa，缺失时退回显式 standard。
     lat_all = lat.get("variants") or {}
     base_ms, base_name = None, None
     for cand in ("standard_sdpa", "standard"):
@@ -761,7 +761,7 @@ def build_summary(results_dir: str, audit: dict = None,
     md = ["# LEGA 实验汇总", "",
           f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}；"
           f"PPL/RULER 为跨随机种子的 Mean ± Std（变体间同种子配对，"
-          f"显著性经 Holm–Bonferroni 校正），延迟在相同配置下测得。", ""]
+          f"显著性经 Holm–Bonferroni 校正），运行时指标在相同配置下测得。", ""]
     if rows:
         stat_keys = {"val_ppl", "ruler_avg", "gate_mean", "misleading_rate",
                      "misleading_given_conc", "auroc_logit", "auroc_qterm"} \
@@ -949,7 +949,7 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("")
         md.append("注: sanity check 只验证固定小批量的前向/反向/损失/标签链路能被"
                   "优化到接近零损失（必要非充分）；数据增强/特征对齐/标签映射等"
-                  "bug 仍可能漏网，需配合中间结果检查。")
+                  "问题仍可能漏网，需配合中间结果检查。")
     else:
         md.append("- ⚠ 未找到 sanity 结果（本次可能跳过了 sanity check）。")
     if os.path.exists(os.path.join(results_dir, "fig_train_curves.png")):
@@ -999,7 +999,7 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append("⚠ 存在出现非有限损失的 run：训练已失效，"
                       "对应 run 目录的 `nan_report.json` 给出了"
                       "数据→代码→混合精度→梯度/学习率的系统排查路径，"
-                      "修复前该变体的一切指标都不可信。")
+                      "处理前该变体的一切指标都不可信。")
         else:
             md.append("注：全部 run 无 NaN/Inf；有异常状态的变体请按建议处理"
                       "（过拟合→正则化/增数据/早停，欠拟合→查学习率与数据管道）"
@@ -1024,7 +1024,7 @@ def build_summary(results_dir: str, audit: dict = None,
         bad_example_pool += [(v, c) for c in ana["cases"]]
     if bad_rows:
         md.append("错误样本不是污点而是信息：逐条区分**标注错误**（gold 不在 "
-                  "prompt 中→修构造）、**难度边界样本**（needle 极深）与"
+                  "prompt 中→构造错误）、**难度边界样本**（needle 极深）与"
                   "**模型盲区**（误抄干扰值/幻觉数字/无数值回答）。"
                   "逐案例详情见 `badcases_*.md`。")
         md.append("")
@@ -1055,7 +1055,7 @@ def build_summary(results_dir: str, audit: dict = None,
         n_label = sum(a["label_errors"] for _, a, _ in bad_rows)
         if n_label:
             md.append(f"⚠ 共 {n_label} 条 gold 不在 prompt 中的样本：这是"
-                      "构造/标注 bug，不是模型失败，须先修复评测再下结论。")
+                      "构造/标注错误，不是模型失败，须先处理评测再下结论。")
     else:
         md.append("- 暂无错误样本记录（RULER 未运行或全部命中）。"
                   "全部命中时也建议人工抽查若干正确样本确认没有'碰巧命中'。")
@@ -1168,21 +1168,21 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
 
     # --- 效率-精度权衡：评价改进不能只看指标涨点
-    md += ["", "## 效率-精度权衡（涨点必须对照代价）", ""]
+    md += ["", "## 效率-精度权衡（涨点必须对照增幅）", ""]
     if common_ctx is not None and lat_entries.get("standard"):
         base_e = lat_entries["standard"]
         base_prefill = (base_e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
-        md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。代价="
-                  "Prefill 延迟/参数量/FLOPs(token)/显存 相对基线增幅的最大值；"
+        md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
+                  "Prefill ms/参数量/FLOPs(token)/实测分配量 相对基线增幅的最大值；"
                   "收益=PPL 相对改善。判定规则：涨点不显著（Holm 校正后 p≥α）"
-                  "→说服力有限（代价>10% 判不可行）；显著但代价>50% 或 >5×收益 "
-                  "→收益-成本比不利。提升 0.5% 却让计算时间增加 10 倍的方案"
+                  "→说服力有限（增幅>10% 判不可行）；显著但增幅>50% 或 >5×收益 "
+                  "→收益-增幅比不利。提升 0.5% 却让计算量增加 10 倍的方案"
                   "会被明确拒绝。")
         md.append("")
-        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill 延迟 | 参数量 "
-                  "| FLOPs/token | 峰值显存 | 判定 |")
+        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | 参数量 "
+                  "| FLOPs/token | 实测分配 | 判定 |")
         md.append("|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
@@ -1228,12 +1228,12 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"| {verdict} |")
         md.append("")
         md.append("注：FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
-                  "+ 门控开销，见 latency.json 的 efficiency 字段）；峰值显存"
+                  "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
                   "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
-                  "延迟/显存受硬件影响，跨机器对比无效。")
+                  "运行时指标受硬件影响，跨机器对比无效。")
     else:
-        md.append("- ⚠ 缺少延迟/效率基准（latency.json 或 standard 基线），"
-                  "无法给出权衡判定；没有代价对照的涨点不能作为结论。")
+        md.append("- ⚠ 缺少运行时/效率基准（latency.json 或 standard 基线），"
+                  "无法给出权衡判定；没有增幅对照的涨点不能作为结论。")
 
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "summary.md"), "w", encoding="utf-8") as f:
@@ -1383,7 +1383,7 @@ def main():
 
     # 过拟合小批量 sanity check：全量训练前的代码正确性闸门（梯度/损失/标签）。
     # 每个变体跑一次（用首个种子），失败立即中止——连小批量都无法过拟合时不应
-    # 继续全量训练。通过不代表数据增强/对齐/映射等 bug 不存在。
+    # 继续全量训练。通过不代表数据增强/对齐/映射等问题不存在。
     sanity = {}
     if args.skip_sanity or args.skip_train:
         print("[run_all] sanity check 已跳过（--skip_sanity/--skip_train）")
@@ -1407,7 +1407,7 @@ def main():
             v = variants[cmds.index(e.cmd)]
             raise SystemExit(
                 f"sanity check 失败（变体 {v}，退出码 {e.returncode}）：无法过拟合小批量，"
-                "说明梯度反传/损失计算/标签对齐存在严重 bug；请先修复再开全量"
+                "说明梯度反传/损失计算/标签对齐存在严重问题；请先排查再开全量"
                 f"训练。结果见 {os.path.join(results_dir, f'sanity_{v}.json')}。")
         for v in variants:
             sanity[v] = "pass"
@@ -1441,7 +1441,7 @@ def main():
             raise SystemExit(
                 f"训练失败（变体命令退出码 {e.returncode}）：若为 NaN 中止，"
                 f"对应 run 目录下已生成 nan_report.json（数据→代码→混合精度→"
-                f"梯度/学习率的系统排查路径），修复后重跑；命令: "
+                f"梯度/学习率的系统排查路径），排查后重跑；命令: "
                 f"{' '.join(e.cmd)}")
     eval_cmds, eval_names = [], []
     ruler_cmds, ruler_names = [], []
@@ -1500,9 +1500,9 @@ def main():
                       f" -> badcases_*.md")
 
     if not args.skip_latency:
-        # 显式给出延迟基准的变体清单：lega.latency 的默认值不含消融变体，
-        # 不传会让汇总表的消融变体延迟列恒为 "-"。多种子时延迟按各变体首个
-        # 种子的 checkpoint 测量（延迟由架构决定，与训练种子无关）。
+        # 显式给出基准的变体清单：lega.latency 的默认值不含消融变体，
+        # 不传会让汇总表的消融变体对应列恒为 "-"。多种子时按各变体首个
+        # 种子的 checkpoint 测量（该指标由架构决定，与训练种子无关）。
         lat_variants = ",".join(dict.fromkeys(["standard", "standard_sdpa"] + variants))
         run([py, "-m", "lega.latency", "--config", args.config,
              "--data_dir", args.data_dir, "--ckpt_dir", out_root,

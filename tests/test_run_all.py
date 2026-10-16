@@ -128,26 +128,26 @@ def test_component_evidence_requires_significance():
 
 
 def test_tradeoff_verdict_rejects_bad_deals():
-    """效率-精度权衡判定：不显著涨点说服力有限；大代价小收益被拒绝。"""
-    # 不显著 + 代价 >10% → 不可行（微小且不显著的涨点 + 大代价）
+    """效率-精度权衡判定：不显著涨点说服力有限；大增幅小收益被拒绝。"""
+    # 不显著 + 增幅 >10% → 不可行（微小且不显著的涨点 + 大增幅）
     v = tradeoff_verdict(benefit_pct=0.3, p_adj=0.4, cost_pct=30.0)
     assert v.startswith("不可行"), v
-    # 不显著 + 代价小 → 说服力有限
+    # 不显著 + 增幅小 → 说服力有限
     v = tradeoff_verdict(benefit_pct=0.3, p_adj=0.4, cost_pct=2.0)
     assert v.startswith("说服力有限"), v
-    # 显著但代价 >5×收益 → 收益-成本比不利（0.5% 涨点 vs 10 倍计算不可行）
+    # 显著但增幅 >5×收益 → 收益-增幅比不利（0.5% 涨点 vs 10 倍计算不可行）
     v = tradeoff_verdict(benefit_pct=0.5, p_adj=0.01, cost_pct=900.0)
-    assert "收益-成本比不利" in v or "需审视" in v, v
-    # 显著 + 代价温和（<5×收益）→ 可接受
+    assert "收益-增幅比不利" in v or "需审视" in v, v
+    # 显著 + 增幅温和（<5×收益）→ 可接受
     v = tradeoff_verdict(benefit_pct=5.0, p_adj=0.01, cost_pct=10.0)
     assert v == "可接受", v
-    # 显著但代价 >50% → 需审视
+    # 显著但增幅 >50% → 需审视
     v = tradeoff_verdict(benefit_pct=5.0, p_adj=0.01, cost_pct=60.0)
     assert v.startswith("需审视"), v
     # 数据缺失 → 不下结论
     assert tradeoff_verdict(None, 0.01, 10.0) == "数据不足"
     assert tradeoff_verdict(1.0, 0.01, None) == "数据不足"
-    print("  [ok] tradeoff_verdict（不显著/大代价/收益成本比判定）")
+    print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比判定）")
 
 
 def test_rel_pct_and_eff_cells():

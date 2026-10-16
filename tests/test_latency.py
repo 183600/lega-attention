@@ -1,4 +1,4 @@
-"""评测流水线完整性：延迟/效率基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
+"""评测流水线完整性：效率基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
 import json
 import os
 
@@ -19,7 +19,7 @@ def test_latency_bench_runs_on_cpu():
                 ffn_mult=4, variant="lega")
     model.eval()
     ms = bench_prefill(model, "cpu", ctx=32, batch_size=1, iters=1, warmup=1, vocab=64)
-    assert ms > 0, f"prefill 耗时异常: {ms}"
+    assert ms > 0, f"prefill 数值异常: {ms}"
     dms, pf_len = bench_decode(model, "cpu", ctx=32, decode_tokens=8, iters=1,
                                warmup=1, vocab=64)
     assert dms > 0 and pf_len == 32, f"decode 基准异常: dms={dms}, pf_len={pf_len}"
@@ -27,7 +27,7 @@ def test_latency_bench_runs_on_cpu():
 
 
 def test_flops_estimate_matches_formula():
-    """FLOPs/token 解析估计必须与公式一致，且门控开销精确可算。"""
+    """FLOPs/token 解析估计必须与公式一致，且门控项精确可算。"""
     torch.manual_seed(0)
     V, L, d, H, ctx = 64, 2, 64, 2, 32
     model = GPT(vocab_size=V, block_size=64, d_model=d, n_layers=L, n_heads=H,
@@ -44,7 +44,7 @@ def test_flops_estimate_matches_formula():
     assert f["total_flops_per_tok"] == sum(
         f[k] for k in ("matmul_flops_per_tok", "attn_flops_per_tok",
                        "gate_extra_flops_per_tok"))
-    # standard 无门控开销
+    # standard 无门控项
     f_std = estimate_flops_per_token(
         GPT(vocab_size=V, block_size=64, d_model=d, n_layers=L, n_heads=H,
             variant="standard"), ctx)
@@ -52,11 +52,11 @@ def test_flops_estimate_matches_formula():
     # 同结构下 lega 与 standard 的 matmul/attn 完全一致（差异只来自门控）
     assert f_std["matmul_flops_per_tok"] == f["matmul_flops_per_tok"]
     assert f_std["attn_flops_per_tok"] == f["attn_flops_per_tok"]
-    print(f"  [ok] FLOPs 估计（matmul={expect_mm:,}，gate 开销精确可算）")
+    print(f"  [ok] FLOPs 估计（matmul={expect_mm:,}，gate 项精确可算）")
 
 
 def test_flops_gate_terms_match_variant():
-    """门控开销必须按变体实际启用的公式项计价（qgate/null/仅长度/仅集中度）。"""
+    """门控项必须按变体实际启用的公式项计价（qgate/null/仅长度/仅集中度）。"""
     torch.manual_seed(0)
     V, L, d, H, ctx = 64, 2, 64, 2, 32
 
@@ -69,7 +69,7 @@ def test_flops_gate_terms_match_variant():
     scan = ctx * H * L    # max_j p_j 扫描
     assert gate("qgate") == wq, "qgate 无集中度项，不应计 max 扫描"
     assert gate("null") == 4 * d * L, "null 只有解析合并 null 槽的 QK+AV"
-    assert gate("lega_len_only") == 0, "仅长度门控无 w·q/扫描开销"
+    assert gate("lega_len_only") == 0, "仅长度门控无 w·q/扫描项"
     assert gate("lega_no_query") == scan
     assert gate("lega_conc_only") == scan
     assert gate("lega") == wq + scan
@@ -78,7 +78,7 @@ def test_flops_gate_terms_match_variant():
 
 
 def test_efficiency_metrics_on_cpu():
-    """efficiency_metrics：参数量/KV 缓存/FLOPs 齐全；CPU 无峰值显存（记 None）。"""
+    """efficiency_metrics：参数量/KV 缓存/FLOPs 齐全；CPU 无 CUDA 分配指标（记 None）。"""
     torch.manual_seed(0)
     model = GPT(vocab_size=64, block_size=64, d_model=32, n_layers=2, n_heads=2,
                 variant="lega")
@@ -92,13 +92,13 @@ def test_efficiency_metrics_on_cpu():
     assert set(eff["flops_per_tok"]) == {"32", "64"}
     assert all(v["total_flops_per_tok"] > 0 for v in eff["flops_per_tok"].values())
     assert all(v is None for v in eff["peak_mem_mb_prefill"].values()), \
-        "CPU 环境不应伪造峰值显存数值"
+        "CPU 环境不应伪造 CUDA 分配数值"
     print(f"  [ok] efficiency_metrics（params={eff['n_params']:,}，"
           f"KV={eff['kv_cache_mb_per_tok']*2**20:.0f}B/tok）")
 
 
 def test_latency_wired_into_configs_and_runner():
-    """延迟配置、run_all 接线与汇总/绘图链路均存在。"""
+    """效率配置、run_all 接线与汇总/绘图链路均存在。"""
     for name in ("tiny.json", "small.json"):
         with open(os.path.join(ROOT, "configs", name), encoding="utf-8") as f:
             cfg = json.load(f)
@@ -107,4 +107,4 @@ def test_latency_wired_into_configs_and_runner():
         src = f.read()
     assert "lega.latency" in src, "run_all.py 未接入 lega.latency"
     assert "tradeoff_verdict" in src, "run_all.py 未接入效率-精度权衡判定"
-    print("  [ok] latency/efficiency 已接入 configs/run_all/plots")
+    print("  [ok] efficiency 已接入 configs/run_all/plots")

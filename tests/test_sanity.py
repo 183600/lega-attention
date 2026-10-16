@@ -81,7 +81,7 @@ def test_gradient_coverage_classifies_missing_zero_nonfinite():
 def test_overfit_check_detects_detached_submodule():
     """总梯度范数正常、但子模块没接进计算图（detach）也必须判失败。
 
-    这是比“全参数冻结”更隐蔽的 bug：loss.requires_grad 与总梯度范数都正常，
+    这是比“全参数冻结”更隐蔽的问题：loss.requires_grad 与总梯度范数都正常，
     只有逐参数覆盖能定位到断流参数。
     """
     model = _model()

@@ -222,8 +222,8 @@ def fig_latency(rdir):
                  marker="o", label=_label(v) + ("(SDPA)" if e.get("use_sdpa") and v == "standard_sdpa" else ""),
                  color=COLORS.get(v))
     ax1.set_xlabel("上下文长度 (tokens)")
-    ax1.set_ylabel(f"预填充耗时 (ms, batch={prefill_bs})")
-    ax1.set_title("Prefill 延迟")
+    ax1.set_ylabel(f"Prefill (ms, batch={prefill_bs})")
+    ax1.set_title("Prefill")
     ax1.grid(alpha=0.3)
     ax1.legend(fontsize=8)
     for v, e in variants.items():
@@ -235,11 +235,11 @@ def fig_latency(rdir):
         ax2.plot(xs, [e["decode_ms_per_tok"][c] for c in ctx_keys],
                  marker="s", label=_label(v), color=COLORS.get(v))
     ax2.set_xlabel("decode 前的实际 KV 上下文长度 (tokens)")
-    ax2.set_ylabel("每 token 解码耗时 (ms)")
-    ax2.set_title("Decode 延迟（KV 缓存，batch=1）")
+    ax2.set_ylabel("Decode (ms/tok)")
+    ax2.set_title("Decode（KV 缓存，batch=1）")
     ax2.grid(alpha=0.3)
     ax2.legend(fontsize=8)
-    fig.suptitle("实际推理延迟对比", y=1.02)
+    fig.suptitle("推理基准对比", y=1.02)
     fig.savefig(os.path.join(rdir, "fig_latency.png"), dpi=150)
     plt.close(fig)
     return True

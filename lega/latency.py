@@ -1,6 +1,6 @@
-"""推理延迟基准：预填充（prefill）与带 KV 缓存的逐 token 解码（decode）。
+"""推理基准：预填充（prefill）与带 KV 缓存的逐 token 解码（decode）。
 
-对比各变体的推理耗时，回答“实际推理延迟”这一评测维度。
+对比各变体在相同配置下两种前向模式的相对差异。
 CUDA 上默认与 train/evaluate/ruler/analysis 一样启用 bf16 autocast
 （--no_amp 回退 fp32/TF32）。
 用法:
@@ -39,7 +39,7 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
       * attn：每个 query token 对 kv_len 个 key 的 QK 与 AV 各一次 → 4·kv_len·d/层；
       * gate：按变体实际启用的公式项计价——w·q（含查询项变体，2d/层）、
         对每头注意力列求 max_j p_j（含集中度项变体，≈kv_len·H/层）、
-        null 槽额外一个 key 的 QK+AV（仅 null，4d/层）；standard 无门控开销。
+        null 槽额外一个 key 的 QK+AV（仅 null，4d/层）；standard 无门控项。
     """
     d = model.d_model
     n_layers = len(model.blocks)
@@ -67,13 +67,13 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
         "gate_extra_flops_per_tok": int(gate_flops),
         "total_flops_per_tok": int(2 * matmul_macs + attn_flops + gate_flops),
         "kv_len": int(kv_len),
-        "note": "解析估计：matmul 2·MACs + 注意力 4·kv_len·d/层 + 门控开销；"
+        "note": "解析估计：matmul 2·MACs + 注意力 4·kv_len·d/层 + 门控项；"
                 "变体间相对差比绝对值更可靠",
     }
 
 
 def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
-    """参数量/显存/KV 缓存/FLOPs：效率-精度权衡的效率侧输入。"""
+    """参数量/KV 缓存/FLOPs 等结构指标：效率-精度权衡的输入。"""
     params_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     attn0 = model.blocks[0].attn
     kv_dtype = kv_dtype or attn0.wk.weight.dtype
@@ -86,22 +86,20 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         "flops_per_tok": {},
         "peak_mem_mb_prefill": {},
     }
-    # 峰值显存必须与真实推理同口径：无梯度（autograd 图会系统性抬高峰值，
-    # 大 ctx 下甚至 OOM）+ 与延迟基准一致的 AMP dtype。
+    # 测量口径与真实推理一致：无梯度 + 与基准相同的 AMP dtype。
     amp = (device.startswith("cuda")
            and kv_dtype in (torch.bfloat16, torch.float16))
     for ctx in ctxs:
         if ctx > model.block_size:
             continue
         eff["flops_per_tok"][str(ctx)] = estimate_flops_per_token(model, ctx)
-        # 峰值显存：单次 prefill 前向（batch=1）内实测；CPU 无显存语义，
-        # 记 None 并以 params+KV 的解析量供参考（明确标注口径）
+        # 单次 prefill 前向（batch=1）内实测；CPU 无 CUDA 分配语义，记 None
         if device.startswith("cuda"):
             x = torch.randint(0, model.vocab_size, (1, ctx), device=device)
             ctxmgr = (torch.autocast("cuda", dtype=kv_dtype) if amp
                       else contextlib.nullcontext())
             with torch.inference_mode(), ctxmgr:
-                model(x, last_logits_only=True)  # 预热，排除首次启动开销
+                model(x, last_logits_only=True)  # 预热以稳定计时
                 torch.cuda.reset_peak_memory_stats()
                 model(x, last_logits_only=True)
             torch.cuda.synchronize()
@@ -207,7 +205,7 @@ def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup
 
 
 def main():
-    p = argparse.ArgumentParser(description="推理延迟基准")
+    p = argparse.ArgumentParser(description="推理基准")
     p.add_argument("--config", required=True)
     p.add_argument("--data_dir", required=True, help="读取 meta.json 获取词表大小")
     p.add_argument("--ckpt_dir", default=None,
@@ -261,7 +259,7 @@ def main():
         assert vname in VARIANTS, f"未知变体 {v}"
         # 与 evaluate/ruler/analysis 口径一致：优先 val 上选出的 best-checkpoint。
         # 兼容两种布局：单种子 out/<tag>/<variant>/，多种子 out/<tag>/<variant>/seed<seed>/；
-        # 多种子时延迟按最小种子号的 checkpoint 测量（延迟由架构决定，与种子无关）。
+        # 多种子时按最小种子号的 checkpoint 测量（该指标由架构决定，与种子无关）。
         ckpt_path = None
         if args.ckpt_dir:
             base = os.path.join(args.ckpt_dir, vname)
@@ -294,7 +292,7 @@ def main():
         entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa, "weights": src,
                  "n_params": count_params(model), "prefill_ms": {},
                  "decode_ms_per_tok": {}, "decode_prefill_ctx": {}}
-        # 效率侧完整指标：参数量/KV 缓存/FLOPs/峰值显存 —— 效率-精度权衡的输入。
+        # 效率侧指标：参数量/KV 缓存/FLOPs —— 效率-精度权衡的输入。
         entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
                                                  kv_dtype=kv_dtype)
         for ctx in ctx_lens:
@@ -318,7 +316,7 @@ def main():
                                            warmup, model.vocab_size, kv_dtype=kv_dtype)
             entry["decode_ms_per_tok"][str(ctx)] = round(dms, 4)
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
-            # 较短 KV 前缀的耗时标注成原 ctx 的耗时。
+            # 较短 KV 前缀的数值标注成原 ctx 的数值。
             entry["decode_prefill_ctx"][str(ctx)] = pf_len
             bs1 = entry["prefill_ms"][str(ctx)]
             bs_key = "1" if "1" in bs1 else next(iter(bs1))

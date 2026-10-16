@@ -135,7 +135,7 @@ def test_run_ruler_collects_badcases():
         assert c["answer"] and isinstance(c["pred"], str)
         assert c["question"] and "Answer:" in c["question"]
         assert c["needle_excerpt"] and c["answer"] in c["needle_excerpt"]
-        # 标注自检：gold 必须真的在 prompt 里，否则是构造 bug
+        # 标注自检：gold 必须真的在 prompt 里，否则是构造错误
         assert c["answer_in_prompt"] is True
         assert c["em"] == 0.0
         assert "context_numbers" in c
