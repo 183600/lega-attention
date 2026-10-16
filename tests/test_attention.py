@@ -223,35 +223,42 @@ def test_standard_sdpa_cache_forwards_dropout_in_training():
 
 
 def test_query_chunked_attention_matches_unchunked():
-    """查询维分块 + 逐块 checkpoint 与单块显式注意力逐位一致（前向/反向）。"""
+    """查询维分块（逐块 checkpoint / 直接重算两种模式）与单块显式注意力逐位一致（前向/反向）。"""
     torch.manual_seed(3)
     ref = CausalSelfAttention(32, 2, variant="lega")
     with torch.no_grad():
         ref.gate_w.normal_(0, 0.2)
         ref.gate_a.normal_(0, 0.2)
         ref.gate_b.normal_(0, 0.2)
-    chk = CausalSelfAttention(32, 2, variant="lega")
-    chk.load_state_dict(ref.state_dict())
     x = torch.randn(2, 96, 32)
 
     old = attention_mod._CHUNK_TARGET_ELEMS
+    old_ckpt = attention_mod._CKPT_MIN_BYTES
     try:
         attention_mod._CHUNK_TARGET_ELEMS = 10**12
         ref.train()
         o_ref, _, _ = ref(x)
         (o_ref * o_ref).mean().backward()
-        attention_mod._CHUNK_TARGET_ELEMS = 1024
-        chk.train()
-        o_chk, _, _ = chk(x)
-        (o_chk * o_chk).mean().backward()
+        # 阈值 0 强制逐块 checkpoint；阈值极大走不重算的分块路径。
+        for ckpt_bytes in (0, 10**18):
+            attention_mod._CKPT_MIN_BYTES = ckpt_bytes
+            chk = CausalSelfAttention(32, 2, variant="lega")
+            chk.load_state_dict(ref.state_dict())
+            attention_mod._CHUNK_TARGET_ELEMS = 1024
+            chk.train()
+            o_chk, _, _ = chk(x)
+            (o_chk * o_chk).mean().backward()
+
+            assert torch.equal(o_ref, o_chk)
+            for (n0, p0), (n1, p1) in zip(ref.named_parameters(),
+                                          chk.named_parameters()):
+                assert n0 == n1
+                if p0.grad is not None:
+                    assert torch.allclose(p0.grad, p1.grad,
+                                          atol=1e-5, rtol=1e-5), n0
     finally:
         attention_mod._CHUNK_TARGET_ELEMS = old
-
-    assert torch.equal(o_ref, o_chk)
-    for (n0, p0), (n1, p1) in zip(ref.named_parameters(), chk.named_parameters()):
-        assert n0 == n1
-        if p0.grad is not None:
-            assert torch.allclose(p0.grad, p1.grad, atol=1e-5, rtol=1e-5), n0
+        attention_mod._CKPT_MIN_BYTES = old_ckpt
 
 
 def test_chunked_full_stats_matches_unchunked():

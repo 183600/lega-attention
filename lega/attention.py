@@ -69,12 +69,23 @@ _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only")
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
 
+# 训练态逐块 checkpoint 的使用下限：不重算时各块 softmax 输出（因果可见
+# 前缀合计约 B*H*T*S/2 个元素）会全部驻留在反向图中；估算省下的字节数
+# 低于该值时改走不重算的分块路径。
+_CKPT_MIN_BYTES = 128 * 1024 * 1024
+
 
 def _chunk_elems(dev: torch.device) -> int:
     """当前设备每块打分矩阵的目标元素数（CPU 与加速器取值不同）。"""
     if dev.type == "cpu":
         return max(1, _CHUNK_TARGET_ELEMS // 4)
     return _CHUNK_TARGET_ELEMS
+
+
+def _ckpt_worthwhile(B: int, H: int, T: int, S: int, dtype: torch.dtype) -> bool:
+    """估算逐块 checkpoint 可省下的激活字节数是否达到启用下限。"""
+    elem = torch.empty((), dtype=dtype).element_size()
+    return B * H * T * S * elem // 2 >= _CKPT_MIN_BYTES
 
 
 # 进程级共享缓存：各层（乃至各实例）在同一设备/长度下的因果掩码完全相同，
@@ -312,9 +323,9 @@ class CausalSelfAttention(nn.Module):
         # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加。
         if self.use_conc:
             # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
-            # clamp/log 原地完成；max_p 为 amax 的反向保存值，需要梯度时
-            # 必须保持原值。clamp_min 的输出是一次性中间张量，在其上原地取
-            # log 不影响反向（反向比较的是 clamp 的输入 max_p）。
+            # clamp/log 原地完成；max_p 为 max/amax 的反向保存值，需要梯度
+            # 时必须保持原值。clamp_min 的输出是一次性中间张量，在其上原地
+            # 取 log 不影响反向（反向比较的是 clamp 的输入 max_p）。
             c = max_p.clamp_min(1e-30).log_() if (keep_terms or max_p.requires_grad) \
                 else max_p.clamp_min_(1e-30).log_()
             if self.use_len:
@@ -413,6 +424,10 @@ class CausalSelfAttention(nn.Module):
             if full_diag:
                 max_v, argmax_real = torch.max(p, dim=-1)
                 max_p = max_v.float()                                  # (B,H,C)
+            elif p.requires_grad:
+                # 训练态用 max(dim)：反向只保存 argmax 索引并 scatter，
+                # 而 amax 的反向需要在整张 p 上逐元素比较。
+                max_p = torch.max(p, dim=-1).values.float()            # (B,H,C)
             else:
                 max_p = p.amax(dim=-1).float()                         # (B,H,C)
         if full_diag:
@@ -480,7 +495,9 @@ class CausalSelfAttention(nn.Module):
         kT = k.transpose(-2, -1)
         # checkpoint 的前向以 collect_stats=False 运行且返回单个张量，
         # 需要统计时必须走普通调用，否则统计会被静默丢弃（g/logit 全为 None）。
-        use_ckpt = torch.is_grad_enabled() and q_rot.requires_grad and not collect_stats
+        use_ckpt = (torch.is_grad_enabled() and q_rot.requires_grad
+                    and not collect_stats
+                    and _ckpt_worthwhile(B, H, T, S, q_rot.dtype))
         # 输出按 (B,T,H,Dh) 连续布局写入预分配缓冲（逐块 copy_ 是 autograd
         # 安全的），块输出到多头合并的转置在此完成
         Dh = v.shape[-1]
@@ -830,7 +847,10 @@ class CausalSelfAttention(nn.Module):
                     max_v, argmax_stat = torch.max(p, dim=-1)
                     max_p = max_v.float()                    # max_j p_j ∈ (0, 1]
                 elif need_max_real:
-                    max_p = p.amax(dim=-1).float()
+                    # 有梯度时 max(dim) 的反向只需 argmax 索引（见
+                    # _attend_q_chunk）；无梯度时用 amax。
+                    max_p = (torch.max(p, dim=-1).values if p.requires_grad
+                             else p.amax(dim=-1)).float()
                 elif need_argmax_real:
                     argmax_stat = p.argmax(dim=-1)
 
