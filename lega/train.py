@@ -200,7 +200,7 @@ def main():
         model, lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.1)),
         fused=(device.startswith("cuda")))
     base_lrs = [g["lr"] for g in opt.param_groups]
-    # 梯度裁剪的参数列表与优化器同口径，只构建一次
+    # 梯度裁剪的参数列表与优化器同口径
     clip_params = [p for p in model.parameters() if p.requires_grad]
 
     steps = int(cfg["steps"])

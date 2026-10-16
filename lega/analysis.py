@@ -84,9 +84,8 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
         ns, ne = gold_span if gold_span else (None, None)
         width = qe - qs
         qpos = list(range(qs, qe))
-        # 只回传 query 区间的切片统计：各层先在设备端各拼为一张
-        # (N, H, width) 张量，再把全部层堆叠一次后单次 D2H；
-        # 各层字段完全一致（同模型同变体），堆叠维度天然对齐。
+        # 只回传 query 区间的切片统计；各层字段完全一致（同模型同变体），
+        # 堆叠维度天然对齐。
         per_layer = []
         for st in out["gate_stats"]:
             argmax_d = st["argmax"][0][:, qs:qe]                          # (H, width) 设备端

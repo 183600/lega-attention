@@ -846,7 +846,7 @@ class CausalSelfAttention(nn.Module):
                     elif self.variant == "null":
                         # null 变体的统计必须基于含 null 槽的完整 softmax，
                         # 否则会虚增集中度并错误地把 null 槽落点记为真实键。
-                        # 真实键一次 max 同时给出概率与落点，再与 null 槽比较；
+                        # 真实键 max 给出概率与落点，再与 null 槽比较；
                         # 与对 S+1 列整体 argmax 后判是否落在 null 槽完全一致。
                         max_real, amax_real = torch.max(p_pre[..., :n_real], dim=-1)
                         null_p = p_pre[..., -1]

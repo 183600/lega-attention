@@ -141,7 +141,7 @@ def build_summary(results_dir: str) -> dict:
         if base_ms is not None and base_ms > 0 \
                 and r.get("prefill_ms") is not None and r["prefill_ms"] > 0 \
                 and r["variant"] not in ("standard", "standard_sdpa"):
-            r["prefill_overhead_pct"] = round(
+            r["prefill_rel_pct"] = round(
                 (r["prefill_ms"] - base_ms) / base_ms * 100, 2)
 
     # Markdown
@@ -149,7 +149,7 @@ def build_summary(results_dir: str) -> dict:
             ("val_ppl", "PPL↓"), ("ruler_avg", "RULER平均↑"),
             ("ruler_niah_synth", "niah_synth↑"), ("ruler_niah_corpus", "niah_corpus↑"),
             ("ruler_niah_multikey", "multikey↑"), ("ruler_fwe", "fwe↑"), ("ruler_vt", "vt↑"),
-            ("prefill_ms", "Prefill ms↓"), ("prefill_overhead_pct", "开销%"),
+            ("prefill_ms", "Prefill ms↓"), ("prefill_rel_pct", "相对基线%"),
             ("decode_ms_per_tok", "Decode ms/tok↓"), ("gate_mean", "门控均值"),
             ("misleading_rate", "集中但看错率"), ("misleading_given_conc", "集中后看错率"),
             ("auroc_logit", "AUROC(logit)"),
@@ -180,7 +180,7 @@ def build_summary(results_dir: str) -> dict:
                       "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，见机制分析。",
                       split_note, ""]
         if common_ctx is not None:
-            cols_notes.insert(1, f"“开销%”以 {base_name or 'standard'} 的 prefill 为基线"
+            cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
                                  f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；")
         md += [""] + cols_notes
     else:
