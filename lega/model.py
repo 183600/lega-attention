@@ -442,7 +442,7 @@ class GPT(nn.Module):
             f"输入长度 {past_len}+{T} 超过 block_size={self.block_size}")
 
         x = self.drop(self.tok_emb(idx))
-        # 逐层缓存容器预分配为定长列表再按序号写入：逐 token 解码每步都调 forward
+        # 逐层缓存容器预分配为定长列表再按序号写入
         new_cache: List = [None] * len(self.blocks)
         stats_all: List = []
         for i, blk in enumerate(self.blocks):

@@ -342,7 +342,7 @@ class CausalSelfAttention(nn.Module):
         全块不可见的尾列既不参与打分也不参与 softmax，数学上与先算全量再做整列
         -inf 屏蔽完全等价；块内只需对对角带
         [band_start, band_start+cq) 用平移不变的 (1,1,cq,cq) 三角掩码做
-        masked_fill_，面积只有 cq² 而非 cq*S。
+        masked_fill_。
 
         null 变体不把 null 槽拼接进 K/V，也不把空槽得分 cat 到打分矩阵末尾，
         而是解析合并：
@@ -452,7 +452,6 @@ class CausalSelfAttention(nn.Module):
             if self.use_query else None
         k = _ensure_mm_input(k)
         v = _ensure_mm_input(v)
-        # 每块打分矩阵约 <= 设备对应的目标元素数
         cq = max(_CHUNK_MIN_T, min(T, _chunk_elems(q_rot.device) // max(1, B * H * S)))
         cq = min(T, max(cq, 1))
         kT = k.transpose(-2, -1)
@@ -624,8 +623,7 @@ class CausalSelfAttention(nn.Module):
                        and (kv_cache is None or cache_pos == 0)
                        and self.variant in ("standard", "qgate", "lega_no_conc"))
 
-        # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码），
-        # 完全不需要 (1,1,T,S) 整表掩码。
+        # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码）。
         elems = B * H * T * S
         will_chunk = (not use_sdpa and T >= _CHUNK_MIN_T
                       and elems >= _chunk_elems(dev)
