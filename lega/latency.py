@@ -17,7 +17,7 @@ from typing import Dict
 
 import torch
 
-from .attention import VARIANTS
+from .attention import VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
@@ -37,7 +37,9 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
     约定（与常见 2*N 口径一致，乘法+加法各计 1 FLOP）：
       * matmul：逐层 qkv/wo/ffn 权重 MACs×2 + lm_head×2（权重共享只计一次）；
       * attn：每个 query token 对 kv_len 个 key 的 QK 与 AV 各一次 → 4·kv_len·d/层；
-      * gate：gated 变体额外 w·q（2d）+ 对每头注意力列求 max_j p_j（≈kv_len·H）。
+      * gate：按变体实际启用的公式项计价——w·q（含查询项变体，2d/层）、
+        对每头注意力列求 max_j p_j（含集中度项变体，≈kv_len·H/层）、
+        null 槽额外一个 key 的 QK+AV（仅 null，4d/层）；standard 无门控开销。
     """
     d = model.d_model
     n_layers = len(model.blocks)
@@ -51,9 +53,14 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
     attn_flops = 4 * int(kv_len) * d * n_layers
     variant = model.variant
     gate_flops = 0
-    if variant not in ("standard", "standard_sdpa", None):
-        # w·q: 2·d；max_j p_j: 每头扫 kv_len 个概率 → kv_len·n_heads
-        gate_flops = 2 * d * n_layers + int(kv_len) * model.n_heads * n_layers
+    if variant in _USE_QUERY:
+        gate_flops += 2 * d * n_layers                 # w·q: 每层 2·d
+    if variant in _LEGA_FAMILY:
+        # max_j p_j: 每头扫描 kv_len 个概率 -> 每层 kv_len·n_heads
+        gate_flops += int(kv_len) * model.n_heads * n_layers
+    if variant == "null":
+        # 解析合并的 null 槽：每层多一个 key 的 QK 与 AV -> 4·d
+        gate_flops += 4 * d * n_layers
     return {
         "matmul_flops_per_tok": int(2 * matmul_macs),
         "attn_flops_per_tok": int(attn_flops),
@@ -79,6 +86,10 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         "flops_per_tok": {},
         "peak_mem_mb_prefill": {},
     }
+    # 峰值显存必须与真实推理同口径：无梯度（autograd 图会系统性抬高峰值，
+    # 大 ctx 下甚至 OOM）+ 与延迟基准一致的 AMP dtype。
+    amp = (device.startswith("cuda")
+           and kv_dtype in (torch.bfloat16, torch.float16))
     for ctx in ctxs:
         if ctx > model.block_size:
             continue
@@ -87,9 +98,12 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         # 记 None 并以 params+KV 的解析量供参考（明确标注口径）
         if device.startswith("cuda"):
             x = torch.randint(0, model.vocab_size, (1, ctx), device=device)
-            model(x, last_logits_only=True)      # 预热，排除首次启动开销
-            torch.cuda.reset_peak_memory_stats()
-            model(x, last_logits_only=True)
+            ctxmgr = (torch.autocast("cuda", dtype=kv_dtype) if amp
+                      else contextlib.nullcontext())
+            with torch.inference_mode(), ctxmgr:
+                model(x, last_logits_only=True)  # 预热，排除首次启动开销
+                torch.cuda.reset_peak_memory_stats()
+                model(x, last_logits_only=True)
             torch.cuda.synchronize()
             eff["peak_mem_mb_prefill"][str(ctx)] = round(
                 torch.cuda.max_memory_allocated() / 2**20, 3)

@@ -55,6 +55,28 @@ def test_flops_estimate_matches_formula():
     print(f"  [ok] FLOPs 估计（matmul={expect_mm:,}，gate 开销精确可算）")
 
 
+def test_flops_gate_terms_match_variant():
+    """门控开销必须按变体实际启用的公式项计价（qgate/null/仅长度/仅集中度）。"""
+    torch.manual_seed(0)
+    V, L, d, H, ctx = 64, 2, 64, 2, 32
+
+    def gate(variant):
+        m = GPT(vocab_size=V, block_size=64, d_model=d, n_layers=L, n_heads=H,
+                ffn_mult=4, variant=variant)
+        return estimate_flops_per_token(m, ctx)["gate_extra_flops_per_tok"]
+
+    wq = 2 * d * L        # w·q 项
+    scan = ctx * H * L    # max_j p_j 扫描
+    assert gate("qgate") == wq, "qgate 无集中度项，不应计 max 扫描"
+    assert gate("null") == 4 * d * L, "null 只有解析合并 null 槽的 QK+AV"
+    assert gate("lega_len_only") == 0, "仅长度门控无 w·q/扫描开销"
+    assert gate("lega_no_query") == scan
+    assert gate("lega_conc_only") == scan
+    assert gate("lega") == wq + scan
+    assert gate("standard") == 0
+    print(f"  [ok] 门控 FLOPs 按变体计价（w·q={wq}，扫描={scan}）")
+
+
 def test_efficiency_metrics_on_cpu():
     """efficiency_metrics：参数量/KV 缓存/FLOPs 齐全；CPU 无峰值显存（记 None）。"""
     torch.manual_seed(0)
