@@ -171,8 +171,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     try:
         model.train()
         initial = batch_metrics(model, x, y)
+        fused = str(device).startswith("cuda")
         opt = torch.optim.AdamW(model.parameters(), lr=float(lr),
-                                weight_decay=0.0, betas=(0.9, 0.95))
+                                weight_decay=0.0, betas=(0.9, 0.95),
+                                fused=fused, foreach=not fused)
         history = []
         first_grad_norm = None
         first_train_loss = None
