@@ -61,23 +61,19 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
     直接消费 logits 计算指标（而非模型的训练路径），因此同时校验了
     lm_head 输出与标签的对齐关系。
 
-    内存约束（显存/内存峰值与词表规模解耦）：
-      * max_chunk_tokens 限制单次前向的 token 数（rows*T）；
-      * max_chunk_elems 限制单次 logits 张量 (rows*T*V) 与交叉熵内部
-        log_softmax 缓冲 (ce_tokens*V) 的元素量——大词表下 F.cross_entropy
-        会在整块 (rows*T, V) 上再分配一份同尺寸缓冲，必须按元素量二次分块，
-        否则词表一大峰值内存就会数倍于 logits 本身。
-        （单条序列自身的 logits 无法再拆，rows 至少为 1。）
+    计算逐块进行：max_chunk_tokens 限制单次前向的 token 数（rows*T），
+    max_chunk_elems 限制单块 logits 与交叉熵逐 token 块的元素量
+    （单条序列自身的 logits 无法再拆，rows 至少为 1）。
     """
     was_training = model.training
     model.eval()
     B, T = x.shape
     V = model.vocab_size
-    budget = max(1, int(max_chunk_elems))
+    max_elems = max(1, int(max_chunk_elems))
     rows = max(1, min(int(max_chunk_tokens) // max(1, T),
-                      budget // max(1, T * V)))
-    # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块预算同口径
-    ce_tokens = max(256, min(4096, budget // max(1, V)))
+                      max_elems // max(1, T * V)))
+    # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块一致
+    ce_tokens = max(256, min(4096, max_elems // max(1, V)))
     total_loss = 0.0
     n_tokens = 0
     correct = 0

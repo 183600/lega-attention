@@ -266,7 +266,6 @@ class _ChunkedLinearCE(torch.autograd.Function):
         # 一律非原地缩放：ctx.dx/ctx.gw 是前向物化的中间量，同一计算图多次
         # backward（retain_graph=True）时必须保持不变；若在第一次调用中原地
         # 缩放，后续调用会再乘一次 1/n_valid，梯度随 backward 次数逐次衰减。
-        # 代价是反向多一份 dx 大小的临时量（不做原地省的只是这一份）。
         dx = None if ctx.dx is None else ctx.dx * gscale
         gw = None if ctx.gw is None else ctx.gw * gscale
         if gw is not None and gw.dtype != weight.dtype:

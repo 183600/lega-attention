@@ -319,7 +319,7 @@ class CausalSelfAttention(nn.Module):
         if self.use_query:
             # qterm 已由调用方预归约并升到 fp32。
             logit = qterm.clone() if keep_terms else qterm
-        # logit.addcmul_(a, c) 融合"标量门控系数 × 统计项"的乘加。
+        # logit 累加"标量门控系数 × 统计项"（addcmul_）。
         if self.use_conc:
             # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
             # clamp/log 原地完成；max_p 为 max/amax 的反向保存值，需要梯度
@@ -456,7 +456,7 @@ class CausalSelfAttention(nn.Module):
         del p
         if is_null:
             # 真实键部分整体乘 (1 - p_null)（联合 softmax 的尺度因子），
-            # addcmul_ 再融合 p_null(×)v_null 的乘加。
+            # addcmul_ 再累加 p_null(×)v_null。
             o.mul_(1 - p_null)
             o.addcmul_(p_null, v_null_c.view(1, self.n_heads, 1, -1))
         if not collect_stats:
@@ -484,8 +484,8 @@ class CausalSelfAttention(nn.Module):
         gw = self._cast_cached(
             '_gate_w_cast', (self.gate_w,), q_content.dtype)[0] \
             if self.use_query else None
-        # 门控查询项 w·q 在进入分块循环前一次性归约（整段 T 单次批量归约）；
-        # 训练态 checkpoint 反向重算直接复用该结果，不再重算。
+        # 门控查询项 w·q 在进入分块循环前统一归约（整段 T）；
+        # 训练态 checkpoint 反向重算直接复用该结果。
         qterm_pre = None if gw is None else self._gate_qterm(q_content, gw)
         k = _ensure_mm_input(k)
         v = _ensure_mm_input(v)
