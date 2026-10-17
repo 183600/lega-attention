@@ -4,12 +4,27 @@ import os
 
 import torch
 
-from lega.latency import bench_decode, bench_prefill, efficiency_metrics, \
-    estimate_flops_per_token
+from lega.latency import (bench_decode, bench_decode_stats, bench_prefill,
+                          bench_prefill_stats, efficiency_metrics,
+                          estimate_flops_per_token, timing_stats)
 from lega.model import GPT
 from lega.plots import fig_latency  # noqa: F401  （确保绘图接线存在）
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_timing_stats_reports_spread():
+    """逐次计时 → 中位数/p10/p90/相对散布；单调序列的统计值精确可算。"""
+    st = timing_stats([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert st["median_ms"] == 3.0 and st["n"] == 5
+    assert st["p10_ms"] == 1.4 and st["p90_ms"] == 4.6
+    # spread=(4.6-1.4)/3=106.67%
+    assert abs(st["spread_pct"] - 106.667) < 0.01, st
+    # 恒定序列散布为 0；空输入安全返回 None
+    assert timing_stats([2.0, 2.0])["spread_pct"] == 0.0
+    empty = timing_stats([])
+    assert empty["median_ms"] is None and empty["spread_pct"] is None
+    print("  [ok] timing_stats（中位数/p10/p90/散布）")
 
 
 def test_latency_bench_runs_on_cpu():
@@ -24,6 +39,28 @@ def test_latency_bench_runs_on_cpu():
                                warmup=1, vocab=64)
     assert dms > 0 and pf_len == 32, f"decode 基准异常: dms={dms}, pf_len={pf_len}"
     print(f"  [ok] prefill={ms:.2f}ms decode={dms:.3f}ms/tok pf={pf_len}")
+
+
+def test_latency_stats_carry_measurement_noise():
+    """带统计的基准必须给出逐次计时散布与 decode 的 prefill 基线噪声。"""
+    torch.manual_seed(0)
+    model = GPT(vocab_size=64, block_size=64, d_model=32, n_layers=2, n_heads=2,
+                ffn_mult=4, variant="lega")
+    model.eval()
+    st = bench_prefill_stats(model, "cpu", ctx=16, batch_size=1, iters=3,
+                             warmup=1, vocab=64)
+    assert st["n"] == 3 and st["median_ms"] > 0
+    assert st["p10_ms"] <= st["median_ms"] <= st["p90_ms"]
+    assert st["spread_pct"] is not None and st["spread_pct"] >= 0
+    dst, pf_len = bench_decode_stats(model, "cpu", ctx=16, decode_tokens=4,
+                                     iters=3, warmup=1, vocab=64)
+    assert pf_len == 16 and dst["median_ms"] > 0
+    assert dst["prefill_baseline_median_ms"] > 0
+    assert dst["prefill_baseline_spread_pct"] is not None
+    # 兼容接口返回值与统计口径一致
+    assert bench_prefill(model, "cpu", ctx=16, batch_size=1, iters=2, warmup=1,
+                         vocab=64) > 0
+    print("  [ok] bench_*_stats（逐次计时散布 + prefill 基线噪声）")
 
 
 def test_flops_estimate_matches_formula():

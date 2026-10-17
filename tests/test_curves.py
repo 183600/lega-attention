@@ -41,6 +41,27 @@ def test_overfitting_detected():
     print("  [ok] 过拟合判定 + 早停/正则化建议")
 
 
+def test_overfitting_trend_train_down_val_stalled():
+    """训练仍在实质下降而验证无实质变化：过拟合的早期形态，必须给出
+    正则化/早停建议，且不得建议延长训练。"""
+    d = diagnose_curve(_log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2],
+                            [4.3, 4.28, 4.31, 4.27, 4.3]))
+    assert d["status"] == "过拟合趋势", d
+    assert any("验证不再随训练改善" in e for e in d["evidence"]), d["evidence"]
+    assert any("正则化" in r for r in d["recommendations"]), d["recommendations"]
+    assert not any("延长训练" in r and "不要" not in r
+                   for r in d["recommendations"]), d["recommendations"]
+    # 训练与验证同步下降仍是正常收敛，不得误报趋势
+    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    assert d2["status"] == "正常收敛", d2
+    # 训练停滞（不降）而验证也未降：仍按欠拟合处理，不是过拟合趋势
+    d3 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
+                             [2.0, 2.01, 2.005, 2.02, 2.01]))
+    assert d3["status"] == "欠拟合/学习不充分", d3
+    print("  [ok] 过拟合趋势（训练降/验证停滞）判定与建议")
+
+
 def test_plateau_train_rising_val_is_overfitting():
     """训练停滞（平台期）而验证回升同样是过拟合，不能误判为欠拟合并建议延长训练。"""
     d = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
@@ -154,8 +175,13 @@ def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"
     assert worst_status(["欠拟合/学习不充分", "发散"]) == "发散"
+    assert worst_status(["正常收敛", "过拟合趋势"]) == "过拟合趋势"
+    assert worst_status(["过拟合趋势", "过拟合"]) == "过拟合"
     assert worst_status([]) == "数据不足"
-    assert STATUS_ORDER["NaN/Inf"] > STATUS_ORDER["发散"] > STATUS_ORDER["过拟合"]
+    assert (STATUS_ORDER["NaN/Inf"] > STATUS_ORDER["发散"]
+            > STATUS_ORDER["过拟合"] > STATUS_ORDER["欠拟合/学习不充分"]
+            > STATUS_ORDER["过拟合趋势"] > STATUS_ORDER["数据不足"]
+            > STATUS_ORDER["正常收敛"])
     print("  [ok] worst_status 严重度排序")
 
 

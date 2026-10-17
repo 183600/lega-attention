@@ -15,7 +15,8 @@ import tempfile
 from unittest import mock
 
 from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
-                      _cmd_env, _effect_status, _enrich_paired, _rel_pct,
+                      _cmd_env, _effect_status, _enrich_paired, _lat_noise_pct,
+                      _noise_floor_pct, _rel_pct,
                       _resolve_jobs, _stat, AUROC_DIFF_METRIC,
                       AUROC_DIFF_REFERENCE, build_summary, component_evidence,
                       evaluate_registered_hypotheses, load_registered_hypotheses,
@@ -390,6 +391,80 @@ def test_build_summary_missing_latency_entry():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
+
+
+def test_latency_noise_helpers():
+    """测量噪声读取与两段散布的方和根合成：缺失安全。"""
+    entry = {"prefill_ms_spread_pct": {"256": {"1": 6.0}},
+             "decode_ms_spread_pct": {"256": 4.0}}
+    assert _lat_noise_pct(entry, "prefill", 256) == 6.0
+    assert _lat_noise_pct(entry, "decode", 256) == 4.0
+    assert _lat_noise_pct(entry, "prefill", 512) is None
+    assert _lat_noise_pct({}, "decode", 256) is None
+    assert _lat_noise_pct({"decode_ms_spread_pct": {"256": "bad"}},
+                          "decode", 256) is None
+    assert _noise_floor_pct(3.0, 4.0) == 5.0
+    assert _noise_floor_pct(6.0, None) is None
+    assert _noise_floor_pct(None, None) is None
+    print("  [ok] 延迟测量噪声读取与合成（缺失安全）")
+
+
+def test_tradeoff_ignores_deltas_within_measurement_noise():
+    """延迟差异不超过重复测量噪声时按不可区分处理：不计入增幅、标 †。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+
+        def _lat(prefill, dec):
+            return {"prefill_ms": {"256": {"1": prefill}},
+                    "prefill_ms_spread_pct": {"256": {"1": 30.0}},
+                    "decode_ms_per_tok": {"256": dec},
+                    "decode_ms_spread_pct": {"256": 25.0},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        # lega 的 prefill/decode 各慢 5%，均远小于噪声方和根（~39%/35%）
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(1.0, 0.1), "lega": _lat(1.05, 0.105)}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["eff_prefill_within_noise"] is True
+        assert row["eff_decode_within_noise"] is True
+        assert row["eff_prefill_noise_pct"] is not None
+        # 其余指标一致：噪声内的延迟差归零后最大增幅为 0，而不是 5%
+        assert row["eff_cost_max_pct"] == 0.0, row
+        assert "†" in out["markdown"] and "噪声区间内" in out["markdown"]
+
+        # 噪声很大但真实差异也大（+300%）时必须照常计入增幅
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(1.0, 0.1), "lega": _lat(1.0, 0.4)}})
+        out2 = build_summary(tmp)
+        row2 = next(r for r in out2["rows"] if r["variant"] == "lega")
+        assert row2["eff_decode_within_noise"] is False
+        assert row2["eff_cost_max_pct"] == 300.0, row2
+
+        # 旧格式无噪声字段：行为与之前一致（差异全部计入）
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": 1.0}},
+                         "decode_ms_per_tok": {"256": 0.1},
+                         "efficiency": {
+                             "n_params": 100,
+                             "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                             "peak_mem_mb_prefill": {"256": 1.0}}},
+            "lega": _lat(1.05, 0.105)}})
+        out3 = build_summary(tmp)
+        row3 = next(r for r in out3["rows"] if r["variant"] == "lega")
+        assert row3["eff_prefill_within_noise"] is False
+        assert row3["eff_decode_within_noise"] is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅权衡：噪声内延迟差按不可区分处理（旧格式兼容）")
 
 
 def test_tradeoff_includes_decode_latency():

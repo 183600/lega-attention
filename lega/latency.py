@@ -3,6 +3,11 @@
 对比各变体在相同配置下两种前向模式的相对差异。
 CUDA 上默认与 train/evaluate/ruler/analysis 一样启用 bf16 autocast
 （--no_amp 回退 fp32/TF32）。
+
+计时口径：每个配置重复 iters 次并**逐次计时**，报告的中位数连同
+[p10, p90] 区间与相对散布 spread_pct=(p90-p10)/median。只看单个均值
+无法判断"某变体慢 3%"是真实差距还是测量噪声；散布进入 latency.json，
+run_all 的涨点-增幅权衡据此把噪声内的差异按不可区分处理。
 用法:
   python -m lega.latency --config configs/small.json --data_dir data/wikitext103 \
       --ckpt_dir out/small --out results/small/latency.json
@@ -11,7 +16,9 @@ import argparse
 import contextlib
 import glob
 import json
+import math
 import os
+import statistics
 import time
 from typing import Dict
 
@@ -28,6 +35,43 @@ def _sync(device):
     # 同步模型所在设备：torch.cuda.synchronize() 默认只同步当前设备。
     if device is not None and str(device).startswith("cuda"):
         torch.cuda.synchronize(device)
+
+
+def _percentile(sorted_vals, q: float) -> float:
+    """线性插值分位数（q∈[0,1]；调用方保证列表非空）。"""
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return float(sorted_vals[lo]
+                 + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo))
+
+
+def timing_stats(times_ms) -> dict:
+    """逐次计时列表 → 中位数/p10/p90/相对散布（测量不确定性的最小报告口径）。
+
+    spread_pct=(p90-p10)/median：同一配置重复测量 80% 中心区间的相对宽度。
+    变体间延迟差异小于该量级时应视为测量噪声，而不是真实的效率差距。
+    """
+    vals = sorted(float(t) for t in times_ms if t is not None)
+    if not vals:
+        return {"median_ms": None, "p10_ms": None, "p90_ms": None,
+                "spread_pct": None, "n": 0}
+    med = _percentile(vals, 0.5)
+    p10 = _percentile(vals, 0.1)
+    p90 = _percentile(vals, 0.9)
+    spread = ((p90 - p10) / med * 100.0) if med > 0 else None
+    return {"median_ms": round(med, 6), "p10_ms": round(p10, 6),
+            "p90_ms": round(p90, 6),
+            "spread_pct": (round(spread, 3) if spread is not None else None),
+            "n": len(vals)}
+
+
+# 计时结果的统一说明，写入 latency.json 的 meta 供下游/复核者读取。
+TIMING_NOTE = ("每个配置重复 iters 次并逐次计时：上报中位数；"
+               "spread_pct=(p90-p10)/median 为同配置测量的相对散布。"
+               "变体间差异小于噪声量级时不可当作真实效率差距。")
 
 
 # ---------------------------------------------------------------- 结构指标
@@ -113,28 +157,43 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
 
 
 @torch.inference_mode()
-def bench_prefill(model, device, ctx: int, batch_size: int, iters: int, warmup: int,
-                  vocab: int) -> float:
+def bench_prefill_stats(model, device, ctx: int, batch_size: int, iters: int,
+                        warmup: int, vocab: int) -> dict:
+    """prefill 逐次计时 → timing_stats（中位数/p10/p90/散布）。
+
+    每次前向后同步设备再取墙钟：逐次采样才能给出测量散布。同步开销对
+    所有变体相同，变体间的相对比较不受影响。
+    """
     x = torch.randint(0, vocab, (batch_size, ctx), device=device)
     # 测的是生成式推理的 prefill：只需要最后一个位置的 logits。
     # 计算全词表 (B, T, V) logits 会掩盖注意力变体之间的真实差异。
     for _ in range(warmup):
         model(x, last_logits_only=True)
     _sync(device)
-    t0 = time.perf_counter()
+    times = []
     for _ in range(iters):
+        t0 = time.perf_counter()
         model(x, last_logits_only=True)
-    _sync(device)
-    return (time.perf_counter() - t0) / iters * 1000.0  # ms
+        _sync(device)
+        times.append((time.perf_counter() - t0) * 1000.0)
+    return timing_stats(times)
+
+
+def bench_prefill(model, device, ctx: int, batch_size: int, iters: int, warmup: int,
+                  vocab: int) -> float:
+    """兼容旧接口：返回 prefill 中位数毫秒（详细统计用 bench_prefill_stats）。"""
+    return bench_prefill_stats(model, device, ctx, batch_size, iters, warmup,
+                               vocab)["median_ms"]
 
 
 @torch.inference_mode()
-def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup: int,
-                 vocab: int, kv_dtype=None):
-    """返回 (每 token 解码毫秒, 实际预填充长度)。
+def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
+                       warmup: int, vocab: int, kv_dtype=None):
+    """返回 (每 token 解码 timing_stats, 实际预填充长度)。
 
     逐 token 基线由本函数按实际 pf_len 带缓存复测，不依赖外部
-    prefill 测量值。
+    prefill 测量值。每次 run_once 的耗时扣除 prefill 基线中位数后按
+    decode_tokens-1 折算，得到逐次 decode 采样，再汇总为中位数与散布。
     """
     # 预填充长度留出生成余量，避免超过 RoPE 最大位置。
     # 最大位置索引为 pf_len + decode_tokens - 2（第 1 步是 prefill，其后
@@ -144,6 +203,10 @@ def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup
     if room < 1:
         raise ValueError(
             f"block_size={model.block_size} 不足以解码 {decode_tokens} 个 token")
+    if decode_tokens < 2:
+        raise RuntimeError(
+            f"decode_tokens={decode_tokens} 过小：第 1 步是 prefill 前向，"
+            "至少需要 2 才能包含 1 步纯 decode")
     pf_len = max(1, min(ctx, room))
     x = torch.randint(0, vocab, (1, pf_len), device=device)
 
@@ -172,37 +235,50 @@ def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup
     for _ in range(warmup):
         run_once()
     _sync(device)
-    t0 = time.perf_counter()
+    run_times = []
     for _ in range(iters):
+        t0 = time.perf_counter()
         run_once()
-    _sync(device)
-    total = time.perf_counter() - t0
+        _sync(device)
+        run_times.append(time.perf_counter() - t0)
     # 每次 run_once 内含一次 pf_len 的 prefill；pf_len 可能与 ctx 不同
     # （pf_len = min(ctx, block_size - decode_tokens + 1)）。外部基线仅在
     # batch=1 且 pf_len == ctx 时可复用；其余情况均按实际 pf_len 重新测。
     # 基线必须与 run_once 内的 prefill 同口径（同样写入 KV 缓存），否则基线
-    # 偏小、decode_total 被系统性高估。bench_prefill 传入的 prefill_ms 不含缓存
-    # 写入，不可直接复用，这里始终按实际 pf_len 带缓存复测。
+    # 偏小、decode 被系统性高估。bench_prefill 传入的 prefill_ms 不含缓存
+    # 写入，不可直接复用，这里始终按实际 pf_len 带缓存复测并逐次计时。
     for _ in range(warmup):  # 与 bench_prefill 保持一致的预热次数
         model(x, kv_cache=kv_cache, cache_pos=0, last_logits_only=True)
     _sync(device)
-    tp = time.perf_counter()
+    prefill_times = []
     for _ in range(iters):
+        t0 = time.perf_counter()
         model(x, kv_cache=kv_cache, cache_pos=0, last_logits_only=True)
-    _sync(device)
-    prefill_t = (time.perf_counter() - tp) / iters
+        _sync(device)
+        prefill_times.append(time.perf_counter() - t0)
+    pf_med = statistics.median(prefill_times)
+    pf_stats = timing_stats([t * 1000.0 for t in prefill_times])
     # run_once 内第 1 步是 prefill 前向（past is None 处理整条 x），其后
     # decode_tokens - 1 步才是真正的单 token decode 前向。
-    if decode_tokens < 2:
-        raise RuntimeError(
-            f"decode_tokens={decode_tokens} 过小：第 1 步是 prefill 前向，"
-            "至少需要 2 才能包含 1 步纯 decode")
-    decode_total = total - prefill_t * iters
-    if decode_total <= 0:
+    per_tok = [(t - pf_med) / (decode_tokens - 1) * 1000.0
+               for t in run_times]
+    per_tok = [v for v in per_tok if v > 0]
+    if not per_tok:
         raise RuntimeError(
             "decode 总时长不大于 prefill 基线，无法可靠扣除；请增加 iters/decode_tokens "
             "或确认 prefill 基线对应 batch=1 且长度正确")
-    return decode_total / (iters * (decode_tokens - 1)) * 1000.0, pf_len  # ms/tok
+    stats = timing_stats(per_tok)
+    stats["prefill_baseline_median_ms"] = round(pf_med * 1000.0, 6)
+    stats["prefill_baseline_spread_pct"] = pf_stats["spread_pct"]
+    return stats, pf_len  # stats["median_ms"] 为每 token 毫秒
+
+
+def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup: int,
+                 vocab: int, kv_dtype=None):
+    """兼容旧接口：返回 (每 token 解码中位数毫秒, 实际预填充长度)。"""
+    stats, pf_len = bench_decode_stats(model, device, ctx, decode_tokens, iters,
+                                       warmup, vocab, kv_dtype=kv_dtype)
+    return stats["median_ms"], pf_len
 
 
 def main():
@@ -292,7 +368,9 @@ def main():
         model.eval()
         entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa, "weights": src,
                  "n_params": count_params(model), "prefill_ms": {},
-                 "decode_ms_per_tok": {}, "decode_prefill_ctx": {}}
+                 "prefill_ms_spread_pct": {},
+                 "decode_ms_per_tok": {}, "decode_ms_spread_pct": {},
+                 "decode_prefill_ctx": {}}
         # 结构指标：参数量/KV 缓存/FLOPs。
         entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
                                                  kv_dtype=kv_dtype)
@@ -303,28 +381,38 @@ def main():
                 print(f"[latency] {v}@ctx{ctx}: 跳过，超过 block_size={model.block_size}")
                 continue
             entry["prefill_ms"][str(ctx)] = {}
+            entry["prefill_ms_spread_pct"][str(ctx)] = {}
             for bs in batch_sizes:
                 with amp_ctx:
-                    ms = bench_prefill(model, device, ctx, bs, iters, warmup,
-                                       model.vocab_size)
-                entry["prefill_ms"][str(ctx)][str(bs)] = round(ms, 4)
+                    st = bench_prefill_stats(model, device, ctx, bs, iters, warmup,
+                                             model.vocab_size)
+                entry["prefill_ms"][str(ctx)][str(bs)] = round(st["median_ms"], 4)
+                entry["prefill_ms_spread_pct"][str(ctx)][str(bs)] = st["spread_pct"]
             # 只有 bs=1 的 prefill 才能作为逐 token decode 的扣除基线；
             # 若 batch_sizes 不含 1，则由 bench_decode 按实际 pf_len 重新测量。
             if not batch_sizes:
                 raise ValueError("latency.batch_sizes 不能为空")
             with amp_ctx:
-                dms, pf_len = bench_decode(model, device, ctx, decode_tokens, iters,
-                                           warmup, model.vocab_size, kv_dtype=kv_dtype)
-            entry["decode_ms_per_tok"][str(ctx)] = round(dms, 4)
+                dec_stats, pf_len = bench_decode_stats(
+                    model, device, ctx, decode_tokens, iters, warmup,
+                    model.vocab_size, kv_dtype=kv_dtype)
+            entry["decode_ms_per_tok"][str(ctx)] = round(
+                dec_stats["median_ms"], 4)
+            entry["decode_ms_spread_pct"][str(ctx)] = dec_stats["spread_pct"]
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
             # 较短 KV 前缀的数值标注成原 ctx 的数值。
             entry["decode_prefill_ctx"][str(ctx)] = pf_len
             bs1 = entry["prefill_ms"][str(ctx)]
             bs_key = "1" if "1" in bs1 else next(iter(bs1))
+            pf_spread = entry["prefill_ms_spread_pct"][str(ctx)][bs_key]
             suffix = "" if pf_len == ctx else f"（decode 实际 prefill={pf_len}）"
             print(f"[latency] {v}@ctx{ctx}: prefill(bs={bs_key})="
-                  f"{bs1[bs_key]:.2f}ms "
-                  f"decode={dms:.3f}ms/tok{suffix}")
+                  f"{bs1[bs_key]:.2f}ms"
+                  + (f"(噪声{pf_spread:.1f}%)" if pf_spread is not None else "")
+                  + f" decode={dec_stats['median_ms']:.3f}ms/tok"
+                  + (f"(噪声{dec_stats['spread_pct']:.1f}%)"
+                     if dec_stats["spread_pct"] is not None else "")
+                  + suffix)
         results[v] = entry
 
     git = git_info()
@@ -336,6 +424,7 @@ def main():
         "meta": {"device": device, "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
                  "decode_tokens": decode_tokens, "iters": iters, "warmup": warmup,
                  "amp": bool(use_amp), "torch": torch.__version__,
+                 "timing": TIMING_NOTE,
                  "code_commit": git["commit"], "code_dirty": git["dirty"],
                  "data_fingerprint": data_fp,
                  "config_sha256": sha256_file(args.config)},

@@ -460,23 +460,35 @@ def _mean_by_step(runs, key):
 
 
 def fig_train_curves(rdir, train_root):
-    """训练 loss 与 val PPL 曲线（训练曲线随实验留档，支持复现与异常排查）。"""
+    """训练 loss、val PPL 与训练/验证损失对照三视图。
+
+    同轴对照图让"训练降而验证升/停滞"的过拟合形态一眼可见——只看某一条
+    曲线或只看最终数值都可能漏掉训练动态。
+    """
     if not train_root or not os.path.isdir(train_root):
         return False
     series = _load_train_logs(train_root)
     if not series:
         return False
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.2), constrained_layout=True)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15.5, 4.2),
+                                        constrained_layout=True)
     for v in sorted(series):
         color = COLORS.get(v, "#34495e")
+        lw = 2.0 if v == "lega" else 1.2
         xs, ys = _mean_by_step(series[v], "loss")
         if xs:
-            ax1.plot(xs, ys, label=_label(v), color=color,
-                     lw=2.0 if v == "lega" else 1.2, alpha=0.9)
+            ax1.plot(xs, ys, label=_label(v), color=color, lw=lw, alpha=0.9)
         xs2, ys2 = _mean_by_step(series[v], "val_ppl")
         if xs2:
             ax2.plot(xs2, ys2, label=_label(v), color=color, marker=".",
-                     lw=2.0 if v == "lega" else 1.2, alpha=0.9)
+                     lw=lw, alpha=0.9)
+        # 同一坐标下的训练/验证损失：实线=训练，虚线=验证；两线间距
+        # 即为泛化差距，扩大或验证线走平/上翘即过拟合信号。
+        if xs:
+            ax3.plot(xs, ys, color=color, lw=lw, alpha=0.9)
+        xv, yv = _mean_by_step(series[v], "val_loss")
+        if xv:
+            ax3.plot(xv, yv, color=color, lw=lw, ls="--", alpha=0.75)
     ax1.set_xlabel("训练步数")
     ax1.set_ylabel("训练 loss")
     ax1.set_yscale("log")
@@ -489,6 +501,12 @@ def fig_train_curves(rdir, train_root):
     ax2.set_title("验证困惑度曲线（多种子均值）")
     ax2.grid(alpha=0.3)
     ax2.legend(fontsize=7)
+    ax3.set_xlabel("训练步数")
+    ax3.set_ylabel("loss")
+    ax3.set_yscale("log")
+    ax3.set_title("训练(实线)/验证(虚线)损失对照")
+    ax3.grid(alpha=0.3)
+    ax3.legend(fontsize=7)
     fig.suptitle(f"训练过程留档（源目录 {train_root}）", y=1.03)
     fig.savefig(os.path.join(rdir, "fig_train_curves.png"), dpi=150)
     plt.close(fig)

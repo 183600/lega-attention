@@ -137,6 +137,64 @@ def test_checklist_precision_step_reports_amp_dtype():
     print("  [ok] 排查步骤 3（精度）：bf16/fp16/无 autocast 的差异化结论")
 
 
+def test_activation_audit_fp32_recheck_isolates_precision():
+    """amp 路径非有限时用同批次 fp32 复测：fp32 有限→判混合精度数值问题；
+    fp32 同样非有限→排除精度因素。"""
+    import lega.train as tr
+    m = _model()
+    calls = []
+
+    def fake_forward(model, x, device, amp_dtype, cap=60):
+        calls.append(amp_dtype)
+        if amp_dtype is not None:
+            return ([{"seq": 0, "module": "blocks.0.ln1", "output_nan": 4,
+                      "output_inf": 0, "input_nonfinite": 0}], None)
+        return ([], None)
+
+    orig = tr._hooked_forward
+    tr._hooked_forward = fake_forward
+    try:
+        rep = tr.audit_activations(m, _batches(), "cuda",
+                                   amp_dtype=torch.bfloat16)
+        calls.clear()  # 只考察 CPU 审计的调用次数
+        rep2 = tr.audit_activations(m, _batches(), "cpu",
+                                    amp_dtype=torch.bfloat16)
+    finally:
+        tr._hooked_forward = orig
+    # 第一次：amp 路径 + fp32 隔离复测各跑一次
+    assert rep["precision_recheck"]["ran"]
+    assert rep["precision_recheck"]["fp32_nonfinite_records"] == 0
+    assert "混合精度数值问题" in rep["precision_recheck"]["verdict"], rep
+    assert any("混合精度" in f for f in rep["findings"])
+    # CPU 上 autocast 未生效（无混合精度可查）：只做主审计、不触发复测
+    assert len(calls) == 1 and rep2["precision_recheck"] is None
+
+    # fp32 复测同样非有限 → 明确排除混合精度因素
+    def fake_forward2(model, x, device, amp_dtype, cap=60):
+        return ([{"seq": 0, "module": "blocks.0.ln1", "output_nan": 1,
+                  "output_inf": 0, "input_nonfinite": 0}], None)
+
+    tr._hooked_forward = fake_forward2
+    try:
+        rep3 = tr.audit_activations(m, _batches(), "cuda",
+                                    amp_dtype=torch.float16)
+    finally:
+        tr._hooked_forward = orig
+    assert "不是混合精度" in rep3["precision_recheck"]["verdict"], rep3
+    # 完整排查入口：精度步骤的 note 必须带上复测结论
+    tr._hooked_forward = fake_forward2
+    try:
+        full = run_nan_checklist(m, _batches(), "cuda", 7, "train_loss",
+                                 float("nan"), lr=1e-3, grad_norm_history=[],
+                                 amp_dtype=torch.float16, vocab_size=64)
+    finally:
+        tr._hooked_forward = orig
+    assert "不是混合精度" in full["checklist_precision"]["note"]
+    assert any("不是混合精度" in a for a in full["suggested_actions"]), \
+        full["suggested_actions"]
+    print("  [ok] 排查步骤 3（精度）：fp32 隔离复测（限制在 amp 实际生效时）")
+
+
 def test_checklist_optimization_step_detects_grad_explosion():
     m = _model()
     hist = [1.0, 1.2, 0.9, 1.1, 800.0]

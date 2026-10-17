@@ -6,6 +6,9 @@
   * 过拟合        训练损失下降而验证损失上升 —— 需要正则化、增大数据量或早停；
                   训练损失停滞（平台期）而验证损失回升同样按过拟合处理
                   （泛化先于训练损失恶化，不能因"训练没降"误判成欠拟合）；
+  * 过拟合趋势    训练损失仍在实质下降而验证损失无实质变化（±REL_TOL 内）——
+                  验证不再随训练改善、泛化差距扩大中的早期信号；按过拟合
+                  早期处理（正则化/早停），不要仅凭训练损失还在降就续训；
   * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
   * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"。
@@ -203,6 +206,25 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 recommendations.append(
                     "训练已停滞而验证恶化：按平台期过拟合处理（早停/正则化），"
                     "并先确认学习率不过小（训练推得动）；不要按欠拟合扩大容量或续训")
+        elif (train_down and val_delta is not None and not val_down
+              and (early_stop_gain or 0) <= EARLY_STOP_TOL):
+            # 训练仍在实质下降而验证无实质变化（|Δ|<REL_TOL）：验证不再随
+            # 训练改善，泛化差距在扩大——过拟合的早期形态。它比"验证回升"
+            # 更早出现；只看最终数值或只等验证回升会漏掉这一信号。
+            status = "过拟合趋势"
+            evidence.append(
+                f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                f"（{_fmt_rel(train_delta)}）仍在实质下降，而验证损失 "
+                f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                f"（{_fmt_rel(val_delta)}）无实质变化：验证不再随训练改善，"
+                "泛化差距在扩大（尚不满足“验证回升”的过拟合判定）")
+            recommendations += [
+                "训练降而验证停滞：按过拟合早期信号处理——启用/加强正则化"
+                "（dropout / weight decay），对比使用 val 最优的 model_best.pt",
+                "不要仅因训练损失还在下降就延长训练：新增收益只体现在训练集",
+                "若验证损失自始未改善且训练降幅也很小：先按欠拟合排查学习率/"
+                "数据管道，再考虑扩容",
+            ]
         elif not train_down:
             status = "欠拟合/学习不充分"
             trend = "不降反升" if train_up else "没有实质下降"
@@ -320,8 +342,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
 
 # 状态严重度排序（汇总时取"最差种子"的状态代表整个变体）
 STATUS_ORDER = {
-    "NaN/Inf": 5, "发散": 4, "过拟合": 3,
-    "欠拟合/学习不充分": 2, "数据不足": 1, "正常收敛": 0,
+    "NaN/Inf": 6, "发散": 5, "过拟合": 4,
+    "欠拟合/学习不充分": 3, "过拟合趋势": 2, "数据不足": 1, "正常收敛": 0,
 }
 
 

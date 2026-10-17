@@ -70,32 +70,14 @@ def _numerical_hint(module_name: str) -> str:
     return "通用算子：按该模块在计算图中的位置定位 log/除零/溢出路径"
 
 
-def audit_activations(model, pending_batches, device: str,
-                      amp_dtype=None) -> dict:
-    """用前向钩子定位首个“输入有限、输出非有限”的模块（NaN 排查第 2 步的主动检查）。
+def _hooked_forward(model, x, device: str, amp_dtype, cap: int = 60):
+    """带前向钩子跑一次 x，返回 (非有限激活记录, 前向错误串)。
 
-    仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
-    而来，还是某个算子在**有限输入**上产生（log(0)、除零、softmax 溢出、
-    fp16/bf16 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
-    每个模块输出/输入的 NaN/Inf 情况：
-
-      * origin          第一个输入有限但输出非有限的模块 —— 最可疑的数值故障点，
-                        附该模块位置的排查指向（softmax/log/归一化/投影）；
-      * first_nonfinite 第一个输出非有限的模块：若与 origin 不同，说明 NaN 来自
-                        更早的算子（如 attention 内部的函数式 softmax/log）；
-      * records         非有限激活沿计算图的传播链（按执行顺序，截断到上限）。
-
-    前向只消费 x 不消费 y（标签越界不会妨碍激活审计），异常被捕获并写入
-    forward_error 而不是让排查本身崩溃。
+    记录按实际执行顺序，元素为模块名 + 输入/输出 NaN/Inf 计数；只保留
+    输出非有限且未超过 cap 的模块。异常被捕获返回而不抛出——排查路径
+    本身绝不能因前向失败而中断。
     """
-    batch = next((b for b in (pending_batches or []) if b is not None), None)
-    if batch is None:
-        return {"checked": False, "n_modules_checked": 0, "records": [],
-                "origin": None, "first_nonfinite": None, "forward_error": None,
-                "findings": ["无可用批次（NaN 出现在记录成功批次之前），跳过激活定位"]}
-    x = batch[0]
     records, handles = [], []
-    cap = 60
 
     def hook(name):
         def _h(module, inputs, output):
@@ -132,6 +114,40 @@ def audit_activations(model, pending_batches, device: str,
         for h in handles:
             h.remove()
         model.train(was_training)
+    return records, forward_error
+
+
+def audit_activations(model, pending_batches, device: str,
+                      amp_dtype=None) -> dict:
+    """用前向钩子定位首个“输入有限、输出非有限”的模块（NaN 排查第 2 步的主动检查）。
+
+    仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
+    而来，还是某个算子在**有限输入**上产生（log(0)、除零、softmax 溢出、
+    fp16/bf16 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
+    每个模块输出/输入的 NaN/Inf 情况：
+
+      * origin          第一个输入有限但输出非有限的模块 —— 最可疑的数值故障点，
+                        附该模块位置的排查指向（softmax/log/归一化/投影）；
+      * first_nonfinite 第一个输出非有限的模块：若与 origin 不同，说明 NaN 来自
+                        更早的算子（如 attention 内部的函数式 softmax/log）；
+      * records         非有限激活沿计算图的传播链（按执行顺序，截断到上限）。
+      * precision_recheck  混合精度路径出现非有限时，对同一批次做 fp32 复测：
+                        若 fp32 全部有限 → 数值问题来自混合精度（下溢/上溢），
+                        否则排除精度因素、按数据/代码/优化排查。
+
+    前向只消费 x 不消费 y（标签越界不会妨碍激活审计），异常被捕获并写入
+    forward_error 而不是让排查本身崩溃。
+    """
+    batch = next((b for b in (pending_batches or []) if b is not None), None)
+    if batch is None:
+        return {"checked": False, "n_modules_checked": 0, "records": [],
+                "origin": None, "first_nonfinite": None, "forward_error": None,
+                "precision_recheck": None,
+                "findings": ["无可用批次（NaN 出现在记录成功批次之前），跳过激活定位"]}
+    x = batch[0]
+    cap = 60
+    records, forward_error = _hooked_forward(model, x, device, amp_dtype,
+                                             cap=cap)
 
     origin = next((r for r in records if r["input_nonfinite"] == 0), None)
     if origin is not None:
@@ -153,15 +169,46 @@ def audit_activations(model, pending_batches, device: str,
         findings.append(
             "所有模块输出均有限——NaN 产生在损失计算/评测聚合环节"
             "（如分块交叉熵的目标越界），不是前向算子溢出")
+
+    # 混合精度隔离复测：amp 路径出现非有限时，用同一批次在 fp32 下重跑。
+    # 这是"先查数据/代码、再查混合精度"顺序里的主动证据，而不是只报 dtype。
+    use_cuda_amp = amp_dtype is not None and str(device).startswith("cuda")
+    precision_recheck = None
+    if use_cuda_amp and (records or forward_error):
+        fp_records, fp_err = _hooked_forward(model, x, device, None, cap=cap)
+        if fp_err is not None:
+            precision_recheck = {
+                "ran": True, "fp32_nonfinite_records": None,
+                "fp32_origin": None, "fp32_forward_error": fp_err,
+                "verdict": ("fp32 复测未能完成（前向失败），无法隔离混合精度因素；"
+                            "先按数据/代码路径排查")}
+        else:
+            fp_origin = next((r for r in fp_records if r["input_nonfinite"] == 0),
+                             None)
+            if fp_records:
+                verdict = (f"fp32 复测同样出现 {len(fp_records)} 个非有限激活 → "
+                           "不是混合精度下溢/上溢，按数据/代码/优化路径排查")
+            else:
+                verdict = (
+                    f"{str(amp_dtype).replace('torch.', '')} 路径非有限而同一批次 "
+                    "fp32 复测全部有限 → 混合精度数值问题：fp16 应加 GradScaler "
+                    "损失缩放或改用 bf16，并对可疑层（见 origin）升精度复测")
+            precision_recheck = {
+                "ran": True, "fp32_nonfinite_records": len(fp_records),
+                "fp32_origin": (dict(fp_origin, hint=_numerical_hint(
+                    fp_origin["module"])) if fp_origin else None),
+                "fp32_forward_error": None, "verdict": verdict}
+        findings.append(precision_recheck["verdict"])
     return {
         # checked = 审计前向成功执行；records/origin 为空表示前向算子全部有限
         "checked": forward_error is None,
-        "n_modules_checked": len(handles),
+        "n_modules_checked": len(list(model.named_modules())) - 1,
         "records": records[:cap],
         "truncated": len(records) >= cap,
         "origin": origin,
         "first_nonfinite": first,
         "forward_error": forward_error,
+        "precision_recheck": precision_recheck,
         "findings": findings,
     }
 
@@ -242,7 +289,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     }
     report["checklist_activations"] = activation_audit
 
-    # ---- 3. 混合精度：当前 autocast 精度与下溢/溢出风险
+    # ---- 3. 混合精度：当前 autocast 精度与下溢/溢出风险；
+    #     若激活审计做了 fp32 隔离复测，把结论并入本步（有证据而非只有推断）
     if amp_dtype is None:
         prec_note = "未启用 autocast（fp32/TF32 路径）：可排除混合精度下溢因素"
     elif "bfloat16" in str(amp_dtype):
@@ -251,8 +299,12 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     else:
         prec_note = ("fp16 autocast：梯度/激活下溢是常见 NaN 来源，"
                      "应使用 GradScaler 损失缩放，或改用 bf16 复测")
+    recheck = activation_audit.get("precision_recheck")
+    if recheck and recheck.get("ran"):
+        prec_note += "；fp32 隔离复测：" + recheck["verdict"]
     report["checklist_precision"] = {"amp_dtype": (str(amp_dtype) if amp_dtype
-                                                   else None), "note": prec_note}
+                                                   else None), "note": prec_note,
+                                     "recheck": recheck}
 
     # ---- 4. 梯度爆炸 / 学习率：pre-clip 梯度范数历史是否出现尖峰/Inf
     hist = [g for g in (grad_norm_history or []) if g is not None]
