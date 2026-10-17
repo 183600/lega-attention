@@ -41,7 +41,7 @@ def test_collect_worst_windows():
 
 
 def test_load_train_throughput_propagates_and_degrades_safely():
-    """训练吞吐必须随被评测 checkpoint 传播；缺失/损坏时安全返回 (None, None)。"""
+    """训练步时记录必须随被评测 checkpoint 传播；缺失/损坏时安全返回 (None, None)。"""
     tmp = tempfile.mkdtemp()
     try:
         assert load_train_throughput(tmp) == (None, None)
@@ -49,7 +49,7 @@ def test_load_train_throughput_propagates_and_degrades_safely():
             json.dump({"train_step_time_ms": 12.5,
                        "train_tokens_per_sec": 81920.0}, f)
         assert load_train_throughput(tmp) == (12.5, 81920.0)
-        # 旧格式（无吞吐字段）→ None 而非 KeyError
+        # 旧格式（无该字段）→ None 而非 KeyError
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"val_ppl": 10.0}, f)
         assert load_train_throughput(tmp) == (None, None)
@@ -59,7 +59,7 @@ def test_load_train_throughput_propagates_and_degrades_safely():
         assert load_train_throughput(tmp) == (None, None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 训练吞吐随 checkpoint 传播（缺失/损坏安全降级）")
+    print("  [ok] 训练步时记录随 checkpoint 传播（缺失/损坏安全降级）")
 
 
 def test_collect_worst_windows_gold_in_context_uses_full_window():

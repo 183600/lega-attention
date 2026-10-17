@@ -736,7 +736,7 @@ def _render_registration_integrity(integrity: dict) -> list:
                      "否则判违反。")
     else:
         lines.append("- ⚠ **本页全部“注册假设判定”因完整性未通过而失效"
-                     "（降级为探索性分析）**：修复登记表/锁链后重跑汇总。")
+                     "（降级为探索性分析）**：登记表/锁链恢复一致后重跑汇总。")
     lines.append("")
     return lines
 
@@ -1695,7 +1695,7 @@ def build_summary(results_dir: str, audit: dict = None,
                   "按探索性线索对待。请登记方向性主张后重跑正式实验。")
 
     # --- 涨点-增幅权衡：评价改进不能只看指标涨点
-    md += ["", "## 效率-精度权衡（涨点必须对照增幅）", ""]
+    md += ["", "## 涨点-增幅权衡（涨点必须对照增幅）", ""]
     if common_ctx is not None and lat_entries.get("standard"):
         base_e = lat_entries["standard"]
         base_prefill = (base_e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
@@ -1714,9 +1714,9 @@ def build_summary(results_dir: str, audit: dict = None,
         def _train_step_ms(v):
             """该变体各种子训练步时的中位数（毫秒/步；旧 eval.json 无此字段→None）。
 
-            同一 run_all 内所有变体在同一台机器、同一批次下训练，训练 ms/step
-            是直接可比的算力成本口径（评测耗时与 checkpoint 写入已从区间计时中
-            扣除）；中位数避免首步 compile/显存分配与偶发卡顿污染。
+            同一 run_all 内所有变体在同一台机器、同一批次下训练，该步时是
+            同口径的直接可比时序（评测耗时与 checkpoint 写入已从区间计时中
+            扣除）；中位数避免首步冷启动与偶发卡顿污染。
             """
             vals = []
             for s in _variant_seed_map(runs, v).values():
@@ -1804,7 +1804,7 @@ def build_summary(results_dir: str, audit: dict = None,
                   "train_step_time_ms），三者同为相对基线的百分比变化。"
                   "运行时指标受硬件影响，跨机器对比无效。")
     else:
-        md.append("- ⚠ 缺少运行时/效率基准（latency.json 或 standard 基线），"
+        md.append("- ⚠ 缺少运行时/结构基准（latency.json 或 standard 基线），"
                   "无法给出权衡判定；没有增幅对照的涨点不能作为结论。")
 
     os.makedirs(results_dir, exist_ok=True)

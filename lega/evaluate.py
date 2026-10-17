@@ -72,9 +72,8 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
 
 
 def load_train_throughput(run_dir: str):
-    """从训练 run 的 eval.json 继承训练吞吐（train_step_time_ms/tokens_per_sec）。
+    """从训练 run 的 eval.json 继承训练步时记录（train_step_time_ms/tokens_per_sec）。
 
-    被评测 checkpoint 的训练成本应与评测结果绑定：效率-精度权衡需要它；
     旧 run 没有该字段时返回 (None, None)，消费方显示 '-' 而不是编造数值。
     文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
     """
@@ -213,7 +212,7 @@ def main():
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     run_dir = os.path.dirname(os.path.abspath(args.ckpt))
     res.update(load_provenance(run_dir, args.data_dir))
-    # 训练吞吐随被评测 checkpoint 一起绑定（效率-精度权衡的增幅口径）
+    # 训练步时随被评测 checkpoint 一起绑定
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)
     save_json(res, args.out)

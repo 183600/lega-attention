@@ -588,8 +588,8 @@ def main():
     # 最近一步实际消费的 micro-batch：预取会覆盖 batches，NaN 排查若只看待训练
     # 批次会漏掉"罪魁数据"，这里保留引用供 _nan_guard 优先检查
     last_batches = []
-    # 训练吞吐计时：按 log 区间累计墙钟并扣除评测耗时（.item() 已同步设备，
-    # 区间边界无需额外 synchronize）；首区间可能含 compile/显存分配开销，
+    # 步时计时：按 log 区间累计墙钟并扣除评测耗时（.item() 已同步设备，
+    # 区间边界无需额外 synchronize）；首区间可能因 compile/冷启动偏慢，
     # 汇总取中位数而非均值。pending_eval_s 供 do_eval 累加评测耗时。
     step_times_ms: list = []
     interval_t0 = time.perf_counter()
@@ -745,8 +745,7 @@ def main():
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
-    # 训练吞吐汇总（区间步时的中位数，抗首区间 compile/分配与偶发卡顿）：
-    # 效率-精度权衡必须把训练算力成本计入涨幅，不能只看推理与参数量。
+    # 步时汇总：区间步时的中位数，抗首区间冷启动与偶发卡顿。
     tokens_per_step = int(cfg["batch_size"]) * train_ctx * grad_accum
     train_step_ms = (statistics.median(step_times_ms)
                      if step_times_ms else None)

@@ -386,7 +386,7 @@ def test_build_summary_missing_latency_entry():
                 "peak_mem_mb_prefill": {"256": 1.0}}}}})
         out = build_summary(tmp)
         assert len(out["rows"]) == 2
-        assert "效率-精度权衡" in out["markdown"]
+        assert "涨点-增幅权衡" in out["markdown"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
@@ -425,7 +425,7 @@ def test_tradeoff_includes_decode_latency():
 
 
 def test_tradeoff_includes_train_step_time():
-    """训练算力成本（ms/step）必须进入增幅与判定：推理不变但训练慢 10 倍也要被计入。"""
+    """训练 ms/step 必须进入综合增幅与判定：其余指标不变时也要被计入。"""
     tmp = tempfile.mkdtemp()
     try:
         for v, tms in (("standard", 100.0), ("lega", 1000.0)):
