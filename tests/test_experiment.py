@@ -93,11 +93,15 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
                        "data_fingerprint": "fp", "config_sha256": "sha"}, f)
         with open(os.path.join(out, "train_log.jsonl"), "w", encoding="utf-8") as f:
             f.write('{"step": 1, "loss": 1.0}\n')
+        with open(os.path.join(out, "model_best.pt"), "wb") as f:
+            f.write(b"fake-ckpt")               # 被评测产物也必须被哈希绑定
         snap = snapshot_train_run("lega", 7, out)
         assert snap["variant"] == "lega" and snap["seed"] == 7
         assert snap["result"]["val_ppl"] == 12.5
-        assert set(snap["files"]) == {"eval.json", "train_log.jsonl"}
+        assert set(snap["files"]) == {"eval.json", "train_log.jsonl",
+                                      "model_best.pt"}
         assert len(snap["files"]["train_log.jsonl"]["sha256"]) == 64
+        assert len(snap["files"]["model_best.pt"]["sha256"]) == 64
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] snapshot_train_run 最终指标 + 曲线/配置哈希")
+    print("  [ok] snapshot_train_run 最终指标 + 曲线/配置/checkpoint 哈希")

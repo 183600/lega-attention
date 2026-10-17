@@ -131,6 +131,15 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     return fp
 
 
+def _pkg_version(name: str):
+    """已安装包版本；未安装（可选依赖）时返回 None。"""
+    try:
+        from importlib import metadata
+        return metadata.version(name)
+    except Exception:
+        return None
+
+
 def runtime_info(device: str = None) -> dict:
     """运行环境版本与确定性/精度开关（跨机器不可复现时用于排查差异来源）。"""
     info = {
@@ -144,6 +153,10 @@ def runtime_info(device: str = None) -> dict:
         "device": device,
         "gpu": (torch.cuda.get_device_name(0)
                 if torch.cuda.is_available() else None),
+        # 影响产物的可选依赖版本（分词器变更会改变 token 流，绘图库影响图表），
+        # 未安装时显式为 None，避免“环境已记录”的错觉
+        "packages": {name: _pkg_version(name)
+                     for name in ("tiktoken", "matplotlib")},
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),

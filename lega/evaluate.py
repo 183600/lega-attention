@@ -157,6 +157,9 @@ def main():
         "variant": ck.get("variant", model.variant),
         "seed": ck.get("seed"),
         "ckpt": args.ckpt,
+        # 被评测产物的内容指纹：结果与 checkpoint 一一绑定，换/改 checkpoint
+        # 后旧结果无法冒充（与 test 访问账本、实验台账中的哈希同一口径）
+        "ckpt_sha256": sha256_file(args.ckpt),
         "split": split,
         # checkpoint（model_best.pt）在 val 上选出；split=val 时报告指标与选择集同源
         "selection_set_is_eval_set": bool(split == "val"),

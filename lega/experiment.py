@@ -118,11 +118,12 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str) -> dict:
     """把一个 (变体, 种子) run 压缩成台账条目。
 
     最终指标取自 eval.json；同时记录 config_used.json / train_log.jsonl /
-    run_manifest.json / eval.json 的路径与哈希 —— 训练曲线文件后续被覆盖或
-    手改都能通过哈希比对发现。
+    run_manifest.json / eval.json 的路径与哈希，以及被评测 checkpoint
+    （model_best.pt / model.pt）的内容哈希 —— 训练曲线或结果文件后续被
+    覆盖、手改、甚至换掉 checkpoint，都能通过哈希比对发现。
     """
     names = ("config_used.json", "train_log.jsonl", "run_manifest.json",
-             "eval.json")
+             "eval.json", "model_best.pt", "model.pt")
     rec = {"variant": variant, "seed": int(seed), "out_dir": out_dir,
            "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
                                       rel_to=out_dir)}

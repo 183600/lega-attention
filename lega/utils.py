@@ -12,6 +12,7 @@
 汇总同时报告以上全部统计量；t 与置换检验结论冲突时会显式标注，而不是静默
 采信任何一方。
 """
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,46 @@ import time
 
 import numpy as np
 import torch
+
+# 解释器启动时的环境快照：PYTHONHASHSEED 只在解释器启动前设置才影响**当前**
+# 进程；set_seed 之后再写 os.environ 只对之后启动的子进程生效。审计字段若直接
+# 读取当前 env，会被 set_seed 自己写成 seed，变成“永远为真”的自证字段——必须
+# 记录导入时（任何 set_seed 之前）看到的值，才能区分两种情况。
+_ENV_AT_IMPORT = {"PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED")}
+
+# 最近一次 set_seed 的随机源状态指纹：(seed, fingerprints)，供 seed_report
+# 给出“种子确实生效”的可核对证据，而不是复述传入参数。
+_LAST_SEED = {"seed": None, "fingerprints": None}
+
+
+def rng_state_fingerprint() -> dict:
+    """各全局 RNG **当前状态**的短指纹（只读：get_state 不消耗随机数）。
+
+    与“记录了 seed 字面量”不同，指纹来自 RNG 真实内部状态：同 seed 的
+    set_seed 必然得到相同指纹，不同 seed 得到不同指纹（实测），任何人重跑
+    ``set_seed(seed) + rng_state_fingerprint()`` 即可验证运行时的种子是否
+    真的生效。Python random / NumPy MT19937 的状态跨平台一致；PyTorch CPU
+    为 MT19937 字节状态，同版本跨平台一致；CUDA 状态哈希在无 GPU 时不出现。
+    """
+    fp = {
+        "python_random": hashlib.sha256(
+            repr(random.getstate()).encode("utf-8")).hexdigest()[:16],
+    }
+    ns = np.random.get_state()
+    h = hashlib.sha256()
+    h.update(str(ns[0]).encode("ascii"))
+    h.update(np.asarray(ns[1], dtype="<u4").tobytes())
+    h.update(int(ns[2]).to_bytes(8, "little"))
+    h.update(repr(ns[3:]).encode("ascii"))
+    fp["numpy_global"] = h.hexdigest()[:16]
+    fp["torch_cpu"] = hashlib.sha256(
+        torch.get_rng_state().numpy().tobytes()).hexdigest()[:16]
+    if torch.cuda.is_available():
+        h = hashlib.sha256()
+        for st in torch.cuda.get_rng_state_all():
+            h.update(st.cpu().numpy().tobytes())
+        fp["torch_cuda_all"] = h.hexdigest()[:16]
+    return fp
 
 
 def set_seed(seed: int) -> None:
@@ -34,8 +75,10 @@ def set_seed(seed: int) -> None:
     TensorFlow 不在依赖内，无需 TF seed。
 
     PYTHONHASHSEED 仅对之后启动的子进程生效（当前进程的哈希盐在解释器启动时已
-    固定）；run_all.py 会在派生子进程前设置。跨硬件架构（不同 GPU 型号、CPU
-    指令集、cuDNN 版本）无法保证逐位一致，本函数只保证同机相对稳定。
+    固定）；run_all.py 会在派生子进程前设置。本函数结束时记录各全局 RNG 的
+    状态指纹（_LAST_SEED），seed_report 据此提供种子生效的可核对证据。
+    跨硬件架构（不同 GPU 型号、CPU 指令集、cuDNN 版本）无法保证逐位一致，
+    本函数只保证同机相对稳定。
     """
     os.environ.setdefault("PYTHONHASHSEED", str(int(seed)))
     random.seed(seed)
@@ -52,30 +95,57 @@ def set_seed(seed: int) -> None:
         torch.use_deterministic_algorithms(True, warn_only=True)
     except TypeError:  # 兼容没有 warn_only 参数的旧版 PyTorch
         torch.use_deterministic_algorithms(True)
+    _LAST_SEED["seed"] = int(seed)
+    _LAST_SEED["fingerprints"] = rng_state_fingerprint()
 
 
 def seed_report(seed: int) -> dict:
     """逐随机源的种子审计记录（写入 run_manifest/实验台账，供事后核对）。
 
     证明“这个 run 到底固定了哪些种子”，而不是口头声称：set_seed 覆盖的每个
-    随机源都以实际传给它的 seed 记录在案；同时记录确定性开关与数据顺序机制。
-    字段全部为 JSON 原生类型。``pythonhashseed_env`` 来自环境变量：若与 seed
-    不同，说明当前进程的哈希盐在解释器启动时已固定（只能对子进程生效），
-    属于已知边界而非静默失败。
+    随机源都以实际传给它的 seed 记录在案；同时记录确定性开关、数据顺序机制
+    与各 RNG **真实状态**的短指纹（见 rng_state_fingerprint）——指纹只在
+    最近一次 set_seed 的 seed 与本次请求一致时给出，否则为 None，避免拿
+    后来被消耗过的状态冒充任意 seed 的证据。
+    字段全部为 JSON 原生类型。
+
+    PYTHONHASHSEED 用三个字段分开记录，防止自证陷阱：
+      * ``pythonhashseed_at_start``：解释器启动时（导入本模块时）环境里的值，
+        None 表示当时未设置——当前进程的哈希随机化仍在生效，set_seed 写入
+        的 env 只对子进程有效；
+      * ``pythonhashseed_env``：当前环境值（只影响之后启动的子进程）；
+      * ``pythonhashseed_effective``：仅当启动时已带数值且等于 seed 才为
+        True；启动时未设置时为 False（等价于“本进程未固定，已显式标注”），
+        启动时的值不可解析为整数时为 None。
     """
+    def _as_int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    at_start = _ENV_AT_IMPORT.get("PYTHONHASHSEED")
+    start_int = _as_int(at_start)
+    fp = (_LAST_SEED["fingerprints"]
+          if _LAST_SEED["seed"] == int(seed) else None)
     return {
         "seed": int(seed),
         "python_random": int(seed),
         "numpy_global": int(seed),
         "torch_cpu": int(seed),
         "torch_cuda": (int(seed) if torch.cuda.is_available() else None),
+        "pythonhashseed_at_start": at_start,
         "pythonhashseed_env": os.environ.get("PYTHONHASHSEED"),
+        "pythonhashseed_effective": (
+            None if (at_start is not None and start_int is None)
+            else start_int == int(seed)),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "deterministic_algorithms": bool(
             torch.are_deterministic_algorithms_enabled()),
         "data_order": "np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
+        "rng_fingerprints": dict(fp) if fp else None,
     }
 
 

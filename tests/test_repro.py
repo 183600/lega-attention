@@ -69,6 +69,8 @@ def test_git_and_runtime_info_json_safe():
     rt = runtime_info("cpu")
     assert rt["torch"] and rt["python"] and rt["numpy"]
     assert rt["hostname"] and rt["python_executable"] and rt["cpu_count"]
+    # 影响产物的可选依赖显式记录（未安装为 None，不假装已记录环境）
+    assert "tiktoken" in rt["packages"] and "matplotlib" in rt["packages"]
     json.dumps({"git": git, "runtime": rt})  # 必须是 JSON 原生类型
     print(f"  [ok] git/runtime 信息可序列化 (commit={git['commit_short']})")
 
@@ -87,6 +89,59 @@ def test_seed_report_covers_all_random_sources():
     assert rep["data_order"]
     json.dumps(rep)
     print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA) 与确定性开关")
+
+
+def test_seed_report_rng_fingerprints_are_seed_evidence():
+    """种子生效的证据而非声称：指纹来自 RNG 真实状态，可被第三方复算。
+
+    同 seed 的 set_seed 必然得到相同指纹；不同 seed 得到不同指纹；当前状态
+    属于别的 seed 时，请求旧 seed 的证据必须为 None（不能张冠李戴）。
+    """
+    set_seed(11)
+    fp_a = seed_report(11)["rng_fingerprints"]
+    assert fp_a and {"python_random", "numpy_global", "torch_cpu"} <= set(fp_a)
+    assert all(isinstance(v, str) and len(v) == 16 for v in fp_a.values())
+    set_seed(11)
+    assert seed_report(11)["rng_fingerprints"] == fp_a     # 同 seed 可复算
+    set_seed(12)
+    fp_b = seed_report(12)["rng_fingerprints"]
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        assert fp_b[key] != fp_a[key], key               # 异 seed 状态不同
+    assert seed_report(11)["rng_fingerprints"] is None   # 不冒充旧 seed
+    json.dumps(fp_a)
+    print("  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/"
+          "不冒充）")
+
+
+def test_seed_report_distinguishes_process_hashseed_from_child_env():
+    """PYTHONHASHSEED 审计不得自证：当前进程与子进程要分开记录。
+
+    set_seed 会写 os.environ（只影响之后启动的子进程）；若审计直接读当前
+    env，字段会永远等于 seed，“当前进程哈希随机化其实没固定”会被掩盖。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("import json\n"
+            "from lega.utils import set_seed, seed_report\n"
+            "set_seed(7)\n"
+            "print(json.dumps(seed_report(7)))\n")
+    env = os.environ.copy()
+    env.pop("PYTHONHASHSEED", None)
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    rep_unset = json.loads(r.stdout.strip().splitlines()[-1])
+    assert rep_unset["pythonhashseed_at_start"] is None
+    assert rep_unset["pythonhashseed_env"] == "7"
+    assert rep_unset["pythonhashseed_effective"] is False
+
+    env["PYTHONHASHSEED"] = "7"
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    rep_set = json.loads(r.stdout.strip().splitlines()[-1])
+    assert rep_set["pythonhashseed_at_start"] == "7"
+    assert rep_set["pythonhashseed_effective"] is True
+    print("  [ok] PYTHONHASHSEED 审计区分解释器启动值/子进程 env（不自证）")
 
 
 def test_run_manifest_embeds_seed_report_and_runtime():
