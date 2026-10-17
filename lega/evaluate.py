@@ -169,7 +169,8 @@ def main():
                   f"（累计 {test_access['evaluations']} 次、"
                   f"{test_access['distinct_checkpoints']} 个 checkpoint）；"
                   "测试集只能用于最终一次性评估，反复评测/据此调参视为泄露")
-    val = load_bin(args.data_dir, split)
+    # test 已在上面写入访问账本；此处显式放行是“尘封协议”的唯一合法出口
+    val = load_bin(args.data_dir, split, allow_test=(split == "test"))
     # 与训练时的评估保持一致：优先使用训练配置里的 train_ctx
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
     train_ctx = None

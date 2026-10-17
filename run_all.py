@@ -1217,6 +1217,17 @@ def build_summary(results_dir: str, audit: dict = None,
                 f"最长行={int(v.get('line_chars_max') or 0):,} 字符、"
                 f"超长行(>10万字符)={int(v.get('lines_gt_huge_threshold') or 0)}"
                 for k, v in ts.items()))
+        alerts = data_report.get("alerts") or []
+        if alerts:
+            n_warn = sum(1 for a in alerts if a.get("level") == "warning")
+            shown = "；".join(f"[{a.get('code')}] {a.get('message')}"
+                              for a in alerts[:5])
+            md.append(f"- ⚠ 自检告警（{n_warn} warning / 共 {len(alerts)} 条）："
+                      + shown + (" …" if len(alerts) > 5 else "")
+                      + "（阈值见 data_report.json 的 alert_thresholds）")
+        else:
+            md.append("- 自检告警：无（全部指标在 alert_thresholds 阈值内；"
+                      "阈值是复核触发线而非显著性检验）")
         ta = data_report.get("test_access") or {}
         if ta:
             warn = ("" if not ta.get("checkpoints_evaluated_multiple_times")

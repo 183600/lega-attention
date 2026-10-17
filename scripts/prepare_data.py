@@ -191,6 +191,12 @@ def main():
         if split_info["fallback_char_cut"]:
             print("[data] 警告：本地文本缺少可用换行/文档边界，退化为字符切分；"
                   "同一文档可能跨 split，请检查语料格式")
+        elif split_info.get("documents_cross_cut"):
+            print("[data] 警告：切点未落在标题文档边界（标题间距大于划分区间），"
+                  "有文档跨 split（群组泄露）；请调整语料/划分比例或改用官方 split")
+        else:
+            print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个，"
+                  "文档不跨 split")
         train_text = clean_lines(train_text.split("\n"), args.max_tokens, args.tokenizer)
         val_text = clean_lines(val_text.split("\n"), args.val_tokens, args.tokenizer)
         test_text = clean_lines(test_text.split("\n"), args.test_tokens, args.tokenizer)

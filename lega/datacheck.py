@@ -36,6 +36,14 @@ _SANITIZE_TABLE = {i: None for i in range(32) if i not in (9, 10, 13)}
 _SANITIZE_TABLE[0x7f] = None
 _SANITIZE_TABLE[ord("\ufffd")] = " "
 
+# 行级标签噪声（语言建模标签即下一 token，来自同一份清洗前文本）：
+# 含 U+FFFD/非法控制符的行比例反映“标签质量”。用正则按行匹配而非 split，
+# 避免在数百 MB 语料上构造逐行字符串列表。三处各自一次 C 层扫描。
+_REPL_LINE_RE = re.compile(r"[^\n]*\ufffd[^\n]*")
+_CTRL_LINE_RE = re.compile(r"[^\n]*[\x00-\x08\x0b\x0c\x0e-\x1f\x7f][^\n]*")
+_BAD_CHAR_LINE_RE = re.compile(
+    r"[^\n]*(?:\ufffd|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f])[^\n]*")
+
 # WikiText 风格的一级/多级标题行：作为“文档边界”的首选切点。
 # 兼容 `= Title =`、`== Section ==`、`=== Sub ===` 及 WikiText-103 原始
 # 语料的分隔写法 `= = Section = =`、`= = = Sub = = =`。
@@ -50,6 +58,9 @@ def sanitize_text(text: str):
 
     只做逐字符的确定性替换/删除，不依赖任何跨样本统计量，因此可以在
     划分之后对每个 split 独立执行，不产生泄露。
+
+    stats 额外给出行级标签噪声估计（bad_char_line_rate）：坏字符不是均匀
+    分布的，逐行比例比总量更能反映“多少标签受影响”。
     """
     stats = {
         "replacement_char_replaced_with_space": int(text.count("\ufffd")),
@@ -58,14 +69,36 @@ def sanitize_text(text: str):
     clean = text.translate(_SANITIZE_TABLE)
     # translate 只删除 NUL/控制符（U+FFFD 是 1:1 替换），长度差即删除数
     stats["control_chars_deleted"] = int(len(text) - len(clean))
+    n_lines = int(text.count("\n")) + 1
+    stats["lines"] = n_lines
+    stats["lines_with_replacement_char"] = int(
+        sum(1 for _ in _REPL_LINE_RE.finditer(text)))
+    stats["lines_with_control_chars"] = int(
+        sum(1 for _ in _CTRL_LINE_RE.finditer(text)))
+    n_bad_lines = int(sum(1 for _ in _BAD_CHAR_LINE_RE.finditer(text)))
+    stats["lines_with_bad_chars"] = n_bad_lines
+    stats["bad_char_line_rate"] = float(n_bad_lines / max(1, n_lines))
     return clean, stats
 
 
 # ---------------------------------------------------------------- 重复/去污染
 
-def decontaminate_texts(texts: dict, min_chars: int = 40):
-    """跨 split 精确重复的长行只从 train 移除；val/test 保持原样（尘封）。
+def _normalize_line(s: str) -> str:
+    """行内空白折叠（含制表符/连续空格）后的比较键。
 
+    用于捕获“仅缩进/空格差异”的复制：精确字符串匹配会漏掉这类近似重复，
+    而它们同样是跨 split 的样本级泄露。只做确定性的空白归一化，不做
+    大小写/标点改写（避免把语义不同的英文句子误判为重复）。
+    """
+    return " ".join(s.split())
+
+
+def decontaminate_texts(texts: dict, min_chars: int = 40):
+    """跨 split 重复的长行只从 train 移除；val/test 保持原样（尘封）。
+
+    两类重复都处理（最小改动原则，宁删 train 不碰 eval）：
+      * 精确重复（strip 后逐字符相同）；
+      * 空白归一化重复（连续空白折叠后相同，捕获仅缩进/空格差异的复制）。
     行内容先 strip；短行（< min_chars，如 WikiText 的 "= References =" 标题）
     不计入去污染，避免大面积误删；但仍会统计其重复数量供审查。
     返回 (cleaned_texts, stats)。
@@ -73,54 +106,72 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     min_chars = int(min_chars)
 
     def scan(t):
-        # 单次扫描：每行只 strip 一次。长行（>= min_chars）用于去污染；
-        # 非空行的重复都计数——短行不参与去污染，但重复数量仍统计供审查
-        # （见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
-        n_long, seen_long, n_valid, seen_valid = 0, set(), 0, set()
+        # 单次扫描：每行只 strip/normalize 一次。长行（>= min_chars）用于
+        # 去污染；非空行的重复都计数——短行不参与去污染，但重复数量仍统计
+        # 供审查（见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
+        n_long, n_valid = 0, 0
+        seen_long, seen_long_norm = set(), set()
+        seen_valid, seen_valid_norm = set(), set()
         for ln in (t or "").split("\n"):
             s = ln.strip()
             if not s:
                 continue
             n_valid += 1
             seen_valid.add(s)
+            seen_valid_norm.add(_normalize_line(s))
             if len(s) >= min_chars:
                 n_long += 1
                 seen_long.add(s)
-        return n_long, seen_long, n_valid, seen_valid
+                seen_long_norm.add(_normalize_line(s))
+        return (n_long, seen_long, seen_long_norm, n_valid,
+                len(seen_valid), len(seen_valid_norm))
 
-    eval_lines = set()
+    eval_lines, eval_norm_lines = set(), set()
     eval_counts = {}
     for split in ("val", "test"):
-        n_long, seen_long, n_valid, seen_valid = scan(texts.get(split))
+        (n_long, seen_long, seen_long_norm, n_valid, n_uniq,
+         n_uniq_norm) = scan(texts.get(split))
         eval_lines.update(seen_long)
-        eval_counts[split] = (n_long, n_valid, len(seen_valid))
+        eval_norm_lines.update(seen_long_norm)
+        eval_counts[split] = (n_long, n_valid, n_uniq, n_uniq_norm)
 
-    kept, dropped = [], 0
-    n_train, seen_train = 0, set()
-    n_valid_train, seen_valid_train = 0, set()
+    kept, dropped_exact, dropped_norm = [], 0, 0
+    n_train, n_valid_train = 0, 0
+    seen_train, seen_valid_train = set(), set()
+    seen_valid_train_norm = set()
     for ln in texts["train"].split("\n"):
         s = ln.strip()
         if s:
             n_valid_train += 1
             seen_valid_train.add(s)
+            seen_valid_train_norm.add(_normalize_line(s))
         if len(s) >= min_chars:
             n_train += 1
             seen_train.add(s)
             if s in eval_lines:
-                dropped += 1
+                dropped_exact += 1
+                continue
+            if _normalize_line(s) in eval_norm_lines:
+                dropped_norm += 1
                 continue
         kept.append(ln)
 
     out = dict(texts)
     out["train"] = "\n".join(kept)
     stats = {"min_chars": min_chars,
-             "train_lines_dropped_as_duplicates_of_eval": int(dropped)}
-    per_split = {"train": (n_train, n_valid_train, len(seen_valid_train)),
+             "normalization": "collapse_whitespace",
+             "train_lines_dropped_as_duplicates_of_eval": int(dropped_exact),
+             "train_lines_dropped_as_normalized_duplicates_of_eval":
+                 int(dropped_norm)}
+    per_split = {"train": (n_train, n_valid_train, len(seen_valid_train),
+                           len(seen_valid_train_norm)),
                  "val": eval_counts["val"], "test": eval_counts["test"]}
-    for split, (n_long, n_valid, n_uniq_valid) in per_split.items():
+    for split, (n_long, n_valid, n_uniq, n_uniq_norm) in per_split.items():
         stats[f"{split}_long_lines"] = int(n_long)
         stats[f"{split}_intra_split_duplicate_lines"] = int(
-            n_valid - n_uniq_valid)
+            n_valid - n_uniq)
+        stats[f"{split}_intra_split_normalized_duplicate_lines"] = int(
+            n_valid - n_uniq_norm)
     return out, stats
 
 
@@ -322,14 +373,34 @@ def _pick_boundary(text: str, target: int, window: int):
     return int(best[1]), best[2]
 
 
+def _heading_positions(text: str):
+    """所有有效标题行的行首偏移（0 与文末不作为切点）。"""
+    n = len(text)
+    return [m.start() for m in _HEADING_RE.finditer(text) if 0 < m.start() < n]
+
+
+def _nearest_heading_in_range(headings, target: int, lo: int, hi: int):
+    """[lo, hi] 内离 target 最近（并列取靠前）的标题行首；无则 None。"""
+    cands = [h for h in headings if lo <= h <= hi]
+    if not cands:
+        return None
+    return min(cands, key=lambda h: (abs(h - target), h))
+
+
 def temporal_split_text(text: str, train_frac: float = 0.8,
                         val_frac: float = 0.1, window_frac: float = 0.02,
                         min_gap: int = 1):
     """连续文本的时序划分：train=最早、val=其后、test=最新（绝不随机打乱）。
 
     切点优先落在文档边界（WikiText 标题行 > 空行段落 > 换行），搜索窗口为
-    len(text)*window_frac，保证同一段/文档不跨 split。找不到任何换行时退化为
-    字符切分（info 中 fallback_char_cut=True 提示该文件无法做文档级划分）。
+    len(text)*window_frac。**只要文本含标题行，就优先在全文范围内选最近的
+    标题作为切点**（哪怕超出窗口）——标题定义的“文档”是群组单位，同一文档
+    绝不跨 split；仅当有效范围内没有任何标题时才退回窗口内的段落/换行切分，
+    此时按段落/行语义仍是完整单位。找不到任何换行时退化为字符切分
+    （info 中 fallback_char_cut=True 提示该文件无法做文档级划分）。
+
+    info["documents_cross_cut"]（标题文档是否跨切点）是显式自检：为 True 时
+    调用方应告警——只有“标题间距大于划分区间”这类无法两全的语料才会出现。
     返回 (train_text, val_text, test_text, info)。
     """
     n = len(text)
@@ -339,8 +410,18 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     t2 = max(t1 + 1, int(n * (float(train_frac) + float(val_frac))))
     t2 = min(t2, n - 1)
     window = max(256, int(n * float(window_frac)))
+    heads = _heading_positions(text)
     p1, k1 = _pick_boundary(text, t1, window)
+    # 标题优先：窗口内没有标题时在全文中找最近的（范围保证 p1 < t2，val 非空）
+    if heads and (p1 is None or k1 != "heading"):
+        h = _nearest_heading_in_range(heads, t1, 1, t2 - 1)
+        if h is not None:
+            p1, k1 = h, "heading"
     p2, k2 = _pick_boundary(text, t2, window)
+    if heads and (p2 is None or k2 != "heading"):
+        h = _nearest_heading_in_range(heads, t2, (p1 or 0) + min_gap, n - 1)
+        if h is not None:
+            p2, k2 = h, "heading"
     fallback = False
     # p1 必须严格小于 t2：否则 val=[p1,p2) 会被 p2≈t2 压空并触发“空 split”。
     # 短文本里唯一边界可能落在 t2 之后（如仅有的换行恰在结尾附近），
@@ -354,11 +435,18 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     train_text, val_text, test_text = text[:p1], text[p1:p2], text[p2:]
     if not (train_text and val_text and test_text):
         raise ValueError("时序划分产生了空 split，请检查文本长度与划分比例")
+    heading_set = set(heads)
+    documents_cross = bool(heads) and (p1 not in heading_set
+                                       or p2 not in heading_set)
     info = {
         "order": "temporal:train(earliest)->val->test(latest)",
         "cut_offsets": [int(p1), int(p2)], "cut_kinds": [str(k1), str(k2)],
         "window_chars": int(window), "fallback_char_cut": bool(fallback),
         "shuffled": False,
+        # 群组自检：标题定义文档；为 True 表示至少一个文档跨了切点
+        "n_headings": int(len(heads)),
+        "documents_cross_cut": bool(documents_cross),
+        "group_unit": ("heading_document" if heads else "line_segment"),
         "lengths_chars": {"train": len(train_text), "val": len(val_text),
                           "test": len(test_text)},
     }
@@ -434,11 +522,95 @@ def summarize_test_access(records) -> dict:
 
 # ---------------------------------------------------------------- 报告组装
 
+# 自检告警阈值：不是统计检验的显著性水平，而是“必须人工复核”的操作触发线，
+# 与开放集/结构不同分布下的经验值一致（可通过 extra_report 覆盖记录）。
+ALERT_THRESHOLDS = {
+    "ngram_overlap_rate": 0.0,       # 任何跨 split 长 n-gram 复制都不允许
+    "distribution_tv": 0.1,          # 一元 TV 距离 > 0.1 视为明显漂移
+    "distribution_js_bits": 0.1,     # JS 散度（bit）
+    "eval_oov_token_rate": 0.02,     # eval 中 train 未见 token 质量占比
+    "eval_unk_char_rate": 0.005,     # val/test 字符级 OOV 率
+    "bad_char_line_rate": 0.01,      # 含坏字符的行占比（标签噪声）
+}
+
+
+def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
+                   contamination: dict, distribution: dict,
+                   text_stats: dict = None, thresholds: dict = None) -> list:
+    """把防泄漏/清洗诊断转成显式告警（供打印与汇总页展示）。
+
+    返回 [{"level": "warning"|"info", "code": ..., "message": ...}]。
+    没有告警时返回空列表——"无告警"与"没有自检"是两回事，后者由报告缺失表示。
+    """
+    th = dict(ALERT_THRESHOLDS)
+    if thresholds:
+        th.update(thresholds)
+    alerts = []
+
+    def add(level, code, message):
+        alerts.append({"level": level, "code": code, "message": message})
+
+    for key, label in (("train_val", "train/val"), ("train_test", "train/test")):
+        c = (contamination or {}).get(key) or {}
+        rate = c.get("overlap_rate")
+        if rate is not None and rate > th["ngram_overlap_rate"]:
+            add("warning", f"ngram_overlap_{key}",
+                f"{label} 采样 {c.get('n', '?')}-gram 重叠率 {rate:.4%}"
+                "（>0 表示疑似跨 split 语料复制，须人工核查）")
+    for key, label in (("val_vs_train", "val−train"),
+                       ("test_vs_train", "test−train")):
+        d = (distribution or {}).get(key) or {}
+        tv, js = d.get("tv"), d.get("js_bits")
+        if tv is not None and tv > th["distribution_tv"]:
+            add("warning", f"distribution_tv_{key}",
+                f"{label} 一元 token TV 距离 {tv:.4f} > "
+                f"{th['distribution_tv']}（分布漂移明显，结论外推需谨慎）")
+        if js is not None and js > th["distribution_js_bits"]:
+            add("warning", f"distribution_js_{key}",
+                f"{label} JS 散度 {js:.4f} bit > {th['distribution_js_bits']}")
+        oov = d.get("eval_oov_token_rate")
+        if oov is not None and oov > th["eval_oov_token_rate"]:
+            add("warning", f"eval_oov_{key}",
+                f"{label} 方向 OOV token 质量占比 {oov:.4%} > "
+                f"{th['eval_oov_token_rate']}")
+    for split, rate in ((tokenizer or {}).get("unk_rate") or {}).items():
+        if rate is not None and rate > th["eval_unk_char_rate"]:
+            add("warning", f"unk_char_rate_{split}",
+                f"{split} 字符级 OOV 率 {rate:.4%} > "
+                f"{th['eval_unk_char_rate']}（该 split 有较多字符映射 <unk>）")
+    for split, st in (sanitization or {}).items():
+        rate = (st or {}).get("bad_char_line_rate")
+        if rate is not None and rate > th["bad_char_line_rate"]:
+            add("warning", f"bad_char_lines_{split}",
+                f"{split} 含坏字符行占比 {rate:.4%} > "
+                f"{th['bad_char_line_rate']}（标签噪声偏高，建议回查语料）")
+    dup = duplicates or {}
+    n_exact = int(dup.get("train_lines_dropped_as_duplicates_of_eval") or 0)
+    n_norm = int(
+        dup.get("train_lines_dropped_as_normalized_duplicates_of_eval") or 0)
+    if n_exact or n_norm:
+        add("info", "decontamination_applied",
+            f"已从 train 移除与 val/test 重复的长行：精确 {n_exact} 行、"
+            f"空白归一化后额外 {n_norm} 行（val/test 未改写）")
+    for split, st in (text_stats or {}).items():
+        n_huge = int((st or {}).get("lines_gt_huge_threshold") or 0)
+        if n_huge:
+            add("info", f"huge_lines_{split}",
+                f"{split} 有 {n_huge} 行超过 "
+                f"{(st or {}).get('huge_line_threshold_chars')} 字符"
+                "（异常值已计数未删除，训练窗口可能被其主导）")
+    return alerts
+
+
 def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
                       duplicates: dict, contamination: dict,
                       distribution: dict, text_stats: dict = None,
-                      extra: dict = None) -> dict:
+                      extra: dict = None,
+                      alert_thresholds: dict = None) -> dict:
     """汇总为 data_report.json（只含 JSON 原生类型）。"""
+    alerts = leakage_alerts(tokenizer, sanitization, duplicates,
+                            contamination, distribution, text_stats,
+                            thresholds=alert_thresholds)
     report = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "protocol": {
@@ -455,11 +627,15 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         "duplicates": duplicates,
         "contamination": contamination,
         "distribution_shift": distribution,
+        "alert_thresholds": dict(ALERT_THRESHOLDS, **(alert_thresholds or {})),
+        "alerts": alerts,
         "notes": [
             "所有拟合类统计（字符词表等）只在 train 上完成，val/test 只做 transform；",
-            "去污染只从 train 移除与 val/test 精确重复的长行，val/test 不被改写；",
+            "去污染只从 train 移除与 val/test 重复（精确/空白归一化）的长行，"
+            "val/test 不被改写；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",
-            "一元分布漂移为采样估计，用于提示 train/test 分布差异而非统计检验。",
+            "一元分布漂移为采样估计，用于提示 train/test 分布差异而非统计检验；",
+            "alerts 为阈值触发的复核提示（见 alert_thresholds），不是显著性检验。",
         ],
     }
     if extra:

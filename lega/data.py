@@ -14,6 +14,7 @@
   meta.json               {"tokenizer": "gpt2_bpe"|"char", "vocab_size": int, ...}
   data_report.json        防泄漏/清洗/漂移诊断报告
 """
+import hashlib
 import json
 import os
 from typing import List
@@ -28,6 +29,58 @@ from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
                         token_stream_stats, unknown_char_rate)
 
 _GPT2_CACHE = {}
+
+# bin 缓存协议版本：清洗/去污染/词表拟合逻辑变更时必须 +1，
+# 旧缓存（含未记录版本的第一代缓存）会被强制重建，
+# 否则会用旧协议产出的 bin 静默训练，防泄漏自检报告也与实际数据不符。
+CACHE_SCHEMA = 2
+
+
+def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk_size)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _cache_integrity(data_dir: str, meta: dict, report_path: str,
+                     report_enabled: bool):
+    """缓存完整性核对：源文本哈希 + 报告哈希 + 缓存协议版本。
+
+    返回 (ok, issue, has_sources)。缓存命中只核对大小无法发现“txt 改了但
+    bin 没重建”：那样训练集张冠李戴，data_report.json 里的去污染/重叠/
+    漂移诊断也不再对应当前数据。只要存在源文本就强校验；只分发 bin（无
+    任何 txt）的场景无法核对也无法重建，按不可判定放行，由调用方提示。
+    """
+    has_sources = any(os.path.exists(os.path.join(data_dir, f"{s}.txt"))
+                      for s in ("train", "val", "test"))
+    if not has_sources:
+        return True, None, False
+    if int(meta.get("cache_schema", 0)) != CACHE_SCHEMA:
+        return (False, "缓存由旧版数据管线生成（无版本/源哈希记录），"
+                       "重建以应用最新清洗与去污染协议", False)
+    recorded = meta.get("source_sha256")
+    if not isinstance(recorded, dict):
+        return False, "旧缓存未记录源文本哈希，无法确认 bin 与当前 txt 一致", False
+    for split in ("train", "val", "test"):
+        path = os.path.join(data_dir, f"{split}.txt")
+        if not os.path.exists(path):
+            continue
+        if recorded.get(split) != _sha256_file(path):
+            return False, f"{split}.txt 内容与构建 bin 时不一致（缓存过期）", False
+    if report_enabled:
+        if not os.path.exists(report_path):
+            return False, "缺少防泄漏诊断报告 data_report.json", False
+        recorded_report = meta.get("report_sha256")
+        if not isinstance(recorded_report, str):
+            return False, "旧缓存未记录诊断报告哈希", False
+        if _sha256_file(report_path) != recorded_report:
+            return False, "诊断报告与构建 bin 时不一致（可能被改写/过期）", False
+    return True, None, False
 
 
 class GPT2Tokenizer:
@@ -146,7 +199,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             cached_kind = "gpt2" if meta.get("tokenizer") == "gpt2_bpe" else "char"
         # 旧缓存可能是在 val/test 上拟合词表（泄露）或缺少防泄漏报告，必须重建
         fit_ok = meta.get("fit_on") in ("train", "gpt2_pretrained")
-        report_ok = (not report) or os.path.exists(report_path)
+        integrity_ok, integrity_issue, no_sources = _cache_integrity(
+            data_dir, meta, report_path, report)
         train_valid = os.path.getsize(train_bin) == int(meta.get("train_tokens", -1)) * 2
         val_valid = os.path.getsize(val_bin) == int(meta.get("val_tokens", -1)) * 2
         test_valid = (not has_test_txt and not os.path.exists(test_bin)) or (
@@ -154,7 +208,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             and os.path.exists(test_bin)
             and os.path.getsize(test_bin) == int(meta.get("test_tokens", -1)) * 2)
         if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
-                and test_valid and fit_ok and report_ok:
+                and test_valid and fit_ok and integrity_ok:
+            if no_sources:
+                print("[data] 警告：数据目录只有 bin 没有源 txt，"
+                      "无法核对缓存与源文本一致性（按不可判定放行）")
             if kind == "auto":
                 # auto 的实际分词器取决于当前环境（tiktoken 是否可用），
                 # 直接复用缓存可能与本应使用的分词器不一致，必须提示。
@@ -170,8 +227,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             print("[data] 缓存 bin/meta 大小不一致，重建 bin")
         elif not fit_ok:
             print("[data] 旧缓存词表可能在全量数据上拟合（泄露风险），重建 bin")
-        elif not report_ok:
-            print("[data] 缺少防泄漏诊断报告 data_report.json，重建 bin")
+        elif not integrity_ok:
+            print(f"[data] {integrity_issue}，重建 bin")
         else:
             print(f"[data] 缓存分词方式({cached_kind})与请求({kind})不一致，重建 bin")
 
@@ -274,10 +331,20 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     train_tmp, val_tmp, meta_tmp = train_bin + ".tmp", val_bin + ".tmp", meta_path + ".tmp"
     tr.tofile(train_tmp)
     va.tofile(val_tmp)
+    # 源文本指纹：缓存命中时据此确认 bin 确实由当前 train/val/test.txt 构建，
+    # 防止“txt 改了但 bins 没重建”的静默过期（防泄漏报告也会随之失真）。
+    source_sha256 = {}
+    for split, path in (("train", os.path.join(data_dir, "train.txt")),
+                        ("val", os.path.join(data_dir, "val.txt")),
+                        ("test", test_txt_path)):
+        if os.path.exists(path):
+            source_sha256[split] = _sha256_file(path)
     meta = {"tokenizer": tok.name, "requested_kind": kind,
             "vocab_size": tok.n_vocab,
             "fit_on": tokenizer_report["fit_on"],
             "text_sanitized": True,
+            "cache_schema": int(CACHE_SCHEMA),
+            "source_sha256": source_sha256,
             "train_tokens": int(tr.size), "val_tokens": int(va.size)}
     if te is not None:
         test_tmp = test_bin + ".tmp"
@@ -286,11 +353,13 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     if tok.name == "char":
         meta["itos"] = tok.itos
         meta["char_unk"] = UNK_TOKEN in tok.stoi
-    with open(meta_tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False)
+    # 报告先落临时文件并哈希进 meta：缓存命中时若报告被改写/过期可被发现
     report_tmp = report_path + ".tmp"
     with open(report_tmp, "w", encoding="utf-8") as f:
         json.dump(data_report, f, ensure_ascii=False, indent=2)
+    meta["report_sha256"] = _sha256_file(report_tmp)
+    with open(meta_tmp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
     os.replace(meta_tmp, meta_path)
     os.replace(train_tmp, train_bin)
     os.replace(val_tmp, val_bin)
@@ -304,10 +373,9 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     if te is not None:
         msg += f" / test {te.size:,} tokens"
     print(f"{msg} -> {data_dir}")
-    ov = contamination.get("train_test", {}).get("overlap_rate")
-    if ov:
-        print(f"[data] 警告：train/test 采样 64-gram 重叠率 {ov:.3%}，"
-              "请人工核查是否存在语料复制")
+    for alert in data_report.get("alerts", []):
+        tag = "警告" if alert.get("level") == "warning" else "提示"
+        print(f"[data] {tag}：{alert.get('message')}")
     print(f"[data] 防泄漏报告 -> {report_path}")
     return meta
 
@@ -326,7 +394,19 @@ def load_tokenizer(data_dir: str):
     return CharTokenizer(meta["itos"], add_unk=bool(meta.get("char_unk", False)))
 
 
-def load_bin(data_dir: str, split: str) -> np.memmap:
+def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
+    """读取 token 流；test split 默认拒绝（尘封）。
+
+    测试集只允许在最终一次性评估中通过 lega.evaluate 访问（它同时写入
+    .test_access_log.jsonl 访问账本）。训练、调参、选型代码调用
+    load_bin(..., "test") 时必须显式传 allow_test=True，把“读测试集”
+    从默认行为变成需要主动声明的动作。
+    """
+    if split == "test" and not allow_test:
+        raise PermissionError(
+            "测试集已尘封：load_bin(split='test') 需显式 allow_test=True；"
+            "test 只用于最终一次性评估（lega.evaluate 会写访问账本），"
+            "训练/调参/选型不得读取")
     path = os.path.join(data_dir, f"{split}.bin")
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         raise FileNotFoundError(f"{path} 不存在或为空，请先运行 prepare_bins / prepare_data.py")

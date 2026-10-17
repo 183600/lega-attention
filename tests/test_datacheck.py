@@ -1,9 +1,14 @@
 """防泄漏数据协议测试：时序划分、去污染、token 硬校验、重叠筛查、访问账本。
 
 覆盖用户协议中的三条硬要求：
-  1) 时序划分不打乱、文档不跨 split（train 最早 → test 最新）；
-  2) 群组/重复样本不跨侧：与 val/test 重复的长行只从 train 移除；
+  1) 时序划分不打乱、文档不跨 split（train 最早 → test 最新；含标题文档
+     优先切分与 documents_cross_cut 自检）；
+  2) 群组/重复样本不跨侧：与 val/test 重复（精确或空白归一化）的长行只从
+     train 移除；test split 默认拒绝读取（尘封），需显式 allow_test=True；
   3) 测试集访问可审计：账本记录每次 test 评测与重复评测的 checkpoint。
+
+另覆盖 bin 缓存完整性：源文本/诊断报告哈希变化时强制重建，防止旧协议
+或过期缓存的 bin 被静默训练；以及阈值触发的数据自检告警（alerts）。
 """
 import json
 import os
@@ -13,9 +18,10 @@ import numpy as np
 
 from lega.data import (CharTokenizer, get_tokenizer, load_bin, load_meta,
                        load_tokenizer, prepare_bins)
-from lega.datacheck import (append_test_access, check_vocab_capacity,
-                            decontaminate_texts, distribution_shift,
-                            ngram_overlap, read_test_access_log, sanitize_text,
+from lega.datacheck import (append_test_access, build_data_report,
+                            check_vocab_capacity, decontaminate_texts,
+                            distribution_shift, ngram_overlap,
+                            read_test_access_log, sanitize_text,
                             temporal_split_text, text_length_stats,
                             token_stream_stats, unknown_char_rate)
 
@@ -70,6 +76,42 @@ def test_temporal_split_short_text_boundary_after_t2():
         assert info["fallback_char_cut"] is True
         assert 0 < info["cut_offsets"][0] < info["cut_offsets"][1] < len(text)
     print("  [ok] 时序划分：唯一边界晚于 t2 的短文本不产生空 split")
+
+
+def test_temporal_split_prefers_heading_documents_whole():
+    """标题文档是群组单位：即使最近标题在窗口外，也必须切在标题上。"""
+    docs = []
+    for i in range(6):
+        body = " ".join(f"w{i}x{j}" for j in range(400))
+        docs.append(f"= Doc {i} =\n{body}")
+    text = "\n\n".join(docs) + "\n"
+    train, val, test, info = temporal_split_text(text)
+    assert info["n_headings"] == 6
+    assert info["documents_cross_cut"] is False
+    assert info["cut_kinds"] == ["heading", "heading"]
+    assert train + val + test == text
+    parts = {"train": train, "val": val, "test": test}
+    idx = {}
+    for i, d in enumerate(docs):
+        where = [k for k, p in parts.items() if d in p]
+        assert len(where) == 1, f"文档 {i} 出现在 {where}"
+        idx[where[0]] = idx.get(where[0], []) + [i]
+    assert max(idx["train"]) < min(idx["val"])
+    assert max(idx["val"]) < min(idx["test"])
+    print("  [ok] 标题优先切分：窗口内外均落在文档边界，文档不跨 split")
+
+
+def test_temporal_split_reports_document_crossing():
+    """无法在标题处切分时必须如实报告 documents_cross_cut=True（可审计）。"""
+    # 唯一有效标题在 t2 之后：p1 只能退回换行切分 → 有文档跨 split
+    body = "\n".join(f"line {i} padding" for i in range(400))
+    text = body + "\n= Late =\nfin\n"
+    train, val, test, info = temporal_split_text(text)
+    assert train + val + test == text
+    assert info["n_headings"] == 1
+    assert info["cut_kinds"][0] != "heading"
+    assert info["documents_cross_cut"] is True
+    print("  [ok] 标题无法覆盖切点时 documents_cross_cut 显式上报")
 
 
 def test_heading_regex_matches_multilevel_wikitext_headings():
@@ -128,6 +170,26 @@ def test_decontaminate_counts_short_line_duplicates():
     assert stats["val_intra_split_duplicate_lines"] == 0
     assert stats["test_intra_split_duplicate_lines"] == 0
     print("  [ok] 短行不参与去污染，但重复短行仍被计数供审查")
+
+
+def test_decontaminate_catches_whitespace_normalized_duplicates():
+    """仅空白差异的跨 split 复制同样是泄露，必须只从 train 移除。"""
+    val_line = ("A long paragraph repeated with a whitespace variant that must "
+                "still be caught by decontamination.")
+    train_variant = ("A  long paragraph repeated with a whitespace   variant "
+                     "that must still be caught by decontamination.")
+    train_only = ("A train-only paragraph with sufficient length to be tracked "
+                  "by checks.")
+    texts = {"train": f"{train_variant}\n{train_only}", "val": val_line,
+             "test": ""}
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert train_variant not in out["train"]
+    assert train_only in out["train"]
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
+    assert stats["train_lines_dropped_as_normalized_duplicates_of_eval"] == 1
+    assert stats["normalization"] == "collapse_whitespace"
+    print("  [ok] 去污染：空白归一化重复只从 train 移除，val/test 不改写")
 
 
 def test_ngram_overlap_detects_and_clears():
@@ -205,6 +267,20 @@ def test_sanitize_text_stats():
     print("  [ok] 文本清洗：NUL/控制符删除、U+FFFD 替换为空格并可计数")
 
 
+def test_sanitize_text_line_level_label_noise_stats():
+    """行级坏字符统计：标签噪声按行比例报告，而不是只看总字符数。"""
+    raw = ("clean line\nbad \ufffd line\ncontrol \x07 line\n"
+           "both \ufffd and \x01 here\nclean again")
+    clean, st = sanitize_text(raw)
+    assert "\ufffd" not in clean and "\x07" not in clean and "\x01" not in clean
+    assert st["lines"] == 5
+    assert st["lines_with_replacement_char"] == 2
+    assert st["lines_with_control_chars"] == 2
+    assert st["lines_with_bad_chars"] == 3
+    assert abs(st["bad_char_line_rate"] - 3.0 / 5.0) < 1e-12
+    print("  [ok] 文本清洗：行级标签噪声统计（含两类坏字符的行只计一次）")
+
+
 def test_text_length_stats_outlier_detection():
     text = "short\n" + "x" * 200001 + "\nmedium line"
     st = text_length_stats(text, huge_line_chars=100000)
@@ -269,3 +345,91 @@ def test_prepare_bins_writes_report_and_decontaminates():
         assert meta2["train_tokens"] == meta["train_tokens"]
         assert load_bin(d, "train").size == meta["train_tokens"]
     print("  [ok] prepare_bins：去污染 + train-only 词表 + data_report + 缓存命中")
+
+
+def _write_min_splits(d: str) -> None:
+    with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+        f.write("alpha beta gamma delta epsilon zeta eta theta iota kappa.\n")
+    with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+        f.write("val text with enough characters to survive sanitization.\n")
+    with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
+        f.write("test text with enough characters to survive sanitization.\n")
+
+
+def test_prepare_bins_cache_invalidated_on_source_or_report_change():
+    """源 txt 或诊断报告被改动后，旧 bin 缓存必须失效重建（不得静默沿用）。"""
+    with tempfile.TemporaryDirectory() as d:
+        _write_min_splits(d)
+        meta1 = prepare_bins(d, kind="char", force=True)
+        assert meta1["cache_schema"] == 2
+        assert set(meta1["source_sha256"]) == {"train", "val", "test"}
+        assert isinstance(meta1["report_sha256"], str)
+        # 未改动：缓存命中
+        meta2 = prepare_bins(d, kind="char")
+        assert meta2["train_tokens"] == meta1["train_tokens"]
+        assert meta2["report_sha256"] == meta1["report_sha256"]
+        # 改 train.txt（追加内容）→ 源文本哈希变化，必须重建
+        with open(os.path.join(d, "train.txt"), "a", encoding="utf-8") as f:
+            f.write("additional training content appended.\n")
+        meta3 = prepare_bins(d, kind="char")
+        assert meta3["source_sha256"]["train"] != meta1["source_sha256"]["train"]
+        # 篡改诊断报告 → 报告哈希不匹配，重建并恢复完整报告
+        with open(os.path.join(d, "data_report.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        prepare_bins(d, kind="char")
+        with open(os.path.join(d, "data_report.json"), "r",
+                  encoding="utf-8") as f:
+            rep = json.load(f)
+        assert "protocol" in rep and "alerts" in rep
+    print("  [ok] bin 缓存完整性：源文本/诊断报告哈希变化即失效重建")
+
+
+def test_load_bin_test_split_is_sealed_by_default():
+    """test split 默认拒绝读取；唯一出口 allow_test=True（evaluate 专用）。"""
+    with tempfile.TemporaryDirectory() as d:
+        _write_min_splits(d)
+        prepare_bins(d, kind="char", force=True)
+        try:
+            load_bin(d, "test")
+            raise AssertionError("未显式放行时读取 test 必须抛 PermissionError")
+        except PermissionError:
+            pass
+        assert load_bin(d, "test", allow_test=True).size > 0
+        # train/val 不受影响
+        assert load_bin(d, "train").size > 0
+        assert load_bin(d, "val").size > 0
+    print("  [ok] 测试集尘封：load_bin('test') 默认拒绝，allow_test=True 显式放行")
+
+
+def test_build_data_report_emits_threshold_alerts():
+    """防泄漏自检必须把超阈值的诊断转成显式告警，而不是只躺在报告里。"""
+    tokenizer = {"kind": "char", "fit_on": "train", "vocab_size": 50,
+                 "unk_rate": {"val": 0.2, "test": 0.0}}
+    sanitization = {"train": {"bad_char_line_rate": 0.0},
+                    "val": {"bad_char_line_rate": 0.05}}
+    duplicates = {"train_lines_dropped_as_duplicates_of_eval": 1,
+                  "train_lines_dropped_as_normalized_duplicates_of_eval": 2}
+    contamination = {"train_val": {"n": 64, "overlap_rate": 0.01},
+                     "train_test": {"n": 64, "overlap_rate": 0.0}}
+    distribution = {
+        "val_vs_train": {"tv": 0.2, "js_bits": 0.01,
+                         "eval_oov_token_rate": 0.0},
+        "test_vs_train": {"tv": 0.01, "js_bits": 0.2,
+                          "eval_oov_token_rate": 0.5}}
+    text_stats = {"train": {"lines_gt_huge_threshold": 2,
+                            "huge_line_threshold_chars": 100000}}
+    rep = build_data_report(tokenizer, {}, sanitization, duplicates,
+                            contamination, distribution, text_stats)
+    codes = {a["code"] for a in rep["alerts"]}
+    for expected in ("ngram_overlap_train_val", "distribution_tv_val_vs_train",
+                     "distribution_js_test_vs_train", "eval_oov_test_vs_train",
+                     "unk_char_rate_val", "bad_char_lines_val",
+                     "decontamination_applied", "huge_lines_train"):
+        assert expected in codes, f"缺少告警 {expected}: {sorted(codes)}"
+    # 未超阈值的方向不产生告警
+    assert "ngram_overlap_train_test" not in codes
+    assert "distribution_tv_test_vs_train" not in codes
+    assert all(a["level"] in ("warning", "info") for a in rep["alerts"])
+    # 阈值本身随报告落盘，供审计确认告警口径
+    assert "ngram_overlap_rate" in rep["alert_thresholds"]
+    print("  [ok] 数据自检告警：重叠/漂移/OOV/坏字符行/去污染/超长行均可审计")
