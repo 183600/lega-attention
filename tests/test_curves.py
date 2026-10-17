@@ -171,6 +171,42 @@ def test_degenerate_segments_render_without_crash():
     print("  [ok] 退化区间（None 均值/变化率）诊断可正常完成")
 
 
+def test_transient_loss_spike_detected_even_when_trend_normal():
+    """瞬态损失尖峰不能被分段均值掩盖：趋势正常也要单项报告，且不应再给
+    “无需干预”的建议（尖峰常对应异常批次/一次梯度爆炸）。"""
+    train = [5.0, 4.8, 4.6, 4.4, 4.2, 4.0, 3.8, 30.0, 3.4, 3.2,
+             3.0, 2.8, 2.6, 2.4, 2.2]
+    recs = _log(train, [5.0, 4.6, 4.2, 3.8, 3.4],
+                val_steps=[90, 180, 270, 360, 450])
+    d = diagnose_curve(recs)
+    assert d["status"] == "正常收敛", d
+    assert d["has_loss_spike"] and d["loss_spikes"], d
+    assert d["loss_spikes"][0]["step"] == 80
+    assert any("尖峰" in e for e in d["evidence"]), d["evidence"]
+    assert any("尖峰" in r for r in d["recommendations"]), d["recommendations"]
+    assert not any("无需干预" in r for r in d["recommendations"]), d["recommendations"]
+    # 平滑下降（无尖峰）时不得误报，且保留“无需干预”
+    d2 = diagnose_curve(_log(train[:7] + train[8:], [5.0, 4.6, 4.2, 3.8, 3.4],
+                             val_steps=[90, 180, 270, 360, 450]))
+    assert d2["status"] == "正常收敛" and not d2["has_loss_spike"], d2
+    assert any("无需干预" in r for r in d2["recommendations"])
+    print("  [ok] 瞬态损失尖峰检测（与趋势独立、平滑曲线不误报）")
+
+
+def test_malformed_log_records_do_not_crash_diagnosis():
+    """损坏记录（字符串值/非法 step）必须被跳过并计数，不能中断整个诊断。"""
+    recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": "oops"},
+            {"step": "x", "loss": 4.0}, {"step": 30, "loss": 3.0},
+            {"step": 40, "loss": 2.0}, {"step": 50, "loss": 1.5},
+            {"step": 10, "val_loss": 5.0}, {"step": 30, "val_loss": 3.2},
+            {"step": 50, "val_loss": 2.0}, {"step": 60, "val_loss": "bad"}]
+    d = diagnose_curve(recs)
+    assert d["status"] in ("正常收敛", "过拟合趋势", "欠拟合/学习不充分"), d
+    assert d["malformed_records"] == 3, d
+    assert any("无法解析" in e for e in d["evidence"]), d["evidence"]
+    print("  [ok] 损坏日志记录跳过并计数（不再崩溃）")
+
+
 def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"

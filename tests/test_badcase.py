@@ -7,7 +7,7 @@ import tempfile
 
 from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
                            case_key, categorize_case, categorize_window,
-                           cross_variant_analysis, format_window_case,
+                           cross_variant_analysis, format_case, format_window_case,
                            process_eval_json, process_ruler_json,
                            write_badcase_md, write_worstcase_md)
 
@@ -367,6 +367,37 @@ def test_cross_variant_zero_error_variant_blocks_consensus():
     assert cross["per_variant"]["lega"]["n_new_vs_reference"] == 1
     assert cross["per_variant"]["qgate"]["n_fixed_vs_reference"] == 0
     print("  [ok] 零错误变体阻止“全体共识失败”误报")
+
+
+def test_malformed_records_do_not_crash_attribution():
+    """外部/旧格式 JSON 的字段可能是数字/缺失/None：单条坏样本必须被容错
+    处理（pred=123 的 fwe、缺 task、非字符串 needle/depth），不能中断整份报告。"""
+    bad = [
+        {"task": "fwe", "pred": 123, "answer_words": None},
+        {"task": "fwe", "pred": None, "answer_words": ["a"]},
+        {"task": "niah_synth", "depth": {"a": 1}, "pred": None,
+         "answer": 123, "context_numbers": None, "needle_excerpt": 42},
+        {},  # 缺 task
+    ]
+    ana = analyze_badcases(bad, variant="lega")
+    assert ana["n_badcases"] == len(bad)
+    for i, c in enumerate(ana["cases"], 1):
+        format_case(i, c)  # 渲染不得崩溃
+    win = analyze_worst_windows(
+        [{"pred_top5": ["a"]}, {"pred_top5": [{"t": "a", "p": 0.9}],
+                                "gold_next": None, "context_tail": None}],
+        variant="lega")
+    for i, c in enumerate(win["cases"], 1):
+        format_window_case(i, c)
+    tmp = tempfile.mkdtemp()
+    try:
+        write_badcase_md(ana, os.path.join(tmp, "b.md"))
+        write_worstcase_md(win, os.path.join(tmp, "w.md"))
+        cross = cross_variant_analysis({"a": bad, "b": bad}, reference="a")
+        json.dumps(cross, ensure_ascii=False)  # 结果必须可序列化
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 坏样本字段类型异常不崩溃（fwe/缺 task/非字符串字段）")
 
 
 def test_main_keeps_zero_error_variants_for_cross_variant():

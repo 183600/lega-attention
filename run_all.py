@@ -60,7 +60,8 @@ from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,
                           process_eval_json, process_ruler_json)
-from lega.curves import STATUS_ORDER, diagnose_run_dir, worst_status  # noqa: E402
+from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
+                         diagnose_run_dir, worst_status)
 from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
                              collect_artifacts, ledger_path, new_run_id,
@@ -1306,7 +1307,8 @@ def build_summary(results_dir: str, audit: dict = None,
                   "验证回升同样判过拟合（平台期泛化先恶化，不按欠拟合处理）；"
                   "训练仍在实质下降而验证无实质变化=过拟合趋势（验证不再随训练"
                   "改善的早期信号，按正则化/早停处理，不据此续训）；"
-                  "两者都不降=欠拟合/学习率不当/数据管道问题；出现 NaN=训练失效。"
+                  "两者都不降=欠拟合/学习率不当/数据管道问题；出现 NaN=训练失效；"
+                  "瞬态损失尖峰（分段均值会掩盖）与损坏日志行单独报告。"
                   "逐 run 明细见 `curve_diagnosis.json`。")
         md.append("")
         md.append("| 变体 | 状态（最差种子） | 训练损失 首→末 | 验证损失 首→最优→末 "
@@ -1314,6 +1316,8 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("|---|---|---|---|---|---|")
         any_nan = False
         any_grad_spike = False
+        any_loss_spike = False
+        any_malformed = False
         for v in variants:
             by_seed = curve.get(v) or {}
             if not by_seed:
@@ -1324,6 +1328,10 @@ def build_summary(results_dir: str, audit: dict = None,
             any_nan = any_nan or any(d.get("nonfinite_values") for d in diags)
             spike = any(d.get("has_grad_spike") for d in diags)
             any_grad_spike = any_grad_spike or spike
+            lspike = any(d.get("has_loss_spike") for d in diags)
+            any_loss_spike = any_loss_spike or lspike
+            any_malformed = any_malformed or any(d.get("malformed_records")
+                                                 for d in diags)
             es = [d.get("early_stop_gain_rel") for d in diags
                   if d.get("early_stop_gain_rel") is not None]
 
@@ -1340,7 +1348,8 @@ def build_summary(results_dir: str, audit: dict = None,
                     + ("（最终劣于最优，已用 best checkpoint）"
                        if sum(es) / len(es) > 0.02 else ""))
             rec = worst["recommendations"][:1]
-            status_s = status + ("　（梯度尖峰）" if spike else "")
+            status_s = status + ("　（梯度尖峰）" if spike else "") \
+                + ("　（损失尖峰）" if lspike else "")
             md.append(f"| {VARIANT_CN.get(v, v)} | {status_s} | {train_s} "
                       f"| {val_s} | {es_s} | {rec[0] if rec else '-'} |")
         md.append("")
@@ -1359,6 +1368,17 @@ def build_summary(results_dir: str, audit: dict = None,
                       "（最大/中位数 ≥10×）的 run：这是 NaN/发散的早期信号，"
                       "即使损失曲线看似正常也应先降低学习率/收紧 grad_clip "
                       "后重跑，细节见 `curve_diagnosis.json` 的 grad_norm 字段。")
+        if any_loss_spike:
+            md.append("")
+            md.append(f"⚠ 检测到训练损失瞬态尖峰（某点 > 邻近中位数 "
+                      f"{LOSS_SPIKE_FACTOR:.0f}×，分段均值会掩盖）：先核对该"
+                      "步批次数据与梯度范数，再决定收紧 grad_clip/降低学习率；"
+                      "细节见 `curve_diagnosis.json` 的 loss_spikes 字段。")
+        if any_malformed:
+            md.append("")
+            md.append("⚠ 部分 train_log.jsonl 记录无法解析（已跳过并计数）："
+                      "日志可能被中断或损坏，曲线结论只基于其余记录点，"
+                      "复核前不要把它当作完整训练历史。")
     else:
         md.append("- ⚠ 未找到 `curve_diagnosis.json`：只看最终数值会掩盖训练动态，"
                   "请先运行训练（或 `python -m lega.curves --run_dir <run 目录>`）。")

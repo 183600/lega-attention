@@ -77,7 +77,9 @@ def categorize_case(rec: Dict) -> Dict:
         return r
     # 2) fwe：按词表覆盖情况归因
     if task == "fwe":
-        pred_words = set(_WORD_RE.findall((r.get("pred") or "").lower()))
+        # 外部/旧格式 JSON 的 pred 可能是数字等非字符串类型：显式 str()，
+        # 一个坏样本不应让整份归因报告崩溃
+        pred_words = set(_WORD_RE.findall(str(r.get("pred") or "").lower()))
         top = set(r.get("answer_words") or [])
         if not pred_words:
             r["category"] = "fwe_no_parse"
@@ -122,7 +124,8 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
     cat_counts = Counter(c["category"] for c in cases)
     by_task_ctx: Dict[str, Dict] = {}
     for c in cases:
-        key = f"{c['task']}@{c.get('ctx')}"
+        # 记录可能缺少 task（外部/旧格式）：用 .get，一个坏样本不应中断聚合
+        key = f"{c.get('task')}@{c.get('ctx')}"
         by_task_ctx.setdefault(key, Counter())[c["category"]] += 1
     hard = sum(1 for c in cases if c.get("hard_sample"))
     label_errors = cat_counts.get("label_error", 0)
@@ -147,17 +150,17 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
 
 def format_case(idx: int, c: Dict) -> List[str]:
     """单个坏案例的 Markdown 行（问题/gold 摘录/预测/归因）。"""
-    lines = [f"### 案例 {idx}: {c['task']} @ctx={c.get('ctx')}"
+    lines = [f"### 案例 {idx}: {c.get('task')} @ctx={c.get('ctx')}"
              + (f" depth={c['depth']:.2f}" if c.get("depth") is not None else "")
              + (" 【难度边界样本：needle 靠后】" if c.get("hard_sample") else "")]
-    q = (c.get("question") or "").strip().replace("\n", " ⏎ ")
+    q = str(c.get("question") or "").strip().replace("\n", " ⏎ ")
     if len(q) > 220:
         q = q[:220] + "…"
     lines.append(f"- 问题: {q}")
     if c.get("needle_excerpt"):
-        ne = c["needle_excerpt"].replace("\n", " ⏎ ")
+        ne = str(c["needle_excerpt"]).replace("\n", " ⏎ ")
         lines.append(f"- gold 证据摘录: {ne}")
-    pred = (c.get("pred") or "").strip().replace("\n", " ⏎ ")
+    pred = str(c.get("pred") or "").strip().replace("\n", " ⏎ ")
     if len(pred) > 160:
         pred = pred[:160] + "…"
     lines.append(f"- 模型输出: {pred!r}")

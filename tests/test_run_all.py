@@ -393,6 +393,36 @@ def test_build_summary_missing_latency_entry():
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
 
 
+def test_build_summary_surfaces_loss_spike_diagnosis():
+    """瞬态损失尖峰（分段均值会掩盖）必须进入 summary.md 的显著提醒，
+    不能只躺在 curve_diagnosis.json 里。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": None, "n_params": 100, "n_gate_extra": 0})
+        base = {"status": "正常收敛", "evidence": [], "recommendations": ["x"],
+                "nonfinite_values": 0, "malformed_records": 0,
+                "has_grad_spike": False, "has_loss_spike": False,
+                "train_loss_first": 4.0, "train_loss_last": 3.0,
+                "val_loss_first": 4.1, "val_loss_best": 3.4,
+                "val_best_step": 50, "val_loss_last": 3.4,
+                "early_stop_gain_rel": 0.0}
+        spike = dict(base, has_loss_spike=True,
+                     recommendations=["损失尖峰（×9 @step 80）：先核对批次"])
+        _write_json(os.path.join(tmp, "curve_diagnosis.json"),
+                    {"standard": {"1": base}, "lega": {"1": spike}})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "损失瞬态尖峰" in md, md[-2000:]
+        assert "（损失尖峰）" in md
+        assert "损失尖峰（×9" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（瞬态损失尖峰进入汇总页显著提醒）")
+
+
 def test_latency_noise_helpers():
     """测量噪声读取与两段散布的方和根合成：缺失安全。"""
     entry = {"prefill_ms_spread_pct": {"256": {"1": 6.0}},

@@ -79,14 +79,19 @@ def test_temporal_split_short_text_boundary_after_t2():
 
 
 def test_temporal_split_prefers_heading_documents_whole():
-    """标题文档是群组单位：即使最近标题在窗口外，也必须切在标题上。"""
+    """标题文档是群组单位：即使最近标题在窗口外，也必须切在标题上。
+
+    12 个等长文档使 80%/90% 切点附近存在文档边界（1/12≈8.3% 间隔）：
+    才能同时满足“两切点都在标题上”与“三 split 非空”，6 个文档时
+    90% 切点落在最后一个文档内部，任何算法都无法既不过约又非空。
+    """
     docs = []
-    for i in range(6):
+    for i in range(12):
         body = " ".join(f"w{i}x{j}" for j in range(400))
         docs.append(f"= Doc {i} =\n{body}")
     text = "\n\n".join(docs) + "\n"
     train, val, test, info = temporal_split_text(text)
-    assert info["n_headings"] == 6
+    assert info["n_headings"] == 12
     assert info["documents_cross_cut"] is False
     assert info["cut_kinds"] == ["heading", "heading"]
     assert train + val + test == text

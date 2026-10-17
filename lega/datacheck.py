@@ -398,9 +398,13 @@ def _pick_boundary(text: str, target: int, window: int):
 
 
 def _heading_positions(text: str):
-    """所有有效标题行的行首偏移（0 与文末不作为切点）。"""
-    n = len(text)
-    return [m.start() for m in _HEADING_RE.finditer(text) if 0 < m.start() < n]
+    """所有有效标题行的行首偏移（含位置 0 的标题：它计数，但不作切点）。
+
+    位置 0 的标题必须计入 n_headings（它是真实存在的文档边界，漏计会造成
+    “6 个文档只报 5 个标题”的审计错误）；是否可选为切点由调用方保证——
+    切点候选一律要求 pos>0，否则 train 会为空。
+    """
+    return [m.start() for m in _HEADING_RE.finditer(text)]
 
 
 def _nearest_heading_in_range(headings, target: int, lo: int, hi: int):

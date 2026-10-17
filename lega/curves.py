@@ -11,7 +11,10 @@
                   早期处理（正则化/早停），不要仅凭训练损失还在降就续训；
   * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
-  * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"。
+  * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"；
+  * 瞬态损失尖峰  单步损失远超邻近点中位数（分段均值会掩盖）——异常批次或
+                  一次梯度爆炸的信号，即使趋势正常也应先核对批次与梯度；
+  * 坏记录        值/step 无法解析的日志行被跳过并计数，结论只基于其余点。
 
 诊断输出为结构化 JSON（含建议清单），由 run_all 汇总进 summary.md；
 也可独立运行：
@@ -35,6 +38,12 @@ RANDOM_LEVEL_TOL = 0.9
 # 梯度范数尖峰：最大 pre-clip 范数超过中位数该倍数视为爆炸性尖峰
 # （NaN 之前的典型早期信号；即使损失曲线尚未发散也应预警）
 GRAD_SPIKE_FACTOR = 10.0
+# 瞬态损失尖峰：某点训练损失超过"两侧邻居中位数"该倍数。区间均值/首末值会
+# 把单步尖峰平均掉，只看分段趋势可能完全漏掉（尖峰常伴随一次异常批次或
+# 梯度爆炸，即使之后恢复也说明训练不稳）。局部比较而非全局中位数：损失
+# 整体单调下降时全局中位数会把早期高点误判为尖峰。
+LOSS_SPIKE_FACTOR = 8.0
+LOSS_SPIKE_WINDOW = 5  # 每侧参与中位数的邻居点数
 
 
 def load_train_log(path: str) -> List[Dict]:
@@ -57,24 +66,55 @@ def load_train_log(path: str) -> List[Dict]:
     return recs
 
 
-def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int]:
-    """取出 (step, value) 均有限并按 step 排序的记录点；非有限值单独计数。
+def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]:
+    """取出 (step, value) 均有限并按 step 排序的记录点；异常记录单独计数。
 
-    返回 (pts, bad)：pts 为有限点列表，bad 为非有限值个数。
+    返回 (pts, bad, malformed)：pts 为有限点列表，bad 为非有限值个数，
+    malformed 为 step/值无法解析的记录数。
     记录按 step 排序（train/val 两类点在 jsonl 中交错写入，不能假设有序）。
+    单条记录的值可能是字符串/对象（日志被中断或手工编辑）：整个诊断不能
+    因此崩溃，坏记录跳过并计数，结论只基于其余点。
     """
-    pts, bad = [], 0
+    pts, bad, malformed = [], 0, 0
     for r in records:
         v, s = r.get(key), r.get("step")
         if v is None or s is None:
             continue
-        v, s = float(v), int(s)
+        try:
+            v, s = float(v), int(s)
+        except (TypeError, ValueError):
+            malformed += 1
+            continue
         if math.isfinite(v):
             pts.append({"step": s, "value": v})
         else:
             bad += 1
     pts.sort(key=lambda p: p["step"])
-    return pts, bad
+    return pts, bad, malformed
+
+
+def _detect_loss_spikes(train_pts: List[Dict]) -> List[Dict]:
+    """检出瞬态训练损失尖峰：值 > LOSS_SPIKE_FACTOR × 两侧邻居中位数。
+
+    只比较局部邻居（每侧 LOSS_SPIKE_WINDOW 个点）而非全局中位数/均值：
+    损失整体单调下降时，全局统计会把早期高点误报为尖峰，而局部比较对
+    正常下降免疫。点太少（<2W+1）时无法判定，返回空表。
+    """
+    n = len(train_pts)
+    w = LOSS_SPIKE_WINDOW
+    spikes = []
+    for i in range(w, n - w):
+        neigh = [p["value"] for p in train_pts[i - w:i]] \
+            + [p["value"] for p in train_pts[i + 1:i + 1 + w]]
+        med = statistics.median(neigh)
+        if med <= 0:
+            continue
+        ratio = train_pts[i]["value"] / med
+        if ratio >= LOSS_SPIKE_FACTOR:
+            spikes.append({"step": train_pts[i]["step"],
+                           "value": train_pts[i]["value"],
+                           "local_median": med, "ratio": ratio})
+    return spikes
 
 
 def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
@@ -115,12 +155,16 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
     records: load_train_log 的输出（含 'loss' 训练点与 'val_loss' 验证点）。
     返回 dict：status / 判定依据 / 关键数值 / 建议清单 recommendations。
     """
-    train_pts, train_bad = _finite_points(records, "loss")
-    val_pts, val_bad = _finite_points(records, "val_loss")
+    train_pts, train_bad, train_malformed = _finite_points(records, "loss")
+    val_pts, val_bad, val_malformed = _finite_points(records, "val_loss")
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报
     nan_count = train_bad + val_bad
+    malformed_count = train_malformed + val_malformed
     # 梯度范数体检：尖峰/非有限是发散与 NaN 的早期信号，损失曲线可能还没反映
-    grad_pts, grad_bad = _finite_points(records, "grad_norm")
+    grad_pts, grad_bad, grad_malformed = _finite_points(records, "grad_norm")
+    malformed_count += grad_malformed
+    # 瞬态损失尖峰：分段均值会把它平均掉，必须按点单独体检（与损失状态独立）
+    loss_spikes = _detect_loss_spikes(train_pts)
     grad_vals = [p["value"] for p in grad_pts]
     grad_med = None
     grad_max = None
@@ -283,7 +327,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
             if (early_stop_gain or 0) > EARLY_STOP_TOL:
                 evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
                                 f"{early_stop_gain:.1%}，已按 best-checkpoint 口径评测")
-            else:
+            elif not loss_spikes:
+                # 有瞬态尖峰时不写"无需干预"：先按尖峰建议排查（下文追加）
                 recommendations.append("无需干预；对比实验使用 model_best.pt")
         if (early_stop_gain or 0) > EARLY_STOP_TOL and status != "过拟合":
             recommendations.append(
@@ -306,6 +351,27 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
             f"检测到梯度范数尖峰（×{grad_spike_ratio:.0f}）：这是 NaN 之前的"
             "典型信号，应降低学习率/收紧 grad_clip 后再验证曲线")
 
+    # 瞬态损失尖峰（与分段状态独立）：某一步损失突然跳升又恢复。分段均值/
+    # 首末值会把这个点平均掉，只看趋势会漏；它常来自异常批次或一次梯度爆炸。
+    if loss_spikes:
+        worst_spike = max(loss_spikes, key=lambda s: s["ratio"])
+        evidence.append(
+            f"训练损失出现 {len(loss_spikes)} 个瞬态尖峰，最大在 step "
+            f"{worst_spike['step']}: {worst_spike['value']:.4f} 是邻近点中位数 "
+            f"{worst_spike['local_median']:.4f} 的 {worst_spike['ratio']:.1f} 倍"
+            "（分段均值会将其掩盖）")
+        recommendations.append(
+            f"损失尖峰（×{worst_spike['ratio']:.0f} @step {worst_spike['step']}）："
+            "先查该步批次是否含异常样本（见 datacheck/该步附近数据）与梯度范数"
+            "是否同步尖峰，再考虑收紧 grad_clip 或降低学习率后重跑")
+
+    # 坏记录（值/step 无法解析）：结构化日志被中断或手工编辑的信号；明确
+    # 报告已跳过多少点，避免剩余曲线被当作完整曲线解读。
+    if malformed_count:
+        evidence.append(
+            f"训练日志有 {malformed_count} 条记录的 step/值无法解析（已跳过）："
+            "日志可能被中断或损坏，上述结论只基于其余记录点")
+
     gap = None
     if last_train is not None and final_val is not None:
         gap = final_val - last_train
@@ -317,6 +383,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         "n_train_points": n_train,
         "n_val_points": n_val,
         "nonfinite_values": int(nan_count),
+        "malformed_records": int(malformed_count),
         "train_loss_first": first_train,
         "train_loss_last": last_train,
         "train_rel_change": train_delta,
@@ -334,9 +401,13 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         "grad_norm_max": grad_max,
         "grad_spike_ratio": grad_spike_ratio,
         "has_grad_spike": bool(grad_spike or grad_bad),
+        "loss_spikes": loss_spikes,
+        "has_loss_spike": bool(loss_spikes),
         "thresholds": {"rel_tol": REL_TOL, "diverge_factor": DIVERGE_FACTOR,
                        "early_stop_tol": EARLY_STOP_TOL,
-                       "grad_spike_factor": GRAD_SPIKE_FACTOR},
+                       "grad_spike_factor": GRAD_SPIKE_FACTOR,
+                       "loss_spike_factor": LOSS_SPIKE_FACTOR,
+                       "loss_spike_window": LOSS_SPIKE_WINDOW},
     }
 
 
