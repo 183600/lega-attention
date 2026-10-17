@@ -694,3 +694,34 @@ def test_build_summary_downgrades_confirmatory_when_integrity_violated():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（完整性违反 → 确认性判定显式降级）")
+
+
+def test_build_summary_zero_failure_variant_blocks_consensus():
+    """RULER 已评测且零错误的变体必须进入跨变体对照（n_failed=0）：
+    否则它会被静默排除，"全体变体共识失败"会把方法特异性失败误报给数据。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        case = {"sample_id": "niah_synth@256#0", "task": "niah_synth",
+                "ctx": 256, "answer": "1234567", "answer_words": None,
+                "pred": "7654321", "em": 0.0, "recall": None,
+                "question": "What is the special magic number?",
+                "needle_excerpt": "magic number is: 1234567.",
+                "depth": 0.5, "meta": {}, "context_numbers": ["7654321"],
+                "answer_in_prompt": True}
+        for v, cases in (("standard", [case]), ("lega", [case]), ("qgate", [])):
+            _write_json(os.path.join(tmp, f"ruler_{v}_seed1.json"),
+                        {"variant": v, "seed": 1, "results": {},
+                         "badcases": cases})
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0,
+                "split": "test"})
+        out = build_summary(tmp)
+        cross = json.load(open(os.path.join(tmp, "badcase_cross.json"),
+                               encoding="utf-8"))
+        assert cross["ruler"]["per_variant"]["qgate"]["n_failed"] == 0
+        assert cross["ruler"]["n_shared_all_failures"] == 0
+        assert "全部通过" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：零错误变体计入跨变体对照")

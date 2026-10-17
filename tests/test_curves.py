@@ -153,3 +153,15 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] diagnose_run_dir（日志/nan_report/容错）")
+
+
+def test_rising_train_loss_not_advised_to_train_longer():
+    """训练损失缓慢上升（未达发散阈值）时不能给出"延长训练/增大模型"
+    这类反向建议：上升更可能来自学习率过大，延长训练会继续恶化。"""
+    d = diagnose_curve(_log([3.0, 3.05, 3.1, 3.15, 3.2, 3.3],
+                            [3.1, 3.2, 3.3, 3.4, 3.5]))
+    assert d["status"] == "欠拟合/学习不充分", d
+    assert any("不降反升" in e for e in d["evidence"]), d["evidence"]
+    assert any("降低学习率" in r for r in d["recommendations"]), d["recommendations"]
+    assert not any("延长训练" in r for r in d["recommendations"]), d["recommendations"]
+    print("  [ok] 上升训练损失不误报「延长训练」建议")

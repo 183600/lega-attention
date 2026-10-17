@@ -305,3 +305,43 @@ def test_process_ruler_json_end_to_end():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] process_ruler_json（含旧格式兼容）")
+
+
+def test_nonfinite_loss_excluded_from_mean():
+    """发散 run 的窗口 loss 可能是 NaN/Inf：均值必须剔除（与 utils.mean_std
+    同口径），否则 NaN 会污染报告并被写进非法 JSON。"""
+    ana = analyze_worst_windows([
+        _win(loss=float("nan"), pred_top5=[[" blue", 0.3]]),
+        _win(loss=float("inf"), pred_top5=[[" blue", 0.3]]),
+        _win(loss=2.0, pred_top5=[[" blue", 0.3]]),
+    ], variant="lega")
+    assert ana["mean_loss"] == 2.0
+    # 报告聚合字段不得含 NaN/Inf（NaN 字面量不是合法 JSON）
+    aggregates = {k: v for k, v in ana.items() if k != "cases"}
+    json.dumps(aggregates, allow_nan=False)
+    print("  [ok] 最差窗口均值剔除 NaN/Inf（聚合字段 JSON 合法）")
+
+
+def test_empty_gold_not_counted_as_top1_correct():
+    """gold 缺失/空串时，空的 top1 不能因空串相等被判“top1 正确”。"""
+    c = categorize_window(_win(gold=None, pred_top5=[["", 0.1], ["x", 0.2]]))
+    assert c["category"] != "top1_correct", c
+    c2 = categorize_window(_win(gold="", pred_top5=[["", 0.1]]))
+    assert c2["category"] != "top1_correct", c2
+    print("  [ok] 空 gold 不再被误判为 top1_correct")
+
+
+def test_cross_variant_zero_error_variant_blocks_consensus():
+    """某变体已评测且零错误（空列表）时，绝不能再把其余变体的共同失败
+    标成“全体变体共识失败”——那是方法特异性失败，不是数据/难度问题。"""
+    a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+    cross = cross_variant_analysis(
+        {"standard": [a], "lega": [a], "qgate": []}, reference="standard")
+    assert cross["variants"] == ["lega", "qgate", "standard"]
+    assert cross["n_shared_all_failures"] == 0
+    assert cross["per_variant"]["qgate"]["n_failed"] == 0
+    # 三个变体都错时仍正确计为共识失败
+    cross = cross_variant_analysis(
+        {"standard": [a], "lega": [a], "qgate": [a]}, reference="standard")
+    assert cross["n_shared_all_failures"] == 1
+    print("  [ok] 零错误变体阻止“全体共识失败”误报")

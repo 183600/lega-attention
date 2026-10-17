@@ -253,3 +253,24 @@ def test_hypothesis_fields_cover_analysis_keys():
     assert set(HYPOTHESIS_FIELDS) >= {"id", "claim", "metric", "candidate",
                                       "reference", "direction"}
     print("  [ok] HYPOTHESIS_FIELDS 覆盖判定字段")
+
+
+def test_verify_registration_rejects_non_list_chain():
+    """锁文件的 chain 被替换为非列表（字符串/数字/对象）时必须判 violated：
+    否则篡改审计链会被静默当作“无修订”而仍确认有效（int 还会直接崩）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        for bad in ("corrupted-string", 42, {"0": {}}):
+            lk = json.load(open(lock, encoding="utf-8"))
+            lk["chain"] = bad
+            _write(lock, lk)
+            r = verify_registration(registry_path=reg, lock_path=lock)
+            assert r["status"] == "violated", bad
+            assert not r["confirmatory_valid"], bad
+            assert any("chain" in p for p in r["problems"]), bad
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_registration：非列表 chain 按损坏处理（不再静默通过）")

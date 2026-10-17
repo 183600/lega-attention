@@ -188,9 +188,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 "下游对比应使用 val 上选出的 model_best.pt，而不是最终步模型"]
         elif not train_down:
             status = "欠拟合/学习不充分"
+            trend = "不降反升" if train_up else "没有实质下降"
             evidence.append(
                 f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
-                f"（{_fmt_rel(train_delta)}），没有实质下降")
+                f"（{_fmt_rel(train_delta)}），{trend}")
             if (log_vocab is not None and last_train is not None
                     and last_train > RANDOM_LEVEL_TOL * log_vocab):
                 evidence.append(
@@ -202,9 +203,19 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
             else:
                 recommendations += [
                     "检查学习率是否过小/过大（观察 loss 曲线是否停滞或震荡）",
-                    "检查数据管道（标签错位、特征污染）与 batch 组成",
-                    "若容量不足：增大模型或延长训练"]
-            if not val_down:
+                    "检查数据管道（标签错位、特征污染）与 batch 组成"]
+                if train_up:
+                    recommendations.append(
+                        "训练损失不降反升：优先降低学习率并检查数据顺序/批组成；"
+                        "容量不足通常表现为低损失平台，而非上升")
+                else:
+                    recommendations.append("若容量不足：增大模型或延长训练")
+            if train_up:
+                if val_up:
+                    recommendations.append(
+                        "训练与验证损失同步上升：更像学习率过大/训练不稳，"
+                        "按发散前期处理而不是欠拟合")
+            elif not val_down:
                 recommendations.append("验证损失同样不降，与欠拟合判断一致")
         else:
             status = "正常收敛"

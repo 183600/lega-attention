@@ -333,10 +333,12 @@ class Block(nn.Module):
         a, cache, stats = self.attn(self.ln1(x), rope=rope, past_kv=past_kv,
                                     need_stats=need_stats, stats_argmax=stats_argmax,
                                     kv_cache=kv_cache, cache_pos=cache_pos)
-        # 无梯度（推理/评测）时残差连接用原地加法：x 是本层独占的新张量
-        # （来自上一层输出或嵌入层输出，不被其它子图引用）；有梯度时 autograd
-        # 需要加法输出做反向，必须保持 out-of-place。
-        if torch.is_grad_enabled() and x.requires_grad:
+        # 无梯度（no_grad/inference_mode，推理/评测）时残差连接用原地加法：x 是
+        # 本层独占的新张量（来自上一层输出或嵌入层输出，不被其它子图引用）。
+        # 只要梯度模式开启就必须 out-of-place：即使 x 本身 requires_grad=False
+        # （冻结嵌入/detach 上游），LayerNorm 的反向仍会保存 x（用于计算
+        # weight/bias 梯度），原地 add_ 会破坏其版本计数并直接报错。
+        if torch.is_grad_enabled():
             x = x + self.drop(a)
             x = x + self.drop(self.w2(self.act(self.w1(self.ln2(x)))))
         else:

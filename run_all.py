@@ -1326,9 +1326,17 @@ def build_summary(results_dir: str, audit: dict = None,
     for v in variants:
         m = _variant_seed_map(runs, v)
         cases = []
+        ruler_ran = False
         for s in m.values():
-            cases += (s.get("ruler") or {}).get("badcases") or []
+            r = s.get("ruler")
+            if r:
+                ruler_ran = True
+                cases += r.get("badcases") or []
         if not cases:
+            # RULER 已评测但零错误：显式记为 [] 传给跨变体对照，避免该变体
+            # 被静默排除、把"全体变体共识失败"误报给从未失败的方法。
+            if ruler_ran:
+                per_variant_badcases[v] = []
             continue
         seeds_sorted = _sorted_seeds(m)
         rep = ((m[seeds_sorted[0]].get("ruler") or {}).get("badcases") or []
@@ -1386,11 +1394,13 @@ def build_summary(results_dir: str, audit: dict = None,
         md += ["", "### 跨变体错误对照（共识失败 vs 方法特异性）", ""]
         n_shared = bad_cross["n_shared_all_failures"]
         md.append(
-            f"各变体取最小种子的错误清单（样本集相同，可逐条对齐）：共 "
+            f"各变体取最小种子的错误清单（样本集相同，可逐条对齐；RULER 已"
+            f"评测但零错误的变体按“全部通过”计入，不会被误算作共识失败）：共 "
             f"{bad_cross['n_unique_failed_items']} 个不同的失败样本，"
-            f"{n_shared} 个为全体变体共识失败——共识失败（尤其当 standard "
-            "也错）更可能是数据/构造/内在难度问题，不应算作某一方法的缺陷；"
-            "相对 standard 的新增错误才是该方法的特异性盲区，优先逐条分析。")
+            f"{n_shared} 个为全体（已评测）变体共识失败——共识失败（尤其当 "
+            "standard 也错）更可能是数据/构造/内在难度问题，不应算作某一"
+            "方法的缺陷；相对 standard 的新增错误才是该方法的特异性盲区，"
+            "优先逐条分析。")
         md += ["", "| 变体 | 错误样本数 | 全体共识失败 | 相对standard新增 "
                    "| 相对standard改对 |", "|---|---|---|---|---|"]
         for v in bad_cross["variants"]:

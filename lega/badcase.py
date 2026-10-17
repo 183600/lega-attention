@@ -28,6 +28,7 @@
 import argparse
 import glob
 import json
+import math
 import os
 import re
 from collections import Counter
@@ -264,7 +265,9 @@ def categorize_window(rec: Dict) -> Dict:
     pick = top1.strip()
     r["repeats_context"] = bool(pick and len(pick) >= 2 and pick in tail
                                 and gold_txt != top1)
-    if top1 == gold_txt:
+    if gold_txt and top1 == gold_txt:
+        # gold 缺失/为空串时不能判"top1 正确"：空串相等会把无 gold 的记录
+        # 误标为命中的校准样本（gold 不存在则无从谈"预测正确"）。
         r["category"] = "top1_correct"
         r["explanation"] = (f"top1 与 gold 一致但概率仅 {p1:.3f}（低置信正确），"
                             "属输出校准问题而非检索错误"
@@ -294,7 +297,10 @@ def categorize_window(rec: Dict) -> Dict:
 
 
 def _mean(vals):
-    vals = [float(v) for v in vals if v is not None]
+    # 与 utils.mean_std 同口径：剔除 None 与非有限值（NaN/Inf）。发散 run 的
+    # 窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并污染报告。
+    vals = [float(v) for v in vals
+            if v is not None and math.isfinite(float(v))]
     return float(sum(vals) / len(vals)) if vals else None
 
 
@@ -438,7 +444,9 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
 
     输入 per_variant_cases: {variant: [错误样本记录]}（所有变体应使用同一批
     评测样本，逐变体错误列表来自同一份 ruler_*.json / eval_*.json 的 badcases
-    或 worst_windows）。输出：
+    或 worst_windows）。空列表表示"该变体已评测且零错误"，会作为通过者计入
+    全体变体集合（否则一个全对的变体会被静默排除，让"全体共识失败"失真）。
+    输出：
       * shared_all_failures —— 所有变体都错的样本：更可能是数据/构造错误或
         样本本身不可解（尤其当 standard 也错），不应算作某一方法的缺陷；
       * 相对参照（默认 standard）的 new_vs_reference —— 参照对而该方法错的
@@ -447,7 +455,11 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
         由错转对的证据，可与新增错误对照衡量净收益。
     n<2 个变体时返回空对照并注明。
     """
-    variants = sorted(v for v, cs in (per_variant_cases or {}).items() if cs)
+    # 保留空列表（已评测且零错误）：它们必须进入 all_set，否则任何一个全对
+    # 的变体都会让"所有变体都错"的共识判定漏掉它，把方法特异性失败误报成
+    # 数据/难度问题。None/非列表值（无此变体数据）才排除。
+    variants = sorted(v for v, cs in (per_variant_cases or {}).items()
+                      if isinstance(cs, list))
     items: Dict[str, Dict] = {}
     for v in variants:
         for c in per_variant_cases[v]:

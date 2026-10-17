@@ -306,3 +306,19 @@ def test_chunked_ce_repeated_backward_does_not_decay_grads():
             assert torch.allclose(p.grad, 2 * first[n], atol=1e-6, rtol=1e-5), \
                 f"{n}: 重复 backward 梯度不可累加"
     print("  [ok] ChunkedLinearCE 重复 backward 梯度可累加（无 1/n 衰减）")
+
+
+def test_frozen_embedding_training_backward_under_grad():
+    """冻结嵌入/detach 上游时梯度模式下不得走残差原地加法路径：
+    LayerNorm 反向会保存 x（用于 weight/bias 梯度），原地改写 x 会让
+    backward 报“变量被 inplace 修改”而直接失败。"""
+    model = _tiny("lega")
+    model.tok_emb.weight.requires_grad_(False)   # lm_head 权重与其共享
+    model.train()
+    idx = torch.randint(0, 64, (2, 10))
+    loss = model(idx, targets=idx)["loss"]
+    loss.backward()
+    assert model.tok_emb.weight.grad is None
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for p in model.parameters() if p.requires_grad)
+    print("  [ok] 冻结嵌入时训练 backward 不再触发 inplace 版本错误")

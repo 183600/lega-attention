@@ -182,7 +182,13 @@ def _replay_chain(lock: dict):
         return None, ["锁文件 baseline 结构不完整（缺 document_sha256/"
                       "hypotheses）"]
     chain = lock.get("chain")
-    chain = chain if isinstance(chain, list) else []
+    if chain is None:
+        chain = []  # 兼容早期无 chain 字段的锁格式
+    elif not isinstance(chain, list):
+        # 链结构被破坏（如被替换成字符串/数字）时不能静默当作"无修订"：
+        # 那会让篡改过的锁文件仍被判 intact/amended，防篡改边界失效。
+        return None, [f"锁文件 chain 结构非法（{type(chain).__name__}），"
+                      "修订链无法重放——按损坏处理"]
     for i, link in enumerate(chain):
         if (not isinstance(link, dict) or not _state_ok(link.get("before"))
                 or not _state_ok(link.get("after"))):
@@ -262,7 +268,9 @@ def verify_registration(registry_path: str = None,
 
     report["baseline_document_sha256"] = (lock.get("baseline") or {}).get(
         "document_sha256")
-    report["chain_length"] = len(lock.get("chain") or [])
+    raw_chain = lock.get("chain")
+    report["chain_length"] = (len(raw_chain) if isinstance(raw_chain, list)
+                              else None)
     head, problems = _replay_chain(lock)
     if head is None:
         report["status"] = "violated"
