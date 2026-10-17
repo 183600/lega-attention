@@ -60,7 +60,31 @@ def test_hard_sample_flag():
     assert c["hard_sample"] is True
     c = categorize_case(_case(pred="1111111", ctx_nums=[], depth=0.1))
     assert c["hard_sample"] is False
-    print("  [ok] 难度边界样本标注（needle 深位）")
+    # vt 的 depth 是链深度（整数）而非 needle 位置比例，不得按位置判难度
+    c = categorize_case(_case(task="vt", pred="1111111", ctx_nums=[], depth=4))
+    assert c["hard_sample"] is False
+    # 提前返回的分支（no_answer 等）也必须带 hard_sample：深位失败仍是难度边界
+    c = categorize_case(_case(pred="no digits here at all", depth=0.9))
+    assert c["category"] == "no_answer" and c["hard_sample"] is True
+    print("  [ok] 难度边界样本标注（needle 深位；vt 链深度不误判）")
+
+
+def test_deep_ratio_excludes_vt_chain_depth():
+    """deep_position_fail_ratio 只能统计 niah 的 needle 位置，不含 vt 链深度。"""
+    cases = [
+        _case(task="niah_multikey", pred="5550001", ctx_nums=[], depth=0.2),
+        _case(task="vt", pred="5550001", ctx_nums=[], depth=4),
+    ]
+    ana = analyze_badcases(cases)
+    assert ana["deep_position_fail_ratio"] == 0.0
+    assert ana["hard_sample_ratio"] == 0.0
+    cases = [
+        _case(task="niah_multikey", pred="5550001", ctx_nums=[], depth=0.9),
+        _case(task="vt", pred="5550001", ctx_nums=[], depth=4),
+    ]
+    ana = analyze_badcases(cases)
+    assert ana["deep_position_fail_ratio"] == 1.0
+    print("  [ok] 深位失败占比仅计 niah 位置 depth")
 
 
 def test_analyze_and_md_report():

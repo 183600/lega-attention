@@ -1,0 +1,98 @@
+{
+  "tag": "tiny_smoke",
+  "variant": "lega",
+  "seed": 1337,
+  "seed_report": {
+    "seed": 1337,
+    "python_random": 1337,
+    "numpy_global": 1337,
+    "torch_cpu": 1337,
+    "torch_cuda": null,
+    "pythonhashseed_env": "1337",
+    "cublas_workspace_config": ":4096:8",
+    "cudnn_deterministic": true,
+    "cudnn_benchmark": false,
+    "deterministic_algorithms": true,
+    "data_order": "np.random.default_rng(seed) 显式批采样（无 DataLoader worker）"
+  },
+  "time": "2026-10-17 00:09:31",
+  "config_file": "/home/runner/work/lega-attention/lega-attention/configs/tiny.json",
+  "config_sha256": "73c51ef7d3ab7f2cf902559ed491b5ebda7a788d5c202194124dcdf2a4f43b82",
+  "git": {
+    "commit": "08dd8ec196b607a3a5637627dba49f8e0e32b790",
+    "commit_short": "08dd8ec196b6",
+    "branch": "master",
+    "dirty": true
+  },
+  "data": {
+    "algo": "sha256-16",
+    "digest": "5ee6587089e52bd0",
+    "tokenizer": "gpt2_bpe",
+    "files": [
+      {
+        "name": "train.bin",
+        "size": 1476776,
+        "mtime_ns": 1792195735422975220,
+        "sha256": "3860a61b74e44926acc78ef26dfe5db39f2cfb7f892671bcf4b0ec9625572747"
+      },
+      {
+        "name": "val.bin",
+        "size": 170448,
+        "mtime_ns": 1792195735423426090,
+        "sha256": "9cda16aad8d6eb266d425eb1ff9134a52a58d8739d32f031500e4b52919dd5ff"
+      },
+      {
+        "name": "test.bin",
+        "size": 171458,
+        "mtime_ns": 1792195735423527058,
+        "sha256": "25cc1eb05acc1f0654d09ac1f8699d7d28c0a55b9d963cf253866827ebdd7a79"
+      },
+      {
+        "name": "meta.json",
+        "size": 192,
+        "mtime_ns": 1792195735423675565,
+        "sha256": "5c63345ab9068f907b94ee14019860ee793ed8fb11198b3afa8c951f2ba5c4b6"
+      }
+    ]
+  },
+  "runtime": {
+    "python": "3.12.3",
+    "torch": "2.14.1+cpu",
+    "numpy": "2.5.4",
+    "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+    "cuda": null,
+    "cudnn": null,
+    "device": "cpu",
+    "gpu": null,
+    "cudnn_deterministic": true,
+    "cudnn_benchmark": false,
+    "deterministic_algorithms": true,
+    "tf32_matmul": false,
+    "hostname": "runnervm8k3b6",
+    "python_executable": "/usr/bin/python",
+    "cpu_count": 4,
+    "threads_env": {
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1"
+    }
+  },
+  "argv": [
+    "/home/runner/work/lega-attention/lega-attention/lega/train.py",
+    "--config",
+    "/home/runner/work/lega-attention/lega-attention/configs/tiny.json",
+    "--variant",
+    "lega",
+    "--data_dir",
+    "/home/runner/work/lega-attention/lega-attention/data/dummy",
+    "--out_dir",
+    "/home/runner/work/lega-attention/lega-attention/out_check/tiny_smoke/lega",
+    "--seed",
+    "1337",
+    "--device",
+    "auto",
+    "--smoke"
+  ],
+  "cwd": "/home/runner/work/lega-attention/lega-attention"
+}

@@ -490,7 +490,12 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                                 "em": sc["em"], "recall": sc["recall"],
                                 "question": tok.decode(ex["ids"][qs:qe]),
                                 "needle_excerpt": _needle_excerpt(tok, ex),
-                                "depth": ex.get("meta", {}).get("depth"),
+                                # 坏案例的 depth 字段统一语义为“needle 位置比例”
+                                # （0~1）；vt 的 meta.depth 是链深度（整数），
+                                # 不能按位置解释，仅 niah 家族记录（vt 链深度
+                                # 仍在 meta 中可见）。
+                                "depth": (ex.get("meta", {}).get("depth")
+                                          if task.startswith("niah") else None),
                                 "meta": {k: v for k, v in ex.get("meta", {}).items()
                                          if k != "n_tokens"},
                                 # 上下文中除 gold 外的全部数值（区分"误抄干扰值"

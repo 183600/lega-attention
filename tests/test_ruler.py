@@ -139,6 +139,13 @@ def test_run_ruler_collects_badcases():
         assert c["answer_in_prompt"] is True
         assert c["em"] == 0.0
         assert "context_numbers" in c
+        # 坏案例 depth 字段统一语义为 needle 位置比例（0~1），仅 niah 家族有；
+        # vt 的链深度不能混入该字段（链深度仍在 meta 中）
+        if c["task"].startswith("niah"):
+            assert c["depth"] is not None and 0.0 <= c["depth"] <= 1.0
+        else:
+            assert c["depth"] is None
+            assert c["meta"].get("depth") is not None
     # 收集开关关闭时不产生 _badcases 键
     res2 = run_ruler(model, tok, "cpu", ctx_lens=[400], n_samples=1,
                      max_new=12, fwe_max_new=12, tasks=("niah_synth",),

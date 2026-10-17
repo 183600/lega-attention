@@ -45,6 +45,13 @@ def categorize_case(rec: Dict) -> Dict:
     """
     r = dict(rec)
     task = r.get("task")
+    # 0) 难度标注：只有 niah 家族的 depth 是 needle 位置比例（0~1）；vt 的
+    # meta.depth 是链深度（整数），不能按位置解释。先算好该标志，保证
+    # 下面各归因分支（fwe/no_answer 等提前返回）的返回值都带 hard_sample。
+    depth = r.get("depth")
+    positional = (depth is not None
+                  and str(task or "").startswith("niah"))
+    r["hard_sample"] = bool(positional and depth > 0.75)
     # 1) 标注/构造自检：gold 答案必须真的在 prompt 里，否则错在数据侧
     if task != "fwe" and r.get("answer_in_prompt") is False:
         r["category"] = "label_error"
@@ -89,9 +96,6 @@ def categorize_case(rec: Dict) -> Dict:
         r["category"] = "hallucinated"
         r["explanation"] = (f"输出了 {first}——上下文中并不存在该数字"
                             f"（gold={r.get('answer')}），属于幻觉")
-    # 4) 难度标注：needle 靠后（depth>0.75）或长上下文样本记为难度边界样本
-    depth = r.get("depth")
-    r["hard_sample"] = bool(depth is not None and depth > 0.75)
     return r
 
 
@@ -105,9 +109,10 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
         by_task_ctx.setdefault(key, Counter())[c["category"]] += 1
     hard = sum(1 for c in cases if c.get("hard_sample"))
     label_errors = cat_counts.get("label_error", 0)
-    # 深度信息只在 niah 家族存在；给出深位（>0.75）失败占比用于判断
-    # "是样本极难，还是模型系统性盲区"
-    with_depth = [c for c in cases if c.get("depth") is not None]
+    # 深度信息只在 niah 家族存在（vt meta.depth 是链深度而非位置）；给出
+    # 深位（>0.75）失败占比用于判断"是样本极难，还是模型系统性盲区"
+    with_depth = [c for c in cases if c.get("depth") is not None
+                  and str(c.get("task") or "").startswith("niah")]
     deep_fail = sum(1 for c in with_depth if c["depth"] > 0.75)
     return {
         "variant": variant,
