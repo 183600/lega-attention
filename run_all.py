@@ -143,6 +143,15 @@ def _resolve_jobs(args) -> int:
     return min(4, os.cpu_count() or 1)
 
 
+def parse_variants(spec: str) -> list:
+    """解析 --variants 逗号列表，保留顺序并按首次出现去重（与 --seeds 同口径）。
+
+    重复变体会让每个阶段生成重复命令（sanity/训练/评测/机制分析同一输出路径），
+    并发执行时互相覆盖结果文件——去重后行为与显式去重的种子列表一致。
+    """
+    return list(dict.fromkeys(v.strip() for v in spec.split(",") if v.strip()))
+
+
 def _jobs_env(jobs: int):
     """并发时按 jobs 均分每个子进程的 BLAS 线程配额；jobs<=1 返回 None。"""
     if jobs <= 1:
@@ -1736,7 +1745,7 @@ def main():
     out_root = os.path.join(_repo_path(args.out_root), tag)
     results_dir = _repo_path(args.results_dir) if args.results_dir else os.path.join(ROOT, "results", tag)
     os.makedirs(results_dir, exist_ok=True)
-    variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+    variants = parse_variants(args.variants)
     invalid = sorted(set(variants) - set(ALL_VARIANTS))
     if invalid:
         p.error(f"未知变体: {', '.join(invalid)}；可选: {', '.join(ALL_VARIANTS)}")

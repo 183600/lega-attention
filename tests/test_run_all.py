@@ -19,7 +19,8 @@ from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
                       _resolve_jobs, _stat, AUROC_DIFF_METRIC,
                       AUROC_DIFF_REFERENCE, build_summary, component_evidence,
                       evaluate_registered_hypotheses, load_registered_hypotheses,
-                      run_many, tradeoff_verdict, verify_controlled_setup)
+                      parse_variants, run_many, tradeoff_verdict,
+                      verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -49,6 +50,16 @@ def test_resolve_jobs_defaults():
     _A.jobs = 7
     assert _resolve_jobs(_A()) == 7
     print("  [ok] _resolve_jobs（显式 jobs / CUDA / wandb 默认值）")
+
+
+def test_parse_variants_dedups_preserving_order():
+    assert parse_variants("lega") == ["lega"]
+    assert parse_variants(" lega , standard ,lega,, leafless ") == \
+        ["lega", "standard", "leafless"]
+    # 重复变体在并发阶段会生成重复命令并写同一输出路径，必须按首次出现去重
+    assert parse_variants("standard,standard,standard") == ["standard"]
+    assert parse_variants(", ,") == []
+    print("  [ok] parse_variants：保序去重、忽略空白项")
 
 
 def test_run_many_sequential_parallel_and_failure():
