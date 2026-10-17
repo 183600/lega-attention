@@ -821,7 +821,7 @@ def _lat_noise_pct(entry, metric, ctx, bs="1"):
     """latency.json 中某运行时指标的测量相对散布（spread_pct）；缺失返回 None。
 
     spread_pct=(p90-p10)/median，由 lega.latency 逐次计时给出。旧格式
-    latency.json 没有该字段时返回 None（按无噪声信息处理，行为与之前一致）。
+    latency.json 没有该字段时返回 None（按无噪声信息处理）。
     """
     if not entry:
         return None
@@ -1801,7 +1801,7 @@ def build_summary(results_dir: str, audit: dict = None,
             mem_b = _eff_cell(base_e, "mem", common_ctx)
             mem_delta = _rel_pct(mem_b, mem_v) if (mem_v is not None and mem_b) else None
             # 延迟差异的测量噪声：|Δ| 不超过两端散布的方和根时不可区分，
-            # 按 0 计入增幅（原始值仍保留在 JSON，避免把噪声当效率差距）。
+            # 按 0 计入增幅（原始值仍保留在 JSON，避免把噪声当真实差异）。
             pre_noise = _noise_floor_pct(
                 _lat_noise_pct(base_e, "prefill", common_ctx),
                 _lat_noise_pct(e, "prefill", common_ctx))

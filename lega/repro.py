@@ -93,7 +93,7 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
                 cached = json.load(f)
         except (OSError, ValueError):
             cached = None
-    # 结构校验：缓存是纯加速产物，语法合法但结构畸形（非对象、files 非列表、
+    # 结构校验：缓存是纯派生数据，语法合法但结构畸形（非对象、files 非列表、
     # 元素非对象）时必须视为未命中并重建，而不是抛 AttributeError/TypeError。
     if isinstance(cached, dict) and cached.get("algo") == FINGERPRINT_ALGO \
             and isinstance(cached.get("files"), list) \

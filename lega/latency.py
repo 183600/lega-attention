@@ -52,7 +52,7 @@ def timing_stats(times_ms) -> dict:
     """逐次计时列表 → 中位数/p10/p90/相对散布（测量不确定性的最小报告口径）。
 
     spread_pct=(p90-p10)/median：同一配置重复测量 80% 中心区间的相对宽度。
-    变体间延迟差异小于该量级时应视为测量噪声，而不是真实的效率差距。
+    变体间差异小于该量级时按测量噪声处理。
     """
     vals = sorted(float(t) for t in times_ms if t is not None)
     if not vals:
@@ -71,7 +71,7 @@ def timing_stats(times_ms) -> dict:
 # 计时结果的统一说明，写入 latency.json 的 meta 供下游/复核者读取。
 TIMING_NOTE = ("每个配置重复 iters 次并逐次计时：上报中位数；"
                "spread_pct=(p90-p10)/median 为同配置测量的相对散布。"
-               "变体间差异小于噪声量级时不可当作真实效率差距。")
+               "变体间差异小于噪声量级时按不可区分处理。")
 
 
 # ---------------------------------------------------------------- 结构指标

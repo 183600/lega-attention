@@ -145,8 +145,8 @@ def test_all_variants_forward_backward_and_params():
 def test_gate_stats_batch_shape_all_variants():
     """门控统计必须与输入批次对齐 (B,H,T)。
 
-    lega_len_only 只含 b·log n 一项，曾因 (1,H,1) 参数与 (T,) 的 log_n 广播
-    把批次维压成 1，导致机制分析按批次行取统计时越界；该测试同时覆盖
+    lega_len_only 只含 b·log n 一项，若 (1,H,1) 参数与 (T,) 的 log_n 广播会
+    把批次维压成 1，机制分析按批次行取统计时将越界；该测试同时覆盖
     显式完整路径（stats_argmax=True）与 SDPA 轻量路径（stats_argmax=False）。
     """
     torch.manual_seed(5)

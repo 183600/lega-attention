@@ -257,7 +257,7 @@ def test_hypothesis_fields_cover_analysis_keys():
 
 def test_verify_registration_rejects_non_list_chain():
     """锁文件的 chain 被替换为非列表（字符串/数字/对象）时必须判 violated：
-    否则篡改审计链会被静默当作“无修订”而仍确认有效（int 还会直接崩）。"""
+    否则篡改审计链会被静默当作“无修订”而仍确认有效。"""
     tmp = tempfile.mkdtemp()
     try:
         reg, lock = _pair(tmp)
@@ -273,4 +273,4 @@ def test_verify_registration_rejects_non_list_chain():
             assert any("chain" in p for p in r["problems"]), bad
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] verify_registration：非列表 chain 按损坏处理（不再静默通过）")
+    print("  [ok] verify_registration：非列表 chain 按损坏处理（静默通过一律判违反）")

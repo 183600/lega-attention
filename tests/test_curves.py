@@ -168,7 +168,7 @@ def test_degenerate_segments_render_without_crash():
              {"step": 100, "val_loss": 3.4}, {"step": 100, "val_loss": 3.6}]
     d2 = diagnose_curve(recs2)
     assert d2["status"] == "过拟合", d2
-    print("  [ok] 退化区间（None 均值/变化率）诊断不再崩溃")
+    print("  [ok] 退化区间（None 均值/变化率）诊断可正常完成")
 
 
 def test_worst_status_ordering():

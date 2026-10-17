@@ -321,4 +321,4 @@ def test_frozen_embedding_training_backward_under_grad():
     assert model.tok_emb.weight.grad is None
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for p in model.parameters() if p.requires_grad)
-    print("  [ok] 冻结嵌入时训练 backward 不再触发 inplace 版本错误")
+    print("  [ok] 冻结嵌入时训练 backward 在梯度模式下正常完成")

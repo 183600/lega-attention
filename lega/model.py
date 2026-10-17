@@ -187,8 +187,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         ctx.amp_dtype = _ChunkedLinearCE._autocast_dtype(x2d)
         # n_valid 以设备张量保存；clamp_min(1) 同时吸收"全部位置被忽略"的
         # 除零情形（此时梯度因 keep 掩码全零而天然为 0，无需提前特判）。
-        # 同一份逐位置比较同时服务 n_valid 与 tgt_has_ignore：整批只做一次
-        # 比较（等价于原来两次 (tgt != ignore_index)），少一遍逐元素扫描。
+        # 同一份逐位置比较同时服务 n_valid 与 tgt_has_ignore。
         not_ignored = tgt != ctx.ignore_index
         n_valid = not_ignored.sum()
         ctx.inv_n = n_valid.clamp_min(1).to(

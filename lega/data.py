@@ -348,7 +348,7 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
 
     src 可以是已物化的 np.ndarray，也可以是 (memmap, span) 二元组：
     后者把 memmap 的花式索引进 pinned 输出缓冲一步完成（np.take 的 out= 参数）；
-    CPU 目标同样用 out= 一步 gather 成 int64，不再经 uint16 中间数组。
+    CPU 目标同样用 out= 一步 gather 成 int64。
     """
     global _H2D_STAGE_BYTES
     is_span = isinstance(src, tuple)
@@ -357,7 +357,7 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     if not device.startswith("cuda"):
         if is_span:
             # 花式索引直接 gather 进 int64 缓冲：np.take(out=...) 在收集时同步
-            # 完成 uint16→int64 升位，省去 uint16 中间数组与随后的 .long() 二次拷贝
+            # 完成 uint16→int64 升位。
             arr = np.empty(shape, dtype=np.int64)
             np.take(src[0], src[1], out=arr)
             return torch.from_numpy(arr)

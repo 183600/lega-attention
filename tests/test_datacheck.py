@@ -69,7 +69,7 @@ def test_temporal_split_short_text_boundary_after_t2():
         assert train + val + test == text
         assert info["fallback_char_cut"] is True
         assert 0 < info["cut_offsets"][0] < info["cut_offsets"][1] < len(text)
-    print("  [ok] 时序划分：唯一边界晚于 t2 的短文本不再产生空 split")
+    print("  [ok] 时序划分：唯一边界晚于 t2 的短文本不产生空 split")
 
 
 def test_heading_regex_matches_multilevel_wikitext_headings():

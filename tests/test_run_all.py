@@ -449,7 +449,7 @@ def test_tradeoff_ignores_deltas_within_measurement_noise():
         assert row2["eff_decode_within_noise"] is False
         assert row2["eff_cost_max_pct"] == 300.0, row2
 
-        # 旧格式无噪声字段：行为与之前一致（差异全部计入）
+        # 旧格式无噪声字段：差异全部计入
         _write_json(os.path.join(tmp, "latency.json"), {"variants": {
             "standard": {"prefill_ms": {"256": {"1": 1.0}},
                          "decode_ms_per_tok": {"256": 0.1},
@@ -587,7 +587,7 @@ def test_enrich_paired_adds_robustness_fields():
 
 def test_apply_holm_permutation_agreement():
     """t 显著但置换不显著必须显式标 ⚠；两套 p 在同家族内分别 Holm 校正。"""
-    # p_perm 缺失（旧格式 dict）：行为与原先完全一致，不崩不标
+    # p_perm 缺失（旧格式 dict）：按同一口径处理，不崩不标
     tests = [_mk("lega", "standard", "PPL", -0.5, 0.01, 5)]
     _apply_holm(tests)
     assert "显著优于" in tests[0]["verdict"] and "⚠" not in tests[0]["verdict"]

@@ -343,7 +343,7 @@ def test_empty_gold_not_counted_as_top1_correct():
     assert c["category"] != "top1_correct", c
     c2 = categorize_window(_win(gold="", pred_top5=[["", 0.1]]))
     assert c2["category"] != "top1_correct", c2
-    print("  [ok] 空 gold 不再被误判为 top1_correct")
+    print("  [ok] 空 gold 不计为 top1_correct")
 
 
 def test_cross_variant_zero_error_variant_blocks_consensus():
