@@ -1,5 +1,6 @@
 """语言建模坏案例测试：最差验证窗口转储（预测错误的样本要看得见）。"""
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -8,7 +9,8 @@ import numpy as np
 import torch
 
 from lega.data import CharTokenizer
-from lega.evaluate import collect_worst_windows, load_train_throughput
+from lega.evaluate import (collect_worst_windows, json_safe_eval_metrics,
+                           load_train_throughput)
 from lega.model import GPT
 
 
@@ -80,3 +82,29 @@ def test_collect_worst_windows_gold_in_context_uses_full_window():
         assert r["context_tail"] == full[-160:]
         assert r["gold_in_context"] == (bool(gold) and gold in full), r
     print("  [ok] 最差窗口 gold_in_context 按完整窗口判定")
+
+
+def test_json_safe_eval_metrics_handles_nonfinite():
+    """非有限验证损失不得写成 NaN 字面量，也不得伪装成 exp(20) 截断值。
+
+    math.exp(min(20, float("nan"))) 恰为 exp(20)（min 对 NaN 返回第一个参数），
+    而 bool(nan > 20) 为 False：不做显式处理会把失效 checkpoint 报告为
+    "正常但很大"的有限 PPL，且 json.dump 产出非法 JSON 字面量。
+    """
+    out = json_safe_eval_metrics({"val_loss": float("nan"),
+                                  "gate_mean": float("nan")})
+    assert out == {"val_ppl": None, "val_loss": None,
+                   "val_ppl_clamped": None, "gate_mean": None}
+    # allow_nan=False 不抛异常：产物中不存在 NaN/Infinity 字面量
+    json.dumps(out, allow_nan=False)
+    for bad in (float("inf"), float("-inf")):
+        o = json_safe_eval_metrics({"val_loss": bad, "gate_mean": 0.5})
+        assert o["val_ppl"] is None and o["val_loss"] is None
+        assert o["val_ppl_clamped"] is None and o["gate_mean"] == 0.5
+    # 有限值沿用 train.py 的 exp(min(20, loss)) / >20 截断口径
+    o = json_safe_eval_metrics({"val_loss": 2.5, "gate_mean": None})
+    assert o["val_ppl"] == math.exp(2.5) and o["val_ppl_clamped"] is False
+    o = json_safe_eval_metrics({"val_loss": 21.0, "gate_mean": 0.9})
+    assert o["val_ppl"] == math.exp(20) and o["val_ppl_clamped"] is True
+    assert o["val_loss"] == 21.0 and o["gate_mean"] == 0.9
+    print("  [ok] 非有限评测指标归为 null（JSON 安全、不伪装截断值）")

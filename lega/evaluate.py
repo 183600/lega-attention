@@ -71,6 +71,32 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     return rows[:max(1, int(n_worst))]
 
 
+def json_safe_eval_metrics(metrics: dict) -> dict:
+    """把评测指标规范化为 JSON 安全且不误导的字段。
+
+    训练内评测（train.py 的 do_eval）在写入前用 _nan_guard 对非有限 val_loss
+    显式中止；独立评测入口没有这道闸门，必须在写盘前显式处理，否则：
+      * json.dump 会把 NaN/Inf 序列化为非法 JSON 字面量（NaN/Infinity），
+        外部消费者（jq 等）直接解析失败；
+      * math.exp(min(20, float("nan"))) 恰为 exp(20)（min 对 NaN 返回第一个
+        参数），而 bool(nan > 20) 为 False——失效 checkpoint 会被伪装成
+        “正常但很大”的有限 PPL，且不触发任何截断标注。
+    非有限值统一记为 None（缺失值语义），由下游按缺失处理；有限值沿用
+    exp(min(20, loss)) 与 >20 的截断口径，与 train.py 完全一致。
+    """
+    vl = float(metrics["val_loss"])
+    if math.isfinite(vl):
+        ppl = math.exp(min(20, vl))
+        loss, clamped = vl, bool(vl > 20)
+    else:
+        ppl, loss, clamped = None, None, None
+    gmean = metrics.get("gate_mean")
+    if gmean is not None and not math.isfinite(float(gmean)):
+        gmean = None
+    return {"val_ppl": ppl, "val_loss": loss, "val_ppl_clamped": clamped,
+            "gate_mean": gmean}
+
+
 def load_train_throughput(run_dir: str):
     """从训练 run 的 eval.json 继承训练步时记录（train_step_time_ms/tokens_per_sec）。
 
@@ -166,9 +192,13 @@ def main():
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。
     metrics = evaluate_val(model, val, ctx, device, eval_iters, amp=use_amp)
-    vl = metrics["val_loss"]
-    ppl = math.exp(min(20, vl))
-    gmean = metrics["gate_mean"]
+    norm = json_safe_eval_metrics(metrics)
+    ppl, vl, gmean = norm["val_ppl"], norm["val_loss"], norm["gate_mean"]
+    if vl is None:
+        print("[eval] 警告：验证损失非有限（NaN/Inf），该 checkpoint 已失效；"
+              "val_ppl/val_loss 记为 null（避免写入非法 JSON 字面量、也避免 "
+              "min(20, NaN) 恰为 exp(20) 被误读成截断 PPL），"
+              "该结果不得与正常 PPL 比较")
 
     res = {
         "variant": ck.get("variant", model.variant),
@@ -185,7 +215,7 @@ def main():
         # 通用别名：split="test" 时 val_ppl/val_loss 为兼容键名，消费方应优先用这里
         "ppl": ppl,
         "loss": vl,
-        "val_ppl_clamped": bool(vl > 20),
+        "val_ppl_clamped": norm["val_ppl_clamped"],
         "eval_ctx": ctx,
         "gate_mean": gmean,
         "n_params": count_params(model),
@@ -216,7 +246,10 @@ def main():
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)
     save_json(res, args.out)
-    print(f"[eval] {res['variant']}: val_ppl={ppl:.3f} -> {args.out}")
+    if ppl is None:
+        print(f"[eval] {res['variant']}: val_ppl=null（验证损失非有限）-> {args.out}")
+    else:
+        print(f"[eval] {res['variant']}: val_ppl={ppl:.3f} -> {args.out}")
 
 
 if __name__ == "__main__":
