@@ -142,8 +142,14 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
                             data_fingerprint, runtime, out_root: str,
                             results_dir: str, time_start: str,
                             time_end: str = None, sanity=None, runs=None,
-                            artifacts=None, extra=None) -> dict:
-    """组装标准台账记录；字段与 config_used.json/run_manifest.json 同口径。"""
+                            artifacts=None, extra=None,
+                            registration=None) -> dict:
+    """组装标准台账记录；字段与 config_used.json/run_manifest.json 同口径。
+
+    registration（可选）为预注册完整性快照：登记表指纹 + 锁链校验结论
+    （见 lega/hypotheses.py）。写入台账后，“本轮实验开始时登记表是什么
+    状态、是否通过防篡改校验”成为不可回填的历史记录。
+    """
     rec = {
         "run_id": run_id,
         "status": status,
@@ -164,6 +170,7 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
         "sanity": sanity,
         "runs": runs,
         "artifacts": artifacts,
+        "registration": registration,
     }
     if extra:
         rec["extra"] = extra

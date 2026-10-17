@@ -634,9 +634,58 @@ def test_build_summary_renders_confirmatory_sections():
         assert sig["registered_hypotheses"], "注册假设判定必须进 significance.json"
         h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")
         assert h1["status"] in ("支持", "未定", "拒绝")
+        # 预注册完整性报告与完整性小节必须进入 JSON 与汇总页
+        assert sig["registration_integrity"]["status"] in ("intact", "amended")
+        assert sig["registration_integrity"]["confirmatory_valid"] is True
+        assert "预注册完整性" in md and "防事后静默改写" in md
+        assert all(h.get("confirmatory_valid") for h in
+                   sig["registered_hypotheses"])
         # 每条 pair 检验都带稳健性字段
         for t in sig["pairs"]:
             assert "p_perm" in t and "mean_diff_ci95" in t and "mde" in t
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（注册假设/置换/CI/MDE 进入汇总页与 JSON）")
+
+
+def test_build_summary_downgrades_confirmatory_when_integrity_violated():
+    """锁链校验失败时：确认性判定必须显式降级，不能假装边界仍成立。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for s in (1, 2, 3):
+            _write_json(os.path.join(tmp, f"eval_lega_seed{s}.json"), {
+                "variant": "lega", "seed": s, "val_ppl": 9.0 + 0.01 * s,
+                "val_loss": 2.2, "n_params": 100, "n_gate_extra": 0,
+                "split": "val"})
+            _write_json(os.path.join(tmp, f"eval_standard_seed{s}.json"), {
+                "variant": "standard", "seed": s, "val_ppl": 10.0 + 0.01 * s,
+                "val_loss": 2.3, "n_params": 100, "n_gate_extra": 0,
+                "split": "val"})
+        reg = {"hypotheses": [
+            {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
+             "candidate": "lega", "reference": "standard",
+             "direction": "candidate_better"}]}
+        violated = {"status": "violated", "confirmatory_valid": False,
+                    "problems": ["已登记的假设 H1 科学内容被改写"],
+                    "registry_sha256": "a" * 64, "n_hypotheses": 1,
+                    "baseline_document_sha256": "b" * 64,
+                    "chain_length": 0}
+        with mock.patch("run_all.load_registered_hypotheses",
+                        return_value=reg), \
+                mock.patch("run_all.verify_registration",
+                           return_value=violated):
+            out = build_summary(tmp)
+        md = out["markdown"]
+        assert "已登记的假设 H1 科学内容被改写" in md
+        assert "失效" in md and "降级为探索性" in md
+        assert "⚠（无效）" in md
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert sig["registration_integrity"]["status"] == "violated"
+        assert all(not h["confirmatory_valid"]
+                   for h in sig["registered_hypotheses"])
+        assert all("降级" in h["confirmatory_note"]
+                   for h in sig["registered_hypotheses"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（完整性违反 → 确认性判定显式降级）")

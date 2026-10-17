@@ -74,6 +74,7 @@ A/B/C（去一法：Full−X 显著变差；全因子：仅 X 显著优于无门
   5. **测试集尘封**：checkpoint 选择与早停只用 val，test 只在最终评估时访问；每次 test 评测写入 `data_dir/.test_access_log.jsonl` 账本，汇总表报告累计次数与被重复评测的 checkpoint。
 - **公平对比（受控变量）**：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/训练步数/数据顺序），训练后双层自动核对：`config_used.json`（超参数逐项一致）与 `eval.json` 溯源（数据指纹、代码 commit、配置 SHA-256、实际训练步数与 tokens_seen 一致，并与本次流水线数据比对），任何差异都会直接报错；模型初始化完成后统一重放随机种子，使各变体的训练期随机流（dropout 等）也完全一致——把“公平对比”从口头约定变成可执行断言。
 - **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std** 与配对 Cohen's d 效应量（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对的双侧 t 检验在同一指标家族内做 **Holm–Bonferroni 校正**（控制多重比较 FWER），结论一律基于校正后 p 值（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益。
+- **预注册与防事后改写（confirmatory vs exploratory）**：正式实验前把方向性主张登记在 `docs/registered_hypotheses.json`，汇总时逐条对照 Holm 校正后的同种子配对检验，判定 支持 / 拒绝（方向相反且显著=被证伪）/ 未定（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与 `significance.json`；未登记的对比一律属事后（exploratory），只能作为线索。登记表由 `docs/registered_hypotheses.lock.json` 防篡改：锁基线记录整文档 SHA-256 与**逐假设科学内容摘要**，修订必须经 `python -m lega.hypotheses --amend --reason ...` 在**修订链**上留痕（既有假设只增不改不删）。删除登记表、改写 claim、调换变体对、删条目或未留痕新增，都会被 `--verify`／汇总页判为 `violated`，并**自动把全部确认性判定降级为探索性**；登记表的意外删除与恢复事件本身也必须在 amendments 中留痕（本项目已发生过一次清理误删，见 `docs/design_notes.md`）。
 - **三个评测维度**：
   1. **困惑度**（WikiText-103 PPL：checkpoint 选择在 val 上完成，PPL 在 held-out test 上评测，无 test 时回退 val）；评估窗口不重复，并在整个评测集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；
   2. **RULER 长上下文检索**（简化复现 5 任务）：`niah_synth`（合成干扰单键检索）、`niah_corpus`（自然文本干扰）、`niah_multikey`（多键干扰）、`fwe`（高频词提取）、`vt`（变量追踪）；多档上下文长度 + 贪心解码；数值任务 EM **只承认生成内容中的第一个数值回答**，避免"先答错后蒙中"被计分；
@@ -132,7 +133,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `results/experiments.jsonl` | **追加式实验台账：每轮 run 的 run_id、代码版本、配置 SHA-256、种子、数据指纹、sanity 结论、逐 run 最终指标与产物哈希（started/completed 生命周期）** |
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
-| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据） |
+| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）与 `registered_hypotheses`（逐条判定） |
 | `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现） |
@@ -167,6 +168,7 @@ python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m lega.curves    --run_dir out/small/lega/seed1337   # 训练曲线诊断（过拟合/欠拟合/发散/NaN）
 python -m lega.badcase   --results_dir results/small         # 错误样本归因（RULER + 语言建模最差窗口）
+python -m lega.hypotheses --verify                           # 预注册完整性校验（0=可确认；1=被删/改/未留痕）
 python -m tests.run_tests   # 单元测试（不依赖 pytest）
 ```
 
@@ -205,8 +207,13 @@ lega-attention/
 │   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
 │   ├── repro.py               # 代码版本/数据指纹/运行环境/种子审计/溯源继承
 │   ├── experiment.py          # 追加式实验台账（跨轮次记录代码/配置/种子/数据/结果哈希）
+│   ├── hypotheses.py          # 预注册完整性：锁基线 + 修订链 + 防篡改校验（CLI --verify/--init/--amend）
 │   ├── plots.py               # 中文标注图表（PNG，含训练曲线）
 │   └── utils.py               # 种子/JSON/AUROC/Pearson（无 scipy 依赖）
+├── docs/
+│   ├── design_notes.md        # 设计笔记、统计推断协议与结果分析协议
+│   ├── registered_hypotheses.json       # 预注册登记表（禁止删除；修订须留痕）
+│   └── registered_hypotheses.lock.json  # 锁基线 + 修订链（防事后静默改写/删除）
 ├── scripts/
 │   ├── prepare_data.py        # WikiText-103 下载（parquet→zip→rows 多级回退）
 │   ├── make_dummy_data.py     # 离线伪语料（冒烟用）

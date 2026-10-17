@@ -1,0 +1,71 @@
+{
+  "algo": "sha256",
+  "baseline": {
+    "document_sha256": "cfc9fee6af048ee8c8835e9ee62cfef38551d012b96edf328e987fa986f2370e",
+    "n_hypotheses": 6,
+    "hypothesis_ids": [
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5",
+      "H6"
+    ],
+    "hypotheses": {
+      "H1": "0af24b711eb6b2ba",
+      "H2": "ae743657c43c5423",
+      "H3": "fb364dfd78ae4efb",
+      "H4": "208aaced9bd6d1f0",
+      "H5": "323a77791a81ccea",
+      "H6": "96db792da58155d3"
+    }
+  },
+  "created_at": "2026-10-17 05:11 UTC",
+  "reason": "首次登记（baseline 取自提交 8861bf6 中登记表的科学内容快照）",
+  "chain": [
+    {
+      "at": "2026-10-17 13:00 UTC",
+      "reason": "登记表被 clean 提交 467947d/4ccdbdb 误删后的恢复留痕：从 8861bf6 原样恢复 H1–H6，并追加防删说明与恢复 amendment；假设科学字段逐字未改（逐假设摘要与基线一致）",
+      "before": {
+        "document_sha256": "cfc9fee6af048ee8c8835e9ee62cfef38551d012b96edf328e987fa986f2370e",
+        "n_hypotheses": 6,
+        "hypothesis_ids": [
+          "H1",
+          "H2",
+          "H3",
+          "H4",
+          "H5",
+          "H6"
+        ],
+        "hypotheses": {
+          "H1": "0af24b711eb6b2ba",
+          "H2": "ae743657c43c5423",
+          "H3": "fb364dfd78ae4efb",
+          "H4": "208aaced9bd6d1f0",
+          "H5": "323a77791a81ccea",
+          "H6": "96db792da58155d3"
+        }
+      },
+      "after": {
+        "document_sha256": "367db0f1334824ef24d32d959d489c81efd138c9bb6dffa69c84a998414ef937",
+        "n_hypotheses": 6,
+        "hypothesis_ids": [
+          "H1",
+          "H2",
+          "H3",
+          "H4",
+          "H5",
+          "H6"
+        ],
+        "hypotheses": {
+          "H1": "0af24b711eb6b2ba",
+          "H2": "ae743657c43c5423",
+          "H3": "fb364dfd78ae4efb",
+          "H4": "208aaced9bd6d1f0",
+          "H5": "323a77791a81ccea",
+          "H6": "96db792da58155d3"
+        }
+      }
+    }
+  ]
+}

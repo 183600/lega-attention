@@ -57,6 +57,20 @@ Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=�
 须先登记再在新的种子/数据上检验——把"哪些对比是事先声称的"从记忆变成
 可执行的边界。
 
+**完整性锁链（防事后静默改写/删除）**：`docs/registered_hypotheses.lock.json`
+记录锁基线（整文档 SHA-256 + **逐假设科学内容摘要**，只覆盖
+id/claim/metric/candidate/reference/direction，注释类字段不参与）与**修订链**。
+既有假设只增不改不删；新增假设必须经 `python -m lega.hypotheses --amend --reason ...`
+留痕，否则判违反。`verify_registration` 的状态为 intact/amended（可确认）
+与 violated/missing_lock/missing_registry（不可确认）；run_all 把登记表指纹
+与完整性报告写入 `repro.json`、实验台账与 `significance.json`，汇总页显式渲染；
+**violated 时全部确认性判定自动降级为探索性**（`apply_integrity_gate`），
+不假装边界仍成立。`tests/test_hypotheses.py` 对仓库登记表做存在性与锁链自检——
+清理脚本误删预注册文件会直接让测试失败（历史上已发生过一次：登记表被
+clean 提交 467947d/4ccdbdb 删除后缺失多轮，本项目随后在 amendments 中留痕并从
+git 历史原样恢复，科学字段逐字未改）。局限如实声明：本机制防御的是静默/意外
+改写，无法对抗同时改写登记表、锁文件与 git 历史的攻击者——那需要外部审计。
+
 ## 可复现性与 sanity check
 
 - **种子**：`set_seed` 覆盖 Python/NumPy/PyTorch（CPU/CUDA）、cuDNN 确定性算法与子进程 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker）。`run_all` 逐命令把 `PYTHONHASHSEED` 对齐到该命令自己的 `--seed`，`run_manifest.json` 内嵌 `seed_report`（逐随机源的种子、**RNG 真实状态短指纹**、确定性开关、数据顺序机制）供事后审计：指纹可被第三方用 `set_seed(seed)+rng_state_fingerprint()` 复算，当前状态不属于所请求 seed 时为 `null`；`PYTHONHASHSEED` 分“解释器启动值/子进程 env/是否真的对当前进程生效”三字段记录，避免字段被 set_seed 自身写值而自证。跨硬件架构不保证逐位一致，同机重跑稳定。

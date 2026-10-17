@@ -65,6 +65,9 @@ from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: 
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
                              collect_artifacts, ledger_path, new_run_id,
                              snapshot_train_run)
+from lega.hypotheses import (REGISTRY_PATH as HYPOTHESES_PATH,  # noqa: E402
+                             fingerprint as registration_fingerprint,
+                             load_registration, verify_registration)
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
 from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
                         mean_std, min_detectable_effect, paired_sign_flip_test,
@@ -604,7 +607,7 @@ def _auroc_diff_tests(runs) -> list:
 
 # 注册假设（confirmatory）：在正式实验前登记的方向性主张；未登记的对比
 # 一律视为事后（exploratory）分析，只能作为提出新假设的线索。
-HYPOTHESES_PATH = os.path.join(ROOT, "docs", "registered_hypotheses.json")
+# 登记表与防篡改锁链的实现见 lega/hypotheses.py（锁基线 + 修订链）。
 
 
 def load_registered_hypotheses(path: str = HYPOTHESES_PATH) -> dict:
@@ -680,6 +683,62 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
                          "n": t.get("n"), "mde": t.get("mde")})
         out.append(item)
     return out
+
+
+def apply_integrity_gate(hyp_eval: list, integrity: dict) -> list:
+    """预注册完整性失败时给全部确认性判定加盖“无效”戳。
+
+    预注册的全部意义在于事后不能静默改写；一旦 lega/hypotheses.py 的
+    锁链校验发现登记表被删/改/无留痕新增，这些判定就不再具有 confirmatory
+    地位——逐条标注 valid 标志与原因，汇总页显式降级为探索性，
+    而不是假装边界仍然成立。
+    """
+    valid = bool((integrity or {}).get("confirmatory_valid"))
+    reason = ("登记表完整性校验通过" if valid else
+              "预注册完整性校验未通过（登记表被删/改/无留痕新增，"
+              "或锁文件缺失）：判定降级为探索性，不得作为 confirmatory 结论")
+    for h in hyp_eval or []:
+        h["confirmatory_valid"] = valid
+        h["confirmatory_note"] = reason
+    return hyp_eval
+
+
+def _render_registration_integrity(integrity: dict) -> list:
+    """预注册完整性小节：删除/静默改写必须在校验中显形。"""
+    integrity = integrity or {}
+    st = integrity.get("status")
+    icon = {"intact": "✅", "amended": "✅", "violated": "⛔",
+            "missing_lock": "⚠", "missing_registry": "⛔"}.get(st, "?")
+    desc = {
+        "intact": "与锁基线一致（登记后未发生任何修订）",
+        "amended": "与修订链一致（既有假设未被改写/删除，"
+                   f"链上共 {integrity.get('chain_length')} 环留痕修订）",
+        "violated": "完整性校验失败：登记表被删除/改写，或新增假设未留痕",
+        "missing_lock": "缺少锁文件，无法验证登记表未被静默改写",
+        "missing_registry": "登记表文件缺失，预注册边界不存在",
+    }.get(st, "无法判定")
+    lines = ["### 预注册完整性（防事后静默改写）", "",
+             f"{icon} 状态：`{st}` —— {desc}。"]
+    sha = integrity.get("registry_sha256")
+    if sha:
+        lines.append(f"- 登记表 SHA-256：`{sha[:16]}…`（假设 "
+                     f"{integrity.get('n_hypotheses')} 条"
+                     + (f"；锁基线 `{str(integrity.get('baseline_document_sha256'))[:16]}…`"
+                        if integrity.get("baseline_document_sha256") else "")
+                     + "）")
+    else:
+        lines.append("- 登记表 SHA-256：不可用（文件缺失或不可解析）")
+    for p in (integrity.get("problems") or []):
+        lines.append(f"- ⛔ {p}")
+    if integrity.get("confirmatory_valid"):
+        lines.append("- 修订规则：既有假设只增不改不删；新增假设必须经 "
+                     "`python -m lega.hypotheses --amend --reason ...` 留痕，"
+                     "否则判违反。")
+    else:
+        lines.append("- ⚠ **本页全部“注册假设判定”因完整性未通过而失效"
+                     "（降级为探索性分析）**：修复登记表/锁链后重跑汇总。")
+    lines.append("")
+    return lines
 
 
 def _fmt_rate(x) -> str:
@@ -953,8 +1012,12 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _auroc_diff_tests(runs)
     tests = _apply_holm(tests)
     comp = component_evidence(tests)
-    # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）
-    hyp_eval = evaluate_registered_hypotheses(registered, tests)
+    # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
+    # 完整性锁链把“事后静默改写登记表”变成可检测事件：校验未通过时
+    # 全部确认性判定被显式降级（apply_integrity_gate），不会假装边界仍成立。
+    integrity = verify_registration()
+    hyp_eval = apply_integrity_gate(
+        evaluate_registered_hypotheses(registered, tests), integrity)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -1570,14 +1633,20 @@ def build_summary(results_dir: str, audit: dict = None,
 
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
+    md += _render_registration_integrity(integrity)
     if hyp_eval:
         n_sup = sum(1 for h in hyp_eval if h["status"] == "支持")
         n_ref = sum(1 for h in hyp_eval if h["status"] == "拒绝")
         n_und = sum(1 for h in hyp_eval if h["status"] == "未定")
+        valid = all(h.get("confirmatory_valid") for h in hyp_eval)
         md.append(f"预注册文件 `docs/registered_hypotheses.json`（登记于正式实验前）："
                   f"{len(hyp_eval)} 条方向性主张，判定 支持 {n_sup}、拒绝 {n_ref}、"
                   f"未定 {n_und}。只有“支持”能写进结论；“拒绝”= 方向相反且校正后"
                   "显著（假设被证伪）；“未定”不得解释为任何方向的证据。")
+        if not valid:
+            md.append("")
+            md.append("> ⛔ 预注册完整性校验未通过：下表的“支持/拒绝”不作数，"
+                      "已按探索性线索处理（见上方完整性小节）。")
         md.append("")
         md.append("| ID | 主张 | Δ均值 | n | p_adj | p_perm | MDE | 判定 |")
         md.append("|---|---|---|---|---|---|---|---|")
@@ -1589,6 +1658,8 @@ def build_summary(results_dir: str, audit: dict = None,
                      if h.get("mean_diff") is not None else "-")
             mde = f"{h['mde']:+.4f}" if h.get("mde") is not None else "-"
             mark = {"支持": "✅", "拒绝": "❌"}.get(h["status"], "—")
+            if not h.get("confirmatory_valid"):
+                mark = "⚠（无效）"
             md.append(f"| {h['id']} | {h['claim']} | {delta} | "
                       f"{h.get('n') if h.get('n') is not None else '-'} | "
                       f"{padj} | {pp} | {mde} | {mark} {h['status']}"
@@ -1713,6 +1784,7 @@ def build_summary(results_dir: str, audit: dict = None,
                    "registered_hypotheses": hyp_eval,
                    "registered_hypotheses_source": (
                        "docs/registered_hypotheses.json" if hyp_eval else None),
+                   "registration_integrity": integrity,
                    "auroc_diff_note": (
                        f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
                        "(变体, 种子) run 的 auroc_logit − auroc_qterm 配对差，"
@@ -1800,6 +1872,24 @@ def main():
     # 全局溯源清单：本次流水线的代码版本、数据指纹、运行环境与命令。
     git = git_info()
     config_sha256 = sha256_file(args.config)
+    # 预注册完整性：把登记表指纹与锁链校验结论写进 repro 与实验台账，
+    # 使“本轮实验对应哪份登记表、是否发生静默改写”可事后审计。
+    reg_doc = load_registration()
+    reg_integrity = verify_registration()
+    reg_info = {
+        "path": "docs/registered_hypotheses.json",
+        "present": reg_doc is not None,
+        "fingerprint": (registration_fingerprint(reg_doc)
+                        if reg_doc is not None else None),
+        "integrity": reg_integrity,
+    }
+    if not reg_integrity.get("confirmatory_valid"):
+        print(f"[repro] ⚠ 预注册完整性未通过（status="
+              f"{reg_integrity.get('status')}）：本轮全部对比按探索性对待")
+    else:
+        print(f"[repro] 预注册完整性 {reg_integrity.get('status')}"
+              f"（假设 {reg_integrity.get('n_hypotheses')} 条，"
+              f"修订链 {reg_integrity.get('chain_length')} 环）")
     try:
         data_fp = data_fingerprint(args.data_dir)
         data_digest = data_fp["digest"]
@@ -1820,6 +1910,7 @@ def main():
         "git": git,
         "data": data_fp,
         "runtime": runtime_info(args.device),
+        "registration": reg_info,
     }
     save_json(repro, os.path.join(results_dir, "repro.json"))
     print(f"[repro] code={git.get('commit_short')} dirty={git.get('dirty')} "
@@ -1835,7 +1926,7 @@ def main():
         smoke=bool(args.smoke), argv=sys.argv, git=git,
         data_fingerprint=data_digest, runtime=repro["runtime"],
         out_root=out_root, results_dir=results_dir,
-        time_start=repro["time"])
+        time_start=repro["time"], registration=reg_info)
     append_record(ledger, build_experiment_record(status="started",
                                                   **ledger_common))
     print(f"[repro] 实验台账 run_id={run_id} -> {ledger}")

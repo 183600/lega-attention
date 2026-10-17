@@ -75,6 +75,7 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
   5. **Test seal**: checkpoint selection and early stopping use val only; test is accessed for final evaluation only, and every test evaluation appends to the `data_dir/.test_access_log.jsonl` ledger; the summary reports the total count and any repeatedly evaluated checkpoint.
 - **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, two layers are cross-checked automatically: `config_used.json` (hyperparameters item by item) and the `eval.json` provenance (data fingerprint, code commit, config SHA-256, actual steps and tokens_seen, also compared against the pipeline's data fingerprint). Any difference fails the pipeline; the random seed is replayed after model construction so training-time randomness (dropout etc.) is also identical across variants — fairness is an executable assertion, not a verbal promise.
 - **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** plus the paired Cohen's d effect size across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test, and p-values within each metric family are corrected with **Holm–Bonferroni** (controlling the family-wise error rate); verdicts are based on corrected p-values (`results/<tag>/significance.json`). With n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%.
+- **Pre-registration and tamper-evidence (confirmatory vs exploratory)**: directional claims are registered before the formal runs in `docs/registered_hypotheses.json`; at summarization each claim is judged against Holm-corrected same-seed paired tests as supported / rejected (significant in the opposite direction = falsified) / undetermined (undetermined ≠ no effect; read it against the MDE). Results go to `summary.md` and `significance.json`; unregistered comparisons are exploratory leads only. The registry is protected by `docs/registered_hypotheses.lock.json`: the lock stores the whole-document SHA-256 and **per-hypothesis scientific-content digests**, and any amendment must be traced on an **amendment chain** via `python -m lega.hypotheses --amend --reason ...` (existing hypotheses may only be added to, never edited or removed). Deleting the registry, rewriting a claim, swapping a variant pair, dropping an entry or adding an unrecorded hypothesis is flagged as `violated` by `--verify`/the summary page, and **all confirmatory verdicts are automatically downgraded to exploratory**. Even the accidental deletion and restoration of the registry (which happened once, see `docs/design_notes.md`) must be recorded in `amendments`.
 - **Three evaluation axes**:
   1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision;
   2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
@@ -133,7 +134,7 @@ Outputs:
 | `results/experiments.jsonl` | **Append-only experiment ledger: per-run run_id, code version, config SHA-256, seeds, data fingerprint, sanity verdict, per-run final metrics and artifact hashes (started/completed lifecycle)** |
 | `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
-| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence) |
+| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check) and `registered_hypotheses` (per-claim verdicts) |
 | `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting/underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations) |
 | `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
 | `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) |
@@ -168,6 +169,7 @@ python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m lega.curves    --run_dir out/small/lega/seed1337   # training-curve diagnosis (overfit/underfit/divergence/NaN)
 python -m lega.badcase   --results_dir results/small         # error attribution (RULER + LM worst windows)
+python -m lega.hypotheses --verify                           # pre-registration integrity (0=confirmatory-valid; 1=deleted/edited/unrecorded)
 python -m tests.run_tests   # unit tests (no pytest dependency)
 ```
 
@@ -212,8 +214,13 @@ lega-attention/
 │   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
 │   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance
 │   ├── experiment.py          # append-only experiment ledger (code/config/seed/data/result hashes per run)
+│   ├── hypotheses.py          # pre-registration integrity: lock baseline + amendment chain + tamper check (CLI --verify/--init/--amend)
 │   ├── plots.py               # plots (PNG, including training curves)
 │   └── utils.py               # seed/JSON/AUROC/Pearson (no scipy)
+├── docs/
+│   ├── design_notes.md        # design notes, statistical-inference and result-analysis protocols
+│   ├── registered_hypotheses.json       # pre-registration registry (do not delete; amendments must be traced)
+│   └── registered_hypotheses.lock.json  # lock baseline + amendment chain (anti silent rewrite/deletion)
 ├── scripts/
 │   ├── prepare_data.py        # WikiText-103 download (parquet→zip→rows fallbacks)
 │   ├── make_dummy_data.py     # offline dummy corpus (smoke)
