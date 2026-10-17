@@ -17,6 +17,7 @@ htmlcov/
 
 # 实验产物
 out/
+out_check/
 data/
 results/*
 !results/.gitkeep
