@@ -47,15 +47,20 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
         gold = y[:, -1]
         losses = F.cross_entropy(logits, gold, reduction="none")
         top_p, top_i = torch.topk(torch.softmax(logits, dim=-1), 5, dim=-1)
+        # 一次性批量 D2H：逐元素 int()/float() 在 CUDA 上每个都触发一次设备
+        # 同步（每行约 10 次），整表 tolist() 后循环内不再与设备交互。
+        loss_l, gold_l = losses.tolist(), gold.tolist()
+        top_p_l, top_i_l = top_p.tolist(), top_i.tolist()
+        x_l = x.tolist()
         for r in range(len(chunk)):
             rows.append({
                 "window": int(chunk[r]),
                 "split": str(split),
-                "loss": float(losses[r]),
-                "context_tail": tok.decode(x[r].tolist())[-160:],
-                "gold_next": tok.decode([int(gold[r])]),
-                "pred_top5": [(tok.decode([int(i)]), round(float(p), 4))
-                              for p, i in zip(top_p[r], top_i[r])],
+                "loss": float(loss_l[r]),
+                "context_tail": tok.decode(x_l[r])[-160:],
+                "gold_next": tok.decode([gold_l[r]]),
+                "pred_top5": [(tok.decode([i]), round(float(p), 4))
+                              for p, i in zip(top_p_l[r], top_i_l[r])],
             })
     rows.sort(key=lambda r: -r["loss"])
     return rows[:max(1, int(n_worst))]

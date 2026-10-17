@@ -21,6 +21,7 @@ import zlib
 from collections import Counter
 from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 
 from .utils import save_json
@@ -390,7 +391,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
         R, L = len(rows), len(rows[0])
         n = R * L
         if not use_cuda:
-            return torch.tensor(rows, dtype=torch.long, device=device)
+            # 嵌套 list -> tensor 逐元素走 Python 转换；等长行先经 numpy 一次成型
+            out = torch.from_numpy(np.asarray(rows, dtype=np.int64))
+            return out if device == "cpu" else out.to(device)
         if pin_ev is not None:
             # 覆盖或替换常驻 pinned 缓冲前，必须等待上一轮 non_blocking H2D
             # 拷贝把旧缓冲读完：否则主机写入与在途 DMA 构成数据竞争；扩容时
@@ -473,8 +476,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         out_ids = model.generate(
                             ids, max_new_tokens=max_gen,
                             kv_cache=_get_kv(len(part), total))
+                    # 整批一次 D2H：逐行 tolist() 在 CUDA 上每行一次设备同步
+                    out_ids_l = out_ids.tolist()
                     for r, ex in enumerate(part):
-                        pred_text = tok.decode(out_ids[r, length:].tolist())
+                        pred_text = tok.decode(out_ids_l[r][length:])
                         sc = score_prediction(task, ex["answer"], pred_text,
                                               ex["answer_words"])
                         ems.append(sc["em"])
