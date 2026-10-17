@@ -149,15 +149,21 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     else torch.get_autocast_cpu_dtype())
 
     @staticmethod
-    def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int) -> torch.Tensor:
+    def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int,
+                has_ignore: bool = True) -> torch.Tensor:
         """sum-CE 的闭式计算：log_softmax - 目标 logit，逐元素掩掉 ignore_index。
 
         与 F.cross_entropy(reduction="sum") 等价（log_softmax 内部 max 平移，
         数值稳定）。log_softmax 原地写入 lcf，调用方可继续取指数复用。
+        has_ignore=False（调用方已确认本批不存在忽略位置，语言建模训练的常见
+        情形）时跳过逐块掩码构造，直接按原目标取值；两条路径的取值结果完全
+        一致（无忽略位置时掩码恒为 False）。
         """
+        logp = torch.log_softmax(lcf, dim=-1, out=lcf)
+        if not has_ignore:
+            return logp.gather(1, tgt.unsqueeze(1)).squeeze(1).neg_().sum()
         ignore = tgt == ignore_index
         ts_safe = tgt.masked_fill(ignore, 0)
-        logp = torch.log_softmax(lcf, dim=-1, out=lcf)
         nll = logp.gather(1, ts_safe.unsqueeze(1)).squeeze(1).neg_()
         nll.masked_fill_(ignore, 0)
         return nll.sum()
@@ -187,9 +193,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
         dx = torch.empty_like(x2d) if need_dx else None
         gw = None
         w_f = None
-        # 是否有被忽略的位置（全局判定一次）：没有时无需逐块把无效行清零。
-        has_ignore = (need_dx or need_gw) and not bool(
-            (tgt != ctx.ignore_index).all())
+        # 是否有被忽略的位置（全局判定一次）：没有时损失与梯度两条路径
+        # 都无需逐块构造掩码，直接按原目标取值/散加。
+        tgt_has_ignore = not bool((tgt != ctx.ignore_index).all())
+        has_ignore = (need_dx or need_gw) and tgt_has_ignore
         # 梯度 GEMM 必须与 logits 同精度：前向处于 autocast 上下文内时显式
         # 关闭 autocast，避免 fp32/fp64 的 GEMM 被降到低精度。
         grad_ctx = torch.autocast("cuda" if x2d.is_cuda else "cpu", enabled=False)
@@ -200,6 +207,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 else weight.to(ctx.amp_dtype)
             neg_one = None   # scatter_add_ 的 -1 源张量
             for s in range(0, tgt.numel(), chunk):
+                ts = tgt[s:s + chunk]
                 lc = F.linear(x2d[s:s + chunk], w_fwd)               # (m, V)
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
                 # 升精度副本已生成（不升精度时 lcf 与 lc 为同一张量）。
@@ -208,20 +216,21 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 # dL/dlogits 的 softmax 项（cross-entropy 对 logits 的梯度
                 # = softmax - onehot）。
                 loss.add_(_ChunkedLinearCE._ce_sum(
-                    lcf, tgt[s:s + chunk], ctx.ignore_index))
+                    lcf, ts, ctx.ignore_index, tgt_has_ignore))
                 if not (need_dx or need_gw):
                     continue
                 with grad_ctx:
                     d = lcf.exp_()
-                    ts = tgt[s:s + chunk]
-                    keep = ts != ctx.ignore_index
-                    # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的
-                    # 索引压到 0（其减 1 随后被 keep 掩码清零）。
-                    ts_safe = ts.masked_fill(~keep, 0)
-                    if neg_one is None or neg_one.size(0) < ts_safe.numel():
-                        neg_one = d.new_full((max(ts_safe.numel(), 4096), 1), -1.0)
-                    d.scatter_add_(1, ts_safe.unsqueeze(1),
-                                   neg_one[:ts_safe.numel()])
+                    idx_src = ts
+                    if has_ignore:
+                        keep = ts != ctx.ignore_index
+                        # one-hot 减 1 用 scatter_add_ 一步完成：先把无效位置的
+                        # 索引压到 0（其减 1 随后被 keep 掩码清零）。
+                        idx_src = ts.masked_fill(~keep, 0)
+                    if neg_one is None or neg_one.size(0) < idx_src.numel():
+                        neg_one = d.new_full((max(idx_src.numel(), 4096), 1), -1.0)
+                    d.scatter_add_(1, idx_src.unsqueeze(1),
+                                   neg_one[:idx_src.numel()])
                     # keep∈{0,1}，无效行清零即可。
                     if has_ignore:
                         d.mul_(keep.unsqueeze(1).to(d.dtype))
@@ -441,12 +450,15 @@ class GPT(nn.Module):
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
                 total = None  # 设备端累加
+                # 无忽略位置（常见情形）时逐块损失无需掩码
+                tgt_has_ignore = not bool((tgt != ignore_index).all())
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
                     del lc
                     part = _ChunkedLinearCE._ce_sum(lcd, tgt[s:s + CHUNK],
-                                                    int(ignore_index))
+                                                    int(ignore_index),
+                                                    tgt_has_ignore)
                     total = part if total is None else total.add_(part)
                 # n_valid 保留为设备张量
                 loss = total / (tgt != ignore_index).sum().clamp_min(1)
