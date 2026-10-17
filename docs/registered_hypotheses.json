@@ -1,0 +1,87 @@
+{
+  "_说明": [
+    "预注册（confirmatory）假设登记文件：在正式实验运行之前，把方向性主张写死在这里。",
+    "run_all 汇总时逐条对照 Holm–Bonferroni 校正后的同种子配对检验，判定 支持/拒绝/未定，",
+    "结果写入 summary.md 与 significance.json 的 registered_hypotheses 字段。",
+    "未登记在本文件里的对比一律属事后（exploratory）分析：其显著性只能作为提出新假设的线索，",
+    "要升级为结论必须先登记、再在新的种子/数据上检验。"
+  ],
+  "registered_at": "2026-10-17 05:11 UTC",
+  "registered_before": [
+    "登记时正式实验（configs/small.json，5 种子）尚未运行。",
+    "此前仅有 tiny 配置的冒烟流水线产物（单种子、20 训练步，用于验证流程连通性），",
+    "不构成任何方向的证据，也不用于挑选登记方向。"
+  ],
+  "scope": {
+    "config": "configs/small.json",
+    "seeds": [1337, 2024, 42, 7, 2025],
+    "data": "scripts/prepare_data.py 生成的 WikiText-103 (gpt2 BPE)",
+    "comparisons": "同种子配对（变体间共享同一组种子），PPL 在 held-out test 上评测"
+  },
+  "decision_rule": {
+    "alpha": 0.05,
+    "min_seeds": 3,
+    "multiple_comparison": "同一指标家族内 Holm–Bonferroni 校正",
+    "verdicts": {
+      "支持": "方向与登记一致且校正后显著",
+      "拒绝": "校正后显著但方向与登记相反（假设被证伪）",
+      "未定": "种子不足 / 对比未运行 / 校正后不显著；不得解释为任何方向的证据，须对照 MDE 判断是功效不足还是无效应"
+    },
+    "robustness": "每条判定同时报告符号翻转置换检验 p_perm（n≤16 全枚举精确）与配对差 bootstrap 95% CI；t 与置换结论冲突时显式标注"
+  },
+  "amendment_policy": [
+    "登记后只允许追加（append-only）：修正或追加假设须在 amendments 里留痕并说明理由，",
+    "禁止在看到正式实验结果后删除或改写原条目——那等于事后伪装成预注册。"
+  ],
+  "amendments": [],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "claim": "主效应（语言建模）：相同参数量级与训练步数下，LEGA 门控的 PPL 低于无门控基线 standard",
+      "metric": "PPL",
+      "candidate": "lega",
+      "reference": "standard",
+      "direction": "candidate_better"
+    },
+    {
+      "id": "H2",
+      "claim": "核心消融·查询项（A）：去掉查询项后语言建模变差（lega_no_query 的 PPL 高于 lega）",
+      "metric": "PPL",
+      "candidate": "lega_no_query",
+      "reference": "lega",
+      "direction": "candidate_worse"
+    },
+    {
+      "id": "H3",
+      "claim": "核心消融·集中度证据（B）：去掉集中度证据后语言建模变差（lega_no_conc 的 PPL 高于 lega）",
+      "metric": "PPL",
+      "candidate": "lega_no_conc",
+      "reference": "lega",
+      "direction": "candidate_worse"
+    },
+    {
+      "id": "H4",
+      "claim": "核心消融·长度校准（C）：去掉长度校准后长上下文检索变差（lega_no_len 的 RULER 平均 EM 低于 lega）——长度校准的设计主张正是长上下文可靠性，故登记在 RULER 家族",
+      "metric": "RULER平均",
+      "candidate": "lega_no_len",
+      "reference": "lega",
+      "direction": "candidate_worse"
+    },
+    {
+      "id": "H5",
+      "claim": "vs 已有工作：完整证据门控（LEGA）的 PPL 优于仅查询门控（qgate，最接近的已有门控基线）",
+      "metric": "PPL",
+      "candidate": "lega",
+      "reference": "qgate",
+      "direction": "candidate_better"
+    },
+    {
+      "id": "H6",
+      "claim": "机制主张：门控完整 logit 比仅查询项更能判断该不该写入——lega 的 AUROC(logit)−AUROC(仅查询) 跨种子配对差大于 0",
+      "metric": "AUROC差(logit−仅查询)",
+      "candidate": "lega",
+      "reference": "仅查询项基线",
+      "direction": "candidate_better"
+    }
+  ]
+}

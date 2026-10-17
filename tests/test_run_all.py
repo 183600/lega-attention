@@ -15,11 +15,13 @@ import tempfile
 from unittest import mock
 
 from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
-                     _cmd_env, _effect_status, _enrich_paired, _rel_pct,
-                     _resolve_jobs, _stat, AUROC_DIFF_METRIC,
-                     AUROC_DIFF_REFERENCE, build_summary, component_evidence,
-                     evaluate_registered_hypotheses, load_registered_hypotheses,
-                     run_many, tradeoff_verdict, verify_controlled_setup)
+                      _cmd_env, _effect_status, _enrich_paired, _rel_pct,
+                      _resolve_jobs, _stat, AUROC_DIFF_METRIC,
+                      AUROC_DIFF_REFERENCE, build_summary, component_evidence,
+                      evaluate_registered_hypotheses, load_registered_hypotheses,
+                      run_many, tradeoff_verdict, verify_controlled_setup,
+                      HYPOTHESES_PATH)
+from lega.attention import VARIANTS
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -178,6 +180,48 @@ def test_load_registered_hypotheses_tolerates_non_dict_json():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] load_registered_hypotheses：非 dict JSON 安全降级")
+
+
+def test_registered_hypotheses_file_is_live_and_well_formed():
+    """仓库必须真的带预注册文件，且每条假设可被检验机制消费。
+
+    预注册协议不能只停在 design_notes 的描述：docs/registered_hypotheses.json
+    缺失时 run_all 的汇总页会把全部对比降级为事后分析，本测试保证文件
+    在仓库里真实存在、字段合法、(候选, 参照) 都是可运行的变体、指标名与
+    检验家族精确匹配（拼错指标名会让该主张永远显示"未检验"）。
+    """
+    assert os.path.exists(HYPOTHESES_PATH), \
+        f"预注册文件缺失: {HYPOTHESES_PATH}（confirmatory/exploratory 边界失效）"
+    reg = load_registered_hypotheses()          # 默认路径：与 run_all 同一入口
+    assert reg.get("hypotheses"), "预注册文件必须登记至少一条方向性主张"
+    hyps = reg["hypotheses"]
+    ids = [h.get("id") for h in hyps]
+    assert all(ids) and len(ids) == len(set(ids)), f"id 缺失或重复: {ids}"
+    known_metrics = {"PPL", "RULER平均", AUROC_DIFF_METRIC}
+    for h in hyps:
+        for key in ("id", "claim", "metric", "candidate", "reference",
+                    "direction"):
+            assert h.get(key), (h.get("id"), f"缺少字段 {key}")
+        assert h["metric"] in known_metrics, \
+            (h["id"], f"指标 {h['metric']!r} 不在任何检验家族，永远无法判定")
+        assert h["direction"] in ("candidate_better", "candidate_worse"), \
+            (h["id"], h["direction"])
+        if h["metric"] == AUROC_DIFF_METRIC:
+            # 机制族由 _auroc_diff_tests 覆盖：reference 固定为基线哨兵值
+            assert h["reference"] == AUROC_DIFF_REFERENCE, h["id"]
+            assert h["candidate"] in VARIANTS, \
+                (h["id"], f"候选 {h['candidate']} 不在可运行变体中")
+        else:
+            # 变体间对照必须可估计，否则汇总页静默显示"未检验"
+            assert h["candidate"] in VARIANTS and h["reference"] in VARIANTS, \
+                (h["id"], "登记的 (候选, 参照) 含未定义变体，配对检验无法运行")
+    # 全部条目能被判定机制消费（空检验表 → 显式"未检验"，而不是崩溃）
+    ev = evaluate_registered_hypotheses(reg, [])
+    assert len(ev) == len(hyps)
+    assert all(e["status"] == "未检验" for e in ev)
+    # 追加式修正承诺：文件自带 amendments 留痕区，禁止改写历史的机制落在文件里
+    assert isinstance(reg.get("amendments"), list)
+    print(f"  [ok] 预注册文件在案且合法: {len(hyps)} 条（{', '.join(ids)}）")
 
 
 def test_build_summary_audit_zero_checked_is_warning_not_failure():
