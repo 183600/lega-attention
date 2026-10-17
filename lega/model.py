@@ -151,20 +151,27 @@ class _ChunkedLinearCE(torch.autograd.Function):
     @staticmethod
     def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int,
                 has_ignore: bool = True) -> torch.Tensor:
-        """sum-CE 的闭式计算：log_softmax - 目标 logit，逐元素掩掉 ignore_index。
+        """sum-CE 的闭式计算：softmax 就地写入 lcf，按目标位置取概率再取对数，
+        逐元素掩掉 ignore_index。
 
-        与 F.cross_entropy(reduction="sum") 等价（log_softmax 内部 max 平移，
-        数值稳定）。log_softmax 原地写入 lcf，调用方可继续取指数复用。
+        与 F.cross_entropy(reduction="sum") 数值等价（softmax 内部 max 平移，
+        数值稳定）。softmax 就地写入 lcf，调用方可直接把它用作 dL/dlogits
+        的 softmax 项（cross-entropy 对 logits 的梯度 = softmax - onehot），
+        无需再取一次指数。目标概率下溢为 0 时以 finfo(dtype).tiny 兜底取对数，
+        避免 -inf 进入损失。
         has_ignore=False（调用方已确认本批不存在忽略位置，语言建模训练的常见
         情形）时跳过逐块掩码构造，直接按原目标取值；两条路径的取值结果完全
         一致（无忽略位置时掩码恒为 False）。
         """
-        logp = torch.log_softmax(lcf, dim=-1, out=lcf)
+        probs = torch.softmax(lcf, dim=-1, out=lcf)
+        tiny = torch.finfo(probs.dtype).tiny
         if not has_ignore:
-            return logp.gather(1, tgt.unsqueeze(1)).squeeze(1).neg_().sum()
+            return probs.gather(1, tgt.unsqueeze(1)).squeeze(1) \
+                .clamp_min_(tiny).log_().neg_().sum()
         ignore = tgt == ignore_index
         ts_safe = tgt.masked_fill(ignore, 0)
-        nll = logp.gather(1, ts_safe.unsqueeze(1)).squeeze(1).neg_()
+        nll = probs.gather(1, ts_safe.unsqueeze(1)).squeeze(1) \
+            .clamp_min_(tiny).log_().neg_()
         nll.masked_fill_(ignore, 0)
         return nll.sum()
 
@@ -212,15 +219,14 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 lcf = _ChunkedLinearCE._loss_dtype(lc)
                 # 升精度副本已生成（不升精度时 lcf 与 lc 为同一张量）。
                 del lc
-                # _ce_sum 把 log_softmax 原地写在 lcf 上，随后取指数即得
-                # dL/dlogits 的 softmax 项（cross-entropy 对 logits 的梯度
-                # = softmax - onehot）。
+                # _ce_sum 把 softmax 原地写在 lcf 上，它同时就是 dL/dlogits 的
+                # softmax 项（cross-entropy 对 logits 的梯度 = softmax - onehot）。
                 loss.add_(_ChunkedLinearCE._ce_sum(
                     lcf, ts, ctx.ignore_index, tgt_has_ignore))
                 if not (need_dx or need_gw):
                     continue
                 with grad_ctx:
-                    d = lcf.exp_()
+                    d = lcf
                     idx_src = ts
                     if has_ignore:
                         keep = ts != ctx.ignore_index
@@ -443,7 +449,7 @@ class GPT(nn.Module):
             CHUNK = max(256, min(4096, 33_554_432 // self.vocab_size))
             # 只要计算图需要梯度（输入或共享 lm_head 权重任一 requires_grad，
             # 如冻结主干只训分类头/detach 上游）就走闭式梯度路径；否则
-            # log_softmax(out=) 在 grad 模式下反传会报“derivative not implemented”。
+            # softmax(out=) 在 grad 模式下反传会报“derivative not implemented”。
             if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
                 # 训练路径：分块前向，交叉熵闭式梯度在前向内求出
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
