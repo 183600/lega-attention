@@ -2,14 +2,18 @@
 
 AUROC 是机制分析的核心指标（门控分数区分 hit/miss），这里用逐对比较的
 定义式独立复算，专门覆盖并列分数的平均秩路径。paired_t_test 是“多种子
-Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p 值精度。
+Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p 值精度；
+sign-flip 置换检验（小样本下比 t 检验更可信的分布无关检验）用独立枚举
+复算核对精确 p 值。
 """
 import math
 
 import numpy as np
 
-from lega.utils import (auroc, holm_bonferroni, mean_std, paired_t_test,
-                        pearson, student_t_two_sided_p)
+from lega.utils import (auroc, bootstrap_mean_ci, holm_bonferroni, mean_std,
+                        min_detectable_effect, paired_sign_flip_test,
+                        paired_t_test, pearson, student_t_two_sided_p,
+                        wilson_score_ci)
 
 
 def _brute_auroc(scores, labels):
@@ -206,3 +210,127 @@ def test_holm_bonferroni():
     assert holm_bonferroni([]) == []
     assert holm_bonferroni([None, None]) == [None, None]
     print("  [ok] holm_bonferroni（手算示例/None 不占家族/单调与封顶）")
+
+
+def _brute_signflip_p(diffs):
+    """定义式精确 p：枚举 2^n 个符号翻转，数 |mean| >= |观测均值| 的比例。"""
+    n = len(diffs)
+    obs = abs(sum(diffs) / n)
+    cnt = 0
+    for mask in range(2 ** n):
+        flipped = [(d if (mask >> i) & 1 == 0 else -d)
+                   for i, d in enumerate(diffs)]
+        if abs(sum(flipped) / n) >= obs - 1e-15:
+            cnt += 1
+    return cnt / float(2 ** n)
+
+
+def test_paired_sign_flip_exact_p_values():
+    """n<=16 全枚举：p_perm 必须与定义式独立复算逐位一致。"""
+    cases = [
+        [5.0, 4.0, 6.0, 7.0, 5.0],            # 同号大效应
+        [1.0, -1.0, 1.0, -1.0, 1.0],          # 均值近 0 的噪声
+        [0.3, -0.1, 0.2, 0.25, -0.05, 0.4],   # 小效应
+        [2.0, 1.0, 3.0],                      # n=3
+    ]
+    for diffs in cases:
+        r = paired_sign_flip_test(diffs, [0.0] * len(diffs))
+        assert r["exact"] is True
+        ref = _brute_signflip_p(diffs)
+        assert abs(r["p_perm"] - ref) < 1e-12, (diffs, r["p_perm"], ref)
+    # 同号大效应：只有全正/全负两个极端达到观测均值 → p = 2/2^n
+    r = paired_sign_flip_test([5.0, 4.0, 6.0, 7.0, 5.0], [0.0] * 5)
+    assert abs(r["p_perm"] - 2.0 / 32.0) < 1e-12
+    # 全零差：p=1（无可检效应）
+    r = paired_sign_flip_test([1.0, 1.0], [1.0, 1.0])
+    assert r["p_perm"] == 1.0
+    print("  [ok] paired_sign_flip_test 精确 p 与独立枚举一致（n=3~6）")
+
+
+def test_paired_sign_flip_mc_and_guards():
+    """n>16 走固定种子 Monte-Carlo；边界与 paired_t_test 同口径。"""
+    rng = np.random.default_rng(7)
+    a = list(rng.normal(10.0, 0.05, 20))
+    b = list(rng.normal(10.0, 0.05, 20))
+    r = paired_sign_flip_test(a, b)
+    assert r["exact"] is False and r["n_resamples"] >= 1000
+    # 确定性：同一输入两次调用结果一致
+    assert r["p_perm"] == paired_sign_flip_test(a, b)["p_perm"]
+    # 无效应数据 p 应偏大、强效应 p 应很小（Monte-Carlo 口径下方向正确）
+    assert paired_sign_flip_test(a, b)["p_perm"] > 0.01
+    strong_a = [10.0 + i * 0.2 for i in range(20)]
+    strong_b = [10.0 + i * 0.01 for i in range(20)]
+    assert paired_sign_flip_test(strong_a, strong_b)["p_perm"] < 0.001
+    # 边界：n<2 不检验；None/长度错配与 t 检验同口径
+    r = paired_sign_flip_test([2.0], [1.0])
+    assert r["p_perm"] is None and r["n"] == 1
+    r = paired_sign_flip_test([1.0, None, 3.0], [0.0, None, 2.0])
+    assert r["n"] == 2
+    try:
+        paired_sign_flip_test([1.0, None], [None, 2.0])
+        raise AssertionError("None 位置不一致应抛 ValueError")
+    except ValueError:
+        pass
+    r = paired_sign_flip_test([1.0, float("nan")], [0.0, 1.0])
+    assert r["n"] == 1 and r["p_perm"] is None
+    print("  [ok] paired_sign_flip_test Monte-Carlo/确定性/边界口径")
+
+
+def test_bootstrap_mean_ci():
+    # 常规数据：区间覆盖样本均值、宽度合理、确定性复现
+    vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    ci1 = bootstrap_mean_ci(vals, n_resamples=2000, seed=3)
+    ci2 = bootstrap_mean_ci(vals, n_resamples=2000, seed=3)
+    assert ci1 == ci2
+    lo, hi = ci1
+    assert lo < 4.5 < hi and hi - lo < 4.0
+    # NaN/None 剔除后仍可用
+    ci = bootstrap_mean_ci([1.0, float("nan"), 3.0, None, 5.0])
+    assert ci is not None and ci[0] < 3.0 < ci[1]
+    # n<2 与全 NaN：无区间可言
+    assert bootstrap_mean_ci([2.5]) is None
+    assert bootstrap_mean_ci([float("nan"), None]) is None
+    # 退化样本（全同值）：区间坍缩到点
+    assert bootstrap_mean_ci([5.0, 5.0, 5.0]) == (5.0, 5.0)
+    print("  [ok] bootstrap_mean_ci（覆盖均值/确定性/NaN 剔除/退化样本）")
+
+
+def test_min_detectable_effect():
+    # MDE 随种子数增加而减小、随方差增大而增大
+    m5 = min_detectable_effect(0.1, 5)
+    m10 = min_detectable_effect(0.1, 10)
+    assert m5 > m10 > 0
+    m_big = min_detectable_effect(1.0, 5)
+    assert m_big > m5
+    # 正态近似口径：z_{0.975}+z_{0.8} = 1.959964 + 0.841621 ≈ 2.801586
+    ref = 2.801586 * 0.1 / math.sqrt(5)
+    assert abs(m5 - ref) < 1e-6
+    # 不可估计的输入
+    assert min_detectable_effect(None, 5) is None
+    assert min_detectable_effect(0.0, 5) is None
+    assert min_detectable_effect(0.1, 1) is None
+    print("  [ok] min_detectable_effect（随 n 递减/口径常数/边界）")
+
+
+def test_wilson_score_ci():
+    # 手算核对：k=8, n=10, z=1.959964 → (0.4906, 0.9437)
+    lo, hi = wilson_score_ci(8, 10)
+    assert abs(lo - 0.4906) < 1e-3 and abs(hi - 0.9437) < 1e-3
+    # 点估计必须落在区间内
+    assert lo <= 0.8 <= hi
+    # 端点闭式且不越界：k=0 → 下界恰为 0；k=n → 上界恰为 1（无浮点残差）
+    lo0, hi0 = wilson_score_ci(0, 10)
+    assert lo0 == 0.0 and 0.0 < hi0 < 0.5
+    lo1, hi1 = wilson_score_ci(10, 10)
+    assert lo1 > 0.5 and hi1 == 1.0
+    # n 增大区间收窄
+    w5 = wilson_score_ci(4, 5)
+    w50 = wilson_score_ci(40, 50)
+    assert (w50[1] - w50[0]) < (w5[1] - w5[0])
+    # 边界：n<=0 / None
+    assert wilson_score_ci(3, 0) is None
+    assert wilson_score_ci(None, 10) is None
+    # k 越界被钳制而不是产生非法区间
+    lo, hi = wilson_score_ci(12, 10)
+    assert 0.0 <= lo <= hi <= 1.0
+    print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄）")

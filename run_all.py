@@ -14,6 +14,15 @@
     配对 t 检验的同指标家族做 Holm–Bonferroni 校正以控制 FWER，并报告
     Cohen's d_z 效应量；默认种子数见 configs（tiny 3 / small 5），可用
     --seeds 覆盖；
+  * 小样本稳健性：种子只有 3~5 个时 t 检验的正态假设不可靠，每组配对同时
+    报告符号翻转置换检验（分布无关）p_perm（同家族独立 Holm 校正）、配对差
+    bootstrap 95% CI 与最小可检测效应 MDE——t 与置换结论冲突显式标 ⚠，
+    “不显著”先对照 MDE 区分“无效应”与“功效不足”；
+  * 机制主张检验：auroc_logit − auroc_qterm 的同种子配对差作为独立指标
+    家族正式检验（与逐 run 样例聚类 bootstrap 区间互为印证）；
+  * 预注册：docs/registered_hypotheses.json 在正式实验前登记方向性主张，
+    汇总时逐条判定 支持/拒绝/未定；未登记的对比一律为事后（exploratory）
+    分析，只能作为线索；
   * 消融完整性：全因子（无/A/B/C/AB/AC/BC/ABC）与去一法（Full/Full-A/
     Full-B/Full-C）两套组合全部实现；汇总表显式列出消融矩阵，并基于
     Holm 校正后的显著证据逐一判定 A/B/C 组件是否“有用”——组合齐全但证据
@@ -57,8 +66,9 @@ from lega.experiment import (append_record, build_experiment_record,  # noqa: E4
                              collect_artifacts, ledger_path, new_run_id,
                              snapshot_train_run)
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
-from lega.utils import (get_device, holm_bonferroni, mean_std, paired_t_test,
-                        save_json)  # noqa: E402
+from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
+                        mean_std, min_detectable_effect, paired_sign_flip_test,
+                        paired_t_test, save_json)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -373,6 +383,28 @@ def _fmt_stat(st, nd=3) -> str:
     return f"{mean:.{nd}f} ± {st['std']:.{nd}f} (n={st['n']})"
 
 
+def _enrich_paired(res: dict, a, b) -> dict:
+    """为配对检验补充稳健性证据：置换检验 p、配对差 bootstrap CI 与 MDE。
+
+    种子数只有 3~5 时 t 检验的正态假设并不可靠：置换检验给出分布无关的
+    对照 p 值（两套结论冲突时必须显式标注，而不是静默采信 t 检验）；
+    bootstrap CI 展示效应量的不确定范围；MDE 回答"以当前种子方差，
+    多大的效应才检测得到"——区分"没有效应"与"功效不足"。
+    均为确定性计算（固定随机种子），同一输入恒定复现。
+    """
+    if res.get("n", 0) >= 1 and res.get("mean_diff") is not None:
+        perm = paired_sign_flip_test(a, b)
+        res["p_perm"] = perm.get("p_perm")
+        res["perm_exact"] = perm.get("exact")
+        res["mean_diff_ci95"] = bootstrap_mean_ci(
+            [x - y for x, y in zip(a, b)])
+        res["mde"] = min_detectable_effect(res.get("std_diff"), res.get("n"))
+    else:
+        res["p_perm"] = res["perm_exact"] = None
+        res["mean_diff_ci95"] = res["mde"] = None
+    return res
+
+
 def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> list:
     """对每个 (候选, 参照) 在共同种子上做配对 t 检验（原始 p，未校正）。"""
     out = []
@@ -394,7 +426,7 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         res = paired_t_test(a, b)
         res.update({"candidate": cand, "reference": ref, "metric": metric_name,
                     "lower_is_better": bool(lower_better)})
-        out.append(res)
+        out.append(_enrich_paired(res, a, b))
     return out
 
 
@@ -404,14 +436,21 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     汇总同时检验几十组对比；不校正时 FWER 随检验数上升，名义 p<0.05 极易由
     运气产生。结论一律基于同一指标家族内校正后的 p_adj；原始 p 仍保留在
     结果 JSON 中供查阅。
+
+    置换检验的 p_perm 在同一指标家族内单独做 Holm 校正（它与 t 检验是两套
+    独立的检验族，合并会双重惩罚）：校正后两套结论是否一致被显式记录为
+    t_perm_agree；t 显著而置换不显著（小样本下 t 的正态假设失效的典型症状）
+    时在结论里追加警示，而不是让读者只看到一个 p 值。
     """
     by_metric = {}
     for t in tests:
         by_metric.setdefault(t.get("metric"), []).append(t)
     for group in by_metric.values():
         pads = holm_bonferroni([t.get("p") for t in group])
-        for t, padj in zip(group, pads):
+        ppads = holm_bonferroni([t.get("p_perm") for t in group])
+        for t, padj, ppadj in zip(group, pads, ppads):
             t["p_adj"] = padj
+            t["p_perm_adj"] = ppadj
             if t.get("p") is None:
                 t["verdict"] = f"无法检验（n={t['n']} 或方差退化），不作判定"
             elif t["n"] < min_seeds:
@@ -421,10 +460,18 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
                           else (t["mean_diff"] > 0))
                 t["verdict"] = ("显著优于（Holm 校正后）" if better
                                 else "显著劣于（Holm 校正后）")
+                if ppadj is not None and ppadj >= alpha:
+                    t["verdict"] += "；⚠ 置换检验不显著（见注）"
             else:
                 t["verdict"] = ("不显著（Holm 校正后 p="
                                 f"{t['p_adj']:.4f}）"
                                 if t.get("p_adj") is not None else "不显著")
+                if ppadj is not None and ppadj < alpha:
+                    t["verdict"] += "；置换检验显著（边缘证据，建议补种子确认）"
+            t["t_perm_agree"] = (
+                None if (t.get("p_adj") is None or ppadj is None
+                        or t["n"] < min_seeds)
+                else (t["p_adj"] < alpha) == (ppadj < alpha))
     return tests
 
 
@@ -498,6 +545,127 @@ def component_evidence(tests) -> list:
                     "p_adj": (loo if loo["supported"] else add)["p_adj"]}
         item["evidence"] = best_detail
         item["verdict"] = "有证据支持" if item["supported"] else "证据不足"
+        out.append(item)
+    return out
+
+
+# 机制主张的检验族：门控完整 logit 与仅查询项的 AUROC 之差（越大越好）。
+AUROC_DIFF_METRIC = "AUROC差(logit−仅查询)"
+AUROC_DIFF_REFERENCE = "仅查询项基线"
+
+
+def _auroc_diff_tests(runs) -> list:
+    """机制主张的正式检验：同一 run 内 auroc_logit − auroc_qterm 的配对差。
+
+    “完整门控 logit 比仅查询项更能判断该不该写入”是本方法的核心机制
+    主张，但把 AUROC(logit) 与 AUROC(qterm) 两个数并排放在表里不构成
+    证据：它们来自同一批记录、同一批样例，必须作为配对差值检验。
+    这里把每个 (变体, 种子) run 的 auroc_logit − auroc_qterm 当作一次
+    观测（H0：差为 0），跨种子做配对检验；变体内部该差值无“变体间公平
+    性”问题（同一模型同一次前向的产物）。单一侧 AUROC 缺失（该种子无法
+    计算）的种子整对剔除，n 如实反映有效配对数。全家族与 PPL/RULER
+    一样走 Holm 校正。lega 的逐 run 聚类 bootstrap 区间（analysis JSON
+    的 auroc_cluster_bootstrap）与本跨种子检验互为印证：前者回答“换
+    样例波动多少”，后者回答“换训练种子方向是否稳定”。
+    """
+    out = []
+    for v in sorted(runs):
+        if v not in VARIANTS:
+            continue
+        m = _variant_seed_map(runs, v)
+        seeds = _sorted_seeds(m)
+        if not seeds:
+            continue
+        a, b = [], []
+        for s in seeds:
+            an = m[s].get("analysis") or {}
+            al, aq = an.get("auroc_logit"), an.get("auroc_qterm")
+            if al is None or aq is None:
+                continue
+            a.append(al)
+            b.append(aq)
+        if not a:
+            continue
+        res = paired_t_test(a, b)
+        res.update({"candidate": v, "reference": AUROC_DIFF_REFERENCE,
+                    "metric": AUROC_DIFF_METRIC, "lower_is_better": False})
+        out.append(_enrich_paired(res, a, b))
+    return out
+
+
+# 注册假设（confirmatory）：在正式实验前登记的方向性主张；未登记的对比
+# 一律视为事后（exploratory）分析，只能作为提出新假设的线索。
+HYPOTHESES_PATH = os.path.join(ROOT, "docs", "registered_hypotheses.json")
+
+
+def load_registered_hypotheses(path: str = HYPOTHESES_PATH) -> dict:
+    """读取预注册假设文件；缺失/损坏时返回空 dict（汇总页显式提示）。"""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"[summary] 警告：注册假设文件不可读（{e}），跳过判定")
+        return {}
+    if not isinstance(d.get("hypotheses"), list) or not d["hypotheses"]:
+        print("[summary] 警告：注册假设文件无 hypotheses 条目，跳过判定")
+        return {}
+    return d
+
+
+def evaluate_registered_hypotheses(registered: dict, tests: list,
+                                    alpha: float = ALPHA) -> list:
+    """把预注册假设逐条对照 Holm 校正后的配对检验，判定 支持/拒绝/未定。
+
+    “拒绝”只在方向相反且校正后显著时给出（假设被证伪）；
+    “未定”包括种子不足、对比未运行、校正后不显著——不显著绝不等于
+    “假设成立”，也不等于“无效应”，配合 MDE 才能判断是功效不足还是
+    真的没有效应。
+    """
+    if not registered:
+        return []
+    out = []
+    for h in registered.get("hypotheses", []):
+        t = _find_test(tests, (h.get("candidate"), h.get("reference")),
+                       h.get("metric"))
+        item = {"id": h.get("id"), "claim": h.get("claim"),
+                "metric": h.get("metric"),
+                "candidate": h.get("candidate"), "reference": h.get("reference"),
+                "direction": h.get("direction"),
+                "p_adj": None, "p_perm_adj": None, "mean_diff": None,
+                "n": None, "mde": None, "status": None, "detail": None}
+        if t is None:
+            item["status"] = "未检验"
+            item["detail"] = "对应的对比/指标没有检验结果（run 缺失或未评测）"
+        elif t.get("n") is not None and t["n"] < MIN_SEEDS:
+            item["status"] = "未定"
+            item["detail"] = f"种子不足（n={t['n']}<{MIN_SEEDS}）"
+        elif t.get("p_adj") is None:
+            item["status"] = "未定"
+            item["detail"] = "无法检验（方差退化或指标缺失）"
+        elif t["p_adj"] >= alpha:
+            item["status"] = "未定"
+            item["detail"] = "Holm 校正后不显著"
+            if t.get("mde") is not None and t.get("mean_diff") is not None:
+                item["detail"] += (f"（观测差 {t['mean_diff']:+.4f}，"
+                                   f"当前种子数可检测的最小效应 "
+                                   f"{t['mde']:+.4f}）")
+        else:
+            better = (t["mean_diff"] < 0 if t["lower_is_better"]
+                      else t["mean_diff"] > 0)
+            supported = (better if h.get("direction") == "candidate_better"
+                         else not better)
+            item["status"] = "支持" if supported else "拒绝"
+            item["detail"] = ("方向与登记一致且校正后显著" if supported
+                              else "校正后显著但方向与登记相反")
+            if t.get("p_perm_adj") is not None and t["p_perm_adj"] >= alpha:
+                item["detail"] += "；⚠ 置换检验不显著，小样本下需谨慎"
+        if t is not None:
+            item.update({"p_adj": t.get("p_adj"),
+                         "p_perm_adj": t.get("p_perm_adj"),
+                         "mean_diff": t.get("mean_diff"),
+                         "n": t.get("n"), "mde": t.get("mde")})
         out.append(item)
     return out
 
@@ -730,6 +898,16 @@ def build_summary(results_dir: str, audit: dict = None,
     leafless = ("lega_no_len", "lega_no_conc", "lega_no_query",
                 "lega_conc_only", "lega_len_only")
     pairs += [(c, "lega") for c in leafless]
+    # 预注册假设涉及的变体间对照必须可估计：登记的 (候选, 参照) 若不在
+    # 常规矩阵里（如 lega vs qgate 的“vs 已有工作”主张），在此补入，
+    # 保证每条 confirmatory 主张都有对应检验，而不是“登记了却没检验”。
+    registered = load_registered_hypotheses()
+    for h in (registered.get("hypotheses") or []):
+        c, r = h.get("candidate"), h.get("reference")
+        if h.get("metric") == AUROC_DIFF_METRIC:
+            continue  # 单样本机制族，由 _auroc_diff_tests 覆盖
+        if c in VARIANTS and r in VARIANTS and (c, r) not in pairs:
+            pairs.append((c, r))
     pairs = list(dict.fromkeys(pairs))
     tests = []
     tests += _paired_comparisons(
@@ -738,8 +916,12 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _paired_comparisons(
         runs, pairs, "RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
         lower_better=False)
+    # 机制主张的正式检验族：AUROC(logit) − AUROC(qterm) 同种子配对差
+    tests += _auroc_diff_tests(runs)
     tests = _apply_holm(tests)
     comp = component_evidence(tests)
+    # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）
+    hyp_eval = evaluate_registered_hypotheses(registered, tests)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -1288,32 +1470,83 @@ def build_summary(results_dir: str, audit: dict = None,
               "两套消融结论不一致时应以“证据不足”处理并补实验。")
 
     # --- 配对检验表
-    md += ["", "## 关键对比（同种子配对 t 检验，Holm 校正）", ""]
+    md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
-        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | d_z | n | p | "
-                  "p_adj(Holm) | 结论 |")
-        md.append("|---|---|---|---|---|---|---|---|")
+        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | Δ 95% CI | d_z | n | p | "
+                  "p_adj(Holm) | p_perm(Holm) | MDE | 结论 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for t in tests:
             if t.get("mean_diff") is None:
                 continue
             std = t.get("std_diff")
             delta = (f"{t['mean_diff']:+.4f}"
                      + (f" ± {std:.4f}" if std is not None else ""))
+            ci = t.get("mean_diff_ci95")
+            ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+                    if ci else "-")
             p = f"{t['p']:.4f}" if t.get("p") is not None else "-"
             padj = (f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-")
+            ppadj = (f"{t['p_perm_adj']:.4f}"
+                     if t.get("p_perm_adj") is not None else "-")
             dz = f"{t['d_z']:+.2f}" if t.get("d_z") is not None else "-"
+            mde = (f"{t['mde']:+.4f}" if t.get("mde") is not None else "-")
             md.append(f"| {t['candidate']} vs {t['reference']} | {t['metric']} | "
-                      f"{delta} | {dz} | {t['n']} | {p} | {padj} | "
-                      f"{t.get('verdict', '-')} |")
+                      f"{delta} | {ci_s} | {dz} | {t['n']} | {p} | {padj} | "
+                      f"{ppadj} | {mde} | {t.get('verdict', '-')} |")
         md.append("")
-        md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER 越大越好；"
+        md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER/AUROC差 越大越好；"
                   "d_z = Δ均值/Δ标准差为配对 Cohen's d 效应量。"
                   f"p 为双侧配对 t 检验原始值，p_adj 为同一指标家族内 "
                   f"Holm–Bonferroni 校正值（控制多重比较的 FWER），"
                   f"结论一律基于 p_adj<{ALPHA} 且 n≥{MIN_SEEDS}；"
-                  "n<3 只报描述统计、不判定显著性。种子不足时请先补齐种子再下结论。")
+                  f"n<3 只报描述统计、不判定显著性。种子不足时请先补齐种子再下结论。")
+        md.append("注: p_perm 为符号翻转置换检验（分布无关；n≤16 全枚举精确）"
+                  "在同一指标家族内独立 Holm 校正后的值——种子只有 3~5 个时"
+                  "t 检验的正态假设不可靠，置换检验不支持的“显著”会标注"
+                  "⚠。**粒度边界**：置换双侧 p 值的理论下限是 2/2^n——"
+                  "n=3 时 0.25、n=5 时 0.0625、n=6 才降至 0.03125：种子数 <6 "
+                  "时“置换不显著”是粒度所限而非 t 检验一定虚警，此时显著性"
+                  "完全依赖 t 的正态假设；n≥6 后两套检验不一致才是真实的"
+                  "稳健性警报。Δ 95% CI 为配对差的 bootstrap 区间；MDE = 当前"
+                  "种子数与方差下 80% 功效可检测的最小效应：观测差远小于 "
+                  "MDE 的“不显著”是功效不足，不是无效应。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
+
+    # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
+    md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
+    if hyp_eval:
+        n_sup = sum(1 for h in hyp_eval if h["status"] == "支持")
+        n_ref = sum(1 for h in hyp_eval if h["status"] == "拒绝")
+        n_und = sum(1 for h in hyp_eval if h["status"] == "未定")
+        md.append(f"预注册文件 `docs/registered_hypotheses.json`（登记于正式实验前）："
+                  f"{len(hyp_eval)} 条方向性主张，判定 支持 {n_sup}、拒绝 {n_ref}、"
+                  f"未定 {n_und}。只有“支持”能写进结论；“拒绝”= 方向相反且校正后"
+                  "显著（假设被证伪）；“未定”不得解释为任何方向的证据。")
+        md.append("")
+        md.append("| ID | 主张 | Δ均值 | n | p_adj | p_perm | MDE | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|")
+        for h in hyp_eval:
+            padj = (f"{h['p_adj']:.4f}" if h.get("p_adj") is not None else "-")
+            pp = (f"{h['p_perm_adj']:.4f}"
+                  if h.get("p_perm_adj") is not None else "-")
+            delta = (f"{h['mean_diff']:+.4f}"
+                     if h.get("mean_diff") is not None else "-")
+            mde = f"{h['mde']:+.4f}" if h.get("mde") is not None else "-"
+            mark = {"支持": "✅", "拒绝": "❌"}.get(h["status"], "—")
+            md.append(f"| {h['id']} | {h['claim']} | {delta} | "
+                      f"{h.get('n') if h.get('n') is not None else '-'} | "
+                      f"{padj} | {pp} | {mde} | {mark} {h['status']}"
+                      f"（{h['detail']}） |")
+        md.append("")
+        md.append("注: 未登记在本文件里的对比（含本汇总表中的其余行）一律属"
+                  "事后（exploratory）分析：p 值只受本表家族内校正保护，"
+                  "其“显著”只能作为提出新假设的线索；要升级为结论须先登记"
+                  "再在新的种子/数据上检验。")
+    else:
+        md.append("- ⚠ 未找到可用的注册假设文件（`docs/registered_hypotheses.json`）。"
+                  "本页全部对比均为事后分析：没有预注册边界，任何“显著”都只能"
+                  "按探索性线索对待。请登记方向性主张后重跑正式实验。")
 
     # --- 效率-精度权衡：评价改进不能只看指标涨点
     md += ["", "## 效率-精度权衡（涨点必须对照增幅）", ""]
@@ -1403,8 +1636,21 @@ def build_summary(results_dir: str, audit: dict = None,
                    "note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
                             f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
                             f"n<{MIN_SEEDS} 不判定显著性；"
-                            "d_z 为配对 Cohen's d 效应量"),
-                   "component_evidence": comp},
+                            "d_z 为配对 Cohen's d 效应量。p_perm/p_perm_adj 为"
+                            "符号翻转置换检验（分布无关，n≤16 精确）的原始/家族内"
+                            "Holm 校正值，t 与置换结论冲突时见 t_perm_agree 与"
+                            "verdict 中的 ⚠ 标注；mean_diff_ci95 为配对差 "
+                            "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
+                            "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"),
+                   "component_evidence": comp,
+                   "registered_hypotheses": hyp_eval,
+                   "registered_hypotheses_source": (
+                       "docs/registered_hypotheses.json" if hyp_eval else None),
+                   "auroc_diff_note": (
+                       f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
+                       "(变体, 种子) run 的 auroc_logit − auroc_qterm 配对差，"
+                       "与逐 run 样例聚类 bootstrap 区间"
+                       "（analysis_*.json 的 auroc_cluster_bootstrap）互为印证")},
                   f, ensure_ascii=False, indent=2)
     cross_out = {}
     if bad_cross:

@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from .utils import save_json
+from .utils import save_json, wilson_score_ci
 
 KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate",
              "quartz", "falcon", "harbor", "meadow", "thistle", "cobalt", "juniper",
@@ -353,11 +353,14 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
               tasks: tuple = TASKS, verbose: bool = True,
               amp: bool = True, gen_batch: int = 8,
               collect_badcases: bool = True) -> Dict:
-    """返回 {task: {ctx: {"em":, "recall":, "n"}}}、"_skipped" 与 "_badcases"。
+    """返回 {task: {ctx: {"em":, "em_ci95_wilson":, "recall":, "n"}}}、"_skipped" 与 "_badcases"。
 
     CUDA 上默认启用 bf16 autocast，与 train/evaluate 的评测精度口径一致。
     同一任务、同一上下文档下 prompt 等长的样例合并为一次批量贪婪解码：
     因果注意力与贪婪解码都逐行独立，逐样例评分口径不变。
+    每格 em 附带 Wilson 95% 置信区间：n_samples 较小时点估计的抽样误差
+    不可忽略，跨变体比较时应同时看区间是否重叠（区间重叠不代表差异不
+    显著，正式判定仍以同种子配对检验为准）。
 
     collect_badcases=True 时，预测错误的样本连同问题、gold 摘录、上下文数值表
     一起落入 "_badcases"：错误样本是改进思路的最重要来源，不能只留聚合分数。
@@ -529,6 +532,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                 # 样本是在缩短后的 room_ctx 上构建的，记入 ctx 会虚增长上下文分数
                 results[task][str(room_ctx)] = {
                     "em": float(sum(ems) / n),
+                    # EM 是 0/1 二值指标：n<=30 的任务档位下点估计的抽样误差
+                    # 相当可观（1/n 即 ~3%），Wilson 95% 区间把这份不确定性
+                    # 显式随结果落盘（小样本下比 Wald 区间可靠，端点不越界）。
+                    "em_ci95_wilson": list(wilson_score_ci(int(round(sum(ems))), n)),
                     "recall": (float(sum(recalls) / len(recalls)) if recalls else None),
                     "n": n,
                 }

@@ -16,6 +16,14 @@
                        —— lega 的 auroc_logit vs auroc_qterm 直接回答：
                        “加入长度校准的注意力统计，是否比只看查询更能判断该不该写入”
 
+稳健性协议（防单一阈值/虚假精度）：
+  tau_sensitivity          misleading/P(hit|集中) 系指标在多档 τ 上并报，
+                           主结论不得只挂在单一任意选定的阈值上；
+  auroc_cluster_bootstrap  以样例为聚类单元的 bootstrap 置信区间——同一
+                           样例的 (层,头,查询位) 记录共享难度，不是独立
+                           观测；逐重采样同步给出 logit−qterm 差的区间，
+                           供 run_all 的跨种子配对检验交叉印证。
+
 用法:
   python -m lega.analysis --ckpt out/small/lega/model.pt --data_dir data/wikitext103 \
       --out_dir results/small
@@ -175,20 +183,135 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     return [rec for rs in records_by_ex for rec in rs]
 
 
+def _record_arrays(records: List[Dict], key: str) -> np.ndarray:
+    """提取记录中标量字段；缺失记 NaN（与 summarize 的 None 口径一致）。"""
+    return np.array([np.nan if r.get(key) is None else r[key]
+                     for r in records], dtype=np.float64)
+
+
+def _conc_stats(hit: np.ndarray, max_p: np.ndarray, tau: float) -> Dict:
+    """给定集中度阈值 τ 的全部条件统计（misleading 系与 P(hit|集中) 系）。
+
+    hit 含 NaN（无 gold 跨度的记录）时仅在有效样本上计算；
+    集中但看错的两口径互补：misleading_rate = P(集中 ∧ 看错) 会随长上下文
+    下集中事件变稀而趋 0，造成虚假安全；misleading_given_conc =
+    P(看错 | 集中) 才是"集中时有多少比例看错"的条件风险。
+    """
+    conc = (max_p > tau).astype(np.float64)
+    n_conc = int(conc.sum())
+    hv = ~np.isnan(hit)
+    return {
+        "conc_rate": float(conc.mean()),
+        "p_hit_given_conc": (float(np.nanmean(hit[conc == 1]))
+                             if n_conc and hv[conc == 1].any() else None),
+        "p_hit_given_notconc": (float(np.nanmean(hit[conc == 0]))
+                                if (conc == 0).any() and hv[conc == 0].any()
+                                else None),
+        "misleading_rate": (float(((max_p[hv] > tau) & (hit[hv] == 0)).mean())
+                            if hv.any() else None),
+        "misleading_given_conc": (
+            float((hit[hv & (conc == 1)] == 0).mean())
+            if int((hv & (conc == 1)).sum()) else None),
+    }
+
+
+def tau_sensitivity(records: List[Dict], taus: List[float]) -> Dict:
+    """misleading/P(hit|集中) 系指标对阈值 τ 的敏感性扫描。
+
+    主结论不能建立单个任意选定的 τ 上：若 τ=0.5 时"集中但看错率"很低、
+    τ=0.3 时却很高，说明"注意力沉降即可靠"的叙事只在特定阈值下成立。
+    逐 τ 输出全部条件统计，供汇总表并列展示与人工审视。
+    """
+    hit = _record_arrays(records, "hit")
+    max_p = _record_arrays(records, "max_p")
+    out: Dict = {"taus": [float(t) for t in taus]}
+    fields = ("conc_rate", "p_hit_given_conc", "p_hit_given_notconc",
+              "misleading_rate", "misleading_given_conc")
+    for f in fields:
+        out[f] = []
+    for tau in out["taus"]:
+        s = _conc_stats(hit, max_p, tau)
+        for f in fields:
+            out[f].append(s[f])
+    return out
+
+
+def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
+                            ci: float = 0.95, seed: int = 0) -> Dict:
+    """按样例聚类的 bootstrap：给 AUROC 与 logit−qterm 差一个置信区间。
+
+    机制分析的记录不是独立样本：同一样例的全部 (层, 头, 查询位) 记录共享该
+    样例的难度、gold 位置与构造随机性，把记录当独立观测会严重虚增 AUROC
+    的有效样本量、让区间过窄。这里以样例（example 字段）为聚类单元有放回
+    重采样，聚类内相关性完整保留，区间回答的是"换一批评测样例，指标会
+    波动多少"。logit−qterm 差的区间直接服务于核心机制主张（完整门控
+    logit 是否比仅查询项更能判断该不该写入），逐重采样同步计算避免
+    两个边缘区间相减的谬误。
+    """
+    clusters: Dict[int, List[Dict]] = {}
+    for r in records:
+        if r.get("hit") is None:
+            continue
+        clusters.setdefault(r["example"], []).append(r)
+    ex_ids = sorted(clusters)
+    out = {"n_examples": len(ex_ids), "n_resamples": int(n_resamples),
+           "ci_level": float(ci), "ci95": {}, "n_valid_resamples": None}
+    if len(ex_ids) < 2:
+        return out
+    score_keys = [k for k in ("logit", "qterm", "c")
+                  if any(k in r for cl in clusters.values() for r in cl)]
+    if not score_keys:
+        return out
+    labels = [np.array([float(r["hit"]) for r in clusters[e]]) for e in ex_ids]
+    scores = {k: [np.array([float(r[k]) for r in clusters[e]]) for e in ex_ids]
+              for k in score_keys}
+
+    def _auroc_safe(sc, lb):
+        if np.isnan(sc).any() or len(set(lb.tolist())) != 2:
+            return None
+        v = auroc(sc, lb)
+        return v if np.isfinite(v) else None
+
+    rng = np.random.default_rng(seed)
+    samples: Dict = {k: [] for k in score_keys}
+    samples["logit_minus_qterm"] = []
+    n_valid = 0
+    for _ in range(int(n_resamples)):
+        idx = rng.integers(0, len(ex_ids), len(ex_ids))
+        lb = np.concatenate([labels[i] for i in idx])
+        vals = {}
+        for k in score_keys:
+            v = _auroc_safe(np.concatenate([scores[k][i] for i in idx]), lb)
+            vals[k] = v
+            if v is not None:
+                samples[k].append(v)
+        if "logit" in vals and "qterm" in vals \
+                and vals["logit"] is not None and vals["qterm"] is not None:
+            samples["logit_minus_qterm"].append(vals["logit"] - vals["qterm"])
+            n_valid += 1
+    alpha = (1.0 - float(ci)) / 2.0
+    for k, vals_list in samples.items():
+        if len(vals_list) < 10:
+            out["ci95"][k] = None
+            continue
+        lo, hi = np.quantile(np.asarray(vals_list), [alpha, 1.0 - alpha])
+        out["ci95"][k] = [float(lo), float(hi)]
+    out["n_valid_resamples"] = n_valid
+    return out
+
+
 def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     n = len(records)
     if n == 0:
         return {"variant": variant, "n_records": 0}
     hit = np.array([np.nan if r.get("hit") is None else r["hit"] for r in records], dtype=np.float64)
     max_p = np.array([r["max_p"] for r in records])
-    conc = (max_p > tau).astype(np.float64)
     g = np.array([np.nan if r.get("g") is None else r["g"] for r in records], dtype=np.float64)
     logit = np.array([np.nan if r.get("logit") is None else r["logit"] for r in records], dtype=np.float64)
     qterm = np.array([np.nan if r.get("qterm") is None else r["qterm"] for r in records], dtype=np.float64)
     c = np.array([np.nan if r.get("c") is None else r["c"] for r in records], dtype=np.float64)
     log_n = np.array([r["log_n"] for r in records])
 
-    n_conc = int(conc.sum())
     # 部分记录可能没有 needle 跨度（hit=None），统计时仅在有效样本上计算
     hv = ~np.isnan(hit)
 
@@ -204,17 +327,9 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         "tau": tau,
         "n_records": n,
         "hit_rate": float(np.nanmean(hit)) if hv.any() else None,
-        "conc_rate": float(conc.mean()),
-        "p_hit_given_conc": (float(np.nanmean(hit[conc == 1]))
-                             if n_conc and hv[conc == 1].any() else None),
-        "p_hit_given_notconc": (float(np.nanmean(hit[conc == 0]))
-                                if (conc == 0).any() and hv[conc == 0].any() else None),
-        "misleading_rate": (float(((max_p[hv] > tau) & (hit[hv] == 0)).mean())
-                            if hv.any() else None),
-        # 与 misleading_rate 互补的条件风险：P(看错 | 注意力集中)。长上下文下
-        # 集中事件本身很少时，前者会趋近 0，单看它会造成虚假的安全印象。
-        "misleading_given_conc": ((float((hit[hv & (conc == 1)] == 0).mean())
-                                   if int((hv & (conc == 1)).sum()) else None)),
+    }
+    summary.update(_conc_stats(hit, max_p, tau))
+    summary.update({
         "mean_g_hit": (float(np.nanmean(g[hit == 1])) if (~np.isnan(g)).any() and (hit == 1).any() else None),
         "mean_g_miss": (float(np.nanmean(g[hit == 0])) if (~np.isnan(g)).any() and (hit == 0).any() else None),
         "auroc_logit": _auroc(logit, hit, hv),
@@ -225,7 +340,7 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         "corr_c_g": (pearson(c, g) if (~np.isnan(c)).any() and (~np.isnan(g)).any() else None),
         "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
         "corr_qterm_g": (pearson(qterm, g) if (~np.isnan(qterm)).any() and (~np.isnan(g)).any() else None),
-    }
+    })
     # 逐头统计
     per_head = []
     by_lh: Dict[tuple, List[Dict]] = {}
@@ -267,6 +382,12 @@ def main():
     p.add_argument("--out_dir", required=True)
     p.add_argument("--n_examples", type=int, default=None)
     p.add_argument("--tau", type=float, default=None)
+    p.add_argument("--tau_grid", default=None,
+                   help="逗号分隔的敏感性扫描阈值；默认取配置 analysis.tau_grid "
+                        "（[0.3, 0.5, 0.7]），并并入主阈值 tau")
+    p.add_argument("--bootstrap_resamples", type=int, default=None,
+                   help="按样例聚类的 AUROC bootstrap 重采样次数；"
+                        "默认取配置 analysis.bootstrap_resamples（1000），0 关闭")
     p.add_argument("--ctx", type=int, default=None, help="分析用上下文长度，默认取 RULER 最长档")
     p.add_argument("--suffix", default="",
                    help="输出文件名后缀（如 _seed1337），多种子运行避免互相覆盖")
@@ -337,6 +458,20 @@ def main():
     records = collect_records(model, tok, device, examples, task_of, ctx_of,
                               amp=bool(ckpt_cfg.get("amp", True)))
     summary = summarize(records, variant, tau)
+    # 阈值敏感性：misleading/P(hit|集中) 的结论不能只挂在单一 τ 上
+    if args.tau_grid is not None:
+        grid = [float(x) for x in args.tau_grid.split(",") if x.strip()]
+    else:
+        grid = [float(x) for x in acfg.get("tau_grid", [0.3, 0.5, 0.7])]
+    summary["tau_sensitivity"] = tau_sensitivity(records, sorted(set(grid) | {float(tau)}))
+    # 聚类 bootstrap：同一记录池的 AUROC 置信区间（样例为聚类单元）
+    n_boot = (int(args.bootstrap_resamples)
+              if args.bootstrap_resamples is not None
+              else int(acfg.get("bootstrap_resamples", 1000)))
+    if n_boot > 0:
+        summary["auroc_cluster_bootstrap"] = auroc_cluster_bootstrap(
+            records, n_resamples=n_boot,
+            seed=int(ck.get("seed")) if ck.get("seed") is not None else 0)
     # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
     summary["seed"] = ck.get("seed")
     summary.update(provenance)
@@ -366,6 +501,13 @@ def main():
         print(f"[analysis] AUROC logit={fmt(summary.get('auroc_logit'))} "
               f"qterm={fmt(summary.get('auroc_qterm'))} c={fmt(summary.get('auroc_c'))} "
               f"maxp={fmt(summary.get('auroc_maxp'))}")
+    boot = summary.get("auroc_cluster_bootstrap") or {}
+    ci = (boot.get("ci95") or {}).get("logit_minus_qterm")
+    if ci:
+        print(f"[analysis] AUROC(logit−qterm) 样例聚类 bootstrap 95% CI: "
+              f"[{ci[0]:.3f}, {ci[1]:.3f}]"
+              f"（n_examples={boot.get('n_examples')}，"
+              f"n_resamples={boot.get('n_resamples')}）")
     print(f"[analysis] 完成 -> {args.out_dir}")
 
 

@@ -136,7 +136,13 @@ def test_run_ruler_dedupes_clamped_ctx():
                     verbose=False)
     assert list(res["niah_synth"].keys()) == [str(room)], \
         f"clamp 到同一 room_ctx 的 ctx 档应去重: {list(res['niah_synth'].keys())}"
-    assert 0.0 <= res["niah_synth"][str(room)]["em"] <= 1.0
+    cell = res["niah_synth"][str(room)]
+    assert 0.0 <= cell["em"] <= 1.0
+    # 每格必须附带 Wilson 95% 区间：n=1 时 EM 只能是 0/1，点估计毫无
+    # 精度可言，区间把抽样不确定性显式化（端点在 [0,1] 内且覆盖点估计）
+    lo, hi = cell["em_ci95_wilson"]
+    assert 0.0 <= lo <= cell["em"] <= hi <= 1.0
+    print(f"  [ok] run_ruler 去重 + Wilson CI（em={cell['em']}, CI=[{lo:.3f}, {hi:.3f}]）")
 
 
 def test_run_ruler_collects_badcases():

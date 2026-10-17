@@ -1,8 +1,22 @@
-"""通用工具：随机种子、JSON 读写、指标计算（AUROC/Pearson/统计检验，无 scipy 依赖）。"""
+"""通用工具：随机种子、JSON 读写、指标计算（AUROC/Pearson/统计检验，无 scipy 依赖）。
+
+统计检验的设计口径：正式实验的种子数通常只有 3~5，配对 t 检验的正态假设在此
+样本量下并不可靠；因此本模块同时提供
+  * paired_t_test            —— 参数检验（主判定依据，历史口径保持不变）；
+  * paired_sign_flip_test    —— 符号翻转置换检验（H0 下精确/分布无关，n<=16 时
+                                全枚举精确，否则固定种子 Monte-Carlo）；
+  * bootstrap_mean_ci        —— 配对差的百分位 bootstrap 置信区间；
+  * min_detectable_effect    —— 给定种子数与配对差标准差的最小可检测效应，
+                                用于区分"没有效应"与"功效不足"；
+  * wilson_score_ci          —— 二值指标（RULER EM）的小样本比例置信区间。
+汇总同时报告以上全部统计量；t 与置换检验结论冲突时会显式标注，而不是静默
+采信任何一方。
+"""
 import json
 import math
 import os
 import random
+import statistics
 import time
 
 import numpy as np
@@ -187,18 +201,12 @@ def student_t_two_sided_p(t: float, df: float) -> float:
     return float(_betai(df / 2.0, 0.5, x))
 
 
-def paired_t_test(a, b) -> dict:
-    """同种子配对样本的双侧 t 检验：比较 a 与 b 两组一一对应的观测。
+def _paired_diffs(a, b) -> np.ndarray:
+    """按位置提取配对差 a_i − b_i，供 t 检验/置换检验/bootstrap 共用。
 
-    实验协议中所有变体使用同一组随机种子训练，因此变体间比较天然配对：
-    d_i = a_i - b_i 消除“种子运气”的公共方差，统计功效高于独立样本检验。
-    返回 {n, mean_diff, std_diff, t, df, p, d_z}；n<2 时 t/df/p 为 None。
-    d_z = mean_diff / std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。
-    标准差为 0（所有配对差完全相同）时：均值非 0 记 p=0，否则 p=1。
-
-    配对按位置严格一一对应：两侧长度必须一致，None 也必须成对出现，
-    否则抛 ValueError（None 位置错开意味着种子集合没有对齐，静默过滤会
-    把不同种子的观测配到一起）。任一观测非有限（NaN/Inf）的配对整体剔除。
+    配对按位置严格一一对应：两侧长度必须一致，None 也必须成对出现，否则抛
+    ValueError（None 位置错开意味着种子集合没有对齐，静默过滤会把不同种子
+    的观测配到一起）。任一观测非有限（NaN/Inf）的配对整体剔除。
     """
     a_list, b_list = list(a), list(b)
     if len(a_list) != len(b_list):
@@ -213,7 +221,19 @@ def paired_t_test(a, b) -> dict:
         if not (math.isfinite(xf) and math.isfinite(yf)):
             continue
         diffs.append(xf - yf)
-    d = np.asarray(diffs, dtype=np.float64)
+    return np.asarray(diffs, dtype=np.float64)
+
+
+def paired_t_test(a, b) -> dict:
+    """同种子配对样本的双侧 t 检验：比较 a 与 b 两组一一对应的观测。
+
+    实验协议中所有变体使用同一组随机种子训练，因此变体间比较天然配对：
+    d_i = a_i - b_i 消除“种子运气”的公共方差，统计功效高于独立样本检验。
+    返回 {n, mean_diff, std_diff, t, df, p, d_z}；n<2 时 t/df/p 为 None。
+    d_z = mean_diff / std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。
+    标准差为 0（所有配对差完全相同）时：均值非 0 记 p=0，否则 p=1。
+    """
+    d = _paired_diffs(a, b)
     n = int(d.size)
     if n == 0:
         return {"n": 0, "mean_diff": None, "std_diff": None,
@@ -233,6 +253,129 @@ def paired_t_test(a, b) -> dict:
     return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
             "t": float(t), "df": df, "p": student_t_two_sided_p(t, df),
             "d_z": float(mean_diff / std_diff)}
+
+
+# 符号翻转置换检验的精确全枚举上限：2^16 = 65536 次枚举在现代 CPU 上毫秒级。
+_SIGNFLIP_EXACT_MAX = 16
+
+
+def paired_sign_flip_test(a, b, n_resamples: int = 20000,
+                          seed: int = 0) -> dict:
+    """配对样本的符号翻转置换检验（双侧，分布无关）。
+
+    H0：配对差 d_i 关于 0 对称。检验统计量 T = |mean(d)|；H0 下对任意
+    d_i 翻转符号得同样合法的样本，p = P(|mean(翻转样本)| >= |mean(d)|)。
+    该检验不依赖正态假设，对 3~5 个种子的小样本推断比 t 检验更稳健：
+    n<=16 时 2^n 次全枚举给出**精确** p 值；更大 n 用固定种子 Monte-Carlo
+    （同一输入恒定复现）。零差值对任何翻转不变，天然计入分布。
+
+    粒度边界（必须知情）：双侧 p 值的理论下限为 2/2^n——n=3 时 0.25、
+    n=5 时 0.0625，n<6 时分布无关证据**本来就不可能**达到 α=0.05。因此
+    小种子下"置换不显著"是粒度所限，不能单独推翻 t 检验结论；此时 t 的
+    显著性完全依赖正态假设，应报告两者并补种子，而不是静默采信任何一方。
+
+    配对规则与 paired_t_test 完全一致（_paired_diffs）。返回
+    {n, mean_diff, p_perm, exact, n_resamples}；n<2 时不检验（p_perm=None，
+    与 t 检验口径一致，避免 n=1 的"精确 p=1"被误读为证据）。
+    """
+    d = _paired_diffs(a, b)
+    n = int(d.size)
+    out = {"n": n, "mean_diff": None, "p_perm": None,
+           "exact": None, "n_resamples": None}
+    if n == 0:
+        return out
+    mean_diff = float(d.mean())
+    out["mean_diff"] = mean_diff
+    if n < 2:
+        return out
+    obs = abs(mean_diff)
+    if obs == 0.0:
+        # 全零差：任何翻转都不改变均值，p=1（无可检效应）。
+        out.update({"p_perm": 1.0, "exact": True, "n_resamples": 2 ** n})
+        return out
+    if n <= _SIGNFLIP_EXACT_MAX:
+        # 精确全枚举：2^n 个翻转样本（含观测自身与其全反号）。
+        signs = (np.arange(2 ** n, dtype=np.int64)[:, None]
+                 >> np.arange(n, dtype=np.int64)[None, :]) & 1
+        flipped = d[None, :] * (1.0 - 2.0 * signs)
+        ge = int((np.abs(flipped.mean(axis=1)) >= obs - 1e-15).sum())
+        out.update({"p_perm": ge / float(2 ** n), "exact": True,
+                    "n_resamples": int(2 ** n)})
+        return out
+    # Monte-Carlo：固定种子可复现。随机翻转每个 d_i 的符号（±1），
+    # 双侧口径把观测自身与其全反号一并计入（+2），与精确枚举一致。
+    rng = np.random.default_rng(seed)
+    flips = rng.integers(0, 2, size=(int(n_resamples), n)) * 2.0 - 1.0
+    stat = np.abs((d[None, :] * flips).mean(axis=1))
+    ge = int((stat >= obs - 1e-15).sum())
+    out.update({"p_perm": (ge + 2) / float(n_resamples + 2),
+                "exact": False, "n_resamples": int(n_resamples)})
+    return out
+
+
+def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
+                      seed: int = 0):
+    """样本均值的百分位 bootstrap 置信区间（配对差/任意标量观测通用）。
+
+    None/非有限值剔除后 n<2 时返回 None（单点无区间可言）。
+    固定随机种子，同一输入恒定复现。返回 (lo, hi)。
+    """
+    arr = np.asarray([v for v in values
+                      if v is not None and math.isfinite(float(v))],
+                     dtype=np.float64)
+    if arr.size < 2:
+        return None
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, arr.size, size=(int(n_resamples), arr.size))
+    means = arr[idx].mean(axis=1)
+    alpha = (1.0 - float(ci)) / 2.0
+    lo, hi = np.quantile(means, [alpha, 1.0 - alpha])
+    return float(lo), float(hi)
+
+
+def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
+                          power: float = 0.8):
+    """配对设计在给定 (配对差标准差, 种子数) 下的最小可检测效应（MDE）。
+
+    正态近似（大样本 z 口径）：MDE = (z_{1-α/2} + z_{power}) · std/√n。
+    用途：区分“不显著 = 无效应”与“不显著 = 功效不足”。报告的 MDE 远大于
+    声称的效应量时，应先补种子而不是下结论；n>=3 时该近似已足够指引决策
+    （严格 t 口径的临界值略大，近似值偏乐观，作解释性参考而非判定门槛）。
+    标准差不可估计（None/0）或 n<2 时返回 None。
+    """
+    if std_diff is None or n is None or int(n) < 2:
+        return None
+    std = float(std_diff)
+    if not (math.isfinite(std) and std > 0.0):
+        return None
+    nd = statistics.NormalDist()
+    z = nd.inv_cdf(1.0 - float(alpha) / 2.0) + nd.inv_cdf(float(power))
+    return float(z * std / math.sqrt(int(n)))
+
+
+def wilson_score_ci(k: int, n: int, ci: float = 0.95):
+    """二值比例的 Wilson 得分置信区间（小样本下远优于正态近似区间）。
+
+    k 为成功数、n 为试验数；n<=0 返回 None。k=0 时下界恰为 0、k=n 时上界
+    恰为 1（不会像 Wald 区间那样越界）。返回 (lo, hi)。
+    """
+    if n is None or k is None or int(n) <= 0:
+        return None
+    n = int(n)
+    k = int(min(max(k, 0), n))
+    z = statistics.NormalDist().inv_cdf(1.0 - (1.0 - float(ci)) / 2.0)
+    z2 = z * z
+    if k == 0:
+        # 端点闭式：p=0 时区间为 [0, z²/(n+z²)]（避免浮点残差 1e-17 进 JSON）
+        return 0.0, z2 / (n + z2)
+    if k == n:
+        # p=1 时区间为 [n/(n+z²), 1]
+        return n / (n + z2), 1.0
+    p = k / n
+    den = 1.0 + z2 / n
+    center = (p + z2 / (2.0 * n)) / den
+    half = z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n)) / den
+    return max(0.0, center - half), min(1.0, center + half)
 
 
 def holm_bonferroni(pvals) -> list:

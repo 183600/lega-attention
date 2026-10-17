@@ -1,8 +1,9 @@
 """对比/消融协议测试：Holm 校正结论、组件有效性判定与受控变量审计。
 
-覆盖三条关键科研口径：
+覆盖四条关键科研口径：
   * 多重比较校正后结论才有效（避免 8 变体两两对比下的假阳性）；
   * “各组件均有用”必须有显著统计证据，组合跑全本身不算证据；
+  * 小样本下 t 检验结论必须与置换检验互证，冲突要显式暴露而不是静默采信；
   * 受控变量审计除超参数外还核对数据指纹/代码版本/训练步数。
 """
 import json
@@ -12,10 +13,12 @@ import subprocess
 import sys
 import tempfile
 
-from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _cmd_env, _effect_status,
-                     _rel_pct, _resolve_jobs, _stat, build_summary,
-                     component_evidence, run_many, tradeoff_verdict,
-                     verify_controlled_setup)
+from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
+                     _cmd_env, _effect_status, _enrich_paired, _rel_pct,
+                     _resolve_jobs, _stat, AUROC_DIFF_METRIC,
+                     AUROC_DIFF_REFERENCE, build_summary, component_evidence,
+                     evaluate_registered_hypotheses, run_many,
+                     tradeoff_verdict, verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -336,3 +339,191 @@ def test_build_summary_missing_latency_entry():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
+
+
+def test_enrich_paired_adds_robustness_fields():
+    """配对检验必须附带置换 p / bootstrap CI / MDE，三者口径一致可复核。"""
+    a = [10.5, 10.6, 10.4, 10.7, 10.55]
+    b = [10.0, 10.05, 10.02, 10.03, 10.04]
+    res = _enrich_paired({"n": 5, "mean_diff": 0.5, "std_diff": 0.1}, a, b)
+    assert res["p_perm"] is not None and 0.0 <= res["p_perm"] <= 1.0
+    assert res["perm_exact"] is True          # n=5 <= 16 → 全枚举精确
+    lo, hi = res["mean_diff_ci95"]
+    assert lo <= res["mean_diff"] <= hi
+    assert res["mde"] > 0
+    # 无可检效应（差恒 0）→ 置换 p=1，MDE 仍按方差给出
+    res0 = _enrich_paired({"n": 3, "mean_diff": 0.0, "std_diff": 0.2},
+                           [1, 2, 3], [1, 2, 3])
+    assert res0["p_perm"] == 1.0 and res0["mde"] > 0
+    # n=1 / 无均值：字段为 None 而不是崩溃
+    res1 = _enrich_paired({"n": 0, "mean_diff": None, "std_diff": None}, [], [])
+    assert res1["p_perm"] is None and res1["mean_diff_ci95"] is None
+    print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径）")
+
+
+def test_apply_holm_permutation_agreement():
+    """t 显著但置换不显著必须显式标 ⚠；两套 p 在同家族内分别 Holm 校正。"""
+    # p_perm 缺失（旧格式 dict）：行为与原先完全一致，不崩不标
+    tests = [_mk("lega", "standard", "PPL", -0.5, 0.01, 5)]
+    _apply_holm(tests)
+    assert "显著优于" in tests[0]["verdict"] and "⚠" not in tests[0]["verdict"]
+    assert tests[0]["t_perm_agree"] is None
+    # t 与置换一致显著：无警示，t_perm_agree=True
+    t_ok = _mk("lega", "standard", "PPL", -0.5, 0.001, 5)
+    t_ok["p_perm"] = 0.001
+    _apply_holm([t_ok])
+    assert t_ok["p_perm_adj"] == 0.001
+    assert t_ok["t_perm_agree"] is True and "⚠" not in t_ok["verdict"]
+    # t 显著（p=0.02，家族 m=1）但置换不显著（p_perm=0.3）→ ⚠ 标注
+    t_warn = _mk("lega", "standard", "PPL", -0.3, 0.02, 4)
+    t_warn["p_perm"] = 0.3
+    _apply_holm([t_warn])
+    assert "显著优于" in t_warn["verdict"] and "置换检验不显著" in t_warn["verdict"]
+    assert t_warn["t_perm_agree"] is False
+    # t 不显著但置换显著 → 边缘证据标注
+    t_edge = _mk("qgate", "standard", "PPL", -0.1, 0.09, 5)
+    t_edge["p_perm"] = 0.01
+    _apply_holm([t_edge])
+    assert "不显著" in t_edge["verdict"] and "置换检验显著" in t_edge["verdict"]
+    assert t_edge["t_perm_agree"] is False
+    # 置换 p 也参与 Holm 家族校正：家族 m=2 时最小 p 乘 2
+    fam = [_mk("a", "standard", "PPL", -0.5, 0.01, 5),
+           _mk("b", "standard", "PPL", -0.4, 0.05, 5)]
+    fam[0]["p_perm"] = 0.01
+    fam[1]["p_perm"] = 0.05
+    _apply_holm(fam)
+    assert abs(fam[0]["p_perm_adj"] - 0.02) < 1e-12
+    assert abs(fam[1]["p_perm_adj"] - 0.05) < 1e-12
+    # 种子不足：不进入 agree 判定
+    t_small = _mk("x", "y", "PPL", 1.0, 0.01, 2)
+    t_small["p_perm"] = 0.01
+    _apply_holm([t_small])
+    assert t_small["t_perm_agree"] is None and "种子不足" in t_small["verdict"]
+    print("  [ok] _apply_holm 置换检验一致性与 ⚠ 标注")
+
+
+def test_auroc_diff_tests_family():
+    """机制主张（AUROC logit > 仅查询）必须作为配对差正式检验，而非并排数字。"""
+    # 构造 runs：lega 的 logit AUROC 每个种子都比 qterm 高（带种子间波动）；
+    # qgate 的差值在 0 附近来回 → 应判不显著
+    def _slot(al, aq):
+        return {"analysis": {"auroc_logit": al, "auroc_qterm": aq}}
+    runs = {
+        "lega": {1: _slot(0.80, 0.70), 2: _slot(0.83, 0.72), 3: _slot(0.77, 0.68),
+                 4: _slot(0.81, 0.70), 5: _slot(0.79, 0.685)},
+        "qgate": {1: _slot(0.70, 0.71), 2: _slot(0.72, 0.71), 3: _slot(0.69, 0.70),
+                  4: _slot(0.71, 0.72), 5: _slot(0.70, 0.69)},
+        # 无分析数据的变体不产生检验
+        "standard": {1: {}},
+        # 单侧缺失的种子整对剔除（auroc_qterm=None 不算配对）
+        "lega_no_len": {1: _slot(0.8, None), 2: _slot(None, None)},
+    }
+    tests = _auroc_diff_tests(runs)
+    by_v = {t["candidate"]: t for t in tests}
+    assert set(by_v) == {"lega", "qgate"}, set(by_v)
+    t = by_v["lega"]
+    assert t["metric"] == AUROC_DIFF_METRIC
+    assert t["reference"] == AUROC_DIFF_REFERENCE
+    assert t["lower_is_better"] is False
+    assert t["n"] == 5 and t["mean_diff"] > 0
+    assert t["p"] < 0.001
+    # 差值全为正但量级有波动：精确置换 p 恰为双侧下限 2/2^5=0.0625
+    # （n=5 的粒度边界：置换检验到不了 α=0.05，见 _apply_holm 注释）
+    assert t["perm_exact"] is True
+    assert abs(t["p_perm"] - 2.0 / 32.0) < 1e-12
+    # qgate 差值均值为 -0.002（噪声）→ t 检验不显著
+    assert abs(by_v["qgate"]["mean_diff"] - (-0.002)) < 1e-12
+    assert by_v["qgate"]["p"] > 0.05
+    # Holm 校正 + 结论方向（AUROC 越大越好 → 差为正 = 显著优于）
+    tests = _apply_holm(tests)
+    assert "显著优于" in by_v["lega"]["verdict"]
+    # t 显著但置换 p 下限 >α → 必须带 ⚠（显著性依赖正态假设）
+    assert "⚠" in by_v["lega"]["verdict"] and by_v["lega"]["t_perm_agree"] is False
+    assert "不显著" in by_v["qgate"]["verdict"]
+    print("  [ok] _auroc_diff_tests（配对差检验/置换粒度边界/家族校正）")
+
+
+def test_registered_hypotheses_evaluation():
+    """预注册假设判定：支持/拒绝/未定的边界与未登记文件时的提示。"""
+    tests = [
+        _mk("lega", "standard", "PPL", -0.5, 0.01, 5),
+        _mk("lega_no_len", "lega", "PPL", 0.4, 0.02, 5),   # 去掉长度项显著变差
+        _mk("qgate", "standard", "PPL", 0.1, 0.5, 5),      # 不显著
+        _mk("x", "y", "PPL", 1.0, 0.01, 2),                # 种子不足
+    ]
+    # 让 p_adj 直接可判（单家族 m=4 Holm：0.01→0.04, 0.02→0.06, ...）
+    _apply_holm(tests)
+    reg = {"hypotheses": [
+        {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
+         "candidate": "lega", "reference": "standard",
+         "direction": "candidate_better"},
+        {"id": "H2", "claim": "长度校准有用（去一法）", "metric": "PPL",
+         "candidate": "lega_no_len", "reference": "lega",
+         "direction": "candidate_worse"},
+        {"id": "H3", "claim": "LEGA 优于 qgate（PPL）", "metric": "PPL",
+         "candidate": "lega", "reference": "qgate",   # 未运行 → 未检验
+         "direction": "candidate_better"},
+        {"id": "H4", "claim": "方向登记反了的假设", "metric": "PPL",
+         "candidate": "lega", "reference": "standard",
+         "direction": "candidate_worse"},             # 显著但方向相反 → 拒绝
+        {"id": "H5", "claim": "种子不足的对比", "metric": "PPL",
+         "candidate": "x", "reference": "y",
+         "direction": "candidate_better"},
+    ]}
+    ev = {h["id"]: h for h in evaluate_registered_hypotheses(reg, tests)}
+    assert ev["H1"]["status"] == "支持"
+    assert ev["H2"]["status"] == "支持"
+    assert ev["H3"]["status"] == "未检验"
+    assert ev["H4"]["status"] == "拒绝"
+    assert ev["H5"]["status"] == "未定" and "种子不足" in ev["H5"]["detail"]
+    # 不显著 → 未定，且 detail 提示 MDE（有均值/方差可估时）
+    reg2 = {"hypotheses": [
+        {"id": "H6", "claim": "qgate 优于 standard", "metric": "PPL",
+         "candidate": "qgate", "reference": "standard",
+         "direction": "candidate_better"}]}
+    ev2 = evaluate_registered_hypotheses(reg2, tests)
+    assert ev2[0]["status"] == "未定" and "不显著" in ev2[0]["detail"]
+    # 空注册文件：不判定
+    assert evaluate_registered_hypotheses({}, tests) == []
+    print("  [ok] evaluate_registered_hypotheses（支持/拒绝/未定/未检验边界）")
+
+
+def test_build_summary_renders_confirmatory_sections():
+    """summary.md 必须包含注册假设小节与置换/CI/MDE 列，而非只留 JSON。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        seeds = [1, 2, 3]
+        for v, ppl, al, aq in (
+                ("standard", 10.0, None, None),
+                ("lega", 9.4, 0.8, 0.7),
+                ("lega_no_len", 9.9, 0.75, 0.7),
+                ("qgate", 9.8, 0.72, 0.71)):
+            for s in seeds:
+                jitter = 0.02 * s
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s, "val_ppl": ppl + jitter,
+                    "val_loss": 2.3, "n_params": 100,
+                    "n_gate_extra": 0, "split": "val"})
+                if al is not None:
+                    _write_json(os.path.join(tmp, f"analysis_{v}_seed{s}.json"), {
+                        "variant": v, "seed": s, "auroc_logit": al + 0.01 * s,
+                        "auroc_qterm": aq - 0.01 * s})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "注册假设判定" in md
+        assert "H1" in md and "事后" in md
+        # 配对检验表的新列
+        assert "p_perm(Holm)" in md and "MDE" in md and "Δ 95% CI" in md
+        assert "AUROC差" in md
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert any(t["metric"] == AUROC_DIFF_METRIC for t in sig["pairs"])
+        assert sig["registered_hypotheses"], "注册假设判定必须进 significance.json"
+        h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")
+        assert h1["status"] in ("支持", "未定", "拒绝")
+        # 每条 pair 检验都带稳健性字段
+        for t in sig["pairs"]:
+            assert "p_perm" in t and "mean_diff_ci95" in t and "mde" in t
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（注册假设/置换/CI/MDE 进入汇总页与 JSON）")

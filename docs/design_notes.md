@@ -18,7 +18,45 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 - WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）；
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
+  每格 em 附带 Wilson 95% 区间（`em_ci95_wilson`）：n_samples 小时点估计的抽样误差不可忽略；
 - 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC。
+
+## 统计推断协议（小样本科研口径）
+
+正式实验的种子数只有 3~5，任何单点统计声明都站不住。协议分四层：
+
+1. **主判定**：同种子配对 t 检验，同一指标家族内 Holm–Bonferroni 校正
+   （控制 FWER），配对 Cohen's d_z 效应量；n<3 只报描述统计。
+2. **稳健性印证**（每组配对同时报告，`significance.json`）：
+   - **符号翻转置换检验** p_perm（分布无关；n≤16 全枚举精确）：t 检验在
+     小样本下依赖正态假设，两套结论冲突时在结论文本中显式标 ⚠ 而非静默
+     采信任何一方。**粒度边界必须知情**：置换双侧 p 的理论下限是 2/2^n
+     （n=3→0.25、n=5→0.0625、n=6→0.03125），种子 <6 时"置换不显著"是
+     粒度所限，此时 t 的显著性完全依赖正态假设；n≥6 后不一致才是真实警报；
+   - **配对差 bootstrap 95% CI**：效应量的不确定范围，防止把点估计当精确值；
+   - **MDE（最小可检测效应）**：(z_{1-α/2}+z_{power})·std/√n。"不显著"
+     必须对照 MDE 解读：观测差远小于 MDE → 功效不足（先补种子），而不是
+     "证明了没有效应"。
+3. **机制主张的正式检验**：AUROC(完整 logit) − AUROC(仅查询项) 作为独立
+   指标家族做同种子配对检验（`run_all._auroc_diff_tests`）——两个 AUROC
+   来自同一批记录，并排放数字不构成证据。与逐 run 的**样例聚类 bootstrap**
+   区间（`analysis.auroc_cluster_bootstrap`）互为印证：后者以样例为重采样
+   单元（同一样例的层×头×查询位记录共享难度，不是独立观测），回答"换样例
+   波动多少"；前者回答"换训练种子方向是否稳定"。
+4. **阈值敏感性**：misleading/P(hit|集中) 系指标在多档 τ 上并报
+   （`analysis.tau_sensitivity`，默认 [0.3, 0.5, 0.7] 并入主 τ），
+   机制结论不得只挂在单一任意选定的阈值上。
+
+## 预注册（confirmatory vs exploratory）
+
+`docs/registered_hypotheses.json` 在正式实验前登记方向性主张（H1~H6：
+主效应、核心消融、vs 已有工作、机制主张）。`run_all` 汇总时逐条对照
+Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=被证伪）/ 未定**
+（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与
+`significance.json`。未登记的对比一律属事后（exploratory）分析：其 p 值
+只受所在家族内校正保护，"显著"只能作为提出新假设的线索；要升级为结论
+须先登记再在新的种子/数据上检验——把"哪些对比是事先声称的"从记忆变成
+可执行的边界。
 
 ## 可复现性与 sanity check
 
