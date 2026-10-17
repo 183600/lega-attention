@@ -364,19 +364,20 @@ class CausalSelfAttention(nn.Module):
             return F.softmax(att, dim=-1)
         return torch.softmax(att, dim=-1, out=att)
 
-    def _attend_q_chunk(self, q_rot: torch.Tensor, qterm: Optional[torch.Tensor],
-                        kT: torch.Tensor, v: torch.Tensor,
+    def _attend_q_chunk(self, q_rot: torch.Tensor, kT: torch.Tensor, v: torch.Tensor,
                         band_start: int, band_mask: Optional[torch.Tensor],
-                        log_n: Optional[torch.Tensor], collect_stats: bool,
-                        keep_gate_terms: bool = True):
-        """单查询块的显式注意力 + 门控；collect_stats=False 时只返回输出。
+                        collect_stats: bool, keep_gate_terms: bool = True):
+        """单查询块的显式注意力；门控由调用方在整段上统一计算后施加。
 
-        keep_gate_terms=False 的轻量统计只保留 g（训练内验证评测仅消费门控均值），
-        qterm/logit 不逐块物化与汇总。
+        各查询位置的门控值只依赖该位置的 qterm/max_j p_j/log n，逐块与整段
+        计算结果逐位一致，因此门控不在此处按块计算。
 
-        q_rot 是 RoPE 旋转后且已预乘 1/sqrt(Dh) 的查询（打分的 q·k）；
-        qterm 是 RoPE 旋转前的查询内容向量与门控权重 w 的本块归约
-        （长度/绝对位置只通过显式 log n 进入门控），无查询项时为 None。
+        collect_stats=False 返回 (o, max_p)；collect_stats=True 返回
+        (o, max_p, argmax_stat, p_null_stat)。max_p 为 (B,H,C) fp32 的
+        max_j p_j（null 变体已按联合 softmax 口径并入空槽），供调用方汇总后
+        计算门控或作为统计返回。
+
+        q_rot 是 RoPE 旋转后且已预乘 1/sqrt(Dh) 的查询（打分的 q·k）。
 
         kT/v 已被调用方裁到本块可见前缀（末列即块内最末查询可见的最后一键），
         全块不可见的尾列既不参与打分也不参与 softmax，数学上与先算全量再做整列
@@ -453,36 +454,23 @@ class CausalSelfAttention(nn.Module):
         del p
         if is_null:
             # 真实键部分整体乘 (1 - p_null)（联合 softmax 的尺度因子），
-            # addcmul_ 再融合 p_null(×)v_null 的乘加（训练态逐块 checkpoint
-            # 反向重算时逐块生效）
+            # addcmul_ 再融合 p_null(×)v_null 的乘加。
             o.mul_(1 - p_null)
             o.addcmul_(p_null, v_null_c.view(1, self.n_heads, 1, -1))
-
-        g = logit = qterm_out = None
-        if self.variant in _GATED:
-            g, logit, qterm_out = self._gate_logit(
-                qterm, max_p, log_n,
-                (q_rot.shape[0], self.n_heads, q_rot.shape[2]),
-                keep_terms=collect_stats and keep_gate_terms)
-            o.mul_(g.to(o.dtype).unsqueeze(-1))
         if not collect_stats:
-            return o
-        # 轻量统计（keep_gate_terms=False，契约上只消费 g）：集中度门控在
-        # _gate_logit 内对 max_p 原地 clamp_min_/log_，此后 max_p 装的已是
-        # log(max_p) 而不再是概率，不能作为统计返回，
-        # 与 SDPA 轻量分支的 max_p=None 口径保持一致。
-        return o, (max_p if keep_gate_terms else None), qterm_out, logit, g, \
-            argmax_stat, p_null_stat
+            return o, max_p
+        return o, max_p, argmax_stat, p_null_stat
 
     def _attend_chunked(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         k: torch.Tensor, v: torch.Tensor,
                         past_len: int, log_n: Optional[torch.Tensor],
                         B: int, H: int, T: int, collect_stats: bool,
                         keep_gate_terms: bool = True):
-        """按查询块执行显式注意力；训练态逐块 checkpoint。
+        """按查询块执行显式注意力；训练态按层包一层 checkpoint。
 
         q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次。
         q_content 为 RoPE 前的查询内容视图 (B,H,T,Dh)。
+        门控在全部查询块算完后按整段 T 计算一次（各块 max_p 先按查询维汇总）。
         """
         S = k.shape[2]
         # q/k/v 来自 QKV 融合 GEMM 的 permute().unbind() 视图：批量维步长
@@ -512,13 +500,13 @@ class CausalSelfAttention(nn.Module):
         Dh = v.shape[-1]
 
         def _run_chunks(qt_full):
+            # max_p 逐块汇总表必须是本次调用的局部变量：训练态 checkpoint
+            # 反向会重算整个函数，闭包列表会在重算时被重复追加。
+            max_ps = []
             o = v.new_empty(B, T, H, Dh)
             for q0 in range(0, T, cq):
                 q1 = min(T, q0 + cq)
                 qr = q_rot[:, :, q0:q1]  # 已预乘 1/sqrt(Dh) 的 RoPE 旋转后查询块（打分用）
-                # 逐块取门控查询项切片并克隆：sigmoid 等在原地操作只作用于克隆，
-                # checkpoint 反向重算读取的始终是未受污染的整段归约结果。
-                qt_c = None if qt_full is None else qt_full[:, :, q0:q1].clone()
                 # 因果掩码两段式：
                 #   * [fill_from, S) 列对本块全部查询不可见：不置 -inf，直接把 kT/v
                 #     切片到可见前缀，打分矩阵从 (B,H,Cq,S) 缩到 (B,H,Cq,fill_from)；
@@ -534,33 +522,50 @@ class CausalSelfAttention(nn.Module):
                 # 单行块（逐 token 解码）的对角带掩码为全 False（triu(1)），
                 # 逐元素 masked_fill_ 不会对任何元素置 -inf，整块跳过。
                 band_mask = None if q1 - q0 == 1 else _tri_band(q1 - q0, q1 - q0, q_rot.device)
-                logn_c = None if log_n is None else log_n[q0:q1]
                 if collect_stats:
-                    oc, mp, qt, lg, gg, am, pnl = self._attend_q_chunk(
-                        qr, qt_c, kT_c, v_c, band_start, band_mask,
-                        logn_c, True, keep_gate_terms)
+                    oc, mp, am, pnl = self._attend_q_chunk(
+                        qr, kT_c, v_c, band_start, band_mask, True,
+                        keep_gate_terms)
                     if mp is not None:
                         max_ps.append(mp)
-                    if qt is not None:
-                        qterms.append(qt)
-                    if lg is not None:
-                        logits.append(lg)
-                    if gg is not None:
-                        gs.append(gg)
                     if am is not None:
                         argmaxes.append(am)
                     if pnl is not None:
                         p_nulls.append(pnl)
                 else:
-                    oc = self._attend_q_chunk(qr, qt_c, kT_c, v_c, band_start,
-                                              band_mask, logn_c, False)
+                    oc, mp = self._attend_q_chunk(
+                        qr, kT_c, v_c, band_start, band_mask, False)
+                    if mp is not None:
+                        max_ps.append(mp)
                 # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
                 # 布局变换在此完成
                 o[:, q0:q1].copy_(oc.transpose(1, 2))
+            # 各块 max_p 按查询维汇成整段，门控整段只算一次：门控值逐位置只依赖
+            # (qterm, max_p, log n)，逐块与整段结果逐位一致；整段计算同时把
+            # 逐块的小张量门控算子合并为一次全段算子。
+            max_p_all = torch.cat(max_ps, dim=2) if max_ps else None
+            if self.variant in _GATED:
+                # keep_terms=False 时 _gate_logit 原地改写 qterm：checkpoint
+                # 反向会重算本函数并再次读取其输入，必须传副本；非 checkpoint
+                # 路径中 qterm 是本次前向的独占中间量，可直接原地使用。
+                qterm_in = qt_full
+                if qt_full is not None and use_ckpt:
+                    qterm_in = qt_full.clone()
+                gg, lg, qt = self._gate_logit(
+                    qterm_in, max_p_all, log_n, (B, H, T),
+                    keep_terms=collect_stats and keep_gate_terms)
+                chunk_out[0], chunk_out[1], chunk_out[2] = max_p_all, gg, lg
+                chunk_out[3] = qt
+                o.mul_(gg.to(o.dtype).transpose(1, 2).unsqueeze(-1))
+            else:
+                chunk_out[0] = max_p_all
             # 送出的 o 已按 (B,T,H) 布局写满，直接 view 成多头合并的 (B,T,C)
             return o.view(B, T, H * Dh)
 
-        max_ps, qterms, logits, gs, argmaxes, p_nulls = [], [], [], [], [], []
+        # [max_p, g, logit, qterm]：仅统计路径（collect_stats=True，不启用
+        # checkpoint）消费，闭包写入后由下方按需返回。
+        chunk_out = [None, None, None, None]
+        argmaxes, p_nulls = [], []
         if use_ckpt:
             # 训练态按层（而非按查询块）包一层 checkpoint；门控查询项作为
             # 输入传入（而非闭包捕获），其梯度经输入路径正常回传。
@@ -574,7 +579,12 @@ class CausalSelfAttention(nn.Module):
         if not collect_stats:
             return o, None, None, None, None, None, None
         cat = lambda xs: torch.cat(xs, dim=2) if xs else None
-        return o, cat(max_ps), cat(qterms), cat(logits), cat(gs), \
+        # 轻量统计（keep_gate_terms=False，契约上只消费 g）：集中度门控在
+        # _gate_logit 内对 max_p 原地 clamp_min_/log_，此后 max_p 装的已是
+        # log(max_p) 而不再是概率，不能作为统计返回，
+        # 与 SDPA 轻量分支的 max_p=None 口径保持一致。
+        return o, (chunk_out[0] if keep_gate_terms else None), \
+            chunk_out[3], chunk_out[2], chunk_out[1], \
             cat(argmaxes), cat(p_nulls)
 
     def forward(self, x: torch.Tensor, rope=None,
@@ -680,7 +690,7 @@ class CausalSelfAttention(nn.Module):
                       and elems >= _chunk_elems(dev)
                       and not (self.training and self.attn_dropout > 0))
 
-        # 门控查询项 w·q 预计算；分块路径在 _attend_chunked 内逐块归约
+        # 门控查询项 w·q 预计算；分块路径在 _attend_chunked 内整段归约一次
         # （checkpoint 重算安全），此处只为 SDPA 与非分块显式路径服务。
         qterm_pre = None
         if self.use_query and not will_chunk:
