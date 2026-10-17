@@ -240,8 +240,17 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 recommendations.append(
                     "训练不降而验证上升：按平台期过拟合处理（早停/正则化），"
                     "不要按欠拟合延长训练")
+            elif val_down:
+                # 验证仍在实质下降时绝不能套用"验证损失同样不降"的论断
+                # （会把在改善的 run 说成停滞）；先自检训练链路再谈容量。
+                recommendations.append(
+                    "训练不降而验证损失仍在下降：先确认训练损失记录与优化"
+                    "链路（日志/梯度）是否正常，再判断是否需要更大容量或"
+                    "更长训练")
             else:
-                recommendations.append("验证损失同样不降，与欠拟合判断一致")
+                recommendations.append(
+                    "训练与验证损失均无实质下降（波动未超噪声阈值），"
+                    "与欠拟合判断一致")
         else:
             status = "正常收敛"
             evidence.append(

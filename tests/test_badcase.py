@@ -359,4 +359,43 @@ def test_cross_variant_zero_error_variant_blocks_consensus():
     cross = cross_variant_analysis(
         {"standard": [a], "lega": [a], "qgate": [a]}, reference="standard")
     assert cross["n_shared_all_failures"] == 1
+    # 参照变体已评测且零错误：其余变体的每个失败都确实是“参照对而该方法错”，
+    # 全部计入新增是正确的（不能因为参照没有错误样本就放弃计数）。
+    cross = cross_variant_analysis(
+        {"standard": [], "lega": [a], "qgate": [a]}, reference="standard")
+    assert cross["reference_available"] is True
+    assert cross["per_variant"]["lega"]["n_new_vs_reference"] == 1
+    assert cross["per_variant"]["qgate"]["n_fixed_vs_reference"] == 0
     print("  [ok] 零错误变体阻止“全体共识失败”误报")
+
+
+def test_main_keeps_zero_error_variants_for_cross_variant():
+    """badcase.main 汇总时必须把 "badcases": []（已评测且零错误）传给跨变体
+    对照：否则全对变体被静默排除，方法特异性失败会被误报为共识失败。"""
+    import sys
+    from lega.badcase import main as badcase_main
+    tmp = tempfile.mkdtemp()
+    try:
+        a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+        for v, cases in (("standard", []), ("lega", [a]), ("qgate", [a])):
+            with open(os.path.join(tmp, f"ruler_{v}.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"variant": v, "seed": 1, "badcases": cases}, f,
+                          ensure_ascii=False)
+        old_argv = sys.argv
+        sys.argv = ["badcase", "--results_dir", tmp, "--no_md"]
+        try:
+            badcase_main()
+        finally:
+            sys.argv = old_argv
+        with open(os.path.join(tmp, "badcase_summary.json"),
+                  encoding="utf-8") as f:
+            merged = json.load(f)
+        cross = merged["cross_variant"]
+        assert cross["variants"] == ["lega", "qgate", "standard"], cross
+        assert cross["reference_available"] is True
+        assert cross["n_shared_all_failures"] == 0
+        assert cross["per_variant"]["lega"]["n_new_vs_reference"] == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] badcase.main 保留零错误变体进入跨变体对照")

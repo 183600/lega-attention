@@ -316,9 +316,12 @@ def paired_t_test(a, b) -> dict:
     df = n - 1
     if std_diff == 0.0:
         p = 1.0 if mean_diff == 0.0 else 0.0
+        # 零方差时 t 无有限值，方向必须跟随 mean_diff 的符号：
+        # 常数负差（方法一致更差）也记 t=+inf 会把方向说反。
+        t_inf = (math.copysign(float("inf"), mean_diff)
+                 if mean_diff != 0.0 else 0.0)
         return {"n": n, "mean_diff": mean_diff, "std_diff": 0.0,
-                "t": float("inf") if mean_diff else 0.0, "df": df, "p": p,
-                "d_z": None}
+                "t": t_inf, "df": df, "p": p, "d_z": None}
     t = mean_diff / (std_diff / math.sqrt(n))
     return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
             "t": float(t), "df": df, "p": student_t_two_sided_p(t, df),

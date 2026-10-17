@@ -328,15 +328,23 @@ def fig_calibration(rdir, variant="lega"):
 def fig_misleading(rdir):
     """各变体：集中时找对率 vs 集中但看错率 —— “集中≠找对”的直接证据。"""
     keys = ("p_hit_given_conc", "p_hit_given_notconc", "misleading_rate")
-    groups = {}
     files = [fp for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json")))
              if "records" not in os.path.basename(fp)]
-    for fp in _prefer_seeded(files):
+    # 种子择优必须按变体分别进行（同 _group_by_variant）：全局 _prefer_seeded
+    # 会因一个变体有 _seed 文件而把其它变体仅有的无种子结果整体丢弃。
+    grouped = {}
+    for fp in files:
         d = _load(fp)
-        if d and d.get("n_records"):
-            groups.setdefault(d["variant"], []).append(d)
+        if not (d and d.get("variant") and d.get("n_records")):
+            continue
+        m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
+        seed = int(m.group(1)) if m else d.get("seed")
+        grouped.setdefault(d["variant"], []).append((seed, d))
     rows = []
-    for v, ds in groups.items():
+    for v, items in grouped.items():
+        ds = ([d for s, d in items if s is not None]
+              if any(s is not None for s, _ in items)
+              else [d for _, d in items])
         row = {"variant": v}
         for k in keys:
             vals = [d[k] for d in ds if d.get(k) is not None]

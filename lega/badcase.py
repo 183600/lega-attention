@@ -478,8 +478,9 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
                 "note": "少于 2 个变体的错误样本，无法做跨变体对照"}
     all_set = set(variants)
     shared = sorted(k for k, it in items.items() if it["variants"] == all_set)
-    # 参照变体（默认 standard）无任何错误时无法计算“新增/改对”：不套用
-    # “全部失败都算新增”的兜底，否则每个变体都会被误报为引入大量新增错误。
+    # 参照变体只有“未评测”（不在 variants 里）才无法计算新增/改对。
+    # 若参照已评测且零错误（[]），按定义其余变体的每个失败都是“参照对而
+    # 该方法错”，全部计入 new_vs_reference 是正确的，不需要兜底。
     has_ref = reference in variants
     ref_failed = ({k for k, it in items.items() if reference in it["variants"]}
                   if has_ref else set())
@@ -599,7 +600,10 @@ def main():
         except (OSError, ValueError):
             continue
         v = payload.get("variant")
-        if v and v not in per_variant and payload.get("badcases"):
+        # "badcases": [] 表示"该变体已评测且零错误"，必须保留传入跨变体对照
+        # （与 cross_variant_analysis 的语义一致）；只有缺失/非列表才视为无数据。
+        if v and v not in per_variant \
+                and isinstance(payload.get("badcases"), list):
             per_variant[v] = payload["badcases"]
     if all_analyses or window_analyses:
         merged = {

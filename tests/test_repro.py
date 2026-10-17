@@ -61,6 +61,22 @@ def test_data_fingerprint_cache_and_invalidation():
     print("  [ok] 数据指纹缓存命中/内容变化失效")
 
 
+def test_data_fingerprint_survives_malformed_cache():
+    """缓存文件语法合法但结构畸形（非对象/files 非列表/元素非对象）时
+    必须视为未命中并重建，而不是让指纹计算崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        cache = os.path.join(d, ".lega_fingerprint.json")
+        ref = data_fingerprint(d)
+        for bad in ([1, 2], "oops", 5, {"algo": "sha256-16", "files": None},
+                    {"algo": "sha256-16", "files": [1, "x"]}):
+            with open(cache, "w", encoding="utf-8") as f:
+                json.dump(bad, f)
+            assert data_fingerprint(d)["digest"] == ref["digest"]
+    print("  [ok] 畸形指纹缓存被视为未命中并重建")
+
+
 def test_git_and_runtime_info_json_safe():
     git = git_info()
     assert set(git) == {"commit", "commit_short", "branch", "dirty"}

@@ -55,6 +55,17 @@ def test_plateau_train_rising_val_is_overfitting():
     d2 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
                              [2.0, 2.01, 2.005, 2.02, 2.01]))
     assert d2["status"] == "欠拟合/学习不充分", d2
+    assert not any("同样不降" in r for r in d2["recommendations"]), \
+        d2["recommendations"]
+    # 训练平台期而验证显著下降：更不能说"验证损失同样不降"，并应给出
+    # 先自检训练链路的指引（而不是断言停滞或直接建议扩大容量）
+    d3 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
+                             [4.0, 3.5, 3.0, 2.6, 2.3]))
+    assert d3["status"] == "欠拟合/学习不充分", d3
+    assert not any("同样不降" in r for r in d3["recommendations"]), \
+        d3["recommendations"]
+    assert any("验证损失仍在下降" in r for r in d3["recommendations"]), \
+        d3["recommendations"]
     print("  [ok] 平台期验证回升 → 过拟合（不误报欠拟合/延长训练）")
 
 

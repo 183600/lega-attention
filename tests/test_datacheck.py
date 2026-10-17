@@ -111,6 +111,25 @@ def test_decontaminate_ignores_short_lines():
     print("  [ok] 短行（如标题）不参与去污染；train 内部重复仅计数")
 
 
+def test_decontaminate_counts_short_line_duplicates():
+    """短行不参与去污染，但同一 split 内重复的短行仍要计数供审查
+    （docstring 承诺；否则重复标题行在报告里完全不可见）。"""
+    short = "= References ="
+    train_long = "A train-only paragraph long enough to satisfy the length threshold."
+    val_long = "A validation paragraph that is distinct and sufficiently long too."
+    test_long = "A test paragraph that is distinct from the others and long enough."
+    texts = {"train": f"{short}\n{short}\n{train_long}",
+             "val": val_long, "test": test_long}
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert short in out["train"]
+    assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
+    # 重复的是短行，同样必须计入 intra-split 重复统计
+    assert stats["train_intra_split_duplicate_lines"] == 1
+    assert stats["val_intra_split_duplicate_lines"] == 0
+    assert stats["test_intra_split_duplicate_lines"] == 0
+    print("  [ok] 短行不参与去污染，但重复短行仍被计数供审查")
+
+
 def test_ngram_overlap_detects_and_clears():
     rng = np.random.default_rng(0)
     leak = rng.integers(0, 1000, size=64).astype(np.uint16)

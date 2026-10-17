@@ -72,27 +72,37 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     """
     min_chars = int(min_chars)
 
-    def scan_long(t):
-        # 单次扫描：每行只 strip 一次，同时得到长行数与去重后的长行集合
-        n_long, seen = 0, set()
+    def scan(t):
+        # 单次扫描：每行只 strip 一次。长行（>= min_chars）用于去污染；
+        # 非空行的重复都计数——短行不参与去污染，但重复数量仍统计供审查
+        # （见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
+        n_long, seen_long, n_valid, seen_valid = 0, set(), 0, set()
         for ln in (t or "").split("\n"):
             s = ln.strip()
+            if not s:
+                continue
+            n_valid += 1
+            seen_valid.add(s)
             if len(s) >= min_chars:
                 n_long += 1
-                seen.add(s)
-        return n_long, seen
+                seen_long.add(s)
+        return n_long, seen_long, n_valid, seen_valid
 
     eval_lines = set()
     eval_counts = {}
     for split in ("val", "test"):
-        n_long, seen = scan_long(texts.get(split))
-        eval_lines.update(seen)
-        eval_counts[split] = (n_long, len(seen))
+        n_long, seen_long, n_valid, seen_valid = scan(texts.get(split))
+        eval_lines.update(seen_long)
+        eval_counts[split] = (n_long, n_valid, len(seen_valid))
 
     kept, dropped = [], 0
     n_train, seen_train = 0, set()
+    n_valid_train, seen_valid_train = 0, set()
     for ln in texts["train"].split("\n"):
         s = ln.strip()
+        if s:
+            n_valid_train += 1
+            seen_valid_train.add(s)
         if len(s) >= min_chars:
             n_train += 1
             seen_train.add(s)
@@ -105,11 +115,12 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     out["train"] = "\n".join(kept)
     stats = {"min_chars": min_chars,
              "train_lines_dropped_as_duplicates_of_eval": int(dropped)}
-    for split in ("train", "val", "test"):
-        n_long, n_uniq = ((n_train, len(seen_train)) if split == "train"
-                          else eval_counts[split])
+    per_split = {"train": (n_train, n_valid_train, len(seen_valid_train)),
+                 "val": eval_counts["val"], "test": eval_counts["test"]}
+    for split, (n_long, n_valid, n_uniq_valid) in per_split.items():
         stats[f"{split}_long_lines"] = int(n_long)
-        stats[f"{split}_intra_split_duplicate_lines"] = int(n_long - n_uniq)
+        stats[f"{split}_intra_split_duplicate_lines"] = int(
+            n_valid - n_uniq_valid)
     return out, stats
 
 

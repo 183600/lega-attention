@@ -133,7 +133,10 @@ def test_paired_t_edge_cases():
     assert r["t"] == 0.0 and r["p"] == 1.0
     # 常数差且方差为 0：均值非 0 记 p=0，均值 0 记 p=1
     r = paired_t_test([6.0, 6.0, 6.0], [5.0, 5.0, 5.0])
-    assert r["p"] == 0.0 and math.isinf(r["t"])
+    assert r["p"] == 0.0 and math.isinf(r["t"]) and r["t"] > 0
+    # 零方差且均值为负：t 必须带负号（方向不能被说反）
+    r = paired_t_test([5.0, 5.0, 5.0], [6.0, 6.0, 6.0])
+    assert r["p"] == 0.0 and math.isinf(r["t"]) and r["t"] < 0
     # n=1：无法检验，p 为 None
     r = paired_t_test([2.0], [1.0])
     assert r["n"] == 1 and r["p"] is None and r["t"] is None
