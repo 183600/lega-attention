@@ -1092,7 +1092,7 @@ def build_summary(results_dir: str, audit: dict = None,
             "也错）更可能是数据/构造/内在难度问题，不应算作某一方法的缺陷；"
             "相对 standard 的新增错误才是该方法的特异性盲区，优先逐条分析。")
         md += ["", "| 变体 | 错误样本数 | 全体共识失败 | 相对standard新增 "
-                   "| 相对standard修复 |", "|---|---|---|---|---|"]
+                   "| 相对standard改对 |", "|---|---|---|---|---|"]
         for v in bad_cross["variants"]:
             pv = (bad_cross["per_variant"] or {}).get(v) or {}
 
@@ -1202,7 +1202,7 @@ def build_summary(results_dir: str, audit: dict = None,
                 f"跨变体看：{win_cross['n_unique_failed_items']} 个不同的最差窗口，"
                 f"其中 {n_shared_w} 个为全体变体共识失败（更可能是数据的局部"
                 "不可预测/噪声，而非某一模型的问题）；"
-                + (f"⚠ 参照 standard 无最差窗口记录，新增/修复计数不可得。"
+                + (f"⚠ 参照 standard 无最差窗口记录，新增/改对计数不可得。"
                    if not win_cross.get("reference_available") else
                    "相对 standard 的新增窗口才是该方法引入的预测退化。"))
     else:

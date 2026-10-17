@@ -243,7 +243,7 @@ def test_cross_variant_analysis_shared_vs_specific():
         {"standard": [a], "lega": [a], "qgate": [a]}, reference="standard")
     assert cross["n_shared_all_failures"] == 1
     assert cross["shared_failures"][0]["key"] == "niah_synth@256#0"
-    # 参照变体无错误时不得把“全部失败”误报为“新增回归”
+    # 参照变体无错误时不得把“全部失败”误报为“大量新增错误”
     cross = cross_variant_analysis({"lega": [a], "qgate": [b]},
                                    reference="standard")
     assert cross["reference_available"] is False

@@ -392,7 +392,7 @@ def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
 
 # ---------------------------------------------------------------- 跨变体错误对照
 
-# 每个变体最多保留的"新增/修复"个案条数（只作报告展示，计数始终完整）
+# 每个变体最多保留的"新增/改对"个案条数（只作报告展示，计数始终完整）
 CROSS_LIST_LIMIT = 5
 
 
@@ -433,9 +433,9 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
       * shared_all_failures —— 所有变体都错的样本：更可能是数据/构造错误或
         样本本身不可解（尤其当 standard 也错），不应算作某一方法的缺陷；
       * 相对参照（默认 standard）的 new_vs_reference —— 参照对而该方法错的
-        样本：疑似该方法引入的特异性盲区/回归，应优先逐条分析；
-      * 相对参照的 fixed_vs_reference —— 参照错而该方法对的样本：方法修复
-        的证据，可与新增错误对照衡量净收益。
+        样本：疑似该方法引入的特异性盲区，应优先逐条分析；
+      * 相对参照的 fixed_vs_reference —— 参照错而该方法对的样本：该方法
+        由错转对的证据，可与新增错误对照衡量净收益。
     n<2 个变体时返回空对照并注明。
     """
     variants = sorted(v for v, cs in (per_variant_cases or {}).items() if cs)
@@ -451,8 +451,8 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
                 "note": "少于 2 个变体的错误样本，无法做跨变体对照"}
     all_set = set(variants)
     shared = sorted(k for k, it in items.items() if it["variants"] == all_set)
-    # 参照变体（默认 standard）无任何错误时无法计算“新增/修复”：不套用
-    # “全部失败都算新增”的兜底，否则每个变体都会被误报为引入大量回归。
+    # 参照变体（默认 standard）无任何错误时无法计算“新增/改对”：不套用
+    # “全部失败都算新增”的兜底，否则每个变体都会被误报为引入大量新增错误。
     has_ref = reference in variants
     ref_failed = ({k for k, it in items.items() if reference in it["variants"]}
                   if has_ref else set())
@@ -485,7 +485,7 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
         "note": ("共识失败（所有变体都错，含标准基线）优先怀疑数据/构造/内在"
                  "难度；相对参照新增的错误才是该方法的特异性盲区，优先分析。"
                  + ("" if has_ref else f"⚠ 参照变体 {reference} 没有错误样本，"
-                                        "新增/修复计数不可得。")
+                                        "新增/改对计数不可得。")
                  + f"个案列表每类最多展示 {CROSS_LIST_LIMIT} 条，计数为完整值。"),
     }
 
