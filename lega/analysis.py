@@ -264,12 +264,14 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     labels = [np.array([float(r["hit"]) for r in clusters[e]]) for e in ex_ids]
     scores = {k: [np.array([float(r[k]) for r in clusters[e]]) for e in ex_ids]
               for k in score_keys}
-
-    def _auroc_safe(sc, lb):
-        if np.isnan(sc).any() or len(set(lb.tolist())) != 2:
-            return None
-        v = auroc(sc, lb)
-        return v if np.isfinite(v) else None
+    # 逐聚类预计算“是否含正/负类”“得分是否含 NaN”：重采样时先按聚类标志
+    # 判定有效性，再构造拼接数组。与原 _auroc_safe 的过滤口径逐位等价
+    # （重采样后标签恰有两类 ⟺ 命中的聚类中正负类都出现），但省去每次
+    # 重采样对全池标签做 set()/tolist() 的整表转换与无效样本的数组构造。
+    has_pos = np.array([bool((lb == 1.0).any()) for lb in labels])
+    has_neg = np.array([bool((lb == 0.0).any()) for lb in labels])
+    nan_score = {k: np.array([bool(np.isnan(sc).any()) for sc in scores[k]])
+                 for k in score_keys}
 
     rng = np.random.default_rng(seed)
     samples: Dict = {k: [] for k in score_keys}
@@ -277,10 +279,17 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     n_valid = 0
     for _ in range(int(n_resamples)):
         idx = rng.integers(0, len(ex_ids), len(ex_ids))
-        lb = np.concatenate([labels[i] for i in idx])
+        both = bool(has_pos[idx].any() and has_neg[idx].any())
+        lb = None
         vals = {}
         for k in score_keys:
-            v = _auroc_safe(np.concatenate([scores[k][i] for i in idx]), lb)
+            if not both or nan_score[k][idx].any():
+                vals[k] = None
+                continue
+            if lb is None:
+                lb = np.concatenate([labels[i] for i in idx])
+            v = auroc(np.concatenate([scores[k][i] for i in idx]), lb)
+            v = v if np.isfinite(v) else None
             vals[k] = v
             if v is not None:
                 samples[k].append(v)
@@ -340,28 +349,25 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
         "corr_qterm_g": (pearson(qterm, g) if (~np.isnan(qterm)).any() and (~np.isnan(g)).any() else None),
     })
-    # 逐头统计
+    # 逐头统计：直接对上方的整段数组按 (layer, head) 掩码切片，
+    # 不重新逐记录构造各字段（原实现对每个头重复扫描全部记录）。
     per_head = []
-    by_lh: Dict[tuple, List[Dict]] = {}
-    for r in records:
-        by_lh.setdefault((r["layer"], r["head"]), []).append(r)
-    for (layer, head), rs in sorted(by_lh.items()):
-        gg = np.array([np.nan if r.get("g") is None else r["g"] for r in rs], dtype=np.float64)
-        hh = np.array([np.nan if r.get("hit") is None else r["hit"] for r in rs], dtype=np.float64)
-        cc = np.array([np.nan if r.get("c") is None else r["c"] for r in rs], dtype=np.float64)
-        qq = np.array([np.nan if r.get("qterm") is None else r["qterm"] for r in rs], dtype=np.float64)
-        ll = np.array([np.nan if r.get("logit") is None else r["logit"] for r in rs], dtype=np.float64)
-        mp = np.array([r["max_p"] for r in rs])
+    layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)
+    head_arr = np.array([r["head"] for r in records], dtype=np.int64)
+    for layer, head in np.unique(np.stack([layer_arr, head_arr], axis=1), axis=0):
+        m = (layer_arr == layer) & (head_arr == head)
+        gg, hh, cc = g[m], hit[m], c[m]
+        qq, ll, mp = qterm[m], logit[m], max_p[m]
         hv = ~np.isnan(hh)
 
         def _auroc(scores, labels, mask):
-            m = mask & ~np.isnan(scores)
-            if not m.any() or len(set(labels[m])) != 2:
+            mk = mask & ~np.isnan(scores)
+            if not mk.any() or len(set(labels[mk])) != 2:
                 return None
-            return auroc(scores[m], labels[m])
+            return auroc(scores[mk], labels[mk])
 
         per_head.append({
-            "layer": layer, "head": head, "n": len(rs),
+            "layer": int(layer), "head": int(head), "n": int(m.sum()),
             "mean_g": float(np.nanmean(gg)) if (~np.isnan(gg)).any() else None,
             "mean_max_p": float(mp.mean()),
             "hit_rate": float(np.nanmean(hh)) if hv.any() else None,

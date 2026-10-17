@@ -45,8 +45,12 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
             out = model(x, last_logits_only=True)
         logits = out["logits"][:, -1, :].float()
         gold = y[:, -1]
-        losses = F.cross_entropy(logits, gold, reduction="none")
-        top_p, top_i = torch.topk(torch.softmax(logits, dim=-1), 5, dim=-1)
+        # 只做一次 log_softmax：交叉熵与 top-5 概率共用同一份结果，
+        # 不再额外物化一张 full-vocab softmax 临时张量（大词表下显著）。
+        logp = F.log_softmax(logits, dim=-1)
+        losses = -logp.gather(1, gold.unsqueeze(1)).squeeze(1)
+        top_v, top_i = torch.topk(logp, 5, dim=-1)
+        top_p = top_v.exp()
         # 整表转 Python 标量后再构造行记录。
         loss_l, gold_l = losses.tolist(), gold.tolist()
         top_p_l, top_i_l = top_p.tolist(), top_i.tolist()
@@ -147,6 +151,9 @@ def main():
         # 须明确提示而非静默；正式数据请用 prepare_data.py 生成 held-out test。
         print("[eval] 警告：正在 val split 上评测——这也是 best checkpoint 的选择集，"
               "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测")
+    # checkpoint 内容指纹只计算一次：test 访问账本与结果 JSON 共用同一值，
+    # 避免对同一（可能数百 MB 的）文件重复流式哈希。
+    ckpt_sha256 = sha256_file(args.ckpt)
     test_access = None
     if split == "test":
         # 测试集尘封协议：每次在 test 上评测都写入访问账本（data_dir 下），
@@ -157,7 +164,7 @@ def main():
             test_access = append_test_access(args.data_dir, {
                 "time": now_str(),
                 "ckpt": os.path.abspath(args.ckpt),
-                "ckpt_sha256": sha256_file(args.ckpt),
+                "ckpt_sha256": ckpt_sha256,
                 "variant": ck.get("variant", model.variant),
                 "seed": ck.get("seed"),
             })
@@ -207,7 +214,7 @@ def main():
         "ckpt": args.ckpt,
         # 被评测产物的内容指纹：结果与 checkpoint 一一绑定，换/改 checkpoint
         # 后旧结果无法冒充（与 test 访问账本、实验台账中的哈希同一口径）
-        "ckpt_sha256": sha256_file(args.ckpt),
+        "ckpt_sha256": ckpt_sha256,
         "split": split,
         # checkpoint（model_best.pt）在 val 上选出；split=val 时报告指标与选择集同源
         "selection_set_is_eval_set": bool(split == "val"),

@@ -18,6 +18,7 @@ import itertools
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .repro import ROOT, sha256_file
 
@@ -92,16 +93,22 @@ def collect_artifacts(paths, rel_to: str = None) -> dict:
     """对产物文件计算 SHA-256 与大小；缺失文件跳过。
 
     rel_to 给定时用相对路径作为键（避免把机器绝对路径写进台账，且跨机器
-    对照时键稳定）。
+    对照时键稳定）。大文件（数百 MB 的 checkpoint）用线程池并行哈希：
+    hashlib 在分块读取时释放 GIL，并行后整体墙钟显著缩短；键顺序与输入一致。
     """
-    out = {}
-    for p in paths:
-        if not os.path.isfile(p):
-            continue
-        key = os.path.relpath(p, rel_to) if rel_to else p
-        out[key] = {"sha256": sha256_file(p),
-                    "size": int(os.path.getsize(p))}
-    return out
+    entries = [(p, os.path.relpath(p, rel_to) if rel_to else p)
+               for p in paths if os.path.isfile(p)]
+    if not entries:
+        return {}
+
+    def _one(entry):
+        p, key = entry
+        return key, {"sha256": sha256_file(p), "size": int(os.path.getsize(p))}
+
+    if len(entries) == 1:
+        return dict([_one(entries[0])])
+    with ThreadPoolExecutor(max_workers=min(8, len(entries))) as ex:
+        return dict(ex.map(_one, entries))
 
 
 def _load_json(path: str):

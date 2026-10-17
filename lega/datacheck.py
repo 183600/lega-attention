@@ -105,10 +105,15 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     """
     min_chars = int(min_chars)
 
+    def digest(s: str) -> bytes:
+        return hashlib.blake2b(s.encode("utf-8"), digest_size=16).digest()
+
     def scan(t):
         # 单次扫描：每行只 strip/normalize 一次。长行（>= min_chars）用于
         # 去污染；非空行的重复都计数——短行不参与去污染，但重复数量仍统计
         # 供审查（见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
+        # 仅用于 len() 的计数集合存 128-bit 摘要而非整行字符串：在数百 MB
+        # 语料上避免为去重计数再持有一份归一化行文本（16 字节碰撞概率可忽略）。
         n_long, n_valid = 0, 0
         seen_long, seen_long_norm = set(), set()
         seen_valid, seen_valid_norm = set(), set()
@@ -117,12 +122,13 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             if not s:
                 continue
             n_valid += 1
-            seen_valid.add(s)
-            seen_valid_norm.add(_normalize_line(s))
+            sn = _normalize_line(s)
+            seen_valid.add(digest(s))
+            seen_valid_norm.add(digest(sn))
             if len(s) >= min_chars:
                 n_long += 1
                 seen_long.add(s)
-                seen_long_norm.add(_normalize_line(s))
+                seen_long_norm.add(sn)
         return (n_long, seen_long, seen_long_norm, n_valid,
                 len(seen_valid), len(seen_valid_norm))
 
@@ -137,21 +143,22 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
 
     kept, dropped_exact, dropped_norm = [], 0, 0
     n_train, n_valid_train = 0, 0
-    seen_train, seen_valid_train = set(), set()
-    seen_valid_train_norm = set()
+    # 仅用于计数 len() 的集合存摘要（同 scan 的内存口径）；归一化每行只算一次。
+    seen_valid_train, seen_valid_train_norm = set(), set()
     for ln in texts["train"].split("\n"):
         s = ln.strip()
+        sn = None
         if s:
             n_valid_train += 1
-            seen_valid_train.add(s)
-            seen_valid_train_norm.add(_normalize_line(s))
+            sn = _normalize_line(s)
+            seen_valid_train.add(digest(s))
+            seen_valid_train_norm.add(digest(sn))
         if len(s) >= min_chars:
             n_train += 1
-            seen_train.add(s)
             if s in eval_lines:
                 dropped_exact += 1
                 continue
-            if _normalize_line(s) in eval_norm_lines:
+            if sn in eval_norm_lines:
                 dropped_norm += 1
                 continue
         kept.append(ln)
@@ -175,6 +182,18 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     return out, stats
 
 
+def _iter_line_lengths(text: str):
+    """逐行字符长度，与 text.split("\\n") 的长度序列一致，但不构造行字符串列表。"""
+    start = 0
+    while True:
+        i = text.find("\n", start)
+        if i < 0:
+            yield len(text) - start
+            return
+        yield i - start
+        start = i + 1
+
+
 def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
     """逐行长度分布：用于发现异常值（超长行会主导训练窗口）。
 
@@ -183,7 +202,7 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
     """
     if not text:
         return {"lines": 0, "chars": 0}
-    lens = np.fromiter((len(ln) for ln in text.split("\n")), dtype=np.int64,
+    lens = np.fromiter(_iter_line_lengths(text), dtype=np.int64,
                        count=text.count("\n") + 1)
     return {
         "lines": int(lens.size),
@@ -340,14 +359,19 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
 
 # ---------------------------------------------------------------- 时序划分
 
+_NEWLINE_RE = re.compile("\n")
+_BLANK_LINE_RE = re.compile(r"(?<=\n)\n")
+
+
 def _boundary_candidates(seg: str, base: int, kind: str):
+    # 换行/空行候选用 C 层正则扫描而非逐字符 Python 循环：seg 长度可达
+    # 全文件窗口的 2 倍（数 MB~数十 MB），逐字符循环会成为数据预处理的瓶颈。
     if kind == "heading":
         return [base + m.start() for m in _HEADING_RE.finditer(seg)
                 if base + m.start() > 0]
     if kind == "blank":
-        return [base + i + 1 for i in range(1, len(seg))
-                if seg[i] == "\n" and seg[i - 1] == "\n"]
-    return [base + i + 1 for i in range(len(seg)) if seg[i] == "\n"]
+        return [base + m.start() + 1 for m in _BLANK_LINE_RE.finditer(seg)]
+    return [base + m.start() + 1 for m in _NEWLINE_RE.finditer(seg)]
 
 
 def _pick_boundary(text: str, target: int, window: int):
