@@ -134,8 +134,12 @@ Outputs:
 | `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence) |
-| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent) |
-| `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths |
+| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting/underfitting/divergence/NaN + recommendations) |
+| `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
+| `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) |
+| `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard) |
+| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases |
+| `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths, with badcases error samples |
 | `results/<tag>/latency.json` | prefill / decode latency |
 | `results/<tag>/analysis_*.csv|json` | Per (layer, head, query position) gate records and aggregates |
 | `results/<tag>/fig_*.png` | All plots (including training curves `fig_train_curves.png`) |
@@ -162,8 +166,19 @@ python -m lega.latency   --config configs/small.json --data_dir data/wikitext103
 python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
 python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
+python -m lega.curves    --run_dir out/small/lega/seed1337   # training-curve diagnosis (overfit/underfit/divergence/NaN)
+python -m lega.badcase   --results_dir results/small         # error attribution (RULER + LM worst windows)
 python -m tests.run_tests   # unit tests (no pytest dependency)
 ```
+
+Result-analysis protocol (see the matching sections in `summary.md`): diagnose the
+training curves rather than final values only; for NaN follow the checklist order
+data → code (log(0)/division by zero/softmax overflow) → mixed-precision underflow →
+gradient explosion/LR (see `nan_report.json`); attribute every error case, and use
+the cross-variant comparison to separate "shared failures (data/difficulty)" from
+"method-specific blind spots"; the accuracy-efficiency trade-off is judged explicitly
+(a gain without significance, or a cost far exceeding the gain, is flagged — see the
+`tradeoff_verdict` rules in §2).
 
 ---
 
@@ -185,6 +200,8 @@ lega-attention/
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
 │   ├── latency.py             # prefill / decode latency benchmark
 │   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC
+│   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN) + recommendations
+│   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison
 │   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
 │   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance
 │   ├── experiment.py          # append-only experiment ledger (code/config/seed/data/result hashes per run)

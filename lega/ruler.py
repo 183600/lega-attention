@@ -450,6 +450,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 避免单个超长样例让不同模型的有效样本量 n 悄悄不同
                     skipped.append(f"{task}@ctx{ctx}: {e}")
                     continue
+                # 稳定标识：各变体用同一 (task, ctx, i) 构造同一批样本，
+                # 跨变体错误对照靠它把错误的个案一一对齐（而不是靠文本猜测）
+                ex["sample_id"] = f"{task}@{room_ctx}#{i}"
                 samples.append(ex)
             if not samples:
                 continue
@@ -483,6 +486,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                             prompt_nums = set(_NUM_RE.findall(prompt_text))
                             qs, qe = ex["query_span"]
                             badcases.append({
+                                "sample_id": ex.get("sample_id"),
                                 "task": task, "ctx": int(room_ctx),
                                 "answer": ex["answer"],
                                 "answer_words": ex["answer_words"],

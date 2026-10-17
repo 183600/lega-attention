@@ -24,7 +24,8 @@ from .utils import enable_tf32, get_device, now_str, save_json, set_seed
 @torch.inference_mode()
 def collect_worst_windows(model, val, ctx: int, device: str, tok,
                           n_worst: int = 3, amp: bool = False,
-                          max_windows: int = 64, batch_windows: int = None) -> list:
+                          max_windows: int = 64, batch_windows: int = None,
+                          split: str = "val") -> list:
     """语言建模的坏案例：挑出下一 token 预测最差的验证窗口并解码。
 
     以"窗口末位的下一 token 预测"为坏案例单元（与贪心生成评测口径一致）：
@@ -49,6 +50,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
         for r in range(len(chunk)):
             rows.append({
                 "window": int(chunk[r]),
+                "split": str(split),
                 "loss": float(losses[r]),
                 "context_tail": tok.decode(x[r].tolist())[-160:],
                 "gold_next": tok.decode([int(gold[r])]),
@@ -172,7 +174,7 @@ def main():
             tok = load_tokenizer(args.data_dir)
             res["worst_windows"] = collect_worst_windows(
                 model, val, ctx, device, tok, n_worst=int(args.worst_n),
-                amp=use_amp)
+                amp=use_amp, split=split)
             print(f"[eval] 最差 {len(res['worst_windows'])} 个窗口已随结果落盘"
                   "（res['worst_windows']）")
         except Exception as e:  # 坏案例转储失败不应阻塞评测本身

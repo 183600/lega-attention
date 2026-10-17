@@ -133,8 +133,12 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据） |
-| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val） |
-| `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文 |
+| `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合/欠拟合/发散/NaN + 处理建议） |
+| `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe） |
+| `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现） |
+| `results/<tag>/badcase_cross.json` | 跨变体错误对照（全体共识失败 vs 相对 standard 的特异性新增/修复） |
+| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val），含 worst_windows 坏案例 |
+| `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文，含 badcases 错误样本 |
 | `results/<tag>/latency.json` | prefill / decode 延迟 |
 | `results/<tag>/analysis_*.csv|json` | 逐 (层，头，查询位) 门控记录与汇总 |
 | `results/<tag>/fig_*.png` | 全部图表（中文标注，含训练曲线 `fig_train_curves.png`） |
@@ -161,8 +165,16 @@ python -m lega.latency   --config configs/small.json --data_dir data/wikitext103
 python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
 python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
+python -m lega.curves    --run_dir out/small/lega/seed1337   # 训练曲线诊断（过拟合/欠拟合/发散/NaN）
+python -m lega.badcase   --results_dir results/small         # 错误样本归因（RULER + 语言建模最差窗口）
 python -m tests.run_tests   # 单元测试（不依赖 pytest）
 ```
+
+结果分析口径（详见 `summary.md` 对应小节）：训练诊断看曲线而非只看最终值；NaN 按
+数据→代码（log(0)/除零/softmax 溢出）→混合精度下溢→梯度爆炸/学习率的顺序排查
+（`nan_report.json`）；错误样本逐条归因，并用跨变体对照区分"全体共识失败（数据/
+难度）"与"方法特异性盲区"；效率-精度权衡显式判定（涨点未过显著性检验或增幅远大于
+收益时明确标注，见 §2 的 `tradeoff_verdict` 规则）。
 
 ---
 
@@ -184,6 +196,8 @@ lega-attention/
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
 │   ├── latency.py             # prefill / decode 延迟基准
 │   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC
+│   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN）+ 处理建议
+│   ├── badcase.py             # 错误样本归因（RULER + 语言建模最差窗口）+ 跨变体对照
 │   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
 │   ├── repro.py               # 代码版本/数据指纹/运行环境/种子审计/溯源继承
 │   ├── experiment.py          # 追加式实验台账（跨轮次记录代码/配置/种子/数据/结果哈希）

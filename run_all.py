@@ -48,7 +48,9 @@ sys.path.insert(0, ROOT)
 
 from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
-                          analyze_badcases, process_ruler_json)
+                          WINDOW_CATEGORY_CN, analyze_badcases,
+                          analyze_worst_windows, cross_variant_analysis,
+                          process_eval_json, process_ruler_json)
 from lega.curves import STATUS_ORDER, diagnose_run_dir, worst_status  # noqa: E402
 from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
@@ -1018,12 +1020,21 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 坏案例分析：预测错误的样本逐一归因（改进思路的最重要来源）
     md += ["", "## 坏案例分析（预测错误的样本与归因）", ""]
     bad_rows, bad_example_pool = [], []
+    # 跨变体对照要求各变体使用同一批评测样本：取每个变体最小种子的错误
+    # 清单（RULER 样本由配置里的评测种子构造，与训练种子无关，可逐条对齐）
+    per_variant_badcases = {}
     for v in variants:
+        m = _variant_seed_map(runs, v)
         cases = []
-        for s in _variant_seed_map(runs, v).values():
+        for s in m.values():
             cases += (s.get("ruler") or {}).get("badcases") or []
         if not cases:
             continue
+        seeds_sorted = _sorted_seeds(m)
+        rep = ((m[seeds_sorted[0]].get("ruler") or {}).get("badcases") or []
+               if seeds_sorted else [])
+        if rep:
+            per_variant_badcases[v] = rep
         ana = analyze_badcases(cases, variant=v)
         cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
         cat_s = "；".join(f"{BADCASE_CN.get(k, k)}×{n}" for k, n in cats[:3])
@@ -1067,6 +1078,136 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- 暂无错误样本记录（RULER 未运行或全部命中）。"
                   "全部命中时也建议人工抽查若干正确样本确认没有'碰巧命中'。")
 
+    # --- 跨变体错误对照：共识失败（数据/难度）vs 方法特异性盲区
+    bad_cross = None
+    if len(per_variant_badcases) >= 2:
+        bad_cross = cross_variant_analysis(per_variant_badcases,
+                                           reference="standard")
+        md += ["", "### 跨变体错误对照（共识失败 vs 方法特异性）", ""]
+        n_shared = bad_cross["n_shared_all_failures"]
+        md.append(
+            f"各变体取最小种子的错误清单（样本集相同，可逐条对齐）：共 "
+            f"{bad_cross['n_unique_failed_items']} 个不同的失败样本，"
+            f"{n_shared} 个为全体变体共识失败——共识失败（尤其当 standard "
+            "也错）更可能是数据/构造/内在难度问题，不应算作某一方法的缺陷；"
+            "相对 standard 的新增错误才是该方法的特异性盲区，优先逐条分析。")
+        md += ["", "| 变体 | 错误样本数 | 全体共识失败 | 相对standard新增 "
+                   "| 相对standard修复 |", "|---|---|---|---|---|"]
+        for v in bad_cross["variants"]:
+            pv = (bad_cross["per_variant"] or {}).get(v) or {}
+
+            def _cnt(x):
+                return "-" if x is None else str(x)
+
+            md.append(f"| {VARIANT_CN.get(v, v)} | {_cnt(pv.get('n_failed'))} "
+                      f"| {_cnt(pv.get('n_shared_all'))} "
+                      f"| {_cnt(pv.get('n_new_vs_reference'))} "
+                      f"| {_cnt(pv.get('n_fixed_vs_reference'))} |")
+        # 展示至多 2 条特异性新增错误（方法盲区的最直接线索）
+        shown = 0
+        for v in bad_cross["variants"]:
+            if v == "standard" or shown >= 2:
+                continue
+            for c in (bad_cross["per_variant"][v].get("new_vs_reference") or []):
+                if shown >= 2:
+                    break
+                shown += 1
+                ctx_s = f"@ctx{c['ctx']}" if c.get("ctx") is not None else ""
+                md.append(
+                    f"- **{VARIANT_CN.get(v, v)} · {c.get('task')}{ctx_s} "
+                    f"特异性新增错误**：问题「{str(c.get('excerpt') or '')[-100:]}」；"
+                    f"输出 `{c.get('pred')}` vs gold `{c.get('answer')}`")
+        if n_shared and bad_cross["shared_failures"]:
+            c0 = bad_cross["shared_failures"][0]
+            ctx_s = f"@ctx{c0['ctx']}" if c0.get("ctx") is not None else ""
+            md.append(f"- 共识失败示例：{c0.get('task')}{ctx_s}，问题"
+                      f"「{str(c0.get('excerpt') or '')[-100:]}」；gold "
+                      f"`{c0.get('answer')}`（所有变体都错，先检查样本本身）")
+        md.append("")
+        md.append("注: 跨变体对照只使用各变体最小种子的错误清单以保证样本集一致，"
+                  "多种子时不同种子的失败集合变化属正常波动，不在此表统计。")
+    elif per_variant_badcases:
+        md += ["", "（仅一个变体有错误样本，无法做跨变体对照）"]
+
+    # --- 语言建模最差窗口（PPL 坏案例）：PPL 只反映平均，错误必须看得见
+    md += ["", "## 语言建模最差窗口（预测错误的样本）", ""]
+    per_variant_windows = {}
+    for v in variants:
+        m = _variant_seed_map(runs, v)
+        seeds_sorted = _sorted_seeds(m)
+        if not seeds_sorted:
+            continue
+        ev0 = m[seeds_sorted[0]].get("eval") or {}
+        wins = ev0.get("worst_windows") or []
+        if not wins:
+            continue
+        # 评测窗口集合由 (val 长度, ctx, eval_iters) 决定，与训练种子无关：
+        # 给每个窗口写入稳定 key，供跨变体对齐
+        keyed = []
+        for w in wins:
+            w = dict(w)
+            w.setdefault("split", ev0.get("split"))
+            w["sample_id"] = f"lm:{w.get('split') or '?'}#w{w.get('window')}"
+            keyed.append(w)
+        per_variant_windows[v] = keyed
+    win_cross = None
+    if per_variant_windows:
+        md.append("PPL 是所有窗口的平均，看不出「模型究竟错了哪句」。下表按窗口"
+                  "末位交叉熵挑出各变体最差的一次 next-token 预测并归因："
+                  "高置信错答=top1 概率≥0.5 却错（系统性盲区，含高置信复读）；"
+                  "复读吸引子=低置信下首选续写退化为抄上下文已有串；低置信="
+                  "模型在多个候选间平均（样本本身多解/噪声，或训练不足）。"
+                  "逐案例详情见 `worstcases_*.md`。")
+        md += ["", "| 变体 | 最差窗口数 | 主要归因 | 平均 top-1 概率 "
+                   "| gold 在上下文中 | gold 进 top-5 | 平均 loss |",
+               "|---|---|---|---|---|---|---|"]
+        window_pool, seen_cat = [], set()
+        for v, wins in per_variant_windows.items():
+            ana = analyze_worst_windows(wins, variant=v)
+            cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
+            cat_s = "；".join(f"{WINDOW_CATEGORY_CN.get(k, k)}×{n}"
+                              for k, n in cats[:3])
+            mt1 = ("-" if ana["mean_top1_prob"] is None
+                   else f"{ana['mean_top1_prob']:.3f}")
+            gic = ("-" if ana["gold_in_context_rate"] is None
+                   else f"{ana['gold_in_context_rate']:.0%}")
+            g5 = ("-" if ana["gold_in_top5_rate"] is None
+                  else f"{ana['gold_in_top5_rate']:.0%}")
+            ml = ("-" if ana["mean_loss"] is None else f"{ana['mean_loss']:.3f}")
+            md.append(f"| {VARIANT_CN.get(v, v)} | {ana['n_windows']} | {cat_s} "
+                      f"| {mt1} | {gic} | {g5} | {ml} |")
+            for c in ana["cases"]:
+                if c["category"] not in seen_cat:
+                    seen_cat.add(c["category"])
+                    window_pool.append((v, c))
+        # 摘 3 条不同类别的个案进汇总页
+        for v, c in window_pool[:3]:
+            tail = str(c.get("context_tail") or "").replace("\n", " ")[-100:]
+            p1 = c.get("top1_prob")
+            p1_s = f"（p={p1:.3f}）" if p1 is not None else ""
+            tag = ("gold 在上下文中" if c.get("gold_in_context")
+                   else "gold 不在上下文中")
+            md += [f"- **{VARIANT_CN.get(v, v)} · 窗口 #{c.get('window')}"
+                   + (f"（{c['split']}）" if c.get("split") else "")
+                   + f"** —— {WINDOW_CATEGORY_CN.get(c['category'], c['category'])}",
+                   f"  - 上下文尾部：…{tail}",
+                   f"  - 模型 top-1：`{c.get('top1')}`{p1_s}；真实续写："
+                   f"`{c.get('gold_next')}`（{tag}）"]
+        if len(per_variant_windows) >= 2:
+            win_cross = cross_variant_analysis(per_variant_windows,
+                                               reference="standard")
+            n_shared_w = win_cross["n_shared_all_failures"]
+            md.append("")
+            md.append(
+                f"跨变体看：{win_cross['n_unique_failed_items']} 个不同的最差窗口，"
+                f"其中 {n_shared_w} 个为全体变体共识失败（更可能是数据的局部"
+                "不可预测/噪声，而非某一模型的问题）；"
+                + (f"⚠ 参照 standard 无最差窗口记录，新增/修复计数不可得。"
+                   if not win_cross.get("reference_available") else
+                   "相对 standard 的新增窗口才是该方法引入的预测退化。"))
+    else:
+        md.append("- 暂无最差窗口记录（评测未含 --worst_n 或评测被跳过）。"
+                  "PPL 平均分无法替代对错误样本的逐条检查。")
 
     # --- 消融矩阵（全因子 + 去一法）
     present = set(runs.keys())
@@ -1265,6 +1406,13 @@ def build_summary(results_dir: str, audit: dict = None,
                             "d_z 为配对 Cohen's d 效应量"),
                    "component_evidence": comp},
                   f, ensure_ascii=False, indent=2)
+    cross_out = {}
+    if bad_cross:
+        cross_out["ruler"] = bad_cross
+    if win_cross:
+        cross_out["lm_windows"] = win_cross
+    if cross_out:
+        save_json(cross_out, os.path.join(results_dir, "badcase_cross.json"))
     print(f"[summary] 汇总 {len(rows)} 个变体 -> {results_dir}/summary.md "
           f"（配对检验 {len(tests)} 组）")
     return {"rows": rows, "markdown": "\n".join(md), "tests": tests}
@@ -1505,6 +1653,22 @@ def main():
                 print(f"[badcase] {os.path.basename(fp)}: "
                       f"{ana['n_badcases']} 条错误样本 —— {top}"
                       f" -> badcases_*.md")
+
+    # 语言建模坏案例：把 PPL 最差窗口（next-token 预测错误）逐一归因成
+    # Markdown，与 RULER 坏案例同等对待——PPL 平均分看不出模型错在哪句话
+    for fp in sorted(glob.glob(os.path.join(results_dir, "eval_*.json"))):
+        try:
+            ana = process_eval_json(fp)
+        except (OSError, ValueError, KeyError) as e:
+            print(f"[badcase] 跳过 {fp}: {e}")
+            continue
+        if not ana["n_windows"]:
+            continue
+        top = ", ".join(f"{WINDOW_CATEGORY_CN.get(k, k)}×{n}"
+                        for k, n in sorted(ana["category_counts"].items(),
+                                           key=lambda kv: -kv[1])[:3])
+        print(f"[badcase] {os.path.basename(fp)}: 最差窗口 {ana['n_windows']} 个"
+              f" —— {top} -> worstcases_*.md")
 
     if not args.skip_latency:
         # 显式给出基准的变体清单：lega.latency 的默认值不含消融变体，

@@ -1,11 +1,25 @@
-"""坏案例分析测试：错误归因（标注错误/误抄干扰/幻觉/无回答/fwe）与报告生成。"""
+"""坏案例分析测试：错误归因（标注错误/误抄干扰/幻觉/无回答/fwe）、语言建模
+最差窗口归因、跨变体错误对照与报告生成。"""
 import json
 import os
 import shutil
 import tempfile
 
-from lega.badcase import (analyze_badcases, categorize_case, process_ruler_json,
-                           write_badcase_md, CATEGORY_CN)
+from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
+                           case_key, categorize_case, categorize_window,
+                           cross_variant_analysis, process_eval_json,
+                           process_ruler_json, write_badcase_md,
+                           write_worstcase_md)
+
+
+def _win(pred_top5=None, gold="green", tail="The sky is blue. The sky is",
+         **kw):
+    rec = {"window": 7, "split": "val", "loss": 8.0, "context_tail": tail,
+           "gold_next": gold,
+           "pred_top5": ([[" blue", 0.7], [" red", 0.1]]
+                         if pred_top5 is None else pred_top5)}
+    rec.update(kw)
+    return rec
 
 
 def _case(task="niah_multikey", answer="7021853", pred="", ctx_nums=None,
@@ -117,6 +131,132 @@ def test_analyze_and_md_report():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 归因汇总与 Markdown 报告")
+
+
+def test_categorize_worst_window():
+    # 复读吸引子：低置信下首选续写退化为抄上下文已有串
+    c = categorize_window(_win(pred_top5=[[" blue", 0.3], [" green", 0.02]]))
+    assert c["category"] == "repetition_attractor", c
+    assert c["repeats_context"] is True and c["gold_in_context"] is False
+    # 高置信错答（系统性盲区）优先于复读机制：概率高、不是 gold
+    c = categorize_window(_win(pred_top5=[[" blue", 0.9], [" green", 0.02]]))
+    assert c["category"] == "confident_bias", c
+    assert c["repeats_context"] is True and "高置信复读" in c["explanation"]
+    # 高置信错答且 gold 在上下文出现过但没被复制
+    c = categorize_window(_win(gold=" blue", tail="a blue car",
+                               pred_top5=[[" red", 0.85], [" rope", 0.05]]))
+    assert c["category"] == "confident_bias", c
+    assert c["gold_in_context"] is True and "未被复制" in c["explanation"]
+    # 高置信错答：gold 从未出现在上下文中（真正的预测失败）
+    c = categorize_window(_win(gold=" xyzzy", tail="a blue car",
+                               pred_top5=[[" red", 0.85]]))
+    assert c["category"] == "confident_bias"
+    assert "未出现" in c["explanation"]
+    # 低置信：模型自己在多个候选间平均（样本多解/噪声或训练不足）
+    c = categorize_window(_win(gold=" xyzzy", tail="a blue car",
+                               pred_top5=[[" red", 0.2], [" rope", 0.18]]))
+    assert c["category"] == "low_confidence", c
+    # top1 正确但概率低：校准问题，不是检索错误
+    c = categorize_window(_win(gold=" blue", tail="a blue car",
+                               pred_top5=[[" blue", 0.2]]))
+    assert c["category"] == "top1_correct"
+    # 无预测分布（旧格式）不崩溃
+    c = categorize_window(_win(pred_top5=[]))
+    assert c["category"] == "unparsed" and c["top1"] is None
+    print("  [ok] 最差窗口归因（复读/高置信盲区/低置信/校准/旧格式）")
+
+
+def test_analyze_worst_windows_and_md():
+    wins = [
+        _win(pred_top5=[[" blue", 0.3]]),
+        _win(gold=" xyzzy", tail="a blue car", window=8,
+             pred_top5=[[" red", 0.85]]),
+        _win(gold=" xyzzy", tail="a blue car", window=9,
+             pred_top5=[[" rope", 0.1], [" red", 0.09]]),
+    ]
+    ana = analyze_worst_windows(wins, variant="lega")
+    assert ana["n_windows"] == 3
+    assert ana["category_counts"]["repetition_attractor"] == 1
+    assert ana["category_counts"]["confident_bias"] == 1
+    assert ana["category_counts"]["low_confidence"] == 1
+    assert 0.0 <= ana["gold_in_context_rate"] <= 1.0
+    assert ana["repeats_context_rate"] == 1 / 3
+    assert abs(ana["mean_top1_prob"] - (0.3 + 0.85 + 0.1) / 3) < 1e-9
+    tmp = tempfile.mkdtemp()
+    try:
+        write_worstcase_md(ana, os.path.join(tmp, "worstcases_lega.md"))
+        text = open(os.path.join(tmp, "worstcases_lega.md"), encoding="utf-8").read()
+        assert "复读吸引子" in text and "真实续写(gold)" in text
+        assert "案例 1" in text
+        write_worstcase_md(analyze_worst_windows([], "standard"),
+                           os.path.join(tmp, "worstcases_std.md"))
+        assert "无最差窗口记录" in open(os.path.join(tmp, "worstcases_std.md"),
+                                        encoding="utf-8").read()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 最差窗口汇总与 Markdown 报告")
+
+
+def test_process_eval_json_end_to_end():
+    tmp = tempfile.mkdtemp()
+    try:
+        payload = {"variant": "lega", "seed": 1337, "split": "test",
+                   "val_ppl": 10.0,
+                   "worst_windows": [_win(pred_top5=[[" blue", 0.3]])]}
+        path = os.path.join(tmp, "eval_lega_seed1337.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        ana = process_eval_json(path)
+        assert ana["n_windows"] == 1 and ana["seed"] == 1337
+        md = os.path.join(tmp, "worstcases_lega_seed1337.md")
+        assert os.path.exists(md), "worstcase md 应与 eval json 同目录同名换后缀"
+        assert "复读吸引子" in open(md, encoding="utf-8").read()
+        # 旧格式（无 worst_windows）不崩溃
+        old = os.path.join(tmp, "eval_old.json")
+        with open(old, "w", encoding="utf-8") as f:
+            json.dump({"variant": "standard"}, f)
+        assert process_eval_json(old)["n_windows"] == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] process_eval_json（含旧格式兼容）")
+
+
+def _case_sid(sid, task="niah_synth", answer="1234567", pred="", **kw):
+    rec = _case(task=task, answer=answer, pred=pred, **kw)
+    rec["sample_id"] = sid
+    return rec
+
+
+def test_cross_variant_analysis_shared_vs_specific():
+    a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+    b = _case_sid("niah_synth@256#1", pred="7654321", ctx_nums=["7654321"])
+    cross = cross_variant_analysis(
+        {"standard": [a], "lega": [a, b], "qgate": [b]}, reference="standard")
+    assert cross["n_unique_failed_items"] == 2
+    assert cross["n_shared_all_failures"] == 0
+    lv = cross["per_variant"]["lega"]
+    assert lv["n_failed"] == 2 and lv["n_new_vs_reference"] == 1
+    assert lv["new_vs_reference"][0]["key"] == "niah_synth@256#1"
+    assert cross["per_variant"]["standard"]["n_new_vs_reference"] == 0
+    # 三个变体全错的样本 → 共识失败（更可能是数据/构造/内在难度）
+    cross = cross_variant_analysis(
+        {"standard": [a], "lega": [a], "qgate": [a]}, reference="standard")
+    assert cross["n_shared_all_failures"] == 1
+    assert cross["shared_failures"][0]["key"] == "niah_synth@256#0"
+    # 参照变体无错误时不得把“全部失败”误报为“新增回归”
+    cross = cross_variant_analysis({"lega": [a], "qgate": [b]},
+                                   reference="standard")
+    assert cross["reference_available"] is False
+    assert cross["per_variant"]["lega"]["n_new_vs_reference"] is None
+    # 少于 2 个变体：空对照
+    cross = cross_variant_analysis({"lega": [a]})
+    assert cross["per_variant"] == {}
+    # 旧格式无 sample_id：回退键仍能对齐同一题的多个变体
+    legacy = _case(pred="1234567", ctx_nums=["1234567"])
+    k1 = case_key(legacy)
+    k2 = case_key(dict(legacy))
+    assert k1 == k2 and "niah" in k1
+    print("  [ok] 跨变体错误对照（共识失败/特异性新增/参照缺失/旧格式对齐）")
 
 
 def test_process_ruler_json_end_to_end():

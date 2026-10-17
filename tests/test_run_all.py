@@ -270,6 +270,49 @@ def test_stat_counts_finite_only():
     print("  [ok] _stat（NaN 不计入 n，与 mean/std 口径一致）")
 
 
+def test_build_summary_worst_windows_and_cross_variant():
+    """最差窗口归因与跨变体错误对照必须进入汇总页与 JSON，而不是只留在文件里。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v, sids in (("standard", ["niah_synth@256#0"]),
+                        ("lega", ["niah_synth@256#0", "niah_synth@256#1"])):
+            cases = [{"sample_id": sid, "task": "niah_synth", "ctx": 256,
+                      "answer": "1234567", "answer_words": None,
+                      "pred": "7654321", "em": 0.0, "recall": None,
+                      "question": "What is the special magic number?",
+                      "needle_excerpt": "magic number is: 1234567.",
+                      "depth": 0.5, "meta": {}, "context_numbers": ["7654321"],
+                      "answer_in_prompt": True} for sid in sids]
+            _write_json(os.path.join(tmp, f"ruler_{v}_seed1.json"),
+                        {"variant": v, "seed": 1, "results": {},
+                         "badcases": cases})
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0,
+                "split": "test",
+                "worst_windows": [{"window": 1, "split": "test", "loss": 8.0,
+                                   "context_tail": "sky is blue and",
+                                   "gold_next": " green",
+                                   "pred_top5": [[" blue", 0.3]]}]})
+        out = build_summary(tmp)
+        assert len(out["rows"]) == 2
+        md = out["markdown"]
+        assert "跨变体错误对照" in md and "方法特异性" in md
+        assert "语言建模最差窗口" in md and "复读吸引子" in md
+        cross_path = os.path.join(tmp, "badcase_cross.json")
+        assert os.path.exists(cross_path)
+        cross = json.load(open(cross_path, encoding="utf-8"))
+        # lega 相对 standard 多错一题 = 方法特异性新增；standard 无错误清单时
+        # 该样本才是共识失败（这里 standard 也错了 #0）
+        assert cross["ruler"]["per_variant"]["lega"]["n_new_vs_reference"] == 1
+        assert cross["ruler"]["n_shared_all_failures"] == 1
+        # 两个变体的最差窗口是同一个 → 全体共识失败
+        assert cross["lm_windows"]["n_shared_all_failures"] == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（最差窗口与跨变体错误对照进入汇总）")
+
+
 def test_build_summary_missing_latency_entry():
     """latency.json 缺少某变体条目（--skip_latency 复用旧结果）时安全跳过该行。"""
     tmp = tempfile.mkdtemp()
