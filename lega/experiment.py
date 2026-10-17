@@ -14,6 +14,7 @@
 读取：`read_records(path)` 逐行解析，畸形行跳过；消费方按 run_id 取最新的
 status="completed" 记录作为该轮实验的最终档案。
 """
+import itertools
 import json
 import os
 import time
@@ -34,15 +35,21 @@ def ledger_path(results_root: str = None) -> str:
     return os.path.join(root, LEDGER_FILENAME)
 
 
+_RUN_SEQ = itertools.count()
+
+
 def new_run_id(tag: str, config_sha256: str = None, ts: str = None) -> str:
-    """生成可读且唯一的 run_id：时间-标签-配置哈希前缀-微秒计数。
+    """生成可读且唯一的 run_id：时间-标签-配置哈希前缀-微秒·进程内序号。
 
     不占用任何科学随机源（用 time_ns 而非 random），避免台账生成影响实验
-    本身的随机流。
+    本身的随机流。后缀 = 秒内微秒计数(6 位) + 进程内单调递增序号：同一时刻
+    连续调用也绝不重复（旧实现取 time_ns()%1e6，每毫秒循环一次，同毫秒内
+    必然碰撞）；跨进程则由微秒计数区分。
     """
     ts = ts or time.strftime("%Y%m%d-%H%M%S")
     sha = (config_sha256 or "noconfig")[:8]
-    return f"{ts}-{tag}-{sha}-{time.time_ns() % 1_000_000:06d}"
+    micros = (time.time_ns() // 1000) % 1_000_000
+    return f"{ts}-{tag}-{sha}-{micros:06d}{next(_RUN_SEQ):03d}"
 
 
 def append_record(path: str, record: dict) -> None:

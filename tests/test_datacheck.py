@@ -60,6 +60,28 @@ def test_temporal_split_preserves_content_with_newlines():
     print("  [ok] 换行边界切分不丢内容")
 
 
+def test_temporal_split_short_text_boundary_after_t2():
+    # 仅有的换行落在 t2 之后（末尾换行的小文本很常见）：旧实现把 p1 吸到
+    # 近结尾，val 被压成空并抛 ValueError；现在退化为字符切分且三段非空。
+    for text in ("x" * 67 + "\n" + "x", "y" * 500 + "\n" + "z"):
+        train, val, test, info = temporal_split_text(text)
+        assert train and val and test
+        assert train + val + test == text
+        assert info["fallback_char_cut"] is True
+        assert 0 < info["cut_offsets"][0] < info["cut_offsets"][1] < len(text)
+    print("  [ok] 时序划分：唯一边界晚于 t2 的短文本不再产生空 split")
+
+
+def test_heading_regex_matches_multilevel_wikitext_headings():
+    from lega.datacheck import _HEADING_RE
+    for line in ("= Title =", "== Section ==", "=== Sub ===",
+                 "= = Section = =", "= = = Sub = = =", "==NoSpace=="):
+        assert _HEADING_RE.match(line), f"应视为标题: {line!r}"
+    for line in ("x = y = z", "plain text", "= = ", "= = =", ""):
+        assert not _HEADING_RE.match(line), f"不应视为标题: {line!r}"
+    print("  [ok] 标题正则：一级/多级（含 WikiText-103 分隔写法）标题行均可识别")
+
+
 def test_decontaminate_drops_train_duplicates_only():
     shared = ("This is a long duplicated paragraph that appears in both splits "
               "for testing decontamination behavior.")

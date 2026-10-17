@@ -18,8 +18,8 @@ from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
                      _cmd_env, _effect_status, _enrich_paired, _rel_pct,
                      _resolve_jobs, _stat, AUROC_DIFF_METRIC,
                      AUROC_DIFF_REFERENCE, build_summary, component_evidence,
-                     evaluate_registered_hypotheses, run_many,
-                     tradeoff_verdict, verify_controlled_setup)
+                     evaluate_registered_hypotheses, load_registered_hypotheses,
+                     run_many, tradeoff_verdict, verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -152,7 +152,46 @@ def test_tradeoff_verdict_rejects_bad_deals():
     # 数据缺失 → 不下结论
     assert tradeoff_verdict(None, 0.01, 10.0) == "数据不足"
     assert tradeoff_verdict(1.0, 0.01, None) == "数据不足"
-    print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比判定）")
+    # PPL 显著变差不是“收益”：绝不能得到“可接受”
+    v = tradeoff_verdict(benefit_pct=-5.0, p_adj=0.01, cost_pct=1.0)
+    assert v.startswith("不可行") and "可接受" not in v, v
+    v = tradeoff_verdict(benefit_pct=-0.3, p_adj=0.4, cost_pct=2.0)
+    assert v.startswith("说服力有限"), v
+    # 种子数不足与全表口径一致：p_adj 再小也不判定
+    v = tradeoff_verdict(benefit_pct=5.0, p_adj=0.001, cost_pct=1.0, n_seeds=2)
+    assert v.startswith("种子不足"), v
+    assert tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=MIN_SEEDS) == "可接受"
+    print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比/负收益/种子不足）")
+
+
+def test_load_registered_hypotheses_tolerates_non_dict_json():
+    """顶层为 list/null/str 的合法 JSON 也必须按“空 dict”降级而不是崩。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "hypotheses.json")
+        for bad in ([{"id": "H1"}], None, "text"):
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(bad, f, ensure_ascii=False)
+            assert load_registered_hypotheses(p) == {}
+        _write_json(p, {"hypotheses": [{"id": "H1"}]})
+        assert load_registered_hypotheses(p)["hypotheses"][0]["id"] == "H1"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] load_registered_hypotheses：非 dict JSON 安全降级")
+
+
+def test_build_summary_audit_zero_checked_is_warning_not_failure():
+    """ok=True 但 checked=0 表示“没有可核对的 run”，不能渲染成 ❌ 未通过。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = build_summary(tmp, audit={"ok": True, "checked": 0,
+                                        "mismatches": []})
+        md = out["markdown"]
+        assert "未检查受控变量" in md
+        assert "❌ 未通过" not in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：checked=0 的审计显示为未检查而非未通过")
 
 
 def test_rel_pct_and_eff_cells():

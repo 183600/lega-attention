@@ -608,6 +608,9 @@ def load_registered_hypotheses(path: str = HYPOTHESES_PATH) -> dict:
     except (OSError, ValueError) as e:
         print(f"[summary] 警告：注册假设文件不可读（{e}），跳过判定")
         return {}
+    if not isinstance(d, dict):
+        print("[summary] 警告：注册假设文件顶层不是 JSON 对象，跳过判定")
+        return {}
     if not isinstance(d.get("hypotheses"), list) or not d["hypotheses"]:
         print("[summary] 警告：注册假设文件无 hypotheses 条目，跳过判定")
         return {}
@@ -736,10 +739,13 @@ def _rel_pct(base, cand):
     return (cand - base) / abs(base) * 100.0
 
 
-def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA) -> str:
+def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
+                     n_seeds=None) -> str:
     """效率-精度权衡判定：不看增幅的涨点没有意义。
 
     规则（显式、可审计）：
+      * 种子不足（n_seeds 给定且 < MIN_SEEDS）→ 无法判定，与全表口径一致；
+      * 收益为负且显著 → 不可行（PPL 显著劣于基线，不存在“权衡”可言）；
       * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
         且增幅 >10% 时直接判不可行；
       * 显著但增幅（参数/计算量等结构指标的最大增幅）>50% → 需审视；
@@ -750,7 +756,15 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA) -> str:
     """
     if benefit_pct is None or cost_pct is None:
         return "数据不足"
+    if n_seeds is not None and n_seeds < MIN_SEEDS:
+        return f"种子不足（n={n_seeds}<{MIN_SEEDS}），无法判定"
     sig = p_adj is not None and p_adj < alpha
+    if benefit_pct < 0:
+        if sig:
+            return f"不可行：PPL 显著差于基线（{benefit_pct:.1f}%）"
+        if cost_pct > 10:
+            return f"不可行：无涨点且增幅 {cost_pct:.0f}%"
+        return "说服力有限：无涨点且差异不显著"
     if not sig:
         if cost_pct > 10:
             return f"不可行：涨点不显著且增幅 {cost_pct:.0f}%"
@@ -994,10 +1008,14 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
     if audit:
-        if audit.get("ok") and audit.get("checked"):
-            md.append(f"- ✅ 通过：{audit['checked']} 个 run 的优化器、学习率、"
-                      f"训练步数、数据顺序等受控设置逐项一致；逐 run 仅 "
-                      f"`{'`, `'.join(audit['exempt_keys'])}` 不同。")
+        if audit.get("ok"):
+            if audit.get("checked"):
+                md.append(f"- ✅ 通过：{audit['checked']} 个 run 的优化器、学习率、"
+                          f"训练步数、数据顺序等受控设置逐项一致；逐 run 仅 "
+                          f"`{'`, `'.join(audit['exempt_keys'])}` 不同。")
+            else:
+                md.append("- ⚠ 未检查受控变量：没有 run 可用于核对"
+                          "（全部缺少 config_used.json），不能据此声称一致性。")
             if audit.get("meta_checked"):
                 digest = audit.get("expected_data_digest")
                 md.append(f"- ✅ 训练溯源一致：{audit['meta_checked']} 个 run 的"
@@ -1557,10 +1575,11 @@ def build_summary(results_dir: str, audit: dict = None,
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
                   "Prefill ms/参数量/FLOPs(token)/实测分配量 相对基线增幅的最大值；"
-                  "收益=PPL 相对改善。判定规则：涨点不显著（Holm 校正后 p≥α）"
-                  "→说服力有限（增幅>10% 判不可行）；显著但增幅>50% 或 >5×收益 "
-                  "→收益-增幅比不利。提升 0.5% 却让计算量增加 10 倍的方案"
-                  "会被明确拒绝。")
+                  "收益=PPL 相对改善。判定规则：种子不足（n<3）或数据缺失→"
+                  "无法判定；PPL 显著差于基线→不可行；涨点不显著（Holm 校正后 "
+                  "p≥α）→说服力有限（增幅>10% 判不可行）；显著但增幅>50% 或 "
+                  ">5×收益 →收益-增幅比不利。提升 0.5% 却让计算量增加 10 倍的"
+                  "方案会被明确拒绝。")
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | 参数量 "
                   "| FLOPs/token | 实测分配 | 判定 |")
@@ -1579,6 +1598,7 @@ def build_summary(results_dir: str, audit: dict = None,
             benefit = (-_rel_pct(std_ppl, ppl)) if (ppl is not None and std_ppl) else None
             t = ppl_test.get(v)
             p_adj = t.get("p_adj") if t else None
+            n_ppl = t.get("n") if t else None
             pre_delta = _rel_pct(base_prefill,
                                  (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1"))
             par_delta = _rel_pct(base_params, _eff_cell(e, "params", common_ctx))
@@ -1589,7 +1609,7 @@ def build_summary(results_dir: str, audit: dict = None,
             deltas = [d for d in (pre_delta, par_delta, flo_delta, mem_delta)
                       if d is not None]
             cost = max(deltas) if deltas else None
-            verdict = tradeoff_verdict(benefit, p_adj, cost)
+            verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl)
             r["eff_cost_max_pct"] = round(cost, 2) if cost is not None else None
             r["eff_flops_per_tok"] = _eff_cell(e, "flops", common_ctx)
             r["eff_peak_mem_mb"] = mem_v

@@ -36,8 +36,11 @@ _SANITIZE_TABLE = {i: None for i in range(32) if i not in (9, 10, 13)}
 _SANITIZE_TABLE[0x7f] = None
 _SANITIZE_TABLE[ord("\ufffd")] = " "
 
-# WikiText 风格的一级/多级标题行：作为“文档边界”的首选切点
-_HEADING_RE = re.compile(r"(?m)^[ \t]*=[ \t]*[^=\n][^\n]*=[ \t]*$")
+# WikiText 风格的一级/多级标题行：作为“文档边界”的首选切点。
+# 兼容 `= Title =`、`== Section ==`、`=== Sub ===` 及 WikiText-103 原始
+# 语料的分隔写法 `= = Section = =`、`= = = Sub = = =`。
+_HEADING_RE = re.compile(
+    r"(?m)^[ \t]*(?:=[ \t]*)+[^=\s\n][^\n]*?(?:[ \t]*=)+[ \t]*$")
 
 
 # ---------------------------------------------------------------- 文本清洗
@@ -327,8 +330,11 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     p1, k1 = _pick_boundary(text, t1, window)
     p2, k2 = _pick_boundary(text, t2, window)
     fallback = False
-    if p1 is None:
-        p1, k1, fallback = t1, "char", True
+    # p1 必须严格小于 t2：否则 val=[p1,p2) 会被 p2≈t2 压空并触发“空 split”。
+    # 短文本里唯一边界可能落在 t2 之后（如仅有的换行恰在结尾附近），
+    # 此时退化为按比例字符切分，并保证 p1 至少留 1 个字符给 train、1 个给 val。
+    if p1 is None or p1 >= t2:
+        p1, k1, fallback = min(t1, t2 - 1), "char", True
     if p2 is None or p2 <= p1 + min_gap:
         p2, k2, fallback = max(p1 + min_gap, t2), "char", True
     if p2 >= n:

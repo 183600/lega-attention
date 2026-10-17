@@ -14,6 +14,16 @@ def test_run_id_unique_readable_and_no_scientific_rng():
     b = new_run_id("tiny", "deadbeef" * 8)
     assert a != b                      # 同一秒内连续调用也必须唯一
     assert "tiny" in a and "deadbeef"[:8] in a
+    # 固定时钟下批量生成也必须全部唯一（旧实现后缀取 time_ns()%1e6，
+    # 每毫秒循环一次，固定微秒时间戳会确定性碰撞）。
+    import lega.experiment as exp
+    real_time_ns = exp.time.time_ns
+    try:
+        exp.time.time_ns = lambda: 1_700_000_000_123_456_789
+        ids = [exp.new_run_id("tiny", "deadbeef" * 8) for _ in range(50)]
+    finally:
+        exp.time.time_ns = real_time_ns
+    assert len(set(ids)) == len(ids)
     print(f"  [ok] run_id 唯一且可读: {a}")
 
 
