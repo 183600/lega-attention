@@ -353,6 +353,20 @@ def _val_eval_indices(val_len: int, ctx: int, iters: int):
     return indices, n_windows
 
 
+def val_audit_batch(val, ctx: int, iters: int, device: str, fallback=None):
+    """val_loss 非有限时，取一个真实验证窗口批次作为数据/激活排查的输入。
+
+    验证窗口才是产生该损失的输入现场；训练批次只应在取窗失败时回退
+    （如验证集过短），排查报告中由调用方如实呈现。返回批次列表
+    [(x, y)]，形状约定与 run_nan_checklist 的 consumed_batches 一致。
+    """
+    try:
+        indices, _ = _val_eval_indices(len(val), ctx, iters)
+        return [get_val_windows(val, ctx, indices[:1], device)]
+    except (ValueError, OSError, RuntimeError):
+        return [b for b in (fallback or []) if b is not None]
+
+
 def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int = None):
     """在不重复、覆盖全验证集的窗口上同时计算 val_loss 与门控均值。
 
@@ -574,24 +588,42 @@ def main():
     # 最近一步实际消费的 micro-batch：预取会覆盖 batches，NaN 排查若只看待训练
     # 批次会漏掉"罪魁数据"，这里保留引用供 _nan_guard 优先检查
     last_batches = []
+    # 训练吞吐计时：按 log 区间累计墙钟并扣除评测耗时（.item() 已同步设备，
+    # 区间边界无需额外 synchronize）；首区间可能含 compile/显存分配开销，
+    # 汇总取中位数而非均值。pending_eval_s 供 do_eval 累加评测耗时。
+    step_times_ms: list = []
+    interval_t0 = time.perf_counter()
+    interval_steps = 0
+    pending_eval_s = 0.0
 
-    def _nan_guard(where: str, value, step: int):
-        """log/eval 点检查损失与梯度范数的有限性，异常即触发系统排查。"""
+    def _nan_guard(where: str, value, step: int, make_consumed=None):
+        """log/eval 点检查损失与梯度范数的有限性，异常即触发系统排查。
+
+        make_consumed：按需构造"失败输入批次"的函数（val_loss 时应给出真实
+        验证窗口）；缺省回退到最近一步消费的训练批次。
+        """
         if value is not None and not math.isfinite(float(value)):
+            consumed = (make_consumed() if make_consumed is not None
+                        else last_batches)
             report = run_nan_checklist(
                 model, batches, device, step, where, value,
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
                 grad_norm_history=gn_hist, amp_dtype=(torch.bfloat16 if use_amp else None),
                 vocab_size=int(meta["vocab_size"]),
-                consumed_batches=last_batches)
+                consumed_batches=consumed)
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):
-        nonlocal best_val, last_eval_step, last_eval_metrics
+        nonlocal best_val, last_eval_step, last_eval_metrics, pending_eval_s
+        t_eval = time.perf_counter()
         metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        pending_eval_s += time.perf_counter() - t_eval
         last_eval_step, last_eval_metrics = step, metrics
         vl = metrics["val_loss"]
-        _nan_guard("val_loss", vl, step)
+        # val 损失非有限时用真实验证窗口做数据/激活排查（训练批次只是回退）
+        _nan_guard("val_loss", vl, step,
+                   make_consumed=lambda: val_audit_batch(
+                       val, train_ctx, eval_iters, device, fallback=last_batches))
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
         rec = {"step": step, **metrics, "val_ppl": ppl,
@@ -618,6 +650,7 @@ def main():
         return vl
 
     for step in range(steps):
+        interval_steps += 1
         lr_f = lr_factor(step)
         for g, base in zip(opt.param_groups, base_lrs):
             g["lr"] = base * lr_f
@@ -655,6 +688,17 @@ def main():
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())
             gn_last = float(gn_dev_recent[-1].item()) if gn_dev_recent else None
+            # .item() 已同步本区间全部前向/反向/优化器内核，此刻的墙钟差
+            # 是本区间（扣除评测）的真实训练耗时
+            t_now = time.perf_counter()
+            dt = t_now - interval_t0 - pending_eval_s
+            step_ms = (dt / interval_steps * 1000.0
+                       if interval_steps > 0 and dt > 0 else None)
+            if step_ms is not None:
+                step_times_ms.append(step_ms)
+            interval_t0 = t_now
+            interval_steps = 0
+            pending_eval_s = 0.0
             if gn_last is not None and math.isfinite(gn_last):
                 gn_hist.append(gn_last)
                 if len(gn_hist) > 200:
@@ -665,6 +709,8 @@ def main():
                    "lr": base_lrs[0] * lr_f, "time": now_str()}
             if gn_last is not None:
                 rec["grad_norm"] = gn_last
+            if step_ms is not None:
+                rec["step_time_ms"] = round(step_ms, 3)
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             log_f.flush()
             print(f"[train] step {step+1}/{steps} loss={loss_acc:.4f} "
@@ -681,7 +727,9 @@ def main():
         final_metrics = last_eval_metrics
     else:
         final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
-        _nan_guard("val_loss(final)", final_metrics["val_loss"], steps)
+        _nan_guard("val_loss(final)", final_metrics["val_loss"], steps,
+                   make_consumed=lambda: val_audit_batch(
+                       val, train_ctx, eval_iters, device, fallback=last_batches))
         # 最终步评测必须同样参与 best-checkpoint 选择，与训练循环内口径一致：
         # 否则 steps 非 eval_every 整数倍（或 steps < eval_every）时，更优的最终
         # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按
@@ -697,6 +745,13 @@ def main():
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
+    # 训练吞吐汇总（区间步时的中位数，抗首区间 compile/分配与偶发卡顿）：
+    # 效率-精度权衡必须把训练算力成本计入涨幅，不能只看推理与参数量。
+    tokens_per_step = int(cfg["batch_size"]) * train_ctx * grad_accum
+    train_step_ms = (statistics.median(step_times_ms)
+                     if step_times_ms else None)
+    train_tokens_per_sec = (tokens_per_step * 1000.0 / train_step_ms
+                            if train_step_ms else None)
     save_checkpoint(os.path.join(out_dir, "model.pt"), model,
                     extra={"variant": args.variant, "step": steps, "seed": seed,
                            "val_ppl": final_ppl, "val_loss": final_val_loss,
@@ -710,6 +765,10 @@ def main():
                                       ("eval_iters_requested", "eval_iters",
                                        "val_windows", "val_tokens_evaluated")},
                "n_params": n_params, "n_gate_extra": n_extra,
+               "train_step_time_ms": (round(train_step_ms, 3)
+                                      if train_step_ms else None),
+               "train_tokens_per_sec": (round(train_tokens_per_sec, 1)
+                                        if train_tokens_per_sec else None),
                "tokens_seen": tokens_seen, "steps": steps, "seed": seed,
                **provenance},
               os.path.join(out_dir, "eval.json"))

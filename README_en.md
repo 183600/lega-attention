@@ -135,11 +135,11 @@ Outputs:
 | `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check) and `registered_hypotheses` (per-claim verdicts) |
-| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting/underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations) |
+| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations) |
 | `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
 | `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) |
 | `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard) |
-| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases |
+| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases and training throughput (`train_step_time_ms`/`train_tokens_per_sec`, feeding the efficiency-precision trade-off) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths, with badcases error samples |
 | `results/<tag>/latency.json` | prefill / decode latency |
 | `results/<tag>/analysis_*.csv|json` | Per (layer, head, query position) gate records and aggregates |
@@ -177,17 +177,23 @@ Result-analysis protocol (see the matching sections in `summary.md`): diagnose t
 training curves rather than final values only — besides overfitting/underfitting/
 divergence, pre-clip **gradient-norm spikes/non-finite values** are reported
 independently (an early signal of NaN/divergence that the loss curve may not show
-yet); for NaN follow the checklist order data → code (log(0)/division by zero/
-softmax overflow; forward hooks localize the first module whose finite input yields
-a non-finite output, the `origin`) → mixed-precision underflow → gradient explosion/
-LR (see `nan_report.json`); both the data and the activation checks inspect the
-failing step's batches first (prefetching overwrites the pending ones); attribute
+yet); a plateaued training loss with rising validation loss is also diagnosed as
+overfitting (generalization degrades before the training loss does, so it is not
+misread as underfitting); for NaN follow the checklist order data → code (log(0)/
+division by zero/softmax overflow; forward hooks localize the first module whose
+finite input yields a non-finite output, the `origin`) → mixed-precision underflow →
+gradient explosion/LR (see `nan_report.json`); both the data and the activation
+checks inspect the failing step's batches first (prefetching overwrites the pending
+ones), and a non-finite validation loss switches to the real validation windows
+(training batches are only a fallback when windowing fails); attribute
 every error case, and use the cross-variant
 comparison to separate "shared failures (data/difficulty)" from "method-specific
 blind spots"; the accuracy-efficiency trade-off is judged explicitly, where the cost
 is the maximum relative increase over the baseline among **prefill/decode inference
-latency, parameters, FLOPs and peak memory** (a gain without significance, or a cost
-far exceeding the gain, is flagged — see the `tradeoff_verdict` rules in §2).
+latency, training ms/step, parameters, FLOPs and peak memory** (a gain without
+significance, or a cost far exceeding the gain, is flagged — see the
+`tradeoff_verdict` rules in §2). A "0.5% gain at 10× training/inference cost" is
+rejected outright.
 
 ---
 

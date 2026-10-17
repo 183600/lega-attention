@@ -4,6 +4,8 @@
   * NaN/Inf      训练或验证损失出现非有限值 —— 训练已失效，先走 NaN 排查路径；
   * 发散          训练损失后期显著高于前期（学习率过大/梯度爆炸的典型表现）；
   * 过拟合        训练损失下降而验证损失上升 —— 需要正则化、增大数据量或早停；
+                  训练损失停滞（平台期）而验证损失回升同样按过拟合处理
+                  （泛化先于训练损失恶化，不能因"训练没降"误判成欠拟合）；
   * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
   * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"。
@@ -170,12 +172,23 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 f"{last_train / first_train:.2f} 倍")
             recommendations.append("疑似发散：优先降低学习率或加强梯度裁剪，"
                                    "并检查梯度范数是否出现尖峰")
-        elif train_down and (val_up or (early_stop_gain or 0) > EARLY_STOP_TOL):
+        elif ((train_down and (val_up or (early_stop_gain or 0) > EARLY_STOP_TOL))
+              or (train_delta is not None and not train_down and not train_up
+                  and val_up and (early_stop_gain or 0) > EARLY_STOP_TOL)):
+            # 平台期过拟合：训练不再下降而验证回升，同样需要早停/正则化；
+            # 若按"训练没降"误判成欠拟合，会给出"延长训练/增大模型"的反向建议。
             status = "过拟合"
-            ev = [f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
-                  f"（{_fmt_rel(train_delta)}）而验证损失 "
-                  f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
-                  f"（{_fmt_rel(val_delta)}）"]
+            if train_down:
+                ev = [f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                      f"（{_fmt_rel(train_delta)}）而验证损失 "
+                      f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                      f"（{_fmt_rel(val_delta)}）"]
+            else:
+                ev = [f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                      f"（{_fmt_rel(train_delta)}）已停滞/不再实质下降，而验证损失 "
+                      f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                      f"（{_fmt_rel(val_delta)}）上升——泛化先于训练损失恶化，"
+                      "按平台期过拟合处理"]
             if (early_stop_gain or 0) > EARLY_STOP_TOL:
                 ev.append(f"最终验证损失劣于 step {best_step} 的最优值 "
                           f"{best_val:.4f} 达 {early_stop_gain:+.1%}")
@@ -186,6 +199,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 + (f"（早停可挽回 {early_stop_gain:.1%} 验证损失）"
                    if (early_stop_gain or 0) > 0 else ""),
                 "下游对比应使用 val 上选出的 model_best.pt，而不是最终步模型"]
+            if not train_down:
+                recommendations.append(
+                    "训练已停滞而验证恶化：按平台期过拟合处理（早停/正则化），"
+                    "并先确认学习率不过小（训练推得动）；不要按欠拟合扩大容量或续训")
         elif not train_down:
             status = "欠拟合/学习不充分"
             trend = "不降反升" if train_up else "没有实质下降"
@@ -208,6 +225,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                     recommendations.append(
                         "训练损失不降反升：优先降低学习率并检查数据顺序/批组成；"
                         "容量不足通常表现为低损失平台，而非上升")
+                elif val_up:
+                    recommendations.append(
+                        "容量不足应表现为训练/验证同步的低损失平台；这里验证在"
+                        "上升而训练不降，先排除过拟合/训练不稳，不要盲目增大模型")
                 else:
                     recommendations.append("若容量不足：增大模型或延长训练")
             if train_up:
@@ -215,7 +236,11 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                     recommendations.append(
                         "训练与验证损失同步上升：更像学习率过大/训练不稳，"
                         "按发散前期处理而不是欠拟合")
-            elif not val_down:
+            elif val_up:
+                recommendations.append(
+                    "训练不降而验证上升：按平台期过拟合处理（早停/正则化），"
+                    "不要按欠拟合延长训练")
+            else:
                 recommendations.append("验证损失同样不降，与欠拟合判断一致")
         else:
             status = "正常收敛"

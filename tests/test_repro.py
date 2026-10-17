@@ -202,6 +202,9 @@ def test_same_seed_training_is_bitwise_reproducible():
                 recs = [json.loads(ln) for ln in f if ln.strip()]
             for rec in recs:
                 rec.pop("time", None)      # 时间戳不参与数值比对
+                # 步时是墙钟测量，天然不可逐位复现（与 time 同口径剔除）；
+                # 模型权重与损失数值仍逐位比对
+                rec.pop("step_time_ms", None)
             return recs
 
         assert curves(outs[0]) == curves(outs[1])

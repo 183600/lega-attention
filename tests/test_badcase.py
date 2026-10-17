@@ -83,6 +83,21 @@ def test_hard_sample_flag():
     print("  [ok] 难度边界样本标注（needle 深位；vt 链深度不误判）")
 
 
+def test_non_numeric_depth_tolerated():
+    """外部/旧格式 JSON 的字符串 depth 不能让整个归因流程崩溃。"""
+    c = categorize_case(_case(pred="1111111", ctx_nums=[], depth="0.9"))
+    assert c["depth"] == 0.9 and c["hard_sample"] is True
+    c = categorize_case(_case(task="vt", pred="1111111", ctx_nums=[], depth="deep"))
+    assert c["depth"] is None and c["hard_sample"] is False
+    # 混合进集合分析：坏 depth 只被忽略，不中断报告
+    ana = analyze_badcases([
+        _case(task="niah_multikey", pred="5550001", ctx_nums=[], depth="0.9"),
+        _case(task="vt", pred="5550001", ctx_nums=[], depth="bad"),
+    ])
+    assert ana["deep_position_fail_ratio"] == 1.0
+    print("  [ok] 非数值 depth 安全归一化（不崩溃、不误判难度）")
+
+
 def test_deep_ratio_excludes_vt_chain_depth():
     """deep_position_fail_ratio 只能统计 niah 的 needle 位置，不含 vt 链深度。"""
     cases = [

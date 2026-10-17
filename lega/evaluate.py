@@ -71,6 +71,24 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     return rows[:max(1, int(n_worst))]
 
 
+def load_train_throughput(run_dir: str):
+    """从训练 run 的 eval.json 继承训练吞吐（train_step_time_ms/tokens_per_sec）。
+
+    被评测 checkpoint 的训练成本应与评测结果绑定：效率-精度权衡需要它；
+    旧 run 没有该字段时返回 (None, None)，消费方显示 '-' 而不是编造数值。
+    文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
+    """
+    path = os.path.join(run_dir, "eval.json")
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None, None
+    return d.get("train_step_time_ms"), d.get("train_tokens_per_sec")
+
+
 def main():
     p = argparse.ArgumentParser(description="PPL 评测（默认 held-out test，缺 test.bin 时回退 val）")
     p.add_argument("--ckpt", required=True)
@@ -193,8 +211,11 @@ def main():
         except Exception as e:  # 坏案例转储失败不应阻塞评测本身
             print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
-    res.update(load_provenance(os.path.dirname(os.path.abspath(args.ckpt)),
-                               args.data_dir))
+    run_dir = os.path.dirname(os.path.abspath(args.ckpt))
+    res.update(load_provenance(run_dir, args.data_dir))
+    # 训练吞吐随被评测 checkpoint 一起绑定（效率-精度权衡的增幅口径）
+    res["train_step_time_ms"], res["train_tokens_per_sec"] = \
+        load_train_throughput(run_dir)
     save_json(res, args.out)
     print(f"[eval] {res['variant']}: val_ppl={ppl:.3f} -> {args.out}")
 

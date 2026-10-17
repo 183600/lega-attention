@@ -41,6 +41,23 @@ def test_overfitting_detected():
     print("  [ok] 过拟合判定 + 早停/正则化建议")
 
 
+def test_plateau_train_rising_val_is_overfitting():
+    """训练停滞（平台期）而验证回升同样是过拟合，不能误判为欠拟合并建议延长训练。"""
+    d = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
+                            [3.1, 3.3, 3.6, 4.0, 4.5]))
+    assert d["status"] == "过拟合", d
+    assert any("停滞" in e for e in d["evidence"]), d["evidence"]
+    assert any("早停" in r for r in d["recommendations"])
+    assert not any("延长训练" in r for r in d["recommendations"]), d["recommendations"]
+    assert not any("增大模型" in r for r in d["recommendations"]), d["recommendations"]
+    # 训练不降、验证仅轻微波动（未超噪声阈值）时仍按欠拟合描述，但不得
+    # 出现"验证损失同样不降"的错误论断
+    d2 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
+                             [2.0, 2.01, 2.005, 2.02, 2.01]))
+    assert d2["status"] == "欠拟合/学习不充分", d2
+    print("  [ok] 平台期验证回升 → 过拟合（不误报欠拟合/延长训练）")
+
+
 def test_underfitting_and_random_level():
     # 训练损失不降且停在 log(V) 随机水平附近 → 欠拟合，指向数据管道/学习率
     lv = math.log(64)

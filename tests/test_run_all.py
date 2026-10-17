@@ -424,6 +424,48 @@ def test_tradeoff_includes_decode_latency():
     print("  [ok] 涨点-增幅权衡包含 decode 项")
 
 
+def test_tradeoff_includes_train_step_time():
+    """训练算力成本（ms/step）必须进入增幅与判定：推理不变但训练慢 10 倍也要被计入。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v, tms in (("standard", 100.0), ("lega", 1000.0)):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0,
+                "train_step_time_ms": tms,
+                "train_tokens_per_sec": 1000.0 / tms})
+
+        def _lat():
+            return {"prefill_ms": {"256": {"1": 1.0}},
+                    "decode_ms_per_tok": {"256": 0.1},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(), "lega": _lat()}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["eff_train_step_ms"] == 1000.0, row
+        assert row["eff_train_delta_pct"] == 900.0
+        # 其余指标与基线一致时，最大增幅由训练 ms/step 贡献
+        assert row["eff_cost_max_pct"] == 900.0, row
+        assert "训练 ms/step" in out["markdown"]
+        # 旧结果无该字段时优雅降级为不判定，不崩溃也不编造增幅
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0})
+        out2 = build_summary(tmp)
+        row2 = next(r for r in out2["rows"] if r["variant"] == "lega")
+        assert row2["eff_train_step_ms"] is None
+        assert row2["eff_train_delta_pct"] is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅权衡包含训练 ms/step（旧结果缺失时降级）")
+
+
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     """PPL 截断必须在汇总表显式标注；分布漂移字段为 null（空 split）时不得崩溃。"""
     tmp = tempfile.mkdtemp()

@@ -134,11 +134,11 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）与 `registered_hypotheses`（逐条判定） |
-| `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
+| `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合（含训练停滞+验证回升的平台期）/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现） |
 | `results/<tag>/badcase_cross.json` | 跨变体错误对照（全体共识失败 vs 相对 standard 的特异性新增/修复） |
-| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val），含 worst_windows 坏案例 |
+| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val），含 worst_windows 坏案例与训练吞吐（`train_step_time_ms`/`train_tokens_per_sec`，供效率-精度权衡） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文，含 badcases 错误样本 |
 | `results/<tag>/latency.json` | prefill / decode 延迟 |
 | `results/<tag>/analysis_*.csv|json` | 逐 (层，头，查询位) 门控记录与汇总 |
@@ -174,13 +174,16 @@ python -m tests.run_tests   # 单元测试（不依赖 pytest）
 
 结果分析口径（详见 `summary.md` 对应小节）：训练诊断看曲线而非只看最终值，
 除过拟合/欠拟合/发散外还独立报告 **pre-clip 梯度范数尖峰/非有限**（NaN 与发散的
-早期信号，损失曲线可能尚未反映）；NaN 按数据→代码（log(0)/除零/softmax 溢出，
-前向钩子给出首个"输入有限、输出非有限"的模块即 `origin`）→混合精度下溢→梯度
-爆炸/学习率的顺序排查（`nan_report.json`），数据与激活检查均优先分析失败步批次
-（预取会覆盖待训练批次）；错误样本逐条归因，并用跨变体对照
-区分"全体共识失败（数据/难度）"与"方法特异性盲区"；效率-精度权衡显式判定，
-增幅取 **Prefill/Decode 推理延迟、参数量、FLOPs、显存峰值** 相对基线的最大者，
-涨点未过显著性检验或增幅远大于收益时明确标注（见 §2 的 `tradeoff_verdict` 规则）。
+早期信号，损失曲线可能尚未反映）；训练损失停滞而验证回升同样判为过拟合
+（平台期泛化先恶化，不因"训练没降"误判成欠拟合）；NaN 按数据→代码
+（log(0)/除零/softmax 溢出，前向钩子给出首个"输入有限、输出非有限"的模块即
+`origin`）→混合精度下溢→梯度爆炸/学习率的顺序排查（`nan_report.json`），
+数据与激活检查均优先分析失败步批次（预取会覆盖待训练批次），val 损失非有限时
+直接改用真实验证窗口（训练批次仅作取窗失败的回退）；错误样本逐条归因，并用
+跨变体对照区分"全体共识失败（数据/难度）"与"方法特异性盲区"；效率-精度权衡
+显式判定，增幅取 **Prefill/Decode 推理延迟、训练 ms/step、参数量、FLOPs、
+显存峰值** 相对基线的最大者，涨点未过显著性检验或增幅远大于收益时明确标注
+（见 §2 的 `tradeoff_verdict` 规则），"涨 0.5% 但训练/推理贵 10 倍"会被直接拒绝。
 
 ---
 

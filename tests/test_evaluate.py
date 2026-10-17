@@ -1,9 +1,14 @@
 """语言建模坏案例测试：最差验证窗口转储（预测错误的样本要看得见）。"""
+import json
+import os
+import shutil
+import tempfile
+
 import numpy as np
 import torch
 
 from lega.data import CharTokenizer
-from lega.evaluate import collect_worst_windows
+from lega.evaluate import collect_worst_windows, load_train_throughput
 from lega.model import GPT
 
 
@@ -33,6 +38,28 @@ def test_collect_worst_windows():
         assert r["context_tail"] and isinstance(r["gold_next"], str)
     print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
           f"gold={rows[0]['gold_next']!r}）")
+
+
+def test_load_train_throughput_propagates_and_degrades_safely():
+    """训练吞吐必须随被评测 checkpoint 传播；缺失/损坏时安全返回 (None, None)。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        assert load_train_throughput(tmp) == (None, None)
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_step_time_ms": 12.5,
+                       "train_tokens_per_sec": 81920.0}, f)
+        assert load_train_throughput(tmp) == (12.5, 81920.0)
+        # 旧格式（无吞吐字段）→ None 而非 KeyError
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"val_ppl": 10.0}, f)
+        assert load_train_throughput(tmp) == (None, None)
+        # 损坏 JSON 不阻塞评测
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        assert load_train_throughput(tmp) == (None, None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 训练吞吐随 checkpoint 传播（缺失/损坏安全降级）")
 
 
 def test_collect_worst_windows_gold_in_context_uses_full_window():

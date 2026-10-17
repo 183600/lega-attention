@@ -59,9 +59,15 @@ def categorize_case(rec: Dict) -> Dict:
     # 0) 难度标注：只有 niah 家族的 depth 是 needle 位置比例（0~1）；vt 的
     # meta.depth 是链深度（整数），不能按位置解释。先算好该标志，保证
     # 下面各归因分支（fwe/no_answer 等提前返回）的返回值都带 hard_sample。
+    # depth 归一化为数值或 None：外部/旧格式 JSON 里的字符串 depth 不能
+    # 让整个归因流程崩溃（一个坏样本不应毁掉报告）。
     depth = r.get("depth")
-    positional = (depth is not None
-                  and str(task or "").startswith("niah"))
+    try:
+        depth = float(depth) if depth is not None else None
+    except (TypeError, ValueError):
+        depth = None
+    r["depth"] = depth
+    positional = depth is not None and str(task or "").startswith("niah")
     r["hard_sample"] = bool(positional and depth > 0.75)
     # 1) 标注/构造自检：gold 答案必须真的在 prompt 里，否则错在数据侧
     if task != "fwe" and r.get("answer_in_prompt") is False:

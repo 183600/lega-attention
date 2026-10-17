@@ -1259,9 +1259,10 @@ def build_summary(results_dir: str, audit: dict = None,
     md += ["", "## 训练曲线诊断（过拟合/欠拟合/发散/NaN）", ""]
     curve = load(os.path.join(results_dir, "curve_diagnosis.json"))
     if curve:
-        md.append("诊断口径：训练降而验证升=过拟合；两者都不降=欠拟合/学习率不当/"
-                  "数据管道问题；出现 NaN=训练失效。逐 run 明细见 "
-                  "`curve_diagnosis.json`。")
+        md.append("诊断口径：训练降而验证升=过拟合；训练停滞（不再实质下降）而"
+                  "验证回升同样判过拟合（平台期泛化先恶化，不按欠拟合处理）；"
+                  "两者都不降=欠拟合/学习率不当/数据管道问题；出现 NaN=训练失效。"
+                  "逐 run 明细见 `curve_diagnosis.json`。")
         md.append("")
         md.append("| 变体 | 状态（最差种子） | 训练损失 首→末 | 验证损失 首→最优→末 "
                   "| 早停空间 | 关键建议 |")
@@ -1354,7 +1355,16 @@ def build_summary(results_dir: str, audit: dict = None,
                   "**模型盲区**（误抄干扰值/幻觉数字/无数值回答）。"
                   "逐案例详情见 `badcases_*.md`。")
         md.append("")
-        md.append("| 变体 | 错误样本数 | 主要归因 | niah 深位(>0.75)失败占比 "
+        n_seeds_max = max((len(_variant_seed_map(runs, v)) for v in variants),
+                          default=0)
+        if n_seeds_max > 1:
+            md.append(f"注：RULER 样本集跨种子相同（由评测构造种子决定），下表"
+                      f"错误样本数为最多 **{n_seeds_max} 个种子的累计频次**"
+                      "（同一样本在 k 个种子下错就计 k 次），用于衡量错误的"
+                      "稳定性；唯一样本级的对照见下节「跨变体错误对照」"
+                      "（取最小种子）。")
+            md.append("")
+        md.append("| 变体 | 错误样本数（跨种子累计） | 主要归因 | niah 深位(>0.75)失败占比 "
                   "| 标注/构造错误 |")
         md.append("|---|---|---|---|---|")
         for v, ana, cat_s in bad_rows:
@@ -1693,20 +1703,44 @@ def build_summary(results_dir: str, audit: dict = None,
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
-                  "Prefill ms/Decode ms(tok)/参数量/FLOPs(token)/实测分配量 "
-                  "相对基线增幅的最大值；"
+                  "Prefill ms/Decode ms(tok)/训练 ms(step)/参数量/FLOPs(token)/"
+                  "实测分配量 相对基线增幅的最大值；"
                   "收益=PPL 相对改善。判定规则：种子不足（n<3）或数据缺失→"
                   "无法判定；PPL 显著差于基线→不可行；涨点不显著（Holm 校正后 "
                   "p≥α）→说服力有限（增幅>10% 判不可行）；显著但增幅>50% 或 "
                   ">5×收益 →收益-增幅比不利。提升 0.5% 却让计算量增加 10 倍的"
                   "方案会被明确拒绝。")
+
+        def _train_step_ms(v):
+            """该变体各种子训练步时的中位数（毫秒/步；旧 eval.json 无此字段→None）。
+
+            同一 run_all 内所有变体在同一台机器、同一批次下训练，训练 ms/step
+            是直接可比的算力成本口径（评测耗时与 checkpoint 写入已从区间计时中
+            扣除）；中位数避免首步 compile/显存分配与偶发卡顿污染。
+            """
+            vals = []
+            for s in _variant_seed_map(runs, v).values():
+                x = (s.get("eval") or {}).get("train_step_time_ms")
+                if x is None:
+                    continue
+                try:
+                    vals.append(float(x))
+                except (TypeError, ValueError):
+                    continue
+            if not vals:
+                return None
+            vals.sort()
+            n = len(vals)
+            return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | Decode ms/tok "
-                  "| 参数量 | FLOPs/token | 实测分配 | 判定 |")
-        md.append("|---|---|---|---|---|---|---|---|---|")
+                  "| 训练 ms/step | 参数量 | FLOPs/token | 实测分配 | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
                     and t.get("mean_diff") is not None}
+        base_train_ms = _train_step_ms("standard")
         for r in rows:
             v = r["variant"]
             if v == "standard" or not lat_entries.get(v):
@@ -1723,12 +1757,15 @@ def build_summary(results_dir: str, audit: dict = None,
                                  (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1"))
             dec_v = (e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
             dec_delta = _rel_pct(base_decode, dec_v)
+            tr_v = _train_step_ms(v)
+            tr_delta = _rel_pct(base_train_ms, tr_v)
             par_delta = _rel_pct(base_params, _eff_cell(e, "params", common_ctx))
             flo_delta = _rel_pct(base_flops, _eff_cell(e, "flops", common_ctx))
             mem_v = _eff_cell(e, "mem", common_ctx)
             mem_b = _eff_cell(base_e, "mem", common_ctx)
             mem_delta = _rel_pct(mem_b, mem_v) if (mem_v is not None and mem_b) else None
-            deltas = [d for d in (pre_delta, dec_delta, par_delta, flo_delta, mem_delta)
+            deltas = [d for d in (pre_delta, dec_delta, tr_delta,
+                                  par_delta, flo_delta, mem_delta)
                       if d is not None]
             cost = max(deltas) if deltas else None
             verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl)
@@ -1737,6 +1774,9 @@ def build_summary(results_dir: str, audit: dict = None,
             r["eff_decode_ms_per_tok"] = dec_v
             r["eff_decode_delta_pct"] = (round(dec_delta, 2)
                                          if dec_delta is not None else None)
+            r["eff_train_step_ms"] = tr_v
+            r["eff_train_delta_pct"] = (round(tr_delta, 2)
+                                        if tr_delta is not None else None)
             r["eff_peak_mem_mb"] = mem_v
             r["eff_benefit_ppl_pct"] = (round(benefit, 2)
                                         if benefit is not None else None)
@@ -1749,7 +1789,8 @@ def build_summary(results_dir: str, audit: dict = None,
 
             md.append(f"| {VARIANT_CN.get(v, v)} | {_d(benefit)} "
                       f"| {'-' if p_adj is None else f'{p_adj:.4f}'} "
-                      f"| {_d(pre_delta)} | {_d(dec_delta)} | {_d(par_delta)} "
+                      f"| {_d(pre_delta)} | {_d(dec_delta)} | {_d(tr_delta)} "
+                      f"| {_d(par_delta)} "
                       f"| {_d(flo_delta)} "
                       f"| {'-' if mem_v is None else f'{mem_v:.0f} MB'} "
                       f"| {verdict} |")
@@ -1758,7 +1799,9 @@ def build_summary(results_dir: str, audit: dict = None,
                   "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
                   "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
                   "Decode ms/tok 为带 KV 缓存的逐 token 解码延迟（推理延迟的"
-                  "直接口径），与 Prefill 同为相对基线的百分比变化。"
+                  "直接口径），训练 ms/step 为纯训练步（区间墙钟已扣除评测与"
+                  "checkpoint 写入）跨种子中位数（见 eval_*.json 的 "
+                  "train_step_time_ms），三者同为相对基线的百分比变化。"
                   "运行时指标受硬件影响，跨机器对比无效。")
     else:
         md.append("- ⚠ 缺少运行时/效率基准（latency.json 或 standard 基线），"

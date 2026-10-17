@@ -184,6 +184,25 @@ def test_checklist_action_order_is_fixed():
     print("  [ok] 建议动作按固定排查顺序输出")
 
 
+def test_val_audit_batch_uses_real_validation_window():
+    """val_loss 非有限时，排查输入必须是真实验证窗口而非训练批次（回退仅在取窗失败时）。"""
+    import numpy as np
+    from lega.train import val_audit_batch
+
+    val = np.arange(0, 200, dtype=np.int64)
+    fb = _batches()
+    batch = val_audit_batch(val, ctx=16, iters=2, device="cpu", fallback=fb)
+    assert len(batch) == 1 and batch[0] is not fb[0]
+    x, y = batch[0]
+    assert x.shape == (1, 16) and y.shape == (1, 16)
+    assert torch.equal(x[:, 1:], y[:, :-1]), "y 必须是 x 的右移一位（与训练口径一致）"
+    # 验证集过短组不成窗口 → 回退到训练批次而不是崩溃
+    short = np.arange(0, 10, dtype=np.int64)
+    batch2 = val_audit_batch(short, ctx=16, iters=2, device="cpu", fallback=fb)
+    assert len(batch2) == 1 and batch2[0][0] is fb[0][0]
+    print("  [ok] val_loss 排查使用真实验证窗口（取窗失败才回退）")
+
+
 def test_abort_writes_report_and_exits():
     m = _model()
     rep = run_nan_checklist(m, _batches(), "cpu", 123, "train_loss", float("nan"),
