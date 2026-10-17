@@ -165,7 +165,7 @@ def main():
         "selection_set_is_eval_set": bool(split == "val"),
         "val_ppl": ppl,
         "val_loss": vl,
-        # 通用别名：split="test" 时 val_ppl/val_loss 键名有历史误导性，消费方应优先用这里
+        # 通用别名：split="test" 时 val_ppl/val_loss 为兼容键名，消费方应优先用这里
         "ppl": ppl,
         "loss": vl,
         "val_ppl_clamped": bool(vl > 20),

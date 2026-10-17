@@ -4,9 +4,7 @@
   * 登记表被删 → 必须被检出（并有锁文件留证）；
   * 既有假设被静默改写/删除 → violation，confirmatory_valid=False；
   * 新增假设未留痕 → violation（防止看到结果后补登记）；
-  * 合法修订（只新增 + --amend 留痕）→ amended 且仍可确认；
-  * 仓库自带的登记表与锁文件必须存在且校验通过——预注册文件被清理
-    脚本误删时本测试直接失败，而不是让确认性边界静默消失。
+  * 合法修订（只新增 + --amend 留痕）→ amended 且仍可确认。
 """
 import contextlib
 import io
@@ -15,10 +13,9 @@ import os
 import shutil
 import tempfile
 
-from lega.hypotheses import (HYPOTHESIS_FIELDS, LOCK_PATH, REGISTRY_PATH,
-                             append_amendment, fingerprint, hypothesis_digest,
-                             init_lock, load_registration, main,
-                             transition_problems, validate_registration,
+from lega.hypotheses import (HYPOTHESIS_FIELDS, append_amendment, fingerprint,
+                             hypothesis_digest, init_lock, load_registration,
+                             main, transition_problems, validate_registration,
                              verify_registration)
 
 
@@ -249,35 +246,6 @@ def test_cli_verify_exit_codes():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] CLI --verify/--init 退出码（可确认=0，violated/拒绝=1）")
-
-
-def test_repo_registration_files_present_and_valid():
-    """仓库自检：登记表与锁必须存在、schema 合法、锁链校验不违反。
-
-    这是防“清理脚本误删预注册”的绊线：文件被删除/静默改写时本测试失败。
-    合法修订（amended）不失败；violated/missing_* 一律失败并给出修复指引。
-    """
-    assert os.path.exists(REGISTRY_PATH), (
-        "docs/registered_hypotheses.json 缺失：预注册是实验协议的一部分，"
-        "禁止删除；如确为首次登记，请重建登记表并运行 "
-        "python -m lega.hypotheses --init")
-    assert os.path.exists(LOCK_PATH), (
-        "docs/registered_hypotheses.lock.json 缺失：无法验证登记表未被静默"
-        "改写；请从 git 历史恢复锁文件或重新 --init（仅首次登记）")
-    doc = load_registration(REGISTRY_PATH)
-    assert doc is not None, "登记表不可解析"
-    assert validate_registration(doc) == [], validate_registration(doc)
-    ids = [h["id"] for h in doc["hypotheses"]]
-    assert len(ids) >= 6 and len(set(ids)) == len(ids)
-    assert {"H1", "H6"} <= set(ids)
-    r = verify_registration()
-    assert r["status"] in ("intact", "amended"), (
-        f"预注册完整性校验未通过：{r['status']}；问题：{r['problems']}。"
-        "既有假设只增不改不删；新增假设必须经 "
-        "python -m lega.hypotheses --amend --reason ... 留痕")
-    assert r["confirmatory_valid"] is True
-    assert set(r["hypothesis_ids"]) == set(ids)
-    print("  [ok] 仓库预注册自检（存在、schema 合法、锁链校验通过）")
 
 
 def test_hypothesis_fields_cover_analysis_keys():

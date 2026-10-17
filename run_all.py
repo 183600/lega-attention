@@ -792,7 +792,7 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
 
 
 def _eff_cell(entry, key, ctx):
-    """latency.json 变体条目里的效率字段（flops 取 total，mem 取实测值）。"""
+    """latency.json 变体条目里的结构与运行时字段（flops 取 total，mem 取量测值）。"""
     if not entry:
         return None
     eff = entry.get("efficiency") or {}
@@ -819,18 +819,18 @@ def _rel_pct(base, cand):
 
 def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
                      n_seeds=None) -> str:
-    """效率-精度权衡判定：不看增幅的涨点没有意义。
+    """涨点-增幅权衡判定：不看增幅的涨点没有意义。
 
     规则（显式、可审计）：
       * 种子不足（n_seeds 给定且 < MIN_SEEDS）→ 无法判定，与全表口径一致；
       * 收益为负且显著 → 不可行（PPL 显著劣于基线，不存在“权衡”可言）；
       * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
-        且增幅 >10% 时直接判不可行；
-      * 显著但增幅（参数/计算量/推理延迟/显存的最大增幅）>50% → 需审视；
+        且综合增幅 >10% 时直接判不可行；
+      * 显著但综合增幅（各指标相对基线的最大增幅）>50% → 需审视；
       * 显著但增幅 >5×收益（收益按 PPL 相对改善计，下限按 0.5% 计，
         避免收益趋近 0 时比值判定失效）→ 收益-增幅比不利；
       * 其余 → 可接受。
-    "提升 0.5% 精度却让计算量增加 10 倍"式的改进在这里会被明确拒绝。
+    微小涨点伴随巨大增幅的改进在这里会被明确拒绝。
     """
     if benefit_pct is None or cost_pct is None:
         return "数据不足"
@@ -1674,7 +1674,7 @@ def build_summary(results_dir: str, audit: dict = None,
                   "本页全部对比均为事后分析：没有预注册边界，任何“显著”都只能"
                   "按探索性线索对待。请登记方向性主张后重跑正式实验。")
 
-    # --- 效率-精度权衡：评价改进不能只看指标涨点
+    # --- 涨点-增幅权衡：评价改进不能只看指标涨点
     md += ["", "## 效率-精度权衡（涨点必须对照增幅）", ""]
     if common_ctx is not None and lat_entries.get("standard"):
         base_e = lat_entries["standard"]

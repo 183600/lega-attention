@@ -30,7 +30,7 @@ def _sync(device):
         torch.cuda.synchronize(device)
 
 
-# ---------------------------------------------------------------- 效率指标
+# ---------------------------------------------------------------- 结构指标
 
 def estimate_flops_per_token(model, kv_len: int) -> dict:
     """前向 FLOPs/token 的解析估计（增量对比比绝对值更重要）。
@@ -74,7 +74,7 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
 
 
 def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
-    """参数量/KV 缓存/FLOPs 等结构指标：效率-精度权衡的输入。"""
+    """参数量/KV 缓存/FLOPs 等结构指标。"""
     params_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     attn0 = model.blocks[0].attn
     kv_dtype = kv_dtype or attn0.wk.weight.dtype
@@ -293,7 +293,7 @@ def main():
         entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa, "weights": src,
                  "n_params": count_params(model), "prefill_ms": {},
                  "decode_ms_per_tok": {}, "decode_prefill_ctx": {}}
-        # 效率侧指标：参数量/KV 缓存/FLOPs —— 效率-精度权衡的输入。
+        # 结构指标：参数量/KV 缓存/FLOPs。
         entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
                                                  kv_dtype=kv_dtype)
         for ctx in ctx_lens:

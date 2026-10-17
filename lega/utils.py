@@ -325,7 +325,7 @@ def paired_t_test(a, b) -> dict:
             "d_z": float(mean_diff / std_diff)}
 
 
-# 符号翻转置换检验的精确全枚举上限：2^16 = 65536 次枚举在现代 CPU 上毫秒级。
+# 符号翻转置换检验的精确全枚举上限：2^16 = 65536 次枚举。
 _SIGNFLIP_EXACT_MAX = 16
 
 

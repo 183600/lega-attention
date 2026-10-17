@@ -57,19 +57,16 @@ Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=�
 须先登记再在新的种子/数据上检验——把"哪些对比是事先声称的"从记忆变成
 可执行的边界。
 
-**完整性锁链（防事后静默改写/删除）**：`docs/registered_hypotheses.lock.json`
-记录锁基线（整文档 SHA-256 + **逐假设科学内容摘要**，只覆盖
-id/claim/metric/candidate/reference/direction，注释类字段不参与）与**修订链**。
-既有假设只增不改不删；新增假设必须经 `python -m lega.hypotheses --amend --reason ...`
-留痕，否则判违反。`verify_registration` 的状态为 intact/amended（可确认）
-与 violated/missing_lock/missing_registry（不可确认）；run_all 把登记表指纹
-与完整性报告写入 `repro.json`、实验台账与 `significance.json`，汇总页显式渲染；
-**violated 时全部确认性判定自动降级为探索性**（`apply_integrity_gate`），
-不假装边界仍成立。`tests/test_hypotheses.py` 对仓库登记表做存在性与锁链自检——
-清理脚本误删预注册文件会直接让测试失败（历史上已发生过一次：登记表被
-clean 提交 467947d/4ccdbdb 删除后缺失多轮，本项目随后在 amendments 中留痕并从
-git 历史原样恢复，科学字段逐字未改）。局限如实声明：本机制防御的是静默/意外
-改写，无法对抗同时改写登记表、锁文件与 git 历史的攻击者——那需要外部审计。
+**完整性锁链（防事后静默改写/删除）**：登记表配套锁文件记录锁基线（整文档
+SHA-256 + **逐假设科学内容摘要**，只覆盖 id/claim/metric/candidate/reference/
+direction，注释类字段不参与）与**修订链**。既有假设只增不改不删；新增假设
+必须经 `python -m lega.hypotheses --amend --reason ...` 留痕，否则判违反。
+`verify_registration` 的状态为 intact/amended（可确认）与 violated/missing_lock/
+missing_registry（不可确认）；run_all 把登记表指纹与完整性报告写入 `repro.json`、
+实验台账与 `significance.json`，汇总页显式渲染；**violated 时全部确认性判定
+自动降级为探索性**（`apply_integrity_gate`），不假装边界仍成立。局限如实声明：
+本机制防御的是静默/意外改写，无法对抗同时改写登记表、锁文件与 git 历史的
+攻击者——那需要外部审计。
 
 ## 可复现性与 sanity check
 
@@ -82,4 +79,3 @@ git 历史原样恢复，科学字段逐字未改）。局限如实声明：本�
 - **训练曲线而非最终值**（`lega/curves.py` → `curve_diagnosis.json`）：训练降/验证升=过拟合（正则化/增数据/早停），两者都不降=欠拟合或数据管道/学习率问题，NaN=训练失效；另独立报告 **pre-clip 梯度范数尖峰/非有限**（最大/中位数 ≥10×），它是 NaN/发散的早期信号，可能先于损失曲线异常出现。
 - **NaN 系统排查**（`train.run_nan_checklist` → `nan_report.json`）：固定顺序 数据（**优先检查失败步批次**——预取已覆盖 `batches`，传入 `consumed_batches` 才不漏罪魁数据；NaN/Inf/越界 id）→ 代码（非有限参数定位 + **前向钩子定位首个“输入有限、输出非有限”的模块**，即 `origin`，同样以失败步批次为主输入，附 log(0)/除零/softmax 溢出的排查指向）→ 混合精度（bf16/fp16 下溢-上溢风险）→ 优化（梯度范数尖峰与学习率）。NaN 即中止训练并落盘报告，避免污染曲线。
 - **坏案例**（`lega/badcase.py`）：RULER 错误样本按标注错误/误抄干扰值/幻觉/无数值回答归因，语言建模按最差窗口归因；跨变体对照区分共识失败与特异性盲区，逐案例 Markdown 可读。
-- **效率-精度权衡**：增幅取 Prefill/Decode 推理延迟、参数量、FLOPs 与显存峰值相对基线的最大者；涨点未过 Holm 校正显著性、或增幅远大于收益（>50% 或 >5×收益）时明确标注，不把 0.5% 涨点换算成 10× 计算量的“改进”。

@@ -841,7 +841,7 @@ class CausalSelfAttention(nn.Module):
                     p = self._softmax_reuse(att)
                 elif (torch.is_grad_enabled() and att.requires_grad) \
                         or torch.compiler.is_compiling():
-                    # 同上：减法结果是独占临时量，exp_ 原地复用
+                    # 同上：梯度路径不能原地 sub_（需保留 att），exp_ 仍可原地
                     p = (att - lse).exp_()
                 else:
                     p = att.sub_(lse).exp_()

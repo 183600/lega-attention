@@ -1,4 +1,4 @@
-"""评测流水线完整性：效率基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
+"""评测流水线完整性：基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
 import json
 import os
 
@@ -98,7 +98,7 @@ def test_efficiency_metrics_on_cpu():
 
 
 def test_latency_wired_into_configs_and_runner():
-    """效率配置、run_all 接线与汇总/绘图链路均存在。"""
+    """基准配置、run_all 接线与汇总/绘图链路均存在。"""
     for name in ("tiny.json", "small.json"):
         with open(os.path.join(ROOT, "configs", name), encoding="utf-8") as f:
             cfg = json.load(f)
@@ -106,5 +106,5 @@ def test_latency_wired_into_configs_and_runner():
     with open(os.path.join(ROOT, "run_all.py"), encoding="utf-8") as f:
         src = f.read()
     assert "lega.latency" in src, "run_all.py 未接入 lega.latency"
-    assert "tradeoff_verdict" in src, "run_all.py 未接入效率-精度权衡判定"
-    print("  [ok] efficiency 已接入 configs/run_all/plots")
+    assert "tradeoff_verdict" in src, "run_all.py 未接入涨点-增幅权衡判定"
+    print("  [ok] 结构与运行时基准已接入 configs/run_all/plots")

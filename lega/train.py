@@ -123,9 +123,8 @@ def audit_activations(model, pending_batches, device: str,
         amp_ctx = (torch.autocast("cuda", dtype=amp_dtype) if use_cuda_amp
                    else contextlib.nullcontext())
         with torch.no_grad(), amp_ctx:
-            # last_logits_only：只对最后位置过 lm_head，避免训练规模下
-            # (B,T,V) 全量 logits 在排查时 OOM；注意力/门控（NaN 最常见的
-            # 产生位置）仍对整段前缀执行，逐模块钩子照常触发。
+            # last_logits_only：只对最后位置过 lm_head；注意力/门控（NaN 最
+            # 常见的产生位置）仍对整段前缀执行，逐模块钩子照常触发。
             model(x, last_logits_only=True)
     except Exception as e:  # 排查过程本身绝不能因前向失败而中断
         forward_error = f"{type(e).__name__}: {e}"

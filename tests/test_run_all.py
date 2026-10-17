@@ -144,14 +144,14 @@ def test_component_evidence_requires_significance():
 
 
 def test_tradeoff_verdict_rejects_bad_deals():
-    """效率-精度权衡判定：不显著涨点说服力有限；大增幅小收益被拒绝。"""
+    """涨点-增幅权衡判定：不显著涨点说服力有限；大增幅小收益被拒绝。"""
     # 不显著 + 增幅 >10% → 不可行（微小且不显著的涨点 + 大增幅）
     v = tradeoff_verdict(benefit_pct=0.3, p_adj=0.4, cost_pct=30.0)
     assert v.startswith("不可行"), v
     # 不显著 + 增幅小 → 说服力有限
     v = tradeoff_verdict(benefit_pct=0.3, p_adj=0.4, cost_pct=2.0)
     assert v.startswith("说服力有限"), v
-    # 显著但增幅 >5×收益 → 收益-增幅比不利（0.5% 涨点 vs 10 倍计算不可行）
+    # 显著但增幅 >5×收益 → 收益-增幅比不利
     v = tradeoff_verdict(benefit_pct=0.5, p_adj=0.01, cost_pct=900.0)
     assert "收益-增幅比不利" in v or "需审视" in v, v
     # 显著 + 增幅温和（<5×收益）→ 可接受
@@ -212,7 +212,7 @@ def test_rel_pct_and_eff_cells():
     assert _rel_pct(None, 10.0) is None
     assert _rel_pct(10.0, None) is None
     assert _rel_pct(0.0, 10.0) is None
-    # _eff_cell 读取 latency 条目的效率字段
+    # _eff_cell 读取 latency 条目的结构与运行时字段
     entry = {"n_params": 100, "efficiency": {
         "n_params": 100, "params_mb": 0.4,
         "flops_per_tok": {"256": {"total_flops_per_tok": 12345}},
@@ -393,7 +393,7 @@ def test_build_summary_missing_latency_entry():
 
 
 def test_tradeoff_includes_decode_latency():
-    """推理延迟（decode ms/tok）必须进入效率-精度权衡的增幅与判定，不能只看 prefill。"""
+    """逐 token 解码指标（decode ms/tok）必须进入涨点-增幅权衡的增幅与判定，不能只看 prefill。"""
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "lega"):
@@ -416,12 +416,12 @@ def test_tradeoff_includes_decode_latency():
         row = next(r for r in out["rows"] if r["variant"] == "lega")
         assert row["eff_decode_ms_per_tok"] == 0.4
         assert row["eff_decode_delta_pct"] == 300.0
-        # 其余指标与基线一致时，最大增幅由 decode 延迟贡献
+        # 其余指标与基线一致时，最大增幅由 decode 项贡献
         assert row["eff_cost_max_pct"] == 300.0, row
         assert "Decode ms/tok" in out["markdown"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 效率-精度权衡包含 decode 推理延迟")
+    print("  [ok] 涨点-增幅权衡包含 decode 项")
 
 
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
@@ -619,8 +619,13 @@ def test_build_summary_renders_confirmatory_sections():
             {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
              "candidate": "lega", "reference": "standard",
              "direction": "candidate_better"}]}
+        intact = {"status": "intact", "confirmatory_valid": True, "problems": [],
+                  "registry_sha256": "a" * 64, "n_hypotheses": 1,
+                  "baseline_document_sha256": "b" * 64, "chain_length": 0}
         with mock.patch("run_all.load_registered_hypotheses",
-                        return_value=reg):
+                        return_value=reg), \
+                mock.patch("run_all.verify_registration",
+                           return_value=intact):
             out = build_summary(tmp)
         md = out["markdown"]
         assert "注册假设判定" in md
