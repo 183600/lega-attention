@@ -61,8 +61,8 @@ def test_temporal_split_preserves_content_with_newlines():
 
 
 def test_temporal_split_short_text_boundary_after_t2():
-    # 仅有的换行落在 t2 之后（末尾换行的小文本很常见）：旧实现把 p1 吸到
-    # 近结尾，val 被压成空并抛 ValueError；现在退化为字符切分且三段非空。
+    # 仅有的换行落在 t2 之后（末尾换行的小文本很常见）：退化为字符切分
+    # 且三段非空。
     for text in ("x" * 67 + "\n" + "x", "y" * 500 + "\n" + "z"):
         train, val, test, info = temporal_split_text(text)
         assert train and val and test

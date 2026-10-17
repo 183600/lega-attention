@@ -43,8 +43,7 @@ def new_run_id(tag: str, config_sha256: str = None, ts: str = None) -> str:
 
     不占用任何科学随机源（用 time_ns 而非 random），避免台账生成影响实验
     本身的随机流。后缀 = 秒内微秒计数(6 位) + 进程内单调递增序号：同一时刻
-    连续调用也绝不重复（旧实现取 time_ns()%1e6，每毫秒循环一次，同毫秒内
-    必然碰撞）；跨进程则由微秒计数区分。
+    连续调用也绝不重复；跨进程则由微秒计数区分。
     """
     ts = ts or time.strftime("%Y%m%d-%H%M%S")
     sha = (config_sha256 or "noconfig")[:8]

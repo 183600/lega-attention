@@ -49,13 +49,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 ## 预注册（confirmatory vs exploratory）
 
-`docs/registered_hypotheses.json` 在正式实验前登记方向性主张（H1~H6：
-主效应、核心消融、vs 已有工作、机制主张）。当前登记在案：
-H1 主效应 PPL（lega vs standard）、H2/H3/H4 去一法消融（查询/集中度在 PPL、
-长度校准在其设计动机对应的长上下文检索 RULER 家族）、H5 vs 已有工作
-（lega vs qgate）、H6 机制主张（AUROC(logit)−AUROC(仅查询) 跨种子配对差>0）。
-登记后文件只许追加（`amendments` 留痕），不许在看到正式结果后改写。
-`run_all` 汇总时逐条对照
+`run_all` 支持在正式实验前登记方向性主张，汇总时逐条对照
 Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=被证伪）/ 未定**
 （未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与
 `significance.json`。未登记的对比一律属事后（exploratory）分析：其 p 值

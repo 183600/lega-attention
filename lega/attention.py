@@ -470,7 +470,7 @@ class CausalSelfAttention(nn.Module):
 
         q_rot 必须已预乘 1/sqrt(Dh)：在进入分块循环前统一缩放一次。
         q_content 为 RoPE 前的查询内容视图 (B,H,T,Dh)。
-        门控在全部查询块算完后按整段 T 计算一次（各块 max_p 先按查询维汇总）。
+        门控在全部查询块算完后按整段 T 计算（各块 max_p 先按查询维汇总）。
         """
         S = k.shape[2]
         # q/k/v 来自 QKV 融合 GEMM 的 permute().unbind() 视图：批量维步长
@@ -540,9 +540,8 @@ class CausalSelfAttention(nn.Module):
                 # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
                 # 布局变换在此完成
                 o[:, q0:q1].copy_(oc.transpose(1, 2))
-            # 各块 max_p 按查询维汇成整段，门控整段只算一次：门控值逐位置只依赖
-            # (qterm, max_p, log n)，逐块与整段结果逐位一致；整段计算同时把
-            # 逐块的小张量门控算子合并为一次全段算子。
+            # 各块 max_p 按查询维汇成整段：门控值逐位置只依赖
+            # (qterm, max_p, log n)，逐块与整段结果逐位一致。
             max_p_all = torch.cat(max_ps, dim=2) if max_ps else None
             if self.variant in _GATED:
                 # keep_terms=False 时 _gate_logit 原地改写 qterm：checkpoint
