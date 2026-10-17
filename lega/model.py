@@ -187,7 +187,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
         ctx.amp_dtype = _ChunkedLinearCE._autocast_dtype(x2d)
         # n_valid 以设备张量保存；clamp_min(1) 同时吸收"全部位置被忽略"的
         # 除零情形（此时梯度因 keep 掩码全零而天然为 0，无需提前特判）。
-        n_valid = (tgt != ctx.ignore_index).sum()
+        # 同一份逐位置比较同时服务 n_valid 与 tgt_has_ignore：整批只做一次
+        # 比较（等价于原来两次 (tgt != ignore_index)），少一遍逐元素扫描。
+        not_ignored = tgt != ctx.ignore_index
+        n_valid = not_ignored.sum()
         ctx.inv_n = n_valid.clamp_min(1).to(
             x2d.dtype if x2d.dtype in (torch.float32, torch.float64)
             else torch.float32).reciprocal()
@@ -201,8 +204,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
         gw = None
         w_f = None
         # 是否有被忽略的位置（全局判定一次）：没有时损失与梯度两条路径
-        # 都无需逐块构造掩码，直接按原目标取值/散加。
-        tgt_has_ignore = not bool((tgt != ctx.ignore_index).all())
+        # 都无需逐块构造掩码，直接按原目标取值/散加。复用上面的比较结果。
+        tgt_has_ignore = not bool(not_ignored.all())
+        del not_ignored
         has_ignore = (need_dx or need_gw) and tgt_has_ignore
         # 梯度 GEMM 必须与 logits 同精度：前向处于 autocast 上下文内时显式
         # 关闭 autocast，避免 fp32/fp64 的 GEMM 被降到低精度。
@@ -457,8 +461,10 @@ class GPT(nn.Module):
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
                 total = None  # 设备端累加
-                # 无忽略位置（常见情形）时逐块损失无需掩码
-                tgt_has_ignore = not bool((tgt != ignore_index).all())
+                # 逐位置比较只做一次：tgt_has_ignore 与有效位置计数共用，
+                # 无忽略位置（常见情形）时逐块损失无需掩码。
+                not_ignored = tgt != ignore_index
+                tgt_has_ignore = not bool(not_ignored.all())
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
@@ -468,7 +474,7 @@ class GPT(nn.Module):
                                                     tgt_has_ignore)
                     total = part if total is None else total.add_(part)
                 # n_valid 保留为设备张量
-                loss = total / (tgt != ignore_index).sum().clamp_min(1)
+                loss = total / not_ignored.sum().clamp_min(1)
             logits = None
         else:
             # last_logits_only 时（如 generate）先裁到最后位置再过 ln_f/lm_head：
