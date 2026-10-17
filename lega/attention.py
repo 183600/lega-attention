@@ -35,6 +35,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 # 全部变体名（配置/命令行使用）
 VARIANTS = ("standard", "qgate", "null", "lega", "lega_no_len", "lega_no_conc",
@@ -354,9 +355,10 @@ class CausalSelfAttention(nn.Module):
                     gw: torch.Tensor) -> torch.Tensor:
         """门控查询项 w·q 的 (B,H,T) 归约，返回 fp32。
 
-        用 (B,H,T,Dh) @ (H,Dh,1) 的批量矩阵乘按点积归约实现。
+        gw 沿批量维广播后逐元素乘、再对 head_dim 求和（与矩阵乘按点积归约
+        数学等价）；sum 的内部累加精度为 fp32，低精度输入下数值更稳。
         """
-        return torch.matmul(q_content, gw.unsqueeze(-1)).squeeze(-1).float()
+        return (q_content * gw.view(1, gw.size(0), 1, gw.size(-1))).sum(-1).float()
 
     def _softmax_reuse(self, att: torch.Tensor) -> torch.Tensor:
         if ((torch.is_grad_enabled() and att.requires_grad)
