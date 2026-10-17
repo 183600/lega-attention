@@ -141,6 +141,7 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
         # 最终截断点 room，否则 filler[:room] 会把尾部干扰行截成半句。
         slots = sorted(rng.sample(range(2, room), min(n_distract, room - 2)))
         shift = 0
+        distractor_spans = []
         for sp in slots:
             k2 = rng.choice(others)
             # 干扰值必须区别于真值，否则看错行的模型会因干扰值碰巧等于
@@ -152,6 +153,7 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
             if sp + shift + len(line) > room:
                 continue  # 该行会越过截断点被截成半句，跳过
             filler = filler[:sp + shift] + line + filler[sp + shift:]
+            distractor_spans.append((sp + shift, sp + shift + len(line)))
             shift += len(line)
         filler = filler[:room]
 
@@ -159,6 +161,14 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
     max_pos = max(1, room - 1)
     lo_pos = max(1, int(0.1 * room))
     pos = rng.randint(lo_pos, max_pos) if max_pos > lo_pos else max_pos
+    if multikey:
+        # needle 也不能把干扰行从中间截断：否则干扰值会裂成两个数字
+        # （与上方“干扰行不得越过截断点”是同一条完整性约定）。就近吸附到
+        # 行边界，不额外消耗随机源，pos 的分布基本不变。
+        for a, b in distractor_spans:
+            if a < pos < b:
+                pos = a if pos - a <= b - pos else b
+                break
     hay = filler[:pos] + needle_ids + filler[pos:]
     ids = hay + question_ids
     assert len(ids) <= ctx, f"样例长度 {len(ids)} 超过 ctx={ctx}"

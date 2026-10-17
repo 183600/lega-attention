@@ -1,5 +1,6 @@
 """RULER 任务构造器测试：跨度有效性、答案一致性、打分函数。"""
 import random
+import re
 
 from lega.data import CharTokenizer
 from lega.ruler import (build_fwe, build_niah, build_vt, score_prediction,
@@ -65,6 +66,32 @@ def test_niah_needle_span_contains_answer():
         ex = build_niah(tok, 512, rng, mode="synth")
         s, e = ex["needle_span"]
         assert ex["answer"] in tok.decode(ex["ids"][s:e])
+
+
+def test_multikey_distractor_lines_stay_complete():
+    """needle 插入位置不得截断干扰行：干扰值裂成两个数字会破坏任务构造。"""
+    # _TEXT 未覆盖 x/z 等字母，未登录字符会静默解码成 id 0（'\\n'），
+    # 只有补齐字母表才能用解码文本做行完整性断言。
+    tok = CharTokenizer(sorted(set(_TEXT) | set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+    pat = re.compile(r"One of the special magic numbers for \w+ is: \d{7}\.")
+    built = 0
+    for i in range(60):
+        rng = random.Random(i)
+        try:
+            ex = build_niah(tok, 512, rng, mode="synth", multikey=True)
+        except ContextTooSmall:
+            continue
+        built += 1
+        text = tok.decode(ex["ids"])
+        n_tmpl = text.count("One of the special magic numbers for")
+        n_full = len(pat.findall(text))
+        assert n_tmpl == n_full, (
+            f"seed {i}: {n_tmpl} 处干扰/needle 模板但只有 {n_full} 条完整行"
+            "（行被从中截断）")
+        for m in re.finditer(r"\d+", text):
+            assert len(m.group(0)) == 7, f"seed {i}: 残缺数值 {m.group(0)!r}"
+    assert built > 0, "测试未能构造任何 multikey 样例"
 
 
 def test_score_predictions():
