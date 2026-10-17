@@ -54,17 +54,30 @@ DEFAULTS = {"steps": 300, "batch_size": 8, "ctx": 128, "lr": 3e-3,
 
 @torch.no_grad()
 def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
-                  max_chunk_tokens: int = 8192) -> dict:
+                  max_chunk_tokens: int = 8192,
+                  max_chunk_elems: int = 16_777_216) -> dict:
     """固定批的 loss / 下一 token 准确率 / 整条序列全对率（fp32、逐块计算）。
 
     直接消费 logits 计算指标（而非模型的训练路径），因此同时校验了
     lm_head 输出与标签的对齐关系。
+
+    内存约束（显存/内存峰值与词表规模解耦）：
+      * max_chunk_tokens 限制单次前向的 token 数（rows*T）；
+      * max_chunk_elems 限制单次 logits 张量 (rows*T*V) 与交叉熵内部
+        log_softmax 缓冲 (ce_tokens*V) 的元素量——大词表下 F.cross_entropy
+        会在整块 (rows*T, V) 上再分配一份同尺寸缓冲，必须按元素量二次分块，
+        否则词表一大峰值内存就会数倍于 logits 本身。
+        （单条序列自身的 logits 无法再拆，rows 至少为 1。）
     """
     was_training = model.training
     model.eval()
     B, T = x.shape
     V = model.vocab_size
-    rows = max(1, int(max_chunk_tokens) // max(1, T))
+    budget = max(1, int(max_chunk_elems))
+    rows = max(1, min(int(max_chunk_tokens) // max(1, T),
+                      budget // max(1, T * V)))
+    # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块预算同口径
+    ce_tokens = max(256, min(4096, budget // max(1, V)))
     total_loss = 0.0
     n_tokens = 0
     correct = 0
@@ -74,8 +87,12 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
         logits = model(xb)["logits"]                    # (b, T, V) fp32
         lf = logits.reshape(-1, V)
         tgt = yb.reshape(-1)
-        total_loss += float(F.cross_entropy(lf, tgt, reduction="sum"))
-        pred = lf.argmax(dim=-1)
+        pred = torch.empty(lf.size(0), dtype=torch.int64, device=lf.device)
+        for t0 in range(0, lf.size(0), ce_tokens):
+            lc = lf[t0:t0 + ce_tokens]
+            tc = tgt[t0:t0 + ce_tokens]
+            total_loss += float(F.cross_entropy(lc, tc, reduction="sum"))
+            pred[t0:t0 + ce_tokens] = lc.argmax(dim=-1)
         correct += int((pred == tgt).sum())
         n_tokens += int(tgt.numel())
         exact += int((pred.reshape(xb.shape[0], T) == yb).all(dim=1).sum())

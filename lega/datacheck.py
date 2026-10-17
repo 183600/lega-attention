@@ -168,7 +168,10 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
                 "浮点流必须是整数值")
         arr_i = arr_r.astype(np.int64)
     elif arr.dtype.kind in "iu":
-        arr_i = arr.astype(np.int64, copy=False)
+        # 整数流的 min/max 在任何整数 dtype 上都是精确运算，无需升位；
+        # 常见 uint16 输入若整体 astype(int64) 会瞬时分配 4 倍 token 数的
+        # 内存（大语料可达数 GB），直接使用原数组。
+        arr_i = arr
     else:
         raise ValueError(f"{split} token 流 dtype 非法: {arr.dtype}")
     vmin, vmax = int(arr_i.min()), int(arr_i.max())
