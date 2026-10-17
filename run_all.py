@@ -137,14 +137,23 @@ def run(cmd, env=None):
 
 
 def _resolve_jobs(args) -> int:
-    """并发度：显式 --jobs 优先；未指定时 CPU 取 min(4, 核数)，CUDA/--wandb 取 1。"""
+    """并发度：显式 --jobs 优先；未指定时 CPU 取 min(4, 核数)，CUDA/--wandb 取 1。
+
+    小核机器（<=4 核）默认放宽到 核数+1：并发时 _jobs_env 已把每个子进程压到
+    单 BLAS 线程（cpu//(cpu+1) 仍为 1，不增加总线程数），而子任务按
+    ceil(任务数/worker) 成轮调度——9 个等长子任务在 4 worker 下排成 4+4+1
+    三轮（末轮 3 核闲置），5 worker 下只需 5+4 两轮；轻度超订只改变任务间
+    的调度，不改变任何单进程的计算内容与随机数。大核机器维持 4 并发 x
+    cpu//4 线程、不引入超订；显式 --jobs 完全以用户值为准，不受此默认影响。
+    """
     if args.jobs is not None:
         return max(1, int(args.jobs))
     if args.wandb:
         return 1
     if get_device(args.device).startswith("cuda"):
         return 1
-    return min(4, os.cpu_count() or 1)
+    cpu = os.cpu_count() or 1
+    return min(4, cpu) if cpu > 4 else cpu + 1
 
 
 def parse_variants(spec: str) -> list:
@@ -1977,7 +1986,7 @@ def main():
     p.add_argument("--skip_plots", action="store_true")
     p.add_argument("--jobs", type=int, default=None,
                    help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
-                        "min(4, 核数)，CUDA 或 --wandb 下为 1")
+                        "min(4, 核数)（<=4 核时为核数+1），CUDA 或 --wandb 下为 1")
     args = p.parse_args()
 
     args.config = _repo_path(args.config)

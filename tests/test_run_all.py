@@ -41,7 +41,10 @@ def test_resolve_jobs_defaults():
         wandb = False
         device = "cpu"
 
-    assert _resolve_jobs(_A()) == min(4, os.cpu_count() or 1)
+    # 小核（<=4）默认 cpu+1：等长子任务与 worker 数同量级时少排一轮（见
+    # _resolve_jobs 文档）；大核维持 4 并发上限
+    cpu = os.cpu_count() or 1
+    assert _resolve_jobs(_A()) == (cpu + 1 if cpu <= 4 else min(4, cpu))
     _A.wandb = True
     assert _resolve_jobs(_A()) == 1
     _A.wandb = False
