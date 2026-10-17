@@ -52,12 +52,18 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
         top_p_l, top_i_l = top_p.tolist(), top_i.tolist()
         x_l = x.tolist()
         for r in range(len(chunk)):
+            ctx_text = tok.decode(x_l[r])
+            gold_txt = tok.decode([gold_l[r]])
             rows.append({
                 "window": int(chunk[r]),
                 "split": str(split),
                 "loss": float(loss_l[r]),
-                "context_tail": tok.decode(x_l[r])[-160:],
-                "gold_next": tok.decode([gold_l[r]]),
+                "context_tail": ctx_text[-160:],
+                # gold 是否出现在完整上下文窗口内。必须在采集时用全窗口判定：
+                # context_tail 只有 160 字符（窗口尾部），早先出现过的 gold 若只
+                # 看尾部会被误判为"从未出现"（复制/检索失败被错记成预测失败）。
+                "gold_in_context": bool(gold_txt) and gold_txt in ctx_text,
+                "gold_next": gold_txt,
                 "pred_top5": [(tok.decode([i]), round(float(p), 4))
                               for p, i in zip(top_p_l[r], top_i_l[r])],
             })

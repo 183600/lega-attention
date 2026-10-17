@@ -682,6 +682,16 @@ def _fmt_rate(x) -> str:
         return "-"
 
 
+def _fmt4(x) -> str:
+    """四位小数；None 显式显示 '-'（如空 split 的分布漂移统计为 null）。"""
+    if x is None:
+        return "-"
+    try:
+        return f"{float(x):.4f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
 # ---------------------------------------------------------------- 曲线诊断与权衡
 
 def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
@@ -954,7 +964,12 @@ def build_summary(results_dir: str, audit: dict = None,
     def fmt_stat_cell(r, key):
         st = {"mean": r.get(key), "std": r.get(f"{key}_std"),
               "n": r.get(f"{key}_n")}
-        return _fmt_stat(st)
+        cell = _fmt_stat(st)
+        # PPL 被钳制在 exp(20) 的 run（发散）必须显式标注：不能与正常 PPL
+        # 在同一列表头中静默比较（行级 val_ppl_clamped 由评测写入）。
+        if key == "val_ppl" and r.get("val_ppl_clamped"):
+            cell = f"{cell} ⚠含截断值"
+        return cell
 
     def _fmt_scalar(x):
         if x is None:
@@ -997,7 +1012,10 @@ def build_summary(results_dir: str, audit: dict = None,
             "注: niah/fwe/vt 为各上下文档位平均后的跨种子均值，"
             "每格样本数见 ruler_*.json（各变体同 seed 使用同一批样本）；",
             "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，"
-            "见机制分析。", seed_note, split_note, ""]
+            "见机制分析。",
+            "注: PPL 单元格标注 ⚠含截断值时，该变体至少有 1 个种子验证损失 >20，"
+            "PPL 已按 exp(20) 截断；发散的 run 不能与正常 PPL 直接比较。",
+            seed_note, split_note, ""]
         if common_ctx is not None:
             cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
                                  f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；")
@@ -1076,9 +1094,9 @@ def build_summary(results_dir: str, audit: dict = None,
         dv = dist.get("val_vs_train") or {}
         dt = dist.get("test_vs_train") or {}
         md.append(
-            f"- 分布漂移（一元 token，采样估计）：val−train TV={dv.get('tv', 0):.4f}、"
-            f"JS={dv.get('js_bits', 0):.4f} bit；test−train TV={dt.get('tv', 0):.4f}、"
-            f"JS={dt.get('js_bits', 0):.4f} bit；test OOV token 率="
+            f"- 分布漂移（一元 token，采样估计）：val−train TV={_fmt4(dv.get('tv'))}、"
+            f"JS={_fmt4(dv.get('js_bits'))} bit；test−train TV={_fmt4(dt.get('tv'))}、"
+            f"JS={_fmt4(dt.get('js_bits'))} bit；test OOV token 率="
             f"{_fmt_rate(dt.get('eval_oov_token_rate'))}")
         san = data_report.get("sanitization") or {}
         noise = sum(int((san.get(s) or {}).get("replacement_char_replaced_with_space", 0))

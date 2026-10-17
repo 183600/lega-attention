@@ -289,3 +289,20 @@ def test_chunked_ce_preserves_float64_dtype_and_value():
         logits.reshape(-1, logits.size(-1)), idx.reshape(-1))
     assert loss.dtype == torch.float64
     assert torch.allclose(loss, ref, atol=1e-12, rtol=1e-12)
+
+
+def test_chunked_ce_repeated_backward_does_not_decay_grads():
+    """retain_graph 下重复 backward：前向物化的 dx/gw 不得被原地重复缩放，
+    否则第二次梯度会被再乘一次 1/n_valid（并不是可累加的等值梯度）。"""
+    model = _tiny("standard")
+    idx = torch.randint(0, 64, (2, 9))
+    loss = model(idx, targets=idx)["loss"]
+    loss.backward(retain_graph=True)
+    first = {n: p.grad.detach().clone() for n, p in model.named_parameters()
+             if p.grad is not None}
+    loss.backward()
+    for n, p in model.named_parameters():
+        if n in first:
+            assert torch.allclose(p.grad, 2 * first[n], atol=1e-6, rtol=1e-5), \
+                f"{n}: 重复 backward 梯度不可累加"
+    print("  [ok] ChunkedLinearCE 重复 backward 梯度可累加（无 1/n 衰减）")

@@ -25,8 +25,10 @@ from .utils import enable_tf32, get_device, set_seed, save_json
 
 
 def _sync(device):
-    if device.startswith("cuda"):
-        torch.cuda.synchronize()
+    # 必须同步模型所在设备：torch.cuda.synchronize() 默认只同步当前设备，
+    # 在 cuda:N（N≠当前设备）上会量到异步发射耗时而不是真实计算耗时。
+    if device is not None and str(device).startswith("cuda"):
+        torch.cuda.synchronize(device)
 
 
 # ---------------------------------------------------------------- 效率指标
@@ -100,11 +102,12 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
                       else contextlib.nullcontext())
             with torch.inference_mode(), ctxmgr:
                 model(x, last_logits_only=True)  # 预热以稳定计时
-                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.reset_peak_memory_stats(device)
                 model(x, last_logits_only=True)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
+            # 峰值内存统计也必须绑定模型所在设备（默认是 current device）。
             eff["peak_mem_mb_prefill"][str(ctx)] = round(
-                torch.cuda.max_memory_allocated() / 2**20, 3)
+                torch.cuda.max_memory_allocated(device) / 2**20, 3)
             del x
         else:
             eff["peak_mem_mb_prefill"][str(ctx)] = None

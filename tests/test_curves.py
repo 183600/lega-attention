@@ -79,6 +79,25 @@ def test_short_log_is_descriptive_only():
     print("  [ok] 曲线点过少时只作描述统计")
 
 
+def test_degenerate_segments_render_without_crash():
+    """同一 step 的重复点会让区间均值为 None：证据行必须显示 '-' 而非崩溃。"""
+    # 训练/验证点都挤在同一 step：区间均值与相对变化均为 None → 欠拟合分支
+    recs = [{"step": 10, "loss": 4.0}, {"step": 10, "loss": 3.9},
+            {"step": 10, "loss": 3.8},
+            {"step": 100, "val_loss": 3.4}, {"step": 100, "val_loss": 3.6}]
+    d = diagnose_curve(recs)
+    assert d["status"] == "欠拟合/学习不充分", d
+    assert d["train_rel_change"] is None
+    assert any("-" in e for e in d["evidence"])
+    # 训练下降 + val 区间均值为 None，但早停增益显著 → 过拟合分支同样不得崩
+    recs2 = [{"step": 10, "loss": 4.0}, {"step": 20, "loss": 3.0},
+             {"step": 30, "loss": 2.0},
+             {"step": 100, "val_loss": 3.4}, {"step": 100, "val_loss": 3.6}]
+    d2 = diagnose_curve(recs2)
+    assert d2["status"] == "过拟合", d2
+    print("  [ok] 退化区间（None 均值/变化率）诊断不再崩溃")
+
+
 def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"

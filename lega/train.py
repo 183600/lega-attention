@@ -103,15 +103,28 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     # ---- 4. 梯度爆炸 / 学习率：pre-clip 梯度范数历史是否出现尖峰/Inf
     hist = [g for g in (grad_norm_history or []) if g is not None]
     opt_findings = []
+    # 梯度范数触发的排查（where=grad_norm）时，触发值本身就是非有限的当前范数；
+    # 历史只保留有限值（避免 Infinity 写进 JSON），因此不能只靠 hist[-1] 判定，
+    # 必须用触发值显式报告"已爆炸"（否则专家信号会退化为"未见尖峰"）。
+    trigger_nonfinite = (where == "grad_norm" and loss_value is not None
+                         and not math.isfinite(float(loss_value)))
+    if trigger_nonfinite:
+        opt_findings.append(
+            f"本次 pre-clip 梯度范数 {float(loss_value):.3e} 非有限 → 梯度已爆炸")
     if hist:
         finite = [g for g in hist if math.isfinite(g)]
         last = hist[-1]
         if finite and len(finite) >= 3:
             med = statistics.median(finite[:-1]) or 1e-12
+            if last > 10 * med:
+                spike_note = f"（尖峰 ×{last / med:.0f}，**疑似梯度爆炸**）"
+            elif trigger_nonfinite:
+                spike_note = "（历史尾部未见尖峰，但本次已非有限）"
+            else:
+                spike_note = "（未见爆炸性尖峰）"
             opt_findings.append(
                 f"最近 pre-clip 梯度范数 {last:.3e}，此前中位数 {med:.3e}"
-                + (f"（尖峰 ×{last / med:.0f}，**疑似梯度爆炸**）"
-                   if last > 10 * med else "（未见爆炸性尖峰）"))
+                + spike_note)
         if not math.isfinite(last):
             opt_findings.append("最近一次 pre-clip 梯度范数非有限 → 梯度已爆炸")
     else:

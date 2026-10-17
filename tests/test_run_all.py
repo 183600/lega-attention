@@ -381,6 +381,30 @@ def test_build_summary_missing_latency_entry():
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
 
 
+def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
+    """PPL 截断必须在汇总表显式标注；分布漂移字段为 null（空 split）时不得崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 4.85e8, "val_loss": 21.0,
+            "val_ppl_clamped": True, "gate_mean": 0.5, "n_params": 100,
+            "n_gate_extra": 0})
+        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
+            "variant": "standard", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "gate_mean": None, "n_params": 100, "n_gate_extra": 0})
+        out = build_summary(tmp, data_report={
+            "distribution_shift": {
+                "val_vs_train": {"tv": None, "js_bits": None},
+                "test_vs_train": {"tv": None, "js_bits": None,
+                                  "eval_oov_token_rate": None}}})
+        md = out["markdown"]
+        assert "含截断值" in md
+        assert "TV=-" in md and "JS=-" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（PPL 截断标注；分布漂移 null 安全）")
+
+
 def test_enrich_paired_adds_robustness_fields():
     """配对检验必须附带置换 p / bootstrap CI / MDE，三者口径一致可复核。"""
     a = [10.5, 10.6, 10.4, 10.7, 10.55]

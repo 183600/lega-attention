@@ -83,6 +83,23 @@ def test_checklist_optimization_step_detects_grad_explosion():
     print("  [ok] 排查步骤 4（优化）：梯度爆炸尖峰检测与学习率报告")
 
 
+def test_checklist_nonfinite_grad_norm_trigger_reports_explosion():
+    """grad_norm 触发的排查：当前范数非有限而历史只保留有限值，
+    必须用触发值显式报告“已爆炸”，不能退化成“未见爆炸性尖峰”。"""
+    m = _model()
+    rep = run_nan_checklist(m, _batches(), "cpu", 7, "grad_norm", float("inf"),
+                            lr=3e-3, grad_norm_history=[1.0, 1.1, 0.95, 1.05],
+                            amp_dtype=None, vocab_size=64)
+    findings = " ".join(rep["checklist_optimization"]["findings"])
+    assert "梯度已爆炸" in findings, findings
+    # train_loss 触发（非 grad_norm）时不得误报爆炸
+    rep2 = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss", float("nan"),
+                             lr=1e-3, grad_norm_history=[1.0, 1.1, 0.95, 1.05],
+                             amp_dtype=None, vocab_size=64)
+    assert "梯度已爆炸" not in " ".join(rep2["checklist_optimization"]["findings"])
+    print("  [ok] 排查步骤 4（优化）：grad_norm 非有限的触发值本身被作为爆炸证据")
+
+
 def test_checklist_action_order_is_fixed():
     m = _model()
     rep = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss", float("nan"),

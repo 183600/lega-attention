@@ -235,6 +235,9 @@ def categorize_window(rec: Dict) -> Dict:
          噪声，或训练不足）。
     附加布尔 gold_in_context / gold_in_top5 区分"上下文里出现过 gold 但
     模型没复制"（复制/检索失败）与"gold 从未出现"（真正的预测失败/长尾）。
+    gold_in_context 优先使用采集时按完整窗口判定的布尔（evaluate 写入）；
+    旧格式记录没有该字段时退化为 context_tail（只有窗口尾部 160 字符）检查，
+    此时"未出现"只代表尾部未出现。
     """
     r = dict(rec)
     top1, p1 = _window_top1(r)
@@ -249,7 +252,10 @@ def categorize_window(rec: Dict) -> Dict:
             top5_txt.append(str(item))
     r["top1"] = top1
     r["top1_prob"] = p1
-    r["gold_in_context"] = bool(gold_txt) and gold_txt in tail
+    recorded_ctx = r.get("gold_in_context")
+    r["gold_in_context"] = (bool(recorded_ctx)
+                            if isinstance(recorded_ctx, bool)
+                            else bool(gold_txt) and gold_txt in tail)
     r["gold_in_top5"] = bool(gold_txt) and gold_txt in top5_txt
     if top1 is None:
         r["category"] = "unparsed"
@@ -318,7 +324,10 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     """单个最差窗口的 Markdown 行（上下文尾部/模型 top-1/真实续写/归因）。"""
     where = (f"窗口 #{c.get('window')}" +
              (f"（{c['split']} 集）" if c.get("split") else ""))
-    lines = [f"### 案例 {idx}: {where}　loss={c.get('loss', float('nan')):.3f}"]
+    loss = c.get("loss")
+    # loss 可能缺失或显式为 null（旧格式/外部 JSON）：显示 '-' 而不是崩溃
+    loss_s = f"{float(loss):.3f}" if isinstance(loss, (int, float)) else "-"
+    lines = [f"### 案例 {idx}: {where}　loss={loss_s}"]
     tail = (c.get("context_tail") or "").replace("\n", " ⏎ ")[-160:]
     lines.append(f"- 上下文尾部: …{tail}")
     top1 = c.get("top1")

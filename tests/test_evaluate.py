@@ -33,3 +33,23 @@ def test_collect_worst_windows():
         assert r["context_tail"] and isinstance(r["gold_next"], str)
     print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
           f"gold={rows[0]['gold_next']!r}）")
+
+
+def test_collect_worst_windows_gold_in_context_uses_full_window():
+    """gold_in_context 必须按完整窗口判定，而不是只看 160 字符的上下文尾部。"""
+    torch.manual_seed(0)
+    tok = CharTokenizer(sorted("abcdefghij "))
+    model = GPT(vocab_size=len(tok.itos), block_size=64, d_model=32, n_layers=1,
+                n_heads=2, variant="lega")
+    model.eval()
+    val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
+    val = val.astype(np.uint16)
+    rows = collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
+                                 n_worst=3, max_windows=32)
+    for r in rows:
+        w = int(r["window"])
+        full = tok.decode(val[w * 64:(w + 1) * 64].tolist())
+        gold = tok.decode([int(val[w * 64 + 64])])
+        assert r["context_tail"] == full[-160:]
+        assert r["gold_in_context"] == (bool(gold) and gold in full), r
+    print("  [ok] 最差窗口 gold_in_context 按完整窗口判定")

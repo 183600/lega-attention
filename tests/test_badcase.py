@@ -7,9 +7,9 @@ import tempfile
 
 from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
                            case_key, categorize_case, categorize_window,
-                           cross_variant_analysis, process_eval_json,
-                           process_ruler_json, write_badcase_md,
-                           write_worstcase_md)
+                           cross_variant_analysis, format_window_case,
+                           process_eval_json, process_ruler_json,
+                           write_badcase_md, write_worstcase_md)
 
 
 def _win(pred_top5=None, gold="green", tail="The sky is blue. The sky is",
@@ -164,6 +164,30 @@ def test_categorize_worst_window():
     c = categorize_window(_win(pred_top5=[]))
     assert c["category"] == "unparsed" and c["top1"] is None
     print("  [ok] 最差窗口归因（复读/高置信盲区/低置信/校准/旧格式）")
+
+
+def test_categorize_window_prefers_full_context_flag():
+    """采集端按完整窗口判定的 gold_in_context 优先于尾部兜底猜测。"""
+    # 旧格式（无该字段）：沿用 context_tail 检查
+    c = categorize_window(_win(pred_top5=[[" red", 0.85]]))
+    assert c["gold_in_context"] is False and "未出现" in c["explanation"]
+    # 新格式：gold 在窗口前部出现过（尾部没有），布尔为 True 时必须采信，
+    # 否则会把“复制失败”误报成“gold 从未出现”的预测失败
+    c2 = categorize_window(_win(pred_top5=[[" red", 0.85]],
+                                gold_in_context=True))
+    assert c2["gold_in_context"] is True
+    assert "未被复制" in c2["explanation"]
+    print("  [ok] 最差窗口 gold_in_context：完整窗口布尔优先/旧格式尾部兜底")
+
+
+def test_format_window_case_tolerates_null_loss():
+    """loss 缺失/为 null 的窗口记录也必须能出报告行（外部/旧格式 JSON 容错）。"""
+    c = categorize_window(_win(loss=None, pred_top5=[[" blue", 0.7]]))
+    assert "loss=-" in format_window_case(1, c)[0]
+    c2 = categorize_window(_win(pred_top5=[[" blue", 0.7]]))
+    c2.pop("loss")
+    assert "loss=-" in format_window_case(1, c2)[0]
+    print("  [ok] 最差窗口报告行：loss 缺失/null 安全")
 
 
 def test_analyze_worst_windows_and_md():

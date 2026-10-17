@@ -90,6 +90,16 @@ def _rel_change(first: Optional[float], last: Optional[float]) -> Optional[float
     return (last - first) / abs(first)
 
 
+def _fmt_num(x: Optional[float], spec: str = ".4f") -> str:
+    """数值缺失（区间内无点时 _seg_mean 返回 None）显式显示 '-'。"""
+    return "-" if x is None else format(x, spec)
+
+
+def _fmt_rel(x: Optional[float]) -> str:
+    """相对变化缺失时显式显示 '-'（不能把 None 交给百分号格式化）。"""
+    return "-" if x is None else f"{x:+.1%}"
+
+
 def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Dict:
     """从单条 train_log 记录序列给出结构化诊断。
 
@@ -145,9 +155,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                                    "并检查梯度范数是否出现尖峰")
         elif train_down and (val_up or (early_stop_gain or 0) > EARLY_STOP_TOL):
             status = "过拟合"
-            ev = [f"训练损失 {first_train:.4f}→{last_train:.4f}"
-                  f"（{train_delta:+.1%}）而验证损失 "
-                  f"{first_val:.4f}→{last_val:.4f}（{val_delta:+.1%}）"]
+            ev = [f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                  f"（{_fmt_rel(train_delta)}）而验证损失 "
+                  f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                  f"（{_fmt_rel(val_delta)}）"]
             if (early_stop_gain or 0) > EARLY_STOP_TOL:
                 ev.append(f"最终验证损失劣于 step {best_step} 的最优值 "
                           f"{best_val:.4f} 达 {early_stop_gain:+.1%}")
@@ -161,8 +172,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         elif not train_down:
             status = "欠拟合/学习不充分"
             evidence.append(
-                f"训练损失 {first_train:.4f}→{last_train:.4f}（{train_delta:+.1%}），"
-                "没有实质下降")
+                f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                f"（{_fmt_rel(train_delta)}），没有实质下降")
             if (log_vocab is not None and last_train is not None
                     and last_train > RANDOM_LEVEL_TOL * log_vocab):
                 evidence.append(
@@ -181,8 +192,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         else:
             status = "正常收敛"
             evidence.append(
-                f"训练损失 {first_train:.4f}→{last_train:.4f}（{train_delta:+.1%}），"
-                f"验证损失 {first_val:.4f}→{last_val:.4f}（{val_delta:+.1%}）")
+                f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                f"（{_fmt_rel(train_delta)}），"
+                f"验证损失 {_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                f"（{_fmt_rel(val_delta)}）")
             if (early_stop_gain or 0) > EARLY_STOP_TOL:
                 evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
                                 f"{early_stop_gain:.1%}，已按 best-checkpoint 口径评测")
