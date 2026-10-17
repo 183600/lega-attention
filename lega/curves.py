@@ -16,6 +16,7 @@ import argparse
 import json
 import math
 import os
+import statistics
 from typing import Dict, List, Optional, Tuple
 
 # 相对变化阈值：低于该幅度视为"没有实质下降/上升"（覆盖常见噪声量级）
@@ -26,6 +27,9 @@ DIVERGE_FACTOR = 1.5
 EARLY_STOP_TOL = 0.02
 # 欠拟合疑似数据管道问题：训练损失停在随机猜测水平的该比例以内
 RANDOM_LEVEL_TOL = 0.9
+# 梯度范数尖峰：最大 pre-clip 范数超过中位数该倍数视为爆炸性尖峰
+# （NaN 之前的典型早期信号；即使损失曲线尚未发散也应预警）
+GRAD_SPIKE_FACTOR = 10.0
 
 
 def load_train_log(path: str) -> List[Dict]:
@@ -110,6 +114,19 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
     val_pts, val_bad = _finite_points(records, "val_loss")
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报
     nan_count = train_bad + val_bad
+    # 梯度范数体检：尖峰/非有限是发散与 NaN 的早期信号，损失曲线可能还没反映
+    grad_pts, grad_bad = _finite_points(records, "grad_norm")
+    grad_vals = [p["value"] for p in grad_pts]
+    grad_med = None
+    grad_max = None
+    grad_spike_ratio = None
+    if grad_vals:
+        grad_med = float(statistics.median(grad_vals))
+        grad_max = float(max(grad_vals))
+        if grad_med > 0:
+            grad_spike_ratio = grad_max / grad_med
+    grad_spike = (grad_spike_ratio is not None
+                  and grad_spike_ratio >= GRAD_SPIKE_FACTOR)
 
     first_train = _seg_mean(train_pts, 0.0, 1 / 3)
     last_train = _seg_mean(train_pts, 2 / 3, 1.0)
@@ -206,6 +223,22 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
 
+    # 梯度范数体检（与损失状态独立）：非有限/尖峰是梯度爆炸的早期信号，
+    # 损失曲线可能尚未发散，只看最终损失会漏掉。
+    if grad_bad:
+        evidence.append(f"pre-clip 梯度范数出现 {grad_bad} 个非有限值"
+                        "（梯度已爆炸，先于或伴随损失 NaN）")
+        recommendations.append(
+            "梯度爆炸：降低学习率、收紧 grad_clip（如 0.5）、延长 warmup，"
+            "并确认 train_log.jsonl 的 grad_norm 不再出现非有限值")
+    elif grad_spike:
+        evidence.append(
+            f"pre-clip 梯度范数最大 {grad_max:.2e} 为中位数 {grad_med:.2e} 的 "
+            f"{grad_spike_ratio:.1f} 倍（爆炸性尖峰）")
+        recommendations.append(
+            f"检测到梯度范数尖峰（×{grad_spike_ratio:.0f}）：这是 NaN 之前的"
+            "典型信号，应降低学习率/收紧 grad_clip 后再验证曲线")
+
     gap = None
     if last_train is not None and final_val is not None:
         gap = final_val - last_train
@@ -228,8 +261,15 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         "val_final_step": final_step,
         "early_stop_gain_rel": early_stop_gain,
         "generalization_gap": gap,
+        "grad_norm_points": len(grad_pts),
+        "grad_norm_nonfinite": int(grad_bad),
+        "grad_norm_median": grad_med,
+        "grad_norm_max": grad_max,
+        "grad_spike_ratio": grad_spike_ratio,
+        "has_grad_spike": bool(grad_spike or grad_bad),
         "thresholds": {"rel_tol": REL_TOL, "diverge_factor": DIVERGE_FACTOR,
-                       "early_stop_tol": EARLY_STOP_TOL},
+                       "early_stop_tol": EARLY_STOP_TOL,
+                       "grad_spike_factor": GRAD_SPIKE_FACTOR},
     }
 
 

@@ -72,6 +72,30 @@ def test_divergence_and_nan():
     print("  [ok] 发散与 NaN 判定")
 
 
+def test_grad_norm_spike_and_nonfinite_reported():
+    """梯度爆炸的早期信号（尖峰/非有限范数）必须报告，即使损失曲线看似正常。"""
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    for i, g in enumerate([1.0, 1.1, 1.0, 1.05, 100.0]):
+        recs.append({"step": (i + 1) * 10, "grad_norm": g})
+    d = diagnose_curve(recs)
+    assert d["status"] == "正常收敛"
+    assert d["has_grad_spike"] and d["grad_spike_ratio"] >= 10
+    assert any("尖峰" in e for e in d["evidence"]), d["evidence"]
+    assert any("梯度" in r for r in d["recommendations"]), d["recommendations"]
+    # 非有限梯度范数（Infinity 写入 jsonl）：即使没有损失 NaN 也要判爆炸
+    recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    recs2.append({"step": 10, "grad_norm": float("inf")})
+    d2 = diagnose_curve(recs2)
+    assert d2["status"] == "正常收敛" and d2["grad_norm_nonfinite"] == 1
+    assert d2["has_grad_spike"]
+    assert any("非有限" in e for e in d2["evidence"]), d2["evidence"]
+    # 旧日志无 grad_norm：字段可缺省且不误报
+    d3 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    assert d3["grad_norm_points"] == 0 and not d3["has_grad_spike"]
+    print("  [ok] 梯度范数尖峰/非有限检测（与损失状态独立）")
+
+
 def test_short_log_is_descriptive_only():
     d = diagnose_curve([{"step": 1, "loss": 4.2}])
     assert d["status"] == "数据不足"

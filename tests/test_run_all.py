@@ -392,6 +392,38 @@ def test_build_summary_missing_latency_entry():
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
 
 
+def test_tradeoff_includes_decode_latency():
+    """推理延迟（decode ms/tok）必须进入效率-精度权衡的增幅与判定，不能只看 prefill。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+
+        def _lat(dec):
+            return {"prefill_ms": {"256": {"1": 1.0}},
+                    "decode_ms_per_tok": {"256": dec},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(0.1), "lega": _lat(0.4)}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["eff_decode_ms_per_tok"] == 0.4
+        assert row["eff_decode_delta_pct"] == 300.0
+        # 其余指标与基线一致时，最大增幅由 decode 延迟贡献
+        assert row["eff_cost_max_pct"] == 300.0, row
+        assert "Decode ms/tok" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 效率-精度权衡包含 decode 推理延迟")
+
+
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     """PPL 截断必须在汇总表显式标注；分布漂移字段为 null（空 split）时不得崩溃。"""
     tmp = tempfile.mkdtemp()

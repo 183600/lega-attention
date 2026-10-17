@@ -767,7 +767,7 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
       * 收益为负且显著 → 不可行（PPL 显著劣于基线，不存在“权衡”可言）；
       * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
         且增幅 >10% 时直接判不可行；
-      * 显著但增幅（参数/计算量等结构指标的最大增幅）>50% → 需审视；
+      * 显著但增幅（参数/计算量/推理延迟/显存的最大增幅）>50% → 需审视；
       * 显著但增幅 >5×收益（收益按 PPL 相对改善计，下限按 0.5% 计，
         避免收益趋近 0 时比值判定失效）→ 收益-增幅比不利；
       * 其余 → 可接受。
@@ -1204,6 +1204,7 @@ def build_summary(results_dir: str, audit: dict = None,
                   "| 早停空间 | 关键建议 |")
         md.append("|---|---|---|---|---|---|")
         any_nan = False
+        any_grad_spike = False
         for v in variants:
             by_seed = curve.get(v) or {}
             if not by_seed:
@@ -1212,6 +1213,8 @@ def build_summary(results_dir: str, audit: dict = None,
             status = worst_status([d["status"] for d in diags])
             worst = next(d for d in diags if d["status"] == status)
             any_nan = any_nan or any(d.get("nonfinite_values") for d in diags)
+            spike = any(d.get("has_grad_spike") for d in diags)
+            any_grad_spike = any_grad_spike or spike
             es = [d.get("early_stop_gain_rel") for d in diags
                   if d.get("early_stop_gain_rel") is not None]
 
@@ -1228,8 +1231,9 @@ def build_summary(results_dir: str, audit: dict = None,
                     + ("（最终劣于最优，已用 best checkpoint）"
                        if sum(es) / len(es) > 0.02 else ""))
             rec = worst["recommendations"][:1]
-            md.append(f"| {VARIANT_CN.get(v, v)} | {status} | {train_s} | {val_s} "
-                      f"| {es_s} | {rec[0] if rec else '-'} |")
+            status_s = status + ("　（梯度尖峰）" if spike else "")
+            md.append(f"| {VARIANT_CN.get(v, v)} | {status_s} | {train_s} "
+                      f"| {val_s} | {es_s} | {rec[0] if rec else '-'} |")
         md.append("")
         if any_nan:
             md.append("⚠ 存在出现非有限损失的 run：训练已失效，"
@@ -1240,6 +1244,12 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append("注：全部 run 无 NaN/Inf；有异常状态的变体请按建议处理"
                       "（过拟合→正则化/增数据/早停，欠拟合→查学习率与数据管道）"
                       "后重跑，再进入对比结论。")
+        if any_grad_spike:
+            md.append("")
+            md.append("⚠ 检测到 pre-clip 梯度范数非有限或爆炸性尖峰"
+                      "（最大/中位数 ≥10×）的 run：这是 NaN/发散的早期信号，"
+                      "即使损失曲线看似正常也应先降低学习率/收紧 grad_clip "
+                      "后重跑，细节见 `curve_diagnosis.json` 的 grad_norm 字段。")
     else:
         md.append("- ⚠ 未找到 `curve_diagnosis.json`：只看最终数值会掩盖训练动态，"
                   "请先运行训练（或 `python -m lega.curves --run_dir <run 目录>`）。")
@@ -1598,19 +1608,21 @@ def build_summary(results_dir: str, audit: dict = None,
     if common_ctx is not None and lat_entries.get("standard"):
         base_e = lat_entries["standard"]
         base_prefill = (base_e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
+        base_decode = (base_e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
-                  "Prefill ms/参数量/FLOPs(token)/实测分配量 相对基线增幅的最大值；"
+                  "Prefill ms/Decode ms(tok)/参数量/FLOPs(token)/实测分配量 "
+                  "相对基线增幅的最大值；"
                   "收益=PPL 相对改善。判定规则：种子不足（n<3）或数据缺失→"
                   "无法判定；PPL 显著差于基线→不可行；涨点不显著（Holm 校正后 "
                   "p≥α）→说服力有限（增幅>10% 判不可行）；显著但增幅>50% 或 "
                   ">5×收益 →收益-增幅比不利。提升 0.5% 却让计算量增加 10 倍的"
                   "方案会被明确拒绝。")
         md.append("")
-        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | 参数量 "
-                  "| FLOPs/token | 实测分配 | 判定 |")
-        md.append("|---|---|---|---|---|---|---|---|")
+        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | Decode ms/tok "
+                  "| 参数量 | FLOPs/token | 实测分配 | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
                     and t.get("mean_diff") is not None}
@@ -1628,17 +1640,22 @@ def build_summary(results_dir: str, audit: dict = None,
             n_ppl = t.get("n") if t else None
             pre_delta = _rel_pct(base_prefill,
                                  (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1"))
+            dec_v = (e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
+            dec_delta = _rel_pct(base_decode, dec_v)
             par_delta = _rel_pct(base_params, _eff_cell(e, "params", common_ctx))
             flo_delta = _rel_pct(base_flops, _eff_cell(e, "flops", common_ctx))
             mem_v = _eff_cell(e, "mem", common_ctx)
             mem_b = _eff_cell(base_e, "mem", common_ctx)
             mem_delta = _rel_pct(mem_b, mem_v) if (mem_v is not None and mem_b) else None
-            deltas = [d for d in (pre_delta, par_delta, flo_delta, mem_delta)
+            deltas = [d for d in (pre_delta, dec_delta, par_delta, flo_delta, mem_delta)
                       if d is not None]
             cost = max(deltas) if deltas else None
             verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl)
             r["eff_cost_max_pct"] = round(cost, 2) if cost is not None else None
             r["eff_flops_per_tok"] = _eff_cell(e, "flops", common_ctx)
+            r["eff_decode_ms_per_tok"] = dec_v
+            r["eff_decode_delta_pct"] = (round(dec_delta, 2)
+                                         if dec_delta is not None else None)
             r["eff_peak_mem_mb"] = mem_v
             r["eff_benefit_ppl_pct"] = (round(benefit, 2)
                                         if benefit is not None else None)
@@ -1651,13 +1668,16 @@ def build_summary(results_dir: str, audit: dict = None,
 
             md.append(f"| {VARIANT_CN.get(v, v)} | {_d(benefit)} "
                       f"| {'-' if p_adj is None else f'{p_adj:.4f}'} "
-                      f"| {_d(pre_delta)} | {_d(par_delta)} | {_d(flo_delta)} "
+                      f"| {_d(pre_delta)} | {_d(dec_delta)} | {_d(par_delta)} "
+                      f"| {_d(flo_delta)} "
                       f"| {'-' if mem_v is None else f'{mem_v:.0f} MB'} "
                       f"| {verdict} |")
         md.append("")
         md.append("注：FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
                   "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
                   "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
+                  "Decode ms/tok 为带 KV 缓存的逐 token 解码延迟（推理延迟的"
+                  "直接口径），与 Prefill 同为相对基线的百分比变化。"
                   "运行时指标受硬件影响，跨机器对比无效。")
     else:
         md.append("- ⚠ 缺少运行时/效率基准（latency.json 或 standard 基线），"

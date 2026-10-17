@@ -133,7 +133,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据） |
-| `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合/欠拟合/发散/NaN + 处理建议） |
+| `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现） |
 | `results/<tag>/badcase_cross.json` | 跨变体错误对照（全体共识失败 vs 相对 standard 的特异性新增/修复） |
@@ -170,11 +170,15 @@ python -m lega.badcase   --results_dir results/small         # 错误样本归�
 python -m tests.run_tests   # 单元测试（不依赖 pytest）
 ```
 
-结果分析口径（详见 `summary.md` 对应小节）：训练诊断看曲线而非只看最终值；NaN 按
-数据→代码（log(0)/除零/softmax 溢出）→混合精度下溢→梯度爆炸/学习率的顺序排查
-（`nan_report.json`）；错误样本逐条归因，并用跨变体对照区分"全体共识失败（数据/
-难度）"与"方法特异性盲区"；效率-精度权衡显式判定（涨点未过显著性检验或增幅远大于
-收益时明确标注，见 §2 的 `tradeoff_verdict` 规则）。
+结果分析口径（详见 `summary.md` 对应小节）：训练诊断看曲线而非只看最终值，
+除过拟合/欠拟合/发散外还独立报告 **pre-clip 梯度范数尖峰/非有限**（NaN 与发散的
+早期信号，损失曲线可能尚未反映）；NaN 按数据→代码（log(0)/除零/softmax 溢出，
+前向钩子给出首个"输入有限、输出非有限"的模块即 `origin`）→混合精度下溢→梯度
+爆炸/学习率的顺序排查（`nan_report.json`），数据与激活检查均优先分析失败步批次
+（预取会覆盖待训练批次）；错误样本逐条归因，并用跨变体对照
+区分"全体共识失败（数据/难度）"与"方法特异性盲区"；效率-精度权衡显式判定，
+增幅取 **Prefill/Decode 推理延迟、参数量、FLOPs、显存峰值** 相对基线的最大者，
+涨点未过显著性检验或增幅远大于收益时明确标注（见 §2 的 `tradeoff_verdict` 规则）。
 
 ---
 
@@ -191,12 +195,12 @@ lega-attention/
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底，词表只在 train 拟合）+ bin 缓存 + 批采样
 │   ├── datacheck.py           # 防泄漏：时序/文档划分、去污染、token 硬校验、漂移筛查、test 访问账本
-│   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）+ 溯源清单
+│   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）+ NaN 系统排查（激活钩子定位）+ 溯源清单
 │   ├── evaluate.py            # held-out test PPL（缺 test.bin 时回退 val）
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
 │   ├── latency.py             # prefill / decode 延迟基准
 │   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC
-│   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN）+ 处理建议
+│   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度尖峰）+ 处理建议
 │   ├── badcase.py             # 错误样本归因（RULER + 语言建模最差窗口）+ 跨变体对照
 │   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
 │   ├── repro.py               # 代码版本/数据指纹/运行环境/种子审计/溯源继承

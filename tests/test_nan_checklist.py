@@ -7,7 +7,7 @@ import tempfile
 import torch
 
 from lega.model import GPT
-from lega.train import _abort_on_nan, run_nan_checklist
+from lega.train import _abort_on_nan, audit_activations, run_nan_checklist
 
 
 def _model():
@@ -39,6 +39,44 @@ def test_checklist_data_step_finds_out_of_range_ids():
     print("  [ok] 排查步骤 1（数据）：id 越界检查")
 
 
+def test_checklist_prefers_consumed_failing_batch():
+    """预取会覆盖 batches：失败步批次必须显式传入并优先检查，否则漏掉罪魁数据。"""
+    m = _model()
+    rep = run_nan_checklist(m, _batches(), "cpu", 42, "train_loss", float("nan"),
+                            lr=1e-3, grad_norm_history=[], amp_dtype=None,
+                            vocab_size=64, consumed_batches=_batches(bad_ids=True))
+    findings = rep["checklist_data"]["findings"]
+    assert findings and findings[0].startswith("失败步批"), findings
+    assert any("越界" in f for f in findings), "只查待训练批次会漏掉失败步的越界 id"
+    assert rep["checklist_data"]["n_consumed_batches"] == 1
+    print("  [ok] 排查步骤 1（数据）：失败步批次优先检查并定位越界 id")
+
+
+def test_checklist_activation_audit_gets_consumed_batches_first():
+    """激活定位也应以失败步批次为主输入（消耗完的批次才是 NaN 现场）。"""
+    import lega.train as tr
+    captured = {}
+    orig = tr.audit_activations
+
+    def fake(model, batches, device, amp_dtype=None):
+        captured["batches"] = list(batches)
+        return {"checked": True, "origin": None, "records": [],
+                "first_nonfinite": None, "forward_error": None,
+                "n_modules_checked": 0, "findings": []}
+    tr.audit_activations = fake
+    try:
+        consumed, pending = _batches(), _batches()
+        run_nan_checklist(_model(), pending, "cpu", 1, "train_loss",
+                          float("nan"), lr=1e-3, grad_norm_history=[],
+                          amp_dtype=None, vocab_size=64,
+                          consumed_batches=consumed)
+        assert captured["batches"][0] is consumed[0], "优先用失败步批次"
+        assert captured["batches"][1] is pending[0], "待训练批次保留作补充"
+    finally:
+        tr.audit_activations = orig
+    print("  [ok] 排查步骤 2（代码）：激活定位优先以失败步批次为输入")
+
+
 def test_checklist_params_step_localizes_nan_layer():
     m = _model()
     with torch.no_grad():
@@ -52,6 +90,40 @@ def test_checklist_params_step_localizes_nan_layer():
     assert any("log(0)" in t or "log" in rep["checklist_params"]["note"]
                for t in tensors), "参数定位应附带代码排查指引"
     print("  [ok] 排查步骤 2（代码）：NaN 参数定位到具体层 + log(0)/softmax 指引")
+
+
+def test_activation_audit_finds_origin_on_finite_inputs():
+    """主动检查：有限参数下由某个算子产生的 NaN，必须定位到该模块（origin）。"""
+    m = _model()
+    m.ln_f.forward = lambda x: x * float("nan")   # 有限输入 → 非有限输出
+    rep = audit_activations(m, _batches(), "cpu")
+    assert rep["origin"] is not None, rep
+    assert rep["origin"]["module"] == "ln_f", rep["origin"]
+    assert rep["origin"]["input_nonfinite"] == 0
+    assert rep["origin"]["output_nan"] > 0
+    assert any("ln_f" in f for f in rep["findings"])
+    # 通过完整排查入口也应包含该定位结果
+    full = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss", float("nan"),
+                             lr=1e-3, grad_norm_history=[], amp_dtype=None,
+                             vocab_size=64)
+    assert full["checklist_activations"]["origin"]["module"] == "ln_f"
+    print("  [ok] 激活审计：定位首个“输入有限、输出非有限”的模块")
+
+
+def test_activation_audit_distinguishes_propagation():
+    """NaN 参数：origin 定位到注入 NaN 的叶子模块，下游模块标记为传播。"""
+    m = _model()
+    with torch.no_grad():
+        m.blocks[1].ln1.weight[0] = float("nan")
+    rep = audit_activations(m, _batches(), "cpu")
+    assert rep["origin"]["module"] == "blocks.1.ln1", rep["origin"]
+    downstream = [r for r in rep["records"] if r["seq"] > 0]
+    assert any(r["input_nonfinite"] > 0 for r in downstream), rep["records"]
+    # 健康模型：无任何非有限激活 → 结论应指向损失/聚合环节而非前向算子
+    rep2 = audit_activations(_model(), _batches(), "cpu")
+    assert rep2["origin"] is None and not rep2["records"]
+    assert any("损失" in f for f in rep2["findings"]), rep2["findings"]
+    print("  [ok] 激活审计：参数污染定位 + 传播链 + 全有限时指向损失环节")
 
 
 def test_checklist_precision_step_reports_amp_dtype():

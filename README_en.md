@@ -134,7 +134,7 @@ Outputs:
 | `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence) |
-| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting/underfitting/divergence/NaN + recommendations) |
+| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting/underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations) |
 | `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
 | `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) |
 | `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard) |
@@ -172,13 +172,20 @@ python -m tests.run_tests   # unit tests (no pytest dependency)
 ```
 
 Result-analysis protocol (see the matching sections in `summary.md`): diagnose the
-training curves rather than final values only; for NaN follow the checklist order
-data → code (log(0)/division by zero/softmax overflow) → mixed-precision underflow →
-gradient explosion/LR (see `nan_report.json`); attribute every error case, and use
-the cross-variant comparison to separate "shared failures (data/difficulty)" from
-"method-specific blind spots"; the accuracy-efficiency trade-off is judged explicitly
-(a gain without significance, or a cost far exceeding the gain, is flagged — see the
-`tradeoff_verdict` rules in §2).
+training curves rather than final values only — besides overfitting/underfitting/
+divergence, pre-clip **gradient-norm spikes/non-finite values** are reported
+independently (an early signal of NaN/divergence that the loss curve may not show
+yet); for NaN follow the checklist order data → code (log(0)/division by zero/
+softmax overflow; forward hooks localize the first module whose finite input yields
+a non-finite output, the `origin`) → mixed-precision underflow → gradient explosion/
+LR (see `nan_report.json`); both the data and the activation checks inspect the
+failing step's batches first (prefetching overwrites the pending ones); attribute
+every error case, and use the cross-variant
+comparison to separate "shared failures (data/difficulty)" from "method-specific
+blind spots"; the accuracy-efficiency trade-off is judged explicitly, where the cost
+is the maximum relative increase over the baseline among **prefill/decode inference
+latency, parameters, FLOPs and peak memory** (a gain without significance, or a cost
+far exceeding the gain, is flagged — see the `tradeoff_verdict` rules in §2).
 
 ---
 
@@ -195,12 +202,12 @@ lega-attention/
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback, vocab fit on train only) + bin cache + batch sampling
 │   ├── datacheck.py           # leakage-proofing: temporal/document split, decontamination, token hard checks, shift screening, test-access ledger
-│   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + provenance manifest
+│   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + systematic NaN audit (activation hooks) + provenance manifest
 │   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
 │   ├── latency.py             # prefill / decode latency benchmark
 │   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC
-│   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN) + recommendations
+│   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN + grad spikes) + recommendations
 │   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison
 │   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
 │   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance

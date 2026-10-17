@@ -62,3 +62,10 @@ Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=�
 - **种子**：`set_seed` 覆盖 Python/NumPy/PyTorch（CPU/CUDA）、cuDNN 确定性算法与子进程 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker）。`run_all` 逐命令把 `PYTHONHASHSEED` 对齐到该命令自己的 `--seed`，`run_manifest.json` 内嵌 `seed_report`（逐随机源的种子、**RNG 真实状态短指纹**、确定性开关、数据顺序机制）供事后审计：指纹可被第三方用 `set_seed(seed)+rng_state_fingerprint()` 复算，当前状态不属于所请求 seed 时为 `null`；`PYTHONHASHSEED` 分“解释器启动值/子进程 env/是否真的对当前进程生效”三字段记录，避免字段被 set_seed 自身写值而自证。跨硬件架构不保证逐位一致，同机重跑稳定。
 - **过拟合小批量**（`lega/sanity.py`）：训练前在固定小批量、关闭正则化与数据扰动的条件下检查损失能否趋近 0、下一 token 准确率能否接近 100%；首步还会做**逐参数梯度覆盖**（missing/zero/nonfinite），可定位“总梯度范数正常但门控等子模块没接进计算图”的断流问题，并自动核对两条中间结果：训练路径 loss（lm_head 分块 + 交叉熵）与直接完整 logits 的 `F.cross_entropy` 数值一致（捕捉分块/归一化/ignore 处理错误），以及消费点标签满足 `y = x 右移一位`（捕捉错位/换序）。不能过拟合或核对失败说明梯度/损失/标签链路存在严重问题，`run_all` 会直接中止全量训练。通过是必要非充分条件，需继续配合中间结果检查。
 - **追踪**：训练写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、种子审计、环境、命令行）与 `config_used.json`/`train_log.jsonl`；`run_all` 写全局 `repro.json`，并向固定路径 `results/experiments.jsonl` 追加实验台账（started/completed 生命周期，逐 run 最终指标与曲线/被评测 checkpoint/结果文件 SHA-256；`eval_*.json` 内嵌 `ckpt_sha256` 绑定权重），重跑不丢历史，评测 JSON 内嵌同一溯源字段。
+
+## 结果分析协议
+
+- **训练曲线而非最终值**（`lega/curves.py` → `curve_diagnosis.json`）：训练降/验证升=过拟合（正则化/增数据/早停），两者都不降=欠拟合或数据管道/学习率问题，NaN=训练失效；另独立报告 **pre-clip 梯度范数尖峰/非有限**（最大/中位数 ≥10×），它是 NaN/发散的早期信号，可能先于损失曲线异常出现。
+- **NaN 系统排查**（`train.run_nan_checklist` → `nan_report.json`）：固定顺序 数据（**优先检查失败步批次**——预取已覆盖 `batches`，传入 `consumed_batches` 才不漏罪魁数据；NaN/Inf/越界 id）→ 代码（非有限参数定位 + **前向钩子定位首个“输入有限、输出非有限”的模块**，即 `origin`，同样以失败步批次为主输入，附 log(0)/除零/softmax 溢出的排查指向）→ 混合精度（bf16/fp16 下溢-上溢风险）→ 优化（梯度范数尖峰与学习率）。NaN 即中止训练并落盘报告，避免污染曲线。
+- **坏案例**（`lega/badcase.py`）：RULER 错误样本按标注错误/误抄干扰值/幻觉/无数值回答归因，语言建模按最差窗口归因；跨变体对照区分共识失败与特异性盲区，逐案例 Markdown 可读。
+- **效率-精度权衡**：增幅取 Prefill/Decode 推理延迟、参数量、FLOPs 与显存峰值相对基线的最大者；涨点未过 Holm 校正显著性、或增幅远大于收益（>50% 或 >5×收益）时明确标注，不把 0.5% 涨点换算成 10× 计算量的“改进”。

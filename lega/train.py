@@ -27,13 +27,157 @@ from .utils import set_seed, now_str, save_json, enable_tf32
 
 # ---------------------------------------------------------------- NaN 排查路径
 
+def _nonfinite_stats(obj) -> dict:
+    """递归统计张量结构里的 NaN/Inf 元素数（tuple/list/dict；非张量忽略）。
+
+    模块钩子的输入/输出可能是张量、张量元组/列表或 dict（如 attention 返回
+    past_kv），只对浮点/复数张量统计——整数索引张量不存在 NaN。
+    """
+    stats = {"nan": 0, "inf": 0, "elems": 0, "nonfinite": 0}
+
+    def visit(o):
+        if torch.is_tensor(o):
+            if not (torch.is_floating_point(o) or torch.is_complex(o)):
+                return
+            stats["elems"] += int(o.numel())
+            stats["nan"] += int(torch.isnan(o).sum())
+            stats["inf"] += int(torch.isinf(o).sum())
+        elif isinstance(o, (tuple, list)):
+            for t in o:
+                visit(t)
+        elif isinstance(o, dict):
+            for t in o.values():
+                visit(t)
+
+    visit(obj)
+    stats["nonfinite"] = stats["nan"] + stats["inf"]
+    return stats
+
+
+def _numerical_hint(module_name: str) -> str:
+    """按模块在计算图中的位置给出 log(0)/除零/softmax 溢出的排查指向。"""
+    name = module_name or ""
+    if name.endswith(".attn"):
+        return ("注意力核心：Q/K/V 投影走函数式 F.linear（不经过子模块钩子，"
+                "溯源到本模块即可能来自投影权重）；复核 max_p→0 时的 log(0)"
+                "（已 clamp_min(1e-30)）、score 缩放、除零与 softmax 溢出")
+    if "gate_" in name:
+        return "门控参数：复核集中度项 c 与长度项 log n 的输入范围"
+    if ".ln" in name or name == "ln_f" or name.endswith("ln1") or name.endswith("ln2"):
+        return "LayerNorm/归一化：检查其输入是否已被上游污染（方差/半径除法）"
+    if name == "lm_head" or name in ("wte", "wpe"):
+        return "输出/嵌入路径：检查 logits 范围与权重是否已被污染"
+    return "通用算子：按该模块在计算图中的位置定位 log/除零/溢出路径"
+
+
+def audit_activations(model, pending_batches, device: str,
+                      amp_dtype=None) -> dict:
+    """用前向钩子定位首个“输入有限、输出非有限”的模块（NaN 排查第 2 步的主动检查）。
+
+    仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
+    而来，还是某个算子在**有限输入**上产生（log(0)、除零、softmax 溢出、
+    fp16/bf16 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
+    每个模块输出/输入的 NaN/Inf 情况：
+
+      * origin          第一个输入有限但输出非有限的模块 —— 最可疑的数值故障点，
+                        附该模块位置的排查指向（softmax/log/归一化/投影）；
+      * first_nonfinite 第一个输出非有限的模块：若与 origin 不同，说明 NaN 来自
+                        更早的算子（如 attention 内部的函数式 softmax/log）；
+      * records         非有限激活沿计算图的传播链（按执行顺序，截断到上限）。
+
+    前向只消费 x 不消费 y（标签越界不会妨碍激活审计），异常被捕获并写入
+    forward_error 而不是让排查本身崩溃。
+    """
+    batch = next((b for b in (pending_batches or []) if b is not None), None)
+    if batch is None:
+        return {"checked": False, "n_modules_checked": 0, "records": [],
+                "origin": None, "first_nonfinite": None, "forward_error": None,
+                "findings": ["无可用批次（NaN 出现在记录成功批次之前），跳过激活定位"]}
+    x = batch[0]
+    records, handles = [], []
+    cap = 60
+
+    def hook(name):
+        def _h(module, inputs, output):
+            out_st = _nonfinite_stats(output)
+            if not out_st["nonfinite"]:
+                return
+            if len(records) >= cap:
+                return
+            in_st = _nonfinite_stats(inputs)
+            records.append({
+                "seq": len(records), "module": name,
+                "output_nan": out_st["nan"], "output_inf": out_st["inf"],
+                "input_nonfinite": in_st["nonfinite"],
+            })
+        return _h
+
+    for name, mod in model.named_modules():
+        if name:
+            handles.append(mod.register_forward_hook(hook(name)))
+    was_training = model.training
+    forward_error = None
+    try:
+        model.eval()
+        use_cuda_amp = amp_dtype is not None and str(device).startswith("cuda")
+        amp_ctx = (torch.autocast("cuda", dtype=amp_dtype) if use_cuda_amp
+                   else contextlib.nullcontext())
+        with torch.no_grad(), amp_ctx:
+            # last_logits_only：只对最后位置过 lm_head，避免训练规模下
+            # (B,T,V) 全量 logits 在排查时 OOM；注意力/门控（NaN 最常见的
+            # 产生位置）仍对整段前缀执行，逐模块钩子照常触发。
+            model(x, last_logits_only=True)
+    except Exception as e:  # 排查过程本身绝不能因前向失败而中断
+        forward_error = f"{type(e).__name__}: {e}"
+    finally:
+        for h in handles:
+            h.remove()
+        model.train(was_training)
+
+    origin = next((r for r in records if r["input_nonfinite"] == 0), None)
+    if origin is not None:
+        origin = dict(origin, hint=_numerical_hint(origin["module"]))
+    first = records[0] if records else None
+    findings = []
+    if forward_error:
+        findings.append(f"激活审计前向失败（{forward_error}），改用参数/数据检查定位")
+    if origin is not None:
+        findings.append(
+            f"首个非有限激活源: {origin['module']}（输入有限，输出 NaN="
+            f"{origin['output_nan']}/Inf={origin['output_inf']}）→ {origin['hint']}")
+    elif first is not None:
+        findings.append(
+            f"第一个非有限模块 {first['module']} 的输入已含非有限值"
+            f"（NaN/Inf={first['input_nonfinite']}）：NaN 来自更早的函数式算子或"
+            "输入数据，按模块名检查该模块内部的 log/除零/softmax 路径")
+    elif not forward_error:
+        findings.append(
+            "所有模块输出均有限——NaN 产生在损失计算/评测聚合环节"
+            "（如分块交叉熵的目标越界），不是前向算子溢出")
+    return {
+        # checked = 审计前向成功执行；records/origin 为空表示前向算子全部有限
+        "checked": forward_error is None,
+        "n_modules_checked": len(handles),
+        "records": records[:cap],
+        "truncated": len(records) >= cap,
+        "origin": origin,
+        "first_nonfinite": first,
+        "forward_error": forward_error,
+        "findings": findings,
+    }
+
+
 def run_nan_checklist(model, pending_batches, device: str, step: int, where: str,
                       loss_value, lr: float, grad_norm_history, amp_dtype,
-                      vocab_size: int) -> dict:
+                      vocab_size: int, consumed_batches=None) -> dict:
     """训练出现非有限值时的系统化排查：数据 → 代码 → 混合精度 → 梯度/学习率。
 
     排查顺序固定（先便宜后昂贵、先外部后内部），每步产出可核对的证据，
     避免"看到 NaN 就乱调参"。返回可直接写盘的报告 dict。
+
+    consumed_batches：产出该损失的**失败步批次**（训练循环已预取并覆盖了
+    它们，调用方必须显式传入）。数据检查与激活定位都优先检查这些批次——
+    只看待训练批次会把"罪魁数据"漏掉。
     """
     report = {
         "time": now_str(), "step": int(step), "where": str(where),
@@ -42,12 +186,14 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         "amp_dtype": (str(amp_dtype) if amp_dtype else None),
     }
 
-    # ---- 1. 数据：输入流是否含非法值（NaN/Inf/越界 id）
+    # ---- 1. 数据：输入流是否含非法值（NaN/Inf/越界 id）；先查失败步批次
+    labeled = [(f"失败步批{i}", b) for i, b in enumerate(consumed_batches or [])
+               if b is not None] \
+        + [(f"待训练批{i}", b) for i, b in enumerate(pending_batches or [])
+           if b is not None]
     data_findings = []
     n_checked = 0
-    for bi, batch in enumerate(pending_batches or []):
-        if batch is None:
-            continue
+    for label, batch in labeled:
         x, y = batch
         for name, t in (("x", x), ("y", y)):
             n_checked += 1
@@ -55,23 +201,27 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                 lo, hi = int(t.min()), int(t.max())
                 bad = (lo < 0) or (hi >= vocab_size)
                 data_findings.append(
-                    f"批{bi} {name}: 整数 id 范围 [{lo}, {hi}]，"
+                    f"{label} {name}: 整数 id 范围 [{lo}, {hi}]，"
                     + ("**越界 vocab**" if bad else "合法"))
             else:
                 n_nan = int(torch.isnan(t).sum())
                 n_inf = int(torch.isinf(t).sum())
                 data_findings.append(
-                    f"批{bi} {name}: 浮点输入 NaN={n_nan}/Inf={n_inf}"
+                    f"{label} {name}: 浮点输入 NaN={n_nan}/Inf={n_inf}"
                     + ("（**数据侧混入非法值**）" if n_nan or n_inf else ""))
     report["checklist_data"] = {
         "findings": data_findings,
         "n_tensors_checked": n_checked,
-        "note": ("token 流为 uint16 整数且 prepare_bins 入库时已拒绝 NaN/Inf/"
-                 "越界 id（见 data_report.json 的 token 流硬校验）；"
-                 "浮点输入出现 NaN/Inf 才是数据侧问题"),
+        "n_consumed_batches": sum(1 for b in (consumed_batches or [])
+                                  if b is not None),
+        "note": ("失败步批=产出该损失的批次（优先检查）；token 流为 uint16 整数且 "
+                 "prepare_bins 入库时已拒绝 NaN/Inf/越界 id（见 data_report.json "
+                 "的 token 流硬校验）；浮点输入出现 NaN/Inf 才是数据侧问题"),
     }
 
-    # ---- 2. 代码：定位已含 NaN/Inf 的参数张量（把锅从"玄学"收敛到具体层）
+    # ---- 2. 代码：定位已含 NaN/Inf 的参数张量（把锅从"玄学"收敛到具体层），
+    #      再用前向钩子定位首个“输入有限、输出非有限”的算子（主动检查
+    #      log(0)/除零/softmax 溢出，而不是只打印已知防护清单）
     bad_params = []
     for n, p in model.named_parameters():
         if not torch.isfinite(p).all():
@@ -80,6 +230,10 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             bad_params.append(f"{n} (NaN={n_nan}, Inf={n_inf}, shape={list(p.shape)})")
         if len(bad_params) >= 8:
             break
+    audit_batches = [b for b in (consumed_batches or []) if b is not None] \
+        + [b for b in (pending_batches or []) if b is not None]
+    activation_audit = audit_activations(model, audit_batches, device,
+                                         amp_dtype=amp_dtype)
     report["checklist_params"] = {
         "nonfinite_tensors": bad_params,
         "note": ("非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
@@ -87,6 +241,7 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                  "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"
                  "交叉熵经 log_softmax（数值稳定），除法处均有 clamp_min 兜底"),
     }
+    report["checklist_activations"] = activation_audit
 
     # ---- 3. 混合精度：当前 autocast 精度与下溢/溢出风险
     if amp_dtype is None:
@@ -139,7 +294,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     actions = [
         "1) 数据：核对 data_report.json 的 token 流硬校验与上方批次范围检查；"
         "浮点输入出现 NaN/Inf 才需回查数据管道",
-        "2) 代码：按上方非有限参数定位层，复核该层 log(0)/除零/softmax 溢出路径"
+        "2) 代码：先看 checklist_activations 的 origin（首个“输入有限、输出非有限”"
+        "的模块）再对照非有限参数列表，复核该层 log(0)/除零/softmax 溢出路径"
         "（本仓库门控 c 项已 clamp_min(1e-30)）",
         f"3) 精度：{prec_note}",
         "4) 优化：降低学习率（如减半）、延长 warmup、收紧 grad_clip（如 0.5），"
@@ -156,6 +312,7 @@ def _abort_on_nan(report: dict, out_dir: str) -> None:
     print(f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}），"
           f"排查报告 -> {path}")
     for key, title in (("checklist_data", "数据"), ("checklist_params", "参数定位"),
+                       ("checklist_activations", "激活定位"),
                        ("checklist_precision", "精度"), ("checklist_optimization", "梯度/学习率")):
         sec = report.get(key) or {}
         lines = sec.get("findings") or sec.get("nonfinite_tensors") or []
@@ -415,6 +572,9 @@ def main():
     # 历史尾部供 NaN 排查判断"梯度爆炸 vs 学习率过大"
     gn_dev_recent = []
     gn_hist = []
+    # 最近一步实际消费的 micro-batch：预取会覆盖 batches，NaN 排查若只看待训练
+    # 批次会漏掉"罪魁数据"，这里保留引用供 _nan_guard 优先检查
+    last_batches = []
 
     def _nan_guard(where: str, value, step: int):
         """log/eval 点检查损失与梯度范数的有限性，异常即触发系统排查。"""
@@ -423,7 +583,8 @@ def main():
                 model, batches, device, step, where, value,
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
                 grad_norm_history=gn_hist, amp_dtype=(torch.bfloat16 if use_amp else None),
-                vocab_size=int(meta["vocab_size"]))
+                vocab_size=int(meta["vocab_size"]),
+                consumed_batches=last_batches)
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):
@@ -462,7 +623,8 @@ def main():
         for g, base in zip(opt.param_groups, base_lrs):
             g["lr"] = base * lr_f
 
-        # 在设备上累积 loss
+        # 在设备上累积 loss；快照本步将消费的批次（下一步预取会覆盖 batches）
+        last_batches = [b for b in batches if b is not None]
         loss_acc_dev.zero_()
         for mi in range(grad_accum):
             x, y = batches[mi]
