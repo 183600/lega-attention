@@ -161,8 +161,8 @@ def bench_prefill_stats(model, device, ctx: int, batch_size: int, iters: int,
                         warmup: int, vocab: int) -> dict:
     """prefill 逐次计时 → timing_stats（中位数/p10/p90/散布）。
 
-    每次前向后同步设备再取墙钟：逐次采样才能给出测量散布。同步开销对
-    所有变体相同，变体间的相对比较不受影响。
+    每次前向后同步设备再取墙钟：逐次采样才能给出测量散布。同步对所有
+    变体一致，变体间的相对比较不受影响。
     """
     x = torch.randint(0, vocab, (batch_size, ctx), device=device)
     # 测的是生成式推理的 prefill：只需要最后一个位置的 logits。

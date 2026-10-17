@@ -37,8 +37,7 @@ _SANITIZE_TABLE[0x7f] = None
 _SANITIZE_TABLE[ord("\ufffd")] = " "
 
 # 行级标签噪声（语言建模标签即下一 token，来自同一份清洗前文本）：
-# 含 U+FFFD/非法控制符的行比例反映“标签质量”。用正则按行匹配而非 split，
-# 避免在数百 MB 语料上构造逐行字符串列表。三处各自一次 C 层扫描。
+# 含 U+FFFD/非法控制符的行比例反映“标签质量”。用正则按行匹配而非 split。
 _REPL_LINE_RE = re.compile(r"[^\n]*\ufffd[^\n]*")
 _CTRL_LINE_RE = re.compile(r"[^\n]*[\x00-\x08\x0b\x0c\x0e-\x1f\x7f][^\n]*")
 _BAD_CHAR_LINE_RE = re.compile(
@@ -112,8 +111,8 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
         # 单次扫描：每行只 strip/normalize 一次。长行（>= min_chars）用于
         # 去污染；非空行的重复都计数——短行不参与去污染，但重复数量仍统计
         # 供审查（见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
-        # 仅用于 len() 的计数集合存 128-bit 摘要而非整行字符串：在数百 MB
-        # 语料上避免为去重计数再持有一份归一化行文本（16 字节碰撞概率可忽略）。
+        # 仅用于 len() 的计数集合存 128-bit 摘要而非整行字符串
+        # （16 字节碰撞概率可忽略）。
         n_long, n_valid = 0, 0
         seen_long, seen_long_norm = set(), set()
         seen_valid, seen_valid_norm = set(), set()
@@ -143,7 +142,7 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
 
     kept, dropped_exact, dropped_norm = [], 0, 0
     n_train, n_valid_train = 0, 0
-    # 仅用于计数 len() 的集合存摘要（同 scan 的内存口径）；归一化每行只算一次。
+    # 仅用于计数 len() 的集合存摘要；归一化每行只算一次。
     seen_valid_train, seen_valid_train_norm = set(), set()
     for ln in texts["train"].split("\n"):
         s = ln.strip()
@@ -364,8 +363,7 @@ _BLANK_LINE_RE = re.compile(r"(?<=\n)\n")
 
 
 def _boundary_candidates(seg: str, base: int, kind: str):
-    # 换行/空行候选用 C 层正则扫描而非逐字符 Python 循环：seg 长度可达
-    # 全文件窗口的 2 倍（数 MB~数十 MB），逐字符循环会成为数据预处理的瓶颈。
+    # 换行/空行候选用 C 层正则扫描而非逐字符 Python 循环。
     if kind == "heading":
         return [base + m.start() for m in _HEADING_RE.finditer(seg)
                 if base + m.start() > 0]

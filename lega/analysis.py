@@ -265,9 +265,8 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     scores = {k: [np.array([float(r[k]) for r in clusters[e]]) for e in ex_ids]
               for k in score_keys}
     # 逐聚类预计算“是否含正/负类”“得分是否含 NaN”：重采样时先按聚类标志
-    # 判定有效性，再构造拼接数组。与原 _auroc_safe 的过滤口径逐位等价
-    # （重采样后标签恰有两类 ⟺ 命中的聚类中正负类都出现），但省去每次
-    # 重采样对全池标签做 set()/tolist() 的整表转换与无效样本的数组构造。
+    # 判定有效性，再构造拼接数组，过滤口径与 _auroc_safe 逐位等价
+    # （重采样后标签恰有两类 ⟺ 命中的聚类中正负类都出现）。
     has_pos = np.array([bool((lb == 1.0).any()) for lb in labels])
     has_neg = np.array([bool((lb == 0.0).any()) for lb in labels])
     nan_score = {k: np.array([bool(np.isnan(sc).any()) for sc in scores[k]])
@@ -349,8 +348,7 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
         "corr_qterm_g": (pearson(qterm, g) if (~np.isnan(qterm)).any() and (~np.isnan(g)).any() else None),
     })
-    # 逐头统计：直接对上方的整段数组按 (layer, head) 掩码切片，
-    # 不重新逐记录构造各字段（原实现对每个头重复扫描全部记录）。
+    # 逐头统计：对整段数组按 (layer, head) 掩码切片。
     per_head = []
     layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)
     head_arr = np.array([r["head"] for r in records], dtype=np.int64)

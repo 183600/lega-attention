@@ -152,8 +152,7 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
             line = tok.encode("\n" + NEEDLE_TMPL.format(key=k2, value=v2))
             if sp + shift + len(line) > room:
                 continue  # 该行会越过截断点被截成半句，跳过
-            # 原地切片插入：与列表拼接结果完全一致，但避免每次都复制整段
-            # filler（原写法是 O(room) 复制 × O(room) 次插入）。
+            # 原地切片插入：与列表拼接结果完全一致。
             filler[sp + shift:sp + shift] = line
             distractor_spans.append((sp + shift, sp + shift + len(line)))
             shift += len(line)

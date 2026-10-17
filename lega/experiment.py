@@ -93,8 +93,8 @@ def collect_artifacts(paths, rel_to: str = None) -> dict:
     """对产物文件计算 SHA-256 与大小；缺失文件跳过。
 
     rel_to 给定时用相对路径作为键（避免把机器绝对路径写进台账，且跨机器
-    对照时键稳定）。大文件（数百 MB 的 checkpoint）用线程池并行哈希：
-    hashlib 在分块读取时释放 GIL，并行后整体墙钟显著缩短；键顺序与输入一致。
+    对照时键稳定）。大文件（数百 MB 的 checkpoint）用线程池并行哈希，
+    键顺序与输入一致。
     """
     entries = [(p, os.path.relpath(p, rel_to) if rel_to else p)
                for p in paths if os.path.isfile(p)]

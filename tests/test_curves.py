@@ -204,7 +204,7 @@ def test_malformed_log_records_do_not_crash_diagnosis():
     assert d["status"] in ("正常收敛", "过拟合趋势", "欠拟合/学习不充分"), d
     assert d["malformed_records"] == 3, d
     assert any("无法解析" in e for e in d["evidence"]), d["evidence"]
-    print("  [ok] 损坏日志记录跳过并计数（不再崩溃）")
+    print("  [ok] 损坏日志记录跳过并计数（诊断正常完成）")
 
 
 def test_worst_status_ordering():

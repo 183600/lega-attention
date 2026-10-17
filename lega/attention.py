@@ -355,11 +355,9 @@ class CausalSelfAttention(nn.Module):
                     gw: torch.Tensor) -> torch.Tensor:
         """门控查询项 w·q 的 (B,H,T) 归约，返回 fp32。
 
-        推理/无梯度时用广播乘 + sum（与矩阵乘按点积归约数学等价，且对
-        head_dim 的归约在 CPU 上更快）；训练态需要反向时改用
-        (B,H,T,Dh)@(H,Dh,1) 矩阵乘，其反向是两次 GEMM，避免 mul+sum 反向在
-        (B,H,T,Dh) 全尺寸上的广播逐元素算子与归约（实测同形状快约 2-3 倍，
-        显存上也不产生乘法中间张量）。两条路径数学等价，仅归约实现不同。
+        推理/无梯度时用广播乘 + sum；训练态需要反向时改用
+        (B,H,T,Dh)@(H,Dh,1) 矩阵乘，其反向是两次 GEMM。两条路径按点积
+        归约数学等价，仅实现不同。
         """
         H, Dh = gw.shape
         if self.training and torch.is_grad_enabled() and (
