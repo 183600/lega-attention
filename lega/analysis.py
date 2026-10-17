@@ -99,8 +99,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
             g1 += 1
         idxs = order[g0:g1]
         g0 = g1
-        # 等长样例分组后嵌套 list 先经 numpy 一次成型，避免 torch.tensor 的
-        # 逐元素 Python 转换；再按设备搬移。
+        # 等长样例分组后可整表转 tensor，再按设备搬移。
         ids = torch.from_numpy(
             np.asarray([examples[k]["ids"] for k in idxs], dtype=np.int64))
         if device.startswith("cuda"):

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
                      _cmd_env, _effect_status, _enrich_paired, _rel_pct,
@@ -508,7 +509,13 @@ def test_build_summary_renders_confirmatory_sections():
                     _write_json(os.path.join(tmp, f"analysis_{v}_seed{s}.json"), {
                         "variant": v, "seed": s, "auroc_logit": al + 0.01 * s,
                         "auroc_qterm": aq - 0.01 * s})
-        out = build_summary(tmp)
+        reg = {"hypotheses": [
+            {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
+             "candidate": "lega", "reference": "standard",
+             "direction": "candidate_better"}]}
+        with mock.patch("run_all.load_registered_hypotheses",
+                        return_value=reg):
+            out = build_summary(tmp)
         md = out["markdown"]
         assert "注册假设判定" in md
         assert "H1" in md and "事后" in md

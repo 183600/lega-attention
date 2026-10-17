@@ -404,7 +404,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
         R, L = len(rows), len(rows[0])
         n = R * L
         if not use_cuda:
-            # 嵌套 list -> tensor 逐元素走 Python 转换；等长行先经 numpy 一次成型
+            # 等长行整表转 tensor
             out = torch.from_numpy(np.asarray(rows, dtype=np.int64))
             return out if device == "cpu" else out.to(device)
         if pin_ev is not None:
@@ -489,7 +489,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         out_ids = model.generate(
                             ids, max_new_tokens=max_gen,
                             kv_cache=_get_kv(len(part), total))
-                    # 整批一次 D2H：逐行 tolist() 在 CUDA 上每行一次设备同步
+                    # 整批转 Python 列表后逐行解码
                     out_ids_l = out_ids.tolist()
                     for r, ex in enumerate(part):
                         pred_text = tok.decode(out_ids_l[r][length:])

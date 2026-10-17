@@ -47,8 +47,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
         gold = y[:, -1]
         losses = F.cross_entropy(logits, gold, reduction="none")
         top_p, top_i = torch.topk(torch.softmax(logits, dim=-1), 5, dim=-1)
-        # 一次性批量 D2H：逐元素 int()/float() 在 CUDA 上每个都触发一次设备
-        # 同步（每行约 10 次），整表 tolist() 后循环内不再与设备交互。
+        # 整表转 Python 标量后再构造行记录。
         loss_l, gold_l = losses.tolist(), gold.tolist()
         top_p_l, top_i_l = top_p.tolist(), top_i.tolist()
         x_l = x.tolist()
