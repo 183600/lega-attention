@@ -490,10 +490,11 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         out_ids = model.generate(
                             ids, max_new_tokens=max_gen,
                             kv_cache=_get_kv(len(part), total))
-                    # 整批转 Python 列表后逐行解码
-                    out_ids_l = out_ids.tolist()
+                    # 只把生成段转 Python 列表（提示前缀不参与解码）：
+                    # 避免整段 prompt 的逐 token Python int 化。
+                    out_ids_l = out_ids[:, length:].tolist()
                     for r, ex in enumerate(part):
-                        pred_text = tok.decode(out_ids_l[r][length:])
+                        pred_text = tok.decode(out_ids_l[r])
                         sc = score_prediction(task, ex["answer"], pred_text,
                                               ex["answer_words"])
                         ems.append(sc["em"])

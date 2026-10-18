@@ -495,8 +495,10 @@ def auroc(scores, labels) -> float:
     if len(pos) == 0 or len(neg) == 0:
         return float("nan")
     allv = np.concatenate([neg, pos])
-    order = np.argsort(allv, kind="mergesort")
-    # 并列取平均秩：在有序数组上用 unique 定位等值组，
+    # 并列取平均秩：等值样本在 unique 分组后获得同一平均秩，与组内先后次序
+    # 无关，因此不必用稳定排序。
+    order = np.argsort(allv)
+    # 在有序数组上用 unique 定位等值组，
     # 组内平均秩（1-based）= 首名次（0-based 首个位置）+ (组大小+1)/2
     sorted_v = allv[order]
     first, counts = np.unique(sorted_v, return_index=True, return_counts=True)[1:]
@@ -525,24 +527,20 @@ def average_precision(scores, labels) -> float:
     n_pos = int((labels == 1).sum())
     if n_pos == 0 or n_pos == len(labels):
         return float("nan")
-    order = np.argsort(-scores, kind="mergesort")
+    # 等值样本在分组边界处整体计入，结果与组内先后次序无关，无需稳定排序。
+    order = np.argsort(-scores)
     s_sorted, l_sorted = scores[order], labels[order]
     # 分数降序后按等值组切边界（合并并列，避免排序稳定性影响结果）
     cuts = np.flatnonzero(np.diff(s_sorted)) + 1
-    starts = np.concatenate([[0], cuts])
     ends = np.concatenate([cuts, [len(s_sorted)]])
-    tp = fp = 0
-    prev_recall = 0.0
-    ap = 0.0
-    for a, b in zip(starts, ends):
-        group = l_sorted[a:b]
-        tp += int(group.sum())
-        fp += int(b - a - group.sum())
-        recall = tp / n_pos
-        precision = tp / (tp + fp)
-        ap += (recall - prev_recall) * precision
-        prev_recall = recall
-    return float(ap)
+    # 逐组累计：tp 为按分数降序的累计正类数（组末位置取值），
+    # 组末累计样本数 b 即 tp + fp，故 precision = tp / b。
+    tp = np.cumsum(l_sorted)[ends - 1]
+    recalled = tp / n_pos
+    precision = tp / ends
+    # 逐步积分与逐组循环同序累加，保持逐位一致。
+    prev_recall = np.concatenate([[0.0], recalled[:-1]])
+    return float(np.cumsum((recalled - prev_recall) * precision)[-1])
 
 
 def f1_scores(y_true, y_pred, labels=None) -> dict:

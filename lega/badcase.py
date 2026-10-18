@@ -522,10 +522,14 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
 
 
 def process_ruler_json(ruler_path: str, out_dir: Optional[str] = None,
-                       write_md: bool = True) -> Dict:
-    """处理一个 ruler_*.json：归因分析 + 写 md（与源文件同目录）。"""
-    with open(ruler_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+                       write_md: bool = True, payload: Optional[Dict] = None) -> Dict:
+    """处理一个 ruler_*.json：归因分析 + 写 md（与源文件同目录）。
+
+    payload 已由调用方解析时可直接传入，避免重复读取/解析同一文件。
+    """
+    if payload is None:
+        with open(ruler_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
     analysis = analyze_badcases(payload.get("badcases") or [],
                                variant=payload.get("variant"))
     analysis["seed"] = payload.get("seed")
@@ -554,9 +558,15 @@ def main():
     if not paths:
         print(f"[badcase] {args.results_dir} 下没有 ruler_*.json，跳过")
     all_analyses = []
+    # 每个 ruler_*.json 只读取/解析一次：归因与跨变体对照共用同一份 payload。
+    # 解析成功后即登记（即使后续归因抛错），与跨变体对照独立读取的语义一致。
+    ruler_payloads = {}
     for fp in paths:
         try:
-            ana = process_ruler_json(fp, write_md=not args.no_md)
+            with open(fp, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            ruler_payloads[fp] = payload
+            ana = process_ruler_json(fp, write_md=not args.no_md, payload=payload)
         except (OSError, ValueError, KeyError) as e:
             print(f"[badcase] 跳过 {fp}: {e}")
             continue
@@ -597,10 +607,8 @@ def main():
     # 跨变体错误对照：共识失败 vs 相对 standard 的特异性新增错误
     per_variant = {}
     for fp in paths:
-        try:
-            with open(fp, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, ValueError):
+        payload = ruler_payloads.get(fp)
+        if payload is None:
             continue
         v = payload.get("variant")
         # "badcases": [] 表示"该变体已评测且零错误"，必须保留传入跨变体对照

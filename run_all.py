@@ -780,7 +780,7 @@ def _fmt4(x) -> str:
         return "-"
 
 
-def _render_baseline_sections(results_dir: str) -> list:
+def _render_baseline_sections(results_dir: str, smoke=None) -> list:
     """基线合理性小节：简单统计基线 + 基线超参数调优证据。
 
     科研方法问题：如果复杂方法只与“随手设一个学习率”的弱基线比较，
@@ -790,15 +790,17 @@ def _render_baseline_sections(results_dir: str) -> list:
       2. 基线（standard）在验证集上的学习率/权重衰减网格调优结果与
          “默认是否已接近最优”判定。
     缺少调优证据时显式警告“未调优基线”，而不是让读者默认基线已调好。
+    smoke 由调用方传入可避免重复读取 repro.json；缺省时自行读取。
     """
-    smoke = False
-    rfp = os.path.join(results_dir, "repro.json")
-    if os.path.exists(rfp):
-        try:
-            with open(rfp, "r", encoding="utf-8") as f:
-                smoke = bool((json.load(f) or {}).get("smoke"))
-        except (OSError, ValueError):
-            smoke = False
+    if smoke is None:
+        smoke = False
+        rfp = os.path.join(results_dir, "repro.json")
+        if os.path.exists(rfp):
+            try:
+                with open(rfp, "r", encoding="utf-8") as f:
+                    smoke = bool((json.load(f) or {}).get("smoke"))
+            except (OSError, ValueError):
+                smoke = False
     lines = ["", "## 基线合理性（简单基线 + 调优证据）", ""]
     ngram = None
     nfp = os.path.join(results_dir, "ngram_baseline.json")
@@ -1266,7 +1268,9 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("（暂无结果，先运行训练评测）")
 
     # --- 基线合理性（简单统计基线 + 基线调优证据）
-    md += _render_baseline_sections(results_dir)
+    repro = load(os.path.join(results_dir, "repro.json"))
+    md += _render_baseline_sections(results_dir,
+                                    smoke=bool((repro or {}).get("smoke")))
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
@@ -1386,7 +1390,6 @@ def build_summary(results_dir: str, audit: dict = None,
 
     # --- 可复现性与 sanity check（代码版本 / 数据指纹 / 过拟合小批量）
     md += ["", "## 可复现性与 sanity check", ""]
-    repro = load(os.path.join(results_dir, "repro.json"))
     if repro:
         git = repro.get("git") or {}
         data = repro.get("data") or {}
@@ -2046,8 +2049,9 @@ def build_summary(results_dir: str, audit: dict = None,
                   "无法给出权衡判定；没有增幅对照的涨点不能作为结论。")
 
     os.makedirs(results_dir, exist_ok=True)
+    md_text = "\n".join(md)
     with open(os.path.join(results_dir, "summary.md"), "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
+        f.write(md_text)
 
     # CSV（统计列以并列的 mean/std/n 展开，便于程序消费）
     if rows:
@@ -2091,7 +2095,7 @@ def build_summary(results_dir: str, audit: dict = None,
         save_json(cross_out, os.path.join(results_dir, "badcase_cross.json"))
     print(f"[summary] 汇总 {len(rows)} 个变体 -> {results_dir}/summary.md "
           f"（配对检验 {len(tests)} 组）")
-    return {"rows": rows, "markdown": "\n".join(md), "tests": tests}
+    return {"rows": rows, "markdown": md_text, "tests": tests}
 
 
 def main():

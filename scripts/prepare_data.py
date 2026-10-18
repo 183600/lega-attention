@@ -68,17 +68,18 @@ def from_parquet(out_dir: str) -> dict:
     import pyarrow.parquet as pq
     texts = {}
     for split, files in HF_FILES.items():
-        parts = []
+        # 逐文件解析后直接并入同一列表，避免在 parts 之上再复制一层展平副本
+        lines = []
         for fn in files:
             dst = os.path.join(out_dir, fn)
             if not os.path.exists(dst):
                 _download(f"{HF_BASE}/{fn}", dst, fn)
             t = pq.read_table(dst, columns=["text"])
-            parts.append(t.column("text").to_pylist())
-            print(f"[data] 已解析 {fn}: {len(parts[-1]):,} 行")
-        texts[split] = parts
-    return {split: [line for part in parts for line in part]
-            for split, parts in texts.items()}
+            part = t.column("text").to_pylist()
+            print(f"[data] 已解析 {fn}: {len(part):,} 行")
+            lines.extend(part)
+        texts[split] = lines
+    return texts
 
 
 def from_zip(out_dir: str) -> dict:
@@ -98,7 +99,10 @@ def from_zip(out_dir: str) -> dict:
                 raise FileNotFoundError(
                     f"zip 中缺少 {base}；现有条目示例: {names[:8]}")
             with z.open(cands[0]) as f:
-                texts[split] = io.TextIOWrapper(f, encoding="utf-8").read().split("\n")
+                # 逐行读入而非先整读为字符串再 split：避免“原始全文 + 行列表”
+                # 同时驻留；TextIOWrapper 已做换行翻译，行内容与 split("\n") 一致
+                # （空行/行尾空白由 clean_lines 统一处理）。
+                texts[split] = list(io.TextIOWrapper(f, encoding="utf-8"))
     return texts
 
 

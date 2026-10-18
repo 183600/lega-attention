@@ -245,6 +245,9 @@ def fig_latency(rdir):
     return True
 
 
+_RECORDS_CACHE: dict = {}
+
+
 def _read_records(rdir, variant):
     import csv
     # 兼容单种子 analysis_records_<v>.csv 与多种子 analysis_records_<v>_seed<s>.csv，
@@ -253,6 +256,15 @@ def _read_records(rdir, variant):
         [os.path.join(rdir, f"analysis_records_{variant}.csv")]
         + sorted(glob.glob(os.path.join(
             rdir, f"analysis_records_{variant}_seed*.csv"))))
+    # 同一批文件在本次画图中会被多张图消费（门控分布/校准曲线）：按
+    # (路径, mtime, size) 缓存最近一次解析结果，文件变化自动失效；
+    # 只保留一个条目，记录量可达数十万行。
+    key = (variant, tuple(
+        (p, os.path.getmtime(p), os.path.getsize(p))
+        for p in paths if os.path.exists(p)))
+    cached = _RECORDS_CACHE.get(key)
+    if cached is not None:
+        return cached
     rows = []
     for path in paths:
         if not os.path.exists(path):
@@ -261,6 +273,8 @@ def _read_records(rdir, variant):
             for r in csv.DictReader(f):
                 rows.append({k: (float(v) if v not in ("", "None", "nan") else None)
                              for k, v in r.items() if k not in ("task",)})
+    _RECORDS_CACHE.clear()
+    _RECORDS_CACHE[key] = rows
     return rows
 
 

@@ -70,11 +70,16 @@ def sanitize_text(text: str):
     stats["control_chars_deleted"] = int(len(text) - len(clean))
     n_lines = int(text.count("\n")) + 1
     stats["lines"] = n_lines
+    # 字符计数为 0 时对应正则必然无匹配（U+FFFD 计数/删除计数分别覆盖两类
+    # 坏字符），直接记为 0，省去整篇扫描。
+    has_repl = stats["replacement_char_replaced_with_space"] > 0
+    has_ctrl = stats["control_chars_deleted"] > 0
     stats["lines_with_replacement_char"] = int(
-        sum(1 for _ in _REPL_LINE_RE.finditer(text)))
+        sum(1 for _ in _REPL_LINE_RE.finditer(text))) if has_repl else 0
     stats["lines_with_control_chars"] = int(
-        sum(1 for _ in _CTRL_LINE_RE.finditer(text)))
-    n_bad_lines = int(sum(1 for _ in _BAD_CHAR_LINE_RE.finditer(text)))
+        sum(1 for _ in _CTRL_LINE_RE.finditer(text))) if has_ctrl else 0
+    n_bad_lines = (int(sum(1 for _ in _BAD_CHAR_LINE_RE.finditer(text)))
+                   if (has_repl or has_ctrl) else 0)
     stats["lines_with_bad_chars"] = n_bad_lines
     stats["bad_char_line_rate"] = float(n_bad_lines / max(1, n_lines))
     return clean, stats

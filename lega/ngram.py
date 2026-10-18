@@ -77,23 +77,38 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
             "ppl_clamped": bool(mean_nll > 20.0)}
 
 
+def _bigram_terms(eval_ids: np.ndarray, uni: np.ndarray,
+                  pair_keys: np.ndarray, pair_counts: np.ndarray,
+                  vocab_size: int):
+    """评测流的逐 token 二元项：返回 (相邻对训练频次, 前文频次, 计分 token 数)。"""
+    if len(eval_ids) < 2:
+        return None, None, 0
+    ids = np.asarray(eval_ids, dtype=np.int64)
+    keys = _pair_keys(ids, vocab_size)
+    prev = ids[:-1]
+    c_pair = _bigram_counts_for(pair_keys, pair_counts, keys)
+    c_prev = uni[prev]
+    return c_pair, c_prev, int(len(keys))
+
+
+def _bigram_ppl(c_pair: np.ndarray, c_prev: np.ndarray, n_tokens: int,
+                alpha: float, vocab_size: int) -> dict:
+    """由预计算的逐 token 频次给出加 α 平滑二元模型的 PPL。"""
+    if n_tokens <= 0:
+        return {"ppl": None, "mean_nll": None, "n_tokens": 0}
+    probs = (c_pair + alpha) / (c_prev + alpha * int(vocab_size))
+    mean_nll = float(-np.log(probs).mean())
+    return {"ppl": float(math.exp(min(20.0, mean_nll))),
+            "mean_nll": mean_nll, "n_tokens": n_tokens,
+            "ppl_clamped": bool(mean_nll > 20.0)}
+
+
 def ppl_bigram(eval_ids: np.ndarray, uni: np.ndarray, pair_keys: np.ndarray,
                pair_counts: np.ndarray, alpha: float, vocab_size: int) -> dict:
     """加 α 平滑二元模型；第一个 token 无前文，从第二个 token 起计分。"""
-    n = int(len(eval_ids))
-    if n < 2:
-        return {"ppl": None, "mean_nll": None, "n_tokens": 0}
-    keys = _pair_keys(np.asarray(eval_ids, dtype=np.int64), vocab_size)
-    cur = np.asarray(eval_ids, dtype=np.int64)[1:]
-    prev = np.asarray(eval_ids, dtype=np.int64)[:-1]
-    c_pair = _bigram_counts_for(pair_keys, pair_counts, keys)
-    c_prev = uni[prev]
-    vocab = int(vocab_size)
-    probs = (c_pair + alpha) / (c_prev + alpha * vocab)
-    mean_nll = float(-np.log(probs).mean())
-    return {"ppl": float(math.exp(min(20.0, mean_nll))),
-            "mean_nll": mean_nll, "n_tokens": int(len(cur)),
-            "ppl_clamped": bool(mean_nll > 20.0)}
+    c_pair, c_prev, n_tokens = _bigram_terms(eval_ids, uni, pair_keys,
+                                             pair_counts, vocab_size)
+    return _bigram_ppl(c_pair, c_prev, n_tokens, alpha, vocab_size)
 
 
 def evaluate(data_dir: str, split: str = "val",
@@ -119,6 +134,12 @@ def evaluate(data_dir: str, split: str = "val",
         eval_ids = np.asarray(load_bin(data_dir, split), dtype=np.int64)
         sel_ids = eval_ids
     uni, pair_keys, pair_counts = fit_counts(train_ids, vocab_size)
+    # 选参与报告各自评测流的逐 token 二元项只算一次：α 只影响频次到 PPL
+    # 的换算，不改变二元组频次本身。split == "val" 时两个流是同一数组。
+    sel_terms = _bigram_terms(sel_ids, uni, pair_keys, pair_counts, vocab_size)
+    eval_terms = (sel_terms if eval_ids is sel_ids
+                  else _bigram_terms(eval_ids, uni, pair_keys, pair_counts,
+                                     vocab_size))
     # α 选择：val 上按 mean_nll（等价于 PPL 排序，避免 exp 截断干扰选择）
     best = {"unigram": None, "bigram": None}
     for order in ("unigram", "bigram"):
@@ -127,8 +148,7 @@ def evaluate(data_dir: str, split: str = "val",
             if order == "unigram":
                 m = ppl_unigram(sel_ids, uni, a)
             else:
-                m = ppl_bigram(sel_ids, uni, pair_keys, pair_counts, a,
-                               vocab_size)
+                m = _bigram_ppl(*sel_terms, a, vocab_size)
             if m["mean_nll"] is None:
                 continue
             if best_nll is None or m["mean_nll"] < best_nll:
@@ -162,8 +182,7 @@ def evaluate(data_dir: str, split: str = "val",
         if order == "unigram":
             m = ppl_unigram(eval_ids, uni, a)
         else:
-            m = ppl_bigram(eval_ids, uni, pair_keys, pair_counts, a,
-                           vocab_size)
+            m = _bigram_ppl(*eval_terms, a, vocab_size)
         report["ppl"][order] = m["ppl"]
         # test 上只消费一次：仅报告 val 选定的 α，不额外扫网格
         # （避免"一次评测"被多次读数的灰色空间）。
@@ -173,8 +192,7 @@ def evaluate(data_dir: str, split: str = "val",
                 if order == "unigram":
                     m2 = ppl_unigram(eval_ids, uni, a2)
                 else:
-                    m2 = ppl_bigram(eval_ids, uni, pair_keys, pair_counts, a2,
-                                    vocab_size)
+                    m2 = _bigram_ppl(*eval_terms, a2, vocab_size)
                 by_alpha[str(a2)] = m2["ppl"]
             report["ppl_by_alpha"][order] = by_alpha
     return report
