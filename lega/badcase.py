@@ -455,11 +455,20 @@ def categorize_window(rec: Dict) -> Dict:
 
 
 def _mean(vals):
-    # 与 utils.mean_std 同口径：剔除 None 与非有限值（NaN/Inf）。发散 run 的
-    # 窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并污染报告。
-    vals = [float(v) for v in vals
-            if v is not None and math.isfinite(float(v))]
-    return float(sum(vals) / len(vals)) if vals else None
+    # 与 utils.mean_std 同口径：剔除 None、非数值与非有限值（NaN/Inf）。发散
+    # run 的窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并污染
+    # 报告；旧格式/坏数据里的 "n/a" 等字符串同样跳过而不是让整份报告崩掉。
+    out = []
+    for v in vals:
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            out.append(f)
+    return float(sum(out) / len(out)) if out else None
 
 
 def synthesize_window_improvements(ana: Dict) -> List[Dict]:
@@ -635,6 +644,10 @@ def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
     if payload is None:
         with open(eval_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
+    if not isinstance(payload, dict):
+        # 顶层非对象（如坏文件里的 []）：抛 ValueError，调用方统一跳过该文件，
+        # 不能让 AttributeError 中断整条流水线
+        raise ValueError("JSON 顶层不是对象，无法解析 worst_windows")
     analysis = analyze_worst_windows(payload.get("worst_windows") or [],
                                      variant=payload.get("variant"))
     analysis["seed"] = payload.get("seed")
@@ -850,6 +863,8 @@ def process_ruler_json(ruler_path: str, out_dir: Optional[str] = None,
     if payload is None:
         with open(ruler_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON 顶层不是对象，无法解析 badcases")
     analysis = analyze_badcases(payload.get("badcases") or [],
                                variant=payload.get("variant"))
     analysis["seed"] = payload.get("seed")
@@ -884,11 +899,13 @@ def main():
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            ruler_payloads[fp] = payload
             ana = process_ruler_json(fp, write_md=not args.no_md, payload=payload)
         except (OSError, ValueError, KeyError) as e:
             print(f"[badcase] 跳过 {fp}: {e}")
             continue
+        # 归因成功后才登记 payload（顶层非对象的坏文件已被上面的校验拒绝，
+        # 不能进跨变体对照导致二次崩溃）
+        ruler_payloads[fp] = payload
         all_analyses.append(ana)
         name = os.path.splitext(os.path.basename(fp))[0]
         if not ana["n_badcases"]:

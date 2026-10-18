@@ -78,6 +78,48 @@ def test_temporal_split_short_text_boundary_after_t2():
     print("  [ok] 时序划分：唯一边界晚于 t2 的短文本不产生空 split")
 
 
+def test_temporal_split_no_phantom_heading_at_slice_start():
+    """切片起点落在行中间时，串首 '^' 不是真实行首：不得当作标题切点。
+
+    坏切点会产出 "= abc =" 标题标签但 n_headings=0 的自相矛盾报告，
+    同时把换行切点误升为 heading。
+    """
+    text = "m" * 1343 + "x" + "= abc =\n" + "y" * 648
+    train, val, test, info = temporal_split_text(text)
+    assert train + val + test == text
+    assert info["n_headings"] == 0
+    assert "heading" not in info["cut_kinds"], info
+    # 第二切点附近无换行 → 字符切分并显式标注；首切点用真实换行
+    assert info["cut_kinds"][0] == "newline"
+    assert text[info["cut_offsets"][0] - 1] == "\n"
+    print("  [ok] 时序划分：切片首位的假标题被剔除（不产生幻影 heading）")
+
+
+def test_temporal_split_heading_guard_uses_usable_headings():
+    """窗口内命中的标题若不可用（越过 t2 / 离 p1 太近），必须换全局标题。
+
+    旧逻辑只在“窗口内没标题”时才做全局搜索，导致两切点在错误的
+    窗口内标题上、val 被压空或切序倒置。
+    """
+    # 触发 A：窗口内 t1 命中 >= t2 的标题（950），p2 命中被压空的 800
+    text = ("\n" + "= H =\n" + "m" * 492 + "\n" + "= K =\n"
+            + "m" * 443 + "\n" + "= Q =\n" + "m" * 44)
+    train, val, test, info = temporal_split_text(text)
+    assert train + val + test == text
+    assert info["cut_offsets"] == [500, 950], info
+    assert info["cut_kinds"] == ["heading", "heading"], info
+    assert info["fallback_char_cut"] is False
+    assert info["documents_cross_cut"] is False
+    # 触发 B：窗口内 t2 命中的标题（810）离 p1 太近
+    text2 = "m" * 809 + "\n" + "= A =\n" + "m" * 178 + "\n" + "= B =\n"
+    train, val, test, info = temporal_split_text(text2)
+    assert train + val + test == text2
+    assert info["cut_offsets"] == [810, 995], info
+    assert info["cut_kinds"] == ["heading", "heading"], info
+    assert info["fallback_char_cut"] is False
+    print("  [ok] 标题切点必须可用：越过 t2 / 离 p1 太近时换全局最近标题")
+
+
 def test_temporal_split_prefers_heading_documents_whole():
     """标题文档是群组单位：即使最近标题在窗口外，也必须切在标题上。
 

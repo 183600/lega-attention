@@ -74,32 +74,98 @@ def _load(path):
 _SEED_SUFFIX_RE = re.compile(r"_seed(\d+)$")
 
 
-def _prefer_seeded(paths):
-    """存在 _seed<s> 结果文件时忽略无种子的旧文件：否则同一次实验会被多算一次。"""
-    seeded = [p for p in paths
-              if _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(p))[0])]
-    return seeded if seeded else paths
+def _is_tagged(path):
+    return bool(_SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(path))[0]))
+
+
+def _expected_tagged(rdir):
+    """本次 run 的命名约定：repro.json 的 seeds 多于一个 → 结果带 _seed 后缀。
+
+    未知（无/坏 repro.json）时返回 None，调用方退回“_seed 优先”的旧行为。
+    """
+    d = _load(os.path.join(rdir, "repro.json")) if rdir else None
+    seeds = d.get("seeds") if isinstance(d, dict) else None
+    if isinstance(seeds, list) and seeds:
+        return len(seeds) > 1
+    return None
+
+
+def _prefer_seeded(paths, rdir=None):
+    """只保留与本次 run 命名约定一致的结果文件：否则同一次实验会被多算一次。
+
+    多种子运行的产物带 _seed<s> 后缀、单种子不带；在旧目录上以不同种子数重跑
+    时两种命名的文件可能同时存在，谁属于“本次 run”必须按 repro.json 判定，
+    不能永远偏爱 _seed 文件（那会把旧多种子结果混进单种子报告）。无 repro
+    信息时退回“_seed 优先”的旧行为。
+    """
+    expected = _expected_tagged(rdir) if rdir else None
+    if expected is not None:
+        keep = [p for p in paths
+                if _is_tagged(p) == expected and os.path.exists(p)]
+        if keep:
+            return keep
+    seeded = [p for p in paths if _is_tagged(p) and os.path.exists(p)]
+    if seeded:
+        return seeded
+    existing = [p for p in paths if os.path.exists(p)]
+    return existing or list(paths)
+
+
+def _group_items(items, rdir=None):
+    """items: [(path, data)] → {variant: [data]}，同一 (变体, 种子) 只留一个。
+
+    种子识别与 run_all 的汇总口径一致（文件名 _seed<s> 或 JSON 的 seed 字段）；
+    裸命名文件与 _seed<s> 文件可能指向同一种子（JSON 内有 seed），两者都留会
+    把同一次实验算两次并把过期结果混进均值。冲突时与本次 run 命名约定
+    （repro.json）一致者胜出；无 repro 信息时 _seed 命名优先（旧行为）。
+    完全无种子信息的文件在该变体已有种子结果时忽略（与旧行为一致）。
+    """
+    expected = _expected_tagged(rdir) if rdir else None
+    if expected is not None:
+        # 与 _prefer_seeded 同规则：先按本次 run 的命名约定筛掉另一族过期文件
+        keep = [it for it in items if _is_tagged(it[0]) == expected]
+        if keep:
+            items = keep
+    groups = {}
+    for fp, d in items:
+        if not (d and d.get("variant")):
+            continue
+        tagged = _is_tagged(fp)
+        m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
+        seed = int(m.group(1)) if m else d.get("seed")
+        groups.setdefault(d["variant"], []).append((seed, d, tagged))
+    out = {}
+    for v, items_v in groups.items():
+        seeded = [it for it in items_v if it[0] is not None]
+        if not seeded:
+            out[v] = [d for _, d, _ in items_v]
+            continue
+        slots = {}
+        for seed, d, tagged in seeded:
+            cur = slots.get(seed)
+            if cur is None:
+                slots[seed] = (tagged, d)
+                continue
+            cur_tagged = cur[0]
+            if expected is not None:
+                win = (tagged == expected) and (cur_tagged != expected)
+            else:
+                win = tagged and not cur_tagged
+            if win:
+                slots[seed] = (tagged, d)
+        out[v] = [d for _, d in slots.values()]
+    return out
 
 
 def _group_by_variant(pattern):
-    """按变体分组 glob 到的结果文件（自动合并多种子 _seed<seed> 文件）。
-
-    种子识别与 run_all 的汇总口径一致：文件名 _seed<s> 或 JSON 内的 seed 字段；
-    若某变体已有带种子的结果，则忽略完全无种子信息（None）的旧文件，避免同一次
-    实验被重复计为一个额外种子。
-    """
-    groups = {}
+    """按变体分组 glob 到的结果文件（自动合并多种子 _seed<seed> 文件）。"""
+    rdir = os.path.dirname(pattern)
+    items = []
     for fp in sorted(glob.glob(pattern)):
         d = _load(fp)
-        if not (d and d.get("variant")):
-            continue
-        m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
-        seed = int(m.group(1)) if m else d.get("seed")
-        groups.setdefault(d["variant"], []).append((seed, d))
-    return {v: ([d for s, d in items if s is not None]
-                if any(s is not None for s, _ in items)
-                else [d for _, d in items])
-            for v, items in groups.items()}
+        if d is not None:
+            items.append((fp, d))
+    return _group_items(items, rdir)
 
 
 def fig_ppl(rdir):
@@ -117,7 +183,9 @@ def fig_ppl(rdir):
         mean = float(np.mean(ppls))
         std = float(np.std(ppls, ddof=1)) if len(ppls) > 1 else 0.0
         rows.append((v, mean, std, any(d.get("val_ppl_clamped", False) for d in ds)))
-        splits.add(ds[0].get("split", "val"))
+        # 收集全部种子的 split（多种子均在同一 split 上评测；这里避免只看
+        # 首个文件时漏掉其它种子的信息，标签才不会误导）
+        splits.update(d.get("split", "val") for d in ds)
     if not rows:
         return False
     rows.sort(key=lambda r: r[1])
@@ -255,7 +323,7 @@ def _read_records(rdir, variant):
     paths = _prefer_seeded(
         [os.path.join(rdir, f"analysis_records_{variant}.csv")]
         + sorted(glob.glob(os.path.join(
-            rdir, f"analysis_records_{variant}_seed*.csv"))))
+            rdir, f"analysis_records_{variant}_seed*.csv"))), rdir=rdir)
     # 同一批文件会被多张图（门控分布/校准曲线）消费：按 (路径, mtime, size)
     # 缓存最近一次解析结果，文件变化自动失效；只保留一个条目。
     key = (variant, tuple(
@@ -341,23 +409,16 @@ def fig_calibration(rdir, variant="lega"):
 def fig_misleading(rdir):
     """各变体：集中时找对率 vs 集中但看错率 —— “集中≠找对”的直接证据。"""
     keys = ("p_hit_given_conc", "p_hit_given_notconc", "misleading_rate")
-    files = [fp for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json")))
+    files = [(fp, _load(fp))
+             for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json")))
              if "records" not in os.path.basename(fp)]
     # 种子择优必须按变体分别进行（同 _group_by_variant）：全局 _prefer_seeded
-    # 会因一个变体有 _seed 文件而把其它变体仅有的无种子结果整体丢弃。
-    grouped = {}
-    for fp in files:
-        d = _load(fp)
-        if not (d and d.get("variant") and d.get("n_records")):
-            continue
-        m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
-        seed = int(m.group(1)) if m else d.get("seed")
-        grouped.setdefault(d["variant"], []).append((seed, d))
+    # 会因一个变体有 _seed 文件而把其它变体仅有的无种子结果整体丢弃；同一
+    # (变体, 种子) 的裸/带后缀重复文件也在这里按命名约定去重。
+    grouped = _group_items([(fp, d) for fp, d in files
+                            if d and d.get("n_records")], rdir)
     rows = []
-    for v, items in grouped.items():
-        ds = ([d for s, d in items if s is not None]
-              if any(s is not None for s, _ in items)
-              else [d for _, d in items])
+    for v, ds in grouped.items():
         row = {"variant": v}
         for k in keys:
             vals = [d[k] for d in ds if d.get(k) is not None]
@@ -393,7 +454,7 @@ def fig_auroc_heads(rdir, variant="lega"):
     files = _prefer_seeded(
         [os.path.join(rdir, f"analysis_{variant}.json")]
         + sorted(glob.glob(os.path.join(
-            rdir, f"analysis_{variant}_seed*.json"))))
+            rdir, f"analysis_{variant}_seed*.json"))), rdir=rdir)
     # 多种子：逐 (层, 头) 的 AUROC 跨 seed 求均值后再画
     agg = {}
     for fp in files:

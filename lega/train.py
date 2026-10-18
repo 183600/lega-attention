@@ -215,7 +215,8 @@ def audit_activations(model, pending_batches, device: str,
 
 def run_nan_checklist(model, pending_batches, device: str, step: int, where: str,
                       loss_value, lr: float, grad_norm_history, amp_dtype,
-                      vocab_size: int, consumed_batches=None) -> dict:
+                      vocab_size: int, consumed_batches=None,
+                      peak_lr=None) -> dict:
     """训练出现非有限值时的系统化排查：数据 → 代码 → 混合精度 → 梯度/学习率。
 
     排查顺序固定（先便宜后昂贵、先外部后内部），每步产出可核对的证据，
@@ -335,9 +336,12 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             opt_findings.append("最近一次 pre-clip 梯度范数非有限 → 梯度已爆炸")
     else:
         opt_findings.append("无梯度范数历史（NaN 出现过早，尚未记录到 log 点）")
+    # peak_lr 为调度峰值（warmup 后的 base lr）：失败步可能仍在 warmup 中，
+    # 实际 lr 与峰值不同，必须分别显示才能判断“是否已到峰值附近才炸”
     opt_findings.append(
-        f"失败时学习率 {lr:.2e}（warmup 后峰值 {lr:.2e} 量级；"
-        "过大学习率会在 warmup 结束前后率先炸出 NaN）")
+        f"失败时学习率 {lr:.2e}"
+        + (f"（调度峰值 {peak_lr:.2e}）" if peak_lr is not None else "")
+        + "：过大学习率会在 warmup 结束前后率先炸出 NaN")
     report["checklist_optimization"] = {"findings": opt_findings,
                                         "grad_norm_history_tail": hist[-20:]}
 
@@ -704,7 +708,7 @@ def main():
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
                 grad_norm_history=gn_hist, amp_dtype=(torch.bfloat16 if use_amp else None),
                 vocab_size=int(meta["vocab_size"]),
-                consumed_batches=consumed)
+                consumed_batches=consumed, peak_lr=base_lrs[0])
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):

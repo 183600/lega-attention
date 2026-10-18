@@ -391,14 +391,21 @@ _NEWLINE_RE = re.compile("\n")
 _BLANK_LINE_RE = re.compile(r"(?<=\n)\n")
 
 
-def _boundary_candidates(seg: str, base: int, kind: str):
-    # 换行/空行候选用正则扫描。
+def _boundary_candidates(text: str, lo: int, hi: int, kind: str):
+    # 换行/空行候选用正则扫描；标题候选额外校验真实行首（切片首位的
+    # re.MULTILINE '^' 对任意切片起点都会匹配，可能是行中假命中）。
+    seg = text[lo:hi]
     if kind == "heading":
-        return [base + m.start() for m in _HEADING_RE.finditer(seg)
-                if base + m.start() > 0]
+        positions = []
+        for m in _HEADING_RE.finditer(seg):
+            if m.start() == 0 and lo > 0 and text[lo - 1] != "\n":
+                # 切片起点落在行中间：串首的 '^' 不是真实行首，剔除该假标题
+                continue
+            positions.append(lo + m.start())
+        return positions
     if kind == "blank":
-        return [base + m.start() + 1 for m in _BLANK_LINE_RE.finditer(seg)]
-    return [base + m.start() + 1 for m in _NEWLINE_RE.finditer(seg)]
+        return [lo + m.start() + 1 for m in _BLANK_LINE_RE.finditer(seg)]
+    return [lo + m.start() + 1 for m in _NEWLINE_RE.finditer(seg)]
 
 
 def _pick_boundary(text: str, target: int, window: int):
@@ -409,10 +416,9 @@ def _pick_boundary(text: str, target: int, window: int):
     """
     lo = max(0, target - window)
     hi = min(len(text), target + window)
-    seg = text[lo:hi]
     best = None
     for kind, slack in (("heading", 0.75), ("blank", 0.35), ("newline", 0.0)):
-        for pos in _boundary_candidates(seg, lo, kind):
+        for pos in _boundary_candidates(text, lo, hi, kind):
             if pos <= 0 or pos >= len(text):
                 continue
             score = (abs(pos - target) - slack * window, pos, kind)
@@ -467,13 +473,17 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     window = max(256, int(n * float(window_frac)))
     heads = _heading_positions(text)
     p1, k1 = _pick_boundary(text, t1, window)
-    # 标题优先：窗口内没有标题时在全文中找最近的（范围保证 p1 < t2，val 非空）
-    if heads and (p1 is None or k1 != "heading"):
+    # 标题优先：窗口内没有“可用”标题时在全文中找最近的（范围保证 p1 < t2，
+    # val 非空）。窗口内命中的标题若 >= t2 同样不可用，必须换正文范围内的标题。
+    if heads and (p1 is None or k1 != "heading" or p1 >= t2):
         h = _nearest_heading_in_range(heads, t1, 1, t2 - 1)
         if h is not None:
             p1, k1 = h, "heading"
     p2, k2 = _pick_boundary(text, t2, window)
-    if heads and (p2 is None or k2 != "heading"):
+    # 同理：窗口内命中的标题若离 p1 太近（<= p1+min_gap，val 会被压空/切序
+    # 倒置），也要换到 [p1+min_gap, n-1] 里最近的标题。
+    if heads and (p2 is None or k2 != "heading"
+                  or p2 <= (p1 or 0) + min_gap):
         h = _nearest_heading_in_range(heads, t2, (p1 or 0) + min_gap, n - 1)
         if h is not None:
             p2, k2 = h, "heading"

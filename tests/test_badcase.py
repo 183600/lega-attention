@@ -349,6 +349,72 @@ def test_nonfinite_loss_excluded_from_mean():
     print("  [ok] 最差窗口均值剔除 NaN/Inf（聚合字段 JSON 合法）")
 
 
+def test_mean_tolerates_non_numeric_values():
+    """旧格式/坏数据里的 "n/a" 等非数值必须跳过，不能让整份报告崩溃。"""
+    from lega.badcase import _mean
+    assert abs(_mean([1.0, "n/a", 2.0]) - 1.5) < 1e-12
+    assert _mean(["n/a", None, float("nan")]) is None
+    ana = analyze_worst_windows([
+        _win(loss="n/a", pred_top5=[[" blue", 0.3]]),
+        _win(loss=2.0, pred_top5=[[" blue", 0.3]]),
+    ], variant="lega")
+    assert ana["mean_loss"] == 2.0
+    print("  [ok] 非数值 loss 容错（\"n/a\" 跳过且不中断报告）")
+
+
+def test_process_json_non_dict_payload_raises_value_error():
+    """顶层非对象（[] / 字符串）的坏文件：抛 ValueError 供调用方跳过，
+    而不是 AttributeError 中断整条流水线。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for name, fn in (("eval_bad.json", process_eval_json),
+                         ("ruler_bad.json", process_ruler_json)):
+            path = os.path.join(tmp, name)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+            try:
+                fn(path, write_md=False)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{fn.__name__} 对非对象 payload 未抛 ValueError")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 非对象 JSON payload 抛 ValueError（按坏文件跳过）")
+
+
+def test_main_skips_non_dict_ruler_and_keeps_cross_variant():
+    """main 遇到顶层非对象的 ruler 文件必须跳过，且该坏 payload 不能进入
+    跨变体对照导致二次崩溃。"""
+    import sys
+    from lega.badcase import main as badcase_main
+    tmp = tempfile.mkdtemp()
+    try:
+        a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+        for v, cases in (("standard", []), ("lega", [a])):
+            with open(os.path.join(tmp, f"ruler_{v}.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"variant": v, "seed": 1, "badcases": cases}, f,
+                          ensure_ascii=False)
+        with open(os.path.join(tmp, "ruler_bad.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump([], f)
+        old_argv = sys.argv
+        sys.argv = ["badcase", "--results_dir", tmp, "--no_md"]
+        try:
+            badcase_main()
+        finally:
+            sys.argv = old_argv
+        with open(os.path.join(tmp, "badcase_summary.json"),
+                  encoding="utf-8") as f:
+            merged = json.load(f)
+        assert merged["n_files"] == 2
+        assert merged["cross_variant"]["per_variant"]["standard"]["n_failed"] == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] main：非对象 JSON 跳过且不污染跨变体对照")
+
+
 def test_empty_gold_not_counted_as_top1_correct():
     """gold 缺失/空串时，空的 top1 不能因空串相等被判“top1 正确”。"""
     c = categorize_window(_win(gold=None, pred_top5=[["", 0.1], ["x", 0.2]]))

@@ -213,6 +213,18 @@ def test_checklist_optimization_step_detects_grad_explosion():
     print("  [ok] 排查步骤 4（优化）：梯度爆炸尖峰检测与学习率报告")
 
 
+def test_checklist_reports_failure_lr_and_schedule_peak_separately():
+    """失败步可能仍在 warmup 中：失败时 lr 与调度峰值必须分别显示，
+    不能把同一个数值打印两遍。"""
+    m = _model()
+    rep = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss", float("nan"),
+                            lr=5e-4, grad_norm_history=[1.0],
+                            amp_dtype=None, vocab_size=64, peak_lr=2e-3)
+    findings = " ".join(rep["checklist_optimization"]["findings"])
+    assert "5.00e-04" in findings and "2.00e-03" in findings, findings
+    print("  [ok] 排查步骤 4（优化）：失败时 lr 与调度峰值分别显示")
+
+
 def test_checklist_nonfinite_grad_norm_trigger_reports_explosion():
     """grad_norm 触发的排查：当前范数非有限而历史只保留有限值，
     必须用触发值显式报告“已爆炸”，不能退化成“未见爆炸性尖峰”。"""

@@ -169,6 +169,21 @@ def test_tune_selects_grid_best_and_flags_default_not_optimal():
     print("  [ok] tune（网格最优选择/默认近优判定/全失败报错）")
 
 
+def test_parse_seeds_rejects_non_integer():
+    """--seeds 是整数列表："1.5" 必须报错，不能静默截断成种子 1。"""
+    from lega.tuning import parse_seeds
+    assert parse_seeds("1, 2,3") == [1, 2, 3]
+    assert parse_seeds("") is None
+    assert parse_seeds(" 4 ") == [4]
+    try:
+        parse_seeds("1.5")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("非整数种子未被拒绝")
+    print("  [ok] parse_seeds：整数校验（拒绝浮点种子）")
+
+
 def test_tune_multiseed_selects_by_mean_not_lucky_seed():
     """多种子选择：按平均 val_loss 选配置，不被单个“幸运种子”左右。"""
     tmp = tempfile.mkdtemp()

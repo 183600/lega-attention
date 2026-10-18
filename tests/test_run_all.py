@@ -17,7 +17,8 @@ from unittest import mock
 from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _lat_noise_pct, _noise_floor_pct,
-                      _rel_pct, _render_baseline_sections, _resolve_jobs, _stat,
+                      _rel_pct, _render_baseline_sections,
+                      _render_registration_integrity, _resolve_jobs, _stat,
                       apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
                       component_evidence, cross_variant_badcase_map,
@@ -1086,6 +1087,19 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
         out_mix = ngram_baseline_comparison(runs_mix, tmp)
         assert out_mix["rows"] == []
         assert out_mix["incomparable"][0]["variant"] == "qgate"
+        # 部分种子 split 错位：可比种子照常进 rows，但错位种子必须显式列出，
+        # 不能因为“还有可比种子”就静默丢弃
+        runs_partial = {"qgate": {
+            1: {"eval": {"variant": "qgate", "split": "val", "ppl": 25.0}},
+            2: {"eval": {"variant": "qgate", "split": "test", "ppl": 24.0}},
+            3: {"eval": {"variant": "qgate", "split": "test", "ppl": 26.0}}}}
+        out_partial = ngram_baseline_comparison(runs_partial, tmp)
+        assert out_partial["rows"][0]["n"] == 2
+        assert out_partial["incomparable"] == [
+            {"variant": "qgate", "eval_splits": ["val"], "excluded_seeds": [1]}]
+        text_partial = "\n".join(
+            _render_baseline_sections(tmp, ngram_cmp=out_partial))
+        assert "未纳入比较" in text_partial and "[1]" in text_partial
         # 渲染：比较表与错位警告都必须出现在基线小节
         text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
         assert "显著优于统计基线" in text and "比值" in text
@@ -1149,6 +1163,45 @@ def test_registration_scope_check_and_gate():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] registration_scope_check/apply_scope_gate（范围外降级）")
+
+
+def test_registration_scope_render_matches_gate_and_paths():
+    """范围核对渲染必须与实际降级一致，且 config_file 路径解析正确。
+
+    登记表未声明 scope 时 apply_scope_gate 明确不降级，渲染不得声称
+    “按不可确认降级”；相对 config_file 必须按项目根解析，不能相对 cwd
+    静默核对到另一个同名文件；非字符串 config_file 按不可读处理而非崩溃。
+    """
+    sc = registration_scope_check({}, {"seeds": [1]})
+    hyp = [{"id": "H1", "confirmatory_valid": True}]
+    apply_scope_gate(hyp, sc)
+    assert hyp[0]["confirmatory_valid"] is True
+    text = "\n".join(_render_registration_integrity(
+        {"status": "intact", "confirmatory_valid": True}, sc))
+    assert "不可确认" not in text and "降级" not in text
+    assert "未声明 scope" in text
+    # 声明了 scope 却核不动 → 实际降级，渲染必须同样声明降级
+    sc2 = registration_scope_check({"scope": {"data": "WikiText-103 (gpt2 BPE)"}}, {})
+    hyp2 = [{"id": "H1", "confirmatory_valid": True}]
+    apply_scope_gate(hyp2, sc2)
+    assert hyp2[0]["confirmatory_valid"] is False
+    text2 = "\n".join(_render_registration_integrity(
+        {"status": "intact", "confirmatory_valid": True}, sc2))
+    assert "不可确认" in text2 and "降级" in text2
+    tmp = tempfile.mkdtemp()
+    try:
+        reg = os.path.join(tmp, "reg.json")
+        _write_json(reg, {"d_model": 8})
+        _write_json(os.path.join(tmp, "actual.json"), {"d_model": 16})
+        sc3 = registration_scope_check({"scope": {"config": reg}},
+                                       {"config_file": "actual.json"}, root=tmp)
+        assert sc3["problems"] and "d_model" in sc3["problems"][0]
+        sc4 = registration_scope_check({"scope": {"config": reg}},
+                                       {"config_file": {"x": 1}}, root=tmp)
+        assert sc4["warnings"] and sc4["checked"] is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 范围核对渲染/降级一致 + config_file 路径解析")
 
 
 def test_registered_hypotheses_evaluation():

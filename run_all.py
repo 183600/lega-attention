@@ -827,6 +827,8 @@ def registration_scope_check(registered: dict, repro: dict,
         return out
 
     def _load_json(p):
+        if not isinstance(p, (str, os.PathLike)):
+            return None
         try:
             with open(p, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -841,7 +843,12 @@ def registration_scope_check(registered: dict, repro: dict,
     want_rel = str(scope.get("config") or "")
     want_path = (want_rel if os.path.isabs(want_rel)
                  else os.path.join(root, want_rel))
-    got_path = repro.get("config_file")
+    got_rel = repro.get("config_file")
+    # 与 scope.config 对称：相对路径按项目根解析（否则会相对 cwd 去读另一个
+    # 同名文件，悄悄核对错配置）
+    got_path = (os.path.join(root, got_rel)
+                if isinstance(got_rel, str) and got_rel
+                and not os.path.isabs(got_rel) else got_rel)
     want_cfg, got_cfg = (_load_json(want_path) if want_path else None,
                          _load_json(got_path) if got_path else None)
     if want_cfg is None:
@@ -964,8 +971,11 @@ def _render_registration_integrity(integrity: dict,
                         else "")
             lines.append(f"- ✅ 本次 run 在预注册范围内：{cfg_note}{tok_note}。")
         else:
+            # 无 scope 的登记表不降级（与 apply_scope_gate 的早退一致），
+            # 只有“声明了 scope 却核不动”才是不可确认
             lines.append("- ⚠ 无法核对预注册范围（缺少 repro/config 信息）："
-                         "确认性判定按“不可确认”降级。")
+                         + ("确认性判定按“不可确认”降级。" if scope else
+                            "登记表未声明 scope，完整性判定不受影响。"))
         for w in sc.get("warnings") or []:
             lines.append(f"- ⚠ {w}")
     if integrity.get("confirmatory_valid") and not scope_failed:
@@ -1053,7 +1063,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         if v not in VARIANTS:
             continue
         m = _variant_seed_map(runs, v)
-        vals, seeds_used, eval_splits = [], [], set()
+        vals, seeds_used, eval_splits, excl_seeds = [], [], set(), []
         for s in _sorted_seeds(m):
             d = m[s].get("eval")
             if not d:
@@ -1061,16 +1071,20 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             ev_split = d.get("split", "val")
             if ev_split != ng_split:
                 eval_splits.add(ev_split)
+                excl_seeds.append(s)
                 continue
             p = _ppl_of(d)
             if p is None or not math.isfinite(p):
                 continue
             vals.append(p)
             seeds_used.append(s)
+        if eval_splits:
+            # 只要存在 split 错位的种子就必须显式列出（哪怕同变体另有可比
+            # 种子已被纳入）：静默丢弃部分种子同样会让读者高估证据完整性
+            incomparable.append({"variant": v,
+                                 "eval_splits": sorted(eval_splits),
+                                 "excluded_seeds": [int(s) for s in excl_seeds]})
         if not vals:
-            if eval_splits:
-                incomparable.append({"variant": v,
-                                     "eval_splits": sorted(eval_splits)})
             continue
         res = paired_t_test(vals, [ref_ppl] * len(vals))
         res.update({"candidate": v, "reference": ref_name,
@@ -1198,10 +1212,13 @@ def _render_baseline_sections(results_dir: str, smoke=None,
     elif cmp.get("note") and not cmp.get("rows"):
         lines.append(f"- ⚠ {cmp['note']}")
     for item in cmp.get("incomparable") or []:
+        excl = item.get("excluded_seeds") or []
         lines.append(
             f"- ⚠ 变体 `{item.get('variant')}` 的评测 split="
             f"{item.get('eval_splits')} 与 n-gram split={cmp.get('split')} "
-            "不一致：未纳入比较（不同切片的 PPL 不可比；用 "
+            "不一致"
+            + (f"的种子 {excl} " if excl else "：")
+            + "未纳入比较（不同切片的 PPL 不可比；用 "
             "`--ngram_split auto` 或对齐后再比较）。")
     tune = None
     tfp = os.path.join(results_dir, "baseline_tuning.json")

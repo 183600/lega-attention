@@ -32,6 +32,23 @@ def parse_floats(s):
     return [float(x) for x in str(s).split(",") if str(x).strip() != ""]
 
 
+def parse_seeds(s, parser=None):
+    """逗号分隔的整数种子列表；"1.5" 这类非整数被拒绝而不是静默截断成 1。"""
+    out = []
+    for x in str(s).split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            out.append(int(x))
+        except ValueError:
+            msg = f"--seeds 需要整数种子，收到 {x!r}"
+            if parser is not None:
+                parser.error(msg)
+            raise ValueError(msg)
+    return out or None
+
+
 def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
                wd_list=None):
     """生成网格；默认组合 (lr0, wd0) 确保存在且排在首位。"""
@@ -280,9 +297,10 @@ def main():
     p.add_argument("--variant", default="standard")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--seeds", default=None,
-                   help="逗号分隔的选择种子列表：每个网格配置在每个种子上各训"
-                        "一次，按平均 val_loss 选择（默认只用 --seed/配置种子；"
-                        "单种子选择可能被噪声左右，正式实验建议 ≥3 个）")
+                   type=lambda s: parse_seeds(s, p),
+                   help="逗号分隔的选择种子列表（整数）：每个网格配置在每个种子"
+                        "上各训一次，按平均 val_loss 选择（默认只用 --seed/配置"
+                        "种子；单种子选择可能被噪声左右，正式实验建议 ≥3 个）")
     p.add_argument("--steps", type=int, default=None,
                    help="每个 trial 的训练步数（默认用配置值；可先用较小步数）")
     p.add_argument("--lr_mults", default=",".join(str(m) for m in DEFAULT_LR_MULTS))
@@ -298,7 +316,7 @@ def main():
          lr_mults=parse_floats(args.lr_mults),
          wd_list=(parse_floats(args.wd_list) if args.wd_list else None),
          device=args.device, tolerance=args.tolerance, timeout=args.timeout,
-         seeds=(parse_floats(args.seeds) if args.seeds else None))
+         seeds=args.seeds)
 
 
 if __name__ == "__main__":
