@@ -214,9 +214,12 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
                 manifest = json.load(f)
         except (OSError, ValueError):
             manifest = None
-    if manifest:
-        git = manifest.get("git") or {}
-        data = manifest.get("data") or {}
+    # 结构校验：语法合法但结构畸形（非对象，或 git/data 不是对象）的
+    # run_manifest 必须视为“无清单”并按当前环境补算，而不是抛
+    # AttributeError 阻塞下游评测（与 data_fingerprint 的缓存校验同口径）。
+    if isinstance(manifest, dict) and manifest:
+        git = manifest.get("git") if isinstance(manifest.get("git"), dict) else {}
+        data = manifest.get("data") if isinstance(manifest.get("data"), dict) else {}
         return {
             "code_commit": git.get("commit"),
             "code_dirty": git.get("dirty"),

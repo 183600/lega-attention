@@ -767,7 +767,13 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     items: Dict[str, Dict] = {}
     for v in variants:
         for c in per_variant_cases[v]:
-            items.setdefault(case_key(c), {"variants": set(), "example": c})["variants"].add(v)
+            # 每个变体对同一 key 的记录各不相同（预测/归因依赖该变体自身输出），
+            # 必须逐变体保存，不能只留一个代表样本——否则相对参照的新增/改对
+            # 会拿别的变体的记录去归因，类别统计与个案展示都会张冠李戴。
+            it = items.setdefault(case_key(c),
+                                  {"variants": set(), "example": c, "examples": {}})
+            it["variants"].add(v)
+            it["examples"][v] = c
     if len(variants) < 2:
         return {"variants": variants, "reference": reference,
                 "n_unique_failed_items": len(items),
@@ -791,11 +797,16 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
         else:
             new_keys, fixed_keys = [], []
 
+        def _example_for(k):
+            """该变体对 key 的原始记录（逐变体保存；缺失时回退代表样本）。"""
+            return items[k]["examples"].get(v, items[k]["example"])
+
         def _cat_counts(keys):
-            # 对全部新增/改对样本归因（不只展示的前 N 条），供改进方向统计
+            # 对全部新增/改对样本归因（不只展示的前 N 条），供改进方向统计；
+            # 归因必须基于该变体自己的记录。
             cc = Counter()
             for k in keys:
-                c = _categorize_any(items[k]["example"])
+                c = _categorize_any(_example_for(k))
                 if c:
                     cc[c["category"]] += 1
             return dict(cc)
@@ -807,9 +818,9 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
             "n_fixed_vs_reference": len(fixed_keys) if has_ref else None,
             "new_category_counts": _cat_counts(new_keys),
             "fixed_category_counts": _cat_counts(fixed_keys),
-            "new_vs_reference": [_case_brief(items[k]["example"])
+            "new_vs_reference": [_case_brief(_example_for(k))
                                  for k in new_keys[:CROSS_LIST_LIMIT]],
-            "fixed_vs_reference": [_case_brief(items[k]["example"])
+            "fixed_vs_reference": [_case_brief(_example_for(k))
                                    for k in fixed_keys[:CROSS_LIST_LIMIT]],
         }
     out = {
