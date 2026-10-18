@@ -200,9 +200,14 @@ def main():
         else:
             print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个，"
                   "文档不跨 split")
-        train_text = clean_lines(train_text.split("\n"), args.max_tokens, args.tokenizer)
-        val_text = clean_lines(val_text.split("\n"), args.val_tokens, args.tokenizer)
-        test_text = clean_lines(test_text.split("\n"), args.test_tokens, args.tokenizer)
+        # 逐行迭代而不 split 成整份列表：全量语料（数亿字符）下
+        # split("\n") 会额外物化一份与正文等量的行列表，这里按行流式读取。
+        train_text = clean_lines(io.StringIO(train_text), args.max_tokens,
+                                 args.tokenizer)
+        val_text = clean_lines(io.StringIO(val_text), args.val_tokens,
+                               args.tokenizer)
+        test_text = clean_lines(io.StringIO(test_text), args.test_tokens,
+                                args.tokenizer)
     else:
         lines = None
         if args.source in ("auto", "parquet"):

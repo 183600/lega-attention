@@ -149,11 +149,13 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                     packed.append(st["logit"][r][:, qs:qe].float())
                 if st.get("qterm") is not None:
                     packed.append(st["qterm"][r][:, qs:qe].float())
-                # log_n 为 (width,)：设备端广播进同一张表
-                packed.append(st["log_n"][qs:qe].float().expand_as(packed[0]))
                 per_layer.append(torch.stack(packed))
             merged_all = torch.stack(per_layer).cpu().numpy()             # (L, N, H, width)
-            for st, merged in zip(out["gate_stats"], merged_all):
+            # log_n 为 (width,)：逐层扩成 (H, width) 再堆进合并表会白白多拷
+            # H 倍数据；单独整表堆叠一次转回设备（单次传输），消费时按层取。
+            log_ns_all = torch.stack([st["log_n"][qs:qe].float()
+                                      for st in out["gate_stats"]]).cpu().tolist()
+            for li, (st, merged) in enumerate(zip(out["gate_stats"], merged_all)):
                 layer = st["layer"]
                 it = iter(merged)
                 max_p = next(it)                                          # (H, width)
@@ -161,10 +163,10 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                 g = next(it) if st.get("g") is not None else None
                 logit = next(it) if st.get("logit") is not None else None
                 qterm = next(it) if st.get("qterm") is not None else None
-                log_n = next(it)[0]                                       # (width,)
+                ln_l = log_ns_all[li]                                     # (width,) 已是标量表
                 # hit 掩码随合并表一次带回；矩阵整体 tolist() 转 Python 标量。
                 hit_l = hit_m.tolist() if hit_m is not None else None
-                mp_l, ln_l = max_p.tolist(), log_n.tolist()
+                mp_l = max_p.tolist()
                 g_l = g.tolist() if g is not None else None
                 logit_l = logit.tolist() if logit is not None else None
                 qterm_l = qterm.tolist() if qterm is not None else None
@@ -434,8 +436,14 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     per_head = []
     layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)
     head_arr = np.array([r["head"] for r in records], dtype=np.int64)
-    for layer, head in np.unique(np.stack([layer_arr, head_arr], axis=1), axis=0):
-        m = (layer_arr == layer) & (head_arr == head)
+    # 一次分组得到每行的组号：逐组重扫全表求 (layer, head) 掩码在记录数
+    # 大时是 O(N × 组数)；分组顺序仍为字典序，各组记录顺序不变。
+    groups, group_idx = np.unique(
+        np.stack([layer_arr, head_arr], axis=1), axis=0,
+        return_inverse=True)
+    group_idx = group_idx.reshape(-1)
+    for gi, (layer, head) in enumerate(groups):
+        m = group_idx == gi
         gg, hh, cc = g[m], hit[m], c[m]
         qq, ll, mp = qterm[m], logit[m], max_p[m]
         hv = ~np.isnan(hh)

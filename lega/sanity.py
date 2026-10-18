@@ -180,6 +180,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         first_train_loss = None
         nan_seen = False
         loss_no_grad = False
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
         for step in range(int(steps)):
             cur_lr = float(lr) * (step + 1) / max(1, warmup) \
                 if step < warmup else float(lr)
@@ -204,8 +205,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             # 这里能定位到具体参数名（见 gradient_coverage 文档）。
             if step == 0:
                 grad_cov = gradient_coverage(model)
-            gn = torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad], grad_clip)
+            gn = torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
             if first_grad_norm is None:
                 first_grad_norm = float(gn)
             opt.step()

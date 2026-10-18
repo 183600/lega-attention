@@ -397,10 +397,16 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
 
 
 def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
-                      write_md: bool = True) -> Dict:
-    """处理一个 eval_*.json 的 worst_windows：归因分析 + 写 md（与源文件同目录）。"""
-    with open(eval_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+                      write_md: bool = True,
+                      payload: Optional[Dict] = None) -> Dict:
+    """处理一个 eval_*.json 的 worst_windows：归因分析 + 写 md（与源文件同目录）。
+
+    payload 已由调用方解析时可直接传入（避免同一文件在流水线中被解析两次）；
+    为 None 时自行读取。
+    """
+    if payload is None:
+        with open(eval_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
     analysis = analyze_worst_windows(payload.get("worst_windows") or [],
                                      variant=payload.get("variant"))
     analysis["seed"] = payload.get("seed")

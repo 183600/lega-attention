@@ -1057,16 +1057,20 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
 
 
 def build_summary(results_dir: str, audit: dict = None,
-                  data_report: dict = None) -> dict:
+                  data_report: dict = None, preloaded: dict = None) -> dict:
     """汇总 PPL / RULER / 参数量等指标为 Markdown + CSV + JSON。
 
     多种子口径：每个变体的每个指标先按种子聚合为 Mean ± Std；变体间比较使用
     同一批种子上的配对 t 检验（同种子共享初始化与数据顺序，配对消除公共方差）。
     消融矩阵显式列出全因子 8 个组合的覆盖情况，缺失组合会被标注。
     data_report（可选）来自数据目录的防泄漏自检报告，汇总为独立小节。
+    preloaded（可选）为 {results 下结果文件路径: 已解析 JSON} 缓存：坏案例
+    阶段已解析过的 eval/ruler 文件在此直接复用，避免同文件二次解析。
     """
 
     def load(p):
+        if preloaded and p in preloaded:
+            return preloaded[p]
         if not os.path.exists(p):
             return None
         with open(p, "r", encoding="utf-8") as f:
@@ -2524,14 +2528,20 @@ def main():
             f"{e.returncode}）：{' '.join(e.cmd)}")
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
-    # 错误样本是改进思路的最重要来源，不能只留聚合分数
+    # 错误样本是改进思路的最重要来源，不能只留聚合分数。
+    # 解析结果进 preloaded 缓存：build_summary 汇总时直接复用同一份 payload，
+    # 不再对每个 eval/ruler 结果文件做第二次 JSON 解析。
+    preloaded = {}
     if not args.skip_ruler:
         for fp in sorted(glob.glob(os.path.join(results_dir, "ruler_*.json"))):
             try:
-                ana = process_ruler_json(fp)
+                with open(fp, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                ana = process_ruler_json(fp, payload=payload)
             except (OSError, ValueError, KeyError) as e:
                 print(f"[badcase] 跳过 {fp}: {e}")
                 continue
+            preloaded[fp] = payload
             if ana["n_badcases"]:
                 top = ", ".join(f"{BADCASE_CN.get(k, k)}×{n}"
                                 for k, n in sorted(ana["category_counts"].items(),
@@ -2544,10 +2554,13 @@ def main():
     # Markdown，与 RULER 坏案例同等对待——PPL 平均分看不出模型错在哪句话
     for fp in sorted(glob.glob(os.path.join(results_dir, "eval_*.json"))):
         try:
-            ana = process_eval_json(fp)
+            with open(fp, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            ana = process_eval_json(fp, payload=payload)
         except (OSError, ValueError, KeyError) as e:
             print(f"[badcase] 跳过 {fp}: {e}")
             continue
+        preloaded[fp] = payload
         if not ana["n_windows"]:
             continue
         top = ", ".join(f"{WINDOW_CATEGORY_CN.get(k, k)}×{n}"
@@ -2609,7 +2622,8 @@ def main():
 
     audit = verify_controlled_setup(out_root, variants, seeds, n_seeds,
                                     expected_data_digest=data_digest)
-    build_summary(results_dir, audit=audit, data_report=data_report)
+    build_summary(results_dir, audit=audit, data_report=data_report,
+                  preloaded=preloaded)
 
     # 收尾台账：最终指标（逐 run 的 eval.json）+ 全部结果文件的 SHA-256。
     # 曲线/结果文件后续被覆盖或手改，都能通过哈希与当时记录比对发现。
