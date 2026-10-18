@@ -14,14 +14,14 @@ import sys
 import tempfile
 from unittest import mock
 
-from run_all import (ALPHA, MIN_SEEDS, _apply_holm, _auroc_diff_tests,
-                      _cmd_env, _effect_status, _enrich_paired, _lat_noise_pct,
-                      _noise_floor_pct, _rel_pct,
-                      _resolve_jobs, _stat, AUROC_DIFF_METRIC,
-                      AUROC_DIFF_REFERENCE, build_summary, component_evidence,
-                      evaluate_registered_hypotheses, load_registered_hypotheses,
-                      parse_variants, run_many, tradeoff_verdict,
-                      verify_controlled_setup)
+from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
+                      _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
+                      _enrich_paired, _lat_noise_pct, _noise_floor_pct,
+                      _rel_pct, _render_baseline_sections, _resolve_jobs, _stat,
+                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE, build_summary,
+                      component_evidence, evaluate_registered_hypotheses,
+                      load_registered_hypotheses, parse_variants, run_many,
+                      tradeoff_verdict, verify_controlled_setup)
 
 
 def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
@@ -698,6 +698,86 @@ def test_auroc_diff_tests_family():
     assert "⚠" in by_v["lega"]["verdict"] and by_v["lega"]["t_perm_agree"] is False
     assert "不显著" in by_v["qgate"]["verdict"]
     print("  [ok] _auroc_diff_tests（配对差检验/置换粒度边界/家族校正）")
+
+
+def test_ap_diff_tests_family_and_registered_metric():
+    """PR-AUC 机制族：不平衡主指标口径下的配对差检验（H7 的判定依据）。"""
+    def _slot(al, aq):
+        return {"analysis": {"auprc_logit": al, "auprc_qterm": aq}}
+    runs = {
+        "lega": {1: _slot(0.30, 0.10), 2: _slot(0.33, 0.11),
+                 3: _slot(0.28, 0.09), 4: _slot(0.31, 0.12),
+                 5: _slot(0.29, 0.10)},
+        "qgate": {1: _slot(0.20, 0.21), 2: _slot(0.19, 0.20),
+                  3: _slot(0.21, 0.20), 4: _slot(0.20, 0.20),
+                  5: _slot(0.19, 0.21)},
+    }
+    tests = _ap_diff_tests(runs)
+    by_v = {t["candidate"]: t for t in tests}
+    assert set(by_v) == {"lega", "qgate"}
+    t = by_v["lega"]
+    assert t["metric"] == AP_DIFF_METRIC
+    assert t["reference"] == AUROC_DIFF_REFERENCE
+    assert t["lower_is_better"] is False
+    assert t["n"] == 5 and t["mean_diff"] > 0.15
+    tests = _apply_holm(tests)
+    assert "显著优于" in by_v["lega"]["verdict"]
+    assert "不显著" in by_v["qgate"]["verdict"]
+    # H7 必须以该 metric 字符串登记（evaluate_registered_hypotheses 按
+    # metric 精确匹配检验表，拼写不一致会让假设永远“未检验”）
+    reg = {"hypotheses": [{
+        "id": "H7",
+        "claim": "机制主张（不平衡口径）：AP(logit) > AP(仅查询)",
+        "metric": AP_DIFF_METRIC, "candidate": "lega",
+        "reference": AUROC_DIFF_REFERENCE, "direction": "candidate_better"}]}
+    ev = evaluate_registered_hypotheses(reg, tests)
+    assert ev and ev[0]["status"] == "支持", ev
+    print("  [ok] _ap_diff_tests（PR-AUC 配对差、Holm 校正、H7 判定）")
+
+
+def test_render_baseline_sections_reads_evidence_and_warns():
+    """汇总页必须渲染简单基线 PPL 与基线调优证据；缺失时显式警告。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        # 缺证据：必须给出“未运行/未提供”的警告而不是静默
+        empty = _render_baseline_sections(tmp)
+        text = "\n".join(empty)
+        assert "基线合理性" in text
+        assert "未运行" in text
+        # 提供证据：调优选择、最优/默认差距与 ngram PPL 都要出现
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
+            "variant": "standard", "steps": 100, "n_trials": 3,
+            "selected": {"lr": 0.0012, "weight_decay": 0.1,
+                         "val_loss_best": 3.1},
+            "default_trial": {"lr": 0.0006, "weight_decay": 0.1,
+                              "val_loss_best": 3.2},
+            "selected_minus_default_val_loss": -0.1,
+            "default_is_optimal": False,
+        })
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "train_tokens": 1000, "eval_tokens": 100,
+            "vocab_size": 50, "ppl": {"unigram": 90.0, "bigram": 45.0},
+        })
+        _write_json(os.path.join(tmp, "repro.json"), {"smoke": False})
+        text2 = "\n".join(_render_baseline_sections(tmp))
+        assert "0.0012" in text2 and "3.1000" in text2
+        assert "90.000" in text2 and "45.000" in text2
+        assert "全流水线" in text2 and "受控变量" in text2
+        # 默认组合 trial 失败（default_is_optimal=None）：不得冒充“并非最优”
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
+            "variant": "standard", "n_trials": 2, "selected": {
+                "lr": 0.0012, "weight_decay": 0.1, "val_loss_best": 3.1},
+            "default_trial": None, "default_is_optimal": None,
+            "selected_minus_default_val_loss": None})
+        text4 = "\n".join(_render_baseline_sections(tmp))
+        assert "无法判定默认是否" in text4
+        # 调优缺证据但 ngram 在：仍必须点名“未调优基线”的风险
+        os.remove(os.path.join(tmp, "baseline_tuning.json"))
+        text3 = "\n".join(_render_baseline_sections(tmp))
+        assert "未提供基线调优证据" in text3
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] _render_baseline_sections（证据渲染/缺失警告）")
 
 
 def test_registered_hypotheses_evaluation():

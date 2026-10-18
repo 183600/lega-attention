@@ -1,4 +1,10 @@
-"""通用工具：随机种子、JSON 读写、指标计算（AUROC/Pearson/统计检验，无 scipy 依赖）。
+"""通用工具：随机种子、JSON 读写、指标计算（AUROC/PR-AUC/F1/Pearson/统计检验）。
+
+指标选择口径：类别不平衡时不能只看准确率。AUROC 在负样本占绝对多数时
+（FPR 增长缓慢）会过于乐观，须与 PR-AUC（average_precision）并报；正类率
+低于 5% 时以 PR-AUC 为主，其“随机猜”基线就是正类率。F1 必须显式注明
+macro / micro / weighted（三者在不平衡数据上可能差异巨大，macro 对稀有类
+最诚实）。以上均已实现且无 scipy 依赖。
 
 统计检验的设计口径：正式实验的种子数通常只有 3~5，配对 t 检验的正态假设在此
 样本量下并不可靠；因此本模块同时提供
@@ -479,6 +485,9 @@ def auroc(scores, labels) -> float:
     """秩和法 AUROC（Mann-Whitney U），含并列取平均秩；labels: 1=正类。
 
     用于检验“门控分数能否区分这次读取是否找对了信息”。
+
+    类别极度不平衡时 AUROC 会被巨大的负样本基数抬高（FPR 增长缓慢），
+    必须与 `average_precision` 并报；正类率 <5% 时应以 PR-AUC 为主。
     """
     scores = np.asarray(scores, dtype=np.float64)
     labels = np.asarray(labels)
@@ -497,3 +506,90 @@ def auroc(scores, labels) -> float:
     r_pos = ranks[len(neg):].sum()
     u = r_pos - len(pos) * (len(pos) + 1) / 2.0
     return float(u / (len(pos) * len(neg)))
+
+
+def average_precision(scores, labels) -> float:
+    """PR-AUC（average precision，逐步积分，含并列分数分组）；labels: 1=正类。
+
+    为什么需要它：类别不平衡时 ROC-AUC 会因负样本基数巨大、FPR 增长缓慢
+    而给出过于乐观的分数（正类率 <5% 即须警惕，<0.1% 时优先看 PR-AUC）。
+    PR-AUC 的“随机猜”基线恰为正类率（prevalence），因此可直接对照判断
+    分数是否真的有判别力。分组口径：同分样本整体进入当前阈值，取
+    P=TP/(TP+FP) 与 R=TP/n_pos，AP = Σ (R_k − R_{k−1}) · P_k，
+    与并列取平均秩的 AUROC 一样对并列稳健。单一类别或空输入返回 NaN。
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.float64)
+    m = np.isfinite(scores)
+    scores, labels = scores[m], labels[m]
+    n_pos = int((labels == 1).sum())
+    if n_pos == 0 or n_pos == len(labels):
+        return float("nan")
+    order = np.argsort(-scores, kind="mergesort")
+    s_sorted, l_sorted = scores[order], labels[order]
+    # 分数降序后按等值组切边界（合并并列，避免排序稳定性影响结果）
+    cuts = np.flatnonzero(np.diff(s_sorted)) + 1
+    starts = np.concatenate([[0], cuts])
+    ends = np.concatenate([cuts, [len(s_sorted)]])
+    tp = fp = 0
+    prev_recall = 0.0
+    ap = 0.0
+    for a, b in zip(starts, ends):
+        group = l_sorted[a:b]
+        tp += int(group.sum())
+        fp += int(b - a - group.sum())
+        recall = tp / n_pos
+        precision = tp / (tp + fp)
+        ap += (recall - prev_recall) * precision
+        prev_recall = recall
+    return float(ap)
+
+
+def f1_scores(y_true, y_pred, labels=None) -> dict:
+    """二/多分类 F1：同时给出 macro / micro / weighted 三种平均口径与逐类明细。
+
+    为什么必须注明平均口径：类别不平衡时三者可能差异巨大——macro 对每个
+    类等权（对稀有类敏感，是不平衡场景的诚实口径）、micro 汇总全局
+    TP/FP/FN（多分类下偏向多数类）、weighted 按类支持度加权（同样被多数类
+    主导）。任何只写“F1”的表格都不完整，本函数一次给全并显式命名。
+
+    返回 {macro, micro, weighted, per_class: {label: {precision, recall, f1,
+    support}}, labels}；单一类别或无样本时值为 None（表示不可计算）。
+    """
+    y_true = np.asarray(y_true).astype(int).ravel()
+    y_pred = np.asarray(y_pred).astype(int).ravel()
+    if y_true.size != y_pred.size:
+        raise ValueError(f"y_true/y_pred 长度不一致: {y_true.size} vs {y_pred.size}")
+    if labels is None:
+        labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
+    labels = [int(x) for x in labels]
+    per_class = {}
+    f1s, supports = [], []
+    total = int(y_true.size)
+    tp_all = fp_all = fn_all = 0
+    for lb in labels:
+        tp = int(((y_true == lb) & (y_pred == lb)).sum())
+        fp = int(((y_true != lb) & (y_pred == lb)).sum())
+        fn = int(((y_true == lb) & (y_pred != lb)).sum())
+        support = int((y_true == lb).sum())
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+        per_class[lb] = {"precision": prec, "recall": rec, "f1": f1,
+                         "support": support}
+        f1s.append(f1)
+        supports.append(support)
+        tp_all += tp
+        fp_all += fp
+        fn_all += fn
+    if not labels or total == 0:
+        return {"macro": None, "micro": None, "weighted": None,
+                "per_class": per_class, "labels": labels, "n": total}
+    macro = float(np.mean(f1s)) if f1s else None
+    micro = (2 * tp_all / (2 * tp_all + fp_all + fn_all)
+             if (2 * tp_all + fp_all + fn_all) else None)
+    weighted = (float(np.average(f1s, weights=supports))
+                if sum(supports) else None)
+    return {"macro": macro, "micro": float(micro) if micro is not None else None,
+            "weighted": weighted, "per_class": per_class, "labels": labels,
+            "n": total}

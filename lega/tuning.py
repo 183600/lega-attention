@@ -1,0 +1,230 @@
+"""基线超参数调优：基线（standard）在验证集上的 lr/权重衰减网格。
+
+科研方法问题：如果新方法只与“随手一个学习率”的基线比较，涨点可能全部
+来自超参数红利，而非所验证的模块。本模块对**基线变体**（默认
+`standard`）做一个小网格搜索：
+
+  * 网格 = lr × weight_decay 的笛卡尔积（默认 lr 乘子 0.5/1/2、
+    wd 取配置默认值），默认组合必须包含在内并作为第一个 trial；
+  * 选择只用**验证集** val_loss（与训练中 model_best.pt 的选择口径一致：
+    取 train_log.jsonl 中所有评测点的最小值），测试集从不加载
+    （lega.data.load_bin 对 test 默认拒绝）；
+  * 输出 `default_is_optimal` 判定：默认超参数与网格最优的 val_loss 差
+    小于相对容差（默认 0.5%）即视为“接近最优”，否则流水线应改用最优
+    组合统一训练所有变体（受控变量不变，仅整体平移）。
+
+每个 trial 以子进程调用 `python -m lega.train` 真实训练，产出目录内
+`eval.json` / `train_log.jsonl` / `run_manifest.json` 全量保留，便于审计。
+"""
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+
+DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
+DEFAULT_TOLERANCE = 0.005
+
+
+def parse_floats(s):
+    return [float(x) for x in str(s).split(",") if str(x).strip() != ""]
+
+
+def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
+               wd_list=None):
+    """生成网格；默认组合 (lr0, wd0) 确保存在且排在首位。"""
+    wds = [wd0] if wd_list is None else list(wd_list)
+    if wd0 not in wds:
+        wds = [wd0] + wds
+    grid = []
+    for wd in wds:
+        for m in lr_mults:
+            lr = lr0 * float(m)
+            pair = (lr, wd)
+            if pair not in grid:
+                grid.append(pair)
+    default = (lr0, wd0)
+    grid.remove(default)
+    return [default] + grid
+
+
+def _trial_name(lr: float, wd: float) -> str:
+    def fmt(x):
+        s = f"{x:.6g}"
+        return s.replace("+", "").replace("-", "m").replace(".", "p")
+    return f"trial_lr{fmt(lr)}_wd{fmt(wd)}"
+
+
+def _read_best_val_loss(trial_dir: str):
+    """trial 的最优 val_loss：优先 train_log.jsonl 全评测点最小值。
+
+    返回 (val_loss_best, best_step, val_loss_final, source)；train_log 缺失
+    时回退 eval.json 的最终值（并标注来源，便于审计差异）。
+    """
+    log_path = os.path.join(trial_dir, "train_log.jsonl")
+    best, best_step = None, None
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                vl = rec.get("val_loss")
+                if vl is None:
+                    continue
+                if best is None or float(vl) < best:
+                    best, best_step = float(vl), rec.get("step")
+    final = None
+    ev_path = os.path.join(trial_dir, "eval.json")
+    if os.path.exists(ev_path):
+        with open(ev_path, "r", encoding="utf-8") as f:
+            ev = json.load(f) or {}
+        if ev.get("val_loss") is not None:
+            final = float(ev["val_loss"])
+    if best is None:
+        return final, None, final, "eval.json(final)" if final is not None else None
+    return best, best_step, final, "train_log.jsonl(min)"
+
+
+def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
+              wd: float, steps: int, out_dir: str, device: str = "auto",
+              timeout=None) -> dict:
+    """以子进程真实训练一个 trial；失败不抛异常，返回带 error 的记录。"""
+    os.makedirs(out_dir, exist_ok=True)
+    cmd = [sys.executable, "-m", "lega.train",
+           "--config", config, "--variant", variant,
+           "--data_dir", data_dir, "--out_dir", out_dir,
+           "--seed", str(int(seed)), "--steps", str(int(steps)),
+           "--device", device]
+    t0 = time.perf_counter()
+    rec = {"lr": float(lr), "weight_decay": float(wd), "seed": int(seed),
+           "steps": int(steps), "out_dir": out_dir}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        rec.update({"returncode": None, "error": f"timeout({timeout}s)",
+                    "duration_s": round(time.perf_counter() - t0, 1)})
+        return rec
+    rec["duration_s"] = round(time.perf_counter() - t0, 1)
+    rec["returncode"] = int(proc.returncode)
+    if proc.returncode != 0:
+        rec["error"] = (proc.stderr or proc.stdout or "")[-800:]
+        return rec
+    best, best_step, final, source = _read_best_val_loss(out_dir)
+    if best is None:
+        rec["error"] = "训练成功但未找到 val_loss（train_log.jsonl/eval.json 缺失）"
+        return rec
+    rec.update({
+        "val_loss_best": best, "best_step": best_step,
+        "val_loss_final": final,
+        "val_ppl_best": math.exp(min(20.0, best)),
+        "val_loss_source": source,
+    })
+    return rec
+
+
+def tune(config: str, data_dir: str, out_dir: str,
+         variant: str = "standard", seed=None, steps=None,
+         lr_mults=DEFAULT_LR_MULTS, wd_list=None, device: str = "auto",
+         tolerance: float = DEFAULT_TOLERANCE, timeout=None) -> dict:
+    """执行基线网格调优并落盘 `baseline_tuning.json`。"""
+    with open(config, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    lr0 = float(cfg["lr"])
+    wd0 = float(cfg.get("weight_decay", 0.1))
+    seed = int(cfg.get("seed", 1337) if seed is None else seed)
+    steps = int(cfg["steps"] if steps is None else steps)
+    grid = build_grid(lr0, wd0, lr_mults=lr_mults, wd_list=wd_list)
+    trials = []
+    for lr, wd in grid:
+        tdir = os.path.join(out_dir, _trial_name(lr, wd))
+        print(f"[tuning] trial lr={lr:.3g} wd={wd:.3g} -> {tdir}")
+        rec = run_trial(config, data_dir, variant, seed, lr, wd, steps, tdir,
+                        device=device, timeout=timeout)
+        status = (f"val_loss={rec['val_loss_best']:.4f}"
+                  if rec.get("val_loss_best") is not None
+                  else f"FAILED: {rec.get('error', '')[:120]}")
+        print(f"[tuning]   {status}")
+        trials.append(rec)
+    ok = [t for t in trials if t.get("val_loss_best") is not None]
+    if not ok:
+        raise RuntimeError("全部 trial 失败，无法完成基线调优；"
+                           "请检查训练日志（各 trial 目录 stderr 已记录）")
+    selected = min(ok, key=lambda t: t["val_loss_best"])
+    default = next((t for t in ok
+                    if t["lr"] == lr0 and t["weight_decay"] == wd0), None)
+    gap = None
+    default_is_optimal = None
+    if default is not None:
+        # gap = 最优 − 默认：默认“近优”要求默认不比最优差出容差以上，
+        # 即 gap ≥ −tol·|最优|（gap 为负表示最优显著优于默认 → 不近优）。
+        gap = selected["val_loss_best"] - default["val_loss_best"]
+        same_as_default = (selected["lr"] == default["lr"]
+                           and selected["weight_decay"] == default["weight_decay"])
+        default_is_optimal = bool(
+            same_as_default
+            or gap >= -tolerance * abs(selected["val_loss_best"]))
+    report = {
+        "variant": variant,
+        "config": os.path.abspath(config),
+        "data_dir": os.path.abspath(data_dir),
+        "seed": seed,
+        "steps": steps,
+        "lr_grid": [t["lr"] for t in trials],
+        "weight_decay_grid": [t["weight_decay"] for t in trials],
+        "n_trials": len(trials),
+        "n_failed": len(trials) - len(ok),
+        "selection_metric": "val_loss（train_log.jsonl 全评测点最小值，"
+                            "与 model_best.pt 选择口径一致）",
+        "tolerance": float(tolerance),
+        "selected": selected,
+        "default_trial": default,
+        "selected_minus_default_val_loss": gap,
+        "default_is_optimal": default_is_optimal,
+        "test_split_used": False,
+        "trials": trials,
+    }
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "baseline_tuning.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print(f"[tuning] 最优 lr={selected['lr']:.3g} "
+          f"wd={selected['weight_decay']:.3g} "
+          f"val_loss={selected['val_loss_best']:.4f} -> {out_path}")
+    return report
+
+
+def main():
+    p = argparse.ArgumentParser(description="基线（standard）lr/权重衰减网格调优")
+    p.add_argument("--config", required=True)
+    p.add_argument("--data_dir", required=True)
+    p.add_argument("--out_dir", required=True,
+                   help="trial 目录与 baseline_tuning.json 的输出根目录")
+    p.add_argument("--variant", default="standard")
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--steps", type=int, default=None,
+                   help="每个 trial 的训练步数（默认用配置值；建议先用较小预算）")
+    p.add_argument("--lr_mults", default=",".join(str(m) for m in DEFAULT_LR_MULTS))
+    p.add_argument("--wd_list", default=None, help="逗号分隔；默认仅配置的 wd")
+    p.add_argument("--device", default="auto")
+    p.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE,
+                   help="default_is_optimal 的相对容差（默认 0.005）")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="单个 trial 超时秒数")
+    args = p.parse_args()
+    tune(args.config, args.data_dir, args.out_dir, variant=args.variant,
+         seed=args.seed, steps=args.steps,
+         lr_mults=parse_floats(args.lr_mults),
+         wd_list=(parse_floats(args.wd_list) if args.wd_list else None),
+         device=args.device, tolerance=args.tolerance, timeout=args.timeout)
+
+
+if __name__ == "__main__":
+    main()

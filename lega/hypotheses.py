@@ -7,7 +7,10 @@
 
 本模块把登记表变成可验证的追加式文档：
 
-  * 锁文件 ``docs/registered_hypotheses.lock.json`` 记录登记的**基线**
+  * 登记表与锁文件存放在 ``preregistration/``（**故意不放在 docs/**：
+    流水线的自动清理会删除 docs/ 下除 design_notes.md 外的文件，
+    曾把登记表连带锁链一起清掉，使确认性/探索性边界实际失效）；
+  * 锁文件 ``preregistration/hypotheses.lock.json`` 记录登记的**基线**
     （整文档 SHA-256 + 逐假设科学内容摘要）与**修订链**：每次修正/追加
     假设都要在链上留痕（改动前/后两份状态 + 理由）；
   * 逐假设摘要只覆盖科学内容字段（id/claim/metric/candidate/reference/
@@ -39,8 +42,10 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REGISTRY_PATH = os.path.join(ROOT, "docs", "registered_hypotheses.json")
-LOCK_PATH = os.path.join(ROOT, "docs", "registered_hypotheses.lock.json")
+# 2026-10 迁移：从 docs/ 移入 preregistration/。CI 的清理步骤会删除
+# docs/ 下除 design_notes.md 外的全部文件，登记表在那里会被下一轮自动删除。
+REGISTRY_PATH = os.path.join(ROOT, "preregistration", "hypotheses.json")
+LOCK_PATH = os.path.join(ROOT, "preregistration", "hypotheses.lock.json")
 
 # 科学内容字段：只有这些字段参与逐假设摘要；说明/注释类字段可自由补充。
 HYPOTHESIS_FIELDS = ("id", "claim", "metric", "candidate", "reference",
@@ -262,7 +267,7 @@ def verify_registration(registry_path: str = None,
     if lock is None:
         report["status"] = "missing_lock"
         report["problems"].append(
-            "缺少锁文件 docs/registered_hypotheses.lock.json：无法验证"
+            "缺少锁文件 preregistration/hypotheses.lock.json：无法验证"
             "登记表自登记以来未被改写；请用 --init（首次登记）恢复基线")
         return report
 

@@ -74,16 +74,17 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
   4. **Cleaning & anomaly checks**: corrupt characters (U+FFFD/NUL/illegal control chars) are deterministically removed; token streams are hard-validated (integer, finite, id range); duplicate samples, overlong lines and train-vs-val/test unigram shift (TV/JS, OOV) are all written to `data_report.json`;
   5. **Test seal**: checkpoint selection and early stopping use val only; test is accessed for final evaluation only, and every test evaluation appends to the `data_dir/.test_access_log.jsonl` ledger; the summary reports the total count and any repeatedly evaluated checkpoint.
 - **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, two layers are cross-checked automatically: `config_used.json` (hyperparameters item by item) and the `eval.json` provenance (data fingerprint, code commit, config SHA-256, actual steps and tokens_seen, also compared against the pipeline's data fingerprint). Any difference fails the pipeline; the random seed is replayed after model construction so training-time randomness (dropout etc.) is also identical across variants — fairness is an executable assertion, not a verbal promise.
+- **A tuned baseline (avoid misattributing hyperparameter gains)**: with `--tune_baseline`, a small lr × weight-decay grid search is run on the **baseline (`standard`) first**, selected on the validation split only (`lega/tuning.py`; test is never loaded). The winning combination is injected into **all** variants, and the evidence (including `default_is_optimal`, whether the default hyperparameters are within a 0.5% val_loss tolerance of the grid optimum) is written to `results/<tag>/baseline_tuning.json` and rendered in the summary. Without this evidence the summary explicitly warns about an untuned baseline instead of assuming one. **Simple statistical baseline**: `lega/ngram.py` reports unigram/bigram smoothed n-gram PPL on the same split as the neural models (α selected on val), answering how hard the data is in absolute terms and whether the neural models actually beat a parameter-free baseline.
 - **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** plus the paired Cohen's d effect size across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test, and p-values within each metric family are corrected with **Holm–Bonferroni** (controlling the family-wise error rate); verdicts are based on corrected p-values (`results/<tag>/significance.json`). With n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%.
-- **Pre-registration and tamper-evidence (confirmatory vs exploratory)**: directional claims are registered before the formal runs in `docs/registered_hypotheses.json`; at summarization each claim is judged against Holm-corrected same-seed paired tests as supported / rejected (significant in the opposite direction = falsified) / undetermined (undetermined ≠ no effect; read it against the MDE). Results go to `summary.md` and `significance.json`; unregistered comparisons are exploratory leads only. The registry is protected by `docs/registered_hypotheses.lock.json`: the lock stores the whole-document SHA-256 and **per-hypothesis scientific-content digests**, and any amendment must be traced on an **amendment chain** via `python -m lega.hypotheses --amend --reason ...` (existing hypotheses may only be added to, never edited or removed). Deleting the registry, rewriting a claim, swapping a variant pair, dropping an entry or adding an unrecorded hypothesis is flagged as `violated` by `--verify`/the summary page, and **all confirmatory verdicts are automatically downgraded to exploratory**. Even the accidental deletion and restoration of the registry (which happened once, see `docs/design_notes.md`) must be recorded in `amendments`.
+- **Pre-registration and tamper-evidence (confirmatory vs exploratory)**: directional claims are registered before the formal runs in `preregistration/hypotheses.json` (**deliberately not under `docs/`**: the pipeline cleanup deletes everything there except `design_notes.md`, and repeated auto-clean commits once deleted the registry); at summarization each claim is judged against Holm-corrected same-seed paired tests as supported / rejected (significant in the opposite direction = falsified) / undetermined (undetermined ≠ no effect; read it against the MDE). Results go to `summary.md` and `significance.json`; unregistered comparisons are exploratory leads only. The registry is protected by `preregistration/hypotheses.lock.json`: the lock stores the whole-document SHA-256 and **per-hypothesis scientific-content digests**, and any amendment must be traced on an **amendment chain** via `python -m lega.hypotheses --amend --reason ...` (existing hypotheses may only be added to, never edited or removed). Deleting the registry, rewriting a claim, swapping a variant pair, dropping an entry or adding an unrecorded hypothesis is flagged as `violated` by `--verify`/the summary page, and **all confirmatory verdicts are automatically downgraded to exploratory**. Even the accidental deletion/relocation and restoration of the registry (see `docs/design_notes.md`) must be recorded in `amendments`.
 - **Three evaluation axes**:
-  1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision;
+  1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision; a same-split **unigram/bigram smoothed n-gram PPL** is reported alongside as a simple statistical baseline (`ngram_baseline.json`), so neural scores are never interpreted without the absolute difficulty reference;
   2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
   3. **Actual inference latency**: prefill (last-position logits only) and token-by-token decode with KV cache, compared against the SDPA fast path.
 - **Core-risk checks (not just "attention sink reduced")**: `lega/analysis.py` performs mechanistic analysis on RULER samples with gold spans:
   - **misleading_rate**: fraction of highly concentrated attention ($\max_j p_j>\tau$) whose landing point is outside the answer's numeric span (value_span); the hit test uses the exact answer-number token span rather than the whole needle sentence — direct evidence that "concentrated ≠ correct";
   - **P(hit | concentrated)** vs **P(hit | not concentrated)**;
-  - **AUROC**: ability of the gate score to separate "hit / miss", plus **the difference between LEGA's full logit and the query-only term $w^\top q$**, directly answering whether length-calibrated attention statistics judge "should we write" better than the query alone.
+  - **AUROC and PR-AUC (both reported under imbalance)**: ability of the gate score to separate "hit / miss", plus **the difference between LEGA's full logit and the query-only term $w^\top q$** in AUROC and in PR-AUC (average precision), directly answering whether length-calibrated attention statistics judge "should we write" better than the query alone. hit/¬hit is a heavily imbalanced binary task (the positive rate is `hit_base_rate`); below 5% positive rate AUROC becomes optimistic because of the huge negative base, so **PR-AUC is the primary metric** (its chance baseline equals the positive rate), especially below 0.1%. The **gate decision-point F1** ($g>0.5$) is reported with **macro / micro / weighted** averages (`gate_f1` in `analysis_*.json`; macro in the summary table) — under imbalance these differ widely, and any table that writes "F1" without the averaging scheme is incomplete; RULER EM is a generative metric without a threshold (fwe additionally reports recall).
 
 ---
 
@@ -120,6 +121,15 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --seeds 1337,2024,42
 wandb login
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --wandb
+
+# optional (recommended): tune the baseline first — lr/weight-decay grid on
+# `standard` (val only); the winner is injected into all variants and evidence
+# goes to results/<tag>/baseline_tuning.json
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --tune_baseline
+
+# the simple statistical baseline can also be run standalone (val by default;
+# test requires an explicit opt-in and writes the access ledger)
+python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram_baseline.json
 ```
 
 Outputs:
@@ -134,6 +144,8 @@ Outputs:
 | `results/experiments.jsonl` | **Append-only experiment ledger: per-run run_id, code version, config SHA-256, seeds, data fingerprint, sanity verdict, per-run final metrics and artifact hashes (started/completed lifecycle)** |
 | `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
+| `results/<tag>/baseline_tuning.json` | Baseline (`standard`) lr/weight-decay tuning evidence (val only; includes the `default_is_optimal` verdict and per-trial provenance) |
+| `results/<tag>/ngram_baseline.json` | Simple statistical baseline: unigram/bigram smoothed n-gram held-out PPL (α selected on val; test needs an explicit opt-in) |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check) and `registered_hypotheses` (per-claim verdicts) |
 | `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, overfitting trend (train still falling, validation stalled), underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations) |
 | `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
@@ -223,19 +235,22 @@ lega-attention/
 │   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
 │   ├── latency.py             # prefill / decode latency benchmark
-│   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC
+│   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC + PR-AUC (primary under imbalance) + gate F1 (three averages)
+│   ├── ngram.py               # simple statistical baseline: unigram/bigram smoothed n-gram PPL (α on val; test opt-in + ledger)
 │   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN + grad spikes) + recommendations
 │   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison
 │   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
 │   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance
 │   ├── experiment.py          # append-only experiment ledger (code/config/seed/data/result hashes per run)
 │   ├── hypotheses.py          # pre-registration integrity: lock baseline + amendment chain + tamper check (CLI --verify/--init/--amend)
+│   ├── tuning.py              # baseline (`standard`) lr/weight-decay grid (val only; default_is_optimal verdict)
 │   ├── plots.py               # plots (PNG, including training curves)
-│   └── utils.py               # seed/JSON/AUROC/Pearson (no scipy)
+│   └── utils.py               # seed/JSON/AUROC/PR-AUC/F1/Pearson (no scipy)
+├── preregistration/           # deliberately not under docs/ (pipeline cleanup deletes non-whitelisted files there)
+│   ├── hypotheses.json        # pre-registration registry (never delete/move; amendments must be traced)
+│   └── hypotheses.lock.json   # lock baseline + amendment chain (anti silent rewrite/deletion)
 ├── docs/
-│   ├── design_notes.md        # design notes, statistical-inference and result-analysis protocols
-│   ├── registered_hypotheses.json       # pre-registration registry (do not delete; amendments must be traced)
-│   └── registered_hypotheses.lock.json  # lock baseline + amendment chain (anti silent rewrite/deletion)
+│   └── design_notes.md        # design notes, statistical-inference and result-analysis protocols
 ├── scripts/
 │   ├── prepare_data.py        # WikiText-103 download (parquet→zip→rows fallbacks)
 │   ├── make_dummy_data.py     # offline dummy corpus (smoke)

@@ -121,6 +121,12 @@ def test_auroc_cluster_bootstrap_ci():
     # 确定性：同种子重跑逐位一致
     out2 = auroc_cluster_bootstrap(records, n_resamples=200, seed=0)
     assert out2 == out
+    # PR-AUC 族：合成数据对 logit 与 qterm 均完全可分 → AP 均为 1，差恒 0
+    ap_logit = out["ci95"]["ap_logit"]
+    ap_diff = out["ci95"]["ap_logit_minus_qterm"]
+    assert ap_logit and abs(ap_logit[0] - 1.0) < 1e-9 and abs(ap_logit[1] - 1.0) < 1e-9
+    assert (out["ci95"]["ap_qterm"] is not None)
+    assert ap_diff and abs(ap_diff[0]) < 1e-9
     # qterm 无信号（hit/miss 分数全部并列）→ AUROC=0.5，logit 区间下界仍高于它
     weak = [dict(r) for r in records]
     for r in weak:
@@ -128,6 +134,9 @@ def test_auroc_cluster_bootstrap_ci():
     out3 = auroc_cluster_bootstrap(weak, n_resamples=200, seed=0)
     assert abs(out3["ci95"]["qterm"][0] - 0.5) < 1e-9
     assert out3["ci95"]["logit"][0] > out3["ci95"]["qterm"][0]
+    # qterm 全并列 → PR-AUC 随机基线（正类率 0.5），AP 差恒为 0.5
+    assert abs(out3["ci95"]["ap_qterm"][0] - 0.5) < 1e-9
+    assert abs(out3["ci95"]["ap_logit_minus_qterm"][0] - 0.5) < 1e-9
     # 样例过少（<2 个聚类）或无有效分数：安全返回空区间
     few = auroc_cluster_bootstrap(records[:8], n_resamples=50)
     assert few["ci95"] == {}
@@ -135,4 +144,46 @@ def test_auroc_cluster_bootstrap_ci():
         [{"example": i, "hit": 1.0, "max_p": 0.9} for i in range(4)],
         n_resamples=50)
     assert nokey["ci95"] == {}
-    print("  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错）")
+    print("  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错/AP 族）")
+
+
+def test_summarize_reports_imbalance_aware_metrics():
+    """summarize 必须报告正类率、不平衡等级、主指标与三口径门控 F1。"""
+    # 19 正 381 负 → 正类率 4.75%（<5%）触发 PR-AUC 主指标
+    records = []
+    for i in range(400):
+        hit = 1.0 if i < 19 else 0.0
+        records.append({
+            "example": i // 8, "hit": hit, "max_p": 0.8 if hit else 0.1,
+            "logit": 2.0 if hit else -1.0, "qterm": 0.5,
+            "c": 1.0, "g": 0.9 if hit else 0.4,
+            "log_n": 4.0, "task": "niah_synth", "ctx": 256,
+            "layer": 0, "head": i % 2, "query_pos": i % 4})
+    s = summarize(records, "lega", 0.5)
+    assert s["n_hit"] == 19 and s["n_miss"] == 381
+    assert abs(s["hit_base_rate"] - 19 / 400) < 1e-12
+    assert s["primary_detection_metric"] == "PR-AUC"
+    assert s["imbalance_level"].startswith("severe")
+    assert s["auprc_logit"] is not None and s["auprc_logit"] > 0.9
+    # 全并列的 qterm：PR-AUC 应等于正类率（随机基线）
+    assert abs(s["auprc_qterm"] - s["hit_base_rate"]) < 1e-9
+    # 门控 F1：三口径齐全、宏平均对稀有类更严格（< micro）
+    gf = s["gate_f1"]
+    assert gf and gf["threshold"] == 0.5
+    for k in ("macro", "micro", "weighted"):
+        assert 0.0 <= gf[k] <= 1.0
+    assert gf["macro"] <= gf["micro"] + 1e-12
+    assert set(gf["per_class"]) == {"0", "1"}
+    # 不平衡温和时主指标改为并报（避免阈值语义被误解为“禁止 AUROC”）
+    mild = [dict(r) for r in records]
+    for i, r in enumerate(mild):
+        r["hit"] = 1.0 if i < 100 else 0.0
+    s2 = summarize(mild, "lega", 0.5)
+    assert s2["primary_detection_metric"] == "AUROC 与 PR-AUC 并报"
+    # 无 hit 标签的记录不产生 F1（None），不崩溃
+    s3 = summarize([{"example": 0, "hit": None, "max_p": 0.9, "logit": 1.0,
+                     "qterm": 0.0, "c": 0.5, "g": 0.8, "log_n": 4.0,
+                     "layer": 0, "head": 0, "query_pos": 0}],
+                   "lega", 0.5)
+    assert s3["gate_f1"] is None
+    print("  [ok] summarize（正类率/主指标/PR-AUC/三口径门控 F1）")

@@ -1,16 +1,18 @@
-"""通用工具测试：AUROC（并列取平均秩）、Pearson 与统计检验的边界行为。
+"""通用工具测试：AUROC/PR-AUC/F1（不平衡指标口径）、Pearson 与统计检验。
 
 AUROC 是机制分析的核心指标（门控分数区分 hit/miss），这里用逐对比较的
-定义式独立复算，专门覆盖并列分数的平均秩路径。paired_t_test 是“多种子
-Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p 值精度；
-sign-flip 置换检验（小样本下比 t 检验更可信的分布无关检验）用独立枚举
-复算核对精确 p 值。
+定义式独立复算，专门覆盖并列分数的平均秩路径。PR-AUC（average precision）
+是类别不平衡时的主指标，用逐步积分的定义式独立复算；F1 必须同时给出
+macro/micro/weighted 口径，用不平衡算例核对三者的差异。paired_t_test 是
+“多种子 Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p
+值精度；sign-flip 置换检验用独立枚举复算核对精确 p 值。
 """
 import math
 
 import numpy as np
 
-from lega.utils import (auroc, bootstrap_mean_ci, holm_bonferroni, mean_std,
+from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
+                        f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, pearson, student_t_two_sided_p,
                         wilson_score_ci)
@@ -76,6 +78,102 @@ def test_auroc_single_class_nan():
     assert math.isnan(auroc(np.array([1.0, 2.0]), np.array([1, 1])))
     assert math.isnan(auroc(np.array([1.0, 2.0]), np.array([0, 0])))
     print("  [ok] 单一类别返回 nan（调用方负责转 None）")
+
+
+def _brute_ap(scores, labels):
+    """定义式 PR-AUC：按降序唯一阈值逐步积分（并列同组），独立于实现。"""
+    pairs = sorted(zip(scores, labels), key=lambda t: -t[0])
+    n_pos = sum(1 for _, y in pairs if y == 1)
+    if n_pos == 0 or n_pos == len(pairs):
+        return float("nan")
+    ap, prev_r = 0.0, 0.0
+    for i in range(len(pairs)):
+        if i + 1 < len(pairs) and pairs[i + 1][0] == pairs[i][0]:
+            continue  # 只在并列组末尾结算，保证同分整体进阈值
+        tp = sum(1 for _, y in pairs[:i + 1] if y == 1)
+        prec = tp / (i + 1)
+        rec = tp / n_pos
+        ap += (rec - prev_r) * prec
+        prev_r = rec
+    return ap
+
+
+def test_average_precision_matches_bruteforce():
+    """PR-AUC 与逐步积分定义式一致（含大量并列分数）。"""
+    rng = np.random.default_rng(3)
+    checked = 0
+    for trial in range(300):
+        n = int(rng.integers(4, 40))
+        if trial % 2:
+            scores = rng.integers(0, 4, size=n).astype(np.float64)
+        else:
+            scores = rng.normal(size=n)
+        # 低正类率以贴近机制分析的真实不平衡场景
+        labels = (rng.random(n) < 0.3).astype(int)
+        if labels.sum() in (0, n):
+            continue
+        got = average_precision(scores, labels)
+        ref = _brute_ap(scores.tolist(), labels.tolist())
+        assert abs(got - ref) < 1e-12, f"trial={trial}: ap={got} != brute={ref}"
+        checked += 1
+    assert checked > 200
+    print(f"  [ok] average_precision 与定义式一致（{checked} 个用例，含并列）")
+
+
+def test_average_precision_properties():
+    """随机基线=正类率、完全可分=1、反序≤正类率、单一类别 NaN。"""
+    # 全部并列：一次召回全正类，precision=正类率 → AP 必须恰为正类率
+    scores = np.ones(10)
+    labels = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+    assert abs(average_precision(scores, labels) - 0.2) < 1e-12
+    # 完全可分 → 1.0
+    sep = np.array([5.0, 4.0, 3.0, 2.0, 1.0, 0.0])
+    y_sep = np.array([1, 1, 1, 0, 0, 0])
+    assert abs(average_precision(sep, y_sep) - 1.0) < 1e-12
+    # 完全反序（全负在前）：AP 应低于正类率
+    rev = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    assert average_precision(rev, y_sep) < 0.5
+    # 单一类别/空输入 → NaN（调用方转 None）
+    assert math.isnan(average_precision(np.array([1.0, 2.0]), np.array([1, 1])))
+    assert math.isnan(average_precision(np.array([]), np.array([])))
+    # 非有限分数剔除而非污染
+    nan_scores = np.array([np.nan, 3.0, 2.0, 1.0])
+    assert abs(average_precision(nan_scores, np.array([1, 1, 0, 0])) - 1.0) < 1e-12
+    print("  [ok] average_precision（随机基线/可分/反序/NaN 剔除）")
+
+
+def test_f1_scores_three_averages_and_imbalance():
+    """不平衡算例下 macro/micro/weighted 的差异必须如实给出且可复算。"""
+    # 10 个样本、3 正 7 负，全预测为正：class1 P=0.3,R=1,f1=6/13；class0 全 0
+    y_true = np.array([1, 1, 1, 0, 0, 0, 0, 0, 0, 0])
+    y_pred = np.ones(10, dtype=int)
+    out = f1_scores(y_true, y_pred)
+    f1_pos = 2 * 0.3 * 1.0 / 1.3
+    assert abs(out["per_class"][1]["f1"] - f1_pos) < 1e-12
+    assert abs(out["per_class"][0]["f1"] - 0.0) < 1e-12
+    assert abs(out["macro"] - (f1_pos + 0.0) / 2) < 1e-12
+    # 多分类 micro 汇总全部类的 TP/FP/FN，等于逐样本准确率 3/10；
+    # weighted 按支持度加权（多数类全错 → 被拉低）
+    assert abs(out["micro"] - 0.3) < 1e-12
+    assert abs(out["weighted"] - f1_pos * 3 / 10) < 1e-12
+    # 三者显著分离：只报“F1”不足以复现结论
+    assert out["weighted"] < out["macro"] < out["micro"]
+    # 多分类：labels 限定只统计子集，未出现的类 support=0、f1=0；
+    # 长度不一致必须报错而不是静默对齐
+    yt = np.array([0, 1, 2, 2])
+    yp = np.array([0, 2, 2, 1])
+    out2 = f1_scores(yt, yp, labels=[0, 1, 2])
+    assert out2["n"] == 4 and set(out2["per_class"]) == {0, 1, 2}
+    assert out2["per_class"][0]["f1"] == 1.0
+    assert out2["per_class"][1]["f1"] == 0.0
+    out3 = f1_scores(yt, yp, labels=[0, 1])
+    assert set(out3["per_class"]) == {0, 1}
+    try:
+        f1_scores([1, 0], [1])
+        raise AssertionError("长度不一致应抛 ValueError")
+    except ValueError:
+        pass
+    print("  [ok] f1_scores（macro/micro/weighted 分离、多分类、长度校验）")
 
 
 def test_pearson_guards():

@@ -20,9 +20,9 @@
     “不显著”先对照 MDE 区分“无效应”与“功效不足”；
   * 机制主张检验：auroc_logit − auroc_qterm 的同种子配对差作为独立指标
     家族正式检验（与逐 run 样例聚类 bootstrap 区间互为印证）；
-  * 预注册：docs/registered_hypotheses.json 在正式实验前登记方向性主张，
+  * 预注册：preregistration/hypotheses.json 在正式实验前登记方向性主张，
     汇总时逐条判定 支持/拒绝/未定；未登记的对比一律为事后（exploratory）
-    分析，只能作为线索；
+    分析，只能作为线索（登记表刻意不放 docs/：该目录会被流水线自动清理）；
   * 消融完整性：全因子（无/A/B/C/AB/AC/BC/ABC）与去一法（Full/Full-A/
     Full-B/Full-C）两套组合全部实现；汇总表显式列出消融矩阵，并基于
     Holm 校正后的显著证据逐一判定 A/B/C 组件是否“有用”——组合齐全但证据
@@ -69,6 +69,9 @@ from lega.experiment import (append_record, build_experiment_record,  # noqa: E4
 from lega.hypotheses import (REGISTRY_PATH as HYPOTHESES_PATH,  # noqa: E402
                              fingerprint as registration_fingerprint,
                              load_registration, verify_registration)
+from lega.ngram import evaluate as ngram_evaluate  # noqa: E402
+from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
+from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
 from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
                         mean_std, min_detectable_effect, paired_sign_flip_test,
@@ -571,24 +574,24 @@ def component_evidence(tests) -> list:
     return out
 
 
-# 机制主张的检验族：门控完整 logit 与仅查询项的 AUROC 之差（越大越好）。
+# 机制主张的检验族：门控完整 logit 与仅查询项的 AUROC / PR-AUC 之差
+# （越大越好）。两族必须分别检验：hit 判别通常类别极不平衡，AUROC 会因
+# 负样本基数巨大而乐观，PR-AUC 是此时更贴近研究目标的口径。
 AUROC_DIFF_METRIC = "AUROC差(logit−仅查询)"
+AP_DIFF_METRIC = "AP差(logit−仅查询)"
 AUROC_DIFF_REFERENCE = "仅查询项基线"
 
 
-def _auroc_diff_tests(runs) -> list:
-    """机制主张的正式检验：同一 run 内 auroc_logit − auroc_qterm 的配对差。
+def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
+    """同一 run 内 key_cand(logit) − key_cand(qterm) 的跨种子配对检验。
 
     “完整门控 logit 比仅查询项更能判断该不该写入”是本方法的核心机制
-    主张，但把 AUROC(logit) 与 AUROC(qterm) 两个数并排放在表里不构成
-    证据：它们来自同一批记录、同一批样例，必须作为配对差值检验。
-    这里把每个 (变体, 种子) run 的 auroc_logit − auroc_qterm 当作一次
-    观测（H0：差为 0），跨种子做配对检验；变体内部该差值无“变体间公平
-    性”问题（同一模型同一次前向的产物）。单一侧 AUROC 缺失（该种子无法
-    计算）的种子整对剔除，n 如实反映有效配对数。全家族与 PPL/RULER
-    一样走 Holm 校正。lega 的逐 run 聚类 bootstrap 区间（analysis JSON
-    的 auroc_cluster_bootstrap）与本跨种子检验互为印证：前者回答“换
-    样例波动多少”，后者回答“换训练种子方向是否稳定”。
+    主张，但把两个并排的数放在表里不构成证据：它们来自同一批记录、同一
+    批样例，必须作为配对差值检验。每个 (变体, 种子) run 的差值当作一次
+    观测（H0：差为 0），单一侧缺失的种子整对剔除，n 如实反映有效配对数。
+    全家族与 PPL/RULER 一样走 Holm 校正。逐 run 的样例聚类 bootstrap
+    区间（analysis JSON 的 auroc_cluster_bootstrap）与本跨种子检验互为
+    印证：前者回答“换样例波动多少”，后者回答“换训练种子方向是否稳定”。
     """
     out = []
     for v in sorted(runs):
@@ -601,7 +604,7 @@ def _auroc_diff_tests(runs) -> list:
         a, b = [], []
         for s in seeds:
             an = m[s].get("analysis") or {}
-            al, aq = an.get("auroc_logit"), an.get("auroc_qterm")
+            al, aq = an.get(key_cand + "_logit"), an.get(key_cand + "_qterm")
             if al is None or aq is None:
                 continue
             a.append(al)
@@ -610,9 +613,19 @@ def _auroc_diff_tests(runs) -> list:
             continue
         res = paired_t_test(a, b)
         res.update({"candidate": v, "reference": AUROC_DIFF_REFERENCE,
-                    "metric": AUROC_DIFF_METRIC, "lower_is_better": False})
+                    "metric": metric, "lower_is_better": False})
         out.append(_enrich_paired(res, a, b))
     return out
+
+
+def _auroc_diff_tests(runs) -> list:
+    """AUROC(logit)−AUROC(qterm) 配对差检验（历史口径，H6 的判定依据）。"""
+    return _detection_diff_tests(runs, "auroc", AUROC_DIFF_METRIC)
+
+
+def _ap_diff_tests(runs) -> list:
+    """PR-AUC(logit)−PR-AUC(qterm) 配对差检验（不平衡下的主指标口径，H7）。"""
+    return _detection_diff_tests(runs, "auprc", AP_DIFF_METRIC)
 
 
 # 注册假设（confirmatory）：在正式实验前登记的方向性主张；未登记的对比
@@ -768,6 +781,103 @@ def _fmt4(x) -> str:
         return f"{float(x):.4f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def _render_baseline_sections(results_dir: str) -> list:
+    """基线合理性小节：简单统计基线 + 基线超参数调优证据。
+
+    科研方法问题：如果复杂方法只与“随手设一个学习率”的弱基线比较，
+    涨点可能全部来自超参数红利。本小节渲染两类证据：
+      1. 简单基线（一元/二元平滑 n-gram）在同一 held-out split 上的 PPL，
+         给出绝对难度参照；
+      2. 基线（standard）在验证集上的学习率/权重衰减网格调优结果与
+         “默认是否已接近最优”判定。
+    缺少调优证据时显式警告“未调优基线”，而不是让读者默认基线已调好。
+    """
+    smoke = False
+    rfp = os.path.join(results_dir, "repro.json")
+    if os.path.exists(rfp):
+        try:
+            with open(rfp, "r", encoding="utf-8") as f:
+                smoke = bool((json.load(f) or {}).get("smoke"))
+        except (OSError, ValueError):
+            smoke = False
+    lines = ["", "## 基线合理性（简单基线 + 调优证据）", ""]
+    ngram = None
+    nfp = os.path.join(results_dir, "ngram_baseline.json")
+    if os.path.exists(nfp):
+        try:
+            with open(nfp, "r", encoding="utf-8") as f:
+                ngram = json.load(f)
+        except (OSError, ValueError):
+            ngram = None
+    if ngram:
+        uni = ((ngram.get("ppl") or {}).get("unigram"))
+        bi = ((ngram.get("ppl") or {}).get("bigram"))
+        split = ngram.get("split")
+        lines.append(
+            f"- 简单统计基线（train 拟合、{split} 评测，无梯度、无调参空间）："
+            f"一元平滑 PPL={_fmt_scalar_maybe(uni)}、"
+            f"二元平滑 PPL={_fmt_scalar_maybe(bi)}"
+            f"（训练 token {int(ngram.get('train_tokens') or 0):,}、"
+            f"评测 token {int(ngram.get('eval_tokens') or 0):,}、"
+            f"词表 {ngram.get('vocab_size')}）。主科学对比仍是神经变体之间；"
+            "该基线只回答“绝对难度有多高、神经模型是否显著优于统计基线”。")
+    else:
+        lines.append("- 简单统计基线：未运行（`python -m lega.ngram`，"
+                     "结果写入 `results/<tag>/ngram_baseline.json`）。")
+    tune = None
+    tfp = os.path.join(results_dir, "baseline_tuning.json")
+    if os.path.exists(tfp):
+        try:
+            with open(tfp, "r", encoding="utf-8") as f:
+                tune = json.load(f)
+        except (OSError, ValueError):
+            tune = None
+    if tune:
+        best = tune.get("selected") or {}
+        dflt = tune.get("default_trial") or {}
+        gap = tune.get("selected_minus_default_val_loss")
+        lines.append(
+            f"- 基线调优（变体 `{tune.get('variant', 'standard')}`，"
+            f"{tune.get('n_trials', len(tune.get('trials') or []))} 组网格、"
+            f"trial 步数 {tune.get('steps', '-')}（与正式训练同预算与否以"
+            f"此为准）、验证集选择、测试集未使用）：最优 lr={best.get('lr')}"
+            + (f"、weight_decay={best.get('weight_decay')}"
+               if best.get("weight_decay") is not None else "")
+            + f"，最优 val_loss={_fmt4(best.get('val_loss_best', best.get('val_loss')))}；"
+            f"默认 lr={dflt.get('lr')} 的 val_loss="
+            f"{_fmt4(dflt.get('val_loss_best', dflt.get('val_loss')))}"
+            f"（最优−默认={_fmt4(gap)}）。")
+        if tune.get("default_is_optimal") is True:
+            lines.append("- ✅ 默认超参数即为网格最优/在容差内：基线的对比不受"
+                         "“选了不利学习率”的质疑。全流水线所有变体使用同一"
+                         "（已调优的）配置，受控变量保持一致。")
+        elif tune.get("default_is_optimal") is False:
+            lines.append("- 默认超参数并非网格最优：全流水线已改用上述最优"
+                         "配置训练**所有**变体（受控变量一致），因此与基线的"
+                         "对比不是“调好的新方法 vs 没调过的基线”。")
+        else:
+            lines.append("- ⚠ 默认组合的 trial 失败或缺失，无法判定默认是否"
+                         "近优；请核对 `baseline_tuning.json` 的 trials 记录。")
+    else:
+        lines.append("- 基线调优：未运行。"
+                     + ("（冒烟模式不要求。）" if smoke else
+                        "⚠ 未提供基线调优证据：若基线（standard）没有经过"
+                        "至少一档学习率/权重衰减的网格验证，方法涨点可能只是"
+                        "超参数红利。请用 `run_all.py --tune_baseline` 或在"
+                        "`results/<tag>/baseline_tuning.json` 提供证据。"))
+    lines.append("")
+    return lines
+
+
+def _fmt_scalar_maybe(x) -> str:
+    if x is None:
+        return "-"
+    try:
+        return f"{float(x):.3f}"
+    except (TypeError, ValueError):
+        return str(x)
 
 
 # ---------------------------------------------------------------- 曲线诊断与权衡
@@ -977,10 +1087,18 @@ def build_summary(results_dir: str, audit: dict = None,
              (lambda t: lambda m: _stat_series(
                  m, "ruler", lambda d: _ruler_task_means(d).get(t)))(task)))
     for key in ("auroc_logit", "auroc_qterm", "misleading_rate",
-                "misleading_given_conc", "p_hit_given_conc"):
+                "misleading_given_conc", "p_hit_given_conc",
+                "auprc_logit", "auprc_qterm", "hit_base_rate"):
         metric_specs.append(
             (key, (lambda k: lambda m: _stat_series(
                 m, "analysis", _clock_extractor(k)))(key)))
+    # 门控决策点 F1（g>0.5）：显式只取 macro 进汇总表（不平衡下对稀有类
+    # 最诚实的口径）；micro/weighted 与逐类明细在 analysis_*.json 中
+    # 的 gate_f1 字段并列完整保留，避免“只写 F1 不注明平均口径”。
+    metric_specs.append(
+        ("gate_f1_macro", lambda m: _stat_series(
+            m, "analysis",
+            lambda d: (d.get("gate_f1") or {}).get("macro"))))
 
     rows = []
     for v in variants:
@@ -1038,8 +1156,8 @@ def build_summary(results_dir: str, audit: dict = None,
     registered = load_registered_hypotheses()
     for h in (registered.get("hypotheses") or []):
         c, r = h.get("candidate"), h.get("reference")
-        if h.get("metric") == AUROC_DIFF_METRIC:
-            continue  # 单样本机制族，由 _auroc_diff_tests 覆盖
+        if h.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
+            continue  # 单样本机制族，由 _auroc_diff_tests/_ap_diff_tests 覆盖
         if c in VARIANTS and r in VARIANTS and (c, r) not in pairs:
             pairs.append((c, r))
     pairs = list(dict.fromkeys(pairs))
@@ -1050,8 +1168,10 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _paired_comparisons(
         runs, pairs, "RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
         lower_better=False)
-    # 机制主张的正式检验族：AUROC(logit) − AUROC(qterm) 同种子配对差
+    # 机制主张的正式检验族：AUROC(logit) − AUROC(qterm) 同种子配对差，
+    # 以及不平衡口径下的 PR-AUC 配对差（两族分别 Holm 校正）
     tests += _auroc_diff_tests(runs)
+    tests += _ap_diff_tests(runs)
     tests = _apply_holm(tests)
     comp = component_evidence(tests)
     # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
@@ -1073,7 +1193,10 @@ def build_summary(results_dir: str, audit: dict = None,
             ("decode_ms_per_tok", "Decode ms/tok↓"),
             ("gate_mean", "门控均值"), ("misleading_rate", "集中但看错率"),
             ("misleading_given_conc", "集中后看错率"),
-            ("auroc_logit", "AUROC(logit)"), ("auroc_qterm", "AUROC(仅查询)")]
+            ("hit_base_rate", "命中基线率"),
+            ("auroc_logit", "AUROC(logit)"), ("auroc_qterm", "AUROC(仅查询)"),
+            ("auprc_logit", "PR-AUC(logit)↑"), ("auprc_qterm", "PR-AUC(仅查询)↑"),
+            ("gate_f1_macro", "门控F1(macro)↑")]
 
     def fmt_stat_cell(r, key):
         st = {"mean": r.get(key), "std": r.get(f"{key}_std"),
@@ -1098,8 +1221,9 @@ def build_summary(results_dir: str, audit: dict = None,
           f"显著性经 Holm–Bonferroni 校正），运行时指标在相同配置下测得。", ""]
     if rows:
         stat_keys = {"val_ppl", "ruler_avg", "gate_mean", "misleading_rate",
-                     "misleading_given_conc", "auroc_logit", "auroc_qterm"} \
-            | {f"ruler_{t}" for t in ruler_tasks}
+                     "misleading_given_conc", "auroc_logit", "auroc_qterm",
+                     "auprc_logit", "auprc_qterm", "hit_base_rate",
+                     "gate_f1_macro"} | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
         md += [header, sep]
@@ -1129,6 +1253,13 @@ def build_summary(results_dir: str, audit: dict = None,
             "见机制分析。",
             "注: PPL 单元格标注 ⚠含截断值时，该变体至少有 1 个种子验证损失 >20，"
             "PPL 已按 exp(20) 截断；发散的 run 不能与正常 PPL 直接比较。",
+            "注（类别不平衡与指标口径）：“命中基线率”= 机制分析中 hit 正类率，"
+            "即 PR-AUC 的随机猜基线；正类率 <5% 时 AUROC 会因负样本基数巨大、"
+            "FPR 增长缓慢而过于乐观，结论应以 PR-AUC 为主（极度不平衡 <0.1% "
+            "时更是如此），两者并报供对照。F1 一律为 **macro**（各类等权，对"
+            "稀有类最诚实）；micro/weighted 与逐类明细见 analysis_*.json 的 "
+            "`gate_f1`（门控 g>0.5 决策点）。RULER 的 EM 是生成式准确率、"
+            "无决策阈值，不受此口径影响；fwe 另报召回率。",
             seed_note, split_note, ""]
         if common_ctx is not None:
             cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
@@ -1136,6 +1267,9 @@ def build_summary(results_dir: str, audit: dict = None,
         md += [""] + cols_notes
     else:
         md.append("（暂无结果，先运行训练评测）")
+
+    # --- 基线合理性（简单统计基线 + 基线调优证据）
+    md += _render_baseline_sections(results_dir)
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
@@ -1733,7 +1867,8 @@ def build_summary(results_dir: str, audit: dict = None,
         n_ref = sum(1 for h in hyp_eval if h["status"] == "拒绝")
         n_und = sum(1 for h in hyp_eval if h["status"] == "未定")
         valid = all(h.get("confirmatory_valid") for h in hyp_eval)
-        md.append(f"预注册文件 `docs/registered_hypotheses.json`（登记于正式实验前）："
+        md.append(f"预注册文件 `preregistration/hypotheses.json`（登记于正式实验前；"
+                  f"不放在 docs/ 以免被流水线自动清理删除）："
                   f"{len(hyp_eval)} 条方向性主张，判定 支持 {n_sup}、拒绝 {n_ref}、"
                   f"未定 {n_und}。只有“支持”能写进结论；“拒绝”= 方向相反且校正后"
                   "显著（假设被证伪）；“未定”不得解释为任何方向的证据。")
@@ -1764,7 +1899,7 @@ def build_summary(results_dir: str, audit: dict = None,
                   "其“显著”只能作为提出新假设的线索；要升级为结论须先登记"
                   "再在新的种子/数据上检验。")
     else:
-        md.append("- ⚠ 未找到可用的注册假设文件（`docs/registered_hypotheses.json`）。"
+        md.append("- ⚠ 未找到可用的注册假设文件（`preregistration/hypotheses.json`）。"
                   "本页全部对比均为事后分析：没有预注册边界，任何“显著”都只能"
                   "按探索性线索对待。请登记方向性主张后重跑正式实验。")
 
@@ -1942,7 +2077,7 @@ def build_summary(results_dir: str, audit: dict = None,
                    "component_evidence": comp,
                    "registered_hypotheses": hyp_eval,
                    "registered_hypotheses_source": (
-                       "docs/registered_hypotheses.json" if hyp_eval else None),
+                       "preregistration/hypotheses.json" if hyp_eval else None),
                    "registration_integrity": integrity,
                    "auroc_diff_note": (
                        f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
@@ -1984,6 +2119,21 @@ def main():
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument("--skip_plots", action="store_true")
+    p.add_argument("--tune_baseline", action="store_true",
+                   help="训练前对基线（standard）做 lr/权重衰减网格调优（仅验证集）；"
+                        "选定组合注入配置并统一用于全部变体，证据写入 "
+                        "results/<tag>/baseline_tuning.json")
+    p.add_argument("--tune_steps", type=int, default=None,
+                   help="调优 trial 的训练步数（默认与正式训练相同；显式缩小预算时"
+                        "汇总页会如实记录，不能当作与正式同预算的调优）")
+    p.add_argument("--tune_lr_mults", default="0.5,1,2",
+                   help="调优网格的 lr 乘子（逗号分隔，默认 0.5,1,2）")
+    p.add_argument("--tune_wd_list", default=None,
+                   help="调优网格的 weight_decay 列表（逗号分隔；默认仅配置值）")
+    p.add_argument("--skip_ngram", action="store_true",
+                   help="跳过简单统计基线（一元/二元平滑 n-gram PPL）")
+    p.add_argument("--ngram_split", default="val", choices=["val", "test"],
+                   help="n-gram 基线评测 split（默认 val；test 会写访问账本）")
     p.add_argument("--jobs", type=int, default=None,
                    help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
                         "min(4, 核数)（<=4 核时为核数+1），CUDA 或 --wandb 下为 1")
@@ -2028,6 +2178,46 @@ def main():
     os.environ.setdefault("PYTHONHASHSEED", str(seeds[0]))
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+    # 基线调优（可选）：先调 standard 的 lr/权重衰减（只用验证集，test 不加载），
+    # 把最优组合注入配置并统一用于所有变体——保证对比是“调过的基线 vs 新方法”，
+    # 而不是把超参数红利误归因给模块。证据落盘 results/<tag>/baseline_tuning.json。
+    if args.tune_baseline and args.skip_train:
+        print("[tuning] --skip_train：跳过基线调优（没有要训练的新 run）")
+    elif args.tune_baseline:
+        tune_root = os.path.join(out_root, "_baseline_tuning")
+        tune_report = tune_baseline(
+            args.config, args.data_dir, tune_root, variant="standard",
+            seed=seeds[0], steps=args.tune_steps,
+            lr_mults=parse_floats(args.tune_lr_mults),
+            wd_list=(parse_floats(args.tune_wd_list)
+                     if args.tune_wd_list else None),
+            device=args.device, tolerance=TUNE_TOLERANCE)
+        save_json(tune_report,
+                  os.path.join(results_dir, "baseline_tuning.json"))
+        best = tune_report["selected"]
+        cfg["lr"] = float(best["lr"])
+        cfg["weight_decay"] = float(best["weight_decay"])
+        tuned_path = os.path.join(results_dir, "config_tuned.json")
+        save_json(cfg, tuned_path)
+        args.config = tuned_path
+        print(f"[tuning] 全部变体改用调优后配置: lr={cfg['lr']:.3g} "
+              f"wd={cfg['weight_decay']:.3g} -> {tuned_path}")
+
+    # 简单统计基线：一元/二元平滑 n-gram 的 held-out PPL，给出“数据绝对难度”
+    # 参照（零训练零参数；平滑系数只在 val 上选）。默认 val；test 需显式选择
+    # 并写访问账本。
+    if not args.skip_ngram:
+        try:
+            ng = ngram_evaluate(args.data_dir, split=args.ngram_split,
+                                allow_test=(args.ngram_split == "test"))
+            save_json(ng, os.path.join(results_dir, "ngram_baseline.json"))
+            print(f"[ngram] 简单基线 {args.ngram_split} PPL: "
+                  f"unigram={ng['ppl'].get('unigram')} "
+                  f"bigram={ng['ppl'].get('bigram')} "
+                  f"(α={ng['selected_alpha']})")
+        except (OSError, ValueError) as e:
+            print(f"[run_all] ⚠ n-gram 基线跳过：{e}")
+
     # 全局溯源清单：本次流水线的代码版本、数据指纹、运行环境与命令。
     git = git_info()
     config_sha256 = sha256_file(args.config)
@@ -2036,7 +2226,7 @@ def main():
     reg_doc = load_registration()
     reg_integrity = verify_registration()
     reg_info = {
-        "path": "docs/registered_hypotheses.json",
+        "path": os.path.relpath(HYPOTHESES_PATH, ROOT),
         "present": reg_doc is not None,
         "fingerprint": (registration_fingerprint(reg_doc)
                         if reg_doc is not None else None),

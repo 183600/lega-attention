@@ -13,7 +13,8 @@ import os
 import shutil
 import tempfile
 
-from lega.hypotheses import (HYPOTHESIS_FIELDS, append_amendment, fingerprint,
+from lega.hypotheses import (HYPOTHESIS_FIELDS, LOCK_PATH, REGISTRY_PATH,
+                             append_amendment, fingerprint,
                              hypothesis_digest, init_lock, load_registration,
                              main, transition_problems, validate_registration,
                              verify_registration)
@@ -274,3 +275,31 @@ def test_verify_registration_rejects_non_list_chain():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_registration：非列表 chain 按损坏处理（静默通过一律判违反）")
+
+
+def test_repo_registration_present_and_confirmatory():
+    """仓库自带的预注册登记表必须存在、可确认、且不在会被清理的 docs/ 下。
+
+    历史教训：docs/registered_hypotheses.json 曾被流水线的 docs/ 自动清理
+    提交多次误删（dee75a1/4ccdbdb/467947d），确认性边界实际失效。本测试把
+    “登记表与锁必须在 preregistration/ 且完整”变成不可绕过的仓库断言。
+    """
+    assert os.path.exists(REGISTRY_PATH), (
+        f"预注册登记表缺失：{REGISTRY_PATH}；禁止删除，修正走 --amend 留痕")
+    assert os.path.exists(LOCK_PATH), (
+        f"预注册锁文件缺失：{LOCK_PATH}；没有锁链就无法区分“未登记”与“被静默改写”")
+    rel = os.path.relpath(REGISTRY_PATH, os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    assert rel == os.path.join("preregistration", "hypotheses.json"), rel
+    assert not rel.startswith("docs" + os.sep), (
+        "登记表不能放在 docs/：流水线清理会删除该目录下的非白名单文件")
+    report = verify_registration()
+    assert report["confirmatory_valid"], (
+        f"仓库预注册完整性校验失败：{report['status']} {report['problems']}")
+    doc = load_registration()
+    ids = [h["id"] for h in doc["hypotheses"]]
+    assert "H7" in ids, "H7（AP差机制对照）必须已登记"
+    h7 = next(h for h in doc["hypotheses"] if h["id"] == "H7")
+    assert h7["metric"] == "AP差(logit−仅查询)"
+    assert h7["candidate"] == "lega" and h7["direction"] == "candidate_better"
+    print("  [ok] 仓库预注册（preregistration/ 存在、confirmatory、含 H7）")

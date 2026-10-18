@@ -19,7 +19,14 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）；
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
   每格 em 附带 Wilson 95% 区间（`em_ci95_wilson`）：n_samples 小时点估计的抽样误差不可忽略；
-- 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC。
+- 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC 与 PR-AUC、门控决策点 F1。
+- 简单统计基线（`lega/ngram.py`）：与神经模型同 split 的一元/二元平滑 n-gram PPL；平滑系数 α 只在 val 上按 mean NLL 选优（与 model_best 同口径），正式报告只消费选定 α 一次；test split 需显式 `--allow_test` 并写访问账本。
+
+## 基线与指标口径（先测最简单的，再谈复杂模型）
+
+- **简单基线不可省**：没有无参数基线时，“PPL=xx”无法区分“数据容易”与“模型好”。n-gram 基线与神经变体用同一 train 拟合、同一 held-out split 评测，给出绝对难度参照。
+- **基线必须调过**：新方法的涨点可能只是超参数红利。`lega/tuning.py` 对基线（standard）做 lr × weight-decay 小网格（默认 lr×{0.5,1,2}），只用验证集选择（`train_log.jsonl` 全评测点最小值，与 `model_best.pt` 同口径；test 从不加载）；`default_is_optimal` 在默认与网格最优的相对差 ≤0.5% 时为真。`run_all --tune_baseline` 把最优组合注入**全部**变体（受控变量仅整体平移），证据写入 `baseline_tuning.json` 并在汇总页渲染；缺证据时汇总页显式警告“未调优基线”。
+- **不平衡指标必须并报且注明口径**：hit/¬hit 判别是类别极不平衡的二分类，`hit_base_rate`（正类率）即 PR-AUC 的随机基线。正类率 <5% 时 AUROC 因负样本基数巨大、FPR 增长缓慢而乐观，**以 PR-AUC（average precision）为主指标**（<0.1% 尤甚）；正类率 ≥5% 时两者并报。F1 一律注明平均口径（`gate_f1` 同时给 macro/micro/weighted 与逐类明细；macro 对稀有类最诚实，汇总表列 macro）。RULER 的 EM 为生成式指标、无决策阈值，不受此影响（fwe 另报召回率）。
 
 ## 统计推断协议（小样本科研口径）
 
@@ -37,17 +44,25 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
    - **MDE（最小可检测效应）**：(z_{1-α/2}+z_{power})·std/√n。"不显著"
      必须对照 MDE 解读：观测差远小于 MDE → 功效不足（先补种子），而不是
      "证明了没有效应"。
-3. **机制主张的正式检验**：AUROC(完整 logit) − AUROC(仅查询项) 作为独立
-   指标家族做同种子配对检验（`run_all._auroc_diff_tests`）——两个 AUROC
-   来自同一批记录，并排放数字不构成证据。与逐 run 的**样例聚类 bootstrap**
-   区间（`analysis.auroc_cluster_bootstrap`）互为印证：后者以样例为重采样
-   单元（同一样例的层×头×查询位记录共享难度，不是独立观测），回答"换样例
-   波动多少"；前者回答"换训练种子方向是否稳定"。
+3. **机制主张的正式检验（两种指标口径）**：AUROC(完整 logit) − AUROC(仅查询项)
+   （H6）与 PR-AUC(完整 logit) − PR-AUC(仅查询项)（H7，不平衡主指标口径）
+   各作为独立指标家族做同种子配对检验（`run_all._auroc_diff_tests` /
+   `_ap_diff_tests`）——两个分数指标来自同一批记录，并排放数字不构成证据。
+   与逐 run 的**样例聚类 bootstrap** 区间（`analysis.auroc_cluster_bootstrap`，
+   同时给 AUROC 与 AP 两族及各自差值）互为印证：后者以样例为重采样单元
+   （同一样例的层×头×查询位记录共享难度，不是独立观测），回答"换样例波动
+   多少"；前者回答"换训练种子方向是否稳定"。
 4. **阈值敏感性**：misleading/P(hit|集中) 系指标在多档 τ 上并报
    （`analysis.tau_sensitivity`，默认 [0.3, 0.5, 0.7] 并入主 τ），
    机制结论不得只挂在单一任意选定的阈值上。
 
 ## 预注册（confirmatory vs exploratory）
+
+登记表与锁文件位于 `preregistration/`（`hypotheses.json` + `hypotheses.lock.json`）——
+**刻意不放 `docs/`**：流水线自动清理会删除 docs/ 下除 `design_notes.md` 外的
+全部文件，本项目已因该清理机制多次误删登记表（dee75a1/4ccdbdb/467947d），
+使确认性/探索性边界实际失效；迁移本身已在修订链与仓库测试中留痕。当前登记
+H1–H7（H7 为 PR-AUC 口径的机制主张，与 H6 的 AUROC 口径互为印证）。
 
 `run_all` 支持在正式实验前登记方向性主张，汇总时逐条对照
 Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=被证伪）/ 未定**

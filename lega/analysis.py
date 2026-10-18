@@ -15,6 +15,12 @@
   auroc_logit/qterm/c  门控分数区分 hit/¬hit 的 AUROC
                        —— lega 的 auroc_logit vs auroc_qterm 直接回答：
                        “加入长度校准的注意力统计，是否比只看查询更能判断该不该写入”
+  auprc_*              同分数的 PR-AUC（average precision）：hit 判别通常
+                       类别极不平衡（小模型 hit 稀少），AUROC 会被巨大负类
+                       基数抬高；正类率 <5% 时以 PR-AUC 为主（其随机基线 =
+                       正类率 hit_base_rate），两者必须并报
+  gate_f1              g>0.5 决策点的 F1，显式给 macro/micro/weighted 三口径
+                       （不平衡数据三者差异大，macro 对稀有类最诚实）
 
 稳健性协议（防单一阈值/虚假精度）：
   tau_sensitivity          misleading/P(hit|集中) 系指标在多档 τ 上并报，
@@ -46,10 +52,19 @@ from .model import load_model
 from .repro import load_provenance
 from .ruler import (build_niah, build_vt, load_corpus_sents,
                     ContextTooSmall, _stable_hash)
-from .utils import (auroc, enable_tf32, get_device, pearson, save_json,
-                    set_seed)
+from .utils import (auroc, average_precision, enable_tf32, f1_scores,
+                    get_device, pearson, save_json, set_seed)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
+
+# 命中判别（hit vs miss）正类率低于该值时以 PR-AUC 为主指标：此时负样本
+# 基数使 ROC-AUC 过于乐观（FPR 增长缓慢）。0.05 是常用警戒线；
+# 0.001（1:1000）以下属极度不平衡。
+_PRIMARY_AP_THRESHOLD = 0.05
+_EXTREME_IMBALANCE_THRESHOLD = 0.001
+# 门控决策阈值：g 为 sigmoid 输出，0.5 是“是否写入”的自然默认决策点；
+# 显式落盘以便复现（F1 依赖阈值，不能隐式）。
+_GATE_DECISION_THRESHOLD = 0.5
 
 
 def _example(task: str, tok, ctx: int, rng: Random, corpus_sents: Optional[List[str]] = None,
@@ -237,7 +252,7 @@ def tau_sensitivity(records: List[Dict], taus: List[float]) -> Dict:
 
 def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
                             ci: float = 0.95, seed: int = 0) -> Dict:
-    """按样例聚类的 bootstrap：给 AUROC 与 logit−qterm 差一个置信区间。
+    """按样例聚类的 bootstrap：给 AUROC、PR-AUC 及其 logit−qterm 差的置信区间。
 
     机制分析的记录不是独立样本：同一样例的全部 (层, 头, 查询位) 记录共享该
     样例的难度、gold 位置与构造随机性，把记录当独立观测会严重虚增 AUROC
@@ -246,6 +261,11 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     波动多少"。logit−qterm 差的区间直接服务于核心机制主张（完整门控
     logit 是否比仅查询项更能判断该不该写入），逐重采样同步计算避免
     两个边缘区间相减的谬误。
+
+    同时给出 PR-AUC（average precision）族：命中判别通常极端不平衡
+    （小模型 hit 稀少），此时 AUROC 的乐观偏差不可忽略，`ap_logit` 与
+    `ap_logit_minus_qterm` 是机制结论在正确指标口径下的对照证据。
+    键名沿用 `ci95`（历史字段），内部为 AUROC 与 AP 两族区间。
     """
     clusters: Dict[int, List[Dict]] = {}
     for r in records:
@@ -272,30 +292,40 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     nan_score = {k: np.array([bool(np.isnan(sc).any()) for sc in scores[k]])
                  for k in score_keys}
 
+    def _finite(v):
+        return v if (v is not None and np.isfinite(v)) else None
+
     rng = np.random.default_rng(seed)
     samples: Dict = {k: [] for k in score_keys}
+    samples.update({f"ap_{k}": [] for k in score_keys})
     samples["logit_minus_qterm"] = []
+    samples["ap_logit_minus_qterm"] = []
     n_valid = 0
     for _ in range(int(n_resamples)):
         idx = rng.integers(0, len(ex_ids), len(ex_ids))
         both = bool(has_pos[idx].any() and has_neg[idx].any())
         lb = None
-        vals = {}
+        vals, aps = {}, {}
         for k in score_keys:
             if not both or nan_score[k][idx].any():
-                vals[k] = None
+                vals[k] = aps[k] = None
                 continue
             if lb is None:
                 lb = np.concatenate([labels[i] for i in idx])
-            v = auroc(np.concatenate([scores[k][i] for i in idx]), lb)
-            v = v if np.isfinite(v) else None
+            sc = np.concatenate([scores[k][i] for i in idx])
+            v = _finite(auroc(sc, lb))
             vals[k] = v
+            ap = _finite(average_precision(sc, lb))
+            aps[k] = ap
             if v is not None:
                 samples[k].append(v)
-        if "logit" in vals and "qterm" in vals \
-                and vals["logit"] is not None and vals["qterm"] is not None:
+            if ap is not None:
+                samples[f"ap_{k}"].append(ap)
+        if vals.get("logit") is not None and vals.get("qterm") is not None:
             samples["logit_minus_qterm"].append(vals["logit"] - vals["qterm"])
             n_valid += 1
+        if aps.get("logit") is not None and aps.get("qterm") is not None:
+            samples["ap_logit_minus_qterm"].append(aps["logit"] - aps["qterm"])
     alpha = (1.0 - float(ci)) / 2.0
     for k, vals_list in samples.items():
         if len(vals_list) < 10:
@@ -328,12 +358,43 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
             return None
         return auroc(scores[m], labels[m])
 
+    def _auprc(scores, labels, mask):
+        """PR-AUC（average precision）；类别不平衡时的主指标（见模块说明）。"""
+        m = mask & ~np.isnan(scores)
+        if not m.any() or len(set(labels[m])) != 2:
+            return None
+        ap = average_precision(scores[m], labels[m])
+        return float(ap) if np.isfinite(ap) else None
+
+    hit_pos = int((hit == 1).sum())
+    hit_neg = int((hit == 0).sum())
+    base_rate = (hit_pos / (hit_pos + hit_neg)) if (hit_pos + hit_neg) else None
+    # 命中判别的类别不平衡等级与主指标：AUROC 在负类占优时会过于乐观。
+    if base_rate is None:
+        imbalance = None
+        primary = None
+    elif base_rate <= _EXTREME_IMBALANCE_THRESHOLD:
+        imbalance, primary = "extreme(≤1:1000)", "PR-AUC"
+    elif base_rate < _PRIMARY_AP_THRESHOLD:
+        imbalance, primary = "severe(<5%)", "PR-AUC"
+    else:
+        imbalance, primary = "moderate", "AUROC 与 PR-AUC 并报"
     summary = {
         "variant": variant,
         "variant_cn": VARIANT_CN[variant],
         "tau": tau,
         "n_records": n,
         "hit_rate": float(np.nanmean(hit)) if hv.any() else None,
+        "n_hit": hit_pos,
+        "n_miss": hit_neg,
+        # 正类率 = PR-AUC 的“随机猜”基线；低于 5% 时主指标改为 PR-AUC
+        "hit_base_rate": base_rate,
+        "imbalance_level": imbalance,
+        "primary_detection_metric": primary,
+        "detection_metric_note": (
+            "hit/¬hit 为二分类；正类率即 hit 率。PR-AUC 的随机基线等于正类率。"
+            "正类率 <5% 时 AUROC 会因负样本基数大而过于乐观，以 PR-AUC 为主；"
+            "F1 三种平均口径并列于 gate_f1（macro/micro/weighted）。"),
     }
     summary.update(_conc_stats(hit, max_p, tau))
     summary.update({
@@ -344,10 +405,31 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         "auroc_c": _auroc(c, hit, hv),
         "auroc_maxp": _auroc(max_p, hit, hv),
         "auroc_logn": _auroc(log_n, hit, hv),
+        "auprc_logit": _auprc(logit, hit, hv),
+        "auprc_qterm": _auprc(qterm, hit, hv),
+        "auprc_c": _auprc(c, hit, hv),
+        "auprc_maxp": _auprc(max_p, hit, hv),
+        "auprc_logn": _auprc(log_n, hit, hv),
         "corr_c_g": (pearson(c, g) if (~np.isnan(c)).any() and (~np.isnan(g)).any() else None),
         "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
         "corr_qterm_g": (pearson(qterm, g) if (~np.isnan(qterm)).any() and (~np.isnan(g)).any() else None),
     })
+    # 门控决策点（g > 0.5 ⇒ 预测“这次写入是对的”）的分类指标。
+    # 只对有效（有 hit 标签）且有门控 g 的记录计算；F1 必须注明平均口径。
+    gate_f1 = None
+    gm = hv & ~np.isnan(g)
+    if gm.any() and len(set(hit[gm])) == 2:
+        pred = (g[gm] > _GATE_DECISION_THRESHOLD).astype(np.int64)
+        f1s = f1_scores(hit[gm].astype(np.int64), pred, labels=[0, 1])
+        gate_f1 = {
+            "threshold": _GATE_DECISION_THRESHOLD,
+            "n": f1s["n"],
+            "macro": f1s["macro"],
+            "micro": f1s["micro"],
+            "weighted": f1s["weighted"],
+            "per_class": {str(k): v for k, v in f1s["per_class"].items()},
+        }
+    summary["gate_f1"] = gate_f1
     # 逐头统计：对整段数组按 (layer, head) 掩码切片。
     per_head = []
     layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)
@@ -364,6 +446,13 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
                 return None
             return auroc(scores[mk], labels[mk])
 
+        def _auprc(scores, labels, mask):
+            mk = mask & ~np.isnan(scores)
+            if not mk.any() or len(set(labels[mk])) != 2:
+                return None
+            ap = average_precision(scores[mk], labels[mk])
+            return float(ap) if np.isfinite(ap) else None
+
         per_head.append({
             "layer": int(layer), "head": int(head), "n": int(m.sum()),
             "mean_g": float(np.nanmean(gg)) if (~np.isnan(gg)).any() else None,
@@ -373,6 +462,8 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
             "corr_qterm_g": pearson(qq, gg) if (~np.isnan(qq)).any() and (~np.isnan(gg)).any() else None,
             "auroc_logit": _auroc(ll, hh, hv),
             "auroc_qterm": _auroc(qq, hh, hv),
+            "auprc_logit": _auprc(ll, hh, hv),
+            "auprc_qterm": _auprc(qq, hh, hv),
         })
     summary["per_head"] = per_head
     return summary
@@ -504,6 +595,10 @@ def main():
         print(f"[analysis] AUROC logit={fmt(summary.get('auroc_logit'))} "
               f"qterm={fmt(summary.get('auroc_qterm'))} c={fmt(summary.get('auroc_c'))} "
               f"maxp={fmt(summary.get('auroc_maxp'))}")
+        print(f"[analysis] PR-AUC logit={fmt(summary.get('auprc_logit'))} "
+              f"qterm={fmt(summary.get('auprc_qterm'))} "
+              f"（hit 基线率={fmt(summary.get('hit_base_rate'))}，"
+              f"主指标={summary.get('primary_detection_metric')}）")
     boot = summary.get("auroc_cluster_bootstrap") or {}
     ci = (boot.get("ci95") or {}).get("logit_minus_qterm")
     if ci:
@@ -511,6 +606,10 @@ def main():
               f"[{ci[0]:.3f}, {ci[1]:.3f}]"
               f"（n_examples={boot.get('n_examples')}，"
               f"n_resamples={boot.get('n_resamples')}）")
+    ap_ci = (boot.get("ci95") or {}).get("ap_logit_minus_qterm")
+    if ap_ci:
+        print(f"[analysis] PR-AUC(logit−qterm) 样例聚类 bootstrap 95% CI: "
+              f"[{ap_ci[0]:.3f}, {ap_ci[1]:.3f}]（不平衡下的主指标口径）")
     print(f"[analysis] 完成 -> {args.out_dir}")
 
 
