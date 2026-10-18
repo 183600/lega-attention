@@ -45,7 +45,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
             out = model(x, last_logits_only=True)
         logits = out["logits"][:, -1, :].float()
         gold = y[:, -1]
-        # 只做一次 log_softmax：交叉熵与 top-5 概率共用同一份结果。
+        # 交叉熵与 top-5 概率共用同一份 log_softmax 结果。
         logp = F.log_softmax(logits, dim=-1)
         losses = -logp.gather(1, gold.unsqueeze(1)).squeeze(1)
         top_v, top_i = torch.topk(logp, 5, dim=-1)

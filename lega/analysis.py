@@ -328,8 +328,7 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             if lb is None:
                 lb = np.concatenate([labels[i] for i in idx])
             sc = np.concatenate([scores[k][i] for i in idx])
-            # 同一份重采样分数上 AUROC 与 AP 共用一次排序（逐位等价的
-            # roc_pr_aucs），避免每个指标各自 argsort/去重。
+            # 同一份重采样分数上用 roc_pr_aucs 计算逐位等价的 AUROC 与 AP。
             v, ap = roc_pr_aucs(sc, lb)
             v, ap = _finite(v), _finite(ap)
             vals[k] = v

@@ -521,8 +521,8 @@ def auroc(scores, labels) -> float:
     allv = np.concatenate([neg, pos])
     # 并列取平均秩：等值样本按等值分组获得同一平均秩，与组内先后次序无关。
     order = np.argsort(allv)
-    # 有序数组的等值组起点即 np.unique 的 return_index 结果，用相邻差分直接
-    # 定位，省去 unique 内部对已排序数组的再次排序。
+    # 有序数组的等值组起点用相邻差分直接定位（与 np.unique 的
+    # return_index 结果一致）。
     # 组内平均秩（1-based）= 首名次（0-based 首个位置）+ (组大小+1)/2
     sorted_v = allv[order]
     first = np.concatenate([[0], np.flatnonzero(np.diff(sorted_v)) + 1])
@@ -573,9 +573,7 @@ def roc_pr_aucs(scores, labels):
 
     与 `auroc` / `average_precision` 在二值标签下逐位一致：AUROC 的并列
     平均秩与 AP 的等值整组累计都以“按分数排序后的等值分组”为基础，分组
-    结果与组内次序无关。聚类的 bootstrap 对每批重采样都要并报两个指标，
-    分别调用会各自 argsort（auroc 还需一次去重排序），重复近两倍排序
-    开销；这里共享同一份升序 argsort、等值分组与秩映射，只排序一次。
+    结果与组内次序无关。两个指标共享同一份升序排序的等值分组与秩映射。
 
     约定与两函数一致：先按分数有限性过滤；AUROC 需正负两类齐备，AP 需
     正类率既不等于 0 也不等于 1，否则对应值为 NaN（另一指标仍照常计算）。
@@ -605,7 +603,7 @@ def roc_pr_aucs(scores, labels):
     if need_auc:
         avg_ranks = starts.astype(np.float64) + (counts + 1.0) / 2.0
         # 按输入序把组平均秩散射回每个位置（与 auroc 的 ranks 构造同序
-        # 同值），正类切片求和即可；避免逐元素二分查找的随机访问开销。
+        # 同值），正类切片求和即可。
         ranks = np.empty(sv.size, dtype=np.float64)
         ranks[order] = np.repeat(avg_ranks, counts)
         r_pos = ranks[lb == 1].sum()

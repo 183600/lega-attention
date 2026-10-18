@@ -686,7 +686,7 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
 
 
 def _auroc_diff_tests(runs) -> list:
-    """AUROC(logit)−AUROC(qterm) 配对差检验（历史口径，H6 的判定依据）。"""
+    """AUROC(logit)−AUROC(qterm) 配对差检验（H6 的判定依据）。"""
     return _detection_diff_tests(runs, "auroc", AUROC_DIFF_METRIC)
 
 

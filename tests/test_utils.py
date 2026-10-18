@@ -177,7 +177,7 @@ def test_average_precision_properties():
 
 
 def test_roc_pr_aucs_bitwise_equals_separate_metrics():
-    """组合入口必须是两单指标函数的逐位等价替身（bootstrap 并报两指标时共用排序）。
+    """组合入口必须是两单指标函数的逐位等价替身。
 
     覆盖大量并列、非有限分数、单一类别、全并列等边界；任一元素不满足
     逐位相等（或同为 NaN）即失败。

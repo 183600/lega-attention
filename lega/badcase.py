@@ -638,8 +638,7 @@ def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
                       payload: Optional[Dict] = None) -> Dict:
     """处理一个 eval_*.json 的 worst_windows：归因分析 + 写 md（与源文件同目录）。
 
-    payload 已由调用方解析时可直接传入（避免同一文件在流水线中被解析两次）；
-    为 None 时自行读取。
+    payload 已由调用方解析时可直接传入；为 None 时自行读取。
     """
     if payload is None:
         with open(eval_path, "r", encoding="utf-8") as f:
