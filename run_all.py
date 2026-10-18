@@ -2894,11 +2894,8 @@ def main():
     # 每个 (变体, 种子) 是一个独立 run：训练 → 独立评测 → RULER → 机制分析。
     # 四个阶段由 lega.postrun 在同一进程内顺序执行：单 run 的行为与逐条独立
     # 进程完全相同（各阶段 main() 自行 set_seed/加载模型/写自己的产物，评测/
-    # RULER/分析只依赖本 run 的 checkpoint），但只付一次解释器启动与框架导入
-    # （实测 torch 导入约 1s，占单个评测进程耗时的大头）；不同 run 之间不再
-    # 需要“全部训练完成才能开始评测”的全局阶段屏障，近饱和机器上并发调度
-    # 的波尾空隙更小。evaluate 追加 test 访问账本，append_test_access 已用
-    # 进程间文件锁保证不丢记录。
+    # RULER/分析只依赖本 run 的 checkpoint）。evaluate 追加 test 访问账本，
+    # append_test_access 已用进程间文件锁保证不丢记录。
     chain = []
     chain_cmds = []
     for v in variants:
@@ -2944,8 +2941,7 @@ def main():
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
     # 错误样本是改进思路的最重要来源，不能只留聚合分数。
-    # 解析结果进 preloaded 缓存：build_summary 汇总时直接复用同一份 payload，
-    # 不再对每个 eval/ruler 结果文件做第二次 JSON 解析。
+    # 解析结果进 preloaded 缓存：build_summary 汇总时直接复用同一份 payload。
     preloaded = {}
     if not args.skip_ruler:
         for fp in sorted(glob.glob(os.path.join(results_dir, "ruler_*.json"))):

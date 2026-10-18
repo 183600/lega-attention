@@ -1,17 +1,10 @@
 """单 run 流水线链：训练 → 独立评测 → RULER → 机制分析（同一进程内顺序执行）。
 
-run_all 原本把四个阶段各自作为独立子进程成批并发：每个 (变体, 种子) 要启动
-4 个解释器、4 次导入 torch（实测单进程 import 约 1.1s，torch 占 1.0s），且
-不同阶段之间还要全局屏障（全部训练结束才能开始评测）。本模块把同一 run 的
-四个阶段放进一个进程顺序执行：
-
-  * 语义不变：每个阶段仍以自己的 main() 运行（runpy 以 ``__main__`` 语义执行
-    ``lega.<stage>``，sys.argv 临时替换为等价命令），各阶段 main() 自行
-    set_seed / 加载模型 / 写自己的输出文件，阶段之间没有共享状态；
-    PYTHONHASHSEED 由外层命令的 --seed 确定（与 run_all._cmd_env 一致）。
-  * 产物不变：文件路径、JSON 内容、随机源与独立进程逐条执行完全一致。
-  * 收益：一次解释器启动与框架导入服务四个阶段；不同 run 之间无需阶段屏障，
-    近饱和机器上的波尾空隙更小。
+每个阶段仍以自己的 main() 运行（runpy 以 ``__main__`` 语义执行
+``lega.<stage>``，sys.argv 临时替换为等价命令），各阶段 main() 自行
+set_seed / 加载模型 / 写自己的输出文件，阶段之间没有共享状态；
+PYTHONHASHSEED 由外层命令的 --seed 确定（与 run_all._cmd_env 一致）。
+文件路径、JSON 内容、随机源与独立进程逐条执行完全一致。
 
 用法（由 run_all 逐 run 调用，也可手动排障）:
   python -m lega.postrun --config configs/tiny.json --variant lega --seed 1337 \\
@@ -32,7 +25,7 @@ GATED_FOR_ANALYSIS_HINT = (
 def resolve_ckpt(out_dir: str) -> Optional[str]:
     """评测用 checkpoint：优先验证集选出的最优权重，缺失时回退最终步模型。
 
-    与 run_all 原有口径一致（model selection 用 model_best.pt；--skip_train
+    与 run_all 口径一致（model selection 用 model_best.pt；--skip_train
     复用旧产物时可能只有 model.pt）；都不存在返回 None（跳过评测阶段）。
     """
     best = os.path.join(out_dir, "model_best.pt")

@@ -33,9 +33,7 @@ ALPHA_GRID = (0.01, 0.1, 1.0)
 def _pair_keys(ids: np.ndarray, vocab_size: int) -> np.ndarray:
     """token 序列 → 相邻对的唯一整数键 prev*V + cur（int64 防溢出）。
 
-    ids 已是 int64 时不再复制（astype 默认 copy=True，会在整条 1 亿 token
-    的序列上多分配两份全量临时数组）；乘积结果缓冲原地累加后继 token，
-    把临时数组从两块降到一块。
+    ids 已是 int64 时不做复制；乘积结果缓冲原地累加后继 token。
     """
     ids = np.asarray(ids, dtype=np.int64)
     keys = ids[:-1] * int(vocab_size)

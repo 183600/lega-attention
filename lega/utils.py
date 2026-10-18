@@ -8,7 +8,7 @@ macro / micro / weighted（三者在不平衡数据上可能差异巨大，macro
 
 统计检验的设计口径：正式实验的种子数通常只有 3~5，配对 t 检验的正态假设在此
 样本量下并不可靠；因此本模块同时提供
-  * paired_t_test            —— 参数检验（主判定依据，历史口径保持不变）；
+  * paired_t_test            —— 参数检验（主判定依据）；
   * paired_sign_flip_test    —— 符号翻转置换检验（H0 下精确/分布无关，n<=16 时
                                 全枚举精确，否则固定种子 Monte-Carlo）；
   * bootstrap_mean_ci        —— 配对差的百分位 bootstrap 置信区间；

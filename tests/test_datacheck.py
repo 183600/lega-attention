@@ -100,7 +100,7 @@ def test_temporal_split_no_phantom_heading_at_slice_start():
 def test_temporal_split_heading_guard_uses_usable_headings():
     """窗口内命中的标题若不可用（越过 t2 / 离 p1 太近），必须换全局标题。
 
-    旧逻辑只在“窗口内没标题”时才做全局搜索，导致两切点在错误的
+    只在“窗口内没标题”时才做全局搜索是不够的：两切点会落在错误的
     窗口内标题上、val 被压空或切序倒置。
     """
     # 触发 A：窗口内 t1 命中 >= t2 的标题（950），p2 命中被压空的 800

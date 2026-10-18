@@ -38,9 +38,9 @@ from .model import GPT, count_params
 from .repro import build_run_manifest
 from .utils import save_json, set_seed
 
-# 训练路径 loss 与直接 logits CE 的一致性容差：实测同一权重/同一批数据下
-# 两条路径差异 ≤1e-7（相对），1e-3 只用于吸收分块/归约顺序的浮点噪声，
-# 真正的计算错误（错误 chunk 边界、错误归一化/ignore 处理）远大于此。
+# 训练路径 loss 与直接 logits CE 的一致性容差：1e-3 只用于吸收分块/
+# 归约顺序的浮点噪声，真正的计算错误（错误 chunk 边界、错误归一化/
+# ignore 处理）远大于此。
 LOSS_CONSISTENCY_REL_TOL = 1e-3
 LOSS_CONSISTENCY_ABS_TOL = 1e-3
 
