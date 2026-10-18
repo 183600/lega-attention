@@ -366,8 +366,8 @@ def _sorted_seeds(mapping) -> list:
 
 
 def _variant_seed_map(runs: dict, variant: str) -> dict:
-    """取某变体的 {seed: slot}；若已有带种子的结果，忽略无种子的旧格式文件，
-    避免把同一次实验重复计为一个额外种子。"""
+    """取某变体的 {seed: slot}；已有带种子的结果时忽略无种子的文件，
+    同一次实验不重复计为额外种子。"""
     m = (runs or {}).get(variant) or {}
     tagged = {s: slot for s, slot in m.items() if s is not None}
     return tagged if tagged else m
@@ -377,9 +377,8 @@ def cross_variant_badcase_map(runs: dict, variants) -> dict:
     """跨变体对齐用：每个变体取“最小种子”的 RULER 错误清单。
 
     最小种子没有 RULER 结果时（例如只跑了其他种子）退化到最小的有结果的
-    种子；已评测且零错误必须显式记为 []——若跳过，该变体会被静默排除出
-    cross_variant_analysis，"全体变体共识失败"就会漏掉它，把共有难度误
-    报成方法特异性失败。未跑过 RULER 的变体不进结果（无法参与对照）。
+    种子；已评测且零错误的变体记为 [] 并参与对照。未跑过 RULER 的变体
+    不进结果（无法参与对照）。
     """
     out = {}
     for v in variants:
@@ -842,7 +841,7 @@ def _render_baseline_sections(results_dir: str, smoke=None) -> list:
       2. 基线（standard）在验证集上的学习率/权重衰减网格调优结果与
          “默认是否已接近最优”判定。
     缺少调优证据时显式警告“未调优基线”，而不是让读者默认基线已调好。
-    smoke 由调用方传入可避免重复读取 repro.json；缺省时自行读取。
+    smoke 可由调用方传入；为 None 时自行读取 repro.json。
     """
     if smoke is None:
         smoke = False
@@ -1074,11 +1073,9 @@ def build_summary(results_dir: str, audit: dict = None,
             return json.load(f)
 
     # --- “本次 run”范围限定：results/<tag> 会被同一 tag 的多次运行复用
-    # （改种子/变体集、--skip_* 等），历史遗留的 eval_*/ruler_*/analysis_*
-    # 若无条件聚合，会把不同实验的观测混进同一均值/配对检验，虚增种子数并
-    # 污染 Holm 家族。repro.json 每次运行开头重写，记录了本次的
-    # variants/seeds，据此过滤；没有 repro.json（直接调用/手工构建目录）
-    # 时保持全量发现。
+    # （改种子/变体集、--skip_* 等），聚合按 repro.json 记录的本次
+    # variants/seeds 过滤，不同实验的观测不混入同一均值/配对检验；
+    # 没有 repro.json（直接调用/手工构建目录）时保持全量发现。
     repro = load(os.path.join(results_dir, "repro.json")) or {}
     scope_variants = repro.get("variants") if isinstance(
         repro.get("variants"), list) else None
@@ -1499,8 +1496,7 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- ⚠ 未找到 `repro.json`（直接调用 build_summary？）；"
                   "无法核对代码版本与数据指纹。")
     sanity_files = sorted(glob.glob(os.path.join(results_dir, "sanity_*.json")))
-    # 与 runs 同一“本次 run”口径：上一轮遗留变体的 sanity 未通过不应
-    # 出现在本次汇总表里（sanity 无种子维度，只按变体过滤）。
+    # 与 runs 同一“本次 run”口径（sanity 无种子维度，只按变体过滤）。
     if scope_variants is not None:
         sanity_files = [fp for fp in sanity_files
                         if (load(fp) or {}).get("variant") in scope_variants]
@@ -1624,7 +1620,7 @@ def build_summary(results_dir: str, audit: dict = None,
         if any_early:
             md.append("")
             md.append("⏹ 上表带「早停」标记的变体触发了早停（验证连续 patience "
-                      "次无实质改善即终止，曲线按设计截断，不同于崩溃/丢日志）："
+                      "次无实质改善即终止，曲线按设计截断，区别于日志缺失/中断）："
                       "下游评测使用的仍是 val 选出的 `model_best.pt`；若其最优"
                       "仍出现在训练早期，应先处理过拟合/学习率问题，而不是"
                       "统一延长所有变体的训练步数。")

@@ -153,7 +153,7 @@ def test_short_log_is_descriptive_only():
 
 
 def test_degenerate_segments_render_without_crash():
-    """同一 step 的重复点会让区间均值为 None：证据行必须显示 '-' 而非崩溃。"""
+    """同一 step 的重复点会让区间均值为 None：证据行必须显示 '-'。"""
     # 训练/验证点都挤在同一 step：区间均值与相对变化均为 None → 欠拟合分支
     recs = [{"step": 10, "loss": 4.0}, {"step": 10, "loss": 3.9},
             {"step": 10, "loss": 3.8},
@@ -246,7 +246,7 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
 
 
 def test_load_train_log_skips_valid_json_non_object_lines():
-    """合法 JSON 但非对象的行（数组/标量/null）必须按损坏行跳过而不是崩溃。"""
+    """合法 JSON 但非对象的行（数组/标量/null）必须按损坏行跳过。"""
     tmp = tempfile.mkdtemp()
     try:
         p = os.path.join(tmp, "train_log.jsonl")

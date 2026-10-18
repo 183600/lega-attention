@@ -99,9 +99,8 @@ def categorize_case(rec: Dict) -> Dict:
                 r["spurious_words"] = spurious
                 r["explanation"] = f"高频词全中但多答 {len(spurious)} 个无关词（严格 EM 记错）"
         return r
-    # 3) 数值任务：按输出的第一个数字归因（与 EM 计分口径一致）
-    # 外部/旧格式 JSON 的 pred 可能是数字等非字符串类型：显式 str()，
-    # 一个坏样本不应让整份归因报告崩溃（与 fwe 分支同一防御）
+    # 3) 数值任务：按输出的第一个数字归因（与 EM 计分口径一致）；
+    # pred 可能是数字等非字符串类型，显式 str() 后再解析
     nums = _NUM_RE.findall(str(r.get("pred") or ""))
     if not nums:
         r["category"] = "no_answer"
@@ -527,7 +526,7 @@ def process_ruler_json(ruler_path: str, out_dir: Optional[str] = None,
                        write_md: bool = True, payload: Optional[Dict] = None) -> Dict:
     """处理一个 ruler_*.json：归因分析 + 写 md（与源文件同目录）。
 
-    payload 已由调用方解析时可直接传入，避免重复读取/解析同一文件。
+    payload 已由调用方解析时可直接传入；为 None 时自行读取。
     """
     if payload is None:
         with open(ruler_path, "r", encoding="utf-8") as f:
@@ -560,8 +559,7 @@ def main():
     if not paths:
         print(f"[badcase] {args.results_dir} 下没有 ruler_*.json，跳过")
     all_analyses = []
-    # 每个 ruler_*.json 只读取/解析一次：归因与跨变体对照共用同一份 payload。
-    # 解析成功后即登记（即使后续归因抛错），与跨变体对照独立读取的语义一致。
+    # 归因与跨变体对照共用同一份 payload；解析成功后即登记。
     ruler_payloads = {}
     for fp in paths:
         try:

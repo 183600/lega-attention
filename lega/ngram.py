@@ -134,8 +134,8 @@ def evaluate(data_dir: str, split: str = "val",
         eval_ids = np.asarray(load_bin(data_dir, split), dtype=np.int64)
         sel_ids = eval_ids
     uni, pair_keys, pair_counts = fit_counts(train_ids, vocab_size)
-    # 选参与报告各自评测流的逐 token 二元项只算一次：α 只影响频次到 PPL
-    # 的换算，不改变二元组频次本身。split == "val" 时两个流是同一数组。
+    # 选参与报告各自评测流的逐 token 二元项：α 只影响频次到 PPL 的换算，
+    # 不改变二元组频次本身；split == "val" 时两个流是同一数组，可共用。
     sel_terms = _bigram_terms(sel_ids, uni, pair_keys, pair_counts, vocab_size)
     eval_terms = (sel_terms if eval_ids is sel_ids
                   else _bigram_terms(eval_ids, uni, pair_keys, pair_counts,

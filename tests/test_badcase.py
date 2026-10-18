@@ -48,15 +48,15 @@ def test_categorize_numeric_causes():
 
 
 def test_categorize_tolerates_non_string_pred():
-    """外部/旧格式 JSON 的 pred 可能是数字：不得抛 TypeError，按字符串归因。"""
+    """外部 JSON 的 pred 可能是数字：按字符串归一化后归因。"""
     c = categorize_case(_case(pred=1234567, ctx_nums=["1234567"]))
     assert c["category"] == "copy_distractor", c
     c = categorize_case(_case(pred=1234567.0, ctx_nums=["7654321"]))
     assert c["category"] == "hallucinated", c
-    # 整份报告级入口同样不应崩
+    # 整份报告级入口同样按此口径归因
     ana = analyze_badcases([_case(pred=1234567, ctx_nums=["1234567"])])
     assert ana["category_counts"] == {"copy_distractor": 1}
-    print("  [ok] 数值型 pred 容错（不崩溃且归因正确）")
+    print("  [ok] 数值型 pred 容错（归因正确）")
 
 
 def test_categorize_label_error():
@@ -96,7 +96,7 @@ def test_hard_sample_flag():
 
 
 def test_non_numeric_depth_tolerated():
-    """外部/旧格式 JSON 的字符串 depth 不能让整个归因流程崩溃。"""
+    """外部 JSON 的字符串 depth 按非数值归一化处理。"""
     c = categorize_case(_case(pred="1111111", ctx_nums=[], depth="0.9"))
     assert c["depth"] == 0.9 and c["hard_sample"] is True
     c = categorize_case(_case(task="vt", pred="1111111", ctx_nums=[], depth="deep"))
@@ -107,7 +107,7 @@ def test_non_numeric_depth_tolerated():
         _case(task="vt", pred="5550001", ctx_nums=[], depth="bad"),
     ])
     assert ana["deep_position_fail_ratio"] == 1.0
-    print("  [ok] 非数值 depth 安全归一化（不崩溃、不误判难度）")
+    print("  [ok] 非数值 depth 安全归一化（不误判难度）")
 
 
 def test_deep_ratio_excludes_vt_chain_depth():
@@ -187,7 +187,7 @@ def test_categorize_worst_window():
     c = categorize_window(_win(gold=" blue", tail="a blue car",
                                pred_top5=[[" blue", 0.2]]))
     assert c["category"] == "top1_correct"
-    # 无预测分布（旧格式）不崩溃
+    # 无预测分布（旧格式）→ unparsed
     c = categorize_window(_win(pred_top5=[]))
     assert c["category"] == "unparsed" and c["top1"] is None
     print("  [ok] 最差窗口归因（复读/高置信盲区/低置信/校准/旧格式）")
@@ -262,7 +262,7 @@ def test_process_eval_json_end_to_end():
         md = os.path.join(tmp, "worstcases_lega_seed1337.md")
         assert os.path.exists(md), "worstcase md 应与 eval json 同目录同名换后缀"
         assert "复读吸引子" in open(md, encoding="utf-8").read()
-        # 旧格式（无 worst_windows）不崩溃
+        # 旧格式（无 worst_windows）→ n_windows=0
         old = os.path.join(tmp, "eval_old.json")
         with open(old, "w", encoding="utf-8") as f:
             json.dump({"variant": "standard"}, f)
@@ -324,7 +324,7 @@ def test_process_ruler_json_end_to_end():
         md_path = os.path.join(tmp, "badcases_lega_seed1337.md")
         assert os.path.exists(md_path), "badcase md 应与 ruler json 同目录同名换后缀"
         assert CATEGORY_CN["copy_distractor"] in open(md_path, encoding="utf-8").read()
-        # 无 badcases 键的旧格式文件不崩溃
+        # 无 badcases 键的旧格式文件 → n_badcases=0
         old = os.path.join(tmp, "ruler_old.json")
         with open(old, "w", encoding="utf-8") as f:
             json.dump({"variant": "standard", "results": {}}, f)
@@ -394,7 +394,7 @@ def test_malformed_records_do_not_crash_attribution():
     ana = analyze_badcases(bad, variant="lega")
     assert ana["n_badcases"] == len(bad)
     for i, c in enumerate(ana["cases"], 1):
-        format_case(i, c)  # 渲染不得崩溃
+        format_case(i, c)  # 渲染输出
     win = analyze_worst_windows(
         [{"pred_top5": ["a"]}, {"pred_top5": [{"t": "a", "p": 0.9}],
                                 "gold_next": None, "context_tail": None}],
@@ -409,12 +409,12 @@ def test_malformed_records_do_not_crash_attribution():
         json.dumps(cross, ensure_ascii=False)  # 结果必须可序列化
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 坏样本字段类型异常不崩溃（fwe/缺 task/非字符串字段）")
+    print("  [ok] 坏样本字段类型异常的归因（fwe/缺 task/非字符串字段）")
 
 
 def test_main_keeps_zero_error_variants_for_cross_variant():
     """badcase.main 汇总时必须把 "badcases": []（已评测且零错误）传给跨变体
-    对照：否则全对变体被静默排除，方法特异性失败会被误报为共识失败。"""
+    对照，使零错误变体参与共识判定。"""
     import sys
     from lega.badcase import main as badcase_main
     tmp = tempfile.mkdtemp()

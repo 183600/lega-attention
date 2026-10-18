@@ -44,7 +44,7 @@ def rng_state_fingerprint() -> dict:
     """各全局 RNG **当前状态**的短指纹（只读：get_state 不消耗随机数）。
 
     与“记录了 seed 字面量”不同，指纹来自 RNG 真实内部状态：同 seed 的
-    set_seed 必然得到相同指纹，不同 seed 得到不同指纹（实测），任何人重跑
+    set_seed 必然得到相同指纹，不同 seed 得到不同指纹，任何人重跑
     ``set_seed(seed) + rng_state_fingerprint()`` 即可验证运行时的种子是否
     真的生效。Python random / NumPy MT19937 的状态跨平台一致；PyTorch CPU
     为 MT19937 字节状态，同版本跨平台一致；CUDA 状态哈希在无 GPU 时不出现。
@@ -169,10 +169,8 @@ def load_json(path: str, default=None):
 def _json_safe(obj):
     """递归把非有限浮点（NaN/±Inf）转成 None。
 
-    json.dump 默认会写出 NaN/Infinity 字面量——那不是合法 JSON，jq 等严格
-    消费方直接解析失败（nan_report.json 的 loss_value 恰是非有限触发值，
-    最坏情况下正是这种非法字面量）。统一记为 null（缺失值语义），与
-    evaluate.json_safe_eval_metrics / pearson 等既有口径一致。
+    非有限浮点统一记为 null（缺失值语义），保证输出是严格合法 JSON，
+    与 evaluate.json_safe_eval_metrics / pearson 等既有口径一致。
     """
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
@@ -186,8 +184,7 @@ def _json_safe(obj):
 def save_json(obj, path: str) -> None:
     """原子写入 JSON（临时文件 + os.replace），非有限浮点记为 null。
 
-    直接覆盖写入在中断时会让旧结果变成半截文件；同目录替换保证读者看到的
-    要么是旧完整文件、要么是新完整文件。临时名带 pid，避免并发进程互踩。
+    读者看到的要么是旧完整文件、要么是新完整文件；临时名带 pid。
     """
     d = os.path.dirname(os.path.abspath(path))
     if d:
@@ -515,8 +512,7 @@ def auroc(scores, labels) -> float:
     """
     scores = np.asarray(scores, dtype=np.float64)
     labels = np.asarray(labels)
-    # 与 average_precision 同一口径：先剔除非有限分数。np.argsort 会把
-    # NaN 当作最大秩排在最前，不剔除会让含 NaN 的正类样本虚高 AUROC。
+    # 与 average_precision 同一口径：先剔除非有限分数。
     m = np.isfinite(scores)
     scores, labels = scores[m], labels[m]
     pos, neg = scores[labels == 1], scores[labels == 0]
@@ -524,7 +520,7 @@ def auroc(scores, labels) -> float:
         return float("nan")
     allv = np.concatenate([neg, pos])
     # 并列取平均秩：等值样本在 unique 分组后获得同一平均秩，与组内先后次序
-    # 无关，因此不必用稳定排序。
+    # 无关。
     order = np.argsort(allv)
     # 在有序数组上用 unique 定位等值组，
     # 组内平均秩（1-based）= 首名次（0-based 首个位置）+ (组大小+1)/2
@@ -555,7 +551,7 @@ def average_precision(scores, labels) -> float:
     n_pos = int((labels == 1).sum())
     if n_pos == 0 or n_pos == len(labels):
         return float("nan")
-    # 等值样本在分组边界处整体计入，结果与组内先后次序无关，无需稳定排序。
+    # 等值样本在分组边界处整体计入，结果与组内先后次序无关。
     order = np.argsort(-scores)
     s_sorted, l_sorted = scores[order], labels[order]
     # 分数降序后按等值组切边界（合并并列，避免排序稳定性影响结果）

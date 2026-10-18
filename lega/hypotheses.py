@@ -8,8 +8,7 @@
 本模块把登记表变成可验证的追加式文档：
 
   * 登记表与锁文件存放在 ``preregistration/``（**故意不放在 docs/**：
-    流水线的自动清理会删除 docs/ 下除 design_notes.md 外的文件，
-    曾把登记表连带锁链一起清掉，使确认性/探索性边界实际失效）；
+    流水线清理只保留 docs/design_notes.md）；
   * 锁文件 ``preregistration/hypotheses.lock.json`` 记录登记的**基线**
     （整文档 SHA-256 + 逐假设科学内容摘要）与**修订链**：每次修正/追加
     假设都要在链上留痕（改动前/后两份状态 + 理由）；
@@ -42,8 +41,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 2026-10 迁移：从 docs/ 移入 preregistration/。CI 的清理步骤会删除
-# docs/ 下除 design_notes.md 外的全部文件，登记表在那里会被下一轮自动删除。
+# 登记表与锁文件位于 preregistration/：CI 清理只保留 docs/design_notes.md。
 REGISTRY_PATH = os.path.join(ROOT, "preregistration", "hypotheses.json")
 LOCK_PATH = os.path.join(ROOT, "preregistration", "hypotheses.lock.json")
 

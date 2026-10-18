@@ -71,7 +71,7 @@ def sanitize_text(text: str):
     n_lines = int(text.count("\n")) + 1
     stats["lines"] = n_lines
     # 字符计数为 0 时对应正则必然无匹配（U+FFFD 计数/删除计数分别覆盖两类
-    # 坏字符），直接记为 0，省去整篇扫描。
+    # 坏字符），直接记为 0。
     has_repl = stats["replacement_char_replaced_with_space"] > 0
     has_ctrl = stats["control_chars_deleted"] > 0
     stats["lines_with_replacement_char"] = int(
@@ -262,8 +262,7 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
         raise ValueError(
             f"{split} token id 越界: [{vmin}, {vmax}] 不在 [0, {vocab_size}) "
             "或超出 uint16 可存储范围（<= 65535），数据/词表不一致")
-    # 至此 vmax <= 65535 已被本函数显式保证（不依赖调用方先做过
-    # check_vocab_capacity），写入 uint16 无损
+    # 至此 vmax <= 65535 由本函数保证，写入 uint16 无损
     return {"split": str(split), "tokens": int(arr.size), "dtype": str(arr.dtype),
             "min_id": vmin, "max_id": vmax, "nan": n_nan, "inf": n_inf}
 
@@ -369,7 +368,7 @@ _BLANK_LINE_RE = re.compile(r"(?<=\n)\n")
 
 
 def _boundary_candidates(seg: str, base: int, kind: str):
-    # 换行/空行候选用 C 层正则扫描而非逐字符 Python 循环。
+    # 换行/空行候选用正则扫描。
     if kind == "heading":
         return [base + m.start() for m in _HEADING_RE.finditer(seg)
                 if base + m.start() > 0]

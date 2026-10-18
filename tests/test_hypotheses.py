@@ -307,9 +307,8 @@ def test_verify_registration_rejects_non_list_chain():
 def test_repo_registration_present_and_confirmatory():
     """仓库自带的预注册登记表必须存在、可确认、且不在会被清理的 docs/ 下。
 
-    历史教训：docs/registered_hypotheses.json 曾被流水线的 docs/ 自动清理
-    提交多次误删（dee75a1/4ccdbdb/467947d），确认性边界实际失效。本测试把
-    “登记表与锁必须在 preregistration/ 且完整”变成不可绕过的仓库断言。
+    本测试把“登记表与锁必须在 preregistration/ 且完整”变成不可绕过的
+    仓库断言。
     """
     assert os.path.exists(REGISTRY_PATH), (
         f"预注册登记表缺失：{REGISTRY_PATH}；禁止删除，修正走 --amend 留痕")

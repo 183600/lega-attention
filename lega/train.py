@@ -828,8 +828,8 @@ def main():
                        step=step + 1)
         if (step + 1) % eval_every == 0:
             do_eval(step + 1)
-            # 早停：验证连续 patience 次评测无实质改善即终止（避免继续消耗
-            # 算力只得到更多过拟合的步；下游评测本就用 val 选出的 model_best.pt）
+            # 早停：验证连续 patience 次评测无实质改善即终止（下游评测
+            # 本就用 val 选出的 model_best.pt）
             if stop_step is not None:
                 break
 

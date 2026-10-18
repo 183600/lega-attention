@@ -210,7 +210,7 @@ def test_build_summary_audit_zero_checked_is_warning_not_failure():
 
 
 def test_cross_variant_badcase_map_min_seed_even_when_empty():
-    """最小种子零错误也必须注册为 []（否则变体被静默排除出共识判定）；
+    """最小种子零错误也注册为 []（参与共识判定）；
     最小种子无 RULER 结果时退化到最小的有结果的种子；未评测不进表。"""
     cases99 = [{"sample_id": "x"}]
     # 最小种子（7）零错误，较大种子（99）有错 → 仍取最小种子的 []
@@ -226,8 +226,8 @@ def test_cross_variant_badcase_map_min_seed_even_when_empty():
 
 
 def test_build_summary_scopes_discovery_to_current_repro_run():
-    """results/<tag> 跨多次运行复用时，上一轮的 eval/sanity 不得混入本次汇总
-    （否则不同实验的观测被配成对：虚增种子数并污染 Holm 家族）。"""
+    """results/<tag> 跨多次运行复用时，汇总只纳入 repro.json 记录的本次
+    eval/sanity（不同实验的观测不相配成对）。"""
     tmp = tempfile.mkdtemp()
     try:
         _write_json(os.path.join(tmp, "repro.json"),
@@ -1125,8 +1125,7 @@ def test_build_summary_downgrades_confirmatory_when_integrity_violated():
 
 
 def test_build_summary_zero_failure_variant_blocks_consensus():
-    """RULER 已评测且零错误的变体必须进入跨变体对照（n_failed=0）：
-    否则它会被静默排除，"全体变体共识失败"会把方法特异性失败误报给数据。"""
+    """RULER 已评测且零错误的变体必须进入跨变体对照（n_failed=0）。"""
     tmp = tempfile.mkdtemp()
     try:
         case = {"sample_id": "niah_synth@256#0", "task": "niah_synth",

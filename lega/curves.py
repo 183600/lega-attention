@@ -61,8 +61,7 @@ def load_train_log(path: str) -> List[Dict]:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                # 合法 JSON 但非对象（如被截断拼接出的数组/标量行）没有
-                # .get 接口，按损坏行跳过，否则整个曲线诊断会崩溃。
+                # 合法 JSON 但非对象的行（数组/标量）按损坏行跳过
                 if isinstance(rec, dict):
                     recs.append(rec)
     except OSError:
@@ -158,13 +157,12 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
 
     records: load_train_log 的输出（含 'loss' 训练点与 'val_loss' 验证点）。
     返回 dict：status / 判定依据 / 关键数值 / 建议清单 recommendations。
-    早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注，
-    避免被误读为日志缺失/训练中断/数据不足。
+    早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注。
     """
     train_pts, train_bad, train_malformed = _finite_points(records, "loss")
     val_pts, val_bad, val_malformed = _finite_points(records, "val_loss")
-    # 早停终止标记：训练按设计提前结束而非崩溃/丢日志，建议不得再指向
-    # "延长训练"（验证已连续无改善，续训只增加过拟合）。
+    # 早停终止标记：训练按设计提前结束（区别于日志缺失/训练中断），
+    # 建议不再指向"延长训练"（验证已连续无改善）。
     early_stop_steps = [r.get("step") for r in records
                         if isinstance(r, dict) and r.get("early_stop")]
     early_stopped = bool(early_stop_steps)
@@ -346,7 +344,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
 
-    # 早停终止：截断是设计行为（不同于崩溃/丢日志），独立于状态标注；
+    # 早停终止：截断是设计行为（不同于日志缺失），独立于状态标注；
     # "数据不足"分支的"增加步数/评测密度"建议与早停矛盾，须替换。
     if early_stopped:
         es_step = early_stop_steps[0]

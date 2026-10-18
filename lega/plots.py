@@ -256,9 +256,8 @@ def _read_records(rdir, variant):
         [os.path.join(rdir, f"analysis_records_{variant}.csv")]
         + sorted(glob.glob(os.path.join(
             rdir, f"analysis_records_{variant}_seed*.csv"))))
-    # 同一批文件在本次画图中会被多张图消费（门控分布/校准曲线）：按
-    # (路径, mtime, size) 缓存最近一次解析结果，文件变化自动失效；
-    # 只保留一个条目，记录量可达数十万行。
+    # 同一批文件会被多张图（门控分布/校准曲线）消费：按 (路径, mtime, size)
+    # 缓存最近一次解析结果，文件变化自动失效；只保留一个条目。
     key = (variant, tuple(
         (p, os.path.getmtime(p), os.path.getsize(p))
         for p in paths if os.path.exists(p)))
