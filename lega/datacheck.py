@@ -667,6 +667,38 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     return alerts
 
 
+def split_protocol_alerts(split_protocol: dict) -> list:
+    """把上游划分协议的群组/时序风险转成显式告警（元数据不能“静默通过”）。
+
+    split_protocol 来自 prepare_data 的 temporal_split_text info 或官方 split
+    的静态描述。group_unit 定义的群组（如 heading_document）一旦跨 split，
+    train/val/test 就不再独立——必须与 ngram 重叠同级进入 alerts，
+    供汇总页与复核者看到，而不是只躺在报告元数据里。
+    """
+    alerts = []
+    p = split_protocol or {}
+    if not p:
+        return alerts
+
+    def add(level, code, message):
+        alerts.append({"level": level, "code": code, "message": message})
+
+    if p.get("shuffled"):
+        add("warning", "split_shuffled",
+            "划分协议声明 shuffled=True：时序先后/群组完整性不可保证，须人工核查")
+    if p.get("fallback_char_cut"):
+        add("warning", "split_char_cut",
+            "无可用换行或文档边界，退化为字符切分——同一文档可能跨 split"
+            "（群组泄露），须人工核查")
+    if p.get("documents_cross_cut"):
+        add("warning", "split_documents_cross_cut",
+            f"切点未落在文档边界：{p.get('group_unit', 'group')} 群组跨 split"
+            f"（标题 {p.get('n_headings', '?')} 个、切点类型 "
+            f"{p.get('cut_kinds', '?')}），违反“群组整体落在同一侧”，"
+            "须调整划分比例或更换可整体划分的语料")
+    return alerts
+
+
 def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
                       duplicates: dict, contamination: dict,
                       distribution: dict, text_stats: dict = None,
@@ -700,9 +732,15 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "val/test 不被改写；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",
             "一元分布漂移为采样估计，用于提示 train/test 分布差异而非统计检验；",
-            "alerts 为阈值触发的复核提示（见 alert_thresholds），不是显著性检验。",
+            "alerts 同时包含协议违规（群组/时序，见 split_protocol）与阈值触发的"
+            "复核提示（见 alert_thresholds），不是显著性检验。",
         ],
     }
     if extra:
         report.update(extra)
+    # 协议违规（群组跨 split / 字符切分 / 打乱）置顶，确保汇总页的告警截断
+    # 不会把更严重的问题挤出视野。
+    protocol_alerts = split_protocol_alerts(report.get("split_protocol"))
+    if protocol_alerts:
+        report["alerts"] = protocol_alerts + report["alerts"]
     return report

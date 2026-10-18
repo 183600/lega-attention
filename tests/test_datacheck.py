@@ -8,7 +8,8 @@
   3) 测试集访问可审计：账本记录每次 test 评测与重复评测的 checkpoint。
 
 另覆盖 bin 缓存完整性：源文本/诊断报告哈希变化时强制重建，防止旧协议
-或过期缓存的 bin 被静默训练；以及阈值触发的数据自检告警（alerts）。
+或过期缓存的 bin 被静默训练；以及数据自检告警（alerts）：阈值触发项与
+划分协议违规（群组跨 split / 字符切分 / 打乱）都必须显式上报。
 """
 import json
 import os
@@ -22,8 +23,9 @@ from lega.datacheck import (append_test_access, build_data_report,
                             check_vocab_capacity, decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             read_test_access_log, sanitize_text,
-                            temporal_split_text, text_length_stats,
-                            token_stream_stats, unknown_char_rate)
+                            split_protocol_alerts, temporal_split_text,
+                            text_length_stats, token_stream_stats,
+                            unknown_char_rate)
 
 
 def _doc(i):
@@ -534,3 +536,45 @@ def test_build_data_report_emits_threshold_alerts():
     # 阈值本身随报告落盘，供审计确认告警口径
     assert "ngram_overlap_rate" in rep["alert_thresholds"]
     print("  [ok] 数据自检告警：重叠/漂移/OOV/坏字符行/去污染/超长行均可审计")
+
+
+def test_split_protocol_alerts_flag_group_crossing():
+    """群组跨 split / 字符切分 / 打乱必须在 alerts 中显式告警，不能只留在元数据。"""
+    assert split_protocol_alerts(None) == []
+    assert split_protocol_alerts({}) == []
+    clean = {"mode": "temporal", "shuffled": False,
+             "fallback_char_cut": False, "documents_cross_cut": False,
+             "group_unit": "heading_document", "n_headings": 3}
+    assert split_protocol_alerts(clean) == []
+    alerts = split_protocol_alerts({
+        "shuffled": True, "fallback_char_cut": True,
+        "documents_cross_cut": True, "group_unit": "heading_document",
+        "n_headings": 1, "cut_kinds": ["newline", "newline"]})
+    codes = {a["code"] for a in alerts}
+    assert codes == {"split_shuffled", "split_char_cut",
+                     "split_documents_cross_cut"}
+    assert all(a["level"] == "warning" for a in alerts)
+    cross = next(a for a in alerts if a["code"] == "split_documents_cross_cut")
+    assert "heading_document" in cross["message"]
+    print("  [ok] 划分协议告警：打开 shuffled / 字符切分 / 文档跨切点均显式上报")
+
+
+def test_build_data_report_surfaces_group_crossing_alerts():
+    """带 split_protocol 的报告：协议告警置顶，避免被阈值告警挤出汇总页。"""
+    rep = build_data_report(
+        {"kind": "char", "fit_on": "train", "vocab_size": 5, "unk_rate": {}},
+        {"train": {"tokens": 10}}, {}, {}, {}, {},
+        extra={"split_protocol": {
+            "mode": "temporal", "shuffled": False, "fallback_char_cut": False,
+            "group_unit": "heading_document", "n_headings": 1,
+            "documents_cross_cut": True}})
+    assert rep["alerts"][0]["code"] == "split_documents_cross_cut"
+    assert rep["split_protocol"]["documents_cross_cut"] is True
+    # 官方/独立生成 split 无违规字段时不产生协议告警
+    rep2 = build_data_report(
+        {"kind": "char", "fit_on": "train", "vocab_size": 5, "unk_rate": {}},
+        {"train": {"tokens": 10}}, {}, {}, {}, {},
+        extra={"split_protocol": {"mode": "official", "shuffled": False,
+                                  "documents_cross_cut": False}})
+    assert all(not a["code"].startswith("split_") for a in rep2["alerts"])
+    print("  [ok] data_report：协议违规告警置顶；无违规协议不误报")

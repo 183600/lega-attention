@@ -1805,6 +1805,14 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"文档边界回退={sp.get('fallback_char_cut', '-')}"
                       + ("（⚠ 字符切分可能让同一文档跨 split）"
                          if sp.get("fallback_char_cut") else ""))
+            group = sp.get("group_unit")
+            cross = sp.get("documents_cross_cut")
+            if group or cross is not None:
+                md.append(f"- 群组完整性：群组单位={group or '-'}；"
+                          f"标题数={sp.get('n_headings', '-')}；"
+                          f"文档跨切点={cross if cross is not None else '-'}"
+                          + ("（⚠ 群组跨 split，见告警 "
+                             "split_documents_cross_cut）" if cross else ""))
         tok = data_report.get("tokenizer") or {}
         unk = tok.get("unk_rate") or {}
         unk_s = "、".join(f"{k}={_fmt_rate(v)}" for k, v in unk.items())

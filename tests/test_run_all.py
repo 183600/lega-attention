@@ -856,6 +856,32 @@ def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     print("  [ok] build_summary（PPL 截断标注；分布漂移 null 安全）")
 
 
+def test_build_summary_surfaces_group_crossing_split_protocol():
+    """群组跨切点必须渲染进汇总页（元数据行 + 告警），不允许静默通过。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0})
+        out = build_summary(tmp, data_report={
+            "split_protocol": {
+                "mode": "temporal",
+                "order": "temporal:train(earliest)->val->test(latest)",
+                "fallback_char_cut": False, "shuffled": False,
+                "group_unit": "heading_document", "n_headings": 1,
+                "documents_cross_cut": True},
+            "alerts": [{"level": "warning",
+                        "code": "split_documents_cross_cut",
+                        "message": "heading_document 群组跨 split"}]})
+        md = out["markdown"]
+        assert "群组单位=heading_document" in md
+        assert "文档跨切点=True" in md
+        assert "split_documents_cross_cut" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：群组跨 split 进入汇总页（元数据 + 告警）")
+
+
 def test_enrich_paired_adds_robustness_fields():
     """配对检验必须附带置换 p / bootstrap CI / MDE，三者口径一致可复核。"""
     a = [10.5, 10.6, 10.4, 10.7, 10.55]
