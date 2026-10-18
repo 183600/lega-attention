@@ -19,14 +19,15 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）；
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
   每格 em 附带 Wilson 95% 区间（`em_ci95_wilson`）：n_samples 小时点估计的抽样误差不可忽略；
-- 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC 与 PR-AUC、门控决策点 F1。
-- 简单统计基线（`lega/ngram.py`）：与神经模型同 split 的一元/二元平滑 n-gram PPL；平滑系数 α 只在 val 上按 mean NLL 选优（与 model_best 同口径），正式报告只消费选定 α 一次；test split 需显式 `--allow_test` 并写访问账本。
+- 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC 与 PR-AUC、门控决策点 F1（macro/micro/weighted + **恒写/恒不写稻草人对照** `gate_f1_trivial`——门控 F1 不高于无信息固定规则时没有决策价值）。
+- 简单统计基线（`lega/ngram.py`）：与神经模型同 split 的一元/二元平滑 n-gram PPL；平滑系数 α 只在 val 上按 mean NLL 选优（与 model_best 同口径），正式报告只消费选定 α 一次；test split 需显式 `--allow_test` 并写访问账本。流水线 `--ngram_split auto`（有非空 `test.bin` → test，否则 val）与神经评测同一规则，从源头避免 val 评测的模型对比 test 基线这类错位。
 
 ## 基线与指标口径（先测最简单的，再谈复杂模型）
 
 - **简单基线不可省**：没有无参数基线时，“PPL=xx”无法区分“数据容易”与“模型好”。n-gram 基线与神经变体用同一 train 拟合、同一 held-out split 评测，给出绝对难度参照。
-- **基线必须调过**：新方法的涨点可能只是超参数红利。`lega/tuning.py` 对基线（standard）做 lr × weight-decay 小网格（默认 lr×{0.5,1,2}），只用验证集选择（`train_log.jsonl` 全评测点最小值，与 `model_best.pt` 同口径；test 从不加载）；`default_is_optimal` 在默认与网格最优的相对差 ≤0.5% 时为真。`run_all --tune_baseline` 把最优组合注入**全部**变体（受控变量仅整体平移），证据写入 `baseline_tuning.json` 并在汇总页渲染；缺证据时汇总页显式警告“未调优基线”。
-- **不平衡指标必须并报且注明口径**：hit/¬hit 判别是类别极不平衡的二分类，`hit_base_rate`（正类率）即 PR-AUC 的随机基线。正类率 <5% 时 AUROC 因负样本基数巨大、FPR 增长缓慢而乐观，**以 PR-AUC（average precision）为主指标**（<0.1% 尤甚）；正类率 ≥5% 时两者并报。F1 一律注明平均口径（`gate_f1` 同时给 macro/micro/weighted 与逐类明细；macro 对稀有类最诚实，汇总表列 macro）。RULER 的 EM 为生成式指标、无决策阈值，不受此影响（fwe 另报召回率）。
+- **与简单基线的差异也要检验**：n-gram 是确定性基线（无种子方差），逐种子神经 PPL 与同一常数做**单样本配对检验**，按变体家族 Holm 校正，报告比值/相对降低/p_adj/判定（`ngram_baseline_comparison` → `significance.json.ngram_comparison`）。split 不一致的变体单列“未纳入比较”，绝不混表。该对比未预注册，标为补充性/探索性证据，不替代变体间受控配对检验。
+- **基线必须调过，调优选择本身也要防噪声**：新方法的涨点可能只是超参数红利。`lega/tuning.py` 对基线（standard）做 lr × weight-decay 小网格（默认 lr×{0.5,1,2}），只用验证集选择（`train_log.jsonl` 全评测点最小值，与 `model_best.pt` 同口径；test 从不加载）；`default_is_optimal` 在默认与网格最优的相对差 ≤0.5% 时为真。单一种子上的网格最大值可能是“幸运种子”选出的假最优（winner's curse）：`--tune_seeds` 让每个组合在多个种子上重复训练、按**平均 val_loss** 选择，报告 `selection_seeds` 与逐种子明细；不指定时只用单一种子（汇总页显式警告），正式实验建议 ≥3 个。`run_all --tune_baseline` 把最优组合注入**全部**变体（受控变量仅整体平移），证据写入 `baseline_tuning.json` 并在汇总页渲染；缺证据时汇总页显式警告“未调优基线”。
+- **不平衡指标必须并报且注明口径**：hit/¬hit 判别是类别极不平衡的二分类，`hit_base_rate`（正类率）即 PR-AUC 的随机基线。正类率 <5% 时 AUROC 因负样本基数巨大、FPR 增长缓慢而乐观，**以 PR-AUC（average precision）为主指标**（<0.1% 尤甚）；正类率 ≥5% 时两者并报。F1 一律注明平均口径（`gate_f1` 同时给 macro/micro/weighted 与逐类明细；macro 对稀有类最诚实，汇总表列 macro）。**任何学习指标都要有无信息对照**：门控 F1 并报恒写/恒不写固定规则的 `gate_f1_trivial`，打不过固定规则就谈不上“门控学会判断”。RULER 的 EM 为生成式指标、无决策阈值，不受此影响（fwe 另报召回率）。
 
 ## 统计推断协议（小样本科研口径）
 
@@ -80,6 +81,15 @@ missing_registry（不可确认）；run_all 把登记表指纹与完整性报�
 自动降级为探索性**（`apply_integrity_gate`），不假装边界仍成立。局限如实声明：
 本机制防御的是静默/意外改写，无法对抗同时改写登记表、锁文件与 git 历史的
 攻击者——那需要外部审计。
+
+**范围核对（锁链完整 ≠ 实验落在范围内）**：登记表声明 `scope`（正式配置的
+模型规模、数据/分词器、种子计划）。汇总时 `registration_scope_check` 把它与
+本次实跑的 `repro.json`（`config_file` 的规模字段、数据指纹的 tokenizer、种子）
+逐项比对：tiny/冒烟/伪数据/非同登记分词器都判范围外，`apply_scope_gate` 与
+完整性门串联，确认性判定同样降级并写明原因；无法核对（缺 repro/config）也不
+默认通过。调优按协议注入的 lr/weight_decay 改变不算越界（本来是 val 选择）；
+未登记种子只警告不降级。登记表未声明 `scope` 的历史登记表则只警告，不因
+“没有可核对字段”本身推翻已通过的完整性判定。
 
 ## 可复现性与 sanity check
 

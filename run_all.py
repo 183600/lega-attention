@@ -793,7 +793,126 @@ def apply_integrity_gate(hyp_eval: list, integrity: dict) -> list:
     return hyp_eval
 
 
-def _render_registration_integrity(integrity: dict) -> list:
+# 预注册 scope 核对的配置字段：模型/训练规模（结论可迁移性的前提）。
+# lr/weight_decay 刻意排除：按本项目协议，基线调优（--tune_baseline）会在
+# 验证集上选定统一超参并注入全部变体，属预注册流程的一部分而非范围外改动。
+_SCOPE_CONFIG_KEYS = ("d_model", "n_layers", "n_heads", "ffn_mult",
+                      "block_size", "steps", "train_ctx")
+
+
+def registration_scope_check(registered: dict, repro: dict,
+                             root: str = ROOT) -> dict:
+    """核对“本次 run 是否落在预注册 scope 内”（confirmatory 资格的前提）。
+
+    预注册假设只在登记的实验范围内具有确认性地位：用 tiny 配置、冒烟
+    步数、字符伪数据或其它规模跑出的“支持/拒绝”不能冒充预注册结论。
+      * smoke 运行 = 明确的范围外；
+      * 配置的模型/训练规模字段逐项比对（lr/wd 除外，见上）；
+      * scope.data 声明 gpt2 BPE 时核对实际数据分词器（伪数据/换词表会
+        改变目标语言建模任务本身，必须显形）；
+      * 额外（未登记）种子只列为 warning：种子可交换、不直接推翻判定，
+        但偏离登记计划必须显式可见，由读者知情。
+    返回 {checked, in_scope, problems, warnings, scope}；无法核对（缺
+    repro/config 文件）时 checked=False、in_scope=None，由
+    apply_scope_gate 按“不可确认”处理，而不是默认通过。
+    """
+    scope = (registered or {}).get("scope") or {}
+    out = {"scope": scope, "checked": False, "in_scope": None,
+           "problems": [], "warnings": []}
+    if not scope:
+        out["warnings"].append("登记表未提供 scope 字段，无法核对实验范围")
+        return out
+    if not repro:
+        out["warnings"].append("缺少 repro.json，无法核对实验范围")
+        return out
+
+    def _load_json(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    checked_any = False
+    if repro.get("smoke"):
+        out["problems"].append("冒烟运行（--smoke）不在预注册范围（正式配置/全部种子）内")
+        checked_any = True
+
+    want_rel = str(scope.get("config") or "")
+    want_path = (want_rel if os.path.isabs(want_rel)
+                 else os.path.join(root, want_rel))
+    got_path = repro.get("config_file")
+    want_cfg, got_cfg = (_load_json(want_path) if want_path else None,
+                         _load_json(got_path) if got_path else None)
+    if want_cfg is None:
+        out["warnings"].append(
+            f"登记 scope.config 不可读（{want_rel or '-'}），跳过配置规模核对")
+    elif got_cfg is None:
+        out["warnings"].append(f"本次配置不可读（{got_path or '-'}），跳过配置规模核对")
+    else:
+        diffs = [f"{k}: 登记={want_cfg.get(k)} vs 实际={got_cfg.get(k)}"
+                 for k in _SCOPE_CONFIG_KEYS
+                 if k in want_cfg and want_cfg.get(k) != got_cfg.get(k)]
+        if diffs:
+            out["problems"].append(
+                "模型/训练规模与预注册配置不一致（" + "；".join(diffs) + "）")
+        checked_any = True
+
+    scope_data = str(scope.get("data") or "")
+    actual_tok = ((repro.get("data") or {}).get("tokenizer")
+                  if isinstance(repro.get("data"), dict) else None)
+    if "gpt2" in scope_data.lower() and actual_tok is not None \
+            and "gpt2" not in str(actual_tok).lower():
+        out["problems"].append(
+            f"数据分词器与预注册不一致（登记含 gpt2 BPE，实际 {actual_tok}）")
+        checked_any = True
+
+    want_seeds = scope.get("seeds")
+    got_seeds = repro.get("seeds")
+    if isinstance(want_seeds, list) and isinstance(got_seeds, list):
+        extra = [s for s in got_seeds if s not in want_seeds]
+        if extra:
+            out["warnings"].append(
+                f"本次含未登记种子 {extra}：判定基于登记计划外的抽样，证据强度打折")
+        checked_any = True
+    out["checked"] = bool(checked_any)
+    if out["problems"]:
+        out["in_scope"] = False
+    elif out["checked"]:
+        out["in_scope"] = True
+    return out
+
+
+def apply_scope_gate(hyp_eval: list, scope_check: dict) -> list:
+    """预注册范围核对失败/无法核对时，确认性判定显式降级。
+
+    与完整性门（apply_integrity_gate）同义：登记表没被篡改，但本次 run
+    根本不在登记范围内（如 tiny 配置、冒烟步数、伪数据、无法核对），
+    此时“支持/拒绝”同样不作数——降级为探索性线索，避免范围外结果
+    冒充预注册结论。
+    """
+    scope_check = scope_check or {}
+    if not scope_check.get("scope"):
+        # 登记表未声明 scope（历史/精简登记表）：无从核对，仅由汇总页告警，
+        # 不因“没有可核对的字段”本身降级已通过的完整性判定。
+        return hyp_eval
+    problems = scope_check.get("problems") or []
+    if not problems and scope_check.get("checked"):
+        return hyp_eval
+    reason = ("本次运行超出预注册范围：" + "；".join(problems)
+              if problems else
+              "无法核对本次运行是否落在预注册范围（缺少 repro/config），"
+              "确认性判定不可确认")
+    for h in hyp_eval or []:
+        if h.get("confirmatory_valid") is False:
+            continue  # 已因完整性失败降级，保留原原因
+        h["confirmatory_valid"] = False
+        h["confirmatory_note"] = reason
+    return hyp_eval
+
+
+def _render_registration_integrity(integrity: dict,
+                                   scope_check: dict = None) -> list:
     """预注册完整性小节：删除/静默改写必须在校验中显形。"""
     integrity = integrity or {}
     st = integrity.get("status")
@@ -822,13 +941,40 @@ def _render_registration_integrity(integrity: dict) -> list:
         lines.append(f"- ⛔ {p}")
     for w in (integrity.get("warnings") or []):
         lines.append(f"- ⚠ {w}")
-    if integrity.get("confirmatory_valid"):
+    # 预注册范围核对：完整性通过不等于本轮 run 落在登记范围内
+    # （tiny 配置/冒烟步数/伪数据跑出的“支持”同样不能冒充确认性结论）。
+    sc = scope_check or {}
+    scope = sc.get("scope") or {}
+    scope_failed = False
+    if scope or sc:
+        # 只有登记表声明了 scope 时才谈得上“范围核对失败”
+        scope_failed = bool(scope) and (
+            bool(sc.get("problems")) or not sc.get("checked"))
+        lines.append("")
+        lines.append("#### 预注册范围核对（确认性资格的前提）")
+        if sc.get("problems"):
+            lines.append("- ⛔ 本次运行超出预注册范围：")
+            for p in sc["problems"]:
+                lines.append(f"  - {p}")
+        elif sc.get("checked"):
+            cfg_note = (f"模型/训练规模与 `{scope.get('config')}` 一致"
+                        if scope.get("config") else "配置已核对")
+            tok_note = ("；数据分词器与 scope.data 一致"
+                        if "gpt2" in str(scope.get("data") or "").lower()
+                        else "")
+            lines.append(f"- ✅ 本次 run 在预注册范围内：{cfg_note}{tok_note}。")
+        else:
+            lines.append("- ⚠ 无法核对预注册范围（缺少 repro/config 信息）："
+                         "确认性判定按“不可确认”降级。")
+        for w in sc.get("warnings") or []:
+            lines.append(f"- ⚠ {w}")
+    if integrity.get("confirmatory_valid") and not scope_failed:
         lines.append("- 修订规则：既有假设只增不改不删；新增假设必须经 "
                      "`python -m lega.hypotheses --amend --reason ...` 留痕，"
                      "否则判违反。")
     else:
-        lines.append("- ⚠ **本页全部“注册假设判定”因完整性未通过而失效"
-                     "（降级为探索性分析）**：登记表/锁链恢复一致后重跑汇总。")
+        lines.append("- ⚠ **本页全部“注册假设判定”因完整性/范围核对未通过而"
+                     "失效（降级为探索性分析）**：修复后重跑汇总。")
     lines.append("")
     return lines
 
@@ -852,13 +998,132 @@ def _fmt4(x) -> str:
         return "-"
 
 
-def _render_baseline_sections(results_dir: str, smoke=None) -> list:
+def _has_test_split(data_dir: str) -> bool:
+    """数据目录是否有非空 test.bin（与 lega.evaluate 的 --split auto 同规则）。"""
+    p = os.path.join(data_dir, "test.bin")
+    return os.path.exists(p) and os.path.getsize(p) > 0
+
+
+def resolve_ngram_split(data_dir: str, requested: str = "auto") -> str:
+    """把 --ngram_split 的 auto 解析为与神经模型评测完全一致的 split。
+
+    口径不一致的陷阱：神经模型的 PPL 默认在 held-out test 上评测
+    （存在 test.bin 时），而 n-gram 基线若固定在 val 上算，汇总页给出的
+    “神经模型 vs 统计基线”就是 test-vs-val 的错位比较（数据集切片不同、
+    难度不同，绝对差值不可解释）。auto 与 lega.evaluate 的 --split auto
+    使用同一条判定规则：test.bin 存在且非空 → test，否则回退 val。
+    """
+    if requested == "auto":
+        return "test" if _has_test_split(data_dir) else "val"
+    return requested
+
+
+def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
+    """神经变体 vs 简单统计基线（同 split）的统计对比。
+
+    科研方法问题：“n-gram PPL=xx” 与 “神经 PPL=yy” 并排放着不构成
+    “复杂模型比简单基线好”的证据——必须同 split、必须对照方差。n-gram
+    对给定 split 是确定值（无种子方差），因此每个神经变体的逐种子 PPL
+    与同一常数配对 = 单样本检验；只在两侧 split 一致的种子上比较，
+    split 不一致的 run 显式列出且不混入（避免 test-vs-val 错位）。
+    多个变体同时对比时沿用 Holm–Bonferroni 校正。该对比不属于预注册
+    假设，标为补充性/探索性证据：用于回答“数据绝对难度有多高、神经
+    模型是否真的优于无梯度基线”，而不是替代变体间的受控对比。
+    """
+    path = os.path.join(results_dir, "ngram_baseline.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            ng = json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+    ppl_map = ng.get("ppl") or {}
+    ref_name = next((k for k in ("bigram", "unigram")
+                     if ppl_map.get(k) is not None), None)
+    if ref_name is None:
+        return {"error": "ngram_baseline.json 没有可用 PPL"}
+    try:
+        ref_ppl = float(ppl_map[ref_name])
+    except (TypeError, ValueError):
+        return {"error": "ngram PPL 非数值"}
+    ng_split = ng.get("split")
+    rows, incomparable = [], []
+    for v in sorted(runs):
+        if v not in VARIANTS:
+            continue
+        m = _variant_seed_map(runs, v)
+        vals, seeds_used, eval_splits = [], [], set()
+        for s in _sorted_seeds(m):
+            d = m[s].get("eval")
+            if not d:
+                continue
+            ev_split = d.get("split", "val")
+            if ev_split != ng_split:
+                eval_splits.add(ev_split)
+                continue
+            p = _ppl_of(d)
+            if p is None or not math.isfinite(p):
+                continue
+            vals.append(p)
+            seeds_used.append(s)
+        if not vals:
+            if eval_splits:
+                incomparable.append({"variant": v,
+                                     "eval_splits": sorted(eval_splits)})
+            continue
+        res = paired_t_test(vals, [ref_ppl] * len(vals))
+        res.update({"candidate": v, "reference": ref_name,
+                    "metric": "PPL vs ngram", "lower_is_better": True})
+        res = _enrich_paired(res, vals, [ref_ppl] * len(vals))
+        mean_ppl = float(sum(vals) / len(vals))
+        rows.append({
+            "variant": v, "n": len(vals), "seeds": [int(s) for s in seeds_used],
+            "mean_ppl": mean_ppl,
+            "std_ppl": mean_std(vals)[1],
+            "ratio": mean_ppl / ref_ppl if ref_ppl > 0 else None,
+            "reduction_pct": (1.0 - mean_ppl / ref_ppl) * 100.0
+            if ref_ppl > 0 else None,
+            "p": res.get("p"), "p_adj": None,
+            "mean_diff": res.get("mean_diff"),
+            "mean_diff_ci95": res.get("mean_diff_ci95"),
+            "p_perm": res.get("p_perm"), "mde": res.get("mde"),
+            "verdict": None,
+        })
+    if not rows:
+        return {"split": ng_split, "reference_model": ref_name,
+                "ngram_ppl": ref_ppl, "rows": [],
+                "incomparable": incomparable,
+                "note": "没有与 n-gram 同 split 的神经评测结果可比"}
+    pads = holm_bonferroni([r.get("p") for r in rows])
+    for r, padj in zip(rows, pads):
+        r["p_adj"] = padj
+        if r["n"] < MIN_SEEDS:
+            r["verdict"] = f"种子不足（n={r['n']}<{MIN_SEEDS}）"
+        elif padj is None:
+            r["verdict"] = "无法检验"
+        elif padj < ALPHA and r["mean_ppl"] < ref_ppl:
+            r["verdict"] = "显著优于统计基线"
+        elif padj < ALPHA:
+            r["verdict"] = "显著劣于统计基线（严重）"
+        else:
+            r["verdict"] = "无显著差异（对照 MDE）"
+    return {"split": ng_split, "reference_model": ref_name,
+            "ngram_ppl": ref_ppl, "rows": rows, "incomparable": incomparable,
+            "holm_family_size": len(rows),
+            "note": ("n-gram 无种子方差：逐种子 PPL 与同一常数配对 = 单样本检验；"
+                     "本对比为补充性/探索性证据，不替代变体间受控对比")}
+
+
+def _render_baseline_sections(results_dir: str, smoke=None,
+                              ngram_cmp: dict = None) -> list:
     """基线合理性小节：简单统计基线 + 基线超参数调优证据。
 
     科研方法问题：如果复杂方法只与“随手设一个学习率”的弱基线比较，
     涨点可能全部来自超参数红利。本小节渲染两类证据：
       1. 简单基线（一元/二元平滑 n-gram）在同一 held-out split 上的 PPL，
-         给出绝对难度参照；
+         给出绝对难度参照，并（ngram_cmp 提供时）逐变体做同 split 的
+         单样本配对检验，回答“神经模型是否显著优于无梯度基线”；
       2. 基线（standard）在验证集上的学习率/权重衰减网格调优结果与
          “默认是否已接近最优”判定。
     缺少调优证据时显式警告“未调优基线”，而不是让读者默认基线已调好。
@@ -897,6 +1162,47 @@ def _render_baseline_sections(results_dir: str, smoke=None) -> list:
     else:
         lines.append("- 简单统计基线：未运行（`python -m lega.ngram`，"
                      "结果写入 `results/<tag>/ngram_baseline.json`）。")
+    # 逐变体 vs 简单基线的同 split 配对对比：只并排报两个数不构成
+    # “复杂模型优于简单基线”的证据，必须给出比值、校正后 p 与判定。
+    cmp = ngram_cmp or {}
+    if cmp.get("rows"):
+        ref = cmp.get("reference_model")
+        lines += [
+            "",
+            f"- 神经变体 vs 简单统计基线（{ref}，split={cmp.get('split')}；"
+            "n-gram 无种子方差 → 逐种子 PPL 与同一常数配对做单样本检验，"
+            f"Holm 校正（家族 {cmp.get('holm_family_size', len(cmp['rows']))} "
+            "个变体）；属补充性/探索性对比）：",
+            "",
+            "| 变体 | n | 神经 PPL(mean) | 统计基线 PPL | 比值 | 相对降低 | p_adj | 判定 |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for r in cmp["rows"]:
+            ratio = (_fmt4(r.get("ratio"))
+                     if r.get("ratio") is not None else "-")
+            red = (f"{r['reduction_pct']:.1f}%"
+                   if r.get("reduction_pct") is not None else "-")
+            padj = (_fmt4(r.get("p_adj"))
+                    if r.get("p_adj") is not None else "-")
+            lines.append(
+                f"| {r.get('variant')} | {r.get('n')} | "
+                f"{_fmt_scalar_maybe(r.get('mean_ppl'))} | "
+                f"{_fmt_scalar_maybe(cmp.get('ngram_ppl'))} | {ratio} | {red} "
+                f"| {padj} | {r.get('verdict')} |")
+        lines += ["",
+                  "  注：比值 <1 且判定“显著优于统计基线”才说明神经模型真的"
+                  "比无梯度基线好；本对比未预注册，只是补充证据，"
+                  "不替代变体间受控配对检验。"]
+    elif cmp.get("error"):
+        lines.append(f"- ⚠ 简单基线对比不可用：{cmp['error']}")
+    elif cmp.get("note") and not cmp.get("rows"):
+        lines.append(f"- ⚠ {cmp['note']}")
+    for item in cmp.get("incomparable") or []:
+        lines.append(
+            f"- ⚠ 变体 `{item.get('variant')}` 的评测 split="
+            f"{item.get('eval_splits')} 与 n-gram split={cmp.get('split')} "
+            "不一致：未纳入比较（不同切片的 PPL 不可比；用 "
+            "`--ngram_split auto` 或对齐后再比较）。")
     tune = None
     tfp = os.path.join(results_dir, "baseline_tuning.json")
     if os.path.exists(tfp):
@@ -909,17 +1215,30 @@ def _render_baseline_sections(results_dir: str, smoke=None) -> list:
         best = tune.get("selected") or {}
         dflt = tune.get("default_trial") or {}
         gap = tune.get("selected_minus_default_val_loss")
+        sel_seeds = tune.get("selection_seeds") or [tune.get("seed")]
+        grid = tune.get("grid") or []
+        n_lr = len({c.get("lr") for c in grid}) if grid else "-"
+        n_wd = len({c.get("weight_decay") for c in grid}) if grid else "-"
+        std = best.get("val_loss_best_std")
         lines.append(
             f"- 基线调优（变体 `{tune.get('variant', 'standard')}`，"
-            f"{tune.get('n_trials', len(tune.get('trials') or []))} 组网格、"
-            f"trial 步数 {tune.get('steps', '-')}（与正式训练同步数与否以"
-            f"此为准）、验证集选择、测试集未使用）：最优 lr={best.get('lr')}"
+            f"网格 {n_lr} 档 lr × {n_wd} 档 wd = "
+            f"{tune.get('n_trials', len(grid) or len(tune.get('trials') or []))} "
+            f"组配置、选择用 {len(sel_seeds)} 个种子、trial 步数 "
+            f"{tune.get('steps', '-')}（与正式训练同步数与否以此为准）、"
+            f"验证集选择、测试集未使用）：最优 lr={best.get('lr')}"
             + (f"、weight_decay={best.get('weight_decay')}"
                if best.get("weight_decay") is not None else "")
-            + f"，最优 val_loss={_fmt4(best.get('val_loss_best', best.get('val_loss')))}；"
-            f"默认 lr={dflt.get('lr')} 的 val_loss="
+            + f"，最优 val_loss={_fmt4(best.get('val_loss_best', best.get('val_loss')))}"
+            + (f" ± {_fmt4(std)}（跨选择种子）" if std is not None else "")
+            + f"；默认 lr={dflt.get('lr')} 的 val_loss="
             f"{_fmt4(dflt.get('val_loss_best', dflt.get('val_loss')))}"
             f"（最优−默认={_fmt4(gap)}）。")
+        if len(sel_seeds) < 2:
+            lines.append("- ⚠ 网格选择只用 1 个种子：val_loss 的种子噪声可能让"
+                         "“最优配置”在下一次抽样中翻转（winner's curse）；"
+                         "多组接近时应改用 `--tune_seeds`（多带几个种子按均值"
+                         "选择）后重跑，不要据此宣称基线已充分调优。")
         if tune.get("default_is_optimal") is True:
             lines.append("- ✅ 默认超参数即为网格最优/在容差内：基线的对比不受"
                          "“选了不利学习率”的质疑。全流水线所有变体使用同一"
@@ -1220,6 +1539,13 @@ def build_summary(results_dir: str, audit: dict = None,
         ("gate_f1_macro", lambda m: _stat_series(
             m, "analysis",
             lambda d: (d.get("gate_f1") or {}).get("macro"))))
+    # 恒写（全判 hit）规则的 macro F1：门控决策的“稻草人”对照。
+    # 不平衡下门控 F1 若不明显高于该固定规则，就没有决策价值。
+    metric_specs.append(
+        ("gate_f1_macro_always_write", lambda m: _stat_series(
+            m, "analysis",
+            lambda d: (((d.get("gate_f1_trivial") or {})
+                        .get("always_write") or {}).get("macro")))))
 
     rows = []
     for v in variants:
@@ -1299,8 +1625,13 @@ def build_summary(results_dir: str, audit: dict = None,
     # 完整性锁链把“事后静默改写登记表”变成可检测事件：校验未通过时
     # 全部确认性判定被显式降级（apply_integrity_gate），不会假装边界仍成立。
     integrity = verify_registration()
-    hyp_eval = apply_integrity_gate(
-        evaluate_registered_hypotheses(registered, tests), integrity)
+    # 范围门：登记表完整还不够——本次 run 必须真的落在登记的实验范围内
+    # （config 规模/数据/种子计划），否则同样不能给 confirmatory 判定。
+    scope_check = registration_scope_check(registered, repro)
+    hyp_eval = apply_scope_gate(
+        apply_integrity_gate(
+            evaluate_registered_hypotheses(registered, tests), integrity),
+        scope_check)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -1317,7 +1648,8 @@ def build_summary(results_dir: str, audit: dict = None,
             ("hit_base_rate", "命中基线率"),
             ("auroc_logit", "AUROC(logit)"), ("auroc_qterm", "AUROC(仅查询)"),
             ("auprc_logit", "PR-AUC(logit)↑"), ("auprc_qterm", "PR-AUC(仅查询)↑"),
-            ("gate_f1_macro", "门控F1(macro)↑")]
+            ("gate_f1_macro", "门控F1(macro)↑"),
+            ("gate_f1_macro_always_write", "恒写基线F1(macro)")]
 
     def fmt_stat_cell(r, key):
         st = {"mean": r.get(key), "std": r.get(f"{key}_std"),
@@ -1344,7 +1676,8 @@ def build_summary(results_dir: str, audit: dict = None,
         stat_keys = {"val_ppl", "ruler_avg", "gate_mean", "misleading_rate",
                      "misleading_given_conc", "auroc_logit", "auroc_qterm",
                      "auprc_logit", "auprc_qterm", "hit_base_rate",
-                     "gate_f1_macro"} | {f"ruler_{t}" for t in ruler_tasks}
+                     "gate_f1_macro", "gate_f1_macro_always_write"} \
+            | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
         md += [header, sep]
@@ -1379,8 +1712,11 @@ def build_summary(results_dir: str, audit: dict = None,
             "FPR 增长缓慢而过于乐观，结论应以 PR-AUC 为主（极度不平衡 <0.1% "
             "时更是如此），两者并报供对照。F1 一律为 **macro**（各类等权，对"
             "稀有类最诚实）；micro/weighted 与逐类明细见 analysis_*.json 的 "
-            "`gate_f1`（门控 g>0.5 决策点）。RULER 的 EM 是生成式准确率、"
-            "无决策阈值，不受此口径影响；fwe 另报召回率。",
+            "`gate_f1`（门控 g>0.5 决策点）。门控 F1 必须对照"
+            "“恒写基线F1(macro)”（恒判写入的固定规则）：不高于这个无信息"
+            "基线时，门控的决策价值不成立（`gate_f1_trivial` 另含恒不写"
+            "规则）。RULER 的 EM 是生成式准确率、无决策阈值，不受此口径"
+            "影响；fwe 另报召回率。",
             seed_note, split_note, ""]
         if common_ctx is not None:
             cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
@@ -1389,9 +1725,11 @@ def build_summary(results_dir: str, audit: dict = None,
     else:
         md.append("（暂无结果，先运行训练评测）")
 
-    # --- 基线合理性（简单统计基线 + 基线调优证据）
+    # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线）
+    ngram_cmp = ngram_baseline_comparison(runs, results_dir)
     md += _render_baseline_sections(results_dir,
-                                    smoke=bool((repro or {}).get("smoke")))
+                                    smoke=bool((repro or {}).get("smoke")),
+                                    ngram_cmp=ngram_cmp)
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
@@ -2021,7 +2359,7 @@ def build_summary(results_dir: str, audit: dict = None,
 
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
-    md += _render_registration_integrity(integrity)
+    md += _render_registration_integrity(integrity, scope_check=scope_check)
     if hyp_eval:
         n_sup = sum(1 for h in hyp_eval if h["status"] == "支持")
         n_ref = sum(1 for h in hyp_eval if h["status"] == "拒绝")
@@ -2272,6 +2610,8 @@ def build_summary(results_dir: str, audit: dict = None,
                    "registered_hypotheses_source": (
                        "preregistration/hypotheses.json" if hyp_eval else None),
                    "registration_integrity": integrity,
+                   "registration_scope": scope_check,
+                   "ngram_comparison": ngram_cmp,
                    "auroc_diff_note": (
                        f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
                        "(变体, 种子) run 的 auroc_logit − auroc_qterm 配对差，"
@@ -2328,10 +2668,18 @@ def main():
                    help="调优网格的 lr 乘子（逗号分隔，默认 0.5,1,2）")
     p.add_argument("--tune_wd_list", default=None,
                    help="调优网格的 weight_decay 列表（逗号分隔；默认仅配置值）")
+    p.add_argument("--tune_seeds", default=None,
+                   help="调优选择用的种子（逗号分隔；默认只用首个正式种子）。"
+                        "单种子选择可能被 val_loss 噪声左右（winner's curse），"
+                        "正式实验建议给 ≥3 个（网格配置数 × 种子数 次训练）")
     p.add_argument("--skip_ngram", action="store_true",
                    help="跳过简单统计基线（一元/二元平滑 n-gram PPL）")
-    p.add_argument("--ngram_split", default="val", choices=["val", "test"],
-                   help="n-gram 基线评测 split（默认 val；test 会写访问账本）")
+    p.add_argument("--ngram_split", default="auto",
+                   choices=["auto", "val", "test"],
+                   help="n-gram 基线评测 split；auto（默认）与 lega.evaluate 的 "
+                        "--split auto 同规则：有非空 test.bin 用 held-out test，"
+                        "否则回退 val——保证与神经模型 PPL 同 split 可比；"
+                        "test 会写访问账本")
     p.add_argument("--jobs", type=int, default=None,
                    help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
                         "min(4, 核数)（<=4 核时为核数+1），CUDA 或 --wandb 下为 1")
@@ -2383,9 +2731,11 @@ def main():
         print("[tuning] --skip_train：跳过基线调优（没有要训练的新 run）")
     elif args.tune_baseline:
         tune_root = os.path.join(out_root, "_baseline_tuning")
+        tune_seeds = ([int(s.strip()) for s in args.tune_seeds.split(",")
+                       if s.strip()] if args.tune_seeds else None)
         tune_report = tune_baseline(
             args.config, args.data_dir, tune_root, variant="standard",
-            seed=seeds[0], steps=args.tune_steps,
+            seed=seeds[0], seeds=tune_seeds, steps=args.tune_steps,
             lr_mults=parse_floats(args.tune_lr_mults),
             wd_list=(parse_floats(args.tune_wd_list)
                      if args.tune_wd_list else None),
@@ -2402,14 +2752,16 @@ def main():
               f"wd={cfg['weight_decay']:.3g} -> {tuned_path}")
 
     # 简单统计基线：一元/二元平滑 n-gram 的 held-out PPL，给出“数据绝对难度”
-    # 参照（零训练零参数；平滑系数只在 val 上选）。默认 val；test 需显式选择
-    # 并写访问账本。
+    # 参照（零训练零参数；平滑系数只在 val 上选）。split 默认 auto：与神经
+    # 模型的评测 split 完全一致（test.bin 存在且非空 → held-out test），
+    # 否则汇总页的“神经 vs 统计基线”会变成 test-vs-val 的错位比较。
     if not args.skip_ngram:
+        ngram_split = resolve_ngram_split(args.data_dir, args.ngram_split)
         try:
-            ng = ngram_evaluate(args.data_dir, split=args.ngram_split,
-                                allow_test=(args.ngram_split == "test"))
+            ng = ngram_evaluate(args.data_dir, split=ngram_split,
+                                allow_test=(ngram_split == "test"))
             save_json(ng, os.path.join(results_dir, "ngram_baseline.json"))
-            print(f"[ngram] 简单基线 {args.ngram_split} PPL: "
+            print(f"[ngram] 简单基线 {ngram_split} PPL: "
                   f"unigram={ng['ppl'].get('unigram')} "
                   f"bigram={ng['ppl'].get('bigram')} "
                   f"(α={ng['selected_alpha']})")

@@ -174,6 +174,18 @@ def test_summarize_reports_imbalance_aware_metrics():
         assert 0.0 <= gf[k] <= 1.0
     assert gf["macro"] <= gf["micro"] + 1e-12
     assert set(gf["per_class"]) == {"0", "1"}
+    # 固定规则“稻草人”对照：恒写/恒不写 F1 必须并报（不平衡下学习 F1
+    # 只有高于多数类固定规则才说明门控真有决策价值）
+    triv = s["gate_f1_trivial"]
+    assert triv and set(triv) >= {"always_write", "never_write"}
+    p_base = 19 / 400
+    # 恒写规则的 micro F1 在二分类下等于正类率（= 全判正的准确率）
+    assert abs(triv["always_write"]["micro"] - p_base) < 1e-9
+    f1_pos = 2 * p_base / (1 + p_base)
+    assert abs(triv["always_write"]["macro"] - f1_pos / 2) < 1e-9
+    assert triv["never_write"]["macro"] is not None
+    # 学习门控（此例完美）必须显著优于恒写基线
+    assert gf["macro"] > triv["always_write"]["macro"]
     # 不平衡温和时主指标改为并报（避免阈值语义被误解为“禁止 AUROC”）
     mild = [dict(r) for r in records]
     for i, r in enumerate(mild):
@@ -186,4 +198,5 @@ def test_summarize_reports_imbalance_aware_metrics():
                      "layer": 0, "head": 0, "query_pos": 0}],
                    "lega", 0.5)
     assert s3["gate_f1"] is None
+    assert s3["gate_f1_trivial"] is None   # 无标签时不报稻草人对照
     print("  [ok] summarize（正类率/主指标/PR-AUC/三口径门控 F1）")

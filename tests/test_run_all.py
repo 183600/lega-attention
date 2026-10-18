@@ -18,10 +18,13 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _lat_noise_pct, _noise_floor_pct,
                       _rel_pct, _render_baseline_sections, _resolve_jobs, _stat,
-                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE, build_summary,
+                      apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
+                      build_summary,
                       component_evidence, cross_variant_badcase_map,
                       evaluate_registered_hypotheses,
-                      load_registered_hypotheses, parse_variants, run_many,
+                      load_registered_hypotheses, ngram_baseline_comparison,
+                      parse_variants, registration_scope_check,
+                      resolve_ngram_split, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
 
@@ -1032,6 +1035,120 @@ def test_render_baseline_sections_reads_evidence_and_warns():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] _render_baseline_sections（证据渲染/缺失警告）")
+
+
+def test_resolve_ngram_split_auto_matches_neural_eval_rule():
+    """auto 必须与 lega.evaluate 的 --split auto 同规则：有非空 test.bin → test。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        assert resolve_ngram_split(tmp, "auto") == "val"
+        with open(os.path.join(tmp, "test.bin"), "wb") as f:
+            f.write(b"")
+        assert resolve_ngram_split(tmp, "auto") == "val"   # 空文件不算
+        with open(os.path.join(tmp, "test.bin"), "wb") as f:
+            f.write(b"\x01")
+        assert resolve_ngram_split(tmp, "auto") == "test"
+        assert resolve_ngram_split(tmp, "val") == "val"    # 显式选择透传
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] resolve_ngram_split（auto 与神经评测 split 规则一致）")
+
+
+def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
+    """神经变体 vs 简单基线：同 split 才可比、单样本配对检验 + Holm 判定。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "test", "ppl": {"unigram": 200.0, "bigram": 100.0},
+            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
+        runs = {}
+        for v, base in (("standard", 30.0), ("lega", 20.0)):
+            runs[v] = {s: {"eval": {"variant": v, "split": "test",
+                                    "ppl": base + s}}
+                       for s in (1, 2, 3)}
+        out = ngram_baseline_comparison(runs, tmp)
+        assert out["split"] == "test" and out["reference_model"] == "bigram"
+        assert abs(out["ngram_ppl"] - 100.0) < 1e-12
+        rows = {r["variant"]: r for r in out["rows"]}
+        assert rows["lega"]["n"] == 3
+        assert abs(rows["lega"]["ratio"] - 22.0 / 100.0) < 1e-12
+        assert rows["lega"]["verdict"] == "显著优于统计基线"
+        assert rows["lega"]["p_adj"] is not None and rows["lega"]["p_adj"] < ALPHA
+        # 显著劣于统计基线要被点名（神经模型连 n-gram 都打不过）
+        runs_bad = {"lega": {s: {"eval": {"variant": "lega", "split": "test",
+                                          "ppl": 120.0 + s}}
+                             for s in (1, 2, 3)}}
+        out_bad = ngram_baseline_comparison(runs_bad, tmp)
+        assert out_bad["rows"][0]["verdict"] == "显著劣于统计基线（严重）"
+        # split 错位（val 评测 vs test 基线）不得混入比较，必须显式列出
+        runs_mix = {"qgate": {1: {"eval": {"variant": "qgate", "split": "val",
+                                            "ppl": 25.0}}}}
+        out_mix = ngram_baseline_comparison(runs_mix, tmp)
+        assert out_mix["rows"] == []
+        assert out_mix["incomparable"][0]["variant"] == "qgate"
+        # 渲染：比较表与错位警告都必须出现在基线小节
+        text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
+        assert "显著优于统计基线" in text and "比值" in text
+        text_mix = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out_mix))
+        assert "不一致" in text_mix and "未纳入比较" in text_mix
+        # 文件缺失 → 空报告（调用方按“未运行”渲染）
+        tmp2 = tempfile.mkdtemp()
+        try:
+            assert ngram_baseline_comparison(runs, tmp2) == {}
+        finally:
+            shutil.rmtree(tmp2, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram_baseline_comparison（同 split 配对、Holm、错位隔离）")
+
+
+def test_registration_scope_check_and_gate():
+    """登记表完整还不够：run 必须落在登记范围内，否则确认性判定降级。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg_cfg = os.path.join(tmp, "registered.json")
+        act_cfg = os.path.join(tmp, "actual.json")
+        base = {"d_model": 384, "n_layers": 6, "n_heads": 6, "ffn_mult": 4,
+                "block_size": 1024, "steps": 8000, "train_ctx": 1024,
+                "lr": 6e-4, "weight_decay": 0.1}
+        _write_json(reg_cfg, base)
+        # 调优注入的 lr/wd 改变不算越界（协议内），其它字段必须一致
+        _write_json(act_cfg, dict(base, lr=3e-4))
+        registered = {"scope": {"config": reg_cfg, "seeds": [1, 2, 3],
+                                "data": "WikiText-103 (gpt2 BPE)"}}
+        repro = {"config_file": act_cfg, "seeds": [1, 2, 4], "smoke": False,
+                 "data": {"tokenizer": "gpt2"}}
+        sc = registration_scope_check(registered, repro)
+        assert sc["checked"] and sc["in_scope"] is True and not sc["problems"]
+        assert any("4" in w for w in sc["warnings"])   # 未登记种子显式警告
+        hyp = [{"id": "H1", "confirmatory_valid": True}]
+        assert apply_scope_gate(hyp, sc)[0]["confirmatory_valid"] is True
+        # 训练规模与登记配置不一致（如 tiny 配置冒充正式实验）→ 范围外
+        _write_json(act_cfg, dict(base, steps=100))
+        sc2 = registration_scope_check(registered, repro)
+        assert sc2["in_scope"] is False and sc2["problems"]
+        hyp2 = [{"id": "H1", "confirmatory_valid": True}]
+        assert apply_scope_gate(hyp2, sc2)[0]["confirmatory_valid"] is False
+        _write_json(act_cfg, base)
+        # 伪数据（字符分词）冒充 gpt2 BPE → 范围外
+        sc3 = registration_scope_check(
+            registered, {"config_file": act_cfg, "seeds": [1],
+                         "smoke": False, "data": {"tokenizer": "char"}})
+        assert sc3["in_scope"] is False
+        assert any("分词器" in p for p in sc3["problems"])
+        # 冒烟运行 → 范围外
+        sc4 = registration_scope_check(
+            registered, {"config_file": act_cfg, "seeds": [1],
+                         "smoke": True, "data": {"tokenizer": "gpt2"}})
+        assert sc4["in_scope"] is False
+        # 缺 repro → 不可确认（不能默认通过）→ 降级
+        sc5 = registration_scope_check(registered, {})
+        assert sc5["checked"] is False and sc5["in_scope"] is None
+        hyp5 = [{"id": "H1", "confirmatory_valid": True}]
+        assert apply_scope_gate(hyp5, sc5)[0]["confirmatory_valid"] is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] registration_scope_check/apply_scope_gate（范围外降级）")
 
 
 def test_registered_hypotheses_evaluation():

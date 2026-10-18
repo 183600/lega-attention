@@ -73,17 +73,18 @@ A/B/C（去一法：Full−X 显著变差；全因子：仅 X 显著优于无门
   4. **清洗与异常检查**：坏字符（U+FFFD/NUL/非法控制符）确定性清除；token 流做整数/有限/id 越界硬校验；重复样本、超长行、train 与 val/test 的一元分布漂移（TV/JS、OOV）全部写入 `data_report.json`；
   5. **测试集尘封**：checkpoint 选择与早停只用 val，test 只在最终评估时访问；每次 test 评测写入 `data_dir/.test_access_log.jsonl` 账本，汇总表报告累计次数与被重复评测的 checkpoint。
 - **公平对比（受控变量）**：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/训练步数/数据顺序），训练后双层自动核对：`config_used.json`（超参数逐项一致）与 `eval.json` 溯源（数据指纹、代码 commit、配置 SHA-256、实际训练步数与 tokens_seen 一致，并与本次流水线数据比对），任何差异都会直接报错；模型初始化完成后统一重放随机种子，使各变体的训练期随机流（dropout 等）也完全一致——把“公平对比”从口头约定变成可执行断言。
-- **调过的基线（防“超参数红利”误归因）**：加 `--tune_baseline` 时先对**基线（standard）**做 lr × weight-decay 小网格搜索——只用验证集选择（`lega/tuning.py`，test 从不加载），选定组合**统一注入全部变体**训练；输出 `results/<tag>/baseline_tuning.json`（含 `default_is_optimal`：默认超参数与网格最优的 val_loss 差是否在 0.5% 容差内）并在汇总页渲染。没有这条证据时，汇总页显式警告“未调优基线”，而不是默认基线已调好。**简单统计基线**：`lega/ngram.py` 给出与神经模型同 split 的一元/二元平滑 n-gram PPL（α 只在 val 上选），回答“数据绝对难度有多高、神经模型是否显著优于无参数基线”。
+- **调过的基线（防“超参数红利”误归因）**：加 `--tune_baseline` 时先对**基线（standard）**做 lr × weight-decay 小网格搜索——只用验证集选择（`lega/tuning.py`，test 从不加载），选定组合**统一注入全部变体**训练；输出 `results/<tag>/baseline_tuning.json`（含 `default_is_optimal`：默认超参数与网格最优的 val_loss 差是否在 0.5% 容差内）并在汇总页渲染。没有这条证据时，汇总页显式警告“未调优基线”，而不是默认基线已调好。选择本身也有噪声：`--tune_seeds` 让每个网格组合在多个种子上重复训练、**按平均 val_loss 选择**，报告 `selection_seeds`/逐种子明细；不指定时只用单个种子（首个正式种子），汇总页会显式警告 winner's curse（“幸运种子”可能把更差的配置选成最优），正式实验建议给 ≥3 个。**简单统计基线**：`lega/ngram.py` 给出与神经模型同 split 的一元/二元平滑 n-gram PPL（α 只在 val 上选），回答“数据绝对难度有多高、神经模型是否显著优于无参数基线”。
+- **对简单基线的显著性（补充性对比）**：`--ngram_split` 默认 `auto`，与神经评测同一规则（有非空 `test.bin` → test，否则 val），从根上避免 val 评测的神经模型与 test 基线的错位比较；汇总页把**每个变体逐种子 PPL 与同一常数基线做单样本配对检验**（n-gram 无种子方差），按变体家族 Holm 校正，输出比值/相对降低/p_adj/判定；split 不一致的变体单列为“未纳入比较”，绝不混进表里。此对比未预注册，标注为探索性证据，不替代变体间受控配对检验。
 - **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std** 与配对 Cohen's d 效应量（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对的双侧 t 检验在同一指标家族内做 **Holm–Bonferroni 校正**（控制多重比较 FWER），结论一律基于校正后 p 值（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益。
-- **预注册与防事后改写（confirmatory vs exploratory）**：正式实验前把方向性主张登记在 `preregistration/hypotheses.json`（**刻意不放 `docs/`**：流水线清理会删除该目录下除 `design_notes.md` 外的文件，该登记表曾被自动清理提交多次误删），汇总时逐条对照 Holm 校正后的同种子配对检验，判定 支持 / 拒绝（方向相反且显著=被证伪）/ 未定（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与 `significance.json`；未登记的对比一律属事后（exploratory），只能作为线索。登记表由 `preregistration/hypotheses.lock.json` 防篡改：锁基线记录整文档 SHA-256 与**逐假设科学内容摘要**，修订必须经 `python -m lega.hypotheses --amend --reason ...` 在**修订链**上留痕（既有假设只增不改不删）。删除登记表、改写 claim、调换变体对、删条目或未留痕新增，都会被 `--verify`／汇总页判为 `violated`，并**自动把全部确认性判定降级为探索性**；登记表的意外删除与恢复/迁移事件本身也必须在 amendments 中留痕（本项目已发生过一次清理误删，见 `docs/design_notes.md`）。
+- **预注册与防事后改写（confirmatory vs exploratory）**：正式实验前把方向性主张登记在 `preregistration/hypotheses.json`（**刻意不放 `docs/`**：流水线清理会删除该目录下除 `design_notes.md` 外的文件，该登记表曾被自动清理提交多次误删），汇总时逐条对照 Holm 校正后的同种子配对检验，判定 支持 / 拒绝（方向相反且显著=被证伪）/ 未定（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与 `significance.json`；未登记的对比一律属事后（exploratory），只能作为线索。登记表由 `preregistration/hypotheses.lock.json` 防篡改：锁基线记录整文档 SHA-256 与**逐假设科学内容摘要**，修订必须经 `python -m lega.hypotheses --amend --reason ...` 在**修订链**上留痕（既有假设只增不改不删）。删除登记表、改写 claim、调换变体对、删条目或未留痕新增，都会被 `--verify`／汇总页判为 `violated`，并**自动把全部确认性判定降级为探索性**；登记表的意外删除与恢复/迁移事件本身也必须在 amendments 中留痕（本项目已发生过一次清理误删，见 `docs/design_notes.md`）。锁链完整还不够：汇总页还做**预注册范围核对**——登记表里的 `scope`（配置规模、数据/分词器、种子计划）必须与本次实跑（`repro.json` 的 `config_file`/数据指纹/种子）对上；tiny/冒烟/伪数据/非同登记分词器都会判为范围外，确认性判定同样自动降级（调优注入 lr/权重衰减属协议内，不算越界；未登记种子只警告）。
 - **三个评测维度**：
-  1. **困惑度**（WikiText-103 PPL：checkpoint 选择在 val 上完成，PPL 在 held-out test 上评测，无 test 时回退 val）；评估窗口不重复，并在整个评测集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；同 split 的**一元/二元平滑 n-gram PPL** 作为简单统计基线并报（`ngram_baseline.json`），避免“绝对难度未知”下解读神经模型分数；
+  1. **困惑度**（WikiText-103 PPL：checkpoint 选择在 val 上完成，PPL 在 held-out test 上评测，无 test 时回退 val）；评估窗口不重复，并在整个评测集上等间隔抽样（窗口数不足时评估全部）；`gate_mean` 与 PPL 使用同一批窗口、同一精度口径；**一元/二元平滑 n-gram PPL** 作为简单统计基线并报（`ngram_baseline.json`），默认与神经评测同一 split（`--ngram_split auto`，避免错位比较），避免“绝对难度未知”下解读神经模型分数；
   2. **RULER 长上下文检索**（简化复现 5 任务）：`niah_synth`（合成干扰单键检索）、`niah_corpus`（自然文本干扰）、`niah_multikey`（多键干扰）、`fwe`（高频词提取）、`vt`（变量追踪）；多档上下文长度 + 贪心解码；数值任务 EM **只承认生成内容中的第一个数值回答**，避免"先答错后蒙中"被计分；
   3. **实际推理延迟**：生成推理口径的 prefill（只算最后位置 logits）与带 KV 缓存的逐 token decode，对比 SDPA 快速路径。
 - **核心风险检验（不能只看"注意力沉降减少"）**：`lega/analysis.py` 用带 gold 跨度的 RULER 样例做机制分析：
   - **misleading_rate**：注意力很集中（$\max_j p_j>\tau$）但落点不在答案数值跨度（value_span）内的比率 —— hit 判定以答案数值的精确 token 跨度为准（而非整条 needle 句），"集中 ≠ 找对"的直接证据；
   - **P(hit | 集中)** vs **P(hit | 不集中)**；
-  - **AUROC 与 PR-AUC（不平衡口径并报）**：门控分数区分"找对/没找对"的能力，且 **LEGA 的完整 logit vs 仅查询项 $w^\top q$ 的 AUROC 之差 / PR-AUC（average precision）之差**，直接回答"结合长度校准后的注意力统计是否比只看查询更能判断该不该写入"。hit/¬hit 是类别极不平衡的二分类（正类率即 `hit_base_rate`），正类率 <5% 时 AUROC 会因负样本基数巨大而乐观，**以 PR-AUC 为主指标**（其随机基线恰为正类率，便于对照）；正类率 <0.1% 时尤其如此。**门控决策点 F1**（$g>0.5$）同时给出 **macro / micro / weighted 三口径**（`analysis_*.json` 的 `gate_f1`，汇总表列 macro）——不平衡数据下三者差异巨大，任何只写"F1"而不注明平均口径的表格都不完整；RULER 的 EM 是生成式指标、无阈值，不受此影响（fwe 另报召回率）。
+  - **AUROC 与 PR-AUC（不平衡口径并报）**：门控分数区分"找对/没找对"的能力，且 **LEGA 的完整 logit vs 仅查询项 $w^\top q$ 的 AUROC 之差 / PR-AUC（average precision）之差**，直接回答"结合长度校准后的注意力统计是否比只看查询更能判断该不该写入"。hit/¬hit 是类别极不平衡的二分类（正类率即 `hit_base_rate`），正类率 <5% 时 AUROC 会因负样本基数巨大而乐观，**以 PR-AUC 为主指标**（其随机基线恰为正类率，便于对照）；正类率 <0.1% 时尤其如此。**门控决策点 F1**（$g>0.5$）同时给出 **macro / micro / weighted 三口径**（`analysis_*.json` 的 `gate_f1`，汇总表列 macro）——不平衡数据下三者差异巨大，任何只写"F1"而不注明平均口径的表格都不完整；同时并报**固定规则稻草人对照 `gate_f1_trivial`**（恒写/恒不写），门控若打不过无信息基线则谈不上决策价值（汇总表列“恒写基线F1(macro)”）；RULER 的 EM 是生成式指标、无阈值，不受此影响（fwe 另报召回率）。
 
 ---
 
@@ -122,14 +123,19 @@ wandb login
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --wandb
 
 # 可选（推荐）：先调基线再全量训练——standard 的 lr/权重衰减网格（仅用 val），
-# 选定组合统一用于所有变体，证据写入 results/<tag>/baseline_tuning.json
-python run_all.py --config configs/small.json --data_dir data/wikitext103 --tune_baseline
+# 每组合跑 --tune_seeds 指定的多种子并按平均 val_loss 选择（防幸运种子，
+# 默认沿用 --seeds），选定组合统一用于所有变体，证据写入
+# results/<tag>/baseline_tuning.json
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+  --tune_baseline --tune_seeds 1337,2024,42
 
 # 可选：早停——验证连续 N 次评测无实质改善即终止（默认关闭；启用后各变体
 # 实际步数可不同，受控变量审计按计划步数核对，汇总页会标注「早停」）
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --early_stop_patience 5
 
-# 简单统计基线可单独运行（默认 val；test 需显式选择并写访问账本）
+# 简单统计基线可单独运行（默认 val；test 需显式选择并写访问账本）。
+# 全流水线里 --ngram_split auto（默认）会与神经评测同 split；神经变体
+# 逐种子 PPL 与基线做单样本配对检验 + Holm 校正并渲染进汇总页
 python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram_baseline.json
 ```
 
@@ -145,9 +151,9 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 | `results/experiments.jsonl` | **追加式实验台账：每轮 run 的 run_id、代码版本、配置 SHA-256、种子、数据指纹、sanity 结论、逐 run 最终指标与产物哈希（started/completed 生命周期）** |
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
-| `results/<tag>/baseline_tuning.json` | 基线（standard）lr/权重衰减调优证据（仅验证集；含 `default_is_optimal` 近优判定与逐 trial 训练溯源） |
-| `results/<tag>/ngram_baseline.json` | 简单统计基线：一元/二元平滑 n-gram 的 held-out PPL（α 在 val 上选，test 需显式开锁） |
-| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）与 `registered_hypotheses`（逐条判定） |
+| `results/<tag>/baseline_tuning.json` | 基线（standard）lr/权重衰减调优证据（仅验证集；含 `default_is_optimal` 近优判定、`selection_seeds`/逐种子 val_loss 明细与逐 trial 训练溯源） |
+| `results/<tag>/ngram_baseline.json` | 简单统计基线：一元/二元平滑 n-gram 的 held-out PPL（α 在 val 上选，test 需显式开锁；流水线默认与神经评测同 split） |
+| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）、`registration_scope`（范围核对：配置规模/分词器/种子计划）与 `registered_hypotheses`（逐条判定）；另含 `ngram_comparison`（逐变体 vs 简单基线单样本配对检验） |
 | `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合（含训练停滞+验证回升的平台期）/过拟合趋势（训练降而验证停滞）/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe）+ 粗归因轴计数 + **改进方向**（触发证据→建议→下一步实验） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现）+ **改进方向** |
@@ -231,15 +237,15 @@ lega-attention/
 │   ├── evaluate.py            # held-out test PPL（缺 test.bin 时回退 val）
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
 │   ├── latency.py             # prefill / decode 延迟基准
-│   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC + PR-AUC（不平衡主指标）+ 门控 F1（三口径）
-│   ├── ngram.py               # 简单统计基线：一元/二元平滑 n-gram PPL（α 只在 val 选；test 需开锁并记账）
+│   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC + PR-AUC（不平衡主指标）+ 门控 F1（三口径 + 恒写/恒不写稻草人对照）
+│   ├── ngram.py               # 简单统计基线：一元/二元平滑 n-gram PPL（α 只在 val 选；test 需开锁并记账；流水线默认按 auto 与神经评测同 split）
 │   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度尖峰）+ 处理建议
 │   ├── badcase.py             # 错误样本归因（RULER + 语言建模最差窗口）+ 跨变体对照 + 改进方向合成
 │   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
 │   ├── repro.py               # 代码版本/数据指纹/运行环境/种子审计/溯源继承
 │   ├── experiment.py          # 追加式实验台账（跨轮次记录代码/配置/种子/数据/结果哈希）
 │   ├── hypotheses.py          # 预注册完整性：锁基线 + 修订链 + 防篡改校验（CLI --verify/--init/--amend）
-│   ├── tuning.py              # 基线（standard）lr/权重衰减网格调优（仅验证集；default_is_optimal 判定）
+│   ├── tuning.py              # 基线（standard）lr/权重衰减网格调优（仅验证集；多种子按均值选择，default_is_optimal 判定）
 │   ├── plots.py               # 中文标注图表（PNG，含训练曲线）
 │   └── utils.py               # 种子/JSON/AUROC/PR-AUC/F1/Pearson（无 scipy 依赖）
 ├── preregistration/           # 预注册（刻意不放 docs/：流水线清理会删除 docs/ 下非白名单文件）

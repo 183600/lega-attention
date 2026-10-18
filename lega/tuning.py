@@ -144,65 +144,118 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
     return rec
 
 
+def _grid_stats(grid, trials, seeds):
+    """把逐 (配置, 种子) trial 聚合为逐配置统计（选择只看验证集）。
+
+    单种子选择容易被 val_loss 的种子噪声左右（winner's curse）：网格里
+    “最优配置”换一个种子重跑就可能翻转。多种子时按平均 val_loss 选择，
+    并给出跨种子标准差，让“最优−默认”的差距可对照噪声解读。
+    """
+    out = []
+    for lr, wd in grid:
+        ts = [t for t in trials if t["lr"] == lr and t["weight_decay"] == wd]
+        per_seed = {str(t.get("seed")): t.get("val_loss_best") for t in ts}
+        vals = [t["val_loss_best"] for t in ts
+                if t.get("val_loss_best") is not None]
+        mean = (sum(vals) / len(vals)) if vals else None
+        std = None
+        if len(vals) >= 2:
+            var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+            std = math.sqrt(var)
+        out.append({
+            "lr": lr, "weight_decay": wd,
+            "n_seeds": len(vals), "n_failed": len(ts) - len(vals),
+            "seeds": [int(s) for s in seeds],
+            "val_loss_best": mean,            # 兼容名：多种子时为均值
+            "val_loss_best_mean": mean,
+            "val_loss_best_std": std,
+            "val_loss_best_per_seed": per_seed,
+        })
+    return out
+
+
 def tune(config: str, data_dir: str, out_dir: str,
          variant: str = "standard", seed=None, steps=None,
          lr_mults=DEFAULT_LR_MULTS, wd_list=None, device: str = "auto",
-         tolerance: float = DEFAULT_TOLERANCE, timeout=None) -> dict:
-    """执行基线网格调优并落盘 `baseline_tuning.json`。"""
+         tolerance: float = DEFAULT_TOLERANCE, timeout=None,
+         seeds=None) -> dict:
+    """执行基线网格调优并落盘 `baseline_tuning.json`。
+
+    选择口径：seeds=None 时只用配置种子（或显式 seed）；传 seeds=[...]
+    时每个网格配置在每个种子上各训练一次，按**平均 val_loss** 选择。
+    报告里 `single_seed_selection` 显式标注“只用 1 个种子选择”——此时
+    网格最优可能只是该种子的幸运值，不能据此宣称基线已充分调优。
+    """
     with open(config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     lr0 = float(cfg["lr"])
     wd0 = float(cfg.get("weight_decay", 0.1))
-    seed = int(cfg.get("seed", 1337) if seed is None else seed)
+    if seeds is None:
+        seeds = [int(cfg.get("seed", 1337) if seed is None else seed)]
+    else:
+        seeds = [int(s) for s in seeds] or [int(cfg.get("seed", 1337))]
+    seed = seeds[0]  # 兼容字段：报告里的主（第一个）选择种子
     steps = int(cfg["steps"] if steps is None else steps)
     grid = build_grid(lr0, wd0, lr_mults=lr_mults, wd_list=wd_list)
     trials = []
     for lr, wd in grid:
-        tdir = os.path.join(out_dir, _trial_name(lr, wd))
-        print(f"[tuning] trial lr={lr:.3g} wd={wd:.3g} -> {tdir}")
-        rec = run_trial(config, data_dir, variant, seed, lr, wd, steps, tdir,
-                        device=device, timeout=timeout)
-        status = (f"val_loss={rec['val_loss_best']:.4f}"
-                  if rec.get("val_loss_best") is not None
-                  else f"FAILED: {rec.get('error', '')[:120]}")
-        print(f"[tuning]   {status}")
-        trials.append(rec)
-    ok = [t for t in trials if t.get("val_loss_best") is not None]
+        for s in seeds:
+            tdir = os.path.join(out_dir, _trial_name(lr, wd)
+                                + (f"_seed{s}" if len(seeds) > 1 else ""))
+            print(f"[tuning] trial lr={lr:.3g} wd={wd:.3g} seed={s} -> {tdir}")
+            rec = run_trial(config, data_dir, variant, s, lr, wd, steps, tdir,
+                            device=device, timeout=timeout)
+            status = (f"val_loss={rec['val_loss_best']:.4f}"
+                      if rec.get("val_loss_best") is not None
+                      else f"FAILED: {rec.get('error', '')[:120]}")
+            print(f"[tuning]   {status}")
+            trials.append(rec)
+    grid_stats = _grid_stats(grid, trials, seeds)
+    ok = [g for g in grid_stats if g["val_loss_best_mean"] is not None]
     if not ok:
         raise RuntimeError("全部 trial 失败，无法完成基线调优；"
                            "请检查训练日志（各 trial 目录 stderr 已记录）")
-    selected = min(ok, key=lambda t: t["val_loss_best"])
-    default = next((t for t in ok
-                    if t["lr"] == lr0 and t["weight_decay"] == wd0), None)
+    selected = min(ok, key=lambda g: g["val_loss_best_mean"])
+    default = next((g for g in grid_stats
+                    if g["lr"] == lr0 and g["weight_decay"] == wd0), None)
     gap = None
     default_is_optimal = None
-    if default is not None:
+    if default is not None and default["val_loss_best_mean"] is not None:
         # gap = 最优 − 默认：默认“近优”要求默认不比最优差出容差以上，
         # 即 gap ≥ −tol·|最优|（gap 为负表示最优显著优于默认 → 不近优）。
-        gap = selected["val_loss_best"] - default["val_loss_best"]
+        gap = selected["val_loss_best_mean"] - default["val_loss_best_mean"]
         same_as_default = (selected["lr"] == default["lr"]
                            and selected["weight_decay"] == default["weight_decay"])
         default_is_optimal = bool(
             same_as_default
-            or gap >= -tolerance * abs(selected["val_loss_best"]))
+            or gap >= -tolerance * abs(selected["val_loss_best_mean"]))
     report = {
         "variant": variant,
         "config": os.path.abspath(config),
         "data_dir": os.path.abspath(data_dir),
         "seed": seed,
+        "selection_seeds": [int(s) for s in seeds],
+        "selection_seed_count": len(seeds),
+        "single_seed_selection": len(seeds) == 1,
         "steps": steps,
         "lr_grid": [t["lr"] for t in trials],
         "weight_decay_grid": [t["weight_decay"] for t in trials],
-        "n_trials": len(trials),
-        "n_failed": len(trials) - len(ok),
+        "n_trials": len(grid),
+        "n_runs": len(trials),
+        "n_failed": sum(1 for t in trials if t.get("val_loss_best") is None),
         "selection_metric": "val_loss（train_log.jsonl 全评测点最小值，"
-                            "与 model_best.pt 选择口径一致）",
+                            "与 model_best.pt 选择口径一致）"
+                            + ("；跨种子取均值" if len(seeds) > 1 else ""),
+        "selection_aggregation": ("单种子（选择可能不可复现，见 "
+                                  "single_seed_selection）" if len(seeds) == 1
+                                  else f"{len(seeds)} 个种子的平均 val_loss"),
         "tolerance": float(tolerance),
         "selected": selected,
         "default_trial": default,
         "selected_minus_default_val_loss": gap,
         "default_is_optimal": default_is_optimal,
         "test_split_used": False,
+        "grid": grid_stats,
         "trials": trials,
     }
     os.makedirs(out_dir, exist_ok=True)
@@ -211,7 +264,10 @@ def tune(config: str, data_dir: str, out_dir: str,
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(f"[tuning] 最优 lr={selected['lr']:.3g} "
           f"wd={selected['weight_decay']:.3g} "
-          f"val_loss={selected['val_loss_best']:.4f} -> {out_path}")
+          f"val_loss={selected['val_loss_best']:.4f}"
+          + ("（单种子选择，结论可能受种子噪声影响）"
+             if len(seeds) == 1 else f"（{len(seeds)} 种子均值）")
+          + f" -> {out_path}")
     return report
 
 
@@ -223,6 +279,10 @@ def main():
                    help="trial 目录与 baseline_tuning.json 的输出根目录")
     p.add_argument("--variant", default="standard")
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--seeds", default=None,
+                   help="逗号分隔的选择种子列表：每个网格配置在每个种子上各训"
+                        "一次，按平均 val_loss 选择（默认只用 --seed/配置种子；"
+                        "单种子选择可能被噪声左右，正式实验建议 ≥3 个）")
     p.add_argument("--steps", type=int, default=None,
                    help="每个 trial 的训练步数（默认用配置值；可先用较小步数）")
     p.add_argument("--lr_mults", default=",".join(str(m) for m in DEFAULT_LR_MULTS))
@@ -237,7 +297,8 @@ def main():
          seed=args.seed, steps=args.steps,
          lr_mults=parse_floats(args.lr_mults),
          wd_list=(parse_floats(args.wd_list) if args.wd_list else None),
-         device=args.device, tolerance=args.tolerance, timeout=args.timeout)
+         device=args.device, tolerance=args.tolerance, timeout=args.timeout,
+         seeds=(parse_floats(args.seeds) if args.seeds else None))
 
 
 if __name__ == "__main__":

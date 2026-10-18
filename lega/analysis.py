@@ -21,6 +21,9 @@
                        正类率 hit_base_rate），两者必须并报
   gate_f1              g>0.5 决策点的 F1，显式给 macro/micro/weighted 三口径
                        （不平衡数据三者差异大，macro 对稀有类最诚实）
+  gate_f1_trivial      恒写/恒不写两个固定规则的 F1（无阈值“稻草人”对照）：
+                       不平衡下学习到的门控 F1 必须比多数类规则更有信息量，
+                       否则门控的“决策价值”无从谈起
 
 稳健性协议（防单一阈值/虚假精度）：
   tau_sensitivity          misleading/P(hit|集中) 系指标在多档 τ 上并报，
@@ -432,6 +435,24 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
             "per_class": {str(k): v for k, v in f1s["per_class"].items()},
         }
     summary["gate_f1"] = gate_f1
+    # 决策终点的“稻草人”参照：恒写（全判 hit）/恒不写（全判 miss）两个
+    # 固定规则的 F1。类别不平衡时学习到的门控 F1 必须对照多数类规则才能
+    # 解读——micro/weighted 口径下“比恒写基线还差”的高 F1 并不罕见。
+    gate_f1_trivial = None
+    if gm.any() and len(set(hit[gm])) == 2:
+        y = hit[gm].astype(np.int64)
+        gate_f1_trivial = {"n": int(len(y)),
+                           "note": "固定规则、无阈值：不平衡下 F1 的稻草人对照"}
+        for name, pred in (("always_write", np.ones_like(y)),
+                           ("never_write", np.zeros_like(y))):
+            f1s_t = f1_scores(y, pred, labels=[0, 1])
+            gate_f1_trivial[name] = {
+                "macro": f1s_t["macro"], "micro": f1s_t["micro"],
+                "weighted": f1s_t["weighted"],
+                "per_class": {str(k): v
+                              for k, v in f1s_t["per_class"].items()},
+            }
+    summary["gate_f1_trivial"] = gate_f1_trivial
     # 逐头统计：对整段数组按 (layer, head) 掩码切片。
     per_head = []
     layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)

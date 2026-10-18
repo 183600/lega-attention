@@ -169,6 +169,56 @@ def test_tune_selects_grid_best_and_flags_default_not_optimal():
     print("  [ok] tune（网格最优选择/默认近优判定/全失败报错）")
 
 
+def test_tune_multiseed_selects_by_mean_not_lucky_seed():
+    """多种子选择：按平均 val_loss 选配置，不被单个“幸运种子”左右。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"lr": 6e-4, "weight_decay": 0.1, "steps": 10,
+                       "seed": 7}, f)
+        out = os.path.join(tmp, "tuning")
+        # 默认配置 3 个种子都稳（1.0）；备选配置均值更差，
+        # 但种子 7 上恰好更低（0.9）——单种子选择会误选它。
+        vals = {(6e-4, 0.1, 7): 1.0, (6e-4, 0.1, 8): 1.0, (6e-4, 0.1, 9): 1.0,
+                (3e-4, 0.1, 7): 0.9, (3e-4, 0.1, 8): 1.2, (3e-4, 0.1, 9): 1.2}
+
+        def fake(config, data_dir, variant, seed, lr, wd, steps, out_dir,
+                 device="auto", timeout=None):
+            v = vals[(lr, wd, seed)]
+            return {"lr": lr, "weight_decay": wd, "seed": seed,
+                    "steps": steps, "out_dir": out_dir, "returncode": 0,
+                    "val_loss_best": v, "best_step": steps,
+                    "val_loss_final": v, "val_loss_source": "train_log.jsonl(min)"}
+
+        with mock.patch("lega.tuning.run_trial", side_effect=fake):
+            report = tune(cfg_path, tmp, out, lr_mults=[0.5, 1.0],
+                          seeds=[7, 8, 9])
+        assert report["selection_seeds"] == [7, 8, 9]
+        assert report["single_seed_selection"] is False
+        assert report["n_trials"] == 2 and report["n_runs"] == 6
+        assert report["selected"]["lr"] == 6e-4        # 按均值选，而非幸运种子
+        assert abs(report["selected"]["val_loss_best_mean"] - 1.0) < 1e-12
+        assert report["selected"]["val_loss_best_std"] == 0.0
+        assert report["default_is_optimal"] is True
+        by_lr = {g["lr"]: g for g in report["grid"]}
+        assert abs(by_lr[3e-4]["val_loss_best_mean"]
+                   - (0.9 + 1.2 + 1.2) / 3) < 1e-12
+        assert by_lr[3e-4]["val_loss_best_std"] > 0
+        assert set(by_lr[3e-4]["val_loss_best_per_seed"]) == {"7", "8", "9"}
+        # 单种子（默认）路径保持旧口径且显式标注“选择只用 1 个种子”
+        with mock.patch("lega.tuning.run_trial",
+                        side_effect=_fake_trial({(6e-4, 0.1): 1.0,
+                                                 (3e-4, 0.1): 0.9})):
+            report_s = tune(cfg_path, tmp, out, lr_mults=[0.5, 1.0])
+        assert report_s["single_seed_selection"] is True
+        assert report_s["selection_seeds"] == [7]
+        assert report_s["selected"]["lr"] == 3e-4       # 单种子仍按点估计选
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] tune（多种子按均值选择、幸运种子不翻盘、单种子显式标注）")
+
+
 def test_tune_dedupes_and_default_mult_present():
     assert 1.0 in DEFAULT_LR_MULTS
     print("  [ok] DEFAULT_LR_MULTS 含 1.0（默认组合必在网格内）")
