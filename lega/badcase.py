@@ -50,6 +50,7 @@ CATEGORY_CN = {
     "fwe_missing": "fwe 漏答高频词",
     "fwe_spurious": "fwe 多答无关词",
     "fwe_no_parse": "fwe 无法解析（未输出小写词）",
+    "fwe_no_ref": "fwe 缺少 answer_words 词表基线（无法归因）",
 }
 
 # 错误归属轴：直接回答"标注有错？样本极难？模型盲区？"三问。难度边界不覆盖
@@ -100,6 +101,12 @@ def categorize_case(rec: Dict) -> Dict:
         if not pred_words:
             r["category"] = "fwe_no_parse"
             r["explanation"] = "模型输出中没有可解析的小写词"
+        elif not top:
+            # 外部/旧格式 JSON 缺少 answer_words：没有词表就无法判断漏答/多答，
+            # 不能默认“全中”并把所有输出词记成无关词（归因到数据/导出侧）。
+            r["category"] = "fwe_no_ref"
+            r["explanation"] = ("样例缺少 answer_words 词表基线（外部/旧格式），"
+                                "无法归因漏答/多答")
         else:
             missing = sorted(top - pred_words)
             spurious = sorted(pred_words - top)
@@ -146,7 +153,7 @@ def case_axis(c: Dict) -> str:
         return "数据/构造"
     if c.get("hard_sample"):
         return "难度边界"
-    if c.get("category") == "unparsed":
+    if c.get("category") in ("unparsed", "fwe_no_ref"):
         return "评测/导出"
     return "模型/方法"
 

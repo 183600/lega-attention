@@ -361,8 +361,14 @@ def _read_records(rdir, variant):
                     v = parts[i] if i < len(parts) else ""
                     cols[name].append(
                         float(v) if v not in ("", "None", "nan") else np.nan)
-    out = {name: np.asarray(vals, dtype=np.float64)
-           for name, vals in cols.items()}
+    out = {}
+    # 合并多种子文件时表头可能因代码版本不同而缺列：短列尾部补 NaN，
+    # 保证各列等长（消费方用 isfinite 掩码，缺失值不会进入统计）。
+    width = max((len(vals) for vals in cols.values()), default=0)
+    for name, vals in cols.items():
+        if len(vals) < width:
+            vals = vals + [np.nan] * (width - len(vals))
+        out[name] = np.asarray(vals, dtype=np.float64)
     _RECORDS_CACHE[key] = out
     _RECORDS_CACHE.move_to_end(key)
     while len(_RECORDS_CACHE) > _RECORDS_CACHE_MAX:

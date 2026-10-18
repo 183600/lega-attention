@@ -267,6 +267,12 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
                  "“更能判断该不该写入”归因给门控结构。此对照为补充性/"
                  "探索性证据，不替代预注册的确认性检验。"),
     }
+    if not report["l2_grid"]:
+        # λ 网格为空（如命令行 --probe_l2 "," 过滤后为空、或配置写成空表）
+        # 时无从选参：显式返回缺失，而不是在下面 best[1] 处崩溃。
+        report["note"] = ("λ 网格为空（至少需一个候选取值），线性探针不可估计。"
+                          + report["note"])
+        return report
     if not records:
         report["note"] = "无记录，未训练探针。" + report["note"]
         return report

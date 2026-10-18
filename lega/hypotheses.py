@@ -217,6 +217,11 @@ def _replay_chain(lock: dict):
         if link["before"]["hypotheses"] != head["hypotheses"]:
             problems.append(f"修订链[{i}] 的起点与上一环终点不一致"
                             "（链断裂或被改写）")
+        # document_sha256 同样是链状态的一部分：只比对假设摘要表会漏掉
+        # 改写中间环文档、但假设表恰好未变的篡改。
+        if link["before"].get("document_sha256") != head.get("document_sha256"):
+            problems.append(f"修订链[{i}] 的起点文档哈希与上一环终点不一致"
+                            "（链断裂或被改写）")
         problems += [f"修订链[{i}]：{p}" for p in
                      transition_problems(head, link["after"])]
         head = link["after"]

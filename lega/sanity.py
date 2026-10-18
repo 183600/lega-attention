@@ -288,9 +288,10 @@ def main():
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     opt = dict(DEFAULTS)
-    opt["loss_threshold"] = float(cfg.get("sanity", {}).get(
+    sanity_cfg = cfg.get("sanity") or {}
+    opt["loss_threshold"] = float(sanity_cfg.get(
         "loss_threshold", DEFAULTS["loss_threshold"]))
-    opt["acc_threshold"] = float(cfg.get("sanity", {}).get(
+    opt["acc_threshold"] = float(sanity_cfg.get(
         "acc_threshold", DEFAULTS["acc_threshold"]))
     if args.smoke:
         opt.update(SMOKE_OVERRIDES)

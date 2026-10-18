@@ -1,7 +1,7 @@
 """独立困惑度评测：从 checkpoint 计算 PPL（默认 held-out test，缺 test.bin 时回退 val）。
 
 用法:
-  python -m lega.evaluate --ckpt out/tiny/lega/model.pt --data_dir data/dummy \
+  python -m lega.evaluate --ckpt out/tiny/lega/model_best.pt --data_dir data/dummy \
       --out results/tiny/eval_lega.json
 """
 import argparse
@@ -65,7 +65,10 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
                 # gold 是否出现在完整上下文窗口内。必须在采集时用全窗口判定：
                 # context_tail 只有 160 字符（窗口尾部），早先出现过的 gold 若只
                 # 看尾部会被误判为"从未出现"（复制/检索失败被错记成预测失败）。
-                "gold_in_context": bool(gold_txt) and gold_txt in ctx_text,
+                # 按 token id 精确判定：字节级 BPE 下单 token decode 可能不是
+                # 完整字符（非 ASCII 时文本包含判定漏报），文本包含还会把
+                # 其他 token 内的子串误报为 gold 出现。
+                "gold_in_context": bool(gold_l[r] in x_l[r]),
                 "gold_next": gold_txt,
                 "pred_top5": [(tok.decode([i]), round(float(p), 4))
                               for p, i in zip(top_p_l[r], top_i_l[r])],
@@ -211,8 +214,10 @@ def main():
         print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "
               f"model.block_size={model.block_size}，PPL 可能与训练内评测不可比")
     ctx = min(model.block_size, int(train_ctx)) if train_ctx else model.block_size
+    cfg_eval_iters = cfg_used.get("eval_iters")
     eval_iters = (int(args.eval_iters) if args.eval_iters is not None
-                  else int(cfg_used.get("eval_iters", 100)))
+                  else (int(cfg_eval_iters) if cfg_eval_iters is not None
+                        else 100))
 
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。

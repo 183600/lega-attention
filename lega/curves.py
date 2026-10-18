@@ -99,7 +99,7 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
 
 
 def _detect_loss_spikes(train_pts: List[Dict]) -> List[Dict]:
-    """检出瞬态训练损失尖峰：值 > LOSS_SPIKE_FACTOR × 两侧邻居中位数。
+    """检出瞬态训练损失尖峰：值 ≥ LOSS_SPIKE_FACTOR × 两侧邻居中位数。
 
     只比较局部邻居（每侧 LOSS_SPIKE_WINDOW 个点）而非全局中位数/均值：
     损失整体单调下降时，全局统计会把早期高点误报为尖峰，而局部比较对
@@ -165,9 +165,21 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
     val_pts, val_bad, val_malformed = _finite_points(records, "val_loss")
     # 早停终止标记：训练按设计提前结束（区别于日志缺失/训练中断），
     # 建议不再指向"延长训练"（验证已连续无改善）。
-    early_stop_steps = [r.get("step") for r in records
-                        if isinstance(r, dict) and r.get("early_stop")]
-    early_stopped = bool(early_stop_steps)
+    # step 只采信可解析的有限值；缺失/损坏（外部或截断的日志）时回退到
+    # 最后一个有限训练点，既保留早停标注，又不把 "step None" 写进证据。
+    early_stop_recs = [r for r in records
+                       if isinstance(r, dict) and r.get("early_stop")]
+    early_stopped = bool(early_stop_recs)
+    early_stop_steps = []
+    for r in early_stop_recs:
+        try:
+            s = int(r.get("step"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(float(s)):
+            early_stop_steps.append(s)
+    es_step = (early_stop_steps[0] if early_stop_steps
+               else (train_pts[-1]["step"] if train_pts else None))
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报
     nan_count = train_bad + val_bad
     malformed_count = train_malformed + val_malformed
@@ -349,9 +361,9 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
     # 早停终止：截断是设计行为（不同于日志缺失），独立于状态标注；
     # "数据不足"分支的"增加步数/评测密度"建议与早停矛盾，须替换。
     if early_stopped:
-        es_step = early_stop_steps[0]
+        es_txt = f"（step {es_step}）" if es_step is not None else ""
         evidence.append(
-            f"该 run 由早停终止（step {es_step}）：验证损失连续无实质改善，"
+            f"该 run 由早停终止{es_txt}：验证损失连续无实质改善，"
             "训练按设计提前结束，曲线被截断而非日志缺失/训练中断")
         if status == "数据不足":
             recommendations[:] = [r for r in recommendations
@@ -420,7 +432,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         "val_final_step": final_step,
         "early_stop_gain_rel": early_stop_gain,
         "early_stopped": early_stopped,
-        "early_stop_step": (early_stop_steps[0] if early_stopped else None),
+        "early_stop_step": (es_step if early_stopped else None),
         "generalization_gap": gap,
         "grad_norm_points": len(grad_pts),
         "grad_norm_nonfinite": int(grad_bad),

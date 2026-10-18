@@ -563,7 +563,8 @@ def load_corpus_sents(data_dir: str, max_chars: int = 300000) -> List[str]:
         path = os.path.join(data_dir, "val.txt")
     if not os.path.exists(path):
         return []
-    text = open(path, "r", encoding="utf-8").read(max_chars)
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read(max_chars)
     sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.replace("\n", " "))]
     return [s for s in sents if 20 <= len(s) <= 200]
 
@@ -597,11 +598,15 @@ def main():
     import json
     import os
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
-    cfg = json.load(open(cfg_path, encoding="utf-8")) if os.path.exists(cfg_path) else {}
-    rl = cfg.get("ruler", {})
+    cfg = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    rl = cfg.get("ruler") or {}
     ctx_lens = ([int(x) for x in args.ctx_lens.split(",")] if args.ctx_lens
                 else rl.get("ctx_lens", [min(256, model.block_size)]))
-    n_samples = args.n_samples or int(rl.get("n_samples", 30))
+    n_samples = (args.n_samples if args.n_samples is not None
+                 else int(rl.get("n_samples", 30)))
     gen_batch = (args.gen_batch if args.gen_batch is not None
                  else int(rl.get("gen_batch", 8)))
     # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
