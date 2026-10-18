@@ -550,11 +550,11 @@ def test_latency_noise_helpers():
     assert _noise_floor_pct(3.0, 4.0) == 5.0
     assert _noise_floor_pct(6.0, None) is None
     assert _noise_floor_pct(None, None) is None
-    print("  [ok] 延迟测量噪声读取与合成（缺失安全）")
+    print("  [ok] 运行时测量噪声读取与合成（缺失安全）")
 
 
 def test_tradeoff_ignores_deltas_within_measurement_noise():
-    """延迟差异不超过重复测量噪声时按不可区分处理：不计入增幅、标 †。"""
+    """运行时差异不超过重复测量噪声时按不可区分处理：不计入增幅、标 †。"""
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "lega"):
@@ -581,7 +581,7 @@ def test_tradeoff_ignores_deltas_within_measurement_noise():
         assert row["eff_prefill_within_noise"] is True
         assert row["eff_decode_within_noise"] is True
         assert row["eff_prefill_noise_pct"] is not None
-        # 其余指标一致：噪声内的延迟差归零后最大增幅为 0，而不是 5%
+        # 其余指标一致：噪声内的运行时差归零后最大增幅为 0，而不是 5%
         assert row["eff_cost_max_pct"] == 0.0, row
         assert "†" in out["markdown"] and "噪声区间内" in out["markdown"]
 
@@ -608,7 +608,7 @@ def test_tradeoff_ignores_deltas_within_measurement_noise():
         assert row3["eff_decode_within_noise"] is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 涨点-增幅权衡：噪声内延迟差按不可区分处理（旧格式兼容）")
+    print("  [ok] 涨点-增幅权衡：噪声内运行时差按不可区分处理（旧格式兼容）")
 
 
 def test_tradeoff_includes_decode_latency():
@@ -686,8 +686,8 @@ def test_tradeoff_includes_train_step_time():
 
 
 def test_tradeoff_includes_train_peak_memory():
-    """训练峰值显存（显存占用）必须进入涨点-增幅权衡的成本项，不能只看
-    推理延迟/参数量；CPU 训练缺该字段时安全降级。"""
+    """训练进程峰值必须进入涨点-增幅权衡的增幅项，不能只看
+    推理时序/参数量；CPU 训练缺该字段时安全降级。"""
     tmp = tempfile.mkdtemp()
     try:
         for v, mem in (("standard", 1000.0), ("lega", 3000.0)):
@@ -711,10 +711,10 @@ def test_tradeoff_includes_train_peak_memory():
         row = next(r for r in out["rows"] if r["variant"] == "lega")
         assert row["eff_train_peak_mem_mb"] == 3000.0, row
         assert row["eff_train_mem_delta_pct"] == 200.0
-        # 其余指标与基线一致时，最大增幅由训练显存贡献
+        # 其余指标与基线一致时，最大增幅由训练进程峰值贡献
         assert row["eff_cost_max_pct"] == 200.0, row
-        assert "训练显存" in out["markdown"]
-        # CPU 训练（无 CUDA 统计）：字段缺失时该成本项不参与判定
+        assert "训练峰值" in out["markdown"]
+        # CPU 训练（无 CUDA 统计）：字段缺失时该项不参与判定
         _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
             "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
             "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0})
@@ -725,7 +725,7 @@ def test_tradeoff_includes_train_peak_memory():
         assert row2["eff_cost_max_pct"] == 0.0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 涨点-增幅权衡包含训练峰值显存（缺失时降级）")
+    print("  [ok] 涨点-增幅权衡包含训练进程峰值（缺失时降级）")
 
 
 def test_audit_tolerates_early_stop_actual_steps():

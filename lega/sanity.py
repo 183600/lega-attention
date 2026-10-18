@@ -108,8 +108,8 @@ def gradient_coverage(model) -> dict:
     只看总梯度范数会漏掉“某个子模块没接进计算图”的问题：主体梯度正常时
     总范数依然 >0（如门控参数被 detach/漏传），只有逐参数检查才能发现。
     分类：
-      * missing_grad —— grad is None：该参数与 loss 之间图断流（严重故障）；
-      * nonfinite_grad —— grad 含 NaN/Inf：数值故障，继续训练只会污染权重；
+      * missing_grad —— grad is None：该参数与 loss 之间图断流（严重问题）；
+      * nonfinite_grad —— grad 含 NaN/Inf：数值问题，继续训练只会污染权重；
       * zero_grad —— grad 全 0：给出列表供人工判断（首步恰为 0 属于可疑但
         不一定错误，例如无输入信号的偏置），不单独判失败。
     """

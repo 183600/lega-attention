@@ -86,7 +86,7 @@ def test_train_early_stop_end_to_end():
     """lr=0 时验证损失恒定：patience=1 必然在第二次评测处早停。
 
     同时验证：eval.json 区分实际/计划步数、train_log 带 early_stop 标记、
-    CPU 下训练峰值显存字段为 None（CUDA 才有），以及 CLI 覆盖配置生效。
+    CPU 下训练进程统计字段为 None（CUDA 才有），以及 CLI 覆盖配置生效。
     """
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = os.path.join(tmp, "data")
@@ -104,7 +104,7 @@ def test_train_early_stop_end_to_end():
         assert ev["early_stop_patience"] == 1
         assert ev["steps"] == 4 and ev["steps_planned"] == 6, ev
         assert ev["tokens_seen"] == 4 * 2 * 32
-        assert ev["train_peak_mem_mb"] is None, "CPU 训练没有 CUDA 显存统计"
+        assert ev["train_peak_mem_mb"] is None, "CPU 训练没有 CUDA 进程统计"
         cfg_used = json.load(open(os.path.join(out_dir, "config_used.json"),
                                   encoding="utf-8"))
         assert cfg_used["early_stop_patience"] == 1, "CLI 覆盖必须进入受控变量记录"

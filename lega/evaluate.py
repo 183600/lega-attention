@@ -114,7 +114,7 @@ def _read_run_eval(run_dir: str) -> dict:
 
 
 def load_train_throughput(run_dir: str):
-    """从训练 run 的 eval.json 继承训练步时记录（train_step_time_ms/tokens_per_sec）。
+    """从训练 run 的 eval.json 继承训练过程记录（train_step_time_ms/tokens_per_sec）。
 
     旧 run 没有该字段时返回 (None, None)，消费方显示 '-' 而不是编造数值。
     文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
@@ -124,10 +124,10 @@ def load_train_throughput(run_dir: str):
 
 
 def load_train_peak_mem_mb(run_dir: str):
-    """从训练 run 的 eval.json 继承训练峰值显存（MB）。
+    """从训练 run 的 eval.json 继承训练进程统计字段（数值型）。
 
-    必须随评测结果落盘：run_all 的显存效率列只读 results/eval_*.json，
-    不复制该字段会让训练峰值显存永远显示缺失。缺失/损坏返回 None。
+    必须随评测结果落盘：run_all 的汇总列只读 results/eval_*.json；
+    缺失/损坏返回 None。
     """
     v = _read_run_eval(run_dir).get("train_peak_mem_mb")
     try:
@@ -267,7 +267,7 @@ def main():
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     run_dir = os.path.dirname(os.path.abspath(args.ckpt))
     res.update(load_provenance(run_dir, args.data_dir))
-    # 训练步时/峰值显存随被评测 checkpoint 一起绑定（run_all 从本文件读取）
+    # 训练过程统计随被评测 checkpoint 一起绑定（run_all 从本文件读取）
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)
     res["train_peak_mem_mb"] = load_train_peak_mem_mb(run_dir)

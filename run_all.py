@@ -1765,7 +1765,7 @@ def build_summary(results_dir: str, audit: dict = None,
             f"{bad_cross['n_unique_failed_items']} 个不同的失败样本，"
             f"{n_shared} 个为全体（已评测）变体共识失败——共识失败（尤其当 "
             "standard 也错）更可能是数据/构造/内在难度问题，不应算作某一"
-            "方法的缺陷；相对 standard 的新增错误才是该方法的特异性盲区，"
+            "方法的问题；相对 standard 的新增错误才是该方法的特异性盲区，"
             "优先逐条分析。")
         md += ["", "| 变体 | 错误样本数 | 全体共识失败 | 相对standard新增 "
                    "| 相对standard改对 |", "|---|---|---|---|---|"]
@@ -2072,20 +2072,20 @@ def build_summary(results_dir: str, audit: dict = None,
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
-                  "Prefill ms/Decode ms(tok)/训练 ms(step)/训练显存/参数量/"
+                  "Prefill ms/Decode ms(tok)/训练 ms(step)/训练进程峰值/参数量/"
                   "FLOPs(token)/实测分配量 相对基线增幅的最大值（Prefill/Decode "
                   "的差异若不超过两端重复测量的噪声散布则按不可区分处理，标 † "
                   "且不计入增幅）；收益=PPL 相对改善。判定规则：种子不足（n<3）"
                   "或数据缺失→无法判定；PPL 显著差于基线→不可行；涨点不显著"
                   "（Holm 校正后 p≥α）→说服力有限（增幅>10% 判不可行）；显著"
-                  "但增幅>50% 或 >5×收益 →收益-增幅比不利。提升 0.5% 却让"
-                  "计算量增加 10 倍的方案会被明确拒绝。")
+                  "但增幅>50% 或 >5×收益 →收益-增幅比不利。微小改善伴随巨大"
+                  "增幅的方案会被明确拒绝。")
 
         def _train_step_ms(v):
             """该变体各种子训练步时的中位数（毫秒/步；旧 eval.json 无此字段→None）。
 
             同一 run_all 内所有变体在同一台机器、同一批次下训练，该步时是
-            同口径的直接可比时序（评测耗时与 checkpoint 写入已从区间计时中
+            同口径的直接可比时序（评测与 checkpoint 写入已从区间计时中
             扣除）；中位数避免首步冷启动与偶发卡顿污染。
             """
             vals = []
@@ -2104,10 +2104,9 @@ def build_summary(results_dir: str, audit: dict = None,
             return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
 
         def _train_peak_mem_mb(v):
-            """该变体各种子训练峰值显存的跨种子中位数（MB；旧 eval.json 无→None）。
+            """该变体各种子训练进程峰值的跨种子中位数（MB；旧 eval.json 无→None）。
 
-            训练显存是"改进"的成本维度之一（更大的门控/中间激活可能 OOM 或
-            挤掉 batch），与推理峰值分配量分开报告：两者口径不同（进程高水位
+            与推理单次前向的实测值分开报告：两者口径不同（进程级高水位
             含优化器状态与激活 vs prefill 单次分配）。
             """
             vals = []
@@ -2127,7 +2126,7 @@ def build_summary(results_dir: str, audit: dict = None,
 
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | Decode ms/tok "
-                  "| 训练 ms/step | 训练显存 | 参数量 | FLOPs/token | 实测分配 | 判定 |")
+                  "| 训练 ms/step | 训练峰值 | 参数量 | FLOPs/token | 实测分配 | 判定 |")
         md.append("|---|---|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
@@ -2160,7 +2159,7 @@ def build_summary(results_dir: str, audit: dict = None,
             mem_v = _eff_cell(e, "mem", common_ctx)
             mem_b = _eff_cell(base_e, "mem", common_ctx)
             mem_delta = _rel_pct(mem_b, mem_v) if (mem_v is not None and mem_b) else None
-            # 延迟差异的测量噪声：|Δ| 不超过两端散布的方和根时不可区分，
+            # 运行时差异的测量噪声：|Δ| 不超过两端散布的方和根时不可区分，
             # 按 0 计入增幅（原始值仍保留在 JSON，避免把噪声当真实差异）。
             pre_noise = _noise_floor_pct(
                 _lat_noise_pct(base_e, "prefill", common_ctx),
@@ -2227,11 +2226,11 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("注：FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
                   "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
                   "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
-                  "Decode ms/tok 为带 KV 缓存的逐 token 解码延迟（推理延迟的"
-                  "直接口径），训练 ms/step 为纯训练步（区间墙钟已扣除评测与 "
+                  "Decode ms/tok 为带 KV 缓存的逐 token 解码时序，"
+                  "训练 ms/step 为纯训练步（区间墙钟已扣除评测与 "
                   "checkpoint 写入）跨种子中位数（见 eval_*.json 的 "
-                  "train_step_time_ms），训练显存为该变体训练进程峰值显存"
-                  "（含模型/优化器/激活/评测窗口，CUDA 高水位，跨种子中位数；"
+                  "train_step_time_ms），训练峰值为该变体训练进程的进程级"
+                  "高水位（含模型/优化器/激活/评测窗口，CUDA，跨种子中位数；"
                   "见 eval_*.json 的 train_peak_mem_mb；CPU 训练为 '-'），"
                   "均为相对基线的百分比变化。"
                   "Prefill/Decode 为逐次计时的中位数，重复测量的相对散布见 "

@@ -40,8 +40,8 @@ _SANITIZE_TABLE[ord("\ufffd")] = " "
 # 含 U+FFFD/非法控制符的行比例反映“标签质量”。
 # 只匹配坏字符本身：单字符类扫描是线性的；若用 `[^\n]*坏字符[^\n]*` 按行
 # 匹配，正则引擎在无坏字符的行上会从每个起点回溯整行（O(行长²/行)），
-# 长行大语料下会退化成秒级~分钟级开销。行号由坏字符位置之间的换行增量
-# 换算（见 sanitize_text），整体单趟线性。
+# 长行大语料下不可取。行号由坏字符位置之间的换行增量换算
+# （见 sanitize_text），整体单趟线性。
 _BAD_CHAR_RE = re.compile(r"[\ufffd\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # WikiText 风格的一级/多级标题行：作为“文档边界”的首选切点。
@@ -150,8 +150,7 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             sn = _normalize_line(s)
             d = digest(s)
             seen_valid.add(d)
-            # 行本身已是归一化形态时两个摘要相同：复用第一次哈希，
-            # 干净语料（绝大多数行无多余空白）下可省一半 blake2b 调用。
+            # 行本身已是归一化形态时两个摘要相同，直接复用第一次哈希。
             seen_valid_norm.add(d if sn == s else digest(sn))
             if len(s) >= min_chars:
                 n_long += 1

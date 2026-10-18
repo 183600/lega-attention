@@ -126,8 +126,8 @@ def audit_activations(model, pending_batches, device: str,
     fp16/bf16 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
     每个模块输出/输入的 NaN/Inf 情况：
 
-      * origin          第一个输入有限但输出非有限的模块 —— 最可疑的数值故障点，
-                        附该模块位置的排查指向（softmax/log/归一化/投影）；
+      * origin          第一个输入有限但输出非有限的模块，附该模块位置的
+                        排查指向（softmax/log/归一化/投影）；
       * first_nonfinite 第一个输出非有限的模块：若与 origin 不同，说明 NaN 来自
                         更早的算子（如 attention 内部的函数式 softmax/log）；
       * records         非有限激活沿计算图的传播链（按执行顺序，截断到上限）。
@@ -683,9 +683,8 @@ def main():
     # 最近一步实际消费的 micro-batch：预取会覆盖 batches，NaN 排查若只看待训练
     # 批次会漏掉"罪魁数据"，这里保留引用供 _nan_guard 优先检查
     last_batches = []
-    # 步时计时：按 log 区间累计墙钟并扣除评测耗时（.item() 已同步设备，
-    # 区间边界无需额外 synchronize）；首区间可能因 compile/冷启动偏慢，
-    # 汇总取中位数而非均值。pending_eval_s 供 do_eval 累加评测耗时。
+    # 步时计时：按 log 区间累计墙钟并扣除评测时间（.item() 已同步设备，
+    # 区间边界无需额外 synchronize）。pending_eval_s 供 do_eval 累加。
     step_times_ms: list = []
     interval_t0 = time.perf_counter()
     interval_steps = 0
@@ -794,8 +793,8 @@ def main():
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())
             gn_last = float(gn_dev_recent[-1].item()) if gn_dev_recent else None
-            # .item() 已同步本区间全部前向/反向/优化器内核，此刻的墙钟差
-            # 是本区间（扣除评测）的真实训练耗时
+            # .item() 已同步本区间全部前向/反向/优化器内核，
+            # 此处墙钟差为区间步时（扣除评测）
             t_now = time.perf_counter()
             dt = t_now - interval_t0 - pending_eval_s
             step_ms = (dt / interval_steps * 1000.0
@@ -865,8 +864,7 @@ def main():
                      if step_times_ms else None)
     train_tokens_per_sec = (tokens_per_step * 1000.0 / train_step_ms
                             if train_step_ms else None)
-    # 训练过程峰值显存（进程级高水位：模型/优化器/激活/评测窗口都计入）。
-    # 不做 reset_peak 以保留完整占用；CUDA 之外的设备没有该统计（显式 None）。
+    # 训练进程级高水位统计（CUDA 设备；其他设备为 None）。
     train_peak_mem_mb = None
     if device.startswith("cuda") and torch.cuda.is_available():
         try:

@@ -5,9 +5,8 @@ CUDA 上默认与 train/evaluate/ruler/analysis 一样启用 bf16 autocast
 （--no_amp 回退 fp32/TF32）。
 
 计时口径：每个配置重复 iters 次并**逐次计时**，报告的中位数连同
-[p10, p90] 区间与相对散布 spread_pct=(p90-p10)/median。只看单个均值
-无法判断"某变体慢 3%"是真实差距还是测量噪声；散布进入 latency.json，
-run_all 的涨点-增幅权衡据此把噪声内的差异按不可区分处理。
+[p10, p90] 区间与相对散布 spread_pct=(p90-p10)/median；散布进入
+latency.json，下游据此把噪声量级内的差异按不可区分处理。
 用法:
   python -m lega.latency --config configs/small.json --data_dir data/wikitext103 \
       --ckpt_dir out/small --out results/small/latency.json
@@ -192,7 +191,7 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     """返回 (每 token 解码 timing_stats, 实际预填充长度)。
 
     逐 token 基线由本函数按实际 pf_len 带缓存复测，不依赖外部
-    prefill 测量值。每次 run_once 的耗时扣除 prefill 基线中位数后按
+    prefill 测量值。每次 run_once 的时长扣除 prefill 基线中位数后按
     decode_tokens-1 折算，得到逐次 decode 采样，再汇总为中位数与散布。
     """
     # 预填充长度留出生成余量，避免超过 RoPE 最大位置。

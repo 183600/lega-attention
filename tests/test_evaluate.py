@@ -43,7 +43,7 @@ def test_collect_worst_windows():
 
 
 def test_load_train_throughput_propagates_and_degrades_safely():
-    """训练步时记录必须随被评测 checkpoint 传播；缺失/损坏时安全返回 (None, None)。"""
+    """训练过程记录必须随被评测 checkpoint 传播；缺失/损坏时安全返回 (None, None)。"""
     tmp = tempfile.mkdtemp()
     try:
         assert load_train_throughput(tmp) == (None, None)
@@ -61,11 +61,11 @@ def test_load_train_throughput_propagates_and_degrades_safely():
         assert load_train_throughput(tmp) == (None, None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 训练步时记录随 checkpoint 传播（缺失/损坏安全降级）")
+    print("  [ok] 训练过程记录随 checkpoint 传播（缺失/损坏安全降级）")
 
 
 def test_load_train_peak_mem_propagates_and_degrades_safely():
-    """训练峰值显存必须随 checkpoint 传播（run_all 效率列只读评测结果文件）。"""
+    """训练进程统计必须随 checkpoint 传播（run_all 汇总列只读评测结果文件）。"""
     tmp = tempfile.mkdtemp()
     try:
         assert load_train_peak_mem_mb(tmp) is None
@@ -87,7 +87,7 @@ def test_load_train_peak_mem_propagates_and_degrades_safely():
         assert load_train_peak_mem_mb(tmp) is None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 训练峰值显存随 checkpoint 传播（缺失/损坏安全降级）")
+    print("  [ok] 训练进程统计随 checkpoint 传播（缺失/损坏安全降级）")
 
 
 def test_collect_worst_windows_gold_in_context_uses_full_window():

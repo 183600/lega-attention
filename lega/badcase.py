@@ -490,7 +490,7 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
                 "模型/方法", "高",
                 f"高置信错答占 {cb}/{n}，且 {gic:.0%} 的 gold 其实在上下文中",
                 "模型看得到却没抄对：优先检查注意力是否落在 gold 跨度"
-                "（复制/检索失败而非知识缺失），这类失败最可能通过结构改进修复",
+                "（复制/检索失败而非知识缺失），这类失败最可能通过结构调整改善",
                 "对这批窗口检查 top-1 注意力位置与 gold 跨度的重叠；区分"
                 "位置编码混淆与干扰串抑制问题后再改注意力"))
         else:
@@ -710,7 +710,7 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
         recs.append(_advice(
             "数据/难度", "高",
             f"{shared}/{n_unique} 个失败样本为全体已评测变体共识失败",
-            "失败以共识为主：优先怀疑数据/构造/内在难度，而不是方法缺陷；"
+            "失败以共识为主：优先怀疑数据/构造/内在难度，而不是方法本身；"
             "先修数据再比方法，否则结论会指向错误的对象",
             "人工复核共识失败样例的标注与可解性；修正后重跑评测再对比"))
     ref = cross.get("reference")
@@ -752,7 +752,7 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     全体变体集合（否则一个全对的变体会被静默排除，让"全体共识失败"失真）。
     输出：
       * shared_all_failures —— 所有变体都错的样本：更可能是数据/构造错误或
-        样本本身不可解（尤其当 standard 也错），不应算作某一方法的缺陷；
+        样本本身不可解（尤其当 standard 也错），不应算作某一方法的问题；
       * 相对参照（默认 standard）的 new_vs_reference —— 参照对而该方法错的
         样本：疑似该方法引入的特异性盲区，应优先逐条分析；
       * 相对参照的 fixed_vs_reference —— 参照错而该方法对的样本：该方法
