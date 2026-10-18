@@ -439,6 +439,92 @@ def test_main_keeps_zero_error_variants_for_cross_variant():
         assert cross["reference_available"] is True
         assert cross["n_shared_all_failures"] == 0
         assert cross["per_variant"]["lega"]["n_new_vs_reference"] == 1
+        # 汇总必须把改进方向一并落盘，且标注来源（分析不止于分类）
+        assert merged["recommendations"], merged.get("recommendations")
+        assert {r["source"] for r in merged["recommendations"]} >= {
+            "ruler:standard", "ruler:lega", "ruler:qgate", "cross_variant"}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] badcase.main 保留零错误变体进入跨变体对照")
+
+
+def test_ruler_improvement_synthesis():
+    """归因不止于分类：主导错误模式必须转成带触发证据的改进方向。"""
+    keys = {"axis", "priority", "trigger", "suggestion", "next_experiment"}
+    # 误抄干扰主导 → 检索定位方向（先机制分析再改结构）
+    ana = analyze_badcases([_case(pred="1234567", ctx_nums=["1234567"])] * 3,
+                           variant="lega")
+    assert ana["recommendations"] and all(
+        set(r) == keys for r in ana["recommendations"])
+    assert any(r["axis"] == "模型/方法" and "检索" in r["trigger"]
+               and "注意力" in r["suggestion"] for r in ana["recommendations"])
+    # 标注/构造错误 → 数据轴，优先级最高
+    ana2 = analyze_badcases(
+        [_case(pred="1234567", ctx_nums=[], in_prompt=False)] * 3, variant="lega")
+    assert any(r["axis"] == "数据/构造" and r["priority"] == "高"
+               for r in ana2["recommendations"])
+    assert ana2["axis_counts"].get("数据/构造") == 3
+    # 深位失败主导 → 难度边界（轴计数直接回答“标注/难度/盲区”三问）
+    ana3 = analyze_badcases([_case(pred="5550001", ctx_nums=[], depth=0.9)] * 3)
+    assert any(r["axis"] == "难度边界" for r in ana3["recommendations"])
+    assert ana3["axis_counts"].get("难度边界") == 3
+    # 零错误也给出解释边界（零错误 ≠ 方法更强）
+    ana4 = analyze_badcases([])
+    assert ana4["recommendations"][0]["axis"] == "评测"
+    json.dumps(ana, ensure_ascii=False, allow_nan=False)
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "badcases_lega.md")
+        write_badcase_md(ana, path)
+        text = open(path, encoding="utf-8").read()
+        assert "改进方向（坏案例驱动）" in text and "下一步实验" in text
+        assert "粗归因轴" in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] RULER 坏案例 → 改进方向合成（误抄/标注/深位/零错误）")
+
+
+def test_window_improvement_synthesis():
+    """PPL 最差窗口：复制失败与复读必须给出不同的改进方向。"""
+    # gold 在上下文中却没抄对（检索/复制失败）
+    wins = [_win(gold=" blue", tail="a blue car",
+                 pred_top5=[[" red", 0.85]]) for _ in range(3)]
+    ana = analyze_worst_windows(wins, variant="lega")
+    assert ana["gold_in_context_rate"] == 1.0
+    assert any("抄对" in r["suggestion"] or "复制" in r["suggestion"]
+               for r in ana["recommendations"]), ana["recommendations"]
+    # 复读吸引子主导
+    wins2 = [_win(pred_top5=[[" blue", 0.3]]) for _ in range(3)]
+    ana2 = analyze_worst_windows(wins2, variant="lega")
+    assert ana2["category_counts"].get("repetition_attractor") == 3
+    assert any("复读" in r["suggestion"] or "重复" in r["suggestion"]
+               for r in ana2["recommendations"])
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "worstcases_lega.md")
+        write_worstcase_md(ana, path)
+        assert "改进方向" in open(path, encoding="utf-8").read()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 最差窗口 → 改进方向合成（复制失败/复读）")
+
+
+def test_cross_improvement_synthesis():
+    """跨变体：特异性新增错误按类别统计并给出方法侧方向；共识失败走数据轴。"""
+    a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+    b = _case_sid("niah_synth@256#1", pred="7654321", ctx_nums=["7654321"])
+    cross = cross_variant_analysis(
+        {"standard": [a], "lega": [a, b], "qgate": [b]}, reference="standard")
+    lv = cross["per_variant"]["lega"]
+    assert lv["new_category_counts"].get("copy_distractor") == 1
+    assert lv["new_vs_reference"][0]["category"] == "copy_distractor"
+    assert any(r["axis"] == "模型/方法" and "lega" in r["trigger"]
+               for r in cross["recommendations"])
+    # 全体共识失败主导 → 先怀疑数据/难度而不是方法
+    cross2 = cross_variant_analysis(
+        {"standard": [a], "lega": [a], "qgate": [a]}, reference="standard")
+    assert any(r["axis"] == "数据/难度" for r in cross2["recommendations"])
+    json.dumps(cross, ensure_ascii=False, allow_nan=False)
+    # 少于 2 个变体：空对照也有 recommendations 键（消费方无需分叉）
+    assert cross_variant_analysis({"lega": [a]})["recommendations"] == []
+    print("  [ok] 跨变体对照 → 改进方向合成（特异性新增/共识失败）")

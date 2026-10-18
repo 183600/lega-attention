@@ -149,9 +149,9 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 | `results/<tag>/ngram_baseline.json` | 简单统计基线：一元/二元平滑 n-gram 的 held-out PPL（α 在 val 上选，test 需显式开锁） |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）与 `registered_hypotheses`（逐条判定） |
 | `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合（含训练停滞+验证回升的平台期）/过拟合趋势（训练降而验证停滞）/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
-| `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe） |
-| `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现） |
-| `results/<tag>/badcase_cross.json` | 跨变体错误对照（全体共识失败 vs 相对 standard 的特异性新增/修复） |
+| `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe）+ 粗归因轴计数 + **改进方向**（触发证据→建议→下一步实验） |
+| `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现）+ **改进方向** |
+| `results/<tag>/badcase_cross.json` | 跨变体错误对照（全体共识失败 vs 相对 standard 的特异性新增/修复；含逐变体新增错误类别计数与跨变体改进方向） |
 | `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val），含 worst_windows 坏案例与训练吞吐/成本（`train_step_time_ms`/`train_tokens_per_sec`/`train_peak_mem_mb`，供效率-精度权衡）与早停记录（`steps_planned`/`steps`/`early_stopped`） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文，含 badcases 错误样本 |
 | `results/<tag>/latency.json` | prefill / decode 延迟（逐次计时的中位数 + `*_spread_pct=(p90-p10)/median` 测量散布，供判断变体差异是否超出噪声） |
@@ -181,7 +181,7 @@ python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext
 python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m lega.curves    --run_dir out/small/lega/seed1337   # 训练曲线诊断（过拟合/欠拟合/发散/NaN）
-python -m lega.badcase   --results_dir results/small         # 错误样本归因（RULER + 语言建模最差窗口）
+python -m lega.badcase   --results_dir results/small         # 错误样本归因（RULER + 语言建模最差窗口）+ 改进方向合成
 python -m lega.hypotheses --verify                           # 预注册完整性校验（0=可确认；1=被删/改/未留痕）
 python -m tests.run_tests   # 单元测试（不依赖 pytest）
 ```
@@ -201,8 +201,11 @@ python -m tests.run_tests   # 单元测试（不依赖 pytest）
 验证连续 N 次评测无实质改善即终止，默认关闭不影响受控对比；启用后各 run 实际
 步数可不同，`eval.json` 同时记录计划/实际步数，受控变量审计按计划步数核对并在
 汇总页如实标注"早停"与截断原因，下游仍使用 val 选出的 `model_best.pt`）；
-错误样本逐条归因，并用
-跨变体对照区分"全体共识失败（数据/难度）"与"方法特异性盲区"；效率-精度权衡
+错误样本逐条归因（每个案例附粗归因轴：数据/构造、难度边界、模型/方法），并用
+跨变体对照区分"全体共识失败（数据/难度）"与"方法特异性盲区"；归因最终**合成为
+可执行的改进方向**（触发证据→建议→下一步实验，确定性阈值见 `lega/badcase.py`），
+同时进入逐案例 md、`badcase_summary.json` 与 `summary.md`——坏案例分析的落点不是
+分类表，而是提出新改进思路的最重要来源；效率-精度权衡
 显式判定，增幅取 **Prefill/Decode 推理延迟、训练 ms/step、训练峰值显存、
 参数量、FLOPs、推理峰值分配** 相对基线的最大者，其中延迟为逐次计时的中位数，**差异不超过两端
 测量散布（[p10,p90] 方和根）时按不可区分处理、不计入增幅（表中标 †）**，
@@ -231,7 +234,7 @@ lega-attention/
 │   ├── analysis.py            # 机制分析：集中≠找对、门控校准、AUROC + PR-AUC（不平衡主指标）+ 门控 F1（三口径）
 │   ├── ngram.py               # 简单统计基线：一元/二元平滑 n-gram PPL（α 只在 val 选；test 需开锁并记账）
 │   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度尖峰）+ 处理建议
-│   ├── badcase.py             # 错误样本归因（RULER + 语言建模最差窗口）+ 跨变体对照
+│   ├── badcase.py             # 错误样本归因（RULER + 语言建模最差窗口）+ 跨变体对照 + 改进方向合成
 │   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
 │   ├── repro.py               # 代码版本/数据指纹/运行环境/种子审计/溯源继承
 │   ├── experiment.py          # 追加式实验台账（跨轮次记录代码/配置/种子/数据/结果哈希）

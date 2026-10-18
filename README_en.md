@@ -153,9 +153,9 @@ Outputs:
 | `results/<tag>/ngram_baseline.json` | Simple statistical baseline: unigram/bigram smoothed n-gram held-out PPL (α selected on val; test needs an explicit opt-in) |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check) and `registered_hypotheses` (per-claim verdicts) |
 | `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, overfitting trend (train still falling, validation stalled), underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations; early-stopped runs are flagged as intentionally truncated) |
-| `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
-| `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) |
-| `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard) |
+| `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) + coarse attribution-axis counts + **improvement directions** (trigger evidence → suggestion → next experiment) |
+| `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) + **improvement directions** |
+| `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard; includes per-variant new-error category counts and cross-variant improvement directions) |
 | `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases and training throughput/cost (`train_step_time_ms`/`train_tokens_per_sec`/`train_peak_mem_mb`, feeding the efficiency-precision trade-off) plus early-stop records (`steps_planned`/`steps`/`early_stopped`) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths, with badcases error samples |
 | `results/<tag>/latency.json` | prefill / decode latency (per-iteration median + `*_spread_pct=(p90-p10)/median` measurement spread, for telling real differences from noise) |
@@ -185,7 +185,7 @@ python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext
 python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m lega.curves    --run_dir out/small/lega/seed1337   # training-curve diagnosis (overfit/underfit/divergence/NaN)
-python -m lega.badcase   --results_dir results/small         # error attribution (RULER + LM worst windows)
+python -m lega.badcase   --results_dir results/small         # error attribution (RULER + LM worst windows) + improvement synthesis
 python -m lega.hypotheses --verify                           # pre-registration integrity (0=confirmatory-valid; 1=deleted/edited/unrecorded)
 python -m tests.run_tests   # unit tests (no pytest dependency)
 ```
@@ -216,9 +216,14 @@ unaffected by it; when enabled, actual steps may differ across runs, `eval.json`
 records both planned and actual steps, the controlled-variable audit compares
 planned steps and the summary marks early-stopped runs — downstream evaluation
 still uses the val-selected `model_best.pt`). Attribute
-every error case, and use the cross-variant
+every error case (each case also gets a coarse attribution axis: data/construction,
+difficulty boundary, or model/method), and use the cross-variant
 comparison to separate "shared failures (data/difficulty)" from "method-specific
-blind spots"; the accuracy-efficiency trade-off is judged explicitly, where the cost
+blind spots"; the attribution is then **synthesized into actionable improvement
+directions** (trigger evidence → suggestion → next experiment, deterministic
+thresholds in `lega/badcase.py`) that appear in the per-case reports, in
+`badcase_summary.json` and in `summary.md` — error analysis must not stop at the
+category table, since hard cases are the most important source of new ideas; the accuracy-efficiency trade-off is judged explicitly, where the cost
 is the maximum relative increase over the baseline among **prefill/decode inference
 latency, training ms/step, training peak GPU memory, parameters, FLOPs and
 inference peak allocation**. Latency is the median
@@ -251,7 +256,7 @@ lega-attention/
 │   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate calibration, AUROC + PR-AUC (primary under imbalance) + gate F1 (three averages)
 │   ├── ngram.py               # simple statistical baseline: unigram/bigram smoothed n-gram PPL (α on val; test opt-in + ledger)
 │   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN + grad spikes) + recommendations
-│   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison
+│   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison + improvement synthesis
 │   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
 │   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance
 │   ├── experiment.py          # append-only experiment ledger (code/config/seed/data/result hashes per run)

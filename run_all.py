@@ -951,6 +951,33 @@ def _fmt_scalar_maybe(x) -> str:
         return str(x)
 
 
+def _dedupe_advice(items, limit=6):
+    """按 (轴, 建议) 去重改进方向并截断（不同变体的同一模式只留一条）。"""
+    out, seen = [], set()
+    for label, r in items:
+        key = (r.get("axis"), r.get("suggestion"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((label, r))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _render_advice(md, advice, title, max_items=6):
+    """渲染“坏案例驱动的改进方向”小节（证据 → 建议 → 下一步实验）。"""
+    advice = _dedupe_advice(advice, limit=max_items)
+    if not advice:
+        return
+    md += ["", title, ""]
+    for label, r in advice:
+        md.append(f"- **[{r.get('axis')}·{r.get('priority')}]**（{label}）"
+                  f"{r.get('trigger')}")
+        md.append(f"  - 建议：{r.get('suggestion')}")
+        md.append(f"  - 下一步：{r.get('next_experiment')}")
+
+
 # ---------------------------------------------------------------- 曲线诊断与权衡
 
 def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
@@ -1716,6 +1743,11 @@ def build_summary(results_dir: str, audit: dict = None,
         if n_label:
             md.append(f"⚠ 共 {n_label} 条 gold 不在 prompt 中的样本：这是"
                       "构造/标注错误，不是模型失败，须先处理评测再下结论。")
+        # 错误归因的终点是改进方向：把主导错误模式转成下一步可执行的实验，
+        # 而不是停在分类表（坏案例是提出新思路的最重要来源）。
+        _render_advice(md, [(v, r) for v, a, _ in bad_rows
+                            for r in (a.get("recommendations") or [])],
+                       "### 坏案例驱动的改进方向（RULER）")
     else:
         md.append("- 暂无错误样本记录（RULER 未运行或全部命中）。"
                   "全部命中时也建议人工抽查若干正确样本确认没有'碰巧命中'。")
@@ -1770,6 +1802,9 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("")
         md.append("注: 跨变体对照只使用各变体最小种子的错误清单以保证样本集一致，"
                   "多种子时不同种子的失败集合变化属正常波动，不在此表统计。")
+        _render_advice(md, [("跨变体", r) for r in
+                            (bad_cross.get("recommendations") or [])],
+                       "### 坏案例驱动的改进方向（跨变体）", max_items=4)
     elif per_variant_badcases:
         md += ["", "（仅一个变体有错误样本，无法做跨变体对照）"]
 
@@ -1809,9 +1844,10 @@ def build_summary(results_dir: str, audit: dict = None,
         md += ["", "| 变体 | 最差窗口数 | 主要归因 | 平均 top-1 概率 "
                    "| gold 在上下文中 | gold 进 top-5 | 平均 loss |",
                "|---|---|---|---|---|---|---|"]
-        window_pool, seen_cat = [], set()
+        window_pool, seen_cat, window_advice = [], set(), []
         for v, wins in per_variant_windows.items():
             ana = analyze_worst_windows(wins, variant=v)
+            window_advice += [(v, r) for r in (ana.get("recommendations") or [])]
             cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
             cat_s = "；".join(f"{WINDOW_CATEGORY_CN.get(k, k)}×{n}"
                               for k, n in cats[:3])
@@ -1853,6 +1889,10 @@ def build_summary(results_dir: str, audit: dict = None,
                 + (f"⚠ 参照 standard 无最差窗口记录，新增/改对计数不可得。"
                    if not win_cross.get("reference_available") else
                    "相对 standard 的新增窗口才是该方法引入的预测退化。"))
+            window_advice += [("跨变体", r) for r in
+                              (win_cross.get("recommendations") or [])]
+        _render_advice(md, window_advice,
+                       "### 坏案例驱动的改进方向（最差窗口）", max_items=4)
     else:
         md.append("- 暂无最差窗口记录（评测未含 --worst_n 或评测被跳过）。"
                   "PPL 平均分无法替代对错误样本的逐条检查。")
