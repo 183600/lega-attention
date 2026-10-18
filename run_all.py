@@ -974,7 +974,7 @@ def _render_registration_integrity(integrity: dict,
                      "否则判违反。")
     else:
         lines.append("- ⚠ **本页全部“注册假设判定”因完整性/范围核对未通过而"
-                     "失效（降级为探索性分析）**：修复后重跑汇总。")
+                     "失效（降级为探索性分析）**：排除问题后重跑汇总。")
     lines.append("")
     return lines
 
