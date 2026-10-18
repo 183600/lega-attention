@@ -519,13 +519,14 @@ def auroc(scores, labels) -> float:
     if len(pos) == 0 or len(neg) == 0:
         return float("nan")
     allv = np.concatenate([neg, pos])
-    # 并列取平均秩：等值样本在 unique 分组后获得同一平均秩，与组内先后次序
-    # 无关。
+    # 并列取平均秩：等值样本按等值分组获得同一平均秩，与组内先后次序无关。
     order = np.argsort(allv)
-    # 在有序数组上用 unique 定位等值组，
+    # 有序数组的等值组起点即 np.unique 的 return_index 结果，用相邻差分直接
+    # 定位，省去 unique 内部对已排序数组的再次排序。
     # 组内平均秩（1-based）= 首名次（0-based 首个位置）+ (组大小+1)/2
     sorted_v = allv[order]
-    first, counts = np.unique(sorted_v, return_index=True, return_counts=True)[1:]
+    first = np.concatenate([[0], np.flatnonzero(np.diff(sorted_v)) + 1])
+    counts = np.diff(np.append(first, [sorted_v.size]))
     avg_ranks = first.astype(np.float64) + (counts + 1.0) / 2.0
     ranks = np.empty(len(allv), dtype=np.float64)
     ranks[order] = np.repeat(avg_ranks, counts)
@@ -565,6 +566,65 @@ def average_precision(scores, labels) -> float:
     # 逐步积分与逐组循环同序累加，保持逐位一致。
     prev_recall = np.concatenate([[0.0], recalled[:-1]])
     return float(np.cumsum((recalled - prev_recall) * precision)[-1])
+
+
+def roc_pr_aucs(scores, labels):
+    """一次升序排序同时算出 AUROC 与 PR-AUC（average precision）。
+
+    与 `auroc` / `average_precision` 在二值标签下逐位一致：AUROC 的并列
+    平均秩与 AP 的等值整组累计都以“按分数排序后的等值分组”为基础，分组
+    结果与组内次序无关。聚类的 bootstrap 对每批重采样都要并报两个指标，
+    分别调用会各自 argsort（auroc 还需一次去重排序），重复近两倍排序
+    开销；这里共享同一份升序 argsort、等值分组与秩映射，只排序一次。
+
+    约定与两函数一致：先按分数有限性过滤；AUROC 需正负两类齐备，AP 需
+    正类率既不等于 0 也不等于 1，否则对应值为 NaN（另一指标仍照常计算）。
+    返回 (auroc, ap)。
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels)
+    m = np.isfinite(scores)
+    sc, lb = scores[m], labels[m]
+    # 非二值标签（调用方不应出现）语义含糊：average_precision 会把非 0/1
+    # 标签计入累计，与按 0/1 计数推导的快速路径不一致；此时退化为直接
+    # 调用两个原函数，保证任何输入下都逐位一致。
+    if not bool(((lb == 0) | (lb == 1)).all()):
+        return auroc(sc, lb), average_precision(sc, lb)
+    n_pos = int((lb == 1).sum())
+    n_neg = int((lb == 0).sum())
+    need_auc = n_pos > 0 and n_neg > 0
+    need_ap = n_pos > 0 and n_pos != len(lb)
+    if not (need_auc or need_ap):
+        return float("nan"), float("nan")
+    order = np.argsort(sc)
+    sv = sc[order]
+    # 等值组首位置（升序）；组内平均秩（1-based）= 首位置 + (组大小+1)/2
+    starts = np.concatenate([[0], np.flatnonzero(np.diff(sv)) + 1])
+    counts = np.diff(np.append(starts, [sv.size]))
+    auc = float("nan")
+    if need_auc:
+        avg_ranks = starts.astype(np.float64) + (counts + 1.0) / 2.0
+        # 按输入序把组平均秩散射回每个位置（与 auroc 的 ranks 构造同序
+        # 同值），正类切片求和即可；避免逐元素二分查找的随机访问开销。
+        ranks = np.empty(sv.size, dtype=np.float64)
+        ranks[order] = np.repeat(avg_ranks, counts)
+        r_pos = ranks[lb == 1].sum()
+        u = r_pos - n_pos * (n_pos + 1) / 2.0
+        auc = float(u / (n_pos * n_neg))
+    ap = float("nan")
+    if need_ap:
+        # AP 需要按分数降序的分组；整数计数在 float64 下精确，故降序组末的
+        # 累计样本数 = n - 组首位置、累计正类数 = n_pos - 升序前缀正类数，
+        # 与 average_precision 中 cumsum 在组末取到的值逐位一致。
+        lv = lb[order].astype(np.float64)
+        g_pos = np.add.reduceat(lv, starts)
+        tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(g_pos)[:-1]]))[::-1]
+        ends_desc = (sv.size - starts)[::-1]
+        recalled = tp_desc / n_pos
+        precision = tp_desc / ends_desc
+        prev_recall = np.concatenate([[0.0], recalled[:-1]])
+        ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
+    return auc, ap
 
 
 def f1_scores(y_true, y_pred, labels=None) -> dict:

@@ -56,7 +56,7 @@ from .repro import load_provenance
 from .ruler import (build_niah, build_vt, load_corpus_sents,
                     ContextTooSmall, _stable_hash)
 from .utils import (auroc, average_precision, enable_tf32, f1_scores,
-                    get_device, pearson, save_json, set_seed)
+                    get_device, pearson, roc_pr_aucs, save_json, set_seed)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -318,9 +318,11 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             if lb is None:
                 lb = np.concatenate([labels[i] for i in idx])
             sc = np.concatenate([scores[k][i] for i in idx])
-            v = _finite(auroc(sc, lb))
+            # 同一份重采样分数上 AUROC 与 AP 共用一次排序（逐位等价的
+            # roc_pr_aucs），避免每个指标各自 argsort/去重。
+            v, ap = roc_pr_aucs(sc, lb)
+            v, ap = _finite(v), _finite(ap)
             vals[k] = v
-            ap = _finite(average_precision(sc, lb))
             aps[k] = ap
             if v is not None:
                 samples[k].append(v)

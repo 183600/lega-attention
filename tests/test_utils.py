@@ -18,7 +18,7 @@ import numpy as np
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
-                        paired_t_test, pearson, save_json,
+                        paired_t_test, pearson, roc_pr_aucs, save_json,
                         student_t_two_sided_p, wilson_score_ci)
 
 
@@ -174,6 +174,47 @@ def test_average_precision_properties():
     nan_scores = np.array([np.nan, 3.0, 2.0, 1.0])
     assert abs(average_precision(nan_scores, np.array([1, 1, 0, 0])) - 1.0) < 1e-12
     print("  [ok] average_precision（随机基线/可分/反序/NaN 剔除）")
+
+
+def test_roc_pr_aucs_bitwise_equals_separate_metrics():
+    """组合入口必须是两单指标函数的逐位等价替身（bootstrap 并报两指标时共用排序）。
+
+    覆盖大量并列、非有限分数、单一类别、全并列等边界；任一元素不满足
+    逐位相等（或同为 NaN）即失败。
+    """
+    rng = np.random.default_rng(11)
+    cases = []
+    for trial in range(200):
+        n = int(rng.integers(2, 60))
+        if trial % 3 == 0:
+            scores = rng.integers(0, 4, size=n).astype(np.float64)
+        elif trial % 3 == 1:
+            scores = np.round(rng.normal(size=n), 1)
+        else:
+            scores = rng.normal(size=n)
+        labels = (rng.random(n) < 0.35).astype(np.float64)
+        cases.append((scores, labels))
+    cases += [
+        (np.array([1.0, 2.0]), np.array([1.0, 1.0])),          # 单一类别
+        (np.array([1.0, 2.0]), np.array([0.0, 0.0])),
+        (np.ones(6), np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])),
+        (np.array([np.nan, 3.0, 2.0, 1.0, np.inf]),
+         np.array([1.0, 1.0, 0.0, 0.0, 1.0])),
+        (np.array([-0.0, 0.0, 1.0]), np.array([0.0, 1.0, 1.0])),
+        (np.array([]), np.array([])),
+        (np.array([1.0, 2.0, 3.0]), np.array([1.0, 1.0, 2.0])),  # 非二值退化为原函数
+    ]
+    checked = 0
+    for scores, labels in cases:
+        ref_a, ref_p = auroc(scores, labels), average_precision(scores, labels)
+        got_a, got_p = roc_pr_aucs(scores, labels)
+        ok_a = (math.isnan(ref_a) and math.isnan(got_a)) or ref_a == got_a
+        ok_p = (math.isnan(ref_p) and math.isnan(got_p)) or ref_p == got_p
+        assert ok_a and ok_p, (f"scores={scores} labels={labels}: "
+                               f"ref=({ref_a}, {ref_p}) got=({got_a}, {got_p})")
+        checked += 1
+    assert checked == len(cases)
+    print(f"  [ok] roc_pr_aucs 与 auroc/average_precision 逐位一致（{checked} 组）")
 
 
 def test_f1_scores_three_averages_and_imbalance():
