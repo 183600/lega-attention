@@ -125,6 +125,10 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 # 选定组合统一用于所有变体，证据写入 results/<tag>/baseline_tuning.json
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --tune_baseline
 
+# 可选：早停——验证连续 N 次评测无实质改善即终止（默认关闭；启用后各变体
+# 实际步数可不同，受控变量审计按计划步数核对，汇总页会标注「早停」）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --early_stop_patience 5
+
 # 简单统计基线可单独运行（默认 val；test 需显式选择并写访问账本）
 python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram_baseline.json
 ```
@@ -148,7 +152,7 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现） |
 | `results/<tag>/badcase_cross.json` | 跨变体错误对照（全体共识失败 vs 相对 standard 的特异性新增/修复） |
-| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val），含 worst_windows 坏案例与训练吞吐（`train_step_time_ms`/`train_tokens_per_sec`，供效率-精度权衡） |
+| `results/<tag>/eval_*.json` | 各变体 held-out test PPL（无 test.bin 时回退 val），含 worst_windows 坏案例与训练吞吐/成本（`train_step_time_ms`/`train_tokens_per_sec`/`train_peak_mem_mb`，供效率-精度权衡）与早停记录（`steps_planned`/`steps`/`early_stopped`） |
 | `results/<tag>/ruler_*.json` | RULER 5 任务 × 多档上下文，含 badcases 错误样本 |
 | `results/<tag>/latency.json` | prefill / decode 延迟（逐次计时的中位数 + `*_spread_pct=(p90-p10)/median` 测量散布，供判断变体差异是否超出噪声） |
 | `results/<tag>/analysis_*.csv|json` | 逐 (层，头，查询位) 门控记录与汇总 |
@@ -192,10 +196,15 @@ python -m tests.run_tests   # 单元测试（不依赖 pytest）
 数据与激活检查均优先分析失败步批次（预取会覆盖待训练批次），val 损失非有限时
 直接改用真实验证窗口（训练批次仅作取窗失败的回退），混合精度路径出现非有限时
 还会对同一批次做 **fp32 隔离复测**（fp32 有限→判混合精度数值问题；fp32 同样
-非有限→排除精度因素）；错误样本逐条归因，并用
+非有限→排除精度因素）；过拟合建议的"早停"是**可选的实际机制**（
+`--early_stop_patience N`，或配置 `early_stop_patience`/`early_stop_min_delta`：
+验证连续 N 次评测无实质改善即终止，默认关闭不影响受控对比；启用后各 run 实际
+步数可不同，`eval.json` 同时记录计划/实际步数，受控变量审计按计划步数核对并在
+汇总页如实标注"早停"与截断原因，下游仍使用 val 选出的 `model_best.pt`）；
+错误样本逐条归因，并用
 跨变体对照区分"全体共识失败（数据/难度）"与"方法特异性盲区"；效率-精度权衡
-显式判定，增幅取 **Prefill/Decode 推理延迟、训练 ms/step、参数量、FLOPs、
-显存峰值** 相对基线的最大者，其中延迟为逐次计时的中位数，**差异不超过两端
+显式判定，增幅取 **Prefill/Decode 推理延迟、训练 ms/step、训练峰值显存、
+参数量、FLOPs、推理峰值分配** 相对基线的最大者，其中延迟为逐次计时的中位数，**差异不超过两端
 测量散布（[p10,p90] 方和根）时按不可区分处理、不计入增幅（表中标 †）**，
 涨点未过显著性检验或增幅远大于收益时明确标注
 （见 §2 的 `tradeoff_verdict` 规则），"涨 0.5% 但训练/推理贵 10 倍"会被直接拒绝。

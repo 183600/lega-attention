@@ -226,11 +226,14 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     对比实验的公平性前提：优化器/LR 策略/步数/数据顺序等受控变量必须一致，
     且各 run 必须消费同一份数据、同一代码版本、同样的训练步数。该检查把
     “公平对比”从口头约定变成可执行断言，分两层：
-      1. config_used.json：除 variant/seed/device/tag 外的字段逐项一致；
-      2. eval.json 溯源：数据指纹、代码 commit、配置 SHA-256、实际训练
-         步数与 tokens_seen 跨 run 一致（并与本次流水线的数据指纹比对），
-         避免“同一 config 跑了不同数据/代码版本”被静默当成可比。
-    任一层不一致都会报错并列出差异。
+     1. config_used.json：除 variant/seed/device/tag 外的字段逐项一致；
+     2. eval.json 溯源：数据指纹、代码提交、配置 SHA-256、计划训练步数
+        （steps_planned，旧格式回退 steps）跨 run 一致，并与本次流水线的
+        数据指纹比对，避免"同一 config 跑了不同数据/代码版本"被静默当成可比。
+        实际步数/tokens_seen 默认也必须逐项一致；启用早停（early_stopped）
+        时各 run 可以停在不同的步数——这是早停的定义而非条件失控，此时按
+        计划步数核对，实际步数逐 run 如实报告、不再要求相同。
+     任一层不一致都会报错并列出差异。
     """
     ref = None
     ref_name = None
@@ -238,12 +241,14 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     missing = []
     checked = 0
     meta_keys = ("data_fingerprint", "code_commit", "config_sha256",
-                 "steps", "tokens_seen")
+                 "steps_planned")
     meta_ref = None
     meta_ref_name = None
     meta_mismatches = []
     meta_missing = []
     meta_checked = 0
+    early_stop_runs = []
+    actual_meta = []
     for v in variants:
         for seed in seeds:
             vdir = _variant_dir(out_root, v, seed, n_seeds)
@@ -273,6 +278,13 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             with open(ev_path, "r", encoding="utf-8") as f:
                 ev = json.load(f)
             meta = {k: ev.get(k) for k in meta_keys}
+            if meta["steps_planned"] is None:
+                meta["steps_planned"] = ev.get("steps")
+            actual_meta.append((f"{v}/seed{seed}", ev.get("steps"),
+                                ev.get("tokens_seen")))
+            if ev.get("early_stopped"):
+                early_stop_runs.append(f"{v}/seed{seed}(step {ev.get('steps')}"
+                                       f"/{meta['steps_planned']})")
             here = []
             if int(ev.get("seed", seed)) != int(seed):
                 here.append(f"eval seed={ev.get('seed')}")
@@ -290,6 +302,19 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             if here:
                 meta_mismatches.append(f"{v}/seed{seed}: " + "; ".join(here))
             meta_checked += 1
+    # 实际步数/tokens_seen：未启用早停时必须严格一致；启用早停时逐 run 可以
+    # 不同（已在 early_stop_runs 如实列出），不再作为可比性失败。
+    if not early_stop_runs and actual_meta:
+        a_ref_name, a_ref_steps, a_ref_tokens = actual_meta[0]
+        for name, steps_run, tokens_run in actual_meta[1:]:
+            diffs = []
+            if a_ref_steps != steps_run:
+                diffs.append(f"steps: {a_ref_steps!r} vs {steps_run!r}")
+            if a_ref_tokens != tokens_run:
+                diffs.append(f"tokens_seen: {a_ref_tokens!r} vs {tokens_run!r}")
+            if diffs:
+                meta_mismatches.append(f"{name} 相对 {a_ref_name} 的差异: "
+                                       + "; ".join(diffs))
     if missing:
         print(f"[audit] 警告：缺少 {len(missing)} 个 run 的 config_used.json，"
               f"无法核对受控变量: {', '.join(missing[:6])}"
@@ -308,13 +333,19 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         print(f"[audit] 受控变量自检通过：{checked} 个 run 的优化器/LR/步数等配置一致")
     if meta_checked:
         print(f"[audit] 训练溯源自检通过：{meta_checked} 个 run 的数据指纹/"
-              f"代码版本/训练步数一致"
+              f"代码版本/计划训练步数一致"
               + (f"（数据指纹 {expected_data_digest}）"
                  if expected_data_digest else ""))
+    if early_stop_runs:
+        print(f"[audit] 早停启用：{len(early_stop_runs)} 个 run 未跑满计划步数"
+              f"（{', '.join(early_stop_runs[:6])}"
+              + (" ..." if len(early_stop_runs) > 6 else "")
+              + "）；实际步数差异已如实记录，按计划步数核对可比性")
     return {"ok": not (mismatches or meta_mismatches), "checked": checked,
             "missing_configs": missing, "mismatches": mismatches,
             "meta_checked": meta_checked, "missing_evals": meta_missing,
             "meta_mismatches": meta_mismatches,
+            "early_stop_runs": early_stop_runs,
             "expected_data_digest": expected_data_digest,
             "exempt_keys": sorted(_AUDIT_EXEMPT_KEYS)}
 
@@ -1326,11 +1357,22 @@ def build_summary(results_dir: str, audit: dict = None,
                           "（全部缺少 config_used.json），不能据此声称一致性。")
             if audit.get("meta_checked"):
                 digest = audit.get("expected_data_digest")
+                stopped = audit.get("early_stop_runs") or []
                 md.append(f"- ✅ 训练溯源一致：{audit['meta_checked']} 个 run 的"
-                          f"数据指纹、代码提交、配置 SHA-256、实际训练步数与 "
-                          f"tokens_seen 逐项一致"
+                          f"数据指纹、代码提交、配置 SHA-256、计划训练步数"
+                          f"逐项一致"
+                          + ("；实际步数差异为早停所致（见下条）"
+                             if stopped else "")
                           + (f"（数据指纹 `{digest}`，并与本次流水线数据比对）"
                              if digest else "。"))
+            if audit.get("early_stop_runs"):
+                md.append(
+                    f"- ⏹ 早停启用：{len(audit['early_stop_runs'])} 个 run 未跑满"
+                    f"计划步数（{', '.join(audit['early_stop_runs'][:8])}"
+                    + (" …" if len(audit["early_stop_runs"]) > 8 else "")
+                    + "）：实际步数可因验证曲线不同而不同（早停的定义），"
+                    "受控变量按计划步数核对；逐 run 实际步数与 tokens_seen "
+                    "见各 eval.json。")
         else:
             md.append(f"- ❌ 未通过：{audit.get('mismatches') or audit}")
         if audit.get("missing_configs"):
@@ -1537,8 +1579,17 @@ def build_summary(results_dir: str, audit: dict = None,
                     + ("（最终劣于最优，已用 best checkpoint）"
                        if sum(es) / len(es) > 0.02 else ""))
             rec = worst["recommendations"][:1]
-            status_s = status + ("　（梯度尖峰）" if spike else "") \
-                + ("　（损失尖峰）" if lspike else "")
+            es_flagged = any(d.get("early_stopped") for d in diags)
+            # 需关注种子的占比：只看"最差种子"分不清系统性异常与单个种子偶发，
+            # 1/5 与 5/5 需要完全不同的处置
+            n_attention = sum(1 for d in diags
+                              if d.get("status") not in ("正常收敛", "数据不足"))
+            attention_s = (f"（{n_attention}/{len(diags)} 种子需关注）"
+                           if n_attention else "")
+            status_s = status + attention_s \
+                + ("　（梯度尖峰）" if spike else "") \
+                + ("　（损失尖峰）" if lspike else "") \
+                + ("　（早停）" if es_flagged else "")
             md.append(f"| {VARIANT_CN.get(v, v)} | {status_s} | {train_s} "
                       f"| {val_s} | {es_s} | {rec[0] if rec else '-'} |")
         md.append("")
@@ -1568,6 +1619,15 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append("⚠ 部分 train_log.jsonl 记录无法解析（已跳过并计数）："
                       "日志可能被中断或损坏，曲线结论只基于其余记录点，"
                       "复核前不要把它当作完整训练历史。")
+        any_early = any(d.get("early_stopped")
+                        for vs in curve.values() for d in vs.values())
+        if any_early:
+            md.append("")
+            md.append("⏹ 上表带「早停」标记的变体触发了早停（验证连续 patience "
+                      "次无实质改善即终止，曲线按设计截断，不同于崩溃/丢日志）："
+                      "下游评测使用的仍是 val 选出的 `model_best.pt`；若其最优"
+                      "仍出现在训练早期，应先处理过拟合/学习率问题，而不是"
+                      "统一延长所有变体的训练步数。")
     else:
         md.append("- ⚠ 未找到 `curve_diagnosis.json`：只看最终数值会掩盖训练动态，"
                   "请先运行训练（或 `python -m lega.curves --run_dir <run 目录>`）。")
@@ -1947,11 +2007,11 @@ def build_summary(results_dir: str, audit: dict = None,
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
-                  "Prefill ms/Decode ms(tok)/训练 ms(step)/参数量/FLOPs(token)/"
-                  "实测分配量 相对基线增幅的最大值（Prefill/Decode 的差异若"
-                  "不超过两端重复测量的噪声散布则按不可区分处理，标 † 且不"
-                  "计入增幅）；收益=PPL 相对改善。判定规则：种子不足（n<3）或"
-                  "数据缺失→无法判定；PPL 显著差于基线→不可行；涨点不显著"
+                  "Prefill ms/Decode ms(tok)/训练 ms(step)/训练显存/参数量/"
+                  "FLOPs(token)/实测分配量 相对基线增幅的最大值（Prefill/Decode "
+                  "的差异若不超过两端重复测量的噪声散布则按不可区分处理，标 † "
+                  "且不计入增幅）；收益=PPL 相对改善。判定规则：种子不足（n<3）"
+                  "或数据缺失→无法判定；PPL 显著差于基线→不可行；涨点不显著"
                   "（Holm 校正后 p≥α）→说服力有限（增幅>10% 判不可行）；显著"
                   "但增幅>50% 或 >5×收益 →收益-增幅比不利。提升 0.5% 却让"
                   "计算量增加 10 倍的方案会被明确拒绝。")
@@ -1978,14 +2038,37 @@ def build_summary(results_dir: str, audit: dict = None,
             n = len(vals)
             return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
 
+        def _train_peak_mem_mb(v):
+            """该变体各种子训练峰值显存的跨种子中位数（MB；旧 eval.json 无→None）。
+
+            训练显存是"改进"的成本维度之一（更大的门控/中间激活可能 OOM 或
+            挤掉 batch），与推理峰值分配量分开报告：两者口径不同（进程高水位
+            含优化器状态与激活 vs prefill 单次分配）。
+            """
+            vals = []
+            for s in _variant_seed_map(runs, v).values():
+                x = (s.get("eval") or {}).get("train_peak_mem_mb")
+                if x is None:
+                    continue
+                try:
+                    vals.append(float(x))
+                except (TypeError, ValueError):
+                    continue
+            if not vals:
+                return None
+            vals.sort()
+            n = len(vals)
+            return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | Decode ms/tok "
-                  "| 训练 ms/step | 参数量 | FLOPs/token | 实测分配 | 判定 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|")
+                  "| 训练 ms/step | 训练显存 | 参数量 | FLOPs/token | 实测分配 | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
                     and t.get("mean_diff") is not None}
         base_train_ms = _train_step_ms("standard")
+        base_train_mem = _train_peak_mem_mb("standard")
         n_metric_within_noise = 0
         for r in rows:
             v = r["variant"]
@@ -2005,6 +2088,8 @@ def build_summary(results_dir: str, audit: dict = None,
             dec_delta = _rel_pct(base_decode, dec_v)
             tr_v = _train_step_ms(v)
             tr_delta = _rel_pct(base_train_ms, tr_v)
+            memtr_v = _train_peak_mem_mb(v)
+            memtr_delta = _rel_pct(base_train_mem, memtr_v)
             par_delta = _rel_pct(base_params, _eff_cell(e, "params", common_ctx))
             flo_delta = _rel_pct(base_flops, _eff_cell(e, "flops", common_ctx))
             mem_v = _eff_cell(e, "mem", common_ctx)
@@ -2025,7 +2110,8 @@ def build_summary(results_dir: str, audit: dict = None,
             n_metric_within_noise += int(pre_within) + int(dec_within)
             deltas = [d for d in ((0.0 if pre_within else pre_delta),
                                   (0.0 if dec_within else dec_delta),
-                                  tr_delta, par_delta, flo_delta, mem_delta)
+                                  tr_delta, memtr_delta, par_delta, flo_delta,
+                                  mem_delta)
                       if d is not None]
             cost = max(deltas) if deltas else None
             verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl)
@@ -2045,6 +2131,9 @@ def build_summary(results_dir: str, audit: dict = None,
             r["eff_train_step_ms"] = tr_v
             r["eff_train_delta_pct"] = (round(tr_delta, 2)
                                         if tr_delta is not None else None)
+            r["eff_train_peak_mem_mb"] = memtr_v
+            r["eff_train_mem_delta_pct"] = (round(memtr_delta, 2)
+                                            if memtr_delta is not None else None)
             r["eff_peak_mem_mb"] = mem_v
             r["eff_benefit_ppl_pct"] = (round(benefit, 2)
                                         if benefit is not None else None)
@@ -2060,6 +2149,7 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"| {'-' if p_adj is None else f'{p_adj:.4f}'} "
                       f"| {_d(pre_delta, within=pre_within)} "
                       f"| {_d(dec_delta, within=dec_within)} | {_d(tr_delta)} "
+                      f"| {_d(memtr_delta)} "
                       f"| {_d(par_delta)} "
                       f"| {_d(flo_delta)} "
                       f"| {'-' if mem_v is None else f'{mem_v:.0f} MB'} "
@@ -2073,9 +2163,12 @@ def build_summary(results_dir: str, audit: dict = None,
                   "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
                   "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
                   "Decode ms/tok 为带 KV 缓存的逐 token 解码延迟（推理延迟的"
-                  "直接口径），训练 ms/step 为纯训练步（区间墙钟已扣除评测与"
+                  "直接口径），训练 ms/step 为纯训练步（区间墙钟已扣除评测与 "
                   "checkpoint 写入）跨种子中位数（见 eval_*.json 的 "
-                  "train_step_time_ms），三者同为相对基线的百分比变化。"
+                  "train_step_time_ms），训练显存为该变体训练进程峰值显存"
+                  "（含模型/优化器/激活/评测窗口，CUDA 高水位，跨种子中位数；"
+                  "见 eval_*.json 的 train_peak_mem_mb；CPU 训练为 '-'），"
+                  "均为相对基线的百分比变化。"
                   "Prefill/Decode 为逐次计时的中位数，重复测量的相对散布见 "
                   "latency.json 的 *_spread_pct；运行时间指标受硬件与同机负载"
                   "影响，跨机器对比无效。")
@@ -2151,6 +2244,11 @@ def main():
                         "失败即中止全量训练）")
     p.add_argument("--sanity_steps", type=int, default=None,
                    help="sanity check 的优化步数（默认 300，冒烟 60）")
+    p.add_argument("--early_stop_patience", type=int, default=None,
+                   help="验证损失连续 N 次评测无实质改善则早停（透传 lega.train；"
+                        "默认读配置 early_stop_patience，缺省关闭）。启用后各 run "
+                        "实际步数可不同，受控变量审计按计划步数核对并在汇总页"
+                        "如实标记")
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
@@ -2373,7 +2471,10 @@ def main():
                         "--variant", v, "--data_dir", args.data_dir,
                         "--out_dir", vdir, "--seed", str(seed),
                         "--device", args.device] + (["--smoke"] if args.smoke else [])
-                       + (["--wandb"] if args.wandb else []))
+                       + (["--wandb"] if args.wandb else [])
+                       + (["--early_stop_patience",
+                           str(args.early_stop_patience)]
+                          if args.early_stop_patience is not None else []))
                 print("+", " ".join(cmd), flush=True)
                 train_cmds.append(cmd)
     if train_cmds:

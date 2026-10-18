@@ -158,9 +158,16 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
 
     records: load_train_log 的输出（含 'loss' 训练点与 'val_loss' 验证点）。
     返回 dict：status / 判定依据 / 关键数值 / 建议清单 recommendations。
+    早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注，
+    避免被误读为日志缺失/训练中断/数据不足。
     """
     train_pts, train_bad, train_malformed = _finite_points(records, "loss")
     val_pts, val_bad, val_malformed = _finite_points(records, "val_loss")
+    # 早停终止标记：训练按设计提前结束而非崩溃/丢日志，建议不得再指向
+    # "延长训练"（验证已连续无改善，续训只增加过拟合）。
+    early_stop_steps = [r.get("step") for r in records
+                        if isinstance(r, dict) and r.get("early_stop")]
+    early_stopped = bool(early_stop_steps)
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报
     nan_count = train_bad + val_bad
     malformed_count = train_malformed + val_malformed
@@ -339,6 +346,20 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
 
+    # 早停终止：截断是设计行为（不同于崩溃/丢日志），独立于状态标注；
+    # "数据不足"分支的"增加步数/评测密度"建议与早停矛盾，须替换。
+    if early_stopped:
+        es_step = early_stop_steps[0]
+        evidence.append(
+            f"该 run 由早停终止（step {es_step}）：验证损失连续无实质改善，"
+            "训练按设计提前结束，曲线被截断而非日志缺失/训练中断")
+        if status == "数据不足":
+            recommendations[:] = [r for r in recommendations
+                                  if "训练步数" not in r and "eval_every" not in r]
+        recommendations.append(
+            "已早停：不要以“曲线未走完”为由延长训练；对比使用 val 选出的 "
+            "model_best.pt，先按上述诊断处理（正则化/数据/学习率）再决定是否重跑")
+
     # 梯度范数体检（与损失状态独立）：非有限/尖峰是梯度爆炸的早期信号，
     # 损失曲线可能尚未发散，只看最终损失会漏掉。
     if grad_bad:
@@ -398,6 +419,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         "val_best_step": best_step,
         "val_final_step": final_step,
         "early_stop_gain_rel": early_stop_gain,
+        "early_stopped": early_stopped,
+        "early_stop_step": (early_stop_steps[0] if early_stopped else None),
         "generalization_gap": gap,
         "grad_norm_points": len(grad_pts),
         "grad_norm_nonfinite": int(grad_bad),

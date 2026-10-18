@@ -629,6 +629,149 @@ def test_tradeoff_includes_train_step_time():
     print("  [ok] 涨点-增幅权衡包含训练 ms/step（旧结果缺失时降级）")
 
 
+def test_tradeoff_includes_train_peak_memory():
+    """训练峰值显存（显存占用）必须进入涨点-增幅权衡的成本项，不能只看
+    推理延迟/参数量；CPU 训练缺该字段时安全降级。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v, mem in (("standard", 1000.0), ("lega", 3000.0)):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0,
+                "train_peak_mem_mb": mem})
+
+        def _lat():
+            return {"prefill_ms": {"256": {"1": 1.0}},
+                    "decode_ms_per_tok": {"256": 0.1},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(), "lega": _lat()}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["eff_train_peak_mem_mb"] == 3000.0, row
+        assert row["eff_train_mem_delta_pct"] == 200.0
+        # 其余指标与基线一致时，最大增幅由训练显存贡献
+        assert row["eff_cost_max_pct"] == 200.0, row
+        assert "训练显存" in out["markdown"]
+        # CPU 训练（无 CUDA 统计）：字段缺失时该成本项不参与判定
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0})
+        out2 = build_summary(tmp)
+        row2 = next(r for r in out2["rows"] if r["variant"] == "lega")
+        assert row2["eff_train_peak_mem_mb"] is None
+        assert row2["eff_train_mem_delta_pct"] is None
+        assert row2["eff_cost_max_pct"] == 0.0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅权衡包含训练峰值显存（缺失时降级）")
+
+
+def test_audit_tolerates_early_stop_actual_steps():
+    """启用早停时实际步数/tokens_seen 可以逐 run 不同（早停的定义），审计按
+    计划步数核对并如实报告；未标记早停的步数差异仍是不可比错误。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        variants, seeds = ["standard", "lega"], [7]
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "warmup": 2,
+                "early_stop_patience": 2,
+                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
+        _write_json(os.path.join(tmp, "standard", "eval.json"), {
+            "variant": "standard", "seed": 7, "data_fingerprint": "abc123",
+            "code_commit": "deadbeef", "config_sha256": "shax",
+            "steps": 10, "steps_planned": 10, "early_stopped": False,
+            "tokens_seen": 1024})
+        _write_json(os.path.join(tmp, "lega", "eval.json"), {
+            "variant": "lega", "seed": 7, "data_fingerprint": "abc123",
+            "code_commit": "deadbeef", "config_sha256": "shax",
+            "steps": 6, "steps_planned": 10, "early_stopped": True,
+            "tokens_seen": 614})
+        audit = verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+        assert audit["ok"], audit
+        assert len(audit["early_stop_runs"]) == 1, audit
+        assert "lega/seed7" in audit["early_stop_runs"][0]
+
+        # 计划步数不一致仍是错误（早停不能掩盖"计划就不同"）
+        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"),
+                            encoding="utf-8"))
+        ev["steps_planned"] = 12
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1)
+            raise AssertionError("计划步数不一致应触发 SystemExit")
+        except SystemExit:
+            pass
+
+        # 未标记早停（early_stopped 缺失/False）的实际步数差异必须报错
+        ev["steps_planned"] = 10
+        ev["early_stopped"] = False
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1)
+            raise AssertionError("非早停的实际步数不一致应触发 SystemExit")
+        except SystemExit:
+            pass
+
+        # 非早停时 tokens_seen 不一致同样报错
+        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"),
+                            encoding="utf-8"))
+        ev["steps"] = 10
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1)
+            raise AssertionError("tokens_seen 不一致应触发 SystemExit")
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 受控变量审计：早停按计划步数核对，非早停差异仍报错")
+
+
+def test_build_summary_marks_early_stop_run():
+    """早停 run 必须在汇总页被显式标注（曲线按设计截断），且审计小节说明
+    实际步数差异的核对口径。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": None, "n_params": 100, "n_gate_extra": 0})
+        base = {"status": "过拟合趋势", "evidence": ["x"], "recommendations": ["y"],
+                "nonfinite_values": 0, "malformed_records": 0,
+                "has_grad_spike": False, "has_loss_spike": False,
+                "train_loss_first": 4.0, "train_loss_last": 3.0,
+                "val_loss_first": 4.1, "val_loss_best": 3.4,
+                "val_best_step": 50, "val_loss_last": 3.4,
+                "early_stop_gain_rel": 0.0, "early_stopped": False,
+                "early_stop_step": None}
+        stopped = dict(base, early_stopped=True, early_stop_step=500)
+        _write_json(os.path.join(tmp, "curve_diagnosis.json"),
+                    {"standard": {"1": base}, "lega": {"1": stopped}})
+        audit = {"ok": True, "checked": 2, "missing_configs": [],
+                 "mismatches": [], "meta_checked": 2, "missing_evals": [],
+                 "meta_mismatches": [], "expected_data_digest": "abc123",
+                 "exempt_keys": ["variant"], "early_stop_runs": ["lega/seed1(step 500/8000)"]}
+        out = build_summary(tmp, audit=audit)
+        md = out["markdown"]
+        assert "（早停）" in md, md
+        assert "1/1 种子需关注" in md, "需关注种子占比必须显式标出"
+        assert "早停启用" in md, md
+        assert "按计划步数核对" in md, md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总页：早停标记 + 审计口径说明")
+
+
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     """PPL 截断必须在汇总表显式标注；分布漂移字段为 null（空 split）时不得崩溃。"""
     tmp = tempfile.mkdtemp()

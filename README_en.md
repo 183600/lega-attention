@@ -127,6 +127,11 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 --wand
 # goes to results/<tag>/baseline_tuning.json
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --tune_baseline
 
+# optional: early stopping — stop when val loss shows no material improvement for
+# N consecutive evals (off by default; actual steps may differ across variants,
+# the audit then compares planned steps and the summary marks early-stopped runs)
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --early_stop_patience 5
+
 # the simple statistical baseline can also be run standalone (val by default;
 # test requires an explicit opt-in and writes the access ledger)
 python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram_baseline.json
@@ -147,11 +152,11 @@ Outputs:
 | `results/<tag>/baseline_tuning.json` | Baseline (`standard`) lr/weight-decay tuning evidence (val only; includes the `default_is_optimal` verdict and per-trial provenance) |
 | `results/<tag>/ngram_baseline.json` | Simple statistical baseline: unigram/bigram smoothed n-gram held-out PPL (α selected on val; test needs an explicit opt-in) |
 | `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check) and `registered_hypotheses` (per-claim verdicts) |
-| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, overfitting trend (train still falling, validation stalled), underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations) |
+| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, overfitting trend (train still falling, validation stalled), underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations; early-stopped runs are flagged as intentionally truncated) |
 | `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) |
 | `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) |
 | `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard) |
-| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases and training throughput (`train_step_time_ms`/`train_tokens_per_sec`, feeding the efficiency-precision trade-off) |
+| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases and training throughput/cost (`train_step_time_ms`/`train_tokens_per_sec`/`train_peak_mem_mb`, feeding the efficiency-precision trade-off) plus early-stop records (`steps_planned`/`steps`/`early_stopped`) |
 | `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths, with badcases error samples |
 | `results/<tag>/latency.json` | prefill / decode latency (per-iteration median + `*_spread_pct=(p90-p10)/median` measurement spread, for telling real differences from noise) |
 | `results/<tag>/analysis_*.csv|json` | Per (layer, head, query position) gate records and aggregates |
@@ -203,12 +208,20 @@ ones), and a non-finite validation loss switches to the real validation windows
 (training batches are only a fallback when windowing fails); when the mixed-precision
 path produces non-finite values, the same batch is **re-run in fp32 to isolate the
 precision factor** (fp32 finite → mixed-precision numerics; fp32 also non-finite →
-precision ruled out). Attribute
+precision ruled out). The "early stopping" recommended for overfitting is an
+**optional, actually implemented mechanism** (`--early_stop_patience N`, or config
+`early_stop_patience`/`early_stop_min_delta`: stop when val loss shows no material
+improvement for N consecutive evals; off by default so controlled comparisons are
+unaffected by it; when enabled, actual steps may differ across runs, `eval.json`
+records both planned and actual steps, the controlled-variable audit compares
+planned steps and the summary marks early-stopped runs — downstream evaluation
+still uses the val-selected `model_best.pt`). Attribute
 every error case, and use the cross-variant
 comparison to separate "shared failures (data/difficulty)" from "method-specific
 blind spots"; the accuracy-efficiency trade-off is judged explicitly, where the cost
 is the maximum relative increase over the baseline among **prefill/decode inference
-latency, training ms/step, parameters, FLOPs and peak memory**. Latency is the median
+latency, training ms/step, training peak GPU memory, parameters, FLOPs and
+inference peak allocation**. Latency is the median
 of per-iteration timings and **differences within the combined measurement spread
 ([p10,p90] added in quadrature) are treated as indistinguishable and excluded from
 the cost (marked †)**; a gain without

@@ -497,6 +497,33 @@ def mean_gate_value(model, val, ctx, device, iters=1, amp=False):
     return evaluate_val(model, val, ctx, device, iters, amp=amp)["gate_mean"]
 
 
+# ---------------------------------------------------------------- 早停（可选）
+
+def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
+                      min_delta: float = 0.0, patience: int = 0):
+    """一次验证评测后更新早停状态，返回 (best_val, evals_since_improve, stop)。
+
+    口径（与曲线诊断的"过拟合→早停"建议衔接，默认关闭、显式开启才生效）：
+      * 改善 = 验证损失相对当前最优有实质下降（vl < best·(1−min_delta)），
+        相对阈值不随任务损失尺度漂移；min_delta=0 退化为严格更优；
+      * best_val 按严格最小维护（checkpoint 选择口径不变），因此
+        min_delta>0 时"小幅改善"仍会保存 checkpoint，但不重置耐心计数；
+      * 连续 patience 次评测无实质改善 → stop=True；patience<=0 时功能关闭，
+        计数仍如实维护（供日志显示"距最优已多少次评测未改善"）；
+      * 非有限 vl 由 NaN 防护路径负责中止，这里不消费也不误判改善。
+    """
+    if not math.isfinite(float(vl)):
+        return best_val, evals_since_improve, False
+    if best_val == float("inf"):
+        return float(vl), 0, False
+    improved = float(vl) < best_val * (1.0 - max(0.0, float(min_delta)))
+    new_best = float(vl) if float(vl) < best_val else best_val
+    if improved:
+        return new_best, 0, False
+    count = int(evals_since_improve) + 1
+    return new_best, count, bool(patience and count >= int(patience))
+
+
 def main():
     p = argparse.ArgumentParser(description="LEGA 训练")
     p.add_argument("--config", required=True, help="实验配置 JSON")
@@ -508,6 +535,10 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--steps", type=int, default=None, help="覆盖配置中的训练步数")
+    p.add_argument("--early_stop_patience", type=int, default=None,
+                   help="验证损失连续 N 次评测无实质改善则早停（0=关闭，"
+                        "默认读配置 early_stop_patience；启用后各 run 实际步数"
+                        "可能不同，run_all 审计按计划步数核对）")
     args = p.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -517,6 +548,10 @@ def main():
             cfg[k] = min(v, cfg.get(k, v)) if k in ("batch_size",) else v
     if args.steps is not None:
         cfg["steps"] = args.steps
+    if args.early_stop_patience is not None:
+        cfg["early_stop_patience"] = args.early_stop_patience
+    early_stop_patience = max(0, int(cfg.get("early_stop_patience", 0) or 0))
+    early_stop_min_delta = max(0.0, float(cfg.get("early_stop_min_delta", 0.0) or 0.0))
     seed = args.seed if args.seed is not None else cfg.get("seed", 1337)
     device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -524,7 +559,11 @@ def main():
     out_dir = args.out_dir or os.path.join("out", tag, args.variant)
     os.makedirs(out_dir, exist_ok=True)
     cfg_used = dict(cfg)
-    cfg_used.update({"variant": args.variant, "seed": seed, "device": device, "tag": tag})
+    cfg_used.update({"variant": args.variant, "seed": seed, "device": device,
+                     "tag": tag,
+                     # 显式写入实际生效的早停口径：CLI 覆盖也必须进入受控变量审计
+                     "early_stop_patience": early_stop_patience,
+                     "early_stop_min_delta": early_stop_min_delta})
 
     set_seed(seed)
     meta = load_meta(args.data_dir)
@@ -631,6 +670,10 @@ def main():
     best_val = float("inf")
     last_eval_step = None
     last_eval_metrics = None
+    # 早停状态：patience=0（默认）时功能关闭，但计数仍维护并写入日志；
+    # stop_step 非 None 表示本次 run 被早停终止（曲线按设计截断）。
+    evals_since_improve = 0
+    stop_step = None
     # loss 设备端累加器（每步 zero_()）
     loss_acc_dev = torch.zeros((), device=device)
     # pre-clip 梯度范数：设备标量只保留引用，log 点才 .item()；
@@ -666,7 +709,8 @@ def main():
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):
-        nonlocal best_val, last_eval_step, last_eval_metrics, pending_eval_s
+        nonlocal best_val, last_eval_step, last_eval_metrics, pending_eval_s, \
+            evals_since_improve, stop_step
         t_eval = time.perf_counter()
         metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
         pending_eval_s += time.perf_counter() - t_eval
@@ -678,13 +722,19 @@ def main():
                        val, train_ctx, eval_iters, device, fallback=last_batches))
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
+        prev_best = best_val
+        best_val, evals_since_improve, should_stop = early_stop_update(
+            vl, best_val, evals_since_improve, early_stop_min_delta,
+            early_stop_patience)
         rec = {"step": step, **metrics, "val_ppl": ppl,
-               "val_ppl_clamped": bool(vl > 20), "time": now_str()}
+               "val_ppl_clamped": bool(vl > 20), "time": now_str(),
+               "evals_since_best": evals_since_improve}
+        if should_stop:
+            rec["early_stop_trigger"] = True
         log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         log_f.flush()
         mark = ""
-        if vl < best_val:
-            best_val = vl
+        if vl < prev_best:
             mark = " (best)"
             # 同步保存最优 checkpoint，避免下游评测只能用到最终步模型
             save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
@@ -693,6 +743,10 @@ def main():
                                    "val_ppl": math.exp(min(20, vl)),
                                    "val_ppl_clamped": bool(vl > 20),
                                    **provenance})
+        if should_stop:
+            stop_step = step
+            mark += (f" [early-stop: {evals_since_improve} 次评测无实质改善；"
+                     f"best 在更早的 eval，checkpoint 用 model_best.pt]")
         print(f"[train] step {step}: val_ppl={ppl:.3f}"
               + (f" gate_mean={gmean:.3f}" if gmean is not None else "") + mark)
         if wb:
@@ -774,8 +828,16 @@ def main():
                        step=step + 1)
         if (step + 1) % eval_every == 0:
             do_eval(step + 1)
+            # 早停：验证连续 patience 次评测无实质改善即终止（避免继续消耗
+            # 算力只得到更多过拟合的步；下游评测本就用 val 选出的 model_best.pt）
+            if stop_step is not None:
+                break
 
-    if last_eval_step == steps:
+    # stop_step==steps 说明触发点恰在最后一次评测：其实已跑满计划步数，
+    # 不算"提前终止"，避免把完整训练的 run 标成早停。
+    stopped_early = stop_step is not None and stop_step < steps
+    final_step = stop_step if stopped_early else steps
+    if last_eval_step == final_step:
         final_metrics = last_eval_metrics
     else:
         final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
@@ -803,8 +865,20 @@ def main():
                      if step_times_ms else None)
     train_tokens_per_sec = (tokens_per_step * 1000.0 / train_step_ms
                             if train_step_ms else None)
+    # 训练过程峰值显存（进程级高水位：模型/优化器/激活/评测窗口都计入）。
+    # 不做 reset_peak 以保留完整占用；CUDA 之外的设备没有该统计（显式 None）。
+    train_peak_mem_mb = None
+    if device.startswith("cuda") and torch.cuda.is_available():
+        try:
+            train_peak_mem_mb = round(
+                torch.cuda.max_memory_allocated() / (1024.0 ** 2), 1)
+        except (RuntimeError, ValueError):
+            train_peak_mem_mb = None
     save_checkpoint(os.path.join(out_dir, "model.pt"), model,
-                    extra={"variant": args.variant, "step": steps, "seed": seed,
+                    extra={"variant": args.variant, "step": final_step,
+                           "steps_planned": steps,
+                           "early_stopped": stopped_early,
+                           "seed": seed,
                            "val_ppl": final_ppl, "val_loss": final_val_loss,
                            "val_ppl_clamped": bool(final_val_loss > 20),
                            "tokens_seen": tokens_seen,
@@ -820,15 +894,30 @@ def main():
                                       if train_step_ms else None),
                "train_tokens_per_sec": (round(train_tokens_per_sec, 1)
                                         if train_tokens_per_sec else None),
-               "tokens_seen": tokens_seen, "steps": steps, "seed": seed,
+               "train_peak_mem_mb": train_peak_mem_mb,
+               "tokens_seen": tokens_seen,
+               # steps=实际运行步数（早停时小于计划）；steps_planned=计划步数。
+               # 受控变量审计按 steps_planned 核对，实际步数差异由 early_stopped
+               # 如实暴露，而不是静默伪装成跑满了计划步数。
+               "steps": final_step, "steps_planned": steps,
+               "early_stopped": stopped_early,
+               "early_stop_patience": early_stop_patience,
+               "early_stop_min_delta": early_stop_min_delta,
+               "seed": seed,
                **provenance},
               os.path.join(out_dir, "eval.json"))
-    log_f.write(json.dumps({"step": steps, **final_metrics,
-                            "val_ppl": final_ppl,
-                            "val_ppl_clamped": bool(final_val_loss > 20),
-                            "final": True},
-                           ensure_ascii=False) + "\n")
+    final_rec = {"step": final_step, **final_metrics,
+                 "val_ppl": final_ppl,
+                 "val_ppl_clamped": bool(final_val_loss > 20),
+                 "final": True, "evals_since_best": evals_since_improve}
+    if stopped_early:
+        final_rec["early_stop"] = True
+    log_f.write(json.dumps(final_rec, ensure_ascii=False) + "\n")
     log_f.close()
+    if stopped_early:
+        print(f"[train] 早停于 step {final_step}/{steps}（连续 "
+              f"{evals_since_improve} 次评测无实质改善）；"
+              f"下游使用 model_best.pt")
     print(f"[train] 完成: val_ppl={final_ppl:.3f} -> {out_dir}")
     if wb:
         wb.finish()

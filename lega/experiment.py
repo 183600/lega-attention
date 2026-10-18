@@ -137,7 +137,8 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str) -> dict:
     ev = _load_json(os.path.join(out_dir, "eval.json"))
     if ev:
         rec["result"] = {k: ev.get(k) for k in (
-            "val_ppl", "val_loss", "gate_mean", "steps", "tokens_seen",
+            "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
+            "early_stopped", "tokens_seen",
             "n_params", "code_commit", "code_dirty", "data_fingerprint",
             "config_sha256")}
     return rec
