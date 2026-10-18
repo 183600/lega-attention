@@ -52,7 +52,7 @@ DEFAULTS = {"steps": 300, "batch_size": 8, "ctx": 128, "lr": 3e-3,
             "loss_threshold": 0.05, "acc_threshold": 0.99}
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
                   max_chunk_tokens: int = 8192,
                   max_chunk_elems: int = 16_777_216) -> dict:
@@ -60,6 +60,9 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
 
     直接消费 logits 计算指标（而非模型的训练路径），因此同时校验了
     lm_head 输出与标签的对齐关系。
+
+    inference_mode：纯指标计算，返回的只有 Python 标量、无张量逃逸，
+    省去 no_grad 下仍需维护的视图/版本计数开销。
 
     计算逐块进行：max_chunk_tokens 限制单次前向的 token 数（rows*T），
     max_chunk_elems 限制单块 logits 与交叉熵逐 token 块的元素量
