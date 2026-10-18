@@ -24,6 +24,13 @@
   gate_f1_trivial      恒写/恒不写两个固定规则的 F1（无阈值“稻草人”对照）：
                        不平衡下学习到的门控 F1 必须比多数类规则更有信息量，
                        否则门控的“决策价值”无从谈起
+  linear_probe         同特征集（log max_p、log n、qterm）的 L2 逻辑回归
+                       **简单监督基线**：按样例分组交叉验证、标准化统计
+                       只用训练折、λ 按 out-of-fold log-loss 网格选择。
+                       门控 logit 在语言建模中训练、从未见过 hit 标签；
+                       探针直接用 hit 标签监督训练。对照语义：探针显著
+                       更好属预期，门控不能显著优于探针时不得把“更能
+                       判断该不该写入”归因给门控结构。详见 lega/probe.py
 
 稳健性协议（防单一阈值/虚假精度）：
   tau_sensitivity          misleading/P(hit|集中) 系指标在多档 τ 上并报，
@@ -52,6 +59,11 @@ import torch
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_tokenizer
 from .model import load_model
+from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
+                    DEFAULT_L2_GRID as _PROBE_L2_GRID,
+                    EXTREME_IMBALANCE_THRESHOLD as _EXTREME_IMBALANCE_THRESHOLD,
+                    PRIMARY_AP_THRESHOLD as _PRIMARY_AP_THRESHOLD,
+                    linear_probe)
 from .repro import load_provenance
 from .ruler import (build_niah, build_vt, load_corpus_sents,
                     ContextTooSmall, _stable_hash)
@@ -61,10 +73,8 @@ from .utils import (auroc, average_precision, enable_tf32, f1_scores,
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
 # 命中判别（hit vs miss）正类率低于该值时以 PR-AUC 为主指标：此时负样本
-# 基数使 ROC-AUC 过于乐观（FPR 增长缓慢）。0.05 是常用警戒线；
-# 0.001（1:1000）以下属极度不平衡。
-_PRIMARY_AP_THRESHOLD = 0.05
-_EXTREME_IMBALANCE_THRESHOLD = 0.001
+# 基数使 ROC-AUC 过于乐观（FPR 增长缓慢）。阈值集中在 lega.probe 定义
+# （线性探针基线复用同一口径），此处导入别名避免两处漂移。
 # 门控决策阈值：g 为 sigmoid 输出，0.5 是“是否写入”的自然默认决策点；
 # 显式落盘以便复现（F1 依赖阈值，不能隐式）。
 _GATE_DECISION_THRESHOLD = 0.5
@@ -514,6 +524,15 @@ def main():
                    help="按样例聚类的 AUROC bootstrap 重采样次数；"
                         "默认取配置 analysis.bootstrap_resamples（1000），0 关闭")
     p.add_argument("--ctx", type=int, default=None, help="分析用上下文长度，默认取 RULER 最长档")
+    p.add_argument("--probe_folds", type=int, default=None,
+                   help="线性探针的分组交叉验证折数（默认取配置 "
+                        "analysis.probe_folds，5）")
+    p.add_argument("--probe_l2", default=None,
+                   help="逗号分隔的 L2 强度网格；默认取配置 "
+                        "analysis.probe_l2_grid（0,0.01,0.1,1）")
+    p.add_argument("--no_probe", action="store_true",
+                   help="跳过线性探针简单基线（默认运行；跳过时汇总页会"
+                        "缺少“门控 vs 最简监督线性模型”的对照）")
     p.add_argument("--suffix", default="",
                    help="输出文件名后缀（如 _seed1337），多种子运行避免互相覆盖")
     p.add_argument("--device", default="auto")
@@ -583,6 +602,20 @@ def main():
     records = collect_records(model, tok, device, examples, task_of, ctx_of,
                               amp=bool(ckpt_cfg.get("amp", True)))
     summary = summarize(records, variant, tau)
+    # 简单监督基线（线性探针）：从同一批记录学“该不该写入”的最简线性模型。
+    # 探针有 hit 标签监督，门控 logit 没有；对照语义见 lega/probe.py 与
+    # 落盘报告的 note，不得反向解读。
+    if not args.no_probe:
+        if args.probe_l2:
+            probe_l2 = [float(x) for x in args.probe_l2.split(",") if x.strip()]
+        else:
+            probe_l2 = [float(x) for x in acfg.get(
+                "probe_l2_grid", list(_PROBE_L2_GRID))]
+        probe_folds = (int(args.probe_folds) if args.probe_folds is not None
+                       else int(acfg.get("probe_folds", _PROBE_FOLDS)))
+        summary["linear_probe"] = linear_probe(
+            records, folds=probe_folds, l2_grid=probe_l2,
+            seed=int(ck.get("seed")) if ck.get("seed") is not None else 0)
     # 阈值敏感性：misleading/P(hit|集中) 的结论不能只挂在单一 τ 上
     if args.tau_grid is not None:
         grid = [float(x) for x in args.tau_grid.split(",") if x.strip()]
@@ -641,6 +674,16 @@ def main():
     if ap_ci:
         print(f"[analysis] PR-AUC(logit−qterm) 样例聚类 bootstrap 95% CI: "
               f"[{ap_ci[0]:.3f}, {ap_ci[1]:.3f}]（不平衡下的主指标口径）")
+    probe = summary.get("linear_probe") or {}
+    pset = (probe.get("feature_sets") or {}).get(probe.get("primary") or "") or {}
+    poof = pset.get("oof") or {}
+    if poof:
+        print(f"[analysis] 线性探针简单基线（{pset.get('name')}，"
+              f"{probe.get('folds')} 折按样例分组 CV、λ={pset.get('selected_l2')}）："
+              f"AUROC={fmt(poof.get('auroc'))} PR-AUC={fmt(poof.get('auprc'))} "
+              f"（OOF，有标签监督；门控 logit 无标签监督，务必对照解读）")
+    elif probe:
+        print(f"[analysis] 线性探针跳过：{probe.get('note', '')[:120]}")
     print(f"[analysis] 完成 -> {args.out_dir}")
 
 

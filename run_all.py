@@ -1129,8 +1129,174 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                      "本对比为补充性/探索性证据，不替代变体间受控对比")}
 
 
+def _probe_oof(analysis: dict, key: str):
+    """从机制分析 JSON 取线性探针主特征集的 out-of-fold 指标。"""
+    lp = (analysis or {}).get("linear_probe") or {}
+    fs = (lp.get("feature_sets") or {}).get(lp.get("primary") or "") or {}
+    return (fs.get("oof") or {}).get(key)
+
+
+# 机制判别的简单学习基线对照（补充性/探索性）：门控 logit 是语言建模的
+# 副产品、训练时从未见过 hit 标签；线性探针在同一批记录上用 hit 标签监督
+# 训练（按样例分组 CV、λ 按 OOF log-loss 调优，见 lega/probe.py）。
+# Δ = 探针 − 门控：>0 表示简单监督基线更好（门控的“判别优越性”不成立），
+# ≈0 表示门控与最简线性模型打平，<0 才是门控在判别上显著更好。
+LINEAR_PROBE_AP_METRIC = "PR-AUC差(探针−门控)"
+LINEAR_PROBE_AUROC_METRIC = "AUROC差(探针−门控)"
+
+
+def linear_probe_baseline_comparison(runs: dict) -> dict:
+    """门控 logit vs 线性探针简单监督基线的逐种子配对对照。
+
+    没有这个对照时，“门控 logit 的 AUROC/PR-AUC 高”可能只说明廉价特征
+    （log max_p、log n、qterm）本身线性可分，复杂门控结构的贡献无从谈起。
+    探针是**有标签监督**的简单基线：探针超过门控属预期，门控必须在
+    主指标上不被探针显著超越，才有资格谈“更能判断该不该写入”。
+    单统计量规则（max_p）一并列出，作为最低档次的规则系统对照。
+    """
+    rows, tests_ap, tests_aud, missing = [], [], [], []
+    for v in sorted(runs):
+        if v not in VARIANTS:
+            continue
+        m = _variant_seed_map(runs, v)
+        per_seed, has_analysis = [], False
+        for s in _sorted_seeds(m):
+            an = m[s].get("analysis") or {}
+            if an:
+                has_analysis = True
+            lp = an.get("linear_probe") or {}
+            fs = (lp.get("feature_sets") or {}).get(lp.get("primary") or "") or {}
+            oof = fs.get("oof") or {}
+            if oof.get("auprc") is None or oof.get("auroc") is None:
+                continue
+            per_seed.append({
+                "seed": int(s),
+                "probe_auprc": float(oof["auprc"]),
+                "probe_auroc": float(oof["auroc"]),
+                "gate_auprc": an.get("auprc_logit"),
+                "gate_auroc": an.get("auroc_logit"),
+                "rule_auprc": an.get("auprc_maxp"),
+                "rule_auroc": an.get("auroc_maxp"),
+                "base_rate": an.get("hit_base_rate"),
+                "probe_l2": fs.get("selected_l2"),
+                "probe_features": fs.get("features"),
+                "folds": lp.get("folds"),
+                "primary_detection_metric": lp.get("primary_detection_metric"),
+                "imbalance_level": lp.get("imbalance_level"),
+            })
+        if not per_seed:
+            if has_analysis:
+                missing.append({"variant": v,
+                                "reason": "analysis JSON 缺少 linear_probe"
+                                          "（旧产物或 --no_probe）"})
+            continue
+
+        def _ms(key):
+            vals = [r[key] for r in per_seed if r.get(key) is not None]
+            return mean_std(vals) if vals else (None, None)
+
+        probe_ap_m, probe_ap_s = _ms("probe_auprc")
+        gate_ap_m, gate_ap_s = _ms("gate_auprc")
+        probe_auc_m, probe_auc_s = _ms("probe_auroc")
+        gate_auc_m, gate_auc_s = _ms("gate_auroc")
+        rule_ap_m, _ = _ms("rule_auprc")
+        rule_auc_m, _ = _ms("rule_auroc")
+        base_m, _ = _ms("base_rate")
+
+        def _test(key_p, key_g, metric):
+            a, b = [], []
+            for r in per_seed:
+                if r.get(key_p) is None or r.get(key_g) is None:
+                    continue
+                a.append(r[key_p])
+                b.append(r[key_g])
+            if not a:
+                return None
+            res = paired_t_test(a, b)
+            res.update({"candidate": v, "reference": "linear_probe",
+                        "metric": metric, "lower_is_better": False})
+            return _enrich_paired(res, a, b)
+
+        t_ap = _test("probe_auprc", "gate_auprc", LINEAR_PROBE_AP_METRIC)
+        t_aud = _test("probe_auroc", "gate_auroc", LINEAR_PROBE_AUROC_METRIC)
+        if t_ap:
+            tests_ap.append(t_ap)
+        if t_aud:
+            tests_aud.append(t_aud)
+        d_ap = [r["probe_auprc"] - r["gate_auprc"] for r in per_seed
+                if r.get("gate_auprc") is not None]
+        d_auc = [r["probe_auroc"] - r["gate_auroc"] for r in per_seed
+                 if r.get("gate_auroc") is not None]
+        primary = next((r.get("primary_detection_metric") for r in per_seed
+                        if r.get("primary_detection_metric")), None)
+        rows.append({
+            "variant": v, "n_seeds": len(per_seed),
+            "seeds": [r["seed"] for r in per_seed],
+            "imbalance_level": next((r.get("imbalance_level") for r in per_seed
+                                     if r.get("imbalance_level")), None),
+            "hit_base_rate": base_m,
+            "primary_detection_metric": primary,
+            "features": next((r.get("probe_features") for r in per_seed
+                              if r.get("probe_features")), None),
+            "probe_l2": next((r.get("probe_l2") for r in per_seed
+                              if r.get("probe_l2") is not None), None),
+            "folds": next((r.get("folds") for r in per_seed
+                           if r.get("folds") is not None), None),
+            "rule_auprc": rule_ap_m, "probe_auprc": probe_ap_m,
+            "probe_auprc_std": probe_ap_s,
+            "gate_auprc": gate_ap_m, "gate_auprc_std": gate_ap_s,
+            "rule_auroc": rule_auc_m, "probe_auroc": probe_auc_m,
+            "probe_auroc_std": probe_auc_s,
+            "gate_auroc": gate_auc_m, "gate_auroc_std": gate_auc_s,
+            "delta_auprc": (sum(d_ap) / len(d_ap)) if d_ap else None,
+            "delta_auroc": (sum(d_auc) / len(d_auc)) if d_auc else None,
+        })
+    tests = _apply_holm(tests_ap + tests_aud)
+    for t in tests:
+        # _apply_holm 的结论文案面向“候选优于参照”，此处 Δ=探针−门控，
+        # 语义相反：Δ>0 是简单监督基线更好，必须改写以免方向误导。
+        n = t.get("n") or 0
+        if t.get("p") is None:
+            t["verdict"] = "无法检验（样本或方差退化），不作判定"
+        elif n < MIN_SEEDS:
+            t["verdict"] = f"种子不足（n={n}<{MIN_SEEDS}），不作判定"
+        elif t.get("p_adj") is not None and t["p_adj"] < ALPHA:
+            t["verdict"] = ("⚠ 简单监督基线更好：门控的判别优越性不成立"
+                            if t["mean_diff"] > 0 else
+                            "门控显著优于最简监督线性基线")
+        else:
+            t["verdict"] = ("无显著差异（对照 MDE）——打平不等于门控结构"
+                            "无用，但也不构成“判别优越性”的证据")
+    # 行内证据在 Holm 校正与自定义 verdict 之后回填（校正对象是 tests 里的
+    # 同一批 dict；若在循环里先取值会拿到校正前的 None）。
+    by_key = {(t.get("candidate"), t.get("metric")): t for t in tests}
+    for r in rows:
+        t_ap = by_key.get((r["variant"], LINEAR_PROBE_AP_METRIC))
+        t_aud = by_key.get((r["variant"], LINEAR_PROBE_AUROC_METRIC))
+        r["p_adj_auprc"] = (t_ap or {}).get("p_adj")
+        r["p_adj_auroc"] = (t_aud or {}).get("p_adj")
+        r["delta_auprc_ci95"] = (t_ap or {}).get("mean_diff_ci95")
+        r["delta_auroc_ci95"] = (t_aud or {}).get("mean_diff_ci95")
+        r["verdict"] = ((t_ap if r.get("primary_detection_metric") == "PR-AUC"
+                         else t_aud) or {}).get("verdict")
+    return {
+        "metrics": {"ap": LINEAR_PROBE_AP_METRIC,
+                    "auroc": LINEAR_PROBE_AUROC_METRIC},
+        "rows": rows, "tests": tests, "missing": missing,
+        "note": ("线性探针=有标签监督的简单基线（同批记录、按样例分组 CV、"
+                 "λ 按 OOF log-loss 网格调优；OOF 指标防“背题”泄漏）；"
+                 "门控 logit 为语言建模副产品、训练未见 hit 标签。"
+                 "Δ=探针−门控：>0 属预期（判别能力本可由线性模型从廉价"
+                 "统计量学得），门控必须在主指标上不被探针显著超越才有"
+                 "资格谈“结构优越性”。单统计量规则（max_p）为最低档次"
+                 "对照。本对比为补充性/探索性证据，不替代预注册的确认性"
+                 "检验。"),
+    }
+
+
 def _render_baseline_sections(results_dir: str, smoke=None,
-                              ngram_cmp: dict = None) -> list:
+                              ngram_cmp: dict = None,
+                              probe_cmp: dict = None) -> list:
     """基线合理性小节：简单统计基线 + 基线超参数调优证据。
 
     科研方法问题：如果复杂方法只与“随手设一个学习率”的弱基线比较，
@@ -1274,6 +1440,55 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                         "至少一档学习率/权重衰减的网格验证，方法涨点可能只是"
                         "超参数红利。请用 `run_all.py --tune_baseline` 或在"
                         "`results/<tag>/baseline_tuning.json` 提供证据。"))
+    # 机制判别的“最简监督线性模型”对照：没有它，“门控 logit 判别力高”
+    # 无法排除“廉价特征本身线性可分”。探针 OOF 有标签监督、门控无标签；
+    # Δ=探针−门控，>0 属预期，门控不被显著超越才谈得上结构优越性。
+    probe = probe_cmp or {}
+    if probe.get("rows"):
+        lines += [
+            "",
+            "- 机制判别的简单学习基线（线性探针，OOF；与门控 logit 逐种子"
+            "配对、Holm 校正；属补充性/探索性对比）：",
+            "",
+            "| 变体 | n | 命中基线率 | 特征集 | PR-AUC规则(max_p) | "
+            "PR-AUC探针(OOF) | PR-AUC门控(logit) | AUROC探针(OOF) | "
+            "AUROC门控(logit) | ΔPR-AUC(探针−门控) | p_adj | 判定 |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for r in probe["rows"]:
+            feat = r.get("features")
+            feat_s = "+".join(str(x) for x in feat) if feat else "-"
+            delta = r.get("delta_auprc")
+            ci = r.get("delta_auprc_ci95")
+            delta_s = ("-" if delta is None else
+                       f"{delta:+.3f}"
+                       + (f" [{(ci or [None, None])[0]:+.3f}, "
+                          f"{(ci or [None, None])[1]:+.3f}]"
+                          if ci else ""))
+            lines.append(
+                f"| {r.get('variant')} | {r.get('n_seeds')} | "
+                f"{_fmt4(r.get('hit_base_rate'))} | {feat_s} | "
+                f"{_fmt4(r.get('rule_auprc'))} | "
+                f"{_fmt4(r.get('probe_auprc'))} | "
+                f"{_fmt4(r.get('gate_auprc'))} | "
+                f"{_fmt4(r.get('probe_auroc'))} | "
+                f"{_fmt4(r.get('gate_auroc'))} | {delta_s} | "
+                f"{_fmt4(r.get('p_adj_auprc'))} | "
+                f"{r.get('verdict') or '-'} |")
+        lines += ["", f"  {probe.get('note', '')}"]
+        lines.append(
+            f"  注：命中基线率=hit 正类率，也是 PR-AUC 的随机猜基线；"
+            f"主指标={next((r.get('primary_detection_metric') for r in probe['rows'] if r.get('primary_detection_metric')), 'n/a')}"
+            f"（正类率 <5% 时 PR-AUC 为主，AUROC 因负类基数大而乐观）；"
+            f"探针 λ 逐变体按 OOF log-loss 网格选择（见 analysis_*.json "
+            f"的 linear_probe.per_l2）；PR-AUC 探针/OOF 与门控在同一样本上"
+            f"计算，Δ 的 CI 与 p_adj 见 significance.json。")
+    if probe.get("missing"):
+        names = "、".join(f"{x.get('variant')}（{x.get('reason')}）"
+                          for x in probe["missing"])
+        lines.append(f"- ⚠ 线性探针简单基线缺失：{names}；"
+                     "机制主张缺少“有标签监督的最简线性模型”对照，"
+                     "不能用“门控 logit 判别力高”替代。")
     lines.append("")
     return lines
 
@@ -1563,6 +1778,14 @@ def build_summary(results_dir: str, audit: dict = None,
             m, "analysis",
             lambda d: (((d.get("gate_f1_trivial") or {})
                         .get("always_write") or {}).get("macro")))))
+    # 线性探针（有标签监督的简单基线）OOF 指标：进入 summary.json/csv，
+    # 供“门控 vs 最简线性模型”的补充性对照审计（渲染见基线合理性小节）。
+    metric_specs.append(
+        ("probe_auprc", lambda m: _stat_series(
+            m, "analysis", lambda d: _probe_oof(d, "auprc"))))
+    metric_specs.append(
+        ("probe_auroc", lambda m: _stat_series(
+            m, "analysis", lambda d: _probe_oof(d, "auroc"))))
 
     rows = []
     for v in variants:
@@ -1742,11 +1965,14 @@ def build_summary(results_dir: str, audit: dict = None,
     else:
         md.append("（暂无结果，先运行训练评测）")
 
-    # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线）
+    # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线
+    #     + 机制判别的线性探针简单监督基线）
     ngram_cmp = ngram_baseline_comparison(runs, results_dir)
+    probe_cmp = linear_probe_baseline_comparison(runs)
     md += _render_baseline_sections(results_dir,
                                     smoke=bool((repro or {}).get("smoke")),
-                                    ngram_cmp=ngram_cmp)
+                                    ngram_cmp=ngram_cmp,
+                                    probe_cmp=probe_cmp)
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
@@ -2637,6 +2863,7 @@ def build_summary(results_dir: str, audit: dict = None,
                    "registration_integrity": integrity,
                    "registration_scope": scope_check,
                    "ngram_comparison": ngram_cmp,
+                   "linear_probe_comparison": probe_cmp,
                    "auroc_diff_note": (
                        f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
                        "(变体, 种子) run 的 auroc_logit − auroc_qterm 配对差，"
