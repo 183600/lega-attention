@@ -2830,14 +2830,9 @@ def main():
                                                   **ledger_common))
     print(f"[repro] 实验台账 run_id={run_id} -> {ledger}")
 
-    ruler_over = []
-    analysis_over = []
-    if args.smoke:
-        # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
-        # 模板约 211 token，128 会让 RULER 全部任务与机制分析被跳过）
-        smoke_ctx = min(256, int(cfg.get("block_size", 256)))
-        ruler_over = ["--n_samples", "2", "--ctx_lens", str(smoke_ctx)]
-        analysis_over = ["--n_examples", "2", "--ctx", str(smoke_ctx)]
+    # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
+    # 模板约 211 token，128 会让 RULER 全部任务与机制分析被跳过）
+    smoke_ctx = min(256, int(cfg.get("block_size", 256))) if args.smoke else 0
 
     # 过拟合小批量 sanity check：全量训练前的代码正确性闸门（梯度/损失/标签）。
     # 每个变体跑一次（用首个种子），失败立即中止——连小批量都无法过拟合时不应
@@ -2871,77 +2866,56 @@ def main():
             sanity[v] = "pass"
         print(f"[run_all] sanity check 全部通过: {', '.join(sanity.keys())}")
 
-    # 各 (变体, 种子) 的训练相互独立，可并发。评测同样相互独立（evaluate 只
-    # 追加 test 访问账本，append_test_access 已用进程间文件锁保证不丢记录；
-    # ruler 只读数据、各写各的 ruler_*.json），因此一并并发执行，产出物与
-    # 串行逐条执行完全一致。
+    # 每个 (变体, 种子) 是一个独立 run：训练 → 独立评测 → RULER → 机制分析。
+    # 四个阶段由 lega.postrun 在同一进程内顺序执行：单 run 的行为与逐条独立
+    # 进程完全相同（各阶段 main() 自行 set_seed/加载模型/写自己的产物，评测/
+    # RULER/分析只依赖本 run 的 checkpoint），但只付一次解释器启动与框架导入
+    # （实测 torch 导入约 1s，占单个评测进程耗时的大头）；不同 run 之间不再
+    # 需要“全部训练完成才能开始评测”的全局阶段屏障，近饱和机器上并发调度
+    # 的波尾空隙更小。evaluate 追加 test 访问账本，append_test_access 已用
+    # 进程间文件锁保证不丢记录。
     chain = []
-    train_cmds = []
+    chain_cmds = []
     for v in variants:
         for seed in seeds:
             vdir = _variant_dir(out_root, v, seed, n_seeds)
             suffix = _seed_tag(seed, n_seeds)
             chain.append((v, seed, vdir, suffix))
-            if not args.skip_train:
-                cmd = ([py, "-m", "lega.train", "--config", args.config,
-                        "--variant", v, "--data_dir", args.data_dir,
-                        "--out_dir", vdir, "--seed", str(seed),
-                        "--device", args.device] + (["--smoke"] if args.smoke else [])
-                       + (["--wandb"] if args.wandb else [])
-                       + (["--early_stop_patience",
-                           str(args.early_stop_patience)]
-                          if args.early_stop_patience is not None else []))
-                print("+", " ".join(cmd), flush=True)
-                train_cmds.append(cmd)
-    if train_cmds:
-        try:
-            run_many(train_cmds, jobs, _jobs_env(jobs))
-        except subprocess.CalledProcessError as e:
-            # 训练中止最常见的原因是 NaN 防护触发（train.py 会先落盘
-            # nan_report.json 再退出）；把排查入口直接指给用户，避免只留堆栈
-            raise SystemExit(
-                f"训练失败（变体命令退出码 {e.returncode}）：若为 NaN 中止，"
-                f"对应 run 目录下已生成 nan_report.json（数据→代码→混合精度→"
-                f"梯度/学习率的系统排查路径），排查后重跑；命令: "
-                f"{' '.join(e.cmd)}")
-    eval_cmds, eval_names = [], []
-    ruler_cmds, ruler_names = [], []
-    for v, seed, vdir, suffix in chain:
-        # 优先评测验证集选出的最优 checkpoint（与 model selection 口径一致），
-        # 仅在不存在（如 --skip_train 复用旧产物）时回退到最终步模型。
-        best = os.path.join(vdir, "model_best.pt")
-        ckpt = best if os.path.exists(best) else os.path.join(vdir, "model.pt")
-        if not os.path.exists(ckpt):
-            print(f"[run_all] 跳过 {v}/seed{seed}：无 checkpoint")
-            continue
-        cmd = [py, "-m", "lega.evaluate", "--ckpt", ckpt,
-               "--data_dir", args.data_dir,
-               "--out", os.path.join(results_dir, f"eval_{v}{suffix}.json"),
-               "--worst_n", "3",
-               "--device", args.device]
-        print("+", " ".join(cmd), flush=True)
-        eval_cmds.append(cmd)
-        eval_names.append(f"{v}/seed{seed}")
-        if not args.skip_ruler:
-            cmd = [py, "-m", "lega.ruler", "--ckpt", ckpt,
-                   "--data_dir", args.data_dir,
-                   "--out", os.path.join(results_dir, f"ruler_{v}{suffix}.json"),
-                   "--device", args.device] + ruler_over
+            cmd = [py, "-m", "lega.postrun",
+                   "--config", args.config, "--variant", v, "--seed", str(seed),
+                   "--data_dir", args.data_dir, "--out_dir", vdir,
+                   "--results_dir", results_dir, "--suffix", suffix,
+                   "--device", args.device]
+            if args.skip_train:
+                cmd += ["--skip_train"]
+            if args.wandb:
+                cmd += ["--wandb"]
+            if args.early_stop_patience is not None:
+                cmd += ["--early_stop_patience", str(args.early_stop_patience)]
+            if args.smoke:
+                cmd += ["--smoke", "--ruler_ctx_lens", str(smoke_ctx),
+                        "--ruler_n_samples", "2",
+                        "--analysis_n_examples", "2",
+                        "--analysis_ctx", str(smoke_ctx)]
+            if args.skip_ruler:
+                cmd += ["--skip_ruler"]
+            if args.skip_analysis or v not in GATED_FOR_ANALYSIS:
+                cmd += ["--skip_analysis"]
             print("+", " ".join(cmd), flush=True)
-            ruler_cmds.append(cmd)
-            ruler_names.append(f"{v}/seed{seed}")
-    try:
-        run_many(eval_cmds, jobs, _jobs_env(jobs))
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(
-            f"评测失败（{eval_names[eval_cmds.index(e.cmd)]}，退出码 "
-            f"{e.returncode}）：{' '.join(e.cmd)}")
-    try:
-        run_many(ruler_cmds, jobs, _jobs_env(jobs))
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(
-            f"RULER 评测失败（{ruler_names[ruler_cmds.index(e.cmd)]}，退出码 "
-            f"{e.returncode}）：{' '.join(e.cmd)}")
+            chain_cmds.append(cmd)
+    if chain_cmds:
+        try:
+            run_many(chain_cmds, jobs, _jobs_env(jobs))
+        except subprocess.CalledProcessError as e:
+            # 失败可能出现在链的任一阶段（postrun stderr 已标明阶段名与等价
+            # 命令）；训练中止最常见的原因是 NaN 防护触发（train.py 会先落盘
+            # nan_report.json 再退出），把排查入口直接指给用户
+            v0 = variants[chain_cmds.index(e.cmd) // max(1, len(seeds))]
+            raise SystemExit(
+                f"run 链失败（变体 {v0}，退出码 {e.returncode}）：训练/评测/"
+                "机制分析任一阶段失败即中止；若为训练 NaN 中止，对应 run 目录"
+                "下已生成 nan_report.json（数据→代码→混合精度→梯度/学习率的"
+                f"系统排查路径），排查后重跑；命令: {' '.join(e.cmd)}")
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
     # 错误样本是改进思路的最重要来源，不能只留聚合分数。
@@ -2995,23 +2969,6 @@ def main():
              "--out", os.path.join(results_dir, "latency.json"),
              "--variants", lat_variants,
              "--device", args.device] + (["--smoke"] if args.smoke else []))
-
-    if not args.skip_analysis:
-        cmds = []
-        for v in variants:
-            if v not in GATED_FOR_ANALYSIS:
-                continue
-            for seed in seeds:
-                vdir = _variant_dir(out_root, v, seed, n_seeds)
-                best = os.path.join(vdir, "model_best.pt")
-                ckpt = best if os.path.exists(best) else os.path.join(vdir, "model.pt")
-                if not os.path.exists(ckpt):
-                    continue
-                cmds.append([py, "-m", "lega.analysis", "--ckpt", ckpt,
-                             "--data_dir", args.data_dir,
-                             "--out_dir", results_dir, "--device", args.device,
-                             "--suffix", _seed_tag(seed, n_seeds)] + analysis_over)
-        run_many(cmds, jobs, _jobs_env(jobs))
 
     if not args.skip_plots:
         run([py, "-m", "lega.plots", "--results_dir", results_dir,
