@@ -150,8 +150,7 @@ def main():
         # 须明确提示而非静默；正式数据请用 prepare_data.py 生成 held-out test。
         print("[eval] 警告：正在 val split 上评测——这也是 best checkpoint 的选择集，"
               "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测")
-    # checkpoint 内容指纹只计算一次：test 访问账本与结果 JSON 共用同一值，
-    # 避免对同一（可能数百 MB 的）文件重复流式哈希。
+    # checkpoint 内容指纹只计算一次：test 访问账本与结果 JSON 共用同一值。
     ckpt_sha256 = sha256_file(args.ckpt)
     test_access = None
     if split == "test":

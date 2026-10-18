@@ -40,7 +40,7 @@ def fit_counts(ids: np.ndarray, vocab_size: int):
     """在训练流上统计一元/二元频次；返回 (uni_counts, pair_keys, pair_counts)。
 
     一元用 bincount（V=50257 量级可接受）；二元的 V² 稀疏不可枚举，
-    用 np.unique 收集出现的对并计数（内存与 train_tokens 同阶）。
+    用 np.unique 收集出现的对并计数。
     """
     ids = np.asarray(ids, dtype=np.int64)
     uni = np.bincount(ids, minlength=int(vocab_size)).astype(np.float64)

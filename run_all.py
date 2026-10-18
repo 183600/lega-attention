@@ -142,12 +142,9 @@ def run(cmd, env=None):
 def _resolve_jobs(args) -> int:
     """并发度：显式 --jobs 优先；未指定时 CPU 取 min(4, 核数)，CUDA/--wandb 取 1。
 
-    小核机器（<=4 核）默认放宽到 核数+1：并发时 _jobs_env 已把每个子进程压到
-    单 BLAS 线程（cpu//(cpu+1) 仍为 1，不增加总线程数），而子任务按
-    ceil(任务数/worker) 成轮调度——9 个等长子任务在 4 worker 下排成 4+4+1
-    三轮（末轮 3 核闲置），5 worker 下只需 5+4 两轮；轻度超订只改变任务间
-    的调度，不改变任何单进程的计算内容与随机数。大核机器维持 4 并发 x
-    cpu//4 线程、不引入超订；显式 --jobs 完全以用户值为准，不受此默认影响。
+    小核机器（<=4 核）默认取 核数+1：_jobs_env 已把每个子进程压到单 BLAS
+    线程，总线程数不随 worker 数增加；大核机器维持 4 并发。显式 --jobs
+    完全以用户值为准，不受此默认影响。
     """
     if args.jobs is not None:
         return max(1, int(args.jobs))
@@ -841,7 +838,7 @@ def _render_baseline_sections(results_dir: str) -> list:
         lines.append(
             f"- 基线调优（变体 `{tune.get('variant', 'standard')}`，"
             f"{tune.get('n_trials', len(tune.get('trials') or []))} 组网格、"
-            f"trial 步数 {tune.get('steps', '-')}（与正式训练同预算与否以"
+            f"trial 步数 {tune.get('steps', '-')}（与正式训练同步数与否以"
             f"此为准）、验证集选择、测试集未使用）：最优 lr={best.get('lr')}"
             + (f"、weight_decay={best.get('weight_decay')}"
                if best.get("weight_decay") is not None else "")
@@ -2124,8 +2121,8 @@ def main():
                         "选定组合注入配置并统一用于全部变体，证据写入 "
                         "results/<tag>/baseline_tuning.json")
     p.add_argument("--tune_steps", type=int, default=None,
-                   help="调优 trial 的训练步数（默认与正式训练相同；显式缩小预算时"
-                        "汇总页会如实记录，不能当作与正式同预算的调优）")
+                   help="调优 trial 的训练步数（默认与正式训练相同；显式缩小步数时"
+                        "汇总页会如实记录，不能当作与正式同步数的调优）")
     p.add_argument("--tune_lr_mults", default="0.5,1,2",
                    help="调优网格的 lr 乘子（逗号分隔，默认 0.5,1,2）")
     p.add_argument("--tune_wd_list", default=None,

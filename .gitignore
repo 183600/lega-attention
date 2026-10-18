@@ -24,6 +24,8 @@ results/*
 wandb/
 *.pt
 *.bin
+REPORT*.md
+autodl_budget*.json
 
 # 系统文件
 .DS_Store

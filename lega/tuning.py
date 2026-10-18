@@ -210,7 +210,7 @@ def main():
     p.add_argument("--variant", default="standard")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--steps", type=int, default=None,
-                   help="每个 trial 的训练步数（默认用配置值；建议先用较小预算）")
+                   help="每个 trial 的训练步数（默认用配置值；可先用较小步数）")
     p.add_argument("--lr_mults", default=",".join(str(m) for m in DEFAULT_LR_MULTS))
     p.add_argument("--wd_list", default=None, help="逗号分隔；默认仅配置的 wd")
     p.add_argument("--device", default="auto")
