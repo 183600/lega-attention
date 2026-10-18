@@ -65,12 +65,16 @@ def test_validate_registration_schema():
          "reference": "b", "direction": "bogus"},
         {"id": "H4", "claim": "c4", "candidate": "a",
          "reference": "b", "direction": "candidate_better"},
+        {"id": ["H5"], "claim": "c5", "metric": "PPL", "candidate": "a",
+         "reference": "b", "direction": "candidate_better"},
     ]}
     errs = validate_registration(bad)
     assert any("重复" in e for e in errs)
     assert any("direction" in e for e in errs)
     assert any("缺少字段 metric" in e for e in errs)  # H4 无 metric
-    print("  [ok] validate_registration（重复 id/非法 direction/缺字段）")
+    # 不可哈希 id（数组）必须显式报 schema 错误，而不是在去重时 TypeError
+    assert any("非空字符串" in e for e in errs)
+    print("  [ok] validate_registration（重复 id/非法 direction/缺字段/坏 id）")
 
 
 def test_verify_intact_then_silent_tamper_detected():
@@ -239,6 +243,41 @@ def test_verify_missing_files_and_malformed_lock():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_registration（缺文件/坏锁/非法登记表的状态边界）")
+
+
+def test_malformed_lock_baseline_and_unhashable_ids_do_not_crash():
+    """锁基线/登记表被改成异常结构时必须走 violated/schema_errors 报告，
+    而不是让验证器 AttributeError/TypeError 崩溃（它是审计的最后一环）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        for bad in ("corrupted", 42, ["x"], None):
+            lk = json.load(open(lock, encoding="utf-8"))
+            lk["baseline"] = bad
+            _write(lock, lk)
+            r = verify_registration(registry_path=reg, lock_path=lock)
+            assert r["status"] == "violated", bad
+            assert not r["confirmatory_valid"], bad
+        # 登记表被删且锁基线坏掉：missing_registry 报告不得崩溃
+        os.remove(reg)
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "missing_registry"
+        # 不可哈希 id（数组）→ violated + schema_errors，而非去重时崩溃
+        _write(reg, {"hypotheses": [
+            {"id": ["H1"], "claim": "c", "metric": "PPL", "candidate": "a",
+             "reference": "b", "direction": "candidate_better"}]})
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "violated" and r["schema_errors"]
+        # fingerprint 对不可哈希 id 也要能算摘要（报告落盘路径）
+        fp = fingerprint({"hypotheses": [
+            {"id": ["H1"], "claim": "c", "metric": "PPL", "candidate": "a",
+             "reference": "b", "direction": "candidate_better"}]})
+        assert fp["n_hypotheses"] == 1 and len(fp["hypotheses"]) == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 坏锁基线/不可哈希 id：违规报告而非崩溃")
 
 
 def test_transition_problems_lists_all_edit_kinds():

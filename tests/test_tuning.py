@@ -10,7 +10,7 @@ import tempfile
 from unittest import mock
 
 from lega.tuning import (DEFAULT_LR_MULTS, _read_best_val_loss, _trial_name,
-                         build_grid, parse_floats, tune)
+                         build_grid, parse_floats, run_trial, tune)
 
 
 def test_build_grid_default_first_and_dedup():
@@ -28,6 +28,54 @@ def test_build_grid_default_first_and_dedup():
     assert set(w for _, w in grid3) == {0.1, 0.01}
     assert parse_floats("0.5, 1,2") == [0.5, 1.0, 2.0]
     print("  [ok] build_grid/parse_floats（默认在首、去重、wd 补默认）")
+
+
+def test_build_grid_default_first_when_mult_missing():
+    """乘子不含 1.0（CLI 允许）时默认组合仍须排首位，而不是崩溃。"""
+    grid = build_grid(6e-4, 0.1, lr_mults=[0.5, 2.0])
+    assert grid[0] == (6e-4, 0.1)
+    assert len(grid) == 3 and (3e-4, 0.1) in grid and (1.2e-3, 0.1) in grid
+    print("  [ok] build_grid（乘子不含 1.0 时默认组合仍补首位）")
+
+
+def test_run_trial_injects_lr_and_weight_decay():
+    """trial 的 lr/weight_decay 必须真实注入训练命令（trial 专属配置），
+    否则整个网格退化为同一组默认超参数重复训练。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"lr": 6e-4, "weight_decay": 0.1, "steps": 10,
+                       "seed": 7, "d_model": 8}, f)
+        out_dir = os.path.join(tmp, "trial")
+        seen = {}
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, capture_output=True, text=True, timeout=None):
+            seen["cmd"] = cmd
+            tcfg_path = cmd[cmd.index("--config") + 1]
+            with open(tcfg_path, encoding="utf-8") as f:
+                seen["cfg"] = json.load(f)
+            with open(os.path.join(out_dir, "train_log.jsonl"), "w",
+                      encoding="utf-8") as f:
+                f.write(json.dumps({"step": 10, "val_loss": 1.0}) + "\n")
+            return _Proc()
+
+        with mock.patch("lega.tuning.subprocess.run", side_effect=fake_run):
+            rec = run_trial(cfg_path, tmp, "standard", 7, 3e-4, 0.01, 10,
+                            out_dir)
+        assert "error" not in rec and rec["val_loss_best"] == 1.0
+        assert seen["cfg"]["lr"] == 3e-4
+        assert seen["cfg"]["weight_decay"] == 0.01
+        assert seen["cfg"]["d_model"] == 8          # 其余字段原样继承
+        assert os.path.exists(os.path.join(out_dir, "config_trial.json"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] run_trial（lr/weight_decay 经 trial 配置注入训练命令）")
 
 
 def test_trial_name_filesystem_safe():

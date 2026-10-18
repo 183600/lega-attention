@@ -10,7 +10,7 @@ import torch
 
 from lega.data import CharTokenizer
 from lega.evaluate import (collect_worst_windows, json_safe_eval_metrics,
-                           load_train_throughput)
+                           load_train_peak_mem_mb, load_train_throughput)
 from lega.model import GPT
 
 
@@ -62,6 +62,32 @@ def test_load_train_throughput_propagates_and_degrades_safely():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 训练步时记录随 checkpoint 传播（缺失/损坏安全降级）")
+
+
+def test_load_train_peak_mem_propagates_and_degrades_safely():
+    """训练峰值显存必须随 checkpoint 传播（run_all 效率列只读评测结果文件）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_peak_mem_mb": 321.5}, f)
+        assert load_train_peak_mem_mb(tmp) == 321.5
+        # 旧格式（无该字段）/非数值/损坏/结构异常 → None，不阻塞
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"val_ppl": 10.0}, f)
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_peak_mem_mb": "n/a"}, f)
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump([1, 2], f)
+        assert load_train_peak_mem_mb(tmp) is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 训练峰值显存随 checkpoint 传播（缺失/损坏安全降级）")
 
 
 def test_collect_worst_windows_gold_in_context_uses_full_window():

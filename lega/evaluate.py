@@ -100,21 +100,40 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
             "gate_mean": gmean}
 
 
+def _read_run_eval(run_dir: str) -> dict:
+    """读取训练 run 的 eval.json；缺失/损坏/结构异常返回空 dict（不阻塞评测）。"""
+    path = os.path.join(run_dir, "eval.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
 def load_train_throughput(run_dir: str):
     """从训练 run 的 eval.json 继承训练步时记录（train_step_time_ms/tokens_per_sec）。
 
     旧 run 没有该字段时返回 (None, None)，消费方显示 '-' 而不是编造数值。
     文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
     """
-    path = os.path.join(run_dir, "eval.json")
-    if not os.path.exists(path):
-        return None, None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-    except (OSError, ValueError):
-        return None, None
+    d = _read_run_eval(run_dir)
     return d.get("train_step_time_ms"), d.get("train_tokens_per_sec")
+
+
+def load_train_peak_mem_mb(run_dir: str):
+    """从训练 run 的 eval.json 继承训练峰值显存（MB）。
+
+    必须随评测结果落盘：run_all 的显存效率列只读 results/eval_*.json，
+    不复制该字段会让训练峰值显存永远显示缺失。缺失/损坏返回 None。
+    """
+    v = _read_run_eval(run_dir).get("train_peak_mem_mb")
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def main():
@@ -248,9 +267,10 @@ def main():
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     run_dir = os.path.dirname(os.path.abspath(args.ckpt))
     res.update(load_provenance(run_dir, args.data_dir))
-    # 训练步时随被评测 checkpoint 一起绑定
+    # 训练步时/峰值显存随被评测 checkpoint 一起绑定（run_all 从本文件读取）
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)
+    res["train_peak_mem_mb"] = load_train_peak_mem_mb(run_dir)
     save_json(res, args.out)
     if ppl is None:
         print(f"[eval] {res['variant']}: val_ppl=null（验证损失非有限）-> {args.out}")

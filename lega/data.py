@@ -59,7 +59,8 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str,
     has_sources = any(os.path.exists(os.path.join(data_dir, f"{s}.txt"))
                       for s in ("train", "val", "test"))
     if not has_sources:
-        return True, None, False
+        # 不可判定放行，并把 no_sources 如实返回给调用方（用于提示与缓存判定）
+        return True, None, True
     if int(meta.get("cache_schema", 0)) != CACHE_SCHEMA:
         return (False, "缓存由旧版数据管线生成（无版本/源哈希记录），"
                        "重建以应用最新清洗与去污染协议", False)
@@ -203,7 +204,11 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             data_dir, meta, report_path, report)
         train_valid = os.path.getsize(train_bin) == int(meta.get("train_tokens", -1)) * 2
         val_valid = os.path.getsize(val_bin) == int(meta.get("val_tokens", -1)) * 2
-        test_valid = (not has_test_txt and not os.path.exists(test_bin)) or (
+        # 无源 txt（纯 bin 数据目录）时无法判定 test.bin 是否对应缺失的
+        # test.txt：显式保留 test.bin 视为有效，否则该场景会在重建路径上
+        # 因缺少 train.txt 直接报错。
+        test_valid = (not has_test_txt and (
+            no_sources or not os.path.exists(test_bin))) or (
             has_test_txt
             and os.path.exists(test_bin)
             and os.path.getsize(test_bin) == int(meta.get("test_tokens", -1)) * 2)

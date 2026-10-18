@@ -74,6 +74,13 @@ def hypothesis_digest(h: dict) -> str:
     return _sha256_text(_canonical(core))[:16]
 
 
+def _hypothesis_key(hid) -> str:
+    """摘要表的键：字符串 id 原样，其他 JSON 值规范化——非哈希类型（如
+    数组）若直接作键会在指纹阶段崩溃，篡改过的登记表应走 schema_errors
+    被显式拒绝，而不是让验证器抛 AttributeError/TypeError。"""
+    return hid if isinstance(hid, str) else _canonical(hid)
+
+
 def fingerprint(doc) -> dict:
     """登记文本的指纹：整文档 SHA-256 + 逐假设摘要表 + 条数与顺序。"""
     doc = doc if isinstance(doc, dict) else {}
@@ -84,7 +91,7 @@ def fingerprint(doc) -> dict:
         "document_sha256": _sha256_text(_canonical(doc)),
         "n_hypotheses": len(hs),
         "hypothesis_ids": ids,
-        "hypotheses": {h.get("id"): hypothesis_digest(h)
+        "hypotheses": {_hypothesis_key(h.get("id")): hypothesis_digest(h)
                        for h in hs if isinstance(h, dict) and h.get("id")},
     }
 
@@ -114,9 +121,12 @@ def validate_registration(doc) -> list:
             errors.append(f"{where} direction={h.get('direction')!r} 非法"
                           f"（应为 {'/'.join(VALID_DIRECTIONS)}）")
         hid = h.get("id")
-        if hid:
-            if hid in seen:
-                errors.append(f"{where} 重复的假设 id：{hid}")
+        if not isinstance(hid, str) or not hid:
+            # id 必须是可哈希的非空字符串；否则摘要表/去重都无法可靠工作
+            errors.append(f"{where} id 缺失或不是非空字符串：{hid!r}")
+        elif hid in seen:
+            errors.append(f"{where} 重复的假设 id：{hid}")
+        else:
             seen.add(hid)
     return errors
 
@@ -151,6 +161,13 @@ def _state_ok(state) -> bool:
     return (isinstance(state, dict)
             and isinstance(state.get("hypotheses"), dict)
             and isinstance(state.get("document_sha256"), str))
+
+
+def _lock_baseline(lock) -> dict:
+    """锁文件 baseline 字段；结构异常（非 dict）时退化为空 dict，
+    保证验证器对损坏的锁文件给出问题报告而不是属性错误。"""
+    b = lock.get("baseline") if isinstance(lock, dict) else None
+    return b if isinstance(b, dict) else {}
 
 
 def transition_problems(before: dict, after: dict) -> list:
@@ -251,7 +268,7 @@ def verify_registration(registry_path: str = None,
         report["status"] = "missing_registry"
         report["problems"].append(
             "登记表文件不存在或不可解析" +
-            (f"（锁文件基线记录 {len((lock.get('baseline') or {}).get('hypotheses') or {})} "
+            (f"（锁文件基线记录 {len(_lock_baseline(lock).get('hypotheses') or {})} "
              "条已登记假设，删除登记表即失去预注册边界）"
              if isinstance(lock, dict) else "（且无锁文件）"))
         return report
@@ -274,7 +291,7 @@ def verify_registration(registry_path: str = None,
             "登记表自登记以来未被改写；请用 --init（首次登记）恢复基线")
         return report
 
-    report["baseline_document_sha256"] = (lock.get("baseline") or {}).get(
+    report["baseline_document_sha256"] = _lock_baseline(lock).get(
         "document_sha256")
     raw_chain = lock.get("chain")
     report["chain_length"] = (len(raw_chain) if isinstance(raw_chain, list)

@@ -485,7 +485,7 @@ def fig_train_curves(rdir, train_root):
         return False
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15.5, 4.2),
                                         constrained_layout=True)
-    for v in sorted(series):
+    for i, v in enumerate(sorted(series)):
         color = COLORS.get(v, "#34495e")
         lw = 2.0 if v == "lega" else 1.2
         xs, ys = _mean_by_step(series[v], "loss")
@@ -497,11 +497,14 @@ def fig_train_curves(rdir, train_root):
                      lw=lw, alpha=0.9)
         # 同一坐标下的训练/验证损失：实线=训练，虚线=验证；两线间距
         # 即为泛化差距，扩大或验证线走平/上翘即过拟合信号。
+        # 图例标签只由首个变体挂一次（线色区分变体），避免无标签图例告警。
         if xs:
-            ax3.plot(xs, ys, color=color, lw=lw, alpha=0.9)
+            ax3.plot(xs, ys, color=color, lw=lw, alpha=0.9,
+                     label=("训练 loss" if i == 0 else None))
         xv, yv = _mean_by_step(series[v], "val_loss")
         if xv:
-            ax3.plot(xv, yv, color=color, lw=lw, ls="--", alpha=0.75)
+            ax3.plot(xv, yv, color=color, lw=lw, ls="--", alpha=0.75,
+                     label=("验证 loss" if i == 0 else None))
     ax1.set_xlabel("训练步数")
     ax1.set_ylabel("训练 loss")
     ax1.set_yscale("log")

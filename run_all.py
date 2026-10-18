@@ -360,6 +360,27 @@ def _seed_key(path: str, data: dict):
     return int(s) if s is not None else None
 
 
+def _result_files(results_dir: str, prefix: str, scope_seeds) -> list:
+    """按“命名约定优先”的顺序返回 <prefix>_*.json。
+
+    多种子运行的结果带 _seed<seed> 后缀、单种子不带。两种命名可能同时
+    存在（如在旧多种子目录上重跑单种子），且经 _seed_key 会落到同一
+    (变体, 种子) 槽位；调用方按序赋值、后写覆盖，因此必须让与本次
+    约定一致的文件排在最后，否则陈旧的旧命名文件覆盖新结果。
+    """
+    fps = glob.glob(os.path.join(results_dir, f"{prefix}_*.json"))
+    if not scope_seeds:
+        return sorted(fps)
+    expected_tagged = len(scope_seeds) > 1
+
+    def convention_match(fp: str) -> int:
+        stem = os.path.splitext(os.path.basename(fp))[0]
+        tagged = _SEED_RE.search(stem) is not None
+        return int(tagged == expected_tagged)
+
+    return sorted(fps, key=lambda fp: (convention_match(fp), fp))
+
+
 def _sorted_seeds(mapping) -> list:
     return sorted(mapping.keys(),
                   key=lambda s: (s is None, s if s is not None else -1))
@@ -1102,15 +1123,15 @@ def build_summary(results_dir: str, audit: dict = None,
         return runs.setdefault(v, {}).setdefault(
             s, {"eval": None, "ruler": None, "analysis": None})
 
-    for fp in sorted(glob.glob(os.path.join(results_dir, "eval_*.json"))):
+    for fp in _result_files(results_dir, "eval", scope_seeds):
         d = load(fp)
         if in_run_scope(fp, d):
             slot(d["variant"], _seed_key(fp, d))["eval"] = d
-    for fp in sorted(glob.glob(os.path.join(results_dir, "ruler_*.json"))):
+    for fp in _result_files(results_dir, "ruler", scope_seeds):
         d = load(fp)
         if in_run_scope(fp, d):
             slot(d["variant"], _seed_key(fp, d))["ruler"] = d
-    for fp in sorted(glob.glob(os.path.join(results_dir, "analysis_*.json"))):
+    for fp in _result_files(results_dir, "analysis", scope_seeds):
         if "records" in os.path.basename(fp):
             continue
         d = load(fp)
@@ -1757,11 +1778,15 @@ def build_summary(results_dir: str, audit: dict = None,
     per_variant_windows = {}
     for v in variants:
         m = _variant_seed_map(runs, v)
-        seeds_sorted = _sorted_seeds(m)
-        if not seeds_sorted:
-            continue
-        ev0 = m[seeds_sorted[0]].get("eval") or {}
-        wins = ev0.get("worst_windows") or []
+        # 取第一个真正转储了最差窗口的种子：最小种子的评测可能没开
+        # --worst_n，若只看它会把其他种子的窗口一并静默丢弃。
+        ev0, wins = {}, []
+        for s in _sorted_seeds(m):
+            cand = m[s].get("eval") or {}
+            cand_wins = cand.get("worst_windows") or []
+            if cand_wins:
+                ev0, wins = cand, cand_wins
+                break
         if not wins:
             continue
         # 评测窗口集合由 (val 长度, ctx, eval_iters) 决定，与训练种子无关：

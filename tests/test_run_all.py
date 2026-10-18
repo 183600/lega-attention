@@ -426,6 +426,62 @@ def test_build_summary_worst_windows_and_cross_variant():
     print("  [ok] build_summary（最差窗口与跨变体错误对照进入汇总）")
 
 
+def test_build_summary_worst_windows_falls_back_to_seed_with_data():
+    """最小种子没转储最差窗口（未开 --worst_n）时，不得把其他种子的
+    窗口一并静默丢弃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1, 2], "smoke": False})
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"),
+                    {"variant": "lega", "seed": 1, "val_ppl": 10.0,
+                     "val_loss": 2.3, "n_params": 10, "split": "test"})
+        _write_json(os.path.join(tmp, "eval_lega_seed2.json"), {
+            "variant": "lega", "seed": 2, "val_ppl": 10.0, "val_loss": 2.3,
+            "n_params": 10, "split": "test",
+            "worst_windows": [{"window": 1, "split": "test", "loss": 8.0,
+                               "context_tail": "sky is blue and",
+                               "gold_next": " green",
+                               "pred_top5": [[" blue", 0.3]]}]})
+        out = build_summary(tmp)
+        assert "最差窗口数" in out["markdown"]
+        assert "8.000" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（最差窗口退化到有数据的种子）")
+
+
+def test_build_summary_prefers_current_naming_on_slot_collision():
+    """同一 (变体, 种子) 同时存在新旧两种文件名时必须取本次命名约定的
+    文件：否则在旧多种子目录上重跑单种子，陈旧的 eval_lega_seed<seed>.json
+    会经 _seed_key 落到同一槽位并覆盖新写的 eval_lega.json。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        # 单种子运行（约定不带后缀）：新写的无后缀文件必须胜出
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1337], "smoke": False})
+        _write_json(os.path.join(tmp, "eval_lega.json"),
+                    {"variant": "lega", "seed": 1337, "val_ppl": 7.0,
+                     "val_loss": 1.9, "n_params": 10})
+        _write_json(os.path.join(tmp, "eval_lega_seed1337.json"),
+                    {"variant": "lega", "seed": 1337, "val_ppl": 99.0,
+                     "val_loss": 4.6, "n_params": 10})
+        out = build_summary(tmp)
+        assert [r["val_ppl"] for r in out["rows"]] == [7.0]
+        # 多种子运行（约定带后缀）：上一轮单种子的无后缀残留不得覆盖
+        os.remove(os.path.join(tmp, "eval_lega.json"))
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1337, 2], "smoke": False})
+        _write_json(os.path.join(tmp, "eval_lega.json"),
+                    {"variant": "lega", "seed": 1337, "val_ppl": 5.5,
+                     "val_loss": 1.7, "n_params": 10})
+        out2 = build_summary(tmp)
+        assert [r["val_ppl"] for r in out2["rows"]] == [99.0]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（同槽冲突按本次命名约定取数）")
+
+
 def test_build_summary_missing_latency_entry():
     """latency.json 缺少某变体条目（--skip_latency 复用旧结果）时安全跳过该行。"""
     tmp = tempfile.mkdtemp()

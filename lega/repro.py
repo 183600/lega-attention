@@ -96,6 +96,7 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     # 结构校验：缓存是纯派生数据，语法合法但结构畸形（非对象、files 非列表、
     # 元素非对象）时必须视为未命中并重建，而不是抛 AttributeError/TypeError。
     if isinstance(cached, dict) and cached.get("algo") == FINGERPRINT_ALGO \
+            and isinstance(cached.get("digest"), str) \
             and isinstance(cached.get("files"), list) \
             and all(isinstance(e, dict) for e in cached["files"]) \
             and [e.get("name") for e in cached["files"]] == names:

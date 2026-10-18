@@ -65,9 +65,14 @@ def main():
     with open(os.path.join(args.out_dir, "val.txt"), "w", encoding="utf-8") as f:
         f.write(make_text(args.val_words))
     # 冒烟同样走 held-out test 口径：评测默认 test，与 best-checkpoint 选择集（val）分离
+    test_txt = os.path.join(args.out_dir, "test.txt")
     if args.test_words > 0:
-        with open(os.path.join(args.out_dir, "test.txt"), "w", encoding="utf-8") as f:
+        with open(test_txt, "w", encoding="utf-8") as f:
             f.write(make_text(args.test_words))
+    elif os.path.exists(test_txt):
+        # 明确要求不生成 test 时删除上次残留的 test.txt，
+        # 否则旧 split 会被 force 重建回 test.bin，与“回退 val”口径矛盾
+        os.remove(test_txt)
 
     from lega.data import prepare_bins
     meta = prepare_bins(

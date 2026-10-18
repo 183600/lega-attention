@@ -398,6 +398,51 @@ def test_prepare_bins_cache_invalidated_on_source_or_report_change():
     print("  [ok] bin 缓存完整性：源文本/诊断报告哈希变化即失效重建")
 
 
+def test_prepare_bins_bins_only_cache_hit_without_sources():
+    """纯 bin 数据目录（无任何源 txt）必须按不可判定放行缓存命中，
+    而不是在重建路径上因缺少 train.txt 直接 FileNotFoundError。"""
+    with tempfile.TemporaryDirectory() as d:
+        _write_min_splits(d)
+        meta1 = prepare_bins(d, kind="char", force=True)
+        for name in ("train.txt", "val.txt", "test.txt"):
+            os.remove(os.path.join(d, name))
+        meta2 = prepare_bins(d, kind="char")
+        assert meta2["train_tokens"] == meta1["train_tokens"]
+        assert meta2["val_tokens"] == meta1["val_tokens"]
+        assert meta2["test_tokens"] == meta1["test_tokens"]
+    print("  [ok] prepare_bins：无源 txt 的纯 bin 目录缓存命中（不误报缺失）")
+
+
+def test_make_dummy_data_removes_stale_test_when_disabled():
+    """--test_words<=0 必须清除残留 test.txt/test.bin，否则旧 test split
+    会被 force 重建，与“评测回退 val”的口径矛盾。"""
+    import importlib.util
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(root, "scripts", "make_dummy_data.py")
+    spec = importlib.util.spec_from_file_location("_make_dummy_data", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with tempfile.TemporaryDirectory() as d:
+        def run(test_words):
+            argv = sys.argv
+            sys.argv = ["make_dummy_data", "--out_dir", d, "--train_words",
+                        "60", "--val_words", "30", "--test_words",
+                        str(test_words)]
+            try:
+                mod.main()
+            finally:
+                sys.argv = argv
+        run(20)
+        assert os.path.exists(os.path.join(d, "test.txt"))
+        run(0)
+        assert not os.path.exists(os.path.join(d, "test.txt"))
+        assert not os.path.exists(os.path.join(d, "test.bin"))
+        with open(os.path.join(d, "meta.json"), encoding="utf-8") as f:
+            assert "test_tokens" not in json.load(f)
+    print("  [ok] make_dummy_data：--test_words<=0 清除残留 test.txt/test.bin")
+
+
 def test_load_bin_test_split_is_sealed_by_default():
     """test split 默认拒绝读取；唯一出口 allow_test=True（evaluate 专用）。"""
     with tempfile.TemporaryDirectory() as d:

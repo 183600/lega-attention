@@ -46,7 +46,9 @@ def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
             if pair not in grid:
                 grid.append(pair)
     default = (lr0, wd0)
-    grid.remove(default)
+    # 乘子不含 1.0 时默认组合不在笛卡尔积里：显式补在首位，而不是让
+    # list.remove 抛 ValueError（CLI 允许自定义 --lr_mults）。
+    grid = [p for p in grid if p != default]
     return [default] + grid
 
 
@@ -95,10 +97,22 @@ def _read_best_val_loss(trial_dir: str):
 def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
               wd: float, steps: int, out_dir: str, device: str = "auto",
               timeout=None) -> dict:
-    """以子进程真实训练一个 trial；失败不抛异常，返回带 error 的记录。"""
+    """以子进程真实训练一个 trial；失败不抛异常，返回带 error 的记录。
+
+    trial 的 lr/weight_decay 通过写入 trial 专属配置注入训练命令（其余字段
+    原样继承）：`lega.train` 只从 --config 读取超参数，若不注入，网格中的每个
+    trial 实际都用同一组默认超参数训练，调优结论完全失真。
+    """
     os.makedirs(out_dir, exist_ok=True)
+    with open(config, "r", encoding="utf-8") as f:
+        trial_cfg = json.load(f)
+    trial_cfg["lr"] = float(lr)
+    trial_cfg["weight_decay"] = float(wd)
+    trial_config = os.path.join(out_dir, "config_trial.json")
+    with open(trial_config, "w", encoding="utf-8") as f:
+        json.dump(trial_cfg, f, ensure_ascii=False, indent=2)
     cmd = [sys.executable, "-m", "lega.train",
-           "--config", config, "--variant", variant,
+           "--config", trial_config, "--variant", variant,
            "--data_dir", data_dir, "--out_dir", out_dir,
            "--seed", str(int(seed)), "--steps", str(int(steps)),
            "--device", device]
