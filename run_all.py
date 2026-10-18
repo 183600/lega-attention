@@ -3248,8 +3248,24 @@ def main():
 
     # 收尾台账：最终指标（逐 run 的 eval.json）+ 全部结果文件的 SHA-256。
     # 曲线/结果文件后续被覆盖或手改，都能通过哈希与当时记录比对发现。
-    run_snapshots = [snapshot_train_run(v, seed, vdir)
-                     for v, seed, vdir, _suffix in chain]
+    # evaluate 阶段已对本 run 的 model_best.pt 做过全量哈希（写在
+    # results_dir/eval_<variant><suffix>.json 的 ckpt/ckpt_sha256）；
+    # 台账复用该值，只有路径不匹配（例如未评测/旧评测文件）时才回退重算。
+    known_ckpt = {}
+    for v, seed, _vdir, suffix in chain:
+        try:
+            with open(os.path.join(results_dir, f"eval_{v}{suffix}.json"),
+                      "r", encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            rec = None
+        if isinstance(rec, dict) and rec.get("ckpt_sha256") and rec.get("ckpt"):
+            known_ckpt[(v, seed)] = (str(rec["ckpt_sha256"]), str(rec["ckpt"]))
+    run_snapshots = []
+    for v, seed, vdir, _suffix in chain:
+        sha, ckpt = known_ckpt.get((v, seed), (None, None))
+        run_snapshots.append(snapshot_train_run(
+            v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt))
     result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
                     if os.path.isfile(p)]
     append_record(ledger, build_experiment_record(

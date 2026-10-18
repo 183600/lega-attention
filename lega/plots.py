@@ -9,6 +9,7 @@ import glob
 import json
 import os
 import re
+from collections import OrderedDict
 
 try:
     import matplotlib
@@ -317,10 +318,18 @@ def fig_latency(rdir):
     return True
 
 
-_RECORDS_CACHE: dict = {}
+_RECORDS_CACHE: OrderedDict = OrderedDict()
+_RECORDS_CACHE_MAX = 8
 
 
 def _read_records(rdir, variant):
+    """读入逐记录 CSV，返回列名 -> np.float64 数组（缺失值为 NaN）。
+
+    列式表示避免逐行 dict（每格 float 转换 + 字典键哈希）在十万级记录下的
+    内存/CPU 开销；同一批文件被多张图消费，按 (路径, mtime, size) 缓存，
+    文件变化自动失效，并保留多个 key（LRU 上限 8），变体交替请求时不至
+    互相驱逐后反复重解析。
+    """
     import csv
     # 兼容单种子 analysis_records_<v>.csv 与多种子 analysis_records_<v>_seed<s>.csv，
     # 多种子记录合并后画图（分布图上的种子差异会自然体现为更宽的分布）。
@@ -328,33 +337,47 @@ def _read_records(rdir, variant):
         [os.path.join(rdir, f"analysis_records_{variant}.csv")]
         + sorted(glob.glob(os.path.join(
             rdir, f"analysis_records_{variant}_seed*.csv"))), rdir=rdir)
-    # 同一批文件会被多张图（门控分布/校准曲线）消费：按 (路径, mtime, size)
-    # 缓存最近一次解析结果，文件变化自动失效；只保留一个条目。
     key = (variant, tuple(
         (p, os.path.getmtime(p), os.path.getsize(p))
         for p in paths if os.path.exists(p)))
     cached = _RECORDS_CACHE.get(key)
     if cached is not None:
+        _RECORDS_CACHE.move_to_end(key)
         return cached
-    rows = []
+    cols = {}
     for path in paths:
         if not os.path.exists(path):
             continue
-        with open(path, "r", encoding="utf-8") as f:
-            for r in csv.DictReader(f):
-                rows.append({k: (float(v) if v not in ("", "None", "nan") else None)
-                             for k, v in r.items() if k not in ("task",)})
-    _RECORDS_CACHE.clear()
-    _RECORDS_CACHE[key] = rows
-    return rows
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header:
+                continue
+            idx = {name: i for i, name in enumerate(header) if name != "task"}
+            for name in idx:
+                cols.setdefault(name, [])
+            for parts in reader:
+                for name, i in idx.items():
+                    v = parts[i] if i < len(parts) else ""
+                    cols[name].append(
+                        float(v) if v not in ("", "None", "nan") else np.nan)
+    out = {name: np.asarray(vals, dtype=np.float64)
+           for name, vals in cols.items()}
+    _RECORDS_CACHE[key] = out
+    _RECORDS_CACHE.move_to_end(key)
+    while len(_RECORDS_CACHE) > _RECORDS_CACHE_MAX:
+        _RECORDS_CACHE.popitem(last=False)
+    return out
 
 
 def fig_gate_hist(rdir, variant="lega"):
-    rows = _read_records(rdir, variant)
-    if not rows:
+    cols = _read_records(rdir, variant)
+    g, hit = cols.get("g"), cols.get("hit")
+    if g is None or hit is None or g.size == 0:
         return False
-    g_hit = [r["g"] for r in rows if r.get("g") is not None and r.get("hit") == 1.0]
-    g_miss = [r["g"] for r in rows if r.get("g") is not None and r.get("hit") == 0.0]
+    ok = np.isfinite(g)
+    g_hit = g[ok & (hit == 1.0)].tolist()
+    g_miss = g[ok & (hit == 0.0)].tolist()
     if not g_hit and not g_miss:
         return False
     fig, ax = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
@@ -376,12 +399,14 @@ def fig_gate_hist(rdir, variant="lega"):
 
 
 def fig_calibration(rdir, variant="lega"):
-    rows = [r for r in _read_records(rdir, variant) if r.get("g") is not None and r.get("c") is not None]
-    if len(rows) < 20:
+    cols = _read_records(rdir, variant)
+    c, g, ln = cols.get("c"), cols.get("g"), cols.get("log_n")
+    if c is None or g is None or ln is None:
         return False
-    c = np.array([r["c"] for r in rows])
-    g = np.array([r["g"] for r in rows])
-    ln = np.array([r["log_n"] for r in rows])
+    m = np.isfinite(c) & np.isfinite(g) & np.isfinite(ln)
+    if int(m.sum()) < 20:
+        return False
+    c, g, ln = c[m], g[m], ln[m]
     med = np.median(ln)
     fig, ax = plt.subplots(figsize=(6.4, 4.4), constrained_layout=True)
     for mask, name, color in ((ln <= med, f"短上下文 log n≤{med:.1f}", "#2980b9"),

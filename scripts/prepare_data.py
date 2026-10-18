@@ -64,29 +64,41 @@ def _download(url: str, dst: str, desc: str, retries: int = 3) -> None:
             time.sleep(3 * attempt)
 
 
-def from_parquet(out_dir: str) -> dict:
+def from_parquet(out_dir: str, txt_paths: dict, max_tokens: dict) -> dict:
+    """下载 parquet 并逐文件逐 batch 流式解析、清洗后直接写入各 split 的 txt。
+
+    返回 split -> 写入字符数。不再把全部行先物化为 Python 列表（WikiText-103
+    train 约 180 万行，列表与字符串对象开销可达数百 MB）。
+    """
     import pyarrow.parquet as pq
-    texts = {}
+    counts = {}
     for split, files in HF_FILES.items():
-        # 逐文件解析后直接并入每个 split 的行列表
-        lines = []
-        for fn in files:
-            dst = os.path.join(out_dir, fn)
-            if not os.path.exists(dst):
-                _download(f"{HF_BASE}/{fn}", dst, fn)
-            t = pq.read_table(dst, columns=["text"])
-            part = t.column("text").to_pylist()
-            print(f"[data] 已解析 {fn}: {len(part):,} 行")
-            lines.extend(part)
-        texts[split] = lines
-    return texts
+        def _iter_lines(files=files):
+            for fn in files:
+                dst = os.path.join(out_dir, fn)
+                if not os.path.exists(dst):
+                    _download(f"{HF_BASE}/{fn}", dst, fn)
+                print(f"[data] 解析 {fn}")
+                # 按 row group 分批读入，单批行数有界
+                pf = pq.ParquetFile(dst)
+                for batch in pf.iter_batches(columns=["text"],
+                                             batch_size=100_000):
+                    yield from batch.column("text").to_pylist()
+
+        lines = _iter_lines()
+        try:
+            counts[split] = write_clean_lines(lines, txt_paths[split],
+                                              max_tokens[split])
+        finally:
+            lines.close()
+    return counts
 
 
-def from_zip(out_dir: str) -> dict:
+def from_zip(out_dir: str, txt_paths: dict, max_tokens: dict) -> dict:
     dst = os.path.join(out_dir, "wikitext-103-raw-v1.zip")
     if not os.path.exists(dst):
         _download(ZIP_URL, dst, "wikitext zip")
-    texts = {}
+    counts = {}
     with zipfile.ZipFile(dst) as z:
         names = z.namelist()
         # 该 zip 内为 wikitext-103-raw/wiki.{train,valid,test}.raw；顶层目录名
@@ -100,9 +112,12 @@ def from_zip(out_dir: str) -> dict:
                     f"zip 中缺少 {base}；现有条目示例: {names[:8]}")
             with z.open(cands[0]) as f:
                 # TextIOWrapper 已做换行翻译，行内容与 split("\n") 一致
-                # （空行/行尾空白由 clean_lines 统一处理）。
-                texts[split] = list(io.TextIOWrapper(f, encoding="utf-8"))
-    return texts
+                # （空行/行尾空白由 write_clean_lines 统一处理）；逐行流式
+                # 消费，不再 list() 出整个 split。
+                counts[split] = write_clean_lines(
+                    io.TextIOWrapper(f, encoding="utf-8"),
+                    txt_paths[split], max_tokens[split])
+    return counts
 
 
 def from_rows_api(max_rows: int, retries: int = 4) -> dict:
@@ -137,28 +152,43 @@ def from_rows_api(max_rows: int, retries: int = 4) -> dict:
     return out
 
 
-def clean_lines(lines, max_tokens: int, tokenizer_kind: str) -> str:
-    if not max_tokens:
-        return "\n".join(ln.rstrip() for ln in lines if ln.strip())
-    # 粗略按 1 token ≈ 3.6 字符估算，留 20% 余量
-    limit = int(max_tokens * 3.6 * 1.2)
-    parts = []
-    used = 0
-    for raw in lines:
-        ln = raw.rstrip()
-        if not ln.strip():
-            continue
-        sep = int(bool(parts))
-        take = min(len(ln), limit - used - sep)
-        if take < 0:
-            break
-        if sep:
-            parts.append("\n")
-        parts.append(ln[:take])
-        used += sep + take
-        if used >= limit:
-            break
-    return "".join(parts)
+def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
+    """逐行清洗并流式写入 dst，返回写入的字符数。
+
+    清洗口径与原 clean_lines 一致：行尾 rstrip、跳过空行、行间以单个换行
+    连接；max_tokens > 0 时按 1 token ≈ 3.6 字符、留 20% 余量截断。
+    边读边写（临时文件 + 原子替换），避免在内存中 join 出与正文等量的整串。
+    """
+    limit = int(max_tokens * 3.6 * 1.2) if max_tokens else None
+    tmp = dst + ".part"
+    used, wrote, n_parts = 0, 0, 0
+    with open(tmp, "w", encoding="utf-8") as f:
+        for raw in lines:
+            ln = raw.rstrip()
+            if not ln.strip():
+                continue
+            if limit is None:
+                if n_parts:
+                    f.write("\n")
+                    wrote += 1
+                f.write(ln)
+                wrote += len(ln)
+                n_parts += 1
+                continue
+            sep = 1 if n_parts else 0
+            take = min(len(ln), limit - used - sep)
+            if take < 0:
+                break
+            if sep:
+                f.write("\n")
+            f.write(ln[:take])
+            used += sep + take
+            wrote += sep + take
+            n_parts += 1
+            if used >= limit:
+                break
+    os.replace(tmp, dst)
+    return wrote
 
 
 def main():
@@ -171,23 +201,29 @@ def main():
                     choices=["auto", "parquet", "zip", "rows", "local"])
     ap.add_argument("--local_txt", default=None, help="本地 txt 路径（--source local）")
     ap.add_argument("--tokenizer", default="gpt2", choices=["gpt2", "auto"])
-    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="强制重建 token bin；不传时复用与当前 txt 一致的缓存")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    train_txt = os.path.join(args.out_dir, "train.txt")
-    val_txt = os.path.join(args.out_dir, "val.txt")
-    test_txt = os.path.join(args.out_dir, "test.txt")
+    txt_paths = {"train": os.path.join(args.out_dir, "train.txt"),
+                 "val": os.path.join(args.out_dir, "val.txt"),
+                 "test": os.path.join(args.out_dir, "test.txt")}
+    max_tokens = {"train": args.max_tokens, "val": args.val_tokens,
+                  "test": args.test_tokens}
 
     source_used = args.source
     split_protocol = None
     if args.source == "local" or args.local_txt:
         assert args.local_txt, "--source local 需要 --local_txt"
-        text = open(args.local_txt, "r", encoding="utf-8").read()
+        with open(args.local_txt, "r", encoding="utf-8") as f:
+            text = f.read()
         # 时序划分：train=最早、val=其后、test=最新；切点对齐文档边界，
         # 绝不随机打乱。preprocess 级别的清洗/去污/拟合在 prepare_bins 中完成。
         from lega.datacheck import temporal_split_text
         train_text, val_text, test_text, split_info = temporal_split_text(text)
+        # 三个切片已各持一份内容，原串此后不再使用：立即释放（峰值 -1× 文件大小）
+        del text
         split_info["mode"] = "local_temporal"
         split_protocol = split_info
         source_used = "local"
@@ -200,33 +236,32 @@ def main():
         else:
             print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个，"
                   "文档不跨 split")
-        # 逐行迭代而不 split 成整份列表：全量语料（数亿字符）下
-        # split("\n") 会额外物化一份与正文等量的行列表，这里按行流式读取。
-        train_text = clean_lines(io.StringIO(train_text), args.max_tokens,
-                                 args.tokenizer)
-        val_text = clean_lines(io.StringIO(val_text), args.val_tokens,
-                               args.tokenizer)
-        test_text = clean_lines(io.StringIO(test_text), args.test_tokens,
-                                args.tokenizer)
+        # 逐行流式清洗并直接写 txt：不再 split 出行列表、也不再 join 出整串
+        char_counts = {
+            split: write_clean_lines(io.StringIO(t), txt_paths[split],
+                                     max_tokens[split])
+            for split, t in (("train", train_text), ("val", val_text),
+                             ("test", test_text))}
+        del train_text, val_text, test_text
     else:
-        lines = None
+        char_counts = None
         if args.source in ("auto", "parquet"):
             try:
-                lines = from_parquet(args.out_dir)
+                char_counts = from_parquet(args.out_dir, txt_paths, max_tokens)
                 source_used = "parquet"
             except Exception as e:
                 print(f"[data] parquet 路径失败: {e}")
                 if args.source == "parquet":
                     raise
-        if lines is None and args.source in ("auto", "zip"):
+        if char_counts is None and args.source in ("auto", "zip"):
             try:
-                lines = from_zip(args.out_dir)
+                char_counts = from_zip(args.out_dir, txt_paths, max_tokens)
                 source_used = "zip"
             except Exception as e:
                 print(f"[data] zip 镜像失败: {e}")
                 if args.source == "zip":
                     raise
-        if lines is None and args.source in ("auto", "rows"):
+        if char_counts is None and args.source in ("auto", "rows"):
             if args.max_tokens == 0:
                 print("[data] rows API 太慢，需要 --max_tokens 限制；跳过")
             else:
@@ -235,30 +270,30 @@ def main():
                 est_rows = min(max(args.max_tokens // 30, 500), 20000)
                 lines = from_rows_api(max_rows=est_rows)
                 source_used = "rows_api"
-        if lines is None:
+                char_counts = {
+                    split: write_clean_lines(lines.get(split) or [],
+                                             txt_paths[split],
+                                             max_tokens[split])
+                    for split in ("train", "val", "test")}
+                del lines
+        if char_counts is None:
             raise RuntimeError("所有下载路径均失败，请检查网络或使用 --local_txt")
-        train_text = clean_lines(lines["train"], args.max_tokens, args.tokenizer)
-        val_text = clean_lines(lines["val"], args.val_tokens, args.tokenizer)
         # 官方 test split 作为 held-out：checkpoint 选择用 val，最终 PPL 报告用 test，
         # 避免「在报告的指标上做模型选择」的乐观偏差。
-        test_text = clean_lines(lines["test"], args.test_tokens, args.tokenizer)
         split_protocol = {
             "mode": "official_wikitext103",
             "order": "document_disjoint_official_split(no_shuffle)",
             "shuffled": False,
         }
 
-    with open(train_txt, "w", encoding="utf-8") as f:
-        f.write(train_text)
-    with open(val_txt, "w", encoding="utf-8") as f:
-        f.write(val_text)
-    with open(test_txt, "w", encoding="utf-8") as f:
-        f.write(test_text)
-    print(f"[data] train.txt {len(train_text):,} 字符 / val.txt {len(val_text):,} 字符"
-          f" / test.txt {len(test_text):,} 字符")
+    print(f"[data] train.txt {char_counts['train']:,} 字符 / "
+          f"val.txt {char_counts['val']:,} 字符 / "
+          f"test.txt {char_counts['test']:,} 字符")
 
     from lega.data import prepare_bins
-    prepare_bins(args.out_dir, kind=args.tokenizer, force=True,
+    # force 透传：不传时 prepare_bins 依据源 txt 哈希/协议版本校验缓存，
+    # 一致则复用、变化则自动重建；传 --force 则无条件重建。
+    prepare_bins(args.out_dir, kind=args.tokenizer, force=args.force,
                  extra_report={"source": source_used,
                                "split_protocol": split_protocol})
     print("[data] WikiText-103 准备完成")

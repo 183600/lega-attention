@@ -82,9 +82,15 @@ def _chunk_elems(dev: torch.device) -> int:
 
 
 def _ckpt_worthwhile(B: int, H: int, T: int, S: int, dtype: torch.dtype) -> bool:
-    """按打分矩阵元素量估算逐块 checkpoint 是否达到启用下限。"""
-    elem = torch.empty((), dtype=dtype).element_size()
-    return B * H * T * S * elem // 2 >= _CKPT_MIN_BYTES
+    """按反向实际保留的软概率矩阵估算逐块 checkpoint 是否达到启用下限。
+
+    训练态显式路径的 softmax 反向依赖其输出，保留的是输出概率本身：AMP
+    （autocast）与 CPU 下 softmax 强制升 fp32，因此即使输入为 fp16/bf16，
+    反向也按 fp32 常驻完整 (B,H,T,S)（4 字节/元素）。估算与保存口径一致，
+    不再按低精度与半量低估，避免在长上下文下误关 checkpoint。
+    """
+    elem = max(4, torch.empty((), dtype=dtype).element_size())
+    return B * H * T * S * elem >= _CKPT_MIN_BYTES
 
 
 # 进程级共享缓存：各层（乃至各实例）在同一设备/长度下的因果掩码完全相同，

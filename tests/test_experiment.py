@@ -102,6 +102,23 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
                                       "model_best.pt"}
         assert len(snap["files"]["train_log.jsonl"]["sha256"]) == 64
         assert len(snap["files"]["model_best.pt"]["sha256"]) == 64
+        real = snap["files"]["model_best.pt"]["sha256"]
+        # 独立评测 eval_*.json 的已知哈希：传入即复用，不重算
+        snap2 = snapshot_train_run(
+            "lega", 7, out, known_ckpt_sha256="f" * 64,
+            known_ckpt_path=os.path.join(out, "model_best.pt"))
+        assert snap2["files"]["model_best.pt"]["sha256"] == "f" * 64
+        # 已知哈希对应的路径不是本 run 的 model_best.pt：回退重算
+        snap3 = snapshot_train_run(
+            "lega", 7, out, known_ckpt_sha256="f" * 64,
+            known_ckpt_path=os.path.join(tmp, "other.pt"))
+        assert snap3["files"]["model_best.pt"]["sha256"] == real
+        # out_dir/eval.json 自带 ckpt/ckpt_sha256 时同样复用
+        with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"ckpt": os.path.join(out, "model_best.pt"),
+                       "ckpt_sha256": "e" * 64}, f)
+        snap4 = snapshot_train_run("lega", 7, out)
+        assert snap4["files"]["model_best.pt"]["sha256"] == "e" * 64
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] snapshot_train_run 最终指标 + 曲线/配置/checkpoint 哈希")

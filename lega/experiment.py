@@ -89,11 +89,13 @@ def read_records(path: str) -> list:
     return out
 
 
-def collect_artifacts(paths, rel_to: str = None) -> dict:
+def collect_artifacts(paths, rel_to: str = None, known: dict = None) -> dict:
     """对产物文件计算 SHA-256 与大小；缺失文件跳过。
 
     rel_to 给定时用相对路径作为键（避免把机器绝对路径写进台账，且跨机器
-    对照时键稳定）。键顺序与输入一致。
+    对照时键稳定）。键顺序与输入一致。known（path -> sha256）给出同一进程
+    流水线内已计算过的哈希（如 eval.json 记录的 checkpoint 指纹）时直接
+    复用，避免对同一大文件反复全量哈希；大小仍以当前文件为准。
     """
     entries = [(p, os.path.relpath(p, rel_to) if rel_to else p)
                for p in paths if os.path.isfile(p)]
@@ -102,7 +104,9 @@ def collect_artifacts(paths, rel_to: str = None) -> dict:
 
     def _one(entry):
         p, key = entry
-        return key, {"sha256": sha256_file(p), "size": int(os.path.getsize(p))}
+        h = (known or {}).get(p)
+        return key, {"sha256": h if h else sha256_file(p),
+                     "size": int(os.path.getsize(p))}
 
     if len(entries) == 1:
         return dict([_one(entries[0])])
@@ -120,20 +124,42 @@ def _load_json(path: str):
         return None
 
 
-def snapshot_train_run(variant: str, seed: int, out_dir: str) -> dict:
+def snapshot_train_run(variant: str, seed: int, out_dir: str,
+                       known_ckpt_sha256=None, known_ckpt_path=None) -> dict:
     """把一个 (变体, 种子) run 压缩成台账条目。
 
     最终指标取自 eval.json；同时记录 config_used.json / train_log.jsonl /
     run_manifest.json / eval.json 的路径与哈希，以及被评测 checkpoint
     （model_best.pt / model.pt）的内容哈希 —— 训练曲线或结果文件后续被
     覆盖、手改、甚至换掉 checkpoint，都能通过哈希比对发现。
+
+    evaluate 阶段已对同一 checkpoint 做过全量 SHA-256（写在 results_dir
+    的 eval_<variant><suffix>.json 及 test 访问账本）：调用方通过
+    known_ckpt_sha256/known_ckpt_path 传入后直接复用，避免台账再次全量
+    读盘。仅当路径确为本 run 的 model_best.pt 时采信（防止复用旧评测
+    文件导致错配），否则回退重算。out_dir/eval.json 自带的同名字段
+    同样复用。
     """
     names = ("config_used.json", "train_log.jsonl", "run_manifest.json",
              "eval.json", "model_best.pt", "model.pt")
+    ev = _load_json(os.path.join(out_dir, "eval.json"))
+    known = {}
+    best = os.path.join(out_dir, "model_best.pt")
+    candidates = []
+    if known_ckpt_sha256 and known_ckpt_path:
+        candidates.append((known_ckpt_path, known_ckpt_sha256))
+    if isinstance(ev, dict) and ev.get("ckpt_sha256") and ev.get("ckpt"):
+        candidates.append((ev["ckpt"], ev["ckpt_sha256"]))
+    for path, sha in candidates:
+        try:
+            if os.path.realpath(path) == os.path.realpath(best):
+                known[best] = str(sha)
+                break
+        except OSError:
+            continue
     rec = {"variant": variant, "seed": int(seed), "out_dir": out_dir,
            "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
-                                      rel_to=out_dir)}
-    ev = _load_json(os.path.join(out_dir, "eval.json"))
+                                      rel_to=out_dir, known=known)}
     if ev:
         rec["result"] = {k: ev.get(k) for k in (
             "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",

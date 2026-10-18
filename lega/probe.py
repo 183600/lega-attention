@@ -191,10 +191,13 @@ def _safe_auprc(y: np.ndarray, p: np.ndarray) -> Optional[float]:
     return float(v) if np.isfinite(v) else None
 
 
-def _oof_scores(X: np.ndarray, y: np.ndarray, folds: np.ndarray,
-                l2: float) -> np.ndarray:
-    """分组 CV 的 out-of-fold 概率；标准化统计只用训练折拟合。"""
-    oof = np.full(y.shape[0], float("nan"))
+def _fold_views(X: np.ndarray, folds: np.ndarray):
+    """每折的掩码与标准化后切片：与 λ 无关，网格搜索只算一次。
+
+    返回 [(te, Xtr_n, Xte_n)]；标准化统计（mu/sd）只用训练折拟合，
+    防信息从留出折泄漏，与逐 λ 现场计算完全同口径。
+    """
+    views = []
     for f in sorted(set(folds.tolist())):
         te = folds == f
         tr = ~te
@@ -203,8 +206,19 @@ def _oof_scores(X: np.ndarray, y: np.ndarray, folds: np.ndarray,
         mu = X[tr].mean(axis=0)
         sd = X[tr].std(axis=0)
         sd = np.where(sd > 0, sd, 1.0)
-        model = fit_logreg((X[tr] - mu) / sd, y[tr], l2=l2)
-        oof[te] = predict_logreg(model, (X[te] - mu) / sd)
+        views.append((te, (X[tr] - mu) / sd, (X[te] - mu) / sd))
+    return views
+
+
+def _oof_scores(X: np.ndarray, y: np.ndarray, folds: np.ndarray,
+                l2: float, views=None) -> np.ndarray:
+    """分组 CV 的 out-of-fold 概率；标准化统计只用训练折拟合。"""
+    oof = np.full(y.shape[0], float("nan"))
+    if views is None:
+        views = _fold_views(X, folds)
+    for te, xtr_n, xte_n in views:
+        model = fit_logreg(xtr_n, y[~te], l2=l2)
+        oof[te] = predict_logreg(model, xte_n)
     return oof
 
 
@@ -280,10 +294,13 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     k = max(2, min(k, len(examples)))
     report["folds"] = k
     available = []
+    # 可用性检查顺带保留特征矩阵：同一特征集不再为训练重复构建第二次。
+    feature_matrices = {}
     for key, name, names in FEATURE_SETS:
-        _, valid = _features(valid_all, names)
+        X, valid = _features(valid_all, names)
         if len(valid) == len(valid_all) and len(valid) > 0:
             available.append((key, name, names))
+            feature_matrices[key] = X
     if not available:
         report["note"] = "没有任何特征集在所有有效记录上齐备。" + report["note"]
         return report
@@ -298,14 +315,16 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
                         dtype=np.int64)
     fold_arr = _group_folds(groups.tolist(), k, seed)
     for key, name, names in available:
-        X, _ = _features(valid_all, names)
+        X = feature_matrices[key]
+        # 折划分/标准化统计与 λ 无关：整个网格只算一次，λ 循环只重跑拟合/预测
+        views = _fold_views(X, fold_arr)
         set_out: Dict = {"name": name, "features": list(names),
                          "n": int(y_all.size), "n_pos": n_pos,
                          "selected_l2": None, "oof": None,
                          "per_l2": [], "per_fold": []}
         best = None
         for l2 in report["l2_grid"]:
-            oof = _oof_scores(X, y_all, fold_arr, float(l2))
+            oof = _oof_scores(X, y_all, fold_arr, float(l2), views=views)
             block = _score_block(y_all, oof)
             block["l2"] = float(l2)
             set_out["per_l2"].append({

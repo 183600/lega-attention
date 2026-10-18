@@ -30,6 +30,11 @@ from .datacheck import append_test_access
 ALPHA_GRID = (0.01, 0.1, 1.0)
 
 
+# 训练流统计的分块粒度（token 数）：每块只升这一段为 int64 并做块内
+# np.unique，避免把整段训练流物化成 int64 键（1 亿 token 时约 800MB）。
+_PAIR_CHUNK_TOKENS = 4_000_000
+
+
 def _pair_keys(ids: np.ndarray, vocab_size: int) -> np.ndarray:
     """token 序列 → 相邻对的唯一整数键 prev*V + cur（int64 防溢出）。
 
@@ -41,18 +46,81 @@ def _pair_keys(ids: np.ndarray, vocab_size: int) -> np.ndarray:
     return keys
 
 
+def _merge_two_counted(a, b):
+    """归并两个按 key 升序去重的 (keys, counts) 分块，相同 key 计数相加。"""
+    ka, ca = a
+    kb, cb = b
+    if len(ka) == 0:
+        return b
+    if len(kb) == 0:
+        return a
+    keys = np.concatenate((ka, kb))
+    counts = np.concatenate((ca, cb))
+    order = np.argsort(keys, kind="stable")
+    keys = keys[order]
+    counts = counts[order]
+    first = np.empty(keys.shape[0], dtype=bool)
+    first[0] = True
+    np.not_equal(keys[1:], keys[:-1], out=first[1:])
+    idx = np.flatnonzero(first)
+    return keys[idx], np.add.reduceat(counts, idx)
+
+
+def _merge_counted(pieces):
+    """多路两两归并各块内已排序去重的 (keys, counts)，得到全局有序唯一频次。"""
+    while len(pieces) > 1:
+        merged = []
+        for i in range(0, len(pieces), 2):
+            merged.append(_merge_two_counted(pieces[i], pieces[i + 1])
+                          if i + 1 < len(pieces) else pieces[i])
+        pieces = merged
+    return pieces[0]
+
+
+def _pair_counts_chunked(ids: np.ndarray, vocab_size: int):
+    """分块统计相邻对频次；返回按 key 升序去重的 (pair_keys, pair_counts)。
+
+    每块（可配 chunk_tokens）尾部多取一个 token，使块内相邻对覆盖
+    [start, end-1) 且块间不重不漏；块内 np.unique 后归并有序块结果，
+    总排序规模降至各块去重键数之和，而非整段键的全量排序。
+    """
+    n = int(len(ids))
+    if n < 2:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    vocab_size = int(vocab_size)
+    chunk_tokens = int(_PAIR_CHUNK_TOKENS)
+    pieces = []
+    start = 0
+    while start < n - 1:
+        end = min(n, start + chunk_tokens + 1)
+        chunk = np.asarray(ids[start:end], dtype=np.int64)
+        keys = chunk[:-1] * vocab_size
+        keys += chunk[1:]
+        uk, uc = np.unique(keys, return_counts=True)
+        if len(uk):
+            pieces.append((uk, uc))
+        start = end - 1
+    if not pieces:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    return _merge_counted(pieces)
+
+
 def fit_counts(ids: np.ndarray, vocab_size: int):
     """在训练流上统计一元/二元频次；返回 (uni_counts, pair_keys, pair_counts)。
 
-    一元用 bincount（V=50257 量级可接受）；二元的 V² 稀疏不可枚举，
-    用 np.unique 收集出现的对并计数。
+    一元分块 bincount（numpy 会把输入升为 intp，整段转换在大流上会多占
+    4 倍内存；逐块转换峰值只与块大小相关）；二元的 V² 稀疏不可枚举，
+    按块生成相邻对、块内 np.unique 后归并，不做整段 int64 物化与全量排序。
     """
-    ids = np.asarray(ids, dtype=np.int64)
-    uni = np.bincount(ids, minlength=int(vocab_size)).astype(np.float64)
-    if len(ids) < 2:
-        return uni, np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
-    keys = _pair_keys(ids, vocab_size)
-    pair_keys, pair_counts = np.unique(keys, return_counts=True)
+    ids = np.asarray(ids)
+    vocab_size = int(vocab_size)
+    uni = np.zeros(max(1, vocab_size), dtype=np.float64)
+    n = int(len(ids))
+    for start in range(0, n, _PAIR_CHUNK_TOKENS):
+        chunk = np.asarray(ids[start:start + _PAIR_CHUNK_TOKENS],
+                           dtype=np.int64)
+        uni += np.bincount(chunk, minlength=vocab_size)
+    pair_keys, pair_counts = _pair_counts_chunked(ids, vocab_size)
     return uni, pair_keys, pair_counts.astype(np.float64)
 
 
@@ -74,7 +142,8 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     if n == 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
     total = float(uni.sum())
-    c = uni[np.asarray(eval_ids, dtype=np.int64)]
+    # uint16 流可直接做花式索引，无需先升为 int64（省一份 4 倍拷贝）
+    c = uni[np.asarray(eval_ids)]
     probs = (c + alpha) / (total + alpha * vocab)
     mean_nll = float(-np.log(probs).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
@@ -126,7 +195,9 @@ def evaluate(data_dir: str, split: str = "val",
     """
     meta = load_meta(data_dir)
     vocab_size = int(meta["vocab_size"])
-    train_ids = np.asarray(load_bin(data_dir, "train"), dtype=np.int64)
+    # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数，避免
+    # 把整段训练流物化为 int64（1 亿 token 时约 800MB）后再统计。
+    train_ids = load_bin(data_dir, "train")
     if split == "test":
         if not allow_test:
             raise PermissionError(
