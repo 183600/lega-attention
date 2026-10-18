@@ -258,11 +258,12 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
     else:
         raise ValueError(f"{split} token 流 dtype 非法: {arr.dtype}")
     vmin, vmax = int(arr_i.min()), int(arr_i.max())
-    if vmin < 0 or vmax >= int(vocab_size):
+    if vmin < 0 or vmax >= int(vocab_size) or vmax > 65535:
         raise ValueError(
-            f"{split} token id 越界: [{vmin}, {vmax}] 不在 [0, {vocab_size})，"
-            "数据/词表不一致")
-    # 重新扫一遍确认索引在写入 uint16 前无损（vmax 已保证 <= 65535）
+            f"{split} token id 越界: [{vmin}, {vmax}] 不在 [0, {vocab_size}) "
+            "或超出 uint16 可存储范围（<= 65535），数据/词表不一致")
+    # 至此 vmax <= 65535 已被本函数显式保证（不依赖调用方先做过
+    # check_vocab_capacity），写入 uint16 无损
     return {"split": str(split), "tokens": int(arr.size), "dtype": str(arr.dtype),
             "min_id": vmin, "max_id": vmax, "nan": n_nan, "inf": n_inf}
 

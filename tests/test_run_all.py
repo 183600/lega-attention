@@ -19,7 +19,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _enrich_paired, _lat_noise_pct, _noise_floor_pct,
                       _rel_pct, _render_baseline_sections, _resolve_jobs, _stat,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE, build_summary,
-                      component_evidence, evaluate_registered_hypotheses,
+                      component_evidence, cross_variant_badcase_map,
+                      evaluate_registered_hypotheses,
                       load_registered_hypotheses, parse_variants, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
@@ -206,6 +207,61 @@ def test_build_summary_audit_zero_checked_is_warning_not_failure():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary：checked=0 的审计显示为未检查而非未通过")
+
+
+def test_cross_variant_badcase_map_min_seed_even_when_empty():
+    """最小种子零错误也必须注册为 []（否则变体被静默排除出共识判定）；
+    最小种子无 RULER 结果时退化到最小的有结果的种子；未评测不进表。"""
+    cases99 = [{"sample_id": "x"}]
+    # 最小种子（7）零错误，较大种子（99）有错 → 仍取最小种子的 []
+    runs = {"lega": {7: {"ruler": {"badcases": []}},
+                     99: {"ruler": {"badcases": cases99}}}}
+    assert cross_variant_badcase_map(runs, ["lega"]) == {"lega": []}
+    # 最小种子没有 RULER 结果 → 退化到最小有结果的种子
+    runs2 = {"lega": {1: {}, 5: {"ruler": {"badcases": cases99}}}}
+    assert cross_variant_badcase_map(runs2, ["lega"]) == {"lega": cases99}
+    # 完全未跑 RULER → 不注册（无法参与对照）
+    assert cross_variant_badcase_map({"lega": {1: {}}}, ["lega"]) == {}
+    print("  [ok] cross_variant_badcase_map（最小种子优先，零错误显式注册）")
+
+
+def test_build_summary_scopes_discovery_to_current_repro_run():
+    """results/<tag> 跨多次运行复用时，上一轮的 eval/sanity 不得混入本次汇总
+    （否则不同实验的观测被配成对：虚增种子数并污染 Holm 家族）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1], "smoke": False})
+        _write_json(os.path.join(tmp, "eval_lega.json"),
+                    {"variant": "lega", "seed": 1, "val_ppl": 9.0,
+                     "val_loss": 2.0, "n_params": 10})
+        _write_json(os.path.join(tmp, "sanity_lega.json"),
+                    {"variant": "lega", "passed": True,
+                     "initial": {"loss": 2.5},
+                     "final": {"loss": 1.0, "token_acc": 0.4}})
+        # 上一轮遗留：旧变体、旧种子、未通过的旧 sanity
+        _write_json(os.path.join(tmp, "eval_standard.json"),
+                    {"variant": "standard", "seed": 1, "val_ppl": 10.0,
+                     "val_loss": 2.3, "n_params": 10})
+        _write_json(os.path.join(tmp, "eval_lega_seed99.json"),
+                    {"variant": "lega", "seed": 99, "val_ppl": 1.0,
+                     "val_loss": 0.1, "n_params": 10})
+        _write_json(os.path.join(tmp, "sanity_standard.json"),
+                    {"variant": "standard", "passed": False,
+                     "initial": {"loss": 9.9},
+                     "final": {"loss": 9.9, "token_acc": 0.01}})
+        out = build_summary(tmp)
+        assert [r["variant"] for r in out["rows"]] == ["lega"]
+        md = out["markdown"]
+        assert "❌ 未通过" not in md           # 旧 sanity 不得混入
+        assert "10.0000" not in md            # 旧 standard 的 PPL 不得混入
+        assert "0.1000" not in md             # 旧种子的 val_loss 不得混入
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert sig["pairs"] == []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（repro.json 限定本次运行的变体/种子发现范围）")
 
 
 def test_rel_pct_and_eff_cells():

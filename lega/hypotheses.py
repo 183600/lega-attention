@@ -215,7 +215,11 @@ def verify_registration(registry_path: str = None,
     返回报告（可直接进 significance.json）：
       status             intact/amended/violated/missing_lock/missing_registry
       confirmatory_valid True 仅当 status ∈ {intact, amended}
-      problems           违反 append-only 的具体原因列表
+      problems           违反 append-only 的具体原因列表（会作废 confirmatory）
+      warnings           不否决 confirmatory 但需人工核对的提示（如整文档
+                         SHA 变化可来自 note/decision_rule/scope 等锁链未覆盖
+                         字段——只加注释类字段是允许的，改写判定参数则不行，
+                         锁链无法区分，必须看 git diff）
       schema_errors      登记表结构错误
       ...                SHA-256、条数、链长、假设摘要等审计字段
     """
@@ -239,6 +243,7 @@ def verify_registration(registry_path: str = None,
         "chain_length": None,
         "document_sha256_matches_chain_head": None,
         "problems": [],
+        "warnings": [],
         "schema_errors": [],
     }
     doc = load_registration(registry_path)
@@ -297,6 +302,16 @@ def verify_registration(registry_path: str = None,
         report["problems"] = problems
         return report
 
+    if not report["document_sha256_matches_chain_head"]:
+        # 科学内容字段未变但整文档哈希变了：合法来源是给假设追加 note 等
+        # 可读性字段（允许，不影响判定）；非法来源是改写 decision_rule /
+        # scope 等锁链未摘要的判定参数——锁链无法区分，故不否决
+        # confirmatory，但必须显式提示人工核对 git diff。
+        report["warnings"].append(
+            "整文档 SHA-256 与链头不一致（假设科学内容未变）：可能是追加了 "
+            "note 等注释类字段（允许）；但也可能是改写了 decision_rule/"
+            "scope 等判定参数（不允许、锁链不覆盖）。请核对 git diff，"
+            "必要时用 --amend 留痕。")
     report["status"] = "amended" if report["chain_length"] else "intact"
     report["confirmatory_valid"] = True
     return report
@@ -401,6 +416,8 @@ def main(argv=None) -> int:
                   f"confirmatory_valid={report['confirmatory_valid']}）")
             for p in report["problems"]:
                 print(f"  - {p}")
+            for w in report.get("warnings") or []:
+                print(f"  ⚠ {w}")
         return 0 if report["confirmatory_valid"] else 1
 
     try:

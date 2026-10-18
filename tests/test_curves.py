@@ -245,6 +245,23 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
     print("  [ok] diagnose_run_dir（日志/nan_report/容错）")
 
 
+def test_load_train_log_skips_valid_json_non_object_lines():
+    """合法 JSON 但非对象的行（数组/标量/null）必须按损坏行跳过而不是崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "train_log.jsonl")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("[1, 2, 3]\n")          # 合法 JSON 数组（无 .get）
+            f.write("42\n")                  # 合法 JSON 标量
+            f.write("null\n")
+            f.write('{"step": 1, "loss": 2.0}\n')
+            f.write("{broken\n")
+        assert load_train_log(p) == [{"step": 1, "loss": 2.0}]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] load_train_log：非对象 JSON 行按损坏行跳过")
+
+
 def test_rising_train_loss_not_advised_to_train_longer():
     """训练损失缓慢上升（未达发散阈值）时不能给出"延长训练/增大模型"
     这类反向建议：上升更可能来自学习率过大，延长训练会继续恶化。"""

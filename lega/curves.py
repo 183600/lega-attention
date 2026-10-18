@@ -58,9 +58,13 @@ def load_train_log(path: str) -> List[Dict]:
                 if not line:
                     continue
                 try:
-                    recs.append(json.loads(line))
+                    rec = json.loads(line)
                 except ValueError:
                     continue
+                # 合法 JSON 但非对象（如被截断拼接出的数组/标量行）没有
+                # .get 接口，按损坏行跳过，否则整个曲线诊断会崩溃。
+                if isinstance(rec, dict):
+                    recs.append(rec)
     except OSError:
         return []
     return recs

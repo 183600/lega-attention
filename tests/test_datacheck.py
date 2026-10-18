@@ -242,6 +242,15 @@ def test_token_stream_hard_checks():
         raise AssertionError("超 uint16 容量应抛 ValueError")
     except ValueError:
         pass
+    # 即使 vocab_size 更大（如误传），>65535 的 id 也必须显式拒绝：
+    # 写入 uint16 会被静默截断成别的 token。
+    try:
+        token_stream_stats(np.array([70000], dtype=np.int64), 100000, "train")
+        raise AssertionError("超 uint16 的 id 应抛 ValueError")
+    except ValueError as e:
+        assert "65535" in str(e)
+    assert token_stream_stats(np.array([0, 65535], dtype=np.int64),
+                              65536, "train")["max_id"] == 65535
     print("  [ok] token 流硬校验：越界/NaN/Inf/空流/非整数/uint16 容量")
 
 

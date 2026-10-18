@@ -7,15 +7,19 @@ macro/micro/weighted 口径，用不平衡算例核对三者的差异。paired_t
 “多种子 Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p
 值精度；sign-flip 置换检验用独立枚举复算核对精确 p 值。
 """
+import json
 import math
+import os
+import shutil
+import tempfile
 
 import numpy as np
 
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
-                        paired_t_test, pearson, student_t_two_sided_p,
-                        wilson_score_ci)
+                        paired_t_test, pearson, save_json,
+                        student_t_two_sided_p, wilson_score_ci)
 
 
 def _brute_auroc(scores, labels):
@@ -78,6 +82,36 @@ def test_auroc_single_class_nan():
     assert math.isnan(auroc(np.array([1.0, 2.0]), np.array([1, 1])))
     assert math.isnan(auroc(np.array([1.0, 2.0]), np.array([0, 0])))
     print("  [ok] 单一类别返回 nan（调用方负责转 None）")
+
+
+def test_auroc_filters_nonfinite_like_average_precision():
+    """非有限分数先剔除（与 AP 同口径）：NaN 不参与排序，也不虚高 AUROC。"""
+    got = auroc(np.array([np.nan, 3.0, 2.0, 1.0]), np.array([1, 1, 0, 0]))
+    assert abs(got - 1.0) < 1e-12, got
+    got = auroc(np.array([np.inf, 3.0, 2.0, 0.0]), np.array([1, 1, 0, 0]))
+    assert abs(got - 1.0) < 1e-12, got
+    # 剔除后只剩单一类别 → 仍返回 NaN
+    assert math.isnan(auroc(np.array([np.nan, 1.0]), np.array([1, 1])))
+    print("  [ok] auroc：非有限分数剔除（与 average_precision 同口径）")
+
+
+def test_save_json_writes_strict_json_atomically():
+    """NaN/Inf 写成 null（合法 JSON），临时文件不残留。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "out.json")
+        save_json({"loss": float("nan"),
+                   "x": [float("inf"), {"y": float("-inf")}],
+                   "keep": 0.5}, p)
+        txt = open(p, encoding="utf-8").read()
+        assert "NaN" not in txt and "Infinity" not in txt
+        strict = json.loads(
+            txt, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+        assert strict == {"loss": None, "x": [None, {"y": None}], "keep": 0.5}
+        assert not [f for f in os.listdir(tmp) if ".tmp" in f]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] save_json：非有限浮点转 null 且原子写")
 
 
 def _brute_ap(scores, labels):

@@ -360,7 +360,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     meta["report_sha256"] = _sha256_file(report_tmp)
     with open(meta_tmp, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
-    os.replace(meta_tmp, meta_path)
+    # 替换顺序：bin/报告先落位，meta 最后。meta 是缓存有效的判定依据，
+    # 若先替换 meta 再中断，下一次运行会看到“新 meta + 旧 bin”（token 数
+    # 恰好相同时会被静默当有效缓存）。meta 最后替换时，中途崩溃只会留下
+    # 旧 meta 与新旧混合产物，大小/哈希核对必然触发重建。
     os.replace(train_tmp, train_bin)
     os.replace(val_tmp, val_bin)
     if te is not None:
@@ -369,6 +372,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         # 本次没有 test.txt 但残留旧 test.bin：删除，避免用过期 split 评测
         os.remove(test_bin)
     os.replace(report_tmp, report_path)
+    os.replace(meta_tmp, meta_path)
     msg = f"[data] train {tr.size:,} tokens / val {va.size:,} tokens"
     if te is not None:
         msg += f" / test {te.size:,} tokens"

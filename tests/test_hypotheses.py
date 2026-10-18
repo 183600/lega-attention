@@ -113,6 +113,33 @@ def test_verify_intact_then_silent_tamper_detected():
     print("  [ok] verify_registration（改写/删除/未留痕新增 → violated）")
 
 
+def test_document_sha_change_warns_without_voiding_confirmatory():
+    """锁链未覆盖字段（decision_rule/scope/note）变化：科学摘要未变 → 不判
+    违反（注释类字段允许改），但必须给出 warning 提示人工核对 git diff。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        d = load_registration(reg)
+        d["decision_rule"] = {"alpha": 0.5}   # 改写判定参数（锁链不摘要）
+        _write(reg, d)
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] in ("intact", "amended") and r["confirmatory_valid"]
+        assert r["document_sha256_matches_chain_head"] is False
+        assert any("decision_rule" in w for w in r["warnings"])
+        # 追加 note（明确允许的可读性字段）同样只警告不判违反
+        d2 = load_registration(reg)
+        d2.pop("decision_rule")
+        d2["hypotheses"][0]["note"] = "补充阅读说明"
+        _write(reg, d2)
+        r2 = verify_registration(registry_path=reg, lock_path=lock)
+        assert r2["confirmatory_valid"] and r2["warnings"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_registration：文档哈希变化 → warning 而非静默通过")
+
+
 def test_amendment_appends_only_and_rejects_forbidden_edits():
     tmp = tempfile.mkdtemp()
     try:

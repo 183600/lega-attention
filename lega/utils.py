@@ -166,12 +166,36 @@ def load_json(path: str, default=None):
         return json.load(f)
 
 
+def _json_safe(obj):
+    """递归把非有限浮点（NaN/±Inf）转成 None。
+
+    json.dump 默认会写出 NaN/Infinity 字面量——那不是合法 JSON，jq 等严格
+    消费方直接解析失败（nan_report.json 的 loss_value 恰是非有限触发值，
+    最坏情况下正是这种非法字面量）。统一记为 null（缺失值语义），与
+    evaluate.json_safe_eval_metrics / pearson 等既有口径一致。
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 def save_json(obj, path: str) -> None:
+    """原子写入 JSON（临时文件 + os.replace），非有限浮点记为 null。
+
+    直接覆盖写入在中断时会让旧结果变成半截文件；同目录替换保证读者看到的
+    要么是旧完整文件、要么是新完整文件。临时名带 pid，避免并发进程互踩。
+    """
     d = os.path.dirname(os.path.abspath(path))
     if d:
         os.makedirs(d, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(_json_safe(obj), f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def get_device(device: str = "auto") -> str:
@@ -491,6 +515,10 @@ def auroc(scores, labels) -> float:
     """
     scores = np.asarray(scores, dtype=np.float64)
     labels = np.asarray(labels)
+    # 与 average_precision 同一口径：先剔除非有限分数。np.argsort 会把
+    # NaN 当作最大秩排在最前，不剔除会让含 NaN 的正类样本虚高 AUROC。
+    m = np.isfinite(scores)
+    scores, labels = scores[m], labels[m]
     pos, neg = scores[labels == 1], scores[labels == 0]
     if len(pos) == 0 or len(neg) == 0:
         return float("nan")

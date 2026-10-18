@@ -342,6 +342,25 @@ def _variant_seed_map(runs: dict, variant: str) -> dict:
     return tagged if tagged else m
 
 
+def cross_variant_badcase_map(runs: dict, variants) -> dict:
+    """跨变体对齐用：每个变体取“最小种子”的 RULER 错误清单。
+
+    最小种子没有 RULER 结果时（例如只跑了其他种子）退化到最小的有结果的
+    种子；已评测且零错误必须显式记为 []——若跳过，该变体会被静默排除出
+    cross_variant_analysis，"全体变体共识失败"就会漏掉它，把共有难度误
+    报成方法特异性失败。未跑过 RULER 的变体不进结果（无法参与对照）。
+    """
+    out = {}
+    for v in variants:
+        m = _variant_seed_map(runs, v)
+        for s in _sorted_seeds(m):
+            r = m[s].get("ruler")
+            if r is not None:
+                out[v] = r.get("badcases") or []
+                break
+    return out
+
+
 def _stat(values) -> dict:
     """跨种子聚合：{mean, std, n}；无有效值时 None。
 
@@ -750,6 +769,8 @@ def _render_registration_integrity(integrity: dict) -> list:
         lines.append("- 登记表 SHA-256：不可用（文件缺失或不可解析）")
     for p in (integrity.get("problems") or []):
         lines.append(f"- ⛔ {p}")
+    for w in (integrity.get("warnings") or []):
+        lines.append(f"- ⚠ {w}")
     if integrity.get("confirmatory_valid"):
         lines.append("- 修订规则：既有假设只增不改不删；新增假设必须经 "
                      "`python -m lega.hypotheses --amend --reason ...` 留痕，"
@@ -1021,6 +1042,27 @@ def build_summary(results_dir: str, audit: dict = None,
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    # --- “本次 run”范围限定：results/<tag> 会被同一 tag 的多次运行复用
+    # （改种子/变体集、--skip_* 等），历史遗留的 eval_*/ruler_*/analysis_*
+    # 若无条件聚合，会把不同实验的观测混进同一均值/配对检验，虚增种子数并
+    # 污染 Holm 家族。repro.json 每次运行开头重写，记录了本次的
+    # variants/seeds，据此过滤；没有 repro.json（直接调用/手工构建目录）
+    # 时保持全量发现。
+    repro = load(os.path.join(results_dir, "repro.json")) or {}
+    scope_variants = repro.get("variants") if isinstance(
+        repro.get("variants"), list) else None
+    scope_seeds = repro.get("seeds") if isinstance(
+        repro.get("seeds"), list) else None
+
+    def in_run_scope(fp, d):
+        if not isinstance(d, dict) or d.get("variant") is None:
+            return False
+        if scope_variants is not None and d["variant"] not in scope_variants:
+            return False
+        if scope_seeds is not None and _seed_key(fp, d) not in scope_seeds:
+            return False
+        return True
+
     # --- 发现所有 run：（变体, 种子） -> {eval, ruler, analysis}
     runs = {}
 
@@ -1030,17 +1072,17 @@ def build_summary(results_dir: str, audit: dict = None,
 
     for fp in sorted(glob.glob(os.path.join(results_dir, "eval_*.json"))):
         d = load(fp)
-        if d and d.get("variant"):
+        if in_run_scope(fp, d):
             slot(d["variant"], _seed_key(fp, d))["eval"] = d
     for fp in sorted(glob.glob(os.path.join(results_dir, "ruler_*.json"))):
         d = load(fp)
-        if d and d.get("variant"):
+        if in_run_scope(fp, d):
             slot(d["variant"], _seed_key(fp, d))["ruler"] = d
     for fp in sorted(glob.glob(os.path.join(results_dir, "analysis_*.json"))):
         if "records" in os.path.basename(fp):
             continue
         d = load(fp)
-        if d and d.get("variant"):
+        if in_run_scope(fp, d):
             slot(d["variant"], _seed_key(fp, d))["analysis"] = d
 
     variants = sorted(v for v in runs if v in VARIANTS)
@@ -1268,7 +1310,6 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("（暂无结果，先运行训练评测）")
 
     # --- 基线合理性（简单统计基线 + 基线调优证据）
-    repro = load(os.path.join(results_dir, "repro.json"))
     md += _render_baseline_sections(results_dir,
                                     smoke=bool((repro or {}).get("smoke")))
 
@@ -1416,6 +1457,11 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- ⚠ 未找到 `repro.json`（直接调用 build_summary？）；"
                   "无法核对代码版本与数据指纹。")
     sanity_files = sorted(glob.glob(os.path.join(results_dir, "sanity_*.json")))
+    # 与 runs 同一“本次 run”口径：上一轮遗留变体的 sanity 未通过不应
+    # 出现在本次汇总表里（sanity 无种子维度，只按变体过滤）。
+    if scope_variants is not None:
+        sanity_files = [fp for fp in sanity_files
+                        if (load(fp) or {}).get("variant") in scope_variants]
     if sanity_files:
         md.append("")
         md.append("| 变体 | sanity | 初始 loss | 最终 loss | token 准确率 |")
@@ -1531,27 +1577,16 @@ def build_summary(results_dir: str, audit: dict = None,
     bad_rows, bad_example_pool = [], []
     # 跨变体对照要求各变体使用同一批评测样本：取每个变体最小种子的错误
     # 清单（RULER 样本由配置里的评测种子构造，与训练种子无关，可逐条对齐）
-    per_variant_badcases = {}
+    per_variant_badcases = cross_variant_badcase_map(runs, variants)
     for v in variants:
         m = _variant_seed_map(runs, v)
         cases = []
-        ruler_ran = False
         for s in m.values():
             r = s.get("ruler")
             if r:
-                ruler_ran = True
                 cases += r.get("badcases") or []
         if not cases:
-            # RULER 已评测但零错误：显式记为 [] 传给跨变体对照，避免该变体
-            # 被静默排除、把"全体变体共识失败"误报给从未失败的方法。
-            if ruler_ran:
-                per_variant_badcases[v] = []
             continue
-        seeds_sorted = _sorted_seeds(m)
-        rep = ((m[seeds_sorted[0]].get("ruler") or {}).get("badcases") or []
-               if seeds_sorted else [])
-        if rep:
-            per_variant_badcases[v] = rep
         ana = analyze_badcases(cases, variant=v)
         cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
         cat_s = "；".join(f"{BADCASE_CN.get(k, k)}×{n}" for k, n in cats[:3])

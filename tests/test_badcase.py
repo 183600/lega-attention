@@ -47,6 +47,18 @@ def test_categorize_numeric_causes():
     print("  [ok] 数值任务归因（误抄干扰/幻觉/无回答）")
 
 
+def test_categorize_tolerates_non_string_pred():
+    """外部/旧格式 JSON 的 pred 可能是数字：不得抛 TypeError，按字符串归因。"""
+    c = categorize_case(_case(pred=1234567, ctx_nums=["1234567"]))
+    assert c["category"] == "copy_distractor", c
+    c = categorize_case(_case(pred=1234567.0, ctx_nums=["7654321"]))
+    assert c["category"] == "hallucinated", c
+    # 整份报告级入口同样不应崩
+    ana = analyze_badcases([_case(pred=1234567, ctx_nums=["1234567"])])
+    assert ana["category_counts"] == {"copy_distractor": 1}
+    print("  [ok] 数值型 pred 容错（不崩溃且归因正确）")
+
+
 def test_categorize_label_error():
     # gold 不在 prompt 中 → 标注/构造错误，不计为模型失败
     c = categorize_case(_case(pred="1234567", ctx_nums=["1234567"], in_prompt=False))
