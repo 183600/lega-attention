@@ -85,7 +85,9 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
             continue
         try:
             v, s = float(v), int(s)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # step 可能是 JSON 里的 Infinity/1e999（json.loads 接受非标准
+            # 字面量）：int(inf) 抛 OverflowError，同样必须按坏记录跳过。
             malformed += 1
             continue
         if math.isfinite(v):

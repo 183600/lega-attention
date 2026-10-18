@@ -121,14 +121,11 @@ def _group_items(items, rdir=None):
     完全无种子信息的文件在该变体已有种子结果时忽略（与旧行为一致）。
     """
     expected = _expected_tagged(rdir) if rdir else None
-    if expected is not None:
-        # 与 _prefer_seeded 同规则：先按本次 run 的命名约定筛掉另一族过期文件
-        keep = [it for it in items if _is_tagged(it[0]) == expected]
-        if keep:
-            items = keep
     groups = {}
     for fp, d in items:
-        if not (d and d.get("variant")):
+        # 合法 JSON 但非对象的文件（如误放入的数组）按无效结果跳过，不让
+        # 一个坏文件毁掉整张图（与 curves/badcase 的容错口径一致）
+        if not (isinstance(d, dict) and d.get("variant")):
             continue
         tagged = _is_tagged(fp)
         m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
@@ -136,6 +133,13 @@ def _group_items(items, rdir=None):
         groups.setdefault(d["variant"], []).append((seed, d, tagged))
     out = {}
     for v, items_v in groups.items():
+        if expected is not None:
+            # 与 _prefer_seeded 同规则按命名约定筛掉另一族过期文件，但必须
+            # 逐变体进行：不能因为某个变体有本次约定的文件，就把其它变体
+            # 仅有的另一族结果整体丢弃（那会让这些变体从图上消失）。
+            keep_v = [it for it in items_v if it[2] == expected]
+            if keep_v:
+                items_v = keep_v
         seeded = [it for it in items_v if it[0] is not None]
         if not seeded:
             out[v] = [d for _, d, _ in items_v]
@@ -416,7 +420,7 @@ def fig_misleading(rdir):
     # 会因一个变体有 _seed 文件而把其它变体仅有的无种子结果整体丢弃；同一
     # (变体, 种子) 的裸/带后缀重复文件也在这里按命名约定去重。
     grouped = _group_items([(fp, d) for fp, d in files
-                            if d and d.get("n_records")], rdir)
+                            if isinstance(d, dict) and d.get("n_records")], rdir)
     rows = []
     for v, ds in grouped.items():
         row = {"variant": v}
@@ -490,19 +494,25 @@ def fig_auroc_heads(rdir, variant="lega"):
     return True
 
 
-def _load_train_logs(train_root):
+def _load_train_logs(train_root, rdir=None):
     """扫描 out/<tag>/<variant>[/seed<s>]/train_log.jsonl，按变体归组。
 
     多种子拆分为多份记录；同一步的曲线在画图时取跨种子均值。
+    rdir 给定时（repro.json 所在的结果目录）：同一变体下两种命名布局
+    并存说明目录里混有不同种子数的旧 run（以不同 --seeds 在同一 tag 上
+    重跑），按本次命名约定逐变体择优，避免把旧布局日志与本次日志混在
+    一起求均值；某变体只有另一族文件时仍保留（不因其它变体而丢弃）。
     """
     series = {}
+    expected = _expected_tagged(rdir) if rdir else None
     paths = (sorted(glob.glob(os.path.join(train_root, "*", "train_log.jsonl")))
              + sorted(glob.glob(os.path.join(
                  train_root, "*", "seed*", "train_log.jsonl"))))
     for path in paths:
         parts = os.path.normpath(path).split(os.sep)
         # 目录结构 .../<variant>/[seed<s>/]train_log.jsonl
-        variant = parts[-2] if not parts[-2].startswith("seed") else parts[-3]
+        tagged = parts[-2].startswith("seed")
+        variant = parts[-3] if tagged else parts[-2]
         recs = []
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -517,8 +527,15 @@ def _load_train_logs(train_root):
         except OSError:
             continue
         if recs:
-            series.setdefault(variant, []).append(recs)
-    return series
+            series.setdefault(variant, []).append((tagged, recs))
+    out = {}
+    for v, items in series.items():
+        if expected is not None:
+            keep = [it for it in items if it[0] == expected]
+            if keep:
+                items = keep
+        out[v] = [recs for _, recs in items]
+    return out
 
 
 def _mean_by_step(runs, key):
@@ -541,7 +558,7 @@ def fig_train_curves(rdir, train_root):
     """
     if not train_root or not os.path.isdir(train_root):
         return False
-    series = _load_train_logs(train_root)
+    series = _load_train_logs(train_root, rdir)
     if not series:
         return False
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15.5, 4.2),

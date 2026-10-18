@@ -207,6 +207,23 @@ def test_malformed_log_records_do_not_crash_diagnosis():
     print("  [ok] 损坏日志记录跳过并计数（诊断正常完成）")
 
 
+def test_infinite_step_records_do_not_crash_diagnosis():
+    """step 为 JSON Infinity（json.loads 接受该非标准字面量）时必须按坏记录
+    跳过：int(inf) 抛 OverflowError，不能中断整个诊断。"""
+    recs = [json.loads('{"step": 10, "loss": 5.0}'),
+            json.loads('{"step": Infinity, "loss": 4.0}'),
+            json.loads('{"step": 20, "loss": 3.5}'),
+            json.loads('{"step": 30, "loss": 3.0}'),
+            json.loads('{"step": 40, "loss": 2.0}'),
+            json.loads('{"step": 10, "val_loss": 5.0}'),
+            json.loads('{"step": 20, "val_loss": 4.0}'),
+            json.loads('{"step": 30, "val_loss": 3.0}')]
+    d = diagnose_curve(recs)
+    assert d["malformed_records"] == 1, d
+    assert d["status"] == "正常收敛", d
+    print("  [ok] step=Infinity 的记录跳过并计数（OverflowError 不中断诊断）")
+
+
 def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"
