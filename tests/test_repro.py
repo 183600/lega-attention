@@ -11,7 +11,7 @@ import torch
 
 from lega.data import get_train_batch
 from lega.repro import (build_run_manifest, data_fingerprint, git_info,
-                        runtime_info, sha256_file)
+                        load_provenance, runtime_info, sha256_file)
 from lega.utils import set_seed, seed_report
 
 
@@ -173,6 +173,40 @@ def test_run_manifest_embeds_seed_report_and_runtime():
         assert manifest["runtime"]["hostname"]
         json.dumps(manifest)
     print("  [ok] run_manifest 内嵌 seed_report 与机器级 runtime 信息")
+
+
+def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
+    """清单缺字段/结构畸形时逐字段补算，不能把 None 写进下游溯源。"""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = os.path.join(d, "config_used.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _manifest(obj):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+
+        base = load_provenance(d)          # 无清单：按当前环境/配置补算
+        assert base["config_sha256"] == sha256_file(cfg)
+        # 语法合法但只是空壳/缺字段：缺失项补算，而不是返回一整排 None
+        _manifest({"tag": "legacy"})
+        p1 = load_provenance(d)
+        assert p1["config_sha256"] == sha256_file(cfg)
+        assert p1["code_commit"] == base["code_commit"]
+        # 已有字段优先于当前环境，数据摘要缺失时保持 None 而不是乱填
+        _manifest({"git": {"commit": "abc", "branch": "main"},
+                   "config_sha256": "deadbeef"})
+        p2 = load_provenance(d)
+        assert p2["code_commit"] == "abc" and p2["code_branch"] == "main"
+        assert p2["config_sha256"] == "deadbeef"
+        assert p2["data_fingerprint"] is None
+        # git/data 不是对象（结构畸形）：不崩，回退到当前环境
+        _manifest({"git": "oops", "data": [1, 2], "config_sha256": "x"})
+        p3 = load_provenance(d)
+        assert p3["config_sha256"] == "x"
+        assert p3["code_commit"] == base["code_commit"]
+    print("  [ok] load_provenance：缺字段/畸形清单逐字段回退补算")
 
 
 def test_same_seed_training_is_bitwise_reproducible():

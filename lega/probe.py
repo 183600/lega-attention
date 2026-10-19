@@ -285,13 +285,20 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     n_neg = int((y_all == 0).sum())
     base_rate = (n_pos / (n_pos + n_neg)) if (n_pos + n_neg) else None
     level, primary_metric = imbalance_level(base_rate)
+
+    def _ex_key(ex):
+        # example 可能缺失或类型混杂（旧/外部记录）：规范化为可排序、可哈希的
+        # 键。缺失 example 的记录归入同一"未知"组（分组宁可偏合并也绝不跨折，
+        # 泄漏防护不受影响），避免 sorted 在 None 与数值混排时抛 TypeError。
+        return ("missing", "") if ex is None else ("example", str(ex))
+
+    ex_keys = [_ex_key(r.get("example")) for r in valid_all]
     report.update({
-        "n_valid": int(y_all.size), "n_examples": len(set(
-            r.get("example") for r in valid_all)),
+        "n_valid": int(y_all.size), "n_examples": len(set(ex_keys)),
         "n_pos": n_pos, "n_neg": n_neg, "base_rate": base_rate,
         "imbalance_level": level, "primary_detection_metric": primary_metric,
     })
-    examples = sorted({r.get("example") for r in valid_all})
+    examples = sorted(set(ex_keys))
     k = int(folds)
     if len(examples) < 2 or y_all.size == 0 or len(set(y_all.tolist())) != 2:
         report["note"] = ("样例/类别不足（需 ≥2 个样例且两类齐备），"
@@ -316,8 +323,7 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
                          else available[0][0])
     gaps = sorted(set(examples))
     ex_to_idx = {g: i for i, g in enumerate(gaps)}
-    groups = np.asarray([ex_to_idx[r.get("example")] for r in valid_all],
-                        dtype=np.int64)
+    groups = np.asarray([ex_to_idx[k] for k in ex_keys], dtype=np.int64)
     fold_arr = _group_folds(groups.tolist(), k, seed)
     for key, name, names in available:
         X = feature_matrices[key]

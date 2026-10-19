@@ -403,6 +403,27 @@ def test_verify_controlled_setup_consistency():
             raise AssertionError("学习率不一致应触发 SystemExit")
         except SystemExit:
             pass
+
+        # 显式 null seed：审计应按“不一致”如实报告，而不是 int(None) 崩溃
+        cfg["lr"] = 0.001
+        cfg["seed"] = None
+        _write_json(cfg_path, cfg)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("config seed=null 应触发 SystemExit")
+        except SystemExit:
+            pass
+        cfg["seed"] = 7
+        _write_json(cfg_path, cfg)
+        ev["seed"] = None
+        _write_json(ev_path, ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("eval seed=null 应触发 SystemExit")
+        except SystemExit:
+            pass
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # 缺少 eval.json 时只警告不阻塞（--skip_train 复用旧产物的场景）
@@ -1260,6 +1281,7 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert all(r["token_matched"] for r in out["rows"])
         text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
         assert "逐位置对齐" in text
+        assert "在神经评测实际使用的窗口目标 token 上" in text
         # 任一 run 的窗口字段与规格不符 → 整体回退全 split 参考并显式说明
         runs_mis = {"lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s,
                                               eval_iters=3)}
@@ -1271,6 +1293,9 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert not any(r["token_matched"] for r in out_mis["rows"])
         text_mis = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out_mis))
         assert "未使用逐位置对齐参考" in text_mis
+        # 回退时必须撤销“这些数字=神经评测实际使用的 token”的宣称
+        assert "在神经评测实际使用的窗口目标 token 上" not in text_mis
+        assert "回退全 split 参考" in text_mis
         # 历史产物缺窗口规格 → 同样回退且如实说明原因
         tmp2 = tempfile.mkdtemp()
         try:

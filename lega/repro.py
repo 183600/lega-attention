@@ -217,16 +217,9 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
     # 结构校验：语法合法但结构畸形（非对象，或 git/data 不是对象）的
     # run_manifest 必须视为“无清单”并按当前环境补算，而不是抛
     # AttributeError 阻塞下游评测（与 data_fingerprint 的缓存校验同口径）。
-    if isinstance(manifest, dict) and manifest:
-        git = manifest.get("git") if isinstance(manifest.get("git"), dict) else {}
-        data = manifest.get("data") if isinstance(manifest.get("data"), dict) else {}
-        return {
-            "code_commit": git.get("commit"),
-            "code_dirty": git.get("dirty"),
-            "code_branch": git.get("branch"),
-            "data_fingerprint": data.get("digest"),
-            "config_sha256": manifest.get("config_sha256"),
-        }
+    # 先按当前环境/配置算出兜底值，再让清单逐字段覆盖：旧版清单可能缺少
+    # config_sha256 等字段（或整个 git/data 不是对象），缺失字段必须补算
+    # 而不是留 None 污染 eval.json 的溯源与受控变量审计。
     cfg = os.path.join(ckpt_dir, "config_used.json")
     git = git_info()
     out = {
@@ -241,4 +234,18 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             out["data_fingerprint"] = data_fingerprint(data_dir)["digest"]
         except FileNotFoundError:
             pass
+    if isinstance(manifest, dict) and manifest:
+        mgit = manifest.get("git")
+        mdata = manifest.get("data")
+        mgit = mgit if isinstance(mgit, dict) else {}
+        mdata = mdata if isinstance(mdata, dict) else {}
+        for key, src, field in (
+                ("code_commit", mgit, "commit"),
+                ("code_dirty", mgit, "dirty"),
+                ("code_branch", mgit, "branch"),
+                ("data_fingerprint", mdata, "digest"),
+                ("config_sha256", manifest, "config_sha256")):
+            val = src.get(field)
+            if val is not None:
+                out[key] = val
     return out

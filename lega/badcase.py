@@ -153,7 +153,10 @@ def case_axis(c: Dict) -> str:
         return "数据/构造"
     if c.get("hard_sample"):
         return "难度边界"
-    if c.get("category") in ("unparsed", "fwe_no_ref"):
+    if c.get("category") in ("unparsed", "fwe_no_ref", "fwe_no_parse"):
+        # fwe_no_parse 与 unparsed/fwe_no_ref 同属评测/导出环节（解析规则或
+        # 导出问题），必须与 synthesize_ruler_improvements 给出的 axis 一致，
+        # 否则同一批案例在分布表与改进建议里被算到两条不同的账上。
         return "评测/导出"
     return "模型/方法"
 
@@ -499,12 +502,26 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             "先扩大 worst_n/评测窗口数再按归因下结论",
             "把 --worst_n 提高到 ≥10 并跨更多窗口采样"))
     cb = counts.get("confident_bias", 0)
-    gic = ana.get("gold_in_context_rate")
     if _share(cb, n) >= DOMINANT_SHARE:
+        # 分支判定只看 confident_bias 这批窗口：全局 gold_in_context_rate 会把
+        # 其它类别（如 repetition_attractor）的可见性算进来，可能把"这批窗口
+        # 的 gold 根本没见过"错判成"模型看得到却没抄对"。
+        cb_gic = [bool(c.get("gold_in_context"))
+                  for c in (ana.get("cases") or [])
+                  if c.get("category") == "confident_bias"
+                  and c.get("gold_in_context") is not None]
+        if cb_gic:
+            gic = sum(cb_gic) / len(cb_gic)
+            scope = "其中"
+        else:
+            # 旧格式窗口缺 gold_in_context 字段：退回全局率但显式标注口径，
+            # 不把它冒充成这批窗口自身的比例。
+            gic = ana.get("gold_in_context_rate")
+            scope = "全部最差窗口中"
         if gic is not None and gic >= 0.5:
             recs.append(_advice(
                 "模型/方法", "高",
-                f"高置信错答占 {cb}/{n}，且 {gic:.0%} 的 gold 其实在上下文中",
+                f"高置信错答占 {cb}/{n}，且{scope} {gic:.0%} 的 gold 在上下文中",
                 "模型看得到却没抄对：优先检查注意力是否落在 gold 跨度"
                 "（复制/检索失败而非知识缺失），这类失败最可能通过结构调整改善",
                 "对这批窗口检查 top-1 注意力位置与 gold 跨度的重叠；区分"
@@ -947,7 +964,7 @@ def main():
                 print(f"[badcase]   {line}")
 
     # 跨变体错误对照：共识失败 vs 相对 standard 的特异性新增错误
-    per_variant = {}
+    per_variant_cases = {}
     for fp in paths:
         payload = ruler_payloads.get(fp)
         if payload is None:
@@ -955,9 +972,20 @@ def main():
         v = payload.get("variant")
         # "badcases": [] 表示"该变体已评测且零错误"，必须保留传入跨变体对照
         # （与 cross_variant_analysis 的语义一致）；只有缺失/非列表才视为无数据。
-        if v and v not in per_variant \
-                and isinstance(payload.get("badcases"), list):
-            per_variant[v] = payload["badcases"]
+        if v and isinstance(payload.get("badcases"), list):
+            per_variant_cases.setdefault(v, []).append(
+                (payload.get("seed"), fp, payload["badcases"]))
+
+    def _seed_key(item):
+        try:
+            return (0, int(item[0]), item[1])
+        except (TypeError, ValueError):
+            return (1, 0, item[1])
+
+    # 每个变体取“最小种子”（与 run_all.cross_variant_badcase_map 同策略）：
+    # paths 是文件名字典序（seed1000 排在 seed999 之前），取首个会选错种子。
+    per_variant = {v: min(cands, key=_seed_key)[2]
+                   for v, cands in per_variant_cases.items()}
     if all_analyses or window_analyses:
         merged = {
             "n_files": len(all_analyses),

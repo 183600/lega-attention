@@ -9,8 +9,10 @@ import os
 import shutil
 import tempfile
 
+import numpy as np
+
 from lega.plots import (_expected_tagged, _group_by_variant, _load_train_logs,
-                        _mean_by_step, _prefer_seeded)
+                        _mean_by_step, _prefer_seeded, _read_records)
 
 
 def _w(rdir, name, obj):
@@ -104,6 +106,37 @@ def test_load_train_logs_respects_run_convention():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 训练曲线日志：按 repro.json 命名约定逐变体择优")
+
+
+def test_read_records_merges_ragged_headers_by_file_rows():
+    """合并不同版本的逐记录 CSV 时，缺列必须按"该文件的行区间"补 NaN。
+
+    旧版 CSV 可能缺少后来才加入的门控列（c/logit）：若统一在列尾补 NaN，
+    后续文件的行会整体前移，isfinite 掩码按位置配对就会把 c 与错误的 g/hit
+    配对，静默产出错误图表。这里直接用三份不同表头的文件锁定行对齐。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "repro.json", {"seeds": [1, 2, 3]})
+        rows_by_seed = {
+            1: "g,hit\n0.1,1\n0.2,0\n",
+            2: "g,hit,c\n0.3,1,30\n0.4,0,40\n",
+            3: "g,hit,c,logit\n0.5,1,50,-5\n0.6,0,60,6\n",
+        }
+        for s, text in rows_by_seed.items():
+            with open(os.path.join(tmp, f"analysis_records_lega_seed{s}.csv"),
+                      "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        cols = _read_records(tmp, "lega")
+        assert cols["g"].tolist() == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+        assert cols["hit"].tolist() == [1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+        assert np.isnan(cols["c"][:2]).all()
+        assert cols["c"][2:].tolist() == [30.0, 40.0, 50.0, 60.0]
+        assert np.isnan(cols["logit"][:4]).all()
+        assert cols["logit"][4:].tolist() == [-5.0, 6.0]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 逐记录 CSV：不同表头按文件行区间对齐补 NaN")
 
 
 def test_prefer_seeded_matches_run_convention():

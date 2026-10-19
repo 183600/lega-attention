@@ -38,6 +38,9 @@ def test_collect_worst_windows():
         assert sum(probs) <= 1.0 + 1e-9, probs
         assert probs == sorted(probs, reverse=True)
         assert r["context_tail"] and isinstance(r["gold_next"], str)
+    # n_worst=0 表示关闭：返回空列表，而不是“至少转储一条”
+    assert collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
+                                 n_worst=0, max_windows=32) == []
     print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
           f"gold={rows[0]['gold_next']!r}）")
 

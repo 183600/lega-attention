@@ -330,8 +330,9 @@ def verify_registration(registry_path: str = None,
         report["warnings"].append(
             "整文档 SHA-256 与链头不一致（假设科学内容未变）：可能是追加了 "
             "note 等注释类字段（允许）；但也可能是改写了 decision_rule/"
-            "scope 等判定参数（不允许、锁链不覆盖）。请核对 git diff，"
-            "必要时用 --amend 留痕。")
+            "scope 等判定参数（不允许、锁链不覆盖）。请核对 git diff："
+            "注释类改动可保留，判定参数的改动必须 revert——--amend 只能为"
+            "新增假设留痕，无法为改写既有判定参数“补手续”。")
     report["status"] = "amended" if report["chain_length"] else "intact"
     report["confirmatory_valid"] = True
     return report

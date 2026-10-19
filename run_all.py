@@ -258,7 +258,15 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             else:
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                if int(cfg.get("seed", seed)) != int(seed):
+                # 键缺失（旧产物）沿用默认 seed；显式为 null/非数值时无法证明
+                # 用了预期种子，审计应如实报“不一致”而不是 int(None) 崩溃。
+                cfg_seed = cfg.get("seed", seed)
+                try:
+                    seed_mismatch = (cfg_seed is None
+                                     or int(cfg_seed) != int(seed))
+                except (TypeError, ValueError):
+                    seed_mismatch = True
+                if seed_mismatch:
                     mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
                 ctrl = {k: val for k, val in cfg.items()
                         if k not in _AUDIT_EXEMPT_KEYS}
@@ -286,7 +294,12 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                 early_stop_runs.append(f"{v}/seed{seed}(step {ev.get('steps')}"
                                        f"/{meta['steps_planned']})")
             here = []
-            if int(ev.get("seed", seed)) != int(seed):
+            ev_seed = ev.get("seed", seed)
+            try:
+                ev_seed_bad = (ev_seed is None or int(ev_seed) != int(seed))
+            except (TypeError, ValueError):
+                ev_seed_bad = True
+            if ev_seed_bad:
                 here.append(f"eval seed={ev.get('seed')}")
             if (expected_data_digest is not None
                     and meta["data_fingerprint"] != expected_data_digest):
@@ -1437,7 +1450,14 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             "该基线只回答“绝对难度有多高、神经模型是否显著优于统计基线”。")
         wm = ngram.get("ppl_window_matched") or {}
         wspec = ngram.get("window_spec") or {}
-        if wm and wspec:
+        # 只有比较表确实采用了逐位置对齐参考（全部 run 的窗口规格一致）时，
+        # 这些数字才真的打在“神经评测实际使用的窗口 token”上；一旦回退到全
+        # split 参考（历史产物/规格不符），同样的数字只是按声明规格算出的
+        # 参考值，不能宣称与神经评测同 token——必须显式区分，否则基线证据
+        # 被高估。
+        token_matched = ((ngram_cmp or {}).get("reference_source")
+                         == "window_matched")
+        if wm and wspec and token_matched:
             lines.append(
                 f"- 逐位置对齐口径（同 split 还不够，两边必须打在同一批 token "
                 f"上）：在神经评测实际使用的窗口目标 token 上"
@@ -1447,6 +1467,16 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
                 f"（与全 split 口径同一选定 α）。")
+        elif wm and wspec:
+            lines.append(
+                f"- 窗口规格参考值（按 n-gram 侧声明规格 ctx={wspec.get('ctx')}、"
+                f"iters={wspec.get('iters')}、n_eval={wspec.get('n_eval')}、"
+                f"共 {int(wspec.get('n_tokens') or 0):,} 个评分 token）："
+                f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
+                f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
+                f"（与全 split 口径同一选定 α）。⚠ 本次神经评测未全部满足该"
+                "窗口规格，实际比较已回退全 split 参考（见下方比较表），"
+                "这些数字不代表神经评测实际使用的 token 集合。")
         elif ngram.get("window_spec_error"):
             lines.append(f"- ⚠ n-gram 窗口对齐不可用："
                          f"{ngram['window_spec_error']}")
@@ -2790,12 +2820,18 @@ def build_summary(results_dir: str, audit: dict = None,
         n_sup = sum(1 for h in hyp_eval if h["status"] == "支持")
         n_ref = sum(1 for h in hyp_eval if h["status"] == "拒绝")
         n_und = sum(1 for h in hyp_eval if h["status"] == "未定")
+        n_untested = sum(1 for h in hyp_eval if h["status"] == "未检验")
+        counts = f"支持 {n_sup}、拒绝 {n_ref}、未定 {n_und}"
+        if n_untested:
+            # “未检验”（对比未运行/指标对不上）与“未定”是不同状态，
+            # 必须显式计数，否则四项之和小于登记条数、读者会误以为漏算。
+            counts += f"、未检验 {n_untested}"
         valid = all(h.get("confirmatory_valid") for h in hyp_eval)
         md.append(f"预注册文件 `preregistration/hypotheses.json`（登记于正式实验前；"
                   f"不放在 docs/ 以免被流水线自动清理删除）："
-                  f"{len(hyp_eval)} 条方向性主张，判定 支持 {n_sup}、拒绝 {n_ref}、"
-                  f"未定 {n_und}。只有“支持”能写进结论；“拒绝”= 方向相反且校正后"
-                  "显著（假设被证伪）；“未定”不得解释为任何方向的证据。")
+                  f"{len(hyp_eval)} 条方向性主张，判定 {counts}。"
+                  "只有“支持”能写进结论；“拒绝”= 方向相反且校正后"
+                  "显著（假设被证伪）；“未定/未检验”不得解释为任何方向的证据。")
         if not valid:
             md.append("")
             md.append("> ⛔ 预注册完整性校验未通过：下表的“支持/拒绝”不作数，"

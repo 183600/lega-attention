@@ -66,10 +66,14 @@ def _label(v):
 
 
 def _load(path):
+    """读取 JSON；缺失/不可读/损坏一律返回 None（坏文件不毁整张图）。"""
     if not os.path.exists(path):
         return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 _SEED_SUFFIX_RE = re.compile(r"_seed(\d+)$")
@@ -342,7 +346,8 @@ def _read_records(rdir, variant):
     if cached is not None:
         _RECORDS_CACHE.move_to_end(key)
         return cached
-    cols = {}
+    names = []
+    per_file = []   # [(file_cols, n_rows), ...]，保持文件顺序
     for path in paths:
         if not os.path.exists(path):
             continue
@@ -353,19 +358,27 @@ def _read_records(rdir, variant):
                 continue
             idx = {name: i for i, name in enumerate(header) if name != "task"}
             for name in idx:
-                cols.setdefault(name, [])
+                if name not in names:
+                    names.append(name)
+            file_cols = {name: [] for name in idx}
+            n_rows = 0
             for parts in reader:
+                n_rows += 1
                 for name, i in idx.items():
                     v = parts[i] if i < len(parts) else ""
-                    cols[name].append(
+                    file_cols[name].append(
                         float(v) if v not in ("", "None", "nan") else np.nan)
+        per_file.append((file_cols, n_rows))
     out = {}
-    # 合并多种子文件时表头可能因代码版本不同而缺列：短列尾部补 NaN，
-    # 保证各列等长（消费方用 isfinite 掩码，缺失值不会进入统计）。
-    width = max((len(vals) for vals in cols.values()), default=0)
-    for name, vals in cols.items():
-        if len(vals) < width:
-            vals = vals + [np.nan] * (width - len(vals))
+    # 合并多种子文件时表头可能因代码版本不同而缺列。每个文件在行空间里占
+    # 自己的 [offset, offset+n_rows) 区间，缺列时必须按该文件的真实行数在此
+    # 区间补 NaN；统一在列尾补会让后续文件的行整体前移，列与记录错位
+    # （消费方用 isfinite 掩码按位置配对，错位会静默产生错误图表）。
+    for name in names:
+        vals = []
+        for file_cols, n_rows in per_file:
+            col = file_cols.get(name)
+            vals.extend(col if col is not None else [np.nan] * n_rows)
         out[name] = np.asarray(vals, dtype=np.float64)
     _RECORDS_CACHE[key] = out
     _RECORDS_CACHE.move_to_end(key)

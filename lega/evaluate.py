@@ -31,7 +31,10 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     以"窗口末位的下一 token 预测"为坏案例单元（与贪心生成评测口径一致）：
     损失 = 末位交叉熵；同时给出模型的 top-5 预测与真实 token，用于人工区分
     "样本本身不可预测（噪声/生僻 token）"与"模型系统性盲区"。
+    n_worst<=0（0=关闭）返回空列表，不白跑一遍前向。
     """
+    if int(n_worst) <= 0:
+        return []
     indices, _ = _val_eval_indices(len(val), ctx, max_windows)
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
@@ -74,7 +77,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
                               for p, i in zip(top_p_l[r], top_i_l[r])],
             })
     rows.sort(key=lambda r: -r["loss"])
-    return rows[:max(1, int(n_worst))]
+    return rows[:int(n_worst)]
 
 
 def json_safe_eval_metrics(metrics: dict) -> dict:
@@ -145,7 +148,8 @@ def main():
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True, help="输出 JSON 路径")
     p.add_argument("--eval_iters", type=int, default=None,
-                   help="评测窗口数；默认继承训练配置，训练配置缺失时为 100")
+                   help="评测窗口数；默认继承训练配置，训练配置缺失时为 50"
+                        "（与 train.py 的默认值一致，保证窗口规格可比）")
     p.add_argument("--worst_n", type=int, default=0,
                    help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）")
     p.add_argument("--split", default="auto",
@@ -215,9 +219,12 @@ def main():
               f"model.block_size={model.block_size}，PPL 可能与训练内评测不可比")
     ctx = min(model.block_size, int(train_ctx)) if train_ctx else model.block_size
     cfg_eval_iters = cfg_used.get("eval_iters")
+    # 缺省必须与 train.py 的 eval_iters 默认值（50）一致：否则同一 checkpoint
+    # 的独立评测窗口数与训练内评测/选择口径不同，PPL 不可比，run_all 的窗口
+    # 对齐检查也会因此回退到全 split 参考。
     eval_iters = (int(args.eval_iters) if args.eval_iters is not None
                   else (int(cfg_eval_iters) if cfg_eval_iters is not None
-                        else 100))
+                        else 50))
 
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。

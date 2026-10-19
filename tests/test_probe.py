@@ -228,3 +228,20 @@ def test_probe_feature_sets_cover_gate_linear_terms():
             assert set(feats) == {"log_maxp", "log_n", "qterm"}
     assert "log_maxp" in names and "log_n" in names
     print("  [ok] 特征集与门控线性项覆盖一致")
+
+
+def test_linear_probe_tolerates_missing_or_mixed_example_ids():
+    """缺失/类型混杂的 example 不得让探针崩溃，且分组仍不跨折。"""
+    recs = _synth_records(n_examples=8, per_example=4, seed=7)
+    for i, r in enumerate(recs):
+        if i % 5 == 0:
+            r["example"] = None          # 旧/外部记录可能缺 example
+        elif i % 5 == 1:
+            r["example"] = str(r["example"])   # 同字段类型混杂
+    rep = linear_probe(recs, folds=3, seed=7)
+    assert rep["n_valid"] == len(recs)
+    assert rep["n_examples"] >= 2
+    # 未知 example 的记录归入同一组；分组索引整批稳定可算，探针可估计
+    assert rep["primary"] is not None and rep["folds"] >= 2
+    assert rep["feature_sets"][rep["primary"]]["oof"] is not None
+    print("  [ok] example 缺失/类型混杂：不崩溃且分组可用")

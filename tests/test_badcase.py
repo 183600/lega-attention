@@ -6,7 +6,7 @@ import shutil
 import tempfile
 
 from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
-                           case_key, categorize_case, categorize_window,
+                           case_axis, case_key, categorize_case, categorize_window,
                            cross_variant_analysis, format_case, format_window_case,
                            process_eval_json, process_ruler_json,
                            write_badcase_md, write_worstcase_md)
@@ -79,6 +79,27 @@ def test_categorize_fwe():
                               answer_words=["ka"]))
     assert c["category"] == "fwe_no_parse"
     print("  [ok] fwe 归因（漏答/多答/无法解析）")
+
+
+def test_case_axis_matches_synthesized_advice_axes():
+    """评测/导出类错误的 axis 分布与改进建议的 axis 必须一致。
+
+    fwe_no_parse 与 unparsed/fwe_no_ref 同属解析/导出环节；若 case_axis 漏掉
+    它，同一批案例会被同时算到"模型/方法"（分布表）与"评测/导出"（建议），
+    报告自相矛盾。
+    """
+    cases = [_case(task="fwe", answer="ka", pred="123",
+                   answer_words=["ka"])] * 3
+    ana = analyze_badcases(cases)
+    assert ana["category_counts"] == {"fwe_no_parse": 3}
+    assert ana["axis_counts"] == {"评测/导出": 3}, ana["axis_counts"]
+    assert {a["axis"] for a in ana["recommendations"]} == {"评测/导出"}
+    # 最差窗口的 unparsed（旧格式/导出失败）同样归评测/导出
+    c = categorize_window({"window": 1, "loss": 1.0, "gold_next": "x",
+                           "pred_top5": None})
+    assert c["category"] == "unparsed"
+    assert case_axis(c) == "评测/导出"
+    print("  [ok] 评测/导出类错误的 axis 与改进建议一致")
 
 
 def test_hard_sample_flag():
@@ -514,6 +535,42 @@ def test_main_keeps_zero_error_variants_for_cross_variant():
     print("  [ok] badcase.main 保留零错误变体进入跨变体对照")
 
 
+def test_main_picks_smallest_seed_per_variant_not_lexicographic_first():
+    """跨变体对照必须按数值最小种子对齐；文件名字典序会把 seed1000 排在
+    seed999 前面，从而把一次“零错误”的运行当成该变体的代表结果。"""
+    import sys
+    from lega.badcase import main as badcase_main
+    tmp = tempfile.mkdtemp()
+    try:
+        a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+        payloads = {
+            "ruler_standard_seed999.json": {"variant": "standard", "seed": 999,
+                                            "badcases": []},
+            "ruler_lega_seed999.json": {"variant": "lega", "seed": 999,
+                                        "badcases": [a]},
+            "ruler_lega_seed1000.json": {"variant": "lega", "seed": 1000,
+                                         "badcases": []},
+        }
+        for name, obj in payloads.items():
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False)
+        old_argv = sys.argv
+        sys.argv = ["badcase", "--results_dir", tmp, "--no_md"]
+        try:
+            badcase_main()
+        finally:
+            sys.argv = old_argv
+        with open(os.path.join(tmp, "badcase_summary.json"),
+                  encoding="utf-8") as f:
+            merged = json.load(f)
+        assert merged["n_files"] == 3
+        pv = merged["cross_variant"]["per_variant"]["lega"]
+        assert pv["n_failed"] == 1, pv      # seed999，而非字典序在前的 seed1000
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] badcase.main 按数值最小种子对齐跨变体对照")
+
+
 def test_ruler_improvement_synthesis():
     """归因不止于分类：主导错误模式必须转成带触发证据的改进方向。"""
     keys = {"axis", "priority", "trigger", "suggestion", "next_experiment"}
@@ -573,6 +630,29 @@ def test_window_improvement_synthesis():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 最差窗口 → 改进方向合成（复制失败/复读）")
+
+
+def test_window_advice_uses_confident_bias_subset_rate():
+    """confident_bias 的“看得到却没抄对”判定必须只看该类窗口。
+
+    其它类别（如 gold 在上下文中的复读窗口）会把全局可见率抬到 0.5 以上；
+    若沿用全局率，gold 从未出现的 confident_bias 窗口会被错误地建议去查
+    “注意力是否落在 gold 跨度”，把长尾失败误归因为检索失败。
+    """
+    wins = [
+        # confident_bias：高置信错答，gold 从未出现在窗口里
+        _win(gold="zzz", tail="no match here",
+             pred_top5=[[" red", 0.85]]),
+        # repetition_attractor：gold 在上下文尾出现，抬高全局可见率
+        _win(gold=" blue", tail="a blue car",
+             pred_top5=[[" car", 0.2]]),
+    ]
+    ana = analyze_worst_windows(wins, variant="lega")
+    assert ana["category_counts"]["confident_bias"] == 1
+    assert ana["gold_in_context_rate"] == 0.5
+    cb_advs = [r for r in ana["recommendations"] if "高置信" in r["trigger"]]
+    assert cb_advs and "大多不在上下文中" in cb_advs[0]["trigger"], cb_advs
+    print("  [ok] 高置信错答建议按同类别子集的 gold 可见率判定")
 
 
 def test_cross_improvement_synthesis():
