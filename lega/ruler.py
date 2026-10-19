@@ -374,8 +374,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                if (amp and use_cuda) else contextlib.nullcontext())
     gen_batch = max(1, int(gen_batch))
     # 静态 KV 缓冲在单个网格内跨样例复用：按本网格历史最大 (B, total) 扩容，
-    # 之后按所需窗口返回切片视图；网格开始时重置（见下），避免历史最大容量
-    # 在整轮评测期间常驻设备。
+    # 之后按所需窗口返回切片视图；网格开始时重置（见下）。
     attn0 = model.blocks[0].attn
     kv_B = 0
     kv_cap = 0
@@ -430,8 +429,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
         results[task] = {}
         seen_rooms: set = set()
         for ctx in ctx_lens:
-            # 每个 (task, ctx) 网格开始时重置 KV 缓冲：缓冲只在本网格内按需
-            # 增长，网格间不保留历史最大容量（后续网格重新按自身需要分配）。
+            # 每个 (task, ctx) 网格开始时重置 KV 缓冲。
             kv_B = 0
             kv_cap = 0
             kv_bufs = None

@@ -163,7 +163,6 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             n_valid += 1
             sn = _normalize_line(s)
             d = digest(s)
-            # 行本身已是归一化形态时两个摘要相同，直接复用第一次哈希。
             dn = d if sn == s else digest(sn)
             seen_valid.add(d)
             seen_valid_norm.add(dn)
@@ -185,7 +184,7 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
 
     train_text = texts["train"]
     n_train, n_valid_train = 0, 0
-    # 仅用于计数 len() 的集合存摘要；归一化每行只算一次。
+    # 仅用于计数 len() 的集合存摘要。
     seen_valid_train, seen_valid_train_norm = set(), set()
     dropped_exact, dropped_norm = 0, 0
     # 流式扫描 train：被删行（连同其后换行）不进入任何片段；

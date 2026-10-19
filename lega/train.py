@@ -756,8 +756,7 @@ def main():
     # （带步标签）交给排查，而不是用"最后一步批次"冒充失败步批。
     interval_batches = []   # [(0-based step, [consumed micro-batch, ...])]
     interval_first_bad_dev = torch.full((), -1.0, device=device)
-    # 当前训练步的 0 维设备标量：预分配后每步 fill_（内核参数传值，无
-    # 主机标量的逐微批 H2D 拷贝）。
+    # 当前训练步的 0 维设备标量：预分配后每步 fill_。
     step_dev = torch.zeros((), device=device)
     # 步时计时：按 log 区间累计墙钟并扣除评测时间（.item() 已同步设备，
     # 区间边界无需额外 synchronize）。pending_eval_s 供 do_eval 累加。
@@ -891,8 +890,6 @@ def main():
                 # grad_accum==1（默认配置）时除法结果就是 loss 本身
                 loss = out["loss"] if grad_accum == 1 else out["loss"] / grad_accum
             # 设备端标记区间内首个非有限损失步（0-based），log 点统一读取。
-            # bool 掩码直接作 where 条件；仅当此前无标记且本步非有限时写入
-            # 步号，单个 where 完成，不做主机标量拷贝。
             bad_now = ~torch.isfinite(out["loss"].detach())
             interval_first_bad_dev = torch.where(
                 (interval_first_bad_dev < 0) & bad_now,

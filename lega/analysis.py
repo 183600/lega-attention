@@ -127,8 +127,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
             g1 += 1
         idxs = order[g0:g1]
         g0 = g1
-        # 等长样例分组后可整表转 tensor，再按设备搬移。源为 from_numpy 的
-        # 可分页内存，non_blocking 不会产生异步 H2D，直接用同步拷贝。
+        # 等长样例分组后可整表转 tensor，再按设备搬移。
         ids = torch.from_numpy(
             np.asarray([examples[k]["ids"] for k in idxs], dtype=np.int64))
         if device.startswith("cuda"):

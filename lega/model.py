@@ -261,8 +261,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     del d
         ctx.dx = dx
         ctx.gw = gw
-        # 反向缩放输出的可复用缓冲（按重量级最大的 gw 一份），首次 backward
-        # 时按参数精度惰性分配。
+        # 反向缩放输出的缓冲，首次 backward 时按参数精度惰性分配。
         ctx.gw_buf = None
         return loss * ctx.inv_n
 
@@ -284,9 +283,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                 # 缓冲的原地写会与已记录的版本冲突，退回新建临时。
                 gw = torch.mul(ctx.gw, gscale).to(weight.dtype)
             else:
-                # 复用 ctx 持有的输出缓冲：out= 的精度提升路径与
-                # 「先乘后转参数精度」逐位一致，dtype 不一致时也只需一份
-                # 全尺寸临时（原先 .to() 后再乘会同时存在两份）。
+                # out= 路径与「先乘后转参数精度」逐位一致。
                 buf = ctx.gw_buf
                 if (buf is None or buf.dtype != weight.dtype
                         or buf.shape != ctx.gw.shape
@@ -693,7 +690,6 @@ def load_model(ckpt_path: str, device: str = "cpu",
     cfg["use_sdpa_standard"] = use_sdpa_standard
     model = GPT(**cfg)
     model.load_state_dict(ck["state_dict"])
-    # 权重已拷贝进模型，返回的 ckpt 字典不再需要整份 state_dict。
     ck.pop("state_dict", None)
     model.to(device)
     model.eval()
