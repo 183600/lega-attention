@@ -171,6 +171,8 @@ def test_tradeoff_verdict_rejects_bad_deals():
     # 数据缺失 → 不下结论
     assert tradeoff_verdict(None, 0.01, 10.0) == "数据不足"
     assert tradeoff_verdict(1.0, 0.01, None) == "数据不足"
+    assert tradeoff_verdict(None, None, 10.0,
+                            ruler_benefit_pp=None, ruler_p_adj=None) == "数据不足"
     # PPL 显著变差不是“收益”：绝不能得到“可接受”
     v = tradeoff_verdict(benefit_pct=-5.0, p_adj=0.01, cost_pct=1.0)
     assert v.startswith("不可行") and "可接受" not in v, v
@@ -181,6 +183,47 @@ def test_tradeoff_verdict_rejects_bad_deals():
     assert v.startswith("种子不足"), v
     assert tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=MIN_SEEDS) == "可接受"
     print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比/负收益/种子不足）")
+
+
+def test_tradeoff_verdict_covers_ruler_primary_metric():
+    """权衡判定必须覆盖 RULER 主指标：只看 PPL 会误判长上下文涨点，
+    也会漏掉 RULER 显著退步。"""
+    # PPL 持平（不显著）+ RULER 显著涨点 + 增幅温和 → 有涨点且注明依据
+    v = tradeoff_verdict(benefit_pct=0.1, p_adj=0.6, cost_pct=8.0,
+                         n_seeds=5, ruler_benefit_pp=1.5, ruler_p_adj=0.01,
+                         ruler_n_seeds=5)
+    assert v.startswith("可接受") and "RULER" in v, v
+    # RULER 单独显著改善 + 增幅超过 10×收益（RULER 独立阈值）→ 比值不利
+    v = tradeoff_verdict(benefit_pct=0.1, p_adj=0.6, cost_pct=30.0,
+                         n_seeds=5, ruler_benefit_pp=1.0, ruler_p_adj=0.01,
+                         ruler_n_seeds=5)
+    assert "收益-增幅比不利" in v and "RULER" in v, v
+    # RULER 显著改善但 PPL 显著退步 → 权衡，而不是“不可行”
+    v = tradeoff_verdict(benefit_pct=-3.0, p_adj=0.01, cost_pct=10.0,
+                         n_seeds=5, ruler_benefit_pp=2.0, ruler_p_adj=0.01,
+                         ruler_n_seeds=5)
+    assert v.startswith("权衡") and "PPL" in v and "RULER" in v \
+        and "不可行" not in v, v
+    # PPL 显著改善但 RULER 显著退步 → 权衡（核心检索目标受损必须显式）
+    v = tradeoff_verdict(benefit_pct=4.0, p_adj=0.01, cost_pct=5.0,
+                         n_seeds=5, ruler_benefit_pp=-2.0, ruler_p_adj=0.01,
+                         ruler_n_seeds=5)
+    assert v.startswith("权衡") and "RULER" in v and "受损" in v, v
+    # RULER 显著退步且无 PPL 涨点 → 不可行（不能因 PPL 不动就静默放过）
+    v = tradeoff_verdict(benefit_pct=0.0, p_adj=0.6, cost_pct=5.0,
+                         n_seeds=5, ruler_benefit_pp=-1.5, ruler_p_adj=0.01,
+                         ruler_n_seeds=5)
+    assert v.startswith("不可行") and "RULER" in v, v
+    # 两个主指标都显著改善 → 依据两者；RULER 侧种子不足同样不能判定
+    v = tradeoff_verdict(benefit_pct=3.0, p_adj=0.01, cost_pct=8.0,
+                         n_seeds=5, ruler_benefit_pp=1.0, ruler_p_adj=0.01,
+                         ruler_n_seeds=5)
+    assert v.startswith("可接受") and "PPL+RULER" in v, v
+    v = tradeoff_verdict(benefit_pct=3.0, p_adj=0.01, cost_pct=8.0,
+                         n_seeds=5, ruler_benefit_pp=1.0, ruler_p_adj=0.01,
+                         ruler_n_seeds=2)
+    assert v.startswith("种子不足") and "RULER" in v, v
+    print("  [ok] tradeoff_verdict（RULER 涨点/退步/权衡/独立阈值）")
 
 
 def test_load_registered_hypotheses_tolerates_non_dict_json():
@@ -730,6 +773,55 @@ def test_tradeoff_includes_train_peak_memory():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 涨点-增幅权衡包含训练进程峰值（缺失时降级）")
+
+
+def test_tradeoff_table_surfaces_ruler_benefit():
+    """权衡表必须输出 RULER 收益列；PPL 持平而 RULER 显著提升时判定不能
+    仍写“说服力有限”（长上下文检索是本项目预注册的核心主张）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        seeds = [1, 2, 3]
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["standard", "lega"], "seeds": seeds,
+                     "smoke": False})
+        lega_ppls = {1: 9.0, 2: 10.0, 3: 10.9}
+        for s in seeds:
+            for v in ("standard", "lega"):
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s,
+                    "val_ppl": 10.0 if v == "standard" else lega_ppls[s],
+                    "val_loss": 2.3,
+                    "gate_mean": 0.5 if v == "lega" else None,
+                    "n_params": 100, "n_gate_extra": 0})
+        for s in seeds:
+            for v, em in (("standard", 0.40), ("lega", 0.43)):
+                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s,
+                    "results": {"niah_synth": {"128": {"em": em}}}})
+
+        def _lat():
+            return {"prefill_ms": {"256": {"1": 1.0}},
+                    "decode_ms_per_tok": {"256": 0.1},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(), "lega": _lat()}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["eff_benefit_ruler_pp"] == 3.0, row
+        assert row["eff_ruler_p_adj"] is not None \
+            and row["eff_ruler_p_adj"] < ALPHA, row
+        assert row["eff_verdict"].startswith("可接受") \
+            and "RULER" in row["eff_verdict"], row
+        md = out["markdown"]
+        assert "RULER Δ(pp)" in md and "+3.00 pp" in md, md[-3000:]
+        assert "p_adj(RULER)" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅权衡：RULER 收益列与判定依据（PPL 持平不误判）")
 
 
 def test_audit_tolerates_early_stop_actual_steps():

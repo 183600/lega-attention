@@ -1618,41 +1618,92 @@ def _noise_floor_pct(base_noise, cand_noise):
     return math.sqrt(base_noise * base_noise + cand_noise * cand_noise)
 
 
+# RULER 收益以 EM 绝对百分点计，与 PPL 的相对百分比单位不同：收支比规则
+# 不能混算，RULER 单独设阈值（EM 提升通常比 PPL 百分比更难获得，倍数放宽
+# 到 10×；下限 0.5 pp 避免收益趋近 0 时比值判定失效）。
+RULER_COST_RATIO = 10.0
+RULER_RATIO_FLOOR_PP = 0.5
+
+
 def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
-                     n_seeds=None) -> str:
-    """涨点-增幅权衡判定：不看增幅的涨点没有意义。
+                     n_seeds=None, ruler_benefit_pp=None, ruler_p_adj=None,
+                     ruler_n_seeds=None) -> str:
+    """涨点-增幅权衡判定：不看增幅的涨点没有意义；收益必须覆盖两个主指标。
+
+    两个主指标：PPL（benefit_pct=相对基线的百分比改善，正=更好）与 RULER
+    平均 EM（ruler_benefit_pp=相对基线的绝对百分点改善，正=更好）。本项目
+    预注册主张横跨两者（H1 PPL、H4 长上下文检索），只看 PPL 会把“PPL 持平
+    但 RULER 显著提升”的真涨点误判为无效，也会漏掉“PPL 涨、RULER 显著
+    退步”的严重信号。
 
     规则（显式、可审计）：
-      * 种子不足（n_seeds 给定且 < MIN_SEEDS）→ 无法判定，与全表口径一致；
-      * 收益为负且显著 → 不可行（PPL 显著劣于基线，不存在“权衡”可言）；
-      * 涨点未通过 Holm 校正显著性检验 → 说服力有限（涨点可能只是噪声），
-        且综合增幅 >10% 时直接判不可行；
-      * 显著但综合增幅（各指标相对基线的最大增幅）>50% → 需审视；
-      * 显著但增幅 >5×收益（收益按 PPL 相对改善计，下限按 0.5% 计，
-        避免收益趋近 0 时比值判定失效）→ 收益-增幅比不利；
-      * 其余 → 可接受。
+      * 两个主指标都无数据或增幅缺失 → 数据不足；
+      * 参与判定的指标种子不足（给定 n<MIN_SEEDS）→ 无法判定，与全表口径一致；
+      * 某一主指标显著劣化：若另一主指标同时显著改善 → 权衡（必须显式
+        说明取舍）；否则 → 不可行；
+      * 任一主指标显著改善 → 有涨点：综合增幅（各指标相对基线的最大增幅）
+        >50% → 需审视；按显著者中最不利的收益套用收支比规则（PPL 5×，
+        RULER 单独 10× 且下限 0.5 pp，单位不同不混算）→ 收益-增幅比不利；
+        否则 → 可接受，并注明依据哪个指标；
+      * 有正向涨点但不显著 → 说服力有限（增幅>10% 判不可行）。
     微小涨点伴随巨大增幅的改进在这里会被明确拒绝。
     """
-    if benefit_pct is None or cost_pct is None:
+    if (benefit_pct is None and ruler_benefit_pp is None) or cost_pct is None:
         return "数据不足"
-    if n_seeds is not None and n_seeds < MIN_SEEDS:
-        return f"种子不足（n={n_seeds}<{MIN_SEEDS}），无法判定"
-    sig = p_adj is not None and p_adj < alpha
-    if benefit_pct < 0:
-        if sig:
-            return f"不可行：PPL 显著差于基线（{benefit_pct:.1f}%）"
-        if cost_pct > 10:
-            return f"不可行：无涨点且增幅 {cost_pct:.0f}%"
-        return "说服力有限：无涨点且差异不显著"
-    if not sig:
+    lacks = []
+    if benefit_pct is not None and n_seeds is not None and n_seeds < MIN_SEEDS:
+        lacks.append(f"PPL n={n_seeds}")
+    if (ruler_benefit_pp is not None and ruler_n_seeds is not None
+            and ruler_n_seeds < MIN_SEEDS):
+        lacks.append(f"RULER n={ruler_n_seeds}")
+    if lacks:
+        return f"种子不足（{'、'.join(lacks)}<{MIN_SEEDS}），无法判定"
+    ppl_sig = p_adj is not None and p_adj < alpha
+    rul_sig = ruler_p_adj is not None and ruler_p_adj < alpha
+    ppl_up = benefit_pct is not None and benefit_pct > 0 and ppl_sig
+    rul_up = (ruler_benefit_pp is not None and ruler_benefit_pp > 0
+              and rul_sig)
+    ppl_down = benefit_pct is not None and benefit_pct < 0 and ppl_sig
+    rul_down = (ruler_benefit_pp is not None and ruler_benefit_pp < 0
+                and rul_sig)
+    if ppl_down and rul_up:
+        return (f"权衡：PPL 显著退步 {benefit_pct:.1f}% 但 RULER 显著提升 "
+                f"+{ruler_benefit_pp:.2f} pp（增幅 {cost_pct:.0f}%，"
+                "检索目标改善，须说明 PPL 取舍）")
+    if rul_down and ppl_up:
+        return (f"权衡：PPL 显著改善 {benefit_pct:.1f}% 但 RULER 显著退步 "
+                f"{ruler_benefit_pp:.2f} pp（增幅 {cost_pct:.0f}%，"
+                "核心检索目标受损，须说明取舍）")
+    if ppl_down:
+        extra = (f"，且 RULER 显著退步 {ruler_benefit_pp:+.2f} pp"
+                 if rul_down else "")
+        return (f"不可行：PPL 显著差于基线（{benefit_pct:.1f}%）"
+                f"{extra}")
+    if rul_down:
+        return f"不可行：RULER 显著差于基线（{ruler_benefit_pp:+.2f} pp）"
+    if ppl_up or rul_up:
+        if cost_pct > 50:
+            return f"需审视：显著但增幅 {cost_pct:.0f}%"
+        if ppl_up and cost_pct > 5 * max(benefit_pct, 0.5):
+            return (f"收益-增幅比不利：PPL 收益 {benefit_pct:.1f}% vs "
+                    f"增幅 {cost_pct:.0f}%")
+        if rul_up and cost_pct > RULER_COST_RATIO * max(ruler_benefit_pp,
+                                                        RULER_RATIO_FLOOR_PP):
+            return (f"收益-增幅比不利：RULER 收益 +{ruler_benefit_pp:.2f} pp vs "
+                    f"增幅 {cost_pct:.0f}%")
+        basis = "PPL" if ppl_up else "RULER"
+        if ppl_up and rul_up:
+            basis = "PPL+RULER"
+        return "可接受" if basis == "PPL" else f"可接受（依据 {basis} 显著涨点）"
+    any_pos = ((benefit_pct is not None and benefit_pct > 0)
+               or (ruler_benefit_pp is not None and ruler_benefit_pp > 0))
+    if any_pos:
         if cost_pct > 10:
             return f"不可行：涨点不显著且增幅 {cost_pct:.0f}%"
         return "说服力有限：涨点未通过显著性检验"
-    if cost_pct > 50:
-        return f"需审视：显著但增幅 {cost_pct:.0f}%"
-    if cost_pct > 5 * max(benefit_pct, 0.5):
-        return f"收益-增幅比不利：收益 {benefit_pct:.1f}% vs 增幅 {cost_pct:.0f}%"
-    return "可接受"
+    if cost_pct > 10:
+        return f"不可行：无涨点且增幅 {cost_pct:.0f}%"
+    return "说服力有限：无涨点且差异不显著"
 
 
 def build_summary(results_dir: str, audit: dict = None,
@@ -2233,8 +2284,10 @@ def build_summary(results_dir: str, audit: dict = None,
         if any_nan:
             md.append("⚠ 存在出现非有限损失的 run：训练已失效，"
                       "对应 run 目录的 `nan_report.json` 给出了"
-                      "数据→代码→混合精度→梯度/学习率的系统排查路径，"
-                      "处理前该变体的一切指标都不可信。")
+                      "数据→代码→混合精度→梯度/学习率的系统排查路径"
+                      "（含检测点前的整个 log 区间候选批次与区间内首个非有限"
+                      "损失步 `first_bad_step`，排查的是失败现场而非最后一步"
+                      "批次），处理前该变体的一切指标都不可信。")
         else:
             md.append("注：全部 run 无 NaN/Inf；有异常状态的变体请按建议处理"
                       "（过拟合/过拟合趋势→正则化/增数据/早停，欠拟合→查学习率"
@@ -2664,11 +2717,18 @@ def build_summary(results_dir: str, audit: dict = None,
                   "Prefill ms/Decode ms(tok)/训练 ms(step)/训练进程峰值/参数量/"
                   "FLOPs(token)/实测分配量 相对基线增幅的最大值（Prefill/Decode "
                   "的差异若不超过两端重复测量的噪声散布则按不可区分处理，标 † "
-                  "且不计入增幅）；收益=PPL 相对改善。判定规则：种子不足（n<3）"
-                  "或数据缺失→无法判定；PPL 显著差于基线→不可行；涨点不显著"
-                  "（Holm 校正后 p≥α）→说服力有限（增幅>10% 判不可行）；显著"
-                  "但增幅>50% 或 >5×收益 →收益-增幅比不利。微小改善伴随巨大"
-                  "增幅的方案会被明确拒绝。")
+                  "且不计入增幅）。收益覆盖两个主指标：PPL 相对改善（%）与 "
+                  "RULER 平均 EM 改善（绝对百分点 pp）——预注册主张横跨两者"
+                  "（H1 PPL、H4 长上下文检索），只看 PPL 会误判长上下文涨点，"
+                  "也会漏掉 RULER 显著退步。判定规则：两个主指标都无数据或"
+                  "增幅缺失→无法判定；任一参与判定的指标种子不足（n<3）→无法"
+                  "判定；某一主指标显著差于基线（Holm 校正后 p<α）→不可行，"
+                  "但另一主指标同时显著改善时判“权衡”并显式说明取舍；任一主"
+                  "指标显著改善即有涨点（按显著者中最不利的收益套用收支比："
+                  "PPL >5×收益、RULER 单独 >10×收益且下限 0.5 pp，单位不同不"
+                  "混算），涨点不显著→说服力有限（增幅>10% 判不可行）；显著但"
+                  "增幅>50% 或超过上述收支比 →收益-增幅比不利/需审视。微小改善"
+                  "伴随巨大增幅的方案会被明确拒绝。")
 
         def _train_step_ms(v):
             """该变体各种子训练步时的中位数（毫秒/步；旧 eval.json 无此字段→None）。
@@ -2714,12 +2774,17 @@ def build_summary(results_dir: str, audit: dict = None,
             return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
 
         md.append("")
-        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | Prefill ms | Decode ms/tok "
+        md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | RULER Δ(pp) | p_adj(RULER) "
+                  "| Prefill ms | Decode ms/tok "
                   "| 训练 ms/step | 训练峰值 | 参数量 | FLOPs/token | 实测分配 | 判定 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
                     and t.get("mean_diff") is not None}
+        ruler_test = {t["candidate"]: t for t in tests
+                      if t.get("reference") == "standard"
+                      and t.get("metric") == "RULER平均"
+                      and t.get("mean_diff") is not None}
         base_train_ms = _train_step_ms("standard")
         base_train_mem = _train_peak_mem_mb("standard")
         n_metric_within_noise = 0
@@ -2735,6 +2800,14 @@ def build_summary(results_dir: str, audit: dict = None,
             t = ppl_test.get(v)
             p_adj = t.get("p_adj") if t else None
             n_ppl = t.get("n") if t else None
+            # RULER 平均 EM 的配对差是比例（0~1），换算为绝对百分点后进入
+            # 权衡判定：与 PPL 的相对百分比单位不同，绝不混算收益比。
+            rt = ruler_test.get(v)
+            ruler_benefit_pp = (rt["mean_diff"] * 100.0
+                                if rt and rt.get("mean_diff") is not None
+                                else None)
+            ruler_p_adj = rt.get("p_adj") if rt else None
+            n_ruler = rt.get("n") if rt else None
             pre_delta = _rel_pct(base_prefill,
                                  (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1"))
             dec_v = (e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
@@ -2767,7 +2840,10 @@ def build_summary(results_dir: str, audit: dict = None,
                                   mem_delta)
                       if d is not None]
             cost = max(deltas) if deltas else None
-            verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl)
+            verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl,
+                                       ruler_benefit_pp=ruler_benefit_pp,
+                                       ruler_p_adj=ruler_p_adj,
+                                       ruler_n_seeds=n_ruler)
             r["eff_cost_max_pct"] = round(cost, 2) if cost is not None else None
             r["eff_flops_per_tok"] = _eff_cell(e, "flops", common_ctx)
             r["eff_prefill_delta_pct"] = (round(pre_delta, 2)
@@ -2790,6 +2866,9 @@ def build_summary(results_dir: str, audit: dict = None,
             r["eff_peak_mem_mb"] = mem_v
             r["eff_benefit_ppl_pct"] = (round(benefit, 2)
                                         if benefit is not None else None)
+            r["eff_ruler_p_adj"] = ruler_p_adj
+            r["eff_benefit_ruler_pp"] = (round(ruler_benefit_pp, 3)
+                                         if ruler_benefit_pp is not None else None)
             r["eff_verdict"] = verdict
 
             def _d(x, plus=True, within=False):
@@ -2798,8 +2877,13 @@ def build_summary(results_dir: str, audit: dict = None,
                 s = f"{x:+.1f}%" if plus else f"{x:.1f}%"
                 return s + "†" if within else s
 
+            def _dpp(x):
+                return "-" if x is None else f"{x:+.2f} pp"
+
             md.append(f"| {VARIANT_CN.get(v, v)} | {_d(benefit)} "
                       f"| {'-' if p_adj is None else f'{p_adj:.4f}'} "
+                      f"| {_dpp(ruler_benefit_pp)} "
+                      f"| {'-' if ruler_p_adj is None else f'{ruler_p_adj:.4f}'} "
                       f"| {_d(pre_delta, within=pre_within)} "
                       f"| {_d(dec_delta, within=dec_within)} | {_d(tr_delta)} "
                       f"| {_d(memtr_delta)} "
@@ -2812,7 +2896,13 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(f"† {n_metric_within_noise} 个运行时涨幅落在重复测量的"
                       "噪声区间内（[p10,p90] 相对散布的方和根），按不可区分"
                       "处理、不计入增幅；原始差值仍在 summary.json 中。")
-        md.append("注：FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
+        md.append("注：RULER Δ(pp) 为候选相对 standard 的平均 EM 配对差"
+                  "（绝对百分点，越大越好；样本集跨种子相同、同种子配对），"
+                  "p_adj(RULER) 取自 RULER 指标家族的 Holm 校正配对检验；"
+                  "判定在 PPL 与 RULER 任一显著涨点成立时注明依据"
+                  "（可接受（依据 …）），显著退步会单独给出权衡/不可行结论，"
+                  "不会因另一个指标涨而被静默忽略。"
+                  "FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
                   "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
                   "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
                   "Decode ms/tok 为带 KV 缓存的逐 token 解码时序，"
@@ -3164,7 +3254,9 @@ def main():
                 f"run 链失败（变体 {v0}，退出码 {e.returncode}）：训练/评测/"
                 "机制分析任一阶段失败即中止；若为训练 NaN 中止，对应 run 目录"
                 "下已生成 nan_report.json（数据→代码→混合精度→梯度/学习率的"
-                f"系统排查路径），排查后重跑；命令: {' '.join(e.cmd)}")
+                "系统排查路径；报告含检测点前的整个 log 区间候选批次与区间内"
+                "首个非有限损失步 first_bad_step，数据/激活排查针对失败现场而"
+                f"非最后一步批次），排查后重跑；命令: {' '.join(e.cmd)}")
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
     # 错误样本是改进思路的最重要来源，不能只留聚合分数。

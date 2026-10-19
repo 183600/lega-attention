@@ -2,10 +2,12 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 
 import torch
 
+from lega.data import prepare_bins
 from lega.model import GPT
 from lega.train import _abort_on_nan, audit_activations, run_nan_checklist
 
@@ -50,6 +52,54 @@ def test_checklist_prefers_consumed_failing_batch():
     assert any("越界" in f for f in findings), "只查待训练批次会漏掉失败步的越界 id"
     assert rep["checklist_data"]["n_consumed_batches"] == 1
     print("  [ok] 排查步骤 1（数据）：失败步批次优先检查并定位越界 id")
+
+
+def test_checklist_labels_interval_candidates_and_first_bad_step():
+    """检测点在 log 边界、失败步可能在区间中段：报告必须给出首个失败步，
+    并把每条数据检查定位到具体步（而不是笼统的“失败步批”）。"""
+    m = _model()
+    rep = run_nan_checklist(m, _batches(), "cpu", 40, "train_loss", float("nan"),
+                            lr=1e-3, grad_norm_history=[], amp_dtype=None,
+                            vocab_size=64,
+                            consumed_batches=_batches(bad_ids=True) * 2,
+                            consumed_step_labels=[36, 40],
+                            first_bad_step=36, interval=(36, 40))
+    findings = rep["checklist_data"]["findings"]
+    assert findings[0].startswith("失败区间批0@step36"), findings
+    assert findings[2].startswith("失败区间批1@step40"), findings
+    assert rep["first_bad_step"] == 36
+    assert rep["interval"] == [36, 40]
+    assert rep["checklist_data"]["first_bad_step"] == 36
+    assert "首个非有限损失步=36" in rep["checklist_data"]["note"]
+    # 旧调用（无标签）保持“失败步批”前缀，避免破坏既有报告口径
+    rep2 = run_nan_checklist(m, _batches(), "cpu", 40, "train_loss",
+                             float("nan"), lr=1e-3, grad_norm_history=[],
+                             amp_dtype=None, vocab_size=64,
+                             consumed_batches=_batches())
+    assert rep2["checklist_data"]["findings"][0].startswith("失败步批0")
+    assert rep2["first_bad_step"] is None and rep2["interval"] is None
+    print("  [ok] 排查步骤 1（数据）：区间候选批次带步标签 + 首个失败步")
+
+
+def test_activation_audit_iterates_interval_candidates():
+    """激活定位必须逐批检查区间候选：NaN 出现在后一批时不能只审计第一批。"""
+    m = _model()
+    # 只让较长序列（第二批）在 blocks.1.ln1 产生 NaN：首批必须有限
+    m.blocks[1].ln1.forward = lambda x: x * (
+        float("nan") if x.shape[1] > 16 else 1.0)
+    b1 = (torch.randint(0, 64, (2, 16)), torch.randint(0, 64, (2, 16)))
+    b2 = (torch.randint(0, 64, (2, 32)), torch.randint(0, 64, (2, 32)))
+    rep = audit_activations(m, [b1, b2], "cpu")
+    assert rep["n_batches_checked"] == 2, rep
+    assert rep["checked_batch_index"] == 1, rep
+    assert rep["origin"]["module"] == "blocks.1.ln1", rep["origin"]
+    assert any("逐批检查了 2 个候选批次" in f for f in rep["findings"])
+    # 全部有限时也要遍历所有候选，并据全部候选下“损失环节”结论
+    m2 = _model()
+    rep2 = audit_activations(m2, [b1, b2], "cpu")
+    assert rep2["n_batches_checked"] == 2 and rep2["origin"] is None
+    assert any("已检查 2 批" in f for f in rep2["findings"])
+    print("  [ok] 激活审计：逐批检查区间候选并命中失败批次")
 
 
 def test_checklist_activation_audit_gets_consumed_batches_first():
@@ -293,3 +343,81 @@ def test_abort_writes_report_and_exits():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] NaN 中止：先落盘报告再 SystemExit")
+
+
+def test_train_nan_report_uses_first_bad_step_and_interval_candidates():
+    """端到端：第 3 个训练步注入 NaN 损失，log 点在第 4 步才检测到。
+
+    报告必须指出 first_bad_step=3，并检查区间 [3,4] 的候选批次，而不是
+    只检查检测点时的“最后一步”批次（那会漏掉真正的罪魁数据）。
+    """
+    import lega.model as model_mod
+    import lega.train as train_mod
+
+    cfg = {
+        "d_model": 32, "n_layers": 2, "n_heads": 2, "ffn_mult": 4,
+        "block_size": 32, "dropout": 0.0, "attn_dropout": 0.0,
+        "gate_bias_init": 2.0, "use_sdpa_standard": True,
+        "batch_size": 2, "grad_accum": 1, "steps": 8, "lr": 1e-3,
+        "warmup": 1, "weight_decay": 0.0, "grad_clip": 1.0,
+        "train_ctx": 32, "amp": False, "seed": 1,
+        "log_every": 2, "eval_every": 4, "eval_iters": 2,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        base = "the quick brown fox jumps over the lazy dog. "
+        with open(os.path.join(data_dir, "train.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(base * 60)
+        with open(os.path.join(data_dir, "val.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(base * 20)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg_path = os.path.join(tmp, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        out_dir = os.path.join(tmp, "run")
+
+        orig_forward = model_mod.GPT.forward
+        calls = {"n": 0}
+
+        def poisoned_forward(self, idx, targets=None, *a, **kw):
+            out = orig_forward(self, idx, targets=targets, *a, **kw)
+            # 只污染训练前向（evaluate_val 会切 eval()），第 3 步起 loss=NaN
+            if self.training and targets is not None \
+                    and out.get("loss") is not None:
+                calls["n"] += 1
+                if calls["n"] >= 3:
+                    out["loss"] = out["loss"] * float("nan")
+            return out
+
+        model_mod.GPT.forward = poisoned_forward
+        old_argv = sys.argv
+        sys.argv = ["lega.train", "--config", cfg_path,
+                    "--variant", "standard", "--data_dir", data_dir,
+                    "--out_dir", out_dir, "--device", "cpu", "--seed", "1"]
+        try:
+            try:
+                train_mod.main()
+                raise AssertionError("NaN 必须中止训练")
+            except SystemExit as e:
+                assert "nan_report.json" in str(e)
+        finally:
+            sys.argv = old_argv
+            model_mod.GPT.forward = orig_forward
+
+        rep = json.load(open(os.path.join(out_dir, "nan_report.json"),
+                             encoding="utf-8"))
+        assert rep["where"] == "train_loss", rep
+        assert rep["step"] == 4, rep
+        assert rep["first_bad_step"] == 3, rep
+        assert rep["interval"] == [3, 4], rep
+        data = rep["checklist_data"]
+        assert data["n_consumed_batches"] == 2, data
+        labels = [f for f in data["findings"] if f.startswith("失败区间批")]
+        assert any("@step3 " in f for f in labels), labels
+        assert any("@step4 " in f for f in labels), labels
+        act = rep["checklist_activations"]
+        assert act["n_batches_checked"] >= 1, act
+    print("  [ok] train 端到端：NaN 报告定位首个失败步并检查区间候选批次")

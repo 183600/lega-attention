@@ -137,23 +137,54 @@ def audit_activations(model, pending_batches, device: str,
 
     前向只消费 x 不消费 y（标签越界不会妨碍激活审计），异常被捕获并写入
     forward_error 而不是让排查本身崩溃。
+
+    候选批次（NaN 所在 log 区间内每一步消费的批次）会逐批检查：NaN 现场
+    可能落在区间中的任意一步，只看第一批会漏掉真正的诱发批次。找到首个
+    出现非有限激活的批次即停止；所有候选都有限时才用首批结果下
+    "损失/聚合环节"的结论。
     """
-    batch = next((b for b in (pending_batches or []) if b is not None), None)
-    if batch is None:
+    candidates = [b for b in (pending_batches or []) if b is not None]
+    if not candidates:
         return {"checked": False, "n_modules_checked": 0, "records": [],
                 "origin": None, "first_nonfinite": None, "forward_error": None,
-                "precision_recheck": None,
+                "precision_recheck": None, "n_batches_checked": 0,
+                "checked_batch_index": None,
                 "findings": ["无可用批次（NaN 出现在记录成功批次之前），跳过激活定位"]}
-    x = batch[0]
     cap = 60
-    records, forward_error = _hooked_forward(model, x, device, amp_dtype,
-                                             cap=cap)
+    records, forward_error = [], None
+    x = candidates[0][0]
+    n_batches_checked = 0
+    checked_index = 0
+    fallback = None   # 首个"无非有限记录"的结果（优先无前向错误者）
+    first_error = None
+    for i, batch in enumerate(candidates):
+        recs, err = _hooked_forward(model, batch[0], device, amp_dtype,
+                                    cap=cap)
+        n_batches_checked += 1
+        if err is not None and first_error is None:
+            first_error = err
+        if recs:
+            records, forward_error = recs, err
+            x, checked_index = batch[0], i
+            break
+        if fallback is None or (fallback[1] is not None and err is None):
+            fallback = (recs, err, batch[0], i)
+    else:
+        records, forward_error, x, checked_index = fallback
+    if forward_error is None and first_error is not None:
+        # 任一候选前向失败都意味着审计未完整覆盖：不能据此断言“全部有限”
+        forward_error = first_error
 
     origin = next((r for r in records if r["input_nonfinite"] == 0), None)
     if origin is not None:
         origin = dict(origin, hint=_numerical_hint(origin["module"]))
     first = records[0] if records else None
     findings = []
+    if n_batches_checked > 1:
+        findings.append(
+            f"激活定位逐批检查了 {n_batches_checked} 个候选批次"
+            f"（命中第 {checked_index + 1} 个）：NaN 现场在区间中段时"
+            "只用单批会检查错误的输入")
     if forward_error:
         findings.append(f"激活审计前向失败（{forward_error}），改用参数/数据检查定位")
     if origin is not None:
@@ -167,8 +198,9 @@ def audit_activations(model, pending_batches, device: str,
             "输入数据，按模块名检查该模块内部的 log/除零/softmax 路径")
     elif not forward_error:
         findings.append(
-            "所有模块输出均有限——NaN 产生在损失计算/评测聚合环节"
-            "（如分块交叉熵的目标越界），不是前向算子溢出")
+            f"所有候选批次的模块输出均有限（已检查 {n_batches_checked} 批）——"
+            "NaN 产生在损失计算/评测聚合环节（如分块交叉熵的目标越界），"
+            "不是前向算子溢出")
 
     # 混合精度隔离复测：amp 路径出现非有限时，用同一批次在 fp32 下重跑。
     # 这是"先查数据/代码、再查混合精度"顺序里的主动证据，而不是只报 dtype。
@@ -203,6 +235,8 @@ def audit_activations(model, pending_batches, device: str,
         # checked = 审计前向成功执行；records/origin 为空表示前向算子全部有限
         "checked": forward_error is None,
         "n_modules_checked": len(list(model.named_modules())) - 1,
+        "n_batches_checked": n_batches_checked,
+        "checked_batch_index": checked_index,
         "records": records[:cap],
         "truncated": len(records) >= cap,
         "origin": origin,
@@ -216,28 +250,44 @@ def audit_activations(model, pending_batches, device: str,
 def run_nan_checklist(model, pending_batches, device: str, step: int, where: str,
                       loss_value, lr: float, grad_norm_history, amp_dtype,
                       vocab_size: int, consumed_batches=None,
-                      peak_lr=None) -> dict:
+                      consumed_step_labels=None, peak_lr=None,
+                      first_bad_step=None, interval=None) -> dict:
     """训练出现非有限值时的系统化排查：数据 → 代码 → 混合精度 → 梯度/学习率。
 
     排查顺序固定（先便宜后昂贵、先外部后内部），每步产出可核对的证据，
     避免"看到 NaN 就乱调参"。返回可直接写盘的报告 dict。
 
-    consumed_batches：产出该损失的**失败步批次**（训练循环已预取并覆盖了
-    它们，调用方必须显式传入）。数据检查与激活定位都优先检查这些批次——
-    只看待训练批次会把"罪魁数据"漏掉。
+    consumed_batches：失败所在 log 区间内每一步消费的候选批次（训练循环已
+    预取并覆盖了 batches，调用方必须显式传入；顺序=区间内步序）。数据检查
+    与激活定位都遍历这些批次——NaN 可能在区间中段首次出现，只用"最后一步
+    批次"会把"罪魁数据"漏掉。consumed_step_labels 为与之一一对应的日志步号
+    （1-based），用于把每条数据检查定位到具体步；缺省时保留旧标签。
+    first_bad_step / interval：设备端标记的区间内首个非有限损失步与区间范围；
+    检测点（step）可能晚于首个失败步，报告必须同时给出两者。
     """
     report = {
         "time": now_str(), "step": int(step), "where": str(where),
         "loss_value": (None if loss_value is None else float(loss_value)),
         "device": str(device), "lr_at_failure": float(lr),
         "amp_dtype": (str(amp_dtype) if amp_dtype else None),
+        # NaN 在 log 点才被检测到：step 是检测点，first_bad_step 才是区间内
+        # 首个出现非有限损失的步（两者可能相差最多 log_every-1 步）。
+        "first_bad_step": (int(first_bad_step) if first_bad_step is not None
+                           else None),
+        "interval": ([int(interval[0]), int(interval[1])] if interval else None),
     }
 
-    # ---- 1. 数据：输入流是否含非法值（NaN/Inf/越界 id）；先查失败步批次
-    labeled = [(f"失败步批{i}", b) for i, b in enumerate(consumed_batches or [])
-               if b is not None] \
-        + [(f"待训练批{i}", b) for i, b in enumerate(pending_batches or [])
-           if b is not None]
+    # ---- 1. 数据：输入流是否含非法值（NaN/Inf/越界 id）；先查失败区间候选批
+    labels = list(consumed_step_labels or [])
+    labeled = []
+    for i, b in enumerate(consumed_batches or []):
+        if b is None:
+            continue
+        lab = labels[i] if i < len(labels) else None
+        labeled.append((f"失败区间批{i}@step{lab}" if lab is not None
+                        else f"失败步批{i}", b))
+    labeled += [(f"待训练批{i}", b) for i, b in enumerate(pending_batches or [])
+                if b is not None]
     data_findings = []
     n_checked = 0
     for label, batch in labeled:
@@ -261,9 +311,15 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         "n_tensors_checked": n_checked,
         "n_consumed_batches": sum(1 for b in (consumed_batches or [])
                                   if b is not None),
-        "note": ("失败步批=产出该损失的批次（优先检查）；token 流为 uint16 整数且 "
-                 "prepare_bins 入库时已拒绝 NaN/Inf/越界 id（见 data_report.json "
-                 "的 token 流硬校验）；浮点输入出现 NaN/Inf 才是数据侧问题"),
+        "first_bad_step": report["first_bad_step"],
+        "note": ("失败区间批=检测点所在 log 区间内每一步消费的候选批次"
+                 "（优先检查；NaN 可能早在区间中段出现，预取已覆盖 batches）；"
+                 + (f"本区间首个非有限损失步={int(first_bad_step)}，"
+                    "检测点 step 不等于首个失败步；"
+                    if first_bad_step is not None else "")
+                 + "token 流为 uint16 整数且 prepare_bins 入库时已拒绝 "
+                   "NaN/Inf/越界 id（见 data_report.json 的 token 流硬校验）；"
+                   "浮点输入出现 NaN/Inf 才是数据侧问题"),
     }
 
     # ---- 2. 代码：定位已含 NaN/Inf 的参数张量（把锅从"玄学"收敛到具体层），
@@ -364,8 +420,15 @@ def _abort_on_nan(report: dict, out_dir: str) -> None:
     """落盘 NaN 排查报告并中止训练：NaN 之后的步数只会污染曲线。"""
     path = os.path.join(out_dir, "nan_report.json")
     save_json(report, path)
-    print(f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}），"
-          f"排查报告 -> {path}")
+    where_bad = ""
+    if report.get("first_bad_step") is not None:
+        where_bad = f"，本区间首个非有限损失步 {report['first_bad_step']}"
+        if report.get("interval"):
+            where_bad += (f"（区间 {report['interval'][0]}~"
+                          f"{report['interval'][1]}；检测点晚于失败步，排查输入"
+                          "已覆盖整个区间）")
+    print(f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}"
+          f"{where_bad}），排查报告 -> {path}")
     for key, title in (("checklist_data", "数据"), ("checklist_params", "参数定位"),
                        ("checklist_activations", "激活定位"),
                        ("checklist_precision", "精度"), ("checklist_optimization", "梯度/学习率")):
@@ -684,9 +747,14 @@ def main():
     # 历史尾部供 NaN 排查判断"梯度爆炸 vs 学习率过大"
     gn_dev_recent = []
     gn_hist = []
-    # 最近一步实际消费的 micro-batch：预取会覆盖 batches，NaN 排查若只看待训练
-    # 批次会漏掉"罪魁数据"，这里保留引用供 _nan_guard 优先检查
-    last_batches = []
+    # NaN 现场按 log 区间保留：NaN 在 log 点才被检测到（区间累计损失），真正
+    # 诱发的批次可能在本区间任意一步，而预取早已把 batches 覆盖成后续数据。
+    # interval_batches 保存每一步消费的 micro-batch 引用（≤ log_every 步，
+    # log 点清空）；interval_first_bad_dev 在设备端标记区间内首个非有限损失步
+    # （0-based，-1=无；不每步同步），_nan_guard 触发时把整个区间的候选批次
+    # （带步标签）交给排查，而不是用"最后一步批次"冒充失败步批。
+    interval_batches = []   # [(0-based step, [consumed micro-batch, ...])]
+    interval_first_bad_dev = torch.full((), -1.0, device=device)
     # 步时计时：按 log 区间累计墙钟并扣除评测时间（.item() 已同步设备，
     # 区间边界无需额外 synchronize）。pending_eval_s 供 do_eval 累加。
     step_times_ms: list = []
@@ -694,21 +762,38 @@ def main():
     interval_steps = 0
     pending_eval_s = 0.0
 
-    def _nan_guard(where: str, value, step: int, make_consumed=None):
+    def _interval_candidates():
+        """本 log 区间内每一步消费的训练批次及对应日志步号（1-based）。"""
+        consumed, labels = [], []
+        for s0, bs in interval_batches:
+            for b in bs:
+                consumed.append(b)
+                labels.append(s0 + 1)
+        return consumed, labels
+
+    def _nan_guard(where: str, value, step: int, make_consumed=None,
+                   first_bad_step=None, interval=None):
         """log/eval 点检查损失与梯度范数的有限性，异常即触发系统排查。
 
         make_consumed：按需构造"失败输入批次"的函数（val_loss 时应给出真实
-        验证窗口）；缺省回退到最近一步消费的训练批次。
+        验证窗口）；缺省用本 log 区间内全部候选训练批次（含失败步）。
+        first_bad_step/interval：设备端标记的首个非有限损失步与区间范围，
+        让报告能区分"检测点"与"失败点"。
         """
         if value is not None and not math.isfinite(float(value)):
-            consumed = (make_consumed() if make_consumed is not None
-                        else last_batches)
+            labels = None
+            if make_consumed is not None:
+                consumed = [b for b in make_consumed() if b is not None]
+            else:
+                consumed, labels = _interval_candidates()
             report = run_nan_checklist(
                 model, batches, device, step, where, value,
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
                 grad_norm_history=gn_hist, amp_dtype=(torch.bfloat16 if use_amp else None),
                 vocab_size=int(meta["vocab_size"]),
-                consumed_batches=consumed, peak_lr=base_lrs[0])
+                consumed_batches=consumed, consumed_step_labels=labels,
+                peak_lr=base_lrs[0], first_bad_step=first_bad_step,
+                interval=interval)
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):
@@ -719,10 +804,11 @@ def main():
         pending_eval_s += time.perf_counter() - t_eval
         last_eval_step, last_eval_metrics = step, metrics
         vl = metrics["val_loss"]
-        # val 损失非有限时用真实验证窗口做数据/激活排查（训练批次只是回退）
+        # val 损失非有限时用真实验证窗口做数据/激活排查（本区间训练批次只是回退）
         _nan_guard("val_loss", vl, step,
                    make_consumed=lambda: val_audit_batch(
-                       val, train_ctx, eval_iters, device, fallback=last_batches))
+                       val, train_ctx, eval_iters, device,
+                       fallback=_interval_candidates()[0]))
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
         prev_best = best_val
@@ -764,8 +850,9 @@ def main():
         for g, base in zip(opt.param_groups, base_lrs):
             g["lr"] = base * lr_f
 
-        # 在设备上累积 loss；快照本步将消费的批次（下一步预取会覆盖 batches）
-        last_batches = [b for b in batches if b is not None]
+        # 在设备上累积 loss；按 log 区间快照本步将消费的批次（下一步预取会
+        # 覆盖 batches，快照保留引用供 NaN 排查定位"哪一步的数据出问题"）
+        interval_batches.append((step, [b for b in batches if b is not None]))
         loss_acc_dev.zero_()
         for mi in range(grad_accum):
             x, y = batches[mi]
@@ -781,6 +868,14 @@ def main():
                 out = model(x, targets=y)
                 # grad_accum==1（默认配置）时除法结果就是 loss 本身
                 loss = out["loss"] if grad_accum == 1 else out["loss"] / grad_accum
+            # 设备端标记区间内首个非有限损失步（0-based）：只做极小元素级
+            # 运算，不在热路径插入 .item()/同步；log 点统一读取。
+            step_dev = torch.as_tensor(float(step), device=device)
+            bad_now = (~torch.isfinite(out["loss"].detach())).to(torch.float32)
+            bad_mark = torch.where(bad_now > 0, step_dev,
+                                   interval_first_bad_dev)
+            interval_first_bad_dev = torch.where(
+                interval_first_bad_dev < 0, bad_mark, interval_first_bad_dev)
             loss.backward()
             loss_acc_dev.add_(out["loss"].detach(), alpha=1.0 / grad_accum)
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
@@ -796,6 +891,12 @@ def main():
 
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())
+            # 设备端标记的区间内首个非有限损失步（0-based）→ 1-based 日志步
+            first_bad_local = int(interval_first_bad_dev.item())
+            first_bad_step = (first_bad_local + 1 if first_bad_local >= 0
+                              else None)
+            interval = ((interval_batches[0][0] + 1, step + 1)
+                        if interval_batches else None)
             gn_last = float(gn_dev_recent[-1].item()) if gn_dev_recent else None
             # .item() 已同步本区间全部前向/反向/优化器内核，
             # 此处墙钟差为区间步时（扣除评测）
@@ -812,8 +913,14 @@ def main():
                 gn_hist.append(gn_last)
                 if len(gn_hist) > 200:
                     gn_hist.pop(0)
-            _nan_guard("train_loss", loss_acc, step + 1)
-            _nan_guard("grad_norm", gn_last, step + 1)
+            _nan_guard("train_loss", loss_acc, step + 1,
+                       first_bad_step=first_bad_step, interval=interval)
+            _nan_guard("grad_norm", gn_last, step + 1,
+                       first_bad_step=first_bad_step, interval=interval)
+            # 本区间现场已检查完毕（异常路径已在中止前写出报告）：清空，
+            # 避免跨区间串批、控制引用数量 ≤ log_every 步
+            interval_batches.clear()
+            interval_first_bad_dev = torch.full_like(interval_first_bad_dev, -1.0)
             rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
                    "lr": base_lrs[0] * lr_f, "time": now_str()}
             if gn_last is not None:
@@ -846,7 +953,8 @@ def main():
         final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
         _nan_guard("val_loss(final)", final_metrics["val_loss"], steps,
                    make_consumed=lambda: val_audit_batch(
-                       val, train_ctx, eval_iters, device, fallback=last_batches))
+                       val, train_ctx, eval_iters, device,
+                       fallback=_interval_candidates()[0]))
         # 最终步评测必须同样参与 best-checkpoint 选择，与训练循环内口径一致：
         # 否则 steps 非 eval_every 整数倍（或 steps < eval_every）时，更优的最终
         # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按
