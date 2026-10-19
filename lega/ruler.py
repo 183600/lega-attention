@@ -560,19 +560,37 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     return results
 
 
-def load_corpus_sents(data_dir: str, max_chars: int = 300000) -> List[str]:
-    """从 train.txt 抽自然句，作为 niah_corpus 的干扰语料。
-    （缺失时回退 val.txt 以兼容旧数据目录。）"""
+def load_corpus_sents_with_source(data_dir: str, max_chars: int = 300000,
+                                  splits=("val", "test", "train")):
+    """抽取 niah_corpus 的干扰语句，返回 (sents, 实际使用的 split)。
+
+    评测上下文绝不能来自训练语料：若干扰句取自 train.txt，模型在“自然文本
+    干扰”任务上评的是见过的文本，长上下文检索会被系统性高估，机制分析
+    （misleading_rate 等）也建立在记忆而非泛化上。因此按 held-out 优先级
+    选择：val → test → train；仅当没有任何 held-out 文本时才回退 train
+    （调用方须显式告警，并把来源写入结果供审计）。
+    """
     import os
-    path = os.path.join(data_dir, "train.txt")
-    if not os.path.exists(path):
-        path = os.path.join(data_dir, "val.txt")
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read(max_chars)
-    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.replace("\n", " "))]
-    return [s for s in sents if 20 <= len(s) <= 200]
+    for split in splits:
+        path = os.path.join(data_dir, f"{split}.txt")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read(max_chars)
+        except OSError:
+            continue
+        sents = [s.strip() for s in
+                 re.split(r"(?<=[.!?])\s+", text.replace("\n", " "))]
+        sents = [s for s in sents if 20 <= len(s) <= 200]
+        if sents:
+            return sents, split
+    return [], None
+
+
+def load_corpus_sents(data_dir: str, max_chars: int = 300000) -> List[str]:
+    """兼容旧调用：只返回语句列表（来源见 load_corpus_sents_with_source）。"""
+    return load_corpus_sents_with_source(data_dir, max_chars=max_chars)[0]
 
 
 def main():
@@ -618,20 +636,33 @@ def main():
     # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
     amp = bool(cfg.get("amp", True)) and not args.no_amp
 
+    corpus_sents, corpus_source = load_corpus_sents_with_source(args.data_dir)
+    if corpus_source == "train":
+        print("[ruler] ⚠ niah_corpus 干扰语料回退到 train.txt（缺少 val/test 文本）："
+              "评测上下文与训练语料重叠，长上下文检索分数偏高、机制分析建立在"
+              "见过的文本上，不能与 held-out 语料的运行直接比较")
+    elif corpus_source is None:
+        print("[ruler] ⚠ 未找到可用干扰语料（val/test/train 文本均缺失）："
+              "niah_corpus 将被跳过")
+    else:
+        print(f"[ruler] niah_corpus 干扰语料来源: {corpus_source}.txt（held-out）")
     results = run_ruler(model, tok, device, ctx_lens=ctx_lens, n_samples=n_samples,
                         seed=int(rl.get("seed", 1234)),
                         max_new=int(rl.get("max_new", 12)),
                         fwe_max_new=int(rl.get("fwe_max_new", 44)),
                         vt_chains=int(rl.get("vt_chains", 4)),
                         vt_depth=int(rl.get("vt_depth", 4)),
-                        corpus_sents=load_corpus_sents(args.data_dir),
+                        corpus_sents=corpus_sents,
                         amp=amp, gen_batch=gen_batch)
     # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务
     badcases = results.pop("_badcases", [])
     payload = {"variant": ck.get("variant", model.variant), "seed": ck.get("seed"),
                "ctx_lens": ctx_lens, "n_samples": n_samples,
                "sample_seed": int(rl.get("seed", 1234)), "results": results,
-               "badcases": badcases}
+               "badcases": badcases,
+               # 干扰语料来源可审计：train 回退会让检索分数不可比
+               "corpus_source": corpus_source,
+               "corpus_held_out": corpus_source in ("val", "test")}
     payload.update(load_provenance(
         os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir))
     save_json(payload, args.out)

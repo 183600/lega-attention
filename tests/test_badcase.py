@@ -99,7 +99,16 @@ def test_case_axis_matches_synthesized_advice_axes():
                            "pred_top5": None})
     assert c["category"] == "unparsed"
     assert case_axis(c) == "评测/导出"
-    print("  [ok] 评测/导出类错误的 axis 与改进建议一致")
+    # top1 正确但低置信属校准问题：若归入"模型/方法"，会与建议里的
+    # "校准"自相矛盾；深位也不例外（排位已对，不是检索失败）
+    for deep in (0.1, 0.9):
+        w = categorize_window({"window": 2, "loss": 1.0, "gold_next": "x",
+                               "pred_top5": ["x", "y"],
+                               "gold_in_context": True, "depth": deep})
+        w["hard_sample"] = deep > 0.75   # 即使深位，排位已对 → 校准优先
+        assert w["category"] == "top1_correct"
+        assert case_axis(w) == "校准", (deep, case_axis(w))
+    print("  [ok] 评测/导出/校准类错误的 axis 与改进建议一致")
 
 
 def test_hard_sample_flag():

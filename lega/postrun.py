@@ -127,8 +127,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--suffix", default="",
                    help="多种子运行的文件名后缀（如 _seed1）")
     p.add_argument("--device", default="auto")
-    p.add_argument("--worst_n", type=int, default=3,
-                   help="evaluate 记录的最差窗口数")
+    p.add_argument("--worst_n", type=int, default=10,
+                   help="evaluate 记录的最差窗口数（坏案例模式分析需要足够样本，"
+                        "默认 10）")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--early_stop_patience", type=int, default=None)

@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from .attention import VARIANTS, VARIANT_CN
+from .curves import LIVE_WARN_EVALS, live_overfit_hint
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
 from .repro import build_run_manifest
@@ -818,9 +819,24 @@ def main():
         best_val, evals_since_improve, should_stop = early_stop_update(
             vl, best_val, evals_since_improve, early_stop_min_delta,
             early_stop_patience)
+        gap_s = None
+        if math.isfinite(prev_best) and prev_best > 0:
+            gap = (vl - prev_best) / prev_best
+            if math.isfinite(gap):
+                gap_s = gap
         rec = {"step": step, **metrics, "val_ppl": ppl,
                "val_ppl_clamped": bool(vl > 20), "time": now_str(),
-               "evals_since_best": evals_since_improve}
+               "evals_since_best": evals_since_improve,
+               # 当前 val 相对历史最优的差距：曲线诊断的原材料，训练中途
+               # 的预警也与它同口径（见 curves.live_overfit_hint）
+               "val_vs_best_rel": gap_s}
+        # 只在每个"未改善连击"的第 LIVE_WARN_EVALS 次提示一次（改善后计数
+        # 归零，下轮连击会再次提示），避免逐评测刷屏
+        hint = (live_overfit_hint(evals_since_improve, prev_best, vl,
+                                  early_stop_patience)
+                if evals_since_improve == LIVE_WARN_EVALS else None)
+        if hint:
+            rec["overfit_hint"] = hint
         if should_stop:
             rec["early_stop_trigger"] = True
         log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -841,6 +857,8 @@ def main():
                      f"best 在更早的 eval，checkpoint 用 model_best.pt]")
         print(f"[train] step {step}: val_ppl={ppl:.3f}"
               + (f" gate_mean={gmean:.3f}" if gmean is not None else "") + mark)
+        if hint:
+            print(f"[train] ⚠ {hint}")
         if wb:
             wb.log({"val_ppl": ppl, "val_loss": vl,
                     **({"gate_mean": gmean} if gmean is not None else {})},
@@ -1019,10 +1037,16 @@ def main():
                "seed": seed,
                **provenance},
               os.path.join(out_dir, "eval.json"))
+    final_gap = None
+    if (final_val_loss is not None and math.isfinite(float(final_val_loss))
+            and math.isfinite(best_val) and best_val > 0):
+        g = (float(final_val_loss) - best_val) / best_val
+        final_gap = g if math.isfinite(g) else None
     final_rec = {"step": final_step, **final_metrics,
                  "val_ppl": final_ppl,
                  "val_ppl_clamped": bool(final_val_loss > 20),
-                 "final": True, "evals_since_best": evals_since_improve}
+                 "final": True, "evals_since_best": evals_since_improve,
+                 "val_vs_best_rel": final_gap}
     if stopped_early:
         final_rec["early_stop"] = True
     log_f.write(json.dumps(final_rec, ensure_ascii=False) + "\n")

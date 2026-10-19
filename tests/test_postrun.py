@@ -95,7 +95,7 @@ def test_stage_argv_matches_cli():
     assert _eval_argv(a, ckpt) == [
         "--ckpt", ckpt, "--data_dir", "data/dummy",
         "--out", os.path.join("results/tiny_smoke", "eval_lega.json"),
-        "--worst_n", "3", "--device", "auto"]
+        "--worst_n", "10", "--device", "auto"]
     assert _ruler_argv(a, ckpt) == [
         "--ckpt", ckpt, "--data_dir", "data/dummy",
         "--out", os.path.join("results/tiny_smoke", "ruler_lega.json"),
@@ -150,7 +150,7 @@ def test_resolve_ckpt_prefers_best():
 
 def test_parser_defaults():
     a = _ns()
-    assert a.device == "auto" and a.worst_n == 3 and a.suffix == ""
+    assert a.device == "auto" and a.worst_n == 10 and a.suffix == ""
     assert not (a.smoke or a.wandb or a.skip_train or a.skip_eval
                 or a.skip_ruler or a.skip_analysis)
     assert a.ruler_ctx_lens is None and a.early_stop_patience is None

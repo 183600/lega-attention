@@ -2480,6 +2480,12 @@ def build_summary(results_dir: str, audit: dict = None,
     # 跨变体对照要求各变体使用同一批评测样本：取每个变体最小种子的错误
     # 清单（RULER 样本由配置里的评测种子构造，与训练种子无关，可逐条对齐）
     per_variant_badcases = cross_variant_badcase_map(runs, variants)
+    corpus_sources = set()
+    for v in variants:
+        for s in _variant_seed_map(runs, v).values():
+            r = s.get("ruler") or {}
+            if r.get("corpus_source"):
+                corpus_sources.add(str(r["corpus_source"]))
     for v in variants:
         m = _variant_seed_map(runs, v)
         cases = []
@@ -2494,6 +2500,17 @@ def build_summary(results_dir: str, audit: dict = None,
         cat_s = "；".join(f"{BADCASE_CN.get(k, k)}×{n}" for k, n in cats[:3])
         bad_rows.append((v, ana, cat_s))
         bad_example_pool += [(v, c) for c in ana["cases"]]
+    if corpus_sources:
+        src_s = "、".join(f"{x}.txt" for x in sorted(corpus_sources))
+        if "train" in corpus_sources:
+            md.append(f"⚠ RULER niah_corpus 干扰语料来自 **{src_s}**："
+                      "训练文本进入评测上下文会让长上下文检索偏容易，"
+                      "该任务的绝对分数与 held-out 语料运行不可比（见 ruler payload "
+                      "的 `corpus_source`）。")
+        else:
+            md.append(f"RULER niah_corpus 干扰语料来源：{src_s}（held-out，"
+                      "未使用训练文本）。")
+        md.append("")
     if bad_rows:
         md.append("错误样本不是污点而是信息：逐条区分**标注错误**（gold 不在 "
                   "prompt 中→构造错误）、**难度边界样本**（needle 极深）与"
@@ -2604,29 +2621,34 @@ def build_summary(results_dir: str, audit: dict = None,
 
     # --- 语言建模最差窗口（PPL 坏案例）：PPL 只反映平均，错误必须看得见
     md += ["", "## 语言建模最差窗口（预测错误的样本）", ""]
+    # 逐变体归因用全部种子的窗口累计（错误模式必须跨种子稳定）；跨变体
+    # 对齐仍只用最小种子的同一批窗口（样本集必须一致）。
     per_variant_windows = {}
+    per_variant_windows_first = {}
+    window_seed_counts = {}
     for v in variants:
         m = _variant_seed_map(runs, v)
-        # 取第一个真正转储了最差窗口的种子：最小种子的评测可能没开
-        # --worst_n，若只看它会把其他种子的窗口一并静默丢弃。
-        ev0, wins = {}, []
+        all_keyed, first_keyed = [], None
         for s in _sorted_seeds(m):
             cand = m[s].get("eval") or {}
-            cand_wins = cand.get("worst_windows") or []
-            if cand_wins:
-                ev0, wins = cand, cand_wins
-                break
-        if not wins:
-            continue
-        # 评测窗口集合由 (val 长度, ctx, eval_iters) 决定，与训练种子无关：
-        # 给每个窗口写入稳定 key，供跨变体对齐
-        keyed = []
-        for w in wins:
-            w = dict(w)
-            w.setdefault("split", ev0.get("split"))
-            w["sample_id"] = f"lm:{w.get('split') or '?'}#w{w.get('window')}"
-            keyed.append(w)
-        per_variant_windows[v] = keyed
+            wins = cand.get("worst_windows") or []
+            if not wins:
+                continue
+            # 评测窗口集合由 (val/test 长度, ctx, eval_iters) 决定，与训练
+            # 种子无关：给每个窗口写入稳定 key，供跨变体对齐。
+            keyed = []
+            for w in wins:
+                w = dict(w)
+                w.setdefault("split", cand.get("split"))
+                w["sample_id"] = f"lm:{w.get('split') or '?'}#w{w.get('window')}"
+                keyed.append(w)
+            all_keyed.extend(keyed)
+            window_seed_counts[v] = window_seed_counts.get(v, 0) + 1
+            if first_keyed is None:
+                first_keyed = keyed
+        if all_keyed:
+            per_variant_windows[v] = all_keyed
+            per_variant_windows_first[v] = first_keyed
     win_cross = None
     if per_variant_windows:
         md.append("PPL 是所有窗口的平均，看不出「模型究竟错了哪句」。下表按窗口"
@@ -2635,6 +2657,12 @@ def build_summary(results_dir: str, audit: dict = None,
                   "复读吸引子=低置信下首选续写退化为抄上下文已有串；低置信="
                   "模型在多个候选间平均（样本本身多解/噪声，或训练不足）。"
                   "逐案例详情见 `worstcases_*.md`。")
+        n_win_seeds = max(window_seed_counts.values()) if window_seed_counts else 0
+        if n_win_seeds > 1:
+            md.append("")
+            md.append(f"注：下表按最多 {n_win_seeds} 个种子累计最差窗口——同一窗口"
+                      "在 k 个种子中都差就计 k 次，用于判断错误模式是否跨种子"
+                      "稳定；跨变体对照仍取各变体最小种子的同一批窗口。")
         md += ["", "| 变体 | 最差窗口数 | 主要归因 | 平均 top-1 概率 "
                    "| gold 在上下文中 | gold 进 top-5 | 平均 loss |",
                "|---|---|---|---|---|---|---|"]
@@ -2671,8 +2699,8 @@ def build_summary(results_dir: str, audit: dict = None,
                    f"  - 上下文尾部：…{tail}",
                    f"  - 模型 top-1：`{c.get('top1')}`{p1_s}；真实续写："
                    f"`{c.get('gold_next')}`（{tag}）"]
-        if len(per_variant_windows) >= 2:
-            win_cross = cross_variant_analysis(per_variant_windows,
+        if len(per_variant_windows_first) >= 2:
+            win_cross = cross_variant_analysis(per_variant_windows_first,
                                                reference="standard")
             n_shared_w = win_cross["n_shared_all_failures"]
             md.append("")
@@ -3153,6 +3181,9 @@ def main():
                         "默认读配置 early_stop_patience，缺省关闭）。启用后各 run "
                         "实际步数可不同，受控变量审计按计划步数核对并在汇总页"
                         "如实标记")
+    p.add_argument("--worst_n", type=int, default=10,
+                   help="每个 run 转储的最差语言建模窗口数（坏案例归因用；"
+                        "默认 10，少于 3 条的模式分析不具统计意义）")
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
@@ -3396,6 +3427,8 @@ def main():
                 cmd += ["--wandb"]
             if args.early_stop_patience is not None:
                 cmd += ["--early_stop_patience", str(args.early_stop_patience)]
+            if args.worst_n is not None:
+                cmd += ["--worst_n", str(args.worst_n)]
             if args.smoke:
                 cmd += ["--smoke", "--ruler_ctx_lens", str(smoke_ctx),
                         "--ruler_n_samples", "2",

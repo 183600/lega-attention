@@ -5,8 +5,9 @@ import os
 import shutil
 import tempfile
 
-from lega.curves import (diagnose_curve, diagnose_run_dir, load_train_log,
-                         worst_status, STATUS_ORDER)
+from lega.curves import (LIVE_WARN_EVALS, diagnose_curve, diagnose_run_dir,
+                         live_overfit_hint, load_train_log, worst_status,
+                         STATUS_ORDER)
 
 
 def _log(train, val, val_steps=None):
@@ -289,3 +290,21 @@ def test_rising_train_loss_not_advised_to_train_longer():
     assert any("降低学习率" in r for r in d["recommendations"]), d["recommendations"]
     assert not any("延长训练" in r for r in d["recommendations"]), d["recommendations"]
     print("  [ok] 上升训练损失不误报「延长训练」建议")
+
+
+def test_live_overfit_hint():
+    """训练中途预警：连续 N 次无改善才提示；早停开启时不重复提示。"""
+    assert live_overfit_hint(0, 2.0, 2.1, patience=0) is None
+    assert live_overfit_hint(LIVE_WARN_EVALS - 1, 2.0, 2.5, patience=0) is None
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5, patience=0)
+    assert msg and "回升" in msg and "过拟合" in msg
+    assert "2 次" not in msg and f"{LIVE_WARN_EVALS} 次" in msg
+    plateau = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0, patience=0)
+    assert plateau and "平台" in plateau
+    # 早停开启 → 预警交给早停逻辑，不重复提示
+    assert live_overfit_hint(5, 2.0, 2.5, patience=2) is None
+    # 非有限/异常输入不炸
+    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, float("nan"), patience=0) is None
+    assert live_overfit_hint(LIVE_WARN_EVALS, None, 2.0, patience=0) is None
+    assert live_overfit_hint("bad", 2.0, 2.0, patience=0) is None
+    print("  [ok] live_overfit_hint（训练中途过拟合/平台预警口径）")

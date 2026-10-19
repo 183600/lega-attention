@@ -44,6 +44,11 @@ GRAD_SPIKE_FACTOR = 10.0
 # 整体单调下降时全局中位数会把早期高点误判为尖峰。
 LOSS_SPIKE_FACTOR = 8.0
 LOSS_SPIKE_WINDOW = 5  # 每侧参与中位数的邻居点数
+# 训练中途的过拟合/平台预警：连续该次数评测无实质改善即提示（仅提示，
+# 不代替显式开启的早停；曲线诊断在训练结束后给出同样的结论）。
+LIVE_WARN_EVALS = 3
+# 回升幅度超过该比例时措辞升级为"过拟合信号"（否则视为平台）
+LIVE_OVERFIT_GAP = 0.02
 
 
 def load_train_log(path: str) -> List[Dict]:
@@ -152,6 +157,37 @@ def _fmt_num(x: Optional[float], spec: str = ".4f") -> str:
 def _fmt_rel(x: Optional[float]) -> str:
     """相对变化缺失时显式显示 '-'（不能把 None 交给百分号格式化）。"""
     return "-" if x is None else f"{x:+.1%}"
+
+
+def live_overfit_hint(evals_since_improve, best_val, val,
+                      patience: int = 0) -> Optional[str]:
+    """训练中途的曲线预警：连续多次评测无实质改善时返回提示文案。
+
+    只看最终数值会漏掉"训练 loss 仍降、验证早已停步"的过程信号；早停关闭
+    （patience<=0，默认）时没有任何机制会在训练中提醒。该函数与
+    diagnose_curve 的"过拟合→早停"判定同口径（best 由严格最小维护），
+    但只提示不改流程。返回 None 表示无预警或早停已开启（由早停自身处理）。
+    """
+    if patience and int(patience) > 0:
+        return None
+    try:
+        n = int(evals_since_improve or 0)
+    except (TypeError, ValueError):
+        return None
+    if n < LIVE_WARN_EVALS or best_val is None or val is None:
+        return None
+    try:
+        gap = (float(val) - float(best_val)) / float(best_val)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if not math.isfinite(gap):
+        return None
+    if gap > LIVE_OVERFIT_GAP:
+        what = f"验证损失在回升（较历史最优 +{gap:.1%}），典型过拟合信号"
+    else:
+        what = f"验证损失进入平台（较历史最优 +{gap:.1%}，无实质改善）"
+    return (f"{what}：已连续 {n} 次评测未改善。检查训练/验证曲线是否"
+            "分叉，必要时加正则化/数据或显式开启 --early_stop_patience。")
 
 
 def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Dict:

@@ -65,7 +65,7 @@ from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
                     PRIMARY_AP_THRESHOLD as _PRIMARY_AP_THRESHOLD,
                     linear_probe)
 from .repro import load_provenance
-from .ruler import (build_niah, build_vt, load_corpus_sents,
+from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
                     ContextTooSmall, _stable_hash)
 from .utils import (auroc, average_precision, enable_tf32, f1_scores,
                     get_device, pearson, roc_pr_aucs, save_json, set_seed)
@@ -564,7 +564,7 @@ def main():
     ctx = min(ctx, model.block_size - max_new - 1)
     ruler_seed = int(rcfg.get("seed", 1234))
 
-    sents = load_corpus_sents(args.data_dir)
+    sents, corpus_source = load_corpus_sents_with_source(args.data_dir)
     examples, task_of, ctx_of = [], [], []
     skipped_tasks = []
     for i in range(n_examples):
@@ -632,6 +632,9 @@ def main():
             seed=int(ck.get("seed")) if ck.get("seed") is not None else 0)
     # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
     summary["seed"] = ck.get("seed")
+    # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计
+    summary["corpus_source"] = corpus_source
+    summary["corpus_held_out"] = corpus_source in ("val", "test")
     summary.update(provenance)
     if skipped_tasks:
         summary["skipped_tasks"] = skipped_tasks

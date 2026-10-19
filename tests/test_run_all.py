@@ -520,6 +520,35 @@ def test_build_summary_worst_windows_falls_back_to_seed_with_data():
     print("  [ok] build_summary（最差窗口退化到有数据的种子）")
 
 
+def test_build_summary_worst_windows_aggregate_seeds():
+    """逐变体归因必须累计全部种子的最差窗口（同一窗口在多种子中错要重复
+    计入以显示错误模式的跨种子稳定性）；若仍只取一个种子，这里会少 2 条。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1, 2], "smoke": False})
+        w1 = {"window": 1, "split": "test", "loss": 8.0,
+              "context_tail": "sky is blue and", "gold_next": " green",
+              "pred_top5": [[" blue", 0.3]]}          # 复读吸引子
+        w2 = {"window": 2, "split": "test", "loss": 7.0,
+              "context_tail": "the cat sat on", "gold_next": " the",
+              "pred_top5": [[" mat", 0.4]]}           # 低置信
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "n_params": 10, "split": "test", "worst_windows": [w1]})
+        _write_json(os.path.join(tmp, "eval_lega_seed2.json"), {
+            "variant": "lega", "seed": 2, "val_ppl": 10.0, "val_loss": 2.3,
+            "n_params": 10, "split": "test", "worst_windows": [w1, w2]})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "| LEGA(ours) | 3 |" in md, md
+        assert "复读吸引子（低置信下首选续写退化为抄上下文已有串）×2" in md, md
+        assert "2 个种子" in md, md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（最差窗口跨种子累计、说明口径）")
+
+
 def test_build_summary_prefers_current_naming_on_slot_collision():
     """同一 (变体, 种子) 同时存在新旧两种文件名时必须取本次命名约定的
     文件：否则在旧多种子目录上重跑单种子，陈旧的 eval_lega_seed<seed>.json

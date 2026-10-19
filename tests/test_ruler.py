@@ -1,9 +1,13 @@
 """RULER 任务构造器测试：跨度有效性、答案一致性、打分函数。"""
+import os
 import random
 import re
+import shutil
+import tempfile
 
 from lega.data import CharTokenizer
-from lega.ruler import (build_fwe, build_niah, build_vt, score_prediction,
+from lega.ruler import (build_fwe, build_niah, build_vt, load_corpus_sents,
+                        load_corpus_sents_with_source, score_prediction,
                         ContextTooSmall, TASKS, _stable_hash)
 
 _TEXT = ("One of the special magic numbers for lyre is: 7021853.\n"
@@ -208,3 +212,39 @@ def test_vt_needle_span_is_value_definition_line():
         assert seg.startswith(f"VAR {ex['meta']['chain']}1 ="), f"跨度不是定义行: {seg!r}"
         assert ex["answer"] in seg
         assert f"VAR {ex['meta']['chain']}4" not in seg
+
+
+def test_corpus_sents_prefer_heldout_over_train():
+    """niah_corpus 的干扰语料必须优先 held-out（val → test → train）。
+
+    取自 train.txt 会让评测上下文与训练语料重叠，长上下文检索分数偏高、
+    机制分析建立在见过的文本上；只有完全没有 held-out 文本时才允许回退，
+    且来源要能被调用方审计（payload 的 corpus_source）。
+    """
+    d = tempfile.mkdtemp()
+    try:
+        def _write(name, tag, n=5):
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(" ".join(
+                    f"{tag}{i} sentence has plenty of characters for the filter."
+                    for i in range(n)))
+
+        _write("train.txt", "T")
+        _write("val.txt", "V")
+        _write("test.txt", "S")
+        sents, src = load_corpus_sents_with_source(d)
+        assert src == "val" and all(s.startswith("V") for s in sents), (src, sents)
+        os.remove(os.path.join(d, "val.txt"))
+        sents, src = load_corpus_sents_with_source(d)
+        assert src == "test" and all(s.startswith("S") for s in sents), (src, sents)
+        os.remove(os.path.join(d, "test.txt"))
+        sents, src = load_corpus_sents_with_source(d)
+        assert src == "train" and all(s.startswith("T") for s in sents), (src, sents)
+        # 兼容旧接口仍返回列表
+        assert load_corpus_sents(d) == sents
+        # 全部缺失/为空时必须显式返回 (空, None)，而不是静默给空列表
+        os.remove(os.path.join(d, "train.txt"))
+        assert load_corpus_sents_with_source(d) == ([], None)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("  [ok] niah_corpus 干扰语料优先 held-out（val→test→train 仅回退）")

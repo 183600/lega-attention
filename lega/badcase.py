@@ -143,7 +143,8 @@ def categorize_case(rec: Dict) -> Dict:
 
 
 def case_axis(c: Dict) -> str:
-    """错误的粗归因轴：数据/构造（标注错）→ 难度边界（深位）→ 模型/方法。
+    """错误的粗归因轴：数据/构造（标注错）→ 校准（排位对但置信低）→
+    难度边界（深位）→ 评测/导出（解析/导出）→ 模型/方法。
 
     与 category 的机制归因互补：机制回答"错在哪一步"（误抄/幻觉/格式），
     轴回答"这笔账算谁的"（数据、难度还是模型）。深位样本即使机制是误抄，
@@ -151,6 +152,12 @@ def case_axis(c: Dict) -> str:
     """
     if c.get("category") == "label_error":
         return "数据/构造"
+    if c.get("category") == "top1_correct":
+        # 排位正确、置信度低是输出校准问题，不是检索失败；即使位于深位，
+        # 改结构/加数据也不对症。synthesize_window_improvements 给该类别的
+        # 建议 axis 是"校准"，这里必须先于 hard_sample 判断，否则同一批
+        # 案例在分布表与改进建议里会被算到两条不同的账上。
+        return "校准"
     if c.get("hard_sample"):
         return "难度边界"
     if c.get("category") in ("unparsed", "fwe_no_ref", "fwe_no_parse"):

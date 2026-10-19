@@ -124,7 +124,31 @@ def test_train_early_stop_end_to_end():
         assert ev2["steps"] == 6 and ev2["steps_planned"] == 6
         recs2 = load_train_log(os.path.join(out_dir2, "train_log.jsonl"))
         assert not any(r.get("early_stop") for r in recs2)
+        # 每个评测点都记录相对历史最优的差距（训练中途预警的原材料）
+        eval_recs = [r for r in recs2 if "val_loss" in r]
+        assert eval_recs and all("val_vs_best_rel" in r for r in eval_recs)
     print("  [ok] train 端到端早停（CLI 覆盖 + 标记落盘 + 默认关闭兼容）")
+
+
+def test_train_live_overfit_hint_end_to_end():
+    """早停默认关闭时，验证连续多次无改善必须在训练日志里留下过拟合/平台
+    预警——只看最终数值会漏掉过程信号。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg = _cfg()
+        cfg["steps"] = 10        # eval_every=2 → 5 次评测，足够累积 3 次无改善
+        cfg["eval_every"] = 2
+        out_dir = os.path.join(tmp, "run")
+        _run_train(cfg, data_dir, out_dir)
+        recs = load_train_log(os.path.join(out_dir, "train_log.jsonl"))
+        hints = [r for r in recs if r.get("overfit_hint")]
+        assert hints, "lr=0 时验证损失不变，应触发过拟合/平台预警"
+        assert all(r["evals_since_best"] >= 3 for r in hints), hints
+        assert "平台" in hints[0]["overfit_hint"]
+    print("  [ok] train 中途过拟合/平台预警（连续无改善写日志）")
 
 
 def test_curve_marks_early_stop_not_data_insufficient():
