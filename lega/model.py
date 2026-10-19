@@ -209,8 +209,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
         gw = None
         w_f = None
         # 是否有被忽略的位置（全局判定一次）：没有时损失与梯度两条路径
-        # 都无需逐块构造掩码，直接按原目标取值/散加。
-        tgt_has_ignore = int(n_valid) != tgt.numel()
+        # 都无需逐块构造掩码，直接按原目标取值/散加。CUDA 上不把有效数取回
+        # 主机：.item() 会强制设备同步、打断异步流水，而掩码只是 O(x2d.numel())
+        # 的元素级开销，相对 lm_head GEMM 可忽略；CPU 上 .item() 无同步代价，
+        # 保留无掩码快路径。
+        tgt_has_ignore = (True if x2d.is_cuda
+                          else int(n_valid) != tgt.numel())
         has_ignore = (need_dx or need_gw) and tgt_has_ignore
         # 梯度 GEMM 必须与 logits 同精度：前向处于 autocast 上下文内时显式
         # 关闭 autocast，避免 fp32/fp64 的 GEMM 被降到低精度。
@@ -502,9 +506,12 @@ class GPT(nn.Module):
             else:
                 total = None  # 设备端累加
                 # 有忽略位置 ⇔ 有效数少于总数，tgt_has_ignore 由 n_valid
-                # 导出；无忽略位置（常见情形）时逐块损失无需掩码。
+                # 导出；无忽略位置（常见情形）时逐块损失无需掩码。CUDA 上
+                # 不把有效数取回主机：.item() 会强制设备同步、打断异步流水，
+                # 而掩码只是元素级开销，相对 lm_head GEMM 可忽略。
                 n_valid = (tgt != ignore_index).sum()
-                tgt_has_ignore = int(n_valid) != tgt.numel()
+                tgt_has_ignore = (True if flat.is_cuda
+                                  else int(n_valid) != tgt.numel())
                 row_sums = None
                 if return_window_losses:
                     # 每个输入窗口占一行（B 行、每行 T 个位置）；按行累加

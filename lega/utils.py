@@ -609,38 +609,63 @@ def roc_pr_aucs(scores, labels):
     # 非二值标签（调用方不应出现）语义含糊：average_precision 会把非 0/1
     # 标签计入累计，与按 0/1 计数推导的快速路径不一致；此时退化为直接
     # 调用两个原函数，保证任何输入下都逐位一致。
-    if not bool(((lb == 0) | (lb == 1)).all()):
+    is_pos = lb == 1
+    is_neg = lb == 0
+    if not bool((is_pos | is_neg).all()):
         return auroc(sc, lb), average_precision(sc, lb)
-    n_pos = int((lb == 1).sum())
-    n_neg = int((lb == 0).sum())
+    n_pos = int(is_pos.sum())
+    n_neg = int(is_neg.sum())
     need_auc = n_pos > 0 and n_neg > 0
     need_ap = n_pos > 0 and n_pos != len(lb)
     if not (need_auc or need_ap):
         return float("nan"), float("nan")
     order = np.argsort(sc)
     sv = sc[order]
-    # 等值组首位置（升序）；组内平均秩（1-based）= 首位置 + (组大小+1)/2
-    starts = np.concatenate([[0], np.flatnonzero(np.diff(sv)) + 1])
-    counts = np.diff(np.append(starts, [sv.size]))
+    lv = lb[order].astype(np.float64)
+    n = sv.size
     auc = float("nan")
+    ap = float("nan")
+    # 无并列（浮点分数几乎总如此）的快速路径：组大小恒为 1，跳过等值分组
+    # 的 diff/flatnonzero/repeat/散射与 reduceat，仅用“正类在升序位置上的
+    # 前缀和”这一等价形式。整数计数在 float64 下精确，结果与等值分组
+    # 通用路径逐位一致（tests/test_utils.py 有逐位对照）。
+    if n < 2 or bool((sv[1:] == sv[:-1]).any()):
+        # 等值组首位置（升序）；组内平均秩（1-based）= 首位置 + (组大小+1)/2
+        starts = np.concatenate([[0], np.flatnonzero(np.diff(sv)) + 1])
+        counts = np.diff(np.append(starts, [n]))
+        # 每组正类数：AUROC 与 AP 共用（整数计数在 float64 下精确）。
+        g_pos = np.add.reduceat(lv, starts)
+        if need_auc:
+            avg_ranks = starts.astype(np.float64) + (counts + 1.0) / 2.0
+            # 正类平均秩之和 = Σ_组 组平均秩×组内正类数。avg_ranks 是
+            # 半整数、g_pos 是小整数，乘积与求和全程在 float64 下精确，
+            # 与散射回各位置后逐个求和的旧口径逐位一致，但省去 n 规模的
+            # scatter/repeat 与布尔切片。
+            r_pos = float((avg_ranks * g_pos).sum())
+            u = r_pos - n_pos * (n_pos + 1) / 2.0
+            auc = float(u / (n_pos * n_neg))
+        if need_ap:
+            # AP 需要按分数降序的分组；降序组末的累计样本数 = n - 组首位
+            # 置、累计正类数 = n_pos - 升序前缀正类数，与
+            # average_precision 中 cumsum 在组末取到的值逐位一致。
+            tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(g_pos)[:-1]]))[::-1]
+            ends_desc = (n - starts)[::-1]
+            recalled = tp_desc / n_pos
+            precision = tp_desc / ends_desc
+            prev_recall = np.concatenate([[0.0], recalled[:-1]])
+            ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
+        return auc, ap
     if need_auc:
-        avg_ranks = starts.astype(np.float64) + (counts + 1.0) / 2.0
-        # 按输入序把组平均秩散射回每个位置（与 auroc 的 ranks 构造同序
-        # 同值），正类切片求和即可。
-        ranks = np.empty(sv.size, dtype=np.float64)
-        ranks[order] = np.repeat(avg_ranks, counts)
-        r_pos = ranks[lb == 1].sum()
+        # 正类平均秩之和 = Σ(升序位置+1) = n_pos + Σ位置；两项都是不超过
+        # n(n+1)/2 的精确整数（float64/ int64 均无舍入），与散射路径同值。
+        r_pos = float(n_pos + int(np.flatnonzero(lv).sum()))
         u = r_pos - n_pos * (n_pos + 1) / 2.0
         auc = float(u / (n_pos * n_neg))
-    ap = float("nan")
     if need_ap:
-        # AP 需要按分数降序的分组；整数计数在 float64 下精确，故降序组末的
-        # 累计样本数 = n - 组首位置、累计正类数 = n_pos - 升序前缀正类数，
-        # 与 average_precision 中 cumsum 在组末取到的值逐位一致。
-        lv = lb[order].astype(np.float64)
-        g_pos = np.add.reduceat(lv, starts)
-        tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(g_pos)[:-1]]))[::-1]
-        ends_desc = (sv.size - starts)[::-1]
+        # 逐位置前缀正类数（升序）→ 段末累计口径，与通用路径的
+        # reduceat(组大小=1)=identity 完全一致。
+        tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(lv)[:-1]]))[::-1]
+        ends_desc = np.arange(1, n + 1)
         recalled = tp_desc / n_pos
         precision = tp_desc / ends_desc
         prev_recall = np.concatenate([[0.0], recalled[:-1]])

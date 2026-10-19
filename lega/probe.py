@@ -125,33 +125,59 @@ def predict_logreg(model: Dict, X: np.ndarray) -> np.ndarray:
     return _sigmoid(X @ np.asarray(model["coef"], dtype=np.float64) + intercept)
 
 
-def _features(records: Sequence[Dict], names: Sequence[str]):
-    """构造特征矩阵与有效性掩码；缺失/非有限特征的记录整体剔除。"""
-    rows, valid = [], []
-    for r in records:
-        vals = []
-        for name in names:
-            if name == "log_maxp":
-                mp = r.get("max_p")
-                vals.append(math.log(max(float(mp), _MAXP_FLOOR))
-                            if mp is not None else float("nan"))
-            elif name == "log_n":
-                ln = r.get("log_n")
-                vals.append(float(ln) if ln is not None else float("nan"))
-            elif name == "qterm":
-                q = r.get("qterm")
-                vals.append(float(q) if q is not None else float("nan"))
-            else:
-                raise ValueError(f"未知特征: {name}")
-        hit = r.get("hit")
-        ok = (hit is not None and all(math.isfinite(v) for v in vals)
-              and float(hit) in (0.0, 1.0))
-        if ok:
-            rows.append(vals)
-            valid.append(r)
-        else:
-            rows.append([float("nan")] * len(names))
-    return np.asarray(rows, dtype=np.float64), valid
+def _column_values(records: Sequence[Dict], name: str) -> np.ndarray:
+    """单列特征取值（缺失为 NaN）；语义与旧逐记录实现逐位一致。"""
+    if name == "log_maxp":
+        return np.asarray([
+            math.log(max(float(mp), _MAXP_FLOOR)) if (mp := r.get("max_p")) is not None
+            else float("nan") for r in records], dtype=np.float64)
+    if name == "log_n":
+        return np.asarray([
+            float(ln) if (ln := r.get("log_n")) is not None else float("nan")
+            for r in records], dtype=np.float64)
+    if name == "qterm":
+        return np.asarray([
+            float(q) if (q := r.get("qterm")) is not None else float("nan")
+            for r in records], dtype=np.float64)
+    raise ValueError(f"未知特征: {name}")
+
+
+def _hit_values(records: Sequence[Dict]) -> np.ndarray:
+    """hit 列（缺失为 NaN）；非 0/1 值在有效性判定中被整体剔除。"""
+    return np.asarray([
+        float(h) if (h := r.get("hit")) is not None else float("nan")
+        for r in records], dtype=np.float64)
+
+
+def _features(records: Sequence[Dict], names: Sequence[str], cache: dict = None):
+    """构造特征矩阵与有效性掩码；缺失/非有限特征的记录整体剔除。
+
+    cache：可选的“列名 -> 数组”缓存，仅在 records 为同一对象时复用；
+    由调用方在多次取不同特征子集时传入，避免重复提取同一列。
+    """
+    n = len(records)
+    if cache is None:
+        cache = {}
+    if n == 0:
+        # 空输入保持旧实现的形状（np.asarray([]) 为 (0,)），消费方无需分支。
+        return np.asarray([], dtype=np.float64), []
+    X = np.empty((n, len(names)), dtype=np.float64)
+    valid = np.ones(n, dtype=bool)
+    for j, name in enumerate(names):
+        col = cache.get(name)
+        if col is None or col.shape[0] != n:
+            col = _column_values(records, name)
+            cache[name] = col
+        X[:, j] = col
+        valid &= np.isfinite(col)
+    hit = cache.get("_hit")
+    if hit is None or hit.shape[0] != n:
+        hit = _hit_values(records)
+        cache["_hit"] = hit
+    valid &= (hit == 0.0) | (hit == 1.0)
+    X[~valid] = np.nan
+    valid_list = [r for r, v in zip(records, valid.tolist()) if v]
+    return X, valid_list
 
 
 def _group_folds(groups: Sequence, k: int, seed: int) -> np.ndarray:
@@ -276,11 +302,18 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     if not records:
         report["note"] = "无记录，未训练探针。" + report["note"]
         return report
-    base_rows, _ = _features(records, ("log_n",))
-    valid_all = [r for r, ln in zip(records, base_rows[:, 0].tolist())
-                 if r.get("hit") is not None and math.isfinite(float(ln))
-                 and float(r.get("hit", 0.0)) in (0.0, 1.0)]
-    y_all = np.asarray([float(r["hit"]) for r in valid_all], dtype=np.float64)
+    # 逐列提取一次并缓存：log_n/_hit 用于有效性过滤，log_maxp/qterm 供各特征
+    # 集按同一份列切片复用（值与逐特征集重复提取逐位一致）。
+    col_cache: Dict = {}
+    _features(records, ("log_n",), cache=col_cache)
+    logn_col = col_cache["log_n"]
+    hit_col = col_cache["_hit"]
+    valid_mask = np.isfinite(logn_col) & ((hit_col == 0.0) | (hit_col == 1.0))
+    valid_all = [r for r, v in zip(records, valid_mask.tolist()) if v]
+    y_all = hit_col[valid_mask]
+    for nm in ("log_maxp", "qterm"):
+        if nm not in col_cache:
+            col_cache[nm] = _column_values(records, nm)
     n_pos = int((y_all == 1).sum())
     n_neg = int((y_all == 0).sum())
     base_rate = (n_pos / (n_pos + n_neg)) if (n_pos + n_neg) else None
@@ -309,10 +342,12 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     available = []
     feature_matrices = {}
     for key, name, names in FEATURE_SETS:
-        X, valid = _features(valid_all, names)
-        if len(valid) == len(valid_all) and len(valid) > 0:
+        # 有效记录上逐列切片（列值直接来自缓存，无重复提取）；任一列非有限
+        # 即该特征集在全部有效记录上不齐备，与逐记录重建的口径一致。
+        cols = [col_cache[n][valid_mask] for n in names]
+        if len(valid_all) > 0 and all(np.isfinite(c).all() for c in cols):
             available.append((key, name, names))
-            feature_matrices[key] = X
+            feature_matrices[key] = np.column_stack(cols)
     if not available:
         report["note"] = "没有任何特征集在所有有效记录上齐备。" + report["note"]
         return report
