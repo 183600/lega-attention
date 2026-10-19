@@ -95,7 +95,7 @@ def collect_artifacts(paths, rel_to: str = None, known: dict = None) -> dict:
     rel_to 给定时用相对路径作为键（避免把机器绝对路径写进台账，且跨机器
     对照时键稳定）。键顺序与输入一致。known（path -> sha256）给出同一进程
     流水线内已计算过的哈希（如 eval.json 记录的 checkpoint 指纹）时直接
-    复用，避免对同一大文件反复全量哈希；大小仍以当前文件为准。
+    使用；大小以当前文件为准。
     """
     entries = [(p, os.path.relpath(p, rel_to) if rel_to else p)
                for p in paths if os.path.isfile(p)]
@@ -135,10 +135,9 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
 
     evaluate 阶段已对同一 checkpoint 做过全量 SHA-256（写在 results_dir
     的 eval_<variant><suffix>.json 及 test 访问账本）：调用方通过
-    known_ckpt_sha256/known_ckpt_path 传入后直接复用，避免台账再次全量
-    读盘。仅当路径确为本 run 的 model_best.pt 时采信（防止复用旧评测
-    文件导致错配），否则回退重算。out_dir/eval.json 自带的同名字段
-    同样复用。
+    known_ckpt_sha256/known_ckpt_path 传入。仅当路径确为本 run 的
+    model_best.pt 时采信（防止复用旧评测文件导致错配），否则重算。
+    out_dir/eval.json 自带的同名字段同样可用。
     """
     names = ("config_used.json", "train_log.jsonl", "run_manifest.json",
              "eval.json", "model_best.pt", "model.pt")

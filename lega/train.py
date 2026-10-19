@@ -868,8 +868,7 @@ def main():
                 out = model(x, targets=y)
                 # grad_accum==1（默认配置）时除法结果就是 loss 本身
                 loss = out["loss"] if grad_accum == 1 else out["loss"] / grad_accum
-            # 设备端标记区间内首个非有限损失步（0-based）：只做极小元素级
-            # 运算，不在热路径插入 .item()/同步；log 点统一读取。
+            # 设备端标记区间内首个非有限损失步（0-based），log 点统一读取。
             step_dev = torch.as_tensor(float(step), device=device)
             bad_now = (~torch.isfinite(out["loss"].detach())).to(torch.float32)
             bad_mark = torch.where(bad_now > 0, step_dev,

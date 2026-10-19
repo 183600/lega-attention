@@ -119,7 +119,7 @@ def _normalize_line(s: str) -> str:
 
 
 def _iter_lines(text: str):
-    """逐行迭代，与 text.split("\\n") 的长度/内容序列一致，但不构造行列表。"""
+    """逐行迭代，与 text.split("\\n") 的长度/内容序列一致。"""
     start = 0
     while True:
         i = text.find("\n", start)
@@ -140,9 +140,8 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     不计入去污染，避免大面积误删；但仍会统计其重复数量供审查。
     返回 (cleaned_texts, stats)。
 
-    全程流式处理：val/test 与 train 都按行迭代（不 split 出行列表），
-    跨 split 比较集合只存 128-bit 摘要（16 字节碰撞概率可忽略），
-    train 输出按删除切点拼接片段——无删除时直接复用原串、零复制。
+    跨 split 比较集合使用 128-bit 摘要（16 字节碰撞概率可忽略），
+    train 输出按删除切点拼接未删除片段。
     """
     min_chars = int(min_chars)
 
@@ -153,7 +152,7 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
         # 单次扫描：每行只 strip/normalize 一次。长行（>= min_chars）用于
         # 去污染；非空行的重复都计数——短行不参与去污染，但重复数量仍统计
         # 供审查（见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
-        # 集合只存 128-bit 摘要而非整行字符串。
+        # 集合使用 128-bit 摘要（16 字节碰撞概率可忽略）。
         n_long, n_valid = 0, 0
         seen_long, seen_long_norm = set(), set()
         seen_valid, seen_valid_norm = set(), set()
@@ -189,8 +188,8 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     # 仅用于计数 len() 的集合存摘要；归一化每行只算一次。
     seen_valid_train, seen_valid_train_norm = set(), set()
     dropped_exact, dropped_norm = 0, 0
-    # 流式扫描 train：被删行（连同其后换行）不进入任何片段；未删除片段只在
-    # 出现首个删除后复制，最后一次性拼接。无删除时原串零复制直接复用。
+    # 流式扫描 train：被删行（连同其后换行）不进入任何片段；
+    # 未删除片段在最后一次性拼接。
     parts, seg_start, any_drop = [], 0, False
     tail_dropped = False
     pos, n = 0, len(train_text)
@@ -360,8 +359,6 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int):
     m = min(int(n_samples), total)
     starts = (rng.integers(0, total, size=m) if m < total
               else np.arange(total))
-    # 滑窗视图 + 一次性批量 gather：避免逐窗口 Python 级切片/类型转换，
-    # 只保留逐个窗口做 blake2b 的固有开销。
     windows = np.lib.stride_tricks.sliding_window_view(ids, n)
     picked = np.ascontiguousarray(windows[np.asarray(starts, dtype=np.int64)])
     if picked.dtype != np.uint16:

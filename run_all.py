@@ -1715,7 +1715,7 @@ def build_summary(results_dir: str, audit: dict = None,
     消融矩阵显式列出全因子 8 个组合的覆盖情况，缺失组合会被标注。
     data_report（可选）来自数据目录的防泄漏自检报告，汇总为独立小节。
     preloaded（可选）为 {results 下结果文件路径: 已解析 JSON} 缓存：坏案例
-    阶段已解析过的 eval/ruler 文件在此直接复用，避免同文件二次解析。
+    阶段已解析过的 eval/ruler 文件在此共用同一份结果。
     """
 
     def load(p):
@@ -3260,7 +3260,7 @@ def main():
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
     # 错误样本是改进思路的最重要来源，不能只留聚合分数。
-    # 解析结果进 preloaded 缓存：build_summary 汇总时直接复用同一份 payload。
+    # 解析结果进 preloaded 缓存：build_summary 汇总时使用同一份 payload。
     preloaded = {}
     if not args.skip_ruler:
         for fp in sorted(glob.glob(os.path.join(results_dir, "ruler_*.json"))):
@@ -3342,7 +3342,7 @@ def main():
     # 曲线/结果文件后续被覆盖或手改，都能通过哈希与当时记录比对发现。
     # evaluate 阶段已对本 run 的 model_best.pt 做过全量哈希（写在
     # results_dir/eval_<variant><suffix>.json 的 ckpt/ckpt_sha256）；
-    # 台账复用该值，只有路径不匹配（例如未评测/旧评测文件）时才回退重算。
+    # 路径匹配时台账使用该值，否则（未评测/旧评测文件）重算。
     known_ckpt = {}
     for v, seed, _vdir, suffix in chain:
         try:

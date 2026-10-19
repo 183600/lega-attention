@@ -67,8 +67,7 @@ def _download(url: str, dst: str, desc: str, retries: int = 3) -> None:
 def from_parquet(out_dir: str, txt_paths: dict, max_tokens: dict) -> dict:
     """下载 parquet 并逐文件逐 batch 流式解析、清洗后直接写入各 split 的 txt。
 
-    返回 split -> 写入字符数。不再把全部行先物化为 Python 列表（WikiText-103
-    train 约 180 万行，列表与字符串对象开销可达数百 MB）。
+    返回 split -> 写入字符数。
     """
     import pyarrow.parquet as pq
     counts = {}
@@ -112,8 +111,7 @@ def from_zip(out_dir: str, txt_paths: dict, max_tokens: dict) -> dict:
                     f"zip 中缺少 {base}；现有条目示例: {names[:8]}")
             with z.open(cands[0]) as f:
                 # TextIOWrapper 已做换行翻译，行内容与 split("\n") 一致
-                # （空行/行尾空白由 write_clean_lines 统一处理）；逐行流式
-                # 消费，不再 list() 出整个 split。
+                # （空行/行尾空白由 write_clean_lines 统一处理）。
                 counts[split] = write_clean_lines(
                     io.TextIOWrapper(f, encoding="utf-8"),
                     txt_paths[split], max_tokens[split])
@@ -157,7 +155,7 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
 
     清洗口径与原 clean_lines 一致：行尾 rstrip、跳过空行、行间以单个换行
     连接；max_tokens > 0 时按 1 token ≈ 3.6 字符、留 20% 余量截断。
-    边读边写（临时文件 + 原子替换），避免在内存中 join 出与正文等量的整串。
+    边读边写，写入临时文件后原子替换。
     """
     limit = int(max_tokens * 3.6 * 1.2) if max_tokens else None
     tmp = dst + ".part"
@@ -222,7 +220,7 @@ def main():
         # 绝不随机打乱。preprocess 级别的清洗/去污/拟合在 prepare_bins 中完成。
         from lega.datacheck import temporal_split_text
         train_text, val_text, test_text, split_info = temporal_split_text(text)
-        # 三个切片已各持一份内容，原串此后不再使用：立即释放（峰值 -1× 文件大小）
+        # 三个切片已各持一份内容，原串此后不再使用
         del text
         split_info["mode"] = "local_temporal"
         split_protocol = split_info
@@ -236,7 +234,7 @@ def main():
         else:
             print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个，"
                   "文档不跨 split")
-        # 逐行流式清洗并直接写 txt：不再 split 出行列表、也不再 join 出整串
+        # 逐行清洗并直接写入 txt
         char_counts = {
             split: write_clean_lines(io.StringIO(t), txt_paths[split],
                                      max_tokens[split])

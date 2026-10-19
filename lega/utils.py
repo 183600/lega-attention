@@ -569,7 +569,7 @@ def average_precision(scores, labels) -> float:
 
 
 def roc_pr_aucs(scores, labels):
-    """一次升序排序同时算出 AUROC 与 PR-AUC（average precision）。
+    """同时计算 AUROC 与 PR-AUC（average precision）。
 
     与 `auroc` / `average_precision` 在二值标签下逐位一致：AUROC 的并列
     平均秩与 AP 的等值整组累计都以“按分数排序后的等值分组”为基础，分组

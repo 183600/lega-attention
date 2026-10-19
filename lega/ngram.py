@@ -30,8 +30,7 @@ from .datacheck import append_test_access
 ALPHA_GRID = (0.01, 0.1, 1.0)
 
 
-# 训练流统计的分块粒度（token 数）：每块只升这一段为 int64 并做块内
-# np.unique，避免把整段训练流物化成 int64 键（1 亿 token 时约 800MB）。
+# 训练流统计的分块粒度（token 数）：每块内升位并做块内 np.unique。
 _PAIR_CHUNK_TOKENS = 4_000_000
 
 
@@ -81,8 +80,7 @@ def _pair_counts_chunked(ids: np.ndarray, vocab_size: int):
     """分块统计相邻对频次；返回按 key 升序去重的 (pair_keys, pair_counts)。
 
     每块（可配 chunk_tokens）尾部多取一个 token，使块内相邻对覆盖
-    [start, end-1) 且块间不重不漏；块内 np.unique 后归并有序块结果，
-    总排序规模降至各块去重键数之和，而非整段键的全量排序。
+    [start, end-1) 且块间不重不漏；块内 np.unique 后归并有序块结果。
     """
     n = int(len(ids))
     if n < 2:
@@ -108,9 +106,8 @@ def _pair_counts_chunked(ids: np.ndarray, vocab_size: int):
 def fit_counts(ids: np.ndarray, vocab_size: int):
     """在训练流上统计一元/二元频次；返回 (uni_counts, pair_keys, pair_counts)。
 
-    一元分块 bincount（numpy 会把输入升为 intp，整段转换在大流上会多占
-    4 倍内存；逐块转换峰值只与块大小相关）；二元的 V² 稀疏不可枚举，
-    按块生成相邻对、块内 np.unique 后归并，不做整段 int64 物化与全量排序。
+    一元分块 bincount；二元的 V² 稀疏不可枚举，按块生成相邻对、
+    块内 np.unique 后归并。
     """
     ids = np.asarray(ids)
     vocab_size = int(vocab_size)
@@ -142,7 +139,7 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     if n == 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
     total = float(uni.sum())
-    # uint16 流可直接做花式索引，无需先升为 int64（省一份 4 倍拷贝）
+    # uint16 流可直接做花式索引
     c = uni[np.asarray(eval_ids)]
     probs = (c + alpha) / (total + alpha * vocab)
     mean_nll = float(-np.log(probs).mean())
@@ -195,8 +192,7 @@ def evaluate(data_dir: str, split: str = "val",
     """
     meta = load_meta(data_dir)
     vocab_size = int(meta["vocab_size"])
-    # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数，避免
-    # 把整段训练流物化为 int64（1 亿 token 时约 800MB）后再统计。
+    # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数。
     train_ids = load_bin(data_dir, "train")
     if split == "test":
         if not allow_test:

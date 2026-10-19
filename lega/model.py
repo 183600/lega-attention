@@ -187,9 +187,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         ctx.amp_dtype = _ChunkedLinearCE._autocast_dtype(x2d)
         # n_valid 以设备张量保存；clamp_min(1) 同时吸收"全部位置被忽略"的
         # 除零情形（此时梯度因 keep 掩码全零而天然为 0，无需提前特判）。
-        # 逐位置比较只做一次归约：有忽略位置 ⇔ 有效数少于总数，
-        # tgt_has_ignore 从 n_valid 直接导出，省去第二次全量归约
-        # （.all()），结果与 not_ignored.all() 完全一致。
+        # 有忽略位置 ⇔ 有效数少于总数，tgt_has_ignore 由 n_valid 导出。
         n_valid = (tgt != ctx.ignore_index).sum()
         ctx.inv_n = n_valid.clamp_min(1).to(
             x2d.dtype if x2d.dtype in (torch.float32, torch.float64)
@@ -460,9 +458,8 @@ class GPT(nn.Module):
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
                 total = None  # 设备端累加
-                # 逐位置比较只做一次归约：有忽略位置 ⇔ 有效数少于总数；
-                # tgt_has_ignore 从 n_valid 导出，无忽略位置（常见情形）时
-                # 逐块损失无需掩码，也省去第二次全量归约（.all()）。
+                # 有忽略位置 ⇔ 有效数少于总数，tgt_has_ignore 由 n_valid
+                # 导出；无忽略位置（常见情形）时逐块损失无需掩码。
                 n_valid = (tgt != ignore_index).sum()
                 tgt_has_ignore = int(n_valid) != tgt.numel()
                 for s in range(0, flat.size(0), CHUNK):

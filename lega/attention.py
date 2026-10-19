@@ -86,8 +86,7 @@ def _ckpt_worthwhile(B: int, H: int, T: int, S: int, dtype: torch.dtype) -> bool
 
     训练态显式路径的 softmax 反向依赖其输出，保留的是输出概率本身：AMP
     （autocast）与 CPU 下 softmax 强制升 fp32，因此即使输入为 fp16/bf16，
-    反向也按 fp32 常驻完整 (B,H,T,S)（4 字节/元素）。估算与保存口径一致，
-    不再按低精度与半量低估，避免在长上下文下误关 checkpoint。
+    反向也按 fp32 保留完整 (B,H,T,S)（4 字节/元素）。估算与保存口径一致。
     """
     elem = max(4, torch.empty((), dtype=dtype).element_size())
     return B * H * T * S * elem >= _CKPT_MIN_BYTES

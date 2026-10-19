@@ -325,10 +325,8 @@ _RECORDS_CACHE_MAX = 8
 def _read_records(rdir, variant):
     """读入逐记录 CSV，返回列名 -> np.float64 数组（缺失值为 NaN）。
 
-    列式表示避免逐行 dict（每格 float 转换 + 字典键哈希）在十万级记录下的
-    内存/CPU 开销；同一批文件被多张图消费，按 (路径, mtime, size) 缓存，
-    文件变化自动失效，并保留多个 key（LRU 上限 8），变体交替请求时不至
-    互相驱逐后反复重解析。
+    同一批文件被多张图消费，按 (路径, mtime, size) 缓存，文件变化自动
+    失效；缓存保留多个 key（LRU 上限 8）。
     """
     import csv
     # 兼容单种子 analysis_records_<v>.csv 与多种子 analysis_records_<v>_seed<s>.csv，

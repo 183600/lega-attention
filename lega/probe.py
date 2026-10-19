@@ -192,10 +192,10 @@ def _safe_auprc(y: np.ndarray, p: np.ndarray) -> Optional[float]:
 
 
 def _fold_views(X: np.ndarray, folds: np.ndarray):
-    """每折的掩码与标准化后切片：与 λ 无关，网格搜索只算一次。
+    """每折的掩码与标准化后切片。
 
     返回 [(te, Xtr_n, Xte_n)]；标准化统计（mu/sd）只用训练折拟合，
-    防信息从留出折泄漏，与逐 λ 现场计算完全同口径。
+    防信息从留出折泄漏。
     """
     views = []
     for f in sorted(set(folds.tolist())):
@@ -300,7 +300,6 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     k = max(2, min(k, len(examples)))
     report["folds"] = k
     available = []
-    # 可用性检查顺带保留特征矩阵：同一特征集不再为训练重复构建第二次。
     feature_matrices = {}
     for key, name, names in FEATURE_SETS:
         X, valid = _features(valid_all, names)
@@ -322,7 +321,6 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     fold_arr = _group_folds(groups.tolist(), k, seed)
     for key, name, names in available:
         X = feature_matrices[key]
-        # 折划分/标准化统计与 λ 无关：整个网格只算一次，λ 循环只重跑拟合/预测
         views = _fold_views(X, fold_arr)
         set_out: Dict = {"name": name, "features": list(names),
                          "n": int(y_all.size), "n_pos": n_pos,
