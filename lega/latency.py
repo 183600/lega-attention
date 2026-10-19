@@ -138,7 +138,7 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         if ctx > model.block_size:
             continue
         eff["flops_per_tok"][str(ctx)] = estimate_flops_per_token(model, ctx)
-        # 单次 prefill 前向（batch=1）内实测；CPU 无 CUDA 分配语义，记 None
+        # 单次 prefill 前向（batch=1）内记录；CPU 无 CUDA 分配语义，记 None
         if device.startswith("cuda"):
             x = torch.randint(0, model.vocab_size, (1, ctx), device=device)
             ctxmgr = (torch.autocast("cuda", dtype=kv_dtype) if amp

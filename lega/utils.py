@@ -232,12 +232,11 @@ def enable_tf32(device: str) -> None:
 
 
 def cpu_bf16_available() -> bool:
-    """CPU 是否具备可用的 bf16 加速内核（oneDNN/MKLDNN 后端）。
+    """CPU 是否具备可用的 bf16 内核（oneDNN/MKLDNN 后端）。
 
     PyTorch 的 CPU autocast 在所有 x86 机器上都能运行 bf16，但只有带
-    AVX512-BF16（或等价的硬件加速）时才有收益；没有加速内核时仿真路径
-    反而比 fp32 慢。这里以 oneDNN 自报的 bf16 支持为准，缺失该查询接口的
-    构建按“不支持”处理，保持原来的 fp32 行为。
+    AVX512-BF16（或等价的硬件支持）的内核才会启用。这里以 oneDNN 自报的
+    bf16 支持为准，缺失该查询接口的构建按“不支持”处理。
     """
     try:
         return bool(torch.backends.mkldnn.is_available()
@@ -687,10 +686,9 @@ def roc_pr_aucs(scores, labels):
     n = sv.size
     auc = float("nan")
     ap = float("nan")
-    # 无并列（浮点分数几乎总如此）的快速路径：组大小恒为 1，跳过等值分组
-    # 的 diff/flatnonzero/repeat/散射与 reduceat，仅用“正类在升序位置上的
-    # 前缀和”这一等价形式。整数计数在 float64 下精确，结果与等值分组
-    # 通用路径逐位一致（tests/test_utils.py 有逐位对照）。
+    # 无并列（浮点分数几乎总如此）的路径：组大小恒为 1，用“正类在升序
+    # 位置上的前缀和”这一等价形式。整数计数在 float64 下精确，结果与等值
+    # 分组通用路径逐位一致（tests/test_utils.py 有逐位对照）。
     if n < 2 or bool((sv[1:] == sv[:-1]).any()):
         # 等值组首位置（升序）；组内平均秩（1-based）= 首位置 + (组大小+1)/2
         starts = np.concatenate([[0], np.flatnonzero(np.diff(sv)) + 1])
@@ -701,8 +699,7 @@ def roc_pr_aucs(scores, labels):
             avg_ranks = starts.astype(np.float64) + (counts + 1.0) / 2.0
             # 正类平均秩之和 = Σ_组 组平均秩×组内正类数。avg_ranks 是
             # 半整数、g_pos 是小整数，乘积与求和全程在 float64 下精确，
-            # 与散射回各位置后逐个求和的旧口径逐位一致，但省去 n 规模的
-            # scatter/repeat 与布尔切片。
+            # 与散射回各位置后逐个求和的旧口径逐位一致。
             r_pos = float((avg_ranks * g_pos).sum())
             u = r_pos - n_pos * (n_pos + 1) / 2.0
             auc = float(u / (n_pos * n_neg))

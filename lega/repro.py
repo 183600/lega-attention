@@ -178,7 +178,7 @@ def runtime_info(device: str = None) -> dict:
         "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
         # cudnn conv 默认 allow_tf32=True：不记录会把“训练实际用 TF32”漏掉
         "tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
-        # 线程数影响归约顺序与浮点结果；CVD 决定实际可见的加速器
+        # 线程数影响归约顺序与浮点结果；CVD 决定实际可见的设备
         "torch_threads": int(torch.get_num_threads()),
         "torch_interop_threads": int(torch.get_num_interop_threads()),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),

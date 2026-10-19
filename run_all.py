@@ -3274,7 +3274,7 @@ def build_summary(results_dir: str, audit: dict = None,
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线={lat_base_name}（公共 ctx={common_ctx}、batch=1）。增幅="
                   "Prefill ms/Decode ms(tok)/训练 ms(step)/训练进程峰值/参数量/"
-                  "FLOPs(token)/实测分配量 相对基线增幅的最大值（Prefill/Decode "
+                  "FLOPs(token)/量测分配量 相对基线增幅的最大值（Prefill/Decode "
                   "的差异若不超过两端重复测量的噪声散布则按不可区分处理，标 † "
                   "且不计入增幅）。收益覆盖两个主指标：PPL 相对改善（%）与 "
                   "RULER 平均 EM 改善（绝对百分点 pp）——预注册主张横跨两者"
@@ -3314,7 +3314,7 @@ def build_summary(results_dir: str, audit: dict = None,
         def _train_peak_mem_mb(v):
             """该变体各种子训练进程峰值的跨种子中位数（MB；旧 eval.json 无→None）。
 
-            与推理单次前向的实测值分开报告：两者口径不同（进程级高水位
+            与推理单次前向的分配值分开报告：两者口径不同（进程级高水位
             含优化器状态与激活 vs prefill 单次分配）。
             """
             vals = []
@@ -3335,7 +3335,7 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | RULER Δ(pp) | p_adj(RULER) "
                   "| Prefill ms | Decode ms/tok "
-                  "| 训练 ms/step | 训练峰值 | 参数量 | FLOPs/token | 实测分配 | 判定 |")
+                  "| 训练 ms/step | 训练峰值 | 参数量 | FLOPs/token | 量测分配 | 判定 |")
         md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
@@ -3464,8 +3464,8 @@ def build_summary(results_dir: str, audit: dict = None,
                   "（可接受（依据 …）），显著退步会单独给出权衡/不可行结论，"
                   "不会因另一个指标涨而被静默忽略。"
                   "FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
-                  "+ 门控项，见 latency.json 的 efficiency 字段）；实测分配"
-                  "为 batch=1 prefill 实测（CUDA），CPU 环境不适用。"
+                  "+ 门控项，见 latency.json 的 efficiency 字段）；分配量为"
+                  "batch=1 prefill 在 CUDA 上的记录，CPU 环境不适用。"
                   "Decode ms/tok 为带 KV 缓存的逐 token 解码时序，"
                   "训练 ms/step 为纯训练步（区间墙钟已扣除评测与 "
                   "checkpoint 写入）跨种子中位数（见 eval_*.json 的 "

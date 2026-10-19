@@ -217,9 +217,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                       (torch.float16, torch.bfloat16) else None)
         # 是否有被忽略的位置（全局判定一次）：没有时损失与梯度两条路径
         # 都无需逐块构造掩码，直接按原目标取值/散加。CUDA 上不把有效数取回
-        # 主机：.item() 会强制设备同步、打断异步流水，而掩码只是 O(x2d.numel())
-        # 的元素级开销，相对 lm_head GEMM 可忽略；CPU 上 .item() 无同步代价，
-        # 保留无掩码快路径。
+        # 主机，按有掩码处理；CPU 上取回有效数并保留无掩码路径。
         tgt_has_ignore = (True if x2d.is_cuda
                           else int(n_valid) != tgt.numel())
         has_ignore = (need_dx or need_gw) and tgt_has_ignore
@@ -261,8 +259,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
                         d.mul_(keep.unsqueeze(1).to(d.dtype))
                     if gemm_dtype is not None:
                         d = d.to(gemm_dtype)
-                        # 低精度副本生成后立即释放 fp32 概率矩阵，峰值显存
-                        # 只多出低精度副本而不是两份同时驻留。
+                        # 低精度副本生成后立即释放 fp32 概率矩阵。
                         del lcf
                         if w_g is None:
                             w_g = (w_fwd if w_fwd.dtype == gemm_dtype
@@ -340,12 +337,10 @@ class _ChunkedLinearCE(torch.autograd.Function):
 
 def _ce_chunk_size(vocab_size: int, device: torch.device, *,
                    train: bool) -> int:
-    """lm_head+交叉熵的分块大小：按设备内存预算与词表自适应。
+    """lm_head+交叉熵的分块大小：按设备与词表自适应。
 
-    训练态 CPU 用 512MB fp32 logits 预算（bf16 梯度 GEMM 实测大块明显更快）；
-    CUDA 按总显存的 1/16 估算并夹在 128–512MB：大显存卡减少分块次数、提升
-    GEMM 利用率，小显存卡仍保留 128MB 下限。无梯度推理的 CPU 路径大块几乎
-    没有收益（实测在噪声内），沿用 128MB 预算以降低峰值内存。
+    训练态与无梯度路径使用不同的元素上限；CUDA 上按设备规模估算，结果限制在
+    固定上下限之间。
     """
     if not train and device.type == "cpu":
         elems = 33_554_432
@@ -540,7 +535,7 @@ class GPT(nn.Module):
             # softmax(out=) 在 grad 模式下反传会报“derivative not implemented”。
             needs_grad = (torch.is_grad_enabled()
                           and (x.requires_grad or w.requires_grad))
-            # 每块 logits 为目标数乘以分块大小，分块大小随词表/设备内存自适应。
+            # 每块 logits 为目标数乘以分块大小，分块大小随设备/词表自适应。
             CHUNK = _ce_chunk_size(self.vocab_size, flat.device,
                                    train=needs_grad)
             if return_window_losses and needs_grad:
@@ -553,8 +548,7 @@ class GPT(nn.Module):
                 total = None  # 设备端累加
                 # 有忽略位置 ⇔ 有效数少于总数，tgt_has_ignore 由 n_valid
                 # 导出；无忽略位置（常见情形）时逐块损失无需掩码。CUDA 上
-                # 不把有效数取回主机：.item() 会强制设备同步、打断异步流水，
-                # 而掩码只是元素级开销，相对 lm_head GEMM 可忽略。
+                # 不把有效数取回主机，按有掩码处理。
                 n_valid = (tgt != ignore_index).sum()
                 tgt_has_ignore = (True if flat.is_cuda
                                   else int(n_valid) != tgt.numel())
