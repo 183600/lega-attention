@@ -625,6 +625,12 @@ class GPT(nn.Module):
             assert T0 + max_new_tokens <= self.block_size, (
                 f"生成长度超限: 提示 {T0} + 新增 {max_new_tokens} > "
                 f"block_size {self.block_size}，请先截断提示或减少 max_new_tokens")
+            # 空提示（T0=0）无法生成：第一个 token 的 logits 必须来自至少一个
+            # 输入位置；提前报出清晰错误，避免在注意力的 max/切片处抛出
+            # 难以定位的 "amax(): Expected reduction dim -1 to have non-zero size"。
+            assert T0 >= 1, (
+                f"提示长度不能为 0（收到 shape {tuple(idx.shape)}）："
+                "生成至少需要 1 个起始 token 才能产生第一个 token 的 logits")
             # 预分配输出缓冲，逐 token 就地写入
             out_ids = torch.empty(B, T0 + max_new_tokens, dtype=idx.dtype,
                                   device=idx.device)
