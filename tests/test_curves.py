@@ -280,7 +280,7 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
                        "val_ppl_ci95": [1.0, 2.0]}, f)
         d = diagnose_run_dir(tmp)
         assert d["nan_report"]["where"] == "train_loss"
-        # eval.json 的训练预算覆盖率必须被曲线诊断读取并用于“训练不足”判定
+        # eval.json 的训练数据覆盖率必须被曲线诊断读取并用于“训练不足”判定
         assert d["epochs_seen"] == 0.05 and d["train_tokens"] == 1000
         assert d["train_budget_sufficient"] is False
         assert d["status"] == "训练不足（数据覆盖不足）", d

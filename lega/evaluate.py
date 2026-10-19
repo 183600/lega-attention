@@ -157,7 +157,7 @@ def load_train_peak_mem_mb(run_dir: str):
 
 
 def load_train_coverage(run_dir: str):
-    """从训练 run 的 eval.json 继承训练预算覆盖率。
+    """从训练 run 的 eval.json 继承训练数据覆盖率。
 
     独立评测（test split）也需要知道 checkpoint 训练时看过多少数据：
     epochs_seen<1 的结果不能当作收敛。返回 dict（缺失字段不含该键），
@@ -339,7 +339,7 @@ def main():
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)
     res["train_peak_mem_mb"] = load_train_peak_mem_mb(run_dir)
-    # 训练预算覆盖率随 checkpoint 绑定：epochs_seen<1 时下游必须把这份
+    # 训练数据覆盖率随 checkpoint 绑定：epochs_seen<1 时下游必须把这份
     # 评测标为“未充分训练”，而不是与跑满数据的 run 直接比 PPL。
     res.update(load_train_coverage(run_dir))
     save_json(res, args.out)

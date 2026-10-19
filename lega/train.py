@@ -1022,7 +1022,7 @@ def main():
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
-    # 训练预算覆盖率：tokens_seen 是“见过的 token 总数”，除以训练集大小
+    # 训练数据覆盖率：tokens_seen 是“见过的 token 总数”，除以训练集大小
     # 得到约等价 epoch 数（随机窗口采样，不是严格的一遍遍历）。它回答的是
     # “曲线下降是否只是还没看完数据”，与 eval_iters 的验证覆盖率互补。
     train_tokens = int(len(train))

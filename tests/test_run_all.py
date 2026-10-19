@@ -404,7 +404,7 @@ def test_verify_controlled_setup_consistency():
         except SystemExit:
             pass
 
-        # 显式 null seed：审计应按“不一致”如实报告，而不是 int(None) 崩溃
+        # 显式 null seed：审计应如实报告“不一致”
         cfg["lr"] = 0.001
         cfg["seed"] = None
         _write_json(cfg_path, cfg)
@@ -1618,11 +1618,10 @@ def test_build_summary_zero_failure_variant_blocks_consensus():
 
 
 def test_build_summary_tolerates_seedless_artifacts():
-    """旧/外部产物没有 seed 字段时不得在汇总里 TypeError。
+    """产物没有 seed 字段时按缺种子信息处理。
 
     _seed_key 对无名种子文件返回 None（全表以 None 表“无种子信息”）；ngram
-    对比的 excluded_seeds/seeds 与线性探针逐种子表若直接 int(None) 会让整份
-    汇总中途崩溃，而不是按缺种子信息处理。
+    对比的 excluded_seeds/seeds 与线性探针逐种子表沿用同一口径。
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -1652,27 +1651,26 @@ def test_build_summary_tolerates_seedless_artifacts():
         assert probe["rows"] and probe["rows"][0]["seeds"] == [None]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] build_summary：无 seed 旧产物按缺种子信息处理，不崩溃")
+    print("  [ok] build_summary：无 seed 产物按缺种子信息处理")
 
 
 def test_ngram_baseline_rejects_non_dict_json():
-    """合法 JSON 但非对象（数组）的 ngram_baseline.json 视为不可用而非崩溃。"""
+    """合法 JSON 但非对象（数组）的 ngram_baseline.json 视为不可用。"""
     tmp = tempfile.mkdtemp()
     try:
         _write_json(os.path.join(tmp, "ngram_baseline.json"), [1, 2, 3])
         r = ngram_baseline_comparison({}, tmp)
         assert r.get("error"), r
         out = build_summary(tmp)
-        # 畸形文件按“未运行”处理（而不是把数组当对象炸掉汇总）
+        # 畸形文件按“未运行”处理
         assert "简单统计基线：未运行" in out["markdown"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] ngram_baseline.json 非对象：返回 error/跳过而非 AttributeError")
+    print("  [ok] ngram_baseline.json 非对象：返回 error/跳过")
 
 
 def test_tradeoff_prefers_sdpa_runtime_baseline():
-    """涨点-增幅的运行时要与主表同一基线（standard_sdpa 优先），
-    否则候选的 SDPA 加速会被误算成负增幅、低估方法开销。"""
+    """涨点-增幅的运行时要与主表同一基线（standard_sdpa 优先）。"""
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "standard_sdpa", "lega"):

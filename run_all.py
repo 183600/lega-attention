@@ -258,8 +258,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             else:
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                # 键缺失（旧产物）沿用默认 seed；显式为 null/非数值时无法证明
-                # 用了预期种子，审计应如实报“不一致”而不是 int(None) 崩溃。
+                # 键缺失时沿用默认 seed；显式为 null/非数值时无法证明用了
+                # 预期种子，审计应如实报“不一致”。
                 cfg_seed = cfg.get("seed", seed)
                 try:
                     seed_mismatch = (cfg_seed is None
@@ -1160,8 +1160,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             ng = json.load(f)
     except (OSError, ValueError):
         return {}
-    # 合法 JSON 但非对象（如误写为数组）按不可用处理：结构畸形不能以
-    # AttributeError 炸掉整份汇总（与 load_registered_hypotheses 同口径）。
+    # 合法 JSON 但非对象（如数组）按不可用处理。
     if not isinstance(ng, dict):
         return {"error": "ngram_baseline.json 不是 JSON 对象"}
     ppl_map = ng.get("ppl") or {}
@@ -1340,9 +1339,7 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             if oof.get("auprc") is None or oof.get("auroc") is None:
                 continue
             per_seed.append({
-                # 旧/外部 analysis JSON 可能无 seed 字段（_seed_key 返回 None）：
-                # 直接 int(None) 会让整份汇总 TypeError，与全表 None 容忍口径
-                # 不一致（下面同样理由的 excluded_seeds/seeds 也要容忍）。
+                # 无 seed 字段（_seed_key 返回 None）时按缺种子信息处理。
                 "seed": int(s) if s is not None else None,
                 "probe_auprc": float(oof["auprc"]),
                 "probe_auroc": float(oof["auroc"]),
@@ -2023,7 +2020,7 @@ def build_summary(results_dir: str, audit: dict = None,
         ("val_ppl", lambda m: _stat_series(m, "eval", _ppl_of)),
         ("gate_mean", lambda m: _stat_series(m, "eval", _clock_extractor("gate_mean"))),
         ("val_loss", lambda m: _stat_series(m, "eval", _clock_extractor("val_loss"))),
-        # 评估不确定性（单 run 内窗口抽样）与训练预算覆盖率：这两个量决定
+        # 评估不确定性（单 run 内窗口抽样）与训练数据覆盖率：这两个量决定
         # “数值差异是否值得解释”，必须与点估计一起进入 summary.json/csv。
         ("ppl_ci_rel_pct", lambda m: _stat_series(m, "eval", _ppl_ci_rel_pct)),
         ("epochs_seen", lambda m: _stat_series(m, "eval", _eval_scalar("epochs_seen"))),
@@ -2087,7 +2084,7 @@ def build_summary(results_dir: str, audit: dict = None,
         row["gate_extra"] = (ev_example or {}).get("n_gate_extra", 0)
         row["val_ppl_clamped"] = any(
             (s.get("eval") or {}).get("val_ppl_clamped") for s in m.values())
-        # 训练预算/评估覆盖的“最坏种子”兜底值：均值可能掩盖某个种子只跑了
+        # 训练/评估覆盖的“最坏种子”兜底值：均值可能掩盖某个种子只跑了
         # 极少数据或只评测了极少窗口的情况，汇总警告以最小值触发。
         evals_v = [s["eval"] for s in m.values() if s.get("eval")]
         eps = [float(e["epochs_seen"]) for e in evals_v
@@ -2271,7 +2268,7 @@ def build_summary(results_dir: str, audit: dict = None,
             cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
                                  f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；")
         md += [""] + cols_notes
-        # 训练预算门：不足 1 epoch 的 PPL 下降只是“还没学完”，与“方法有效”
+        # 训练覆盖门：不足 1 epoch 的 PPL 下降只是“还没学完”，与“方法有效”
         # 是两回事；在表格外单独给醒目警告，避免读者把可跑通当结论。
         insufficient = [r for r in rows
                         if r.get("epochs_seen_min") is not None
@@ -2279,13 +2276,13 @@ def build_summary(results_dir: str, audit: dict = None,
         missing_cov = [r for r in rows if r.get("epochs_seen_min") is None]
         if insufficient:
             worst_cov = min(r["epochs_seen_min"] for r in insufficient)
-            md += ["", f"⚠ 训练预算不足：{len(insufficient)}/{len(rows)} 个变体"
+            md += ["", f"⚠ 训练覆盖不足：{len(insufficient)}/{len(rows)} 个变体"
                       f"的最少训练覆盖仅约 {worst_cov:.2f} 个 epoch（<1）——"
                       "训练/验证曲线同时下降只说明“还在学”，不能作为收敛证据；"
                       "下表的 PPL/RULER 差异先按“没学完”处理，延长训练后重评。"]
         if missing_cov:
             md += ["", f"注：{len(missing_cov)}/{len(rows)} 个变体的 eval.json "
-                      "没有训练覆盖字段（旧结果或手工评测），无法核对训练预算。"]
+                      "没有训练覆盖字段（旧结果或手工评测），无法核对训练覆盖。"]
         # 评估噪声门：单 run 的 PPL 窗口抽样 CI 相对半宽若与跨种子差异同量级，
         # 变体间的小 PPL 差异不足以支撑方法结论。
         ci_vals = [r["ppl_ci_rel_pct"] for r in rows
@@ -3061,8 +3058,7 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 涨点-增幅权衡：评价改进不能只看指标涨点
     md += ["", "## 涨点-增幅权衡（涨点必须对照增幅）", ""]
     # 运行时基线与上表 prefill_rel_pct 同一策略：优先 standard_sdpa（与全部
-    # 候选的 SDPA 推理路径可比），缺失时退回显式 standard。用显式 standard
-    # 当基线与候选的 SDPA 路径错位，会把加速误算成"负增幅"、系统性低估开销。
+    # 候选的 SDPA 推理路径可比），缺失时退回显式 standard。
     # 训练 ms/step 与训练峰值仍取 standard 训练产物（只有它有训练记录）。
     # 注：standard_sdpa 不在 VARIANTS 里，只存在于 latency.json 的变体表。
     lat_base_name = next((n for n in ("standard_sdpa", "standard")

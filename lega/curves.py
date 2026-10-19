@@ -37,7 +37,7 @@ DIVERGE_FACTOR = 1.5
 EARLY_STOP_TOL = 0.02
 # 欠拟合疑似数据管道问题：训练损失停在随机猜测水平的该比例以内
 RANDOM_LEVEL_TOL = 0.9
-# 训练预算是否足以谈“收敛”：随机窗口采样下折算的 epoch 数低于该值时，
+# 训练覆盖是否足以谈“收敛”：随机窗口采样下折算的 epoch 数低于该值时，
 # 曲线下降只说明“还在学”，不能据此判定收敛或建议“无需干预”。
 MIN_TRAIN_EPOCHS = 1.0
 # 梯度范数尖峰：最大 pre-clip 范数超过中位数该倍数视为爆炸性尖峰
@@ -201,7 +201,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     """从单条 train_log 记录序列给出结构化诊断。
 
     records: load_train_log 的输出（含 'loss' 训练点与 'val_loss' 验证点）。
-    epochs_seen/train_tokens: 来自 eval.json 的训练预算覆盖率；缺失时跳过
+    epochs_seen/train_tokens: 来自 eval.json 的训练数据覆盖率；缺失时跳过
     “训练不足”判定（旧结果目录仍可诊断）。
     返回 dict：status / 判定依据 / 关键数值 / 建议清单 recommendations。
     早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注。
@@ -403,7 +403,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
 
-    # 训练预算覆盖率（来自 eval.json）：曲线下降 ≠ 已收敛。只见过不足
+    # 训练数据覆盖率（来自 eval.json）：曲线下降 ≠ 已收敛。只见过不足
     # 1 个 epoch 时，验证损失仍在快速变化，此时比较方法/下“无需干预”的
     # 结论都不稳；必须把“还没学完”与真正的收敛区分开。
     budget_insufficient = (epochs_seen is not None
@@ -412,14 +412,14 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         tok_s = (f"（{train_tokens:,} 训练 token）"
                  if train_tokens else "")
         evidence.append(
-            f"训练预算仅覆盖约 {epochs_seen:.3f} 个 epoch{tok_s}："
+            f"训练覆盖仅约 {epochs_seen:.3f} 个 epoch{tok_s}："
             f"低于 {MIN_TRAIN_EPOCHS:g} 个 epoch，曲线下降主要反映“还没学完”，"
             "不能据此判定收敛或比较方法优劣")
         recommendations[:] = [r for r in recommendations
                               if "无需干预" not in r]
         recommendations.append(
             f"训练数据覆盖不足（约 {epochs_seen:.3f} epoch）：先继续训练/增大"
-            "训练预算到至少覆盖 1 个 epoch，并保持当前验证密度；在此之前"
+            "训练覆盖至少 1 个 epoch，并保持当前验证密度；在此之前"
             "不要把验证损失变化解释为收敛或方法差异")
         if status == "正常收敛":
             status = "训练不足（数据覆盖不足）"

@@ -510,8 +510,7 @@ def holm_bonferroni(pvals) -> list:
     返回同序列表：
     p_adj_(i) = max_{j<=i} min(1, (m-j+1) * p_(j))（p 升序的第 j 个观测），
     保证校正后 p 随原始 p 单调不减且 >= 原始 p。
-    NaN 必须剔除而不是参与排序：NaN 的比较全为 False，sorted 会把它们按
-    任意相对位置插入，一旦排在前面，后续有效 p 的校正值将被全部抬到 1。
+    NaN 与 None 一样不参与排序，也不计入家族大小。
     """
     idx = [i for i, p in enumerate(pvals) if p is not None and p == p]
     m = len(idx)

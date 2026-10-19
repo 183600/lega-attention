@@ -361,8 +361,7 @@ class CausalSelfAttention(nn.Module):
         """门控查询项 w·q 的 (B,H,T) 归约，返回 fp32。
 
         统一用 einsum 归约（逐头点积）：对训练与推理都走同一条归约路径，
-        保证两种模式数值一致；相比广播乘 + sum 不物化 (B,H,T,Dh) 中间张量，
-        前向/反向实测均更快（CPU 上 B=16,T=1024,Dh=64 约 2.1ms→1.5ms）。
+        保证两种模式数值一致。
         """
         return torch.einsum("bhtd,hd->bht", q_content, gw).float()
 
@@ -410,8 +409,7 @@ class CausalSelfAttention(nn.Module):
         k_null_c = v_null_c = None
         lse = None
         if is_null:
-            # null 权重按块共享：调用方（分块路径）在循环外转换一次并传入，
-            # 避免每块重复构造缓存键/比较（推理态）或重复 .to（训练态）。
+            # null 权重按块共享：调用方（分块路径）在循环外转换一次并传入。
             if null_c is None:
                 null_c = self._cast_cached(
                     '_null_cast', (self.k_null, self.v_null), v.dtype)
