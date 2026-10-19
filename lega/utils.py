@@ -298,6 +298,27 @@ def student_t_two_sided_p(t: float, df: float) -> float:
     return float(_betai(df / 2.0, 0.5, x))
 
 
+def t_critical_95(df: float) -> float:
+    """95% 双侧 Student-t 临界值（用现有 t 分布 p 值二分求根，无 scipy）。
+
+    小样本（如验证窗口仅 eval_iters=20 个）用正态 1.96 会低估区间宽度；
+    df<=0 返回 None，df>200 时 t→z 近似 1.96 直接返回以免无谓迭代。
+    """
+    if df is None or not math.isfinite(float(df)) or float(df) <= 0:
+        return None
+    df = float(df)
+    if df > 200:
+        return 1.959963984540054
+    lo, hi = 0.0, 1e3
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if student_t_two_sided_p(mid, df) > 0.05:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def _paired_diffs(a, b) -> np.ndarray:
     """按位置提取配对差 a_i − b_i，供 t 检验/置换检验/bootstrap 共用。
 

@@ -237,6 +237,52 @@ def test_evaluate_val_returns_coverage_and_gate_metrics():
     assert 0.0 < metrics["gate_mean"] < 1.0
 
 
+def test_evaluate_val_reports_window_sampling_uncertainty():
+    """有限个验证窗口的点估计必须附带窗口间抽样标准误与 CI。"""
+    torch.manual_seed(0)
+    model = _tiny("lega")
+    val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
+    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=9, amp=False)
+    assert metrics["val_loss_se"] is not None and metrics["val_loss_se"] > 0
+    lo, hi = metrics["val_loss_ci95"]
+    assert lo < metrics["val_loss"] < hi
+    ppl_lo, ppl_hi = metrics["val_ppl_ci95"]
+    assert 0 < ppl_lo <= ppl_hi
+    assert metrics["val_loss_min"] <= metrics["val_loss"] <= metrics["val_loss_max"]
+    # 单窗口时无法估计窗口间方差：SE/CI 必须为 None，而不是给出虚假精度。
+    one = evaluate_val(model, val, ctx=10, device="cpu", iters=1, amp=False)
+    assert one["eval_iters"] == 1
+    assert one["val_loss_se"] is None and one["val_loss_ci95"] is None
+    assert one["val_loss_min"] == one["val_loss"] == one["val_loss_max"]
+
+
+def test_per_window_losses_match_individual_forwards():
+    """loss_per_window 每行必须等于单独评测该窗口的损失，且均值等于总损失。"""
+    torch.manual_seed(0)
+    model = _tiny("lega")
+    model.eval()
+    idx = torch.randint(0, 64, (3, 10))
+    y = torch.randint(0, 64, (3, 10))
+    with torch.inference_mode():
+        out = model(idx, targets=y, return_window_losses=True)
+    assert out["loss_per_window"].shape == (3,)
+    assert abs(float(out["loss"]) -
+               float(out["loss_per_window"].mean())) < 1e-6
+    for r in range(3):
+        with torch.inference_mode():
+            one = model(idx[r:r + 1], targets=y[r:r + 1])
+        assert abs(float(one["loss"]) -
+                   float(out["loss_per_window"][r])) < 1e-5
+    # 训练/需要梯度的路径不得支持该选项（避免悄悄改变训练图）
+    model.train()
+    try:
+        model(idx, targets=y, return_window_losses=True)
+    except RuntimeError as e:
+        assert "return_window_losses" in str(e)
+    else:
+        raise AssertionError("梯度路径必须拒绝 return_window_losses")
+
+
 def test_inference_mode_then_training_forward_backward():
     """inference_mode 前向产生的缓存常量不能污染随后同形状的训练图。"""
     model = _tiny("lega")

@@ -225,6 +225,29 @@ def test_infinite_step_records_do_not_crash_diagnosis():
     print("  [ok] step=Infinity 的记录跳过并计数（OverflowError 不中断诊断）")
 
 
+def test_insufficient_train_coverage_is_not_normal_convergence():
+    """训练/验证都在降但只见过 <1 epoch：必须判“训练不足”，不得写无需干预。"""
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    d = diagnose_curve(recs, epochs_seen=0.03, train_tokens=1000)
+    assert d["status"] == "训练不足（数据覆盖不足）", d
+    assert any("epoch" in e for e in d["evidence"]), d["evidence"]
+    assert not any("无需干预" in r for r in d["recommendations"]), d
+    assert any("继续训练" in r or "覆盖不足" in r for r in d["recommendations"])
+    assert d["epochs_seen"] == 0.03 and d["train_budget_sufficient"] is False
+    # 覆盖足够时仍是正常收敛；缺少 coverage 信息（旧结果）时也不误报
+    d2 = diagnose_curve(recs, epochs_seen=2.0)
+    assert d2["status"] == "正常收敛" and d2["train_budget_sufficient"] is True
+    d3 = diagnose_curve(recs)
+    assert d3["status"] == "正常收敛"
+    assert d3["epochs_seen"] is None and d3["train_budget_sufficient"] is None
+    # 更严重的状态（过拟合）不被覆盖率信息覆盖
+    d4 = diagnose_curve(_log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2],
+                             [4.3, 3.6, 3.2, 3.4, 3.9]), epochs_seen=0.1)
+    assert d4["status"] == "过拟合"
+    assert any("epoch" in e for e in d4["evidence"]), d4["evidence"]
+    print("  [ok] 训练覆盖 <1 epoch → 训练不足（不误写无需干预）")
+
+
 def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"
@@ -232,8 +255,11 @@ def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合趋势"]) == "过拟合趋势"
     assert worst_status(["过拟合趋势", "过拟合"]) == "过拟合"
     assert worst_status([]) == "数据不足"
+    assert worst_status(["训练不足（数据覆盖不足）", "正常收敛"]) \
+        == "训练不足（数据覆盖不足）"
     assert (STATUS_ORDER["NaN/Inf"] > STATUS_ORDER["发散"]
             > STATUS_ORDER["过拟合"] > STATUS_ORDER["欠拟合/学习不充分"]
+            > STATUS_ORDER["训练不足（数据覆盖不足）"]
             > STATUS_ORDER["过拟合趋势"] > STATUS_ORDER["数据不足"]
             > STATUS_ORDER["正常收敛"])
     print("  [ok] worst_status 严重度排序")
@@ -249,8 +275,15 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
             f.write(json.dumps({"step": 20, "val_loss": 3.8}) + "\n")
         with open(os.path.join(tmp, "nan_report.json"), "w", encoding="utf-8") as f:
             json.dump({"step": 30, "where": "train_loss"}, f)
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"epochs_seen": 0.05, "train_tokens": 1000,
+                       "val_ppl_ci95": [1.0, 2.0]}, f)
         d = diagnose_run_dir(tmp)
         assert d["nan_report"]["where"] == "train_loss"
+        # eval.json 的训练预算覆盖率必须被曲线诊断读取并用于“训练不足”判定
+        assert d["epochs_seen"] == 0.05 and d["train_tokens"] == 1000
+        assert d["train_budget_sufficient"] is False
+        assert d["status"] == "训练不足（数据覆盖不足）", d
         assert len(load_train_log(os.path.join(tmp, "train_log.jsonl"))) == 5
         # 损坏行被容忍，不阻塞诊断
         with open(os.path.join(tmp, "train_log.jsonl"), "a", encoding="utf-8") as f:

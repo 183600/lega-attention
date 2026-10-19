@@ -451,6 +451,40 @@ def _ppl_of(d):
         return None
 
 
+def _ppl_ci_rel_pct(d):
+    """单次 run 内验证窗口抽样 CI 的相对半宽（占 PPL 点估计的百分比）。
+
+    PPL 的跨种子 std 与此量回答不同问题：前者是训练随机性，后者是
+    “只评测有限个验证窗口”的评估随机性。两者都要看，不能互相替代。
+    """
+    ci = (d or {}).get("val_ppl_ci95")
+    ppl = _ppl_of(d)
+    if (not isinstance(ci, (list, tuple)) or len(ci) != 2
+            or ppl is None or ppl <= 0):
+        return None
+    try:
+        lo, hi = float(ci[0]), float(ci[1])
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return None
+    return (hi - lo) / 2.0 / ppl * 100.0
+
+
+def _eval_scalar(key):
+    """从 eval.json 提取标量（缺失/非法值返回 None），用于覆盖率汇总。"""
+    def get(d):
+        v = (d or {}).get(key)
+        if v is None:
+            return None
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) else None
+    return get
+
+
 def _ruler_task_means(d):
     """单次 RULER 结果：各任务先在上下文档位求平均（fwe 用 recall，其余 EM）。"""
     out = {}
@@ -468,6 +502,26 @@ def _ruler_task_means(d):
 def _ruler_avg_of(d):
     tm = _ruler_task_means(d)
     return float(sum(tm.values()) / len(tm)) if tm else None
+
+
+def _ruler_min_cell_n(d):
+    """单次 RULER 结果里 (任务, 上下文) 单元的最小样本数。
+
+    EM/Wilson CI 的精度直接由每格 n 决定；汇总只报平均分而不报最小 n，
+    会把 n=2 的 0.000 与 n=30 的 0.000 当成同样可信的证据。
+    """
+    ns = []
+    for task, by_ctx in ((d or {}).get("results") or {}).items():
+        if task.startswith("_") or not isinstance(by_ctx, dict):
+            continue
+        for cell in by_ctx.values():
+            if not isinstance(cell, dict) or cell.get("n") is None:
+                continue
+            try:
+                ns.append(int(cell["n"]))
+            except (TypeError, ValueError):
+                continue
+    return min(ns) if ns else None
 
 
 def _stat_series(seed_map, payload_key, extractor):
@@ -1969,7 +2023,16 @@ def build_summary(results_dir: str, audit: dict = None,
         ("val_ppl", lambda m: _stat_series(m, "eval", _ppl_of)),
         ("gate_mean", lambda m: _stat_series(m, "eval", _clock_extractor("gate_mean"))),
         ("val_loss", lambda m: _stat_series(m, "eval", _clock_extractor("val_loss"))),
+        # 评估不确定性（单 run 内窗口抽样）与训练预算覆盖率：这两个量决定
+        # “数值差异是否值得解释”，必须与点估计一起进入 summary.json/csv。
+        ("ppl_ci_rel_pct", lambda m: _stat_series(m, "eval", _ppl_ci_rel_pct)),
+        ("epochs_seen", lambda m: _stat_series(m, "eval", _eval_scalar("epochs_seen"))),
+        ("eval_tokens", lambda m: _stat_series(
+            m, "eval", _eval_scalar("val_tokens_evaluated"))),
+        ("eval_windows", lambda m: _stat_series(
+            m, "eval", _eval_scalar("val_windows"))),
         ("ruler_avg", lambda m: _stat_series(m, "ruler", _ruler_avg_of)),
+        ("ruler_min_n", lambda m: _stat_series(m, "ruler", _ruler_min_cell_n)),
     ]
     ruler_tasks = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
     for task in ruler_tasks:
@@ -2024,6 +2087,21 @@ def build_summary(results_dir: str, audit: dict = None,
         row["gate_extra"] = (ev_example or {}).get("n_gate_extra", 0)
         row["val_ppl_clamped"] = any(
             (s.get("eval") or {}).get("val_ppl_clamped") for s in m.values())
+        # 训练预算/评估覆盖的“最坏种子”兜底值：均值可能掩盖某个种子只跑了
+        # 极少数据或只评测了极少窗口的情况，汇总警告以最小值触发。
+        evals_v = [s["eval"] for s in m.values() if s.get("eval")]
+        eps = [float(e["epochs_seen"]) for e in evals_v
+               if e.get("epochs_seen") is not None]
+        row["epochs_seen_min"] = min(eps) if eps else None
+        toks = [float(e["val_tokens_evaluated"]) for e in evals_v
+                if e.get("val_tokens_evaluated") is not None]
+        row["eval_tokens_min"] = min(toks) if toks else None
+        row["val_loss_ci95"] = (ev_example or {}).get("val_loss_ci95")
+        row["val_ppl_ci95"] = (ev_example or {}).get("val_ppl_ci95")
+        rns = [_ruler_min_cell_n(s.get("ruler")) for s in m.values()
+               if s.get("ruler") is not None]
+        rns = [n for n in rns if n is not None]
+        row["ruler_min_n_min"] = min(rns) if rns else None
         # 运行时指标（取全部变体的最大公共 ctx、batch=1）；不受种子影响，测一次
         e = lat_entries.get(v)
         if e and common_ctx is not None:
@@ -2095,6 +2173,8 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
             ("gate_extra", "门控额外参数"), ("val_ppl", "PPL↓"),
+            ("ppl_ci_rel_pct", "PPL评估CI±%"),
+            ("epochs_seen", "训练覆盖(epoch)"),
             ("ruler_avg", "RULER平均↑"),
             ("ruler_niah_synth", "niah_synth↑"),
             ("ruler_niah_corpus", "niah_corpus↑"),
@@ -2113,7 +2193,10 @@ def build_summary(results_dir: str, audit: dict = None,
     def fmt_stat_cell(r, key):
         st = {"mean": r.get(key), "std": r.get(f"{key}_std"),
               "n": r.get(f"{key}_n")}
-        cell = _fmt_stat(st)
+        # 评估 CI 半宽与 epoch 覆盖用 2 位小数：0.03 epoch 的差异不应被
+        # 四舍五入成 0.0 而看起来像“没有训练”；CI ±12.5% 也需要小数位。
+        cell = _fmt_stat(st, nd=2 if key in ("ppl_ci_rel_pct", "epochs_seen")
+                         else 3)
         # PPL 被钳制在 exp(20) 的 run（发散）必须显式标注：不能与正常 PPL
         # 在同一列表头中静默比较（行级 val_ppl_clamped 由评测写入）。
         if key == "val_ppl" and r.get("val_ppl_clamped"):
@@ -2135,7 +2218,8 @@ def build_summary(results_dir: str, audit: dict = None,
         stat_keys = {"val_ppl", "ruler_avg", "gate_mean", "misleading_rate",
                      "misleading_given_conc", "auroc_logit", "auroc_qterm",
                      "auprc_logit", "auprc_qterm", "hit_base_rate",
-                     "gate_f1_macro", "gate_f1_macro_always_write"} \
+                     "gate_f1_macro", "gate_f1_macro_always_write",
+                     "ppl_ci_rel_pct", "epochs_seen"} \
             | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
@@ -2160,6 +2244,12 @@ def build_summary(results_dir: str, audit: dict = None,
                      "正式实验请用 ≥3 个种子（configs 默认已达要求）。")
         cols_notes = [
             "注: 统计单元格为 Mean ± Std (n=种子数)；n=1 时 Std 不可估计。",
+            "注: `PPL评估CI` 为单次 run 内验证窗口抽样的 95% 相对半宽"
+            "（窗口作为抽样单元，未计窗口间空间相关）；它与跨种子 Mean ± Std "
+            "回答不同问题，比较变体时两者都要看；逐 run 区间见 eval.json 的 "
+            "`val_ppl_ci95`。",
+            "注: `训练覆盖` 为 tokens_seen / train_tokens 的等价 epoch 数；"
+            "低于 1 时曲线下降主要反映“还没学完”，不能当作收敛。",
             "注: niah/fwe/vt 为各上下文档位平均后的跨种子均值，"
             "每格样本数见 ruler_*.json（各变体同 seed 使用同一批样本）；",
             "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，"
@@ -2181,6 +2271,39 @@ def build_summary(results_dir: str, audit: dict = None,
             cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
                                  f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；")
         md += [""] + cols_notes
+        # 训练预算门：不足 1 epoch 的 PPL 下降只是“还没学完”，与“方法有效”
+        # 是两回事；在表格外单独给醒目警告，避免读者把可跑通当结论。
+        insufficient = [r for r in rows
+                        if r.get("epochs_seen_min") is not None
+                        and r["epochs_seen_min"] < 1.0]
+        missing_cov = [r for r in rows if r.get("epochs_seen_min") is None]
+        if insufficient:
+            worst_cov = min(r["epochs_seen_min"] for r in insufficient)
+            md += ["", f"⚠ 训练预算不足：{len(insufficient)}/{len(rows)} 个变体"
+                      f"的最少训练覆盖仅约 {worst_cov:.2f} 个 epoch（<1）——"
+                      "训练/验证曲线同时下降只说明“还在学”，不能作为收敛证据；"
+                      "下表的 PPL/RULER 差异先按“没学完”处理，延长训练后重评。"]
+        if missing_cov:
+            md += ["", f"注：{len(missing_cov)}/{len(rows)} 个变体的 eval.json "
+                      "没有训练覆盖字段（旧结果或手工评测），无法核对训练预算。"]
+        # 评估噪声门：单 run 的 PPL 窗口抽样 CI 相对半宽若与跨种子差异同量级，
+        # 变体间的小 PPL 差异不足以支撑方法结论。
+        ci_vals = [r["ppl_ci_rel_pct"] for r in rows
+                   if r.get("ppl_ci_rel_pct") is not None]
+        if ci_vals and max(ci_vals) > 5.0:
+            md += ["", f"注：单 run 内 PPL 评估 95% CI 相对半宽最大 "
+                      f"±{max(ci_vals):.1f}%（窗口抽样）；小于该量级的 PPL "
+                      "差异不能脱离评估噪声解读。"]
+        # RULER 每格样本数门：n=2 与 n=30 的相同 EM 不是同样可信的证据；
+        # 汇总层显式提示最小 n，读者需对照 ruler_*.json 的 Wilson CI。
+        ruler_ns = [r["ruler_min_n_min"] for r in rows
+                    if r.get("ruler_min_n_min") is not None]
+        if ruler_ns and min(ruler_ns) < 10:
+            md += ["", f"⚠ RULER 每格样本数不足：最小 n={min(ruler_ns)}（<10）——"
+                      "EM 的 Wilson 95% CI 在该样本量下很宽（n=2 时接近 [0,0.84]），"
+                      "RULER 的变体差异只能作方向性线索；逐格区间见 "
+                      "ruler_*.json 的 `em_ci95_wilson`，正式结论需增大 "
+                      "`ruler.n_samples` 后重跑。"]
     else:
         md.append("（暂无结果，先运行训练评测）")
 
@@ -2394,13 +2517,15 @@ def build_summary(results_dir: str, audit: dict = None,
                   "验证回升同样判过拟合（平台期泛化先恶化，不按欠拟合处理）；"
                   "训练仍在实质下降而验证无实质变化=过拟合趋势（验证不再随训练"
                   "改善的早期信号，按正则化/早停处理，不据此续训）；"
-                  "两者都不降=欠拟合/学习率不当/数据管道问题；出现 NaN=训练失效；"
+                  "两者都不降=欠拟合/学习率不当/数据管道问题；曲线虽在降但"
+                  "训练覆盖 <1 epoch=训练不足（还没学完，不能当收敛）；"
+                  "出现 NaN=训练失效；"
                   "瞬态损失尖峰（分段均值会掩盖）与损坏日志行单独报告。"
                   "逐 run 明细见 `curve_diagnosis.json`。")
         md.append("")
-        md.append("| 变体 | 状态（最差种子） | 训练损失 首→末 | 验证损失 首→最优→末 "
-                  "| 早停空间 | 关键建议 |")
-        md.append("|---|---|---|---|---|---|")
+        md.append("| 变体 | 状态（最差种子） | 训练覆盖(epoch) | 训练损失 首→末 "
+                  "| 验证损失 首→最优→末 | 早停空间 | 关键建议 |")
+        md.append("|---|---|---|---|---|---|---|")
         any_nan = False
         any_grad_spike = False
         any_loss_spike = False
@@ -2434,6 +2559,11 @@ def build_summary(results_dir: str, audit: dict = None,
                     f"{sum(es) / len(es):+.1%}"
                     + ("（最终劣于最优，已用 best checkpoint）"
                        if sum(es) / len(es) > 0.02 else ""))
+            eps = [d.get("epochs_seen") for d in diags
+                   if d.get("epochs_seen") is not None]
+            ep_min = min(eps) if eps else None
+            ep_s = ("-" if ep_min is None else
+                    f"{ep_min:.3f}" + (" ⚠<1" if ep_min < 1.0 else ""))
             rec = worst["recommendations"][:1]
             es_flagged = any(d.get("early_stopped") for d in diags)
             # 需关注种子的占比：只看"最差种子"分不清系统性异常与单个种子偶发，
@@ -2446,8 +2576,9 @@ def build_summary(results_dir: str, audit: dict = None,
                 + ("　（梯度尖峰）" if spike else "") \
                 + ("　（损失尖峰）" if lspike else "") \
                 + ("　（早停）" if es_flagged else "")
-            md.append(f"| {VARIANT_CN.get(v, v)} | {status_s} | {train_s} "
-                      f"| {val_s} | {es_s} | {rec[0] if rec else '-'} |")
+            md.append(f"| {VARIANT_CN.get(v, v)} | {status_s} | {ep_s} "
+                      f"| {train_s} | {val_s} | {es_s} "
+                      f"| {rec[0] if rec else '-'} |")
         md.append("")
         if any_nan:
             md.append("⚠ 存在出现非有限损失的 run：训练已失效，"
@@ -2459,7 +2590,8 @@ def build_summary(results_dir: str, audit: dict = None,
         else:
             md.append("注：全部 run 无 NaN/Inf；有异常状态的变体请按建议处理"
                       "（过拟合/过拟合趋势→正则化/增数据/早停，欠拟合→查学习率"
-                      "与数据管道）后重跑，再进入对比结论。")
+                      "与数据管道，训练不足→延长训练/增大数据覆盖）后重跑，"
+                      "再进入对比结论。")
         if any_grad_spike:
             md.append("")
             md.append("⚠ 检测到 pre-clip 梯度范数非有限或爆炸性尖峰"
@@ -2679,6 +2811,25 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(f"注：下表按最多 {n_win_seeds} 个种子累计最差窗口——同一窗口"
                       "在 k 个种子中都差就计 k 次，用于判断错误模式是否跨种子"
                       "稳定；跨变体对照仍取各变体最小种子的同一批窗口。")
+        # 最差窗口的“分母”必须可见：只报 top-10 而不报候选/总窗口数，会把
+        # 候选子集里的最差误读成全量最差，也会让不同覆盖率的变体不可比。
+        scopes = set()
+        for v in variants:
+            for s in _sorted_seeds(_variant_seed_map(runs, v)):
+                cand = (_variant_seed_map(runs, v)[s].get("eval") or {})
+                sc = cand.get("worst_window_scope")
+                if isinstance(sc, dict) and sc.get("screened") is not None:
+                    scopes.add((int(sc["screened"]),
+                                int(sc.get("total") or 0)))
+        if scopes:
+            md.append("")
+            lo_cov = min((scr / tot) if tot else 1.0 for scr, tot in scopes)
+            shown = "；".join(f"{scr}/{tot}" for scr, tot in sorted(scopes)[:3])
+            extra = " 等" if len(scopes) > 3 else ""
+            md.append(f"注：最差窗口在等间隔候选窗口子集中排序（本次 "
+                      f"{shown}{extra}，最低覆盖率 {lo_cov:.0%}），不是全量窗口"
+                      "的严格最差；各变体独立选各自的候选窗口，跨变体的归因"
+                      "占比是描述性对照，不是同一批样本的配对比较。")
         md += ["", "| 变体 | 最差窗口数 | 主要归因 | 平均 top-1 概率 "
                    "| gold 在上下文中 | gold 进 top-5 | 平均 loss |",
                "|---|---|---|---|---|---|---|"]

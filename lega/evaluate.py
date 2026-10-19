@@ -21,10 +21,24 @@ from .train import evaluate_val, _val_eval_indices
 from .utils import enable_tf32, get_device, now_str, save_json, set_seed
 
 
+# 最差窗口筛查的候选窗口上限：与 PPL 的 eval_iters 各自独立（前者排序、
+# 后者求平均），必须显式记录，避免把“64 个候选里的最差”说成全量最差。
+WORST_SCREEN_MAX = 64
+
+
+def worst_window_screening(val_len: int, ctx: int,
+                           max_windows: int = WORST_SCREEN_MAX) -> dict:
+    """最差窗口筛查范围（候选数/总窗口数/覆盖率），供结果落盘与汇总注脚。"""
+    screened, n_windows = _val_eval_indices(int(val_len), ctx, int(max_windows))
+    return {"screened": int(len(screened)), "total": int(n_windows),
+            "screen_max": int(max_windows)}
+
+
 @torch.inference_mode()
 def collect_worst_windows(model, val, ctx: int, device: str, tok,
                           n_worst: int = 3, amp: bool = False,
-                          max_windows: int = 64, batch_windows: int = None,
+                          max_windows: int = WORST_SCREEN_MAX,
+                          batch_windows: int = None,
                           split: str = "val") -> list:
     """语言建模的坏案例：挑出下一 token 预测最差的验证窗口并解码。
 
@@ -140,6 +154,35 @@ def load_train_peak_mem_mb(run_dir: str):
         return float(v) if v is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def load_train_coverage(run_dir: str):
+    """从训练 run 的 eval.json 继承训练预算覆盖率。
+
+    独立评测（test split）也需要知道 checkpoint 训练时看过多少数据：
+    epochs_seen<1 的结果不能当作收敛。返回 dict（缺失字段不含该键），
+    文件缺失/损坏返回空 dict，不阻塞评测。
+    """
+    d = _read_run_eval(run_dir)
+    out = {}
+    for src, dst in (("tokens_seen", "train_tokens_seen"),
+                     ("train_tokens", "train_tokens")):
+        v = d.get(src)
+        if v is None:
+            continue
+        try:
+            out[dst] = int(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    e = d.get("epochs_seen")
+    if e is not None:
+        try:
+            e = float(e)
+            if math.isfinite(e):
+                out["epochs_seen"] = e
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def main():
@@ -261,6 +304,13 @@ def main():
         "eval_iters": metrics["eval_iters"],
         "val_windows": metrics["val_windows"],
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
+        # 有限验证窗口的抽样误差：与 PPL 点估计同源，必须一起传递，否则
+        # 下游只看到点估计，无法区分“真实差异”与“窗口抽样噪声”。
+        "val_loss_se": metrics.get("val_loss_se"),
+        "val_loss_ci95": metrics.get("val_loss_ci95"),
+        "val_ppl_ci95": metrics.get("val_ppl_ci95"),
+        "val_loss_min": metrics.get("val_loss_min"),
+        "val_loss_max": metrics.get("val_loss_max"),
         # test 访问账本摘要（split=val 时为 None）：审计"测试集被反复评测"
         "test_access": test_access,
     }
@@ -272,8 +322,14 @@ def main():
             res["worst_windows"] = collect_worst_windows(
                 model, val, ctx, device, tok, n_worst=int(args.worst_n),
                 amp=use_amp, split=split)
+            # 把筛查范围随结果落盘：最差窗口来自“候选窗口子集”而非全量排序，
+            # 汇总层必须能区分 64/665 与 64/64 两种覆盖度。
+            res["worst_window_scope"] = worst_window_screening(
+                len(val), ctx, WORST_SCREEN_MAX)
             print(f"[eval] 最差 {len(res['worst_windows'])} 个窗口已随结果落盘"
-                  "（res['worst_windows']）")
+                  f"（候选 {res['worst_window_scope']['screened']}/"
+                  f"{res['worst_window_scope']['total']} 个窗口；"
+                  "res['worst_windows']）")
         except Exception as e:  # 坏案例转储失败不应阻塞评测本身
             print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
@@ -283,6 +339,9 @@ def main():
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)
     res["train_peak_mem_mb"] = load_train_peak_mem_mb(run_dir)
+    # 训练预算覆盖率随 checkpoint 绑定：epochs_seen<1 时下游必须把这份
+    # 评测标为“未充分训练”，而不是与跑满数据的 run 直接比 PPL。
+    res.update(load_train_coverage(run_dir))
     save_json(res, args.out)
     if ppl is None:
         print(f"[eval] {res['variant']}: val_ppl=null（验证损失非有限）-> {args.out}")

@@ -11,6 +11,8 @@
                   早期处理（正则化/早停），不要仅凭训练损失还在降就续训；
   * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
+  * 训练不足      训练/验证都在下降，但累计只见过不足 1 个 epoch 的训练
+                  数据——这是“还没学完”，不能当作收敛或“无需干预”；
   * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"；
   * 瞬态损失尖峰  单步损失远超邻近点中位数（分段均值会掩盖）——异常批次或
                   一次梯度爆炸的信号，即使趋势正常也应先核对批次与梯度；
@@ -35,6 +37,9 @@ DIVERGE_FACTOR = 1.5
 EARLY_STOP_TOL = 0.02
 # 欠拟合疑似数据管道问题：训练损失停在随机猜测水平的该比例以内
 RANDOM_LEVEL_TOL = 0.9
+# 训练预算是否足以谈“收敛”：随机窗口采样下折算的 epoch 数低于该值时，
+# 曲线下降只说明“还在学”，不能据此判定收敛或建议“无需干预”。
+MIN_TRAIN_EPOCHS = 1.0
 # 梯度范数尖峰：最大 pre-clip 范数超过中位数该倍数视为爆炸性尖峰
 # （NaN 之前的典型早期信号；即使损失曲线尚未发散也应预警）
 GRAD_SPIKE_FACTOR = 10.0
@@ -190,10 +195,14 @@ def live_overfit_hint(evals_since_improve, best_val, val,
             "分叉，必要时加正则化/数据或显式开启 --early_stop_patience。")
 
 
-def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Dict:
+def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
+                   epochs_seen: Optional[float] = None,
+                   train_tokens: Optional[int] = None) -> Dict:
     """从单条 train_log 记录序列给出结构化诊断。
 
     records: load_train_log 的输出（含 'loss' 训练点与 'val_loss' 验证点）。
+    epochs_seen/train_tokens: 来自 eval.json 的训练预算覆盖率；缺失时跳过
+    “训练不足”判定（旧结果目录仍可诊断）。
     返回 dict：status / 判定依据 / 关键数值 / 建议清单 recommendations。
     早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注。
     """
@@ -394,6 +403,27 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
 
+    # 训练预算覆盖率（来自 eval.json）：曲线下降 ≠ 已收敛。只见过不足
+    # 1 个 epoch 时，验证损失仍在快速变化，此时比较方法/下“无需干预”的
+    # 结论都不稳；必须把“还没学完”与真正的收敛区分开。
+    budget_insufficient = (epochs_seen is not None
+                           and epochs_seen < MIN_TRAIN_EPOCHS)
+    if budget_insufficient:
+        tok_s = (f"（{train_tokens:,} 训练 token）"
+                 if train_tokens else "")
+        evidence.append(
+            f"训练预算仅覆盖约 {epochs_seen:.3f} 个 epoch{tok_s}："
+            f"低于 {MIN_TRAIN_EPOCHS:g} 个 epoch，曲线下降主要反映“还没学完”，"
+            "不能据此判定收敛或比较方法优劣")
+        recommendations[:] = [r for r in recommendations
+                              if "无需干预" not in r]
+        recommendations.append(
+            f"训练数据覆盖不足（约 {epochs_seen:.3f} epoch）：先继续训练/增大"
+            "训练预算到至少覆盖 1 个 epoch，并保持当前验证密度；在此之前"
+            "不要把验证损失变化解释为收敛或方法差异")
+        if status == "正常收敛":
+            status = "训练不足（数据覆盖不足）"
+
     # 早停终止：截断是设计行为（不同于日志缺失），独立于状态标注；
     # "数据不足"分支的"增加步数/评测密度"建议与早停矛盾，须替换。
     if early_stopped:
@@ -469,6 +499,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
         "early_stop_gain_rel": early_stop_gain,
         "early_stopped": early_stopped,
         "early_stop_step": (es_step if early_stopped else None),
+        "epochs_seen": epochs_seen,
+        "train_tokens": train_tokens,
+        "train_budget_sufficient": (None if epochs_seen is None
+                                    else not budget_insufficient),
         "generalization_gap": gap,
         "grad_norm_points": len(grad_pts),
         "grad_norm_nonfinite": int(grad_bad),
@@ -489,7 +523,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None) -> Di
 # 状态严重度排序（汇总时取"最差种子"的状态代表整个变体）
 STATUS_ORDER = {
     "NaN/Inf": 6, "发散": 5, "过拟合": 4,
-    "欠拟合/学习不充分": 3, "过拟合趋势": 2, "数据不足": 1, "正常收敛": 0,
+    "欠拟合/学习不充分": 3, "训练不足（数据覆盖不足）": 2.5,
+    "过拟合趋势": 2, "数据不足": 1, "正常收敛": 0,
 }
 
 
@@ -500,9 +535,27 @@ def worst_status(statuses) -> str:
 
 
 def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
-    """诊断一个训练 run 目录（train_log.jsonl + 可选的 nan_report.json）。"""
+    """诊断一个训练 run 目录（train_log.jsonl + eval.json + nan_report.json）。"""
     records = load_train_log(os.path.join(run_dir, "train_log.jsonl"))
-    diag = diagnose_curve(records, log_vocab=log_vocab)
+    epochs_seen = None
+    train_tokens = None
+    eval_path = os.path.join(run_dir, "eval.json")
+    if os.path.exists(eval_path):
+        try:
+            with open(eval_path, "r", encoding="utf-8") as f:
+                ev = json.load(f)
+            if isinstance(ev, dict):
+                e = ev.get("epochs_seen")
+                t = ev.get("train_tokens")
+                if e is not None and math.isfinite(float(e)):
+                    epochs_seen = float(e)
+                if t is not None:
+                    train_tokens = int(t)
+        except (OSError, ValueError, TypeError, OverflowError):
+            pass
+    diag = diagnose_curve(records, log_vocab=log_vocab,
+                          epochs_seen=epochs_seen,
+                          train_tokens=train_tokens)
     nan_path = os.path.join(run_dir, "nan_report.json")
     if os.path.exists(nan_path):
         try:

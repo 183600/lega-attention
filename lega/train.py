@@ -23,7 +23,7 @@ from .curves import LIVE_WARN_EVALS, live_overfit_hint
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
 from .repro import build_run_manifest
-from .utils import set_seed, now_str, save_json, enable_tf32
+from .utils import set_seed, now_str, save_json, enable_tf32, t_critical_95
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -507,6 +507,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     gate_acc = torch.zeros((), device=device)
     total_w = 0
     gate_w_total = 0
+    window_losses = []
     amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
                if (amp and device.startswith("cuda")) else contextlib.nullcontext())
     # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
@@ -524,13 +525,17 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                                      indices[s + batch_windows:s + 2 * batch_windows],
                                      device)
             with amp_ctx:
-                # 验证评测只消费门控均值 g，使用轻量统计
-                out = model(x, targets=y, need_stats=collect_gate, stats_argmax=False)
+                # 验证评测只消费门控均值 g，使用轻量统计；额外取每窗口损失
+                # 用于估计“有限个验证窗口”带来的抽样误差。
+                out = model(x, targets=y, need_stats=collect_gate,
+                            stats_argmax=False, return_window_losses=True)
             nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
             # add_(alpha=nb) 直接按批大小加权累加（loss 前向/门控闭式求和
             # 本就以 fp32 返回）。
             loss_acc.add_(out["loss"].detach(), alpha=float(nb))
             total_w += nb
+            wl = out["loss_per_window"].detach().float().cpu().numpy()
+            window_losses.extend(float(v) for v in wl.reshape(-1))
             if collect_gate and out["gate_stats"]:
                 # 在设备端先 stack 成 (n_layers,) 再求均值
                 gs = [s_["g"].detach().float().mean()
@@ -543,10 +548,39 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     val_loss = float(float(loss_acc.item()) / total_w)
     gate_mean = (float(gate_acc.item()) / gate_w_total
                  if gate_w_total else None)
+    # 验证集只评测 eval_iters 个等间隔窗口：点估计本身带抽样误差。这里把
+    # 窗口作为抽样单元，报告窗口间标准误与 t 近似 95% CI（小样本比正态
+    # 更宽）；CI 不包含窗口间空间相关，也不替代跨随机种子的方差（后者在
+    # run_all 汇总）。
+    val_loss_se = None
+    val_loss_ci95 = None
+    val_ppl_ci95 = None
+    val_loss_min = None
+    val_loss_max = None
+    losses = np.asarray(window_losses, dtype=np.float64)
+    if losses.size and np.all(np.isfinite(losses)):
+        val_loss_min = float(losses.min())
+        val_loss_max = float(losses.max())
+        if losses.size >= 2:
+            se = float(losses.std(ddof=1) / math.sqrt(losses.size))
+            # 小样本用 t 临界值：eval_iters=20 时 t≈2.09，比正态 1.96 宽
+            # 约 7%；窗口数少时不该假装有正态大样本的精度。
+            tcrit = t_critical_95(losses.size - 1)
+            if math.isfinite(se) and tcrit is not None:
+                lo, hi = val_loss - tcrit * se, val_loss + tcrit * se
+                val_loss_se = se
+                val_loss_ci95 = [lo, hi]
+                val_ppl_ci95 = [math.exp(min(20.0, lo)),
+                                math.exp(min(20.0, hi))]
     if was_training:
         model.train()
     return {
         "val_loss": val_loss,
+        "val_loss_se": val_loss_se,
+        "val_loss_ci95": val_loss_ci95,
+        "val_ppl_ci95": val_ppl_ci95,
+        "val_loss_min": val_loss_min,
+        "val_loss_max": val_loss_max,
         "gate_mean": gate_mean,
         "eval_iters_requested": int(iters),
         "eval_iters": int(len(indices)),
@@ -988,6 +1022,11 @@ def main():
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
+    # 训练预算覆盖率：tokens_seen 是“见过的 token 总数”，除以训练集大小
+    # 得到约等价 epoch 数（随机窗口采样，不是严格的一遍遍历）。它回答的是
+    # “曲线下降是否只是还没看完数据”，与 eval_iters 的验证覆盖率互补。
+    train_tokens = int(len(train))
+    epochs_seen = (tokens_seen / train_tokens) if train_tokens else None
     # 步时汇总：区间步时的中位数，抗首区间冷启动与偶发卡顿。
     tokens_per_step = int(cfg["batch_size"]) * train_ctx * grad_accum
     train_step_ms = (statistics.median(step_times_ms)
@@ -1010,13 +1049,19 @@ def main():
                            "val_ppl": final_ppl, "val_loss": final_val_loss,
                            "val_ppl_clamped": bool(final_val_loss > 20),
                            "tokens_seen": tokens_seen,
+                           "train_tokens": train_tokens,
+                           "epochs_seen": (round(epochs_seen, 4)
+                                           if epochs_seen is not None else None),
                            "n_params": n_params, "n_gate_extra": n_extra,
                            **provenance})
     save_json({"variant": args.variant, "val_ppl": final_ppl, "val_loss": final_val_loss,
                "val_ppl_clamped": bool(final_val_loss > 20),
                "gate_mean": gmean, **{k: final_metrics[k] for k in
                                       ("eval_iters_requested", "eval_iters",
-                                       "val_windows", "val_tokens_evaluated")},
+                                       "val_windows", "val_tokens_evaluated",
+                                       "val_loss_se", "val_loss_ci95",
+                                       "val_ppl_ci95", "val_loss_min",
+                                       "val_loss_max")},
                "n_params": n_params, "n_gate_extra": n_extra,
                "train_step_time_ms": (round(train_step_ms, 3)
                                       if train_step_ms else None),
@@ -1024,6 +1069,9 @@ def main():
                                         if train_tokens_per_sec else None),
                "train_peak_mem_mb": train_peak_mem_mb,
                "tokens_seen": tokens_seen,
+               "train_tokens": train_tokens,
+               "epochs_seen": (round(epochs_seen, 4)
+                               if epochs_seen is not None else None),
                # steps=实际运行步数（早停时小于计划）；steps_planned=计划步数。
                # 受控变量审计按 steps_planned 核对，实际步数差异由 early_stopped
                # 如实暴露，而不是静默伪装成跑满了计划步数。

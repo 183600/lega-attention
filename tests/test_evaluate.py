@@ -10,7 +10,8 @@ import torch
 
 from lega.data import CharTokenizer
 from lega.evaluate import (collect_worst_windows, json_safe_eval_metrics,
-                           load_train_peak_mem_mb, load_train_throughput)
+                           load_train_coverage, load_train_peak_mem_mb,
+                           load_train_throughput, worst_window_screening)
 from lega.model import GPT
 
 
@@ -43,6 +44,18 @@ def test_collect_worst_windows():
                                  n_worst=0, max_windows=32) == []
     print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
           f"gold={rows[0]['gold_next']!r}）")
+
+
+def test_worst_window_screening_scope_is_recorded():
+    """最差窗口必须连同“候选/总窗口数”一起落盘：不能把子集最差当成全量最差。"""
+    val = np.zeros(64 * 34, dtype=np.uint16)
+    sc = worst_window_screening(len(val), ctx=64, max_windows=30)
+    assert sc["screened"] == 30 and sc["total"] == 33
+    assert sc["screen_max"] == 30
+    # 候选上限大于总窗口数时全部评估：覆盖率 100%
+    sc2 = worst_window_screening(len(val), ctx=64, max_windows=100)
+    assert sc2["screened"] == 33 and sc2["total"] == 33
+    print("  [ok] 最差窗口筛查范围落盘（候选/总窗口数）")
 
 
 def test_load_train_throughput_propagates_and_degrades_safely():
@@ -91,6 +104,32 @@ def test_load_train_peak_mem_propagates_and_degrades_safely():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 训练进程统计随 checkpoint 传播（缺失/损坏安全降级）")
+
+
+def test_load_train_coverage_propagates_and_degrades_safely():
+    """训练覆盖必须随 checkpoint 传播：<1 epoch 的评测不能被当成收敛结果。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        assert load_train_coverage(tmp) == {}
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokens_seen": 20480, "train_tokens": 738388,
+                       "epochs_seen": 0.0277}, f)
+        cov = load_train_coverage(tmp)
+        assert cov == {"train_tokens_seen": 20480, "train_tokens": 738388,
+                       "epochs_seen": 0.0277}
+        # 旧格式/非法值/损坏/结构异常 → 安全降级，不阻塞评测
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"epochs_seen": float("inf"), "train_tokens": "x"}, f)
+        assert load_train_coverage(tmp) == {}
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        assert load_train_coverage(tmp) == {}
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump([1, 2], f)
+        assert load_train_coverage(tmp) == {}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 训练覆盖率随 checkpoint 传播（缺失/损坏安全降级）")
 
 
 def test_collect_worst_windows_gold_in_context_uses_full_window():

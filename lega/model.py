@@ -149,12 +149,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     else torch.get_autocast_cpu_dtype())
 
     @staticmethod
-    def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int,
+    def _ce_nll(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int,
                 has_ignore: bool = True) -> torch.Tensor:
-        """sum-CE 的闭式计算：softmax 就地写入 lcf，按目标位置取概率再取对数，
-        逐元素掩掉 ignore_index。
+        """逐位置 CE 的闭式计算：softmax 就地写入 lcf，按目标位置取概率再取
+        对数，逐元素掩掉 ignore_index（返回 1-D nll）。
 
-        与 F.cross_entropy(reduction="sum") 数值等价（softmax 内部 max 平移，
+        与 F.cross_entropy(reduction="none") 数值等价（softmax 内部 max 平移，
         数值稳定）。softmax 就地写入 lcf，调用方可直接把它用作 dL/dlogits
         的 softmax 项（cross-entropy 对 logits 的梯度 = softmax - onehot），
         无需再取一次指数。目标概率下溢为 0 时以 finfo(dtype).tiny 兜底取对数，
@@ -167,13 +167,20 @@ class _ChunkedLinearCE(torch.autograd.Function):
         tiny = torch.finfo(probs.dtype).tiny
         if not has_ignore:
             return probs.gather(1, tgt.unsqueeze(1)).squeeze(1) \
-                .clamp_min_(tiny).log_().neg_().sum()
+                .clamp_min_(tiny).log_().neg_()
         ignore = tgt == ignore_index
         ts_safe = tgt.masked_fill(ignore, 0)
         nll = probs.gather(1, ts_safe.unsqueeze(1)).squeeze(1) \
             .clamp_min_(tiny).log_().neg_()
         nll.masked_fill_(ignore, 0)
-        return nll.sum()
+        return nll
+
+    @staticmethod
+    def _ce_sum(lcf: torch.Tensor, tgt: torch.Tensor, ignore_index: int,
+                has_ignore: bool = True) -> torch.Tensor:
+        """sum-CE；语义同 ``_ce_nll(...).sum()``。"""
+        return _ChunkedLinearCE._ce_nll(
+            lcf, tgt, ignore_index, has_ignore).sum()
 
     @staticmethod
     def forward(ctx, x2d, weight, tgt, chunk: int, ignore_index: int = -100):
@@ -440,9 +447,15 @@ class GPT(nn.Module):
                 past_kv: Optional[List] = None, need_stats: bool = False,
                 last_logits_only: bool = False, stats_argmax: bool = True,
                 kv_cache: Optional[List] = None, cache_pos: int = 0,
-                ignore_index: int = -100) -> Dict:
+                ignore_index: int = -100,
+                return_window_losses: bool = False) -> Dict:
         """kv_cache/cache_pos：静态 KV 缓存模式（预分配缓冲 + 写入偏移），
-        供 generate 逐 token 解码使用；与 past_kv 的动态拼接缓存互斥。"""
+        供 generate 逐 token 解码使用；与 past_kv 的动态拼接缓存互斥。
+
+        return_window_losses=True 时，在无梯度评测路径额外返回每行（每个
+        输入窗口）的平均损失 ``loss_per_window``，供验证集抽样误差估计；
+        训练/需要梯度的路径不支持该选项（避免改变训练图）。
+        """
         B, T = idx.shape
         past_len = (0 if past_kv is None else past_kv[0][0].shape[2]) \
             if kv_cache is None else cache_pos
@@ -465,6 +478,7 @@ class GPT(nn.Module):
                 stats["layer"] = i
                 stats_all.append(stats)
         loss = None
+        loss_per_window = None
         if targets is not None:
             x = self.ln_f(x)
             # 训练/评测只需 loss：分块过 lm_head 并立即做交叉熵；
@@ -477,7 +491,12 @@ class GPT(nn.Module):
             # 只要计算图需要梯度（输入或共享 lm_head 权重任一 requires_grad，
             # 如冻结主干只训分类头/detach 上游）就走闭式梯度路径；否则
             # softmax(out=) 在 grad 模式下反传会报“derivative not implemented”。
-            if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
+            needs_grad = (torch.is_grad_enabled()
+                          and (x.requires_grad or w.requires_grad))
+            if return_window_losses and needs_grad:
+                raise RuntimeError(
+                    "return_window_losses 仅支持无梯度评测（inference_mode）")
+            if needs_grad:
                 # 训练路径：分块前向，交叉熵闭式梯度在前向内求出
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
@@ -486,16 +505,36 @@ class GPT(nn.Module):
                 # 导出；无忽略位置（常见情形）时逐块损失无需掩码。
                 n_valid = (tgt != ignore_index).sum()
                 tgt_has_ignore = int(n_valid) != tgt.numel()
+                row_sums = None
+                if return_window_losses:
+                    # 每个输入窗口占一行（B 行、每行 T 个位置）；按行累加
+                    # 逐位置 nll，最后除以每行有效位置数。这个统计只服务
+                    # 于验证集抽样误差估计，不进入训练路径。
+                    per_row_valid = (tgt != ignore_index).reshape(B, T) \
+                        .sum(dim=1).clamp_min(1)
+                    rows = torch.arange(flat.size(0), device=flat.device) // T
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s:s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
                     del lc
-                    part = _ChunkedLinearCE._ce_sum(lcd, tgt[s:s + CHUNK],
-                                                    int(ignore_index),
-                                                    tgt_has_ignore)
-                    total = part if total is None else total.add_(part)
+                    if return_window_losses:
+                        nll = _ChunkedLinearCE._ce_nll(
+                            lcd, tgt[s:s + CHUNK], int(ignore_index),
+                            tgt_has_ignore)
+                        total = nll.sum() if total is None else total.add_(nll.sum())
+                        if row_sums is None:
+                            row_sums = torch.zeros(B, dtype=nll.dtype,
+                                                   device=nll.device)
+                        row_sums.index_add_(0, rows[s:s + nll.numel()], nll)
+                    else:
+                        part = _ChunkedLinearCE._ce_sum(
+                            lcd, tgt[s:s + CHUNK], int(ignore_index),
+                            tgt_has_ignore)
+                        total = part if total is None else total.add_(part)
                 # n_valid 保留为设备张量
                 loss = total / n_valid.clamp_min(1)
+                if return_window_losses:
+                    loss_per_window = row_sums / per_row_valid.to(row_sums.dtype)
             logits = None
         else:
             # last_logits_only 时（如 generate）先裁到最后位置再过 ln_f/lm_head：
@@ -504,7 +543,9 @@ class GPT(nn.Module):
                 x = x[:, -1:, :]
             x = self.ln_f(x)
             logits = F.linear(x, self._lmhead_weight())  # 权重共享
-        return {"logits": logits, "loss": loss, "past_kv": new_cache,
+        return {"logits": logits, "loss": loss,
+                "loss_per_window": loss_per_window,
+                "past_kv": new_cache,
                 "gate_stats": stats_all if stats_all else None}
 
     @torch.inference_mode()

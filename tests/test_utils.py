@@ -19,7 +19,7 @@ from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, pearson, roc_pr_aucs, save_json,
-                        student_t_two_sided_p, wilson_score_ci)
+                        student_t_two_sided_p, t_critical_95, wilson_score_ci)
 
 
 def _brute_auroc(scores, labels):
@@ -298,6 +298,20 @@ def test_paired_t_matches_t_table():
     assert abs(r2["p"] - r["p"]) < 1e-12
     assert abs(r2["mean_diff"] + r["mean_diff"]) < 1e-12
     print("  [ok] paired_t_test 与 Student-t 临界值表一致")
+
+
+def test_t_critical_95_matches_known_table():
+    """小样本 PPL 区间必须用 t 临界值，而不是固定 1.96。"""
+    assert abs(t_critical_95(1) - 12.7062) < 1e-3
+    assert abs(t_critical_95(2) - 4.30265) < 1e-3
+    assert abs(t_critical_95(9) - 2.26216) < 1e-3
+    assert abs(t_critical_95(19) - 2.09302) < 1e-3
+    assert abs(t_critical_95(30) - 2.04227) < 1e-3
+    assert abs(t_critical_95(300) - 1.95996) < 1e-4
+    # 非法自由度安全返回 None，不抛异常
+    assert t_critical_95(0) is None and t_critical_95(None) is None
+    assert t_critical_95(float("inf")) is None
+    print("  [ok] t_critical_95 与 Student-t 临界值表一致")
 
 
 def test_paired_t_edge_cases():
