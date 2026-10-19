@@ -127,11 +127,12 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
             g1 += 1
         idxs = order[g0:g1]
         g0 = g1
-        # 等长样例分组后可整表转 tensor，再按设备搬移。
+        # 等长样例分组后可整表转 tensor，再按设备搬移。源为 from_numpy 的
+        # 可分页内存，non_blocking 不会产生异步 H2D，直接用同步拷贝。
         ids = torch.from_numpy(
             np.asarray([examples[k]["ids"] for k in idxs], dtype=np.int64))
         if device.startswith("cuda"):
-            ids = ids.to(device, non_blocking=True)
+            ids = ids.to(device)
         # logits 不参与机制分析；只算最后位置
         with amp_ctx:
             out = model(ids, need_stats=True, last_logits_only=True)

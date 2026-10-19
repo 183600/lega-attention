@@ -261,6 +261,9 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     del d
         ctx.dx = dx
         ctx.gw = gw
+        # 反向缩放输出的可复用缓冲（按重量级最大的 gw 一份），首次 backward
+        # 时按参数精度惰性分配。
+        ctx.gw_buf = None
         return loss * ctx.inv_n
 
     @staticmethod
@@ -270,13 +273,37 @@ class _ChunkedLinearCE(torch.autograd.Function):
         weight, = ctx.saved_tensors
         gscale = (gout if gout.dtype in (torch.float32, torch.float64)
                   else gout.float()) * ctx.inv_n
-        # 一律非原地缩放：ctx.dx/ctx.gw 是前向物化的中间量，同一计算图多次
-        # backward（retain_graph=True）时必须保持不变；若在第一次调用中原地
-        # 缩放，后续调用会再乘一次 1/n_valid，梯度随 backward 次数逐次衰减。
+        # 一律不原地缩放 ctx.dx/ctx.gw：它们是前向物化的中间量，同一计算图
+        # 多次 backward（retain_graph=True）时必须保持不变；若在第一次调用中
+        # 原地缩放，后续调用会再乘一次 1/n_valid，梯度随 backward 次数衰减。
         dx = None if ctx.dx is None else ctx.dx * gscale
-        gw = None if ctx.gw is None else ctx.gw * gscale
-        if gw is not None and gw.dtype != weight.dtype:
-            gw = gw.to(weight.dtype)
+        gw = None
+        if ctx.gw is not None:
+            if torch.is_grad_enabled():
+                # create_graph（高阶梯度）下本次 backward 自身也建图，复用
+                # 缓冲的原地写会与已记录的版本冲突，退回新建临时。
+                gw = torch.mul(ctx.gw, gscale).to(weight.dtype)
+            else:
+                # 复用 ctx 持有的输出缓冲：out= 的精度提升路径与
+                # 「先乘后转参数精度」逐位一致，dtype 不一致时也只需一份
+                # 全尺寸临时（原先 .to() 后再乘会同时存在两份）。
+                buf = ctx.gw_buf
+                if (buf is None or buf.dtype != weight.dtype
+                        or buf.shape != ctx.gw.shape
+                        or buf.device != ctx.gw.device):
+                    buf = torch.empty(ctx.gw.shape, dtype=weight.dtype,
+                                      device=ctx.gw.device)
+                    ctx.gw_buf = buf
+                grad = weight.grad
+                if (grad is not None and grad.device == buf.device
+                        and grad.shape == buf.shape
+                        and grad.data_ptr() == buf.data_ptr()):
+                    # 缓冲已被 AccumulateGrad 采纳为 weight.grad：再原地
+                    # 覆写会丢掉已累加的梯度，本次改用新建临时并换新缓冲。
+                    buf = torch.empty(ctx.gw.shape, dtype=weight.dtype,
+                                      device=ctx.gw.device)
+                    ctx.gw_buf = buf
+                gw = torch.mul(ctx.gw, gscale, out=buf)
         return dx, gw, None, None, None
 
 
