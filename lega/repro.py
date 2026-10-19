@@ -21,6 +21,8 @@ import sys
 import numpy as np
 import torch
 
+from .utils import deterministic_algorithms_warn_only
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FINGERPRINT_ALGO = "sha256-16"
@@ -168,8 +170,18 @@ def runtime_info(device: str = None) -> dict:
                      for name in ("tiktoken", "matplotlib")},
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        "cudnn_enabled": bool(torch.backends.cudnn.enabled),
         "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
+        # True=仅告警而非严格模式；只记 deterministic_algorithms 会夸大数据一致性
+        "deterministic_algorithms_warn_only":
+            deterministic_algorithms_warn_only(),
         "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
+        # cudnn conv 默认 allow_tf32=True：不记录会把“训练实际用 TF32”漏掉
+        "tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
+        # 线程数影响归约顺序与浮点结果；CVD 决定实际可见的加速器
+        "torch_threads": int(torch.get_num_threads()),
+        "torch_interop_threads": int(torch.get_num_interop_threads()),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         # 机器级上下文：同机重跑是否稳定、跨机差异是否来自环境，都靠这些字段判断
         "hostname": socket.gethostname(),
         "python_executable": sys.executable,
@@ -182,9 +194,52 @@ def runtime_info(device: str = None) -> dict:
     return info
 
 
+def sanity_summary(path: str) -> dict:
+    """sanity 结果 JSON 的紧凑摘要，供训练 run 的 manifest 内嵌代码正确性闸门。
+
+    每个 checkpoint 旁都应能回答“这个模型开训前是否通过了小批量过拟合检查、
+    检查了哪些项、当时结果文件是什么”。文件缺失/损坏时不阻塞训练，但摘要
+    显式 present=False（不假装通过）。
+    """
+    out = {"file": os.path.abspath(path) if path else None, "present": False,
+           "sha256": None, "passed": None, "variant": None, "seed": None,
+           "failed_checks": None, "initial_loss": None, "final_loss": None,
+           "token_acc": None}
+    if not path or not os.path.exists(path):
+        return out
+    out["present"] = True
+    try:
+        out["sha256"] = sha256_file(path)
+        with open(path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return out
+    if not isinstance(rec, dict):
+        return out
+    checks = rec.get("checks")
+    if isinstance(checks, dict):
+        out["failed_checks"] = sorted(k for k, v in checks.items() if not v)
+    for key in ("passed", "variant", "seed"):
+        if rec.get(key) is not None:
+            out[key] = rec[key]
+    initial = rec.get("initial")
+    final = rec.get("final")
+    if isinstance(initial, dict):
+        out["initial_loss"] = initial.get("loss")
+    if isinstance(final, dict):
+        out["final_loss"] = final.get("loss")
+        out["token_acc"] = final.get("token_acc")
+    return out
+
+
 def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
-                       data_dir: str, device: str, argv=None) -> dict:
-    """单个 (变体, 种子) run 的完整溯源清单。"""
+                       data_dir: str, device: str, argv=None,
+                       sanity: dict = None) -> dict:
+    """单个 (变体, 种子) run 的完整溯源清单。
+
+    sanity（可选）为 lega.sanity 结果的紧凑摘要（见 sanity_summary）：把
+    “开训前通过小批量过拟合闸门”的代码正确性证据绑定到本 run 的 checkpoint。
+    """
     from .utils import now_str, seed_report
     config_path = os.path.abspath(config_path)
     data_dir = os.path.abspath(data_dir)
@@ -199,6 +254,7 @@ def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
         "git": git_info(),
         "data": data_fingerprint(data_dir),
         "runtime": runtime_info(device),
+        "sanity": sanity,
         "argv": [str(a) for a in (argv if argv is not None else sys.argv)],
         "cwd": os.getcwd(),
     }
@@ -232,6 +288,10 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "code_branch": git.get("branch"),
         "data_fingerprint": None,
         "config_sha256": (sha256_file(cfg) if os.path.exists(cfg) else None),
+        # 训练 run 是否通过了小批量过拟合 sanity 闸门（无清单/旧清单为 None）
+        "sanity_passed": None,
+        "sanity_variant": None,
+        "sanity_file": None,
     }
     if data_dir:
         try:
@@ -252,4 +312,12 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             val = src.get(field)
             if val is not None:
                 out[key] = val
+        msanity = manifest.get("sanity")
+        if isinstance(msanity, dict):
+            if msanity.get("passed") is not None:
+                out["sanity_passed"] = bool(msanity["passed"])
+            if msanity.get("variant") is not None:
+                out["sanity_variant"] = msanity["variant"]
+            if msanity.get("file") is not None:
+                out["sanity_file"] = msanity["file"]
     return out

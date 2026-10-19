@@ -29,6 +29,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       evaluate_registered_hypotheses,
                       load_registered_hypotheses, ngram_baseline_comparison,
                       parse_variants, registration_scope_check,
+                      record_aborted_sanity,
                       resolve_ngram_split, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
@@ -1841,3 +1842,74 @@ def test_summary_loads_tolerate_null_ppl_and_bad_json_seed():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 汇总：ppl=null 回退、坏 JSON 文件跳过、坏 seed 不崩溃")
+
+
+def test_record_aborted_sanity_writes_reason_and_failed_checks():
+    """sanity 闸门失败：台账必须有 aborted 记录、失败原因与未通过项。"""
+    from lega.experiment import read_records
+    tmp = tempfile.mkdtemp()
+    try:
+        results_dir = os.path.join(tmp, "results")
+        os.makedirs(results_dir)
+        _write_json(os.path.join(results_dir, "sanity_lega.json"), {
+            "passed": False, "variant": "lega", "seed": 7,
+            "checks": {"loss_below_threshold": False,
+                       "next_token_shift_consistent": True},
+            "initial": {"loss": 4.2}, "final": {"loss": 3.9,
+                                                "token_acc": 0.1}})
+        ledger = os.path.join(tmp, "experiments.jsonl")
+        common = dict(
+            run_id="rid1", tag="t", config_path="configs/tiny.json",
+            config_sha256="a" * 64, config={"lr": 1e-3}, variants=["lega"],
+            seeds=[7], smoke=False, argv=["run_all.py"],
+            git={"commit": "c" * 40, "dirty": False}, data_fingerprint="fp",
+            runtime={"torch": "x"}, out_root="out/t", results_dir=results_dir,
+            time_start="2026-01-01 00:00:00")
+        failed = record_aborted_sanity(ledger, common, "lega", 1, results_dir)
+        assert failed["passed"] is False
+        assert failed["failed_checks"] == ["loss_below_threshold"]
+        recs = read_records(ledger)
+        assert len(recs) == 1
+        rec = recs[0]
+        assert rec["status"] == "aborted"
+        assert rec["extra"]["error"] == "sanity_gate_failed"
+        assert rec["extra"]["variant"] == "lega" and rec["extra"]["returncode"] == 1
+        assert rec["sanity"]["verdict"] == {"lega": "fail"}
+        assert rec["sanity"]["failed"]["final_loss"] == 3.9
+        assert rec["config"] == {"lr": 1e-3}
+        # 结果文件缺失时同样留痕（failed.present=False），不崩
+        os.remove(os.path.join(results_dir, "sanity_lega.json"))
+        ledger2 = os.path.join(tmp, "exp2.jsonl")
+        failed2 = record_aborted_sanity(ledger2, common, "lega", 2, results_dir)
+        assert failed2["present"] is False
+        assert read_records(ledger2)[0]["status"] == "aborted"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 台账 aborted 记录：失败原因 + 未通过项 + 缺失结果容错")
+
+
+def test_append_aborted_record_covers_run_chain_failures():
+    """train/eval/ruler/analysis 任一阶段失败也要落 aborted（含阶段与变体）。"""
+    from lega.experiment import read_records
+    from run_all import append_aborted_record
+    tmp = tempfile.mkdtemp()
+    try:
+        ledger = os.path.join(tmp, "experiments.jsonl")
+        common = dict(
+            run_id="rid2", tag="t", config_path="configs/tiny.json",
+            config_sha256="b" * 64, config={"lr": 1e-3}, variants=["lega"],
+            seeds=[7], smoke=False, argv=["run_all.py"], git={},
+            data_fingerprint="fp", runtime={}, out_root="out/t",
+            results_dir="results/t", time_start="2026-01-01 00:00:00")
+        append_aborted_record(ledger, common, error="run_chain_failed",
+                              stage="train/eval/ruler/analysis",
+                              variant="lega", returncode=1)
+        rec = read_records(ledger)[0]
+        assert rec["status"] == "aborted"
+        assert rec["extra"] == {"error": "run_chain_failed",
+                                "stage": "train/eval/ruler/analysis",
+                                "variant": "lega", "returncode": 1}
+        assert rec["time_end"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] run 链失败落 aborted（阶段/变体/退出码）")

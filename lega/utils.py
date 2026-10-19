@@ -37,8 +37,22 @@ import torch
 _ENV_AT_IMPORT = {"PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED")}
 
 # 最近一次 set_seed 的随机源状态指纹：(seed, fingerprints)，供 seed_report
-# 给出“种子确实生效”的可核对证据，而不是复述传入参数。
-_LAST_SEED = {"seed": None, "fingerprints": None}
+# 给出“种子确实生效”的可核对证据，而不是复述传入参数。同时记录确定性算法
+# 的实际启用模式（严格/warn_only），避免把“只警告”审计成“严格确定性”。
+_LAST_SEED = {"seed": None, "fingerprints": None,
+              "deterministic_warn_only": None}
+
+
+def deterministic_algorithms_warn_only():
+    """当前确定性算法的实际模式：True=仅告警，False=严格，None=未启用/未知。
+
+    PyTorch 公开 API 只暴露 ``are_deterministic_algorithms_enabled()``，
+    无法区分严格与 warn_only；本函数据 set_seed 时记录的实际模式如实汇报，
+    保证 run_manifest/seed_report 中的“确定性已启用”不被夸大。
+    """
+    if not torch.are_deterministic_algorithms_enabled():
+        return None
+    return _LAST_SEED.get("deterministic_warn_only")
 
 
 def rng_state_fingerprint() -> dict:
@@ -100,8 +114,10 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
     try:
         torch.use_deterministic_algorithms(True, warn_only=True)
+        _LAST_SEED["deterministic_warn_only"] = True
     except TypeError:  # 兼容没有 warn_only 参数的旧版 PyTorch
         torch.use_deterministic_algorithms(True)
+        _LAST_SEED["deterministic_warn_only"] = False
     _LAST_SEED["seed"] = int(seed)
     _LAST_SEED["fingerprints"] = rng_state_fingerprint()
 
@@ -151,7 +167,13 @@ def seed_report(seed: int) -> dict:
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "deterministic_algorithms": bool(
             torch.are_deterministic_algorithms_enabled()),
+        # 严格 / 仅告警：只报 deterministic_algorithms=True 会夸大确定性保证
+        "deterministic_algorithms_warn_only":
+            deterministic_algorithms_warn_only(),
         "data_order": "np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
+        # 项目约定：批采样与本审计共用同一 seed（train/sanity/evaluate 均如此），
+        # 机器可读字段便于台账/清单自动核对数据顺序来源
+        "data_order_seed": int(seed),
         "rng_fingerprints": dict(fp) if fp else None,
     }
 

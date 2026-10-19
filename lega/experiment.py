@@ -142,6 +142,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     names = ("config_used.json", "train_log.jsonl", "run_manifest.json",
              "eval.json", "model_best.pt", "model.pt")
     ev = _load_json(os.path.join(out_dir, "eval.json"))
+    cfg_used = _load_json(os.path.join(out_dir, "config_used.json"))
     known = {}
     best = os.path.join(out_dir, "model_best.pt")
     candidates = []
@@ -159,12 +160,16 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     rec = {"variant": variant, "seed": int(seed), "out_dir": out_dir,
            "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
                                       rel_to=out_dir, known=known)}
+    if isinstance(cfg_used, dict):
+        # 超参数内嵌进台账条目：即使 config_used.json 之后被覆盖/删除，
+        # 该 run 实际生效的配置仍可从台账还原
+        rec["config_used"] = cfg_used
     if ev:
         rec["result"] = {k: ev.get(k) for k in (
             "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
             "early_stopped", "tokens_seen",
             "n_params", "code_commit", "code_dirty", "data_fingerprint",
-            "config_sha256")}
+            "config_sha256", "sanity_passed")}
     return rec
 
 
@@ -175,12 +180,16 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
                             results_dir: str, time_start: str,
                             time_end: str = None, sanity=None, runs=None,
                             artifacts=None, extra=None,
-                            registration=None) -> dict:
+                            registration=None, config=None) -> dict:
     """组装标准台账记录；字段与 config_used.json/run_manifest.json 同口径。
 
     registration（可选）为预注册完整性快照：登记表指纹 + 锁链校验结论
     （见 lega/hypotheses.py）。写入台账后，“本轮实验开始时登记表是什么
     状态、是否通过防篡改校验”成为不可回填的历史记录。
+
+    config（可选）为解析后的超参数字典（含 CLI/调优注入后的实际值）：
+    台账因此自含超参数，config 文件之后被改写/删除也不影响历史记录的
+    可复核性（config_sha256 只能证明“变了”，无法还原“原来是什么”）。
     """
     rec = {
         "run_id": run_id,
@@ -190,6 +199,7 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
         "tag": tag,
         "config_file": config_path,
         "config_sha256": config_sha256,
+        "config": config,
         "variants": [str(v) for v in variants],
         "seeds": [int(s) for s in seeds],
         "smoke": bool(smoke),

@@ -79,6 +79,14 @@ def main():
         args.out_dir, kind="auto", force=True,
         extra_report={
             "source": "dummy_synthetic",
+            # 生成器版本信息进 data_report：数据内容指纹之外，种子/规模也可追溯
+            "generator": {
+                "script": "scripts/make_dummy_data.py",
+                "seed": int(args.seed),
+                "train_words": int(args.train_words),
+                "val_words": int(args.val_words),
+                "test_words": int(args.test_words),
+            },
             "split_protocol": {
                 "mode": "independent_generation",
                 "order": "train/val/test 各自独立生成（共享分布、无共享样本）",

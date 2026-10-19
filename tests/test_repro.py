@@ -103,6 +103,7 @@ def test_seed_report_covers_all_random_sources():
     assert rep["cudnn_benchmark"] is False
     assert rep["deterministic_algorithms"] is True
     assert rep["data_order"]
+    assert rep["data_order_seed"] == 2024
     json.dumps(rep)
     print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA) 与确定性开关")
 
@@ -278,3 +279,141 @@ def test_data_fingerprint_tolerates_non_object_meta():
         fp = data_fingerprint(d)
         assert fp["tokenizer"] is None and fp["digest"]
     print("  [ok] 数据指纹：非对象 meta.json 不崩溃")
+
+
+def test_seed_report_and_runtime_record_warn_only_mode_honestly():
+    """确定性算法只记 True 会夸大保证：必须如实标注 warn_only 而非严格模式。"""
+    from lega.utils import deterministic_algorithms_warn_only
+    set_seed(31)
+    rep = seed_report(31)
+    mode = rep["deterministic_algorithms_warn_only"]
+    assert mode in (True, False), rep
+    assert mode == deterministic_algorithms_warn_only()
+    # 本项目为兼容个别无确定实现的算子显式采用 warn_only；若未来改严格模式
+    # 该断言会失败，提醒同步更新文档与审计口径。
+    assert mode is True, "set_seed 当前应运行在 warn_only 模式且如实记录"
+    rt = runtime_info("cpu")
+    assert rt["deterministic_algorithms_warn_only"] == mode
+    json.dumps(rep) and json.dumps(rt)
+    print("  [ok] seed_report/runtime 如实记录确定性算法 warn_only 模式")
+
+
+def test_runtime_info_records_precision_threads_and_device_visibility():
+    """影响数值复现的精度开关/线程数/CUDA 可见性必须进入环境快照。"""
+    rt = runtime_info("cpu")
+    for key in ("tf32_matmul", "tf32_cudnn", "cudnn_enabled",
+                "torch_threads", "torch_interop_threads",
+                "cuda_visible_devices"):
+        assert key in rt, key
+    assert isinstance(rt["tf32_matmul"], bool)
+    assert isinstance(rt["tf32_cudnn"], bool)
+    assert rt["torch_threads"] >= 1 and rt["torch_interop_threads"] >= 1
+    assert rt["cuda_visible_devices"] in (None, "") or \
+        isinstance(rt["cuda_visible_devices"], str)
+    json.dumps(rt)
+    # 精度开关记录的是“当前实际状态”，而不是硬编码默认值：
+    # enable_tf32 之后 runtime_info 必须如实反映
+    from lega.utils import enable_tf32
+    prev_mm = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn = torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        enable_tf32("cuda")
+        rt2 = runtime_info("cuda")
+        assert rt2["tf32_matmul"] is True and rt2["tf32_cudnn"] is True
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_mm
+        torch.backends.cudnn.allow_tf32 = prev_cudnn
+    print("  [ok] runtime_info 记录 TF32/线程数/CUDA_VISIBLE_DEVICES")
+
+
+def test_sanity_summary_binds_gate_evidence_to_manifest():
+    """sanity 结果摘要与 manifest 绑定：缺失/畸形不得冒充“通过”。"""
+    from lega.repro import sanity_summary
+    with tempfile.TemporaryDirectory() as d:
+        assert sanity_summary(os.path.join(d, "missing.json"))["present"] is False
+        bad = os.path.join(d, "bad.json")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("[1, 2]")
+        assert sanity_summary(bad)["present"] is True
+        assert sanity_summary(bad)["passed"] is None
+        good = os.path.join(d, "sanity_lega.json")
+        with open(good, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "variant": "lega", "seed": 3,
+                       "checks": {"a": True, "b": False},
+                       "initial": {"loss": 4.1}, "final": {"loss": 0.01,
+                                                          "token_acc": 0.99}}, f)
+        s = sanity_summary(good)
+        assert s["passed"] is True and s["variant"] == "lega" and s["seed"] == 3
+        assert s["failed_checks"] == ["b"]
+        assert s["final_loss"] == 0.01 and s["token_acc"] == 0.99
+        assert len(s["sha256"]) == 64
+        # 清单内嵌 + 下游 provenance 继承
+        cfg = os.path.join(d, "cfg.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 3}, f)
+        data = os.path.join(d, "data")
+        os.makedirs(data)
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(8))
+        m = build_run_manifest(tag="t", variant="lega", seed=3,
+                               config_path=cfg, data_dir=data, device="cpu",
+                               sanity=s)
+        assert m["sanity"]["sha256"] == s["sha256"]
+        with open(os.path.join(d, "run_manifest.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(m, f)
+        prov = load_provenance(d)
+        assert prov["sanity_passed"] is True
+        assert prov["sanity_variant"] == "lega"
+    print("  [ok] sanity 摘要绑定 manifest，load_provenance 继承 sanity_passed")
+
+
+def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
+    """端到端：train --sanity_file 把闸门证据与训练时精度开关写进 manifest。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=2048, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin"))
+        rng.integers(0, 64, size=256, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin"))
+        with open(os.path.join(data_dir, "meta.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "vocab_size": 64}, f)
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
+                       "block_size": 32, "batch_size": 2, "steps": 1,
+                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
+                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
+                       "seed": 5, "log_every": 1, "eval_every": 1,
+                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+        sanity_path = os.path.join(d, "sanity_lega.json")
+        with open(sanity_path, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "variant": "lega", "seed": 5,
+                       "checks": {}, "initial": {}, "final": {}}, f)
+        out_dir = os.path.join(d, "out")
+        r = subprocess.run(
+            [sys.executable, "-m", "lega.train", "--config", cfg_path,
+             "--variant", "lega", "--data_dir", data_dir,
+             "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
+             "--sanity_file", sanity_path],
+            cwd=root, capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        with open(os.path.join(out_dir, "run_manifest.json"),
+                  encoding="utf-8") as f:
+            manifest = json.load(f)
+        assert manifest["sanity"]["present"] is True
+        assert manifest["sanity"]["passed"] is True
+        assert manifest["sanity"]["variant"] == "lega"
+        # 精度开关必须如实记录（顺序错误会记成训练前默认值）
+        assert isinstance(manifest["runtime"]["tf32_matmul"], bool)
+        assert isinstance(manifest["runtime"]["tf32_cudnn"], bool)
+        with open(os.path.join(out_dir, "eval.json"), encoding="utf-8") as f:
+            ev = json.load(f)
+        assert ev["sanity_passed"] is True
+    print("  [ok] train manifest：sanity 证据 + 精度开关已记录")

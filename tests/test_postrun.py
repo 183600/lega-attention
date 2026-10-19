@@ -154,5 +154,23 @@ def test_parser_defaults():
     assert not (a.smoke or a.wandb or a.skip_train or a.skip_eval
                 or a.skip_ruler or a.skip_analysis)
     assert a.ruler_ctx_lens is None and a.early_stop_patience is None
+    assert a.sanity_file is None
     assert isinstance(a, argparse.Namespace)
     print("  [ok] CLI 默认值与 skip 开关缺省关闭")
+
+
+def test_train_argv_forwards_sanity_file_only_when_present():
+    """sanity 证据透传：提供时进入 train 命令，缺省不夹带旧文件。"""
+    a = _ns()
+    assert "--sanity_file" not in _train_argv(a)
+    a2 = _parser().parse_args([
+        "--config", "configs/tiny.json", "--variant", "lega",
+        "--seed", "1337", "--data_dir", "data/dummy",
+        "--out_dir", "out/tiny_smoke/lega",
+        "--results_dir", "results/tiny_smoke", "--suffix", "",
+        "--sanity_file", "results/tiny_smoke/sanity_lega.json",
+    ])
+    t = _train_argv(a2)
+    assert t[t.index("--sanity_file") + 1] == \
+        "results/tiny_smoke/sanity_lega.json"
+    print("  [ok] postrun 透传 --sanity_file（缺省不夹带）")

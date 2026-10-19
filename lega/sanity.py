@@ -47,9 +47,15 @@ LOSS_CONSISTENCY_ABS_TOL = 1e-3
 # 冒烟模式：更小批次/更少步数，保持“能快速过拟合”的性质
 SMOKE_OVERRIDES = {"steps": 60, "batch_size": 4, "ctx": 64, "log_every": 10}
 
+# 随机初始化下交叉熵应接近 log(V)：偏差过大意味着 logits 尺度/初始化/标签
+# 分布异常（这是排查标签错位与初始化错误的第一中间量）。容差取 1.0 nat 的
+# 宽松值，只拦“数量级都不对”的问题，避免误伤正常随机初始化。
+DEFAULT_INITIAL_LOSS_TOL = 1.0
+
 DEFAULTS = {"steps": 300, "batch_size": 8, "ctx": 128, "lr": 3e-3,
             "warmup": 10, "grad_clip": 1.0, "log_every": 25,
-            "loss_threshold": 0.05, "acc_threshold": 0.99}
+            "loss_threshold": 0.05, "acc_threshold": 0.99,
+            "initial_loss_tol": DEFAULT_INITIAL_LOSS_TOL}
 
 
 @torch.inference_mode()
@@ -148,16 +154,20 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                       warmup: int = 10, grad_clip: float = 1.0,
                       log_every: int = 25,
                       loss_threshold: float = 0.05,
-                      acc_threshold: float = 0.99) -> dict:
+                      acc_threshold: float = 0.99,
+                      initial_loss_tol: float = DEFAULT_INITIAL_LOSS_TOL) -> dict:
     """在同一个固定批上训练 model 并返回可审计的检查结果。
 
     调用方必须已保证 model 的正则化已关闭（dropout=0/attn_dropout=0，
     优化器 weight_decay=0）；本函数只用固定批、无任何数据增强。
 
-    除了“能否过拟合”，本函数还自动核对两条中间结果：
+    除了“能否过拟合”，本函数还自动核对三条中间结果：
       * 首步训练路径 loss（模型内部 lm_head 分块 + 交叉熵）与 batch_metrics
         直接对完整 logits 算 F.cross_entropy 的结果一致——loss 计算错误
         （分块边界/归一化/ignore_index）未必妨碍过拟合，但数值会对不上；
+      * 初始 loss ≈ log(V)：随机初始化 + 未见数据下交叉熵应接近均匀分布
+        的对数值，偏差超过 initial_loss_tol（默认 1.0 nat，只拦数量级错误；
+        负值表示显式禁用该检查）说明初始化/logits 尺度/标签分布存在严重问题；
       * 标签映射 y == x 右移一位——在数据消费点再次硬校验。
     """
     set_seed(seed)
@@ -219,6 +229,12 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
         model.eval()
 
+    log_vocab = math.log(model.vocab_size)
+    initial_loss_gap = float(initial["loss"]) - log_vocab
+    # initial_loss_tol < 0 表示显式禁用该检查（仍记录偏差供人工复核）
+    initial_loss_ok = (float(initial_loss_tol) < 0) or (
+        math.isfinite(initial_loss_gap)
+        and abs(initial_loss_gap) <= float(initial_loss_tol))
     checks = {
         "loss_below_threshold": final["loss"] <= float(loss_threshold),
         "token_acc_above_threshold": final["token_acc"] >= float(acc_threshold),
@@ -236,6 +252,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             first_train_loss, initial["loss"]),
         # 中间结果核对：消费点的标签映射是 next-token 移位（而非错位/换序）
         "next_token_shift_consistent": bool(shift_ok),
+        # 中间结果核对：初始 loss 接近 log(V)（初始化/logits 尺度/标签分布正常）
+        "initial_loss_near_log_vocab": initial_loss_ok,
     }
     passed = all(checks.values())
     return {
@@ -243,10 +261,12 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "passed": bool(passed),
         "checks": checks,
         "thresholds": {"loss": float(loss_threshold),
-                       "token_acc": float(acc_threshold)},
+                       "token_acc": float(acc_threshold),
+                       "initial_loss_tol": float(initial_loss_tol)},
         "initial": initial,
         "final": final,
-        "log_vocab": math.log(model.vocab_size),
+        "log_vocab": log_vocab,
+        "initial_loss_minus_log_vocab": initial_loss_gap,
         "first_grad_norm": first_grad_norm,
         "first_train_loss": first_train_loss,
         "loss_consistency": {
@@ -261,9 +281,9 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "history": history,
         "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
                    "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
-                   "logits CE（首步）以及 y=x 右移一位，其余中间结果"
-                   "（首步 loss≈log(V)、梯度范数>0、逐参数梯度覆盖、逐层"
-                   "统计）请结合本 JSON 人工复核，并使用真实数据小规模预跑。"),
+                   "logits CE（首步）、y=x 右移一位与初始 loss≈log(V)，"
+                   "其余中间结果（梯度范数>0、逐参数梯度覆盖、逐层统计）"
+                   "请结合本 JSON 人工复核，并使用真实数据小规模预跑。"),
     }
 
 
@@ -281,6 +301,8 @@ def main():
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--loss_threshold", type=float, default=None)
     p.add_argument("--acc_threshold", type=float, default=None)
+    p.add_argument("--initial_loss_tol", type=float, default=None,
+                   help="初始 loss 与 log(V) 的允许偏差（nat，默认 1.0）")
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
@@ -292,10 +314,12 @@ def main():
         "loss_threshold", DEFAULTS["loss_threshold"]))
     opt["acc_threshold"] = float(sanity_cfg.get(
         "acc_threshold", DEFAULTS["acc_threshold"]))
+    opt["initial_loss_tol"] = float(sanity_cfg.get(
+        "initial_loss_tol", DEFAULTS["initial_loss_tol"]))
     if args.smoke:
         opt.update(SMOKE_OVERRIDES)
     for name in ("steps", "batch_size", "ctx", "lr", "seed",
-                 "loss_threshold", "acc_threshold"):
+                 "loss_threshold", "acc_threshold", "initial_loss_tol"):
         val = getattr(args, name)
         if val is not None:
             opt[name] = val
@@ -334,7 +358,8 @@ def main():
         device=device, seed=seed, warmup=int(opt["warmup"]),
         grad_clip=float(opt["grad_clip"]), log_every=int(opt["log_every"]),
         loss_threshold=float(opt["loss_threshold"]),
-        acc_threshold=float(opt["acc_threshold"]))
+        acc_threshold=float(opt["acc_threshold"]),
+        initial_loss_tol=float(opt["initial_loss_tol"]))
     res.update({
         "variant": args.variant,
         "variant_cn": VARIANT_CN[args.variant],
@@ -351,7 +376,9 @@ def main():
     last = res["history"][-1]["loss"] if res["history"] else float("nan")
     print(f"[sanity] {'PASS' if res['passed'] else 'FAIL'}: "
           f"loss {res['initial']['loss']:.4f} -> {res['final']['loss']:.4f} "
-          f"(曲线末值 {last:.4f}, logV={res['log_vocab']:.3f}), "
+          f"(曲线末值 {last:.4f}, logV={res['log_vocab']:.3f}, "
+          f"初始偏差 {res['initial_loss_minus_log_vocab']:+.3f}/"
+          f"±{res['thresholds']['initial_loss_tol']:.2f}), "
           f"token_acc={res['final']['token_acc']:.4f}, "
           f"exact={res['final']['exact_match']:.3f}")
     if not res["passed"]:

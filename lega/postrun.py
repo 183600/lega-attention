@@ -45,6 +45,8 @@ def _train_argv(a) -> List[str]:
         argv.append("--wandb")
     if a.early_stop_patience is not None:
         argv += ["--early_stop_patience", str(a.early_stop_patience)]
+    if a.sanity_file:
+        argv += ["--sanity_file", a.sanity_file]
     return argv
 
 
@@ -133,6 +135,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--early_stop_patience", type=int, default=None)
+    p.add_argument("--sanity_file", default=None,
+                   help="小批量过拟合 sanity 结果 JSON；透传给 lega.train 写入 "
+                        "run_manifest（由 run_all 提供）")
     p.add_argument("--ruler_ctx_lens", default=None,
                    help="透传 ruler 的 --ctx_lens（逗号分隔）")
     p.add_argument("--ruler_n_samples", type=int, default=None)

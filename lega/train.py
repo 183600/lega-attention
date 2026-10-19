@@ -21,7 +21,7 @@ from .attention import VARIANTS, VARIANT_CN
 from .curves import LIVE_WARN_EVALS, live_overfit_hint
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
-from .repro import build_run_manifest
+from .repro import build_run_manifest, sanity_summary
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, now_str,
                     save_json, set_seed, t_critical_95)
 
@@ -640,6 +640,11 @@ def main():
                    help="验证损失连续 N 次评测无实质改善则早停（0=关闭，"
                         "默认读配置 early_stop_patience；启用后各 run 实际步数"
                         "可能不同，run_all 审计按计划步数核对）")
+    p.add_argument("--sanity_file", default=None,
+                   help="开训前小批量过拟合 sanity 结果 JSON 路径；提供时把"
+                        "“本 run 通过代码正确性闸门”的摘要与哈希写入 "
+                        "run_manifest.json，使 checkpoint 可自证（run_all "
+                        "默认透传）")
     args = p.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -671,18 +676,37 @@ def main():
     train = load_bin(args.data_dir, "train")
     val = load_bin(args.data_dir, "val")
 
+    # 按设备启用 TF32（Ampere+）；门控路径在 AMP 下已是 bf16。
+    # 必须在 build_run_manifest 之前：manifest 记录的是训练实际生效的精度开关，
+    # 否则 CUDA 上会记下 tf32_matmul=False 的“训练前默认值”，环境溯源失真。
+    enable_tf32(device)
+
     # 实验溯源：代码版本 + 数据指纹 + 运行环境 + 实际命令行，训练前落盘，
     # 与 config_used.json（超参数）和 train_log.jsonl（训练曲线）共同构成
     # 可复现、可追溯的完整记录。
+    sanity_info = sanity_summary(args.sanity_file) if args.sanity_file else None
+    if sanity_info and not sanity_info.get("present"):
+        print(f"[train] ⚠ --sanity_file 指定的结果文件不存在：{args.sanity_file}"
+              "（manifest 按 present=false 记录，不冒充通过）")
+    if sanity_info and sanity_info.get("variant") not in (None, args.variant):
+        print(f"[train] ⚠ sanity 结果变体不一致（sanity={sanity_info['variant']} "
+              f"vs 本 run={args.variant}）：原样记录进 manifest 供审计，"
+              "不把它当作本 run 的通过证据")
     manifest = build_run_manifest(
         tag=tag, variant=args.variant, seed=seed, config_path=args.config,
-        data_dir=args.data_dir, device=device)
+        data_dir=args.data_dir, device=device, sanity=sanity_info)
     save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
+    # 本 run 的 eval.json 也继承闸门结论；变体不一致时不得冒充通过
+    sanity_passed = None
+    if (sanity_info and sanity_info.get("present")
+            and sanity_info.get("variant") in (None, args.variant)):
+        sanity_passed = sanity_info.get("passed")
     provenance = {
         "code_commit": manifest["git"]["commit"],
         "code_dirty": manifest["git"]["dirty"],
         "data_fingerprint": manifest["data"]["digest"],
         "config_sha256": manifest["config_sha256"],
+        "sanity_passed": sanity_passed,
     }
 
     block_size = int(cfg["block_size"])
@@ -702,8 +726,6 @@ def main():
         gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
         use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
     )
-    # 按设备启用 TF32（Ampere+）；门控路径在 AMP 下已是 bf16
-    enable_tf32(device)
     model = GPT(**model_cfg).to(device)
     if cfg.get("compile", False) and device.startswith("cuda"):
         try:
@@ -750,8 +772,11 @@ def main():
     if args.wandb:
         try:
             import wandb
-            wb = wandb.init(project="lega-attention", name=f"{tag}-{args.variant}",
-                            config=cfg_used, reinit=True)
+            # 名字含 seed：多种子实验在 W&B 上不互相覆盖；config 同时带
+            # 代码版本/数据指纹，远端记录也能回答“这条曲线对应哪份代码/数据”
+            wb = wandb.init(project="lega-attention",
+                            name=f"{tag}-{args.variant}-seed{seed}",
+                            config={**cfg_used, **provenance}, reinit=True)
             print("[train] WandB 已启动")
         except Exception as e:
             print(f"[train] WandB 启动失败（忽略，继续本地训练）: {e}")

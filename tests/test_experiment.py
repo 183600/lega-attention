@@ -90,7 +90,8 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
         with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"variant": "lega", "val_ppl": 12.5, "steps": 100,
                        "tokens_seen": 4096, "code_commit": "c" * 40,
-                       "data_fingerprint": "fp", "config_sha256": "sha"}, f)
+                       "data_fingerprint": "fp", "config_sha256": "sha",
+                       "sanity_passed": True}, f)
         with open(os.path.join(out, "train_log.jsonl"), "w", encoding="utf-8") as f:
             f.write('{"step": 1, "loss": 1.0}\n')
         with open(os.path.join(out, "model_best.pt"), "wb") as f:
@@ -98,6 +99,7 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
         snap = snapshot_train_run("lega", 7, out)
         assert snap["variant"] == "lega" and snap["seed"] == 7
         assert snap["result"]["val_ppl"] == 12.5
+        assert snap["result"]["sanity_passed"] is True
         assert set(snap["files"]) == {"eval.json", "train_log.jsonl",
                                       "model_best.pt"}
         assert len(snap["files"]["train_log.jsonl"]["sha256"]) == 64
@@ -122,3 +124,45 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] snapshot_train_run 最终指标 + 曲线/配置/checkpoint 哈希")
+
+
+def test_experiment_record_embeds_resolved_hyperparameters():
+    """台账必须自含超参数：config 文件被改写/删除后仍可还原实际配置。"""
+    rec = build_experiment_record(
+        run_id="r1", status="started", tag="t", config_path="configs/tiny.json",
+        config_sha256="a" * 64, variants=["lega"], seeds=[1], smoke=False,
+        argv=["run_all.py"], git={"commit": "c" * 40, "dirty": False},
+        data_fingerprint="fp", runtime={"torch": "x"}, out_root="out/t",
+        results_dir="results/t", time_start="2026-01-01 00:00:00",
+        config={"lr": 3e-4, "steps": 100, "seeds": [1]})
+    assert rec["config"] == {"lr": 3e-4, "steps": 100, "seeds": [1]}
+    # 未提供 config 的旧调用方保持兼容（字段为 None）
+    rec2 = build_experiment_record(
+        run_id="r2", status="started", tag="t", config_path="c.json",
+        config_sha256="b" * 64, variants=["lega"], seeds=[1], smoke=False,
+        argv=["run_all.py"], git={}, data_fingerprint=None, runtime={},
+        out_root="out/t", results_dir="results/t", time_start="t0")
+    assert rec2["config"] is None
+    json.dumps(rec)
+    print("  [ok] 台账内嵌解析后的超参数（config 自含）")
+
+
+def test_snapshot_train_run_embeds_config_used():
+    """run 快照内嵌 config_used.json 内容：单 run 超参数可从台账直接还原。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "lega")
+        os.makedirs(out)
+        with open(os.path.join(out, "config_used.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"lr": 1e-3, "seed": 9, "variant": "lega",
+                       "train_ctx": 64}, f)
+        snap = snapshot_train_run("lega", 9, out)
+        assert snap["config_used"]["lr"] == 1e-3
+        assert snap["config_used"]["seed"] == 9
+        # config_used.json 缺失/畸形时静默降级，不影响其余哈希
+        os.remove(os.path.join(out, "config_used.json"))
+        assert "config_used" not in snapshot_train_run("lega", 9, out)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] run 快照内嵌 config_used.json（含缺失降级）")

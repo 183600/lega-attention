@@ -73,7 +73,8 @@ from lega.hypotheses import (REGISTRY_PATH as HYPOTHESES_PATH,  # noqa: E402
 from lega.ngram import evaluate as ngram_evaluate  # noqa: E402
 from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
 from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
-from lega.repro import data_fingerprint, git_info, runtime_info, sha256_file  # noqa: E402
+from lega.repro import (data_fingerprint, git_info, runtime_info,  # noqa: E402
+                        sanity_summary, sha256_file)
 from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
                         mean_std, min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, save_json)  # noqa: E402
@@ -206,6 +207,37 @@ def run_many(cmds, jobs: int, env=None) -> None:
 def _repo_path(path: str) -> str:
     """相对路径统一解释为仓库根目录；父进程与子进程必须看到同一位置。"""
     return path if os.path.isabs(path) else os.path.abspath(os.path.join(ROOT, path))
+
+
+def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
+                          stage: str, variant: str = None,
+                          returncode: int = None, sanity: dict = None) -> None:
+    """失败轮次的终态记录：附失败阶段/原因/退出码，失败实验也完整留痕。"""
+    extra = {"error": error, "stage": stage}
+    if variant is not None:
+        extra["variant"] = variant
+    if returncode is not None:
+        extra["returncode"] = int(returncode)
+    append_record(ledger, build_experiment_record(
+        status="aborted", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
+        sanity=sanity, extra=extra, **ledger_common))
+
+
+def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
+                          returncode: int, results_dir: str) -> dict:
+    """sanity 闸门失败时向台账追写 aborted 记录，返回结果文件摘要。
+
+    只留 dangling started 无法区分“被中止”与“崩溃”，也没有失败原因；
+    aborted 记录内嵌失败变体、退出码与该变体的 sanity 结果摘要（含未通过
+    项），供事后复现失败现场。
+    """
+    failed = sanity_summary(os.path.join(results_dir, f"sanity_{variant}.json"))
+    append_aborted_record(
+        ledger, ledger_common, error="sanity_gate_failed", stage="sanity",
+        variant=variant, returncode=returncode,
+        sanity={"executed": True, "verdict": {variant: "fail"},
+                "failed": failed})
+    return failed
 
 
 def _seed_tag(seed: int, n_seeds: int) -> str:
@@ -3723,7 +3755,10 @@ def main():
     run_id = new_run_id(tag, config_sha256)
     ledger_common = dict(
         run_id=run_id, tag=tag, config_path=args.config,
-        config_sha256=config_sha256, variants=variants, seeds=seeds,
+        config_sha256=config_sha256,
+        # 快照而不是引用：started/completed 两条记录必须对应同一份配置
+        config=json.loads(json.dumps(cfg)), variants=variants,
+        seeds=seeds,
         smoke=bool(args.smoke), argv=sys.argv, git=git,
         data_fingerprint=data_digest, runtime=repro["runtime"],
         out_root=out_root, results_dir=results_dir,
@@ -3760,6 +3795,11 @@ def main():
             run_many(cmds, jobs, _jobs_env(jobs))
         except subprocess.CalledProcessError as e:
             v = variants[cmds.index(e.cmd)]
+            # 失败实验也要完整留痕：aborted 记录内嵌 sanity 判定与结果文件摘要
+            record_aborted_sanity(ledger, ledger_common, v, e.returncode,
+                                  results_dir)
+            print(f"[repro] 实验台账已记录 aborted（run_id={run_id}，"
+                  f"sanity 闸门失败）-> {ledger}")
             raise SystemExit(
                 f"sanity check 失败（变体 {v}，退出码 {e.returncode}）：无法过拟合小批量，"
                 "说明梯度反传/损失计算/标签对齐存在严重问题；请先排查再开全量"
@@ -3789,6 +3829,11 @@ def main():
                 cmd += ["--skip_train"]
             if args.wandb:
                 cmd += ["--wandb"]
+            if sanity:
+                # 把开训前过拟合闸门的判定与哈希绑定进 run_manifest；
+                # 跳过 sanity 时不透传，避免旧结果文件被当成本次证据。
+                cmd += ["--sanity_file",
+                        os.path.join(results_dir, f"sanity_{v}.json")]
             if args.early_stop_patience is not None:
                 cmd += ["--early_stop_patience", str(args.early_stop_patience)]
             if args.worst_n is not None:
@@ -3812,6 +3857,12 @@ def main():
             # 命令）；训练中止最常见的原因是 NaN 防护触发（train.py 会先落盘
             # nan_report.json 再退出），把排查入口直接指给用户
             v0 = variants[chain_cmds.index(e.cmd) // max(1, len(seeds))]
+            append_aborted_record(
+                ledger, ledger_common, error="run_chain_failed",
+                stage="train/eval/ruler/analysis", variant=v0,
+                returncode=e.returncode)
+            print(f"[repro] 实验台账已记录 aborted（run_id={run_id}，"
+                  f"run 链失败）-> {ledger}")
             raise SystemExit(
                 f"run 链失败（变体 {v0}，退出码 {e.returncode}）：训练/评测/"
                 "机制分析任一阶段失败即中止；若为训练 NaN 中止，对应 run 目录"

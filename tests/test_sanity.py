@@ -180,3 +180,33 @@ def test_overfit_check_restores_tf32_flags_independently():
         torch.backends.cuda.matmul.allow_tf32 = mm
         torch.backends.cudnn.allow_tf32 = cudnn
     print("  [ok] TF32 开关分别还原（matmul/cudnn 互不覆盖）")
+
+
+def test_overfit_check_detects_pathological_initial_logits():
+    """初始 loss 远离 log(V)（logits 尺度病态）必须被自动中间结果核对拦下。
+
+    这对应“初始化/标签分布异常”类问题：模型仍可能慢慢过拟合，但初始
+    交叉熵不可能接近均匀分布的对数值，应立即报警而不是盲目开训。
+    """
+    import math
+    model = _model()
+    with torch.no_grad():
+        model.lm_head.weight.mul_(30.0)          # 权重共享：embedding 同步放大
+    x, y = _batch()
+    res = run_overfit_check(model, x, y, steps=5, lr=1e-3, device="cpu",
+                            seed=0, log_every=1)
+    assert not res["passed"]
+    assert res["checks"]["initial_loss_near_log_vocab"] is False
+    assert abs(res["initial_loss_minus_log_vocab"]) > res["thresholds"]["initial_loss_tol"]
+    assert math.isfinite(res["initial_loss_minus_log_vocab"])
+    # 容差可配置：放宽到足够大时该检查通过（其余检查仍以各自阈值判定）
+    res2 = run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu",
+                             seed=0, log_every=1, initial_loss_tol=1e6)
+    assert res2["checks"]["initial_loss_near_log_vocab"] is True
+    # 负值显式禁用该检查（偏差仍记录在案）
+    res3 = run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu",
+                             seed=0, log_every=1, initial_loss_tol=-1.0)
+    assert res3["checks"]["initial_loss_near_log_vocab"] is True
+    assert abs(res3["initial_loss_minus_log_vocab"]) > 1.0
+    print(f"  [ok] 病态 logits 初始偏差 "
+          f"{res['initial_loss_minus_log_vocab']:+.2f} 被初始 loss≈log(V) 核对拦下")
