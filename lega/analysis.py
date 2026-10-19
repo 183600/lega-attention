@@ -414,8 +414,10 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     }
     summary.update(_conc_stats(hit, max_p, tau))
     summary.update({
-        "mean_g_hit": (float(np.nanmean(g[hit == 1])) if (~np.isnan(g)).any() and (hit == 1).any() else None),
-        "mean_g_miss": (float(np.nanmean(g[hit == 0])) if (~np.isnan(g)).any() and (hit == 0).any() else None),
+        "mean_g_hit": (float(np.nanmean(g[hit == 1]))
+                       if (~np.isnan(g[hit == 1])).any() else None),
+        "mean_g_miss": (float(np.nanmean(g[hit == 0]))
+                        if (~np.isnan(g[hit == 0])).any() else None),
         "auroc_logit": _auroc(logit, hit, hv),
         "auroc_qterm": _auroc(qterm, hit, hv),
         "auroc_c": _auroc(c, hit, hv),

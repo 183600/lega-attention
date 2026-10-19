@@ -385,7 +385,13 @@ def test_holm_bonferroni():
     # 全 None / 空输入
     assert holm_bonferroni([]) == []
     assert holm_bonferroni([None, None]) == [None, None]
-    print("  [ok] holm_bonferroni（手算示例/None 不占家族/单调与封顶）")
+    # NaN 与 None 同义：不占家族大小，也不得污染其他 p 的校正值
+    adj = holm_bonferroni([float("nan"), 0.01, 0.02, 0.5])
+    assert adj[0] is None, adj
+    assert abs(adj[1] - 0.03) < 1e-12 and abs(adj[2] - 0.04) < 1e-12
+    assert abs(adj[3] - 0.5) < 1e-12
+    assert holm_bonferroni([float("nan"), float("nan")]) == [None, None]
+    print("  [ok] holm_bonferroni（手算示例/None 与 NaN 不占家族/单调与封顶）")
 
 
 def _brute_signflip_p(diffs):

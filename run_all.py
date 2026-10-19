@@ -1103,9 +1103,13 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            ng = json.load(f) or {}
+            ng = json.load(f)
     except (OSError, ValueError):
         return {}
+    # 合法 JSON 但非对象（如误写为数组）按不可用处理：结构畸形不能以
+    # AttributeError 炸掉整份汇总（与 load_registered_hypotheses 同口径）。
+    if not isinstance(ng, dict):
+        return {"error": "ngram_baseline.json 不是 JSON 对象"}
     ppl_map = ng.get("ppl") or {}
     ref_name = next((k for k in ("bigram", "unigram")
                      if ppl_map.get(k) is not None), None)
@@ -1146,10 +1150,13 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             # 种子已被纳入）：静默丢弃部分种子同样会让读者高估证据完整性
             incomparable.append({"variant": v,
                                  "eval_splits": sorted(eval_splits),
-                                 "excluded_seeds": [int(s) for s in excl_seeds]})
+                                 "excluded_seeds": [int(s) if s is not None
+                                                    else None
+                                                    for s in excl_seeds]})
         if vals:
             staged.append({"variant": v, "vals": vals,
-                           "seeds": [int(s) for s in seeds_used],
+                           "seeds": [int(s) if s is not None else None
+                                     for s in seeds_used],
                            "matched": matched})
     # 参考值决策（第一步）：全部纳入比较的 run 都与窗口规格一致，且
     # window-matched PPL 可用 → 用逐位置对齐参考；否则整体回退全 split。
@@ -1279,7 +1286,10 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             if oof.get("auprc") is None or oof.get("auroc") is None:
                 continue
             per_seed.append({
-                "seed": int(s),
+                # 旧/外部 analysis JSON 可能无 seed 字段（_seed_key 返回 None）：
+                # 直接 int(None) 会让整份汇总 TypeError，与全表 None 容忍口径
+                # 不一致（下面同样理由的 excluded_seeds/seeds 也要容忍）。
+                "seed": int(s) if s is not None else None,
                 "probe_auprc": float(oof["auprc"]),
                 "probe_auroc": float(oof["auroc"]),
                 "gate_auprc": an.get("auprc_logit"),
@@ -1434,6 +1444,8 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         try:
             with open(nfp, "r", encoding="utf-8") as f:
                 ngram = json.load(f)
+            if not isinstance(ngram, dict):
+                ngram = None
         except (OSError, ValueError):
             ngram = None
     if ngram:
@@ -1927,8 +1939,12 @@ def build_summary(results_dir: str, audit: dict = None,
                 eval_splits.add(s["eval"].get("split", "val"))
 
     # 汇总运行时指标时必须使用所有变体共有的同一上下文档，不允许各取自己的最大 ctx。
-    lat = load(os.path.join(results_dir, "latency.json")) or {}
-    lat_entries = {v: (lat.get("variants") or {}).get(v) for v in variants}
+    lat = load(os.path.join(results_dir, "latency.json"))
+    if not isinstance(lat, dict):
+        lat = {}
+    lat_variants = lat.get("variants")
+    lat_variants = lat_variants if isinstance(lat_variants, dict) else {}
+    lat_entries = {v: lat_variants.get(v) for v in variants}
 
     def _prefill_at(e, ctx):
         if not e or ctx is None:
@@ -2893,13 +2909,20 @@ def build_summary(results_dir: str, audit: dict = None,
 
     # --- 涨点-增幅权衡：评价改进不能只看指标涨点
     md += ["", "## 涨点-增幅权衡（涨点必须对照增幅）", ""]
-    if common_ctx is not None and lat_entries.get("standard"):
-        base_e = lat_entries["standard"]
+    # 运行时基线与上表 prefill_rel_pct 同一策略：优先 standard_sdpa（与全部
+    # 候选的 SDPA 推理路径可比），缺失时退回显式 standard。用显式 standard
+    # 当基线与候选的 SDPA 路径错位，会把加速误算成"负增幅"、系统性低估开销。
+    # 训练 ms/step 与训练峰值仍取 standard 训练产物（只有它有训练记录）。
+    # 注：standard_sdpa 不在 VARIANTS 里，只存在于 latency.json 的变体表。
+    lat_base_name = next((n for n in ("standard_sdpa", "standard")
+                          if isinstance(lat_variants.get(n), dict)), None)
+    if common_ctx is not None and lat_base_name:
+        base_e = lat_variants[lat_base_name]
         base_prefill = (base_e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
         base_decode = (base_e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
-        md.append(f"基线=standard（公共 ctx={common_ctx}、batch=1）。增幅="
+        md.append(f"基线={lat_base_name}（公共 ctx={common_ctx}、batch=1）。增幅="
                   "Prefill ms/Decode ms(tok)/训练 ms(step)/训练进程峰值/参数量/"
                   "FLOPs(token)/实测分配量 相对基线增幅的最大值（Prefill/Decode "
                   "的差异若不超过两端重复测量的噪声散布则按不可区分处理，标 † "
@@ -2976,6 +2999,8 @@ def build_summary(results_dir: str, audit: dict = None,
         n_metric_within_noise = 0
         for r in rows:
             v = r["variant"]
+            # 基线行（standard）不参与涨点-增幅判定；standard_sdpa 不在
+            # VARIANTS 里，根本不会出现在 rows 中。
             if v == "standard" or not lat_entries.get(v):
                 continue
             e = lat_entries[v]

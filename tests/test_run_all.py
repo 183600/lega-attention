@@ -1615,3 +1615,90 @@ def test_build_summary_zero_failure_variant_blocks_consensus():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary：零错误变体计入跨变体对照")
+
+
+def test_build_summary_tolerates_seedless_artifacts():
+    """旧/外部产物没有 seed 字段时不得在汇总里 TypeError。
+
+    _seed_key 对无名种子文件返回 None（全表以 None 表“无种子信息”）；ngram
+    对比的 excluded_seeds/seeds 与线性探针逐种子表若直接 int(None) 会让整份
+    汇总中途崩溃，而不是按缺种子信息处理。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_standard.json"),
+                    {"variant": "standard", "val_ppl": 10.0, "val_loss": 2.3,
+                     "n_params": 10, "split": "val"})
+        # 无 seed 且 split 与 ngram 不一致 → 进入 excluded_seeds 分支
+        _write_json(os.path.join(tmp, "eval_lega.json"),
+                    {"variant": "lega", "val_ppl": 9.0, "val_loss": 2.2,
+                     "n_params": 10, "split": "test"})
+        _write_json(os.path.join(tmp, "ngram_baseline.json"),
+                    {"ppl": {"unigram": 100.0, "bigram": 50.0},
+                     "split": "val", "train_tokens": 100, "eval_tokens": 50,
+                     "vocab_size": 20})
+        _write_json(os.path.join(tmp, "analysis_lega.json"), {
+            "variant": "lega",
+            "linear_probe": {"primary": "conc_len_query",
+                             "feature_sets": {"conc_len_query": {
+                                 "oof": {"auprc": 0.5, "auroc": 0.6}}}}})
+        build_summary(tmp)
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        excl = [x for x in sig["ngram_comparison"].get("incomparable", [])
+                if x["variant"] == "lega"]
+        assert excl and excl[0]["excluded_seeds"] == [None], sig
+        probe = sig["linear_probe_comparison"]
+        assert probe["rows"] and probe["rows"][0]["seeds"] == [None]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：无 seed 旧产物按缺种子信息处理，不崩溃")
+
+
+def test_ngram_baseline_rejects_non_dict_json():
+    """合法 JSON 但非对象（数组）的 ngram_baseline.json 视为不可用而非崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), [1, 2, 3])
+        r = ngram_baseline_comparison({}, tmp)
+        assert r.get("error"), r
+        out = build_summary(tmp)
+        # 畸形文件按“未运行”处理（而不是把数组当对象炸掉汇总）
+        assert "简单统计基线：未运行" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram_baseline.json 非对象：返回 error/跳过而非 AttributeError")
+
+
+def test_tradeoff_prefers_sdpa_runtime_baseline():
+    """涨点-增幅的运行时要与主表同一基线（standard_sdpa 优先），
+    否则候选的 SDPA 加速会被误算成负增幅、低估方法开销。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "standard_sdpa", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+
+        def _lat(prefill, dec):
+            return {"prefill_ms": {"256": {"1": prefill}},
+                    "decode_ms_per_tok": {"256": dec},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(10.0, 1.0),        # 显式路径（旧默认基线）
+            "standard_sdpa": _lat(1.0, 0.1),    # 与候选同路径的可比基线
+            "lega": _lat(1.1, 0.11)}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["prefill_rel_pct"] == 10.0, row
+        assert row["eff_prefill_delta_pct"] == 10.0, row
+        assert row["eff_cost_max_pct"] == 10.0, row
+        assert "基线=standard_sdpa" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅：运行时基线优先 standard_sdpa（与主表一致）")

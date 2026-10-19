@@ -485,11 +485,14 @@ def holm_bonferroni(pvals) -> list:
     检验越多、至少一次假阳性的概率越大（family-wise error）。Holm 法在
     任意依赖结构下都控制 FWER，且比 Bonferroni 保守度更低。
 
-    输入为 p 值列表（允许 None，表示无法检验，不占家族大小），返回同序列表：
+    输入为 p 值列表（允许 None 表示无法检验，不占家族大小；NaN 与 None 同义），
+    返回同序列表：
     p_adj_(i) = max_{j<=i} min(1, (m-j+1) * p_(j))（p 升序的第 j 个观测），
     保证校正后 p 随原始 p 单调不减且 >= 原始 p。
+    NaN 必须剔除而不是参与排序：NaN 的比较全为 False，sorted 会把它们按
+    任意相对位置插入，一旦排在前面，后续有效 p 的校正值将被全部抬到 1。
     """
-    idx = [i for i, p in enumerate(pvals) if p is not None]
+    idx = [i for i, p in enumerate(pvals) if p is not None and p == p]
     m = len(idx)
     adj = [None] * len(pvals)
     if m == 0:

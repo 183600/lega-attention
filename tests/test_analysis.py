@@ -199,4 +199,18 @@ def test_summarize_reports_imbalance_aware_metrics():
                    "lega", 0.5)
     assert s3["gate_f1"] is None
     assert s3["gate_f1_trivial"] is None   # 无标签时不报稻草人对照
-    print("  [ok] summarize（正类率/主指标/PR-AUC/三口径门控 F1）")
+    # hit==1 切片 g 全缺：mean_g_hit 必须是 None；整数组守卫会把这里
+    # 误判为“有非 NaN”并对空切片 nanmean，返回 nan 且发 RuntimeWarning
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        s4 = summarize([
+            {"example": 0, "hit": 1.0, "max_p": 0.9, "logit": 1.0,
+             "qterm": 0.0, "c": 0.5, "g": None, "log_n": 4.0, "layer": 0,
+             "head": 0, "query_pos": 0},
+            {"example": 1, "hit": 0.0, "max_p": 0.1, "logit": 0.0,
+             "qterm": 0.0, "c": 0.5, "g": 0.4, "log_n": 4.0, "layer": 0,
+             "head": 0, "query_pos": 1},
+        ], "lega", 0.5)
+    assert s4["mean_g_hit"] is None and s4["mean_g_miss"] is not None
+    print("  [ok] summarize（正类率/主指标/PR-AUC/三口径门控 F1/全缺 g 切片）")
