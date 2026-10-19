@@ -1,8 +1,8 @@
 """推理基准：预填充（prefill）与带 KV 缓存的逐 token 解码（decode）。
 
 对比各变体在相同配置下两种前向模式的相对差异。
-CUDA 上默认与 train/evaluate/ruler/analysis 一样启用 bf16 autocast
-（--no_amp 回退 fp32/TF32）。
+与 train/evaluate/ruler/analysis 一样默认启用 bf16 autocast（CUDA，或
+支持 bf16 的 CPU；--no_amp 回退 fp32/TF32）。
 
 计时口径：每个配置重复 iters 次并**逐次计时**，报告的中位数连同
 [p10, p90] 区间与相对散布 spread_pct=(p90-p10)/median；散布进入
@@ -27,7 +27,8 @@ from .attention import VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
-from .utils import enable_tf32, get_device, set_seed, save_json
+from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
+                    save_json, set_seed)
 
 
 def _sync(device):
@@ -291,7 +292,8 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--variants", default="standard,standard_sdpa,qgate,null,lega")
     p.add_argument("--device", default="auto")
-    p.add_argument("--no_amp", action="store_true", help="禁用 bf16 autocast（CUDA）")
+    p.add_argument("--no_amp", action="store_true",
+                   help="禁用 bf16 autocast（CUDA/支持 bf16 的 CPU）")
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
@@ -299,13 +301,13 @@ def main():
         cfg = json.load(f)
     meta = load_meta(args.data_dir)
     device = get_device(args.device)
-    # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 上启用 bf16
-    # autocast（--no_amp 可回退 fp32/TF32 以便与旧基准对照）；TF32 仅在
-    # 回退的 fp32 路径上生效（enable_tf32 不影响 bf16/AMP 路径）。
-    use_amp = (not args.no_amp) and device.startswith("cuda")
-    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
-               if use_amp else contextlib.nullcontext())
-    kv_dtype = torch.bfloat16 if use_amp else None
+    # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 或支持 bf16 的
+    # CPU 上启用 bf16 autocast（--no_amp 可回退 fp32/TF32 以便与旧基准对照）；
+    # TF32 仅在回退的 fp32 路径上生效（enable_tf32 不影响 bf16/AMP 路径）。
+    amp_dt = amp_dtype_for(device, not args.no_amp)
+    use_amp = amp_dt is not None
+    amp_ctx = amp_autocast(device, use_amp)
+    kv_dtype = amp_dt
     enable_tf32(device)
     lcfg = dict(cfg.get("latency", {}))
 

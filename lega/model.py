@@ -208,6 +208,13 @@ class _ChunkedLinearCE(torch.autograd.Function):
         dx = torch.empty_like(x2d) if need_dx else None
         gw = None
         w_f = None
+        w_g = None
+        # AMP 下梯度 GEMM 走 autocast 精度（与 nn.Linear 在 autocast 下的
+        # 反向一致）：softmax/掩码仍在 fp32 上完成，进入 GEMM 前才降精度；
+        # 权重梯度先按块在低精度下求出、再累加到 fp32 缓冲，避免跨块在
+        # bf16/fp16 上累加。非 AMP（fp32/fp64）路径保持原精度。
+        gemm_dtype = (ctx.amp_dtype if ctx.amp_dtype in
+                      (torch.float16, torch.bfloat16) else None)
         # 是否有被忽略的位置（全局判定一次）：没有时损失与梯度两条路径
         # 都无需逐块构造掩码，直接按原目标取值/散加。CUDA 上不把有效数取回
         # 主机：.item() 会强制设备同步、打断异步流水，而掩码只是 O(x2d.numel())
@@ -216,8 +223,8 @@ class _ChunkedLinearCE(torch.autograd.Function):
         tgt_has_ignore = (True if x2d.is_cuda
                           else int(n_valid) != tgt.numel())
         has_ignore = (need_dx or need_gw) and tgt_has_ignore
-        # 梯度 GEMM 必须与 logits 同精度：前向处于 autocast 上下文内时显式
-        # 关闭 autocast，避免 fp32/fp64 的 GEMM 被降到低精度。
+        # 非 AMP 时梯度 GEMM 必须与 logits 同精度：显式关闭 autocast，避免
+        # fp32/fp64 的 GEMM 被本就处于 autocast 上下文的外层调用降到低精度。
         grad_ctx = torch.autocast("cuda" if x2d.is_cuda else "cpu", enabled=False)
         with torch.no_grad():
             # 分块循环共用一份目标精度权重，各块 GEMM 的输入逐位一致。
@@ -252,6 +259,22 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     # keep∈{0,1}，无效行清零即可。
                     if has_ignore:
                         d.mul_(keep.unsqueeze(1).to(d.dtype))
+                    if gemm_dtype is not None:
+                        d = d.to(gemm_dtype)
+                        # 低精度副本生成后立即释放 fp32 概率矩阵，峰值显存
+                        # 只多出低精度副本而不是两份同时驻留。
+                        del lcf
+                        if w_g is None:
+                            w_g = (w_fwd if w_fwd.dtype == gemm_dtype
+                                   else weight.to(gemm_dtype))
+                        if need_dx:
+                            dx[s:s + chunk].copy_(torch.matmul(d, w_g))
+                        if need_gw:
+                            xs_g = x2d[s:s + chunk].to(gemm_dtype)
+                            part = torch.mm(d.transpose(0, 1), xs_g)
+                            gw = part.float() if gw is None else gw.add_(part)
+                        del d
+                        continue
                     if need_dx:
                         # d 与权重副本同为计算精度，GEMM 结果与向上游要求的
                         # 梯度同精度（常见 fp32/fp64 下直接写入 dx 的行切片）。
@@ -313,6 +336,28 @@ class _ChunkedLinearCE(torch.autograd.Function):
                     ctx.gw_buf = buf
                 gw = torch.mul(ctx.gw, gscale, out=buf)
         return dx, gw, None, None, None
+
+
+def _ce_chunk_size(vocab_size: int, device: torch.device, *,
+                   train: bool) -> int:
+    """lm_head+交叉熵的分块大小：按设备内存预算与词表自适应。
+
+    训练态 CPU 用 512MB fp32 logits 预算（bf16 梯度 GEMM 实测大块明显更快）；
+    CUDA 按总显存的 1/16 估算并夹在 128–512MB：大显存卡减少分块次数、提升
+    GEMM 利用率，小显存卡仍保留 128MB 下限。无梯度推理的 CPU 路径大块几乎
+    没有收益（实测在噪声内），沿用 128MB 预算以降低峰值内存。
+    """
+    if not train and device.type == "cpu":
+        elems = 33_554_432
+    else:
+        elems = 33_554_432 * 4
+        if device.type == "cuda":
+            try:
+                total = torch.cuda.get_device_properties(device).total_memory
+                elems = min(max(total // 64, 33_554_432), elems)
+            except Exception:
+                pass
+    return max(256, min(4096, elems // max(1, int(vocab_size))))
 
 
 def _cast_weight_cached(owner, slot: str, weight: torch.Tensor) -> torch.Tensor:
@@ -490,13 +535,14 @@ class GPT(nn.Module):
             w = self._lmhead_weight()                     # 共享权重
             flat = x.reshape(-1, x.size(-1))
             tgt = targets.reshape(-1)
-            # 每块 logits 为目标数乘以分块大小，分块大小随词表自适应。
-            CHUNK = max(256, min(4096, 33_554_432 // self.vocab_size))
             # 只要计算图需要梯度（输入或共享 lm_head 权重任一 requires_grad，
             # 如冻结主干只训分类头/detach 上游）就走闭式梯度路径；否则
             # softmax(out=) 在 grad 模式下反传会报“derivative not implemented”。
             needs_grad = (torch.is_grad_enabled()
                           and (x.requires_grad or w.requires_grad))
+            # 每块 logits 为目标数乘以分块大小，分块大小随词表/设备内存自适应。
+            CHUNK = _ce_chunk_size(self.vocab_size, flat.device,
+                                   train=needs_grad)
             if return_window_losses and needs_grad:
                 raise RuntimeError(
                     "return_window_losses 仅支持无梯度评测（inference_mode）")

@@ -45,7 +45,6 @@
       --out_dir results/small
 """
 import argparse
-import contextlib
 import csv
 import json
 import math
@@ -67,8 +66,9 @@ from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
 from .repro import load_provenance
 from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
                     ContextTooSmall, _stable_hash)
-from .utils import (auroc, average_precision, enable_tf32, f1_scores,
-                    get_device, pearson, roc_pr_aucs, save_json, set_seed)
+from .utils import (amp_autocast, auroc, average_precision, enable_tf32,
+                    f1_scores, get_device, pearson, roc_pr_aucs, save_json,
+                    set_seed)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -110,8 +110,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     """
     variant = model.variant
     records_by_ex: List[List[Dict]] = [[] for _ in examples]
-    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
-               if (amp and device.startswith("cuda")) else contextlib.nullcontext())
+    amp_ctx = amp_autocast(device, bool(amp))
     use_c_full = variant in ("lega", "lega_no_query")
     use_c_nolen = (not use_c_full
                    and variant in ("lega_no_len", "lega_conc_only"))

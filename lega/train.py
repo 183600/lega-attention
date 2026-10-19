@@ -5,7 +5,6 @@
       --data_dir data/dummy --out_dir out/tiny/lega [--smoke] [--wandb]
 """
 import argparse
-import contextlib
 import json
 import math
 import os
@@ -23,7 +22,8 @@ from .curves import LIVE_WARN_EVALS, live_overfit_hint
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
 from .repro import build_run_manifest
-from .utils import set_seed, now_str, save_json, enable_tf32, t_critical_95
+from .utils import (amp_autocast, amp_dtype_for, enable_tf32, now_str,
+                    save_json, set_seed, t_critical_95)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -102,9 +102,7 @@ def _hooked_forward(model, x, device: str, amp_dtype, cap: int = 60):
     forward_error = None
     try:
         model.eval()
-        use_cuda_amp = amp_dtype is not None and str(device).startswith("cuda")
-        amp_ctx = (torch.autocast("cuda", dtype=amp_dtype) if use_cuda_amp
-                   else contextlib.nullcontext())
+        amp_ctx = amp_autocast(device, amp_dtype is not None)
         with torch.no_grad(), amp_ctx:
             # last_logits_only：只对最后位置过 lm_head；注意力/门控（NaN 最
             # 常见的产生位置）仍对整段前缀执行，逐模块钩子照常触发。
@@ -205,9 +203,11 @@ def audit_activations(model, pending_batches, device: str,
 
     # 混合精度隔离复测：amp 路径出现非有限时，用同一批次在 fp32 下重跑。
     # 这是"先查数据/代码、再查混合精度"顺序里的主动证据，而不是只报 dtype。
-    use_cuda_amp = amp_dtype is not None and str(device).startswith("cuda")
+    # CPU bf16 与 fp32 的动态范围相同，不存在 fp16 式下溢，且 CPU 上 fp32
+    # 复测无法隔离硬件内核差异；该复测只在 CUDA AMP 路径触发。
+    amp_on = amp_dtype is not None and str(device).startswith("cuda")
     precision_recheck = None
-    if use_cuda_amp and (records or forward_error):
+    if amp_on and (records or forward_error):
         fp_records, fp_err = _hooked_forward(model, x, device, None, cap=cap)
         if fp_err is not None:
             precision_recheck = {
@@ -508,8 +508,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     total_w = 0
     gate_w_total = 0
     window_losses = []
-    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
-               if (amp and device.startswith("cuda")) else contextlib.nullcontext())
+    amp_ctx = amp_autocast(device, bool(amp))
     # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
     with torch.inference_mode():
         # 预取流水线：在当前批前向之前发起下一窗口批的 memmap 收集与 H2D
@@ -738,9 +737,8 @@ def main():
     eval_every = int(cfg.get("eval_every", 500))
     eval_iters = int(cfg.get("eval_iters", 50))
     grad_clip = float(cfg.get("grad_clip", 1.0))
-    use_amp = bool(cfg.get("amp", True)) and device.startswith("cuda")
-    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
-               if use_amp else contextlib.nullcontext())
+    amp_dt = amp_dtype_for(device, bool(cfg.get("amp", True)))
+    amp_ctx = amp_autocast(device, amp_dt is not None)
 
     def lr_factor(step: int) -> float:
         if step < warmup:
@@ -826,7 +824,7 @@ def main():
             report = run_nan_checklist(
                 model, batches, device, step, where, value,
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
-                grad_norm_history=gn_hist, amp_dtype=(torch.bfloat16 if use_amp else None),
+                grad_norm_history=gn_hist, amp_dtype=amp_dt,
                 vocab_size=int(meta["vocab_size"]),
                 consumed_batches=consumed, consumed_step_labels=labels,
                 peak_lr=base_lrs[0], first_bad_step=first_bad_step,
@@ -837,7 +835,7 @@ def main():
         nonlocal best_val, last_eval_step, last_eval_metrics, pending_eval_s, \
             evals_since_improve, stop_step
         t_eval = time.perf_counter()
-        metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=amp_dt is not None)
         pending_eval_s += time.perf_counter() - t_eval
         last_eval_step, last_eval_metrics = step, metrics
         vl = metrics["val_loss"]
@@ -1002,7 +1000,7 @@ def main():
     if last_eval_step == final_step:
         final_metrics = last_eval_metrics
     else:
-        final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=use_amp)
+        final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=amp_dt is not None)
         _nan_guard("val_loss(final)", final_metrics["val_loss"], steps,
                    make_consumed=lambda: val_audit_batch(
                        val, train_ctx, eval_iters, device,

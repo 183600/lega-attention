@@ -14,7 +14,6 @@
   * 生成采用贪心解码 + KV 缓存，与训练相同的因果语言模型接口；
   * 指标: niah/multikey/vt 用数值命中 EM；fwe 用 top-10 词召回率 recall 与严格 EM。
 """
-import contextlib
 import random
 import re
 import zlib
@@ -24,7 +23,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from .utils import save_json, wilson_score_ci
+from .utils import amp_autocast, amp_dtype_for, save_json, wilson_score_ci
 
 KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate",
              "quartz", "falcon", "harbor", "meadow", "thistle", "cobalt", "juniper",
@@ -370,8 +369,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     skipped: List[str] = []
     badcases: List[Dict] = []
     use_cuda = device.startswith("cuda")
-    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
-               if (amp and use_cuda) else contextlib.nullcontext())
+    amp_dt = amp_dtype_for(device, bool(amp))
+    amp_ctx = amp_autocast(device, amp_dt is not None)
     gen_batch = max(1, int(gen_batch))
     # 静态 KV 缓冲在单个网格内跨样例复用：按本网格历史最大 (B, total) 扩容，
     # 之后按所需窗口返回切片视图；网格开始时重置（见下）。
@@ -379,7 +378,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     kv_B = 0
     kv_cap = 0
     kv_bufs: Optional[list] = None
-    kv_dtype = torch.bfloat16 if (amp and use_cuda) else attn0.wk.weight.dtype
+    kv_dtype = amp_dt or attn0.wk.weight.dtype
 
     def _get_kv(B: int, total: int):
         nonlocal kv_B, kv_cap, kv_bufs

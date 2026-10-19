@@ -18,6 +18,7 @@ macro / micro / weighted（三者在不平衡数据上可能差异巨大，macro
 汇总同时报告以上全部统计量；t 与置换检验结论冲突时会显式标注，而不是静默
 采信任何一方。
 """
+import contextlib
 import hashlib
 import json
 import math
@@ -206,6 +207,45 @@ def enable_tf32(device: str) -> None:
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+
+
+def cpu_bf16_available() -> bool:
+    """CPU 是否具备可用的 bf16 加速内核（oneDNN/MKLDNN 后端）。
+
+    PyTorch 的 CPU autocast 在所有 x86 机器上都能运行 bf16，但只有带
+    AVX512-BF16（或等价的硬件加速）时才有收益；没有加速内核时仿真路径
+    反而比 fp32 慢。这里以 oneDNN 自报的 bf16 支持为准，缺失该查询接口的
+    构建按“不支持”处理，保持原来的 fp32 行为。
+    """
+    try:
+        return bool(torch.backends.mkldnn.is_available()
+                    and torch.ops.mkldnn._is_mkldnn_bf16_supported())
+    except (AttributeError, RuntimeError, TypeError):
+        return False
+
+
+def amp_dtype_for(device: str, enabled: bool = True):
+    """当前设备/开关下的 autocast dtype；不可用或未启用时返回 None。
+
+    CUDA 与支持 bf16 内核的 CPU 都使用 bfloat16（动态范围与 fp32 相同，
+    无需 GradScaler）；其它情况返回 None，调用方回退 fp32。
+    """
+    if not enabled:
+        return None
+    if str(device).startswith("cuda") or cpu_bf16_available():
+        return torch.bfloat16
+    return None
+
+
+def amp_autocast(device: str, enabled: bool = True):
+    """bf16 autocast 上下文（CUDA 或支持 bf16 内核的 CPU）；否则空上下文。"""
+    if not enabled:
+        return contextlib.nullcontext()
+    if str(device).startswith("cuda"):
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    if cpu_bf16_available():
+        return torch.autocast("cpu", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
 
 
 def pearson(x, y):

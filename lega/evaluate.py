@@ -5,7 +5,6 @@
       --out results/tiny/eval_lega.json
 """
 import argparse
-import contextlib
 import json
 import math
 import os
@@ -18,7 +17,8 @@ from .datacheck import append_test_access
 from .model import load_model, count_params, gate_extra_params
 from .repro import load_provenance, sha256_file
 from .train import evaluate_val, _val_eval_indices
-from .utils import enable_tf32, get_device, now_str, save_json, set_seed
+from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
+                    now_str, save_json, set_seed)
 
 
 # 最差窗口筛查的候选窗口上限：与 PPL 的 eval_iters 各自独立（前者排序、
@@ -52,8 +52,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     indices, _ = _val_eval_indices(len(val), ctx, max_windows)
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
-    amp_ctx = (torch.autocast("cuda", dtype=torch.bfloat16)
-               if (amp and device.startswith("cuda")) else contextlib.nullcontext())
+    amp_ctx = amp_autocast(device, bool(amp))
     rows = []
     for s in range(0, len(indices), batch_windows):
         chunk = indices[s:s + batch_windows]
@@ -250,7 +249,7 @@ def main():
     # 与训练时的评估保持一致：优先使用训练配置里的 train_ctx
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
     train_ctx = None
-    use_amp = device.startswith("cuda")
+    use_amp = amp_dtype_for(device, True) is not None
     cfg_used = {}
     if os.path.exists(cfg_path):
         try:
@@ -263,7 +262,7 @@ def main():
             cfg_used = {}
         train_ctx = cfg_used.get("train_ctx")
         # 与训练内评测口径一致：尊重训练配置的 amp 设置
-        use_amp = bool(cfg_used.get("amp", True)) and device.startswith("cuda")
+        use_amp = amp_dtype_for(device, bool(cfg_used.get("amp", True))) is not None
     else:
         # 缺少训练配置时评测上下文静默变为 block_size，PPL 口径与训练内评测不一致
         print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "
