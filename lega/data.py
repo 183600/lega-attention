@@ -33,7 +33,7 @@ _GPT2_CACHE = {}
 # bin 缓存协议版本：清洗/去污染/词表拟合逻辑变更时必须 +1，
 # 旧缓存（含未记录版本的第一代缓存）会被强制重建，
 # 否则会用旧协议产出的 bin 静默训练，防泄漏自检报告也与实际数据不符。
-CACHE_SCHEMA = 2
+CACHE_SCHEMA = 3
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -274,10 +274,23 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
     # 原文此后只由局部变量引用：逐段编码完即释放
     del texts
-    if duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]:
-        print(f"[data] 去污染：从 train 移除 "
-              f"{duplicate_stats['train_lines_dropped_as_duplicates_of_eval']:,} "
-              f"条与 val/test 精确重复的长行")
+    n_cross = (duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]
+               + duplicate_stats[
+                   "train_lines_dropped_as_normalized_duplicates_of_eval"])
+    n_intra = (duplicate_stats[
+                   "train_intra_split_duplicate_lines_removed"]
+               + duplicate_stats[
+                   "train_intra_split_normalized_duplicate_lines_removed"])
+    if n_cross:
+        print(f"[data] 去污染：从 train 移除 {n_cross:,} 条与 val/test "
+              "重复（精确/空白归一化）的长行")
+    if n_intra:
+        print(f"[data] 去重：从 train 移除 {n_intra:,} 条内部重复长行"
+              "（保留首次出现；val/test 不改写）")
+    if duplicate_stats["val_test_overlap_long_lines"]:
+        print(f"[data] 警告：val 与 test 有 "
+              f"{duplicate_stats['val_test_overlap_long_lines']:,} 条长行重复"
+              "（两侧均未改写；val 选型对 test 的独立性下降）")
 
     # 2) 分词器只在 train 上拟合；3) val/test 只做 transform
     tok = get_tokenizer(kind, train_text)
@@ -331,7 +344,11 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     distribution = {"val_vs_train": distribution_shift(tr, va, tok.n_vocab)}
     if te is not None:
         contamination["train_test"] = ngram_overlap(tr, te)
+        # eval 两侧也要互查：val 用于选 checkpoint，test 用于最终报告；
+        # 二者若有共享片段，val 选择会部分“预演”test，test 不再独立。
+        contamination["val_test"] = ngram_overlap(va, te)
         distribution["test_vs_train"] = distribution_shift(tr, te, tok.n_vocab)
+        distribution["test_vs_val"] = distribution_shift(va, te, tok.n_vocab)
     tokenizer_report = {
         "kind": tok.name,
         "fit_on": "train" if tok.name == "char" else "gpt2_pretrained",

@@ -131,16 +131,22 @@ def _iter_lines(text: str):
 
 
 def decontaminate_texts(texts: dict, min_chars: int = 40):
-    """跨 split 重复的长行只从 train 移除；val/test 保持原样（尘封）。
+    """清理 train 侧重复样本，并诊断 eval 两侧（val/test）的重复。
 
-    两类重复都处理（最小改动原则，宁删 train 不碰 eval）：
-      * 精确重复（strip 后逐字符相同）；
-      * 空白归一化重复（连续空白折叠后相同，捕获仅缩进/空格差异的复制）。
+    三类重复都处理/统计（最小改动原则：只改 train，val/test 保持尘封）：
+      * train 与 val/test 的跨 split 精确重复；
+      * train 与 val/test 的跨 split 空白归一化重复；
+      * train **内部**重复：保留首次出现，删除后续精确/空白归一化重复
+        （重复训练样本会放大其权重并增加记忆，属于数据清洗而非评测改写）。
     行内容先 strip；短行（< min_chars，如 WikiText 的 "= References =" 标题）
     不计入去污染，避免大面积误删；但仍会统计其重复数量供审查。
     返回 (cleaned_texts, stats)。
 
-    跨 split 比较集合使用 128-bit 摘要（16 字节碰撞概率可忽略），
+    val/test 内容绝不被改写；val 与 test 之间的重复另行统计
+    （val_test_overlap_*）并由报告告警——两侧样本重叠会让“用 val 选模型、
+    在 test 上最终评估”不再独立。
+
+    比较集合使用 128-bit 摘要（16 字节碰撞概率可忽略），
     train 输出按删除切点拼接未删除片段。
     """
     min_chars = int(min_chars)
@@ -170,23 +176,34 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
                 n_long += 1
                 seen_long.add(d)
                 seen_long_norm.add(dn)
-        return (n_long, seen_long, seen_long_norm, n_valid,
-                len(seen_valid), len(seen_valid_norm))
+        return {"n_long": n_long, "long": seen_long,
+                "long_norm": seen_long_norm, "n_valid": n_valid,
+                "n_uniq": len(seen_valid), "n_uniq_norm": len(seen_valid_norm)}
 
     eval_lines, eval_norm_lines = set(), set()
     eval_counts = {}
+    split_lines = {}
     for split in ("val", "test"):
-        (n_long, seen_long, seen_long_norm, n_valid, n_uniq,
-         n_uniq_norm) = scan(texts.get(split))
-        eval_lines.update(seen_long)
-        eval_norm_lines.update(seen_long_norm)
-        eval_counts[split] = (n_long, n_valid, n_uniq, n_uniq_norm)
+        st = scan(texts.get(split))
+        eval_lines.update(st["long"])
+        eval_norm_lines.update(st["long_norm"])
+        eval_counts[split] = (st["n_long"], st["n_valid"], st["n_uniq"],
+                              st["n_uniq_norm"])
+        split_lines[split] = (st["long"], st["long_norm"])
+    val_long, val_long_norm = split_lines["val"]
+    test_long, test_long_norm = split_lines["test"]
+    # eval 两侧的重复：不修改任何一侧（test 必须尘封），但必须显式报告。
+    val_test_overlap = len(val_long & test_long)
+    val_test_overlap_norm = len(val_long_norm & test_long_norm)
 
     train_text = texts["train"]
     n_train, n_valid_train = 0, 0
     # 仅用于计数 len() 的集合存摘要。
     seen_valid_train, seen_valid_train_norm = set(), set()
+    # train 内部去重：长行摘要集合（首次出现保留）。
+    seen_train_long, seen_train_long_norm = set(), set()
     dropped_exact, dropped_norm = 0, 0
+    dropped_train_exact, dropped_train_norm = 0, 0
     # 流式扫描 train：被删行（连同其后换行）不进入任何片段；
     # 未删除片段在最后一次性拼接。
     parts, seg_start, any_drop = [], 0, False
@@ -205,15 +222,19 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             seen_valid_train.add(d)
             seen_valid_train_norm.add(dn)
         drop = False
-        if len(s) >= min_chars:
+        if s and len(s) >= min_chars:
             n_train += 1
-            if d is None:
-                sn = _normalize_line(s)
-                d = dn = digest(s)
             if d in eval_lines:
                 drop, dropped_exact = True, dropped_exact + 1
             elif dn in eval_norm_lines:
                 drop, dropped_norm = True, dropped_norm + 1
+            elif d in seen_train_long:
+                drop, dropped_train_exact = True, dropped_train_exact + 1
+            elif dn in seen_train_long_norm:
+                drop, dropped_train_norm = True, dropped_train_norm + 1
+            # 无论是否删除都登记，保证后续同内容行被识别为重复。
+            seen_train_long.add(d)
+            seen_train_long_norm.add(dn)
         if drop:
             any_drop = True
             if pos > seg_start:
@@ -240,7 +261,16 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
              "normalization": "collapse_whitespace",
              "train_lines_dropped_as_duplicates_of_eval": int(dropped_exact),
              "train_lines_dropped_as_normalized_duplicates_of_eval":
-                 int(dropped_norm)}
+                 int(dropped_norm),
+             "train_intra_split_duplicate_lines_removed":
+                 int(dropped_train_exact),
+             "train_intra_split_normalized_duplicate_lines_removed":
+                 int(dropped_train_norm),
+             "val_test_overlap_long_lines": int(val_test_overlap),
+             "val_test_overlap_normalized_long_lines":
+                 int(val_test_overlap_norm),
+             "val_test_overlap_rate": float(
+                 val_test_overlap / max(1, len(val_long)))}
     per_split = {"train": (n_train, n_valid_train, len(seen_valid_train),
                            len(seen_valid_train_norm)),
                  "val": eval_counts["val"], "test": eval_counts["test"]}
@@ -667,7 +697,8 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     def add(level, code, message):
         alerts.append({"level": level, "code": code, "message": message})
 
-    for key, label in (("train_val", "train/val"), ("train_test", "train/test")):
+    for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
+                       ("val_test", "val/test")):
         c = (contamination or {}).get(key) or {}
         rate = c.get("overlap_rate")
         if rate is not None and rate > th["ngram_overlap_rate"]:
@@ -675,7 +706,8 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
                 f"{label} 采样 {c.get('n', '?')}-gram 重叠率 {rate:.4%}"
                 "（>0 表示疑似跨 split 语料复制，须人工核查）")
     for key, label in (("val_vs_train", "val−train"),
-                       ("test_vs_train", "test−train")):
+                       ("test_vs_train", "test−train"),
+                       ("test_vs_val", "test−val")):
         d = (distribution or {}).get(key) or {}
         tv, js = d.get("tv"), d.get("js_bits")
         if tv is not None and tv > th["distribution_tv"]:
@@ -709,6 +741,28 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         add("info", "decontamination_applied",
             f"已从 train 移除与 val/test 重复的长行：精确 {n_exact} 行、"
             f"空白归一化后额外 {n_norm} 行（val/test 未改写）")
+    n_train_dup = int(
+        dup.get("train_intra_split_duplicate_lines_removed") or 0)
+    n_train_dup_norm = int(
+        dup.get("train_intra_split_normalized_duplicate_lines_removed") or 0)
+    if n_train_dup or n_train_dup_norm:
+        add("info", "train_intra_duplicates_removed",
+            f"已从 train 移除内部重复长行：精确 {n_train_dup} 行、"
+            f"空白归一化后额外 {n_train_dup_norm} 行（保留首次出现）")
+    n_eval_dup = int(dup.get("val_test_overlap_long_lines") or 0)
+    n_eval_dup_norm = int(
+        dup.get("val_test_overlap_normalized_long_lines") or 0)
+    if n_eval_dup:
+        add("warning", "eval_splits_overlap",
+            f"val 与 test 有 {n_eval_dup} 条长行重复（空白归一化后 "
+            f"{n_eval_dup_norm} 条）：两侧均保持尘封未改写，但 val 选型会"
+            "部分预演 test，最终 test 指标的独立性下降，须核查/重建划分")
+    for split in ("val", "test"):
+        n_dup = int(dup.get(f"{split}_intra_split_duplicate_lines") or 0)
+        if n_dup:
+            add("info", f"{split}_intra_duplicates",
+                f"{split} 内部有 {n_dup} 条重复长行（未改写，避免破坏尘封；"
+                "重复会高估评测有效样本量，解读置信区间时须注意）")
     for split, st in (text_stats or {}).items():
         n_huge = int((st or {}).get("lines_gt_huge_threshold") or 0)
         if n_huge:
@@ -717,6 +771,19 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
                 f"{(st or {}).get('huge_line_threshold_chars')} 字符"
                 "（异常值已计数未删除，训练窗口可能被其主导）")
     return alerts
+
+
+# 会让 train/val/test 独立性失效的协议违规：run_all 在训练前据此硬失败
+# （可显式覆盖），避免“报告里有警告但全量训练照跑”。
+CRITICAL_SPLIT_ALERT_CODES = (
+    "split_shuffled", "split_char_cut", "split_documents_cross_cut")
+
+
+def critical_split_alerts(data_report: dict) -> list:
+    """从 data_report 中筛出必须在训练前处理的划分协议违规。"""
+    return [a for a in ((data_report or {}).get("alerts") or [])
+            if isinstance(a, dict)
+            and a.get("code") in CRITICAL_SPLIT_ALERT_CODES]
 
 
 def split_protocol_alerts(split_protocol: dict) -> list:
@@ -780,10 +847,12 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         "alerts": alerts,
         "notes": [
             "所有拟合类统计（字符词表等）只在 train 上完成，val/test 只做 transform；",
-            "去污染只从 train 移除与 val/test 重复（精确/空白归一化）的长行，"
-            "val/test 不被改写；",
+            "去污染只改写 train：移除与 val/test 重复的长行，并删除 train 内部"
+            "重复长行（保留首次出现）；val/test 不被改写；",
+            "val 与 test 之间的重复/64-gram 重叠单独统计并告警：两侧均不改写，"
+            "但重叠会削弱 final test 相对 val 选择集的独立性；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",
-            "一元分布漂移为采样估计，用于提示 train/test 分布差异而非统计检验；",
+            "一元分布漂移为采样估计，用于提示 split 间分布差异而非统计检验；",
             "alerts 同时包含协议违规（群组/时序，见 split_protocol）与阈值触发的"
             "复核提示（见 alert_thresholds），不是显著性检验。",
         ],

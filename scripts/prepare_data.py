@@ -155,7 +155,8 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
 
     清洗口径与原 clean_lines 一致：行尾 rstrip、跳过空行、行间以单个换行
     连接；max_tokens > 0 时按 1 token ≈ 3.6 字符、留 20% 余量截断。
-    边读边写，写入临时文件后原子替换。
+    截断只在**完整行边界**发生：写入半行会制造被截断的标签/文档，并可能让
+    同一段落的残片跨 split。边读边写，写入临时文件后原子替换。
     """
     limit = int(max_tokens * 3.6 * 1.2) if max_tokens else None
     tmp = dst + ".part"
@@ -165,26 +166,16 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
             ln = raw.rstrip()
             if not ln.strip():
                 continue
-            if limit is None:
-                if n_parts:
-                    f.write("\n")
-                    wrote += 1
-                f.write(ln)
-                wrote += len(ln)
-                n_parts += 1
-                continue
             sep = 1 if n_parts else 0
-            take = min(len(ln), limit - used - sep)
-            if take < 0:
+            if limit is not None and used + sep + len(ln) > limit:
+                # 不写半行：宁可提前结束，也不把截断残片当作完整样本。
                 break
             if sep:
                 f.write("\n")
-            f.write(ln[:take])
-            used += sep + take
-            wrote += sep + take
+            f.write(ln)
+            used += sep + len(ln)
+            wrote += sep + len(ln)
             n_parts += 1
-            if used >= limit:
-                break
     os.replace(tmp, dst)
     return wrote
 

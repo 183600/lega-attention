@@ -6,6 +6,7 @@
   * 小样本下 t 检验结论必须与置换检验互证，冲突要显式暴露而不是静默采信；
   * 受控变量审计除超参数外还核对数据指纹/代码版本/训练步数。
 """
+import hashlib
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
                       component_evidence, cross_variant_badcase_map,
+                      data_protocol_preflight, data_report_binding_issue,
                       evaluate_registered_hypotheses,
                       load_registered_hypotheses, ngram_baseline_comparison,
                       parse_variants, registration_scope_check,
@@ -40,6 +42,50 @@ def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
 def _write_json(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)
+
+
+def test_data_protocol_preflight_blocks_critical_violations():
+    """已知群组/时序泄露的数据默认不得进入训练；显式覆盖才放行。"""
+    with tempfile.TemporaryDirectory() as d:
+        _write_json(os.path.join(d, "data_report.json"), {
+            "alerts": [
+                {"level": "warning", "code": "split_shuffled", "message": "打乱"},
+                {"level": "warning", "code": "ngram_overlap_train_val",
+                 "message": "重叠"},
+            ]})
+        try:
+            data_protocol_preflight(d)
+            raise AssertionError("严重协议违规应中止训练")
+        except SystemExit as e:
+            assert "数据协议前置检查失败" in str(e)
+            assert "split_shuffled" in str(e)
+        info = data_protocol_preflight(d, allow_override=True)
+        assert info["override"] is True
+        assert [a["code"] for a in info["critical_violations"]] == \
+            ["split_shuffled"]
+    with tempfile.TemporaryDirectory() as d:
+        info = data_protocol_preflight(d)
+        assert info["report_present"] is False
+        assert info["critical_violations"] == []
+    print("  [ok] 数据协议闸门：严重违规默认中止，显式覆盖放行，报告缺失仅告警")
+
+
+def test_data_report_binding_detects_tampering():
+    with tempfile.TemporaryDirectory() as d:
+        rp = os.path.join(d, "data_report.json")
+        _write_json(rp, {"alerts": []})
+        with open(rp, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        _write_json(os.path.join(d, "meta.json"), {"report_sha256": digest})
+        assert data_report_binding_issue(d) is None
+        _write_json(rp, {"alerts": [{"code": "split_shuffled"}]})
+        issue = data_report_binding_issue(d)
+        assert issue and "哈希不一致" in issue
+        info = data_protocol_preflight(d, allow_override=True)
+        assert info["binding_issue"] == issue and info["override"] is True
+        assert any(a["code"] == "data_report_binding"
+                   for a in info["critical_violations"])
+    print("  [ok] data_report 与 meta 哈希绑定：篡改/过期报告被阻断")
 
 
 def test_resolve_jobs_defaults():

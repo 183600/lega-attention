@@ -4,7 +4,9 @@
   1) 时序划分不打乱、文档不跨 split（train 最早 → test 最新；含标题文档
      优先切分与 documents_cross_cut 自检）；
   2) 群组/重复样本不跨侧：与 val/test 重复（精确或空白归一化）的长行只从
-     train 移除；test split 默认拒绝读取（尘封），需显式 allow_test=True；
+     train 移除；train 内部重复同样只改 train（保留首次出现）；val/test
+     之间的重复只统计告警、不改写；test split 默认拒绝读取（尘封），需显式
+     allow_test=True；
   3) 测试集访问可审计：账本记录每次 test 评测与重复评测的 checkpoint。
 
 另覆盖 bin 缓存完整性：源文本/诊断报告哈希变化时强制重建，防止旧协议
@@ -20,8 +22,8 @@ import numpy as np
 from lega.data import (CharTokenizer, get_tokenizer, load_bin, load_meta,
                        load_tokenizer, prepare_bins)
 from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
-                            build_data_report,
-                            check_vocab_capacity, decontaminate_texts,
+                            build_data_report, check_vocab_capacity,
+                            critical_split_alerts, decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             read_test_access_log, sanitize_text,
                             split_protocol_alerts, temporal_split_text,
@@ -198,9 +200,10 @@ def test_decontaminate_ignores_short_lines():
              "test": ""}
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert short in out["train"]
+    assert out["train"].count(long_train) == 1
     assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
     assert stats["train_intra_split_duplicate_lines"] == 1
-    print("  [ok] 短行（如标题）不参与去污染；train 内部重复仅计数")
+    print("  [ok] 短行不参与去污染；train 内部长行重复被删除且仍计数")
 
 
 def test_decontaminate_counts_short_line_duplicates():
@@ -240,6 +243,52 @@ def test_decontaminate_catches_whitespace_normalized_duplicates():
     assert stats["train_lines_dropped_as_normalized_duplicates_of_eval"] == 1
     assert stats["normalization"] == "collapse_whitespace"
     print("  [ok] 去污染：空白归一化重复只从 train 移除，val/test 不改写")
+
+
+def test_decontaminate_removes_train_internal_duplicates_only():
+    """train 内部重复样本会放大权重/记忆：保留首次出现，删除后续重复。"""
+    dup = "A long training paragraph that appears more than once inside train."
+    train_only = "Another long training paragraph that is unique in the corpus."
+    val_only = "A long validation paragraph that must remain completely untouched."
+    test_only = "A long test paragraph that must remain completely untouched."
+    texts = {"train": f"{dup}\n{train_only}\n{dup}\n{dup}",
+             "val": val_only, "test": test_only}
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert out["train"].count(dup) == 1
+    assert train_only in out["train"]
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    assert stats["train_intra_split_duplicate_lines_removed"] == 2
+    assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
+    print("  [ok] 去重：train 内部重复只改 train（保留首次出现），val/test 不改写")
+
+
+def test_decontaminate_diagnoses_val_test_overlap_without_rewriting():
+    """val/test 重叠会削弱 final test 的独立性，但两侧尘封，只统计不改写。"""
+    shared = "A long paragraph copied into both evaluation splits for diagnosis."
+    texts = {"train": "A long independent training paragraph with enough length.",
+             "val": f"{shared}\nA long val-only paragraph with enough length.",
+             "test": f"{shared}\nA long test-only paragraph with enough length."}
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    assert stats["val_test_overlap_long_lines"] == 1
+    assert stats["val_test_overlap_normalized_long_lines"] == 1
+    assert 0 < stats["val_test_overlap_rate"] <= 1
+    print("  [ok] val↔test 长行重叠被统计/告警，但两侧数据不被改写")
+
+
+def test_critical_split_alerts_filters_actionable_violations():
+    report = {"alerts": [
+        {"level": "warning", "code": "split_shuffled", "message": "x"},
+        {"level": "warning", "code": "split_char_cut", "message": "y"},
+        {"level": "warning", "code": "split_documents_cross_cut", "message": "z"},
+        {"level": "warning", "code": "ngram_overlap_train_val", "message": "w"},
+        {"level": "info", "code": "decontamination_applied", "message": "v"},
+    ]}
+    picked = critical_split_alerts(report)
+    assert [a["code"] for a in picked] == [
+        "split_shuffled", "split_char_cut", "split_documents_cross_cut"]
+    assert critical_split_alerts({}) == []
+    print("  [ok] critical_split_alerts 只筛出必须先修复的划分协议违规")
 
 
 def test_ngram_overlap_detects_and_clears():
@@ -420,7 +469,7 @@ def test_prepare_bins_cache_invalidated_on_source_or_report_change():
     with tempfile.TemporaryDirectory() as d:
         _write_min_splits(d)
         meta1 = prepare_bins(d, kind="char", force=True)
-        assert meta1["cache_schema"] == 2
+        assert meta1["cache_schema"] == 3
         assert set(meta1["source_sha256"]) == {"train", "val", "test"}
         assert isinstance(meta1["report_sha256"], str)
         # 未改动：缓存命中

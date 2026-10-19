@@ -62,7 +62,8 @@ from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           process_eval_json, process_ruler_json)
 from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
                          diagnose_run_dir, worst_status)
-from lega.datacheck import read_test_access_log, summarize_test_access  # noqa: E402
+from lega.datacheck import (critical_split_alerts, read_test_access_log,
+                            summarize_test_access)  # noqa: E402
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
                              collect_artifacts, ledger_path, new_run_id,
                              snapshot_train_run)
@@ -217,6 +218,79 @@ def _variant_dir(out_root: str, variant: str, seed: int, n_seeds: int) -> str:
     if n_seeds > 1:
         return os.path.join(out_root, variant, f"seed{seed}")
     return os.path.join(out_root, variant)
+
+
+def load_data_report(data_dir: str):
+    """读取 data_dir/data_report.json；缺失/损坏/非对象返回 None。"""
+    path = os.path.join(data_dir, "data_report.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def data_report_binding_issue(data_dir: str):
+    """检查 data_report.json 是否仍是 meta.json 记录的那一份。
+
+    prepare_bins 把报告哈希写进 meta；若报告后来被手改/替换，缓存校验虽然
+    能发现，但训练入口不会自动调用 prepare_bins。这里在训练前显式核对，
+    避免汇总页把陈旧/被篡改的防泄漏诊断当作当前数据的事实。
+    """
+    report_path = os.path.join(data_dir, "data_report.json")
+    meta_path = os.path.join(data_dir, "meta.json")
+    if not (os.path.exists(report_path) and os.path.exists(meta_path)):
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return "meta.json 不可解析，无法核对 data_report 绑定"
+    if not isinstance(meta, dict):
+        return "meta.json 顶层不是对象，无法核对 data_report 绑定"
+    recorded = meta.get("report_sha256")
+    if not recorded:
+        return None  # 旧缓存没有记录：由 prepare_bins 重建时补齐
+    try:
+        actual = sha256_file(report_path)
+    except OSError as e:
+        return f"无法读取 data_report.json: {e}"
+    if actual != recorded:
+        return ("data_report.json 与 meta.json 记录的哈希不一致"
+                "（报告被改写或已过期），防泄漏诊断不可信")
+    return None
+
+
+def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict:
+    """训练前的数据协议闸门：报告缺失只告警，严重违规默认中止。
+
+    报告声明“打乱/字符切分/文档跨 split”或报告与 meta 绑定失效时，已知
+    泄露的数据不应进入全量训练。返回汇总（写入 repro），违规且未显式覆盖
+    时抛 SystemExit；allow_override 仅用于复现历史实验。
+    """
+    report = load_data_report(data_dir)
+    binding_issue = data_report_binding_issue(data_dir)
+    critical = list(critical_split_alerts(report))
+    if binding_issue:
+        critical.append({"level": "warning", "code": "data_report_binding",
+                         "message": binding_issue})
+    info = {
+        "report_present": report is not None,
+        "binding_issue": binding_issue,
+        "critical_violations": critical,
+        "override": bool(allow_override),
+    }
+    if critical and not allow_override:
+        detail = "；".join(
+            f"[{a.get('code')}] {a.get('message')}" for a in critical[:5])
+        raise SystemExit(
+            f"数据协议前置检查失败（{len(critical)} 个严重问题）：{detail}。"
+            "请先修复划分/清洗（必要时重建 data_report.json），确认无泄露后再"
+            "训练；确需复现历史实验可显式加 --allow_data_protocol_violations。")
+    return info
 
 
 def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
@@ -2475,19 +2549,26 @@ def build_summary(results_dir: str, audit: dict = None,
         dup = data_report.get("duplicates") or {}
         cont = data_report.get("contamination") or {}
         md.append(
-            f"- 去污染：与 val/test 精确重复的训练长行移除 "
+            f"- 去污染：与 val/test 重复的训练长行移除 "
             f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"
+            f"train 内部重复长行移除 "
+            f"{dup.get('train_intra_split_duplicate_lines_removed', '-')} 行"
+            f"（保留首次出现）；val↔test 长行重叠 "
+            f"{dup.get('val_test_overlap_long_lines', '-')} 条；"
             f"采样 {cont.get('train_val', {}).get('n', '-')}-gram 重叠率 "
             f"val={_fmt_rate((cont.get('train_val') or {}).get('overlap_rate'))}、"
-            f"test={_fmt_rate((cont.get('train_test') or {}).get('overlap_rate'))}"
+            f"test={_fmt_rate((cont.get('train_test') or {}).get('overlap_rate'))}、"
+            f"val↔test={_fmt_rate((cont.get('val_test') or {}).get('overlap_rate'))}"
             "（采样筛查下界，>0 需人工核查）")
         dist = data_report.get("distribution_shift") or {}
         dv = dist.get("val_vs_train") or {}
         dt = dist.get("test_vs_train") or {}
+        dvt = dist.get("test_vs_val") or {}
         md.append(
             f"- 分布漂移（一元 token，采样估计）：val−train TV={_fmt4(dv.get('tv'))}、"
             f"JS={_fmt4(dv.get('js_bits'))} bit；test−train TV={_fmt4(dt.get('tv'))}、"
-            f"JS={_fmt4(dt.get('js_bits'))} bit；test OOV token 率="
+            f"JS={_fmt4(dt.get('js_bits'))} bit；test−val TV={_fmt4(dvt.get('tv'))}、"
+            f"JS={_fmt4(dvt.get('js_bits'))} bit；test OOV token 率="
             f"{_fmt_rate(dt.get('eval_oov_token_rate'))}")
         san = data_report.get("sanitization") or {}
         noise = sum(int((san.get(s) or {}).get("replacement_char_replaced_with_space", 0))
@@ -3473,6 +3554,9 @@ def main():
                         "--split auto 同规则：有非空 test.bin 用 held-out test，"
                         "否则回退 val——保证与神经模型 PPL 同 split 可比；"
                         "test 会写访问账本")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 检测到打乱/字符切分/文档跨 split 也继续"
+                        "训练（默认拒绝；仅用于复现历史实验，不推荐）")
     p.add_argument("--jobs", type=int, default=None,
                    help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
                         "min(4, 核数)（<=4 核时为核数+1），CUDA 或 --wandb 下为 1")
@@ -3510,6 +3594,23 @@ def main():
     jobs = _resolve_jobs(args)
     if jobs > 1:
         print(f"[run_all] jobs={jobs}（sanity/训练/评测/机制分析并发；--jobs 可覆盖）")
+
+    # 数据协议前置闸门：报告缺失只告警（兼容旧数据），但一旦报告声明的划分
+    # 协议违反“时序/群组不跨侧”，默认直接中止——已知泄露的数据不应进入
+    # 全量训练；报告与 meta 的哈希绑定也必须一致，避免陈旧/被改报告冒充
+    # 当前自检结果。
+    data_preflight = data_protocol_preflight(
+        args.data_dir, allow_override=args.allow_data_protocol_violations)
+    critical_data_alerts = data_preflight["critical_violations"]
+    if critical_data_alerts:
+        detail = "；".join(
+            f"[{a.get('code')}] {a.get('message')}"
+            for a in critical_data_alerts[:5])
+        print(f"[run_all] ⚠ 数据协议自检发现 {len(critical_data_alerts)} 个"
+              f"严重问题，但 --allow_data_protocol_violations 已放行：{detail}")
+    elif not data_preflight["report_present"]:
+        print("[run_all] 警告：数据目录缺少 data_report.json，"
+              "无法做训练前防泄漏闸门（旧数据或未走统一入口）")
 
     # 子进程随机性/确定性环境：PYTHONHASHSEED 必须在解释器启动前设置；
     # 这里给出基准值（无 --seed 的命令用），带 --seed 的命令由 _cmd_env 逐条
@@ -3610,6 +3711,7 @@ def main():
         "data": data_fp,
         "runtime": runtime_info(args.device),
         "registration": reg_info,
+        "data_protocol_preflight": data_preflight,
     }
     save_json(repro, os.path.join(results_dir, "repro.json"))
     print(f"[repro] code={git.get('commit_short')} dirty={git.get('dirty')} "
@@ -3778,20 +3880,12 @@ def main():
     # 结果落盘 curve_diagnosis.json 并进入 summary.md
     diagnose_training_curves(chain, args.data_dir, results_dir)
 
-    # 数据协议防泄漏报告（prepare_bins 生成）：在所有评测结束后读取，连同实时
-    # 测试集访问账本复制进 results，供汇总与审计（早读会漏掉本轮 test 评测）。
-    data_report = None
-    dr_path = os.path.join(args.data_dir, "data_report.json")
-    if os.path.exists(dr_path):
-        try:
-            with open(dr_path, "r", encoding="utf-8") as f:
-                data_report = json.load(f)
-        except (OSError, ValueError):
-            data_report = None
-        # 顶层非对象的防泄漏报告按缺失处理，而不是在字段赋值上崩溃。
-        if not isinstance(data_report, dict):
-            data_report = None
-            print(f"[repro] 警告：{dr_path} 不是 JSON 对象，按缺失处理")
+    # 数据协议防泄漏报告（prepare_bins 生成）：在所有评测结束后重新读取，连同
+    # 实时测试集访问账本复制进 results，供汇总与审计（测试账本已在本轮更新）。
+    data_report = load_data_report(args.data_dir)
+    if data_report is None:
+        print("[repro] 警告：数据目录缺少可解析的 data_report.json"
+              "（旧数据或未走统一入口），汇总将标注防泄漏自检缺失")
     if data_report is not None:
         data_report["test_access"] = summarize_test_access(
             read_test_access_log(args.data_dir))
