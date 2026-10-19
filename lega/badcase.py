@@ -260,7 +260,10 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
 
 def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
     """坏案例集合 → 归因分布 + 难度/上下文切片 + 结构化个案列表 + 改进方向。"""
-    cases = [categorize_case(c) for c in badcases]
+    # 外部/旧格式 JSON 的 badcases 列表可能混入 null/标量；跳过坏样本，
+    # 不让单条记录中断整份归因（与 process_* 的顶层类型校验同口径）。
+    cases = [categorize_case(c) for c in (badcases or [])
+             if isinstance(c, dict)]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
     by_task_ctx: Dict[str, Dict] = {}
@@ -577,7 +580,9 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
 
 def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
     """最差窗口集合 → 归因分布 + 校准/复制统计 + 个案列表 + 改进方向。"""
-    cases = [categorize_window(w) for w in (windows or [])]
+    # 同 analyze_badcases：列表内的 null/数组等坏记录按损坏样本跳过。
+    cases = [categorize_window(w) for w in (windows or [])
+             if isinstance(w, dict)]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
     out = {

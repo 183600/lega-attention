@@ -237,3 +237,30 @@ def test_tune_multiseed_selects_by_mean_not_lucky_seed():
 def test_tune_dedupes_and_default_mult_present():
     assert 1.0 in DEFAULT_LR_MULTS
     print("  [ok] DEFAULT_LR_MULTS 含 1.0（默认组合必在网格内）")
+
+
+def test_read_best_val_loss_skips_non_dict_and_bad_eval():
+    """日志非对象行/非数值 val_loss、eval 顶层非对象均不能崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        tdir = os.path.join(tmp, "trial")
+        os.makedirs(tdir)
+        with open(os.path.join(tdir, "train_log.jsonl"), "w",
+                  encoding="utf-8") as f:
+            f.write("null\n[1]\n")
+            f.write(json.dumps({"step": 1, "val_loss": "bad"}) + "\n")
+            f.write(json.dumps({"step": 2, "val_loss": 1.2}) + "\n")
+        with open(os.path.join(tdir, "eval.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump([1, 2, 3], f)
+        assert _read_best_val_loss(tdir) == (1.2, 2, None,
+                                             "train_log.jsonl(min)")
+        tdir2 = os.path.join(tmp, "only_bad_eval")
+        os.makedirs(tdir2)
+        with open(os.path.join(tdir2, "eval.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump("oops", f)
+        assert _read_best_val_loss(tdir2) == (None, None, None, None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 调优日志/eval 非对象或坏值：跳过而不崩溃")

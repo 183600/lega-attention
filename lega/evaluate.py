@@ -65,7 +65,9 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
         # 交叉熵与 top-5 概率共用同一份 log_softmax 结果。
         logp = F.log_softmax(logits, dim=-1)
         losses = -logp.gather(1, gold.unsqueeze(1)).squeeze(1)
-        top_v, top_i = torch.topk(logp, 5, dim=-1)
+        # 小词表（如字符级冒烟数据）不足 5 类时 topk 会直接越界；按实际
+        # 词表截断，保证转储仍可用。
+        top_v, top_i = torch.topk(logp, min(5, logp.shape[-1]), dim=-1)
         top_p = top_v.exp()
         # 整表转 Python 标量后再构造行记录。
         loss_l, gold_l = losses.tolist(), gold.tolist()
@@ -251,11 +253,17 @@ def main():
     use_amp = device.startswith("cuda")
     cfg_used = {}
     if os.path.exists(cfg_path):
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg_used = json.load(f)
-            train_ctx = cfg_used.get("train_ctx")
-            # 与训练内评测口径一致：尊重训练配置的 amp 设置
-            use_amp = bool(cfg_used.get("amp", True)) and device.startswith("cuda")
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg_used = json.load(f)
+        except (OSError, ValueError):
+            cfg_used = None
+        if not isinstance(cfg_used, dict):
+            print(f"[eval] 警告：{cfg_path} 不是 JSON 对象，按缺失配置处理")
+            cfg_used = {}
+        train_ctx = cfg_used.get("train_ctx")
+        # 与训练内评测口径一致：尊重训练配置的 amp 设置
+        use_amp = bool(cfg_used.get("amp", True)) and device.startswith("cuda")
     else:
         # 缺少训练配置时评测上下文静默变为 block_size，PPL 口径与训练内评测不一致
         print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "

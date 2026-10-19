@@ -346,7 +346,9 @@ def main():
                  if os.path.isdir(p)
                  and os.path.basename(p)[4:].isdigit()),
                 key=lambda p: int(os.path.basename(p)[4:]))
-            for d in [base] + seed_dirs:
+            # 多种子布局下先检查 seed*：base 目录可能残留上一次单种子
+            # 运行（或旧版）的 checkpoint，不能让它压过本次多种子结果。
+            for d in seed_dirs + [base]:
                 best = os.path.join(d, "model_best.pt")
                 ckpt_path = (best if os.path.exists(best)
                              else os.path.join(d, "model.pt"))

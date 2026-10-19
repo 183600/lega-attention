@@ -578,9 +578,13 @@ def read_test_access_log(data_dir: str) -> list:
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                rec = json.loads(line)
             except ValueError:
                 continue
+            # 合法 JSON 但非对象的行（null/数组/标量）按坏行跳过；
+            # summarize_test_access 需要按 dict 取字段。
+            if isinstance(rec, dict):
+                records.append(rec)
     return records
 
 
@@ -616,6 +620,7 @@ def append_test_access(data_dir: str, record: dict) -> dict:
 
 def summarize_test_access(records) -> dict:
     """测试集访问审计：评测次数、不同 checkpoint 数、被重复评测的 checkpoint。"""
+    records = [r for r in (records or []) if isinstance(r, dict)]
     ckpts = [str(r.get("ckpt_sha256") or r.get("ckpt") or "")
              for r in records]
     counts = {}

@@ -19,7 +19,8 @@ import numpy as np
 
 from lega.data import (CharTokenizer, get_tokenizer, load_bin, load_meta,
                        load_tokenizer, prepare_bins)
-from lega.datacheck import (append_test_access, build_data_report,
+from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
+                            build_data_report,
                             check_vocab_capacity, decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             read_test_access_log, sanitize_text,
@@ -578,3 +579,60 @@ def test_build_data_report_surfaces_group_crossing_alerts():
                                   "documents_cross_cut": False}})
     assert all(not a["code"].startswith("split_") for a in rep2["alerts"])
     print("  [ok] data_report：协议违规告警置顶；无违规协议不误报")
+
+
+def test_test_access_ledger_skips_non_dict_lines():
+    """账本中的 null/数组/坏 JSON 行不能进入统计或让追加崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        append_test_access(d, {"ckpt_sha256": "aaa"})
+        log_path = os.path.join(d, TEST_ACCESS_LOG)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("null\n[1, 2]\n不是 JSON\n")
+        records = read_test_access_log(d)
+        assert len(records) == 1 and records[0]["ckpt_sha256"] == "aaa"
+        summary = append_test_access(d, {"ckpt_sha256": "bbb"})
+        assert summary["evaluations"] == 2
+        assert len(read_test_access_log(d)) == 2
+    print("  [ok] 测试集访问账本：非对象行按坏行跳过")
+
+
+def test_prepare_bins_rebuilds_on_non_object_meta_cache():
+    """meta.json 语法合法但非对象时按无缓存处理并重建，而非崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write("train text with enough characters for tokenization checks.\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write("val text with enough characters for tokenization checks.\n")
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(b"\x00" * 16)
+        with open(os.path.join(d, "val.bin"), "wb") as f:
+            f.write(b"\x00" * 16)
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump([1, 2, 3], f)
+        meta = prepare_bins(d, kind="char", force=False)
+        assert meta["tokenizer"] == "char" and meta["train_tokens"] > 0
+        saved = json.load(open(os.path.join(d, "meta.json"), encoding="utf-8"))
+        assert isinstance(saved, dict) and saved["train_tokens"] > 0
+    print("  [ok] 非对象 meta 缓存：按缺失处理并重建")
+
+
+def test_load_meta_rejects_broken_json_with_clear_error():
+    """meta.json 损坏或顶层非对象时必须抛 ValueError，而非深层 TypeError。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        try:
+            load_meta(d)
+        except ValueError as e:
+            assert "meta.json" in str(e)
+        else:
+            raise AssertionError("损坏 JSON 未抛 ValueError")
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump([1, 2], f)
+        try:
+            load_meta(d)
+        except ValueError as e:
+            assert "JSON 对象" in str(e)
+        else:
+            raise AssertionError("非对象 meta 未抛 ValueError")
+    print("  [ok] load_meta：坏 JSON/非对象给出明确 ValueError")

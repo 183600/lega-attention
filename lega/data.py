@@ -187,8 +187,15 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     test_bin = os.path.join(data_dir, "test.bin")
     if (os.path.exists(meta_path) and os.path.exists(train_bin)
             and os.path.exists(val_bin) and not force):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = None
+        # 语法合法但结构畸形（数组/标量）的缓存元数据按“无 meta”处理，
+        # 走重建路径，而不是在 .get 上崩溃（与指纹缓存同口径）。
+        if not isinstance(meta, dict):
+            meta = {}
         # test.txt 存在而 test.bin 缺失/不一致时缓存不完整，必须重建，
         # 否则评测会静默回退到 val（与 checkpoint 选择同一 split）。
         # 缓存的分词器与本次请求的 kind 不一致时必须重建，
@@ -202,8 +209,18 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         fit_ok = meta.get("fit_on") in ("train", "gpt2_pretrained")
         integrity_ok, integrity_issue, no_sources = _cache_integrity(
             data_dir, meta, report_path, report)
-        train_valid = os.path.getsize(train_bin) == int(meta.get("train_tokens", -1)) * 2
-        val_valid = os.path.getsize(val_bin) == int(meta.get("val_tokens", -1)) * 2
+
+        def _meta_int(key):
+            # 缓存是派生数据，字段缺失/类型异常按“与 bin 不一致”处理。
+            try:
+                return int(meta.get(key, -1))
+            except (TypeError, ValueError, OverflowError):
+                return -1
+
+        train_valid = (os.path.getsize(train_bin)
+                       == _meta_int("train_tokens") * 2)
+        val_valid = (os.path.getsize(val_bin)
+                     == _meta_int("val_tokens") * 2)
         # 无源 txt（纯 bin 数据目录）时无法判定 test.bin 是否对应缺失的
         # test.txt：显式保留 test.bin 视为有效，否则该场景会在重建路径上
         # 因缺少 train.txt 直接报错。
@@ -211,7 +228,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             no_sources or not os.path.exists(test_bin))) or (
             has_test_txt
             and os.path.exists(test_bin)
-            and os.path.getsize(test_bin) == int(meta.get("test_tokens", -1)) * 2)
+            and os.path.getsize(test_bin) == _meta_int("test_tokens") * 2)
         if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
                 and test_valid and fit_ok and integrity_ok:
             if no_sources:
@@ -388,8 +405,22 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
 
 
 def load_meta(data_dir: str) -> dict:
-    with open(os.path.join(data_dir, "meta.json"), "r", encoding="utf-8") as f:
-        return json.load(f)
+    """读取 data_dir/meta.json；损坏或顶层非对象时给出明确错误。
+
+    下游（分词器/训练/评测）一律按字段读取元数据，合法 JSON 但顶层是
+    数组/标量（如 ``null``）时在此处显式拒绝，避免后续 ``meta["tokenizer"]``
+    抛出难以定位的 TypeError。
+    """
+    path = os.path.join(data_dir, "meta.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except ValueError as e:
+        raise ValueError(f"{path} 不是合法 JSON: {e}") from e
+    if not isinstance(meta, dict):
+        raise ValueError(
+            f"{path} 顶层不是 JSON 对象（实际为 {type(meta).__name__}）")
+    return meta
 
 
 def load_tokenizer(data_dir: str):

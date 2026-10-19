@@ -266,3 +266,15 @@ def test_same_seed_training_is_bitwise_reproducible():
         diff = [k for k in w_a if not torch.equal(w_a[k], w_b[k])]
         assert diff == [], diff
     print("  [ok] 同 seed 两次完整训练：曲线与权重逐位一致")
+
+
+def test_data_fingerprint_tolerates_non_object_meta():
+    """meta.json 是数组/标量时视为无 tokenizer，而不是崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump([1, 2, 3], f)
+        fp = data_fingerprint(d)
+        assert fp["tokenizer"] is None and fp["digest"]
+    print("  [ok] 数据指纹：非对象 meta.json 不崩溃")

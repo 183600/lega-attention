@@ -11,8 +11,9 @@ import tempfile
 
 import numpy as np
 
-from lega.plots import (_expected_tagged, _group_by_variant, _load_train_logs,
-                        _mean_by_step, _prefer_seeded, _read_records)
+from lega.plots import (_HAS_MPL, _expected_tagged, _group_by_variant,
+                        _load_train_logs, _mean_by_step, _prefer_seeded,
+                        _read_records, fig_ppl)
 
 
 def _w(rdir, name, obj):
@@ -163,3 +164,43 @@ def test_prefer_seeded_matches_run_convention():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 记录文件选择：按 repro.json 命名约定取本次产物")
+
+
+def test_train_logs_skip_non_dict_and_bad_steps():
+    """日志中的 null/数组/坏 step 不能进入均值计算或让图崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        os.makedirs(os.path.join(tmp, "lega"))
+        path = os.path.join(tmp, "lega", "train_log.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("null\n[1, 2]\n5\n")
+            f.write('{"step": 1, "loss": 2.0, "val_ppl": 10.0}\n')
+            f.write('{"step": "bad", "loss": 1.0}\n')
+            f.write('{"step": 2, "loss": "bad"}\n')
+            f.write('{"step": 3, "loss": 1.5, "val_ppl": 9.0}\n')
+        series = _load_train_logs(tmp)
+        assert list(series) == ["lega"]
+        assert len(series["lega"][0]) == 4
+        xs, ys = _mean_by_step(series["lega"], "loss")
+        assert xs == [1, 3] and ys == [2.0, 1.5]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 训练日志：非 dict 行/坏 step/坏值安全跳过")
+
+
+def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
+    """ppl 为 null 时用 val_ppl，非数值 ppl 不能让画图崩溃。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_ppl 渲染测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "eval_lega.json",
+           {"variant": "lega", "ppl": None, "val_ppl": 10.0, "split": "val"})
+        _w(tmp, "eval_bad.json",
+           {"variant": "bad", "ppl": "oops", "val_ppl": None, "split": "val"})
+        assert fig_ppl(tmp) is True
+        assert os.path.exists(os.path.join(tmp, "fig_ppl.png"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] PPL 图：null ppl 回退 val_ppl，坏值不崩溃")

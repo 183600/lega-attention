@@ -683,3 +683,16 @@ def test_cross_improvement_synthesis():
     # 少于 2 个变体：空对照也有 recommendations 键（消费方无需分叉）
     assert cross_variant_analysis({"lega": [a]})["recommendations"] == []
     print("  [ok] 跨变体对照 → 改进方向合成（特异性新增/共识失败）")
+
+
+def test_analyze_skips_non_dict_records_in_lists():
+    """badcases/worst_windows 列表混入 null/标量时跳过坏样本而非崩溃。"""
+    ana = analyze_badcases([None, 5, _case(pred="1234567")])
+    assert ana["n_badcases"] == 1
+    win = analyze_worst_windows([None, "oops", _win()])
+    assert win["n_windows"] == 1
+    ana2 = process_ruler_json("ignored.json", write_md=False, payload={
+        "variant": "lega", "badcases": [None, {"task": "niah_synth",
+                                               "pred": "1", "answer": "1"}]})
+    assert ana2["n_badcases"] == 1
+    print("  [ok] 归因列表：非对象样本跳过")

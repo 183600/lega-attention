@@ -121,7 +121,11 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
-                tokenizer = json.load(f).get("tokenizer")
+                meta = json.load(f)
+            # 语法合法但结构畸形（数组/标量）的 meta 视为无 tokenizer，
+            # 与缓存结构校验同口径，不让指纹计算崩溃。
+            tokenizer = (meta.get("tokenizer")
+                         if isinstance(meta, dict) else None)
         except (OSError, ValueError):
             tokenizer = None
     fp = {"algo": FINGERPRINT_ALGO, "digest": _digest_of(entries),

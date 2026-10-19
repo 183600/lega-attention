@@ -276,6 +276,9 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
                  l2_grid: Sequence[float] = DEFAULT_L2_GRID,
                  seed: int = 0) -> Dict:
     """在机制分析记录上训练/评估线性探针，返回可直接 JSON 落盘的报告。"""
+    # 外部/旧格式 analysis JSON 的记录列表可能混入 null/标量：按坏记录剔除，
+    # 否则逐列提取会在 r.get 上崩溃。
+    records = [r for r in (records or []) if isinstance(r, dict)]
     report: Dict = {
         "folds": None, "n_records": len(records), "n_valid": 0,
         "n_examples": 0, "n_pos": 0, "n_neg": 0, "base_rate": None,

@@ -256,41 +256,55 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             if not os.path.exists(cfg_path):
                 missing.append(f"{v}/seed{seed}")
             else:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                # 键缺失时沿用默认 seed；显式为 null/非数值时无法证明用了
-                # 预期种子，审计应如实报“不一致”。
-                cfg_seed = cfg.get("seed", seed)
                 try:
-                    seed_mismatch = (cfg_seed is None
-                                     or int(cfg_seed) != int(seed))
-                except (TypeError, ValueError):
-                    seed_mismatch = True
-                if seed_mismatch:
-                    mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
-                ctrl = {k: val for k, val in cfg.items()
-                        if k not in _AUDIT_EXEMPT_KEYS}
-                if ref is None:
-                    ref, ref_name = ctrl, f"{v}/seed{seed}"
-                elif ctrl != ref:
-                    keys = sorted(set(ctrl) | set(ref))
-                    diffs = [f"{k}: {ref.get(k)!r} vs {ctrl.get(k)!r}"
-                             for k in keys if ref.get(k) != ctrl.get(k)]
-                    mismatches.append(f"{v}/seed{seed} 相对 {ref_name} 的差异: "
-                                      + "; ".join(diffs[:8]))
-                checked += 1
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except (OSError, ValueError):
+                    cfg = None
+                if not isinstance(cfg, dict):
+                    missing.append(f"{v}/seed{seed}(config_used.json 不可解析)")
+                else:
+                    # 键缺失时沿用默认 seed；显式为 null/非数值时无法证明用了
+                    # 预期种子，审计应如实报“不一致”。
+                    cfg_seed = cfg.get("seed", seed)
+                    try:
+                        seed_mismatch = (cfg_seed is None
+                                         or int(cfg_seed) != int(seed))
+                    except (TypeError, ValueError):
+                        seed_mismatch = True
+                    if seed_mismatch:
+                        mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
+                    ctrl = {k: val for k, val in cfg.items()
+                            if k not in _AUDIT_EXEMPT_KEYS}
+                    if ref is None:
+                        ref, ref_name = ctrl, f"{v}/seed{seed}"
+                    elif ctrl != ref:
+                        keys = sorted(set(ctrl) | set(ref))
+                        diffs = [f"{k}: {ref.get(k)!r} vs {ctrl.get(k)!r}"
+                                 for k in keys if ref.get(k) != ctrl.get(k)]
+                        mismatches.append(f"{v}/seed{seed} 相对 {ref_name} 的差异: "
+                                          + "; ".join(diffs[:8]))
+                    checked += 1
             ev_path = os.path.join(vdir, "eval.json")
             if not os.path.exists(ev_path):
                 meta_missing.append(f"{v}/seed{seed}")
                 continue
-            with open(ev_path, "r", encoding="utf-8") as f:
-                ev = json.load(f)
+            try:
+                with open(ev_path, "r", encoding="utf-8") as f:
+                    ev = json.load(f)
+            except (OSError, ValueError):
+                ev = None
+            if not isinstance(ev, dict):
+                meta_missing.append(f"{v}/seed{seed}(eval.json 不可解析)")
+                continue
             meta = {k: ev.get(k) for k in meta_keys}
             if meta["steps_planned"] is None:
                 meta["steps_planned"] = ev.get("steps")
+            early_stopped = bool(ev.get("early_stopped"))
             actual_meta.append((f"{v}/seed{seed}", ev.get("steps"),
-                                ev.get("tokens_seen")))
-            if ev.get("early_stopped"):
+                                ev.get("tokens_seen"), early_stopped,
+                                meta["steps_planned"]))
+            if early_stopped:
                 early_stop_runs.append(f"{v}/seed{seed}(step {ev.get('steps')}"
                                        f"/{meta['steps_planned']})")
             here = []
@@ -315,15 +329,33 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             if here:
                 meta_mismatches.append(f"{v}/seed{seed}: " + "; ".join(here))
             meta_checked += 1
-    # 实际步数/tokens_seen：未启用早停时必须严格一致；启用早停时逐 run 可以
-    # 不同（已在 early_stop_runs 如实列出），不再作为可比性失败。
-    if not early_stop_runs and actual_meta:
-        a_ref_name, a_ref_steps, a_ref_tokens = actual_meta[0]
-        for name, steps_run, tokens_run in actual_meta[1:]:
+    # 实际步数/tokens_seen：只豁免真正早停的 run。其它 run 的实际步数必须
+    # 等于计划步数，且彼此的实际步数/tokens_seen 必须一致；不能因为同批里
+    # 有另一个 run 早停，就跳过所有 run 的实际训练量检查。
+    def _same_quantity(a, b):
+        # 旧产物可能把步数写成 "10"/10.0；语义相同即算一致，无法解析时
+        # 退化为原始值比较。
+        if a == b:
+            return True
+        try:
+            return int(a) == int(b)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    stable_actual = [(name, steps_run, tokens_run, planned)
+                     for name, steps_run, tokens_run, early, planned in actual_meta
+                     if not early]
+    for name, steps_run, _tokens_run, planned in stable_actual:
+        if not _same_quantity(steps_run, planned):
+            meta_mismatches.append(
+                f"{name}: 实际 steps={steps_run!r} != 计划 steps={planned!r}")
+    if stable_actual:
+        a_ref_name, a_ref_steps, a_ref_tokens = stable_actual[0][:3]
+        for name, steps_run, tokens_run, _planned in stable_actual[1:]:
             diffs = []
-            if a_ref_steps != steps_run:
+            if not _same_quantity(a_ref_steps, steps_run):
                 diffs.append(f"steps: {a_ref_steps!r} vs {steps_run!r}")
-            if a_ref_tokens != tokens_run:
+            if not _same_quantity(a_ref_tokens, tokens_run):
                 diffs.append(f"tokens_seen: {a_ref_tokens!r} vs {tokens_run!r}")
             if diffs:
                 meta_mismatches.append(f"{name} 相对 {a_ref_name} 的差异: "
@@ -370,7 +402,14 @@ def _seed_key(path: str, data: dict):
     if m:
         return int(m.group(1))
     s = data.get("seed")
-    return int(s) if s is not None else None
+    if s is None:
+        return None
+    try:
+        return int(s)
+    except (TypeError, ValueError, OverflowError):
+        # 外部/旧产物里的 seed 可能是对象、字符串或 Infinity；无法解析时
+        # 按“缺少种子信息”处理，不能让整份汇总崩溃。
+        return None
 
 
 def _result_files(results_dir: str, prefix: str, scope_seeds) -> list:
@@ -442,7 +481,11 @@ def _stat(values) -> dict:
 def _ppl_of(d):
     if not d:
         return None
-    v = d.get("ppl", d.get("val_ppl"))
+    # ppl 键存在但为 null（外部/旧格式）时必须继续回退 val_ppl，不能把
+    # 一个缺失字段当成“没有 PPL”。
+    v = d.get("ppl")
+    if v is None:
+        v = d.get("val_ppl")
     if v is None:
         return None
     try:
@@ -903,6 +946,7 @@ def registration_scope_check(registered: dict, repro: dict,
             return None
 
     checked_any = False
+    unverifiable = []
     if repro.get("smoke"):
         out["problems"].append("冒烟运行（--smoke）不在预注册范围（正式配置/全部种子）内")
         checked_any = True
@@ -916,40 +960,60 @@ def registration_scope_check(registered: dict, repro: dict,
     got_path = (os.path.join(root, got_rel)
                 if isinstance(got_rel, str) and got_rel
                 and not os.path.isabs(got_rel) else got_rel)
-    want_cfg, got_cfg = (_load_json(want_path) if want_path else None,
-                         _load_json(got_path) if got_path else None)
-    if want_cfg is None:
-        out["warnings"].append(
-            f"登记 scope.config 不可读（{want_rel or '-'}），跳过配置规模核对")
-    elif got_cfg is None:
-        out["warnings"].append(f"本次配置不可读（{got_path or '-'}），跳过配置规模核对")
-    else:
-        diffs = [f"{k}: 登记={want_cfg.get(k)} vs 实际={got_cfg.get(k)}"
-                 for k in _SCOPE_CONFIG_KEYS
-                 if k in want_cfg and want_cfg.get(k) != got_cfg.get(k)]
-        if diffs:
-            out["problems"].append(
-                "模型/训练规模与预注册配置不一致（" + "；".join(diffs) + "）")
-        checked_any = True
+    want_cfg = _load_json(want_path) if want_path else None
+    got_cfg = _load_json(got_path) if got_path else None
+    want_cfg = want_cfg if isinstance(want_cfg, dict) else None
+    got_cfg = got_cfg if isinstance(got_cfg, dict) else None
+    if want_rel:
+        if want_cfg is None:
+            unverifiable.append("登记 scope.config 不可读")
+            out["warnings"].append(
+                f"登记 scope.config 不可读（{want_rel or '-'}），无法核对配置规模")
+        elif got_cfg is None:
+            unverifiable.append("本次配置不可读")
+            out["warnings"].append(
+                f"本次配置不可读（{got_path or '-'}），无法核对配置规模")
+        else:
+            diffs = [f"{k}: 登记={want_cfg.get(k)} vs 实际={got_cfg.get(k)}"
+                     for k in _SCOPE_CONFIG_KEYS
+                     if k in want_cfg and want_cfg.get(k) != got_cfg.get(k)]
+            if diffs:
+                out["problems"].append(
+                    "模型/训练规模与预注册配置不一致（" + "；".join(diffs) + "）")
+            checked_any = True
 
     scope_data = str(scope.get("data") or "")
     actual_tok = ((repro.get("data") or {}).get("tokenizer")
                   if isinstance(repro.get("data"), dict) else None)
-    if "gpt2" in scope_data.lower() and actual_tok is not None \
-            and "gpt2" not in str(actual_tok).lower():
-        out["problems"].append(
-            f"数据分词器与预注册不一致（登记含 gpt2 BPE，实际 {actual_tok}）")
-        checked_any = True
+    if "gpt2" in scope_data.lower():
+        if actual_tok is None:
+            unverifiable.append("数据分词器不可读")
+            out["warnings"].append(
+                "本次数据分词器不可读（repro.json 缺 data.tokenizer），"
+                "无法核对 scope.data")
+        elif "gpt2" not in str(actual_tok).lower():
+            out["problems"].append(
+                f"数据分词器与预注册不一致（登记含 gpt2 BPE，实际 {actual_tok}）")
+            checked_any = True
+        else:
+            checked_any = True
 
     want_seeds = scope.get("seeds")
     got_seeds = repro.get("seeds")
-    if isinstance(want_seeds, list) and isinstance(got_seeds, list):
-        extra = [s for s in got_seeds if s not in want_seeds]
-        if extra:
+    if isinstance(want_seeds, list):
+        if not isinstance(got_seeds, list):
+            unverifiable.append("本次种子列表不可读")
             out["warnings"].append(
-                f"本次含未登记种子 {extra}：判定基于登记计划外的抽样，证据强度打折")
-        checked_any = True
-    out["checked"] = bool(checked_any)
+                "repro.json 缺少可读的 seeds，无法核对预注册种子范围")
+        else:
+            extra = [s for s in got_seeds if s not in want_seeds]
+            if extra:
+                out["warnings"].append(
+                    f"本次含未登记种子 {extra}：判定基于登记计划外的抽样，证据强度打折")
+            checked_any = True
+    # 任一已声明范围字段无法核对时，不能因为其它字段通过就默认在范围内；
+    # 保持 checked=False / in_scope=None，由 apply_scope_gate 降级。
+    out["checked"] = bool(checked_any) and not unverifiable
     if out["problems"]:
         out["in_scope"] = False
     elif out["checked"]:
@@ -1032,11 +1096,14 @@ def _render_registration_integrity(integrity: dict,
                 lines.append(f"  - {p}")
         elif sc.get("checked"):
             cfg_note = (f"模型/训练规模与 `{scope.get('config')}` 一致"
-                        if scope.get("config") else "配置已核对")
+                        if scope.get("config") else "未声明配置范围")
             tok_note = ("；数据分词器与 scope.data 一致"
                         if "gpt2" in str(scope.get("data") or "").lower()
                         else "")
-            lines.append(f"- ✅ 本次 run 在预注册范围内：{cfg_note}{tok_note}。")
+            seeds_note = ("；本次种子均在登记范围内"
+                          if isinstance(scope.get("seeds"), list) else "")
+            lines.append(f"- ✅ 本次 run 在预注册范围内：{cfg_note}"
+                         f"{tok_note}{seeds_note}。")
         else:
             # 无 scope 的登记表不降级（与 apply_scope_gate 的早退一致），
             # 只有“声明了 scope 却核不动”才是不可确认
@@ -1485,7 +1552,9 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         if os.path.exists(rfp):
             try:
                 with open(rfp, "r", encoding="utf-8") as f:
-                    smoke = bool((json.load(f) or {}).get("smoke"))
+                    doc = json.load(f)
+                # 合法 JSON 但非对象（数组/标量）按缺 repro 处理。
+                smoke = bool(doc.get("smoke")) if isinstance(doc, dict) else False
             except (OSError, ValueError):
                 smoke = False
     lines = ["", "## 基线合理性（简单基线 + 调优证据）", ""]
@@ -1609,12 +1678,18 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 tune = json.load(f)
         except (OSError, ValueError):
             tune = None
+        if not isinstance(tune, dict):
+            tune = None
     if tune:
-        best = tune.get("selected") or {}
-        dflt = tune.get("default_trial") or {}
+        best = tune.get("selected")
+        best = best if isinstance(best, dict) else {}
+        dflt = tune.get("default_trial")
+        dflt = dflt if isinstance(dflt, dict) else {}
         gap = tune.get("selected_minus_default_val_loss")
         sel_seeds = tune.get("selection_seeds") or [tune.get("seed")]
+        sel_seeds = sel_seeds if isinstance(sel_seeds, list) else []
         grid = tune.get("grid") or []
+        grid = [c for c in grid if isinstance(c, dict)] if isinstance(grid, list) else []
         n_lr = len({c.get("lr") for c in grid}) if grid else "-"
         n_wd = len({c.get("weight_decay") for c in grid}) if grid else "-"
         std = best.get("val_loss_best_std")
@@ -1938,14 +2013,21 @@ def build_summary(results_dir: str, audit: dict = None,
             return preloaded[p]
         if not os.path.exists(p):
             return None
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            # 坏/半写入的结果文件按“未运行”处理，不能毁掉整份汇总。
+            return None
 
     # --- “本次 run”范围限定：results/<tag> 会被同一 tag 的多次运行复用
     # （改种子/变体集、--skip_* 等），聚合按 repro.json 记录的本次
     # variants/seeds 过滤，不同实验的观测不混入同一均值/配对检验；
     # 没有 repro.json（直接调用/手工构建目录）时保持全量发现。
-    repro = load(os.path.join(results_dir, "repro.json")) or {}
+    repro_doc = load(os.path.join(results_dir, "repro.json"))
+    # 合法 JSON 但非对象（数组/标量）的 repro.json 按“无 repro”处理，
+    # 不能让汇总在 .get 上崩溃。
+    repro = repro_doc if isinstance(repro_doc, dict) else {}
     scope_variants = repro.get("variants") if isinstance(
         repro.get("variants"), list) else None
     scope_seeds = repro.get("seeds") if isinstance(
@@ -2476,16 +2558,21 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- ⚠ 未找到 `repro.json`（直接调用 build_summary？）；"
                   "无法核对代码版本与数据指纹。")
     sanity_files = sorted(glob.glob(os.path.join(results_dir, "sanity_*.json")))
+
+    def _load_dict(p):
+        d = load(p)
+        return d if isinstance(d, dict) else None
+
     # 与 runs 同一“本次 run”口径（sanity 无种子维度，只按变体过滤）。
     if scope_variants is not None:
         sanity_files = [fp for fp in sanity_files
-                        if (load(fp) or {}).get("variant") in scope_variants]
+                        if (_load_dict(fp) or {}).get("variant") in scope_variants]
     if sanity_files:
         md.append("")
         md.append("| 变体 | sanity | 初始 loss | 最终 loss | token 准确率 |")
         md.append("|---|---|---|---|---|")
         for fp in sanity_files:
-            d = load(fp)
+            d = _load_dict(fp)
             if not d:
                 continue
             ini = (d.get("initial") or {}).get("loss")
@@ -2509,6 +2596,9 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 训练曲线诊断：结果分析不能只看最终数值，曲线本身先要过一遍体检
     md += ["", "## 训练曲线诊断（过拟合/欠拟合/发散/NaN）", ""]
     curve = load(os.path.join(results_dir, "curve_diagnosis.json"))
+    # 合法 JSON 但非对象（数组/标量）的诊断文件按“无诊断”处理。
+    if not isinstance(curve, dict):
+        curve = None
     if curve:
         md.append("诊断口径：训练降而验证升=过拟合；训练停滞（不再实质下降）而"
                   "验证回升同样判过拟合（平台期泛化先恶化，不按欠拟合处理）；"
@@ -3693,8 +3783,16 @@ def main():
     data_report = None
     dr_path = os.path.join(args.data_dir, "data_report.json")
     if os.path.exists(dr_path):
-        with open(dr_path, "r", encoding="utf-8") as f:
-            data_report = json.load(f)
+        try:
+            with open(dr_path, "r", encoding="utf-8") as f:
+                data_report = json.load(f)
+        except (OSError, ValueError):
+            data_report = None
+        # 顶层非对象的防泄漏报告按缺失处理，而不是在字段赋值上崩溃。
+        if not isinstance(data_report, dict):
+            data_report = None
+            print(f"[repro] 警告：{dr_path} 不是 JSON 对象，按缺失处理")
+    if data_report is not None:
         data_report["test_access"] = summarize_test_access(
             read_test_access_log(args.data_dir))
         save_json(data_report, os.path.join(results_dir, "data_report.json"))

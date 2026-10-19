@@ -18,8 +18,9 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _lat_noise_pct, _neural_eval_window_spec,
                       _noise_floor_pct,
-                      _rel_pct, _render_baseline_sections,
+                      _ppl_of, _rel_pct, _render_baseline_sections,
                       _render_registration_integrity, _resolve_jobs, _stat,
+                      _seed_key,
                       apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
                       component_evidence, cross_variant_badcase_map,
@@ -1700,3 +1701,97 @@ def test_tradeoff_prefers_sdpa_runtime_baseline():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 涨点-增幅：运行时基线优先 standard_sdpa（与主表一致）")
+
+
+def test_scope_missing_config_or_data_is_not_confirmed():
+    """缺 config/data 时范围核对必须“不可确认”，不能因种子匹配就通过。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg = os.path.join(tmp, "reg.json")
+        actual = os.path.join(tmp, "actual.json")
+        cfg = {"d_model": 384, "n_layers": 6, "n_heads": 6, "ffn_mult": 4,
+               "block_size": 1024, "steps": 8000, "train_ctx": 1024}
+        _write_json(reg, cfg)
+        _write_json(actual, cfg)
+        registered = {"scope": {"config": reg, "seeds": [1, 2, 3],
+                                "data": "WikiText-103 (gpt2 BPE)"}}
+
+        # config 与 data 都缺失：即使 seeds 匹配也不能通过
+        sc = registration_scope_check(registered, {"seeds": [1]})
+        assert sc["checked"] is False and sc["in_scope"] is None, sc
+        assert sc["warnings"]
+        hyp = [{"id": "H", "confirmatory_valid": True}]
+        assert apply_scope_gate(hyp, sc)[0]["confirmatory_valid"] is False
+
+        # 有 config、缺 data.tokenizer：仍不可确认
+        sc2 = registration_scope_check(registered, {
+            "config_file": actual, "seeds": [1], "data": {}})
+        assert sc2["checked"] is False and sc2["in_scope"] is None, sc2
+
+        # 三部分都可核对且匹配：通过；分词器匹配本身也算“已核对”
+        sc3 = registration_scope_check(registered, {
+            "config_file": actual, "seeds": [1],
+            "data": {"tokenizer": "gpt2_bpe"}})
+        assert sc3["checked"] is True and sc3["in_scope"] is True, sc3
+
+        # scope 未声明 config/data、仅声明 seeds：种子核对通过即可判定
+        sc4 = registration_scope_check({"scope": {"seeds": [1]}},
+                                       {"seeds": [1]})
+        assert sc4["checked"] is True and sc4["in_scope"] is True, sc4
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 范围核对：缺 config/data 不可确认，匹配 tokenizer 计入核对")
+
+
+def test_verify_controlled_setup_checks_nonearly_runs_with_early_peer():
+    """同批中一个 run 早停，不能豁免其它 run 的实际步数/计划步数检查。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        variants, seeds = ["standard", "lega"], [7]
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "warmup": 2,
+                "early_stop_patience": 2,
+                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
+        common = {"data_fingerprint": "abc123", "code_commit": "deadbeef",
+                  "config_sha256": "shax", "tokens_seen": 1024}
+        _write_json(os.path.join(tmp, "standard", "eval.json"), dict(
+            common, variant="standard", seed=7, steps=8,
+            steps_planned=10, early_stopped=False))
+        _write_json(os.path.join(tmp, "lega", "eval.json"), dict(
+            common, variant="lega", seed=7, steps=6,
+            steps_planned=10, early_stopped=True, tokens_seen=614))
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("非早停 run 实际步数 != 计划步数应触发 SystemExit")
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 混合早停：非早停 run 仍核对实际/计划步数")
+
+
+def test_summary_loads_tolerate_null_ppl_and_bad_json_seed():
+    """缺失 ppl 回退 val_ppl；无法解析的 seed 按无种子信息处理。"""
+    assert _ppl_of({"ppl": None, "val_ppl": 9.5}) == 9.5
+    assert _ppl_of({"ppl": 8.0, "val_ppl": 9.5}) == 8.0
+    assert _seed_key("eval_lega.json", {"seed": "not-an-int"}) is None
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
+            "variant": "standard", "seed": 1, "val_ppl": 10.0,
+            "val_loss": 2.3, "n_params": 10, "split": "val"})
+        for name in ("repro.json", "latency.json", "baseline_tuning.json",
+                     "curve_diagnosis.json", "sanity_standard.json"):
+            _write_json(os.path.join(tmp, name), [1, 2, 3])
+        with open(os.path.join(tmp, "eval_lega_seed1.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{ 坏 JSON")
+        out = build_summary(tmp)
+        assert "standard" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总：ppl=null 回退、坏 JSON 文件跳过、坏 seed 不崩溃")

@@ -549,12 +549,22 @@ def main():
     provenance = load_provenance(
         os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir)
 
-    ckpt_cfg = json.load(open(os.path.join(
-        os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json"),
-        encoding="utf-8")) if os.path.exists(os.path.join(
-            os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")) else {}
-    acfg = ckpt_cfg.get("analysis", {})
-    rcfg = ckpt_cfg.get("ruler", {})
+    ckpt_cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
+    ckpt_cfg = {}
+    if os.path.exists(ckpt_cfg_path):
+        try:
+            with open(ckpt_cfg_path, encoding="utf-8") as f:
+                ckpt_cfg = json.load(f)
+        except (OSError, ValueError):
+            ckpt_cfg = {}
+        # 合法 JSON 但非对象（数组/标量）的配置按空配置处理，走默认值。
+        if not isinstance(ckpt_cfg, dict):
+            ckpt_cfg = {}
+    acfg = ckpt_cfg.get("analysis")
+    acfg = acfg if isinstance(acfg, dict) else {}
+    rcfg = ckpt_cfg.get("ruler")
+    rcfg = rcfg if isinstance(rcfg, dict) else {}
     n_examples = args.n_examples or int(acfg.get("n_examples", 30))
     tau = args.tau if args.tau is not None else float(acfg.get("tau", 0.5))
     ctx = args.ctx if args.ctx is not None \

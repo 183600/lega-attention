@@ -622,9 +622,17 @@ def main():
     cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
     cfg = {}
     if os.path.exists(cfg_path):
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-    rl = cfg.get("ruler") or {}
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            cfg = {}
+        # 合法 JSON 但非对象（数组/标量）的配置按空配置处理，走默认值
+        # 而不是在 .get 上崩溃。
+        if not isinstance(cfg, dict):
+            cfg = {}
+    rl = cfg.get("ruler")
+    rl = rl if isinstance(rl, dict) else {}
     ctx_lens = ([int(x) for x in args.ctx_lens.split(",")] if args.ctx_lens
                 else rl.get("ctx_lens", [min(256, model.block_size)]))
     n_samples = (args.n_samples if args.n_samples is not None

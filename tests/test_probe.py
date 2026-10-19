@@ -245,3 +245,12 @@ def test_linear_probe_tolerates_missing_or_mixed_example_ids():
     assert rep["primary"] is not None and rep["folds"] >= 2
     assert rep["feature_sets"][rep["primary"]]["oof"] is not None
     print("  [ok] example 缺失/类型混杂：不崩溃且分组可用")
+
+
+def test_linear_probe_skips_non_dict_records():
+    """记录列表混入 null/标量时剔除坏记录，n_records 与实际一致。"""
+    recs = _synth_records(n_examples=6, per_example=3, seed=2)
+    rep = linear_probe([None, 5, "bad"] + recs, folds=3, seed=0)
+    assert rep["n_records"] == len(recs)
+    assert rep["n_valid"] > 0
+    print("  [ok] 线性探针：非对象记录被剔除")

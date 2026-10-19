@@ -185,8 +185,18 @@ def fig_ppl(rdir):
     splits = set()
     for v, ds in groups.items():
         # 多种子：每变体取 PPL 均值，误差棒为样本标准差；单种子不画误差棒。
-        ppls = [d.get("ppl", d.get("val_ppl")) for d in ds]
-        ppls = [p for p in ppls if p is not None]
+        # ppl 为 null 时回退 val_ppl（与 run_all._ppl_of 同口径），坏值跳过。
+        ppls = []
+        for d in ds:
+            p = d.get("ppl")
+            if p is None:
+                p = d.get("val_ppl")
+            if p is None:
+                continue
+            try:
+                ppls.append(float(p))
+            except (TypeError, ValueError):
+                continue
         if not ppls:
             continue
         mean = float(np.mean(ppls))
@@ -563,9 +573,13 @@ def _load_train_logs(train_root, rdir=None):
                     if not line:
                         continue
                     try:
-                        recs.append(json.loads(line))
+                        rec = json.loads(line)
                     except ValueError:
                         continue
+                    # 合法 JSON 但非对象（null/数组/标量）按损坏行跳过：
+                    # 后续按 dict 取字段，不能让它毁掉整张训练曲线图。
+                    if isinstance(rec, dict):
+                        recs.append(rec)
         except OSError:
             continue
         if recs:
@@ -585,9 +599,17 @@ def _mean_by_step(runs, key):
     acc = {}
     for recs in runs:
         for r in recs:
+            if not isinstance(r, dict):
+                continue
             if r.get(key) is None or r.get("step") is None:
                 continue
-            acc.setdefault(int(r["step"]), []).append(float(r[key]))
+            try:
+                step, val = int(r["step"]), float(r[key])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not np.isfinite(val):
+                continue
+            acc.setdefault(step, []).append(val)
     xs = sorted(acc)
     return xs, [float(np.mean(acc[x])) for x in xs]
 

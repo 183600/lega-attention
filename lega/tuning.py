@@ -94,18 +94,35 @@ def _read_best_val_loss(trial_dir: str):
                     rec = json.loads(line)
                 except ValueError:
                     continue
+                # 合法 JSON 但非对象的行（null/数组）按坏行跳过。
+                if not isinstance(rec, dict):
+                    continue
                 vl = rec.get("val_loss")
                 if vl is None:
                     continue
-                if best is None or float(vl) < best:
-                    best, best_step = float(vl), rec.get("step")
+                try:
+                    vl = float(vl)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not math.isfinite(vl):
+                    continue
+                if best is None or vl < best:
+                    best, best_step = vl, rec.get("step")
     final = None
     ev_path = os.path.join(trial_dir, "eval.json")
     if os.path.exists(ev_path):
-        with open(ev_path, "r", encoding="utf-8") as f:
-            ev = json.load(f) or {}
-        if ev.get("val_loss") is not None:
-            final = float(ev["val_loss"])
+        try:
+            with open(ev_path, "r", encoding="utf-8") as f:
+                ev = json.load(f)
+        except (OSError, ValueError):
+            ev = None
+        if isinstance(ev, dict) and ev.get("val_loss") is not None:
+            try:
+                val = float(ev["val_loss"])
+            except (TypeError, ValueError, OverflowError):
+                val = None
+            if val is not None and math.isfinite(val):
+                final = val
     if best is None:
         return final, None, final, "eval.json(final)" if final is not None else None
     return best, best_step, final, "train_log.jsonl(min)"

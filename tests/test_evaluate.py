@@ -176,3 +176,18 @@ def test_json_safe_eval_metrics_handles_nonfinite():
     assert o["val_ppl"] == math.exp(20) and o["val_ppl_clamped"] is True
     assert o["val_loss"] == 21.0 and o["gate_mean"] == 0.9
     print("  [ok] 非有限评测指标归为 null（JSON 安全、不伪装截断值）")
+
+
+def test_collect_worst_windows_small_vocab_clamps_topk():
+    """词表 <5 时 top-5 转储按实际词表截断，不能越界崩溃。"""
+    torch.manual_seed(0)
+    tok = CharTokenizer(list("abc"))
+    model = GPT(vocab_size=3, block_size=16, d_model=8, n_layers=1,
+                n_heads=1, variant="standard")
+    model.eval()
+    val = np.zeros(16 * 33, dtype=np.uint16)
+    rows = collect_worst_windows(model, val, ctx=16, device="cpu", tok=tok,
+                                 n_worst=2, max_windows=4)
+    assert len(rows) == 2
+    assert all(1 <= len(r["pred_top5"]) <= 3 for r in rows)
+    print("  [ok] 小词表最差窗口：top-k 自动截断")
