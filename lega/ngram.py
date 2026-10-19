@@ -182,13 +182,48 @@ def ppl_bigram(eval_ids: np.ndarray, uni: np.ndarray, pair_keys: np.ndarray,
     return _bigram_ppl(c_pair, c_prev, n_tokens, alpha, vocab_size)
 
 
+def window_positions(n_tokens: int, ctx: int, iters: int):
+    """神经评测窗口实际打分的 token 位置（与 train._val_eval_indices 同规则）。
+
+    神经 PPL 只在 `eval_iters` 个等间隔、不重复的窗口上评测：窗口序号按
+    `_val_eval_indices` 生成（含首尾、iters 超窗口数时取全部），每个窗口
+    消费 x=ids[s·ctx:(s+1)·ctx]、y=ids[s·ctx+1:(s+1)·ctx+1]，因此被打分的
+    token 位置是每个窗口的 s·ctx+1 .. s·ctx+ctx（0-based）。n-gram 基线若在
+    整个 split 上打分，两侧就是不同 token 集合上的 PPL（“同 split”不等于
+    “同 token”），比较存在未知方向的偏移；本函数给出逐位置对齐的评分集合。
+
+    规则必须与 `lega.train._val_eval_indices` 完全一致（tests 中有逐例等价
+    断言）。窗口规格非法或评测流过短时返回 None（调用方按缺失处理）。
+    """
+    n_tokens, ctx, iters = int(n_tokens), int(ctx), int(iters)
+    if ctx < 1 or iters < 1:
+        return None
+    n_windows = (n_tokens - 1) // ctx
+    if n_windows <= 0:
+        return None
+    n_eval = min(iters, n_windows)
+    if n_eval == 1:
+        starts = np.array([(n_windows - 1) // 2], dtype=np.int64)
+    else:
+        starts = (np.arange(n_eval, dtype=np.int64) * (n_windows - 1)
+                  // (n_eval - 1))
+    offsets = np.arange(1, ctx + 1, dtype=np.int64)
+    return (starts[:, None] * ctx + offsets[None, :]).reshape(-1)
+
+
 def evaluate(data_dir: str, split: str = "val",
-             alphas=ALPHA_GRID, allow_test: bool = False) -> dict:
+             alphas=ALPHA_GRID, allow_test: bool = False,
+             window_spec: dict = None) -> dict:
     """拟合并评测 n-gram 基线，返回完整报告 dict（不写文件）。
 
     选参协议：α 在 **val** 上选优（val 不存在或过短时报错），随后在
     `split` 上按选定 α 报告；split == "val" 时选参与报告同集，报告中
     以 `alpha_selected_on` 与 `selection_eval_same_split` 显式披露。
+
+    window_spec（可选 {"ctx": int, "iters": int}）给出神经评测实际使用的
+    窗口规格：此时额外计算 `ppl_window_matched`——只在 `window_positions`
+    生成的、与神经评测逐位置一致的 token 上按同一选定 α 打分，供汇总页
+    做真正的同 token 对比；窗口规格无效时以 `window_spec_error` 显式标注。
     """
     meta = load_meta(data_dir)
     vocab_size = int(meta["vocab_size"])
@@ -267,6 +302,47 @@ def evaluate(data_dir: str, split: str = "val",
                     m2 = _bigram_ppl(*eval_terms, a2, vocab_size)
                 by_alpha[str(a2)] = m2["ppl"]
             report["ppl_by_alpha"][order] = by_alpha
+    # 窗口对齐口径：只在神经评测窗口的目标 token 上打分（见 window_positions）。
+    # 与全 split 口径使用同一选定 α（test 上不额外扫网格，仍是单次消费）。
+    if window_spec:
+        spec_ctx = int(window_spec.get("ctx", 0) or 0)
+        spec_iters = int(window_spec.get("iters", 0) or 0)
+        pos = window_positions(len(eval_ids), spec_ctx, spec_iters)
+        if pos is None:
+            report["window_spec"] = None
+            report["window_spec_error"] = (
+                f"窗口规格无效或评测流过短（ctx={spec_ctx}, iters={spec_iters}, "
+                f"eval_tokens={len(eval_ids)}），无法逐位置对齐")
+        else:
+            n_windows = (len(eval_ids) - 1) // spec_ctx
+            n_eval = min(spec_iters, n_windows)
+            wm = {
+                "n_tokens": int(pos.size),
+                "positions": "每个窗口 s·ctx+1 .. s·ctx+ctx（0-based），"
+                             "与 get_val_windows 的目标 token 集合逐位置一致",
+                "unigram": None, "bigram": None,
+            }
+            pos = np.asarray(pos, dtype=np.int64)
+            for order in ("unigram", "bigram"):
+                a = best[order]
+                if a is None:
+                    continue
+                if order == "unigram":
+                    m = ppl_unigram(eval_ids[pos], uni, a)
+                else:
+                    prev = np.asarray(eval_ids[pos - 1], dtype=np.int64)
+                    keys = prev * vocab_size
+                    keys += np.asarray(eval_ids[pos], dtype=np.int64)
+                    c_pair = _bigram_counts_for(pair_keys, pair_counts, keys)
+                    m = _bigram_ppl(c_pair, uni[prev], int(pos.size), a,
+                                    vocab_size)
+                wm[order] = m["ppl"]
+            report["ppl_window_matched"] = wm
+            report["window_spec"] = {
+                "ctx": spec_ctx, "iters": spec_iters,
+                "n_windows": int(n_windows), "n_eval": int(n_eval),
+                "n_tokens": int(pos.size),
+            }
     return report
 
 
@@ -279,11 +355,20 @@ def main():
                    help="逗号分隔的 α 网格，默认 0.01,0.1,1.0")
     p.add_argument("--allow_test", action="store_true",
                    help="允许在 test 上评测（写访问账本）")
+    p.add_argument("--window_ctx", type=int, default=None,
+                   help="神经评测的窗口长度（与 --window_iters 一起给出时，"
+                        "额外报告与神经评测逐位置对齐的 PPL）")
+    p.add_argument("--window_iters", type=int, default=None,
+                   help="神经评测的窗口数（与 --window_ctx 成对使用）")
     args = p.parse_args()
+    if (args.window_ctx is None) != (args.window_iters is None):
+        p.error("--window_ctx 与 --window_iters 必须成对给出")
+    window_spec = ({"ctx": args.window_ctx, "iters": args.window_iters}
+                   if args.window_ctx is not None else None)
     alphas = (tuple(float(x) for x in args.alphas.split(","))
               if args.alphas else ALPHA_GRID)
     report = evaluate(args.data_dir, split=args.split, alphas=alphas,
-                      allow_test=args.allow_test)
+                      allow_test=args.allow_test, window_spec=window_spec)
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

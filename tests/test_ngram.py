@@ -11,8 +11,8 @@ import tempfile
 
 import numpy as np
 
-from lega.ngram import (ALPHA_GRID, evaluate, fit_counts, ppl_bigram,
-                        ppl_unigram)
+from lega.ngram import (ALPHA_GRID, _bigram_ppl, evaluate, fit_counts,
+                        ppl_bigram, ppl_unigram, window_positions)
 from lega.datacheck import TEST_ACCESS_LOG
 
 
@@ -106,3 +106,66 @@ def test_test_split_sealed_and_access_logged():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] evaluate（test 默认尘封、开锁写账本、test 单次消费）")
+
+
+def test_window_positions_match_neural_eval_rule():
+    """窗口评分位置必须与 train._val_eval_indices 的规则逐例一致。
+
+    神经 PPL 的窗口选择规则若与 n-gram 对齐用的规则漂移，两侧又重新
+    变成不同 token 集合上的 PPL；这里直接与训练侧实现逐例对照。
+    """
+    from lega.train import _val_eval_indices
+    cases = [(500, 32, 1), (500, 32, 5), (500, 32, 100), (129, 64, 2),
+             (65, 16, 3), (33, 32, 1), (1000, 128, 50)]
+    for n_tokens, ctx, iters in cases:
+        starts, _ = _val_eval_indices(n_tokens, ctx, iters)
+        expected = np.concatenate([np.arange(s * ctx + 1, s * ctx + ctx + 1)
+                                   for s in starts])
+        got = window_positions(n_tokens, ctx, iters)
+        assert got is not None and np.array_equal(got, expected), \
+            f"不一致: n={n_tokens} ctx={ctx} iters={iters}"
+    # 规格非法/流过短：None 而不是崩溃或静默错位
+    assert window_positions(10, 16, 2) is None
+    assert window_positions(100, 0, 2) is None
+    assert window_positions(100, 16, 0) is None
+    print("  [ok] window_positions（与 _val_eval_indices 逐例一致、非法规格返回 None）")
+
+
+def test_evaluate_window_matched_restricts_scoring_positions():
+    """window_spec 下额外报告逐位置对齐 PPL，且等于手工按同位置的计算。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        train = [0, 1, 2, 3] * 30
+        # val 长度 41：ctx=8 时 n_windows=(41-1)//8=5；iters=2 → 窗口 [0, 4]
+        val = list(range(4)) * 10 + [0]
+        _mk_data(tmp, train, val, vocab_size=4)
+        rep = evaluate(tmp, split="val", alphas=(0.01,),
+                       window_spec={"ctx": 8, "iters": 2})
+        assert rep["window_spec"] == {"ctx": 8, "iters": 2, "n_windows": 5,
+                                      "n_eval": 2, "n_tokens": 16}
+        wm = rep["ppl_window_matched"]
+        assert wm["n_tokens"] == 16
+        # 手工复算：同样的 position 集合、同样的选定 α，必须逐位一致
+        uni, keys, counts = fit_counts(np.asarray(train), vocab_size=4)
+        pos = window_positions(len(val), 8, 2)
+        m_uni = ppl_unigram(np.asarray(val)[pos], uni, 0.01)
+        assert math.isclose(wm["unigram"], m_uni["ppl"], rel_tol=1e-12)
+        prev = np.asarray(val)[pos - 1]
+        keys_pos = prev * 4 + np.asarray(val)[pos]
+        c_pair = np.zeros(len(pos))
+        lookup = {int(k): float(c) for k, c in zip(keys, counts)}
+        for i, k in enumerate(keys_pos):
+            c_pair[i] = lookup.get(int(k), 0.0)
+        m_bi = _bigram_ppl(c_pair, uni[prev], len(pos), 0.01, 4)
+        assert math.isclose(wm["bigram"], m_bi["ppl"], rel_tol=1e-12)
+        # 一时一用的全 split 口径仍在（保留绝对难度参照）
+        assert rep["ppl"]["unigram"] is not None
+        # 非法规格：显式报错字段而不是假装对齐
+        rep_bad = evaluate(tmp, split="val", alphas=(0.01,),
+                           window_spec={"ctx": 999, "iters": 2})
+        assert rep_bad["window_spec"] is None
+        assert rep_bad["window_spec_error"]
+        assert "ppl_window_matched" not in rep_bad
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] evaluate（window_spec 逐位置对齐、非法规格显式报错）")

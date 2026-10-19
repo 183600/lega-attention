@@ -16,7 +16,8 @@ from unittest import mock
 
 from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _lat_noise_pct, _noise_floor_pct,
+                      _enrich_paired, _lat_noise_pct, _neural_eval_window_spec,
+                      _noise_floor_pct,
                       _rel_pct, _render_baseline_sections,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
@@ -1232,6 +1233,70 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] ngram_baseline_comparison（同 split 配对、Holm、错位隔离）")
+
+
+def test_ngram_comparison_prefers_window_matched_reference():
+    """同 split 之后还要同 token：窗口规格一致时用逐位置对齐参考并披露。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        spec = {"ctx": 8, "iters": 2, "n_windows": 5, "n_eval": 2,
+                "n_tokens": 16}
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val",
+            "ppl": {"unigram": 200.0, "bigram": 100.0},
+            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
+                                   "n_tokens": 16},
+            "window_spec": spec,
+            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
+        matched_eval = {"variant": "lega", "split": "val", "ppl": 20.0 + 0,
+                        "eval_ctx": 8, "eval_iters": 2, "val_windows": 5}
+        runs = {"lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s)}
+                         for s in (1, 2, 3)}}
+        out = ngram_baseline_comparison(runs, tmp)
+        assert out["reference_source"] == "window_matched"
+        assert abs(out["ngram_ppl"] - 90.0) < 1e-12
+        assert abs(out["ngram_ppl_full_split"] - 100.0) < 1e-12
+        assert out["fallback_reason"] is None
+        assert all(r["token_matched"] for r in out["rows"])
+        text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
+        assert "逐位置对齐" in text
+        # 任一 run 的窗口字段与规格不符 → 整体回退全 split 参考并显式说明
+        runs_mis = {"lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s,
+                                              eval_iters=3)}
+                             for s in (1, 2, 3)}}
+        out_mis = ngram_baseline_comparison(runs_mis, tmp)
+        assert out_mis["reference_source"] == "full_split"
+        assert abs(out_mis["ngram_ppl"] - 100.0) < 1e-12
+        assert "lega" in (out_mis["fallback_reason"] or "")
+        assert not any(r["token_matched"] for r in out_mis["rows"])
+        text_mis = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out_mis))
+        assert "未使用逐位置对齐参考" in text_mis
+        # 历史产物缺窗口规格 → 同样回退且如实说明原因
+        tmp2 = tempfile.mkdtemp()
+        try:
+            _write_json(os.path.join(tmp2, "ngram_baseline.json"), {
+                "split": "val", "ppl": {"bigram": 100.0}})
+            out_old = ngram_baseline_comparison(runs, tmp2)
+            assert out_old["reference_source"] == "full_split"
+            assert "window_spec" in (out_old["fallback_reason"] or "")
+        finally:
+            shutil.rmtree(tmp2, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram_baseline_comparison（窗口对齐参考优先、回退显式披露）")
+
+
+def test_neural_eval_window_spec_matches_train_overrides():
+    """n-gram 对齐用的窗口规格必须与训练/评测实际口径一致（含冒烟覆盖）。"""
+    tiny = {"block_size": 256, "train_ctx": 256, "eval_iters": 20}
+    assert _neural_eval_window_spec(tiny, False) == {"ctx": 256, "iters": 20}
+    # 冒烟：train.py 的 SMOKE_OVERRIDES（train_ctx=128、eval_iters=2）必须生效
+    assert _neural_eval_window_spec(tiny, True) == {"ctx": 128, "iters": 2}
+    # train_ctx 被 block_size 截断；默认 eval_iters=50；非法规格返回 None
+    assert _neural_eval_window_spec(
+        {"block_size": 64, "train_ctx": 256}, False) == {"ctx": 64, "iters": 50}
+    assert _neural_eval_window_spec({}, False) is None
+    print("  [ok] _neural_eval_window_spec（与 train/evaluate 口径一致）")
 
 
 def test_registration_scope_check_and_gate():

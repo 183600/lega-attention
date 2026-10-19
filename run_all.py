@@ -1028,17 +1028,62 @@ def resolve_ngram_split(data_dir: str, requested: str = "auto") -> str:
     return requested
 
 
+def _neural_eval_window_spec(cfg: dict, smoke: bool):
+    """推导神经评测实际使用的窗口规格 (ctx, iters)，供 n-gram 逐位置对齐。
+
+    口径必须与 train.py/evaluate.py 完全一致：ctx = min(block_size, train_ctx)
+    （冒烟模式先应用 train.py 的 SMOKE_OVERRIDES），iters = eval_iters
+    （缺省 50）。规格非法时返回 None（不阻塞基线评测）。
+    """
+    from lega.train import SMOKE_OVERRIDES
+    ctx = int(cfg.get("train_ctx") or cfg.get("block_size") or 0)
+    iters = int(cfg.get("eval_iters", 50))
+    if smoke:
+        if "train_ctx" in SMOKE_OVERRIDES:
+            ctx = int(SMOKE_OVERRIDES["train_ctx"])
+        if "eval_iters" in SMOKE_OVERRIDES:
+            iters = int(SMOKE_OVERRIDES["eval_iters"])
+    block = int(cfg.get("block_size") or 0)
+    if block > 0:
+        ctx = min(ctx, block)
+    if ctx < 1 or iters < 1:
+        return None
+    return {"ctx": ctx, "iters": iters}
+
+
+def _eval_matches_window_spec(ev: dict, wspec: dict) -> bool:
+    """run 的 eval JSON 是否与 n-gram 窗口规格逐字段一致。
+
+    字段口径：eval_ctx=实际评测上下文、eval_iters=实际窗口数（已按可用
+    窗口数截断）、val_windows=评测 split 的可用窗口数。任一项缺失/不同即
+    视为未对齐（历史产物、ctx/iters 被覆盖等情况），回退全 split 参考。
+    """
+    if not wspec:
+        return False
+    try:
+        return (int(ev.get("eval_ctx")) == int(wspec.get("ctx"))
+                and int(ev.get("eval_iters")) == int(wspec.get("n_eval"))
+                and int(ev.get("val_windows")) == int(wspec.get("n_windows")))
+    except (TypeError, ValueError):
+        return False
+
+
 def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
-    """神经变体 vs 简单统计基线（同 split）的统计对比。
+    """神经变体 vs 简单统计基线（同 split、能校验时同 token）的统计对比。
 
     科研方法问题：“n-gram PPL=xx” 与 “神经 PPL=yy” 并排放着不构成
-    “复杂模型比简单基线好”的证据——必须同 split、必须对照方差。n-gram
-    对给定 split 是确定值（无种子方差），因此每个神经变体的逐种子 PPL
-    与同一常数配对 = 单样本检验；只在两侧 split 一致的种子上比较，
-    split 不一致的 run 显式列出且不混入（避免 test-vs-val 错位）。
-    多个变体同时对比时沿用 Holm–Bonferroni 校正。该对比不属于预注册
-    假设，标为补充性/探索性证据：用于回答“数据绝对难度有多高、神经
-    模型是否真的优于无梯度基线”，而不是替代变体间的受控对比。
+    “复杂模型比简单基线好”的证据——必须同 split、必须对照方差，而且
+    两边必须打在**同一批 token** 上：神经 PPL 只在 eval_iters 个等间隔
+    窗口的目标 token 上计算，n-gram 若在整个 split 上打分就是不同 token
+    集合上的 PPL（同 split 不等于同 token）。n-gram 对给定 split 是确定值
+    （无种子方差），因此每个神经变体的逐种子 PPL 与同一常数配对 = 单样本
+    检验；只在两侧 split 一致的种子上比较，split 不一致的 run 显式列出且
+    不混入（避免 test-vs-val 错位）。参考值的优先级：全部纳入比较的 run
+    的 eval 字段都与 n-gram 的窗口规格一致时用 `ppl_window_matched`
+    （逐位置对齐）；任一不一致（历史产物/规格缺省）则整体回退全 split
+    参考并在结果里显式标注 `reference_source`——同一 Holm 家族必须共用
+    同一个参考值。多个变体同时对比时沿用 Holm–Bonferroni 校正。该对比
+    不属于预注册假设，标为补充性/探索性证据。
     """
     path = os.path.join(results_dir, "ngram_baseline.json")
     if not os.path.exists(path):
@@ -1054,16 +1099,20 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     if ref_name is None:
         return {"error": "ngram_baseline.json 没有可用 PPL"}
     try:
-        ref_ppl = float(ppl_map[ref_name])
+        ref_ppl_full = float(ppl_map[ref_name])
     except (TypeError, ValueError):
         return {"error": "ngram PPL 非数值"}
+    wm_map = ng.get("ppl_window_matched") or {}
+    wspec = ng.get("window_spec") or {}
     ng_split = ng.get("split")
-    rows, incomparable = [], []
+    # 第一遍：收集逐种子 PPL 与该 run 是否与窗口规格逐字段一致。
+    staged, incomparable = [], []
     for v in sorted(runs):
         if v not in VARIANTS:
             continue
         m = _variant_seed_map(runs, v)
         vals, seeds_used, eval_splits, excl_seeds = [], [], set(), []
+        matched = []
         for s in _sorted_seeds(m):
             d = m[s].get("eval")
             if not d:
@@ -1078,21 +1127,40 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 continue
             vals.append(p)
             seeds_used.append(s)
+            matched.append(_eval_matches_window_spec(d, wspec))
         if eval_splits:
             # 只要存在 split 错位的种子就必须显式列出（哪怕同变体另有可比
             # 种子已被纳入）：静默丢弃部分种子同样会让读者高估证据完整性
             incomparable.append({"variant": v,
                                  "eval_splits": sorted(eval_splits),
                                  "excluded_seeds": [int(s) for s in excl_seeds]})
-        if not vals:
-            continue
+        if vals:
+            staged.append({"variant": v, "vals": vals,
+                           "seeds": [int(s) for s in seeds_used],
+                           "matched": matched})
+    # 参考值决策（第一步）：全部纳入比较的 run 都与窗口规格一致，且
+    # window-matched PPL 可用 → 用逐位置对齐参考；否则整体回退全 split。
+    # 同一 Holm 家族必须共用同一参考值，不能逐行混用。
+    wm_ref = None
+    try:
+        if wm_map.get(ref_name) is not None:
+            wm_ref = float(wm_map[ref_name])
+    except (TypeError, ValueError):
+        wm_ref = None
+    all_matched = bool(staged) and all(all(r["matched"]) for r in staged)
+    use_window = bool(wspec) and wm_ref is not None and all_matched
+    ref_ppl = wm_ref if use_window else ref_ppl_full
+    ref_source = "window_matched" if use_window else "full_split"
+    rows = []
+    for st in staged:
+        v, vals = st["variant"], st["vals"]
         res = paired_t_test(vals, [ref_ppl] * len(vals))
         res.update({"candidate": v, "reference": ref_name,
                     "metric": "PPL vs ngram", "lower_is_better": True})
         res = _enrich_paired(res, vals, [ref_ppl] * len(vals))
         mean_ppl = float(sum(vals) / len(vals))
         rows.append({
-            "variant": v, "n": len(vals), "seeds": [int(s) for s in seeds_used],
+            "variant": v, "n": len(vals), "seeds": st["seeds"],
             "mean_ppl": mean_ppl,
             "std_ppl": mean_std(vals)[1],
             "ratio": mean_ppl / ref_ppl if ref_ppl > 0 else None,
@@ -1102,11 +1170,29 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "mean_diff": res.get("mean_diff"),
             "mean_diff_ci95": res.get("mean_diff_ci95"),
             "p_perm": res.get("p_perm"), "mde": res.get("mde"),
+            "token_matched": bool(all(st["matched"])) and use_window,
             "verdict": None,
         })
+    # 回退原因：把“为什么没用窗口对齐参考”显式落盘，避免读者默认已对齐。
+    mismatch_variants = [st["variant"] for st in staged
+                         if not all(st["matched"])]
+    if use_window:
+        fallback_reason = None
+    elif not wspec:
+        fallback_reason = "ngram_baseline.json 缺少 window_spec（历史产物）"
+    elif wm_ref is None:
+        fallback_reason = "window-matched PPL 缺失或非数值"
+    else:
+        fallback_reason = ("存在与窗口规格不一致的 run（eval_ctx/eval_iters/"
+                           f"val_windows 任一字段不符）：{mismatch_variants}")
     if not rows:
         return {"split": ng_split, "reference_model": ref_name,
                 "ngram_ppl": ref_ppl, "rows": [],
+                "reference_source": ref_source,
+                "ngram_ppl_full_split": ref_ppl_full,
+                "ngram_ppl_window_matched": wm_ref,
+                "window_spec": wspec or None,
+                "fallback_reason": fallback_reason,
                 "incomparable": incomparable,
                 "note": "没有与 n-gram 同 split 的神经评测结果可比"}
     pads = holm_bonferroni([r.get("p") for r in rows])
@@ -1122,11 +1208,21 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             r["verdict"] = "显著劣于统计基线（严重）"
         else:
             r["verdict"] = "无显著差异（对照 MDE）"
+    note = ("n-gram 无种子方差：逐种子 PPL 与同一常数配对 = 单样本检验；"
+            "本对比为补充性/探索性证据，不替代变体间受控对比")
+    if use_window:
+        note = ("参考值取自与神经评测逐位置对齐的窗口目标 token"
+                f"（窗口规格 ctx={wspec.get('ctx')}, iters={wspec.get('iters')}, "
+                f"共 {wspec.get('n_tokens')} 个评分 token）；" + note)
     return {"split": ng_split, "reference_model": ref_name,
             "ngram_ppl": ref_ppl, "rows": rows, "incomparable": incomparable,
+            "reference_source": ref_source,
+            "ngram_ppl_full_split": ref_ppl_full,
+            "ngram_ppl_window_matched": wm_ref,
+            "window_spec": wspec or None,
+            "fallback_reason": fallback_reason,
             "holm_family_size": len(rows),
-            "note": ("n-gram 无种子方差：逐种子 PPL 与同一常数配对 = 单样本检验；"
-                     "本对比为补充性/探索性证据，不替代变体间受控对比")}
+            "note": note}
 
 
 def _probe_oof(analysis: dict, key: str):
@@ -1339,6 +1435,21 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             f"评测 token {int(ngram.get('eval_tokens') or 0):,}、"
             f"词表 {ngram.get('vocab_size')}）。主科学对比仍是神经变体之间；"
             "该基线只回答“绝对难度有多高、神经模型是否显著优于统计基线”。")
+        wm = ngram.get("ppl_window_matched") or {}
+        wspec = ngram.get("window_spec") or {}
+        if wm and wspec:
+            lines.append(
+                f"- 逐位置对齐口径（同 split 还不够，两边必须打在同一批 token "
+                f"上）：在神经评测实际使用的窗口目标 token 上"
+                f"（ctx={wspec.get('ctx')}、iters={wspec.get('iters')}、"
+                f"n_eval={wspec.get('n_eval')}、"
+                f"共 {int(wspec.get('n_tokens') or 0):,} 个评分 token），"
+                f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
+                f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
+                f"（与全 split 口径同一选定 α）。")
+        elif ngram.get("window_spec_error"):
+            lines.append(f"- ⚠ n-gram 窗口对齐不可用："
+                         f"{ngram['window_spec_error']}")
     else:
         lines.append("- 简单统计基线：未运行（`python -m lega.ngram`，"
                      "结果写入 `results/<tag>/ngram_baseline.json`）。")
@@ -1347,12 +1458,17 @@ def _render_baseline_sections(results_dir: str, smoke=None,
     cmp = ngram_cmp or {}
     if cmp.get("rows"):
         ref = cmp.get("reference_model")
+        matched = cmp.get("reference_source") == "window_matched"
+        basis = ("参考值与神经评测逐位置对齐（同一批窗口目标 token）"
+                 if matched else
+                 "参考值为全 split PPL（未逐位置对齐，见下方说明）")
         lines += [
             "",
             f"- 神经变体 vs 简单统计基线（{ref}，split={cmp.get('split')}；"
-            "n-gram 无种子方差 → 逐种子 PPL 与同一常数配对做单样本检验，"
-            f"Holm 校正（家族 {cmp.get('holm_family_size', len(cmp['rows']))} "
-            "个变体）；属补充性/探索性对比）：",
+            f"{basis}；n-gram 无种子方差 → 逐种子 PPL 与同一常数配对做单样本"
+            f"检验，Holm 校正（家族 "
+            f"{cmp.get('holm_family_size', len(cmp['rows']))} 个变体）；"
+            "属补充性/探索性对比）：",
             "",
             "| 变体 | n | 神经 PPL(mean) | 统计基线 PPL | 比值 | 相对降低 | p_adj | 判定 |",
             "|---|---|---|---|---|---|---|---|",
@@ -1371,8 +1487,14 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"| {padj} | {r.get('verdict')} |")
         lines += ["",
                   "  注：比值 <1 且判定“显著优于统计基线”才说明神经模型真的"
-                  "比无梯度基线好；本对比未预注册，只是补充证据，"
-                  "不替代变体间受控配对检验。"]
+                  "比无梯度基线好；两边必须同 split 且尽量同 token——神经 "
+                  "PPL 只在 eval_iters 个窗口的目标 token 上计算，若本表未用"
+                  "窗口对齐参考（reference_source=full_split），说明存在"
+                  "与窗口规格不一致的 run，比值含 token 集合差异带来的偏移。"
+                  "本对比未预注册，只是补充证据，不替代变体间受控配对检验。"]
+        if not matched and cmp.get("fallback_reason"):
+            lines.append(f"  ⚠ 未使用逐位置对齐参考：{cmp['fallback_reason']}"
+                         "（重跑 n-gram 基线或对齐 eval 规格后即可对齐）。")
     elif cmp.get("error"):
         lines.append(f"- ⚠ 简单基线对比不可用：{cmp['error']}")
     elif cmp.get("note") and not cmp.get("rows"):
@@ -3099,14 +3221,21 @@ def main():
     # 否则汇总页的“神经 vs 统计基线”会变成 test-vs-val 的错位比较。
     if not args.skip_ngram:
         ngram_split = resolve_ngram_split(args.data_dir, args.ngram_split)
+        # 窗口规格来自本次配置（含冒烟覆盖）：同 split 还不够，必须同 token——
+        # n-gram 额外在神经评测窗口的目标 token 上打分，供汇总做逐位置对比。
+        window_spec = _neural_eval_window_spec(cfg, args.smoke)
         try:
             ng = ngram_evaluate(args.data_dir, split=ngram_split,
-                                allow_test=(ngram_split == "test"))
+                                allow_test=(ngram_split == "test"),
+                                window_spec=window_spec)
             save_json(ng, os.path.join(results_dir, "ngram_baseline.json"))
+            wm = ng.get("ppl_window_matched") or {}
             print(f"[ngram] 简单基线 {ngram_split} PPL: "
                   f"unigram={ng['ppl'].get('unigram')} "
                   f"bigram={ng['ppl'].get('bigram')} "
-                  f"(α={ng['selected_alpha']})")
+                  f"(α={ng['selected_alpha']})；"
+                  f"窗口对齐 PPL: unigram={wm.get('unigram')} "
+                  f"bigram={wm.get('bigram')}（spec={ng.get('window_spec')}）")
         except (OSError, ValueError) as e:
             print(f"[run_all] ⚠ n-gram 基线跳过：{e}")
 
