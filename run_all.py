@@ -392,8 +392,9 @@ def _same_protocol_value(a, b) -> bool:
     return _protocol_value(a) == _protocol_value(b)
 
 
-def _same_seed(value, expected) -> bool:
-    if isinstance(value, bool):
+def _same_integral_value(value, expected) -> bool:
+    """两个值是否表示同一个整数（拒绝 bool/非有限/小数截断）。"""
+    if isinstance(value, bool) or isinstance(expected, bool):
         return False
     try:
         fv, fe = float(value), float(expected)
@@ -401,6 +402,10 @@ def _same_seed(value, expected) -> bool:
         return False
     return (math.isfinite(fv) and math.isfinite(fe)
             and fv.is_integer() and fe.is_integer() and fv == fe)
+
+
+def _same_seed(value, expected) -> bool:
+    return _same_integral_value(value, expected)
 
 
 def _ppl_protocol(d) -> dict:
@@ -1936,12 +1941,11 @@ def _eval_matches_window_spec(ev: dict, wspec: dict) -> bool:
     """
     if not isinstance(ev, dict) or not isinstance(wspec, dict) or not wspec:
         return False
-    try:
-        return (int(ev.get("eval_ctx")) == int(wspec.get("ctx"))
-                and int(ev.get("eval_iters")) == int(wspec.get("n_eval"))
-                and int(ev.get("val_windows")) == int(wspec.get("n_windows")))
-    except (TypeError, ValueError, OverflowError):
-        return False
+    return (_same_integral_value(ev.get("eval_ctx"), wspec.get("ctx"))
+            and _same_integral_value(ev.get("eval_iters"),
+                                     wspec.get("n_eval"))
+            and _same_integral_value(ev.get("val_windows"),
+                                     wspec.get("n_windows")))
 
 
 def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:

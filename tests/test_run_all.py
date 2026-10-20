@@ -2330,6 +2330,13 @@ def test_summary_helpers_tolerate_nested_non_dict_values():
     assert _eval_matches_window_spec(
         {"eval_ctx": float("inf")},
         {"ctx": 8, "n_eval": 2, "n_windows": 5}) is False
+    spec = {"ctx": 8, "n_eval": 2, "n_windows": 5}
+    assert _eval_matches_window_spec(
+        {"eval_ctx": 8.5, "eval_iters": 2, "val_windows": 5}, spec) is False
+    assert _eval_matches_window_spec(
+        {"eval_ctx": True, "eval_iters": 2, "val_windows": 5}, spec) is False
+    assert _eval_matches_window_spec(
+        {"eval_ctx": "8", "eval_iters": "2", "val_windows": "5"}, spec) is True
     tmp = tempfile.mkdtemp()
     try:
         _write_json(os.path.join(tmp, "ngram_baseline.json"),
