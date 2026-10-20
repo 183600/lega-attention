@@ -690,3 +690,28 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
             ev = json.load(f)
         assert ev["sanity_passed"] is True
     print("  [ok] train manifest：sanity 证据 + 精度开关已记录")
+
+
+def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
+    """工作区补丁被截断时，相同哈希不能证明“未变化”，必须记 unknown。"""
+    start = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1",
+                     "diff_truncated": True},
+        "data_fingerprint": "fp1",
+    }
+    same_truncated = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1",
+                     "diff_truncated": True},
+        "data_fingerprint": "fp1",
+    }
+    d = provenance_drift(start, same_truncated)
+    assert d["checked"]["worktree_diff_sha256"] is None, d
+    assert "worktree_diff_sha256" in d["unknown"], d
+    assert d["changed"] is False
+    # 哈希已不同时仍能确认发生变化，不因截断而漏报。
+    moved = dict(same_truncated, worktree={
+        "available": True, "diff_sha256": "d2", "diff_truncated": True})
+    assert provenance_drift(start, moved)["changed"] is True
+    print("  [ok] 截断的工作区补丁按 unknown 处理，哈希不同仍可确认变化")

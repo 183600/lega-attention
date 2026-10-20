@@ -188,12 +188,17 @@ def provenance_drift(start: dict, end: dict) -> dict:
         unknown.append("worktree_diff_sha256")
     else:
         same = s_wt.get("diff_sha256") == e_wt.get("diff_sha256")
-        checks["worktree_diff_sha256"] = same
         if not same:
+            checks["worktree_diff_sha256"] = False
             mismatches.append({
                 "field": "worktree_diff_sha256",
                 "start": s_wt.get("diff_sha256"),
                 "end": e_wt.get("diff_sha256")})
+        elif s_wt.get("diff_truncated") or e_wt.get("diff_truncated"):
+            checks["worktree_diff_sha256"] = None
+            unknown.append("worktree_diff_sha256")
+        else:
+            checks["worktree_diff_sha256"] = True
 
     s_data = (start or {}).get("data_fingerprint")
     e_data = (end or {}).get("data_fingerprint")
