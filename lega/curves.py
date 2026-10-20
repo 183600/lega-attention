@@ -14,6 +14,8 @@
   * 训练不足      训练/验证都在下降，但累计只见过不足 1 个 epoch 的训练
                   数据——这是“还没学完”，不能当作收敛或“无需干预”；
   * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"；
+  * 评估噪声      日志带 val_loss_ci95 时，小于该抽样误差的变化不算“实质
+                  回升/下降”——避免把有限窗口的评估噪声误判成过拟合；
   * 瞬态损失尖峰  单步损失远超邻近点中位数（分段均值会掩盖）——异常批次或
                   一次梯度爆炸的信号，即使趋势正常也应先核对批次与梯度；
   * 坏记录        值/step 无法解析的日志行被跳过并计数，结论只基于其余点。
@@ -149,6 +151,31 @@ def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
     return float(sum(vals) / len(vals)) if vals else None
 
 
+def _val_ci_rel(records: List[Dict]) -> Optional[float]:
+    """验证损失点级 95% CI 的相对半宽中位数（无可用区间时返回 None）。
+
+    单次 run 只评测 eval_iters 个窗口；train.py/evaluate.py 已把窗口抽样
+    误差写入 val_loss_ci95，但曲线诊断此前只比较点估计，2% 的“验证回升”
+    可能完全落在该误差内。这里取所有带区间的验证点中相对半宽的中位数作为
+    噪声量级（点级、偏保守：分段均值实际会进一步降低该项噪声）。
+    """
+    vals = []
+    for r in records if isinstance(records, (list, tuple)) else []:
+        if not isinstance(r, dict):
+            continue
+        ci, v = r.get("val_loss_ci95"), r.get("val_loss")
+        if not isinstance(ci, (list, tuple)) or len(ci) != 2:
+            continue
+        try:
+            lo, hi, v = float(ci[0]), float(ci[1]), float(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (math.isfinite(lo) and math.isfinite(hi) and math.isfinite(v)
+                and v > 0 and hi >= lo):
+            vals.append((hi - lo) / 2.0 / v)
+    return float(statistics.median(vals)) if vals else None
+
+
 def _rel_change(first: Optional[float], last: Optional[float]) -> Optional[float]:
     """last 相对 first 的相对变化（正=上升）；first 接近 0 时返回 None
     （相对变化无定义，不回退成绝对差以免口径混淆）。"""
@@ -260,8 +287,13 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     val_delta = _rel_change(first_val, last_val)
     train_down = train_delta is not None and train_delta < -REL_TOL
     train_up = train_delta is not None and train_delta > REL_TOL
-    val_down = val_delta is not None and val_delta < -REL_TOL
-    val_up = val_delta is not None and val_delta > REL_TOL
+    # 验证侧判定必须扣除评估抽样噪声：val_loss_ci95 存在时，变化幅度不超过
+    # 该点级 CI 半宽就不算“实质回升/下降”。无 CI 的旧日志保持原口径。
+    val_ci_rel = _val_ci_rel(records)
+    val_tol = max(REL_TOL, val_ci_rel or 0.0)
+    val_down = val_delta is not None and val_delta < -val_tol
+    val_up = val_delta is not None and val_delta > val_tol
+    val_unresolved = (val_delta is not None and abs(val_delta) <= val_tol)
 
     best_val, best_step = None, None
     for p in val_pts:
@@ -270,6 +302,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     final_val = val_pts[-1]["value"] if val_pts else None
     final_step = val_pts[-1]["step"] if val_pts else None
     early_stop_gain = _rel_change(best_val, final_val)  # >0 表示最终劣于最优
+    # 早停空间同样要扣除评估噪声：final 比 best 差 2% 但单点 CI 就有 ±3% 时，
+    # 不能据此断言“已经过拟合、早停能挽回”。
+    gain_tol = max(EARLY_STOP_TOL, val_ci_rel or 0.0)
+    gain_sig = (early_stop_gain or 0) > gain_tol
 
     status, evidence, recommendations = "数据不足", [], []
     n_train, n_val = len(train_pts), len(val_pts)
@@ -293,9 +329,9 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"{last_train / first_train:.2f} 倍")
             recommendations.append("疑似发散：优先降低学习率或加强梯度裁剪，"
                                    "并检查梯度范数是否出现尖峰")
-        elif ((train_down and (val_up or (early_stop_gain or 0) > EARLY_STOP_TOL))
+        elif ((train_down and (val_up or gain_sig))
               or (train_delta is not None and not train_down and not train_up
-                  and val_up and (early_stop_gain or 0) > EARLY_STOP_TOL)):
+                  and val_up and gain_sig)):
             # 平台期过拟合：训练不再下降而验证回升，同样需要早停/正则化；
             # 若按"训练没降"误判成欠拟合，会给出"延长训练/增大模型"的反向建议。
             status = "过拟合"
@@ -310,22 +346,22 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                       f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
                       f"（{_fmt_rel(val_delta)}）上升——泛化先于训练损失恶化，"
                       "按平台期过拟合处理"]
-            if (early_stop_gain or 0) > EARLY_STOP_TOL:
+            if gain_sig:
                 ev.append(f"最终验证损失劣于 step {best_step} 的最优值 "
-                          f"{best_val:.4f} 达 {early_stop_gain:+.1%}")
+                          f"{best_val:.4f} 达 {early_stop_gain:+.1%}"
+                          "（超过评估噪声）")
             evidence += ev
             recommendations += [
                 "加正则化（dropout / weight decay）或增大数据量",
                 f"早停：val 最优在 step {best_step}，最终 step {final_step} 已过拟合"
                 + (f"（早停可挽回 {early_stop_gain:.1%} 验证损失）"
-                   if (early_stop_gain or 0) > 0 else ""),
+                   if gain_sig else ""),
                 "下游对比应使用 val 上选出的 model_best.pt，而不是最终步模型"]
             if not train_down:
                 recommendations.append(
                     "训练已停滞而验证恶化：按平台期过拟合处理（早停/正则化），"
                     "并先确认学习率不过小（训练推得动）；不要按欠拟合扩大容量或续训")
-        elif (train_down and val_delta is not None and not val_down
-              and (early_stop_gain or 0) <= EARLY_STOP_TOL):
+        elif (train_down and val_unresolved and not gain_sig):
             # 训练仍在实质下降而验证无实质变化（|Δ|<REL_TOL）：验证不再随
             # 训练改善，泛化差距在扩大——过拟合的早期形态。它比"验证回升"
             # 更早出现；只看最终数值或只等验证回升会漏掉这一信号。
@@ -334,8 +370,11 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
                 f"（{_fmt_rel(train_delta)}）仍在实质下降，而验证损失 "
                 f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
-                f"（{_fmt_rel(val_delta)}）无实质变化：验证不再随训练改善，"
-                "泛化差距在扩大（尚不满足“验证回升”的过拟合判定）")
+                f"（{_fmt_rel(val_delta)}）无实质变化"
+                + (f"（评估噪声 ±{val_ci_rel:.1%}）" if val_ci_rel is not None
+                   else "")
+                + "：验证不再随训练改善，泛化差距在扩大"
+                "（尚不满足“验证回升”的过拟合判定）")
             recommendations += [
                 "训练降而验证停滞：按过拟合早期信号处理——启用/加强正则化"
                 "（dropout / weight decay），对比使用 val 最优的 model_best.pt",
@@ -398,16 +437,28 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"（{_fmt_rel(train_delta)}），"
                 f"验证损失 {_fmt_num(first_val)}→{_fmt_num(last_val)}"
                 f"（{_fmt_rel(val_delta)}）")
-            if (early_stop_gain or 0) > EARLY_STOP_TOL:
+            if gain_sig:
                 evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
-                                f"{early_stop_gain:.1%}，已按 best-checkpoint 口径评测")
+                                f"{early_stop_gain:.1%}（超过评估噪声），"
+                                "已按 best-checkpoint 口径评测")
+            elif (early_stop_gain or 0) > EARLY_STOP_TOL:
+                evidence.append(
+                    f"最终验证损失比 step {best_step} 的最优值差 "
+                    f"{early_stop_gain:.1%}，但未超过评估噪声 "
+                    f"±{val_ci_rel:.1%}：不据此判定过拟合")
             elif not loss_spikes:
                 # 有瞬态尖峰时不写"无需干预"：先按尖峰建议排查（下文追加）
                 recommendations.append("无需干预；对比实验使用 model_best.pt")
-        if (early_stop_gain or 0) > EARLY_STOP_TOL and status != "过拟合":
+        if gain_sig and status != "过拟合":
             recommendations.append(
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
+
+    if val_ci_rel is not None:
+        evidence.append(
+            f"验证损失点级 95% CI 相对半宽中位数 ±{val_ci_rel:.1%}"
+            "（窗口抽样误差；分段均值会进一步降低该项，按保守口径使用）："
+            "小于该量级的验证变化按噪声处理，不作为过拟合/收敛证据")
 
     # 训练数据覆盖率（来自 eval.json）：曲线下降 ≠ 已收敛。只见过不足
     # 1 个 epoch 时，验证损失仍在快速变化，此时比较方法/下“无需干预”的
@@ -503,6 +554,15 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "val_best_step": best_step,
         "val_final_step": final_step,
         "early_stop_gain_rel": early_stop_gain,
+        # 验证侧噪声量级与“变化是否超出噪声”的显式标记：下游可据此避免
+        # 把窗口抽样误差当成过拟合/收敛信号。
+        "val_ci_rel": val_ci_rel,
+        "val_change_above_noise": (
+            None if (val_delta is None or val_ci_rel is None)
+            else bool(abs(val_delta) > val_ci_rel)),
+        "early_stop_gain_above_noise": (
+            None if (early_stop_gain is None or val_ci_rel is None)
+            else bool(early_stop_gain > val_ci_rel)),
         "early_stopped": early_stopped,
         "early_stop_step": (es_step if early_stopped else None),
         "epochs_seen": epochs_seen,

@@ -42,6 +42,29 @@ def test_overfitting_detected():
     print("  [ok] 过拟合判定 + 早停/正则化建议")
 
 
+def test_curve_diagnosis_respects_validation_noise():
+    """验证回升若落在 val_loss_ci95 内，不得判成过拟合：有限窗口的评估
+    噪声不是泛化信号；无 CI 的旧日志保持原判定。"""
+    recs = _log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2], [3.0, 3.2, 3.5])
+    # 每个验证点 ±20% 的 95% CI：+16.7% 的“回升”完全在噪声内
+    for r in recs:
+        if "val_loss" in r:
+            v = r["val_loss"]
+            r["val_loss_ci95"] = [v * 0.8, v * 1.2]
+    d = diagnose_curve(recs)
+    assert d["status"] != "过拟合", d
+    assert d["val_ci_rel"] is not None and d["val_ci_rel"] > 0.15
+    assert d["val_change_above_noise"] is False
+    assert d["early_stop_gain_above_noise"] is False
+    assert any("评估噪声" in e for e in d["evidence"]), d["evidence"]
+    assert not any("早停可挽回" in r for r in d["recommendations"]), d["recommendations"]
+    # 同样的曲线但没有 CI（旧日志）沿用原阈值，仍能识别过拟合
+    plain = _log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2], [3.0, 3.2, 3.5])
+    d2 = diagnose_curve(plain)
+    assert d2["status"] == "过拟合", d2
+    print("  [ok] 曲线诊断扣除验证评估噪声（无 CI 时兼容旧判定）")
+
+
 def test_overfitting_trend_train_down_val_stalled():
     """训练仍在实质下降而验证无实质变化：过拟合的早期形态，必须给出
     正则化/早停建议，且不得建议延长训练。"""
