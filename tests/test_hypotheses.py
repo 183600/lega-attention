@@ -271,6 +271,22 @@ def test_corrupt_json_is_violation_not_missing_file():
     print("  [ok] 损坏的锁/登记表 → violated（不冒充 missing）")
 
 
+def test_init_lock_creates_missing_parent_directory():
+    """自定义 --lock 指向尚不存在的目录时也必须能首次登记（原子写入先建目录）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg = os.path.join(tmp, "reg.json")
+        lock = os.path.join(tmp, "nested", "deeper", "reg.lock.json")
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        assert os.path.exists(lock)
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "intact" and r["confirmatory_valid"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] init_lock（锁文件父目录不存在时自动创建）")
+
+
 def test_malformed_lock_baseline_and_unhashable_ids_do_not_crash():
     """锁基线/登记表被改成异常结构时必须走 violated/schema_errors 报告，
     而不是让验证器 AttributeError/TypeError 崩溃（它是审计的最后一环）。"""

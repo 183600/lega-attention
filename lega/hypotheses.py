@@ -362,6 +362,7 @@ def _write_json(obj, path: str) -> None:
     目标同目录（跨文件系统 replace 会失败），失败时清理临时文件。
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
