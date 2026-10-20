@@ -181,6 +181,17 @@ def _manifest_identity(out_dir: str) -> dict:
 
 
 def _as_int(value):
+    """严格整数化：bool/非有限浮点/小数一律视为不可核对。
+
+    manifest 是子进程自证身份的证据；若把 7.5 截断成 7 或把 True 当成 1，
+    伪造的种子也能与请求种子“一致”，身份核对就失去意义。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        return int(value)
     try:
         return int(value)
     except (TypeError, ValueError, OverflowError):

@@ -258,10 +258,14 @@ def test_trial_identity_requires_manifest_for_every_success_and_valid_seed():
     assert ident["consistent"] is False
 
     for bad in (trial(manifest_seed=None), trial(manifest_seed="bad"),
+                trial(manifest_seed=7.5), trial(manifest_seed=True),
+                trial(manifest_seed=float("nan")),
                 trial(data_fp=None), trial(commit=None),
                 trial(verified=False)):
         one = _trial_identity_summary([bad])
         assert one["checked"] is True and one["consistent"] is False, one
+    integral = _trial_identity_summary([trial(manifest_seed=7.0)])
+    assert integral["consistent"] is True, integral
     print("  [ok] trial identity（成功 trial 全部可核对才判一致）")
 
 
