@@ -252,6 +252,37 @@ def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
     print("  [ok] Prefill 图：无共同 batch 时按变体各自档位绘制")
 
 
+def test_fig_latency_respects_variant_scope():
+    """本次 run 范围外的变体不得出现在 decode 图上（旧结果可能仍留在目录）。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_latency 范围测试")
+        return
+    import matplotlib.axes as maxes
+    from unittest import mock
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "repro.json", {"variants": ["lega"], "seeds": [1]})
+        _w(tmp, "latency.json", {"variants": {
+            "lega": {"prefill_ms": {"256": {"1": 12.0}},
+                     "decode_ms_per_tok": {"256": 1.2}},
+            "stale": {"prefill_ms": {"256": {"1": 9.0}},
+                      "decode_ms_per_tok": {"256": 0.9}}}})
+        labels = []
+        orig = maxes.Axes.plot
+
+        def spy(self, *a, **kw):
+            if kw.get("marker") in ("o", "s"):
+                labels.append(kw.get("label"))
+            return orig(self, *a, **kw)
+
+        with mock.patch.object(maxes.Axes, "plot", spy):
+            assert fig_latency(tmp) is True
+        assert labels == ["LEGA(ours)", "LEGA(ours)"], labels
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 延迟图：范围外变体不进入 prefill/decode 曲线")
+
+
 def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
     """ppl 为 null 时用 val_ppl，非数值 ppl 不能让画图崩溃。"""
     if not _HAS_MPL:

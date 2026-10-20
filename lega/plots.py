@@ -458,6 +458,8 @@ def fig_latency(rdir):
     ax1.grid(alpha=0.3)
     ax1.legend(fontsize=8)
     for v, e in variants.items():
+        if variant_scope is not None and v not in variant_scope:
+            continue
         if not isinstance(e, dict):
             continue
         decode = e.get("decode_ms_per_tok")
