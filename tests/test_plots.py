@@ -110,6 +110,39 @@ def test_load_train_logs_respects_run_convention():
     print("  [ok] 训练曲线日志：按 repro.json 命名约定逐变体择优")
 
 
+def test_run_scope_filters_stale_seed_and_variant_artifacts():
+    """repro.json 的具体 seeds/variants 白名单必须生效：同后缀的旧种子
+    （如 seeds 7,9 目录里的 _seed8）与已移除变体都不得混入本次图表。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "repro.json", {"seeds": [7, 9], "variants": ["lega"]})
+        for s, ppl in ((7, 10.0), (8, 99.0), (9, 11.0)):
+            _w(tmp, f"eval_lega_seed{s}.json",
+               {"variant": "lega", "seed": s, "val_ppl": ppl})
+        _w(tmp, "eval_standard_seed7.json",
+           {"variant": "standard", "seed": 7, "val_ppl": 1.0})
+        g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
+        assert set(g) == {"lega"}, g
+        assert sorted(d["val_ppl"] for d in g["lega"]) == [10.0, 11.0]
+        paths = [os.path.join(tmp, f"eval_lega_seed{s}.json") for s in (7, 8)]
+        assert _prefer_seeded(paths, rdir=tmp) == [paths[0]]
+        # 训练日志同样不得混入旧 seed8 / 已移除变体
+        for s in (7, 8, 9):
+            _w_log(tmp, "lega", s, float(s))
+        _w_log(tmp, "standard", 7, 1.0)
+        series = _load_train_logs(tmp, rdir=tmp)
+        assert set(series) == {"lega"}, series
+        _, ys = _mean_by_step(series["lega"], "loss")
+        assert ys == [8.0], ys       # (7+9)/2，而不是 (7+8+9)/3
+        # 无 repro 信息时保持旧行为（全量发现）
+        os.remove(os.path.join(tmp, "repro.json"))
+        series = _load_train_logs(tmp, rdir=tmp)
+        assert set(series) == {"lega", "standard"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] repro 范围：旧种子/已移除变体不混入图表")
+
+
 def test_read_records_merges_ragged_headers_by_file_rows():
     """合并不同版本的逐记录 CSV 时，缺列必须按"该文件的行区间"补 NaN。
 

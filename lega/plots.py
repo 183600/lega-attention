@@ -106,6 +106,47 @@ def _expected_tagged(rdir):
     return None
 
 
+def _run_scope(rdir):
+    """repro.json 记录的本次 run 变体/种子范围；未知时对应项为 None。
+
+    仅按“带不带 _seed 后缀”筛选还不够：同一 tag 下换过具体种子（如
+    seeds 7,8 → 7,9）重跑时，旧 seed8 与本次一样带后缀，会被混入均值。
+    必须再按 repro.json 的 seeds/variants 白名单过滤。
+    """
+    d = _load(os.path.join(rdir, "repro.json")) if rdir else None
+    if not isinstance(d, dict):
+        return None, None
+    variants = d.get("variants")
+    variant_scope = None
+    if isinstance(variants, list):
+        variant_scope = {v for v in variants if isinstance(v, str)}
+    seeds = d.get("seeds")
+    seed_scope = None
+    if isinstance(seeds, list):
+        parsed = set()
+        for x in seeds:
+            try:
+                parsed.add(int(x))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        seed_scope = parsed or None
+    return variant_scope, seed_scope
+
+
+def _path_seed(path):
+    m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(path))[0])
+    return int(m.group(1)) if m else None
+
+
+def _seed_in_scope(seed, scope):
+    if scope is None or seed is None:
+        return True
+    try:
+        return int(seed) in scope
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+
 def _prefer_seeded(paths, rdir=None):
     """只保留与本次 run 命名约定一致的结果文件：否则同一次实验会被多算一次。
 
@@ -115,6 +156,14 @@ def _prefer_seeded(paths, rdir=None):
     信息时退回“_seed 优先”的旧行为。
     """
     expected = _expected_tagged(rdir) if rdir else None
+    _, seed_scope = _run_scope(rdir) if rdir else (None, None)
+    if seed_scope is not None:
+        # 先剔除不属于本次种子白名单的过期产物（含同后缀的旧种子）。
+        # 过滤后为空时宁可不出图，也不回退去画别的 run 的结果。
+        paths = [p for p in paths
+                 if _seed_in_scope(_path_seed(p), seed_scope)]
+        if not paths:
+            return []
     if expected is not None:
         keep = [p for p in paths
                 if _is_tagged(p) == expected and os.path.exists(p)]
@@ -137,6 +186,7 @@ def _group_items(items, rdir=None):
     完全无种子信息的文件在该变体已有种子结果时忽略（与旧行为一致）。
     """
     expected = _expected_tagged(rdir) if rdir else None
+    variant_scope, seed_scope = _run_scope(rdir) if rdir else (None, None)
     groups = {}
     for fp, d in items:
         # 合法 JSON 但非对象（如误放入的数组）或变体名非法（数组/对象既不是
@@ -144,6 +194,8 @@ def _group_items(items, rdir=None):
         # 毁掉整张图（与 curves/badcase 的容错口径一致）。
         if not (isinstance(d, dict) and isinstance(d.get("variant"), str)
                 and d["variant"]):
+            continue
+        if variant_scope is not None and d["variant"] not in variant_scope:
             continue
         tagged = _is_tagged(fp)
         m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
@@ -153,6 +205,8 @@ def _group_items(items, rdir=None):
         except TypeError:
             # 外部/旧格式 JSON 的 seed 可能是数组/对象：按缺种子信息处理。
             seed = None
+        if not _seed_in_scope(seed, seed_scope):
+            continue
         groups.setdefault(d["variant"], []).append((seed, d, tagged))
     out = {}
     for v, items_v in groups.items():
@@ -335,9 +389,12 @@ def fig_latency(rdir):
     variants = d.get("variants")
     if not isinstance(variants, dict):
         return False
+    variant_scope, _ = _run_scope(rdir)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
     prefill_bs = None
     for v, e in variants.items():
+        if variant_scope is not None and v not in variant_scope:
+            continue
         if not isinstance(e, dict):
             continue
         prefill = e.get("prefill_ms")
@@ -662,6 +719,7 @@ def _load_train_logs(train_root, rdir=None):
     """
     series = {}
     expected = _expected_tagged(rdir) if rdir else None
+    variant_scope, seed_scope = _run_scope(rdir) if rdir else (None, None)
     paths = (sorted(glob.glob(os.path.join(train_root, "*", "train_log.jsonl")))
              + sorted(glob.glob(os.path.join(
                  train_root, "*", "seed*", "train_log.jsonl"))))
@@ -670,6 +728,13 @@ def _load_train_logs(train_root, rdir=None):
         # 目录结构 .../<variant>/[seed<s>/]train_log.jsonl
         tagged = parts[-2].startswith("seed")
         variant = parts[-3] if tagged else parts[-2]
+        if variant_scope is not None and variant not in variant_scope:
+            continue
+        if tagged:
+            m = re.search(r"seed(\d+)$", parts[-2])
+            seed = int(m.group(1)) if m else None
+            if not _seed_in_scope(seed, seed_scope):
+                continue
         recs = []
         try:
             with open(path, "r", encoding="utf-8") as f:
