@@ -14,10 +14,12 @@
     lega_conc_only:  g = sigmoid(a*c + d)                          （全因子消融：仅集中度项 B）
     lega_len_only :  g = sigmoid(b*log n + d)                      （全因子消融：仅长度项 C）
 
-全因子消融矩阵（无=standard, A=查询, B=集中度, C=长度）：
-    无   -> standard         A    -> qgate          B   -> lega_conc_only
+全因子消融矩阵（门控内 2^3：无=gate_only, A=查询, B=集中度, C=长度）：
+    无   -> gate_only        A    -> qgate          B   -> lega_conc_only
     C    -> lega_len_only    A+B  -> lega_no_len    A+C -> lega_no_conc
     B+C  -> lega_no_query    A+B+C-> lega
+standard 是全因子范围外的无门控基线（用于“LEGA vs 标准注意力”的整体对比），
+不能当作 2^3 的 none 格，否则组件主效应会混入“加不加输出门”。
 去一法（leave-one-out）：Full=lega, Full-A=lega_no_query,
 Full-B=lega_no_conc, Full-C=lega_no_len。两套消融均被实现，可互相印证。
 

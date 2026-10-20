@@ -2459,3 +2459,19 @@ def test_registration_paths_tolerate_malformed_hypotheses_and_status():
                                      ["lega"]) == {}
     assert cross_variant_badcase_map({"lega": [1]}, ["lega"]) == {}
     print("  [ok] 预注册路径：畸形 hypotheses/status/slot 安全降级")
+
+
+def test_factorial_none_cell_is_within_gate_control():
+    """2^3 的 none 格必须是 gate_only：standard 无门会混入额外因子。"""
+    from run_all import CONTROL_CELLS, FACTORIAL_CELLS, LOO_CELLS
+    cells = dict(FACTORIAL_CELLS)
+    assert cells["无 A/B/C（有门）"] == "gate_only", cells
+    variants = [v for _, v in FACTORIAL_CELLS]
+    assert "standard" not in variants, variants
+    assert len(set(variants)) == 8 and set(variants) == {
+        "gate_only", "qgate", "lega_conc_only", "lega_len_only",
+        "lega_no_len", "lega_no_conc", "lega_no_query", "lega"}, variants
+    assert [v for _, v in CONTROL_CELLS] == ["standard"]
+    assert [v for _, v in LOO_CELLS] == [
+        "lega", "lega_no_query", "lega_no_conc", "lega_no_len"]
+    print("  [ok] 全因子 none=gate_only，standard 仅作范围外无门基线")

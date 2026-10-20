@@ -53,7 +53,7 @@ where $p_j$ are the causal attention weights, $n$ is the number of real tokens r
 | `lega_len_only` | $g=\sigma(b\log n+d)$ | Factorial: length term only (C) |
 
 **Ablation completeness**: with query=A, concentration=B, length=C, both the full
-factorial (none/`standard`, A/`qgate`, B/`lega_conc_only`, C/`lega_len_only`,
+factorial within the gated family (none/`gate_only`, A/`qgate`, B/`lega_conc_only`, C/`lega_len_only`,
 AB/`lega_no_len`, AC/`lega_no_conc`, BC/`lega_no_query`, ABC/`lega`) and the
 leave-one-out set (Full/Full−A/Full−B/Full−C) are implemented. A `gate_only`
 control (learnable bias only, no A/B/C) isolates the effect of adding a gate from

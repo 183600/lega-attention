@@ -54,10 +54,11 @@ $$
 | `lega_len_only` | $g=\sigma(b\log n+d)$ | 全因子：仅长度项（C） |
 
 **消融完整性**：设查询项=A、集中度项=B、长度项=C，则
-全因子 8 格（无/`standard`、A/`qgate`、B/`lega_conc_only`、C/`lega_len_only`、
-AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、ABC/`lega`）与
-去一法（Full/Full−A/Full−B/Full−C）全部实现；另设 `gate_only`（仅门控偏置、
-无 A/B/C）作为门控对照，避免把“加门”本身误算成 A/B/C 的贡献。
+全因子 8 格（门控内 2^3：无/`gate_only`、A/`qgate`、B/`lega_conc_only`、
+C/`lega_len_only`、AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、
+ABC/`lega`）与去一法（Full/Full−A/Full−B/Full−C）全部实现；无门的
+`standard` 作为全因子范围外的外部基线（用于“LEGA vs 标准注意力”），
+不当作 2^3 的 none 格，避免把“加门”本身误算成 A/B/C 的贡献。
 汇总表会自动列出矩阵并标注缺失组合。组件是否有用不靠“组合跑全”自证：
 汇总表基于 Holm 校正后的显著配对检验逐一判定 A/B/C（去一法：Full−X 显著变差；
 全因子增量：X vs `gate_only` 显著变好），主指标按预注册：A/B 用 PPL、C 用 RULER；

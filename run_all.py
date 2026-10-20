@@ -89,9 +89,11 @@ GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
                       "lega_no_query", "lega_conc_only", "lega_len_only")
 
 # 全因子消融矩阵（A=查询项 w·q, B=集中度证据 c=log(n*max_j p_j), C=长度项 b*log n）。
-# standard 表示无门控“无”格；三组件两两与全部组合均对应一个独立变体。
+# 2^3 设计必须固定其余结构：8 个格子全部带输出门，none 格是 gate_only
+# （只有门偏置 d），而不是无门的 standard。否则 A/B/C 的“主效应”会混入
+# “加不加门”这一额外因子，表格与交互检验（同样以 gate_only 为基准）也不一致。
 FACTORIAL_CELLS = (
-    ("无（无门）", "standard"),
+    ("无 A/B/C（有门）", "gate_only"),
     ("A 查询", "qgate"),
     ("B 集中度", "lega_conc_only"),
     ("C 长度", "lega_len_only"),
@@ -100,11 +102,11 @@ FACTORIAL_CELLS = (
     ("B+C", "lega_no_query"),
     ("A+B+C", "lega"),
 )
-# 只含门控偏置 d、不含 A/B/C 的对照：把“门本身”与“证据项”解耦。
-# 组件“加入 X”的对照必须是 X-only vs gate_only，而不是 vs 无门的 standard
+# 全因子范围外的无门控基线：用于 H1（LEGA vs 标准注意力）等整体对比。
+# 组件“加入 X”的受控对照是 X-only vs gate_only，不是 vs standard
 # （后者把输出门的存在也混进了 A/B/C 效应）。
 CONTROL_CELLS = (
-    ("门控偏置（无 A/B/C）", "gate_only"),
+    ("无门控基线（全因子范围外）", "standard"),
 )
 # 去一法（leave-one-out）：Full 及各去掉一个组件的结果。
 LOO_CELLS = (
@@ -3750,19 +3752,24 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"{fmt_stat_cell(r, 'ruler_avg')} |")
         else:
             md.append(f"| {name} | {v}（未运行） | - | - |")
-    if not factorial_missing and not control_missing:
+    if not factorial_missing and not loo_missing and not control_missing:
         md.append("")
-        md.append("全因子组合覆盖 8/8、去一法覆盖完整、gate_only 对照已运行；"
-                  "但组合覆盖只是必要条件，组件是否有用须以下方统计证据为准。"
-                  "gate_only 只含可学习门偏置 d，是“有门但无 A/B/C”的对照："
-                  "standard vs gate_only 度量门本身，X-only vs gate_only 才是"
-                  "组件 X 的受控效应。")
-    elif not factorial_missing and control_missing:
+        md.append("全因子（门控内 2^3，none=`gate_only`）覆盖 8/8、去一法覆盖完整、"
+                  "无门控 `standard` 外部基线已运行；但组合覆盖只是必要条件，"
+                  "组件是否有用须以下方统计证据为准。`gate_only` 只含可学习门偏置 d，"
+                  "是“有门但无 A/B/C”的对照：standard vs gate_only 度量门本身，"
+                  "X-only vs gate_only 才是组件 X 的受控效应。")
+    elif not factorial_missing and not loo_missing:
         md.append("")
-        md.append("⚠ 全因子 8/8 完整，但缺少 gate_only 对照：X-only vs standard "
-                  "会把“输出门本身”的效应算进组件收益，组件结论不完整；"
-                  "请补跑 `gate_only` 后重跑汇总。")
-    elif not loo_missing and not factorial_missing:
+        md.append("全因子（门控内 2^3）8/8、去一法完整；⚠ 缺少无门控 `standard` "
+                  "外部基线：H1（LEGA vs 标准注意力）无法估计。组件 A/B/C 的判定"
+                  "不依赖 standard，仍以 `gate_only` 为受控对照。")
+    elif not factorial_missing:
+        md.append("")
+        md.append("⚠ 全因子（门控内 2^3）覆盖 8/8，但去一法缺失组合："
+                  + "、".join(f"{n}({v})" for n, v in loo_missing)
+                  + "；Full−X 的组件结论不完整。")
+    elif not loo_missing:
         md.append("")
         md.append("⚠ 已覆盖去一法（Full/Full−A/Full−B/Full−C），但全因子缺失组合："
                   + "、".join(f"{n}({v})" for n, v in factorial_missing)
@@ -3773,7 +3780,8 @@ def build_summary(results_dir: str, audit: dict = None,
                   + "、".join(f"{n}({v})" for n, v in factorial_missing)
                   + "；去一法缺失 "
                   + "、".join(f"{n}({v})" for n, v in loo_missing)
-                  + ("；gate_only 对照缺失 " + "、".join(v for _, v in control_missing)
+                  + ("；无门控 standard 外部基线缺失 "
+                     + "、".join(v for _, v in control_missing)
                      if control_missing else "")
                   + "。仅凭部分组合无法支撑“每个组件都有用”，请补齐后重跑。")
 
@@ -3803,13 +3811,13 @@ def build_summary(results_dir: str, audit: dict = None,
     if not comp:
         md.append("")
         md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
-    elif (not unsupported and not factorial_missing and not control_missing
+    elif (not unsupported and not factorial_missing and not loo_missing
           and not inconsistent):
         md.append("")
         md.append("✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均在预注册主指标上"
                   "有 Holm 校正后的显著证据，去一法与全因子两套消融一致，"
-                  "且全因子 8/8、gate_only 对照完整。")
-    elif (not unsupported and not factorial_missing and not control_missing):
+                  "且门控内全因子 8/8、去一法完整。")
+    elif (not unsupported and not factorial_missing and not loo_missing):
         md.append("")
         md.append("✅ 统计证据支持各组件有用，但仅部分组件同时得到两套消融支持："
                   + "、".join(inconsistent)
@@ -3826,9 +3834,14 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append("⚠ 全因子缺失组合："
                       + "、".join(f"{n}({v})" for n, v in factorial_missing)
                       + "，组件单独贡献的覆盖不完整。")
-        if control_missing:
-            md.append("⚠ 缺少 gate_only 对照，组件“加入 X”的效应仍混有门本身；"
-                      "不能宣称组件各自有用。")
+        if loo_missing:
+            md.append("⚠ 去一法缺失："
+                      + "、".join(f"{n}({v})" for n, v in loo_missing)
+                      + "，Full−X 的组件结论不完整。")
+    if control_missing:
+        md.append("")
+        md.append("⚠ 缺少无门控 `standard` 外部基线：H1（LEGA vs 标准注意力）"
+                  "无法估计；这不影响门控内 A/B/C 的受控判定。")
     stopped_comp = _as_text_list((audit or {}).get("early_stop_runs"))
     if stopped_comp:
         md.append("")
