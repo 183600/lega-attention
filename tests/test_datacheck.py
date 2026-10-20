@@ -362,6 +362,21 @@ def test_decontaminate_diagnoses_val_test_overlap_without_rewriting():
     print("  [ok] val↔test 长行重叠被统计/告警，但两侧数据不被改写")
 
 
+def test_leakage_alerts_flags_normalized_only_val_test_overlap():
+    """仅空白归一化后才相等的 val/test 长行也必须告警，不能只统计。"""
+    out = leakage_alerts(
+        None, None,
+        {"val_test_overlap_long_lines": 0,
+         "val_test_overlap_normalized_long_lines": 1},
+        None, None, None)
+    hits = [a for a in out if a["code"] == "eval_splits_overlap"]
+    assert len(hits) == 1
+    assert hits[0]["level"] == "warning"
+    assert "精确 0 条" in hits[0]["message"]
+    assert "共 1 条" in hits[0]["message"]
+    print("  [ok] val↔test 仅归一化重复时也触发告警")
+
+
 def test_critical_split_alerts_filters_actionable_violations():
     report = {"alerts": [
         {"level": "warning", "code": "split_shuffled", "message": "x"},

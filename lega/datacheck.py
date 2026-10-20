@@ -968,11 +968,12 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     n_eval_dup = _count(dup.get("val_test_overlap_long_lines"))
     n_eval_dup_norm = _count(
         dup.get("val_test_overlap_normalized_long_lines"))
-    if n_eval_dup:
+    if n_eval_dup or n_eval_dup_norm:
         add("warning", "eval_splits_overlap",
-            f"val 与 test 有 {n_eval_dup} 条长行重复（空白归一化后 "
-            f"{n_eval_dup_norm} 条）：两侧均保持尘封未改写，但 val 选型会"
-            "部分预演 test，最终 test 指标的独立性下降，须核查/重建划分")
+            f"val 与 test 有长行重复：精确 {n_eval_dup} 条、空白归一化后共 "
+            f"{n_eval_dup_norm} 条（含精确重复）：两侧均保持尘封未改写，但 "
+            "val 选型会部分预演 test，最终 test 指标的独立性下降，"
+            "须核查/重建划分")
     for split in ("val", "test"):
         n_dup = _count(dup.get(f"{split}_intra_split_duplicate_lines"))
         if n_dup:
