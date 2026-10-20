@@ -125,28 +125,38 @@ def predict_logreg(model: Dict, X: np.ndarray) -> np.ndarray:
     return _sigmoid(X @ np.asarray(model["coef"], dtype=np.float64) + intercept)
 
 
+def _float_or_nan(v) -> float:
+    """外部/旧格式记录的单列取值：缺失或非数值一律按缺失（NaN）处理。"""
+    if v is None:
+        return float("nan")
+    try:
+        return float(v)
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
+
+
 def _column_values(records: Sequence[Dict], name: str) -> np.ndarray:
-    """单列特征取值（缺失为 NaN）；语义与旧逐记录实现逐位一致。"""
+    """单列特征取值（缺失/非数值为 NaN）；语义与旧逐记录实现一致。"""
     if name == "log_maxp":
-        return np.asarray([
-            math.log(max(float(mp), _MAXP_FLOOR)) if (mp := r.get("max_p")) is not None
-            else float("nan") for r in records], dtype=np.float64)
+        vals = []
+        for r in records:
+            mp = _float_or_nan(r.get("max_p"))
+            vals.append(math.log(max(mp, _MAXP_FLOOR))
+                        if not math.isnan(mp) else float("nan"))
+        return np.asarray(vals, dtype=np.float64)
     if name == "log_n":
-        return np.asarray([
-            float(ln) if (ln := r.get("log_n")) is not None else float("nan")
-            for r in records], dtype=np.float64)
+        return np.asarray([_float_or_nan(r.get("log_n")) for r in records],
+                          dtype=np.float64)
     if name == "qterm":
-        return np.asarray([
-            float(q) if (q := r.get("qterm")) is not None else float("nan")
-            for r in records], dtype=np.float64)
+        return np.asarray([_float_or_nan(r.get("qterm")) for r in records],
+                          dtype=np.float64)
     raise ValueError(f"未知特征: {name}")
 
 
 def _hit_values(records: Sequence[Dict]) -> np.ndarray:
-    """hit 列（缺失为 NaN）；非 0/1 值在有效性判定中被整体剔除。"""
-    return np.asarray([
-        float(h) if (h := r.get("hit")) is not None else float("nan")
-        for r in records], dtype=np.float64)
+    """hit 列（缺失/非数值为 NaN）；非 0/1 值在有效性判定中被整体剔除。"""
+    return np.asarray([_float_or_nan(r.get("hit")) for r in records],
+                      dtype=np.float64)
 
 
 def _features(records: Sequence[Dict], names: Sequence[str], cache: dict = None):

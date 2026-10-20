@@ -815,6 +815,10 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     items: Dict[str, Dict] = {}
     for v in variants:
         for c in per_variant_cases[v]:
+            # 外部/旧格式 JSON 的列表可能混入 null/标量：跳过坏记录，否则
+            # case_key 的 .get 会中断整份跨变体对照（与 analyze_* 同口径）。
+            if not isinstance(c, dict):
+                continue
             # 每个变体对同一 key 的记录各不相同（预测/归因依赖该变体自身输出），
             # 必须逐变体保存，不能只留一个代表样本——否则相对参照的新增/改对
             # 会拿别的变体的记录去归因，类别统计与个案展示都会张冠李戴。

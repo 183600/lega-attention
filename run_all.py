@@ -576,12 +576,20 @@ def _stat(values) -> dict:
     n 只计有限值，与 mean_std 的口径一致：NaN/Inf 不参与统计也不虚增
     样本量（否则会显示“n=5”但均值实际只来自 4 个种子）。
     """
-    vals = [v for v in values if v is not None]
+    vals = []
+    for v in values:
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(f):
+            vals.append(f)
     m, s = mean_std(vals)
     if m is None:
         return None
-    return {"mean": m, "std": s,
-            "n": sum(1 for v in vals if math.isfinite(float(v)))}
+    return {"mean": m, "std": s, "n": len(vals)}
 
 
 def _ppl_of(d):
@@ -596,7 +604,7 @@ def _ppl_of(d):
         return None
     try:
         return float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -628,7 +636,7 @@ def _eval_scalar(key):
             return None
         try:
             v = float(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         return v if math.isfinite(v) else None
     return get
@@ -641,8 +649,16 @@ def _ruler_task_means(d):
         if task.startswith("_") or not isinstance(by_ctx, dict) or not by_ctx:
             continue
         metric = "recall" if task == "fwe" else "em"
-        vals = [m[metric] for m in by_ctx.values()
-                if isinstance(m, dict) and m.get(metric) is not None]
+        vals = []
+        for m in by_ctx.values():
+            if not isinstance(m, dict) or m.get(metric) is None:
+                continue
+            try:
+                v = float(m[metric])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(v):
+                vals.append(v)
         if vals:
             out[task] = float(sum(vals) / len(vals))
     return out
@@ -668,7 +684,7 @@ def _ruler_min_cell_n(d):
                 continue
             try:
                 ns.append(int(cell["n"]))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
     return min(ns) if ns else None
 
@@ -1229,12 +1245,33 @@ def _render_registration_integrity(integrity: dict,
     return lines
 
 
+def _as_dict(v) -> dict:
+    """外部/旧格式 JSON 的嵌套对象：非 dict 统一按空对象处理。"""
+    return v if isinstance(v, dict) else {}
+
+
+def _as_dict_list(v) -> list:
+    """只保留列表中的对象元素，供外部 JSON 的告警/访问记录使用。"""
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _as_text_list(v) -> list:
+    return [str(x) for x in v] if isinstance(v, list) else []
+
+
+def _int_or_zero(v) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _fmt_rate(x) -> str:
     if x is None:
         return "-"
     try:
         return f"{float(x):.3%}"
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "-"
 
 
@@ -1244,7 +1281,7 @@ def _fmt4(x) -> str:
         return "-"
     try:
         return f"{float(x):.4f}"
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "-"
 
 
@@ -1298,7 +1335,7 @@ def _eval_matches_window_spec(ev: dict, wspec: dict) -> bool:
     窗口数截断）、val_windows=评测 split 的可用窗口数。任一项缺失/不同即
     视为未对齐（历史产物、ctx/iters 被覆盖等情况），回退全 split 参考。
     """
-    if not wspec:
+    if not isinstance(ev, dict) or not isinstance(wspec, dict) or not wspec:
         return False
     try:
         return (int(ev.get("eval_ctx")) == int(wspec.get("ctx"))
@@ -1336,7 +1373,10 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     # 合法 JSON 但非对象（如数组）按不可用处理。
     if not isinstance(ng, dict):
         return {"error": "ngram_baseline.json 不是 JSON 对象"}
-    ppl_map = ng.get("ppl") or {}
+    ppl_map = ng.get("ppl")
+    if ppl_map is not None and not isinstance(ppl_map, dict):
+        return {"error": "ngram_baseline.json 的 ppl 不是 JSON 对象"}
+    ppl_map = ppl_map or {}
     ref_name = next((k for k in ("bigram", "unigram")
                      if ppl_map.get(k) is not None), None)
     if ref_name is None:
@@ -1345,8 +1385,10 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         ref_ppl_full = float(ppl_map[ref_name])
     except (TypeError, ValueError):
         return {"error": "ngram PPL 非数值"}
-    wm_map = ng.get("ppl_window_matched") or {}
-    wspec = ng.get("window_spec") or {}
+    wm_map = ng.get("ppl_window_matched")
+    wm_map = wm_map if isinstance(wm_map, dict) else {}
+    wspec = ng.get("window_spec")
+    wspec = wspec if isinstance(wspec, dict) else {}
     ng_split = ng.get("split")
     # 第一遍：收集逐种子 PPL 与该 run 是否与窗口规格逐字段一致。
     staged, incomparable = [], []
@@ -1675,19 +1717,23 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         except (OSError, ValueError):
             ngram = None
     if ngram:
-        uni = ((ngram.get("ppl") or {}).get("unigram"))
-        bi = ((ngram.get("ppl") or {}).get("bigram"))
+        ppl_map = ngram.get("ppl")
+        ppl_map = ppl_map if isinstance(ppl_map, dict) else {}
+        uni = ppl_map.get("unigram")
+        bi = ppl_map.get("bigram")
         split = ngram.get("split")
         lines.append(
             f"- 简单统计基线（train 拟合、{split} 评测，无梯度、无调参空间）："
             f"一元平滑 PPL={_fmt_scalar_maybe(uni)}、"
             f"二元平滑 PPL={_fmt_scalar_maybe(bi)}"
-            f"（训练 token {int(ngram.get('train_tokens') or 0):,}、"
-            f"评测 token {int(ngram.get('eval_tokens') or 0):,}、"
+            f"（训练 token {_int_or_zero(ngram.get('train_tokens')):,}、"
+            f"评测 token {_int_or_zero(ngram.get('eval_tokens')):,}、"
             f"词表 {ngram.get('vocab_size')}）。主科学对比仍是神经变体之间；"
             "该基线只回答“绝对难度有多高、神经模型是否显著优于统计基线”。")
-        wm = ngram.get("ppl_window_matched") or {}
-        wspec = ngram.get("window_spec") or {}
+        wm = ngram.get("ppl_window_matched")
+        wm = wm if isinstance(wm, dict) else {}
+        wspec = ngram.get("window_spec")
+        wspec = wspec if isinstance(wspec, dict) else {}
         # 只有比较表确实采用了逐位置对齐参考（全部 run 的窗口规格一致）时，
         # 这些数字才真的打在“神经评测实际使用的窗口 token”上；一旦回退到全
         # split 参考（历史产物/规格不符），同样的数字只是按声明规格算出的
@@ -1701,7 +1747,7 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"上）：在神经评测实际使用的窗口目标 token 上"
                 f"（ctx={wspec.get('ctx')}、iters={wspec.get('iters')}、"
                 f"n_eval={wspec.get('n_eval')}、"
-                f"共 {int(wspec.get('n_tokens') or 0):,} 个评分 token），"
+                f"共 {_int_or_zero(wspec.get('n_tokens')):,} 个评分 token），"
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
                 f"（与全 split 口径同一选定 α）。")
@@ -1709,7 +1755,7 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             lines.append(
                 f"- 窗口规格参考值（按 n-gram 侧声明规格 ctx={wspec.get('ctx')}、"
                 f"iters={wspec.get('iters')}、n_eval={wspec.get('n_eval')}、"
-                f"共 {int(wspec.get('n_tokens') or 0):,} 个评分 token）："
+                f"共 {_int_or_zero(wspec.get('n_tokens')):,} 个评分 token）："
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
                 f"（与全 split 口径同一选定 α）。⚠ 本次神经评测未全部满足该"
@@ -1894,7 +1940,7 @@ def _fmt_scalar_maybe(x) -> str:
         return "-"
     try:
         return f"{float(x):.3f}"
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return str(x)
 
 
@@ -1956,28 +2002,45 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
     return diag
 
 
+def _num_or_none(v):
+    """JSON 数值安全转换：缺失/非数值/非有限值统一返回 None。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def _eff_cell(entry, key, ctx):
     """latency.json 变体条目里的结构与运行时字段（flops 取 total，mem 取量测值）。"""
-    if not entry:
+    if not isinstance(entry, dict):
         return None
-    eff = entry.get("efficiency") or {}
+    eff = entry.get("efficiency")
+    eff = eff if isinstance(eff, dict) else {}
     if key == "flops":
-        cell = (eff.get("flops_per_tok") or {}).get(str(ctx))
-        return cell.get("total_flops_per_tok") if cell else None
+        by_ctx = eff.get("flops_per_tok")
+        if not isinstance(by_ctx, dict):
+            return None
+        cell = by_ctx.get(str(ctx))
+        return (_num_or_none(cell.get("total_flops_per_tok"))
+                if isinstance(cell, dict) else None)
     if key == "mem":
-        return (eff.get("peak_mem_mb_prefill") or {}).get(str(ctx))
+        by_ctx = eff.get("peak_mem_mb_prefill")
+        return (_num_or_none(by_ctx.get(str(ctx)))
+                if isinstance(by_ctx, dict) else None)
     if key == "params":
-        return eff.get("n_params") or entry.get("n_params")
+        return _num_or_none(eff.get("n_params") or entry.get("n_params"))
     if key == "params_mb":
-        return eff.get("params_mb")
+        return _num_or_none(eff.get("params_mb"))
     return None
 
 
 def _rel_pct(base, cand):
     """cand 相对 base 的百分比变化；任一缺失或 base=0 时返回 None。"""
-    if base is None or cand is None:
-        return None
-    if base == 0:
+    base, cand = _num_or_none(base), _num_or_none(cand)
+    if base is None or cand is None or base == 0:
         return None
     return (cand - base) / abs(base) * 100.0
 
@@ -1988,19 +2051,17 @@ def _lat_noise_pct(entry, metric, ctx, bs="1"):
     spread_pct=(p90-p10)/median，由 lega.latency 逐次计时给出。旧格式
     latency.json 没有该字段时返回 None（按无噪声信息处理）。
     """
-    if not entry:
+    if not isinstance(entry, dict):
         return None
     key = ("prefill_ms_spread_pct" if metric == "prefill"
            else "decode_ms_spread_pct")
-    cell = (entry.get(key) or {}).get(str(ctx))
+    by_ctx = entry.get(key)
+    if not isinstance(by_ctx, dict):
+        return None
+    cell = by_ctx.get(str(ctx))
     if metric == "prefill":
-        cell = (cell or {}).get(str(bs))
-    if cell is None:
-        return None
-    try:
-        return float(cell)
-    except (TypeError, ValueError):
-        return None
+        cell = cell.get(str(bs)) if isinstance(cell, dict) else None
+    return _num_or_none(cell)
 
 
 def _noise_floor_pct(base_noise, cand_noise):
@@ -2113,6 +2174,8 @@ def build_summary(results_dir: str, audit: dict = None,
     preloaded（可选）为 {results 下结果文件路径: 已解析 JSON} 缓存：坏案例
     阶段已解析过的 eval/ruler 文件在此共用同一份结果。
     """
+    audit = audit if isinstance(audit, dict) else None
+    data_report = data_report if isinstance(data_report, dict) else None
 
     def load(p):
         if preloaded and p in preloaded:
@@ -2183,21 +2246,40 @@ def build_summary(results_dir: str, audit: dict = None,
         lat = {}
     lat_variants = lat.get("variants")
     lat_variants = lat_variants if isinstance(lat_variants, dict) else {}
-    lat_entries = {v: lat_variants.get(v) for v in variants}
+    lat_entries = {v: (lat_variants.get(v)
+                       if isinstance(lat_variants.get(v), dict) else None)
+                   for v in variants}
+
+    def _lat_metric_at(e, key, ctx):
+        if not isinstance(e, dict) or ctx is None:
+            return None
+        by_ctx = e.get(key)
+        if not isinstance(by_ctx, dict):
+            return None
+        return by_ctx.get(str(ctx))
 
     def _prefill_at(e, ctx):
-        if not e or ctx is None:
-            return None
-        return (e.get("prefill_ms") or {}).get(str(ctx), {}).get("1")
+        cell = _lat_metric_at(e, "prefill_ms", ctx)
+        return cell.get("1") if isinstance(cell, dict) else None
 
     common_ctxs = None
     for v in variants:
         e = lat_entries.get(v)
-        if not e:
+        if not isinstance(e, dict):
             continue
-        usable = {int(c) for c, by_bs in (e.get("prefill_ms") or {}).items()
-                  if isinstance(by_bs, dict) and by_bs.get("1") is not None
-                  and (e.get("decode_ms_per_tok") or {}).get(c) is not None}
+        prefill = e.get("prefill_ms")
+        decode = e.get("decode_ms_per_tok")
+        if not isinstance(prefill, dict) or not isinstance(decode, dict):
+            continue
+        usable = set()
+        for c, by_bs in prefill.items():
+            if (not isinstance(by_bs, dict) or by_bs.get("1") is None
+                    or decode.get(c) is None):
+                continue
+            try:
+                usable.add(int(c))
+            except (TypeError, ValueError, OverflowError):
+                continue
         common_ctxs = usable if common_ctxs is None else (common_ctxs & usable)
     common_ctx = max(common_ctxs) if common_ctxs else None
 
@@ -2290,15 +2372,16 @@ def build_summary(results_dir: str, audit: dict = None,
         # 运行时指标（取全部变体的最大公共 ctx、batch=1）；不受种子影响，测一次
         e = lat_entries.get(v)
         if e and common_ctx is not None:
-            ckey = str(common_ctx)
-            row["prefill_ms"] = (e.get("prefill_ms") or {}).get(ckey, {}).get("1")
-            row["decode_ms_per_tok"] = (e.get("decode_ms_per_tok") or {}).get(ckey)
-            row["decode_prefill_ctx"] = (e.get("decode_prefill_ctx") or {}).get(ckey)
+            row["prefill_ms"] = _prefill_at(e, common_ctx)
+            row["decode_ms_per_tok"] = _lat_metric_at(
+                e, "decode_ms_per_tok", common_ctx)
+            row["decode_prefill_ctx"] = _lat_metric_at(
+                e, "decode_prefill_ctx", common_ctx)
             row["latency_ctx"] = common_ctx
         rows.append(row)
 
     # 运行时基线：优先取 standard_sdpa，缺失时退回显式 standard。
-    lat_all = lat.get("variants") or {}
+    lat_all = lat_variants
     base_ms, base_name = None, None
     for cand in ("standard_sdpa", "standard"):
         if _prefill_at(lat_all.get(cand), common_ctx) is not None:
@@ -2504,17 +2587,18 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
     if audit:
+        exempt_keys = _as_text_list(audit.get("exempt_keys"))
+        stopped = _as_text_list(audit.get("early_stop_runs"))
         if audit.get("ok"):
             if audit.get("checked"):
                 md.append(f"- ✅ 通过：{audit['checked']} 个 run 的优化器、学习率、"
                           f"训练步数、数据顺序等受控设置逐项一致；逐 run 仅 "
-                          f"`{'`, `'.join(audit['exempt_keys'])}` 不同。")
+                          f"`{'`, `'.join(exempt_keys)}` 不同。")
             else:
                 md.append("- ⚠ 未检查受控变量：没有 run 可用于核对"
                           "（全部缺少 config_used.json），不能据此声称一致性。")
             if audit.get("meta_checked"):
                 digest = audit.get("expected_data_digest")
-                stopped = audit.get("early_stop_runs") or []
                 md.append(f"- ✅ 训练溯源一致：{audit['meta_checked']} 个 run 的"
                           f"数据指纹、代码提交、配置 SHA-256、计划训练步数"
                           f"逐项一致"
@@ -2522,36 +2606,38 @@ def build_summary(results_dir: str, audit: dict = None,
                              if stopped else "")
                           + (f"（数据指纹 `{digest}`，并与本次流水线数据比对）"
                              if digest else "。"))
-            if audit.get("early_stop_runs"):
+            if stopped:
                 md.append(
-                    f"- ⏹ 早停启用：{len(audit['early_stop_runs'])} 个 run 未跑满"
-                    f"计划步数（{', '.join(audit['early_stop_runs'][:8])}"
-                    + (" …" if len(audit["early_stop_runs"]) > 8 else "")
+                    f"- ⏹ 早停启用：{len(stopped)} 个 run 未跑满"
+                    f"计划步数（{', '.join(stopped[:8])}"
+                    + (" …" if len(stopped) > 8 else "")
                     + "）：实际步数可因验证曲线不同而不同（早停的定义），"
                     "受控变量按计划步数核对；逐 run 实际步数与 tokens_seen "
                     "见各 eval.json。")
         else:
             md.append(f"- ❌ 未通过：{audit.get('mismatches') or audit}")
-        if audit.get("missing_configs"):
-            md.append(f"- ⚠ 缺少配置文件的 run：{', '.join(audit['missing_configs'][:8])}"
-                      + (" …" if len(audit["missing_configs"]) > 8 else ""))
-        if audit.get("missing_evals"):
+        missing_configs = _as_text_list(audit.get("missing_configs"))
+        if missing_configs:
+            md.append(f"- ⚠ 缺少配置文件的 run：{', '.join(missing_configs[:8])}"
+                      + (" …" if len(missing_configs) > 8 else ""))
+        missing_evals = _as_text_list(audit.get("missing_evals"))
+        if missing_evals:
             md.append(f"- ⚠ 缺少 eval.json、无法核对数据/代码/训练步数的 run："
-                      f"{', '.join(audit['missing_evals'][:8])}"
-                      + (" …" if len(audit["missing_evals"]) > 8 else ""))
+                      f"{', '.join(missing_evals[:8])}"
+                      + (" …" if len(missing_evals) > 8 else ""))
     else:
         md.append("- ⚠ 未执行（直接调用 build_summary 或缺少 out 目录）。")
 
     # --- 数据协议与防泄漏自检（由 lega.data.prepare_bins 生成 data_report.json）
     md += ["", "## 数据协议与防泄漏自检", ""]
     if data_report:
-        proto = data_report.get("protocol") or {}
+        proto = _as_dict(data_report.get("protocol"))
         md.append(
             f"- 协议：先划分后预处理={proto.get('split_first_then_preprocess')}、"
             f"拟合统计只来自 {proto.get('fit_on')}、"
             f"划分时打乱={proto.get('shuffle_at_split_time')}；"
             "训练阶段 batch 级随机采样（shuffle）不构成泄露。")
-        sp = data_report.get("split_protocol") or {}
+        sp = _as_dict(data_report.get("split_protocol"))
         if sp:
             md.append(f"- 划分方式：{sp.get('mode', '-')}；"
                       f"顺序 {sp.get('order', '-')}；"
@@ -2566,20 +2652,20 @@ def build_summary(results_dir: str, audit: dict = None,
                           f"文档跨切点={cross if cross is not None else '-'}"
                           + ("（⚠ 群组跨 split，见告警 "
                              "split_documents_cross_cut）" if cross else ""))
-        tok = data_report.get("tokenizer") or {}
-        unk = tok.get("unk_rate") or {}
+        tok = _as_dict(data_report.get("tokenizer"))
+        unk = _as_dict(tok.get("unk_rate"))
         unk_s = "、".join(f"{k}={_fmt_rate(v)}" for k, v in unk.items())
         md.append(f"- 分词器：{tok.get('kind')}（vocab={tok.get('vocab_size')}，"
                   f"拟合集={tok.get('fit_on')}）；OOV 字符率：{unk_s or 'N/A'}"
                   "（未知字符映射 <unk>，val/test 不参与词表拟合）")
-        splits = data_report.get("splits") or {}
+        splits = _as_dict(data_report.get("splits"))
         md.append("- token 流硬校验：" + "；".join(
-            f"{k} {int(v.get('tokens', 0)):,} tokens"
-            f"（id∈[{v.get('min_id')},{v.get('max_id')}]，"
-            f"NaN={v.get('nan')}，Inf={v.get('inf')}）"
+            f"{k} {_int_or_zero(_as_dict(v).get('tokens')):,} tokens"
+            f"（id∈[{_as_dict(v).get('min_id')},{_as_dict(v).get('max_id')}]，"
+            f"NaN={_as_dict(v).get('nan')}，Inf={_as_dict(v).get('inf')}）"
             for k, v in splits.items()))
-        dup = data_report.get("duplicates") or {}
-        cont = data_report.get("contamination") or {}
+        dup = _as_dict(data_report.get("duplicates"))
+        cont = _as_dict(data_report.get("contamination"))
         md.append(
             f"- 去污染：与 val/test 重复的训练长行移除 "
             f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"
@@ -2587,37 +2673,37 @@ def build_summary(results_dir: str, audit: dict = None,
             f"{dup.get('train_intra_split_duplicate_lines_removed', '-')} 行"
             f"（保留首次出现）；val↔test 长行重叠 "
             f"{dup.get('val_test_overlap_long_lines', '-')} 条；"
-            f"采样 {cont.get('train_val', {}).get('n', '-')}-gram 重叠率 "
-            f"val={_fmt_rate((cont.get('train_val') or {}).get('overlap_rate'))}、"
-            f"test={_fmt_rate((cont.get('train_test') or {}).get('overlap_rate'))}、"
-            f"val↔test={_fmt_rate((cont.get('val_test') or {}).get('overlap_rate'))}"
+            f"采样 {_as_dict(cont.get('train_val')).get('n', '-')}-gram 重叠率 "
+            f"val={_fmt_rate(_as_dict(cont.get('train_val')).get('overlap_rate'))}、"
+            f"test={_fmt_rate(_as_dict(cont.get('train_test')).get('overlap_rate'))}、"
+            f"val↔test={_fmt_rate(_as_dict(cont.get('val_test')).get('overlap_rate'))}"
             "（采样筛查下界，>0 需人工核查）")
-        dist = data_report.get("distribution_shift") or {}
-        dv = dist.get("val_vs_train") or {}
-        dt = dist.get("test_vs_train") or {}
-        dvt = dist.get("test_vs_val") or {}
+        dist = _as_dict(data_report.get("distribution_shift"))
+        dv = _as_dict(dist.get("val_vs_train"))
+        dt = _as_dict(dist.get("test_vs_train"))
+        dvt = _as_dict(dist.get("test_vs_val"))
         md.append(
             f"- 分布漂移（一元 token，采样估计）：val−train TV={_fmt4(dv.get('tv'))}、"
             f"JS={_fmt4(dv.get('js_bits'))} bit；test−train TV={_fmt4(dt.get('tv'))}、"
             f"JS={_fmt4(dt.get('js_bits'))} bit；test−val TV={_fmt4(dvt.get('tv'))}、"
             f"JS={_fmt4(dvt.get('js_bits'))} bit；test OOV token 率="
             f"{_fmt_rate(dt.get('eval_oov_token_rate'))}")
-        san = data_report.get("sanitization") or {}
-        noise = sum(int((san.get(s) or {}).get("replacement_char_replaced_with_space", 0))
-                    for s in san)
-        ctrl = sum(int((san.get(s) or {}).get("control_chars_deleted", 0))
-                   for s in san)
+        san = _as_dict(data_report.get("sanitization"))
+        noise = sum(_int_or_zero(_as_dict(san.get(s)).get(
+            "replacement_char_replaced_with_space")) for s in san)
+        ctrl = sum(_int_or_zero(_as_dict(san.get(s)).get(
+            "control_chars_deleted")) for s in san)
         md.append(f"- 文本清洗（标签噪声）：U+FFFD 替换 {noise:,} 处、"
                   f"非法控制符删除 {ctrl:,} 处；清洗为逐字符确定性规则，"
                   "不依赖跨样本统计量。")
-        ts = data_report.get("text_stats") or {}
+        ts = _as_dict(data_report.get("text_stats"))
         if ts:
             md.append("- 行长度异常检查：" + "；".join(
-                f"{k} 行数={int(v.get('lines') or 0):,}、"
-                f"最长行={int(v.get('line_chars_max') or 0):,} 字符、"
-                f"超长行(>10万字符)={int(v.get('lines_gt_huge_threshold') or 0)}"
+                f"{k} 行数={_int_or_zero(_as_dict(v).get('lines')):,}、"
+                f"最长行={_int_or_zero(_as_dict(v).get('line_chars_max')):,} 字符、"
+                f"超长行(>10万字符)={_int_or_zero(_as_dict(v).get('lines_gt_huge_threshold'))}"
                 for k, v in ts.items()))
-        alerts = data_report.get("alerts") or []
+        alerts = _as_dict_list(data_report.get("alerts"))
         if alerts:
             n_warn = sum(1 for a in alerts if a.get("level") == "warning")
             shown = "；".join(f"[{a.get('code')}] {a.get('message')}"
@@ -2628,11 +2714,13 @@ def build_summary(results_dir: str, audit: dict = None,
         else:
             md.append("- 自检告警：无（全部指标在 alert_thresholds 阈值内；"
                       "阈值是复核触发线而非显著性检验）")
-        ta = data_report.get("test_access") or {}
+        ta = _as_dict(data_report.get("test_access"))
         if ta:
-            warn = ("" if not ta.get("checkpoints_evaluated_multiple_times")
+            repeated = _as_text_list(
+                ta.get("checkpoints_evaluated_multiple_times"))
+            warn = ("" if not repeated
                     else "；⚠ 存在被重复评测的 checkpoint："
-                         + "、".join(ta["checkpoints_evaluated_multiple_times"][:4]))
+                         + "、".join(repeated[:4]))
             md.append(f"- 测试集尘封账本：累计 test 评测 {ta.get('evaluations', 0)} 次、"
                       f"不同 checkpoint {ta.get('distinct_checkpoints', 0)} 个"
                       f"{warn}。测试集只用于最终评估；据此调参即视为泄露。")
@@ -3268,8 +3356,8 @@ def build_summary(results_dir: str, audit: dict = None,
                           if isinstance(lat_variants.get(n), dict)), None)
     if common_ctx is not None and lat_base_name:
         base_e = lat_variants[lat_base_name]
-        base_prefill = (base_e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1")
-        base_decode = (base_e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
+        base_prefill = _prefill_at(base_e, common_ctx)
+        base_decode = _lat_metric_at(base_e, "decode_ms_per_tok", common_ctx)
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
         md.append(f"基线={lat_base_name}（公共 ctx={common_ctx}、batch=1）。增幅="
@@ -3369,9 +3457,8 @@ def build_summary(results_dir: str, audit: dict = None,
                                 else None)
             ruler_p_adj = rt.get("p_adj") if rt else None
             n_ruler = rt.get("n") if rt else None
-            pre_delta = _rel_pct(base_prefill,
-                                 (e.get("prefill_ms") or {}).get(str(common_ctx), {}).get("1"))
-            dec_v = (e.get("decode_ms_per_tok") or {}).get(str(common_ctx))
+            pre_delta = _rel_pct(base_prefill, _prefill_at(e, common_ctx))
+            dec_v = _lat_metric_at(e, "decode_ms_per_tok", common_ctx)
             dec_delta = _rel_pct(base_decode, dec_v)
             tr_v = _train_step_ms(v)
             tr_delta = _rel_pct(base_train_ms, tr_v)

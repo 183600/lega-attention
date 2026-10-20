@@ -126,6 +126,30 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
     print("  [ok] snapshot_train_run 最终指标 + 曲线/配置/checkpoint 哈希")
 
 
+def test_snapshot_train_run_degrades_on_non_dict_eval():
+    """eval.json 顶层为数组/标量时不能崩溃，其余产物哈希仍应正常记录。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "lega")
+        os.makedirs(out)
+        with open(os.path.join(out, "model_best.pt"), "wb") as f:
+            f.write(b"fake-ckpt")
+        for bad in ([1, 2], "text", 3, None):
+            with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
+                json.dump(bad, f)
+            snap = snapshot_train_run("lega", 7, out)
+            assert "result" not in snap
+            assert "model_best.pt" in snap["files"]
+        # 非字符串 ckpt 字段同样按不可用候选跳过，而不是 TypeError
+        with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"ckpt": 123, "ckpt_sha256": "e" * 64}, f)
+        snap = snapshot_train_run("lega", 7, out)
+        assert len(snap["files"]["model_best.pt"]["sha256"]) == 64
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] snapshot_train_run：非对象 eval.json/非法 ckpt 字段安全降级")
+
+
 def test_experiment_record_embeds_resolved_hyperparameters():
     """台账必须自含超参数：config 文件被改写/删除后仍可还原实际配置。"""
     rec = build_experiment_record(

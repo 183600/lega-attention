@@ -96,6 +96,12 @@ def test_load_train_peak_mem_propagates_and_degrades_safely():
             json.dump({"train_peak_mem_mb": "n/a"}, f)
         assert load_train_peak_mem_mb(tmp) is None
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_peak_mem_mb": float("inf")}, f)
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_peak_mem_mb": 10 ** 400}, f)
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             f.write("{broken")
         assert load_train_peak_mem_mb(tmp) is None
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
@@ -120,6 +126,9 @@ def test_load_train_coverage_propagates_and_degrades_safely():
         # 旧格式/非法值/损坏/结构异常 → 安全降级，不阻塞评测
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"epochs_seen": float("inf"), "train_tokens": "x"}, f)
+        assert load_train_coverage(tmp) == {}
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"epochs_seen": 10 ** 400}, f)
         assert load_train_coverage(tmp) == {}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             f.write("{broken")

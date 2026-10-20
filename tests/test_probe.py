@@ -12,8 +12,9 @@ import random
 import shutil
 import tempfile
 
-from lega.probe import (DECISION_THRESHOLD, FEATURE_SETS, _group_folds,
-                        fit_logreg, linear_probe, predict_logreg)
+from lega.probe import (DECISION_THRESHOLD, FEATURE_SETS, _column_values,
+                        _group_folds, _hit_values, fit_logreg, linear_probe,
+                        predict_logreg)
 from run_all import (linear_probe_baseline_comparison, _render_baseline_sections)
 
 
@@ -245,6 +246,26 @@ def test_linear_probe_tolerates_missing_or_mixed_example_ids():
     assert rep["primary"] is not None and rep["folds"] >= 2
     assert rep["feature_sets"][rep["primary"]]["oof"] is not None
     print("  [ok] example 缺失/类型混杂：不崩溃且分组可用")
+
+
+def test_linear_probe_tolerates_non_numeric_columns():
+    """非数值 max_p/log_n/qterm/hit 按缺失处理，不能中断探针。"""
+    recs = [{"max_p": "bad", "log_n": "bad", "qterm": "bad", "hit": "bad"},
+            {"max_p": 0.5, "log_n": 4.0, "qterm": 0.0, "hit": 1.0}]
+    for col, name in ((_column_values(recs, "log_maxp"), "max_p"),
+                      (_column_values(recs, "log_n"), "log_n"),
+                      (_column_values(recs, "qterm"), "qterm")):
+        assert math.isnan(col[0]) and math.isfinite(col[1]), name
+    assert math.isnan(_hit_values(recs)[0])
+    synth = _synth_records(n_examples=8, per_example=4, seed=4)
+    synth[0]["qterm"] = "n/a"
+    synth[1]["log_n"] = [1]
+    synth[2]["hit"] = {"bad": 1}
+    rep = linear_probe(synth, folds=3, seed=0)
+    assert rep["n_valid"] == len(synth) - 2
+    assert rep["primary"] == "conc_len"
+    assert rep["feature_sets"]["conc_len"]["oof"] is not None
+    print("  [ok] 线性探针：非数值列按缺失剔除，不崩溃")
 
 
 def test_linear_probe_skips_non_dict_records():

@@ -61,7 +61,11 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str,
     if not has_sources:
         # 不可判定放行，并把 no_sources 如实返回给调用方（用于提示与缓存判定）
         return True, None, True
-    if int(meta.get("cache_schema", 0)) != CACHE_SCHEMA:
+    try:
+        cache_schema = int(meta.get("cache_schema", 0))
+    except (TypeError, ValueError, OverflowError):
+        cache_schema = -1
+    if cache_schema != CACHE_SCHEMA:
         return (False, "缓存由旧版数据管线生成（无版本/源哈希记录），"
                        "重建以应用最新清洗与去污染协议", False)
     recorded = meta.get("source_sha256")

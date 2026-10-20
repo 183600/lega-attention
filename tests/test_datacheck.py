@@ -665,6 +665,22 @@ def test_prepare_bins_rebuilds_on_non_object_meta_cache():
     print("  [ok] 非对象 meta 缓存：按缺失处理并重建")
 
 
+def test_prepare_bins_rebuilds_on_malformed_cache_schema():
+    """meta.json 结构合法但 cache_schema 类型异常时按旧缓存重建，而非崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        _write_min_splits(d)
+        prepare_bins(d, kind="char", force=True)
+        for bad in (None, [3], {"v": 3}, "not-a-version"):
+            with open(os.path.join(d, "meta.json"), encoding="utf-8") as f:
+                saved = json.load(f)
+            saved["cache_schema"] = bad
+            with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+                json.dump(saved, f)
+            meta = prepare_bins(d, kind="char", force=False)
+            assert meta["cache_schema"] == 3 and meta["train_tokens"] > 0
+    print("  [ok] 异常 cache_schema：按旧缓存重建而非崩溃")
+
+
 def test_load_meta_rejects_broken_json_with_clear_error():
     """meta.json 损坏或顶层非对象时必须抛 ValueError，而非深层 TypeError。"""
     with tempfile.TemporaryDirectory() as d:

@@ -508,6 +508,18 @@ def test_malformed_records_do_not_crash_attribution():
     print("  [ok] 坏样本字段类型异常的归因（fwe/缺 task/非字符串字段）")
 
 
+def test_cross_variant_skips_non_dict_records():
+    """跨变体列表混入 null/标量时必须跳过坏记录，不能让整份对照崩溃。"""
+    a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+    cross = cross_variant_analysis(
+        {"standard": [None, a, "bad"], "lega": [5, a, None]},
+        reference="standard")
+    assert cross["n_unique_failed_items"] == 1
+    assert cross["per_variant"]["lega"]["n_failed"] == 1
+    json.dumps(cross, ensure_ascii=False, allow_nan=False)
+    print("  [ok] 跨变体对照：非对象样本跳过")
+
+
 def test_main_keeps_zero_error_variants_for_cross_variant():
     """badcase.main 汇总时必须把 "badcases": []（已评测且零错误）传给跨变体
     对照，使零错误变体参与共识判定。"""

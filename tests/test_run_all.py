@@ -20,6 +20,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _enrich_paired, _lat_noise_pct, _neural_eval_window_spec,
                       _noise_floor_pct,
                       _ppl_of, _rel_pct, _render_baseline_sections,
+                      _ruler_min_cell_n,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
                       apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
@@ -1715,6 +1716,131 @@ def test_ngram_baseline_rejects_non_dict_json():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] ngram_baseline.json 非对象：返回 error/跳过")
+
+
+def test_ngram_nested_malformed_fields_do_not_crash_summary():
+    """ngram_baseline.json 的嵌套字段是列表时按不可用/回退处理，不能崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 20.0, "val_loss": 2.0,
+            "split": "val"})
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "ppl": [1], "ppl_window_matched": [1],
+            "window_spec": [1], "train_tokens": 100, "eval_tokens": 50,
+            "vocab_size": 20})
+        bad = ngram_baseline_comparison({}, tmp)
+        assert bad.get("error") and "ppl" in bad["error"], bad
+        out = build_summary(tmp)
+        assert "简单基线对比不可用" in out["markdown"]
+        # ppl 合法但窗口参考/规格是列表：必须回退全 split 并正常渲染
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "ppl": {"bigram": 100.0},
+            "ppl_window_matched": [1], "window_spec": [1],
+            "train_tokens": 100, "eval_tokens": 50, "vocab_size": 20})
+        out2 = build_summary(tmp)
+        assert "未使用逐位置对齐参考" in out2["markdown"]
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        cmp_doc = sig["ngram_comparison"]
+        assert cmp_doc["reference_source"] == "full_split"
+        assert "window_spec" in (cmp_doc["fallback_reason"] or "")
+        # token 计数/规格计数非数值时只影响展示，不能让整份汇总崩溃
+        for patch in ({"train_tokens": [1]}, {"eval_tokens": "x"},
+                      {"ppl_window_matched": {"bigram": 90.0},
+                       "window_spec": {"ctx": 8, "iters": 2, "n_eval": 2,
+                                       "n_tokens": [1]}}):
+            doc = {"split": "val", "ppl": {"bigram": 100.0}}
+            doc.update(patch)
+            _write_json(os.path.join(tmp, "ngram_baseline.json"), doc)
+            build_summary(tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram_baseline.json 嵌套字段非对象：报错/回退而非崩溃")
+
+
+def test_build_summary_tolerates_malformed_latency_nested_fields():
+    """latency.json 的变体条目/prefill 单元是列表时按缺失跳过，不能崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "n_params": 100, "split": "val"})
+        lat_path = os.path.join(tmp, "latency.json")
+        _write_json(lat_path, {"variants": {
+            "standard": [1], "lega": [1]}})
+        build_summary(tmp)
+        # 基线 standard_sdpa 自身嵌套字段畸形：prefill/efficiency/spread
+        # 都不能在运行时指标与权衡小节的读取路径上崩溃。
+        _write_json(lat_path, {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": 10.0}},
+                         "decode_ms_per_tok": {"256": 1.0}},
+            "lega": {"prefill_ms": {"256": {"1": 12.0}},
+                     "decode_ms_per_tok": {"256": 1.2}},
+            "standard_sdpa": {
+                "prefill_ms": [1], "decode_ms_per_tok": [1],
+                "efficiency": [1],
+                "prefill_ms_spread_pct": {"256": [1]},
+                "decode_ms_spread_pct": {"256": [1]}}}})
+        out = build_summary(tmp)
+        assert "涨点-增幅权衡" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] latency.json 嵌套字段非对象：缺失跳过而非崩溃")
+
+
+def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
+    """RULER n=Infinity 不得触发 OverflowError；非数值指标按缺失/跳过。"""
+    assert _ruler_min_cell_n({"results": {"niah": {
+        "256": {"n": float("inf"), "em": 1.0},
+        "512": {"n": 3, "em": "bad"}}}}) == 3
+    assert _ppl_of({"ppl": 10 ** 400}) is None
+    assert _stat([10 ** 400, "bad", float("nan"), 2.0]) == {
+        "mean": 2.0, "std": None, "n": 1}
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "ruler_standard_seed1.json"), {
+            "variant": "standard", "seed": 1, "split": "val",
+            "results": {"niah_synth": {
+                "256": {"n": float("inf"), "em": 1.0},
+                "512": {"n": 3, "em": "bad"}}}})
+        out = build_summary(tmp)
+        assert "standard" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] RULER n=Infinity/非数值指标：跳过而非崩溃")
+
+
+def test_build_summary_tolerates_malformed_data_report_and_audit():
+    """data_report/audit 嵌套字段畸形时按缺失渲染，不能毁掉整份汇总。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for report in (
+                {"protocol": [1]}, {"splits": [1]},
+                {"tokenizer": {"unk_rate": [1]}},
+                {"contamination": {"train_val": [1]}},
+                {"distribution_shift": {"val_vs_train": [1]}},
+                {"sanitization": [1]}, {"text_stats": [1]},
+                {"alerts": [1]},
+                {"test_access": [1]}, {"splits": {"val": [1]}}):
+            out = build_summary(tmp, data_report=report)
+            assert "数据协议与防泄漏自检" in out["markdown"]
+        out = build_summary(tmp, data_report={
+            "protocol": {"split_first_then_preprocess": True},
+            "splits": {"val": {"tokens": "x"}},
+            "sanitization": {"train": {"control_chars_deleted": "bad"}},
+            "text_stats": {"train": [1]},
+            "alerts": [1, {"level": "warning", "code": "c", "message": "m"}],
+            "test_access": {"checkpoints_evaluated_multiple_times": 1}})
+        assert "[c] m" in out["markdown"]
+        for audit in ([1], "bad", {"ok": True, "checked": 1,
+                                   "exempt_keys": [1],
+                                   "early_stop_runs": [1]}):
+            build_summary(tmp, audit=audit)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] data_report/audit 嵌套字段非对象：缺失降级而非崩溃")
 
 
 def test_tradeoff_prefers_sdpa_runtime_baseline():

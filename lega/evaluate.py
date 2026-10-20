@@ -151,10 +151,13 @@ def load_train_peak_mem_mb(run_dir: str):
     缺失/损坏返回 None。
     """
     v = _read_run_eval(run_dir).get("train_peak_mem_mb")
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
+    if v is None:
         return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return v if math.isfinite(v) else None
 
 
 def load_train_coverage(run_dir: str):
@@ -181,7 +184,7 @@ def load_train_coverage(run_dir: str):
             e = float(e)
             if math.isfinite(e):
                 out["epochs_seen"] = e
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
     return out
 

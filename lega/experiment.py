@@ -155,7 +155,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             if os.path.realpath(path) == os.path.realpath(best):
                 known[best] = str(sha)
                 break
-        except OSError:
+        except (OSError, TypeError, ValueError):
             continue
     rec = {"variant": variant, "seed": int(seed), "out_dir": out_dir,
            "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
@@ -164,7 +164,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
         # 超参数内嵌进台账条目：即使 config_used.json 之后被覆盖/删除，
         # 该 run 实际生效的配置仍可从台账还原
         rec["config_used"] = cfg_used
-    if ev:
+    if isinstance(ev, dict) and ev:
         rec["result"] = {k: ev.get(k) for k in (
             "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
             "early_stopped", "tokens_seen",
