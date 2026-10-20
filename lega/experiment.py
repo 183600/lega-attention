@@ -154,6 +154,11 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                                      r.get("runs"))
             if not (isinstance(variants, list) and isinstance(seeds, list)
                     and isinstance(runs, list)):
+                # 旧台账可能三者都没有（只核验生命周期）；但只要声明了其中
+                # 任一字段，缺字段/类型错误就是不可核对的覆盖声明，不能静默
+                # 跳过而让 completed 记录冒充完整。
+                if any(v is not None for v in (variants, seeds, runs)):
+                    run_issues.append("runs_malformed")
                 continue
             try:
                 expected = {(str(v), int(s)) for v in variants for s in seeds}

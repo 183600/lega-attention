@@ -303,6 +303,33 @@ def test_verify_ledger_completed_coverage_and_config_identity():
     print("  [ok] verify_ledger：completed 覆盖完整性 + 配置哈希改写")
 
 
+def test_verify_ledger_rejects_malformed_run_coverage_fields():
+    """声明了 variants/seeds 却缺 runs（或 runs 非列表）时必须报畸形，不能静默跳过。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        for i, runs in enumerate(("absent", "not-a-list", None)):
+            common = {"run_id": f"r{i}", "status": "started",
+                      "variants": ["lega"], "seeds": [7]}
+            append_record(path, common)
+            done = {"run_id": f"r{i}", "status": "completed",
+                    "variants": ["lega"], "seeds": [7]}
+            if runs != "absent":
+                done["runs"] = runs
+            append_record(path, done)
+        # 旧台账既无 variants/seeds 也无 runs：保留生命周期核验兼容性
+        append_record(path, {"run_id": "legacy", "status": "started"})
+        append_record(path, {"run_id": "legacy", "status": "completed"})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        for i in range(3):
+            assert "runs_malformed" in by_id[f"r{i}"]["issues"], by_id
+        assert "legacy" not in by_id
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：runs 缺失/非列表显式报畸形")
+
+
 def test_verify_ledger_lifecycle_and_artifact_hashes():
     tmp = tempfile.mkdtemp()
     try:
