@@ -165,11 +165,37 @@ def test_collect_worst_windows_gold_in_context_uses_full_window():
                                  n_worst=3, max_windows=32)
     for r in rows:
         w = int(r["window"])
-        full = tok.decode(val[w * 64:(w + 1) * 64].tolist())
-        gold = tok.decode([int(val[w * 64 + 64])])
+        toks = val[w * 64:(w + 1) * 64].tolist()
+        full = tok.decode(toks)
+        gold_id = int(val[w * 64 + 64])
+        gold = tok.decode([gold_id])
         assert r["context_tail"] == full[-160:]
         assert r["gold_in_context"] == (bool(gold) and gold in full), r
-    print("  [ok] 最差窗口 gold_in_context 按完整窗口判定")
+        # 出现次数/最后位置/到预测位的距离必须与完整窗口一致：报告里的
+        # "gold 距预测位 N tokens" 直接决定该看检索失败还是复制失败。
+        pos = [i for i, t in enumerate(toks) if t == gold_id]
+        assert r["gold_occurrences"] == len(pos), r
+        if pos:
+            assert r["gold_last_pos"] == pos[-1], r
+            assert r["gold_distance_tokens"] == 64 - pos[-1] - 1, r
+            assert r["gold_context_excerpt"], r
+        else:
+            assert r["gold_last_pos"] is None, r
+            assert r["gold_distance_tokens"] is None, r
+            assert r["gold_context_excerpt"] is None, r
+    # 构造一个 gold 只出现在窗口早段、尾部 160 字符看不到的样本：
+    # 摘录必须能让人复核“上下文里到底有没有证据”。
+    trend = np.tile(np.arange(len(tok.itos), dtype=np.uint16), 4)[:64]
+    val2 = np.concatenate([trend, np.array([0], dtype=np.uint16),
+                           trend, np.array([0], dtype=np.uint16)])
+    rows2 = collect_worst_windows(model, val2, ctx=64, device="cpu", tok=tok,
+                                  n_worst=2, max_windows=2)
+    for r in rows2:
+        if r["gold_in_context"]:
+            assert r["gold_context_excerpt"], r
+            assert r["gold_distance_tokens"] >= 0, r
+    print("  [ok] 最差窗口 gold_in_context 按完整窗口判定；"
+          "位置/距离/摘录可用于人工复核")
 
 
 def test_json_safe_eval_metrics_handles_nonfinite():

@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import statistics
 from collections import Counter
 from typing import Dict, List, Optional
 
@@ -621,6 +622,8 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
                                            else []) if isinstance(w, dict)]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
+    distances = [c.get("gold_distance_tokens") for c in cases
+                 if isinstance(c.get("gold_distance_tokens"), (int, float))]
     out = {
         "variant": variant,
         "n_windows": len(cases),
@@ -636,6 +639,10 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
                               / len(cases)) if cases else None,
         "gold_in_context_rate": (sum(1 for c in cases if c.get("gold_in_context"))
                                  / len(cases)) if cases else None,
+        # gold 距预测位的 token 距离（只在 gold 出现时定义）：区分“远处检索
+        # 失败”与“近处复制失败”，后者更像注意力/复制机制问题。
+        "median_gold_distance_tokens": (statistics.median(distances)
+                                        if distances else None),
         "mean_loss": _mean([c.get("loss") for c in cases]),
         "cases": cases,
     }
@@ -665,6 +672,17 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     lines.append(f"- 真实续写(gold): {c.get('gold_next')!r}"
                  + ("　（gold 在上下文中出现过）" if c.get("gold_in_context")
                     else "　（gold 未在上下文中出现）"))
+    pos = c.get("gold_last_pos")
+    dist = c.get("gold_distance_tokens")
+    if isinstance(pos, (int, float)) and isinstance(dist, (int, float)):
+        occ = c.get("gold_occurrences")
+        lines.append(f"- gold 位置: 窗口内第 {int(pos)} 个 token，距预测位 "
+                     f"{int(dist)} tokens"
+                     + (f"（共出现 {int(occ)} 次，取最后一次）"
+                        if isinstance(occ, (int, float)) and occ > 1 else ""))
+        snippet = c.get("gold_context_excerpt")
+        if snippet:
+            lines.append(f"- gold 附近上下文: …{snippet}…")
     cat = c.get("category")
     cat_s = WINDOW_CATEGORY_CN.get(cat, cat) if isinstance(cat, str) else "?"
     lines.append(f"- 归因: **{cat_s}** —— {c.get('explanation', '')}")
@@ -705,6 +723,9 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
         git5 = analysis.get("gold_in_top5_rate")
         if isinstance(git5, (int, float)):
             stats.append(f"gold 进入 top-5 的比例={git5:.0%}")
+        dist = analysis.get("median_gold_distance_tokens")
+        if isinstance(dist, (int, float)):
+            stats.append(f"gold 距预测位的中位距离={int(dist)} tokens")
         if stats:
             md += ["", "；".join(stats) + "。"]
         cases = analysis.get("cases")

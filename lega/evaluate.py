@@ -84,6 +84,21 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
         for r in range(len(chunk)):
             ctx_text = tok.decode(x_l[r])
             gold_txt = tok.decode([gold_l[r]])
+            # gold 在窗口中的所有出现位置（token 级精确匹配）。最差窗口的
+            # 上下文尾部只有 160 字符，若 gold 出现在更早位置，人工复核时
+            # 看不到证据句，无法区分“标注/构造问题”“检索失败”与“复制失败”。
+            # 这里把最后一次出现附近的原文一并落盘，并记录到末尾的距离。
+            gold_positions = [i for i, t in enumerate(x_l[r])
+                              if t == gold_l[r]]
+            gold_pos = gold_positions[-1] if gold_positions else None
+            gold_excerpt = None
+            if gold_pos is not None:
+                lo = max(0, gold_pos - 48)
+                hi = min(len(x_l[r]), gold_pos + 49)
+                gold_excerpt = tok.decode(x_l[r][lo:hi])
+                if len(gold_excerpt) > 240:
+                    gold_excerpt = gold_excerpt[:240] + "…"
+                gold_excerpt = gold_excerpt.replace("\n", " ⏎ ")
             rows.append({
                 "window": int(chunk[r]),
                 "split": str(split),
@@ -95,8 +110,13 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
                 # 按 token id 精确判定：字节级 BPE 下单 token decode 可能不是
                 # 完整字符（非 ASCII 时文本包含判定漏报），文本包含还会把
                 # 其他 token 内的子串误报为 gold 出现。
-                "gold_in_context": bool(gold_l[r] in x_l[r]),
+                "gold_in_context": bool(gold_positions),
                 "gold_next": gold_txt,
+                "gold_occurrences": len(gold_positions),
+                "gold_last_pos": (int(gold_pos) if gold_pos is not None else None),
+                "gold_distance_tokens": (int(len(x_l[r]) - gold_pos - 1)
+                                         if gold_pos is not None else None),
+                "gold_context_excerpt": gold_excerpt,
                 "pred_top5": [(tok.decode([i]), round(float(p), 4))
                               for p, i in zip(top_p_l[r], top_i_l[r])],
             })

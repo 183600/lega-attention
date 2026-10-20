@@ -237,6 +237,25 @@ def test_categorize_window_prefers_full_context_flag():
     print("  [ok] 最差窗口 gold_in_context：完整窗口布尔优先/旧格式尾部兜底")
 
 
+def test_format_window_case_shows_gold_location_and_context():
+    """gold 出现在早段时，报告要给出位置/距离/附近原文，便于区分检索失败
+    与复制失败；旧记录缺失这些字段时安全降级。"""
+    c = categorize_window({
+        "window": 1, "loss": 3.0, "gold_next": " blue",
+        "gold_in_context": True, "gold_occurrences": 2,
+        "gold_last_pos": 10, "gold_distance_tokens": 22,
+        "gold_context_excerpt": "a blue car parked",
+        "context_tail": "near the road", "pred_top5": [[" red", 0.9]]})
+    text = "\n".join(format_window_case(1, c))
+    assert "距预测位 22 tokens" in text, text
+    assert "共出现 2 次" in text and "a blue car parked" in text, text
+    # 旧格式没有位置字段：只保留原有的出现过/未出现提示，不伪造距离
+    old = categorize_window(_win(gold=" blue", tail="a blue car",
+                                 pred_top5=[[" red", 0.85]]))
+    assert "距预测位" not in "\n".join(format_window_case(2, old))
+    print("  [ok] 最差窗口报告展示 gold 位置/距离/附近上下文")
+
+
 def test_format_window_case_tolerates_null_loss():
     """loss 缺失/为 null 的窗口记录也必须能出报告行（外部/旧格式 JSON 容错）。"""
     c = categorize_window(_win(loss=None, pred_top5=[[" blue", 0.7]]))
