@@ -141,6 +141,84 @@ def _read_best_val_loss(trial_dir: str):
     return best, best_step, final, "train_log.jsonl(min)"
 
 
+def _manifest_identity(out_dir: str) -> dict:
+    """从 trial 的 run_manifest.json 提取可核对的种子/代码/数据身份。
+
+    trial 在独立子进程中训练；若只看父进程传入的 --seed，无法证明子进程
+    真的固定了该种子、用了同一份数据。manifest 是子进程自己写的证据，
+    这里只提取核对所需字段，缺失/畸形时显式 present=False。
+    """
+    path = os.path.join(out_dir, "run_manifest.json")
+    out = {"present": False, "seed": None, "seed_verified": None,
+           "config_sha256": None, "git_commit": None, "git_dirty": None,
+           "worktree_diff_sha256": None, "data_fingerprint": None}
+    if not os.path.exists(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            m = json.load(f)
+    except (OSError, ValueError):
+        return out
+    if not isinstance(m, dict):
+        return out
+    out["present"] = True
+    out["seed"] = m.get("seed")
+    out["config_sha256"] = m.get("config_sha256")
+    git = m.get("git")
+    git = git if isinstance(git, dict) else {}
+    out["git_commit"] = git.get("commit")
+    out["git_dirty"] = git.get("dirty")
+    worktree = m.get("worktree")
+    worktree = worktree if isinstance(worktree, dict) else {}
+    out["worktree_diff_sha256"] = worktree.get("diff_sha256")
+    data = m.get("data")
+    data = data if isinstance(data, dict) else {}
+    out["data_fingerprint"] = data.get("digest")
+    seed_report = m.get("seed_report")
+    seed_report = seed_report if isinstance(seed_report, dict) else {}
+    out["seed_verified"] = seed_report.get("seed_verified")
+    return out
+
+
+def _trial_identity_summary(trials) -> dict:
+    """汇总成功 trial 的 manifest 身份，检查是否用了同一份代码/数据。"""
+    manifests = [t.get("manifest") for t in trials
+                 if isinstance(t.get("manifest"), dict)
+                 and t["manifest"].get("present")]
+    datas = sorted({m.get("data_fingerprint") for m in manifests
+                    if m.get("data_fingerprint") is not None})
+    commits = sorted({m.get("git_commit") for m in manifests
+                      if m.get("git_commit") is not None})
+    seed_mismatches = []
+    for t in trials:
+        m = t.get("manifest")
+        if not isinstance(m, dict) or not m.get("present"):
+            continue
+        if m.get("seed") is not None and int(m["seed"]) != int(t.get("seed", -1)):
+            seed_mismatches.append({"lr": t.get("lr"),
+                                    "wd": t.get("weight_decay"),
+                                    "requested_seed": t.get("seed"),
+                                    "manifest_seed": m.get("seed")})
+    checked = bool(manifests)
+    consistent = None
+    if checked:
+        consistent = (len(datas) <= 1 and len(commits) <= 1
+                      and not seed_mismatches
+                      and all(m.get("seed_verified") is True
+                              for m in manifests))
+    return {
+        "checked": checked,
+        "n_with_manifest": len(manifests),
+        "data_fingerprints": datas,
+        "git_commits": commits,
+        "seed_mismatches": seed_mismatches,
+        "consistent": consistent,
+        "note": ("consistent=True 要求全部成功 trial 的 manifest 都证明种子"
+                 "已生效，且代码 commit/数据指纹一致；缺失 manifest 时为 "
+                 "None（未核对），不冒充通过。"),
+    }
+
+
 def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
               wd: float, steps: int, out_dir: str, device: str = "auto",
               timeout=None) -> dict:
@@ -186,11 +264,18 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
     if best is None:
         rec["error"] = "训练成功但未找到 val_loss（train_log.jsonl/eval.json 缺失）"
         return rec
+    manifest = _manifest_identity(out_dir)
     rec.update({
         "val_loss_best": best, "best_step": best_step,
         "val_loss_final": final,
         "val_ppl_best": math.exp(min(20.0, best)),
         "val_loss_source": source,
+        "manifest": manifest,
+        # 父进程请求的种子必须与子进程 manifest 一致且确认生效
+        "seed_identity_ok": bool(
+            manifest["present"] and manifest.get("seed_verified") is True
+            and manifest.get("seed") is not None
+            and int(manifest["seed"]) == int(seed)),
     })
     return rec
 
@@ -300,6 +385,21 @@ def tune(config: str, data_dir: str, out_dir: str,
         default_is_optimal = bool(
             same_as_default
             or gap >= -tolerance * abs(selected["val_loss_best_mean"]))
+    # 调优报告必须能回答“在哪个代码/数据版本上选出的超参数”。父进程
+    # 记录自身身份，逐 trial 则核对子进程 manifest，避免 trial 实际用了
+    # 另一份数据/代码（或种子根本没生效）却仍被当作同一实验。
+    from .repro import (data_fingerprint, git_info, runtime_info,
+                        sha256_file, worktree_state)
+    try:
+        data_digest = data_fingerprint(data_dir).get("digest")
+    except FileNotFoundError:
+        data_digest = None
+    git = git_info()
+    worktree = worktree_state()
+    trial_identity = _trial_identity_summary(trials)
+    if trial_identity["consistent"] is False:
+        print("[tuning] ⚠ 成功 trial 的 manifest 身份不一致："
+              f"{trial_identity}；不得把网格结果当作单一版本调优证据")
     report = {
         "variant": variant,
         "config": os.path.abspath(config),
@@ -326,6 +426,15 @@ def tune(config: str, data_dir: str, out_dir: str,
         "selected_minus_default_val_loss": gap,
         "default_is_optimal": default_is_optimal,
         "test_split_used": False,
+        # 调优结论的版本身份：代码 commit/工作区、数据指纹、配置内容、
+        # 运行环境，以及逐 trial manifest 的一致性核对结果。
+        "code_commit": git.get("commit"),
+        "code_dirty": git.get("dirty"),
+        "worktree_diff_sha256": worktree.get("diff_sha256"),
+        "data_fingerprint": data_digest,
+        "config_sha256": sha256_file(config),
+        "runtime": runtime_info(),
+        "trial_identity": trial_identity,
         "grid": grid_stats,
         "trials": trials,
     }

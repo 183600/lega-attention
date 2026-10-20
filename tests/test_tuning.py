@@ -65,6 +65,14 @@ def test_run_trial_injects_lr_and_weight_decay():
             with open(os.path.join(out_dir, "train_log.jsonl"), "w",
                       encoding="utf-8") as f:
                 f.write(json.dumps({"step": 10, "val_loss": 1.0}) + "\n")
+            with open(os.path.join(out_dir, "run_manifest.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"seed": 7,
+                           "seed_report": {"seed_verified": True},
+                           "git": {"commit": "c" * 40, "dirty": False},
+                           "worktree": {"diff_sha256": "d" * 64},
+                           "data": {"digest": "f" * 64},
+                           "config_sha256": "e" * 64}, f)
             return _Proc()
 
         with mock.patch("lega.tuning.subprocess.run", side_effect=fake_run):
@@ -80,6 +88,11 @@ def test_run_trial_injects_lr_and_weight_decay():
         assert seen["env"]["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
         assert rec["pythonhashseed"] == "7"
         assert os.path.exists(os.path.join(out_dir, "config_trial.json"))
+        # 子进程自己写的 manifest 才是种子/版本确实生效的证据
+        assert rec["manifest"]["present"] is True
+        assert rec["manifest"]["seed_verified"] is True
+        assert rec["manifest"]["data_fingerprint"] == "f" * 64
+        assert rec["seed_identity_ok"] is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] run_trial（lr/weight_decay 经 trial 配置注入训练命令）")
@@ -174,6 +187,49 @@ def test_tune_selects_grid_best_and_flags_default_not_optimal():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] tune（网格最优选择/默认近优判定/全失败报错）")
+
+
+def test_tune_embeds_provenance_and_checks_trial_manifests():
+    """报告必须记录代码/数据身份，并核对子进程 manifest 是否一致。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"lr": 6e-4, "weight_decay": 0.1, "steps": 10,
+                       "seed": 7}, f)
+        out = os.path.join(tmp, "tuning")
+
+        def fake(config, data_dir, variant, seed, lr, wd, steps, out_dir,
+                 **kwargs):
+            digest = "a" * 64 if lr == 3e-4 else "b" * 64
+            return {"lr": lr, "weight_decay": wd, "seed": seed,
+                    "steps": steps, "out_dir": out_dir, "returncode": 0,
+                    "val_loss_best": 1.0 if lr == 3e-4 else 1.1,
+                    "val_loss_final": 1.0, "best_step": steps,
+                    "val_loss_source": "train_log.jsonl(min)",
+                    "manifest": {"present": True, "seed": seed,
+                                 "seed_verified": True,
+                                 "git_commit": "c" * 40,
+                                 "data_fingerprint": digest}}
+
+        with mock.patch("lega.tuning.run_trial", side_effect=fake):
+            report = tune(cfg_path, tmp, out, lr_mults=[0.5, 2.0])
+        for key in ("code_commit", "code_dirty", "worktree_diff_sha256",
+                    "data_fingerprint", "config_sha256", "runtime"):
+            assert key in report, key
+        ident = report["trial_identity"]
+        assert ident["checked"] is True and ident["consistent"] is False
+        assert ident["data_fingerprints"] == ["a" * 64, "b" * 64]
+        assert report["test_split_used"] is False
+        # 全部 trial 缺 manifest → 未核对，不得冒充通过
+        with mock.patch("lega.tuning.run_trial", side_effect=_fake_trial(
+                {(6e-4, 0.1): 1.0, (3e-4, 0.1): 1.1, (1.2e-3, 0.1): 1.0})):
+            report2 = tune(cfg_path, tmp, out, lr_mults=[1.0])
+        assert report2["trial_identity"]["checked"] is False
+        assert report2["trial_identity"]["consistent"] is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] tune 报告内嵌 provenance 并核对 trial manifest 一致性")
 
 
 def test_parse_seeds_rejects_non_integer():
