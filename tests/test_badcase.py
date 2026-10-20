@@ -664,6 +664,23 @@ def test_main_picks_smallest_seed_per_variant_not_lexicographic_first():
     print("  [ok] badcase.main 按数值最小种子对齐跨变体对照")
 
 
+def test_label_errors_excluded_from_model_advice_denominator():
+    """标注/构造错误不是模型失败：深位比例与类别主导度都不能被它污染。"""
+    cases = ([_case(pred="1234567", ctx_nums=[], in_prompt=False, depth=0.9)] * 10
+             + [_case(pred="1234567", ctx_nums=["1234567"], depth=0.2)] * 3
+             + [_case(pred="5550001", ctx_nums=[], depth=0.2)] * 3)
+    ana = analyze_badcases(cases, variant="lega")
+    assert ana["label_errors"] == 10
+    # 非标注错误的 6 条都在 depth=0.2：深位比例必须是 0，而不是 10/16
+    assert ana["deep_position_fail_ratio"] == 0.0
+    # 误抄 3/6 达到主导阈值；用 3/16 会被稀释而漏报
+    assert any("误抄干扰值占模型错误 3/6" in r["trigger"]
+               for r in ana["recommendations"]), ana["recommendations"]
+    assert not any("位于 needle 深位" in r["trigger"]
+                   for r in ana["recommendations"])
+    print("  [ok] 标注错误从模型改进方向的分母中剔除")
+
+
 def test_ruler_improvement_synthesis():
     """归因不止于分类：主导错误模式必须转成带触发证据的改进方向。"""
     keys = {"axis", "priority", "trigger", "suggestion", "next_experiment"}

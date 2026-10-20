@@ -211,36 +211,41 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
             "先修评测构造/标注再谈模型：构造错误会同时污染 EM、机制分析与"
             "跨变体对照",
             "核查 RULER needle 插入与答案抽取逻辑，补 answer_in_prompt 断言后重跑"))
+    # 标注/构造错误不属于模型失败：类别主导度与深位难度的分母都要剔除，
+    # 否则大量标注错误会把真实的模型盲区稀释到阈值以下（或反过来把
+    # “深位失败”全算成数据错误的功劳）。
+    model_n = max(0, n - le)
     deep = ana.get("deep_position_fail_ratio")
-    if deep is not None and deep >= DEEP_FAIL_TOL and n >= MIN_PATTERN_CASES:
+    if (deep is not None and deep >= DEEP_FAIL_TOL
+            and model_n >= MIN_PATTERN_CASES):
         recs.append(_advice(
             "难度边界", "中", f"niah 失败中 {deep:.0%} 位于 needle 深位 (>0.75)",
             "失败由长程检索边界主导：平均 EM 会掩盖深位退化，应按 depth 分层报告",
             "增加深位训练样本/更长训练上下文；对门控变体检查深位处门控分布，"
             "确认长度项 b·log n 校准是否正确"))
     cd = counts.get("copy_distractor", 0)
-    if _share(cd, n) >= DOMINANT_SHARE:
+    if _share(cd, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "高",
-            f"误抄干扰值占错误 {cd}/{n}（检索到错误位置，不是没读到）",
+            f"误抄干扰值占模型错误 {cd}/{model_n}（检索到错误位置，不是没读到）",
             "定位失败：注意力落在同类干扰行/错误链上；先用机制分析确认"
             "（misleading_rate、P(hit|集中)）再改结构",
             "在失败样例上对比注意力落点；若属位置混淆，优先改位置编码或"
             "干扰项抑制，再考虑门控"))
     ha = counts.get("hallucinated", 0)
-    if _share(ha, n) >= DOMINANT_SHARE:
+    if _share(ha, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "高",
-            f"幻觉数字占错误 {ha}/{n}（输出上下文中不存在的值）",
+            f"幻觉数字占模型错误 {ha}/{model_n}（输出上下文中不存在的值）",
             "模型未 grounding 到上下文：检查训练/评测长度分布是否错配、"
             "是否存在长程复制的系统性衰减",
             "统计训练样本中长上下文与复制型任务占比；对门控变体比较 "
             "gate_mean 是否过低（该写入的信息被压制）"))
     na = counts.get("no_answer", 0)
-    if _share(na, n) >= DOMINANT_SHARE:
+    if _share(na, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "中",
-            f"无数值回答占错误 {na}/{n}（复读问题/提前停止）",
+            f"无数值回答占模型错误 {na}/{model_n}（复读问题/提前停止）",
             "先排除解码/格式问题再改模型，否则真实能力会被低估",
             "检查 prompt 模板与 max_new_tokens/停止条件；贪心解码复测确认"
             "输出格式"))
@@ -279,7 +284,8 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
     # 深度信息只在 niah 家族存在（vt meta.depth 是链深度而非位置）；给出
     # 深位（>0.75）失败占比用于判断"是样本极难，还是模型系统性盲区"
     with_depth = [c for c in cases if c.get("depth") is not None
-                  and str(c.get("task") or "").startswith("niah")]
+                  and str(c.get("task") or "").startswith("niah")
+                  and c.get("category") != "label_error"]
     deep_fail = sum(1 for c in with_depth if c["depth"] > 0.75)
     out = {
         "variant": variant,
