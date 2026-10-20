@@ -162,7 +162,7 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 continue
             try:
                 expected = {(str(v), int(s)) for v in variants for s in seeds}
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 run_issues.append("runs_expected_unparseable")
                 continue
             actual_list, malformed = [], 0
@@ -176,7 +176,7 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     continue
                 try:
                     actual_list.append((str(v), int(s)))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     malformed += 1
             actual = set(actual_list)
             if expected - actual:

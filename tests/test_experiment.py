@@ -366,3 +366,27 @@ def test_verify_ledger_lifecycle_and_artifact_hashes():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：悬挂/重复终态/无 started/产物哈希可发现")
+
+
+def test_verify_ledger_tolerates_nonfinite_seed_values():
+    """seeds/run.seed 为 JSON Infinity 时必须报畸形而不是让核验崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        append_record(path, {"run_id": "bad-expected", "status": "started",
+                             "variants": ["lega"], "seeds": [1, float("inf")]})
+        append_record(path, {"run_id": "bad-expected", "status": "completed",
+                             "variants": ["lega"], "seeds": [1, float("inf")],
+                             "runs": [{"variant": "lega", "seed": 1}]})
+        append_record(path, {"run_id": "bad-run", "status": "started",
+                             "variants": ["lega"], "seeds": [1]})
+        append_record(path, {"run_id": "bad-run", "status": "completed",
+                             "variants": ["lega"], "seeds": [1],
+                             "runs": [{"variant": "lega", "seed": float("inf")}]})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        assert "runs_expected_unparseable" in by_id["bad-expected"]["issues"]
+        assert "runs_malformed" in by_id["bad-run"]["issues"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：非有限种子显式报畸形，不崩溃")
