@@ -859,7 +859,12 @@ def _enrich_paired(res: dict, a, b) -> dict:
 
 
 def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> list:
-    """对每个 (候选, 参照) 在共同种子上做配对 t 检验（原始 p，未校正）。"""
+    """对每个 (候选, 参照) 在共同种子上做配对 t 检验（原始 p，未校正）。
+
+    PPL 的 eval.json 可能分别落在 val/test（旧产物或手工重评）上：跨 split
+    的“配对差”混入了评测集难度差异，不是同条件对照。此类种子整对剔除，
+    并在结果里记录剔除了多少对，避免静默得到虚假的显著性。
+    """
     out = []
     for cand, ref in pairs:
         if cand not in runs or ref not in runs:
@@ -868,10 +873,17 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         rm = _variant_seed_map(runs, ref)
         seeds = [s for s in _sorted_seeds(cm) if s in rm]
         a, b = [], []
+        split_skipped = 0
         for s in seeds:
             sa, sb = cm.get(s), rm.get(s)
             if not (isinstance(sa, dict) and isinstance(sb, dict)):
                 continue
+            if metric_name == "PPL":
+                ea = sa.get("eval") if isinstance(sa.get("eval"), dict) else {}
+                eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else {}
+                if ea.get("split", "val") != eb.get("split", "val"):
+                    split_skipped += 1
+                    continue
             va, vb = extractor(sa), extractor(sb)
             if va is None or vb is None:
                 continue
@@ -882,6 +894,8 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         res = paired_t_test(a, b)
         res.update({"candidate": cand, "reference": ref, "metric": metric_name,
                     "lower_is_better": bool(lower_better)})
+        if split_skipped:
+            res["excluded_split_mismatches"] = split_skipped
         out.append(_enrich_paired(res, a, b))
     return out
 

@@ -22,7 +22,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
                       _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
-                      _ppl_ci_rel_pct, _ppl_of, _probe_oof, _rel_pct,
+                      _paired_comparisons, _ppl_ci_rel_pct, _ppl_of,
+                      _probe_oof, _rel_pct,
                       _render_baseline_sections, _ruler_avg_micro,
                       _ruler_avg_of, _ruler_min_cell_n,
                       _ruler_task_means,
@@ -1248,6 +1249,29 @@ def test_build_summary_marks_early_stop_run():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 汇总页：早停标记 + 审计口径说明")
+
+
+def test_paired_ppl_skips_seeds_with_mismatched_eval_split():
+    """PPL 配对检验不能把 val 与 test 的种子配成一对：split 不同整对剔除。"""
+    def ev(ppl, split):
+        return {"eval": {"ppl": ppl, "split": split}}
+
+    runs = {
+        "lega": {7: ev(10.0, "val"), 8: ev(11.0, "test"),
+                 9: ev(12.0, "val")},
+        "standard": {7: ev(20.0, "val"), 8: ev(30.0, "val"),
+                     9: ev(25.0, "test")},
+    }
+    out = _paired_comparisons(
+        runs, [("lega", "standard")], "PPL",
+        lambda slot: _ppl_of(slot.get("eval")), lower_better=True)
+    assert len(out) == 1
+    t = out[0]
+    # 只有 seed7 的双方同为 val；seed8/9 的 split 错位被剔除
+    assert t["n"] == 1
+    assert abs(t["mean_diff"] - (10.0 - 20.0)) < 1e-12
+    assert t.get("excluded_split_mismatches") == 2
+    print("  [ok] PPL 配对：跨 eval split 的种子整对剔除")
 
 
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
