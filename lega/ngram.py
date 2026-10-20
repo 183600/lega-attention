@@ -1,16 +1,20 @@
-"""简单统计基线：一元/二元平滑 n-gram 的 held-out PPL。
+"""简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL。
 
 科研方法问题：没有简单基线时，“神经模型 PPL=xx”无法回答“数据本身
-有多难、复杂架构是否真的比无参数的统计模型更好”。本模块提供一个
-零训练、零调参空间（除平滑系数在验证集上选优）的 n-gram 基线：
+有多难、复杂架构是否真的比无参数的统计模型更好”；而一个故意没调好
+的弱基线（如只扫两档 α 的纯 bigram）会把“复杂模型更好”变成廉价结论。
+本模块提供零训练、选参只在验证集的 n-gram 基线：
 
   * 一元：P(w) = (c(w) + α) / (N + α·V)，即加 α 平滑
   * 二元：P(w_t | w_{t-1}) = (c(w_{t-1}, w_t) + α) / (c(w_{t-1}) + α·V)
+  * 插值二元：P = λ·P_bigram + (1−λ)·P_unigram；λ=1 时退化为二元模型，
+    因此“最强简单基线”永不低于纯二元（选择面包含它）
 
-平滑系数 α 只在**验证集**上选优（与神经模型的 checkpoint 选择同口径），
-再在指定 held-out split 上报告 PPL；选择记录完整落盘，供审阅者核对
-“没有偷偷用测试集调参”。测试集 split 需显式 `--allow_test` 并写入
-数据目录的访问账本（与 lega.evaluate 同一账本），保持尘封协议一致。
+α 与 λ 只在内层**验证集**上按 mean NLL 选优（与神经模型的 checkpoint
+选择同口径），并联合选择、最终报告 val 上最强的简单模型；选择记录完整
+落盘，供审阅者核对“没有偷偷用测试集调参”。测试集 split 需显式
+`--allow_test` 并写入数据目录的访问账本（与 lega.evaluate 同一账本），
+保持尘封协议一致。
 
 约定：训练统计只来自 `train.bin`；评测 split 内容绝不参与拟合或选参
 （split="val" 时 α 选择与报告同集，属轻微乐观，已在输出中显式注明）。
@@ -28,6 +32,9 @@ from .datacheck import append_test_access
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
 # “选平滑系数”变成又一次大规模调参。
 ALPHA_GRID = (0.01, 0.1, 1.0)
+# 插值 bigram 的权重网格：P = λ·P_addα(w|prev) + (1−λ)·P_addα(w)。
+# λ 只在 val 上选；与 add-α 的 α 联合扫描，避免“平滑弱所以基线弱”。
+INTERP_LAMBDA_GRID = (0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 1.0)
 
 
 # 训练流统计的分块粒度（token 数）：每块内升位并做块内 np.unique。
@@ -182,6 +189,52 @@ def ppl_bigram(eval_ids: np.ndarray, uni: np.ndarray, pair_keys: np.ndarray,
     return _bigram_ppl(c_pair, c_prev, n_tokens, alpha, vocab_size)
 
 
+def _interp_ppl_from_counts(cur_ids: np.ndarray, uni: np.ndarray,
+                            c_pair: np.ndarray, c_prev: np.ndarray,
+                            n_tokens: int, alpha_uni: float, alpha_bi: float,
+                            lam: float, vocab_size: int) -> dict:
+    """由“当前 token + 预计算上下文频次”给出插值 bigram 的 PPL。"""
+    if n_tokens <= 0:
+        return {"ppl": None, "mean_nll": None, "n_tokens": 0}
+    cur = np.asarray(cur_ids, dtype=np.int64)
+    vocab_size = int(vocab_size)
+    total = float(uni.sum())
+    p_uni = ((uni[cur] + alpha_uni) / (total + alpha_uni * vocab_size))
+    p_bi = ((c_pair + alpha_bi) / (c_prev + alpha_bi * vocab_size))
+    p = float(lam) * p_bi + (1.0 - float(lam)) * p_uni
+    mean_nll = float(-np.log(np.clip(p, 1e-300, None)).mean())
+    return {"ppl": float(math.exp(min(20.0, mean_nll))),
+            "mean_nll": mean_nll, "n_tokens": int(n_tokens),
+            "ppl_clamped": bool(mean_nll > 20.0)}
+
+
+def _interp_ppl_from_terms(eval_ids: np.ndarray, uni: np.ndarray,
+                           c_pair: np.ndarray, c_prev: np.ndarray,
+                           n_tokens: int, alpha_uni: float, alpha_bi: float,
+                           lam: float, vocab_size: int) -> dict:
+    """由预计算频次给出插值 bigram 的 PPL（λ 在 val 上选）。"""
+    # 评测 token 从第二个开始计分；与 _bigram_terms 的 c_pair/c_prev 对齐。
+    ids = np.asarray(eval_ids, dtype=np.int64)
+    cur = ids[1:1 + int(n_tokens)]
+    return _interp_ppl_from_counts(cur, uni, c_pair, c_prev, n_tokens,
+                                   alpha_uni, alpha_bi, lam, vocab_size)
+
+
+def ppl_interpolated_bigram(eval_ids: np.ndarray, uni: np.ndarray,
+                            pair_keys: np.ndarray, pair_counts: np.ndarray,
+                            alpha_uni: float, alpha_bi: float, lam: float,
+                            vocab_size: int) -> dict:
+    """插值 bigram：λ·P_addα(w|prev) + (1−λ)·P_addα(w)。
+
+    相比纯 add-α bigram，未出现过的上下文不再只回退到近似均匀分布，
+    而是回退到一元分布；这是仍属“简单统计基线”的更强版本。
+    """
+    c_pair, c_prev, n_tokens = _bigram_terms(eval_ids, uni, pair_keys,
+                                             pair_counts, vocab_size)
+    return _interp_ppl_from_terms(eval_ids, uni, c_pair, c_prev, n_tokens,
+                                  alpha_uni, alpha_bi, lam, vocab_size)
+
+
 def window_positions(n_tokens: int, ctx: int, iters: int):
     """神经评测窗口实际打分的 token 位置（与 train._val_eval_indices 同规则）。
 
@@ -219,9 +272,12 @@ def evaluate(data_dir: str, split: str = "val",
              window_spec: dict = None) -> dict:
     """拟合并评测 n-gram 基线，返回完整报告 dict（不写文件）。
 
-    选参协议：α 在 **val** 上选优（val 不存在或过短时报错），随后在
-    `split` 上按选定 α 报告；split == "val" 时选参与报告同集，报告中
-    以 `alpha_selected_on` 与 `selection_eval_same_split` 显式披露。
+    选参协议：α 与插值权重 λ 只在 **val** 上按 mean NLL 联合选优
+    （val 不存在或过短时报错），`selected_model` 取 val 上最强的简单
+    模型（unigram/bigram/interpolated_bigram）；随后在 `split` 上按
+    选定参数报告；split == "val" 时选参与报告同集，报告中以
+    `alpha_selected_on`、`selected_model_selected_on` 与
+    `selection_eval_same_split` 显式披露。
 
     window_spec（可选 {"ctx": int, "iters": int}）给出神经评测实际使用的
     窗口规格：此时额外计算 `ppl_window_matched`——只在 `window_positions`
@@ -230,6 +286,8 @@ def evaluate(data_dir: str, split: str = "val",
     """
     meta = load_meta(data_dir)
     vocab_size = int(meta["vocab_size"])
+    # 规范化候选网格：调用方可能传生成器；后面要在 uni/bi/插值三段重复扫描。
+    alphas = tuple(float(a) for a in alphas)
     # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数。
     train_ids = load_bin(data_dir, "train")
     if split == "test":
@@ -264,8 +322,47 @@ def evaluate(data_dir: str, split: str = "val",
             if best_nll is None or m["mean_nll"] < best_nll:
                 best_nll = m["mean_nll"]
                 best[order] = float(a)
+    # 插值 bigram：P = λ·P_addα(w|prev) + (1−λ)·P_addα(w)。λ 与两个 α
+    # 在 val 上联合选择（仍按 mean NLL）；这保证“神经 vs 简单基线”的
+    # 对照不会输给一个故意没调好的纯 bigram。ppl_by_lambda 记录每个 λ
+    # 的最优 α 组合，供审阅选择面是否平坦。
+    interp = None
+    interp_by_lambda = {}
+    if sel_terms[2] > 0:
+        for lam in INTERP_LAMBDA_GRID:
+            best_lam = None
+            for au in alphas:
+                for ab in alphas:
+                    m = _interp_ppl_from_terms(sel_ids, uni, *sel_terms, au, ab,
+                                               lam, vocab_size)
+                    if m["mean_nll"] is None:
+                        continue
+                    if (best_lam is None
+                            or m["mean_nll"] < best_lam["val_mean_nll"]):
+                        best_lam = {"lambda": float(lam),
+                                    "alpha_unigram": float(au),
+                                    "alpha_bigram": float(ab),
+                                    "val_mean_nll": m["mean_nll"]}
+            if best_lam is not None:
+                interp_by_lambda[str(lam)] = best_lam
+                if (interp is None
+                        or best_lam["val_mean_nll"] < interp["val_mean_nll"]):
+                    interp = best_lam
+    # 简单基线内部也按 val 选“最强模型”，而不是固定拿 bigram 当靶子。
+    val_mean_nll = {}
+    if best["unigram"] is not None:
+        val_mean_nll["unigram"] = ppl_unigram(
+            sel_ids, uni, best["unigram"])["mean_nll"]
+    if best["bigram"] is not None:
+        val_mean_nll["bigram"] = _bigram_ppl(
+            *sel_terms, best["bigram"], vocab_size)["mean_nll"]
+    if interp is not None:
+        val_mean_nll["interpolated_bigram"] = interp["val_mean_nll"]
+    usable = {k: v for k, v in val_mean_nll.items() if v is not None}
+    selected_model = min(usable, key=usable.get) if usable else None
     report = {
-        "baseline": "smoothed n-gram (add-α), no gradient training",
+        "baseline": ("smoothed n-gram (add-α unigram/bigram + val-tuned "
+                     "interpolation), no gradient training"),
         "split": split,
         "allow_test": bool(allow_test),
         "tokenizer": meta.get("tokenizer"),
@@ -273,8 +370,14 @@ def evaluate(data_dir: str, split: str = "val",
         "train_tokens": int(len(train_ids)),
         "eval_tokens": int(len(eval_ids)),
         "alpha_grid": [float(a) for a in alphas],
+        "interp_lambda_grid": [float(x) for x in INTERP_LAMBDA_GRID],
         "selected_alpha": best,
+        "selected_interpolated": interp,
+        "interpolated_by_lambda": interp_by_lambda,
+        "val_mean_nll": val_mean_nll,
+        "selected_model": selected_model,
         "alpha_selected_on": "val (mean NLL，与 model_best 选择同口径)",
+        "selected_model_selected_on": "val (mean NLL，与 model_best 选择同口径)",
         "selection_eval_same_split": bool(split == "val"),
         "ppl": {},
         "ppl_by_alpha": {},
@@ -284,19 +387,26 @@ def evaluate(data_dir: str, split: str = "val",
             "split": "test", "kind": "ngram_baseline",
             "ckpt": "ngram-baseline",
             "note": "简单统计基线评测（α 在 val 上选择）"})
-    for order in ("unigram", "bigram"):
-        a = best[order]
-        if a is None:
+    for order in ("unigram", "bigram", "interpolated_bigram"):
+        if order == "unigram":
+            a = best["unigram"]
+            m = ppl_unigram(eval_ids, uni, a) if a is not None else None
+        elif order == "bigram":
+            a = best["bigram"]
+            m = (_bigram_ppl(*eval_terms, a, vocab_size)
+                 if a is not None else None)
+        else:
+            m = (_interp_ppl_from_terms(
+                eval_ids, uni, *eval_terms, interp["alpha_unigram"],
+                interp["alpha_bigram"], interp["lambda"], vocab_size)
+                if interp is not None else None)
+        if m is None:
             report["ppl"][order] = None
             continue
-        if order == "unigram":
-            m = ppl_unigram(eval_ids, uni, a)
-        else:
-            m = _bigram_ppl(*eval_terms, a, vocab_size)
         report["ppl"][order] = m["ppl"]
-        # test 上只消费一次：仅报告 val 选定的 α，不额外扫网格
+        # test 上只消费一次：仅报告 val 选定的参数，不额外扫网格
         # （避免"一次评测"被多次读数的灰色空间）。
-        if split != "test":
+        if split != "test" and order in ("unigram", "bigram"):
             by_alpha = {}
             for a2 in alphas:
                 if order == "unigram":
@@ -330,21 +440,35 @@ def evaluate(data_dir: str, split: str = "val",
                 "positions": "每个窗口 s·ctx+1 .. s·ctx+ctx（0-based），"
                              "与 get_val_windows 的目标 token 集合逐位置一致",
                 "unigram": None, "bigram": None,
+                "interpolated_bigram": None,
             }
             pos = np.asarray(pos, dtype=np.int64)
-            for order in ("unigram", "bigram"):
-                a = best[order]
-                if a is None:
-                    continue
-                if order == "unigram":
-                    m = ppl_unigram(eval_ids[pos], uni, a)
+            for order in ("unigram", "bigram", "interpolated_bigram"):
+                if order in ("unigram", "bigram"):
+                    a = best[order]
+                    if a is None:
+                        continue
+                    if order == "unigram":
+                        m = ppl_unigram(eval_ids[pos], uni, a)
+                    else:
+                        prev = np.asarray(eval_ids[pos - 1], dtype=np.int64)
+                        keys = prev * vocab_size
+                        keys += np.asarray(eval_ids[pos], dtype=np.int64)
+                        c_pair = _bigram_counts_for(pair_keys, pair_counts,
+                                                    keys)
+                        m = _bigram_ppl(c_pair, uni[prev], int(pos.size), a,
+                                        vocab_size)
                 else:
+                    if interp is None:
+                        continue
                     prev = np.asarray(eval_ids[pos - 1], dtype=np.int64)
                     keys = prev * vocab_size
                     keys += np.asarray(eval_ids[pos], dtype=np.int64)
                     c_pair = _bigram_counts_for(pair_keys, pair_counts, keys)
-                    m = _bigram_ppl(c_pair, uni[prev], int(pos.size), a,
-                                    vocab_size)
+                    m = _interp_ppl_from_counts(
+                        eval_ids[pos], uni, c_pair, uni[prev], int(pos.size),
+                        interp["alpha_unigram"], interp["alpha_bigram"],
+                        interp["lambda"], vocab_size)
                 wm[order] = m["ppl"]
             report["ppl_window_matched"] = wm
             report["window_spec"] = {
@@ -356,7 +480,8 @@ def evaluate(data_dir: str, split: str = "val",
 
 
 def main():
-    p = argparse.ArgumentParser(description="简单统计基线：平滑 n-gram PPL")
+    p = argparse.ArgumentParser(
+        description="简单统计基线：一元/二元/插值二元平滑 n-gram PPL")
     p.add_argument("--data_dir", required=True)
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--out", default=None, help="JSON 输出路径（默认打印）")
@@ -385,7 +510,10 @@ def main():
             f.write(text + "\n")
     print(text)
     print(f"[ngram] {args.split} PPL: unigram={report['ppl'].get('unigram')} "
-          f"bigram={report['ppl'].get('bigram')}")
+          f"bigram={report['ppl'].get('bigram')} "
+          f"interp={report['ppl'].get('interpolated_bigram')} "
+          f"(selected={report.get('selected_model')}, "
+          f"λ={((report.get('selected_interpolated') or {}).get('lambda'))})")
 
 
 if __name__ == "__main__":

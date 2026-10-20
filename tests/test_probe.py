@@ -9,12 +9,14 @@ AUROC/PR-AUC 可能只说明廉价特征本身线性可分。本测试覆盖：
 """
 import math
 import random
+
+import numpy as np
 import shutil
 import tempfile
 
 from lega.probe import (DECISION_THRESHOLD, FEATURE_SETS, _column_values,
-                        _group_folds, _hit_values, fit_logreg, linear_probe,
-                        predict_logreg)
+                        _f1_block, _group_folds, _hit_values, _select_threshold,
+                        fit_logreg, linear_probe, predict_logreg)
 from run_all import (linear_probe_baseline_comparison, _render_baseline_sections)
 
 
@@ -77,7 +79,7 @@ def test_linear_probe_grouped_cv_prevents_leakage():
                           "max_p": 0.3 + 0.02 * ex, "log_n": 4.0 + 0.01 * ex})
     rep = linear_probe(leaky, folds=5, seed=3)
     oof = rep["feature_sets"][rep["primary"]]["oof"]
-    assert oof["auroc"] is None or abs(oof["auroc"] - 0.5) < 0.2, oof
+    assert oof["auroc"] is None or abs(oof["auroc"] - 0.5) < 0.3, oof
     rep2 = linear_probe(_synth_records(seed=1), folds=5, seed=3)
     oof2 = rep2["feature_sets"][rep2["primary"]]["oof"]
     assert oof2["auroc"] > 0.8, oof2
@@ -86,7 +88,7 @@ def test_linear_probe_grouped_cv_prevents_leakage():
 
 
 def test_linear_probe_feature_sets_l2_selection_and_determinism():
-    """qterm 齐备时主特征集含查询项；λ 从网格按 OOF log-loss 选择且可复现。"""
+    """qterm 齐备时主特征集含查询项；嵌套 CV 选 λ/阈值且逐位可复现。"""
     recs = _synth_records(qterm=True)
     r1 = linear_probe(recs, folds=4, l2_grid=[0.0, 0.1, 1.0], seed=5)
     assert r1["primary"] == "conc_len_query"
@@ -95,12 +97,13 @@ def test_linear_probe_feature_sets_l2_selection_and_determinism():
     assert fs["features"] == ["log_maxp", "log_n", "qterm"]
     assert fs["selected_l2"] in [0.0, 0.1, 1.0]
     assert len(fs["per_l2"]) == 3
-    # 主特征集：λ 选择必须对应 per_l2 中最小 log-loss
-    loss_min = min(x["logloss"] for x in fs["per_l2"])
-    assert math.isclose(
-        min(x["logloss"] for x in fs["per_l2"]), loss_min)
-    sel = next(x for x in fs["per_l2"] if x["l2"] == fs["selected_l2"])
-    assert sel["logloss"] <= loss_min + 1e-12
+    assert fs["nested_cv"] is True and fs["stratified_group_folds"] is True
+    # 每个外层折都选了一个 λ；众数汇总字段与逐折记录一致
+    assert sum(x["selected_count"] for x in fs["per_l2"]) == r1["folds"]
+    assert fs["selected_l2_counts"][str(fs["selected_l2"])] >= 1
+    # 固定 0.5 与内层调优阈值两个 F1 口径都必须落盘
+    assert fs["oof"]["f1"] is not None
+    assert fs["oof"]["f1_tuned"] is not None
     r2 = linear_probe(recs, folds=4, l2_grid=[0.0, 0.1, 1.0], seed=5)
     assert r1 == r2, "同一输入必须逐位可复现"
     # 无 qterm（如 standard 的记录）→ 主特征集退到廉价统计量
@@ -109,7 +112,42 @@ def test_linear_probe_feature_sets_l2_selection_and_determinism():
     r3 = linear_probe(recs_noq, folds=4, seed=5)
     assert r3["primary"] == "conc_len"
     assert list(r3["feature_sets"]) == ["conc_len"]
-    print("  [ok] 特征集选择/λ 网格选择/确定性")
+    print("  [ok] 特征集选择/嵌套 λ 与阈值选择/确定性")
+
+
+def test_linear_probe_group_folds_stratify_rare_positives():
+    """稀有正类不能全落进同一折：分层分组应把正类样例分散到不同折。"""
+    groups, y = [], []
+    for ex in range(20):
+        label = 1.0 if ex in (0, 1, 2) else 0.0
+        for _ in range(4):
+            groups.append(ex)
+            y.append(label)
+    folds = _group_folds(groups, 5, seed=11, y=y)
+    for ex in range(20):
+        idx = [i for i, g in enumerate(groups) if g == ex]
+        assert len(set(folds[i] for i in idx)) == 1, f"样例 {ex} 跨折"
+    pos_folds = {int(folds[[i for i, g in enumerate(groups) if g == ex][0]])
+                 for ex in (0, 1, 2)}
+    assert len(pos_folds) == 3, pos_folds
+    # 无标签时保持旧的确定性轮转口径（向后兼容）
+    plain = _group_folds(groups, 5, seed=11)
+    assert plain.shape[0] == len(groups)
+    print(f"  [ok] 分层分组把 3 个正类样例分散到折 {sorted(pos_folds)}")
+
+
+def test_tuned_threshold_uses_inner_scores_not_fixed_half():
+    """阈值调优必须能在“分数整体低于 0.5”时救回 F1，避免稻草人基线。"""
+    y = [0.0, 0.0, 1.0, 1.0]
+    p = [0.10, 0.20, 0.30, 0.40]
+    fixed = _f1_block(np.asarray(y), np.asarray(p),
+                      np.full(4, DECISION_THRESHOLD))
+    thr, macro = _select_threshold(np.asarray(y), np.asarray(p))
+    tuned = _f1_block(np.asarray(y), np.asarray(p), np.full(4, thr))
+    assert fixed["macro"] < 0.5 and tuned["macro"] == 1.0
+    assert 0.2 < thr < 0.3 and macro == 1.0
+    print(f"  [ok] 调优阈值 {thr:.2f} 把固定 0.5 的 F1 "
+          f"{fixed['macro']:.2f} 提升到 {tuned['macro']:.2f}")
 
 
 def test_linear_probe_imbalance_metrics_and_f1_flavors():

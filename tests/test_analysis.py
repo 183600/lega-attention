@@ -177,6 +177,12 @@ def test_summarize_reports_imbalance_aware_metrics():
     # 固定规则“稻草人”对照：恒写/恒不写 F1 必须并报（不平衡下学习 F1
     # 只有高于多数类固定规则才说明门控真有决策价值）
     triv = s["gate_f1_trivial"]
+    # 概率校准：Brier/ECE 与常数基率 Brier 必须落盘；排序好不等于校准好
+    cal = s["calibration_g"]
+    assert cal and cal["n"] == 400 and cal["n_pos"] == 19
+    assert s["brier_g"] is not None and s["ece_g"] is not None
+    assert s["brier_g_constant"] is not None
+    assert len(cal["bins"]) == 10
     assert triv and set(triv) >= {"always_write", "never_write"}
     p_base = 19 / 400
     # 恒写规则的 micro F1 在二分类下等于正类率（= 全判正的准确率）

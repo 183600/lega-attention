@@ -20,7 +20,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _enrich_paired, _eval_matches_window_spec, _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _ppl_ci_rel_pct, _ppl_of, _probe_oof, _rel_pct,
-                      _render_baseline_sections, _ruler_min_cell_n,
+                      _render_baseline_sections, _ruler_avg_micro,
+                      _ruler_avg_of, _ruler_min_cell_n,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
@@ -1335,6 +1336,43 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
     print("  [ok] ngram_baseline_comparison（同 split 配对、Holm、错位隔离）")
 
 
+def test_ngram_comparison_uses_val_selected_strongest_baseline():
+    """简单基线参照必须取 val 选出的最强模型，而不是固定拿 bigram 当靶子。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val",
+            "ppl": {"unigram": 200.0, "bigram": 100.0,
+                    "interpolated_bigram": 80.0},
+            "selected_model": "interpolated_bigram",
+            "selected_interpolated": {"lambda": 0.7, "alpha_unigram": 0.1,
+                                      "alpha_bigram": 0.1,
+                                      "val_mean_nll": 4.0},
+            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
+        runs = {"lega": {s: {"eval": {"variant": "lega", "split": "val",
+                                      "ppl": 70.0 + s}}
+                         for s in (1, 2, 3)}}
+        out = ngram_baseline_comparison(runs, tmp)
+        assert out["reference_model"] == "interpolated_bigram"
+        assert abs(out["ngram_ppl"] - 80.0) < 1e-12
+        assert out["rows"][0]["verdict"] == "显著优于统计基线"
+        # 历史产物没有 selected_model：按插值→bigram→unigram 的强度顺序回退
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val",
+            "ppl": {"unigram": 200.0, "bigram": 100.0,
+                    "interpolated_bigram": 80.0}})
+        out_old = ngram_baseline_comparison(runs, tmp)
+        assert out_old["reference_model"] == "interpolated_bigram"
+        # 更老产物连插值都没有：仍回退 bigram
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "ppl": {"unigram": 200.0, "bigram": 100.0}})
+        out_older = ngram_baseline_comparison(runs, tmp)
+        assert out_older["reference_model"] == "bigram"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram_baseline_comparison（val 选出的最强简单基线优先）")
+
+
 def test_ngram_comparison_prefers_window_matched_reference():
     """同 split 之后还要同 token：窗口规格一致时用逐位置对齐参考并披露。"""
     tmp = tempfile.mkdtemp()
@@ -1842,6 +1880,27 @@ def test_build_summary_tolerates_malformed_data_report_and_audit():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] data_report/audit 嵌套字段非对象：缺失降级而非崩溃")
+
+
+def test_ruler_avg_macro_micro_defined_and_reported():
+    """RULER 平均必须显式定义：macro（任务/格等权）与 micro（按 n 加权）并报。"""
+    doc = {"results": {
+        "niah_synth": {"8": {"em": 1.0, "n": 1},
+                       "16": {"em": 0.0, "n": 9}},
+        "vt": {"8": {"em": 0.0, "n": 1}, "16": {"em": 0.0, "n": 9}}}}
+    # macro：任务内两格等权（0.5 与 0），再任务等权 → 0.25
+    assert abs(_ruler_avg_of(doc) - 0.25) < 1e-12
+    # micro：按 n 加权，只有 niah_synth@8 的 1 个样例命中 → 1/20
+    assert abs(_ruler_avg_micro(doc) - 0.05) < 1e-12
+    # fwe 用 recall，其余用 EM
+    fwe = {"results": {"fwe": {"8": {"em": 0.0, "recall": 0.75, "n": 4}}}}
+    assert abs(_ruler_avg_of(fwe) - 0.75) < 1e-12
+    assert abs(_ruler_avg_micro(fwe) - 0.75) < 1e-12
+    # 缺字段/坏类型按缺失处理
+    assert _ruler_avg_micro([1]) is None
+    assert _ruler_avg_micro({"results": [1]}) is None
+    assert _ruler_avg_micro({"results": {"vt": {"8": {"n": 0}}}}) is None
+    print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe 口径）")
 
 
 def test_summary_helpers_tolerate_nested_non_dict_values():

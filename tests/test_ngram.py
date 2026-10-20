@@ -11,8 +11,10 @@ import tempfile
 
 import numpy as np
 
-from lega.ngram import (ALPHA_GRID, _bigram_ppl, evaluate, fit_counts,
-                        ppl_bigram, ppl_unigram, window_positions)
+from lega.ngram import (ALPHA_GRID, INTERP_LAMBDA_GRID, _bigram_ppl,
+                        _interp_ppl_from_counts, evaluate, fit_counts,
+                        ppl_bigram, ppl_interpolated_bigram, ppl_unigram,
+                        window_positions)
 from lega.datacheck import TEST_ACCESS_LOG
 
 
@@ -58,6 +60,25 @@ def test_ppl_bigram_matches_closed_form():
     print("  [ok] ppl_bigram（条件概率闭式解、单 token 训练流容错）")
 
 
+def test_ppl_interpolated_bigram_matches_closed_form():
+    """插值 bigram 闭式核对：λ·P(w|prev)+(1−λ)·P(w)，λ=1 退化为 bigram。"""
+    uni, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
+    # eval=[0,1]，αu=αb=1，V=3：
+    # P(1|0)=(2+1)/(2+3)=0.6；P(1)=(2+1)/(4+3)=3/7
+    # λ=0.5 → p=0.5·0.6+0.5·3/7；λ=1 → 纯 bigram 0.6
+    half = ppl_interpolated_bigram(np.array([0, 1]), uni, keys, counts,
+                                   1.0, 1.0, 0.5, 3)
+    exp_p = 0.5 * 0.6 + 0.5 * (3.0 / 7.0)
+    assert math.isclose(half["ppl"], 1.0 / exp_p, rel_tol=1e-12)
+    full = ppl_interpolated_bigram(np.array([0, 1]), uni, keys, counts,
+                                   1.0, 1.0, 1.0, 3)
+    assert math.isclose(full["ppl"], 1.0 / 0.6, rel_tol=1e-12)
+    # 空/过短：安全返回 None 而不是崩溃
+    assert ppl_interpolated_bigram(np.array([1]), uni, keys, counts,
+                                   1.0, 1.0, 0.5, 3)["ppl"] is None
+    print("  [ok] ppl_interpolated_bigram（闭式解、λ=1 退化、边界）")
+
+
 def test_evaluate_end_to_end_and_alpha_selected_on_val():
     tmp = tempfile.mkdtemp()
     try:
@@ -70,6 +91,16 @@ def test_evaluate_end_to_end_and_alpha_selected_on_val():
         assert rep["selected_alpha"]["unigram"] in (0.01, 1.0)
         assert rep["selected_alpha"]["bigram"] in (0.01, 1.0)
         assert rep["ppl"]["unigram"] > 1.0 and rep["ppl"]["bigram"] > 1.0
+        # 插值 bigram 由 val 联合选参，且不得比纯 bigram 更差（λ=1 可退化）
+        assert rep["ppl"]["interpolated_bigram"] is not None
+        si = rep["selected_interpolated"]
+        assert si["lambda"] in INTERP_LAMBDA_GRID
+        assert si["alpha_unigram"] in (0.01, 1.0)
+        assert si["alpha_bigram"] in (0.01, 1.0)
+        assert rep["selected_model"] in rep["ppl"]
+        assert (rep["val_mean_nll"]["interpolated_bigram"]
+                <= rep["val_mean_nll"]["bigram"] + 1e-9)
+        assert rep["selected_model_selected_on"].startswith("val")
         assert rep["selection_eval_same_split"] is True
         assert rep["allow_test"] is False
         # 选定 α 的 PPL 必须是该阶数在候选网格中的最优（按 mean NLL）
@@ -158,6 +189,12 @@ def test_evaluate_window_matched_restricts_scoring_positions():
             c_pair[i] = lookup.get(int(k), 0.0)
         m_bi = _bigram_ppl(c_pair, uni[prev], len(pos), 0.01, 4)
         assert math.isclose(wm["bigram"], m_bi["ppl"], rel_tol=1e-12)
+        si = rep["selected_interpolated"]
+        m_interp = _interp_ppl_from_counts(
+            np.asarray(val)[pos], uni, c_pair, uni[prev], len(pos),
+            si["alpha_unigram"], si["alpha_bigram"], si["lambda"], 4)
+        assert math.isclose(wm["interpolated_bigram"], m_interp["ppl"],
+                            rel_tol=1e-12)
         # 一时一用的全 split 口径仍在（保留绝对难度参照）
         assert rep["ppl"]["unigram"] is not None
         # 非法规格：显式报错字段而不是假装对齐

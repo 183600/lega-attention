@@ -16,7 +16,7 @@ import tempfile
 import numpy as np
 
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
-                        f1_scores, holm_bonferroni, mean_std,
+                        calibration_metrics, f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, pearson, roc_pr_aucs, save_json,
                         student_t_two_sided_p, t_critical_95, wilson_score_ci)
@@ -530,3 +530,29 @@ def test_wilson_score_ci():
     lo, hi = wilson_score_ci(12, 10)
     assert 0.0 <= lo <= hi <= 1.0
     print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄）")
+
+
+def test_calibration_metrics_brier_ece_and_baseline():
+    """校准：完美概率 Brier=0、常数基率 Brier 为无信息基线、ECE 识别错校准。"""
+    y = [0.0] * 80 + [1.0] * 20
+    perfect = list(y)
+    c = calibration_metrics(perfect, y, n_bins=10)
+    assert c["brier"] == 0.0 and c["ece"] == 0.0 and c["mce"] == 0.0
+    assert c["brier_skill"] == 1.0
+    # 常数基率预测：Brier 恰为 p(1-p)，skill≈0
+    const = calibration_metrics([0.2] * len(y), y, n_bins=10)
+    assert abs(const["brier"] - 0.2 * 0.8) < 1e-12
+    assert abs(const["brier_skill"]) < 1e-12
+    # 排序正确但概率整体过高：Brier 比完美差，ECE>0
+    over = [0.9 if v == 1.0 else 0.6 for v in y]
+    c2 = calibration_metrics(over, y, n_bins=10)
+    assert c2["brier"] > 0.0 and c2["ece"] > 0.2
+    # 分箱计数/边界：10 箱内计数总和等于样本数
+    assert sum(b["n"] for b in c2["bins"]) == len(y)
+    assert c2["n"] == len(y) and c2["n_pos"] == 20
+    # 单类/空输入：Brier 可算，ECE 不可解释地返回 None
+    one = calibration_metrics([0.7, 0.8], [1.0, 1.0])
+    assert one["brier"] is not None and one["ece"] is None
+    empty = calibration_metrics([], [])
+    assert empty["n"] == 0 and empty["brier"] is None
+    print("  [ok] calibration_metrics（Brier/ECE/常数基线/边界）")

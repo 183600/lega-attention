@@ -24,13 +24,19 @@
   gate_f1_trivial      恒写/恒不写两个固定规则的 F1（无阈值“稻草人”对照）：
                        不平衡下学习到的门控 F1 必须比多数类规则更有信息量，
                        否则门控的“决策价值”无从谈起
+  calibration_g        门控 g 的概率校准：Brier（严格评分规则）、ECE/MCE
+                       （等宽分箱）与常数基率 Brier 基线。排序指标（AUROC/
+                       PR-AUC）回答“能不能区分”，校准回答“g=0.8 时命中率
+                       是否真的约 80%”；g 被当作软权重/概率使用，两者都要看。
   linear_probe         同特征集（log max_p、log n、qterm）的 L2 逻辑回归
-                       **简单监督基线**：按样例分组交叉验证、标准化统计
-                       只用训练折、λ 按 out-of-fold log-loss 网格选择。
-                       门控 logit 在语言建模中训练、从未见过 hit 标签；
-                       探针直接用 hit 标签监督训练。对照语义：探针显著
-                       更好属预期，门控不能显著优于探针时不得把“更能
-                       判断该不该写入”归因给门控结构。详见 lega/probe.py
+                       **简单监督基线**：按样例分组并按标签分层的嵌套 CV，
+                       标准化统计只用训练折；λ 在内层 OOF 上按主指标
+                       （PR-AUC/AUROC）选择、阈值在内层 OOF 上按 macro-F1
+                       选择，最终 OOF 不再参与选参。门控 logit 在语言建模
+                       中训练、从未见过 hit 标签；探针直接用 hit 标签监督
+                       训练。对照语义：探针显著更好属预期，门控不能显著
+                       优于探针时不得把“更能判断该不该写入”归因给门控
+                       结构。详见 lega/probe.py
 
 稳健性协议（防单一阈值/虚假精度）：
   tau_sensitivity          misleading/P(hit|集中) 系指标在多档 τ 上并报，
@@ -66,9 +72,9 @@ from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
 from .repro import load_provenance
 from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
                     ContextTooSmall, _stable_hash)
-from .utils import (amp_autocast, auroc, average_precision, enable_tf32,
-                    f1_scores, get_device, pearson, roc_pr_aucs, save_json,
-                    set_seed)
+from .utils import (amp_autocast, auroc, average_precision,
+                    calibration_metrics, enable_tf32, f1_scores, get_device,
+                    pearson, roc_pr_aucs, save_json, set_seed)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -465,6 +471,23 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
                               for k, v in f1s_t["per_class"].items()},
             }
     summary["gate_f1_trivial"] = gate_f1_trivial
+    # 概率校准：g 是 sigmoid 输出、被当作“该不该写入”的软权重/概率使用。
+    # AUROC/PR-AUC 只看排序；Brier/ECE 回答 g 的数值是否可信。常数基率
+    # 预测的 Brier 是“无信息基线”，校准后的 Brier 必须对照它解读。
+    calibration_g = None
+    if gm.any():
+        calibration_g = calibration_metrics(g[gm], hit[gm])
+        summary["calibration_g"] = calibration_g
+        summary["brier_g"] = calibration_g.get("brier")
+        summary["ece_g"] = calibration_g.get("ece")
+        summary["brier_g_constant"] = calibration_g.get("brier_constant")
+        summary["brier_g_skill"] = calibration_g.get("brier_skill")
+        summary["calibration_g_n"] = calibration_g.get("n")
+    else:
+        summary["calibration_g"] = None
+        summary["brier_g"] = summary["ece_g"] = None
+        summary["brier_g_constant"] = summary["brier_g_skill"] = None
+        summary["calibration_g_n"] = None
     # 逐头统计：对整段数组按 (layer, head) 掩码切片。
     per_head = []
     layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)
@@ -687,13 +710,24 @@ def main():
     if ap_ci:
         print(f"[analysis] PR-AUC(logit−qterm) 样例聚类 bootstrap 95% CI: "
               f"[{ap_ci[0]:.3f}, {ap_ci[1]:.3f}]（不平衡下的主指标口径）")
+    cal = summary.get("calibration_g") or {}
+    if cal.get("brier") is not None:
+        print(f"[analysis] 门控概率校准：Brier={cal['brier']:.4f}"
+              f"（常数基率基线={cal.get('brier_constant'):.4f}，"
+              f"skill={cal.get('brier_skill'):+.3f}）"
+              f" ECE={fmt(cal.get('ece'))}（排序好≠概率可信）")
     probe = summary.get("linear_probe") or {}
     pset = (probe.get("feature_sets") or {}).get(probe.get("primary") or "") or {}
     poof = pset.get("oof") or {}
     if poof:
+        f1 = poof.get("f1") or {}
+        f1t = poof.get("f1_tuned") or {}
         print(f"[analysis] 线性探针简单基线（{pset.get('name')}，"
-              f"{probe.get('folds')} 折按样例分组 CV、λ={pset.get('selected_l2')}）："
+              f"{probe.get('folds')} 折嵌套分组 CV、"
+              f"λ={pset.get('selected_l2')}）："
               f"AUROC={fmt(poof.get('auroc'))} PR-AUC={fmt(poof.get('auprc'))} "
+              f"F1(0.5)={fmt(f1.get('macro'))} "
+              f"F1(调优阈值)={fmt(f1t.get('macro'))} "
               f"（OOF，有标签监督；门控 logit 无标签监督，务必对照解读）")
     elif probe:
         print(f"[analysis] 线性探针跳过：{probe.get('note', '')[:120]}")

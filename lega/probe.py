@@ -6,18 +6,26 @@ log n"并排对照，但这些要么是门控自身的组件、要么是未调�
 没有这个对照，"门控 logit 的 AUROC/PR-AUC 很高"可能只说明这些廉价特征
 本身线性可分，"复杂门控结构"的贡献无从谈起——即所谓"只打败了稻草人"。
 
-本模块在机制分析的同一批记录上训练 L2 逻辑回归，用**按样例分组的交叉
-验证**产生 out-of-fold 分数：
+本模块在机制分析的同一批记录上训练 L2 逻辑回归，用**嵌套的、按样例
+分组并按标签均衡的交叉验证**产生 out-of-fold 分数：
 
   * 同一 (层,头,查询位) 的记录不独立（同一样例共享难度与 gold 位置），
     按行随机切分会把同一样例的其余记录留给训练折、对留出折"背题"；分组
     CV 保证同一样例只出现在一侧，OOF 指标才是诚实的泛化估计；
-  * 标准化均值/方差只用训练折计算，防止信息从留出折泄漏；
-  * λ（L2 强度）在网格上用 out-of-fold 平均 log-loss 选择——"简单基线
-    也要充分调优"，而不是随手一个 λ；逐 λ 指标一并落盘供敏感性审视；
+  * 折分配同时按 hit 标签均衡：正类记录只占少数时，纯轮转分组可能让
+    某些折完全没有正类，训练折退化为常数先验、留出折无法计算 AP；分层
+    分组把正类样例尽量分散到各折，降低这种“空正类折”造成的基线低估；
+  * **嵌套 CV**：λ 与决策阈值只在每个外层训练折内部的 CV 上选择，再在
+    外层留出折上评测。若在最终报告的同一份 OOF 上选 λ/阈值，OOF 指标会
+    因选择偏差而乐观——简单基线也不能用这种口径“调参”；
+  * λ 的选择指标与主检验指标对齐（正类率 <5% 用 PR-AUC，否则 AUROC），
+    而不是只看 log-loss；log-loss 仍并报，供概率质量参考；
+  * 决策阈值用内层 OOF 的 macro-F1 选择；另保留固定 0.5 阈值的 F1，
+    两者并报，既与门控 g>0.5 同口径可比，也避免把“阈值没调”误当成
+    “简单基线判别力差”；
   * 报告 AUROC 与 PR-AUC（hit/¬hit 常极度不平衡，正类率 <5% 时以
-    PR-AUC 为主，其随机基线=正类率），并给 g>0.5 决策点的 F1
-    （macro/micro/weighted 三口径，与门控 F1 同阈值，保证同口径可比）。
+    PR-AUC 为主，其随机基线=正类率），并给 macro/micro/weighted
+    三口径 F1，以及 Brier 分数（概率校准的严格评分规则）。
 
 与门控 logit 的对照语义（必须如实陈述，防止过度解读）：探针是**有监督**
 的（用 hit 标签训练），门控是语言建模训练的副产品（训练时从未见过 hit
@@ -31,7 +39,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .utils import auroc, average_precision, f1_scores
+from .utils import auroc, average_precision, calibration_metrics, f1_scores
 
 # hit 判别正类率低于该值时以 PR-AUC 为主指标（与 lega.analysis 同一口径，
 # 集中定义于此并由此导入，避免两处阈值漂移）。
@@ -39,6 +47,9 @@ PRIMARY_AP_THRESHOLD = 0.05
 EXTREME_IMBALANCE_THRESHOLD = 0.001
 # 决策阈值：与门控 F1 的 g>0.5 完全一致，保证探针/门控/固定规则三者同口径。
 DECISION_THRESHOLD = 0.5
+# 阈值调优网格：内层 OOF 上按 macro-F1 选；0.5 在其中，保证“调阈值”不会
+# 比固定默认更差（只在有一致收益时移动）。细网格避免只搜索粗档位。
+THRESHOLD_GRID = tuple(round(0.01 * i, 2) for i in range(1, 100))
 # max_p 的下界：log(0) 会变 -inf，统计中 0 是数值下溢，用 1e-12 兜底。
 _MAXP_FLOOR = 1e-12
 DEFAULT_L2_GRID = (0.0, 0.01, 0.1, 1.0)
@@ -190,13 +201,47 @@ def _features(records: Sequence[Dict], names: Sequence[str], cache: dict = None)
     return X, valid_list
 
 
-def _group_folds(groups: Sequence, k: int, seed: int) -> np.ndarray:
-    """按样例（聚类）分组做分层近似均衡的 k 折分配，样例内绝不跨折。"""
+def _group_folds(groups: Sequence, k: int, seed: int,
+                 y: Optional[Sequence] = None) -> np.ndarray:
+    """按样例（聚类）分组做 k 折分配，样例内绝不跨折。
+
+    y 给出时按标签做**分层分组**：先把含正类的样例按正类数从多到少
+    依次分给当前正类最少的折（平局看总样本数），再把纯负类样例分给
+    当前总样本数最少的折。这样稀有正类不会全部落进同一折，避免训练折
+    单类退化、留出折 AP 不可计算。y=None 时保持旧的确定性轮转分配。
+    """
     uniq = sorted(set(groups))
     rng = np.random.default_rng(seed)
-    order = list(uniq)
-    rng.shuffle(order)
-    fold_of = {g: (i % k) for i, g in enumerate(order)}
+    tie = {g: float(rng.random()) for g in uniq}
+    if y is None:
+        order = sorted(uniq, key=lambda g: tie[g])
+        fold_of = {g: (i % k) for i, g in enumerate(order)}
+        return np.asarray([fold_of[g] for g in groups], dtype=np.int64)
+    y_arr = np.asarray(list(y), dtype=np.float64)
+    if y_arr.shape[0] != len(groups):
+        raise ValueError("y 与 groups 长度不一致")
+    pos = {g: 0 for g in uniq}
+    total = {g: 0 for g in uniq}
+    for g, label in zip(groups, y_arr.tolist()):
+        total[g] += 1
+        if label == 1.0:
+            pos[g] += 1
+    pos_groups = [g for g in uniq if pos[g] > 0]
+    neg_groups = [g for g in uniq if pos[g] == 0]
+    pos_groups.sort(key=lambda g: (-pos[g], -total[g], tie[g]))
+    neg_groups.sort(key=lambda g: (-total[g], tie[g]))
+    fold_pos = [0] * k
+    fold_total = [0] * k
+    fold_of = {}
+    for g in pos_groups:
+        f = min(range(k), key=lambda i: (fold_pos[i], fold_total[i], i))
+        fold_of[g] = f
+        fold_pos[f] += pos[g]
+        fold_total[f] += total[g]
+    for g in neg_groups:
+        f = min(range(k), key=lambda i: (fold_total[i], i))
+        fold_of[g] = f
+        fold_total[f] += total[g]
     return np.asarray([fold_of[g] for g in groups], dtype=np.int64)
 
 
@@ -258,8 +303,33 @@ def _oof_scores(X: np.ndarray, y: np.ndarray, folds: np.ndarray,
     return oof
 
 
-def _score_block(y: np.ndarray, p: np.ndarray) -> Dict:
-    """一组 OOF 分数的全部指标（AUROC/PR-AUC/LogLoss/Brier/F1 三口径）。"""
+def _f1_block(y: np.ndarray, p: np.ndarray, thresholds: np.ndarray) -> Optional[Dict]:
+    """逐记录阈值下的 F1（macro/micro/weighted + 逐类明细）。"""
+    m = np.isfinite(p) & np.isfinite(thresholds)
+    y, p, thresholds = y[m], p[m], thresholds[m]
+    if y.size == 0 or len(set(y.tolist())) != 2:
+        return None
+    pred = (p > thresholds).astype(np.int64)
+    f1s = f1_scores(y.astype(np.int64), pred, labels=[0, 1])
+    return {
+        "threshold": ("per-fold inner-CV macro-F1"
+                      if len(set(thresholds.tolist())) > 1
+                      else float(thresholds[0])),
+        "thresholds": [float(x) for x in sorted(set(thresholds.tolist()))],
+        "macro": f1s["macro"], "micro": f1s["micro"],
+        "weighted": f1s["weighted"],
+        "per_class": {str(k): v for k, v in f1s["per_class"].items()},
+    }
+
+
+def _score_block(y: np.ndarray, p: np.ndarray,
+                 thresholds: Optional[np.ndarray] = None) -> Dict:
+    """一组分数的全部指标（AUROC/PR-AUC/LogLoss/Brier/F1 三口径）。
+
+    默认 F1 在固定 0.5 阈值上计算（与门控 g>0.5 同口径）；传入每条
+    记录自己的阈值时追加 `f1_tuned`。两个口径并报，避免把固定 0.5 的
+    阈值选择误读成“简单基线判别力差”。
+    """
     m = np.isfinite(p)
     y, p = y[m], p[m]
     out: Dict = {
@@ -270,16 +340,67 @@ def _score_block(y: np.ndarray, p: np.ndarray) -> Dict:
         "brier": _brier(y, p),
         "f1": None,
     }
-    if y.size and len(set(y.tolist())) == 2:
-        pred = (p > DECISION_THRESHOLD).astype(np.int64)
-        f1s = f1_scores(y.astype(np.int64), pred, labels=[0, 1])
-        out["f1"] = {
-            "threshold": DECISION_THRESHOLD,
-            "macro": f1s["macro"], "micro": f1s["micro"],
-            "weighted": f1s["weighted"],
-            "per_class": {str(k): v for k, v in f1s["per_class"].items()},
-        }
+    cal = calibration_metrics(p, y)
+    out.update({"ece": cal.get("ece"), "mce": cal.get("mce"),
+                "brier_constant": cal.get("brier_constant"),
+                "brier_skill": cal.get("brier_skill"),
+                "calibration_bins": cal.get("bins")})
+    fixed = np.full(y.shape[0], DECISION_THRESHOLD, dtype=np.float64)
+    out["f1"] = _f1_block(y, p, fixed)
+    if thresholds is not None:
+        thr = np.asarray(thresholds, dtype=np.float64)[m]
+        out["f1_tuned"] = _f1_block(y, p, thr)
+    else:
+        out["f1_tuned"] = None
     return out
+
+
+def _fit_predict(Xtr: np.ndarray, ytr: np.ndarray, Xte: np.ndarray,
+                 l2: float) -> np.ndarray:
+    """只用训练折统计量标准化后拟合 L2 逻辑回归并预测留出折。"""
+    mu = Xtr.mean(axis=0)
+    sd = Xtr.std(axis=0)
+    sd = np.where(sd > 0, sd, 1.0)
+    model = fit_logreg((Xtr - mu) / sd, ytr, l2=l2)
+    return predict_logreg(model, (Xte - mu) / sd)
+
+
+def _select_threshold(y: np.ndarray, p: np.ndarray) -> Tuple[float, Optional[float]]:
+    """在内层 OOF 上按 macro-F1 选决策阈值（并列取更接近 0.5 的稳定阈值）。"""
+    m = np.isfinite(p)
+    y, p = y[m], p[m]
+    if y.size == 0 or len(set(y.tolist())) != 2:
+        return DECISION_THRESHOLD, None
+    best = None
+    for t in THRESHOLD_GRID:
+        pred = (p > t).astype(np.int64)
+        f1s = f1_scores(y.astype(np.int64), pred, labels=[0, 1])
+        macro = f1s["macro"]
+        if macro is None:
+            continue
+        key = (float(macro), -abs(float(t) - DECISION_THRESHOLD), float(t))
+        if best is None or key > best[0]:
+            best = (key, float(t), float(macro))
+    if best is None:
+        return DECISION_THRESHOLD, None
+    return best[1], best[2]
+
+
+def _selection_value(block: Dict, primary_metric: Optional[str]) -> Optional[float]:
+    """λ 的选择分数：与主检验指标对齐（AP 或 AUROC），缺失时回退 log-loss。"""
+    if primary_metric == "PR-AUC":
+        return block.get("auprc")
+    if primary_metric and primary_metric.startswith("AUROC"):
+        return block.get("auroc")
+    return block.get("auprc") if block.get("auprc") is not None else block.get("auroc")
+
+
+def _selection_name(primary_metric: Optional[str]) -> str:
+    if primary_metric == "PR-AUC":
+        return "auprc"
+    if primary_metric and primary_metric.startswith("AUROC"):
+        return "auroc"
+    return "auprc/auroc（按可用性）"
 
 
 def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
@@ -294,11 +415,17 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
         "n_examples": 0, "n_pos": 0, "n_neg": 0, "base_rate": None,
         "imbalance_level": None, "primary_detection_metric": None,
         "l2_grid": [float(x) for x in l2_grid],
-        "selection_metric": "out-of-fold 平均 log-loss（λ 越大越正则；"
-                            "λ 网格含 0 以检验正则是否真的必要）",
+        "selection_metric": ("嵌套分组 CV：λ 在内层 OOF 上按与主检验对齐的"
+                             "指标选择（正类率 <5% 用 PR-AUC，否则 AUROC；"
+                             "并列按 log-loss 与更小 λ）；最终 OOF 不被用于"
+                             "选 λ，避免选择偏差"),
         "decision_threshold": DECISION_THRESHOLD,
-        "grouped_cv": "按样例（example）分组，同一样例的记录绝不跨折；"
-                      "标准化统计只用训练折拟合",
+        "decision_threshold_tuned": ("每个外层折用内层 OOF 的 macro-F1 选阈值；"
+                                     "固定 0.5 与调优阈值两个 F1 口径并报"),
+        "grouped_cv": ("按样例（example）分组，同一样例的记录绝不跨折；"
+                       "折分配按 hit 标签分层，降低稀有正类折缺失；"
+                       "标准化统计只用训练折拟合"),
+        "nested_cv": True,
         "primary": None, "feature_sets": {},
         "note": ("线性探针为**有标签监督**的简单基线（用 hit 标签训练，OOF "
                  "指标），门控 logit 为语言建模副产品（训练未见 hit 标签）；"
@@ -372,35 +499,109 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     gaps = sorted(set(examples))
     ex_to_idx = {g: i for i, g in enumerate(gaps)}
     groups = np.asarray([ex_to_idx[k] for k in ex_keys], dtype=np.int64)
-    fold_arr = _group_folds(groups.tolist(), k, seed)
+    fold_arr = _group_folds(groups.tolist(), k, seed, y=y_all)
+    l2s = list(dict.fromkeys(float(x) for x in report["l2_grid"]))
+    selected_name = _selection_name(primary_metric)
     for key, name, names in available:
         X = feature_matrices[key]
-        views = _fold_views(X, fold_arr)
-        set_out: Dict = {"name": name, "features": list(names),
-                         "n": int(y_all.size), "n_pos": n_pos,
-                         "selected_l2": None, "oof": None,
-                         "per_l2": [], "per_fold": []}
-        best = None
-        for l2 in report["l2_grid"]:
-            oof = _oof_scores(X, y_all, fold_arr, float(l2), views=views)
-            block = _score_block(y_all, oof)
-            block["l2"] = float(l2)
-            set_out["per_l2"].append({
-                "l2": float(l2), "logloss": block["logloss"],
-                "auroc": block["auroc"], "auprc": block["auprc"]})
-            # λ 选择：log-loss 越低越好；并列取更小的 λ（更简单的模型）。
-            cand = (block["logloss"] if block["logloss"] is not None
-                    else float("inf"))
-            if best is None or cand < best[0] - 1e-12:
-                best = (cand, float(l2), block, oof)
-        set_out["selected_l2"] = best[1]
-        set_out["oof"] = {k1: v for k1, v in best[2].items() if k1 != "l2"}
+        set_out: Dict = {
+            "name": name, "features": list(names),
+            "n": int(y_all.size), "n_pos": n_pos,
+            "nested_cv": True, "stratified_group_folds": True,
+            "selection_metric": selected_name,
+            "selected_l2": None, "selected_l2_by_fold": [],
+            "selected_l2_counts": {}, "oof": None,
+            "per_l2": [], "per_fold": [],
+        }
+        fixed_oof = {l2: np.full(y_all.shape[0], float("nan")) for l2 in l2s}
+        nested_oof = np.full(y_all.shape[0], float("nan"))
+        nested_thr = np.full(y_all.shape[0], float("nan"))
+        fold_selected = []
         for f in sorted(set(fold_arr.tolist())):
             te = fold_arr == f
-            block = _score_block(y_all[te], best[3][te])
-            set_out["per_fold"].append({
-                "fold": int(f), "n": block["n"], "n_pos": block["n_pos"],
-                "auroc": block["auroc"], "auprc": block["auprc"],
-                "logloss": block["logloss"]})
+            tr = ~te
+            Xtr, ytr = X[tr], y_all[tr]
+            # 固定 λ 的外层预测：既用于 per_l2 敏感性表，也复用为嵌套
+            # 预测（每个外层折只选一个 λ，不重复拟合）。
+            for l2 in l2s:
+                fixed_oof[l2][te] = _fit_predict(Xtr, ytr, X[te], l2)
+            tr_groups = groups[tr].tolist()
+            n_tr_groups = len(set(tr_groups))
+            inner_k = max(2, min(k, n_tr_groups)) if n_tr_groups >= 2 else 0
+            chosen_l2 = 1.0 if 1.0 in l2s else max(l2s)
+            chosen_thr = DECISION_THRESHOLD
+            inner_metric = None
+            inner_best_macro = None
+            if inner_k >= 2:
+                inner_fold = _group_folds(
+                    tr_groups, inner_k, seed + 1009 * (f + 1), y=ytr)
+                inner_best = None
+                for l2 in l2s:
+                    inner_oof = _oof_scores(Xtr, ytr, inner_fold, l2)
+                    block = _score_block(ytr, inner_oof)
+                    score = _selection_value(block, primary_metric)
+                    ll = block.get("logloss")
+                    # 主指标优先；并列看 log-loss（越低越好），再取更小 λ。
+                    key_l2 = (score if score is not None else float("-inf"),
+                              -(ll if ll is not None else float("inf")),
+                              -float(l2))
+                    if inner_best is None or key_l2 > inner_best[0]:
+                        inner_best = (key_l2, l2, inner_oof, score)
+                chosen_l2 = float(inner_best[1])
+                chosen_thr, inner_best_macro = _select_threshold(
+                    ytr, inner_best[2])
+                inner_metric = inner_best[3]
+            nested_oof[te] = fixed_oof[chosen_l2][te]
+            nested_thr[te] = chosen_thr
+            fold_selected.append({
+                "fold": int(f), "selected_l2": chosen_l2,
+                "threshold": float(chosen_thr),
+                "inner_folds": int(inner_k) if inner_k >= 2 else None,
+                "inner_selection_metric": selected_name,
+                "inner_selection_value": inner_metric,
+                "inner_best_macro_f1": inner_best_macro,
+                "n_train": int(tr.sum()), "n_train_pos": int((ytr == 1).sum()),
+                "n_test": int(te.sum()),
+                "n_test_pos": int((y_all[te] == 1).sum()),
+            })
+        selected_counts: Dict[float, int] = {l2: 0 for l2 in l2s}
+        for rec in fold_selected:
+            selected_counts[rec["selected_l2"]] = (
+                selected_counts.get(rec["selected_l2"], 0) + 1)
+        # 汇总字段取众数 λ（并列取更小 λ）；实际 nested OOF 用的是逐折 λ，
+        # 逐折选择记录在 selected_l2_by_fold / per_fold 中完整保留。
+        set_out["selected_l2"] = min(
+            l2s, key=lambda x: (-selected_counts.get(x, 0), x))
+        set_out["selected_l2_counts"] = {
+            str(l2): selected_counts.get(l2, 0) for l2 in l2s}
+        set_out["selected_l2_by_fold"] = [
+            {"fold": r["fold"], "l2": r["selected_l2"],
+             "threshold": r["threshold"]} for r in fold_selected]
+        set_out["oof"] = _score_block(y_all, nested_oof, thresholds=nested_thr)
+        for l2 in l2s:
+            block = _score_block(y_all, fixed_oof[l2])
+            f1 = block.get("f1") or {}
+            set_out["per_l2"].append({
+                "l2": float(l2), "logloss": block.get("logloss"),
+                "auroc": block.get("auroc"), "auprc": block.get("auprc"),
+                "brier": block.get("brier"),
+                "f1_macro_fixed": f1.get("macro"),
+                "selected_count": int(selected_counts.get(l2, 0)),
+                "selected": bool(l2 == set_out["selected_l2"]),
+            })
+        for rec in fold_selected:
+            f = rec["fold"]
+            te = fold_arr == f
+            block = _score_block(y_all[te], nested_oof[te],
+                                 thresholds=nested_thr[te])
+            rec.update({
+                "auroc": block.get("auroc"),
+                "auprc": block.get("auprc"),
+                "logloss": block.get("logloss"),
+                "brier": block.get("brier"),
+                "f1_fixed": block.get("f1"),
+                "f1_tuned": block.get("f1_tuned"),
+            })
+        set_out["per_fold"] = fold_selected
         report["feature_sets"][key] = set_out
     return report

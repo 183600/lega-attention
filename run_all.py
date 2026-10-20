@@ -674,8 +674,47 @@ def _ruler_task_means(d):
 
 
 def _ruler_avg_of(d):
+    """RULER 平均（macro）：任务等权，任务内上下文档位等权。
+
+    该口径忽略每格样本数 n 与任务/上下文规模差异——n=2 的格与 n=30 的
+    格同样重。预注册假设的“RULER平均”固定指这一口径；样本加权口径另见
+    `_ruler_avg_micro`，两者差异是“平均值定义依赖”的直接证据。
+    """
     tm = _ruler_task_means(d)
     return float(sum(tm.values()) / len(tm)) if tm else None
+
+
+def _ruler_avg_micro(d):
+    """RULER 平均（micro）：按每格样本数 n 加权，所有评测样例等权。
+
+    fwe 用 recall、其余任务用 EM（与 macro 口径相同），但不再让每个任务/
+    上下文格等权。macro 与 micro 并报，避免“平均”二字的歧义掩盖任务间
+    难度与格大小的不均。
+    """
+    if not isinstance(d, dict):
+        return None
+    results = d.get("results")
+    if not isinstance(results, dict):
+        return None
+    num, total = 0.0, 0.0
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or task.startswith("_")
+                or not isinstance(by_ctx, dict)):
+            continue
+        metric = "recall" if task == "fwe" else "em"
+        for cell in by_ctx.values():
+            if not isinstance(cell, dict):
+                continue
+            v, n = cell.get(metric), cell.get("n")
+            try:
+                v, n = float(v), float(n)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(v) or not math.isfinite(n) or n <= 0:
+                continue
+            num += v * n
+            total += n
+    return (num / total) if total > 0 else None
 
 
 def _ruler_min_cell_n(d):
@@ -1400,8 +1439,17 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     if ppl_map is not None and not isinstance(ppl_map, dict):
         return {"error": "ngram_baseline.json 的 ppl 不是 JSON 对象"}
     ppl_map = ppl_map or {}
-    ref_name = next((k for k in ("bigram", "unigram")
-                     if ppl_map.get(k) is not None), None)
+    # 优先用 n-gram 侧按 val 选出的“最强简单基线”，避免固定拿较弱
+    # bigram 当靶子；历史产物没有 selected_model 时再按插值→bigram→unigram
+    # 的强度顺序回退。
+    ref_name = None
+    sel = ng.get("selected_model")
+    if isinstance(sel, str) and ppl_map.get(sel) is not None:
+        ref_name = sel
+    if ref_name is None:
+        ref_name = next((k for k in ("interpolated_bigram", "bigram",
+                                     "unigram")
+                         if ppl_map.get(k) is not None), None)
     if ref_name is None:
         return {"error": "ngram_baseline.json 没有可用 PPL"}
     try:
@@ -1543,16 +1591,23 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "note": note}
 
 
-def _probe_oof(analysis: dict, key: str):
-    """从机制分析 JSON 取线性探针主特征集的 out-of-fold 指标。"""
+def _probe_oof(analysis: dict, key: str, subkey: str = None):
+    """从机制分析 JSON 取线性探针主特征集的 out-of-fold 指标。
+
+    subkey 用于嵌套指标（如 oof.f1.macro / oof.f1_tuned.macro）。
+    """
     lp = _as_dict(_as_dict(analysis).get("linear_probe"))
     fs = _as_dict(_as_dict(lp.get("feature_sets")).get(lp.get("primary") or ""))
-    return _as_dict(fs.get("oof")).get(key)
+    val = _as_dict(fs.get("oof")).get(key)
+    if subkey is not None:
+        return _as_dict(val).get(subkey)
+    return val
 
 
 # 机制判别的简单学习基线对照（补充性/探索性）：门控 logit 是语言建模的
 # 副产品、训练时从未见过 hit 标签；线性探针在同一批记录上用 hit 标签监督
-# 训练（按样例分组 CV、λ 按 OOF log-loss 调优，见 lega/probe.py）。
+# 训练（嵌套、按样例分组并按标签分层的 CV；λ/阈值只在内层 OOF 选，
+# 且 λ 按与主检验对齐的 PR-AUC/AUROC，见 lega/probe.py）。
 # Δ = 探针 − 门控：>0 表示简单监督基线更好（门控的“判别优越性”不成立），
 # ≈0 表示门控与最简线性模型打平，<0 才是门控在判别上显著更好。
 LINEAR_PROBE_AP_METRIC = "PR-AUC差(探针−门控)"
@@ -1587,11 +1642,17 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             probe_auroc = _num_or_none(oof.get("auroc"))
             if probe_auprc is None or probe_auroc is None:
                 continue
+            probe_f1_fixed = _num_or_none(
+                _as_dict(oof.get("f1")).get("macro"))
+            probe_f1_tuned = _num_or_none(
+                _as_dict(oof.get("f1_tuned")).get("macro"))
             per_seed.append({
                 # 无 seed 字段（_seed_key 返回 None）时按缺种子信息处理。
                 "seed": int(s) if s is not None else None,
                 "probe_auprc": probe_auprc,
                 "probe_auroc": probe_auroc,
+                "probe_f1_fixed": probe_f1_fixed,
+                "probe_f1_tuned": probe_f1_tuned,
                 "gate_auprc": _num_or_none(an.get("auprc_logit")),
                 "gate_auroc": _num_or_none(an.get("auroc_logit")),
                 "rule_auprc": _num_or_none(an.get("auprc_maxp")),
@@ -1620,6 +1681,8 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
         gate_auc_m, gate_auc_s = _ms("gate_auroc")
         rule_ap_m, _ = _ms("rule_auprc")
         rule_auc_m, _ = _ms("rule_auroc")
+        probe_f1_fixed_m, _ = _ms("probe_f1_fixed")
+        probe_f1_tuned_m, _ = _ms("probe_f1_tuned")
         base_m, _ = _ms("base_rate")
 
         def _test(key_p, key_g, metric):
@@ -1669,6 +1732,8 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             "gate_auroc": gate_auc_m, "gate_auroc_std": gate_auc_s,
             "delta_auprc": (sum(d_ap) / len(d_ap)) if d_ap else None,
             "delta_auroc": (sum(d_auc) / len(d_auc)) if d_auc else None,
+            "probe_f1_fixed": probe_f1_fixed_m,
+            "probe_f1_tuned": probe_f1_tuned_m,
         })
     tests = _apply_holm(tests_ap + tests_aud)
     for t in tests:
@@ -1702,8 +1767,9 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
         "metrics": {"ap": LINEAR_PROBE_AP_METRIC,
                     "auroc": LINEAR_PROBE_AUROC_METRIC},
         "rows": rows, "tests": tests, "missing": missing,
-        "note": ("线性探针=有标签监督的简单基线（同批记录、按样例分组 CV、"
-                 "λ 按 OOF log-loss 网格调优；OOF 指标防“背题”泄漏）；"
+        "note": ("线性探针=有标签监督的简单基线（同批记录、嵌套分组 CV、"
+                 "按 hit 标签分层；λ 在内层 OOF 按主指标选、阈值在内层 OOF "
+                 "按 macro-F1 选，最终 OOF 不参与选参）；"
                  "门控 logit 为语言建模副产品、训练未见 hit 标签。"
                  "Δ=探针−门控：>0 属预期（判别能力本可由线性模型从廉价"
                  "统计量学得），门控必须在主指标上不被探针显著超越才有"
@@ -1720,7 +1786,7 @@ def _render_baseline_sections(results_dir: str, smoke=None,
 
     科研方法问题：如果复杂方法只与“随手设一个学习率”的弱基线比较，
     涨点可能全部来自超参数红利。本小节渲染两类证据：
-      1. 简单基线（一元/二元平滑 n-gram）在同一 held-out split 上的 PPL，
+      1. 简单基线（一元/二元/插值二元平滑 n-gram）在同一 held-out split 上的 PPL，
          给出绝对难度参照，并（ngram_cmp 提供时）逐变体做同 split 的
          单样本配对检验，回答“神经模型是否显著优于无梯度基线”；
       2. 基线（standard）在验证集上的学习率/权重衰减网格调优结果与
@@ -1755,11 +1821,15 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         ppl_map = ppl_map if isinstance(ppl_map, dict) else {}
         uni = ppl_map.get("unigram")
         bi = ppl_map.get("bigram")
+        interp = ppl_map.get("interpolated_bigram")
         split = ngram.get("split")
         lines.append(
-            f"- 简单统计基线（train 拟合、{split} 评测，无梯度、无调参空间）："
+            f"- 简单统计基线（train 拟合、{split} 评测；无梯度；α/λ 只在 "
+            f"val 上按 mean NLL 选，仍属零训练基线）："
             f"一元平滑 PPL={_fmt_scalar_maybe(uni)}、"
-            f"二元平滑 PPL={_fmt_scalar_maybe(bi)}"
+            f"二元平滑 PPL={_fmt_scalar_maybe(bi)}、"
+            f"插值二元 PPL={_fmt_scalar_maybe(interp)}、"
+            f"val 选出的最强简单模型={ngram.get('selected_model') or '-'}"
             f"（训练 token {_int_or_zero(ngram.get('train_tokens')):,}、"
             f"评测 token {_int_or_zero(ngram.get('eval_tokens')):,}、"
             f"词表 {ngram.get('vocab_size')}）。主科学对比仍是神经变体之间；"
@@ -1783,16 +1853,18 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"n_eval={wspec.get('n_eval')}、"
                 f"共 {_int_or_zero(wspec.get('n_tokens')):,} 个评分 token），"
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
-                f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
-                f"（与全 split 口径同一选定 α）。")
+                f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}、"
+                f"插值二元 PPL={_fmt_scalar_maybe(wm.get('interpolated_bigram'))}"
+                f"（与全 split 口径同一选定 α/λ）。")
         elif wm and wspec:
             lines.append(
                 f"- 窗口规格参考值（按 n-gram 侧声明规格 ctx={wspec.get('ctx')}、"
                 f"iters={wspec.get('iters')}、n_eval={wspec.get('n_eval')}、"
                 f"共 {_int_or_zero(wspec.get('n_tokens')):,} 个评分 token）："
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
-                f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}"
-                f"（与全 split 口径同一选定 α）。⚠ 本次神经评测未全部满足该"
+                f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}、"
+                f"插值二元 PPL={_fmt_scalar_maybe(wm.get('interpolated_bigram'))}"
+                f"（与全 split 口径同一选定 α/λ）。⚠ 本次神经评测未全部满足该"
                 "窗口规格，实际比较已回退全 split 参考（见下方比较表），"
                 "这些数字不代表神经评测实际使用的 token 集合。")
         elif ngram.get("window_spec_error"):
@@ -1928,8 +2000,9 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             "",
             "| 变体 | n | 命中基线率 | 特征集 | PR-AUC规则(max_p) | "
             "PR-AUC探针(OOF) | PR-AUC门控(logit) | AUROC探针(OOF) | "
-            "AUROC门控(logit) | ΔPR-AUC(探针−门控) | p_adj | 判定 |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "AUROC门控(logit) | F1探针(macro,0.5) | F1探针(macro,调优) | "
+            "ΔPR-AUC(探针−门控) | p_adj | 判定 |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for r in probe["rows"]:
             feat = r.get("features")
@@ -1948,7 +2021,9 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"{_fmt4(r.get('probe_auprc'))} | "
                 f"{_fmt4(r.get('gate_auprc'))} | "
                 f"{_fmt4(r.get('probe_auroc'))} | "
-                f"{_fmt4(r.get('gate_auroc'))} | {delta_s} | "
+                f"{_fmt4(r.get('gate_auroc'))} | "
+                f"{_fmt4(r.get('probe_f1_fixed'))} | "
+                f"{_fmt4(r.get('probe_f1_tuned'))} | {delta_s} | "
                 f"{_fmt4(r.get('p_adj_auprc'))} | "
                 f"{r.get('verdict') or '-'} |")
         lines += ["", f"  {probe.get('note', '')}"]
@@ -1956,9 +2031,12 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             f"  注：命中基线率=hit 正类率，也是 PR-AUC 的随机猜基线；"
             f"主指标={next((r.get('primary_detection_metric') for r in probe['rows'] if r.get('primary_detection_metric')), 'n/a')}"
             f"（正类率 <5% 时 PR-AUC 为主，AUROC 因负类基数大而乐观）；"
-            f"探针 λ 逐变体按 OOF log-loss 网格选择（见 analysis_*.json "
-            f"的 linear_probe.per_l2）；PR-AUC 探针/OOF 与门控在同一样本上"
-            f"计算，Δ 的 CI 与 p_adj 见 significance.json。")
+            f"探针 λ 用嵌套分组 CV、在内层 OOF 上按主指标（PR-AUC 或 AUROC）"
+            f"选择，阈值在内层 OOF 上按 macro-F1 选择（见 analysis_*.json 的 "
+            f"linear_probe.per_fold / per_l2）；固定 0.5 阈值 F1 仅作与门控 "
+            f"g>0.5 的同口径对照，调优阈值 F1 才代表简单基线被充分调参后的"
+            f"决策能力。PR-AUC 探针/OOF 与门控在同一样本上计算，Δ 的 CI 与 "
+            f"p_adj 见 significance.json。")
     if probe.get("missing"):
         names = "、".join(f"{x.get('variant')}（{x.get('reason')}）"
                           for x in probe["missing"])
@@ -2339,6 +2417,8 @@ def build_summary(results_dir: str, audit: dict = None,
         ("eval_windows", lambda m: _stat_series(
             m, "eval", _eval_scalar("val_windows"))),
         ("ruler_avg", lambda m: _stat_series(m, "ruler", _ruler_avg_of)),
+        ("ruler_avg_micro", lambda m: _stat_series(
+            m, "ruler", _ruler_avg_micro)),
         ("ruler_min_n", lambda m: _stat_series(m, "ruler", _ruler_min_cell_n)),
     ]
     ruler_tasks = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
@@ -2349,7 +2429,8 @@ def build_summary(results_dir: str, audit: dict = None,
                  m, "ruler", lambda d: _ruler_task_means(d).get(t)))(task)))
     for key in ("auroc_logit", "auroc_qterm", "misleading_rate",
                 "misleading_given_conc", "p_hit_given_conc",
-                "auprc_logit", "auprc_qterm", "hit_base_rate"):
+                "auprc_logit", "auprc_qterm", "hit_base_rate",
+                "brier_g", "ece_g", "brier_g_constant", "brier_g_skill"):
         metric_specs.append(
             (key, (lambda k: lambda m: _stat_series(
                 m, "analysis", _clock_extractor(k)))(key)))
@@ -2376,6 +2457,20 @@ def build_summary(results_dir: str, audit: dict = None,
     metric_specs.append(
         ("probe_auroc", lambda m: _stat_series(
             m, "analysis", lambda d: _probe_oof(d, "auroc"))))
+    metric_specs.append(
+        ("probe_f1_fixed", lambda m: _stat_series(
+            m, "analysis",
+            lambda d: _probe_oof(d, "f1", "macro"))))
+    metric_specs.append(
+        ("probe_f1_tuned", lambda m: _stat_series(
+            m, "analysis",
+            lambda d: _probe_oof(d, "f1_tuned", "macro"))))
+    metric_specs.append(
+        ("probe_brier", lambda m: _stat_series(
+            m, "analysis", lambda d: _probe_oof(d, "brier"))))
+    metric_specs.append(
+        ("probe_ece", lambda m: _stat_series(
+            m, "analysis", lambda d: _probe_oof(d, "ece"))))
 
     rows = []
     for v in variants:
@@ -2524,7 +2619,8 @@ def build_summary(results_dir: str, audit: dict = None,
           f"PPL/RULER 为跨随机种子的 Mean ± Std（变体间同种子配对，"
           f"显著性经 Holm–Bonferroni 校正），运行时指标在相同配置下测得。", ""]
     if rows:
-        stat_keys = {"val_ppl", "ruler_avg", "gate_mean", "misleading_rate",
+        stat_keys = {"val_ppl", "ruler_avg", "ruler_avg_micro",
+                     "gate_mean", "misleading_rate",
                      "misleading_given_conc", "auroc_logit", "auroc_qterm",
                      "auprc_logit", "auprc_qterm", "hit_base_rate",
                      "gate_f1_macro", "gate_f1_macro_always_write",
@@ -2613,8 +2709,59 @@ def build_summary(results_dir: str, audit: dict = None,
                       "RULER 的变体差异只能作方向性线索；逐格区间见 "
                       "ruler_*.json 的 `em_ci95_wilson`，正式结论需增大 "
                       "`ruler.n_samples` 后重跑。"]
+        # RULER 平均口径：macro 与 micro 可能因任务/格大小不均而不同。
+        # “平均”不注明定义就等于给读者留了事后择优的空间，这里显式固定
+        # 预注册口径（macro）并给出样本加权口径供对照。
+        rul_rows = [r for r in rows if r.get("ruler_avg") is not None]
+        if rul_rows:
+            md += ["", "### RULER 平均口径（macro / micro）", "",
+                   "macro = 各任务内先对上下文档位等权平均，再对任务等权平均"
+                   "（预注册“RULER平均”固定指此口径）；micro = 按每格样本数 n "
+                   "加权（所有评测样例等权）。fwe 用 recall、其余任务用 EM。"
+                   "两者差异大说明任务难度/每格样本数不均衡会改变“平均分”"
+                   "的读法，结论应同时对照逐任务列与 Wilson CI。", "",
+                   "| 变体 | RULER平均 macro↑ | RULER平均 micro↑ | "
+                   "macro−micro |", "|---|---|---|---|"]
+            for r in rul_rows:
+                macro, micro = r.get("ruler_avg"), r.get("ruler_avg_micro")
+                gap = (macro - micro
+                       if macro is not None and micro is not None else None)
+                md.append(f"| {r.get('variant_cn') or r.get('variant')} | "
+                          f"{_fmt4(macro)} | {_fmt4(micro)} | {_fmt4(gap)} |")
     else:
         md.append("（暂无结果，先运行训练评测）")
+
+    # --- 门控概率校准：排序好 ≠ 概率数值可信。g 被当作“该不该写入”的
+    #     软权重/概率使用，Brier/ECE 必须与 AUROC/PR-AUC 分开报告。
+    cal_rows = [r for r in rows
+                if r.get("brier_g") is not None
+                or r.get("probe_brier") is not None]
+    if cal_rows:
+        md += ["", "### 门控概率校准（Brier / ECE）", "",
+               "排序指标回答“能不能区分 hit/¬hit”，校准回答“g 的数值是否"
+               "可信”。Brier 越小越好；常数基率预测（永远输出 hit_base_rate）"
+               "的 Brier 是无信息基线，`Brier skill=1−Brier/Brier_常数` >0 "
+               "才说明概率预测优于常数。ECE 为 10 个等宽分箱的加权平均"
+               "|置信−准确率|，样本少/正类稀少时只能作描述性证据；线性探针"
+               "为有标签监督的 OOF 概率，门控 g 为语言建模副产品，两者"
+               "校准口径不同，不能只凭 Brier 判定方法优劣。", "",
+               "| 变体 | 命中基线率 | 门控Brier↓ | 常数基率Brier | "
+               "Brier skill↑ | 门控ECE↓ | 探针Brier↓ | 探针ECE↓ |",
+               "|---|---|---|---|---|---|---|---|"]
+        for r in cal_rows:
+            md.append(
+                f"| {r.get('variant_cn') or r.get('variant')} | "
+                f"{_fmt4(r.get('hit_base_rate'))} | "
+                f"{_fmt4(r.get('brier_g'))} | "
+                f"{_fmt4(r.get('brier_g_constant'))} | "
+                f"{_fmt4(r.get('brier_g_skill'))} | "
+                f"{_fmt4(r.get('ece_g'))} | "
+                f"{_fmt4(r.get('probe_brier'))} | "
+                f"{_fmt4(r.get('probe_ece'))} |")
+        md += ["",
+               "注：门控 Brier/ECE 与固定 0.5 阈值无关；它们评估的是 g 的"
+               "概率数值，而不是某个决策点的 F1。逐分箱的置信/准确率、"
+               "n 与 gap 见 `analysis_*.json` 的 `calibration_g.bins`。"]
 
     # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线
     #     + 机制判别的线性探针简单监督基线）
@@ -3723,7 +3870,7 @@ def main():
                         "单种子选择可能被 val_loss 噪声左右（winner's curse），"
                         "正式实验建议给 ≥3 个（网格配置数 × 种子数 次训练）")
     p.add_argument("--skip_ngram", action="store_true",
-                   help="跳过简单统计基线（一元/二元平滑 n-gram PPL）")
+                   help="跳过简单统计基线（一元/二元/插值二元平滑 n-gram PPL）")
     p.add_argument("--ngram_split", default="auto",
                    choices=["auto", "val", "test"],
                    help="n-gram 基线评测 split；auto（默认）与 lega.evaluate 的 "
@@ -3821,8 +3968,9 @@ def main():
         print(f"[tuning] 全部变体改用调优后配置: lr={cfg['lr']:.3g} "
               f"wd={cfg['weight_decay']:.3g} -> {tuned_path}")
 
-    # 简单统计基线：一元/二元平滑 n-gram 的 held-out PPL，给出“数据绝对难度”
-    # 参照（零训练零参数；平滑系数只在 val 上选）。split 默认 auto：与神经
+    # 简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL，给出
+    # “数据绝对难度”参照（零训练；平滑系数/插值权重只在 val 上选）。split
+    # 默认 auto：与神经
     # 模型的评测 split 完全一致（test.bin 存在且非空 → held-out test），
     # 否则汇总页的“神经 vs 统计基线”会变成 test-vs-val 的错位比较。
     if not args.skip_ngram:
@@ -3839,9 +3987,14 @@ def main():
             print(f"[ngram] 简单基线 {ngram_split} PPL: "
                   f"unigram={ng['ppl'].get('unigram')} "
                   f"bigram={ng['ppl'].get('bigram')} "
-                  f"(α={ng['selected_alpha']})；"
+                  f"interp={ng['ppl'].get('interpolated_bigram')} "
+                  f"(α={ng['selected_alpha']}, "
+                  f"interp={ng.get('selected_interpolated')}, "
+                  f"selected={ng.get('selected_model')})；"
                   f"窗口对齐 PPL: unigram={wm.get('unigram')} "
-                  f"bigram={wm.get('bigram')}（spec={ng.get('window_spec')}）")
+                  f"bigram={wm.get('bigram')} "
+                  f"interp={wm.get('interpolated_bigram')}"
+                  f"（spec={ng.get('window_spec')}）")
         except (OSError, ValueError) as e:
             print(f"[run_all] ⚠ n-gram 基线跳过：{e}")
 

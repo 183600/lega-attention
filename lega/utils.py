@@ -749,6 +749,64 @@ def roc_pr_aucs(scores, labels):
     return auc, ap
 
 
+def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
+    """概率校准指标：Brier、ECE、MCE 与可靠性分箱。
+
+    为什么需要：门控 g 是 sigmoid 输出，被当作“该不该写入”的概率/软权重
+    使用；AUROC/PR-AUC 只衡量排序，无法回答“g=0.8 时命中率是否真的约
+    80%”。Brier 是严格评分规则（越小越好），ECE 是分箱后的 |置信−准确率|
+    加权平均；两者与常数基率预测（Brier 基线）并报，才能区分“排序好”
+    与“校准好”。ECE 依赖等宽分箱，样本少时噪声大，只作描述性证据。
+
+    返回 {n, n_pos, base_rate, brier, brier_constant, brier_skill,
+    ece, mce, n_bins, bins}；分数先 clip 到 [0,1]，非有限值与非法标签剔除；
+    单一类别时 brier 仍可算，但 ECE 的“校准”语义不完整，返回 None。
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.float64)
+    m = np.isfinite(scores) & ((labels == 0.0) | (labels == 1.0))
+    scores, labels = scores[m], labels[m]
+    n = int(scores.size)
+    if n == 0:
+        return {"n": 0, "n_pos": 0, "base_rate": None, "brier": None,
+                "brier_constant": None, "brier_skill": None, "ece": None,
+                "mce": None, "n_bins": int(n_bins), "bins": []}
+    scores = np.clip(scores, 0.0, 1.0)
+    n_pos = int((labels == 1.0).sum())
+    base_rate = float(n_pos / n)
+    brier = float(np.mean((scores - labels) ** 2))
+    brier_constant = float(np.mean((base_rate - labels) ** 2))
+    skill = (1.0 - brier / brier_constant
+             if brier_constant > 0 else None)
+    out = {"n": n, "n_pos": n_pos, "base_rate": base_rate,
+           "brier": brier, "brier_constant": brier_constant,
+           "brier_skill": skill, "ece": None, "mce": None,
+           "n_bins": int(n_bins), "bins": []}
+    if len(set(labels.tolist())) != 2 or n_bins < 1:
+        return out
+    idx = np.clip((scores * n_bins).astype(np.int64), 0, n_bins - 1)
+    ece, mce, bins = 0.0, 0.0, []
+    for b in range(n_bins):
+        mb = idx == b
+        nb = int(mb.sum())
+        if nb == 0:
+            bins.append({"bin": b, "n": 0, "mean_score": None,
+                         "mean_label": None, "gap": None})
+            continue
+        mean_score = float(scores[mb].mean())
+        mean_label = float(labels[mb].mean())
+        gap = abs(mean_score - mean_label)
+        ece += (nb / n) * gap
+        mce = max(mce, gap)
+        bins.append({"bin": b, "n": nb, "mean_score": mean_score,
+                     "mean_label": mean_label, "gap": gap,
+                     "lo": b / n_bins, "hi": (b + 1) / n_bins})
+    out["ece"] = float(ece)
+    out["mce"] = float(mce)
+    out["bins"] = bins
+    return out
+
+
 def f1_scores(y_true, y_pred, labels=None) -> dict:
     """二/多分类 F1：同时给出 macro / micro / weighted 三种平均口径与逐类明细。
 
