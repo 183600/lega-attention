@@ -768,6 +768,33 @@ def test_build_data_report_emits_threshold_alerts():
     print("  [ok] 数据自检告警：重叠/漂移/OOV/坏字符行/去污染/超长行均可审计")
 
 
+def test_build_data_report_flags_normalized_and_short_intra_duplicates():
+    """val/test 内部重复告警必须覆盖归一化重复，且不能把短行重复漏掉。
+
+    decontaminate_texts 的 intra-split 统计覆盖所有非空行，归一化计数也包含
+    精确重复；报告若只读精确计数会把“仅空白差异”的重复静默掉，文案写
+    “长行”还会与统计口径矛盾。
+    """
+    duplicates = {
+        "val_intra_split_duplicate_lines": 0,
+        "val_intra_split_normalized_duplicate_lines": 2,
+        "test_intra_split_duplicate_lines": 1,
+        "test_intra_split_normalized_duplicate_lines": 3,
+    }
+    rep = build_data_report(
+        {"kind": "char", "fit_on": "train", "vocab_size": 5, "unk_rate": {}},
+        {}, {}, duplicates, {}, {}, {})
+    by_code = {a["code"]: a for a in rep["alerts"]}
+    assert "val_intra_duplicates" in by_code
+    assert "test_intra_duplicates" in by_code
+    val_msg = by_code["val_intra_duplicates"]["message"]
+    test_msg = by_code["test_intra_duplicates"]["message"]
+    assert "2" in val_msg and "精确 0" in val_msg
+    assert "3" in test_msg and "精确 1" in test_msg
+    assert "长行" not in val_msg and "长行" not in test_msg
+    print("  [ok] 内部重复告警：归一化差异与短行重复均可见，文案口径一致")
+
+
 def test_split_protocol_alerts_flag_group_crossing():
     """群组跨 split / 字符切分 / 打乱必须在 alerts 中显式告警，不能只留在元数据。"""
     assert split_protocol_alerts(None) == []

@@ -976,9 +976,18 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
             "须核查/重建划分")
     for split in ("val", "test"):
         n_dup = _count(dup.get(f"{split}_intra_split_duplicate_lines"))
-        if n_dup:
+        n_dup_norm = _count(
+            dup.get(f"{split}_intra_split_normalized_duplicate_lines"))
+        if n_dup or n_dup_norm:
+            # 统计键覆盖所有非空行（含短行），且归一化计数包含精确重复；
+            # 只读精确计数会漏掉“仅空白/NFKC 差异”的重复，文案也不能写成
+            # “长行”（与 decontaminate_texts 的口径不一致）。
+            if n_dup_norm:
+                detail = (f"空白归一化后 {n_dup_norm} 条（其中精确 {n_dup} 条）")
+            else:
+                detail = f"精确 {n_dup} 条"
             add("info", f"{split}_intra_duplicates",
-                f"{split} 内部有 {n_dup} 条重复长行（未改写，避免破坏尘封；"
+                f"{split} 内部有重复行：{detail}（未改写，避免破坏尘封；"
                 "重复会高估评测有效样本量，解读置信区间时须注意）")
     text_stats = text_stats if isinstance(text_stats, dict) else {}
     for split, st in text_stats.items():
