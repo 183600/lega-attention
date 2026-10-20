@@ -54,6 +54,22 @@ def test_temporal_split_keeps_documents_whole():
     print("  [ok] 时序划分：文档整体不跨 split，train<val<test，无打乱")
 
 
+def test_temporal_split_handles_crlf_headings():
+    """CRLF 语料的标题/空行边界必须被识别，否则文档会跨 split。"""
+    docs = [f"= Doc {i} =\r\n" + " ".join(f"word{j}" for j in range(20)) + "."
+            for i in range(40)]
+    text = "\r\n\r\n".join(docs) + "\r\n"
+    train, val, test, info = temporal_split_text(text)
+    assert train + val + test == text
+    assert info["n_headings"] == 40
+    assert info["documents_cross_cut"] is False
+    parts = {"train": train, "val": val, "test": test}
+    for i, doc in enumerate(docs):
+        where = [k for k, p in parts.items() if doc in p]
+        assert len(where) == 1, f"CRLF 文档 {i} 出现在 {where}"
+    print("  [ok] 时序划分：CRLF 标题/空行边界可识别，文档不跨 split")
+
+
 def test_temporal_split_single_line_fallback():
     text = "x" * 3000
     train, val, test, info = temporal_split_text(text, window_frac=0.01)
@@ -170,11 +186,12 @@ def test_temporal_split_reports_document_crossing():
 def test_heading_regex_matches_multilevel_wikitext_headings():
     from lega.datacheck import _HEADING_RE
     for line in ("= Title =", "== Section ==", "=== Sub ===",
-                 "= = Section = =", "= = = Sub = = =", "==NoSpace=="):
+                 "= = Section = =", "= = = Sub = = =", "==NoSpace==",
+                 "= Title =\r", "== Section ==\r"):
         assert _HEADING_RE.match(line), f"应视为标题: {line!r}"
     for line in ("x = y = z", "plain text", "= = ", "= = =", ""):
         assert not _HEADING_RE.match(line), f"不应视为标题: {line!r}"
-    print("  [ok] 标题正则：一级/多级（含 WikiText-103 分隔写法）标题行均可识别")
+    print("  [ok] 标题正则：一级/多级（含 WikiText-103 分隔写法/CRLF）均可识别")
 
 
 def test_decontaminate_drops_train_duplicates_only():

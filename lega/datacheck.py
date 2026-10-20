@@ -50,7 +50,7 @@ _BAD_CHAR_RE = re.compile(r"[\ufffd\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # 兼容 `= Title =`、`== Section ==`、`=== Sub ===` 及 WikiText-103 原始
 # 语料的分隔写法 `= = Section = =`、`= = = Sub = = =`。
 _HEADING_RE = re.compile(
-    r"(?m)^[ \t]*(?:=[ \t]*)+[^=\s\n][^\n]*?(?:[ \t]*=)+[ \t]*$")
+    r"(?m)^[ \t]*(?:=[ \t]*)+[^=\s\r\n][^\r\n]*?(?:[ \t]*=)+[ \t]*\r?$")
 
 
 # ---------------------------------------------------------------- 文本清洗
@@ -634,7 +634,8 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
 # ---------------------------------------------------------------- 时序划分
 
 _NEWLINE_RE = re.compile("\n")
-_BLANK_LINE_RE = re.compile(r"(?<=\n)\n")
+# 空行：两个换行之间只允许空白（兼容 CRLF 与“有空格的行”）。
+_BLANK_LINE_RE = re.compile(r"(?<=\n)[ \t\r]*\n")
 
 
 def _boundary_candidates(text: str, lo: int, hi: int, kind: str):
@@ -650,7 +651,9 @@ def _boundary_candidates(text: str, lo: int, hi: int, kind: str):
             positions.append(lo + m.start())
         return positions
     if kind == "blank":
-        return [lo + m.start() + 1 for m in _BLANK_LINE_RE.finditer(seg)]
+        # 候选点是第二个换行之后（即下一个内容行起点）；CRLF/含空白的空行
+        # 需要用到 m.end() 而不是 m.start()+1。
+        return [lo + m.end() for m in _BLANK_LINE_RE.finditer(seg)]
     return [lo + m.start() + 1 for m in _NEWLINE_RE.finditer(seg)]
 
 
