@@ -497,6 +497,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     early_stop_runs = []
     actual_meta = []
     eval_protocols = []
+    selection_points = []
     eval_protocol_missing = []
     attention_backends = {}
     attention_key_seen = False
@@ -568,6 +569,15 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             actual_meta.append((f"{v}/seed{seed}", ev.get("steps"),
                                 ev.get("tokens_seen"), early_stopped,
                                 meta["steps_planned"]))
+            steps_planned_here = meta["steps_planned"]
+            sel_step = _integral_value(ev.get("ckpt_step"))
+            if sel_step is not None:
+                sel_frac = (sel_step / steps_planned_here
+                            if isinstance(steps_planned_here, (int, float))
+                            and not isinstance(steps_planned_here, bool)
+                            and steps_planned_here > 0 else None)
+                selection_points.append((f"{v}/seed{seed}", sel_step,
+                                         steps_planned_here, sel_frac))
             if early_stopped:
                 early_stop_runs.append(f"{v}/seed{seed}(step {ev.get('steps')}"
                                        f"/{meta['steps_planned']})")
@@ -685,6 +695,18 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               f"（{', '.join(early_stop_runs[:6])}"
               + (" ..." if len(early_stop_runs) > 6 else "")
               + "）；实际训练步数不等，预注册判定将按计划步数核对并降级为探索性")
+    # checkpoint 选型步分布：val-loss 最优点的训练步是否在变体间差异过大
+    # （同一预算下“过早选中 vs 接近末步选中”可能不是公平对照）。只报告，
+    # 不作为强制失败，以免污染既有实验流水线；但在汇总中已经有展示列。
+    sel_spread = None
+    if selection_points:
+        fracs = [p[3] for p in selection_points if p[3] is not None]
+        if len(fracs) >= 2:
+            sel_spread = {
+                "n": len(fracs),
+                "min": min(fracs), "max": max(fracs),
+                "span": max(fracs) - min(fracs),
+            }
     return {"ok": not (mismatches or meta_mismatches), "checked": checked,
             "eval_protocol_checked": len(eval_protocols),
             "eval_protocol_missing": eval_protocol_missing,
@@ -695,6 +717,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             "meta_checked": meta_checked, "missing_evals": meta_missing,
             "meta_mismatches": meta_mismatches,
             "early_stop_runs": early_stop_runs,
+            "selection_step_points": selection_points,
+            "selection_step_spread": sel_spread,
             "expected_data_digest": expected_data_digest,
             "exempt_keys": sorted(_AUDIT_EXEMPT_KEYS)}
 
