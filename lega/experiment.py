@@ -90,6 +90,20 @@ def read_records(path: str) -> list:
     return out
 
 
+def _ledger_seed(value):
+    if isinstance(value, bool):
+        raise ValueError("bool 不是合法种子")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(f"非整数种子: {value!r}")
+        return int(value)
+    if isinstance(value, str):
+        return int(value)
+    raise TypeError(f"不支持的种子类型: {type(value).__name__}")
+
+
 def verify_ledger(path: str = None, check_artifacts: bool = False,
                   root: str = None, max_reported: int = 20) -> dict:
     """核验台账完整性：生命周期链与（可选）产物哈希。
@@ -161,7 +175,8 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     run_issues.append("runs_malformed")
                 continue
             try:
-                expected = {(str(v), int(s)) for v in variants for s in seeds}
+                expected = {(str(v), _ledger_seed(s))
+                            for v in variants for s in seeds}
             except (TypeError, ValueError, OverflowError):
                 run_issues.append("runs_expected_unparseable")
                 continue
@@ -175,7 +190,7 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     malformed += 1
                     continue
                 try:
-                    actual_list.append((str(v), int(s)))
+                    actual_list.append((str(v), _ledger_seed(s)))
                 except (TypeError, ValueError, OverflowError):
                     malformed += 1
             actual = set(actual_list)

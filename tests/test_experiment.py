@@ -390,3 +390,33 @@ def test_verify_ledger_tolerates_nonfinite_seed_values():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：非有限种子显式报畸形，不崩溃")
+
+def test_verify_ledger_rejects_fractional_seed_values():
+    """小数种子不能被 int() 截断后冒充整数种子参与覆盖核对。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        append_record(path, {"run_id": "bad-expected", "status": "started",
+                             "variants": ["lega"], "seeds": [1, 1.5]})
+        append_record(path, {"run_id": "bad-expected", "status": "completed",
+                             "variants": ["lega"], "seeds": [1, 1.5],
+                             "runs": [{"variant": "lega", "seed": 1}]})
+        append_record(path, {"run_id": "bad-run", "status": "started",
+                             "variants": ["lega"], "seeds": [1]})
+        append_record(path, {"run_id": "bad-run", "status": "completed",
+                             "variants": ["lega"], "seeds": [1],
+                             "runs": [{"variant": "lega", "seed": 1.5}]})
+        append_record(path, {"run_id": "ok", "status": "started",
+                             "variants": ["lega"], "seeds": [1, 2]})
+        append_record(path, {"run_id": "ok", "status": "completed",
+                             "variants": ["lega"], "seeds": [1, 2],
+                             "runs": [{"variant": "lega", "seed": 1},
+                                      {"variant": "lega", "seed": 2}]})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        assert "runs_expected_unparseable" in by_id["bad-expected"]["issues"]
+        assert "runs_malformed" in by_id["bad-run"]["issues"]
+        assert "ok" not in by_id, by_id
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：小数种子显式报畸形，不截断为整数")
