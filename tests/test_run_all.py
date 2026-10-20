@@ -1091,7 +1091,7 @@ def test_budget_gate_downgrades_confirmatory_on_early_stop():
     unchanged = [{"id": "H1", "confirmatory_valid": True}]
     assert apply_budget_gate(unchanged, {"early_stop_runs": []})[0][
         "confirmatory_valid"] is True
-    print("  [ok] 早停预算门：确认性判定降级为探索性，不覆盖既有降级原因")
+    print("  [ok] 早停门：确认性判定降级为探索性，不覆盖既有降级原因")
 
 
 def test_build_summary_marks_early_stop_run():

@@ -526,7 +526,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         print(f"[audit] 早停启用：{len(early_stop_runs)} 个 run 未跑满计划步数"
               f"（{', '.join(early_stop_runs[:6])}"
               + (" ..." if len(early_stop_runs) > 6 else "")
-              + "）；实际训练预算不等，预注册判定将按计划步数核对并降级为探索性")
+              + "）；实际训练步数不等，预注册判定将按计划步数核对并降级为探索性")
     return {"ok": not (mismatches or meta_mismatches), "checked": checked,
             "missing_configs": missing, "mismatches": mismatches,
             "attention_backends": attention_backends,
@@ -1422,7 +1422,7 @@ def apply_scope_gate(hyp_eval: list, scope_check: dict) -> list:
 def apply_budget_gate(hyp_eval: list, audit: dict) -> list:
     """早停导致实际训练量不等时，确认性判定显式降级。
 
-    对比实验要求除待验证模块外的训练预算一致；早停按各变体自己的验证曲线
+    对比实验要求除待验证模块外的训练步数一致；早停按各变体自己的验证曲线
     停在不同步数，实际 tokens_seen 因变体而异。计划步数相同并不能消除
     “有效训练量不同”这一混杂，因此确认性结论降级为探索性，直到用相同
     实际步数重跑。
@@ -3058,7 +3058,7 @@ def build_summary(results_dir: str, audit: dict = None,
                     f"计划步数（{', '.join(stopped[:8])}"
                     + (" …" if len(stopped) > 8 else "")
                     + "）：实际步数/tokens_seen 因验证曲线不同而不同，"
-                    "有效训练预算不等；受控变量按计划步数核对，但预注册"
+                    "有效训练量不等；受控变量按计划步数核对，但预注册"
                     "确认性判定已自动降级为探索性（见 `significance.json` "
                     "的 registered_hypotheses）。逐 run 实际步数与 tokens_seen "
                     "见各 eval.json。")
