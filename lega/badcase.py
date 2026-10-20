@@ -665,7 +665,18 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             # 不把它冒充成这批窗口自身的比例。
             gic = ana.get("gold_in_context_rate")
             scope = "全部最差窗口中"
-        if gic is not None and gic >= 0.5:
+        if gic is None:
+            # 旧格式/导出缺失 gold_in_context：既不能断言“看得到没抄对”，
+            # 也不能把未知当成“gold 从未出现”，先补齐证据再归因。
+            recs.append(_advice(
+                "评测/导出", "中",
+                f"高置信错答占 {cb}/{n}，但缺少 gold_in_context 记录，"
+                "无法判断是检索失败还是长尾预测失败",
+                "先补齐窗口级 gold 可见性再决定改结构还是扩数据；把未知"
+                "当成“从未出现”会低估复制/检索机制的问题",
+                "用当前 evaluate 重跑 worst_windows（写入完整窗口的 "
+                "gold_in_context），或从原窗口重新计算 gold 是否出现"))
+        elif gic >= 0.5:
             recs.append(_advice(
                 "模型/方法", "高",
                 f"高置信错答占 {cb}/{n}，且{scope} {gic:.0%} 的 gold 在上下文中",

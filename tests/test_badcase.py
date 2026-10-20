@@ -816,6 +816,19 @@ def test_window_advice_uses_confident_bias_subset_rate():
                for r in tiny["recommendations"])
 
 
+def test_window_advice_does_not_claim_unknown_gold_visibility():
+    """gold_in_context 未知时不能断言 gold 不在上下文（未知≠未出现）。"""
+    wins = [_win(tail=None, gold="zzz",
+                 pred_top5=[[" red", 0.85]]) for _ in range(3)]
+    ana = analyze_worst_windows(wins, variant="lega")
+    assert ana["gold_in_context_rate"] is None
+    cb = [r for r in ana["recommendations"] if "高置信" in r["trigger"]]
+    assert cb and "无法判断" in cb[0]["trigger"], cb
+    assert "大多不在上下文中" not in cb[0]["trigger"]
+    assert cb[0]["axis"] == "评测/导出"
+    print("  [ok] 高置信错答：gold 可见性未知时不伪造“未出现”结论")
+
+
 def test_cross_improvement_reports_fixed_only_variant():
     """仅改对错误、没有新增错误的变体也必须得到净收益提示。"""
     bad = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
