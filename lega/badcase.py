@@ -174,6 +174,11 @@ def _share(count: int, total: int) -> float:
     return (count / total) if total else 0.0
 
 
+def _report_total(reported: int, counts: List[tuple]) -> int:
+    """报告分母至少覆盖显式总数与各类别计数之和，坏 JSON 也不出现 >100%。"""
+    return max(int(reported), sum(n for _, n in counts if n > 0))
+
+
 def _advice(axis: str, priority: str, trigger: str, suggestion: str,
             next_experiment: str) -> Dict:
     """一条可执行的改进方向（字段固定，便于汇总去重与结构化消费）。"""
@@ -360,23 +365,26 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
     analysis = analysis if isinstance(analysis, dict) else {}
     md = [f"# 坏案例分析：{analysis.get('variant') or '-'}", ""]
     try:
-        n_badcases = int(analysis.get("n_badcases") or 0)
+        n_badcases = max(0, int(analysis.get("n_badcases") or 0))
     except (TypeError, ValueError, OverflowError):
         n_badcases = 0
-    if not n_badcases:
+    counts = analysis.get("category_counts")
+    counts = counts if isinstance(counts, dict) else {}
+    clean = []
+    for cat, n in counts.items():
+        try:
+            n = int(n)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if n < 0:
+            continue
+        clean.append((cat, n))
+    total = _report_total(n_badcases, clean)
+    if not total:
         md.append("本变体无预测错误样本（或评测被跳过）。")
     else:
-        md += [f"共 {n_badcases} 条错误样本；归因分布：", "",
+        md += [f"共 {total} 条错误样本；归因分布：", "",
                "| 类别 | 数量 | 占比 |", "|---|---|---|"]
-        total = n_badcases
-        counts = analysis.get("category_counts")
-        counts = counts if isinstance(counts, dict) else {}
-        clean = []
-        for cat, n in counts.items():
-            try:
-                clean.append((cat, int(n)))
-            except (TypeError, ValueError, OverflowError):
-                continue
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
         axis = analysis.get("axis_counts")
@@ -405,7 +413,7 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
         cases = cases if isinstance(cases, list) else []
         for i, c in enumerate(cases[:max_cases], 1):
             md += [""] + format_case(i, c)
-        if n_badcases > max_cases:
+        if total > max_cases:
             md.append(f"\n（仅展示前 {max_cases} 条，完整结构化数据见同目录 "
                       "badcase_summary.json）")
     # 改进方向对"零错误"同样给出（提示零错误的解释边界）
@@ -800,23 +808,26 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
     analysis = analysis if isinstance(analysis, dict) else {}
     md = [f"# 语言建模最差窗口归因：{analysis.get('variant') or '-'}", ""]
     try:
-        n_windows = int(analysis.get("n_windows") or 0)
+        n_windows = max(0, int(analysis.get("n_windows") or 0))
     except (TypeError, ValueError, OverflowError):
         n_windows = 0
-    if not n_windows:
+    counts = analysis.get("category_counts")
+    counts = counts if isinstance(counts, dict) else {}
+    clean = []
+    for cat, n in counts.items():
+        try:
+            n = int(n)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if n < 0:
+            continue
+        clean.append((cat, n))
+    total = _report_total(n_windows, clean)
+    if not total:
         md.append("本变体无最差窗口记录（评测被跳过或 --worst_n=0）。")
     else:
-        md += [f"共 {n_windows} 个最差窗口；归因分布：", "",
+        md += [f"共 {total} 个最差窗口；归因分布：", "",
                "| 类别 | 数量 | 占比 |", "|---|---|---|"]
-        total = n_windows
-        counts = analysis.get("category_counts")
-        counts = counts if isinstance(counts, dict) else {}
-        clean = []
-        for cat, n in counts.items():
-            try:
-                clean.append((cat, int(n)))
-            except (TypeError, ValueError, OverflowError):
-                continue
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {WINDOW_CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
         stats = []

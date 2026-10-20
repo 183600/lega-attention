@@ -889,6 +889,35 @@ def test_categorize_window_tolerates_malformed_top5_and_tail():
     print("  [ok] 窗口归因：畸形 pred_top5/context_tail 安全降级")
 
 
+def test_write_reports_denominator_covers_category_counts():
+    """外部/旧版 summary 的计数之和与总数不一致时，占比仍不得超过 100%。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p1 = os.path.join(tmp, "badcase.md")
+        p2 = os.path.join(tmp, "worst.md")
+        write_badcase_md({
+            "variant": "lega", "n_badcases": 2,
+            "category_counts": {"copy_distractor": 3, "hallucinated": -1,
+                                "no_answer": "bad"},
+        }, p1)
+        text = open(p1, encoding="utf-8").read()
+        assert "共 3 条错误样本" in text, text
+        assert "100.0%" in text and "150.0%" not in text, text
+        write_worstcase_md({
+            "variant": "lega", "n_windows": 1,
+            "category_counts": {"confident_bias": 2},
+        }, p2)
+        text2 = open(p2, encoding="utf-8").read()
+        assert "共 2 个最差窗口" in text2, text2
+        assert "100.0%" in text2 and "200.0%" not in text2, text2
+        # 总数合法但计数缺失时仍以总数作分母
+        write_badcase_md({"n_badcases": 4, "category_counts": {}}, p1)
+        assert "共 4 条错误样本" in open(p1, encoding="utf-8").read()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 报告分母覆盖类别计数，坏 summary 不出现 >100% 占比")
+
+
 def test_write_reports_tolerate_malformed_analysis():
     """手改/旧版 analysis dict 缺字段或类型错误时，报告仍能写出。"""
     tmp = tempfile.mkdtemp()
