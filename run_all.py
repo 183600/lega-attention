@@ -2392,6 +2392,20 @@ def _eff_cell(entry, key, ctx):
         return _num_or_none(eff.get("n_params") or entry.get("n_params"))
     if key == "params_mb":
         return _num_or_none(eff.get("params_mb"))
+    if key == "kv_mem":
+        # 优先取 latency.json 已按 ctx 落盘的值；旧格式只有 per-token 时
+        # 按 ctx 线性换算（KV cache 大小随上下文长度线性增长）。
+        by_ctx = eff.get("kv_cache_mb_at_ctx")
+        if isinstance(by_ctx, dict):
+            v = _num_or_none(by_ctx.get(str(ctx)))
+            if v is not None:
+                return v
+        per_tok = _num_or_none(eff.get("kv_cache_mb_per_tok"))
+        if per_tok is not None:
+            try:
+                return per_tok * float(ctx)
+            except (TypeError, ValueError):
+                return None
     return None
 
 
@@ -3895,9 +3909,10 @@ def build_summary(results_dir: str, audit: dict = None,
         base_decode = _lat_metric_at(base_e, "decode_ms_per_tok", common_ctx)
         base_params = _eff_cell(base_e, "params", common_ctx)
         base_flops = _eff_cell(base_e, "flops", common_ctx)
+        base_kv = _eff_cell(base_e, "kv_mem", common_ctx)
         md.append(f"基线={lat_base_name}（公共 ctx={common_ctx}、batch=1）。增幅="
                   "Prefill ms/Decode ms(tok)/训练 ms(step)/训练进程峰值/参数量/"
-                  "FLOPs(token)/量测分配量 相对基线增幅的最大值（Prefill/Decode "
+                  "FLOPs(token)/KV cache/量测分配量 相对基线增幅的最大值（Prefill/Decode "
                   "的差异若不超过两端重复测量的噪声散布则按不可区分处理，标 † "
                   "且不计入增幅）。收益覆盖两个主指标：PPL 相对改善（%）与 "
                   "RULER 平均 EM 改善（绝对百分点 pp）——预注册主张横跨两者"
@@ -3958,8 +3973,9 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | RULER Δ(pp) | p_adj(RULER) "
                   "| Prefill ms | Decode ms/tok "
-                  "| 训练 ms/step | 训练峰值 | 参数量 | FLOPs/token | 量测分配 | 判定 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                  "| 训练 ms/step | 训练峰值 | 参数量 | FLOPs/token | KV cache "
+                  "| 量测分配 | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         ppl_test = {t["candidate"]: t for t in tests
                     if t.get("reference") == "standard" and t.get("metric") == "PPL"
                     and t.get("mean_diff") is not None}
@@ -4004,6 +4020,8 @@ def build_summary(results_dir: str, audit: dict = None,
             mem_v = _eff_cell(e, "mem", common_ctx)
             mem_b = _eff_cell(base_e, "mem", common_ctx)
             mem_delta = _rel_pct(mem_b, mem_v) if (mem_v is not None and mem_b) else None
+            kv_v = _eff_cell(e, "kv_mem", common_ctx)
+            kv_delta = _rel_pct(base_kv, kv_v)
             # 运行时差异的测量噪声：|Δ| 不超过两端散布的方和根时不可区分，
             # 按 0 计入增幅（原始值仍保留在 JSON，避免把噪声当真实差异）。
             pre_noise = _noise_floor_pct(
@@ -4020,7 +4038,7 @@ def build_summary(results_dir: str, audit: dict = None,
             deltas = [d for d in ((0.0 if pre_within else pre_delta),
                                   (0.0 if dec_within else dec_delta),
                                   tr_delta, memtr_delta, par_delta, flo_delta,
-                                  mem_delta)
+                                  kv_delta, mem_delta)
                       if d is not None]
             cost = max(deltas) if deltas else None
             verdict = tradeoff_verdict(benefit, p_adj, cost, n_seeds=n_ppl,
@@ -4046,6 +4064,9 @@ def build_summary(results_dir: str, audit: dict = None,
             r["eff_train_peak_mem_mb"] = memtr_v
             r["eff_train_mem_delta_pct"] = (round(memtr_delta, 2)
                                             if memtr_delta is not None else None)
+            r["eff_kv_cache_mb"] = kv_v
+            r["eff_kv_cache_delta_pct"] = (round(kv_delta, 2)
+                                           if kv_delta is not None else None)
             r["eff_peak_mem_mb"] = mem_v
             r["eff_benefit_ppl_pct"] = (round(benefit, 2)
                                         if benefit is not None else None)
@@ -4072,6 +4093,7 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"| {_d(memtr_delta)} "
                       f"| {_d(par_delta)} "
                       f"| {_d(flo_delta)} "
+                      f"| {_d(kv_delta)} "
                       f"| {'-' if mem_v is None else f'{mem_v:.0f} MB'} "
                       f"| {verdict} |")
         md.append("")
@@ -4086,7 +4108,9 @@ def build_summary(results_dir: str, audit: dict = None,
                   "（可接受（依据 …）），显著退步会单独给出权衡/不可行结论，"
                   "不会因另一个指标涨而被静默忽略。"
                   "FLOPs/token 为解析估计（matmul 2·MACs + 注意力 4·kv_len·d/层 "
-                  "+ 门控项，见 latency.json 的 efficiency 字段）；分配量为"
+                  "+ 门控项，见 latency.json 的 efficiency 字段）；KV cache 为公共 "
+                  "ctx 下按推理 dtype 计算的 K/V 缓存总量（随 ctx 线性增长，见 "
+                  "efficiency.kv_cache_mb_at_ctx），与参数量/激活峰值分开报告；分配量为"
                   "batch=1 prefill 在 CUDA 上的记录，CPU 环境不适用。"
                   "Decode ms/tok 为带 KV 缓存的逐 token 解码时序，"
                   "训练 ms/step 为纯训练步（区间墙钟已扣除评测与 "

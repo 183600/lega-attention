@@ -118,7 +118,11 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
 
 
 def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
-    """参数量/KV 缓存/FLOPs 等结构指标。"""
+    """参数量/KV 缓存/FLOPs 等结构指标。
+
+    kv_cache_mb_per_tok 与 kv_cache_mb_at_ctx 都按实际推理 dtype（AMP 下为
+    bf16）计算：长上下文方案的内存差异不能被参数量掩盖。
+    """
     params_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     attn0 = model.blocks[0].attn
     kv_dtype = kv_dtype or attn0.wk.weight.dtype
@@ -128,6 +132,7 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         "n_params": count_params(model),
         "params_mb": round(params_bytes / 2**20, 3),
         "kv_cache_mb_per_tok": round(kv_bytes_per_tok / 2**20, 6),
+        "kv_cache_mb_at_ctx": {},
         "flops_per_tok": {},
         "peak_mem_mb_prefill": {},
     }
@@ -138,6 +143,10 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         if ctx > model.block_size:
             continue
         eff["flops_per_tok"][str(ctx)] = estimate_flops_per_token(model, ctx)
+        # 长上下文的内存开销主要是 KV cache（随 ctx 线性增长）；逐 ctx 落盘
+        # 便于效率-精度权衡直接比较，而不是只看参数量/单次激活峰值。
+        eff["kv_cache_mb_at_ctx"][str(ctx)] = round(
+            kv_bytes_per_tok * int(ctx) / 2**20, 6)
         # 单次 prefill 前向（batch=1）内记录；CPU 无 CUDA 分配语义，记 None
         if device.startswith("cuda"):
             x = torch.randint(0, model.vocab_size, (1, ctx), device=device)

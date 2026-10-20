@@ -855,6 +855,50 @@ def test_tradeoff_includes_decode_latency():
     print("  [ok] 涨点-增幅权衡包含 decode 项")
 
 
+def test_tradeoff_includes_kv_cache_memory():
+    """KV cache 显存必须进入效率-精度权衡：长上下文内存开销不能只看参数/
+    单次激活峰值；旧格式只有 per-token 时按 ctx 换算。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+
+        def _lat(kv_per_tok, kv_at_ctx=None):
+            eff = {"n_params": 100,
+                   "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                   "peak_mem_mb_prefill": {"256": 1.0},
+                   "kv_cache_mb_per_tok": kv_per_tok}
+            if kv_at_ctx is not None:
+                eff["kv_cache_mb_at_ctx"] = {"256": kv_at_ctx}
+            return {"prefill_ms": {"256": {"1": 1.0}},
+                    "decode_ms_per_tok": {"256": 0.1},
+                    "efficiency": eff}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(0.001, kv_at_ctx=0.256),
+            "lega": _lat(0.002, kv_at_ctx=0.512)}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert abs(row["eff_kv_cache_mb"] - 0.512) < 1e-9, row
+        assert row["eff_kv_cache_delta_pct"] == 100.0, row
+        assert row["eff_cost_max_pct"] == 100.0, row
+        assert "KV cache" in out["markdown"] and "+100.0%" in out["markdown"]
+
+        # 只有 per-token（旧 latency.json）时按公共 ctx 线性换算
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat(0.001), "lega": _lat(0.002)}})
+        out2 = build_summary(tmp)
+        row2 = next(r for r in out2["rows"] if r["variant"] == "lega")
+        assert abs(row2["eff_kv_cache_mb"] - 0.512) < 1e-9, row2
+        assert row2["eff_cost_max_pct"] == 100.0, row2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅权衡包含 KV cache 显存（旧格式按 ctx 换算）")
+
+
 def test_tradeoff_includes_train_step_time():
     """训练 ms/step 必须进入综合增幅与判定：其余指标不变时也要被计入。"""
     tmp = tempfile.mkdtemp()
