@@ -99,6 +99,7 @@ def test_activation_audit_iterates_interval_candidates():
     rep2 = audit_activations(m2, [b1, b2], "cpu")
     assert rep2["n_batches_checked"] == 2 and rep2["origin"] is None
     assert any("已检查 2 批" in f for f in rep2["findings"])
+    assert not any("命中第" in f for f in rep2["findings"]), rep2["findings"]
     print("  [ok] 激活审计：逐批检查区间候选并命中失败批次")
 
 

@@ -182,10 +182,15 @@ def audit_activations(model, pending_batches, device: str,
     first = records[0] if records else None
     findings = []
     if n_batches_checked > 1:
-        findings.append(
-            f"激活定位逐批检查了 {n_batches_checked} 个候选批次"
-            f"（命中第 {checked_index + 1} 个）：NaN 现场在区间中段时"
-            "只用单批会检查错误的输入")
+        if records:
+            findings.append(
+                f"激活定位逐批检查了 {n_batches_checked} 个候选批次"
+                f"（命中第 {checked_index + 1} 个）：NaN 现场在区间中段时"
+                "只用单批会检查错误的输入")
+        else:
+            findings.append(
+                f"激活定位逐批检查了 {n_batches_checked} 个候选批次，"
+                "均未发现非有限激活")
     if forward_error:
         findings.append(f"激活审计前向失败（{forward_error}），改用参数/数据检查定位")
     if origin is not None:
