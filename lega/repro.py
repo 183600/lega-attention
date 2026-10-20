@@ -499,8 +499,11 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "code_branch": git.get("branch"),
         "data_fingerprint": None,
         "config_sha256": (sha256_file(cfg) if os.path.exists(cfg) else None),
-        # 训练 run 是否通过了小批量过拟合 sanity 闸门（无清单/旧清单为 None）
+        # 训练 run 是否通过了小批量过拟合 sanity 闸门（无清单/旧清单为 None）。
+        # sanity_verified 区分“PASS 已核对身份”与“旧证据/无法核对”：
+        # 硬身份不一致时不得把旧 PASS 继承到下游结果。
         "sanity_passed": None,
+        "sanity_verified": None,
         "sanity_variant": None,
         "sanity_file": None,
     }
@@ -525,8 +528,20 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
                 out[key] = val
         msanity = manifest.get("sanity")
         if isinstance(msanity, dict):
-            if msanity.get("passed") is not None:
+            identity = msanity.get("identity")
+            identity = identity if isinstance(identity, dict) else {}
+            hard_mismatches = identity.get("hard_mismatches")
+            # 与 train.py 的 sanity_passed 口径一致：只有硬身份不一致时
+            # 才拒绝继承 PASS；旧清单缺 identity 时保留 PASS 但标记未验证。
+            if (msanity.get("passed") is not None
+                    and not hard_mismatches):
                 out["sanity_passed"] = bool(msanity["passed"])
+            if identity.get("verified") is not None:
+                out["sanity_verified"] = bool(identity["verified"])
+            elif hard_mismatches:
+                # 身份已确认不一致时，即使旧清单没有 verified 字段也不能
+                # 留 None 让下游误以为“尚未核对”。
+                out["sanity_verified"] = False
             if msanity.get("variant") is not None:
                 out["sanity_variant"] = msanity["variant"]
             if msanity.get("file") is not None:

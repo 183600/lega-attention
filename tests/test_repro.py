@@ -211,6 +211,41 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
     print("  [ok] load_provenance：缺字段/畸形清单逐字段回退补算")
 
 
+def test_load_provenance_rejects_stale_sanity_evidence():
+    """下游评测不得把身份不一致的旧 sanity PASS 继承成自己的闸门结论。"""
+    with tempfile.TemporaryDirectory() as d:
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _write(sanity):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump({"sanity": sanity}, f)
+            return load_provenance(d)
+
+        stale = _write({
+            "present": True, "passed": True, "variant": "lega",
+            "identity": {"hard_mismatches": ["config_sha256"],
+                         "unknown_fields": [], "verified": False}})
+        assert stale["sanity_passed"] is None
+        assert stale["sanity_verified"] is False
+        # 身份核对通过：PASS 与 verified 都继承
+        fresh = _write({
+            "present": True, "passed": True, "variant": "lega",
+            "identity": {"hard_mismatches": [], "unknown_fields": [],
+                         "verified": True}})
+        assert fresh["sanity_passed"] is True
+        assert fresh["sanity_verified"] is True
+        # 旧清单/无法核对：保留 PASS 但不冒充已验证
+        legacy = _write({"present": True, "passed": True, "variant": "lega"})
+        assert legacy["sanity_passed"] is True
+        assert legacy["sanity_verified"] is None
+        # 结构畸形的 identity 也不能让闸门结论崩溃或冒充已验证
+        malformed = _write({"present": True, "passed": True,
+                            "identity": "oops"})
+        assert malformed["sanity_passed"] is True
+        assert malformed["sanity_verified"] is None
+    print("  [ok] load_provenance：旧 sanity PASS 的身份核对口径与 train 一致")
+
+
 def test_same_seed_training_is_bitwise_reproducible():
     """同一台机器上，同 seed 的完整训练必须逐位可复现（可复现性门槛）。
 
