@@ -391,7 +391,10 @@ def fig_latency(rdir):
         return False
     variant_scope, _ = _run_scope(rdir)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
-    prefill_bs = None
+    # 每个变体先收集可用的 batch 档位。Prefill 对比必须用同一 batch：
+    # 不能拿第一个变体的档位（如 "1"）去查另一个只测过 "8" 的变体，
+    # 否则后者整条线静默消失，图上只剩一个变体却仍标着 batch=1。
+    series = []
     for v, e in variants.items():
         if variant_scope is not None and v not in variant_scope:
             continue
@@ -408,19 +411,32 @@ def fig_latency(rdir):
                 by_ctx[int(c)] = cell
             except (TypeError, ValueError, OverflowError):
                 continue
-        if not by_ctx:
+        if by_ctx:
+            series.append((v, e, by_ctx))
+    batch_sets = [{str(k) for cell in by_ctx.values() for k in cell}
+                  for _, _, by_ctx in series]
+    common = set.intersection(*batch_sets) if batch_sets else set()
+
+    def _batch_key(keys):
+        if not keys:
+            return None
+        if "1" in keys:
+            return "1"
+        return min(keys, key=lambda k: (not k.isdigit(), int(k)
+                                        if k.isdigit() else 0, k))
+
+    common_key = _batch_key(common)
+    mixed_batches = common_key is None
+    used_keys = set()
+    for v, e, by_ctx in series:
+        key = common_key if common_key is not None else _batch_key(
+            {str(k) for cell in by_ctx.values() for k in cell})
+        if key is None:
             continue
-        ctxs = sorted(by_ctx)
-        bs_key = prefill_bs
-        if bs_key is None:
-            bs_key = "1" if "1" in by_ctx[ctxs[0]] else next(
-                iter(by_ctx[ctxs[0]]), None)
-        if bs_key is None:
-            continue
-        prefill_bs = prefill_bs or bs_key
+        used_keys.add(key)
         xs, ys = [], []
-        for c in ctxs:
-            val = _finite_float(by_ctx[c].get(bs_key))
+        for c in sorted(by_ctx):
+            val = _finite_float(by_ctx[c].get(key))
             if val is not None:
                 xs.append(c)
                 ys.append(val)
@@ -431,7 +447,13 @@ def fig_latency(rdir):
                                     and v == "standard_sdpa" else ""),
                  color=COLORS.get(v))
     ax1.set_xlabel("上下文长度 (tokens)")
-    ax1.set_ylabel(f"Prefill (ms, batch={prefill_bs})")
+    if mixed_batches:
+        # 没有共同 batch 时说明各变体测的 workload 不同，不能假装可横向比较。
+        batch_label = ("各变体首个可用档位 "
+                       f"({', '.join(sorted(used_keys))})——不可横向比较")
+    else:
+        batch_label = str(common_key)
+    ax1.set_ylabel(f"Prefill (ms, batch={batch_label})")
     ax1.set_title("Prefill")
     ax1.grid(alpha=0.3)
     ax1.legend(fontsize=8)

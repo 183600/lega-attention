@@ -222,6 +222,36 @@ def test_train_logs_skip_non_dict_and_bad_steps():
     print("  [ok] 训练日志：非 dict 行/坏 step/坏值安全跳过")
 
 
+def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
+    """没有共同 batch 档位时仍要为每个变体取自己的可用档位画线，
+    不能拿第一个变体的 batch key 去查所有变体（否则整条线静默消失）。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_latency 批次测试")
+        return
+    import matplotlib.axes as maxes
+    from unittest import mock
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "latency.json", {"variants": {
+            "standard": {"prefill_ms": {"256": {"8": 20.0}}},
+            "qgate": {"prefill_ms": {"256": {"1": 12.0}},
+                      "decode_ms_per_tok": {"256": 1.2}}}})
+        labels = []
+        orig = maxes.Axes.plot
+
+        def spy(self, *a, **kw):
+            if kw.get("marker") == "o":
+                labels.append(kw.get("label"))
+            return orig(self, *a, **kw)
+
+        with mock.patch.object(maxes.Axes, "plot", spy):
+            assert fig_latency(tmp) is True
+        assert len(labels) == 2, labels
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] Prefill 图：无共同 batch 时按变体各自档位绘制")
+
+
 def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
     """ppl 为 null 时用 val_ppl，非数值 ppl 不能让画图崩溃。"""
     if not _HAS_MPL:
