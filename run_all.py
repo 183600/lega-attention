@@ -75,9 +75,9 @@ from lega.hypotheses import (REGISTRY_PATH as HYPOTHESES_PATH,  # noqa: E402
 from lega.ngram import evaluate as ngram_evaluate  # noqa: E402
 from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
 from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
-from lega.repro import (data_fingerprint, git_info, runtime_info,  # noqa: E402
-                        sanity_summary, sha256_file, worktree_state,
-                        write_worktree_patch)
+from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E402
+                        runtime_info, sanity_summary, sha256_file,
+                        worktree_state, write_worktree_patch)
 from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
                         mean_std, min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, save_json)  # noqa: E402
@@ -4998,11 +4998,38 @@ def main():
             v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt))
     result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
                     if os.path.isfile(p)]
+    # 收尾身份核对：长实验期间代码/数据若被改动，开始时记录的 commit/指纹
+    # 已不足以代表整轮实验。把结束快照与漂移结论一并写入 completed 记录，
+    # 让“全程同一版本”成为可核对的事实而不是假设。
+    end_git = git_info()
+    end_worktree = worktree_state()
+    try:
+        end_data_digest = data_fingerprint(args.data_dir)["digest"]
+    except FileNotFoundError:
+        end_data_digest = None
+    drift = provenance_drift(
+        {"git": git, "worktree": worktree,
+         "data_fingerprint": data_digest},
+        {"git": end_git, "worktree": end_worktree,
+         "data_fingerprint": end_data_digest})
+    tracking_end = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "git": end_git,
+        "worktree": end_worktree,
+        "data_fingerprint": end_data_digest,
+        "drift": drift,
+    }
+    if drift["changed"]:
+        print("[repro] ⚠ 实验期间代码或数据身份发生变化："
+              + "; ".join(f"{m['field']} {m['start']} -> {m['end']}"
+                          for m in drift["mismatches"])
+              + "；该轮 completed 记录已显式标注，结果不得声称对应单一版本")
     append_record(ledger, build_experiment_record(
         status="completed", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
         sanity={"executed": bool(sanity), "verdict": sanity},
         runs=run_snapshots,
         artifacts=collect_artifacts(result_files, rel_to=ROOT),
+        extra={"tracking_end": tracking_end},
         **ledger_common))
     print(f"[repro] 实验台账已记录 completed（run_id={run_id}）-> {ledger}")
     print(f"\n[run_all] 全部完成；结果目录: {results_dir}")

@@ -155,6 +155,68 @@ def worktree_state(root: str = None, max_files: int = 500) -> dict:
     }
 
 
+def provenance_drift(start: dict, end: dict) -> dict:
+    """比较实验开始/结束时的代码与数据身份，识别长实验期间被改动。
+
+    start/end 各含 ``git``（git_info 结果）、``worktree``（worktree_state
+    结果）与 ``data_fingerprint``。只有双方都有可比较值且不同才判 changed；
+    无法核对（非 git、数据缺失）记 unknown，绝不用“没检查”冒充“没变化”。
+    worktree 用 diff_sha256 比较（含未跟踪文件补丁），因此 commit 不变但
+    工作区代码被改动也能发现。
+    """
+    def _sub(d, key):
+        v = (d or {}).get(key)
+        return v if isinstance(v, dict) else {}
+
+    s_git, e_git = _sub(start, "git"), _sub(end, "git")
+    s_wt, e_wt = _sub(start, "worktree"), _sub(end, "worktree")
+    checks, mismatches, unknown = {}, [], []
+
+    s_commit, e_commit = s_git.get("commit"), e_git.get("commit")
+    if s_commit is None or e_commit is None:
+        checks["code_commit"] = None
+        unknown.append("code_commit")
+    else:
+        checks["code_commit"] = s_commit == e_commit
+        if s_commit != e_commit:
+            mismatches.append({"field": "code_commit", "start": s_commit,
+                               "end": e_commit})
+
+    s_avail, e_avail = s_wt.get("available"), e_wt.get("available")
+    if not s_avail or not e_avail:
+        checks["worktree_diff_sha256"] = None
+        unknown.append("worktree_diff_sha256")
+    else:
+        same = s_wt.get("diff_sha256") == e_wt.get("diff_sha256")
+        checks["worktree_diff_sha256"] = same
+        if not same:
+            mismatches.append({
+                "field": "worktree_diff_sha256",
+                "start": s_wt.get("diff_sha256"),
+                "end": e_wt.get("diff_sha256")})
+
+    s_data = (start or {}).get("data_fingerprint")
+    e_data = (end or {}).get("data_fingerprint")
+    if s_data is None or e_data is None:
+        checks["data_fingerprint"] = None
+        unknown.append("data_fingerprint")
+    else:
+        checks["data_fingerprint"] = s_data == e_data
+        if s_data != e_data:
+            mismatches.append({"field": "data_fingerprint", "start": s_data,
+                               "end": e_data})
+
+    return {
+        "checked": checks,
+        "unknown": unknown,
+        "changed": bool(mismatches),
+        "mismatches": mismatches,
+        "note": ("changed=True 表示实验期间代码或数据身份发生变化；该轮结果"
+                 "不能声称全程对应开始时记录的版本，需要按完整时长重跑或"
+                 "在台账中显式标注。"),
+    }
+
+
 def write_worktree_patch(path: str, root: str = None) -> dict:
     """把当前工作区补丁（含未跟踪文件）原子写入 path，返回哈希/大小。
 

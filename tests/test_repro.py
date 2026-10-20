@@ -11,8 +11,9 @@ import torch
 
 from lega.data import get_train_batch
 from lega.repro import (build_run_manifest, data_fingerprint, git_info,
-                        load_provenance, runtime_info, sanity_identity_check,
-                        sha256_file, worktree_state, write_worktree_patch)
+                        load_provenance, provenance_drift, runtime_info,
+                        sanity_identity_check, sha256_file, worktree_state,
+                        write_worktree_patch)
 from lega.utils import set_seed, seed_report
 
 
@@ -345,6 +346,45 @@ def _init_git_repo(d):
     git("config", "user.email", "t@example.com")
     git("config", "user.name", "t")
     return git
+
+
+def test_provenance_drift_flags_code_and_data_changes_without_false_positive():
+    """结束快照必须发现 commit/工作区 diff/数据指纹变化，缺失时记 unknown。"""
+    start = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1"},
+        "data_fingerprint": "fp1",
+    }
+    same = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1"},
+        "data_fingerprint": "fp1",
+    }
+    d0 = provenance_drift(start, same)
+    assert d0["changed"] is False and d0["mismatches"] == []
+    assert all(v is True for v in d0["checked"].values())
+    moved = {
+        "git": {"commit": "b" * 40},
+        "worktree": {"available": True, "diff_sha256": "d2"},
+        "data_fingerprint": "fp2",
+    }
+    d1 = provenance_drift(start, moved)
+    assert d1["changed"] is True
+    assert {m["field"] for m in d1["mismatches"]} == {
+        "code_commit", "worktree_diff_sha256", "data_fingerprint"}
+    # 非 git/工作区不可用/数据缺失：unknown 而不是“未变化”
+    unknown = provenance_drift(
+        {"git": {}, "worktree": {"available": False},
+         "data_fingerprint": None},
+        {"git": {}, "worktree": {"available": False},
+         "data_fingerprint": None})
+    assert unknown["changed"] is False
+    assert set(unknown["unknown"]) == {
+        "code_commit", "worktree_diff_sha256", "data_fingerprint"}
+    # commit 不变但工作区改动同样必须被抓到
+    dirty = dict(same, worktree={"available": True, "diff_sha256": "d9"})
+    assert provenance_drift(start, dirty)["changed"] is True
+    print("  [ok] 结束身份核对：commit/工作区/数据变化可发现，缺失记 unknown")
 
 
 def test_worktree_state_and_patch_capture_dirty_code():
