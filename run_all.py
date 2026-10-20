@@ -377,7 +377,7 @@ def _protocol_value(v):
     """把评测协议字段规范化后比较（"10" 与 10、[256,512] 与元组视为相同）。"""
     if isinstance(v, bool):
         return ("bool", v)
-    if isinstance(v, (int, float)):
+    if isinstance(v, (int, float, str)):
         try:
             f = float(v)
         except (TypeError, ValueError, OverflowError):
@@ -580,12 +580,11 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     def _same_quantity(a, b):
         # 旧产物可能把步数写成 "10"/10.0；语义相同即算一致，无法解析时
         # 退化为原始值比较。
-        if a == b:
-            return True
         try:
-            return int(a) == int(b)
+            fa, fb = float(a), float(b)
         except (TypeError, ValueError, OverflowError):
-            return False
+            return a == b
+        return math.isfinite(fa) and math.isfinite(fb) and fa == fb
 
     stable_actual = [(name, steps_run, tokens_run, planned)
                      for name, steps_run, tokens_run, early, planned in actual_meta

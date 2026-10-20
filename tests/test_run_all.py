@@ -2686,6 +2686,69 @@ def test_verify_controlled_setup_rejects_eval_protocol_mismatch():
     print("  [ok] 受控变量审计：PPL 评测 split/ctx/iters/windows 不一致即拒绝")
 
 
+def test_verify_controlled_setup_normalizes_numeric_strings():
+    """旧 eval.json 把协议数量写成字符串时，语义相同的数值不应被判不一致。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        variants, seeds = ["standard", "lega"], [7]
+        base = {"split": "test", "eval_ctx": 512, "eval_iters": 50,
+                "eval_iters_requested": 50, "val_windows": 80,
+                "val_tokens_evaluated": 25600,
+                "selection_set_is_eval_set": False}
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "variant": v, "seed": 7,
+                "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024, **base})
+        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"),
+                            encoding="utf-8"))
+        for key in ("eval_ctx", "eval_iters", "eval_iters_requested",
+                    "val_windows", "val_tokens_evaluated"):
+            ev[key] = str(ev[key])
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        audit = verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+        assert audit["ok"] and audit["eval_protocol_checked"] == 2, audit
+    print("  [ok] 受控变量审计：数值字符串与数值按相同语义比较")
+
+
+def test_verify_controlled_setup_rejects_fractional_steps():
+    """实际步数/评测窗口被小数污染时不能被 int() 截断后冒充一致。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        variants, seeds = ["standard", "lega"], [7]
+        base = {"split": "test", "eval_ctx": 512, "eval_iters": 50,
+                "eval_iters_requested": 50, "val_windows": 80,
+                "val_tokens_evaluated": 25600,
+                "selection_set_is_eval_set": False}
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "variant": v, "seed": 7,
+                "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024, **base})
+        for v, actual in (("standard", 10), ("lega", 10.5)):
+            p = os.path.join(tmp, v, "eval.json")
+            ev = json.load(open(p, encoding="utf-8"))
+            ev["steps_planned"] = 10.5
+            ev["steps"] = actual
+            _write_json(p, ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("小数实际步数不应被截断为一致")
+        except SystemExit:
+            pass
+    print("  [ok] 受控变量审计：小数步数不会被截断为整数")
+
+
 def test_component_evidence_marks_early_stop_budget():
     """早停预算不等时，JSON 证据必须显式降为探索性而非只说 supported。"""
     tests = [
