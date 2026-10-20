@@ -127,6 +127,40 @@ def test_snapshot_train_run_reads_eval_and_hashes_logs():
     print("  [ok] snapshot_train_run 最终指标 + 曲线/配置/checkpoint 哈希")
 
 
+def test_snapshot_train_run_embeds_curve_for_history_after_overwrite():
+    """台账必须内嵌训练曲线：同 tag 重跑覆盖 train_log.jsonl 后历史仍可还原。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "lega")
+        os.makedirs(out)
+        rows = [
+            {"step": 1, "loss": 4.0, "ppl": 54.6, "time": "t1",
+             "step_time_ms": 12.5},
+            {"step": 10, "loss": 3.0, "ppl": 20.1, "grad_norm": 1.2},
+            {"step": 10, "val_loss": 2.8, "val_ppl": 16.4},
+            {"step": 20, "loss": 2.5, "final": True},
+        ]
+        with open(os.path.join(out, "train_log.jsonl"), "w",
+                  encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+            f.write("not json\n")
+        snap = snapshot_train_run("lega", 7, out)
+        curve = snap["train_curve"]
+        assert curve["n_records"] == 4 and not curve["downsampled"]
+        assert [r["step"] for r in curve["records"]] == [1, 10, 10, 20]
+        assert curve["records"][-1]["final"] is True
+        # 覆盖日志后，台账快照仍保留旧曲线内容
+        with open(os.path.join(out, "train_log.jsonl"), "w",
+                  encoding="utf-8") as f:
+            f.write(json.dumps({"step": 999, "loss": 0.0}) + "\n")
+        assert snapshot_train_run("lega", 7, out)["train_curve"] != curve
+        json.dumps(snap)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 台账内嵌训练曲线（覆盖日志后历史仍可还原）")
+
+
 def test_snapshot_train_run_degrades_on_non_dict_eval():
     """eval.json 顶层为数组/标量时不能崩溃，其余产物哈希仍应正常记录。"""
     tmp = tempfile.mkdtemp()

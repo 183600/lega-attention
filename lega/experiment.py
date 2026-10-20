@@ -16,6 +16,7 @@ status="completed" 记录作为该轮实验的最终档案。
 """
 import itertools
 import json
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -226,6 +227,50 @@ def _load_json(path: str):
         return None
 
 
+def _load_train_curve(out_dir: str, max_points: int = 1000):
+    """把 train_log.jsonl 内嵌进台账快照（防止重跑覆盖后曲线历史丢失）。
+
+    文件哈希只能证明“当时有过这份日志”，无法在文件被覆盖后还原曲线。
+    这里保留逐条数值记录；超过 max_points 时按固定步长下采样并保留末点，
+    报告 n_records/returned_records/downsampled，绝不把截断冒充完整历史。
+    """
+    path = os.path.join(out_dir, "train_log.jsonl")
+    if not os.path.exists(path):
+        return None
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    records.append(rec)
+    except OSError:
+        return None
+    if not records:
+        return None
+    n = len(records)
+    sampled = records
+    if n > max(1, int(max_points)):
+        # 均匀抽取并强制保留最后一条（final/early_stop 标记通常在这里）
+        step = max(1, math.ceil(n / max(1, int(max_points))))
+        sampled = records[::step]
+        if sampled[-1] is not records[-1]:
+            sampled.append(records[-1])
+    return {
+        "source": "train_log.jsonl",
+        "n_records": n,
+        "returned_records": len(sampled),
+        "downsampled": len(sampled) != n,
+        "records": sampled,
+    }
+
+
 def snapshot_train_run(variant: str, seed: int, out_dir: str,
                        known_ckpt_sha256=None, known_ckpt_path=None) -> dict:
     """把一个 (变体, 种子) run 压缩成台账条目。
@@ -233,7 +278,9 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     最终指标取自 eval.json；同时记录 config_used.json / train_log.jsonl /
     run_manifest.json / eval.json 的路径与哈希，以及被评测 checkpoint
     （model_best.pt / model.pt）的内容哈希 —— 训练曲线或结果文件后续被
-    覆盖、手改、甚至换掉 checkpoint，都能通过哈希比对发现。
+    覆盖、手改、甚至换掉 checkpoint，都能通过哈希比对发现。训练曲线本身
+    也内嵌进台账（train_curve，超长时显式下采样）：同 tag 重跑覆盖文件后，
+    历史曲线仍可从台账还原，而不只是留下一个已失效的文件哈希。
 
     evaluate 阶段已对同一 checkpoint 做过全量 SHA-256（写在 results_dir
     的 eval_<variant><suffix>.json 及 test 访问账本）：调用方通过
@@ -263,6 +310,9 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     rec = {"variant": variant, "seed": int(seed), "out_dir": out_dir,
            "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
                                       rel_to=out_dir, known=known)}
+    curve = _load_train_curve(out_dir)
+    if curve is not None:
+        rec["train_curve"] = curve
     if isinstance(cfg_used, dict):
         # 超参数内嵌进台账条目：即使 config_used.json 之后被覆盖/删除，
         # 该 run 实际生效的配置仍可从台账还原
