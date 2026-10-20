@@ -749,6 +749,35 @@ def test_build_summary_surfaces_loss_spike_diagnosis():
     print("  [ok] build_summary（瞬态损失尖峰进入汇总页显著提醒）")
 
 
+def test_build_summary_surfaces_curve_observability_warnings():
+    """验证/日志点过少是配置级限制：必须进入 summary，而不是只留在训练
+    启动日志里；否则汇总页的趋势/早停结论会被误读为可靠。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": None, "n_params": 100, "n_gate_extra": 0})
+        base = {"status": "正常收敛", "evidence": [], "recommendations": ["x"],
+                "nonfinite_values": 0, "malformed_records": 0,
+                "has_grad_spike": False, "has_loss_spike": False,
+                "train_loss_first": 4.0, "train_loss_last": 3.0,
+                "val_loss_first": 4.1, "val_loss_best": 3.4,
+                "val_best_step": 50, "val_loss_last": 3.4,
+                "early_stop_gain_rel": 0.0,
+                "curve_observability_warnings": [
+                    "验证点预计仅 2 个（steps=20, eval_every=10）"]}
+        _write_json(os.path.join(tmp, "curve_diagnosis.json"),
+                    {"standard": {"1": base}, "lega": {"1": dict(base)}})
+        md = build_summary(tmp)["markdown"]
+        assert "曲线采样可观测性受限" in md, md[-2000:]
+        assert "验证点预计仅 2 个" in md, md[-2000:]
+        assert "eval_every" in md, md[-2000:]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（曲线采样不足告警进入汇总页）")
+
+
 def test_latency_noise_helpers():
     """测量噪声读取与两段散布的方和根合成：缺失安全。"""
     entry = {"prefill_ms_spread_pct": {"256": {"1": 6.0}},
