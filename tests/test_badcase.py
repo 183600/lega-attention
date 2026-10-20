@@ -348,6 +348,8 @@ def test_cross_variant_analysis_shared_vs_specific():
                                    reference="standard")
     assert cross["reference_available"] is False
     assert cross["per_variant"]["lega"]["n_new_vs_reference"] is None
+    # 参照缺失是“未评测/无清单”，不是“已评测且零错误”，提示不得混为一谈
+    assert "未评测" in cross["note"] and "没有错误样本" not in cross["note"]
     # 少于 2 个变体：空对照
     cross = cross_variant_analysis({"lega": [a]})
     assert cross["per_variant"] == {}

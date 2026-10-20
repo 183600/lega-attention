@@ -1067,7 +1067,8 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
         "per_variant": per_v,
         "note": ("共识失败（所有变体都错，含标准基线）优先怀疑数据/构造/内在"
                  "难度；相对参照新增的错误才是该方法的特异性盲区，优先分析。"
-                 + ("" if has_ref else f"⚠ 参照变体 {reference} 没有错误样本，"
+                 + ("" if has_ref else f"⚠ 参照变体 {reference} 未评测或没有"
+                                        "可用错误清单（不等于零错误），"
                                         "新增/改对计数不可得。")
                  + f"个案列表每类最多展示 {CROSS_LIST_LIMIT} 条，计数为完整值。"),
     }
