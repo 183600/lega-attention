@@ -477,6 +477,22 @@ def test_char_vocab_fit_on_train_only():
     print("  [ok] 字符词表只在 train 拟合；未知字符 → <unk>；旧缓存兼容")
 
 
+def test_char_tokenizer_keeps_single_unk_at_id_zero():
+    """add_unk=True 时旧词表里的 <unk> 不能重复保留到非零 id。
+
+    stoi 后写覆盖前写；若只检查 itos[0] 就前置一个 <unk>，输入中已有的
+    <unk> 会让 unk_id 指向后面的位置，未知字符不再映射到 0。
+    """
+    tok = CharTokenizer(["a", "<unk>", "b"], add_unk=True)
+    assert tok.itos == ["<unk>", "a", "b"]
+    assert tok.unk_id == 0
+    assert tok.encode("az") == [tok.stoi["a"], 0]
+    dup = CharTokenizer(["<unk>", "a", "<unk>"], add_unk=True)
+    assert dup.itos == ["<unk>", "a"]
+    assert dup.unk_id == 0
+    print("  [ok] 字符词表 <unk> 唯一且固定在 id 0")
+
+
 def test_sanitize_text_stats():
     raw = "ok\x00bad\x07line\ufffdend"
     clean, st = sanitize_text(raw)

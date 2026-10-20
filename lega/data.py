@@ -120,10 +120,11 @@ class CharTokenizer:
 
     def __init__(self, itos: List[str], add_unk: bool = False):
         itos = list(itos)
-        if add_unk and itos and itos[0] != UNK_TOKEN:
-            itos = [UNK_TOKEN] + itos
-        elif add_unk and not itos:
-            itos = [UNK_TOKEN]
+        if add_unk:
+            # <unk> 必须唯一且固定在 0；输入词表里可能已带旧格式的
+            # <unk>（且不一定在首位），不能简单前置而留下重复项——
+            # 否则 stoi 会指向后一个 id，unk_id 不再是 0。
+            itos = [UNK_TOKEN] + [ch for ch in itos if ch != UNK_TOKEN]
         self.itos = itos
         self.stoi = {ch: i for i, ch in enumerate(self.itos)}
         self.unk_id = self.stoi.get(UNK_TOKEN, 0)
