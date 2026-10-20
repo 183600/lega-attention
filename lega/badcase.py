@@ -71,7 +71,7 @@ def categorize_case(rec: Dict) -> Dict:
     归因顺序：先排除"不是模型的错"（标注/构造错误），再区分难度边界样本与
     模型盲区，最后按输出内容定位具体机制。
     """
-    r = dict(rec)
+    r = dict(rec) if isinstance(rec, dict) else {}
     task = r.get("task")
     # 0) 难度标注：只有 niah 家族的 depth 是 needle 位置比例（0~1）；vt 的
     # meta.depth 是链深度（整数），不能按位置解释。先算好该标志，保证
@@ -187,6 +187,8 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     与"错误归因是提出新改进思路的最重要来源"对应，避免分析止步于分类表。
     输出按优先级排序，可直接进报告与改进 backlog。
     """
+    if not isinstance(ana, dict):
+        return []
     n = int(ana.get("n_badcases") or 0)
     counts = ana.get("category_counts") or {}
     if n == 0:
@@ -262,8 +264,8 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
     """坏案例集合 → 归因分布 + 难度/上下文切片 + 结构化个案列表 + 改进方向。"""
     # 外部/旧格式 JSON 的 badcases 列表可能混入 null/标量；跳过坏样本，
     # 不让单条记录中断整份归因（与 process_* 的顶层类型校验同口径）。
-    cases = [categorize_case(c) for c in (badcases or [])
-             if isinstance(c, dict)]
+    cases = [categorize_case(c) for c in (badcases if isinstance(badcases, list)
+                                          else []) if isinstance(c, dict)]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
     by_task_ctx: Dict[str, Dict] = {}
@@ -418,7 +420,7 @@ def categorize_window(rec: Dict) -> Dict:
     旧格式记录没有该字段时退化为 context_tail（只有窗口尾部 160 字符）检查，
     此时"未出现"只代表尾部未出现。
     """
-    r = dict(rec)
+    r = dict(rec) if isinstance(rec, dict) else {}
     top1, p1 = _window_top1(r)
     gold = r.get("gold_next")
     gold_txt = gold if isinstance(gold, str) else ("" if gold is None else str(gold))
@@ -497,6 +499,8 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     关键区分是"gold 在上下文中却没抄对"（复制/检索失败，模型信息可得）与
     "gold 从未出现"（真正的预测失败/长尾，通常只能靠数据/容量）。
     """
+    if not isinstance(ana, dict):
+        return []
     n = int(ana.get("n_windows") or 0)
     counts = ana.get("category_counts") or {}
     if n == 0:
@@ -581,8 +585,8 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
 def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
     """最差窗口集合 → 归因分布 + 校准/复制统计 + 个案列表 + 改进方向。"""
     # 同 analyze_badcases：列表内的 null/数组等坏记录按损坏样本跳过。
-    cases = [categorize_window(w) for w in (windows or [])
-             if isinstance(w, dict)]
+    cases = [categorize_window(w) for w in (windows if isinstance(windows, list)
+                                           else []) if isinstance(w, dict)]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
     out = {
@@ -706,6 +710,8 @@ CROSS_LIST_LIMIT = 5
 def case_key(rec: Dict) -> str:
     """错误样本的稳定标识：优先 RULER 构造期写入的 sample_id；语言建模窗口用
     split+window；旧格式回退到 task@ctx+问题文本（截断后仍需确定性一致）。"""
+    if not isinstance(rec, dict):
+        rec = {}
     sid = rec.get("sample_id")
     if sid:
         return str(sid)
@@ -748,6 +754,8 @@ def _case_brief(rec: Dict) -> Dict:
 
 def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
     """跨变体对照 → 改进方向：先判"账算数据还是算方法"，再定位主导错误类别。"""
+    if not isinstance(cross, dict):
+        return []
     recs = []
     variants = cross.get("variants") or []
     if len(variants) < 2:
@@ -809,9 +817,11 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     """
     # 保留空列表（已评测且零错误）：它们必须进入 all_set，否则任何一个全对
     # 的变体都会让"所有变体都错"的共识判定漏掉它，把方法特异性失败误报成
-    # 数据/难度问题。None/非列表值（无此变体数据）才排除。
-    variants = sorted(v for v, cs in (per_variant_cases or {}).items()
-                      if isinstance(cs, list))
+    # 数据/难度问题。None/非列表值（无此变体数据）才排除；顶层非对象按空对照。
+    per_variant_cases = (per_variant_cases
+                         if isinstance(per_variant_cases, dict) else {})
+    variants = sorted((v for v, cs in per_variant_cases.items()
+                       if isinstance(cs, list)), key=str)
     items: Dict[str, Dict] = {}
     for v in variants:
         for c in per_variant_cases[v]:

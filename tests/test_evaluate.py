@@ -9,9 +9,10 @@ import numpy as np
 import torch
 
 from lega.data import CharTokenizer
-from lega.evaluate import (collect_worst_windows, json_safe_eval_metrics,
-                           load_train_coverage, load_train_peak_mem_mb,
-                           load_train_throughput, worst_window_screening)
+from lega.evaluate import (_positive_int_or_none, collect_worst_windows,
+                           json_safe_eval_metrics, load_train_coverage,
+                           load_train_peak_mem_mb, load_train_throughput,
+                           worst_window_screening)
 from lega.model import GPT
 
 
@@ -56,6 +57,16 @@ def test_worst_window_screening_scope_is_recorded():
     sc2 = worst_window_screening(len(val), ctx=64, max_windows=100)
     assert sc2["screened"] == 33 and sc2["total"] == 33
     print("  [ok] 最差窗口筛查范围落盘（候选/总窗口数）")
+
+
+def test_positive_int_config_value_degrades_to_none():
+    """config_used.json 的手改数值不能让评测 int() 崩溃。"""
+    assert _positive_int_or_none("bad") is None
+    assert _positive_int_or_none(float("inf")) is None
+    assert _positive_int_or_none(0) is None
+    assert _positive_int_or_none(-3) is None
+    assert _positive_int_or_none("128") == 128
+    print("  [ok] 非法 train_ctx/eval_iters 配置安全降级")
 
 
 def test_load_train_throughput_propagates_and_degrades_safely():

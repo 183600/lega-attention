@@ -195,7 +195,10 @@ def window_positions(n_tokens: int, ctx: int, iters: int):
     规则必须与 `lega.train._val_eval_indices` 完全一致（tests 中有逐例等价
     断言）。窗口规格非法或评测流过短时返回 None（调用方按缺失处理）。
     """
-    n_tokens, ctx, iters = int(n_tokens), int(ctx), int(iters)
+    try:
+        n_tokens, ctx, iters = int(n_tokens), int(ctx), int(iters)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if ctx < 1 or iters < 1:
         return None
     n_windows = (n_tokens - 1) // ctx
@@ -305,9 +308,15 @@ def evaluate(data_dir: str, split: str = "val",
     # 窗口对齐口径：只在神经评测窗口的目标 token 上打分（见 window_positions）。
     # 与全 split 口径使用同一选定 α（test 上不额外扫网格，仍是单次消费）。
     if window_spec:
-        spec_ctx = int(window_spec.get("ctx", 0) or 0)
-        spec_iters = int(window_spec.get("iters", 0) or 0)
-        pos = window_positions(len(eval_ids), spec_ctx, spec_iters)
+        try:
+            if not isinstance(window_spec, dict):
+                raise TypeError
+            spec_ctx = int(window_spec.get("ctx", 0) or 0)
+            spec_iters = int(window_spec.get("iters", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            spec_ctx = spec_iters = None
+        pos = (window_positions(len(eval_ids), spec_ctx, spec_iters)
+               if spec_ctx is not None and spec_iters is not None else None)
         if pos is None:
             report["window_spec"] = None
             report["window_spec_error"] = (

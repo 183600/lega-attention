@@ -707,4 +707,12 @@ def test_analyze_skips_non_dict_records_in_lists():
         "variant": "lega", "badcases": [None, {"task": "niah_synth",
                                                "pred": "1", "answer": "1"}]})
     assert ana2["n_badcases"] == 1
-    print("  [ok] 归因列表：非对象样本跳过")
+    # 列表字段本身是非可迭代标量/对象时按空处理，而不是 TypeError。
+    assert analyze_badcases(5)["n_badcases"] == 0
+    assert analyze_worst_windows({"bad": 1})["n_windows"] == 0
+    assert process_eval_json("ignored.json", write_md=False, payload={
+        "variant": "lega", "worst_windows": 5})["n_windows"] == 0
+    assert cross_variant_analysis([1])["variants"] == []
+    assert categorize_case([1])["category"] == "no_answer"
+    assert categorize_window("bad")["category"] == "unparsed"
+    print("  [ok] 归因列表：非对象样本/标量字段跳过")

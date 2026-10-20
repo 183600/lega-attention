@@ -150,11 +150,16 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     train 输出按删除切点拼接未删除片段。
     """
     min_chars = int(min_chars)
+    # 顶层非对象或缺少 train（旧格式/手改缓存）时按空文本处理，避免一个
+    # 损坏的数据缓存让 prepare_data 直接 KeyError/AttributeError。
+    texts = texts if isinstance(texts, dict) else {}
 
     def digest(s: str) -> bytes:
         return hashlib.blake2b(s.encode("utf-8"), digest_size=16).digest()
 
     def scan(t):
+        if not isinstance(t, str):
+            t = ""
         # 单次扫描：每行只 strip/normalize 一次。长行（>= min_chars）用于
         # 去污染；非空行的重复都计数——短行不参与去污染，但重复数量仍统计
         # 供审查（见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
@@ -196,7 +201,9 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     val_test_overlap = len(val_long & test_long)
     val_test_overlap_norm = len(val_long_norm & test_long_norm)
 
-    train_text = texts["train"]
+    train_text = texts.get("train")
+    if not isinstance(train_text, str):
+        train_text = ""
     n_train, n_valid_train = 0, 0
     # 仅用于计数 len() 的集合存摘要。
     seen_valid_train, seen_valid_train_norm = set(), set()
@@ -781,7 +788,12 @@ CRITICAL_SPLIT_ALERT_CODES = (
 
 def critical_split_alerts(data_report: dict) -> list:
     """从 data_report 中筛出必须在训练前处理的划分协议违规。"""
-    return [a for a in ((data_report or {}).get("alerts") or [])
+    if not isinstance(data_report, dict):
+        return []
+    alerts = data_report.get("alerts")
+    if not isinstance(alerts, list):
+        return []
+    return [a for a in alerts
             if isinstance(a, dict)
             and a.get("code") in CRITICAL_SPLIT_ALERT_CODES]
 
@@ -795,7 +807,7 @@ def split_protocol_alerts(split_protocol: dict) -> list:
     供汇总页与复核者看到，而不是只躺在报告元数据里。
     """
     alerts = []
-    p = split_protocol or {}
+    p = split_protocol if isinstance(split_protocol, dict) else {}
     if not p:
         return alerts
 

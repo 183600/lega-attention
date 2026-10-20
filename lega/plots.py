@@ -65,6 +65,17 @@ def _label(v):
     return VARIANT_CN.get(v, v)
 
 
+def _finite_float(v):
+    """JSON 数值安全转换：非数值/非有限值返回 None（坏点跳过而非崩溃）。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if np.isfinite(f) else None
+
+
 def _load(path):
     """读取 JSON；缺失/不可读/损坏一律返回 None（坏文件不毁整张图）。"""
     if not os.path.exists(path):
@@ -128,13 +139,20 @@ def _group_items(items, rdir=None):
     expected = _expected_tagged(rdir) if rdir else None
     groups = {}
     for fp, d in items:
-        # 合法 JSON 但非对象的文件（如误放入的数组）按无效结果跳过，不让
-        # 一个坏文件毁掉整张图（与 curves/badcase 的容错口径一致）
-        if not (isinstance(d, dict) and d.get("variant")):
+        # 合法 JSON 但非对象（如误放入的数组）或变体名非法（数组/对象既不是
+        # 合法标识也不能作为字典键）的文件按无效结果跳过，不让一个坏文件
+        # 毁掉整张图（与 curves/badcase 的容错口径一致）。
+        if not (isinstance(d, dict) and isinstance(d.get("variant"), str)
+                and d["variant"]):
             continue
         tagged = _is_tagged(fp)
         m = _SEED_SUFFIX_RE.search(os.path.splitext(os.path.basename(fp))[0])
         seed = int(m.group(1)) if m else d.get("seed")
+        try:
+            hash(seed)
+        except TypeError:
+            # 外部/旧格式 JSON 的 seed 可能是数组/对象：按缺种子信息处理。
+            seed = None
         groups.setdefault(d["variant"], []).append((seed, d, tagged))
     out = {}
     for v, items_v in groups.items():
@@ -183,6 +201,7 @@ def fig_ppl(rdir):
         return False
     rows = []
     splits = set()
+    invalid_split = False
     for v, ds in groups.items():
         # 多种子：每变体取 PPL 均值，误差棒为样本标准差；单种子不画误差棒。
         # ppl 为 null 时回退 val_ppl（与 run_all._ppl_of 同口径），坏值跳过。
@@ -191,12 +210,9 @@ def fig_ppl(rdir):
             p = d.get("ppl")
             if p is None:
                 p = d.get("val_ppl")
-            if p is None:
-                continue
-            try:
-                ppls.append(float(p))
-            except (TypeError, ValueError):
-                continue
+            p = _finite_float(p)
+            if p is not None:
+                ppls.append(p)
         if not ppls:
             continue
         mean = float(np.mean(ppls))
@@ -204,7 +220,11 @@ def fig_ppl(rdir):
         rows.append((v, mean, std, any(d.get("val_ppl_clamped", False) for d in ds)))
         # 收集全部种子的 split（多种子均在同一 split 上评测；这里避免只看
         # 首个文件时漏掉其它种子的信息，标签才不会误导）
-        splits.update(d.get("split", "val") for d in ds)
+        for d in ds:
+            try:
+                splits.add(d.get("split", "val"))
+            except TypeError:
+                invalid_split = True
     if not rows:
         return False
     rows.sort(key=lambda r: r[1])
@@ -221,9 +241,9 @@ def fig_ppl(rdir):
     ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c
                                else ("%.2f±%.2f" % (p, s) if s else "%.2f" % p)
                                for (_, p, s, c) in rows], fontsize=9)
-    if splits == {"test"}:
+    if splits == {"test"} and not invalid_split:
         set_name = "测试集"
-    elif len(splits) == 1:
+    elif len(splits) == 1 and not invalid_split:
         set_name = "验证集"
     else:
         set_name = "各评测集"   # 混合 split 时不冒充单一集合
@@ -245,7 +265,10 @@ def fig_ruler(rdir):
     for v, ds in groups.items():
         agg = {}
         for d in ds:
-            for task, by_ctx in (d.get("results") or {}).items():
+            results = d.get("results")
+            if not isinstance(results, dict):
+                continue
+            for task, by_ctx in results.items():
                 if task == "_skipped" or not isinstance(by_ctx, dict):
                     continue
                 for ctx, m in by_ctx.items():
@@ -253,10 +276,12 @@ def fig_ruler(rdir):
                         continue
                     cell = agg.setdefault(task, {}).setdefault(
                         ctx, {"em": [], "recall": []})
-                    if m.get("em") is not None:
-                        cell["em"].append(m["em"])
-                    if m.get("recall") is not None:
-                        cell["recall"].append(m["recall"])
+                    em = _finite_float(m.get("em"))
+                    recall = _finite_float(m.get("recall"))
+                    if em is not None:
+                        cell["em"].append(em)
+                    if recall is not None:
+                        cell["recall"].append(recall)
         data[v] = {
             task: {ctx: {
                 "em": (float(np.mean(cell["em"])) if cell["em"] else None),
@@ -275,11 +300,22 @@ def fig_ruler(rdir):
         for v, r in sorted(data.items()):
             if task not in r or not r[task]:
                 continue
-            items = sorted(((int(k), m) for k, m in r[task].items()))
-            xs = [x for x, _ in items]
+            items = []
+            for k, m in r[task].items():
+                try:
+                    ctx = int(k)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                items.append((ctx, m))
+            items.sort(key=lambda it: it[0])
             # fwe 主指标是 top-10 recall；其余检索任务为 EM。
             metric = "recall" if task == "fwe" else "em"
-            ys = [m[metric] * 100 for _, m in items]
+            points = [(x, m[metric]) for x, m in items
+                      if _finite_float(m.get(metric)) is not None]
+            if not points:
+                continue
+            xs = [x for x, _ in points]
+            ys = [y * 100 for _, y in points]
             ax.plot(xs, ys, marker="o", label=_label(v), color=COLORS.get(v))
         ax.set_title(task)
         ax.set_xlabel("上下文长度 (tokens)")
@@ -294,19 +330,48 @@ def fig_ruler(rdir):
 
 def fig_latency(rdir):
     d = _load(os.path.join(rdir, "latency.json"))
-    if not d:
+    if not isinstance(d, dict):
         return False
-    variants = d["variants"]
+    variants = d.get("variants")
+    if not isinstance(variants, dict):
+        return False
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
     prefill_bs = None
     for v, e in variants.items():
-        ctxs = sorted(int(c) for c in e["prefill_ms"].keys())
-        if not ctxs:
+        if not isinstance(e, dict):
             continue
-        bs_key = "1" if "1" in e["prefill_ms"][str(ctxs[0])] else str(list(e["prefill_ms"][str(ctxs[0])].keys())[0])
+        prefill = e.get("prefill_ms")
+        if not isinstance(prefill, dict):
+            continue
+        by_ctx = {}
+        for c, cell in prefill.items():
+            if not isinstance(cell, dict):
+                continue
+            try:
+                by_ctx[int(c)] = cell
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if not by_ctx:
+            continue
+        ctxs = sorted(by_ctx)
+        bs_key = prefill_bs
+        if bs_key is None:
+            bs_key = "1" if "1" in by_ctx[ctxs[0]] else next(
+                iter(by_ctx[ctxs[0]]), None)
+        if bs_key is None:
+            continue
         prefill_bs = prefill_bs or bs_key
-        ax1.plot(ctxs, [e["prefill_ms"][str(c)][bs_key] for c in ctxs],
-                 marker="o", label=_label(v) + ("(SDPA)" if e.get("use_sdpa") and v == "standard_sdpa" else ""),
+        xs, ys = [], []
+        for c in ctxs:
+            val = _finite_float(by_ctx[c].get(bs_key))
+            if val is not None:
+                xs.append(c)
+                ys.append(val)
+        if not xs:
+            continue
+        ax1.plot(xs, ys, marker="o",
+                 label=_label(v) + ("(SDPA)" if e.get("use_sdpa")
+                                    and v == "standard_sdpa" else ""),
                  color=COLORS.get(v))
     ax1.set_xlabel("上下文长度 (tokens)")
     ax1.set_ylabel(f"Prefill (ms, batch={prefill_bs})")
@@ -314,13 +379,31 @@ def fig_latency(rdir):
     ax1.grid(alpha=0.3)
     ax1.legend(fontsize=8)
     for v, e in variants.items():
-        ctx_keys = [str(c) for c in sorted(int(c) for c in e["decode_ms_per_tok"].keys())]
-        if not ctx_keys:
+        if not isinstance(e, dict):
             continue
-        actual = e.get("decode_prefill_ctx") or {}
-        xs = [int(actual.get(c, c)) for c in ctx_keys]
-        ax2.plot(xs, [e["decode_ms_per_tok"][c] for c in ctx_keys],
-                 marker="s", label=_label(v), color=COLORS.get(v))
+        decode = e.get("decode_ms_per_tok")
+        if not isinstance(decode, dict):
+            continue
+        actual = e.get("decode_prefill_ctx")
+        actual = actual if isinstance(actual, dict) else {}
+        points = []
+        for c, val in decode.items():
+            dec = _finite_float(val)
+            if dec is None:
+                continue
+            try:
+                ctx = int(c)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            actual_ctx = _finite_float(actual.get(c))
+            x = int(actual_ctx) if actual_ctx is not None else ctx
+            points.append((x, dec))
+        if not points:
+            continue
+        points.sort(key=lambda it: it[0])
+        xs = [x for x, _ in points]
+        ys = [y for _, y in points]
+        ax2.plot(xs, ys, marker="s", label=_label(v), color=COLORS.get(v))
     ax2.set_xlabel("decode 前的实际 KV 上下文长度 (tokens)")
     ax2.set_ylabel("Decode (ms/tok)")
     ax2.set_title("Decode（KV 缓存，batch=1）")
@@ -376,8 +459,13 @@ def _read_records(rdir, variant):
                 n_rows += 1
                 for name, i in idx.items():
                     v = parts[i] if i < len(parts) else ""
-                    file_cols[name].append(
-                        float(v) if v not in ("", "None", "nan") else np.nan)
+                    if v in ("", "None", "nan"):
+                        file_cols[name].append(np.nan)
+                        continue
+                    try:
+                        file_cols[name].append(float(v))
+                    except (TypeError, ValueError, OverflowError):
+                        file_cols[name].append(np.nan)
         per_file.append((file_cols, n_rows))
     out = {}
     # 合并多种子文件时表头可能因代码版本不同而缺列。每个文件在行空间里占
@@ -477,7 +565,8 @@ def fig_misleading(rdir):
     for v, ds in grouped.items():
         row = {"variant": v}
         for k in keys:
-            vals = [d[k] for d in ds if d.get(k) is not None]
+            vals = [x for x in (_finite_float(d.get(k)) for d in ds)
+                    if x is not None]
             row[k] = float(np.mean(vals)) if vals else None
         rows.append(row)
     if not rows:
@@ -515,15 +604,23 @@ def fig_auroc_heads(rdir, variant="lega"):
     agg = {}
     for fp in files:
         d = _load(fp)
-        if not d:
+        if not isinstance(d, dict):
             continue
         for h in d.get("per_head") or []:
-            key = (h["layer"], h["head"])
+            if not isinstance(h, dict):
+                continue
+            key = (h.get("layer"), h.get("head"))
+            try:
+                hash(key)
+            except TypeError:
+                continue
             cell = agg.setdefault(key, {"qterm": [], "logit": []})
-            if h.get("auroc_qterm") is not None:
-                cell["qterm"].append(h["auroc_qterm"])
-            if h.get("auroc_logit") is not None:
-                cell["logit"].append(h["auroc_logit"])
+            qterm = _finite_float(h.get("auroc_qterm"))
+            logit = _finite_float(h.get("auroc_logit"))
+            if qterm is not None:
+                cell["qterm"].append(qterm)
+            if logit is not None:
+                cell["logit"].append(logit)
     ph = [{"layer": k[0], "head": k[1],
            "auroc_qterm": float(np.mean(v["qterm"])),
            "auroc_logit": float(np.mean(v["logit"]))}

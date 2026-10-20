@@ -17,10 +17,11 @@ from unittest import mock
 
 from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _lat_noise_pct, _neural_eval_window_spec,
-                      _noise_floor_pct,
-                      _ppl_of, _rel_pct, _render_baseline_sections,
-                      _ruler_min_cell_n,
+                      _enrich_paired, _eval_matches_window_spec, _lat_noise_pct,
+                      _neural_eval_window_spec, _noise_floor_pct,
+                      _ppl_ci_rel_pct, _ppl_of, _probe_oof, _rel_pct,
+                      _render_baseline_sections, _ruler_min_cell_n,
+                      _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
                       apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
@@ -1841,6 +1842,69 @@ def test_build_summary_tolerates_malformed_data_report_and_audit():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] data_report/audit 嵌套字段非对象：缺失降级而非崩溃")
+
+
+def test_summary_helpers_tolerate_nested_non_dict_values():
+    """嵌套字段是数组/标量时按缺失处理，不能让整份汇总在这些 helper 上崩溃。"""
+    assert _ruler_task_means([1]) == {}
+    assert _ruler_task_means({"results": [1]}) == {}
+    assert _probe_oof([1], "auprc") is None
+    assert _probe_oof({"linear_probe": [1]}, "auprc") is None
+    assert _ppl_of([1]) is None
+    assert _ppl_ci_rel_pct([1]) is None
+    assert _neural_eval_window_spec({"train_ctx": float("inf")}, False) is None
+    assert _neural_eval_window_spec({"eval_iters": "x"}, False) is None
+    assert _neural_eval_window_spec([1], False) is None
+    assert _eval_matches_window_spec(
+        {"eval_ctx": float("inf")},
+        {"ctx": 8, "n_eval": 2, "n_windows": 5}) is False
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "ngram_baseline.json"),
+                    {"ppl": {"bigram": float("inf")}})
+        assert ngram_baseline_comparison({}, tmp).get("error")
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "ppl": {"bigram": 100.0},
+            "ppl_window_matched": {"bigram": float("inf")},
+            "window_spec": {"ctx": 8, "iters": 2}})
+        cmp_doc = ngram_baseline_comparison({}, tmp)
+        assert cmp_doc["ngram_ppl_window_matched"] is None, cmp_doc
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总 helper：嵌套非对象/Inf 数值安全降级")
+
+
+def test_build_summary_tolerates_malformed_eval_probe_repro_curve():
+    """eval/analysis/repro/curve 的字段类型畸形时汇总仍能生成。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 9.0, "val_loss": 2.2,
+            "split": ["val"], "epochs_seen": "x",
+            "val_tokens_evaluated": "x",
+            "worst_windows": ["bad"], "worst_window_scope": {
+                "screened": "inf", "total": "x"}})
+        # 变体名是数组时既不能进 runs 字典，也不能被当作合法 row。
+        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
+            "variant": ["standard"], "seed": 1, "val_ppl": 10.0})
+        _write_json(os.path.join(tmp, "analysis_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "auroc_logit": "x",
+            "auroc_qterm": "x", "linear_probe": [1],
+            "gate_f1": [1], "gate_f1_trivial": "x"})
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "ppl": {"bigram": 100.0}})
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": ["lega"], "seeds": [1], "git": [1],
+            "data": {"files": ["x"]}})
+        _write_json(os.path.join(tmp, "curve_diagnosis.json"), {
+            "lega": {"1": {"status": "正常收敛",
+                           "recommendations": {"a": 1}}}})
+        out = build_summary(tmp)
+        assert [r["variant"] for r in out["rows"]] == ["lega"]
+        assert "训练曲线诊断" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：畸形 eval/analysis/repro/curve 不崩溃")
 
 
 def test_tradeoff_prefers_sdpa_runtime_baseline():

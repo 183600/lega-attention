@@ -288,8 +288,17 @@ def mean_std(values):
     统计学约定：跨随机种子的结果必须报告 Mean ± Std（样本标准差），
     单种子结果无法评估方差，调用方应显式标注 n=1。
     """
-    a = np.asarray([v for v in values if v is not None], dtype=np.float64)
-    a = a[np.isfinite(a)]
+    vals = []
+    for v in values:
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(f):
+            vals.append(f)
+    a = np.asarray(vals, dtype=np.float64)
     if a.size == 0:
         return None, None
     if a.size == 1:
@@ -502,9 +511,17 @@ def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
     None/非有限值剔除后 n<2 时返回 None（单点无区间可言）。
     固定随机种子，同一输入恒定复现。返回 (lo, hi)。
     """
-    arr = np.asarray([v for v in values
-                      if v is not None and math.isfinite(float(v))],
-                     dtype=np.float64)
+    vals = []
+    for v in values:
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(f):
+            vals.append(f)
+    arr = np.asarray(vals, dtype=np.float64)
     if arr.size < 2:
         return None
     rng = np.random.default_rng(seed)

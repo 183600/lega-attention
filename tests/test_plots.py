@@ -12,8 +12,9 @@ import tempfile
 import numpy as np
 
 from lega.plots import (_HAS_MPL, _expected_tagged, _group_by_variant,
-                        _load_train_logs, _mean_by_step, _prefer_seeded,
-                        _read_records, fig_ppl)
+                        _group_items, _load_train_logs, _mean_by_step,
+                        _prefer_seeded, _read_records, fig_auroc_heads,
+                        fig_latency, fig_misleading, fig_ppl, fig_ruler)
 
 
 def _w(rdir, name, obj):
@@ -204,3 +205,65 @@ def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] PPL 图：null ppl 回退 val_ppl，坏值不崩溃")
+
+
+def test_group_items_treats_unhashable_seed_as_missing():
+    """JSON seed 为数组/对象时按缺种子信息处理，不能作为字典键崩溃。"""
+    items = [("eval_lega.json", {"variant": "lega", "seed": [1],
+                                 "val_ppl": 9.0}),
+             ("eval_standard.json", {"variant": "standard",
+                                     "seed": {"n": 1}, "val_ppl": 10.0}),
+             ("eval_bad.json", {"variant": ["bad"], "seed": 1}),
+             ("eval_bad2.json", {"variant": {"x": 1}, "seed": 1})]
+    groups = _group_items(items)
+    assert len(groups["lega"]) == 1
+    assert len(groups["standard"]) == 1
+    assert set(groups) == {"lega", "standard"}
+    print("  [ok] 分组：不可哈希 seed/变体按缺失处理")
+
+
+def test_plots_tolerate_malformed_nested_fields():
+    """畸形 split/seed/results/latency/per_head/CSV 单元格不能让画图崩溃。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过畸形字段渲染测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "eval_lega_seed1.json", {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0,
+            "split": ["val"]})
+        _w(tmp, "eval_standard_seed1.json", {
+            "variant": "standard", "seed": 1, "val_ppl": float("inf"),
+            "split": "val"})
+        assert fig_ppl(tmp) is True
+        _w(tmp, "ruler_lega_seed1.json", {
+            "variant": "lega", "seed": 1,
+            "results": {"niah_synth": {"x": {"em": 0.5},
+                                       "256": {"em": "bad"}},
+                        "fwe": [1]}})
+        assert fig_ruler(tmp) is True
+        _w(tmp, "latency.json", {"variants": {
+            "lega": [1],
+            "standard": {"prefill_ms": {"256": {}},
+                         "decode_ms_per_tok": {"256": "x"}},
+            "qgate": {"prefill_ms": {"256": {"1": 12.0}},
+                      "decode_ms_per_tok": {"256": 1.2},
+                      "decode_prefill_ctx": {"256": "bad"}}}})
+        assert fig_latency(tmp) is True
+        _w(tmp, "analysis_lega_seed1.json", {
+            "variant": "lega", "seed": 1, "n_records": 10,
+            "p_hit_given_conc": "x", "p_hit_given_notconc": 0.2,
+            "misleading_rate": float("nan"),
+            "per_head": ["bad", {"layer": [1], "head": 0},
+                         {"layer": 0, "head": 0,
+                          "auroc_qterm": 0.6, "auroc_logit": 0.7}]})
+        assert fig_misleading(tmp) is True
+        assert fig_auroc_heads(tmp, variant="lega") is True
+        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
+                  encoding="utf-8") as f:
+            f.write("task,g,hit,c,log_n\nx,zzz,1,1,2\n")
+        cols = _read_records(tmp, "lega")
+        assert np.isnan(cols["g"][0])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 图表：畸形嵌套字段/CSV 单元格安全跳过")

@@ -288,7 +288,19 @@ def test_critical_split_alerts_filters_actionable_violations():
     assert [a["code"] for a in picked] == [
         "split_shuffled", "split_char_cut", "split_documents_cross_cut"]
     assert critical_split_alerts({}) == []
+    assert critical_split_alerts(None) == []
+    assert critical_split_alerts({"alerts": 5}) == []
+    assert split_protocol_alerts("not-a-dict") == []
     print("  [ok] critical_split_alerts 只筛出必须先处理的划分协议违规")
+
+
+def test_decontaminate_tolerates_non_dict_and_missing_train():
+    """旧缓存/手改 JSON 缺 train 或顶层非对象时按空文本处理，而非崩溃。"""
+    for texts in (None, [], {"val": "x"}, {"train": 123, "val": ["x"]}):
+        out, stats = decontaminate_texts(texts)
+        assert out["train"] == ""
+        assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
+    print("  [ok] decontaminate_texts 容忍非对象/缺失 train")
 
 
 def test_ngram_overlap_detects_and_clears():

@@ -594,7 +594,7 @@ def _stat(values) -> dict:
 
 
 def _ppl_of(d):
-    if not d:
+    if not isinstance(d, dict):
         return None
     # ppl 键存在但为 null（外部/旧格式）时必须继续回退 val_ppl，不能把
     # 一个缺失字段当成“没有 PPL”。
@@ -615,7 +615,9 @@ def _ppl_ci_rel_pct(d):
     PPL 的跨种子 std 与此量回答不同问题：前者是训练随机性，后者是
     “只评测有限个验证窗口”的评估随机性。两者都要看，不能互相替代。
     """
-    ci = (d or {}).get("val_ppl_ci95")
+    if not isinstance(d, dict):
+        return None
+    ci = d.get("val_ppl_ci95")
     ppl = _ppl_of(d)
     if (not isinstance(ci, (list, tuple)) or len(ci) != 2
             or ppl is None or ppl <= 0):
@@ -645,9 +647,15 @@ def _eval_scalar(key):
 
 def _ruler_task_means(d):
     """单次 RULER 结果：各任务先在上下文档位求平均（fwe 用 recall，其余 EM）。"""
+    if not isinstance(d, dict):
+        return {}
+    results = d.get("results")
+    if not isinstance(results, dict):
+        return {}
     out = {}
-    for task, by_ctx in ((d or {}).get("results") or {}).items():
-        if task.startswith("_") or not isinstance(by_ctx, dict) or not by_ctx:
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or task.startswith("_")
+                or not isinstance(by_ctx, dict) or not by_ctx):
             continue
         metric = "recall" if task == "fwe" else "em"
         vals = []
@@ -676,9 +684,15 @@ def _ruler_min_cell_n(d):
     EM/Wilson CI 的精度直接由每格 n 决定；汇总只报平均分而不报最小 n，
     会把 n=2 的 0.000 与 n=30 的 0.000 当成同样可信的证据。
     """
+    if not isinstance(d, dict):
+        return None
+    results = d.get("results")
+    if not isinstance(results, dict):
+        return None
     ns = []
-    for task, by_ctx in ((d or {}).get("results") or {}).items():
-        if task.startswith("_") or not isinstance(by_ctx, dict):
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or task.startswith("_")
+                or not isinstance(by_ctx, dict)):
             continue
         for cell in by_ctx.values():
             if not isinstance(cell, dict) or cell.get("n") is None:
@@ -903,8 +917,11 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
             continue
         a, b = [], []
         for s in seeds:
-            an = m[s].get("analysis") or {}
-            al, aq = an.get(key_cand + "_logit"), an.get(key_cand + "_qterm")
+            an = m[s].get("analysis")
+            if not isinstance(an, dict):
+                continue
+            al = _num_or_none(an.get(key_cand + "_logit"))
+            aq = _num_or_none(an.get(key_cand + "_qterm"))
             if al is None or aq is None:
                 continue
             a.append(al)
@@ -1314,14 +1331,19 @@ def _neural_eval_window_spec(cfg: dict, smoke: bool):
     （缺省 50）。规格非法时返回 None（不阻塞基线评测）。
     """
     from lega.train import SMOKE_OVERRIDES
-    ctx = int(cfg.get("train_ctx") or cfg.get("block_size") or 0)
-    iters = int(cfg.get("eval_iters", 50))
-    if smoke:
-        if "train_ctx" in SMOKE_OVERRIDES:
-            ctx = int(SMOKE_OVERRIDES["train_ctx"])
-        if "eval_iters" in SMOKE_OVERRIDES:
-            iters = int(SMOKE_OVERRIDES["eval_iters"])
-    block = int(cfg.get("block_size") or 0)
+    if not isinstance(cfg, dict):
+        return None
+    try:
+        ctx = int(cfg.get("train_ctx") or cfg.get("block_size") or 0)
+        iters = int(cfg.get("eval_iters", 50))
+        if smoke:
+            if "train_ctx" in SMOKE_OVERRIDES:
+                ctx = int(SMOKE_OVERRIDES["train_ctx"])
+            if "eval_iters" in SMOKE_OVERRIDES:
+                iters = int(SMOKE_OVERRIDES["eval_iters"])
+        block = int(cfg.get("block_size") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if block > 0:
         ctx = min(ctx, block)
     if ctx < 1 or iters < 1:
@@ -1342,7 +1364,7 @@ def _eval_matches_window_spec(ev: dict, wspec: dict) -> bool:
         return (int(ev.get("eval_ctx")) == int(wspec.get("ctx"))
                 and int(ev.get("eval_iters")) == int(wspec.get("n_eval"))
                 and int(ev.get("val_windows")) == int(wspec.get("n_windows")))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -1384,8 +1406,10 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         return {"error": "ngram_baseline.json 没有可用 PPL"}
     try:
         ref_ppl_full = float(ppl_map[ref_name])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"error": "ngram PPL 非数值"}
+    if not math.isfinite(ref_ppl_full) or ref_ppl_full <= 0:
+        return {"error": "ngram PPL 非有限值或非正数"}
     wm_map = ng.get("ppl_window_matched")
     wm_map = wm_map if isinstance(wm_map, dict) else {}
     wspec = ng.get("window_spec")
@@ -1405,7 +1429,10 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 continue
             ev_split = d.get("split", "val")
             if ev_split != ng_split:
-                eval_splits.add(ev_split)
+                try:
+                    eval_splits.add(ev_split)
+                except TypeError:
+                    eval_splits.add(str(ev_split))
                 excl_seeds.append(s)
                 continue
             p = _ppl_of(d)
@@ -1418,7 +1445,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             # 只要存在 split 错位的种子就必须显式列出（哪怕同变体另有可比
             # 种子已被纳入）：静默丢弃部分种子同样会让读者高估证据完整性
             incomparable.append({"variant": v,
-                                 "eval_splits": sorted(eval_splits),
+                                 "eval_splits": sorted(eval_splits, key=str),
                                  "excluded_seeds": [int(s) if s is not None
                                                     else None
                                                     for s in excl_seeds]})
@@ -1434,7 +1461,9 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     try:
         if wm_map.get(ref_name) is not None:
             wm_ref = float(wm_map[ref_name])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        wm_ref = None
+    if wm_ref is not None and (not math.isfinite(wm_ref) or wm_ref <= 0):
         wm_ref = None
     all_matched = bool(staged) and all(all(r["matched"]) for r in staged)
     use_window = bool(wspec) and wm_ref is not None and all_matched
@@ -1516,9 +1545,9 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
 
 def _probe_oof(analysis: dict, key: str):
     """从机制分析 JSON 取线性探针主特征集的 out-of-fold 指标。"""
-    lp = (analysis or {}).get("linear_probe") or {}
-    fs = (lp.get("feature_sets") or {}).get(lp.get("primary") or "") or {}
-    return (fs.get("oof") or {}).get(key)
+    lp = _as_dict(_as_dict(analysis).get("linear_probe"))
+    fs = _as_dict(_as_dict(lp.get("feature_sets")).get(lp.get("primary") or ""))
+    return _as_dict(fs.get("oof")).get(key)
 
 
 # 机制判别的简单学习基线对照（补充性/探索性）：门控 logit 是语言建模的
@@ -1546,24 +1575,28 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
         m = _variant_seed_map(runs, v)
         per_seed, has_analysis = [], False
         for s in _sorted_seeds(m):
-            an = m[s].get("analysis") or {}
-            if an:
-                has_analysis = True
-            lp = an.get("linear_probe") or {}
-            fs = (lp.get("feature_sets") or {}).get(lp.get("primary") or "") or {}
-            oof = fs.get("oof") or {}
-            if oof.get("auprc") is None or oof.get("auroc") is None:
+            an = m[s].get("analysis")
+            if not isinstance(an, dict):
+                continue
+            has_analysis = True
+            lp = _as_dict(an.get("linear_probe"))
+            fs = _as_dict(_as_dict(lp.get("feature_sets")).get(
+                lp.get("primary") or ""))
+            oof = _as_dict(fs.get("oof"))
+            probe_auprc = _num_or_none(oof.get("auprc"))
+            probe_auroc = _num_or_none(oof.get("auroc"))
+            if probe_auprc is None or probe_auroc is None:
                 continue
             per_seed.append({
                 # 无 seed 字段（_seed_key 返回 None）时按缺种子信息处理。
                 "seed": int(s) if s is not None else None,
-                "probe_auprc": float(oof["auprc"]),
-                "probe_auroc": float(oof["auroc"]),
-                "gate_auprc": an.get("auprc_logit"),
-                "gate_auroc": an.get("auroc_logit"),
-                "rule_auprc": an.get("auprc_maxp"),
-                "rule_auroc": an.get("auroc_maxp"),
-                "base_rate": an.get("hit_base_rate"),
+                "probe_auprc": probe_auprc,
+                "probe_auroc": probe_auroc,
+                "gate_auprc": _num_or_none(an.get("auprc_logit")),
+                "gate_auroc": _num_or_none(an.get("auroc_logit")),
+                "rule_auprc": _num_or_none(an.get("auprc_maxp")),
+                "rule_auroc": _num_or_none(an.get("auroc_maxp")),
+                "base_rate": _num_or_none(an.get("hit_base_rate")),
                 "probe_l2": fs.get("selected_l2"),
                 "probe_features": fs.get("features"),
                 "folds": lp.get("folds"),
@@ -2204,7 +2237,9 @@ def build_summary(results_dir: str, audit: dict = None,
         repro.get("seeds"), list) else None
 
     def in_run_scope(fp, d):
-        if not isinstance(d, dict) or d.get("variant") is None:
+        # 变体名必须是可哈希字符串：外部 JSON 的数组/对象既不能作为 runs
+        # 的键，也不是合法的变体标识，按损坏产物跳过。
+        if not isinstance(d, dict) or not isinstance(d.get("variant"), str):
             return False
         if scope_variants is not None and d["variant"] not in scope_variants:
             return False
@@ -2236,10 +2271,14 @@ def build_summary(results_dir: str, audit: dict = None,
 
     variants = sorted(v for v in runs if v in VARIANTS)
     eval_splits = set()
+    invalid_eval_split = False
     for v in variants:
         for s in _variant_seed_map(runs, v).values():
             if s.get("eval"):
-                eval_splits.add(s["eval"].get("split", "val"))
+                try:
+                    eval_splits.add(s["eval"].get("split", "val"))
+                except TypeError:
+                    invalid_eval_split = True
 
     # 汇总运行时指标时必须使用所有变体共有的同一上下文档，不允许各取自己的最大 ctx。
     lat = load(os.path.join(results_dir, "latency.json"))
@@ -2285,7 +2324,7 @@ def build_summary(results_dir: str, audit: dict = None,
     common_ctx = max(common_ctxs) if common_ctxs else None
 
     def _clock_extractor(key):
-        return lambda d: (d or {}).get(key)
+        return lambda d: d.get(key) if isinstance(d, dict) else None
 
     metric_specs = [
         ("val_ppl", lambda m: _stat_series(m, "eval", _ppl_of)),
@@ -2320,14 +2359,15 @@ def build_summary(results_dir: str, audit: dict = None,
     metric_specs.append(
         ("gate_f1_macro", lambda m: _stat_series(
             m, "analysis",
-            lambda d: (d.get("gate_f1") or {}).get("macro"))))
+            lambda d: _as_dict(d.get("gate_f1")).get("macro"))))
     # 恒写（全判 hit）规则的 macro F1：门控决策的“稻草人”对照。
     # 不平衡下门控 F1 若不明显高于该固定规则，就没有决策价值。
     metric_specs.append(
         ("gate_f1_macro_always_write", lambda m: _stat_series(
             m, "analysis",
-            lambda d: (((d.get("gate_f1_trivial") or {})
-                        .get("always_write") or {}).get("macro")))))
+            lambda d: _as_dict(
+                _as_dict(d.get("gate_f1_trivial")).get("always_write")
+            ).get("macro"))))
     # 线性探针（有标签监督的简单基线）OOF 指标：进入 summary.json/csv，
     # 供“门控 vs 最简线性模型”的补充性对照审计（渲染见基线合理性小节）。
     metric_specs.append(
@@ -2358,11 +2398,11 @@ def build_summary(results_dir: str, audit: dict = None,
         # 训练/评估覆盖的“最坏种子”兜底值：均值可能掩盖某个种子只跑了
         # 极少数据或只评测了极少窗口的情况，汇总警告以最小值触发。
         evals_v = [s["eval"] for s in m.values() if s.get("eval")]
-        eps = [float(e["epochs_seen"]) for e in evals_v
-               if e.get("epochs_seen") is not None]
+        eps = [x for x in (_num_or_none(e.get("epochs_seen"))
+                           for e in evals_v) if x is not None]
         row["epochs_seen_min"] = min(eps) if eps else None
-        toks = [float(e["val_tokens_evaluated"]) for e in evals_v
-                if e.get("val_tokens_evaluated") is not None]
+        toks = [x for x in (_num_or_none(e.get("val_tokens_evaluated"))
+                            for e in evals_v) if x is not None]
         row["eval_tokens_min"] = min(toks) if toks else None
         row["val_loss_ci95"] = (ev_example or {}).get("val_loss_ci95")
         row["val_ppl_ci95"] = (ev_example or {}).get("val_ppl_ci95")
@@ -2502,7 +2542,7 @@ def build_summary(results_dir: str, audit: dict = None,
                     cells.append(_fmt_scalar(r.get(k)))
             md.append("| " + " | ".join(cells) + " |")
         split_note = ("PPL 在 held-out test 集上评测（checkpoint 选择在 val 上完成）"
-                      if eval_splits == {"test"} else
+                      if eval_splits == {"test"} and not invalid_eval_split else
                       "⚠ PPL 在 val 集上评测，该集同时用于 best-checkpoint 选择，"
                       "数值偏乐观；请用 prepare_data.py 生成 held-out test 后重跑评测")
         min_n = min((r.get("n_seeds") or 1) for r in rows)
@@ -2735,19 +2775,23 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 可复现性与 sanity check（代码版本 / 数据指纹 / 过拟合小批量）
     md += ["", "## 可复现性与 sanity check", ""]
     if repro:
-        git = repro.get("git") or {}
-        data = repro.get("data") or {}
-        rt = repro.get("runtime") or {}
+        git = _as_dict(repro.get("git"))
+        data = _as_dict(repro.get("data"))
+        rt = _as_dict(repro.get("runtime"))
         commit = git.get("commit") or "unknown"
         dirty = git.get("dirty")
         md.append(f"- 代码版本：`{str(commit)[:12]}`"
                   + (f"（分支 {git.get('branch')}）" if git.get("branch") else "")
                   + ("；⚠ 工作区 dirty，结果对应未提交状态" if dirty else
                      ("" if dirty is None else "；工作区 clean")))
-        files = data.get("files") or []
+        files = data.get("files")
+        files = [e for e in files if isinstance(e, dict)] \
+            if isinstance(files, list) else []
         md.append(f"- 数据指纹：`{data.get('digest')}`"
                   f"（tokenizer={data.get('tokenizer')}，"
-                  + "、".join(f"{e['name']} sha256:{e['sha256'][:12]}…" for e in files)
+                  + "、".join(f"{e.get('name')} "
+                              f"sha256:{str(e.get('sha256'))[:12]}…"
+                              for e in files)
                   + "）")
         md.append(f"- 配置 SHA-256：`{str(repro.get('config_sha256'))[:16]}…`；"
                   f"种子：{repro.get('seeds')}")
@@ -2820,10 +2864,13 @@ def build_summary(results_dir: str, audit: dict = None,
         any_loss_spike = False
         any_malformed = False
         for v in variants:
-            by_seed = curve.get(v) or {}
-            if not by_seed:
+            by_seed = curve.get(v)
+            if not isinstance(by_seed, dict):
                 continue
-            diags = list(by_seed.values())
+            diags = [d for d in by_seed.values()
+                     if isinstance(d, dict) and isinstance(d.get("status"), str)]
+            if not diags:
+                continue
             status = worst_status([d["status"] for d in diags])
             worst = next(d for d in diags if d["status"] == status)
             any_nan = any_nan or any(d.get("nonfinite_values") for d in diags)
@@ -2833,27 +2880,30 @@ def build_summary(results_dir: str, audit: dict = None,
             any_loss_spike = any_loss_spike or lspike
             any_malformed = any_malformed or any(d.get("malformed_records")
                                                  for d in diags)
-            es = [d.get("early_stop_gain_rel") for d in diags
-                  if d.get("early_stop_gain_rel") is not None]
+            es = [x for x in (_num_or_none(d.get("early_stop_gain_rel"))
+                              for d in diags) if x is not None]
 
             def _f4(x):
+                x = _num_or_none(x)
                 return "-" if x is None else f"{x:.4f}"
 
-            train_s = (f"{_f4(worst['train_loss_first'])}→"
-                       f"{_f4(worst['train_loss_last'])}")
-            val_s = (f"{_f4(worst['val_loss_first'])}→"
-                     f"{_f4(worst['val_loss_best'])}@s{worst['val_best_step']}"
-                     f"→{_f4(worst['val_loss_last'])}")
+            train_s = (f"{_f4(worst.get('train_loss_first'))}→"
+                       f"{_f4(worst.get('train_loss_last'))}")
+            val_s = (f"{_f4(worst.get('val_loss_first'))}→"
+                     f"{_f4(worst.get('val_loss_best'))}"
+                     f"@s{worst.get('val_best_step')}"
+                     f"→{_f4(worst.get('val_loss_last'))}")
             es_s = ("-" if not es else
                     f"{sum(es) / len(es):+.1%}"
                     + ("（最终劣于最优，已用 best checkpoint）"
                        if sum(es) / len(es) > 0.02 else ""))
-            eps = [d.get("epochs_seen") for d in diags
-                   if d.get("epochs_seen") is not None]
+            eps = [x for x in (_num_or_none(d.get("epochs_seen"))
+                               for d in diags) if x is not None]
             ep_min = min(eps) if eps else None
             ep_s = ("-" if ep_min is None else
                     f"{ep_min:.3f}" + (" ⚠<1" if ep_min < 1.0 else ""))
-            rec = worst["recommendations"][:1]
+            rec = worst.get("recommendations")
+            rec = rec[:1] if isinstance(rec, list) else []
             es_flagged = any(d.get("early_stopped") for d in diags)
             # 需关注种子的占比：只看"最差种子"分不清系统性异常与单个种子偶发，
             # 1/5 与 5/5 需要完全不同的处置
@@ -2898,8 +2948,10 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append("⚠ 部分 train_log.jsonl 记录无法解析（已跳过并计数）："
                       "日志可能被中断或损坏，曲线结论只基于其余记录点，"
                       "复核前不要把它当作完整训练历史。")
-        any_early = any(d.get("early_stopped")
-                        for vs in curve.values() for d in vs.values())
+        any_early = any(
+            d.get("early_stopped")
+            for vs in curve.values() if isinstance(vs, dict)
+            for d in vs.values() if isinstance(d, dict))
         if any_early:
             md.append("")
             md.append("⏹ 上表带「早停」标记的变体触发了早停（验证连续 patience "
@@ -3075,6 +3127,8 @@ def build_summary(results_dir: str, audit: dict = None,
             # 种子无关：给每个窗口写入稳定 key，供跨变体对齐。
             keyed = []
             for w in wins:
+                if not isinstance(w, dict):
+                    continue
                 w = dict(w)
                 w.setdefault("split", cand.get("split"))
                 w["sample_id"] = f"lm:{w.get('split') or '?'}#w{w.get('window')}"
@@ -3107,9 +3161,11 @@ def build_summary(results_dir: str, audit: dict = None,
             for s in _sorted_seeds(_variant_seed_map(runs, v)):
                 cand = (_variant_seed_map(runs, v)[s].get("eval") or {})
                 sc = cand.get("worst_window_scope")
-                if isinstance(sc, dict) and sc.get("screened") is not None:
-                    scopes.add((int(sc["screened"]),
-                                int(sc.get("total") or 0)))
+                screened = (_num_or_none(sc.get("screened"))
+                            if isinstance(sc, dict) else None)
+                if screened is not None:
+                    total = _num_or_none(sc.get("total"))
+                    scopes.add((int(screened), int(total or 0)))
         if scopes:
             md.append("")
             lo_cov = min((scr / tot) if tot else 1.0 for scr, tot in scopes)

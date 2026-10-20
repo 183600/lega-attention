@@ -26,6 +26,15 @@ from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
 WORST_SCREEN_MAX = 64
 
 
+def _positive_int_or_none(value):
+    """配置里的数值→正整数；字符串/非有限浮点/越界值返回 None。"""
+    try:
+        value = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value > 0 else None
+
+
 def worst_window_screening(val_len: int, ctx: int,
                            max_windows: int = WORST_SCREEN_MAX) -> dict:
     """最差窗口筛查范围（候选数/总窗口数/覆盖率），供结果落盘与汇总注脚。"""
@@ -270,8 +279,9 @@ def main():
         # 缺少训练配置时评测上下文静默变为 block_size，PPL 口径与训练内评测不一致
         print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "
               f"model.block_size={model.block_size}，PPL 可能与训练内评测不可比")
-    ctx = min(model.block_size, int(train_ctx)) if train_ctx else model.block_size
-    cfg_eval_iters = cfg_used.get("eval_iters")
+    train_ctx = _positive_int_or_none(train_ctx)
+    ctx = min(model.block_size, train_ctx) if train_ctx else model.block_size
+    cfg_eval_iters = _positive_int_or_none(cfg_used.get("eval_iters"))
     # 缺省必须与 train.py 的 eval_iters 默认值（50）一致：否则同一 checkpoint
     # 的独立评测窗口数与训练内评测/选择口径不同，PPL 不可比，run_all 的窗口
     # 对齐检查也会因此回退到全 split 参考。
