@@ -26,7 +26,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
-                      _ruler_min_cell_n,
+                      _ruler_fwe_recall, _ruler_min_cell_n,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
@@ -2314,15 +2314,18 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     assert abs(_ruler_avg_of(doc) - 0.25) < 1e-12
     # micro：按 n 加权，只有 niah_synth@8 的 1 个样例命中 → 1/20
     assert abs(_ruler_avg_micro(doc) - 0.05) < 1e-12
-    # fwe 用 recall，其余用 EM
+    # fwe 主平均用严格集合 EM；recall 只作诊断单列，不进入平均。
+    # 否则“把上下文词全部列出”的灌水策略可凭 recall 拿满分。
     fwe = {"results": {"fwe": {"8": {"em": 0.0, "recall": 0.75, "n": 4}}}}
-    assert abs(_ruler_avg_of(fwe) - 0.75) < 1e-12
-    assert abs(_ruler_avg_micro(fwe) - 0.75) < 1e-12
+    assert abs(_ruler_avg_of(fwe) - 0.0) < 1e-12
+    assert abs(_ruler_avg_micro(fwe) - 0.0) < 1e-12
+    assert abs(_ruler_fwe_recall(fwe) - 0.75) < 1e-12
+    assert _ruler_fwe_recall({"results": {"vt": {"8": {"em": 1.0}}}}) is None
     # 缺字段/坏类型按缺失处理
     assert _ruler_avg_micro([1]) is None
     assert _ruler_avg_micro({"results": [1]}) is None
     assert _ruler_avg_micro({"results": {"vt": {"8": {"n": 0}}}}) is None
-    print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe 口径）")
+    print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe EM 口径）")
 
 
 def test_summary_helpers_tolerate_nested_non_dict_values():

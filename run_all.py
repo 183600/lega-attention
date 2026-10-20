@@ -849,8 +849,13 @@ def _eval_scalar(key):
     return get
 
 
-def _ruler_task_means(d):
-    """单次 RULER 结果：各任务先在上下文档位求平均（fwe 用 recall，其余 EM）。"""
+def _ruler_task_means(d, metric: str = "em"):
+    """单次 RULER 结果：各任务先在上下文档位求平均。
+
+    默认 `metric="em"`，与预注册假设 H4 的“RULER 平均 EM”逐字一致。
+    fwe 的 recall 不进入主平均（recall 不惩罚“把上下文词全列出来”的灌水
+    策略），仅由 `_ruler_fwe_recall` 单独报告作诊断。
+    """
     if not isinstance(d, dict):
         return {}
     results = d.get("results")
@@ -861,7 +866,6 @@ def _ruler_task_means(d):
         if (not isinstance(task, str) or task.startswith("_")
                 or not isinstance(by_ctx, dict) or not by_ctx):
             continue
-        metric = "recall" if task == "fwe" else "em"
         vals = []
         for m in by_ctx.values():
             if not isinstance(m, dict) or m.get(metric) is None:
@@ -877,12 +881,24 @@ def _ruler_task_means(d):
     return out
 
 
+def _ruler_fwe_recall(d):
+    """fwe 的召回率（仅诊断，不进入 RULER 主平均）。
+
+    recall 奖励“多答中一个”，对把上下文词全部列出的灌水策略不敏感；主
+    指标必须用严格集合 EM（预注册口径）。召回率单列帮助区分“完全没找到
+    高频词”与“找对了但多答/少答”。
+    """
+    tm = _ruler_task_means(d, metric="recall")
+    return tm.get("fwe")
+
+
 def _ruler_avg_of(d):
-    """RULER 平均（macro）：任务等权，任务内上下文档位等权。
+    """RULER 平均（macro）：任务等权，任务内上下文档位等权，统一用 EM。
 
     该口径忽略每格样本数 n 与任务/上下文规模差异——n=2 的格与 n=30 的
     格同样重。预注册假设的“RULER平均”固定指这一口径；样本加权口径另见
     `_ruler_avg_micro`，两者差异是“平均值定义依赖”的直接证据。
+    fwe 用严格集合 EM（与 H4 的“平均 EM”一致），recall 仅单列诊断。
     """
     tm = _ruler_task_means(d)
     return float(sum(tm.values()) / len(tm)) if tm else None
@@ -891,7 +907,7 @@ def _ruler_avg_of(d):
 def _ruler_avg_micro(d):
     """RULER 平均（micro）：按每格样本数 n 加权，所有评测样例等权。
 
-    fwe 用 recall、其余任务用 EM（与 macro 口径相同），但不再让每个任务/
+    与 macro 相同统一用各任务 EM（fwe 为严格集合 EM）；不再让每个任务/
     上下文格等权。macro 与 micro 并报，避免“平均”二字的歧义掩盖任务间
     难度与格大小的不均。
     """
@@ -905,11 +921,10 @@ def _ruler_avg_micro(d):
         if (not isinstance(task, str) or task.startswith("_")
                 or not isinstance(by_ctx, dict)):
             continue
-        metric = "recall" if task == "fwe" else "em"
         for cell in by_ctx.values():
             if not isinstance(cell, dict):
                 continue
-            v, n = cell.get(metric), _integral_value(cell.get("n"))
+            v, n = cell.get("em"), _integral_value(cell.get("n"))
             try:
                 v = float(v)
             except (TypeError, ValueError, OverflowError):
@@ -3002,6 +3017,11 @@ def build_summary(results_dir: str, audit: dict = None,
             (f"ruler_{task}",
              (lambda t: lambda m: _stat_series(
                  m, "ruler", lambda d: _ruler_task_means(d).get(t)))(task)))
+    # fwe 召回率仅作诊断单列：recall 不惩罚“把上下文词全部列出”的灌水
+    # 策略，不能进入预注册的 RULER 平均（主口径为严格集合 EM）。
+    metric_specs.append(
+        ("ruler_fwe_recall",
+         lambda m: _stat_series(m, "ruler", _ruler_fwe_recall)))
     for key in ("auroc_logit", "auroc_qterm", "misleading_rate",
                 "misleading_given_conc", "p_hit_given_conc",
                 "auprc_logit", "auprc_qterm", "hit_base_rate",
@@ -3169,7 +3189,9 @@ def build_summary(results_dir: str, audit: dict = None,
             ("ruler_avg", "RULER平均↑"),
             ("ruler_niah_synth", "niah_synth↑"),
             ("ruler_niah_corpus", "niah_corpus↑"),
-            ("ruler_niah_multikey", "multikey↑"), ("ruler_fwe", "fwe↑"),
+            ("ruler_niah_multikey", "multikey↑"),
+            ("ruler_fwe", "fwe EM↑"),
+            ("ruler_fwe_recall", "fwe recall↑"),
             ("ruler_vt", "vt↑"), ("prefill_ms", "Prefill ms↓"),
             ("prefill_rel_pct", "相对基线%"),
             ("decode_ms_per_tok", "Decode ms/tok↓"),
@@ -3211,7 +3233,8 @@ def build_summary(results_dir: str, audit: dict = None,
                      "misleading_given_conc", "auroc_logit", "auroc_qterm",
                      "auprc_logit", "auprc_qterm", "hit_base_rate",
                      "gate_f1_macro", "gate_f1_macro_always_write",
-                     "ppl_ci_rel_pct", "epochs_seen"} \
+                     "ppl_ci_rel_pct", "epochs_seen",
+                     "ruler_fwe_recall"} \
             | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
@@ -3304,9 +3327,12 @@ def build_summary(results_dir: str, audit: dict = None,
             md += ["", "### RULER 平均口径（macro / micro）", "",
                    "macro = 各任务内先对上下文档位等权平均，再对任务等权平均"
                    "（预注册“RULER平均”固定指此口径）；micro = 按每格样本数 n "
-                   "加权（所有评测样例等权）。fwe 用 recall、其余任务用 EM。"
-                   "两者差异大说明任务难度/每格样本数不均衡会改变“平均分”"
-                   "的读法，结论应同时对照逐任务列与 Wilson CI。", "",
+                   "加权（所有评测样例等权）。两者统一用各任务 EM；fwe 用"
+                   "严格集合 EM（与预注册 H4 的“RULER 平均 EM”一致），其"
+                   "recall 仅作诊断单列、不进入平均——recall 不惩罚“把上下文"
+                   "词全部列出”的灌水策略。两者差异大说明任务难度/每格样本数"
+                   "不均衡会改变“平均分”的读法，结论应同时对照逐任务列与"
+                   "Wilson CI。", "",
                    "| 变体 | RULER平均 macro↑ | RULER平均 micro↑ | "
                    "macro−micro |", "|---|---|---|---|"]
             for r in rul_rows:
