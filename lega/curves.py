@@ -152,9 +152,11 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
             continue
         try:
             v, s = float(v), int(s)
+            float(s)
         except (TypeError, ValueError, OverflowError):
             # step 可能是 JSON 里的 Infinity/1e999（json.loads 接受非标准
-            # 字面量）：int(inf) 抛 OverflowError，同样必须按坏记录跳过。
+            # 字面量）或超出 float 范围的巨大整数：int(inf)/float(step)
+            # 抛 OverflowError，同样必须按坏记录跳过。
             malformed += 1
             continue
         if math.isfinite(v):
@@ -389,10 +391,11 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     for r in early_stop_recs:
         try:
             s = int(r.get("step"))
+            if not math.isfinite(float(s)):
+                continue
         except (TypeError, ValueError, OverflowError):
             continue
-        if math.isfinite(float(s)):
-            early_stop_steps.append(s)
+        early_stop_steps.append(s)
     es_step = (early_stop_steps[0] if early_stop_steps
                else (train_pts[-1]["step"] if train_pts else None))
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报

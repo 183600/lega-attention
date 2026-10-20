@@ -249,6 +249,35 @@ def test_infinite_step_records_do_not_crash_diagnosis():
     print("  [ok] step=Infinity 的记录跳过并计数（OverflowError 不中断诊断）")
 
 
+def test_huge_step_records_do_not_crash_diagnosis():
+    """超出 float 范围的巨大整数 step 也必须按坏记录跳过：否则分段均值
+    的 step 算术会在 float 转换时 OverflowError。"""
+    recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": 3.5},
+            {"step": 30, "loss": 3.0}, {"step": 40, "loss": 2.0},
+            {"step": 10 ** 400, "loss": 1.0},
+            {"step": 10, "val_loss": 5.0}, {"step": 20, "val_loss": 4.0},
+            {"step": 30, "val_loss": 3.0},
+            {"step": 10 ** 400, "val_loss": 1.0}]
+    d = diagnose_curve(recs)
+    assert d["status"] == "正常收敛", d
+    assert d["malformed_records"] == 2, d
+    print("  [ok] 超出 float 范围的巨大 step 跳过并计数（诊断不中断）")
+
+
+def test_huge_early_stop_step_does_not_crash_diagnosis():
+    """early_stop 记录的 step 是合法超大整数时 float(step) 会 OverflowError；
+    该标记应被忽略并回退到最后一个有限训练点。"""
+    recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": 3.5},
+            {"step": 30, "loss": 3.0}, {"step": 40, "loss": 2.0},
+            {"step": 10, "val_loss": 5.0}, {"step": 20, "val_loss": 4.0},
+            {"step": 30, "val_loss": 3.0},
+            {"step": 10 ** 400, "early_stop": True}]
+    d = diagnose_curve(recs)
+    assert d["status"] == "正常收敛", d
+    assert d["early_stop_step"] == 40, d
+    print("  [ok] early_stop 的超大整数 step 不中断诊断")
+
+
 def test_insufficient_train_coverage_is_not_normal_convergence():
     """训练/验证都在降但只见过 <1 epoch：必须判“训练不足”，不得写无需干预。"""
     recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
