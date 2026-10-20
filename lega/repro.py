@@ -66,11 +66,11 @@ def git_info(root: str = None) -> dict:
 
 
 def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
-    """工作区可重放补丁：已跟踪改动 + 未跟踪文件（受字节预算限制）。
+    """工作区可重放补丁：已跟踪改动 + 未跟踪文件（受字节上限限制）。
 
     只取 `git diff HEAD` 会漏掉未跟踪的新代码文件；这里对
     `git ls-files --others --exclude-standard` 列出的每个文件生成
-    `git diff --no-index --binary /dev/null <file>` 并拼接。预算用尽时在
+    `git diff --no-index --binary /dev/null <file>` 并拼接。上限用尽时在
     返回值中标记 truncated，调用方可据此知道补丁不完整（绝不静默冒充完整）。
     """
     tracked = _git_bytes(["diff", "HEAD", "--binary"], root) or b""
@@ -109,7 +109,7 @@ def worktree_state(root: str = None, max_files: int = 500) -> dict:
       * changed_files / untracked_files：git status 的路径（截断到 max_files，
         并给出完整计数）；
       * diff_sha256 / diff_bytes：已跟踪改动 + 未跟踪文件补丁的 SHA-256 与
-        字节数（原始字节；未跟踪文件受 8 MiB 预算限制，见 diff_truncated）；
+        字节数（原始字节；未跟踪文件受 8 MiB 上限限制，见 diff_truncated）；
       * head：快照对应的 commit。
     非 git 仓库/无提交/git 不可用时 available=False，字段为 None，绝不阻塞实验。
     """
@@ -160,7 +160,7 @@ def write_worktree_patch(path: str, root: str = None) -> dict:
 
     与 worktree_state 的 diff_sha256 使用同一字节口径，因此可由哈希比对
     确认补丁与清单记录的是同一份工作区状态。无任何改动时不写文件，返回
-    patch_file=None；未跟踪文件超过预算时 patch_truncated=True。
+    patch_file=None；未跟踪文件超过上限时 patch_truncated=True。
     """
     diff, truncated = _worktree_diff_bytes(root or ROOT)
     if not diff:

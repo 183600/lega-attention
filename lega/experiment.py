@@ -284,7 +284,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
         }
     if isinstance(ev, dict) and ev:
         # eval 身份与本次快照不符（旧 eval.json 被复用）时显式标记：
-        # 不能把别的 (variant, seed) 的结果当成本 run 的最终指标。
+        # 不能把别的 (variant, seed) 的结果当作本 run 的最终指标。
         mismatches = []
         ev_variant = ev.get("variant")
         if ev_variant is not None and ev_variant != variant:

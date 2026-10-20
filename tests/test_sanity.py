@@ -217,7 +217,7 @@ def test_overfit_check_requires_regularization_disabled():
     """sanity 的“关闭正则化”是前提条件，必须自动核对而不是只写在文档里。
 
     dropout>0 时固定批也会被随机噪声干扰；若不检查，就会把“配置没关
-    dropout”误报成梯度/损失 bug（或反之）。
+    dropout”误报成梯度/损失错误（或反之）。
     """
     clean = _model()
     assert active_regularization(clean) == []

@@ -695,7 +695,7 @@ def main():
     identity = None
     if sanity_info and sanity_info.get("present"):
         # 闸门证据必须和本 run 是同一份代码/配置/数据；旧配置或旧数据的
-        # PASS 不能被当成本 run 的通过证据（seed 不同是设计行为，不判失败）。
+        # PASS 不能被当作本 run 的通过证据（seed 不同是设计行为，不判失败）。
         identity = sanity_identity_check(sanity_info, manifest)
         sanity_info["identity"] = identity
         manifest["sanity"] = sanity_info

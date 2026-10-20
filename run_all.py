@@ -321,7 +321,7 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
             f"[{a.get('code')}] {a.get('message')}" for a in critical[:5])
         raise SystemExit(
             f"数据协议前置检查失败（{len(critical)} 个严重问题）：{detail}。"
-            "请先修复划分/清洗（必要时重建 data_report.json），确认无泄露后再"
+            "请先处理划分/清洗（必要时重建 data_report.json），确认无泄露后再"
             "训练；确需复现历史实验可显式加 --allow_data_protocol_violations。")
     return info
 
@@ -3351,7 +3351,7 @@ def build_summary(results_dir: str, audit: dict = None,
     md += ["", "## 涨点-增幅权衡（涨点必须对照增幅）", ""]
     # 运行时基线与上表 prefill_rel_pct 同一策略：优先 standard_sdpa（与全部
     # 候选的 SDPA 推理路径可比），缺失时退回显式 standard。
-    # 训练 ms/step 与训练峰值仍取 standard 训练产物（只有它有训练记录）。
+    # 训练步时与进程峰值两列仍取 standard 训练产物（只有它有训练记录）。
     # 注：standard_sdpa 不在 VARIANTS 里，只存在于 latency.json 的变体表。
     lat_base_name = next((n for n in ("standard_sdpa", "standard")
                           if isinstance(lat_variants.get(n), dict)), None)
@@ -3932,7 +3932,7 @@ def main():
                 cmd += ["--wandb"]
             if sanity:
                 # 把开训前过拟合闸门的判定与哈希绑定进 run_manifest；
-                # 跳过 sanity 时不透传，避免旧结果文件被当成本次证据。
+                # 跳过 sanity 时不透传，避免旧结果文件被当作本次证据。
                 cmd += ["--sanity_file",
                         os.path.join(results_dir, f"sanity_{v}.json")]
             if args.early_stop_patience is not None:

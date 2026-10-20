@@ -288,7 +288,7 @@ def test_critical_split_alerts_filters_actionable_violations():
     assert [a["code"] for a in picked] == [
         "split_shuffled", "split_char_cut", "split_documents_cross_cut"]
     assert critical_split_alerts({}) == []
-    print("  [ok] critical_split_alerts 只筛出必须先修复的划分协议违规")
+    print("  [ok] critical_split_alerts 只筛出必须先处理的划分协议违规")
 
 
 def test_ngram_overlap_detects_and_clears():
