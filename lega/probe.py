@@ -48,8 +48,11 @@ EXTREME_IMBALANCE_THRESHOLD = 0.001
 # 决策阈值：与门控 F1 的 g>0.5 完全一致，保证探针/门控/固定规则三者同口径。
 DECISION_THRESHOLD = 0.5
 # 阈值调优网格：内层 OOF 上按 macro-F1 选；0.5 在其中，保证“调阈值”不会
-# 比固定默认更差（只在有一致收益时移动）。细网格避免只搜索粗档位。
-THRESHOLD_GRID = tuple(round(0.01 * i, 2) for i in range(1, 100))
+# 比固定默认更差（只在有一致收益时移动）。细网格避免只搜索粗档位；
+# 极端不平衡时（正类率 <1%）校准后的概率常远低于 0.01，仅有 [0.01,0.99]
+# 会让调优永远无法把少量高置信正例判出，因此向低端补几个对数档位。
+THRESHOLD_GRID = ((1e-4, 1e-3, 5e-3)
+                  + tuple(round(0.01 * i, 2) for i in range(1, 100)))
 # max_p 的下界：log(0) 会变 -inf，统计中 0 是数值下溢，用 1e-12 兜底。
 _MAXP_FLOOR = 1e-12
 DEFAULT_L2_GRID = (0.0, 0.01, 0.1, 1.0)

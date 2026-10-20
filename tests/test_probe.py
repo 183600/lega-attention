@@ -148,6 +148,13 @@ def test_tuned_threshold_uses_inner_scores_not_fixed_half():
     assert 0.2 < thr < 0.3 and macro == 1.0
     print(f"  [ok] 调优阈值 {thr:.2f} 把固定 0.5 的 F1 "
           f"{fixed['macro']:.2f} 提升到 {tuned['macro']:.2f}")
+    # 极端不平衡：校准概率可低到 1e-4 量级，阈值网格必须能触达 <0.01
+    y_small = [0.0, 0.0, 1.0, 1.0]
+    p_small = [1e-5, 5e-5, 2e-4, 4e-4]
+    thr_small, macro_small = _select_threshold(np.asarray(y_small),
+                                                np.asarray(p_small))
+    assert thr_small < 0.01 and macro_small == 1.0, (thr_small, macro_small)
+    print("  [ok] 极端不平衡下阈值网格可达 <0.01")
 
 
 def test_linear_probe_imbalance_metrics_and_f1_flavors():
