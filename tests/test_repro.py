@@ -11,7 +11,8 @@ import torch
 
 from lega.data import get_train_batch
 from lega.repro import (build_run_manifest, data_fingerprint, git_info,
-                        load_provenance, runtime_info, sha256_file)
+                        load_provenance, runtime_info, sanity_identity_check,
+                        sha256_file, worktree_state, write_worktree_patch)
 from lega.utils import set_seed, seed_report
 
 
@@ -269,6 +270,107 @@ def test_same_seed_training_is_bitwise_reproducible():
     print("  [ok] 同 seed 两次完整训练：曲线与权重逐位一致")
 
 
+def _init_git_repo(d):
+    def git(*args):
+        r = subprocess.run(["git"] + list(args), cwd=d, capture_output=True,
+                           text=True)
+        assert r.returncode == 0, (args, r.stderr)
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    return git
+
+
+def test_worktree_state_and_patch_capture_dirty_code():
+    """dirty 工作区必须留下 diff 指纹与可重放补丁，而不是只有 dirty=True。"""
+    with tempfile.TemporaryDirectory() as d:
+        git = _init_git_repo(d)
+        src = os.path.join(d, "code.py")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        git("add", "code.py")
+        git("commit", "-q", "-m", "init")
+        clean = worktree_state(d)
+        assert clean["available"] and clean["dirty"] is False
+        assert clean["diff_sha256"] is None and clean["diff_bytes"] == 0
+        # 修改 tracked 文件 + 新增 untracked：两者都要可见
+        with open(src, "a", encoding="utf-8") as f:
+            f.write("y = 2\n")
+        with open(os.path.join(d, "new.py"), "w", encoding="utf-8") as f:
+            f.write("z = 3\n")
+        wt = worktree_state(d)
+        assert wt["dirty"] is True
+        assert "code.py" in wt["changed_files"]
+        assert "new.py" in wt["untracked_files"]
+        assert len(wt["diff_sha256"]) == 64 and wt["diff_bytes"] > 0
+        patch_path = os.path.join(d, "worktree.patch")
+        patch = write_worktree_patch(patch_path, root=d)
+        assert patch["patch_sha256"] == wt["diff_sha256"]  # 同一字节口径
+        with open(patch_path, "rb") as f:
+            raw = f.read()
+        assert raw and sha256_file(patch_path) == patch["patch_sha256"]
+        # 未跟踪的新代码文件也必须进入补丁，否则 commit+tracked diff 仍无法重放
+        assert b"new.py" in raw and b"new file mode" in raw
+        # 再做一次修改：指纹变化（不能拿旧补丁冒充当前状态）
+        with open(src, "a", encoding="utf-8") as f:
+            f.write("w = 4\n")
+        assert worktree_state(d)["diff_sha256"] != wt["diff_sha256"]
+    print("  [ok] worktree_state/write_worktree_patch：diff 指纹与补丁可重放")
+
+
+def test_worktree_state_degrades_outside_git():
+    with tempfile.TemporaryDirectory() as d:
+        st = worktree_state(d)
+        assert st["available"] is False and st["dirty"] is None
+        assert write_worktree_patch(
+            os.path.join(d, "p.patch"), root=d)["patch_file"] is None
+    print("  [ok] 非 git 目录：工作区快照显式不可用，不阻塞实验")
+
+
+def test_sanity_identity_check_detects_stale_gate_evidence():
+    """旧配置/旧数据/旧代码的 sanity PASS 不得绑定到当前 run。"""
+    run = {"variant": "lega", "config_sha256": "c" * 64, "seed": 5,
+           "git": {"commit": "a" * 40, "dirty": False},
+           "data": {"digest": "d" * 16},
+           "worktree": {"available": True, "diff_sha256": None}}
+    fresh = {"variant": "lega", "config_sha256": "c" * 64, "seed": 5,
+             "git_commit": "a" * 40, "data_fingerprint": "d" * 16,
+             "worktree_recorded": True, "worktree_diff_sha256": None}
+    ok = sanity_identity_check(fresh, run)
+    assert ok["hard_mismatches"] == [] and ok["verified"] is True
+    assert ok["unknown_fields"] == []
+    # seed 不同是设计行为（run_all 只用首种子跑 sanity）：不算硬不一致
+    deeper = dict(fresh, seed=9)
+    assert sanity_identity_check(deeper, run)["hard_mismatches"] == []
+    assert sanity_identity_check(deeper, run)["seed_mismatch"] is True
+    for field, bad in (("config_sha256", "e" * 64),
+                       ("data_fingerprint", "f" * 16),
+                       ("git_commit", "b" * 40),
+                       ("variant", "standard")):
+        stale = dict(fresh, **{field: bad})
+        res = sanity_identity_check(stale, run)
+        assert field in res["hard_mismatches"], (field, res)
+        assert res["verified"] is False
+    # 工作区补丁不同（同 commit 但代码不同）同样判硬不一致
+    dirty_run = dict(run, worktree={"available": True, "diff_sha256": "1" * 64})
+    dirty_ok = dict(fresh, worktree_diff_sha256="1" * 64)
+    assert sanity_identity_check(dirty_ok, dirty_run)["verified"] is True
+    assert ("worktree_diff_sha256"
+            in sanity_identity_check(fresh, dirty_run)["hard_mismatches"])
+    # 旧版 sanity 缺身份字段：记为 unknown，不冒充已验证
+    old = {"variant": "lega", "seed": 5}
+    res_old = sanity_identity_check(old, run)
+    assert res_old["verified"] is False and res_old["hard_mismatches"] == []
+    assert "config_sha256" in res_old["unknown_fields"]
+    # 非 git 目录：两侧工作区都不可用 → unknown，而不是把无法核对当失败
+    nogit_run = dict(run, worktree={"available": False})
+    nogit_sanity = dict(fresh, worktree_available=False)
+    res_nogit = sanity_identity_check(nogit_sanity, nogit_run)
+    assert res_nogit["hard_mismatches"] == []
+    assert "worktree_diff_sha256" in res_nogit["unknown_fields"]
+    print("  [ok] sanity_identity_check：旧配置/数据/代码/工作区不一致被拦下")
+
+
 def test_data_fingerprint_tolerates_non_object_meta():
     """meta.json 是数组/标量时视为无 tokenizer，而不是崩溃。"""
     with tempfile.TemporaryDirectory() as d:
@@ -343,12 +445,25 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
             json.dump({"passed": True, "variant": "lega", "seed": 3,
                        "checks": {"a": True, "b": False},
                        "initial": {"loss": 4.1}, "final": {"loss": 0.01,
-                                                          "token_acc": 0.99}}, f)
+                                                          "token_acc": 0.99},
+                       "manifest": {
+                           "config_sha256": "c" * 64,
+                           "git": {"commit": "a" * 40, "dirty": False},
+                           "data": {"digest": "d" * 16},
+                           "worktree": {"available": True,
+                                        "diff_sha256": None}}}, f)
         s = sanity_summary(good)
         assert s["passed"] is True and s["variant"] == "lega" and s["seed"] == 3
         assert s["failed_checks"] == ["b"]
         assert s["final_loss"] == 0.01 and s["token_acc"] == 0.99
         assert len(s["sha256"]) == 64
+        # 身份字段提取：train 据此核对闸门是否属于本 run
+        assert s["config_sha256"] == "c" * 64
+        assert s["data_fingerprint"] == "d" * 16
+        assert s["git_commit"] == "a" * 40 and s["git_dirty"] is False
+        assert s["worktree_recorded"] is True
+        assert s["worktree_available"] is True
+        assert s["worktree_diff_sha256"] is None
         # 清单内嵌 + 下游 provenance 继承
         cfg = os.path.join(d, "cfg.json")
         with open(cfg, "w", encoding="utf-8") as f:
@@ -368,6 +483,58 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         assert prov["sanity_passed"] is True
         assert prov["sanity_variant"] == "lega"
     print("  [ok] sanity 摘要绑定 manifest，load_provenance 继承 sanity_passed")
+
+
+def test_train_rejects_stale_sanity_evidence_identity():
+    """端到端：sanity 文件声明的 config 与本 run 不一致时不得冒充 PASS。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=1024, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin"))
+        rng.integers(0, 64, size=128, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin"))
+        with open(os.path.join(data_dir, "meta.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "vocab_size": 64}, f)
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
+                       "block_size": 32, "batch_size": 2, "steps": 1,
+                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
+                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
+                       "seed": 5, "log_every": 1, "eval_every": 1,
+                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+        sanity_path = os.path.join(d, "sanity_lega.json")
+        with open(sanity_path, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "variant": "lega", "seed": 5,
+                       "checks": {}, "initial": {}, "final": {},
+                       "manifest": {
+                           "config_sha256": "f" * 64,       # 旧配置
+                           "git": {"commit": "a" * 40, "dirty": False},
+                           "data": {"digest": "d" * 16},
+                           "worktree": {"available": True,
+                                        "diff_sha256": None}}}, f)
+        out_dir = os.path.join(d, "out")
+        r = subprocess.run(
+            [sys.executable, "-m", "lega.train", "--config", cfg_path,
+             "--variant", "lega", "--data_dir", data_dir,
+             "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
+             "--sanity_file", sanity_path],
+            cwd=root, capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        with open(os.path.join(out_dir, "run_manifest.json"),
+                  encoding="utf-8") as f:
+            manifest = json.load(f)
+        ident = manifest["sanity"]["identity"]
+        assert "config_sha256" in ident["hard_mismatches"]
+        assert ident["verified"] is False
+        with open(os.path.join(out_dir, "eval.json"), encoding="utf-8") as f:
+            ev = json.load(f)
+        assert ev["sanity_passed"] is None and ev["sanity_verified"] is False
+    print("  [ok] 旧配置的 sanity PASS 被身份校验拒绝绑定到本 run")
 
 
 def test_train_manifest_binds_sanity_file_and_actual_tf32_state():

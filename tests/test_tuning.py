@@ -55,8 +55,10 @@ def test_run_trial_injects_lr_and_weight_decay():
             stdout = ""
             stderr = ""
 
-        def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        def fake_run(cmd, capture_output=True, text=True, timeout=None,
+                     env=None):
             seen["cmd"] = cmd
+            seen["env"] = env
             tcfg_path = cmd[cmd.index("--config") + 1]
             with open(tcfg_path, encoding="utf-8") as f:
                 seen["cfg"] = json.load(f)
@@ -72,6 +74,11 @@ def test_run_trial_injects_lr_and_weight_decay():
         assert seen["cfg"]["lr"] == 3e-4
         assert seen["cfg"]["weight_decay"] == 0.01
         assert seen["cfg"]["d_model"] == 8          # 其余字段原样继承
+        # each trial's Python hash salt must match its own seed (not inherit
+        # the parent/first-seed value); CUBLAS config before CUDA init
+        assert seen["env"]["PYTHONHASHSEED"] == "7"
+        assert seen["env"]["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+        assert rec["pythonhashseed"] == "7"
         assert os.path.exists(os.path.join(out_dir, "config_trial.json"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -264,3 +271,16 @@ def test_read_best_val_loss_skips_non_dict_and_bad_eval():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 调优日志/eval 非对象或坏值：跳过而不崩溃")
+
+
+def test_trial_env_aligns_hashseed_per_trial():
+    """逐 trial 的 PYTHONHASHSEED 必须等于该 trial 自己的 seed。"""
+    from lega.tuning import trial_env
+    e = trial_env(123)
+    assert e["PYTHONHASHSEED"] == "123"
+    assert e["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+    # 不修改调用方传入的环境对象
+    base = {"PYTHONHASHSEED": "999"}
+    e2 = trial_env(7, base)
+    assert e2["PYTHONHASHSEED"] == "7" and base["PYTHONHASHSEED"] == "999"
+    print("  [ok] trial_env：PYTHONHASHSEED 对齐 trial seed")

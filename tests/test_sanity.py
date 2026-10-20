@@ -2,7 +2,8 @@
 import torch
 
 from lega.model import GPT
-from lega.sanity import (batch_metrics, gradient_coverage, losses_consistent,
+from lega.sanity import (active_regularization, batch_metrics,
+                         gradient_coverage, losses_consistent,
                          run_overfit_check)
 
 
@@ -210,3 +211,26 @@ def test_overfit_check_detects_pathological_initial_logits():
     assert abs(res3["initial_loss_minus_log_vocab"]) > 1.0
     print(f"  [ok] 病态 logits 初始偏差 "
           f"{res['initial_loss_minus_log_vocab']:+.2f} 被初始 loss≈log(V) 核对拦下")
+
+
+def test_overfit_check_requires_regularization_disabled():
+    """sanity 的“关闭正则化”是前提条件，必须自动核对而不是只写在文档里。
+
+    dropout>0 时固定批也会被随机噪声干扰；若不检查，就会把“配置没关
+    dropout”误报成梯度/损失 bug（或反之）。
+    """
+    clean = _model()
+    assert active_regularization(clean) == []
+    noisy = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1,
+                n_heads=2, ffn_mult=4, variant="lega", dropout=0.2,
+                attn_dropout=0.1)
+    active = active_regularization(noisy)
+    assert any("Dropout" in a for a in active)
+    assert any("attn_dropout" in a for a in active)
+    x, y = _batch()
+    res = run_overfit_check(noisy, x, y, steps=2, lr=1e-3, device="cpu",
+                            seed=0, log_every=1)
+    assert not res["passed"]
+    assert res["checks"]["regularization_disabled"] is False
+    assert res["active_regularization"] == active
+    print(f"  [ok] 未关闭正则化被 sanity 自动拦下（{len(active)} 处）")

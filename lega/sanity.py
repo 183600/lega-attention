@@ -110,6 +110,24 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
     }
 
 
+def active_regularization(model) -> list:
+    """列出模型里仍生效的 dropout 类正则化（sanity 要求全部关闭）。
+
+    只关优化器 weight_decay 不够：dropout>0 时每次前向都注入随机噪声，固定
+    批也无法压到接近 0 损失——“连小批量都过拟合不了”会被误判为梯度/损失
+    有 bug。这里自动检查 Dropout 模块与注意力 attn_dropout，作为显式失败项。
+    """
+    active = []
+    for name, m in model.named_modules():
+        p = getattr(m, "p", None)
+        if isinstance(m, torch.nn.Dropout) and p and float(p) > 0:
+            active.append(f"{name or type(m).__name__}: Dropout(p={float(p):g})")
+        ad = getattr(m, "attn_dropout", None)
+        if ad is not None and float(ad) > 0:
+            active.append(f"{name or type(m).__name__}: attn_dropout={float(ad):g}")
+    return active
+
+
 def gradient_coverage(model) -> dict:
     """逐参数梯度覆盖检查（在第一次 backward 之后调用）。
 
@@ -169,11 +187,14 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         的对数值，偏差超过 initial_loss_tol（默认 1.0 nat，只拦数量级错误；
         负值表示显式禁用该检查）说明初始化/logits 尺度/标签分布存在严重问题；
       * 标签映射 y == x 右移一位——在数据消费点再次硬校验。
+      * 正则化已关闭（dropout/attn_dropout 全部为 0）——开着 dropout 的
+        “过拟合失败”是配置错误而非代码 bug，自动检查避免误判。
     """
     set_seed(seed)
     # 标签映射硬校验：固定批必须在消费点满足 next-token 移位关系
     shift_ok = (x.dim() == 2 and x.shape == y.shape
                 and bool(torch.equal(x[:, 1:], y[:, :-1])))
+    active_reg = active_regularization(model)
     # 关闭 TF32：sanity 追求数值上确定地“压到 0”
     prev_tf32_mm = torch.backends.cuda.matmul.allow_tf32
     prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
@@ -254,6 +275,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "next_token_shift_consistent": bool(shift_ok),
         # 中间结果核对：初始 loss 接近 log(V)（初始化/logits 尺度/标签分布正常）
         "initial_loss_near_log_vocab": initial_loss_ok,
+        # 配置前提：正则化必须关闭，否则“过拟合失败”无法归因于代码 bug
+        "regularization_disabled": not active_reg,
     }
     passed = all(checks.values())
     return {
@@ -267,6 +290,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "final": final,
         "log_vocab": log_vocab,
         "initial_loss_minus_log_vocab": initial_loss_gap,
+        "active_regularization": active_reg,
         "first_grad_norm": first_grad_norm,
         "first_train_loss": first_train_loss,
         "loss_consistency": {

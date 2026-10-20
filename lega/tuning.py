@@ -49,6 +49,19 @@ def parse_seeds(s, parser=None):
     return out or None
 
 
+def trial_env(seed: int, env=None) -> dict:
+    """trial 子进程的环境：PYTHONHASHSEED 对齐该 trial 自己的 seed。
+
+    PYTHONHASHSEED 必须在解释器启动前设置才影响该进程；若让 trial 继承父
+    进程的哈希盐，所有 trial 会共享父进程/首个种子的哈希随机化，同 seed
+    重跑也不再稳定。CUBLAS_WORKSPACE_CONFIG 须在任何 CUDA 初始化前生效。
+    """
+    e = dict(env if env is not None else os.environ)
+    e["PYTHONHASHSEED"] = str(int(seed))
+    e.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    return e
+
+
 def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
                wd_list=None):
     """生成网格；默认组合 (lr0, wd0) 确保存在且排在首位。"""
@@ -151,11 +164,15 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
            "--seed", str(int(seed)), "--steps", str(int(steps)),
            "--device", device]
     t0 = time.perf_counter()
+    run_env = trial_env(seed)
     rec = {"lr": float(lr), "weight_decay": float(wd), "seed": int(seed),
-           "steps": int(steps), "out_dir": out_dir}
+           "steps": int(steps), "out_dir": out_dir,
+           # 逐 trial 的确定性环境也可审计（PYTHONHASHSEED 必须与 seed 对齐）
+           "pythonhashseed": run_env["PYTHONHASHSEED"],
+           "cublas_workspace_config": run_env.get("CUBLAS_WORKSPACE_CONFIG")}
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout)
+                              timeout=timeout, env=run_env)
     except subprocess.TimeoutExpired:
         rec.update({"returncode": None, "error": f"timeout({timeout}s)",
                     "duration_s": round(time.perf_counter() - t0, 1)})

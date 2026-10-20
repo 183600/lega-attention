@@ -38,6 +38,16 @@ def _git(args, cwd):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _git_bytes(args, cwd):
+    """git 的原始字节输出（diff --binary 必须按字节哈希/落盘，不能经过文本解码）。"""
+    try:
+        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True,
+                           timeout=15)
+    except Exception:
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
 def git_info(root: str = None) -> dict:
     """代码版本；非 git 仓库或 git 不可用时字段为 None，绝不阻塞实验。"""
     root = root or ROOT
@@ -53,6 +63,119 @@ def git_info(root: str = None) -> dict:
         # dirty=True 表示结果对应“未提交的工作区状态”，仅凭 commit 无法重建
         "dirty": bool(status) if status is not None else None,
     }
+
+
+def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
+    """工作区可重放补丁：已跟踪改动 + 未跟踪文件（受字节预算限制）。
+
+    只取 `git diff HEAD` 会漏掉未跟踪的新代码文件；这里对
+    `git ls-files --others --exclude-standard` 列出的每个文件生成
+    `git diff --no-index --binary /dev/null <file>` 并拼接。预算用尽时在
+    返回值中标记 truncated，调用方可据此知道补丁不完整（绝不静默冒充完整）。
+    """
+    tracked = _git_bytes(["diff", "HEAD", "--binary"], root) or b""
+    raw = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"],
+                     root) or b""
+    files = [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
+    chunks = [tracked] if tracked else []
+    used = len(tracked)
+    truncated = False
+    for rel in files:
+        if used >= max_untracked_bytes:
+            truncated = True
+            break
+        try:
+            r = subprocess.run(
+                ["git", "diff", "--no-index", "--binary", "--",
+                 os.devnull, rel],
+                cwd=root, capture_output=True, timeout=15)
+        except Exception:
+            continue
+        if r.returncode not in (0, 1):
+            continue
+        chunk = r.stdout
+        if used + len(chunk) > max_untracked_bytes:
+            truncated = True
+            break
+        chunks.append(chunk)
+        used += len(chunk)
+    return b"".join(chunks), truncated
+
+
+def worktree_state(root: str = None, max_files: int = 500) -> dict:
+    """未提交工作区的可重建证据（dirty 时仅凭 commit 无法还原代码）。
+
+    记录：
+      * changed_files / untracked_files：git status 的路径（截断到 max_files，
+        并给出完整计数）；
+      * diff_sha256 / diff_bytes：已跟踪改动 + 未跟踪文件补丁的 SHA-256 与
+        字节数（原始字节；未跟踪文件受 8 MiB 预算限制，见 diff_truncated）；
+      * head：快照对应的 commit。
+    非 git 仓库/无提交/git 不可用时 available=False，字段为 None，绝不阻塞实验。
+    """
+    root = root or ROOT
+    commit = _git(["rev-parse", "--verify", "HEAD"], root)
+    if not commit:
+        return {"available": False, "head": None, "dirty": None,
+                "changed_files": None, "untracked_files": None,
+                "n_changed": None, "n_untracked": None,
+                "diff_sha256": None, "diff_bytes": None,
+                "diff_truncated": False}
+    # 必须保留原始行首空格：porcelain 的 " M path" 前两个字符是状态列，
+    # 若先 strip 整段输出，第一行会变成 "M path" 而把路径截掉一个字符。
+    raw_status = _git_bytes(["status", "--porcelain"], root)
+    if raw_status is None:
+        return {"available": False, "head": commit, "dirty": None,
+                "changed_files": None, "untracked_files": None,
+                "n_changed": None, "n_untracked": None,
+                "diff_sha256": None, "diff_bytes": None,
+                "diff_truncated": False}
+    status = raw_status.decode("utf-8", "replace")
+    changed, untracked = [], []
+    for line in status.splitlines():
+        if len(line) < 4:
+            continue
+        code, path = line[:2], line[3:]
+        # 重命名行格式为 "R  old -> new"：记录新路径
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        (untracked if code.strip() == "??" else changed).append(path)
+    diff, truncated = _worktree_diff_bytes(root)
+    return {
+        "available": True,
+        "head": commit,
+        "dirty": bool(status),
+        "changed_files": changed[:max_files],
+        "untracked_files": untracked[:max_files],
+        "n_changed": len(changed),
+        "n_untracked": len(untracked),
+        "diff_sha256": (hashlib.sha256(diff).hexdigest() if diff else None),
+        "diff_bytes": len(diff),
+        "diff_truncated": truncated,
+    }
+
+
+def write_worktree_patch(path: str, root: str = None) -> dict:
+    """把当前工作区补丁（含未跟踪文件）原子写入 path，返回哈希/大小。
+
+    与 worktree_state 的 diff_sha256 使用同一字节口径，因此可由哈希比对
+    确认补丁与清单记录的是同一份工作区状态。无任何改动时不写文件，返回
+    patch_file=None；未跟踪文件超过预算时 patch_truncated=True。
+    """
+    diff, truncated = _worktree_diff_bytes(root or ROOT)
+    if not diff:
+        return {"patch_file": None, "patch_sha256": None, "patch_bytes": 0,
+                "patch_truncated": truncated}
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "wb") as f:
+        f.write(diff)
+    os.replace(tmp, path)
+    return {"patch_file": os.path.abspath(path),
+            "patch_sha256": hashlib.sha256(diff).hexdigest(),
+            "patch_bytes": len(diff), "patch_truncated": truncated}
 
 
 def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -204,7 +327,13 @@ def sanity_summary(path: str) -> dict:
     out = {"file": os.path.abspath(path) if path else None, "present": False,
            "sha256": None, "passed": None, "variant": None, "seed": None,
            "failed_checks": None, "initial_loss": None, "final_loss": None,
-           "token_acc": None}
+           "token_acc": None,
+           # 证据身份：只有与当前 run 的 config/data/git 一致时，PASS 才能
+           # 算作本 run 的代码正确性闸门（见 sanity_identity_check）
+           "config_sha256": None, "data_fingerprint": None,
+           "git_commit": None, "git_dirty": None,
+           "worktree_diff_sha256": None, "worktree_recorded": False,
+           "worktree_available": None}
     if not path or not os.path.exists(path):
         return out
     out["present"] = True
@@ -229,7 +358,87 @@ def sanity_summary(path: str) -> dict:
     if isinstance(final, dict):
         out["final_loss"] = final.get("loss")
         out["token_acc"] = final.get("token_acc")
+    manifest = rec.get("manifest")
+    if isinstance(manifest, dict):
+        for key in ("config_sha256",):
+            if manifest.get(key) is not None:
+                out[key] = manifest[key]
+        git = manifest.get("git")
+        if isinstance(git, dict):
+            out["git_commit"] = git.get("commit")
+            out["git_dirty"] = git.get("dirty")
+        data = manifest.get("data")
+        if isinstance(data, dict):
+            out["data_fingerprint"] = data.get("digest")
+        worktree = manifest.get("worktree")
+        if isinstance(worktree, dict):
+            out["worktree_recorded"] = True
+            out["worktree_available"] = worktree.get("available")
+            out["worktree_diff_sha256"] = worktree.get("diff_sha256")
     return out
+
+
+def sanity_identity_check(sanity: dict, run: dict) -> dict:
+    """核对 sanity 证据与当前训练 run 是否针对同一代码/配置/数据。
+
+    旧版 sanity 文件可能没有 manifest 身份字段：缺失记为 unknown（不冒充
+    已验证，也不因“无法核对”直接推翻旧证据）。只要双方都有值且不同，就是
+    hard mismatch——旧配置/旧数据/旧代码的 PASS 不得绑定到本 run。
+    seed 只作展示：run_all 用首个种子跑 sanity，其余种子共享同一闸门是
+    设计行为，不参与 hard mismatch。
+    """
+    sanity = sanity if isinstance(sanity, dict) else {}
+    run = run if isinstance(run, dict) else {}
+    git = run.get("git") if isinstance(run.get("git"), dict) else {}
+    data = run.get("data") if isinstance(run.get("data"), dict) else {}
+    worktree = (run.get("worktree")
+                if isinstance(run.get("worktree"), dict) else {})
+    current = {
+        "variant": run.get("variant"),
+        "config_sha256": run.get("config_sha256"),
+        "data_fingerprint": data.get("digest"),
+        "git_commit": git.get("commit"),
+        "seed": run.get("seed"),
+    }
+    hard_fields = ("variant", "config_sha256", "data_fingerprint",
+                   "git_commit")
+    matches, mismatches, unknown = {}, [], []
+    for key, want in current.items():
+        got = sanity.get(key)
+        if got is None or want is None:
+            matches[key] = None
+            if key in hard_fields:
+                unknown.append(key)
+        elif got == want:
+            matches[key] = True
+        else:
+            matches[key] = False
+            if key in hard_fields:
+                mismatches.append(key)
+    # 工作区补丁是 commit 之外的可重建证据：只有 sanity 清单确实记录了
+    # worktree 才参与比较（旧文件缺失记 unknown）。clean 工作区两边都是
+    # None，是合法相等而不是“缺字段”。
+    recorded = bool(sanity.get("worktree_recorded"))
+    # 旧记录没有 worktree_available 字段：按“已记录即可核对”处理（当时能从
+    # manifest 取到 worktree 才会记录 diff），保持向后兼容。
+    sanity_avail = sanity.get("worktree_available", recorded)
+    if not recorded or sanity_avail is False or not worktree.get("available"):
+        # 任一侧工作区不可用（如非 git 目录）时无法核对：记 unknown，
+        # 不因“无法核对”直接推翻旧证据。
+        matches["worktree_diff_sha256"] = None
+        unknown.append("worktree_diff_sha256")
+    elif worktree.get("diff_sha256") == sanity.get("worktree_diff_sha256"):
+        matches["worktree_diff_sha256"] = True
+    else:
+        matches["worktree_diff_sha256"] = False
+        mismatches.append("worktree_diff_sha256")
+    return {
+        "matches": matches,
+        "hard_mismatches": mismatches,
+        "unknown_fields": unknown,
+        "verified": not mismatches and not unknown,
+        "seed_mismatch": (matches.get("seed") is False),
+    }
 
 
 def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
@@ -252,6 +461,8 @@ def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
         "config_file": config_path,
         "config_sha256": sha256_file(config_path),
         "git": git_info(),
+        # dirty 时 commit 无法重建代码：额外记录 diff 指纹/文件清单
+        "worktree": worktree_state(),
         "data": data_fingerprint(data_dir),
         "runtime": runtime_info(device),
         "sanity": sanity,

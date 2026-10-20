@@ -89,6 +89,108 @@ def read_records(path: str) -> list:
     return out
 
 
+def verify_ledger(path: str = None, check_artifacts: bool = False,
+                  root: str = None, max_reported: int = 20) -> dict:
+    """核验台账完整性：生命周期链与（可选）产物哈希。
+
+    每个 run_id 应有且仅有 1 条 started、1 条终态（completed/aborted），且
+    终态之后不再出现该 run 的记录；只有 started 表示崩溃/中止未留痕，多条
+    终态表示重复写入。check_artifacts=True 时抽样重算 completed 记录中
+    artifacts/runs[].files 的 SHA-256（相对路径按 root 或 out_dir 解析），
+    产物被覆盖/手改/删除即可发现。
+
+    返回 JSON 原生结构，可直接落盘；issues 为问题列表（空表示通过），
+    report_capped=True 表示问题数超过 max_reported 已截断。
+    """
+    path = path or ledger_path()
+    root = root or ROOT
+    recs = read_records(path)
+    grouped = {}
+    issues = []
+    for i, rec in enumerate(recs):
+        rid = rec.get("run_id")
+        if not isinstance(rid, str) or not rid:
+            issues.append({"index": i, "issue": "missing_run_id"})
+            continue
+        grouped.setdefault(rid, []).append((i, rec))
+    run_details = []
+    for rid, items in grouped.items():
+        statuses = [r.get("status") for _, r in items]
+        run_issues = []
+        if statuses.count("started") == 0:
+            run_issues.append("no_started_record")
+        if statuses.count("started") > 1:
+            run_issues.append("multiple_started_records")
+        terminals = [s for s in statuses if s in ("completed", "aborted")]
+        if not terminals:
+            run_issues.append("dangling_started")
+        if len(terminals) > 1:
+            run_issues.append("multiple_terminal_records")
+        seen_terminal = False
+        for _, r in items:
+            st = r.get("status")
+            if st in ("completed", "aborted"):
+                seen_terminal = True
+            elif seen_terminal:
+                run_issues.append("record_after_terminal")
+        if run_issues:
+            issues.append({"run_id": rid, "issues": sorted(set(run_issues)),
+                           "statuses": statuses})
+        run_details.append({"run_id": rid, "statuses": statuses,
+                            "issues": run_issues})
+
+    artifact_issues = []
+    if check_artifacts:
+        def _check(rel_key, entry, base):
+            p = rel_key if os.path.isabs(rel_key) else os.path.join(base, rel_key)
+            if not os.path.exists(p):
+                return f"missing: {rel_key}"
+            want = entry.get("sha256") if isinstance(entry, dict) else None
+            if not want:
+                return None
+            if sha256_file(p) != want:
+                return f"sha256_mismatch: {rel_key}"
+            return None
+
+        for rec in recs:
+            if rec.get("status") != "completed":
+                continue
+            arts = rec.get("artifacts")
+            if isinstance(arts, dict):
+                for key, entry in arts.items():
+                    problem = _check(key, entry, root)
+                    if problem:
+                        artifact_issues.append(problem)
+            runs = rec.get("runs")
+            for run in (runs if isinstance(runs, list) else []):
+                if not isinstance(run, dict):
+                    continue
+                out_dir = run.get("out_dir") or ""
+                base = out_dir if os.path.isabs(out_dir) \
+                    else os.path.join(root, out_dir)
+                files = run.get("files")
+                if not isinstance(files, dict):
+                    continue
+                for key, entry in files.items():
+                    problem = _check(key, entry, base)
+                    if problem:
+                        artifact_issues.append(
+                            f"{run.get('variant')}/seed{run.get('seed')}: "
+                            f"{problem}")
+    capped = len(issues) + len(artifact_issues) > max_reported
+    return {
+        "path": os.path.abspath(path),
+        "n_records": len(recs),
+        "n_runs": len(grouped),
+        "ok": not issues and not artifact_issues,
+        "issues": (issues + [{"issue": a} for a in artifact_issues])[
+            :max_reported],
+        "runs": run_details,
+        "artifacts_checked": bool(check_artifacts),
+        "report_capped": capped,
+    }
+
+
 def collect_artifacts(paths, rel_to: str = None, known: dict = None) -> dict:
     """对产物文件计算 SHA-256 与大小；缺失文件跳过。
 
@@ -143,6 +245,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
              "eval.json", "model_best.pt", "model.pt")
     ev = _load_json(os.path.join(out_dir, "eval.json"))
     cfg_used = _load_json(os.path.join(out_dir, "config_used.json"))
+    manifest = _load_json(os.path.join(out_dir, "run_manifest.json"))
     known = {}
     best = os.path.join(out_dir, "model_best.pt")
     candidates = []
@@ -164,12 +267,42 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
         # 超参数内嵌进台账条目：即使 config_used.json 之后被覆盖/删除，
         # 该 run 实际生效的配置仍可从台账还原
         rec["config_used"] = cfg_used
+    if isinstance(manifest, dict):
+        # 逐 run 溯源内嵌：manifest 被覆盖/删除后，台账仍能自证该 run 固定了
+        # 哪些随机源、用了什么环境、代码/数据版本以及 sanity 闸门身份。
+        mdata = manifest.get("data")
+        mdata = mdata if isinstance(mdata, dict) else {}
+        rec["provenance"] = {
+            "git": manifest.get("git"),
+            "worktree": manifest.get("worktree"),
+            "worktree_patch": manifest.get("worktree_patch"),
+            "config_sha256": manifest.get("config_sha256"),
+            "data_fingerprint": mdata.get("digest"),
+            "seed_report": manifest.get("seed_report"),
+            "runtime": manifest.get("runtime"),
+            "sanity": manifest.get("sanity"),
+        }
     if isinstance(ev, dict) and ev:
+        # eval 身份与本次快照不符（旧 eval.json 被复用）时显式标记：
+        # 不能把别的 (variant, seed) 的结果当成本 run 的最终指标。
+        mismatches = []
+        ev_variant = ev.get("variant")
+        if ev_variant is not None and ev_variant != variant:
+            mismatches.append(f"variant={ev_variant}")
+        ev_seed = ev.get("seed")
+        if ev_seed is not None:
+            try:
+                if int(ev_seed) != int(seed):
+                    mismatches.append(f"seed={ev_seed}")
+            except (TypeError, ValueError, OverflowError):
+                mismatches.append(f"seed={ev_seed!r}")
+        if mismatches:
+            rec["eval_identity_mismatches"] = mismatches
         rec["result"] = {k: ev.get(k) for k in (
             "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
             "early_stopped", "tokens_seen",
             "n_params", "code_commit", "code_dirty", "data_fingerprint",
-            "config_sha256", "sanity_passed")}
+            "config_sha256", "sanity_passed", "sanity_verified")}
     return rec
 
 
@@ -180,7 +313,8 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
                             results_dir: str, time_start: str,
                             time_end: str = None, sanity=None, runs=None,
                             artifacts=None, extra=None,
-                            registration=None, config=None) -> dict:
+                            registration=None, config=None,
+                            worktree=None) -> dict:
     """组装标准台账记录；字段与 config_used.json/run_manifest.json 同口径。
 
     registration（可选）为预注册完整性快照：登记表指纹 + 锁链校验结论
@@ -190,6 +324,9 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
     config（可选）为解析后的超参数字典（含 CLI/调优注入后的实际值）：
     台账因此自含超参数，config 文件之后被改写/删除也不影响历史记录的
     可复核性（config_sha256 只能证明“变了”，无法还原“原来是什么”）。
+
+    worktree（可选）为未提交工作区快照（见 repro.worktree_state）：dirty
+    时仅凭 git commit 无法复现代码，diff 指纹/补丁路径必须随台账保存。
     """
     rec = {
         "run_id": run_id,
@@ -205,6 +342,7 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
         "smoke": bool(smoke),
         "argv": [str(a) for a in argv],
         "git": git,
+        "worktree": worktree,
         "data_fingerprint": data_fingerprint,
         "runtime": runtime,
         "out_root": out_root,
@@ -217,3 +355,31 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
     if extra:
         rec["extra"] = extra
     return rec
+
+
+def main(argv=None) -> int:
+    import argparse
+    import sys
+
+    p = argparse.ArgumentParser(
+        description="实验台账核验：started/completed/aborted 生命周期与产物哈希")
+    p.add_argument("--path", default=None,
+                   help="台账路径（默认 results/experiments.jsonl）")
+    p.add_argument("--check_artifacts", action="store_true",
+                   help="重算 completed 记录中全部产物的 SHA-256（较慢）")
+    args = p.parse_args(argv)
+    report = verify_ledger(args.path, check_artifacts=args.check_artifacts)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["ok"]:
+        print(f"[ledger] 通过：{report['n_runs']} 个 run，"
+              f"{report['n_records']} 条记录")
+        return 0
+    print(f"[ledger] 发现 {len(report['issues'])} 个问题"
+          + ("（已截断）" if report["report_capped"] else ""))
+    return 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

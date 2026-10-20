@@ -74,7 +74,8 @@ from lega.ngram import evaluate as ngram_evaluate  # noqa: E402
 from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
 from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import (data_fingerprint, git_info, runtime_info,  # noqa: E402
-                        sanity_summary, sha256_file)
+                        sanity_summary, sha256_file, worktree_state,
+                        write_worktree_patch)
 from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
                         mean_std, min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, save_json)  # noqa: E402
@@ -3817,6 +3818,17 @@ def main():
         # 但在计数指纹处显式标注缺失，避免汇总页假装数据版本已知。
         data_fp, data_digest = None, None
         print(f"[repro] 警告：无法计算数据指纹（{e}）")
+    # dirty 工作区：commit 之外还需要 diff 指纹与可重放补丁，否则结果无法
+    # 仅凭 commit 复原。补丁写入 results_dir 并纳入 completed 台账的产物哈希。
+    worktree = worktree_state()
+    if worktree.get("dirty") and worktree.get("diff_bytes"):
+        patch = write_worktree_patch(
+            os.path.join(results_dir, "worktree.patch"))
+        if patch.get("patch_file"):
+            patch["patch_file"] = os.path.relpath(patch["patch_file"], ROOT)
+            if patch.get("patch_sha256") != worktree.get("diff_sha256"):
+                patch["differs_from_manifest"] = True
+            worktree["patch"] = patch
     repro = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tag": tag,
@@ -3827,6 +3839,7 @@ def main():
         "variants": variants,
         "smoke": bool(args.smoke),
         "git": git,
+        "worktree": worktree,
         "data": data_fp,
         "runtime": runtime_info(args.device),
         "registration": reg_info,
@@ -3847,6 +3860,7 @@ def main():
         config=json.loads(json.dumps(cfg)), variants=variants,
         seeds=seeds,
         smoke=bool(args.smoke), argv=sys.argv, git=git,
+        worktree=worktree,
         data_fingerprint=data_digest, runtime=repro["runtime"],
         out_root=out_root, results_dir=results_dir,
         time_start=repro["time"], registration=reg_info)

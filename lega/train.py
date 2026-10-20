@@ -21,7 +21,8 @@ from .attention import VARIANTS, VARIANT_CN
 from .curves import LIVE_WARN_EVALS, live_overfit_hint
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
-from .repro import build_run_manifest, sanity_summary
+from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
+                    write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, now_str,
                     save_json, set_seed, t_critical_95)
 
@@ -688,18 +689,38 @@ def main():
     if sanity_info and not sanity_info.get("present"):
         print(f"[train] ⚠ --sanity_file 指定的结果文件不存在：{args.sanity_file}"
               "（manifest 按 present=false 记录，不冒充通过）")
-    if sanity_info and sanity_info.get("variant") not in (None, args.variant):
-        print(f"[train] ⚠ sanity 结果变体不一致（sanity={sanity_info['variant']} "
-              f"vs 本 run={args.variant}）：原样记录进 manifest 供审计，"
-              "不把它当作本 run 的通过证据")
     manifest = build_run_manifest(
         tag=tag, variant=args.variant, seed=seed, config_path=args.config,
         data_dir=args.data_dir, device=device, sanity=sanity_info)
+    identity = None
+    if sanity_info and sanity_info.get("present"):
+        # 闸门证据必须和本 run 是同一份代码/配置/数据；旧配置或旧数据的
+        # PASS 不能被当成本 run 的通过证据（seed 不同是设计行为，不判失败）。
+        identity = sanity_identity_check(sanity_info, manifest)
+        sanity_info["identity"] = identity
+        manifest["sanity"] = sanity_info
+        if identity["hard_mismatches"]:
+            print("[train] ⚠ sanity 证据身份不一致（"
+                  + ", ".join(identity["hard_mismatches"])
+                  + "）：该 PASS 不属于本 run，manifest/eval 按未验证记录")
+        elif identity["unknown_fields"]:
+            print("[train] ⚠ sanity 证据缺少身份字段（"
+                  + ", ".join(identity["unknown_fields"])
+                  + "）：旧文件无法核对，PASS 原样保留但不标记为已验证")
+    # dirty 工作区：把 diff 补丁随 run 落盘，否则仅凭 commit 无法复原代码
+    worktree = manifest.get("worktree") or {}
+    if worktree.get("dirty") and worktree.get("diff_bytes"):
+        patch = write_worktree_patch(os.path.join(out_dir, "worktree.patch"))
+        if patch.get("patch_file"):
+            patch["patch_file"] = os.path.basename(patch["patch_file"])
+            if patch.get("patch_sha256") != worktree.get("diff_sha256"):
+                patch["differs_from_manifest"] = True
+            manifest["worktree_patch"] = patch
     save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
-    # 本 run 的 eval.json 也继承闸门结论；变体不一致时不得冒充通过
+    # 本 run 的 eval.json 也继承闸门结论；硬身份不一致时不得冒充通过
     sanity_passed = None
     if (sanity_info and sanity_info.get("present")
-            and sanity_info.get("variant") in (None, args.variant)):
+            and not (identity and identity["hard_mismatches"])):
         sanity_passed = sanity_info.get("passed")
     provenance = {
         "code_commit": manifest["git"]["commit"],
@@ -707,6 +728,10 @@ def main():
         "data_fingerprint": manifest["data"]["digest"],
         "config_sha256": manifest["config_sha256"],
         "sanity_passed": sanity_passed,
+        # 通过值是否由与本 run 同代码/配置/数据的证据支持（旧文件无法核对
+        # 时为 None，而不是假称已验证）
+        "sanity_verified": (identity.get("verified")
+                            if isinstance(identity, dict) else None),
     }
 
     block_size = int(cfg["block_size"])

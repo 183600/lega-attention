@@ -6,7 +6,8 @@ import tempfile
 
 from lega.experiment import (append_record, build_experiment_record,
                              collect_artifacts, ledger_path, new_run_id,
-                             read_records, snapshot_train_run)
+                             read_records, snapshot_train_run, verify_ledger)
+from lega.repro import sha256_file
 
 
 def test_run_id_unique_readable_and_no_scientific_rng():
@@ -190,3 +191,74 @@ def test_snapshot_train_run_embeds_config_used():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] run 快照内嵌 config_used.json（含缺失降级）")
+
+
+def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
+    """台账快照必须自含 seed_report/环境/sanity；旧 eval 不得冒充本 run。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "lega")
+        os.makedirs(out)
+        with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"variant": "standard", "seed": 999, "val_ppl": 1.0}, f)
+        with open(os.path.join(out, "run_manifest.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"config_sha256": "c" * 64,
+                       "git": {"commit": "a" * 40, "dirty": False},
+                       "worktree": {"available": True, "diff_sha256": None},
+                       "data": {"digest": "d" * 16},
+                       "seed_report": {"seed": 7,
+                                       "rng_fingerprints": {"torch_cpu": "x"}},
+                       "runtime": {"torch": "test"},
+                       "sanity": {"passed": True, "sha256": "s" * 64}}, f)
+        snap = snapshot_train_run("lega", 7, out)
+        prov = snap["provenance"]
+        assert prov["seed_report"]["seed"] == 7
+        assert prov["runtime"]["torch"] == "test"
+        assert prov["sanity"]["passed"] is True
+        assert prov["data_fingerprint"] == "d" * 16
+        assert prov["worktree"]["diff_sha256"] is None
+        assert snap["eval_identity_mismatches"]
+        assert any("variant" in x for x in snap["eval_identity_mismatches"])
+        assert any("seed" in x for x in snap["eval_identity_mismatches"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 台账快照内嵌逐 run 溯源 + 标记 eval 身份不匹配")
+
+
+def test_verify_ledger_lifecycle_and_artifact_hashes():
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        art = os.path.join(tmp, "summary.md")
+        with open(art, "w", encoding="utf-8") as f:
+            f.write("ok")
+        good = {"run_id": "r1", "status": "started"}
+        done = {"run_id": "r1", "status": "completed",
+                "artifacts": {"summary.md": {
+                    "sha256": sha256_file(art), "size": 2}}}
+        append_record(path, good)
+        append_record(path, done)
+        append_record(path, {"run_id": "r2", "status": "started"})
+        append_record(path, {"run_id": "r3", "status": "completed"})
+        append_record(path, {"run_id": "r3", "status": "aborted"})
+        rep = verify_ledger(path, check_artifacts=True, root=tmp)
+        assert rep["n_records"] == 5 and rep["n_runs"] == 3
+        assert rep["ok"] is False
+        issues = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        assert "dangling_started" in issues["r2"]["issues"]
+        assert "no_started_record" in issues["r3"]["issues"]
+        assert "multiple_terminal_records" in issues["r3"]["issues"]
+        # 产物被改写：completed 记录必须报哈希不符
+        with open(art, "a", encoding="utf-8") as f:
+            f.write("tampered")
+        rep2 = verify_ledger(path, check_artifacts=True, root=tmp)
+        assert any("sha256_mismatch" in str(i) for i in rep2["issues"])
+        # 正常 started→completed 链 + 正确哈希应通过
+        path2 = os.path.join(tmp, "ok.jsonl")
+        append_record(path2, {"run_id": "ok", "status": "started"})
+        append_record(path2, {"run_id": "ok", "status": "completed"})
+        assert verify_ledger(path2)["ok"] is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：悬挂/重复终态/无 started/产物哈希可发现")

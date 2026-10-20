@@ -145,10 +145,10 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 |---|---|
 | `out/<tag>/<variant>[/seed<seed>]/model.pt` | 检查点 + 训练配置 + 代码/数据溯源字段（多种子时按种子分子目录） |
 | `out/<tag>/<variant>[/seed<seed>]/train_log.jsonl` | 训练/验证曲线数据 |
-| `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **溯源清单：git commit/dirty、配置 SHA-256、数据指纹、运行环境（含 TF32/线程数/CUDA 可见性与确定性算法严格/warn_only 模式）、命令行、开训前 sanity 闸门结论与哈希** |
+| `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **溯源清单：git commit/dirty、dirty 工作区 diff 指纹/文件清单（含未跟踪文件，`worktree.patch` 可重放、截断标记）、配置 SHA-256、数据指纹、运行环境（含 TF32/线程数/CUDA 可见性与确定性算法严格/warn_only 模式）、命令行、开训前 sanity 闸门结论/哈希/身份核对** |
 | `results/<tag>/summary.md` | **汇总表（Mean ± Std + 消融矩阵 + 受控变量自检 + 可复现性/sanity）** |
 | `results/<tag>/repro.json` | 流水线全局溯源（代码版本、数据指纹、种子、运行环境） |
-| `results/experiments.jsonl` | **追加式实验台账：每轮 run 的 run_id、代码版本、解析后的完整超参数、种子、数据指纹、sanity 结论、逐 run 最终指标与产物哈希（started/completed/aborted 生命周期，失败含原因）** |
+| `results/experiments.jsonl` | **追加式实验台账：每轮 run 的 run_id、代码版本/工作区 diff、解析后的完整超参数、逐 run 种子审计与随机源指纹、数据指纹、sanity 结论与身份、最终指标与产物哈希（started/completed/aborted 生命周期，失败含原因）；`python -m lega.experiment --check_artifacts` 可核验链与哈希** |
 | `data/<data_dir>/data_report.json` | 数据防泄漏自检（划分协议、词表拟合集、去污染、64-gram 重叠、分布漂移、超长行、访问账本） |
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/baseline_tuning.json` | 基线（standard）lr/权重衰减调优证据（仅验证集；含 `default_is_optimal` 近优判定、`selection_seeds`/逐种子 val_loss 明细与逐 trial 训练溯源） |
@@ -167,8 +167,8 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 ### 3.4 可复现性、sanity check 与实验追踪
 
 - **随机种子全覆盖**：`lega.utils.set_seed` 固定 Python `random`、NumPy、PyTorch（CPU/CUDA）、cuDNN 确定性算法（`warn_only`）与 `PYTHONHASHSEED`（子进程）；本项目的批采样使用显式 `np.random.default_rng(seed)`（无 torch DataLoader/worker），数据顺序由 seed 唯一确定，单测覆盖（`tests/test_repro.py`）。`run_all` 还会逐命令把子进程的 `PYTHONHASHSEED` 对齐到该命令自己的 `--seed`（而非统一用第一个种子），每个 run 的 `run_manifest.json` 内嵌 `seed_report` 审计记录：逐随机源的实际种子、**各 RNG 真实状态的短指纹**（同 seed 可被第三方用 `set_seed(seed)+rng_state_fingerprint()` 复算验证，异 seed 必然不同，当前状态不属于该 seed 时为 `null` 而非张冠李戴）、cuDNN/确定性开关（**如实标注严格模式还是 `warn_only`，避免把“只警告”写成“严格确定性”**）、数据顺序机制，并如实区分 `PYTHONHASHSEED` 的“解释器启动时取值 vs 仅对子进程生效的当前 env”（启动时未设置时 `pythonhashseed_effective=false`，不再让字段被 `set_seed` 自身写成 seed 而自证为真），杜绝“声称固定了其实没有”。运行环境快照同时记录 TF32（matmul/cudnn）、torch 线程数与 `CUDA_VISIBLE_DEVICES`；训练清单在 `enable_tf32` **之后**生成，记录的是实际生效值而非默认值。跨硬件架构（不同 GPU/CPU/cuDNN 版本）无法保证逐位一致，但同一台机器上重跑结果稳定。
-- **过拟合小批量 sanity check（训练前闸门）**：`lega.sanity` 抽取固定小批量（默认 8 条 × 128 token），关闭 dropout/weight decay 与全部数据扰动，在**同一批数据**上优化，检查损失能否迅速趋近 0、下一 token 准确率能否接近 100%（阈值可用 `--loss_threshold/--acc_threshold/--initial_loss_tol` 或配置 `sanity` 块调整）。`run_all.py` 在全量训练前对每个变体自动执行，失败立即中止并写入台账 `aborted` 记录（`--skip_sanity` 跳过，`--sanity_steps` 调节步数），通过时把 sanity 结果摘要（路径/SHA-256/判定/未通过项）绑定进该 run 的 `run_manifest.json`，checkpoint 可自证“开训前过了代码正确性闸门”。这是**必要非充分**检查：连小批量都无法过拟合说明梯度反传/损失/标签存在严重 bug；通过也不代表数据增强、特征对齐、标签映射等 bug 不存在。sanity JSON 除损失曲线与首步梯度范数外，还**自动核对**：首步训练路径 loss ≡ 直接 logits CE、标签 y=x 右移一位、初始 loss≈log(V)（默认容差 1.0 nat，负值可禁用），并做**首步逐参数梯度覆盖**（`missing/zero/nonfinite`，可定位“总梯度范数正常但某个子模块没接进计算图”的断流 bug）。
-- **实验追踪/可追溯**：每次训练自动写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、种子审计、含实际精度开关的 Python/PyTorch/CUDA 环境、完整命令行、sanity 闸门证据），超参数在 `config_used.json`，训练曲线在 `train_log.jsonl`（并汇总为 `fig_train_curves.png`）；`run_all` 写全局 `results/<tag>/repro.json`，并在固定路径 `results/experiments.jsonl` **追加**一轮实验台账记录（开始 `started` + 结束 `completed`，失败为 `aborted`，同一 `run_id`）：代码版本、**解析后的完整超参数（config 文件被改写/删除后仍可还原）**、逐 run 的 `config_used.json` 内容、种子、数据指纹、sanity 结论（含未通过项）、逐 run 最终指标与 `train_log.jsonl`/被评测 checkpoint/全部结果文件的 SHA-256（`eval_*.json` 内亦记录 `ckpt_sha256`，结果与产出的权重一一绑定）。重跑不再丢失上一轮历史；失败轮次（sanity 闸门或训练/评测链）以 `aborted` 记录失败阶段、原因与退出码，失败实验同样完整留痕。评测结果（eval/ruler/analysis/latency）均内嵌同一份代码/数据溯源字段，不依赖手工记录。
+- **过拟合小批量 sanity check（训练前闸门）**：`lega.sanity` 抽取固定小批量（默认 8 条 × 128 token），关闭 dropout/weight decay 与全部数据扰动，在**同一批数据**上优化，检查损失能否迅速趋近 0、下一 token 准确率能否接近 100%（阈值可用 `--loss_threshold/--acc_threshold/--initial_loss_tol` 或配置 `sanity` 块调整）。`run_all.py` 在全量训练前对每个变体自动执行，失败立即中止并写入台账 `aborted` 记录（`--skip_sanity` 跳过，`--sanity_steps` 调节步数），通过时把 sanity 结果摘要（路径/SHA-256/判定/未通过项）绑定进该 run 的 `run_manifest.json`，checkpoint 可自证“开训前过了代码正确性闸门”。这是**必要非充分**检查：连小批量都无法过拟合说明梯度反传/损失/标签存在严重 bug；通过也不代表数据增强、特征对齐、标签映射等 bug 不存在。sanity JSON 除损失曲线与首步梯度范数外，还**自动核对**：首步训练路径 loss ≡ 直接 logits CE、标签 y=x 右移一位、初始 loss≈log(V)（默认容差 1.0 nat，负值可禁用），并做**首步逐参数梯度覆盖**（`missing/zero/nonfinite`，可定位“总梯度范数正常但某个子模块没接进计算图”的断流 bug）；同时强制核对 dropout/attn_dropout 已关闭（未关闭即失败，避免把配置错误误判为代码 bug）。sanity 证据绑定到 run 时会核对 variant/config/data/git（含 dirty diff）身份：旧配置/旧数据/旧代码的 PASS 不会被当成本 run 的通过证据。
+- **实验追踪/可追溯**：每次训练自动写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、种子审计、含实际精度开关的 Python/PyTorch/CUDA 环境、完整命令行、sanity 闸门证据），超参数在 `config_used.json`，训练曲线在 `train_log.jsonl`（并汇总为 `fig_train_curves.png`）；`run_all` 写全局 `results/<tag>/repro.json`，并在固定路径 `results/experiments.jsonl` **追加**一轮实验台账记录（开始 `started` + 结束 `completed`，失败为 `aborted`，同一 `run_id`）：代码版本、**解析后的完整超参数（config 文件被改写/删除后仍可还原）**、逐 run 的 `config_used.json` 内容、种子、数据指纹、sanity 结论（含未通过项）、逐 run 最终指标与 `train_log.jsonl`/被评测 checkpoint/全部结果文件的 SHA-256（`eval_*.json` 内亦记录 `ckpt_sha256`，结果与产出的权重一一绑定）。重跑不再丢失上一轮历史；失败轮次（sanity 闸门或训练/评测链）以 `aborted` 记录失败阶段、原因与退出码，失败实验同样完整留痕。台账快照还内嵌逐 run 的 `seed_report`/运行环境/sanity 身份，manifest 被删除后仍可自证；dirty 工作区的补丁与指纹随 run 保存（已跟踪 diff + 未跟踪文件，预算 8 MiB 并显式标记截断），仅凭 commit 无法复原代码时仍可重放。评测结果（eval/ruler/analysis/latency）均内嵌同一份代码/数据溯源字段，不依赖手工记录。
 
 ```bash
 # 单独运行 sanity check（退出码 0=通过，1=未通过）
@@ -186,6 +186,7 @@ python -m lega.latency   --config configs/small.json --data_dir data/wikitext103
 python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
 python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
+python -m lega.experiment --check_artifacts                  # 台账完整性/产物哈希核验（0=通过；1=异常）
 python -m lega.curves    --run_dir out/small/lega/seed1337   # 训练曲线诊断（过拟合/欠拟合/发散/NaN）
 python -m lega.badcase   --results_dir results/small         # 错误样本归因（RULER + 语言建模最差窗口）+ 改进方向合成
 python -m lega.hypotheses --verify                           # 预注册完整性校验（0=可确认；1=被删/改/未留痕）
@@ -267,7 +268,7 @@ lega-attention/
 - **c 的数值稳定性**：`max_p = exp(zmax − LSE)`，恒有界 (0,1]；`log` 前 clamp 到 `1e-30`。均匀注意力→`c=0` 有单元测试覆盖（`tests/test_attention.py`）。
 - **n 的定义**：查询位置 $t$ 的可读 token 数为 $t+1$（因果），null 槽不计入 $n$；`null` 变体的 null 键不施加 RoPE（位置无关槽）。
 - **门控查询项的定位**：门控里的 $q$ 使用 **RoPE 旋转前**的查询内容向量；注意力打分仍使用旋转后的 $q,k$。这样长度/绝对位置只通过显式的 $\log n$ 进入门控，避免方法主张中的因果混淆。
-- **可复现性**：`set_seed` 固定 Python/NumPy/PyTorch（CPU/CUDA）种子，CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`），并为子进程设置 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker），数据顺序可复现且有单测。同一组随机种子训练全部变体，变体间用同种子配对统计（`run_all.py --seeds` / configs 中的 `seeds`）。跨硬件架构无法保证逐位一致，同机重跑稳定；每次训练另写 `run_manifest.json`（git/数据指纹/环境/命令行），评测 JSON 内嵌同一溯源字段。训练前默认执行过拟合小批量 sanity check（`--skip_sanity` 可跳过）。
+- **可复现性**：`set_seed` 固定 Python/NumPy/PyTorch（CPU/CUDA）种子，CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`），并为子进程设置 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker），数据顺序可复现且有单测。同一组随机种子训练全部变体，变体间用同种子配对统计（`run_all.py --seeds` / configs 中的 `seeds`）。跨硬件架构无法保证逐位一致，同机重跑稳定；每次训练另写 `run_manifest.json`（git/数据指纹/环境/命令行），评测 JSON 内嵌同一溯源字段。训练前默认执行过拟合小批量 sanity check（`--skip_sanity` 可跳过）；基线调优的每个 trial 子进程也把 `PYTHONHASHSEED` 对齐到自己的 seed。
 - **torch.compile**：配置 `"compile": true` 可在 CUDA 上启用 torch.compile；保存检查点时统一使用剥离包装前缀后的参数键名，`load_model`（evaluate/ruler/latency/analysis）可直接加载。
 - **标准注意力双路径**：SDPA 快速路径与显式路径数值一致（有单测），显式路径用于需要注意力统计的变体与延迟公平对比（`standard` vs `standard_sdpa` 两者都测）。
 - **KV 缓存**：gated 变体在增量解码时逐 token 计算门控，缓存等价性有单测（全量前向 vs 逐 token）。
