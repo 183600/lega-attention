@@ -686,7 +686,8 @@ def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
     if improved:
         return new_best, 0, False
     count = int(evals_since_improve) + 1
-    return new_best, count, bool(patience and count >= int(patience))
+    # patience<=0 表示关闭：负值曾因 truthy 而立即触发退出，必须显式排除。
+    return new_best, count, bool(int(patience) > 0 and count >= int(patience))
 
 
 def main():
@@ -1139,7 +1140,8 @@ def main():
         # 否则 steps 非 eval_every 整数倍（或 steps < eval_every）时，更优的最终
         # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按
         # “val 上选出的最优 checkpoint”口径报告。
-        if final_metrics["val_loss"] < best_val:
+        improved_for_ckpt = final_metrics["val_loss"] < best_val
+        if improved_for_ckpt:
             best_val = final_metrics["val_loss"]
             save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
                             extra={"variant": args.variant, "step": steps,
@@ -1147,6 +1149,12 @@ def main():
                                    "val_ppl": math.exp(min(20, best_val)),
                                    "val_ppl_clamped": bool(best_val > 20),
                                    **provenance})
+        # 最终评测也要更新耐心计数（改善归零、未改善累加），否则最后一条
+        # 日志会出现 val_vs_best_rel=0 却 evals_since_best 仍为旧值的矛盾。
+        # patience 传 0：训练此刻已结束，早停状态只用于如实记录。
+        best_val, evals_since_improve, _ = early_stop_update(
+            final_metrics["val_loss"], best_val, evals_since_improve,
+            early_stop_min_delta, 0)
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]

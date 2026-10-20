@@ -33,6 +33,9 @@ def test_early_stop_update_semantics():
     # patience=0（默认关闭）：计数仍维护，但永不触发停止
     best, cnt, stop = early_stop_update(5.0, 2.9, 7, 0.0, 0)
     assert best == 2.9 and cnt == 8 and not stop
+    # 负 patience 同样是关闭（不能被 truthy 误判为立即停止）
+    best, cnt, stop = early_stop_update(5.0, 2.9, 7, 0.0, -1)
+    assert best == 2.9 and cnt == 8 and not stop
     # min_delta：幅度小于阈值不算"实质改善"（不重置计数），但严格更小仍进 best
     best, cnt, stop = early_stop_update(2.89, 2.9, 0, 0.05, 2)
     assert best == 2.89 and cnt == 1 and not stop
@@ -127,6 +130,23 @@ def test_train_early_stop_end_to_end():
         # 每个评测点都记录相对历史最优的差距（训练中途预警的原材料）
         eval_recs = [r for r in recs2 if "val_loss" in r]
         assert eval_recs and all("val_vs_best_rel" in r for r in eval_recs)
+        # steps 非 eval_every 整数倍：最终补评测也要更新耐心计数，否则
+        # 最后一条日志的 evals_since_best 与 val_vs_best_rel 自相矛盾。
+        out_dir3 = os.path.join(tmp, "run3")
+        cfg3 = _cfg()
+        cfg3["steps"] = 5
+        _run_train(cfg3, data_dir, out_dir3)
+        recs3 = load_train_log(os.path.join(out_dir3, "train_log.jsonl"))
+        final3 = [r for r in recs3 if r.get("final")]
+        assert len(final3) == 1, final3
+        prev_evals = [r for r in recs3
+                      if "val_loss" in r and not r.get("final")]
+        assert prev_evals
+        prev_best = min(r["val_loss"] for r in prev_evals)
+        expected_cnt = (0 if final3[0]["val_loss"] < prev_best
+                        else prev_evals[-1]["evals_since_best"] + 1)
+        assert final3[0]["evals_since_best"] == expected_cnt, final3[0]
+        assert abs(final3[0]["val_vs_best_rel"]) < 1e-12, final3[0]
     print("  [ok] train 端到端早停（CLI 覆盖 + 标记落盘 + 默认关闭兼容）")
 
 
