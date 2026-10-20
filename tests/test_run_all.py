@@ -1380,6 +1380,27 @@ def test_build_summary_surfaces_group_crossing_split_protocol():
     print("  [ok] build_summary：群组跨 split 进入汇总页（元数据 + 告警）")
 
 
+def test_paired_effect_below_seed_noise_is_explicitly_marked():
+    """|Δ|<ΔSD 的边缘结果不能只写“不显著”，必须显式标注噪声内。"""
+    diffs = [-0.5, 0.7, -0.3, 0.6, 0.4]
+    ref = [11.0, 12.0, 11.0, 13.0, 9.0]
+    cand = [r + d for r, d in zip(ref, diffs)]
+    runs = {
+        "lega": {s + 1: {"eval": {"ppl": v, "split": "val"}}
+                 for s, v in enumerate(cand)},
+        "standard": {s + 1: {"eval": {"ppl": v, "split": "val"}}
+                     for s, v in enumerate(ref)},
+    }
+    out = _apply_holm(_paired_comparisons(
+        runs, [("lega", "standard")], "PPL",
+        lambda slot: _ppl_of(slot.get("eval")), lower_better=True))
+    t = out[0]
+    assert t["within_noise"] is True, t
+    assert t["effect_to_noise"] < 1.0, t
+    assert "噪声" in t["verdict"], t
+    print("  [ok] 效应/噪声：|Δ|<ΔSD 的边缘结果显式标注")
+
+
 def test_enrich_paired_adds_robustness_fields():
     """配对检验必须附带置换 p / bootstrap CI / MDE，三者口径一致可复核。"""
     a = [10.5, 10.6, 10.4, 10.7, 10.55]

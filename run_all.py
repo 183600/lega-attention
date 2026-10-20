@@ -958,7 +958,43 @@ def _enrich_paired(res: dict, a, b) -> dict:
     else:
         res["p_perm"] = res["perm_exact"] = None
         res["mean_diff_ci95"] = res["mde"] = None
+
+    # 效应 vs 噪声：同一对比里“显著”与“幅度有意义”是两件事。配对差
+    # 的标准差 sd_diff 是种子/评测波动的直接尺度；|Δ|<sd_diff 表示单看
+    # 任何一个种子，符号都可能翻转，这类边缘结果必须显式标注。
+    diff = res.get("mean_diff")
+    sd = res.get("std_diff")
+    res["effect_to_noise"] = res["within_noise"] = res["below_mde"] = None
+    if diff is not None and sd is not None:
+        try:
+            diff_f, sd_f = float(diff), float(sd)
+        except (TypeError, ValueError, OverflowError):
+            diff_f = sd_f = None
+        if (diff_f is not None and math.isfinite(diff_f)
+                and math.isfinite(sd_f)):
+            res["within_noise"] = bool(sd_f > 0 and abs(diff_f) < sd_f)
+            res["effect_to_noise"] = (abs(diff_f) / sd_f
+                                      if sd_f > 0 else None)
+    if diff is not None and res.get("mde") is not None:
+        try:
+            diff_f, mde_f = abs(float(diff)), float(res["mde"])
+        except (TypeError, ValueError, OverflowError):
+            diff_f = mde_f = None
+        if (diff_f is not None and math.isfinite(diff_f)
+                and math.isfinite(mde_f)):
+            res["below_mde"] = bool(abs(diff_f) < abs(mde_f))
     return res
+
+
+def _noise_verdict_note(t: dict) -> str:
+    """把效应/噪声关系压成一句可渲染的警示（无信息时返回空串）。"""
+    if not isinstance(t, dict):
+        return ""
+    if t.get("within_noise"):
+        return "；⚠ |Δ|<ΔSD，效应落在种子/评测噪声内"
+    if t.get("below_mde"):
+        return "；效应低于当前种子数可检测的 MDE"
+    return ""
 
 
 def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> list:
@@ -1084,6 +1120,9 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
                 None if (t.get("p_adj") is None or ppadj is None
                         or t["n"] < min_seeds)
                 else (t["p_adj"] < alpha) == (ppadj < alpha))
+            note = _noise_verdict_note(t)
+            if note and isinstance(t.get("verdict"), str):
+                t["verdict"] += note
     return tests
 
 
@@ -1125,8 +1164,13 @@ def _effect_status(t, removing: bool) -> dict:
                 "reason": f"种子不足（n={t['n']}）", "p_adj": t.get("p_adj")}
     if (t.get("mean_diff") is None or t.get("p_adj") is None
             or t.get("p_adj") >= ALPHA):
+        reason = "Holm 校正后不显著"
+        if t.get("within_noise"):
+            reason += "（效应在种子噪声内）"
+        elif t.get("below_mde"):
+            reason += "（效应低于 MDE）"
         return {"supported": False, "opposite": False,
-                "reason": "Holm 校正后不显著", "p_adj": t.get("p_adj")}
+                "reason": reason, "p_adj": t.get("p_adj")}
     lb = bool(t.get("lower_is_better"))
     if removing:
         evidence = (t["mean_diff"] > 0) if lb else (t["mean_diff"] < 0)
@@ -1386,7 +1430,8 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
                 "candidate": h.get("candidate"), "reference": h.get("reference"),
                 "direction": h.get("direction"),
                 "p_adj": None, "p_perm_adj": None, "mean_diff": None,
-                "n": None, "mde": None, "status": None, "detail": None}
+                "n": None, "mde": None, "within_noise": None,
+                "below_mde": None, "status": None, "detail": None}
         if t is None:
             item["status"] = "未检验"
             item["detail"] = "对应的对比/指标没有检验结果（run 缺失或未评测）"
@@ -1417,7 +1462,12 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
             item.update({"p_adj": t.get("p_adj"),
                          "p_perm_adj": t.get("p_perm_adj"),
                          "mean_diff": t.get("mean_diff"),
-                         "n": t.get("n"), "mde": t.get("mde")})
+                         "n": t.get("n"), "mde": t.get("mde"),
+                         "within_noise": t.get("within_noise"),
+                         "below_mde": t.get("below_mde")})
+            note = _noise_verdict_note(t)
+            if note and item.get("detail"):
+                item["detail"] += note
         out.append(item)
     return out
 
@@ -4049,7 +4099,10 @@ def build_summary(results_dir: str, audit: dict = None,
                   "完全依赖 t 的正态假设；n≥6 后两套检验不一致才是真实的"
                   "稳健性警报。Δ 95% CI 为配对差的 bootstrap 区间；MDE = 当前"
                   "种子数与方差下 80% 功效可检测的最小效应：观测差远小于 "
-                  "MDE 的“不显著”是功效不足，不是无效应。")
+                  "MDE 的“不显著”是功效不足，不是无效应。效应/噪声比 = "
+                  "|Δ|/ΔSD（ΔSD 为逐种子配对差的标准差）：|Δ|<ΔSD 的结果"
+                  "在结论中标注为“种子/评测噪声内”的边缘证据，即使 p_adj "
+                  "显著也不能当作稳健收益。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
 
