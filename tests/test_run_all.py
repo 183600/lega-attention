@@ -368,7 +368,7 @@ def test_build_summary_audit_zero_checked_is_warning_not_failure():
 
 def test_cross_variant_badcase_map_min_seed_even_when_empty():
     """最小种子零错误也注册为 []（参与共识判定）；
-    最小种子无 RULER 结果时退化到最小的有结果的种子；未评测不进表。"""
+    最小种子无可用的 RULER 错误清单时退化到最小的有清单的种子；未评测不进表。"""
     cases99 = [{"sample_id": "x"}]
     # 最小种子（7）零错误，较大种子（99）有错 → 仍取最小种子的 []
     runs = {"lega": {7: {"ruler": {"badcases": []}},
@@ -377,6 +377,15 @@ def test_cross_variant_badcase_map_min_seed_even_when_empty():
     # 最小种子没有 RULER 结果 → 退化到最小有结果的种子
     runs2 = {"lega": {1: {}, 5: {"ruler": {"badcases": cases99}}}}
     assert cross_variant_badcase_map(runs2, ["lega"]) == {"lega": cases99}
+    # 最小种子的 ruler 产物缺 badcases 键/非列表 → 不是“零错误”，
+    # 退化到下一个有合法清单的种子；全无合法清单则排除该变体。
+    runs3 = {"lega": {1: {"ruler": {"results": {}}},
+                      2: {"ruler": {"badcases": "bad"}},
+                      5: {"ruler": {"badcases": cases99}}}}
+    assert cross_variant_badcase_map(runs3, ["lega"]) == {"lega": cases99}
+    runs4 = {"lega": {1: {"ruler": {"results": {}}},
+                      2: {"ruler": {"badcases": "bad"}}}}
+    assert cross_variant_badcase_map(runs4, ["lega"]) == {}
     # 完全未跑 RULER → 不注册（无法参与对照）
     assert cross_variant_badcase_map({"lega": {1: {}}}, ["lega"]) == {}
     print("  [ok] cross_variant_badcase_map（最小种子优先，零错误显式注册）")

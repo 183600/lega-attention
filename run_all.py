@@ -729,9 +729,13 @@ def _variant_seed_map(runs: dict, variant: str) -> dict:
 def cross_variant_badcase_map(runs: dict, variants) -> dict:
     """跨变体对齐用：每个变体取“最小种子”的 RULER 错误清单。
 
-    最小种子没有 RULER 结果时（例如只跑了其他种子）退化到最小的有结果的
-    种子；已评测且零错误的变体记为 [] 并参与对照。未跑过 RULER 的变体
-    不进结果（无法参与对照）。
+    最小种子没有可用的 RULER 错误清单时（例如只跑了其他种子，或产物损坏
+    缺 badcases 键）退化到最小的有可用清单的种子；已评测且零错误的变体
+    记为 [] 并参与对照。未跑过 RULER 的变体不进结果（无法参与对照）。
+
+    badcases 必须是列表：空列表才表示“已评测且零错误”；缺失/非列表是
+    无数据（旧格式或损坏产物），按 [] 处理会把参照变体伪造成全对，进而
+    把其他变体的每个失败都误报成 new_vs_reference。
     """
     out = {}
     for v in variants:
@@ -739,8 +743,9 @@ def cross_variant_badcase_map(runs: dict, variants) -> dict:
         for s in _sorted_seeds(m):
             slot = m[s]
             r = slot.get("ruler") if isinstance(slot, dict) else None
-            if isinstance(r, dict):
-                out[v] = r.get("badcases") or []
+            badcases = r.get("badcases") if isinstance(r, dict) else None
+            if isinstance(badcases, list):
+                out[v] = badcases
                 break
     return out
 
