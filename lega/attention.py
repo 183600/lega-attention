@@ -462,6 +462,9 @@ class CausalSelfAttention(nn.Module):
                 argmax_stat = torch.where(
                     p_null_stat > max_p,
                     torch.full_like(argmax_real, -1), argmax_real)
+                # 联合 softmax 的最大概率必须包含 null 槽：否则 null 主导时
+                # argmax=-1 而 max_p 仍只是真实键的最大值，两个统计自相矛盾。
+                max_p = torch.maximum(max_p, p_null_stat)
             else:
                 argmax_stat = argmax_real
         if self.attn_dropout > 0 and self.training:
@@ -950,7 +953,8 @@ class CausalSelfAttention(nn.Module):
                         stats["argmax"] = torch.where(null_p > max_real,
                                                       torch.full_like(amax_real, -1),
                                                       amax_real)
-                        stats["max_p"] = max_real.float()
+                        # max_p 是联合 softmax 的最大值：null 槽主导时必须取 null 概率。
+                        stats["max_p"] = torch.maximum(max_real, null_p).float()
                         stats["p_null"] = null_p.float()                  # 分给 null 槽的概率质量
                     else:
                         # argmax 已在 softmax 前提取（softmax 不变量，真实键内相对位置）

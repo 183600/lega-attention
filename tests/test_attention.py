@@ -310,6 +310,39 @@ def test_chunked_full_stats_matches_unchunked():
         assert torch.equal(s_ref["argmax"], s_chk["argmax"]), variant
 
 
+def test_null_variant_max_p_includes_null_slot():
+    """null 主导时 max_p 必须是含 null 槽的联合概率最大值（与 argmax=-1 一致）。"""
+    old = attention_mod._CHUNK_TARGET_ELEMS
+    torch.manual_seed(0)
+    ref = CausalSelfAttention(16, 1, variant="null")
+    chk = CausalSelfAttention(16, 1, variant="null")
+    with torch.no_grad():
+        ref.wq.weight.copy_(torch.eye(16))
+        ref.wk.weight.copy_(torch.eye(16))
+        # k_null 与查询方向高度对齐 → null 槽以接近 1 的概率主导。
+        ref.k_null.copy_(torch.eye(16)[0] * 1000.0)
+        ref.v_null.zero_()
+    chk.load_state_dict(ref.state_dict())
+    x = torch.zeros(1, 40, 16)
+    x[..., 0] = 10.0
+    try:
+        attention_mod._CHUNK_TARGET_ELEMS = 10**12
+        with torch.no_grad():
+            _, _, s_ref = ref(x, need_stats=True)
+        attention_mod._CHUNK_TARGET_ELEMS = 1024
+        with torch.no_grad():
+            _, _, s_chk = chk(x, need_stats=True)
+    finally:
+        attention_mod._CHUNK_TARGET_ELEMS = old
+    for s in (s_ref, s_chk):
+        for t in range(x.shape[1]):
+            assert s["argmax"][0, 0, t].item() == -1
+            assert abs(s["max_p"][0, 0, t].item()
+                       - s["p_null"][0, 0, t].item()) < 1e-5
+    assert torch.allclose(s_ref["max_p"], s_chk["max_p"],
+                          atol=1e-5, rtol=1e-5)
+
+
 def test_mask_cache_byte_limit_uses_lru():
     """全局掩码缓存按字节上限驱逐最旧条目。"""
     old_cap = attention_mod._CACHE_CAP
