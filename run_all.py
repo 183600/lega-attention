@@ -3128,6 +3128,16 @@ def build_summary(results_dir: str, audit: dict = None,
             for k, v in splits.items()))
         dup = _as_dict(data_report.get("duplicates"))
         cont = _as_dict(data_report.get("contamination"))
+        doc = _as_dict(dup.get("document_level"))
+        if doc:
+            md.append(
+                f"- 块级去污染：与 val/test 重复的多行块移除 "
+                f"{doc.get('train_blocks_dropped_as_duplicates_of_eval', '-')} 个；"
+                f"train 内部重复块移除 "
+                f"{doc.get('train_intra_split_duplicate_blocks_removed', '-')} 个"
+                f"（共 {doc.get('train_lines_dropped', '-')} 行）；"
+                f"val↔test 多行块重叠 {doc.get('val_test_overlap_blocks', '-')} 个"
+                "（只改 train，val/test 保持尘封）")
         md.append(
             f"- 去污染：与 val/test 重复的训练长行移除 "
             f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"

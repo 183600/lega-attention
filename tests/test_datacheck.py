@@ -19,11 +19,12 @@ import tempfile
 
 import numpy as np
 
-from lega.data import (CharTokenizer, get_tokenizer, load_bin, load_meta,
-                       load_tokenizer, prepare_bins)
+from lega.data import (CACHE_SCHEMA, CharTokenizer, get_tokenizer, load_bin,
+                       load_meta, load_tokenizer, prepare_bins)
 from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             build_data_report, check_vocab_capacity,
-                            critical_split_alerts, decontaminate_texts,
+                            critical_split_alerts, decontaminate_documents,
+                            decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             leakage_alerts, read_test_access_log, sanitize_text,
                             split_protocol_alerts, temporal_split_text,
@@ -262,6 +263,54 @@ def test_decontaminate_removes_train_internal_duplicates_only():
     print("  [ok] 去重：train 内部重复只改 train（保留首次出现），val/test 不改写")
 
 
+def test_decontaminate_documents_catches_multiline_short_line_copies():
+    """行级去污染只看 >=40 字符的单行；整段复制由块级逻辑补齐。"""
+    block = "Chapter One\nshort a\nshort b"  # 每行都低于行级阈值
+    texts = {
+        "train": (f"{block}\n\ntrain-only long line with enough characters to stay.\n\n"
+                  "second train-only long line with enough characters to stay."),
+        "val": (f"{block}\n\nval-only long line with enough characters to stay."),
+        "test": "test-only long line with enough characters to stay.",
+    }
+    out, stats = decontaminate_documents(texts)
+    assert block not in out["train"]
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    assert stats["train_blocks_dropped_as_duplicates_of_eval"] == 1
+    assert stats["train_lines_dropped"] == 3
+    assert stats["train_chars_dropped"] > 0
+    assert stats["val_blocks_scanned"] == 1
+    print("  [ok] 块级去污染：多行短行副本只从 train 删除，val/test 不改写")
+
+
+def test_decontaminate_documents_handles_heading_blocks_and_eval_overlap():
+    section_a = "= A =\nshort a1\nshort a2"
+    section_b = "= B =\nshort b1\nshort b2"
+    # 两个标题之间没有空行：若标题不开启新块，会被并成一个 6 行块而漏检。
+    body = f"{section_a}\n{section_b}"
+    texts = {
+        "train": f"{body}\n\nunique train long line with enough characters.",
+        "val": f"{body}\n\nunique val long line with enough characters.",
+        "test": f"{section_a}\n\nunique test long line with enough characters.",
+    }
+    out, stats = decontaminate_documents(texts)
+    assert stats["train_blocks_scanned"] == 2
+    assert stats["train_blocks_dropped_as_duplicates_of_eval"] == 2
+    assert section_a not in out["train"] and section_b not in out["train"]
+    # val/test 之间的块重复只统计不改写
+    assert stats["val_test_overlap_blocks"] == 1
+    assert section_a in out["val"] and section_a in out["test"]
+    print("  [ok] 块级去污染：标题分块、跨 split 删除、val↔test 重叠仅告警")
+
+
+def test_decontaminate_documents_tolerates_missing_or_bad_input():
+    for texts in (None, [], {"val": "x"}, {"train": 123, "val": ["x"]}):
+        out, stats = decontaminate_documents(texts)
+        assert out["train"] == ""
+        assert stats["train_blocks_dropped_as_duplicates_of_eval"] == 0
+        assert stats["val_test_overlap_blocks"] == 0
+    print("  [ok] 块级去污染：容忍非对象/缺失 train/非字符串输入")
+
+
 def test_decontaminate_diagnoses_val_test_overlap_without_rewriting():
     """val/test 重叠会削弱 final test 的独立性，但两侧尘封，只统计不改写。"""
     shared = "A long paragraph copied into both evaluation splits for diagnosis."
@@ -467,6 +516,39 @@ def test_prepare_bins_writes_report_and_decontaminates():
     print("  [ok] prepare_bins：去污染 + train-only 词表 + data_report + 缓存命中")
 
 
+def test_prepare_bins_applies_document_level_decontamination():
+    """多行短行副本必须由 prepare_bins 真正删除并写入报告/告警。"""
+    block = "Doc block line one\nDoc block line two"
+    train_unique = ("A train-only paragraph with enough characters to survive "
+                    "line-level decontamination.")
+    val_unique = ("A val-only paragraph with enough characters to survive "
+                  "line-level decontamination.")
+    test_unique = ("A test-only paragraph with enough characters for held-out "
+                   "evaluation.")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{block}\n\n{train_unique}\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{block}\n\n{val_unique}\n")
+        with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{test_unique}\n")
+        meta = prepare_bins(d, kind="char", force=True)
+        with open(os.path.join(d, "data_report.json"), "r",
+                  encoding="utf-8") as f:
+            rep = json.load(f)
+        doc = rep["duplicates"]["document_level"]
+        assert doc["train_blocks_dropped_as_duplicates_of_eval"] == 1
+        assert doc["train_lines_dropped"] == 2
+        assert doc["val_test_overlap_blocks"] == 0
+        codes = {a["code"] for a in rep["alerts"]}
+        assert "document_decontamination_applied" in codes
+        decoded = load_tokenizer(d).decode(load_bin(d, "train"))
+        assert "Doc block line one" not in decoded
+        assert "train-only paragraph" in decoded
+        assert meta["cache_schema"] == CACHE_SCHEMA
+    print("  [ok] prepare_bins：块级去污染删除多行短行副本并写入报告/告警")
+
+
 def _write_min_splits(d: str) -> None:
     with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
         f.write("alpha beta gamma delta epsilon zeta eta theta iota kappa.\n")
@@ -481,7 +563,7 @@ def test_prepare_bins_cache_invalidated_on_source_or_report_change():
     with tempfile.TemporaryDirectory() as d:
         _write_min_splits(d)
         meta1 = prepare_bins(d, kind="char", force=True)
-        assert meta1["cache_schema"] == 3
+        assert meta1["cache_schema"] == CACHE_SCHEMA
         assert set(meta1["source_sha256"]) == {"train", "val", "test"}
         assert isinstance(meta1["report_sha256"], str)
         # 未改动：缓存命中
@@ -689,7 +771,7 @@ def test_prepare_bins_rebuilds_on_malformed_cache_schema():
             with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
                 json.dump(saved, f)
             meta = prepare_bins(d, kind="char", force=False)
-            assert meta["cache_schema"] == 3 and meta["train_tokens"] > 0
+            assert meta["cache_schema"] == CACHE_SCHEMA and meta["train_tokens"] > 0
     print("  [ok] 异常 cache_schema：按旧缓存重建而非崩溃")
 
 

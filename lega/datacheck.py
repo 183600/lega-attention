@@ -290,6 +290,139 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     return out, stats
 
 
+def _iter_blocks(text: str, min_lines: int = 2):
+    """迭代多行块：返回 (起始偏移, 结束偏移, 归一化摘要, 内容行数)。
+
+    块由空行分隔；标题行也会开启新块（WikiText 的一篇文章/小节），避免
+    无空行语料被当成一个巨型块。块只包含非空行，摘要对每行做空白归一化后
+    以换行连接。结束偏移取“下一个块首行”的起点，因此删除范围会一并带走
+    块后的空行；块位于文件末尾时结束偏移为文本长度。
+    """
+    if not isinstance(text, str) or not text:
+        return
+    n = len(text)
+    start = None
+    digest = None
+    count = 0
+    blank_since_content = False
+    pos = 0
+    while True:
+        nl = text.find("\n", pos)
+        line_end = n if nl < 0 else nl
+        s = text[pos:line_end].strip()
+        if s:
+            is_heading = bool(_HEADING_RE.match(s))
+            if count and (blank_since_content or is_heading):
+                if count >= int(min_lines):
+                    yield start, pos, digest.digest(), count
+                start, digest, count = None, None, 0
+            if count == 0:
+                start = pos
+                digest = hashlib.blake2b(digest_size=16)
+            norm = _normalize_line(s)
+            digest.update(norm.encode("utf-8"))
+            digest.update(b"\n")
+            count += 1
+            blank_since_content = False
+        elif count:
+            blank_since_content = True
+        if nl < 0:
+            break
+        pos = nl + 1
+    if count >= int(min_lines):
+        yield start, n, digest.digest(), count
+
+
+def _remove_ranges(text: str, ranges) -> str:
+    """按字符区间删除片段；相邻/重叠区间先合并，未命中的原文保持逐字节不变。"""
+    merged = []
+    for start, end in sorted((int(a), int(b)) for a, b in ranges):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    if not merged:
+        return text
+    parts, prev = [], 0
+    for start, end in merged:
+        if start > prev:
+            parts.append(text[prev:start])
+        prev = max(prev, end)
+    if prev < len(text):
+        parts.append(text[prev:])
+    return "".join(parts)
+
+
+def decontaminate_documents(texts: dict, min_lines: int = 2):
+    """块级去污染：只从 train 删除与 val/test 或 train 前文重复的多行块。
+
+    行级去污染（decontaminate_texts）只处理长度 >= min_chars 的单行，无法
+    发现“由多行短行组成的整段/整文档”跨 split 复制。这里按空行/标题切块，
+    对块内每行做空白归一化后哈希；仅处理至少 min_lines 行的块，单行块继续
+    交给行级逻辑，避免重复统计。
+
+    只改写 train：val/test 保持逐字节原样（test 尘封）；val 与 test 之间的
+    块重复只统计并告警。train 内部重复块保留首次出现。
+    返回 (cleaned_texts, stats)。
+    """
+    texts = texts if isinstance(texts, dict) else {}
+
+    def scan(t):
+        hashes, n_blocks, n_lines = set(), 0, 0
+        for _, _, digest, count in _iter_blocks(t, min_lines):
+            hashes.add(digest)
+            n_blocks += 1
+            n_lines += count
+        return hashes, n_blocks, n_lines
+
+    eval_scan = {split: scan(texts.get(split)) for split in ("val", "test")}
+    eval_hashes = set().union(*(st[0] for st in eval_scan.values()))
+    train_text = texts.get("train")
+    if not isinstance(train_text, str):
+        train_text = ""
+
+    seen, ranges = set(), []
+    n_blocks, n_lines, dropped_lines = 0, 0, 0
+    n_cross, n_intra = 0, 0
+    for start, end, digest, count in _iter_blocks(train_text, min_lines):
+        n_blocks += 1
+        n_lines += count
+        if digest in eval_hashes:
+            n_cross += 1
+            ranges.append((start, end))
+            dropped_lines += count
+        elif digest in seen:
+            n_intra += 1
+            ranges.append((start, end))
+            dropped_lines += count
+        else:
+            seen.add(digest)
+
+    out = dict(texts)
+    out["train"] = _remove_ranges(train_text, ranges)
+    val_hashes = eval_scan["val"][0]
+    test_hashes = eval_scan["test"][0]
+    val_test_overlap = len(val_hashes & test_hashes)
+    stats = {
+        "min_lines": int(min_lines),
+        "normalization": "collapse_whitespace",
+        "train_blocks_scanned": int(n_blocks),
+        "train_block_lines_scanned": int(n_lines),
+        "train_blocks_dropped_as_duplicates_of_eval": int(n_cross),
+        "train_intra_split_duplicate_blocks_removed": int(n_intra),
+        "train_lines_dropped": int(dropped_lines),
+        "train_chars_dropped": int(sum(b - a for a, b in ranges)),
+        "val_blocks_scanned": int(eval_scan["val"][1]),
+        "test_blocks_scanned": int(eval_scan["test"][1]),
+        "val_test_overlap_blocks": int(val_test_overlap),
+        "val_test_overlap_rate": float(
+            val_test_overlap / max(1, len(val_hashes))),
+    }
+    return out, stats
+
+
 def _iter_line_lengths(text: str):
     """逐行字符长度，与 text.split("\\n") 的长度序列一致，但不构造行字符串列表。"""
     start = 0
@@ -782,6 +915,24 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         add("info", "train_intra_duplicates_removed",
             f"已从 train 移除内部重复长行：精确 {n_train_dup} 行、"
             f"空白归一化后额外 {n_train_dup_norm} 行（保留首次出现）")
+    doc = dup.get("document_level")
+    doc = doc if isinstance(doc, dict) else {}
+    n_doc_cross = _count(
+        doc.get("train_blocks_dropped_as_duplicates_of_eval"))
+    n_doc_intra = _count(
+        doc.get("train_intra_split_duplicate_blocks_removed"))
+    if n_doc_cross or n_doc_intra:
+        add("info", "document_decontamination_applied",
+            f"已从 train 移除多行块：与 val/test 重复 {n_doc_cross} 个、"
+            f"train 内部重复 {n_doc_intra} 个"
+            f"（共 {_count(doc.get('train_lines_dropped'))} 行；"
+            "单行块交给行级去污染，val/test 未改写）")
+    n_doc_eval_dup = _count(doc.get("val_test_overlap_blocks"))
+    if n_doc_eval_dup:
+        add("warning", "eval_splits_overlap_documents",
+            f"val 与 test 有 {n_doc_eval_dup} 个多行块重复：两侧均保持尘封"
+            "未改写，但 val 选型会部分预演 test，最终 test 指标的独立性下降，"
+            "须核查/重建划分")
     n_eval_dup = _count(dup.get("val_test_overlap_long_lines"))
     n_eval_dup_norm = _count(
         dup.get("val_test_overlap_normalized_long_lines"))
@@ -889,8 +1040,9 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         "alerts": alerts,
         "notes": [
             "所有拟合类统计（字符词表等）只在 train 上完成，val/test 只做 transform；",
-            "去污染只改写 train：移除与 val/test 重复的长行，并删除 train 内部"
-            "重复长行（保留首次出现）；val/test 不被改写；",
+            "去污染只改写 train：先删除与 val/test 重复的多行块及 train 内部"
+            "重复块（单行块交给行级逻辑），再移除与 val/test 重复的长行并删除"
+            "train 内部重复长行（保留首次出现）；val/test 不被改写；",
             "val 与 test 之间的重复/64-gram 重叠单独统计并告警：两侧均不改写，"
             "但重叠会削弱 final test 相对 val 选择集的独立性；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",

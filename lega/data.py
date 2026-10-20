@@ -23,7 +23,8 @@ import numpy as np
 import torch
 
 from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
-                        decontaminate_texts, distribution_shift, ngram_overlap,
+                        decontaminate_documents, decontaminate_texts,
+                        distribution_shift, ngram_overlap,
                         read_test_access_log, sanitize_text,
                         summarize_test_access, text_length_stats,
                         token_stream_stats, unknown_char_rate)
@@ -33,7 +34,7 @@ _GPT2_CACHE = {}
 # bin 缓存协议版本：清洗/去污染/词表拟合逻辑变更时必须 +1，
 # 旧缓存（含未记录版本的第一代缓存）会被强制重建，
 # 否则会用旧协议产出的 bin 静默训练，防泄漏自检报告也与实际数据不符。
-CACHE_SCHEMA = 3
+CACHE_SCHEMA = 4
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -274,10 +275,27 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         clean, stats = sanitize_text(texts[name])
         texts[name] = clean
         sanitization[name] = stats
+    # 块级去污染先于行级：整块复制（可能由多行短行组成）一旦被行级先删掉
+    # 其中一条长行，块哈希就不再与 eval 匹配，剩余短行会漏检。
+    texts, document_stats = decontaminate_documents(texts)
     texts, duplicate_stats = decontaminate_texts(texts, min_chars=40)
+    duplicate_stats["document_level"] = document_stats
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
     # 原文此后只由局部变量引用：逐段编码完即释放
     del texts
+    n_doc_cross = document_stats[
+        "train_blocks_dropped_as_duplicates_of_eval"]
+    n_doc_intra = document_stats[
+        "train_intra_split_duplicate_blocks_removed"]
+    if n_doc_cross or n_doc_intra:
+        print(f"[data] 块级去污染：从 train 移除 {n_doc_cross:,} 个与 val/test "
+              f"重复的多行块、{n_doc_intra:,} 个内部重复块"
+              f"（共 {document_stats['train_lines_dropped']:,} 行；"
+              "val/test 不改写）")
+    if document_stats["val_test_overlap_blocks"]:
+        print(f"[data] 警告：val 与 test 有 "
+              f"{document_stats['val_test_overlap_blocks']:,} 个多行块重复"
+              "（两侧均未改写；val 选型对 test 的独立性下降）")
     n_cross = (duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]
                + duplicate_stats[
                    "train_lines_dropped_as_normalized_duplicates_of_eval"])
