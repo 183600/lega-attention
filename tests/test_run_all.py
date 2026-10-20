@@ -22,6 +22,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
                       _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
+                      _noise_verdict_note, _loo_stability_str, _seed_winloss_str,
                       _paired_comparisons, _ppl_ci_rel_pct, _ppl_of,
                       _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
@@ -1504,6 +1505,43 @@ def test_enrich_paired_adds_robustness_fields():
     res1 = _enrich_paired({"n": 0, "mean_diff": None, "std_diff": None}, [], [])
     assert res1["p_perm"] is None and res1["mean_diff_ci95"] is None
     print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径）")
+
+
+def test_enrich_paired_leave_one_seed_out_stability():
+    """n 很小时一个种子可能决定符号：必须给出逐种子胜负与留一方向稳定性。
+
+    a-b = [+0.4, +0.4, +0.4, +0.4, -0.1]：均值 +0.3，但删掉第 5 个种子后
+    仍为正；构造一个删掉任一种子即翻转的对比，检查 loo_sign_stable=False。
+    """
+    a = [1.0, 1.0, 1.0]
+    b = [0.9, 0.9, -1.0]
+    # 差 = [+0.1, +0.1, +2.0] 全为正 → 稳定
+    res = _enrich_paired({"n": 3, "mean_diff": 0.733, "std_diff": 1.1}, a, b)
+    assert res["n_seed_wins"] == 3 and res["n_seed_losses"] == 0, res
+    assert res["n_seed_ties"] == 0
+    assert res["loo_sign_stable"] is True, res
+    # 差 = [+0.5, -0.45, -0.4]：整体均值 -0.117 < 0；删掉 -0.45 后剩余均值
+    # (+0.5-0.4)/2 = +0.05 > 0 → 符号翻转，应判为不稳定；胜 1 负 2。
+    res2 = _enrich_paired(
+        {"n": 3, "mean_diff": -0.117, "std_diff": 0.5},
+        [1.0, -0.45, -0.4], [0.5, 0.0, 0.0])
+    assert res2["n_seed_wins"] == 1 and res2["n_seed_losses"] == 2, res2
+    assert res2["loo_sign_stable"] is False, res2
+    # 构造明确会翻转的例子：差 = [+1.0, -0.1, -0.1, -0.1]（n=4）
+    res3 = _enrich_paired(
+        {"n": 4, "mean_diff": 0.175, "std_diff": 0.5},
+        [1.0, -0.1, -0.1, -0.1], [0.0, 0.0, 0.0, 0.0])
+    # 整体均值 +0.175 > 0；删掉 +1.0 种子后均值 = -0.1 < 0 → 翻转
+    assert res3["loo_sign_stable"] is False, res3
+    # LOO 警告在 within_noise/below_mde 之后才生效（更严重的噪声警示优先）
+    assert "留一" in _noise_verdict_note(
+        {"loo_sign_stable": False})
+    assert "留一" in _noise_verdict_note(res3) or res3["within_noise"]
+    # 无信息（n<2）→ None，不崩溃
+    res4 = _enrich_paired({"n": 1, "mean_diff": 0.1, "std_diff": None},
+                          [1.0], [0.9])
+    assert res4["n_seed_wins"] is None and res4["loo_sign_stable"] is None
+    print("  [ok] _enrich_paired（逐种子胜负 / 留一方向稳定性）")
 
 
 def test_apply_holm_permutation_agreement():

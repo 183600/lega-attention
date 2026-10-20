@@ -1029,7 +1029,47 @@ def _enrich_paired(res: dict, a, b) -> dict:
         if (diff_f is not None and math.isfinite(diff_f)
                 and math.isfinite(mde_f)):
             res["below_mde"] = bool(abs(diff_f) < abs(mde_f))
+
+    # 留一稳健性：n=5 时一个“幸运/倒霉种子”就可能决定均值符号与显著性。
+    # 逐种子胜负计数与 leave-one-seed-out 均值方向给出两条不含正态假设的
+    # 稳定性证据：若删掉任一单个种子后均值符号翻转，或逐种子胜负并非
+    # 一致，则报道的“显著优于”对个体种子高度敏感，必须显式标注。
+    res["n_seed_wins"] = res["n_seed_losses"] = res["n_seed_ties"] = None
+    res["loo_sign_stable"] = res["loo_min_abs_mean"] = None
+    try:
+        diffs = [float(x) - float(y) for x, y in zip(a, b)]
+        diffs = [d for d in diffs if math.isfinite(d)]
+    except (TypeError, ValueError, OverflowError):
+        diffs = []
+    if len(diffs) >= 2:
+        wins = sum(1 for d in diffs if d > 0)
+        losses = sum(1 for d in diffs if d < 0)
+        res["n_seed_wins"], res["n_seed_losses"] = wins, losses
+        res["n_seed_ties"] = len(diffs) - wins - losses
+        loo_means = []
+        for i in range(len(diffs)):
+            rest = diffs[:i] + diffs[i + 1:]
+            loo_means.append(sum(rest) / len(rest))
+        sign = 1 if diffs and (sum(diffs) > 0) else -1
+        res["loo_sign_stable"] = bool(
+            all((m > 0) == (sign > 0) for m in loo_means))
+        res["loo_min_abs_mean"] = float(min(abs(m) for m in loo_means))
     return res
+
+
+def _seed_winloss_str(t: dict) -> str:
+    """逐种子配对差符号计数渲染为“胜/负/平”（无信息时返回 '-'）。"""
+    if not isinstance(t, dict) or t.get("n_seed_wins") is None:
+        return "-"
+    return (f"{t['n_seed_wins']}/{t.get('n_seed_losses', 0)}/"
+            f"{t.get('n_seed_ties', 0)}")
+
+
+def _loo_stability_str(t: dict) -> str:
+    """留一方向稳定性渲染：✅ 稳定 / ❌ 删任一种子即翻转 / '-' 无信息。"""
+    if not isinstance(t, dict) or t.get("loo_sign_stable") is None:
+        return "-"
+    return "✅" if t["loo_sign_stable"] else "❌"
 
 
 def _noise_verdict_note(t: dict) -> str:
@@ -1040,6 +1080,8 @@ def _noise_verdict_note(t: dict) -> str:
         return "；⚠ |Δ|<ΔSD，效应落在种子/评测噪声内"
     if t.get("below_mde"):
         return "；效应低于当前种子数可检测的 MDE"
+    if t.get("loo_sign_stable") is False:
+        return "；⚠ 留一法方向翻转：删掉任一单个种子即改变均值符号，结论依赖个别种子"
     return ""
 
 
@@ -4210,9 +4252,9 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
-        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | Δ 95% CI | d_z | n | p | "
-                  "p_adj(Holm) | p_perm(Holm) | MDE | 结论 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | Δ 95% CI | d_z | n | 胜/负/平 | "
+                  "留一稳定 | p | p_adj(Holm) | p_perm(Holm) | MDE | 结论 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for t in tests:
             if t.get("interaction"):
                 continue  # 交互效应单独成表，避免与主效应表重复
@@ -4232,9 +4274,11 @@ def build_summary(results_dir: str, audit: dict = None,
                      if t.get("p_perm_adj") is not None else "-")
             dz = f"{t['d_z']:+.2f}" if t.get("d_z") is not None else "-"
             mde = (f"{t['mde']:+.4f}" if t.get("mde") is not None else "-")
+            wl = _seed_winloss_str(t)
+            loo = _loo_stability_str(t)
             md.append(f"| {t['candidate']} vs {t['reference']} | {t['metric']} | "
-                      f"{delta} | {ci_s} | {dz} | {t['n']} | {p} | {padj} | "
-                      f"{ppadj} | {mde} | {t.get('verdict', '-')} |")
+                      f"{delta} | {ci_s} | {dz} | {t['n']} | {wl} | {loo} | "
+                      f"{p} | {padj} | {ppadj} | {mde} | {t.get('verdict', '-')} |")
         md.append("")
         md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER/AUROC差 越大越好；"
                   "d_z = Δ均值/Δ标准差为配对 Cohen's d 效应量。"
@@ -4255,6 +4299,9 @@ def build_summary(results_dir: str, audit: dict = None,
                   "|Δ|/ΔSD（ΔSD 为逐种子配对差的标准差）：|Δ|<ΔSD 的结果"
                   "在结论中标注为“种子/评测噪声内”的边缘证据，即使 p_adj "
                   "显著也不能当作稳健收益。")
+        md.append("注: “胜/负/平”= 逐种子配对差为正/负/零的种子计数（不含任何"
+                  "分布假设）；“留一稳定”= 删掉任一单个种子后均值符号不变，"
+                  "❌ 表示结论由个别种子决定，即使 p_adj 显著也不稳健。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
 
@@ -4276,22 +4323,27 @@ def build_summary(results_dir: str, audit: dict = None,
                "RULER 对比逐任务各做一次同种子配对检验；每个任务是一个独立"
                "Holm 家族（探索性，不替代综合平均的确认性判定）。", ""]
         if shown:
-            md += ["| 对比 | 任务 | Δ均值 ± Δ标准差 | n | p_adj(Holm) | 结论 |",
-                   "|---|---|---|---|---|---|"]
+            md += ["| 对比 | 任务 | Δ均值 ± Δ标准差 | 胜/负/平 | 留一稳定 | n | "
+                   "p_adj(Holm) | 结论 |",
+                   "|---|---|---|---|---|---|---|---|"]
             for t in shown:
                 std = t.get("std_diff")
                 delta = (f"{t['mean_diff']:+.4f}"
                          + (f" ± {std:.4f}" if std is not None else ""))
                 padj = (f"{t['p_adj']:.4f}"
                         if t.get("p_adj") is not None else "-")
+                wl = _seed_winloss_str(t)
+                loo = _loo_stability_str(t)
                 md.append(f"| {t['candidate']} vs {t['reference']} | "
-                          f"{t['ruler_task']} | {delta} | {t['n']} | {padj} | "
-                          f"{t.get('verdict', '-')} |")
+                          f"{t['ruler_task']} | {delta} | {wl} | {loo} | "
+                          f"{t['n']} | {padj} | {t.get('verdict', '-')} |")
         else:
             md.append("（预注册 RULER 对比未运行，无法分解）")
         md += ["", "注: 全部逐任务检验（含未渲染的对比）见 "
                "`significance.json` 中 metric 以 `RULER:` 开头的条目；这些"
-               "检验未预注册方向，只作机制/定位线索，需在新数据上确认。"]
+               "检验未预注册方向，只作机制/定位线索，需在新数据上确认。"
+               "“胜/负/平”为逐种子配对差符号计数；“留一稳定”= 删掉任一单个"
+               "种子后均值符号不变，❌ 表示结论由个别种子决定。"]
 
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
