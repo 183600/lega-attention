@@ -667,7 +667,7 @@ def _ppl_ci_rel_pct(d):
         lo, hi = float(ci[0]), float(ci[1])
     except (TypeError, ValueError, OverflowError):
         return None
-    if not (math.isfinite(lo) and math.isfinite(hi)):
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi < lo:
         return None
     return (hi - lo) / 2.0 / ppl * 100.0
 

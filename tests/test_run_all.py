@@ -2108,6 +2108,8 @@ def test_summary_helpers_tolerate_nested_non_dict_values():
     assert _ppl_ci_rel_pct([1]) is None
     assert _ppl_ci_rel_pct({
         "ppl": 1.0, "val_ppl_ci95": [10 ** 400, 1.0]}) is None
+    assert _ppl_ci_rel_pct({
+        "ppl": 1.0, "val_ppl_ci95": [5.0, 1.0]}) is None
     assert _neural_eval_window_spec({"train_ctx": float("inf")}, False) is None
     assert _neural_eval_window_spec({"eval_iters": "x"}, False) is None
     assert _neural_eval_window_spec([1], False) is None
