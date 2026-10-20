@@ -34,7 +34,7 @@ _GPT2_CACHE = {}
 # bin 缓存协议版本：清洗/去污染/词表拟合逻辑变更时必须 +1，
 # 旧缓存（含未记录版本的第一代缓存）会被强制重建，
 # 否则会用旧协议产出的 bin 静默训练，防泄漏自检报告也与实际数据不符。
-CACHE_SCHEMA = 4
+CACHE_SCHEMA = 5
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:

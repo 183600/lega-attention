@@ -20,6 +20,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 
 import numpy as np
 
@@ -109,12 +110,14 @@ def sanitize_text(text: str):
 # ---------------------------------------------------------------- 重复/去污染
 
 def _normalize_line(s: str) -> str:
-    """行内空白折叠（含制表符/连续空格）后的比较键。
+    """行内 NFKC + 空白折叠后的比较键。
 
-    用于捕获“仅缩进/空格差异”的复制：精确字符串匹配会漏掉这类近似重复，
-    而它们同样是跨 split 的样本级泄露。只做确定性的空白归一化，不做
-    大小写/标点改写（避免把语义不同的英文句子误判为重复）。
+    用于捕获“仅缩进/空格差异”或 Unicode 兼容字符变体（全角 Ａ vs A、
+    表意空格 U+3000 vs 普通空格）的复制：精确字符串匹配会漏掉这类近似
+    重复，而它们同样是跨 split 的样本级泄露。只做确定性的 NFKC 与空白
+    归一化，不做大小写/标点改写（避免把语义不同的英文句子误判为重复）。
     """
+    s = unicodedata.normalize("NFKC", s)
     return " ".join(s.split())
 
 
@@ -266,6 +269,7 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
         out["train"] = train_text
     stats = {"min_chars": min_chars,
              "normalization": "collapse_whitespace",
+             "unicode_normalization": "NFKC",
              "train_lines_dropped_as_duplicates_of_eval": int(dropped_exact),
              "train_lines_dropped_as_normalized_duplicates_of_eval":
                  int(dropped_norm),
@@ -408,6 +412,7 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
     stats = {
         "min_lines": int(min_lines),
         "normalization": "collapse_whitespace",
+        "unicode_normalization": "NFKC",
         "train_blocks_scanned": int(n_blocks),
         "train_block_lines_scanned": int(n_lines),
         "train_blocks_dropped_as_duplicates_of_eval": int(n_cross),

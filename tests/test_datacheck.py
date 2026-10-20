@@ -246,6 +246,26 @@ def test_decontaminate_catches_whitespace_normalized_duplicates():
     print("  [ok] 去污染：空白归一化重复只从 train 移除，val/test 不改写")
 
 
+def test_decontaminate_catches_nfkc_compatibility_duplicates():
+    """全角/表意空格等 Unicode 兼容变体不能绕过重复检测。"""
+    val_line = ("Ａ long paragraph with fullwidth A and\u3000an ideographic "
+                "space that must still be caught by decontamination.")
+    train_variant = ("A long paragraph with fullwidth A and an ideographic "
+                     "space that must still be caught by decontamination.")
+    train_only = ("A train-only paragraph with sufficient length to be tracked "
+                  "by checks.")
+    texts = {"train": f"{train_variant}\n{train_only}", "val": val_line,
+             "test": ""}
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert train_variant not in out["train"]
+    assert train_only in out["train"]
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
+    assert stats["train_lines_dropped_as_normalized_duplicates_of_eval"] == 1
+    assert stats["unicode_normalization"] == "NFKC"
+    print("  [ok] 去污染：NFKC 兼容字符变体同样被识别，val/test 不改写")
+
+
 def test_decontaminate_removes_train_internal_duplicates_only():
     """train 内部重复样本会放大权重/记忆：保留首次出现，删除后续重复。"""
     dup = "A long training paragraph that appears more than once inside train."
