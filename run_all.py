@@ -3155,7 +3155,7 @@ def build_summary(results_dir: str, audit: dict = None,
         dt = _as_dict(dist.get("test_vs_train"))
         dvt = _as_dict(dist.get("test_vs_val"))
         md.append(
-            f"- 分布漂移（一元 token，采样估计）：val−train TV={_fmt4(dv.get('tv'))}、"
+            f"- 分布漂移（一元 token，默认精确计数）：val−train TV={_fmt4(dv.get('tv'))}、"
             f"JS={_fmt4(dv.get('js_bits'))} bit；test−train TV={_fmt4(dt.get('tv'))}、"
             f"JS={_fmt4(dt.get('js_bits'))} bit；test−val TV={_fmt4(dvt.get('tv'))}、"
             f"JS={_fmt4(dvt.get('js_bits'))} bit；test OOV token 率="

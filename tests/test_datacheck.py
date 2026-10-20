@@ -488,7 +488,20 @@ def test_distribution_shift_metric():
     d_diff = distribution_shift(a, b, 200)
     assert d_diff["tv"] > 0.9
     assert d_diff["eval_oov_token_rate"] > 0.9
-    print("  [ok] 分布漂移：同分布 TV≈0，完全错位 TV≈1 且 OOV 率≈1")
+    # 默认全量精确计数：train 中只出现一次的 token 也必须算已见，不能因
+    # 采样漏掉而误报 OOV。
+    rare = np.ones(10000, dtype=np.uint16)
+    rare[0] = 7
+    d_rare = distribution_shift(rare, np.array([7, 1], dtype=np.uint16), 10)
+    assert d_rare["count_mode"] == "exact"
+    assert d_rare["tokens_train"] == rare.size
+    assert d_rare["eval_oov_token_rate"] == 0
+    # 显式 max_samples 仍保留有放回采样路径，并标记 count_mode 供审计。
+    d_sample = distribution_shift(rare, np.array([7, 1], dtype=np.uint16), 10,
+                                  max_samples=1000)
+    assert d_sample["count_mode"] == "sampled"
+    assert d_sample["tokens_train"] == 1000
+    print("  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计")
 
 
 def test_test_access_ledger():

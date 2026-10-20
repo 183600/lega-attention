@@ -8,7 +8,8 @@
   * 重复样本：与 val/test 精确重复的长行从 train 移除（去污染），val/test
     保持尘封不动；另用采样 64-gram 哈希筛查跨 split 的 token 级重叠；
   * token 流硬校验：整数 dtype、有限值、id ∈ [0, vocab)、uint16 可容纳；
-  * 分布漂移：train 与 val/test 的（采样）一元 token 分布 TV/JS 散度与 OOV；
+  * 分布漂移：train 与 val/test 的一元 token 分布 TV/JS 散度与 OOV
+    （默认全量精确计数，显式 max_samples 时才采样）；
   * 文本清洗：U+FFFD 替换字符、NUL 与非法控制符（标签噪声来源）；
   * 测试集访问账本：每次 test 评测都追加记录到 data_dir/.test_access_log.jsonl，
     使“反复在测试集上评测/调参”的行为可审计。
@@ -564,27 +565,45 @@ def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 20000,
 
 
 def distribution_shift(train_ids, eval_ids, vocab_size: int,
-                       max_samples: int = 2_000_000, seed: int = 0) -> dict:
-    """train 与 eval 的一元 token 分布漂移（采样估计）。
+                       max_samples: int = None, seed: int = 0) -> dict:
+    """train 与 eval 的一元 token 分布漂移（默认全量精确计数）。
 
     返回 TV 距离、JS 散度（bit）、eval 中 train 未出现的 token 占比（OOV 率）
-    以及频率差最大的若干 token id。稀疏 token 的排序仅作审查提示。
+    以及频率差最大的若干 token id。OOV 必须基于完整 train 词表判断：若对
+    train 采样后用“采样计数为 0”判 OOV，会把真实存在但未被采样的 token
+    误报为 OOV。因此默认用分块 `bincount` 做全量计数；只有显式传入
+    max_samples（且小于流长度）时才退化为有放回采样，并在结果中标记
+    count_mode="sampled" 供审计。
     """
-    def counts(ids, s):
-        L = len(ids)
-        if L == 0:
-            return None
-        rng = np.random.default_rng(s)
-        n = min(int(max_samples), L)
-        idx = (rng.integers(0, L, size=n) if n < L else np.arange(L))
-        arr = np.asarray(ids)
-        return np.bincount(arr[idx], minlength=vocab_size).astype(np.float64)
+    try:
+        limit = int(max_samples) if max_samples is not None else None
+    except (TypeError, ValueError, OverflowError):
+        limit = None
+    if limit is not None and limit <= 0:
+        limit = None
 
-    c_train = counts(train_ids, seed)
-    c_eval = counts(eval_ids, seed + 1)
+    def counts(ids, s):
+        arr = np.asarray(ids)
+        L = int(arr.size)
+        if L == 0:
+            return None, False
+        sampled = limit is not None and limit < L
+        if sampled:
+            rng = np.random.default_rng(s)
+            arr = arr[rng.integers(0, L, size=limit)]
+            L = int(arr.size)
+        out = np.zeros(int(vocab_size), dtype=np.int64)
+        # 分块计数：内存只与 chunk 和词表大小有关，不随语料线性增长。
+        chunk = 5_000_000
+        for i in range(0, L, chunk):
+            out += np.bincount(arr[i:i + chunk], minlength=int(vocab_size))
+        return out.astype(np.float64), sampled
+
+    c_train, s_train = counts(train_ids, seed)
+    c_eval, s_eval = counts(eval_ids, seed + 1)
     if c_train is None or c_eval is None:
         return {"tv": None, "js_bits": None, "eval_oov_token_rate": None,
-                "top_divergent_token_ids": []}
+                "top_divergent_token_ids": [], "count_mode": "empty"}
     p = c_train / max(1.0, c_train.sum())
     q = c_eval / max(1.0, c_eval.sum())
     eps = 1e-12
@@ -598,10 +617,15 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
     js = 0.5 * _kl(pp, m) + 0.5 * _kl(qq, m)
     oov = float(c_eval[c_train == 0].sum() / max(1.0, c_eval.sum()))
     order = np.argsort(-np.abs(p - q))[:10]
+    exact = not (s_train or s_eval)
     return {
         "tv": tv, "js_bits": js, "eval_oov_token_rate": oov,
         "eval_oov_token_count": int(c_eval[c_train == 0].sum()),
         "top_divergent_token_ids": [int(i) for i in order],
+        "count_mode": "exact" if exact else "sampled",
+        "tokens_train": int(c_train.sum()),
+        "tokens_eval": int(c_eval.sum()),
+        # 兼容旧报告字段：精确模式下即全量 token 数。
         "sampled_tokens_train": int(c_train.sum()),
         "sampled_tokens_eval": int(c_eval.sum()),
     }
@@ -1051,7 +1075,8 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "val 与 test 之间的重复/64-gram 重叠单独统计并告警：两侧均不改写，"
             "但重叠会削弱 final test 相对 val 选择集的独立性；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",
-            "一元分布漂移为采样估计，用于提示 split 间分布差异而非统计检验；",
+            "一元分布漂移默认全量精确计数（显式 max_samples 时才采样），"
+            "用于提示 split 间分布差异而非统计检验；",
             "alerts 同时包含协议违规（群组/时序，见 split_protocol）与阈值触发的"
             "复核提示（见 alert_thresholds），不是显著性检验。",
         ],
