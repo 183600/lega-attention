@@ -474,7 +474,7 @@ def categorize_window(rec: Dict) -> Dict:
     模型没复制"（复制/检索失败）与"gold 从未出现"（真正的预测失败/长尾）。
     gold_in_context 优先使用采集时按完整窗口判定的布尔（evaluate 写入）；
     旧格式记录没有该字段时退化为 context_tail（只有窗口尾部 160 字符）检查，
-    此时"未出现"只代表尾部未出现。
+    此时"未出现"只代表尾部未出现；两者都没有时记 None（未知），不伪造。
     """
     r = dict(rec) if isinstance(rec, dict) else {}
     top1, p1 = _window_top1(r)
@@ -495,9 +495,15 @@ def categorize_window(rec: Dict) -> Dict:
     r["top1"] = top1
     r["top1_prob"] = p1
     recorded_ctx = r.get("gold_in_context")
-    r["gold_in_context"] = (bool(recorded_ctx)
-                            if isinstance(recorded_ctx, bool)
-                            else bool(gold_txt) and gold_txt in tail)
+    if isinstance(recorded_ctx, bool):
+        r["gold_in_context"] = recorded_ctx
+    elif isinstance(tail_raw, str):
+        # 旧格式没有完整窗口布尔：只有确实拿到尾部文本时才可退回尾部检查
+        # （“尾部未出现”仍不等于“窗口内从未出现”）。
+        r["gold_in_context"] = bool(gold_txt) and gold_txt in tail
+    else:
+        # 既无完整窗口布尔也无尾部文本：无法判断，不能伪造成“从未出现”。
+        r["gold_in_context"] = None
     r["gold_in_top5"] = bool(gold_txt) and gold_txt in top5_txt
     if top1 is None:
         r["category"] = "unparsed"
@@ -520,8 +526,10 @@ def categorize_window(rec: Dict) -> Dict:
             + ("且 top1 是上下文里已出现的串（高置信复读）；"
                if r["repeats_context"] else "")
             + ("gold 在上下文中出现过但未被复制（检索/复制失败）"
-               if r["gold_in_context"] else
-               "gold 在上下文中未出现（真正的预测失败，长尾/分布外）"))
+               if r["gold_in_context"] is True else
+               "gold 在上下文中未出现（真正的预测失败，长尾/分布外）"
+               if r["gold_in_context"] is False else
+               "gold 是否在上下文中出现未记录（无法区分检索失败与长尾）"))
     elif r["repeats_context"]:
         r["category"] = "repetition_attractor"
         r["explanation"] = (f"top1={top1!r} 是上下文里已出现的串（复读），"
@@ -532,8 +540,10 @@ def categorize_window(rec: Dict) -> Dict:
             (f"top1={top1!r} 概率仅 {p1:.2f}（多候选平均）"
              if p1 is not None else f"top1={top1!r} 无概率信息")
             + ("，且 gold 在上下文中出现过（模型没抄到）"
-               if r["gold_in_context"] else
-               "，gold 未在上下文中出现（样本本身难/长尾）"))
+               if r["gold_in_context"] is True else
+               "，gold 未在上下文中出现（样本本身难/长尾）"
+               if r["gold_in_context"] is False else
+               "，gold 是否在上下文中出现未记录（无法判断样本难度）"))
     return r
 
 
@@ -697,6 +707,12 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     return recs[:MAX_ADVICE]
 
 
+def _known_bool_rate(cases: List[Dict], key: str) -> Optional[float]:
+    """仅在字段被明确记录为布尔时计算比例；未知记录不进入分母。"""
+    known = [c.get(key) for c in cases if isinstance(c.get(key), bool)]
+    return (sum(1 for v in known if v) / len(known)) if known else None
+
+
 def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
     """最差窗口集合 → 归因分布 + 校准/复制统计 + 个案列表 + 改进方向。"""
     # 同 analyze_badcases：列表内的 null/数组等坏记录按损坏样本跳过。
@@ -719,8 +735,7 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
                                  / len(cases)) if cases else None,
         "gold_in_top5_rate": (sum(1 for c in cases if c.get("gold_in_top5"))
                               / len(cases)) if cases else None,
-        "gold_in_context_rate": (sum(1 for c in cases if c.get("gold_in_context"))
-                                 / len(cases)) if cases else None,
+        "gold_in_context_rate": _known_bool_rate(cases, "gold_in_context"),
         # gold 距预测位的 token 距离（只在 gold 出现时定义）：区分“远处检索
         # 失败”与“近处复制失败”，后者更像注意力/复制机制问题。
         "median_gold_distance_tokens": _median(distances),
@@ -756,9 +771,11 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
         p1_s = ""
     top_s = f"{top1!r}" + p1_s
     lines.append(f"- 模型 top-1: {top_s}")
-    lines.append(f"- 真实续写(gold): {c.get('gold_next')!r}"
-                 + ("　（gold 在上下文中出现过）" if c.get("gold_in_context")
-                    else "　（gold 未在上下文中出现）"))
+    gic = c.get("gold_in_context")
+    gic_note = ("　（gold 在上下文中出现过）" if gic is True else
+                "　（gold 未在上下文中出现）" if gic is False else
+                "　（gold 是否在上下文中出现未记录）")
+    lines.append(f"- 真实续写(gold): {c.get('gold_next')!r}{gic_note}")
     pos = c.get("gold_last_pos")
     dist = c.get("gold_distance_tokens")
     pos_i = _safe_int(pos)
@@ -820,11 +837,16 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
         cases = analysis.get("cases")
         cases = cases if isinstance(cases, list) else []
         not_ctx = sum(1 for c in cases
-                      if not (isinstance(c, dict)
-                              and c.get("gold_in_context")))
+                      if isinstance(c, dict) and c.get("gold_in_context") is False)
+        unknown_ctx = sum(1 for c in cases
+                          if not (isinstance(c, dict)
+                                  and isinstance(c.get("gold_in_context"), bool)))
         if not_ctx:
             md += ["", f"其中 {not_ctx} 个窗口的 gold 从未出现在上下文中——"
                        "这些更接近真正的预测失败/长尾，应与“抄不到”的复制失败分开看。"]
+        if unknown_ctx:
+            md += ["", f"另有 {unknown_ctx} 个窗口缺少 gold_in_context 记录——"
+                       "无法判断 gold 是否在上下文中，不能计入“从未出现”。"]
         md.append("")
         for i, c in enumerate(cases[:max_cases], 1):
             md += [""] + format_window_case(i, c)

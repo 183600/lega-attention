@@ -234,7 +234,33 @@ def test_categorize_window_prefers_full_context_flag():
                                 gold_in_context=True))
     assert c2["gold_in_context"] is True
     assert "未被复制" in c2["explanation"]
-    print("  [ok] 最差窗口 gold_in_context：完整窗口布尔优先/旧格式尾部兜底")
+    # 既无完整窗口布尔也无 context_tail：不能伪造成“从未出现”
+    unknown = {"window": 8, "loss": 1.0, "gold_next": "blue",
+               "context_tail": None, "pred_top5": [[" red", 0.85]]}
+    c3 = categorize_window(unknown)
+    assert c3["gold_in_context"] is None and "未记录" in c3["explanation"]
+    assert "未记录" in "\n".join(format_window_case(1, c3))
+    ana = analyze_worst_windows([
+        _win(gold=" blue", tail="a blue car", gold_in_context=True,
+             pred_top5=[[" red", 0.85]]), unknown], variant="lega")
+    assert ana["gold_in_context_rate"] == 1.0
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "w.md")
+        write_worstcase_md({
+            "variant": "lega", "n_windows": 2, "category_counts": {},
+            "cases": [
+                {"window": 1, "gold_next": "a", "gold_in_context": False,
+                 "pred_top5": [[" b", 0.9]]},
+                {"window": 2, "gold_next": "b",
+                 "pred_top5": [[" a", 0.9]]},
+            ]}, path)
+        text = open(path, encoding="utf-8").read()
+        assert "其中 1 个窗口的 gold 从未出现" in text, text
+        assert "另有 1 个窗口缺少 gold_in_context" in text, text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 最差窗口 gold_in_context：完整窗口布尔优先/缺失不伪造")
 
 
 def test_format_window_case_shows_gold_location_and_context():
