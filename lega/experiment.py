@@ -96,7 +96,10 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
 
     每个 run_id 应有且仅有 1 条 started、1 条终态（completed/aborted），且
     终态之后不再出现该 run 的记录；只有 started 表示崩溃/中止未留痕，多条
-    终态表示重复写入。check_artifacts=True 时抽样重算 completed 记录中
+    终态表示重复写入。同一 run_id 的 config_sha256 不得变化。completed
+    记录的 runs 必须恰好覆盖 variants×seeds（缺失/多余/重复/畸形均可
+    发现），避免“少跑种子却声称完整”或重复计权。check_artifacts=True 时
+    抽样重算 completed 记录中
     artifacts/runs[].files 的 SHA-256（相对路径按 root 或 out_dir 解析），
     产物被覆盖/手改/删除即可发现。
 
@@ -134,6 +137,51 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 seen_terminal = True
             elif seen_terminal:
                 run_issues.append("record_after_terminal")
+        # 同一 run_id 的配置哈希必须始终一致：重建同名实验却改写记录（或
+        # 误把不同配置的 started/completed 拼在一起）会让“run_id 即配置”
+        # 的假设失效。
+        shas = sorted({r.get("config_sha256") for _, r in items
+                       if isinstance(r.get("config_sha256"), str)
+                       and r.get("config_sha256")})
+        if len(shas) > 1:
+            run_issues.append("config_sha256_rewritten")
+        # completed 的 runs 必须完整覆盖 variants×seeds，且不得重复：
+        # 少跑 seed 会让“N 个种子”的结论虚胖，重复条目会重复计权。
+        for _, r in items:
+            if r.get("status") != "completed":
+                continue
+            variants, seeds, runs = (r.get("variants"), r.get("seeds"),
+                                     r.get("runs"))
+            if not (isinstance(variants, list) and isinstance(seeds, list)
+                    and isinstance(runs, list)):
+                continue
+            try:
+                expected = {(str(v), int(s)) for v in variants for s in seeds}
+            except (TypeError, ValueError):
+                run_issues.append("runs_expected_unparseable")
+                continue
+            actual_list, malformed = [], 0
+            for run in runs:
+                if not isinstance(run, dict):
+                    malformed += 1
+                    continue
+                v, s = run.get("variant"), run.get("seed")
+                if v is None or s is None:
+                    malformed += 1
+                    continue
+                try:
+                    actual_list.append((str(v), int(s)))
+                except (TypeError, ValueError):
+                    malformed += 1
+            actual = set(actual_list)
+            if expected - actual:
+                run_issues.append("runs_coverage_missing")
+            if actual - expected:
+                run_issues.append("runs_coverage_unexpected")
+            if len(actual_list) != len(actual):
+                run_issues.append("runs_duplicate")
+            if malformed:
+                run_issues.append("runs_malformed")
         if run_issues:
             issues.append({"run_id": rid, "issues": sorted(set(run_issues)),
                            "statuses": statuses})

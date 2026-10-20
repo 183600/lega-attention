@@ -260,6 +260,49 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
     print("  [ok] 台账快照内嵌逐 run 溯源 + 标记 eval 身份不匹配")
 
 
+def test_verify_ledger_completed_coverage_and_config_identity():
+    """completed 必须覆盖 variants×seeds；同 run_id 的配置哈希不得改写。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        common = {"run_id": "bad", "config_sha256": "a" * 64,
+                  "variants": ["lega", "standard"], "seeds": [1, 2]}
+        append_record(path, dict(common, status="started"))
+        append_record(path, dict(
+            common, status="completed",
+            runs=[{"variant": "lega", "seed": 1},
+                  {"variant": "lega", "seed": 1},   # 重复计权
+                  {"variant": "other", "seed": 9},  # 不属于本轮
+                  "not-a-run"]))                    # 畸形条目
+        # 同一 run_id 的 completed 记录改了配置哈希
+        append_record(path, {"run_id": "rewrite", "status": "started",
+                             "config_sha256": "a" * 64,
+                             "variants": ["lega"], "seeds": [1]})
+        append_record(path, {"run_id": "rewrite", "status": "completed",
+                             "config_sha256": "b" * 64,
+                             "variants": ["lega"], "seeds": [1],
+                             "runs": [{"variant": "lega", "seed": 1}]})
+        # 覆盖完整且无重复的应通过
+        append_record(path, {"run_id": "ok", "status": "started",
+                             "config_sha256": "c" * 64,
+                             "variants": ["lega"], "seeds": [1, 2]})
+        append_record(path, {"run_id": "ok", "status": "completed",
+                             "config_sha256": "c" * 64,
+                             "variants": ["lega"], "seeds": [1, 2],
+                             "runs": [{"variant": "lega", "seed": 1},
+                                      {"variant": "lega", "seed": 2}]})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        for issue in ("runs_coverage_missing", "runs_coverage_unexpected",
+                      "runs_duplicate", "runs_malformed"):
+            assert issue in by_id["bad"]["issues"], issue
+        assert "config_sha256_rewritten" in by_id["rewrite"]["issues"]
+        assert "ok" not in by_id
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：completed 覆盖完整性 + 配置哈希改写")
+
+
 def test_verify_ledger_lifecycle_and_artifact_hashes():
     tmp = tempfile.mkdtemp()
     try:
