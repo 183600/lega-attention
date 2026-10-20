@@ -235,7 +235,10 @@ records both planned and actual steps, the controlled-variable audit compares
 planned steps and the summary marks early-stopped runs; because the actual training
 budget (tokens_seen) then differs across runs, pre-registered confirmatory
 verdicts are automatically downgraded to exploratory (`apply_budget_gate`) and
-can only be restored by rerunning with equal actual steps. Downstream evaluation
+can only be restored by rerunning with equal actual steps; `component_evidence`
+in `significance.json` also records `training_budget_comparable=false` /
+`confirmatory_supported=false` / `evidence_status="exploratory"`, so machine
+consumers cannot mistake it for confirmatory evidence. Downstream evaluation
 still uses the val-selected `model_best.pt`). Attribute
 every error case (each case also gets a coarse attribution axis: data/construction,
 difficulty boundary, or model/method), and use the cross-variant

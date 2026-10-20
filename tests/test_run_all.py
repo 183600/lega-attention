@@ -2600,3 +2600,26 @@ def test_verify_controlled_setup_rejects_eval_protocol_mismatch():
         assert audit["ok"], audit
         assert "lega/seed7" in audit["eval_protocol_missing"], audit
     print("  [ok] 受控变量审计：PPL 评测 split/ctx/iters/windows 不一致即拒绝")
+
+
+def test_component_evidence_marks_early_stop_budget():
+    """早停预算不等时，JSON 证据必须显式降为探索性而非只说 supported。"""
+    tests = [
+        _mk("lega_no_query", "lega", "PPL", 0.4, 0.005),
+        _mk("qgate", "gate_only", "PPL", -0.01, 0.7),
+    ]
+    _apply_holm(tests)
+    audit = {"early_stop_runs": ["lega/seed7(step 6/10)"]}
+    a = next(c for c in component_evidence(tests, audit=audit)
+             if c["component"] == "A 查询项")
+    assert a["supported"] == ["PPL"]                 # 统计显著性仍保留
+    assert a["training_budget_comparable"] is False
+    assert a["confirmatory_supported"] is False
+    assert a["evidence_status"] == "exploratory"
+    assert "早停" in a["budget_note"] and a["early_stop_runs"]
+    ok = next(c for c in component_evidence(tests)
+              if c["component"] == "A 查询项")
+    assert ok["training_budget_comparable"] is True
+    assert ok["confirmatory_supported"] is True
+    assert ok["evidence_status"] == "confirmatory"
+    print("  [ok] component_evidence：早停预算不等时机器可读降级为探索性")

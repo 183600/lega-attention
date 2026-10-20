@@ -1212,7 +1212,7 @@ def _combine_component_evidence(loo: dict, add: dict) -> dict:
     return {"has_evidence": False, "consistent": False, "verdict": "证据不足"}
 
 
-def component_evidence(tests) -> list:
+def component_evidence(tests, audit: dict = None) -> list:
     """由配对检验结果汇总各组件（A/B/C）是否“有用”的统计证据。
 
     统计口径：
@@ -1222,12 +1222,28 @@ def component_evidence(tests) -> list:
         两套证据合并且检测方向冲突；gate_only 只含门控偏置 d、不含
         A/B/C，避免把“输出门本身”算作组件收益；
       * 任一套显著反向时判“证据冲突”，不再宣称该组件有用。
+      * 早停导致实际训练量不等时，统计检验本身仍可计算，但“组件有用”
+        不再具备确认性：每条证据同时带 training_budget_comparable /
+        confirmatory_supported / evidence_status，供机器消费时不会把
+        探索性结果误读成确认结论。
     """
+    audit = _as_dict(audit)
+    stopped = _as_text_list(audit.get("early_stop_runs"))
+    budget_ok = not stopped
     out = []
     for name, loo_pair, add_pair, primary in COMPONENT_TESTS:
         item = {"component": name, "loo_pair": list(loo_pair),
                 "add_pair": list(add_pair), "primary_metric": primary,
-                "loo": {}, "add": {}, "supported": []}
+                "loo": {}, "add": {}, "supported": [],
+                "training_budget_comparable": budget_ok,
+                "confirmatory_supported": False,
+                "evidence_status": "none"}
+        if stopped:
+            item["budget_note"] = (
+                "早停使实际训练量不等（" + "；".join(stopped[:4])
+                + (" ..." if len(stopped) > 4 else "")
+                + "）：组件证据仅供探索，不能作为确认性结论")
+            item["early_stop_runs"] = stopped
         for metric in _EVIDENCE_METRICS:
             item["loo"][metric] = _effect_status(
                 _find_test(tests, loo_pair, metric), True)
@@ -1239,6 +1255,13 @@ def component_evidence(tests) -> list:
         if combined["has_evidence"]:
             item["supported"].append(primary)
         item.update(combined)
+        item["confirmatory_supported"] = bool(
+            combined["has_evidence"] and budget_ok)
+        if combined["has_evidence"]:
+            item["evidence_status"] = (
+                "confirmatory" if budget_ok else "exploratory")
+        elif not budget_ok:
+            item["evidence_status"] = "exploratory"
         item["evidence"] = ({primary: {
             "direction": ("loo" if loo_p["supported"] else "add"),
             "p_adj": (loo_p if loo_p["supported"] else add_p).get("p_adj")}}
@@ -3054,7 +3077,7 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _ap_diff_tests(runs)
     tests += _factorial_interaction_tests(runs)
     tests = _apply_holm(tests)
-    comp = component_evidence(tests)
+    comp = component_evidence(tests, audit=audit)
     # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
     # 完整性锁链把“事后静默改写登记表”变成可检测事件：校验未通过时
     # 全部确认性判定被显式降级（apply_integrity_gate），不会假装边界仍成立。
@@ -3980,8 +4003,11 @@ def build_summary(results_dir: str, audit: dict = None,
                              for m in _EVIDENCE_METRICS)
         add_cells = "；".join(f"{m}: {_fmt_evidence(c['add'][m])}"
                              for m in _EVIDENCE_METRICS)
+        verdict = c["verdict"]
+        if not c.get("training_budget_comparable", True):
+            verdict += "（探索性：训练预算不等）"
         md.append(f"| {c['component']} | {c['primary_metric']} | {loo_cells} | "
-                  f"{add_cells} | {c['verdict']} |")
+                  f"{add_cells} | {verdict} |")
     supported = [c["component"] for c in comp if c["supported"]]
     unsupported = [c["component"] for c in comp if not c["supported"]]
     inconsistent = [c["component"] for c in comp if not c.get("consistent")]

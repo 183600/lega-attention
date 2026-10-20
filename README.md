@@ -217,7 +217,7 @@ python -m tests.run_tests   # 单元测试（不依赖 pytest）
 步数可不同，`eval.json` 同时记录计划/实际步数，受控变量审计按计划步数核对并在
 汇总页如实标注"早停"与截断原因；由于实际训练量（tokens_seen）不等，预注册
 确认性判定会自动降级为探索性（`apply_budget_gate`），需在相同实际步数下重跑
-才能恢复 confirmatory 地位；下游仍使用 val 选出的 `model_best.pt`）；
+才能恢复 confirmatory 地位，`significance.json` 的 `component_evidence` 也同步写入 `training_budget_comparable=false` / `confirmatory_supported=false` / `evidence_status="exploratory"`，不会在 JSON 里继续冒充确认性证据；下游仍使用 val 选出的 `model_best.pt`）；
 错误样本逐条归因（每个案例附粗归因轴：数据/构造、难度边界、模型/方法），并用
 跨变体对照区分"全体共识失败（数据/难度）"与"方法特异性盲区"；归因最终**合成为
 可执行的改进方向**（触发证据→建议→下一步实验，确定性阈值见 `lega/badcase.py`），
