@@ -2243,6 +2243,10 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
     assert _ruler_min_cell_n({"results": {"niah": {
         "256": {"n": float("inf"), "em": 1.0},
         "512": {"n": 3, "em": "bad"}}}}) == 3
+    assert _ruler_min_cell_n({"results": {"niah": {
+        "256": {"n": 2.5}, "512": {"n": 3}}}}) == 3
+    assert _ruler_min_cell_n({"results": {"niah": {
+        "256": {"n": True}, "512": {"n": "4"}}}}) == 4
     assert _ppl_of({"ppl": 10 ** 400}) is None
     assert _stat([10 ** 400, "bad", float("nan"), 2.0]) == {
         "mean": 2.0, "std": None, "n": 1}

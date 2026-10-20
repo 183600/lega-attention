@@ -945,10 +945,9 @@ def _ruler_min_cell_n(d):
         for cell in by_ctx.values():
             if not isinstance(cell, dict) or cell.get("n") is None:
                 continue
-            try:
-                ns.append(int(cell["n"]))
-            except (TypeError, ValueError, OverflowError):
-                continue
+            n = _integral_value(cell["n"])
+            if n is not None:
+                ns.append(n)
     return min(ns) if ns else None
 
 
