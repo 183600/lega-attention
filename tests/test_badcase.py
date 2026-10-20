@@ -522,8 +522,11 @@ def test_malformed_records_do_not_crash_attribution():
     bad = [
         {"task": "fwe", "pred": 123, "answer_words": None},
         {"task": "fwe", "pred": None, "answer_words": ["a"]},
+        {"task": "fwe", "pred": "ka ro", "answer_words": 123},
+        {"task": "fwe", "pred": "ka", "answer_words": [1, None]},
         {"task": "niah_synth", "depth": {"a": 1}, "pred": None,
          "answer": 123, "context_numbers": None, "needle_excerpt": 42},
+        {"task": "niah_synth", "pred": "1234567", "context_numbers": 5},
         {},  # 缺 task
     ]
     ana = analyze_badcases(bad, variant="lega")
@@ -545,6 +548,36 @@ def test_malformed_records_do_not_crash_attribution():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 坏样本字段类型异常的归因（fwe/缺 task/非字符串字段）")
+
+
+def test_huge_and_nonfinite_window_fields_tolerated():
+    """窗口距离/位置可能是超大整数或 NaN/Inf：中位数与 Markdown 渲染必须
+    跳过不可用值，不能因 float 转换溢出中断最差窗口报告。"""
+    win = analyze_worst_windows([
+        {"pred_top5": ["a"], "gold_next": "b",
+         "gold_last_pos": 10, "gold_distance_tokens": 100,
+         "gold_occurrences": 2},
+        {"pred_top5": ["a"], "gold_next": "b",
+         "gold_last_pos": 20, "gold_distance_tokens": 200,
+         "gold_occurrences": 3},
+        {"pred_top5": ["a"], "gold_next": "b",
+         "gold_last_pos": float("inf"), "gold_distance_tokens": 10 ** 400,
+         "gold_occurrences": float("inf")},
+        {"pred_top5": ["a"], "gold_next": "b",
+         "gold_last_pos": float("nan"), "gold_distance_tokens": 10 ** 400,
+         "gold_occurrences": 10 ** 400},
+        {"pred_top5": ["a"], "gold_next": "b",
+         "gold_distance_tokens": float("inf")},
+    ], variant="lega")
+    assert win["median_gold_distance_tokens"] == 150.0
+    for i, c in enumerate(win["cases"], 1):
+        format_window_case(i, c)
+    tmp = tempfile.mkdtemp()
+    try:
+        write_worstcase_md(win, os.path.join(tmp, "w.md"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 最差窗口的超大整数/非有限数值容错")
 
 
 def test_cross_variant_skips_non_dict_records():

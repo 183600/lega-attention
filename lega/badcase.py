@@ -98,7 +98,7 @@ def categorize_case(rec: Dict) -> Dict:
         # 外部/旧格式 JSON 的 pred 可能是数字等非字符串类型：显式 str()，
         # 一个坏样本不应让整份归因报告崩溃
         pred_words = set(_WORD_RE.findall(str(r.get("pred") or "").lower()))
-        top = set(r.get("answer_words") or [])
+        top = _word_set(r.get("answer_words"))
         if not pred_words:
             r["category"] = "fwe_no_parse"
             r["explanation"] = "模型输出中没有可解析的小写词"
@@ -131,7 +131,7 @@ def categorize_case(rec: Dict) -> Dict:
         r["explanation"] = "模型没有给出可解析的数字回答（可能复读问题或提前停止）"
         return r
     first = nums[0]
-    ctx_nums = set(r.get("context_numbers") or [])
+    ctx_nums = _num_set(r.get("context_numbers"))
     if first in ctx_nums:
         r["category"] = "copy_distractor"
         r["explanation"] = (f"输出了 {first}——这是上下文中的干扰值（gold={r.get('answer')}），"
@@ -513,6 +513,58 @@ def categorize_window(rec: Dict) -> Dict:
     return r
 
 
+def _word_set(raw) -> set:
+    if isinstance(raw, str):
+        return set(_WORD_RE.findall(raw.lower()))
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    out = set()
+    for v in raw:
+        if v is not None:
+            out.update(_WORD_RE.findall(str(v).lower()))
+    return out
+
+
+def _num_set(raw) -> set:
+    if isinstance(raw, str):
+        return set(_NUM_RE.findall(raw))
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    out = set()
+    for v in raw:
+        if v is not None:
+            out.update(_NUM_RE.findall(str(v)))
+    return out
+
+
+def _finite_float(v):
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _safe_int(v):
+    if _finite_float(v) is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _median(vals):
+    out = []
+    for v in vals:
+        f = _finite_float(v)
+        if f is not None:
+            out.append(f)
+    return statistics.median(out) if out else None
+
+
 def _mean(vals):
     # 与 utils.mean_std 同口径：剔除 None、非数值与非有限值（NaN/Inf）。发散
     # run 的窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并污染
@@ -645,8 +697,7 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
                                  / len(cases)) if cases else None,
         # gold 距预测位的 token 距离（只在 gold 出现时定义）：区分“远处检索
         # 失败”与“近处复制失败”，后者更像注意力/复制机制问题。
-        "median_gold_distance_tokens": (statistics.median(distances)
-                                        if distances else None),
+        "median_gold_distance_tokens": _median(distances),
         "mean_loss": _mean([c.get("loss") for c in cases]),
         "cases": cases,
     }
@@ -684,12 +735,14 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
                     else "　（gold 未在上下文中出现）"))
     pos = c.get("gold_last_pos")
     dist = c.get("gold_distance_tokens")
-    if isinstance(pos, (int, float)) and isinstance(dist, (int, float)):
-        occ = c.get("gold_occurrences")
-        lines.append(f"- gold 位置: 窗口内第 {int(pos)} 个 token，距预测位 "
-                     f"{int(dist)} tokens"
-                     + (f"（共出现 {int(occ)} 次，取最后一次）"
-                        if isinstance(occ, (int, float)) and occ > 1 else ""))
+    pos_i = _safe_int(pos)
+    dist_i = _safe_int(dist)
+    if pos_i is not None and dist_i is not None:
+        occ_i = _safe_int(c.get("gold_occurrences"))
+        lines.append(f"- gold 位置: 窗口内第 {pos_i} 个 token，距预测位 "
+                     f"{dist_i} tokens"
+                     + (f"（共出现 {occ_i} 次，取最后一次）"
+                        if occ_i is not None and occ_i > 1 else ""))
         snippet = c.get("gold_context_excerpt")
         if snippet:
             lines.append(f"- gold 附近上下文: …{snippet}…")
@@ -733,9 +786,9 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
         git5 = analysis.get("gold_in_top5_rate")
         if isinstance(git5, (int, float)):
             stats.append(f"gold 进入 top-5 的比例={git5:.0%}")
-        dist = analysis.get("median_gold_distance_tokens")
-        if isinstance(dist, (int, float)):
-            stats.append(f"gold 距预测位的中位距离={int(dist)} tokens")
+        dist_i = _safe_int(analysis.get("median_gold_distance_tokens"))
+        if dist_i is not None:
+            stats.append(f"gold 距预测位的中位距离={dist_i} tokens")
         if stats:
             md += ["", "；".join(stats) + "。"]
         cases = analysis.get("cases")
@@ -1091,7 +1144,7 @@ def main():
     def _seed_key(item):
         try:
             return (0, int(item[0]), item[1])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return (1, 0, item[1])
 
     # 每个变体取“最小种子”（与 run_all.cross_variant_badcase_map 同策略）：
