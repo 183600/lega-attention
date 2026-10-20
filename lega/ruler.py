@@ -325,14 +325,23 @@ def score_prediction(task: str, answer: str, pred_text: str,
         # EM 只承认“第一个数值回答”：若模型先答错、随后在同一输出里再蒙中正确答案，
         # 记为命中会系统性地高估检索能力。
         nums = _NUM_RE.findall(pred_text)
-        return {"em": float(bool(nums) and nums[0] == answer), "recall": None}
+        return {"em": float(bool(nums) and nums[0] == answer), "recall": None,
+                "precision": None, "f1": None}
     if task == "fwe":
         pred = set(_WORD_RE.findall(pred_text.lower()))
         top = set(answer_words or [])
         recall = len(pred & top) / max(1, len(top))
         # 严格 EM：预测词集合必须与 top-10 完全相等（多答无关词同样算错），
         # 否则模型“背出 top-10 再灌水”也会被记为命中。
-        return {"em": float(bool(top) and pred == top), "recall": recall}
+        em = float(bool(top) and pred == top)
+        # precision/F1 为诊断量：recall 不惩罚“把上下文所有词都列出来”的
+        # 灌水策略，precision 才有惩罚（多余预测压低 precision）。二者不进
+        # 主平均（主指标仍是严格集合 EM），只用于区分“没找到”与“找对但多答”。
+        inter = len(pred & top)
+        precision = inter / len(pred) if pred else 0.0
+        f1 = (2 * precision * recall / (precision + recall)
+              if (precision + recall) > 0 else 0.0)
+        return {"em": em, "recall": recall, "precision": precision, "f1": f1}
     raise ValueError(f"未知任务 {task}")
 
 
@@ -483,6 +492,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             for ex in samples:
                 by_len.setdefault(len(ex["ids"]), []).append(ex)
             ems, recalls, n = [], [], 0
+            precisions, f1s = [], []
             for length in sorted(by_len):
                 grp = by_len[length]
                 total = min(length + max_gen, model.block_size)
@@ -505,6 +515,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         ems.append(sc["em"])
                         if sc["recall"] is not None:
                             recalls.append(sc["recall"])
+                        if sc.get("precision") is not None:
+                            precisions.append(sc["precision"])
+                        if sc.get("f1") is not None:
+                            f1s.append(sc["f1"])
                         n += 1
                         if collect_badcases and sc["em"] < 1.0:
                             prompt_text = tok.decode(ex["ids"])
@@ -517,6 +531,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                                 "answer_words": ex["answer_words"],
                                 "pred": pred_text.strip(),
                                 "em": sc["em"], "recall": sc["recall"],
+                                "precision": sc.get("precision"),
+                                "f1": sc.get("f1"),
                                 "question": tok.decode(ex["ids"][qs:qe]),
                                 "needle_excerpt": _needle_excerpt(tok, ex),
                                 # 坏案例的 depth 字段统一语义为“needle 位置比例”
@@ -544,11 +560,17 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 显式随结果落盘（小样本下比 Wald 区间可靠，端点不越界）。
                     "em_ci95_wilson": list(wilson_score_ci(int(round(sum(ems))), n)),
                     "recall": (float(sum(recalls) / len(recalls)) if recalls else None),
+                    "precision": (float(sum(precisions) / len(precisions))
+                                  if precisions else None),
+                    "f1": (float(sum(f1s) / len(f1s)) if f1s else None),
                     "n": n,
                 }
                 if verbose:
                     r = results[task][str(room_ctx)]
-                    extra = f" recall={r['recall']:.3f}" if r["recall"] is not None else ""
+                    extra = (f" recall={r['recall']:.3f}"
+                             f" prec={r['precision']:.3f}"
+                             f" f1={r['f1']:.3f}"
+                             if r["recall"] is not None else "")
                     print(f"[ruler] {task}@ctx{room_ctx}: em={r['em']:.3f}{extra} (n={n})")
     if skipped:
         results["_skipped"] = skipped

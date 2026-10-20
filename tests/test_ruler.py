@@ -113,11 +113,24 @@ def test_score_predictions():
     top = ["ka", "ro", "mi", "ta"]
     sc = score_prediction("fwe", "ka ro mi ta", " ka ro mi", answer_words=top)
     assert sc["recall"] == 0.75 and sc["em"] == 0.0
+    assert sc["precision"] == 1.0 and abs(sc["f1"] - 6 / 7) < 1e-9
     sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro", answer_words=top)
     assert sc["recall"] == 1.0 and sc["em"] == 1.0
-    # fwe 严格 EM：多答无关词不算命中
-    sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro extra", answer_words=top)
+    assert sc["precision"] == 1.0 and sc["f1"] == 1.0
+    # fwe 严格 EM：多答无关词不算命中；precision 惩罚“灌水”
+    sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro extra",
+                          answer_words=top)
     assert sc["recall"] == 1.0 and sc["em"] == 0.0
+    assert sc["precision"] == 0.8 and sc["f1"] < 1.0
+    # 把上下文全部词都列出来：recall 仍满，但 precision 崩掉
+    sc = score_prediction("fwe", "ka ro mi ta", " ka ro mi ta zz qq",
+                          answer_words=top)
+    assert sc["recall"] == 1.0 and sc["precision"] < 1.0
+    # 空预测：precision 记为 0（无预测不能算“零误报”）
+    sc = score_prediction("fwe", "ka ro mi ta", "", answer_words=top)
+    assert sc["precision"] == 0.0 and sc["recall"] == 0.0 and sc["f1"] == 0.0
+    # 非 fwe 任务 precision/f1 为 None（口径不适用）
+    assert score_prediction("niah_synth", "7021853", "7021853")["precision"] is None
 
 
 def test_run_ruler_dedupes_clamped_ctx():

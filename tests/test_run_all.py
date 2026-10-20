@@ -2359,11 +2359,44 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     assert abs(_ruler_avg_micro(fwe) - 0.0) < 1e-12
     assert abs(_ruler_fwe_recall(fwe) - 0.75) < 1e-12
     assert _ruler_fwe_recall({"results": {"vt": {"8": {"em": 1.0}}}}) is None
+    # precision/f1 同为诊断口径，且对“灌水”敏感
+    fwe2 = {"results": {"fwe": {"8": {"em": 0.0, "recall": 1.0,
+                                      "precision": 0.5, "f1": 2 / 3, "n": 4}}}}
+    assert abs(_ruler_task_means(fwe2, "precision").get("fwe") - 0.5) < 1e-12
+    assert abs(_ruler_task_means(fwe2, "f1").get("fwe") - 2 / 3) < 1e-12
+    # 旧产物无 precision 字段 → 缺失而非崩溃
+    assert _ruler_task_means(fwe, "precision").get("fwe") is None
     # 缺字段/坏类型按缺失处理
     assert _ruler_avg_micro([1]) is None
     assert _ruler_avg_micro({"results": [1]}) is None
     assert _ruler_avg_micro({"results": {"vt": {"8": {"n": 0}}}}) is None
     print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe EM 口径）")
+
+
+def test_build_summary_fwe_precision_f1_columns():
+    """fwe 除严格 EM 外，必须把 precision/F1 诊断量渲染进汇总表。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for s in (1, 2, 3):
+            for v, prec in (("standard", 0.4), ("lega", 0.6)):
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s, "val_ppl": 10.0, "val_loss": 2.3,
+                    "n_params": 100, "n_gate_extra": 0, "split": "val"})
+                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s,
+                    "results": {"fwe": {"256": {"em": 0.5, "recall": 0.8,
+                                               "precision": prec,
+                                               "f1": 0.5 + prec / 10,
+                                               "n": 30}}}})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "fwe prec↑" in md and "fwe F1↑" in md, md[-2000:]
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row.get("ruler_fwe_precision") == 0.6, row
+        assert row.get("ruler_fwe_f1") is not None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：fwe precision/F1 诊断列")
 
 
 def test_build_summary_per_task_ruler_breakdown():

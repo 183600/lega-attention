@@ -3073,6 +3073,16 @@ def build_summary(results_dir: str, audit: dict = None,
     metric_specs.append(
         ("ruler_fwe_recall",
          lambda m: _stat_series(m, "ruler", _ruler_fwe_recall)))
+    # fwe precision/F1 同为诊断：precision 才惩罚“多答”，与 recall 并排
+    # 才能区分“没找到高频词”与“找对但灌水/漏答”；均不进主平均。
+    metric_specs.append(
+        ("ruler_fwe_precision",
+         lambda m: _stat_series(
+             m, "ruler", lambda d: _ruler_task_means(d, "precision").get("fwe"))))
+    metric_specs.append(
+        ("ruler_fwe_f1",
+         lambda m: _stat_series(
+             m, "ruler", lambda d: _ruler_task_means(d, "f1").get("fwe"))))
     for key in ("auroc_logit", "auroc_qterm", "misleading_rate",
                 "misleading_given_conc", "p_hit_given_conc",
                 "auprc_logit", "auprc_qterm", "hit_base_rate",
@@ -3258,6 +3268,8 @@ def build_summary(results_dir: str, audit: dict = None,
             ("ruler_niah_multikey", "multikey↑"),
             ("ruler_fwe", "fwe EM↑"),
             ("ruler_fwe_recall", "fwe recall↑"),
+            ("ruler_fwe_precision", "fwe prec↑"),
+            ("ruler_fwe_f1", "fwe F1↑"),
             ("ruler_vt", "vt↑"), ("prefill_ms", "Prefill ms↓"),
             ("prefill_rel_pct", "相对基线%"),
             ("decode_ms_per_tok", "Decode ms/tok↓"),
@@ -3300,7 +3312,8 @@ def build_summary(results_dir: str, audit: dict = None,
                      "auprc_logit", "auprc_qterm", "hit_base_rate",
                      "gate_f1_macro", "gate_f1_macro_always_write",
                      "ppl_ci_rel_pct", "epochs_seen", "ckpt_step",
-                     "selection_step_fraction", "ruler_fwe_recall"} \
+                     "selection_step_fraction", "ruler_fwe_recall",
+                     "ruler_fwe_precision", "ruler_fwe_f1"} \
             | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
