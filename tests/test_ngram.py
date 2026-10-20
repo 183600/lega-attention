@@ -57,7 +57,15 @@ def test_ppl_bigram_matches_closed_form():
                       vocab_size=3)
     assert out2["ppl"] is not None and math.isfinite(out2["ppl"])
     assert ppl_bigram(np.array([1]), uni, keys, counts, 1.0, 3)["ppl"] is None
-    print("  [ok] ppl_bigram（条件概率闭式解、单 token 训练流容错）")
+    # 训练流最后一个 token 没有后继，不能作为二元前文计入分母：
+    # train=[0,1,2,0] 时 prev=0 只出现 1 次有效上下文（首个 0），
+    # 而不是 uni[0]=2；P(1|0)=(1+1)/(1+3)=0.5，故 PPL=2。
+    uni3, keys3, counts3 = fit_counts(np.array([0, 1, 2, 0]), vocab_size=3)
+    out3 = ppl_bigram(np.array([0, 1]), uni3, keys3, counts3, alpha=1.0,
+                      vocab_size=3)
+    assert math.isclose(out3["ppl"], 2.0, rel_tol=1e-12)
+    print("  [ok] ppl_bigram（条件概率闭式解、单 token 训练流容错、"
+          "末位 token 不计上下文）")
 
 
 def test_ppl_interpolated_bigram_matches_closed_form():
@@ -187,11 +195,12 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         lookup = {int(k): float(c) for k, c in zip(keys, counts)}
         for i, k in enumerate(keys_pos):
             c_pair[i] = lookup.get(int(k), 0.0)
-        m_bi = _bigram_ppl(c_pair, uni[prev], len(pos), 0.01, 4)
+        prev_counts = np.bincount(keys // 4, weights=counts, minlength=4)
+        m_bi = _bigram_ppl(c_pair, prev_counts[prev], len(pos), 0.01, 4)
         assert math.isclose(wm["bigram"], m_bi["ppl"], rel_tol=1e-12)
         si = rep["selected_interpolated"]
         m_interp = _interp_ppl_from_counts(
-            np.asarray(val)[pos], uni, c_pair, uni[prev], len(pos),
+            np.asarray(val)[pos], uni, c_pair, prev_counts[prev], len(pos),
             si["alpha_unigram"], si["alpha_bigram"], si["lambda"], 4)
         assert math.isclose(wm["interpolated_bigram"], m_interp["ppl"],
                             rel_tol=1e-12)

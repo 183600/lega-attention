@@ -139,6 +139,22 @@ def _bigram_counts_for(pair_keys: np.ndarray, pair_counts: np.ndarray,
     return np.where(hit, pair_counts[pos_clip], 0.0)
 
 
+def _context_counts(pair_keys: np.ndarray, pair_counts: np.ndarray,
+                    vocab_size: int) -> np.ndarray:
+    """训练流中每个 token 作为“前文”出现的次数（即其后确实有 token 的次数）。
+
+    不能用 ``uni[prev]``：一元频次包含训练流最后一个 token，但它没有后继，
+    不可能是任何二元事件的前文。把它计入分母会让 add-α 二元分布在每个
+    prev 上凭空多出一个（几乎不可能的）后继位置，系统性低估 PPL。
+    """
+    vocab_size = int(vocab_size)
+    if len(pair_keys) == 0:
+        return np.zeros(max(1, vocab_size), dtype=np.float64)
+    prev = np.asarray(pair_keys, dtype=np.int64) // vocab_size
+    return np.bincount(prev, weights=pair_counts,
+                       minlength=max(1, vocab_size)).astype(np.float64)
+
+
 def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     """加 α 平滑一元模型的 per-token 平均负对数似然与 PPL。"""
     vocab = int(len(uni))
@@ -165,7 +181,7 @@ def _bigram_terms(eval_ids: np.ndarray, uni: np.ndarray,
     keys = _pair_keys(ids, vocab_size)
     prev = ids[:-1]
     c_pair = _bigram_counts_for(pair_keys, pair_counts, keys)
-    c_prev = uni[prev]
+    c_prev = _context_counts(pair_keys, pair_counts, vocab_size)[prev]
     return c_pair, c_prev, int(len(keys))
 
 
@@ -443,6 +459,7 @@ def evaluate(data_dir: str, split: str = "val",
                 "interpolated_bigram": None,
             }
             pos = np.asarray(pos, dtype=np.int64)
+            ctx_counts = _context_counts(pair_keys, pair_counts, vocab_size)
             for order in ("unigram", "bigram", "interpolated_bigram"):
                 if order in ("unigram", "bigram"):
                     a = best[order]
@@ -456,8 +473,8 @@ def evaluate(data_dir: str, split: str = "val",
                         keys += np.asarray(eval_ids[pos], dtype=np.int64)
                         c_pair = _bigram_counts_for(pair_keys, pair_counts,
                                                     keys)
-                        m = _bigram_ppl(c_pair, uni[prev], int(pos.size), a,
-                                        vocab_size)
+                        m = _bigram_ppl(c_pair, ctx_counts[prev],
+                                        int(pos.size), a, vocab_size)
                 else:
                     if interp is None:
                         continue
@@ -466,9 +483,9 @@ def evaluate(data_dir: str, split: str = "val",
                     keys += np.asarray(eval_ids[pos], dtype=np.int64)
                     c_pair = _bigram_counts_for(pair_keys, pair_counts, keys)
                     m = _interp_ppl_from_counts(
-                        eval_ids[pos], uni, c_pair, uni[prev], int(pos.size),
-                        interp["alpha_unigram"], interp["alpha_bigram"],
-                        interp["lambda"], vocab_size)
+                        eval_ids[pos], uni, c_pair, ctx_counts[prev],
+                        int(pos.size), interp["alpha_unigram"],
+                        interp["alpha_bigram"], interp["lambda"], vocab_size)
                 wm[order] = m["ppl"]
             report["ppl_window_matched"] = wm
             report["window_spec"] = {
