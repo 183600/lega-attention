@@ -155,8 +155,31 @@ def _context_counts(pair_keys: np.ndarray, pair_counts: np.ndarray,
                        minlength=max(1, vocab_size)).astype(np.float64)
 
 
+def _validate_alpha(alpha) -> float:
+    """平滑系数必须是有限非负数；NaN/Inf/负值会把 PPL 变成非法数值。"""
+    try:
+        alpha = float(alpha)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"平滑系数 α 非数值: {alpha!r}") from None
+    if not math.isfinite(alpha) or alpha < 0:
+        raise ValueError(f"平滑系数 α 必须是有限非负数: {alpha!r}")
+    return alpha
+
+
+def _validate_lambda(lam) -> float:
+    """插值权重必须在 [0, 1] 内，否则组合出来的“概率”不再合法。"""
+    try:
+        lam = float(lam)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"插值权重 λ 非数值: {lam!r}") from None
+    if not math.isfinite(lam) or not 0.0 <= lam <= 1.0:
+        raise ValueError(f"插值权重 λ 必须在 [0, 1]: {lam!r}")
+    return lam
+
+
 def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     """加 α 平滑一元模型的 per-token 平均负对数似然与 PPL。"""
+    alpha = _validate_alpha(alpha)
     vocab = int(len(uni))
     n = int(len(eval_ids))
     if n == 0:
@@ -188,6 +211,7 @@ def _bigram_terms(eval_ids: np.ndarray, uni: np.ndarray,
 def _bigram_ppl(c_pair: np.ndarray, c_prev: np.ndarray, n_tokens: int,
                 alpha: float, vocab_size: int) -> dict:
     """由预计算的逐 token 频次给出加 α 平滑二元模型的 PPL。"""
+    alpha = _validate_alpha(alpha)
     if n_tokens <= 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
     probs = (c_pair + alpha) / (c_prev + alpha * int(vocab_size))
@@ -210,6 +234,9 @@ def _interp_ppl_from_counts(cur_ids: np.ndarray, uni: np.ndarray,
                             n_tokens: int, alpha_uni: float, alpha_bi: float,
                             lam: float, vocab_size: int) -> dict:
     """由“当前 token + 预计算上下文频次”给出插值 bigram 的 PPL。"""
+    alpha_uni = _validate_alpha(alpha_uni)
+    alpha_bi = _validate_alpha(alpha_bi)
+    lam = _validate_lambda(lam)
     if n_tokens <= 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
     cur = np.asarray(cur_ids, dtype=np.int64)
@@ -303,7 +330,10 @@ def evaluate(data_dir: str, split: str = "val",
     meta = load_meta(data_dir)
     vocab_size = int(meta["vocab_size"])
     # 规范化候选网格：调用方可能传生成器；后面要在 uni/bi/插值三段重复扫描。
-    alphas = tuple(float(a) for a in alphas)
+    # 非法 α（NaN/Inf/负值）必须显式拒绝，不能静默参与选参并写出非法 JSON。
+    alphas = tuple(_validate_alpha(a) for a in alphas)
+    if not alphas:
+        raise ValueError("平滑系数候选网格不能为空")
     # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数。
     train_ids = load_bin(data_dir, "train")
     if split == "test":
