@@ -249,6 +249,18 @@ def _group_by_variant(pattern):
     return _group_items(items, rdir)
 
 
+def _ppl_split_label(splits, invalid_split=False):
+    """单一评测集的显示名；未知 split 不得冒充验证集。"""
+    if invalid_split or len(splits) != 1:
+        return "各评测集"
+    split = next(iter(splits))
+    if split == "test":
+        return "测试集"
+    if split == "val":
+        return "验证集"
+    return f"{split} 集" if isinstance(split, str) and split else "未知评测集"
+
+
 def fig_ppl(rdir):
     groups = _group_by_variant(os.path.join(rdir, "eval_*.json"))
     if not groups:
@@ -295,12 +307,7 @@ def fig_ppl(rdir):
     ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c
                                else ("%.2f±%.2f" % (p, s) if s else "%.2f" % p)
                                for (_, p, s, c) in rows], fontsize=9)
-    if splits == {"test"} and not invalid_split:
-        set_name = "测试集"
-    elif len(splits) == 1 and not invalid_split:
-        set_name = "验证集"
-    else:
-        set_name = "各评测集"   # 混合 split 时不冒充单一集合
+    set_name = _ppl_split_label(splits, invalid_split)
     ax.set_ylabel(f"{set_name}困惑度 (PPL, 越低越好)")
     ax.set_title("语言建模困惑度对比（相同配置与步数；误差棒=跨 seed 标准差）")
     ax.tick_params(axis="x", rotation=20)

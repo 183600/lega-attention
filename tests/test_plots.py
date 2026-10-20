@@ -13,8 +13,9 @@ import numpy as np
 
 from lega.plots import (_HAS_MPL, _expected_tagged, _group_by_variant,
                         _group_items, _load_train_logs, _mean_by_step,
-                        _prefer_seeded, _read_records, fig_auroc_heads,
-                        fig_latency, fig_misleading, fig_ppl, fig_ruler)
+                        _ppl_split_label, _prefer_seeded, _read_records,
+                        fig_auroc_heads, fig_latency, fig_misleading,
+                        fig_ppl, fig_ruler)
 
 
 def _w(rdir, name, obj):
@@ -281,6 +282,17 @@ def test_fig_latency_respects_variant_scope():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 延迟图：范围外变体不进入 prefill/decode 曲线")
+
+
+def test_ppl_split_label_reports_actual_split():
+    """单一未知 split（如 train）必须显式标注，不能冒充验证集。"""
+    assert _ppl_split_label({"val"}) == "验证集"
+    assert _ppl_split_label({"test"}) == "测试集"
+    assert _ppl_split_label({"train"}) == "train 集"
+    assert _ppl_split_label({"val", "test"}) == "各评测集"
+    assert _ppl_split_label({"train"}, invalid_split=True) == "各评测集"
+    assert _ppl_split_label({None}) == "未知评测集"
+    print("  [ok] PPL 图：未知 split 不冒充验证集")
 
 
 def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
