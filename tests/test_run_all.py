@@ -1416,6 +1416,44 @@ def test_paired_ruler_skips_protocol_and_cell_mismatch():
     print("  [ok] RULER 配对：协议/评测格/单元样本数不一致的种子整对剔除")
 
 
+def test_paired_ruler_per_task_skips_protocol_and_cell_mismatch():
+    """逐任务（RULER:<task>）配对必须与综合平均走同一套可比性门槛。"""
+    def rul(em, **kw):
+        base = {
+            "ctx_lens": [256, 512], "n_samples": 30, "sample_seed": 1234,
+            "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
+            "vt_chains": 4, "vt_depth": 4,
+            "results": {"niah": {"256": {"em": em, "n": 30},
+                                 "512": {"em": em, "n": 30}}}}
+        base.update(kw)
+        return {"ruler": base}
+
+    runs = {
+        "lega": {7: rul(0.8), 8: rul(0.9, n_samples=20)},
+        "standard": {7: rul(0.5), 8: rul(0.5)},
+    }
+    out = _paired_comparisons(
+        runs, [("lega", "standard")], "RULER:niah",
+        lambda slot: _ruler_task_means(slot.get("ruler")).get("niah"),
+        lower_better=False)
+    assert len(out) == 1, out
+    assert out[0]["n"] == 1, out
+    assert out[0].get("excluded_protocol_mismatches") == 1, out
+    # 同协议但评测格样本数不同：逐任务也不能配对
+    runs2 = {
+        "lega": {7: rul(0.8)},
+        "standard": {7: rul(0.5, results={
+            "niah": {"256": {"em": 0.5, "n": 15},
+                     "512": {"em": 0.5, "n": 30}}})},
+    }
+    out2 = _paired_comparisons(
+        runs2, [("lega", "standard")], "RULER:niah",
+        lambda slot: _ruler_task_means(slot.get("ruler")).get("niah"),
+        lower_better=False)
+    assert out2 == [], out2
+    print("  [ok] RULER 逐任务配对：协议/评测格不一致的种子整对剔除")
+
+
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     """PPL 截断必须在汇总表显式标注；分布漂移字段为 null（空 split）时不得崩溃。"""
     tmp = tempfile.mkdtemp()

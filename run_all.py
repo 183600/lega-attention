@@ -1141,11 +1141,13 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                        for k in common):
                     protocol_skipped += 1
                     continue
-            elif metric_name == "RULER平均":
+            elif metric_name == "RULER平均" or metric_name.startswith("RULER:"):
                 ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else {}
                 rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else {}
                 # 同 seed 只保证训练随机性相同；RULER 题面/抽样/生成预算与
                 # 干扰语料来源任一不同，EM 就不是同一批样例上的配对观测。
+                # 逐任务分解（RULER:<task>）与综合平均必须走同一套可比性门槛，
+                # 否则会从不一致的样本数/评测格上得出“逐任务显著”的假结论。
                 pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
                 common = set(pa) & set(pb)
                 if any(not _same_protocol_value(pa[k], pb[k])
