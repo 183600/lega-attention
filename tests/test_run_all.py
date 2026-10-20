@@ -1243,7 +1243,18 @@ def test_factorial_interactions_exclude_protocol_mismatches():
     out = _factorial_interaction_tests(runs)
     assert len([t for t in out if t["metric"] == "PPL交互"]) == 3, out
     assert [t for t in out if t["metric"] == "RULER平均交互"] == [], out
-    print("  [ok] 全因子交互剔除评测协议/单元不一致的种子")
+    # 恢复 RULER 单元覆盖后，仅让一个种子下某格 n 不同：该种子的交互剔除
+    for variant, slots in runs.items():
+        for slot in slots.values():
+            slot["ruler"]["results"] = {"niah_synth": {
+                "256": {"em": 1.0, "n": 4}}}
+    runs["lega"][2]["ruler"]["results"]["niah_synth"]["256"]["n"] = 3
+    out = [t for t in _factorial_interaction_tests(runs)
+           if t["metric"] == "RULER平均交互"]
+    assert len(out) == 3, out
+    assert all(t["n"] == 2 for t in out), out
+    assert all(t.get("excluded_protocol_mismatches") == 1 for t in out), out
+    print("  [ok] 全因子交互剔除评测协议/单元/样本数不一致的种子")
 
 
 def test_budget_gate_downgrades_confirmatory_on_early_stop():
@@ -1373,7 +1384,18 @@ def test_paired_ruler_skips_protocol_and_cell_mismatch():
         runs2, [("lega", "standard")], "RULER平均",
         lambda slot: _ruler_avg_of(slot.get("ruler")), lower_better=False)
     assert out2 == [], out2
-    print("  [ok] RULER 配对：协议/评测格不一致的种子整对剔除")
+    # 同一评测格但样本数不同：聚合 EM 不是同一批观测，不能配对
+    runs3 = {
+        "lega": {7: rul(0.8)},
+        "standard": {7: rul(0.5, results={
+            "niah": {"256": {"em": 0.5, "n": 15},
+                     "512": {"em": 0.5, "n": 30}}})},
+    }
+    out3 = _paired_comparisons(
+        runs3, [("lega", "standard")], "RULER平均",
+        lambda slot: _ruler_avg_of(slot.get("ruler")), lower_better=False)
+    assert out3 == [], out3
+    print("  [ok] RULER 配对：协议/评测格/单元样本数不一致的种子整对剔除")
 
 
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():

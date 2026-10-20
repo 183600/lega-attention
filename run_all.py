@@ -416,7 +416,11 @@ def _ruler_protocol(d) -> dict:
 
 
 def _ruler_cell_signature(d):
-    """RULER 已评测 (任务, 上下文) 单元集合；缺格会让 macro 平均不可比。"""
+    """RULER 已评测 (任务, 上下文, 样本数) 单元；缺格或 n 不同均不可配对。
+
+    同一 (任务, 上下文) 但 n 不同说明实际参与平均的样例数不同（例如部分
+    样例构造失败被跳过），两边的聚合 EM/macro 不是同一批观测上的配对值。
+    """
     if not isinstance(d, dict):
         return None
     results = d.get("results")
@@ -428,8 +432,15 @@ def _ruler_cell_signature(d):
                 or not isinstance(by_ctx, dict)):
             continue
         for ctx, cell in by_ctx.items():
-            if isinstance(cell, dict):
-                cells.add((task, str(ctx)))
+            if not isinstance(cell, dict):
+                continue
+            n = cell.get("n")
+            try:
+                nf = float(n)
+                n = int(nf) if math.isfinite(nf) and nf.is_integer() else None
+            except (TypeError, ValueError, OverflowError):
+                n = None
+            cells.add((task, str(ctx), n))
     return frozenset(cells)
 
 
