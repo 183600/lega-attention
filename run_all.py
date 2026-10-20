@@ -709,8 +709,11 @@ def _result_files(results_dir: str, prefix: str, scope_seeds) -> list:
     约定一致的文件排在最后，否则陈旧的旧命名文件覆盖新结果。
     """
     fps = glob.glob(os.path.join(results_dir, f"{prefix}_*.json"))
-    if not scope_seeds:
+    if scope_seeds is None:
         return sorted(fps)
+    if not scope_seeds:
+        # 空列表表示本次 run 没有任何种子；不能回退成“扫描全部旧结果”。
+        return []
     expected_tagged = len(scope_seeds) > 1
 
     def convention_match(fp: str) -> int:

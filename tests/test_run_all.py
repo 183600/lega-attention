@@ -24,8 +24,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _paired_comparisons, _ppl_ci_rel_pct, _ppl_of,
                       _probe_oof, _rel_pct,
-                      _render_baseline_sections, _ruler_avg_micro,
-                      _ruler_avg_of, _ruler_min_cell_n,
+                      _render_baseline_sections, _result_files,
+                      _ruler_avg_micro, _ruler_avg_of, _ruler_min_cell_n,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
@@ -449,6 +449,22 @@ def test_rel_pct_and_eff_cells():
     assert _eff_cell(None, "flops", 256) is None
     assert _eff_cell({"efficiency": {}}, "flops", 256) is None
     print("  [ok] _rel_pct/_eff_cell（缺失安全）")
+
+
+def test_result_files_empty_scope_does_not_fall_back_to_all():
+    """repro.seeds=[] 表示本次 run 无种子，不能扫描目录里的旧结果。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for name in ("eval_standard.json", "eval_lega_seed1.json"):
+            _write_json(os.path.join(tmp, name), {"variant": "x"})
+        assert _result_files(tmp, "eval", None) == sorted(
+            os.path.join(tmp, n) for n in
+            ("eval_standard.json", "eval_lega_seed1.json"))
+        assert _result_files(tmp, "eval", []) == []
+        assert len(_result_files(tmp, "eval", [1])) == 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] _result_files：空 seeds 范围不回退全量旧结果")
 
 
 def test_effect_status_directions():
