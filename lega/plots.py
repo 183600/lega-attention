@@ -606,7 +606,8 @@ def fig_auroc_heads(rdir, variant="lega"):
         d = _load(fp)
         if not isinstance(d, dict):
             continue
-        for h in d.get("per_head") or []:
+        heads = d.get("per_head")
+        for h in (heads if isinstance(heads, list) else []):
             if not isinstance(h, dict):
                 continue
             key = (h.get("layer"), h.get("head"))
@@ -621,10 +622,17 @@ def fig_auroc_heads(rdir, variant="lega"):
                 cell["qterm"].append(qterm)
             if logit is not None:
                 cell["logit"].append(logit)
+    def _head_key(k):
+        try:
+            return (0, float(k[0]), float(k[1]))
+        except (TypeError, ValueError):
+            return (1, str(k[0]), str(k[1]))
+
     ph = [{"layer": k[0], "head": k[1],
            "auroc_qterm": float(np.mean(v["qterm"])),
            "auroc_logit": float(np.mean(v["logit"]))}
-          for k, v in sorted(agg.items()) if v["qterm"] and v["logit"]]
+          for k, v in sorted(agg.items(), key=lambda kv: _head_key(kv[0]))
+          if v["qterm"] and v["logit"]]
     if not ph:
         return False
     fig, ax = plt.subplots(figsize=(5.6, 5.0), constrained_layout=True)

@@ -89,7 +89,12 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
     因此崩溃，坏记录跳过并计数，结论只基于其余点。
     """
     pts, bad, malformed = [], 0, 0
+    if not isinstance(records, (list, tuple)):
+        records = []
     for r in records:
+        if not isinstance(r, dict):
+            malformed += 1
+            continue
         v, s = r.get(key), r.get("step")
         if v is None or s is None:
             continue
@@ -206,6 +211,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     返回 dict：status / 判定依据 / 关键数值 / 建议清单 recommendations。
     早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注。
     """
+    records = records if isinstance(records, (list, tuple)) else []
     train_pts, train_bad, train_malformed = _finite_points(records, "loss")
     val_pts, val_bad, val_malformed = _finite_points(records, "val_loss")
     # 早停终止标记：训练按设计提前结束（区别于日志缺失/训练中断），

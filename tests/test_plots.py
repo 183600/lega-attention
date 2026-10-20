@@ -267,3 +267,23 @@ def test_plots_tolerate_malformed_nested_fields():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 图表：畸形嵌套字段/CSV 单元格安全跳过")
+
+
+def test_fig_auroc_heads_tolerates_non_list_per_head():
+    """analysis JSON 的 per_head 非列表/层头类型混杂时不崩溃。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_auroc_heads 渲染测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "analysis_lega.json", {"per_head": 5})
+        assert fig_auroc_heads(tmp) is False
+        _w(tmp, "analysis_lega.json", {"per_head": [
+            {"layer": "x", "head": 0, "auroc_logit": 0.5,
+             "auroc_qterm": 0.4},
+            {"layer": 1, "head": 0, "auroc_logit": 0.6,
+             "auroc_qterm": 0.5}]})
+        assert fig_auroc_heads(tmp) is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 逐头 AUROC 图：per_head 非列表/类型混杂安全跳过")

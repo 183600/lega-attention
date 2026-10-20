@@ -211,3 +211,18 @@ def test_collect_worst_windows_small_vocab_clamps_topk():
     assert len(rows) == 2
     assert all(1 <= len(r["pred_top5"]) <= 3 for r in rows)
     print("  [ok] 小词表最差窗口：top-k 自动截断")
+
+
+def test_json_safe_eval_metrics_tolerates_malformed_fields():
+    """缺失/非数值 val_loss 与 gate_mean 归为 null，不能抛 TypeError。"""
+    empty = {"val_ppl": None, "val_loss": None,
+             "val_ppl_clamped": None, "gate_mean": None}
+    assert json_safe_eval_metrics({}) == empty
+    assert json_safe_eval_metrics(None) == empty
+    assert json_safe_eval_metrics({"val_loss": "bad",
+                                   "gate_mean": "bad"}) == empty
+    out = json_safe_eval_metrics({"val_loss": 2.0, "gate_mean": [1]})
+    assert out["val_ppl"] == math.exp(2.0) and out["gate_mean"] is None
+    out = json_safe_eval_metrics({"val_loss": 2.0, "gate_mean": "0.5"})
+    assert out["gate_mean"] == 0.5
+    print("  [ok] 评测指标：畸形 val_loss/gate_mean 安全降级")

@@ -716,3 +716,42 @@ def test_analyze_skips_non_dict_records_in_lists():
     assert categorize_case([1])["category"] == "no_answer"
     assert categorize_window("bad")["category"] == "unparsed"
     print("  [ok] 归因列表：非对象样本/标量字段跳过")
+
+
+def test_categorize_window_tolerates_malformed_top5_and_tail():
+    """pred_top5/context_tail 为对象/标量时按缺失处理，不能崩溃。"""
+    assert categorize_window({"context_tail": [1, 2],
+                              "pred_top5": {"x": 1}})["category"] == "unparsed"
+    assert categorize_window({"context_tail": 123,
+                              "pred_top5": [[" x", 0.4]]})["category"] \
+        == "low_confidence"
+    assert categorize_window({"context_tail": None,
+                              "pred_top5": "bad"})["category"] == "unparsed"
+    print("  [ok] 窗口归因：畸形 pred_top5/context_tail 安全降级")
+
+
+def test_write_reports_tolerate_malformed_analysis():
+    """手改/旧版 analysis dict 缺字段或类型错误时，报告仍能写出。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p1 = os.path.join(tmp, "badcase.md")
+        p2 = os.path.join(tmp, "worst.md")
+        for ana in (None, 5, [], {"n_badcases": "bad", "category_counts": [1],
+                                  "axis_counts": {"data": "bad"},
+                                  "cases": [1, None,
+                                            {"category": [], "depth": "bad"}],
+                                  "recommendations": [1, {"axis": "x"}]}):
+            write_badcase_md(ana, p1)
+            assert os.path.exists(p1)
+        for ana in (None, 5, [], {"n_windows": "bad", "category_counts": 5,
+                                  "mean_top1_prob": "bad",
+                                  "gold_in_context_rate": [1],
+                                  "cases": [1, None,
+                                            {"category": [],
+                                             "top1_prob": "bad"}],
+                                  "recommendations": "bad"}):
+            write_worstcase_md(ana, p2)
+            assert os.path.exists(p2)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 坏案例报告：畸形 analysis 字段安全降级")

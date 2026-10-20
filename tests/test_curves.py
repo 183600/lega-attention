@@ -341,3 +341,11 @@ def test_live_overfit_hint():
     assert live_overfit_hint(LIVE_WARN_EVALS, None, 2.0, patience=0) is None
     assert live_overfit_hint("bad", 2.0, 2.0, patience=0) is None
     print("  [ok] live_overfit_hint（训练中途过拟合/平台预警口径）")
+
+
+def test_diagnose_curve_tolerates_non_dict_records():
+    """日志含非对象行（旧格式/手改）时按坏记录跳过，不抛属性错误。"""
+    d = diagnose_curve([1, None, "x", {"step": 1, "loss": 2.0}])
+    assert d["status"] == "数据不足"
+    assert diagnose_curve(None)["status"] == "数据不足"
+    print("  [ok] diagnose_curve：非对象记录安全跳过")

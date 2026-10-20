@@ -25,7 +25,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
-                      apply_scope_gate, AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
+                      apply_integrity_gate, apply_scope_gate,
+                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
                       component_evidence, cross_variant_badcase_map,
                       data_protocol_preflight, data_report_binding_issue,
@@ -2162,3 +2163,48 @@ def test_append_aborted_record_covers_run_chain_failures():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] run 链失败落 aborted（阶段/变体/退出码）")
+
+
+def test_summary_tolerates_malformed_sanity_and_baseline_tuning():
+    """sanity/tuning 的嵌套字段被手改/旧格式污染时，汇总不能崩。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_standard.json"), {
+            "variant": "standard", "seed": 1, "val_ppl": 10.0,
+            "val_loss": 2.3, "n_params": 10, "split": "val"})
+        _write_json(os.path.join(tmp, "sanity_standard.json"), {
+            "variant": [1, 2], "passed": True, "initial": [1, 2],
+            "final": {"loss": "bad", "token_acc": [1, 2]}})
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
+            "grid": [{"lr": [1, 2], "weight_decay": {"x": 1}}],
+            "trials": 5, "selected": {"lr": [1]},
+            "default_trial": [], "selection_seeds": {"x": 1}})
+        out = build_summary(tmp)
+        assert "standard" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总：sanity/tuning 嵌套字段畸形安全跳过")
+
+
+def test_registration_paths_tolerate_malformed_hypotheses_and_status():
+    """登记表 hypotheses 非列表/条目非对象、完整性 status 非字符串均不崩。"""
+    assert evaluate_registered_hypotheses({"hypotheses": 5}, [1, None]) == []
+    out = evaluate_registered_hypotheses(
+        {"hypotheses": [1, {"id": "H1", "metric": "PPL",
+                            "candidate": "lega", "reference": "standard",
+                            "direction": "candidate_better"}]}, [1])
+    assert len(out) == 1 and out[0]["status"] == "未检验"
+    assert apply_integrity_gate({"x": 1}, {"confirmatory_valid": True}) == {"x": 1}
+    hyp = [{"confirmatory_valid": True}]
+    apply_integrity_gate(hyp, {"confirmatory_valid": True})
+    apply_scope_gate(hyp, {"scope": {"config": "x"}, "checked": False,
+                           "problems": [1]})
+    assert hyp[0]["confirmatory_valid"] is False
+    md = _render_registration_integrity(
+        {"status": [1, 2], "problems": [1], "warnings": 5},
+        {"scope": 5, "checked": False, "problems": "x"})
+    assert any("预注册完整性" in line for line in md)
+    assert cross_variant_badcase_map({"lega": {1: {"ruler": 5}}},
+                                     ["lega"]) == {}
+    assert cross_variant_badcase_map({"lega": [1]}, ["lega"]) == {}
+    print("  [ok] 预注册路径：畸形 hypotheses/status/slot 安全降级")

@@ -696,27 +696,48 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     返回 [{"level": "warning"|"info", "code": ..., "message": ...}]。
     没有告警时返回空列表——"无告警"与"没有自检"是两回事，后者由报告缺失表示。
     """
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return f if np.isfinite(f) else None
+
+    def _count(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     th = dict(ALERT_THRESHOLDS)
-    if thresholds:
-        th.update(thresholds)
+    if isinstance(thresholds, dict):
+        for k, v in thresholds.items():
+            if k in th:
+                f = _num(v)
+                if f is not None:
+                    th[k] = f
     alerts = []
 
     def add(level, code, message):
         alerts.append({"level": level, "code": code, "message": message})
 
+    contamination = contamination if isinstance(contamination, dict) else {}
     for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
                        ("val_test", "val/test")):
-        c = (contamination or {}).get(key) or {}
-        rate = c.get("overlap_rate")
+        c = contamination.get(key)
+        c = c if isinstance(c, dict) else {}
+        rate = _num(c.get("overlap_rate"))
         if rate is not None and rate > th["ngram_overlap_rate"]:
             add("warning", f"ngram_overlap_{key}",
                 f"{label} 采样 {c.get('n', '?')}-gram 重叠率 {rate:.4%}"
                 "（>0 表示疑似跨 split 语料复制，须人工核查）")
+    distribution = distribution if isinstance(distribution, dict) else {}
     for key, label in (("val_vs_train", "val−train"),
                        ("test_vs_train", "test−train"),
                        ("test_vs_val", "test−val")):
-        d = (distribution or {}).get(key) or {}
-        tv, js = d.get("tv"), d.get("js_bits")
+        d = distribution.get(key)
+        d = d if isinstance(d, dict) else {}
+        tv, js = _num(d.get("tv")), _num(d.get("js_bits"))
         if tv is not None and tv > th["distribution_tv"]:
             add("warning", f"distribution_tv_{key}",
                 f"{label} 一元 token TV 距离 {tv:.4f} > "
@@ -724,58 +745,65 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         if js is not None and js > th["distribution_js_bits"]:
             add("warning", f"distribution_js_{key}",
                 f"{label} JS 散度 {js:.4f} bit > {th['distribution_js_bits']}")
-        oov = d.get("eval_oov_token_rate")
+        oov = _num(d.get("eval_oov_token_rate"))
         if oov is not None and oov > th["eval_oov_token_rate"]:
             add("warning", f"eval_oov_{key}",
                 f"{label} 方向 OOV token 质量占比 {oov:.4%} > "
                 f"{th['eval_oov_token_rate']}")
-    for split, rate in ((tokenizer or {}).get("unk_rate") or {}).items():
+    tokenizer = tokenizer if isinstance(tokenizer, dict) else {}
+    unk_rate = tokenizer.get("unk_rate")
+    for split, rate in (unk_rate if isinstance(unk_rate, dict) else {}).items():
+        rate = _num(rate)
         if rate is not None and rate > th["eval_unk_char_rate"]:
             add("warning", f"unk_char_rate_{split}",
                 f"{split} 字符级 OOV 率 {rate:.4%} > "
                 f"{th['eval_unk_char_rate']}（该 split 有较多字符映射 <unk>）")
-    for split, st in (sanitization or {}).items():
-        rate = (st or {}).get("bad_char_line_rate")
+    sanitization = sanitization if isinstance(sanitization, dict) else {}
+    for split, st in sanitization.items():
+        st = st if isinstance(st, dict) else {}
+        rate = _num(st.get("bad_char_line_rate"))
         if rate is not None and rate > th["bad_char_line_rate"]:
             add("warning", f"bad_char_lines_{split}",
                 f"{split} 含坏字符行占比 {rate:.4%} > "
                 f"{th['bad_char_line_rate']}（标签噪声偏高，建议回查语料）")
-    dup = duplicates or {}
-    n_exact = int(dup.get("train_lines_dropped_as_duplicates_of_eval") or 0)
-    n_norm = int(
-        dup.get("train_lines_dropped_as_normalized_duplicates_of_eval") or 0)
+    dup = duplicates if isinstance(duplicates, dict) else {}
+    n_exact = _count(dup.get("train_lines_dropped_as_duplicates_of_eval"))
+    n_norm = _count(
+        dup.get("train_lines_dropped_as_normalized_duplicates_of_eval"))
     if n_exact or n_norm:
         add("info", "decontamination_applied",
             f"已从 train 移除与 val/test 重复的长行：精确 {n_exact} 行、"
             f"空白归一化后额外 {n_norm} 行（val/test 未改写）")
-    n_train_dup = int(
-        dup.get("train_intra_split_duplicate_lines_removed") or 0)
-    n_train_dup_norm = int(
-        dup.get("train_intra_split_normalized_duplicate_lines_removed") or 0)
+    n_train_dup = _count(
+        dup.get("train_intra_split_duplicate_lines_removed"))
+    n_train_dup_norm = _count(
+        dup.get("train_intra_split_normalized_duplicate_lines_removed"))
     if n_train_dup or n_train_dup_norm:
         add("info", "train_intra_duplicates_removed",
             f"已从 train 移除内部重复长行：精确 {n_train_dup} 行、"
             f"空白归一化后额外 {n_train_dup_norm} 行（保留首次出现）")
-    n_eval_dup = int(dup.get("val_test_overlap_long_lines") or 0)
-    n_eval_dup_norm = int(
-        dup.get("val_test_overlap_normalized_long_lines") or 0)
+    n_eval_dup = _count(dup.get("val_test_overlap_long_lines"))
+    n_eval_dup_norm = _count(
+        dup.get("val_test_overlap_normalized_long_lines"))
     if n_eval_dup:
         add("warning", "eval_splits_overlap",
             f"val 与 test 有 {n_eval_dup} 条长行重复（空白归一化后 "
             f"{n_eval_dup_norm} 条）：两侧均保持尘封未改写，但 val 选型会"
             "部分预演 test，最终 test 指标的独立性下降，须核查/重建划分")
     for split in ("val", "test"):
-        n_dup = int(dup.get(f"{split}_intra_split_duplicate_lines") or 0)
+        n_dup = _count(dup.get(f"{split}_intra_split_duplicate_lines"))
         if n_dup:
             add("info", f"{split}_intra_duplicates",
                 f"{split} 内部有 {n_dup} 条重复长行（未改写，避免破坏尘封；"
                 "重复会高估评测有效样本量，解读置信区间时须注意）")
-    for split, st in (text_stats or {}).items():
-        n_huge = int((st or {}).get("lines_gt_huge_threshold") or 0)
+    text_stats = text_stats if isinstance(text_stats, dict) else {}
+    for split, st in text_stats.items():
+        st = st if isinstance(st, dict) else {}
+        n_huge = _count(st.get("lines_gt_huge_threshold"))
         if n_huge:
             add("info", f"huge_lines_{split}",
                 f"{split} 有 {n_huge} 行超过 "
-                f"{(st or {}).get('huge_line_threshold_chars')} 字符"
+                f"{st.get('huge_line_threshold_chars')} 字符"
                 "（异常值已计数未删除，训练窗口可能被其主导）")
     return alerts
 
@@ -836,6 +864,8 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
                       extra: dict = None,
                       alert_thresholds: dict = None) -> dict:
     """汇总为 data_report.json（只含 JSON 原生类型）。"""
+    alert_thresholds = (alert_thresholds
+                        if isinstance(alert_thresholds, dict) else {})
     alerts = leakage_alerts(tokenizer, sanitization, duplicates,
                             contamination, distribution, text_stats,
                             thresholds=alert_thresholds)
@@ -855,7 +885,7 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         "duplicates": duplicates,
         "contamination": contamination,
         "distribution_shift": distribution,
-        "alert_thresholds": dict(ALERT_THRESHOLDS, **(alert_thresholds or {})),
+        "alert_thresholds": dict(ALERT_THRESHOLDS, **alert_thresholds),
         "alerts": alerts,
         "notes": [
             "所有拟合类统计（字符词表等）只在 train 上完成，val/test 只做 transform；",
@@ -869,7 +899,7 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "复核提示（见 alert_thresholds），不是显著性检验。",
         ],
     }
-    if extra:
+    if isinstance(extra, dict):
         report.update(extra)
     # 协议违规（群组跨 split / 字符切分 / 打乱）置顶，确保汇总页的告警截断
     # 不会把更严重的问题挤出视野。

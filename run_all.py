@@ -541,6 +541,8 @@ def _result_files(results_dir: str, prefix: str, scope_seeds) -> list:
 
 
 def _sorted_seeds(mapping) -> list:
+    if not isinstance(mapping, dict):
+        return []
     return sorted(mapping.keys(),
                   key=lambda s: (s is None, s if s is not None else -1))
 
@@ -548,7 +550,8 @@ def _sorted_seeds(mapping) -> list:
 def _variant_seed_map(runs: dict, variant: str) -> dict:
     """取某变体的 {seed: slot}；已有带种子的结果时忽略无种子的文件，
     同一次实验不重复计为额外种子。"""
-    m = (runs or {}).get(variant) or {}
+    m = (runs.get(variant) if isinstance(runs, dict) else None)
+    m = m if isinstance(m, dict) else {}
     tagged = {s: slot for s, slot in m.items() if s is not None}
     return tagged if tagged else m
 
@@ -564,8 +567,9 @@ def cross_variant_badcase_map(runs: dict, variants) -> dict:
     for v in variants:
         m = _variant_seed_map(runs, v)
         for s in _sorted_seeds(m):
-            r = m[s].get("ruler")
-            if r is not None:
+            slot = m[s]
+            r = slot.get("ruler") if isinstance(slot, dict) else None
+            if isinstance(r, dict):
                 out[v] = r.get("badcases") or []
                 break
     return out
@@ -578,7 +582,7 @@ def _stat(values) -> dict:
     样本量（否则会显示“n=5”但均值实际只来自 4 个种子）。
     """
     vals = []
-    for v in values:
+    for v in (values if isinstance(values, (list, tuple)) else []):
         if v is None:
             continue
         try:
@@ -634,7 +638,9 @@ def _ppl_ci_rel_pct(d):
 def _eval_scalar(key):
     """从 eval.json 提取标量（缺失/非法值返回 None），用于覆盖率汇总。"""
     def get(d):
-        v = (d or {}).get(key)
+        if not isinstance(d, dict):
+            return None
+        v = d.get(key)
         if v is None:
             return None
         try:
@@ -745,8 +751,10 @@ def _ruler_min_cell_n(d):
 
 def _stat_series(seed_map, payload_key, extractor):
     vals = []
+    seed_map = seed_map if isinstance(seed_map, dict) else {}
     for s in _sorted_seeds(seed_map):
-        d = seed_map[s].get(payload_key)
+        slot = seed_map.get(s)
+        d = slot.get(payload_key) if isinstance(slot, dict) else None
         if d:
             vals.append(extractor(d))
     return _stat(vals)
@@ -794,7 +802,10 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         seeds = [s for s in _sorted_seeds(cm) if s in rm]
         a, b = [], []
         for s in seeds:
-            va, vb = extractor(cm[s]), extractor(rm[s])
+            sa, sb = cm.get(s), rm.get(s)
+            if not (isinstance(sa, dict) and isinstance(sb, dict)):
+                continue
+            va, vb = extractor(sa), extractor(sb)
             if va is None or vb is None:
                 continue
             a.append(va)
@@ -820,6 +831,8 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     t_perm_agree；t 显著而置换不显著（小样本下 t 的正态假设失效的典型症状）
     时在结论里追加警示，而不是让读者只看到一个 p 值。
     """
+    tests = [t for t in (tests if isinstance(tests, list) else [])
+             if isinstance(t, dict)]
     by_metric = {}
     for t in tests:
         by_metric.setdefault(t.get("metric"), []).append(t)
@@ -864,8 +877,9 @@ _EVIDENCE_METRICS = ("PPL", "RULER平均")
 
 
 def _find_test(tests, pair, metric):
-    for t in tests:
-        if ((t.get("candidate"), t.get("reference")) == pair
+    for t in (tests if isinstance(tests, list) else []):
+        if (isinstance(t, dict)
+                and (t.get("candidate"), t.get("reference")) == pair
                 and t.get("metric") == metric):
             return t
     return None
@@ -947,6 +961,7 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
     印证：前者回答“换样例波动多少”，后者回答“换训练种子方向是否稳定”。
     """
     out = []
+    runs = runs if isinstance(runs, dict) else {}
     for v in sorted(runs):
         if v not in VARIANTS:
             continue
@@ -956,7 +971,8 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
             continue
         a, b = [], []
         for s in seeds:
-            an = m[s].get("analysis")
+            slot = m.get(s)
+            an = slot.get("analysis") if isinstance(slot, dict) else None
             if not isinstance(an, dict):
                 continue
             al = _num_or_none(an.get(key_cand + "_logit"))
@@ -1017,10 +1033,13 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
     “假设成立”，也不等于“无效应”，配合 MDE 才能判断是功效不足还是
     真的没有效应。
     """
-    if not registered:
+    hypotheses = _as_dict(registered).get("hypotheses")
+    if not isinstance(hypotheses, list) or not hypotheses:
         return []
     out = []
-    for h in registered.get("hypotheses", []):
+    for h in hypotheses:
+        if not isinstance(h, dict):
+            continue
         t = _find_test(tests, (h.get("candidate"), h.get("reference")),
                        h.get("metric"))
         item = {"id": h.get("id"), "claim": h.get("claim"),
@@ -1072,11 +1091,13 @@ def apply_integrity_gate(hyp_eval: list, integrity: dict) -> list:
     地位——逐条标注 valid 标志与原因，汇总页显式降级为探索性，
     而不是假装边界仍然成立。
     """
-    valid = bool((integrity or {}).get("confirmatory_valid"))
+    valid = bool(_as_dict(integrity).get("confirmatory_valid"))
     reason = ("登记表完整性校验通过" if valid else
               "预注册完整性校验未通过（登记表被删/改/无留痕新增，"
               "或锁文件缺失）：判定降级为探索性，不得作为 confirmatory 结论")
-    for h in hyp_eval or []:
+    for h in (hyp_eval if isinstance(hyp_eval, list) else []):
+        if not isinstance(h, dict):
+            continue
         h["confirmatory_valid"] = valid
         h["confirmatory_note"] = reason
     return hyp_eval
@@ -1105,7 +1126,9 @@ def registration_scope_check(registered: dict, repro: dict,
     repro/config 文件）时 checked=False、in_scope=None，由
     apply_scope_gate 按“不可确认”处理，而不是默认通过。
     """
-    scope = (registered or {}).get("scope") or {}
+    registered = _as_dict(registered)
+    repro = _as_dict(repro)
+    scope = _as_dict(registered.get("scope"))
     out = {"scope": scope, "checked": False, "in_scope": None,
            "problems": [], "warnings": []}
     if not scope:
@@ -1208,19 +1231,21 @@ def apply_scope_gate(hyp_eval: list, scope_check: dict) -> list:
     此时“支持/拒绝”同样不作数——降级为探索性线索，避免范围外结果
     冒充预注册结论。
     """
-    scope_check = scope_check or {}
+    scope_check = _as_dict(scope_check)
     if not scope_check.get("scope"):
         # 登记表未声明 scope（历史/精简登记表）：无从核对，仅由汇总页告警，
         # 不因“没有可核对的字段”本身降级已通过的完整性判定。
         return hyp_eval
-    problems = scope_check.get("problems") or []
+    problems = _as_text_list(scope_check.get("problems"))
     if not problems and scope_check.get("checked"):
         return hyp_eval
     reason = ("本次运行超出预注册范围：" + "；".join(problems)
               if problems else
               "无法核对本次运行是否落在预注册范围（缺少 repro/config），"
               "确认性判定不可确认")
-    for h in hyp_eval or []:
+    for h in (hyp_eval if isinstance(hyp_eval, list) else []):
+        if not isinstance(h, dict):
+            continue
         if h.get("confirmatory_valid") is False:
             continue  # 已因完整性失败降级，保留原原因
         h["confirmatory_valid"] = False
@@ -1231,8 +1256,10 @@ def apply_scope_gate(hyp_eval: list, scope_check: dict) -> list:
 def _render_registration_integrity(integrity: dict,
                                    scope_check: dict = None) -> list:
     """预注册完整性小节：删除/静默改写必须在校验中显形。"""
-    integrity = integrity or {}
+    integrity = _as_dict(integrity)
     st = integrity.get("status")
+    if not isinstance(st, str):
+        st = None
     icon = {"intact": "✅", "amended": "✅", "violated": "⛔",
             "missing_lock": "⚠", "missing_registry": "⛔"}.get(st, "?")
     desc = {
@@ -1247,21 +1274,21 @@ def _render_registration_integrity(integrity: dict,
              f"{icon} 状态：`{st}` —— {desc}。"]
     sha = integrity.get("registry_sha256")
     if sha:
-        lines.append(f"- 登记表 SHA-256：`{sha[:16]}…`（假设 "
+        lines.append(f"- 登记表 SHA-256：`{str(sha)[:16]}…`（假设 "
                      f"{integrity.get('n_hypotheses')} 条"
                      + (f"；锁基线 `{str(integrity.get('baseline_document_sha256'))[:16]}…`"
                         if integrity.get("baseline_document_sha256") else "")
                      + "）")
     else:
         lines.append("- 登记表 SHA-256：不可用（文件缺失或不可解析）")
-    for p in (integrity.get("problems") or []):
+    for p in _as_text_list(integrity.get("problems")):
         lines.append(f"- ⛔ {p}")
-    for w in (integrity.get("warnings") or []):
+    for w in _as_text_list(integrity.get("warnings")):
         lines.append(f"- ⚠ {w}")
     # 预注册范围核对：完整性通过不等于本轮 run 落在登记范围内
     # （tiny 配置/冒烟步数/伪数据跑出的“支持”同样不能冒充确认性结论）。
-    sc = scope_check or {}
-    scope = sc.get("scope") or {}
+    sc = _as_dict(scope_check)
+    scope = _as_dict(sc.get("scope"))
     scope_failed = False
     if scope or sc:
         # 只有登记表声明了 scope 时才谈得上“范围核对失败”
@@ -1269,9 +1296,10 @@ def _render_registration_integrity(integrity: dict,
             bool(sc.get("problems")) or not sc.get("checked"))
         lines.append("")
         lines.append("#### 预注册范围核对（确认性资格的前提）")
-        if sc.get("problems"):
+        sc_problems = _as_text_list(sc.get("problems"))
+        if sc_problems:
             lines.append("- ⛔ 本次运行超出预注册范围：")
-            for p in sc["problems"]:
+            for p in sc_problems:
                 lines.append(f"  - {p}")
         elif sc.get("checked"):
             cfg_note = (f"模型/训练规模与 `{scope.get('config')}` 一致"
@@ -1289,7 +1317,7 @@ def _render_registration_integrity(integrity: dict,
             lines.append("- ⚠ 无法核对预注册范围（缺少 repro/config 信息）："
                          + ("确认性判定按“不可确认”降级。" if scope else
                             "登记表未声明 scope，完整性判定不受影响。"))
-        for w in sc.get("warnings") or []:
+        for w in _as_text_list(sc.get("warnings")):
             lines.append(f"- ⚠ {w}")
     if integrity.get("confirmatory_valid") and not scope_failed:
         lines.append("- 修订规则：既有假设只增不改不删；新增假设必须经 "
@@ -1314,6 +1342,11 @@ def _as_dict_list(v) -> list:
 
 def _as_text_list(v) -> list:
     return [str(x) for x in v] if isinstance(v, list) else []
+
+
+def _as_text(v) -> str:
+    """外部 JSON 的文本字段：非字符串按可读文本降级（缺失为空串）。"""
+    return v if isinstance(v, str) else ("" if v is None else str(v))
 
 
 def _int_or_zero(v) -> int:
@@ -1465,6 +1498,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     ng_split = ng.get("split")
     # 第一遍：收集逐种子 PPL 与该 run 是否与窗口规格逐字段一致。
     staged, incomparable = [], []
+    runs = runs if isinstance(runs, dict) else {}
     for v in sorted(runs):
         if v not in VARIANTS:
             continue
@@ -1472,7 +1506,8 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         vals, seeds_used, eval_splits, excl_seeds = [], [], set(), []
         matched = []
         for s in _sorted_seeds(m):
-            d = m[s].get("eval")
+            slot = m.get(s)
+            d = slot.get("eval") if isinstance(slot, dict) else None
             if not d:
                 continue
             ev_split = d.get("split", "val")
@@ -1597,7 +1632,9 @@ def _probe_oof(analysis: dict, key: str, subkey: str = None):
     subkey 用于嵌套指标（如 oof.f1.macro / oof.f1_tuned.macro）。
     """
     lp = _as_dict(_as_dict(analysis).get("linear_probe"))
-    fs = _as_dict(_as_dict(lp.get("feature_sets")).get(lp.get("primary") or ""))
+    primary = lp.get("primary")
+    fs = _as_dict(_as_dict(lp.get("feature_sets")).get(
+        primary if isinstance(primary, str) else ""))
     val = _as_dict(fs.get("oof")).get(key)
     if subkey is not None:
         return _as_dict(val).get(subkey)
@@ -1624,19 +1661,22 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
     单统计量规则（max_p）一并列出，作为最低档次的规则系统对照。
     """
     rows, tests_ap, tests_aud, missing = [], [], [], []
+    runs = runs if isinstance(runs, dict) else {}
     for v in sorted(runs):
         if v not in VARIANTS:
             continue
         m = _variant_seed_map(runs, v)
         per_seed, has_analysis = [], False
         for s in _sorted_seeds(m):
-            an = m[s].get("analysis")
+            slot = m.get(s)
+            an = slot.get("analysis") if isinstance(slot, dict) else None
             if not isinstance(an, dict):
                 continue
             has_analysis = True
             lp = _as_dict(an.get("linear_probe"))
+            primary = lp.get("primary")
             fs = _as_dict(_as_dict(lp.get("feature_sets")).get(
-                lp.get("primary") or ""))
+                primary if isinstance(primary, str) else ""))
             oof = _as_dict(fs.get("oof"))
             probe_auprc = _num_or_none(oof.get("auprc"))
             probe_auroc = _num_or_none(oof.get("auroc"))
@@ -1948,13 +1988,28 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         sel_seeds = sel_seeds if isinstance(sel_seeds, list) else []
         grid = tune.get("grid") or []
         grid = [c for c in grid if isinstance(c, dict)] if isinstance(grid, list) else []
-        n_lr = len({c.get("lr") for c in grid}) if grid else "-"
-        n_wd = len({c.get("weight_decay") for c in grid}) if grid else "-"
+        def _n_distinct(key):
+            vals = set()
+            for c in grid:
+                v = c.get(key)
+                try:
+                    hash(v)
+                except TypeError:
+                    continue
+                vals.add(v)
+            return len(vals) if grid else "-"
+
+        n_lr, n_wd = _n_distinct("lr"), _n_distinct("weight_decay")
+        trials = tune.get("trials")
+        n_trials = tune.get("n_trials")
+        if n_trials is None:
+            n_trials = (len(grid) or (len(trials)
+                                      if isinstance(trials, list) else "-"))
         std = best.get("val_loss_best_std")
         lines.append(
             f"- 基线调优（变体 `{tune.get('variant', 'standard')}`，"
             f"网格 {n_lr} 档 lr × {n_wd} 档 wd = "
-            f"{tune.get('n_trials', len(grid) or len(tune.get('trials') or []))} "
+            f"{n_trials} "
             f"组配置、选择用 {len(sel_seeds)} 个种子、trial 步数 "
             f"{tune.get('steps', '-')}（与正式训练同步数与否以此为准）、"
             f"验证集选择、测试集未使用）：最优 lr={best.get('lr')}"
@@ -2541,8 +2596,11 @@ def build_summary(results_dir: str, audit: dict = None,
     # 预注册假设涉及的变体间对照必须可估计：登记的 (候选, 参照) 若不在
     # 常规矩阵里（如 lega vs qgate 的“vs 已有工作”主张），在此补入，
     # 保证每条 confirmatory 主张都有对应检验，而不是“登记了却没检验”。
-    registered = load_registered_hypotheses()
-    for h in (registered.get("hypotheses") or []):
+    registered = _as_dict(load_registered_hypotheses())
+    hypotheses = registered.get("hypotheses")
+    for h in (hypotheses if isinstance(hypotheses, list) else []):
+        if not isinstance(h, dict):
+            continue
         c, r = h.get("candidate"), h.get("reference")
         if h.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
             continue  # 单样本机制族，由 _auroc_diff_tests/_ap_diff_tests 覆盖
@@ -2968,10 +3026,12 @@ def build_summary(results_dir: str, audit: dict = None,
             d = _load_dict(fp)
             if not d:
                 continue
-            ini = (d.get("initial") or {}).get("loss")
-            fin = (d.get("final") or {}).get("loss")
-            acc = (d.get("final") or {}).get("token_acc")
-            md.append(f"| {VARIANT_CN.get(d.get('variant'), d.get('variant'))} | "
+            ini = _num_or_none(_as_dict(d.get("initial")).get("loss"))
+            fin = _num_or_none(_as_dict(d.get("final")).get("loss"))
+            acc = _num_or_none(_as_dict(d.get("final")).get("token_acc"))
+            sv = d.get("variant")
+            sv = VARIANT_CN.get(sv, sv) if isinstance(sv, str) else "?"
+            md.append(f"| {sv} | "
                       f"{'✅ 通过' if d.get('passed') else '❌ 未通过'} | "
                       f"{'-' if ini is None else f'{ini:.4f}'} | "
                       f"{'-' if fin is None else f'{fin:.4f}'} | "
@@ -3128,7 +3188,9 @@ def build_summary(results_dir: str, audit: dict = None,
         for s in m.values():
             r = s.get("ruler")
             if r:
-                cases += r.get("badcases") or []
+                badcases = r.get("badcases")
+                if isinstance(badcases, list):
+                    cases += badcases
         if not cases:
             continue
         ana = analyze_badcases(cases, variant=v)
@@ -3178,8 +3240,8 @@ def build_summary(results_dir: str, audit: dict = None,
                 continue
             seen_cat.add(c["category"])
             shown += 1
-            q = (c.get("question") or "").strip().replace("\n", " ")[:120]
-            pred = (c.get("pred") or "").strip().replace("\n", " ")[:80]
+            q = _as_text(c.get("question")).strip().replace("\n", " ")[:120]
+            pred = _as_text(c.get("pred")).strip().replace("\n", " ")[:80]
             md += [f"- **{VARIANT_CN.get(v, v)} · {c['task']}@ctx{c.get('ctx')}** "
                    f"—— {BADCASE_CN.get(c['category'], c['category'])}",
                    f"  - 问题：{q}…",
@@ -3267,8 +3329,8 @@ def build_summary(results_dir: str, audit: dict = None,
         all_keyed, first_keyed = [], None
         for s in _sorted_seeds(m):
             cand = m[s].get("eval") or {}
-            wins = cand.get("worst_windows") or []
-            if not wins:
+            wins = cand.get("worst_windows")
+            if not isinstance(wins, list) or not wins:
                 continue
             # 评测窗口集合由 (val/test 长度, ctx, eval_iters) 决定，与训练
             # 种子无关：给每个窗口写入稳定 key，供跨变体对齐。

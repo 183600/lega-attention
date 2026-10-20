@@ -25,7 +25,7 @@ from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             build_data_report, check_vocab_capacity,
                             critical_split_alerts, decontaminate_texts,
                             distribution_shift, ngram_overlap,
-                            read_test_access_log, sanitize_text,
+                            leakage_alerts, read_test_access_log, sanitize_text,
                             split_protocol_alerts, temporal_split_text,
                             text_length_stats, token_stream_stats,
                             unknown_char_rate)
@@ -713,3 +713,18 @@ def test_load_meta_rejects_broken_json_with_clear_error():
         else:
             raise AssertionError("非对象 meta 未抛 ValueError")
     print("  [ok] load_meta：坏 JSON/非对象给出明确 ValueError")
+
+
+def test_leakage_alerts_tolerates_malformed_nested_sections():
+    """data_report 的嵌套诊断被手改成标量/列表时仍返回告警列表。"""
+    assert leakage_alerts(None, None, None, None, None, None, None) == []
+    out = leakage_alerts(
+        tokenizer={"unk_rate": {"val": "bad"}},
+        sanitization={"val": [1]},
+        duplicates={"train_lines_dropped_as_duplicates_of_eval": "bad"},
+        contamination={"train_val": [1]},
+        distribution={"val_vs_train": {"tv": "bad", "js_bits": [1]}},
+        text_stats={"train": {"lines_gt_huge_threshold": "bad"}},
+        thresholds=[1])
+    assert out == []
+    print("  [ok] leakage_alerts：畸形嵌套诊断不崩溃")

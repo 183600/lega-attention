@@ -117,15 +117,25 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
     非有限值统一记为 None（缺失值语义），由下游按缺失处理；有限值沿用
     exp(min(20, loss)) 与 >20 的截断口径，与 train.py 完全一致。
     """
-    vl = float(metrics["val_loss"])
-    if math.isfinite(vl):
+    metrics = metrics if isinstance(metrics, dict) else {}
+    try:
+        vl = float(metrics.get("val_loss"))
+    except (TypeError, ValueError, OverflowError):
+        vl = None
+    if vl is not None and math.isfinite(vl):
         ppl = math.exp(min(20, vl))
         loss, clamped = vl, bool(vl > 20)
     else:
         ppl, loss, clamped = None, None, None
     gmean = metrics.get("gate_mean")
-    if gmean is not None and not math.isfinite(float(gmean)):
-        gmean = None
+    if gmean is not None:
+        try:
+            gmean = float(gmean)
+        except (TypeError, ValueError, OverflowError):
+            gmean = None
+        else:
+            if not math.isfinite(gmean):
+                gmean = None
     return {"val_ppl": ppl, "val_loss": loss, "val_ppl_clamped": clamped,
             "gate_mean": gmean}
 

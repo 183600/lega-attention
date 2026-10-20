@@ -301,8 +301,12 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
 
 def format_case(idx: int, c: Dict) -> List[str]:
     """单个坏案例的 Markdown 行（问题/gold 摘录/预测/归因）。"""
+    c = c if isinstance(c, dict) else {}
+    depth = c.get("depth")
+    depth_s = (f" depth={float(depth):.2f}"
+               if isinstance(depth, (int, float)) else "")
     lines = [f"### 案例 {idx}: {c.get('task')} @ctx={c.get('ctx')}"
-             + (f" depth={c['depth']:.2f}" if c.get("depth") is not None else "")
+             + depth_s
              + (" 【难度边界样本：needle 靠后】" if c.get("hard_sample") else "")]
     q = str(c.get("question") or "").strip().replace("\n", " ⏎ ")
     if len(q) > 220:
@@ -316,18 +320,21 @@ def format_case(idx: int, c: Dict) -> List[str]:
         pred = pred[:160] + "…"
     lines.append(f"- 模型输出: {pred!r}")
     lines.append(f"- gold 答案: {c.get('answer')!r}")
-    lines.append(f"- 归因: **{CATEGORY_CN.get(c['category'], c['category'])}**"
-                 f" —— {c.get('explanation', '')}")
+    cat = c.get("category")
+    cat_s = CATEGORY_CN.get(cat, cat) if isinstance(cat, str) else "?"
+    lines.append(f"- 归因: **{cat_s}** —— {c.get('explanation', '')}")
     return lines
 
 
 def _render_recommendations(md: List[str], recs: List[Dict],
                             title: str = "## 改进方向（坏案例驱动）") -> None:
     """把改进方向渲染成 Markdown 小节（触发证据→建议→下一步实验）。"""
-    if not recs:
+    if not isinstance(recs, list) or not recs:
         return
     md += ["", title, ""]
     for i, r in enumerate(recs, 1):
+        if not isinstance(r, dict):
+            continue
         md.append(f"{i}. **[{r.get('axis')}·{r.get('priority')}]** "
                   f"触发：{r.get('trigger')}")
         md.append(f"   - 建议：{r.get('suggestion')}")
@@ -336,33 +343,55 @@ def _render_recommendations(md: List[str], recs: List[Dict],
 
 def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
     """写人类可读的 Markdown 报告（归因分布 + 改进方向 + 逐案例详情）。"""
+    analysis = analysis if isinstance(analysis, dict) else {}
     md = [f"# 坏案例分析：{analysis.get('variant') or '-'}", ""]
-    if not analysis["n_badcases"]:
+    try:
+        n_badcases = int(analysis.get("n_badcases") or 0)
+    except (TypeError, ValueError, OverflowError):
+        n_badcases = 0
+    if not n_badcases:
         md.append("本变体无预测错误样本（或评测被跳过）。")
     else:
-        md += [f"共 {analysis['n_badcases']} 条错误样本；归因分布：", "",
+        md += [f"共 {n_badcases} 条错误样本；归因分布：", "",
                "| 类别 | 数量 | 占比 |", "|---|---|---|"]
-        total = analysis["n_badcases"]
-        for cat, n in sorted(analysis["category_counts"].items(),
-                             key=lambda kv: -kv[1]):
+        total = n_badcases
+        counts = analysis.get("category_counts")
+        counts = counts if isinstance(counts, dict) else {}
+        clean = []
+        for cat, n in counts.items():
+            try:
+                clean.append((cat, int(n)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
-        axis = analysis.get("axis_counts") or {}
+        axis = analysis.get("axis_counts")
+        axis = axis if isinstance(axis, dict) else {}
         if axis:
+            clean_axis = []
+            for k, v in axis.items():
+                try:
+                    clean_axis.append((k, int(v)))
+                except (TypeError, ValueError, OverflowError):
+                    continue
             axis_s = "；".join(f"{AXIS_CN.get(k, k)}×{v}" for k, v in
-                              sorted(axis.items(), key=lambda kv: -kv[1]))
+                              sorted(clean_axis, key=lambda kv: -kv[1]))
             md += ["", f"粗归因轴（数据/难度/模型）：{axis_s}。"]
-        if analysis.get("deep_position_fail_ratio") is not None:
+        deep_ratio = analysis.get("deep_position_fail_ratio")
+        if isinstance(deep_ratio, (int, float)):
             md += ["",
                    f"needle 深位（>0.75）失败占 niah 类错误的 "
-                   f"{analysis['deep_position_fail_ratio']:.0%}——"
+                   f"{deep_ratio:.0%}——"
                    "高占比说明是长程检索边界问题，低占比说明是系统性盲区。"]
         if analysis.get("label_errors"):
             md += ["", f"⚠ 有 {analysis['label_errors']} 条 gold 答案不在 prompt 中："
                         "样例构造或标注有错，须先修 RULER 构造再谈模型。"]
         md.append("")
-        for i, c in enumerate(analysis["cases"][:max_cases], 1):
+        cases = analysis.get("cases")
+        cases = cases if isinstance(cases, list) else []
+        for i, c in enumerate(cases[:max_cases], 1):
             md += [""] + format_case(i, c)
-        if analysis["n_badcases"] > max_cases:
+        if n_badcases > max_cases:
             md.append(f"\n（仅展示前 {max_cases} 条，完整结构化数据见同目录 "
                       "badcase_summary.json）")
     # 改进方向对"零错误"同样给出（提示零错误的解释边界）
@@ -389,14 +418,14 @@ TOP1_CONF_TOL = 0.5
 
 def _window_top1(rec: Dict):
     """取出窗口 top1 预测 (文本, 概率)；缺失/格式异常返回 (None, None)。"""
-    top5 = rec.get("pred_top5") or []
-    if not top5:
+    top5 = rec.get("pred_top5")
+    if not isinstance(top5, (list, tuple)) or not top5:
         return None, None
     item = top5[0]
     if isinstance(item, (list, tuple)) and len(item) >= 2:
         try:
             return str(item[0]), float(item[1])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return str(item[0]), None
     return str(item), None
 
@@ -424,9 +453,12 @@ def categorize_window(rec: Dict) -> Dict:
     top1, p1 = _window_top1(r)
     gold = r.get("gold_next")
     gold_txt = gold if isinstance(gold, str) else ("" if gold is None else str(gold))
-    tail = r.get("context_tail") or ""
+    tail_raw = r.get("context_tail")
+    tail = (tail_raw if isinstance(tail_raw, str)
+            else ("" if tail_raw is None else str(tail_raw)))
     top5_txt = []
-    for item in (r.get("pred_top5") or []):
+    top5_raw = r.get("pred_top5")
+    for item in (top5_raw if isinstance(top5_raw, (list, tuple)) else []):
         if isinstance(item, (list, tuple)) and item:
             top5_txt.append(str(item[0]))
         elif item is not None:
@@ -613,57 +645,80 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
 
 def format_window_case(idx: int, c: Dict) -> List[str]:
     """单个最差窗口的 Markdown 行（上下文尾部/模型 top-1/真实续写/归因）。"""
+    c = c if isinstance(c, dict) else {}
+    p1 = c.get("top1_prob")
     where = (f"窗口 #{c.get('window')}" +
              (f"（{c['split']} 集）" if c.get("split") else ""))
     loss = c.get("loss")
     # loss 可能缺失或显式为 null（旧格式/外部 JSON）：显示 '-' 而不是崩溃
     loss_s = f"{float(loss):.3f}" if isinstance(loss, (int, float)) else "-"
     lines = [f"### 案例 {idx}: {where}　loss={loss_s}"]
-    tail = (c.get("context_tail") or "").replace("\n", " ⏎ ")[-160:]
+    tail = str(c.get("context_tail") or "").replace("\n", " ⏎ ")[-160:]
     lines.append(f"- 上下文尾部: …{tail}")
     top1 = c.get("top1")
-    p1 = c.get("top1_prob")
-    top_s = f"{top1!r}" + (f"（p={p1:.3f}）" if p1 is not None else "")
+    try:
+        p1_s = f"（p={float(p1):.3f}）" if p1 is not None else ""
+    except (TypeError, ValueError, OverflowError):
+        p1_s = ""
+    top_s = f"{top1!r}" + p1_s
     lines.append(f"- 模型 top-1: {top_s}")
     lines.append(f"- 真实续写(gold): {c.get('gold_next')!r}"
                  + ("　（gold 在上下文中出现过）" if c.get("gold_in_context")
                     else "　（gold 未在上下文中出现）"))
-    lines.append(f"- 归因: **{WINDOW_CATEGORY_CN.get(c['category'], c['category'])}**"
-                 f" —— {c.get('explanation', '')}")
+    cat = c.get("category")
+    cat_s = WINDOW_CATEGORY_CN.get(cat, cat) if isinstance(cat, str) else "?"
+    lines.append(f"- 归因: **{cat_s}** —— {c.get('explanation', '')}")
     return lines
 
 
 def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
     """写语言建模坏案例的 Markdown 报告（含归因分布与逐案例详情）。"""
+    analysis = analysis if isinstance(analysis, dict) else {}
     md = [f"# 语言建模最差窗口归因：{analysis.get('variant') or '-'}", ""]
-    if not analysis["n_windows"]:
+    try:
+        n_windows = int(analysis.get("n_windows") or 0)
+    except (TypeError, ValueError, OverflowError):
+        n_windows = 0
+    if not n_windows:
         md.append("本变体无最差窗口记录（评测被跳过或 --worst_n=0）。")
     else:
-        md += [f"共 {analysis['n_windows']} 个最差窗口；归因分布：", "",
+        md += [f"共 {n_windows} 个最差窗口；归因分布：", "",
                "| 类别 | 数量 | 占比 |", "|---|---|---|"]
-        total = analysis["n_windows"]
-        for cat, n in sorted(analysis["category_counts"].items(),
-                             key=lambda kv: -kv[1]):
+        total = n_windows
+        counts = analysis.get("category_counts")
+        counts = counts if isinstance(counts, dict) else {}
+        clean = []
+        for cat, n in counts.items():
+            try:
+                clean.append((cat, int(n)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {WINDOW_CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
         stats = []
-        if analysis.get("mean_top1_prob") is not None:
-            stats.append(f"平均 top-1 概率={analysis['mean_top1_prob']:.3f}")
-        if analysis.get("gold_in_context_rate") is not None:
-            stats.append(f"gold 出现在上下文中的比例="
-                         f"{analysis['gold_in_context_rate']:.0%}")
-        if analysis.get("gold_in_top5_rate") is not None:
-            stats.append(f"gold 进入 top-5 的比例="
-                         f"{analysis['gold_in_top5_rate']:.0%}")
+        mtp = analysis.get("mean_top1_prob")
+        if isinstance(mtp, (int, float)):
+            stats.append(f"平均 top-1 概率={mtp:.3f}")
+        gic = analysis.get("gold_in_context_rate")
+        if isinstance(gic, (int, float)):
+            stats.append(f"gold 出现在上下文中的比例={gic:.0%}")
+        git5 = analysis.get("gold_in_top5_rate")
+        if isinstance(git5, (int, float)):
+            stats.append(f"gold 进入 top-5 的比例={git5:.0%}")
         if stats:
             md += ["", "；".join(stats) + "。"]
-        not_ctx = sum(1 for c in analysis["cases"] if not c.get("gold_in_context"))
+        cases = analysis.get("cases")
+        cases = cases if isinstance(cases, list) else []
+        not_ctx = sum(1 for c in cases
+                      if not (isinstance(c, dict)
+                              and c.get("gold_in_context")))
         if not_ctx:
             md += ["", f"其中 {not_ctx} 个窗口的 gold 从未出现在上下文中——"
                        "这些更接近真正的预测失败/长尾，应与“抄不到”的复制失败分开看。"]
         md.append("")
-        for i, c in enumerate(analysis["cases"][:max_cases], 1):
+        for i, c in enumerate(cases[:max_cases], 1):
             md += [""] + format_window_case(i, c)
-        if analysis["n_windows"] > max_cases:
+        if n_windows > max_cases:
             md.append(f"\n（仅展示 loss 最高的前 {max_cases} 个窗口，"
                       "完整数据见 eval_*.json 的 worst_windows）")
     _render_recommendations(md, analysis.get("recommendations") or [],
