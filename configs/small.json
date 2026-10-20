@@ -1,5 +1,5 @@
 {
-  "_说明": "small 正式实验配置 (~30M 参数)。建议 GPU + bf16",
+  "_说明": "small 正式实验配置 (~30M 参数)。建议 GPU + bf16；use_sdpa_standard=false 使全部变体共用显式注意力路径，避免实现差异混入方法对比",
   "d_model": 384,
   "n_layers": 6,
   "n_heads": 6,
@@ -8,7 +8,7 @@
   "dropout": 0.0,
   "attn_dropout": 0.0,
   "gate_bias_init": 2.0,
-  "use_sdpa_standard": true,
+  "use_sdpa_standard": false,
 
   "batch_size": 16,
   "grad_accum": 1,

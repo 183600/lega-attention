@@ -8,10 +8,10 @@
     lega (ours)   :  c = log(n * max_j p_j)
                      g = sigmoid(w·q + a*c + b*log n + d)
                      o' = g * o
-    lega_no_len   :  g = sigmoid(w·q + a*log max_j p_j + d)        （消融：去掉长度校准）
-    lega_no_conc  :  g = sigmoid(w·q + b*log n + d)                （消融：去掉集中度证据）
+    lega_no_len   :  g = sigmoid(w·q + a*c + d)                    （消融：去掉长度项 b*log n）
+    lega_no_conc  :  g = sigmoid(w·q + b*log n + d)                （消融：去掉集中度项 a*c）
     lega_no_query :  g = sigmoid(a*c + b*log n + d)                （消融：去掉查询项）
-    lega_conc_only:  g = sigmoid(a*log max_j p_j + d)              （全因子消融：仅集中度项 B）
+    lega_conc_only:  g = sigmoid(a*c + d)                          （全因子消融：仅集中度项 B）
     lega_len_only :  g = sigmoid(b*log n + d)                      （全因子消融：仅长度项 C）
 
 全因子消融矩阵（无=standard, A=查询, B=集中度, C=长度）：
@@ -38,12 +38,13 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 # 全部变体名（配置/命令行使用）
-VARIANTS = ("standard", "qgate", "null", "lega", "lega_no_len", "lega_no_conc",
-            "lega_no_query", "lega_conc_only", "lega_len_only")
+VARIANTS = ("standard", "gate_only", "qgate", "null", "lega", "lega_no_len",
+            "lega_no_conc", "lega_no_query", "lega_conc_only", "lega_len_only")
 
 # 供图表与汇总表使用的中文名
 VARIANT_CN = {
     "standard": "标准Attention",
+    "gate_only": "仅门控偏置(无A/B/C)",
     "qgate": "查询门控(已有)",
     "null": "空注意力(已有)",
     "lega": "LEGA(ours)",
@@ -57,12 +58,12 @@ VARIANT_CN = {
 # 各公式项出现的变体
 _USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc")      # w·q 项
 _USE_CONC = ("lega", "lega_no_len", "lega_no_query",
-             "lega_conc_only")                                     # log max_j p_j 项
+             "lega_conc_only")                                     # a*c, c=log(n*max_j p_j)
 _USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
             "lega_len_only")                                       # log n 项
 # 有输出门
-_GATED = ("qgate", "lega", "lega_no_len", "lega_no_conc", "lega_no_query",
-          "lega_conc_only", "lega_len_only")
+_GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
+          "lega_no_query", "lega_conc_only", "lega_len_only")
 # 门依赖注意力统计（需要 max_j p_j）
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only")
 
@@ -332,8 +333,10 @@ class CausalSelfAttention(nn.Module):
             # 取 log 不影响反向（反向比较的是 clamp 的输入 max_p）。
             c = max_p.clamp_min(1e-30).log_() if (keep_terms or max_p.requires_grad) \
                 else max_p.clamp_min_(1e-30).log_()
-            if self.use_len:
-                c += log_n                                                # c = log(n * max_j p_j)
+            # 集中度项按定义始终是 c=log(n*max_j p_j)：即使 b*log n 被消融
+            # （lega_no_len / lega_conc_only），a*c 里的长度归一化也不能丢，
+            # 否则 Full−C 实际多去掉了 a·log n，不再是单组件消融。
+            c += log_n
             a = self.gate_a.float().view(1, H, 1)
             logit = a * c if logit is None else logit.addcmul_(a, c)
         if self.use_len:
@@ -697,8 +700,8 @@ class CausalSelfAttention(nn.Module):
         # 注意力只在已写入的 T 个前缀键上做全因果，可同走 is_causal 快路。
         causal_only = (use_sdpa and past_kv is None
                        and (kv_cache is None or cache_pos == 0)
-                       and self.variant in ("standard", "qgate", "lega_no_conc",
-                                            "lega_len_only"))
+                       and self.variant in ("standard", "gate_only", "qgate",
+                                            "lega_no_conc", "lega_len_only"))
 
         # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码）。
         elems = B * H * T * S
@@ -784,7 +787,7 @@ class CausalSelfAttention(nn.Module):
                     dropout_p=self.attn_dropout if self.training else 0.0)
             # 与显式路径一致：need_stats 时即使该变体不用 log n（qgate/standard）
             # 也计算并记录，保证 SDPA/显式两条路径返回的轻量 stats 口径完全相同。
-            if self.use_len or bool(need_stats):
+            if self.use_conc or self.use_len or bool(need_stats):
                 log_n = _log_n(past_len, T, dev)
             if self.variant in _GATED:
                 # 与显式路径相同的门控公式（qgate: w·q+d；lega_no_conc: w·q+b·log n+d）
@@ -819,7 +822,7 @@ class CausalSelfAttention(nn.Module):
                 q.mul_(self.scale)
             if use_chunk:
                 log_n = None
-                if self.use_len or bool(need_stats):
+                if self.use_conc or self.use_len or bool(need_stats):
                     log_n = _log_n(past_len, T, dev)
                 collect = bool(need_stats)
                 o, max_p, qterm, logit, g, argmax_stat, p_null_stat = \
@@ -867,9 +870,10 @@ class CausalSelfAttention(nn.Module):
                 # stats_argmax=False（轻量诊断，如验证评测只需要 g）时不计算
                 # argmax；不含集中度项的变体（qgate 等）此时也不必计算 max_p/log_n。
                 full_stats = bool(need_stats) and stats_argmax
-                # log n 仅在门控需要长度项(use_len)或完整诊断(full_stats)时需要；
-                # 如 lega_no_len 的训练前向（use_len=False 且无统计需求），不计算。
-                need_logn = self.use_len or bool(need_stats)
+                # log n 在门控含集中度项（c 的定义需要 n）或长度项时需要；
+                # 完整诊断也计算。注意 lega_no_len/lega_conc_only 虽无 b*log n，
+                # 但 a*c 仍需要 log n。
+                need_logn = self.use_conc or self.use_len or bool(need_stats)
                 if need_logn:
                     log_n = _log_n(past_len, T, dev)
                 # max_p 与完整诊断的 argmax 都必须基于 dropout 前的 softmax 分布。

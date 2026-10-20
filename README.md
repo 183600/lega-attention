@@ -42,23 +42,30 @@ $$
 
 | 变体 | 门控公式 | 作用 |
 |---|---|---|
-| `standard` | 无 | 基线 |
+| `standard` | 无 | 基线（无门控） |
+| `gate_only` | $g=\sigma(d)$ | 门控对照：只有可学习偏置，无 A/B/C（隔离“门本身”效应） |
 | `qgate` | $g=\sigma(w^\top q+d)$ | 已有工作代表：只看查询的输出门控 |
 | `null` | 无（额外 null KV 槽） | 已有工作代表：显式"选择不读取" |
 | `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **本文方法**（全因子 A+B+C） |
-| `lega_no_len` | $g=\sigma(w^\top q+a\log\max_j p_j+d)$ | 去一法：去掉长度校准（A+B） |
+| `lega_no_len` | $g=\sigma(w^\top q+a\,c+d)$ | 去一法：去掉长度项 $b\log n$（A+B） |
 | `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | 去一法：去掉集中度证据（A+C） |
 | `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | 去一法：去掉查询项（B+C） |
-| `lega_conc_only` | $g=\sigma(a\log\max_j p_j+d)$ | 全因子：仅集中度项（B） |
+| `lega_conc_only` | $g=\sigma(a\,c+d)$ | 全因子：仅集中度项（B，$c=\log(n\max_j p_j)$） |
 | `lega_len_only` | $g=\sigma(b\log n+d)$ | 全因子：仅长度项（C） |
 
 **消融完整性**：设查询项=A、集中度项=B、长度项=C，则
 全因子 8 格（无/`standard`、A/`qgate`、B/`lega_conc_only`、C/`lega_len_only`、
 AB/`lega_no_len`、AC/`lega_no_conc`、BC/`lega_no_query`、ABC/`lega`）与
-去一法（Full/Full−A/Full−B/Full−C）全部实现；汇总表会自动列出矩阵并标注缺失组合。
-组件是否有用不靠“组合跑全”自证：汇总表基于 Holm 校正后的显著配对检验逐一判定
-A/B/C（去一法：Full−X 显著变差；全因子：仅 X 显著优于无门控），
-组合齐全但证据不足或方向相反时，明确拒绝“各组件均有用”的结论。
+去一法（Full/Full−A/Full−B/Full−C）全部实现；另设 `gate_only`（仅门控偏置、
+无 A/B/C）作为门控对照，避免把“加门”本身误算成 A/B/C 的贡献。
+汇总表会自动列出矩阵并标注缺失组合。组件是否有用不靠“组合跑全”自证：
+汇总表基于 Holm 校正后的显著配对检验逐一判定 A/B/C（去一法：Full−X 显著变差；
+全因子增量：X vs `gate_only` 显著变好），主指标按预注册：A/B 用 PPL、C 用 RULER；
+另一指标只作探索性敏感性分析。全部变体统一走显式注意力路径
+（`use_sdpa_standard=false`），避免 SDPA 与显式 softmax 混用引入实现差异；
+审计会拒绝混用后端的对比。组合齐全但证据不足或方向相反时，
+明确拒绝“各组件均有用”的结论。全因子矩阵还做 A×B/A×C/B×C 交互效应检验
+（探索性、独立 Holm 家族，以 `gate_only` 为无组件基准），检验组件收益能否按单组件加总。
 
 参数量差异：门控仅引入**每头 $d_{head}+3$ 个参数**（LEGA），相对模型总量 <0.02%（`null` 为每头 $2d_{head}$）。脚本会在训练开始时打印精确数值。
 
@@ -113,7 +120,7 @@ bash scripts/run_smoke.sh
 python scripts/prepare_data.py --out_dir data/wikitext103
 # 可选 --max_tokens 30000000 控制训练规模
 
-# 2) 全流水线：9 变体 × 多种子（默认 5 个）训练 → PPL → RULER → 延迟
+# 2) 全流水线：10 变体 × 多种子（默认 5 个）训练 → PPL → RULER → 延迟
 #    → 机制分析 → 图表 → 汇总表（Mean ± Std + 配对显著性检验）
 python run_all.py --config configs/small.json --data_dir data/wikitext103
 
@@ -153,7 +160,7 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/baseline_tuning.json` | 基线（standard）lr/权重衰减调优证据（仅验证集；含 `default_is_optimal` 近优判定、`selection_seeds`/逐种子 val_loss 明细与逐 trial 训练溯源） |
 | `results/<tag>/ngram_baseline.json` | 简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL（α/λ 在 val 上联合选，`selected_model` 取 val 最强；test 需显式开锁；流水线默认与神经评测同 split） |
-| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）、`registration_scope`（范围核对：配置规模/分词器/种子计划）与 `registered_hypotheses`（逐条判定）；另含 `ngram_comparison`（逐变体 vs 简单基线单样本配对检验） |
+| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）、`registration_scope`（范围核对：配置规模/分词器/种子计划）、`registered_hypotheses`（逐条判定，早停/完整性/范围未过则降级）与 `factorial_interactions`（全因子交互检验，含 `training_budget` 早停可比性标记）；另含 `ngram_comparison`（逐变体 vs 简单基线单样本配对检验） |
 | `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合（含训练停滞+验证回升的平台期）/过拟合趋势（训练降而验证停滞）/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe）+ 粗归因轴计数 + **改进方向**（触发证据→建议→下一步实验） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现）+ **改进方向** |
@@ -207,7 +214,9 @@ python -m tests.run_tests   # 单元测试（不依赖 pytest）
 `--early_stop_patience N`，或配置 `early_stop_patience`/`early_stop_min_delta`：
 验证连续 N 次评测无实质改善即终止，默认关闭不影响受控对比；启用后各 run 实际
 步数可不同，`eval.json` 同时记录计划/实际步数，受控变量审计按计划步数核对并在
-汇总页如实标注"早停"与截断原因，下游仍使用 val 选出的 `model_best.pt`）；
+汇总页如实标注"早停"与截断原因；由于实际训练量（tokens_seen）不等，预注册
+确认性判定会自动降级为探索性（`apply_budget_gate`），需在相同实际步数下重跑
+才能恢复 confirmatory 地位；下游仍使用 val 选出的 `model_best.pt`）；
 错误样本逐条归因（每个案例附粗归因轴：数据/构造、难度边界、模型/方法），并用
 跨变体对照区分"全体共识失败（数据/难度）"与"方法特异性盲区"；归因最终**合成为
 可执行的改进方向**（触发证据→建议→下一步实验，确定性阈值见 `lega/badcase.py`），
@@ -230,7 +239,7 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M 参数冒烟配置（CPU 可跑）
 │   └── small.json             # ~30M 参数正式配置（单卡数小时/变体）
 ├── lega/
-│   ├── attention.py           # 核心：9 个变体的因果注意力（LEGA 门控公式与消融矩阵在此）
+│   ├── attention.py           # 核心：10 个变体的因果注意力（LEGA 门控公式与消融矩阵在此）
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底，词表只在 train 拟合）+ bin 缓存 + 批采样
 │   ├── datacheck.py           # 防泄漏：时序/文档划分、去污染、token 硬校验、漂移筛查、test 访问账本

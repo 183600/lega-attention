@@ -90,6 +90,26 @@ def test_gate_formula_components():
     assert np.allclose(g, 1.0 / (1.0 + np.exp(-full)), atol=1e-5)
 
 
+def test_concentration_ablations_keep_length_normalization():
+    """消融长度项 b*log n 时，集中度项仍是 c=log(n*max_p)，不能连带删掉
+    a*log n；否则 Full−C 不再是单组件消融，B 格也不再是完整集中度项。"""
+    for variant in ("lega_no_len", "lega_conc_only"):
+        m = _mk_attn(variant=variant)
+        with torch.no_grad():
+            m.gate_a.fill_(0.5)
+            m.gate_d.zero_()
+            if m.use_query:
+                m.gate_w.zero_()
+        max_p = torch.full((1, 1, 1), 0.25)
+        log_n = torch.full((1, 1, 1), math.log(8.0))
+        qterm = torch.zeros(1, 1, 1) if m.use_query else None
+        _, logit, _ = m._gate_logit(qterm, max_p, log_n, (1, 1, 1),
+                                    keep_terms=True)
+        expected = 0.5 * (math.log(0.25) + math.log(8.0))
+        assert abs(logit.item() - expected) < 1e-5, (variant, logit.item())
+    print("  [ok] 集中度消融保留 c=log(n*max_p) 的长度归一化")
+
+
 def test_gate_query_term_uses_pre_rope_query():
     """门控查询项 w·q 不应混入 RoPE 绝对位置（注意力打分仍使用 RoPE）。"""
     torch.manual_seed(0)

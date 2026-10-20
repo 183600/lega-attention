@@ -727,6 +727,7 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
     """理论额外参数量，用于单元测试核对。"""
     per = {
         "standard": 0,
+        "gate_only": 1,               # d（仅门控偏置，无 A/B/C）
         "qgate": d_head + 1,          # w, d
         "null": 2 * d_head,           # k_null, v_null
         "lega": d_head + 3,           # w, a, b, d

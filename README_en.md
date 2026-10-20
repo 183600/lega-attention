@@ -41,25 +41,35 @@ where $p_j$ are the causal attention weights, $n$ is the number of real tokens r
 
 | Variant | Gate formula | Purpose |
 |---|---|---|
-| `standard` | none | Baseline |
+| `standard` | none | Baseline (no gate) |
+| `gate_only` | $g=\sigma(d)$ | Gate control: learnable bias only, no A/B/C (isolates the gate itself) |
 | `qgate` | $g=\sigma(w^\top q+d)$ | Prior-work representative: query-only output gating |
 | `null` | none (extra null KV slots) | Prior-work representative: explicit "choose not to read" |
 | `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **Ours** (full factorial A+B+C) |
-| `lega_no_len` | $g=\sigma(w^\top q+a\log\max_j p_j+d)$ | Leave-one-out: no length calibration (A+B) |
+| `lega_no_len` | $g=\sigma(w^\top q+a\,c+d)$ | Leave-one-out: no length term $b\log n$ (A+B) |
 | `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | Leave-one-out: no concentration evidence (A+C) |
 | `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | Leave-one-out: no query term (B+C) |
-| `lega_conc_only` | $g=\sigma(a\log\max_j p_j+d)$ | Factorial: concentration term only (B) |
+| `lega_conc_only` | $g=\sigma(a\,c+d)$ | Factorial: concentration term only (B, $c=\log(n\max_j p_j)$) |
 | `lega_len_only` | $g=\sigma(b\log n+d)$ | Factorial: length term only (C) |
 
 **Ablation completeness**: with query=A, concentration=B, length=C, both the full
 factorial (none/`standard`, A/`qgate`, B/`lega_conc_only`, C/`lega_len_only`,
 AB/`lega_no_len`, AC/`lega_no_conc`, BC/`lega_no_query`, ABC/`lega`) and the
-leave-one-out set (Full/Full−A/Full−B/Full−C) are implemented; the summary lists
-the matrix and flags missing cells. Component usefulness is never inferred from
-coverage alone: the summary judges each of A/B/C with Holm-corrected significant
-paired tests (leave-one-out: Full−X significantly worse than Full; factorial:
-X alone significantly better than no gate), and explicitly rejects
-"every component helps" when the evidence is missing or points the other way.
+leave-one-out set (Full/Full−A/Full−B/Full−C) are implemented. A `gate_only`
+control (learnable bias only, no A/B/C) isolates the effect of adding a gate from
+the contributions of A/B/C. The summary lists the matrix and flags missing cells.
+Component usefulness is never inferred from coverage alone: the summary judges
+each of A/B/C with Holm-corrected significant paired tests (leave-one-out:
+Full−X significantly worse than Full; factorial increment: X vs `gate_only`
+significantly better), using the pre-registered primary metric (A/B: PPL,
+C: RULER); the other metric is reported only as an exploratory sensitivity
+analysis. All variants use the explicit attention path
+(`use_sdpa_standard=false`) so SDPA and explicit softmax are never mixed, and
+the audit rejects such mixing. It explicitly rejects "every component helps"
+when the evidence is missing or points the other way. The full factorial also
+tests A×B/A×C/B×C interactions (exploratory, separate Holm family, with
+`gate_only` as the no-component baseline) to check whether component gains are
+additive or synergistic/sub-additive.
 
 Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA), <0.02% of the model (`null` is $2d_{head}$ per head). Scripts print the exact numbers at the start of training.
 
@@ -114,7 +124,7 @@ Smoke mode automatically shrinks: 20 steps/variant, a single seed, ctx=min(256, 
 python scripts/prepare_data.py --out_dir data/wikitext103
 # optional --max_tokens 30000000 to control training size
 
-# 2) Full pipeline: 9 variants x multiple seeds (5 by default) -> PPL -> RULER
+# 2) Full pipeline: 10 variants x multiple seeds (5 by default) -> PPL -> RULER
 #    -> latency -> analysis -> plots -> summary (Mean ± Std + paired tests)
 python run_all.py --config configs/small.json --data_dir data/wikitext103
 
@@ -158,7 +168,7 @@ Outputs:
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/baseline_tuning.json` | Baseline (`standard`) lr/weight-decay tuning evidence (val only; includes the `default_is_optimal` verdict, `selection_seeds`/per-seed val_loss details, and per-trial provenance) |
 | `results/<tag>/ngram_baseline.json` | Simple statistical baseline: unigram/bigram/interpolated-bigram smoothed n-gram held-out PPL (α/λ jointly selected on val, `selected_model` is the strongest on val; test needs an explicit opt-in; the pipeline matches the neural eval split by default) |
-| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check), `registration_scope` (config-scale/tokenizer/seed-plan scope check) and `registered_hypotheses` (per-claim verdicts); also `ngram_comparison` (per-variant one-sample paired tests vs the simple baseline) |
+| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check), `registration_scope` (config-scale/tokenizer/seed-plan scope check), `registered_hypotheses` (per-claim verdicts, downgraded when integrity/scope/early-stop budget fails) and `factorial_interactions` (2^3 interaction tests, plus a `training_budget` comparability flag); also `ngram_comparison` (per-variant one-sample paired tests vs the simple baseline) |
 | `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, overfitting trend (train still falling, validation stalled), underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations; early-stopped runs are flagged as intentionally truncated) |
 | `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) + coarse attribution-axis counts + **improvement directions** (trigger evidence → suggestion → next experiment) |
 | `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) + **improvement directions** |
@@ -222,7 +232,10 @@ precision ruled out). The "early stopping" recommended for overfitting is an
 improvement for N consecutive evals; off by default so controlled comparisons are
 unaffected by it; when enabled, actual steps may differ across runs, `eval.json`
 records both planned and actual steps, the controlled-variable audit compares
-planned steps and the summary marks early-stopped runs — downstream evaluation
+planned steps and the summary marks early-stopped runs; because the actual training
+budget (tokens_seen) then differs across runs, pre-registered confirmatory
+verdicts are automatically downgraded to exploratory (`apply_budget_gate`) and
+can only be restored by rerunning with equal actual steps. Downstream evaluation
 still uses the val-selected `model_best.pt`). Attribute
 every error case (each case also gets a coarse attribution axis: data/construction,
 difficulty boundary, or model/method), and use the cross-variant
@@ -253,7 +266,7 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M smoke config (CPU-friendly)
 │   └── small.json             # ~30M full config (hours/variant on one GPU)
 ├── lega/
-│   ├── attention.py           # core: causal attention for 9 variants (LEGA gate + ablation matrix)
+│   ├── attention.py           # core: causal attention for 10 variants (LEGA gate + ablation matrix)
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback, vocab fit on train only) + bin cache + batch sampling
 │   ├── datacheck.py           # leakage-proofing: temporal/document split, decontamination, token hard checks, shift screening, test-access ledger

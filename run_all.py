@@ -2,8 +2,8 @@
 """一键实验流水线：训练全部变体 → PPL → RULER → 机制分析 → 图表 → 汇总表。
 
 变体（相同参数量级与训练步数）:
-  standard | qgate | null | lega | lega_no_len | lega_no_conc | lega_no_query
-  | lega_conc_only | lega_len_only
+  standard | gate_only | qgate | null | lega | lega_no_len | lega_no_conc
+  | lega_no_query | lega_conc_only | lega_len_only
 
 对比与消融协议（科研统计口径）:
   * 受控变量：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/
@@ -26,7 +26,8 @@
   * 消融完整性：全因子（无/A/B/C/AB/AC/BC/ABC）与去一法（Full/Full-A/
     Full-B/Full-C）两套组合全部实现；汇总表显式列出消融矩阵，并基于
     Holm 校正后的显著证据逐一判定 A/B/C 组件是否“有用”——组合齐全但证据
-    不足时不会下“各组件均有用”的结论。
+    不足时不会下“各组件均有用”的结论；全因子另做 A×B/A×C/B×C 交互效应
+    检验（探索性，独立 Holm 家族），区分“主效应可加”与“协同/次可加”。
 
 用法:
   # 冒烟测试（tiny 配置 + 伪数据，仅验证全流程可跑通；默认只跑 1 个种子）
@@ -86,7 +87,7 @@ ALL_VARIANTS = list(VARIANTS)
 GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
                       "lega_no_query", "lega_conc_only", "lega_len_only")
 
-# 全因子消融矩阵（A=查询项 w·q, B=集中度证据 log max_j p_j, C=长度校准 log n）。
+# 全因子消融矩阵（A=查询项 w·q, B=集中度证据 c=log(n*max_j p_j), C=长度项 b*log n）。
 # standard 表示无门控“无”格；三组件两两与全部组合均对应一个独立变体。
 FACTORIAL_CELLS = (
     ("无（无门）", "standard"),
@@ -97,6 +98,12 @@ FACTORIAL_CELLS = (
     ("A+C", "lega_no_conc"),
     ("B+C", "lega_no_query"),
     ("A+B+C", "lega"),
+)
+# 只含门控偏置 d、不含 A/B/C 的对照：把“门本身”与“证据项”解耦。
+# 组件“加入 X”的对照必须是 X-only vs gate_only，而不是 vs 无门的 standard
+# （后者把输出门的存在也混进了 A/B/C 效应）。
+CONTROL_CELLS = (
+    ("门控偏置（无 A/B/C）", "gate_only"),
 )
 # 去一法（leave-one-out）：Full 及各去掉一个组件的结果。
 LOO_CELLS = (
@@ -356,6 +363,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     meta_checked = 0
     early_stop_runs = []
     actual_meta = []
+    attention_backends = {}
+    attention_key_seen = False
     for v in variants:
         for seed in seeds:
             vdir = _variant_dir(out_root, v, seed, n_seeds)
@@ -381,6 +390,17 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                         seed_mismatch = True
                     if seed_mismatch:
                         mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
+                    if "use_sdpa_standard" in cfg:
+                        attention_key_seen = True
+                        sdpa_on = bool(cfg.get("use_sdpa_standard"))
+                        # 含集中度项的门控必须读取 softmax 概率，无法走 SDPA；
+                        # 其它变体在 sdpa_on 时走 SDPA。若配置开启 SDPA，两类
+                        # 变体的注意力实现就不同，PPL 差异不能全部归因于门控。
+                        needs_probs = v in ("lega", "lega_no_len",
+                                            "lega_no_query", "lega_conc_only")
+                        attention_backends[v] = (
+                            "explicit" if needs_probs or not sdpa_on
+                            else "sdpa")
                     ctrl = {k: val for k, val in cfg.items()
                             if k not in _AUDIT_EXEMPT_KEYS}
                     if ref is None:
@@ -467,6 +487,13 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             if diffs:
                 meta_mismatches.append(f"{name} 相对 {a_ref_name} 的差异: "
                                        + "; ".join(diffs))
+    mixed_attention = []
+    if attention_key_seen and len(set(attention_backends.values())) > 1:
+        by_backend = {}
+        for v, b in attention_backends.items():
+            by_backend.setdefault(b, []).append(v)
+        mixed_attention = [f"{b}: {', '.join(sorted(vs))}"
+                           for b, vs in sorted(by_backend.items())]
     if missing:
         print(f"[audit] 警告：缺少 {len(missing)} 个 run 的 config_used.json，"
               f"无法核对受控变量: {', '.join(missing[:6])}"
@@ -475,6 +502,13 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         print(f"[audit] 警告：缺少 {len(meta_missing)} 个 run 的 eval.json，"
               f"无法核对数据指纹/代码版本/训练步数: {', '.join(meta_missing[:6])}"
               + (" ..." if len(meta_missing) > 6 else ""))
+    if mixed_attention:
+        mismatches.append(
+            "注意力实现路径不一致（来自 use_sdpa_standard=true）："
+            + "；".join(mixed_attention)
+            + "。含集中度项的变体必须走显式 softmax，而其它变体走 SDPA，"
+              "两者数值/内核不同；正式对比请设 use_sdpa_standard=false，"
+              "让全部变体共用显式路径（延迟评测仍可单独测 standard_sdpa）")
     if mismatches or meta_mismatches:
         msg = ("受控变量自检失败：对比实验除待验证模块外必须完全一致，"
                "否则观测差异不能归因于方法本身。\n  - "
@@ -492,9 +526,12 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         print(f"[audit] 早停启用：{len(early_stop_runs)} 个 run 未跑满计划步数"
               f"（{', '.join(early_stop_runs[:6])}"
               + (" ..." if len(early_stop_runs) > 6 else "")
-              + "）；实际步数差异已如实记录，按计划步数核对可比性")
+              + "）；实际训练预算不等，预注册判定将按计划步数核对并降级为探索性")
     return {"ok": not (mismatches or meta_mismatches), "checked": checked,
             "missing_configs": missing, "mismatches": mismatches,
+            "attention_backends": attention_backends,
+            "mixed_attention": mixed_attention,
+            "training_budget_comparable": not early_stop_runs,
             "meta_checked": meta_checked, "missing_evals": meta_missing,
             "meta_mismatches": meta_mismatches,
             "early_stop_runs": early_stop_runs,
@@ -846,6 +883,17 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
                 t["verdict"] = f"无法检验（n={t['n']} 或方差退化），不作判定"
             elif t["n"] < min_seeds:
                 t["verdict"] = f"种子不足（n={t['n']}<{min_seeds}），无法判定"
+            elif t.get("no_direction"):
+                if t.get("p_adj") is not None and t["p_adj"] < alpha:
+                    t["verdict"] = ("显著偏离可加性（Holm 校正后；"
+                                    "方向见 Δ 符号）")
+                    if ppadj is not None and ppadj >= alpha:
+                        t["verdict"] += "；⚠ 置换检验不显著（见注）"
+                else:
+                    t["verdict"] = ("未检出显著交互（Holm 校正后 p="
+                                    f"{t['p_adj']:.4f}）"
+                                    if t.get("p_adj") is not None
+                                    else "未检出显著交互")
             elif t.get("p_adj") is not None and t["p_adj"] < alpha:
                 better = ((t["mean_diff"] < 0) if t["lower_is_better"]
                           else (t["mean_diff"] > 0))
@@ -866,12 +914,15 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     return tests
 
 
-# 组件有效性判定所用的检验对：组件 -> (去一法检验, 全因子检验)。
-# 去一法: Full−X vs Full；全因子: 仅 X vs 无门控（standard）。
+# 组件有效性判定所用的检验对：组件 -> (去一法检验, 全因子检验, 主指标)。
+# 去一法: Full−X vs Full；全因子: 仅 X vs gate_only（已有门但无 A/B/C）。
+# 主指标按 preregistration/hypotheses.json 的登记口径固定：A/B 在语言建模
+# PPL，C 在长上下文 RULER。另一指标只作探索性补充，不能用来“换个指标再
+# 判一次”以规避多重比较（两族分别 Holm 后取 OR 会放大假阳性）。
 COMPONENT_TESTS = (
-    ("A 查询项", ("lega_no_query", "lega"), ("qgate", "standard")),
-    ("B 集中度证据", ("lega_no_conc", "lega"), ("lega_conc_only", "standard")),
-    ("C 长度校准", ("lega_no_len", "lega"), ("lega_len_only", "standard")),
+    ("A 查询项", ("lega_no_query", "lega"), ("qgate", "gate_only"), "PPL"),
+    ("B 集中度证据", ("lega_no_conc", "lega"), ("lega_conc_only", "gate_only"), "PPL"),
+    ("C 长度校准", ("lega_no_len", "lega"), ("lega_len_only", "gate_only"), "RULER平均"),
 )
 _EVIDENCE_METRICS = ("PPL", "RULER平均")
 
@@ -890,53 +941,96 @@ def _effect_status(t, removing: bool) -> dict:
 
     removing=True（去一法）：候选=去掉组件的 Full−X，显著变差才算证据；
     removing=False（全因子）：候选=仅含该组件的 X，显著变好才算证据。
+    opposite=True 表示检验显著但方向相反——这是“去掉反而更好/加入反而
+    更差”的反证，不能被同一组件的另一套消融静默抵消。
     """
     if t is None:
-        return {"supported": False, "reason": "无对应检验（变体未运行）",
-                "p_adj": None}
+        return {"supported": False, "opposite": False,
+                "reason": "无对应检验（变体未运行）", "p_adj": None}
     if t.get("n") is not None and t["n"] < MIN_SEEDS:
-        return {"supported": False, "reason": f"种子不足（n={t['n']}）",
-                "p_adj": t.get("p_adj")}
+        return {"supported": False, "opposite": False,
+                "reason": f"种子不足（n={t['n']}）", "p_adj": t.get("p_adj")}
     if (t.get("mean_diff") is None or t.get("p_adj") is None
             or t.get("p_adj") >= ALPHA):
-        return {"supported": False, "reason": "Holm 校正后不显著",
-                "p_adj": t.get("p_adj")}
+        return {"supported": False, "opposite": False,
+                "reason": "Holm 校正后不显著", "p_adj": t.get("p_adj")}
     lb = bool(t.get("lower_is_better"))
     if removing:
         evidence = (t["mean_diff"] > 0) if lb else (t["mean_diff"] < 0)
     else:
         evidence = (t["mean_diff"] < 0) if lb else (t["mean_diff"] > 0)
-    return {"supported": bool(evidence),
-            "reason": "显著" if evidence else "方向相反（去掉反而更好/加入反而更差）",
+    return {"supported": bool(evidence), "opposite": not evidence,
+            "reason": ("显著" if evidence
+                       else "方向相反（去掉反而更好/加入反而更差）"),
             "p_adj": t.get("p_adj")}
+
+
+def _combine_component_evidence(loo: dict, add: dict) -> dict:
+    """合并去一法与全因子两套消融证据，显式处理方向冲突。
+
+    规则（与汇总页注释一致）：
+      * 两套均支持 -> 有证据支持（一致）；
+      * 仅一套支持、另一套不显著 -> 有证据支持（另一套未检出，可能功效不足）；
+      * 任一套显著反向 -> 证据冲突（即使另一套支持也不能宣称有用）；
+      * 都无显著证据 -> 证据不足。
+    """
+    # 任一预注册主指标上的显著反向本身就是反证；另一套“未检出”不能把
+    # 它稀释成“证据不足”。只有两套都不显著/都不支持时才是证据不足。
+    if loo.get("opposite") or add.get("opposite"):
+        conflict = True
+    else:
+        conflict = False
+    if conflict:
+        return {"has_evidence": False, "consistent": False,
+                "verdict": "证据冲突（一套消融显著反向）"}
+    if loo.get("supported") and add.get("supported"):
+        return {"has_evidence": True, "consistent": True,
+                "verdict": "有证据支持（两套消融一致）"}
+    if loo.get("supported"):
+        return {"has_evidence": True, "consistent": False,
+                "verdict": "有证据支持（仅去一法；全因子未检出）"}
+    if add.get("supported"):
+        return {"has_evidence": True, "consistent": False,
+                "verdict": "有证据支持（仅全因子；去一法未检出）"}
+    return {"has_evidence": False, "consistent": False, "verdict": "证据不足"}
 
 
 def component_evidence(tests) -> list:
     """由配对检验结果汇总各组件（A/B/C）是否“有用”的统计证据。
 
-    组件有用的判定必须有可检验的显著证据，而不是组合是否跑全：
-    去一法（Full−X 显著变差）或全因子（仅 X 显著优于无门控）任一方向成立
-    才算“有证据支持”；所有方向均不显著/种子不足则记“证据不足”。调用方
-    据此决定能否下“各组件均有用”的结论。
+    统计口径：
+      * 判定只用预注册主指标（A/B=PPL，C=RULER），另一指标作为探索性
+        补充展示——两族分别 Holm 后再取 OR 等于给同一主张两次显著性机会；
+      * 去一法（Full−X 显著变差）与全因子（X-only 显著优于 gate_only）
+        两套证据合并且检测方向冲突；gate_only 只含门控偏置 d、不含
+        A/B/C，避免把“输出门本身”算作组件收益；
+      * 任一套显著反向时判“证据冲突”，不再宣称该组件有用。
     """
     out = []
-    for name, loo_pair, add_pair in COMPONENT_TESTS:
+    for name, loo_pair, add_pair, primary in COMPONENT_TESTS:
         item = {"component": name, "loo_pair": list(loo_pair),
-                "add_pair": list(add_pair), "loo": {}, "add": {},
-                "supported": []}
-        best_detail = {}
+                "add_pair": list(add_pair), "primary_metric": primary,
+                "loo": {}, "add": {}, "supported": []}
         for metric in _EVIDENCE_METRICS:
-            loo = _effect_status(_find_test(tests, loo_pair, metric), True)
-            add = _effect_status(_find_test(tests, add_pair, metric), False)
-            item["loo"][metric] = loo
-            item["add"][metric] = add
-            if loo["supported"] or add["supported"]:
-                item["supported"].append(metric)
-                best_detail[metric] = {
-                    "direction": "loo" if loo["supported"] else "add",
-                    "p_adj": (loo if loo["supported"] else add)["p_adj"]}
-        item["evidence"] = best_detail
-        item["verdict"] = "有证据支持" if item["supported"] else "证据不足"
+            item["loo"][metric] = _effect_status(
+                _find_test(tests, loo_pair, metric), True)
+            item["add"][metric] = _effect_status(
+                _find_test(tests, add_pair, metric), False)
+        loo_p = item["loo"][primary]
+        add_p = item["add"][primary]
+        combined = _combine_component_evidence(loo_p, add_p)
+        if combined["has_evidence"]:
+            item["supported"].append(primary)
+        item.update(combined)
+        item["evidence"] = ({primary: {
+            "direction": ("loo" if loo_p["supported"] else "add"),
+            "p_adj": (loo_p if loo_p["supported"] else add_p).get("p_adj")}}
+            if combined["has_evidence"] else {})
+        item["secondary"] = {
+            metric: {"exploratory": True,
+                     "loo_supported": item["loo"][metric]["supported"],
+                     "add_supported": item["add"][metric]["supported"]}
+            for metric in _EVIDENCE_METRICS if metric != primary}
         out.append(item)
     return out
 
@@ -987,6 +1081,78 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
         res.update({"candidate": v, "reference": AUROC_DIFF_REFERENCE,
                     "metric": metric, "lower_is_better": False})
         out.append(_enrich_paired(res, a, b))
+    return out
+
+
+# 全因子 2^3 单元格到变体的映射（用于交互效应检验）。
+# “none”用 gate_only 而不是 standard：8 个 gated 单元格共享输出门，
+# 交互对比必须在同一个门内比较 A/B/C；用无门的 standard 会把门本身
+# 重新混进交互项（正是 gate_only 要隔离的混杂）。
+_FACTORIAL_CONTRAST_CELLS = {
+    "none": "gate_only", "A": "qgate", "B": "lega_conc_only",
+    "C": "lega_len_only", "AB": "lega_no_len", "AC": "lega_no_conc",
+    "BC": "lega_no_query", "ABC": "lega",
+}
+# 交互对比式（对第三个因子的两个水平取平均）：
+#   I_AB = ½[(AB−A−B+none) + (ABC−AC−BC+C)]
+#   I_AC = ½[(AC−A−C+none) + (ABC−AB−BC+B)]
+#   I_BC = ½[(BC−B−C+none) + (ABC−AB−AC+A)]
+_FACTORIAL_CONTRASTS = {
+    "A×B": (("AB", "A", "B", "none"), ("ABC", "AC", "BC", "C")),
+    "A×C": (("AC", "A", "C", "none"), ("ABC", "AB", "BC", "B")),
+    "B×C": (("BC", "B", "C", "none"), ("ABC", "AB", "AC", "A")),
+}
+
+
+def _factorial_interaction_tests(runs) -> list:
+    """全因子 2^3 设计的交互效应检验（探索性，独立指标家族）。
+
+    组件主效应“有没有用”不等于“效应可加”：A 的收益可能在已有 B 时缩小
+    （次可加）或放大（协同）。逐种子计算标准 2^3 交互对比（对第三个因子
+    取平均），再对该对比做单样本配对 t 检验（H0：交互=0）。交互检验没有
+    预注册方向，因此只报“是否显著偏离可加性”与 Δ 符号，不套用“优/劣”。
+    基准格是 gate_only（有门但无 A/B/C），不是无门的 standard。
+    """
+    out = []
+    runs = runs if isinstance(runs, dict) else {}
+    for metric, extractor in (
+            ("PPL", lambda slot: _ppl_of(slot.get("eval"))),
+            ("RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")))):
+        maps = {cell: _variant_seed_map(runs, v)
+                for cell, v in _FACTORIAL_CONTRAST_CELLS.items()}
+        if any(not m for m in maps.values()):
+            continue
+        seeds = _sorted_seeds(maps["none"])
+        for pair, (slice_a, slice_b) in _FACTORIAL_CONTRASTS.items():
+            vals = []
+            for s_ in seeds:
+                terms = []
+                ok = True
+                for cell, sign in zip(slice_a, (1, -1, -1, 1)):
+                    v = extractor(maps[cell].get(s_))
+                    if v is None:
+                        ok = False
+                        break
+                    terms.append(sign * v)
+                if not ok:
+                    continue
+                second = []
+                for cell, sign in zip(slice_b, (1, -1, -1, 1)):
+                    v = extractor(maps[cell].get(s_))
+                    if v is None:
+                        ok = False
+                        break
+                    second.append(sign * v)
+                if not ok:
+                    continue
+                vals.append(0.5 * (sum(terms) + sum(second)))
+            if not vals:
+                continue
+            res = paired_t_test(vals, [0.0] * len(vals))
+            res.update({"candidate": f"{pair} 交互", "reference": "可加性（交互=0）",
+                        "metric": metric + "交互", "lower_is_better": True,
+                        "no_direction": True, "interaction": pair})
+            out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
     return out
 
 
@@ -1248,6 +1414,31 @@ def apply_scope_gate(hyp_eval: list, scope_check: dict) -> list:
             continue
         if h.get("confirmatory_valid") is False:
             continue  # 已因完整性失败降级，保留原原因
+        h["confirmatory_valid"] = False
+        h["confirmatory_note"] = reason
+    return hyp_eval
+
+
+def apply_budget_gate(hyp_eval: list, audit: dict) -> list:
+    """早停导致实际训练量不等时，确认性判定显式降级。
+
+    对比实验要求除待验证模块外的训练预算一致；早停按各变体自己的验证曲线
+    停在不同步数，实际 tokens_seen 因变体而异。计划步数相同并不能消除
+    “有效训练量不同”这一混杂，因此确认性结论降级为探索性，直到用相同
+    实际步数重跑。
+    """
+    audit = _as_dict(audit)
+    stopped = _as_text_list(audit.get("early_stop_runs"))
+    if not stopped:
+        return hyp_eval
+    reason = ("早停使实际训练量不一致（" + "；".join(stopped[:4])
+              + (" ..." if len(stopped) > 4 else "")
+              + "）：确认性判定降级为探索性；请在相同实际步数下重跑")
+    for h in (hyp_eval if isinstance(hyp_eval, list) else []):
+        if not isinstance(h, dict):
+            continue
+        if h.get("confirmatory_valid") is False:
+            continue
         h["confirmatory_valid"] = False
         h["confirmatory_note"] = reason
     return hyp_eval
@@ -2593,6 +2784,12 @@ def build_summary(results_dir: str, audit: dict = None,
     leafless = ("lega_no_len", "lega_no_conc", "lega_no_query",
                 "lega_conc_only", "lega_len_only")
     pairs += [(c, "lega") for c in leafless]
+    # 组件“加入 X”的受控对照：X-only vs 只含门控偏置的 gate_only。
+    # standard 不是合适对照——它连输出门都没有，qgate/B-only/C-only 相对
+    # standard 的差异混入了“门本身”的效应。
+    if "gate_only" in runs:
+        pairs += [(c, "gate_only") for c in
+                  ("qgate", "lega_conc_only", "lega_len_only")]
     # 预注册假设涉及的变体间对照必须可估计：登记的 (候选, 参照) 若不在
     # 常规矩阵里（如 lega vs qgate 的“vs 已有工作”主张），在此补入，
     # 保证每条 confirmatory 主张都有对应检验，而不是“登记了却没检验”。
@@ -2618,6 +2815,7 @@ def build_summary(results_dir: str, audit: dict = None,
     # 以及不平衡口径下的 PR-AUC 配对差（两族分别 Holm 校正）
     tests += _auroc_diff_tests(runs)
     tests += _ap_diff_tests(runs)
+    tests += _factorial_interaction_tests(runs)
     tests = _apply_holm(tests)
     comp = component_evidence(tests)
     # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
@@ -2627,10 +2825,12 @@ def build_summary(results_dir: str, audit: dict = None,
     # 范围门：登记表完整还不够——本次 run 必须真的落在登记的实验范围内
     # （config 规模/数据/种子计划），否则同样不能给 confirmatory 判定。
     scope_check = registration_scope_check(registered, repro)
-    hyp_eval = apply_scope_gate(
-        apply_integrity_gate(
-            evaluate_registered_hypotheses(registered, tests), integrity),
-        scope_check)
+    hyp_eval = apply_budget_gate(
+        apply_scope_gate(
+            apply_integrity_gate(
+                evaluate_registered_hypotheses(registered, tests), integrity),
+            scope_check),
+        audit)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -2857,8 +3057,10 @@ def build_summary(results_dir: str, audit: dict = None,
                     f"- ⏹ 早停启用：{len(stopped)} 个 run 未跑满"
                     f"计划步数（{', '.join(stopped[:8])}"
                     + (" …" if len(stopped) > 8 else "")
-                    + "）：实际步数可因验证曲线不同而不同（早停的定义），"
-                    "受控变量按计划步数核对；逐 run 实际步数与 tokens_seen "
+                    + "）：实际步数/tokens_seen 因验证曲线不同而不同，"
+                    "有效训练预算不等；受控变量按计划步数核对，但预注册"
+                    "确认性判定已自动降级为探索性（见 `significance.json` "
+                    "的 registered_hypotheses）。逐 run 实际步数与 tokens_seen "
                     "见各 eval.json。")
         else:
             md.append(f"- ❌ 未通过：{audit.get('mismatches') or audit}")
@@ -3446,6 +3648,7 @@ def build_summary(results_dir: str, audit: dict = None,
     factorial_done = [(name, v) for name, v in FACTORIAL_CELLS if v in present]
     factorial_missing = [(name, v) for name, v in FACTORIAL_CELLS if v not in present]
     loo_missing = [(name, v) for name, v in LOO_CELLS if v not in present]
+    control_missing = [(name, v) for name, v in CONTROL_CELLS if v not in present]
     rows_by_var = {r["variant"]: r for r in rows}
     md.append("| 组合 | 变体 | PPL↓ | RULER平均↑ |")
     md.append("|---|---|---|---|")
@@ -3457,11 +3660,27 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"{fmt_stat_cell(r, 'ruler_avg')} |")
         else:
             md.append(f"| {name} | {v}（未运行） | - | - |")
-    if not factorial_missing:
+    for name, v in CONTROL_CELLS:
+        r = rows_by_var.get(v)
+        if r:
+            md.append(f"| {name} | {VARIANT_CN.get(v, v)} | "
+                      f"{fmt_stat_cell(r, 'val_ppl')} | "
+                      f"{fmt_stat_cell(r, 'ruler_avg')} |")
+        else:
+            md.append(f"| {name} | {v}（未运行） | - | - |")
+    if not factorial_missing and not control_missing:
         md.append("")
-        md.append("全因子组合覆盖 8/8、去一法覆盖完整；但组合覆盖只是必要条件，"
-                  "组件是否有用须以下方统计证据为准。")
-    elif not loo_missing:
+        md.append("全因子组合覆盖 8/8、去一法覆盖完整、gate_only 对照已运行；"
+                  "但组合覆盖只是必要条件，组件是否有用须以下方统计证据为准。"
+                  "gate_only 只含可学习门偏置 d，是“有门但无 A/B/C”的对照："
+                  "standard vs gate_only 度量门本身，X-only vs gate_only 才是"
+                  "组件 X 的受控效应。")
+    elif not factorial_missing and control_missing:
+        md.append("")
+        md.append("⚠ 全因子 8/8 完整，但缺少 gate_only 对照：X-only vs standard "
+                  "会把“输出门本身”的效应算进组件收益，组件结论不完整；"
+                  "请补跑 `gate_only` 后重跑汇总。")
+    elif not loo_missing and not factorial_missing:
         md.append("")
         md.append("⚠ 已覆盖去一法（Full/Full−A/Full−B/Full−C），但全因子缺失组合："
                   + "、".join(f"{n}({v})" for n, v in factorial_missing)
@@ -3472,12 +3691,17 @@ def build_summary(results_dir: str, audit: dict = None,
                   + "、".join(f"{n}({v})" for n, v in factorial_missing)
                   + "；去一法缺失 "
                   + "、".join(f"{n}({v})" for n, v in loo_missing)
+                  + ("；gate_only 对照缺失 " + "、".join(v for _, v in control_missing)
+                     if control_missing else "")
                   + "。仅凭部分组合无法支撑“每个组件都有用”，请补齐后重跑。")
 
     # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
     md += ["", "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）", ""]
-    md.append("| 组件 | 去一法 Full−X vs Full | 全因子 X vs 无门控 | 判定 |")
-    md.append("|---|---|---|---|")
+    md.append("判定只用预注册主指标（A/B=PPL，C=RULER）；另一指标仅作探索性"
+              "补充，不参与判定，避免两个指标族分别校正后取 OR 放大假阳性。")
+    md.append("")
+    md.append("| 组件 | 主指标 | 去一法 Full−X vs Full | 全因子 X vs gate_only | 判定 |")
+    md.append("|---|---|---|---|---|")
 
     def _fmt_evidence(st):
         p = st.get("p_adj")
@@ -3489,34 +3713,77 @@ def build_summary(results_dir: str, audit: dict = None,
                              for m in _EVIDENCE_METRICS)
         add_cells = "；".join(f"{m}: {_fmt_evidence(c['add'][m])}"
                              for m in _EVIDENCE_METRICS)
-        md.append(f"| {c['component']} | {loo_cells} | {add_cells} | "
-                  f"{c['verdict']} |")
+        md.append(f"| {c['component']} | {c['primary_metric']} | {loo_cells} | "
+                  f"{add_cells} | {c['verdict']} |")
     supported = [c["component"] for c in comp if c["supported"]]
     unsupported = [c["component"] for c in comp if not c["supported"]]
+    inconsistent = [c["component"] for c in comp if not c.get("consistent")]
     if not comp:
         md.append("")
         md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
-    elif not unsupported and not factorial_missing:
+    elif (not unsupported and not factorial_missing and not control_missing
+          and not inconsistent):
         md.append("")
-        md.append("✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均至少在一个指标上"
-                  "有 Holm 校正后的显著证据，且全因子消融 8/8 完整；"
-                  "去一法与全因子两套消融可交叉印证。")
+        md.append("✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均在预注册主指标上"
+                  "有 Holm 校正后的显著证据，去一法与全因子两套消融一致，"
+                  "且全因子 8/8、gate_only 对照完整。")
+    elif (not unsupported and not factorial_missing and not control_missing):
+        md.append("")
+        md.append("✅ 统计证据支持各组件有用，但仅部分组件同时得到两套消融支持："
+                  + "、".join(inconsistent)
+                  + "；另一套未检出可能只是功效不足，报告时不得写成"
+                  "“两套消融交叉印证”。")
     else:
         md.append("")
         if unsupported:
             md.append("⚠ **不能下“各组件均有用”的结论**："
                       + "、".join(unsupported)
-                      + " 缺少 Holm 校正后的显著证据（幅度不足、方向相反或"
-                      "种子数不够）；组合齐全并不等于组件有效。")
+                      + " 缺少主指标上 Holm 校正后的显著证据（幅度不足、方向相反、"
+                      "证据冲突或种子数不够）；组合齐全并不等于组件有效。")
         if factorial_missing:
             md.append("⚠ 全因子缺失组合："
                       + "、".join(f"{n}({v})" for n, v in factorial_missing)
                       + "，组件单独贡献的覆盖不完整。")
+        if control_missing:
+            md.append("⚠ 缺少 gate_only 对照，组件“加入 X”的效应仍混有门本身；"
+                      "不能宣称组件各自有用。")
+    stopped_comp = _as_text_list((audit or {}).get("early_stop_runs"))
+    if stopped_comp:
+        md.append("")
+        md.append(f"⚠ 早停导致实际训练量不等（{len(stopped_comp)} 个 run）："
+                  "下方组件证据仍按配对检验数值报告，但属于探索性分析；"
+                  "确认性结论需在相同实际步数下重跑。")
     md.append("")
     md.append("注: 去一法证据=去掉该组件的 Full−X 显著差于 Full（去掉有害）；"
-              "全因子证据=仅含该组件的 X 显著优于无门控 standard（只加它也有收益）。"
-              "判定要求方向正确且 Holm 校正后 p<0.05、种子数≥3；"
-              "两套消融结论不一致时应以“证据不足”处理并补实验。")
+              "全因子证据=仅含该组件的 X 显著优于 gate_only（只加它、且已有"
+              "门偏置时仍有收益）。判定要求方向正确且 Holm 校正后 p<0.05、"
+              "种子数≥3；任一套显著反向记“证据冲突”，以证据不足处理。")
+
+    # --- 全因子交互效应（探索性）：主效应有用 ≠ 可加。A 的收益可能在已有
+    #     B 时缩小（次可加）或放大（协同）；以 gate_only 为无组件基准，
+    #     逐种子算 8 个 gated 单元格的 2^3 交互对比并检验。
+    inter = [t for t in tests if t.get("interaction")]
+    md += ["", "### 门控内 2^3 交互效应（探索性，独立 Holm 家族）", "",
+           "以 `gate_only`（有门但无 A/B/C）为无组件基准，比较 8 个 gated "
+           "单元格；交互=0 表示两个组件的效应可加，显著非零说明同时加入"
+           "两者时收益不能按单组件加总。该检验未预注册方向，只报是否偏离"
+           "可加性与 Δ 符号（PPL 越小越好、RULER 越大越好，符号解释随指标而变）。",
+           "", "| 交互 | 指标 | Δ均值 ± Δ标准差 | n | p_adj(Holm) | "
+           "结论 |", "|---|---|---|---|---|---|"]
+    if inter:
+        for t in inter:
+            std = t.get("std_diff")
+            delta = (f"{t['mean_diff']:+.4f}"
+                     + (f" ± {std:.4f}" if std is not None else ""))
+            padj = (f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-")
+            md.append(f"| {t['interaction']} | {t['metric']} | {delta} | "
+                      f"{t['n']} | {padj} | {t.get('verdict', '-')} |")
+    else:
+        md.append("（缺少完整 8 格或全部种子不足，无法计算交互对比）")
+    md.append("")
+    md.append("注: 交互对比以 gate_only 为无组件基准，对第三个因子的两个水平"
+              "取平均，逐种子单样本配对检验；n<3 或 Holm 校正后不显著只表示"
+              "未检出，不等于交互不存在。")
 
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
@@ -3525,6 +3792,8 @@ def build_summary(results_dir: str, audit: dict = None,
                   "p_adj(Holm) | p_perm(Holm) | MDE | 结论 |")
         md.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for t in tests:
+            if t.get("interaction"):
+                continue  # 交互效应单独成表，避免与主效应表重复
             if t.get("mean_diff") is None:
                 continue
             std = t.get("std_diff")
@@ -3861,6 +4130,11 @@ def build_summary(results_dir: str, audit: dict = None,
                             "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
                             "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"),
                    "component_evidence": comp,
+                   "training_budget": {
+                       "comparable": not _as_text_list(
+                           (audit or {}).get("early_stop_runs")),
+                       "early_stop_runs": _as_text_list(
+                           (audit or {}).get("early_stop_runs"))},
                    "registered_hypotheses": hyp_eval,
                    "registered_hypotheses_source": (
                        "preregistration/hypotheses.json" if hyp_eval else None),
@@ -3868,6 +4142,12 @@ def build_summary(results_dir: str, audit: dict = None,
                    "registration_scope": scope_check,
                    "ngram_comparison": ngram_cmp,
                    "linear_probe_comparison": probe_cmp,
+                   "factorial_interactions": [
+                       t for t in tests if t.get("interaction")],
+                   "factorial_interactions_note": (
+                       "全因子 2^3 的 A×B/A×C/B×C 交互对比（探索性，独立 "
+                       "Holm 家族，基准 gate_only）：交互=0 表示组件效应可加；"
+                       "显著非零说明同时加入两个组件时收益不能按单加总"),
                    "auroc_diff_note": (
                        f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
                        "(变体, 种子) run 的 auroc_logit − auroc_qterm 配对差，"

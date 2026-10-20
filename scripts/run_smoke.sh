@@ -12,7 +12,7 @@ python -m tests.run_tests
 echo "=== [2/3] 生成伪数据 ==="
 python scripts/make_dummy_data.py --out_dir data/dummy
 
-echo "=== [3/3] 全流水线冒烟（tiny, 9 变体 x 20 步） ==="
+echo "=== [3/3] 全流水线冒烟（tiny, 10 变体 x 20 步） ==="
 python run_all.py --config configs/tiny.json --data_dir data/dummy --smoke "$@"
 
 echo "冒烟测试完成: results/tiny_smoke/summary.md"

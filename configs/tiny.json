@@ -1,5 +1,5 @@
 {
-  "_说明": "tiny 冒烟/快速验证配置 (~6.8M 参数, CPU 可跑)。正式实验用 configs/small.json",
+  "_说明": "tiny 冒烟/快速验证配置 (~6.8M 参数, CPU 可跑)。正式实验用 configs/small.json；use_sdpa_standard=false 使全部变体共用显式注意力路径",
   "d_model": 128,
   "n_layers": 2,
   "n_heads": 2,
@@ -8,7 +8,7 @@
   "dropout": 0.0,
   "attn_dropout": 0.0,
   "gate_bias_init": 2.0,
-  "use_sdpa_standard": true,
+  "use_sdpa_standard": false,
 
   "batch_size": 16,
   "grad_accum": 1,

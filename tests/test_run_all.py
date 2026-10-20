@@ -17,7 +17,9 @@ from unittest import mock
 
 from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _eval_matches_window_spec, _lat_noise_pct,
+                      _enrich_paired, _eval_matches_window_spec,
+                      _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
+                      _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _ppl_ci_rel_pct, _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _ruler_avg_micro,
@@ -25,7 +27,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
-                      apply_integrity_gate, apply_scope_gate,
+                      apply_budget_gate, apply_integrity_gate, apply_scope_gate,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
                       component_evidence, cross_variant_badcase_map,
@@ -183,25 +185,50 @@ def test_apply_holm_verdicts():
 
 def test_component_evidence_requires_significance():
     tests = [
-        # A：去一法 Full−A 显著变差（PPL 变大）→ 有证据
+        # A：去一法 Full−A 显著变差（PPL 变大）→ 有证据；全因子未检出
         _mk("lega_no_query", "lega", "PPL", 0.4, 0.005),
-        _mk("qgate", "standard", "PPL", -0.01, 0.7),
+        _mk("qgate", "gate_only", "PPL", -0.01, 0.7),
         # B：两个方向都不显著 → 无证据
         _mk("lega_no_conc", "lega", "PPL", 0.05, 0.5),
-        _mk("lega_conc_only", "standard", "PPL", -0.02, 0.6),
-        # C：方向相反（去掉反而更好），即使显著也不算“该组件有用”
+        _mk("lega_conc_only", "gate_only", "PPL", -0.02, 0.6),
+        # C：PPL 上去掉反而更好（显著），但 C 的主指标是 RULER；RULER 未检验
         _mk("lega_no_len", "lega", "PPL", -0.1, 0.001),
-        _mk("lega_len_only", "standard", "PPL", 0.03, 0.4),
+        _mk("lega_len_only", "gate_only", "PPL", 0.03, 0.4),
     ]
     _apply_holm(tests)
     comp = {c["component"]: c for c in component_evidence(tests)}
     assert comp["A 查询项"]["supported"] == ["PPL"]
-    assert comp["A 查询项"]["verdict"] == "有证据支持"
+    assert comp["A 查询项"]["verdict"].startswith("有证据支持")
+    assert comp["A 查询项"]["primary_metric"] == "PPL"
     assert comp["B 集中度证据"]["verdict"] == "证据不足"
-    # C 的去一法方向相反：不构成有用证据
+    # C 的主指标是 RULER；PPL 上的（相反）结果只能作探索性补充
     assert comp["C 长度校准"]["verdict"] == "证据不足"
+    assert comp["C 长度校准"]["primary_metric"] == "RULER平均"
     assert "方向相反" in comp["C 长度校准"]["loo"]["PPL"]["reason"]
-    print("  [ok] component_evidence（去一法/全因子证据、方向与显著性门槛）")
+    assert comp["C 长度校准"]["secondary"]["PPL"]["exploratory"] is True
+    print("  [ok] component_evidence（主指标判定/去一法/全因子/方向门槛）")
+
+
+def test_component_evidence_flags_contradiction():
+    """一套消融显著支持、另一套显著反向时必须判冲突，不能用 OR 静默取胜。"""
+    tests = [
+        _mk("lega_no_query", "lega", "PPL", 0.4, 0.005),   # 去 A 变差：支持
+        _mk("qgate", "gate_only", "PPL", 0.3, 0.004),      # 加 A 反而变差：反向
+    ]
+    _apply_holm(tests)
+    a = next(c for c in component_evidence(tests) if c["component"] == "A 查询项")
+    assert a["supported"] == []
+    assert a["verdict"].startswith("证据冲突")
+    # 只有一套显著反向、另一套不显著时仍必须判冲突，不能降格成“证据不足”
+    one_sided = [
+        _mk("lega_no_query", "lega", "PPL", 0.4, 0.5),      # 去 A 不显著
+        _mk("qgate", "gate_only", "PPL", 0.3, 0.005),       # 加 A 显著反向
+    ]
+    _apply_holm(one_sided)
+    a2 = next(c for c in component_evidence(one_sided)
+              if c["component"] == "A 查询项")
+    assert a2["verdict"].startswith("证据冲突"), a2
+    print("  [ok] component_evidence（任一套显著反向 -> 证据冲突，另一套不显著亦然）")
 
 
 def test_tradeoff_verdict_rejects_bad_deals():
@@ -492,6 +519,41 @@ def test_verify_controlled_setup_consistency():
     finally:
         shutil.rmtree(tmp2, ignore_errors=True)
     print("  [ok] verify_controlled_setup（数据/代码/步数/超参数双层审计）")
+
+
+def test_verify_controlled_setup_rejects_mixed_attention_backend():
+    """standard/legA 开了 SDPA 时实现路径不同；正式对比必须统一为显式路径。"""
+    for sdpa, should_fail in ((True, True), (False, False)):
+        tmp = tempfile.mkdtemp()
+        try:
+            variants, seeds = ["standard", "lega"], [7]
+            for v in variants:
+                d = os.path.join(tmp, v)
+                os.makedirs(d)
+                _write_json(os.path.join(d, "config_used.json"), {
+                    "lr": 0.001, "steps": 10, "warmup": 2,
+                    "use_sdpa_standard": sdpa,
+                    "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
+                _write_json(os.path.join(d, "eval.json"), {
+                    "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef", "config_sha256": "shax",
+                    "steps": 10, "tokens_seen": 1024})
+            if should_fail:
+                try:
+                    verify_controlled_setup(tmp, variants, seeds, 1,
+                                            expected_data_digest="abc123")
+                    raise AssertionError("混合 SDPA/显式路径应触发 SystemExit")
+                except SystemExit:
+                    pass
+            else:
+                audit = verify_controlled_setup(
+                    tmp, variants, seeds, 1, expected_data_digest="abc123")
+                assert audit["ok"]
+                assert audit["attention_backends"] == {
+                    "standard": "explicit", "lega": "explicit"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
 
 
 def test_stat_counts_finite_only():
@@ -955,6 +1017,7 @@ def test_audit_tolerates_early_stop_actual_steps():
         assert audit["ok"], audit
         assert len(audit["early_stop_runs"]) == 1, audit
         assert "lega/seed7" in audit["early_stop_runs"][0]
+        assert audit["training_budget_comparable"] is False, audit
 
         # 计划步数不一致仍是错误（早停不能掩盖"计划就不同"）
         ev = json.load(open(os.path.join(tmp, "lega", "eval.json"),
@@ -990,6 +1053,45 @@ def test_audit_tolerates_early_stop_actual_steps():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 受控变量审计：早停按计划步数核对，非早停差异仍报错")
+
+
+def test_factorial_interaction_contrast_math():
+    """2^3 交互对比公式：A×B=2 时 A×C/B×C 应为 0，且标记为无方向检验。"""
+    base = {"none": 0.0, "A": 1.0, "B": 2.0, "C": 4.0,
+            "AB": 5.0, "AC": 5.0, "BC": 6.0, "ABC": 9.0}
+    runs = {}
+    for cell, variant in _FACTORIAL_CONTRAST_CELLS.items():
+        runs[variant] = {s: {"eval": {"val_ppl": base[cell]}}
+                         for s in (1, 2, 3)}
+    out = _factorial_interaction_tests(runs)
+    assert len(out) == 3, out
+    ppl = {t["interaction"]: t for t in out if t["metric"] == "PPL交互"}
+    assert len(ppl) == 3, out
+    assert abs(ppl["A×B"]["mean_diff"] - 2.0) < 1e-9, ppl["A×B"]
+    assert abs(ppl["A×C"]["mean_diff"]) < 1e-9, ppl["A×C"]
+    assert abs(ppl["B×C"]["mean_diff"]) < 1e-9, ppl["B×C"]
+    assert all(t.get("no_direction") for t in out), out
+    incomplete = {k: v for k, v in runs.items() if k != "lega"}
+    got = [t for t in _factorial_interaction_tests(incomplete)
+           if t["metric"] == "PPL交互"]
+    assert got == [], got
+    print("  [ok] 全因子交互对比：标准 2^3 对比公式、无方向标记与不完整降级")
+
+
+def test_budget_gate_downgrades_confirmatory_on_early_stop():
+    """早停导致实际训练量不等：确认性判定降级，已降级的保留原原因。"""
+    hyp = [{"id": "H1", "status": "支持", "confirmatory_valid": True},
+           {"id": "H2", "status": "未定", "confirmatory_valid": False,
+            "confirmatory_note": "原有原因"}]
+    out = apply_budget_gate(hyp, {
+        "early_stop_runs": ["lega/seed7(step 6/10)"]})
+    assert out[0]["confirmatory_valid"] is False, out
+    assert "早停" in out[0]["confirmatory_note"], out
+    assert out[1]["confirmatory_note"] == "原有原因", out
+    unchanged = [{"id": "H1", "confirmatory_valid": True}]
+    assert apply_budget_gate(unchanged, {"early_stop_runs": []})[0][
+        "confirmatory_valid"] is True
+    print("  [ok] 早停预算门：确认性判定降级为探索性，不覆盖既有降级原因")
 
 
 def test_build_summary_marks_early_stop_run():
