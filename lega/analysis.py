@@ -709,9 +709,13 @@ def main():
               f"[{ap_ci[0]:.3f}, {ap_ci[1]:.3f}]（不平衡下的主指标口径）")
     cal = summary.get("calibration_g") or {}
     if cal.get("brier") is not None:
+        # 单一类别（全 hit 或全 miss）时常数基率 Brier=0，skill 无定义；
+        # 缺省值必须显式显示 n/a，不能拿 None 去做带符号浮点格式化。
+        skill = cal.get("brier_skill")
+        skill_txt = "n/a" if skill is None else f"{skill:+.3f}"
         print(f"[analysis] 门控概率校准：Brier={cal['brier']:.4f}"
-              f"（常数基率基线={cal.get('brier_constant'):.4f}，"
-              f"skill={cal.get('brier_skill'):+.3f}）"
+              f"（常数基率基线={fmt(cal.get('brier_constant'))}，"
+              f"skill={skill_txt}）"
               f" ECE={fmt(cal.get('ece'))}（排序好≠概率可信）")
     probe = summary.get("linear_probe") or {}
     pset = (probe.get("feature_sets") or {}).get(probe.get("primary") or "") or {}
