@@ -307,7 +307,8 @@ def live_overfit_hint(evals_since_improve, best_val, val,
         except (TypeError, ValueError, OverflowError):
             ci_rel = None
     if ci_rel is not None and abs(gap) <= ci_rel + 1e-12:
-        return (f"验证损失变化（较历史最优 {gap:+.1%}）仍在 95% 抽样噪声内"
+        label = "回升" if gap > LIVE_OVERFIT_GAP else "平台"
+        return (f"验证损失{label}（较历史最优 {gap:+.1%}）仍在 95% 抽样噪声内"
                 f"（±{ci_rel:.1%}），已连续 {n} 次评测未改善：先继续观察，"
                 "不要据此加正则化或触发早停；可增大 eval_iters/验证集。")
 
