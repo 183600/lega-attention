@@ -5,6 +5,7 @@
       --out results/tiny/eval_lega.json
 """
 import argparse
+import functools
 import json
 import math
 import os
@@ -26,6 +27,20 @@ from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
 WORST_SCREEN_MAX = 64
 
 
+def _preserve_eval_mode(fn):
+    """评测辅助函数临时切到 eval 并在结束时恢复调用方模式（dropout 不影响结果）。"""
+    @functools.wraps(fn)
+    def wrapper(model, *args, **kwargs):
+        was_training = model.training
+        model.eval()
+        try:
+            return fn(model, *args, **kwargs)
+        finally:
+            if was_training:
+                model.train()
+    return wrapper
+
+
 def _positive_int_or_none(value):
     """配置里的数值→正整数；字符串/非有限浮点/越界值返回 None。"""
     try:
@@ -44,6 +59,7 @@ def worst_window_screening(val_len: int, ctx: int,
 
 
 @torch.inference_mode()
+@_preserve_eval_mode
 def collect_worst_windows(model, val, ctx: int, device: str, tok,
                           n_worst: int = 3, amp: bool = False,
                           max_windows: int = WORST_SCREEN_MAX,

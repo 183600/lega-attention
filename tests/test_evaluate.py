@@ -47,6 +47,27 @@ def test_collect_worst_windows():
           f"gold={rows[0]['gold_next']!r}）")
 
 
+def test_collect_worst_windows_forces_eval_and_restores_mode():
+    """辅助函数必须自己关掉 dropout（否则“最差窗口”不可复现），并恢复调用方模式。"""
+    torch.manual_seed(0)
+    tok = CharTokenizer(sorted("abcdefghij "))
+    model = GPT(vocab_size=len(tok.itos), block_size=64, d_model=32, n_layers=1,
+                n_heads=2, variant="lega", dropout=0.5)
+    val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
+    val = val.astype(np.uint16)
+    model.train()
+    rows_train = collect_worst_windows(model, val, ctx=64, device="cpu",
+                                       tok=tok, n_worst=3, max_windows=32)
+    assert model.training, "调用方模式必须恢复"
+    model.eval()
+    rows_eval = collect_worst_windows(model, val, ctx=64, device="cpu",
+                                      tok=tok, n_worst=3, max_windows=32)
+    assert [r["window"] for r in rows_train] == [r["window"] for r in rows_eval]
+    for a, b in zip(rows_train, rows_eval):
+        assert math.isclose(a["loss"], b["loss"], rel_tol=1e-6, abs_tol=1e-6)
+    print("  [ok] 最差窗口固定 eval、关闭 dropout 并恢复调用方模式")
+
+
 def test_worst_window_screening_scope_is_recorded():
     """最差窗口必须连同“候选/总窗口数”一起落盘：不能把子集最差当成全量最差。"""
     val = np.zeros(64 * 34, dtype=np.uint16)
