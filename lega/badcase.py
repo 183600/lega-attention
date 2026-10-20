@@ -204,6 +204,9 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
             "评测", "低", f"仅 {n} 条错误样本，模式不具统计意义",
             "先扩大评测规模再按归因下结论（单条错误可能是偶然）",
             "把 RULER n_samples/ctx_lens 提高到每格 ≥20 个样本"))
+        # 样本不足时任何类别占比/深位比例都只是 1~2 条的偶然结果；继续
+        # 输出“高优先级模型改进方向”会把噪声包装成证据。只保留扩样提示。
+        return recs[:MAX_ADVICE]
     le = int(ana.get("label_errors") or 0)
     if le:
         recs.append(_advice(
@@ -625,6 +628,8 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             "评测", "低", f"仅 {n} 个最差窗口，模式不具统计意义",
             "先扩大 worst_n/评测窗口数再按归因下结论",
             "把 --worst_n 提高到 ≥10 并跨更多窗口采样"))
+        # 同 synthesize_ruler_improvements：窗口太少时不下高/中优先级结论。
+        return recs[:MAX_ADVICE]
     cb = counts.get("confident_bias", 0)
     if _share(cb, n) >= DOMINANT_SHARE:
         # 分支判定只看 confident_bias 这批窗口：全局 gold_in_context_rate 会把

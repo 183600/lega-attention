@@ -753,19 +753,27 @@ def test_window_advice_uses_confident_bias_subset_rate():
     “注意力是否落在 gold 跨度”，把长尾失败误归因为检索失败。
     """
     wins = [
-        # confident_bias：高置信错答，gold 从未出现在窗口里
+        # confident_bias：高置信错答，gold 从未出现在窗口里（3 条，
+        # 避免落入“样本不足只提示扩样”的分支）
         _win(gold="zzz", tail="no match here",
-             pred_top5=[[" red", 0.85]]),
-        # repetition_attractor：gold 在上下文尾出现，抬高全局可见率
+             pred_top5=[[" red", 0.85]]) for _ in range(3)
+    ] + [
+        # repetition_attractor：gold 在上下文尾出现，把全局可见率抬到 0.5
         _win(gold=" blue", tail="a blue car",
-             pred_top5=[[" car", 0.2]]),
+             pred_top5=[[" car", 0.2]]) for _ in range(3)
     ]
     ana = analyze_worst_windows(wins, variant="lega")
-    assert ana["category_counts"]["confident_bias"] == 1
+    assert ana["category_counts"]["confident_bias"] == 3
     assert ana["gold_in_context_rate"] == 0.5
     cb_advs = [r for r in ana["recommendations"] if "高置信" in r["trigger"]]
     assert cb_advs and "大多不在上下文中" in cb_advs[0]["trigger"], cb_advs
     print("  [ok] 高置信错答建议按同类别子集的 gold 可见率判定")
+    # 低于 MIN_PATTERN_CASES 时不得再输出高/中优先级的模式结论
+    tiny = analyze_worst_windows(wins[:2], variant="lega")
+    assert len(tiny["recommendations"]) == 1, tiny["recommendations"]
+    assert tiny["recommendations"][0]["priority"] == "低"
+    assert all(r["priority"] not in ("高", "中")
+               for r in tiny["recommendations"])
 
 
 def test_cross_improvement_reports_fixed_only_variant():
