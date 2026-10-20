@@ -427,18 +427,31 @@ WINDOW_CATEGORY_CN = {
 TOP1_CONF_TOL = 0.5
 
 
+def _token_text(value):
+    """预测词项的文本形式；对象/容器/None 不是可解码 token，返回 None。"""
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return None
+    return str(value)
+
+
 def _window_top1(rec: Dict):
     """取出窗口 top1 预测 (文本, 概率)；缺失/格式异常返回 (None, None)。"""
     top5 = rec.get("pred_top5")
     if not isinstance(top5, (list, tuple)) or not top5:
         return None, None
     item = top5[0]
-    if isinstance(item, (list, tuple)) and len(item) >= 2:
+    if isinstance(item, (list, tuple)):
+        if len(item) < 2:
+            return None, None
+        token = _token_text(item[0])
+        if token is None:
+            return None, None
         try:
-            return str(item[0]), float(item[1])
+            return token, float(item[1])
         except (TypeError, ValueError, OverflowError):
-            return str(item[0]), None
-    return str(item), None
+            return token, None
+    token = _token_text(item)
+    return (token, None) if token is not None else (None, None)
 
 
 def categorize_window(rec: Dict) -> Dict:
@@ -470,10 +483,12 @@ def categorize_window(rec: Dict) -> Dict:
     top5_txt = []
     top5_raw = r.get("pred_top5")
     for item in (top5_raw if isinstance(top5_raw, (list, tuple)) else []):
-        if isinstance(item, (list, tuple)) and item:
-            top5_txt.append(str(item[0]))
-        elif item is not None:
-            top5_txt.append(str(item))
+        if isinstance(item, (list, tuple)):
+            token = _token_text(item[0]) if item else None
+        else:
+            token = _token_text(item)
+        if token is not None:
+            top5_txt.append(token)
     r["top1"] = top1
     r["top1_prob"] = p1
     recorded_ctx = r.get("gold_in_context")

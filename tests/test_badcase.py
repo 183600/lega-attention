@@ -827,6 +827,14 @@ def test_categorize_window_tolerates_malformed_top5_and_tail():
         == "low_confidence"
     assert categorize_window({"context_tail": None,
                               "pred_top5": "bad"})["category"] == "unparsed"
+    # 词项本身缺失/为对象时是“无可用预测分布”，不能被 str() 成
+    # "{'token': ...}" / "None" 后当成高置信错答。
+    assert categorize_window({"gold_next": "x",
+                              "pred_top5": [{"token": "x", "p": 0.9}]}
+                             )["category"] == "unparsed"
+    assert categorize_window({"gold_next": "x",
+                              "pred_top5": [[None, 0.9]]}
+                             )["category"] == "unparsed"
     print("  [ok] 窗口归因：畸形 pred_top5/context_tail 安全降级")
 
 
