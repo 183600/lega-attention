@@ -1274,6 +1274,62 @@ def test_paired_ppl_skips_seeds_with_mismatched_eval_split():
     print("  [ok] PPL 配对：跨 eval split 的种子整对剔除")
 
 
+def test_paired_ppl_skips_eval_protocol_mismatch():
+    """同 split 不同 ctx/窗口数仍是不同 token 子集，不能充当配对观测。"""
+    def ev(ppl, ctx=512, windows=80):
+        return {"eval": {"ppl": ppl, "split": "val", "eval_ctx": ctx,
+                         "val_windows": windows}}
+
+    runs = {
+        "lega": {7: ev(10.0), 8: ev(11.0, ctx=256), 9: ev(12.0, windows=40)},
+        "standard": {7: ev(20.0), 8: ev(30.0), 9: ev(25.0)},
+    }
+    out = _paired_comparisons(
+        runs, [("lega", "standard")], "PPL",
+        lambda slot: _ppl_of(slot.get("eval")), lower_better=True)
+    assert len(out) == 1, out
+    assert out[0]["n"] == 1, out
+    assert out[0].get("excluded_protocol_mismatches") == 2, out
+    print("  [ok] PPL 配对：同 split 但 ctx/窗口数不一致的种子整对剔除")
+
+
+def test_paired_ruler_skips_protocol_and_cell_mismatch():
+    """RULER 配对不能跨题面/抽样/生成预算或不同评测格集合比较 EM。"""
+    def rul(em, **kw):
+        base = {
+            "ctx_lens": [256, 512], "n_samples": 30, "sample_seed": 1234,
+            "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
+            "vt_chains": 4, "vt_depth": 4,
+            "results": {"niah": {"256": {"em": em, "n": 30},
+                                 "512": {"em": em, "n": 30}}}}
+        base.update(kw)
+        return {"ruler": base}
+
+    runs = {
+        "lega": {7: rul(0.8), 8: rul(0.9, n_samples=20), 9: rul(0.7)},
+        "standard": {7: rul(0.5), 8: rul(0.5), 9: rul(0.5, max_new=44)},
+    }
+    out = _paired_comparisons(
+        runs, [("lega", "standard")], "RULER平均",
+        lambda slot: _ruler_avg_of(slot.get("ruler")), lower_better=False)
+    assert len(out) == 1, out
+    t = out[0]
+    assert t["n"] == 1, t
+    assert abs(t["mean_diff"] - 0.3) < 1e-12, t
+    assert t.get("excluded_protocol_mismatches") == 2, t
+    # 只覆盖一个上下文格的评测同样不可与两格 macro 平均配对
+    runs2 = {
+        "lega": {7: rul(0.8)},
+        "standard": {7: rul(0.5, results={
+            "niah": {"256": {"em": 0.5, "n": 30}}})},
+    }
+    out2 = _paired_comparisons(
+        runs2, [("lega", "standard")], "RULER平均",
+        lambda slot: _ruler_avg_of(slot.get("ruler")), lower_better=False)
+    assert out2 == [], out2
+    print("  [ok] RULER 配对：协议/评测格不一致的种子整对剔除")
+
+
 def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     """PPL 截断必须在汇总表显式标注；分布漂移字段为 null（空 split）时不得崩溃。"""
     tmp = tempfile.mkdtemp()
@@ -2475,3 +2531,51 @@ def test_factorial_none_cell_is_within_gate_control():
     assert [v for _, v in LOO_CELLS] == [
         "lega", "lega_no_query", "lega_no_conc", "lega_no_len"]
     print("  [ok] 全因子 none=gate_only，standard 仅作范围外无门基线")
+
+
+def test_verify_controlled_setup_rejects_eval_protocol_mismatch():
+    """同一训练 config 但独立评测用了不同窗口/上下文，PPL 不可配对。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        variants, seeds = ["standard", "lega"], [7]
+        base = {"split": "test", "eval_ctx": 512, "eval_iters": 50,
+                "eval_iters_requested": 50, "val_windows": 80,
+                "val_tokens_evaluated": 25600,
+                "selection_set_is_eval_set": False}
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "variant": v, "seed": 7,
+                "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024, **base})
+        audit = verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+        assert audit["ok"] and audit["eval_protocol_checked"] == 2, audit
+        for key, bad in (("eval_ctx", 256), ("eval_iters", 25),
+                         ("val_windows", 40), ("split", "val")):
+            p = os.path.join(tmp, "lega", "eval.json")
+            ev = json.load(open(p, encoding="utf-8"))
+            ev[key] = bad
+            _write_json(p, ev)
+            try:
+                verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+                raise AssertionError(f"{key} 不一致应触发 SystemExit")
+            except SystemExit:
+                pass
+            ev[key] = base[key]
+            _write_json(p, ev)
+        # 旧产物完全缺评测协议字段：不伪造一致，但也保持兼容（显式记录缺失）
+        for key in ("split", "eval_ctx", "eval_iters", "eval_iters_requested",
+                    "val_windows", "val_tokens_evaluated",
+                    "selection_set_is_eval_set"):
+            ev.pop(key, None)
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        audit = verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+        assert audit["ok"], audit
+        assert "lega/seed7" in audit["eval_protocol_missing"], audit
+    print("  [ok] 受控变量审计：PPL 评测 split/ctx/iters/windows 不一致即拒绝")

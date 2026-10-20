@@ -668,6 +668,14 @@ def main():
                "ctx_lens": ctx_lens, "n_samples": n_samples,
                "sample_seed": int(rl.get("seed", 1234)), "results": results,
                "badcases": badcases,
+               # 生成口径随结果落盘：不同 max_new/解码预算或任务构造参数下的
+               # EM 不是同一评测协议，下游不得直接配对（见 run_all 的协议核对）。
+               "max_new": int(rl.get("max_new", 12)),
+               "fwe_max_new": int(rl.get("fwe_max_new", 44)),
+               "vt_chains": int(rl.get("vt_chains", 4)),
+               "vt_depth": int(rl.get("vt_depth", 4)),
+               "gen_batch": int(gen_batch),
+               "amp": bool(amp),
                # 干扰语料来源可审计：train 回退会让检索分数不可比
                "corpus_source": corpus_source,
                "corpus_held_out": corpus_source in ("val", "test")}

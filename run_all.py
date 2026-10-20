@@ -365,6 +365,74 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     return info
 
 
+# 配对/审计必须共享的 PPL 评测协议：同一 split、同一上下文、同一批复用窗口
+# （eval_iters/val_windows/val_tokens_evaluated）才是同一批 token 上的 PPL。
+# 仅核对训练 config 不够——独立评测可被 --eval_iters 等参数重跑。
+_PPL_PROTOCOL_KEYS = ("split", "eval_ctx", "eval_iters",
+                      "eval_iters_requested", "val_windows",
+                      "val_tokens_evaluated", "selection_set_is_eval_set")
+
+
+def _protocol_value(v):
+    """把评测协议字段规范化后比较（"10" 与 10、[256,512] 与元组视为相同）。"""
+    if isinstance(v, bool):
+        return ("bool", v)
+    if isinstance(v, (int, float)):
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            return ("raw", repr(v))
+        return ("num", f) if math.isfinite(f) else ("raw", repr(v))
+    if isinstance(v, (list, tuple)):
+        return ("seq", tuple(_protocol_value(x) for x in v))
+    return ("raw", repr(v))
+
+
+def _same_protocol_value(a, b) -> bool:
+    return _protocol_value(a) == _protocol_value(b)
+
+
+def _ppl_protocol(d) -> dict:
+    """从 eval.json 提取实际生效的评测条件；缺失字段不伪造。"""
+    if not isinstance(d, dict):
+        return {}
+    return {k: d[k] for k in _PPL_PROTOCOL_KEYS
+            if k in d and d[k] is not None}
+
+
+def _ruler_protocol(d) -> dict:
+    """从 ruler payload 提取决定样本集/生成口径的字段；缺失字段不伪造。
+
+    这些字段任一不同，EM 就不是同一批样例/同一生成规则上的配对观测：
+    ctx_lens/n_samples/sample_seed 决定题面与抽样，corpus_source 决定
+    干扰文本是否见过，max_new/fwe_max_new/vt_* 决定解码预算。
+    """
+    if not isinstance(d, dict):
+        return {}
+    keys = ("ctx_lens", "n_samples", "sample_seed", "corpus_source",
+            "corpus_held_out", "max_new", "fwe_max_new", "vt_chains",
+            "vt_depth", "amp")
+    return {k: d[k] for k in keys if k in d and d[k] is not None}
+
+
+def _ruler_cell_signature(d):
+    """RULER 已评测 (任务, 上下文) 单元集合；缺格会让 macro 平均不可比。"""
+    if not isinstance(d, dict):
+        return None
+    results = d.get("results")
+    if not isinstance(results, dict):
+        return None
+    cells = set()
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or task.startswith("_")
+                or not isinstance(by_ctx, dict)):
+            continue
+        for ctx, cell in by_ctx.items():
+            if isinstance(cell, dict):
+                cells.add((task, str(ctx)))
+    return frozenset(cells)
+
+
 def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                             expected_data_digest: str = None) -> dict:
     """核对所有变体 × 种子确实除待验证模块外使用完全相同的训练条件。
@@ -395,6 +463,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     meta_checked = 0
     early_stop_runs = []
     actual_meta = []
+    eval_protocols = []
+    eval_protocol_missing = []
     attention_backends = {}
     attention_key_seen = False
     for v in variants:
@@ -459,6 +529,11 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             meta = {k: ev.get(k) for k in meta_keys}
             if meta["steps_planned"] is None:
                 meta["steps_planned"] = ev.get("steps")
+            proto = _ppl_protocol(ev)
+            if proto:
+                eval_protocols.append((f"{v}/seed{seed}", proto))
+            else:
+                eval_protocol_missing.append(f"{v}/seed{seed}")
             early_stopped = bool(ev.get("early_stopped"))
             actual_meta.append((f"{v}/seed{seed}", ev.get("steps"),
                                 ev.get("tokens_seen"), early_stopped,
@@ -519,6 +594,24 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             if diffs:
                 meta_mismatches.append(f"{name} 相对 {a_ref_name} 的差异: "
                                        + "; ".join(diffs))
+    # PPL 评测协议：训练配置相同并不保证独立评测用了同一批 token。
+    # 只比较双方都记录的字段（旧产物可能缺字段），缺失单独告警；只要共同
+    # 字段有差异就直接失败，避免把不同窗口/上下文的 PPL 当成同条件配对。
+    protocol_ref = None
+    protocol_ref_name = None
+    for name, proto in eval_protocols:
+        if protocol_ref is None:
+            protocol_ref, protocol_ref_name = proto, name
+            continue
+        common = sorted(set(proto) & set(protocol_ref))
+        diffs = [f"{k}: {protocol_ref[k]!r} vs {proto[k]!r}"
+                 for k in common
+                 if not _same_protocol_value(protocol_ref[k], proto[k])]
+        if diffs:
+            meta_mismatches.append(
+                f"{name} 相对 {protocol_ref_name} 的 PPL 评测协议差异: "
+                + "; ".join(diffs)
+                + "（不同评测 token 子集/上下文不可直接配对）")
     mixed_attention = []
     if attention_key_seen and len(set(attention_backends.values())) > 1:
         by_backend = {}
@@ -534,6 +627,12 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         print(f"[audit] 警告：缺少 {len(meta_missing)} 个 run 的 eval.json，"
               f"无法核对数据指纹/代码版本/训练步数: {', '.join(meta_missing[:6])}"
               + (" ..." if len(meta_missing) > 6 else ""))
+    if eval_protocol_missing:
+        print(f"[audit] 警告：{len(eval_protocol_missing)} 个 run 的 eval.json "
+              "缺少评测协议字段（eval_ctx/eval_iters/val_windows），"
+              "无法核对是否在同一批 token 上评测: "
+              + ", ".join(eval_protocol_missing[:6])
+              + (" ..." if len(eval_protocol_missing) > 6 else ""))
     if mixed_attention:
         mismatches.append(
             "注意力实现路径不一致（来自 use_sdpa_standard=true）："
@@ -560,6 +659,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               + (" ..." if len(early_stop_runs) > 6 else "")
               + "）；实际训练步数不等，预注册判定将按计划步数核对并降级为探索性")
     return {"ok": not (mismatches or meta_mismatches), "checked": checked,
+            "eval_protocol_checked": len(eval_protocols),
+            "eval_protocol_missing": eval_protocol_missing,
             "missing_configs": missing, "mismatches": mismatches,
             "attention_backends": attention_backends,
             "mixed_attention": mixed_attention,
@@ -875,7 +976,7 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         rm = _variant_seed_map(runs, ref)
         seeds = [s for s in _sorted_seeds(cm) if s in rm]
         a, b = [], []
-        split_skipped = 0
+        split_skipped = protocol_skipped = cell_skipped = 0
         for s in seeds:
             sa, sb = cm.get(s), rm.get(s)
             if not (isinstance(sa, dict) and isinstance(sb, dict)):
@@ -885,6 +986,28 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                 eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else {}
                 if ea.get("split", "val") != eb.get("split", "val"):
                     split_skipped += 1
+                    continue
+                pa, pb = _ppl_protocol(ea), _ppl_protocol(eb)
+                common = set(pa) & set(pb)
+                if any(not _same_protocol_value(pa[k], pb[k])
+                       for k in common):
+                    protocol_skipped += 1
+                    continue
+            elif metric_name == "RULER平均":
+                ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else {}
+                rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else {}
+                # 同 seed 只保证训练随机性相同；RULER 题面/抽样/生成预算与
+                # 干扰语料来源任一不同，EM 就不是同一批样例上的配对观测。
+                pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
+                common = set(pa) & set(pb)
+                if any(not _same_protocol_value(pa[k], pb[k])
+                       for k in common):
+                    protocol_skipped += 1
+                    continue
+                ca = _ruler_cell_signature(ra)
+                cb = _ruler_cell_signature(rb)
+                if ca is not None and cb is not None and ca != cb:
+                    cell_skipped += 1
                     continue
             va, vb = extractor(sa), extractor(sb)
             if va is None or vb is None:
@@ -898,6 +1021,10 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                     "lower_is_better": bool(lower_better)})
         if split_skipped:
             res["excluded_split_mismatches"] = split_skipped
+        if protocol_skipped:
+            res["excluded_protocol_mismatches"] = protocol_skipped
+        if cell_skipped:
+            res["excluded_cell_mismatches"] = cell_skipped
         out.append(_enrich_paired(res, a, b))
     return out
 
