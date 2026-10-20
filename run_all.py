@@ -3286,6 +3286,7 @@ def build_summary(results_dir: str, audit: dict = None,
         any_grad_spike = False
         any_loss_spike = False
         any_malformed = False
+        observability = set()
         for v in variants:
             by_seed = curve.get(v)
             if not isinstance(by_seed, dict):
@@ -3303,6 +3304,10 @@ def build_summary(results_dir: str, audit: dict = None,
             any_loss_spike = any_loss_spike or lspike
             any_malformed = any_malformed or any(d.get("malformed_records")
                                                  for d in diags)
+            for d in diags:
+                for w in (d.get("curve_observability_warnings") or []):
+                    if isinstance(w, str) and w.strip():
+                        observability.add(w.strip())
             es = [x for x in (_num_or_none(d.get("early_stop_gain_rel"))
                               for d in diags) if x is not None]
 
@@ -3342,6 +3347,15 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"| {train_s} | {val_s} | {es_s} "
                       f"| {rec[0] if rec else '-'} |")
         md.append("")
+        if observability:
+            shown = sorted(observability)
+            more = len(shown) - 2
+            md.append("⚠ 曲线采样可观测性受限（配置级，所有种子同因）："
+                      + "；".join(shown[:2])
+                      + (f"；另有 {more} 条同类告警" if more > 0 else "")
+                      + "。上述趋势/早停结论的可靠性受此限制，正式实验请"
+                      "按告警调整 `eval_every`/`log_every` 后重跑。")
+            md.append("")
         if any_nan:
             md.append("⚠ 存在出现非有限损失的 run：训练已失效，"
                       "对应 run 目录的 `nan_report.json` 给出了"

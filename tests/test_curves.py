@@ -301,8 +301,10 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
             json.dump({"step": 30, "where": "train_loss"}, f)
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"epochs_seen": 0.05, "train_tokens": 1000,
-                       "val_ppl_ci95": [1.0, 2.0]}, f)
+                       "val_ppl_ci95": [1.0, 2.0],
+                       "curve_observability_warnings": ["验证点预计仅 2 个"]}, f)
         d = diagnose_run_dir(tmp)
+        assert d["curve_observability_warnings"] == ["验证点预计仅 2 个"]
         assert d["nan_report"]["where"] == "train_loss"
         # eval.json 的训练数据覆盖率必须被曲线诊断读取并用于“训练不足”判定
         assert d["epochs_seen"] == 0.05 and d["train_tokens"] == 1000

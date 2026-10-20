@@ -743,6 +743,7 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
     epochs_seen = None
     train_tokens = None
     eval_path = os.path.join(run_dir, "eval.json")
+    diag_warnings = []
     if os.path.exists(eval_path):
         try:
             with open(eval_path, "r", encoding="utf-8") as f:
@@ -754,11 +755,20 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
                     epochs_seen = float(e)
                 if t is not None:
                     train_tokens = int(t)
+                cw = ev.get("curve_observability_warnings")
+                if isinstance(cw, list):
+                    diag_warnings = [str(x) for x in cw if str(x).strip()]
+                else:
+                    diag_warnings = []
         except (OSError, ValueError, TypeError, OverflowError):
-            pass
+            diag_warnings = []
     diag = diagnose_curve(records, log_vocab=log_vocab,
                           epochs_seen=epochs_seen,
                           train_tokens=train_tokens)
+    if diag_warnings:
+        # 采样过稀是配置级限制：随诊断结果进入 summary，避免只看汇总时
+        # 把 2 个验证点的曲线当成可靠趋势。
+        diag["curve_observability_warnings"] = diag_warnings
     nan_path = os.path.join(run_dir, "nan_report.json")
     if os.path.exists(nan_path):
         try:
