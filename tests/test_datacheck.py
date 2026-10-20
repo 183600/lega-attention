@@ -479,6 +479,27 @@ def test_text_length_stats_outlier_detection():
     print("  [ok] 行长度统计：超长行作为异常值被单独计数")
 
 
+def test_write_clean_lines_preserves_blank_line_boundaries():
+    """空行是段落/文档边界：清洗后至多保留一个，不能被全部丢弃。"""
+    import io
+    from scripts.prepare_data import write_clean_lines
+
+    with tempfile.TemporaryDirectory() as d:
+        dst = os.path.join(d, "clean.txt")
+        n = write_clean_lines(
+            io.StringIO("first\n\n\nsecond\n  \nthird\n"), dst, 0)
+        with open(dst, "r", encoding="utf-8") as f:
+            text = f.read()
+        assert text == "first\n\nsecond\n\nthird"
+        assert n == len(text)
+        # 截断仍只发生在完整行边界
+        dst2 = os.path.join(d, "truncated.txt")
+        write_clean_lines(io.StringIO("aaaa\n\nbbbb\n\ncccc\n"), dst2, 1)
+        with open(dst2, "r", encoding="utf-8") as f:
+            assert f.read() == "aaaa"
+    print("  [ok] 数据准备：空行块边界被保留，截断仍只发生在完整行")
+
+
 def test_distribution_shift_metric():
     rng = np.random.default_rng(0)
     a = rng.integers(0, 100, size=100000).astype(np.uint16)

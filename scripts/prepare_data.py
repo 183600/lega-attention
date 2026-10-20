@@ -153,29 +153,34 @@ def from_rows_api(max_rows: int, retries: int = 4) -> dict:
 def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
     """逐行清洗并流式写入 dst，返回写入的字符数。
 
-    清洗口径与原 clean_lines 一致：行尾 rstrip、跳过空行、行间以单个换行
-    连接；max_tokens > 0 时按 1 token ≈ 3.6 字符、留 20% 余量截断。
+    清洗口径：行尾 rstrip、跳过空行内容，但**保留至多一个空行作为块分隔**。
+    空行是段落/文档边界；全部删掉会让下游块级去污染与边界审计失去结构。
+    max_tokens > 0 时按 1 token ≈ 3.6 字符、留 20% 余量截断。
     截断只在**完整行边界**发生：写入半行会制造被截断的标签/文档，并可能让
     同一段落的残片跨 split。边读边写，写入临时文件后原子替换。
     """
     limit = int(max_tokens * 3.6 * 1.2) if max_tokens else None
     tmp = dst + ".part"
     used, wrote, n_parts = 0, 0, 0
+    pending_blank = False
     with open(tmp, "w", encoding="utf-8") as f:
         for raw in lines:
             ln = raw.rstrip()
             if not ln.strip():
+                if n_parts:
+                    pending_blank = True
                 continue
-            sep = 1 if n_parts else 0
+            sep = 0 if not n_parts else (2 if pending_blank else 1)
             if limit is not None and used + sep + len(ln) > limit:
                 # 不写半行：宁可提前结束，也不把截断残片当作完整样本。
                 break
             if sep:
-                f.write("\n")
+                f.write("\n" * sep)
             f.write(ln)
             used += sep + len(ln)
             wrote += sep + len(ln)
             n_parts += 1
+            pending_blank = False
     os.replace(tmp, dst)
     return wrote
 
