@@ -167,6 +167,42 @@ def test_auroc_cluster_bootstrap_ci():
     print("  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错/AP 族）")
 
 
+def test_analysis_tolerates_malformed_external_records():
+    """外部/截断记录缺 example/max_p/log_n/layer/head 时跳过而非崩溃。"""
+    records = _mk_records() + [
+        "junk",
+        # 缺 log_n/layer/head：仍可进入汇总，但不能伪造逐头统计
+        {"example": 90, "hit": 1.0, "max_p": 0.9, "logit": 2.0,
+         "qterm": 0.5, "c": 1.5, "g": 0.8},
+        # 类型错误的 hit/max_p/layer/head：按缺失处理
+        {"example": 91, "hit": "bad", "max_p": "bad", "log_n": None,
+         "layer": "bad", "head": []},
+        {"example": 92, "hit": 0.0, "max_p": 0.1, "logit": 0.0,
+         "qterm": 0.0, "c": 0.0, "g": 0.2, "log_n": 4.0,
+         "layer": 0, "head": 0},
+        # 缺 example：bootstrap 无法聚类，跳过
+        {"hit": 1.0, "max_p": 0.9, "logit": 1.0, "qterm": 0.5,
+         "c": 1.2, "g": 0.9, "log_n": 4.0, "layer": 0, "head": 0},
+    ]
+    s = summarize(records, "unknown_variant", 0.5)
+    assert s["n_records"] == len(records)
+    assert s["variant_cn"] == "unknown_variant"
+    assert {(p["layer"], p["head"]) for p in s["per_head"]} == {
+        (0, 0), (0, 1)}
+    ts = tau_sensitivity(records, [0.3, 0.5])
+    assert len(ts["conc_rate"]) == 2
+    out = auroc_cluster_bootstrap(records, n_resamples=50, seed=0)
+    assert out["n_examples"] == 7, out
+    # max_p 全缺失不能伪装成“从未集中”
+    missing_mp = summarize([{"example": 0, "hit": 1.0, "logit": 1.0,
+                             "qterm": 0.5, "c": 1.2, "g": 0.9,
+                             "log_n": 4.0, "layer": 0, "head": 0}],
+                           "lega", 0.5)
+    assert missing_mp["conc_rate"] is None
+    assert missing_mp["misleading_rate"] is None
+    print("  [ok] 机制分析：畸形外部记录按缺失跳过，不触发 KeyError")
+
+
 def test_summarize_reports_imbalance_aware_metrics():
     """summarize 必须报告正类率、不平衡等级、主指标与三口径门控 F1。"""
     # 19 正 381 负 → 正类率 4.75%（<5%）触发 PR-AUC 主指标

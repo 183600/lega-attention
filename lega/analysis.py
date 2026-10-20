@@ -214,10 +214,23 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     return [rec for rs in records_by_ex for rec in rs]
 
 
+def _finite_float(value):
+    """把外部记录中的标量转为有限 float；缺失/类型错误/NaN/Inf 返回 None。"""
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _record_arrays(records: List[Dict], key: str) -> np.ndarray:
-    """提取记录中标量字段；缺失记 NaN（与 summarize 的 None 口径一致）。"""
-    return np.array([np.nan if r.get(key) is None else r[key]
-                     for r in records], dtype=np.float64)
+    """提取记录中标量字段；缺失/非数值/非有限记 NaN（None 口径一致）。"""
+    records = records if isinstance(records, (list, tuple)) else []
+    vals = []
+    for r in records:
+        value = _finite_float(r.get(key)) if isinstance(r, dict) else None
+        vals.append(np.nan if value is None else value)
+    return np.array(vals, dtype=np.float64)
 
 
 def _conc_stats(hit: np.ndarray, max_p: np.ndarray, tau: float) -> Dict:
@@ -228,21 +241,23 @@ def _conc_stats(hit: np.ndarray, max_p: np.ndarray, tau: float) -> Dict:
     下集中事件变稀而趋 0，造成虚假安全；misleading_given_conc =
     P(看错 | 集中) 才是"集中时有多少比例看错"的条件风险。
     """
-    conc = (max_p > tau).astype(np.float64)
+    valid = ~np.isnan(max_p)
+    conc = (max_p > tau) & valid
     n_conc = int(conc.sum())
-    hv = ~np.isnan(hit)
+    hv = ~np.isnan(hit) & valid
     return {
-        "conc_rate": float(conc.mean()),
-        "p_hit_given_conc": (float(np.nanmean(hit[conc == 1]))
-                             if n_conc and hv[conc == 1].any() else None),
-        "p_hit_given_notconc": (float(np.nanmean(hit[conc == 0]))
-                                if (conc == 0).any() and hv[conc == 0].any()
-                                else None),
-        "misleading_rate": (float(((max_p[hv] > tau) & (hit[hv] == 0)).mean())
+        "conc_rate": (float(conc.sum() / valid.sum())
+                      if valid.any() else None),
+        "p_hit_given_conc": (float(np.nanmean(hit[conc]))
+                             if n_conc and hv[conc].any() else None),
+        "p_hit_given_notconc": (float(np.nanmean(hit[valid & ~conc]))
+                                if (valid & ~conc).any()
+                                and hv[valid & ~conc].any() else None),
+        "misleading_rate": (float((conc[hv] & (hit[hv] == 0)).mean())
                             if hv.any() else None),
         "misleading_given_conc": (
-            float((hit[hv & (conc == 1)] == 0).mean())
-            if int((hv & (conc == 1)).sum()) else None),
+            float((hit[hv & conc] == 0).mean())
+            if int((hv & conc).sum()) else None),
     }
 
 
@@ -284,23 +299,45 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     `ap_logit_minus_qterm` 是机制结论在正确指标口径下的对照证据。
     键名沿用 `ci95`（历史字段），内部为 AUROC 与 AP 两族区间。
     """
+    records = records if isinstance(records, (list, tuple)) else []
     clusters: Dict[int, List[Dict]] = {}
     for r in records:
-        if r.get("hit") is None:
+        if not isinstance(r, dict):
             continue
-        clusters.setdefault(r["example"], []).append(r)
-    ex_ids = sorted(clusters)
+        hit = _finite_float(r.get("hit"))
+        example = r.get("example")
+        if hit is None or example is None:
+            continue
+        try:
+            hash(example)
+        except TypeError:
+            continue
+        if isinstance(example, float) and not math.isfinite(example):
+            continue
+        rec = dict(r)
+        rec["hit"] = hit
+        clusters.setdefault(example, []).append(rec)
+    try:
+        ex_ids = sorted(clusters)
+    except TypeError:
+        ex_ids = sorted(clusters, key=lambda e: (type(e).__name__, repr(e)))
     out = {"n_examples": len(ex_ids), "n_resamples": int(n_resamples),
            "ci_level": float(ci), "ci95": {}, "n_valid_resamples": None}
     if len(ex_ids) < 2:
         return out
     score_keys = [k for k in ("logit", "qterm", "c")
-                  if any(k in r for cl in clusters.values() for r in cl)]
+                  if any(_finite_float(r.get(k)) is not None
+                         for cl in clusters.values() for r in cl)]
     if not score_keys:
         return out
-    labels = [np.array([float(r["hit"]) for r in clusters[e]]) for e in ex_ids]
-    scores = {k: [np.array([float(r[k]) for r in clusters[e]]) for e in ex_ids]
-              for k in score_keys}
+    labels = [np.array([r["hit"] for r in clusters[e]]) for e in ex_ids]
+    scores = {}
+    for k in score_keys:
+        scores[k] = []
+        for e in ex_ids:
+            vals = [_finite_float(r.get(k)) for r in clusters[e]]
+            scores[k].append(np.array(
+                [np.nan if v is None else v for v in vals], dtype=np.float64))
     # 逐聚类预计算“是否含正/负类”“得分是否含 NaN”：重采样时先按聚类标志
     # 判定有效性，再构造拼接数组，过滤口径与 _auroc_safe 逐位等价
     # （重采样后标签恰有两类 ⟺ 命中的聚类中正负类都出现）。
@@ -356,16 +393,17 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
 
 
 def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
+    records = records if isinstance(records, (list, tuple)) else []
     n = len(records)
     if n == 0:
         return {"variant": variant, "n_records": 0}
-    hit = np.array([np.nan if r.get("hit") is None else r["hit"] for r in records], dtype=np.float64)
-    max_p = np.array([r["max_p"] for r in records])
-    g = np.array([np.nan if r.get("g") is None else r["g"] for r in records], dtype=np.float64)
-    logit = np.array([np.nan if r.get("logit") is None else r["logit"] for r in records], dtype=np.float64)
-    qterm = np.array([np.nan if r.get("qterm") is None else r["qterm"] for r in records], dtype=np.float64)
-    c = np.array([np.nan if r.get("c") is None else r["c"] for r in records], dtype=np.float64)
-    log_n = np.array([r["log_n"] for r in records])
+    hit = _record_arrays(records, "hit")
+    max_p = _record_arrays(records, "max_p")
+    g = _record_arrays(records, "g")
+    logit = _record_arrays(records, "logit")
+    qterm = _record_arrays(records, "qterm")
+    c = _record_arrays(records, "c")
+    log_n = _record_arrays(records, "log_n")
 
     # 部分记录可能没有 needle 跨度（hit=None），统计时仅在有效样本上计算
     hv = ~np.isnan(hit)
@@ -399,7 +437,7 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         imbalance, primary = "moderate", "AUROC 与 PR-AUC 并报"
     summary = {
         "variant": variant,
-        "variant_cn": VARIANT_CN[variant],
+        "variant_cn": VARIANT_CN.get(variant, variant),
         "tau": tau,
         "n_records": n,
         "hit_rate": float(np.nanmean(hit)) if hv.any() else None,
@@ -485,20 +523,29 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         summary["brier_g"] = summary["ece_g"] = None
         summary["brier_g_constant"] = summary["brier_g_skill"] = None
         summary["calibration_g_n"] = None
-    # 逐头统计：对整段数组按 (layer, head) 掩码切片。
+    # 逐头统计：对整段数组按 (layer, head) 掩码切片。缺字段/非整数的
+    # 记录无法归属到具体头，跳过该记录而不是让整份汇总崩溃。
     per_head = []
-    layer_arr = np.array([r["layer"] for r in records], dtype=np.int64)
-    head_arr = np.array([r["head"] for r in records], dtype=np.int64)
-    # 一次分组得到每行的组号：逐组重扫全表求 (layer, head) 掩码在记录数
-    # 大时是 O(N × 组数)；分组顺序仍为字典序，各组记录顺序不变。
-    groups, group_idx = np.unique(
-        np.stack([layer_arr, head_arr], axis=1), axis=0,
-        return_inverse=True)
-    group_idx = group_idx.reshape(-1)
-    for gi, (layer, head) in enumerate(groups):
+    layer_arr = _record_arrays(records, "layer")
+    head_arr = _record_arrays(records, "head")
+    lh_ok = (np.isfinite(layer_arr) & np.isfinite(head_arr)
+             & (layer_arr == np.floor(layer_arr))
+             & (head_arr == np.floor(head_arr)))
+    if lh_ok.any():
+        layer_v = layer_arr[lh_ok].astype(np.int64)
+        head_v = head_arr[lh_ok].astype(np.int64)
+        # 一次分组得到每行的组号：逐组重扫全表求 (layer, head) 掩码在记录数
+        # 大时是 O(N × 组数)；分组顺序仍为字典序，各组记录顺序不变。
+        groups, group_idx = np.unique(
+            np.stack([layer_v, head_v], axis=1), axis=0,
+            return_inverse=True)
+        group_idx = group_idx.reshape(-1)
+        g_v, hit_v, c_v = g[lh_ok], hit[lh_ok], c[lh_ok]
+        qterm_v, logit_v, max_p_v = qterm[lh_ok], logit[lh_ok], max_p[lh_ok]
+    for gi, (layer, head) in enumerate(groups if lh_ok.any() else []):
         m = group_idx == gi
-        gg, hh, cc = g[m], hit[m], c[m]
-        qq, ll, mp = qterm[m], logit[m], max_p[m]
+        gg, hh, cc = g_v[m], hit_v[m], c_v[m]
+        qq, ll, mp = qterm_v[m], logit_v[m], max_p_v[m]
         hv = ~np.isnan(hh)
 
         def _auroc(scores, labels, mask):
