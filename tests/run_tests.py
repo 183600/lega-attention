@@ -1,5 +1,6 @@
 """极简测试入口（不依赖 pytest）: python -m tests.run_tests（或 python tests/run_tests.py）"""
 import importlib
+import inspect
 import os
 import sys
 import traceback
@@ -15,7 +16,87 @@ MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
            "tests.test_nan_checklist", "tests.test_evaluate",
            "tests.test_experiment", "tests.test_hypotheses",
            "tests.test_tuning", "tests.test_ngram", "tests.test_early_stop",
-           "tests.test_postrun", "tests.test_plots", "tests.test_probe"]
+           "tests.test_postrun", "tests.test_plots", "tests.test_probe",
+           "tests.test_run_tests"]
+
+
+class _MonkeyPatch:
+    """最小 pytest `monkeypatch` 兼容实现（setattr / delattr / setenv）。
+
+    该测试入口不依赖 pytest，但个别测试用 `monkeypatch` fixture 做局部猴子
+    补丁；此实现让它们在无 pytest 环境下也能运行并自动回滚，避免“仅在
+    pytest 下通过、在 run_tests 下报 missing argument”的假失败。
+    """
+
+    def __init__(self):
+        self._setattrs = []
+        self._dels = {}
+        self._env = []
+
+    def setattr(self, target, name, value=None, raising=True):
+        if isinstance(target, str):  # "module.attr" 形式：由 setattr 代理给 resolve
+            raise TypeError("monkeypatch.setattr 需要对象而非字符串目标")
+        if not hasattr(target, name) and raising:
+            raise AttributeError(f"{target!r} 无属性 {name!r}")
+        old = getattr(target, name, None)
+        had = hasattr(target, name)
+        self._setattrs.append((target, name, old, had))
+        setattr(target, name, value)
+
+    def delattr(self, target, name, raising=True):
+        had = hasattr(target, name)
+        if not had and raising:
+            raise AttributeError(f"{target!r} 无属性 {name!r}")
+        self._dels.setdefault((id(target), name), (target, name,
+                                                    getattr(target, name, None)))
+        if had:
+            delattr(target, name)
+
+    def setenv(self, name, value, prepend=None):
+        old = os.environ.get(name)
+        self._env.append((name, old))
+        os.environ[name] = str(value)
+
+    def undo(self):
+        for target, name, old, had in reversed(self._setattrs):
+            if had:
+                setattr(target, name, old)
+            else:
+                try:
+                    delattr(target, name)
+                except AttributeError:
+                    pass
+        for target, name, old in reversed(list(self._dels.values())):
+            setattr(target, name, old)
+        for name, old in reversed(self._env):
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+
+def _run_with_fixtures(fn):
+    """按签名注入支持的 fixture（当前仅 monkeypatch）；未知参数直接报错。"""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    names = [p.name for p in params.values()
+             if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    kwargs = {}
+    mp = None
+    for n in names:
+        if n == "monkeypatch":
+            if mp is None:
+                mp = _MonkeyPatch()
+            kwargs[n] = mp
+        else:
+            raise TypeError(f"测试函数 {fn.__name__} 需要未知 fixture {n!r}")
+    try:
+        fn(**kwargs)
+    finally:
+        if mp is not None:
+            mp.undo()
 
 
 def main() -> int:
@@ -31,7 +112,7 @@ def main() -> int:
             total += 1
             print(f"[RUN ] {mod_name}.{name}")
             try:
-                fn()
+                _run_with_fixtures(fn)
                 print(f"[PASS] {mod_name}.{name}")
             except Exception:
                 fails += 1
