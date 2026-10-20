@@ -1007,6 +1007,7 @@ def main():
             # 同步保存最优 checkpoint，避免下游评测只能用到最终步模型
             save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
                             extra={"variant": args.variant, "step": step,
+                                   "steps_planned": steps,
                                    "seed": seed, "val_loss": vl,
                                    "val_ppl": math.exp(min(20, vl)),
                                    "val_ppl_clamped": bool(vl > 20),
@@ -1157,6 +1158,7 @@ def main():
         if improved_for_ckpt:
             save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
                             extra={"variant": args.variant, "step": steps,
+                                   "steps_planned": steps,
                                    "seed": seed,
                                    "val_loss": final_metrics["val_loss"],
                                    "val_ppl": math.exp(

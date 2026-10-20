@@ -61,6 +61,41 @@ def _positive_int_or_none(value):
     return value if value > 0 else None
 
 
+def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
+    """从 checkpoint 元数据还原“被评测模型是在第几步、用哪个 val_loss 选出的”。
+
+    run_all 比较的是各变体的 `model_best.pt`；它们都在 val 上按最小损失选出，
+    但选型步可能不同（同一预算内早停/波动）。不记录选型步就无法审计
+    “same budget”是否真的可比，也无法发现某个变体在极早步被偶然选中。
+    缺失/非法字段一律返回 None（旧 checkpoint 不伪造），计划步数可回退到
+    训练配置的 steps。
+    """
+    ck = ck if isinstance(ck, dict) else {}
+    step = _positive_int_or_none(ck.get("step"))
+    planned = _positive_int_or_none(ck.get("steps_planned"))
+    if planned is None:
+        planned = _positive_int_or_none(steps_planned_fallback)
+    frac = (float(step) / float(planned)
+            if step is not None and planned is not None else None)
+    val_loss = None
+    raw_loss = ck.get("val_loss")
+    if raw_loss is not None and not isinstance(raw_loss, bool):
+        try:
+            val_loss = float(raw_loss)
+        except (TypeError, ValueError, OverflowError):
+            val_loss = None
+        if val_loss is not None and not math.isfinite(val_loss):
+            val_loss = None
+    return {
+        "ckpt_step": step,
+        "steps_planned": planned,
+        "selection_step_fraction": frac,
+        "selection_step_exceeds_planned": bool(
+            step is not None and planned is not None and step > planned),
+        "ckpt_val_loss": val_loss,
+    }
+
+
 def worst_window_screening(val_len: int, ctx: int,
                            max_windows: int = WORST_SCREEN_MAX) -> dict:
     """最差窗口筛查范围（候选数/总窗口数/覆盖率），供结果落盘与汇总注脚。"""
@@ -377,6 +412,8 @@ def main():
         "gate_mean": gmean,
         "n_params": count_params(model),
         "n_gate_extra": gate_extra_params(model),
+        **checkpoint_selection_info(
+            ck, cfg_used.get("steps") if isinstance(cfg_used, dict) else None),
         "eval_iters_requested": metrics["eval_iters_requested"],
         "eval_iters": metrics["eval_iters"],
         "val_windows": metrics["val_windows"],

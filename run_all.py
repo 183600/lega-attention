@@ -3002,6 +3002,11 @@ def build_summary(results_dir: str, audit: dict = None,
         # “数值差异是否值得解释”，必须与点估计一起进入 summary.json/csv。
         ("ppl_ci_rel_pct", lambda m: _stat_series(m, "eval", _ppl_ci_rel_pct)),
         ("epochs_seen", lambda m: _stat_series(m, "eval", _eval_scalar("epochs_seen"))),
+        # model_best.pt 的选型步：同一最大预算下，各变体可能在差异很大的步
+        # 被 val 选中。记录后才能审计“同预算”之外的选型差异。
+        ("ckpt_step", lambda m: _stat_series(m, "eval", _eval_scalar("ckpt_step"))),
+        ("selection_step_fraction", lambda m: _stat_series(
+            m, "eval", _eval_scalar("selection_step_fraction"))),
         ("eval_tokens", lambda m: _stat_series(
             m, "eval", _eval_scalar("val_tokens_evaluated"))),
         ("eval_windows", lambda m: _stat_series(
@@ -3186,6 +3191,8 @@ def build_summary(results_dir: str, audit: dict = None,
             ("gate_extra", "门控额外参数"), ("val_ppl", "PPL↓"),
             ("ppl_ci_rel_pct", "PPL评估CI±%"),
             ("epochs_seen", "训练覆盖(epoch)"),
+            ("ckpt_step", "选型步"),
+            ("selection_step_fraction", "选型步/计划"),
             ("ruler_avg", "RULER平均↑"),
             ("ruler_niah_synth", "niah_synth↑"),
             ("ruler_niah_corpus", "niah_corpus↑"),
@@ -3233,8 +3240,8 @@ def build_summary(results_dir: str, audit: dict = None,
                      "misleading_given_conc", "auroc_logit", "auroc_qterm",
                      "auprc_logit", "auprc_qterm", "hit_base_rate",
                      "gate_f1_macro", "gate_f1_macro_always_write",
-                     "ppl_ci_rel_pct", "epochs_seen",
-                     "ruler_fwe_recall"} \
+                     "ppl_ci_rel_pct", "epochs_seen", "ckpt_step",
+                     "selection_step_fraction", "ruler_fwe_recall"} \
             | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
@@ -3265,6 +3272,11 @@ def build_summary(results_dir: str, audit: dict = None,
             "`val_ppl_ci95`。",
             "注: `训练覆盖` 为 tokens_seen / train_tokens 的等价 epoch 数；"
             "低于 1 时曲线下降主要反映“还没学完”，不能当作收敛。",
+            "注: `选型步`/`选型步/计划` 是 `model_best.pt` 在 val 上被选中时"
+            "的训练步数与占计划预算比例（跨种子均值）。所有变体共用同一最大"
+            "预算与同一选型规则；选型步差异属 val 波动而非条件失控，但某变体"
+            "长期在极早步被选中时，它的“同预算”比较实质是“更少训练”，需结合"
+            "训练覆盖与曲线谨慎解读。",
             "注: niah/fwe/vt 为各上下文档位平均后的跨种子均值，"
             "每格样本数见 ruler_*.json（各变体同 seed 使用同一批样本）；",
             "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，"

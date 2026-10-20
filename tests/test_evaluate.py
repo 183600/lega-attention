@@ -9,10 +9,10 @@ import numpy as np
 import torch
 
 from lega.data import CharTokenizer
-from lega.evaluate import (_positive_int_or_none, collect_worst_windows,
-                           json_safe_eval_metrics, load_train_coverage,
-                           load_train_peak_mem_mb, load_train_throughput,
-                           worst_window_screening)
+from lega.evaluate import (_positive_int_or_none, checkpoint_selection_info,
+                           collect_worst_windows, json_safe_eval_metrics,
+                           load_train_coverage, load_train_peak_mem_mb,
+                           load_train_throughput, worst_window_screening)
 from lega.model import GPT
 
 
@@ -221,6 +221,38 @@ def test_collect_worst_windows_gold_in_context_uses_full_window():
             assert r["gold_distance_tokens"] >= 0, r
     print("  [ok] 最差窗口 gold_in_context 按完整窗口判定；"
           "位置/距离/摘录可用于人工复核")
+
+
+def test_checkpoint_selection_info_records_step_and_rejects_garbage():
+    """选型步/计划步数必须可审计；旧/坏 checkpoint 字段按缺失处理。"""
+    info = checkpoint_selection_info(
+        {"step": 250, "steps_planned": 1000, "val_loss": 3.25})
+    assert info["ckpt_step"] == 250
+    assert info["steps_planned"] == 1000
+    assert math.isclose(info["selection_step_fraction"], 0.25)
+    assert info["selection_step_exceeds_planned"] is False
+    assert math.isclose(info["ckpt_val_loss"], 3.25)
+    # 缺 steps_planned 时回退到训练配置的 steps（仅当它是正整数）
+    info = checkpoint_selection_info({"step": 40, "val_loss": 2.0}, 100)
+    assert info["steps_planned"] == 100
+    assert math.isclose(info["selection_step_fraction"], 0.4)
+    # bool/小数/非有限值不能冒充整数步数；丢失字段返回 None 而非编造
+    for bad in (True, 2.5, float("inf"), "x"):
+        info = checkpoint_selection_info(
+            {"step": bad, "steps_planned": bad, "val_loss": bad})
+        assert info["ckpt_step"] is None
+        assert info["steps_planned"] is None
+        assert info["selection_step_fraction"] is None
+        if bad is True or bad == float("inf") or isinstance(bad, str):
+            assert info["ckpt_val_loss"] is None
+    # val_loss 本身允许小数；2.5 不是“非法步数”
+    assert math.isclose(checkpoint_selection_info(
+        {"step": 2.5, "val_loss": 2.5})["ckpt_val_loss"], 2.5)
+    # 选型步超过计划预算要显式标记（checkpoint/配置不一致的可审计信号）
+    info = checkpoint_selection_info({"step": 120, "steps_planned": 100})
+    assert info["selection_step_exceeds_planned"] is True
+    assert checkpoint_selection_info(None)["ckpt_step"] is None
+    print("  [ok] checkpoint 选型步元数据（缺失/非法字段不伪造）")
 
 
 def test_json_safe_eval_metrics_handles_nonfinite():
