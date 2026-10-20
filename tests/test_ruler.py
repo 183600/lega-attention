@@ -191,6 +191,19 @@ def test_run_ruler_collects_badcases():
     print(f"  [ok] run_ruler 坏案例收集（{len(bad)} 条，含问题/gold/数值表）")
 
 
+def test_vt_rejects_invalid_depth():
+    """depth<1 会生成“问题问 VAR A0、正文只有 VAR A1”的自相矛盾样例。"""
+    tok = _tok()
+    for depth in (0, -1):
+        try:
+            build_vt(tok, 512, random.Random(0), n_chains=2, depth=depth)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, depth
+    print("  [ok] VT 拒绝非法 depth")
+
+
 def test_context_too_small():
     tok = _tok()
     try:

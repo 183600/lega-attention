@@ -267,6 +267,9 @@ VT_QUESTION = ("\nGiven the variable definitions above, what is the value of VAR
 def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 4) -> Dict:
     if not 1 <= n_chains <= 6:
         raise ValueError(f"n_chains 必须在 1-6 之间，收到 {n_chains}")
+    if int(depth) < 1:
+        raise ValueError(f"depth 必须 >= 1（问题模板会引用 VAR L1），收到 {depth}")
+    depth = int(depth)
     letters = ["A", "B", "C", "D", "E", "F"][:n_chains]
     values = {L: _rand_digit(rng, 5, 5) for L in letters}
     lines = []
