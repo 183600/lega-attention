@@ -2749,6 +2749,49 @@ def test_verify_controlled_setup_rejects_fractional_steps():
     print("  [ok] 受控变量审计：小数步数不会被截断为整数")
 
 
+def test_verify_controlled_setup_rejects_fractional_seeds():
+    """config/eval 的小数种子不能被 int() 截断后冒充预期种子。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        variants, seeds = ["standard", "lega"], [7]
+        base = {"split": "test", "eval_ctx": 512, "eval_iters": 50,
+                "eval_iters_requested": 50, "val_windows": 80,
+                "val_tokens_evaluated": 25600,
+                "selection_set_is_eval_set": False}
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "variant": v, "seed": 7,
+                "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024, **base})
+        cfg_path = os.path.join(tmp, "lega", "config_used.json")
+        cfg = json.load(open(cfg_path, encoding="utf-8"))
+        cfg["seed"] = 7.5
+        _write_json(cfg_path, cfg)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("config 小数种子不应通过审计")
+        except SystemExit:
+            pass
+        cfg["seed"] = 7
+        _write_json(cfg_path, cfg)
+        ev_path = os.path.join(tmp, "lega", "eval.json")
+        ev = json.load(open(ev_path, encoding="utf-8"))
+        ev["seed"] = 7.5
+        _write_json(ev_path, ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("eval 小数种子不应通过审计")
+        except SystemExit:
+            pass
+    print("  [ok] 受控变量审计：小数种子不会被截断为预期种子")
+
+
 def test_component_evidence_marks_early_stop_budget():
     """早停预算不等时，JSON 证据必须显式降为探索性而非只说 supported。"""
     tests = [

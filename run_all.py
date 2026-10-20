@@ -392,6 +392,17 @@ def _same_protocol_value(a, b) -> bool:
     return _protocol_value(a) == _protocol_value(b)
 
 
+def _same_seed(value, expected) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        fv, fe = float(value), float(expected)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (math.isfinite(fv) and math.isfinite(fe)
+            and fv.is_integer() and fe.is_integer() and fv == fe)
+
+
 def _ppl_protocol(d) -> dict:
     """从 eval.json 提取实际生效的评测条件；缺失字段不伪造。"""
     if not isinstance(d, dict):
@@ -496,11 +507,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                     # 键缺失时沿用默认 seed；显式为 null/非数值时无法证明用了
                     # 预期种子，审计应如实报“不一致”。
                     cfg_seed = cfg.get("seed", seed)
-                    try:
-                        seed_mismatch = (cfg_seed is None
-                                         or int(cfg_seed) != int(seed))
-                    except (TypeError, ValueError):
-                        seed_mismatch = True
+                    seed_mismatch = (cfg_seed is None
+                                     or not _same_seed(cfg_seed, seed))
                     if seed_mismatch:
                         mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
                     if "use_sdpa_standard" in cfg:
@@ -554,10 +562,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                                        f"/{meta['steps_planned']})")
             here = []
             ev_seed = ev.get("seed", seed)
-            try:
-                ev_seed_bad = (ev_seed is None or int(ev_seed) != int(seed))
-            except (TypeError, ValueError):
-                ev_seed_bad = True
+            ev_seed_bad = (ev_seed is None
+                           or not _same_seed(ev_seed, seed))
             if ev_seed_bad:
                 here.append(f"eval seed={ev.get('seed')}")
             if (expected_data_digest is not None
