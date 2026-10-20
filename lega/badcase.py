@@ -82,7 +82,7 @@ def categorize_case(rec: Dict) -> Dict:
     depth = r.get("depth")
     try:
         depth = float(depth) if depth is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         depth = None
     r["depth"] = depth
     positional = depth is not None and str(task or "").startswith("niah")
@@ -304,8 +304,12 @@ def format_case(idx: int, c: Dict) -> List[str]:
     """单个坏案例的 Markdown 行（问题/gold 摘录/预测/归因）。"""
     c = c if isinstance(c, dict) else {}
     depth = c.get("depth")
-    depth_s = (f" depth={float(depth):.2f}"
-               if isinstance(depth, (int, float)) else "")
+    depth_s = ""
+    if isinstance(depth, (int, float)):
+        try:
+            depth_s = f" depth={float(depth):.2f}"
+        except (OverflowError, ValueError):
+            depth_s = ""
     lines = [f"### 案例 {idx}: {c.get('task')} @ctx={c.get('ctx')}"
              + depth_s
              + (" 【难度边界样本：needle 靠后】" if c.get("hard_sample") else "")]
@@ -519,7 +523,7 @@ def _mean(vals):
             continue
         try:
             f = float(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if math.isfinite(f):
             out.append(f)
@@ -657,8 +661,14 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     where = (f"窗口 #{c.get('window')}" +
              (f"（{c['split']} 集）" if c.get("split") else ""))
     loss = c.get("loss")
-    # loss 可能缺失或显式为 null（旧格式/外部 JSON）：显示 '-' 而不是崩溃
-    loss_s = f"{float(loss):.3f}" if isinstance(loss, (int, float)) else "-"
+    # loss 可能缺失或显式为 null（旧格式/外部 JSON）：显示 '-' 而不是崩溃；
+    # 超出 float 范围的巨大整数同样是坏数据，不能中断整份报告。
+    loss_s = "-"
+    if isinstance(loss, (int, float)):
+        try:
+            loss_s = f"{float(loss):.3f}"
+        except (OverflowError, ValueError):
+            loss_s = "-"
     lines = [f"### 案例 {idx}: {where}　loss={loss_s}"]
     tail = str(c.get("context_tail") or "").replace("\n", " ⏎ ")[-160:]
     lines.append(f"- 上下文尾部: …{tail}")

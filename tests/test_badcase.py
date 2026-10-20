@@ -411,6 +411,26 @@ def test_mean_tolerates_non_numeric_values():
     print("  [ok] 非数值 loss 容错（\"n/a\" 跳过且不中断报告）")
 
 
+def test_huge_integers_tolerated_in_badcase():
+    """合法 JSON 里的超大整数转 float 会 OverflowError，坏案例报告不能崩。"""
+    from lega.badcase import _mean
+    huge = 10 ** 400
+    assert _mean([huge]) is None
+    c = categorize_case(_case(pred="1234567", ctx_nums=[], depth=huge))
+    assert c["depth"] is None and c["hard_sample"] is False
+    format_case(1, c)
+    text = "\n".join(format_window_case(1, {
+        "loss": huge, "pred_top5": [[" blue", 0.5]],
+        "gold_next": " green", "context_tail": "The sky is"}))
+    assert "loss=-" in text
+    ana = analyze_worst_windows([
+        _win(loss=huge, pred_top5=[[" blue", 0.3]]),
+        _win(loss=2.0, pred_top5=[[" blue", 0.3]]),
+    ], variant="lega")
+    assert ana["mean_loss"] == 2.0
+    print("  [ok] 超大整数（OverflowError）容错且不中断报告")
+
+
 def test_process_json_non_dict_payload_raises_value_error():
     """顶层非对象（[] / 字符串）的坏文件：抛 ValueError 供调用方跳过，
     而不是 AttributeError 中断整条流水线。"""
