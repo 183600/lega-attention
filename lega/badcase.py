@@ -878,7 +878,13 @@ def case_key(rec: Dict) -> str:
     if rec.get("window") is not None:
         return f"lm@{rec.get('split') or '?'}#w{rec['window']}"
     q = rec.get("question") or rec.get("context_tail") or rec.get("answer") or ""
-    return f"{rec.get('task')}@{rec.get('ctx')}|{str(q)[:120]}"
+    # 旧格式没有 sample_id 时，同一问题在不同构造中可能有不同 gold（例如
+    # multikey 的同一模板多次采样）；只按问题截断会把它们错误合并成一个
+    # “共识失败”。答案必须进入回退键。
+    ans = rec.get("answer")
+    if ans is None:
+        ans = rec.get("gold_next")
+    return f"{rec.get('task')}@{rec.get('ctx')}|{str(q)[:120]}|{str(ans)[:80]}"
 
 
 def _categorize_any(rec: Dict) -> Optional[Dict]:

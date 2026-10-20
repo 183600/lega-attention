@@ -356,6 +356,9 @@ def test_cross_variant_analysis_shared_vs_specific():
     k1 = case_key(legacy)
     k2 = case_key(dict(legacy))
     assert k1 == k2 and "niah" in k1
+    # 同一问题、不同 gold 的旧格式样本必须分开，否则会被误合并成共识失败
+    other = dict(legacy, answer="7654321")
+    assert case_key(legacy) != case_key(other)
     print("  [ok] 跨变体错误对照（共识失败/特异性新增/参照缺失/旧格式对齐）")
 
 
