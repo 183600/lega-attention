@@ -1209,6 +1209,43 @@ def test_factorial_interaction_contrast_math():
     print("  [ok] 全因子交互对比：标准 2^3 对比公式、无方向标记与不完整降级")
 
 
+def test_factorial_interactions_exclude_protocol_mismatches():
+    """交互对比用到全部 8 个格：任一格评测协议/单元不一致，该种子必须剔除；
+    否则 split/上下文/RULER 题面差异会伪装成“交互效应”。"""
+    base = {"none": 0.0, "A": 1.0, "B": 2.0, "C": 4.0,
+            "AB": 5.0, "AC": 5.0, "BC": 6.0, "ABC": 9.0}
+    runs = {}
+    for cell, variant in _FACTORIAL_CONTRAST_CELLS.items():
+        runs[variant] = {s: {"eval": {"val_ppl": base[cell],
+                                      "split": "test", "eval_ctx": 512}}
+                         for s in (1, 2, 3)}
+    # 一个种子下某格的 split 不同：该种子的三条交互都不可用；另两个仍可检验
+    runs["lega"][2]["eval"]["split"] = "val"
+    out = [t for t in _factorial_interaction_tests(runs)
+           if t["metric"] == "PPL交互"]
+    assert len(out) == 3, out
+    assert all(t["n"] == 2 for t in out), out
+    assert all(t.get("excluded_protocol_mismatches") == 1 for t in out), out
+    # 所有种子都混入另一协议：不产出交互检验，不能静默给出显著性
+    for slot in runs["lega"].values():
+        slot["eval"]["split"] = "val"
+    assert [t for t in _factorial_interaction_tests(runs)
+            if t["metric"] == "PPL交互"] == []
+    # RULER 已评测单元集合不一致（缺格）同样不可配对
+    for variant, slots in runs.items():
+        for slot in slots.values():
+            slot["eval"]["split"] = "test"
+            slot["ruler"] = {"ctx_lens": [256], "n_samples": 4,
+                             "results": {"niah_synth": {
+                                 "256": {"em": 1.0, "n": 4}}}}
+    for slot in runs["lega"].values():
+        slot["ruler"]["results"] = {}
+    out = _factorial_interaction_tests(runs)
+    assert len([t for t in out if t["metric"] == "PPL交互"]) == 3, out
+    assert [t for t in out if t["metric"] == "RULER平均交互"] == [], out
+    print("  [ok] 全因子交互剔除评测协议/单元不一致的种子")
+
+
 def test_budget_gate_downgrades_confirmatory_on_early_stop():
     """早停导致实际训练量不等：确认性判定降级，已降级的保留原原因。"""
     hyp = [{"id": "H1", "status": "支持", "confirmatory_valid": True},

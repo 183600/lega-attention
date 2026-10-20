@@ -1349,6 +1349,44 @@ _FACTORIAL_CONTRASTS = {
 }
 
 
+def _factorial_protocol_ok(maps, seed, metric) -> bool:
+    """一个种子的 8 个全因子格是否共享同一评测协议。
+
+    交互对比同时用到全部 8 个格；只要任一格的 split/评测窗口或 RULER
+    题面/生成预算/已评测单元不同，整条交互线就混入了非受控差异。判定
+    口径与 `_paired_comparisons` 一致：只比较双方都记录的字段，缺失
+    字段不伪造。
+    """
+    slots = []
+    for cell in _FACTORIAL_CONTRAST_CELLS:
+        m = maps.get(cell) if isinstance(maps, dict) else None
+        slot = m.get(seed) if isinstance(m, dict) else None
+        if not isinstance(slot, dict):
+            return False
+        slots.append(slot)
+    if metric == "PPL":
+        evals = [s.get("eval") if isinstance(s.get("eval"), dict) else {}
+                 for s in slots]
+        if len({e.get("split", "val") for e in evals}) > 1:
+            return False
+        protocols = [_ppl_protocol(e) for e in evals]
+    else:
+        protocols = [_ruler_protocol(
+            s.get("ruler") if isinstance(s.get("ruler"), dict) else {})
+            for s in slots]
+        sigs = [_ruler_cell_signature(
+            s.get("ruler") if isinstance(s.get("ruler"), dict) else {})
+            for s in slots]
+        known = [sig for sig in sigs if sig is not None]
+        if len(set(known)) > 1:
+            return False
+    common = (set.intersection(*(set(p) for p in protocols))
+              if protocols else set())
+    ref = protocols[0] if protocols else {}
+    return not any(not _same_protocol_value(ref[k], p[k])
+                   for p in protocols[1:] for k in common)
+
+
 def _factorial_interaction_tests(runs) -> list:
     """全因子 2^3 设计的交互效应检验（探索性，独立指标家族）。
 
@@ -1367,7 +1405,10 @@ def _factorial_interaction_tests(runs) -> list:
                 for cell, v in _FACTORIAL_CONTRAST_CELLS.items()}
         if any(not m for m in maps.values()):
             continue
-        seeds = _sorted_seeds(maps["none"])
+        all_seeds = _sorted_seeds(maps["none"])
+        seeds = [s for s in all_seeds
+                 if _factorial_protocol_ok(maps, s, metric)]
+        excluded = len(all_seeds) - len(seeds)
         for pair, (slice_a, slice_b) in _FACTORIAL_CONTRASTS.items():
             vals = []
             for s_ in seeds:
@@ -1397,6 +1438,8 @@ def _factorial_interaction_tests(runs) -> list:
             res.update({"candidate": f"{pair} 交互", "reference": "可加性（交互=0）",
                         "metric": metric + "交互", "lower_is_better": True,
                         "no_direction": True, "interaction": pair})
+            if excluded:
+                res["excluded_protocol_mismatches"] = excluded
             out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
     return out
 
