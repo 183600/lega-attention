@@ -219,9 +219,12 @@ def _grid_stats(grid, trials, seeds):
             var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
             std = math.sqrt(var)
         missing = [s for s in seed_list if str(s) not in per_seed]
+        n_failed = sum(1 for t in ts
+                       if t.get("val_loss_best") is None
+                       or t.get("seed") is None)
         out.append({
             "lr": lr, "weight_decay": wd,
-            "n_seeds": len(per_seed), "n_failed": len(ts) - len(vals),
+            "n_seeds": len(per_seed), "n_failed": n_failed,
             "seeds": seed_list, "missing_seeds": missing,
             # 只有覆盖全部选择种子的配置才与其他配置可比：部分种子成功的
             # 配置可能只是“留下了幸运种子”，不能参与 min(mean) 选择。

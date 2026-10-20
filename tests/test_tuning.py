@@ -9,8 +9,8 @@ import shutil
 import tempfile
 from unittest import mock
 
-from lega.tuning import (DEFAULT_LR_MULTS, _read_best_val_loss, _trial_name,
-                         build_grid, parse_floats, run_trial, tune)
+from lega.tuning import (DEFAULT_LR_MULTS, _grid_stats, _read_best_val_loss,
+                         _trial_name, build_grid, parse_floats, run_trial, tune)
 
 
 def test_build_grid_default_first_and_dedup():
@@ -239,6 +239,20 @@ def test_tune_multiseed_selects_by_mean_not_lucky_seed():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] tune（多种子按均值选择、幸运种子不翻盘、单种子显式标注）")
+
+
+def test_grid_stats_duplicate_success_is_not_counted_as_failure():
+    """同一配置/种子重复成功的 trial 只去重，不得被算成失败。"""
+    trials = [
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 7, "val_loss_best": 1.0},
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 7, "val_loss_best": 1.1},
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 8, "error": "boom"},
+    ]
+    g = _grid_stats([(1.0, 0.1)], trials, [7, 8])[0]
+    assert g["n_seeds"] == 1 and g["missing_seeds"] == [8]
+    assert g["n_failed"] == 1, g
+    assert g["complete"] is False
+    print("  [ok] _grid_stats：重复成功去重、失败计数不虚增")
 
 
 def test_tune_excludes_partial_seed_coverage_and_dedupes_seeds():
