@@ -914,19 +914,20 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
             continue
         pv = (cross.get("per_variant") or {}).get(v) or {}
         n_new = pv.get("n_new_vs_reference")
-        if not n_new:
-            continue
-        cats = pv.get("new_category_counts") or {}
-        top = sorted(cats.items(), key=lambda kv: -kv[1])
-        cat_s = (f"，主导类别 {CATEGORY_CN.get(top[0][0], top[0][0])}×{top[0][1]}"
-                 if top else "")
-        recs.append(_advice(
-            "模型/方法", "高",
-            f"{v} 相对 {ref} 新增 {n_new} 个错误{cat_s}",
-            "特异性新增错误是该方法盲区最直接的线索，优先逐条分析这些样例，"
-            "不要只看平均 EM",
-            f"对 {v} 的 new_vs_reference 样例做注意力/门控可视化，定位与 "
-            f"{ref} 的行为差异；若是难度边界样本占比高，先分层再归因"))
+        if n_new:
+            cats = pv.get("new_category_counts") or {}
+            top = sorted(cats.items(), key=lambda kv: -kv[1])
+            cat_s = (f"，主导类别 {CATEGORY_CN.get(top[0][0], top[0][0])}×{top[0][1]}"
+                     if top else "")
+            recs.append(_advice(
+                "模型/方法", "高",
+                f"{v} 相对 {ref} 新增 {n_new} 个错误{cat_s}",
+                "特异性新增错误是该方法盲区最直接的线索，优先逐条分析这些样例，"
+                "不要只看平均 EM",
+                f"对 {v} 的 new_vs_reference 样例做注意力/门控可视化，定位与 "
+                f"{ref} 的行为差异；若是难度边界样本占比高，先分层再归因"))
+        # 只有“改对”而没有“新增错误”的变体同样要报告：净收益不能因新增
+        # 为 0 就静默丢掉正收益证据。
         n_fixed = pv.get("n_fixed_vs_reference")
         if n_fixed:
             recs.append(_advice(

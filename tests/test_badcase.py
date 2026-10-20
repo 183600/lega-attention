@@ -748,6 +748,17 @@ def test_window_advice_uses_confident_bias_subset_rate():
     print("  [ok] 高置信错答建议按同类别子集的 gold 可见率判定")
 
 
+def test_cross_improvement_reports_fixed_only_variant():
+    """仅改对错误、没有新增错误的变体也必须得到净收益提示。"""
+    bad = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
+    cross = cross_variant_analysis({"standard": [bad], "lega": []},
+                                   reference="standard")
+    pv = cross["per_variant"]["lega"]
+    assert pv["n_new_vs_reference"] == 0 and pv["n_fixed_vs_reference"] == 1
+    assert any("改对 1" in r["trigger"] for r in cross["recommendations"]),         cross["recommendations"]
+    print("  [ok] 跨变体：仅改对（无新增）也报告净收益")
+
+
 def test_cross_improvement_synthesis():
     """跨变体：特异性新增错误按类别统计并给出方法侧方向；共识失败走数据轴。"""
     a = _case_sid("niah_synth@256#0", pred="1234567", ctx_nums=["1234567"])
