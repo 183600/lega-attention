@@ -180,42 +180,64 @@ def _manifest_identity(out_dir: str) -> dict:
     return out
 
 
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _trial_identity_summary(trials) -> dict:
     """汇总成功 trial 的 manifest 身份，检查是否用了同一份代码/数据。"""
-    manifests = [t.get("manifest") for t in trials
-                 if isinstance(t.get("manifest"), dict)
-                 and t["manifest"].get("present")]
+    successful = [t for t in trials if t.get("val_loss_best") is not None]
+    manifests = []
+    for t in successful:
+        m = t.get("manifest")
+        if isinstance(m, dict) and m.get("present"):
+            manifests.append(m)
     datas = sorted({m.get("data_fingerprint") for m in manifests
                     if m.get("data_fingerprint") is not None})
     commits = sorted({m.get("git_commit") for m in manifests
                       if m.get("git_commit") is not None})
     seed_mismatches = []
-    for t in trials:
+    for t in successful:
         m = t.get("manifest")
         if not isinstance(m, dict) or not m.get("present"):
             continue
-        if m.get("seed") is not None and int(m["seed"]) != int(t.get("seed", -1)):
+        requested = _as_int(t.get("seed"))
+        actual = _as_int(m.get("seed"))
+        if actual is None or requested is None or actual != requested:
             seed_mismatches.append({"lr": t.get("lr"),
                                     "wd": t.get("weight_decay"),
                                     "requested_seed": t.get("seed"),
                                     "manifest_seed": m.get("seed")})
+    n_missing = len(successful) - len(manifests)
     checked = bool(manifests)
     consistent = None
     if checked:
-        consistent = (len(datas) <= 1 and len(commits) <= 1
+        consistent = (n_missing == 0
+                      and len(datas) <= 1 and len(commits) <= 1
+                      and all(m.get("data_fingerprint") is not None
+                              for m in manifests)
+                      and all(m.get("git_commit") is not None
+                              for m in manifests)
                       and not seed_mismatches
                       and all(m.get("seed_verified") is True
+                              and _as_int(m.get("seed")) is not None
                               for m in manifests))
     return {
         "checked": checked,
+        "n_successful": len(successful),
         "n_with_manifest": len(manifests),
+        "n_missing_manifest": n_missing,
         "data_fingerprints": datas,
         "git_commits": commits,
         "seed_mismatches": seed_mismatches,
         "consistent": consistent,
         "note": ("consistent=True 要求全部成功 trial 的 manifest 都证明种子"
-                 "已生效，且代码 commit/数据指纹一致；缺失 manifest 时为 "
-                 "None（未核对），不冒充通过。"),
+                 "已生效，且代码 commit/数据指纹一致；全部缺失 manifest 时为 "
+                 "None（未核对），部分缺失或字段不可核对时为 False，"
+                 "不冒充通过。"),
     }
 
 
@@ -274,8 +296,7 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
         # 父进程请求的种子必须与子进程 manifest 一致且确认生效
         "seed_identity_ok": bool(
             manifest["present"] and manifest.get("seed_verified") is True
-            and manifest.get("seed") is not None
-            and int(manifest["seed"]) == int(seed)),
+            and _as_int(manifest.get("seed")) == int(seed)),
     })
     return rec
 

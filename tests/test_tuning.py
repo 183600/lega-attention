@@ -10,7 +10,8 @@ import tempfile
 from unittest import mock
 
 from lega.tuning import (DEFAULT_LR_MULTS, _grid_stats, _read_best_val_loss,
-                         _trial_name, build_grid, parse_floats, run_trial, tune)
+                         _trial_identity_summary, _trial_name, build_grid,
+                         parse_floats, run_trial, tune)
 
 
 def test_build_grid_default_first_and_dedup():
@@ -230,6 +231,38 @@ def test_tune_embeds_provenance_and_checks_trial_manifests():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] tune 报告内嵌 provenance 并核对 trial manifest 一致性")
+
+
+def test_trial_identity_requires_manifest_for_every_success_and_valid_seed():
+    """部分成功 trial 缺 manifest、种子缺失/畸形或代码数据未记录时不得判一致。"""
+    def trial(seed=7, present=True, manifest_seed=7, verified=True,
+              data_fp="d" * 64, commit="c" * 40):
+        rec = {"lr": 6e-4, "weight_decay": 0.1, "seed": seed,
+               "val_loss_best": 1.0}
+        if present:
+            rec["manifest"] = {"present": True, "seed": manifest_seed,
+                               "seed_verified": verified,
+                               "data_fingerprint": data_fp,
+                               "git_commit": commit}
+        else:
+            rec["manifest"] = {"present": False}
+        return rec
+
+    failed = {"lr": 3e-4, "weight_decay": 0.1, "seed": 7, "error": "boom"}
+    ident = _trial_identity_summary(
+        [trial(), trial(seed=8, present=False), failed])
+    assert ident["checked"] is True
+    assert ident["n_successful"] == 2
+    assert ident["n_with_manifest"] == 1
+    assert ident["n_missing_manifest"] == 1
+    assert ident["consistent"] is False
+
+    for bad in (trial(manifest_seed=None), trial(manifest_seed="bad"),
+                trial(data_fp=None), trial(commit=None),
+                trial(verified=False)):
+        one = _trial_identity_summary([bad])
+        assert one["checked"] is True and one["consistent"] is False, one
+    print("  [ok] trial identity（成功 trial 全部可核对才判一致）")
 
 
 def test_parse_seeds_rejects_non_integer():
