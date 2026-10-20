@@ -260,6 +260,22 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
     print("  [ok] 台账快照内嵌逐 run 溯源 + 标记 eval 身份不匹配")
 
 
+def test_snapshot_flags_fractional_eval_seed():
+    """eval.json 的小数种子不能被 int() 截断后冒充本 run 的种子。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "lega")
+        os.makedirs(out)
+        with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"variant": "lega", "seed": 7.5, "val_ppl": 1.0}, f)
+        snap = snapshot_train_run("lega", 7, out)
+        assert snap["eval_identity_mismatches"]
+        assert any("seed" in x for x in snap["eval_identity_mismatches"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 台账快照拒绝小数 eval 种子")
+
+
 def test_verify_ledger_completed_coverage_and_config_identity():
     """completed 必须覆盖 variants×seeds；同 run_id 的配置哈希不得改写。"""
     tmp = tempfile.mkdtemp()

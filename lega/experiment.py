@@ -410,7 +410,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
         ev_seed = ev.get("seed")
         if ev_seed is not None:
             try:
-                if int(ev_seed) != int(seed):
+                if _ledger_seed(ev_seed) != int(seed):
                     mismatches.append(f"seed={ev_seed}")
             except (TypeError, ValueError, OverflowError):
                 mismatches.append(f"seed={ev_seed!r}")
