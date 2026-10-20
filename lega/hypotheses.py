@@ -270,12 +270,20 @@ def verify_registration(registry_path: str = None,
     lock = load_lock(lock_path)
 
     if doc is None:
-        report["status"] = "missing_registry"
-        report["problems"].append(
-            "登记表文件不存在或不可解析" +
-            (f"（锁文件基线记录 {len(_lock_baseline(lock).get('hypotheses') or {})} "
-             "条已登记假设，删除登记表即失去预注册边界）"
-             if isinstance(lock, dict) else "（且无锁文件）"))
+        if os.path.exists(registry_path):
+            # 文件在但读不出：这是损坏/篡改，不是“从未登记”。若统一报
+            # missing_registry，会把被破坏的登记表洗成“缺文件”状态。
+            report["status"] = "violated"
+            report["problems"].append(
+                "登记表文件存在但不可解析（不是合法 JSON 对象）："
+                "预注册边界已损坏，需从 git 恢复后重新核对")
+        else:
+            report["status"] = "missing_registry"
+            report["problems"].append(
+                "登记表文件不存在" +
+                (f"（锁文件基线记录 {len(_lock_baseline(lock).get('hypotheses') or {})} "
+                 "条已登记假设，删除登记表即失去预注册边界）"
+                 if isinstance(lock, dict) else "（且无锁文件）"))
         return report
 
     fp = fingerprint(doc)
@@ -290,10 +298,18 @@ def verify_registration(registry_path: str = None,
         return report
 
     if lock is None:
-        report["status"] = "missing_lock"
-        report["problems"].append(
-            "缺少锁文件 preregistration/hypotheses.lock.json：无法验证"
-            "登记表自登记以来未被改写；请用 --init（首次登记）恢复基线")
+        if os.path.exists(lock_path):
+            # 锁文件被写坏（半写入/截断/非法 JSON）必须与“从未生成锁”区分：
+            # 前者意味着完整性证据已损坏，不能被当作可重新 --init 的缺失状态。
+            report["status"] = "violated"
+            report["problems"].append(
+                "锁文件存在但不可解析（损坏/截断）：无法重放修订链，"
+                "需从 git 恢复锁文件后重新验证")
+        else:
+            report["status"] = "missing_lock"
+            report["problems"].append(
+                "缺少锁文件 preregistration/hypotheses.lock.json：无法验证"
+                "登记表自登记以来未被改写；请用 --init（首次登记）恢复基线")
         return report
 
     report["baseline_document_sha256"] = _lock_baseline(lock).get(
@@ -339,9 +355,27 @@ def verify_registration(registry_path: str = None,
 
 
 def _write_json(obj, path: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    """原子写入：临时文件 + fsync + os.replace。
+
+    锁文件是防篡改基线；若进程在 json.dump 中途崩溃，非原子写入会留下
+    截断的 JSON，使下一次验证把“损坏的锁”误当成“没有锁”。临时文件与
+    目标同目录（跨文件系统 replace 会失败），失败时清理临时文件。
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def init_lock(registry_path: str = None, lock_path: str = None,

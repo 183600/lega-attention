@@ -245,6 +245,32 @@ def test_verify_missing_files_and_malformed_lock():
     print("  [ok] verify_registration（缺文件/坏锁/非法登记表的状态边界）")
 
 
+def test_corrupt_json_is_violation_not_missing_file():
+    """文件存在但 JSON 损坏必须判 violated；不能洗成“从未登记/没有锁”。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        with open(lock, "w", encoding="utf-8") as f:
+            f.write("{truncated")
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "violated", r
+        assert not r["confirmatory_valid"]
+        assert any("不可解析" in p for p in r["problems"])
+        os.remove(lock)
+        init_lock(registry_path=reg, lock_path=lock)
+        with open(reg, "w", encoding="utf-8") as f:
+            f.write("not json")
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "violated", r
+        assert not r["confirmatory_valid"]
+        assert any("不可解析" in p for p in r["problems"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 损坏的锁/登记表 → violated（不冒充 missing）")
+
+
 def test_malformed_lock_baseline_and_unhashable_ids_do_not_crash():
     """锁基线/登记表被改成异常结构时必须走 violated/schema_errors 报告，
     而不是让验证器 AttributeError/TypeError 崩溃（它是审计的最后一环）。"""
