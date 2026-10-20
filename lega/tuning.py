@@ -202,21 +202,30 @@ def _grid_stats(grid, trials, seeds):
     “最优配置”换一个种子重跑就可能翻转。多种子时按平均 val_loss 选择，
     并给出跨种子标准差，让“最优−默认”的差距可对照噪声解读。
     """
+    seed_list = [int(s) for s in seeds]
     out = []
     for lr, wd in grid:
         ts = [t for t in trials if t["lr"] == lr and t["weight_decay"] == wd]
-        per_seed = {str(t.get("seed")): t.get("val_loss_best") for t in ts}
-        vals = [t["val_loss_best"] for t in ts
-                if t.get("val_loss_best") is not None]
+        # 按种子去重：同一配置/种子重复跑的记录不能把均值与 n_seeds 撑大。
+        per_seed = {}
+        for t in ts:
+            if t.get("val_loss_best") is None or t.get("seed") is None:
+                continue
+            per_seed[str(int(t["seed"]))] = t["val_loss_best"]
+        vals = list(per_seed.values())
         mean = (sum(vals) / len(vals)) if vals else None
         std = None
         if len(vals) >= 2:
             var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
             std = math.sqrt(var)
+        missing = [s for s in seed_list if str(s) not in per_seed]
         out.append({
             "lr": lr, "weight_decay": wd,
-            "n_seeds": len(vals), "n_failed": len(ts) - len(vals),
-            "seeds": [int(s) for s in seeds],
+            "n_seeds": len(per_seed), "n_failed": len(ts) - len(vals),
+            "seeds": seed_list, "missing_seeds": missing,
+            # 只有覆盖全部选择种子的配置才与其他配置可比：部分种子成功的
+            # 配置可能只是“留下了幸运种子”，不能参与 min(mean) 选择。
+            "complete": not missing,
             "val_loss_best": mean,            # 兼容名：多种子时为均值
             "val_loss_best_mean": mean,
             "val_loss_best_std": std,
@@ -245,6 +254,8 @@ def tune(config: str, data_dir: str, out_dir: str,
         seeds = [int(cfg.get("seed", 1337) if seed is None else seed)]
     else:
         seeds = [int(s) for s in seeds] or [int(cfg.get("seed", 1337))]
+    # 重复种子（如 --seeds 7,7）否则会重复训练同一目录并伪造“多种子证据”。
+    seeds = list(dict.fromkeys(seeds))
     seed = seeds[0]  # 兼容字段：报告里的主（第一个）选择种子
     steps = int(cfg["steps"] if steps is None else steps)
     grid = build_grid(lr0, wd0, lr_mults=lr_mults, wd_list=wd_list)
@@ -266,12 +277,18 @@ def tune(config: str, data_dir: str, out_dir: str,
     if not ok:
         raise RuntimeError("全部 trial 失败，无法完成基线调优；"
                            "请检查训练日志（各 trial 目录 stderr 已记录）")
-    selected = min(ok, key=lambda g: g["val_loss_best_mean"])
+    complete = [g for g in ok if g.get("complete")]
+    if not complete:
+        raise RuntimeError(
+            "没有任何配置在所有选择种子上完成评测，无法按均值比较；"
+            "请检查失败 trial 的日志或减少 seeds 后重跑")
+    selected = min(complete, key=lambda g: g["val_loss_best_mean"])
     default = next((g for g in grid_stats
                     if g["lr"] == lr0 and g["weight_decay"] == wd0), None)
     gap = None
     default_is_optimal = None
-    if default is not None and default["val_loss_best_mean"] is not None:
+    if (default is not None and default["val_loss_best_mean"] is not None
+            and default.get("complete")):
         # gap = 最优 − 默认：默认“近优”要求默认不比最优差出容差以上，
         # 即 gap ≥ −tol·|最优|（gap 为负表示最优显著优于默认 → 不近优）。
         gap = selected["val_loss_best_mean"] - default["val_loss_best_mean"]

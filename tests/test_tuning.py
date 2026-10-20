@@ -241,6 +241,50 @@ def test_tune_multiseed_selects_by_mean_not_lucky_seed():
     print("  [ok] tune（多种子按均值选择、幸运种子不翻盘、单种子显式标注）")
 
 
+def test_tune_excludes_partial_seed_coverage_and_dedupes_seeds():
+    """部分种子成功的配置不能靠“留下的幸运种子”赢过完整覆盖的默认配置。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"lr": 6e-4, "weight_decay": 0.1, "steps": 2,
+                       "seed": 7}, f)
+        out = os.path.join(tmp, "tuning")
+        calls = []
+
+        def fake(config, data_dir, variant, seed, lr, wd, steps, out_dir,
+                 device="auto", timeout=None):
+            calls.append((lr, seed, out_dir))
+            base = {"lr": lr, "weight_decay": wd, "seed": seed, "steps": steps,
+                    "out_dir": out_dir, "returncode": 0}
+            if lr == 3e-4 and seed != 7:
+                base["error"] = "boom"
+                return base
+            base.update({"val_loss_best": 0.5 if lr == 3e-4 else 1.0,
+                         "best_step": steps, "val_loss_final": 1.0,
+                         "val_loss_source": "train_log.jsonl(min)"})
+            return base
+
+        with mock.patch("lega.tuning.run_trial", side_effect=fake):
+            report = tune(cfg_path, tmp, out, lr_mults=[0.5, 1.0],
+                          seeds=[7, 7, 8, 9])
+        # 重复种子去重后每配置只跑 3 次，不再伪造“4 种子”证据
+        assert report["selection_seeds"] == [7, 8, 9]
+        assert report["selection_seed_count"] == 3
+        assert len(calls) == 6
+        assert all("_seed7" in c[2] for c in calls if c[1] == 7)
+        by_lr = {g["lr"]: g for g in report["grid"]}
+        assert by_lr[3e-4]["complete"] is False
+        assert by_lr[3e-4]["missing_seeds"] == [8, 9]
+        assert by_lr[3e-4]["n_seeds"] == 1
+        assert by_lr[6e-4]["complete"] is True
+        assert report["selected"]["lr"] == 6e-4
+        assert report["default_is_optimal"] is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] tune：剔除部分种子覆盖配置并去重选择种子")
+
+
 def test_tune_dedupes_and_default_mult_present():
     assert 1.0 in DEFAULT_LR_MULTS
     print("  [ok] DEFAULT_LR_MULTS 含 1.0（默认组合必在网格内）")
