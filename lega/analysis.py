@@ -306,7 +306,9 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             continue
         hit = _finite_float(r.get("hit"))
         example = r.get("example")
-        if hit is None or example is None:
+        if hit is None or hit not in (0.0, 1.0) or example is None:
+            # 与 probe/summarize 同口径：hit 是二值标签，非 0/1 不能当作
+            # 正类或负数参与 AUROC/AP，否则指标会越界或方向错误。
             continue
         try:
             hash(example)
@@ -338,13 +340,12 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             vals = [_finite_float(r.get(k)) for r in clusters[e]]
             scores[k].append(np.array(
                 [np.nan if v is None else v for v in vals], dtype=np.float64))
-    # 逐聚类预计算“是否含正/负类”“得分是否含 NaN”：重采样时先按聚类标志
-    # 判定有效性，再构造拼接数组，过滤口径与 _auroc_safe 逐位等价
-    # （重采样后标签恰有两类 ⟺ 命中的聚类中正负类都出现）。
+    # 逐聚类预计算“是否含正/负类”：重采样时先按聚类标志判定是否可能
+    # 恰有两类，再交给 roc_pr_aucs 按分数有限性逐记录过滤（与 summarize
+    # 的点估计口径一致）。不能因为某个聚类含 NaN 分数就丢掉整个重采样：
+    # 可用分数仍能估计指标，否则 CI 会在仅少量缺失时整体变成 null。
     has_pos = np.array([bool((lb == 1.0).any()) for lb in labels])
     has_neg = np.array([bool((lb == 0.0).any()) for lb in labels])
-    nan_score = {k: np.array([bool(np.isnan(sc).any()) for sc in scores[k]])
-                 for k in score_keys}
 
     def _finite(v):
         return v if (v is not None and np.isfinite(v)) else None
@@ -361,7 +362,7 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
         lb = None
         vals, aps = {}, {}
         for k in score_keys:
-            if not both or nan_score[k][idx].any():
+            if not both:
                 vals[k] = aps[k] = None
                 continue
             if lb is None:
@@ -405,7 +406,10 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     c = _record_arrays(records, "c")
     log_n = _record_arrays(records, "log_n")
 
-    # 部分记录可能没有 needle 跨度（hit=None），统计时仅在有效样本上计算
+    # 部分记录可能没有 needle 跨度（hit=None），统计时仅在有效样本上计算。
+    # 外部/旧格式记录里的 hit 必须是 0/1；其他有限值（如 1.5、-1）不能
+    # 冒充标签，否则 hit 率/条件概率/AUROC 会越界或把非正类当负类。
+    hit[(hit != 0.0) & (hit != 1.0)] = np.nan
     hv = ~np.isnan(hit)
 
     def _auroc(scores, labels, mask):
@@ -528,9 +532,13 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     per_head = []
     layer_arr = _record_arrays(records, "layer")
     head_arr = _record_arrays(records, "head")
+    # int64 强制转换对超范围浮点会饱和/回绕，把不同的层/头合并成同一
+    # 组；层/头索引远小于 2^53，超出即可安全视为畸形记录。
+    limit = float(2 ** 53)
     lh_ok = (np.isfinite(layer_arr) & np.isfinite(head_arr)
              & (layer_arr == np.floor(layer_arr))
-             & (head_arr == np.floor(head_arr)))
+             & (head_arr == np.floor(head_arr))
+             & (np.abs(layer_arr) <= limit) & (np.abs(head_arr) <= limit))
     if lh_ok.any():
         layer_v = layer_arr[lh_ok].astype(np.int64)
         head_v = head_arr[lh_ok].astype(np.int64)
@@ -564,7 +572,8 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         per_head.append({
             "layer": int(layer), "head": int(head), "n": int(m.sum()),
             "mean_g": float(np.nanmean(gg)) if (~np.isnan(gg)).any() else None,
-            "mean_max_p": float(mp.mean()),
+            "mean_max_p": (float(np.nanmean(mp))
+                           if (~np.isnan(mp)).any() else None),
             "hit_rate": float(np.nanmean(hh)) if hv.any() else None,
             "corr_c_g": pearson(cc, gg) if (~np.isnan(cc)).any() and (~np.isnan(gg)).any() else None,
             "corr_qterm_g": pearson(qq, gg) if (~np.isnan(qq)).any() and (~np.isnan(gg)).any() else None,
@@ -666,8 +675,16 @@ def main():
             task_of.append(task)
             ctx_of.append(ctx)
 
+    csv_path = os.path.join(args.out_dir,
+                            f"analysis_records_{variant}{args.suffix}.csv")
     if not examples:
         print("[analysis] 没有可分析的样例（ctx 过小或缺少语料），跳过")
+        # 空结果必须清掉上一轮的逐记录 CSV：JSON 已声明 n_records=0，
+        # 若旧 CSV 还在，plots._read_records 会继续消费过期记录。
+        try:
+            os.remove(csv_path)
+        except FileNotFoundError:
+            pass
         save_json({"variant": variant, "seed": ck.get("seed"), "n_records": 0,
                    "note": "no examples", "skipped_tasks": skipped_tasks,
                    **provenance},
@@ -718,14 +735,18 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     # 逐记录 CSV（供画图与复核）
-    csv_path = os.path.join(args.out_dir,
-                            f"analysis_records_{variant}{args.suffix}.csv")
     if records:
         fields = sorted({k for r in records for k in r})
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
             w.writerows(records)
+    else:
+        # 同 early return：本次没有任何记录时不能留下上一轮的 CSV。
+        try:
+            os.remove(csv_path)
+        except FileNotFoundError:
+            pass
     save_json(summary,
               os.path.join(args.out_dir, f"analysis_{variant}{args.suffix}.json"))
 

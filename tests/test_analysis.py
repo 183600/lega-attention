@@ -203,6 +203,50 @@ def test_analysis_tolerates_malformed_external_records():
     print("  [ok] 机制分析：畸形外部记录按缺失跳过，不触发 KeyError")
 
 
+def test_summarize_rejects_non_binary_hit_and_missing_maxp():
+    """hit 非 0/1 不能计入标签；逐头缺 max_p 时均值为 None 而非 NaN。"""
+    recs = [
+        {"example": 0, "hit": 1.5, "max_p": 0.9, "g": 0.8,
+         "logit": 1.0, "qterm": 0.0, "c": 0.0, "log_n": 4.0,
+         "layer": 0, "head": 0},
+        {"example": 1, "hit": 0.0, "max_p": 0.1, "g": 0.2,
+         "logit": -1.0, "qterm": 0.0, "c": 0.0, "log_n": 4.0,
+         "layer": 0, "head": 0},
+        {"example": 2, "hit": 1.0, "g": 0.7, "logit": 2.0,
+         "qterm": 0.0, "c": 0.0, "log_n": 4.0, "layer": 0, "head": 1},
+    ]
+    s = summarize(recs, "lega", 0.5)
+    # 1.5 既不是正类也不是负类，不能进入 n_hit/n_miss 或基率
+    assert s["n_hit"] == 1 and s["n_miss"] == 1
+    assert abs(s["hit_base_rate"] - 0.5) < 1e-12
+    assert s["hit_rate"] == 0.5
+    # head 1 只有一条记录且缺 max_p：均值未知，不能写成 NaN/null
+    h1 = [p for p in s["per_head"] if p["head"] == 1][0]
+    assert h1["mean_max_p"] is None
+    # 超范围 layer（int64 转换会饱和合并不同头）按畸形记录跳过
+    huge = [dict(r, layer=10 ** 19) for r in recs]
+    assert summarize(huge, "lega", 0.5)["per_head"] == []
+    print("  [ok] summarize：非二值 hit 被剔除、缺 max_p 不产生 NaN、超范围层头跳过")
+
+
+def test_bootstrap_filters_missing_scores_per_resample():
+    """部分分数缺失不应让整个 bootstrap 重采样作废。"""
+    recs = []
+    for ex in range(12):
+        for k in range(20):
+            recs.append({
+                "example": ex, "hit": float(k < 10),
+                "logit": None if k == 0 else (2.0 if k < 10 else -1.0),
+                "qterm": 0.5 if k < 10 else -0.5, "c": 0.0})
+    point = summarize(recs, "lega", 0.5)["auroc_logit"]
+    assert point == 1.0
+    out = auroc_cluster_bootstrap(recs, n_resamples=200, seed=0)
+    ci = out["ci95"]["logit"]
+    assert ci is not None and ci[0] <= point <= ci[1], ci
+    assert out["n_valid_resamples"] > 0
+    print("  [ok] 聚类 bootstrap：按记录过滤缺失分数，而非丢弃整个重采样")
+
+
 def test_summarize_reports_imbalance_aware_metrics():
     """summarize 必须报告正类率、不平衡等级、主指标与三口径门控 F1。"""
     # 19 正 381 负 → 正类率 4.75%（<5%）触发 PR-AUC 主指标
