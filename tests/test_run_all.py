@@ -2495,6 +2495,11 @@ def test_summary_loads_tolerate_null_ppl_and_bad_json_seed():
     assert _ppl_of({"ppl": None, "val_ppl": 9.5}) == 9.5
     assert _ppl_of({"ppl": 8.0, "val_ppl": 9.5}) == 8.0
     assert _seed_key("eval_lega.json", {"seed": "not-an-int"}) is None
+    assert _seed_key("eval_lega.json", {"seed": "7"}) == 7
+    assert _seed_key("eval_lega.json", {"seed": 7.0}) == 7
+    assert _seed_key("eval_lega.json", {"seed": 7.5}) is None
+    assert _seed_key("eval_lega.json", {"seed": True}) is None
+    assert _seed_key("eval_lega.json", {"seed": float("inf")}) is None
     tmp = tempfile.mkdtemp()
     try:
         _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {

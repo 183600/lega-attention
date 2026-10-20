@@ -392,16 +392,23 @@ def _same_protocol_value(a, b) -> bool:
     return _protocol_value(a) == _protocol_value(b)
 
 
+def _integral_value(value):
+    """把外部 JSON 数值规范为整数；bool/非有限/小数返回 None。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(f) or not f.is_integer():
+        return None
+    return int(f)
+
+
 def _same_integral_value(value, expected) -> bool:
     """两个值是否表示同一个整数（拒绝 bool/非有限/小数截断）。"""
-    if isinstance(value, bool) or isinstance(expected, bool):
-        return False
-    try:
-        fv, fe = float(value), float(expected)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return (math.isfinite(fv) and math.isfinite(fe)
-            and fv.is_integer() and fe.is_integer() and fv == fe)
+    iv, ie = _integral_value(value), _integral_value(expected)
+    return iv is not None and ie is not None and iv == ie
 
 
 def _same_seed(value, expected) -> bool:
@@ -702,12 +709,9 @@ def _seed_key(path: str, data: dict):
     s = data.get("seed")
     if s is None:
         return None
-    try:
-        return int(s)
-    except (TypeError, ValueError, OverflowError):
-        # 外部/旧产物里的 seed 可能是对象、字符串或 Infinity；无法解析时
-        # 按“缺少种子信息”处理，不能让整份汇总崩溃。
-        return None
+    # 外部/旧产物里的 seed 可能是对象、字符串、小数或 Infinity；无法解析为
+    # 精确整数时按“缺少种子信息”处理，不能截断后冒充另一个种子。
+    return _integral_value(s)
 
 
 def _result_files(results_dir: str, prefix: str, scope_seeds) -> list:
