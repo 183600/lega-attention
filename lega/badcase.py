@@ -264,8 +264,8 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
          "把模型原文随结果落盘复核；核对解析正则与 prompt 模板"),
     ):
         c = counts.get(cat, 0)
-        if _share(c, n) >= DOMINANT_SHARE:
-            recs.append(_advice(ax, hi, f"{trig}（{c}/{n}）", sugg, nxt))
+        if _share(c, model_n) >= DOMINANT_SHARE:
+            recs.append(_advice(ax, hi, f"{trig}（{c}/{model_n}）", sugg, nxt))
     return recs[:MAX_ADVICE]
 
 

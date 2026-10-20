@@ -683,6 +683,18 @@ def test_label_errors_excluded_from_model_advice_denominator():
                for r in ana["recommendations"]), ana["recommendations"]
     assert not any("位于 needle 深位" in r["trigger"]
                    for r in ana["recommendations"])
+    # fwe 同样属于模型错误：主导度分母也必须剔除标注错误，否则 3/6 的
+    # fwe 漏答会被 10 条标注错误稀释成 3/16 而漏报
+    fwe = [_case(task="fwe", answer="ka ro", pred="ka",
+                 answer_words=["ka", "ro"])] * 3
+    other = [_case(pred="5550001", ctx_nums=[], depth=0.2)] * 3
+    label_cases = [_case(pred="1234567", ctx_nums=[], in_prompt=False,
+                         depth=0.9)] * 10
+    ana2 = analyze_badcases(label_cases + fwe + other, variant="lega")
+    assert ana2["label_errors"] == 10
+    assert any("fwe 漏答高频词主导" in r["trigger"]
+               and "（3/6）" in r["trigger"]
+               for r in ana2["recommendations"]), ana2["recommendations"]
     print("  [ok] 标注错误从模型改进方向的分母中剔除")
 
 
