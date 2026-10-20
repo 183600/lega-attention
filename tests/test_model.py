@@ -163,6 +163,21 @@ def test_checkpoint_roundtrip():
         assert torch.allclose(o1, o2, atol=1e-6)
 
 
+def test_checkpoint_roundtrip_preserves_attention_path():
+    """评测恢复必须沿用训练时的注意力实现，不能被默认值静默改写。"""
+    torch.manual_seed(0)
+    model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1, n_heads=2,
+                ffn_mult=4, variant="standard", use_sdpa_standard=False)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "model.pt")
+        save_checkpoint(path, model)
+        m2, _ = load_model(path)
+        assert m2.blocks[0].attn.use_sdpa is False
+        # 显式覆盖仍应生效（latency 需要 standard/standard_sdpa 两条路径）
+        m3, _ = load_model(path, use_sdpa_standard=True)
+        assert m3.blocks[0].attn.use_sdpa is True
+
+
 def test_gate_stats_shapes():
     """need_stats=True 时诊断统计形状正确（standard 也应返回集中度统计供分析用）。"""
     for v in ("lega", "qgate", "null", "standard"):

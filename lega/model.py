@@ -778,11 +778,18 @@ def save_checkpoint(path: str, model: GPT, extra: Optional[Dict] = None) -> None
 
 
 def load_model(ckpt_path: str, device: str = "cpu",
-               use_sdpa_standard: bool = True):
-    """从 checkpoint 恢复模型。返回 (model, ckpt_dict)。"""
+               use_sdpa_standard: Optional[bool] = None):
+    """从 checkpoint 恢复模型。返回 (model, ckpt_dict)。
+
+    use_sdpa_standard=None 时沿用 checkpoint 训练时的注意力实现路径，避免
+    评测/生成静默切到另一条实现（数值与内核不同，混用会污染对比）。显式
+    传值仅用于需要强制路径的调用（如 latency 的 standard/standard_sdpa）。
+    """
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     cfg = dict(ck["model_cfg"])
-    cfg["use_sdpa_standard"] = use_sdpa_standard
+    if use_sdpa_standard is None:
+        use_sdpa_standard = bool(cfg.get("use_sdpa_standard", True))
+    cfg["use_sdpa_standard"] = bool(use_sdpa_standard)
     model = GPT(**cfg)
     model.load_state_dict(ck["state_dict"])
     ck.pop("state_dict", None)
