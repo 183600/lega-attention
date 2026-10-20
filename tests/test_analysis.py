@@ -53,6 +53,26 @@ def test_collect_records_batching_matches_per_example():
     print(f"  [ok] {len(r1)} 条记录逐位一致，样例顺序保持")
 
 
+def test_collect_records_c_keeps_length_normalization_for_ablations():
+    """集中度 c 在所有含 a·c 的变体中都必须是 log(n·max_p)，不能随 b·log n 消融。"""
+    import torch
+
+    tok = _tok()
+    examples = [_example(24, 20, tok.n_vocab)]
+    for variant in ("lega", "lega_no_len", "lega_conc_only"):
+        torch.manual_seed(0)
+        model = GPT(tok.n_vocab, block_size=64, d_model=32, n_layers=1,
+                    n_heads=2, variant=variant).eval()
+        recs = collect_records(model, tok, "cpu", examples, ["niah_synth"],
+                               [64], amp=False, batch_size=1)
+        assert recs, variant
+        for r in recs:
+            expected = r["log_n"] + math.log(max(r["max_p"], 1e-30))
+            assert math.isclose(r["c"], expected, rel_tol=1e-9, abs_tol=1e-9), (
+                variant, r["c"], expected)
+    print("  [ok] 消融变体的 c 仍保留 log n 归一化")
+
+
 def _mk_records():
     """合成记录：两个样例，hit 与分数强相关（AUROC 应接近 1）。
 

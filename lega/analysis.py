@@ -6,8 +6,8 @@
   max_p   本次注意力最大概率（集中度）
   hit     注意力落点 argmax 是否落在答案数值 token 跨度内（是否找对）
   g/logit 门控值与门控 logit（gated 变体）
-  qterm   查询项 w·q（若有）；c = log n + log max_p（lega/lega_no_query），
-          去长度项或只保留集中度的变体 c = log max_p
+  qterm   查询项 w·q（若有）；c = log n + log max_p（含集中度项的全部变体，
+          包括去长度项/仅集中度消融——a·c 的长度归一化不能随 b·log n 一起消失）
 
 关键指标：
   misleading_rate      集中但看错: P(max_p > τ 且 ¬hit)
@@ -117,9 +117,8 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     variant = model.variant
     records_by_ex: List[List[Dict]] = [[] for _ in examples]
     amp_ctx = amp_autocast(device, bool(amp))
-    use_c_full = variant in ("lega", "lega_no_query")
-    use_c_nolen = (not use_c_full
-                   and variant in ("lega_no_len", "lega_conc_only"))
+    use_c_full = variant in ("lega", "lega_no_query", "lega_no_len",
+                             "lega_conc_only")
     # 按提示长度分组：只有等长样例可堆叠；每组内再按 batch_size 切批。
     order = sorted(range(len(examples)), key=lambda k: len(examples[k]["ids"]))
     bs = max(1, int(batch_size))
@@ -210,8 +209,6 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                             rec["qterm"] = qterm_h[i]
                         if use_c_full:
                             rec["c"] = ln_i + math.log(max(mp_i, 1e-30))
-                        elif use_c_nolen:
-                            rec["c"] = math.log(max(mp_i, 1e-30))
                         records_by_ex[ex_idx].append(rec)
         del out
     return [rec for rs in records_by_ex for rec in rs]
