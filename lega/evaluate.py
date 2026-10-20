@@ -42,11 +42,22 @@ def _preserve_eval_mode(fn):
 
 
 def _positive_int_or_none(value):
-    """配置里的数值→正整数；字符串/非有限浮点/越界值返回 None。"""
-    try:
-        value = int(value)
-    except (TypeError, ValueError, OverflowError):
+    """配置里的数值→正整数；bool/非有限浮点/小数/越界值返回 None。
+
+    配置是外部可改的评测协议；把 8.5 截断成 8 或把 True 当成 1 会让评测
+    声称使用了与训练配置不同的上下文/窗口数，PPL 因而不可比。
+    """
+    if isinstance(value, bool):
         return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        value = int(value)
+    else:
+        try:
+            value = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
     return value if value > 0 else None
 
 

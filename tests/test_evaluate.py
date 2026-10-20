@@ -86,7 +86,11 @@ def test_positive_int_config_value_degrades_to_none():
     assert _positive_int_or_none(float("inf")) is None
     assert _positive_int_or_none(0) is None
     assert _positive_int_or_none(-3) is None
+    assert _positive_int_or_none(8.5) is None
+    assert _positive_int_or_none(True) is None
+    assert _positive_int_or_none(float("nan")) is None
     assert _positive_int_or_none("128") == 128
+    assert _positive_int_or_none(8.0) == 8
     print("  [ok] 非法 train_ctx/eval_iters 配置安全降级")
 
 
