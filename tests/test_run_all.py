@@ -2328,6 +2328,68 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe EM 口径）")
 
 
+def test_build_summary_per_task_ruler_breakdown():
+    """RULER 综合平均可能被方向相反的任务互相抵消，必须逐任务分解并单独成表。
+
+    逐任务检验（metric 以 `RULER:` 开头）完整落入 significance.json 且带
+    exploratory 标记；markdown 只在预注册 RULER 对比上渲染，且不进入主检验表。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        seeds = [1, 2, 3]
+        # 构造两个任务：niah_synth 上 lega 稳定更好，vt 上稳定更差，综合平均
+        # 接近 0，验证“逐任务方向相反被综合平均掩盖”的可审计性。
+        per_task = {
+            "niah_synth": {"lega": 0.9, "standard": 0.5},
+            "vt": {"lega": 0.1, "standard": 0.5},
+        }
+        for s in seeds:
+            for v in ("lega", "standard"):
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s, "val_ppl": 10.0 + 0.01 * s,
+                    "val_loss": 2.3, "n_params": 100, "n_gate_extra": 0,
+                    "split": "val"})
+                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s,
+                    "ctx_lens": [256], "n_samples": 30, "sample_seed": 1234,
+                    "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
+                    "vt_chains": 4, "vt_depth": 4,
+                    "results": {
+                        t: {"256": {"em": vals[v], "n": 30}}
+                        for t, vals in per_task.items()}})
+        reg = {"hypotheses": [
+            {"id": "H4", "claim": "LEGA 优于 standard（RULER）",
+             "metric": "RULER平均", "candidate": "lega", "reference": "standard",
+             "direction": "candidate_better"}]}
+        intact = {"status": "intact", "confirmatory_valid": True, "problems": [],
+                  "registry_sha256": "a" * 64, "n_hypotheses": 1,
+                  "baseline_document_sha256": "b" * 64, "chain_length": 0}
+        with mock.patch("run_all.load_registered_hypotheses",
+                        return_value=reg), \
+                mock.patch("run_all.verify_registration", return_value=intact):
+            out = build_summary(tmp)
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        task_tests = [t for t in sig["pairs"] if t.get("metric", "")
+                      .startswith("RULER:")]
+        got = {(t["metric"], t["ruler_task"]) for t in task_tests}
+        assert ("RULER:niah_synth", "niah_synth") in got, task_tests
+        assert ("RULER:vt", "vt") in got, task_tests
+        assert all(t.get("exploratory") for t in task_tests), task_tests
+        niah = next(t for t in task_tests if t["ruler_task"] == "niah_synth")
+        vt = next(t for t in task_tests if t["ruler_task"] == "vt")
+        assert abs(niah["mean_diff"] - 0.4) < 1e-9, niah
+        assert abs(vt["mean_diff"] + 0.4) < 1e-9, vt
+        md = out["markdown"]
+        assert "RULER 逐任务分解" in md
+        assert "niah_synth" in md and "| vt |" in md
+        # 逐任务行不得污染主检验表（表头 + 行都在同一小节内）
+        assert "RULER:niah_synth" not in md.split("### RULER 逐任务分解")[0]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] RULER 逐任务分解：方向相反任务可审计，且不污染主表")
+
+
 def test_summary_helpers_tolerate_nested_non_dict_values():
     """嵌套字段是数组/标量时按缺失处理，不能让整份汇总在这些 helper 上崩溃。"""
     assert _ruler_task_means([1]) == {}

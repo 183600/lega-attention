@@ -88,6 +88,10 @@ ALL_VARIANTS = list(VARIANTS)
 GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
                       "lega_no_query", "lega_conc_only", "lega_len_only")
 
+# RULER 逐任务分解的固定任务列表（与 lega.ruler.TASKS 一致，避免导入
+# 评测模块只为拿常量）。
+RULER_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
+
 # 全因子消融矩阵（A=查询项 w·q, B=集中度证据 c=log(n*max_j p_j), C=长度项 b*log n）。
 # 2^3 设计必须固定其余结构：8 个格子全部带输出门，none 格是 gate_only
 # （只有门偏置 d），而不是无门的 standard。否则 A/B/C 的“主效应”会混入
@@ -3016,7 +3020,7 @@ def build_summary(results_dir: str, audit: dict = None,
             m, "ruler", _ruler_avg_micro)),
         ("ruler_min_n", lambda m: _stat_series(m, "ruler", _ruler_min_cell_n)),
     ]
-    ruler_tasks = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
+    ruler_tasks = RULER_TASKS
     for task in ruler_tasks:
         metric_specs.append(
             (f"ruler_{task}",
@@ -3165,6 +3169,19 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _paired_comparisons(
         runs, pairs, "RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
         lower_better=False)
+    # RULER 逐任务分解（探索性）：综合平均可能让方向相反的任务互相抵消。
+    # 每个任务单独作为指标家族做同种子配对 + Holm；综合平均仍是预注册
+    # 主判定，逐任务结果只用于定位“效果来自哪个任务/是否被平均掩盖”。
+    for task in RULER_TASKS:
+        task_tests = _paired_comparisons(
+            runs, pairs, f"RULER:{task}",
+            (lambda t: lambda slot: _ruler_task_means(
+                slot.get("ruler")).get(t))(task),
+            lower_better=False)
+        for t in task_tests:
+            t["ruler_task"] = task
+            t["exploratory"] = True
+        tests += task_tests
     # 机制主张的正式检验族：AUROC(logit) − AUROC(qterm) 同种子配对差，
     # 以及不平衡口径下的 PR-AUC 配对差（两族分别 Holm 校正）
     tests += _auroc_diff_tests(runs)
@@ -4199,6 +4216,8 @@ def build_summary(results_dir: str, audit: dict = None,
         for t in tests:
             if t.get("interaction"):
                 continue  # 交互效应单独成表，避免与主效应表重复
+            if t.get("ruler_task"):
+                continue  # 逐任务分解单独成表，避免主表被 5 个任务淹没
             if t.get("mean_diff") is None:
                 continue
             std = t.get("std_diff")
@@ -4238,6 +4257,41 @@ def build_summary(results_dir: str, audit: dict = None,
                   "显著也不能当作稳健收益。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
+
+    # --- RULER 逐任务分解（探索性）：只渲染预注册 RULER 假设涉及的对比；
+    #     全部逐任务检验仍完整保存在 significance.json（tests[*].ruler_task）。
+    task_rows = [t for t in tests if t.get("ruler_task")]
+    if task_rows:
+        reg_ruler_pairs = {
+            (h.get("candidate"), h.get("reference"))
+            for h in (_as_dict(registered).get("hypotheses") or [])
+            if isinstance(h, dict) and h.get("metric") == "RULER平均"}
+        if not reg_ruler_pairs:
+            reg_ruler_pairs = {("lega", "standard")}
+        shown = [t for t in task_rows
+                 if (t.get("candidate"), t.get("reference"))
+                 in reg_ruler_pairs]
+        md += ["", "### RULER 逐任务分解（探索性；综合平均的辅助诊断）", "",
+               "综合平均可能把不同任务的方向相反效应相互抵消，因此对预注册"
+               "RULER 对比逐任务各做一次同种子配对检验；每个任务是一个独立"
+               "Holm 家族（探索性，不替代综合平均的确认性判定）。", ""]
+        if shown:
+            md += ["| 对比 | 任务 | Δ均值 ± Δ标准差 | n | p_adj(Holm) | 结论 |",
+                   "|---|---|---|---|---|---|"]
+            for t in shown:
+                std = t.get("std_diff")
+                delta = (f"{t['mean_diff']:+.4f}"
+                         + (f" ± {std:.4f}" if std is not None else ""))
+                padj = (f"{t['p_adj']:.4f}"
+                        if t.get("p_adj") is not None else "-")
+                md.append(f"| {t['candidate']} vs {t['reference']} | "
+                          f"{t['ruler_task']} | {delta} | {t['n']} | {padj} | "
+                          f"{t.get('verdict', '-')} |")
+        else:
+            md.append("（预注册 RULER 对比未运行，无法分解）")
+        md += ["", "注: 全部逐任务检验（含未渲染的对比）见 "
+               "`significance.json` 中 metric 以 `RULER:` 开头的条目；这些"
+               "检验未预注册方向，只作机制/定位线索，需在新数据上确认。"]
 
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
