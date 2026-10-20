@@ -1013,6 +1013,25 @@ def test_tradeoff_includes_train_peak_memory():
     print("  [ok] 涨点-增幅权衡包含训练进程峰值（缺失时降级）")
 
 
+def test_summary_tolerates_huge_int_train_stats():
+    """eval.json 里超出 float 范围的合法整数不能中断汇总。"""
+    huge = 10 ** 400
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
+            "variant": "standard", "seed": 1, "val_ppl": 10.0,
+            "val_loss": 2.3, "gate_mean": 0.5, "n_params": 100,
+            "n_gate_extra": 0, "train_step_time_ms": huge,
+            "train_peak_mem_mb": huge})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "standard")
+        assert row.get("eff_train_step_ms") is None, row
+        assert row.get("eff_train_peak_mem_mb") is None, row
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 训练 ms/step 与峰值内存的超大整数安全降级")
+
+
 def test_tradeoff_table_surfaces_ruler_benefit():
     """权衡表必须输出 RULER 收益列；PPL 持平而 RULER 显著提升时判定不能
     仍写“说服力有限”（长上下文检索是本项目预注册的核心主张）。"""
@@ -2087,6 +2106,8 @@ def test_summary_helpers_tolerate_nested_non_dict_values():
     assert _probe_oof({"linear_probe": [1]}, "auprc") is None
     assert _ppl_of([1]) is None
     assert _ppl_ci_rel_pct([1]) is None
+    assert _ppl_ci_rel_pct({
+        "ppl": 1.0, "val_ppl_ci95": [10 ** 400, 1.0]}) is None
     assert _neural_eval_window_spec({"train_ctx": float("inf")}, False) is None
     assert _neural_eval_window_spec({"eval_iters": "x"}, False) is None
     assert _neural_eval_window_spec([1], False) is None

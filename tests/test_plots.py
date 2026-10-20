@@ -282,7 +282,9 @@ def test_fig_auroc_heads_tolerates_non_list_per_head():
             {"layer": "x", "head": 0, "auroc_logit": 0.5,
              "auroc_qterm": 0.4},
             {"layer": 1, "head": 0, "auroc_logit": 0.6,
-             "auroc_qterm": 0.5}]})
+             "auroc_qterm": 0.5},
+            {"layer": 10 ** 400, "head": 0, "auroc_logit": 0.7,
+             "auroc_qterm": 0.6}]})
         assert fig_auroc_heads(tmp) is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

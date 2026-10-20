@@ -665,7 +665,7 @@ def _ppl_ci_rel_pct(d):
         return None
     try:
         lo, hi = float(ci[0]), float(ci[1])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not (math.isfinite(lo) and math.isfinite(hi)):
         return None
@@ -3955,7 +3955,7 @@ def build_summary(results_dir: str, audit: dict = None,
                     continue
                 try:
                     vals.append(float(x))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
             if not vals:
                 return None
@@ -3976,7 +3976,7 @@ def build_summary(results_dir: str, audit: dict = None,
                     continue
                 try:
                     vals.append(float(x))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
             if not vals:
                 return None

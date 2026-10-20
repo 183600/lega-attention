@@ -625,7 +625,7 @@ def fig_auroc_heads(rdir, variant="lega"):
     def _head_key(k):
         try:
             return (0, float(k[0]), float(k[1]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return (1, str(k[0]), str(k[1]))
 
     ph = [{"layer": k[0], "head": k[1],
