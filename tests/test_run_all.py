@@ -15,6 +15,7 @@ import sys
 import tempfile
 from unittest import mock
 
+from lega.data import CACHE_SCHEMA
 from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _eval_matches_window_spec,
@@ -93,6 +94,34 @@ def test_data_report_binding_detects_tampering():
         assert any(a["code"] == "data_report_binding"
                    for a in info["critical_violations"])
     print("  [ok] data_report 与 meta 哈希绑定：篡改/过期报告被阻断")
+
+
+def test_data_protocol_preflight_blocks_stale_cache_schema():
+    """旧版清洗/去污染管线生成的 bin 不得静默进入训练。"""
+    with tempfile.TemporaryDirectory() as d:
+        meta = os.path.join(d, "meta.json")
+        _write_json(meta, {"cache_schema": CACHE_SCHEMA - 1})
+        try:
+            data_protocol_preflight(d)
+            raise AssertionError("旧缓存协议应中止训练")
+        except SystemExit as e:
+            assert "data_cache_schema" in str(e)
+            assert "重建" in str(e)
+        info = data_protocol_preflight(d, allow_override=True)
+        assert any(a["code"] == "data_cache_schema"
+                   for a in info["critical_violations"])
+        assert info["cache_schema_issue"]
+        assert "不一致" in info["cache_schema_issue"]
+        _write_json(meta, {"cache_schema": str(CACHE_SCHEMA)})
+        info = data_protocol_preflight(d)
+        assert info["cache_schema_issue"] is None
+        assert info["critical_violations"] == []
+    with tempfile.TemporaryDirectory() as d:
+        _write_json(os.path.join(d, "meta.json"), {"cache_schema": "bad"})
+        info = data_protocol_preflight(d, allow_override=True)
+        issue = info["cache_schema_issue"]
+        assert issue and "cache_schema=-1" in issue
+    print("  [ok] 数据缓存协议版本：旧版/损坏 schema 默认阻断，重建后放行")
 
 
 def test_resolve_jobs_defaults():

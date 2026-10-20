@@ -63,6 +63,7 @@ from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           process_eval_json, process_ruler_json)
 from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
                          diagnose_run_dir, worst_status)
+from lega.data import CACHE_SCHEMA  # noqa: E402
 from lega.datacheck import (critical_split_alerts, read_test_access_log,
                             summarize_test_access)  # noqa: E402
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
@@ -304,22 +305,51 @@ def data_report_binding_issue(data_dir: str):
     return None
 
 
+def data_cache_schema_issue(data_dir: str):
+    """检查 bin 缓存是否由当前数据管线生成；旧协议缓存不可用于正式训练。"""
+    path = os.path.join(data_dir, "meta.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return "meta.json 不可解析，无法确认数据缓存协议版本"
+    if not isinstance(meta, dict):
+        return "meta.json 顶层不是对象，无法确认数据缓存协议版本"
+    try:
+        schema = int(meta.get("cache_schema", 0))
+    except (TypeError, ValueError, OverflowError):
+        schema = -1
+    if schema != CACHE_SCHEMA:
+        return (f"数据缓存 cache_schema={schema} 与当前管线 "
+                f"{CACHE_SCHEMA} 不一致：旧版清洗/去污染协议不可信，"
+                "请运行 prepare_bins/prepare_data.py 重建 bin 后再训练")
+    return None
+
+
 def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict:
     """训练前的数据协议闸门：报告缺失只告警，严重违规默认中止。
 
-    报告声明“打乱/字符切分/文档跨 split”或报告与 meta 绑定失效时，已知
-    泄露的数据不应进入全量训练。返回汇总（写入 repro），违规且未显式覆盖
-    时抛 SystemExit；allow_override 仅用于复现历史实验。
+    报告声明“打乱/字符切分/文档跨 split”、报告与 meta 绑定失效、或 bin
+    缓存由旧版清洗/去污染协议生成时，已知/疑似泄露的数据不应进入全量训练。
+    返回汇总（写入 repro），违规且未显式覆盖时抛 SystemExit；
+    allow_override 仅用于复现历史实验。
     """
     report = load_data_report(data_dir)
     binding_issue = data_report_binding_issue(data_dir)
+    schema_issue = data_cache_schema_issue(data_dir)
     critical = list(critical_split_alerts(report))
     if binding_issue:
         critical.append({"level": "warning", "code": "data_report_binding",
                          "message": binding_issue})
+    if schema_issue:
+        critical.append({"level": "warning", "code": "data_cache_schema",
+                         "message": schema_issue})
     info = {
         "report_present": report is not None,
         "binding_issue": binding_issue,
+        "cache_schema_issue": schema_issue,
         "critical_violations": critical,
         "override": bool(allow_override),
     }
