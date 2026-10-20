@@ -10,7 +10,8 @@
 漏网（本检查不含增强与真实数据顺序），需配合中间结果检查（首步 loss ≈
 log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 作为实验记录。
 逐参数梯度覆盖能定位“总梯度范数正常、但某个子模块（如门控）没接进计算
-图”的断流问题：loss 可反传不代表每个参数都能收到梯度。
+图”的断流问题：loss 可反传不代表每个参数都能收到梯度；首步全零梯度
+（例如子模块被 detach 后又乘 0）同样视为断流，而不是只统计不判定。
 此外本检查还做两条中间结果自动核对：
   * 训练路径 loss（lm_head 分块 + 交叉熵）必须与“直接对完整 logits 算
     F.cross_entropy”一致——分块/normalization/ignore_index 写错时，
@@ -136,8 +137,9 @@ def gradient_coverage(model) -> dict:
     分类：
       * missing_grad —— grad is None：该参数与 loss 之间图断流（严重问题）；
       * nonfinite_grad —— grad 含 NaN/Inf：数值问题，继续训练只会污染权重；
-      * zero_grad —— grad 全 0：给出列表供人工判断（首步恰为 0 属于可疑但
-        不一定错误，例如无输入信号的偏置），不单独判失败。
+      * zero_grad —— grad 全 0：疑似的图断流（如子模块被 detach 后又乘 0）。
+        overfit 检查将其作为独立失败项；若确有“首步本应为 0”的参数，应在
+        报告里人工复核，而不是让整条链路静默通过。
     """
     missing, nonfinite, zero = [], [], []
     n_trainable = 0
@@ -266,6 +268,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                                         and first_grad_norm > 0.0),
         "all_params_get_grads": (grad_cov is not None
                                  and not grad_cov["missing_grad"]),
+        # 全零梯度同样说明该参数与 loss 之间没有有效信号（例如子模块被
+        # detach 后再乘 0）：总范数可能仍然正常，只有逐参数检查能发现。
+        "no_zero_grads_first_step": (grad_cov is not None
+                                     and not grad_cov["zero_grad"]),
         "grads_finite": (grad_cov is not None
                          and not grad_cov["nonfinite_grad"]),
         # 中间结果核对：训练路径 loss 与直接 logits CE 数值一致（损失计算正确性）
@@ -306,8 +312,9 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
                    "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
                    "logits CE（首步）、y=x 右移一位与初始 loss≈log(V)，"
-                   "其余中间结果（梯度范数>0、逐参数梯度覆盖、逐层统计）"
-                   "请结合本 JSON 人工复核，并使用真实数据小规模预跑。"),
+                   "其余中间结果（梯度范数>0、逐参数梯度覆盖含全零梯度、"
+                   "逐层统计）请结合本 JSON 人工复核，并使用真实数据小规模"
+                   "预跑。"),
     }
 
 

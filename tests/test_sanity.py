@@ -109,6 +109,32 @@ def test_overfit_check_detects_detached_submodule():
           "被逐参数覆盖检查拦下")
 
 
+def test_overfit_check_detects_all_zero_grad_submodule():
+    """子模块收到的是全零梯度（如 detach 后又乘 0）也必须判失败。
+
+    这种断流不会让 grad 变成 None，总梯度范数也可能正常；只有逐参数全零
+    检查能发现“参数确实在计算图里，但没有任何有效学习信号”。
+    """
+    model = _model()
+
+    def zero_ln_f_grad(module, grad_input, grad_output):
+        if module.weight.grad is not None:
+            module.weight.grad = torch.zeros_like(module.weight)
+
+    handle = model.ln_f.register_full_backward_hook(zero_ln_f_grad)
+    try:
+        x, y = _batch()
+        res = run_overfit_check(model, x, y, steps=5, lr=1e-3, device="cpu",
+                                seed=0, log_every=1)
+    finally:
+        handle.remove()
+    assert not res["passed"]
+    assert res["checks"]["no_zero_grads_first_step"] is False
+    assert "ln_f.weight" in res["grad_coverage"]["zero_grad"], \
+        res["grad_coverage"]
+    print("  [ok] 首步全零梯度的子模块被 sanity 判为断流")
+
+
 def test_losses_consistent_tolerance():
     assert losses_consistent(2.0, 2.0 + 1e-6)
     assert not losses_consistent(2.0, 2.0 + 0.1)
