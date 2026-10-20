@@ -25,7 +25,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _paired_comparisons, _ppl_ci_rel_pct, _ppl_of,
                       _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
-                      _ruler_avg_micro, _ruler_avg_of, _ruler_min_cell_n,
+                      _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
+                      _ruler_min_cell_n,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key,
@@ -2247,6 +2248,14 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
         "256": {"n": 2.5}, "512": {"n": 3}}}}) == 3
     assert _ruler_min_cell_n({"results": {"niah": {
         "256": {"n": True}, "512": {"n": "4"}}}}) == 4
+    bad_n = {"results": {"niah": {
+        "256": {"n": 1.5, "em": 0.0},
+        "512": {"n": True, "em": 0.5},
+        "1024": {"n": "2", "em": 1.0}}}}
+    assert _ruler_avg_micro(bad_n) == 1.0
+    assert _ruler_cell_signature(bad_n) == frozenset({
+        ("niah", "256", None), ("niah", "512", None),
+        ("niah", "1024", 2)})
     assert _ppl_of({"ppl": 10 ** 400}) is None
     assert _stat([10 ** 400, "bad", float("nan"), 2.0]) == {
         "mean": 2.0, "std": None, "n": 1}

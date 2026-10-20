@@ -457,12 +457,7 @@ def _ruler_cell_signature(d):
         for ctx, cell in by_ctx.items():
             if not isinstance(cell, dict):
                 continue
-            n = cell.get("n")
-            try:
-                nf = float(n)
-                n = int(nf) if math.isfinite(nf) and nf.is_integer() else None
-            except (TypeError, ValueError, OverflowError):
-                n = None
+            n = _integral_value(cell.get("n"))
             cells.add((task, str(ctx), n))
     return frozenset(cells)
 
@@ -914,12 +909,12 @@ def _ruler_avg_micro(d):
         for cell in by_ctx.values():
             if not isinstance(cell, dict):
                 continue
-            v, n = cell.get(metric), cell.get("n")
+            v, n = cell.get(metric), _integral_value(cell.get("n"))
             try:
-                v, n = float(v), float(n)
+                v = float(v)
             except (TypeError, ValueError, OverflowError):
                 continue
-            if not math.isfinite(v) or not math.isfinite(n) or n <= 0:
+            if not math.isfinite(v) or n is None or n <= 0:
                 continue
             num += v * n
             total += n
