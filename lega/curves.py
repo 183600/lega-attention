@@ -56,6 +56,56 @@ LOSS_SPIKE_WINDOW = 5  # 每侧参与中位数的邻居点数
 LIVE_WARN_EVALS = 3
 # 回升幅度超过该比例时措辞升级为"过拟合信号"（否则视为平台）
 LIVE_OVERFIT_GAP = 0.02
+# 曲线可观测性下限：点太少时趋势/早停/尖峰检测都没有统计意义。验证点
+# 少于 5 个无法区分"早期波动"与"真实回升"；训练日志少于 10 个点无法
+# 可靠估计区间趋势。低于下限要在训练启动时告警，而不是等汇总时才发现
+# 曲线不可用。
+MIN_CURVE_EVAL_POINTS = 5
+MIN_CURVE_LOG_POINTS = 10
+
+
+def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
+    """训练启动前检查曲线采样密度，返回可操作的配置告警（空表=足够）。
+
+    steps/eval_every/log_every 直接决定曲线点数：eval_every 接近 steps 时
+    验证曲线只有 1-2 个点，过拟合/早停/验证噪声诊断全部失效；log_every
+    过大则训练侧趋势与瞬态尖峰无法检测。这里只告警不阻断——小规模冒烟
+    训练有意识地用稀疏采样是合法的，但正式实验必须知道结论会因此受限。
+    """
+    try:
+        steps = int(steps)
+        eval_every = int(eval_every)
+        log_every = int(log_every)
+    except (TypeError, ValueError, OverflowError):
+        return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
+    if steps < 1:
+        return [f"steps={steps}，没有训练曲线可诊断"]
+    warnings = []
+    if eval_every < 1:
+        warnings.append(f"eval_every={eval_every} 非法（必须 >=1），无法评测")
+    else:
+        # 循环内每 eval_every 步评测一次；末尾若不在评测点还会补一次最终评测。
+        n_eval = steps // eval_every + (1 if steps % eval_every else 0)
+        if n_eval < MIN_CURVE_EVAL_POINTS:
+            suggest = max(1, steps // MIN_CURVE_EVAL_POINTS)
+            warnings.append(
+                f"验证点预计仅 {n_eval} 个（steps={steps}, "
+                f"eval_every={eval_every}）：过拟合/早停/验证噪声诊断至少需要 "
+                f"{MIN_CURVE_EVAL_POINTS} 个点；建议 eval_every<={suggest} "
+                "或增加 steps（冒烟训练可忽略，但结论不能外推）")
+    if log_every < 1:
+        warnings.append(f"log_every={log_every} 非法（必须 >=1），无法记录训练点")
+    else:
+        # step 0 先打一个点，之后每个 log_every 步一个点。
+        n_log = 1 + steps // log_every
+        if n_log < MIN_CURVE_LOG_POINTS:
+            suggest = max(1, steps // (MIN_CURVE_LOG_POINTS - 1))
+            warnings.append(
+                f"训练日志预计仅 {n_log} 个点（steps={steps}, "
+                f"log_every={log_every}）：训练侧趋势/瞬态尖峰检测至少需要 "
+                f"{MIN_CURVE_LOG_POINTS} 个点；建议 log_every<={suggest} "
+                "或增加 steps（冒烟训练可忽略，但结论不能外推）")
+    return warnings
 
 
 def load_train_log(path: str) -> List[Dict]:

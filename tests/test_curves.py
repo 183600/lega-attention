@@ -5,7 +5,8 @@ import os
 import shutil
 import tempfile
 
-from lega.curves import (LIVE_WARN_EVALS, diagnose_curve, diagnose_run_dir,
+from lega.curves import (LIVE_WARN_EVALS, curve_observability_warnings,
+                         diagnose_curve, diagnose_run_dir,
                          live_overfit_hint, load_train_log, worst_status,
                          STATUS_ORDER)
 
@@ -372,3 +373,25 @@ def test_diagnose_curve_tolerates_non_dict_records():
     assert d["status"] == "数据不足"
     assert diagnose_curve(None)["status"] == "数据不足"
     print("  [ok] diagnose_curve：非对象记录安全跳过")
+
+
+def test_curve_observability_warnings():
+    """验证/日志点过少时启动即告警，并给出可直接套用的间隔建议。"""
+    # 充足：20 步、每 4 步验证（5 个点）、每 2 步日志（11 个点）
+    assert curve_observability_warnings(20, 4, 2) == []
+    # 验证点：steps=100/eval_every=50 -> 2 个；100/20 -> 5 个（刚好下限）
+    w = curve_observability_warnings(100, 50, 10)
+    assert len(w) == 1 and "验证点" in w[0] and "eval_every<=20" in w[0], w
+    # 末尾补一次最终评测：101 步时 50 的间隔得到 3 个点（仍不足）
+    assert curve_observability_warnings(100, 20, 10) == []
+    w = curve_observability_warnings(101, 50, 10)
+    assert any("3 个" in x for x in w), w
+    # 日志点：steps=20/log_every=10 -> 1+2=3 个（验证密度另算）
+    w = curve_observability_warnings(20, 4, 10)
+    assert any("日志" in x and "log_every<=2" in x for x in w), w
+    # 非法间隔/步数不抛异常
+    assert curve_observability_warnings(0, 5, 5)
+    assert curve_observability_warnings("bad", 5, 5)
+    w = curve_observability_warnings(100, 0, 10)
+    assert any("eval_every=0" in x for x in w), w
+    print("  [ok] 曲线可观测性：稀疏验证/日志点在启动时告警")

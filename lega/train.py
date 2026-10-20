@@ -18,7 +18,8 @@ import numpy as np
 import torch
 
 from .attention import VARIANTS, VARIANT_CN
-from .curves import LIVE_WARN_EVALS, live_overfit_hint
+from .curves import (LIVE_WARN_EVALS, curve_observability_warnings,
+                     live_overfit_hint)
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
@@ -848,6 +849,11 @@ def main():
     grad_clip = float(cfg.get("grad_clip", 1.0))
     amp_dt = amp_dtype_for(device, bool(cfg.get("amp", True)))
     amp_ctx = amp_autocast(device, amp_dt is not None)
+    # 曲线点数在训练开始前就固定了：采样过稀时过拟合/早停/尖峰诊断会静默
+    # 失效，必须在启动日志里明确告警（不阻断，冒烟训练可有意稀疏）。
+    curve_warnings = curve_observability_warnings(steps, eval_every, log_every)
+    for _w in curve_warnings:
+        print(f"[train] ⚠ 曲线可观测性: {_w}")
 
     def lr_factor(step: int) -> float:
         if step < warmup:
@@ -1193,6 +1199,7 @@ def main():
                "early_stopped": stopped_early,
                "early_stop_patience": early_stop_patience,
                "early_stop_min_delta": early_stop_min_delta,
+               "curve_observability_warnings": curve_warnings,
                "seed": seed,
                **provenance},
               os.path.join(out_dir, "eval.json"))
