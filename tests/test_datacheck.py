@@ -339,6 +339,23 @@ def test_decontaminate_documents_handles_heading_blocks_and_eval_overlap():
     print("  [ok] 块级去污染：标题分块、跨 split 删除、val↔test 重叠仅告警")
 
 
+def test_decontaminate_documents_removes_newly_merged_eval_blocks():
+    """删除块后剩余行可能重新拼成与 eval 相同的块，必须继续删到不动点。
+
+    若只扫一遍原始分块，删掉中间标题后前后行会合并成 val 的整段并留在
+    train 中；函数也不幂等，二次调用还能删出新内容。
+    """
+    train = "= A =\n= X =\nx1\nx2\n\nb\n"
+    val = "= A =\nb\n\n= X =\nx1\nx2\n"
+    out, stats = decontaminate_documents(
+        {"train": train, "val": val, "test": ""})
+    assert out["train"] == "", repr(out["train"])
+    assert stats["train_blocks_dropped_as_duplicates_of_eval"] == 2
+    again, _ = decontaminate_documents(out)
+    assert again["train"] == out["train"]
+    print("  [ok] 块级去污染：删除后新拼出的 eval 副本同样被清除（幂等）")
+
+
 def test_decontaminate_documents_tolerates_missing_or_bad_input():
     for texts in (None, [], {"val": "x"}, {"train": 123, "val": ["x"]}):
         out, stats = decontaminate_documents(texts)

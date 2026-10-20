@@ -405,8 +405,32 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
         else:
             seen.add(digest)
 
+    dropped_chars = sum(b - a for a, b in ranges)
     out = dict(texts)
-    out["train"] = _remove_ranges(train_text, ranges)
+    current = _remove_ranges(train_text, ranges)
+    # 删除一个块可能把两侧剩余行/标题重新拼成一个块，而它恰好又与
+    # eval 或 train 前文重复（典型：删掉中间小节标题后，前后短行合并成
+    # val 的整段）。只扫一遍会把这种“新生成”的副本留在 train 里，函数
+    # 也不再幂等；因此反复扫描删除后的文本，直到没有可删块。
+    while current != train_text:
+        pass_hashes, pass_ranges = set(), []
+        for start, end, digest, count in _iter_blocks(current, min_lines):
+            if digest in eval_hashes:
+                n_cross += 1
+                pass_ranges.append((start, end))
+                dropped_lines += count
+            elif digest in pass_hashes:
+                n_intra += 1
+                pass_ranges.append((start, end))
+                dropped_lines += count
+            else:
+                pass_hashes.add(digest)
+        nxt = _remove_ranges(current, pass_ranges)
+        if nxt == current:
+            break
+        dropped_chars += sum(b - a for a, b in pass_ranges)
+        current = nxt
+    out["train"] = current
     val_hashes = eval_scan["val"][0]
     test_hashes = eval_scan["test"][0]
     val_test_overlap = len(val_hashes & test_hashes)
@@ -419,7 +443,7 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
         "train_blocks_dropped_as_duplicates_of_eval": int(n_cross),
         "train_intra_split_duplicate_blocks_removed": int(n_intra),
         "train_lines_dropped": int(dropped_lines),
-        "train_chars_dropped": int(sum(b - a for a, b in ranges)),
+        "train_chars_dropped": int(dropped_chars),
         "val_blocks_scanned": int(eval_scan["val"][1]),
         "test_blocks_scanned": int(eval_scan["test"][1]),
         "val_test_overlap_blocks": int(val_test_overlap),
