@@ -125,6 +125,24 @@ def test_hard_sample_flag():
     print("  [ok] 难度边界样本标注（needle 深位；vt 链深度不误判）")
 
 
+def test_non_finite_depth_and_top1_prob_tolerated():
+    """NaN/Inf depth 与 top1 概率不能被当成有效数值参与归因。"""
+    for depth in (float("nan"), float("inf"), float("-inf")):
+        c = categorize_case(_case(pred="1111111", ctx_nums=[], depth=depth))
+        assert c["depth"] is None and c["hard_sample"] is False, depth
+    c = categorize_window({
+        "gold_next": "x", "context_tail": "x y",
+        "pred_top5": [["y", float("inf")]]})
+    assert c["top1_prob"] is None
+    assert c["category"] != "confident_bias"
+    c = categorize_window({
+        "gold_next": "x", "context_tail": "x y",
+        "pred_top5": [["y", float("nan")]]})
+    assert c["top1_prob"] is None
+    assert c["category"] != "confident_bias"
+    print("  [ok] 非有限 depth/top1 概率按缺失处理，不伪造高置信/深位")
+
+
 def test_non_numeric_depth_tolerated():
     """外部 JSON 的字符串 depth 按非数值归一化处理。"""
     c = categorize_case(_case(pred="1111111", ctx_nums=[], depth="0.9"))

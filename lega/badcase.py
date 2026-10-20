@@ -79,11 +79,9 @@ def categorize_case(rec: Dict) -> Dict:
     # 下面各归因分支（fwe/no_answer 等提前返回）的返回值都带 hard_sample。
     # depth 归一化为数值或 None：外部/旧格式 JSON 里的字符串 depth 不能
     # 让整个归因流程崩溃（一个坏样本不应毁掉报告）。
-    depth = r.get("depth")
-    try:
-        depth = float(depth) if depth is not None else None
-    except (TypeError, ValueError, OverflowError):
-        depth = None
+    # 非有限 depth（NaN/Inf）不是位置比例：NaN 会破坏 JSON，Inf 会被
+    # 误判成“极深位置”的难度边界样本；两者都按缺失处理。
+    depth = _finite_float(r.get("depth"))
     r["depth"] = depth
     positional = depth is not None and str(task or "").startswith("niah")
     r["hard_sample"] = bool(positional and depth > 0.75)
@@ -457,10 +455,9 @@ def _window_top1(rec: Dict):
         token = _token_text(item[0])
         if token is None:
             return None, None
-        try:
-            return token, float(item[1])
-        except (TypeError, ValueError, OverflowError):
-            return token, None
+        # 概率必须是有限数：inf 会被当成“高置信”伪造 confident_bias，
+        # NaN 还会让报告 JSON 非法。
+        return token, _finite_float(item[1])
     token = _token_text(item)
     return (token, None) if token is not None else (None, None)
 
@@ -1220,10 +1217,12 @@ def main():
                 (payload.get("seed"), fp, payload["badcases"]))
 
     def _seed_key(item):
-        try:
-            return (0, int(item[0]), item[1])
-        except (TypeError, ValueError, OverflowError):
+        seed = _finite_float(item[0])
+        # 种子身份必须是整数：1.9 与 1.1 截断成同一个 1 会让跨变体
+        # 对照静默选错 run；非整数/非有限/缺失一律排到最后。
+        if seed is None or seed != math.floor(seed):
             return (1, 0, item[1])
+        return (0, int(seed), item[1])
 
     # 每个变体取“最小种子”（与 run_all.cross_variant_badcase_map 同策略）：
     # paths 是文件名字典序（seed1000 排在 seed999 之前），取首个会选错种子。
