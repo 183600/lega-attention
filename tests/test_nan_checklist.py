@@ -292,6 +292,33 @@ def test_checklist_nonfinite_grad_norm_trigger_reports_explosion():
     print("  [ok] 排查步骤 4（优化）：grad_norm 非有限的触发值本身被作为爆炸证据")
 
 
+def test_checklist_reports_nonfinite_grad_and_optimizer_state():
+    """NaN 排查不能只看参数：梯度反向溢出（早于参数变 NaN）与 Adam 状态
+    溢出（只重置参数无效）都必须被定位到具体张量。"""
+    m = _model()
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    name, param = next(iter(m.named_parameters()))
+    param.grad = torch.full_like(param, float("nan"))
+    opt.state[param]["exp_avg"] = torch.full_like(param, float("inf"))
+    rep = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss",
+                            float("nan"), lr=1e-3, grad_norm_history=[1.0],
+                            amp_dtype=None, vocab_size=64, optimizer=opt)
+    assert rep["checklist_params"]["nonfinite_grads"], rep["checklist_params"]
+    assert any(name in g for g in rep["checklist_params"]["nonfinite_grads"])
+    osec = rep["checklist_optimization"]
+    assert osec["nonfinite_optimizer_state"], osec
+    assert any(name in t for t in osec["nonfinite_optimizer_state"])
+    findings = " ".join(osec["findings"])
+    assert "优化器状态" in findings and "重建" in findings, findings
+    assert "参数梯度" in findings, findings
+    # 无优化器时字段仍存在且为空（旧调用兼容）
+    rep2 = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss",
+                             float("nan"), lr=1e-3, grad_norm_history=[],
+                             amp_dtype=None, vocab_size=64)
+    assert rep2["checklist_optimization"]["nonfinite_optimizer_state"] == []
+    print("  [ok] 排查步骤 4（优化）：非有限梯度与 Adam 状态定位")
+
+
 def test_checklist_action_order_is_fixed():
     m = _model()
     rep = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss", float("nan"),

@@ -253,7 +253,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                       loss_value, lr: float, grad_norm_history, amp_dtype,
                       vocab_size: int, consumed_batches=None,
                       consumed_step_labels=None, peak_lr=None,
-                      first_bad_step=None, interval=None) -> dict:
+                      first_bad_step=None, interval=None,
+                      optimizer=None) -> dict:
     """训练出现非有限值时的系统化排查：数据 → 代码 → 混合精度 → 梯度/学习率。
 
     排查顺序固定（先便宜后昂贵、先外部后内部），每步产出可核对的证据，
@@ -266,6 +267,9 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     （1-based），用于把每条数据检查定位到具体步；缺省时保留旧标签。
     first_bad_step / interval：设备端标记的区间内首个非有限损失步与区间范围；
     检测点（step）可能晚于首个失败步，报告必须同时给出两者。
+    optimizer：可选。Adam 的 exp_avg/exp_avg_sq 可能先于参数溢出；若只重置
+    参数而不清优化器状态，下一步会把 NaN 写回权重。调用方在失败步传真实
+    优化器，报告会列出非有限状态张量及所属参数。
     """
     report = {
         "time": now_str(), "step": int(step), "where": str(where),
@@ -339,10 +343,50 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         + [b for b in (pending_batches or []) if b is not None]
     activation_audit = audit_activations(model, audit_batches, device,
                                          amp_dtype=amp_dtype)
+    # 参数梯度：反向已经溢出的直接证据（训练循环在失败步保留梯度到排查后
+    # 才清零）。它比“参数已经变 NaN”更早、更能定位到具体层。
+    bad_grads = []
+    for n, p in model.named_parameters():
+        if p.grad is None or not torch.isfinite(p.grad).all():
+            if p.grad is not None:
+                bad_grads.append(
+                    f"{n} (NaN={int(torch.isnan(p.grad).sum())}, "
+                    f"Inf={int(torch.isinf(p.grad).sum())}, "
+                    f"shape={list(p.grad.shape)})")
+        if len(bad_grads) >= 8:
+            break
+    # 优化器状态：Adam 动量/二阶矩是非有限值时，即使当前参数仍有限，
+    # 下一步更新也会把状态里的溢出传播回权重（只重置参数无效）。
+    bad_opt_state = []
+    n_state_tensors = 0
+    if optimizer is not None and hasattr(optimizer, "state"):
+        name_by_id = {id(p): n for n, p in model.named_parameters()}
+        try:
+            state_items = list(optimizer.state.items())
+        except (AttributeError, TypeError):
+            state_items = []
+        for p, st in state_items:
+            if not isinstance(st, dict):
+                continue
+            for k, v in st.items():
+                if not torch.is_tensor(v) or not (
+                        torch.is_floating_point(v) or torch.is_complex(v)):
+                    continue
+                n_state_tensors += 1
+                if torch.isfinite(v).all():
+                    continue
+                if len(bad_opt_state) < 8:
+                    bad_opt_state.append(
+                        f"{name_by_id.get(id(p), 'param')}.{k} "
+                        f"(NaN={int(torch.isnan(v).sum())}, "
+                        f"Inf={int(torch.isinf(v).sum())}, "
+                        f"shape={list(v.shape)})")
     report["checklist_params"] = {
         "nonfinite_tensors": bad_params,
+        "nonfinite_grads": bad_grads,
         "note": ("非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
                  "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
+                 "梯度非有限说明反向已溢出（常先于参数变 NaN）；"
                  "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"
                  "交叉熵经 log_softmax（数值稳定），除法处均有 clamp_min 兜底"),
     }
@@ -394,14 +438,30 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             opt_findings.append("最近一次 pre-clip 梯度范数非有限 → 梯度已爆炸")
     else:
         opt_findings.append("无梯度范数历史（NaN 出现过早，尚未记录到 log 点）")
+    if bad_grads:
+        opt_findings.append(
+            f"参数梯度出现 {len(bad_grads)} 个非有限张量（{bad_grads[0]}）："
+            "反向已溢出/爆炸，下一轮更新会把 NaN 写入参数")
+    if bad_opt_state:
+        opt_findings.append(
+            f"优化器状态出现 {len(bad_opt_state)} 个非有限张量（{bad_opt_state[0]}）："
+            "Adam 动量/二阶矩已溢出，仅重置参数无效，需恢复 checkpoint 或重建"
+            "优化器状态")
+    elif optimizer is not None and n_state_tensors == 0:
+        opt_findings.append("优化器尚无状态张量（首步即失败或优化器未 step）")
     # peak_lr 为调度峰值（warmup 后的 base lr）：失败步可能仍在 warmup 中，
     # 实际 lr 与峰值不同，必须分别显示才能判断“是否已到峰值附近才炸”
     opt_findings.append(
         f"失败时学习率 {lr:.2e}"
         + (f"（调度峰值 {peak_lr:.2e}）" if peak_lr is not None else "")
         + "：过大学习率会在 warmup 结束前后率先炸出 NaN")
-    report["checklist_optimization"] = {"findings": opt_findings,
-                                        "grad_norm_history_tail": hist[-20:]}
+    report["checklist_optimization"] = {
+        "findings": opt_findings,
+        "grad_norm_history_tail": hist[-20:],
+        "nonfinite_grads": bad_grads,
+        "nonfinite_optimizer_state": bad_opt_state,
+        "n_optimizer_state_tensors_checked": n_state_tensors,
+    }
 
     # ---- 建议动作：按固定排查顺序给出
     actions = [
@@ -411,7 +471,9 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         "的模块）再对照非有限参数列表，复核该层 log(0)/除零/softmax 溢出路径"
         "（本仓库门控 c 项已 clamp_min(1e-30)）",
         f"3) 精度：{prec_note}",
-        "4) 优化：降低学习率（如减半）、延长 warmup、收紧 grad_clip（如 0.5），"
+        "4) 优化：先看 checklist_optimization 的梯度/优化器状态是否非有限"
+        "（Adam 动量溢出需恢复 checkpoint 或重建状态，不能只重置参数），"
+        "再降低学习率（如减半）、延长 warmup、收紧 grad_clip（如 0.5），"
         "并观察梯度范数是否再出尖峰",
     ]
     report["suggested_actions"] = actions
@@ -878,7 +940,7 @@ def main():
                 vocab_size=int(meta["vocab_size"]),
                 consumed_batches=consumed, consumed_step_labels=labels,
                 peak_lr=base_lrs[0], first_bad_step=first_bad_step,
-                interval=interval)
+                interval=interval, optimizer=opt)
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):
@@ -947,6 +1009,11 @@ def main():
         return vl
 
     for step in range(steps):
+        # 梯度保留到本步排查完成后再清（下一步开始时清）：失败现场的
+        # p.grad 是反向溢出的直接证据，提前 zero_grad 会让 NaN 排查只能看到
+        # 已被优化器写坏的参数。首步在循环前已 zero_grad。
+        if step > 0:
+            opt.zero_grad(set_to_none=True)
         interval_steps += 1
         lr_f = lr_factor(step)
         for g, base in zip(opt.param_groups, base_lrs):
@@ -986,7 +1053,6 @@ def main():
         if len(gn_dev_recent) > log_every + grad_accum + 8:
             gn_dev_recent.pop(0)
         opt.step()
-        opt.zero_grad(set_to_none=True)
         tokens_seen += int(cfg["batch_size"]) * train_ctx * grad_accum
 
         if (step + 1) % log_every == 0 or step == 0:
