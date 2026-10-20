@@ -191,8 +191,12 @@ def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
 
 def _file_entry(path: str) -> dict:
     st = os.stat(path)
+    # ctime 记录的是 inode 元数据变更时间，普通用户无法像 mtime 那样用
+    # os.utime 回填。缓存校验同时看 mtime 与 ctime：同尺寸内容替换后再把
+    # mtime 改回旧值，仍会因 ctime 变化而重算，避免拿旧 SHA 冒充当前数据。
     return {"name": os.path.basename(path), "size": int(st.st_size),
-            "mtime_ns": int(st.st_mtime_ns), "sha256": sha256_file(path)}
+            "mtime_ns": int(st.st_mtime_ns),
+            "ctime_ns": int(st.st_ctime_ns), "sha256": sha256_file(path)}
 
 
 def _digest_of(entries) -> str:
@@ -204,9 +208,11 @@ def _digest_of(entries) -> str:
 def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     """数据目录指纹：对实际参与训练/评测的文件做 SHA-256 并给合并摘要。
 
-    缓存写于 <data_dir>/.lega_fingerprint.json：逐文件记录 size/mtime_ns/sha256，
-    任一文件大小或 mtime 变化即整体重算。缓存仅供重复调用复用（多种子/多脚本），
-    不影响正确性——缓存命中要求文件集与 stat 完全一致。
+    缓存写于 <data_dir>/.lega_fingerprint.json：逐文件记录
+    size/mtime_ns/ctime_ns/sha256，任一变化即整体重算。缓存仅供重复调用复用
+    （多种子/多脚本），不影响正确性——缓存命中要求文件集与 stat 完全一致。
+    ctime 用于识别“同尺寸写入后把 mtime 改回旧值”的内容替换；旧缓存没有
+    ctime 字段时视为未命中并重建，而不是沿用可能失真的 SHA。
     """
     names = [n for n in ("train.bin", "val.bin", "test.bin", "meta.json")
              if os.path.exists(os.path.join(data_dir, n))]
@@ -233,7 +239,10 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
             except OSError:
                 fresh = False
                 break
-            if int(st.st_size) != e.get("size") or int(st.st_mtime_ns) != e.get("mtime_ns"):
+            if (e.get("ctime_ns") is None
+                    or int(st.st_size) != e.get("size")
+                    or int(st.st_mtime_ns) != e.get("mtime_ns")
+                    or int(st.st_ctime_ns) != e.get("ctime_ns")):
                 fresh = False
                 break
         if fresh:

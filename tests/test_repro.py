@@ -62,6 +62,27 @@ def test_data_fingerprint_cache_and_invalidation():
     print("  [ok] 数据指纹缓存命中/内容变化失效")
 
 
+def test_data_fingerprint_detects_mtime_preserving_edit():
+    """同尺寸替换内容并把 mtime 改回旧值，也必须触发重算。
+
+    只看 size+mtime 的缓存会把这种替换误判为“数据未变”，让 run manifest
+    用旧 SHA 冒充当前数据版本；ctime/inode 元数据变化是不可回填的证据。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "train.bin")
+        with open(p, "wb") as f:
+            f.write(b"aaaa")
+        fp1 = data_fingerprint(d)
+        st = os.stat(p)
+        with open(p, "wb") as f:
+            f.write(b"bbbb")                       # 同尺寸、不同内容
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        fp2 = data_fingerprint(d)
+        assert fp2["digest"] != fp1["digest"]
+        assert fp2["files"][0]["sha256"] != fp1["files"][0]["sha256"]
+    print("  [ok] 数据指纹识别 mtime 回填的同尺寸内容替换")
+
+
 def test_data_fingerprint_survives_malformed_cache():
     """缓存文件语法合法但结构畸形（非对象/files 非列表/元素非对象）时
     必须视为未命中并重建，而不是让指纹计算崩溃。"""
