@@ -1146,20 +1146,24 @@ def main():
         # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按
         # “val 上选出的最优 checkpoint”口径报告。
         improved_for_ckpt = final_metrics["val_loss"] < best_val
-        if improved_for_ckpt:
-            best_val = final_metrics["val_loss"]
-            save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
-                            extra={"variant": args.variant, "step": steps,
-                                   "seed": seed, "val_loss": best_val,
-                                   "val_ppl": math.exp(min(20, best_val)),
-                                   "val_ppl_clamped": bool(best_val > 20),
-                                   **provenance})
         # 最终评测也要更新耐心计数（改善归零、未改善累加），否则最后一条
         # 日志会出现 val_vs_best_rel=0 却 evals_since_best 仍为旧值的矛盾。
-        # patience 传 0：训练此刻已结束，早停状态只用于如实记录。
+        # 必须用本次评测前的历史最优做更新：若先写 best_val 再调用，刷新最优
+        # 的最终评测会被误判为“未改善”而把计数加一。patience 传 0：训练
+        # 此刻已结束，早停状态只用于如实记录。
         best_val, evals_since_improve, _ = early_stop_update(
             final_metrics["val_loss"], best_val, evals_since_improve,
             early_stop_min_delta, 0)
+        if improved_for_ckpt:
+            save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
+                            extra={"variant": args.variant, "step": steps,
+                                   "seed": seed,
+                                   "val_loss": final_metrics["val_loss"],
+                                   "val_ppl": math.exp(
+                                       min(20, final_metrics["val_loss"])),
+                                   "val_ppl_clamped": bool(
+                                       final_metrics["val_loss"] > 20),
+                                   **provenance})
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]

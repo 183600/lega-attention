@@ -150,6 +150,47 @@ def test_train_early_stop_end_to_end():
     print("  [ok] train 端到端早停（CLI 覆盖 + 标记落盘 + 默认关闭兼容）")
 
 
+def test_final_eval_improvement_resets_patience_counter(monkeypatch):
+    """最终补评测若刷新历史最优，evals_since_best 必须归零。
+
+    回归：曾先把 best_val 写成本次结果，再交给 early_stop_update，导致
+    “最终评测改善”被误判为未改善，日志同时出现 val_vs_best_rel=0 与
+    evals_since_best=1 的矛盾。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg = _cfg()
+        cfg.update({"steps": 3, "eval_every": 2, "log_every": 3,
+                    "eval_iters": 1, "early_stop_patience": 0})
+        out_dir = os.path.join(tmp, "run")
+        import lega.train as train_mod
+        losses = iter([3.0, 2.0])
+
+        def fake_evaluate_val(*args, **kwargs):
+            vl = next(losses)
+            return {
+                "val_loss": vl, "val_loss_se": None,
+                "val_loss_ci95": None, "val_ppl_ci95": None,
+                "val_loss_min": vl, "val_loss_max": vl,
+                "gate_mean": None, "eval_iters_requested": 1,
+                "eval_iters": 1, "val_windows": 1,
+                "val_tokens_evaluated": 32,
+            }
+
+        monkeypatch.setattr(train_mod, "evaluate_val", fake_evaluate_val)
+        _run_train(cfg, data_dir, out_dir)
+        recs = load_train_log(os.path.join(out_dir, "train_log.jsonl"))
+        final = [r for r in recs if r.get("final")]
+        assert len(final) == 1, final
+        assert final[0]["val_loss"] == 2.0
+        assert final[0]["evals_since_best"] == 0, final[0]
+        assert abs(final[0]["val_vs_best_rel"]) < 1e-12, final[0]
+    print("  [ok] 最终补评测刷新最优时耐心计数归零")
+
+
 def test_train_live_overfit_hint_end_to_end():
     """早停默认关闭时，验证连续多次无改善必须在训练日志里留下过拟合/平台
     预警——只看最终数值会漏掉过程信号。"""
