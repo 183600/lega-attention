@@ -898,6 +898,9 @@ def main():
     # 历史尾部供 NaN 排查判断"梯度爆炸 vs 学习率过大"
     gn_dev_recent = []
     gn_hist = []
+    # 最近训练日志损失：验证停步时用来区分过拟合（训练仍在降）与
+    # 欠拟合/优化不足（训练也停滞或上升），见 curves.live_overfit_hint。
+    train_loss_hist = []
     # NaN 现场按 log 区间保留：NaN 在 log 点才被检测到（区间累计损失），真正
     # 诱发的批次可能在本区间任意一步，而预取早已把 batches 覆盖成后续数据。
     # interval_batches 保存每一步消费的 micro-batch 引用（≤ log_every 步，
@@ -982,7 +985,9 @@ def main():
         # 只在每个"未改善连击"的第 LIVE_WARN_EVALS 次提示一次（改善后计数
         # 归零，下轮连击会再次提示），避免逐评测刷屏
         hint = (live_overfit_hint(evals_since_improve, prev_best, vl,
-                                  early_stop_patience)
+                                  early_stop_patience,
+                                  train_recent=train_loss_hist[-5:],
+                                  val_ci95=metrics.get("val_loss_ci95"))
                 if evals_since_improve == LIVE_WARN_EVALS else None)
         if hint:
             rec["overfit_hint"] = hint
@@ -1093,6 +1098,9 @@ def main():
             # 避免跨区间串批、控制引用数量 ≤ log_every 步
             interval_batches.clear()
             interval_first_bad_dev = torch.full_like(interval_first_bad_dev, -1.0)
+            train_loss_hist.append(loss_acc)
+            if len(train_loss_hist) > 20:
+                train_loss_hist.pop(0)
             rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
                    "lr": base_lrs[0] * lr_f, "time": now_str()}
             if gn_last is not None:

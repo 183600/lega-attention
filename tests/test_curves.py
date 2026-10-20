@@ -364,7 +364,30 @@ def test_live_overfit_hint():
     assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, float("nan"), patience=0) is None
     assert live_overfit_hint(LIVE_WARN_EVALS, None, 2.0, patience=0) is None
     assert live_overfit_hint("bad", 2.0, 2.0, patience=0) is None
-    print("  [ok] live_overfit_hint（训练中途过拟合/平台预警口径）")
+
+    # 结合训练侧趋势：验证回升但训练仍在降 = 典型过拟合
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2,
+                            train_recent=[3.0, 2.9, 2.8])
+    assert "训练损失仍在下降" in msg and "典型过拟合" in msg, msg
+    # 验证回升且训练也上升：更像优化不稳定/学习率过大，不能建议加正则化
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2,
+                            train_recent=[2.8, 2.9, 3.0])
+    assert "学习率" in msg and "不是典型过拟合" in msg, msg
+    assert "加正则化" not in msg.split("：")[-1] or "不要盲目加正则化" in msg, msg
+    # 验证平台 + 训练仍在降：早期过拟合，而不是欠拟合
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0,
+                            train_recent=[3.0, 2.9, 2.8])
+    assert "早期过拟合" in msg, msg
+    # 两边都停滞：更像欠拟合/优化不足，建议检查学习率而不是正则化
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0,
+                            train_recent=[2.8, 2.8, 2.8])
+    assert "欠拟合" in msg and "不要盲目加正则化" in msg, msg
+    # 回升幅度落在验证抽样噪声内：只要求继续观察，不判过拟合
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.01,
+                            train_recent=[3.0, 2.9, 2.8],
+                            val_ci95=[1.99, 2.03])
+    assert "抽样噪声" in msg and "不要据此加正则化" in msg, msg
+    print("  [ok] live_overfit_hint（训练趋势区分过拟合/欠拟合 + 验证噪声）")
 
 
 def test_diagnose_curve_tolerates_non_dict_records():

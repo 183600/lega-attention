@@ -246,14 +246,39 @@ def _fmt_rel(x: Optional[float]) -> str:
     return "-" if x is None else f"{x:+.1%}"
 
 
+def _train_trend(train_recent) -> Optional[float]:
+    """最近训练日志点的相对变化（正=上升）；不足两点/非有限返回 None。"""
+    if not isinstance(train_recent, (list, tuple)):
+        return None
+    vals = []
+    for x in train_recent:
+        try:
+            x = float(x)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(x):
+            vals.append(x)
+    if len(vals) < 2 or abs(vals[0]) < 1e-12:
+        return None
+    return (vals[-1] - vals[0]) / abs(vals[0])
+
+
 def live_overfit_hint(evals_since_improve, best_val, val,
-                      patience: int = 0) -> Optional[str]:
+                      patience: int = 0, train_recent=None,
+                      val_ci95=None) -> Optional[str]:
     """训练中途的曲线预警：连续多次评测无实质改善时返回提示文案。
 
     只看最终数值会漏掉"训练 loss 仍降、验证早已停步"的过程信号；早停关闭
     （patience<=0，默认）时没有任何机制会在训练中提醒。该函数与
     diagnose_curve 的"过拟合→早停"判定同口径（best 由严格最小维护），
     但只提示不改流程。返回 None 表示无预警或早停已开启（由早停自身处理）。
+
+    train_recent: 最近若干训练日志点的 loss（可选）。验证停步时结合训练侧
+        趋势区分"验证回升但训练仍降"（过拟合）、"两边都停滞/上升"（更像
+        学习率/容量/数据管道问题）——否则会把欠拟合误报为过拟合，诱导
+        用户加正则化而进一步恶化。
+    val_ci95: 当前验证损失的 95% 区间（可选）。回升幅度落在抽样误差内时
+        只提示"仍在噪声内、继续观察"，不升级为过拟合结论。
     """
     if patience and int(patience) > 0:
         return None
@@ -264,17 +289,78 @@ def live_overfit_hint(evals_since_improve, best_val, val,
     if n < LIVE_WARN_EVALS or best_val is None or val is None:
         return None
     try:
-        gap = (float(val) - float(best_val)) / float(best_val)
-    except (TypeError, ValueError, ZeroDivisionError):
+        best_f, val_f = float(best_val), float(val)
+        gap = (val_f - best_f) / best_f
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
     if not math.isfinite(gap):
         return None
-    if gap > LIVE_OVERFIT_GAP:
-        what = f"验证损失在回升（较历史最优 +{gap:.1%}），典型过拟合信号"
+    # 验证抽样噪声：区间半宽相对当前 val。gap 小于该半宽时，"回升"与
+    # "平台"都无法和有限窗口抽样误差区分。
+    ci_rel = None
+    if isinstance(val_ci95, (list, tuple)) and len(val_ci95) == 2:
+        try:
+            lo, hi = float(val_ci95[0]), float(val_ci95[1])
+            if (math.isfinite(lo) and math.isfinite(hi) and hi >= lo
+                    and val_f > 0):
+                ci_rel = (hi - lo) / 2.0 / val_f
+        except (TypeError, ValueError, OverflowError):
+            ci_rel = None
+    if ci_rel is not None and abs(gap) <= ci_rel + 1e-12:
+        return (f"验证损失变化（较历史最优 {gap:+.1%}）仍在 95% 抽样噪声内"
+                f"（±{ci_rel:.1%}），已连续 {n} 次评测未改善：先继续观察，"
+                "不要据此加正则化或触发早停；可增大 eval_iters/验证集。")
+
+    trend = _train_trend(train_recent)
+    trend_txt = ""
+    overfit_tail = "检查训练/验证曲线是否分叉，必要时加正则化/数据或显式开启 --early_stop_patience。"
+    underfit_tail = ("先检查学习率/数据管道/模型容量，不要盲目加正则化；"
+                     "确认训练损失本身是否还在下降后再决定是否延长训练。")
+    if trend is not None:
+        if trend < -0.01:
+            trend_txt = f"，训练损失仍在下降（{trend:+.1%}）"
+            kind = "overfit"
+        elif trend > 0.01:
+            trend_txt = f"，且训练损失也在上升（{trend:+.1%}）"
+            kind = "unstable"
+        else:
+            trend_txt = f"，训练损失已基本停滞（{trend:+.1%}）"
+            kind = "flat"
     else:
-        what = f"验证损失进入平台（较历史最优 +{gap:.1%}，无实质改善）"
-    return (f"{what}：已连续 {n} 次评测未改善。检查训练/验证曲线是否"
-            "分叉，必要时加正则化/数据或显式开启 --early_stop_patience。")
+        kind = None
+
+    if gap > LIVE_OVERFIT_GAP:
+        if kind == "overfit":
+            what = f"验证损失在回升（较历史最优 +{gap:.1%}）{trend_txt}，典型过拟合信号"
+            tail = overfit_tail
+        elif kind == "unstable":
+            what = (f"验证损失在回升（较历史最优 +{gap:.1%}）{trend_txt}："
+                    "更像优化不稳定/学习率过大，不是典型过拟合")
+            tail = underfit_tail
+        elif kind == "flat":
+            what = (f"验证损失在回升（较历史最优 +{gap:.1%}）{trend_txt}："
+                    "训练侧已无改善，优先核对验证集构造与正则化，别只延长训练")
+            tail = overfit_tail
+        else:
+            what = f"验证损失在回升（较历史最优 +{gap:.1%}），典型过拟合信号"
+            tail = overfit_tail
+    else:
+        if kind == "overfit":
+            what = (f"验证损失进入平台（较历史最优 +{gap:.1%}）{trend_txt}："
+                    "泛化差距扩大，早期过拟合信号")
+            tail = overfit_tail
+        elif kind == "unstable":
+            what = (f"验证损失进入平台（较历史最优 +{gap:.1%}）{trend_txt}："
+                    "更像欠拟合/优化不足，不是过拟合")
+            tail = underfit_tail
+        elif kind == "flat":
+            what = (f"训练与验证损失同时停滞（验证较历史最优 +{gap:.1%}）："
+                    "更像容量/优化不足（欠拟合），不是过拟合")
+            tail = underfit_tail
+        else:
+            what = f"验证损失进入平台（较历史最优 +{gap:.1%}，无实质改善）"
+            tail = overfit_tail
+    return f"{what}：已连续 {n} 次评测未改善。{tail}"
 
 
 def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
