@@ -125,7 +125,14 @@ def test_seed_report_rng_fingerprints_are_seed_evidence():
     fp_b = seed_report(12)["rng_fingerprints"]
     for key in ("python_random", "numpy_global", "torch_cpu"):
         assert fp_b[key] != fp_a[key], key               # 异 seed 状态不同
-    assert seed_report(11)["rng_fingerprints"] is None   # 不冒充旧 seed
+    stale = seed_report(11)
+    assert stale["rng_fingerprints"] is None   # 不冒充旧 seed
+    # 逐随机源的 seed 也不能复述请求参数：当前 RNG 属于 seed 12，
+    # 请求 seed 11 的报告必须把各源标为未验证/未知，而不是伪造 11。
+    assert stale["seed_verified"] is False
+    for key in ("python_random", "numpy_global", "torch_cpu",
+                "data_order_seed"):
+        assert stale[key] is None, (key, stale)
     json.dumps(fp_a)
     print("  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/"
           "不冒充）")
@@ -169,8 +176,11 @@ def test_run_manifest_embeds_seed_report_and_runtime():
         cfg = os.path.join(d, "cfg.json")
         with open(cfg, "w", encoding="utf-8") as f:
             json.dump({"seed": 5}, f)
+        # manifest 只记录已实际固定到该 seed 的 RNG；调用方须先 set_seed
+        set_seed(5)
         manifest = build_run_manifest(tag="t", variant="lega", seed=5,
                                       config_path=cfg, data_dir=d, device="cpu")
+        assert manifest["seed_report"]["seed_verified"] is True
         assert manifest["seed_report"]["python_random"] == 5
         assert manifest["runtime"]["hostname"]
         json.dumps(manifest)

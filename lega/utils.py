@@ -151,12 +151,17 @@ def seed_report(seed: int) -> dict:
     start_int = _as_int(at_start)
     fp = (_LAST_SEED["fingerprints"]
           if _LAST_SEED["seed"] == int(seed) else None)
+    # 逐随机源的 seed 不是“复述参数”：只有最近一次 set_seed 的种子与请求
+    # 一致时，这些随机源才真的被该 seed 固定。否则记录 None，避免请求旧/
+    # 未设置种子的报告冒充实际 RNG 证据（与 rng_fingerprints 的口径一致）。
+    verified_seed = int(seed) if fp is not None else None
     return {
         "seed": int(seed),
-        "python_random": int(seed),
-        "numpy_global": int(seed),
-        "torch_cpu": int(seed),
-        "torch_cuda": (int(seed) if torch.cuda.is_available() else None),
+        "seed_verified": fp is not None,
+        "python_random": verified_seed,
+        "numpy_global": verified_seed,
+        "torch_cpu": verified_seed,
+        "torch_cuda": (verified_seed if torch.cuda.is_available() else None),
         "pythonhashseed_at_start": at_start,
         "pythonhashseed_env": os.environ.get("PYTHONHASHSEED"),
         "pythonhashseed_effective": (
@@ -173,7 +178,7 @@ def seed_report(seed: int) -> dict:
         "data_order": "np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
         # 项目约定：批采样与本审计共用同一 seed（train/sanity/evaluate 均如此），
         # 机器可读字段便于台账/清单自动核对数据顺序来源
-        "data_order_seed": int(seed),
+        "data_order_seed": verified_seed,
         "rng_fingerprints": dict(fp) if fp else None,
     }
 
