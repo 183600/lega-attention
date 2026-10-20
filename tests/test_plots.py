@@ -144,6 +144,35 @@ def test_run_scope_filters_stale_seed_and_variant_artifacts():
     print("  [ok] repro 范围：旧种子/已移除变体不混入图表")
 
 
+def test_empty_or_fractional_repro_seeds_do_not_scan_stale_artifacts():
+    """seeds=[] 是显式“无种子”；小数种子不能被 int() 截断后混入整数范围。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "repro.json", {"seeds": []})
+        _w(tmp, "eval_lega_seed1.json",
+           {"variant": "lega", "seed": 1, "val_ppl": 10.0})
+        _w(tmp, "analysis_lega_seed1.json",
+           {"variant": "lega", "seed": 1, "n_records": 1})
+        assert _expected_tagged(tmp) is False
+        from lega.plots import _run_scope
+        assert _run_scope(tmp)[1] == set()
+        assert _group_by_variant(os.path.join(tmp, "eval_*.json")) == {}
+        assert _load_train_logs(tmp, rdir=tmp) == {}
+        # 小数种子不是整数身份：即使同目录白名单只有整数 1，也不相等
+        os.remove(os.path.join(tmp, "eval_lega_seed1.json"))
+        _w(tmp, "repro.json", {"seeds": [1]})
+        _w(tmp, "eval_lega.json",
+           {"variant": "lega", "seed": 1.9, "val_ppl": 99.0})
+        from lega.plots import _seed_in_scope
+        assert _seed_in_scope(1.9, {1}) is False
+        assert _seed_in_scope("1", {1}) is True
+        g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
+        assert g == {}, g
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] repro 范围：空/小数种子不混入旧结果")
+
+
 def test_read_records_merges_ragged_headers_by_file_rows():
     """合并不同版本的逐记录 CSV 时，缺列必须按"该文件的行区间"补 NaN。
 

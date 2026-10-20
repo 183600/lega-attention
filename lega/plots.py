@@ -7,6 +7,7 @@
 import argparse
 import glob
 import json
+import math
 import os
 import re
 from collections import OrderedDict
@@ -101,7 +102,9 @@ def _expected_tagged(rdir):
     """
     d = _load(os.path.join(rdir, "repro.json")) if rdir else None
     seeds = d.get("seeds") if isinstance(d, dict) else None
-    if isinstance(seeds, list) and seeds:
+    if isinstance(seeds, list):
+        # 显式 seeds=[] 表示本次 run 没有种子，不是“未知”；不能退回
+        # 扫描旧命名布局。
         return len(seeds) > 1
     return None
 
@@ -125,11 +128,14 @@ def _run_scope(rdir):
     if isinstance(seeds, list):
         parsed = set()
         for x in seeds:
-            try:
-                parsed.add(int(x))
-            except (TypeError, ValueError, OverflowError):
+            # 种子身份必须是整数；1.5 截断成 1 会把不同 run 混为一谈。
+            f = _finite_float(x)
+            if f is None or f != math.floor(f):
                 continue
-        seed_scope = parsed or None
+            parsed.add(int(f))
+        # 空列表/全部非法同样是“显式无可用种子”，不能当作未知而放开
+        # 白名单（否则旧结果会混入）。
+        seed_scope = parsed
     return variant_scope, seed_scope
 
 
@@ -139,12 +145,20 @@ def _path_seed(path):
 
 
 def _seed_in_scope(seed, scope):
-    if scope is None or seed is None:
+    if scope is None:
         return True
-    try:
-        return int(seed) in scope
-    except (TypeError, ValueError, OverflowError):
+    if not scope:
+        # 本次 run 明确没有任何种子：所有产物都不属于它。
+        return False
+    if seed is None:
+        # 有种子白名单时，缺种子信息的文件仍按旧行为保留（如手工目录），
+        # 但显式空白名单已在上面排除。
         return True
+    f = _finite_float(seed)
+    if f is None or f != math.floor(f):
+        # 非整数种子（含外部坏 JSON）不能与整数白名单中的某项相等。
+        return False
+    return int(f) in scope
 
 
 def _prefer_seeded(paths, rdir=None):
@@ -766,6 +780,9 @@ def _load_train_logs(train_root, rdir=None):
             seed = int(m.group(1)) if m else None
             if not _seed_in_scope(seed, seed_scope):
                 continue
+        elif not _seed_in_scope(None, seed_scope):
+            # 显式空种子范围时，无 _seed 后缀的旧日志同样不属于本次 run。
+            continue
         recs = []
         try:
             with open(path, "r", encoding="utf-8") as f:
