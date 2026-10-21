@@ -618,7 +618,12 @@ def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 20000,
     eval_h = _window_hashes(eval_ids, n, n_samples, seed + 1,
                             ignore_ids=ignore_ids)
     if not eval_h:
-        return {"n": int(n), "eval_windows_sampled": 0, "overlap_rate": None}
+        return {"n": int(n),
+                "train_windows_sampled": int(len(train_h)),
+                "eval_windows_sampled": 0,
+                "windows_found_in_train_sample": 0,
+                "overlap_rate": None,
+                "screening": True}
     hits = len(train_h & eval_h)
     return {"n": int(n),
             "train_windows_sampled": int(len(train_h)),
