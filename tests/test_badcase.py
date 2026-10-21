@@ -108,6 +108,15 @@ def test_case_axis_matches_synthesized_advice_axes():
         w["hard_sample"] = deep > 0.75   # 即使深位，排位已对 → 校准优先
         assert w["category"] == "top1_correct"
         assert case_axis(w) == "校准", (deep, case_axis(w))
+    # fwe 缺少 answer_words（旧/外部产物）同样必须给出评测/导出建议，
+    # 不能因为“没有词表”就静默没有任何改进方向。
+    cases = [_case(task="fwe", answer="ka", pred="ka",
+                   answer_words=None)] * 3
+    ana = analyze_badcases(cases)
+    assert ana["category_counts"] == {"fwe_no_ref": 3}
+    assert {a["axis"] for a in ana["recommendations"]} == {"评测/导出"}
+    assert any("answer_words" in a["next_experiment"]
+               for a in ana["recommendations"])
     print("  [ok] 评测/导出/校准类错误的 axis 与改进建议一致")
 
 

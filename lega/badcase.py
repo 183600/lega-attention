@@ -265,6 +265,11 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
         ("fwe_no_parse", "评测/导出", "中", "fwe 输出无法解析主导",
          "模型没输出小写词：可能是格式导出或解析规则问题而非能力问题",
          "把模型原文随结果落盘复核；核对解析正则与 prompt 模板"),
+        ("fwe_no_ref", "评测/导出", "中", "fwe 缺少 answer_words 词表基线",
+         "没有参考词表时漏答/多答无法归因；这是导出/旧格式问题，"
+         "不能据此评价模型召回或精确率",
+         "在 fwe 结果中补写 answer_words/参考词表并重跑归因，"
+         "确认旧产物不是数据导出缺口"),
     ):
         c = counts.get(cat, 0)
         if _share(c, model_n) >= DOMINANT_SHARE:
