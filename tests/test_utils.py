@@ -501,7 +501,25 @@ def test_paired_sign_flip_mc_and_guards():
         pass
     r = paired_sign_flip_test([1.0, float("nan")], [0.0, 1.0])
     assert r["n"] == 1 and r["p_perm"] is None
-    print("  [ok] paired_sign_flip_test Monte-Carlo/确定性/边界口径")
+    # 重采样次数/种子是计数身份：bool/小数/非正数不能截断后继续
+    for bad in (True, 0, -1, 1.5, "bad"):
+        try:
+            paired_sign_flip_test([1.0, 2.0], [0.0, 0.0], n_resamples=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n_resamples 未被拒绝: {bad!r}")
+    for bad in (True, -1, 1.5, "bad"):
+        try:
+            paired_sign_flip_test([1.0, 2.0], [0.0, 0.0], seed=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 seed 未被拒绝: {bad!r}")
+    assert paired_sign_flip_test([1.0, 2.0], [0.0, 0.0],
+                                 n_resamples="1000", seed="3")["p_perm"] is not None
+    print("  [ok] paired_sign_flip_test Monte-Carlo/确定性/边界口径/"
+          "非法重采样与种子拒绝")
 
 
 def test_bootstrap_mean_ci():
@@ -520,7 +538,30 @@ def test_bootstrap_mean_ci():
     assert bootstrap_mean_ci([float("nan"), None]) is None
     # 退化样本（全同值）：区间坍缩到点
     assert bootstrap_mean_ci([5.0, 5.0, 5.0]) == (5.0, 5.0)
-    print("  [ok] bootstrap_mean_ci（覆盖均值/确定性/NaN 剔除/退化样本）")
+    for bad in (True, 0, -1, 1.5, "bad"):
+        try:
+            bootstrap_mean_ci(vals, n_resamples=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n_resamples 未被拒绝: {bad!r}")
+    for bad in (True, 0, 1, 1.5, -0.1, float("nan"), "bad"):
+        try:
+            bootstrap_mean_ci(vals, n_resamples=10, ci=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 ci 未被拒绝: {bad!r}")
+    for bad in (True, -1, 1.5, "bad"):
+        try:
+            bootstrap_mean_ci(vals, n_resamples=10, seed=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 seed 未被拒绝: {bad!r}")
+    assert bootstrap_mean_ci(vals, n_resamples="200", ci="0.9", seed="3")
+    print("  [ok] bootstrap_mean_ci（覆盖均值/确定性/NaN 剔除/退化样本/"
+          "非法参数拒绝）")
 
 
 def test_min_detectable_effect():
@@ -537,7 +578,27 @@ def test_min_detectable_effect():
     assert min_detectable_effect(None, 5) is None
     assert min_detectable_effect(0.0, 5) is None
     assert min_detectable_effect(0.1, 1) is None
-    print("  [ok] min_detectable_effect（随 n 递减/口径常数/边界）")
+    # bool/非有限 std 不是效应量观测；n/α/power 不能截断或越界
+    assert min_detectable_effect(True, 5) is None
+    assert min_detectable_effect(float("nan"), 5) is None
+    for bad in (True, 5.5, "bad"):
+        try:
+            min_detectable_effect(0.1, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n 未被拒绝: {bad!r}")
+    for name in ("alpha", "power"):
+        for bad in (True, 0, 1, -0.1, 1.5, float("nan"), "bad"):
+            try:
+                min_detectable_effect(0.1, 5, **{name: bad})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 {name} 未被拒绝: {bad!r}")
+    assert min_detectable_effect("0.1", "5", alpha="0.05", power="0.8") > 0
+    print("  [ok] min_detectable_effect（随 n 递减/口径常数/边界/"
+          "非法参数拒绝）")
 
 
 def test_wilson_score_ci():
@@ -561,7 +622,29 @@ def test_wilson_score_ci():
     # k 越界被钳制而不是产生非法区间
     lo, hi = wilson_score_ci(12, 10)
     assert 0.0 <= lo <= hi <= 1.0
-    print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄）")
+    # n/k 是计数身份，ci 是 (0,1) 内概率：bool/小数/非法置信水平拒绝
+    for bad in (True, 1.5, "bad"):
+        try:
+            wilson_score_ci(bad, 10)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 k 未被拒绝: {bad!r}")
+        try:
+            wilson_score_ci(3, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n 未被拒绝: {bad!r}")
+    for bad in (True, 0, 1, -0.1, 1.5, float("nan"), "bad"):
+        try:
+            wilson_score_ci(3, 10, ci=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 ci 未被拒绝: {bad!r}")
+    assert wilson_score_ci("8", "10", ci="0.95")
+    print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄/非法参数拒绝）")
 
 
 def test_calibration_metrics_brier_ece_and_baseline():

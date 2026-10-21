@@ -363,6 +363,16 @@ def _finite_observation(value):
     return f if math.isfinite(f) else None
 
 
+def _open_unit_interval(value, name: str) -> float:
+    """(0,1) 内的有限配置值（置信水平/显著性/功效）；bool/越界显式拒绝。"""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} 必须是 (0,1) 内的有限数值，收到 bool {value!r}")
+    f = _finite_observation(value)
+    if f is None or not 0.0 < f < 1.0:
+        raise ValueError(f"{name} 必须是 (0,1) 内的有限数值，收到 {value!r}")
+    return f
+
+
 def mean_std(values):
     """样本均值与样本标准差（ddof=1，无偏）。n<2 时 std 为 None。
 
@@ -544,6 +554,12 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
     {n, mean_diff, p_perm, exact, n_resamples}；n<2 时不检验（p_perm=None，
     与 t 检验口径一致，避免 n=1 的"精确 p=1"被误读为证据）。
     """
+    n_resamples = strict_int(n_resamples, "n_resamples")
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples 必须 >= 1，收到 {n_resamples!r}")
+    seed = strict_int(seed, "seed")
+    if seed < 0:
+        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
     d = _paired_diffs(a, b)
     n = int(d.size)
     out = {"n": n, "mean_diff": None, "p_perm": None,
@@ -586,6 +602,13 @@ def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
     None/bool/非有限值剔除后 n<2 时返回 None（单点无区间可言）。
     固定随机种子，同一输入恒定复现。返回 (lo, hi)。
     """
+    n_resamples = strict_int(n_resamples, "n_resamples")
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples 必须 >= 1，收到 {n_resamples!r}")
+    ci = _open_unit_interval(ci, "ci")
+    seed = strict_int(seed, "seed")
+    if seed < 0:
+        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
     vals = []
     for v in values:
         f = _finite_observation(v)
@@ -595,9 +618,9 @@ def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
     if arr.size < 2:
         return None
     rng = np.random.default_rng(seed)
-    idx = rng.integers(0, arr.size, size=(int(n_resamples), arr.size))
+    idx = rng.integers(0, arr.size, size=(n_resamples, arr.size))
     means = arr[idx].mean(axis=1)
-    alpha = (1.0 - float(ci)) / 2.0
+    alpha = (1.0 - ci) / 2.0
     lo, hi = np.quantile(means, [alpha, 1.0 - alpha])
     return float(lo), float(hi)
 
@@ -612,9 +635,16 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
     （严格 t 口径的临界值略大，近似值偏乐观，作解释性参考而非判定门槛）。
     标准差不可估计（None/0）或 n<2 时返回 None。
     """
-    if std_diff is None or n is None or int(n) < 2:
+    if std_diff is None or n is None:
         return None
-    std = float(std_diff)
+    std = _finite_observation(std_diff)
+    if std is None or std <= 0:
+        return None
+    n = strict_int(n, "n")
+    if n < 2:
+        return None
+    alpha = _open_unit_interval(alpha, "alpha")
+    power = _open_unit_interval(power, "power")
     if not (math.isfinite(std) and std > 0.0):
         return None
     nd = statistics.NormalDist()
@@ -628,11 +658,15 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
     k 为成功数、n 为试验数；n<=0 返回 None。k=0 时下界恰为 0、k=n 时上界
     恰为 1（不会像 Wald 区间那样越界）。返回 (lo, hi)。
     """
-    if n is None or k is None or int(n) <= 0:
+    if n is None or k is None:
         return None
-    n = int(n)
+    n = strict_int(n, "n")
+    k = strict_int(k, "k")
+    if n <= 0:
+        return None
+    ci = _open_unit_interval(ci, "ci")
     k = int(min(max(k, 0), n))
-    z = statistics.NormalDist().inv_cdf(1.0 - (1.0 - float(ci)) / 2.0)
+    z = statistics.NormalDist().inv_cdf(1.0 - (1.0 - ci) / 2.0)
     z2 = z * z
     if k == 0:
         # 端点闭式：p=0 时区间为 [0, z²/(n+z²)]（避免浮点残差 1e-17 进 JSON）
