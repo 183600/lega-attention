@@ -57,6 +57,8 @@ def _eval_argv(a, ckpt: str) -> List[str]:
             "--worst_n", str(a.worst_n), "--device", a.device]
     if a.worst_on_test:
         argv += ["--worst_on_test"]
+    if a.allow_repeat_test:
+        argv += ["--allow_repeat_test"]
     return argv
 
 
@@ -138,6 +140,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--worst_on_test", action="store_true",
                    help="允许在 test 上转储最差窗口（默认关闭：test 只做最终"
                         "一次性评估，把 test 错误清单交给人工迭代即泄露）")
+    p.add_argument("--allow_repeat_test", action="store_true",
+                   help="允许同一 checkpoint 在 test 上重复评测（默认拒绝："
+                        "测试集只能最终一次性评估；确需重测时显式放行，账本仍留痕）")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--early_stop_patience", type=int, default=None)

@@ -102,9 +102,11 @@ def test_stage_argv_matches_cli():
         "--seed", "1337", "--data_dir", "data/dummy",
         "--out_dir", "out/tiny_smoke/lega",
         "--results_dir", "results/tiny_smoke", "--suffix", "",
-        "--worst_on_test"])
+        "--worst_on_test", "--allow_repeat_test"])
     assert "--worst_on_test" in _eval_argv(a_test, ckpt)
+    assert "--allow_repeat_test" in _eval_argv(a_test, ckpt)
     assert "--worst_on_test" not in _eval_argv(a, ckpt)
+    assert "--allow_repeat_test" not in _eval_argv(a, ckpt)
     assert _ruler_argv(a, ckpt) == [
         "--ckpt", ckpt, "--data_dir", "data/dummy",
         "--out", os.path.join("results/tiny_smoke", "ruler_lega.json"),

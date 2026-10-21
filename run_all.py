@@ -4801,6 +4801,10 @@ def main():
                    help="允许在 test split 上转储最差窗口（默认关闭：test 只能"
                         "最终评估一次，把 test 错误清单交给人工迭代会让测试集"
                         "变成隐式训练集；开启后写访问账本并要求报告披露）")
+    p.add_argument("--allow_repeat_test", action="store_true",
+                   help="允许同一 checkpoint 在 test 上重复评测（默认拒绝，这是"
+                        "防止“测试集变隐式训练集”的闸门；--skip_train 重跑会命中，"
+                        "确需重测时显式放行，账本仍留痕）")
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
@@ -5109,6 +5113,8 @@ def main():
                 cmd += ["--worst_n", str(args.worst_n)]
             if args.worst_on_test:
                 cmd += ["--worst_on_test"]
+            if args.allow_repeat_test:
+                cmd += ["--allow_repeat_test"]
             if args.smoke:
                 cmd += ["--smoke", "--ruler_ctx_lens", str(smoke_ctx),
                         "--ruler_n_samples", "2",
