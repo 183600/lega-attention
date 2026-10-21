@@ -3645,6 +3645,15 @@ def build_summary(results_dir: str, audit: dict = None,
             f"test={_fmt_rate(_as_dict(cont.get('train_test')).get('overlap_rate'))}、"
             f"val↔test={_fmt_rate(_as_dict(cont.get('val_test')).get('overlap_rate'))}"
             "（采样筛查下界，>0 需人工核查）")
+        cshort = _as_dict(data_report.get("contamination_short_ngram"))
+        if cshort:
+            md.append(
+                f"- 短 n-gram 重叠（{_as_dict(cshort.get('train_val')).get('n', '-')}-gram，"
+                "抓 <64 token 整句/模板复用，仅告警）："
+                f"val={_fmt_rate(_as_dict(cshort.get('train_val')).get('overlap_rate'))}、"
+                f"test={_fmt_rate(_as_dict(cshort.get('train_test')).get('overlap_rate'))}、"
+                f"val↔test={_fmt_rate(_as_dict(cshort.get('val_test')).get('overlap_rate'))}"
+                "（短 n 易有自然搭配假阳性，不进硬闸门）")
         dist = _as_dict(data_report.get("distribution_shift"))
         dv = _as_dict(dist.get("val_vs_train"))
         dt = _as_dict(dist.get("test_vs_train"))
