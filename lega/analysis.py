@@ -104,7 +104,10 @@ def _float_grid(values, name: str, minimum=None, maximum=None) -> List[float]:
     if isinstance(values, str):
         raw = [x.strip() for x in values.split(",") if x.strip()]
     elif isinstance(values, (list, tuple)):
-        raw = list(values)
+        # 配置文件里常见的空项（""/None，如尾逗号被 JSON 化成空串）按“未提供”
+        # 跳过，与逗号字符串口径一致；bool/NaN 等非法值仍由 _bounded_float 拒绝。
+        raw = [x for x in values
+               if x is not None and not (isinstance(x, str) and not x.strip())]
     else:
         raise ValueError(f"{name} 需要逗号分隔字符串或列表，收到 {values!r}")
     return [_bounded_float(x, name, minimum=minimum, maximum=maximum)

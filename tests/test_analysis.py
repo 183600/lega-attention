@@ -116,6 +116,8 @@ def test_analysis_numeric_args_reject_invalid_values():
     assert _bounded_float("0.5", "tau", minimum=0.0, maximum=1.0) == 0.5
     assert _float_grid("0.3, 0.5,", "tau_grid", 0.0, 1.0) == [0.3, 0.5]
     assert _float_grid([], "tau_grid", 0.0, 1.0) == []
+    assert _float_grid(["0.3", "", None, "  ", 0.5], "tau_grid",
+                       0.0, 1.0) == [0.3, 0.5]
     for bad in ("0.5,-1", "0.5,nan", True):
         try:
             _float_grid(bad, "probe_l2", minimum=0.0)
