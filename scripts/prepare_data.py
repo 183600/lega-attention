@@ -159,6 +159,10 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
     截断只在**完整行边界**发生：写入半行会制造被截断的标签/文档，并可能让
     同一段落的残片跨 split。边读边写，写入临时文件后原子替换。
     """
+    if max_tokens < 0:
+        # 负上限会立刻截断第一行，产出三个空 split，却仍可能被后续
+        # “无重叠”检查判为通过；必须在写入前显式拒绝。
+        raise ValueError(f"max_tokens 不能为负，收到 {max_tokens!r}")
     limit = int(max_tokens * 3.6 * 1.2) if max_tokens else None
     tmp = dst + ".part"
     used, wrote, n_parts = 0, 0, 0
@@ -211,13 +215,18 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="强制重建 token bin；不传时复用与当前 txt 一致的缓存")
     args = ap.parse_args()
+    max_tokens = {"train": args.max_tokens, "val": args.val_tokens,
+                  "test": args.test_tokens}
+    bad_limits = [name for name, value in max_tokens.items() if value < 0]
+    if bad_limits:
+        raise SystemExit(
+            f"[data] --max_tokens/--val_tokens/--test_tokens 不能为负，"
+            f"非法项：{bad_limits}")
 
     os.makedirs(args.out_dir, exist_ok=True)
     txt_paths = {"train": os.path.join(args.out_dir, "train.txt"),
                  "val": os.path.join(args.out_dir, "val.txt"),
                  "test": os.path.join(args.out_dir, "test.txt")}
-    max_tokens = {"train": args.max_tokens, "val": args.val_tokens,
-                  "test": args.test_tokens}
 
     source_used = args.source
     split_protocol = None

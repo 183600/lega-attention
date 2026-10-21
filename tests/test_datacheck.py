@@ -15,6 +15,7 @@
 """
 import json
 import os
+import sys
 import tempfile
 
 import numpy as np
@@ -193,6 +194,58 @@ def test_heading_regex_matches_multilevel_wikitext_headings():
     for line in ("x = y = z", "plain text", "= = ", "= = =", ""):
         assert not _HEADING_RE.match(line), f"不应视为标题: {line!r}"
     print("  [ok] 标题正则：一级/多级（含 WikiText-103 分隔写法/CRLF）均可识别")
+
+
+def test_temporal_split_rejects_invalid_fractions():
+    """比例非法时必须在切分前报错，不能被 max/min 夹成"看似成功"的空 split。"""
+    text = "x" * 1000
+    bad_kwargs = [
+        {"train_frac": 0}, {"train_frac": -0.1}, {"train_frac": 1.0},
+        {"train_frac": 1.2}, {"train_frac": float("nan")},
+        {"val_frac": 0}, {"val_frac": -0.1}, {"val_frac": 1.0},
+        {"train_frac": 0.95, "val_frac": 0.1},
+        {"window_frac": 0}, {"window_frac": -0.1},
+        {"window_frac": 1.1}, {"window_frac": float("nan")},
+        {"window_frac": float("inf")}, {"train_frac": True},
+    ]
+    for kwargs in bad_kwargs:
+        try:
+            temporal_split_text(text, **kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法比例未被拒绝: {kwargs}")
+    # 合法字符串比例仍可用
+    train, val, test, _ = temporal_split_text(
+        text, train_frac="0.8", val_frac="0.1", window_frac="0.02")
+    assert train and val and test
+    print("  [ok] 时序划分：非法比例在切分前显式拒绝")
+
+
+def test_prepare_data_rejects_negative_max_tokens(monkeypatch):
+    """负数 --max_tokens 会让首行即被截断，必须在写文件前报错。"""
+    import io
+    from scripts.prepare_data import main as prepare_main, write_clean_lines
+
+    with tempfile.TemporaryDirectory() as d:
+        dst = os.path.join(d, "clean.txt")
+        try:
+            write_clean_lines(io.StringIO("a line\n"), dst, -1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("write_clean_lines 未拒绝负 max_tokens")
+        out_dir = os.path.join(d, "out")
+        monkeypatch.setattr(sys, "argv", [
+            "prepare_data", "--out_dir", out_dir, "--max_tokens", "-5"])
+        try:
+            prepare_main()
+        except SystemExit as e:
+            assert "不能为负" in str(e), e
+        else:
+            raise AssertionError("prepare_data 未拒绝负 max_tokens")
+        assert not os.path.exists(out_dir)
+    print("  [ok] prepare_data/write_clean_lines：负 max_tokens 显式拒绝")
 
 
 def test_decontaminate_drops_train_duplicates_only():

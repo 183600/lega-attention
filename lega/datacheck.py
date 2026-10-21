@@ -758,10 +758,31 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     n = len(text)
     if n < 3:
         raise ValueError("文本太短（<3 字符），无法做 train/val/test 时序划分")
-    t1 = max(1, int(n * float(train_frac)))
-    t2 = max(t1 + 1, int(n * (float(train_frac) + float(val_frac))))
+    # 比例必须能保证三个 split 都非空：负值/零/和 >=1/NaN/Inf 都会被
+    # max(1,...) 与 min(n-1,...) 静默夹成看似合法的错误切分。
+    ratios = {}
+    for name, value in (("train_frac", train_frac), ("val_frac", val_frac),
+                        ("window_frac", window_frac)):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} 必须是数值比例，收到 bool {value!r}")
+        try:
+            ratios[name] = float(value)
+        except (TypeError, ValueError, OverflowError) as e:
+            raise ValueError(f"{name} 必须是数值比例，收到 {value!r}") from e
+    if not 0 < ratios["train_frac"] < 1:
+        raise ValueError(f"train_frac 必须在 (0,1) 内，收到 {train_frac!r}")
+    if not 0 < ratios["val_frac"] < 1:
+        raise ValueError(f"val_frac 必须在 (0,1) 内，收到 {val_frac!r}")
+    if ratios["train_frac"] + ratios["val_frac"] >= 1:
+        raise ValueError("train_frac + val_frac 必须 < 1，否则 test 为空")
+    if not 0 < ratios["window_frac"] <= 1:
+        raise ValueError(f"window_frac 必须在 (0,1] 内，收到 {window_frac!r}")
+    train_frac, val_frac = ratios["train_frac"], ratios["val_frac"]
+    window_frac = ratios["window_frac"]
+    t1 = max(1, int(n * train_frac))
+    t2 = max(t1 + 1, int(n * (train_frac + val_frac)))
     t2 = min(t2, n - 1)
-    window = max(256, int(n * float(window_frac)))
+    window = max(256, int(n * window_frac))
     heads = _heading_positions(text)
     p1, k1 = _pick_boundary(text, t1, window)
     # 标题优先：窗口内没有“可用”标题时在全文中找最近的（范围保证 p1 < t2，
