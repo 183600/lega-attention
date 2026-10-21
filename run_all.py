@@ -1265,6 +1265,12 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         else:
             t["verdict"] = (f"样例级无显著差异（McNemar 精确，Holm 校正后 "
                             f"p={padj:.4f}）")
+        md_, mc_ = t.get("mean_diff"), t.get("macro_mean_diff")
+        if (md_ is not None and mc_ is not None and md_ != 0
+                and (mc_ == 0 or (md_ > 0) != (mc_ > 0))):
+            t["estimand_conflict"] = True
+            t["verdict"] += ("；⚠ micro/macro 方向不一致（macro 为 0 或反向），"
+                             "结论依赖“平均值”定义")
     return out
 
 

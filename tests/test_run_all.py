@@ -3348,4 +3348,6 @@ def test_ruler_sample_macro_micro_estimands_diverge():
     seed_macro = (_ruler_avg_of(runs["lega"][1]["ruler"])
                   - _ruler_avg_of(runs["standard"][1]["ruler"]))
     assert abs(seed_macro - t["macro_mean_diff"]) < 1e-12
-    print("  [ok] RULER 样例级效应量：micro 与 macro 口径分歧显式并列")
+    assert t["estimand_conflict"] is True
+    assert "micro/macro 方向不一致" in t["verdict"], t
+    print("  [ok] RULER 样例级效应量：micro 与 macro 口径分歧显式并列并告警")
