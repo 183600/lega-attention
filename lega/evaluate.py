@@ -251,8 +251,11 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
     exp(min(20, loss)) 与 >20 的截断口径，与 train.py 完全一致。
     """
     metrics = metrics if isinstance(metrics, dict) else {}
+    raw_loss = metrics.get("val_loss")
     try:
-        vl = float(metrics.get("val_loss"))
+        # bool 是 int 子类，float(True)=1.0；坏记录不能伪装成 val_loss=1.0
+        # （对应一个看似正常的 PPL）。
+        vl = None if isinstance(raw_loss, bool) else float(raw_loss)
     except (TypeError, ValueError, OverflowError):
         vl = None
     if vl is not None and math.isfinite(vl):
@@ -262,13 +265,16 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
         ppl, loss, clamped = None, None, None
     gmean = metrics.get("gate_mean")
     if gmean is not None:
-        try:
-            gmean = float(gmean)
-        except (TypeError, ValueError, OverflowError):
+        if isinstance(gmean, bool):
             gmean = None
         else:
-            if not math.isfinite(gmean):
+            try:
+                gmean = float(gmean)
+            except (TypeError, ValueError, OverflowError):
                 gmean = None
+            else:
+                if not math.isfinite(gmean):
+                    gmean = None
     return {"val_ppl": ppl, "val_loss": loss, "val_ppl_clamped": clamped,
             "gate_mean": gmean}
 

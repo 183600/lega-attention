@@ -297,10 +297,12 @@ def test_json_safe_eval_metrics_handles_nonfinite():
                    "val_ppl_clamped": None, "gate_mean": None}
     # allow_nan=False 不抛异常：产物中不存在 NaN/Infinity 字面量
     json.dumps(out, allow_nan=False)
-    for bad in (float("inf"), float("-inf")):
+    for bad in (float("inf"), float("-inf"), True, False):
         o = json_safe_eval_metrics({"val_loss": bad, "gate_mean": 0.5})
         assert o["val_ppl"] is None and o["val_loss"] is None
         assert o["val_ppl_clamped"] is None and o["gate_mean"] == 0.5
+    o = json_safe_eval_metrics({"val_loss": 2.5, "gate_mean": True})
+    assert o["gate_mean"] is None and o["val_loss"] == 2.5
     # 有限值沿用 train.py 的 exp(min(20, loss)) / >20 截断口径
     o = json_safe_eval_metrics({"val_loss": 2.5, "gate_mean": None})
     assert o["val_ppl"] == math.exp(2.5) and o["val_ppl_clamped"] is False
