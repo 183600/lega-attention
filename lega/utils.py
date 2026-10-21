@@ -264,9 +264,15 @@ def save_json(obj, path: str) -> None:
     if d:
         os.makedirs(d, exist_ok=True)
     tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(_json_safe(obj), f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_json_safe(obj), f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def get_device(device: str = "auto") -> str:

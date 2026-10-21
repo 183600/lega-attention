@@ -115,9 +115,19 @@ def test_save_json_writes_strict_json_atomically():
             "np": {"nan": None, "int": 3, "bool": True, "arr": [1.0, None]},
             "keep": 0.5}
         assert not [f for f in os.listdir(tmp) if ".tmp" in f]
+        # 序列化中途失败也不能留下半截临时文件，否则读者可能误把
+        # “上次失败写入的残留”当成有效报告。
+        bad = os.path.join(tmp, "bad.json")
+        try:
+            save_json({"bad": object()}, bad)
+            raise AssertionError("不可序列化对象应报错")
+        except TypeError:
+            pass
+        assert not os.path.exists(bad)
+        assert not [f for f in os.listdir(tmp) if ".tmp" in f]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] save_json：非有限浮点转 null 且原子写")
+    print("  [ok] save_json：非有限浮点转 null、原子写、失败清理临时文件")
 
 
 def _brute_ap(scores, labels):
