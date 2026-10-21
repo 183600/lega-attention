@@ -76,6 +76,35 @@ def test_invalid_smoothing_parameters_rejected():
     print("  [ok] n-gram：非法 α/λ 显式拒绝")
 
 
+def test_evaluate_rejects_bad_vocab_meta_and_out_of_range_ids():
+    """外部 meta/bin 不一致时必须在拟合前显式报错，不能用错误 V 算 PPL。"""
+    for bad in (True, 2.5, 0, -1, None, "4.5"):
+        tmp = tempfile.mkdtemp()
+        try:
+            _mk_data(tmp, [0, 1, 2, 3] * 5, [0, 1, 2, 0], vocab_size=bad)
+            try:
+                evaluate(tmp, split="val")
+                raise AssertionError(f"非法 vocab_size 应报错: {bad!r}")
+            except ValueError as e:
+                assert "vocab_size" in str(e), e
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    for where, train, val, needle in (
+            ("train", [0, 1, 2, 4] * 5, [0, 1, 2, 0], "train"),
+            ("val", [0, 1, 2, 3] * 5, [0, 1, 9, 0], "val")):
+        tmp = tempfile.mkdtemp()
+        try:
+            _mk_data(tmp, train, val, vocab_size=4)
+            try:
+                evaluate(tmp, split="val")
+                raise AssertionError(f"{where} 越界 token id 应报错")
+            except ValueError as e:
+                assert needle in str(e) and "token id" in str(e), e
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] n-gram：坏词表/越界 token id 显式拒绝")
+
+
 def test_zero_smoothing_unseen_tokens_stay_finite():
     """α=0 是合法输入：未登录 token/上下文概率为 0，PPL 必须是有限的
     截断值而不是 NaN/Inf（后者会让 JSON 报告字段退化为 null）。"""

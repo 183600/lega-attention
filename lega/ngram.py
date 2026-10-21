@@ -331,6 +331,32 @@ def window_positions(n_tokens: int, ctx: int, iters: int):
     return (starts[:, None] * ctx + offsets[None, :]).reshape(-1)
 
 
+def _validate_vocab_and_ids(meta: dict, arrays) -> int:
+    """校验 meta.vocab_size 与各 split 的 token id，避免用错误词表算基线。
+
+    meta 是磁盘上的外部输入：``int("4.5")`` 会抛错但 ``int(3.7)``/``int(True)``
+    会静默截断；更危险的是 bin 中的 id 超出 vocab_size 时，二元键
+    ``prev * V + cur`` 会发生不同 token 对撞，context 频次与分母也按错误 V
+    计算，最终 PPL 看似正常却对应另一个模型。这里在拟合前显式拒绝。
+    """
+    vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
+    if vocab_size <= 0:
+        raise ValueError(
+            f"meta.vocab_size 必须为正整数，收到 {vocab_size}")
+    for name, ids in arrays:
+        n = int(len(ids))
+        if n == 0:
+            continue
+        lo, hi = int(np.min(ids)), int(np.max(ids))
+        if lo < 0 or hi >= vocab_size:
+            raise ValueError(
+                f"{name} 含非法 token id（范围 {lo}..{hi}，"
+                f"meta.vocab_size={vocab_size}，合法范围 "
+                f"0..{vocab_size - 1}）：meta 与 bin 不一致，"
+                "拒绝用错误词表计算 n-gram 基线")
+    return vocab_size
+
+
 def evaluate(data_dir: str, split: str = "val",
              alphas=ALPHA_GRID, allow_test: bool = False,
              window_spec: dict = None) -> dict:
@@ -349,7 +375,6 @@ def evaluate(data_dir: str, split: str = "val",
     做真正的同 token 对比；窗口规格无效时以 `window_spec_error` 显式标注。
     """
     meta = load_meta(data_dir)
-    vocab_size = int(meta["vocab_size"])
     # 规范化候选网格：调用方可能传生成器；后面要在 uni/bi/插值三段重复扫描。
     # 非法 α（NaN/Inf/负值）必须显式拒绝，不能静默参与选参并写出非法 JSON。
     alphas = tuple(_validate_alpha(a) for a in alphas)
@@ -371,6 +396,8 @@ def evaluate(data_dir: str, split: str = "val",
     # 在报告集上选择，否则 alpha_selected_on 的声明与真实协议不符。
     sel_ids = (eval_ids if split == "val"
                else np.asarray(load_bin(data_dir, "val"), dtype=np.int64))
+    vocab_size = _validate_vocab_and_ids(
+        meta, (("train", train_ids), (split, eval_ids), ("val", sel_ids)))
     uni, pair_keys, pair_counts = fit_counts(train_ids, vocab_size)
     # 选参与报告各自评测流的逐 token 二元项：α 只影响频次到 PPL 的换算，
     # 不改变二元组频次本身；split == "val" 时两个流是同一数组，可共用。
