@@ -96,8 +96,9 @@ def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
     if log_every < 1:
         warnings.append(f"log_every={log_every} 非法（必须 >=1），无法记录训练点")
     else:
-        # step 0 先打一个点，之后每个 log_every 步一个点。
-        n_log = 1 + steps // log_every
+        # 训练循环在 step==0 以及 (step+1)%log_every==0 时记录。log_every=1
+        # 时 step 0 已包含在“每步”里，不能再额外 +1，否则会高估可观测点数。
+        n_log = steps // log_every + (0 if log_every == 1 else 1)
         if n_log < MIN_CURVE_LOG_POINTS:
             suggest = max(1, steps // (MIN_CURVE_LOG_POINTS - 1))
             warnings.append(
