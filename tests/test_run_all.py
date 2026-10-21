@@ -8,6 +8,7 @@
 """
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _noise_verdict_note, _loo_stability_str, _num_or_none,
                       _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
-                      _ppl_of, _probe_oof, _rel_pct,
+                      _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
                       _ruler_fwe_recall, _ruler_min_cell_n,
@@ -1526,6 +1527,41 @@ def test_paired_ppl_skips_seeds_with_mismatched_eval_split():
     print("  [ok] PPL 配对：跨 eval split 的种子整对剔除")
 
 
+def test_log_ppl_sensitivity_can_reverse_arithmetic_verdict():
+    """PPL 是比值尺度：log-PPL 与算术 PPL 的均值结论可能方向相反。"""
+    def ev(ppl, **kw):
+        base = {"ppl": ppl, "split": "val", "eval_ctx": 512,
+                "val_windows": 80}
+        base.update(kw)
+        return {"eval": base}
+
+    # 算术差 +99, -100 → 均值 -0.5（候选更好）；
+    # log 差 +4.605, -0.105 → 均值 +2.25（候选更差）。
+    runs = {
+        "lega": {1: ev(100.0), 2: ev(900.0)},
+        "standard": {1: ev(1.0), 2: ev(1000.0)},
+    }
+    raw = _paired_comparisons(
+        runs, [("lega", "standard")], "PPL",
+        lambda slot: _ppl_of(slot.get("eval")), lower_better=True)[0]
+    log = _paired_comparisons(
+        runs, [("lega", "standard")], "PPL(log)",
+        lambda slot: _log_ppl_of(slot.get("eval")), lower_better=True)[0]
+    assert raw["mean_diff"] < 0 < log["mean_diff"], (raw, log)
+    assert abs(raw["mean_diff"] - (-0.5)) < 1e-12, raw
+    assert abs(log["mean_diff"] - (math.log(100.0) + math.log(0.9)) / 2) < 1e-12
+    # log 指标仍走 PPL 的 split/ctx/窗口数协议门槛（不能跨评测协议配对）
+    log2 = _paired_comparisons(
+        {"lega": {1: ev(100.0, eval_ctx=256)},
+         "standard": {1: ev(10.0)}},
+        [("lega", "standard")], "PPL(log)",
+        lambda slot: _log_ppl_of(slot.get("eval")), lower_better=True)
+    assert log2 == [], log2
+    assert _log_ppl_of({"ppl": 0}) is None
+    assert _log_ppl_of({"ppl": -1}) is None
+    print("  [ok] log-PPL 敏感性：几何均值比可反转算术 PPL 的均值方向，协议门槛一致")
+
+
 def test_paired_ppl_skips_eval_protocol_mismatch():
     """同 split 不同 ctx/窗口数仍是不同 token 子集，不能充当配对观测。"""
     def ev(ppl, ctx=512, windows=80):
@@ -1543,6 +1579,40 @@ def test_paired_ppl_skips_eval_protocol_mismatch():
     assert out[0]["n"] == 1, out
     assert out[0].get("excluded_protocol_mismatches") == 2, out
     print("  [ok] PPL 配对：同 split 但 ctx/窗口数不一致的种子整对剔除")
+
+
+def test_build_summary_renders_log_ppl_sensitivity():
+    """汇总页必须报告 log-PPL 几何均值比及其与原始 PPL 判定的一致性。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        pairs = [(100.0, 1.0), (900.0, 1000.0),
+                 (100.0, 1.0), (900.0, 1000.0)]
+        for seed, (lega_ppl, std_ppl) in enumerate(pairs, 1):
+            _write_json(os.path.join(tmp, f"eval_lega_seed{seed}.json"), {
+                "variant": "lega", "seed": seed, "val_ppl": lega_ppl,
+                "val_loss": math.log(lega_ppl), "gate_mean": 0.5,
+                "n_params": 100, "n_gate_extra": 0})
+            _write_json(os.path.join(tmp, f"eval_standard_seed{seed}.json"), {
+                "variant": "standard", "seed": seed, "val_ppl": std_ppl,
+                "val_loss": math.log(std_ppl), "gate_mean": None,
+                "n_params": 100, "n_gate_extra": 0})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "PPL 比值尺度敏感性" in md, md
+        assert "PPL几何比" in md, md
+        log_tests = [t for t in out["tests"]
+                     if t.get("metric") == "PPL(log)"]
+        assert log_tests, out["tests"]
+        t = log_tests[0]
+        assert t.get("ppl_ratio") is not None
+        assert abs(t["ppl_ratio"] - math.exp(t["mean_diff"])) < 1e-12
+        assert t.get("ppl_ratio_ci95") is not None
+        raw = [x for x in out["tests"] if x.get("metric") == "PPL"][0]
+        assert "PPL(log)" not in md.split("## 关键对比")[1].split("### PPL")[0]
+        assert raw["mean_diff"] < 0 < t["mean_diff"], (raw, t)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总页：log-PPL 几何均值比与原始 PPL 方向分歧显式呈现")
 
 
 def test_paired_ruler_skips_protocol_and_cell_mismatch():

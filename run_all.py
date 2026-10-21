@@ -806,6 +806,18 @@ def _ppl_of(d):
     return _finite_number(v)
 
 
+def _log_ppl_of(d):
+    """log-PPL：比值尺度的配对分析必须用对数差（=几何均值比）。
+
+    算术 PPL 差由高 PPL 的种子/变体主导；log 差对尺度对称，exp(ΔlogPPL)
+    即几何均值比。原始 PPL 仍是预注册主指标，log 分析只作敏感性证据。
+    """
+    v = _ppl_of(d)
+    if v is None or v <= 0:
+        return None
+    return math.log(v)
+
+
 def _ppl_ci_rel_pct(d):
     """单次 run 内验证窗口抽样 CI 的相对半宽（占 PPL 点估计的百分比）。
 
@@ -1447,6 +1459,11 @@ def _loo_stability_str(t: dict) -> str:
     return "✅" if t["loo_sign_stable"] else "❌"
 
 
+def _verdict_head(value) -> str:
+    """取结论首词（去掉括号解释），用于跨尺度/口径一致性比较。"""
+    return str(value if value is not None else "-").split("（")[0]
+
+
 def _noise_verdict_note(t: dict) -> str:
     """把效应/噪声关系压成一句可渲染的警示（无信息时返回空串）。"""
     if not isinstance(t, dict):
@@ -1480,7 +1497,7 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
             sa, sb = cm.get(s), rm.get(s)
             if not (isinstance(sa, dict) and isinstance(sb, dict)):
                 continue
-            if metric_name == "PPL":
+            if metric_name.startswith("PPL"):
                 ea = sa.get("eval") if isinstance(sa.get("eval"), dict) else {}
                 eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else {}
                 if ea.get("split", "val") != eb.get("split", "val"):
@@ -3632,6 +3649,25 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _paired_comparisons(
         runs, pairs, "PPL", lambda slot: _ppl_of(slot.get("eval")),
         lower_better=True)
+    # PPL 是比值尺度：算术均值差会被高 PPL 种子主导。log-PPL 配对给出
+    # 几何均值比（exp(Δ)），作为独立敏感性家族；预注册主判定仍是原始 PPL。
+    log_tests = _paired_comparisons(
+        runs, pairs, "PPL(log)", lambda slot: _log_ppl_of(slot.get("eval")),
+        lower_better=True)
+    for t in log_tests:
+        md = t.get("mean_diff")
+        ci = t.get("mean_diff_ci95")
+        t["ppl_ratio"] = (math.exp(md) if md is not None
+                          and math.isfinite(md) else None)
+        t["ppl_ratio_ci95"] = (
+            [math.exp(ci[0]), math.exp(ci[1])]
+            if isinstance(ci, (list, tuple)) and len(ci) == 2
+            and all(isinstance(x, (int, float)) and math.isfinite(x)
+                    for x in ci) else None)
+        t["ppl_delta_pct"] = ((t["ppl_ratio"] - 1.0) * 100.0
+                              if t["ppl_ratio"] is not None else None)
+        t["exploratory"] = True
+    tests += log_tests
     tests += _paired_comparisons(
         runs, pairs, "RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
         lower_better=False)
@@ -4732,6 +4768,8 @@ def build_summary(results_dir: str, audit: dict = None,
                 continue  # 交互效应单独成表，避免与主效应表重复
             if t.get("ruler_task"):
                 continue  # 逐任务分解单独成表，避免主表被 5 个任务淹没
+            if t.get("metric") == "PPL(log)":
+                continue  # 比值尺度敏感性单独成表，避免与原始 PPL 重复
             if t.get("mean_diff") is None:
                 continue
             std = t.get("std_diff")
@@ -4776,6 +4814,46 @@ def build_summary(results_dir: str, audit: dict = None,
                   "❌ 表示结论由个别种子决定，即使 p_adj 显著也不稳健。")
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
+
+    # --- PPL 比值尺度敏感性（探索性）：log-PPL 几何均值比。
+    log_tests = [t for t in tests
+                 if t.get("metric") == "PPL(log)"
+                 and t.get("mean_diff") is not None]
+    if log_tests:
+        md += ["", "### PPL 比值尺度敏感性（log-PPL 几何均值比；探索性）", "",
+               "PPL 是比值尺度，算术均值差会被高 PPL 种子/变体主导；log-PPL "
+               "配对差 Δ=mean(log PPL候选−log PPL参照) 的指数 exp(Δ) 即几何"
+               "均值比（<1 表示候选更好），区间由配对差 bootstrap CI 取指数"
+               "得到。该表只检验结论是否依赖尺度；预注册主判定仍是原始 PPL，"
+               "不能在两种尺度中挑对主张有利的口径。", "",
+               "| 对比 | n | ΔlogPPL | PPL几何比 | 比值95% CI | p_adj(Holm) | "
+               "原始PPL判定 | 尺度结论 |", "|---|---|---|---|---|---|---|---|"]
+        n_mismatch = 0
+        for t in log_tests:
+            raw = _find_test(tests, (t.get("candidate"), t.get("reference")),
+                             "PPL")
+            raw_verdict = (_verdict_head(raw.get("verdict"))
+                           if isinstance(raw, dict) else "未运行")
+            ci = t.get("ppl_ratio_ci95")
+            ci_s = (f"[{ci[0]:.4f}, {ci[1]:.4f}]" if ci else "-")
+            ratio = (f"{t['ppl_ratio']:.4f}"
+                     if t.get("ppl_ratio") is not None else "-")
+            padj = (f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-")
+            log_verdict = _verdict_head(t.get("verdict"))
+            mismatch = (raw_verdict != log_verdict
+                        and raw_verdict not in ("未运行", "未定")
+                        and log_verdict != "未定")
+            n_mismatch += int(mismatch)
+            mark = ("⚠ 尺度结论不一致" if mismatch else log_verdict)
+            md.append(
+                f"| {t['candidate']} vs {t['reference']} | {t['n']} | "
+                f"{t['mean_diff']:+.4f} | {ratio} | {ci_s} | {padj} | "
+                f"{raw_verdict} | {mark} |")
+        md += ["", "注: 几何均值比只改变“平均”的尺度，不改变配对结构；"
+               f"原始 PPL 与 log-PPL 的结论{('有' if n_mismatch else '没有')}"
+               f"不一致（{n_mismatch} 组），不一致时必须同时报告并解释为"
+               "尺度敏感性，不能静默选择其中一个。逐种子 log 差与几何比见 "
+               "`significance.json` 的 `ppl_log_pairs`。"]
 
     # --- PPL 窗口级配对（探索性）：有限窗口抽样的评估不确定性。
     #     与上面的种子级 t 检验回答不同问题，不能互相替代。
@@ -5254,6 +5332,8 @@ def build_summary(results_dir: str, audit: dict = None,
                    "linear_probe_comparison": probe_cmp,
                    "ruler_sample_pairs": ruler_sample_tests,
                    "ppl_window_pairs": ppl_window_tests,
+                   "ppl_log_pairs": [
+                       t for t in tests if t.get("metric") == "PPL(log)"],
                    "factorial_interactions": [
                        t for t in tests if t.get("interaction")],
                    "factorial_interactions_note": (
