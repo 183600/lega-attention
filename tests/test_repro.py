@@ -126,6 +126,34 @@ def test_data_fingerprint_survives_malformed_cache():
     print("  [ok] 畸形指纹缓存被视为未命中并重建")
 
 
+def test_data_fingerprint_rejects_tampered_cache_metadata():
+    """缓存文件 stat 未变但摘要/分词器字段被改坏时，不能直接信任缓存。
+
+    缓存是派生数据；若只核对文件大小/mtime/ctime，损坏的 digest 或
+    tokenizer 会被原样返回并写入 run_manifest，让溯源信息自相矛盾。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char"}, f)
+        ref = data_fingerprint(d)
+        cache = os.path.join(d, ".lega_fingerprint.json")
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        raw["digest"] = "0" * len(ref["digest"])
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        assert data_fingerprint(d)["digest"] == ref["digest"]
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        raw["tokenizer"] = "bogus"
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        assert data_fingerprint(d)["tokenizer"] == "char"
+    print("  [ok] 指纹缓存摘要/分词器被篡改时重建")
+
+
 def test_git_and_runtime_info_json_safe():
     git = git_info()
     assert set(git) == {"commit", "commit_short", "branch", "dirty"}

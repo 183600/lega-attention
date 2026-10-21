@@ -284,6 +284,7 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     names = [n for n in ("train.bin", "val.bin", "test.bin", "meta.json")
              if os.path.exists(os.path.join(data_dir, n))]
     cache_path = os.path.join(data_dir, _CACHE_NAME)
+    meta_path = os.path.join(data_dir, "meta.json")
     cached = None
     if use_cache and os.path.exists(cache_path):
         try:
@@ -296,7 +297,10 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     if isinstance(cached, dict) and cached.get("algo") == FINGERPRINT_ALGO \
             and isinstance(cached.get("digest"), str) \
             and isinstance(cached.get("files"), list) \
-            and all(isinstance(e, dict) for e in cached["files"]) \
+            and all(isinstance(e, dict)
+                    and isinstance(e.get("sha256"), str)
+                    and len(e["sha256"]) == 64
+                    for e in cached["files"]) \
             and [e.get("name") for e in cached["files"]] == names:
         fresh = True
         for e in cached["files"]:
@@ -313,12 +317,24 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
                 fresh = False
                 break
         if fresh:
-            return cached
+            # 缓存是纯派生数据：文件 stat 未变只说明 entries 可能仍有效，
+            # 不代表缓存里的合并摘要/分词器字段没有被损坏或篡改。返回前
+            # 必须验证 digest 与 entries 自洽，且 tokenizer 与当前 meta.json
+            # 一致；否则重建，避免把错误指纹写进 run_manifest。
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                current_tokenizer = (meta.get("tokenizer")
+                                     if isinstance(meta, dict) else None)
+            except (OSError, ValueError):
+                current_tokenizer = None
+            if (cached.get("digest") == _digest_of(cached["files"])
+                    and cached.get("tokenizer") == current_tokenizer):
+                return cached
     if not names:
         raise FileNotFoundError(f"{data_dir} 下没有可指纹化的数据文件（train.bin 等）")
     entries = [_file_entry(os.path.join(data_dir, n)) for n in names]
     tokenizer = None
-    meta_path = os.path.join(data_dir, "meta.json")
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
