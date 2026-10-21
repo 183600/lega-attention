@@ -958,13 +958,23 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
     返回 {macro, micro, weighted, per_class: {label: {precision, recall, f1,
     support}}, labels}；单一类别或无样本时值为 None（表示不可计算）。
     """
-    y_true = np.asarray(y_true).astype(int).ravel()
-    y_pred = np.asarray(y_pred).astype(int).ravel()
+    def _class_ids(values, name):
+        # 类别是整数身份：int(1.5)=1、int(True)=1 会把不同类静默合并，
+        # 同一批预测的 macro/micro/weighted 也就全部失真。
+        arr = np.asarray(values)
+        if isinstance(values, np.ndarray) and arr.dtype.kind in "iu":
+            return arr.astype(np.int64, copy=False).ravel()
+        return np.array([strict_int(v, f"{name}[{i}]")
+                         for i, v in enumerate(np.asarray(values, dtype=object).ravel())],
+                        dtype=np.int64)
+
+    y_true = _class_ids(y_true, "y_true")
+    y_pred = _class_ids(y_pred, "y_pred")
     if y_true.size != y_pred.size:
         raise ValueError(f"y_true/y_pred 长度不一致: {y_true.size} vs {y_pred.size}")
     if labels is None:
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
-    labels = [int(x) for x in labels]
+    labels = [strict_int(x, "labels") for x in labels]
     per_class = {}
     f1s, supports = [], []
     total = int(y_true.size)

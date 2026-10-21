@@ -264,7 +264,20 @@ def test_f1_scores_three_averages_and_imbalance():
         raise AssertionError("长度不一致应抛 ValueError")
     except ValueError:
         pass
-    print("  [ok] f1_scores（macro/micro/weighted 分离、多分类、长度校验）")
+    # 类别是整数身份：bool/小数/非数值不能被截断成另一个合法类别
+    for bad in (True, 1.5, float("nan"), "bad"):
+        for call in (lambda: f1_scores([bad, 0], [0, 1]),
+                     lambda: f1_scores([0, 1], [bad, 0]),
+                     lambda: f1_scores([0, 1], [0, 1], labels=[0, bad])):
+            try:
+                call()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法类别未被拒绝: {bad!r}")
+    assert f1_scores([1.0, 0.0], [1.0, 1.0])["n"] == 2
+    print("  [ok] f1_scores（macro/micro/weighted 分离、多分类、长度校验/"
+          "非法类别拒绝）")
 
 
 def test_pearson_guards():
