@@ -286,6 +286,17 @@ def _read_run_eval(run_dir: str) -> dict:
     return d if isinstance(d, dict) else {}
 
 
+def _nonnegative_metric(v):
+    """训练统计字段的非负有限数值规范化；坏值返回 None（不伪造吞吐）。"""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return v if math.isfinite(v) and v >= 0 else None
+
+
 def load_train_throughput(run_dir: str):
     """从训练 run 的 eval.json 继承训练过程记录（train_step_time_ms/tokens_per_sec）。
 
@@ -293,7 +304,8 @@ def load_train_throughput(run_dir: str):
     文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
     """
     d = _read_run_eval(run_dir)
-    return d.get("train_step_time_ms"), d.get("train_tokens_per_sec")
+    return (_nonnegative_metric(d.get("train_step_time_ms")),
+            _nonnegative_metric(d.get("train_tokens_per_sec")))
 
 
 def load_train_peak_mem_mb(run_dir: str):
@@ -302,14 +314,9 @@ def load_train_peak_mem_mb(run_dir: str):
     必须随评测结果落盘：run_all 的汇总列只读 results/eval_*.json；
     缺失/损坏返回 None。
     """
-    v = _read_run_eval(run_dir).get("train_peak_mem_mb")
-    if v is None:
-        return None
-    try:
-        v = float(v)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return v if math.isfinite(v) else None
+    # bool/负数/NaN/Inf 都不是真实峰值内存；float(True)=1.0 会让坏记录
+    # 在汇总表里冒出一个看似合法的 1 MB。
+    return _nonnegative_metric(_read_run_eval(run_dir).get("train_peak_mem_mb"))
 
 
 def load_train_coverage(run_dir: str):
