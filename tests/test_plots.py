@@ -331,6 +331,41 @@ def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
     print("  [ok] Prefill 图：无共同 batch 时按变体各自档位绘制")
 
 
+def test_fig_latency_does_not_prefer_invalid_batch_one():
+    """batch "1" 的数值非法时必须退到可用的 "8"，不能静默丢掉整条线。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_latency 非法档位测试")
+        return
+    import matplotlib.axes as maxes
+    from unittest import mock
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "latency.json", {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": "bad", "8": 20.0}}},
+            "qgate": {"prefill_ms": {"256": {"1": 12.0}}}}})
+        labels = []
+        orig = maxes.Axes.plot
+
+        def spy(self, *a, **kw):
+            if kw.get("marker") == "o":
+                labels.append(kw.get("label"))
+            return orig(self, *a, **kw)
+
+        with mock.patch.object(maxes.Axes, "plot", spy):
+            assert fig_latency(tmp) is True
+        assert len(labels) == 2, labels
+        # 只有一个变体、且唯一非空档位不是 "1" 时也必须能画出来
+        _w(tmp, "latency.json", {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": "bad", "8": 20.0}}}}})
+        labels.clear()
+        with mock.patch.object(maxes.Axes, "plot", spy):
+            assert fig_latency(tmp) is True
+        assert len(labels) == 1, labels
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] Prefill 图：非法 batch 1 不优先，回退到可用档位")
+
+
 def test_fig_latency_returns_false_without_plottable_points():
     """latency.json 存在但所有值非法/被范围过滤时，不得写空白图并返回成功。"""
     if not _HAS_MPL:

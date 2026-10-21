@@ -464,8 +464,17 @@ def fig_latency(rdir):
                 continue
         if by_ctx:
             series.append((v, e, by_ctx))
-    batch_sets = [{str(k) for cell in by_ctx.values() for k in cell}
-                  for _, _, by_ctx in series]
+    def _usable_batch_keys(by_ctx):
+        """只把至少有一个有限数值的 batch 档位视为可用。
+
+        只看字典键会把 {"1": "bad", "8": 20.0} 的 "1" 当成首选档位，
+        结果整条线因无数值点被静默丢弃，而真正可用的 "8" 从未尝试。
+        """
+        return {str(k) for cell in by_ctx.values()
+                for k, val in cell.items()
+                if _finite_float(val) is not None}
+
+    batch_sets = [_usable_batch_keys(by_ctx) for _, _, by_ctx in series]
     common = set.intersection(*batch_sets) if batch_sets else set()
 
     def _batch_key(keys):
@@ -482,7 +491,7 @@ def fig_latency(rdir):
     drew_prefill = False
     for v, e, by_ctx in series:
         key = common_key if common_key is not None else _batch_key(
-            {str(k) for cell in by_ctx.values() for k in cell})
+            _usable_batch_keys(by_ctx))
         if key is None:
             continue
         used_keys.add(key)
