@@ -3209,3 +3209,48 @@ def test_ruler_sample_paired_mcnemar_counts_and_exact_p():
                   "256": {"em": 0.5, "n": 8}}}}}}}
     assert _ruler_sample_paired_tests(legacy, [("lega", "standard")]) == []
     print("  [ok] RULER 样例级 McNemar：discordant 计数、精确 p、旧产物跳过")
+
+
+def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
+    """PPL 窗口级配对：同窗口序号逐点相减，分层 bootstrap 与协议门槛。"""
+    from run_all import _eval_window_losses, _ppl_window_paired_tests
+
+    def ev(losses, idx, **kw):
+        base = {"split": "test", "eval_ctx": 10, "eval_iters": len(idx),
+                "val_windows": 9, "val_tokens_evaluated": 10 * len(idx),
+                "window_losses": losses, "window_indices": idx}
+        base.update(kw)
+        return {"eval": base}
+
+    runs = {
+        "lega": {7: ev([1.0, 1.0, 1.0], [0, 4, 8]),
+                 8: ev([1.5, 1.5, 1.5], [0, 4, 8])},
+        "standard": {7: ev([2.0, 2.0, 2.0], [0, 4, 8]),
+                     8: ev([2.0, 2.0, 2.0], [0, 4, 8])},
+    }
+    assert _eval_window_losses(runs["lega"][7]["eval"]) == \
+        {0: 1.0, 4: 1.0, 8: 1.0}
+    out = _ppl_window_paired_tests(runs, [("lega", "standard")],
+                                   n_resamples=200)
+    assert len(out) == 1, out
+    t = out[0]
+    assert t["n_seeds"] == 2 and t["n_windows_min"] == 3, t
+    assert abs(t["mean_diff"] - (-0.75)) < 1e-12, t  # seed7 -1, seed8 -0.5
+    assert t["ppl_ratio"] < 1.0, t
+    assert t["mean_diff_ci95"][1] < 0, t
+    assert t["p_adj"] is not None and t["p_adj"] < 0.05, t
+    assert t["verdict"].startswith("窗口级显著优于"), t
+
+    # 窗口序号不一致 = 不是同一批评测单元，整对剔除而不是按位置强配
+    runs2 = {
+        "lega": {7: ev([1.0, 1.0], [0, 4])},
+        "standard": {7: ev([2.0, 2.0], [0, 5])},
+    }
+    assert _ppl_window_paired_tests(runs2, [("lega", "standard")]) == []
+    # 协议不一致同样跳过
+    runs3 = {
+        "lega": {7: ev([1.0, 1.0], [0, 4])},
+        "standard": {7: ev([2.0, 2.0], [0, 4], eval_ctx=20)},
+    }
+    assert _ppl_window_paired_tests(runs3, [("lega", "standard")]) == []
+    print("  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号门槛")

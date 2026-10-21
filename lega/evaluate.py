@@ -423,7 +423,8 @@ def main():
 
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。
-    metrics = evaluate_val(model, val, ctx, device, eval_iters, amp=use_amp)
+    metrics = evaluate_val(model, val, ctx, device, eval_iters, amp=use_amp,
+                           collect_window_losses=True)
     norm = json_safe_eval_metrics(metrics)
     ppl, vl, gmean = norm["val_ppl"], norm["val_loss"], norm["gate_mean"]
     if vl is None:
@@ -458,6 +459,10 @@ def main():
         "eval_iters": metrics["eval_iters"],
         "val_windows": metrics["val_windows"],
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
+        # 逐窗口损失与窗口序号：同 split/同协议下各变体共享同一批窗口，
+        # 下游可做窗口级配对（评估抽样不确定性），与跨种子方差分开报告。
+        "window_losses": metrics.get("window_losses"),
+        "window_indices": metrics.get("window_indices"),
         # 有限验证窗口的抽样误差：与 PPL 点估计同源，必须一起传递，否则
         # 下游只看到点估计，无法区分“真实差异”与“窗口抽样噪声”。
         "val_loss_se": metrics.get("val_loss_se"),

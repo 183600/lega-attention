@@ -556,12 +556,17 @@ def val_audit_batch(val, ctx: int, iters: int, device: str, fallback=None):
         return [b for b in (fallback or []) if b is not None]
 
 
-def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int = None):
+def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int = None,
+                 collect_window_losses: bool = False):
     """在不重复、覆盖全验证集的窗口上同时计算 val_loss 与门控均值。
 
     多个窗口拼成一个批量做前向：每个窗口长度相同，token 加权后的均值
     loss/门控统计与逐窗口完全一致。
     batch_windows 默认按每批约 16384 tokens 估算，并随验证集窗口数收窄。
+    collect_window_losses=True 时额外返回逐窗口损失与窗口序号（仅独立
+    评测入口使用）：供下游按同一批窗口做配对分析，量化“有限窗口抽样”
+    对变体差异的影响。训练内评测不需要，避免把几十个浮点写进每次
+    train_log。
     """
     was_training = model.training
     model.eval()
@@ -642,7 +647,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                                 math.exp(min(20.0, hi))]
     if was_training:
         model.train()
-    return {
+    out = {
         "val_loss": val_loss,
         "val_loss_se": val_loss_se,
         "val_loss_ci95": val_loss_ci95,
@@ -655,6 +660,10 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
         "val_windows": int(n_windows),
         "val_tokens_evaluated": int(len(indices) * ctx),
     }
+    if collect_window_losses:
+        out["window_losses"] = [float(v) for v in window_losses]
+        out["window_indices"] = [int(i) for i in indices]
+    return out
 
 
 def estimate_val_loss(model, val, ctx, device, iters, amp=False):

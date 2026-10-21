@@ -51,6 +51,8 @@ import re
 import subprocess
 import sys
 import time
+
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1198,6 +1200,155 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         else:
             t["verdict"] = (f"样例级无显著差异（McNemar 精确，Holm 校正后 "
                             f"p={padj:.4f}）")
+    return out
+
+
+def _eval_window_losses(d):
+    """eval payload → {window_index: loss}；缺失/损坏/重复序号返回 None。
+
+    只接受逐窗口损失与窗口序号一一对应且序号唯一的记录。旧产物没有这些
+    字段时返回 None，下游跳过窗口级分析，不影响既有 PPL 配对检验。
+    """
+    if not isinstance(d, dict):
+        return None
+    losses = d.get("window_losses")
+    indices = d.get("window_indices")
+    if (not isinstance(losses, list) or not isinstance(indices, list)
+            or not losses or len(losses) != len(indices)):
+        return None
+    out = {}
+    for loss, idx in zip(losses, indices):
+        v = _num_or_none(loss)
+        i = _integral_value(idx)
+        if v is None or i is None or i in out:
+            return None
+        out[i] = v
+    return out
+
+
+def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
+                             seed: int = 0) -> list:
+    """逐窗口配对 + 种子/窗口分层 bootstrap（探索性评估不确定性证据）。
+
+    变体的跨种子 t 检验把“每个种子的 PPL”当作一次观测，只反映训练随机性；
+    而 PPL 是在 eval_iters 个等间隔窗口上估的，有限窗口抽样本身也有误差。
+    同一 split/同评测协议下各变体共享同一批窗口序号，因此可逐窗口配对：
+    d_w = loss_candidate(w) − loss_reference(w)。
+
+    这里对 (种子, 窗口) 做分层 bootstrap：先重采样训练种子，再在每个被选中
+    的种子里重采样窗口，得到“换种子 + 换一批评测窗口”下平均 NLL 差的
+    不确定性区间。窗口间存在空间相关，按窗口独立重采样的区间是近似值；
+    因此只作探索性稳健性证据，不替代确认性种子级检验。
+    """
+    out = []
+    runs = runs if isinstance(runs, dict) else {}
+    for cand, ref in (pairs if isinstance(pairs, list) else []):
+        if cand not in runs or ref not in runs:
+            continue
+        cm = _variant_seed_map(runs, cand)
+        rm = _variant_seed_map(runs, ref)
+        seeds = [s for s in _sorted_seeds(cm) if s in rm]
+        seed_diffs = []
+        per_seed = []
+        skipped = 0
+        window_counts = set()
+        for s in seeds:
+            sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
+            sb = rm.get(s) if isinstance(rm.get(s), dict) else {}
+            ea = sa.get("eval") if isinstance(sa.get("eval"), dict) else None
+            eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else None
+            if ea is None or eb is None:
+                skipped += 1
+                continue
+            if ea.get("split", "val") != eb.get("split", "val"):
+                skipped += 1
+                continue
+            pa, pb = _ppl_protocol(ea), _ppl_protocol(eb)
+            common = set(pa) & set(pb)
+            if any(not _same_protocol_value(pa[k], pb[k]) for k in common):
+                skipped += 1
+                continue
+            wa = _eval_window_losses(ea)
+            wb = _eval_window_losses(eb)
+            if wa is None or wb is None or set(wa) != set(wb):
+                skipped += 1
+                continue
+            keys = sorted(wa)
+            diffs = np.asarray([wa[k] - wb[k] for k in keys], dtype=np.float64)
+            if diffs.size == 0 or not np.all(np.isfinite(diffs)):
+                skipped += 1
+                continue
+            seed_diffs.append(diffs)
+            window_counts.add(int(diffs.size))
+            per_seed.append({
+                "seed": _integral_value(s),
+                "n_windows": int(diffs.size),
+                "mean_diff": float(diffs.mean()),
+                "window_wins": int((diffs < 0).sum()),
+                "window_losses": int((diffs > 0).sum()),
+                "window_ties": int((diffs == 0).sum()),
+            })
+        if not seed_diffs:
+            continue
+        n_seeds = len(seed_diffs)
+        obs = float(np.mean([d.mean() for d in seed_diffs]))
+        # 分层 bootstrap：种子与窗口两级都重采样；同一输入固定种子可复现。
+        rng = np.random.default_rng(seed)
+        reps = np.empty(int(n_resamples), dtype=np.float64)
+        for r in range(int(n_resamples)):
+            sidx = rng.integers(0, n_seeds, n_seeds)
+            means = []
+            for si in sidx:
+                d = seed_diffs[int(si)]
+                w = rng.integers(0, d.size, d.size)
+                means.append(float(d[w].mean()))
+            reps[r] = float(np.mean(means))
+        alpha = 0.025
+        lo, hi = np.quantile(reps, [alpha, 1.0 - alpha])
+        # 中心化 bootstrap 零分布：p ≈ P(|mean*−obs| ≥ |obs|)。
+        ge = int((np.abs(reps - obs) >= abs(obs)).sum())
+        p_boot = (((ge + 1) / (int(n_resamples) + 1))
+                  if obs != 0 else 1.0)
+        same_sign = (float(np.mean((reps > 0) == (obs > 0)))
+                     if obs != 0 else 0.0)
+        res = {
+            "candidate": cand, "reference": ref,
+            "metric": "PPL窗口配对", "lower_is_better": True,
+            "window_level": True, "exploratory": True,
+            "n": n_seeds, "n_seeds": n_seeds,
+            "n_windows_min": min(window_counts),
+            "n_windows_max": max(window_counts),
+            "n_window_observations": int(sum(d.size for d in seed_diffs)),
+            "mean_diff": obs,
+            "mean_diff_ci95": [float(lo), float(hi)],
+            "ppl_ratio": float(math.exp(min(20.0, obs))),
+            "p": p_boot, "p_adj": None,
+            "bootstrap_same_sign": same_sign,
+            "n_resamples": int(n_resamples),
+            "per_seed": per_seed,
+            "verdict": None,
+            "note": ("逐窗口 NLL 差（候选−参照），负值=候选更好；"
+                     "分层 bootstrap 同时重采样种子与窗口，窗口独立重采样"
+                     "忽略空间相关，仅作探索性稳健性证据"),
+        }
+        if skipped:
+            res["excluded_runs"] = skipped
+        out.append(res)
+    pads = holm_bonferroni([t.get("p") for t in out])
+    for t, padj in zip(out, pads):
+        t["p_adj"] = padj
+        if t.get("mean_diff") is None or padj is None:
+            t["verdict"] = "无法检验"
+        elif padj < ALPHA:
+            t["verdict"] = ("窗口级显著优于（Holm 校正后）"
+                            if t["mean_diff"] < 0 else
+                            "窗口级显著劣于（Holm 校正后）")
+        else:
+            ci = t.get("mean_diff_ci95")
+            ci_s = (f"，95% CI [{ci[0]:+.4f}, {ci[1]:+.4f}]"
+                    if ci else "")
+            t["verdict"] = (f"窗口级无显著差异（Holm 校正后 p={padj:.4f}"
+                            f"{ci_s}）")
     return out
 
 
@@ -3482,6 +3633,8 @@ def build_summary(results_dir: str, audit: dict = None,
     # 样例级配对（McNemar）：固定题面上的评测抽样不确定性，与上面的
     # 跨种子聚合 EM 检验互补；独立 Holm 家族、探索性证据。
     ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
+    # PPL 的窗口级配对：评估抽样不确定性，与种子级 PPL 检验互补。
+    ppl_window_tests = _ppl_window_paired_tests(runs, pairs)
     comp = component_evidence(tests, audit=audit)
     # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
     # 完整性锁链把“事后静默改写登记表”变成可检测事件：校验未通过时
@@ -4579,6 +4732,44 @@ def build_summary(results_dir: str, audit: dict = None,
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
 
+    # --- PPL 窗口级配对（探索性）：有限窗口抽样的评估不确定性。
+    #     与上面的种子级 t 检验回答不同问题，不能互相替代。
+    md += ["", "### PPL 窗口级配对（评估抽样不确定性；探索性稳健性）", "",
+           "PPL 只在 `eval_iters` 个等间隔窗口上估计，种子级检验只看每个种子的"
+           "聚合 PPL。各变体共享同一批窗口序号，以下逐窗口配对 `loss_candidate−"
+           "loss_reference`，并用“先重采样种子、再重采样窗口”的分层 bootstrap "
+           "给出平均 NLL 差的区间；窗口间空间相关被忽略，故只作探索性证据。"
+           "`PPL比`=exp(ΔNLL)，<1 表示候选更好。", ""]
+    if ppl_window_tests:
+        md += ["| 对比 | 种子 | 窗口数(最小–最大) | ΔNLL均值 | 分层bootstrap 95% CI | "
+               "PPL比 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for t in ppl_window_tests:
+            seed_t = _find_test(tests, (t.get("candidate"), t.get("reference")),
+                                "PPL")
+            seed_verdict = (seed_t.get("verdict") if isinstance(seed_t, dict)
+                            else "未运行")
+            ci = t.get("mean_diff_ci95") or [None, None]
+            ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+                    if ci[0] is not None and ci[1] is not None else "-")
+            ratio = (f"{t['ppl_ratio']:.4f}"
+                     if t.get("ppl_ratio") is not None else "-")
+            padj = (f"{t['p_adj']:.4f}"
+                    if t.get("p_adj") is not None else "-")
+            md.append(
+                f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
+                f"{t['n_windows_min']}–{t['n_windows_max']} | "
+                f"{t['mean_diff']:+.4f} | {ci_s} | {ratio} | {padj} | "
+                f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
+        md += ["", "注: ΔNLL 为负表示候选的窗口平均交叉熵更低（更好）。"
+               "分层 bootstrap 的 p 值由中心化重采样分布计算，与种子级 t "
+               "检验不是同一个零假设；两者冲突时说明“换训练种子”和“换评测"
+               "窗口”给出不同信息，均不足以单独升级为确认性结论。逐种子"
+               "窗口胜负明细见 `significance.json` 的 `ppl_window_pairs`。"]
+    else:
+        md.append("（缺少逐窗口损失（旧产物）或没有同 split/同协议的配对 run；"
+                  "重新运行独立评测即可启用。）")
+
     # --- RULER 逐任务分解（探索性）：只渲染预注册 RULER 假设涉及的对比；
     #     全部逐任务检验仍完整保存在 significance.json（tests[*].ruler_task）。
     task_rows = [t for t in tests if t.get("ruler_task")]
@@ -4984,6 +5175,7 @@ def build_summary(results_dir: str, audit: dict = None,
                    "ngram_comparison": ngram_cmp,
                    "linear_probe_comparison": probe_cmp,
                    "ruler_sample_pairs": ruler_sample_tests,
+                   "ppl_window_pairs": ppl_window_tests,
                    "factorial_interactions": [
                        t for t in tests if t.get("interaction")],
                    "factorial_interactions_note": (
@@ -5006,7 +5198,8 @@ def build_summary(results_dir: str, audit: dict = None,
     print(f"[summary] 汇总 {len(rows)} 个变体 -> {results_dir}/summary.md "
           f"（配对检验 {len(tests)} 组）")
     return {"rows": rows, "markdown": md_text, "tests": tests,
-            "ruler_sample_tests": ruler_sample_tests}
+            "ruler_sample_tests": ruler_sample_tests,
+            "ppl_window_tests": ppl_window_tests}
 
 
 def main():

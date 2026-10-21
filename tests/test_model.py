@@ -383,3 +383,20 @@ def test_frozen_embedding_training_backward_under_grad():
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for p in model.parameters() if p.requires_grad)
     print("  [ok] 冻结嵌入时训练 backward 在梯度模式下正常完成")
+
+
+def test_evaluate_val_optional_window_loss_detail_for_pairing():
+    """独立评测可落盘逐窗口损失/序号，供跨变体窗口级配对；训练默认不落盘。"""
+    torch.manual_seed(0)
+    model = _tiny("lega")
+    val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
+    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=9,
+                           amp=False, collect_window_losses=True)
+    assert len(metrics["window_losses"]) == metrics["eval_iters"] == 9
+    assert len(metrics["window_indices"]) == 9
+    assert len(set(metrics["window_indices"])) == 9
+    assert metrics["window_indices"] == sorted(metrics["window_indices"])
+    assert abs(sum(metrics["window_losses"]) / 9 - metrics["val_loss"]) < 1e-6
+    plain = evaluate_val(model, val, ctx=10, device="cpu", iters=9, amp=False)
+    assert "window_losses" not in plain and "window_indices" not in plain
+    print("  [ok] evaluate_val 逐窗口明细可选落盘，且均值与 val_loss 一致")
