@@ -1752,18 +1752,22 @@ def _find_test(tests, pair, metric):
 
 
 def _effect_status(t, removing: bool) -> dict:
-    """单条配对检验 -> “组件有用”的证据状态（须方向正确且 Holm 校正后显著）。
+    """单条配对检验 -> “组件有用”的证据状态（须方向正确、显著且稳健）。
 
     removing=True（去一法）：候选=去掉组件的 Full−X，显著变差才算证据；
     removing=False（全因子）：候选=仅含该组件的 X，显著变好才算证据。
     opposite=True 表示检验显著但方向相反——这是“去掉反而更好/加入反而
     更差”的反证，不能被同一组件的另一套消融静默抵消。
+
+    显著不等于稳健：若 |Δ|<ΔSD（效应落在逐种子配对差噪声内）或删掉任一
+    单个种子就翻转均值符号，即使 Holm 校正后显著也标 fragile，不算
+    “组件有用”的证据，更不能进入 confirmatory_supported。
     """
     if t is None:
-        return {"supported": False, "opposite": False,
+        return {"supported": False, "opposite": False, "fragile": False,
                 "reason": "无对应检验（变体未运行）", "p_adj": None}
     if t.get("n") is not None and t["n"] < MIN_SEEDS:
-        return {"supported": False, "opposite": False,
+        return {"supported": False, "opposite": False, "fragile": False,
                 "reason": f"种子不足（n={t['n']}）", "p_adj": t.get("p_adj")}
     if (t.get("mean_diff") is None or t.get("p_adj") is None
             or t.get("p_adj") >= ALPHA):
@@ -1772,27 +1776,40 @@ def _effect_status(t, removing: bool) -> dict:
             reason += "（效应在种子噪声内）"
         elif t.get("below_mde"):
             reason += "（效应低于 MDE）"
-        return {"supported": False, "opposite": False,
+        return {"supported": False, "opposite": False, "fragile": False,
                 "reason": reason, "p_adj": t.get("p_adj")}
     lb = bool(t.get("lower_is_better"))
     if removing:
         evidence = (t["mean_diff"] > 0) if lb else (t["mean_diff"] < 0)
     else:
         evidence = (t["mean_diff"] < 0) if lb else (t["mean_diff"] > 0)
-    return {"supported": bool(evidence), "opposite": not evidence,
-            "reason": ("显著" if evidence
-                       else "方向相反（去掉反而更好/加入反而更差）"),
-            "p_adj": t.get("p_adj")}
+    if not evidence:
+        return {"supported": False, "opposite": True, "fragile": False,
+                "reason": "方向相反（去掉反而更好/加入反而更差）",
+                "p_adj": t.get("p_adj")}
+    fragile_reasons = []
+    if t.get("within_noise"):
+        fragile_reasons.append("|Δ|<ΔSD（种子噪声内）")
+    if t.get("loo_sign_stable") is False:
+        fragile_reasons.append("留一方向翻转")
+    if fragile_reasons:
+        return {"supported": False, "opposite": False, "fragile": True,
+                "reason": "显著但不稳健（" + "；".join(fragile_reasons) + "）",
+                "p_adj": t.get("p_adj")}
+    return {"supported": True, "opposite": False, "fragile": False,
+            "reason": "显著且稳健", "p_adj": t.get("p_adj")}
 
 
 def _combine_component_evidence(loo: dict, add: dict) -> dict:
-    """合并去一法与全因子两套消融证据，显式处理方向冲突。
+    """合并去一法与全因子两套消融证据，显式处理方向冲突与稳健性。
 
     规则（与汇总页注释一致）：
-      * 两套均支持 -> 有证据支持（一致）；
-      * 仅一套支持、另一套不显著 -> 有证据支持（另一套未检出，可能功效不足）；
+      * 两套均稳健支持 -> 有证据支持（一致）；
+      * 仅一套稳健支持、另一套不显著 -> 有证据支持（另一套未检出，可能功效不足）；
+      * 仅一套稳健支持、另一套显著但不稳健 -> 仍有证据，但标 fragile，
+        不能作为确认性结论（confirmatory_supported=False）；
       * 任一套显著反向 -> 证据冲突（即使另一套支持也不能宣称有用）；
-      * 都无显著证据 -> 证据不足。
+      * 都无显著证据；或仅有显著但不稳健的证据 -> 证据不足/不稳健。
     """
     # 任一预注册主指标上的显著反向本身就是反证；另一套“未检出”不能把
     # 它稀释成“证据不足”。只有两套都不显著/都不支持时才是证据不足。
@@ -1801,18 +1818,32 @@ def _combine_component_evidence(loo: dict, add: dict) -> dict:
     else:
         conflict = False
     if conflict:
-        return {"has_evidence": False, "consistent": False,
+        return {"has_evidence": False, "consistent": False, "fragile": False,
                 "verdict": "证据冲突（一套消融显著反向）"}
     if loo.get("supported") and add.get("supported"):
-        return {"has_evidence": True, "consistent": True,
-                "verdict": "有证据支持（两套消融一致）"}
+        return {"has_evidence": True, "consistent": True, "fragile": False,
+                "verdict": "有证据支持（两套消融一致且稳健）"}
     if loo.get("supported"):
-        return {"has_evidence": True, "consistent": False,
+        if add.get("fragile"):
+            return {"has_evidence": True, "consistent": False,
+                    "fragile": True,
+                    "verdict": "有证据支持（仅去一法稳健；全因子显著但"
+                               "落在噪声内/留一翻转）"}
+        return {"has_evidence": True, "consistent": False, "fragile": False,
                 "verdict": "有证据支持（仅去一法；全因子未检出）"}
     if add.get("supported"):
-        return {"has_evidence": True, "consistent": False,
+        if loo.get("fragile"):
+            return {"has_evidence": True, "consistent": False,
+                    "fragile": True,
+                    "verdict": "有证据支持（仅全因子稳健；去一法显著但"
+                               "落在噪声内/留一翻转）"}
+        return {"has_evidence": True, "consistent": False, "fragile": False,
                 "verdict": "有证据支持（仅全因子；去一法未检出）"}
-    return {"has_evidence": False, "consistent": False, "verdict": "证据不足"}
+    if loo.get("fragile") or add.get("fragile"):
+        return {"has_evidence": False, "consistent": False, "fragile": True,
+                "verdict": "证据不稳健（显著但落在种子噪声内/留一方向翻转）"}
+    return {"has_evidence": False, "consistent": False, "fragile": False,
+            "verdict": "证据不足"}
 
 
 def component_evidence(tests, audit: dict = None) -> list:
@@ -1824,7 +1855,9 @@ def component_evidence(tests, audit: dict = None) -> list:
       * 去一法（Full−X 显著变差）与全因子（X-only 显著优于 gate_only）
         两套证据合并且检测方向冲突；gate_only 只含门控偏置 d、不含
         A/B/C，避免把“输出门本身”算作组件收益；
-      * 任一套显著反向时判“证据冲突”，不再宣称该组件有用。
+      * 任一套显著反向时判“证据冲突”，不再宣称该组件有用；
+      * 显著但 |Δ|<ΔSD 或留一方向翻转的证据标为 fragile：最多只能算
+        探索性线索，不能升级为“组件有用”的确认性结论。
       * 早停导致实际训练量不等时，统计检验本身仍可计算，但“组件有用”
         不再具备确认性：每条证据同时带 training_budget_comparable /
         confirmatory_supported / evidence_status，供机器消费时不会把
@@ -1839,6 +1872,7 @@ def component_evidence(tests, audit: dict = None) -> list:
                 "add_pair": list(add_pair), "primary_metric": primary,
                 "loo": {}, "add": {}, "supported": [],
                 "training_budget_comparable": budget_ok,
+                "fragile": False,
                 "confirmatory_supported": False,
                 "evidence_status": "none"}
         if stopped:
@@ -1859,11 +1893,11 @@ def component_evidence(tests, audit: dict = None) -> list:
             item["supported"].append(primary)
         item.update(combined)
         item["confirmatory_supported"] = bool(
-            combined["has_evidence"] and budget_ok)
-        if combined["has_evidence"]:
-            item["evidence_status"] = (
-                "confirmatory" if budget_ok else "exploratory")
-        elif not budget_ok:
+            combined["has_evidence"] and budget_ok
+            and not combined.get("fragile"))
+        if item["confirmatory_supported"]:
+            item["evidence_status"] = "confirmatory"
+        elif combined["has_evidence"] or combined.get("fragile") or not budget_ok:
             item["evidence_status"] = "exploratory"
         item["evidence"] = ({primary: {
             "direction": ("loo" if loo_p["supported"] else "add"),
@@ -4925,29 +4959,43 @@ def build_summary(results_dir: str, audit: dict = None,
                   f"{add_cells} | {verdict} |")
     supported = [c["component"] for c in comp if c["supported"]]
     unsupported = [c["component"] for c in comp if not c["supported"]]
+    fragile = [c["component"] for c in comp if c.get("fragile")]
     inconsistent = [c["component"] for c in comp if not c.get("consistent")]
     if not comp:
         md.append("")
         md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
-    elif (not unsupported and not factorial_missing and not loo_missing
-          and not inconsistent):
+    elif (not unsupported and not fragile and not factorial_missing
+          and not loo_missing and not inconsistent):
         md.append("")
         md.append("✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均在预注册主指标上"
-                  "有 Holm 校正后的显著证据，去一法与全因子两套消融一致，"
+                  "有 Holm 校正后的显著且稳健证据，去一法与全因子两套消融一致，"
                   "且门控内全因子 8/8、去一法完整。")
-    elif (not unsupported and not factorial_missing and not loo_missing):
+    elif (not unsupported and not fragile and not factorial_missing
+          and not loo_missing):
         md.append("")
         md.append("✅ 统计证据支持各组件有用，但仅部分组件同时得到两套消融支持："
                   + "、".join(inconsistent)
                   + "；另一套未检出可能只是功效不足，报告时不得写成"
                   "“两套消融交叉印证”。")
+    elif (not unsupported and not factorial_missing and not loo_missing
+          and fragile):
+        md.append("")
+        md.append("⚠ **不能下“各组件均有用”的稳健结论**："
+                  + "、".join(fragile)
+                  + " 的证据虽通过 Holm 校正，但 |Δ|<ΔSD（种子噪声内）或"
+                  "留一方向翻转；这类显著结果只能作为探索性线索，"
+                  "需增加种子/降低方差后重跑才能确认。")
     else:
         md.append("")
         if unsupported:
             md.append("⚠ **不能下“各组件均有用”的结论**："
                       + "、".join(unsupported)
-                      + " 缺少主指标上 Holm 校正后的显著证据（幅度不足、方向相反、"
-                      "证据冲突或种子数不够）；组合齐全并不等于组件有效。")
+                      + " 缺少主指标上 Holm 校正后的显著且稳健证据（幅度不足、"
+                      "方向相反、噪声内、证据冲突或种子数不够）；"
+                      "组合齐全并不等于组件有效。")
+        if fragile:
+            md.append("⚠ 不稳健组件：" + "、".join(fragile)
+                      + "（显著但效应落在种子噪声内或留一翻转）。")
         if factorial_missing:
             md.append("⚠ 全因子缺失组合："
                       + "、".join(f"{n}({v})" for n, v in factorial_missing)
@@ -4969,8 +5017,9 @@ def build_summary(results_dir: str, audit: dict = None,
     md.append("")
     md.append("注: 去一法证据=去掉该组件的 Full−X 显著差于 Full（去掉有害）；"
               "全因子证据=仅含该组件的 X 显著优于 gate_only（只加它、且已有"
-              "门偏置时仍有收益）。判定要求方向正确且 Holm 校正后 p<0.05、"
-              "种子数≥3；任一套显著反向记“证据冲突”，以证据不足处理。")
+              "门偏置时仍有收益）。判定要求方向正确、Holm 校正后 p<0.05、"
+              "种子数≥3，且效应不落在 |Δ|<ΔSD 的种子噪声内、留一法不翻转；"
+              "任一套显著反向记“证据冲突”，以证据不足处理。")
 
     # --- 全因子交互效应（探索性）：主效应有用 ≠ 可加。A 的收益可能在已有
     #     B 时缩小（次可加）或放大（协同）；以 gate_only 为无组件基准，

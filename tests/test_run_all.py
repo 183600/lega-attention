@@ -668,6 +668,42 @@ def test_effect_status_directions():
     print("  [ok] _effect_status（方向、种子门槛）")
 
 
+def test_effect_status_rejects_significant_but_fragile_effects():
+    """显著但 |Δ|<ΔSD 或留一翻转不能算组件有用，更不能进入确认性证据。
+
+    用户口径：0.2% 的提升若落在 0.5% 的种子方差内，即使 p<0.05 也没有
+    统计意义。这里显式构造“显著但噪声内/留一翻转”的检验，确认判定被降级。
+    """
+    noisy = _mk("qgate", "gate_only", "PPL", -0.02, 0.005)
+    noisy["p_adj"] = 0.01
+    noisy["within_noise"] = True
+    noisy["loo_sign_stable"] = True
+    st = _effect_status(noisy, removing=False)
+    assert not st["supported"] and st["fragile"] and not st["opposite"], st
+    assert "噪声" in st["reason"], st
+    fragile_loo = _mk("qgate", "gate_only", "PPL", -0.4, 0.005)
+    fragile_loo["p_adj"] = 0.01
+    fragile_loo["within_noise"] = False
+    fragile_loo["loo_sign_stable"] = False
+    st2 = _effect_status(fragile_loo, removing=False)
+    assert not st2["supported"] and st2["fragile"], st2
+    assert "留一" in st2["reason"], st2
+    # 两套消融都显著但都不稳健：组件结论必须是“证据不稳健”，不能是“有用”
+    tests = [
+        _mk("lega_no_query", "lega", "PPL", 0.02, 0.005),
+        _mk("qgate", "gate_only", "PPL", -0.02, 0.005),
+    ]
+    for t in tests:
+        t.update({"within_noise": True, "loo_sign_stable": False})
+    _apply_holm(tests)
+    a = next(c for c in component_evidence(tests) if c["component"] == "A 查询项")
+    assert a["supported"] == [] and a["fragile"] is True, a
+    assert a["confirmatory_supported"] is False, a
+    assert a["evidence_status"] == "exploratory", a
+    assert a["verdict"].startswith("证据不稳健"), a
+    print("  [ok] 组件证据拒绝“显著但噪声内/留一翻转”的脆弱收益")
+
+
 def test_verify_controlled_setup_consistency():
     tmp = tempfile.mkdtemp()
     try:
