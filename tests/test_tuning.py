@@ -11,7 +11,7 @@ from unittest import mock
 
 from lega.tuning import (DEFAULT_LR_MULTS, _grid_stats, _read_best_val_loss,
                          _trial_identity_summary, _trial_name, build_grid,
-                         parse_floats, run_trial, tune)
+                         parse_floats, run_trial, trial_env, tune)
 
 
 def test_build_grid_default_first_and_dedup():
@@ -275,6 +275,56 @@ def test_trial_identity_requires_manifest_for_every_success_and_valid_seed():
     integral = _trial_identity_summary([trial(manifest_seed=7.0)])
     assert integral["consistent"] is True, integral
     print("  [ok] trial identity（成功 trial 全部可核对才判一致）")
+
+
+def test_tuning_numeric_args_reject_bool_and_nonfinite():
+    """网格/容差/子进程参数不能被 bool 或非有限值静默改写。"""
+    import tempfile
+    for bad in (True, float("nan"), float("inf"), "bad"):
+        for kwargs in ({"lr0": bad}, {"wd0": bad},
+                       {"lr_mults": [1.0, bad]}, {"wd_list": [bad]}):
+            args = {"lr0": 6e-4, "wd0": 0.1}
+            args.update(kwargs)
+            try:
+                build_grid(**args)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法网格参数未被拒绝: {kwargs}")
+    with tempfile.TemporaryDirectory() as d:
+        for kwargs in ({"seed": True}, {"seed": -1},
+                       {"steps": 10.5}, {"steps": 0},
+                       {"lr": True}, {"lr": float("nan")},
+                       {"wd": True}, {"timeout": True},
+                       {"timeout": -1}):
+            args = dict(config=os.path.join(d, "missing.json"),
+                        data_dir=d, variant="lega", seed=7, lr=6e-4,
+                        wd=0.1, steps=10, out_dir=os.path.join(d, "out"))
+            args.update(kwargs)
+            try:
+                run_trial(**args)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 trial 参数未被拒绝: {kwargs}")
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"lr": 6e-4, "weight_decay": 0.1, "steps": 10,
+                       "seed": 7}, f)
+        for bad in (True, float("nan"), -1.0):
+            try:
+                tune(cfg_path, d, os.path.join(d, "tune"), tolerance=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 tolerance 未被拒绝: {bad!r}")
+    try:
+        trial_env(True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bool seed 未被 trial_env 拒绝")
+    print("  [ok] 调优数值参数拒绝 bool/NaN/Inf/负值")
 
 
 def test_parse_seeds_rejects_non_integer():

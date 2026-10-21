@@ -27,6 +27,19 @@ import time
 from .utils import strict_int
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
+def _finite_number(value, name: str) -> float:
+    """有限浮点超参数/容差；bool/NaN/Inf/非数值显式拒绝。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}") from e
+    if not math.isfinite(f):
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
+    return f
+
+
 DEFAULT_TOLERANCE = 0.005
 
 
@@ -71,8 +84,11 @@ def trial_env(seed: int, env=None) -> dict:
     进程的哈希盐，所有 trial 会共享父进程/首个种子的哈希随机化，同 seed
     重跑也不再稳定。CUBLAS_WORKSPACE_CONFIG 须在任何 CUDA 初始化前生效。
     """
+    seed = strict_int(seed, "seed")
+    if seed < 0:
+        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
     e = dict(env if env is not None else os.environ)
-    e["PYTHONHASHSEED"] = str(int(seed))
+    e["PYTHONHASHSEED"] = str(seed)
     e.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     return e
 
@@ -80,13 +96,23 @@ def trial_env(seed: int, env=None) -> dict:
 def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
                wd_list=None):
     """生成网格；默认组合 (lr0, wd0) 确保存在且排在首位。"""
-    wds = [wd0] if wd_list is None else list(wd_list)
+    lr0 = _finite_number(lr0, "lr0")
+    wd0 = _finite_number(wd0, "wd0")
+    if lr0 < 0 or wd0 < 0:
+        raise ValueError(f"lr0/wd0 必须 >= 0，收到 {lr0!r}/{wd0!r}")
+    lr_mults = [_finite_number(m, "lr_mults") for m in lr_mults]
+    if any(m < 0 for m in lr_mults):
+        raise ValueError(f"lr_mults 必须 >= 0，收到 {lr_mults!r}")
+    wds = [wd0] if wd_list is None else [
+        _finite_number(w, "wd_list") for w in wd_list]
+    if any(w < 0 for w in wds):
+        raise ValueError(f"wd_list 必须 >= 0，收到 {wds!r}")
     if wd0 not in wds:
         wds = [wd0] + wds
     grid = []
     for wd in wds:
         for m in lr_mults:
-            lr = lr0 * float(m)
+            lr = lr0 * m
             pair = (lr, wd)
             if pair not in grid:
                 grid.append(pair)
@@ -276,23 +302,37 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
     原样继承）：`lega.train` 只从 --config 读取超参数，若不注入，网格中的每个
     trial 实际都用同一组默认超参数训练，调优结论完全失真。
     """
+    seed = strict_int(seed, "seed")
+    if seed < 0:
+        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
+    steps = strict_int(steps, "steps")
+    if steps <= 0:
+        raise ValueError(f"steps 必须 >= 1，收到 {steps!r}")
+    lr = _finite_number(lr, "lr")
+    wd = _finite_number(wd, "wd")
+    if lr < 0 or wd < 0:
+        raise ValueError(f"lr/wd 必须 >= 0，收到 {lr!r}/{wd!r}")
+    if timeout is not None:
+        timeout = _finite_number(timeout, "timeout")
+        if timeout <= 0:
+            raise ValueError(f"timeout 必须 > 0，收到 {timeout!r}")
     os.makedirs(out_dir, exist_ok=True)
     with open(config, "r", encoding="utf-8") as f:
         trial_cfg = json.load(f)
-    trial_cfg["lr"] = float(lr)
-    trial_cfg["weight_decay"] = float(wd)
+    trial_cfg["lr"] = lr
+    trial_cfg["weight_decay"] = wd
     trial_config = os.path.join(out_dir, "config_trial.json")
     with open(trial_config, "w", encoding="utf-8") as f:
         json.dump(trial_cfg, f, ensure_ascii=False, indent=2)
     cmd = [sys.executable, "-m", "lega.train",
            "--config", trial_config, "--variant", variant,
            "--data_dir", data_dir, "--out_dir", out_dir,
-           "--seed", str(int(seed)), "--steps", str(int(steps)),
+           "--seed", str(seed), "--steps", str(steps),
            "--device", device]
     t0 = time.perf_counter()
     run_env = trial_env(seed)
-    rec = {"lr": float(lr), "weight_decay": float(wd), "seed": int(seed),
-           "steps": int(steps), "out_dir": out_dir,
+    rec = {"lr": lr, "weight_decay": wd, "seed": seed,
+           "steps": steps, "out_dir": out_dir,
            # 逐 trial 的确定性环境也可审计（PYTHONHASHSEED 必须与 seed 对齐）
            "pythonhashseed": run_env["PYTHONHASHSEED"],
            "cublas_workspace_config": run_env.get("CUBLAS_WORKSPACE_CONFIG")}
@@ -383,8 +423,13 @@ def tune(config: str, data_dir: str, out_dir: str,
     """
     with open(config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    lr0 = float(cfg["lr"])
-    wd0 = float(cfg.get("weight_decay", 0.1))
+    lr0 = _finite_number(cfg.get("lr"), "config.lr")
+    wd0 = _finite_number(cfg.get("weight_decay", 0.1), "config.weight_decay")
+    if lr0 < 0 or wd0 < 0:
+        raise ValueError(f"config.lr/weight_decay 必须 >= 0，收到 {lr0!r}/{wd0!r}")
+    tolerance = _finite_number(tolerance, "tolerance")
+    if tolerance < 0:
+        raise ValueError(f"tolerance 必须 >= 0，收到 {tolerance!r}")
     if seeds is None:
         seeds = [strict_int(
             cfg.get("seed", 1337) if seed is None else seed, "seed")]
