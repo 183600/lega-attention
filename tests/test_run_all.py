@@ -1926,7 +1926,11 @@ def test_enrich_paired_adds_robustness_fields():
                           [True, 2.0, 3.0], [1.0, 1.0, 1.0])
     assert (res2["n_seed_wins"] + res2["n_seed_losses"]
             + res2["n_seed_ties"]) == 2
-    print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径；bool 不参与）")
+    # 均值有效但方差/MDE 无法解析（坏 JSON）时只置空相关字段，不能 TypeError。
+    res3 = _enrich_paired({"n": 2, "mean_diff": 1.5, "std_diff": "bad"},
+                          [1.5, 2.5], [1.0, 1.0])
+    assert res3["within_noise"] is None and res3["below_mde"] is None
+    print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径；bool/坏方差安全）")
 
 
 def test_enrich_paired_leave_one_seed_out_stability():

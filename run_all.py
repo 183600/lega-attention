@@ -1609,8 +1609,8 @@ def _enrich_paired(res: dict, a, b) -> dict:
             diff_f, sd_f = float(diff), float(sd)
         except (TypeError, ValueError, OverflowError):
             diff_f = sd_f = None
-        if (diff_f is not None and math.isfinite(diff_f)
-                and math.isfinite(sd_f)):
+        if (diff_f is not None and sd_f is not None
+                and math.isfinite(diff_f) and math.isfinite(sd_f)):
             res["within_noise"] = bool(sd_f > 0 and abs(diff_f) < sd_f)
             res["effect_to_noise"] = (abs(diff_f) / sd_f
                                       if sd_f > 0 else None)
@@ -1619,8 +1619,8 @@ def _enrich_paired(res: dict, a, b) -> dict:
             diff_f, mde_f = abs(float(diff)), float(res["mde"])
         except (TypeError, ValueError, OverflowError):
             diff_f = mde_f = None
-        if (diff_f is not None and math.isfinite(diff_f)
-                and math.isfinite(mde_f)):
+        if (diff_f is not None and mde_f is not None
+                and math.isfinite(diff_f) and math.isfinite(mde_f)):
             res["below_mde"] = bool(abs(diff_f) < abs(mde_f))
 
     # 留一稳健性：n=5 时一个“幸运/倒霉种子”就可能决定均值符号与显著性。
