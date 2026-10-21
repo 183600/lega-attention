@@ -328,6 +328,14 @@ def test_linear_probe_tolerates_non_numeric_columns():
                       (_column_values(recs, "qterm"), "qterm")):
         assert math.isnan(col[0]) and math.isfinite(col[1]), name
     assert math.isnan(_hit_values(recs)[0])
+    # bool 是 int 子类，float(True)=1.0：不能把 true 伪装成 max_p=1/hit=1。
+    bool_recs = [{"max_p": True, "log_n": True, "qterm": False, "hit": True},
+                 {"max_p": 0.5, "log_n": 4.0, "qterm": 0.0, "hit": 1.0}]
+    for col, name in ((_column_values(bool_recs, "log_maxp"), "max_p"),
+                      (_column_values(bool_recs, "log_n"), "log_n"),
+                      (_column_values(bool_recs, "qterm"), "qterm")):
+        assert math.isnan(col[0]) and math.isfinite(col[1]), name
+    assert math.isnan(_hit_values(bool_recs)[0])
     synth = _synth_records(n_examples=8, per_example=4, seed=4)
     synth[0]["qterm"] = "n/a"
     synth[1]["log_n"] = [1]

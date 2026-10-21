@@ -156,7 +156,7 @@ def predict_logreg(model: Dict, X: np.ndarray) -> np.ndarray:
 
 def _float_or_nan(v) -> float:
     """外部/旧格式记录的单列取值：缺失或非数值一律按缺失（NaN）处理。"""
-    if v is None:
+    if v is None or isinstance(v, bool):
         return float("nan")
     try:
         return float(v)
