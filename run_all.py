@@ -1024,6 +1024,183 @@ def _ruler_min_cell_n(d):
     return min(ns) if ns else None
 
 
+def _ruler_sample_outcomes(d):
+    """RULER payload → {sample_id: em(0/1)}；缺少/损坏/单元 n 不符时返回 None。
+
+    逐样例结果是“固定评测样例”层面配对检验的原材料。旧产物没有 samples
+    字段时返回 None（不伪造），下游只跳过该 run 的样例级分析，不影响
+    聚合 EM 的既有检验。
+    """
+    if not isinstance(d, dict):
+        return None
+    results = d.get("results")
+    if not isinstance(results, dict):
+        return None
+    out = {}
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or task.startswith("_")
+                or not isinstance(by_ctx, dict)):
+            continue
+        for ctx, cell in by_ctx.items():
+            if not isinstance(cell, dict):
+                continue
+            samples = cell.get("samples")
+            n = _integral_value(cell.get("n"))
+            if not isinstance(samples, list) or n is None or n != len(samples):
+                return None
+            for rec in samples:
+                if not isinstance(rec, dict):
+                    return None
+                sid = rec.get("sample_id")
+                em = _num_or_none(rec.get("em"))
+                if not isinstance(sid, str) or em not in (0.0, 1.0):
+                    return None
+                if sid in out:
+                    return None
+                out[sid] = em
+    return out
+
+
+def _mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
+    """配对二分类的精确 McNemar 检验（双侧，等价于 discordant 上的符号检验）。
+
+    只使用两侧结果不同的配对（candidate_only / reference_only），相同结果
+    不提供方向信息。H0 下每个 discordant 对等概率偏向任一侧，故
+    p = 2·P(Bin(n, 0.5) ≤ min(b, c))（截断到 1）。n 可能达数千，用
+    log-gamma + log-sum-exp 稳定求和，避免组合数溢出。
+    """
+    n = int(candidate_only) + int(reference_only)
+    if n <= 0:
+        return 1.0
+    k = min(int(candidate_only), int(reference_only))
+    log2 = math.log(2.0)
+    logs = [math.lgamma(n + 1) - math.lgamma(i + 1)
+            - math.lgamma(n - i + 1) - n * log2 for i in range(k + 1)]
+    m = max(logs)
+    log_tail = m + math.log(math.fsum(math.exp(x - m) for x in logs))
+    return min(1.0, 2.0 * math.exp(log_tail))
+
+
+def _ruler_pair_protocol_ok(ra, rb) -> bool:
+    """两个 RULER payload 是否共享题面/抽样/生成预算与已评测格集合。"""
+    pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
+    common = set(pa) & set(pb)
+    if any(not _same_protocol_value(pa[k], pb[k]) for k in common):
+        return False
+    ca, cb = _ruler_cell_signature(ra), _ruler_cell_signature(rb)
+    return not (ca is not None and cb is not None and ca != cb)
+
+
+def _ruler_sample_paired_tests(runs, pairs) -> list:
+    """固定评测样例上的配对 McNemar 检验（探索性稳健性证据）。
+
+    跨种子 t 检验把每个种子的聚合 EM 当作一次观测，回答“换训练种子是否
+    稳定”；但每格只有 n=20~30 个样例，聚合 EM 的评测抽样误差没有进入
+    该检验。变体共享同一 sample_seed 与 sample_id，因此可以在**同一批
+    题面**上逐样例配对：候选对、参照错 = 候选胜，反之 = 参照胜，相同
+    结果不提供方向信息。McNemar 精确检验只消费 discordant 对，避免把
+    “两边都答对/都答错”的样例算成独立证据。
+
+    多种子合并时，每个种子内先按 sample_id 配对，再把各 seed 的
+    discordant 计数相加做精确检验（同一样例在不同训练种子下重复出现，
+    故该合并口径只作探索性证据；逐种子明细一并落盘供核对）。
+    该检验与跨种子 t 检验回答不同问题，不能互相替代：前者是“固定题面
+    上的样例级差异”，后者是“训练随机性下的种子级差异”。
+    """
+    out = []
+    runs = runs if isinstance(runs, dict) else {}
+    for cand, ref in (pairs if isinstance(pairs, list) else []):
+        if cand not in runs or ref not in runs:
+            continue
+        cm = _variant_seed_map(runs, cand)
+        rm = _variant_seed_map(runs, ref)
+        seeds = [s for s in _sorted_seeds(cm) if s in rm]
+        cand_only = ref_only = both_correct = both_wrong = 0
+        n_samples = 0
+        per_seed = []
+        skipped = 0
+        for s in seeds:
+            sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
+            sb = rm.get(s) if isinstance(rm.get(s), dict) else {}
+            ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else None
+            rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else None
+            if ra is None or rb is None or not _ruler_pair_protocol_ok(ra, rb):
+                skipped += 1
+                continue
+            oa = _ruler_sample_outcomes(ra)
+            ob = _ruler_sample_outcomes(rb)
+            if oa is None or ob is None or set(oa) != set(ob):
+                skipped += 1
+                continue
+            s_cand = s_ref = s_both1 = s_both0 = 0
+            for sid in sorted(oa):
+                a, b = oa[sid], ob[sid]
+                if a == 1.0 and b == 0.0:
+                    s_cand += 1
+                elif a == 0.0 and b == 1.0:
+                    s_ref += 1
+                elif a == 1.0 and b == 1.0:
+                    s_both1 += 1
+                else:
+                    s_both0 += 1
+            n_s = len(oa)
+            per_seed.append({
+                "seed": _integral_value(s), "n": n_s,
+                "candidate_only": s_cand, "reference_only": s_ref,
+                "both_correct": s_both1, "both_wrong": s_both0,
+                "mean_diff": ((s_cand - s_ref) / n_s) if n_s else None,
+                "p": _mcnemar_exact_p(s_cand, s_ref),
+            })
+            cand_only += s_cand
+            ref_only += s_ref
+            both_correct += s_both1
+            both_wrong += s_both0
+            n_samples += n_s
+        if not per_seed:
+            continue
+        wins = sum(1 for r in per_seed
+                   if r["mean_diff"] is not None and r["mean_diff"] > 0)
+        losses = sum(1 for r in per_seed
+                     if r["mean_diff"] is not None and r["mean_diff"] < 0)
+        ties = len(per_seed) - wins - losses
+        mean_diff = ((cand_only - ref_only) / n_samples) if n_samples else None
+        res = {
+            "candidate": cand, "reference": ref,
+            "metric": "RULER样例配对", "lower_is_better": False,
+            "sample_level": True, "exploratory": True,
+            "n": len(per_seed), "n_seeds": len(per_seed),
+            "n_samples": n_samples,
+            "candidate_only": cand_only, "reference_only": ref_only,
+            "both_correct": both_correct, "both_wrong": both_wrong,
+            "mean_diff": mean_diff,
+            "p": _mcnemar_exact_p(cand_only, ref_only),
+            "p_adj": None,
+            "n_seed_wins": wins, "n_seed_losses": losses,
+            "n_seed_ties": ties,
+            "per_seed": per_seed,
+            "verdict": None,
+            "note": ("同一批 sample_id 上的逐样例配对；只消费 discordant "
+                     "对（候选对/参照错 vs 反之），与跨种子聚合 EM 检验"
+                     "回答不同问题，属探索性证据"),
+        }
+        if skipped:
+            res["excluded_runs"] = skipped
+        out.append(res)
+    pads = holm_bonferroni([t.get("p") for t in out])
+    for t, padj in zip(out, pads):
+        t["p_adj"] = padj
+        if t.get("n_samples", 0) <= 0 or padj is None:
+            t["verdict"] = "无法检验（缺少逐样例结果）"
+        elif padj < ALPHA:
+            t["verdict"] = ("样例级显著优于（McNemar 精确，Holm 校正后）"
+                            if t["mean_diff"] > 0 else
+                            "样例级显著劣于（McNemar 精确，Holm 校正后）")
+        else:
+            t["verdict"] = (f"样例级无显著差异（McNemar 精确，Holm 校正后 "
+                            f"p={padj:.4f}）")
+    return out
+
+
 def _stat_series(seed_map, payload_key, extractor):
     vals = []
     seed_map = seed_map if isinstance(seed_map, dict) else {}
@@ -3302,6 +3479,9 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _ap_diff_tests(runs)
     tests += _factorial_interaction_tests(runs)
     tests = _apply_holm(tests)
+    # 样例级配对（McNemar）：固定题面上的评测抽样不确定性，与上面的
+    # 跨种子聚合 EM 检验互补；独立 Holm 家族、探索性证据。
+    ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
     comp = component_evidence(tests, audit=audit)
     # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
     # 完整性锁链把“事后静默改写登记表”变成可检测事件：校验未通过时
@@ -4439,6 +4619,45 @@ def build_summary(results_dir: str, audit: dict = None,
                "“胜/负/平”为逐种子配对差符号计数；“留一稳定”= 删掉任一单个"
                "种子后均值符号不变，❌ 表示结论由个别种子决定。"]
 
+    # --- RULER 样例级配对（探索性稳健性证据）：固定题面上的 McNemar。
+    #     跨种子 t 检验只看每个种子的聚合 EM，n=20~30 的评测抽样误差
+    #     没有进入检验；同一 sample_id 配对能利用“候选对/参照错”的方向
+    #     信息，回答不同的统计问题。它不是确认性检验，也不替代种子级判定。
+    md += ["", "### RULER 样例级配对（McNemar 精确检验；探索性稳健性）", "",
+           "跨种子聚合 EM 检验回答“换训练种子是否稳定”；每格只有 20~30 个"
+           "样例，以下用变体间共享的 `sample_id` 做逐样例配对，回答“在这批"
+           "固定题面上候选是否更常答对”。只统计结果不同的样对（候选独对 vs "
+           "参照独对），相同结果不提供方向信息；多种子按 discordant 计数合并，"
+           "独立 Holm 家族。", ""]
+    if ruler_sample_tests:
+        md += ["| 对比 | 配对种子 | 配对样例 | 候选独对/参照独对 | ΔEM(候选−参照) | "
+               "种子胜/负/平 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for t in ruler_sample_tests:
+            seed_t = _find_test(tests, (t.get("candidate"), t.get("reference")),
+                                "RULER平均")
+            seed_verdict = (seed_t.get("verdict") if isinstance(seed_t, dict)
+                            else "未运行")
+            delta = (f"{t['mean_diff']:+.4f}"
+                     if t.get("mean_diff") is not None else "-")
+            padj = (f"{t['p_adj']:.4f}"
+                    if t.get("p_adj") is not None else "-")
+            md.append(
+                f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
+                f"{t['n_samples']} | {t['candidate_only']}/{t['reference_only']} | "
+                f"{delta} | {t['n_seed_wins']}/{t['n_seed_losses']}/"
+                f"{t['n_seed_ties']} | {padj} | "
+                f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
+        md += ["", "注: McNemar 只使用 discordant 对，n_samples 是参与配对的总样例"
+               "数而非独立证据数；多个训练种子重复使用同一批 sample_id，合并"
+               "检验只作探索性证据。若样例级显著而种子级不显著（或反之），"
+               "说明两个不确定性来源给出不同信息：前者多为评测样本量/题目"
+               "难度，后者为训练随机性，均不能单独升级为确认性结论。"
+               "逐种子明细见 `significance.json` 的 `ruler_sample_pairs`。"]
+    else:
+        md.append("（缺少逐样例 EM 或没有协议一致的配对 run；旧产物需重跑 "
+                  "RULER 才能启用该分析。）")
+
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
     md += _render_registration_integrity(integrity, scope_check=scope_check)
@@ -4764,6 +4983,7 @@ def build_summary(results_dir: str, audit: dict = None,
                    "registration_scope": scope_check,
                    "ngram_comparison": ngram_cmp,
                    "linear_probe_comparison": probe_cmp,
+                   "ruler_sample_pairs": ruler_sample_tests,
                    "factorial_interactions": [
                        t for t in tests if t.get("interaction")],
                    "factorial_interactions_note": (
@@ -4785,7 +5005,8 @@ def build_summary(results_dir: str, audit: dict = None,
         save_json(cross_out, os.path.join(results_dir, "badcase_cross.json"))
     print(f"[summary] 汇总 {len(rows)} 个变体 -> {results_dir}/summary.md "
           f"（配对检验 {len(tests)} 组）")
-    return {"rows": rows, "markdown": md_text, "tests": tests}
+    return {"rows": rows, "markdown": md_text, "tests": tests,
+            "ruler_sample_tests": ruler_sample_tests}
 
 
 def main():

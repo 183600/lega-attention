@@ -526,6 +526,11 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                 by_len.setdefault(len(ex["ids"]), []).append(ex)
             ems, recalls, n = [], [], 0
             precisions, f1s = [], []
+            # 逐样例结果随单元格落盘：变体间用同一 sample_seed 构造同一批
+            # 题面，聚合 EM 的跨种子比较只反映训练随机性；样例级配对
+            # （McNemar）才能回答“在固定的这批评测样例上，候选是否更常
+            # 答对”，同时避免把 n=20~30 的评测抽样误差当成模型差异。
+            outcomes: List[Dict] = []
             for length in sorted(by_len):
                 grp = by_len[length]
                 total = min(length + max_gen, model.block_size)
@@ -546,6 +551,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         sc = score_prediction(task, ex["answer"], pred_text,
                                               ex["answer_words"])
                         ems.append(sc["em"])
+                        outcomes.append({"sample_id": ex.get("sample_id"),
+                                         "em": float(sc["em"])})
                         if sc["recall"] is not None:
                             recalls.append(sc["recall"])
                         if sc.get("precision") is not None:
@@ -597,6 +604,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                                   if precisions else None),
                     "f1": (float(sum(f1s) / len(f1s)) if f1s else None),
                     "n": n,
+                    # 逐样例 EM（sample_id 跨变体稳定对齐）：供下游做
+                    # 样例级配对检验，见 run_all 的 RULER 样例配对小节。
+                    "samples": outcomes,
                 }
                 if verbose:
                     r = results[task][str(room_ctx)]

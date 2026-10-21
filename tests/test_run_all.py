@@ -3156,3 +3156,56 @@ def test_controlled_setup_selection_frac_rejects_bad_planned_steps():
             point = rep["selection_step_points"][0]
             assert point[3] == expect_frac, (bad, point)
     print("  [ok] 受控变量审计：选型比例分母拒绝 bool/小数计划步数")
+
+
+def test_ruler_sample_paired_mcnemar_counts_and_exact_p():
+    """固定样例上的配对：只消费 discordant 对，精确 McNemar 与计数一致。"""
+    from run_all import (_mcnemar_exact_p, _ruler_sample_outcomes,
+                         _ruler_sample_paired_tests)
+
+    # 已知精确值：n=5 全偏向候选 -> 双侧 p=2/32=0.0625；n=6 -> 0.03125
+    assert abs(_mcnemar_exact_p(5, 0) - 0.0625) < 1e-12
+    assert abs(_mcnemar_exact_p(0, 6) - 0.03125) < 1e-12
+    assert _mcnemar_exact_p(0, 0) == 1.0
+
+    def cell(ems):
+        return {"em": sum(ems) / len(ems), "n": len(ems),
+                "samples": [{"sample_id": f"s{i}", "em": float(e)}
+                            for i, e in enumerate(ems)]}
+
+    def rul(samples, **kw):
+        base = {
+            "ctx_lens": [256], "n_samples": len(samples), "sample_seed": 1234,
+            "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
+            "vt_chains": 4, "vt_depth": 4,
+            "results": {"niah": {"256": cell(samples)}},
+        }
+        base.update(kw)
+        return {"ruler": base}
+
+    runs = {
+        "lega": {7: rul([1, 1, 1, 1, 0, 0, 0, 0]),
+                 8: rul([1, 1, 1, 0, 0, 0, 0, 0])},
+        "standard": {7: rul([0, 0, 0, 0, 0, 0, 0, 0]),
+                     8: rul([0, 0, 0, 0, 0, 0, 0, 0])},
+    }
+    d = runs["lega"][7]["ruler"]
+    assert _ruler_sample_outcomes(d)["s0"] == 1.0
+    out = _ruler_sample_paired_tests(runs, [("lega", "standard")])
+    assert len(out) == 1, out
+    t = out[0]
+    # seed 7: 4 个候选独对；seed 8: 3 个；合计 7 个 discordant，全偏向候选
+    assert t["candidate_only"] == 7 and t["reference_only"] == 0, t
+    assert t["n_samples"] == 16 and t["n_seeds"] == 2, t
+    assert abs(t["mean_diff"] - 7 / 16) < 1e-12, t
+    assert abs(t["p"] - 2 / (2 ** 7)) < 1e-12, t
+    assert t["n_seed_wins"] == 2 and t["n_seed_losses"] == 0, t
+    assert t["verdict"].startswith("样例级显著优于"), t
+
+    # 旧产物没有逐样例字段：返回空结果而不是伪造 0 差异
+    legacy = {"lega": {7: {"ruler": {"results": {"niah": {
+        "256": {"em": 0.5, "n": 8}}}}}},
+              "standard": {7: {"ruler": {"results": {"niah": {
+                  "256": {"em": 0.5, "n": 8}}}}}}}
+    assert _ruler_sample_paired_tests(legacy, [("lega", "standard")]) == []
+    print("  [ok] RULER 样例级 McNemar：discordant 计数、精确 p、旧产物跳过")

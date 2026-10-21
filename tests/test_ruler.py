@@ -360,3 +360,29 @@ def test_corpus_test_access_recorded():
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("  [ok] test 语料放行写入访问账本，val 来源不写")
+
+
+def test_run_ruler_records_per_sample_outcomes():
+    """每格必须落盘逐样例 EM（sample_id 跨变体稳定），供样例级配对检验。"""
+    import torch
+
+    from lega.model import GPT
+    from lega.ruler import run_ruler
+
+    tok = _tok()
+    torch.manual_seed(0)
+    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
+                n_heads=2, ffn_mult=4, variant="standard")
+    model.eval()
+    res = run_ruler(model, tok, "cpu", ctx_lens=[320], n_samples=3,
+                    max_new=12, fwe_max_new=12, tasks=("niah_synth",),
+                    verbose=False)
+    cell = next(iter(res["niah_synth"].values()))
+    samples = cell["samples"]
+    assert len(samples) == cell["n"] == 3
+    ids = [s["sample_id"] for s in samples]
+    assert len(set(ids)) == len(ids), ids
+    assert all(isinstance(s["sample_id"], str) and s["sample_id"] for s in samples)
+    assert all(s["em"] in (0.0, 1.0) for s in samples)
+    assert sum(s["em"] for s in samples) / len(samples) == cell["em"]
+    print("  [ok] run_ruler 逐样例 EM 落盘（sample_id 唯一、与聚合 EM 一致）")
