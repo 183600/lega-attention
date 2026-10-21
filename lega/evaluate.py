@@ -113,8 +113,14 @@ def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
     planned = _positive_int_or_none(ck.get("steps_planned"))
     if planned is None:
         planned = _positive_int_or_none(steps_planned_fallback)
-    frac = (float(step) / float(planned)
-            if step is not None and planned is not None else None)
+    frac = None
+    if step is not None and planned is not None:
+        try:
+            frac = float(step) / float(planned)
+        except (OverflowError, ValueError):
+            # 超大整数无法转成有限 float（例如被篡改的 step=10**400）：
+            # 选型步本身仍可记录，但不能让比例计算把整个评测打崩。
+            frac = None
     val_loss = None
     raw_loss = ck.get("val_loss")
     if raw_loss is not None and not isinstance(raw_loss, bool):
