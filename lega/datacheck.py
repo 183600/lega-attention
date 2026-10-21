@@ -1295,7 +1295,17 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         ],
     }
     if isinstance(extra, dict):
-        report.update(extra)
+        # extra 只允许扩充报告，不能覆盖自检结论本身：否则上游元数据里的
+        # 一个 "alerts": [] / "protocol": {...} 就能把防泄漏告警清空或把
+        # 协议声明改成“安全”，而 meta/report 哈希仍然自洽。冲突键显式记录
+        # 供审计，但不采纳其值。
+        protected = set(report)
+        ignored = sorted(str(k) for k in extra if k in protected)
+        for key, value in extra.items():
+            if key not in protected:
+                report[key] = value
+        if ignored:
+            report["ignored_extra_keys"] = ignored
     # 协议违规（群组跨 split / 字符切分 / 打乱）置顶，确保汇总页的告警截断
     # 不会把更严重的问题挤出视野。
     protocol_alerts = split_protocol_alerts(report.get("split_protocol"))

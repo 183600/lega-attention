@@ -1035,6 +1035,30 @@ def test_build_data_report_surfaces_group_crossing_alerts():
     print("  [ok] data_report：协议违规告警置顶；无违规协议不误报")
 
 
+def test_build_data_report_extra_cannot_clobber_audit_fields():
+    """extra 只能扩充报告，不能覆盖 alerts/protocol/splits 等自检结论。
+
+    否则 prepare_data 的上游元数据（甚至手改调用）传入 "alerts": [] 就能
+    把跨 split 重叠告警清空，报告的哈希绑定也拦不住——内容确实是被合法
+    写出的那一份，只是审计结论已被替换。
+    """
+    rep = build_data_report(
+        {"kind": "char", "fit_on": "train", "vocab_size": 5, "unk_rate": {}},
+        {"train": {"tokens": 10}}, {}, {},
+        {"train_val": {"n": 64, "overlap_rate": 0.5}}, {},
+        extra={"alerts": [], "protocol": {"test_sealed": False},
+               "splits": {}, "source": "local",
+               "split_protocol": {"mode": "official", "shuffled": False}})
+    assert any(a["code"] == "ngram_overlap_train_val" for a in rep["alerts"])
+    assert rep["protocol"]["test_sealed"] is True
+    assert rep["protocol"]["split_first_then_preprocess"] is True
+    assert rep["splits"] == {"train": {"tokens": 10}}
+    assert rep["source"] == "local"
+    assert rep["split_protocol"]["mode"] == "official"
+    assert set(rep["ignored_extra_keys"]) == {"alerts", "protocol", "splits"}
+    print("  [ok] data_report：extra 不能覆盖审计字段，冲突键显式记录")
+
+
 def test_test_access_ledger_skips_non_dict_lines():
     """账本中的 null/数组/坏 JSON 行不能进入统计或让追加崩溃。"""
     with tempfile.TemporaryDirectory() as d:
