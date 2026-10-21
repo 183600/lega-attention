@@ -583,12 +583,21 @@ def load_meta(data_dir: str) -> dict:
 
 def load_tokenizer(data_dir: str):
     meta = load_meta(data_dir)
-    if meta["tokenizer"] == "gpt2_bpe":
+    kind = meta.get("tokenizer")
+    if not isinstance(kind, str) or not kind:
+        raise ValueError(
+            f"{os.path.join(data_dir, 'meta.json')} 缺少合法的 tokenizer 字段")
+    if kind == "gpt2_bpe":
         return get_gpt2_tokenizer()
+    itos = meta.get("itos")
+    if not isinstance(itos, list) or not itos or not all(
+            isinstance(ch, str) for ch in itos):
+        raise ValueError(
+            f"{os.path.join(data_dir, 'meta.json')} 的 itos 不是非空字符串数组")
     # 新缓存显式携带 <unk>（char_unk=True）；旧缓存没有该标记，按原编码方式
     # 重建（未知字符→0），保证与旧 bin 的 id 一一对应。
     return CharTokenizer(
-        meta["itos"], add_unk=config_bool(meta.get("char_unk", False), "char_unk"))
+        itos, add_unk=config_bool(meta.get("char_unk", False), "char_unk"))
 
 
 def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:

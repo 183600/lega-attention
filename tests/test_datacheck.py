@@ -1512,6 +1512,28 @@ def test_prepare_bins_rebuilds_on_malformed_cache_schema():
     print("  [ok] 异常 cache_schema：按旧缓存重建而非崩溃")
 
 
+def test_load_tokenizer_rejects_malformed_char_meta():
+    """缺少/畸形词表元数据须给出 ValueError，而不是 KeyError/TypeError。"""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "meta.json")
+        cases = ({}, {"tokenizer": True}, {"tokenizer": "char"},
+                 {"tokenizer": "char", "itos": []},
+                 {"tokenizer": "char", "itos": ["a", 1]})
+        for meta in cases:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+            try:
+                load_tokenizer(d)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"应拒绝畸形 meta: {meta}")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "itos": ["a", "b"]}, f)
+        assert load_tokenizer(d).decode([0, 1]) == "ab"
+    print("  [ok] load_tokenizer：畸形词表元数据显式拒绝")
+
+
 def test_load_meta_rejects_broken_json_with_clear_error():
     """meta.json 损坏或顶层非对象时必须抛 ValueError，而非深层 TypeError。"""
     with tempfile.TemporaryDirectory() as d:
