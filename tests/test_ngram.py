@@ -75,6 +75,23 @@ def test_invalid_smoothing_parameters_rejected():
     print("  [ok] n-gram：非法 α/λ 显式拒绝")
 
 
+def test_zero_smoothing_unseen_tokens_stay_finite():
+    """α=0 是合法输入：未登录 token/上下文概率为 0，PPL 必须是有限的
+    截断值而不是 NaN/Inf（后者会让 JSON 报告字段退化为 null）。"""
+    uni, keys, counts = fit_counts(np.array([0, 1, 0]), vocab_size=3)
+    out = ppl_unigram(np.array([2]), uni, alpha=0.0)
+    assert math.isfinite(out["mean_nll"]) and math.isfinite(out["ppl"])
+    assert out["ppl_clamped"] is True
+    assert math.isclose(out["ppl"], math.exp(20.0), rel_tol=1e-12)
+    # prev=2 在训练流中从未作为上下文出现：0/0 不能变成 NaN。
+    out2 = ppl_bigram(np.array([2, 2]), uni, keys, counts, 0.0, 3)
+    assert math.isfinite(out2["mean_nll"]) and math.isfinite(out2["ppl"])
+    out3 = ppl_interpolated_bigram(np.array([2, 2]), uni, keys, counts,
+                                   0.0, 0.0, 0.5, 3)
+    assert math.isfinite(out3["mean_nll"]) and math.isfinite(out3["ppl"])
+    print("  [ok] n-gram：α=0 时未登录 token/上下文仍返回有限 PPL")
+
+
 def test_ppl_bigram_matches_closed_form():
     uni, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
     assert uni[0] == 2 and uni[1] == 2

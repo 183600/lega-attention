@@ -178,6 +178,18 @@ def _validate_lambda(lam) -> float:
     return lam
 
 
+def _smoothed_probs(counts, denominator) -> np.ndarray:
+    """加 α 概率；α=0 且上下文频次为 0 时概率记为 0 而不是 0/0=NaN。"""
+    numerator = np.asarray(counts, dtype=np.float64)
+    denominator = np.asarray(denominator, dtype=np.float64)
+    out = np.zeros(np.broadcast(numerator, denominator).shape,
+                   dtype=np.float64)
+    np.divide(numerator, denominator, out=out, where=denominator > 0)
+    # 0 概率的 -log 是 Inf，会让报告出现 NaN/Inf；与插值路径一致地
+    # 用 1e-300 下限保留“几乎不可能”的排序，同时输出有限 NLL。
+    return np.clip(out, 1e-300, None)
+
+
 def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     """加 α 平滑一元模型的 per-token 平均负对数似然与 PPL。"""
     alpha = _validate_alpha(alpha)
@@ -188,7 +200,7 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     total = float(uni.sum())
     # uint16 流可直接做花式索引
     c = uni[np.asarray(eval_ids)]
-    probs = (c + alpha) / (total + alpha * vocab)
+    probs = _smoothed_probs(c + alpha, total + alpha * vocab)
     mean_nll = float(-np.log(probs).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
             "mean_nll": mean_nll, "n_tokens": n,
@@ -215,7 +227,8 @@ def _bigram_ppl(c_pair: np.ndarray, c_prev: np.ndarray, n_tokens: int,
     alpha = _validate_alpha(alpha)
     if n_tokens <= 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
-    probs = (c_pair + alpha) / (c_prev + alpha * int(vocab_size))
+    probs = _smoothed_probs(c_pair + alpha,
+                            c_prev + alpha * int(vocab_size))
     mean_nll = float(-np.log(probs).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
             "mean_nll": mean_nll, "n_tokens": n_tokens,
@@ -243,8 +256,10 @@ def _interp_ppl_from_counts(cur_ids: np.ndarray, uni: np.ndarray,
     cur = np.asarray(cur_ids, dtype=np.int64)
     vocab_size = int(vocab_size)
     total = float(uni.sum())
-    p_uni = ((uni[cur] + alpha_uni) / (total + alpha_uni * vocab_size))
-    p_bi = ((c_pair + alpha_bi) / (c_prev + alpha_bi * vocab_size))
+    p_uni = _smoothed_probs(uni[cur] + alpha_uni,
+                            total + alpha_uni * vocab_size)
+    p_bi = _smoothed_probs(c_pair + alpha_bi,
+                           c_prev + alpha_bi * vocab_size)
     p = float(lam) * p_bi + (1.0 - float(lam)) * p_uni
     mean_nll = float(-np.log(np.clip(p, 1e-300, None)).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
