@@ -77,32 +77,30 @@ def read_records(path: str) -> list:
     if not os.path.exists(path):
         return []
     out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict):
-                out.append(rec)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+    except (OSError, UnicodeError):
+        # 台账损坏（含非 UTF-8 字节）时保留已成功解析的记录，而不是让
+        # verify_ledger/snapshot 因一个坏字节整体崩溃。
+        pass
     return out
 
 
 def _ledger_seed(value):
-    if isinstance(value, bool):
-        raise ValueError("bool 不是合法种子")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            raise ValueError(f"非整数种子: {value!r}")
-        return int(value)
-    if isinstance(value, str):
-        return int(value)
-    raise TypeError(f"不支持的种子类型: {type(value).__name__}")
+    # 与 build_experiment_record 共用 strict_int：字符串 "1_0"/空串、bool、
+    # 小数都不能在核验侧被 int()/float() 静默折叠成另一个合法种子，
+    # 否则台账可以用一个“看起来不同”的种子通过覆盖核对。
+    return strict_int(value, "seed")
 
 
 def verify_ledger(path: str = None, check_artifacts: bool = False,
@@ -343,18 +341,22 @@ def _load_train_curve(out_dir: str, max_points: int = 1000):
                     continue
                 if isinstance(rec, dict):
                     records.append(rec)
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     if not records:
         return None
     n = len(records)
     sampled = records
-    if n > max(1, int(max_points)):
-        # 均匀抽取并强制保留最后一条（final/early_stop 标记通常在这里）
-        step = max(1, math.ceil(n / max(1, int(max_points))))
-        sampled = records[::step]
-        if sampled[-1] is not records[-1]:
-            sampled.append(records[-1])
+    cap = max(1, int(max_points))
+    if n > cap:
+        # 均匀抽取并强制保留首尾（final/early_stop 标记通常在末尾）。
+        # 用整除索引生成恰好 cap 条，避免“步长采样 + 追加末点”得到 cap+1 条、
+        # 突破调用方声明的上限。
+        if cap == 1:
+            sampled = [records[-1]]
+        else:
+            idx = [(i * (n - 1)) // (cap - 1) for i in range(cap)]
+            sampled = [records[i] for i in idx]
     return {
         "source": "train_log.jsonl",
         "n_records": n,
