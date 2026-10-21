@@ -216,6 +216,7 @@ def test_train_early_stop_end_to_end():
         assert ev["early_stop_patience"] == 1
         assert ev["steps"] == 4 and ev["steps_planned"] == 6, ev
         assert ev["tokens_seen"] == 4 * 2 * 32
+        assert ev["data_order_sha256"] and len(ev["data_order_sha256"]) == 64, ev
         assert ev["train_peak_mem_mb"] is None, "CPU 训练没有 CUDA 进程统计"
         cfg_used = json.load(open(os.path.join(out_dir, "config_used.json"),
                                   encoding="utf-8"))
