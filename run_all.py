@@ -2345,15 +2345,19 @@ def _neural_eval_window_spec(cfg: dict, smoke: bool):
     if not isinstance(cfg, dict):
         return None
     try:
-        ctx = int(cfg.get("train_ctx") or cfg.get("block_size") or 0)
-        iters = int(cfg.get("eval_iters", 50))
+        # 严格整数：int(True)/int(2.5) 会把“同窗口”对齐的 ctx/iters 静默改值，
+        # 使 n-gram 与神经评测实际上在不同 token 集合上比较。
+        ctx = strict_int(cfg.get("train_ctx") or cfg.get("block_size") or 0,
+                         "train_ctx")
+        iters = strict_int(cfg.get("eval_iters", 50), "eval_iters")
         if smoke:
             if "train_ctx" in SMOKE_OVERRIDES:
-                ctx = int(SMOKE_OVERRIDES["train_ctx"])
+                ctx = strict_int(SMOKE_OVERRIDES["train_ctx"], "smoke.train_ctx")
             if "eval_iters" in SMOKE_OVERRIDES:
-                iters = int(SMOKE_OVERRIDES["eval_iters"])
-        block = int(cfg.get("block_size") or 0)
-    except (TypeError, ValueError, OverflowError):
+                iters = strict_int(SMOKE_OVERRIDES["eval_iters"],
+                                   "smoke.eval_iters")
+        block = strict_int(cfg.get("block_size") or 0, "block_size")
+    except ValueError:
         return None
     if block > 0:
         ctx = min(ctx, block)
@@ -5273,6 +5277,11 @@ def main():
     results_dir = _repo_path(args.results_dir) if args.results_dir else os.path.join(ROOT, "results", tag)
     os.makedirs(results_dir, exist_ok=True)
     variants = parse_variants(args.variants)
+    if not variants:
+        # 空 --variants 会让流水线“成功”跑完但没有任何 run，下游汇总为空；
+        # 这是显式配置错误，不能当作合法实验。
+        p.error("--variants 不能为空：至少指定一个变体（可选："
+                + ", ".join(ALL_VARIANTS) + "）")
     invalid = sorted(set(variants) - set(ALL_VARIANTS))
     if invalid:
         p.error(f"未知变体: {', '.join(invalid)}；可选: {', '.join(ALL_VARIANTS)}")

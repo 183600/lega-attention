@@ -35,6 +35,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
                       component_evidence, cross_variant_badcase_map,
+                      main as run_all_main,
                       data_protocol_preflight, data_report_binding_issue,
                       evaluate_registered_hypotheses,
                       load_registered_hypotheses, ngram_baseline_comparison,
@@ -1974,7 +1975,31 @@ def test_neural_eval_window_spec_matches_train_overrides():
     assert _neural_eval_window_spec(
         {"block_size": 64, "train_ctx": 256}, False) == {"ctx": 64, "iters": 50}
     assert _neural_eval_window_spec({}, False) is None
+    # bool/小数不得截断成“另一个窗口规格”
+    for bad in ({"eval_iters": True}, {"eval_iters": 2.5},
+                {"train_ctx": True}, {"block_size": 64.5}):
+        assert _neural_eval_window_spec(bad, False) is None, bad
+    assert _neural_eval_window_spec(
+        {"block_size": 64, "train_ctx": 256.0, "eval_iters": 20.0},
+        False) == {"ctx": 64, "iters": 20}
     print("  [ok] _neural_eval_window_spec（与 train/evaluate 口径一致）")
+
+
+def test_main_rejects_empty_variants():
+    """--variants 全为空项时必须在启动流水线前报错，不能产生空实验。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        with mock.patch.object(sys, "argv", [
+                "run_all.py", "--variants", ", ,", "--out_root", tmp,
+                "--results_dir", tmp]):
+            try:
+                run_all_main()
+                raise AssertionError("空 --variants 应触发 argparse 错误")
+            except SystemExit as e:
+                assert e.code == 2, e.code
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] run_all：空 --variants 显式拒绝")
 
 
 def test_registration_scope_check_and_gate():
