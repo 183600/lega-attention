@@ -576,6 +576,39 @@ def test_write_clean_lines_preserves_blank_line_boundaries():
     print("  [ok] 数据准备：空行块边界被保留，截断仍只发生在完整行")
 
 
+def test_verify_splits_disjoint_binds_claim_to_content():
+    """官方 split 的 document_disjoint 声明必须与实际文本绑定核对。"""
+    from scripts.prepare_data import verify_splits_disjoint
+
+    shared = "A shared line with enough characters to count as duplicate."
+    with tempfile.TemporaryDirectory() as d:
+        paths = {s: os.path.join(d, f"{s}.txt") for s in
+                 ("train", "val", "test")}
+        # 整洁：三份互不相同
+        for s, p in paths.items():
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(f"unique {s} line with plenty of characters here.\n")
+        r = verify_splits_disjoint(paths)
+        assert r["verified_disjoint"] is True
+        # 注入 val/test 共享长行 → 声明被证伪
+        with open(paths["val"], "w", encoding="utf-8") as f:
+            f.write(f"{shared}\nval unique with plenty of characters.\n")
+        with open(paths["test"], "w", encoding="utf-8") as f:
+            f.write(f"{shared}\ntest unique with plenty of characters.\n")
+        r = verify_splits_disjoint(paths)
+        assert r["verified_disjoint"] is False
+        assert r["overlap_long_lines"]["val_test"]["exact_lines"] == 1
+        # 短行（标题）不计入，避免误报
+        with open(paths["train"], "w", encoding="utf-8") as f:
+            f.write("= References =\ntrain unique plenty of characters here.\n")
+        with open(paths["val"], "w", encoding="utf-8") as f:
+            f.write("= References =\nval unique plenty of characters here.\n")
+        with open(paths["test"], "w", encoding="utf-8") as f:
+            f.write("test unique plenty of characters here.\n")
+        assert verify_splits_disjoint(paths)["verified_disjoint"] is True
+    print("  [ok] verify_splits_disjoint：声明与文本核对，短行不误报")
+
+
 def test_distribution_shift_metric():
     rng = np.random.default_rng(0)
     a = rng.integers(0, 100, size=100000).astype(np.uint16)

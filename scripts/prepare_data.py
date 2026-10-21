@@ -185,6 +185,45 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
     return wrote
 
 
+def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
+    """读回已写入的 train/val/test.txt，核对跨 split 无共享长行。
+
+    split_protocol 里 "document_disjoint(no_shuffle)" 是上游来源的**声明**，
+    不能只靠断言：这里对实际写出的文本做一次可复核的检查——若任意两个
+    split 存在相同长行（逐字符相同或 NFKC/空白归一化后相同），说明三个文件
+    并非真正互斥，"无共享样本" 的协议被证伪。下游 prepare_bins 也会做去污染
+    诊断，这里只是把元数据声明与其实际内容绑定，避免报告"声明一套、数据一套"。
+    """
+    from lega.datacheck import _normalize_line
+    def digest(s: str) -> str:
+        import hashlib
+        return hashlib.blake2b(s.encode("utf-8"), digest_size=16).hexdigest()
+    sets = {}
+    for split, path in txt_paths.items():
+        exact, norm = set(), set()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if len(s) < min_chars:
+                        continue
+                    exact.add(digest(s))
+                    norm.add(digest(_normalize_line(s)))
+        sets[split] = (exact, norm)
+    overlaps = {}
+    for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
+        if a not in sets or b not in sets:
+            continue
+        ex = len(sets[a][0] & sets[b][0])
+        nm = len(sets[a][1] & sets[b][1])
+        overlaps[f"{a}_{b}"] = {"exact_lines": ex, "normalized_lines": nm}
+    disjoint = all(v["exact_lines"] == 0 and v["normalized_lines"] == 0
+                   for v in overlaps.values())
+    return {"verified_disjoint": bool(disjoint),
+            "overlap_long_lines": overlaps,
+            "min_chars": int(min_chars)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_dir", default="data/wikitext103")
@@ -283,6 +322,19 @@ def main():
     print(f"[data] train.txt {char_counts['train']:,} 字符 / "
           f"val.txt {char_counts['val']:,} 字符 / "
           f"test.txt {char_counts['test']:,} 字符")
+
+    # 把划分协议声明与实际写出的文本绑定：官方 split 的 "document_disjoint"
+    # 是上游声明，时序划分的 "documents_cross_cut" 是切点检查；这里再对三个
+    # 文件做一次跨 split 长行核对，把"声明"升级为"已核对"（或如实标为证伪）。
+    if split_protocol is None:
+        split_protocol = {}
+    split_protocol.update(verify_splits_disjoint(txt_paths))
+    if not split_protocol.get("verified_disjoint", True):
+        ov = {k: v for k, v in split_protocol["overlap_long_lines"].items()
+              if v["exact_lines"] or v["normalized_lines"]}
+        print(f"[data] 警告：三个 split 的实际文本存在跨 split 共享长行 {ov}——"
+              "与“无共享样本/document_disjoint”声明不符，须核查来源或划分；"
+              "下游去污染会移除 train 侧重复行，但 val/test 重叠只能靠重建划分消除")
 
     from lega.data import prepare_bins
     # force 透传：不传时 prepare_bins 依据源 txt 哈希/协议版本校验缓存，
