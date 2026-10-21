@@ -27,6 +27,18 @@ from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
 WORST_SCREEN_MAX = 64
 
 
+def repeated_test_checkpoint(test_access, ckpt_sha256) -> bool:
+    """该 checkpoint 是否已在 test 上评测过（据访问账本摘要）。
+
+    纯函数，供评测主流程与单元测试共用：重复在 test 上评测是“测试集变隐式
+    训练集”的直接信号，调用方据此决定拒绝还是放行。
+    """
+    if not test_access or not ckpt_sha256:
+        return False
+    repeated = test_access.get("checkpoints_evaluated_multiple_times") or []
+    return str(ckpt_sha256)[:16] in repeated
+
+
 def _preserve_eval_mode(fn):
     """评测辅助函数临时切到 eval 并在结束时恢复调用方模式（dropout 不影响结果）。"""
     @functools.wraps(fn)
@@ -305,6 +317,10 @@ def main():
                    help="默认 auto：存在 test.bin 时用 held-out test（checkpoint 选择在 "
                         "val 上完成，报告指标必须在独立 split 上），否则回退 val")
     p.add_argument("--device", default="auto")
+    p.add_argument("--allow_repeat_test", action="store_true",
+                   help="允许同一 checkpoint 在 test 上重复评测（尘封协议下这是"
+                        "泄露前兆：测试集只能最终一次性评估；默认拒绝，确需重测"
+                        "时显式放行，账本仍会留痕）")
     args = p.parse_args()
 
     device = get_device(args.device)
@@ -345,11 +361,20 @@ def main():
         except OSError as e:
             print(f"[eval] 警告：test 访问账本写入失败（{e}）；"
                   "本次 test 评测未被记录")
-        if test_access and test_access["checkpoints_evaluated_multiple_times"]:
-            print(f"[eval] 警告：同一 checkpoint 在 test 上被重复评测"
+        if repeated_test_checkpoint(test_access, ckpt_sha256):
+            # 同一 checkpoint 重复在 test 上评测是“测试集变隐式训练集”的直接
+            # 信号：账本已记录，但仅打印警告不足以阻止泄露循环（如反复
+            # run_all --skip_train 据 test 迭代）。默认拒绝，需显式放行。
+            print(f"[eval] ⚠ 同一 checkpoint 在 test 上被重复评测"
                   f"（累计 {test_access['evaluations']} 次、"
                   f"{test_access['distinct_checkpoints']} 个 checkpoint）；"
                   "测试集只能用于最终一次性评估，反复评测/据此调参视为泄露")
+            if not args.allow_repeat_test:
+                raise SystemExit(
+                    f"拒绝重复 test 评测：checkpoint {ckpt_sha256[:16]} 已在 test "
+                    "上评测过（账本见 data_dir/.test_access_log.jsonl）。测试集只"
+                    "用于最终一次性评估；确需重测请显式加 --allow_repeat_test"
+                    "（账本仍会记录，报告中须披露）。")
     # test 已在上面写入访问账本；此处显式放行是“尘封协议”的唯一合法出口
     val = load_bin(args.data_dir, split, allow_test=(split == "test"))
     # 与训练时的评估保持一致：优先使用训练配置里的 train_ctx

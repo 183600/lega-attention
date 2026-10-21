@@ -12,7 +12,8 @@ from lega.data import CharTokenizer
 from lega.evaluate import (_positive_int_or_none, checkpoint_selection_info,
                            collect_worst_windows, json_safe_eval_metrics,
                            load_train_coverage, load_train_peak_mem_mb,
-                           load_train_throughput, worst_window_screening)
+                           load_train_throughput, repeated_test_checkpoint,
+                           worst_window_screening)
 from lega.model import GPT
 
 
@@ -309,3 +310,19 @@ def test_json_safe_eval_metrics_tolerates_malformed_fields():
     out = json_safe_eval_metrics({"val_loss": 2.0, "gate_mean": "0.5"})
     assert out["gate_mean"] == 0.5
     print("  [ok] 评测指标：畸形 val_loss/gate_mean 安全降级")
+
+
+def test_repeated_test_checkpoint_gate():
+    """同一 checkpoint 重复在 test 上评测必须可被识别（默认拒绝的依据）。"""
+    summary = {"evaluations": 2, "distinct_checkpoints": 1,
+               "checkpoints_evaluated_multiple_times": ["abc123def4567890"]}
+    assert repeated_test_checkpoint(summary, "abc123def4567890" + "0" * 48)
+    # 前 16 位不同 → 不判重复
+    assert not repeated_test_checkpoint(summary, "ffffffffffffffff" + "0" * 48)
+    # 空账本 / 空指纹 / 无重复字段都不得误判
+    assert not repeated_test_checkpoint(None, "a" * 64)
+    assert not repeated_test_checkpoint({}, "a" * 64)
+    assert not repeated_test_checkpoint(summary, None)
+    assert not repeated_test_checkpoint(
+        {"checkpoints_evaluated_multiple_times": []}, "a" * 64)
+    print("  [ok] 重复 test 评测检测：按 16 位指纹命中，空值/空账本不误判")
