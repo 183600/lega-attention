@@ -276,8 +276,15 @@ def test_f1_scores_three_averages_and_imbalance():
             else:
                 raise AssertionError(f"非法类别未被拒绝: {bad!r}")
     assert f1_scores([1.0, 0.0], [1.0, 1.0])["n"] == 2
+    # 重复 labels 会让 per_class 覆盖、macro/weighted 重复计权
+    for dup in ([0, 0], [1, 0, 1]):
+        try:
+            f1_scores([0, 1], [0, 1], labels=dup)
+            raise AssertionError(f"重复 labels 应抛 ValueError: {dup!r}")
+        except ValueError:
+            pass
     print("  [ok] f1_scores（macro/micro/weighted 分离、多分类、长度校验/"
-          "非法类别拒绝）")
+          "非法类别与重复 labels 拒绝）")
 
 
 def test_pearson_guards():

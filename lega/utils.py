@@ -975,6 +975,10 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
     if labels is None:
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
     labels = [strict_int(x, "labels") for x in labels]
+    if len(set(labels)) != len(labels):
+        # per_class 以标签为键：重复标签会覆盖明细，同时让 macro/weighted
+        # 对同一类重复计权，三种平均口径之间的差异失真。
+        raise ValueError(f"labels 不得重复: {labels!r}")
     per_class = {}
     f1s, supports = [], []
     total = int(y_true.size)
