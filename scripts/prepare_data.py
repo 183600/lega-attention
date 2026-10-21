@@ -250,11 +250,15 @@ def main():
         if split_info["fallback_char_cut"]:
             leaky_reasons.append(
                 "本地文本缺少可用换行/文档边界，退化为字符切分，"
-                "同一文档可能跨 split")
+                "同一文档/段落可能跨 split")
         elif split_info.get("documents_cross_cut"):
             leaky_reasons.append(
                 "切点未落在标题文档边界（标题间距大于划分区间），"
                 "有文档跨 split（群组泄露）")
+        elif split_info.get("paragraphs_cross_cut"):
+            leaky_reasons.append(
+                "切点未落在空行段落边界（段落长度大于划分区间），"
+                "有段落跨 split（群组泄露）")
         if leaky_reasons:
             detail = "；".join(leaky_reasons)
             if not args.allow_leaky_split:
@@ -264,8 +268,9 @@ def main():
                     "--allow_leaky_split（训练前数据协议闸门仍会拦截）。")
             print(f"[data] 警告：--allow_leaky_split 显式放行泄露划分：{detail}")
         else:
-            print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个，"
-                  "文档不跨 split")
+            print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个、"
+                  f"段落边界 {split_info.get('n_paragraph_boundaries', 0)} 个，"
+                  f"群组单位 {split_info.get('group_unit', '?')} 不跨 split")
         # 逐行清洗并直接写入 txt
         char_counts = {
             split: write_clean_lines(io.StringIO(t), txt_paths[split],

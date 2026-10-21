@@ -783,6 +783,19 @@ def _nearest_heading_in_range(headings, target: int, lo: int, hi: int):
     return min(cands, key=lambda h: (abs(h - target), h))
 
 
+def _paragraph_positions(text: str):
+    """所有空行段落的下一行起点；空行是段落边界，段落是群组单位。"""
+    return [m.end() for m in _BLANK_LINE_RE.finditer(text)]
+
+
+def _nearest_paragraph_in_range(paragraphs, target: int, lo: int, hi: int):
+    """[lo, hi] 内离 target 最近（并列取靠前）的空行段落边界；无则 None。"""
+    cands = [p for p in paragraphs if lo <= p <= hi]
+    if not cands:
+        return None
+    return min(cands, key=lambda p: (abs(p - target), p))
+
+
 def temporal_split_text(text: str, train_frac: float = 0.8,
                         val_frac: float = 0.1, window_frac: float = 0.02,
                         min_gap: int = 1):
@@ -791,13 +804,15 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     切点优先落在文档边界（WikiText 标题行 > 空行段落 > 换行），搜索窗口为
     len(text)*window_frac。**只要文本含标题行，就优先在全文范围内选最近的
     标题作为切点**（哪怕超出窗口）——标题定义的“文档”是群组单位，同一文档
-    绝不跨 split；仅当有效范围内没有任何标题时才退回窗口内的段落/换行切分，
-    此时按段落/行语义仍是完整单位。找不到任何换行时退化为字符切分
+    绝不跨 split。无标题但有空行段落时同理：**优先在全文范围内选最近的空行
+    段落边界**，段落是群组单位，同一段落绝不跨 split，info 中
+    paragraphs_cross_cut=True 表示无法做到（只有“段落长度大于划分区间”这类
+    无法两全的语料才会出现）。仅当既无标题也无空行段落时，才退回窗口内的
+    换行切分（此时行是语义上的完整单位），找不到任何换行时退化为字符切分
     （info 中 fallback_char_cut=True 提示该文件无法做文档级划分）。
 
-    info["documents_cross_cut"]（标题文档是否跨切点）是显式自检：为 True 时
-    调用方应告警——只有“标题间距大于划分区间”这类无法两全的语料才会出现。
-    返回 (train_text, val_text, test_text, info)。
+    info["documents_cross_cut"] / info["paragraphs_cross_cut"] 是显式自检：
+    为 True 时调用方应告警或拒绝。返回 (train_text, val_text, test_text, info)。
     """
     n = len(text)
     if n < 3:
@@ -828,6 +843,7 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     t2 = min(t2, n - 1)
     window = max(256, int(n * window_frac))
     heads = _heading_positions(text)
+    paragraphs = [] if heads else _paragraph_positions(text)
     p1, k1 = _pick_boundary(text, t1, window)
     # 标题优先：窗口内没有“可用”标题时在全文中找最近的（范围保证 p1 < t2，
     # val 非空）。窗口内命中的标题若 >= t2 同样不可用，必须换正文范围内的标题。
@@ -835,6 +851,10 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         h = _nearest_heading_in_range(heads, t1, 1, t2 - 1)
         if h is not None:
             p1, k1 = h, "heading"
+    elif paragraphs and (p1 is None or k1 != "blank" or p1 >= t2):
+        h = _nearest_paragraph_in_range(paragraphs, t1, 1, t2 - 1)
+        if h is not None:
+            p1, k1 = h, "blank"
     p2, k2 = _pick_boundary(text, t2, window)
     # 同理：窗口内命中的标题若离 p1 太近（<= p1+min_gap，val 会被压空/切序
     # 倒置），也要换到 [p1+min_gap, n-1] 里最近的标题。
@@ -843,6 +863,12 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         h = _nearest_heading_in_range(heads, t2, (p1 or 0) + min_gap, n - 1)
         if h is not None:
             p2, k2 = h, "heading"
+    elif paragraphs and (p2 is None or k2 != "blank"
+                         or p2 <= (p1 or 0) + min_gap):
+        h = _nearest_paragraph_in_range(paragraphs, t2,
+                                        (p1 or 0) + min_gap, n - 1)
+        if h is not None:
+            p2, k2 = h, "blank"
     fallback = False
     # p1 必须严格小于 t2：否则 val=[p1,p2) 会被 p2≈t2 压空并触发“空 split”。
     # 短文本里唯一边界可能落在 t2 之后（如仅有的换行恰在结尾附近），
@@ -857,17 +883,28 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     if not (train_text and val_text and test_text):
         raise ValueError("时序划分产生了空 split，请检查文本长度与划分比例")
     heading_set = set(heads)
+    paragraph_set = set(paragraphs)
     documents_cross = bool(heads) and (p1 not in heading_set
                                        or p2 not in heading_set)
+    paragraphs_cross = bool(paragraphs) and (
+        p1 not in paragraph_set or p2 not in paragraph_set)
+    if heads:
+        group_unit = "heading_document"
+    elif paragraphs:
+        group_unit = "blank_line_paragraph"
+    else:
+        group_unit = "line_segment"
     info = {
         "order": "temporal:train(earliest)->val->test(latest)",
         "cut_offsets": [int(p1), int(p2)], "cut_kinds": [str(k1), str(k2)],
         "window_chars": int(window), "fallback_char_cut": bool(fallback),
         "shuffled": False,
-        # 群组自检：标题定义文档；为 True 表示至少一个文档跨了切点
+        # 群组自检：标题定义文档、空行定义段落；为 True 表示群组跨了切点
         "n_headings": int(len(heads)),
+        "n_paragraph_boundaries": int(len(paragraphs)),
         "documents_cross_cut": bool(documents_cross),
-        "group_unit": ("heading_document" if heads else "line_segment"),
+        "paragraphs_cross_cut": bool(paragraphs_cross),
+        "group_unit": group_unit,
         "lengths_chars": {"train": len(train_text), "val": len(val_text),
                           "test": len(test_text)},
     }
@@ -1148,6 +1185,7 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
 # 下属正常现象）不同，它必然导致评测读到训练见过的长串，必须训练前拦截。
 CRITICAL_SPLIT_ALERT_CODES = (
     "split_shuffled", "split_char_cut", "split_documents_cross_cut",
+    "split_paragraphs_cross_cut",
     "ngram_overlap_train_val", "ngram_overlap_train_test",
     "ngram_overlap_val_test",
     "eval_splits_overlap", "eval_splits_overlap_documents")
@@ -1194,6 +1232,12 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             f"（标题 {p.get('n_headings', '?')} 个、切点类型 "
             f"{p.get('cut_kinds', '?')}），违反“群组整体落在同一侧”，"
             "须调整划分比例或更换可整体划分的语料")
+    if p.get("paragraphs_cross_cut"):
+        add("warning", "split_paragraphs_cross_cut",
+            f"切点未落在空行段落边界：{p.get('group_unit', 'group')} 群组跨 "
+            f"split（段落边界 {p.get('n_paragraph_boundaries', '?')} 个、"
+            f"切点类型 {p.get('cut_kinds', '?')}），违反“段落整体落在同一侧”，"
+            "须调整划分比例或为语料补空行分隔")
     if p.get("verified_disjoint") is False:
         overlaps = p.get("overlap_long_lines")
         bad = {}

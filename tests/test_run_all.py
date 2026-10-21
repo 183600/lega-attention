@@ -92,10 +92,12 @@ def test_data_report_protocol_declarations_block_training():
         "tokenizer": {"fit_on": "all"},
         "test_reads_at_prep": {"used_for_selection": True},
         "split_protocol": {"shuffled": True, "fallback_char_cut": True,
-                           "documents_cross_cut": True},
+                           "documents_cross_cut": True,
+                           "paragraphs_cross_cut": True},
     }
     issues = data_report_protocol_issues(bad)
     assert len(issues) >= 8, issues
+    assert any("paragraphs_cross_cut" in msg for msg in issues), issues
     assert data_report_protocol_issues({"alerts": []}) == []
     safe = {"protocol": {"split_first_then_preprocess": True,
                          "shuffle_at_split_time": False,
@@ -104,6 +106,7 @@ def test_data_report_protocol_declarations_block_training():
             "test_reads_at_prep": {"used_for_selection": False},
             "split_protocol": {"shuffled": False, "fallback_char_cut": False,
                                "documents_cross_cut": False,
+                               "paragraphs_cross_cut": False,
                                "verified_disjoint": True}}
     assert data_report_protocol_issues(safe) == []
     # 声明未验证却既不解释重叠也不解释缺失：不能静默放行。

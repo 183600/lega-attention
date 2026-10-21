@@ -81,7 +81,9 @@ def data_report_protocol_issues(report) -> list:
                  "报告 split_protocol.fallback_char_cut=True：退化为字符切分，"
                  "同一文档可能跨 split"),
                 ("documents_cross_cut",
-                 "报告 split_protocol.documents_cross_cut=True：群组跨 split")):
+                 "报告 split_protocol.documents_cross_cut=True：群组跨 split"),
+                ("paragraphs_cross_cut",
+                 "报告 split_protocol.paragraphs_cross_cut=True：段落群组跨 split")):
             value = split_protocol.get(key)
             if value is None:
                 continue

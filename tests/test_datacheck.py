@@ -27,6 +27,7 @@ from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             critical_split_alerts, decontaminate_documents,
                             decontaminate_texts,
                             distribution_shift, ngram_overlap,
+                            CRITICAL_SPLIT_ALERT_CODES,
                             leakage_alerts, read_test_access_log, sanitize_text,
                             short_ngram_overlap, short_overlap_alerts,
                             split_protocol_alerts, temporal_split_text,
@@ -185,6 +186,32 @@ def test_temporal_split_reports_document_crossing():
     print("  [ok] 标题无法覆盖切点时 documents_cross_cut 显式上报")
 
 
+def test_temporal_split_keeps_blank_line_paragraphs_whole():
+    """无标题语料的空行段落是群组单位：即使最近段落边界在窗口外也要切在段落上。"""
+    text = "A" * 90000 + "\n\n" + "B" * 5000 + "\n\n" + "C" * 5000
+    train, val, test, info = temporal_split_text(text, window_frac=0.01)
+    assert train + val + test == text
+    assert info["group_unit"] == "blank_line_paragraph"
+    assert info["n_paragraph_boundaries"] == 2, info
+    assert info["cut_offsets"] == [90002, 95004], info
+    assert info["cut_kinds"] == ["blank", "blank"], info
+    assert info["paragraphs_cross_cut"] is False, info
+    assert info["documents_cross_cut"] is False, info
+    assert "B" * 5000 in val and "C" * 5000 in test
+    print("  [ok] 无标题语料：空行段落整体不跨 split")
+
+
+def test_temporal_split_reports_paragraph_crossing():
+    """段落长于可用划分区间时必须如实报告 paragraphs_cross_cut=True（可审计）。"""
+    text = "A" * 110000 + "\n\n" + "B" * 10000 + "\n"
+    train, val, test, info = temporal_split_text(text, window_frac=0.02)
+    assert train + val + test == text
+    assert info["group_unit"] == "blank_line_paragraph"
+    assert info["paragraphs_cross_cut"] is True, info
+    assert info["fallback_char_cut"] is True, info
+    print("  [ok] 段落无法覆盖切点时 paragraphs_cross_cut 显式上报")
+
+
 def test_heading_regex_matches_multilevel_wikitext_headings():
     from lega.datacheck import _HEADING_RE
     for line in ("= Title =", "== Section ==", "=== Sub ===",
@@ -243,6 +270,28 @@ def test_prepare_data_refuses_group_crossing_local_split(monkeypatch):
             assert "--allow_leaky_split" in str(e)
         assert not os.path.exists(os.path.join(out_dir, "train.txt"))
     print("  [ok] prepare_data：群组跨 split 的本地划分 fail closed")
+
+
+def test_prepare_data_refuses_paragraph_crossing_local_split(monkeypatch):
+    """本地时序划分检测到空行段落跨 split 时同样必须拒绝写出。"""
+    from scripts.prepare_data import main as prepare_main
+    text = "A" * 110000 + "\n\n" + "B" * 10000 + "\n"
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "local.txt")
+        out_dir = os.path.join(d, "out")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(text)
+        monkeypatch.setattr(sys, "argv", [
+            "prepare_data", "--out_dir", out_dir, "--local_txt", src,
+            "--source", "local"])
+        try:
+            prepare_main()
+            raise AssertionError("段落跨 split 的本地划分应被拒绝")
+        except SystemExit as e:
+            assert "拒绝写出泄露划分" in str(e)
+            assert "段落" in str(e)
+        assert not os.path.exists(os.path.join(out_dir, "train.txt"))
+    print("  [ok] prepare_data：段落跨 split 的本地划分 fail closed")
 
 
 def test_prepare_data_refuses_val_test_overlap(monkeypatch):
@@ -1132,6 +1181,21 @@ def test_split_protocol_alerts_flag_group_crossing():
     cross = next(a for a in alerts if a["code"] == "split_documents_cross_cut")
     assert "heading_document" in cross["message"]
     print("  [ok] 划分协议告警：打开 shuffled / 字符切分 / 文档跨切点均显式上报")
+
+
+def test_split_protocol_alerts_flag_paragraph_crossing():
+    """空行段落跨 split 与标题文档跨 split 同级进入告警与训练前硬拦截。"""
+    assert split_protocol_alerts({"paragraphs_cross_cut": False}) == []
+    alerts = split_protocol_alerts({
+        "paragraphs_cross_cut": True, "group_unit": "blank_line_paragraph",
+        "n_paragraph_boundaries": 1, "cut_kinds": ["char", "blank"]})
+    assert [a["code"] for a in alerts] == ["split_paragraphs_cross_cut"]
+    assert alerts[0]["level"] == "warning"
+    assert "blank_line_paragraph" in alerts[0]["message"]
+    assert "split_paragraphs_cross_cut" in CRITICAL_SPLIT_ALERT_CODES
+    critical = critical_split_alerts({"alerts": alerts})
+    assert [a["code"] for a in critical] == ["split_paragraphs_cross_cut"]
+    print("  [ok] 划分协议告警：段落跨切点显式上报并进入硬拦截")
 
 
 def test_build_data_report_surfaces_group_crossing_alerts():
