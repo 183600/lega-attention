@@ -131,6 +131,33 @@ def load_train_log(path: str) -> List[Dict]:
     return recs
 
 
+def _step_or_none(value) -> Optional[int]:
+    """日志 step → 整数；bool/非有限浮点/小数/不可解析值返回 None。
+
+    小数 step 若被 int() 截断（1.5 → 1、True → 1），不同记录会折叠到同一
+    步上，曲线与早停标记随之错位；整数值浮点（2.0）仍是合法 step。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        value = int(value)
+    else:
+        try:
+            value = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    try:
+        if not math.isfinite(float(value)):
+            return None
+    except (OverflowError, ValueError):
+        # step 可能是 JSON 里的 Infinity/1e999 或超出 float 范围的巨大整数：
+        # 分段均值需要 float(step)，这类值同样必须按坏记录跳过。
+        return None
+    return value
+
+
 def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]:
     """取出 (step, value) 均有限并按 step 排序的记录点；异常记录单独计数。
 
@@ -150,13 +177,13 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
         v, s = r.get(key), r.get("step")
         if v is None or s is None:
             continue
+        s = _step_or_none(s)
         try:
-            v, s = float(v), int(s)
-            float(s)
+            v = float(v)
         except (TypeError, ValueError, OverflowError):
-            # step 可能是 JSON 里的 Infinity/1e999（json.loads 接受非标准
-            # 字面量）或超出 float 范围的巨大整数：int(inf)/float(step)
-            # 抛 OverflowError，同样必须按坏记录跳过。
+            malformed += 1
+            continue
+        if s is None:
             malformed += 1
             continue
         if math.isfinite(v):
@@ -389,11 +416,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     early_stopped = bool(early_stop_recs)
     early_stop_steps = []
     for r in early_stop_recs:
-        try:
-            s = int(r.get("step"))
-            if not math.isfinite(float(s)):
-                continue
-        except (TypeError, ValueError, OverflowError):
+        s = _step_or_none(r.get("step"))
+        if s is None:
             continue
         early_stop_steps.append(s)
     es_step = (early_stop_steps[0] if early_stop_steps

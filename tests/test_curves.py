@@ -5,10 +5,10 @@ import os
 import shutil
 import tempfile
 
-from lega.curves import (LIVE_WARN_EVALS, curve_observability_warnings,
-                         diagnose_curve, diagnose_run_dir,
-                         live_overfit_hint, load_train_log, worst_status,
-                         STATUS_ORDER)
+from lega.curves import (LIVE_WARN_EVALS, _finite_points,
+                         curve_observability_warnings, diagnose_curve,
+                         diagnose_run_dir, live_overfit_hint, load_train_log,
+                         worst_status, STATUS_ORDER)
 
 
 def _log(train, val, val_steps=None):
@@ -276,6 +276,28 @@ def test_huge_early_stop_step_does_not_crash_diagnosis():
     assert d["status"] == "正常收敛", d
     assert d["early_stop_step"] == 40, d
     print("  [ok] early_stop 的超大整数 step 不中断诊断")
+
+
+def test_fractional_and_boolean_steps_are_malformed():
+    """小数/布尔 step 不能被 int() 截断后参与诊断：1.5→1、True→1 会把
+    不同记录折叠到同一步，曲线与早停标记随之错位；按坏记录跳过并计数。"""
+    recs = [{"step": 1, "loss": 4.0},
+            {"step": 1.5, "loss": 3.9},
+            {"step": True, "loss": 3.8},
+            {"step": 2.0, "loss": 3.5},      # 整数值浮点仍是合法 step
+            {"step": "3", "loss": 3.0},
+            {"step": 10 ** 400, "loss": 2.5}]
+    pts, bad, malformed = _finite_points(recs, "loss")
+    assert [p["step"] for p in pts] == [1, 2, 3], pts
+    assert bad == 0 and malformed == 3, (bad, malformed)
+
+    # 小数的 early_stop step 不可采信：回退到最后一个有限训练点，而不是截断
+    recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    recs2.append({"step": 45.5, "early_stop": True})
+    d = diagnose_curve(recs2)
+    assert d["early_stopped"] is True
+    assert d["early_stop_step"] == 60, d
+    print("  [ok] 小数/布尔 step 按坏记录跳过（不截断）")
 
 
 def test_insufficient_train_coverage_is_not_normal_convergence():
