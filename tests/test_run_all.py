@@ -497,6 +497,13 @@ def test_tradeoff_verdict_rejects_bad_deals():
     v = tradeoff_verdict(benefit_pct=5.0, p_adj=0.001, cost_pct=1.0, n_seeds=2)
     assert v.startswith("种子不足"), v
     assert tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=MIN_SEEDS) == "可接受"
+    for bad in (True, 3.9, "bad", -2):
+        v = tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=bad)
+        assert v.startswith("种子"), (bad, v)
+    v = tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=5,
+                         ruler_benefit_pp=1.0, ruler_p_adj=0.01,
+                         ruler_n_seeds=2.9)
+    assert v.startswith("种子") and "RULER" in v, v
     print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比/负收益/种子不足）")
 
 
@@ -3481,6 +3488,14 @@ def test_ablation_coverage_requires_min_seeds_per_cell():
     done, missing, under = _ablation_coverage(
         cells, {"a"}, {"a": {"variant": "a"}})
     assert not done and under == [("A", "a", 0)], (done, missing, under)
+    # bool/小数/负数不是有效种子数，不能截断成“覆盖完整”
+    for bad in (True, 3.9, -3, "bad"):
+        done, missing, under = _ablation_coverage(
+            cells, {"a"}, {"a": {"variant": "a", "n_seeds": bad}})
+        assert not done and under == [("A", "a", 0)], (bad, done, missing, under)
+    done, _, _ = _ablation_coverage(
+        cells, {"a"}, {"a": {"variant": "a", "n_seeds": "3"}})
+    assert done == [("A", "a")], done
     print("  [ok] 消融矩阵覆盖按每格种子数判定，单种子格明确标为不足")
 
 

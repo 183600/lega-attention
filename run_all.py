@@ -141,12 +141,9 @@ def _ablation_coverage(cells, present, rows_by_var):
     done, missing, underpowered = [], [], []
     for name, v in cells:
         row = rows_by_var.get(v) if isinstance(rows_by_var, dict) else None
-        n_seeds = 0
-        if isinstance(row, dict):
-            try:
-                n_seeds = int(row.get("n_seeds") or 0)
-            except (TypeError, ValueError):
-                n_seeds = 0
+        n_seeds = _integral_value(row.get("n_seeds")) if isinstance(row, dict) else None
+        if n_seeds is None or n_seeds < 0:
+            n_seeds = 0
         if v not in present:
             missing.append((name, v))
         elif n_seeds < MIN_SEEDS:
@@ -3668,6 +3665,16 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
     """
     if (benefit_pct is None and ruler_benefit_pp is None) or cost_pct is None:
         return "数据不足"
+    raw_n, raw_ruler_n = n_seeds, ruler_n_seeds
+    n_seeds = _integral_value(n_seeds)
+    ruler_n_seeds = _integral_value(ruler_n_seeds)
+    bad_n = []
+    if n_seeds is None and raw_n is not None:
+        bad_n.append(f"PPL n={raw_n!r}")
+    if ruler_n_seeds is None and raw_ruler_n is not None:
+        bad_n.append(f"RULER n={raw_ruler_n!r}")
+    if bad_n:
+        return f"种子数非法（{'、'.join(bad_n)}），无法判定"
     lacks = []
     if benefit_pct is not None and n_seeds is not None and n_seeds < MIN_SEEDS:
         lacks.append(f"PPL n={n_seeds}")
