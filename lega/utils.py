@@ -660,14 +660,28 @@ def holm_bonferroni(pvals) -> list:
     保证校正后 p 随原始 p 单调不减且 >= 原始 p。
     NaN 与 None 一样不参与排序，也不计入家族大小。
     """
-    idx = [i for i, p in enumerate(pvals) if p is not None and p == p]
+    # p 必须落在 [0,1] 且为有限数值：bool 是 int 子类（True→1），字符串/
+    # 容器/NaN/Inf/负数/大于 1 的值都不是可检验的 p，按缺失处理而不参与
+    # 家族大小；否则排序会混入不可比较类型或把损坏值当成显著/不显著。
+    norm = []
+    for p in pvals:
+        if p is None or isinstance(p, (bool, np.bool_)):
+            norm.append(None)
+            continue
+        try:
+            f = float(p)
+        except (TypeError, ValueError, OverflowError):
+            norm.append(None)
+            continue
+        norm.append(f if math.isfinite(f) and 0.0 <= f <= 1.0 else None)
+    idx = [i for i, p in enumerate(norm) if p is not None]
     m = len(idx)
     adj = [None] * len(pvals)
     if m == 0:
         return adj
     running = 0.0
-    for rank, i in enumerate(sorted(idx, key=lambda i: pvals[i])):
-        val = min(1.0, float(pvals[i]) * (m - rank))
+    for rank, i in enumerate(sorted(idx, key=lambda i: norm[i])):
+        val = min(1.0, norm[i] * (m - rank))
         running = max(running, val)
         adj[i] = running
     return adj

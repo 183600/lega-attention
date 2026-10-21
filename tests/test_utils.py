@@ -431,7 +431,13 @@ def test_holm_bonferroni():
     assert abs(adj[1] - 0.03) < 1e-12 and abs(adj[2] - 0.04) < 1e-12
     assert abs(adj[3] - 0.5) < 1e-12
     assert holm_bonferroni([float("nan"), float("nan")]) == [None, None]
-    print("  [ok] holm_bonferroni（手算示例/None 与 NaN 不占家族/单调与封顶）")
+    # bool/字符串/容器/越界 p 均按缺失处理，不占家族大小也不崩溃
+    adj = holm_bonferroni([True, "0.02", -0.1, 1.5, [0.1], 0.04])
+    assert adj[0] is None and adj[2] is None, adj
+    assert adj[3] is None and adj[4] is None, adj
+    assert abs(adj[1] - 0.04) < 1e-12 and abs(adj[5] - 0.04) < 1e-12, adj
+    assert holm_bonferroni([False, np.bool_(True)]) == [None, None]
+    print("  [ok] holm_bonferroni（手算/None 与 NaN 不占家族/非法 p 按缺失）")
 
 
 def _brute_signflip_p(diffs):
