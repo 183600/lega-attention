@@ -204,6 +204,46 @@ def test_run_ruler_collects_badcases():
     print(f"  [ok] run_ruler 坏案例收集（{len(bad)} 条，含问题/gold/数值表）")
 
 
+def test_run_ruler_rejects_fractional_and_bool_params():
+    """run_ruler 入口参数必须是精确整数：截断会悄悄改写评测协议。
+
+    n_samples=1.5 → 1、ctx_lens=[True] → 1（样例全过短被跳过、结果为空却
+    看似成功）、vt_chains=4.5 → 4 会绕过 build_vt 的链数守卫。整数值浮点
+    （JSON 数字的既有用法）仍视为合法整数。
+    """
+    import torch
+
+    from lega.model import GPT
+    from lega.ruler import run_ruler
+
+    tok = _tok()
+    torch.manual_seed(0)
+    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
+                n_heads=2, ffn_mult=4, variant="standard")
+    model.eval()
+    base = {"ctx_lens": [256], "n_samples": 1, "max_new": 12,
+            "fwe_max_new": 12, "tasks": ("niah_synth",), "verbose": False}
+    for key, bad in (("ctx_lens", [256.5]), ("ctx_lens", [True]),
+                     ("n_samples", 2.5), ("n_samples", True),
+                     ("seed", 1.5), ("seed", True),
+                     ("max_new", 6.5), ("fwe_max_new", 9.5),
+                     ("vt_chains", 4.5), ("vt_chains", True),
+                     ("vt_depth", 3.5), ("gen_batch", 2.5),
+                     ("n_samples", 0)):
+        kwargs = dict(base, **{key: bad})
+        try:
+            run_ruler(model, tok, "cpu", **kwargs)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, (key, bad)
+    res = run_ruler(model, tok, "cpu", ctx_lens=[256.0], n_samples=1.0,
+                    seed=7.0, max_new=12, fwe_max_new=12,
+                    tasks=("niah_synth",), verbose=False)
+    assert res["niah_synth"]
+    print("  [ok] run_ruler 拒绝小数/布尔/越界参数，整数值浮点仍可用")
+
+
 def test_vt_rejects_invalid_depth():
     """depth<1 会生成“问题问 VAR A0、正文只有 VAR A1”的自相矛盾样例。"""
     tok = _tok()

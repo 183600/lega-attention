@@ -74,7 +74,7 @@ from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
                     ContextTooSmall, _stable_hash)
 from .utils import (amp_autocast, auroc, average_precision,
                     calibration_metrics, enable_tf32, f1_scores, get_device,
-                    pearson, roc_pr_aucs, save_json, set_seed)
+                    pearson, roc_pr_aucs, save_json, set_seed, strict_int)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -622,8 +622,13 @@ def main():
     model, ck = load_model(args.ckpt, device=device, use_sdpa_standard=False)
     tok = load_tokenizer(args.data_dir)
     variant = ck.get("variant", model.variant)
-    # 固定全局随机源；样例构造本身使用显式种子的 Random，不受影响
-    set_seed(int(ck.get("seed")) if ck.get("seed") is not None else 0)
+    # 固定全局随机源；样例构造本身使用显式种子的 Random，不受影响。
+    # checkpoint 元数据的种子不能被 int() 截断（1.5 → 1、True → 1），否则
+    # 实际播种的种子与记录的种子不同，审计形同虚设。
+    ckpt_seed_raw = ck.get("seed")
+    ckpt_seed = (0 if ckpt_seed_raw is None
+                 else strict_int(ckpt_seed_raw, "checkpoint seed"))
+    set_seed(ckpt_seed)
     provenance = load_provenance(
         os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir)
 
@@ -643,15 +648,34 @@ def main():
     acfg = acfg if isinstance(acfg, dict) else {}
     rcfg = ckpt_cfg.get("ruler")
     rcfg = rcfg if isinstance(rcfg, dict) else {}
-    n_examples = args.n_examples or int(acfg.get("n_examples", 30))
+
+    def _cfg_int(section, key, default):
+        """配置整数：缺失用默认值，bool/小数/非有限显式拒绝（绝不截断）。
+
+        int() 截断在这些字段上会绕过下游守卫：vt_chains=4.5 → 4 让
+        build_vt 的链数校验永远看不到非法值；ctx_lens=[True] → 1 让全部
+        样例过短被跳过，产出"空结果却看似成功"的分析。
+        """
+        table = acfg if section == "analysis" else rcfg
+        if key not in table:
+            return default
+        return strict_int(table[key], f"{section}.{key}")
+
+    n_examples = args.n_examples or _cfg_int("analysis", "n_examples", 30)
     tau = args.tau if args.tau is not None else float(acfg.get("tau", 0.5))
-    ctx = args.ctx if args.ctx is not None \
-        else max(int(x) for x in rcfg.get("ctx_lens", [model.block_size]))
+    if args.ctx is not None:
+        ctx = args.ctx
+    else:
+        raw_ctx_lens = rcfg.get("ctx_lens", [model.block_size])
+        if not isinstance(raw_ctx_lens, (list, tuple)):
+            raise ValueError(
+                f"ruler.ctx_lens 需要整数列表，收到 {raw_ctx_lens!r}")
+        ctx = max(strict_int(x, "ruler.ctx_lens") for x in raw_ctx_lens)
     # run_ruler 为生成预留 max_new 个位置；机制分析必须使用同一个实际 room_ctx，
     # 否则机制统计与 RULER 得分并不来自同一批样本。
-    max_new = int(rcfg.get("max_new", 12))
+    max_new = _cfg_int("ruler", "max_new", 12)
     ctx = min(ctx, model.block_size - max_new - 1)
-    ruler_seed = int(rcfg.get("seed", 1234))
+    ruler_seed = _cfg_int("ruler", "seed", 1234)
 
     sents, corpus_source = load_corpus_sents_with_source(args.data_dir)
     examples, task_of, ctx_of = [], [], []
@@ -663,8 +687,8 @@ def main():
             rng = Random(ruler_seed * 100003 + _stable_hash(task) % 99991 + ctx * 31 + i)
             try:
                 ex = _example(task, tok, ctx, rng, corpus_sents=sents,
-                              vt_chains=int(rcfg.get("vt_chains", 4)),
-                              vt_depth=int(rcfg.get("vt_depth", 4)))
+                              vt_chains=_cfg_int("ruler", "vt_chains", 4),
+                              vt_depth=_cfg_int("ruler", "vt_depth", 4))
             except ContextTooSmall:
                 # 预期的可跳过情况（上下文长度不足）；其余异常说明构造逻辑出错，应暴露。
                 continue
@@ -708,11 +732,10 @@ def main():
         else:
             probe_l2 = [float(x) for x in acfg.get(
                 "probe_l2_grid", list(_PROBE_L2_GRID))]
-        probe_folds = (int(args.probe_folds) if args.probe_folds is not None
-                       else int(acfg.get("probe_folds", _PROBE_FOLDS)))
+        probe_folds = (args.probe_folds if args.probe_folds is not None
+                       else _cfg_int("analysis", "probe_folds", _PROBE_FOLDS))
         summary["linear_probe"] = linear_probe(
-            records, folds=probe_folds, l2_grid=probe_l2,
-            seed=int(ck.get("seed")) if ck.get("seed") is not None else 0)
+            records, folds=probe_folds, l2_grid=probe_l2, seed=ckpt_seed)
     # 阈值敏感性：misleading/P(hit|集中) 的结论不能只挂在单一 τ 上
     if args.tau_grid is not None:
         grid = [float(x) for x in args.tau_grid.split(",") if x.strip()]
@@ -720,13 +743,12 @@ def main():
         grid = [float(x) for x in acfg.get("tau_grid", [0.3, 0.5, 0.7])]
     summary["tau_sensitivity"] = tau_sensitivity(records, sorted(set(grid) | {float(tau)}))
     # 聚类 bootstrap：同一记录池的 AUROC 置信区间（样例为聚类单元）
-    n_boot = (int(args.bootstrap_resamples)
+    n_boot = (args.bootstrap_resamples
               if args.bootstrap_resamples is not None
-              else int(acfg.get("bootstrap_resamples", 1000)))
+              else _cfg_int("analysis", "bootstrap_resamples", 1000))
     if n_boot > 0:
         summary["auroc_cluster_bootstrap"] = auroc_cluster_bootstrap(
-            records, n_resamples=n_boot,
-            seed=int(ck.get("seed")) if ck.get("seed") is not None else 0)
+            records, n_resamples=n_boot, seed=ckpt_seed)
     # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
     summary["seed"] = ck.get("seed")
     # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计

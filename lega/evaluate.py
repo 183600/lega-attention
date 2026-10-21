@@ -19,7 +19,7 @@ from .model import load_model, count_params, gate_extra_params
 from .repro import load_provenance, sha256_file
 from .train import evaluate_val, _val_eval_indices
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
-                    now_str, save_json, set_seed)
+                    now_str, save_json, set_seed, strict_int)
 
 
 # 最差窗口筛查的候选窗口上限：与 PPL 的 eval_iters 各自独立（前者排序、
@@ -311,9 +311,11 @@ def main():
     enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device)
     # 评测同样固定随机源（评测本身无随机性，但保证同一 checkpoint 在任何
-    # 入口下都从同一 RNG 状态出发）。
+    # 入口下都从同一 RNG 状态出发）。种子来自 checkpoint 元数据：bool/小数
+    # 若被 int() 截断，评测会以与记录不同的种子播种（1.5 → 1、True → 1），
+    # 身份审计随之失效——非法元数据必须显式拒绝而不是静默改写。
     seed = ck.get("seed")
-    set_seed(int(seed) if seed is not None else 0)
+    set_seed(0 if seed is None else strict_int(seed, "checkpoint seed"))
     split = args.split
     if split == "auto":
         split = "test" if (os.path.exists(os.path.join(args.data_dir, "test.bin"))

@@ -24,7 +24,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from .utils import amp_autocast, amp_dtype_for, save_json, wilson_score_ci
+from .utils import (amp_autocast, amp_dtype_for, save_json, strict_int,
+                    wilson_score_ci)
 
 KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate",
              "quartz", "falcon", "harbor", "meadow", "thistle", "cobalt", "juniper",
@@ -395,6 +396,19 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     collect_badcases=True 时，预测错误的样本连同问题、gold 摘录、上下文数值表
     一起落入 "_badcases"：错误样本是改进思路的最重要来源，不能只留聚合分数。
     """
+    # 入口严格规范化：bool/小数在此显式拒绝。int() 截断会把 n_samples=1.5
+    # 当成 1、把 ctx_lens=[True] 当成 1（样例全过短被跳过、结果为空却看似
+    # 成功），并让落盘的协议字段与调用方声明的配置不一致。
+    ctx_lens = [strict_int(c, "ctx_lens") for c in ctx_lens]
+    n_samples = strict_int(n_samples, "n_samples")
+    seed = strict_int(seed, "seed")
+    max_new = strict_int(max_new, "max_new")
+    fwe_max_new = strict_int(fwe_max_new, "fwe_max_new")
+    vt_chains = strict_int(vt_chains, "vt_chains")
+    vt_depth = strict_int(vt_depth, "vt_depth")
+    gen_batch = strict_int(gen_batch, "gen_batch")
+    if n_samples < 1:
+        raise ValueError(f"n_samples 必须 >= 1，收到 {n_samples}")
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
     badcases: List[Dict] = []
@@ -638,7 +652,7 @@ def main():
     from .model import load_model
     from .data import load_tokenizer
     from .repro import load_provenance
-    from .utils import get_device, enable_tf32, set_seed
+    from .utils import get_device, enable_tf32, set_seed, strict_int
 
     p = argparse.ArgumentParser(description="RULER 5 任务评测")
     p.add_argument("--ckpt", required=True)
@@ -657,7 +671,9 @@ def main():
     model, ck = load_model(args.ckpt, device=device)
     tok = load_tokenizer(args.data_dir)
     seed = ck.get("seed")
-    set_seed(int(seed) if seed is not None else 0)
+    # checkpoint 元数据的种子同样不能被 int() 截断（1.5 → 1、True → 1）：
+    # 截断后评测播种的种子与记录的种子不是同一个，身份审计形同虚设。
+    set_seed(0 if seed is None else strict_int(seed, "checkpoint seed"))
 
     import json
     import os
@@ -675,12 +691,35 @@ def main():
             cfg = {}
     rl = cfg.get("ruler")
     rl = rl if isinstance(rl, dict) else {}
-    ctx_lens = ([int(x) for x in args.ctx_lens.split(",")] if args.ctx_lens
-                else rl.get("ctx_lens", [min(256, model.block_size)]))
+
+    def _cfg_int(key, default):
+        """ruler 配置整数：缺失用默认值，非法值显式拒绝。
+
+        这里不能用 int()：4.5 → 4、True → 1 的截断会发生在 build_vt 的
+        链数/深度守卫**之前**，把非法配置悄悄洗成合法值；样本数/上下文
+        被截断或变成 1 还会让“配对可比的样例集”与配置声明不一致。
+        """
+        if key not in rl:
+            return default
+        return strict_int(rl[key], f"ruler.{key}")
+
+    if args.ctx_lens:
+        ctx_lens = [int(x) for x in args.ctx_lens.split(",")]
+    else:
+        raw_ctx_lens = rl.get("ctx_lens", [min(256, model.block_size)])
+        if not isinstance(raw_ctx_lens, (list, tuple)):
+            raise ValueError(
+                f"ruler.ctx_lens 需要整数列表，收到 {raw_ctx_lens!r}")
+        ctx_lens = [strict_int(x, "ruler.ctx_lens") for x in raw_ctx_lens]
     n_samples = (args.n_samples if args.n_samples is not None
-                 else int(rl.get("n_samples", 30)))
+                 else _cfg_int("n_samples", 30))
     gen_batch = (args.gen_batch if args.gen_batch is not None
-                 else int(rl.get("gen_batch", 8)))
+                 else _cfg_int("gen_batch", 8))
+    sample_seed = _cfg_int("seed", 1234)
+    max_new = _cfg_int("max_new", 12)
+    fwe_max_new = _cfg_int("fwe_max_new", 44)
+    vt_chains = _cfg_int("vt_chains", 4)
+    vt_depth = _cfg_int("vt_depth", 4)
     # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
     amp = bool(cfg.get("amp", True)) and not args.no_amp
 
@@ -695,25 +734,25 @@ def main():
     else:
         print(f"[ruler] niah_corpus 干扰语料来源: {corpus_source}.txt（held-out）")
     results = run_ruler(model, tok, device, ctx_lens=ctx_lens, n_samples=n_samples,
-                        seed=int(rl.get("seed", 1234)),
-                        max_new=int(rl.get("max_new", 12)),
-                        fwe_max_new=int(rl.get("fwe_max_new", 44)),
-                        vt_chains=int(rl.get("vt_chains", 4)),
-                        vt_depth=int(rl.get("vt_depth", 4)),
+                        seed=sample_seed,
+                        max_new=max_new,
+                        fwe_max_new=fwe_max_new,
+                        vt_chains=vt_chains,
+                        vt_depth=vt_depth,
                         corpus_sents=corpus_sents,
                         amp=amp, gen_batch=gen_batch)
     # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务
     badcases = results.pop("_badcases", [])
     payload = {"variant": ck.get("variant", model.variant), "seed": ck.get("seed"),
                "ctx_lens": ctx_lens, "n_samples": n_samples,
-               "sample_seed": int(rl.get("seed", 1234)), "results": results,
+               "sample_seed": sample_seed, "results": results,
                "badcases": badcases,
                # 生成口径随结果落盘：不同 max_new/解码预算或任务构造参数下的
                # EM 不是同一评测协议，下游不得直接配对（见 run_all 的协议核对）。
-               "max_new": int(rl.get("max_new", 12)),
-               "fwe_max_new": int(rl.get("fwe_max_new", 44)),
-               "vt_chains": int(rl.get("vt_chains", 4)),
-               "vt_depth": int(rl.get("vt_depth", 4)),
+               "max_new": max_new,
+               "fwe_max_new": fwe_max_new,
+               "vt_chains": vt_chains,
+               "vt_depth": vt_depth,
                "gen_batch": int(gen_batch),
                "amp": bool(amp),
                # 干扰语料来源可审计：train 回退会让检索分数不可比
