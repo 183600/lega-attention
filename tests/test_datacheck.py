@@ -588,6 +588,30 @@ def test_ngram_overlap_detects_and_clears():
     print("  [ok] 64-gram 采样筛查：植入的跨 split 复制被检出，独立流为 0")
 
 
+def test_ngram_overlap_rejects_non_token_ids_and_bad_params():
+    """越界/非整数 id 不得被 astype(uint16) 静默环绕，n/n_samples 也须合法。"""
+    ok = np.array([0, 1, 2, 3], dtype=np.int64)
+    res = ngram_overlap(ok, ok.copy(), n=2, n_samples=8, seed=0)
+    assert res["overlap_rate"] == 1.0
+    for bad in (np.array([70000], dtype=np.int64),
+                np.array([-1], dtype=np.int64),
+                np.array([1.5], dtype=np.float64),
+                np.array([True, False])):
+        try:
+            ngram_overlap(bad, ok, n=2)
+            raise AssertionError(f"非法 token 流未被拒绝: {bad!r}")
+        except ValueError:
+            pass
+    for kwargs in ({"n": 0}, {"n": -3}, {"n": True},
+                   {"n": 2, "n_samples": 0}, {"n": 2, "n_samples": True}):
+        try:
+            ngram_overlap(ok, ok, **kwargs)
+            raise AssertionError(f"非法参数未被拒绝: {kwargs}")
+        except ValueError:
+            pass
+    print("  [ok] 64-gram 筛查：越界/非整数 id 与非法 n/n_samples 显式拒绝")
+
+
 def test_token_stream_hard_checks():
     stats = token_stream_stats(np.array([0, 1, 5], dtype=np.uint16), 10, "train")
     assert stats["max_id"] == 5 and stats["nan"] == 0 and stats["inf"] == 0

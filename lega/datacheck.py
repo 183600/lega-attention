@@ -554,20 +554,43 @@ def unknown_char_rate(tok, text: str):
 # ---------------------------------------------------------------- 泄漏筛查
 
 def _window_hashes(ids, n: int, n_samples: int, seed: int):
-    """采样 n 长 token 窗口的哈希集合（有放回采样，重复可忽略）。"""
+    """采样 n 长 token 窗口的哈希集合（有放回采样，重复可忽略）。
+
+    id 必须是 [0, 65536) 内的整数（项目 token 流统一 uint16）。旧实现直接
+    `astype(np.uint16)`：70000 会环绕成 4464，与合法 token 共享哈希，既可能
+    把真实泄漏漏报，也可能把无关窗口误报为重叠。脏数据必须显式拒绝。
+    """
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)):
+        raise ValueError(f"n 必须是正整数，收到 {n!r}")
+    n = int(n)
+    if n <= 0:
+        raise ValueError(f"n 必须是正整数，收到 {n!r}")
+    if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)):
+        raise ValueError(f"n_samples 必须是正整数，收到 {n_samples!r}")
+    n_samples = int(n_samples)
+    if n_samples <= 0:
+        raise ValueError(f"n_samples 必须是正整数，收到 {n_samples!r}")
     ids = np.asarray(ids)
+    if ids.size:
+        if ids.dtype.kind not in "iu":
+            raise ValueError(
+                f"token id 必须是整数流，收到 dtype={ids.dtype}")
+        lo, hi = int(ids.min()), int(ids.max())
+        if lo < 0 or hi > 65535:
+            raise ValueError(
+                f"token id 越界: [{lo}, {hi}] 不在 uint16 token 范围 "
+                "[0, 65536)，拒绝静默环绕")
     L = int(ids.size)
     if L < n:
         return set()
     total = L - n + 1
     rng = np.random.default_rng(seed)
-    m = min(int(n_samples), total)
+    m = min(n_samples, total)
     starts = (rng.integers(0, total, size=m) if m < total
               else np.arange(total))
     windows = np.lib.stride_tricks.sliding_window_view(ids, n)
     picked = np.ascontiguousarray(windows[np.asarray(starts, dtype=np.int64)])
-    if picked.dtype != np.uint16:
-        picked = picked.astype(np.uint16)
+    picked = picked.astype(np.uint16, copy=False)
     out = set()
     for row in picked:
         out.add(hashlib.blake2b(row.tobytes(), digest_size=16).digest())
