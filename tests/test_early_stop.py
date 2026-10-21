@@ -15,7 +15,7 @@ import tempfile
 
 from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
-from lega.train import _config_int, early_stop_update
+from lega.train import _config_int, _config_min_delta, early_stop_update
 
 
 def test_early_stop_update_semantics():
@@ -61,6 +61,22 @@ def test_config_int_rejects_bool_fraction_and_below_min():
     assert _config_int("2", "log_every", 1) == 2
     assert _config_int(0, "warmup", 0) == 0
     print("  [ok] 训练配置整数：拒绝 bool/小数/非有限值/0 间隔")
+
+
+def test_config_min_delta_rejects_nonfinite_and_out_of_range():
+    """min_delta 越界会让改善阈值失真（>=1 永不改善、<0 永不重置）。"""
+    for bad in (True, False, -0.1, 1.0, 2, float("nan"),
+                float("inf"), "nan", None, object()):
+        try:
+            _config_min_delta(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 min_delta 未被拒绝: {bad!r}")
+    assert _config_min_delta(0) == 0.0
+    assert _config_min_delta(0.05) == 0.05
+    assert _config_min_delta("0.1") == 0.1
+    print("  [ok] early_stop_min_delta：拒绝 bool/非有限/越界值")
 
 
 def _write_data(d: str) -> None:

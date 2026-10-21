@@ -692,6 +692,27 @@ def _config_int(value, name: str, minimum: int) -> int:
     return value
 
 
+def _config_min_delta(value) -> float:
+    """早停相对改善阈值：必须是 [0, 1) 内有限浮点，拒绝 bool/NaN/Inf。
+
+    early_stop_update 用 ``vl < best * (1 - min_delta)`` 判定实质改善：
+    min_delta<0 会把正常改善判成未改善，>=1 则任何非负损失都不可能
+    “改善”（best*(1-1)<=0），耐心计数将无限累加。NaN 还会绕过比较，
+    因此必须在开训前显式拒绝，而不是交给 max()/float() 静默处理。
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"config.early_stop_min_delta 必须是数值，收到 bool {value!r}")
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"config.early_stop_min_delta 必须是数值，收到 {value!r}") from e
+    if not math.isfinite(value) or not 0.0 <= value < 1.0:
+        raise ValueError(
+            f"config.early_stop_min_delta 必须在 [0, 1) 内且有限，收到 {value!r}")
+    return value
+
+
 def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
                       min_delta: float = 0.0, patience: int = 0):
     """一次验证评测后更新早停状态，返回 (best_val, evals_since_improve, stop)。
@@ -752,7 +773,9 @@ def main():
     patience_raw = cfg.get("early_stop_patience", 0)
     early_stop_patience = _config_int(
         0 if patience_raw is None else patience_raw, "early_stop_patience", 0)
-    early_stop_min_delta = max(0.0, float(cfg.get("early_stop_min_delta", 0.0) or 0.0))
+    min_delta_raw = cfg.get("early_stop_min_delta", 0.0)
+    early_stop_min_delta = _config_min_delta(
+        0.0 if min_delta_raw is None else min_delta_raw)
     # 种子必须是精确整数：配置里的 "seed": true → 1 或 1.5 → 1 会让本次
     # 训练以与声明不同的种子播种，而 checkpoint/manifest/曲线记的是截断值，
     # 事后无法区分。int(True)==1、int(1.5)==1 都不可接受。
