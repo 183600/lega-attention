@@ -41,15 +41,13 @@ TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
 
 
 def _int_or_none(value):
-    """整数/整数值浮点/整数字符串 -> int；bool/小数/非有限/溢出 -> None。"""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            return None
-        return int(value)
+    """整数/整数值浮点/整数字符串 -> int；bool/小数/非有限/溢出 -> None。
+
+    使用 strict_int 而不是 int()：后者会把 np.float32(4.5) 截成 4、
+    把 np.bool_(True) 当成 1，绕过 build_vt 的链数/深度校验。
+    """
     try:
-        return int(value)
+        return strict_int(value)
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -404,6 +402,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     # 入口严格规范化：bool/小数在此显式拒绝。int() 截断会把 n_samples=1.5
     # 当成 1、把 ctx_lens=[True] 当成 1（样例全过短被跳过、结果为空却看似
     # 成功），并让落盘的协议字段与调用方声明的配置不一致。
+    # 字符串会被逐字符迭代成 [2, 5, 6] 这类无意义上下文长度，必须显式拒绝。
+    if isinstance(ctx_lens, (str, bytes)):
+        raise ValueError(
+            f"ctx_lens 必须是整数序列，收到字符串 {ctx_lens!r}（应传 [256, 512]）")
     ctx_lens = [strict_int(c, "ctx_lens") for c in ctx_lens]
     n_samples = strict_int(n_samples, "n_samples")
     seed = strict_int(seed, "seed")
@@ -423,6 +425,15 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         ("gen_batch", gen_batch)):
         if value < 1:
             raise ValueError(f"{name} 必须 >= 1，收到 {value}")
+    # 生成预算必须先于网格循环校验：若 max_gen 用满 block_size，room_ctx
+    # 会 <=0，所有样例都以 ContextTooSmall 被跳过，函数却返回“成功”的空
+    # 结果，看起来像评测完成而不是配置错误。
+    for task in tasks:
+        max_gen = fwe_max_new if task == "fwe" else max_new
+        if model.block_size - max_gen - 1 < 1:
+            raise ValueError(
+                f"{task} 的生成预算 max_gen={max_gen} 过大："
+                f"block_size={model.block_size} 需为 prompt 留出至少 1 个位置")
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
     badcases: List[Dict] = []

@@ -232,6 +232,7 @@ def test_run_ruler_rejects_fractional_and_bool_params():
     base = {"ctx_lens": [256], "n_samples": 1, "max_new": 12,
             "fwe_max_new": 12, "tasks": ("niah_synth",), "verbose": False}
     for key, bad in (("ctx_lens", [256.5]), ("ctx_lens", [True]),
+                     ("ctx_lens", "256"), ("ctx_lens", b"256"),
                      ("n_samples", 2.5), ("n_samples", True),
                      ("seed", 1.5), ("seed", True),
                      ("max_new", 6.5), ("fwe_max_new", 9.5),
@@ -241,7 +242,7 @@ def test_run_ruler_rejects_fractional_and_bool_params():
                      ("ctx_lens", [-1]), ("ctx_lens", []),
                      ("max_new", 0), ("fwe_max_new", -1),
                      ("vt_chains", 0), ("vt_depth", 0),
-                     ("gen_batch", 0)):
+                     ("gen_batch", 0), ("max_new", 319)):
         kwargs = dict(base, **{key: bad})
         try:
             run_ruler(model, tok, "cpu", **kwargs)
@@ -284,6 +285,22 @@ def test_vt_rejects_fractional_and_boolean_chain_counts():
     ex = build_vt(tok, 512, random.Random(0), n_chains=2.0, depth=4.0)
     assert ex["meta"]["n_chains"] == 2 and ex["meta"]["depth"] == 4
     print("  [ok] VT 拒绝小数/布尔链数与深度")
+
+
+def test_vt_rejects_non_builtin_fractional_numbers():
+    """np.float32/Decimal/Fraction 等非内建数值也不能被 int() 静默截断。"""
+    import numpy as np
+    from fractions import Fraction
+
+    tok = _tok()
+    for bad in (np.float32(4.5), np.bool_(True), Fraction(9, 2)):
+        try:
+            build_vt(tok, 512, random.Random(0), n_chains=bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, (type(bad), bad)
+    print("  [ok] VT 拒绝非内建小数/布尔数值的截断")
 
 
 def test_context_too_small():
