@@ -61,19 +61,27 @@ def parse_floats(s):
 
 
 def parse_seeds(s, parser=None):
-    """逗号分隔的整数种子列表；"1.5" 这类非整数被拒绝而不是静默截断成 1。"""
+    """逗号分隔的非负整数种子列表；非整数/负数显式拒绝而不是截断或晚失败。
+
+    与 run_all 的种子解析同口径：``int("1_0")`` 会得到 10、``int(True)`` 会
+    得到 1，都会让声明的种子与实际训练身份错位；负种子则会在 trial 启动后
+    才因 NumPy/PYTHONHASHSEED 约束失败，必须在这里就报错。
+    """
     out = []
     for x in str(s).split(","):
         x = x.strip()
         if not x:
             continue
         try:
-            out.append(int(x))
-        except ValueError:
-            msg = f"--seeds 需要整数种子，收到 {x!r}"
+            seed = strict_int(x, "种子")
+            if seed < 0:
+                raise ValueError(f"种子必须 >= 0，收到 {x!r}")
+        except ValueError as e:
+            msg = str(e)
             if parser is not None:
                 parser.error(msg)
-            raise ValueError(msg)
+            raise ValueError(msg) from e
+        out.append(seed)
     return out or None
 
 

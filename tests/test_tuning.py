@@ -328,18 +328,19 @@ def test_tuning_numeric_args_reject_bool_and_nonfinite():
 
 
 def test_parse_seeds_rejects_non_integer():
-    """--seeds 是整数列表："1.5" 必须报错，不能静默截断成种子 1。"""
+    """--seeds 是整数列表：浮点/下划线/负数必须报错，不能静默改写种子身份。"""
     from lega.tuning import parse_seeds
     assert parse_seeds("1, 2,3") == [1, 2, 3]
     assert parse_seeds("") is None
     assert parse_seeds(" 4 ") == [4]
-    try:
-        parse_seeds("1.5")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("非整数种子未被拒绝")
-    print("  [ok] parse_seeds：整数校验（拒绝浮点种子）")
+    for bad in ("1.5", "1_0", "-1", "true", "0x10"):
+        try:
+            parse_seeds(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法种子未被拒绝: {bad!r}")
+    print("  [ok] parse_seeds：整数校验（拒绝浮点/下划线/负数种子）")
 
 
 def test_tune_multiseed_selects_by_mean_not_lucky_seed():
