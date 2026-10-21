@@ -428,6 +428,15 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     早停终止的 run（final 记录带 early_stop=true）曲线按设计截断，显式标注。
     """
     records = records if isinstance(records, (list, tuple)) else []
+    log_vocab = _finite_value(log_vocab)
+    if log_vocab is not None and log_vocab <= 0:
+        log_vocab = None
+    epochs_seen = _finite_value(epochs_seen)
+    if epochs_seen is not None and epochs_seen < 0:
+        epochs_seen = None
+    train_tokens = _step_or_none(train_tokens)
+    if train_tokens is not None and train_tokens < 0:
+        train_tokens = None
     train_pts, train_bad, train_malformed = _finite_points(records, "loss")
     val_pts, val_bad, val_malformed = _finite_points(records, "val_loss")
     # 早停终止标记：训练按设计提前结束（区别于日志缺失/训练中断），

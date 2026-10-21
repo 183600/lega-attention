@@ -362,6 +362,21 @@ def test_insufficient_train_coverage_is_not_normal_convergence():
     print("  [ok] 训练覆盖 <1 epoch → 训练不足（不误写无需干预）")
 
 
+def test_diagnose_curve_tolerates_bad_coverage_metadata():
+    """外部 eval.json 的坏覆盖字段不能中断诊断或伪造训练不足。"""
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    for bad in ("bad", True, float("nan"), float("inf"), -0.5):
+        d = diagnose_curve(recs, epochs_seen=bad, train_tokens=bad,
+                           log_vocab=bad)
+        assert d["status"] == "正常收敛", (bad, d)
+        assert d["epochs_seen"] is None and d["train_tokens"] is None, (bad, d)
+        assert d["train_budget_sufficient"] is None, (bad, d)
+    d = diagnose_curve(recs, epochs_seen=0.5, train_tokens=3.5)
+    assert d["status"] == "训练不足（数据覆盖不足）", d
+    assert d["train_tokens"] is None and d["epochs_seen"] == 0.5, d
+    print("  [ok] 曲线诊断拒绝 bool/非法覆盖元数据，不崩溃也不误报")
+
+
 def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"
