@@ -2606,6 +2606,43 @@ def test_tradeoff_prefers_sdpa_runtime_baseline():
     print("  [ok] 涨点-增幅：运行时基线优先 standard_sdpa（与主表一致）")
 
 
+def test_tradeoff_baseline_requires_data_at_common_ctx():
+    """standard_sdpa 存在但缺公共 ctx 数据时必须退回有数据的 standard。
+
+    common_ctx 只对运行变体取交集，standard_sdpa 可能没有该 ctx 的量测；
+    此时若仍选它作基线，Prefill/Decode 增幅会整体缺失、低估开销。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "standard_sdpa", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+
+        def _lat(cells):
+            return {"prefill_ms": {c: {"1": p} for c, (p, _d) in cells.items()},
+                    "decode_ms_per_tok": {c: d for c, (_p, d) in cells.items()},
+                    "efficiency": {
+                        "n_params": 100,
+                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                        "peak_mem_mb_prefill": {"256": 1.0}}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat({"256": (10.0, 1.0), "512": (20.0, 2.0)}),
+            "standard_sdpa": _lat({"256": (1.0, 0.1)}),
+            "lega": _lat({"256": (1.1, 0.11), "512": (24.0, 2.4)})}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["latency_ctx"] == 512, row
+        # 基线必须是 512 ctx 上有数据的 standard：24 vs 20 → +20%
+        assert row["eff_prefill_delta_pct"] == 20.0, row
+        assert "基线=standard（公共 ctx=512" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅：基线必须在公共 ctx 上有量测数据")
+
+
 def test_scope_missing_config_or_data_is_not_confirmed():
     """缺 config/data 时范围核对必须“不可确认”，不能因种子匹配就通过。"""
     tmp = tempfile.mkdtemp()

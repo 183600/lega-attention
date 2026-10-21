@@ -4440,8 +4440,12 @@ def build_summary(results_dir: str, audit: dict = None,
     # 候选的 SDPA 推理路径可比），缺失时退回显式 standard。
     # 训练步时与进程峰值两列仍取 standard 训练产物（只有它有训练记录）。
     # 注：standard_sdpa 不在 VARIANTS 里，只存在于 latency.json 的变体表。
+    # 必须与上表 prefill_rel_pct 的选取口径一致：不仅要存在该变体，还要在
+    # 公共 ctx 上真有 prefill 数据，否则会选中一个在该 ctx 无数据的基线，
+    # 令 Prefill/Decode 增幅整体缺失、低估开销并可能翻转权衡判定。
     lat_base_name = next((n for n in ("standard_sdpa", "standard")
-                          if isinstance(lat_variants.get(n), dict)), None)
+                          if _prefill_at(lat_variants.get(n),
+                                         common_ctx) is not None), None)
     if common_ctx is not None and lat_base_name:
         base_e = lat_variants[lat_base_name]
         base_prefill = _prefill_at(base_e, common_ctx)
