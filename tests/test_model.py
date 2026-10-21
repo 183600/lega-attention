@@ -245,6 +245,33 @@ def test_checkpoint_roundtrip_preserves_attention_path():
         assert m3.blocks[0].attn.use_sdpa is True
 
 
+def test_load_model_parses_attention_switch_strictly():
+    """checkpoint/显式覆盖里的 "false" 不能因 bool("false") 静默变成 True。"""
+    torch.manual_seed(0)
+    model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1, n_heads=2,
+                ffn_mult=4, variant="standard", use_sdpa_standard=True)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "model.pt")
+        save_checkpoint(path, model)
+        m2, _ = load_model(path, use_sdpa_standard="false")
+        assert m2.blocks[0].attn.use_sdpa is False
+
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        payload["model_cfg"]["use_sdpa_standard"] = "false"
+        torch.save(payload, path)
+        m3, _ = load_model(path)
+        assert m3.blocks[0].attn.use_sdpa is False
+
+        payload["model_cfg"]["use_sdpa_standard"] = "not-a-bool"
+        torch.save(payload, path)
+        try:
+            load_model(path)
+            raise AssertionError("非法布尔配置应被拒绝")
+        except ValueError as exc:
+            assert "use_sdpa_standard" in str(exc)
+    print("  [ok] load_model 严格解析 use_sdpa_standard 开关")
+
+
 def test_gate_stats_shapes():
     """need_stats=True 时诊断统计形状正确（standard 也应返回集中度统计供分析用）。"""
     for v in ("lega", "qgate", "null", "standard"):

@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .attention import CausalSelfAttention, VARIANTS
-from .utils import config_finite_float, config_probability
+from .utils import config_bool, config_finite_float, config_probability
 
 
 class _RoPERotate(torch.autograd.Function):
@@ -816,8 +816,9 @@ def load_model(ckpt_path: str, device: str = "cpu",
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     cfg = dict(ck["model_cfg"])
     if use_sdpa_standard is None:
-        use_sdpa_standard = bool(cfg.get("use_sdpa_standard", True))
-    cfg["use_sdpa_standard"] = bool(use_sdpa_standard)
+        use_sdpa_standard = cfg.get("use_sdpa_standard", True)
+    use_sdpa_standard = config_bool(use_sdpa_standard, "use_sdpa_standard")
+    cfg["use_sdpa_standard"] = use_sdpa_standard
     model = GPT(**cfg)
     model.load_state_dict(ck["state_dict"])
     ck.pop("state_dict", None)

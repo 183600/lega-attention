@@ -26,8 +26,8 @@ from .preflight import (allow_protocol_violations,  # noqa: E402
                         data_protocol_preflight)
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     write_worktree_patch)
-from .utils import (amp_autocast, amp_dtype_for, enable_tf32, now_str,
-                    save_json, set_seed, strict_int, t_critical_95)
+from .utils import (amp_autocast, amp_dtype_for, config_bool, enable_tf32,
+                    now_str, save_json, set_seed, strict_int, t_critical_95)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -994,10 +994,11 @@ def main():
         attn_dropout=attn_dropout,
         variant=args.variant,
         gate_bias_init=gate_bias_init,
-        use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
+        use_sdpa_standard=config_bool(
+            cfg.get("use_sdpa_standard", True), "use_sdpa_standard"),
     )
     model = GPT(**model_cfg).to(device)
-    if cfg.get("compile", False) and device.startswith("cuda"):
+    if config_bool(cfg.get("compile", False), "compile") and device.startswith("cuda"):
         try:
             model = torch.compile(model)
             print("[train] torch.compile 已启用")
@@ -1022,7 +1023,7 @@ def main():
     # 梯度裁剪的参数列表与优化器同口径
     clip_params = [p for p in model.parameters() if p.requires_grad]
 
-    amp_dt = amp_dtype_for(device, bool(cfg.get("amp", True)))
+    amp_dt = amp_dtype_for(device, config_bool(cfg.get("amp", True), "amp"))
     amp_ctx = amp_autocast(device, amp_dt is not None)
     # 曲线点数在训练开始前就固定了：采样过稀时过拟合/早停/尖峰诊断会静默
     # 失效，必须在启动日志里明确告警（不阻断，冒烟训练可有意稀疏）。

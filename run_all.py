@@ -89,9 +89,10 @@ from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E402
                         runtime_info, sanity_summary, sha256_file,
                         worktree_state, write_worktree_patch)
-from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
-                        mean_std, min_detectable_effect, paired_sign_flip_test,
-                        paired_t_test, save_json, strict_int)  # noqa: E402
+from lega.utils import (bootstrap_mean_ci, config_bool, get_device,
+                        holm_bonferroni, mean_std, min_detectable_effect,
+                        paired_sign_flip_test, paired_t_test, save_json,
+                        strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -481,7 +482,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                         mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
                     if "use_sdpa_standard" in cfg:
                         attention_key_seen = True
-                        sdpa_on = bool(cfg.get("use_sdpa_standard"))
+                        sdpa_on = config_bool(
+                            cfg.get("use_sdpa_standard"), "use_sdpa_standard")
                         # 含集中度项的门控必须读取 softmax 概率，无法走 SDPA；
                         # 其它变体在 sdpa_on 时走 SDPA。若配置开启 SDPA，两类
                         # 变体的注意力实现就不同，PPL 差异不能全部归因于门控。

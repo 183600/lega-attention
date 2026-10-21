@@ -24,8 +24,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from .utils import (amp_autocast, amp_dtype_for, save_json, strict_int,
-                    wilson_score_ci)
+from .utils import (amp_autocast, amp_dtype_for, config_bool, save_json,
+                    strict_int, wilson_score_ci)
 from .repro import sha256_file, test_data_fingerprint
 
 KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate",
@@ -826,7 +826,7 @@ def main():
     vt_chains = _cfg_int("vt_chains", 4)
     vt_depth = _cfg_int("vt_depth", 4)
     # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
-    amp = bool(cfg.get("amp", True)) and not args.no_amp
+    amp = config_bool(cfg.get("amp", True), "amp") and not args.no_amp
 
     corpus_sents, corpus_source = load_corpus_sents_with_source(
         args.data_dir, allow_test=bool(args.allow_test_corpus))

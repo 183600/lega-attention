@@ -29,6 +29,7 @@ from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
                         short_ngram_overlap,
                         summarize_test_access, text_length_stats,
                         token_stream_stats, unknown_char_rate)
+from .utils import config_bool
 
 _GPT2_CACHE = {}
 
@@ -573,7 +574,8 @@ def load_tokenizer(data_dir: str):
         return get_gpt2_tokenizer()
     # 新缓存显式携带 <unk>（char_unk=True）；旧缓存没有该标记，按原编码方式
     # 重建（未知字符→0），保证与旧 bin 的 id 一一对应。
-    return CharTokenizer(meta["itos"], add_unk=bool(meta.get("char_unk", False)))
+    return CharTokenizer(
+        meta["itos"], add_unk=config_bool(meta.get("char_unk", False), "char_unk"))
 
 
 def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:

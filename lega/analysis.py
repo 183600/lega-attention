@@ -76,8 +76,9 @@ from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
                     record_corpus_test_access,
                     ContextTooSmall, _stable_hash)
 from .utils import (amp_autocast, auroc, average_precision,
-                    calibration_metrics, enable_tf32, f1_scores, get_device,
-                    pearson, roc_pr_aucs, save_json, set_seed, strict_int)
+                    calibration_metrics, config_bool, enable_tf32, f1_scores,
+                    get_device, pearson, roc_pr_aucs, save_json, set_seed,
+                    strict_int)
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
@@ -807,7 +808,7 @@ def main():
 
     print(f"[analysis] variant={variant} ctx={ctx} 样例数={len(examples)} tau={tau}")
     records = collect_records(model, tok, device, examples, task_of, ctx_of,
-                              amp=bool(ckpt_cfg.get("amp", True)))
+                              amp=config_bool(ckpt_cfg.get("amp", True), "amp"))
     summary = summarize(records, variant, tau)
     # 简单监督基线（线性探针）：从同一批记录学“该不该写入”的最简线性模型。
     # 探针有 hit 标签监督，门控 logit 没有；对照语义见 lega/probe.py 与

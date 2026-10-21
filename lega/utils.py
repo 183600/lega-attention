@@ -140,6 +140,31 @@ def config_probability(value, name: str = "概率") -> float:
     return out
 
 
+def config_bool(value, name: str = "开关") -> bool:
+    """配置布尔严格化：只接受 bool/0/1/true/false，拒绝任意真值转换。
+
+    ``bool("false") is True`` 会让旧产物/手写配置里的关闭开关静默变成开启，
+    从而切换注意力后端或 AMP；必须显式解析或拒绝，而不是按非空字符串/非零
+    数值猜测。
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1"):
+            return True
+        if s in ("false", "0"):
+            return False
+        raise ValueError(f"{name} 必须是布尔值，收到 {value!r}")
+    if isinstance(value, np.integer) and not isinstance(value, np.bool_):
+        value = int(value)
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and math.isfinite(value) and value in (0.0, 1.0):
+        return bool(value)
+    raise ValueError(f"{name} 必须是布尔值，收到 {value!r}")
+
+
 def set_seed(seed: int) -> None:
     """固定当前进程内所有随机源，使同一台机器上的同一实验可复现。
 

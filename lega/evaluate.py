@@ -21,8 +21,8 @@ from .preflight import (allow_protocol_violations,
 from .repro import (load_provenance, sha256_file,
                     test_data_fingerprint as _test_data_fingerprint)
 from .train import evaluate_val, _val_eval_indices
-from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
-                    now_str, save_json, set_seed, strict_int)
+from .utils import (amp_autocast, amp_dtype_for, config_bool, enable_tf32,
+                    get_device, now_str, save_json, set_seed, strict_int)
 
 
 # 最差窗口筛查的候选窗口上限：与 PPL 的 eval_iters 各自独立（前者排序、
@@ -484,7 +484,8 @@ def main():
             cfg_used = {}
         train_ctx = cfg_used.get("train_ctx")
         # 与训练内评测口径一致：尊重训练配置的 amp 设置
-        use_amp = amp_dtype_for(device, bool(cfg_used.get("amp", True))) is not None
+        use_amp = amp_dtype_for(
+            device, config_bool(cfg_used.get("amp", True), "amp")) is not None
     else:
         # 缺少训练配置时评测上下文静默变为 block_size，PPL 口径与训练内评测不一致
         print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "

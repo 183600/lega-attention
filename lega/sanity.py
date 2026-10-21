@@ -39,7 +39,7 @@ from .model import GPT, count_params
 from .preflight import (allow_protocol_violations,
                          data_protocol_preflight)
 from .repro import build_run_manifest
-from .utils import save_json, set_seed, strict_int
+from .utils import config_bool, save_json, set_seed, strict_int
 
 # 训练路径 loss 与直接 logits CE 的一致性容差：1e-3 只用于吸收分块/
 # 归约顺序的浮点噪声，真正的计算错误（错误 chunk 边界、错误归一化/
@@ -452,7 +452,8 @@ def main():
         ffn_mult=_cfg_positive_int("ffn_mult", 4),
         dropout=0.0, attn_dropout=0.0, variant=args.variant,
         gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
-        use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
+        use_sdpa_standard=config_bool(
+            cfg.get("use_sdpa_standard", True), "use_sdpa_standard"),
     ).to(device)
     print(f"[sanity] variant={args.variant}({VARIANT_CN[args.variant]}) "
           f"device={device} params={count_params(model):,}")

@@ -16,7 +16,7 @@ import tempfile
 import numpy as np
 
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
-                        calibration_metrics, config_finite_float,
+                        calibration_metrics, config_bool, config_finite_float,
                         config_probability, f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, pearson, roc_pr_aucs, save_json,
@@ -336,6 +336,24 @@ def test_bool_not_counted_as_numeric_observation():
     r = paired_t_test([True, 2.0, 3.0], [1.0, 1.0, 1.0])
     assert r["n"] == 2 and abs(r["mean_diff"] - 1.5) < 1e-12
     print("  [ok] bool 不计入均值/bootstrap/配对检验")
+
+
+def test_config_bool_validation():
+    """配置开关不能把任意非空字符串/非零数值静默当成 True。"""
+    for value, expected in ((True, True), (False, False),
+                            (np.bool_(True), True), (np.bool_(False), False),
+                            (1, True), (0, False), (1.0, True), (0.0, False),
+                            (np.int64(1), True), ("true", True), ("FALSE", False),
+                            (" 0 ", False)):
+        assert config_bool(value, "x") is expected, (value, expected)
+    for bad in ("yes", "no", "on", "", 2, -1, 0.5, float("nan"),
+                float("inf"), None, []):
+        try:
+            config_bool(bad, "x")
+            raise AssertionError(f"config_bool({bad!r}) 应被拒绝")
+        except ValueError as exc:
+            assert "x" in str(exc)
+    print("  [ok] config_bool 只接受明确布尔/0/1，拒绝任意真值转换")
 
 
 def test_config_float_and_probability_validation():
