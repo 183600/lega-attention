@@ -528,10 +528,14 @@ def _val_eval_indices(val_len: int, ctx: int, iters: int):
       * iters > 可用窗口数：评估全部窗口（每个只算一次）；
       * iters <= 可用窗口数：在整个验证集上等间隔抽样（含首尾窗口）。
     """
-    iters = int(iters)
+    iters = strict_int(iters, "eval_iters")
     if iters < 1:
         raise ValueError(f"eval_iters 必须 >= 1，收到 {iters}")
-    n_windows = (int(val_len) - 1) // int(ctx)
+    val_len = strict_int(val_len, "val_len")
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx}")
+    n_windows = (val_len - 1) // ctx
     if n_windows <= 0:
         raise ValueError(f"验证集只有 {val_len} tokens，不足以组成 ctx={ctx} 的窗口")
     n_eval = min(iters, n_windows)
@@ -572,100 +576,101 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     """
     was_training = model.training
     model.eval()
-    collect_gate = model.variant not in ("standard", "null")
-    indices, n_windows = _val_eval_indices(len(val), ctx, iters)
-    if batch_windows is None:
-        batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
-    batch_windows = int(batch_windows)
-    # 设备端累积，循环结束后统一读取。
-    # 窗口等长，权重即窗口数，用 Python int 就地累计。
-    loss_acc = torch.zeros((), device=device)
-    gate_acc = torch.zeros((), device=device)
-    total_w = 0
-    gate_w_total = 0
-    window_losses = []
-    amp_ctx = amp_autocast(device, bool(amp))
-    # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
-    with torch.inference_mode():
-        # 预取流水线：在当前批前向之前发起下一窗口批的 memmap 收集与 H2D
-        # 提交；_stage_to_device 的乒乓暂存（双槽 + event 保护）保证两批
-        # 在途互不干扰。
-        n_batches = (len(indices) + batch_windows - 1) // batch_windows
-        xy = get_val_windows(val, ctx, indices[:batch_windows], device)
-        for bi, s in enumerate(range(0, len(indices), batch_windows)):
-            chunk = indices[s:s + batch_windows]
-            x, y = xy
-            if bi + 1 < n_batches:
-                xy = get_val_windows(val, ctx,
-                                     indices[s + batch_windows:s + 2 * batch_windows],
-                                     device)
-            with amp_ctx:
-                # 验证评测只消费门控均值 g，使用轻量统计；额外取每窗口损失
-                # 用于估计“有限个验证窗口”带来的抽样误差。
-                out = model(x, targets=y, need_stats=collect_gate,
-                            stats_argmax=False, return_window_losses=True)
-            nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
-            # add_(alpha=nb) 直接按批大小加权累加（loss 前向/门控闭式求和
-            # 本就以 fp32 返回）。
-            loss_acc.add_(out["loss"].detach(), alpha=float(nb))
-            total_w += nb
-            wl = out["loss_per_window"].detach().float().cpu().numpy()
-            window_losses.extend(float(v) for v in wl.reshape(-1))
-            if collect_gate and out["gate_stats"]:
-                # 在设备端先 stack 成 (n_layers,) 再求均值
-                gs = [s_["g"].detach().float().mean()
-                      for s_ in out["gate_stats"] if s_.get("g") is not None]
-                if gs:
-                    gate_acc.add_(torch.stack(gs).mean(), alpha=float(nb))
-                    gate_w_total += nb
-    # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
-    # 使 torch.load(weights_only=True) 反序列化失败且不合法
-    val_loss = float(float(loss_acc.item()) / total_w)
-    gate_mean = (float(gate_acc.item()) / gate_w_total
-                 if gate_w_total else None)
-    # 验证集只评测 eval_iters 个等间隔窗口：点估计本身带抽样误差。这里把
-    # 窗口作为抽样单元，报告窗口间标准误与 t 近似 95% CI（小样本比正态
-    # 更宽）；CI 不包含窗口间空间相关，也不替代跨随机种子的方差（后者在
-    # run_all 汇总）。
-    val_loss_se = None
-    val_loss_ci95 = None
-    val_ppl_ci95 = None
-    val_loss_min = None
-    val_loss_max = None
-    losses = np.asarray(window_losses, dtype=np.float64)
-    if losses.size and np.all(np.isfinite(losses)):
-        val_loss_min = float(losses.min())
-        val_loss_max = float(losses.max())
-        if losses.size >= 2:
-            se = float(losses.std(ddof=1) / math.sqrt(losses.size))
-            # 小样本用 t 临界值：eval_iters=20 时 t≈2.09，比正态 1.96 宽
-            # 约 7%；窗口数少时不该假装有正态大样本的精度。
-            tcrit = t_critical_95(losses.size - 1)
-            if math.isfinite(se) and tcrit is not None:
-                lo, hi = val_loss - tcrit * se, val_loss + tcrit * se
-                val_loss_se = se
-                val_loss_ci95 = [lo, hi]
-                val_ppl_ci95 = [math.exp(min(20.0, lo)),
-                                math.exp(min(20.0, hi))]
-    if was_training:
-        model.train()
-    out = {
-        "val_loss": val_loss,
-        "val_loss_se": val_loss_se,
-        "val_loss_ci95": val_loss_ci95,
-        "val_ppl_ci95": val_ppl_ci95,
-        "val_loss_min": val_loss_min,
-        "val_loss_max": val_loss_max,
-        "gate_mean": gate_mean,
-        "eval_iters_requested": int(iters),
-        "eval_iters": int(len(indices)),
-        "val_windows": int(n_windows),
-        "val_tokens_evaluated": int(len(indices) * ctx),
-    }
-    if collect_window_losses:
-        out["window_losses"] = [float(v) for v in window_losses]
-        out["window_indices"] = [int(i) for i in indices]
-    return out
+    try:
+        collect_gate = model.variant not in ("standard", "null")
+        indices, n_windows = _val_eval_indices(len(val), ctx, iters)
+        if batch_windows is None:
+            batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
+        batch_windows = int(batch_windows)
+        # 设备端累积，循环结束后统一读取。
+        # 窗口等长，权重即窗口数，用 Python int 就地累计。
+        loss_acc = torch.zeros((), device=device)
+        gate_acc = torch.zeros((), device=device)
+        total_w = 0
+        gate_w_total = 0
+        window_losses = []
+        amp_ctx = amp_autocast(device, bool(amp))
+        # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
+        with torch.inference_mode():
+            # 预取流水线：在当前批前向之前发起下一窗口批的 memmap 收集与 H2D
+            # 提交；_stage_to_device 的乒乓暂存（双槽 + event 保护）保证两批
+            # 在途互不干扰。
+            n_batches = (len(indices) + batch_windows - 1) // batch_windows
+            xy = get_val_windows(val, ctx, indices[:batch_windows], device)
+            for bi, s in enumerate(range(0, len(indices), batch_windows)):
+                chunk = indices[s:s + batch_windows]
+                x, y = xy
+                if bi + 1 < n_batches:
+                    xy = get_val_windows(val, ctx,
+                                         indices[s + batch_windows:s + 2 * batch_windows],
+                                         device)
+                with amp_ctx:
+                    # 验证评测只消费门控均值 g，使用轻量统计；额外取每窗口损失
+                    # 用于估计“有限个验证窗口”带来的抽样误差。
+                    out = model(x, targets=y, need_stats=collect_gate,
+                                stats_argmax=False, return_window_losses=True)
+                nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
+                # add_(alpha=nb) 直接按批大小加权累加（loss 前向/门控闭式求和
+                # 本就以 fp32 返回）。
+                loss_acc.add_(out["loss"].detach(), alpha=float(nb))
+                total_w += nb
+                wl = out["loss_per_window"].detach().float().cpu().numpy()
+                window_losses.extend(float(v) for v in wl.reshape(-1))
+                if collect_gate and out["gate_stats"]:
+                    # 在设备端先 stack 成 (n_layers,) 再求均值
+                    gs = [s_["g"].detach().float().mean()
+                          for s_ in out["gate_stats"] if s_.get("g") is not None]
+                    if gs:
+                        gate_acc.add_(torch.stack(gs).mean(), alpha=float(nb))
+                        gate_w_total += nb
+        # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
+        # 使 torch.load(weights_only=True) 反序列化失败且不合法
+        val_loss = float(float(loss_acc.item()) / total_w)
+        gate_mean = (float(gate_acc.item()) / gate_w_total
+                     if gate_w_total else None)
+        # 验证集只评测 eval_iters 个等间隔窗口：点估计本身带抽样误差。这里把
+        # 窗口作为抽样单元，报告窗口间标准误与 t 近似 95% CI（小样本比正态
+        # 更宽）；CI 不包含窗口间空间相关，也不替代跨随机种子的方差（后者在
+        # run_all 汇总）。
+        val_loss_se = None
+        val_loss_ci95 = None
+        val_ppl_ci95 = None
+        val_loss_min = None
+        val_loss_max = None
+        losses = np.asarray(window_losses, dtype=np.float64)
+        if losses.size and np.all(np.isfinite(losses)):
+            val_loss_min = float(losses.min())
+            val_loss_max = float(losses.max())
+            if losses.size >= 2:
+                se = float(losses.std(ddof=1) / math.sqrt(losses.size))
+                # 小样本用 t 临界值：eval_iters=20 时 t≈2.09，比正态 1.96 宽
+                # 约 7%；窗口数少时不该假装有正态大样本的精度。
+                tcrit = t_critical_95(losses.size - 1)
+                if math.isfinite(se) and tcrit is not None:
+                    lo, hi = val_loss - tcrit * se, val_loss + tcrit * se
+                    val_loss_se = se
+                    val_loss_ci95 = [lo, hi]
+                    val_ppl_ci95 = [math.exp(min(20.0, lo)),
+                                    math.exp(min(20.0, hi))]
+        out = {
+            "val_loss": val_loss,
+            "val_loss_se": val_loss_se,
+            "val_loss_ci95": val_loss_ci95,
+            "val_ppl_ci95": val_ppl_ci95,
+            "val_loss_min": val_loss_min,
+            "val_loss_max": val_loss_max,
+            "gate_mean": gate_mean,
+            "eval_iters_requested": int(iters),
+            "eval_iters": int(len(indices)),
+            "val_windows": int(n_windows),
+            "val_tokens_evaluated": int(len(indices) * ctx),
+        }
+        if collect_window_losses:
+            out["window_losses"] = [float(v) for v in window_losses]
+            out["window_indices"] = [int(i) for i in indices]
+        return out
+    finally:
+        model.train(was_training)
 
 
 def estimate_val_loss(model, val, ctx, device, iters, amp=False):

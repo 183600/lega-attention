@@ -291,6 +291,49 @@ def test_evaluate_val_reports_window_sampling_uncertainty():
     assert one["val_loss_min"] == one["val_loss"] == one["val_loss_max"]
 
 
+def test_val_eval_indices_rejects_fractional_bool_specs():
+    """eval_iters/ctx/val_len 是评测规格，bool/小数不得被 int() 静默截断。"""
+    for bad in (True, 1.5, 0, "1_0"):
+        try:
+            _val_eval_indices(100, 10, bad)
+            raise AssertionError(f"非法 eval_iters 应报错: {bad!r}")
+        except ValueError:
+            pass
+    for val_len, ctx in ((True, 10), (100.5, 10), (101, 10.5),
+                         (101, True), (101, 0)):
+        try:
+            _val_eval_indices(val_len, ctx, 2)
+            raise AssertionError(f"非法窗口规格应报错: {val_len!r}, {ctx!r}")
+        except ValueError:
+            pass
+    assert _val_eval_indices(1001, 10, 2.0)[0].tolist() == [0, 99]
+    print("  [ok] _val_eval_indices：拒绝 bool/小数/非法 ctx")
+
+
+def test_evaluate_val_restores_mode_on_error():
+    """评测抛错（验证集过短/窗口读取失败）也必须恢复调用前的 train 模式。"""
+    torch.manual_seed(0)
+    model = _tiny("lega")
+    model.train()
+    try:
+        evaluate_val(model, np.arange(5, dtype=np.int64).astype(np.uint16),
+                     ctx=10, device="cpu", iters=2, amp=False)
+        raise AssertionError("过短验证集应报错")
+    except ValueError:
+        pass
+    assert model.training, "评测异常后模型被留在 eval 模式"
+
+    val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
+    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=2, amp=False)
+    assert metrics["val_loss"] == metrics["val_loss"]
+    assert model.training, "成功评测后也应恢复 train 模式"
+
+    model.eval()
+    evaluate_val(model, val, ctx=10, device="cpu", iters=2, amp=False)
+    assert not model.training, "原本处于 eval 的模型不得被切回 train"
+    print("  [ok] evaluate_val 异常/成功均恢复调用前模式")
+
+
 def test_per_window_losses_match_individual_forwards():
     """loss_per_window 每行必须等于单独评测该窗口的损失，且均值等于总损失。"""
     torch.manual_seed(0)
