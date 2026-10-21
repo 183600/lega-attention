@@ -7,6 +7,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import tempfile
 
 import numpy as np
@@ -285,3 +286,25 @@ def test_evaluate_window_matched_restricts_scoring_positions():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] evaluate（window_spec 逐位置对齐、非法规格显式报错）")
+
+
+def test_ngram_cli_runs_data_protocol_preflight():
+    """独立 n-gram 评测也必须在已标记泄露的数据前中止。"""
+    import json
+    from lega.ngram import main as ngram_main
+    old = sys.argv
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "data_report.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"alerts": [{"level": "warning",
+                                   "code": "split_shuffled",
+                                   "message": "打乱"}]}, f)
+        sys.argv = ["ngram", "--data_dir", d]
+        try:
+            ngram_main()
+            raise AssertionError("n-gram 评测入口应执行数据协议闸门")
+        except SystemExit as e:
+            assert "数据协议前置检查失败" in str(e)
+        finally:
+            sys.argv = old
+    print("  [ok] n-gram 评测入口执行数据协议闸门（严重告警默认中止）")

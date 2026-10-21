@@ -28,6 +28,8 @@ import numpy as np
 
 from .data import load_bin, load_meta
 from .datacheck import append_test_access
+from .preflight import (allow_protocol_violations,
+                        data_protocol_preflight)
 from .repro import test_data_fingerprint
 from .utils import strict_int
 
@@ -568,15 +570,30 @@ def main():
                         "额外报告与神经评测逐位置对齐的 PPL）")
     p.add_argument("--window_iters", type=int, default=None,
                    help="神经评测的窗口数（与 --window_ctx 成对使用）")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 标记泄露也继续评测（仅用于复现历史"
+                        "实验；结果不得用于正式结论）")
     args = p.parse_args()
     if (args.window_ctx is None) != (args.window_iters is None):
         p.error("--window_ctx 与 --window_iters 必须成对给出")
+    data_preflight = data_protocol_preflight(
+        args.data_dir,
+        allow_override=allow_protocol_violations(
+            args.allow_data_protocol_violations))
+    if not data_preflight["report_present"]:
+        print("[ngram] 警告：数据目录缺少 data_report.json，"
+              "无法执行评测前防泄漏闸门（旧数据或未走统一入口）")
+    elif data_preflight["critical_violations"]:
+        print(f"[ngram] ⚠ 数据协议自检发现 "
+              f"{len(data_preflight['critical_violations'])} 个严重问题，"
+              "但已显式放行（结果不得用于正式结论）")
     window_spec = ({"ctx": args.window_ctx, "iters": args.window_iters}
                    if args.window_ctx is not None else None)
     alphas = (tuple(float(x) for x in args.alphas.split(","))
               if args.alphas else ALPHA_GRID)
     report = evaluate(args.data_dir, split=args.split, alphas=alphas,
                       allow_test=args.allow_test, window_spec=window_spec)
+    report["data_protocol_preflight"] = data_preflight
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
