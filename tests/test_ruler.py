@@ -355,9 +355,12 @@ def test_corpus_test_access_recorded():
         ok = record_corpus_test_access(d, "test", stage="ruler")
         assert ok is True
         from lega.datacheck import read_test_access_log
+        from lega.repro import sha256_file
         records = read_test_access_log(d)
         assert len(records) == 1
         assert records[0]["reason"] == "ruler_niah_corpus_distractors"
+        assert records[0]["corpus_source_sha256"] == \
+            sha256_file(os.path.join(d, "test.txt"))
         # 非 test 来源不写账本
         assert record_corpus_test_access(d, "val") is False
         assert len(read_test_access_log(d)) == 1

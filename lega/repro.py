@@ -550,6 +550,18 @@ def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
     }
 
 
+def test_data_fingerprint(data_dir: str):
+    """test.bin 的内容指纹；不存在/不可读时返回 None。
+
+    访问账本与评测溯源统一用这一个值作为“测试集版本”，避免 evaluate、
+    n-gram 基线、ruler 语料读取各自哈希不同文件而无法互相对账。
+    """
+    path = os.path.join(data_dir, "test.bin")
+    if not os.path.exists(path):
+        return None
+    return sha256_file(path)
+
+
 def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
     """下游评测统一继承上游 run 的溯源字段；缺失时按当前环境/数据即时补算。
 

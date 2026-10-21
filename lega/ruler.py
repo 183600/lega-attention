@@ -26,7 +26,7 @@ import torch
 
 from .utils import (amp_autocast, amp_dtype_for, save_json, strict_int,
                     wilson_score_ci)
-from .repro import sha256_file
+from .repro import sha256_file, test_data_fingerprint
 
 KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate",
              "quartz", "falcon", "harbor", "meadow", "thistle", "cobalt", "juniper",
@@ -689,13 +689,20 @@ def record_corpus_test_access(data_dir: str, source, ckpt_sha256: str = None,
     """
     if source != "test":
         return False
+    import os
     from .datacheck import append_test_access
+    source_path = os.path.join(data_dir, "test.txt")
     try:
         append_test_access(data_dir, {
             "reason": f"{stage}_niah_corpus_distractors",
             "ckpt_sha256": ckpt_sha256,
             "variant": variant,
             "seed": seed,
+            # 账本统一按 test.bin 版本分组；同时记录实际读取的裸 txt 哈希，
+            # 防止 txt 与 bin 不同步时审计链只覆盖派生文件。
+            "test_data_fingerprint": test_data_fingerprint(data_dir),
+            "corpus_source_sha256": (sha256_file(source_path)
+                                     if os.path.exists(source_path) else None),
         })
         return True
     except OSError:

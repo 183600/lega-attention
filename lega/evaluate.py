@@ -16,7 +16,8 @@ import torch.nn.functional as F
 from .data import get_val_windows, load_bin, load_tokenizer
 from .datacheck import append_test_access
 from .model import load_model, count_params, gate_extra_params
-from .repro import load_provenance, sha256_file
+from .repro import (load_provenance, sha256_file,
+                    test_data_fingerprint as _test_data_fingerprint)
 from .train import evaluate_val, _val_eval_indices
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
                     now_str, save_json, set_seed, strict_int)
@@ -376,11 +377,8 @@ def main():
     ckpt_sha256 = sha256_file(args.ckpt)
     # 账本必须绑定 test 数据版本：只看 checkpoint 会把“重建 test 后的合法
     # 重测”误判为重复，也无法审计同一模型到底评测过哪些测试集。
-    test_data_fingerprint = None
-    if split == "test":
-        test_path = os.path.join(args.data_dir, "test.bin")
-        if os.path.exists(test_path):
-            test_data_fingerprint = sha256_file(test_path)
+    test_data_fingerprint = (None if split != "test"
+                             else _test_data_fingerprint(args.data_dir))
     test_access = None
     if split == "test":
         # 测试集尘封协议：每次在 test 上评测都写入访问账本（data_dir 下），
