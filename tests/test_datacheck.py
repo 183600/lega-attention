@@ -247,7 +247,18 @@ def test_temporal_split_rejects_invalid_fractions():
     train, val, test, _ = temporal_split_text(
         text, train_frac="0.8", val_frac="0.1", window_frac="0.02")
     assert train and val and test
-    print("  [ok] 时序划分：非法比例在切分前显式拒绝")
+    # min_gap 是切片算术参数：bool/小数/非数值/负数必须显式拒绝，
+    # 不能 int() 截断后继续切分。
+    for bad in (True, 1.5, "bad", None, -1):
+        try:
+            temporal_split_text(text, min_gap=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 min_gap 未被拒绝: {bad!r}")
+    train, val, test, _ = temporal_split_text(text, min_gap="2")
+    assert train and val and test
+    print("  [ok] 时序划分：非法比例/min_gap 在切分前显式拒绝")
 
 
 def test_prepare_data_refuses_group_crossing_local_split(monkeypatch):

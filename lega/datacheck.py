@@ -873,6 +873,11 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         raise ValueError(f"window_frac 必须在 (0,1] 内，收到 {window_frac!r}")
     train_frac, val_frac = ratios["train_frac"], ratios["val_frac"]
     window_frac = ratios["window_frac"]
+    # min_gap 参与切点算术与文本切片：bool/小数会把它变成 1 或浮点索引
+    # （text[p1:p2] 直接 TypeError），负数则允许 val 被压到 0/负长度边界。
+    min_gap = strict_int(min_gap, "min_gap")
+    if min_gap < 0:
+        raise ValueError(f"min_gap 必须 >= 0，收到 {min_gap!r}")
     t1 = max(1, int(n * train_frac))
     t2 = max(t1 + 1, int(n * (train_frac + val_frac)))
     t2 = min(t2, n - 1)
