@@ -394,13 +394,16 @@ def test_train_nan_report_uses_first_bad_step_and_interval_candidates():
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = os.path.join(tmp, "data")
         os.makedirs(data_dir)
-        base = "the quick brown fox jumps over the lazy dog. "
+        # train/val 必须使用不同文本：重复同一句会造成 64-gram 100% 重叠，
+        # 被训练入口的数据协议闸门判为疑似跨 split 复制。
+        train_base = "the quick brown fox jumps over the lazy dog. "
+        val_base = "a slow green turtle sleeps under the old oak tree. "
         with open(os.path.join(data_dir, "train.txt"), "w",
                   encoding="utf-8") as f:
-            f.write(base * 60)
+            f.write(train_base * 60)
         with open(os.path.join(data_dir, "val.txt"), "w",
                   encoding="utf-8") as f:
-            f.write(base * 20)
+            f.write(val_base * 20)
         prepare_bins(data_dir, kind="char", force=True)
         cfg_path = os.path.join(tmp, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:

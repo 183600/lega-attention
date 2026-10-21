@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 import torch
 
-from lega.data import get_train_batch
+from lega.data import CACHE_SCHEMA, get_train_batch
 from lega.repro import (build_run_manifest, data_fingerprint, git_info,
                         load_provenance, provenance_drift, runtime_info,
                         sanity_identity_check, sha256_file, worktree_state,
@@ -269,6 +269,39 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
     print("  [ok] load_provenance：缺字段/畸形清单逐字段回退补算")
 
 
+def test_load_provenance_keeps_eval_and_training_data_fingerprints_apart():
+    """用另一份数据评测 checkpoint 时，不能把清单里的训练指纹当评测指纹。"""
+    with tempfile.TemporaryDirectory() as ckpt, \
+            tempfile.TemporaryDirectory() as data:
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        eval_fp = data_fingerprint(data)["digest"]
+        train_fp = "0" * 64
+        mpath = os.path.join(ckpt, "run_manifest.json")
+        with open(mpath, "w", encoding="utf-8") as f:
+            json.dump({"data": {"digest": train_fp}}, f)
+
+        p = load_provenance(ckpt, data_dir=data)
+        assert p["data_fingerprint"] == eval_fp
+        assert p["eval_data_fingerprint"] == eval_fp
+        assert p["train_data_fingerprint"] == train_fp
+        assert p["data_fingerprint_matches_training"] is False
+
+        # 同一份数据：显式确认一致。
+        with open(mpath, "w", encoding="utf-8") as f:
+            json.dump({"data": {"digest": eval_fp}}, f)
+        p = load_provenance(ckpt, data_dir=data)
+        assert p["data_fingerprint"] == eval_fp
+        assert p["data_fingerprint_matches_training"] is True
+
+        # 未提供 data_dir 的只读审计仍回退到清单，但不声称已核对。
+        p = load_provenance(ckpt)
+        assert p["data_fingerprint"] == eval_fp
+        assert p["eval_data_fingerprint"] is None
+        assert p["data_fingerprint_matches_training"] is None
+    print("  [ok] load_provenance 区分评测/训练数据指纹并标记是否一致")
+
+
 def test_load_provenance_rejects_stale_sanity_evidence():
     """下游评测不得把身份不一致的旧 sanity PASS 继承成自己的闸门结论。"""
     with tempfile.TemporaryDirectory() as d:
@@ -322,7 +355,8 @@ def test_same_seed_training_is_bitwise_reproducible():
         rng.integers(0, 64, size=512, dtype=np.uint16).tofile(
             os.path.join(data_dir, "val.bin"))
         with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64}, f)
+            json.dump({"tokenizer": "char", "vocab_size": 64,
+                       "cache_schema": CACHE_SCHEMA}, f)
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
@@ -630,7 +664,8 @@ def test_train_rejects_stale_sanity_evidence_identity():
             os.path.join(data_dir, "val.bin"))
         with open(os.path.join(data_dir, "meta.json"), "w",
                   encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64}, f)
+            json.dump({"tokenizer": "char", "vocab_size": 64,
+                       "cache_schema": CACHE_SCHEMA}, f)
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
@@ -682,7 +717,8 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
             os.path.join(data_dir, "val.bin"))
         with open(os.path.join(data_dir, "meta.json"), "w",
                   encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64}, f)
+            json.dump({"tokenizer": "char", "vocab_size": 64,
+                       "cache_schema": CACHE_SCHEMA}, f)
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,

@@ -555,6 +555,13 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
 
     返回平铺字段便于直接 update 进结果 JSON：
       code_commit / code_dirty / code_branch / data_fingerprint / config_sha256
+
+    数据身份必须区分两端：``train_data_fingerprint`` 来自 run_manifest（训练
+    时数据），``eval_data_fingerprint``/``data_fingerprint`` 来自本次
+    ``data_dir``（实际评测数据）。旧实现让清单里的训练指纹覆盖当前数据指纹，
+    用另一份数据评测 checkpoint 时 eval.json 仍声称是训练数据，数据错配
+    无法被发现。两者不一致时显式记录
+    ``data_fingerprint_matches_training=False``；无法核对时为 None。
     """
     manifest = None
     mpath = os.path.join(ckpt_dir, "run_manifest.json")
@@ -572,11 +579,21 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
     # 而不是留 None 污染 eval.json 的溯源与受控变量审计。
     cfg = os.path.join(ckpt_dir, "config_used.json")
     git = git_info()
+    current_data = None
+    if data_dir:
+        try:
+            current_data = data_fingerprint(data_dir)["digest"]
+        except FileNotFoundError:
+            pass
     out = {
         "code_commit": git.get("commit"),
         "code_dirty": git.get("dirty"),
         "code_branch": git.get("branch"),
-        "data_fingerprint": None,
+        # 兼容字段：优先表示本次实际评测数据；没有 data_dir 时才回退到清单。
+        "data_fingerprint": current_data,
+        "eval_data_fingerprint": current_data,
+        "train_data_fingerprint": None,
+        "data_fingerprint_matches_training": None,
         "config_sha256": (sha256_file(cfg) if os.path.exists(cfg) else None),
         # 训练 run 是否通过了小批量过拟合 sanity 闸门（无清单/旧清单为 None）。
         # sanity_verified 区分“PASS 已核对身份”与“旧证据/无法核对”：
@@ -586,11 +603,6 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "sanity_variant": None,
         "sanity_file": None,
     }
-    if data_dir:
-        try:
-            out["data_fingerprint"] = data_fingerprint(data_dir)["digest"]
-        except FileNotFoundError:
-            pass
     if isinstance(manifest, dict) and manifest:
         mgit = manifest.get("git")
         mdata = manifest.get("data")
@@ -600,11 +612,20 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
                 ("code_commit", mgit, "commit"),
                 ("code_dirty", mgit, "dirty"),
                 ("code_branch", mgit, "branch"),
-                ("data_fingerprint", mdata, "digest"),
                 ("config_sha256", manifest, "config_sha256")):
             val = src.get(field)
             if val is not None:
                 out[key] = val
+        train_data = mdata.get("digest")
+        if train_data is not None:
+            out["train_data_fingerprint"] = train_data
+            if current_data is None:
+                # 没有当前数据目录可核对：保留旧行为（供只读审计使用），
+                # 但不冒充“已核对一致”。
+                out["data_fingerprint"] = train_data
+            else:
+                out["data_fingerprint_matches_training"] = (
+                    current_data == train_data)
         msanity = manifest.get("sanity")
         if isinstance(msanity, dict):
             identity = msanity.get("identity")
