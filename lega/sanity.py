@@ -164,6 +164,20 @@ def gradient_coverage(model) -> dict:
             "nonfinite_grad": nonfinite, "zero_grad": zero}
 
 
+def grad_norm(params) -> float | None:
+    """可训练参数梯度的全局 L2 范数（当前 grad 快照，不改变梯度）。
+
+    ``clip_grad_norm_`` 的返回值是 **裁剪前** 范数（PyTorch 文档语义），
+    因此需在裁剪后另调本函数才能得到后范数；两者同报，才能区分“本来正常”
+    和“爆炸后被截到 grad_clip”。无梯度时返回 None。
+    """
+    norms = [torch.linalg.vector_norm(p.grad.detach(), ord=2)
+             for p in params if p.grad is not None]
+    if not norms:
+        return None
+    return float(torch.linalg.vector_norm(torch.stack(norms), ord=2))
+
+
 def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
                       abs_tol: float = LOSS_CONSISTENCY_ABS_TOL) -> bool:
     """训练路径 loss 与直接 logits 交叉熵的数值一致性判定（None/非有限即失败）。"""
@@ -252,7 +266,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                                 weight_decay=0.0, betas=(0.9, 0.95),
                                 fused=fused, foreach=not fused)
         history = []
-        first_grad_norm = None
+        first_grad_norm_preclip = None
+        first_grad_norm_postclip = None
         first_train_loss = None
         nan_seen = False
         loss_no_grad = False
@@ -281,12 +296,25 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             # 这里能定位到具体参数名（见 gradient_coverage 文档）。
             if step == 0:
                 grad_cov = gradient_coverage(model)
-            gn = torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
-            if first_grad_norm is None:
-                first_grad_norm = float(gn)
+            # clip_grad_norm_ 返回裁剪前总范数；日志点再取裁剪后的快照。
+            # 首步两项都留存，其余步只为 history 计算后范数。
+            at_log = (step == 0) or ((step + 1) % int(log_every) == 0)
+            preclip = float(torch.nn.utils.clip_grad_norm_(
+                trainable_params, grad_clip))
+            postclip = grad_norm(trainable_params) if at_log else None
+            if step == 0:
+                first_grad_norm_preclip = preclip
+                first_grad_norm_postclip = postclip
             opt.step()
-            if (step + 1) % int(log_every) == 0 or step == 0:
-                history.append({"step": step + 1, "loss": float(loss.detach())})
+            if at_log:
+                history.append({
+                    "step": step + 1, "loss": float(loss.detach()),
+                    "lr": cur_lr,
+                    "grad_norm_preclip": preclip,
+                    "grad_norm_postclip": postclip,
+                    "grad_norm_was_clipped": (
+                        preclip > float(grad_clip)),
+                })
         final = batch_metrics(model, x, y)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_mm
@@ -305,8 +333,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "loss_decreased": final["loss"] < initial["loss"],
         "finite": (not nan_seen) and math.isfinite(final["loss"]),
         "loss_requires_grad": not loss_no_grad,
-        "gradient_nonzero_first_step": (first_grad_norm is not None
-                                        and first_grad_norm > 0.0),
+        # 用 clip 前范数判断“梯度是否非零”：grad_clip=0 或爆炸被截断时，
+        # 后范数可能恒为 0/阈值，不能作为梯度存在的证据。
+        "gradient_nonzero_first_step": (first_grad_norm_preclip is not None
+                                        and first_grad_norm_preclip > 0.0),
         "all_params_get_grads": (grad_cov is not None
                                  and not grad_cov["missing_grad"]),
         # 全零梯度同样说明该参数与 loss 之间没有有效信号（例如子模块被
@@ -338,7 +368,15 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "log_vocab": log_vocab,
         "initial_loss_minus_log_vocab": initial_loss_gap,
         "active_regularization": active_reg,
-        "first_grad_norm": first_grad_norm,
+        # first_grad_norm 保留旧字段名（clip 前原始范数）；新增后范数、
+        # 是否触发裁剪与阈值，避免把“截断后的稳定”误当健康。
+        "first_grad_norm": first_grad_norm_preclip,
+        "first_grad_norm_preclip": first_grad_norm_preclip,
+        "first_grad_norm_postclip": first_grad_norm_postclip,
+        "first_grad_norm_was_clipped": (
+            first_grad_norm_preclip is not None
+            and first_grad_norm_preclip > float(grad_clip)),
+        "grad_clip": float(grad_clip),
         "first_train_loss": first_train_loss,
         "loss_consistency": {
             "train_path": first_train_loss,
@@ -353,8 +391,9 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
                    "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
                    "logits CE（首步）、y=x 右移一位与初始 loss≈log(V)，"
-                   "其余中间结果（梯度范数>0、逐参数梯度覆盖含全零梯度、"
-                   "逐层统计）请结合本 JSON 人工复核，并使用真实数据小规模"
+                   "其余中间结果（clip 前梯度范数>0、逐参数梯度覆盖含全零"
+                   "梯度、逐层统计与 history 中的 clip 前后范数）请结合本 "
+                   "JSON 人工复核，并使用真实数据小规模"
                    "预跑。"),
     }
 

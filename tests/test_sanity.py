@@ -58,12 +58,16 @@ def test_overfit_check_passes_on_healthy_model():
     model = _model()
     x, y = _batch()
     res = run_overfit_check(model, x, y, steps=150, lr=5e-3, device="cpu",
-                            seed=0, warmup=10, log_every=50,
+                            seed=0, warmup=10, log_every=50, grad_clip=10.0,
                             loss_threshold=0.1, acc_threshold=0.99)
     assert res["passed"], res["checks"]
     assert res["final"]["loss"] < res["initial"]["loss"]
     assert res["final"]["token_acc"] > 0.95
     assert res["first_grad_norm"] and res["first_grad_norm"] > 0
+    # first_grad_norm 必须是 clip 前原始范数；后范数只作为被裁剪后的对照
+    assert res["first_grad_norm"] == res["first_grad_norm_preclip"]
+    assert res["first_grad_norm_postclip"] is not None
+    assert res["first_grad_norm_was_clipped"] is False, res["first_grad_norm"]
     # 中间结果核对：训练路径 loss ≡ 直接 logits CE；标签为 next-token 移位
     assert res["checks"]["train_loss_matches_direct_logits"], res["loss_consistency"]
     assert res["checks"]["next_token_shift_consistent"]
@@ -168,6 +172,32 @@ def test_overfit_check_detects_detached_submodule():
     assert any(n.startswith("blocks.") for n in missing), missing
     print(f"  [ok] detach 子模块导致 {len(missing)} 个参数收不到梯度，"
           "被逐参数覆盖检查拦下")
+
+
+def test_overfit_check_reports_preclip_grad_norm():
+    """只有 clip 前范数不足以看出梯度是否被截断：爆炸会被截成 grad_clip。
+
+    保留裁剪后范数与是否触发裁剪，才能避免 grad_clip 越小、报告越“稳定”，
+    进而完全掩盖首步梯度爆炸。
+    """
+    model = _model()
+    x, y = _batch()
+    res = run_overfit_check(model, x, y, steps=2, lr=0.0, device="cpu",
+                            seed=0, log_every=1, grad_clip=1e-6)
+    pre = res["first_grad_norm_preclip"]
+    post = res["first_grad_norm_postclip"]
+    assert pre is not None and post is not None
+    assert pre > res["grad_clip"] > 0
+    assert post <= res["grad_clip"] + 1e-12, (pre, post)
+    assert res["first_grad_norm"] == pre
+    assert res["first_grad_norm_was_clipped"] is True
+    assert res["checks"]["gradient_nonzero_first_step"] is True
+    # 每个日志点都保留 clip 前后两套读数，不能只在首步做样子。
+    for h in res["history"]:
+        assert h["grad_norm_preclip"] is not None
+        assert h["grad_norm_postclip"] is not None
+        assert h["grad_norm_was_clipped"] is True
+    print(f"  [ok] sanity 区分 clip 前后梯度范数: {pre:.3g} -> {post:.3g}")
 
 
 def test_overfit_check_detects_all_zero_grad_submodule():
