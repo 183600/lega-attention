@@ -80,6 +80,26 @@ def test_greedy_generation_deterministic():
     assert torch.equal(a, b)
 
 
+def test_generate_rejects_invalid_length_and_top_k():
+    model = _tiny("standard")
+    model.eval()
+    idx = torch.randint(0, 64, (1, 5))
+    for bad in (-1, 1.5, True):
+        try:
+            model.generate(idx, max_new_tokens=bad)
+            raise AssertionError(f"max_new_tokens={bad!r} 应被拒绝")
+        except ValueError as exc:
+            assert "max_new_tokens" in str(exc)
+    for bad in (0, -1, 1.5, True):
+        try:
+            model.generate(idx, max_new_tokens=2, greedy=False, top_k=bad)
+            raise AssertionError(f"top_k={bad!r} 应被拒绝")
+        except ValueError as exc:
+            assert "top_k" in str(exc)
+    assert torch.equal(model.generate(idx, max_new_tokens=0), idx)
+    print("  [ok] generate：拒绝非法 max_new_tokens/top_k")
+
+
 def test_generate_eos_stops_per_row_without_batch_coupling():
     """提供 eos_token_id 时各行的 EOS 判定必须独立：批内某行的命中/未命中
     不能改变其它行的生成内容，也不得把「各行不同步命中」误判成不停。"""

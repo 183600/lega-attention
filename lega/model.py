@@ -614,6 +614,15 @@ class GPT(nn.Module):
         self.eval()
         try:
             B, T0 = idx.shape
+            if (isinstance(max_new_tokens, bool)
+                    or not isinstance(max_new_tokens, int)
+                    or max_new_tokens < 0):
+                raise ValueError(
+                    f"max_new_tokens 必须是非负整数，收到 {max_new_tokens!r}")
+            if top_k is not None and (isinstance(top_k, bool)
+                                      or not isinstance(top_k, int)
+                                      or top_k <= 0):
+                raise ValueError(f"top_k 必须是正整数或 None，收到 {top_k!r}")
             # 生成上限受 block_size（RoPE 位置表）约束：在分配缓冲/缓存前
             # 提前报出清晰错误，避免生成到一半才在 forward 中触发位置断言
             assert T0 + max_new_tokens <= self.block_size, (
