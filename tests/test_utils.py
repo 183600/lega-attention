@@ -587,4 +587,29 @@ def test_calibration_metrics_brier_ece_and_baseline():
     assert one["brier"] is not None and one["ece"] is None
     empty = calibration_metrics([], [])
     assert empty["n"] == 0 and empty["brier"] is None
-    print("  [ok] calibration_metrics（Brier/ECE/常数基线/边界）")
+    # n_bins 是计数身份：bool/小数/非数值不能被 int() 截断或让 range() 崩溃
+    for bad in (True, 10.5, "bad", None):
+        try:
+            calibration_metrics([0.5, 0.6], [0.0, 1.0], n_bins=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n_bins 未被拒绝: {bad!r}")
+    # bool 分数/标签不是概率观测：True 不能冒充 1.0 的正类或完美分数
+    mixed = calibration_metrics([True, 0.25, 0.75], [True, 0.0, 1.0])
+    assert mixed["n"] == 2 and mixed["n_pos"] == 1
+    assert abs(mixed["base_rate"] - 0.5) < 1e-12
+    no_lab = calibration_metrics([0.5, 0.6], [True, False])
+    assert no_lab["n"] == 0 and no_lab["brier"] is None
+    # 长度不一致必须显式拒绝，不能按短边静默截断配对
+    try:
+        calibration_metrics([0.1, 0.2], [0.0])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("scores/labels 长度不一致未被拒绝")
+    nstr = calibration_metrics([0.2] * 10, [0.0] * 8 + [1.0] * 2,
+                               n_bins="10")
+    assert nstr["n_bins"] == 10 and len(nstr["bins"]) == 10
+    print("  [ok] calibration_metrics（Brier/ECE/常数基线/边界/"
+          "非法 n_bins 与 bool 观测）")

@@ -846,8 +846,26 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     ece, mce, n_bins, bins}；分数先 clip 到 [0,1]，非有限值与非法标签剔除；
     单一类别时 brier 仍可算，但 ECE 的“校准”语义不完整，返回 None。
     """
-    scores = np.asarray(scores, dtype=np.float64)
-    labels = np.asarray(labels, dtype=np.float64)
+    n_bins = strict_int(n_bins, "n_bins")
+
+    def _obs(values):
+        # 数值 ndarray 快速路径；列表/元组里 bool 与 float 混合时
+        # np.asarray 会先统一成 float 而丢掉 bool 身份，因此这些输入必须
+        # 走 object 逐元素校验，避免 True 被悄悄折成 1.0 观测。
+        arr = np.asarray(values)
+        if (isinstance(values, np.ndarray) and arr.dtype != object
+                and arr.dtype.kind != "b"):
+            return arr.astype(np.float64, copy=False).ravel()
+        vals = [_finite_observation(v)
+                for v in np.asarray(values, dtype=object).ravel()]
+        return np.array([np.nan if v is None else v for v in vals],
+                        dtype=np.float64)
+
+    scores = _obs(scores)
+    labels = _obs(labels)
+    if scores.size != labels.size:
+        raise ValueError(
+            f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
     m = np.isfinite(scores) & ((labels == 0.0) | (labels == 1.0))
     scores, labels = scores[m], labels[m]
     n = int(scores.size)
