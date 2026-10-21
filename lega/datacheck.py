@@ -1096,7 +1096,13 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "protocol": {
             "split_first_then_preprocess": True,
-            "fit_on": "train_only",
+            # 必须如实记录分词器实际拟合来源：字符级词表在 train 上拟合，
+            # 而 GPT-2 BPE 是公开预训练词表（与语料无关、不构成泄露）。统一
+            # 写死 "train_only" 会与 tokenizer.fit_on 矛盾，使“无全量拟合”
+            # 的审计声明失真。
+            "fit_on": (tokenizer.get("fit_on")
+                       if isinstance(tokenizer, dict) and tokenizer.get("fit_on")
+                       else "train_only"),
             "test_sealed": True,
             "shuffle_at_split_time": False,
             "batch_shuffle_during_training_allowed": True,

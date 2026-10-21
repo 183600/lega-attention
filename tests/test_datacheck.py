@@ -636,6 +636,10 @@ def test_prepare_bins_writes_report_and_decontaminates():
             rep = json.load(f)
         assert rep["duplicates"]["train_lines_dropped_as_duplicates_of_eval"] == 1
         assert rep["tokenizer"]["fit_on"] == "train"
+        # 协议声明的拟合来源必须与分词器实际来源一致：字符级=train、
+        # BPE=gpt2_pretrained；写死 "train_only" 会与 tokenizer.fit_on 矛盾，
+        # 使“无全量拟合”的审计声明失真。
+        assert rep["protocol"]["fit_on"] == rep["tokenizer"]["fit_on"]
         assert rep["tokenizer"]["unk_rate"]["val"] > 0  # 独有的 § 不在 train 词表
         tok = load_tokenizer(d)
         assert "§" not in tok.stoi
