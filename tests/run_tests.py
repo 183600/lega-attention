@@ -1,9 +1,12 @@
 """极简测试入口（不依赖 pytest）: python -m tests.run_tests（或 python tests/run_tests.py）"""
+import contextlib
 import importlib
 import inspect
+import io
 import os
 import sys
 import traceback
+from types import SimpleNamespace
 
 # 允许以脚本方式直接运行（python tests/run_tests.py）：此时 sys.path[0] 是
 # tests/ 而非仓库根，需要显式把仓库根加入路径才能 import tests.* / lega.*。
@@ -57,6 +60,12 @@ class _MonkeyPatch:
         self._env.append((name, old))
         os.environ[name] = str(value)
 
+    def delenv(self, name, raising=True):
+        if name not in os.environ and raising:
+            raise KeyError(name)
+        old = os.environ.pop(name, None)
+        self._env.append((name, old))
+
     def undo(self):
         for target, name, old, had in reversed(self._setattrs):
             if had:
@@ -75,8 +84,24 @@ class _MonkeyPatch:
                 os.environ[name] = old
 
 
+class _CapSys:
+    """最小 pytest `capsys` 兼容：捕获 stdout/stderr，readouterr 后清空。"""
+
+    def __init__(self):
+        self._out = io.StringIO()
+        self._err = io.StringIO()
+
+    def readouterr(self):
+        out, err = self._out.getvalue(), self._err.getvalue()
+        self._out.seek(0)
+        self._out.truncate(0)
+        self._err.seek(0)
+        self._err.truncate(0)
+        return SimpleNamespace(out=out, err=err)
+
+
 def _run_with_fixtures(fn):
-    """按签名注入支持的 fixture（当前仅 monkeypatch）；未知参数直接报错。"""
+    """按签名注入支持的 fixture（monkeypatch/capsys）；未知参数直接报错。"""
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
@@ -85,18 +110,32 @@ def _run_with_fixtures(fn):
              if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
     kwargs = {}
     mp = None
+    cap = None
     for n in names:
         if n == "monkeypatch":
             if mp is None:
                 mp = _MonkeyPatch()
             kwargs[n] = mp
+        elif n == "capsys":
+            if cap is None:
+                cap = _CapSys()
+            kwargs[n] = cap
         else:
             raise TypeError(f"测试函数 {fn.__name__} 需要未知 fixture {n!r}")
     try:
-        fn(**kwargs)
+        if cap is not None:
+            with contextlib.redirect_stdout(cap._out), \
+                    contextlib.redirect_stderr(cap._err):
+                fn(**kwargs)
+        else:
+            fn(**kwargs)
     finally:
         if mp is not None:
             mp.undo()
+        if cap is not None:
+            # 测试内部已 readouterr 的输出不重复；剩余输出照常可见。
+            sys.stdout.write(cap._out.getvalue())
+            sys.stderr.write(cap._err.getvalue())
 
 
 def main() -> int:

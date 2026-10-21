@@ -1,10 +1,11 @@
-"""测试入口 `tests.run_tests` 的自检：无 pytest 时必须能注入 monkeypatch。
+"""测试入口 `tests.run_tests` 的自检：无 pytest 时必须能注入 monkeypatch/capsys。
 
-回归：run_tests 以 `fn()` 直接调用测试函数，遇到带 `monkeypatch` 形参的
-测试会抛 “missing 1 required positional argument” 而假失败；此处的
-_MonkeyPatch 兼容实现必须能 setattr/setenv 且自动回滚。
+回归：run_tests 以 `fn()` 直接调用测试函数，遇到带 `monkeypatch`/`capsys`
+形参的测试会抛 “missing 1 required positional argument” 而假失败；兼容
+实现必须能注入、捕获输出并自动回滚。
 """
 import os
+import sys
 
 from tests.run_tests import _MonkeyPatch, _run_with_fixtures
 
@@ -39,6 +40,40 @@ def test_monkeypatch_fixture_setenv_roundtrip(monkeypatch):
     monkeypatch.setenv(key, "1")
     assert os.environ[key] == "1"
     print("  [ok] _MonkeyPatch.setenv 生效（fixture 注入可运行）")
+
+
+def test_monkeypatch_fixture_delenv_roundtrip():
+    """delenv 生效并自动恢复原环境变量；缺失时 raising=False 不报错。"""
+    key = "LEGA_RUN_TESTS_DELENV_PROBE"
+    os.environ[key] = "orig"
+
+    def use(monkeypatch):
+        monkeypatch.delenv(key)
+        assert key not in os.environ
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "new")
+
+    _run_with_fixtures(use)
+    assert os.environ.get(key) == "orig"
+    os.environ.pop(key, None)
+    print("  [ok] _MonkeyPatch.delenv 生效并自动恢复")
+
+
+def test_capsys_fixture_captures_and_clears():
+    """capsys 捕获 stdout/stderr，readouterr 后清空，测试输出仍可见。"""
+
+    def use(capsys):
+        print("probe-out")
+        print("probe-err", file=sys.stderr)
+        got = capsys.readouterr()
+        assert got.out == "probe-out\n", got
+        assert got.err == "probe-err\n", got
+        got2 = capsys.readouterr()
+        assert got2.out == "" and got2.err == ""
+        print("  [ok] _CapSys 捕获 stdout/stderr 并可清空")
+
+    _run_with_fixtures(use)
+    print("  [ok] capsys fixture 注入可运行")
 
 
 def test_run_with_fixtures_rejects_unknown_fixture():
