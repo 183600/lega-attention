@@ -281,6 +281,21 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 其中一条长行，块哈希就不再与 eval 匹配，剩余短行会漏检。
     texts, document_stats = decontaminate_documents(texts)
     texts, duplicate_stats = decontaminate_texts(texts, min_chars=40)
+    # 行级删除会改变块结构：删掉块中的长行后，剩余短行可能恰好重新拼成
+    # 与 val/test 完全相同的多行块。只做“先块后行”会漏掉这种新生成的
+    # 副本，因此行级确有删除时再跑一遍块级去污染（只会继续删，必然终止）。
+    line_dropped = sum(duplicate_stats[k] for k in (
+        "train_lines_dropped_as_duplicates_of_eval",
+        "train_lines_dropped_as_normalized_duplicates_of_eval",
+        "train_intra_split_duplicate_lines_removed",
+        "train_intra_split_normalized_duplicate_lines_removed"))
+    if line_dropped:
+        texts, post_doc_stats = decontaminate_documents(texts)
+        for key in ("train_blocks_dropped_as_duplicates_of_eval",
+                    "train_intra_split_duplicate_blocks_removed",
+                    "train_lines_dropped", "train_chars_dropped"):
+            document_stats[key] = (int(document_stats.get(key, 0))
+                                   + int(post_doc_stats.get(key, 0)))
     duplicate_stats["document_level"] = document_stats
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
     # 原文此后只由局部变量引用：逐段编码完即释放
