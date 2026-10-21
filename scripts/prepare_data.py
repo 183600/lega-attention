@@ -186,7 +186,7 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
 
 
 def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
-    """读回已写入的 train/val/test.txt，核对跨 split 无共享长行。
+    """兼容包装：实现已移至 lega.datacheck.verify_splits_disjoint。
 
     split_protocol 里 "document_disjoint(no_shuffle)" 是上游来源的**声明**，
     不能只靠断言：这里对实际写出的文本做一次可复核的检查——若任意两个
@@ -194,34 +194,8 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
     并非真正互斥，"无共享样本" 的协议被证伪。下游 prepare_bins 也会做去污染
     诊断，这里只是把元数据声明与其实际内容绑定，避免报告"声明一套、数据一套"。
     """
-    from lega.datacheck import _normalize_line
-    def digest(s: str) -> str:
-        import hashlib
-        return hashlib.blake2b(s.encode("utf-8"), digest_size=16).hexdigest()
-    sets = {}
-    for split, path in txt_paths.items():
-        exact, norm = set(), set()
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    s = line.strip()
-                    if len(s) < min_chars:
-                        continue
-                    exact.add(digest(s))
-                    norm.add(digest(_normalize_line(s)))
-        sets[split] = (exact, norm)
-    overlaps = {}
-    for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
-        if a not in sets or b not in sets:
-            continue
-        ex = len(sets[a][0] & sets[b][0])
-        nm = len(sets[a][1] & sets[b][1])
-        overlaps[f"{a}_{b}"] = {"exact_lines": ex, "normalized_lines": nm}
-    disjoint = all(v["exact_lines"] == 0 and v["normalized_lines"] == 0
-                   for v in overlaps.values())
-    return {"verified_disjoint": bool(disjoint),
-            "overlap_long_lines": overlaps,
-            "min_chars": int(min_chars)}
+    from lega.datacheck import verify_splits_disjoint as _impl
+    return _impl(txt_paths, min_chars=min_chars)
 
 
 def main():

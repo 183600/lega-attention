@@ -81,6 +81,21 @@ def main():
         os.remove(test_txt)
 
     from lega.data import prepare_bins
+    from lega.datacheck import verify_splits_disjoint
+    # 协议声明“无共享样本”必须与实际写出的文本核对，而不是只作文本断言
+    split_protocol = {
+        "mode": "independent_generation",
+        "order": "train/val/test 各自独立生成（共享分布、无共享样本）",
+        "shuffled": False,
+    }
+    split_protocol.update(verify_splits_disjoint({
+        "train": os.path.join(args.out_dir, "train.txt"),
+        "val": os.path.join(args.out_dir, "val.txt"),
+        "test": test_txt}))
+    if not split_protocol.get("verified_disjoint", True):
+        raise SystemExit(
+            "[dummy] 生成器自检失败：三个 split 的实际文本存在跨 split 共享长行"
+            f"（{split_protocol['overlap_long_lines']}），与“无共享样本”声明不符")
     meta = prepare_bins(
         args.out_dir, kind="auto", force=True,
         extra_report={
@@ -93,11 +108,7 @@ def main():
                 "val_words": int(args.val_words),
                 "test_words": int(args.test_words),
             },
-            "split_protocol": {
-                "mode": "independent_generation",
-                "order": "train/val/test 各自独立生成（共享分布、无共享样本）",
-                "shuffled": False,
-            },
+            "split_protocol": split_protocol,
         })
     print(f"[dummy] 完成: {meta}")
 
