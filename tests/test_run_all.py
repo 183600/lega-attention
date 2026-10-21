@@ -2166,6 +2166,50 @@ def test_ngram_comparison_prefers_window_matched_reference():
     print("  [ok] ngram_baseline_comparison（窗口对齐参考优先、回退显式披露）")
 
 
+def test_ngram_window_paired_test_uses_same_window_indices():
+    """n-gram 对比必须能逐窗口配对；窗口序号不一致时显式跳过而不是强配。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        idx = list(range(0, 30, 3))  # 10 个窗口，越过最低窗口门槛
+        spec = {"ctx": 8, "iters": 10, "n_windows": 20, "n_eval": 10,
+                "n_tokens": 80}
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "ppl": {"bigram": 100.0},
+            "selected_model": "bigram",
+            "ppl_window_matched": {"bigram": 100.0, "n_tokens": 80},
+            "window_losses_matched": [1.0] * 10,
+            "window_indices_matched": idx,
+            "window_losses_matched_model": "bigram",
+            "window_spec": spec})
+        base = {"variant": "lega", "split": "val", "ppl": 20.0,
+                "eval_ctx": 8, "eval_iters": 10, "val_windows": 20,
+                "val_tokens_evaluated": 80,
+                "window_losses": [1.5] * 10, "window_indices": idx}
+        runs = {"lega": {s: {"eval": dict(base, ppl=20.0 + s)}
+                         for s in (1, 2, 3)}}
+        out = ngram_baseline_comparison(runs, tmp)
+        r = out["rows"][0]
+        assert out["reference_source"] == "window_matched", out
+        assert r["window_paired_n_seeds"] == 3, r
+        assert abs(r["window_paired_mean_diff"] - 0.5) < 1e-12, r
+        assert r["window_paired_p_adj"] is not None, r
+        assert r["window_paired_verdict"].startswith("窗口级显著劣于"), r
+        text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
+        assert "逐窗口配对（探索性" in text and "ΔNLL(神经−n-gram)" in text
+        # 窗口序号不一致：整行逐窗口统计必须放弃，并写明原因
+        bad = {s: {"eval": dict(base, ppl=20.0 + s, window_indices=[0, 4] * 5)}
+               for s in (1, 2, 3)}
+        out_bad = ngram_baseline_comparison({"lega": bad}, tmp)
+        rb = out_bad["rows"][0]
+        assert rb["window_paired_mean_diff"] is None, rb
+        assert "窗口序号不一致" in (rb["window_paired_skip_reason"] or ""), rb
+        assert "逐窗口配对（探索性" not in "\n".join(
+            _render_baseline_sections(tmp, ngram_cmp=out_bad))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] n-gram 对比：逐窗口配对 + 窗口序号不一致显式降级")
+
+
 def test_neural_eval_window_spec_matches_train_overrides():
     """n-gram 对齐用的窗口规格必须与训练/评测实际口径一致（含冒烟覆盖）。"""
     tiny = {"block_size": 256, "train_ctx": 256, "eval_iters": 20}

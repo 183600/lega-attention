@@ -306,6 +306,9 @@ def test_window_positions_match_neural_eval_rule():
         assert window_positions(100, bad, 2) is None, bad
         assert window_positions(100, 16, bad) is None, bad
     assert window_positions("100", "16", "2") is not None
+    pos, starts = window_positions(500, 32, 5, return_starts=True)
+    assert np.array_equal(pos, window_positions(500, 32, 5))
+    assert starts.tolist() == [0, 3, 7, 10, 14]
     print("  [ok] window_positions（与 _val_eval_indices 逐例一致、非法规格返回 None）")
 
 
@@ -343,6 +346,13 @@ def test_evaluate_window_matched_restricts_scoring_positions():
             si["alpha_unigram"], si["alpha_bigram"], si["lambda"], 4)
         assert math.isclose(wm["interpolated_bigram"], m_interp["ppl"],
                             rel_tol=1e-12)
+        # 逐窗口损失必须与选定模型/窗口序号对齐，且均值与窗口对齐 PPL 同口径
+        assert rep["window_indices_matched"] == [0, 4]
+        assert rep["window_losses_matched_model"] == rep["selected_model"]
+        losses = rep["window_losses_matched"]
+        assert len(losses) == 2
+        assert math.isclose(math.exp(sum(losses) / len(losses)),
+                            wm[rep["selected_model"]], rel_tol=1e-12)
         # 一时一用的全 split 口径仍在（保留绝对难度参照）
         assert rep["ppl"]["unigram"] is not None
         # 非法规格：显式报错字段而不是假装对齐

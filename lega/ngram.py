@@ -297,7 +297,8 @@ def ppl_interpolated_bigram(eval_ids: np.ndarray, uni: np.ndarray,
                                   alpha_uni, alpha_bi, lam, vocab_size)
 
 
-def window_positions(n_tokens: int, ctx: int, iters: int):
+def window_positions(n_tokens: int, ctx: int, iters: int,
+                     return_starts: bool = False):
     """神经评测窗口实际打分的 token 位置（与 train._val_eval_indices 同规则）。
 
     神经 PPL 只在 `eval_iters` 个等间隔、不重复的窗口上评测：窗口序号按
@@ -328,7 +329,10 @@ def window_positions(n_tokens: int, ctx: int, iters: int):
         starts = (np.arange(n_eval, dtype=np.int64) * (n_windows - 1)
                   // (n_eval - 1))
     offsets = np.arange(1, ctx + 1, dtype=np.int64)
-    return (starts[:, None] * ctx + offsets[None, :]).reshape(-1)
+    pos = (starts[:, None] * ctx + offsets[None, :]).reshape(-1)
+    # return_starts 供逐窗口对齐：窗口序号是 s·ctx（与神经评测的
+    # window_indices 完全一致），pos 只是这些窗口内被计分的 token 位置。
+    return (pos, starts) if return_starts else pos
 
 
 def _validate_vocab_and_ids(meta: dict, arrays) -> int:
@@ -355,6 +359,25 @@ def _validate_vocab_and_ids(meta: dict, arrays) -> int:
                 f"0..{vocab_size - 1}）：meta 与 bin 不一致，"
                 "拒绝用错误词表计算 n-gram 基线")
     return vocab_size
+
+
+def _set_ngram_window_losses(report: dict, probs, starts, n_eval: int,
+                             ctx: int, order: str) -> None:
+    """把选定简单模型的逐 token NLL 聚成逐窗口平均损失（与神经口径一致）。
+
+    神经 `window_losses` 是每个窗口内目标 token 的平均交叉熵，窗口序号是
+    窗口起点 s·ctx。这里必须用同样的 reshape/mean，才能在下游逐窗口配对。
+    """
+    if starts is None or n_eval <= 0:
+        return
+    nll = -np.log(np.clip(np.asarray(probs, dtype=np.float64),
+                          1e-300, None))
+    if nll.size != int(n_eval) * int(ctx):
+        return
+    losses = nll.reshape(int(n_eval), int(ctx)).mean(axis=1)
+    report["window_losses_matched"] = [float(v) for v in losses]
+    report["window_indices_matched"] = [int(v) for v in starts[:int(n_eval)]]
+    report["window_losses_matched_model"] = order
 
 
 def evaluate(data_dir: str, split: str = "val",
@@ -536,6 +559,11 @@ def evaluate(data_dir: str, split: str = "val",
             spec_ctx = spec_iters = None
         pos = (window_positions(len(eval_ids), spec_ctx, spec_iters)
                if spec_ctx is not None and spec_iters is not None else None)
+        if pos is not None and spec_ctx is not None and spec_iters is not None:
+            pos, starts = window_positions(
+                len(eval_ids), spec_ctx, spec_iters, return_starts=True)
+        else:
+            starts = None
         if pos is None:
             report["window_spec"] = None
             report["window_spec_error"] = (
@@ -560,6 +588,13 @@ def evaluate(data_dir: str, split: str = "val",
                         continue
                     if order == "unigram":
                         m = ppl_unigram(eval_ids[pos], uni, a)
+                        if order == selected_model:
+                            cur = np.asarray(eval_ids[pos], dtype=np.int64)
+                            probs = _smoothed_probs(
+                                uni[cur] + a,
+                                float(uni.sum()) + a * vocab_size)
+                            _set_ngram_window_losses(
+                                report, probs, starts, n_eval, spec_ctx, order)
                     else:
                         prev = np.asarray(eval_ids[pos - 1], dtype=np.int64)
                         keys = prev * vocab_size
@@ -568,6 +603,12 @@ def evaluate(data_dir: str, split: str = "val",
                                                     keys)
                         m = _bigram_ppl(c_pair, ctx_counts[prev],
                                         int(pos.size), a, vocab_size)
+                        if order == selected_model:
+                            probs = _smoothed_probs(
+                                c_pair + a,
+                                ctx_counts[prev] + a * vocab_size)
+                            _set_ngram_window_losses(
+                                report, probs, starts, n_eval, spec_ctx, order)
                 else:
                     if interp is None:
                         continue
@@ -579,6 +620,20 @@ def evaluate(data_dir: str, split: str = "val",
                         eval_ids[pos], uni, c_pair, ctx_counts[prev],
                         int(pos.size), interp["alpha_unigram"],
                         interp["alpha_bigram"], interp["lambda"], vocab_size)
+                    if order == selected_model:
+                        cur = np.asarray(eval_ids[pos], dtype=np.int64)
+                        total = float(uni.sum())
+                        p_uni = _smoothed_probs(
+                            uni[cur] + interp["alpha_unigram"],
+                            total + interp["alpha_unigram"] * vocab_size)
+                        p_bi = _smoothed_probs(
+                            c_pair + interp["alpha_bigram"],
+                            ctx_counts[prev]
+                            + interp["alpha_bigram"] * vocab_size)
+                        probs = (interp["lambda"] * p_bi
+                                 + (1.0 - interp["lambda"]) * p_uni)
+                        _set_ngram_window_losses(
+                            report, probs, starts, n_eval, spec_ctx, order)
                 wm[order] = m["ppl"]
             report["ppl_window_matched"] = wm
             report["window_spec"] = {

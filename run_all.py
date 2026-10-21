@@ -1263,6 +1263,45 @@ def _eval_window_losses(d):
     return out
 
 
+def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
+                            seed: int = 0) -> dict:
+    """逐窗口配对差的分层 bootstrap（先重采样种子、再重采样窗口）。
+
+    输入 seed_diffs 是每个种子的窗口差数组；返回平均差、百分位区间、
+    中心化零分布 p 值（P(|mean*−obs| ≥ |obs|)）与同号重采样比例。
+    固定 seed 保证可复现；窗口独立重采样忽略空间相关，区间仅为近似。
+    """
+    arrays = [np.asarray(d, dtype=np.float64) for d in (seed_diffs or [])
+              if np.asarray(d).size]
+    if not arrays:
+        return None
+    n_seeds = len(arrays)
+    obs = float(np.mean([d.mean() for d in arrays]))
+    rng = np.random.default_rng(seed)
+    reps = np.empty(int(n_resamples), dtype=np.float64)
+    for r in range(int(n_resamples)):
+        sidx = rng.integers(0, n_seeds, n_seeds)
+        means = []
+        for si in sidx:
+            d = arrays[int(si)]
+            w = rng.integers(0, d.size, d.size)
+            means.append(float(d[w].mean()))
+        reps[r] = float(np.mean(means))
+    alpha = 0.025
+    lo, hi = np.quantile(reps, [alpha, 1.0 - alpha])
+    ge = int((np.abs(reps - obs) >= abs(obs)).sum())
+    p_boot = (((ge + 1) / (int(n_resamples) + 1))
+              if obs != 0 else 1.0)
+    same_sign = (float(np.mean((reps > 0) == (obs > 0)))
+                 if obs != 0 else 0.0)
+    return {"mean_diff": obs, "mean_diff_ci95": [float(lo), float(hi)],
+            "p": p_boot, "bootstrap_same_sign": same_sign,
+            "n_resamples": int(n_resamples),
+            "n_seeds": n_seeds,
+            "n_windows_min": int(min(d.size for d in arrays)),
+            "n_windows_max": int(max(d.size for d in arrays))}
+
+
 def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
                              seed: int = 0) -> list:
     """逐窗口配对 + 种子/窗口分层 bootstrap（探索性评估不确定性证据）。
@@ -1328,26 +1367,10 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
         if not seed_diffs:
             continue
         n_seeds = len(seed_diffs)
-        obs = float(np.mean([d.mean() for d in seed_diffs]))
-        # 分层 bootstrap：种子与窗口两级都重采样；同一输入固定种子可复现。
-        rng = np.random.default_rng(seed)
-        reps = np.empty(int(n_resamples), dtype=np.float64)
-        for r in range(int(n_resamples)):
-            sidx = rng.integers(0, n_seeds, n_seeds)
-            means = []
-            for si in sidx:
-                d = seed_diffs[int(si)]
-                w = rng.integers(0, d.size, d.size)
-                means.append(float(d[w].mean()))
-            reps[r] = float(np.mean(means))
-        alpha = 0.025
-        lo, hi = np.quantile(reps, [alpha, 1.0 - alpha])
-        # 中心化 bootstrap 零分布：p ≈ P(|mean*−obs| ≥ |obs|)。
-        ge = int((np.abs(reps - obs) >= abs(obs)).sum())
-        p_boot = (((ge + 1) / (int(n_resamples) + 1))
-                  if obs != 0 else 1.0)
-        same_sign = (float(np.mean((reps > 0) == (obs > 0)))
-                     if obs != 0 else 0.0)
+        stats = _window_bootstrap_stats(seed_diffs, n_resamples, seed)
+        if stats is None:
+            continue
+        obs = stats["mean_diff"]
         enough = (n_seeds >= MIN_PPL_WINDOW_SEEDS
                   and min(window_counts) >= MIN_PPL_WINDOWS)
         res = {
@@ -1362,10 +1385,10 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "min_window_seeds": MIN_PPL_WINDOW_SEEDS,
             "min_windows_per_seed": MIN_PPL_WINDOWS,
             "mean_diff": obs,
-            "mean_diff_ci95": [float(lo), float(hi)],
+            "mean_diff_ci95": stats["mean_diff_ci95"],
             "ppl_ratio": float(math.exp(min(20.0, obs))),
-            "p": p_boot, "p_adj": None,
-            "bootstrap_same_sign": same_sign,
+            "p": stats["p"], "p_adj": None,
+            "bootstrap_same_sign": stats["bootstrap_same_sign"],
             "n_resamples": int(n_resamples),
             "per_seed": per_seed,
             "verdict": None,
@@ -2554,6 +2577,16 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     wm_map = wm_map if isinstance(wm_map, dict) else {}
     wspec = ng.get("window_spec")
     wspec = wspec if isinstance(wspec, dict) else {}
+    # n-gram 逐窗口损失（选定模型）用于真正的窗口级配对，而不是只把
+    # 神经逐种子 PPL 与一个常数比较。缺字段/模型不匹配时显式降级。
+    ng_win_model = ng.get("window_losses_matched_model")
+    ng_win = _eval_window_losses({
+        "window_losses": ng.get("window_losses_matched"),
+        "window_indices": ng.get("window_indices_matched")})
+    if (ng_win is not None and ng_win_model is not None
+            and ng_win_model != ref_name):
+        ng_win = None
+        ng_win_model = None
     ng_split = ng.get("split")
     # 第一遍：收集逐种子 PPL 与该 run 是否与窗口规格逐字段一致。
     staged, incomparable = [], []
@@ -2564,6 +2597,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         m = _variant_seed_map(runs, v)
         vals, seeds_used, eval_splits, excl_seeds = [], [], set(), []
         matched = []
+        win_maps = []
         for s in _sorted_seeds(m):
             slot = m.get(s)
             d = slot.get("eval") if isinstance(slot, dict) else None
@@ -2583,6 +2617,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             vals.append(p)
             seeds_used.append(s)
             matched.append(_eval_matches_window_spec(d, wspec))
+            win_maps.append(_eval_window_losses(d))
         if eval_splits:
             # 只要存在 split 错位的种子就必须显式列出（哪怕同变体另有可比
             # 种子已被纳入）：静默丢弃部分种子同样会让读者高估证据完整性
@@ -2595,7 +2630,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             staged.append({"variant": v, "vals": vals,
                            "seeds": [_integral_value(s)
                                      for s in seeds_used],
-                           "matched": matched})
+                           "matched": matched, "win_maps": win_maps})
     # 参考值决策（第一步）：全部纳入比较的 run 都与窗口规格一致，且
     # window-matched PPL 可用 → 用逐位置对齐参考；否则整体回退全 split。
     # 同一 Holm 家族必须共用同一参考值，不能逐行混用。
@@ -2609,6 +2644,31 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     rows = []
     for st in staged:
         v, vals = st["variant"], st["vals"]
+        # 窗口级配对：同一批窗口序号上 d_w = loss_neural − loss_ngram。
+        # 仅当全体 run 都采用逐位置对齐参考、n-gram 有选定模型的逐窗口
+        # 损失且窗口序号完全一致时才计算；否则明确置 None，不按位置强配。
+        win_diffs = []
+        win_skip_reason = None
+        if not use_window:
+            win_skip_reason = "参考已回退全 split，无逐窗口对齐"
+        elif ng_win is None:
+            win_skip_reason = "n-gram 缺少选定模型的逐窗口损失"
+        else:
+            for wmap in st.get("win_maps") or []:
+                if not wmap or set(wmap) != set(ng_win):
+                    win_skip_reason = "神经与 n-gram 的窗口序号不一致"
+                    win_diffs = []
+                    break
+                keys = sorted(wmap)
+                arr = np.asarray([wmap[k] - ng_win[k] for k in keys],
+                                 dtype=np.float64)
+                if arr.size == 0 or not np.all(np.isfinite(arr)):
+                    win_skip_reason = "逐窗口损失非有限值"
+                    win_diffs = []
+                    break
+                win_diffs.append(arr)
+        win_stats = (_window_bootstrap_stats(win_diffs)
+                     if win_diffs else None)
         res = paired_t_test(vals, [ref_ppl] * len(vals))
         res.update({"candidate": v, "reference": ref_name,
                     "metric": "PPL vs ngram", "lower_is_better": True})
@@ -2626,6 +2686,27 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "mean_diff_ci95": res.get("mean_diff_ci95"),
             "p_perm": res.get("p_perm"), "mde": res.get("mde"),
             "token_matched": bool(all(st["matched"])) and use_window,
+            "window_paired_n_seeds": (win_stats["n_seeds"]
+                                      if win_stats else None),
+            "window_paired_mean_diff": (win_stats["mean_diff"]
+                                        if win_stats else None),
+            "window_paired_ci95": (win_stats["mean_diff_ci95"]
+                                   if win_stats else None),
+            "window_paired_ppl_ratio": (
+                float(math.exp(min(20.0, win_stats["mean_diff"])))
+                if win_stats else None),
+            "window_paired_p": (win_stats["p"] if win_stats else None),
+            "window_paired_p_adj": None,
+            "window_paired_n_windows_min": (
+                win_stats["n_windows_min"] if win_stats else None),
+            "window_paired_n_windows_max": (
+                win_stats["n_windows_max"] if win_stats else None),
+            "window_paired_enough": (
+                bool(win_stats and win_stats["n_seeds"] >= MIN_PPL_WINDOW_SEEDS
+                     and win_stats["n_windows_min"] >= MIN_PPL_WINDOWS)
+                if win_stats else None),
+            "window_paired_skip_reason": win_skip_reason,
+            "window_paired_verdict": None,
             "verdict": None,
         })
     # 回退原因：把“为什么没用窗口对齐参考”显式落盘，避免读者默认已对齐。
@@ -2647,6 +2728,8 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 "ngram_ppl_full_split": ref_ppl_full,
                 "ngram_ppl_window_matched": wm_ref,
                 "window_spec": wspec or None,
+                "window_paired_reference_model": ng_win_model,
+                "window_paired_available": bool(ng_win is not None),
                 "fallback_reason": fallback_reason,
                 "incomparable": incomparable,
                 "note": "没有与 n-gram 同 split 的神经评测结果可比"}
@@ -2663,6 +2746,22 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             r["verdict"] = "显著劣于统计基线（严重）"
         else:
             r["verdict"] = "无显著差异（对照 MDE）"
+    # 窗口级配对也是独立检验族：Holm 校正只作用于有逐窗口数据的变体。
+    win_rows = [r for r in rows if r.get("window_paired_p") is not None]
+    win_pads = holm_bonferroni([r.get("window_paired_p") for r in win_rows])
+    for r, padj in zip(win_rows, win_pads):
+        r["window_paired_p_adj"] = padj
+        if r.get("window_paired_enough") is False:
+            r["window_paired_verdict"] = (
+                "证据不足（种子或窗口数低于门槛），仅报点估计/区间")
+        elif padj is None:
+            r["window_paired_verdict"] = "无法检验"
+        elif padj < ALPHA and r["window_paired_mean_diff"] < 0:
+            r["window_paired_verdict"] = "窗口级显著优于统计基线（Holm 校正后）"
+        elif padj < ALPHA:
+            r["window_paired_verdict"] = "窗口级显著劣于统计基线（Holm 校正后）"
+        else:
+            r["window_paired_verdict"] = "窗口级无显著差异（Holm 校正后）"
     note = ("n-gram 无种子方差：逐种子 PPL 与同一常数配对 = 单样本检验；"
             "本对比为补充性/探索性证据，不替代变体间受控对比")
     if use_window:
@@ -2675,6 +2774,8 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "ngram_ppl_full_split": ref_ppl_full,
             "ngram_ppl_window_matched": wm_ref,
             "window_spec": wspec or None,
+            "window_paired_reference_model": ng_win_model,
+            "window_paired_available": bool(ng_win is not None),
             "fallback_reason": fallback_reason,
             "holm_family_size": len(rows),
             "note": note}
@@ -3010,6 +3111,37 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         if not matched and cmp.get("fallback_reason"):
             lines.append(f"  ⚠ 未使用逐位置对齐参考：{cmp['fallback_reason']}"
                          "（重跑 n-gram 基线或对齐 eval 规格后即可对齐）。")
+        win_rows = [r for r in cmp["rows"]
+                    if r.get("window_paired_mean_diff") is not None]
+        if win_rows:
+            lines += [
+                "",
+                "  **逐窗口配对（探索性；比“与常数做单样本检验”多利用窗口"
+                "抽样信息）**",
+                "",
+                "| 变体 | 种子 | 窗口数 | ΔNLL(神经−n-gram) | 95% CI | PPL比 | "
+                "p_adj(Holm) | 判定 |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+            for r in win_rows:
+                ci = r.get("window_paired_ci95") or [None, None]
+                ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+                        if ci[0] is not None and ci[1] is not None else "-")
+                ratio = (f"{r['window_paired_ppl_ratio']:.4f}"
+                         if r.get("window_paired_ppl_ratio") is not None else "-")
+                padj = (_fmt4(r.get("window_paired_p_adj"))
+                        if r.get("window_paired_p_adj") is not None else "-")
+                lines.append(
+                    f"| {r.get('variant')} | {r.get('window_paired_n_seeds')} | "
+                    f"{r.get('window_paired_n_windows_min')}–"
+                    f"{r.get('window_paired_n_windows_max')} | "
+                    f"{_fmt4(r.get('window_paired_mean_diff'))} | {ci_s} | "
+                    f"{ratio} | {padj} | {r.get('window_paired_verdict')} |")
+            lines += ["", "  注: ΔNLL<0 表示神经模型在相同窗口上更好；分层 "
+                      "bootstrap 同时重采样训练种子与评测窗口，窗口独立"
+                      "重采样忽略空间相关，故只作探索性证据。该检验要求"
+                      "神经与 n-gram 使用同一批窗口序号；不满足时主表仍"
+                      "保留，但逐窗口行不生成。"]
     elif cmp.get("error"):
         lines.append(f"- ⚠ 简单基线对比不可用：{cmp['error']}")
     elif cmp.get("note") and not cmp.get("rows"):
