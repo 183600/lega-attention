@@ -150,6 +150,48 @@ def data_report_binding_issue(data_dir: str):
     return None
 
 
+def data_source_hash_issue(data_dir: str):
+    """检查 bin 缓存记录的源文本哈希是否仍与当前 txt 一致。
+
+    prepare_bins 命中缓存时会核对，但训练入口可以绕过它直接读 bin。若
+    train/val/test.txt 在构建 bin 后被改动，训练/评测仍会静默使用旧缓存：
+    此时 data_report.json 的统计与实际语料脱节，最坏情况是评测用了已被
+    清洗/替换前的 test。只要 meta 记录过源哈希就强校验；旧缓存没记录时
+    返回 None，交由 cache_schema 检查处理。
+    """
+    path = os.path.join(data_dir, "meta.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return "meta.json 不可解析，无法核对源文本哈希"
+    if not isinstance(meta, dict):
+        return "meta.json 顶层不是对象，无法核对源文本哈希"
+    recorded = meta.get("source_sha256")
+    if recorded is None:
+        return None
+    if not isinstance(recorded, dict):
+        return "meta.json 的 source_sha256 不是对象，无法核对源文本哈希"
+    for split in ("train", "val", "test"):
+        txt_path = os.path.join(data_dir, f"{split}.txt")
+        if not os.path.exists(txt_path):
+            continue
+        expected = recorded.get(split)
+        if not expected:
+            return (f"{split}.txt 存在但 meta 未记录其源哈希：bin 可能是由"
+                    "旧版/不同文本构建，须重建")
+        try:
+            actual = sha256_file(txt_path)
+        except OSError as e:
+            return f"无法读取 {split}.txt 核对源哈希: {e}"
+        if actual != expected:
+            return (f"{split}.txt 与构建 bin 时的源哈希不一致（源文本已改动，"
+                    "缓存过期）：data_report 的诊断不再对应当前语料，须重建")
+    return None
+
+
 def data_cache_schema_issue(data_dir: str):
     """检查 bin 缓存是否由当前数据管线生成、词表拟合来源是否可信。"""
     path = os.path.join(data_dir, "meta.json")
@@ -191,6 +233,7 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     report = load_data_report(data_dir)
     binding_issue = data_report_binding_issue(data_dir)
     schema_issue = data_cache_schema_issue(data_dir)
+    source_hash_issue = data_source_hash_issue(data_dir)
     critical = list(critical_split_alerts(report))
     for issue in data_report_protocol_issues(report):
         critical.append({"level": "warning", "code": "data_report_protocol",
@@ -201,10 +244,14 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     if schema_issue:
         critical.append({"level": "warning", "code": "data_cache_schema",
                          "message": schema_issue})
+    if source_hash_issue:
+        critical.append({"level": "warning", "code": "data_source_hash",
+                         "message": source_hash_issue})
     info = {
         "report_present": report is not None,
         "binding_issue": binding_issue,
         "cache_schema_issue": schema_issue,
+        "source_hash_issue": source_hash_issue,
         "critical_violations": critical,
         "override": bool(allow_override),
     }
