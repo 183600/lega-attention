@@ -588,6 +588,42 @@ def test_ngram_overlap_detects_and_clears():
     print("  [ok] 64-gram 采样筛查：植入的跨 split 复制被检出，独立流为 0")
 
 
+def test_ngram_overlap_ignores_unk_collisions():
+    """不同未见字符都映射 <unk>，不能因此被当成跨 split 复制。"""
+    a = np.array([0] * 50 + [1] * 50, dtype=np.uint16)
+    b = np.array([0] * 50 + [2] * 50, dtype=np.uint16)
+    raw = ngram_overlap(a, b, n=8, n_samples=200)
+    assert raw["windows_found_in_train_sample"] > 0
+    res = ngram_overlap(a, b, n=8, n_samples=200, ignore_ids={0})
+    assert res["windows_found_in_train_sample"] == 0
+    assert res["overlap_rate"] == 0.0
+    print("  [ok] 64-gram 筛查：<unk> 碰撞不当作跨 split 复制证据")
+
+
+def test_prepare_bins_does_not_flag_unk_collision(monkeypatch):
+    """字符级 OOV 长串（val/test 各用不同未见字符）不得触发 hard 重叠告警。"""
+    import lega.data as data_mod
+    monkeypatch.setattr(data_mod, "get_gpt2_tokenizer",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no tiktoken")))
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write("The quick brown fox jumps over the lazy dog. " * 50)
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write("あ" * 300 + "\n")
+        with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
+            f.write("Ω" * 300 + "\n")
+        meta = prepare_bins(d, kind="auto")
+        assert meta["tokenizer"] == "char"
+        with open(os.path.join(d, "data_report.json"), encoding="utf-8") as f:
+            rep = json.load(f)
+        assert rep["contamination"]["val_test"][
+            "windows_found_in_train_sample"] == 0
+        bad = {a["code"] for a in rep["alerts"]
+               if a["code"].startswith("ngram_overlap")}
+        assert not bad, bad
+    print("  [ok] prepare_bins：字符级 OOV 碰撞不产生跨 split 重叠告警")
+
+
 def test_ngram_overlap_rejects_non_token_ids_and_bad_params():
     """越界/非整数 id 不得被 astype(uint16) 静默环绕，n/n_samples 也须合法。"""
     ok = np.array([0, 1, 2, 3], dtype=np.int64)

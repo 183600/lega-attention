@@ -553,12 +553,16 @@ def unknown_char_rate(tok, text: str):
 
 # ---------------------------------------------------------------- 泄漏筛查
 
-def _window_hashes(ids, n: int, n_samples: int, seed: int):
+def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
     """采样 n 长 token 窗口的哈希集合（有放回采样，重复可忽略）。
 
     id 必须是 [0, 65536) 内的整数（项目 token 流统一 uint16）。旧实现直接
     `astype(np.uint16)`：70000 会环绕成 4464，与合法 token 共享哈希，既可能
     把真实泄漏漏报，也可能把无关窗口误报为重叠。脏数据必须显式拒绝。
+
+    ignore_ids 用于排除含指定 id 的窗口（字符级分词器的 <unk>）：不同未见
+    字符都会映射到同一个 unk，若不排除，val/test 的 OOV 长串会被误报成
+    跨 split 复制并触发 hard fail。
     """
     if isinstance(n, bool) or not isinstance(n, (int, np.integer)):
         raise ValueError(f"n 必须是正整数，收到 {n!r}")
@@ -591,6 +595,10 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int):
     windows = np.lib.stride_tricks.sliding_window_view(ids, n)
     picked = np.ascontiguousarray(windows[np.asarray(starts, dtype=np.int64)])
     picked = picked.astype(np.uint16, copy=False)
+    if ignore_ids:
+        ignore = np.fromiter({int(i) for i in ignore_ids}, dtype=np.uint16)
+        if ignore.size:
+            picked = picked[~np.any(np.isin(picked, ignore), axis=1)]
     out = set()
     for row in picked:
         out.add(hashlib.blake2b(row.tobytes(), digest_size=16).digest())
@@ -598,14 +606,17 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int):
 
 
 def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 20000,
-                  seed: int = 0) -> dict:
+                  seed: int = 0, ignore_ids=None) -> dict:
     """采样长 n-gram 哈希筛查 eval 窗口在 train 中出现的比例（泄漏下界指标）。
 
     两侧都采样，因此结果是“采样到的最小重叠”，不是精确上界；>0 即说明存在
     跨 split 的逐 token 复制，应人工核查。n=64 足够长，自然语言巧合重叠可忽略。
+    ignore_ids 见 _window_hashes：字符级 <unk> 不应作为复制证据。
     """
-    train_h = _window_hashes(train_ids, n, n_samples, seed)
-    eval_h = _window_hashes(eval_ids, n, n_samples, seed + 1)
+    train_h = _window_hashes(train_ids, n, n_samples, seed,
+                             ignore_ids=ignore_ids)
+    eval_h = _window_hashes(eval_ids, n, n_samples, seed + 1,
+                            ignore_ids=ignore_ids)
     if not eval_h:
         return {"n": int(n), "eval_windows_sampled": 0, "overlap_rate": None}
     hits = len(train_h & eval_h)
@@ -624,9 +635,11 @@ SHORT_NGRAM_N = 32
 
 
 def short_ngram_overlap(train_ids, eval_ids, n: int = SHORT_NGRAM_N,
-                        n_samples: int = 20000, seed: int = 0) -> dict:
+                        n_samples: int = 20000, seed: int = 0,
+                        ignore_ids=None) -> dict:
     """短 n-gram 重叠诊断（默认 n=32，告警用）。与 ngram_overlap 同口径。"""
-    res = ngram_overlap(train_ids, eval_ids, n=n, n_samples=n_samples, seed=seed)
+    res = ngram_overlap(train_ids, eval_ids, n=n, n_samples=n_samples, seed=seed,
+                        ignore_ids=ignore_ids)
     res["diagnostic_only"] = True
     return res
 

@@ -364,18 +364,31 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         streams["test"] = te
     stream_stats = {name: token_stream_stats(arr, tok.n_vocab, name)
                     for name, arr in streams.items()}
-    contamination = {"train_val": ngram_overlap(tr, va)}
+    # 字符级分词器把所有未见字符映射到同一个 <unk>：不同 split 的 OOV 长串
+    # 会在 token 层变成完全相同的 0 序列，若直接做 n-gram 重叠会被误判为
+    # “语料复制”并触发 hard fail。排除含 unk 的窗口，只让真实 token 作为
+    # 泄漏证据（原文级重复仍由行/块去污染与 verify_splits_disjoint 检查）。
+    ignore_ids = None
+    if tok.name == "char" and UNK_TOKEN in getattr(tok, "stoi", {}):
+        ignore_ids = {int(tok.unk_id)}
+    contamination = {"train_val": ngram_overlap(
+        tr, va, ignore_ids=ignore_ids)}
     # 短 n-gram 筛查：64-gram 会漏掉“整句/整段复用但 <64 token”的模板化泄露；
     # 短 n 更易命中自然搭配，因此只作诊断告警（见 leakage_alerts）。
-    contamination_short = {"train_val": short_ngram_overlap(tr, va)}
+    contamination_short = {"train_val": short_ngram_overlap(
+        tr, va, ignore_ids=ignore_ids)}
     distribution = {"val_vs_train": distribution_shift(tr, va, tok.n_vocab)}
     if te is not None:
-        contamination["train_test"] = ngram_overlap(tr, te)
+        contamination["train_test"] = ngram_overlap(
+            tr, te, ignore_ids=ignore_ids)
         # eval 两侧也要互查：val 用于选 checkpoint，test 用于最终报告；
         # 二者若有共享片段，val 选择会部分“预演”test，test 不再独立。
-        contamination["val_test"] = ngram_overlap(va, te)
-        contamination_short["train_test"] = short_ngram_overlap(tr, te)
-        contamination_short["val_test"] = short_ngram_overlap(va, te)
+        contamination["val_test"] = ngram_overlap(
+            va, te, ignore_ids=ignore_ids)
+        contamination_short["train_test"] = short_ngram_overlap(
+            tr, te, ignore_ids=ignore_ids)
+        contamination_short["val_test"] = short_ngram_overlap(
+            va, te, ignore_ids=ignore_ids)
         distribution["test_vs_train"] = distribution_shift(tr, te, tok.n_vocab)
         distribution["test_vs_val"] = distribution_shift(va, te, tok.n_vocab)
     tokenizer_report = {
