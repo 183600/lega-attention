@@ -189,6 +189,10 @@ def test_test_split_sealed_and_access_logged():
         assert os.path.exists(log_path)
         text = open(log_path, encoding="utf-8").read()
         assert "ngram_baseline" in text
+        from lega.repro import sha256_file
+        assert rep["test_access"]["distinct_test_data_versions"] == 1
+        assert sha256_file(os.path.join(tmp, "test.bin")) in \
+            rep["test_access"]["test_data_fingerprints"]
         assert ALPHA_GRID[0] > 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -28,6 +28,7 @@ import numpy as np
 
 from .data import load_bin, load_meta
 from .datacheck import append_test_access
+from .repro import sha256_file
 from .utils import strict_int
 
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
@@ -447,9 +448,12 @@ def evaluate(data_dir: str, split: str = "val",
         "ppl_by_alpha": {},
     }
     if split == "test":
+        test_path = os.path.join(data_dir, "test.bin")
+        test_fp = sha256_file(test_path) if os.path.exists(test_path) else None
         report["test_access"] = append_test_access(data_dir, {
             "split": "test", "kind": "ngram_baseline",
             "ckpt": "ngram-baseline",
+            "test_data_fingerprint": test_fp,
             "note": "简单统计基线评测（α 在 val 上选择）"})
     for order in ("unigram", "bigram", "interpolated_bigram"):
         if order == "unigram":
