@@ -22,6 +22,8 @@ from .curves import (LIVE_WARN_EVALS, curve_observability_warnings,
                      live_overfit_hint)
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
+from .preflight import (allow_protocol_violations,  # noqa: E402
+                        data_protocol_preflight)
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, now_str,
@@ -759,7 +761,28 @@ def main():
                         "“本 run 通过代码正确性闸门”的摘要与哈希写入 "
                         "run_manifest.json，使 checkpoint 可自证（run_all "
                         "默认透传）")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 检测到打乱/字符切分/文档跨 split/"
+                        "跨 split n-gram 重叠也继续训练（仅用于复现历史实验；"
+                        "run_all 通过同名参数与环境变量向子进程透传）")
     args = p.parse_args()
+
+    # 数据协议闸门必须在任何训练计算之前执行：直接 `python -m lega.train`
+    # 与 run_all/调优 trial 共用同一份防泄漏结论，避免“报告有告警但训练照跑”。
+    allow_override = allow_protocol_violations(
+        args.allow_data_protocol_violations)
+    data_preflight = data_protocol_preflight(
+        args.data_dir, allow_override=allow_override)
+    if not data_preflight["report_present"]:
+        print("[train] 警告：数据目录缺少 data_report.json，"
+              "无法执行训练前防泄漏闸门（旧数据或未走统一入口）")
+    elif data_preflight["critical_violations"]:
+        detail = "；".join(
+            f"[{a.get('code')}] {a.get('message')}"
+            for a in data_preflight["critical_violations"][:5])
+        print(f"[train] ⚠ 数据协议自检发现 "
+              f"{len(data_preflight['critical_violations'])} 个严重问题，"
+              f"但已显式放行（结果不得用于正式结论）：{detail}")
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -791,7 +814,9 @@ def main():
                      "tag": tag,
                      # 显式写入实际生效的早停口径：CLI 覆盖也必须进入受控变量审计
                      "early_stop_patience": early_stop_patience,
-                     "early_stop_min_delta": early_stop_min_delta})
+                     "early_stop_min_delta": early_stop_min_delta,
+                     # 数据协议是否被显式放行：正式结果必须能区分
+                     "data_protocol_override": bool(allow_override)})
 
     set_seed(seed)
     meta = load_meta(args.data_dir)

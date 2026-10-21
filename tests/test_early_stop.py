@@ -80,12 +80,17 @@ def test_config_min_delta_rejects_nonfinite_and_out_of_range():
 
 
 def _write_data(d: str) -> None:
-    """构造足够长的小语料（字符级），保证 train/val 都能组出 ctx=32 的窗口。"""
-    base = "the quick brown fox jumps over the lazy dog. "
+    """构造足够长且 train/val 不共享长串的小语料（字符级）。
+
+    两个 split 使用不同句子：重复同一句会让 64-gram 重叠率 100%，
+    训练入口的数据协议闸门会（正确地）拒绝这份“自己泄露给自己”的假数据。
+    """
+    train_base = "the quick brown fox jumps over the lazy dog. "
+    val_base = "a slow green turtle sleeps under the old oak tree. "
     with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
-        f.write(base * 60)
+        f.write(train_base * 60)
     with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
-        f.write(base * 20)
+        f.write(val_base * 20)
 
 
 def _run_train(cfg: dict, data_dir: str, out_dir: str, extra_argv=()):

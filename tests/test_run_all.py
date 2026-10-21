@@ -81,6 +81,26 @@ def test_data_protocol_preflight_blocks_critical_violations():
     print("  [ok] 数据协议闸门：严重违规默认中止，显式覆盖放行，报告缺失仅告警")
 
 
+def test_direct_train_entry_runs_data_protocol_preflight(monkeypatch):
+    """直接 `python -m lega.train` 也必须被同一份防泄漏闸门拦截。"""
+    from lega.train import main as train_main
+    with tempfile.TemporaryDirectory() as d:
+        _write_json(os.path.join(d, "data_report.json"), {
+            "alerts": [{"level": "warning", "code": "split_shuffled",
+                        "message": "打乱"}]})
+        cfg = os.path.join(d, "cfg.json")
+        _write_json(cfg, {"seed": 7})
+        monkeypatch.setattr(sys, "argv", [
+            "lega.train", "--config", cfg, "--variant", "standard",
+            "--data_dir", d, "--out_dir", os.path.join(d, "out")])
+        try:
+            train_main()
+            raise AssertionError("直接训练入口应执行数据协议闸门")
+        except SystemExit as e:
+            assert "数据协议前置检查失败" in str(e)
+    print("  [ok] 直接训练入口执行数据协议闸门（严重告警默认中止）")
+
+
 def test_data_report_binding_detects_tampering():
     with tempfile.TemporaryDirectory() as d:
         rp = os.path.join(d, "data_report.json")
