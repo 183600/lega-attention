@@ -706,11 +706,20 @@ def _make_span(rows: np.ndarray, ctx: int) -> np.ndarray:
 
 
 def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
-                    rng: np.random.Generator):
-    """随机偏移采样 (x, y)，y 为 x 右移一位。"""
+                    rng: np.random.Generator, order_hasher=None):
+    """随机偏移采样 (x, y)，y 为 x 右移一位。
+
+    order_hasher（可选）接收本批窗口起点序列的规范化字节流。训练脚本用它
+    记录**实际采样顺序**的 SHA-256：仅比较 seed/config 不足以证明各变体
+    真的消费了同一批训练数据（例如采样代码路径被改、RNG 被提前消耗），
+    而数据顺序不同会让“方法对比”混入数据混杂。
+    """
     if len(train) < ctx + 1:
         raise ValueError(f"训练集只有 {len(train)} tokens，不足以采样 ctx={ctx}")
     ix = rng.integers(0, len(train) - ctx, size=batch_size)
+    if order_hasher is not None:
+        # 固定小端 int64，保证跨平台/跨进程的指纹口径一致。
+        order_hasher.update(np.asarray(ix, dtype="<i8").tobytes())
     # 取 (batch_size, ctx+1) 的索引；uint16 贯穿到 H2D，设备端再转 long；
     # (train, span) 元组让 memmap 花式索引写入 pinned 暂存缓冲
     span = _make_span(ix, ctx)

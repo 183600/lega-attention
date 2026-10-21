@@ -457,6 +457,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     eval_protocols = []
     selection_points = []
     eval_protocol_missing = []
+    data_order_runs = []
+    data_order_missing = []
     attention_backends = {}
     attention_key_seen = False
     for v in variants:
@@ -539,6 +541,12 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             actual_meta.append((f"{v}/seed{seed}", ev.get("steps"),
                                 ev.get("tokens_seen"), early_stopped,
                                 meta["steps_planned"]))
+            order_sha = ev.get("data_order_sha256")
+            if isinstance(order_sha, str) and order_sha:
+                data_order_runs.append((seed, f"{v}/seed{seed}", order_sha,
+                                        early_stopped))
+            else:
+                data_order_missing.append(f"{v}/seed{seed}")
             steps_planned_here = meta["steps_planned"]
             sel_step = _integral_value(ev.get("ckpt_step"))
             if sel_step is not None:
@@ -611,6 +619,26 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             if diffs:
                 meta_mismatches.append(f"{name} 相对 {a_ref_name} 的差异: "
                                        + "; ".join(diffs))
+    # 实际训练数据顺序：同一 seed 下所有变体必须消费完全相同的窗口序列。
+    # config/seed 相同只说明“应当”同序；若采样代码路径被改或 RNG 被提前
+    # 消耗，实际 batch 序列可能不同，PPL 差异就混入了数据混杂。只比较非早停
+    # run（早停会少消费批次，本来就不在同一训练量上）。
+    by_seed_order = {}
+    for seed_v, name, digest_v, early_v in data_order_runs:
+        if not early_v:
+            by_seed_order.setdefault(seed_v, []).append((name, digest_v))
+    data_order_checked = 0
+    for seed_v, items in sorted(by_seed_order.items()):
+        if len(items) < 2:
+            continue
+        ref_name, ref_digest = items[0]
+        for name, digest_v in items[1:]:
+            data_order_checked += 1
+            if digest_v != ref_digest:
+                meta_mismatches.append(
+                    f"{name}: 训练数据顺序指纹 {digest_v!r} 与 {ref_name} 的 "
+                    f"{ref_digest!r} 不同（同 seed 下实际 batch 序列不一致，"
+                    "PPL 差异混入数据混杂）")
     # PPL 评测协议：训练配置相同并不保证独立评测用了同一批 token。
     # 只比较双方都记录的字段（旧产物可能缺字段），缺失单独告警；只要共同
     # 字段有差异就直接失败，避免把不同窗口/上下文的 PPL 当成同条件配对。
@@ -650,6 +678,11 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               "无法核对是否在同一批 token 上评测: "
               + ", ".join(eval_protocol_missing[:6])
               + (" ..." if len(eval_protocol_missing) > 6 else ""))
+    if data_order_missing:
+        print(f"[audit] 警告：{len(data_order_missing)} 个 run 的 eval.json "
+              "缺少 data_order_sha256，无法证明实际训练批次序列一致: "
+              + ", ".join(data_order_missing[:6])
+              + (" ..." if len(data_order_missing) > 6 else ""))
     if mixed_attention:
         mismatches.append(
             "注意力实现路径不一致（来自 use_sdpa_standard=true）："
@@ -670,6 +703,9 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               f"代码版本/计划训练步数一致"
               + (f"（数据指纹 {expected_data_digest}）"
                  if expected_data_digest else ""))
+    if data_order_checked:
+        print(f"[audit] 训练数据顺序自检通过：同 seed 下 {data_order_checked} "
+              "组变体对比的实际 batch 起点序列指纹一致")
     if early_stop_runs:
         print(f"[audit] 早停启用：{len(early_stop_runs)} 个 run 未跑满计划步数"
               f"（{', '.join(early_stop_runs[:6])}"
@@ -696,6 +732,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             "training_budget_comparable": not early_stop_runs,
             "meta_checked": meta_checked, "missing_evals": meta_missing,
             "meta_mismatches": meta_mismatches,
+            "data_order_checked": data_order_checked,
+            "data_order_missing": data_order_missing,
             "early_stop_runs": early_stop_runs,
             "selection_step_points": selection_points,
             "selection_step_spread": sel_spread,

@@ -1,4 +1,5 @@
 """可复现性与溯源测试：种子覆盖、数据批采样确定、文件/数据指纹稳定。"""
+import hashlib
 import json
 import os
 import random
@@ -30,7 +31,15 @@ def test_set_seed_covers_python_numpy_torch():
     x2, y2 = get_train_batch(data, 16, 4, "cpu", np.random.default_rng(7))
     assert torch.equal(x1, x2) and torch.equal(y1, y2)
     assert torch.equal(x1[:, 1:], y1[:, :-1])  # y 为 x 右移一位
-    print("  [ok] set_seed 覆盖 random/np/torch，批采样顺序由 seed 唯一确定")
+    # 数据顺序指纹：同一 seed 必须逐字节一致；不同 seed 必须不同。
+    h1, h2, h3 = hashlib.sha256(), hashlib.sha256(), hashlib.sha256()
+    for hasher, seed in ((h1, 7), (h2, 7), (h3, 8)):
+        rng = np.random.default_rng(seed)
+        for _ in range(3):
+            get_train_batch(data, 16, 4, "cpu", rng, order_hasher=hasher)
+    assert h1.hexdigest() == h2.hexdigest()
+    assert h1.hexdigest() != h3.hexdigest()
+    print("  [ok] set_seed 覆盖 random/np/torch，批采样顺序与顺序指纹由 seed 唯一确定")
 
 
 def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():

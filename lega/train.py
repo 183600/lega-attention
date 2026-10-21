@@ -5,6 +5,7 @@
       --data_dir data/dummy --out_dir out/tiny/lega [--smoke] [--wandb]
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -1058,7 +1059,11 @@ def main():
     model.train()
     opt.zero_grad(set_to_none=True)
     # 流水线预取的首批：训练循环内每个 micro-step 再预取下一批
-    batches = [get_train_batch(train, train_ctx, batch_size, device, rng)
+    # 实际采样顺序指纹：与 config/seed 审计互补，证明各变体消费了同一批
+    # 训练窗口（同 seed 但采样代码路径/RNG 被提前消耗时 config 审计看不出）。
+    data_order_hasher = hashlib.sha256()
+    batches = [get_train_batch(train, train_ctx, batch_size, device, rng,
+                               order_hasher=data_order_hasher)
                for _ in range(grad_accum)]
     tokens_seen = 0
     best_val = float("inf")
@@ -1218,8 +1223,9 @@ def main():
             # pinned H2D 提交（_stage_to_device 乒乓暂存双槽 + event 保护，
             # 两批在途互不干扰）。rng 抽取顺序与逐次采样完全一致，确定性不变。
             if step + 1 < steps or mi + 1 < grad_accum:
-                batches[mi] = get_train_batch(train, train_ctx,
-                                              batch_size, device, rng)
+                batches[mi] = get_train_batch(
+                    train, train_ctx, batch_size, device, rng,
+                    order_hasher=data_order_hasher)
             else:
                 batches[mi] = None
             with amp_ctx:
@@ -1344,6 +1350,7 @@ def main():
     # “曲线下降是否只是还没看完数据”，与 eval_iters 的验证覆盖率互补。
     train_tokens = int(len(train))
     epochs_seen = (tokens_seen / train_tokens) if train_tokens else None
+    data_order_sha256 = data_order_hasher.hexdigest()
     # 步时汇总：区间步时的中位数，抗首区间冷启动与偶发卡顿。
     tokens_per_step = batch_size * train_ctx * grad_accum
     train_step_ms = (statistics.median(step_times_ms)
@@ -1369,6 +1376,7 @@ def main():
                            "train_tokens": train_tokens,
                            "epochs_seen": (round(epochs_seen, 4)
                                            if epochs_seen is not None else None),
+                           "data_order_sha256": data_order_sha256,
                            "n_params": n_params, "n_gate_extra": n_extra,
                            **provenance})
     save_json({"variant": args.variant, "val_ppl": final_ppl, "val_loss": final_val_loss,
@@ -1389,6 +1397,7 @@ def main():
                "train_tokens": train_tokens,
                "epochs_seen": (round(epochs_seen, 4)
                                if epochs_seen is not None else None),
+               "data_order_sha256": data_order_sha256,
                # steps=实际运行步数（早停时小于计划）；steps_planned=计划步数。
                # 受控变量审计按 steps_planned 核对，实际步数差异由 early_stopped
                # 如实暴露，而不是静默伪装成跑满了计划步数。

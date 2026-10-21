@@ -798,6 +798,45 @@ def test_verify_controlled_setup_consistency():
     print("  [ok] verify_controlled_setup（数据/代码/步数/超参数双层审计）")
 
 
+def test_verify_controlled_setup_checks_actual_data_order():
+    """同 seed 下各变体必须消费同一训练批次序列，而不只是 config/seed 相同。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        variants, seeds = ["standard", "lega"], [7]
+        base = {"lr": 0.001, "steps": 10, "variant": None, "seed": 7,
+                "device": "cpu", "tag": "t"}
+        meta = {"data_fingerprint": "abc123", "code_commit": "deadbeef",
+                "config_sha256": "shax", "steps": 10, "tokens_seen": 1024}
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"),
+                        dict(base, variant=v))
+            _write_json(os.path.join(d, "eval.json"), dict(
+                meta, variant=v, seed=7, data_order_sha256="order-A"))
+        audit = verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+        assert audit["ok"] and audit["data_order_checked"] == 1, audit
+        assert not audit["data_order_missing"], audit
+        # 同 seed 但实际采样序列不同：即使 config/seed 完全一致也必须失败
+        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"),
+                            encoding="utf-8"))
+        ev["data_order_sha256"] = "order-B"
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("数据顺序指纹不一致应触发 SystemExit")
+        except SystemExit:
+            pass
+        # 旧产物缺少指纹：只警告，不伪造一致
+        ev.pop("data_order_sha256")
+        _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
+        audit = verify_controlled_setup(tmp, variants, seeds, 1,
+                                        expected_data_digest="abc123")
+        assert audit["ok"] and audit["data_order_missing"] == ["lega/seed7"]
+    print("  [ok] 受控变量审计：同 seed 实际训练数据顺序指纹必须一致")
+
+
 def test_verify_controlled_setup_rejects_mixed_attention_backend():
     """standard/legA 开了 SDPA 时实现路径不同；正式对比必须统一为显式路径。"""
     for sdpa, should_fail in ((True, True), (False, False)):
