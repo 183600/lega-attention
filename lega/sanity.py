@@ -175,6 +175,19 @@ def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
                              abs_tol=float(abs_tol)))
 
 
+def _finite_float_arg(value, name: str) -> float:
+    """有限浮点配置；bool/NaN/Inf/非数值显式拒绝（True 不能冒充 1.0）。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}") from e
+    if not math.isfinite(f):
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
+    return f
+
+
 def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                       steps: int, lr: float, device: str, seed: int,
                       warmup: int = 10, grad_clip: float = 1.0,
@@ -209,6 +222,17 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     warmup = strict_int(warmup, "warmup")
     if warmup < 0:
         raise ValueError(f"warmup 必须是非负整数，收到 {warmup!r}")
+    lr = _finite_float_arg(lr, "lr")
+    if lr < 0:
+        raise ValueError(f"lr 必须 >= 0，收到 {lr!r}")
+    grad_clip = _finite_float_arg(grad_clip, "grad_clip")
+    if grad_clip < 0:
+        raise ValueError(f"grad_clip 必须 >= 0，收到 {grad_clip!r}")
+    # 阈值/容差也必须拒绝 bool/NaN/Inf：True 会被 float() 当成 1.0，
+    # 从而伪造一个看似合法的过拟合/准确率门槛。
+    loss_threshold = _finite_float_arg(loss_threshold, "loss_threshold")
+    acc_threshold = _finite_float_arg(acc_threshold, "acc_threshold")
+    initial_loss_tol = _finite_float_arg(initial_loss_tol, "initial_loss_tol")
     set_seed(seed)
     # 标签映射硬校验：固定批必须在消费点满足 next-token 移位关系
     shift_ok = (x.dim() == 2 and x.shape == y.shape
@@ -373,12 +397,15 @@ def main():
         cfg = json.load(f)
     opt = dict(DEFAULTS)
     sanity_cfg = cfg.get("sanity") or {}
-    opt["loss_threshold"] = float(sanity_cfg.get(
-        "loss_threshold", DEFAULTS["loss_threshold"]))
-    opt["acc_threshold"] = float(sanity_cfg.get(
-        "acc_threshold", DEFAULTS["acc_threshold"]))
-    opt["initial_loss_tol"] = float(sanity_cfg.get(
-        "initial_loss_tol", DEFAULTS["initial_loss_tol"]))
+    opt["loss_threshold"] = _finite_float_arg(
+        sanity_cfg.get("loss_threshold", DEFAULTS["loss_threshold"]),
+        "sanity.loss_threshold")
+    opt["acc_threshold"] = _finite_float_arg(
+        sanity_cfg.get("acc_threshold", DEFAULTS["acc_threshold"]),
+        "sanity.acc_threshold")
+    opt["initial_loss_tol"] = _finite_float_arg(
+        sanity_cfg.get("initial_loss_tol", DEFAULTS["initial_loss_tol"]),
+        "sanity.initial_loss_tol")
     if args.smoke:
         opt.update(SMOKE_OVERRIDES)
     for name in ("steps", "batch_size", "ctx", "lr", "seed",

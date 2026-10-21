@@ -73,6 +73,43 @@ def test_overfit_check_passes_on_healthy_model():
           f"acc={res['final']['token_acc']:.3f}")
 
 
+def test_overfit_check_rejects_invalid_numeric_args():
+    """sanity 数值参数不能被 bool/NaN/Inf/非数值静默改写。"""
+    import math
+    model = _model()
+    x, y = _batch()
+    base = dict(steps=0, lr=5e-3, device="cpu", seed=0, warmup=0,
+                log_every=1)
+    for name in ("lr", "grad_clip", "loss_threshold", "acc_threshold",
+                 "initial_loss_tol"):
+        for bad in (True, float("nan"), float("inf"), "bad"):
+            kwargs = dict(base)
+            kwargs[name] = bad
+            try:
+                run_overfit_check(model, x, y, **kwargs)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 {name} 未被拒绝: {bad!r}")
+    for name in ("lr", "grad_clip"):
+        for bad in (-1.0,):
+            kwargs = dict(base)
+            kwargs[name] = bad
+            try:
+                run_overfit_check(model, x, y, **kwargs)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"负 {name} 未被拒绝")
+    # 数字字符串仍可解析；initial_loss_tol<0 仍是“显式禁用”
+    res = run_overfit_check(model, x, y, steps=0, lr="5e-3", device="cpu",
+                            seed=0, warmup=0, log_every=1,
+                            loss_threshold="0.05", acc_threshold="0.99",
+                            initial_loss_tol="-1.0")
+    assert res["checks"]["initial_loss_near_log_vocab"] is True
+    print("  [ok] sanity 数值参数拒绝 bool/NaN/Inf/非数值与负 lr/grad_clip")
+
+
 def test_overfit_check_detects_frozen_params():
     model = _model()
     for p in model.parameters():
