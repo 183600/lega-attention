@@ -108,6 +108,13 @@ def test_score_predictions():
     # 先答错、后附正确答案不算命中
     assert score_prediction("niah_synth", "7021853",
                             " 1234567, or maybe 7021853")["em"] == 0.0
+    # 只截取数字子串会把负号/小数/字母后缀误当成正确答案
+    for bad in (" -7021853.", " 7021853.9", " 7021853abc", "x7021853",
+                " 7021853e2"):
+        assert score_prediction("niah_synth", "7021853", bad)["em"] == 0.0, bad
+    # 标点边界仍算命中
+    for ok in ("7021853.", " 7021853,", "(7021853)"):
+        assert score_prediction("niah_synth", "7021853", ok)["em"] == 1.0, ok
     # vt
     assert score_prediction("vt", "48213", " The value of VAR A4 is 48213.")["em"] == 1.0
     # fwe: 召回率

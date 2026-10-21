@@ -335,7 +335,11 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
 
 # ---------------------------------------------------------------- 打分
 
-_NUM_RE = re.compile(r"\d{4,}")
+# 完整数值 token：可选的符号/小数/科学计数法都先整体匹配，再与 gold 做
+# 字符串全等比较。只截取 \d{4,} 会把 -7021853、7021853.9、7021853abc 都
+# 误判为命中 7021853。
+_NUM_RE = re.compile(
+    r"(?<![\w.+-])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w])")
 _WORD_RE = re.compile(r"[a-z]+")
 
 
