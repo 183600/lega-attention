@@ -605,13 +605,20 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     # 等于计划步数，且彼此的实际步数/tokens_seen 必须一致；不能因为同批里
     # 有另一个 run 早停，就跳过所有 run 的实际训练量检查。
     def _same_quantity(a, b):
-        # 旧产物可能把步数写成 "10"/10.0；语义相同即算一致，无法解析时
-        # 退化为原始值比较。
+        # 旧产物可能把步数写成 "10"/10.0；语义相同即算一致。但 bool 是 int
+        # 的子类（True 会被 float() 当成 1），小数则不能作为步数/tokens_seen：
+        # 静默接受会让被污染的外部元数据冒充同一训练预算。
+        if a is None and b is None:
+            return True
+        if isinstance(a, bool) or isinstance(b, bool):
+            return False
         try:
             fa, fb = float(a), float(b)
         except (TypeError, ValueError, OverflowError):
             return a == b
-        return math.isfinite(fa) and math.isfinite(fb) and fa == fb
+        if not (math.isfinite(fa) and math.isfinite(fb)):
+            return False
+        return fa.is_integer() and fb.is_integer() and fa == fb
 
     stable_actual = [(name, steps_run, tokens_run, planned)
                      for name, steps_run, tokens_run, early, planned in actual_meta

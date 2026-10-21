@@ -2982,7 +2982,34 @@ def test_verify_controlled_setup_rejects_fractional_steps():
             raise AssertionError("小数实际步数不应被截断为一致")
         except SystemExit:
             pass
-    print("  [ok] 受控变量审计：小数步数不会被截断为整数")
+        # 双方都记录相同的小数步数同样不能算“同一预算”：步数必须可解析为整数
+        for v in variants:
+            p = os.path.join(tmp, v, "eval.json")
+            ev = json.load(open(p, encoding="utf-8"))
+            ev["steps_planned"] = 10.5
+            ev["steps"] = 10.5
+            _write_json(p, ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("小数步数不能被当作合法训练预算")
+        except SystemExit:
+            pass
+        # JSON true 不是步数：bool 会被 float() 当成 1，必须显式拒绝
+        for v in variants:
+            p = os.path.join(tmp, v, "eval.json")
+            ev = json.load(open(p, encoding="utf-8"))
+            ev["steps_planned"] = True
+            ev["steps"] = True
+            ev["tokens_seen"] = True
+            _write_json(p, ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("布尔步数/tokens_seen 不能被当作训练量")
+        except SystemExit:
+            pass
+    print("  [ok] 受控变量审计：小数/布尔步数不会被截断为整数")
 
 
 def test_verify_controlled_setup_rejects_fractional_seeds():
