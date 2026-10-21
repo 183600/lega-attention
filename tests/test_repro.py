@@ -43,6 +43,33 @@ def test_set_seed_covers_python_numpy_torch():
     print("  [ok] set_seed 覆盖 random/np/torch，批采样顺序与顺序指纹由 seed 唯一确定")
 
 
+def test_set_seed_overwrites_stale_child_hashseed():
+    """子进程环境必须对齐本次 seed，而不是保留进程启动时的旧值。
+
+    PYTHONHASHSEED 不能改变当前解释器，但设置 os.environ 后启动的子进程会
+    继承它。若用 setdefault，环境里已有的 PYTHONHASHSEED=0 会让 set_seed(4321)
+    的子进程仍以 0 启动，与 run_manifest 声称的 seed 不一致。
+    """
+    old = os.environ.get("PYTHONHASHSEED")
+    try:
+        os.environ["PYTHONHASHSEED"] = "0"
+        set_seed(4321)
+        assert os.environ["PYTHONHASHSEED"] == "4321"
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import os; print(os.environ['PYTHONHASHSEED'])"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env=os.environ.copy(), capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "4321", r.stdout
+    finally:
+        if old is None:
+            os.environ.pop("PYTHONHASHSEED", None)
+        else:
+            os.environ["PYTHONHASHSEED"] = old
+    print("  [ok] set_seed 覆盖旧 PYTHONHASHSEED，子进程继承本次 seed")
+
+
 def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
     """种子身份不能被 int() 截断：True 当 1、1.5 当 1 都会让审计说谎。
 

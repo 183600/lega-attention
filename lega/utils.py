@@ -217,8 +217,10 @@ def set_seed(seed: int) -> None:
     TensorFlow 不在依赖内，无需 TF seed。
 
     PYTHONHASHSEED 仅对之后启动的子进程生效（当前进程的哈希盐在解释器启动时已
-    固定）；run_all.py 会在派生子进程前设置。本函数结束时记录各全局 RNG 的
-    状态指纹（_LAST_SEED），seed_report 据此提供种子生效的可核对证据。
+    固定）；本函数写入本次 seed（覆盖旧值），保证之后由本进程启动的子进程与
+    本次 seed 对齐，而不是继承一个不同的旧值。run_all.py 另在每条子命令的
+    环境中显式设置。本函数结束时记录各全局 RNG 的状态指纹（_LAST_SEED），
+    seed_report 据此提供种子生效的可核对证据。
     跨硬件架构（不同 GPU 型号、CPU 指令集、cuDNN 版本）无法保证逐位一致，
     本函数只保证同机相对稳定。
 
@@ -227,7 +229,7 @@ def set_seed(seed: int) -> None:
     1.5 被截断成 1 后“看起来播种成功”，也不允许半途播种。
     """
     seed = seed_int(seed, "seed")
-    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
