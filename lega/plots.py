@@ -479,6 +479,7 @@ def fig_latency(rdir):
     common_key = _batch_key(common)
     mixed_batches = common_key is None
     used_keys = set()
+    drew_prefill = False
     for v, e, by_ctx in series:
         key = common_key if common_key is not None else _batch_key(
             {str(k) for cell in by_ctx.values() for k in cell})
@@ -497,6 +498,7 @@ def fig_latency(rdir):
                  label=_label(v) + ("(SDPA)" if e.get("use_sdpa")
                                     and v == "standard_sdpa" else ""),
                  color=COLORS.get(v))
+        drew_prefill = True
     ax1.set_xlabel("上下文长度 (tokens)")
     if mixed_batches:
         # 没有共同 batch 时说明各变体测的 workload 不同，不能假装可横向比较。
@@ -508,6 +510,7 @@ def fig_latency(rdir):
     ax1.set_title("Prefill")
     ax1.grid(alpha=0.3)
     ax1.legend(fontsize=8)
+    drew_decode = False
     for v, e in variants.items():
         if variant_scope is not None and v not in variant_scope:
             continue
@@ -536,11 +539,17 @@ def fig_latency(rdir):
         xs = [x for x, _ in points]
         ys = [y for _, y in points]
         ax2.plot(xs, ys, marker="s", label=_label(v), color=COLORS.get(v))
+        drew_decode = True
     ax2.set_xlabel("decode 前的实际 KV 上下文长度 (tokens)")
     ax2.set_ylabel("Decode (ms/tok)")
     ax2.set_title("Decode（KV 缓存，batch=1）")
     ax2.grid(alpha=0.3)
     ax2.legend(fontsize=8)
+    if not (drew_prefill or drew_decode):
+        # latency.json 存在但所有点都不可用/被 run 范围过滤掉：不能写一张
+        # 空白图并返回成功，让下游误以为延迟数据已产出。
+        plt.close(fig)
+        return False
     fig.suptitle("推理基准对比", y=1.02)
     fig.savefig(os.path.join(rdir, "fig_latency.png"), dpi=150)
     plt.close(fig)

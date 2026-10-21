@@ -329,6 +329,30 @@ def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
     print("  [ok] Prefill 图：无共同 batch 时按变体各自档位绘制")
 
 
+def test_fig_latency_returns_false_without_plottable_points():
+    """latency.json 存在但所有值非法/被范围过滤时，不得写空白图并返回成功。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_latency 空数据测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "latency.json", {"variants": {
+            "lega": {"prefill_ms": {"256": {"1": "bad"}},
+                     "decode_ms_per_tok": {"256": float("nan")}},
+            "standard": [1]}})
+        assert fig_latency(tmp) is False
+        assert not os.path.exists(os.path.join(tmp, "fig_latency.png"))
+        _w(tmp, "repro.json", {"variants": ["qgate"], "seeds": [1]})
+        _w(tmp, "latency.json", {"variants": {
+            "lega": {"prefill_ms": {"256": {"1": 12.0}},
+                     "decode_ms_per_tok": {"256": 1.2}}}})
+        assert fig_latency(tmp) is False
+        assert not os.path.exists(os.path.join(tmp, "fig_latency.png"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 延迟图：无可绘点返回 False 且不写空白图")
+
+
 def test_fig_latency_respects_variant_scope():
     """本次 run 范围外的变体不得出现在 decode 图上（旧结果可能仍留在目录）。"""
     if not _HAS_MPL:
