@@ -279,10 +279,12 @@ def verify_registration(registry_path: str = None,
                 "预注册边界已损坏，需从 git 恢复后重新核对")
         else:
             report["status"] = "missing_registry"
+            base_h = _lock_baseline(lock).get("hypotheses")
+            n_base = len(base_h) if isinstance(base_h, dict) else 0
             report["problems"].append(
                 "登记表文件不存在" +
-                (f"（锁文件基线记录 {len(_lock_baseline(lock).get('hypotheses') or {})} "
-                 "条已登记假设，删除登记表即失去预注册边界）"
+                (f"（锁文件基线记录 {n_base} 条已登记假设，"
+                 "删除登记表即失去预注册边界）"
                  if isinstance(lock, dict) else "（且无锁文件）"))
         return report
 
@@ -437,7 +439,13 @@ def append_amendment(registry_path: str = None, lock_path: str = None,
                          + "；".join(problems))
     link = {"at": at or time.strftime("%Y-%m-%d %H:%M:%S"),
             "reason": reason, "before": head, "after": fp}
-    lock.setdefault("chain", []).append(link)
+    # verify 把早期锁文件的 chain=null 当作“无修订”兼容；append 也必须先
+    # 规范化为列表，否则 setdefault 拿到 None 后 .append 会 AttributeError。
+    chain = lock.get("chain")
+    if chain is None:
+        chain = []
+        lock["chain"] = chain
+    chain.append(link)
     _write_json(lock, lock_path)
     return link
 

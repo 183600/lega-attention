@@ -364,6 +364,48 @@ def test_hypothesis_fields_cover_analysis_keys():
     print("  [ok] HYPOTHESIS_FIELDS 覆盖判定字段")
 
 
+def test_missing_registry_with_malformed_baseline_does_not_crash():
+    """登记表被删且 lock.baseline.hypotheses 是标量时，报告不能 TypeError。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        lk = json.load(open(lock, encoding="utf-8"))
+        lk["baseline"]["hypotheses"] = 42
+        _write(lock, lk)
+        os.remove(reg)
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "missing_registry"
+        assert any("登记表文件不存在" in p for p in r["problems"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 缺登记表 + 畸形基线：missing_registry 报告不崩溃")
+
+
+def test_amend_with_null_chain_treated_as_empty():
+    """早期锁文件的 chain=null 在验证时兼容为无修订，amend 也必须容忍。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        lk = json.load(open(lock, encoding="utf-8"))
+        lk["chain"] = None
+        _write(lock, lk)
+        assert verify_registration(registry_path=reg, lock_path=lock)[
+            "status"] == "intact"
+        _write(reg, _doc([("H1", "c1"), ("H2", "c2")]))
+        link = append_amendment(registry_path=reg, lock_path=lock,
+                                reason="追加 H2")
+        assert link["before"]["n_hypotheses"] == 1
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "amended" and r["confirmatory_valid"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] chain=null 的锁文件可正常追加修订")
+
+
 def test_verify_registration_rejects_non_list_chain():
     """锁文件的 chain 被替换为非列表（字符串/数字/对象）时必须判 violated：
     否则篡改审计链会被静默当作“无修订”而仍确认有效。"""
