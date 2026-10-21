@@ -581,7 +581,11 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
         indices, n_windows = _val_eval_indices(len(val), ctx, iters)
         if batch_windows is None:
             batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
-        batch_windows = int(batch_windows)
+        else:
+            batch_windows = strict_int(batch_windows, "batch_windows")
+            if batch_windows <= 0:
+                raise ValueError(
+                    f"batch_windows 必须是正整数，收到 {batch_windows}")
         # 设备端累积，循环结束后统一读取。
         # 窗口等长，权重即窗口数，用 Python int 就地累计。
         loss_acc = torch.zeros((), device=device)

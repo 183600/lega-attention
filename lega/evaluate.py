@@ -167,6 +167,11 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     indices, _ = _val_eval_indices(len(val), ctx, max_windows)
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
+    else:
+        batch_windows = _positive_int_or_none(batch_windows)
+        if batch_windows is None:
+            raise ValueError(
+                f"batch_windows 必须是正整数，收到 {batch_windows!r}")
     amp_ctx = amp_autocast(device, bool(amp))
     rows = []
     for s in range(0, len(indices), batch_windows):
