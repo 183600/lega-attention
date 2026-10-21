@@ -25,6 +25,11 @@ def main():
                     help="held-out test 语料词数；<=0 则不生成 test（评测回退 val）")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
+    # train/val 是训练与选型的基础 split，<=0 会生成只有 1 个 token 的退化流，
+    # 直到训练/评测时才因窗口不足崩溃；在写文件前直接拒绝。
+    for name in ("train_words", "val_words"):
+        if getattr(args, name) <= 0:
+            raise SystemExit(f"--{name} 必须为正整数，收到 {getattr(args, name)}")
 
     rng = random.Random(args.seed)
     # 三个 split 的词汤必须互不相同：共享词表会让 64-gram 在 split 间偶然重合，
@@ -55,7 +60,8 @@ def main():
                 sent = (f"The {split} grass is green. The {split} sky is blue. "
                         f"The {split} sun is yellow. Here we go {split}. "
                         f"There and back again {split}.")
-                n = 22
+                # 该模板恰好 24 个空格分隔词；少计会让生成语料超过请求词数。
+                n = 24
             else:
                 n = rng.randint(6, 16)
                 sent = " ".join(rng.choice(sv) for _ in range(n)) + "."
@@ -85,7 +91,8 @@ def main():
     # 协议声明“无共享样本”必须与实际写出的文本核对，而不是只作文本断言
     split_protocol = {
         "mode": "independent_generation",
-        "order": "train/val/test 各自独立生成（共享分布、无共享样本）",
+        "order": ("train/val/test 各自独立生成（不相交词表分片，"
+                  "无共享样本）"),
         "shuffled": False,
     }
     split_protocol.update(verify_splits_disjoint({
