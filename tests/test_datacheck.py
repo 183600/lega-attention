@@ -1358,6 +1358,22 @@ def test_build_data_report_surfaces_group_crossing_alerts():
     print("  [ok] data_report：协议违规告警置顶；无违规协议不误报")
 
 
+def test_build_data_report_does_not_attest_split_first_without_protocol():
+    """缺少 split_protocol 证据时不能写死“先划分后预处理=True”。"""
+    tok = {"kind": "char", "fit_on": "train", "vocab_size": 5, "unk_rate": {}}
+    rep = build_data_report(tok, {"train": {"tokens": 10}}, {}, {}, {}, {}, {})
+    assert rep["protocol"]["split_first_then_preprocess"] is None
+    assert rep["protocol"]["split_first_then_preprocess_attested"] is False
+    assert "split_first_unattested" in {a["code"] for a in rep["alerts"]}
+    rep2 = build_data_report(
+        tok, {"train": {"tokens": 10}}, {}, {}, {}, {}, {},
+        extra={"split_protocol": {"mode": "official", "shuffled": False}})
+    assert rep2["protocol"]["split_first_then_preprocess"] is True
+    assert rep2["protocol"]["split_first_then_preprocess_attested"] is True
+    assert "split_first_unattested" not in {a["code"] for a in rep2["alerts"]}
+    print("  [ok] data_report：无划分协议证据时“先划分”声明为未知并告警")
+
+
 def test_build_data_report_extra_cannot_clobber_audit_fields():
     """extra 只能扩充报告，不能覆盖 alerts/protocol/splits 等自检结论。
 

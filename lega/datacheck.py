@@ -1426,13 +1426,27 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
     """汇总为 data_report.json（只含 JSON 原生类型）。"""
     alert_thresholds = (alert_thresholds
                         if isinstance(alert_thresholds, dict) else {})
+    extra = extra if isinstance(extra, dict) else None
+    # “先划分后预处理”只能由上游划分协议证据支撑。缺少 split_protocol 时
+    # 写 None（未知）而不是写死 True，避免报告做出无法证实的审计声明；
+    # 同时产生告警，让“无法确认”与“已确认”在汇总页可区分。
+    split_protocol = extra.get("split_protocol") if extra else None
+    split_first_attested = (isinstance(split_protocol, dict)
+                            and bool(split_protocol))
     alerts = leakage_alerts(tokenizer, sanitization, duplicates,
                             contamination, distribution, text_stats,
                             thresholds=alert_thresholds)
+    if not split_first_attested:
+        alerts.append({
+            "level": "warning", "code": "split_first_unattested",
+            "message": "报告缺少 split_protocol 证据：无法确认数据是“先划分"
+                       "后预处理”，只可确认分词/去污染在 train 上完成"})
     report = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "protocol": {
-            "split_first_then_preprocess": True,
+            "split_first_then_preprocess": (True if split_first_attested
+                                            else None),
+            "split_first_then_preprocess_attested": bool(split_first_attested),
             # 必须如实记录分词器实际拟合来源：字符级词表在 train 上拟合，
             # 而 GPT-2 BPE 是公开预训练词表（与语料无关、不构成泄露）。统一
             # 写死 "train_only" 会与 tokenizer.fit_on 矛盾，使“无全量拟合”
