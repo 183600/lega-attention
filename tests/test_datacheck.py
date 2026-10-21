@@ -400,16 +400,27 @@ def test_critical_split_alerts_filters_actionable_violations():
         {"level": "warning", "code": "split_char_cut", "message": "y"},
         {"level": "warning", "code": "split_documents_cross_cut", "message": "z"},
         {"level": "warning", "code": "ngram_overlap_train_val", "message": "w"},
+        {"level": "warning", "code": "ngram_overlap_train_test", "message": "w"},
+        {"level": "warning", "code": "ngram_overlap_val_test", "message": "w"},
+        {"level": "warning", "code": "eval_splits_overlap", "message": "o"},
+        {"level": "warning", "code": "eval_splits_overlap_documents", "message": "o"},
+        # 分布漂移警告不属“必须先处理的泄露”：temporal split 下正常存在，
+        # 不能因此拦截训练（否则合法时序划分永远无法开跑）。
+        {"level": "warning", "code": "distribution_tv_test_vs_train", "message": "d"},
         {"level": "info", "code": "decontamination_applied", "message": "v"},
     ]}
     picked = critical_split_alerts(report)
     assert [a["code"] for a in picked] == [
-        "split_shuffled", "split_char_cut", "split_documents_cross_cut"]
+        "split_shuffled", "split_char_cut", "split_documents_cross_cut",
+        "ngram_overlap_train_val", "ngram_overlap_train_test",
+        "ngram_overlap_val_test",
+        "eval_splits_overlap", "eval_splits_overlap_documents"]
     assert critical_split_alerts({}) == []
     assert critical_split_alerts(None) == []
     assert critical_split_alerts({"alerts": 5}) == []
     assert split_protocol_alerts("not-a-dict") == []
-    print("  [ok] critical_split_alerts 只筛出必须先处理的划分协议违规")
+    print("  [ok] critical_split_alerts 只筛出必须先处理的泄露（含跨 split 复制），"
+          "分布漂移不拦截")
 
 
 def test_decontaminate_tolerates_non_dict_and_missing_train():

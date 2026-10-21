@@ -1027,8 +1027,14 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
 
 # 会让 train/val/test 独立性失效的协议违规：run_all 在训练前据此硬失败
 # （可显式覆盖），避免“报告里有警告但全量训练照跑”。
+# 划分协议违规（群组跨 split / 字符切分 / 打乱）之外，采样 64-gram 跨 split
+# 重叠率 >0 是“语料在 split 间被复制”的直接证据——与分布漂移（temporal split
+# 下属正常现象）不同，它必然导致评测读到训练见过的长串，必须训练前拦截。
 CRITICAL_SPLIT_ALERT_CODES = (
-    "split_shuffled", "split_char_cut", "split_documents_cross_cut")
+    "split_shuffled", "split_char_cut", "split_documents_cross_cut",
+    "ngram_overlap_train_val", "ngram_overlap_train_test",
+    "ngram_overlap_val_test",
+    "eval_splits_overlap", "eval_splits_overlap_documents")
 
 
 def critical_split_alerts(data_report: dict) -> list:

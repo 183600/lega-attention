@@ -73,7 +73,7 @@ def test_data_protocol_preflight_blocks_critical_violations():
         info = data_protocol_preflight(d, allow_override=True)
         assert info["override"] is True
         assert [a["code"] for a in info["critical_violations"]] == \
-            ["split_shuffled"]
+            ["split_shuffled", "ngram_overlap_train_val"]
     with tempfile.TemporaryDirectory() as d:
         info = data_protocol_preflight(d)
         assert info["report_present"] is False
