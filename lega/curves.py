@@ -161,6 +161,21 @@ def _step_or_none(value) -> Optional[int]:
     return value
 
 
+def _finite_value(value) -> Optional[float]:
+    """日志数值 → 有限 float；None/bool/非数值/NaN/Inf → None。
+
+    bool 是 int 子类，float(True)=1.0；若当成 loss/grad_norm/val_loss，
+    坏日志会伪造一个“正常”的数值点，污染趋势、尖峰与噪声诊断。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]:
     """取出 (step, value) 均有限并按 step 排序的记录点；异常记录单独计数。
 
@@ -181,6 +196,9 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
         if v is None or s is None:
             continue
         s = _step_or_none(s)
+        if isinstance(v, bool):
+            malformed += 1
+            continue
         try:
             v = float(v)
         except (TypeError, ValueError, OverflowError):
@@ -253,12 +271,9 @@ def _val_ci_rel(records: List[Dict]) -> Optional[float]:
         ci, v = r.get("val_loss_ci95"), r.get("val_loss")
         if not isinstance(ci, (list, tuple)) or len(ci) != 2:
             continue
-        try:
-            lo, hi, v = float(ci[0]), float(ci[1]), float(v)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if (math.isfinite(lo) and math.isfinite(hi) and math.isfinite(v)
-                and v > 0 and hi >= lo):
+        lo, hi, v = _finite_value(ci[0]), _finite_value(ci[1]), _finite_value(v)
+        if lo is not None and hi is not None and v is not None and v > 0 \
+                and hi >= lo:
             vals.append((hi - lo) / 2.0 / v)
     return float(statistics.median(vals)) if vals else None
 
@@ -289,12 +304,9 @@ def _train_trend(train_recent) -> Optional[float]:
         return None
     vals = []
     for x in train_recent:
-        try:
-            x = float(x)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(x):
-            vals.append(x)
+        f = _finite_value(x)
+        if f is not None:
+            vals.append(f)
     if len(vals) < 2 or abs(vals[0]) < 1e-12:
         return None
     return (vals[-1] - vals[0]) / abs(vals[0])
@@ -325,24 +337,19 @@ def live_overfit_hint(evals_since_improve, best_val, val,
         return None
     if n < LIVE_WARN_EVALS or best_val is None or val is None:
         return None
-    try:
-        best_f, val_f = float(best_val), float(val)
-        gap = (val_f - best_f) / best_f
-    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+    best_f, val_f = _finite_value(best_val), _finite_value(val)
+    if best_f is None or val_f is None or best_f == 0:
         return None
+    gap = (val_f - best_f) / best_f
     if not math.isfinite(gap):
         return None
     # 验证抽样噪声：区间半宽相对当前 val。gap 小于该半宽时，"回升"与
     # "平台"都无法和有限窗口抽样误差区分。
     ci_rel = None
     if isinstance(val_ci95, (list, tuple)) and len(val_ci95) == 2:
-        try:
-            lo, hi = float(val_ci95[0]), float(val_ci95[1])
-            if (math.isfinite(lo) and math.isfinite(hi) and hi >= lo
-                    and val_f > 0):
-                ci_rel = (hi - lo) / 2.0 / val_f
-        except (TypeError, ValueError, OverflowError):
-            ci_rel = None
+        lo, hi = _finite_value(val_ci95[0]), _finite_value(val_ci95[1])
+        if (lo is not None and hi is not None and hi >= lo and val_f > 0):
+            ci_rel = (hi - lo) / 2.0 / val_f
     if ci_rel is not None and abs(gap) <= ci_rel + 1e-12:
         label = "回升" if gap > LIVE_OVERFIT_GAP else "平台"
         return (f"验证损失{label}（较历史最优 {gap:+.1%}）仍在 95% 抽样噪声内"

@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 
-from lega.curves import (LIVE_WARN_EVALS, _finite_points,
+from lega.curves import (LIVE_WARN_EVALS, _finite_points, _val_ci_rel,
                          curve_observability_warnings, diagnose_curve,
                          diagnose_run_dir, live_overfit_hint, load_train_log,
                          worst_status, STATUS_ORDER)
@@ -318,6 +318,25 @@ def test_fractional_and_boolean_steps_are_malformed():
     assert d["early_stopped"] is True
     assert d["early_stop_step"] == 60, d
     print("  [ok] 小数/布尔 step 按坏记录跳过（不截断）")
+
+
+def test_boolean_log_values_are_malformed_not_numeric():
+    """loss/grad_norm/val_loss/CI 里的 bool 是坏数据，不能当成 1.0/0.0。"""
+    recs = [{"step": 10, "loss": True}, {"step": 20, "loss": 2.0}]
+    pts, bad, malformed = _finite_points(recs, "loss")
+    assert pts == [{"step": 20, "value": 2.0}]
+    assert bad == 0 and malformed == 1, (bad, malformed)
+    assert _val_ci_rel([{"val_loss": 3.0,
+                         "val_loss_ci95": [True, 4.0]}]) is None
+    assert abs(_val_ci_rel([{"val_loss": 3.0,
+                             "val_loss_ci95": [2.0, 4.0]}]) - 1 / 3) < 1e-12
+    assert live_overfit_hint(5, True, 4.0) is None
+    d = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                            [4.3, 3.8, 3.3, 2.9, 2.6])
+                       + [{"step": 55, "loss": True}])
+    assert d["malformed_records"] == 1, d
+    assert d["status"] != "发散", d
+    print("  [ok] bool 曲线值按坏记录跳过（不伪造损失/区间/过拟合提示）")
 
 
 def test_insufficient_train_coverage_is_not_normal_convergence():
