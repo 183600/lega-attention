@@ -501,11 +501,13 @@ def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
     load_bin(..., "test") 时必须显式传 allow_test=True，把“读测试集”
     从默认行为变成需要主动声明的动作。
     """
-    if split == "test" and not allow_test:
+    if split == "test" and allow_test is not True:
+        # 只接受真正的 bool True：字符串 "false"、1 等真值若按 truthiness
+        # 放行，会把“显式开锁”的闸门变成任何非空值都能绕过。
         raise PermissionError(
-            "测试集已尘封：load_bin(split='test') 需显式 allow_test=True；"
-            "test 只用于最终一次性评估（lega.evaluate 会写访问账本），"
-            "训练/调参/选型不得读取")
+            "测试集已尘封：load_bin(split='test') 需显式 allow_test=True"
+            "（不接受非布尔真值）；test 只用于最终一次性评估"
+            "（lega.evaluate 会写访问账本），训练/调参/选型不得读取")
     path = os.path.join(data_dir, f"{split}.bin")
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         raise FileNotFoundError(f"{path} 不存在或为空，请先运行 prepare_bins / prepare_data.py")

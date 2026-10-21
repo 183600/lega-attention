@@ -329,6 +329,11 @@ def test_corpus_sents_seal_test_and_prefer_heldout():
         os.remove(os.path.join(d, "val.txt"))
         sents, src = load_corpus_sents_with_source(d)
         assert src == "train" and all(s.startswith("T") for s in sents), (src, sents)
+        # 非布尔真值不能放行 test
+        for bad in (1, "false", "1"):
+            sents, src = load_corpus_sents_with_source(d, allow_test=bad)
+            assert src == "train" and all(s.startswith("T") for s in sents), \
+                (bad, src, sents)
         # 显式放行才允许 test
         sents, src = load_corpus_sents_with_source(d, allow_test=True)
         assert src == "test" and all(s.startswith("S") for s in sents), (src, sents)

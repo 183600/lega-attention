@@ -918,11 +918,13 @@ def test_load_bin_test_split_is_sealed_by_default():
     with tempfile.TemporaryDirectory() as d:
         _write_min_splits(d)
         prepare_bins(d, kind="char", force=True)
-        try:
-            load_bin(d, "test")
-            raise AssertionError("未显式放行时读取 test 必须抛 PermissionError")
-        except PermissionError:
-            pass
+        for bad in (False, None, 1, "false", "1"):
+            try:
+                load_bin(d, "test", allow_test=bad)
+                raise AssertionError(
+                    f"allow_test={bad!r} 不是显式 bool True，必须拒绝")
+            except PermissionError:
+                pass
         assert load_bin(d, "test", allow_test=True).size > 0
         # train/val 不受影响
         assert load_bin(d, "train").size > 0

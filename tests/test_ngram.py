@@ -204,12 +204,14 @@ def test_test_split_sealed_and_access_logged():
     try:
         _mk_data(tmp, [0, 1, 2, 3] * 20, [0, 1, 2, 3], vocab_size=4,
                  test_ids=[0, 1, 2, 3, 0, 1])
-        # 未显式开锁：必须拒绝
-        try:
-            evaluate(tmp, split="test")
-            raise AssertionError("split='test' 未 allow_test 应抛 PermissionError")
-        except PermissionError:
-            pass
+        # 未显式开锁/非布尔真值：必须拒绝
+        for bad in (False, None, 1, "false", "1"):
+            try:
+                evaluate(tmp, split="test", allow_test=bad)
+                raise AssertionError(
+                    f"allow_test={bad!r} 不是显式 bool True，必须拒绝")
+            except PermissionError:
+                pass
         # 显式开锁：可评测且写访问账本；test 只消费选定 α（不扫网格）
         rep = evaluate(tmp, split="test", alphas=(0.01, 1.0), allow_test=True)
         assert rep["allow_test"] is True

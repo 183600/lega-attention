@@ -653,7 +653,8 @@ def load_corpus_sents_with_source(data_dir: str, max_chars: int = 300000,
     """
     import os
     for split in splits:
-        if split == "test" and not allow_test:
+        # 只接受真正的 bool True：非布尔真值（如 "false"）不能打开 test。
+        if split == "test" and allow_test is not True:
             continue
         path = os.path.join(data_dir, f"{split}.txt")
         if not os.path.exists(path):

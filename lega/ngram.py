@@ -358,10 +358,11 @@ def evaluate(data_dir: str, split: str = "val",
     # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数。
     train_ids = load_bin(data_dir, "train")
     if split == "test":
-        if not allow_test:
+        # 必须显式传 bool True：字符串 "false" 等真值不能开锁。
+        if allow_test is not True:
             raise PermissionError(
-                "test 集已尘封：评测 n-gram 基线需显式 allow_test=True，"
-                "并会写入访问账本")
+                "test 集已尘封：评测 n-gram 基线需显式 allow_test=True"
+                "（不接受非布尔真值），并会写入访问账本")
         eval_ids = np.asarray(load_bin(data_dir, "test", allow_test=True),
                               dtype=np.int64)
     else:
