@@ -150,8 +150,9 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
       * train **内部**重复：保留首次出现，删除后续精确/空白归一化重复
         （重复训练样本会放大其权重并增加记忆，属于数据清洗而非评测改写）。
     行内容先 strip；短行（< min_chars，如 WikiText 的 "= References =" 标题）
-    不计入去污染，避免大面积误删；但仍会统计其重复数量供审查。
-    返回 (cleaned_texts, stats)。
+    不计入去污染，避免大面积误删；但短行的跨 split 复制会单独统计并告警
+    （*_overlap_short_lines 与归一化计数），不会成为“既不删除也不报告”的
+    盲区。返回 (cleaned_texts, stats)。
 
     val/test 内容绝不被改写；val 与 test 之间的重复另行统计
     （val_test_overlap_*）并由报告告警——两侧样本重叠会让“用 val 选模型、
@@ -171,11 +172,11 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
         if not isinstance(t, str):
             t = ""
         # 单次扫描：每行只 strip/normalize 一次。长行（>= min_chars）用于
-        # 去污染；非空行的重复都计数——短行不参与去污染，但重复数量仍统计
-        # 供审查（见 docstring）。纯空白行不计，避免换行聚集把重复数虚增。
-        # 集合使用 128-bit 摘要（16 字节碰撞概率可忽略）。
-        n_long, n_valid = 0, 0
+        # 去污染；短行单独收集用于跨 split 重叠诊断（不自动删除）；非空行
+        # 的重复都计数——短行不参与去污染，但重复数量仍统计供审查。
+        n_long, n_short, n_valid = 0, 0, 0
         seen_long, seen_long_norm = set(), set()
+        seen_short, seen_short_norm = set(), set()
         seen_valid, seen_valid_norm = set(), set()
         for ln in _iter_lines(t or ""):
             s = ln.strip()
@@ -191,20 +192,27 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
                 n_long += 1
                 seen_long.add(d)
                 seen_long_norm.add(dn)
-        return {"n_long": n_long, "long": seen_long,
-                "long_norm": seen_long_norm, "n_valid": n_valid,
+            else:
+                n_short += 1
+                seen_short.add(d)
+                seen_short_norm.add(dn)
+        return {"n_long": n_long, "n_short": n_short, "long": seen_long,
+                "long_norm": seen_long_norm, "short": seen_short,
+                "short_norm": seen_short_norm, "n_valid": n_valid,
                 "n_uniq": len(seen_valid), "n_uniq_norm": len(seen_valid_norm)}
 
     eval_lines, eval_norm_lines = set(), set()
-    eval_counts = {}
-    split_lines = {}
+    eval_counts, eval_short_counts = {}, {}
+    split_lines, split_short = {}, {}
     for split in ("val", "test"):
         st = scan(texts.get(split))
         eval_lines.update(st["long"])
         eval_norm_lines.update(st["long_norm"])
         eval_counts[split] = (st["n_long"], st["n_valid"], st["n_uniq"],
                               st["n_uniq_norm"])
+        eval_short_counts[split] = st["n_short"]
         split_lines[split] = (st["long"], st["long_norm"])
+        split_short[split] = (st["short"], st["short_norm"])
     val_long, val_long_norm = split_lines["val"]
     test_long, test_long_norm = split_lines["test"]
     # eval 两侧的重复：不修改任何一侧（test 必须尘封），但必须显式报告。
@@ -219,6 +227,9 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     seen_valid_train, seen_valid_train_norm = set(), set()
     # train 内部去重：长行摘要集合（首次出现保留）。
     seen_train_long, seen_train_long_norm = set(), set()
+    # 短行（< min_chars）不参与去污染，但跨 split 复制必须能被看见：
+    # 单独收集摘要，用于诊断计数与告警。
+    seen_short_train, seen_short_train_norm = set(), set()
     dropped_exact, dropped_norm = 0, 0
     dropped_train_exact, dropped_train_norm = 0, 0
     # 流式扫描 train：被删行（连同其后换行）不进入任何片段；
@@ -238,6 +249,9 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             dn = d if sn == s else digest(sn)
             seen_valid_train.add(d)
             seen_valid_train_norm.add(dn)
+            if len(s) < min_chars:
+                seen_short_train.add(d)
+                seen_short_train_norm.add(dn)
         drop = False
         if s and len(s) >= min_chars:
             n_train += 1
@@ -289,6 +303,22 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
                  int(val_test_overlap_norm),
              "val_test_overlap_rate": float(
                  val_test_overlap / max(1, len(val_long)))}
+    short_pairs = {
+        "train_val": (seen_short_train, seen_short_train_norm,
+                      split_short["val"][0], split_short["val"][1],
+                      eval_short_counts["val"]),
+        "train_test": (seen_short_train, seen_short_train_norm,
+                       split_short["test"][0], split_short["test"][1],
+                       eval_short_counts["test"]),
+        "val_test": (split_short["val"][0], split_short["val"][1],
+                     split_short["test"][0], split_short["test"][1],
+                     eval_short_counts["test"]),
+    }
+    for key, (a, an, b, bn, denom) in short_pairs.items():
+        exact = len(a & b)
+        stats[f"{key}_overlap_short_lines"] = int(exact)
+        stats[f"{key}_overlap_normalized_short_lines"] = int(len(an & bn))
+        stats[f"{key}_short_overlap_rate"] = float(exact / max(1, denom))
     per_split = {"train": (n_train, n_valid_train, len(seen_valid_train),
                            len(seen_valid_train_norm)),
                  "val": eval_counts["val"], "test": eval_counts["test"]}
@@ -1124,6 +1154,27 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         add("info", "train_intra_duplicates_removed",
             f"已从 train 移除内部重复长行：精确 {n_train_dup} 行、"
             f"空白归一化后额外 {n_train_dup_norm} 行（保留首次出现）")
+    n_short_tv = _count(dup.get("train_val_overlap_short_lines"))
+    n_short_tt = _count(dup.get("train_test_overlap_short_lines"))
+    n_short_vt = _count(dup.get("val_test_overlap_short_lines"))
+    n_short_tv_norm = _count(
+        dup.get("train_val_overlap_normalized_short_lines"))
+    n_short_tt_norm = _count(
+        dup.get("train_test_overlap_normalized_short_lines"))
+    n_short_vt_norm = _count(
+        dup.get("val_test_overlap_normalized_short_lines"))
+    if n_short_tv or n_short_tt or n_short_tv_norm or n_short_tt_norm:
+        add("warning", "short_line_cross_split_overlap",
+            f"短行（<{dup.get('min_chars', '?')} 字符）跨 split 重复："
+            f"train/val 精确 {n_short_tv} 行、train/test 精确 {n_short_tt} 行"
+            f"（空白归一化后 {n_short_tv_norm}/{n_short_tt_norm}）；"
+            "为避免误删标题/固定用语未从 train 移除，但重复样本会削弱 "
+            "held-out 独立性，须人工核查")
+    if n_short_vt or n_short_vt_norm:
+        add("warning", "eval_short_lines_overlap",
+            f"val/test 短行重复：精确 {n_short_vt} 行、"
+            f"空白归一化后 {n_short_vt_norm} 行；val 选型会部分预演 test，"
+            "test 不再完全独立，须核查来源或重建划分")
     doc = dup.get("document_level")
     doc = doc if isinstance(doc, dict) else {}
     n_doc_cross = _count(
@@ -1238,6 +1289,22 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             f"split（段落边界 {p.get('n_paragraph_boundaries', '?')} 个、"
             f"切点类型 {p.get('cut_kinds', '?')}），违反“段落整体落在同一侧”，"
             "须调整划分比例或为语料补空行分隔")
+    short = p.get("overlap_short_lines")
+    if isinstance(short, dict):
+        bad_short = {}
+        for pair, val in short.items():
+            if not isinstance(val, dict):
+                continue
+            exact = val.get("exact_lines") or 0
+            norm = val.get("normalized_lines") or 0
+            if exact or norm:
+                bad_short[str(pair)] = {"exact_lines": exact,
+                                        "normalized_lines": norm}
+        if bad_short:
+            add("warning", "split_overlap_short_lines",
+                f"实际文本存在跨 split 共享短行 {bad_short}"
+                f"（<{p.get('min_chars', '?')} 字符，多为标题/固定用语）；"
+                "未自动删除，但重复样本会削弱 held-out 独立性，须人工核查")
     if p.get("verified_disjoint") is False:
         overlaps = p.get("overlap_long_lines")
         bad = {}
@@ -1276,35 +1343,51 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
     文件缺失/路径为空时不能把"空集合交集"当成"已核对无重叠"：缺失的 split
     必须显式列入 missing_files 并令 verified_disjoint=False，否则报告会把
     "没有可核对的文件"伪装成"核对通过"。
+
+    短行（< min_chars）不计入 verified_disjoint（标题/固定用语的重复是正常
+    现象），但会在 overlap_short_lines 中单独计数，避免短样本跨 split 复制
+    成为既不删除也不报告的盲区。
     """
     sets = {}
+    short_sets = {}
     missing = []
     for split, path in (txt_paths if isinstance(txt_paths, dict) else {}).items():
         if not path or not os.path.exists(path):
             missing.append(split)
             continue
         exact, norm = set(), set()
+        short, short_norm = set(), set()
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 s = line.strip()
+                if not s:
+                    continue
                 if len(s) < min_chars:
+                    short.add(_line_digest(s))
+                    short_norm.add(_line_digest(_normalize_line(s)))
                     continue
                 exact.add(_line_digest(s))
                 norm.add(_line_digest(_normalize_line(s)))
         sets[split] = (exact, norm)
+        short_sets[split] = (short, short_norm)
     overlaps = {}
+    overlaps_short = {}
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
         if a not in sets or b not in sets:
             continue
         overlaps[f"{a}_{b}"] = {
             "exact_lines": len(sets[a][0] & sets[b][0]),
             "normalized_lines": len(sets[a][1] & sets[b][1])}
+        overlaps_short[f"{a}_{b}"] = {
+            "exact_lines": len(short_sets[a][0] & short_sets[b][0]),
+            "normalized_lines": len(short_sets[a][1] & short_sets[b][1])}
     disjoint = (not missing and bool(overlaps)
                 and all(v["exact_lines"] == 0
                         and v["normalized_lines"] == 0
                         for v in overlaps.values()))
     return {"verified_disjoint": bool(disjoint),
             "overlap_long_lines": overlaps,
+            "overlap_short_lines": overlaps_short,
             "missing_files": missing,
             "min_chars": int(min_chars)}
 

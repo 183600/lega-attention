@@ -407,6 +407,29 @@ def test_decontaminate_counts_short_line_duplicates():
     print("  [ok] 短行不参与去污染，但重复短行仍被计数供审查")
 
 
+def test_decontaminate_reports_short_line_cross_split_overlap():
+    """短行跨 split 复制必须显式计数：不自动删除，但不能成为静默盲区。"""
+    short = "shared short heading"
+    texts = {
+        "train": f"{short}\ntrain long line with enough characters to survive.",
+        "val": f"{short}\nval long line with enough characters to survive.",
+        "test": "test long line with enough characters to survive.",
+    }
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert short in out["train"]
+    assert stats["train_val_overlap_short_lines"] == 1
+    assert stats["train_test_overlap_short_lines"] == 0
+    assert stats["val_test_overlap_short_lines"] == 0
+    assert stats["train_val_short_overlap_rate"] > 0
+    # NFKC/空白归一化后的短行同样计入（全角 Ａ + 多空格 vs 普通 A 单空格）
+    texts2 = {"train": "Ａ  shared   short\n" + "x" * 50,
+              "val": "A shared short\n" + "y" * 50, "test": ""}
+    _, stats2 = decontaminate_texts(texts2, min_chars=40)
+    assert stats2["train_val_overlap_short_lines"] == 0
+    assert stats2["train_val_overlap_normalized_short_lines"] == 1
+    print("  [ok] 短行跨 split 复制：精确与归一化计数均可见（不静默）")
+
+
 def test_decontaminate_catches_whitespace_normalized_duplicates():
     """仅空白差异的跨 split 复制同样是泄露，必须只从 train 移除。"""
     val_line = ("A long paragraph repeated with a whitespace variant that must "
@@ -857,14 +880,18 @@ def test_verify_splits_disjoint_binds_claim_to_content():
         r = verify_splits_disjoint(paths)
         assert r["verified_disjoint"] is False
         assert r["overlap_long_lines"]["val_test"]["exact_lines"] == 1
-        # 短行（标题）不计入，避免误报
+        # 短行（标题）不计入 verified_disjoint，避免误报；但短行重叠必须
+        # 单独报告，不能成为“既不删除也不报告”的盲区。
         with open(paths["train"], "w", encoding="utf-8") as f:
             f.write("= References =\ntrain unique plenty of characters here.\n")
         with open(paths["val"], "w", encoding="utf-8") as f:
             f.write("= References =\nval unique plenty of characters here.\n")
         with open(paths["test"], "w", encoding="utf-8") as f:
             f.write("test unique plenty of characters here.\n")
-        assert verify_splits_disjoint(paths)["verified_disjoint"] is True
+        r = verify_splits_disjoint(paths)
+        assert r["verified_disjoint"] is True
+        assert r["overlap_short_lines"]["train_val"]["exact_lines"] == 1
+        assert r["overlap_long_lines"]["train_val"]["exact_lines"] == 0
     print("  [ok] verify_splits_disjoint：声明与文本核对，短行不误报，"
           "缺失文件不伪装成通过")
 
@@ -1213,6 +1240,28 @@ def test_build_data_report_flags_normalized_and_short_intra_duplicates():
     print("  [ok] 内部重复告警：归一化差异与短行重复均可见，文案口径一致")
 
 
+def test_leakage_alerts_cover_short_line_cross_split_overlap():
+    """短行跨 split 复制必须进入 alerts（不自动删除，但须显式告警）。"""
+    duplicates = {
+        "min_chars": 40,
+        "train_val_overlap_short_lines": 2,
+        "train_val_overlap_normalized_short_lines": 3,
+        "train_test_overlap_short_lines": 1,
+        "train_test_overlap_normalized_short_lines": 1,
+        "val_test_overlap_short_lines": 4,
+        "val_test_overlap_normalized_short_lines": 5,
+    }
+    rep = build_data_report(
+        {"kind": "char", "fit_on": "train", "vocab_size": 5, "unk_rate": {}},
+        {}, {}, duplicates, {}, {}, {})
+    by_code = {a["code"]: a for a in rep["alerts"]}
+    assert "short_line_cross_split_overlap" in by_code
+    assert "eval_short_lines_overlap" in by_code
+    assert "train/val 精确 2" in by_code["short_line_cross_split_overlap"]["message"]
+    assert "精确 4" in by_code["eval_short_lines_overlap"]["message"]
+    print("  [ok] 短行跨 split 复制告警：train/eval 与 val/test 均显式上报")
+
+
 def test_split_protocol_alerts_flag_group_crossing():
     """群组跨 split / 字符切分 / 打乱必须在 alerts 中显式告警，不能只留在元数据。"""
     assert split_protocol_alerts(None) == []
@@ -1247,6 +1296,22 @@ def test_split_protocol_alerts_flag_paragraph_crossing():
     critical = critical_split_alerts({"alerts": alerts})
     assert [a["code"] for a in critical] == ["split_paragraphs_cross_cut"]
     print("  [ok] 划分协议告警：段落跨切点显式上报并进入硬拦截")
+
+
+def test_split_protocol_alerts_flag_short_line_overlap():
+    """实测短行跨 split 重叠必须进入协议告警（不进入硬闸门，但不可静默）。"""
+    alerts = split_protocol_alerts({
+        "overlap_short_lines": {"train_val": {"exact_lines": 2,
+                                              "normalized_lines": 3}},
+        "min_chars": 40})
+    assert [a["code"] for a in alerts] == ["split_overlap_short_lines"]
+    assert "train_val" in alerts[0]["message"]
+    assert "2" in alerts[0]["message"]
+    clean = split_protocol_alerts({
+        "overlap_short_lines": {"train_val": {"exact_lines": 0,
+                                              "normalized_lines": 0}}})
+    assert clean == []
+    print("  [ok] 划分协议告警：短行跨 split 重叠显式上报")
 
 
 def test_build_data_report_surfaces_group_crossing_alerts():

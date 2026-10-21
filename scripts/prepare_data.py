@@ -341,6 +341,17 @@ def main():
             print(f"[data] 警告：三个 split 的实际文本存在跨 split 共享长行 {ov}——"
                   "与“无共享样本/document_disjoint”声明不符，须核查来源或划分；"
                   "下游去污染会移除 train 侧重复行，但 val/test 重叠只能靠重建划分消除")
+    short_ov = split_protocol.get("overlap_short_lines")
+    if isinstance(short_ov, dict):
+        short_ov = {k: v for k, v in short_ov.items()
+                    if isinstance(v, dict)
+                    and (v.get("exact_lines") or v.get("normalized_lines"))}
+    else:
+        short_ov = {}
+    if short_ov:
+        print(f"[data] 警告：三个 split 存在跨 split 共享短行 {short_ov}"
+              f"（<{split_protocol.get('min_chars', '?')} 字符，多为标题/固定用语）；"
+              "未自动删除，但重复样本会削弱 held-out 独立性，须人工核查")
 
     # val/test 之间没有“只改 train”的去污染出口：一旦共享长行，val 选型会
     # 部分预演 test，test 不再是独立 held-out。train 与 val/test 的重叠可由
