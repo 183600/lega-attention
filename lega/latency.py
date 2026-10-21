@@ -75,9 +75,20 @@ def timing_stats(times_ms) -> dict:
     """逐次计时列表 → 中位数/p10/p90/相对散布（测量不确定性的最小报告口径）。
 
     spread_pct=(p90-p10)/median：同一配置重复测量 80% 中心区间的相对宽度。
-    变体间差异小于该量级时按测量噪声处理。
+    变体间差异小于该量级时按测量噪声处理。bool/负数/非有限值不是计时观测，
+    按缺失剔除——True 会被 float() 伪造成 1ms，Inf/NaN 会污染中位数与散布。
     """
-    vals = sorted(float(t) for t in times_ms if t is not None)
+    vals = []
+    for t in times_ms:
+        if t is None or isinstance(t, bool):
+            continue
+        try:
+            f = float(t)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(f) and f >= 0.0:
+            vals.append(f)
+    vals.sort()
     if not vals:
         return {"median_ms": None, "p10_ms": None, "p90_ms": None,
                 "spread_pct": None, "n": 0}

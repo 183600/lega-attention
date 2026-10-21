@@ -24,7 +24,11 @@ def test_timing_stats_reports_spread():
     assert timing_stats([2.0, 2.0])["spread_pct"] == 0.0
     empty = timing_stats([])
     assert empty["median_ms"] is None and empty["spread_pct"] is None
-    print("  [ok] timing_stats（中位数/p10/p90/散布）")
+    # bool/负数/非有限/非数值不是计时观测，不能伪装成 1ms 或污染散布
+    noisy = timing_stats([True, False, -1.0, float("nan"), float("inf"),
+                          "bad", None, 2.0, "4.0"])
+    assert noisy["n"] == 2 and noisy["median_ms"] == 3.0, noisy
+    print("  [ok] timing_stats（中位数/p10/p90/散布；非法计时按缺失）")
 
 
 def test_latency_bench_runs_on_cpu():
