@@ -13,7 +13,7 @@ from lega.evaluate import (_positive_int_or_none, checkpoint_selection_info,
                            collect_worst_windows, json_safe_eval_metrics,
                            load_train_coverage, load_train_peak_mem_mb,
                            load_train_throughput, repeated_test_checkpoint,
-                           worst_window_screening)
+                           worst_window_screening, worst_windows_allowed)
 from lega.model import GPT
 
 
@@ -326,3 +326,12 @@ def test_repeated_test_checkpoint_gate():
     assert not repeated_test_checkpoint(
         {"checkpoints_evaluated_multiple_times": []}, "a" * 64)
     print("  [ok] 重复 test 评测检测：按 16 位指纹命中，空值/空账本不误判")
+
+
+def test_worst_windows_allowed_seals_test():
+    """test 上转储最差窗口默认禁止，显式放行才允许；val 不受限。"""
+    assert worst_windows_allowed("val", False)
+    assert worst_windows_allowed("val", True)
+    assert not worst_windows_allowed("test", False)
+    assert worst_windows_allowed("test", True)
+    print("  [ok] test 最差窗口默认尘封，val 不受限")

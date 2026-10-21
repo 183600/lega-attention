@@ -4164,7 +4164,9 @@ def build_summary(results_dir: str, audit: dict = None,
         _render_advice(md, window_advice,
                        "### 坏案例驱动的改进方向（最差窗口）", max_items=4)
     else:
-        md.append("- 暂无最差窗口记录（评测未含 --worst_n 或评测被跳过）。"
+        md.append("- 暂无最差窗口记录（评测未含 --worst_n、评测被跳过，或 test "
+                  "split 默认尘封最差窗口转储——需人工迭代请在 val 上做，"
+                  "确需 test 错误清单须显式 --worst_on_test 并在报告中披露）。"
                   "PPL 平均分无法替代对错误样本的逐条检查。")
 
     # --- 消融矩阵（全因子 + 去一法）
@@ -4795,6 +4797,10 @@ def main():
     p.add_argument("--worst_n", type=int, default=10,
                    help="每个 run 转储的最差语言建模窗口数（坏案例归因用；"
                         "默认 10，少于 3 条的模式分析不具统计意义）")
+    p.add_argument("--worst_on_test", action="store_true",
+                   help="允许在 test split 上转储最差窗口（默认关闭：test 只能"
+                        "最终评估一次，把 test 错误清单交给人工迭代会让测试集"
+                        "变成隐式训练集；开启后写访问账本并要求报告披露）")
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
@@ -5101,6 +5107,8 @@ def main():
                 cmd += ["--early_stop_patience", str(args.early_stop_patience)]
             if args.worst_n is not None:
                 cmd += ["--worst_n", str(args.worst_n)]
+            if args.worst_on_test:
+                cmd += ["--worst_on_test"]
             if args.smoke:
                 cmd += ["--smoke", "--ruler_ctx_lens", str(smoke_ctx),
                         "--ruler_n_samples", "2",

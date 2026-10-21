@@ -39,6 +39,15 @@ def repeated_test_checkpoint(test_access, ckpt_sha256) -> bool:
     return str(ckpt_sha256)[:16] in repeated
 
 
+def worst_windows_allowed(split, worst_on_test: bool) -> bool:
+    """是否允许在该 split 上转储最差窗口（坏案例）。
+
+    test 上默认禁止：最差窗口连同上下文/预测暴露 test 内容，交人工迭代等于
+    据 test 改进模型。只有显式 worst_on_test 才放行。
+    """
+    return split != "test" or bool(worst_on_test)
+
+
 def _preserve_eval_mode(fn):
     """评测辅助函数临时切到 eval 并在结束时恢复调用方模式（dropout 不影响结果）。"""
     @functools.wraps(fn)
@@ -312,6 +321,10 @@ def main():
                         "（与 train.py 的默认值一致，保证窗口规格可比）")
     p.add_argument("--worst_n", type=int, default=0,
                    help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）")
+    p.add_argument("--worst_on_test", action="store_true",
+                   help="允许在 test split 上转储最差窗口（坏案例）。默认关闭："
+                        "test 只能最终评估一次，把 test 错误清单交给人工迭代会"
+                        "让测试集变成隐式训练集。需要审阅 test 错误时显式开启。")
     p.add_argument("--split", default="auto",
                    choices=["auto", "test", "val"],
                    help="默认 auto：存在 test.bin 时用 held-out test（checkpoint 选择在 "
@@ -457,7 +470,16 @@ def main():
     }
     # 坏案例：把预测最差的窗口连同 top-5 预测一起落盘（PPL 只反映平均，
     # 最差窗口揭示模型盲区——生僻 token？不可预测噪声？特定模式崩溃？）
-    if args.worst_n > 0:
+    # test 上转储默认关闭：最差窗口会连同上下文/预测暴露 test 内容，交人工
+    # 迭代 = 据 test 改进模型（测试集变隐式训练集）。需要审阅时显式开启。
+    worst_on_test_ok = worst_windows_allowed(
+        split, getattr(args, "worst_on_test", False))
+    if args.worst_n > 0 and not worst_on_test_ok:
+        res["worst_windows_skipped_reason"] = "test_sealed"
+        print("[eval] 已跳过 test 最差窗口转储（默认不在 test 上做坏案例迭代）；"
+              "确需审阅 test 错误请显式加 --worst_on_test，并在报告中披露")
+    if args.worst_n > 0 and worst_on_test_ok:
+        res["worst_windows_on_test"] = bool(split == "test")
         try:
             tok = load_tokenizer(args.data_dir)
             res["worst_windows"] = collect_worst_windows(
@@ -471,6 +493,20 @@ def main():
                   f"（候选 {res['worst_window_scope']['screened']}/"
                   f"{res['worst_window_scope']['total']} 个窗口；"
                   "res['worst_windows']）")
+            if split == "test":
+                # 落盘即意味着 test 内容进入可读报告：必须留痕，供审计。
+                try:
+                    append_test_access(args.data_dir, {
+                        "time": now_str(),
+                        "reason": "worst_window_dump_on_test",
+                        "ckpt_sha256": ckpt_sha256,
+                        "variant": ck.get("variant", model.variant),
+                        "seed": ck.get("seed"),
+                        "n_worst": int(args.worst_n),
+                    })
+                except OSError as e:
+                    print(f"[eval] 警告：test 最差窗口转储的访问记录写入失败"
+                          f"（{e}）")
         except Exception as e:  # 坏案例转储失败不应阻塞评测本身
             print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯

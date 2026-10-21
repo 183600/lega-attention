@@ -96,6 +96,15 @@ def test_stage_argv_matches_cli():
         "--ckpt", ckpt, "--data_dir", "data/dummy",
         "--out", os.path.join("results/tiny_smoke", "eval_lega.json"),
         "--worst_n", "10", "--device", "auto"]
+    # 显式放行 test 最差窗口时，标志位必须透传到 evaluate
+    a_test = _parser().parse_args([
+        "--config", "configs/tiny.json", "--variant", "lega",
+        "--seed", "1337", "--data_dir", "data/dummy",
+        "--out_dir", "out/tiny_smoke/lega",
+        "--results_dir", "results/tiny_smoke", "--suffix", "",
+        "--worst_on_test"])
+    assert "--worst_on_test" in _eval_argv(a_test, ckpt)
+    assert "--worst_on_test" not in _eval_argv(a, ckpt)
     assert _ruler_argv(a, ckpt) == [
         "--ckpt", ckpt, "--data_dir", "data/dummy",
         "--out", os.path.join("results/tiny_smoke", "ruler_lega.json"),

@@ -51,10 +51,13 @@ def _train_argv(a) -> List[str]:
 
 
 def _eval_argv(a, ckpt: str) -> List[str]:
-    return ["--ckpt", ckpt, "--data_dir", a.data_dir,
+    argv = ["--ckpt", ckpt, "--data_dir", a.data_dir,
             "--out", os.path.join(a.results_dir,
                                   f"eval_{a.variant}{a.suffix}.json"),
             "--worst_n", str(a.worst_n), "--device", a.device]
+    if a.worst_on_test:
+        argv += ["--worst_on_test"]
+    return argv
 
 
 def _ruler_argv(a, ckpt: str) -> List[str]:
@@ -132,6 +135,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--worst_n", type=int, default=10,
                    help="evaluate 记录的最差窗口数（坏案例模式分析需要足够样本，"
                         "默认 10）")
+    p.add_argument("--worst_on_test", action="store_true",
+                   help="允许在 test 上转储最差窗口（默认关闭：test 只做最终"
+                        "一次性评估，把 test 错误清单交给人工迭代即泄露）")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--early_stop_patience", type=int, default=None)
