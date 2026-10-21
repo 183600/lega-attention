@@ -7,7 +7,8 @@ import tempfile
 
 from lega.data import CharTokenizer
 from lega.ruler import (build_fwe, build_niah, build_vt, load_corpus_sents,
-                        load_corpus_sents_with_source, score_prediction,
+                        load_corpus_sents_with_source, record_corpus_test_access,
+                        score_prediction,
                         ContextTooSmall, TASKS, _stable_hash)
 
 _TEXT = ("One of the special magic numbers for lyre is: 7021853.\n"
@@ -297,12 +298,14 @@ def test_vt_needle_span_is_value_definition_line():
         assert f"VAR {ex['meta']['chain']}4" not in seg
 
 
-def test_corpus_sents_prefer_heldout_over_train():
-    """niah_corpus 的干扰语料必须优先 held-out（val → test → train）。
+def test_corpus_sents_seal_test_and_prefer_heldout():
+    """niah_corpus 的干扰语料必须优先 held-out，且 test 默认尘封。
 
     取自 train.txt 会让评测上下文与训练语料重叠，长上下文检索分数偏高、
     机制分析建立在见过的文本上；只有完全没有 held-out 文本时才允许回退，
     且来源要能被调用方审计（payload 的 corpus_source）。
+    另外 test 是尘封 split：本加载器直读裸 .txt，绕过 load_bin 闸门，默认
+    绝不能把 test 当候选（否则 val 缺失时无账本地读测试集）。
     """
     d = tempfile.mkdtemp()
     try:
@@ -315,19 +318,45 @@ def test_corpus_sents_prefer_heldout_over_train():
         _write("train.txt", "T")
         _write("val.txt", "V")
         _write("test.txt", "S")
+        # 默认：val 优先，test 不进候选
         sents, src = load_corpus_sents_with_source(d)
         assert src == "val" and all(s.startswith("V") for s in sents), (src, sents)
+        # val 缺失时 test 默认被尘封，回退 train（而不是静默读 test）
         os.remove(os.path.join(d, "val.txt"))
         sents, src = load_corpus_sents_with_source(d)
-        assert src == "test" and all(s.startswith("S") for s in sents), (src, sents)
-        os.remove(os.path.join(d, "test.txt"))
-        sents, src = load_corpus_sents_with_source(d)
         assert src == "train" and all(s.startswith("T") for s in sents), (src, sents)
-        # 兼容旧接口仍返回列表
-        assert load_corpus_sents(d) == sents
+        # 显式放行才允许 test
+        sents, src = load_corpus_sents_with_source(d, allow_test=True)
+        assert src == "test" and all(s.startswith("S") for s in sents), (src, sents)
+        # 兼容旧接口仍返回列表（同样不放行 test，此时 val 已删 → 回退 train）
+        compat = load_corpus_sents(d)
+        assert all(s.startswith("T") for s in compat) and compat, compat
         # 全部缺失/为空时必须显式返回 (空, None)，而不是静默给空列表
         os.remove(os.path.join(d, "train.txt"))
+        os.remove(os.path.join(d, "test.txt"))
         assert load_corpus_sents_with_source(d) == ([], None)
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    print("  [ok] niah_corpus 干扰语料优先 held-out（val→test→train 仅回退）")
+    print("  [ok] niah_corpus 干扰语料优先 held-out、test 默认尘封（显式 allow_test 才放行）")
+
+
+def test_corpus_test_access_recorded():
+    """显式放行 test 语料时，必须写入 test 访问账本（账本旁路留痕）。"""
+    d = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
+            f.write(" ".join(
+                f"S{i} sentence has plenty of characters for the filter."
+                for i in range(5)))
+        ok = record_corpus_test_access(d, "test", stage="ruler")
+        assert ok is True
+        from lega.datacheck import read_test_access_log
+        records = read_test_access_log(d)
+        assert len(records) == 1
+        assert records[0]["reason"] == "ruler_niah_corpus_distractors"
+        # 非 test 来源不写账本
+        assert record_corpus_test_access(d, "val") is False
+        assert len(read_test_access_log(d)) == 1
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("  [ok] test 语料放行写入访问账本，val 来源不写")

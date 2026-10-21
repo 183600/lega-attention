@@ -69,8 +69,9 @@ from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
                     EXTREME_IMBALANCE_THRESHOLD as _EXTREME_IMBALANCE_THRESHOLD,
                     PRIMARY_AP_THRESHOLD as _PRIMARY_AP_THRESHOLD,
                     linear_probe)
-from .repro import load_provenance
+from .repro import load_provenance, sha256_file
 from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
+                    record_corpus_test_access,
                     ContextTooSmall, _stable_hash)
 from .utils import (amp_autocast, auroc, average_precision,
                     calibration_metrics, enable_tf32, f1_scores, get_device,
@@ -615,6 +616,9 @@ def main():
     p.add_argument("--suffix", default="",
                    help="输出文件名后缀（如 _seed1337），多种子运行避免互相覆盖")
     p.add_argument("--device", default="auto")
+    p.add_argument("--allow_test_corpus", action="store_true",
+                   help="允许 niah_corpus 干扰语句取自 test.txt（尘封 split 默认"
+                        "禁止；放行时写入 test 访问账本）")
     args = p.parse_args()
 
     device = get_device(args.device)
@@ -677,7 +681,17 @@ def main():
     ctx = min(ctx, model.block_size - max_new - 1)
     ruler_seed = _cfg_int("ruler", "seed", 1234)
 
-    sents, corpus_source = load_corpus_sents_with_source(args.data_dir)
+    sents, corpus_source = load_corpus_sents_with_source(
+        args.data_dir, allow_test=bool(getattr(args, "allow_test_corpus", False)))
+    if corpus_source == "test":
+        if record_corpus_test_access(args.data_dir, corpus_source,
+                                     ckpt_sha256=sha256_file(args.ckpt),
+                                     stage="analysis"):
+            print("[analysis] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
+                  "已写入 test 访问账本；机制分析输入含测试集文本，需在报告披露")
+        else:
+            print("[analysis] ⚠ niah_corpus 干扰语料取自 test.txt 且访问账本"
+                  "写入失败：本次读取未被记录")
     examples, task_of, ctx_of = [], [], []
     skipped_tasks = []
     for i in range(n_examples):

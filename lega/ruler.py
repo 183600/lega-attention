@@ -26,6 +26,7 @@ import torch
 
 from .utils import (amp_autocast, amp_dtype_for, save_json, strict_int,
                     wilson_score_ci)
+from .repro import sha256_file
 
 KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate",
              "quartz", "falcon", "harbor", "meadow", "thistle", "cobalt", "juniper",
@@ -615,7 +616,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
 
 
 def load_corpus_sents_with_source(data_dir: str, max_chars: int = 300000,
-                                  splits=("val", "test", "train")):
+                                  splits=("val", "test", "train"),
+                                  allow_test: bool = False):
     """抽取 niah_corpus 的干扰语句，返回 (sents, 实际使用的 split)。
 
     评测上下文绝不能来自训练语料：若干扰句取自 train.txt，模型在“自然文本
@@ -623,9 +625,17 @@ def load_corpus_sents_with_source(data_dir: str, max_chars: int = 300000,
     （misleading_rate 等）也建立在记忆而非泛化上。因此按 held-out 优先级
     选择：val → test → train；仅当没有任何 held-out 文本时才回退 train
     （调用方须显式告警，并把来源写入结果供审计）。
+
+    但 test 是尘封 split：本函数直接读裸 .txt，绕过 lega.data.load_bin 的
+    allow_test 闸门，若默认就把 test 当候选，val 缺失时每次 ruler/analysis
+    都会无账本地读测试集（并把 test 文本喂进评测 prompt）。因此默认
+    allow_test=False 时 test 从候选中剔除（退化为 val → train）；只有显式
+    allow_test=True 才纳入 test，且调用方必须写访问账本。
     """
     import os
     for split in splits:
+        if split == "test" and not allow_test:
+            continue
         path = os.path.join(data_dir, f"{split}.txt")
         if not os.path.exists(path):
             continue
@@ -643,8 +653,34 @@ def load_corpus_sents_with_source(data_dir: str, max_chars: int = 300000,
 
 
 def load_corpus_sents(data_dir: str, max_chars: int = 300000) -> List[str]:
-    """兼容旧调用：只返回语句列表（来源见 load_corpus_sents_with_source）。"""
+    """兼容旧调用：只返回语句列表（来源见 load_corpus_sents_with_source）。
+
+    兼容入口同样不放行 test（尘封 split），见 load_corpus_sents_with_source。
+    """
     return load_corpus_sents_with_source(data_dir, max_chars=max_chars)[0]
+
+
+def record_corpus_test_access(data_dir: str, source, ckpt_sha256: str = None,
+                              variant=None, seed=None, stage: str = "ruler") -> bool:
+    """干扰语料取自 test 时补写 test 访问账本（best-effort，返回是否写入成功）。
+
+    ruler/analysis 直接读裸 test.txt 属于账本旁路；显式放行后必须留下记录，
+    否则“测试集被哪些阶段读过”无法审计。账本不可写（只读目录等）时不阻塞
+    评测，但调用方须打印告警。
+    """
+    if source != "test":
+        return False
+    from .datacheck import append_test_access
+    try:
+        append_test_access(data_dir, {
+            "reason": f"{stage}_niah_corpus_distractors",
+            "ckpt_sha256": ckpt_sha256,
+            "variant": variant,
+            "seed": seed,
+        })
+        return True
+    except OSError:
+        return False
 
 
 def main():
@@ -664,6 +700,9 @@ def main():
                    help="等长 prompt 批量贪婪解码的最大批大小")
     p.add_argument("--no_amp", action="store_true", help="禁用 bf16 autocast（CUDA）")
     p.add_argument("--device", default="auto")
+    p.add_argument("--allow_test_corpus", action="store_true",
+                   help="允许 niah_corpus 干扰语句取自 test.txt（尘封 split 默认"
+                        "禁止；放行时写入 test 访问账本，见 load_corpus_sents_with_source）")
     args = p.parse_args()
 
     device = get_device(args.device)
@@ -723,8 +762,22 @@ def main():
     # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
     amp = bool(cfg.get("amp", True)) and not args.no_amp
 
-    corpus_sents, corpus_source = load_corpus_sents_with_source(args.data_dir)
-    if corpus_source == "train":
+    corpus_sents, corpus_source = load_corpus_sents_with_source(
+        args.data_dir, allow_test=bool(args.allow_test_corpus))
+    if corpus_source == "test":
+        # test 作为干扰语料是账本旁路的显式放行：必须留痕，否则测试集被
+        # prompt 级读取完全不可审计（load_bin 的闸门管不到裸 .txt 读取）。
+        if record_corpus_test_access(args.data_dir, corpus_source,
+                                     ckpt_sha256=sha256_file(args.ckpt),
+                                     variant=ck.get("variant"),
+                                     seed=ck.get("seed"), stage="ruler"):
+            print("[ruler] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
+                  "已写入 test 访问账本；test 文本进入评测 prompt，"
+                  "与后续 test PPL 评测共用同一批文本，需在报告中披露")
+        else:
+            print("[ruler] ⚠ niah_corpus 干扰语料取自 test.txt 且访问账本写入"
+                  "失败：本次读取未被记录，测试集审计存在缺口")
+    elif corpus_source == "train":
         print("[ruler] ⚠ niah_corpus 干扰语料回退到 train.txt（缺少 val/test 文本）："
               "评测上下文与训练语料重叠，长上下文检索分数偏高、机制分析建立在"
               "见过的文本上，不能与 held-out 语料的运行直接比较")
