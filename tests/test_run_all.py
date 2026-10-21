@@ -81,6 +81,19 @@ def test_data_protocol_preflight_blocks_critical_violations():
     print("  [ok] 数据协议闸门：严重违规默认中止，显式覆盖放行，报告缺失仅告警")
 
 
+def test_protocol_override_env_matches_cli_flag(monkeypatch):
+    """run_all 自身的闸门必须和子进程一样识别环境变量放行。"""
+    from lega.preflight import ALLOW_ENV, allow_protocol_violations
+    monkeypatch.delenv(ALLOW_ENV, raising=False)
+    assert not allow_protocol_violations(False)
+    assert allow_protocol_violations(True)
+    monkeypatch.setenv(ALLOW_ENV, "YES")
+    assert allow_protocol_violations(False)
+    monkeypatch.setenv(ALLOW_ENV, "0")
+    assert not allow_protocol_violations(False)
+    print("  [ok] 数据协议放行：CLI 与环境变量同口径")
+
+
 def test_direct_train_entry_runs_data_protocol_preflight(monkeypatch):
     """直接 `python -m lega.train` 也必须被同一份防泄漏闸门拦截。"""
     from lega.train import main as train_main

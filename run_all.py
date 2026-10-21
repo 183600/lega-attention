@@ -80,6 +80,7 @@ from lega.hypotheses import (REGISTRY_PATH as HYPOTHESES_PATH,  # noqa: E402
                              load_registration, verify_registration)
 from lega.ngram import evaluate as ngram_evaluate  # noqa: E402
 from lega.preflight import (ALLOW_ENV,  # noqa: E402
+                            allow_protocol_violations,
                             data_cache_schema_issue,
                             data_protocol_preflight,
                             data_report_binding_issue, load_data_report)
@@ -5309,8 +5310,10 @@ def main():
     # 协议违反“时序/群组不跨侧”，默认直接中止——已知泄露的数据不应进入
     # 全量训练；报告与 meta 的哈希绑定也必须一致，避免陈旧/被改报告冒充
     # 当前自检结果。
+    protocol_override = allow_protocol_violations(
+        args.allow_data_protocol_violations)
     data_preflight = data_protocol_preflight(
-        args.data_dir, allow_override=args.allow_data_protocol_violations)
+        args.data_dir, allow_override=protocol_override)
     critical_data_alerts = data_preflight["critical_violations"]
     if critical_data_alerts:
         detail = "；".join(
