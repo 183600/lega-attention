@@ -425,6 +425,25 @@ def test_component_evidence_requires_significance():
     print("  [ok] component_evidence（主指标判定/去一法/全因子/方向门槛）")
 
 
+def test_component_evidence_requires_valid_seed_count():
+    """缺 n / n 非法时不能默认“种子充足”而给出组件有用证据。
+
+    汇总文件可能被旧版本或手工编辑成缺 n；阈值判定必须先证明 n>=MIN_SEEDS。
+    """
+    t = _mk("lega_no_query", "lega", "PPL", 0.4, 0.005)
+    t.pop("n")
+    t["p_adj"] = 0.005
+    st = _effect_status(t, removing=True)
+    assert not st["supported"] and "种子" in st["reason"], st
+    for bad in (True, 2.5, "bad"):
+        t2 = _mk("lega_no_query", "lega", "PPL", 0.4, 0.005)
+        t2["n"] = bad
+        t2["p_adj"] = 0.005
+        st2 = _effect_status(t2, removing=True)
+        assert not st2["supported"] and "种子" in st2["reason"], st2
+    print("  [ok] 组件证据拒绝缺 n/非法 n 的“显著”检验")
+
+
 def test_component_evidence_flags_contradiction():
     """一套消融显著支持、另一套显著反向时必须判冲突，不能用 OR 静默取胜。"""
     tests = [
@@ -3378,6 +3397,34 @@ def test_summary_tolerates_malformed_sanity_and_baseline_tuning():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 汇总：sanity/tuning 嵌套字段畸形安全跳过")
+
+
+def test_registered_hypothesis_rejects_missing_or_invalid_n():
+    """n 缺失/非法时不能仅凭 p_adj 显著就判“支持”。"""
+    tests = [
+        {"candidate": "lega", "reference": "standard", "metric": "PPL",
+         "mean_diff": -0.5, "lower_is_better": True, "p": 0.01,
+         "p_adj": 0.01},
+        {"candidate": "lega2", "reference": "standard", "metric": "PPL",
+         "mean_diff": -0.5, "lower_is_better": True, "p": 0.01,
+         "p_adj": 0.01, "n": "bad"},
+        {"candidate": "lega3", "reference": "standard", "metric": "PPL",
+         "mean_diff": -0.5, "lower_is_better": True, "p": 0.01,
+         "p_adj": 0.01, "n": 2},
+    ]
+    reg = {"hypotheses": [
+        {"id": "H1", "metric": "PPL", "candidate": "lega",
+         "reference": "standard", "direction": "candidate_better"},
+        {"id": "H2", "metric": "PPL", "candidate": "lega2",
+         "reference": "standard", "direction": "candidate_better"},
+        {"id": "H3", "metric": "PPL", "candidate": "lega3",
+         "reference": "standard", "direction": "candidate_better"},
+    ]}
+    ev = {h["id"]: h for h in evaluate_registered_hypotheses(reg, tests)}
+    assert ev["H1"]["status"] == "未定" and "样本量" in ev["H1"]["detail"]
+    assert ev["H2"]["status"] == "未定" and "样本量" in ev["H2"]["detail"]
+    assert ev["H3"]["status"] == "未定" and "种子不足" in ev["H3"]["detail"]
+    print("  [ok] 预注册判定拒绝缺 n/非法 n 的“显著”证据")
 
 
 def test_registration_paths_tolerate_malformed_hypotheses_and_status():

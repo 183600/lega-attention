@@ -1863,9 +1863,14 @@ def _effect_status(t, removing: bool) -> dict:
     if t is None:
         return {"supported": False, "opposite": False, "fragile": False,
                 "reason": "无对应检验（变体未运行）", "p_adj": None}
-    if t.get("n") is not None and t["n"] < MIN_SEEDS:
+    n = _integral_value(t.get("n"))
+    if n is None:
         return {"supported": False, "opposite": False, "fragile": False,
-                "reason": f"种子不足（n={t['n']}）", "p_adj": t.get("p_adj")}
+                "reason": f"种子数缺失或非法（n={t.get('n')!r}）",
+                "p_adj": t.get("p_adj")}
+    if n < MIN_SEEDS:
+        return {"supported": False, "opposite": False, "fragile": False,
+                "reason": f"种子不足（n={n}）", "p_adj": t.get("p_adj")}
     if (t.get("mean_diff") is None or t.get("p_adj") is None
             or t.get("p_adj") >= ALPHA):
         reason = "Holm 校正后不显著"
@@ -2240,29 +2245,35 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
         if t is None:
             item["status"] = "未检验"
             item["detail"] = "对应的对比/指标没有检验结果（run 缺失或未评测）"
-        elif t.get("n") is not None and t["n"] < MIN_SEEDS:
-            item["status"] = "未定"
-            item["detail"] = f"种子不足（n={t['n']}<{MIN_SEEDS}）"
-        elif t.get("p_adj") is None:
-            item["status"] = "未定"
-            item["detail"] = "无法检验（方差退化或指标缺失）"
-        elif t["p_adj"] >= alpha:
-            item["status"] = "未定"
-            item["detail"] = "Holm 校正后不显著"
-            if t.get("mde") is not None and t.get("mean_diff") is not None:
-                item["detail"] += (f"（观测差 {t['mean_diff']:+.4f}，"
-                                   f"当前种子数可检测的最小效应 "
-                                   f"{t['mde']:+.4f}）")
         else:
-            better = (t["mean_diff"] < 0 if t["lower_is_better"]
-                      else t["mean_diff"] > 0)
-            supported = (better if h.get("direction") == "candidate_better"
-                         else not better)
-            item["status"] = "支持" if supported else "拒绝"
-            item["detail"] = ("方向与登记一致且校正后显著" if supported
-                              else "校正后显著但方向与登记相反")
-            if t.get("p_perm_adj") is not None and t["p_perm_adj"] >= alpha:
-                item["detail"] += "；⚠ 置换检验不显著，小样本下需谨慎"
+            n = _integral_value(t.get("n"))
+            if n is None:
+                item["status"] = "未定"
+                item["detail"] = f"无法检验（样本量缺失或非法 n={t.get('n')!r}）"
+            elif n < MIN_SEEDS:
+                item["status"] = "未定"
+                item["detail"] = f"种子不足（n={n}<{MIN_SEEDS}）"
+            elif t.get("p_adj") is None:
+                item["status"] = "未定"
+                item["detail"] = "无法检验（方差退化或指标缺失）"
+            elif t["p_adj"] >= alpha:
+                item["status"] = "未定"
+                item["detail"] = "Holm 校正后不显著"
+                if t.get("mde") is not None and t.get("mean_diff") is not None:
+                    item["detail"] += (f"（观测差 {t['mean_diff']:+.4f}，"
+                                       f"当前种子数可检测的最小效应 "
+                                       f"{t['mde']:+.4f}）")
+            else:
+                better = (t["mean_diff"] < 0 if t["lower_is_better"]
+                          else t["mean_diff"] > 0)
+                supported = (better if h.get("direction") == "candidate_better"
+                             else not better)
+                item["status"] = "支持" if supported else "拒绝"
+                item["detail"] = ("方向与登记一致且校正后显著" if supported
+                                  else "校正后显著但方向与登记相反")
+                if (t.get("p_perm_adj") is not None
+                        and t["p_perm_adj"] >= alpha):
+                    item["detail"] += "；⚠ 置换检验不显著，小样本下需谨慎"
         if t is not None:
             item.update({"p": t.get("p"),
                          "p_adj": t.get("p_adj"),
