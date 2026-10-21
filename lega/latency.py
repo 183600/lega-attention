@@ -331,6 +331,9 @@ def main():
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"{args.config} 顶层必须是 JSON 对象，收到 {type(cfg).__name__}")
     meta = load_meta(args.data_dir)
     device = get_device(args.device)
     # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 或支持 bf16 的
@@ -376,6 +379,14 @@ def main():
         iters, warmup = min(iters, 3), min(warmup, 1)
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+
+    def _arch_int(key, default=None):
+        # 架构字段同样不能用 int() 截断：否则 latency 实际基准的模型与
+        # config_sha256/config_used 声明的模型可能不同（True→1、32.9→32）。
+        value = strict_int(cfg.get(key, default), f"config.{key}")
+        if value <= 0:
+            raise ValueError(f"config.{key} 必须是正整数，收到 {value}")
+        return value
     set_seed(0)
     results: Dict = {}
     for v in variants:
@@ -411,9 +422,13 @@ def main():
             src = "ckpt"
         else:
             model_cfg = dict(
-                vocab_size=int(meta["vocab_size"]), block_size=int(cfg["block_size"]),
-                d_model=int(cfg["d_model"]), n_layers=int(cfg["n_layers"]),
-                n_heads=int(cfg["n_heads"]), ffn_mult=int(cfg.get("ffn_mult", 4)),
+                vocab_size=strict_int(meta.get("vocab_size"),
+                                      "meta.vocab_size"),
+                block_size=_arch_int("block_size"),
+                d_model=_arch_int("d_model"),
+                n_layers=_arch_int("n_layers"),
+                n_heads=_arch_int("n_heads"),
+                ffn_mult=_arch_int("ffn_mult", 4),
                 dropout=0.0, attn_dropout=0.0, variant=vname,
                 gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
                 use_sdpa_standard=use_sdpa)
