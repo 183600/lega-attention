@@ -82,6 +82,44 @@ def test_data_protocol_preflight_blocks_critical_violations():
     print("  [ok] 数据协议闸门：严重违规默认中止，显式覆盖放行，报告缺失仅告警")
 
 
+def test_data_report_protocol_declarations_block_training():
+    """报告内的协议声明必须被独立核对，不能只依赖 alerts 列表。"""
+    from lega.preflight import data_report_protocol_issues
+    bad = {
+        "protocol": {"split_first_then_preprocess": False,
+                     "shuffle_at_split_time": True,
+                     "test_sealed": False, "fit_on": "all"},
+        "tokenizer": {"fit_on": "all"},
+        "test_reads_at_prep": {"used_for_selection": True},
+        "split_protocol": {"shuffled": True, "fallback_char_cut": True,
+                           "documents_cross_cut": True},
+    }
+    issues = data_report_protocol_issues(bad)
+    assert len(issues) >= 8, issues
+    assert data_report_protocol_issues({"alerts": []}) == []
+    safe = {"protocol": {"split_first_then_preprocess": True,
+                         "shuffle_at_split_time": False,
+                         "test_sealed": True, "fit_on": "train"},
+            "tokenizer": {"fit_on": "train"},
+            "test_reads_at_prep": {"used_for_selection": False},
+            "split_protocol": {"shuffled": False, "fallback_char_cut": False,
+                               "documents_cross_cut": False,
+                               "verified_disjoint": True}}
+    assert data_report_protocol_issues(safe) == []
+    with tempfile.TemporaryDirectory() as d:
+        _write_json(os.path.join(d, "data_report.json"),
+                    {"alerts": [], "protocol": {"test_sealed": False}})
+        try:
+            data_protocol_preflight(d)
+            raise AssertionError("报告声明 test_sealed=False 应阻断训练")
+        except SystemExit as e:
+            assert "data_report_protocol" in str(e)
+        info = data_protocol_preflight(d, allow_override=True)
+        assert any(a["code"] == "data_report_protocol"
+                   for a in info["critical_violations"])
+    print("  [ok] data_report 协议声明：不安全声明即使 alerts 为空也阻断训练")
+
+
 def test_protocol_override_env_matches_cli_flag(monkeypatch):
     """run_all 自身的闸门必须和子进程一样识别环境变量放行。"""
     from lega.preflight import ALLOW_ENV, allow_protocol_violations

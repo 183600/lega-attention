@@ -15,6 +15,85 @@ from .repro import sha256_file
 
 ALLOW_ENV = "LEGA_ALLOW_DATA_PROTOCOL_VIOLATIONS"
 
+# 词表/特征拟合来源的可信值：字符级词表只能在 train 上拟合，GPT-2 BPE 是
+# 公开预训练词表（与语料无关）。"all"/"val"/"test" 都意味着用了 eval 侧统计。
+_SAFE_FIT_ON = ("train", "train_only", "gpt2_pretrained")
+
+
+def data_report_protocol_issues(report) -> list:
+    """直接核对报告内的协议声明，而不是只信 alerts 列表。
+
+    critical_split_alerts 只看 alerts；一份旧报告/被手改报告只要把 alerts
+    清空，就能把 protocol.shuffle_at_split_time=True、test_sealed=False 或
+    split_protocol.documents_cross_cut=True 静默带进训练。这里把报告自身
+    声明与 split_protocol 的显式违约独立复核一遍（缺失字段不误报）。
+    """
+    if not isinstance(report, dict):
+        return []
+    issues = []
+
+    def add(msg):
+        issues.append(msg)
+
+    protocol = report.get("protocol")
+    if isinstance(protocol, dict):
+        for key, bad, msg in (
+                ("split_first_then_preprocess", False,
+                 "报告声明先预处理后划分（split_first_then_preprocess=False）"),
+                ("shuffle_at_split_time", True,
+                 "报告声明划分阶段随机打乱（shuffle_at_split_time=True），"
+                 "时序/群组完整性不可保证"),
+                ("test_sealed", False,
+                 "报告声明测试集未尘封（test_sealed=False）")):
+            value = protocol.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, bool):
+                add(f"报告协议字段 {key}={value!r} 不是布尔值，无法确认协议")
+            elif value is bad:
+                add(msg)
+        fit_on = protocol.get("fit_on")
+        if fit_on is not None and str(fit_on) not in _SAFE_FIT_ON:
+            add(f"报告 protocol.fit_on={fit_on!r} 不可信："
+                "字符词表只能拟合 train，BPE 只能用公开预训练词表")
+    tokenizer = report.get("tokenizer")
+    if isinstance(tokenizer, dict):
+        fit_on = tokenizer.get("fit_on")
+        if fit_on is not None and str(fit_on) not in _SAFE_FIT_ON:
+            add(f"报告 tokenizer.fit_on={fit_on!r} 不可信："
+                "字符词表只能拟合 train，BPE 只能用公开预训练词表")
+    prep_read = report.get("test_reads_at_prep")
+    if isinstance(prep_read, dict) and prep_read.get("used_for_selection") is True:
+        add("报告 test_reads_at_prep.used_for_selection=True："
+            "准备阶段读取 test 被用于选择/拟合，测试集不再独立")
+    split_protocol = report.get("split_protocol")
+    if isinstance(split_protocol, dict):
+        for key, msg in (
+                ("shuffled", "报告 split_protocol.shuffled=True：时序/群组完整性不可保证"),
+                ("fallback_char_cut",
+                 "报告 split_protocol.fallback_char_cut=True：退化为字符切分，"
+                 "同一文档可能跨 split"),
+                ("documents_cross_cut",
+                 "报告 split_protocol.documents_cross_cut=True：群组跨 split")):
+            if split_protocol.get(key) is True:
+                add(msg)
+        if split_protocol.get("verified_disjoint") is False:
+            overlaps = split_protocol.get("overlap_long_lines")
+            bad_overlaps = {}
+            if isinstance(overlaps, dict):
+                for pair, val in overlaps.items():
+                    if not isinstance(val, dict):
+                        continue
+                    exact = val.get("exact_lines") or 0
+                    norm = val.get("normalized_lines") or 0
+                    if exact or norm:
+                        bad_overlaps[str(pair)] = {
+                            "exact_lines": exact, "normalized_lines": norm}
+            if bad_overlaps:
+                add(f"报告 split_protocol 实测存在跨 split 共享长行 "
+                    f"{bad_overlaps}")
+    return issues
+
 
 def allow_protocol_violations(cli_flag: bool = False) -> bool:
     """显式放行标志：CLI 参数或环境变量（供 run_all 向子进程透传）。"""
@@ -113,6 +192,9 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     binding_issue = data_report_binding_issue(data_dir)
     schema_issue = data_cache_schema_issue(data_dir)
     critical = list(critical_split_alerts(report))
+    for issue in data_report_protocol_issues(report):
+        critical.append({"level": "warning", "code": "data_report_protocol",
+                         "message": issue})
     if binding_issue:
         critical.append({"level": "warning", "code": "data_report_binding",
                          "message": binding_issue})
