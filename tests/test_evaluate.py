@@ -3,6 +3,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import tempfile
 
 import numpy as np
@@ -335,3 +336,45 @@ def test_worst_windows_allowed_seals_test():
     assert not worst_windows_allowed("test", False)
     assert worst_windows_allowed("test", True)
     print("  [ok] test 最差窗口默认尘封，val 不受限")
+
+
+def test_evaluate_result_test_access_includes_worst_dump(monkeypatch):
+    """结果 JSON 的 test 访问摘要必须包含同次评测的最差窗口转储记录。"""
+    from lega.data import prepare_bins
+    from lega.datacheck import read_test_access_log
+    from lega.evaluate import main as evaluate_main
+    from lega.model import GPT, save_checkpoint
+    from lega.repro import sha256_file
+
+    torch.manual_seed(0)
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "train.txt"), "w", encoding="utf-8") as f:
+            f.write("the quick brown fox jumps over the lazy dog. " * 4)
+        with open(os.path.join(data_dir, "val.txt"), "w", encoding="utf-8") as f:
+            f.write("a quick brown fox jumps over the lazy dog. " * 4)
+        with open(os.path.join(data_dir, "test.txt"), "w", encoding="utf-8") as f:
+            f.write("the quick red fox leaps over the lazy dog. " * 4)
+        meta = prepare_bins(data_dir, kind="char", force=True)
+        ckpt = os.path.join(d, "run", "model.pt")
+        model = GPT(vocab_size=meta["vocab_size"], block_size=16, d_model=16,
+                    n_layers=1, n_heads=2, variant="standard")
+        save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
+        out = os.path.join(d, "eval.json")
+        monkeypatch.setattr(sys, "argv", [
+            "evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
+            "--out", out, "--device", "cpu", "--worst_n", "1",
+            "--worst_on_test", "--allow_repeat_test"])
+        evaluate_main()
+        with open(out, encoding="utf-8") as f:
+            res = json.load(f)
+        ledger = read_test_access_log(data_dir)
+        assert res["test_access"]["evaluations"] == 2
+        assert res["test_access"]["distinct_checkpoints"] == 1
+        assert sha256_file(ckpt)[:16] in \
+            res["test_access"]["checkpoints_evaluated_multiple_times"]
+        assert len(ledger) == 2
+        assert [r.get("reason") for r in ledger if r.get("reason")] == \
+            ["worst_window_dump_on_test"]
+    print("  [ok] test 访问摘要包含 worst-window 转储（不瞒报第二次读取）")

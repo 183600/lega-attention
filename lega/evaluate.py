@@ -496,7 +496,7 @@ def main():
             if split == "test":
                 # 落盘即意味着 test 内容进入可读报告：必须留痕，供审计。
                 try:
-                    append_test_access(args.data_dir, {
+                    test_access = append_test_access(args.data_dir, {
                         "time": now_str(),
                         "reason": "worst_window_dump_on_test",
                         "ckpt_sha256": ckpt_sha256,
@@ -504,6 +504,9 @@ def main():
                         "seed": ck.get("seed"),
                         "n_worst": int(args.worst_n),
                     })
+                    # 结果 JSON 里的账本摘要必须包含刚写入的转储记录；
+                    # 否则报告会少报一次 test 读取，审计链断开。
+                    res["test_access"] = test_access
                 except OSError as e:
                     print(f"[eval] 警告：test 最差窗口转储的访问记录写入失败"
                           f"（{e}）")
