@@ -22,6 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .repro import ROOT, sha256_file
+from .utils import strict_int
 
 LEDGER_FILENAME = "experiments.jsonl"
 
@@ -375,7 +376,10 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
                 break
         except (OSError, TypeError, ValueError):
             continue
-    rec = {"variant": variant, "seed": int(seed), "out_dir": out_dir,
+    # 台账条目自含的种子必须是精确整数：int(1.5)==1、int(True)==1 会让
+    # 台账记录的身份与真正跑的 run 不一致（且台账是历史证据，写错无法回填）。
+    seed = strict_int(seed, "seed")
+    rec = {"variant": variant, "seed": seed, "out_dir": out_dir,
            "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
                                       rel_to=out_dir, known=known)}
     curve = _load_train_curve(out_dir)

@@ -37,7 +37,7 @@ from .attention import VARIANTS, VARIANT_CN
 from .data import load_bin, load_meta, get_train_batch
 from .model import GPT, count_params
 from .repro import build_run_manifest
-from .utils import save_json, set_seed
+from .utils import save_json, set_seed, strict_int
 
 # 训练路径 loss 与直接 logits CE 的一致性容差：1e-3 只用于吸收分块/
 # 归约顺序的浮点噪声，真正的计算错误（错误 chunk 边界、错误归一化/
@@ -354,8 +354,11 @@ def main():
         val = getattr(args, name)
         if val is not None:
             opt[name] = val
-    seed = int(opt.get("seed") if opt.get("seed") is not None
-               else cfg.get("seed", 1337))
+    # 种子必须是精确整数："seed": true/1.5 若被 int() 截断成 1，sanity 会用
+    # 与配置声明不同的种子跑固定批过拟合，而结果 JSON 记录的是截断值。
+    seed = strict_int(
+        opt.get("seed") if opt.get("seed") is not None
+        else cfg.get("seed", 1337), "seed")
     device = (args.device if args.device != "auto"
               else ("cuda" if torch.cuda.is_available() else "cpu"))
     set_seed(seed)

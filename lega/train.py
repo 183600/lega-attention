@@ -25,7 +25,7 @@ from .model import GPT, configure_optimizer, count_params, gate_extra_params, sa
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, now_str,
-                    save_json, set_seed, t_critical_95)
+                    save_json, set_seed, strict_int, t_critical_95)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -728,7 +728,11 @@ def main():
         cfg["early_stop_patience"] = args.early_stop_patience
     early_stop_patience = max(0, int(cfg.get("early_stop_patience", 0) or 0))
     early_stop_min_delta = max(0.0, float(cfg.get("early_stop_min_delta", 0.0) or 0.0))
-    seed = args.seed if args.seed is not None else cfg.get("seed", 1337)
+    # 种子必须是精确整数：配置里的 "seed": true → 1 或 1.5 → 1 会让本次
+    # 训练以与声明不同的种子播种，而 checkpoint/manifest/曲线记的是截断值，
+    # 事后无法区分。int(True)==1、int(1.5)==1 都不可接受。
+    seed = strict_int(
+        args.seed if args.seed is not None else cfg.get("seed", 1337), "seed")
     device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
 
     tag = os.path.splitext(os.path.basename(args.config))[0] + ("_smoke" if args.smoke else "")

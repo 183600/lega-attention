@@ -30,7 +30,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _ruler_fwe_recall, _ruler_min_cell_n,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
-                      _seed_key,
+                      _seed_key, _strict_seed_int, _parse_seed_list,
                       apply_budget_gate, apply_integrity_gate, apply_scope_gate,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_summary,
@@ -3076,3 +3076,35 @@ def test_component_evidence_marks_early_stop_budget():
     assert ok["confirmatory_supported"] is True
     assert ok["evidence_status"] == "confirmatory"
     print("  [ok] component_evidence：早停预算不等时机器可读降级为探索性")
+
+
+def test_seed_parsing_rejects_bool_and_fractional_truncation():
+    """--seeds/配置 seeds 不能被 int() 截断：True → 1、1.5 → 1 会改身份。
+
+    种子身份错位后结果目录名、台账与播种的 RNG 相互矛盾；更糟的是
+    ``dict.fromkeys`` 会把 1.5 与 1 去重，导致"N 个种子"的证据凭空缩水。
+    bool 在 dict 里与 1 同键，同样不能被当作种子 1。
+    """
+    assert _strict_seed_int(7) == 7
+    assert _strict_seed_int(7.0) == 7
+    assert _strict_seed_int("1337") == 1337
+    assert _strict_seed_int(" 42 ") == 42
+    for bad in (True, False, 1.5, -0.5, float("nan"), float("inf"),
+                "1.5", "abc", "", [7], {"seed": 1}, None):
+        try:
+            _strict_seed_int(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    assert _parse_seed_list("1,2, 3") == [1, 2, 3]
+    assert _parse_seed_list("") == []
+    # 字符串 "2.0" 不是整数身份（与 tuning.parse_seeds 同口径拒绝）
+    for bad in ("1,2.0", "1,1.5", "1,true", "1,foo"):
+        try:
+            _parse_seed_list(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    print("  [ok] run_all 种子解析拒绝 bool/小数截断（含 --tune_seeds 同口径）")

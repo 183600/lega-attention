@@ -80,7 +80,7 @@ from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E
                         worktree_state, write_worktree_patch)
 from lega.utils import (bootstrap_mean_ci, get_device, holm_bonferroni,
                         mean_std, min_detectable_effect, paired_sign_flip_test,
-                        paired_t_test, save_json)  # noqa: E402
+                        paired_t_test, save_json, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -180,6 +180,31 @@ def parse_variants(spec: str) -> list:
     并发执行时互相覆盖结果文件——去重后行为与显式去重的种子列表一致。
     """
     return list(dict.fromkeys(v.strip() for v in spec.split(",") if v.strip()))
+
+
+def _strict_seed_int(value, parser=None, label="种子"):
+    """严格整数化种子：bool/小数/非有限显式报错（绝不 int() 截断）。
+
+    True 与 1 在 dict 里同键、1.5 与 1 截断后相等，都会让不同的种子在
+    ``dict.fromkeys`` 去重时合并，或让台账/结果目录名与实际播种不一致。
+    """
+    try:
+        return strict_int(value, label)
+    except ValueError as e:
+        if parser is not None:
+            parser.error(str(e))
+        raise
+
+
+def _parse_seed_list(spec, parser=None, label="--seeds"):
+    """逗号分隔的整数种子列表；整数值浮点/整数字符串合法，其余显式报错。"""
+    out = []
+    for x in str(spec).split(","):
+        x = x.strip()
+        if not x:
+            continue
+        out.append(_strict_seed_int(x, parser, label))
+    return out
 
 
 def _jobs_env(jobs: int):
@@ -2129,12 +2154,12 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             # 种子已被纳入）：静默丢弃部分种子同样会让读者高估证据完整性
             incomparable.append({"variant": v,
                                  "eval_splits": sorted(eval_splits, key=str),
-                                 "excluded_seeds": [int(s) if s is not None
-                                                    else None
-                                                    for s in excl_seeds]})
+                                 "excluded_seeds": [
+                                     _integral_value(s)
+                                     for s in excl_seeds]})
         if vals:
             staged.append({"variant": v, "vals": vals,
-                           "seeds": [int(s) if s is not None else None
+                           "seeds": [_integral_value(s)
                                      for s in seeds_used],
                            "matched": matched})
     # 参考值决策（第一步）：全部纳入比较的 run 都与窗口规格一致，且
@@ -2288,7 +2313,8 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
                 _as_dict(oof.get("f1_tuned")).get("macro"))
             per_seed.append({
                 # 无 seed 字段（_seed_key 返回 None）时按缺种子信息处理。
-                "seed": int(s) if s is not None else None,
+                # 非整数身份（bool/小数）同样记 None，绝不截断成别的种子号。
+                "seed": _integral_value(s),
                 "probe_auprc": probe_auprc,
                 "probe_auroc": probe_auroc,
                 "probe_f1_fixed": probe_f1_fixed,
@@ -4819,11 +4845,19 @@ def main():
         cfg = json.load(cf)
 
     # 多种子协议：显式 --seeds 优先；否则用配置 seeds；冒烟模式只跑首个种子。
+    # 种子一律严格解析：int("1.5") 会直接抛错，而 int(1.5)/int(True) 会把
+    # 1.5、true 静默截断成 1——结果目录与台账都会用错种子，且两个"不同"
+    # 种子经 dict.fromkeys 去重后只剩一个，N 个种子的结论凭空变少。
     if args.seeds:
-        seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
+        seeds = _parse_seed_list(args.seeds, p, "--seeds")
     else:
         cfg_seeds = cfg.get("seeds") or [cfg.get("seed", 1337)]
-        seeds = [int(cfg_seeds[0])] if args.smoke else [int(s) for s in cfg_seeds]
+        if not isinstance(cfg_seeds, (list, tuple)):
+            p.error(f"配置 seeds 需要整数列表，收到 {cfg_seeds!r}")
+        if args.smoke:
+            seeds = [_strict_seed_int(cfg_seeds[0], p, "配置 seed")]
+        else:
+            seeds = [_strict_seed_int(s, p, "配置 seeds") for s in cfg_seeds]
     seeds = list(dict.fromkeys(seeds))
     if not seeds:
         p.error("种子列表为空")
@@ -4864,8 +4898,8 @@ def main():
         print("[tuning] --skip_train：跳过基线调优（没有要训练的新 run）")
     elif args.tune_baseline:
         tune_root = os.path.join(out_root, "_baseline_tuning")
-        tune_seeds = ([int(s.strip()) for s in args.tune_seeds.split(",")
-                       if s.strip()] if args.tune_seeds else None)
+        tune_seeds = (_parse_seed_list(args.tune_seeds, p, "--tune_seeds")
+                      if args.tune_seeds else None)
         tune_report = tune_baseline(
             args.config, args.data_dir, tune_root, variant="standard",
             seed=seeds[0], seeds=tune_seeds, steps=args.tune_steps,
