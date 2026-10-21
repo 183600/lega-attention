@@ -206,6 +206,24 @@ def test_experiment_record_embeds_resolved_hyperparameters():
     print("  [ok] 台账内嵌解析后的超参数（config 自含）")
 
 
+def test_experiment_record_rejects_fractional_and_bool_seeds():
+    """seeds 是实验身份：bool/小数不得被 int() 静默折叠成 1。"""
+    common = dict(
+        run_id="r", status="started", tag="t", config_path="c.json",
+        config_sha256="a" * 64, variants=["lega"], smoke=False,
+        argv=["run_all.py"], git={}, data_fingerprint=None, runtime={},
+        out_root="out/t", results_dir="results/t", time_start="t0")
+    for bad in (True, False, 1.5, float("nan"), "1_0", None):
+        try:
+            build_experiment_record(seeds=[bad], **common)
+            raise AssertionError(f"非法 seed 应报错: {bad!r}")
+        except ValueError:
+            pass
+    rec = build_experiment_record(seeds=[1, 2.0, "3"], **common)
+    assert rec["seeds"] == [1, 2, 3], rec["seeds"]
+    print("  [ok] 台账 seeds 拒绝 bool/小数，整数值浮点/字符串规范化")
+
+
 def test_snapshot_train_run_embeds_config_used():
     """run 快照内嵌 config_used.json 内容：单 run 超参数可从台账直接还原。"""
     tmp = tempfile.mkdtemp()
