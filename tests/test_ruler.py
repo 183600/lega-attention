@@ -217,6 +217,23 @@ def test_vt_rejects_invalid_depth():
     print("  [ok] VT 拒绝非法 depth")
 
 
+def test_vt_rejects_fractional_and_boolean_chain_counts():
+    """VT 的链数/深度必须按整数使用，不能截断或把 bool 当 1。"""
+    tok = _tok()
+    for kwargs in ({"n_chains": 2.5}, {"n_chains": True},
+                   {"depth": 4.5}, {"depth": True}):
+        try:
+            build_vt(tok, 512, random.Random(0), **kwargs)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, kwargs
+    # 整数值浮点仍视为合法整数，避免破坏 JSON 数字的既有用法
+    ex = build_vt(tok, 512, random.Random(0), n_chains=2.0, depth=4.0)
+    assert ex["meta"]["n_chains"] == 2 and ex["meta"]["depth"] == 4
+    print("  [ok] VT 拒绝小数/布尔链数与深度")
+
+
 def test_context_too_small():
     tok = _tok()
     try:

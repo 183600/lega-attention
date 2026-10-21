@@ -14,6 +14,7 @@
   * 生成采用贪心解码 + KV 缓存，与训练相同的因果语言模型接口；
   * 指标: niah/multikey/vt 用数值命中 EM；fwe 用 top-10 词召回率 recall 与严格 EM。
 """
+import math
 import random
 import re
 import zlib
@@ -35,6 +36,20 @@ NEEDLE_TMPL = "One of the special magic numbers for {key} is: {value}."
 QUESTION_TMPL = ("\nWhat is the special magic number for {key} mentioned in the provided text?"
                  "\nAnswer: The special magic number for {key} mentioned in the provided text is")
 TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
+
+
+def _int_or_none(value):
+    """整数/整数值浮点/整数字符串 -> int；bool/小数/非有限/溢出 -> None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _stable_hash(s: str) -> int:
@@ -265,11 +280,14 @@ VT_QUESTION = ("\nGiven the variable definitions above, what is the value of VAR
 
 
 def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 4) -> Dict:
-    if not 1 <= n_chains <= 6:
-        raise ValueError(f"n_chains 必须在 1-6 之间，收到 {n_chains}")
-    if int(depth) < 1:
-        raise ValueError(f"depth 必须 >= 1（问题模板会引用 VAR L1），收到 {depth}")
-    depth = int(depth)
+    n_chains_raw, depth_raw = n_chains, depth
+    n_chains = _int_or_none(n_chains)
+    if n_chains is None or not 1 <= n_chains <= 6:
+        raise ValueError(f"n_chains 必须是 1-6 的整数，收到 {n_chains_raw!r}")
+    depth = _int_or_none(depth)
+    if depth is None or depth < 1:
+        raise ValueError(
+            f"depth 必须是 >= 1 的整数（问题模板会引用 VAR L1），收到 {depth_raw!r}")
     letters = ["A", "B", "C", "D", "E", "F"][:n_chains]
     values = {L: _rand_digit(rng, 5, 5) for L in letters}
     lines = []
