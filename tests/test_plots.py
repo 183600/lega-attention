@@ -173,6 +173,38 @@ def test_empty_or_fractional_repro_seeds_do_not_scan_stale_artifacts():
     print("  [ok] repro 范围：空/小数种子不混入旧结果")
 
 
+def test_bool_seeds_are_not_integer_seed_one():
+    """``"seed": true`` / ``seeds: [true]`` 不得被当成种子 1。
+
+    bool 是 int 的子类：``float(True) is 1.0`` 会让白名单 {1} 接受 True，
+    dict 里 True 与 1 又是同一个键——两个不同的 run 会占用同一去重槽位，
+    过期产物也会冒充本次 run 的结果。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "repro.json", {"seeds": [True]})
+        _w(tmp, "eval_lega_seed1.json",
+           {"variant": "lega", "seed": 1, "val_ppl": 10.0})
+        from lega.plots import _run_scope, _seed_in_scope, _seed_int
+        # 白名单里的 bool 不是整数身份 → 视为显式无可用种子，不扫旧产物
+        assert _run_scope(tmp)[1] == set()
+        assert _group_by_variant(os.path.join(tmp, "eval_*.json")) == {}
+        assert _seed_in_scope(True, {1}) is False
+        assert _seed_in_scope(1, {1}) is True
+        assert _seed_int(True) is None and _seed_int(False) is None
+        assert _seed_int(1.0) == 1 and _seed_int("2") == 2
+        assert _seed_int(1.5) is None and _seed_int([1]) is None
+        # 单种子约定下，带 bool seed 的裸文件不能冒充 seed1 的结果
+        _w(tmp, "repro.json", {"seeds": [1]})
+        _w(tmp, "eval_lega.json",
+           {"variant": "lega", "seed": True, "val_ppl": 99.0})
+        g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
+        assert [d["val_ppl"] for d in g.get("lega", [])] == [10.0], g
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] bool 种子既不等于 1，也不占用种子 1 的去重槽位")
+
+
 def test_read_records_merges_ragged_headers_by_file_rows():
     """合并不同版本的逐记录 CSV 时，缺列必须按"该文件的行区间"补 NaN。
 

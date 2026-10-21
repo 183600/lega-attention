@@ -67,14 +67,37 @@ def _label(v):
 
 
 def _finite_float(v):
-    """JSON 数值安全转换：非数值/非有限值返回 None（坏点跳过而非崩溃）。"""
-    if v is None:
+    """JSON 数值安全转换：bool/非数值/非有限值返回 None（坏点跳过而非崩溃）。
+
+    bool 必须与 badcase._finite_float 同口径拒绝：``float(True) is 1.0`` 会把
+    ``"seed": true`` 或 ``"em": true`` 悄悄当成 1，跨变体对照与图表分组会把
+    两个不同的 run 混成同一种子。
+    """
+    if v is None or isinstance(v, bool):
         return None
     try:
         f = float(v)
     except (TypeError, ValueError, OverflowError):
         return None
     return f if np.isfinite(f) else None
+
+
+def _seed_int(v):
+    """种子字段 → 严格整数身份；bool/小数/非有限/非数值 → None（绝不截断）。
+
+    1.5 与 True 都不能落到整数种子 1 上：那会让不同 run 在分组去重时占用
+    同一个槽位（dict 里 True 与 1 更是同键），把两次实验算成一次。整数
+    原样保留（>2**53 的 JSON 大整数不经 float 往返丢精度），"1" 这类整数
+    字符串与 1 等价（旧产物既有用法）。
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    f = _finite_float(v)
+    if f is None or f != math.floor(f):
+        return None
+    return int(f)
 
 
 def _load(path):
@@ -128,11 +151,11 @@ def _run_scope(rdir):
     if isinstance(seeds, list):
         parsed = set()
         for x in seeds:
-            # 种子身份必须是整数；1.5 截断成 1 会把不同 run 混为一谈。
-            f = _finite_float(x)
-            if f is None or f != math.floor(f):
-                continue
-            parsed.add(int(f))
+            # 种子身份必须是整数；1.5 截断成 1、True 当成 1 都会把不同 run
+            # 混为一谈（bool 在 dict 里与 1 同键，分组去重会直接撞槽）。
+            s = _seed_int(x)
+            if s is not None:
+                parsed.add(s)
         # 空列表/全部非法同样是“显式无可用种子”，不能当作未知而放开
         # 白名单（否则旧结果会混入）。
         seed_scope = parsed
@@ -154,11 +177,9 @@ def _seed_in_scope(seed, scope):
         # 有种子白名单时，缺种子信息的文件仍按旧行为保留（如手工目录），
         # 但显式空白名单已在上面排除。
         return True
-    f = _finite_float(seed)
-    if f is None or f != math.floor(f):
-        # 非整数种子（含外部坏 JSON）不能与整数白名单中的某项相等。
-        return False
-    return int(f) in scope
+    s = _seed_int(seed)
+    # 非整数种子（含 bool、外部坏 JSON）不能与整数白名单中的某项相等。
+    return s is not None and s in scope
 
 
 def _prefer_seeded(paths, rdir=None):
@@ -221,7 +242,16 @@ def _group_items(items, rdir=None):
             seed = None
         if not _seed_in_scope(seed, seed_scope):
             continue
-        groups.setdefault(d["variant"], []).append((seed, d, tagged))
+        # 去重槽位用严格整数身份：bool 不能落进种子 1 的槽位（True 与 1 在
+        # dict 里同键，两次实验会被算成一次），"1" 与 1 必须归并到同一槽；
+        # 1.9 这类非整数身份保留为独立槽位，既不截断也不冒充别的种子。
+        if isinstance(seed, bool):
+            slot_key = None
+        else:
+            slot_key = _seed_int(seed)
+            if slot_key is None:
+                slot_key = seed
+        groups.setdefault(d["variant"], []).append((slot_key, d, tagged))
     out = {}
     for v, items_v in groups.items():
         if expected is not None:
