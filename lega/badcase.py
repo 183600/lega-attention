@@ -621,18 +621,14 @@ def _median(vals):
 
 
 def _mean(vals):
-    # 与 utils.mean_std 同口径：剔除 None、非数值与非有限值（NaN/Inf）。发散
-    # run 的窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并污染
-    # 报告；旧格式/坏数据里的 "n/a" 等字符串同样跳过而不是让整份报告崩掉。
+    # 与 utils.mean_std 同口径：剔除 None、bool、非数值与非有限值（NaN/Inf）。
+    # 发散 run 的窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并
+    # 污染报告；旧格式/坏数据里的 "n/a" 等字符串同样跳过而不是让整份报告崩掉。
+    # bool 是 int 子类，float(True)=1.0，不拒绝会把 "loss": true 伪造成 1.0。
     out = []
     for v in vals:
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(f):
+        f = _finite_float(v)
+        if f is not None:
             out.append(f)
     return float(sum(out) / len(out)) if out else None
 
@@ -785,14 +781,10 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     where = (f"窗口 #{c.get('window')}" +
              (f"（{c['split']} 集）" if c.get("split") else ""))
     loss = c.get("loss")
-    # loss 可能缺失或显式为 null（旧格式/外部 JSON）：显示 '-' 而不是崩溃；
-    # 超出 float 范围的巨大整数同样是坏数据，不能中断整份报告。
-    loss_s = "-"
-    if isinstance(loss, (int, float)):
-        try:
-            loss_s = f"{float(loss):.3f}"
-        except (OverflowError, ValueError):
-            loss_s = "-"
+    # loss 可能缺失、显式为 null、bool 或超出 float 范围（旧格式/外部 JSON）：
+    # 一律显示 '-' 而不是崩溃，也不能把 True 显示成 1.000。
+    loss_f = _finite_float(loss)
+    loss_s = f"{loss_f:.3f}" if loss_f is not None else "-"
     lines = [f"### 案例 {idx}: {where}　loss={loss_s}"]
     tail = str(c.get("context_tail") or "").replace("\n", " ⏎ ")[-160:]
     lines.append(f"- 上下文尾部: …{tail}")

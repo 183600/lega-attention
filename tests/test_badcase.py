@@ -469,6 +469,24 @@ def test_mean_tolerates_non_numeric_values():
     print("  [ok] 非数值 loss 容错（\"n/a\" 跳过且不中断报告）")
 
 
+def test_bool_not_counted_as_numeric_window_stat():
+    """bool 不能伪装成窗口统计：True 不是 loss=1.0 或 top1_prob=1.0。"""
+    from lega.badcase import _mean
+    assert _mean([True, False, 2.0]) == 2.0
+    assert _mean([True, False]) is None
+    ana = analyze_worst_windows([
+        _win(loss=True, pred_top5=[[" blue", True]]),
+        _win(loss=2.0, pred_top5=[[" blue", 0.3]]),
+    ], variant="lega")
+    assert ana["mean_loss"] == 2.0
+    assert abs(ana["mean_top1_prob"] - 0.3) < 1e-9
+    text = "\n".join(format_window_case(1, {
+        "loss": True, "pred_top5": [[" blue", 0.5]],
+        "gold_next": " green", "context_tail": "The sky is"}))
+    assert "loss=-" in text
+    print("  [ok] bool 不计入最差窗口的数值均值/展示")
+
+
 def test_huge_integers_tolerated_in_badcase():
     """合法 JSON 里的超大整数转 float 会 OverflowError，坏案例报告不能崩。"""
     from lega.badcase import _mean
