@@ -45,6 +45,7 @@ _WORD_RE = re.compile(r"[a-z]+")
 
 CATEGORY_CN = {
     "label_error": "标注/构造错误（gold 不在 prompt 中，不是模型的错）",
+    "label_unknown": "标注无法核对（缺少 answer_in_prompt，不计入模型失败）",
     "no_answer": "无数值回答（模型未输出可解析的数字，格式盲区）",
     "copy_distractor": "误抄干扰值（检索到错误位置：输出了上下文中的干扰数字）",
     "hallucinated": "幻觉数字（输出了上下文中不存在的数字）",
@@ -85,7 +86,14 @@ def categorize_case(rec: Dict) -> Dict:
     r["depth"] = depth
     positional = depth is not None and str(task or "").startswith("niah")
     r["hard_sample"] = bool(positional and depth > 0.75)
-    # 1) 标注/构造自检：gold 答案必须真的在 prompt 里，否则错在数据侧
+    # 1) 标注/构造自检：gold 答案必须真的在 prompt 里，否则错在数据侧。
+    # 外部/旧格式可能完全没有该字段：缺少证据时既不能断言标注错误，也不能
+    # 把答案当成幻觉归因给模型——单列为无法核对，避免污染模型失败统计。
+    if task != "fwe" and r.get("answer_in_prompt") is None:
+        r["category"] = "label_unknown"
+        r["explanation"] = ("样例缺少 answer_in_prompt 标注自检字段，"
+                            "无法确认 gold 是否在 prompt 中；不计入模型失败")
+        return r
     if task != "fwe" and r.get("answer_in_prompt") is False:
         r["category"] = "label_error"
         r["explanation"] = "gold 答案未出现在 prompt 中：样例构造或标注有错，" \
@@ -151,6 +159,9 @@ def case_axis(c: Dict) -> str:
     """
     if c.get("category") == "label_error":
         return "数据/构造"
+    if c.get("category") == "label_unknown":
+        # 缺自检元数据是导出/旧格式问题，不是模型能力问题。
+        return "评测/导出"
     if c.get("category") == "top1_correct":
         # 排位正确、置信度低是输出校准问题，不是检索失败；即使位于深位，
         # 改结构/加数据也不对症。synthesize_window_improvements 给该类别的
