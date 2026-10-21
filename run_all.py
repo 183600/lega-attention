@@ -1038,6 +1038,42 @@ def _ruler_pair_protocol_ok(ra, rb) -> bool:
     return not (ca is not None and cb is not None and ca != cb)
 
 
+RULER_MACRO_BOOTSTRAP = 1000
+
+
+def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOOTSTRAP,
+                              rng_seed: int = 20240517):
+    """RULER macro 的分层 bootstrap 区间（固定种子，单元格内重采样样例）。
+
+    macro 估计量把每个 (任务, 上下文) 单元格等权，因此重采样也必须在单元格
+    内进行、再对单元格均值等权平均；直接重采样所有样例会退化成 micro。
+    固定 rng_seed 保证同一输入产生同一区间，便于审计复现。
+    """
+    cells = [c for c in (per_seed_cell_diffs or []) if isinstance(c, dict)]
+    arrays = [[np.asarray(v, dtype=float) for v in c.values() if len(v)]
+              for c in cells]
+    arrays = [a for a in arrays if a]
+    if not arrays:
+        return None
+    rng = np.random.default_rng(rng_seed)
+    reps = []
+    for _ in range(max(1, int(n_boot))):
+        seed_means = []
+        for cell_arrays in arrays:
+            cell_means = []
+            for vals in cell_arrays:
+                idx = rng.integers(0, vals.size, size=vals.size)
+                cell_means.append(float(vals[idx].mean()))
+            if cell_means:
+                seed_means.append(float(np.mean(cell_means)))
+        if seed_means:
+            reps.append(float(np.mean(seed_means)))
+    if not reps:
+        return None
+    lo, hi = np.percentile(reps, [2.5, 97.5])
+    return [float(lo), float(hi)]
+
+
 def _ruler_sample_paired_tests(runs, pairs) -> list:
     """固定评测样例上的配对 McNemar 检验（探索性稳健性证据）。
 
@@ -1068,6 +1104,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         cand_only = ref_only = both_correct = both_wrong = 0
         n_samples = 0
         per_seed = []
+        per_seed_cell_diffs = []
         skipped = 0
         for s in seeds:
             sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
@@ -1083,6 +1120,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 skipped += 1
                 continue
             cell_diffs = []
+            cell_paired = {}
             cell_ok = True
             for ck in sorted(ca):
                 oa, ob = ca[ck], cb[ck]
@@ -1091,11 +1129,13 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                     break
                 if not oa:
                     continue
-                cell_diffs.append(
-                    sum(oa[sid] - ob[sid] for sid in oa) / len(oa))
+                diffs = [oa[sid] - ob[sid] for sid in sorted(oa)]
+                cell_paired[ck] = diffs
+                cell_diffs.append(sum(diffs) / len(diffs))
             if not cell_ok:
                 skipped += 1
                 continue
+            per_seed_cell_diffs.append(cell_paired)
             oa = {sid: em for cell_out in ca.values()
                   for sid, em in cell_out.items()}
             ob = {sid: em for cell_out in cb.values()
@@ -1139,6 +1179,10 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                        if r.get("macro_mean_diff") is not None]
         macro_mean_diff = (sum(macro_diffs) / len(macro_diffs)
                            if macro_diffs else None)
+        # macro 的抽样不确定性：固定已观测种子，在每个 (任务, 上下文) 单元格
+        # 内对配对样例重采样（保持 macro 的单元格等权），再对种子取平均。
+        # 该区间只覆盖评测样例抽样，不覆盖训练种子随机性（后者见种子级 t 检验）。
+        macro_ci = _ruler_macro_bootstrap_ci(per_seed_cell_diffs)
         n_cells = (per_seed[0].get("n_cells")
                    if per_seed and len({r.get("n_cells") for r in per_seed}) == 1
                    else None)
@@ -1152,6 +1196,11 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             "both_correct": both_correct, "both_wrong": both_wrong,
             "mean_diff": mean_diff,
             "macro_mean_diff": macro_mean_diff,
+            "macro_mean_diff_ci95": macro_ci,
+            "macro_ci_method": (
+                "cell-stratified sample bootstrap (seeds fixed): resample "
+                "paired samples within each (task, ctx) cell, keep cells "
+                "equal-weighted, then average over observed seeds"),
             "n_cells": n_cells,
             "p": _mcnemar_exact_p(cand_only, ref_only),
             "p_adj": None,
@@ -1163,7 +1212,9 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                      "对（候选对/参照错 vs 反之），与跨种子聚合 EM 检验"
                      "回答不同问题，属探索性证据。mean_diff 为样例等权 "
                      "micro，macro_mean_diff 为单元格等权（对应预注册 "
-                     "RULER平均 的 macro 口径）"),
+                     "RULER平均 的 macro 口径）；macro_mean_diff_ci95 为"
+                     "固定种子、单元格内样例重采样的分层 bootstrap 区间"
+                     "（只覆盖评测抽样，不覆盖训练随机性）"),
         }
         if skipped:
             res["excluded_runs"] = skipped
@@ -4948,8 +4999,9 @@ def build_summary(results_dir: str, audit: dict = None,
     if ruler_sample_tests:
         md += ["| 对比 | 配对种子 | 配对样例 | 候选独对/参照独对 | "
                "ΔEM micro(候选−参照) | ΔEM macro(单元格等权) | "
-               "种子胜/负/平 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",
-               "|---|---|---|---|---|---|---|---|---|---|"]
+               "ΔEM macro 95% CI | 种子胜/负/平 | p_adj(Holm) | "
+               "种子级判定（供对照） | 结论 |",
+               "|---|---|---|---|---|---|---|---|---|---|---|"]
         for t in ruler_sample_tests:
             seed_t = _find_test(tests, (t.get("candidate"), t.get("reference")),
                                 "RULER平均")
@@ -4959,19 +5011,24 @@ def build_summary(results_dir: str, audit: dict = None,
                      if t.get("mean_diff") is not None else "-")
             macro_delta = (f"{t['macro_mean_diff']:+.4f}"
                            if t.get("macro_mean_diff") is not None else "-")
+            mci = t.get("macro_mean_diff_ci95")
+            mci_s = (f"[{mci[0]:+.4f}, {mci[1]:+.4f}]" if mci else "-")
             padj = (f"{t['p_adj']:.4f}"
                     if t.get("p_adj") is not None else "-")
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
                 f"{t['n_samples']} | {t['candidate_only']}/{t['reference_only']} | "
-                f"{delta} | {macro_delta} | {t['n_seed_wins']}/{t['n_seed_losses']}/"
-                f"{t['n_seed_ties']} | {padj} | "
+                f"{delta} | {macro_delta} | {mci_s} | {t['n_seed_wins']}/"
+                f"{t['n_seed_losses']}/{t['n_seed_ties']} | {padj} | "
                 f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
         md += ["", "注: McNemar 只使用 discordant 对，n_samples 是参与配对的总样例"
                "数而非独立证据数；多个训练种子重复使用同一批 sample_id，合并"
                "检验只作探索性证据。`ΔEM micro` 样例等权、与 McNemar 池化计数"
                "对应；`ΔEM macro` 单元格等权，与预注册 `RULER平均` 及上表种子级"
-               "判定同一估计量。两者方向不一致时，结论依赖“平均值”定义，不能"
+               "判定同一估计量。`ΔEM macro 95% CI` 固定已观测种子，在每个"
+               "(任务, 上下文) 单元格内重采样配对样例并保持单元格等权，只覆盖"
+               "评测抽样不确定性；种子数很少时该区间可能很窄，不能替代种子级"
+               "检验。两者方向不一致时，结论依赖“平均值”定义，不能"
                "只挑对主张有利的口径。若样例级显著而种子级不显著（或反之），"
                "说明两个不确定性来源给出不同信息：前者多为评测样本量/题目"
                "难度，后者为训练随机性，均不能单独升级为确认性结论。"

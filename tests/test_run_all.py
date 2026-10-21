@@ -3671,6 +3671,22 @@ def test_build_summary_renders_both_eval_sampling_sections():
     print("  [ok] build_summary 并列渲染窗口级/样例级评测抽样证据")
 
 
+def test_ruler_macro_bootstrap_preserves_cell_weights_and_is_deterministic():
+    """macro 的 bootstrap 必须在单元格内重采样：小格不能被大格淹没。"""
+    from run_all import _ruler_macro_bootstrap_ci
+
+    # 小格 2 个样例全 +1，大格 8 个样例全 0：macro = (1+0)/2 = 0.5。
+    # 若错误地池化全部样例再重采样，会得到约 0.2，而不是恒定的 0.5。
+    per_seed = [{("niah", "256"): [1.0, 1.0],
+                 ("niah", "512"): [0.0] * 8}]
+    ci = _ruler_macro_bootstrap_ci(per_seed, n_boot=200)
+    assert ci is not None
+    assert abs(ci[0] - 0.5) < 1e-12 and abs(ci[1] - 0.5) < 1e-12, ci
+    assert ci == _ruler_macro_bootstrap_ci(per_seed, n_boot=200), "必须可复现"
+    assert _ruler_macro_bootstrap_ci([]) is None
+    print("  [ok] RULER macro bootstrap：单元格等权、确定性、空输入安全")
+
+
 def test_ruler_sample_macro_micro_estimands_diverge():
     """样例等权 micro 与单元格等权 macro 可给出相反结论，必须同时报告。"""
     from run_all import _ruler_avg_of, _ruler_sample_paired_tests
@@ -3701,6 +3717,8 @@ def test_ruler_sample_macro_micro_estimands_diverge():
     assert abs(t["macro_mean_diff"] - 0.0) < 1e-12, t
     assert t["n_cells"] == 2, t
     assert t["per_seed"][0]["n_cells"] == 2
+    mci = t["macro_mean_diff_ci95"]
+    assert mci is not None and mci[0] <= t["macro_mean_diff"] <= mci[1], t
     seed_macro = (_ruler_avg_of(runs["lega"][1]["ruler"])
                   - _ruler_avg_of(runs["standard"][1]["ruler"]))
     assert abs(seed_macro - t["macro_mean_diff"]) < 1e-12

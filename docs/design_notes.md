@@ -47,7 +47,10 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
   探索性证据。
 - RULER 同时报告样例等权 micro 与单元格等权 macro 效应量：McNemar 的
   discordant 计数对应 micro，预注册 `RULER平均` 是 macro，两者方向不一致
-  时结论依赖“平均值”定义，必须并列展示。
+  时结论依赖“平均值”定义，必须并列展示。macro 的抽样区间固定已观测种子，
+  在 (任务, 上下文) 单元格内对配对样例重采样、再保持单元格等权平均
+  （`_ruler_macro_bootstrap_ci`）；它只覆盖评测样例抽样，不覆盖训练种子
+  随机性，不能替代种子级检验。
 - 独立评测落盘 `window_losses`/`window_indices`，汇总时对同序号窗口逐点
   相减，并用“先重采样种子、再重采样窗口”的分层 bootstrap 给出平均 NLL 差
   区间与 PPL 比（窗口间空间相关被忽略，故为近似）。每个种子不足 8 个窗口
