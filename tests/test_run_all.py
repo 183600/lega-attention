@@ -2266,6 +2266,40 @@ def test_registered_hypotheses_evaluation():
     print("  [ok] evaluate_registered_hypotheses（支持/拒绝/未定/未检验边界）")
 
 
+def test_global_fwer_gate_across_registered_hypotheses():
+    """跨指标家族的确认族必须再做全局 Holm，不能各自 5% 就宣布支持。
+
+    构造 6 条各自家族内 p_adj=0.02 的假设：家族内全部显著，但全局
+    Holm（m=6）后 p_adj=0.12，全部应降级为“未定”；status_family 仍保留
+    原判定供审计。2 条假设时全局 m=2 的 p_adj=0.04，仍可支持。
+    """
+    reg = {"hypotheses": []}
+    tests = []
+    for i in range(6):
+        metric = f"M{i}"
+        cand, ref = f"cand{i}", f"ref{i}"
+        reg["hypotheses"].append({
+            "id": f"H{i + 1}", "claim": f"claim {i}", "metric": metric,
+            "candidate": cand, "reference": ref,
+            "direction": "candidate_better"})
+        tests.append(_mk(cand, ref, metric, -0.5, 0.02, 5))
+    _apply_holm(tests)
+    ev = evaluate_registered_hypotheses(reg, tests)
+    assert len(ev) == 6, ev
+    assert all(h["status_family"] == "支持" for h in ev), ev
+    assert all(h["status"] == "未定" for h in ev), ev
+    assert all(h["p_adj_confirmatory"] is not None
+               and h["p_adj_confirmatory"] >= 0.05 for h in ev), ev
+    assert all("全局 Holm" in h["detail"] for h in ev), ev
+
+    reg2 = {"hypotheses": reg["hypotheses"][:2]}
+    ev2 = evaluate_registered_hypotheses(reg2, tests)
+    assert all(h["status"] == "支持" for h in ev2), ev2
+    assert all(abs(h["p_adj_confirmatory"] - 0.04) < 1e-12
+               for h in ev2), ev2
+    print("  [ok] 全局确认族 Holm（跨指标家族 FWER；仅家族内显著会降级）")
+
+
 def test_build_summary_renders_confirmatory_sections():
     """summary.md 必须包含注册假设小节与置换/CI/MDE 列，而非只留 JSON。"""
     tmp = tempfile.mkdtemp()

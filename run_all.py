@@ -1967,7 +1967,12 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
                 "metric": h.get("metric"),
                 "candidate": h.get("candidate"), "reference": h.get("reference"),
                 "direction": h.get("direction"),
-                "p_adj": None, "p_perm_adj": None, "mean_diff": None,
+                # p 为家族内校正前的原始配对 p；全局确认族校正需要它，
+                # 不能只保存 p_adj（否则无法跨指标家族统一校正）。
+                "p": None, "p_adj": None, "p_perm_adj": None,
+                "p_adj_confirmatory": None, "confirmatory_family_size": None,
+                "global_fwer_pass": None, "status_family": None,
+                "mean_diff": None,
                 "n": None, "mde": None, "within_noise": None,
                 "below_mde": None, "status": None, "detail": None}
         if t is None:
@@ -1997,7 +2002,8 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
             if t.get("p_perm_adj") is not None and t["p_perm_adj"] >= alpha:
                 item["detail"] += "；⚠ 置换检验不显著，小样本下需谨慎"
         if t is not None:
-            item.update({"p_adj": t.get("p_adj"),
+            item.update({"p": t.get("p"),
+                         "p_adj": t.get("p_adj"),
                          "p_perm_adj": t.get("p_perm_adj"),
                          "mean_diff": t.get("mean_diff"),
                          "n": t.get("n"), "mde": t.get("mde"),
@@ -2007,7 +2013,47 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
             if note and item.get("detail"):
                 item["detail"] += note
         out.append(item)
-    return out
+    return apply_global_fwer(out, alpha=alpha)
+
+
+def apply_global_fwer(hyp_eval: list, alpha: float = ALPHA) -> list:
+    """跨全部可检验预注册假设再做一次 Holm 校正（确认性结论的整体 FWER）。
+
+    指标家族内校正只控制“该指标家族”的 FWER；H1–H7 跨越 PPL/RULER/
+    AUROC/AP 多个家族，各自在 5% 下判定时，整体至少一次假阳性的概率仍
+    可能超过 5%。这里把所有“已检验且有 n>=MIN_SEEDS”的预注册假设组成
+    一个确认族，用原始 p 做 Holm 校正（不能用已按更大探索族校正过的
+    p_adj 再校正，否则是重复惩罚）：家族内显著但全局不显著的主张降级为
+    “未定”，并保留 status_family 供审计。
+
+    该门只会让判定更严格，不会把原先不支持的主张升级；未检验/种子不足
+    的假设不进入族（也不被这条门改变状态）。
+    """
+    items = [h for h in (hyp_eval if isinstance(hyp_eval, list) else [])
+             if isinstance(h, dict)]
+    for h in items:
+        # 允许重复调用：status_family 固定为第一次进入全局门前的家族判定。
+        if h.get("status_family") is None:
+            h["status_family"] = h.get("status")
+    tested = [h for h in items
+              if h.get("p") is not None
+              and isinstance(h.get("n"), int)
+              and not isinstance(h.get("n"), bool)
+              and h["n"] >= MIN_SEEDS
+              and h.get("status_family") in ("支持", "拒绝", "未定")]
+    pads = holm_bonferroni([h.get("p") for h in tested])
+    m = len(tested)
+    for h, padj in zip(tested, pads):
+        h["p_adj_confirmatory"] = padj
+        h["confirmatory_family_size"] = m
+        h["global_fwer_pass"] = bool(padj is not None and padj < alpha)
+        if (h.get("status_family") in ("支持", "拒绝")
+                and h["global_fwer_pass"] is False):
+            h["status"] = "未定"
+            h["detail"] = ((h.get("detail") or "")
+                           + "；跨全部预注册假设的全局 Holm 校正后不显著"
+                             "（确认族整体 FWER），不能作为确认性结论")
+    return items
 
 
 def apply_integrity_gate(hyp_eval: list, integrity: dict) -> list:
@@ -4880,10 +4926,18 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append("> ⛔ 预注册完整性校验未通过：下表的“支持/拒绝”不作数，"
                       "已按探索性线索处理（见上方完整性小节）。")
         md.append("")
-        md.append("| ID | 主张 | Δ均值 | n | p_adj | p_perm | MDE | 判定 |")
-        md.append("|---|---|---|---|---|---|---|---|")
+        md.append("| ID | 主张 | Δ均值 | n | p_adj(家族) | p_adj(全体确认族) | "
+                  "p_perm | MDE | 判定 |")
+        md.append("|---|---|---|---|---|---|---|---|---|")
+        n_global_downgraded = 0
         for h in hyp_eval:
             padj = (f"{h['p_adj']:.4f}" if h.get("p_adj") is not None else "-")
+            pg = (f"{h['p_adj_confirmatory']:.4f}"
+                  if h.get("p_adj_confirmatory") is not None else "-")
+            if (h.get("status_family") in ("支持", "拒绝")
+                    and h.get("status") == "未定"
+                    and h.get("p_adj_confirmatory") is not None):
+                n_global_downgraded += 1
             pp = (f"{h['p_perm_adj']:.4f}"
                   if h.get("p_perm_adj") is not None else "-")
             delta = (f"{h['mean_diff']:+.4f}"
@@ -4894,10 +4948,20 @@ def build_summary(results_dir: str, audit: dict = None,
                 mark = "⚠（无效）"
             md.append(f"| {h['id']} | {h['claim']} | {delta} | "
                       f"{h.get('n') if h.get('n') is not None else '-'} | "
-                      f"{padj} | {pp} | {mde} | {mark} {h['status']}"
+                      f"{padj} | {pg} | {pp} | {mde} | {mark} {h['status']}"
                       f"（{h['detail']}） |")
         md.append("")
-        md.append("注: 未登记在本文件里的对比（含本汇总表中的其余行）一律属"
+        if n_global_downgraded:
+            md.append(f"注: {n_global_downgraded} 条主张在指标家族内显著，但"
+                      "跨全部预注册假设的全局 Holm 校正后不显著，已按确认族"
+                      "整体 FWER 降级为“未定”；status_family 仍保留原家族判定"
+                      "供审计。")
+        md.append("注: p_adj(家族) 为同一指标家族内 Holm；p_adj(全体确认族) "
+                  "为全部可检验预注册假设（n≥"
+                  f"{MIN_SEEDS}）组成的确认族 Holm，控制“任意一条确认性结论"
+                  "为假阳性”的整体 FWER。判定要求两者均 < "
+                  f"{ALPHA}：仅家族内显著不足以升级为确认性结论。"
+                  "未登记在本文件里的对比（含本汇总表中的其余行）一律属"
                   "事后（exploratory）分析：p 值只受本表家族内校正保护，"
                   "其“显著”只能作为提出新假设的线索；要升级为结论须先登记"
                   "再在新的种子/数据上检验。")
@@ -5171,6 +5235,19 @@ def build_summary(results_dir: str, audit: dict = None,
                    "registered_hypotheses": hyp_eval,
                    "registered_hypotheses_source": (
                        "preregistration/hypotheses.json" if hyp_eval else None),
+                   "confirmatory_family": {
+                       "method": ("Holm–Bonferroni over all tested registered "
+                                  "hypotheses (n>=MIN_SEEDS), using raw p; "
+                                  "family p_adj retained separately"),
+                       "alpha": ALPHA,
+                       "n_tested": sum(
+                           1 for h in hyp_eval
+                           if h.get("p_adj_confirmatory") is not None),
+                       "n_global_downgraded": sum(
+                           1 for h in hyp_eval
+                           if h.get("status_family") in ("支持", "拒绝")
+                           and h.get("status") == "未定"
+                           and h.get("p_adj_confirmatory") is not None)},
                    "registration_integrity": integrity,
                    "registration_scope": scope_check,
                    "ngram_comparison": ngram_cmp,
