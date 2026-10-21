@@ -79,6 +79,45 @@ from .utils import (amp_autocast, auroc, average_precision,
 
 ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
 
+
+def _bounded_float(value, name: str, minimum=None, maximum=None) -> float:
+    """有限浮点配置；拒绝 bool/NaN/Inf，并按语义上下界显式报错。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}") from e
+    if not math.isfinite(out):
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
+    if minimum is not None and out < minimum:
+        raise ValueError(f"{name} 必须 >= {minimum}，收到 {value!r}")
+    if maximum is not None and out > maximum:
+        raise ValueError(f"{name} 必须 <= {maximum}，收到 {value!r}")
+    return out
+
+
+def _float_grid(values, name: str, minimum=None, maximum=None) -> List[float]:
+    """逗号分隔字符串或列表 → 有限浮点网格；空项跳过、空表保留为空。"""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw = [x.strip() for x in values.split(",") if x.strip()]
+    elif isinstance(values, (list, tuple)):
+        raw = list(values)
+    else:
+        raise ValueError(f"{name} 需要逗号分隔字符串或列表，收到 {values!r}")
+    return [_bounded_float(x, name, minimum=minimum, maximum=maximum)
+            for x in raw]
+
+
+def _int_at_least(value, name: str, minimum: int) -> int:
+    """严格整数化并检查下界（用于样例数/折数/重采样次数等计数）。"""
+    out = strict_int(value, name)
+    if out < int(minimum):
+        raise ValueError(f"{name} 必须 >= {minimum}，收到 {out}")
+    return out
+
 # 命中判别（hit vs miss）正类率低于该值时以 PR-AUC 为主指标：此时负样本
 # 基数使 ROC-AUC 过于乐观（FPR 增长缓慢）。阈值集中在 lega.probe 定义
 # （线性探针基线复用同一口径），此处导入别名避免两处漂移。
@@ -665,8 +704,12 @@ def main():
             return default
         return strict_int(table[key], f"{section}.{key}")
 
-    n_examples = args.n_examples or _cfg_int("analysis", "n_examples", 30)
-    tau = args.tau if args.tau is not None else float(acfg.get("tau", 0.5))
+    n_examples = _int_at_least(
+        args.n_examples if args.n_examples is not None
+        else _cfg_int("analysis", "n_examples", 30), "n_examples", 1)
+    tau = _bounded_float(
+        args.tau if args.tau is not None else acfg.get("tau", 0.5),
+        "tau", minimum=0.0, maximum=1.0)
     if args.ctx is not None:
         ctx = args.ctx
     else:
@@ -742,24 +785,29 @@ def main():
     # 落盘报告的 note，不得反向解读。
     if not args.no_probe:
         if args.probe_l2:
-            probe_l2 = [float(x) for x in args.probe_l2.split(",") if x.strip()]
+            probe_l2 = _float_grid(args.probe_l2, "probe_l2", minimum=0.0)
         else:
-            probe_l2 = [float(x) for x in acfg.get(
-                "probe_l2_grid", list(_PROBE_L2_GRID))]
-        probe_folds = (args.probe_folds if args.probe_folds is not None
-                       else _cfg_int("analysis", "probe_folds", _PROBE_FOLDS))
+            probe_l2 = _float_grid(
+                acfg.get("probe_l2_grid", list(_PROBE_L2_GRID)),
+                "analysis.probe_l2_grid", minimum=0.0)
+        probe_folds = _int_at_least(
+            args.probe_folds if args.probe_folds is not None
+            else _cfg_int("analysis", "probe_folds", _PROBE_FOLDS),
+            "probe_folds", 2)
         summary["linear_probe"] = linear_probe(
             records, folds=probe_folds, l2_grid=probe_l2, seed=ckpt_seed)
     # 阈值敏感性：misleading/P(hit|集中) 的结论不能只挂在单一 τ 上
     if args.tau_grid is not None:
-        grid = [float(x) for x in args.tau_grid.split(",") if x.strip()]
+        grid = _float_grid(args.tau_grid, "tau_grid", minimum=0.0, maximum=1.0)
     else:
-        grid = [float(x) for x in acfg.get("tau_grid", [0.3, 0.5, 0.7])]
-    summary["tau_sensitivity"] = tau_sensitivity(records, sorted(set(grid) | {float(tau)}))
+        grid = _float_grid(acfg.get("tau_grid", [0.3, 0.5, 0.7]),
+                           "analysis.tau_grid", minimum=0.0, maximum=1.0)
+    summary["tau_sensitivity"] = tau_sensitivity(records, sorted(set(grid) | {tau}))
     # 聚类 bootstrap：同一记录池的 AUROC 置信区间（样例为聚类单元）
-    n_boot = (args.bootstrap_resamples
-              if args.bootstrap_resamples is not None
-              else _cfg_int("analysis", "bootstrap_resamples", 1000))
+    n_boot = _int_at_least(
+        args.bootstrap_resamples if args.bootstrap_resamples is not None
+        else _cfg_int("analysis", "bootstrap_resamples", 1000),
+        "bootstrap_resamples", 0)
     if n_boot > 0:
         summary["auroc_cluster_bootstrap"] = auroc_cluster_bootstrap(
             records, n_resamples=n_boot, seed=ckpt_seed)

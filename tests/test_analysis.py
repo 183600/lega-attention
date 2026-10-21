@@ -5,7 +5,8 @@
 """
 import math
 
-from lega.analysis import (auroc_cluster_bootstrap, collect_records,
+from lega.analysis import (_bounded_float, _float_grid, _int_at_least,
+                           auroc_cluster_bootstrap, collect_records,
                            summarize, tau_sensitivity)
 from lega.data import CharTokenizer
 from lega.model import GPT
@@ -94,6 +95,45 @@ def _mk_records():
                             "task": "niah_synth", "ctx": 256,
                             "layer": 0, "head": i % 2, "query_pos": i})
     return records
+
+
+def test_analysis_numeric_args_reject_invalid_values():
+    """τ/网格/计数不能被 bool、NaN、负值或显式 0 静默改写。"""
+    for bad in (True, "x", float("nan"), float("inf")):
+        try:
+            _bounded_float(bad, "tau", minimum=0.0, maximum=1.0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 tau 未被拒绝: {bad!r}")
+    for bad in (-0.1, 1.1):
+        try:
+            _bounded_float(bad, "tau", minimum=0.0, maximum=1.0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"越界 tau 未被拒绝: {bad!r}")
+    assert _bounded_float("0.5", "tau", minimum=0.0, maximum=1.0) == 0.5
+    assert _float_grid("0.3, 0.5,", "tau_grid", 0.0, 1.0) == [0.3, 0.5]
+    assert _float_grid([], "tau_grid", 0.0, 1.0) == []
+    for bad in ("0.5,-1", "0.5,nan", True):
+        try:
+            _float_grid(bad, "probe_l2", minimum=0.0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法网格未被拒绝: {bad!r}")
+    # 显式 n_examples=0 不能回退成默认 30；bool/小数同样拒绝
+    for bad in (0, -1, True, 1.5):
+        try:
+            _int_at_least(bad, "n_examples", 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法计数未被拒绝: {bad!r}")
+    assert _int_at_least(2.0, "n_examples", 1) == 2
+    assert _int_at_least(0, "bootstrap_resamples", 0) == 0
+    print("  [ok] 分析数值参数：拒绝 bool/NaN/越界/显式 0 回退")
 
 
 def test_tau_sensitivity_sweep():
