@@ -147,6 +147,23 @@ MIN_PPL_WINDOWS = 8
 _SEED_RE = re.compile(r"_seed(\d+)$")
 
 
+def _finite_number(value):
+    """外部 JSON 数值 → 有限 float；bool/缺失/坏类型/NaN/Inf 返回 None。
+
+    bool 是 int 的子类（True==1、False==0），若直接 float() 会把损坏的
+    ``"em": true`` / ``"ppl": false`` / ``"val_windows": true`` 伪装成合法
+    数值观测，进入跨种子均值、配对检验或 RULER 平均。汇总层读取的是外部/
+    旧版产物，必须按缺失处理而不是替上游猜值。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _cmd_env(cmd, env=None):
     """为单条子进程命令构造环境：PYTHONHASHSEED 与该命令 --seed 对齐。
 
@@ -769,13 +786,8 @@ def _stat(values) -> dict:
     """
     vals = []
     for v in (values if isinstance(values, (list, tuple)) else []):
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(f):
+        f = _finite_number(v)
+        if f is not None:
             vals.append(f)
     m, s = mean_std(vals)
     if m is None:
@@ -791,12 +803,7 @@ def _ppl_of(d):
     v = d.get("ppl")
     if v is None:
         v = d.get("val_ppl")
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError, OverflowError):
-        return None
+    return _finite_number(v)
 
 
 def _ppl_ci_rel_pct(d):
@@ -812,11 +819,8 @@ def _ppl_ci_rel_pct(d):
     if (not isinstance(ci, (list, tuple)) or len(ci) != 2
             or ppl is None or ppl <= 0):
         return None
-    try:
-        lo, hi = float(ci[0]), float(ci[1])
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if not (math.isfinite(lo) and math.isfinite(hi)) or hi < lo:
+    lo, hi = _finite_number(ci[0]), _finite_number(ci[1])
+    if lo is None or hi is None or hi < lo:
         return None
     return (hi - lo) / 2.0 / ppl * 100.0
 
@@ -826,14 +830,7 @@ def _eval_scalar(key):
     def get(d):
         if not isinstance(d, dict):
             return None
-        v = d.get(key)
-        if v is None:
-            return None
-        try:
-            v = float(v)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        return v if math.isfinite(v) else None
+        return _finite_number(d.get(key))
     return get
 
 
@@ -856,13 +853,10 @@ def _ruler_task_means(d, metric: str = "em"):
             continue
         vals = []
         for m in by_ctx.values():
-            if not isinstance(m, dict) or m.get(metric) is None:
+            if not isinstance(m, dict):
                 continue
-            try:
-                v = float(m[metric])
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if math.isfinite(v):
+            v = _finite_number(m.get(metric))
+            if v is not None:
                 vals.append(v)
         if vals:
             out[task] = float(sum(vals) / len(vals))
@@ -912,12 +906,8 @@ def _ruler_avg_micro(d):
         for cell in by_ctx.values():
             if not isinstance(cell, dict):
                 continue
-            v, n = cell.get("em"), _integral_value(cell.get("n"))
-            try:
-                v = float(v)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not math.isfinite(v) or n is None or n <= 0:
+            v, n = _finite_number(cell.get("em")), _integral_value(cell.get("n"))
+            if v is None or n is None or n <= 0:
                 continue
             num += v * n
             total += n
@@ -2445,11 +2435,10 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                          if ppl_map.get(k) is not None), None)
     if ref_name is None:
         return {"error": "ngram_baseline.json 没有可用 PPL"}
-    try:
-        ref_ppl_full = float(ppl_map[ref_name])
-    except (TypeError, ValueError, OverflowError):
+    ref_ppl_full = _finite_number(ppl_map[ref_name])
+    if ref_ppl_full is None:
         return {"error": "ngram PPL 非数值"}
-    if not math.isfinite(ref_ppl_full) or ref_ppl_full <= 0:
+    if ref_ppl_full <= 0:
         return {"error": "ngram PPL 非有限值或非正数"}
     wm_map = ng.get("ppl_window_matched")
     wm_map = wm_map if isinstance(wm_map, dict) else {}
@@ -2500,13 +2489,8 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     # 参考值决策（第一步）：全部纳入比较的 run 都与窗口规格一致，且
     # window-matched PPL 可用 → 用逐位置对齐参考；否则整体回退全 split。
     # 同一 Holm 家族必须共用同一参考值，不能逐行混用。
-    wm_ref = None
-    try:
-        if wm_map.get(ref_name) is not None:
-            wm_ref = float(wm_map[ref_name])
-    except (TypeError, ValueError, OverflowError):
-        wm_ref = None
-    if wm_ref is not None and (not math.isfinite(wm_ref) or wm_ref <= 0):
+    wm_ref = _finite_number(wm_map.get(ref_name))
+    if wm_ref is not None and wm_ref <= 0:
         wm_ref = None
     all_matched = bool(staged) and all(all(r["matched"]) for r in staged)
     use_window = bool(wspec) and wm_ref is not None and all_matched
@@ -3131,14 +3115,8 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
 
 
 def _num_or_none(v):
-    """JSON 数值安全转换：缺失/非数值/非有限值统一返回 None。"""
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return f if math.isfinite(f) else None
+    """JSON 数值安全转换：缺失/bool/非数值/非有限值统一返回 None。"""
+    return _finite_number(v)
 
 
 def _eff_cell(entry, key, ctx):
@@ -4956,13 +4934,10 @@ def build_summary(results_dir: str, audit: dict = None,
             """
             vals = []
             for s in _variant_seed_map(runs, v).values():
-                x = (s.get("eval") or {}).get("train_step_time_ms")
-                if x is None:
-                    continue
-                try:
-                    vals.append(float(x))
-                except (TypeError, ValueError, OverflowError):
-                    continue
+                x = _finite_number((s.get("eval") or {}).get(
+                    "train_step_time_ms"))
+                if x is not None and x >= 0:
+                    vals.append(x)
             if not vals:
                 return None
             vals.sort()
@@ -4977,13 +4952,10 @@ def build_summary(results_dir: str, audit: dict = None,
             """
             vals = []
             for s in _variant_seed_map(runs, v).values():
-                x = (s.get("eval") or {}).get("train_peak_mem_mb")
-                if x is None:
-                    continue
-                try:
-                    vals.append(float(x))
-                except (TypeError, ValueError, OverflowError):
-                    continue
+                x = _finite_number((s.get("eval") or {}).get(
+                    "train_peak_mem_mb"))
+                if x is not None and x >= 0:
+                    vals.append(x)
             if not vals:
                 return None
             vals.sort()

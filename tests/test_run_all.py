@@ -22,9 +22,9 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
                       _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
-                      _noise_verdict_note, _loo_stability_str, _seed_winloss_str,
-                      _paired_comparisons, _ppl_ci_rel_pct, _ppl_of,
-                      _probe_oof, _rel_pct,
+                      _noise_verdict_note, _loo_stability_str, _num_or_none,
+                      _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
+                      _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
                       _ruler_fwe_recall, _ruler_min_cell_n,
@@ -2499,6 +2499,37 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] RULER n=Infinity/非数值指标：跳过而非崩溃")
+
+
+def test_summary_rejects_bool_as_numeric_observation():
+    """外部 JSON 的 true/false 不能被当成 1.0/0.0 进入均值或配对检验。"""
+    assert _num_or_none(True) is None and _num_or_none(False) is None
+    assert _stat([True, False, 2.0]) == {"mean": 2.0, "std": None, "n": 1}
+    assert _ppl_of({"ppl": True}) is None
+    assert _ppl_ci_rel_pct({"ppl": 1.0, "val_ppl_ci95": [True, 2.0]}) is None
+    assert _ruler_task_means({"results": {"niah": {
+        "256": {"em": True}}}}) == {}
+    assert _ruler_avg_micro({"results": {"niah": {
+        "256": {"em": True, "n": 1}}}}) is None
+    # 汇总完整路径：bool PPL/窗口数/训练统计均按缺失降级，而不是 1.0。
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
+            "variant": "standard", "seed": 1, "split": "val",
+            "ppl": True, "val_ppl": False, "val_loss": True,
+            "gate_mean": True, "epochs_seen": True, "val_windows": True,
+            "train_step_time_ms": True, "train_peak_mem_mb": True})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "standard")
+        assert row["val_ppl"] is None
+        assert row["gate_mean"] is None
+        assert row["epochs_seen"] is None
+        assert row["eval_windows"] is None
+        assert row.get("eff_train_step_ms") is None
+        assert row.get("eff_train_peak_mem_mb") is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] bool 不再伪装成数值观测（PPL/RULER/训练统计）")
 
 
 def test_build_summary_tolerates_malformed_data_report_and_audit():
