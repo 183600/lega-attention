@@ -532,6 +532,10 @@ def main():
         "val_ppl_clamped": norm["val_ppl_clamped"],
         "eval_ctx": ctx,
         "gate_mean": gmean,
+        "gate_std": metrics.get("gate_std"),
+        "gate_frac_low": metrics.get("gate_frac_low"),
+        "gate_frac_high": metrics.get("gate_frac_high"),
+        "gate_layer_mean": metrics.get("gate_layer_mean"),
         "n_params": count_params(model),
         "n_gate_extra": gate_extra_params(model),
         **checkpoint_selection_info(

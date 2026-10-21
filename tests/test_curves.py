@@ -547,3 +547,60 @@ def test_curve_observability_warnings():
         assert len(w) == 1 and "不是整数" in w[0], (bad, w)
     assert curve_observability_warnings(20.0, 4.0, 2.0) == []
     print("  [ok] 曲线可观测性：稀疏验证/日志点告警，bool/小数拒绝")
+
+
+def test_gate_health_distinguishes_collapse_saturation_and_constant():
+    """只看 gate_mean 不够：g→0（关闭）与 g→1（透明）都让机制失效，
+    std≈0 则门控没有样本级区分；这些必须作为独立信号进入曲线诊断。"""
+    base = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    low = base + [{"step": 50, "gate_mean": 0.01, "gate_std": 0.003,
+                   "gate_frac_low": 0.99, "gate_frac_high": 0.0,
+                   "gate_layer_mean": [0.01, 0.012]}]
+    d = diagnose_curve(low)
+    gh = d["gate_health"]
+    assert gh["available"] and "塌缩" in gh["status"], gh
+    assert any("机制未生效" in r or "不能归因" in r
+               for r in gh["recommendations"]), gh
+    assert not any("无需干预" in r for r in d["recommendations"]), d
+
+    high = base + [{"step": 50, "gate_mean": 0.995, "gate_std": 0.001,
+                    "gate_frac_low": 0.0, "gate_frac_high": 0.99}]
+    d = diagnose_curve(high)
+    assert "饱和" in d["gate_health"]["status"], d["gate_health"]
+    assert any("退化为标准注意力" in e for e in d["evidence"]), d["evidence"]
+
+    const = base + [{"step": 50, "gate_mean": 0.5, "gate_std": 0.001,
+                     "gate_frac_low": 0.0, "gate_frac_high": 0.0}]
+    d = diagnose_curve(const)
+    assert "常数" in d["gate_health"]["status"], d["gate_health"]
+    assert any("样本级" in e for e in d["evidence"]), d["evidence"]
+
+    healthy = base + [{"step": 50, "gate_mean": 0.7, "gate_std": 0.15,
+                       "gate_frac_low": 0.02, "gate_frac_high": 0.03}]
+    d = diagnose_curve(healthy)
+    assert d["gate_health"]["status"] == "健康", d["gate_health"]
+    assert not d["gate_health"]["recommendations"]
+    assert "无需干预" in " ".join(d["recommendations"])
+    print("  [ok] 门控健康：塌缩/饱和/常数门与健康门控区分")
+
+
+def test_gate_health_flags_drift_and_ignores_malformed_stats():
+    """门控均值在评测间剧烈变化时，不能只用最终均值解释机制；坏统计值
+    必须被跳过，不能让曲线诊断崩溃或伪造门控状态。"""
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    recs += [{"step": 20, "gate_mean": 0.8, "gate_std": 0.1},
+             {"step": 40, "gate_mean": 0.35, "gate_std": 0.1},
+             {"step": 60, "gate_mean": "bad", "gate_std": True,
+              "gate_frac_low": float("nan")}]
+    d = diagnose_curve(recs)
+    gh = d["gate_health"]
+    assert gh["available"] and "漂移" in gh["status"], gh
+    assert gh["n_points"] == 2, gh
+    assert gh["drift_max"] >= 0.25, gh
+    assert any("最终" in e or "过程" in e for e in gh["evidence"]), gh
+    # 无门控统计（standard/null 或旧日志）时明确标为不适用，且不误报
+    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    assert not d2["gate_health"]["available"], d2["gate_health"]
+    assert not d2["gate_health"]["recommendations"]
+    print("  [ok] 门控漂移检测与坏统计值跳过")

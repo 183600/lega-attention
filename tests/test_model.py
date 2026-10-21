@@ -344,6 +344,19 @@ def test_evaluate_val_returns_coverage_and_gate_metrics():
     assert metrics["val_loss"] == metrics["val_loss"]  # not NaN
     assert metrics["gate_mean"] is not None
     assert 0.0 < metrics["gate_mean"] < 1.0
+    # 门控健康不能只看均值：方差/低高饱和比例/逐层均值必须来自同一批窗口。
+    assert metrics["gate_std"] is not None and metrics["gate_std"] >= 0
+    assert 0.0 <= metrics["gate_frac_low"] <= 1.0
+    assert 0.0 <= metrics["gate_frac_high"] <= 1.0
+    assert len(metrics["gate_layer_mean"]) == 2
+    assert all(0.0 <= x <= 1.0 for x in metrics["gate_layer_mean"])
+    # 无门的 standard 必须显式为空，而不是伪造 0/1 或复用别变体的统计。
+    std_model = _tiny("standard")
+    std_metrics = evaluate_val(std_model, val, ctx=10, device="cpu",
+                               iters=9, amp=False)
+    assert std_metrics["gate_mean"] is None
+    assert std_metrics["gate_std"] is None
+    assert std_metrics["gate_layer_mean"] is None
 
 
 def test_evaluate_val_reports_window_sampling_uncertainty():

@@ -4718,6 +4718,67 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- ⚠ 未找到 `curve_diagnosis.json`：只看最终数值会掩盖训练动态，"
                   "请先运行训练（或 `python -m lega.curves --run_dir <run 目录>`）。")
 
+    # --- 门控健康：机制是否真的在起作用，不能只看最终 PPL
+    md += ["", "## 门控健康（机制是否真的在起作用）", ""]
+    gate_order = {"健康": 0, "不适用（无门控统计）": 0,
+                  "门控近似常数（无样本级区分）": 2,
+                  "门控剧烈漂移": 3,
+                  "门控塌缩（几乎不写入）": 4,
+                  "门控饱和（退化为标准注意力）": 4}
+    gate_rows = []
+    if isinstance(curve, dict):
+        for v in variants:
+            by_seed = curve.get(v)
+            if not isinstance(by_seed, dict):
+                continue
+            hs = [d.get("gate_health") for d in by_seed.values()
+                  if isinstance(d, dict)
+                  and isinstance(d.get("gate_health"), dict)
+                  and d["gate_health"].get("available")]
+            if not hs:
+                continue
+            worst_g = max(hs, key=lambda h: gate_order.get(h.get("status"), -1))
+            status_g = worst_g.get("status") or "-"
+            m_last = _num_or_none(worst_g.get("mean_last"))
+            s_last = _num_or_none(worst_g.get("std_last"))
+            lo = _num_or_none(worst_g.get("frac_low_last"))
+            hi = _num_or_none(worst_g.get("frac_high_last"))
+            layers = [x for x in (_num_or_none(y) for y in
+                                  (worst_g.get("layer_mean_last") or []))
+                      if x is not None]
+            layer_s = ("-" if not layers else
+                       (f"{min(layers):.2f}" if len(layers) == 1
+                        else f"{min(layers):.2f}~{max(layers):.2f}"))
+            n_bad_gate = sum(1 for h in hs
+                             if h.get("status") not in ("健康",))
+            status_s = status_g + (f"（{n_bad_gate}/{len(hs)} 种子需关注）"
+                                   if n_bad_gate else "")
+            rec = (worst_g.get("recommendations") or [""])[0]
+            gate_rows.append(
+                f"| {VARIANT_CN.get(v, v)} | {status_s} | "
+                f"{'-' if m_last is None else f'{m_last:.3f}'} | "
+                f"{'-' if s_last is None else f'{s_last:.4f}'} | "
+                f"{'-' if lo is None else f'{lo:.0%}'} | "
+                f"{'-' if hi is None else f'{hi:.0%}'} | {layer_s} | {rec} |")
+    if gate_rows:
+        md.append("门控健康检查的是方法机制本身：门控塌缩/饱和/常数化时，"
+                  "PPL 的涨跌不能归因于查询、集中度或长度校准项。逐 run 数值"
+                  "见 `curve_diagnosis.json` 的 `gate_health`。")
+        md.append("")
+        md.append("| 变体 | 门控健康（最差种子） | 末点均值 | std | 低饱和比例 "
+                  "| 高饱和比例 | 逐层均值范围 | 关键建议 |")
+        md.append("|---|---|---|---|---|---|---|---|")
+        md += gate_rows
+        bad_gate = [r for r in gate_rows if "健康" not in r.split("|")[2]]
+        if bad_gate:
+            md.append("")
+            md.append("⚠ 存在门控塌缩/饱和/常数化/漂移：对应的 PPL/RULER 差异"
+                      "可能来自“门关闭/门透明”而不是所声称的机制；先按建议"
+                      "修复门控再解释结果，必要时改报“机制未生效”。")
+    else:
+        md.append("- 暂无门控统计（旧日志或未评测门控变体）；门控均值不能"
+                  "替代分布检查，建议用当前版本重跑训练内评测。")
+
     # --- 坏案例分析：预测错误的样本逐一归因（改进思路的最重要来源）
     md += ["", "## 坏案例分析（预测错误的样本与归因）", ""]
     bad_rows, bad_example_pool = [], []

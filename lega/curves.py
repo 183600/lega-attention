@@ -62,6 +62,14 @@ LIVE_OVERFIT_GAP = 0.02
 # 曲线不可用。
 MIN_CURVE_EVAL_POINTS = 5
 MIN_CURVE_LOG_POINTS = 10
+# 门控健康：门控是实现机制本身，不能只看最终 PPL。若 g 长期贴近 0
+# （几乎不写入）或贴近 1（退化为标准注意力），方法的因果解释即失效。
+# 这些阈值用于把“门控是否真的在学、是否有样本级区分”变成可复核信号。
+GATE_SAT_LOW = 0.05
+GATE_SAT_HIGH = 0.95
+GATE_SAT_FRAC = 0.90
+GATE_MIN_STD = 0.01
+GATE_DRIFT_TOL = 0.25
 
 
 def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
@@ -416,6 +424,122 @@ def live_overfit_hint(evals_since_improve, best_val, val,
     return f"{what}：已连续 {n} 次评测未改善。{tail}"
 
 
+def _gate_points(records: List[Dict]) -> List[Dict]:
+    """提取带门控统计的评测点；坏值/非法比例跳过，不让单条日志中断诊断。"""
+    points = []
+    for r in records if isinstance(records, (list, tuple)) else []:
+        if not isinstance(r, dict):
+            continue
+        step = _step_or_none(r.get("step"))
+        mean = _finite_value(r.get("gate_mean"))
+        if step is None or mean is None or not 0.0 <= mean <= 1.0:
+            continue
+        std = _finite_value(r.get("gate_std"))
+        low = _finite_value(r.get("gate_frac_low"))
+        high = _finite_value(r.get("gate_frac_high"))
+        layer = r.get("gate_layer_mean")
+        layer = [f for f in (_finite_value(x) for x in layer)
+                 if f is not None and 0.0 <= f <= 1.0] \
+            if isinstance(layer, (list, tuple)) else None
+        points.append({
+            "step": step, "mean": mean,
+            "std": std if std is not None and std >= 0 else None,
+            "frac_low": low if low is not None and 0.0 <= low <= 1.0 else None,
+            "frac_high": high if high is not None and 0.0 <= high <= 1.0 else None,
+            "layer_mean": layer,
+        })
+    points.sort(key=lambda p: p["step"])
+    return points
+
+
+def diagnose_gate(records: List[Dict]) -> Dict:
+    """门控健康诊断：塌缩/饱和/常数门/剧烈漂移都是方法失效的独立信号。
+
+    只看 PPL 无法发现“门控没在起作用”：g≡0 可能通过压制残差写入降低
+    损失，g≡1 则让 LEGA 完全退化成标准注意力；两种情况下关于长度校准/
+    集中度证据的因果主张都不成立。验证评测已记录 gate_std 与低/高饱和
+    比例，这里把它们转成结构化结论，供曲线诊断与汇总页显式披露。
+    """
+    points = _gate_points(records)
+    if not points:
+        return {"available": False, "status": "不适用（无门控统计）",
+                "n_points": 0, "evidence": [], "recommendations": []}
+    first, last = points[0], points[-1]
+    mean, std = last["mean"], last["std"]
+    low, high = last["frac_low"], last["frac_high"]
+    collapsed_low = ((low is not None and low >= GATE_SAT_FRAC)
+                     or (mean <= 0.02 and (std is None or std <= 0.05)))
+    collapsed_high = ((high is not None and high >= GATE_SAT_FRAC)
+                      or (mean >= 0.98 and (std is None or std <= 0.05)))
+    constant = (std is not None and std <= GATE_MIN_STD
+                and not collapsed_low and not collapsed_high)
+    drifts = []
+    for a, b in zip(points, points[1:]):
+        d = b["mean"] - a["mean"]
+        if abs(d) >= GATE_DRIFT_TOL:
+            drifts.append((a["step"], b["step"], d))
+    status = "健康"
+    evidence, recs = [], []
+    if collapsed_low:
+        status = "门控塌缩（几乎不写入）"
+        evidence.append(
+            f"门控均值 {mean:.3f}"
+            + (f"、std={std:.3f}" if std is not None else "")
+            + (f"、低于 {GATE_SAT_LOW:g} 的比例 {low:.0%}" if low is not None
+               else "")
+            + "：门几乎关闭，输出被整体压制；此时 PPL 变化不能归因于"
+              "集中度/长度校准机制")
+        recs.append(
+            "门控塌缩：检查门控偏置 d、w/a/b 权重与学习率是否把 g 压到 0；"
+            "若门控确实学成关闭，应报告“机制未生效”，不要用该 run 的 PPL "
+            "给门控机制背书")
+    elif collapsed_high:
+        status = "门控饱和（退化为标准注意力）"
+        evidence.append(
+            f"门控均值 {mean:.3f}"
+            + (f"、std={std:.3f}" if std is not None else "")
+            + (f"、高于 {GATE_SAT_HIGH:g} 的比例 {high:.0%}" if high is not None
+               else "")
+            + "：g≈1 时 LEGA 退化为标准注意力，长度/集中度项没有实际作用")
+        recs.append(
+            "门控饱和：g≈1 时方法退化为标准注意力，不能声称门控机制有效；"
+            "检查 gate_bias_init 是否过高、a/b 是否未学习，必要时降低初值"
+            "或加门控正则后重跑")
+    elif constant:
+        status = "门控近似常数（无样本级区分）"
+        evidence.append(
+            f"门控 std={std:.4f} ≤ {GATE_MIN_STD:g}（均值 {mean:.3f}）："
+            "所有 token 得到几乎相同的门值，门控只相当于全局缩放，"
+            "并未按查询/集中度/长度做样本级决策")
+        recs.append(
+            "门控无样本级区分：检查 w/a/b 是否被 weight decay 压到 0、"
+            "学习率是否过小；若门控参数未离开初始化，不要报告门控机制有效")
+    if drifts:
+        worst = max(drifts, key=lambda x: abs(x[2]))
+        if status == "健康":
+            status = "门控剧烈漂移"
+        evidence.append(
+            f"门控均值在评测间最大变化 {worst[2]:+.2f}"
+            f"（step {worst[0]}→{worst[1]}，阈值 ±{GATE_DRIFT_TOL:g}）："
+            "门控行为不稳定，不能只拿最终均值代表训练过程")
+        recs.append(
+            "门控剧烈漂移：优先检查学习率/梯度尖峰（见同页 grad_norm），"
+            "并用多个评测点的门控曲线而不是最终 gate_mean 解释机制")
+    if status == "健康":
+        evidence.append(
+            f"门控末点均值 {mean:.3f}"
+            + (f"、std={std:.3f}" if std is not None else "")
+            + (f"、低饱和 {low:.0%}/高饱和 {high:.0%}"
+               if low is not None and high is not None else "")
+            + f"：门控在训练末段仍有样本级变化，未贴近 0/1 极值")
+    return {"available": True, "status": status, "n_points": len(points),
+            "mean_first": first["mean"], "mean_last": mean,
+            "std_last": std, "frac_low_last": low, "frac_high_last": high,
+            "layer_mean_last": last["layer_mean"],
+            "drift_max": (max(abs(d[2]) for d in drifts) if drifts else 0.0),
+            "evidence": evidence, "recommendations": recs}
+
+
 def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                    epochs_seen: Optional[float] = None,
                    train_tokens: Optional[int] = None) -> Dict:
@@ -734,6 +858,15 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     if last_train is not None and final_val is not None:
         gap = final_val - last_train
 
+    gate = diagnose_gate(records)
+    if gate["evidence"]:
+        evidence += gate["evidence"]
+    if gate["recommendations"]:
+        recommendations += gate["recommendations"]
+        if gate["status"] != "健康":
+            recommendations[:] = [r for r in recommendations
+                                  if "无需干预" not in r]
+
     return {
         "status": status,
         "evidence": evidence,
@@ -776,6 +909,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "has_grad_spike": bool(grad_spike or grad_bad),
         "loss_spikes": loss_spikes,
         "has_loss_spike": bool(loss_spikes),
+        "gate_health": gate,
         "thresholds": {"rel_tol": REL_TOL, "diverge_factor": DIVERGE_FACTOR,
                        "early_stop_tol": EARLY_STOP_TOL,
                        "grad_spike_factor": GRAD_SPIKE_FACTOR,

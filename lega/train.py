@@ -19,8 +19,8 @@ import numpy as np
 import torch
 
 from .attention import VARIANTS, VARIANT_CN
-from .curves import (LIVE_WARN_EVALS, curve_observability_warnings,
-                     live_overfit_hint)
+from .curves import (GATE_SAT_HIGH, GATE_SAT_LOW, LIVE_WARN_EVALS,
+                     curve_observability_warnings, live_overfit_hint)
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
 from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
 from .preflight import (allow_protocol_violations,  # noqa: E402
@@ -592,6 +592,10 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
         # 窗口等长，权重即窗口数，用 Python int 就地累计。
         loss_acc = torch.zeros((), device=device)
         gate_acc = torch.zeros((), device=device)
+        gate_sq_acc = torch.zeros((), device=device)
+        gate_low_acc = torch.zeros((), device=device)
+        gate_high_acc = torch.zeros((), device=device)
+        gate_layer_acc = []
         total_w = 0
         gate_w_total = 0
         window_losses = []
@@ -623,17 +627,44 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                 wl = out["loss_per_window"].detach().float().cpu().numpy()
                 window_losses.extend(float(v) for v in wl.reshape(-1))
                 if collect_gate and out["gate_stats"]:
-                    # 在设备端先 stack 成 (n_layers,) 再求均值
-                    gs = [s_["g"].detach().float().mean()
-                          for s_ in out["gate_stats"] if s_.get("g") is not None]
-                    if gs:
-                        gate_acc.add_(torch.stack(gs).mean(), alpha=float(nb))
+                    # 在设备端先 stack 成 (n_layers,) 再求均值；同时保留二阶矩、
+                    # 低/高饱和比例与逐层均值，供训练曲线诊断门控是否塌缩/饱和。
+                    means, sqs, lows, highs = [], [], [], []
+                    for li, s_ in enumerate(out["gate_stats"]):
+                        g = s_.get("g")
+                        if g is None:
+                            continue
+                        gf = g.detach().float()
+                        means.append(gf.mean())
+                        sqs.append((gf * gf).mean())
+                        lows.append((gf < GATE_SAT_LOW).float().mean())
+                        highs.append((gf > GATE_SAT_HIGH).float().mean())
+                        if li >= len(gate_layer_acc):
+                            gate_layer_acc.append(torch.zeros((), device=device))
+                        gate_layer_acc[li].add_(means[-1], alpha=float(nb))
+                    if means:
+                        gate_acc.add_(torch.stack(means).mean(), alpha=float(nb))
+                        gate_sq_acc.add_(torch.stack(sqs).mean(), alpha=float(nb))
+                        gate_low_acc.add_(torch.stack(lows).mean(), alpha=float(nb))
+                        gate_high_acc.add_(torch.stack(highs).mean(), alpha=float(nb))
                         gate_w_total += nb
         # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
         # 使 torch.load(weights_only=True) 反序列化失败且不合法
         val_loss = float(float(loss_acc.item()) / total_w)
         gate_mean = (float(gate_acc.item()) / gate_w_total
                      if gate_w_total else None)
+        gate_std = None
+        gate_frac_low = None
+        gate_frac_high = None
+        gate_layer_mean = None
+        if gate_w_total:
+            mean_sq = float(gate_sq_acc.item()) / gate_w_total
+            var = max(0.0, mean_sq - gate_mean * gate_mean)
+            gate_std = math.sqrt(var)
+            gate_frac_low = float(gate_low_acc.item()) / gate_w_total
+            gate_frac_high = float(gate_high_acc.item()) / gate_w_total
+            gate_layer_mean = [float(x.item()) / gate_w_total
+                               for x in gate_layer_acc]
         # 验证集只评测 eval_iters 个等间隔窗口：点估计本身带抽样误差。这里把
         # 窗口作为抽样单元，报告窗口间标准误与 t 近似 95% CI（小样本比正态
         # 更宽）；CI 不包含窗口间空间相关，也不替代跨随机种子的方差（后者在
@@ -666,6 +697,10 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
             "val_loss_min": val_loss_min,
             "val_loss_max": val_loss_max,
             "gate_mean": gate_mean,
+            "gate_std": gate_std,
+            "gate_frac_low": gate_frac_low,
+            "gate_frac_high": gate_frac_high,
+            "gate_layer_mean": gate_layer_mean,
             "eval_iters_requested": int(iters),
             "eval_iters": int(len(indices)),
             "val_windows": int(n_windows),
@@ -1413,7 +1448,12 @@ def main():
                            **provenance})
     save_json({"variant": args.variant, "val_ppl": final_ppl, "val_loss": final_val_loss,
                "val_ppl_clamped": bool(final_val_loss > 20),
-               "gate_mean": gmean, **{k: final_metrics[k] for k in
+               "gate_mean": gmean,
+               "gate_std": final_metrics.get("gate_std"),
+               "gate_frac_low": final_metrics.get("gate_frac_low"),
+               "gate_frac_high": final_metrics.get("gate_frac_high"),
+               "gate_layer_mean": final_metrics.get("gate_layer_mean"),
+               **{k: final_metrics[k] for k in
                                       ("eval_iters_requested", "eval_iters",
                                        "val_windows", "val_tokens_evaluated",
                                        "val_loss_se", "val_loss_ci95",
