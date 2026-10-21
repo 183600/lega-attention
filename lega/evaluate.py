@@ -62,7 +62,9 @@ def worst_windows_allowed(split, worst_on_test: bool) -> bool:
     test 上默认禁止：最差窗口连同上下文/预测暴露 test 内容，交人工迭代等于
     据 test 改进模型。只有显式 worst_on_test 才放行。
     """
-    return split != "test" or bool(worst_on_test)
+    # 只接受真正的 bool True：字符串 "false"/0 等真值若按 truthiness 放行，
+    # 会把“test 最差窗口尘封”的闸门变成任何非空值都能绕过。
+    return split != "test" or worst_on_test is True
 
 
 def _preserve_eval_mode(fn):
@@ -438,7 +440,7 @@ def main():
                   f"（累计 {test_access['evaluations']} 次、"
                   f"{test_access['distinct_checkpoints']} 个 checkpoint）；"
                   "测试集只能用于最终一次性评估，反复评测/据此调参视为泄露")
-            if not args.allow_repeat_test:
+            if getattr(args, "allow_repeat_test", False) is not True:
                 raise SystemExit(
                     f"拒绝重复 test 评测：checkpoint {ckpt_sha256[:16]} 已在 test "
                     "上评测过（账本见 data_dir/.test_access_log.jsonl）。测试集只"
