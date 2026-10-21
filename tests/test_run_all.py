@@ -872,6 +872,57 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
 
 
+def test_verify_controlled_setup_rejects_mixed_device_types():
+    """不同变体跑在 CPU/CUDA 上时 PPL 差异无法归因于方法，必须拒绝。"""
+    def fixture(devices):
+        tmp = tempfile.mkdtemp()
+        for v, dev in zip(("standard", "lega"), devices):
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "variant": v, "seed": 7,
+                "device": dev, "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024})
+        return tmp
+    tmp = fixture(("cpu", "cuda:0"))
+    try:
+        try:
+            verify_controlled_setup(tmp, ["standard", "lega"], [7], 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("混合 CPU/CUDA 应触发 SystemExit")
+        except SystemExit:
+            pass
+        # 同类型不同卡不算混杂（仍会记录原始 device），审计通过
+        tmp2 = fixture(("cuda:0", "cuda:1"))
+        try:
+            audit = verify_controlled_setup(
+                tmp2, ["standard", "lega"], [7], 1,
+                expected_data_digest="abc123")
+            assert audit["ok"] and not audit["mixed_device"], audit
+            assert set(audit["device_types"].values()) == {"cuda"}, audit
+        finally:
+            shutil.rmtree(tmp2, ignore_errors=True)
+        # 旧产物缺 device 只警告，不伪造“一致”
+        tmp3 = fixture(("cpu", "cpu"))
+        evpath = os.path.join(tmp3, "lega", "config_used.json")
+        cfg = json.load(open(evpath, encoding="utf-8"))
+        cfg.pop("device")
+        _write_json(evpath, cfg)
+        try:
+            audit = verify_controlled_setup(
+                tmp3, ["standard", "lega"], [7], 1,
+                expected_data_digest="abc123")
+            assert audit["ok"] and audit["device_missing"] == ["lega/seed7"], audit
+        finally:
+            shutil.rmtree(tmp3, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 受控变量审计（混合设备类型被拒绝，缺 device 只告警）")
+
+
 def test_stat_counts_finite_only():
     """_stat 的 n 与 mean/std 口径一致：NaN/Inf 不参与也不虚增样本量。"""
     st = _stat([1.0, float("nan"), 3.0, None])

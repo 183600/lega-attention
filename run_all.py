@@ -461,6 +461,8 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     data_order_missing = []
     attention_backends = {}
     attention_key_seen = False
+    devices = {}
+    device_missing = []
     for v in variants:
         for seed in seeds:
             vdir = _variant_dir(out_root, v, seed, n_seeds)
@@ -483,6 +485,14 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                                      or not _same_seed(cfg_seed, seed))
                     if seed_mismatch:
                         mismatches.append(f"{v}/seed{seed}: config seed={cfg.get('seed')}")
+                    if "device" in cfg:
+                        raw_device = cfg.get("device")
+                        if isinstance(raw_device, str) and raw_device:
+                            devices[f"{v}/seed{seed}"] = raw_device
+                        else:
+                            device_missing.append(f"{v}/seed{seed}")
+                    else:
+                        device_missing.append(f"{v}/seed{seed}")
                     if "use_sdpa_standard" in cfg:
                         attention_key_seen = True
                         sdpa_on = config_bool(
@@ -657,6 +667,22 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                 f"{name} 相对 {protocol_ref_name} 的 PPL 评测协议差异: "
                 + "; ".join(diffs)
                 + "（不同评测 token 子集/上下文不可直接配对）")
+    # 设备类型必须一致：CPU 与 CUDA（或不同精度后端）的数值/内核不同，
+    # 若不同变体跑在不同设备上，PPL 差异不能归因于方法。只比较设备类型
+    # （cuda:0/cuda:1 视为同一类型），不强制同一张卡。
+    device_types = {}
+    for name, raw_device in devices.items():
+        device_types[name] = str(raw_device).split(":", 1)[0].strip().lower()
+    mixed_device = []
+    if len(set(device_types.values())) > 1:
+        by_type = {}
+        for name, dtype in device_types.items():
+            by_type.setdefault(dtype, []).append(name)
+        mixed_device = [f"{dtype}: {', '.join(sorted(names))}"
+                        for dtype, names in sorted(by_type.items())]
+        mismatches.append(
+            "训练设备类型不一致（" + "；".join(mixed_device)
+            + "）：不同设备/精度后端的数值行为不同，正式对比必须同设备类型")
     mixed_attention = []
     if attention_key_seen and len(set(attention_backends.values())) > 1:
         by_backend = {}
@@ -683,6 +709,11 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               "缺少 data_order_sha256，无法证明实际训练批次序列一致: "
               + ", ".join(data_order_missing[:6])
               + (" ..." if len(data_order_missing) > 6 else ""))
+    if device_missing:
+        print(f"[audit] 警告：{len(device_missing)} 个 run 的 config_used.json "
+              "缺少 device，无法核对训练设备类型一致: "
+              + ", ".join(device_missing[:6])
+              + (" ..." if len(device_missing) > 6 else ""))
     if mixed_attention:
         mismatches.append(
             "注意力实现路径不一致（来自 use_sdpa_standard=true）："
@@ -734,6 +765,9 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             "meta_mismatches": meta_mismatches,
             "data_order_checked": data_order_checked,
             "data_order_missing": data_order_missing,
+            "device_types": device_types,
+            "device_missing": device_missing,
+            "mixed_device": mixed_device,
             "early_stop_runs": early_stop_runs,
             "selection_step_points": selection_points,
             "selection_step_spread": sel_spread,
