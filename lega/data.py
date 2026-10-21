@@ -386,6 +386,14 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         contamination={k: v for k, v in contamination.items()},
         distribution={k: v for k, v in distribution.items()},
         text_stats=text_stats, extra=extra_report)
+    # 访问账本只统计“评测级”test 读取；但 prepare_bins 为了编码 test.bin 与
+    # 计算跨 split 重叠/分布漂移，本身会在建模前读一次 test（模型无关的诊断
+    # 读取，不用于任何选择）。显式记录，避免账本 0 次被误读成“test 从未被碰”。
+    data_report["test_reads_at_prep"] = {
+        "encoded": bool(te is not None),
+        "purpose": "编码 test.bin + 跨 split 重叠/分布漂移诊断（模型无关）",
+        "used_for_selection": False,
+    }
     data_report["test_access"] = summarize_test_access(
         read_test_access_log(data_dir))
 

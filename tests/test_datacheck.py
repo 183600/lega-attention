@@ -641,6 +641,9 @@ def test_prepare_bins_writes_report_and_decontaminates():
         # 使“无全量拟合”的审计声明失真。
         assert rep["protocol"]["fit_on"] == rep["tokenizer"]["fit_on"]
         assert rep["tokenizer"]["unk_rate"]["val"] > 0  # 独有的 § 不在 train 词表
+        # 建模前读 test 仅用于编码/诊断，必须显式记录且标注不用于选择
+        assert rep["test_reads_at_prep"]["encoded"] is True
+        assert rep["test_reads_at_prep"]["used_for_selection"] is False
         tok = load_tokenizer(d)
         assert "§" not in tok.stoi
         # 缓存命中：第二次调用不重建（token 数一致），且报告仍存在
