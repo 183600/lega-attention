@@ -15,7 +15,7 @@ import tempfile
 
 from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
-from lega.train import early_stop_update
+from lega.train import _config_int, early_stop_update
 
 
 def test_early_stop_update_semantics():
@@ -46,6 +46,21 @@ def test_early_stop_update_semantics():
     best, cnt, stop = early_stop_update(float("nan"), 2.9, 1, 0.0, 1)
     assert best == 2.9 and cnt == 1 and not stop
     print("  [ok] early_stop_update（严格最优 + min_delta + patience 口径）")
+
+
+def test_config_int_rejects_bool_fraction_and_below_min():
+    """训练配置整数不能被 int() 截断；0 间隔必须在使用前失败。"""
+    for bad in (True, 1.5, "1.5", float("nan"), float("inf"), 0, -1):
+        try:
+            _config_int(bad, "log_every", 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法配置未被拒绝: {bad!r}")
+    assert _config_int(2.0, "log_every", 1) == 2
+    assert _config_int("2", "log_every", 1) == 2
+    assert _config_int(0, "warmup", 0) == 0
+    print("  [ok] 训练配置整数：拒绝 bool/小数/非有限值/0 间隔")
 
 
 def _write_data(d: str) -> None:
@@ -83,6 +98,27 @@ def _cfg():
         "amp": False, "seed": 1, "log_every": 2, "eval_every": 2,
         "eval_iters": 2,
     }
+
+
+def test_train_rejects_zero_log_every_before_training():
+    """log_every=0 必须在开训前报错，而不是训练中途 ZeroDivisionError。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg = _cfg()
+        cfg["log_every"] = 0
+        out_dir = os.path.join(tmp, "run")
+        try:
+            _run_train(cfg, data_dir, out_dir)
+        except ValueError as e:
+            assert "log_every" in str(e), e
+        else:
+            raise AssertionError("log_every=0 未被拒绝")
+        assert not os.path.exists(os.path.join(out_dir, "train_log.jsonl"))
+        assert not os.path.exists(os.path.join(out_dir, "eval.json"))
+    print("  [ok] log_every=0 在开训前显式拒绝")
 
 
 def test_train_early_stop_end_to_end():

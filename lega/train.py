@@ -669,6 +669,20 @@ def mean_gate_value(model, val, ctx, device, iters=1, amp=False):
 
 # ---------------------------------------------------------------- 早停（可选）
 
+def _config_int(value, name: str, minimum: int) -> int:
+    """配置整数：拒绝 bool/小数/非有限值，并检查配置语义下界。
+
+    训练循环里有 ``% log_every``、``/ grad_accum`` 等直接运算：0 会在训练
+    中途才炸，bool/1.5 则会被 int() 静默截断并与 config_used/manifest 记录
+    的声明值错位。这里在建模前统一失败，避免“日志已落盘、训练已开跑”后
+    才发现配置不可执行。
+    """
+    value = strict_int(value, f"config.{name}")
+    if value < int(minimum):
+        raise ValueError(f"config.{name} 必须 >= {minimum}，收到 {value}")
+    return value
+
+
 def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
                       min_delta: float = 0.0, patience: int = 0):
     """一次验证评测后更新早停状态，返回 (best_val, evals_since_improve, stop)。
@@ -726,7 +740,9 @@ def main():
         cfg["steps"] = args.steps
     if args.early_stop_patience is not None:
         cfg["early_stop_patience"] = args.early_stop_patience
-    early_stop_patience = max(0, int(cfg.get("early_stop_patience", 0) or 0))
+    patience_raw = cfg.get("early_stop_patience", 0)
+    early_stop_patience = _config_int(
+        0 if patience_raw is None else patience_raw, "early_stop_patience", 0)
     early_stop_min_delta = max(0.0, float(cfg.get("early_stop_min_delta", 0.0) or 0.0))
     # 种子必须是精确整数：配置里的 "seed": true → 1 或 1.5 → 1 会让本次
     # 训练以与声明不同的种子播种，而 checkpoint/manifest/曲线记的是截断值，
@@ -807,17 +823,37 @@ def main():
                             if isinstance(identity, dict) else None),
     }
 
-    block_size = int(cfg["block_size"])
-    train_ctx = min(int(cfg.get("train_ctx", block_size)), block_size)
-    # 记录实际生效的上下文长度（经过 min 截断），保证下游评测复现同一口径
-    cfg_used["train_ctx"] = train_ctx
+    block_size = _config_int(cfg["block_size"], "block_size", 1)
+    train_ctx = min(_config_int(cfg.get("train_ctx", block_size),
+                                "train_ctx", 1), block_size)
+    d_model = _config_int(cfg["d_model"], "d_model", 1)
+    n_layers = _config_int(cfg["n_layers"], "n_layers", 1)
+    n_heads = _config_int(cfg["n_heads"], "n_heads", 1)
+    ffn_mult = _config_int(cfg.get("ffn_mult", 4), "ffn_mult", 1)
+    steps = _config_int(cfg["steps"], "steps", 1)
+    warmup = _config_int(cfg.get("warmup", 100), "warmup", 0)
+    grad_accum = _config_int(cfg.get("grad_accum", 1), "grad_accum", 1)
+    log_every = _config_int(cfg.get("log_every", 10), "log_every", 1)
+    eval_every = _config_int(cfg.get("eval_every", 500), "eval_every", 1)
+    eval_iters = _config_int(cfg.get("eval_iters", 50), "eval_iters", 1)
+    batch_size = _config_int(cfg["batch_size"], "batch_size", 1)
+    # 记录实际生效的数值（含 train_ctx 的 min 截断与字符串/整数值浮点规范化），
+    # 保证下游评测复现同一口径，而不是复述未经执行的原始配置。
+    cfg_used.update({
+        "block_size": block_size, "train_ctx": train_ctx,
+        "d_model": d_model, "n_layers": n_layers, "n_heads": n_heads,
+        "ffn_mult": ffn_mult, "steps": steps, "warmup": warmup,
+        "grad_accum": grad_accum, "log_every": log_every,
+        "eval_every": eval_every, "eval_iters": eval_iters,
+        "batch_size": batch_size,
+    })
     with open(os.path.join(out_dir, "config_used.json"), "w", encoding="utf-8") as f:
         json.dump(cfg_used, f, ensure_ascii=False, indent=2)
 
     model_cfg = dict(
         vocab_size=int(meta["vocab_size"]), block_size=block_size,
-        d_model=int(cfg["d_model"]), n_layers=int(cfg["n_layers"]),
-        n_heads=int(cfg["n_heads"]), ffn_mult=int(cfg.get("ffn_mult", 4)),
+        d_model=d_model, n_layers=n_layers,
+        n_heads=n_heads, ffn_mult=ffn_mult,
         dropout=float(cfg.get("dropout", 0.0)),
         attn_dropout=float(cfg.get("attn_dropout", 0.0)),
         variant=args.variant,
@@ -840,8 +876,8 @@ def main():
     n_extra = gate_extra_params(model)
     print(f"[train] variant={args.variant}({VARIANT_CN[args.variant]}) device={device} "
           f"params={n_params:,} (门控额外 {n_extra:,})")
-    print(f"[train] steps={cfg['steps']} batch={cfg['batch_size']} ctx={train_ctx} "
-          f"tokens/step={cfg['batch_size'] * train_ctx:,} seed={seed}")
+    print(f"[train] steps={steps} batch={batch_size} ctx={train_ctx} "
+          f"tokens/step={batch_size * train_ctx:,} seed={seed}")
 
     opt = configure_optimizer(
         model, lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.1)),
@@ -850,12 +886,6 @@ def main():
     # 梯度裁剪的参数列表与优化器同口径
     clip_params = [p for p in model.parameters() if p.requires_grad]
 
-    steps = int(cfg["steps"])
-    warmup = int(cfg.get("warmup", 100))
-    grad_accum = int(cfg.get("grad_accum", 1))
-    log_every = int(cfg.get("log_every", 10))
-    eval_every = int(cfg.get("eval_every", 500))
-    eval_iters = int(cfg.get("eval_iters", 50))
     grad_clip = float(cfg.get("grad_clip", 1.0))
     amp_dt = amp_dtype_for(device, bool(cfg.get("amp", True)))
     amp_ctx = amp_autocast(device, amp_dt is not None)
@@ -892,7 +922,7 @@ def main():
     model.train()
     opt.zero_grad(set_to_none=True)
     # 流水线预取的首批：训练循环内每个 micro-step 再预取下一批
-    batches = [get_train_batch(train, train_ctx, int(cfg["batch_size"]), device, rng)
+    batches = [get_train_batch(train, train_ctx, batch_size, device, rng)
                for _ in range(grad_accum)]
     tokens_seen = 0
     best_val = float("inf")
@@ -1053,7 +1083,7 @@ def main():
             # 两批在途互不干扰）。rng 抽取顺序与逐次采样完全一致，确定性不变。
             if step + 1 < steps or mi + 1 < grad_accum:
                 batches[mi] = get_train_batch(train, train_ctx,
-                                              int(cfg["batch_size"]), device, rng)
+                                              batch_size, device, rng)
             else:
                 batches[mi] = None
             with amp_ctx:
@@ -1075,7 +1105,7 @@ def main():
         if len(gn_dev_recent) > log_every + grad_accum + 8:
             gn_dev_recent.pop(0)
         opt.step()
-        tokens_seen += int(cfg["batch_size"]) * train_ctx * grad_accum
+        tokens_seen += batch_size * train_ctx * grad_accum
 
         if (step + 1) % log_every == 0 or step == 0:
             loss_acc = float(loss_acc_dev.item())
@@ -1179,7 +1209,7 @@ def main():
     train_tokens = int(len(train))
     epochs_seen = (tokens_seen / train_tokens) if train_tokens else None
     # 步时汇总：区间步时的中位数，抗首区间冷启动与偶发卡顿。
-    tokens_per_step = int(cfg["batch_size"]) * train_ctx * grad_accum
+    tokens_per_step = batch_size * train_ctx * grad_accum
     train_step_ms = (statistics.median(step_times_ms)
                      if step_times_ms else None)
     train_tokens_per_sec = (tokens_per_step * 1000.0 / train_step_ms
