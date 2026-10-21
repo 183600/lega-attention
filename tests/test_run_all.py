@@ -110,6 +110,18 @@ def test_data_report_protocol_declarations_block_training():
                                "paragraphs_cross_cut": False,
                                "verified_disjoint": True}}
     assert data_report_protocol_issues(safe) == []
+    # 声明“已核对互斥”但报告里仍记录实际重叠/缺失：矛盾证据必须阻断，
+    # 不能被 verified_disjoint=True 掩盖。
+    contradictory = {"split_protocol": {
+        "verified_disjoint": True,
+        "overlap_long_lines": {"train_val": {"exact_lines": 1,
+                                             "normalized_lines": 0}}}}
+    issues = data_report_protocol_issues(contradictory)
+    assert len(issues) == 1 and "矛盾" in issues[0], issues
+    missing_true = {"split_protocol": {
+        "verified_disjoint": True, "missing_files": ["test"]}}
+    issues = data_report_protocol_issues(missing_true)
+    assert len(issues) == 1 and "verified_disjoint=True" in issues[0], issues
     # 声明未验证却既不解释重叠也不解释缺失：不能静默放行。
     unexplained = {"split_protocol": {"verified_disjoint": False}}
     assert any("未记录" in msg

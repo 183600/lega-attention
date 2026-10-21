@@ -492,6 +492,22 @@ def test_decontaminate_catches_nfkc_compatibility_duplicates():
     print("  [ok] 去污染：NFKC 兼容字符变体同样被识别，val/test 不改写")
 
 
+def test_decontaminate_classifies_long_lines_after_normalization():
+    """NFKC 展开后的长行不能被原始长度误判为短行而逃过去污染。"""
+    # 20 个连字原始长度 20，NFKC 后变成 40 个字符；对照行是 40 个普通字符。
+    ligature_line = "ﬀ" * 20
+    plain_line = "f" * 40
+    train_only = "A train-only paragraph with enough characters to survive."
+    texts = {"train": f"{ligature_line}\n{train_only}",
+             "val": plain_line, "test": "A test-only paragraph with enough chars."}
+    out, stats = decontaminate_texts(texts, min_chars=40)
+    assert ligature_line not in out["train"]
+    assert train_only in out["train"]
+    assert stats["train_lines_dropped_as_normalized_duplicates_of_eval"] == 1
+    assert stats["train_val_overlap_normalized_short_lines"] == 0
+    print("  [ok] 去污染：长短行按归一化后长度分类，NFKC 展开重复不漏删")
+
+
 def test_decontaminate_removes_train_internal_duplicates_only():
     """train 内部重复样本会放大权重/记忆：保留首次出现，删除后续重复。"""
     dup = "A long training paragraph that appears more than once inside train."
@@ -653,6 +669,20 @@ def test_split_protocol_alerts_report_unverified_overlap_and_missing_files():
     assert "test" in alerts[0]["message"]
     # 声明已核对且无缺失时不产生额外告警。
     assert split_protocol_alerts({"verified_disjoint": True}) == []
+    # 声明“已验证互斥”但实际重叠计数非零：矛盾证据必须告警，不能只看声明。
+    contradictory = {
+        "verified_disjoint": True,
+        "overlap_long_lines": {"train_val": {"exact_lines": 1,
+                                             "normalized_lines": 0}},
+    }
+    alerts = split_protocol_alerts(contradictory)
+    assert [a["code"] for a in alerts] == ["split_overlap_long_lines"]
+    assert "verified_disjoint=True" in alerts[0]["message"]
+    assert "矛盾" in alerts[0]["message"]
+    missing_true = {"verified_disjoint": True, "missing_files": ["test"]}
+    alerts = split_protocol_alerts(missing_true)
+    assert [a["code"] for a in alerts] == ["split_protocol_unverified"]
+    assert "verified_disjoint=True" in alerts[0]["message"]
     print("  [ok] 划分协议：实际长行重叠/缺失文件不再静默躺在元数据里")
 
 
@@ -946,6 +976,21 @@ def test_verify_splits_disjoint_binds_claim_to_content():
         assert r["verified_disjoint"] is True
         assert r["overlap_short_lines"]["train_val"]["exact_lines"] == 1
         assert r["overlap_long_lines"]["train_val"]["exact_lines"] == 0
+        # NFKC 展开造成的长短差异不能让归一化重复逃过互斥核对。
+        with open(paths["train"], "w", encoding="utf-8") as f:
+            f.write("ﬀ" * 20 + "\ntrain unique plenty of characters here.\n")
+        with open(paths["val"], "w", encoding="utf-8") as f:
+            f.write("f" * 40 + "\nval unique plenty of characters here.\n")
+        with open(paths["test"], "w", encoding="utf-8") as f:
+            f.write("test unique plenty of characters here.\n")
+        r = verify_splits_disjoint(paths)
+        assert r["verified_disjoint"] is False
+        assert r["overlap_long_lines"]["train_val"]["normalized_lines"] == 1
+        # 只提供部分 split 时不能把“碰巧比较过的文件”当成三个 split 已验证。
+        partial = {k: paths[k] for k in ("train", "val")}
+        r = verify_splits_disjoint(partial)
+        assert r["verified_disjoint"] is False
+        assert "test" in r["missing_files"]
     print("  [ok] verify_splits_disjoint：声明与文本核对，短行不误报，"
           "缺失文件不伪装成通过")
 

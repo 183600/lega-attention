@@ -96,31 +96,35 @@ def data_report_protocol_issues(report) -> list:
         if verified is not None and not isinstance(verified, bool):
             add("报告 split_protocol.verified_disjoint="
                 f"{verified!r} 不是布尔值，无法确认划分互斥性")
-        elif verified is False:
-            overlaps = split_protocol.get("overlap_long_lines")
-            bad_overlaps = {}
-            if isinstance(overlaps, dict):
-                for pair, val in overlaps.items():
-                    if not isinstance(val, dict):
-                        continue
-                    exact = val.get("exact_lines") or 0
-                    norm = val.get("normalized_lines") or 0
-                    if exact or norm:
-                        bad_overlaps[str(pair)] = {
-                            "exact_lines": exact, "normalized_lines": norm}
-            if bad_overlaps:
-                add(f"报告 split_protocol 实测存在跨 split 共享长行 "
-                    f"{bad_overlaps}")
-            missing = split_protocol.get("missing_files")
-            if isinstance(missing, list) and missing:
-                add(f"报告 split_protocol 缺少 split 文件 {missing}："
-                    "无法核对划分互斥性，缺失 split 的指标不可比较")
-            if not bad_overlaps and not (isinstance(missing, list) and missing):
-                # verified_disjoint=False 本身就是“未验证通过”。没有重叠
-                # 明细也没有缺失文件时不能当成通过：报告被手改/上游漏写
-                # 证据，同样无法确认三个 split 互斥。
-                add("报告声明 split_protocol.verified_disjoint=False，但未记录"
-                    "跨 split 长行重叠或缺失文件：无法确认划分互斥性")
+        overlaps = split_protocol.get("overlap_long_lines")
+        bad_overlaps = {}
+        if isinstance(overlaps, dict):
+            for pair, val in overlaps.items():
+                if not isinstance(val, dict):
+                    continue
+                exact = val.get("exact_lines") or 0
+                norm = val.get("normalized_lines") or 0
+                if exact or norm:
+                    bad_overlaps[str(pair)] = {
+                        "exact_lines": exact, "normalized_lines": norm}
+        if bad_overlaps:
+            prefix = ("报告声明 split_protocol.verified_disjoint=True，但"
+                      if verified is True else "")
+            add(f"{prefix}实测存在跨 split 共享长行 {bad_overlaps}："
+                "声明与内容矛盾，不能按“已核对互斥”处理")
+        missing = split_protocol.get("missing_files")
+        if isinstance(missing, list) and missing:
+            prefix = ("报告声明 split_protocol.verified_disjoint=True，但"
+                      if verified is True else "")
+            add(f"{prefix}缺少 split 文件 {missing}："
+                "无法核对划分互斥性，缺失 split 的指标不可比较")
+        if (verified is False and not bad_overlaps
+                and not (isinstance(missing, list) and missing)):
+            # verified_disjoint=False 本身就是“未验证通过”。没有重叠
+            # 明细也没有缺失文件时不能当成通过：报告被手改/上游漏写
+            # 证据，同样无法确认三个 split 互斥。
+            add("报告声明 split_protocol.verified_disjoint=False，但未记录"
+                "跨 split 长行重叠或缺失文件：无法确认划分互斥性")
     return issues
 
 

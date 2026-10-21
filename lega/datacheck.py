@@ -190,7 +190,10 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             dn = d if sn == s else digest(sn)
             seen_valid.add(d)
             seen_valid_norm.add(dn)
-            if len(s) >= min_chars:
+            # 长短行按归一化后的内容长度分类：同一内容在不同 split 里
+            # 只因空白/NFKC 差异导致原始长度跨越阈值时，两侧必须落进同一
+            # 集合，否则重复既不会被去污染，也不会出现在短行诊断里。
+            if len(sn) >= min_chars:
                 n_long += 1
                 seen_long.add(d)
                 seen_long_norm.add(dn)
@@ -251,11 +254,11 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
             dn = d if sn == s else digest(sn)
             seen_valid_train.add(d)
             seen_valid_train_norm.add(dn)
-            if len(s) < min_chars:
+            if len(sn) < min_chars:
                 seen_short_train.add(d)
                 seen_short_train_norm.add(dn)
         drop = False
-        if s and len(s) >= min_chars:
+        if s and len(sn) >= min_chars:
             n_train += 1
             if d in eval_lines:
                 drop, dropped_exact = True, dropped_exact + 1
@@ -1315,32 +1318,49 @@ def split_protocol_alerts(split_protocol: dict) -> list:
                 f"实际文本存在跨 split 共享短行 {bad_short}"
                 f"（<{p.get('min_chars', '?')} 字符，多为标题/固定用语）；"
                 "未自动删除，但重复样本会削弱 held-out 独立性，须人工核查")
-    if p.get("verified_disjoint") is False:
-        overlaps = p.get("overlap_long_lines")
-        bad = {}
-        if isinstance(overlaps, dict):
-            for pair, val in overlaps.items():
-                if not isinstance(val, dict):
-                    continue
-                exact = val.get("exact_lines") or 0
-                norm = val.get("normalized_lines") or 0
-                if exact or norm:
-                    bad[str(pair)] = {"exact_lines": exact,
-                                      "normalized_lines": norm}
-        if bad:
+    verified = p.get("verified_disjoint")
+    overlaps = p.get("overlap_long_lines")
+    bad = {}
+    if isinstance(overlaps, dict):
+        for pair, val in overlaps.items():
+            if not isinstance(val, dict):
+                continue
+            exact = val.get("exact_lines") or 0
+            norm = val.get("normalized_lines") or 0
+            if exact or norm:
+                bad[str(pair)] = {"exact_lines": exact,
+                                  "normalized_lines": norm}
+    if bad:
+        if verified is True:
+            add("warning", "split_overlap_long_lines",
+                f"上游声明 verified_disjoint=True，但实际文本存在跨 split "
+                f"共享长行 {bad}：声明与内容矛盾，不能按“已核对互斥”处理；"
+                "去污染只能移除 train 侧副本，val/test 之间或清洗后仍重叠的"
+                "样本会削弱 held-out 独立性，须核查来源或重建划分")
+        else:
             add("warning", "split_overlap_long_lines",
                 f"上游划分声明并非互斥：实际文本存在跨 split 共享长行 {bad}；"
                 "去污染只能移除 train 侧副本，val/test 之间或清洗后仍重叠的"
                 "样本会削弱 held-out 独立性，须核查来源或重建划分")
-        missing = p.get("missing_files")
-        if isinstance(missing, list) and missing:
-            add("warning", "split_protocol_unverified",
-                f"缺少 split 文件 {missing}，无法核对“无共享样本”声明；"
-                "缺失 split 的评测指标不可与其他 split 直接比较")
+    missing = p.get("missing_files")
+    if isinstance(missing, list) and missing:
+        prefix = "上游声明 verified_disjoint=True，但" if verified is True else ""
+        add("warning", "split_protocol_unverified",
+            f"{prefix}缺少 split 文件 {missing}，无法核对“无共享样本”声明；"
+            "缺失 split 的评测指标不可与其他 split 直接比较")
+    if verified is False and not bad and not (
+            isinstance(missing, list) and missing):
+        # verified_disjoint=False 本身就是“未验证通过”。没有重叠明细也没有
+        # 缺失文件时不能当成通过：报告被手改/上游漏写证据，同样无法确认
+        # 三个 split 互斥。
+        add("warning", "split_protocol_unverified",
+            "上游声明 verified_disjoint=False，但未记录跨 split 长行重叠或"
+            "缺失文件：无法确认划分互斥性")
     return alerts
 
 
-def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
+def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40,
+                           required_splits=("train", "val", "test")) -> dict:
     """读回已写入的 train/val/test.txt，核对跨 split 无共享长行。
 
     split_protocol 里 "document_disjoint(no_shuffle)" / "无共享样本" 是上游
@@ -1354,19 +1374,32 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
     必须显式列入 missing_files 并令 verified_disjoint=False，否则报告会把
     "没有可核对的文件"伪装成"核对通过"。
 
-    短行（< min_chars）不计入 verified_disjoint（标题/固定用语的重复是正常
-    现象），但会在 overlap_short_lines 中单独计数，避免短样本跨 split 复制
-    成为既不删除也不报告的盲区。
+    短行（按归一化内容长度 < min_chars）不计入 verified_disjoint（标题/固定
+    用语的重复是正常现象），但会在 overlap_short_lines 中单独计数，避免短
+    样本跨 split 复制成为既不删除也不报告的盲区。
+
+    required_splits 默认要求 train/val/test 三个文件都存在；只有显式声明
+    “本数据集没有 test（回退 val）”的调用方（如 dummy 生成器）才可传子集。
     """
     # 阈值本身必须是严格整数：min_chars=True 会让所有行都变成“短行”，
     # 长行重叠被跳过而 verified_disjoint 仍可能为 True，等于伪造核对通过。
     min_chars = strict_int(min_chars, "min_chars")
     if min_chars < 0:
         raise ValueError(f"min_chars 必须 >= 0，收到 {min_chars!r}")
+    paths = txt_paths if isinstance(txt_paths, dict) else {}
+    if isinstance(required_splits, str):
+        raise ValueError("required_splits 需要字符串序列，不能是单个字符串")
+    try:
+        required = tuple(str(x) for x in required_splits)
+    except TypeError as e:
+        raise ValueError(
+            f"required_splits 需要字符串序列，收到 {required_splits!r}") from e
+    if not required:
+        raise ValueError("required_splits 不能为空")
+    missing = []
     sets = {}
     short_sets = {}
-    missing = []
-    for split, path in (txt_paths if isinstance(txt_paths, dict) else {}).items():
+    for split, path in paths.items():
         if not path or not os.path.exists(path):
             missing.append(split)
             continue
@@ -1377,14 +1410,21 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
                 s = line.strip()
                 if not s:
                     continue
-                if len(s) < min_chars:
+                sn = _normalize_line(s)
+                # 与 decontaminate_texts 同口径：按归一化内容长度分类，
+                # 避免同一行因空白/NFKC 差异在两侧落入 long/short 不同集合。
+                if len(sn) < min_chars:
                     short.add(_line_digest(s))
-                    short_norm.add(_line_digest(_normalize_line(s)))
+                    short_norm.add(_line_digest(sn))
                     continue
                 exact.add(_line_digest(s))
-                norm.add(_line_digest(_normalize_line(s)))
+                norm.add(_line_digest(sn))
         sets[split] = (exact, norm)
         short_sets[split] = (short, short_norm)
+    # 必需 split 缺失时不能因“只比较了碰巧提供的文件”而声称已验证。
+    for split in required:
+        if split not in paths and split not in missing:
+            missing.append(split)
     overlaps = {}
     overlaps_short = {}
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
