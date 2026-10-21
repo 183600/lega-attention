@@ -348,6 +348,21 @@ def pearson(x, y):
     return r if np.isfinite(r) else None
 
 
+def _finite_observation(value):
+    """统计观测值 → 有限 float；None/bool/非数值/NaN/Inf → None。
+
+    bool 是 int 子类，float(True)=1.0；若当作观测，外部 JSON 的
+    ``"em": true`` 或 ``"seed": true`` 会伪造出 1.0 的均值/配对差。
+    """
+    if value is None or isinstance(value, (bool, np.bool_)):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def mean_std(values):
     """样本均值与样本标准差（ddof=1，无偏）。n<2 时 std 为 None。
 
@@ -356,13 +371,8 @@ def mean_std(values):
     """
     vals = []
     for v in values:
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(f):
+        f = _finite_observation(v)
+        if f is not None:
             vals.append(f)
     a = np.asarray(vals, dtype=np.float64)
     if a.size == 0:
@@ -460,7 +470,8 @@ def _paired_diffs(a, b) -> np.ndarray:
 
     配对按位置严格一一对应：两侧长度必须一致，None 也必须成对出现，否则抛
     ValueError（None 位置错开意味着种子集合没有对齐，静默过滤会把不同种子
-    的观测配到一起）。任一观测非有限（NaN/Inf）的配对整体剔除。
+    的观测配到一起）。任一观测非有限（NaN/Inf）或为 bool 的配对整体剔除：
+    bool 不是可比较的数值观测（float(True)=1.0 会伪造配对差）。
     """
     a_list, b_list = list(a), list(b)
     if len(a_list) != len(b_list):
@@ -469,10 +480,8 @@ def _paired_diffs(a, b) -> np.ndarray:
     for x, y in zip(a_list, b_list):
         if (x is None) != (y is None):
             raise ValueError("配对样本 None 位置不一致，无法按位置一一对应")
-        if x is None or y is None:
-            continue
-        xf, yf = float(x), float(y)
-        if not (math.isfinite(xf) and math.isfinite(yf)):
+        xf, yf = _finite_observation(x), _finite_observation(y)
+        if xf is None or yf is None:
             continue
         diffs.append(xf - yf)
     return np.asarray(diffs, dtype=np.float64)
@@ -574,18 +583,13 @@ def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
                       seed: int = 0):
     """样本均值的百分位 bootstrap 置信区间（配对差/任意标量观测通用）。
 
-    None/非有限值剔除后 n<2 时返回 None（单点无区间可言）。
+    None/bool/非有限值剔除后 n<2 时返回 None（单点无区间可言）。
     固定随机种子，同一输入恒定复现。返回 (lo, hi)。
     """
     vals = []
     for v in values:
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(f):
+        f = _finite_observation(v)
+        if f is not None:
             vals.append(f)
     arr = np.asarray(vals, dtype=np.float64)
     if arr.size < 2:

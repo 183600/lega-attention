@@ -298,6 +298,16 @@ def test_mean_std():
     print("  [ok] mean_std（ddof=1、n=1、空输入、NaN 剔除）")
 
 
+def test_bool_not_counted_as_numeric_observation():
+    """bool 不是统计观测：True/False 不能被当成 1.0/0.0 参与均值或配对差。"""
+    assert mean_std([True, np.bool_(False), 2.0]) == (2.0, None)
+    assert mean_std([True, False]) == (None, None)
+    assert bootstrap_mean_ci([True, False, 5.0]) is None
+    r = paired_t_test([True, 2.0, 3.0], [1.0, 1.0, 1.0])
+    assert r["n"] == 2 and abs(r["mean_diff"] - 1.5) < 1e-12
+    print("  [ok] bool 不计入均值/bootstrap/配对检验")
+
+
 def test_paired_t_matches_t_table():
     # Student-t 临界值表（双侧）：df=4, t=2.776445 -> p=0.05；df=3, t=3.182446 -> p=0.05
     assert abs(student_t_two_sided_p(2.776445, 4) - 0.05) < 1e-6
