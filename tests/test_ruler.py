@@ -230,7 +230,11 @@ def test_run_ruler_rejects_fractional_and_bool_params():
                      ("max_new", 6.5), ("fwe_max_new", 9.5),
                      ("vt_chains", 4.5), ("vt_chains", True),
                      ("vt_depth", 3.5), ("gen_batch", 2.5),
-                     ("n_samples", 0)):
+                     ("n_samples", 0), ("ctx_lens", [0]),
+                     ("ctx_lens", [-1]), ("ctx_lens", []),
+                     ("max_new", 0), ("fwe_max_new", -1),
+                     ("vt_chains", 0), ("vt_depth", 0),
+                     ("gen_batch", 0)):
         kwargs = dict(base, **{key: bad})
         try:
             run_ruler(model, tok, "cpu", **kwargs)

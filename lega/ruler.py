@@ -410,6 +410,15 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     gen_batch = strict_int(gen_batch, "gen_batch")
     if n_samples < 1:
         raise ValueError(f"n_samples 必须 >= 1，收到 {n_samples}")
+    if not ctx_lens:
+        raise ValueError("ctx_lens 不能为空")
+    if any(c < 1 for c in ctx_lens):
+        raise ValueError(f"ctx_lens 必须都是 >= 1 的整数，收到 {ctx_lens}")
+    for name, value in (("max_new", max_new), ("fwe_max_new", fwe_max_new),
+                        ("vt_chains", vt_chains), ("vt_depth", vt_depth),
+                        ("gen_batch", gen_batch)):
+        if value < 1:
+            raise ValueError(f"{name} 必须 >= 1，收到 {value}")
     results: Dict[str, Dict] = {}
     skipped: List[str] = []
     badcases: List[Dict] = []
@@ -753,7 +762,8 @@ def main():
         return strict_int(rl[key], f"ruler.{key}")
 
     if args.ctx_lens:
-        ctx_lens = [int(x) for x in args.ctx_lens.split(",")]
+        ctx_lens = [strict_int(x, "--ctx_lens")
+                    for x in args.ctx_lens.split(",")]
     else:
         raw_ctx_lens = rl.get("ctx_lens", [min(256, model.block_size)])
         if not isinstance(raw_ctx_lens, (list, tuple)):
