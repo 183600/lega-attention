@@ -160,6 +160,30 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                        and r.get("config_sha256")})
         if len(shas) > 1:
             run_issues.append("config_sha256_rewritten")
+        # started/completed 声明的 variants×seeds 必须一致：否则可以用
+        # “开始时跑 2 个种子、完成时只声明 1 个”的方式让覆盖核对自洽，
+        # 把少跑的种子洗成合法实验。重复声明同样会重复计权。
+        declared_scopes = []
+        for _, r in items:
+            dv, ds = r.get("variants"), r.get("seeds")
+            if dv is None and ds is None:
+                continue
+            if not (isinstance(dv, list) and isinstance(ds, list)):
+                run_issues.append("scope_malformed")
+                continue
+            try:
+                v_norm = frozenset(str(x) for x in dv)
+                s_norm = frozenset(_ledger_seed(x) for x in ds)
+            except (TypeError, ValueError, OverflowError):
+                run_issues.append("scope_unparseable")
+                continue
+            if len(v_norm) != len(dv):
+                run_issues.append("declared_variants_duplicate")
+            if len(s_norm) != len(ds):
+                run_issues.append("declared_seeds_duplicate")
+            declared_scopes.append((v_norm, s_norm))
+        if len(set(declared_scopes)) > 1:
+            run_issues.append("scope_rewritten")
         # completed 的 runs 必须完整覆盖 variants×seeds，且不得重复：
         # 少跑 seed 会让“N 个种子”的结论虚胖，重复条目会重复计权。
         for _, r in items:

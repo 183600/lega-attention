@@ -337,6 +337,36 @@ def test_verify_ledger_completed_coverage_and_config_identity():
     print("  [ok] verify_ledger：completed 覆盖完整性 + 配置哈希改写")
 
 
+def test_verify_ledger_rejects_scope_rewrite_and_duplicate_declaration():
+    """完成记录不能改写 started 的 variants×seeds，重复声明也不能静默去重。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        append_record(path, {"run_id": "shrink", "status": "started",
+                             "variants": ["lega"], "seeds": [1, 2]})
+        append_record(path, {"run_id": "shrink", "status": "completed",
+                             "variants": ["lega"], "seeds": [1],
+                             "runs": [{"variant": "lega", "seed": 1}]})
+        append_record(path, {"run_id": "dup-seed", "status": "started",
+                             "variants": ["lega"], "seeds": [1, 1]})
+        append_record(path, {"run_id": "dup-seed", "status": "completed",
+                             "variants": ["lega"], "seeds": [1, 1],
+                             "runs": [{"variant": "lega", "seed": 1}]})
+        append_record(path, {"run_id": "dup-var", "status": "started",
+                             "variants": ["lega", "lega"], "seeds": [1]})
+        append_record(path, {"run_id": "dup-var", "status": "completed",
+                             "variants": ["lega", "lega"], "seeds": [1],
+                             "runs": [{"variant": "lega", "seed": 1}]})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        assert "scope_rewritten" in by_id["shrink"]["issues"]
+        assert "declared_seeds_duplicate" in by_id["dup-seed"]["issues"]
+        assert "declared_variants_duplicate" in by_id["dup-var"]["issues"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：scope 改写/重复声明可发现")
+
+
 def test_verify_ledger_rejects_malformed_run_coverage_fields():
     """声明了 variants/seeds 却缺 runs（或 runs 非列表）时必须报畸形，不能静默跳过。"""
     tmp = tempfile.mkdtemp()
