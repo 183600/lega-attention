@@ -15,6 +15,7 @@
 """
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -1035,6 +1036,56 @@ def test_prepare_bins_cache_invalidated_on_source_or_report_change():
             rep = json.load(f)
         assert "protocol" in rep and "alerts" in rep
     print("  [ok] bin 缓存完整性：源文本/诊断报告哈希变化即失效重建")
+
+
+def test_prepare_bins_detects_same_size_bin_tampering():
+    """同尺寸替换 bin 必须被内容哈希识破：缓存失效重建，load_bin 拒绝读取。"""
+    from lega.data import _sha256_file
+    with tempfile.TemporaryDirectory() as d:
+        _write_min_splits(d)
+        meta1 = prepare_bins(d, kind="char", force=True)
+        assert set(meta1["bin_sha256"]) == {"train", "val", "test"}
+        assert (meta1["bin_sha256"]["train"]
+                == _sha256_file(os.path.join(d, "train.bin")))
+        # 同尺寸篡改 train.bin 的首个 token（uint16）
+        with open(os.path.join(d, "train.bin"), "r+b") as f:
+            first = f.read(2)
+            f.seek(0)
+            f.write(bytes([first[0] ^ 0xFF, first[1]]))
+        tampered = _sha256_file(os.path.join(d, "train.bin"))
+        assert tampered != meta1["bin_sha256"]["train"]
+        try:
+            load_bin(d, "train")
+            raise AssertionError("被篡改的 bin 不应通过 load_bin 哈希核对")
+        except ValueError as e:
+            assert "哈希不一致" in str(e)
+        # 有源 txt：缓存失效并按源文本重建，token 流恢复
+        meta2 = prepare_bins(d, kind="char")
+        assert meta2["bin_sha256"]["train"] == meta1["bin_sha256"]["train"]
+        assert load_bin(d, "train").size == meta1["train_tokens"]
+        assert _sha256_file(os.path.join(d, "train.bin")) \
+            == meta1["bin_sha256"]["train"]
+        # 纯 bin 目录（无源 txt）：篡改后不能静默命中缓存，必须报错
+        bin_only = os.path.join(d, "bin_only")
+        os.makedirs(bin_only)
+        for name in ("train.bin", "val.bin", "test.bin", "meta.json",
+                     "data_report.json"):
+            shutil.move(os.path.join(d, name), os.path.join(bin_only, name))
+        with open(os.path.join(bin_only, "train.bin"), "r+b") as f:
+            first = f.read(2)
+            f.seek(0)
+            f.write(bytes([first[0] ^ 0xFF, first[1]]))
+        try:
+            load_bin(bin_only, "train")
+            raise AssertionError("纯 bin 目录的篡改 bin 不应通过 load_bin")
+        except ValueError as e:
+            assert "哈希不一致" in str(e)
+        try:
+            prepare_bins(bin_only, kind="char")
+            raise AssertionError("纯 bin 目录的篡改缓存不应静默命中")
+        except FileNotFoundError:
+            pass
+    print("  [ok] bin 缓存完整性：同尺寸替换被内容哈希识破（含纯 bin 目录）")
 
 
 def test_prepare_bins_bins_only_cache_hit_without_sources():

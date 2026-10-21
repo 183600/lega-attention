@@ -233,6 +233,58 @@ def data_source_hash_issue(data_dir: str):
     return None
 
 
+def data_bin_hash_issue(data_dir: str):
+    """检查 bin 内容是否仍是 meta.json 记录的那一份。
+
+    只核对 token 数量无法发现“同尺寸替换 train.bin（或把 test.bin 复制成
+    train.bin）”：那样真正进入训练/评测的 token 流与 data_report.json 的
+    去污染/重叠/漂移诊断脱节，最坏情况是 test 内容混入训练。prepare_bins
+    命中缓存与 load_bin 都会核对；预检再独立核一遍，保证绕过 prepare_bins
+    的训练入口也无法静默使用被替换的 bin。
+    """
+    path = os.path.join(data_dir, "meta.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return "meta.json 不可解析，无法核对 bin 内容哈希"
+    if not isinstance(meta, dict):
+        return "meta.json 顶层不是对象，无法核对 bin 内容哈希"
+    recorded = meta.get("bin_sha256")
+    has_bins = any(os.path.exists(os.path.join(data_dir, f"{s}.bin"))
+                   for s in ("train", "val", "test"))
+    if recorded is None:
+        has_sources = any(os.path.exists(os.path.join(data_dir, f"{s}.txt"))
+                          for s in ("train", "val", "test"))
+        if has_bins and has_sources:
+            return ("meta.json 未记录 bin 内容哈希：无法确认 bin 未被同尺寸"
+                    "替换，须重建数据缓存")
+        return None
+    if not isinstance(recorded, dict):
+        return "meta.json 的 bin_sha256 不是对象，无法核对 bin 内容哈希"
+    for split in ("train", "val", "test"):
+        bin_path = os.path.join(data_dir, f"{split}.bin")
+        expected = recorded.get(split)
+        if not expected:
+            if has_bins and os.path.exists(bin_path):
+                return (f"{split}.bin 存在但 meta 未记录其哈希：bin 可能是"
+                        "旧版/不同流程产物，须重建")
+            continue
+        if not os.path.exists(bin_path):
+            return f"meta 记录了 {split}.bin 哈希但文件缺失：缓存不完整，须重建"
+        try:
+            actual = sha256_file(bin_path)
+        except OSError as e:
+            return f"无法读取 {split}.bin 核对内容哈希: {e}"
+        if actual != expected:
+            return (f"{split}.bin 内容与 meta.json 记录的哈希不一致"
+                    "（bin 被替换/篡改/损坏）：token 流与防泄漏诊断已脱节，"
+                    "须重建数据缓存")
+    return None
+
+
 def data_cache_schema_issue(data_dir: str):
     """检查 bin 缓存是否由当前数据管线生成、词表拟合来源是否可信。"""
     path = os.path.join(data_dir, "meta.json")
@@ -275,6 +327,7 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     binding_issue = data_report_binding_issue(data_dir)
     schema_issue = data_cache_schema_issue(data_dir)
     source_hash_issue = data_source_hash_issue(data_dir)
+    bin_hash_issue = data_bin_hash_issue(data_dir)
     critical = list(critical_split_alerts(report))
     for issue in data_report_protocol_issues(report):
         critical.append({"level": "warning", "code": "data_report_protocol",
@@ -288,11 +341,15 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     if source_hash_issue:
         critical.append({"level": "warning", "code": "data_source_hash",
                          "message": source_hash_issue})
+    if bin_hash_issue:
+        critical.append({"level": "warning", "code": "data_bin_hash",
+                         "message": bin_hash_issue})
     info = {
         "report_present": report is not None,
         "binding_issue": binding_issue,
         "cache_schema_issue": schema_issue,
         "source_hash_issue": source_hash_issue,
+        "bin_hash_issue": bin_hash_issue,
         "critical_violations": critical,
         "override": bool(allow_override),
     }

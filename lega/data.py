@@ -35,7 +35,9 @@ _GPT2_CACHE = {}
 # bin 缓存协议版本：清洗/去污染/词表拟合逻辑变更时必须 +1，
 # 旧缓存（含未记录版本的第一代缓存）会被强制重建，
 # 否则会用旧协议产出的 bin 静默训练，防泄漏自检报告也与实际数据不符。
-CACHE_SCHEMA = 5
+# v6：meta 记录 train/val/test.bin 的内容哈希，缓存命中与 load_bin 均核对，
+# 防止同尺寸替换 bin 后绕过源文本/报告哈希核对。
+CACHE_SCHEMA = 6
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -49,9 +51,33 @@ def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def _bin_hashes_ok(data_dir: str, meta: dict):
+    """核对 meta 记录的 bin 内容哈希：True/False/None（旧缓存未记录）。
+
+    只核对大小无法发现“同尺寸替换 train.bin/test.bin”：那样 token 流与
+    data_report.json 的去污染/重叠/分布诊断不再对应，训练/评测会静默
+    使用被替换的数据。
+    """
+    recorded = meta.get("bin_sha256")
+    if recorded is None:
+        return None
+    if not isinstance(recorded, dict):
+        return False
+    for split in ("train", "val", "test"):
+        path = os.path.join(data_dir, f"{split}.bin")
+        expected = recorded.get(split)
+        if expected is None:
+            if os.path.exists(path):
+                return False
+            continue
+        if not os.path.exists(path) or _sha256_file(path) != expected:
+            return False
+    return True
+
+
 def _cache_integrity(data_dir: str, meta: dict, report_path: str,
                      report_enabled: bool):
-    """缓存完整性核对：源文本哈希 + 报告哈希 + 缓存协议版本。
+    """缓存完整性核对：源文本哈希 + 报告哈希 + bin 内容哈希 + 缓存协议版本。
 
     返回 (ok, issue, has_sources)。缓存命中只核对大小无法发现“txt 改了但
     bin 没重建”：那样训练集张冠李戴，data_report.json 里的去污染/重叠/
@@ -60,6 +86,11 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str,
     """
     has_sources = any(os.path.exists(os.path.join(data_dir, f"{s}.txt"))
                       for s in ("train", "val", "test"))
+    bin_ok = _bin_hashes_ok(data_dir, meta)
+    if bin_ok is False:
+        return (False, "bin 内容与构建时记录的哈希不一致"
+                       "（被替换/篡改/损坏），重建以恢复与源文本一致的 token 流",
+                False)
     if not has_sources:
         # 不可判定放行，并把 no_sources 如实返回给调用方（用于提示与缓存判定）
         return True, None, True
@@ -70,6 +101,8 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str,
     if cache_schema != CACHE_SCHEMA:
         return (False, "缓存由旧版数据管线生成（无版本/源哈希记录），"
                        "重建以应用最新清洗与去污染协议", False)
+    if bin_ok is None:
+        return False, "缓存未记录 bin 内容哈希，无法确认 bin 未被替换", False
     recorded = meta.get("source_sha256")
     if not isinstance(recorded, dict):
         return False, "旧缓存未记录源文本哈希，无法确认 bin 与当前 txt 一致", False
@@ -442,6 +475,13 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     train_tmp, val_tmp, meta_tmp = train_bin + ".tmp", val_bin + ".tmp", meta_path + ".tmp"
     tr.tofile(train_tmp)
     va.tofile(val_tmp)
+    # bin 内容哈希：缓存命中时据此确认二进制流本身未被同尺寸替换/篡改，
+    # 而不是只看 token 数量。
+    bin_sha256 = {"train": _sha256_file(train_tmp), "val": _sha256_file(val_tmp)}
+    if te is not None:
+        test_tmp = test_bin + ".tmp"
+        te.tofile(test_tmp)
+        bin_sha256["test"] = _sha256_file(test_tmp)
     # 源文本指纹：缓存命中时据此确认 bin 确实由当前 train/val/test.txt 构建，
     # 防止“txt 改了但 bins 没重建”的静默过期（防泄漏报告也会随之失真）。
     source_sha256 = {}
@@ -456,10 +496,9 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             "text_sanitized": True,
             "cache_schema": int(CACHE_SCHEMA),
             "source_sha256": source_sha256,
+            "bin_sha256": bin_sha256,
             "train_tokens": int(tr.size), "val_tokens": int(va.size)}
     if te is not None:
-        test_tmp = test_bin + ".tmp"
-        te.tofile(test_tmp)
         meta["test_tokens"] = int(te.size)
     if tok.name == "char":
         meta["itos"] = tok.itos
@@ -539,6 +578,17 @@ def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
     path = os.path.join(data_dir, f"{split}.bin")
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         raise FileNotFoundError(f"{path} 不存在或为空，请先运行 prepare_bins / prepare_data.py")
+    meta_path = os.path.join(data_dir, "meta.json")
+    if os.path.exists(meta_path):
+        meta = load_meta(data_dir)
+        recorded = meta.get("bin_sha256")
+        # 纯 bin 目录（旧格式 meta 无内容哈希）按不可判定放行；记录过哈希
+        # 就必须一致，否则 bin 已被同尺寸替换/篡改，诊断报告不再对应。
+        if isinstance(recorded, dict) and split in recorded:
+            if _sha256_file(path) != recorded[split]:
+                raise ValueError(
+                    f"{path} 内容与 meta.json 记录的 bin 哈希不一致："
+                    "bin 被替换/篡改/损坏，请重新运行 prepare_bins 重建")
     return np.memmap(path, dtype=np.uint16, mode="r")
 
 

@@ -224,6 +224,48 @@ def test_data_protocol_preflight_detects_stale_source_hash():
     print("  [ok] 源文本哈希：txt 改动/新增 test 而未重建 bin 时阻断训练")
 
 
+def test_data_protocol_preflight_detects_replaced_bin():
+    """同尺寸替换 bin 必须在训练前被内容哈希阻断（不只看 token 数量）。"""
+    from lega.preflight import data_bin_hash_issue
+    with tempfile.TemporaryDirectory() as d:
+        txt = os.path.join(d, "train.txt")
+        with open(txt, "w", encoding="utf-8") as f:
+            f.write("x" * 100 + "\n")
+        with open(txt, "rb") as f:
+            txt_digest = hashlib.sha256(f.read()).hexdigest()
+        train_bin = os.path.join(d, "train.bin")
+        with open(train_bin, "wb") as f:
+            f.write(b"\x01\x00" * 50)
+        with open(train_bin, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        meta = os.path.join(d, "meta.json")
+        _write_json(meta, {
+            "cache_schema": CACHE_SCHEMA, "fit_on": "train",
+            "source_sha256": {"train": txt_digest},
+            "bin_sha256": {"train": digest}})
+        assert data_bin_hash_issue(d) is None
+        with open(train_bin, "r+b") as f:
+            f.write(b"\x02\x00")
+        issue = data_bin_hash_issue(d)
+        assert issue and "train.bin" in issue and "不一致" in issue
+        try:
+            data_protocol_preflight(d)
+            raise AssertionError("被替换的 bin 应阻断训练")
+        except SystemExit as e:
+            assert "data_bin_hash" in str(e)
+        info = data_protocol_preflight(d, allow_override=True)
+        assert info["bin_hash_issue"] == issue
+        assert any(a["code"] == "data_bin_hash"
+                   for a in info["critical_violations"])
+        # 有源文本却完全没有 bin 哈希记录：不可判定，同样阻断
+        _write_json(meta, {
+            "cache_schema": CACHE_SCHEMA, "fit_on": "train",
+            "source_sha256": {"train": txt_digest}})
+        issue = data_bin_hash_issue(d)
+        assert issue and "未记录" in issue
+    print("  [ok] bin 内容哈希：同尺寸替换/未记录时阻断训练")
+
+
 def test_data_protocol_preflight_blocks_stale_cache_schema():
     """旧版清洗/去污染管线生成的 bin 不得静默进入训练。"""
     with tempfile.TemporaryDirectory() as d:
