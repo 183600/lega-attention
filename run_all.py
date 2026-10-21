@@ -3593,6 +3593,14 @@ def build_summary(results_dir: str, audit: dict = None,
                       f"文档边界回退={sp.get('fallback_char_cut', '-')}"
                       + ("（⚠ 字符切分可能让同一文档跨 split）"
                          if sp.get("fallback_char_cut") else ""))
+            # 声明与文本核对结果：document_disjoint 是上游声明，verified_disjoint
+            # 是对实际写出的三份文本做跨 split 长行核对后的结论。
+            if "verified_disjoint" in sp:
+                vd = sp.get("verified_disjoint")
+                md.append(f"- 划分声明核对：无共享长行={vd}"
+                          + ("" if vd else
+                             "（⚠ 实际文本存在跨 split 共享长行，声明被证伪，"
+                             "见 overlap_long_lines）"))
             group = sp.get("group_unit")
             cross = sp.get("documents_cross_cut")
             if group or cross is not None:

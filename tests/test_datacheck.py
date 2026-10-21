@@ -27,6 +27,7 @@ from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             leakage_alerts, read_test_access_log, sanitize_text,
+                            short_ngram_overlap, short_overlap_alerts,
                             split_protocol_alerts, temporal_split_text,
                             text_length_stats, token_stream_stats,
                             unknown_char_rate)
@@ -1007,3 +1008,27 @@ def test_leakage_alerts_tolerates_malformed_nested_sections():
         thresholds=[1])
     assert out == []
     print("  [ok] leakage_alerts：畸形嵌套诊断不崩溃")
+
+
+def test_short_ngram_overlap_and_alerts_are_diagnostic_only():
+    """<64 token 的整句复用要被短 n 筛查抓到，但只告警、不进入硬闸门。"""
+    rng = np.random.default_rng(1)
+    # 一段 32 长的短句在 train 与 test 中逐 token 复制（64-gram 测不到）
+    shared = rng.integers(0, 1000, size=32).astype(np.uint16)
+    train = np.concatenate(
+        [rng.integers(0, 1000, size=4000).astype(np.uint16), shared])
+    test = np.concatenate(
+        [rng.integers(0, 1000, size=3000).astype(np.uint16), shared])
+    res = short_ngram_overlap(train, test, n=32, n_samples=20000, seed=0)
+    assert res["windows_found_in_train_sample"] >= 1
+    assert res["diagnostic_only"] is True
+    alerts = short_overlap_alerts({"train_test": res})
+    assert alerts and alerts[0]["code"] == "ngram_overlap_short_train_test"
+    assert alerts[0]["level"] == "warning"
+    # 短 n-gram 码不得进入训练前硬闸门（否则常见搭配会阻断训练）
+    assert critical_split_alerts({"alerts": alerts}) == []
+    # rate=0 / 缺失 / 畸形 不产生告警
+    assert short_overlap_alerts({"train_test": {"overlap_rate": 0}}) == []
+    assert short_overlap_alerts({"train_test": {"overlap_rate": "bad"}}) == []
+    assert short_overlap_alerts(None) == []
+    print("  [ok] 短 n-gram 重叠：检出整句复用且仅告警、不进硬闸门")

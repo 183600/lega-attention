@@ -26,6 +26,7 @@ from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
                         decontaminate_documents, decontaminate_texts,
                         distribution_shift, ngram_overlap,
                         read_test_access_log, sanitize_text,
+                        short_ngram_overlap,
                         summarize_test_access, text_length_stats,
                         token_stream_stats, unknown_char_rate)
 
@@ -364,12 +365,17 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     stream_stats = {name: token_stream_stats(arr, tok.n_vocab, name)
                     for name, arr in streams.items()}
     contamination = {"train_val": ngram_overlap(tr, va)}
+    # 短 n-gram 筛查：64-gram 会漏掉“整句/整段复用但 <64 token”的模板化泄露；
+    # 短 n 更易命中自然搭配，因此只作诊断告警（见 leakage_alerts）。
+    contamination_short = {"train_val": short_ngram_overlap(tr, va)}
     distribution = {"val_vs_train": distribution_shift(tr, va, tok.n_vocab)}
     if te is not None:
         contamination["train_test"] = ngram_overlap(tr, te)
         # eval 两侧也要互查：val 用于选 checkpoint，test 用于最终报告；
         # 二者若有共享片段，val 选择会部分“预演”test，test 不再独立。
         contamination["val_test"] = ngram_overlap(va, te)
+        contamination_short["train_test"] = short_ngram_overlap(tr, te)
+        contamination_short["val_test"] = short_ngram_overlap(va, te)
         distribution["test_vs_train"] = distribution_shift(tr, te, tok.n_vocab)
         distribution["test_vs_val"] = distribution_shift(va, te, tok.n_vocab)
     tokenizer_report = {
@@ -386,6 +392,13 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         contamination={k: v for k, v in contamination.items()},
         distribution={k: v for k, v in distribution.items()},
         text_stats=text_stats, extra=extra_report)
+    # 短 n-gram 重叠作为诊断指标随报告落盘（告警在下面产生，不进入训练前
+    # 硬闸门）：用于抓 64-gram 漏掉的短模板化复用。
+    data_report["contamination_short_ngram"] = contamination_short
+    from .datacheck import short_overlap_alerts
+    _salerts = short_overlap_alerts(contamination_short)
+    if _salerts:
+        data_report["alerts"] = list(data_report.get("alerts") or []) + _salerts
     # 访问账本只统计“评测级”test 读取；但 prepare_bins 为了编码 test.bin 与
     # 计算跨 split 重叠/分布漂移，本身会在建模前读一次 test（模型无关的诊断
     # 读取，不用于任何选择）。显式记录，避免账本 0 次被误读成“test 从未被碰”。

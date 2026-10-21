@@ -588,6 +588,20 @@ def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 20000,
             "screening": True}
 
 
+# 短 n-gram 筛查的默认长度：64-gram（ngram_overlap）是“必须拦截”的强证据，
+# 但短于 64 token 的复制（整句/段落级复用，尤其模板化文本）会完全漏检。
+# 短 n 更易被自然语言常见搭配命中，因此只做**告警**、不参与硬闸门。
+SHORT_NGRAM_N = 32
+
+
+def short_ngram_overlap(train_ids, eval_ids, n: int = SHORT_NGRAM_N,
+                        n_samples: int = 20000, seed: int = 0) -> dict:
+    """短 n-gram 重叠诊断（默认 n=32，告警用）。与 ngram_overlap 同口径。"""
+    res = ngram_overlap(train_ids, eval_ids, n=n, n_samples=n_samples, seed=seed)
+    res["diagnostic_only"] = True
+    return res
+
+
 def distribution_shift(train_ids, eval_ids, vocab_size: int,
                        max_samples: int = None, seed: int = 0) -> dict:
     """train 与 eval 的一元 token 分布漂移（默认全量精确计数）。
@@ -1078,6 +1092,32 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             f"（标题 {p.get('n_headings', '?')} 个、切点类型 "
             f"{p.get('cut_kinds', '?')}），违反“群组整体落在同一侧”，"
             "须调整划分比例或更换可整体划分的语料")
+    return alerts
+
+
+def short_overlap_alerts(short_contamination: dict) -> list:
+    """短 n-gram 重叠的告警（只警告、不进入硬闸门）。
+
+    短 n（32）比 64-gram 更易被自然语言常见搭配命中，>0 不必然是泄露，但
+    模板化文本的整句复用会在这里暴露；提示人工核查而非阻断训练。
+    """
+    alerts = []
+    c = short_contamination if isinstance(short_contamination, dict) else {}
+    for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
+                       ("val_test", "val/test")):
+        d = c.get(key)
+        d = d if isinstance(d, dict) else {}
+        try:
+            rate = float(d.get("overlap_rate"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not np.isfinite(rate) or rate <= 0:
+            continue
+        alerts.append({
+            "level": "warning", "code": f"ngram_overlap_short_{key}",
+            "message": (f"{label} 采样 {d.get('n', '?')}-gram 重叠率 "
+                        f"{rate:.4%}（<64 token 的整句/模板复用；短 n 易有"
+                        "自然搭配假阳性，须人工核查而非自动阻断）")})
     return alerts
 
 
