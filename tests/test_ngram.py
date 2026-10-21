@@ -170,6 +170,35 @@ def test_evaluate_end_to_end_and_alpha_selected_on_val():
     print("  [ok] evaluate（端到端、α 在 val 选优、候选网格完整）")
 
 
+def test_evaluate_non_val_split_still_selects_alpha_on_val():
+    """split='train' 只改变报告集，α/λ 仍必须在 val 上选择。
+
+    旧实现把 sel_ids 设为 eval_ids，train 报告会静默用 train 自选参数，
+    却仍声明 alpha_selected_on='val'。本数据上 train 自选（bigram α=0.01、
+    λ=1.0）与 val 自选（α=1.0、λ=0.5）不同，可直接区分两种口径。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        train = [3, 2, 2, 1, 1, 0, 0, 0, 0, 3, 2, 3, 2, 2, 3, 2, 2, 2,
+                 2, 3, 1, 3, 2, 0, 1, 3, 2, 0, 3, 2, 3, 0, 0, 3, 0, 2,
+                 0, 1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 1, 2, 3, 1, 1, 3,
+                 3, 3, 1, 2, 3, 2]
+        val = [3, 2, 2, 1, 3, 0, 2, 2, 3, 2, 1, 1]
+        _mk_data(tmp, train, val, vocab_size=4)
+        grid = (0.01, 0.1, 1.0)
+        val_rep = evaluate(tmp, split="val", alphas=grid)
+        train_rep = evaluate(tmp, split="train", alphas=grid)
+        assert train_rep["eval_tokens"] == len(train)
+        assert train_rep["selection_eval_same_split"] is False
+        assert train_rep["selected_alpha"] == val_rep["selected_alpha"]
+        assert (train_rep["selected_interpolated"]
+                == val_rep["selected_interpolated"])
+        assert train_rep["val_mean_nll"] == val_rep["val_mean_nll"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] evaluate（非 val 报告集仍只用 val 选参）")
+
+
 def test_test_split_sealed_and_access_logged():
     tmp = tempfile.mkdtemp()
     try:

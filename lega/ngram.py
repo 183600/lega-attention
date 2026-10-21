@@ -364,10 +364,12 @@ def evaluate(data_dir: str, split: str = "val",
                 "并会写入访问账本")
         eval_ids = np.asarray(load_bin(data_dir, "test", allow_test=True),
                               dtype=np.int64)
-        sel_ids = np.asarray(load_bin(data_dir, "val"), dtype=np.int64)
     else:
         eval_ids = np.asarray(load_bin(data_dir, split), dtype=np.int64)
-        sel_ids = eval_ids
+    # 选参流固定为 val：即使调用方要求报告 train（诊断用），α/λ 也不能
+    # 在报告集上选择，否则 alpha_selected_on 的声明与真实协议不符。
+    sel_ids = (eval_ids if split == "val"
+               else np.asarray(load_bin(data_dir, "val"), dtype=np.int64))
     uni, pair_keys, pair_counts = fit_counts(train_ids, vocab_size)
     # 选参与报告各自评测流的逐 token 二元项：α 只影响频次到 PPL 的换算，
     # 不改变二元组频次本身；split == "val" 时两个流是同一数组，可共用。
