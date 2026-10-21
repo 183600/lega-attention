@@ -28,7 +28,30 @@ from .data import load_meta
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
-                    save_json, set_seed)
+                    save_json, set_seed, strict_int)
+
+
+def _cfg_int(cfg, key, default):
+    """latency 配置整数字段：缺失用默认值，bool/小数/非有限显式拒绝。
+
+    ``int(True) is 1``、``int(256.5) is 256`` 会把配置声明的基准条件悄悄改写，
+    而落盘的 meta 字段记的是截断后的值——读者无从发现两次运行的 iters/ctx
+    与配置不一致。
+    """
+    if not isinstance(cfg, dict) or key not in cfg:
+        return default
+    return strict_int(cfg[key], f"latency.{key}")
+
+
+def _cfg_int_list(cfg, key, default):
+    """latency 配置的整数列表字段（ctx_lens/batch_sizes）。"""
+    if not isinstance(cfg, dict) or key not in cfg:
+        raw = default
+    else:
+        raw = cfg[key]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"latency.{key} 需要整数列表，收到 {raw!r}")
+    return [strict_int(x, f"latency.{key}") for x in raw]
 
 
 def _sync(device):
@@ -318,20 +341,37 @@ def main():
     amp_ctx = amp_autocast(device, use_amp)
     kv_dtype = amp_dt
     enable_tf32(device)
-    lcfg = dict(cfg.get("latency", {}))
+    # 非对象/显式 null 的 latency 段按空配置处理（dict(None) 会 TypeError）
+    lcfg_raw = cfg.get("latency")
+    lcfg = dict(lcfg_raw) if isinstance(lcfg_raw, dict) else {}
 
     if args.smoke:
         lcfg = {"ctx_lens": [128, 256], "batch_sizes": [1],
                 "decode_tokens": 16, "iters": 2, "warmup": 1}
-    ctx_lens = [int(c) for c in lcfg.get("ctx_lens", [256, 512, 1024])]
-    batch_sizes = [int(b) for b in lcfg.get("batch_sizes", [1, 8])]
-    decode_tokens = int(lcfg.get("decode_tokens", 64))
+    # 配置整数一律走严格解析：int() 会把 True → 1、256.5 → 256，落盘 meta
+    # 记的又是截断值，基准条件与配置声明的差异将无从发现。
+    ctx_lens = _cfg_int_list(lcfg, "ctx_lens", [256, 512, 1024])
+    batch_sizes = _cfg_int_list(lcfg, "batch_sizes", [1, 8])
+    if not ctx_lens:
+        raise ValueError("latency.ctx_lens 不能为空（没有可测量的上下文长度）")
+    if not batch_sizes:
+        raise ValueError("latency.batch_sizes 不能为空")
+    if any(c < 1 for c in ctx_lens):
+        raise ValueError(f"latency.ctx_lens 必须都是 >= 1 的整数，收到 {ctx_lens}")
+    if any(b < 1 for b in batch_sizes):
+        raise ValueError(f"latency.batch_sizes 必须都是 >= 1 的整数，收到 {batch_sizes}")
+    decode_tokens = _cfg_int(lcfg, "decode_tokens", 64)
     if decode_tokens < 2:
         raise ValueError(
             f"latency.decode_tokens={decode_tokens} 过小：第 1 步是 prefill 前向，"
             "至少需要 2 才能包含 1 步纯 decode")
-    iters = int(lcfg.get("iters", 20))
-    warmup = int(lcfg.get("warmup", 5))
+    iters = _cfg_int(lcfg, "iters", 20)
+    warmup = _cfg_int(lcfg, "warmup", 5)
+    if iters < 1:
+        # iters=0 → 计时样本为空，statistics.median 会在建模之后才抛错
+        raise ValueError(f"latency.iters 必须 >= 1，收到 {iters}")
+    if warmup < 0:
+        raise ValueError(f"latency.warmup 必须 >= 0，收到 {warmup}")
     if device == "cpu":
         iters, warmup = min(iters, 3), min(warmup, 1)
 

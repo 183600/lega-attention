@@ -145,3 +145,31 @@ def test_latency_wired_into_configs_and_runner():
     assert "lega.latency" in src, "run_all.py 未接入 lega.latency"
     assert "tradeoff_verdict" in src, "run_all.py 未接入涨点-增幅权衡判定"
     print("  [ok] 结构与运行时基准已接入 configs/run_all/plots")
+
+
+def test_latency_config_ints_reject_fractional_and_bool():
+    """latency 配置整数不得被 int() 截断（True → 1、256.5 → 256）。
+
+    落盘 meta 记录的是解析后的值：截断会把“配置声明的基准条件”与“实际
+    测量条件”悄悄对齐成同一个错值，读者无从发现 iters/ctx 与配置不一致。
+    """
+    from lega.latency import _cfg_int, _cfg_int_list
+    assert _cfg_int({}, "iters", 20) == 20
+    assert _cfg_int({"iters": 7.0}, "iters", 20) == 7
+    for bad in (True, 7.5, float("nan"), float("inf"), "abc", [7], None):
+        try:
+            _cfg_int({"iters": bad}, "iters", 20)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    assert _cfg_int_list({}, "ctx_lens", [256]) == [256]
+    assert _cfg_int_list({"ctx_lens": [256.0, "512"]}, "ctx_lens", []) == [256, 512]
+    for bad in ([True], [256.5], 256, None, "256,512", [[]]):
+        try:
+            _cfg_int_list({"ctx_lens": bad}, "ctx_lens", [1])
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    print("  [ok] latency 配置整数/整数列表拒绝 bool/小数截断")
