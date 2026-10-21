@@ -1533,5 +1533,8 @@ def test_short_ngram_overlap_and_alerts_are_diagnostic_only():
     # rate=0 / 缺失 / 畸形 不产生告警
     assert short_overlap_alerts({"train_test": {"overlap_rate": 0}}) == []
     assert short_overlap_alerts({"train_test": {"overlap_rate": "bad"}}) == []
+    # bool/越界比率不是重叠率证据，不能触发 100%/150% 假告警
+    for bad in (True, False, -0.1, 1.5, float("nan"), float("inf"), [0.1]):
+        assert short_overlap_alerts({"train_test": {"overlap_rate": bad}}) == [], bad
     assert short_overlap_alerts(None) == []
     print("  [ok] 短 n-gram 重叠：检出整句复用且仅告警、不进硬闸门")

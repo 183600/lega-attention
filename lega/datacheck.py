@@ -1407,11 +1407,15 @@ def short_overlap_alerts(short_contamination: dict) -> list:
                        ("val_test", "val/test")):
         d = c.get(key)
         d = d if isinstance(d, dict) else {}
+        raw = d.get("overlap_rate")
+        # bool 是 int 子类（True→1.0）：不能把 true 当成 100% 重叠率触发告警。
+        if raw is None or isinstance(raw, bool):
+            continue
         try:
-            rate = float(d.get("overlap_rate"))
+            rate = float(raw)
         except (TypeError, ValueError, OverflowError):
             continue
-        if not np.isfinite(rate) or rate <= 0:
+        if not np.isfinite(rate) or not 0.0 < rate <= 1.0:
             continue
         alerts.append({
             "level": "warning", "code": f"ngram_overlap_short_{key}",
