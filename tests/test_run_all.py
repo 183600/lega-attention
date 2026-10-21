@@ -3305,7 +3305,7 @@ def test_build_summary_renders_both_eval_sampling_sections():
 
 def test_ruler_sample_macro_micro_estimands_diverge():
     """样例等权 micro 与单元格等权 macro 可给出相反结论，必须同时报告。"""
-    from run_all import _ruler_sample_paired_tests
+    from run_all import _ruler_avg_of, _ruler_sample_paired_tests
 
     def cell(ems, prefix):
         return {"em": sum(ems) / len(ems), "n": len(ems),
@@ -3333,4 +3333,7 @@ def test_ruler_sample_macro_micro_estimands_diverge():
     assert abs(t["macro_mean_diff"] - 0.0) < 1e-12, t
     assert t["n_cells"] == 2, t
     assert t["per_seed"][0]["n_cells"] == 2
+    seed_macro = (_ruler_avg_of(runs["lega"][1]["ruler"])
+                  - _ruler_avg_of(runs["standard"][1]["ruler"]))
+    assert abs(seed_macro - t["macro_mean_diff"]) < 1e-12
     print("  [ok] RULER 样例级效应量：micro 与 macro 口径分歧显式并列")
