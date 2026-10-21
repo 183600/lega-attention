@@ -72,12 +72,20 @@ def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
     过大则训练侧趋势与瞬态尖峰无法检测。这里只告警不阻断——小规模冒烟
     训练有意识地用稀疏采样是合法的，但正式实验必须知道结论会因此受限。
     """
-    try:
-        steps = int(steps)
-        eval_every = int(eval_every)
-        log_every = int(log_every)
-    except (TypeError, ValueError, OverflowError):
-        return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
+    normalized = []
+    for value in (steps, eval_every, log_every):
+        # bool 是 int 子类（True→1），小数不能静默截断成另一个采样间隔；
+        # 这里只告警不阻断，但必须明确说“无法评估”而不是给出错误点数。
+        if isinstance(value, bool):
+            return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
+        try:
+            f = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
+        if not math.isfinite(f) or not f.is_integer():
+            return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
+        normalized.append(int(f))
+    steps, eval_every, log_every = normalized
     if steps < 1:
         return [f"steps={steps}，没有训练曲线可诊断"]
     warnings = []

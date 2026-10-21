@@ -525,4 +525,10 @@ def test_curve_observability_warnings():
     assert curve_observability_warnings("bad", 5, 5)
     w = curve_observability_warnings(100, 0, 10)
     assert any("eval_every=0" in x for x in w), w
-    print("  [ok] 曲线可观测性：稀疏验证/日志点在启动时告警")
+    # bool/小数不能被截断成另一个采样间隔（True→1、7.5→7）
+    for bad in ((True, 4, 2), (20, 7.5, 2), (20, 4, 2.5),
+                (20, False, 2), (20, 4, float("nan"))):
+        w = curve_observability_warnings(*bad)
+        assert len(w) == 1 and "不是整数" in w[0], (bad, w)
+    assert curve_observability_warnings(20.0, 4.0, 2.0) == []
+    print("  [ok] 曲线可观测性：稀疏验证/日志点告警，bool/小数拒绝")
