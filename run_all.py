@@ -1026,12 +1026,12 @@ def _ruler_min_cell_n(d):
     return min(ns) if ns else None
 
 
-def _ruler_sample_outcomes(d):
-    """RULER payload → {sample_id: em(0/1)}；缺少/损坏/单元 n 不符时返回 None。
+def _ruler_cell_sample_outcomes(d):
+    """RULER payload → {(task, ctx): {sample_id: em}}；损坏时返回 None。
 
-    逐样例结果是“固定评测样例”层面配对检验的原材料。旧产物没有 samples
-    字段时返回 None（不伪造），下游只跳过该 run 的样例级分析，不影响
-    聚合 EM 的既有检验。
+    保留单元格归属，因为预注册 `RULER平均` 是 macro（任务/上下文档位等权），
+    而逐样例 McNemar 池化所有样例是 micro（样例等权）：两者估计量不同，
+    必须分开报告。旧产物没有 samples 字段时返回 None（不伪造）。
     """
     if not isinstance(d, dict):
         return None
@@ -1039,6 +1039,7 @@ def _ruler_sample_outcomes(d):
     if not isinstance(results, dict):
         return None
     out = {}
+    seen = set()
     for task, by_ctx in results.items():
         if (not isinstance(task, str) or task.startswith("_")
                 or not isinstance(by_ctx, dict)):
@@ -1050,6 +1051,7 @@ def _ruler_sample_outcomes(d):
             n = _integral_value(cell.get("n"))
             if not isinstance(samples, list) or n is None or n != len(samples):
                 return None
+            cell_out = {}
             for rec in samples:
                 if not isinstance(rec, dict):
                     return None
@@ -1057,9 +1059,27 @@ def _ruler_sample_outcomes(d):
                 em = _num_or_none(rec.get("em"))
                 if not isinstance(sid, str) or em not in (0.0, 1.0):
                     return None
-                if sid in out:
+                if sid in seen or sid in cell_out:
                     return None
-                out[sid] = em
+                cell_out[sid] = em
+            seen.update(cell_out)
+            out[(task, str(ctx))] = cell_out
+    return out
+
+
+def _ruler_sample_outcomes(d):
+    """RULER payload → {sample_id: em(0/1)}；缺少/损坏/单元 n 不符时返回 None。
+
+    逐样例结果是“固定评测样例”层面配对检验的原材料。旧产物没有 samples
+    字段时返回 None（不伪造），下游只跳过该 run 的样例级分析，不影响
+    聚合 EM 的既有检验。
+    """
+    cells = _ruler_cell_sample_outcomes(d)
+    if cells is None:
+        return None
+    out = {}
+    for cell_out in cells.values():
+        out.update(cell_out)
     return out
 
 
@@ -1106,6 +1126,9 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
     多种子合并时，每个种子内先按 sample_id 配对，再把各 seed 的
     discordant 计数相加做精确检验（同一样例在不同训练种子下重复出现，
     故该合并口径只作探索性证据；逐种子明细一并落盘供核对）。
+    同时报告两种效应量口径：`mean_diff` 为样例等权 micro（与 McNemar
+    池化计数一致），`macro_mean_diff` 为单元格等权（与预注册 `RULER平均`
+    的 macro 估计量一致）；两者不一致说明结论依赖“平均值”定义。
     该检验与跨种子 t 检验回答不同问题，不能互相替代：前者是“固定题面
     上的样例级差异”，后者是“训练随机性下的种子级差异”。
     """
@@ -1129,11 +1152,29 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             if ra is None or rb is None or not _ruler_pair_protocol_ok(ra, rb):
                 skipped += 1
                 continue
-            oa = _ruler_sample_outcomes(ra)
-            ob = _ruler_sample_outcomes(rb)
-            if oa is None or ob is None or set(oa) != set(ob):
+            ca = _ruler_cell_sample_outcomes(ra)
+            cb = _ruler_cell_sample_outcomes(rb)
+            if ca is None or cb is None or set(ca) != set(cb):
                 skipped += 1
                 continue
+            cell_diffs = []
+            cell_ok = True
+            for ck in sorted(ca):
+                oa, ob = ca[ck], cb[ck]
+                if set(oa) != set(ob):
+                    cell_ok = False
+                    break
+                if not oa:
+                    continue
+                cell_diffs.append(
+                    sum(oa[sid] - ob[sid] for sid in oa) / len(oa))
+            if not cell_ok:
+                skipped += 1
+                continue
+            oa = {sid: em for cell_out in ca.values()
+                  for sid, em in cell_out.items()}
+            ob = {sid: em for cell_out in cb.values()
+                  for sid, em in cell_out.items()}
             s_cand = s_ref = s_both1 = s_both0 = 0
             for sid in sorted(oa):
                 a, b = oa[sid], ob[sid]
@@ -1151,6 +1192,9 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 "candidate_only": s_cand, "reference_only": s_ref,
                 "both_correct": s_both1, "both_wrong": s_both0,
                 "mean_diff": ((s_cand - s_ref) / n_s) if n_s else None,
+                "macro_mean_diff": (sum(cell_diffs) / len(cell_diffs)
+                                    if cell_diffs else None),
+                "n_cells": len(cell_diffs),
                 "p": _mcnemar_exact_p(s_cand, s_ref),
             })
             cand_only += s_cand
@@ -1166,6 +1210,13 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                      if r["mean_diff"] is not None and r["mean_diff"] < 0)
         ties = len(per_seed) - wins - losses
         mean_diff = ((cand_only - ref_only) / n_samples) if n_samples else None
+        macro_diffs = [r["macro_mean_diff"] for r in per_seed
+                       if r.get("macro_mean_diff") is not None]
+        macro_mean_diff = (sum(macro_diffs) / len(macro_diffs)
+                           if macro_diffs else None)
+        n_cells = (per_seed[0].get("n_cells")
+                   if per_seed and len({r.get("n_cells") for r in per_seed}) == 1
+                   else None)
         res = {
             "candidate": cand, "reference": ref,
             "metric": "RULER样例配对", "lower_is_better": False,
@@ -1175,6 +1226,8 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             "candidate_only": cand_only, "reference_only": ref_only,
             "both_correct": both_correct, "both_wrong": both_wrong,
             "mean_diff": mean_diff,
+            "macro_mean_diff": macro_mean_diff,
+            "n_cells": n_cells,
             "p": _mcnemar_exact_p(cand_only, ref_only),
             "p_adj": None,
             "n_seed_wins": wins, "n_seed_losses": losses,
@@ -1183,7 +1236,9 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             "verdict": None,
             "note": ("同一批 sample_id 上的逐样例配对；只消费 discordant "
                      "对（候选对/参照错 vs 反之），与跨种子聚合 EM 检验"
-                     "回答不同问题，属探索性证据"),
+                     "回答不同问题，属探索性证据。mean_diff 为样例等权 "
+                     "micro，macro_mean_diff 为单元格等权（对应预注册 "
+                     "RULER平均 的 macro 口径）"),
         }
         if skipped:
             res["excluded_runs"] = skipped
@@ -4821,9 +4876,10 @@ def build_summary(results_dir: str, audit: dict = None,
            "参照独对），相同结果不提供方向信息；多种子按 discordant 计数合并，"
            "独立 Holm 家族。", ""]
     if ruler_sample_tests:
-        md += ["| 对比 | 配对种子 | 配对样例 | 候选独对/参照独对 | ΔEM(候选−参照) | "
+        md += ["| 对比 | 配对种子 | 配对样例 | 候选独对/参照独对 | "
+               "ΔEM micro(候选−参照) | ΔEM macro(单元格等权) | "
                "种子胜/负/平 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",
-               "|---|---|---|---|---|---|---|---|---|"]
+               "|---|---|---|---|---|---|---|---|---|---|"]
         for t in ruler_sample_tests:
             seed_t = _find_test(tests, (t.get("candidate"), t.get("reference")),
                                 "RULER平均")
@@ -4831,17 +4887,22 @@ def build_summary(results_dir: str, audit: dict = None,
                             else "未运行")
             delta = (f"{t['mean_diff']:+.4f}"
                      if t.get("mean_diff") is not None else "-")
+            macro_delta = (f"{t['macro_mean_diff']:+.4f}"
+                           if t.get("macro_mean_diff") is not None else "-")
             padj = (f"{t['p_adj']:.4f}"
                     if t.get("p_adj") is not None else "-")
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
                 f"{t['n_samples']} | {t['candidate_only']}/{t['reference_only']} | "
-                f"{delta} | {t['n_seed_wins']}/{t['n_seed_losses']}/"
+                f"{delta} | {macro_delta} | {t['n_seed_wins']}/{t['n_seed_losses']}/"
                 f"{t['n_seed_ties']} | {padj} | "
                 f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
         md += ["", "注: McNemar 只使用 discordant 对，n_samples 是参与配对的总样例"
                "数而非独立证据数；多个训练种子重复使用同一批 sample_id，合并"
-               "检验只作探索性证据。若样例级显著而种子级不显著（或反之），"
+               "检验只作探索性证据。`ΔEM micro` 样例等权、与 McNemar 池化计数"
+               "对应；`ΔEM macro` 单元格等权，与预注册 `RULER平均` 及上表种子级"
+               "判定同一估计量。两者方向不一致时，结论依赖“平均值”定义，不能"
+               "只挑对主张有利的口径。若样例级显著而种子级不显著（或反之），"
                "说明两个不确定性来源给出不同信息：前者多为评测样本量/题目"
                "难度，后者为训练随机性，均不能单独升级为确认性结论。"
                "逐种子明细见 `significance.json` 的 `ruler_sample_pairs`。"]

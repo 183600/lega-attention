@@ -3301,3 +3301,36 @@ def test_build_summary_renders_both_eval_sampling_sections():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary 并列渲染窗口级/样例级评测抽样证据")
+
+
+def test_ruler_sample_macro_micro_estimands_diverge():
+    """样例等权 micro 与单元格等权 macro 可给出相反结论，必须同时报告。"""
+    from run_all import _ruler_sample_paired_tests
+
+    def cell(ems, prefix):
+        return {"em": sum(ems) / len(ems), "n": len(ems),
+                "samples": [{"sample_id": f"{prefix}{i}", "em": float(e)}
+                            for i, e in enumerate(ems)]}
+
+    small = cell([1, 1], "a")                  # 小格 +1，2 个样例
+    big = cell([0] * 6, "b")                   # 大格 −1，6 个样例
+    ref = cell([0, 0], "a"), cell([1] * 6, "b")
+
+    def rul(v, cells):
+        return {"ruler": {"variant": v, "seed": 1,
+                          "ctx_lens": [256, 512], "n_samples": 8,
+                          "sample_seed": 7, "corpus_source": "val",
+                          "max_new": 12, "fwe_max_new": 44,
+                          "vt_chains": 4, "vt_depth": 4,
+                          "results": {"niah": {"256": cells[0],
+                                               "512": cells[1]}}}}
+
+    runs = {"lega": {1: rul("lega", (small, big))},
+            "standard": {1: rul("standard", ref)}}
+    t = _ruler_sample_paired_tests(runs, [("lega", "standard")])[0]
+    # micro = (2 胜 − 6 负)/8 = −0.5；macro = (+1 −1)/2 = 0
+    assert abs(t["mean_diff"] - (-0.5)) < 1e-12, t
+    assert abs(t["macro_mean_diff"] - 0.0) < 1e-12, t
+    assert t["n_cells"] == 2, t
+    assert t["per_seed"][0]["n_cells"] == 2
+    print("  [ok] RULER 样例级效应量：micro 与 macro 口径分歧显式并列")
