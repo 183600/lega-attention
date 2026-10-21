@@ -533,6 +533,18 @@ def test_bool_not_counted_as_numeric_window_stat():
     print("  [ok] bool 不计入最差窗口的数值均值/展示")
 
 
+def test_format_case_rejects_bool_and_huge_depth():
+    """渲染层也不能把 True/depth 超大整数伪装成位置比例。"""
+    for bad in (True, False, 10 ** 400, float("nan"), float("inf"), "bad"):
+        text = "\n".join(format_case(1, {"task": "niah", "depth": bad,
+                                         "hard_sample": True}))
+        assert "depth=" not in text, (bad, text)
+    text = "\n".join(format_case(2, {"task": "niah", "depth": 0.75,
+                                     "hard_sample": True}))
+    assert "depth=0.75" in text, text
+    print("  [ok] 案例渲染拒绝 bool/超大/非有限 depth")
+
+
 def test_huge_integers_tolerated_in_badcase():
     """合法 JSON 里的超大整数转 float 会 OverflowError，坏案例报告不能崩。"""
     from lega.badcase import _mean

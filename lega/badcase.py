@@ -343,13 +343,8 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
 def format_case(idx: int, c: Dict) -> List[str]:
     """单个坏案例的 Markdown 行（问题/gold 摘录/预测/归因）。"""
     c = c if isinstance(c, dict) else {}
-    depth = c.get("depth")
-    depth_s = ""
-    if isinstance(depth, (int, float)):
-        try:
-            depth_s = f" depth={float(depth):.2f}"
-        except (OverflowError, ValueError):
-            depth_s = ""
+    depth = _finite_float(c.get("depth"))
+    depth_s = f" depth={depth:.2f}" if depth is not None else ""
     lines = [f"### 案例 {idx}: {c.get('task')} @ctx={c.get('ctx')}"
              + depth_s
              + (" 【难度边界样本：needle 靠后】" if c.get("hard_sample") else "")]
