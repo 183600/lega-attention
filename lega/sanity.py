@@ -39,7 +39,7 @@ from .model import GPT, count_params
 from .preflight import (allow_protocol_violations,
                          data_protocol_preflight)
 from .repro import build_run_manifest
-from .utils import config_bool, save_json, set_seed, strict_int
+from .utils import config_bool, data_rng, save_json, set_seed, strict_int
 
 # 训练路径 loss 与直接 logits CE 的一致性容差：1e-3 只用于吸收分块/
 # 归约顺序的浮点噪声，真正的计算错误（错误 chunk 边界、错误归一化/
@@ -466,7 +466,7 @@ def main():
     print(f"[sanity] variant={args.variant}({VARIANT_CN[args.variant]}) "
           f"device={device} params={count_params(model):,}")
     # 固定批：整轮训练复用同一批数据（无增强、无重采样）
-    rng = np.random.default_rng(seed)
+    rng = data_rng(seed)
     x, y = get_train_batch(train, ctx, batch_size, device, rng)
     print(f"[sanity] 固定批: {batch_size} 条 x {ctx} tokens，"
           f"steps={opt['steps']} lr={opt['lr']} seed={seed}")

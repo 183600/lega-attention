@@ -57,6 +57,30 @@ def deterministic_algorithms_warn_only():
     return _LAST_SEED.get("deterministic_warn_only")
 
 
+def data_rng(seed: int) -> np.random.Generator:
+    """项目唯一的“dataloader”随机源：显式种子的 NumPy Generator。
+
+    train/sanity 的批采样必须经此构造，而不是各自 ``default_rng(seed)``。
+    这样“数据顺序由 seed 唯一确定”不仅是约定，还可用
+    ``data_rng_state_fingerprint(seed)`` 复算同一初始状态作为审计证据。
+    若将来引入 torch DataLoader，必须同样用该 seed 构造 ``torch.Generator``
+    并设置 ``worker_init_fn``，否则 worker 会从默认随机源取种子。
+    """
+    return np.random.default_rng(seed_int(seed, "data rng seed"))
+
+
+def data_rng_state_fingerprint(seed: int) -> str:
+    """由 seed 可复算的数据顺序 RNG 初始状态短指纹（不消耗全局 RNG）。
+
+    直接构造 ``data_rng(seed)`` 并哈希其 bit generator 状态，因此第三方
+    重跑同一函数即可核对数据顺序随机源的种子身份；它与全局 NumPy RNG
+    相互独立，不受模型初始化/评测消耗影响。
+    """
+    state = data_rng(seed).bit_generator.state
+    raw = json.dumps(state, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def rng_state_fingerprint() -> dict:
     """各全局 RNG **当前状态**的短指纹（只读：get_state 不消耗随机数）。
 
@@ -286,10 +310,14 @@ def seed_report(seed: int) -> dict:
         # 严格 / 仅告警：只报 deterministic_algorithms=True 会夸大确定性保证
         "deterministic_algorithms_warn_only":
             deterministic_algorithms_warn_only(),
-        "data_order": "np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
+        "data_order": "data_rng(seed)=np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
         # 项目约定：批采样与本审计共用同一 seed（train/sanity/evaluate 均如此），
         # 机器可读字段便于台账/清单自动核对数据顺序来源
         "data_order_seed": verified_seed,
+        # 数据顺序 RNG 的初始状态指纹：第三方可用
+        # data_rng_state_fingerprint(seed) 独立复算；未验证时同样不给证据。
+        "data_order_rng_fingerprint": (
+            data_rng_state_fingerprint(seed) if fp is not None else None),
         "rng_fingerprints": dict(fp) if fp else None,
     }
 

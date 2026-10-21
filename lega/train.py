@@ -27,8 +27,9 @@ from .preflight import (allow_protocol_violations,  # noqa: E402
                         data_protocol_preflight)
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     write_worktree_patch)
-from .utils import (amp_autocast, amp_dtype_for, config_bool, enable_tf32,
-                    now_str, save_json, set_seed, strict_int, t_critical_95)
+from .utils import (amp_autocast, amp_dtype_for, config_bool, data_rng,
+                    enable_tf32, now_str, save_json, set_seed, strict_int,
+                    t_critical_95)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -1059,7 +1060,7 @@ def main():
     log_path = os.path.join(out_dir, "train_log.jsonl")
     # 同一 out_dir 重跑代表一次新实验：覆盖旧日志，避免 step 轴混入上一轮数据。
     log_f = open(log_path, "w", encoding="utf-8")
-    rng = np.random.default_rng(seed)
+    rng = data_rng(seed)
     model.train()
     opt.zero_grad(set_to_none=True)
     # 流水线预取的首批：训练循环内每个 micro-step 再预取下一批

@@ -16,7 +16,8 @@ from lega.repro import (build_run_manifest, data_fingerprint, git_info,
                         sanity_identity_check, sha256_file,
                         test_data_fingerprint as _test_data_fingerprint,
                         worktree_state, write_worktree_patch)
-from lega.utils import set_seed, seed_report
+from lega.utils import (data_rng, data_rng_state_fingerprint, set_seed,
+                        seed_report)
 
 
 def test_set_seed_covers_python_numpy_torch():
@@ -200,8 +201,13 @@ def test_seed_report_covers_all_random_sources():
     assert rep["deterministic_algorithms"] is True
     assert rep["data_order"]
     assert rep["data_order_seed"] == 2024
+    # 数据顺序 RNG 不仅是"声明用了 seed"：初始状态指纹可由 seed 独立复算，
+    # 且与全局 NumPy RNG 相互独立（全局状态被模型初始化消耗也不影响）。
+    assert rep["data_order_rng_fingerprint"] == \
+        data_rng_state_fingerprint(2024)
     json.dumps(rep)
-    print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA) 与确定性开关")
+    print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA)、数据顺序 RNG "
+          "与确定性开关")
 
 
 def test_seed_report_rng_fingerprints_are_seed_evidence():
@@ -226,11 +232,38 @@ def test_seed_report_rng_fingerprints_are_seed_evidence():
     # 请求 seed 11 的报告必须把各源标为未验证/未知，而不是伪造 11。
     assert stale["seed_verified"] is False
     for key in ("python_random", "numpy_global", "torch_cpu",
-                "data_order_seed"):
+                "data_order_seed", "data_order_rng_fingerprint"):
         assert stale[key] is None, (key, stale)
     json.dumps(fp_a)
     print("  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/"
           "不冒充）")
+
+
+def test_data_rng_is_seeded_and_reproducible():
+    """数据顺序 RNG：同 seed 初始状态/采样逐位一致，异 seed 不同。
+
+    这是“dataloader 种子已固定”的可执行证据：训练不再各自调用
+    np.random.default_rng，而统一走 data_rng(seed)，其状态指纹可由第三方
+    用同一 seed 复算。
+    """
+    data = np.arange(4096, dtype=np.uint16)
+    for seed in (0, 7, 2 ** 32 - 1):
+        r1, r2 = data_rng(seed), data_rng(seed)
+        x1, y1 = get_train_batch(data, 16, 4, "cpu", r1)
+        x2, y2 = get_train_batch(data, 16, 4, "cpu", r2)
+        assert torch.equal(x1, x2) and torch.equal(y1, y2)
+        assert data_rng_state_fingerprint(seed) == \
+            data_rng_state_fingerprint(seed)
+    assert data_rng_state_fingerprint(7) != data_rng_state_fingerprint(8)
+    # 非法种子不能被 np.random.default_rng 静默接受（bool/负数/小数）
+    for bad in (True, -1, 1.5, 2 ** 32):
+        try:
+            data_rng(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    print("  [ok] data_rng 同 seed 可复算、异 seed 不同且拒绝非法种子")
 
 
 def test_seed_report_distinguishes_process_hashseed_from_child_env():
