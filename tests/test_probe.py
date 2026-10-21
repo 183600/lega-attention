@@ -115,6 +115,32 @@ def test_linear_probe_feature_sets_l2_selection_and_determinism():
     print("  [ok] 特征集选择/嵌套 λ 与阈值选择/确定性")
 
 
+def test_linear_probe_rejects_invalid_folds_and_l2():
+    """folds/l2_grid 是实验规格：bool/小数/负值/NaN 不得被静默夹取或接受。"""
+    recs = _synth_records()
+    for bad in (True, 1, 0, 2.5, "2_0"):
+        try:
+            linear_probe(recs, folds=bad)
+            raise AssertionError(f"非法 folds 应报错: {bad!r}")
+        except ValueError:
+            pass
+    for bad in ([-1.0], [float("nan")], [float("inf")], [True], ["bad"]):
+        try:
+            linear_probe(recs, folds=3, l2_grid=bad)
+            raise AssertionError(f"非法 l2_grid 应报错: {bad!r}")
+        except ValueError:
+            pass
+    for bad in (-1.0, float("nan"), True):
+        try:
+            fit_logreg(np.zeros((2, 1)), np.array([0.0, 1.0]), l2=bad)
+            raise AssertionError(f"非法 L2 应报错: {bad!r}")
+        except ValueError:
+            pass
+    rep = linear_probe(recs, folds=2.0, l2_grid=[0, "0.1"])
+    assert rep["folds"] == 2 and rep["l2_grid"] == [0.0, 0.1]
+    print("  [ok] 探针 folds/L2 非法值显式拒绝，合法整数值浮点规范化")
+
+
 def test_linear_probe_group_folds_stratify_rare_positives():
     """稀有正类不能全落进同一折：分层分组应把正类样例分散到不同折。"""
     groups, y = [], []

@@ -39,7 +39,8 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .utils import auroc, average_precision, calibration_metrics, f1_scores
+from .utils import (auroc, average_precision, calibration_metrics, f1_scores,
+                    strict_int)
 
 # hit 判别正类率低于该值时以 PR-AUC 为主指标（与 lega.analysis 同一口径，
 # 集中定义于此并由此导入，避免两处阈值漂移）。
@@ -88,6 +89,19 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return out
 
 
+def _finite_nonnegative(value, name: str = "l2") -> float:
+    """有限非负浮点；bool/NaN/Inf/负值显式拒绝（负数 L2 会破坏凸性）。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是有限非负数，收到 bool {value!r}")
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{name} 必须是有限非负数，收到 {value!r}") from e
+    if not math.isfinite(out) or out < 0:
+        raise ValueError(f"{name} 必须是有限非负数，收到 {value!r}")
+    return out
+
+
 def fit_logreg(X: np.ndarray, y: np.ndarray, l2: float = 0.0,
                max_iter: int = 100, tol: float = 1e-10) -> Dict:
     """L2 逻辑回归（Newton–IRLS，无第三方依赖，确定性）。
@@ -98,6 +112,7 @@ def fit_logreg(X: np.ndarray, y: np.ndarray, l2: float = 0.0,
     """
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
+    l2 = _finite_nonnegative(l2, "l2")
     n, d = X.shape
     if n == 0 or d == 0:
         return {"coef": np.zeros(d), "intercept": 0.0}
@@ -106,14 +121,14 @@ def fit_logreg(X: np.ndarray, y: np.ndarray, l2: float = 0.0,
         return {"coef": np.zeros(d),
                 "intercept": math.inf if y[0] > 0.5 else -math.inf}
     Xb = np.hstack([X, np.ones((n, 1), dtype=np.float64)])
-    pen = float(l2) * np.eye(d + 1)
+    pen = l2 * np.eye(d + 1)
     pen[-1, -1] = 0.0                      # 截距不惩罚
     pen = pen + 1e-8 * np.eye(d + 1)       # 数值稳定
     w = np.zeros(d + 1)
     for _ in range(int(max_iter)):
         p = _sigmoid(Xb @ w)
         grad = Xb.T @ (p - y)
-        grad[:-1] += float(l2) * w[:-1]
+        grad[:-1] += l2 * w[:-1]
         W = np.clip(p * (1.0 - p), 1e-8, None)
         H = Xb.T @ (Xb * W[:, None]) + pen
         try:
@@ -413,11 +428,15 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     # 外部/旧格式 analysis JSON 的记录列表可能混入 null/标量：按坏记录剔除，
     # 否则逐列提取会在 r.get 上崩溃。
     records = [r for r in (records or []) if isinstance(r, dict)]
+    folds = strict_int(folds, "folds")
+    if folds < 2:
+        raise ValueError(f"folds 必须 >= 2，收到 {folds}")
+    l2_grid = [_finite_nonnegative(x, "l2_grid 项") for x in l2_grid]
     report: Dict = {
         "folds": None, "n_records": len(records), "n_valid": 0,
         "n_examples": 0, "n_pos": 0, "n_neg": 0, "base_rate": None,
         "imbalance_level": None, "primary_detection_metric": None,
-        "l2_grid": [float(x) for x in l2_grid],
+        "l2_grid": l2_grid,
         "selection_metric": ("嵌套分组 CV：λ 在内层 OOF 上按与主检验对齐的"
                              "指标选择（正类率 <5% 用 PR-AUC，否则 AUROC；"
                              "并列按 log-loss 与更小 λ）；最终 OOF 不被用于"
@@ -475,12 +494,12 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
         "imbalance_level": level, "primary_detection_metric": primary_metric,
     })
     examples = sorted(set(ex_keys))
-    k = int(folds)
+    k = folds
     if len(examples) < 2 or y_all.size == 0 or len(set(y_all.tolist())) != 2:
         report["note"] = ("样例/类别不足（需 ≥2 个样例且两类齐备），"
                           "线性探针不可估计。" + report["note"])
         return report
-    k = max(2, min(k, len(examples)))
+    k = min(k, len(examples))
     report["folds"] = k
     available = []
     feature_matrices = {}
@@ -503,7 +522,7 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     ex_to_idx = {g: i for i, g in enumerate(gaps)}
     groups = np.asarray([ex_to_idx[k] for k in ex_keys], dtype=np.int64)
     fold_arr = _group_folds(groups.tolist(), k, seed, y=y_all)
-    l2s = list(dict.fromkeys(float(x) for x in report["l2_grid"]))
+    l2s = list(dict.fromkeys(report["l2_grid"]))
     selected_name = _selection_name(primary_metric)
     for key, name, names in available:
         X = feature_matrices[key]
