@@ -293,8 +293,10 @@ def window_positions(n_tokens: int, ctx: int, iters: int):
     断言）。窗口规格非法或评测流过短时返回 None（调用方按缺失处理）。
     """
     try:
-        n_tokens, ctx, iters = int(n_tokens), int(ctx), int(iters)
-    except (TypeError, ValueError, OverflowError):
+        n_tokens = strict_int(n_tokens, "n_tokens")
+        ctx = strict_int(ctx, "ctx")
+        iters = strict_int(iters, "iters")
+    except (TypeError, ValueError):
         return None
     if ctx < 1 or iters < 1:
         return None

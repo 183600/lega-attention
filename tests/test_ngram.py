@@ -198,6 +198,12 @@ def test_window_positions_match_neural_eval_rule():
     assert window_positions(10, 16, 2) is None
     assert window_positions(100, 0, 2) is None
     assert window_positions(100, 16, 0) is None
+    # bool/小数/非有限值不能被 int() 截断成“看似合法的窗口规格”
+    for bad in (True, 100.5, "100.5", float("nan"), float("inf")):
+        assert window_positions(bad, 16, 2) is None, bad
+        assert window_positions(100, bad, 2) is None, bad
+        assert window_positions(100, 16, bad) is None, bad
+    assert window_positions("100", "16", "2") is not None
     print("  [ok] window_positions（与 _val_eval_indices 逐例一致、非法规格返回 None）")
 
 
