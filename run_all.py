@@ -3972,6 +3972,20 @@ def build_summary(results_dir: str, audit: dict = None,
             f"test={_fmt_rate(_as_dict(cont.get('train_test')).get('overlap_rate'))}、"
             f"val↔test={_fmt_rate(_as_dict(cont.get('val_test')).get('overlap_rate'))}"
             "（采样筛查下界，>0 需人工核查）")
+        n_short_tv = _int_or_zero(dup.get("train_val_overlap_short_lines"))
+        n_short_tt = _int_or_zero(dup.get("train_test_overlap_short_lines"))
+        n_short_vt = _int_or_zero(dup.get("val_test_overlap_short_lines"))
+        if n_short_tv or n_short_tt or n_short_vt:
+            md.append(
+                f"- 短行跨 split 重复（<{dup.get('min_chars', '-')} 字符，"
+                "不自动删除以免误删标题/固定用语）："
+                f"train↔val {n_short_tv} 条、train↔test {n_short_tt} 条、"
+                f"val↔test {n_short_vt} 条"
+                f"（空白归一化后额外 "
+                f"{_int_or_zero(dup.get('train_val_overlap_normalized_short_lines'))}/"
+                f"{_int_or_zero(dup.get('train_test_overlap_normalized_short_lines'))}/"
+                f"{_int_or_zero(dup.get('val_test_overlap_normalized_short_lines'))}）；"
+                "重复样本会削弱 held-out 独立性，须人工核查")
         cshort = _as_dict(data_report.get("contamination_short_ngram"))
         if cshort:
             md.append(
