@@ -335,6 +335,9 @@ def main():
                         "泄露前兆：测试集只能最终一次性评估；默认拒绝，确需重测"
                         "时显式放行，账本仍会留痕）")
     args = p.parse_args()
+    if (args.eval_iters is not None
+            and _positive_int_or_none(args.eval_iters) is None):
+        p.error("--eval_iters 必须是正整数")
 
     device = get_device(args.device)
     enable_tf32(device)

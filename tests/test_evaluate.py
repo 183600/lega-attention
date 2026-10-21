@@ -96,6 +96,24 @@ def test_positive_int_config_value_degrades_to_none():
     print("  [ok] 非法 train_ctx/eval_iters 配置安全降级")
 
 
+def test_evaluate_cli_rejects_nonpositive_eval_iters():
+    from lega.evaluate import main as evaluate_main
+    old = sys.argv
+    try:
+        for bad in ("0", "-3"):
+            sys.argv = ["lega.evaluate", "--ckpt", "x", "--data_dir", "x",
+                        "--out", "x", "--eval_iters", bad]
+            try:
+                evaluate_main()
+            except SystemExit as exc:
+                assert exc.code not in (0, None)
+            else:
+                raise AssertionError(f"--eval_iters={bad} 未被拒绝")
+    finally:
+        sys.argv = old
+    print("  [ok] evaluate CLI：拒绝非正 eval_iters")
+
+
 def test_load_train_throughput_propagates_and_degrades_safely():
     """训练过程记录必须随被评测 checkpoint 传播；缺失/损坏时安全返回 (None, None)。"""
     tmp = tempfile.mkdtemp()
