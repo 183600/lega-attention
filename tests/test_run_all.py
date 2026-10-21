@@ -155,10 +155,20 @@ def test_data_protocol_preflight_blocks_stale_cache_schema():
                    for a in info["critical_violations"])
         assert info["cache_schema_issue"]
         assert "不一致" in info["cache_schema_issue"]
-        _write_json(meta, {"cache_schema": str(CACHE_SCHEMA)})
+        _write_json(meta, {"cache_schema": str(CACHE_SCHEMA),
+                           "fit_on": "train"})
         info = data_protocol_preflight(d)
         assert info["cache_schema_issue"] is None
         assert info["critical_violations"] == []
+        # schema 正确但词表在全量数据上拟合：仍必须拦截。
+        _write_json(meta, {"cache_schema": CACHE_SCHEMA, "fit_on": "all"})
+        try:
+            data_protocol_preflight(d)
+            raise AssertionError("fit_on=all 的缓存不应进入训练")
+        except SystemExit as e:
+            assert "fit_on" in str(e)
+        info = data_protocol_preflight(d, allow_override=True)
+        assert "fit_on" in info["cache_schema_issue"]
     with tempfile.TemporaryDirectory() as d:
         _write_json(os.path.join(d, "meta.json"), {"cache_schema": "bad"})
         info = data_protocol_preflight(d, allow_override=True)

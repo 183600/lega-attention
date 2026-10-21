@@ -356,7 +356,7 @@ def test_same_seed_training_is_bitwise_reproducible():
             os.path.join(data_dir, "val.bin"))
         with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA}, f)
+                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
@@ -665,7 +665,7 @@ def test_train_rejects_stale_sanity_evidence_identity():
         with open(os.path.join(data_dir, "meta.json"), "w",
                   encoding="utf-8") as f:
             json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA}, f)
+                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
@@ -718,7 +718,7 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
         with open(os.path.join(data_dir, "meta.json"), "w",
                   encoding="utf-8") as f:
             json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA}, f)
+                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,

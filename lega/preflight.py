@@ -91,6 +91,13 @@ def data_cache_schema_issue(data_dir: str):
         return (f"数据缓存 cache_schema={schema} 与当前管线 "
                 f"{CACHE_SCHEMA} 不一致：旧版清洗/去污染协议不可信，"
                 "请运行 prepare_bins/prepare_data.py 重建 bin 后再训练")
+    # schema 相同不代表分词器拟合来源可信：旧缓存/手改 meta 可能在全量
+    # 语料（含 val/test）上拟合过词表。prepare_bins 命中缓存时会检查
+    # fit_on，但直接训练入口绕过它，这里必须补上同一道检查。
+    fit_on = meta.get("fit_on")
+    if fit_on not in ("train", "gpt2_pretrained"):
+        return (f"数据缓存 fit_on={fit_on!r} 不可信：字符词表必须在 train 上"
+                "拟合（GPT-2 BPE 为公开预训练词表）；请重建 bin")
     return None
 
 
