@@ -351,6 +351,10 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     `ap_logit_minus_qterm` 是机制结论在正确指标口径下的对照证据。
     键名沿用 `ci95`（历史字段），内部为 AUROC 与 AP 两族区间。
     """
+    n_resamples = _int_at_least(n_resamples, "n_resamples", 0)
+    ci = _bounded_float(ci, "ci")
+    if not 0.0 < ci < 1.0:
+        raise ValueError(f"ci 必须在 (0,1) 内，收到 {ci!r}")
     records = records if isinstance(records, (list, tuple)) else []
     clusters: Dict[int, List[Dict]] = {}
     for r in records:

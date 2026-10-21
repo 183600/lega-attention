@@ -206,7 +206,28 @@ def test_auroc_cluster_bootstrap_ci():
         [{"example": i, "hit": 1.0, "max_p": 0.9} for i in range(4)],
         n_resamples=50)
     assert nokey["ci95"] == {}
-    print("  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错/AP 族）")
+    # 重采样次数是计数身份：bool/小数/非数值不能被 int() 截断或崩溃
+    for bad in (True, 1.5, "bad", -1):
+        try:
+            auroc_cluster_bootstrap(records, n_resamples=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n_resamples 未被拒绝: {bad!r}")
+    assert auroc_cluster_bootstrap(records, n_resamples="50")["n_resamples"] == 50
+    # 置信水平必须是 (0,1) 内的有限数值；ci=True 会把区间伪装成 100% 却
+    # 仍以 ci95 为键，ci>=1 会让分位数越界。
+    for bad in (True, 0, 1.0, 1.5, -0.1, float("nan"), float("inf"), "bad"):
+        try:
+            auroc_cluster_bootstrap(records, n_resamples=10, ci=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 ci 未被拒绝: {bad!r}")
+    ok = auroc_cluster_bootstrap(records, n_resamples=200, ci="0.9")
+    assert ok["ci_level"] == 0.9 and ok["ci95"]
+    print("  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错/AP 族/"
+          "非法重采样与置信水平拒绝）")
 
 
 def test_analysis_tolerates_malformed_external_records():
