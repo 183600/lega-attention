@@ -760,6 +760,29 @@ def test_token_stream_hard_checks():
     print("  [ok] token 流硬校验：越界/NaN/Inf/空流/非整数/uint16 容量")
 
 
+def test_prepare_bins_rejects_token_id_overflow_before_uint16_cast(monkeypatch):
+    """分词器返回 >65535 的 id 必须在 astype(uint16) 前拒绝，不能被环绕。"""
+    import lega.data as data_mod
+
+    class BadTok:
+        name = "char"
+        n_vocab = 65536
+
+        def encode(self, text):
+            return [70000] if text else []
+
+    monkeypatch.setattr(data_mod, "get_tokenizer", lambda *a, **k: BadTok())
+    with tempfile.TemporaryDirectory() as d:
+        _write_min_splits(d)
+        try:
+            prepare_bins(d, kind="char", force=True)
+            raise AssertionError("越界 token id 应抛 ValueError")
+        except ValueError as e:
+            assert "65535" in str(e) or "越界" in str(e)
+        assert not os.path.exists(os.path.join(d, "train.bin"))
+    print("  [ok] encode_stream：越界 id 在 uint16 转换前显式拒绝")
+
+
 def test_char_vocab_fit_on_train_only():
     tok = get_tokenizer("char", train_text="abc def", val_text="!!!zzz")
     assert isinstance(tok, CharTokenizer)

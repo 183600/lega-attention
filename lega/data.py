@@ -390,7 +390,23 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                 if nl > pos:
                     end = nl + 1
             e = tok.encode(text[pos:end])
-            parts.append(np.asarray(e, dtype=np.uint16))
+            arr = np.asarray(e)
+            if arr.size:
+                if arr.dtype.kind not in "iu":
+                    raise ValueError(
+                        f"分词器返回非整数 token（dtype={arr.dtype}），"
+                        f"拒绝编码 {pos}:{end}")
+                wide = arr.astype(np.int64)
+                lo, hi = int(wide.min()), int(wide.max())
+                if lo < 0 or hi > 65535:
+                    # 先 astype(uint16) 再校验会让 70000 环绕成 4464，
+                    # token_stream_stats 只看到合法 id，脏数据被静默接受。
+                    raise ValueError(
+                        f"token id 越界 uint16（min={lo}, max={hi}，"
+                        f"分块 {pos}:{end}）：拒绝静默环绕，请检查分词器/词表")
+                parts.append(wide.astype(np.uint16))
+            else:
+                parts.append(np.zeros(0, dtype=np.uint16))
             pos = end
         return np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint16)
 
