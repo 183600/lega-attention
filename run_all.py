@@ -129,6 +129,11 @@ _AUDIT_EXEMPT_KEYS = {"variant", "seed", "device", "tag"}
 # 少于 MIN_SEEDS 个种子时只报描述统计，不作显著性/组件有效性判定。
 ALPHA = 0.05
 MIN_SEEDS = 3
+# 窗口级 bootstrap 的最低样本量：窗口只有 2~3 个时，重采样分布本身几乎
+# 没有自由度，却可能给出极窄区间和“显著”假象（冒烟配置就会触发）。少于
+# 该门槛只报点估计/区间并明确标注证据不足，不生成显著性措辞。
+MIN_PPL_WINDOW_SEEDS = 2
+MIN_PPL_WINDOWS = 8
 
 _SEED_RE = re.compile(r"_seed(\d+)$")
 
@@ -1366,6 +1371,8 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
                   if obs != 0 else 1.0)
         same_sign = (float(np.mean((reps > 0) == (obs > 0)))
                      if obs != 0 else 0.0)
+        enough = (n_seeds >= MIN_PPL_WINDOW_SEEDS
+                  and min(window_counts) >= MIN_PPL_WINDOWS)
         res = {
             "candidate": cand, "reference": ref,
             "metric": "PPL窗口配对", "lower_is_better": True,
@@ -1374,6 +1381,9 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "n_windows_min": min(window_counts),
             "n_windows_max": max(window_counts),
             "n_window_observations": int(sum(d.size for d in seed_diffs)),
+            "enough_windows": bool(enough),
+            "min_window_seeds": MIN_PPL_WINDOW_SEEDS,
+            "min_windows_per_seed": MIN_PPL_WINDOWS,
             "mean_diff": obs,
             "mean_diff_ci95": [float(lo), float(hi)],
             "ppl_ratio": float(math.exp(min(20.0, obs))),
@@ -1392,16 +1402,20 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
     pads = holm_bonferroni([t.get("p") for t in out])
     for t, padj in zip(out, pads):
         t["p_adj"] = padj
+        ci = t.get("mean_diff_ci95")
+        ci_s = (f"，95% CI [{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "")
         if t.get("mean_diff") is None or padj is None:
             t["verdict"] = "无法检验"
+        elif not t.get("enough_windows"):
+            t["verdict"] = (f"证据不足（种子 {t['n_seeds']}，每种子窗口 "
+                            f"{t['n_windows_min']}–{t['n_windows_max']}；"
+                            f"最低 {MIN_PPL_WINDOW_SEEDS} 种子×"
+                            f"{MIN_PPL_WINDOWS} 窗口），仅报点估计{ci_s}")
         elif padj < ALPHA:
             t["verdict"] = ("窗口级显著优于（Holm 校正后）"
                             if t["mean_diff"] < 0 else
                             "窗口级显著劣于（Holm 校正后）")
         else:
-            ci = t.get("mean_diff_ci95")
-            ci_s = (f"，95% CI [{ci[0]:+.4f}, {ci[1]:+.4f}]"
-                    if ci else "")
             t["verdict"] = (f"窗口级无显著差异（Holm 校正后 p={padj:.4f}"
                             f"{ci_s}）")
     return out
@@ -4794,7 +4808,9 @@ def build_summary(results_dir: str, audit: dict = None,
            "聚合 PPL。各变体共享同一批窗口序号，以下逐窗口配对 `loss_candidate−"
            "loss_reference`，并用“先重采样种子、再重采样窗口”的分层 bootstrap "
            "给出平均 NLL 差的区间；窗口间空间相关被忽略，故只作探索性证据。"
-           "`PPL比`=exp(ΔNLL)，<1 表示候选更好。", ""]
+           "`PPL比`=exp(ΔNLL)，<1 表示候选更好。"
+           f"低于 {MIN_PPL_WINDOW_SEEDS} 个种子或每种子 {MIN_PPL_WINDOWS} "
+           "个窗口时只报点估计/区间，不生成“显著”措辞（重采样自由度不足）。", ""]
     if ppl_window_tests:
         md += ["| 对比 | 种子 | 窗口数(最小–最大) | ΔNLL均值 | 分层bootstrap 95% CI | "
                "PPL比 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",

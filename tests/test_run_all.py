@@ -3217,24 +3217,24 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
 
     def ev(losses, idx, **kw):
         base = {"split": "test", "eval_ctx": 10, "eval_iters": len(idx),
-                "val_windows": 9, "val_tokens_evaluated": 10 * len(idx),
+                "val_windows": max(9, len(idx)),
+                "val_tokens_evaluated": 10 * len(idx),
                 "window_losses": losses, "window_indices": idx}
         base.update(kw)
         return {"eval": base}
 
+    idx = list(range(0, 30, 3))  # 10 个窗口，越过最低窗口门槛
     runs = {
-        "lega": {7: ev([1.0, 1.0, 1.0], [0, 4, 8]),
-                 8: ev([1.5, 1.5, 1.5], [0, 4, 8])},
-        "standard": {7: ev([2.0, 2.0, 2.0], [0, 4, 8]),
-                     8: ev([2.0, 2.0, 2.0], [0, 4, 8])},
+        "lega": {7: ev([1.0] * 10, idx), 8: ev([1.5] * 10, idx)},
+        "standard": {7: ev([2.0] * 10, idx), 8: ev([2.0] * 10, idx)},
     }
     assert _eval_window_losses(runs["lega"][7]["eval"]) == \
-        {0: 1.0, 4: 1.0, 8: 1.0}
+        {i: 1.0 for i in idx}
     out = _ppl_window_paired_tests(runs, [("lega", "standard")],
                                    n_resamples=200)
     assert len(out) == 1, out
     t = out[0]
-    assert t["n_seeds"] == 2 and t["n_windows_min"] == 3, t
+    assert t["n_seeds"] == 2 and t["n_windows_min"] == 10, t
     assert abs(t["mean_diff"] - (-0.75)) < 1e-12, t  # seed7 -1, seed8 -0.5
     assert t["ppl_ratio"] < 1.0, t
     assert t["mean_diff_ci95"][1] < 0, t
@@ -3253,7 +3253,19 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
         "standard": {7: ev([2.0, 2.0], [0, 4], eval_ctx=20)},
     }
     assert _ppl_window_paired_tests(runs3, [("lega", "standard")]) == []
-    print("  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号门槛")
+
+    # 1 个种子 × 3 个窗口：重采样自由度不足，只能报区间，不能宣称显著
+    thin = {
+        "lega": {7: ev([1.0, 1.0, 1.0], [0, 4, 8])},
+        "standard": {7: ev([2.0, 2.0, 2.0], [0, 4, 8])},
+    }
+    tt = _ppl_window_paired_tests(thin, [("lega", "standard")],
+                                  n_resamples=50)[0]
+    assert tt["enough_windows"] is False
+    assert tt["verdict"].startswith("证据不足"), tt
+    assert "显著" not in tt["verdict"], tt
+    print("  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号/"
+          "最小窗口门槛")
 
 
 def test_build_summary_renders_both_eval_sampling_sections():
