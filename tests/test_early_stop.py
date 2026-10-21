@@ -15,7 +15,8 @@ import tempfile
 
 from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
-from lega.train import _config_int, _config_min_delta, early_stop_update
+from lega.train import (_config_int, _config_min_delta, _config_nonneg_float,
+                        early_stop_update)
 
 
 def test_early_stop_update_semantics():

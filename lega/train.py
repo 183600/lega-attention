@@ -703,6 +703,26 @@ def _config_int(value, name: str, minimum: int) -> int:
     return value
 
 
+def _config_nonneg_float(value, name: str) -> float:
+    """训练数值超参数必须是有限非负数，拒绝 bool/NaN/Inf/负值。
+
+    ``float(True)=1.0`` 会让布尔值冒充真实超参数；负的 lr/weight_decay 会
+    朝错误方向更新，负的 grad_clip 会让 ``clip_grad_norm_`` 把梯度整体反号。
+    这些配置错误必须在开训/写任何 run 产物之前失败。
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"config.{name} 必须是数值，收到 bool {value!r}")
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"config.{name} 必须是数值，收到 {value!r}") from e
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"config.{name} 必须是有限非负数，收到 {value!r}")
+    return value
+
+
 def _config_min_delta(value) -> float:
     """早停相对改善阈值：必须是 [0, 1) 内有限浮点，拒绝 bool/NaN/Inf。
 
@@ -808,6 +828,13 @@ def main():
     min_delta_raw = cfg.get("early_stop_min_delta", 0.0)
     early_stop_min_delta = _config_min_delta(
         0.0 if min_delta_raw is None else min_delta_raw)
+    # 数值超参数在开训前统一校验：负 lr/weight_decay 会朝反方向优化，
+    # 负 grad_clip 会翻转梯度符号，NaN/Inf 会直接污染参数；这些错误不能
+    # 等到写出 manifest/config_used 或训练若干步后才暴露。
+    lr = _config_nonneg_float(cfg["lr"], "lr")
+    weight_decay = _config_nonneg_float(
+        cfg.get("weight_decay", 0.1), "weight_decay")
+    grad_clip = _config_nonneg_float(cfg.get("grad_clip", 1.0), "grad_clip")
     # 种子必须是精确整数：配置里的 "seed": true → 1 或 1.5 → 1 会让本次
     # 训练以与声明不同的种子播种，而 checkpoint/manifest/曲线记的是截断值，
     # 事后无法区分。int(True)==1、int(1.5)==1 都不可接受。
@@ -946,13 +973,12 @@ def main():
           f"tokens/step={batch_size * train_ctx:,} seed={seed}")
 
     opt = configure_optimizer(
-        model, lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.1)),
+        model, lr=lr, weight_decay=weight_decay,
         fused=(device.startswith("cuda")))
     base_lrs = [g["lr"] for g in opt.param_groups]
     # 梯度裁剪的参数列表与优化器同口径
     clip_params = [p for p in model.parameters() if p.requires_grad]
 
-    grad_clip = float(cfg.get("grad_clip", 1.0))
     amp_dt = amp_dtype_for(device, bool(cfg.get("amp", True)))
     amp_ctx = amp_autocast(device, amp_dt is not None)
     # 曲线点数在训练开始前就固定了：采样过稀时过拟合/早停/尖峰诊断会静默
