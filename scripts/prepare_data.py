@@ -354,6 +354,13 @@ def main():
         detail = (f"val/test 共享长行：精确 {val_test_overlap['exact_lines']} 条、"
                   f"空白归一化后 {val_test_overlap['normalized_lines']} 条")
         if not args.allow_leaky_split:
+            # 三个 txt 已经落盘；拒绝时必须删除本次写出的泄露划分，否则
+            # “命令失败但文件仍在”会让后续手动流程误用这份数据。
+            for path in txt_paths.values():
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
             raise SystemExit(
                 f"[data] 拒绝写出泄露划分：{detail}。val 用于选 checkpoint、"
                 "test 用于最终报告，两者共享样本会使 test 不再独立；请核查"
