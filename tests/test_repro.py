@@ -32,6 +32,32 @@ def test_set_seed_covers_python_numpy_torch():
     print("  [ok] set_seed 覆盖 random/np/torch，批采样顺序由 seed 唯一确定")
 
 
+def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
+    """种子身份不能被 int() 截断：True 当 1、1.5 当 1 都会让审计说谎。
+
+    set_seed(True) 会静默播种到 1 且报告 "seed": 1；set_seed(1.5) 会在
+    np.random.seed 处以 TypeError 半途失败（PYTHONHASHSEED 已被写成 "1"）。
+    两者都必须在入口就显式拒绝。
+    """
+    for bad in (True, False, 1.5, -0.5, float("nan"), float("inf"),
+                "1.5", "abc", "", [1], {"seed": 1}, None):
+        for fn in (set_seed, seed_report):
+            try:
+                fn(bad)
+                raised = False
+            except ValueError:
+                raised = True
+            assert raised, (fn.__name__, bad)
+    # 整数值浮点/整数字符串语义明确，规范化成同一个 int（不再半途崩溃）
+    set_seed(1337.0)
+    rep = seed_report("1337")
+    assert rep["seed"] == 1337 and rep["seed_verified"] is True
+    assert seed_report(1337)["rng_fingerprints"] == rep["rng_fingerprints"]
+    # 环境里的 PYTHONHASHSEED 不可解析为整数时如实标 None，不截断比较
+    assert seed_report(1337)["pythonhashseed_at_start"] in (None, "1337")
+    print("  [ok] set_seed/seed_report 拒绝 bool/小数/非整数字符串种子")
+
+
 def test_sha256_file_deterministic_and_sensitive():
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "a.bin")

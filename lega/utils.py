@@ -22,8 +22,10 @@ import contextlib
 import hashlib
 import json
 import math
+import operator
 import os
 import random
+import re
 import statistics
 import time
 
@@ -85,6 +87,34 @@ def rng_state_fingerprint() -> dict:
     return fp
 
 
+def strict_int(value, name: str = "值") -> int:
+    """严格整数化：只接受整数（含整数值浮点与整数字符串），否则 ValueError。
+
+    为什么不能直接用 ``int()``：``int(True) is 1``、``int(1.5) is 1``——
+    bool 是 int 的子类、小数被静默截断。种子/步数这类“身份与规格”字段一旦
+    被截断，记录下来的值（台账、checkpoint、报告）就会与真正使用的值错位：
+    伪造的 1.5 或 True 也能与种子 1 “对上”，核对彻底失效。整数值浮点
+    （1337.0）与整数字符串（"1337"）语义明确，规范化为 int；其余（bool、
+    小数、NaN/Inf、"1_0"、非数值类型）一律显式拒绝。
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是整数，收到 bool {value!r}")
+    if isinstance(value, str):
+        s = value.strip()
+        if re.fullmatch(r"[+-]?\d+", s) is None:
+            raise ValueError(f"{name} 必须是整数，收到 {value!r}")
+        return int(s)
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(f"{name} 必须是有限整数，收到 {value!r}")
+        return int(value)
+    try:
+        # numpy 整数（np.int64 等）不是 int 子类，但定义了 __index__。
+        return int(operator.index(value))
+    except TypeError as e:
+        raise ValueError(f"{name} 必须是整数，收到 {value!r}") from e
+
+
 def set_seed(seed: int) -> None:
     """固定当前进程内所有随机源，使同一台机器上的同一实验可复现。
 
@@ -100,8 +130,12 @@ def set_seed(seed: int) -> None:
     状态指纹（_LAST_SEED），seed_report 据此提供种子生效的可核对证据。
     跨硬件架构（不同 GPU 型号、CPU 指令集、cuDNN 版本）无法保证逐位一致，
     本函数只保证同机相对稳定。
+
+    种子先经 strict_int 规范化：bool/小数/非整数字符串直接 ValueError，
+    不允许 True 被当成 1、1.5 被截断成 1 后“看起来播种成功”。
     """
-    os.environ.setdefault("PYTHONHASHSEED", str(int(seed)))
+    seed = strict_int(seed, "seed")
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -118,7 +152,7 @@ def set_seed(seed: int) -> None:
     except TypeError:  # 兼容没有 warn_only 参数的旧版 PyTorch
         torch.use_deterministic_algorithms(True)
         _LAST_SEED["deterministic_warn_only"] = False
-    _LAST_SEED["seed"] = int(seed)
+    _LAST_SEED["seed"] = seed
     _LAST_SEED["fingerprints"] = rng_state_fingerprint()
 
 
@@ -140,23 +174,31 @@ def seed_report(seed: int) -> dict:
       * ``pythonhashseed_effective``：仅当启动时已带数值且等于 seed 才为
         True；启动时未设置时为 False（等价于“本进程未固定，已显式标注”），
         启动时的值不可解析为整数时为 None。
+
+    seed 与 set_seed 同口径先经 strict_int 规范化：bool/小数/非整数字符串
+    直接 ValueError，报告里的 "seed" 永远等于真正播种的那个整数。
     """
+    seed = strict_int(seed, "seed")
+
     def _as_int(value):
+        """环境值 → int；bool/小数/不可解析字符串返回 None（不截断、不当 1）。"""
+        if value is None:
+            return None
         try:
-            return int(value)
-        except (TypeError, ValueError):
+            return strict_int(value, "PYTHONHASHSEED")
+        except ValueError:
             return None
 
     at_start = _ENV_AT_IMPORT.get("PYTHONHASHSEED")
     start_int = _as_int(at_start)
     fp = (_LAST_SEED["fingerprints"]
-          if _LAST_SEED["seed"] == int(seed) else None)
+          if _LAST_SEED["seed"] == seed else None)
     # 逐随机源的 seed 不是“复述参数”：只有最近一次 set_seed 的种子与请求
     # 一致时，这些随机源才真的被该 seed 固定。否则记录 None，避免请求旧/
     # 未设置种子的报告冒充实际 RNG 证据（与 rng_fingerprints 的口径一致）。
-    verified_seed = int(seed) if fp is not None else None
+    verified_seed = seed if fp is not None else None
     return {
-        "seed": int(seed),
+        "seed": seed,
         "seed_verified": fp is not None,
         "python_random": verified_seed,
         "numpy_global": verified_seed,
@@ -166,7 +208,7 @@ def seed_report(seed: int) -> dict:
         "pythonhashseed_env": os.environ.get("PYTHONHASHSEED"),
         "pythonhashseed_effective": (
             None if (at_start is not None and start_int is None)
-            else start_int == int(seed)),
+            else start_int == seed),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
