@@ -112,7 +112,7 @@ def categorize_case(rec: Dict) -> Dict:
     if task == "fwe":
         # 外部/旧格式 JSON 的 pred 可能是数字等非字符串类型：显式 str()，
         # 一个坏样本不应让整份归因报告崩溃
-        pred_words = set(_WORD_RE.findall(str(r.get("pred") or "").lower()))
+        pred_words = set(_WORD_RE.findall(_pred_text(r).lower()))
         top = _word_set(r.get("answer_words"))
         if not pred_words:
             r["category"] = "fwe_no_parse"
@@ -140,7 +140,7 @@ def categorize_case(rec: Dict) -> Dict:
         return r
     # 3) 数值任务：按输出的第一个数字归因（与 EM 计分口径一致）；
     # pred 可能是数字等非字符串类型，显式 str() 后再解析
-    nums = _NUM_RE.findall(str(r.get("pred") or ""))
+    nums = _NUM_RE.findall(_pred_text(r))
     if not nums:
         r["category"] = "no_answer"
         r["explanation"] = "模型没有给出可解析的数字回答（可能复读问题或提前停止）"
@@ -229,25 +229,35 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
             "不能据此宣称方法更强",
             "扩大 RULER 的 n_samples 与 ctx 档位、加深 needle 深度后再比较")]
     recs = []
-    if n < MIN_PATTERN_CASES:
-        recs.append(_advice(
-            "评测", "低", f"仅 {n} 条错误样本，模式不具统计意义",
-            "先扩大评测规模再按归因下结论（单条错误可能是偶然）",
-            "把 RULER n_samples/ctx_lens 提高到每格 ≥20 个样本"))
-        # 样本不足时任何类别占比/深位比例都只是 1~2 条的偶然结果；继续
-        # 输出“高优先级模型改进方向”会把噪声包装成证据。只保留扩样提示。
-        return recs[:MAX_ADVICE]
     le = _count_int(ana.get("label_errors")) or 0
+    lu = _count_int(counts.get("label_unknown")) or 0
+    # 标注错误与“缺少自检证据”的样本都不属于模型失败：类别主导度与深位
+    # 难度的分母都要剔除。label_unknown 不是可归因错误，若留在分母里会
+    # 稀释真实模型盲区，甚至把“无法核对”包装成模型方向。
+    model_n = max(0, n - le - lu)
     if le:
         recs.append(_advice(
             "数据/构造", "高", f"{le}/{n} 条错误的 gold 不在 prompt 中",
             "先修评测构造/标注再谈模型：构造错误会同时污染 EM、机制分析与"
             "跨变体对照",
             "核查 RULER needle 插入与答案抽取逻辑，补 answer_in_prompt 断言后重跑"))
-    # 标注/构造错误不属于模型失败：类别主导度与深位难度的分母都要剔除，
-    # 否则大量标注错误会把真实的模型盲区稀释到阈值以下（或反过来把
-    # “深位失败”全算成数据错误的功劳）。
-    model_n = max(0, n - le)
+    if lu:
+        recs.append(_advice(
+            "评测/导出", "中",
+            f"{lu}/{n} 条错误缺少可核对的 answer_in_prompt 自检证据",
+            "先补齐/修复导出再归因：无法确认 gold 是否在 prompt 中时，"
+            "这些样本不能计入模型失败",
+            "在 RULER 结果中写入布尔 answer_in_prompt 并重跑归因"))
+    if model_n < MIN_PATTERN_CASES:
+        if model_n > 0:
+            recs.append(_advice(
+                "评测", "低",
+                f"仅 {model_n} 条可归因于模型的错误样本，模式不具统计意义",
+                "先扩大评测规模再按归因下结论（单条错误可能是偶然）",
+                "把 RULER n_samples/ctx_lens 提高到每格 ≥20 个样本"))
+        # 样本不足时任何类别占比/深位比例都只是 1~2 条的偶然结果；继续
+        # 输出“高优先级模型改进方向”会把噪声包装成证据。
+        return recs[:MAX_ADVICE]
     deep = _finite_float(ana.get("deep_position_fail_ratio"))
     if (deep is not None and 0.0 <= deep <= 1.0 and deep >= DEEP_FAIL_TOL
             and model_n >= MIN_PATTERN_CASES):
@@ -323,7 +333,7 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
     # 深位（>0.75）失败占比用于判断"是样本极难，还是模型系统性盲区"
     with_depth = [c for c in cases if c.get("depth") is not None
                   and str(c.get("task") or "").startswith("niah")
-                  and c.get("category") != "label_error"]
+                  and c.get("category") not in ("label_error", "label_unknown")]
     deep_fail = sum(1 for c in with_depth if c["depth"] > 0.75)
     out = {
         "variant": variant,
@@ -359,7 +369,7 @@ def format_case(idx: int, c: Dict) -> List[str]:
     if c.get("needle_excerpt"):
         ne = str(c["needle_excerpt"]).replace("\n", " ⏎ ")
         lines.append(f"- gold 证据摘录: {ne}")
-    pred = str(c.get("pred") or "").strip().replace("\n", " ⏎ ")
+    pred = _pred_text(c).strip().replace("\n", " ⏎ ")
     if len(pred) > 160:
         pred = pred[:160] + "…"
     lines.append(f"- 模型输出: {pred!r}")
@@ -620,6 +630,19 @@ def _finite_float(v):
     return f if math.isfinite(f) else None
 
 
+def _pred_text(rec: Dict) -> str:
+    """预测文本；数值 0 是合法输出，不能因 falsy 被当成空串。
+
+    ``str(rec.get("pred") or "")`` 会把 0/0.0 变成空串，使模型真实输出的
+    数字 0 被误归因为 no_answer。bool/容器/None 不是有效预测文本，按缺失
+    处理（False 也不应被解析成单词 false）。
+    """
+    pred = rec.get("pred") if isinstance(rec, dict) else None
+    if pred is None or isinstance(pred, (bool, dict, list, tuple, set)):
+        return ""
+    return str(pred)
+
+
 def _safe_int(v):
     if _finite_float(v) is None:
         return None
@@ -676,7 +699,8 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     if not isinstance(ana, dict):
         return []
     n = _count_int(ana.get("n_windows")) or 0
-    counts = ana.get("category_counts") or {}
+    counts = ana.get("category_counts")
+    counts = counts if isinstance(counts, dict) else {}
     if n == 0:
         return [_advice(
             "评测", "低", "最差窗口记录为空",
@@ -684,15 +708,34 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             "错在哪句话",
             "评测时开启 --worst_n（如 5）并复核导出格式")]
     recs = []
-    if n < MIN_PATTERN_CASES:
+    up = _count_int(counts.get("unparsed")) or 0
+    lu = _count_int(counts.get("label_unknown")) or 0
+    # unparsed/label_unknown 是导出/真值缺失，不是模型失败；它们既不能
+    # 进入模式占比的分母，也不能因总数够大就让模式结论通过统计门槛。
+    model_n = max(0, n - up - lu)
+    if up:
         recs.append(_advice(
-            "评测", "低", f"仅 {n} 个最差窗口，模式不具统计意义",
-            "先扩大 worst_n/评测窗口数再按归因下结论",
-            "把 --worst_n 提高到 ≥10 并跨更多窗口采样"))
+            "评测/导出", "中", f"{up}/{n} 个窗口没有可用的 top5 预测",
+            "先修评测导出再归因：旧格式/导出失败会让错误模式被静默丢弃",
+            "核对 evaluate 的 worst_windows 字段与版本兼容；重跑评测导出"))
+    if lu:
+        recs.append(_advice(
+            "评测/导出", "中", f"{lu}/{n} 个窗口缺少可用的 gold_next",
+            "无真值无法判断预测对错：先修复/重导 gold 再归因，不能把这些"
+            "窗口算成高置信错答或长尾失败",
+            "核对 evaluate 的 worst_windows 是否完整写入 gold_next；"
+            "用当前版本重跑评测并复核导出"))
+    if model_n < MIN_PATTERN_CASES:
+        if model_n > 0:
+            recs.append(_advice(
+                "评测", "低",
+                f"仅 {model_n} 个可归因于模型的最差窗口，模式不具统计意义",
+                "先扩大 worst_n/评测窗口数再按归因下结论",
+                "把 --worst_n 提高到 ≥10 并跨更多窗口采样"))
         # 同 synthesize_ruler_improvements：窗口太少时不下高/中优先级结论。
         return recs[:MAX_ADVICE]
-    cb = counts.get("confident_bias", 0)
-    if _share(cb, n) >= DOMINANT_SHARE:
+    cb = _count_int(counts.get("confident_bias")) or 0
+    if _share(cb, model_n) >= DOMINANT_SHARE:
         # 分支判定只看 confident_bias 这批窗口：全局 gold_in_context_rate 会把
         # 其它类别（如 repetition_attractor）的可见性算进来，可能把"这批窗口
         # 的 gold 根本没见过"错判成"模型看得到却没抄对"。
@@ -713,7 +756,7 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             # 也不能把未知当成“gold 从未出现”，先补齐证据再归因。
             recs.append(_advice(
                 "评测/导出", "中",
-                f"高置信错答占 {cb}/{n}，但缺少 gold_in_context 记录，"
+                f"高置信错答占 {cb}/{model_n}，但缺少 gold_in_context 记录，"
                 "无法判断是检索失败还是长尾预测失败",
                 "先补齐窗口级 gold 可见性再决定改结构还是扩数据；把未知"
                 "当成“从未出现”会低估复制/检索机制的问题",
@@ -722,7 +765,7 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
         elif gic >= 0.5:
             recs.append(_advice(
                 "模型/方法", "高",
-                f"高置信错答占 {cb}/{n}，且{scope} {gic:.0%} 的 gold 在上下文中",
+                f"高置信错答占 {cb}/{model_n}，且{scope} {gic:.0%} 的 gold 在上下文中",
                 "模型看得到却没抄对：优先检查注意力是否落在 gold 跨度"
                 "（复制/检索失败而非知识缺失），这类失败最可能通过结构调整改善",
                 "对这批窗口检查 top-1 注意力位置与 gold 跨度的重叠；区分"
@@ -730,50 +773,36 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
         else:
             recs.append(_advice(
                 "模型/方法", "高",
-                f"高置信错答占 {cb}/{n}，且 gold 大多不在上下文中",
+                f"高置信错答占 {cb}/{model_n}，且 gold 大多不在上下文中",
                 "真正的预测失败/长尾：结构改进收益有限，优先扩大数据"
                 "（或先按训练曲线判断是否过拟合再决定正则化）",
                 "抽样人工复核 gold 可预测性；对照 curve_diagnosis.json 的"
                 "状态决定是增数据还是加正则化"))
-    rep = counts.get("repetition_attractor", 0)
-    if _share(rep, n) >= DOMINANT_SHARE:
+    rep = _count_int(counts.get("repetition_attractor")) or 0
+    if _share(rep, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "中",
-            f"复读吸引子占 {rep}/{n}（低置信下退化为抄上下文）",
+            f"复读吸引子占 {rep}/{model_n}（低置信下退化为抄上下文）",
             "检查训练语料重复率与重复上下文下的写入行为，而不是只加解码惩罚",
             "核对 datacheck 报告的重复样本率；对门控变体比较重复上下文中的"
             "gate_mean（是否错误压制了写入）"))
-    lc = counts.get("low_confidence", 0)
-    if _share(lc, n) >= DOMINANT_SHARE:
+    lc = _count_int(counts.get("low_confidence")) or 0
+    if _share(lc, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "中",
-            f"低置信占 {lc}/{n}（模型在多个候选间平均）",
+            f"低置信占 {lc}/{model_n}（模型在多个候选间平均）",
             "先按训练曲线判断是欠拟合（调学习率/数据管道）还是样本本身多解，"
             "再决定扩容或增加数据",
             "对照 curve_diagnosis.json：欠拟合→调学习率/数据；正常收敛→"
             "扩充数据或接受该样本的歧义性"))
-    tc = counts.get("top1_correct", 0)
-    if _share(tc, n) >= DOMINANT_SHARE:
+    tc = _count_int(counts.get("top1_correct")) or 0
+    if _share(tc, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "校准", "低",
-            f"top1 正确但低置信占 {tc}/{n}",
+            f"top1 正确但低置信占 {tc}/{model_n}",
             "排位正确、概率低属校准问题而非检索问题：温度缩放/top-k 校准"
             "优先于改结构",
             "在 held-out 窗口上做温度扫描，报告校准后的 NLL/ECE 变化"))
-    up = counts.get("unparsed", 0)
-    if up:
-        recs.append(_advice(
-            "评测/导出", "中", f"{up}/{n} 个窗口没有可用的 top5 预测",
-            "先修评测导出再归因：旧格式/导出失败会让错误模式被静默丢弃",
-            "核对 evaluate 的 worst_windows 字段与版本兼容；重跑评测导出"))
-    lu = counts.get("label_unknown", 0)
-    if lu:
-        recs.append(_advice(
-            "评测/导出", "中", f"{lu}/{n} 个窗口缺少可用的 gold_next",
-            "无真值无法判断预测对错：先修复/重导 gold 再归因，不能把这些"
-            "窗口算成高置信错答或长尾失败",
-            "核对 evaluate 的 worst_windows 是否完整写入 gold_next；"
-            "用当前版本重跑评测并复核导出"))
     return recs[:MAX_ADVICE]
 
 

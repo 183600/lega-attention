@@ -60,6 +60,19 @@ def test_categorize_tolerates_non_string_pred():
     print("  [ok] 数值型 pred 容错（归因正确）")
 
 
+def test_zero_pred_is_valid_numeric_answer():
+    """模型输出数字 0 是合法回答，不能因 falsy 被当成“无数值回答”。"""
+    for pred, ctx_num in ((0, "0"), (0.0, "0.0"), ("0", "0")):
+        c = categorize_case(_case(pred=pred, ctx_nums=[ctx_num]))
+        assert c["category"] == "copy_distractor", (pred, c)
+        assert f"输出了 {ctx_num}" in c["explanation"], c
+        rendered = "\n".join(format_case(1, c))
+        assert f"模型输出: '{ctx_num}'" in rendered, rendered
+    c = categorize_case(_case(pred=0, ctx_nums=["1234567"]))
+    assert c["category"] == "hallucinated", c
+    print("  [ok] 数值 0 的预测参与归因与渲染（不被 falsy 清空）")
+
+
 def test_badcase_numeric_tokens_match_ruler_scorer():
     """归因必须与 RULER 计分共用“完整数值 token”：否则 -7021853、
     7021853.9、1e6 或短数字 123 会被 _NUM_RE 截断，误抄被判成幻觉。"""
@@ -864,6 +877,25 @@ def test_label_errors_excluded_from_model_advice_denominator():
     print("  [ok] 标注错误从模型改进方向的分母中剔除")
 
 
+def test_label_unknown_excluded_from_model_advice_denominator():
+    """缺少自检证据的样本不是模型失败：不能稀释主导模式或深位比例。"""
+    cases = ([_case(pred="1234567", ctx_nums=[], in_prompt=0, depth=0.9)] * 10
+             + [_case(pred="1234567", ctx_nums=["1234567"], depth=0.2)] * 3)
+    ana = analyze_badcases(cases, variant="lega")
+    assert ana["category_counts"]["label_unknown"] == 10
+    assert ana["deep_position_fail_ratio"] == 0.0
+    assert any("误抄干扰值占模型错误 3/3" in r["trigger"]
+               for r in ana["recommendations"]), ana["recommendations"]
+    assert any("缺少可核对" in r["trigger"] and r["axis"] == "评测/导出"
+               for r in ana["recommendations"]), ana["recommendations"]
+    # 样本不足提示也应基于可归因于模型的错误数，而不是含 label_unknown 的总数
+    tiny = analyze_badcases([_case(pred="1234567", ctx_nums=["1234567"])]
+                            + [_case(pred="1", ctx_nums=[], in_prompt=0)] * 10)
+    assert any("仅 1 条可归因于模型" in r["trigger"]
+               for r in tiny["recommendations"]), tiny["recommendations"]
+    print("  [ok] label_unknown 从模型改进方向的分母中剔除")
+
+
 def test_ruler_improvement_synthesis():
     """归因不止于分类：主导错误模式必须转成带触发证据的改进方向。"""
     keys = {"axis", "priority", "trigger", "suggestion", "next_experiment"}
@@ -967,6 +999,27 @@ def test_window_advice_does_not_claim_unknown_gold_visibility():
     assert "大多不在上下文中" not in cb[0]["trigger"]
     assert cb[0]["axis"] == "评测/导出"
     print("  [ok] 高置信错答：gold 可见性未知时不伪造“未出现”结论")
+
+
+def test_unparsed_and_unknown_windows_dont_dilute_model_patterns():
+    """导出失败/无 gold 的窗口不能进入模型模式占比分母或统计门槛。"""
+    cb = [_win(gold="zzz", tail="no match here",
+               pred_top5=[[" red", 0.85]]) for _ in range(3)]
+    unknown = [_win(gold=None, pred_top5=[[" blue", 0.9]]) for _ in range(10)]
+    ana = analyze_worst_windows(cb + unknown, variant="lega")
+    assert ana["category_counts"]["label_unknown"] == 10
+    triggers = [r["trigger"] for r in ana["recommendations"]]
+    assert any("高置信错答占 3/3" in t for t in triggers), triggers
+    assert any("缺少可用的 gold_next" in t for t in triggers), triggers
+    assert not any("仅" in t and "可归因于模型" in t for t in triggers), triggers
+    # 只有导出问题时也必须给出对应的中优先级建议，而不是“样本不足”
+    tiny = analyze_worst_windows([
+        _win(pred_top5="bad", gold="x"),
+        _win(gold=None, pred_top5=[[" blue", 0.9]])], variant="lega")
+    assert {r["axis"] for r in tiny["recommendations"]} == {"评测/导出"}
+    assert all("可归因于模型" not in r["trigger"]
+               for r in tiny["recommendations"])
+    print("  [ok] 导出失败/无 gold 窗口不稀释模型模式与门槛")
 
 
 def test_cross_improvement_reports_fixed_only_variant():
