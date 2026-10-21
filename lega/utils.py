@@ -246,6 +246,15 @@ def _json_safe(obj):
         return _json_safe(obj.tolist())
     if isinstance(obj, np.generic):
         obj = obj.item()
+        # np.longdouble/float128 的 .item() 仍返回 numpy 标量（不是 Python
+        # float），json.dump 会直接报不可序列化；显式降为内置 float。
+        if isinstance(obj, np.generic):
+            if isinstance(obj, np.floating):
+                obj = float(obj)
+            elif isinstance(obj, np.integer):
+                obj = int(obj)
+            elif isinstance(obj, np.bool_):
+                obj = bool(obj)
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
