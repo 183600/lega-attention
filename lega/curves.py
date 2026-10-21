@@ -114,7 +114,9 @@ def load_train_log(path: str) -> List[Dict]:
         return []
     recs = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # 日志被中断时可能留下半个 UTF-8 字符：按替换字符读入，坏行随后由
+        # JSON 解析失败跳过，而不是让整个诊断因 UnicodeDecodeError 崩溃。
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -197,16 +199,21 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
 def _detect_loss_spikes(train_pts: List[Dict]) -> List[Dict]:
     """检出瞬态训练损失尖峰：值 ≥ LOSS_SPIKE_FACTOR × 两侧邻居中位数。
 
-    只比较局部邻居（每侧 LOSS_SPIKE_WINDOW 个点）而非全局中位数/均值：
+    只比较局部邻居（每侧最多 LOSS_SPIKE_WINDOW 个点）而非全局中位数/均值：
     损失整体单调下降时，全局统计会把早期高点误报为尖峰，而局部比较对
-    正常下降免疫。点太少（<2W+1）时无法判定，返回空表。
+    正常下降免疫。窗口按实际可用点截断：末尾不足 W 个右侧邻居时仍用左侧
+    邻居判定（否则训练最后一步的尖峰会被完全漏掉）；左侧邻居少于 2 个时
+    无法区分“初始高损失”与尖峰，跳过该点。
     """
     n = len(train_pts)
     w = LOSS_SPIKE_WINDOW
     spikes = []
-    for i in range(w, n - w):
-        neigh = [p["value"] for p in train_pts[i - w:i]] \
-            + [p["value"] for p in train_pts[i + 1:i + 1 + w]]
+    for i in range(2, n):
+        left = [p["value"] for p in train_pts[max(0, i - w):i]]
+        if len(left) < 2:
+            continue
+        right = [p["value"] for p in train_pts[i + 1:i + 1 + w]]
+        neigh = left + right
         med = statistics.median(neigh)
         if med <= 0:
             continue
@@ -610,8 +617,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                     f"最终验证损失比 step {best_step} 的最优值差 "
                     f"{early_stop_gain:.1%}，但未超过评估噪声 "
                     f"±{val_ci_rel:.1%}：不据此判定过拟合")
-            elif not loss_spikes:
-                # 有瞬态尖峰时不写"无需干预"：先按尖峰建议排查（下文追加）
+            elif not (loss_spikes or grad_bad or grad_spike
+                      or early_stopped or malformed_count):
+                # 任一独立告警（损失尖峰/梯度尖峰/早停/坏记录）存在时都不写
+                # “无需干预”，否则会与随后追加的诊断建议自相矛盾。
                 recommendations.append("无需干预；对比实验使用 model_best.pt")
         if gain_sig and status != "过拟合":
             recommendations.append(

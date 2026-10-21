@@ -156,6 +156,8 @@ def test_grad_norm_spike_and_nonfinite_reported():
     assert d["has_grad_spike"] and d["grad_spike_ratio"] >= 10
     assert any("尖峰" in e for e in d["evidence"]), d["evidence"]
     assert any("梯度" in r for r in d["recommendations"]), d["recommendations"]
+    assert not any("无需干预" in r for r in d["recommendations"]), \
+        "已有梯度尖峰告警时不得同时建议无需干预"
     # 非有限梯度范数（Infinity 写入 jsonl）：即使没有损失 NaN 也要判爆炸
     recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
     recs2.append({"step": 10, "grad_norm": float("inf")})
@@ -216,6 +218,24 @@ def test_transient_loss_spike_detected_even_when_trend_normal():
     assert d2["status"] == "正常收敛" and not d2["has_loss_spike"], d2
     assert any("无需干预" in r for r in d2["recommendations"])
     print("  [ok] 瞬态损失尖峰检测（与趋势独立、平滑曲线不误报）")
+
+
+def test_loss_spike_in_short_curve_and_final_point_detected():
+    """短曲线（10 点）与训练最后一步的尖峰都不能因窗口边界被漏检。"""
+    # 10 个训练点：旧实现 range(5, 5) 为空，任何尖峰都检测不到
+    train10 = [5.0, 4.8, 4.6, 40.0, 4.2, 4.0, 3.8, 3.6, 3.4, 3.2]
+    d = diagnose_curve(_log(train10, [5.0, 4.6, 4.2, 3.8, 3.4]))
+    assert d["has_loss_spike"] and any(
+        s["step"] == 40 for s in d["loss_spikes"]), d["loss_spikes"]
+    assert not any("无需干预" in r for r in d["recommendations"])
+    # 20 个训练点 + 最后一个点尖峰：旧实现 range(5, 15) 永远扫不到末尾
+    train20 = [5.0 - 0.15 * i for i in range(20)]
+    train20[-1] = 30.0
+    d2 = diagnose_curve(_log(train20, [5.0, 4.6, 4.2, 3.8, 3.4],
+                             val_steps=[100, 200, 300, 400, 500]))
+    assert d2["has_loss_spike"] and any(
+        s["step"] == 200 for s in d2["loss_spikes"]), d2["loss_spikes"]
+    print("  [ok] 短曲线/末尾训练损失尖峰均被检出")
 
 
 def test_malformed_log_records_do_not_crash_diagnosis():
@@ -388,6 +408,22 @@ def test_load_train_log_skips_valid_json_non_object_lines():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] load_train_log：非对象 JSON 行按损坏行跳过")
+
+
+def test_load_train_log_tolerates_invalid_utf8():
+    """日志被中断留下非法 UTF-8 字节时跳过坏行，不能让诊断崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "train_log.jsonl")
+        with open(p, "wb") as f:
+            f.write(b'{"step": 1, "loss": 2.0}\n')
+            f.write(b'{"step": 2, "loss": \xff}\n')
+            f.write(b'{"step": 3, "loss": 1.5}\n')
+        assert load_train_log(p) == [
+            {"step": 1, "loss": 2.0}, {"step": 3, "loss": 1.5}]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] load_train_log：非法 UTF-8 字节按坏行跳过")
 
 
 def test_rising_train_loss_not_advised_to_train_longer():
