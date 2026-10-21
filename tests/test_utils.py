@@ -102,12 +102,18 @@ def test_save_json_writes_strict_json_atomically():
         p = os.path.join(tmp, "out.json")
         save_json({"loss": float("nan"),
                    "x": [float("inf"), {"y": float("-inf")}],
+                   "np": {"nan": np.float32("nan"), "int": np.int64(3),
+                          "bool": np.bool_(True),
+                          "arr": np.array([1.0, np.inf], dtype=np.float32)},
                    "keep": 0.5}, p)
         txt = open(p, encoding="utf-8").read()
         assert "NaN" not in txt and "Infinity" not in txt
         strict = json.loads(
             txt, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
-        assert strict == {"loss": None, "x": [None, {"y": None}], "keep": 0.5}
+        assert strict == {
+            "loss": None, "x": [None, {"y": None}],
+            "np": {"nan": None, "int": 3, "bool": True, "arr": [1.0, None]},
+            "keep": 0.5}
         assert not [f for f in os.listdir(tmp) if ".tmp" in f]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

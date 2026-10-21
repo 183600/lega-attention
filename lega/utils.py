@@ -242,6 +242,10 @@ def _json_safe(obj):
     非有限浮点统一记为 null（缺失值语义），保证输出是严格合法 JSON，
     与 evaluate.json_safe_eval_metrics / pearson 等既有口径一致。
     """
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist())
+    if isinstance(obj, np.generic):
+        obj = obj.item()
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
