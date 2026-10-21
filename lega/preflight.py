@@ -63,11 +63,18 @@ def data_report_protocol_issues(report) -> list:
             add(f"报告 tokenizer.fit_on={fit_on!r} 不可信："
                 "字符词表只能拟合 train，BPE 只能用公开预训练词表")
     prep_read = report.get("test_reads_at_prep")
-    if isinstance(prep_read, dict) and prep_read.get("used_for_selection") is True:
-        add("报告 test_reads_at_prep.used_for_selection=True："
-            "准备阶段读取 test 被用于选择/拟合，测试集不再独立")
+    if isinstance(prep_read, dict) and "used_for_selection" in prep_read:
+        used = prep_read.get("used_for_selection")
+        if not isinstance(used, bool):
+            add("报告 test_reads_at_prep.used_for_selection="
+                f"{used!r} 不是布尔值，无法确认 test 未被用于选择")
+        elif used:
+            add("报告 test_reads_at_prep.used_for_selection=True："
+                "准备阶段读取 test 被用于选择/拟合，测试集不再独立")
     split_protocol = report.get("split_protocol")
     if isinstance(split_protocol, dict):
+        # 非布尔值不能被当成“未声明”：JSON 里的 1/"true"/"yes" 同样意味着
+        # 上游在声明协议违约（或报告被手改），必须显式拒绝而不能静默通过。
         for key, msg in (
                 ("shuffled", "报告 split_protocol.shuffled=True：时序/群组完整性不可保证"),
                 ("fallback_char_cut",
@@ -75,9 +82,18 @@ def data_report_protocol_issues(report) -> list:
                  "同一文档可能跨 split"),
                 ("documents_cross_cut",
                  "报告 split_protocol.documents_cross_cut=True：群组跨 split")):
-            if split_protocol.get(key) is True:
+            value = split_protocol.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, bool):
+                add(f"报告 split_protocol.{key}={value!r} 不是布尔值，无法确认协议")
+            elif value:
                 add(msg)
-        if split_protocol.get("verified_disjoint") is False:
+        verified = split_protocol.get("verified_disjoint")
+        if verified is not None and not isinstance(verified, bool):
+            add("报告 split_protocol.verified_disjoint="
+                f"{verified!r} 不是布尔值，无法确认划分互斥性")
+        elif verified is False:
             overlaps = split_protocol.get("overlap_long_lines")
             bad_overlaps = {}
             if isinstance(overlaps, dict):
@@ -92,6 +108,10 @@ def data_report_protocol_issues(report) -> list:
             if bad_overlaps:
                 add(f"报告 split_protocol 实测存在跨 split 共享长行 "
                     f"{bad_overlaps}")
+            missing = split_protocol.get("missing_files")
+            if isinstance(missing, list) and missing:
+                add(f"报告 split_protocol 缺少 split 文件 {missing}："
+                    "无法核对划分互斥性，缺失 split 的指标不可比较")
     return issues
 
 
@@ -136,7 +156,12 @@ def data_report_binding_issue(data_dir: str):
         return "meta.json 顶层不是对象，无法核对 data_report 绑定"
     recorded = meta.get("report_sha256")
     if not recorded:
-        return None  # 旧缓存没有记录：由 prepare_bins 重建时补齐
+        # 当前协议下缓存必须记录报告哈希。报告还在却没有哈希，说明 meta
+        # 被手改/由旧流程拼接，无法证明报告对应当前数据，不能静默放行。
+        if os.path.exists(report_path):
+            return ("meta.json 未记录 data_report.json 哈希：报告无法与当前"
+                    "数据绑定，防泄漏诊断不可信（须重建 bin/报告）")
+        return None
     if not os.path.exists(report_path):
         return ("meta.json 记录了 data_report.json 哈希，但报告文件缺失："
                 "缓存不完整或报告被删除，防泄漏诊断不可信")
@@ -171,6 +196,14 @@ def data_source_hash_issue(data_dir: str):
         return "meta.json 顶层不是对象，无法核对源文本哈希"
     recorded = meta.get("source_sha256")
     if recorded is None:
+        # 只要目录里仍有源文本，缺少源哈希就无法证明 bin 与 txt 一致；
+        # “没记录”不等于“没变化”，按不可确认处理（纯 bin 目录才放行）。
+        has_sources = any(
+            os.path.exists(os.path.join(data_dir, f"{s}.txt"))
+            for s in ("train", "val", "test"))
+        if has_sources:
+            return ("meta.json 未记录源文本哈希：无法确认 bin 由当前 txt 构建，"
+                    "须重建数据缓存")
         return None
     if not isinstance(recorded, dict):
         return "meta.json 的 source_sha256 不是对象，无法核对源文本哈希"
