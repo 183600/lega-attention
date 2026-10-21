@@ -145,9 +145,12 @@ def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
 def worst_window_screening(val_len: int, ctx: int,
                            max_windows: int = WORST_SCREEN_MAX) -> dict:
     """最差窗口筛查范围（候选数/总窗口数/覆盖率），供结果落盘与汇总注脚。"""
-    screened, n_windows = _val_eval_indices(int(val_len), ctx, int(max_windows))
+    max_windows = strict_int(max_windows, "max_windows")
+    if max_windows < 1:
+        raise ValueError(f"max_windows 必须 >= 1，收到 {max_windows!r}")
+    screened, n_windows = _val_eval_indices(val_len, ctx, max_windows)
     return {"screened": int(len(screened)), "total": int(n_windows),
-            "screen_max": int(max_windows)}
+            "screen_max": max_windows}
 
 
 @torch.inference_mode()
@@ -164,8 +167,12 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     "样本本身不可预测（噪声/生僻 token）"与"模型系统性盲区"。
     n_worst<=0（0=关闭）返回空列表，不白跑一遍前向。
     """
-    if int(n_worst) <= 0:
+    n_worst = strict_int(n_worst, "n_worst")
+    if n_worst <= 0:
         return []
+    max_windows = strict_int(max_windows, "max_windows")
+    if max_windows < 1:
+        raise ValueError(f"max_windows 必须 >= 1，收到 {max_windows!r}")
     indices, _ = _val_eval_indices(len(val), ctx, max_windows)
     if batch_windows is None:
         batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
@@ -234,7 +241,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
                               for p, i in zip(top_p_l[r], top_i_l[r])],
             })
     rows.sort(key=lambda r: -r["loss"])
-    return rows[:int(n_worst)]
+    return rows[:n_worst]
 
 
 def json_safe_eval_metrics(metrics: dict) -> dict:

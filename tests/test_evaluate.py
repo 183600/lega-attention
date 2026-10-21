@@ -45,6 +45,22 @@ def test_collect_worst_windows():
     # n_worst=0 表示关闭：返回空列表，而不是“至少转储一条”
     assert collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
                                  n_worst=0, max_windows=32) == []
+    for bad in (True, 3.5, "bad"):
+        try:
+            collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
+                                  n_worst=bad, max_windows=32)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 n_worst 未被拒绝: {bad!r}")
+    for bad in (True, 32.5, "bad", 0, -1):
+        try:
+            collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
+                                  n_worst=3, max_windows=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 max_windows 未被拒绝: {bad!r}")
     print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
           f"gold={rows[0]['gold_next']!r}）")
 
@@ -79,7 +95,16 @@ def test_worst_window_screening_scope_is_recorded():
     # 候选上限大于总窗口数时全部评估：覆盖率 100%
     sc2 = worst_window_screening(len(val), ctx=64, max_windows=100)
     assert sc2["screened"] == 33 and sc2["total"] == 33
-    print("  [ok] 最差窗口筛查范围落盘（候选/总窗口数）")
+    # 候选上限是计数身份：bool/小数/非正数不能被截断成合法窗口数
+    for bad in (True, 30.5, "bad", 0, -1):
+        try:
+            worst_window_screening(len(val), ctx=64, max_windows=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 max_windows 未被拒绝: {bad!r}")
+    assert worst_window_screening(len(val), ctx=64, max_windows="30")["screened"] == 30
+    print("  [ok] 最差窗口筛查范围落盘（候选/总窗口数/非法上限拒绝）")
 
 
 def test_positive_int_config_value_degrades_to_none():
