@@ -132,6 +132,31 @@ LOO_CELLS = (
     ("Full−C（去长度）", "lega_no_len"),
 )
 
+def _ablation_coverage(cells, present, rows_by_var):
+    """按“变体存在且种子数≥MIN_SEEDS”判定消融单元格覆盖。
+
+    只检查变体名是否出现会把单种子冒烟格当成完整覆盖；单种子既不能做
+    配对检验，也无法区分方法效应与初始化噪声，必须与“未运行”分开报告。
+    """
+    done, missing, underpowered = [], [], []
+    for name, v in cells:
+        row = rows_by_var.get(v) if isinstance(rows_by_var, dict) else None
+        n_seeds = 0
+        if isinstance(row, dict):
+            try:
+                n_seeds = int(row.get("n_seeds") or 0)
+            except (TypeError, ValueError):
+                n_seeds = 0
+        if v not in present:
+            missing.append((name, v))
+        elif n_seeds < MIN_SEEDS:
+            missing.append((name, v))
+            underpowered.append((name, v, n_seeds))
+        else:
+            done.append((name, v))
+    return done, missing, underpowered
+
+
 # 受控变量核对时允许逐 run 不同的字段（方法与复现标识，不属于受控变量）
 _AUDIT_EXEMPT_KEYS = {"variant", "seed", "device", "tag"}
 
@@ -4950,33 +4975,50 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 消融矩阵（全因子 + 去一法）
     present = set(runs.keys())
     md += ["", "## 消融矩阵（全因子 + 去一法）", ""]
-    factorial_done = [(name, v) for name, v in FACTORIAL_CELLS if v in present]
-    factorial_missing = [(name, v) for name, v in FACTORIAL_CELLS if v not in present]
-    loo_missing = [(name, v) for name, v in LOO_CELLS if v not in present]
-    control_missing = [(name, v) for name, v in CONTROL_CELLS if v not in present]
     rows_by_var = {r["variant"]: r for r in rows}
+    factorial_done, factorial_missing, factorial_under = _ablation_coverage(
+        FACTORIAL_CELLS, present, rows_by_var)
+    loo_done, loo_missing, loo_under = _ablation_coverage(
+        LOO_CELLS, present, rows_by_var)
+    control_done, control_missing, control_under = _ablation_coverage(
+        CONTROL_CELLS, present, rows_by_var)
+    underpowered_cells = factorial_under + loo_under + control_under
+
+    def _cell_label(name, v):
+        r = rows_by_var.get(v)
+        if not r:
+            return name, f"{v}（未运行）"
+        n = int(r.get("n_seeds") or 0)
+        if n < MIN_SEEDS:
+            return name, f"{v}（种子不足 n={n}<{MIN_SEEDS}）"
+        return name, f"{VARIANT_CN.get(v, v)}（n={n}）"
+
     md.append("| 组合 | 变体 | PPL↓ | RULER平均↑ |")
     md.append("|---|---|---|---|")
     for name, v in FACTORIAL_CELLS:
+        label, cell = _cell_label(name, v)
         r = rows_by_var.get(v)
         if r:
-            md.append(f"| {name} | {VARIANT_CN.get(v, v)} | "
+            md.append(f"| {label} | {cell} | "
                       f"{fmt_stat_cell(r, 'val_ppl')} | "
                       f"{fmt_stat_cell(r, 'ruler_avg')} |")
         else:
-            md.append(f"| {name} | {v}（未运行） | - | - |")
+            md.append(f"| {label} | {cell} | - | - |")
     for name, v in CONTROL_CELLS:
+        label, cell = _cell_label(name, v)
         r = rows_by_var.get(v)
         if r:
-            md.append(f"| {name} | {VARIANT_CN.get(v, v)} | "
+            md.append(f"| {label} | {cell} | "
                       f"{fmt_stat_cell(r, 'val_ppl')} | "
                       f"{fmt_stat_cell(r, 'ruler_avg')} |")
         else:
-            md.append(f"| {name} | {v}（未运行） | - | - |")
-    if not factorial_missing and not loo_missing and not control_missing:
+            md.append(f"| {label} | {cell} | - | - |")
+    if (not factorial_missing and not loo_missing and not control_missing
+            and not underpowered_cells):
         md.append("")
         md.append("全因子（门控内 2^3，none=`gate_only`）覆盖 8/8、去一法覆盖完整、"
-                  "无门控 `standard` 外部基线已运行；但组合覆盖只是必要条件，"
+                  "无门控 `standard` 外部基线已运行，且每格种子数≥"
+                  f"{MIN_SEEDS}；但组合覆盖只是必要条件，"
                   "组件是否有用须以下方统计证据为准。`gate_only` 只含可学习门偏置 d，"
                   "是“有门但无 A/B/C”的对照：standard vs gate_only 度量门本身，"
                   "X-only vs gate_only 才是组件 X 的受控效应。")
@@ -4992,19 +5034,26 @@ def build_summary(results_dir: str, audit: dict = None,
                   + "；Full−X 的组件结论不完整。")
     elif not loo_missing:
         md.append("")
-        md.append("⚠ 已覆盖去一法（Full/Full−A/Full−B/Full−C），但全因子缺失组合："
+        md.append("⚠ 已覆盖去一法（Full/Full−A/Full−B/Full−C），但全因子缺失/种子不足："
                   + "、".join(f"{n}({v})" for n, v in factorial_missing)
                   + "；涉及这些组合的单独组件结论不完整。")
     else:
         md.append("")
-        md.append("⚠ **消融不完整**：全因子缺失 "
+        md.append("⚠ **消融不完整**：全因子缺失/种子不足 "
                   + "、".join(f"{n}({v})" for n, v in factorial_missing)
-                  + "；去一法缺失 "
+                  + "；去一法缺失/种子不足 "
                   + "、".join(f"{n}({v})" for n, v in loo_missing)
-                  + ("；无门控 standard 外部基线缺失 "
+                  + ("；无门控 standard 外部基线缺失/种子不足 "
                      + "、".join(v for _, v in control_missing)
                      if control_missing else "")
                   + "。仅凭部分组合无法支撑“每个组件都有用”，请补齐后重跑。")
+    if underpowered_cells:
+        md.append("")
+        md.append("⚠ **消融格种子数不足**（"
+                  + f"要求每格≥{MIN_SEEDS} 个种子，单种子无法做配对检验）："
+                  + "、".join(f"{n} n={k}" for n, _v, k in underpowered_cells[:8])
+                  + (" ..." if len(underpowered_cells) > 8 else "")
+                  + "；这些格不参与覆盖完整性宣称。")
 
     # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
     md += ["", "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）", ""]

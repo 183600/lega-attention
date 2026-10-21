@@ -17,8 +17,8 @@ import tempfile
 from unittest import mock
 
 from lega.data import CACHE_SCHEMA
-from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
-                      _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
+from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
+                      _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _eval_matches_window_spec,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
                       _int_or_zero, _lat_noise_pct,
@@ -3414,6 +3414,23 @@ def test_factorial_none_cell_is_within_gate_control():
     assert [v for _, v in LOO_CELLS] == [
         "lega", "lega_no_query", "lega_no_conc", "lega_no_len"]
     print("  [ok] 全因子 none=gate_only，standard 仅作范围外无门基线")
+
+
+def test_ablation_coverage_requires_min_seeds_per_cell():
+    """消融矩阵“覆盖完整”必须每格≥MIN_SEEDS，单种子冒烟格不能算覆盖。"""
+    cells = (("A", "a"), ("B", "b"), ("C", "c"))
+    rows = [{"variant": "a", "n_seeds": 3},
+            {"variant": "b", "n_seeds": 1}]
+    done, missing, under = _ablation_coverage(cells, {"a", "b"}, 
+                                               {r["variant"]: r for r in rows})
+    assert done == [("A", "a")], done
+    assert missing == [("B", "b"), ("C", "c")], missing
+    assert under == [("B", "b", 1)], under
+    # 无 n_seeds 的旧 row 不得默认成“种子充足”
+    done, missing, under = _ablation_coverage(
+        cells, {"a"}, {"a": {"variant": "a"}})
+    assert not done and under == [("A", "a", 0)], (done, missing, under)
+    print("  [ok] 消融矩阵覆盖按每格种子数判定，单种子格明确标为不足")
 
 
 def test_verify_controlled_setup_rejects_eval_protocol_mismatch():
