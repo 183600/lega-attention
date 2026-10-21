@@ -259,6 +259,10 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
 
 def _finite_float(value):
     """把外部记录中的标量转为有限 float；缺失/类型错误/NaN/Inf 返回 None。"""
+    if isinstance(value, bool):
+        # bool 是 int 子类，float(True)=1.0；在 max_p/hit 这类统计列里
+        # 会把坏记录伪装成合法观测，必须按缺失处理。
+        return None
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError):
