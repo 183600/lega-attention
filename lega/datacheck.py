@@ -635,12 +635,15 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
     return out
 
 
-def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 20000,
+def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 100000,
                   seed: int = 0, ignore_ids=None) -> dict:
     """采样长 n-gram 哈希筛查 eval 窗口在 train 中出现的比例（泄漏下界指标）。
 
     两侧都采样，因此结果是“采样到的最小重叠”，不是精确上界；>0 即说明存在
     跨 split 的逐 token 复制，应人工核查。n=64 足够长，自然语言巧合重叠可忽略。
+    n_samples 默认 10 万：该指标是训练前硬闸门（CRITICAL_SPLIT_ALERT_CODES），
+    样本太少时会漏掉占比很低但仍属违规的复制段；实测 10 万窗口约 0.1s/侧，
+    代价可忽略，覆盖率是 2 万时的 5 倍。
     ignore_ids 见 _window_hashes：字符级 <unk> 不应作为复制证据。
     """
     train_h = _window_hashes(train_ids, n, n_samples, seed,
@@ -670,7 +673,7 @@ SHORT_NGRAM_N = 32
 
 
 def short_ngram_overlap(train_ids, eval_ids, n: int = SHORT_NGRAM_N,
-                        n_samples: int = 20000, seed: int = 0,
+                        n_samples: int = 100000, seed: int = 0,
                         ignore_ids=None) -> dict:
     """短 n-gram 重叠诊断（默认 n=32，告警用）。与 ngram_overlap 同口径。"""
     res = ngram_overlap(train_ids, eval_ids, n=n, n_samples=n_samples, seed=seed,
