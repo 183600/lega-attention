@@ -216,7 +216,8 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     if not isinstance(ana, dict):
         return []
     n = _count_int(ana.get("n_badcases")) or 0
-    counts = ana.get("category_counts") or {}
+    counts = ana.get("category_counts")
+    counts = counts if isinstance(counts, dict) else {}
     if n == 0:
         return [_advice(
             "评测", "低", "当前评测没有错误样本",
@@ -243,15 +244,15 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     # 否则大量标注错误会把真实的模型盲区稀释到阈值以下（或反过来把
     # “深位失败”全算成数据错误的功劳）。
     model_n = max(0, n - le)
-    deep = ana.get("deep_position_fail_ratio")
-    if (deep is not None and deep >= DEEP_FAIL_TOL
+    deep = _finite_float(ana.get("deep_position_fail_ratio"))
+    if (deep is not None and 0.0 <= deep <= 1.0 and deep >= DEEP_FAIL_TOL
             and model_n >= MIN_PATTERN_CASES):
         recs.append(_advice(
             "难度边界", "中", f"niah 失败中 {deep:.0%} 位于 needle 深位 (>0.75)",
             "失败由长程检索边界主导：平均 EM 会掩盖深位退化，应按 depth 分层报告",
             "增加深位训练样本/更长训练上下文；对门控变体检查深位处门控分布，"
             "确认长度项 b·log n 校准是否正确"))
-    cd = counts.get("copy_distractor", 0)
+    cd = _count_int(counts.get("copy_distractor")) or 0
     if _share(cd, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "高",
@@ -260,7 +261,7 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
             "（misleading_rate、P(hit|集中)）再改结构",
             "在失败样例上对比注意力落点；若属位置混淆，优先改位置编码或"
             "干扰项抑制，再考虑门控"))
-    ha = counts.get("hallucinated", 0)
+    ha = _count_int(counts.get("hallucinated")) or 0
     if _share(ha, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "高",
@@ -269,7 +270,7 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
             "是否存在长程复制的系统性衰减",
             "统计训练样本中长上下文与复制型任务占比；对门控变体比较 "
             "gate_mean 是否过低（该写入的信息被压制）"))
-    na = counts.get("no_answer", 0)
+    na = _count_int(counts.get("no_answer")) or 0
     if _share(na, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "中",
@@ -293,7 +294,7 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
          "在 fwe 结果中补写 answer_words/参考词表并重跑归因，"
          "确认旧产物不是数据导出缺口"),
     ):
-        c = counts.get(cat, 0)
+        c = _count_int(counts.get(cat)) or 0
         if _share(c, model_n) >= DOMINANT_SHARE:
             recs.append(_advice(ax, hi, f"{trig}（{c}/{model_n}）", sugg, nxt))
     return recs[:MAX_ADVICE]

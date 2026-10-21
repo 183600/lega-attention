@@ -9,6 +9,7 @@ from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
                            case_axis, case_key, categorize_case, categorize_window,
                            cross_variant_analysis, format_case, format_window_case,
                            process_eval_json, process_ruler_json,
+                           synthesize_ruler_improvements,
                            write_badcase_md, write_worstcase_md)
 
 
@@ -1042,6 +1043,25 @@ def test_write_reports_denominator_covers_category_counts():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 报告分母覆盖类别计数，坏 summary 不出现 >100% 占比")
+
+
+def test_improvement_synthesis_tolerates_malformed_analysis():
+    """旧版/手改 analysis 的坏计数与坏比例不能中断改进方向合成。"""
+    recs = synthesize_ruler_improvements({
+        "n_badcases": 6,
+        "category_counts": {"copy_distractor": "3", "hallucinated": True,
+                            "no_answer": 2.5, "fwe_missing": 3},
+        "label_errors": False,
+        "deep_position_fail_ratio": "bad",
+    })
+    assert isinstance(recs, list) and recs
+    assert any("误抄干扰值" in r["trigger"] for r in recs), recs
+    assert not any("深位" in r["trigger"] for r in recs), recs
+    bad = synthesize_ruler_improvements({
+        "n_badcases": 10, "category_counts": [1],
+        "deep_position_fail_ratio": float("nan")})
+    assert isinstance(bad, list)
+    print("  [ok] 改进方向合成拒绝 bool/小数/坏比例，不崩溃也不伪造证据")
 
 
 def test_write_reports_tolerate_malformed_analysis():
