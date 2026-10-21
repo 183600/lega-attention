@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .attention import CausalSelfAttention, VARIANTS
+from .utils import config_finite_float, config_probability
 
 
 class _RoPERotate(torch.autograd.Function):
@@ -434,6 +435,9 @@ class GPT(nn.Module):
                  use_sdpa_standard: bool = True):
         super().__init__()
         assert variant in VARIANTS, f"未知变体: {variant}"
+        dropout = config_probability(dropout, "dropout")
+        attn_dropout = config_probability(attn_dropout, "attn_dropout")
+        gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
         self.variant = variant
         self.block_size = block_size
         self.vocab_size = vocab_size

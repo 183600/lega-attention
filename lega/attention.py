@@ -39,6 +39,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+from .utils import config_finite_float, config_probability
+
 # 全部变体名（配置/命令行使用）
 VARIANTS = ("standard", "gate_only", "qgate", "null", "lega", "lega_no_len",
             "lega_no_conc", "lega_no_query", "lega_conc_only", "lega_len_only")
@@ -223,6 +225,8 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert d_model % n_heads == 0, "d_model 必须能被 n_heads 整除"
         assert variant in VARIANTS, f"未知变体: {variant}"
+        attn_dropout = config_probability(attn_dropout, "attn_dropout")
+        gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
@@ -297,6 +301,7 @@ class CausalSelfAttention(nn.Module):
 
     def init_gate_params_(self, gate_bias_init: float = 2.0) -> None:
         """显式初始化门控参数（在 GPT 的整体初始化之后调用）。"""
+        gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
         if self.use_query:
             nn.init.zeros_(self.gate_w)
         if self.use_conc:
@@ -405,7 +410,6 @@ class CausalSelfAttention(nn.Module):
         与先 cat 再做联合 softmax 的语义逐项等价（softmax/cat 的尺度因子恰好
         为 1 - p_null）。
         """
-        S = kT.size(-1)
         att = torch.matmul(q_rot, kT)                               # (B,H,C,S)，S=可见前缀长
         if band_mask is not None:
             att[..., band_start:band_start + band_mask.shape[-1]].masked_fill_(

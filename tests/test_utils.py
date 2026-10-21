@@ -16,7 +16,8 @@ import tempfile
 import numpy as np
 
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
-                        calibration_metrics, f1_scores, holm_bonferroni, mean_std,
+                        calibration_metrics, config_finite_float,
+                        config_probability, f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
                         paired_t_test, pearson, roc_pr_aucs, save_json,
                         student_t_two_sided_p, t_critical_95, wilson_score_ci)
@@ -335,6 +336,30 @@ def test_bool_not_counted_as_numeric_observation():
     r = paired_t_test([True, 2.0, 3.0], [1.0, 1.0, 1.0])
     assert r["n"] == 2 and abs(r["mean_diff"] - 1.5) < 1e-12
     print("  [ok] bool 不计入均值/bootstrap/配对检验")
+
+
+def test_config_float_and_probability_validation():
+    """模型配置浮点不能把 bool/NaN/Inf 静默转成数值，概率还须落在 [0, 1]。"""
+    for bad in (True, False, np.bool_(True), float("nan"), float("inf"),
+                float("-inf"), None, "abc", []):
+        for fn in (config_finite_float, config_probability):
+            try:
+                fn(bad, "x")
+                raise AssertionError(f"{fn.__name__}({bad!r}) 应被拒绝")
+            except ValueError as exc:
+                assert "x" in str(exc)
+    for bad in (-0.01, 1.01):
+        try:
+            config_probability(bad, "p")
+            raise AssertionError(f"config_probability({bad!r}) 应被拒绝")
+        except ValueError as exc:
+            assert "p" in str(exc)
+    assert config_finite_float("2.5", "x") == 2.5
+    assert config_finite_float(2, "x") == 2.0
+    assert config_probability(0, "p") == 0.0
+    assert config_probability(1, "p") == 1.0
+    assert config_probability("0.25", "p") == 0.25
+    print("  [ok] config_finite_float/config_probability 拒绝 bool/NaN/Inf/越界")
 
 
 def test_paired_t_matches_t_table():

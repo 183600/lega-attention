@@ -5,7 +5,7 @@ import tempfile
 import numpy as np
 import torch
 
-from lega.attention import VARIANTS
+from lega.attention import CausalSelfAttention, VARIANTS
 from lega.model import GPT, load_model, save_checkpoint
 from lega.train import _val_eval_indices, evaluate_val
 
@@ -14,6 +14,53 @@ def _tiny(variant):
     torch.manual_seed(0)
     return GPT(vocab_size=64, block_size=32, d_model=32, n_layers=2, n_heads=2,
                ffn_mult=4, variant=variant)
+
+
+def test_model_constructor_rejects_invalid_regularization():
+    """模型/注意力构造不能把 bool/NaN/Inf 静默转成 dropout 或门控偏置。
+
+    train 已在配置入口校验，但直接构造 GPT/CausalSelfAttention（sanity、
+    latency、外部脚本）会绕过它：``bool`` 被 float 成 0/1、NaN 写入
+    gate_d，都会让后续训练/评测结果失去意义。
+    """
+    bad_probs = (True, False, np.bool_(True), -0.1, 1.1, float("nan"),
+                 float("inf"), None, "nan")
+    for kw in ("dropout", "attn_dropout"):
+        for bad in bad_probs:
+            try:
+                GPT(vocab_size=32, block_size=16, d_model=16, n_layers=1,
+                    n_heads=2, variant="lega", **{kw: bad})
+                raise AssertionError(f"GPT({kw}={bad!r}) 应被拒绝")
+            except ValueError as exc:
+                assert kw in str(exc)
+    for bad in (True, np.bool_(False), float("nan"), float("inf"), None, "nan"):
+        try:
+            GPT(vocab_size=32, block_size=16, d_model=16, n_layers=1,
+                n_heads=2, variant="lega", gate_bias_init=bad)
+            raise AssertionError(f"GPT(gate_bias_init={bad!r}) 应被拒绝")
+        except ValueError as exc:
+            assert "gate_bias_init" in str(exc)
+    for bad in bad_probs:
+        try:
+            CausalSelfAttention(16, 2, attn_dropout=bad)
+            raise AssertionError(f"CausalSelfAttention(attn_dropout={bad!r}) 应被拒绝")
+        except ValueError as exc:
+            assert "attn_dropout" in str(exc)
+    for bad in (True, float("nan"), float("inf"), None, "nan"):
+        try:
+            CausalSelfAttention(16, 2, gate_bias_init=bad)
+            raise AssertionError(f"CausalSelfAttention(gate_bias_init={bad!r}) 应被拒绝")
+        except ValueError as exc:
+            assert "gate_bias_init" in str(exc)
+
+    model = GPT(vocab_size=32, block_size=16, d_model=16, n_layers=1,
+                n_heads=2, variant="lega", dropout="0.25",
+                attn_dropout="0.5", gate_bias_init="1.5")
+    assert model.dropout_p == 0.25
+    assert model.blocks[0].attn.attn_dropout == 0.5
+    assert model.gate_bias_init == 1.5
+    assert torch.equal(model.blocks[0].attn.gate_d, torch.full((2,), 1.5))
+    print("  [ok] 模型构造拒绝 bool/NaN/Inf dropout 与 gate 偏置")
 
 
 def test_kv_cache_matches_full_forward():

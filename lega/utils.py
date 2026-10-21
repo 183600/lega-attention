@@ -115,6 +115,31 @@ def strict_int(value, name: str = "值") -> int:
         raise ValueError(f"{name} 必须是整数，收到 {value!r}") from e
 
 
+def config_finite_float(value, name: str = "值") -> float:
+    """配置浮点数严格化：拒绝 bool 与非有限值（NaN/Inf），其余转 float。
+
+    ``float(True) == 1.0`` 会把开关值静默当成数值；NaN/Inf 则会污染参数
+    （例如 gate_bias_init 直接写入 Parameter）并让后续训练/评测失去意义。
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}") from e
+    if not math.isfinite(out):
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
+    return out
+
+
+def config_probability(value, name: str = "概率") -> float:
+    """配置概率严格化：在 config_finite_float 基础上要求落在 [0, 1]。"""
+    out = config_finite_float(value, name)
+    if not 0.0 <= out <= 1.0:
+        raise ValueError(f"{name} 必须在 [0, 1] 内，收到 {value!r}")
+    return out
+
+
 def set_seed(seed: int) -> None:
     """固定当前进程内所有随机源，使同一台机器上的同一实验可复现。
 
