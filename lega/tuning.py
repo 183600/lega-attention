@@ -29,7 +29,20 @@ DEFAULT_TOLERANCE = 0.005
 
 
 def parse_floats(s):
-    return [float(x) for x in str(s).split(",") if str(x).strip() != ""]
+    """逗号分隔的有限浮点数；NaN/Inf/非数值显式拒绝而不是进入训练网格。"""
+    out = []
+    for x in str(s).split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            v = float(x)
+        except ValueError as e:
+            raise ValueError(f"需要逗号分隔的数值，收到 {x!r}") from e
+        if not math.isfinite(v):
+            raise ValueError(f"数值必须有限（拒绝 NaN/Inf），收到 {x!r}")
+        out.append(v)
+    return out
 
 
 def parse_seeds(s, parser=None):
