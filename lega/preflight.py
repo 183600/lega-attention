@@ -12,6 +12,7 @@ import os
 from .data import CACHE_SCHEMA
 from .datacheck import critical_split_alerts
 from .repro import sha256_file
+from .utils import strict_int
 
 ALLOW_ENV = "LEGA_ALLOW_DATA_PROTOCOL_VIOLATIONS"
 
@@ -298,7 +299,8 @@ def data_cache_schema_issue(data_dir: str):
     if not isinstance(meta, dict):
         return "meta.json 顶层不是对象，无法确认数据缓存协议版本"
     try:
-        schema = int(meta.get("cache_schema", 0))
+        schema = strict_int(meta.get("cache_schema", 0),
+                            "meta.cache_schema")
     except (TypeError, ValueError, OverflowError):
         schema = -1
     if schema != CACHE_SCHEMA:

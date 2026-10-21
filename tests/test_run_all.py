@@ -288,6 +288,12 @@ def test_data_protocol_preflight_blocks_stale_cache_schema():
         info = data_protocol_preflight(d)
         assert info["cache_schema_issue"] is None
         assert info["critical_violations"] == []
+        # 小数 schema 不能被 int() 截断成当前版本而静默放行。
+        _write_json(meta, {"cache_schema": CACHE_SCHEMA + 0.9,
+                           "fit_on": "train"})
+        info = data_protocol_preflight(d, allow_override=True)
+        assert info["cache_schema_issue"]
+        assert "cache_schema=-1" in info["cache_schema_issue"]
         # schema 正确但词表在全量数据上拟合：仍必须拦截。
         _write_json(meta, {"cache_schema": CACHE_SCHEMA, "fit_on": "all"})
         try:

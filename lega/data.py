@@ -29,7 +29,7 @@ from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
                         short_ngram_overlap,
                         summarize_test_access, text_length_stats,
                         token_stream_stats, unknown_char_rate)
-from .utils import config_bool
+from .utils import config_bool, strict_int
 
 _GPT2_CACHE = {}
 
@@ -96,7 +96,8 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str,
         # 不可判定放行，并把 no_sources 如实返回给调用方（用于提示与缓存判定）
         return True, None, True
     try:
-        cache_schema = int(meta.get("cache_schema", 0))
+        cache_schema = strict_int(meta.get("cache_schema", 0),
+                                  "meta.cache_schema")
     except (TypeError, ValueError, OverflowError):
         cache_schema = -1
     if cache_schema != CACHE_SCHEMA:

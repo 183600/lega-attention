@@ -1477,7 +1477,8 @@ def test_prepare_bins_rebuilds_on_malformed_cache_schema():
     with tempfile.TemporaryDirectory() as d:
         _write_min_splits(d)
         prepare_bins(d, kind="char", force=True)
-        for bad in (None, [3], {"v": 3}, "not-a-version"):
+        for bad in (None, [3], {"v": 3}, "not-a-version",
+                    CACHE_SCHEMA + 0.9):
             with open(os.path.join(d, "meta.json"), encoding="utf-8") as f:
                 saved = json.load(f)
             saved["cache_schema"] = bad
