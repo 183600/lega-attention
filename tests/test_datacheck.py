@@ -713,16 +713,28 @@ def test_distribution_shift_metric():
 def test_test_access_ledger():
     with tempfile.TemporaryDirectory() as d:
         assert read_test_access_log(d) == []
-        s1 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt"})
+        s1 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt",
+                                    "test_data_fingerprint": "v1"})
         assert s1["evaluations"] == 1 and s1["distinct_checkpoints"] == 1
-        s2 = append_test_access(d, {"ckpt_sha256": "bbb", "ckpt": "/x/b.pt"})
+        s2 = append_test_access(d, {"ckpt_sha256": "bbb", "ckpt": "/x/b.pt",
+                                    "test_data_fingerprint": "v1"})
         assert s2["evaluations"] == 2 and s2["distinct_checkpoints"] == 2
         assert s2["checkpoints_evaluated_multiple_times"] == []
-        s3 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt"})
+        s3 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt",
+                                    "test_data_fingerprint": "v1"})
         assert s3["evaluations"] == 3 and s3["distinct_checkpoints"] == 2
         assert s3["checkpoints_evaluated_multiple_times"] == ["aaa"[:16]]
-        assert len(read_test_access_log(d)) == 3
-    print("  [ok] 测试集访问账本：追加、去重统计、重复评测告警")
+        # 重建 test.bin 后，同一 checkpoint 在 v2 上是新版本评测，不算重复；
+        # 但旧账本仍保留 v1 的重复记录供审计。
+        s4 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt",
+                                    "test_data_fingerprint": "v2"})
+        assert s4["distinct_test_data_versions"] == 2
+        assert s4["checkpoints_evaluated_multiple_times"] == ["aaa"[:16]]
+        assert s4["repeated_evaluations"] == [
+            {"ckpt_prefix": "aaa"[:16], "test_data_fingerprint": "v1",
+             "evaluations": 2}]
+        assert len(read_test_access_log(d)) == 4
+    print("  [ok] 测试集访问账本：追加、去重统计、按 test 数据版本判定重复")
 
 
 def test_prepare_bins_writes_report_and_decontaminates():

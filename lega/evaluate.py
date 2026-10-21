@@ -27,16 +27,30 @@ from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
 WORST_SCREEN_MAX = 64
 
 
-def repeated_test_checkpoint(test_access, ckpt_sha256) -> bool:
-    """该 checkpoint 是否已在 test 上评测过（据访问账本摘要）。
+def repeated_test_checkpoint(test_access, ckpt_sha256,
+                             test_data_fingerprint=None) -> bool:
+    """该 checkpoint 是否已在同一 test 数据版本上评测过。
 
     纯函数，供评测主流程与单元测试共用：重复在 test 上评测是“测试集变隐式
-    训练集”的直接信号，调用方据此决定拒绝还是放行。
+    训练集”的直接信号，调用方据此决定拒绝还是放行。传入当前 test 指纹时按
+    (checkpoint, test 版本) 精确判定：重建 test.bin 后的评测不是旧版本的
+    重复访问，不应误拒绝。
     """
     if not test_access or not ckpt_sha256:
         return False
+    prefix = str(ckpt_sha256)[:16]
+    details = test_access.get("repeated_evaluations")
+    if test_data_fingerprint is not None and isinstance(details, list):
+        ver = str(test_data_fingerprint)
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            if (item.get("ckpt_prefix") == prefix
+                    and item.get("test_data_fingerprint") == ver):
+                return True
+        return False
     repeated = test_access.get("checkpoints_evaluated_multiple_times") or []
-    return str(ckpt_sha256)[:16] in repeated
+    return prefix in repeated
 
 
 def worst_windows_allowed(split, worst_on_test: bool) -> bool:
@@ -360,6 +374,13 @@ def main():
               "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测")
     # checkpoint 内容指纹：test 访问账本与结果 JSON 共用同一值。
     ckpt_sha256 = sha256_file(args.ckpt)
+    # 账本必须绑定 test 数据版本：只看 checkpoint 会把“重建 test 后的合法
+    # 重测”误判为重复，也无法审计同一模型到底评测过哪些测试集。
+    test_data_fingerprint = None
+    if split == "test":
+        test_path = os.path.join(args.data_dir, "test.bin")
+        if os.path.exists(test_path):
+            test_data_fingerprint = sha256_file(test_path)
     test_access = None
     if split == "test":
         # 测试集尘封协议：每次在 test 上评测都写入访问账本（data_dir 下），
@@ -373,11 +394,13 @@ def main():
                 "ckpt_sha256": ckpt_sha256,
                 "variant": ck.get("variant", model.variant),
                 "seed": ck.get("seed"),
+                "test_data_fingerprint": test_data_fingerprint,
             })
         except OSError as e:
             print(f"[eval] 警告：test 访问账本写入失败（{e}）；"
                   "本次 test 评测未被记录")
-        if repeated_test_checkpoint(test_access, ckpt_sha256):
+        if repeated_test_checkpoint(test_access, ckpt_sha256,
+                                    test_data_fingerprint):
             # 同一 checkpoint 重复在 test 上评测是“测试集变隐式训练集”的直接
             # 信号：账本已记录，但仅打印警告不足以阻止泄露循环（如反复
             # run_all --skip_train 据 test 迭代）。默认拒绝，需显式放行。
@@ -511,6 +534,7 @@ def main():
                         "variant": ck.get("variant", model.variant),
                         "seed": ck.get("seed"),
                         "n_worst": int(args.worst_n),
+                        "test_data_fingerprint": test_data_fingerprint,
                     })
                     # 结果 JSON 里的账本摘要必须包含刚写入的转储记录；
                     # 否则报告会少报一次 test 读取，审计链断开。

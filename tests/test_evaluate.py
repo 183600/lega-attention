@@ -344,7 +344,19 @@ def test_repeated_test_checkpoint_gate():
     assert not repeated_test_checkpoint(summary, None)
     assert not repeated_test_checkpoint(
         {"checkpoints_evaluated_multiple_times": []}, "a" * 64)
-    print("  [ok] 重复 test 评测检测：按 16 位指纹命中，空值/空账本不误判")
+
+    # 精确到 test 数据版本：旧版本重复不阻断新版本评测。
+    versioned = {
+        "checkpoints_evaluated_multiple_times": ["abc123def4567890"],
+        "repeated_evaluations": [
+            {"ckpt_prefix": "abc123def4567890", "test_data_fingerprint": "v1",
+             "evaluations": 2}],
+    }
+    ckpt = "abc123def4567890" + "0" * 48
+    assert repeated_test_checkpoint(versioned, ckpt, "v1")
+    assert not repeated_test_checkpoint(versioned, ckpt, "v2")
+    assert repeated_test_checkpoint(versioned, ckpt)  # 旧调用不带版本：保守判定
+    print("  [ok] 重复 test 评测检测：16 位指纹 + test 数据版本，空值不误判")
 
 
 def test_worst_windows_allowed_seals_test():
@@ -395,4 +407,8 @@ def test_evaluate_result_test_access_includes_worst_dump(monkeypatch):
         assert len(ledger) == 2
         assert [r.get("reason") for r in ledger if r.get("reason")] == \
             ["worst_window_dump_on_test"]
+        test_fp = sha256_file(os.path.join(data_dir, "test.bin"))
+        assert res["test_access"]["distinct_test_data_versions"] == 1
+        assert [r.get("test_data_fingerprint") for r in ledger] == \
+            [test_fp, test_fp]
     print("  [ok] test 访问摘要包含 worst-window 转储（不瞒报第二次读取）")

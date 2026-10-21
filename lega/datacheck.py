@@ -887,19 +887,47 @@ def append_test_access(data_dir: str, record: dict) -> dict:
 
 
 def summarize_test_access(records) -> dict:
-    """测试集访问审计：评测次数、不同 checkpoint 数、被重复评测的 checkpoint。"""
+    """测试集访问审计：评测次数、checkpoint 数、重复评测及其 test 数据版本。
+
+    重复判定按 (checkpoint, test 数据指纹)：重建 test.bin 后，同一 checkpoint
+    在新测试集上评测是合法的新实验，不应被旧账本误拒绝；反过来，同一版本
+    上的重复评测必须能被识别。旧记录没有 test 指纹时按版本未知分组。
+    """
     records = [r for r in (records or []) if isinstance(r, dict)]
-    ckpts = [str(r.get("ckpt_sha256") or r.get("ckpt") or "")
-             for r in records]
     counts = {}
-    for c in ckpts:
-        if c:
-            counts[c] = counts.get(c, 0) + 1
-    repeated = [c[:16] for c, n in counts.items() if n > 1]
+    versions = set()
+    for r in records:
+        c = str(r.get("ckpt_sha256") or r.get("ckpt") or "")
+        if not c:
+            continue
+        ver = r.get("test_data_fingerprint")
+        ver = str(ver) if ver else None
+        key = (c, ver)
+        counts[key] = counts.get(key, 0) + 1
+        if ver is not None:
+            versions.add(ver)
+    repeated = []
+    repeated_details = []
+    for (c, ver), n in counts.items():
+        if n <= 1:
+            continue
+        prefix = c[:16]
+        if prefix not in repeated:
+            repeated.append(prefix)
+        repeated_details.append({
+            "ckpt_prefix": prefix,
+            "test_data_fingerprint": ver,
+            "evaluations": int(n),
+        })
+    ckpts = {c for c, _ in counts}
     return {
         "evaluations": int(len(records)),
-        "distinct_checkpoints": int(len(counts)),
+        "distinct_checkpoints": int(len(ckpts)),
         "checkpoints_evaluated_multiple_times": repeated,
+        # 精确到数据版本的重复项：调用方传当前 test 指纹时可区分“换数据重测”。
+        "repeated_evaluations": repeated_details,
+        "distinct_test_data_versions": int(len(versions)),
+        "test_data_fingerprints": sorted(versions),
         "first_time": records[0].get("time") if records else None,
         "last_time": records[-1].get("time") if records else None,
     }
