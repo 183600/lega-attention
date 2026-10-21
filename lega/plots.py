@@ -888,11 +888,10 @@ def _mean_by_step(runs, key):
             step = _step_or_none(r["step"])
             if step is None:
                 continue
-            try:
-                val = float(r[key])
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not np.isfinite(val):
+            # bool 不是损失观测：True/False 会被 float() 当成 1.0/0.0，
+            # 在曲线里画出不存在的点并污染多种子均值。
+            val = _finite_float(r[key])
+            if val is None:
                 continue
             acc.setdefault(step, []).append(val)
     xs = sorted(acc)
