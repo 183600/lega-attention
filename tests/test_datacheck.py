@@ -1364,13 +1364,21 @@ def test_build_data_report_does_not_attest_split_first_without_protocol():
     rep = build_data_report(tok, {"train": {"tokens": 10}}, {}, {}, {}, {}, {})
     assert rep["protocol"]["split_first_then_preprocess"] is None
     assert rep["protocol"]["split_first_then_preprocess_attested"] is False
+    assert rep["protocol"]["shuffle_at_split_time"] is None
     assert "split_first_unattested" in {a["code"] for a in rep["alerts"]}
     rep2 = build_data_report(
         tok, {"train": {"tokens": 10}}, {}, {}, {}, {}, {},
         extra={"split_protocol": {"mode": "official", "shuffled": False}})
     assert rep2["protocol"]["split_first_then_preprocess"] is True
     assert rep2["protocol"]["split_first_then_preprocess_attested"] is True
+    assert rep2["protocol"]["shuffle_at_split_time"] is False
     assert "split_first_unattested" not in {a["code"] for a in rep2["alerts"]}
+    # 上游声明打乱时必须如实照写（并由 split_protocol 告警拦截）
+    rep3 = build_data_report(
+        tok, {"train": {"tokens": 10}}, {}, {}, {}, {}, {},
+        extra={"split_protocol": {"mode": "temporal", "shuffled": True}})
+    assert rep3["protocol"]["shuffle_at_split_time"] is True
+    assert "split_shuffled" in {a["code"] for a in rep3["alerts"]}
     print("  [ok] data_report：无划分协议证据时“先划分”声明为未知并告警")
 
 

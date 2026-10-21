@@ -1433,6 +1433,13 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
     split_protocol = extra.get("split_protocol") if extra else None
     split_first_attested = (isinstance(split_protocol, dict)
                             and bool(split_protocol))
+    # 划分是否打乱同样只能由上游协议声明：无声明时写 None（未知），
+    # 不能把“没记录”当成“没打乱”。
+    shuffle_at_split = None
+    if isinstance(split_protocol, dict):
+        value = split_protocol.get("shuffled")
+        if isinstance(value, bool):
+            shuffle_at_split = value
     alerts = leakage_alerts(tokenizer, sanitization, duplicates,
                             contamination, distribution, text_stats,
                             thresholds=alert_thresholds)
@@ -1440,7 +1447,7 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         alerts.append({
             "level": "warning", "code": "split_first_unattested",
             "message": "报告缺少 split_protocol 证据：无法确认数据是“先划分"
-                       "后预处理”，只可确认分词/去污染在 train 上完成"})
+                       "后预处理且划分未打乱”，只可确认分词/去污染在 train 上完成"})
     report = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "protocol": {
@@ -1455,7 +1462,7 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
                        if isinstance(tokenizer, dict) and tokenizer.get("fit_on")
                        else "train_only"),
             "test_sealed": True,
-            "shuffle_at_split_time": False,
+            "shuffle_at_split_time": shuffle_at_split,
             "batch_shuffle_during_training_allowed": True,
         },
         "tokenizer": tokenizer,
