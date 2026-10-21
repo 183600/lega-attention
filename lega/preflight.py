@@ -46,7 +46,7 @@ def data_report_binding_issue(data_dir: str):
     """
     report_path = os.path.join(data_dir, "data_report.json")
     meta_path = os.path.join(data_dir, "meta.json")
-    if not (os.path.exists(report_path) and os.path.exists(meta_path)):
+    if not os.path.exists(meta_path):
         return None
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
@@ -58,6 +58,9 @@ def data_report_binding_issue(data_dir: str):
     recorded = meta.get("report_sha256")
     if not recorded:
         return None  # 旧缓存没有记录：由 prepare_bins 重建时补齐
+    if not os.path.exists(report_path):
+        return ("meta.json 记录了 data_report.json 哈希，但报告文件缺失："
+                "缓存不完整或报告被删除，防泄漏诊断不可信")
     try:
         actual = sha256_file(report_path)
     except OSError as e:

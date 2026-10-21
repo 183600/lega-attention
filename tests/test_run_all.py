@@ -129,7 +129,14 @@ def test_data_report_binding_detects_tampering():
         assert info["binding_issue"] == issue and info["override"] is True
         assert any(a["code"] == "data_report_binding"
                    for a in info["critical_violations"])
-    print("  [ok] data_report 与 meta 哈希绑定：篡改/过期报告被阻断")
+        # 报告被删除而 meta 仍记录其哈希：缓存不完整，同样是硬阻断项。
+        os.remove(rp)
+        issue = data_report_binding_issue(d)
+        assert issue and "缺失" in issue
+        info = data_protocol_preflight(d, allow_override=True)
+        assert any(a["code"] == "data_report_binding"
+                   for a in info["critical_violations"])
+    print("  [ok] data_report 与 meta 哈希绑定：篡改/缺失/过期报告被阻断")
 
 
 def test_data_protocol_preflight_blocks_stale_cache_schema():
