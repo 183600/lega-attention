@@ -34,7 +34,10 @@ KEY_WORDS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "sla
              "tundra", "vessel", "walnut", "zephyr", "gambit", "hollow", "ivory", "jasper"]
 FILLER = ("The grass is green. The sky is blue. The sun is yellow. "
           "Here we go. There and back again.")
-NEEDLE_TMPL = "One of the special magic numbers for {key} is: {value}."
+# 句末保留一个空格：needle 可被插在任意 token 边界，若不补空格会出现
+# "...7587205.g" 这类数值与后续单词粘连，既破坏可读性，也让“完整数值
+# token”解析无法区分句号与缺损小数（7587205.x）。
+NEEDLE_TMPL = "One of the special magic numbers for {key} is: {value}. "
 QUESTION_TMPL = ("\nWhat is the special magic number for {key} mentioned in the provided text?"
                  "\nAnswer: The special magic number for {key} mentioned in the provided text is")
 TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
@@ -337,7 +340,10 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
 # 字符串全等比较。只截取 \d{4,} 会把 -7021853、7021853.9、7021853abc 都
 # 误判为命中 7021853。
 _NUM_RE = re.compile(
-    r"(?<![\w.+-])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w])")
+    r"(?<![\w.+-])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    # 数字后若紧跟 "." 再接单词/数字，说明这是残缺的数值 token（.9abc/.x），
+    # 不能回退成只匹配点号前的整数；单独句号（"7021853."）仍允许。
+    r"(?!\w|\.\w)")
 _WORD_RE = re.compile(r"[a-z]+")
 
 
