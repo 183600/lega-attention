@@ -494,6 +494,16 @@ def test_provenance_drift_flags_code_and_data_changes_without_false_positive():
     print("  [ok] 结束身份核对：commit/工作区/数据变化可发现，缺失记 unknown")
 
 
+def test_provenance_drift_tolerates_malformed_snapshots():
+    """畸形快照必须记为 unknown，而不是 AttributeError 中断收尾。"""
+    res = provenance_drift([], "bad")
+    assert res["changed"] is False
+    assert set(res["unknown"]) == {
+        "code_commit", "worktree_diff_sha256", "data_fingerprint"}
+    assert all(v is None for v in res["checked"].values())
+    print("  [ok] 畸形溯源快照按 unknown 降级")
+
+
 def test_worktree_state_and_patch_capture_dirty_code():
     """dirty 工作区必须留下 diff 指纹与可重放补丁，而不是只有 dirty=True。"""
     with tempfile.TemporaryDirectory() as d:

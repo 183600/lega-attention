@@ -164,8 +164,11 @@ def provenance_drift(start: dict, end: dict) -> dict:
     worktree 用 diff_sha256 比较（含未跟踪文件补丁），因此 commit 不变但
     工作区代码被改动也能发现。
     """
+    def _get(d, key):
+        return d.get(key) if isinstance(d, dict) else None
+
     def _sub(d, key):
-        v = (d or {}).get(key)
+        v = _get(d, key)
         return v if isinstance(v, dict) else {}
 
     s_git, e_git = _sub(start, "git"), _sub(end, "git")
@@ -200,8 +203,8 @@ def provenance_drift(start: dict, end: dict) -> dict:
         else:
             checks["worktree_diff_sha256"] = True
 
-    s_data = (start or {}).get("data_fingerprint")
-    e_data = (end or {}).get("data_fingerprint")
+    s_data = _get(start, "data_fingerprint")
+    e_data = _get(end, "data_fingerprint")
     if s_data is None or e_data is None:
         checks["data_fingerprint"] = None
         unknown.append("data_fingerprint")
