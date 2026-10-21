@@ -48,14 +48,15 @@ def test_ppl_unigram_matches_closed_form():
 def test_invalid_smoothing_parameters_rejected():
     """α/λ 非有限或越界时显式报错，不能写出 NaN/Inf 报告或静默选参。"""
     uni = np.array([2.0, 1.0, 0.0])
-    for bad in (float("nan"), float("inf"), float("-inf"), -0.1, "bad"):
+    for bad in (float("nan"), float("inf"), float("-inf"), -0.1, "bad",
+                True, False):
         try:
             ppl_unigram(np.array([0, 1]), uni, bad)
             raise AssertionError(f"非法 α 应报错: {bad!r}")
         except ValueError:
             pass
     _, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
-    for lam in (float("nan"), float("inf"), -0.1, 1.1):
+    for lam in (float("nan"), float("inf"), -0.1, 1.1, True, False):
         try:
             ppl_interpolated_bigram(np.array([0, 1]), uni, keys, counts,
                                     1.0, 1.0, lam, 3)
@@ -65,7 +66,8 @@ def test_invalid_smoothing_parameters_rejected():
     tmp = tempfile.mkdtemp()
     try:
         _mk_data(tmp, [0, 1, 2, 3] * 5, [0, 1, 2, 0], vocab_size=4)
-        for grid in ((), (float("nan"),), (float("inf"),), (-1.0,)):
+        for grid in ((), (float("nan"),), (float("inf"),), (-1.0,),
+                     (True,), (False,)):
             try:
                 evaluate(tmp, split="val", alphas=grid)
                 raise AssertionError(f"非法 α 网格应报错: {grid!r}")
