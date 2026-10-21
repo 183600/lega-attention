@@ -260,6 +260,26 @@ def test_test_split_sealed_and_access_logged():
     print("  [ok] evaluate（test 默认尘封、开锁写账本、test 单次消费）")
 
 
+def test_test_access_logged_even_when_later_setup_fails():
+    """test 已读取但后续 val 缺失/拟合失败时，访问账本不能缺失。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _mk_data(tmp, [0, 1, 2, 3] * 20, [0, 1, 2, 3], vocab_size=4,
+                 test_ids=[0, 1, 2, 3])
+        os.remove(os.path.join(tmp, "val.bin"))
+        try:
+            evaluate(tmp, split="test", allow_test=True)
+            raise AssertionError("val 缺失应报错")
+        except FileNotFoundError:
+            pass
+        log_path = os.path.join(tmp, TEST_ACCESS_LOG)
+        assert os.path.exists(log_path), "test 已读取但访问账本未落盘"
+        assert "ngram_baseline" in open(log_path, encoding="utf-8").read()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] evaluate（后续失败不丢 test 访问账本）")
+
+
 def test_window_positions_match_neural_eval_rule():
     """窗口评分位置必须与 train._val_eval_indices 的规则逐例一致。
 

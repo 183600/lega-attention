@@ -382,6 +382,7 @@ def evaluate(data_dir: str, split: str = "val",
         raise ValueError("平滑系数候选网格不能为空")
     # 训练流保持 uint16 memmap：fit_counts 内部分块升位/分块计数。
     train_ids = load_bin(data_dir, "train")
+    test_access = None
     if split == "test":
         # 必须显式传 bool True：字符串 "false" 等真值不能开锁。
         if allow_test is not True:
@@ -390,6 +391,13 @@ def evaluate(data_dir: str, split: str = "val",
                 "（不接受非布尔真值），并会写入访问账本")
         eval_ids = np.asarray(load_bin(data_dir, "test", allow_test=True),
                               dtype=np.int64)
+        # 访问账本必须在选参/拟合/读 val 之前落盘：否则 val 缺失、拟合失败
+        # 或账本写入异常会让 test 已被消费却没有访问记录，尘封协议失效。
+        test_access = append_test_access(data_dir, {
+            "split": "test", "kind": "ngram_baseline",
+            "ckpt": "ngram-baseline",
+            "test_data_fingerprint": test_data_fingerprint(data_dir),
+            "note": "简单统计基线评测（α 在 val 上选择）"})
     else:
         eval_ids = np.asarray(load_bin(data_dir, split), dtype=np.int64)
     # 选参流固定为 val：即使调用方要求报告 train（诊断用），α/λ 也不能
@@ -480,11 +488,7 @@ def evaluate(data_dir: str, split: str = "val",
         "ppl_by_alpha": {},
     }
     if split == "test":
-        report["test_access"] = append_test_access(data_dir, {
-            "split": "test", "kind": "ngram_baseline",
-            "ckpt": "ngram-baseline",
-            "test_data_fingerprint": test_data_fingerprint(data_dir),
-            "note": "简单统计基线评测（α 在 val 上选择）"})
+        report["test_access"] = test_access
     for order in ("unigram", "bigram", "interpolated_bigram"):
         if order == "unigram":
             a = best["unigram"]
