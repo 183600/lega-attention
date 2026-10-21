@@ -25,6 +25,8 @@ import unicodedata
 
 import numpy as np
 
+from .utils import strict_int
+
 try:
     import fcntl
 except ImportError:  # Windows 等无 flock 平台：退化为原行为（单进程安全）
@@ -617,12 +619,13 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
     max_samples（且小于流长度）时才退化为有放回采样，并在结果中标记
     count_mode="sampled" 供审计。
     """
-    try:
-        limit = int(max_samples) if max_samples is not None else None
-    except (TypeError, ValueError, OverflowError):
+    if max_samples is None:
         limit = None
-    if limit is not None and limit <= 0:
-        limit = None
+    else:
+        limit = strict_int(max_samples, "max_samples")
+        if limit <= 0:
+            raise ValueError(
+                f"max_samples 必须是正整数或 None，收到 {max_samples!r}")
 
     def counts(ids, s):
         arr = np.asarray(ids)

@@ -697,7 +697,17 @@ def test_distribution_shift_metric():
                                   max_samples=1000)
     assert d_sample["count_mode"] == "sampled"
     assert d_sample["tokens_train"] == 1000
-    print("  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计")
+    # 显式采样预算非法时不能静默退回全量或截断成 1：报告会声称采样
+    # 却实际使用另一口径，审计字段失去意义。
+    for bad in (True, 0, -1, 1.5, "bad", float("nan"), float("inf")):
+        try:
+            distribution_shift(rare, np.array([7, 1], dtype=np.uint16), 10,
+                               max_samples=bad)
+            raise AssertionError(f"非法 max_samples 应报错: {bad!r}")
+        except ValueError:
+            pass
+    print("  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计，"
+          "非法预算显式拒绝")
 
 
 def test_test_access_ledger():
