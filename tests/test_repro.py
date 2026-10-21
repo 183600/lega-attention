@@ -356,6 +356,8 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
 
         base = load_provenance(d)          # 无清单：按当前环境/配置补算
         assert base["config_sha256"] == sha256_file(cfg)
+        assert base["seed_report"] is None
+        assert base["training_precision"] is None
         # 语法合法但只是空壳/缺字段：缺失项补算，而不是返回一整排 None
         _manifest({"tag": "legacy"})
         p1 = load_provenance(d)
@@ -363,11 +365,16 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
         assert p1["code_commit"] == base["code_commit"]
         # 已有字段优先于当前环境，数据摘要缺失时保持 None 而不是乱填
         _manifest({"git": {"commit": "abc", "branch": "main"},
-                   "config_sha256": "deadbeef"})
+                   "config_sha256": "deadbeef",
+                   "seed_report": {"seed": 5, "seed_verified": True},
+                   "precision": {"amp_enabled": True,
+                                 "amp_dtype": "bfloat16"}})
         p2 = load_provenance(d)
         assert p2["code_commit"] == "abc" and p2["code_branch"] == "main"
         assert p2["config_sha256"] == "deadbeef"
         assert p2["data_fingerprint"] is None
+        assert p2["seed_report"]["seed_verified"] is True
+        assert p2["training_precision"]["amp_dtype"] == "bfloat16"
         # git/data 不是对象（结构畸形）：不崩，回退到当前环境
         _manifest({"git": "oops", "data": [1, 2], "config_sha256": "x"})
         p3 = load_provenance(d)

@@ -640,6 +640,10 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "sanity_verified": None,
         "sanity_variant": None,
         "sanity_file": None,
+        # 训练 run 的种子生效证据与实际精度：下游评测结果继承后，单看
+        # eval.json 也能核对“哪个 seed/bf16 还是 fp32”而不是只信目录名。
+        "seed_report": None,
+        "training_precision": None,
     }
     if isinstance(manifest, dict) and manifest:
         mgit = manifest.get("git")
@@ -664,6 +668,12 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             else:
                 out["data_fingerprint_matches_training"] = (
                     current_data == train_data)
+        mseed = manifest.get("seed_report")
+        if isinstance(mseed, dict):
+            out["seed_report"] = mseed
+        mprec = manifest.get("precision")
+        if isinstance(mprec, dict):
+            out["training_precision"] = mprec
         msanity = manifest.get("sanity")
         if isinstance(msanity, dict):
             identity = msanity.get("identity")

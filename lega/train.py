@@ -886,6 +886,12 @@ def main():
         args.seed if args.seed is not None else cfg.get("seed", 1337), "seed")
     device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
 
+    # 实际生效精度必须在写 config_used/manifest 之前确定：只记录 "amp": true
+    # 无法区分 bf16 autocast 与不可用时的 fp32 回退，事后会把两种数值路径
+    # 当成同一实验对比。
+    amp_enabled = config_bool(cfg.get("amp", True), "amp")
+    amp_dt = amp_dtype_for(device, amp_enabled)
+
     tag = os.path.splitext(os.path.basename(args.config))[0] + ("_smoke" if args.smoke else "")
     out_dir = args.out_dir or os.path.join("out", tag, args.variant)
     os.makedirs(out_dir, exist_ok=True)
@@ -900,6 +906,10 @@ def main():
                      "dropout": dropout,
                      "attn_dropout": attn_dropout,
                      "gate_bias_init": gate_bias_init,
+                     # 实际生效精度（None=未启用 autocast，回退 fp32）
+                     "amp": amp_enabled,
+                     "amp_dtype": (str(amp_dt).replace("torch.", "")
+                                   if amp_dt is not None else None),
                      # 数据协议是否被显式放行：正式结果必须能区分
                      "data_protocol_override": bool(allow_override)})
 
@@ -923,6 +933,20 @@ def main():
     manifest = build_run_manifest(
         tag=tag, variant=args.variant, seed=seed, config_path=args.config,
         data_dir=args.data_dir, device=device, sanity=sanity_info)
+    # 精度与 tf32 是影响数值可比性的受控变量，且只有 enable_tf32 之后才是
+    # 训练实际取值；紧随 build_run_manifest 补入，保证随后写出的 manifest/
+    # checkpoint/台账携带的是生效值而不是配置默认值。
+    manifest["precision"] = {
+        "amp_enabled": amp_enabled,
+        "amp_dtype": (str(amp_dt).replace("torch.", "")
+                      if amp_dt is not None else None),
+        "autocast": amp_dt is not None,
+        # TF32 仅 CUDA 生效；CPU 上记录布尔默认值会被误读成已启用。
+        "tf32_matmul": (bool(torch.backends.cuda.matmul.allow_tf32)
+                        if str(device).startswith("cuda") else None),
+        "tf32_cudnn": (bool(torch.backends.cudnn.allow_tf32)
+                       if str(device).startswith("cuda") else None),
+    }
     identity = None
     if sanity_info and sanity_info.get("present"):
         # 闸门证据必须和本 run 是同一份代码/配置/数据；旧配置或旧数据的
@@ -958,6 +982,10 @@ def main():
         "code_dirty": manifest["git"]["dirty"],
         "data_fingerprint": manifest["data"]["digest"],
         "config_sha256": manifest["config_sha256"],
+        # checkpoint/eval 自含种子生效证据与实际精度路径：即使 manifest 被
+        # 移走，单看权重文件也能核对播种与 bf16/fp32 口径。
+        "seed_report": manifest.get("seed_report"),
+        "training_precision": manifest["precision"],
         "sanity_passed": sanity_passed,
         # 通过值是否由与本 run 同代码/配置/数据的证据支持（旧文件无法核对
         # 时为 None，而不是假称已验证）
@@ -1029,7 +1057,6 @@ def main():
     # 梯度裁剪的参数列表与优化器同口径
     clip_params = [p for p in model.parameters() if p.requires_grad]
 
-    amp_dt = amp_dtype_for(device, config_bool(cfg.get("amp", True), "amp"))
     amp_ctx = amp_autocast(device, amp_dt is not None)
     # 曲线点数在训练开始前就固定了：采样过稀时过拟合/早停/尖峰诊断会静默
     # 失效，必须在启动日志里明确告警（不阻断，冒烟训练可有意稀疏）。

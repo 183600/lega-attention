@@ -252,7 +252,11 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
         out = os.path.join(tmp, "lega")
         os.makedirs(out)
         with open(os.path.join(out, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"variant": "standard", "seed": 999, "val_ppl": 1.0}, f)
+            json.dump({"variant": "standard", "seed": 999, "val_ppl": 1.0,
+                       "data_order_sha256": "o" * 16,
+                       "training_precision": {
+                           "amp_enabled": True,
+                           "amp_dtype": "bfloat16"}}, f)
         with open(os.path.join(out, "run_manifest.json"), "w",
                   encoding="utf-8") as f:
             json.dump({"config_sha256": "c" * 64,
@@ -261,6 +265,8 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
                        "data": {"digest": "d" * 16},
                        "seed_report": {"seed": 7,
                                        "rng_fingerprints": {"torch_cpu": "x"}},
+                       "precision": {"amp_enabled": True,
+                                     "amp_dtype": "bfloat16"},
                        "runtime": {"torch": "test"},
                        "sanity": {"passed": True, "sha256": "s" * 64}}, f)
         snap = snapshot_train_run("lega", 7, out)
@@ -270,6 +276,9 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
         assert prov["sanity"]["passed"] is True
         assert prov["data_fingerprint"] == "d" * 16
         assert prov["worktree"]["diff_sha256"] is None
+        assert prov["precision"]["amp_dtype"] == "bfloat16"
+        assert snap["result"]["data_order_sha256"] == "o" * 16
+        assert snap["result"]["amp_dtype"] == "bfloat16"
         assert snap["eval_identity_mismatches"]
         assert any("variant" in x for x in snap["eval_identity_mismatches"])
         assert any("seed" in x for x in snap["eval_identity_mismatches"])
@@ -392,6 +401,69 @@ def test_verify_ledger_rejects_malformed_run_coverage_fields():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：runs 缺失/非列表显式报畸形")
+
+
+def test_verify_ledger_checks_embedded_seed_evidence():
+    """台账内嵌 seed_report 必须与 run.seed 一致，且数据顺序指纹可复算。
+
+    只核对覆盖/生命周期不够：把 provenance 从别的 seed 复制过来，仍会显示
+    “已固定种子”。这里对 seed/播种状态/数据顺序 seed/指纹逐项核对；缺字段
+    的旧台账保持兼容，不误报。
+    """
+    from lega.utils import data_rng_state_fingerprint
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+
+        def _run(seed, report_seed=None, **sr):
+            report_seed = seed if report_seed is None else report_seed
+            report = {"seed": report_seed, "seed_verified": True,
+                      "data_order_seed": report_seed,
+                      "data_order_rng_fingerprint":
+                          data_rng_state_fingerprint(report_seed)}
+            report.update(sr)
+            return {"variant": "lega", "seed": seed,
+                    "provenance": {"seed_report": report}}
+
+        append_record(path, {"run_id": "good", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "good", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7)]})
+        # 复制 seed=8 的证据到 seed=7：seed/数据顺序 seed/指纹都不符
+        append_record(path, {"run_id": "copied", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "copied", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7, report_seed=8)]})
+        # 自报未验证，或指纹被改写
+        append_record(path, {"run_id": "unverified", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "unverified", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7, seed_verified=False)]})
+        append_record(path, {"run_id": "tampered", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "tampered", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7, data_order_rng_fingerprint="0" * 16)]})
+        # 旧台账无 seed_report：不因缺新证据而误报
+        append_record(path, {"run_id": "legacy", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "legacy", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [{"variant": "lega", "seed": 7}]})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        assert "good" not in by_id and "legacy" not in by_id, by_id
+        assert "seed_report_seed_mismatch" in by_id["copied"]["issues"]
+        assert "seed_report_data_order_seed_mismatch" in by_id["copied"]["issues"]
+        assert "seed_report_data_order_fingerprint_mismatch" in by_id["copied"]["issues"]
+        assert "seed_report_unverified" in by_id["unverified"]["issues"]
+        assert "seed_report_data_order_fingerprint_mismatch" in by_id["tampered"]["issues"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：run.seed 与内嵌 seed_report/数据指纹一致")
 
 
 def test_verify_ledger_lifecycle_and_artifact_hashes():

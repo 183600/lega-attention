@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .repro import ROOT, sha256_file
-from .utils import strict_int
+from .utils import data_rng_state_fingerprint, strict_int
 
 LEDGER_FILENAME = "experiments.jsonl"
 
@@ -94,6 +94,38 @@ def read_records(path: str) -> list:
         # verify_ledger/snapshot 因一个坏字节整体崩溃。
         pass
     return out
+
+
+def _seed_evidence_issues(run, run_seed: int) -> list:
+    """核验台账 run 内嵌的 seed_report 是否真的对应声明的 run_seed。
+
+    旧台账可能完全没有 seed_report（保留兼容，不误报）；但只要该字段存在，
+    seed 身份、是否实际播种、数据顺序 seed 与可复算指纹就不能与 run.seed
+    冲突。否则手改/拼接一条 provenance 即可让“已固定种子”的证据说谎。
+    """
+    prov = run.get("provenance")
+    sr = prov.get("seed_report") if isinstance(prov, dict) else None
+    if not isinstance(sr, dict):
+        return []
+    issues = []
+
+    def _bad_seed(value):
+        try:
+            return strict_int(value, "seed_report.seed") != int(run_seed)
+        except (TypeError, ValueError, OverflowError):
+            return True
+
+    if "seed" in sr and _bad_seed(sr.get("seed")):
+        issues.append("seed_report_seed_mismatch")
+    if sr.get("seed_verified") is False:
+        issues.append("seed_report_unverified")
+    if "data_order_seed" in sr and _bad_seed(sr.get("data_order_seed")):
+        issues.append("seed_report_data_order_seed_mismatch")
+    fp = sr.get("data_order_rng_fingerprint")
+    if isinstance(fp, str) and fp:
+        if fp != data_rng_state_fingerprint(int(run_seed)):
+            issues.append("seed_report_data_order_fingerprint_mismatch")
+    return issues
 
 
 def _ledger_seed(value):
@@ -213,7 +245,9 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     malformed += 1
                     continue
                 try:
-                    actual_list.append((str(v), _ledger_seed(s)))
+                    s_int = _ledger_seed(s)
+                    actual_list.append((str(v), s_int))
+                    run_issues.extend(_seed_evidence_issues(run, s_int))
                 except (TypeError, ValueError, OverflowError):
                     malformed += 1
             actual = set(actual_list)
@@ -427,6 +461,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "config_sha256": manifest.get("config_sha256"),
             "data_fingerprint": mdata.get("digest"),
             "seed_report": manifest.get("seed_report"),
+            "precision": manifest.get("precision"),
             "runtime": manifest.get("runtime"),
             "sanity": manifest.get("sanity"),
         }
@@ -450,7 +485,14 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
             "early_stopped", "tokens_seen",
             "n_params", "code_commit", "code_dirty", "data_fingerprint",
-            "config_sha256", "sanity_passed", "sanity_verified")}
+            "config_sha256", "sanity_passed", "sanity_verified",
+            "data_order_sha256")}
+        # 训练实际精度嵌在 provenance.training_precision（eval.json 顶层），
+        # 台账 result 提升为标量，便于跨 run 直接核对 bf16/fp32。
+        prec = ev.get("training_precision")
+        if isinstance(prec, dict):
+            rec["result"]["amp_enabled"] = prec.get("amp_enabled")
+            rec["result"]["amp_dtype"] = prec.get("amp_dtype")
     return rec
 
 
