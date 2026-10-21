@@ -623,6 +623,21 @@ class GPT(nn.Module):
                                       or not isinstance(top_k, int)
                                       or top_k <= 0):
                 raise ValueError(f"top_k 必须是正整数或 None，收到 {top_k!r}")
+            if not greedy:
+                # 温度直接改变采样分布：<=0 若被 max(temperature, 1e-6)
+                # 静默夹成极小值，会退化为近乎贪心；NaN 则让 multinomial
+                # 在生成中途抛错。必须在预分配/生成前显式拒绝。
+                if isinstance(temperature, bool):
+                    raise ValueError(
+                        f"temperature 必须是有限正数，收到 bool {temperature!r}")
+                try:
+                    temperature = float(temperature)
+                except (TypeError, ValueError, OverflowError) as e:
+                    raise ValueError(
+                        f"temperature 必须是有限正数，收到 {temperature!r}") from e
+                if not math.isfinite(temperature) or temperature <= 0:
+                    raise ValueError(
+                        f"temperature 必须是有限正数，收到 {temperature!r}")
             # 生成上限受 block_size（RoPE 位置表）约束：在分配缓冲/缓存前
             # 提前报出清晰错误，避免生成到一半才在 forward 中触发位置断言
             assert T0 + max_new_tokens <= self.block_size, (
@@ -689,7 +704,7 @@ class GPT(nn.Module):
                     eos_flags[i] = nxt == eos_token_id
                     if (i + 1) % _EOS_EVERY == 0 or i + 1 == max_new_tokens:
                         window = eos_flags[:i + 1]                 # (k, B)
-                        if bool(window.any(dim=0).all()):
+                        if B and bool(window.any(dim=0).all()):
                             # 所有行都已命中过 EOS：截到「最后一行首次命中的步」。
                             # 首个命中步用「前缀全 False 的个数」计算，避免
                             # argmax 对多个 True 的并列索引依赖后端约定。
