@@ -170,8 +170,13 @@ def _column_values(records: Sequence[Dict], name: str) -> np.ndarray:
         vals = []
         for r in records:
             mp = _float_or_nan(r.get("max_p"))
-            vals.append(math.log(max(mp, _MAXP_FLOOR))
-                        if not math.isnan(mp) else float("nan"))
+            # max_p 是概率质量：负值或 >1 不是“很小的概率”，而是坏记录。
+            # 若只 clamp 下界，max_p=-5 会被当成极强集中度（log 1e-12），
+            # 在探针里给出与真实语义相反的信号；按缺失剔除。
+            if math.isnan(mp) or not (0.0 <= mp <= 1.0):
+                vals.append(float("nan"))
+            else:
+                vals.append(math.log(max(mp, _MAXP_FLOOR)))
         return np.asarray(vals, dtype=np.float64)
     if name == "log_n":
         return np.asarray([_float_or_nan(r.get("log_n")) for r in records],
