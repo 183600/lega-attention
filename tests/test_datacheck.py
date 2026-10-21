@@ -1267,6 +1267,25 @@ def test_leakage_alerts_tolerates_malformed_nested_sections():
     print("  [ok] leakage_alerts：畸形嵌套诊断不崩溃")
 
 
+def test_leakage_alerts_reject_bool_and_fractional_counts():
+    """bool/小数计数不能截断成行数，也不能让布尔比率触发重叠告警。"""
+    out = leakage_alerts(
+        None, None,
+        {"train_lines_dropped_as_duplicates_of_eval": True,
+         "val_test_overlap_long_lines": 1.9},
+        None,
+        {"val_vs_train": {"tv": True, "js_bits": False}},
+        None, None)
+    assert out == [], out
+    # 真正的整数计数与比率仍然工作
+    out = leakage_alerts(
+        None, None, {"val_test_overlap_long_lines": 1}, None,
+        {"val_vs_train": {"tv": 0.9}}, None, None)
+    assert [a["code"] for a in out] == ["distribution_tv_val_vs_train",
+                                        "eval_splits_overlap"], out
+    print("  [ok] leakage_alerts：bool/小数计数与布尔比率按坏数据忽略")
+
+
 def test_short_ngram_overlap_and_alerts_are_diagnostic_only():
     """<64 token 的整句复用要被短 n 筛查抓到，但只告警、不进入硬闸门。"""
     rng = np.random.default_rng(1)

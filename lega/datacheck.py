@@ -997,6 +997,8 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     没有告警时返回空列表——"无告警"与"没有自检"是两回事，后者由报告缺失表示。
     """
     def _num(v):
+        if isinstance(v, bool):
+            return None
         try:
             f = float(v)
         except (TypeError, ValueError, OverflowError):
@@ -1004,10 +1006,13 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         return f if np.isfinite(f) else None
 
     def _count(v):
+        # 计数必须是整数：bool/小数/坏字符串不能截断成看似合法的行数，
+        # 否则报告会凭空写出“已去污染 N 行”或触发不存在的重叠告警。
         try:
-            return int(v or 0)
-        except (TypeError, ValueError, OverflowError):
+            n = strict_int(0 if v is None else v, "计数")
+        except ValueError:
             return 0
+        return n if n >= 0 else 0
 
     th = dict(ALERT_THRESHOLDS)
     if isinstance(thresholds, dict):
