@@ -303,12 +303,16 @@ def main():
     if split_protocol is None:
         split_protocol = {}
     split_protocol.update(verify_splits_disjoint(txt_paths))
+    if split_protocol.get("missing_files"):
+        print(f"[data] 警告：以下 split 文件缺失，无法核对跨 split 长行："
+              f"{split_protocol['missing_files']}")
     if not split_protocol.get("verified_disjoint", True):
         ov = {k: v for k, v in split_protocol["overlap_long_lines"].items()
               if v["exact_lines"] or v["normalized_lines"]}
-        print(f"[data] 警告：三个 split 的实际文本存在跨 split 共享长行 {ov}——"
-              "与“无共享样本/document_disjoint”声明不符，须核查来源或划分；"
-              "下游去污染会移除 train 侧重复行，但 val/test 重叠只能靠重建划分消除")
+        if ov:
+            print(f"[data] 警告：三个 split 的实际文本存在跨 split 共享长行 {ov}——"
+                  "与“无共享样本/document_disjoint”声明不符，须核查来源或划分；"
+                  "下游去污染会移除 train 侧重复行，但 val/test 重叠只能靠重建划分消除")
 
     from lega.data import prepare_bins
     # force 透传：不传时 prepare_bins 依据源 txt 哈希/协议版本校验缓存，

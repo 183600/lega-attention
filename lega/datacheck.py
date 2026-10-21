@@ -1108,18 +1108,25 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
     说明三个文件并非真正互斥，"无共享样本" 的协议被证伪。下游 prepare_bins
     也会做去污染诊断，这里只是把元数据声明与其实际内容绑定，避免报告
     "声明一套、数据一套"。
+
+    文件缺失/路径为空时不能把"空集合交集"当成"已核对无重叠"：缺失的 split
+    必须显式列入 missing_files 并令 verified_disjoint=False，否则报告会把
+    "没有可核对的文件"伪装成"核对通过"。
     """
     sets = {}
+    missing = []
     for split, path in (txt_paths if isinstance(txt_paths, dict) else {}).items():
+        if not path or not os.path.exists(path):
+            missing.append(split)
+            continue
         exact, norm = set(), set()
-        if path and os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    s = line.strip()
-                    if len(s) < min_chars:
-                        continue
-                    exact.add(_line_digest(s))
-                    norm.add(_line_digest(_normalize_line(s)))
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if len(s) < min_chars:
+                    continue
+                exact.add(_line_digest(s))
+                norm.add(_line_digest(_normalize_line(s)))
         sets[split] = (exact, norm)
     overlaps = {}
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
@@ -1128,10 +1135,13 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
         overlaps[f"{a}_{b}"] = {
             "exact_lines": len(sets[a][0] & sets[b][0]),
             "normalized_lines": len(sets[a][1] & sets[b][1])}
-    disjoint = all(v["exact_lines"] == 0 and v["normalized_lines"] == 0
-                   for v in overlaps.values())
+    disjoint = (not missing and bool(overlaps)
+                and all(v["exact_lines"] == 0
+                        and v["normalized_lines"] == 0
+                        for v in overlaps.values()))
     return {"verified_disjoint": bool(disjoint),
             "overlap_long_lines": overlaps,
+            "missing_files": missing,
             "min_chars": int(min_chars)}
 
 

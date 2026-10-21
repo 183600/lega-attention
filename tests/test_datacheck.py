@@ -591,6 +591,17 @@ def test_verify_splits_disjoint_binds_claim_to_content():
                 f.write(f"unique {s} line with plenty of characters here.\n")
         r = verify_splits_disjoint(paths)
         assert r["verified_disjoint"] is True
+        assert r["missing_files"] == []
+        # 缺失文件不是“无可核对内容”→ 空集合交集不能伪造成核对通过
+        missing = dict(paths)
+        missing["train"] = os.path.join(d, "does-not-exist.txt")
+        r = verify_splits_disjoint(missing)
+        assert r["verified_disjoint"] is False
+        assert r["missing_files"] == ["train"]
+        # 空路径/空输入同样不能声称已验证
+        assert verify_splits_disjoint({"train": "", "val": paths["val"]})[
+            "verified_disjoint"] is False
+        assert verify_splits_disjoint({})["verified_disjoint"] is False
         # 注入 val/test 共享长行 → 声明被证伪
         with open(paths["val"], "w", encoding="utf-8") as f:
             f.write(f"{shared}\nval unique with plenty of characters.\n")
@@ -607,7 +618,8 @@ def test_verify_splits_disjoint_binds_claim_to_content():
         with open(paths["test"], "w", encoding="utf-8") as f:
             f.write("test unique plenty of characters here.\n")
         assert verify_splits_disjoint(paths)["verified_disjoint"] is True
-    print("  [ok] verify_splits_disjoint：声明与文本核对，短行不误报")
+    print("  [ok] verify_splits_disjoint：声明与文本核对，短行不误报，"
+          "缺失文件不伪装成通过")
 
 
 def test_distribution_shift_metric():

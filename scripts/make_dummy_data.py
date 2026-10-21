@@ -91,10 +91,10 @@ def main():
     split_protocol.update(verify_splits_disjoint({
         "train": os.path.join(args.out_dir, "train.txt"),
         "val": os.path.join(args.out_dir, "val.txt"),
-        "test": test_txt}))
+        **({"test": test_txt} if os.path.exists(test_txt) else {})}))
     if not split_protocol.get("verified_disjoint", True):
         raise SystemExit(
-            "[dummy] 生成器自检失败：三个 split 的实际文本存在跨 split 共享长行"
+            "[dummy] 生成器自检失败：split 的实际文本存在跨 split 共享长行"
             f"（{split_protocol['overlap_long_lines']}），与“无共享样本”声明不符")
     meta = prepare_bins(
         args.out_dir, kind="auto", force=True,
