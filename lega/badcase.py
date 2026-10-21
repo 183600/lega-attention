@@ -89,7 +89,7 @@ def categorize_case(rec: Dict) -> Dict:
     # 1) 标注/构造自检：gold 答案必须真的在 prompt 里，否则错在数据侧。
     # 外部/旧格式可能完全没有该字段：缺少证据时既不能断言标注错误，也不能
     # 把答案当成幻觉归因给模型——单列为无法核对，避免污染模型失败统计。
-    if task != "fwe" and r.get("answer_in_prompt") is None:
+    if isinstance(rec, dict) and task != "fwe" and r.get("answer_in_prompt") is None:
         r["category"] = "label_unknown"
         r["explanation"] = ("样例缺少 answer_in_prompt 标注自检字段，"
                             "无法确认 gold 是否在 prompt 中；不计入模型失败")
