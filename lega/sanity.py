@@ -395,8 +395,16 @@ def main():
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
+            f"{args.config}")
     opt = dict(DEFAULTS)
     sanity_cfg = cfg.get("sanity") or {}
+    if not isinstance(sanity_cfg, dict):
+        raise ValueError(
+            "配置 sanity 段必须是 JSON 对象，收到 "
+            f"{type(sanity_cfg).__name__}: {args.config}")
     opt["loss_threshold"] = _finite_float_arg(
         sanity_cfg.get("loss_threshold", DEFAULTS["loss_threshold"]),
         "sanity.loss_threshold")

@@ -5893,6 +5893,9 @@ def main():
         p.error(f"配置文件不存在: {args.config}")
     with open(args.config, "r", encoding="utf-8") as cf:
         cfg = json.load(cf)
+    if not isinstance(cfg, dict):
+        p.error(f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
+                f"{args.config}")
 
     # 多种子协议：显式 --seeds 优先；否则用配置 seeds；冒烟模式只跑首个种子。
     # 种子一律严格解析：int("1.5") 会直接抛错，而 int(1.5)/int(True) 会把

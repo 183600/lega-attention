@@ -849,6 +849,10 @@ def main():
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
+            f"{args.config}")
     if args.smoke:
         for k, v in SMOKE_OVERRIDES.items():
             cfg[k] = min(v, cfg.get(k, v)) if k in ("batch_size",) else v

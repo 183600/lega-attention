@@ -305,6 +305,16 @@ def _trial_identity_summary(trials) -> dict:
     }
 
 
+def _load_config_object(path: str) -> dict:
+    """读取配置并拒绝非对象顶层；数组/标量无法按字段继承，必须显式报错。"""
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: {path}")
+    return cfg
+
+
 def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
               wd: float, steps: int, out_dir: str, device: str = "auto",
               timeout=None) -> dict:
@@ -327,8 +337,7 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
         if timeout <= 0:
             raise ValueError(f"timeout 必须 > 0，收到 {timeout!r}")
     os.makedirs(out_dir, exist_ok=True)
-    with open(config, "r", encoding="utf-8") as f:
-        trial_cfg = json.load(f)
+    trial_cfg = _load_config_object(config)
     trial_cfg["lr"] = lr
     trial_cfg["weight_decay"] = wd
     trial_config = os.path.join(out_dir, "config_trial.json")
@@ -431,8 +440,7 @@ def tune(config: str, data_dir: str, out_dir: str,
     报告里 `single_seed_selection` 显式标注“只用 1 个种子选择”——此时
     网格最优可能只是该种子的幸运值，不能据此宣称基线已充分调优。
     """
-    with open(config, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+    cfg = _load_config_object(config)
     lr0 = _finite_number(cfg.get("lr"), "config.lr")
     wd0 = _finite_number(cfg.get("weight_decay", 0.1), "config.weight_decay")
     if lr0 < 0 or wd0 < 0:
