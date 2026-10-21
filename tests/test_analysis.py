@@ -223,6 +223,12 @@ def test_summarize_rejects_non_binary_hit_and_missing_maxp():
     # head 1 只有一条记录且缺 max_p：均值未知，不能写成 NaN/null
     h1 = [p for p in s["per_head"] if p["head"] == 1][0]
     assert h1["mean_max_p"] is None
+    # τ 扫描与 summarize 必须同口径：1.5 不是正类，不能让
+    # p_hit_given_conc / misleading_rate 越界。
+    ts = tau_sensitivity(recs, [0.5])
+    assert ts["p_hit_given_conc"][0] is None, ts   # 唯一的集中样本 hit 非法
+    assert ts["misleading_rate"][0] == 0.0, ts
+    assert ts["p_hit_given_notconc"][0] == 0.0, ts  # 未集中样本 hit=0.0
     # 超范围 layer（int64 转换会饱和合并不同头）按畸形记录跳过
     huge = [dict(r, layer=10 ** 19) for r in recs]
     assert summarize(huge, "lega", 0.5)["per_head"] == []

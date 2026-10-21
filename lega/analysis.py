@@ -270,6 +270,9 @@ def tau_sensitivity(records: List[Dict], taus: List[float]) -> Dict:
     """
     hit = _record_arrays(records, "hit")
     max_p = _record_arrays(records, "max_p")
+    # 与 summarize 同一口径：hit 必须是 0/1 标签，其他有限值（如 1.5、-1）
+    # 不能冒充命中/未命中，否则条件概率会越界或方向错误。
+    hit[(hit != 0.0) & (hit != 1.0)] = np.nan
     out: Dict = {"taus": [float(t) for t in taus]}
     fields = ("conc_rate", "p_hit_given_conc", "p_hit_given_notconc",
               "misleading_rate", "misleading_given_conc")
