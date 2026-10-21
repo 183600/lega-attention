@@ -15,7 +15,8 @@ import tempfile
 
 from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
-from lega.train import (_config_int, _config_min_delta, _config_nonneg_float,
+from lega.train import (_config_finite_float, _config_int, _config_min_delta,
+                        _config_nonneg_float, _config_probability,
                         early_stop_update)
 
 
@@ -80,6 +81,31 @@ def test_config_min_delta_rejects_nonfinite_and_out_of_range():
     print("  [ok] early_stop_min_delta：拒绝 bool/非有限/越界值")
 
 
+def test_config_float_and_probability_reject_invalid_values():
+    """模型正则化超参数不允许 bool/NaN/Inf 或越界概率静默进入训练。"""
+    for bad in (True, False, float("nan"), float("inf"), "nan", None, object()):
+        try:
+            _config_finite_float(bad, "gate_bias_init")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法浮点配置未被拒绝: {bad!r}")
+    assert _config_finite_float(2, "gate_bias_init") == 2.0
+    assert _config_finite_float("2.5", "gate_bias_init") == 2.5
+    for bad in (True, False, -0.1, 1.1, float("nan"), float("inf"),
+                "nan", None, object()):
+        try:
+            _config_probability(bad, "dropout")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法概率配置未被拒绝: {bad!r}")
+    assert _config_probability(0, "dropout") == 0.0
+    assert _config_probability(1, "dropout") == 1.0
+    assert _config_probability("0.25", "dropout") == 0.25
+    print("  [ok] 浮点/概率超参数：拒绝 bool/非有限/越界值")
+
+
 def _write_data(d: str) -> None:
     """构造足够长且 train/val 不共享长串的小语料（字符级）。
 
@@ -141,6 +167,31 @@ def test_train_rejects_zero_log_every_before_training():
         assert not os.path.exists(os.path.join(out_dir, "train_log.jsonl"))
         assert not os.path.exists(os.path.join(out_dir, "eval.json"))
     print("  [ok] log_every=0 在开训前显式拒绝")
+
+
+def test_train_rejects_invalid_model_floats_before_artifacts():
+    """dropout/attn_dropout/gate_bias_init 非法时必须在写 run 产物前失败。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cases = (("dropout", float("nan"), "dropout"),
+                 ("attn_dropout", True, "attn_dropout"),
+                 ("gate_bias_init", float("inf"), "gate_bias_init"))
+        for i, (key, bad, needle) in enumerate(cases):
+            cfg = _cfg()
+            cfg[key] = bad
+            out_dir = os.path.join(tmp, f"run{i}")
+            try:
+                _run_train(cfg, data_dir, out_dir)
+            except ValueError as e:
+                assert needle in str(e), e
+            else:
+                raise AssertionError(f"{key}={bad!r} 未被拒绝")
+            assert not os.path.exists(os.path.join(out_dir, "run_manifest.json"))
+            assert not os.path.exists(os.path.join(out_dir, "config_used.json"))
+    print("  [ok] 非法 dropout/gate_bias_init 在产物写入与训练前拒绝")
 
 
 def test_train_early_stop_end_to_end():

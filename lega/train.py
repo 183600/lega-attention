@@ -723,6 +723,39 @@ def _config_nonneg_float(value, name: str) -> float:
     return value
 
 
+def _config_finite_float(value, name: str) -> float:
+    """训练配置中的普通浮点超参数必须是有限数，拒绝 bool/NaN/Inf。
+
+    ``float(True)=1.0`` 会让布尔值冒充真实超参数；NaN/Inf 一旦进入模型
+    初始化或优化器，会在训练若干步后才污染参数，无法从 run 产物区分。
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"config.{name} 必须是数值，收到 bool {value!r}")
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"config.{name} 必须是数值，收到 {value!r}") from e
+    if not math.isfinite(value):
+        raise ValueError(
+            f"config.{name} 必须是有限数值，收到 {value!r}")
+    return value
+
+
+def _config_probability(value, name: str) -> float:
+    """dropout 类概率必须落在 [0, 1] 且为有限数（拒绝 bool）。
+
+    NaN 与 0 比较恒为 False，会静默走 ``nn.Identity`` 分支把 dropout
+    关掉；bool True 会变成 p=1 把激活全部置零。两者都会让配置声明的
+    正则化强度与实际训练行为不一致，必须在构造模型前显式拒绝。
+    """
+    value = _config_finite_float(value, name)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(
+            f"config.{name} 必须在 [0, 1] 内，收到 {value!r}")
+    return value
+
+
 def _config_min_delta(value) -> float:
     """早停相对改善阈值：必须是 [0, 1) 内有限浮点，拒绝 bool/NaN/Inf。
 
@@ -835,6 +868,11 @@ def main():
     weight_decay = _config_nonneg_float(
         cfg.get("weight_decay", 0.1), "weight_decay")
     grad_clip = _config_nonneg_float(cfg.get("grad_clip", 1.0), "grad_clip")
+    dropout = _config_probability(cfg.get("dropout", 0.0), "dropout")
+    attn_dropout = _config_probability(
+        cfg.get("attn_dropout", 0.0), "attn_dropout")
+    gate_bias_init = _config_finite_float(
+        cfg.get("gate_bias_init", 2.0), "gate_bias_init")
     # 种子必须是精确整数：配置里的 "seed": true → 1 或 1.5 → 1 会让本次
     # 训练以与声明不同的种子播种，而 checkpoint/manifest/曲线记的是截断值，
     # 事后无法区分。int(True)==1、int(1.5)==1 都不可接受。
@@ -851,6 +889,11 @@ def main():
                      # 显式写入实际生效的早停口径：CLI 覆盖也必须进入受控变量审计
                      "early_stop_patience": early_stop_patience,
                      "early_stop_min_delta": early_stop_min_delta,
+                     # 记录规范化后的模型正则化超参数：bool/字符串输入
+                     # 不能只在内存里被转换，而让 config_used 复述原始值。
+                     "dropout": dropout,
+                     "attn_dropout": attn_dropout,
+                     "gate_bias_init": gate_bias_init,
                      # 数据协议是否被显式放行：正式结果必须能区分
                      "data_protocol_override": bool(allow_override)})
 
@@ -947,10 +990,10 @@ def main():
         vocab_size=int(meta["vocab_size"]), block_size=block_size,
         d_model=d_model, n_layers=n_layers,
         n_heads=n_heads, ffn_mult=ffn_mult,
-        dropout=float(cfg.get("dropout", 0.0)),
-        attn_dropout=float(cfg.get("attn_dropout", 0.0)),
+        dropout=dropout,
+        attn_dropout=attn_dropout,
         variant=args.variant,
-        gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
+        gate_bias_init=gate_bias_init,
         use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
     )
     model = GPT(**model_cfg).to(device)
