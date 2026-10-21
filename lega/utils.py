@@ -115,6 +115,23 @@ def strict_int(value, name: str = "值") -> int:
         raise ValueError(f"{name} 必须是整数，收到 {value!r}") from e
 
 
+MAX_SEED = 2 ** 32 - 1
+
+
+def seed_int(value, name: str = "种子") -> int:
+    """严格种子化：整数且在 NumPy/PYTHONHASHSEED 共同支持的 0..2^32-1 内。
+
+    ``set_seed`` 会先写 PYTHONHASHSEED、再调用 ``random.seed``，最后才由
+    ``np.random.seed`` 做范围检查；负种子会在前两步已改写全局状态后才失败，
+    留下“尝试播种但只成功一半”的进程。run_all/tuning 的种子解析若放行
+    负数/超上限，也会让错误推迟到子进程启动后才暴露。这里统一在入口拒绝。
+    """
+    seed = strict_int(value, name)
+    if seed < 0 or seed > MAX_SEED:
+        raise ValueError(f"{name} 必须在 0..{MAX_SEED} 内，收到 {seed}")
+    return seed
+
+
 def config_finite_float(value, name: str = "值") -> float:
     """配置浮点数严格化：拒绝 bool 与非有限值（NaN/Inf），其余转 float。
 
@@ -181,10 +198,11 @@ def set_seed(seed: int) -> None:
     跨硬件架构（不同 GPU 型号、CPU 指令集、cuDNN 版本）无法保证逐位一致，
     本函数只保证同机相对稳定。
 
-    种子先经 strict_int 规范化：bool/小数/非整数字符串直接 ValueError，
-    不允许 True 被当成 1、1.5 被截断成 1 后“看起来播种成功”。
+    种子先经 seed_int 规范化：bool/小数/非整数字符串直接 ValueError，
+    负值/超过 2^32-1 也在写入任何全局状态前拒绝；不允许 True 被当成 1、
+    1.5 被截断成 1 后“看起来播种成功”，也不允许半途播种。
     """
-    seed = strict_int(seed, "seed")
+    seed = seed_int(seed, "seed")
     os.environ.setdefault("PYTHONHASHSEED", str(seed))
     random.seed(seed)
     np.random.seed(seed)
@@ -225,10 +243,11 @@ def seed_report(seed: int) -> dict:
         True；启动时未设置时为 False（等价于“本进程未固定，已显式标注”），
         启动时的值不可解析为整数时为 None。
 
-    seed 与 set_seed 同口径先经 strict_int 规范化：bool/小数/非整数字符串
-    直接 ValueError，报告里的 "seed" 永远等于真正播种的那个整数。
+    seed 与 set_seed 同口径先经 seed_int 规范化：bool/小数/非整数字符串
+    直接 ValueError，负数/超上限同样拒绝，报告里的 "seed" 永远等于真正
+    播种的那个整数。
     """
-    seed = strict_int(seed, "seed")
+    seed = seed_int(seed, "seed")
 
     def _as_int(value):
         """环境值 → int；bool/小数/不可解析字符串返回 None（不截断、不当 1）。"""

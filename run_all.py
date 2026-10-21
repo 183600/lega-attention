@@ -92,7 +92,7 @@ from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E
 from lega.utils import (bootstrap_mean_ci, config_bool, get_device,
                         holm_bonferroni, mean_std, min_detectable_effect,
                         paired_sign_flip_test, paired_t_test, save_json,
-                        strict_int)  # noqa: E402
+                        seed_int, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -217,13 +217,14 @@ def parse_variants(spec: str) -> list:
 
 
 def _strict_seed_int(value, parser=None, label="种子"):
-    """严格整数化种子：bool/小数/非有限显式报错（绝不 int() 截断）。
+    """严格种子化：bool/小数/负值/超过 2^32-1 均显式报错。
 
     True 与 1 在 dict 里同键、1.5 与 1 截断后相等，都会让不同的种子在
     ``dict.fromkeys`` 去重时合并，或让台账/结果目录名与实际播种不一致。
+    越界种子会让全局 RNG 只播种一半后才失败，必须在启动子进程前拦截。
     """
     try:
-        return strict_int(value, label)
+        return seed_int(value, label)
     except ValueError as e:
         if parser is not None:
             parser.error(str(e))

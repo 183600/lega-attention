@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 
-from .utils import strict_int
+from .utils import seed_int, strict_int
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 def _finite_number(value, name: str) -> float:
@@ -61,11 +61,12 @@ def parse_floats(s):
 
 
 def parse_seeds(s, parser=None):
-    """逗号分隔的非负整数种子列表；非整数/负数显式拒绝而不是截断或晚失败。
+    """逗号分隔的合法种子列表；非整数/越界显式拒绝而不是截断或晚失败。
 
     与 run_all 的种子解析同口径：``int("1_0")`` 会得到 10、``int(True)`` 会
-    得到 1，都会让声明的种子与实际训练身份错位；负种子则会在 trial 启动后
-    才因 NumPy/PYTHONHASHSEED 约束失败，必须在这里就报错。
+    得到 1，都会让声明的种子与实际训练身份错位；负种子/超过 NumPy 与
+    PYTHONHASHSEED 共同上限的种子则会在 trial 启动后才失败，必须在这里
+    就报错。
     """
     out = []
     for x in str(s).split(","):
@@ -73,9 +74,7 @@ def parse_seeds(s, parser=None):
         if not x:
             continue
         try:
-            seed = strict_int(x, "种子")
-            if seed < 0:
-                raise ValueError(f"种子必须 >= 0，收到 {x!r}")
+            seed = seed_int(x, "种子")
         except ValueError as e:
             msg = str(e)
             if parser is not None:
@@ -92,9 +91,7 @@ def trial_env(seed: int, env=None) -> dict:
     进程的哈希盐，所有 trial 会共享父进程/首个种子的哈希随机化，同 seed
     重跑也不再稳定。CUBLAS_WORKSPACE_CONFIG 须在任何 CUDA 初始化前生效。
     """
-    seed = strict_int(seed, "seed")
-    if seed < 0:
-        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
+    seed = seed_int(seed, "seed")
     e = dict(env if env is not None else os.environ)
     e["PYTHONHASHSEED"] = str(seed)
     e.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -317,9 +314,7 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
     原样继承）：`lega.train` 只从 --config 读取超参数，若不注入，网格中的每个
     trial 实际都用同一组默认超参数训练，调优结论完全失真。
     """
-    seed = strict_int(seed, "seed")
-    if seed < 0:
-        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
+    seed = seed_int(seed, "seed")
     steps = strict_int(steps, "steps")
     if steps <= 0:
         raise ValueError(f"steps 必须 >= 1，收到 {steps!r}")
@@ -446,11 +441,11 @@ def tune(config: str, data_dir: str, out_dir: str,
     if tolerance < 0:
         raise ValueError(f"tolerance 必须 >= 0，收到 {tolerance!r}")
     if seeds is None:
-        seeds = [strict_int(
+        seeds = [seed_int(
             cfg.get("seed", 1337) if seed is None else seed, "seed")]
     else:
-        seeds = [strict_int(s, "seeds") for s in seeds] or [
-            strict_int(cfg.get("seed", 1337), "seed")]
+        seeds = [seed_int(s, "seeds") for s in seeds] or [
+            seed_int(cfg.get("seed", 1337), "seed")]
     # 重复种子（如 --seeds 7,7）否则会重复训练同一目录并伪造“多种子证据”。
     seeds = list(dict.fromkeys(seeds))
     seed = seeds[0]  # 兼容字段：报告里的主（第一个）选择种子

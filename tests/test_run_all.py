@@ -3505,8 +3505,8 @@ def test_seed_parsing_rejects_bool_and_fractional_truncation():
     assert _strict_seed_int(7.0) == 7
     assert _strict_seed_int("1337") == 1337
     assert _strict_seed_int(" 42 ") == 42
-    for bad in (True, False, 1.5, -0.5, float("nan"), float("inf"),
-                "1.5", "abc", "", [7], {"seed": 1}, None):
+    for bad in (True, False, 1.5, -0.5, -1, 2 ** 32, float("nan"),
+                float("inf"), "1.5", "abc", "", [7], {"seed": 1}, None):
         try:
             _strict_seed_int(bad)
             raised = False

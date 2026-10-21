@@ -40,8 +40,8 @@ def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
     np.random.seed 处以 TypeError 半途失败（PYTHONHASHSEED 已被写成 "1"）。
     两者都必须在入口就显式拒绝。
     """
-    for bad in (True, False, 1.5, -0.5, float("nan"), float("inf"),
-                "1.5", "abc", "", [1], {"seed": 1}, None):
+    for bad in (True, False, 1.5, -0.5, -1, 2 ** 32, float("nan"),
+                float("inf"), "1.5", "abc", "", [1], {"seed": 1}, None):
         for fn in (set_seed, seed_report):
             try:
                 fn(bad)
@@ -49,6 +49,15 @@ def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
             except ValueError:
                 raised = True
             assert raised, (fn.__name__, bad)
+    from lega.utils import MAX_SEED, seed_int
+    assert seed_int(0) == 0 and seed_int(MAX_SEED) == MAX_SEED
+    for bad in (-1, MAX_SEED + 1):
+        try:
+            seed_int(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
     # 整数值浮点/整数字符串语义明确，规范化成同一个 int（不再半途崩溃）
     set_seed(1337.0)
     rep = seed_report("1337")

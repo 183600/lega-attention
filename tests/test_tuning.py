@@ -336,7 +336,7 @@ def test_parse_seeds_rejects_non_integer():
     assert parse_seeds("1, 2,3") == [1, 2, 3]
     assert parse_seeds("") is None
     assert parse_seeds(" 4 ") == [4]
-    for bad in ("1.5", "1_0", "-1", "true", "0x10"):
+    for bad in ("1.5", "1_0", "-1", "4294967296", "true", "0x10"):
         try:
             parse_seeds(bad)
         except ValueError:
