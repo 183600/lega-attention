@@ -385,7 +385,18 @@ def test_decontaminate_ignores_short_lines():
     assert out["train"].count(long_train) == 1
     assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
     assert stats["train_intra_split_duplicate_lines"] == 1
-    print("  [ok] 短行不参与去污染；train 内部长行重复被删除且仍计数")
+    # 阈值是计数身份：bool/小数/非数值不能被 int() 截断成另一个长度口径
+    for bad in (True, 40.5, "bad", None, -1):
+        try:
+            decontaminate_texts(texts, min_chars=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 min_chars 未被拒绝: {bad!r}")
+    _, stats_str = decontaminate_texts(texts, min_chars="40")
+    assert stats_str["min_chars"] == 40
+    print("  [ok] 短行不参与去污染；train 内部长行重复被删除且仍计数；"
+          "min_chars 严格整数化")
 
 
 def test_decontaminate_counts_short_line_duplicates():
@@ -885,6 +896,15 @@ def test_verify_splits_disjoint_binds_claim_to_content():
         r = verify_splits_disjoint(paths)
         assert r["verified_disjoint"] is True
         assert r["missing_files"] == []
+        # min_chars=True 会把所有行当短行，长行重叠被跳过 → 伪造 verified。
+        for bad in (True, 40.5, "bad", None, -1):
+            try:
+                verify_splits_disjoint(paths, min_chars=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 min_chars 未被拒绝: {bad!r}")
+        assert verify_splits_disjoint(paths, min_chars="40")["min_chars"] == 40
         # 缺失文件不是“无可核对内容”→ 空集合交集不能伪造成核对通过
         missing = dict(paths)
         missing["train"] = os.path.join(d, "does-not-exist.txt")

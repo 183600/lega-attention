@@ -161,7 +161,9 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
     比较集合使用 128-bit 摘要（16 字节碰撞概率可忽略），
     train 输出按删除切点拼接未删除片段。
     """
-    min_chars = int(min_chars)
+    min_chars = strict_int(min_chars, "min_chars")
+    if min_chars < 0:
+        raise ValueError(f"min_chars 必须 >= 0，收到 {min_chars!r}")
     # 顶层非对象或缺少 train（旧格式/手改缓存）时按空文本处理，避免一个
     # 损坏的数据缓存让 prepare_data 直接 KeyError/AttributeError。
     texts = texts if isinstance(texts, dict) else {}
@@ -1351,6 +1353,11 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
     现象），但会在 overlap_short_lines 中单独计数，避免短样本跨 split 复制
     成为既不删除也不报告的盲区。
     """
+    # 阈值本身必须是严格整数：min_chars=True 会让所有行都变成“短行”，
+    # 长行重叠被跳过而 verified_disjoint 仍可能为 True，等于伪造核对通过。
+    min_chars = strict_int(min_chars, "min_chars")
+    if min_chars < 0:
+        raise ValueError(f"min_chars 必须 >= 0，收到 {min_chars!r}")
     sets = {}
     short_sets = {}
     missing = []
