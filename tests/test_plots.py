@@ -252,6 +252,21 @@ def test_train_logs_skip_non_dict_and_bad_steps():
     print("  [ok] 训练日志：非 dict 行/坏 step/坏值安全跳过")
 
 
+def test_mean_by_step_rejects_fractional_and_boolean_steps():
+    """1.5/True 不能被 int() 截断后与 step=1 合并到同一 x 坐标；整数值
+    浮点与整数字符串仍是合法 step，超大整数按坏点跳过。"""
+    runs = [[{"step": 1, "loss": 2.0},
+             {"step": 1.5, "loss": 99.0},
+             {"step": True, "loss": 99.0},
+             {"step": 2.0, "loss": 1.0},
+             {"step": "3", "loss": 0.5},
+             {"step": 10 ** 400, "loss": 0.0}]]
+    xs, ys = _mean_by_step(runs, "loss")
+    assert xs == [1, 2, 3], (xs, ys)
+    assert ys == [2.0, 1.0, 0.5], ys
+    print("  [ok] 训练曲线均值：小数/布尔 step 不截断合并")
+
+
 def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
     """没有共同 batch 档位时仍要为每个变体取自己的可用档位画线，
     不能拿第一个变体的 batch key 去查所有变体（否则整条线静默消失）。"""

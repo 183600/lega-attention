@@ -812,6 +812,31 @@ def _load_train_logs(train_root, rdir=None):
     return out
 
 
+def _step_or_none(v):
+    """训练日志 step → 整数；bool/非有限浮点/小数/不可解析值返回 None。
+
+    小数 step 若被 int() 截断，1.5 与 1.0 会合并到同一 x 坐标，多 run
+    均值因而失真；整数值浮点（2.0）仍是合法 step，与 curves 同口径。
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, float):
+        if not math.isfinite(v) or not v.is_integer():
+            return None
+        v = int(v)
+    else:
+        try:
+            v = int(v)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    try:
+        if not math.isfinite(float(v)):
+            return None
+    except (OverflowError, ValueError):
+        return None
+    return v
+
+
 def _mean_by_step(runs, key):
     """把多份 run 的记录按 step 对齐求均值（缺该 key 的记录跳过）。"""
     acc = {}
@@ -821,8 +846,11 @@ def _mean_by_step(runs, key):
                 continue
             if r.get(key) is None or r.get("step") is None:
                 continue
+            step = _step_or_none(r["step"])
+            if step is None:
+                continue
             try:
-                step, val = int(r["step"]), float(r[key])
+                val = float(r[key])
             except (TypeError, ValueError, OverflowError):
                 continue
             if not np.isfinite(val):
