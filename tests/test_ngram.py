@@ -290,7 +290,6 @@ def test_evaluate_window_matched_restricts_scoring_positions():
 
 def test_ngram_cli_runs_data_protocol_preflight():
     """独立 n-gram 评测也必须在已标记泄露的数据前中止。"""
-    import json
     from lega.ngram import main as ngram_main
     old = sys.argv
     with tempfile.TemporaryDirectory() as d:
