@@ -64,6 +64,8 @@ import torch
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_tokenizer
 from .model import load_model
+from .preflight import (allow_protocol_violations,
+                        data_protocol_preflight)
 from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
                     DEFAULT_L2_GRID as _PROBE_L2_GRID,
                     EXTREME_IMBALANCE_THRESHOLD as _EXTREME_IMBALANCE_THRESHOLD,
@@ -665,7 +667,22 @@ def main():
     p.add_argument("--allow_test_corpus", action="store_true",
                    help="允许 niah_corpus 干扰语句取自 test.txt（尘封 split 默认"
                         "禁止；放行时写入 test 访问账本）")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 标记泄露也继续分析（仅用于复现历史"
+                        "实验；结果不得用于正式结论）")
     args = p.parse_args()
+
+    data_preflight = data_protocol_preflight(
+        args.data_dir,
+        allow_override=allow_protocol_violations(
+            args.allow_data_protocol_violations))
+    if not data_preflight["report_present"]:
+        print("[analysis] 警告：数据目录缺少 data_report.json，"
+              "无法执行分析前防泄漏闸门（旧数据或未走统一入口）")
+    elif data_preflight["critical_violations"]:
+        print(f"[analysis] ⚠ 数据协议自检发现 "
+              f"{len(data_preflight['critical_violations'])} 个严重问题，"
+              "但已显式放行（结果不得用于正式结论）")
 
     device = get_device(args.device)
     enable_tf32(device)
@@ -778,6 +795,7 @@ def main():
             pass
         save_json({"variant": variant, "seed": ck.get("seed"), "n_records": 0,
                    "note": "no examples", "skipped_tasks": skipped_tasks,
+                   "data_protocol_preflight": data_preflight,
                    **provenance},
                   os.path.join(args.out_dir,
                                f"analysis_{variant}{args.suffix}.json"))
@@ -823,6 +841,7 @@ def main():
     # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计
     summary["corpus_source"] = corpus_source
     summary["corpus_held_out"] = corpus_source in ("val", "test")
+    summary["data_protocol_preflight"] = data_preflight
     summary.update(provenance)
     if skipped_tasks:
         summary["skipped_tasks"] = skipped_tasks

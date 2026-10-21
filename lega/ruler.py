@@ -735,6 +735,8 @@ def main():
     import argparse
     from .model import load_model
     from .data import load_tokenizer
+    from .preflight import (allow_protocol_violations,
+                            data_protocol_preflight)
     from .repro import load_provenance
     from .utils import get_device, enable_tf32, set_seed, strict_int
 
@@ -751,7 +753,22 @@ def main():
     p.add_argument("--allow_test_corpus", action="store_true",
                    help="允许 niah_corpus 干扰语句取自 test.txt（尘封 split 默认"
                         "禁止；放行时写入 test 访问账本，见 load_corpus_sents_with_source）")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 标记泄露也继续评测（仅用于复现历史"
+                        "实验；结果不得用于正式结论）")
     args = p.parse_args()
+
+    data_preflight = data_protocol_preflight(
+        args.data_dir,
+        allow_override=allow_protocol_violations(
+            args.allow_data_protocol_violations))
+    if not data_preflight["report_present"]:
+        print("[ruler] 警告：数据目录缺少 data_report.json，"
+              "无法执行评测前防泄漏闸门（旧数据或未走统一入口）")
+    elif data_preflight["critical_violations"]:
+        print(f"[ruler] ⚠ 数据协议自检发现 "
+              f"{len(data_preflight['critical_violations'])} 个严重问题，"
+              "但已显式放行（结果不得用于正式结论）")
 
     device = get_device(args.device)
     enable_tf32(device)
@@ -859,7 +876,10 @@ def main():
                "amp": bool(amp),
                # 干扰语料来源可审计：train 回退会让检索分数不可比
                "corpus_source": corpus_source,
-               "corpus_held_out": corpus_source in ("val", "test")}
+               "corpus_held_out": corpus_source in ("val", "test"),
+               # 评测前的数据协议闸门结论随结果落盘，防止泄露数据的结果
+               # 被当成 held-out 证据引用。
+               "data_protocol_preflight": data_preflight}
     payload.update(load_provenance(
         os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir))
     save_json(payload, args.out)

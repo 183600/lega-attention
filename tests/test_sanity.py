@@ -30,6 +30,30 @@ def test_batch_metrics_initial_loss_near_log_vocab():
     assert 0.0 <= m["token_acc"] <= 1.0 and m["n_tokens"] == x.numel()
 
 
+def test_sanity_main_blocks_on_stale_data_cache(monkeypatch):
+    """sanity 入口必须与训练共用数据协议闸门，不能绕过泄露拦截。"""
+    import json
+    import os
+    import sys
+    import tempfile
+
+    from lega.data import CACHE_SCHEMA
+    from lega.sanity import main as sanity_main
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = os.path.join(root, "configs", "tiny.json")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"cache_schema": CACHE_SCHEMA - 1}, f)
+        monkeypatch.setattr(sys, "argv", [
+            "sanity", "--config", cfg, "--data_dir", d, "--variant", "lega"])
+        try:
+            sanity_main()
+            raise AssertionError("旧缓存协议应阻断 sanity")
+        except SystemExit as e:
+            assert "数据协议前置检查失败" in str(e)
+    print("  [ok] sanity：与训练共用数据协议闸门，旧缓存协议默认阻断")
+
+
 def test_overfit_check_passes_on_healthy_model():
     model = _model()
     x, y = _batch()

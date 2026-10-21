@@ -36,6 +36,8 @@ import torch.nn.functional as F
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_bin, load_meta, get_train_batch
 from .model import GPT, count_params
+from .preflight import (allow_protocol_violations,
+                         data_protocol_preflight)
 from .repro import build_run_manifest
 from .utils import save_json, set_seed, strict_int
 
@@ -350,7 +352,22 @@ def main():
     p.add_argument("--initial_loss_tol", type=float, default=None,
                    help="初始 loss 与 log(V) 的允许偏差（nat，默认 1.0）")
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 标记泄露也继续 sanity（仅用于复现"
+                        "历史实验；结果不得用于正式结论）")
     args = p.parse_args()
+
+    data_preflight = data_protocol_preflight(
+        args.data_dir,
+        allow_override=allow_protocol_violations(
+            args.allow_data_protocol_violations))
+    if not data_preflight["report_present"]:
+        print("[sanity] 警告：数据目录缺少 data_report.json，"
+              "无法执行训练前防泄漏闸门（旧数据或未走统一入口）")
+    elif data_preflight["critical_violations"]:
+        print(f"[sanity] ⚠ 数据协议自检发现 "
+              f"{len(data_preflight['critical_violations'])} 个严重问题，"
+              "但已显式放行（结果不得用于正式结论）")
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -434,6 +451,7 @@ def main():
         "device": device,
         "config_file": os.path.abspath(args.config),
         "data_dir": os.path.abspath(args.data_dir),
+        "data_protocol_preflight": data_preflight,
         "manifest": build_run_manifest(
             tag="sanity", variant=args.variant, seed=seed,
             config_path=args.config, data_dir=args.data_dir, device=device),
