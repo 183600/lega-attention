@@ -788,10 +788,17 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
             if isinstance(ev, dict):
                 e = ev.get("epochs_seen")
                 t = ev.get("train_tokens")
-                if e is not None and math.isfinite(float(e)):
-                    epochs_seen = float(e)
-                if t is not None:
-                    train_tokens = int(t)
+                # bool 是 int 子类，float(True)=1.0；直接 int(1.9)=1 也会
+                # 伪造训练覆盖率。类型不符/负数/非有限值按缺失处理，避免
+                # “训练不足”诊断被坏元数据静默改写。
+                if (not isinstance(e, bool)
+                        and isinstance(e, (int, float))):
+                    ef = float(e)
+                    if math.isfinite(ef) and ef >= 0:
+                        epochs_seen = ef
+                if (not isinstance(t, bool)
+                        and isinstance(t, int) and t >= 0):
+                    train_tokens = t
                 cw = ev.get("curve_observability_warnings")
                 if isinstance(cw, list):
                     diag_warnings = [str(x) for x in cw if str(x).strip()]
