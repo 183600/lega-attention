@@ -579,7 +579,7 @@ def test_write_clean_lines_preserves_blank_line_boundaries():
 
 def test_verify_splits_disjoint_binds_claim_to_content():
     """官方 split 的 document_disjoint 声明必须与实际文本绑定核对。"""
-    from scripts.prepare_data import verify_splits_disjoint
+    from lega.datacheck import verify_splits_disjoint
 
     shared = "A shared line with enough characters to count as duplicate."
     with tempfile.TemporaryDirectory() as d:
