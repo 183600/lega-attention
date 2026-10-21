@@ -167,6 +167,51 @@ def test_non_numeric_depth_tolerated():
     print("  [ok] 非数值 depth 安全归一化（不误判难度）")
 
 
+def test_answer_in_prompt_requires_bool():
+    """answer_in_prompt 只有显式布尔值可作证据；0/1、字符串不能伪装。"""
+    for bad in (0, 1, "true", "false", [], {}):
+        c = categorize_case(_case(pred="1234567", ctx_nums=[], in_prompt=bad))
+        assert c["category"] == "label_unknown", bad
+    assert categorize_case(_case(pred="1234567", ctx_nums=[],
+                                 in_prompt=True))["category"] == "hallucinated"
+    assert categorize_case(_case(pred="1234567", ctx_nums=[],
+                                 in_prompt=False))["category"] == "label_error"
+    print("  [ok] answer_in_prompt 非布尔值按无法核对处理")
+
+
+def test_report_counts_reject_bool_and_fractional():
+    """报告计数分母不能把 True/2.5 强转成 1/2 而伪造错误样本数。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        p1 = os.path.join(tmp, "badcase.md")
+        p2 = os.path.join(tmp, "worst.md")
+        write_badcase_md({
+            "variant": "lega", "n_badcases": True,
+            "category_counts": {"copy_distractor": True,
+                                "hallucinated": 2.5, "no_answer": 3},
+            "axis_counts": {"模型/方法": True, "数据/构造": 2},
+            "deep_position_fail_ratio": True,
+            "label_errors": True,
+        }, p1)
+        text = open(p1, encoding="utf-8").read()
+        assert "共 3 条错误样本" in text, text
+        assert "共 6 条" not in text and "共 1 条" not in text, text
+        assert "×1" not in text.split("粗归因轴")[-1], text
+        assert "100%" not in text and "⚠ 有" not in text, text
+        write_worstcase_md({
+            "variant": "lega", "n_windows": True,
+            "category_counts": {"unparsed": True, "low_confidence": 2},
+            "mean_top1_prob": True, "gold_in_context_rate": True,
+        }, p2)
+        text2 = open(p2, encoding="utf-8").read()
+        assert "共 2 个最差窗口" in text2, text2
+        assert "平均 top-1 概率" not in text2, text2
+        assert "gold 出现在上下文中的比例" not in text2, text2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 报告计数拒绝 bool/小数强转")
+
+
 def test_deep_ratio_excludes_vt_chain_depth():
     """deep_position_fail_ratio 只能统计 niah 的 needle 位置，不含 vt 链深度。"""
     cases = [
@@ -481,9 +526,9 @@ def test_bool_not_counted_as_numeric_window_stat():
     assert ana["mean_loss"] == 2.0
     assert abs(ana["mean_top1_prob"] - 0.3) < 1e-9
     text = "\n".join(format_window_case(1, {
-        "loss": True, "pred_top5": [[" blue", 0.5]],
+        "loss": True, "top1_prob": True, "pred_top5": [[" blue", 0.5]],
         "gold_next": " green", "context_tail": "The sky is"}))
-    assert "loss=-" in text
+    assert "loss=-" in text and "p=1.000" not in text, text
     print("  [ok] bool 不计入最差窗口的数值均值/展示")
 
 

@@ -89,16 +89,21 @@ def categorize_case(rec: Dict) -> Dict:
     # 1) 标注/构造自检：gold 答案必须真的在 prompt 里，否则错在数据侧。
     # 外部/旧格式可能完全没有该字段：缺少证据时既不能断言标注错误，也不能
     # 把答案当成幻觉归因给模型——单列为无法核对，避免污染模型失败统计。
-    if isinstance(rec, dict) and task != "fwe" and r.get("answer_in_prompt") is None:
-        r["category"] = "label_unknown"
-        r["explanation"] = ("样例缺少 answer_in_prompt 标注自检字段，"
-                            "无法确认 gold 是否在 prompt 中；不计入模型失败")
-        return r
-    if task != "fwe" and r.get("answer_in_prompt") is False:
-        r["category"] = "label_error"
-        r["explanation"] = "gold 答案未出现在 prompt 中：样例构造或标注有错，" \
-                           "该错误样本不应计入模型失败"
-        return r
+    if isinstance(rec, dict) and task != "fwe":
+        aip = r.get("answer_in_prompt")
+        # 只有显式布尔值才是可核对的证据：0/1、"false" 等非布尔值
+        # 既不能当成 True，也不能当成 False（bool 是 int 子类）。
+        if not isinstance(aip, bool):
+            r["category"] = "label_unknown"
+            r["explanation"] = ("样例缺少 answer_in_prompt 标注自检字段，"
+                                "或该字段不是布尔值；无法确认 gold 是否在 "
+                                "prompt 中，不计入模型失败")
+            return r
+        if aip is False:
+            r["category"] = "label_error"
+            r["explanation"] = "gold 答案未出现在 prompt 中：样例构造或标注有错，" \
+                               "该错误样本不应计入模型失败"
+            return r
     # 2) fwe：按词表覆盖情况归因
     if task == "fwe":
         # 外部/旧格式 JSON 的 pred 可能是数字等非字符串类型：显式 str()，
@@ -185,7 +190,13 @@ def _share(count: int, total: int) -> float:
 
 def _report_total(reported: int, counts: List[tuple]) -> int:
     """报告分母至少覆盖显式总数与各类别计数之和，坏 JSON 也不出现 >100%。"""
-    return max(int(reported), sum(n for _, n in counts if n > 0))
+    total = _count_int(reported) or 0
+    category_total = 0
+    for _, n in counts:
+        ni = _count_int(n)
+        if ni is not None and ni > 0:
+            category_total += ni
+    return max(total, category_total)
 
 
 def _advice(axis: str, priority: str, trigger: str, suggestion: str,
@@ -204,7 +215,7 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     """
     if not isinstance(ana, dict):
         return []
-    n = int(ana.get("n_badcases") or 0)
+    n = _count_int(ana.get("n_badcases")) or 0
     counts = ana.get("category_counts") or {}
     if n == 0:
         return [_advice(
@@ -221,7 +232,7 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
         # 样本不足时任何类别占比/深位比例都只是 1~2 条的偶然结果；继续
         # 输出“高优先级模型改进方向”会把噪声包装成证据。只保留扩样提示。
         return recs[:MAX_ADVICE]
-    le = int(ana.get("label_errors") or 0)
+    le = _count_int(ana.get("label_errors")) or 0
     if le:
         recs.append(_advice(
             "数据/构造", "高", f"{le}/{n} 条错误的 gold 不在 prompt 中",
@@ -378,19 +389,13 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
     """写人类可读的 Markdown 报告（归因分布 + 改进方向 + 逐案例详情）。"""
     analysis = analysis if isinstance(analysis, dict) else {}
     md = [f"# 坏案例分析：{analysis.get('variant') or '-'}", ""]
-    try:
-        n_badcases = max(0, int(analysis.get("n_badcases") or 0))
-    except (TypeError, ValueError, OverflowError):
-        n_badcases = 0
+    n_badcases = _count_int(analysis.get("n_badcases")) or 0
     counts = analysis.get("category_counts")
     counts = counts if isinstance(counts, dict) else {}
     clean = []
     for cat, n in counts.items():
-        try:
-            n = int(n)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if n < 0:
+        n = _count_int(n)
+        if n is None:
             continue
         clean.append((cat, n))
     total = _report_total(n_badcases, clean)
@@ -406,21 +411,21 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
         if axis:
             clean_axis = []
             for k, v in axis.items():
-                try:
-                    clean_axis.append((k, int(v)))
-                except (TypeError, ValueError, OverflowError):
-                    continue
+                n = _count_int(v)
+                if n is not None:
+                    clean_axis.append((k, n))
             axis_s = "；".join(f"{AXIS_CN.get(k, k)}×{v}" for k, v in
                               sorted(clean_axis, key=lambda kv: -kv[1]))
             md += ["", f"粗归因轴（数据/难度/模型）：{axis_s}。"]
-        deep_ratio = analysis.get("deep_position_fail_ratio")
-        if isinstance(deep_ratio, (int, float)):
+        deep_ratio = _finite_float(analysis.get("deep_position_fail_ratio"))
+        if deep_ratio is not None:
             md += ["",
                    f"needle 深位（>0.75）失败占 niah 类错误的 "
                    f"{deep_ratio:.0%}——"
                    "高占比说明是长程检索边界问题，低占比说明是系统性盲区。"]
-        if analysis.get("label_errors"):
-            md += ["", f"⚠ 有 {analysis['label_errors']} 条 gold 答案不在 prompt 中："
+        le_report = _count_int(analysis.get("label_errors")) or 0
+        if le_report:
+            md += ["", f"⚠ 有 {le_report} 条 gold 答案不在 prompt 中："
                         "样例构造或标注有错，须先修 RULER 构造再谈模型。"]
         md.append("")
         cases = analysis.get("cases")
@@ -624,6 +629,22 @@ def _safe_int(v):
         return None
 
 
+def _count_int(v) -> Optional[int]:
+    """计数/分母 → 非负整数；bool、小数、负数与非有限值一律按无效处理。
+
+    ``int(True) is 1``、``int(3.9) is 3`` 会把坏 JSON 里的布尔/小数计数
+    悄悄变成错误样本数量，报告占比随之失真。整数值浮点/数字串仍接受
+    （旧版 summary 可能把整数写成了 3.0 或 "3"）。
+    """
+    f = _finite_float(v)
+    if f is None or f < 0 or not f.is_integer():
+        return None
+    try:
+        return int(f)
+    except (OverflowError, ValueError):
+        return None
+
+
 def _median(vals):
     out = []
     for v in vals:
@@ -654,7 +675,7 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     """
     if not isinstance(ana, dict):
         return []
-    n = int(ana.get("n_windows") or 0)
+    n = _count_int(ana.get("n_windows")) or 0
     counts = ana.get("category_counts") or {}
     if n == 0:
         return [_advice(
@@ -811,10 +832,8 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     tail = str(c.get("context_tail") or "").replace("\n", " ⏎ ")[-160:]
     lines.append(f"- 上下文尾部: …{tail}")
     top1 = c.get("top1")
-    try:
-        p1_s = f"（p={float(p1):.3f}）" if p1 is not None else ""
-    except (TypeError, ValueError, OverflowError):
-        p1_s = ""
+    p1_f = _finite_float(p1)
+    p1_s = f"（p={p1_f:.3f}）" if p1_f is not None else ""
     top_s = f"{top1!r}" + p1_s
     lines.append(f"- 模型 top-1: {top_s}")
     gic = c.get("gold_in_context")
@@ -845,19 +864,13 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
     """写语言建模坏案例的 Markdown 报告（含归因分布与逐案例详情）。"""
     analysis = analysis if isinstance(analysis, dict) else {}
     md = [f"# 语言建模最差窗口归因：{analysis.get('variant') or '-'}", ""]
-    try:
-        n_windows = max(0, int(analysis.get("n_windows") or 0))
-    except (TypeError, ValueError, OverflowError):
-        n_windows = 0
+    n_windows = _count_int(analysis.get("n_windows")) or 0
     counts = analysis.get("category_counts")
     counts = counts if isinstance(counts, dict) else {}
     clean = []
     for cat, n in counts.items():
-        try:
-            n = int(n)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if n < 0:
+        n = _count_int(n)
+        if n is None:
             continue
         clean.append((cat, n))
     total = _report_total(n_windows, clean)
@@ -869,14 +882,14 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {WINDOW_CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
         stats = []
-        mtp = analysis.get("mean_top1_prob")
-        if isinstance(mtp, (int, float)):
+        mtp = _finite_float(analysis.get("mean_top1_prob"))
+        if mtp is not None:
             stats.append(f"平均 top-1 概率={mtp:.3f}")
-        gic = analysis.get("gold_in_context_rate")
-        if isinstance(gic, (int, float)):
+        gic = _finite_float(analysis.get("gold_in_context_rate"))
+        if gic is not None:
             stats.append(f"gold 出现在上下文中的比例={gic:.0%}")
-        git5 = analysis.get("gold_in_top5_rate")
-        if isinstance(git5, (int, float)):
+        git5 = _finite_float(analysis.get("gold_in_top5_rate"))
+        if git5 is not None:
             stats.append(f"gold 进入 top-5 的比例={git5:.0%}")
         dist_i = _safe_int(analysis.get("median_gold_distance_tokens"))
         if dist_i is not None:
@@ -1002,8 +1015,8 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
     variants = cross.get("variants") or []
     if len(variants) < 2:
         return recs
-    n_unique = int(cross.get("n_unique_failed_items") or 0)
-    shared = int(cross.get("n_shared_all_failures") or 0)
+    n_unique = _count_int(cross.get("n_unique_failed_items")) or 0
+    shared = _count_int(cross.get("n_shared_all_failures")) or 0
     if n_unique and _share(shared, n_unique) >= 0.5:
         recs.append(_advice(
             "数据/难度", "高",
