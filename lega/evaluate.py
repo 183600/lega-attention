@@ -544,7 +544,12 @@ def main():
             print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     run_dir = os.path.dirname(os.path.abspath(args.ckpt))
-    res.update(load_provenance(run_dir, args.data_dir))
+    prov = load_provenance(run_dir, args.data_dir)
+    res.update(prov)
+    if prov.get("data_fingerprint_matches_training") is False:
+        print("[eval] ⚠ 当前 data_dir 的数据指纹与 checkpoint 训练清单不一致："
+              "本次指标来自另一份数据，不能与训练时的 val/test 结果直接比较；"
+              "已分别写入 eval_data_fingerprint / train_data_fingerprint")
     # 训练过程统计随被评测 checkpoint 一起绑定（run_all 从本文件读取）
     res["train_step_time_ms"], res["train_tokens_per_sec"] = \
         load_train_throughput(run_dir)

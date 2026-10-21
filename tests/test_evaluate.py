@@ -412,3 +412,46 @@ def test_evaluate_result_test_access_includes_worst_dump(monkeypatch):
         assert [r.get("test_data_fingerprint") for r in ledger] == \
             [test_fp, test_fp]
     print("  [ok] test 访问摘要包含 worst-window 转储（不瞒报第二次读取）")
+
+
+def test_evaluate_warns_when_data_differs_from_training_manifest(capsys):
+    """用另一份数据评测 checkpoint 时必须显式告警，而非静默继承训练指纹。"""
+    from lega.data import prepare_bins
+    from lega.evaluate import main as evaluate_main
+    from lega.model import save_checkpoint
+
+    torch.manual_seed(0)
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "train.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("the quick brown fox jumps over the lazy dog. " * 6)
+        with open(os.path.join(data_dir, "val.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("a slow green turtle sleeps under the old oak tree. " * 6)
+        meta = prepare_bins(data_dir, kind="char", force=True)
+        run_dir = os.path.join(d, "run")
+        ckpt = os.path.join(run_dir, "model.pt")
+        model = GPT(vocab_size=meta["vocab_size"], block_size=16, d_model=16,
+                    n_layers=1, n_heads=2, variant="standard")
+        save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
+        with open(os.path.join(run_dir, "run_manifest.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"data": {"digest": "0" * 64}}, f)
+        out = os.path.join(d, "eval.json")
+        old_argv = sys.argv
+        sys.argv = ["evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
+                    "--out", out, "--device", "cpu", "--split", "val"]
+        try:
+            evaluate_main()
+        finally:
+            sys.argv = old_argv
+        text = capsys.readouterr().out
+        assert "数据指纹与 checkpoint 训练清单不一致" in text
+        with open(out, encoding="utf-8") as f:
+            res = json.load(f)
+        assert res["data_fingerprint_matches_training"] is False
+        assert res["eval_data_fingerprint"] == res["data_fingerprint"]
+        assert res["train_data_fingerprint"] == "0" * 64
+    print("  [ok] 评测数据与训练清单不一致时显式告警并分别落盘两侧指纹")
