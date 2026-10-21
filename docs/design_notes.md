@@ -44,7 +44,10 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - RULER 结果逐单元格落盘 `samples`（`sample_id` 跨变体稳定对齐），汇总时对
   同一批题面做**样例级配对 McNemar 精确检验**（只消费 discordant 对：候选
   独对 vs 参照独对），并给出逐种子 discordant 明细；多种子按计数合并只作
-  探索性证据。
+  探索性证据。**样例聚类稳健性**：同一样例在多个训练种子下重复出现，池化
+  McNemar 会把它当成多条独立证据；因此另按 `sample_id` 先跨种子平均配对差，
+  再以样例为独立单位做符号翻转检验（`cluster_*`，独立 Holm 家族），与池化
+  结果并列报告。
 - RULER 同时报告样例等权 micro 与单元格等权 macro 效应量：McNemar 的
   discordant 计数对应 micro，预注册 `RULER平均` 是 macro，两者方向不一致
   时结论依赖“平均值”定义，必须并列展示。macro 的抽样区间固定已观测种子，

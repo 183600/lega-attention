@@ -1105,6 +1105,10 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         n_samples = 0
         per_seed = []
         per_seed_cell_diffs = []
+        # 按 sample_id 聚合跨种子的配对差：同一样例在多个训练种子下重复
+        # 出现，pooled McNemar 把它当成多条独立证据；聚类分析先对每个
+        # 样例跨种子取平均，再以样例为独立单位做符号翻转检验。
+        cluster_sums = {}
         skipped = 0
         for s in seeds:
             sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
@@ -1140,6 +1144,8 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                   for sid, em in cell_out.items()}
             ob = {sid: em for cell_out in cb.values()
                   for sid, em in cell_out.items()}
+            for sid in oa:
+                cluster_sums.setdefault(sid, []).append(oa[sid] - ob[sid])
             s_cand = s_ref = s_both1 = s_both0 = 0
             for sid in sorted(oa):
                 a, b = oa[sid], ob[sid]
@@ -1183,6 +1189,12 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         # 内对配对样例重采样（保持 macro 的单元格等权），再对种子取平均。
         # 该区间只覆盖评测样例抽样，不覆盖训练种子随机性（后者见种子级 t 检验）。
         macro_ci = _ruler_macro_bootstrap_ci(per_seed_cell_diffs)
+        # 样例聚类（cluster-robust）：每个 sample_id 先跨种子平均，再作为
+        # 独立观测做符号翻转检验；只有 1 个样例时不做检验（n<2）。
+        cluster_vals = [float(np.mean(v)) for v in cluster_sums.values() if v]
+        cluster_test = paired_sign_flip_test(cluster_vals,
+                                             [0.0] * len(cluster_vals))
+        cluster_ci = bootstrap_mean_ci(cluster_vals)
         n_cells = (per_seed[0].get("n_cells")
                    if per_seed and len({r.get("n_cells") for r in per_seed}) == 1
                    else None)
@@ -1204,6 +1216,13 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             "n_cells": n_cells,
             "p": _mcnemar_exact_p(cand_only, ref_only),
             "p_adj": None,
+            "cluster_n": len(cluster_vals),
+            "cluster_mean_diff": cluster_test.get("mean_diff"),
+            "cluster_mean_diff_ci95": cluster_ci,
+            "cluster_p": cluster_test.get("p_perm"),
+            "cluster_p_exact": cluster_test.get("exact"),
+            "cluster_p_adj": None,
+            "cluster_verdict": None,
             "n_seed_wins": wins, "n_seed_losses": losses,
             "n_seed_ties": ties,
             "per_seed": per_seed,
@@ -1214,7 +1233,10 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                      "micro，macro_mean_diff 为单元格等权（对应预注册 "
                      "RULER平均 的 macro 口径）；macro_mean_diff_ci95 为"
                      "固定种子、单元格内样例重采样的分层 bootstrap 区间"
-                     "（只覆盖评测抽样，不覆盖训练随机性）"),
+                     "（只覆盖评测抽样，不覆盖训练随机性）。cluster_* 为"
+                     "按 sample_id 聚合跨种子后的样例级稳健性检验：每个"
+                     "样例先平均、再以样例为独立单位做符号翻转，避免把"
+                     "同一样例在多个种子下的重复观测当成独立证据"),
         }
         if skipped:
             res["excluded_runs"] = skipped
@@ -1237,6 +1259,21 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             t["estimand_conflict"] = True
             t["verdict"] += ("；⚠ micro/macro 方向不一致（macro 为 0 或反向），"
                              "结论依赖“平均值”定义")
+    # 聚类检验独立 Holm 家族：以 sample_id 为独立单位，避免同一样例在
+    # 多个训练种子下被重复计数。它只覆盖 micro（样例等权）口径。
+    cpads = holm_bonferroni([t.get("cluster_p") for t in out])
+    for t, padj in zip(out, cpads):
+        t["cluster_p_adj"] = padj
+        if t.get("cluster_n", 0) < 2 or padj is None:
+            t["cluster_verdict"] = "无法检验（独立样例数不足）"
+        elif padj < ALPHA:
+            t["cluster_verdict"] = (
+                "样例聚类后显著优于（符号翻转，Holm 校正后）"
+                if t["cluster_mean_diff"] > 0 else
+                "样例聚类后显著劣于（符号翻转，Holm 校正后）")
+        else:
+            t["cluster_verdict"] = (f"样例聚类后无显著差异（Holm 校正后 "
+                                    f"p={padj:.4f}）")
     return out
 
 
@@ -5165,6 +5202,28 @@ def build_summary(results_dir: str, audit: dict = None,
                "说明两个不确定性来源给出不同信息：前者多为评测样本量/题目"
                "难度，后者为训练随机性，均不能单独升级为确认性结论。"
                "逐种子明细见 `significance.json` 的 `ruler_sample_pairs`。"]
+        cluster_rows = [t for t in ruler_sample_tests
+                        if t.get("cluster_p") is not None]
+        if cluster_rows:
+            md += ["", "**样例聚类稳健性（每个 sample_id 先跨种子平均；"
+                   "避免同一样例被多个种子重复计数）**", "",
+                   "| 对比 | 独立样例 | 聚类ΔEM | 95% CI | p_adj(Holm) | 判定 |",
+                   "|---|---|---|---|---|---|"]
+            for t in cluster_rows:
+                ci = t.get("cluster_mean_diff_ci95") or [None, None]
+                ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+                        if ci[0] is not None and ci[1] is not None else "-")
+                padj = (f"{t['cluster_p_adj']:.4f}"
+                        if t.get("cluster_p_adj") is not None else "-")
+                md.append(
+                    f"| {t['candidate']} vs {t['reference']} | "
+                    f"{t.get('cluster_n')} | {t['cluster_mean_diff']:+.4f} | "
+                    f"{ci_s} | {padj} | {t.get('cluster_verdict', '-')} |")
+            md += ["", "注: 聚类检验先把每个 sample_id 在多个训练种子下的配对差"
+                   "取平均，再以样例为独立单位做符号翻转（n≤16 精确，否则固定"
+                   "种子 Monte-Carlo）。它只覆盖样例等权 micro 口径，不校正"
+                   "macro；与池化 McNemar 的差异本身说明“重复种子被当成独立"
+                   "证据”的程度，两者应并列解读。"]
     else:
         md.append("（缺少逐样例 EM 或没有协议一致的配对 run；旧产物需重跑 "
                   "RULER 才能启用该分析。）")

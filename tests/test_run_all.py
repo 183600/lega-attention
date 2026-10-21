@@ -3611,6 +3611,38 @@ def test_ruler_sample_paired_mcnemar_counts_and_exact_p():
     print("  [ok] RULER 样例级 McNemar：discordant 计数、精确 p、旧产物跳过")
 
 
+def test_ruler_sample_cluster_test_avoids_seed_pseudo_replication():
+    """同一样例在多个种子下重复出现时，池化 McNemar 会伪造独立性。"""
+    from run_all import _ruler_sample_paired_tests
+
+    def cell(ems):
+        return {"em": sum(ems) / len(ems), "n": len(ems),
+                "samples": [{"sample_id": f"s{i}", "em": float(e)}
+                            for i, e in enumerate(ems)]}
+
+    def rul(ems):
+        return {"ruler": {
+            "ctx_lens": [256], "n_samples": len(ems), "sample_seed": 1234,
+            "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
+            "vt_chains": 4, "vt_depth": 4,
+            "results": {"niah": {"256": cell(ems)}}}}
+
+    # 10 个训练种子反复评测同 2 个样例：池化后有 20 个“discordant 对”，
+    # 但独立样例只有 2 个。聚类检验必须给出 n=2、p=0.5（不能显著）。
+    runs = {
+        "lega": {seed: rul([1, 1]) for seed in range(1, 11)},
+        "standard": {seed: rul([0, 0]) for seed in range(1, 11)},
+    }
+    t = _ruler_sample_paired_tests(runs, [("lega", "standard")])[0]
+    assert t["candidate_only"] == 20 and t["n_samples"] == 20, t
+    assert t["p"] < 0.001, t
+    assert t["cluster_n"] == 2, t
+    assert abs(t["cluster_mean_diff"] - 1.0) < 1e-12, t
+    assert t["cluster_p"] == 0.5, t
+    assert t["cluster_verdict"].startswith("样例聚类后无显著差异"), t
+    print("  [ok] RULER 样例聚类检验：同一样例跨种子重复不伪造独立性")
+
+
 def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     """PPL 窗口级配对：同窗口序号逐点相减，分层 bootstrap 与协议门槛。"""
     from run_all import _eval_window_losses, _ppl_window_paired_tests
