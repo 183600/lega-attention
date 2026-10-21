@@ -40,7 +40,11 @@ import statistics
 from collections import Counter
 from typing import Dict, List, Optional
 
-_NUM_RE = re.compile(r"\d{4,}")
+from .ruler import _NUM_RE
+
+# 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
+# \d{4,}，带符号/小数/科学计数法或短数字会被截成不同字符串，误抄会被
+# 错归因为幻觉（归因错误会直接误导后续改进方向）。
 _WORD_RE = re.compile(r"[a-z]+")
 
 CATEGORY_CN = {

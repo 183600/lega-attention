@@ -60,6 +60,21 @@ def test_categorize_tolerates_non_string_pred():
     print("  [ok] 数值型 pred 容错（归因正确）")
 
 
+def test_badcase_numeric_tokens_match_ruler_scorer():
+    """归因必须与 RULER 计分共用“完整数值 token”：否则 -7021853、
+    7021853.9、1e6 或短数字 123 会被 _NUM_RE 截断，误抄被判成幻觉。"""
+    for token in ("-7021853", "+7021853", "7021853.9", "1e6", "123"):
+        c = categorize_case(_case(answer=token, pred=f"answer: {token}.",
+                                  ctx_nums=[token]))
+        assert c["category"] == "copy_distractor", (token, c)
+        assert c["explanation"].startswith(f"输出了 {token}——"), (token, c)
+    # 不再把长数字截成 \d{4,} 前缀：7021853.9 不能被当成上下文中的 7021853
+    c = categorize_case(_case(answer="1", pred="7021853.9",
+                              ctx_nums=["7021853"]))
+    assert c["category"] == "hallucinated", c
+    print("  [ok] 坏案例数值 token 与 RULER 计分口径一致")
+
+
 def test_categorize_label_error():
     # gold 不在 prompt 中 → 标注/构造错误，不计为模型失败
     c = categorize_case(_case(pred="1234567", ctx_nums=["1234567"], in_prompt=False))
