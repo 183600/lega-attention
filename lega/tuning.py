@@ -24,6 +24,8 @@ import subprocess
 import sys
 import time
 
+from .utils import strict_int
+
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 DEFAULT_TOLERANCE = 0.005
 
@@ -384,13 +386,16 @@ def tune(config: str, data_dir: str, out_dir: str,
     lr0 = float(cfg["lr"])
     wd0 = float(cfg.get("weight_decay", 0.1))
     if seeds is None:
-        seeds = [int(cfg.get("seed", 1337) if seed is None else seed)]
+        seeds = [strict_int(
+            cfg.get("seed", 1337) if seed is None else seed, "seed")]
     else:
-        seeds = [int(s) for s in seeds] or [int(cfg.get("seed", 1337))]
+        seeds = [strict_int(s, "seeds") for s in seeds] or [
+            strict_int(cfg.get("seed", 1337), "seed")]
     # 重复种子（如 --seeds 7,7）否则会重复训练同一目录并伪造“多种子证据”。
     seeds = list(dict.fromkeys(seeds))
     seed = seeds[0]  # 兼容字段：报告里的主（第一个）选择种子
-    steps = int(cfg["steps"] if steps is None else steps)
+    # steps 同样必须是精确整数：int(10.5)=10 会让调优预算与配置声明不一致
+    steps = strict_int(cfg["steps"] if steps is None else steps, "steps")
     grid = build_grid(lr0, wd0, lr_mults=lr_mults, wd_list=wd_list)
     trials = []
     for lr, wd in grid:

@@ -525,13 +525,16 @@ def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
     sanity（可选）为 lega.sanity 结果的紧凑摘要（见 sanity_summary）：把
     “开训前通过小批量过拟合闸门”的代码正确性证据绑定到本 run 的 checkpoint。
     """
-    from .utils import now_str, seed_report
+    from .utils import now_str, seed_report, strict_int
     config_path = os.path.abspath(config_path)
     data_dir = os.path.abspath(data_dir)
+    # manifest 的种子字段必须与 seed_report 同口径：int(1.5)==1、int(True)==1
+    # 会让 manifest 记下与实际播种不同的种子（seed_report 已严格拒绝）。
+    seed = strict_int(seed, "seed")
     return {
         "tag": tag,
         "variant": variant,
-        "seed": int(seed),
+        "seed": seed,
         "seed_report": seed_report(seed),
         "time": now_str(),
         "config_file": config_path,
