@@ -243,6 +243,18 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         assert rep_bad["window_spec"] is None
         assert rep_bad["window_spec_error"]
         assert "ppl_window_matched" not in rep_bad
+        # bool/小数规格不能被 int() 截断成整数口径：True → 1、8.5 → 8 都会
+        # 让"与神经评测逐位置对齐"悄悄失效（对齐的是另一个 token 集合）。
+        for bad in ({"ctx": True, "iters": 2}, {"ctx": 8.5, "iters": 2},
+                    {"ctx": 8, "iters": True}, {"ctx": float("nan"), "iters": 2}):
+            rb = evaluate(tmp, split="val", alphas=(0.01,), window_spec=bad)
+            assert rb["window_spec"] is None, bad
+            assert rb["window_spec_error"], bad
+        # 整数值浮点/整数字符串语义明确，仍走对齐（JSON 既有用法）
+        rep_ok = evaluate(tmp, split="val", alphas=(0.01,),
+                          window_spec={"ctx": 8.0, "iters": "2"})
+        assert rep_ok["window_spec"] == {"ctx": 8, "iters": 2, "n_windows": 5,
+                                         "n_eval": 2, "n_tokens": 16}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] evaluate（window_spec 逐位置对齐、非法规格显式报错）")

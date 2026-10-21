@@ -28,6 +28,7 @@ import numpy as np
 
 from .data import load_bin, load_meta
 from .datacheck import append_test_access
+from .utils import strict_int
 
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
 # “选平滑系数”变成又一次大规模调参。
@@ -467,9 +468,16 @@ def evaluate(data_dir: str, split: str = "val",
         try:
             if not isinstance(window_spec, dict):
                 raise TypeError
-            spec_ctx = int(window_spec.get("ctx", 0) or 0)
-            spec_iters = int(window_spec.get("iters", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
+            # 用严格整数解析：int(128.5)=128、int(True)=1 会改变“同窗口”
+            # 的对齐口径——window_positions 与 train._val_eval_indices 的
+            # 逐位置一致依赖 ctx/iters 是精确整数。bool/小数视为非法规格。
+            spec_ctx = (None if window_spec.get("ctx") is None
+                        else strict_int(window_spec.get("ctx") or 0,
+                                        "window_spec.ctx"))
+            spec_iters = (None if window_spec.get("iters") is None
+                          else strict_int(window_spec.get("iters") or 0,
+                                          "window_spec.iters"))
+        except (ValueError, TypeError):
             spec_ctx = spec_iters = None
         pos = (window_positions(len(eval_ids), spec_ctx, spec_iters)
                if spec_ctx is not None and spec_iters is not None else None)
