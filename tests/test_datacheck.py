@@ -222,6 +222,66 @@ def test_temporal_split_rejects_invalid_fractions():
     print("  [ok] 时序划分：非法比例在切分前显式拒绝")
 
 
+def test_prepare_data_refuses_group_crossing_local_split(monkeypatch):
+    """本地时序划分检测到标题文档跨 split 时必须拒绝写出，而非只告警。"""
+    from scripts.prepare_data import main as prepare_main
+    body = "\n".join(f"line {i} padding" for i in range(400))
+    text = body + "\n= Late =\nfin\n"
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "local.txt")
+        out_dir = os.path.join(d, "out")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(text)
+        monkeypatch.setattr(sys, "argv", [
+            "prepare_data", "--out_dir", out_dir, "--local_txt", src,
+            "--source", "local"])
+        try:
+            prepare_main()
+            raise AssertionError("群组跨 split 的本地划分应被拒绝")
+        except SystemExit as e:
+            assert "拒绝写出泄露划分" in str(e)
+            assert "--allow_leaky_split" in str(e)
+        assert not os.path.exists(os.path.join(out_dir, "train.txt"))
+    print("  [ok] prepare_data：群组跨 split 的本地划分 fail closed")
+
+
+def test_prepare_data_refuses_val_test_overlap(monkeypatch):
+    """val/test 共享长行无法靠只改 train 修复，准备阶段必须拒绝写出。"""
+    import lega.datacheck as dc
+    from scripts.prepare_data import main as prepare_main
+    shared = "shared held-out line " + "x" * 80
+
+    def fake_split(text, *args, **kwargs):
+        train = "train line " + "a" * 120 + "\n"
+        val = shared + "\n"
+        test = shared + "\n"
+        return train, val, test, {
+            "order": "temporal:train(earliest)->val->test(latest)",
+            "cut_offsets": [len(train), len(train) + len(val)],
+            "cut_kinds": ["newline", "newline"], "window_chars": 1,
+            "fallback_char_cut": False, "shuffled": False, "n_headings": 0,
+            "documents_cross_cut": False, "group_unit": "line_segment",
+            "lengths_chars": {"train": len(train), "val": len(val),
+                              "test": len(test)}}
+
+    monkeypatch.setattr(dc, "temporal_split_text", fake_split)
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "local.txt")
+        out_dir = os.path.join(d, "out")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("ignored by fake split\n")
+        monkeypatch.setattr(sys, "argv", [
+            "prepare_data", "--out_dir", out_dir, "--local_txt", src,
+            "--source", "local"])
+        try:
+            prepare_main()
+            raise AssertionError("val/test 重叠的划分应被拒绝")
+        except SystemExit as e:
+            assert "拒绝写出泄露划分" in str(e)
+            assert "val/test 共享长行" in str(e)
+    print("  [ok] prepare_data：val/test 共享长行 fail closed")
+
+
 def test_prepare_data_rejects_negative_max_tokens(monkeypatch):
     """负数 --max_tokens 会让首行即被截断，必须在写文件前报错。"""
     import io

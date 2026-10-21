@@ -214,6 +214,9 @@ def main():
     ap.add_argument("--tokenizer", default="gpt2", choices=["gpt2", "auto"])
     ap.add_argument("--force", action="store_true",
                     help="强制重建 token bin；不传时复用与当前 txt 一致的缓存")
+    ap.add_argument("--allow_leaky_split", action="store_true",
+                    help="显式允许写出群组跨 split / val-test 重叠的划分"
+                         "（仅用于复现或诊断；训练前数据协议闸门仍会拦截）")
     args = ap.parse_args()
     max_tokens = {"train": args.max_tokens, "val": args.val_tokens,
                   "test": args.test_tokens}
@@ -243,12 +246,23 @@ def main():
         split_info["mode"] = "local_temporal"
         split_protocol = split_info
         source_used = "local"
+        leaky_reasons = []
         if split_info["fallback_char_cut"]:
-            print("[data] 警告：本地文本缺少可用换行/文档边界，退化为字符切分；"
-                  "同一文档可能跨 split，请检查语料格式")
+            leaky_reasons.append(
+                "本地文本缺少可用换行/文档边界，退化为字符切分，"
+                "同一文档可能跨 split")
         elif split_info.get("documents_cross_cut"):
-            print("[data] 警告：切点未落在标题文档边界（标题间距大于划分区间），"
-                  "有文档跨 split（群组泄露）；请调整语料/划分比例或改用官方 split")
+            leaky_reasons.append(
+                "切点未落在标题文档边界（标题间距大于划分区间），"
+                "有文档跨 split（群组泄露）")
+        if leaky_reasons:
+            detail = "；".join(leaky_reasons)
+            if not args.allow_leaky_split:
+                raise SystemExit(
+                    f"[data] 拒绝写出泄露划分：{detail}。请调整语料格式/划分"
+                    "比例或改用官方 split；如仅用于复现/诊断，可显式加 "
+                    "--allow_leaky_split（训练前数据协议闸门仍会拦截）。")
+            print(f"[data] 警告：--allow_leaky_split 显式放行泄露划分：{detail}")
         else:
             print(f"[data] 时序划分：标题 {split_info.get('n_headings', 0)} 个，"
                   "文档不跨 split")
@@ -322,6 +336,30 @@ def main():
             print(f"[data] 警告：三个 split 的实际文本存在跨 split 共享长行 {ov}——"
                   "与“无共享样本/document_disjoint”声明不符，须核查来源或划分；"
                   "下游去污染会移除 train 侧重复行，但 val/test 重叠只能靠重建划分消除")
+
+    # val/test 之间没有“只改 train”的去污染出口：一旦共享长行，val 选型会
+    # 部分预演 test，test 不再是独立 held-out。train 与 val/test 的重叠可由
+    # prepare_bins 从 train 侧删除，因此这里只对 val-test 强制 fail closed。
+    overlaps = split_protocol.get("overlap_long_lines")
+    val_test_overlap = {}
+    if isinstance(overlaps, dict):
+        pair = overlaps.get("val_test")
+        if isinstance(pair, dict):
+            exact = pair.get("exact_lines") or 0
+            norm = pair.get("normalized_lines") or 0
+            if exact or norm:
+                val_test_overlap = {"exact_lines": exact,
+                                    "normalized_lines": norm}
+    if val_test_overlap:
+        detail = (f"val/test 共享长行：精确 {val_test_overlap['exact_lines']} 条、"
+                  f"空白归一化后 {val_test_overlap['normalized_lines']} 条")
+        if not args.allow_leaky_split:
+            raise SystemExit(
+                f"[data] 拒绝写出泄露划分：{detail}。val 用于选 checkpoint、"
+                "test 用于最终报告，两者共享样本会使 test 不再独立；请核查"
+                "来源/重建划分；如仅用于复现/诊断，可显式加 "
+                "--allow_leaky_split（训练前数据协议闸门仍会拦截）。")
+        print(f"[data] 警告：--allow_leaky_split 显式放行 val/test 重叠：{detail}")
 
     from lega.data import prepare_bins
     # force 透传：不传时 prepare_bins 依据源 txt 哈希/协议版本校验缓存，
