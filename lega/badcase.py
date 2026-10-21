@@ -446,6 +446,7 @@ WINDOW_CATEGORY_CN = {
     "low_confidence": "低置信（top1 概率低：样本本身多解/噪声，或训练不足）",
     "top1_correct": "top1 正确但置信低（排位对、概率小，属校准问题）",
     "unparsed": "无预测分布（旧格式或导出失败，无法归因）",
+    "label_unknown": "gold 缺失（旧格式/导出失败，无法判断预测正确性）",
 }
 
 # top1 概率 ≥ 阈值仍错 → 高置信错答（系统性偏差）；< 阈值 → 模型自己也不确定
@@ -483,13 +484,15 @@ def categorize_window(rec: Dict) -> Dict:
 
     规则（显式、顺序确定）：
       1. 无 top5 预测 → unparsed；
-      2. top1 即 gold → top1_correct（排位正确但概率低，校准问题）；
-      3. top1 概率 ≥ TOP1_CONF_TOL 且错 → confident_bias（高置信错答，
+      2. gold 缺失/空串 → label_unknown（无真值则无从判断对错，不能把
+         高置信预测误归因为模型盲区，也不能让它污染 gold 可见性比例）；
+      3. top1 即 gold → top1_correct（排位正确但概率低，校准问题）；
+      4. top1 概率 ≥ TOP1_CONF_TOL 且错 → confident_bias（高置信错答，
          最值得作为改进线索的系统性盲区）；若该 token 同时是上下文里已有的
          串，标记 repeats_context 并在解释中注明（复读是高置信错答的一种机制）；
-      4. top1（非空白、≥2 字符）出现在 context_tail 中且不是 gold →
+      5. top1（非空白、≥2 字符）出现在 context_tail 中且不是 gold →
          repetition_attractor（低置信下的复读回环：模型退化为抄上下文）；
-      5. 其余 → low_confidence（模型在多个候选间平均：样本可能本身多解/
+      6. 其余 → low_confidence（模型在多个候选间平均：样本可能本身多解/
          噪声，或训练不足）。
     附加布尔 gold_in_context / gold_in_top5 区分"上下文里出现过 gold 但
     模型没复制"（复制/检索失败）与"gold 从未出现"（真正的预测失败/长尾）。
@@ -515,20 +518,30 @@ def categorize_window(rec: Dict) -> Dict:
             top5_txt.append(token)
     r["top1"] = top1
     r["top1_prob"] = p1
+    gold_missing = not gold_txt
     recorded_ctx = r.get("gold_in_context")
-    if isinstance(recorded_ctx, bool):
+    if gold_missing:
+        # 没有 gold 就没有“可见性”：旧记录里即使带布尔也不能赋予意义，
+        # 否则会以 unknown/present 的身份混进 gold_in_context_rate 分母。
+        r["gold_in_context"] = None
+    elif isinstance(recorded_ctx, bool):
         r["gold_in_context"] = recorded_ctx
     elif isinstance(tail_raw, str):
         # 旧格式没有完整窗口布尔：只有确实拿到尾部文本时才可退回尾部检查
         # （“尾部未出现”仍不等于“窗口内从未出现”）。
-        r["gold_in_context"] = bool(gold_txt) and gold_txt in tail
+        r["gold_in_context"] = gold_txt in tail
     else:
         # 既无完整窗口布尔也无尾部文本：无法判断，不能伪造成“从未出现”。
         r["gold_in_context"] = None
-    r["gold_in_top5"] = bool(gold_txt) and gold_txt in top5_txt
+    r["gold_in_top5"] = None if gold_missing else (gold_txt in top5_txt)
     if top1 is None:
         r["category"] = "unparsed"
         r["explanation"] = "窗口记录中没有可用的 top5 预测分布"
+        return r
+    if gold_missing:
+        r["category"] = "label_unknown"
+        r["explanation"] = ("窗口记录缺少可用的 gold_next：无法判断预测是否"
+                            "正确，不能归因为模型高置信盲区或样本难度")
         return r
     pick = top1.strip()
     r["repeats_context"] = bool(pick and len(pick) >= 2 and pick in tail
@@ -732,6 +745,14 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             "评测/导出", "中", f"{up}/{n} 个窗口没有可用的 top5 预测",
             "先修评测导出再归因：旧格式/导出失败会让错误模式被静默丢弃",
             "核对 evaluate 的 worst_windows 字段与版本兼容；重跑评测导出"))
+    lu = counts.get("label_unknown", 0)
+    if lu:
+        recs.append(_advice(
+            "评测/导出", "中", f"{lu}/{n} 个窗口缺少可用的 gold_next",
+            "无真值无法判断预测对错：先修复/重导 gold 再归因，不能把这些"
+            "窗口算成高置信错答或长尾失败",
+            "核对 evaluate 的 worst_windows 是否完整写入 gold_next；"
+            "用当前版本重跑评测并复核导出"))
     return recs[:MAX_ADVICE]
 
 
@@ -761,8 +782,9 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
         "repeats_context_rate": (sum(1 for c in cases
                                      if c.get("repeats_context"))
                                  / len(cases)) if cases else None,
-        "gold_in_top5_rate": (sum(1 for c in cases if c.get("gold_in_top5"))
-                              / len(cases)) if cases else None,
+        # 与 gold_in_context 同口径：gold 缺失的窗口记为 None，不能把
+        # “无真值”算成“gold 未进 top5”而拉低复制/检索成功率。
+        "gold_in_top5_rate": _known_bool_rate(cases, "gold_in_top5"),
         "gold_in_context_rate": _known_bool_rate(cases, "gold_in_context"),
         # gold 距预测位的 token 距离（只在 gold 出现时定义）：区分“远处检索
         # 失败”与“近处复制失败”，后者更像注意力/复制机制问题。

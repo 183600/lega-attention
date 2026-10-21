@@ -569,6 +569,28 @@ def test_empty_gold_not_counted_as_top1_correct():
     print("  [ok] 空 gold 不计为 top1_correct")
 
 
+def test_missing_gold_window_is_label_unknown():
+    """缺少 gold 的窗口不能算成高置信错答，也不能污染 gold 命中率分母。"""
+    for gold in (None, ""):
+        c = categorize_window(_win(gold=gold,
+                                  pred_top5=[[" blue", 0.9]],
+                                  gold_in_context=True))
+        assert c["category"] == "label_unknown", c
+        assert c["gold_in_context"] is None
+        assert c["gold_in_top5"] is None
+        assert "gold_next" in c["explanation"]
+        assert case_axis(c) == "评测/导出"
+        assert "gold 缺失" in "\n".join(format_window_case(1, c))
+    bad = _win(gold=None, pred_top5=[[" blue", 0.9]])
+    good = _win(gold=" blue", pred_top5=[[" blue", 0.9]])
+    ana = analyze_worst_windows([bad, dict(bad), good], variant="lega")
+    assert ana["category_counts"]["label_unknown"] == 2
+    assert ana["gold_in_top5_rate"] == 1.0
+    assert any("缺少可用的 gold_next" in r["trigger"]
+               for r in ana["recommendations"]), ana["recommendations"]
+    print("  [ok] 缺少 gold 的窗口归为 label_unknown（不误判/不污染分母）")
+
+
 def test_cross_variant_zero_error_variant_blocks_consensus():
     """某变体已评测且零错误（空列表）时，绝不能再把其余变体的共同失败
     标成“全体变体共识失败”——那是方法特异性失败，不是数据/难度问题。"""
@@ -931,9 +953,10 @@ def test_categorize_window_tolerates_malformed_top5_and_tail():
     """pred_top5/context_tail 为对象/标量时按缺失处理，不能崩溃。"""
     assert categorize_window({"context_tail": [1, 2],
                               "pred_top5": {"x": 1}})["category"] == "unparsed"
+    # 该记录没有 gold_next：top1 可解析也不能判成低置信失败。
     assert categorize_window({"context_tail": 123,
                               "pred_top5": [[" x", 0.4]]})["category"] \
-        == "low_confidence"
+        == "label_unknown"
     assert categorize_window({"context_tail": None,
                               "pred_top5": "bad"})["category"] == "unparsed"
     # 词项本身缺失/为对象时是“无可用预测分布”，不能被 str() 成
