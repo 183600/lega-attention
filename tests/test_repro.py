@@ -12,8 +12,9 @@ import torch
 from lega.data import CACHE_SCHEMA, get_train_batch
 from lega.repro import (build_run_manifest, data_fingerprint, git_info,
                         load_provenance, provenance_drift, runtime_info,
-                        sanity_identity_check, sha256_file, worktree_state,
-                        write_worktree_patch)
+                        sanity_identity_check, sha256_file,
+                        test_data_fingerprint as _test_data_fingerprint,
+                        worktree_state, write_worktree_patch)
 from lega.utils import set_seed, seed_report
 
 
@@ -563,6 +564,31 @@ def test_sanity_identity_check_detects_stale_gate_evidence():
     assert res_nogit["hard_mismatches"] == []
     assert "worktree_diff_sha256" in res_nogit["unknown_fields"]
     print("  [ok] sanity_identity_check：旧配置/数据/代码/工作区不一致被拦下")
+
+
+def test_data_fingerprint_empty_cache_cannot_bypass_missing_files():
+    """目录里只有 files=[] 的缓存时仍须报“无数据文件”，不能返回空指纹。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, ".lega_fingerprint.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"algo": "sha256-16",
+                       "digest": "e3b0c44298fc1c14",  # sha256("")[:16]
+                       "tokenizer": None, "files": []}, f)
+        try:
+            data_fingerprint(d)
+            raise AssertionError("空目录 + 空缓存必须报 FileNotFoundError")
+        except FileNotFoundError:
+            pass
+    print("  [ok] 数据指纹：空缓存不能绕过无数据文件报错")
+
+
+def test_test_data_fingerprint_returns_none_when_unreadable():
+    """test.bin 存在但不可读（如目录占位）时返回 None，而不是崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        assert _test_data_fingerprint(d) is None
+        os.mkdir(os.path.join(d, "test.bin"))
+        assert _test_data_fingerprint(d) is None
+    print("  [ok] test_data_fingerprint：缺失/不可读均返回 None")
 
 
 def test_data_fingerprint_tolerates_non_object_meta():

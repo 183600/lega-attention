@@ -283,6 +283,10 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     """
     names = [n for n in ("train.bin", "val.bin", "test.bin", "meta.json")
              if os.path.exists(os.path.join(data_dir, n))]
+    # 先确认目录里确有可指纹化文件，再读取缓存：否则一个 files=[] 的空缓存
+    # 能通过下面的“文件集完全一致”校验并直接返回，绕过“无数据文件”报错。
+    if not names:
+        raise FileNotFoundError(f"{data_dir} 下没有可指纹化的数据文件（train.bin 等）")
     cache_path = os.path.join(data_dir, _CACHE_NAME)
     meta_path = os.path.join(data_dir, "meta.json")
     cached = None
@@ -331,8 +335,6 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
             if (cached.get("digest") == _digest_of(cached["files"])
                     and cached.get("tokenizer") == current_tokenizer):
                 return cached
-    if not names:
-        raise FileNotFoundError(f"{data_dir} 下没有可指纹化的数据文件（train.bin 等）")
     entries = [_file_entry(os.path.join(data_dir, n)) for n in names]
     tokenizer = None
     if os.path.exists(meta_path):
@@ -575,7 +577,12 @@ def test_data_fingerprint(data_dir: str):
     path = os.path.join(data_dir, "test.bin")
     if not os.path.exists(path):
         return None
-    return sha256_file(path)
+    try:
+        return sha256_file(path)
+    except OSError:
+        # 存在但不可读（权限/目录占位/文件系统错误）时按“无可用测试集指纹”
+        # 处理，不能在下游评测/访问账本写入路径上崩溃。
+        return None
 
 
 def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
