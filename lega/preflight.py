@@ -72,7 +72,7 @@ def data_report_binding_issue(data_dir: str):
 
 
 def data_cache_schema_issue(data_dir: str):
-    """检查 bin 缓存是否由当前数据管线生成；旧协议缓存不可用于正式训练。"""
+    """检查 bin 缓存是否由当前数据管线生成、词表拟合来源是否可信。"""
     path = os.path.join(data_dir, "meta.json")
     if not os.path.exists(path):
         return None
