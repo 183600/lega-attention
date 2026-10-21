@@ -186,6 +186,15 @@ def test_load_train_coverage_propagates_and_degrades_safely():
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"epochs_seen": 10 ** 400}, f)
         assert load_train_coverage(tmp) == {}
+        # bool/小数/负数不是可信的训练覆盖：不能 int(True)=1 或截断 10.5
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokens_seen": True, "train_tokens": 10.5,
+                       "epochs_seen": False}, f)
+        assert load_train_coverage(tmp) == {}
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokens_seen": -1, "train_tokens": "20480",
+                       "epochs_seen": -0.1}, f)
+        assert load_train_coverage(tmp) == {"train_tokens": 20480}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             f.write("{broken")
         assert load_train_coverage(tmp) == {}

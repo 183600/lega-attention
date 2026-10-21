@@ -314,14 +314,16 @@ def load_train_coverage(run_dir: str):
         if v is None:
             continue
         try:
-            out[dst] = int(v)
-        except (TypeError, ValueError, OverflowError):
+            v = strict_int(v, f"eval.json.{src}")
+        except ValueError:
             continue
+        if v >= 0:
+            out[dst] = v
     e = d.get("epochs_seen")
-    if e is not None:
+    if e is not None and not isinstance(e, bool):
         try:
             e = float(e)
-            if math.isfinite(e):
+            if math.isfinite(e) and e >= 0:
                 out["epochs_seen"] = e
         except (TypeError, ValueError, OverflowError):
             pass
