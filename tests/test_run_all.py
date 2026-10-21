@@ -20,7 +20,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ap_diff_tests,
                       _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _eval_matches_window_spec,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
-                      _lat_noise_pct,
+                      _int_or_zero, _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _noise_verdict_note, _loo_stability_str, _num_or_none,
                       _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
@@ -2553,6 +2553,21 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] RULER n=Infinity/非数值指标：跳过而非崩溃")
+
+
+def test_int_or_zero_rejects_bool_and_fractional_counts():
+    """外部 JSON 的计数不能被 int() 把 True/5.9 伪装成 1/5。"""
+    assert _int_or_zero(None) == 0 and _int_or_zero("5") == 5
+    assert _int_or_zero(5.0) == 5
+    for bad in (True, False, 5.5, -3, float("nan"), float("inf"),
+                "bad", [5], {"n": 5}):
+        assert _int_or_zero(bad) == 0, bad
+    from run_all import _fmt4, _fmt_rate, _fmt_scalar_maybe
+    assert _fmt_rate(True) == "-" and _fmt_rate(0.5) == "50.000%"
+    assert _fmt4(True) == "-" and _fmt4(1.25) == "1.2500"
+    assert _fmt_scalar_maybe(False) == "-" and _fmt_scalar_maybe("n/a") == "n/a"
+    assert _fmt_scalar_maybe(2.5) == "2.500"
+    print("  [ok] 计数/百分比/小数展示拒绝 bool 伪装数值")
 
 
 def test_summary_rejects_bool_as_numeric_observation():

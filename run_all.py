@@ -2302,29 +2302,20 @@ def _as_text(v) -> str:
 
 
 def _int_or_zero(v) -> int:
-    try:
-        return int(v or 0)
-    except (TypeError, ValueError, OverflowError):
-        return 0
+    """外部/旧版 JSON 的计数 → 非负整数；bool/小数/负数/坏类型按 0 处理。"""
+    iv = _integral_value(v)
+    return iv if iv is not None and iv >= 0 else 0
 
 
 def _fmt_rate(x) -> str:
-    if x is None:
-        return "-"
-    try:
-        return f"{float(x):.3%}"
-    except (TypeError, ValueError, OverflowError):
-        return "-"
+    f = _finite_number(x)
+    return "-" if f is None else f"{f:.3%}"
 
 
 def _fmt4(x) -> str:
-    """四位小数；None 显式显示 '-'（如空 split 的分布漂移统计为 null）。"""
-    if x is None:
-        return "-"
-    try:
-        return f"{float(x):.4f}"
-    except (TypeError, ValueError, OverflowError):
-        return "-"
+    """四位小数；None/非数值显式显示 '-'（如空 split 的分布漂移统计为 null）。"""
+    f = _finite_number(x)
+    return "-" if f is None else f"{f:.4f}"
 
 
 def _has_test_split(data_dir: str) -> bool:
@@ -3053,12 +3044,12 @@ def _render_baseline_sections(results_dir: str, smoke=None,
 
 
 def _fmt_scalar_maybe(x) -> str:
-    if x is None:
-        return "-"
-    try:
-        return f"{float(x):.3f}"
-    except (TypeError, ValueError, OverflowError):
-        return str(x)
+    f = _finite_number(x)
+    if f is not None:
+        return f"{f:.3f}"
+    # 旧产物里可能有 "n/a" 这类说明性字符串，原样保留；bool/容器等
+    # 非数值类型不能显示成 1.000/"[...]" 伪观测。
+    return x if isinstance(x, str) else "-"
 
 
 def _dedupe_advice(items, limit=6):
