@@ -3254,3 +3254,50 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     }
     assert _ppl_window_paired_tests(runs3, [("lega", "standard")]) == []
     print("  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号门槛")
+
+
+def test_build_summary_renders_both_eval_sampling_sections():
+    """窗口级 bootstrap 与样例级 McNemar 都要进入汇总页/JSON，且与种子级并列。"""
+    from run_all import build_summary
+
+    tmp = tempfile.mkdtemp()
+    try:
+        def ev(v, losses, ppl):
+            return {"variant": v, "seed": 1, "val_ppl": ppl, "val_loss": 1.0,
+                    "split": "val", "eval_ctx": 10, "eval_iters": 3,
+                    "eval_iters_requested": 3, "val_windows": 3,
+                    "val_tokens_evaluated": 30, "n_params": 100,
+                    "window_losses": losses, "window_indices": [0, 3, 6]}
+
+        _write_json(os.path.join(tmp, "eval_standard.json"),
+                    ev("standard", [2.0, 2.0, 2.0], 10.0))
+        _write_json(os.path.join(tmp, "eval_lega.json"),
+                    ev("lega", [1.0, 1.0, 1.0], 9.0))
+
+        def rul(v, ems):
+            cell = {"em": sum(ems) / len(ems), "n": len(ems),
+                    "samples": [{"sample_id": f"s{i}", "em": float(e)}
+                                for i, e in enumerate(ems)]}
+            return {"variant": v, "seed": 1,
+                    "ctx_lens": [256], "n_samples": len(ems),
+                    "sample_seed": 7, "corpus_source": "val", "max_new": 12,
+                    "fwe_max_new": 44, "vt_chains": 4, "vt_depth": 4,
+                    "results": {"niah": {"256": cell}}}
+
+        _write_json(os.path.join(tmp, "ruler_standard.json"),
+                    rul("standard", [0, 0, 0, 0]))
+        _write_json(os.path.join(tmp, "ruler_lega.json"),
+                    rul("lega", [1, 1, 1, 1]))
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "### PPL 窗口级配对" in md and "PPL比" in md, md[-3000:]
+        assert "### RULER 样例级配对" in md and "候选独对" in md, md[-3000:]
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert len(sig["ppl_window_pairs"]) == 1, sig.keys()
+        assert len(sig["ruler_sample_pairs"]) == 1, sig.keys()
+        assert len(out["ppl_window_tests"]) == 1
+        assert len(out["ruler_sample_tests"]) == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary 并列渲染窗口级/样例级评测抽样证据")
