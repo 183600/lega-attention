@@ -504,7 +504,18 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                 eval_protocols.append((f"{v}/seed{seed}", proto))
             else:
                 eval_protocol_missing.append(f"{v}/seed{seed}")
-            early_stopped = bool(ev.get("early_stopped"))
+            # 早停标志必须是真正的 bool：字符串 "false"/"0" 若按 truthiness
+            # 变成 True，会让“实际步数与计划步数不一致”的 run 逃过受控预算
+            # 检查。非法值按未早停处理并显式记为元数据不一致。
+            early_raw = ev.get("early_stopped")
+            if isinstance(early_raw, bool):
+                early_stopped = early_raw
+            else:
+                early_stopped = False
+                if early_raw is not None:
+                    meta_mismatches.append(
+                        f"{v}/seed{seed}: early_stopped={early_raw!r} "
+                        "不是布尔值；按未早停核对实际步数")
             actual_meta.append((f"{v}/seed{seed}", ev.get("steps"),
                                 ev.get("tokens_seen"), early_stopped,
                                 meta["steps_planned"]))
