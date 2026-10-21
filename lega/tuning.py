@@ -132,8 +132,15 @@ def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
 
 
 def _trial_name(lr: float, wd: float) -> str:
+    """trial 目录名：浮点的最短可往返表示，保证不同 lr/wd 不会同名。
+
+    旧实现用 ``.6g`` 只有 6 位有效数字：1.0000004 与 1.0000005 会得到同一个
+    目录名，后一个 trial 的 config/log/checkpoint 静默覆盖前一个，网格结果
+    被悄悄丢掉。``repr(float)`` 对有限浮点是最短且可往返的表示，不同值必有
+    不同字符串；替换仅用于文件名安全（不产生 ``.``/``-``/``+``）。
+    """
     def fmt(x):
-        s = f"{x:.6g}"
+        s = repr(float(x))
         return s.replace("+", "").replace("-", "m").replace(".", "p")
     return f"trial_lr{fmt(lr)}_wd{fmt(wd)}"
 

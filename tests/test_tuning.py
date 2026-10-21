@@ -111,7 +111,10 @@ def test_trial_name_filesystem_safe():
     name = _trial_name(6e-4, 0.1)
     assert "/" not in name and "." not in name
     assert _trial_name(1.2e-3, 0.01) != name
-    print("  [ok] _trial_name（文件名安全、可区分）")
+    # .6g 会把这两个不同的 lr 都写成 1，导致 trial 目录互相覆盖
+    assert _trial_name(1.0000004, 0.1) != _trial_name(1.0000005, 0.1)
+    assert _trial_name(-1e-5, 0.1) != _trial_name(1e-5, 0.1)
+    print("  [ok] _trial_name（文件名安全、浮点值可区分）")
 
 
 def test_read_best_val_loss_prefers_log_min():
