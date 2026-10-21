@@ -112,6 +112,12 @@ def data_report_protocol_issues(report) -> list:
             if isinstance(missing, list) and missing:
                 add(f"报告 split_protocol 缺少 split 文件 {missing}："
                     "无法核对划分互斥性，缺失 split 的指标不可比较")
+            if not bad_overlaps and not (isinstance(missing, list) and missing):
+                # verified_disjoint=False 本身就是“未验证通过”。没有重叠
+                # 明细也没有缺失文件时不能当成通过：报告被手改/上游漏写
+                # 证据，同样无法确认三个 split 互斥。
+                add("报告声明 split_protocol.verified_disjoint=False，但未记录"
+                    "跨 split 长行重叠或缺失文件：无法确认划分互斥性")
     return issues
 
 

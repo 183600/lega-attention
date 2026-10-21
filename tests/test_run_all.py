@@ -106,6 +106,10 @@ def test_data_report_protocol_declarations_block_training():
                                "documents_cross_cut": False,
                                "verified_disjoint": True}}
     assert data_report_protocol_issues(safe) == []
+    # 声明未验证却既不解释重叠也不解释缺失：不能静默放行。
+    unexplained = {"split_protocol": {"verified_disjoint": False}}
+    assert any("未记录" in msg
+               for msg in data_report_protocol_issues(unexplained))
     with tempfile.TemporaryDirectory() as d:
         _write_json(os.path.join(d, "data_report.json"),
                     {"alerts": [], "protocol": {"test_sealed": False}})
