@@ -1558,10 +1558,17 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
         for t, padj, ppadj in zip(group, pads, ppads):
             t["p_adj"] = padj
             t["p_perm_adj"] = ppadj
+            n = t.get("n")
+            n_valid = (isinstance(n, int) and not isinstance(n, bool)
+                       and n >= 0)
             if t.get("p") is None:
-                t["verdict"] = f"无法检验（n={t['n']} 或方差退化），不作判定"
-            elif t["n"] < min_seeds:
-                t["verdict"] = f"种子不足（n={t['n']}<{min_seeds}），无法判定"
+                t["verdict"] = f"无法检验（n={n} 或方差退化），不作判定"
+            elif not n_valid:
+                # 汇总文件可能来自旧版本/手工编辑：缺 n 不能让整个报告
+                # KeyError 崩溃，也不能默认满足最小种子数而给出显著性结论。
+                t["verdict"] = f"无法检验（样本量缺失或非法 n={n!r}），不作判定"
+            elif n < min_seeds:
+                t["verdict"] = f"种子不足（n={n}<{min_seeds}），无法判定"
             elif t.get("no_direction"):
                 if t.get("p_adj") is not None and t["p_adj"] < alpha:
                     t["verdict"] = ("显著偏离可加性（Holm 校正后；"
@@ -1588,7 +1595,7 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
                     t["verdict"] += "；置换检验显著（边缘证据，建议补种子确认）"
             t["t_perm_agree"] = (
                 None if (t.get("p_adj") is None or ppadj is None
-                        or t["n"] < min_seeds)
+                        or not n_valid or n < min_seeds)
                 else (t["p_adj"] < alpha) == (ppadj < alpha))
             note = _noise_verdict_note(t)
             if note and isinstance(t.get("verdict"), str):
