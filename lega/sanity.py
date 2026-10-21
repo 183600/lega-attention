@@ -76,39 +76,43 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
     """
     was_training = model.training
     model.eval()
-    B, T = x.shape
-    V = model.vocab_size
-    max_elems = max(1, int(max_chunk_elems))
-    rows = max(1, min(int(max_chunk_tokens) // max(1, T),
-                      max_elems // max(1, T * V)))
-    # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块一致
-    ce_tokens = max(256, min(4096, max_elems // max(1, V)))
-    total_loss = 0.0
-    n_tokens = 0
-    correct = 0
-    exact = 0
-    for s in range(0, B, rows):
-        xb, yb = x[s:s + rows], y[s:s + rows]
-        logits = model(xb)["logits"]                    # (b, T, V) fp32
-        lf = logits.reshape(-1, V)
-        tgt = yb.reshape(-1)
-        pred = torch.empty(lf.size(0), dtype=torch.int64, device=lf.device)
-        for t0 in range(0, lf.size(0), ce_tokens):
-            lc = lf[t0:t0 + ce_tokens]
-            tc = tgt[t0:t0 + ce_tokens]
-            total_loss += float(F.cross_entropy(lc, tc, reduction="sum"))
-            pred[t0:t0 + ce_tokens] = lc.argmax(dim=-1)
-        correct += int((pred == tgt).sum())
-        n_tokens += int(tgt.numel())
-        exact += int((pred.reshape(xb.shape[0], T) == yb).all(dim=1).sum())
-    if was_training:
-        model.train()
-    return {
-        "loss": total_loss / max(1, n_tokens),
-        "token_acc": correct / max(1, n_tokens),
-        "exact_match": exact / max(1, B),
-        "n_tokens": n_tokens,
-    }
+    try:
+        B, T = x.shape
+        V = model.vocab_size
+        max_elems = max(1, int(max_chunk_elems))
+        rows = max(1, min(int(max_chunk_tokens) // max(1, T),
+                          max_elems // max(1, T * V)))
+        # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块一致
+        ce_tokens = max(256, min(4096, max_elems // max(1, V)))
+        total_loss = 0.0
+        n_tokens = 0
+        correct = 0
+        exact = 0
+        for s in range(0, B, rows):
+            xb, yb = x[s:s + rows], y[s:s + rows]
+            logits = model(xb)["logits"]                # (b, T, V) fp32
+            lf = logits.reshape(-1, V)
+            tgt = yb.reshape(-1)
+            pred = torch.empty(lf.size(0), dtype=torch.int64, device=lf.device)
+            for t0 in range(0, lf.size(0), ce_tokens):
+                lc = lf[t0:t0 + ce_tokens]
+                tc = tgt[t0:t0 + ce_tokens]
+                total_loss += float(F.cross_entropy(lc, tc, reduction="sum"))
+                pred[t0:t0 + ce_tokens] = lc.argmax(dim=-1)
+            correct += int((pred == tgt).sum())
+            n_tokens += int(tgt.numel())
+            exact += int((pred.reshape(xb.shape[0], T) == yb).all(dim=1).sum())
+        return {
+            "loss": total_loss / max(1, n_tokens),
+            "token_acc": correct / max(1, n_tokens),
+            "exact_match": exact / max(1, B),
+            "n_tokens": n_tokens,
+        }
+    finally:
+        # 前向/损失计算抛异常时也必须恢复调用方模式：否则失败一次 sanity
+        # 就会把训练模型静默留在 eval 模式，后续 dropout/正则化全部失效。
+        if was_training:
+            model.train()
 
 
 def active_regularization(model) -> list:
@@ -192,6 +196,17 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
       * 正则化已关闭（dropout/attn_dropout 全部为 0）——开着 dropout 的
         “过拟合失败”是配置错误而非代码错误，自动检查避免误判。
     """
+    # log_every=0 会在训练中途 ``% 0`` 崩溃，bool/小数则会被 int() 截断成
+    # 与调用方声明不同的日志频率；在建模/开跑前统一拒绝。
+    log_every = strict_int(log_every, "log_every")
+    if log_every <= 0:
+        raise ValueError(f"log_every 必须是正整数，收到 {log_every!r}")
+    steps = strict_int(steps, "steps")
+    if steps < 0:
+        raise ValueError(f"steps 必须是非负整数，收到 {steps!r}")
+    warmup = strict_int(warmup, "warmup")
+    if warmup < 0:
+        raise ValueError(f"warmup 必须是非负整数，收到 {warmup!r}")
     set_seed(seed)
     # 标签映射硬校验：固定批必须在消费点满足 next-token 移位关系
     shift_ok = (x.dim() == 2 and x.shape == y.shape
@@ -363,18 +378,34 @@ def main():
               else ("cuda" if torch.cuda.is_available() else "cpu"))
     set_seed(seed)
 
+    def _cfg_positive_int(key, default=None):
+        value = cfg.get(key, default)
+        value = strict_int(value, f"config.{key}")
+        if value <= 0:
+            raise ValueError(f"config.{key} 必须是正整数，收到 {value}")
+        return value
+
     meta = load_meta(args.data_dir)
     train = load_bin(args.data_dir, "train")
-    block_size = int(cfg["block_size"])
-    train_ctx = min(int(cfg.get("train_ctx", block_size)), block_size)
-    ctx = min(int(opt["ctx"]), train_ctx)
-    batch_size = int(opt["batch_size"])
+    block_size = _cfg_positive_int("block_size")
+    train_ctx = min(_cfg_positive_int("train_ctx", block_size), block_size)
+    ctx = min(strict_int(opt["ctx"], "ctx"), train_ctx)
+    if ctx <= 0:
+        raise ValueError(f"ctx 必须是正整数，收到 {ctx}")
+    batch_size = strict_int(opt["batch_size"], "batch_size")
+    if batch_size <= 0:
+        raise ValueError(f"batch_size 必须是正整数，收到 {batch_size}")
+    vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
+    if vocab_size <= 0:
+        raise ValueError(f"meta.vocab_size 必须是正整数，收到 {vocab_size}")
 
     # 显式关闭正则化：dropout/attn_dropout=0；优化器 weight_decay=0（见上）
     model = GPT(
-        vocab_size=int(meta["vocab_size"]), block_size=block_size,
-        d_model=int(cfg["d_model"]), n_layers=int(cfg["n_layers"]),
-        n_heads=int(cfg["n_heads"]), ffn_mult=int(cfg.get("ffn_mult", 4)),
+        vocab_size=vocab_size, block_size=block_size,
+        d_model=_cfg_positive_int("d_model"),
+        n_layers=_cfg_positive_int("n_layers"),
+        n_heads=_cfg_positive_int("n_heads"),
+        ffn_mult=_cfg_positive_int("ffn_mult", 4),
         dropout=0.0, attn_dropout=0.0, variant=args.variant,
         gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
         use_sdpa_standard=bool(cfg.get("use_sdpa_standard", True)),
