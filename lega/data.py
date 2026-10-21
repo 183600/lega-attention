@@ -16,6 +16,7 @@
 """
 import hashlib
 import json
+import math
 import os
 from typing import List
 
@@ -254,9 +255,20 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
 
         def _meta_int(key):
             # 缓存是派生数据，字段缺失/类型异常按“与 bin 不一致”处理。
+            # bool 是 int 子类，小数 int() 会截断；两者都能伪造出与 bin
+            # 大小相符的 token 数，让损坏/过期缓存被当成有效。
+            raw = meta.get(key, -1)
+            if isinstance(raw, bool):
+                return -1
             try:
-                return int(meta.get(key, -1))
+                f = float(raw)
             except (TypeError, ValueError, OverflowError):
+                return -1
+            if not math.isfinite(f) or f < 0 or not f.is_integer():
+                return -1
+            try:
+                return int(f)
+            except (OverflowError, ValueError):
                 return -1
 
         train_valid = (os.path.getsize(train_bin)

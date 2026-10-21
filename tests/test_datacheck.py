@@ -1012,6 +1012,29 @@ def test_test_access_ledger():
     print("  [ok] 测试集访问账本：追加、去重统计、按 test 数据版本判定重复")
 
 
+def test_prepare_bins_rejects_bool_or_fractional_token_counts():
+    """缓存元数据的 bool/小数 token 数不能伪造尺寸一致而绕过重建。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write("a")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write("b")
+        meta = prepare_bins(d, kind="char", force=True)
+        assert meta["train_tokens"] == 1 and meta["val_tokens"] == 1
+        meta_path = os.path.join(d, "meta.json")
+        for bad in (True, 1.5, float("nan"), "bad"):
+            with open(meta_path, encoding="utf-8") as f:
+                m = json.load(f)
+            m["train_tokens"] = bad
+            m["val_tokens"] = bad
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(m, f)
+            rebuilt = prepare_bins(d, kind="char")
+            assert rebuilt["train_tokens"] == 1, (bad, rebuilt)
+            assert rebuilt["val_tokens"] == 1, (bad, rebuilt)
+    print("  [ok] bin 缓存拒绝 bool/小数 token 数，强制重建")
+
+
 def test_prepare_bins_writes_report_and_decontaminates():
     shared = ("A shared paragraph with enough characters to count as a long "
               "duplicate line.")
