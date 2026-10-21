@@ -279,7 +279,16 @@ def test_pearson_guards():
     xn[0] = np.nan
     yn[1] = np.nan
     assert abs(pearson(xn, yn) - 1.0) < 1e-9
-    print("  [ok] pearson 边界（常量/样本不足/NaN 成对剔除）")
+    # bool 不是连续观测：True/False 不能被当作 1.0/0.0 算相关系数
+    assert pearson([True, False, True, False, True], x[:5].tolist()) is None
+    assert pearson(np.array([True, False, True, False]), x[:4]) is None
+    try:
+        pearson([1.0, 2.0], [1.0])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pearson 长度不一致未被拒绝")
+    print("  [ok] pearson 边界（常量/样本不足/NaN 成对剔除/bool 与长度校验）")
 
 
 def test_mean_std():

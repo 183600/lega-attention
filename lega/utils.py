@@ -338,8 +338,10 @@ def amp_autocast(device: str, enabled: bool = True):
 def pearson(x, y):
     """Pearson 相关系数；样本不足/零方差/结果非有限时返回 None（调用方以 None 表示不可计算，
     避免 nan 写入 JSON 产生 NaN 字面量——那并非合法 JSON）。"""
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
+    x = _obs_array(x)
+    y = _obs_array(y)
+    if x.size != y.size:
+        raise ValueError(f"x/y 长度不一致: {x.size} vs {y.size}")
     m = ~np.isnan(x) & ~np.isnan(y)
     x, y = x[m], y[m]
     if len(x) < 3 or np.std(x) == 0 or np.std(y) == 0:
@@ -361,6 +363,22 @@ def _finite_observation(value):
     except (TypeError, ValueError, OverflowError):
         return None
     return f if math.isfinite(f) else None
+
+
+def _obs_array(values) -> np.ndarray:
+    """任意可迭代/数组 → 有限 float 观测数组；bool/非数值/非有限记 NaN。
+
+    列表/元组里 bool 与 float 混合时 np.asarray 会先统一成 float 并丢掉
+    bool 身份，因此非数值 ndarray 必须逐元素走 _finite_observation。
+    """
+    arr = np.asarray(values)
+    if (isinstance(values, np.ndarray) and arr.dtype != object
+            and arr.dtype.kind != "b"):
+        return arr.astype(np.float64, copy=False).ravel()
+    vals = [_finite_observation(v)
+            for v in np.asarray(values, dtype=object).ravel()]
+    return np.array([np.nan if v is None else v for v in vals],
+                    dtype=np.float64)
 
 
 def _open_unit_interval(value, name: str) -> float:
@@ -881,22 +899,8 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     单一类别时 brier 仍可算，但 ECE 的“校准”语义不完整，返回 None。
     """
     n_bins = strict_int(n_bins, "n_bins")
-
-    def _obs(values):
-        # 数值 ndarray 快速路径；列表/元组里 bool 与 float 混合时
-        # np.asarray 会先统一成 float 而丢掉 bool 身份，因此这些输入必须
-        # 走 object 逐元素校验，避免 True 被悄悄折成 1.0 观测。
-        arr = np.asarray(values)
-        if (isinstance(values, np.ndarray) and arr.dtype != object
-                and arr.dtype.kind != "b"):
-            return arr.astype(np.float64, copy=False).ravel()
-        vals = [_finite_observation(v)
-                for v in np.asarray(values, dtype=object).ravel()]
-        return np.array([np.nan if v is None else v for v in vals],
-                        dtype=np.float64)
-
-    scores = _obs(scores)
-    labels = _obs(labels)
+    scores = _obs_array(scores)
+    labels = _obs_array(labels)
     if scores.size != labels.size:
         raise ValueError(
             f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
