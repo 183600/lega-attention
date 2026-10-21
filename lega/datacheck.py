@@ -1148,6 +1148,28 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             f"（标题 {p.get('n_headings', '?')} 个、切点类型 "
             f"{p.get('cut_kinds', '?')}），违反“群组整体落在同一侧”，"
             "须调整划分比例或更换可整体划分的语料")
+    if p.get("verified_disjoint") is False:
+        overlaps = p.get("overlap_long_lines")
+        bad = {}
+        if isinstance(overlaps, dict):
+            for pair, val in overlaps.items():
+                if not isinstance(val, dict):
+                    continue
+                exact = val.get("exact_lines") or 0
+                norm = val.get("normalized_lines") or 0
+                if exact or norm:
+                    bad[str(pair)] = {"exact_lines": exact,
+                                      "normalized_lines": norm}
+        if bad:
+            add("warning", "split_overlap_long_lines",
+                f"上游划分声明并非互斥：实际文本存在跨 split 共享长行 {bad}；"
+                "去污染只能移除 train 侧副本，val/test 之间或清洗后仍重叠的"
+                "样本会削弱 held-out 独立性，须核查来源或重建划分")
+        missing = p.get("missing_files")
+        if isinstance(missing, list) and missing:
+            add("warning", "split_protocol_unverified",
+                f"缺少 split 文件 {missing}，无法核对“无共享样本”声明；"
+                "缺失 split 的评测指标不可与其他 split 直接比较")
     return alerts
 
 

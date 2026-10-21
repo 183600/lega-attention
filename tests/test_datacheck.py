@@ -477,6 +477,30 @@ def test_critical_split_alerts_filters_actionable_violations():
           "分布漂移不拦截")
 
 
+def test_split_protocol_alerts_report_unverified_overlap_and_missing_files():
+    """上游声明“已核对”但实际重叠/缺文件时，报告必须有可见告警。"""
+    overlapping = {
+        "verified_disjoint": False,
+        "overlap_long_lines": {
+            "train_val": {"exact_lines": 3, "normalized_lines": 4},
+            "val_test": {"exact_lines": 0, "normalized_lines": 0},
+        },
+    }
+    alerts = split_protocol_alerts(overlapping)
+    codes = [a["code"] for a in alerts]
+    assert "split_overlap_long_lines" in codes
+    msg = next(a["message"] for a in alerts
+               if a["code"] == "split_overlap_long_lines")
+    assert "train_val" in msg and "val/test" in msg
+    missing = {"verified_disjoint": False, "missing_files": ["test"]}
+    alerts = split_protocol_alerts(missing)
+    assert [a["code"] for a in alerts] == ["split_protocol_unverified"]
+    assert "test" in alerts[0]["message"]
+    # 声明已核对且无缺失时不产生额外告警。
+    assert split_protocol_alerts({"verified_disjoint": True}) == []
+    print("  [ok] 划分协议：实际长行重叠/缺失文件不再静默躺在元数据里")
+
+
 def test_decontaminate_tolerates_non_dict_and_missing_train():
     """旧缓存/手改 JSON 缺 train 或顶层非对象时按空文本处理，而非崩溃。"""
     for texts in (None, [], {"val": "x"}, {"train": 123, "val": ["x"]}):
