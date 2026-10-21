@@ -1674,7 +1674,12 @@ def test_enrich_paired_adds_robustness_fields():
     # n=1 / 无均值：字段为 None 而不是崩溃
     res1 = _enrich_paired({"n": 0, "mean_diff": None, "std_diff": None}, [], [])
     assert res1["p_perm"] is None and res1["mean_diff_ci95"] is None
-    print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径）")
+    # bool 配对观测与检验主体同口径跳过：胜负计数不能多于实际 n。
+    res2 = _enrich_paired({"n": 2, "mean_diff": 1.5, "std_diff": 0.5},
+                          [True, 2.0, 3.0], [1.0, 1.0, 1.0])
+    assert (res2["n_seed_wins"] + res2["n_seed_losses"]
+            + res2["n_seed_ties"]) == 2
+    print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径；bool 不参与）")
 
 
 def test_enrich_paired_leave_one_seed_out_stability():

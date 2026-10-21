@@ -1406,11 +1406,16 @@ def _enrich_paired(res: dict, a, b) -> dict:
     # 一致，则报道的“显著优于”对个体种子高度敏感，必须显式标注。
     res["n_seed_wins"] = res["n_seed_losses"] = res["n_seed_ties"] = None
     res["loo_sign_stable"] = res["loo_min_abs_mean"] = None
-    try:
-        diffs = [float(x) - float(y) for x, y in zip(a, b)]
-        diffs = [d for d in diffs if math.isfinite(d)]
-    except (TypeError, ValueError, OverflowError):
-        diffs = []
+    diffs = []
+    for x, y in zip(a, b):
+        # 与 paired_t_test/_paired_diffs 同口径：bool/坏值不参与配对差，
+        # 否则逐种子胜负的样本数会与检验实际 n 不一致。
+        fx, fy = _finite_number(x), _finite_number(y)
+        if fx is None or fy is None:
+            continue
+        d = fx - fy
+        if math.isfinite(d):
+            diffs.append(d)
     if len(diffs) >= 2:
         wins = sum(1 for d in diffs if d > 0)
         losses = sum(1 for d in diffs if d < 0)
