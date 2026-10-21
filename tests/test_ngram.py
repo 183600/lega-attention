@@ -13,7 +13,8 @@ import tempfile
 import numpy as np
 
 from lega.ngram import (ALPHA_GRID, INTERP_LAMBDA_GRID, _bigram_ppl,
-                        _interp_ppl_from_counts, evaluate, fit_counts,
+                        _interp_ppl_from_counts, _validate_alpha,
+                        _validate_lambda, evaluate, fit_counts,
                         ppl_bigram, ppl_interpolated_bigram, ppl_unigram,
                         window_positions)
 from lega.datacheck import TEST_ACCESS_LOG
@@ -399,3 +400,17 @@ def test_ngram_cli_runs_data_protocol_preflight():
         finally:
             sys.argv = old
     print("  [ok] n-gram 评测入口执行数据协议闸门（严重告警默认中止）")
+
+
+def test_ngram_rejects_numpy_bool_smoothing():
+    """np.bool_ 不是数值平滑系数/L2 权重，不能被 float() 变成 1.0。"""
+    for fn, val in ((_validate_alpha, np.bool_(True)),
+                    (_validate_lambda, np.bool_(True)),
+                    (_validate_lambda, np.bool_(False))):
+        try:
+            fn(val)
+            raise AssertionError(f"np.bool_ 应被拒绝: {val!r}")
+        except ValueError:
+            pass
+    assert _validate_alpha(np.float32(0.5)) == 0.5
+    print("  [ok] n-gram 平滑参数拒绝 NumPy bool")

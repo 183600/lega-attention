@@ -161,7 +161,7 @@ def _context_counts(pair_keys: np.ndarray, pair_counts: np.ndarray,
 
 def _validate_alpha(alpha) -> float:
     """平滑系数必须是有限非负数；NaN/Inf/负值会把 PPL 变成非法数值。"""
-    if isinstance(alpha, bool):
+    if isinstance(alpha, (bool, np.bool_)):
         raise ValueError(f"平滑系数 α 必须是数值，收到 bool {alpha!r}")
     try:
         alpha = float(alpha)
@@ -174,7 +174,7 @@ def _validate_alpha(alpha) -> float:
 
 def _validate_lambda(lam) -> float:
     """插值权重必须在 [0, 1] 内，否则组合出来的“概率”不再合法。"""
-    if isinstance(lam, bool):
+    if isinstance(lam, (bool, np.bool_)):
         raise ValueError(f"插值权重 λ 必须是数值，收到 bool {lam!r}")
     try:
         lam = float(lam)

@@ -15,8 +15,10 @@ import shutil
 import tempfile
 
 from lega.probe import (DECISION_THRESHOLD, FEATURE_SETS, _column_values,
-                        _f1_block, _group_folds, _hit_values, _select_threshold,
-                        fit_logreg, linear_probe, predict_logreg)
+                        _features, _f1_block, _finite_nonnegative,
+                        _float_or_nan, _group_folds, _hit_values,
+                        _select_threshold, fit_logreg, linear_probe,
+                        predict_logreg)
 from run_all import (linear_probe_baseline_comparison, _render_baseline_sections)
 
 
@@ -345,6 +347,29 @@ def test_linear_probe_tolerates_non_numeric_columns():
     assert rep["primary"] == "conc_len"
     assert rep["feature_sets"]["conc_len"]["oof"] is not None
     print("  [ok] 线性探针：非数值列按缺失剔除，不崩溃")
+
+
+def test_probe_rejects_numpy_bools_and_cache_identity():
+    """np.bool_ 不能被当成 1.0/L2=1；特征缓存也不能跨 records 对象复用。"""
+    assert math.isnan(_float_or_nan(np.bool_(True)))
+    for bad in (np.bool_(True), np.bool_(False)):
+        try:
+            _finite_nonnegative(bad, "l2")
+            raise AssertionError(f"np.bool_ 应被拒绝: {bad!r}")
+        except ValueError:
+            pass
+    try:
+        fit_logreg(np.zeros((2, 1)), np.array([0.0, 1.0]), l2=np.bool_(True))
+        raise AssertionError("l2=np.bool_(True) 应被拒绝")
+    except ValueError:
+        pass
+    cache = {}
+    first = [{"log_n": 1.0, "hit": 1.0}]
+    second = [{"log_n": 9.0, "hit": 1.0}]
+    x1, _ = _features(first, ("log_n",), cache=cache)
+    x2, _ = _features(second, ("log_n",), cache=cache)
+    assert x1[0, 0] == 1.0 and x2[0, 0] == 9.0, (x1, x2)
+    print("  [ok] 探针：NumPy bool 被拒绝，特征缓存不跨记录对象复用")
 
 
 def test_linear_probe_skips_non_dict_records():

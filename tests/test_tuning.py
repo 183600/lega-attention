@@ -497,3 +497,19 @@ def test_trial_env_aligns_hashseed_per_trial():
     e2 = trial_env(7, base)
     assert e2["PYTHONHASHSEED"] == "7" and base["PYTHONHASHSEED"] == "999"
     print("  [ok] trial_env：PYTHONHASHSEED 对齐 trial seed")
+
+
+def test_tuning_manifest_identity_rejects_numpy_scalars():
+    """manifest 种子核对不能把 np.bool_/np.float32(7.5) 截断成 1/7。"""
+    import numpy as np
+    from lega.tuning import _as_int, _finite_number
+    for bad in (np.bool_(True), np.float32(7.5), np.float64(7.5)):
+        assert _as_int(bad) is None, bad
+    assert _as_int(np.float64(7.0)) == 7
+    for bad in (np.bool_(True), np.bool_(False)):
+        try:
+            _finite_number(bad, "x")
+            raise AssertionError(f"np.bool_ 应被拒绝: {bad!r}")
+        except ValueError:
+            pass
+    print("  [ok] 调优身份核对拒绝 NumPy bool/小数标量")

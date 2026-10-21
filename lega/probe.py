@@ -91,7 +91,7 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
 
 def _finite_nonnegative(value, name: str = "l2") -> float:
     """有限非负浮点；bool/NaN/Inf/负值显式拒绝（负数 L2 会破坏凸性）。"""
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限非负数，收到 bool {value!r}")
     try:
         out = float(value)
@@ -156,7 +156,7 @@ def predict_logreg(model: Dict, X: np.ndarray) -> np.ndarray:
 
 def _float_or_nan(v) -> float:
     """外部/旧格式记录的单列取值：缺失或非数值一律按缺失（NaN）处理。"""
-    if v is None or isinstance(v, bool):
+    if v is None or isinstance(v, (bool, np.bool_)):
         return float("nan")
     try:
         return float(v)
@@ -202,6 +202,12 @@ def _features(records: Sequence[Dict], names: Sequence[str], cache: dict = None)
     n = len(records)
     if cache is None:
         cache = {}
+    # 缓存只在同一 records 对象上复用；仅比较长度会把另一批等长记录
+    # 的旧列静默喂给新记录，产生错误特征矩阵。保存对象引用而不是 id，
+    # 避免 id 回收复用造成误命中。
+    if cache.get("_records") is not records:
+        cache.clear()
+        cache["_records"] = records
     if n == 0:
         # 空输入保持旧实现的形状（np.asarray([]) 为 (0,)），消费方无需分支。
         return np.asarray([], dtype=np.float64), []

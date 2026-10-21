@@ -24,12 +24,14 @@ import subprocess
 import sys
 import time
 
+import numpy as np
+
 from .utils import seed_int, strict_int
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 def _finite_number(value, name: str) -> float:
     """有限浮点超参数/容差；bool/NaN/Inf/非数值显式拒绝。"""
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
     try:
         f = float(value)
@@ -237,16 +239,11 @@ def _as_int(value):
     """严格整数化：bool/非有限浮点/小数一律视为不可核对。
 
     manifest 是子进程自证身份的证据；若把 7.5 截断成 7 或把 True 当成 1，
-    伪造的种子也能与请求种子“一致”，身份核对就失去意义。
+    伪造的种子也能与请求种子“一致”，身份核对就失去意义。复用 strict_int
+    也覆盖 np.bool_/np.float32 等会被 int() 静默截断的 NumPy 标量。
     """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            return None
-        return int(value)
     try:
-        return int(value)
+        return strict_int(value)
     except (TypeError, ValueError, OverflowError):
         return None
 
