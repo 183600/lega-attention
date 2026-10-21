@@ -1979,6 +1979,16 @@ def test_render_baseline_sections_reads_evidence_and_warns():
         assert "0.0012" in text2 and "3.1000" in text2
         assert "90.000" in text2 and "45.000" in text2
         assert "全流水线" in text2 and "受控变量" in text2
+        # 已有工作代表未各自调优：汇总页必须限定“同超参受控对照”，
+        # 不能把 qgate/null 的对比写成“优于各自最佳调优版本”。
+        text_scope = "\n".join(_render_baseline_sections(
+            tmp, variants=["standard", "qgate", "null", "lega"]))
+        assert "调优范围" in text_scope and "同超参受控对照" in text_scope
+        assert "`qgate`" in text_scope and "`null`" in text_scope
+        # 只有 standard/lega 时不产生无关警告
+        text_no_scope = "\n".join(_render_baseline_sections(
+            tmp, variants=["standard", "lega"]))
+        assert "调优范围" not in text_no_scope
         # 默认组合 trial 失败（default_is_optimal=None）：不得冒充“并非最优”
         _write_json(os.path.join(tmp, "baseline_tuning.json"), {
             "variant": "standard", "n_trials": 2, "selected": {

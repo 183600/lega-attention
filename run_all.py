@@ -3014,7 +3014,8 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
 
 def _render_baseline_sections(results_dir: str, smoke=None,
                               ngram_cmp: dict = None,
-                              probe_cmp: dict = None) -> list:
+                              probe_cmp: dict = None,
+                              variants=None) -> list:
     """基线合理性小节：简单统计基线 + 基线超参数调优证据。
 
     科研方法问题：如果复杂方法只与“随手设一个学习率”的弱基线比较，
@@ -3260,6 +3261,22 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         else:
             lines.append("- ⚠ 默认组合的 trial 失败或缺失，无法判定默认是否"
                          "近优；请核对 `baseline_tuning.json` 的 trials 记录。")
+        # 调优只覆盖 tune.variant（默认 standard）；qgate/null 是“已有工作
+        # 代表”，若也直接用同一配置，就不能把对比写成“打败了各自最佳调优
+        # 的已有方法”。这是设计上的受控对照，但结论范围必须写清楚。
+        tuned_variant = tune.get("variant", "standard")
+        prior = [v for v in ("qgate", "null")
+                 if isinstance(variants, (list, tuple, set)) and v in variants]
+        untuned = [v for v in prior if v != tuned_variant]
+        if untuned:
+            lines.append(
+                f"- ⚠ 调优范围：`baseline_tuning.json` 只调优了 "
+                f"`{tuned_variant}`；已有工作代表 {', '.join('`'+v+'`' for v in untuned)} "
+                "直接继承同一组 lr/weight_decay，未各自做网格调优。因此"
+                "“优于已有工作”只能理解为**同超参受控对照**，不是“优于"
+                "各自最佳调优版本”；若差距接近 MDE/种子噪声，不能据此宣称"
+                "方法优越。需要强结论时应分别调优各基线（并同时调优本方"
+                "方法）后在新种子上复验。")
     else:
         lines.append("- 基线调优：未运行。"
                      + ("（冒烟模式不要求。）" if smoke else
@@ -4142,7 +4159,8 @@ def build_summary(results_dir: str, audit: dict = None,
     md += _render_baseline_sections(results_dir,
                                     smoke=bool((repro or {}).get("smoke")),
                                     ngram_cmp=ngram_cmp,
-                                    probe_cmp=probe_cmp)
+                                    probe_cmp=probe_cmp,
+                                    variants=sorted(runs))
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
