@@ -597,10 +597,13 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             steps_planned_here = meta["steps_planned"]
             sel_step = _integral_value(ev.get("ckpt_step"))
             if sel_step is not None:
-                sel_frac = (sel_step / steps_planned_here
-                            if isinstance(steps_planned_here, (int, float))
-                            and not isinstance(steps_planned_here, bool)
-                            and steps_planned_here > 0 else None)
+                # 计划步数必须是"可解释为整数"的量：字符串 "10"/10.0 可接受，
+                # 但 bool（True 会被 / 当成 1）与小数（10.5）都不能作为分母，
+                # 否则选型比例会用错误的预算做除法，且报告里分母与它处不一致。
+                planned_int = _integral_value(steps_planned_here)
+                sel_frac = (sel_step / planned_int
+                            if planned_int is not None and planned_int > 0
+                            else None)
                 selection_points.append((f"{v}/seed{seed}", sel_step,
                                          steps_planned_here, sel_frac))
             if early_stopped:

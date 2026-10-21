@@ -3108,3 +3108,51 @@ def test_seed_parsing_rejects_bool_and_fractional_truncation():
             raised = True
         assert raised, bad
     print("  [ok] run_all 种子解析拒绝 bool/小数截断（含 --tune_seeds 同口径）")
+
+
+def test_controlled_setup_selection_frac_rejects_bad_planned_steps():
+    """checkpoint 选型比例的分母必须是可解释为整数的计划步数。
+
+    steps_planned=true 时 True/1==1 会让比例虚高；10.5 会让比例用错误预算
+    做除法。两者都应记为 None（缺比例），而字符串 "10"/10.0 仍可用。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        variants, seeds = ["standard"], [7]
+        base = {"split": "test", "eval_ctx": 512, "eval_iters": 50,
+                "eval_iters_requested": 50, "val_windows": 80,
+                "val_tokens_evaluated": 25600,
+                "selection_set_is_eval_set": False}
+        d = os.path.join(tmp, "standard")
+        os.makedirs(d)
+        _write_json(os.path.join(d, "config_used.json"), {
+            "lr": 0.001, "steps": 10, "variant": "standard", "seed": 7,
+            "device": "cpu", "tag": "t"})
+        _write_json(os.path.join(d, "eval.json"), {
+            "variant": "standard", "seed": 7, "data_fingerprint": "abc123",
+            "code_commit": "deadbeef", "config_sha256": "shax",
+            "steps": 10, "tokens_seen": 1024, "ckpt_step": 5, **base})
+        for bad, expect_frac in ((True, None), (10.5, None), ("10", 0.5),
+                                 (10.0, 0.5)):
+            ev = json.load(open(os.path.join(d, "eval.json"), encoding="utf-8"))
+            ev["steps_planned"] = bad
+            ev["steps"] = 10            # 实际步数保持正常，聚焦选型比例解析
+            ev["tokens_seen"] = 1024
+            # 计划步数非法（bool/小数）时全局一致性审计会先失败；此时只断言
+            # “不会算出比例”，比例字段本身在成功路径上再验证。
+            if expect_frac is None:
+                ev_bad = dict(ev, steps=bad)   # 实际步数也与计划同值（非法）
+                _write_json(os.path.join(d, "eval.json"), ev_bad)
+                try:
+                    rep = verify_controlled_setup(tmp, variants, seeds, 1,
+                                                  expected_data_digest="abc123")
+                except SystemExit:
+                    continue
+                # 未触发全局失败时，选型比例仍必须是 None（分母不可整数化）
+                assert rep["selection_step_points"][0][3] is None, bad
+                continue
+            _write_json(os.path.join(d, "eval.json"), ev)
+            rep = verify_controlled_setup(tmp, variants, seeds, 1,
+                                          expected_data_digest="abc123")
+            point = rep["selection_step_points"][0]
+            assert point[3] == expect_frac, (bad, point)
+    print("  [ok] 受控变量审计：选型比例分母拒绝 bool/小数计划步数")
