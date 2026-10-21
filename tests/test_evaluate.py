@@ -359,6 +359,29 @@ def test_repeated_test_checkpoint_gate():
     print("  [ok] 重复 test 评测检测：16 位指纹 + test 数据版本，空值不误判")
 
 
+def test_evaluate_runs_data_protocol_preflight_before_loading_model():
+    """独立评测也不能在 data_report 标记泄露的数据上产出正式指标。"""
+    from lega.evaluate import main as evaluate_main
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "data_report.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"alerts": [{"level": "warning",
+                                   "code": "split_shuffled",
+                                   "message": "打乱"}]}, f)
+        old_argv = sys.argv
+        sys.argv = ["evaluate", "--ckpt", os.path.join(d, "missing.pt"),
+                    "--data_dir", d, "--out", os.path.join(d, "eval.json"),
+                    "--device", "cpu"]
+        try:
+            evaluate_main()
+            raise AssertionError("评测入口应执行数据协议闸门")
+        except SystemExit as e:
+            assert "数据协议前置检查失败" in str(e)
+        finally:
+            sys.argv = old_argv
+    print("  [ok] 独立评测入口执行数据协议闸门（严重告警默认中止）")
+
+
 def test_worst_windows_allowed_seals_test():
     """test 上转储最差窗口默认禁止，显式放行才允许；val 不受限。"""
     assert worst_windows_allowed("val", False)

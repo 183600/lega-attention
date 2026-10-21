@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from .data import get_val_windows, load_bin, load_tokenizer
 from .datacheck import append_test_access
 from .model import load_model, count_params, gate_extra_params
+from .preflight import (allow_protocol_violations,
+                        data_protocol_preflight)
 from .repro import (load_provenance, sha256_file,
                     test_data_fingerprint as _test_data_fingerprint)
 from .train import evaluate_val, _val_eval_indices
@@ -349,10 +351,27 @@ def main():
                    help="允许同一 checkpoint 在 test 上重复评测（尘封协议下这是"
                         "泄露前兆：测试集只能最终一次性评估；默认拒绝，确需重测"
                         "时显式放行，账本仍会留痕）")
+    p.add_argument("--allow_data_protocol_violations", action="store_true",
+                   help="即使 data_report 检测到划分/重叠泄露也继续评测（仅用于"
+                        "复现历史实验；报告会标记 override，结果不得用于正式结论）")
     args = p.parse_args()
     if (args.eval_iters is not None
             and _positive_int_or_none(args.eval_iters) is None):
         p.error("--eval_iters 必须是正整数")
+
+    # 评测同样不能在已标记泄露的数据上产出“正式指标”：训练闸门只保护
+    # checkpoint 生产，独立 evaluate/复现历史 run 也必须先过同一份报告。
+    allow_override = allow_protocol_violations(
+        args.allow_data_protocol_violations)
+    data_preflight = data_protocol_preflight(
+        args.data_dir, allow_override=allow_override)
+    if not data_preflight["report_present"]:
+        print("[eval] 警告：数据目录缺少 data_report.json，"
+              "无法执行评测前防泄漏闸门（旧数据或未走统一入口）")
+    elif data_preflight["critical_violations"]:
+        print(f"[eval] ⚠ 数据协议自检发现 "
+              f"{len(data_preflight['critical_violations'])} 个严重问题，"
+              "但已显式放行（结果不得用于正式结论）")
 
     device = get_device(args.device)
     enable_tf32(device)
@@ -465,6 +484,8 @@ def main():
         # 后旧结果无法冒充（与 test 访问账本、实验台账中的哈希同一口径）
         "ckpt_sha256": ckpt_sha256,
         "split": split,
+        # 评测前的数据协议结论随结果落盘，供汇总层区分正式/放行结果。
+        "data_protocol_preflight": data_preflight,
         # checkpoint（model_best.pt）在 val 上选出；split=val 时报告指标与选择集同源
         "selection_set_is_eval_set": bool(split == "val"),
         "val_ppl": ppl,
