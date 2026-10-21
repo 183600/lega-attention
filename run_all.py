@@ -18,6 +18,11 @@
     报告符号翻转置换检验（分布无关）p_perm（同家族独立 Holm 校正）、配对差
     bootstrap 95% CI 与最小可检测效应 MDE——t 与置换结论冲突显式标 ⚠，
     “不显著”先对照 MDE 区分“无效应”与“功效不足”；
+  * 评测抽样不确定性（与训练种子方差分开报告）：RULER 逐样例落盘并在
+    共享 sample_id 上做配对 McNemar（micro）并并列 macro 估计量；PPL 落盘
+    逐窗口损失，对同序号窗口做“种子×窗口”分层 bootstrap。两者都是固定
+    题面/窗口上的探索性证据，低于最低窗口/种子门槛时只报区间不下显著性
+    结论，不能替代种子级确认性检验；
   * 机制主张检验：auroc_logit − auroc_qterm 的同种子配对差作为独立指标
     家族正式检验（与逐 run 样例聚类 bootstrap 区间互为印证）；
   * 预注册：preregistration/hypotheses.json 在正式实验前登记方向性主张，
