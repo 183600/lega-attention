@@ -808,6 +808,17 @@ def holm_bonferroni(pvals) -> list:
     return adj
 
 
+def _score_label_arrays(scores, labels, label_dtype=None):
+    """分数/标签按位置对齐；长度不一致显式拒绝，避免静默截断或错位。"""
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = (np.asarray(labels, dtype=label_dtype)
+              if label_dtype is not None else np.asarray(labels))
+    if scores.size != labels.size:
+        raise ValueError(
+            f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
+    return scores.ravel(), labels.ravel()
+
+
 def auroc(scores, labels) -> float:
     """秩和法 AUROC（Mann-Whitney U），含并列取平均秩；labels: 1=正类。
 
@@ -816,8 +827,7 @@ def auroc(scores, labels) -> float:
     类别极度不平衡时 AUROC 会被巨大的负样本基数抬高（FPR 增长缓慢），
     必须与 `average_precision` 并报；正类率 <5% 时应以 PR-AUC 为主。
     """
-    scores = np.asarray(scores, dtype=np.float64)
-    labels = np.asarray(labels)
+    scores, labels = _score_label_arrays(scores, labels)
     # 与 average_precision 同一口径：先剔除非有限分数。
     m = np.isfinite(scores)
     scores, labels = scores[m], labels[m]
@@ -851,8 +861,7 @@ def average_precision(scores, labels) -> float:
     P=TP/(TP+FP) 与 R=TP/n_pos，AP = Σ (R_k − R_{k−1}) · P_k，
     与并列取平均秩的 AUROC 一样对并列稳健。单一类别或空输入返回 NaN。
     """
-    scores = np.asarray(scores, dtype=np.float64)
-    labels = np.asarray(labels, dtype=np.float64)
+    scores, labels = _score_label_arrays(scores, labels, np.float64)
     m = np.isfinite(scores)
     scores, labels = scores[m], labels[m]
     n_pos = int((labels == 1).sum())
@@ -885,8 +894,7 @@ def roc_pr_aucs(scores, labels):
     正类率既不等于 0 也不等于 1，否则对应值为 NaN（另一指标仍照常计算）。
     返回 (auroc, ap)。
     """
-    scores = np.asarray(scores, dtype=np.float64)
-    labels = np.asarray(labels)
+    scores, labels = _score_label_arrays(scores, labels)
     m = np.isfinite(scores)
     sc, lb = scores[m], labels[m]
     # 非二值标签（调用方不应出现）语义含糊：average_precision 会把非 0/1

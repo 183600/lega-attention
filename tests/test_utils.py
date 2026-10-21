@@ -96,6 +96,30 @@ def test_auroc_filters_nonfinite_like_average_precision():
     print("  [ok] auroc：非有限分数剔除（与 average_precision 同口径）")
 
 
+def test_score_label_length_mismatch_is_rejected():
+    """分数与标签必须一一对应：长度不同不能静默截断或多出标签。
+
+    有限值掩码只按 scores 的形状取 labels；若 labels 更长，多出的标签会
+    被无声丢弃，AUROC/AP 就在错误的样本集上计算。三个入口统一显式报错。
+    """
+    for fn in (auroc, average_precision, roc_pr_aucs):
+        for scores, labels in (([0.1, 0.9], [1]),
+                               ([0.1], [1, 0]),
+                               (np.array([[0.1, 0.9]]), np.array([1]))):
+            try:
+                fn(scores, labels)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    f"{fn.__name__} 未拒绝长度不一致: {scores!r} / {labels!r}")
+    # 同尺寸多维输入按元素对齐（与 pearson/calibration 的扁平口径一致）
+    got = auroc(np.array([[0.1, 0.2], [0.8, 0.9]]),
+                np.array([[0, 0], [1, 1]]))
+    assert abs(got - 1.0) < 1e-12, got
+    print("  [ok] auroc/average_precision/roc_pr_aucs 拒绝长度不一致")
+
+
 def test_save_json_writes_strict_json_atomically():
     """NaN/Inf 写成 null（合法 JSON），临时文件不残留。"""
     tmp = tempfile.mkdtemp()
