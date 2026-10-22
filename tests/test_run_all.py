@@ -3282,6 +3282,32 @@ def test_build_summary_tolerates_malformed_eval_probe_repro_curve():
     print("  [ok] build_summary：畸形 eval/analysis/repro/curve 不崩溃")
 
 
+def test_build_summary_worst_window_scope_requires_valid_total():
+    """缺失/非法 total 不能伪装成 100% 覆盖率，也不能显示 x/0 分母。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        def write(v, scope):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "split": "val", "worst_window_scope": scope,
+                "worst_windows": [{
+                    "window": 1, "split": "val", "loss": 1.0,
+                    "pred_top5": [["a", 0.9]], "gold_next": "b",
+                    "context_tail": "x"}]})
+        write("standard", {"screened": 30, "total": None})
+        write("lega", {"screened": 30, "total": "x"})
+        md = build_summary(tmp)["markdown"]
+        assert "最低覆盖率" not in md, md
+        assert "30/0" not in md, md
+        # 合法 scope 仍应正常显示真实覆盖率，不能被上面的过滤连坐。
+        write("lega", {"screened": 30, "total": 60})
+        md2 = build_summary(tmp)["markdown"]
+        assert "30/60，最低覆盖率 50%" in md2, md2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：缺失/非法 worst_window_scope.total 不伪造覆盖率")
+
+
 def test_tradeoff_prefers_sdpa_runtime_baseline():
     """涨点-增幅的运行时要与主表同一基线（standard_sdpa 优先）。"""
     tmp = tempfile.mkdtemp()

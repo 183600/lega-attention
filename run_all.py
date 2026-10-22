@@ -5241,12 +5241,16 @@ def build_summary(results_dir: str, audit: dict = None,
                 sc = cand.get("worst_window_scope")
                 screened = (_integral_value(sc.get("screened"))
                             if isinstance(sc, dict) else None)
-                if screened is not None:
-                    total = _integral_value(sc.get("total"))
-                    scopes.add((screened, total if total is not None else 0))
+                total = (_integral_value(sc.get("total"))
+                         if isinstance(sc, dict) else None)
+                # 分母缺失/非法时不能写成 0 再按 100% 覆盖率展示：那会把
+                # “未知筛查范围”伪装成“已覆盖全量窗口”，并输出 30/0。
+                if (screened is not None and total is not None
+                        and total > 0 and 0 <= screened <= total):
+                    scopes.add((screened, total))
         if scopes:
             md.append("")
-            lo_cov = min((scr / tot) if tot else 1.0 for scr, tot in scopes)
+            lo_cov = min(scr / tot for scr, tot in scopes)
             shown = "；".join(f"{scr}/{tot}" for scr, tot in sorted(scopes)[:3])
             extra = " 等" if len(scopes) > 3 else ""
             md.append(f"注：最差窗口在等间隔候选窗口子集中排序（本次 "
