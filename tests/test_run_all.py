@@ -4757,7 +4757,26 @@ def test_controlled_setup_selection_frac_rejects_bad_planned_steps():
                                           expected_data_digest="abc123")
             point = rep["selection_step_points"][0]
             assert point[3] == expect_frac, (bad, point)
-    print("  [ok] 受控变量审计：选型比例分母拒绝 bool/小数计划步数")
+        # 合法大整数：ckpt_step/计划步数可精确解析，但比例转 float 会溢出；
+        # 审计必须继续运行并把比例记为缺失，而不是崩溃。
+        ev = json.load(open(os.path.join(d, "eval.json"), encoding="utf-8"))
+        ev.update({"steps_planned": 10, "steps": 10, "tokens_seen": 1024,
+                   "ckpt_step": 10 ** 400})
+        _write_json(os.path.join(d, "eval.json"), ev)
+        rep = verify_controlled_setup(tmp, variants, seeds, 1,
+                                      expected_data_digest="abc123")
+        assert rep["ok"] and rep["selection_step_points"][0][3] is None, rep
+        # steps 与计划步数的数值/字符串表示必须按精确整数比较，不能先转
+        # float（10**400 会溢出）后误判为不一致。
+        huge = 10 ** 400
+        ev.update({"steps_planned": huge, "steps": str(huge),
+                   "tokens_seen": huge, "ckpt_step": huge})
+        _write_json(os.path.join(d, "eval.json"), ev)
+        rep = verify_controlled_setup(tmp, variants, seeds, 1,
+                                      expected_data_digest="abc123")
+        assert rep["ok"], rep
+    print("  [ok] 受控变量审计：选型比例分母拒绝 bool/小数计划步数；"
+          "超大整数精确比较且比例溢出安全降级")
 
 
 def test_ruler_sample_paired_mcnemar_counts_and_exact_p():

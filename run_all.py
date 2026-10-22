@@ -995,9 +995,15 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                 # 但 bool（True 会被 / 当成 1）与小数（10.5）都不能作为分母，
                 # 否则选型比例会用错误的预算做除法，且报告里分母与它处不一致。
                 planned_int = _integral_value(steps_planned_here)
-                sel_frac = (sel_step / planned_int
-                            if planned_int is not None and planned_int > 0
-                            else None)
+                sel_frac = None
+                if planned_int is not None and planned_int > 0:
+                    try:
+                        sel_frac = sel_step / planned_int
+                    except (OverflowError, ZeroDivisionError):
+                        # 外部 JSON 的合法大整数（如 10**400）可精确解析为
+                        # 整数，但转 float 做比例会溢出；比例按缺失处理，
+                        # 不能让审计自己崩溃。
+                        sel_frac = None
                 selection_points.append((f"{v}/seed{seed}", sel_step,
                                          steps_planned_here, sel_frac))
             if early_stopped:
@@ -1038,6 +1044,11 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         if ((isinstance(a, str) and "_" in a)
                 or (isinstance(b, str) and "_" in b)):
             return False
+        # 先按精确整数身份比较：>2**53 的合法 JSON 大整数转 float 会丢精度，
+        # 10**400 更会直接 OverflowError；两者若表示同一个整数仍应判一致。
+        ia, ib = _integral_value(a), _integral_value(b)
+        if ia is not None and ib is not None:
+            return ia == ib
         try:
             fa, fb = float(a), float(b)
         except (TypeError, ValueError, OverflowError):
@@ -1046,9 +1057,6 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             return False
         if not (fa.is_integer() and fb.is_integer()):
             return False
-        ia, ib = _integral_value(a), _integral_value(b)
-        if ia is not None and ib is not None:
-            return ia == ib
         return fa == fb
 
     stable_actual = [(name, steps_run, tokens_run, planned)
