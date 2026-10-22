@@ -1245,3 +1245,28 @@ def test_cross_variant_pairing_reports_mcnemar_and_holm():
     assert cross["per_variant"]["standard"]["mcnemar_p"] is None
     json.dumps(cross, ensure_ascii=False, allow_nan=False)
     print("  [ok] 跨变体配对 McNemar + Holm 校正（小样本不做单侧排序）")
+
+
+def test_improvement_priority_respects_category_ci():
+    """点估计刚过 1/3 但 Wilson 下界远低于阈值时，不能标“高优先级”模式。
+
+    6 条错误里 2 条误抄：点占比 33.3%，但 95% CI 下界约 10%——这只是
+    方向性线索；6/6 时下界仍 >1/3，才配得上高优先级。
+    """
+    weak = synthesize_ruler_improvements({
+        "n_badcases": 6,
+        "category_counts": {"copy_distractor": 2, "no_answer": 4},
+        "label_errors": 0, "deep_position_fail_ratio": None,
+    })
+    copy_rec = next(r for r in weak if "误抄干扰" in r["trigger"])
+    assert copy_rec["priority"] == "中", copy_rec
+    assert "Wilson 95% CI" in copy_rec["trigger"], copy_rec
+
+    strong = synthesize_ruler_improvements({
+        "n_badcases": 6,
+        "category_counts": {"copy_distractor": 6},
+        "label_errors": 0, "deep_position_fail_ratio": None,
+    })
+    copy_rec = next(r for r in strong if "误抄干扰" in r["trigger"])
+    assert copy_rec["priority"] == "高", copy_rec
+    print("  [ok] 改进方向优先级按类别占比 CI 下界降级（小样本不当主导模式）")

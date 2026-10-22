@@ -261,19 +261,42 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
         # 样本不足时任何类别占比/深位比例都只是 1~2 条的偶然结果；继续
         # 输出“高优先级模型改进方向”会把噪声包装成证据。
         return recs[:MAX_ADVICE]
+
+    def _share_ci_text(k):
+        """类别占比的 Wilson 95% CI 文本；坏计数/零分母安全跳过。"""
+        ci = wilson_score_ci(k, model_n)
+        if ci is None:
+            return ""
+        return f"；Wilson 95% CI {ci[0]:.0%}–{ci[1]:.0%}"
+
+    def _cat_priority(k, base="高"):
+        """点估计过阈值但 CI 下界未过阈值时，降为方向性线索（中）。"""
+        ci = wilson_score_ci(k, model_n)
+        return base if (ci is not None and ci[0] >= DOMINANT_SHARE) else "中"
+
     deep = _finite_float(ana.get("deep_position_fail_ratio"))
     if (deep is not None and 0.0 <= deep <= 1.0 and deep >= DEEP_FAIL_TOL
             and model_n >= MIN_PATTERN_CASES):
+        deep_ci = ana.get("deep_position_fail_ci95")
+        deep_note = ""
+        if isinstance(deep_ci, (list, tuple)) and len(deep_ci) == 2:
+            lo, hi = _finite_float(deep_ci[0]), _finite_float(deep_ci[1])
+            if lo is not None and hi is not None and 0.0 <= lo <= hi <= 1.0:
+                deep_note = (f"；Wilson 95% CI {lo:.0%}–{hi:.0%}"
+                             + ("（下界未过 1/2，仅作方向性线索）"
+                                if lo < DEEP_FAIL_TOL else ""))
         recs.append(_advice(
-            "难度边界", "中", f"niah 失败中 {deep:.0%} 位于 needle 深位 (>0.75)",
+            "难度边界", "中",
+            f"niah 失败中 {deep:.0%} 位于 needle 深位 (>0.75){deep_note}",
             "失败由长程检索边界主导：平均 EM 会掩盖深位退化，应按 depth 分层报告",
             "增加深位训练样本/更长训练上下文；对门控变体检查深位处门控分布，"
             "确认长度项 b·log n 校准是否正确"))
     cd = _count_int(counts.get("copy_distractor")) or 0
     if _share(cd, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
-            "模型/方法", "高",
-            f"误抄干扰值占模型错误 {cd}/{model_n}（检索到错误位置，不是没读到）",
+            "模型/方法", _cat_priority(cd),
+            f"误抄干扰值占模型错误 {cd}/{model_n}（检索到错误位置，不是没读到）"
+            f"{_share_ci_text(cd)}",
             "定位失败：注意力落在同类干扰行/错误链上；先用机制分析确认"
             "（misleading_rate、P(hit|集中)）再改结构",
             "在失败样例上对比注意力落点；若属位置混淆，优先改位置编码或"
@@ -281,8 +304,9 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     ha = _count_int(counts.get("hallucinated")) or 0
     if _share(ha, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
-            "模型/方法", "高",
-            f"幻觉数字占模型错误 {ha}/{model_n}（输出上下文中不存在的值）",
+            "模型/方法", _cat_priority(ha),
+            f"幻觉数字占模型错误 {ha}/{model_n}（输出上下文中不存在的值）"
+            f"{_share_ci_text(ha)}",
             "模型未 grounding 到上下文：检查训练/评测长度分布是否错配、"
             "是否存在长程复制的系统性衰减",
             "统计训练样本中长上下文与复制型任务占比；对门控变体比较 "
@@ -291,7 +315,8 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     if _share(na, model_n) >= DOMINANT_SHARE:
         recs.append(_advice(
             "模型/方法", "中",
-            f"无数值回答占模型错误 {na}/{model_n}（复读问题/提前停止）",
+            f"无数值回答占模型错误 {na}/{model_n}（复读问题/提前停止）"
+            f"{_share_ci_text(na)}",
             "先排除解码/格式问题再改模型，否则真实能力会被低估",
             "检查 prompt 模板与 max_new_tokens/停止条件；贪心解码复测确认"
             "输出格式"))
@@ -313,7 +338,9 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     ):
         c = _count_int(counts.get(cat)) or 0
         if _share(c, model_n) >= DOMINANT_SHARE:
-            recs.append(_advice(ax, hi, f"{trig}（{c}/{model_n}）", sugg, nxt))
+            recs.append(_advice(ax, hi,
+                                f"{trig}（{c}/{model_n}）{_share_ci_text(c)}",
+                                sugg, nxt))
     return recs[:MAX_ADVICE]
 
 
