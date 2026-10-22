@@ -1683,11 +1683,16 @@ def test_summary_tolerates_huge_int_train_stats():
                     "val_loss": 2.3, "gate_mean": 0.5, "n_params": 100,
                     "n_gate_extra": 0, "train_step_time_ms": 1e308,
                     "train_peak_mem_mb": 1e308, "split": "val"})
+        _write_json(os.path.join(tmp2, "latency.json"), {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": 1.0}},
+                         "decode_ms_per_tok": {"256": 1.0}},
+            "lega": {"prefill_ms": {"256": {"1": 2.0}},
+                     "decode_ms_per_tok": {"256": 2.0}}}})
         out2 = build_summary(tmp2)
-        for r in out2["rows"]:
-            assert r["eff_train_step_ms"] == 1e308, r
-            assert r["eff_train_peak_mem_mb"] == 1e308, r
-            assert math.isfinite(r["eff_train_step_ms"]), r
+        row2 = next(r for r in out2["rows"] if r["variant"] == "lega")
+        assert row2["eff_train_step_ms"] == 1e308, row2
+        assert row2["eff_train_peak_mem_mb"] == 1e308, row2
+        assert math.isfinite(row2["eff_train_step_ms"]), row2
     finally:
         shutil.rmtree(tmp2, ignore_errors=True)
     print("  [ok] 训练 ms/step 与峰值内存的超大整数/上限值安全降级")
