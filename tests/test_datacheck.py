@@ -1787,3 +1787,39 @@ def test_summarize_test_access_tolerates_non_iterable_ledger():
     assert out["evaluations"] == 2
     assert out["distinct_checkpoints"] == 2
     assert out["first_time"] == "t1" and out["last_time"] == "t2"
+
+
+def test_prepare_data_rows_api_uses_validated_integer_budget(monkeypatch):
+    """rows 兜底路径必须用已严格解析的整数预算，而非 argparse 原始字符串。"""
+    import sys
+    import lega.data as data_mod
+    import scripts.prepare_data as prep
+
+    seen = {}
+
+    def fake_rows(max_rows, retries=4):
+        seen["max_rows"] = max_rows
+        return {
+            "train": ["train line " + "a" * 80],
+            "val": ["val line " + "b" * 80],
+            "test": ["test line " + "c" * 80],
+        }
+
+    def fake_prepare_bins(data_dir, **kwargs):
+        seen["prepare_dir"] = data_dir
+        return {}
+
+    monkeypatch.setattr(prep, "from_rows_api", fake_rows)
+    monkeypatch.setattr(data_mod, "prepare_bins", fake_prepare_bins)
+    with tempfile.TemporaryDirectory() as d:
+        out_dir = os.path.join(d, "out")
+        monkeypatch.setattr(sys, "argv", [
+            "prepare_data", "--out_dir", out_dir, "--source", "rows",
+            "--max_tokens", "600"])
+        prep.main()
+        # 600 // 30 = 20，受下限 500 约束；关键是不能对字符串做 //。
+        assert seen["max_rows"] == 500, seen
+        assert seen["prepare_dir"] == out_dir, seen
+        for name in ("train.txt", "val.txt", "test.txt"):
+            assert os.path.exists(os.path.join(out_dir, name)), name
+    print("  [ok] prepare_data：rows 兜底路径使用校验后的整数预算")

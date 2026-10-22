@@ -322,12 +322,15 @@ def main():
                 if args.source == "zip":
                     raise
         if char_counts is None and args.source in ("auto", "rows"):
-            if args.max_tokens == 0:
+            # 必须使用已严格校验的整数预算，而不是 argparse 原始值：
+            # 命令行传入 --max_tokens 20 时 args.max_tokens 仍是字符串，
+            # 既不会等于 0，也不能参与 // 运算，rows 兜底路径会直接 TypeError。
+            if max_tokens["train"] == 0:
                 print("[data] rows API 太慢，需要 --max_tokens 限制；跳过")
             else:
                 # token 数 -> 行数估算（平均 ~30 token/行），并设上下限：
                 # 下限 500 保证能抓到东西，上限 20000 防止兜底路径发起海量请求
-                est_rows = min(max(args.max_tokens // 30, 500), 20000)
+                est_rows = min(max(max_tokens["train"] // 30, 500), 20000)
                 lines = from_rows_api(max_rows=est_rows)
                 source_used = "rows_api"
                 char_counts = {
