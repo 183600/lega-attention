@@ -367,10 +367,55 @@ def mark_repro_failed(results_dir: str, *, error: str, stage: str,
     return True
 
 
+def _snapshot_existing_runs(ledger_common: dict) -> list:
+    """失败轮次落盘已完成/进行中 run 的实际证据（不伪造未产生的产物）。
+
+    失败发生在训练链或后处理阶段时，已跑完的 run 目录里已有 manifest/
+    config/train_log/eval（甚至 checkpoint）。只写一条 aborted 会让这些
+    逐 run 种子审计与指标从台账历史中消失。这里按本轮 out_root 扫描
+    run_manifest.json，且只接受本轮开始之后写入的清单，避免把上一轮
+    残留目录当成本轮证据；单个 run 快照失败不影响其余 run。
+    """
+    out_root = ledger_common.get("out_root")
+    variants = ledger_common.get("variants") or []
+    seeds = ledger_common.get("seeds") or []
+    if not out_root or not variants or not seeds:
+        return []
+    try:
+        n_seeds = len(seeds)
+        start = time.mktime(time.strptime(
+            str(ledger_common.get("time_start")), "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError, OverflowError):
+        n_seeds, start = len(seeds), None
+    runs = []
+    for v in variants:
+        for seed in seeds:
+            vdir = _variant_dir(out_root, v, seed, n_seeds)
+            manifest = os.path.join(vdir, "run_manifest.json")
+            if not os.path.isfile(manifest):
+                continue
+            if start is not None:
+                try:
+                    if os.path.getmtime(manifest) < start - 2.0:
+                        continue
+                except OSError:
+                    continue
+            try:
+                runs.append(snapshot_train_run(str(v), int(seed), vdir))
+            except Exception as e:  # noqa: BLE001 - 失败路径不阻塞主异常
+                print(f"[repro] ⚠ run 快照失败 {v}/seed{seed}: {e}")
+    return runs
+
+
 def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
                           stage: str, variant: str = None,
-                          returncode: int = None, sanity: dict = None) -> None:
-    """失败轮次的终态记录：附失败阶段/原因/退出码，失败实验也完整留痕。"""
+                          returncode: int = None, sanity: dict = None,
+                          runs: list = None) -> None:
+    """失败轮次的终态记录：附失败阶段/原因/退出码，失败实验也完整留痕。
+
+    runs（可选）为失败前已产生的逐 run 证据快照，写入 aborted 记录；
+    不传时保持旧行为（只有失败原因，不伪造 run 覆盖）。
+    """
     extra = {"error": error, "stage": stage}
     if variant is not None:
         extra["variant"] = variant
@@ -378,7 +423,7 @@ def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
         extra["returncode"] = int(returncode)
     append_record(ledger, build_experiment_record(
         status="aborted", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
-        sanity=sanity, extra=extra, **ledger_common))
+        sanity=sanity, runs=runs, extra=extra, **ledger_common))
     # 台账 aborted 与全局 repro 的失败终态必须一起落盘；后者写失败不能
     # 影响前者的完整性，也不能掩盖调用方即将抛出的原始异常。
     try:
@@ -397,10 +442,12 @@ def abort_ledger_on_failure(ledger: str, ledger_common: dict, stage):
     except BaseException as e:
         stage_name = stage() if callable(stage) else stage
         try:
+            runs = _snapshot_existing_runs(ledger_common)
             append_aborted_record(
                 ledger, ledger_common, error="postrun_stage_failed",
                 stage=str(stage_name),
-                returncode=getattr(e, "returncode", None))
+                returncode=getattr(e, "returncode", None),
+                runs=runs or None)
         except Exception as ledger_err:
             print(f"[repro] ⚠ aborted 台账写入失败（{ledger_err}）；"
                   f"原异常仍将抛出")
@@ -7069,7 +7116,8 @@ def main():
             append_aborted_record(
                 ledger, ledger_common, error="run_chain_failed",
                 stage="train/eval/ruler/analysis", variant=v0,
-                returncode=e.returncode)
+                returncode=e.returncode,
+                runs=_snapshot_existing_runs(ledger_common) or None)
             print(f"[repro] 实验台账已记录 aborted（run_id={run_id}，"
                   f"run 链失败）-> {ledger}")
             raise SystemExit(
@@ -7085,7 +7133,8 @@ def main():
             append_aborted_record(
                 ledger, ledger_common, error="run_chain_failed",
                 stage="train/eval/ruler/analysis",
-                returncode=getattr(e, "returncode", None))
+                returncode=getattr(e, "returncode", None),
+                runs=_snapshot_existing_runs(ledger_common) or None)
             raise
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；

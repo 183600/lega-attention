@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from unittest import mock
 
 from lega.data import CACHE_SCHEMA
@@ -45,6 +46,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       parse_variants, registration_scope_check,
                       abort_ledger_on_failure, record_aborted_sanity,
                       mark_repro_failed, check_sanity_results,
+                      _snapshot_existing_runs,
                       resolve_ngram_split, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
@@ -3909,6 +3911,60 @@ def test_aborted_record_marks_repro_failed_without_losing_start_facts():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] repro.json 失败终态：保留启动事实 + 缺失/畸形容错")
+
+
+def test_snapshot_existing_runs_preserves_failed_round_evidence():
+    """失败轮次不能只剩 aborted：已产生的 run 证据要进台账快照。"""
+    from lega.experiment import read_records
+    from run_all import append_aborted_record
+    tmp = tempfile.mkdtemp()
+    try:
+        out_root = os.path.join(tmp, "out")
+        vdir = os.path.join(out_root, "lega")
+        os.makedirs(vdir)
+        with open(os.path.join(vdir, "run_manifest.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"tag": "t", "variant": "lega", "seed": 7,
+                       "seed_report": {"seed": 7, "seed_verified": True},
+                       "git": {"commit": "a" * 40}, "data": {"digest": "d" * 16}}, f)
+        with open(os.path.join(vdir, "config_used.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"lr": 1e-3}, f)
+        with open(os.path.join(vdir, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"variant": "lega", "seed": 7, "val_ppl": 12.0}, f)
+        with open(os.path.join(vdir, "train_log.jsonl"), "w",
+                  encoding="utf-8") as f:
+            f.write(json.dumps({"step": 1, "loss": 3.0}) + "\n")
+        start = time.time()
+        common = dict(
+            run_id="rid_partial", tag="t", config_path="configs/tiny.json",
+            config_sha256="a" * 64, config={"lr": 1e-3},
+            out_root=out_root, variants=["lega"], seeds=[7],
+            smoke=False, argv=["run_all.py"], git={},
+            data_fingerprint="fp", runtime={},
+            results_dir=os.path.join(tmp, "results"),
+            time_start=time.strftime("%Y-%m-%d %H:%M:%S",
+                                     time.localtime(start)))
+        runs = _snapshot_existing_runs(common)
+        assert len(runs) == 1, runs
+        assert runs[0]["variant"] == "lega" and runs[0]["seed"] == 7
+        assert runs[0]["provenance"]["seed_report"]["seed"] == 7
+        assert runs[0]["result"]["val_ppl"] == 12.0
+        assert "run_manifest.json" in runs[0]["files"]
+        assert "model.pt" not in runs[0]["files"]   # 未产生就不伪造
+        ledger = os.path.join(tmp, "experiments.jsonl")
+        append_aborted_record(ledger, common, error="run_chain_failed",
+                              stage="eval", variant="lega", returncode=1,
+                              runs=runs)
+        rec = read_records(ledger)[0]
+        assert rec["status"] == "aborted" and rec["runs"] == runs
+        # 上一轮残留（manifest mtime 早于本轮开始）不得当成本轮证据
+        old = start - 3600
+        os.utime(os.path.join(vdir, "run_manifest.json"), (old, old))
+        assert _snapshot_existing_runs(common) == []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 失败轮次快照已产生的 run 证据；旧目录不冒充本轮")
 
 
 def test_check_sanity_results_reads_back_verdict_not_exit_code():
