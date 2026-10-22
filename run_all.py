@@ -1542,6 +1542,8 @@ def _eval_window_losses(d):
 
     只接受逐窗口损失与窗口序号一一对应且序号唯一的记录。旧产物没有这些
     字段时返回 None，下游跳过窗口级分析，不影响既有 PPL 配对检验。
+    交叉熵损失不可能为负：负值来自坏记录/错误归一化，若参与逐窗口配对会
+    污染 avg NLL 差、bootstrap 区间与 PPL 比，必须整表按不可用处理。
     """
     if not isinstance(d, dict):
         return None
@@ -1554,7 +1556,7 @@ def _eval_window_losses(d):
     for loss, idx in zip(losses, indices):
         v = _num_or_none(loss)
         i = _integral_value(idx)
-        if v is None or i is None or i in out:
+        if v is None or v < 0.0 or i is None or i in out:
             return None
         out[i] = v
     return out

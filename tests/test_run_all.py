@@ -4332,6 +4332,9 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     }
     assert _eval_window_losses(runs["lega"][7]["eval"]) == \
         {i: 1.0 for i in idx}
+    # 交叉熵不可能为负：坏记录整表按不可用处理，不能污染 avg NLL 差。
+    assert _eval_window_losses({"window_losses": [1.0, -0.5],
+                                "window_indices": [0, 1]}) is None
     out = _ppl_window_paired_tests(runs, [("lega", "standard")],
                                    n_resamples=200)
     assert len(out) == 1, out
