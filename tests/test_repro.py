@@ -17,7 +17,7 @@ from lega.repro import (build_run_manifest, data_fingerprint, git_info,
                         test_data_fingerprint as _test_data_fingerprint,
                         worktree_state, write_worktree_patch)
 from lega.utils import (data_rng, data_rng_state_fingerprint, set_seed,
-                        seed_report)
+                        seed_report, state_dict_fingerprint)
 
 
 def test_set_seed_covers_python_numpy_torch():
@@ -103,6 +103,35 @@ def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
     # 环境里的 PYTHONHASHSEED 不可解析为整数时如实标 None，不截断比较
     assert seed_report(1337)["pythonhashseed_at_start"] in (None, "1337")
     print("  [ok] set_seed/seed_report 拒绝 bool/小数/非整数字符串种子")
+
+
+def test_state_dict_fingerprint_tracks_init_seed_and_layout():
+    """初始化指纹必须随真实权重变化，且不受 state_dict 键顺序影响。"""
+    from collections import OrderedDict
+    set_seed(7)
+    m1 = torch.nn.Linear(4, 3)
+    fp1 = state_dict_fingerprint(m1.state_dict())
+    assert len(fp1["sha256"]) == 64 and fp1["tensors"] == 2
+    assert fp1["elements"] == 15
+    set_seed(7)
+    m2 = torch.nn.Linear(4, 3)
+    assert state_dict_fingerprint(m2.state_dict()) == fp1
+    set_seed(8)
+    m3 = torch.nn.Linear(4, 3)
+    assert state_dict_fingerprint(m3.state_dict())["sha256"] != fp1["sha256"]
+    # 键顺序不是初始化身份的一部分；按名称排序后必须稳定
+    rev = OrderedDict(reversed(list(m1.state_dict().items())))
+    assert state_dict_fingerprint(rev) == fp1
+    # 形状/字节变化必须反映在摘要里
+    m4 = torch.nn.Linear(4, 2)
+    assert state_dict_fingerprint(m4.state_dict())["sha256"] != fp1["sha256"]
+    try:
+        state_dict_fingerprint({"x": 1})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("非张量 state_dict 值未被拒绝")
+    print("  [ok] 初始化 state_dict 指纹随 seed/形状变化且与键顺序无关")
 
 
 def test_sha256_file_deterministic_and_sensitive():

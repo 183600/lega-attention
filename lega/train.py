@@ -28,7 +28,8 @@ from .preflight import (allow_protocol_violations,  # noqa: E402
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     sha256_file, write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, config_bool, data_rng,
-                    enable_tf32, now_str, save_json, set_seed, strict_int,
+                    enable_tf32, now_str, save_json, set_seed,
+                    state_dict_fingerprint, strict_int,
                     t_critical_95)
 
 
@@ -1088,7 +1089,12 @@ def main():
         use_sdpa_standard=config_bool(
             cfg.get("use_sdpa_standard", True), "use_sdpa_standard"),
     )
-    model = GPT(**model_cfg).to(device)
+    model = GPT(**model_cfg)
+    init_fp = state_dict_fingerprint(model.state_dict())
+    manifest["init_state_fingerprint"] = init_fp
+    save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
+    provenance["init_state_fingerprint"] = init_fp
+    model = model.to(device)
     if config_bool(cfg.get("compile", False), "compile") and device.startswith("cuda"):
         try:
             model = torch.compile(model)

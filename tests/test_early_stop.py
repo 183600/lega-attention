@@ -275,6 +275,10 @@ def test_train_early_stop_end_to_end():
         assert ckpt["config_used_sha256"] == cfg_sha
         assert ckpt["resolved_config"] == cfg_used
         assert ckpt["resolved_config"]["early_stop_patience"] == 1
+        init_fp = manifest["init_state_fingerprint"]
+        assert len(init_fp["sha256"]) == 64 and init_fp["tensors"] > 0
+        assert ckpt["init_state_fingerprint"] == init_fp
+        assert ev["init_state_fingerprint"] == init_fp
         assert os.path.exists(os.path.join(out_dir, "model_best.pt"))
         recs = load_train_log(os.path.join(out_dir, "train_log.jsonl"))
         assert any(r.get("early_stop") for r in recs), "train_log 必须留下早停标记"

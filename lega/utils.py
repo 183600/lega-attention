@@ -126,6 +126,38 @@ def rng_state_fingerprint() -> dict:
     return fp
 
 
+def state_dict_fingerprint(state_dict) -> dict:
+    """对参数/缓冲区名称、dtype、形状与原始字节做稳定 SHA-256。
+
+    与只记录 seed 不同，指纹来自初始化后的真实张量：同 seed/同版本应得到
+    同一指纹，初始化顺序、默认 dtype 或模型结构变化会改变指纹。名称排序，
+    不依赖 state_dict 的插入顺序；非浮点/低精度张量统一转成可哈希字节。
+    """
+    h = hashlib.sha256()
+    n_tensors = 0
+    n_elements = 0
+    for name in sorted(state_dict):
+        tensor = state_dict[name]
+        if not torch.is_tensor(tensor):
+            raise ValueError(f"state_dict[{name!r}] 不是张量")
+        t = tensor.detach().cpu().contiguous()
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(t.dtype).encode("ascii"))
+        h.update(b"\0")
+        h.update(str(tuple(t.shape)).encode("ascii"))
+        h.update(b"\0")
+        try:
+            raw = t.numpy().tobytes()
+        except TypeError:
+            raw = t.to(torch.float64).numpy().tobytes()
+        h.update(raw)
+        n_tensors += 1
+        n_elements += int(t.numel())
+    return {"sha256": h.hexdigest(), "tensors": n_tensors,
+            "elements": n_elements}
+
+
 def strict_int(value, name: str = "值") -> int:
     """严格整数化：只接受整数（含整数值浮点与整数字符串），否则 ValueError。
 

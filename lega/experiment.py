@@ -502,6 +502,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "data_fingerprint": mdata.get("digest"),
             "seed_report": manifest.get("seed_report"),
             "precision": manifest.get("precision"),
+            "init_state_fingerprint": manifest.get("init_state_fingerprint"),
             "runtime": manifest.get("runtime"),
             "sanity": manifest.get("sanity"),
         }
