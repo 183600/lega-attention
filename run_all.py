@@ -78,7 +78,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
-                            RUNNABLE_VARIANTS, VARIANTS, VARIANT_CN)
+                            RUNNABLE_VARIANTS, VARIANTS, VARIANT_CN,
+                            _USE_CONC)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER)
@@ -904,9 +905,10 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     def _attention_backend(variant: str, sdpa_on: bool) -> str:
         # 含集中度项的门控必须读取 softmax 概率，无法走 SDPA；其它变体在
         # sdpa_on 时走 SDPA。若配置开启 SDPA，两类变体的注意力实现就不同，
-        # PPL 差异不能全部归因于门控。
-        needs_probs = variant in ("lega", "lega_no_len",
-                                  "lega_no_query", "lega_conc_only")
+        # PPL 差异不能全部归因于门控。集中度变体集合直接从 attention 的
+        # _USE_CONC 派生，避免新增变体（如 lega_placebo）漏进审计时被误判
+        # 成 SDPA 路径：lega_placebo 同样 use_conc=True，实际走显式路径。
+        needs_probs = variant in _USE_CONC
         return "explicit" if needs_probs or not sdpa_on else "sdpa"
     devices = {}
     device_missing = []
@@ -3546,6 +3548,13 @@ def _inference_shapley_tests(ablations):
     out = []
     ablations = ablations if isinstance(ablations, dict) else {}
     for variant in sorted(ablations):
+        # 推理期 2^3 的八个格子只有在 Full 模型上才同时具备 A/B/C 三个
+        # 真实因子；qgate/gate_only 等变体本来就缺项，对它们做同样的病灶
+        # 清零会得到大量 no-op 格，Shapley 值退化为“只有存在的因子”，
+        # 与训练期全因子 Shapley（由 lega 的 8 格定义）不可比。汇总页的
+        # 推理期表也没有变体列，混入多个变体会出现无法区分的重复因子行。
+        if variant != "lega":
+            continue
         seed_map = ablations.get(variant)
         if not isinstance(seed_map, dict):
             continue

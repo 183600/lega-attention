@@ -946,6 +946,33 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
                     "standard": "explicit", "lega": "explicit"}
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+    # lega_placebo 也注册了集中度项（a·c 的槽位保留、证据为噪声），实际
+    # 走显式注意力；审计必须把它当成 explicit，否则会漏报 standard(SDPA)
+    # 与 placebo(显式) 的实现路径混用。
+    tmp = tempfile.mkdtemp()
+    try:
+        variants, seeds = ["standard", "lega_placebo"], [7]
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "warmup": 2,
+                "use_sdpa_standard": True,
+                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024})
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("lega_placebo 与 standard 的注意力路径不同，"
+                                 "审计必须拒绝")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
 
 

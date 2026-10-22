@@ -544,3 +544,19 @@ def test_inference_shapley_recovers_additive_components_across_seeds():
                    for t in causal), causal
     print("  [ok] 推理期 Shapley：可加价值下精确还原 φ，缺格/错窗跳过；"
           "单因子格不混入单病灶因果表")
+
+
+def test_inference_shapley_only_uses_full_lega_checkpoint():
+    """推理期 2^3 只在 Full 模型上定义；qgate/placebo 的缺项格不能混入。
+
+    训练期 Shapley 由 lega 的 8 个全因子格定义；qgate 只有 A、placebo 的
+    B/C 是噪声，对它们施加同一套病灶会产生大量 no-op 格，且汇总页没有
+    变体列，混入后会渲染成无法区分的重复因子行。
+    """
+    payload = _inference_payload(1)
+    full = _inference_shapley_tests({"lega": {1: payload}})
+    assert len(full) == 3, full
+    assert _inference_shapley_tests({"qgate": {1: payload}}) == []
+    assert _inference_shapley_tests({"lega_placebo": {1: payload}}) == []
+    print("  [ok] 推理期 Shapley 只使用 Full(=lega) checkpoint，"
+          "缺项变体不产生重复因子行")
