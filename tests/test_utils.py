@@ -432,7 +432,11 @@ def test_t_critical_95_matches_known_table():
     assert abs(t_critical_95(9) - 2.26216) < 1e-3
     assert abs(t_critical_95(19) - 2.09302) < 1e-3
     assert abs(t_critical_95(30) - 2.04227) < 1e-3
-    assert abs(t_critical_95(300) - 1.95996) < 1e-4
+    assert abs(t_critical_95(300) - 1.96790) < 1e-4
+    # df>200 不能退化为正态近似：df=201/500/1000 的 t 仍明显大于 1.96。
+    assert abs(t_critical_95(201) - 1.97184) < 5e-5
+    assert abs(t_critical_95(500) - 1.96472) < 5e-5
+    assert abs(t_critical_95(1000) - 1.96234) < 5e-5
     # 非法自由度安全返回 None，不抛异常
     assert t_critical_95(0) is None and t_critical_95(None) is None
     assert t_critical_95(float("inf")) is None

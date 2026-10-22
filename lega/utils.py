@@ -717,8 +717,8 @@ def t_critical_95(df: float) -> float:
         return None
     if not math.isfinite(df) or df <= 0:
         return None
-    if df > 200:
-        return 1.959963984540054
+    # 不要用 df>200 就退化为正态近似：df=201 的 t 临界值仍有 1.972，
+    # 与 1.960 的差异会系统性收窄验证区间。现有二分代价很低，直接求根。
     lo, hi = 0.0, 1e3
     for _ in range(80):
         mid = 0.5 * (lo + hi)
