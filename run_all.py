@@ -387,7 +387,14 @@ def _protocol_value(v):
     """把评测协议字段规范化后比较（"10" 与 10、[256,512] 与元组视为相同）。"""
     if isinstance(v, (bool, np.bool_)):
         return ("bool", bool(v))
-    if isinstance(v, (int, float, str)):
+    if isinstance(v, (int, np.integer)):
+        return ("num", int(v))
+    if isinstance(v, str):
+        try:
+            return ("num", int(v))
+        except ValueError:
+            pass
+    if isinstance(v, (float, np.floating)) or isinstance(v, str):
         try:
             f = float(v)
         except (TypeError, ValueError, OverflowError):
@@ -406,6 +413,13 @@ def _integral_value(value):
     """把外部 JSON 数值规范为整数；bool/非有限/小数返回 None。"""
     if isinstance(value, (bool, np.bool_)):
         return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            pass
     try:
         f = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -657,7 +671,12 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             return a == b
         if not (math.isfinite(fa) and math.isfinite(fb)):
             return False
-        return fa.is_integer() and fb.is_integer() and fa == fb
+        if not (fa.is_integer() and fb.is_integer()):
+            return False
+        ia, ib = _integral_value(a), _integral_value(b)
+        if ia is not None and ib is not None:
+            return ia == ib
+        return fa == fb
 
     stable_actual = [(name, steps_run, tokens_run, planned)
                      for name, steps_run, tokens_run, early, planned in actual_meta

@@ -2994,6 +2994,19 @@ def test_int_or_zero_rejects_bool_and_fractional_counts():
     print("  [ok] 计数/百分比/小数展示拒绝 bool 伪装数值")
 
 
+def test_large_integer_identity_does_not_round_through_float():
+    """>2**53 的整数/种子必须逐位比较，不能被 float 往返折叠成同一个值。"""
+    from run_all import _integral_value, _same_protocol_value, _same_seed
+    a, b = 2**53 + 1, 2**53
+    assert _integral_value(a) == a
+    assert not _same_seed(a, b)
+    assert _same_seed(a, a) and _same_seed(str(a), a)
+    assert _same_protocol_value(a, str(a))
+    assert not _same_protocol_value(a, b)
+    assert not _same_protocol_value(True, 1)
+    print("  [ok] 大整数身份不经 float 丢精度")
+
+
 def test_summary_rejects_bool_as_numeric_observation():
     """外部 JSON 的 true/false 不能被当成 1.0/0.0 进入均值或配对检验。"""
     assert _num_or_none(True) is None and _num_or_none(False) is None

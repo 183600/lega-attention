@@ -1292,12 +1292,23 @@ def main():
                 (payload.get("seed"), fp, payload["badcases"]))
 
     def _seed_key(item):
-        seed = _finite_float(item[0])
+        raw = item[0]
+        if isinstance(raw, (bool, np.bool_)):
+            seed = None
+        elif isinstance(raw, (int, np.integer)):
+            seed = int(raw)
+        elif isinstance(raw, str):
+            try:
+                seed = int(raw)
+            except ValueError:
+                seed = _finite_float(raw)
+        else:
+            seed = _finite_float(raw)
         # 种子身份必须是整数：1.9 与 1.1 截断成同一个 1 会让跨变体
         # 对照静默选错 run；非整数/非有限/缺失一律排到最后。
         if seed is None or seed != math.floor(seed):
             return (1, 0, item[1])
-        return (0, int(seed), item[1])
+        return (0, seed, item[1])
 
     # 每个变体取“最小种子”（与 run_all.cross_variant_badcase_map 同策略）：
     # paths 是文件名字典序（seed1000 排在 seed999 之前），取首个会选错种子。
