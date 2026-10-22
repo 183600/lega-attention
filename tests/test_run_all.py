@@ -3289,6 +3289,11 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
         "512": {"n": 3, "em": "bad"}}}}) == 3
     assert _ruler_min_cell_n({"results": {"niah": {
         "256": {"n": 2.5}, "512": {"n": 3}}}}) == 3
+    # 负数/0 是损坏计数，不是“最小样本数”；忽略后才不会把报告写成 n=-3。
+    assert _ruler_min_cell_n({"results": {"niah": {
+        "256": {"n": -3}, "512": {"n": 4}, "1024": {"n": 0}}}}) == 4
+    assert _ruler_min_cell_n({"results": {"niah": {
+        "256": {"n": -3}}}}) is None
     assert _ruler_min_cell_n({"results": {"niah": {
         "256": {"n": True}, "512": {"n": "4"}}}}) == 4
     bad_n = {"results": {"niah": {

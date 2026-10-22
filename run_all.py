@@ -1807,7 +1807,10 @@ def _ruler_min_cell_n(d):
             if not isinstance(cell, dict) or cell.get("n") is None:
                 continue
             n = _integral_value(cell["n"])
-            if n is not None:
+            # n 是评测样本数：负数/0 不是“小样本”，而是损坏计数；若参与
+            # min 会让汇总把坏产物报成“最差格 n=-5”。与 _ruler_avg_micro /
+            # _ruler_depth_means 同口径，只接受正计数。
+            if n is not None and n > 0:
                 ns.append(n)
     return min(ns) if ns else None
 
