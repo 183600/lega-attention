@@ -925,3 +925,17 @@ def test_stats_stable_at_float_limits():
     # 不可表示的 MDE 返回 None，而不是 inf。
     assert min_detectable_effect(1e308, 2) is None
     print("  [ok] 极大有限观测：均值/方差/中位数/置换/bootstrap 不溢出")
+
+
+def test_auroc_and_ap_parse_non_numeric_scores_strictly():
+    """AUROC/AP 的分数也走严格解析：下划线数字串/bool 不能伪装成数值。"""
+    import math
+    # "1_0" 只让一个分数有效：另一类别缺分数 -> AUROC/AP 不可计算，而不是
+    # 把 1_0 当成 10.0 后制造“完美排序”。
+    assert math.isnan(auroc(["1_0", "0.5"], [1, 0]))
+    assert math.isnan(average_precision(["1_0", "0.5"], [1, 0]))
+    assert math.isnan(auroc([True, False], [1, 0]))
+    # 普通数值字符串仍是合法观测；标签字符串也按数值解析。
+    assert auroc(["0.1", "0.9"], ["0", "1"]) == 1.0
+    assert average_precision(["0.1", "0.9"], ["0", "1"]) == 1.0
+    print("  [ok] AUROC/AP 严格解析非数值分数，拒绝下划线串/bool")

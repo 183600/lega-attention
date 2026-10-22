@@ -1143,10 +1143,24 @@ def holm_bonferroni(pvals) -> list:
 
 
 def _score_label_arrays(scores, labels, label_dtype=None):
-    """分数/标签按位置对齐；长度不一致显式拒绝，避免静默截断或错位。"""
-    scores = np.asarray(scores, dtype=np.float64)
-    labels = (np.asarray(labels, dtype=label_dtype)
-              if label_dtype is not None else np.asarray(labels))
+    """分数/标签按位置对齐；长度不一致显式拒绝，避免静默截断或错位。
+
+    非数值 dtype（字符串/对象/bool）走与 ``_obs_array`` 相同的严格解析：
+    ``float("1_0") == 10.0`` 会让坏分数冒充远高于其他样本的观测，而
+    ``True`` 也不能凭 ``float(True)==1.0`` 变成合法分数/标签。纯数字
+    ndarray 仍走 astype 快路，保持原有性能与逐位结果。
+    """
+    scores_arr = np.asarray(scores)
+    if scores_arr.dtype.kind in "iuf":
+        scores = scores_arr.astype(np.float64, copy=False)
+    else:
+        scores = _obs_array(scores)
+    labels_arr = np.asarray(labels)
+    if labels_arr.dtype.kind in "iuf":
+        labels = (labels_arr.astype(label_dtype)
+                  if label_dtype is not None else labels_arr)
+    else:
+        labels = _obs_array(labels)
     if scores.size != labels.size:
         raise ValueError(
             f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
