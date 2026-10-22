@@ -70,6 +70,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from lega.attention import GATE_FACTORS, VARIANTS, VARIANT_CN  # noqa: E402
+from lega.ablate import (LESION_BY_ID as ABLATION_LESION_BY_ID,  # noqa: E402
+                         LESION_ORDER as ABLATION_LESION_ORDER)
+from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
+                            decomposition as factorial_decomposition,
+                            oriented_value as factorial_oriented_value)
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,
@@ -2822,6 +2827,236 @@ def _factorial_interaction_tests(runs) -> list:
     return out
 
 
+# 全因子 Shapley 分解（探索性）：与交互检验同源，但用全部 8 格把 Full−none
+# 的总效应按所有加入顺序平均分摊到 A/B/C，避免单因素边对参照格的依赖。
+SHAPLEY_PPL_METRIC = "Shapley(PPL)"
+SHAPLEY_RULER_METRIC = "Shapley(RULER平均)"
+SHAPLEY_FACTOR_LABEL = {"A": "A 查询项", "B": "B 集中度证据",
+                        "C": "C 长度校准"}
+
+
+def _factorial_shapley_tests(runs) -> list:
+    """全因子 2^3 的 Shapley 效应分解 + 跨种子检验（探索性）。
+
+    价值函数：PPL 用 v=−log(PPL)（比值尺度上可加，exp(−φ) 即 PPL 几何
+    均值比）；RULER 用原始平均 EM（越大越好）。逐种子计算精确 Shapley
+    值（3 个因子、8 个格），再对每个因子的 φ 做单样本配对 t 检验
+    （H0：φ=0）。同一指标的三因子共用同一 Holm 家族；8 格必须全部运行、
+    种子数≥MIN_SEEDS、协议一致，否则如实跳过/标注。
+
+    这不是预注册的确认性检验：Shapley 值依赖价值函数尺度，且把交互
+    效应平均分摊后不再对应某个“单因素边”。它回答的是“在完整设计上，
+    该因子平均贡献多少”，与去一法/全因子增量并列，不能替代它们。
+    """
+    out = []
+    runs = runs if isinstance(runs, dict) else {}
+    for metric, extractor, metric_name in (
+            ("PPL", lambda slot: _ppl_of(slot.get("eval")),
+             SHAPLEY_PPL_METRIC),
+            ("RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
+             SHAPLEY_RULER_METRIC)):
+        maps = {cell: _variant_seed_map(runs, v)
+                for cell, v in _FACTORIAL_CONTRAST_CELLS.items()}
+        if any(not m for m in maps.values()):
+            continue
+        all_seeds = _sorted_seeds(maps["none"])
+        seeds = [s for s in all_seeds
+                 if _factorial_protocol_ok(maps, s, metric)]
+        excluded = len(all_seeds) - len(seeds)
+        per_seed = {}
+        for s in seeds:
+            raw = {}
+            ok = True
+            for cell in FACTORIAL_CELL_ORDER:
+                slot = maps.get(cell, {}).get(s)
+                v = extractor(slot) if isinstance(slot, dict) else None
+                if v is None:
+                    ok = False
+                    break
+                # PPL=0 是历史夹具的兼容边界值，但 log 分解没有定义；
+                # 该种子整条剔除，不用 0/极小值伪造 −log 值。
+                if metric == "PPL" and (_finite_number(v) is None
+                                       or float(v) <= 0):
+                    ok = False
+                    break
+                raw[cell] = v
+            if not ok:
+                continue
+            try:
+                oriented = {c: factorial_oriented_value(metric, raw[c])
+                            for c in FACTORIAL_CELL_ORDER}
+                dec = factorial_decomposition(oriented)
+            except (TypeError, ValueError):
+                continue
+            per_seed[s] = dec
+        if not per_seed:
+            continue
+        ordered = _sorted_seeds(per_seed)
+        totals = [per_seed[s]["total_effect"] for s in ordered]
+        total_mean = (float(np.mean(totals)) if totals else None)
+        # 占比只在每个种子的总效应都为正时可解释；否则不强行归一化。
+        share_ok = bool(totals) and all(float(v) > 1e-12 for v in totals)
+        for factor in ("A", "B", "C"):
+            vals = [per_seed[s]["phi"].get(factor) for s in ordered]
+            vals = [v for v in vals if _finite_number(v) is not None]
+            if not vals:
+                continue
+            res = paired_t_test(vals, [0.0] * len(vals))
+            res.update({
+                "candidate": f"{factor} 的 Shapley 贡献",
+                "reference": "0（无贡献）",
+                "metric": metric_name,
+                "lower_is_better": False,
+                "shapley_factor": factor,
+                "shapley_factor_label": SHAPLEY_FACTOR_LABEL[factor],
+                "shapley_metric": metric,
+                "shapley_total_effect_mean": total_mean,
+                "shapley_total_effect_std": (
+                    float(np.std(totals, ddof=1)) if len(totals) >= 2 else None),
+                "shapley_share": (
+                    float(np.mean([per_seed[s]["phi"][factor]
+                                   / per_seed[s]["total_effect"]
+                                   for s in ordered])) if share_ok else None),
+                "shapley_efficiency_gap_max": (
+                    max(abs(per_seed[s]["efficiency_gap"])
+                        for s in ordered) if ordered else None),
+                "excluded_protocol_mismatches": excluded,
+                "n_protocol_seeds": len(ordered),
+                "exploratory": True,
+            })
+            if metric == "PPL":
+                mean_phi = _finite_number(res.get("mean_diff"))
+                res["shapley_ppl_ratio"] = (
+                    math.exp(max(-20.0, min(20.0, -float(mean_phi))))
+                    if mean_phi is not None else None)
+                res["shapley_ppl_ratio_note"] = (
+                    "exp(−φ)：<1 表示该因子平均降低 PPL；φ 为 −log PPL "
+                    "单位的 Shapley 值")
+            out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
+    return _apply_holm(out)
+
+
+# 因果病灶消融（推理期权重干预）的跨种子指标名与判定口径。
+CAUSAL_ABLATION_METRIC = "因果消融ΔNLL(lesion−normal)"
+
+
+def _ablation_lesion_records(ablations):
+    """{变体: {种子: payload}} -> 逐 (变体, 病灶) 的跨种子观测。
+
+    只消费 payload 中 applied=True 的病灶；不适用/失败/窗口协议不一致的
+    记录跳过，并在结果里保留计数。每个种子先聚合成一个 ΔNLL（病灶−正常），
+    再对种子做配对检验——窗口级 p 只描述单 run，不进入这里的推断。
+    """
+    out = []
+    ablations = ablations if isinstance(ablations, dict) else {}
+    for variant in sorted(ablations):
+        seed_map = ablations.get(variant)
+        if not isinstance(seed_map, dict):
+            continue
+        for lesion_id in ABLATION_LESION_ORDER:
+            spec = ABLATION_LESION_BY_ID.get(lesion_id, {})
+            vals, seeds_used, no_op_seeds = [], [], 0
+            window_n = 0
+            not_applicable = 0
+            for seed in _sorted_seeds(seed_map):
+                payload = seed_map.get(seed)
+                if not isinstance(payload, dict):
+                    continue
+                recs = payload.get("lesions")
+                rec = next((r for r in recs
+                            if isinstance(r, dict)
+                            and r.get("lesion") == lesion_id), None)                     if isinstance(recs, list) else None
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("applicable") is False:
+                    not_applicable += 1
+                    continue
+                delta = _finite_number(rec.get("delta_loss_mean"))
+                if delta is None:
+                    continue
+                vals.append(delta)
+                seeds_used.append(seed)
+                if rec.get("no_op"):
+                    no_op_seeds += 1
+                nw = _integral_value(rec.get("n_windows"))
+                if nw and nw > 0:
+                    window_n += nw
+            if not vals:
+                continue
+            res = paired_t_test(vals, [0.0] * len(vals))
+            mean_delta = _finite_number(res.get("mean_diff"))
+            res.update({
+                "candidate": variant,
+                "reference": f"{variant}:normal",
+                "metric": CAUSAL_ABLATION_METRIC,
+                "lower_is_better": True,
+                "lesion": lesion_id,
+                "lesion_label": spec.get("label", lesion_id),
+                "target": spec.get("target", ""),
+                "expected": spec.get("expected"),
+                "variant": variant,
+                "seeds_used": seeds_used,
+                "n_no_op_seeds": no_op_seeds,
+                "n_not_applicable_seeds": not_applicable,
+                "n_windows_total": window_n,
+                "mean_ppl_ratio": (
+                    math.exp(max(-20.0, min(20.0, float(mean_delta))))
+                    if mean_delta is not None else None),
+                "mean_delta_ppl_pct": (
+                    (math.exp(max(-20.0, min(20.0, float(mean_delta)))) - 1.0)
+                    * 100.0 if mean_delta is not None else None),
+                "ppl_ratio_clamped": bool(
+                    mean_delta is not None
+                    and not (-20.0 <= float(mean_delta) <= 20.0)),
+            })
+            _enrich_paired(res, vals, [0.0] * len(vals))
+            out.append(res)
+    # 判定必须在 Holm 校正之后：p_adj 是“显著”的唯一门槛，提前读取会
+    # 把全部病灶误判成“未检出”。
+    out = _apply_holm(out)
+    for res in out:
+        # _apply_holm 的“显著劣于”在语义上正确（病灶比正常差），但本表
+        # 要回答的是“该机制在推理期是否有因果贡献”，故另给 causal_verdict，
+        # 同时保留 Holm 原判供审计。
+        res["holm_verdict"] = res.get("verdict")
+        mean_delta = _finite_number(res.get("mean_diff"))
+        n = _integral_value(res.get("n"))
+        no_op_seeds = _integral_value(res.get("n_no_op_seeds")) or 0
+        if n is None or n < MIN_SEEDS:
+            verdict = f"种子不足（n={n}），不作判定"
+        elif no_op_seeds == n:
+            verdict = ("全部种子为 no-op：训练后该组件系数已为 0，"
+                       "推理期未使用该输入（不是“无效应”的证据）")
+        elif res.get("p_adj") is not None and res["p_adj"] < ALPHA:
+            if mean_delta is not None and mean_delta > 0:
+                verdict = "病灶显著变差：推理期该机制有因果贡献"
+            elif mean_delta is not None and mean_delta < 0:
+                verdict = "病灶显著变好：该机制在推理期反向有害/冗余"
+            else:
+                verdict = "显著但均值为 0，无法解释"
+            if res.get("within_noise"):
+                verdict += "；⚠ 效应落在种子噪声内"
+            if res.get("loo_sign_stable") is False:
+                verdict += "；⚠ 留一法方向翻转"
+        else:
+            verdict = ("未检出差异（Holm 校正后）；不等于无因果作用，"
+                       "须对照 MDE/窗口功效解读")
+        # 部分种子 no-op 时必须在判定里露出，否则读者会把“该组件在部分
+        # checkpoint 上根本没被使用”误读成“病灶无效应”。
+        if no_op_seeds and no_op_seeds < n:
+            verdict = f"部分种子 no-op（{no_op_seeds}/{n}）；" + verdict
+        res["causal_verdict"] = verdict
+        res["causal_contribution"] = bool(
+            n is not None and n >= MIN_SEEDS
+            and res.get("p_adj") is not None
+            and res["p_adj"] < ALPHA
+            and mean_delta is not None and mean_delta > 0
+            and not res.get("within_noise")
+            and res.get("loo_sign_stable") is not False
+            and no_op_seeds < n)
+    return out
+
+
 def _auroc_diff_tests(runs) -> list:
     """AUROC(logit)−AUROC(qterm) 配对差检验（H6 的判定依据）。"""
     return _detection_diff_tests(runs, "auroc", AUROC_DIFF_METRIC)
@@ -4606,6 +4841,31 @@ def build_summary(results_dir: str, audit: dict = None,
         if in_run_scope(fp, d):
             slot(d["variant"], _seed_key(fp, d))["analysis"] = d
 
+    # 推理期因果病灶消融（每 (变体, 种子) 一个 ablation_*.json）；单独存放，
+    # 不混入 runs 槽位——它不是训练变体，也不参与受控变量审计。
+    ablations = {}
+    ablation_scope = repro.get("ablation")
+    if isinstance(ablation_scope, dict):
+        # 本轮显式关闭消融时，绝不复用旧 ablation 文件冒充本轮证据。
+        allow_ablation = bool(ablation_scope.get("executed"))
+        ablation_variants = (ablation_scope.get("variants")
+                             if isinstance(ablation_scope.get("variants"), list)
+                             else [])
+    else:
+        # 旧 repro 没有该字段：保持向后兼容的全量发现。
+        allow_ablation = True
+        ablation_variants = None
+    for fp in _result_files(results_dir, "ablation", scope_seeds):
+        d = load(fp)
+        if not in_run_scope(fp, d):
+            continue
+        if not allow_ablation:
+            continue
+        if (ablation_variants is not None
+                and d["variant"] not in ablation_variants):
+            continue
+        ablations.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
+
     variants = sorted(v for v in runs if v in VARIANTS)
     eval_splits = set()
     invalid_eval_split = False
@@ -4895,7 +5155,12 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _auroc_diff_tests(runs)
     tests += _ap_diff_tests(runs)
     tests += _factorial_interaction_tests(runs)
+    tests += _factorial_shapley_tests(runs)
     tests = _apply_holm(tests)
+    shapley_tests = [t for t in tests if t.get("shapley_factor")]
+    # 推理期因果病灶消融：与训练期消融回答不同的因果问题（见 lega.ablate
+    # 模块文档）。独立指标家族、独立 Holm，不混入上面的变体间配对表。
+    causal_tests = _ablation_lesion_records(ablations)
     # 样例级配对（McNemar）：固定题面上的评测抽样不确定性，与上面的
     # 跨种子聚合 EM 检验互补；独立 Holm 家族、探索性证据。
     ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
@@ -6264,6 +6529,98 @@ def build_summary(results_dir: str, audit: dict = None,
               "取平均，逐种子单样本配对检验；n<3 或 Holm 校正后不显著只表示"
               "未检出，不等于交互不存在。")
 
+    # --- 全因子 Shapley 分解（探索性）：单因素边依赖参照格，交互非零时
+    #     不同参照格给出不同的“X 的贡献”；Shapley 对全部加入顺序取平均，
+    #     且效率性保证 φ_A+φ_B+φ_C 恰等于 Full−none 的总效应。
+    md += ["", "### 全因子 Shapley 效应分解（探索性，交互感知）", ""]
+    md.append("单因素消融边回答“固定其他因子时删/加 X 会怎样”，但参照格不同"
+              "时结论可能不同；Shapley 值把 Full−none 的总效应按所有加入顺序"
+              "平均分摊给 A/B/C，天然把 A×B/A×C/B×C 交互平均进参与因子。"
+              "PPL 口径在 −log(PPL) 上分解（比值尺度可加），φ>0 表示该因子"
+              "降低 PPL，`exp(−φ)` 即其 PPL 几何均值比；RULER 用原始 EM。"
+              "占比只在每个种子的总效应均为正时报告，否则留空、不强行归一化。"
+              "该分解未预注册，属探索性证据，不替代预注册的单因素确认检验。")
+    if shapley_tests:
+        md += ["", "| 因子 | 指标 | φ均值 ± SD | 95% CI | 占总效应 | "
+               "PPL几何比 | n | p_adj(Holm) | 结论 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for t in shapley_tests:
+            factor = t.get("shapley_factor_label") or t.get("shapley_factor")
+            std = t.get("std_diff")
+            delta = (f"{t['mean_diff']:+.4f}"
+                     + (f" ± {std:.4f}" if std is not None else ""))
+            ci = t.get("mean_diff_ci95")
+            ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-")
+            share = (f"{t['shapley_share']*100:.1f}%"
+                     if t.get("shapley_share") is not None else "-")
+            ratio = (f"{t['shapley_ppl_ratio']:.4f}"
+                     if t.get("shapley_ppl_ratio") is not None else "-")
+            padj = (f"{t['p_adj']:.4f}"
+                    if t.get("p_adj") is not None else "-")
+            md.append(f"| {factor} | {t.get('shapley_metric')} | {delta} | "
+                      f"{ci_s} | {share} | {ratio} | {t['n']} | {padj} | "
+                      f"{t.get('verdict', '-')} |")
+        md.append("")
+        md.append("注: φ 的符号方向=“越大越好”（PPL 已转为 −log）；"
+                  "“占总效应”为逐种子 Shapley 份额的均值；总效应为 Full−none，"
+                  "效率性残差见 `significance.json` 的 "
+                  "`shapley_efficiency_gap_max`（浮点误差量级）。"
+                  "Shapley 显著不等于单因素边也显著：若两者方向冲突，"
+                  "说明贡献依赖其他因子的水平（交互），必须在报告中并列披露。")
+    else:
+        md.append("")
+        md.append("⚠ 无法计算 Shapley 分解：门控内 8 格未全部运行、种子不足，"
+                  "或各格评测协议不一致；此时只能参考上面的单因素边与交互表。")
+
+    # --- 推理期因果病灶消融（探索性）：训练期消融回答“重新训练时去掉
+    #     组件会怎样”，本表回答“训练好的模型推理时是否真的使用该组件”。
+    md += ["", "### 推理期因果消融（权重病灶，val split；探索性）", ""]
+    md.append("训练期消融改变优化轨迹，不能证明最终前向仍在**使用**某组件；"
+              "本表在同一 checkpoint、同一批 val 窗口上只改门控参数，"
+              "逐窗口配对比较 ΔNLL=病灶−正常（>0 表示该机制在推理期有用）。"
+              "`no_query/no_conc/no_len/no_evidence` 是训练期去一法的推理期"
+              "对应；`gate_open/closed/constant_mean` 检验门控写回强度与逐位置"
+              "变化；`head_permute` 在参数个数、分布、结构完全不变的前提下打乱"
+              "头—证据对应，是容量解释的安慰剂对照；`sign_flip` 反转证据方向。"
+              "默认只在 val 上做（test 尘封；val 同时是 checkpoint 选择集，"
+              "故绝对水平偏乐观，本表只作机制定位）。跨种子 p 经 Holm 校正；"
+              "窗口级 p 仅描述单 run，不作为确认性证据。")
+    if causal_tests:
+        md += ["", "| 变体 | 病灶 | 目标机制 | ΔNLL均值 ± SD | PPL比 | n种子 | "
+               "逐种子胜负 | 留一 | p_adj(Holm) | 判定 |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
+        for t in causal_tests:
+            std = t.get("std_diff")
+            delta = (f"{t['mean_diff']:+.4f}"
+                     + (f" ± {std:.4f}" if std is not None else ""))
+            ratio = (f"{t['mean_ppl_ratio']:.4f}"
+                     + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
+                     if t.get("mean_ppl_ratio") is not None else "-")
+            wl = _seed_winloss_str(t)
+            loo = _loo_stability_str(t)
+            padj = (f"{t['p_adj']:.4f}"
+                    if t.get("p_adj") is not None else "-")
+            md.append(f"| {t['variant']} | {t['lesion_label']} | "
+                      f"{t.get('target', '-')} | {delta} | {ratio} | {t['n']} | "
+                      f"{wl} | {loo} | {padj} | {t.get('causal_verdict', '-')} |")
+        md.append("")
+        md.append("注: `PPL比=exp(ΔNLL均值)`（>1 表示病灶更差）；ΔNLL 与 PPL 比"
+                  "只在同一变体/同一 checkpoint 内解释，不跨变体比较绝对值。"
+                  "`no_op` 表示该组件训练后系数已为 0（推理期未使用），"
+                  "此时“无差异”不是“无效应”的证据；`gate_closed` 是阳性对照，"
+                  "若关闭注意力输出仍无差异，应先排查实现/评测而非解释方法。"
+                  "训练期消融显著而推理期病灶无差异，说明组件收益可能来自训练"
+                  "期的优化/正则化而非推理期必需；推理期显著而训练期不显著，"
+                  "则提示训练期消融被再训练补偿。两种证据并列，不互相替代。"
+                  "`no_len` 只去 b·log n；c 中的 log n 仍随 a·c 保留，"
+                  "因此它检验的是“额外长度系数 C”，不是“完全移除长度依赖”。")
+    else:
+        md.append("")
+        md.append("⚠ 未发现推理期因果消融结果（`--skip_ablation`、"
+                  "`--ablate_variants` 为空，或变体不含输出门）；"
+                  "组件结论目前只有训练期消融证据，不能据此声称“推理期使用了"
+                  "该组件”。")
+
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
@@ -6278,6 +6635,8 @@ def build_summary(results_dir: str, audit: dict = None,
                 continue  # 逐任务分解单独成表，避免主表被 5 个任务淹没
             if t.get("metric") == "PPL(log)":
                 continue  # 比值尺度敏感性单独成表，避免与原始 PPL 重复
+            if t.get("shapley_factor"):
+                continue  # Shapley 分解单独成表，避免与单因素边重复
             if t.get("mean_diff") is None:
                 continue
             if t.get("contrast_type") == "single_factor":
@@ -6953,6 +7312,21 @@ def build_summary(results_dir: str, audit: dict = None,
                        t for t in tests if t.get("metric") == "PPL(log)"],
                    "factorial_interactions": [
                        t for t in tests if t.get("interaction")],
+                   "factorial_shapley": shapley_tests,
+                   "factorial_shapley_note": (
+                       "全因子 2^3 的 Shapley 效应分解（探索性）：PPL 在 "
+                       "−log(PPL) 上分解（φ>0 降低 PPL，exp(−φ)=PPL 几何"
+                       "均值比），RULER 用原始 EM；φ_A+φ_B+φ_C 等于 "
+                       "Full−none 的总效应（效率性），交互效应被平均分摊到"
+                       "参与因子；不替代预注册的单因素确认检验"),
+                   "causal_ablation": causal_tests,
+                   "causal_ablation_note": (
+                       "推理期因果病灶消融（lega.ablate，val split）：同一 "
+                       "checkpoint/同一批窗口上只改门控参数，逐窗口配对 ΔNLL；"
+                       "no_query/no_conc/no_len/no_evidence 是训练期去一法的"
+                       "推理期对应，head_permute 是容量/分布不变的安慰剂对照，"
+                       "gate_open/closed/constant_mean 检验写回强度与逐位置变化；"
+                       "跨种子 p 经 Holm 校正，窗口级 p 仅描述性"),
                    "factorial_interactions_note": (
                        "全因子 2^3 的 A×B/A×C/B×C 交互对比（探索性，独立 "
                        "Holm 家族，基准 gate_only）：交互=0 表示组件效应可加；"
@@ -6974,7 +7348,9 @@ def build_summary(results_dir: str, audit: dict = None,
           f"（配对检验 {len(tests)} 组）")
     return {"rows": rows, "markdown": md_text, "tests": tests,
             "ruler_sample_tests": ruler_sample_tests,
-            "ppl_window_tests": ppl_window_tests}
+            "ppl_window_tests": ppl_window_tests,
+            "factorial_shapley": shapley_tests,
+            "causal_ablation": causal_tests}
 
 
 def main():
@@ -7014,6 +7390,15 @@ def main():
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
+    p.add_argument("--skip_ablation", action="store_true",
+                   help="跳过推理期因果病灶消融（默认对 --ablate_variants "
+                        "指定的门控变体，在同一 checkpoint/同一批 val 窗口上"
+                        "做逐窗口配对干预；不访问 test）")
+    p.add_argument("--ablate_variants", default="lega,qgate",
+                   help="做推理期病灶消融的变体（逗号分隔；默认 lega,qgate，"
+                        "让核心对比的已有门控基线也接受同一套病灶；"
+                        "可再加 gate_only 作对照；standard/null 无输出门，"
+                        "会被拒绝）")
     p.add_argument("--skip_plots", action="store_true")
     p.add_argument("--tune_baseline", action="store_true",
                    help="训练前对基线（standard）做 lr/权重衰减网格调优（仅验证集）；"
@@ -7066,6 +7451,17 @@ def main():
     invalid = sorted(set(variants) - set(ALL_VARIANTS))
     if invalid:
         p.error(f"未知变体: {', '.join(invalid)}；可选: {', '.join(ALL_VARIANTS)}")
+    ablate_variants = ([] if args.skip_ablation
+                       else parse_variants(args.ablate_variants))
+    invalid_ablate = sorted(set(ablate_variants) - set(GATE_FACTORS))
+    if invalid_ablate:
+        p.error("--ablate_variants 含无输出门/未知变体: "
+                + ", ".join(invalid_ablate)
+                + "；可选: " + ", ".join(sorted(GATE_FACTORS)))
+    ablate_variants = [v for v in ablate_variants if v in variants]
+    if not args.skip_ablation and not ablate_variants:
+        print("[run_all] 警告：--ablate_variants 与本次 --variants 无交集，"
+              "跳过推理期病灶消融")
 
     if not os.path.exists(args.config):
         p.error(f"配置文件不存在: {args.config}")
@@ -7236,6 +7632,14 @@ def main():
         # 顺序 RNG 初始指纹。实际生效证据在各 run_manifest.seed_report。
         "seed_audit": {str(s): seed_plan(s) for s in seeds},
         "variants": variants,
+        # 推理期病灶消融是否真的在本轮执行、覆盖哪些变体。汇总据此过滤
+        # 旧 ablation_*.json：--skip_ablation 时不能把上一轮的病灶证据
+        # 静默当成本轮结果（旧 repro 无此字段时保持向后兼容的全量发现）。
+        "ablation": {
+            "executed": bool(not args.skip_ablation and ablate_variants),
+            "variants": list(ablate_variants),
+            "split": "val",
+        },
         "smoke": bool(args.smoke),
         "git": git,
         "worktree": worktree,
@@ -7455,8 +7859,34 @@ def main():
         print(f"[badcase] {os.path.basename(fp)}: 最差窗口 {ana['n_windows']} 个"
               f" —— {top} -> worstcases_*.md")
 
-    post_stage = "latency"
     with abort_ledger_on_failure(ledger, ledger_common, lambda: post_stage):
+        # 推理期因果病灶消融：必须在汇总前完成，结果由 build_summary 读取。
+        post_stage = "ablation"
+        if not args.skip_ablation and ablate_variants:
+            ablate_cmds = []
+            for v, seed, vdir, suffix in chain:
+                if v not in ablate_variants:
+                    continue
+                ckpt = os.path.join(vdir, "model_best.pt")
+                if not os.path.exists(ckpt):
+                    ckpt = os.path.join(vdir, "model.pt")
+                if not os.path.exists(ckpt):
+                    print(f"[ablate] 跳过 {v}/seed{seed}：找不到 checkpoint")
+                    continue
+                out = os.path.join(results_dir, f"ablation_{v}{suffix}.json")
+                cmd = [py, "-m", "lega.ablate", "--ckpt", ckpt,
+                       "--data_dir", args.data_dir, "--out", out,
+                       "--seed", str(seed), "--device", args.device]
+                if args.smoke:
+                    # 冒烟时训练配置已被覆盖为小 ctx/少窗口；显式对齐，
+                    # 避免病灶分析退回默认 50 窗口拖慢冒烟。
+                    cmd += ["--ctx", str(smoke_ctx), "--eval_iters", "2"]
+                print("+", " ".join(cmd), flush=True)
+                ablate_cmds.append(cmd)
+            if ablate_cmds:
+                run_many(ablate_cmds, jobs, _jobs_env(jobs))
+
+        post_stage = "latency"
         if not args.skip_latency:
             # 显式给出基准的变体清单：lega.latency 的默认值不含消融变体，
             # 不传会让汇总表的消融变体对应列恒为 "-"。多种子时按各变体首个

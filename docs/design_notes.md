@@ -18,6 +18,81 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。
 
+### 全因子 Shapley 分解（交互感知的补充归因）
+
+单因素边依赖参照格：当 A×B/A×C/B×C 交互不为零时，“加入 X 的收益”在
+`gate_only` 基准与 `Full` 基准下并不相同，只报一条边会掩盖这种依赖。
+`lega/factorial.py` 对门控内 8 格做精确 Shapley 分解：
+
+```
+φ_i = Σ_{S ⊆ N\{i}} |S|!(n−|S|−1)!/n! · [v(S∪{i}) − v(S)]
+```
+
+其中 `N={A,B,C}`，`v(S)` 是只保留因子集合 S 时的性能。PPL 用
+`v=−log(PPL)`（比值尺度上可加，`exp(−φ)` 即该因子的 PPL 几何均值比），
+RULER 用原始 EM。性质与口径：
+
+- 效率性 `φ_A+φ_B+φ_C = v(ABC)−v(none)`，总效应不会被漏算或重复计；
+- 交互效应被平均分摊到参与因子，而不是归给某个参照格；
+- 零玩家（所有联盟中都不改变 v）的 φ=0；
+- 占比只在每个种子的总效应均为正时报告，否则留空，不强行归一化；
+- 逐种子算 φ，再对 φ 做同种子单样本配对 t 检验 + 同一指标内 Holm；
+- **探索性**：Shapley 依赖价值函数尺度且未预注册，不能替代预注册的
+  单因素确认性检验；与单因素边方向冲突时并列披露“贡献依赖其他因子”。
+
+## 推理期因果消融（训练后病灶）
+
+训练期消融回答的是“**重新训练**时去掉组件会怎样”，它改变优化轨迹；
+不能据此断言最终前向仍在**使用**该组件。`lega/ablate.py` 在同一个
+checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
+`ΔNLL = 病灶 − 正常`（>0 表示该机制在推理期有用）：
+
+| 病灶 | 干预 | 回答的问题 |
+|---|---|---|
+| `no_query` | `gate_w := 0` | 推理期去 A（对照训练期 `lega_no_query`） |
+| `no_conc` | `gate_a := 0` | 推理期去 B |
+| `no_len` | `gate_b := 0` | 推理期去 C（只去 b·log n；`c` 里的 log n 仍随 `a·c` 保留，与训练期单因素定义一致） |
+| `no_evidence` | `gate_w/a/b := 0` | 推理期退化为 `gate_only`（只留学习到的 d） |
+| `gate_open` | 证据项 0，`d := +30` | 门恒开：门控是否在抑制某些写回 |
+| `gate_closed` | 证据项 0，`d := −30` | 阳性对照：关闭注意力输出必须显著变差 |
+| `gate_constant_mean` | 证据项 0，`d_h := logit(E[g_h])` | 去掉逐位置/逐查询变化，保留每个头/层的平均写入强度 |
+| `head_permute` | 门参数在头间置换 | 容量/分布/结构不变，只破坏头—证据对应（安慰剂） |
+| `sign_flip` | 证据项反号 | 保留幅度、反转证据方向 |
+
+要点：
+
+- **只改门控参数**，不动注意力/主干；用 `snapshot_gate_params` /
+  `restore_gate_params` 保证病灶不叠加；
+- 与基线使用同一 `ctx/eval_iters/AMP` 口径、同一 `window_indices`，否则拒绝配对；
+- 默认只在 **val** 上做（test 尘封；val 是 checkpoint 选择集，绝对水平
+  偏乐观，只作机制定位）；不写 test 访问账本；
+- 记录 `no_op`：若训练后该系数已为 0，清零不改变前向——“无差异”不是
+  “无效应”的证据；`head_permute` 在全同头时也如实标为 no-op；
+- 窗口级 p 仅描述单 run（相邻窗口可能相关）；正式汇总先按种子聚合
+  ΔNLL，再做跨种子配对 t + Holm（`significance.json.causal_ablation`）；
+- **与训练期消融并列**：训练期显著而推理期病灶无差异 → 收益可能来自
+  训练期优化/正则化而非推理期必需；推理期显著而训练期不显著 → 训练期
+  消融可能被再训练补偿。两者不能互相替代。
+- **边界（必须如实声明）**：`head_permute` 是**推理期**的容量/分布安慰剂，
+  不是训练期的参数量匹配对照；`no_evidence` 在推理期保留全部参数、只关掉
+  证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数
+  是否带来优化红利”这一混淆。后者仍需参数匹配的对照变体（训练期）才能回答，
+  现有证据只能按参数开销 + 推理期病灶 + 单因素消融三者合读。
+
+命令：
+
+```bash
+python -m lega.ablate --ckpt out/small/lega/seed1337/model_best.pt \
+    --data_dir data/wikitext103 --out results/small/ablation_lega_seed1337.json
+# 全流水线默认对 lega,qgate 做（--ablate_variants 可加 gate_only 作对照）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --ablate_variants lega,qgate
+```
+
+输出 `ablation_<variant>[_seed<seed>].json`：基线/各病灶的 val_loss、PPL、
+门控均值/标准差/饱和比例、逐窗口 ΔNLL、窗口级 t/符号检验、`no_op` 标记与
+溯源字段。`--skip_ablation` 可关闭；`standard`/`null` 无输出门，不能做该分析。
+
 ## 评测
 
 - WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）；
