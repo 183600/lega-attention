@@ -186,6 +186,12 @@ class _ChunkedLinearCE(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x2d, weight, tgt, chunk: int, ignore_index: int = -100):
+        # 展平后的 logits/标签必须逐行对齐；长度不一致时下面的切片会静默
+        # 截断成另一个（无意义的）损失。
+        if tgt.numel() != x2d.size(0):
+            raise ValueError(
+                f"targets 元素数必须与 logits 行数一致: "
+                f"{tgt.numel()} != {x2d.size(0)}")
         # weight 参与反向的版本校验（参数被原地改写时能及时报错）；
         # x2d/tgt 只在本次前向使用，不在 ctx 上保留。
         ctx.save_for_backward(weight)
@@ -529,6 +535,12 @@ class GPT(nn.Module):
         loss = None
         loss_per_window = None
         if targets is not None:
+            # 标签必须与输入逐位置对齐。允许 (B,T-1) 等更短形状会让展平后的
+            # 目标与另一行的位置错配（不报错但损失无意义），比直接拒绝更危险。
+            if targets.shape != idx.shape:
+                raise ValueError(
+                    f"targets 形状必须与 idx 一致: {tuple(targets.shape)} "
+                    f"!= {tuple(idx.shape)}")
             x = self.ln_f(x)
             # 训练/评测只需 loss：分块过 lm_head 并立即做交叉熵；
             # 分块求和再平均与整批 mean 结果一致；此时不再返回 logits。

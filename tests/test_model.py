@@ -553,3 +553,19 @@ def test_evaluate_val_optional_window_loss_detail_for_pairing():
     plain = evaluate_val(model, val, ctx=10, device="cpu", iters=9, amp=False)
     assert "window_losses" not in plain and "window_indices" not in plain
     print("  [ok] evaluate_val 逐窗口明细可选落盘，且均值与 val_loss 一致")
+
+
+def test_forward_rejects_misaligned_targets_shape():
+    """targets 与 idx 形状不一致时必须报错，不能静默错配标签算损失。"""
+    m = _tiny("lega")
+    x = torch.randint(0, 64, (2, 8))
+    for shape in ((2, 7), (2, 9), (16,), (2, 8, 1)):
+        try:
+            m(x, targets=torch.randint(0, 64, shape))
+        except ValueError as e:
+            assert "targets" in str(e), e
+        else:
+            raise AssertionError(f"targets shape {shape} 未被拒绝")
+    # 正确形状仍可训练
+    out = m(x, targets=torch.randint(0, 64, (2, 8)))
+    assert out["loss"] is not None
