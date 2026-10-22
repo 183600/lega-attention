@@ -205,14 +205,14 @@ def strict_int(value, name: str = "值") -> int:
     （1337.0）与整数字符串（"1337"）语义明确，规范化为 int；其余（bool、
     小数、NaN/Inf、"1_0"、非数值类型）一律显式拒绝。
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是整数，收到 bool {value!r}")
     if isinstance(value, str):
         s = value.strip()
         if re.fullmatch(r"[+-]?\d+", s) is None:
             raise ValueError(f"{name} 必须是整数，收到 {value!r}")
         return int(s)
-    if isinstance(value, float):
+    if isinstance(value, (float, np.floating)):
         if not math.isfinite(value) or not value.is_integer():
             raise ValueError(f"{name} 必须是有限整数，收到 {value!r}")
         return int(value)

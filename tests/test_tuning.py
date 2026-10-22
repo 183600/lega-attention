@@ -590,6 +590,8 @@ def test_tuning_manifest_identity_rejects_numpy_scalars():
     for bad in (np.bool_(True), np.float32(7.5), np.float64(7.5)):
         assert _as_int(bad) is None, bad
     assert _as_int(np.float64(7.0)) == 7
+    # 整数值的 NumPy 浮点标量语义明确，应与 Python 7.0 一样接受；小数仍拒绝。
+    assert _as_int(np.float32(7.0)) == 7
     for bad in (np.bool_(True), np.bool_(False), "1_0"):
         try:
             _finite_number(bad, "x")
