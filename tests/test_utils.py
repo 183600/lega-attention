@@ -308,6 +308,14 @@ def test_f1_scores_three_averages_and_imbalance():
             else:
                 raise AssertionError(f"非法类别未被拒绝: {bad!r}")
     assert f1_scores([1.0, 0.0], [1.0, 1.0])["n"] == 2
+    # 单一类别没有可区分的正/负类：聚合 F1 必须为 None（否则全判同一类
+    # 会显示成 1.0 的“完美”分类器），逐类明细仍保留。
+    for args in (([1, 1, 1], [1, 1, 1]),
+                 ([0, 0], [0, 0], [0, 1])):
+        single = f1_scores(*args)
+        assert (single["macro"] is None and single["micro"] is None
+                and single["weighted"] is None), single
+        assert single["n"] > 0 and single["per_class"], single
     # 重复 labels 会让 per_class 覆盖、macro/weighted 重复计权
     for dup in ([0, 0], [1, 0, 1]):
         try:

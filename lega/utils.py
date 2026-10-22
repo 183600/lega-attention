@@ -1502,7 +1502,11 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
         tp_all += tp
         fp_all += fp
         fn_all += fn
-    if not labels or total == 0:
+    # 单一类别（观测到的 y_true ∪ y_pred 只有一个类）没有可区分的正/负
+    # 类：此时 micro/macro/weighted 都机械地等于 1，会让“全判同一类”的
+    # 退化预测看起来完美。与空输入一样按不可计算返回 None，逐类明细保留。
+    observed = set(y_true.tolist()) | set(y_pred.tolist())
+    if not labels or total == 0 or len(observed) < 2:
         return {"macro": None, "micro": None, "weighted": None,
                 "per_class": per_class, "labels": labels, "n": total}
     macro = float(np.mean(f1s)) if f1s else None
