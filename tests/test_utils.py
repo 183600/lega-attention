@@ -933,6 +933,10 @@ def test_stats_stable_at_float_limits():
     assert ci == (huge, huge), ci
     # 不可表示的 MDE 返回 None，而不是 inf。
     assert min_detectable_effect(1e308, 2) is None
+    # 合法但超出 float 上限的整数 n：√n 仍可表示（10**400 -> 1e200），
+    # 不能因 math.sqrt(int) 的转换溢出而崩溃。
+    m_huge = min_detectable_effect(0.1, 10 ** 400)
+    assert m_huge is not None and 0.0 < m_huge < 1e-190, m_huge
     print("  [ok] 极大有限观测：均值/方差/中位数/置换/bootstrap 不溢出")
 
 
