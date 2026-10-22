@@ -40,7 +40,7 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from .utils import (auroc, average_precision, calibration_metrics, f1_scores,
-                    strict_int)
+                    seed_int, strict_int)
 
 # hit 判别正类率低于该值时以 PR-AUC 为主指标（与 lega.analysis 同一口径，
 # 集中定义于此并由此导入，避免两处阈值漂移）。
@@ -450,6 +450,9 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
     # 否则逐列提取会在 r.get 上崩溃。
     records = [r for r in (records or []) if isinstance(r, dict)]
     folds = strict_int(folds, "folds")
+    # 探针的折分配用固定种子：bool/小数/越界种子会让“同一输入可复现”
+    # 的承诺失效，必须与 set_seed 同口径（0..2^32-1）。
+    seed = seed_int(seed, "seed")
     if folds < 2:
         raise ValueError(f"folds 必须 >= 2，收到 {folds}")
     l2_grid = [_finite_nonnegative(x, "l2_grid 项") for x in l2_grid]
