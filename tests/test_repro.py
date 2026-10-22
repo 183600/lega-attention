@@ -835,6 +835,32 @@ def test_worktree_state_and_patch_capture_dirty_code():
     print("  [ok] worktree_state/write_worktree_patch：diff 指纹与补丁可重放")
 
 
+def test_worktree_failed_untracked_listing_is_marked_truncated(monkeypatch):
+    """git ls-files 失败时补丁不完整，必须标记 truncated 而不是静默漏文件。"""
+    import lega.repro as repro
+    with tempfile.TemporaryDirectory() as d:
+        git = _init_git_repo(d)
+        with open(os.path.join(d, "code.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        git("add", "code.py")
+        git("commit", "-q", "-m", "init")
+        with open(os.path.join(d, "new.py"), "w", encoding="utf-8") as f:
+            f.write("z = 3\n")
+        real = repro._git_bytes
+
+        def fake(args, cwd):
+            if args[:1] == ["ls-files"]:
+                return None
+            return real(args, cwd)
+
+        monkeypatch.setattr(repro, "_git_bytes", fake)
+        st = repro.worktree_state(d)
+        assert st["available"] is True and st["dirty"] is True
+        assert st["n_untracked"] == 1
+        assert st["diff_truncated"] is True, st
+    print("  [ok] 未跟踪文件列表失败时补丁显式标记不完整")
+
+
 def test_worktree_state_degrades_outside_git():
     with tempfile.TemporaryDirectory() as d:
         st = worktree_state(d)

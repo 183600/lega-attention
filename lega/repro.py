@@ -111,7 +111,12 @@ def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
         tracked = tracked_raw
         truncated = False
     raw = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"],
-                     root) or b""
+                     root)
+    if raw is None:
+        # 无法列出未跟踪文件时补丁不完整：不能把“空列表”当成“没有未跟踪
+        # 文件”，否则 diff_sha256 会静默漏掉新代码且 truncated 仍为 False。
+        truncated = True
+        raw = b""
     files = [os.fsdecode(p) for p in raw.split(b"\0") if p]
     chunks = [tracked] if tracked else []
     used = len(tracked)
