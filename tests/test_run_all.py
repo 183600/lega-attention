@@ -5131,3 +5131,45 @@ def test_ruler_sample_macro_micro_estimands_diverge():
     assert t["estimand_conflict"] is True
     assert "micro/macro 方向不一致" in t["verdict"], t
     print("  [ok] RULER 样例级效应量：micro 与 macro 口径分歧显式并列并告警")
+
+
+def test_ruler_micro_average_survives_huge_finite_weights():
+    """两个可表示但相加会溢出的样本计数仍应给出有限加权均值。"""
+    both_one = {"results": {"niah": {
+        "256": {"n": 1e308, "em": 1.0},
+        "512": {"n": 1e308, "em": 1.0}}}}
+    assert _ruler_avg_micro(both_one) == 1.0
+    half = {"results": {"niah": {
+        "256": {"n": 1e308, "em": 1.0},
+        "512": {"n": 1e308, "em": 0.0}}}}
+    assert abs(_ruler_avg_micro(half) - 0.5) < 1e-12
+    # 极大权重与小权重混合时仍按 n 加权，不能被归一化改写成等权。
+    mixed = {"results": {"niah": {
+        "256": {"n": 1e308, "em": 1.0},
+        "512": {"n": 1, "em": 0.0}}}}
+    assert abs(_ruler_avg_micro(mixed) - 1.0) < 1e-12
+    print("  [ok] RULER micro 平均：超大有限样本计数不再溢出成 NaN")
+
+
+def test_log_ppl_ratio_unrepresentable_is_flagged_not_crash():
+    """exp(log-PPL 差) 超出 float 上限时必须标缺失，不能中断汇总。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        for seed in (1, 2, 3):
+            for variant, ppl in (("lega", 1e300), ("standard", 1e-300)):
+                _write_json(os.path.join(tmp, f"eval_{variant}_seed{seed}.json"), {
+                    "variant": variant, "seed": seed, "val_ppl": ppl,
+                    "val_loss": math.log(ppl), "gate_mean": 0.5,
+                    "n_params": 100, "n_gate_extra": 0, "split": "val",
+                    "eval_ctx": 16, "eval_iters": 4, "val_windows": 100,
+                    "val_tokens_evaluated": 64})
+        out = build_summary(tmp)
+        log_tests = [t for t in out["tests"]
+                     if t.get("metric") == "PPL(log)"]
+        assert log_tests, out["tests"]
+        t = log_tests[0]
+        assert t["ppl_ratio"] is None, t
+        assert t["ppl_ratio_ci95"] is None, t
+        assert t["ppl_delta_pct"] is None, t
+        assert t["ppl_ratio_overflow"] is True, t
+        assert "PPL 比值尺度敏感性" in out["markdown"]
+    print("  [ok] 汇总 log-PPL：不可表示的几何均值比标缺失而非崩溃")

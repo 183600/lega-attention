@@ -1470,7 +1470,8 @@ def _ruler_avg_micro(d):
     results = d.get("results")
     if not isinstance(results, dict):
         return None
-    num, total = 0.0, 0.0
+    cells = []
+    max_weight = 0.0
     for task, by_ctx in results.items():
         if (not isinstance(task, str) or task.startswith("_")
                 or not isinstance(by_ctx, dict)):
@@ -1491,9 +1492,19 @@ def _ruler_avg_micro(d):
                 continue
             if not math.isfinite(nf):
                 continue
-            num += v * nf
-            total += nf
-    return (num / total) if total > 0 else None
+            cells.append((v, nf))
+            max_weight = max(max_weight, nf)
+    if not cells or max_weight <= 0.0:
+        return None
+    # 先按最大权重归一化再累加：各 nf 都是有限正数，但两个 1e308 的格
+    # 相加就会溢出成 inf（随后 num/total 变成 NaN）。归一化后权重均落在
+    # (0,1]，加权和与总权重都不会越过 float 上限，均值保持不变。
+    num = total = 0.0
+    for v, nf in cells:
+        w = nf / max_weight
+        num += v * w
+        total += w
+    return (num / total) if total > 0.0 else None
 
 
 def _ruler_depth_means(d):
@@ -5599,13 +5610,26 @@ def build_summary(results_dir: str, audit: dict = None,
     for t in log_tests:
         md = t.get("mean_diff")
         ci = t.get("mean_diff_ci95")
-        t["ppl_ratio"] = (math.exp(md) if md is not None
-                          and math.isfinite(md) else None)
-        t["ppl_ratio_ci95"] = (
-            [math.exp(ci[0]), math.exp(ci[1])]
-            if isinstance(ci, (list, tuple)) and len(ci) == 2
-            and all(isinstance(x, (int, float)) and math.isfinite(x)
-                    for x in ci) else None)
+        # log-PPL 差是两个有限 log 值之差，但 exp(Δ) 仍可能超出 float 上限
+        # （例如候选 PPL=1e300、参照 PPL=1e-300）。比值不可表示时记为缺失，
+        # 不能抛 OverflowError 让整份汇总失败；原始 log 差与 p 值仍保留。
+        ratio_overflow = False
+        t["ppl_ratio"] = None
+        if md is not None and math.isfinite(float(md)):
+            try:
+                t["ppl_ratio"] = math.exp(float(md))
+            except OverflowError:
+                ratio_overflow = True
+        t["ppl_ratio_ci95"] = None
+        if (isinstance(ci, (list, tuple)) and len(ci) == 2
+                and all(isinstance(x, (int, float)) and math.isfinite(x)
+                        for x in ci)):
+            try:
+                t["ppl_ratio_ci95"] = [math.exp(float(ci[0])),
+                                       math.exp(float(ci[1]))]
+            except OverflowError:
+                ratio_overflow = True
+        t["ppl_ratio_overflow"] = bool(ratio_overflow)
         t["ppl_delta_pct"] = ((t["ppl_ratio"] - 1.0) * 100.0
                               if t["ppl_ratio"] is not None else None)
         t["exploratory"] = True
