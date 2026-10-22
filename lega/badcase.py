@@ -43,7 +43,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from .ruler import standalone_numeric_tokens
-from .utils import holm_bonferroni, mcnemar_exact_p, wilson_score_ci
+from .utils import (holm_bonferroni, mcnemar_exact_p, mean_std,
+                    wilson_score_ci)
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
 # \d{4,}，带符号/小数/科学计数法或短数字会被截成不同字符串，误抄会被
@@ -758,12 +759,17 @@ def _mean(vals):
     # 发散 run 的窗口 loss 可能是 NaN，若混入均值会把 NaN 写进 JSON（非法）并
     # 污染报告；旧格式/坏数据里的 "n/a" 等字符串同样跳过而不是让整份报告崩掉。
     # bool 是 int 子类，float(True)=1.0，不拒绝会把 "loss": true 伪造成 1.0。
+    # 与 utils.mean_std 同口径使用缩放后的稳定均值：多个 1e308 的合法窗口
+    # loss 在朴素求和时会溢出成 inf（JSON 只能写成 null，PPL 比也随之失真）。
     out = []
     for v in vals:
         f = _finite_float(v)
         if f is not None:
             out.append(f)
-    return float(sum(out) / len(out)) if out else None
+    if not out:
+        return None
+    mean, _std = mean_std(out)
+    return mean
 
 
 def synthesize_window_improvements(ana: Dict) -> List[Dict]:

@@ -789,6 +789,12 @@ def test_huge_and_nonfinite_window_fields_tolerated():
          "gold_distance_tokens": float("inf")},
     ], variant="lega")
     assert win["median_gold_distance_tokens"] == 150.0
+    # 合法但巨大的窗口 loss 也不能让均值溢出成 inf。
+    huge = analyze_worst_windows(
+        [{"pred_top5": ["a"], "gold_next": "b", "loss": 1e308},
+         {"pred_top5": ["a"], "gold_next": "b", "loss": 1e308}],
+        variant="lega")
+    assert huge["mean_loss"] == 1e308, huge
     for i, c in enumerate(win["cases"], 1):
         format_window_case(i, c)
     tmp = tempfile.mkdtemp()
