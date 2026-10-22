@@ -33,6 +33,19 @@ def test_normal_convergence():
     print("  [ok] 正常收敛判定")
 
 
+def test_nonfinite_values_with_bad_steps_still_fail_curve():
+    """坏 step 上的 NaN 损失/Inf 梯度仍是训练失效证据，不能被当 malformed 吞掉。"""
+    base = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                [4.3, 3.8, 3.3, 2.9, 2.6])
+    d = diagnose_curve(base + [{"step": "bad", "loss": float("nan")}])
+    assert d["status"] == "NaN/Inf", d
+    assert d["nonfinite_values"] >= 1 and d["malformed_records"] >= 1, d
+    d2 = diagnose_curve(base + [{"step": "bad", "grad_norm": float("inf")}])
+    assert d2["grad_norm_nonfinite"] >= 1, d2
+    assert d2["has_grad_spike"] is True and d2["malformed_records"] >= 1, d2
+    print("  [ok] 坏 step 上的 NaN 损失/Inf 梯度仍触发失效诊断")
+
+
 def test_overfitting_detected():
     # 训练损失持续下降，验证损失先降后升 → 过拟合，且给出早停建议
     recs = _log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2], [4.3, 3.6, 3.2, 3.4, 3.9])

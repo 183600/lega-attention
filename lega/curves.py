@@ -235,10 +235,9 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
         if not isinstance(r, dict):
             malformed += 1
             continue
-        v, s = r.get(key), r.get("step")
+        v = r.get(key)
         if v is None:
             continue
-        s = _step_or_none(s)
         if isinstance(v, (bool, np.bool_)):
             malformed += 1
             continue
@@ -250,15 +249,20 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
         except (TypeError, ValueError, OverflowError):
             malformed += 1
             continue
+        s = _step_or_none(r.get("step"))
+        # 非有限损失是训练失效的直接证据，与 step 是否可解析无关：坏行上的
+        # NaN/Inf 仍必须进入 nan_count，不能被“step 缺失”吞成 malformed。
+        if not math.isfinite(v):
+            bad += 1
+            if s is None:
+                malformed += 1
+            continue
         # 有值但 step 缺失/无法解析同样是损坏记录：不能静默当成“没有这条点”，
         # 否则截断的日志会以更少的曲线点被当作完整日志诊断。
         if s is None:
             malformed += 1
             continue
-        if math.isfinite(v):
-            pts.append({"step": s, "value": v})
-        else:
-            bad += 1
+        pts.append({"step": s, "value": v})
     pts.sort(key=lambda p: p["step"])
     return pts, bad, malformed
 
@@ -273,6 +277,7 @@ def _gradient_points(records: List[Dict]):
     """
     by_step: Dict[int, Dict] = {}
     nonfinite_steps = set()
+    nonfinite_unknown = 0
     malformed = 0
     for r in records if isinstance(records, (list, tuple)) else []:
         if not isinstance(r, dict):
@@ -280,6 +285,7 @@ def _gradient_points(records: List[Dict]):
             continue
         step = _step_or_none(r.get("step"))
         chosen = None
+        saw_numeric = nonfinite_here = False
         # 两个键都要检查：grad_norm_max 有限但 grad_norm 非有限（或反过来）
         # 仍是训练失效证据；不能因为优先键可解析就静默忽略另一个。
         for key in ("grad_norm_max", "grad_norm"):
@@ -295,17 +301,28 @@ def _gradient_points(records: List[Dict]):
             except (TypeError, ValueError, OverflowError):
                 malformed += 1
                 continue
+            saw_numeric = True
             if not math.isfinite(val):
+                nonfinite_here = True
                 if step is not None:
                     nonfinite_steps.add(step)
                 continue
             if chosen is None:
                 chosen = val
-        if step is None or chosen is None:
+        if nonfinite_here and step is None:
+            # 没有可挂接的 step，但非有限梯度仍是必须报告的失效证据。
+            nonfinite_unknown += 1
+        if step is None:
+            # 有数值但没有合法 step：记录为坏行，不能静默消失。
+            if saw_numeric:
+                malformed += 1
+            continue
+        if chosen is None:
             continue
         by_step[step] = {"step": step, "value": chosen}
     pts = sorted(by_step.values(), key=lambda p: p["step"])
-    return pts, len(nonfinite_steps), malformed, sorted(nonfinite_steps)
+    return (pts, len(nonfinite_steps) + nonfinite_unknown, malformed,
+            sorted(nonfinite_steps))
 
 
 def _detect_series_spikes(points: List[Dict],
