@@ -1993,6 +1993,9 @@ def test_enrich_paired_adds_robustness_fields():
                           [True, 2.0, 3.0], [1.0, 1.0, 1.0])
     assert (res2["n_seed_wins"] + res2["n_seed_losses"]
             + res2["n_seed_ties"]) == 2
+    # bootstrap CI 也必须用同一批有效配对差：[2-1, 3-1]，不能把
+    # True-1 当作 0 混入。
+    assert res2["mean_diff_ci95"] == (1.0, 2.0)
     # 均值有效但方差/MDE 无法解析（坏 JSON）时只置空相关字段，不能 TypeError。
     res3 = _enrich_paired({"n": 2, "mean_diff": 1.5, "std_diff": "bad"},
                           [1.5, 2.5], [1.0, 1.0])

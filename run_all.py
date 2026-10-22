@@ -1695,6 +1695,16 @@ def _enrich_paired(res: dict, a, b) -> dict:
     多大的效应才检测得到"——区分"没有效应"与"功效不足"。
     均为确定性计算（固定随机种子），同一输入恒定复现。
     """
+    # 配对差统一按 _paired_diffs 口径构造：bool/None/非有限值不参与，
+    # bootstrap CI 与置换/符号检验使用同一批观测。
+    diffs = []
+    for x, y in zip(a, b):
+        fx, fy = _finite_number(x), _finite_number(y)
+        if fx is None or fy is None:
+            continue
+        d = fx - fy
+        if math.isfinite(d):
+            diffs.append(d)
     if res.get("n", 0) >= 1 and res.get("mean_diff") is not None:
         perm = paired_sign_flip_test(a, b)
         res["p_perm"] = perm.get("p_perm")
@@ -1705,8 +1715,7 @@ def _enrich_paired(res: dict, a, b) -> dict:
         res["sign_n_pos"] = sign.get("n_pos")
         res["sign_n_neg"] = sign.get("n_neg")
         res["sign_n_zero"] = sign.get("n_zero")
-        res["mean_diff_ci95"] = bootstrap_mean_ci(
-            [x - y for x, y in zip(a, b)])
+        res["mean_diff_ci95"] = bootstrap_mean_ci(diffs)
         res["mde"] = min_detectable_effect(res.get("std_diff"), res.get("n"))
     else:
         res["p_perm"] = res["perm_exact"] = None
@@ -1745,16 +1754,6 @@ def _enrich_paired(res: dict, a, b) -> dict:
     # 一致，则报道的“显著优于”对个体种子高度敏感，必须显式标注。
     res["n_seed_wins"] = res["n_seed_losses"] = res["n_seed_ties"] = None
     res["loo_sign_stable"] = res["loo_min_abs_mean"] = None
-    diffs = []
-    for x, y in zip(a, b):
-        # 与 paired_t_test/_paired_diffs 同口径：bool/坏值不参与配对差，
-        # 否则逐种子胜负的样本数会与检验实际 n 不一致。
-        fx, fy = _finite_number(x), _finite_number(y)
-        if fx is None or fy is None:
-            continue
-        d = fx - fy
-        if math.isfinite(d):
-            diffs.append(d)
     if len(diffs) >= 2:
         wins = sum(1 for d in diffs if d > 0)
         losses = sum(1 for d in diffs if d < 0)
