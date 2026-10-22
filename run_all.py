@@ -1954,18 +1954,23 @@ def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP
     for d in ruler_payloads or []:
         cells = _ruler_cell_sample_outcomes(d)
         if not cells:
-            continue
+            # 旧产物/损坏 payload 没有逐样例记录：不能只用其余种子算区间，
+            # 否则 n_seeds 与实际观测集不符，静默丢弃一个种子。
+            return None
         by_task = {}
+        payload_cells = payload_samples = 0
         for (task, _ctx), samples in cells.items():
             vals = np.asarray(list(samples.values()), dtype=float)
             if vals.size == 0:
-                by_task = None
-                break
+                # 任一单元格为空时无法保持预注册的“任务内单元格等权”
+                # 估计量；按不可用处理，不伪造区间。
+                return None
             by_task.setdefault(task, []).append(vals)
-            n_cells += 1
-            n_samples += int(vals.size)
-        if by_task:
-            per_seed.append(by_task)
+            payload_cells += 1
+            payload_samples += int(vals.size)
+        n_cells += payload_cells
+        n_samples += payload_samples
+        per_seed.append(by_task)
     if not per_seed:
         return None
     rng = np.random.default_rng(rng_seed)

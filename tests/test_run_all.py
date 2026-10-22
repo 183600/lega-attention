@@ -5247,6 +5247,12 @@ def test_ruler_macro_absolute_ci_matches_task_equal_estimand():
     # 旧产物无逐样例记录：不给区间，也不伪造 0 宽区间
     legacy = {"results": {"a": {"1": {"em": 0.5, "n": 2}}}}
     assert _ruler_macro_absolute_ci([legacy]) is None
+    # 多种子混合：只要有一个 payload 缺逐样例记录或含空单元格，就不能
+    # 丢掉该种子后仍声称区间覆盖全部观测种子。
+    assert _ruler_macro_absolute_ci([payload, legacy]) is None
+    empty_cell = {"results": {"a": {"1": cell([1, 1], "a"),
+                                    "2": {"em": 0.5, "n": 0, "samples": []}}}}
+    assert _ruler_macro_absolute_ci([payload, empty_cell]) is None
     print("  [ok] RULER 绝对 macro CI：任务等权、确定性、旧产物不伪造")
 
 
