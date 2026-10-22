@@ -180,15 +180,53 @@ SINGLE_FACTOR_PAIRS = tuple(
     (cand, ref) for _factor, _direction, cand, ref in SINGLE_FACTOR_CONTRASTS)
 
 
+# 门控内 A/B/C 的八个合法因子集合。单因素审计不仅核对“表里列出的对比”，
+# 还要核对 GATE_FACTORS 本身确实实现了完整的 2^3：若两个变体的因子集合
+# 意外相同（例如新变体复制了旧公式），只比较变体名集合是发现不了的。
+_GATE_FACTOR_SUBSETS = frozenset({
+    frozenset(), frozenset({"A"}), frozenset({"B"}), frozenset({"C"}),
+    frozenset({"A", "B"}), frozenset({"A", "C"}), frozenset({"B", "C"}),
+    frozenset({"A", "B", "C"}),
+})
+
+
+def _gate_factor_set(value):
+    """把 GATE_FACTORS 的值规范化为因子集合；结构非法时返回 None。
+
+    只接受字符串集合而不是字符串本身：``"ABC"`` 迭代后也是 A/B/C，若不
+    排除会被误当成合法因子集合，掩盖“元数据写成了拼接字符串”的漂移。
+    """
+    if isinstance(value, str) or not isinstance(
+            value, (set, frozenset, tuple, list)):
+        return None
+    try:
+        factors = frozenset(value)
+    except TypeError:
+        return None
+    if any(not isinstance(f, str) for f in factors):
+        return None
+    return factors
+
+
 def changed_gate_factors(candidate, reference):
     """两个门控变体之间激活因子集合的对称差；任一方不在门控内返回 None。
 
     单因素对比要求对称差恰好一个因子。standard/null 不属于门控内 2^3，
     与它们的对比（如 LEGA vs standard）是整体方法对比，不参与组件归因。
+    外部/旧产物可能传入不可哈希键或损坏的因子元数据，此时按“不在门控内”
+    处理，而不是让汇总因一次查询崩溃。
     """
-    c = GATE_FACTORS.get(candidate)
-    r = GATE_FACTORS.get(reference)
+    if not isinstance(GATE_FACTORS, dict):
+        return None
+    try:
+        c = _gate_factor_set(GATE_FACTORS.get(candidate))
+        r = _gate_factor_set(GATE_FACTORS.get(reference))
+    except TypeError:  # candidate/reference 不可哈希
+        return None
     if c is None or r is None:
+        return None
+    known = frozenset("ABC")
+    if (c - known) or (r - known):
         return None
     return frozenset(c.symmetric_difference(r))
 
@@ -197,7 +235,9 @@ def single_factor_change(candidate, reference):
     """候选−参照恰好只改一个因子时返回该因子（A/B/C），否则返回 None。"""
     diff = changed_gate_factors(candidate, reference)
     if diff is not None and len(diff) == 1:
-        return next(iter(diff))
+        factor = next(iter(diff))
+        if factor in ("A", "B", "C"):
+            return factor
     return None
 
 
@@ -208,35 +248,162 @@ def single_factor_audit():
     是汇总与组件判定的唯一单因素对比表。任何一侧漂移（新增变体、改公式、
     误把 B-only/C-only 与 Full 配对）都会在这里显形，而不是被静默当成
     单组件证据。返回值写入 significance.json 并渲染进汇总页。
+
+    审计刻意不假设输入结构永远正确：GATE_FACTORS/对比表/COMPONENT_TESTS
+    都可能被旧版本、手工编辑或上游改动破坏。结构损坏要变成可读的
+    ``problems``，而不是让整份汇总在解包/排序时崩溃。
     """
     problems = []
     contrasts = []
-    factorial_variants = [v for _name, v in FACTORIAL_CELLS]
-    if len(set(factorial_variants)) != 8 or set(factorial_variants) != set(GATE_FACTORS):
+    gate_table = GATE_FACTORS if isinstance(GATE_FACTORS, dict) else {}
+    if not isinstance(GATE_FACTORS, dict):
+        problems.append("GATE_FACTORS 必须是变体 -> A/B/C 因子集合的映射")
+    normalized = {}
+    for variant, raw_factors in gate_table.items():
+        if not isinstance(variant, str):
+            problems.append(f"GATE_FACTORS 含非字符串变体键：{variant!r}")
+            continue
+        factors = _gate_factor_set(raw_factors)
+        if factors is None:
+            problems.append(
+                f"GATE_FACTORS[{variant!r}] 不是合法的因子集合："
+                f"{raw_factors!r}")
+            continue
+        unknown = factors - frozenset("ABC")
+        if unknown:
+            problems.append(
+                f"GATE_FACTORS[{variant!r}] 含未知因子：{sorted(unknown)}")
+            continue
+        normalized[variant] = factors
+    # 2^3 设计必须真的覆盖八个不同因子集合（含空集），而不只是“有 8 个
+    # 变体名”。重复集合会让某个组件格实际上不存在，交互/主效应随之失真。
+    actual_subsets = set(normalized.values())
+    missing_subsets = _GATE_FACTOR_SUBSETS - actual_subsets
+    extra_subsets = actual_subsets - _GATE_FACTOR_SUBSETS
+    if missing_subsets or extra_subsets:
+        problems.append(
+            "GATE_FACTORS 未实现完整 2^3 因子设计：缺少 "
+            + (", ".join(sorted("".join(sorted(s)) or "none"
+                                for s in missing_subsets)) or "无")
+            + "；多出 "
+            + (", ".join(sorted("".join(sorted(s)) or "none"
+                                for s in extra_subsets)) or "无"))
+    # 全因子矩阵的变体集合必须与 GATE_FACTORS 完全一致；否则汇总会拿
+    # 未登记因子语义的变体当 2^3 的一格。
+    factorial_variants = []
+    if not isinstance(FACTORIAL_CELLS, (tuple, list)):
+        problems.append("FACTORIAL_CELLS 必须是 (名称, 变体) 序列")
+    else:
+        for entry in FACTORIAL_CELLS:
+            if (not isinstance(entry, (tuple, list)) or len(entry) != 2
+                    or not isinstance(entry[1], str)):
+                problems.append(f"全因子格定义结构非法：{entry!r}")
+                continue
+            factorial_variants.append(entry[1])
+    if (len(set(factorial_variants)) != 8
+            or set(factorial_variants) != set(normalized)):
         problems.append(
             "全因子 8 格与 GATE_FACTORS 不一致："
             f"cells={sorted(set(factorial_variants))}，"
-            f"factors={sorted(GATE_FACTORS)}")
+            f"factors={sorted(normalized)}")
+    # 交互检验使用的 cell -> 变体映射是另一份实验设计元数据，必须与
+    # GATE_FACTORS 的因子定义逐格对齐（例如 AB 格必须真的启用 A+B）。
+    cell_map = globals().get("_FACTORIAL_CONTRAST_CELLS")
+    if cell_map is not None:
+        if not isinstance(cell_map, dict):
+            problems.append("_FACTORIAL_CONTRAST_CELLS 必须是映射")
+        else:
+            cell_variants = set()
+            for cell, variant in cell_map.items():
+                if cell == "none":
+                    cell_factors = frozenset()
+                elif (isinstance(cell, str) and cell
+                        and len(set(cell)) == len(cell)
+                        and all(ch in "ABC" for ch in cell)):
+                    cell_factors = frozenset(cell)
+                else:
+                    cell_factors = None
+                if (cell_factors is None
+                        or cell_factors not in _GATE_FACTOR_SUBSETS):
+                    problems.append(f"全因子格名非法：{cell!r}")
+                    continue
+                if not isinstance(variant, str):
+                    problems.append(
+                        f"全因子格 {cell!r} 的变体名非法：{variant!r}")
+                    continue
+                cell_variants.add(variant)
+                if normalized.get(variant) != cell_factors:
+                    problems.append(
+                        f"全因子格 {cell!r} -> {variant!r} 的因子集合为 "
+                        f"{sorted(normalized.get(variant, ()))}，"
+                        f"应为 {sorted(cell_factors)}")
+            if cell_variants != set(normalized):
+                problems.append(
+                    "交互检验的全因子变体集合与 GATE_FACTORS 不一致："
+                    f"cells={sorted(cell_variants)}，"
+                    f"factors={sorted(normalized)}")
     # 审计表必须恰好覆盖 A/B/C 的“加入/去掉”六条单因素边。只逐条校验
     # 已列出的对比会漏掉“整条对比被删除/重复”这种漂移：表少一行时仍
     # 全部合法，却不再覆盖某个组件的归因。
     required = {(factor, direction) for factor in ("A", "B", "C")
                 for direction in ("add", "remove")}
     seen = set()
-    for factor, direction, cand, ref in SINGLE_FACTOR_CONTRASTS:
-        pair = (factor, direction)
-        if pair in seen:
+    seen_pairs = {}
+    if (not isinstance(SINGLE_FACTOR_CONTRASTS, (tuple, list))
+            or isinstance(SINGLE_FACTOR_CONTRASTS, str)):
+        problems.append("SINGLE_FACTOR_CONTRASTS 必须是对比序列")
+        contrast_entries = []
+    else:
+        contrast_entries = SINGLE_FACTOR_CONTRASTS
+    for entry in contrast_entries:
+        if not (isinstance(entry, (tuple, list)) and len(entry) == 4):
+            problems.append(f"单因素对比定义结构非法：{entry!r}")
+            continue
+        factor, direction, cand, ref = entry
+        if not all(isinstance(x, str) for x in (factor, direction, cand, ref)):
+            problems.append(f"单因素对比定义含非字符串字段：{entry!r}")
+            continue
+        edge = (factor, direction)
+        if factor not in ("A", "B", "C") or direction not in ("add", "remove"):
+            problems.append(f"存在非 A/B/C 单因素声明：{factor}/{direction}")
+            continue
+        if edge in seen:
             problems.append(
                 f"重复的单因素对比声明：{factor}/{direction}")
-        seen.add(pair)
-        diff = changed_gate_factors(cand, ref)
-        if diff is None:
+        seen.add(edge)
+        if cand == ref:
+            problems.append(f"单因素对比两侧相同：{cand} vs {ref}")
+            continue
+        if (cand, ref) in seen_pairs:
+            problems.append(
+                f"重复的单因素对比对：{cand} vs {ref}"
+                f"（已声明为 {seen_pairs[(cand, ref)][0]}/"
+                f"{seen_pairs[(cand, ref)][1]}）")
+            continue
+        seen_pairs[(cand, ref)] = (factor, direction)
+        c = normalized.get(cand)
+        r = normalized.get(ref)
+        if c is None or r is None:
             problems.append(f"{cand} vs {ref} 不在门控变体内，无法做单因素归因")
             continue
+        diff = frozenset(c.symmetric_difference(r))
         if diff != frozenset({factor}):
             problems.append(
                 f"{cand} vs {ref} 声明为单因素 {factor}，实际改变 "
                 f"{sorted(diff) or '无'}")
+            continue
+        # 方向不只是展示字段：remove 必须从参照中恰好去掉该因子，add 必须
+        # 在参照上恰好加入该因子。写反方向会让“加入/去掉”的效应解释颠倒。
+        if direction == "remove":
+            direction_ok = (c < r and (r - c) == frozenset({factor}))
+            expected_shape = f"{ref} 去掉 {factor} 得到 {cand}"
+        else:
+            direction_ok = (r < c and (c - r) == frozenset({factor}))
+            expected_shape = f"{ref} 加入 {factor} 得到 {cand}"
+        if not direction_ok:
+            problems.append(
+                f"{cand} vs {ref} 声明方向 {direction} 与因子变化不符："
+                f"应为 {expected_shape}")
             continue
         contrasts.append({"factor": factor, "direction": direction,
                           "candidate": cand, "reference": ref,
@@ -255,29 +422,60 @@ def single_factor_audit():
                         for factor, direction in sorted(extra)))
     # 组件判定实际消费的检验对也必须落在已审计表内；否则改 COMPONENT_TESTS
     # 就能绕开审计去使用多因子对比（运行期而非仅测试期拦截）。
-    audited_pairs = {(c["candidate"], c["reference"]) for c in contrasts}
-    component_tests = globals().get("COMPONENT_TESTS") or ()
+    audited_edges = {(c["candidate"], c["reference"]):
+                     (c["factor"], c["direction"]) for c in contrasts}
+    component_tests = globals().get("COMPONENT_TESTS")
+    if not isinstance(component_tests, (tuple, list)):
+        problems.append("COMPONENT_TESTS 必须是组件检验序列")
+        component_tests = []
+    seen_components = set()
     for entry in component_tests:
         if not (isinstance(entry, (tuple, list)) and len(entry) == 4):
             problems.append(f"组件检验定义结构非法：{entry!r}")
             continue
-        name, loo_pair, add_pair, _primary = entry
-        for pair in (loo_pair, add_pair):
+        name, loo_pair, add_pair, primary = entry
+        token = str(name)[:1] if isinstance(name, str) and name else None
+        if token not in ("A", "B", "C"):
+            problems.append(
+                f"组件名 {name!r} 无法映射到 A/B/C，不能作为单组件检验")
+            expected = None
+        else:
+            expected = token
+            if expected in seen_components:
+                problems.append(f"组件 {expected} 存在重复的检验定义")
+            seen_components.add(expected)
+        if primary not in _EVIDENCE_METRICS:
+            problems.append(
+                f"组件 {name!r} 的主指标 {primary!r} 不是已登记指标")
+        for label, pair, expected_direction in (
+                ("去一法", loo_pair, "remove"),
+                ("全因子", add_pair, "add")):
             if (not isinstance(pair, (tuple, list)) or len(pair) != 2
-                    or not all(isinstance(x, str) for x in pair)
-                    or tuple(pair) not in audited_pairs):
+                    or not all(isinstance(x, str) for x in pair)):
+                problems.append(
+                    f"组件 {name!r} 的{label}对比结构非法：{pair!r}")
+                continue
+            edge = audited_edges.get(tuple(pair))
+            if edge is None:
                 problems.append(
                     f"组件 {name!r} 使用了未审计的单因素对比：{pair!r}")
                 continue
-            factor = single_factor_change(*pair)
-            expected = str(name)[:1] if str(name)[:1] in "ABC" else None
+            factor, direction = edge
             if expected is not None and factor != expected:
                 problems.append(
                     f"组件 {name!r} 的对比 {pair!r} 实际单因素为 {factor}，"
                     f"与组件 {expected} 不一致")
+            if direction != expected_direction:
+                problems.append(
+                    f"组件 {name!r} 的{label}对比 {pair!r} 方向为 {direction}，"
+                    f"应为 {expected_direction}")
+    missing_components = {"A", "B", "C"} - seen_components
+    if missing_components:
+        problems.append(
+            "缺少组件检验：" + ", ".join(sorted(missing_components)))
     return {"ok": not problems, "problems": problems,
             "contrasts": contrasts,
-            "factors": {v: sorted(f) for v, f in sorted(GATE_FACTORS.items())},
+            "factors": {v: sorted(f) for v, f in sorted(normalized.items())},
             "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
                      "X-only vs gate_only；整体对比（vs standard、LEGA vs "
                      "qgate）可跨多个因子，不作组件归因。")}
@@ -2923,13 +3121,18 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
             continue
         res = paired_t_test(a, b)
         change = single_factor_change(cand, ref)
+        # 只有审计表登记的六条边才可标成 single_factor。仅凭“对称差=1”会把
+        # 未登记的单因子对（例如方向写反、或临时拼出的对比）也标成可归因
+        # 证据，绕过 SINGLE_FACTOR_CONTRASTS 这个唯一事实来源。
+        audited = (cand, ref) in SINGLE_FACTOR_PAIRS
+        is_single = bool(audited and change)
         res.update({"candidate": cand, "reference": ref, "metric": metric_name,
                     "lower_is_better": bool(lower_better),
                     # 单因素标记进入 significance.json：只有单因素对比可用于
                     # 组件归因；vs standard / LEGA vs qgate 等整体对比即使显著
                     # 也不能把差异归给某一个 A/B/C 因子。
-                    "contrast_type": ("single_factor" if change else "overall"),
-                    "changed_factors": ([change] if change else [])})
+                    "contrast_type": ("single_factor" if is_single else "overall"),
+                    "changed_factors": ([change] if is_single else [])})
         if split_skipped:
             res["excluded_split_mismatches"] = split_skipped
         if protocol_skipped:

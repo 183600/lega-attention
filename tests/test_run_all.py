@@ -46,7 +46,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _fmt_mean_std, _fmt_signed,
                       changed_gate_factors,
                       component_evidence, cross_variant_badcase_map,
-                      COMPONENT_TESTS,
+                      COMPONENT_TESTS, GATE_FACTORS,
                       main as run_all_main,
                       data_protocol_preflight, data_report_binding_issue,
                       evaluate_registered_hypotheses,
@@ -4481,6 +4481,64 @@ def test_single_factor_audit_requires_complete_and_audited_contrasts():
     print("  [ok] 单因素审计拒绝缺失/重复对比与绕过审计表的组件检验")
 
 
+def test_single_factor_audit_rejects_broken_design_metadata():
+    """2^3 设计元数据、方向与组件检验本身损坏时，审计也必须显式失败。"""
+    # 8 个变体名都在，但两个变体拥有相同因子集合：某个因子格实际不存在。
+    bad_factors = dict(GATE_FACTORS)
+    bad_factors["qgate"] = frozenset({"A", "B"})
+    with mock.patch("run_all.GATE_FACTORS", bad_factors):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("完整 2^3" in p for p in audit["problems"]), audit
+
+    # 把“去掉 A”写成“加入 A”：方向是实验定义的一部分，不能靠展示字段糊弄。
+    swapped = (("A", "add", "lega_no_query", "lega"),) + tuple(
+        c for c in SINGLE_FACTOR_CONTRASTS if c != SINGLE_FACTOR_CONTRASTS[0])
+    with mock.patch("run_all.SINGLE_FACTOR_CONTRASTS", swapped):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("方向" in p for p in audit["problems"]), audit
+
+    # 组件检验缺一项/重复一项/名称无法映射/主指标非法，都不能静默通过。
+    with mock.patch("run_all.COMPONENT_TESTS", COMPONENT_TESTS[:2]):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("缺少组件检验" in p for p in audit["problems"]), audit
+    with mock.patch("run_all.COMPONENT_TESTS", COMPONENT_TESTS + (COMPONENT_TESTS[0],)):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("重复的检验定义" in p for p in audit["problems"]), audit
+    bad_name = COMPONENT_TESTS + (
+        ("D 额外组件", ("lega_no_query", "lega"),
+         ("qgate", "gate_only"), "PPL"),)
+    with mock.patch("run_all.COMPONENT_TESTS", bad_name):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("无法映射到 A/B/C" in p for p in audit["problems"]), audit
+    bad_metric = (COMPONENT_TESTS[0][:3] + ("loss",),) + COMPONENT_TESTS[1:]
+    with mock.patch("run_all.COMPONENT_TESTS", bad_metric):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("不是已登记指标" in p for p in audit["problems"]), audit
+    # 组件把去一法/全因子两套对比对调：因子虽然都是 A，方向仍然错误。
+    swapped_component = (("A 查询项", ("qgate", "gate_only"),
+                          ("lega_no_query", "lega"), "PPL"),) + COMPONENT_TESTS[1:]
+    with mock.patch("run_all.COMPONENT_TESTS", swapped_component):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("方向为 add" in p or "方向为 remove" in p
+                   for p in audit["problems"]), audit
+
+    # 外部损坏键不能让“是否单因素”的查询崩溃，只能返回 None/不可归因。
+    assert changed_gate_factors([], "lega") is None
+    assert changed_gate_factors("lega", {"bad": "key"}) is None
+    unknown_factor = dict(GATE_FACTORS, mystery=frozenset({"D"}))
+    with mock.patch("run_all.GATE_FACTORS", unknown_factor):
+        assert changed_gate_factors("mystery", "gate_only") is None
+        assert single_factor_change("mystery", "gate_only") is None
+    print("  [ok] 单因素审计拒绝不完整 2^3、错误方向与损坏的组件检验")
+
+
 def test_paired_comparisons_marks_contrast_type():
     """配对结果必须机器可读地标出 single_factor/overall，避免事后误归因。"""
     runs = {}
@@ -4493,7 +4551,10 @@ def test_paired_comparisons_marks_contrast_type():
                    for s in (1, 2, 3)}
     pairs = list(SINGLE_FACTOR_PAIRS) + [
         ("lega", "standard"), ("lega", "qgate"),
-        ("lega_conc_only", "lega")]
+        ("lega_conc_only", "lega"),
+        # 方向写反的单因子对没有登记在 SINGLE_FACTOR_PAIRS 中，不能
+        # 仅凭“对称差=1”就获得可归因标记。
+        ("lega", "lega_no_query")]
     out = _paired_comparisons(
         runs, pairs, "PPL", lambda slot: _ppl_of(slot.get("eval")),
         lower_better=True)
@@ -4505,6 +4566,7 @@ def test_paired_comparisons_marks_contrast_type():
     assert by[("lega", "standard")]["contrast_type"] == "overall"
     assert by[("lega", "qgate")]["contrast_type"] == "overall"
     assert by[("lega_conc_only", "lega")]["contrast_type"] == "overall"
+    assert by[("lega", "lega_no_query")]["contrast_type"] == "overall"
     print("  [ok] 配对检验结果带 single_factor/overall 机器可读标记")
 
 
