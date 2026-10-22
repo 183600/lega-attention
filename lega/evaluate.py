@@ -433,8 +433,12 @@ def main():
     # 入口下都从同一 RNG 状态出发）。种子来自 checkpoint 元数据：bool/小数
     # 若被 int() 截断，评测会以与记录不同的种子播种（1.5 → 1、True → 1），
     # 身份审计随之失效——非法元数据必须显式拒绝而不是静默改写。
-    seed = ck.get("seed")
-    set_seed(0 if seed is None else strict_int(seed, "checkpoint seed"))
+    seed_raw = ck.get("seed")
+    # 输出/播种都用规范化后的整数：源元数据里的 5.0 不能写成 5.0，否则
+    # eval.json 与台账的 seed 身份会与真正 set_seed 的值不同。
+    seed = (None if seed_raw is None
+            else strict_int(seed_raw, "checkpoint seed"))
+    set_seed(0 if seed is None else seed)
     split = args.split
     if split == "auto":
         split = "test" if (os.path.exists(os.path.join(args.data_dir, "test.bin"))
@@ -463,7 +467,7 @@ def main():
                 "ckpt": os.path.abspath(args.ckpt),
                 "ckpt_sha256": ckpt_sha256,
                 "variant": ck.get("variant", model.variant),
-                "seed": ck.get("seed"),
+                "seed": seed,
                 "test_data_fingerprint": test_data_fingerprint,
             })
         except OSError as e:
@@ -532,7 +536,7 @@ def main():
 
     res = {
         "variant": ck.get("variant", model.variant),
-        "seed": ck.get("seed"),
+        "seed": seed,
         "ckpt": args.ckpt,
         # 被评测产物的内容指纹：结果与 checkpoint 一一绑定，换/改 checkpoint
         # 后旧结果无法冒充（与 test 访问账本、实验台账中的哈希同一口径）
@@ -615,7 +619,7 @@ def main():
                         "reason": "worst_window_dump_on_test",
                         "ckpt_sha256": ckpt_sha256,
                         "variant": ck.get("variant", model.variant),
-                        "seed": ck.get("seed"),
+                        "seed": seed,
                         "n_worst": int(args.worst_n),
                         "test_data_fingerprint": test_data_fingerprint,
                     })

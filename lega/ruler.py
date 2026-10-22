@@ -830,10 +830,13 @@ def main():
     # 绑定，而不是只信目录名；同一路径被新权重覆盖后可立即发现。
     ckpt_sha256 = sha256_file(args.ckpt)
     tok = load_tokenizer(args.data_dir)
-    seed = ck.get("seed")
+    seed_raw = ck.get("seed")
     # checkpoint 元数据的种子同样不能被 int() 截断（1.5 → 1、True → 1）：
     # 截断后评测播种的种子与记录的种子不是同一个，身份审计形同虚设。
-    set_seed(0 if seed is None else strict_int(seed, "checkpoint seed"))
+    # 输出也使用规范化后的值（5.0 -> 5），保证结果与真正播种一致。
+    seed = (None if seed_raw is None
+            else strict_int(seed_raw, "checkpoint seed"))
+    set_seed(0 if seed is None else seed)
 
     import json
     import os
@@ -892,7 +895,7 @@ def main():
         if record_corpus_test_access(args.data_dir, corpus_source,
                                      ckpt_sha256=ckpt_sha256,
                                      variant=ck.get("variant"),
-                                     seed=ck.get("seed"), stage="ruler"):
+                                     seed=seed, stage="ruler"):
             print("[ruler] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
                   "已写入 test 访问账本；test 文本进入评测 prompt，"
                   "与后续 test PPL 评测共用同一批文本，需在报告中披露")
@@ -918,7 +921,7 @@ def main():
                         amp=amp, gen_batch=gen_batch)
     # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务
     badcases = results.pop("_badcases", [])
-    payload = {"variant": ck.get("variant", model.variant), "seed": ck.get("seed"),
+    payload = {"variant": ck.get("variant", model.variant), "seed": seed,
                "ctx_lens": ctx_lens, "n_samples": n_samples,
                "sample_seed": sample_seed, "results": results,
                "badcases": badcases,

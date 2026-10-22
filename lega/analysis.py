@@ -738,6 +738,9 @@ def main():
     ckpt_seed_raw = ck.get("seed")
     ckpt_seed = (0 if ckpt_seed_raw is None
                  else strict_int(ckpt_seed_raw, "checkpoint seed"))
+    # 输出用“缺失=None / 有值=规范化整数”，不把缺失种子写成 0；5.0 也
+    # 不能原样写进结果，否则与真正 set_seed 的身份不一致。
+    ckpt_seed_out = None if ckpt_seed_raw is None else ckpt_seed
     set_seed(ckpt_seed)
     provenance = load_provenance(
         os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir)
@@ -836,7 +839,7 @@ def main():
             os.remove(csv_path)
         except FileNotFoundError:
             pass
-        save_json({"variant": variant, "seed": ck.get("seed"), "n_records": 0,
+        save_json({"variant": variant, "seed": ckpt_seed_out, "n_records": 0,
                    "note": "no examples", "skipped_tasks": skipped_tasks,
                    "ckpt": os.path.abspath(args.ckpt),
                    "ckpt_sha256": ckpt_sha256,
@@ -882,7 +885,7 @@ def main():
         summary["auroc_cluster_bootstrap"] = auroc_cluster_bootstrap(
             records, n_resamples=n_boot, seed=ckpt_seed)
     # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
-    summary["seed"] = ck.get("seed")
+    summary["seed"] = ckpt_seed_out
     # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计
     summary["corpus_source"] = corpus_source
     summary["corpus_held_out"] = corpus_source in ("val", "test")
