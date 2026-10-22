@@ -896,3 +896,32 @@ def test_obs_array_string_arrays_use_strict_numeric_parsing():
     cal = calibration_metrics(np.array(["1_0", "0.5"]),
                               np.array([1.0, 0.0]))
     assert cal["n"] == 1 and cal["n_pos"] == 0, cal
+
+
+def test_stats_stable_at_float_limits():
+    """合法但接近 float 上限的观测不能在均值/方差/中位数处溢出成 inf。
+
+    这些数值来自损坏/极端的外部结果；统计函数必须给出有限结果或显式
+    缺失，不能把 inf/nan 写进 JSON 或让置换检验 p 值失真。
+    """
+    import math
+    huge = 1e308
+    m, s = mean_std([huge, huge, huge])
+    assert m == huge and s == 0.0, (m, s)
+    m2, s2 = mean_std([huge, -huge])
+    assert m2 == 0.0 and s2 is not None and math.isfinite(s2), (m2, s2)
+    # 偶数个相同极值的中位数不能先相加再除二。
+    r = paired_sign_test([huge, huge], [0.0, 0.0])
+    assert r["median_diff"] == huge, r
+    # 配对 t：全部相同的有限差（std=0）应给出 p=0，而不是 nan。
+    t = paired_t_test([huge, huge], [0.0, 0.0])
+    assert t["mean_diff"] == huge and t["std_diff"] == 0.0
+    assert t["p"] == 0.0 and t["t"] == float("inf"), t
+    # 置换检验：p 值只依赖相对大小，缩放后不应溢出。
+    p = paired_sign_flip_test([huge, huge, huge], [0.0, 0.0, 0.0])
+    assert p["mean_diff"] == huge and p["p_perm"] == 0.25, p
+    ci = bootstrap_mean_ci([huge, huge, huge], n_resamples=20)
+    assert ci == (huge, huge), ci
+    # 不可表示的 MDE 返回 None，而不是 inf。
+    assert min_detectable_effect(1e308, 2) is None
+    print("  [ok] 极大有限观测：均值/方差/中位数/置换/bootstrap 不溢出")

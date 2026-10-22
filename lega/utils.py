@@ -624,23 +624,65 @@ def _open_unit_interval(value, name: str) -> float:
     return f
 
 
+def _stable_mean_std(values):
+    """有限观测的均值/样本标准差，先按最大绝对值缩放以避免溢出。
+
+    ``np.mean``/``np.std`` 对接近 float 上限的合法观测会在求和/平方时
+    溢出成 inf（例如 [1e308, 1e308] 的均值本应是 1e308，却得到 nan/inf）。
+    统计量是尺度等变的：先除以 max|x| 再还原，可在不改变结果的前提下把
+    中间量限制在 [-1,1]。仍不可表示时返回 None（缺失值语义），不把 inf
+    写进报告。
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    n = int(arr.size)
+    if n == 0:
+        return None, None
+    scale = float(np.max(np.abs(arr)))
+    if scale == 0.0:
+        return 0.0, (0.0 if n >= 2 else None)
+    scaled = arr / scale
+    mean_scaled = float(scaled.mean())
+    # 缩放后均值理论上在 [-1,1]；夹一下防止舍入让它略越界。
+    mean_scaled = min(1.0, max(-1.0, mean_scaled))
+    mean = mean_scaled * scale
+    if n < 2:
+        return (mean if math.isfinite(mean) else None), None
+    sd = float(scaled.std(ddof=1)) * scale
+    return (mean if math.isfinite(mean) else None,
+            sd if math.isfinite(sd) else None)
+
+
+def _stable_median(values):
+    """有限观测的中位数（偶数个时用 a/2+b/2，避免 a+b 溢出）。
+
+    numpy/Python 的常规中位数对偶数样本会先相加再除以 2；[1e308, 1e308]
+    因此得到 inf，和均值/方差的溢出是同一类问题。
+    """
+    arr = np.sort(np.asarray(values, dtype=np.float64))
+    n = int(arr.size)
+    if n == 0:
+        return None
+    mid = n // 2
+    if n % 2:
+        return float(arr[mid])
+    return float(arr[mid - 1] / 2.0 + arr[mid] / 2.0)
+
+
 def mean_std(values):
     """样本均值与样本标准差（ddof=1，无偏）。n<2 时 std 为 None。
 
     统计学约定：跨随机种子的结果必须报告 Mean ± Std（样本标准差），
-    单种子结果无法评估方差，调用方应显式标注 n=1。
+    单种子结果无法评估方差，调用方应显式标注 n=1。使用缩放后的稳定
+    计算，避免巨大但合法的观测在求和/平方时溢出。
     """
     vals = []
     for v in values:
         f = _finite_observation(v)
         if f is not None:
             vals.append(f)
-    a = np.asarray(vals, dtype=np.float64)
-    if a.size == 0:
+    if not vals:
         return None, None
-    if a.size == 1:
-        return float(a[0]), None
-    return float(a.mean()), float(a.std(ddof=1))
+    return _stable_mean_std(vals)
 
 
 def _betacf(a: float, b: float, x: float) -> float:
@@ -783,7 +825,12 @@ def _paired_diffs(a, b) -> np.ndarray:
         xf, yf = _finite_observation(x), _finite_observation(y)
         if xf is None or yf is None:
             continue
-        diffs.append(xf - yf)
+        d = xf - yf
+        # 两个有限观测的差仍可能溢出（1e308 - (-1e308)）：该配对没有可表示
+        # 的差值，与 TOST 的 _paired_diffs 同口径按缺失剔除，而不是把 inf
+        # 送进均值/方差/置换检验。
+        if math.isfinite(d):
+            diffs.append(d)
     return np.asarray(diffs, dtype=np.float64)
 
 
@@ -803,7 +850,7 @@ def paired_sign_test(a, b) -> dict:
            "n_zero": None, "p_sign": None, "exact": True}
     if n == 0:
         return out
-    out["median_diff"] = float(np.median(d))
+    out["median_diff"] = _stable_median(d)
     n_pos = int(np.count_nonzero(d > 0))
     n_neg = int(np.count_nonzero(d < 0))
     n_zero = int(np.count_nonzero(d == 0))
@@ -832,11 +879,14 @@ def paired_t_test(a, b) -> dict:
     if n == 0:
         return {"n": 0, "mean_diff": None, "std_diff": None,
                 "t": None, "df": None, "p": None, "d_z": None}
-    mean_diff = float(d.mean())
+    mean_diff, std_diff = _stable_mean_std(d)
     if n < 2:
         return {"n": n, "mean_diff": mean_diff, "std_diff": None,
                 "t": None, "df": None, "p": None, "d_z": None}
-    std_diff = float(d.std(ddof=1))
+    if mean_diff is None or std_diff is None:
+        # 差值本身有限，但均值/方差超出 float 表示范围：无法给出可靠检验。
+        return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
+                "t": None, "df": n - 1, "p": None, "d_z": None}
     df = n - 1
     if std_diff == 0.0:
         p = 1.0 if mean_diff == 0.0 else 0.0
@@ -887,11 +937,15 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
            "exact": None, "n_resamples": None}
     if n == 0:
         return out
-    mean_diff = float(d.mean())
+    mean_diff, _ = _stable_mean_std(d)
     out["mean_diff"] = mean_diff
     if n < 2:
         return out
-    obs = abs(mean_diff)
+    # 置换统计量只依赖差值的相对大小：先按 max|d| 缩放再做翻转/均值，
+    # 避免 [1e308, 1e308] 这类合法观测在求和时溢出成 inf，使 p 值失真。
+    scale = float(np.max(np.abs(d)))
+    scaled = d / scale if scale > 0.0 else d
+    obs = abs(float(scaled.mean()))
     if obs == 0.0:
         # 全零差：任何翻转都不改变均值，p=1（无可检效应）。
         out.update({"p_perm": 1.0, "exact": True, "n_resamples": 2 ** n})
@@ -900,7 +954,7 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
         # 精确全枚举：2^n 个翻转样本（含观测自身与其全反号）。
         signs = (np.arange(2 ** n, dtype=np.int64)[:, None]
                  >> np.arange(n, dtype=np.int64)[None, :]) & 1
-        flipped = d[None, :] * (1.0 - 2.0 * signs)
+        flipped = scaled[None, :] * (1.0 - 2.0 * signs)
         ge = int((np.abs(flipped.mean(axis=1)) >= obs - 1e-15).sum())
         out.update({"p_perm": ge / float(2 ** n), "exact": True,
                     "n_resamples": int(2 ** n)})
@@ -909,7 +963,7 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
     # 双侧口径把观测自身与其全反号一并计入（+2），与精确枚举一致。
     rng = np.random.default_rng(seed)
     flips = rng.integers(0, 2, size=(int(n_resamples), n)) * 2.0 - 1.0
-    stat = np.abs((d[None, :] * flips).mean(axis=1))
+    stat = np.abs((scaled[None, :] * flips).mean(axis=1))
     ge = int((stat >= obs - 1e-15).sum())
     out.update({"p_perm": (ge + 2) / float(n_resamples + 2),
                 "exact": False, "n_resamples": int(n_resamples)})
@@ -940,9 +994,19 @@ def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
         return None
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, arr.size, size=(n_resamples, arr.size))
-    means = arr[idx].mean(axis=1)
+    scale = float(np.max(np.abs(arr)))
+    if scale == 0.0:
+        means = np.zeros(n_resamples, dtype=np.float64)
+    else:
+        # 缩放后重采样求均值，避免 [1e308, 1e308] 的 numpy 求和溢出；
+        # 均值是尺度等变的，还原后与未缩放口径一致。
+        means = (arr / scale)[idx].mean(axis=1) * scale
+    if not np.all(np.isfinite(means)):
+        return None
     alpha = (1.0 - ci) / 2.0
     lo, hi = np.quantile(means, [alpha, 1.0 - alpha])
+    if not (math.isfinite(float(lo)) and math.isfinite(float(hi))):
+        return None
     return float(lo), float(hi)
 
 
@@ -970,7 +1034,8 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
         return None
     nd = statistics.NormalDist()
     z = nd.inv_cdf(1.0 - float(alpha) / 2.0) + nd.inv_cdf(float(power))
-    return float(z * std / math.sqrt(int(n)))
+    out = float(z * std / math.sqrt(int(n)))
+    return out if math.isfinite(out) else None
 
 
 def wilson_score_ci(k: int, n: int, ci: float = 0.95):
