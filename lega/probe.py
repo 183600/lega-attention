@@ -507,9 +507,10 @@ def linear_probe(records: Sequence[Dict], folds: int = DEFAULT_FOLDS,
 
     def _ex_key(ex):
         # example 可能缺失或类型混杂（旧/外部记录）：规范化为可排序、可哈希的
-        # 键。缺失 example 的记录归入同一"未知"组（分组宁可偏合并也绝不跨折，
-        # 泄漏防护不受影响），避免 sorted 在 None 与数值混排时抛 TypeError。
-        return ("missing", "") if ex is None else ("example", str(ex))
+        # 键。类型名必须进入键：1 与 "1" 是两个不同的 example，仅用 str()
+        # 会把它们合并成同一 CV 组并少报 n_examples。
+        return (("missing", "") if ex is None
+                else ("example", type(ex).__name__, str(ex)))
 
     ex_keys = [_ex_key(r.get("example")) for r in valid_all]
     report.update({

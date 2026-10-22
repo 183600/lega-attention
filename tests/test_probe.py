@@ -384,3 +384,19 @@ def test_linear_probe_skips_non_dict_records():
     assert rep["n_records"] == len(recs)
     assert rep["n_valid"] > 0
     print("  [ok] 线性探针：非对象记录被剔除")
+
+
+def test_linear_probe_distinguishes_example_ids_of_different_types():
+    """example=1 与 example="1" 是不同样例，不能合并成一个 CV 组。"""
+    from lega.probe import linear_probe
+
+    def _rec(ex, hit, lag):
+        return {"example": ex, "hit": hit, "log_n": 1.0 + lag,
+                "max_p": 0.5, "qterm": 0.1 + lag, "layer": 0, "head": 0}
+
+    recs = [_rec(1, 1, 0.0), _rec("1", 0, 0.1),
+            _rec(2, 1, 0.2), _rec("2", 0, 0.3)]
+    rep = linear_probe(recs, folds=2, l2_grid=[0.0], seed=0)
+    assert rep["n_examples"] == 4, rep["n_examples"]
+    # 两组数据仍可估计（没有因为键冲突退化成单组）
+    assert rep["folds"] == 2
