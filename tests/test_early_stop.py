@@ -17,7 +17,7 @@ from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
 from lega.train import (_config_finite_float, _config_int, _config_min_delta,
                         _config_nonneg_float, _config_probability,
-                        early_stop_update)
+                        _meta_vocab_size, early_stop_update)
 
 
 def test_early_stop_update_semantics():
@@ -63,6 +63,22 @@ def test_config_int_rejects_bool_fraction_and_below_min():
     assert _config_int("2", "log_every", 1) == 2
     assert _config_int(0, "warmup", 0) == 0
     print("  [ok] 训练配置整数：拒绝 bool/小数/非有限值/0 间隔")
+
+
+def test_meta_vocab_size_requires_exact_positive_int():
+    """meta.vocab_size 不允许 int() 截断或非正值，否则模型词表与数据错位。"""
+    for bad in (True, False, 1.5, "1.5", 0, -3, None, float("nan"),
+                float("inf"), object()):
+        try:
+            _meta_vocab_size({"vocab_size": bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 meta.vocab_size 未被拒绝: {bad!r}")
+    assert _meta_vocab_size({"vocab_size": 4}) == 4
+    assert _meta_vocab_size({"vocab_size": 4.0}) == 4
+    assert _meta_vocab_size({"vocab_size": "4"}) == 4
+    print("  [ok] meta.vocab_size：拒绝 bool/小数/非正值，接受精确整数")
 
 
 def test_config_min_delta_rejects_nonfinite_and_out_of_range():
@@ -167,6 +183,31 @@ def test_train_rejects_zero_log_every_before_training():
         assert not os.path.exists(os.path.join(out_dir, "train_log.jsonl"))
         assert not os.path.exists(os.path.join(out_dir, "eval.json"))
     print("  [ok] log_every=0 在开训前显式拒绝")
+
+
+def test_train_rejects_invalid_meta_vocab_before_artifacts():
+    """meta.vocab_size 为 bool/小数/非正值时必须在建模和写产物前失败。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        meta_path = os.path.join(data_dir, "meta.json")
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["vocab_size"] = 1.5
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        out_dir = os.path.join(tmp, "run")
+        try:
+            _run_train(_cfg(), data_dir, out_dir)
+        except ValueError as e:
+            assert "meta.vocab_size" in str(e), e
+        else:
+            raise AssertionError("非法 meta.vocab_size 未被拒绝")
+        assert not os.path.exists(os.path.join(out_dir, "train_log.jsonl"))
+        assert not os.path.exists(os.path.join(out_dir, "eval.json"))
+    print("  [ok] 非法 meta.vocab_size 在建模前显式拒绝")
 
 
 def test_train_rejects_invalid_model_floats_before_artifacts():

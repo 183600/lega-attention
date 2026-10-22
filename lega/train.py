@@ -740,6 +740,20 @@ def _config_int(value, name: str, minimum: int) -> int:
     return value
 
 
+def _meta_vocab_size(meta: dict) -> int:
+    """meta.vocab_size 必须是精确正整数。
+
+    meta.json 是外部输入：``int(True)``/``int(1.5)`` 会静默变成 1，
+    ``int(-3)`` 会构造出负词表并在训练中途才以越界错误失败。模型词表一旦
+    与数据元数据错位，checkpoint 和评测口径都不可比，因此在建模前显式拒绝。
+    """
+    vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
+    if vocab_size <= 0:
+        raise ValueError(
+            f"meta.vocab_size 必须是正整数，收到 {vocab_size}")
+    return vocab_size
+
+
 def _config_nonneg_float(value, name: str) -> float:
     """训练数值超参数必须是有限非负数，拒绝 bool/NaN/Inf/负值。
 
@@ -950,6 +964,7 @@ def main():
 
     set_seed(seed)
     meta = load_meta(args.data_dir)
+    vocab_size = _meta_vocab_size(meta)
     train = load_bin(args.data_dir, "train")
     val = load_bin(args.data_dir, "val")
 
@@ -1056,7 +1071,7 @@ def main():
         json.dump(cfg_used, f, ensure_ascii=False, indent=2)
 
     model_cfg = dict(
-        vocab_size=int(meta["vocab_size"]), block_size=block_size,
+        vocab_size=vocab_size, block_size=block_size,
         d_model=d_model, n_layers=n_layers,
         n_heads=n_heads, ffn_mult=ffn_mult,
         dropout=dropout,
@@ -1194,7 +1209,7 @@ def main():
                 model, batches, device, step, where, value,
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
                 grad_norm_history=gn_hist, amp_dtype=amp_dt,
-                vocab_size=int(meta["vocab_size"]),
+                vocab_size=vocab_size,
                 consumed_batches=consumed, consumed_step_labels=labels,
                 peak_lr=base_lrs[0], first_bad_step=first_bad_step,
                 interval=interval, optimizer=opt)
