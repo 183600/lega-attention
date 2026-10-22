@@ -777,10 +777,21 @@ def test_rel_pct_and_eff_cells():
     assert _eff_cell(entry, "mem", 256) == 3.5
     assert _eff_cell(None, "flops", 256) is None
     assert _eff_cell({"efficiency": {}}, "flops", 256) is None
+    # 旧格式只有 per-token KV 时按 ctx 线性换算；超大/溢出 ctx 必须按缺失
+    # 处理，而不是把 OverflowError 抛给汇总或写出 inf。
+    old_kv = {"efficiency": {"kv_cache_mb_per_tok": 2.0}}
+    assert _eff_cell(old_kv, "kv_mem", 256) == 512.0
+    assert _eff_cell(old_kv, "kv_mem", 10 ** 400) is None
+    huge_kv = {"efficiency": {"kv_cache_mb_per_tok": 1e308}}
+    assert _eff_cell(huge_kv, "kv_mem", 1e308) is None
     from run_all import _noise_floor_pct
     assert _noise_floor_pct(3.0, 4.0) == 5.0
     assert _noise_floor_pct(1e308, 1e308) is None
     assert _noise_floor_pct(-1.0, 2.0) is None
+    # 外部坏值不能参与 `< 0` 比较（TypeError），统一按缺失处理。
+    assert _noise_floor_pct(True, 2.0) is None
+    assert _noise_floor_pct("bad", 2.0) is None
+    assert _noise_floor_pct(float("nan"), 2.0) is None
     print("  [ok] _rel_pct/_eff_cell（缺失安全）")
 
 
@@ -5392,6 +5403,21 @@ def test_ruler_macro_bootstrap_preserves_cell_weights_and_is_deterministic():
     assert abs(ci[0] - 0.5) < 1e-12 and abs(ci[1] - 0.5) < 1e-12, ci
     assert ci == _ruler_macro_bootstrap_ci(per_seed, n_boot=200), "必须可复现"
     assert _ruler_macro_bootstrap_ci([]) is None
+    # bootstrap 次数/随机种子是严格整数身份：0/负数/bool/小数不能经
+    # int()/max(1,·) 静默变成另一次预算。
+    for bad in (0, -1, True, 2.5):
+        try:
+            _ruler_macro_bootstrap_ci(per_seed, n_boot=bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    try:
+        _ruler_macro_bootstrap_ci(per_seed, rng_seed=-1)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
     print("  [ok] RULER macro bootstrap：单元格等权、确定性、空输入安全")
 
 
@@ -5415,6 +5441,13 @@ def test_ruler_macro_absolute_ci_matches_task_equal_estimand():
     assert abs(r["ci95"][0] - 0.5) < 1e-12
     assert abs(r["ci95"][1] - 0.5) < 1e-12
     assert r == _ruler_macro_absolute_ci([payload, payload], n_boot=200)
+    for bad in (0, -1, True, 2.5):
+        try:
+            _ruler_macro_absolute_ci([payload, payload], n_boot=bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
     # 旧产物无逐样例记录：不给区间，也不伪造 0 宽区间
     legacy = {"results": {"a": {"1": {"em": 0.5, "n": 2}}}}
     assert _ruler_macro_absolute_ci([legacy]) is None
@@ -5486,7 +5519,25 @@ def test_window_bootstrap_survives_huge_finite_window_diffs():
     assert st2["p"] == 1.0, st2
     # 直接传入非有限窗口差时按缺失过滤；全部无效则返回 None。
     assert _window_bootstrap_stats([[float("nan")]]) is None
-    print("  [ok] 窗口分层 bootstrap：巨大有限差/正负抵消不溢出，非有限差过滤")
+    # 重采样预算/种子必须是严格整数：0/负数会让空分位数崩溃，bool/小数
+    # 不能经 int() 截断成另一个与声明不一致的预算。
+    for bad in (0, -1, True, 2.5):
+        try:
+            _window_bootstrap_stats(huge, n_resamples=bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    # 整数字符串与全项目 strict_int 口径一致，规范化为整数。
+    assert _window_bootstrap_stats(huge, n_resamples="2") is not None
+    try:
+        _window_bootstrap_stats(huge, n_resamples=10, seed=-1)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    print("  [ok] 窗口分层 bootstrap：巨大有限差/正负抵消不溢出，"
+          "非有限差过滤，重采样预算/种子严格校验")
 
 
 def test_ruler_micro_average_survives_huge_finite_weights():

@@ -1909,6 +1909,12 @@ def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOO
     单元格等权则会在任务间格数不等时偏离预注册口径。固定 rng_seed 保证
     同一输入产生同一区间，便于审计复现。
     """
+    n_boot = strict_int(n_boot, "n_boot")
+    if n_boot < 1:
+        raise ValueError(f"n_boot 必须 >= 1，收到 {n_boot!r}")
+    rng_seed = strict_int(rng_seed, "rng_seed")
+    if rng_seed < 0:
+        raise ValueError(f"rng_seed 必须 >= 0，收到 {rng_seed!r}")
     cells = [c for c in (per_seed_cell_diffs or []) if isinstance(c, dict)]
     by_seed = []
     for c in cells:
@@ -1926,7 +1932,7 @@ def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOO
         return None
     rng = np.random.default_rng(rng_seed)
     reps = []
-    for _ in range(max(1, int(n_boot))):
+    for _ in range(n_boot):
         seed_means = []
         for by_task in by_seed:
             task_means = []
@@ -1958,6 +1964,12 @@ def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP
     返回 {ci95, n_seeds, n_cells, n_samples, method}；旧产物缺逐样例记录或
     任一单元格为空时返回 None，不伪造区间。
     """
+    n_boot = strict_int(n_boot, "n_boot")
+    if n_boot < 1:
+        raise ValueError(f"n_boot 必须 >= 1，收到 {n_boot!r}")
+    rng_seed = strict_int(rng_seed, "rng_seed")
+    if rng_seed < 0:
+        raise ValueError(f"rng_seed 必须 >= 0，收到 {rng_seed!r}")
     per_seed = []
     n_cells = n_samples = 0
     for d in ruler_payloads or []:
@@ -1984,7 +1996,7 @@ def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP
         return None
     rng = np.random.default_rng(rng_seed)
     reps = []
-    for _ in range(max(1, int(n_boot))):
+    for _ in range(n_boot):
         seed_macros = []
         for by_task in per_seed:
             task_means = []
@@ -2262,6 +2274,14 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
     自相关均值，便于判断两种区间为何不同。块 bootstrap 仍是近似，只作
     探索性稳健性证据。
     """
+    # 重采样次数/种子是循环预算与随机源身份：0/负数会让分位数计算在空数组
+    # 上崩溃，bool/小数经 int() 截断后会与调用方声明的次数不一致。
+    n_resamples = strict_int(n_resamples, "n_resamples")
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples 必须 >= 1，收到 {n_resamples!r}")
+    seed = strict_int(seed, "seed")
+    if seed < 0:
+        raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
     arrays = []
     for d in (seed_diffs or []):
         arr = np.asarray(d, dtype=np.float64).ravel()
@@ -5772,10 +5792,13 @@ def _eff_cell(entry, key, ctx):
                 return v
         per_tok = _num_or_none(eff.get("kv_cache_mb_per_tok"))
         if per_tok is not None:
+            # ctx 可能来自外部 JSON，是合法但超出 float 上限的大整数；换算
+            # 结果也可能溢出成 inf。两者都不能进入汇总/判定，按缺失处理。
             try:
-                return per_tok * float(ctx)
-            except (TypeError, ValueError):
+                out = per_tok * float(ctx)
+            except (TypeError, ValueError, OverflowError):
                 return None
+            return out if math.isfinite(out) else None
     return None
 
 
@@ -5820,7 +5843,11 @@ def _noise_floor_pct(base_noise, cand_noise):
 
     只有两端都有散布信息时才给出噪声下限：一侧缺失时无法判断"差值是否
     小于测量噪声"，按未过滤的原口径处理，避免用单侧散布低估/高估噪声。
+    外部 JSON 里的 bool/字符串/NaN/Inf 先统一按缺失处理，不能直接参与
+    ``< 0`` 比较而抛 TypeError。
     """
+    base_noise = _num_or_none(base_noise)
+    cand_noise = _num_or_none(cand_noise)
     if (base_noise is None or cand_noise is None
             or base_noise < 0.0 or cand_noise < 0.0):
         return None
