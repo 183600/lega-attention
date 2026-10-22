@@ -502,15 +502,19 @@ def sanity_summary(path: str) -> dict:
             out["malformed"] = True
         else:
             out["batch_sha256"] = batch
-    if (isinstance(checks, dict) and checks
-            and out["batch_sha256"] is not None):
+    modern_marker = out["batch_sha256"] is not None
+    if modern_marker:
         # batch_sha256 是真实 sanity CLI 的产物标记：此时 checks 必须是完整
-        # 的现代检查集，不能被裁剪成“只剩 loss”仍冒充通过。
-        missing = sorted(SANITY_REQUIRED_CHECKS - set(checks))
+        # 的现代检查集，不能被删掉整个 checks 字段或裁剪成“只剩 loss”仍冒充
+        # 通过。不能只在 checks 非空时才校验——删除 checks 恰好绕过了校验。
+        present_checks = set(checks) if isinstance(checks, dict) else set()
+        missing = sorted(SANITY_REQUIRED_CHECKS - present_checks)
         out["missing_checks"] = missing
         out["checks_complete"] = not missing
         if missing:
             out["malformed"] = True
+            out["failed_checks"] = out["failed_checks"] or []
+            out["checks_consistent"] = False
     for key in ("steps_planned", "steps_executed"):
         value = rec.get(key)
         if value is None:
@@ -524,12 +528,26 @@ def sanity_summary(path: str) -> dict:
             out["malformed"] = True
             continue
         out[key] = value
-    if out["steps_planned"] is not None and out["steps_executed"] is not None:
+    if modern_marker:
+        # 现代 sanity CLI 一定同时写计划/执行步数：只保留其中一个字段即可
+        # 绕过“计划步数未跑完”的一致性检查，必须按不完整证据处理。
+        if (out["steps_planned"] is None
+                or out["steps_executed"] is None):
+            out["steps_complete"] = False
+            out["malformed"] = True
+        else:
+            out["steps_complete"] = (out["steps_planned"] > 0
+                                     and out["steps_executed"]
+                                     == out["steps_planned"])
+            if out["steps_complete"] is False:
+                # 计划步数未跑完（NaN/断流提前 break）却声明 PASS：证据自相矛盾。
+                out["malformed"] = True
+    elif (out["steps_planned"] is not None
+          and out["steps_executed"] is not None):
         out["steps_complete"] = (out["steps_planned"] > 0
                                  and out["steps_executed"]
                                  == out["steps_planned"])
         if out["steps_complete"] is False:
-            # 计划步数未跑完（NaN/断流提前 break）却声明 PASS：证据自相矛盾。
             out["malformed"] = True
     raw_passed = rec.get("passed")
     if isinstance(raw_passed, bool):

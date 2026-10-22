@@ -1250,3 +1250,46 @@ def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
         "available": True, "diff_sha256": "d2", "diff_truncated": True})
     assert provenance_drift(start, moved)["changed"] is True
     print("  [ok] 截断的工作区补丁按 unknown 处理，哈希不同仍可确认变化")
+
+
+def test_sanity_summary_rejects_modern_result_without_checks_or_steps():
+    """现代 sanity 产物（带 batch_sha256）不能靠删字段绕过完整性校验。"""
+    from lega.repro import SANITY_REQUIRED_CHECKS, sanity_summary
+    all_checks = {k: True for k in SANITY_REQUIRED_CHECKS}
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        # 删除整个 checks 字段：batch_sha256 标记仍是“现代产物”，不能因此
+        # 跳过必需检查项覆盖校验。
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "batch_sha256": "b" * 64,
+                       "steps_planned": 10, "steps_executed": 10,
+                       "variant": "lega", "seed": 3}, f)
+        s = sanity_summary(p)
+        assert s["passed"] is False and s["malformed"] is True
+        assert s["checks_complete"] is False
+        assert set(s["missing_checks"]) == set(SANITY_REQUIRED_CHECKS)
+        # checks 结构损坏（不是对象）同样不能当成“旧文件没写 checks”。
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "batch_sha256": "b" * 64,
+                       "checks": ["loss_below_threshold"],
+                       "steps_planned": 10, "steps_executed": 10}, f)
+        s = sanity_summary(p)
+        assert s["passed"] is False and s["malformed"] is True
+        assert s["checks_complete"] is False
+        # 只删掉计划/执行步数之一：无法证明计划步数全部执行，按不完整处理。
+        for missing in ("steps_planned", "steps_executed"):
+            payload = {"passed": True, "batch_sha256": "b" * 64,
+                       "checks": all_checks,
+                       "steps_planned": 10, "steps_executed": 10}
+            payload.pop(missing)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            s = sanity_summary(p)
+            assert s["passed"] is False and s["malformed"] is True
+            assert s["steps_complete"] is False
+        # 旧格式（无 batch_sha256）仍保持兼容：缺少步数字段不误报。
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": all_checks}, f)
+        s = sanity_summary(p)
+        assert s["passed"] is True and s["malformed"] is False
+        assert s["steps_complete"] is None
