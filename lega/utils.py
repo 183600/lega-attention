@@ -565,16 +565,29 @@ def amp_autocast(device: str, enabled: bool = True):
 
 def pearson(x, y):
     """Pearson 相关系数；样本不足/零方差/结果非有限时返回 None（调用方以 None 表示不可计算，
-    避免 nan 写入 JSON 产生 NaN 字面量——那并非合法 JSON）。"""
+    避免 nan 写入 JSON 产生 NaN 字面量——那并非合法 JSON）。
+
+    先按各自最大绝对值缩放再计算：相关系数对正缩放不变，但朴素
+    ``np.corrcoef`` 对接近 float 上限的合法观测会在中心化平方/求和时
+    溢出成 inf，把完全相关的两组大数误判成不可计算。缩放后的数组落在
+    [-1, 1]，不会溢出。
+    """
     x = _obs_array(x)
     y = _obs_array(y)
     if x.size != y.size:
         raise ValueError(f"x/y 长度不一致: {x.size} vs {y.size}")
     m = ~np.isnan(x) & ~np.isnan(y)
     x, y = x[m], y[m]
-    if len(x) < 3 or np.std(x) == 0 or np.std(y) == 0:
+    if len(x) < 3:
         return None
-    r = float(np.corrcoef(x, y)[0, 1])
+    scale_x = float(np.max(np.abs(x)))
+    scale_y = float(np.max(np.abs(y)))
+    if scale_x == 0.0 or scale_y == 0.0:
+        return None
+    xs, ys = x / scale_x, y / scale_y
+    if np.std(xs) == 0 or np.std(ys) == 0:
+        return None
+    r = float(np.corrcoef(xs, ys)[0, 1])
     return r if np.isfinite(r) else None
 
 
@@ -747,8 +760,22 @@ _T_NORMAL_DF = 1e7
 
 
 def _normal_two_sided_p(t: float) -> float:
-    """标准正态双侧 p 值（无 scipy）：erfc(|t|/√2)。"""
-    return float(math.erfc(abs(float(t)) / math.sqrt(2.0)))
+    """标准正态双侧 p 值（无 scipy）：erfc(|t|/√2)。
+
+    合法但超出 float 上限的整数 t 视为 ±∞（双侧 p=0），而不是让
+    ``float(t)`` 的 OverflowError 穿透；非数值输入返回 NaN。
+    """
+    try:
+        at = abs(float(t))
+    except OverflowError:
+        return 0.0
+    except (TypeError, ValueError):
+        return float("nan")
+    if math.isinf(at):
+        return 0.0
+    if math.isnan(at):
+        return float("nan")
+    return float(math.erfc(at / math.sqrt(2.0)))
 
 
 def student_t_two_sided_p(t: float, df: float) -> float:
@@ -758,6 +785,13 @@ def student_t_two_sided_p(t: float, df: float) -> float:
     大自由度使用正态极限，避免 ``df/(df+t²)`` 在 float 中舍入到 1 后把
     p 错算成 1（df≈1e18 时该错误会把 0.0455 变成 1.0）。
     """
+    try:
+        t = float(t)
+    except OverflowError:
+        # 合法但超出 float 上限的整数 t：|t|→∞，双侧 p→0。
+        return 0.0
+    except (TypeError, ValueError):
+        return float("nan")
     if math.isnan(t):
         return float("nan")
     if math.isinf(t):
@@ -1465,12 +1499,27 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
     def _class_ids(values, name):
         # 类别是整数身份：int(1.5)=1、int(True)=1 会把不同类静默合并，
         # 同一批预测的 macro/micro/weighted 也就全部失真。
+        i64 = np.iinfo(np.int64)
         arr = np.asarray(values)
         if isinstance(values, np.ndarray) and arr.dtype.kind in "iu":
+            # uint64 的值可能超过 int64 上限；直接 astype 会回绕成负数，
+            # 把一个大类别静默合并到另一个合法标签上。
+            if arr.size:
+                lo, hi = int(arr.min()), int(arr.max())
+                if lo < int(i64.min) or hi > int(i64.max):
+                    raise ValueError(
+                        f"{name} 类别超出 int64 可表示范围: [{lo}, {hi}]")
             return arr.astype(np.int64, copy=False).ravel()
-        return np.array([strict_int(v, f"{name}[{i}]")
-                         for i, v in enumerate(np.asarray(values, dtype=object).ravel())],
-                        dtype=np.int64)
+        vals = []
+        for i, v in enumerate(np.asarray(values, dtype=object).ravel()):
+            iv = strict_int(v, f"{name}[{i}]")
+            # Python 大整数无法作为 int64 标签参与逐元素比较；显式拒绝，
+            # 而不是让 NumPy 在 astype 时抛裸 OverflowError。
+            if iv < int(i64.min) or iv > int(i64.max):
+                raise ValueError(
+                    f"{name}[{i}] 类别超出 int64 可表示范围: {iv}")
+            vals.append(iv)
+        return np.array(vals, dtype=np.int64)
 
     y_true = _class_ids(y_true, "y_true")
     y_pred = _class_ids(y_pred, "y_pred")
@@ -1479,6 +1528,10 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
     if labels is None:
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
     labels = [strict_int(x, "labels") for x in labels]
+    i64 = np.iinfo(np.int64)
+    for lb in labels:
+        if lb < int(i64.min) or lb > int(i64.max):
+            raise ValueError(f"labels 中的类别超出 int64 可表示范围: {lb}")
     if len(set(labels)) != len(labels):
         # per_class 以标签为键：重复标签会覆盖明细，同时让 macro/weighted
         # 对同一类重复计权，三种平均口径之间的差异失真。

@@ -351,6 +351,12 @@ def test_pearson_guards():
     # bool 不是连续观测：True/False 不能被当作 1.0/0.0 算相关系数
     assert pearson([True, False, True, False, True], x[:5].tolist()) is None
     assert pearson(np.array([True, False, True, False]), x[:4]) is None
+    # 接近 float 上限的合法观测：先缩放再求相关，不能因中心化平方溢出
+    # 把完全可定义的相关（本例 r=-0.5）误判成不可计算。
+    huge = [1e308, -1e308, 1e308]
+    huge_y = [1e308, 1e308, -1e308]
+    assert abs(pearson(huge, huge_y) + 0.5) < 1e-12
+    assert abs(pearson(huge, huge) - 1.0) < 1e-12
     try:
         pearson([1.0, 2.0], [1.0])
     except ValueError:
@@ -464,6 +470,10 @@ def test_t_critical_95_matches_known_table():
     # 把 p 错算成 1、临界值错算成 8/90。
     assert abs(student_t_two_sided_p(2, 10 ** 18)
                - math.erfc(2 / math.sqrt(2))) < 1e-12
+    # 合法但超出 float 上限的整数 t：双侧 p 应为 0，不能让 float(t)
+    # 的 OverflowError 穿透（符号不影响双侧检验）。
+    assert student_t_two_sided_p(10 ** 400, 3) == 0.0
+    assert student_t_two_sided_p(-10 ** 400, 3) == 0.0
     assert abs(t_critical_95(10 ** 18) - 1.9599639845) < 1e-6
     assert abs(t_critical_95(10 ** 400) - 1.9599639845) < 1e-6
     # 非法自由度安全返回 None，不抛异常
@@ -960,3 +970,31 @@ def test_auroc_and_ap_parse_non_numeric_scores_strictly():
     assert auroc(["0.1", "0.9"], ["0", "1"]) == 1.0
     assert average_precision(["0.1", "0.9"], ["0", "1"]) == 1.0
     print("  [ok] AUROC/AP 严格解析非数值分数，拒绝下划线串/bool")
+
+
+def test_f1_scores_rejects_out_of_range_or_wrapping_class_ids():
+    """类别标签是精确整数身份：uint64 回绕/超大 Python int 不能合并类别。"""
+    # uint64 > int64 上限若直接 astype(int64) 会回绕成负数并伪造另一个类。
+    try:
+        f1_scores(np.array([2 ** 63, 1], dtype=np.uint64),
+                  np.array([1, 1], dtype=np.uint64))
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    try:
+        f1_scores([10 ** 400, 1], [1, 1])
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    try:
+        f1_scores([1, 2], [1, 2], labels=[10 ** 400])
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    # 正常 int64 边界标签仍可直接使用。
+    r = f1_scores([0, 1], [0, 1])
+    assert r["micro"] == 1.0
+    print("  [ok] f1_scores 拒绝 uint64 回绕/超出 int64 的类别标签")
