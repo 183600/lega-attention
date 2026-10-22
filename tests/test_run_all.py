@@ -4072,6 +4072,32 @@ def test_ruler_macro_bootstrap_preserves_cell_weights_and_is_deterministic():
     print("  [ok] RULER macro bootstrap：单元格等权、确定性、空输入安全")
 
 
+def test_ruler_macro_absolute_ci_matches_task_equal_estimand():
+    """绝对 macro 区间必须匹配任务等权点估计，而不是单元格等权。"""
+    from run_all import _ruler_avg_of, _ruler_macro_absolute_ci
+
+    def cell(ems, prefix):
+        return {"em": sum(ems) / len(ems), "n": len(ems),
+                "samples": [{"sample_id": f"{prefix}{i}", "em": float(e)}
+                            for i, e in enumerate(ems)]}
+
+    # 任务 a 只有 1 格全对；任务 b 有 2 格全错。任务等权 macro=0.5；
+    # 若错误地按单元格等权会是 (1+0+0)/3≈0.33。
+    payload = {"results": {
+        "a": {"1": cell([1, 1], "a")},
+        "b": {"1": cell([0] * 8, "b1"), "2": cell([0] * 8, "b2")}}}
+    assert abs(_ruler_avg_of(payload) - 0.5) < 1e-12
+    r = _ruler_macro_absolute_ci([payload, payload], n_boot=200)
+    assert r is not None and r["n_seeds"] == 2 and r["n_cells"] == 6
+    assert abs(r["ci95"][0] - 0.5) < 1e-12
+    assert abs(r["ci95"][1] - 0.5) < 1e-12
+    assert r == _ruler_macro_absolute_ci([payload, payload], n_boot=200)
+    # 旧产物无逐样例记录：不给区间，也不伪造 0 宽区间
+    legacy = {"results": {"a": {"1": {"em": 0.5, "n": 2}}}}
+    assert _ruler_macro_absolute_ci([legacy]) is None
+    print("  [ok] RULER 绝对 macro CI：任务等权、确定性、旧产物不伪造")
+
+
 def test_ruler_sample_macro_micro_estimands_diverge():
     """样例等权 micro 与单元格等权 macro 可给出相反结论，必须同时报告。"""
     from run_all import _ruler_avg_of, _ruler_sample_paired_tests

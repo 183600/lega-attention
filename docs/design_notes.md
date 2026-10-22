@@ -54,6 +54,13 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
   在 (任务, 上下文) 单元格内对配对样例重采样、再保持单元格等权平均
   （`_ruler_macro_bootstrap_ci`）；它只覆盖评测样例抽样，不覆盖训练种子
   随机性，不能替代种子级检验。
+- 每个变体的 **RULER 绝对 macro EM** 也报分层 bootstrap 95% 区间
+  （`_ruler_macro_absolute_ci`）：在每个单元格内对样例重采样，按与
+  `ruler_avg` 相同的“任务等权、任务内上下文档位等权”顺序聚合，再对观测
+  种子取平均；同一结果写入汇总表 `RULER评估CI` 与 summary JSON 的
+  `ruler_avg_ci95`。它回答“这个绝对水平在评测抽样下有多不确定”，与
+  “候选−参照差”的区间及跨种子 Mean ± Std 三者不可互相替代；旧产物缺
+  逐样例记录时如实留空。
 - 独立评测落盘 `window_losses`/`window_indices`，汇总时对同序号窗口逐点
   相减，并用“先重采样种子、再重采样窗口”的分层 bootstrap 给出平均 NLL 差
   区间与 PPL 比。窗口按时间顺序排列时相邻窗口可能相关，i.i.d. 重采样会

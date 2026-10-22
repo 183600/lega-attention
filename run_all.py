@@ -1172,6 +1172,61 @@ def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOO
     return [float(lo), float(hi)]
 
 
+def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP,
+                             rng_seed: int = 20240517):
+    """每个变体 RULER 绝对 macro EM 的分层 bootstrap 区间。
+
+    点估计 `ruler_avg` 把任务等权、任务内上下文档位等权；区间必须匹配该
+    估计量，因此在每个 (任务, 上下文) 单元格内对样例有放回重采样，先算
+    单元格均值、再任务内与任务间等权平均。固定已观测种子，只覆盖评测样例
+    抽样，不覆盖训练种子随机性（后者见跨种子 Mean ± Std 与配对 t 检验）。
+    返回 {ci95, n_seeds, n_cells, n_samples, method}；旧产物缺逐样例记录或
+    任一单元格为空时返回 None，不伪造区间。
+    """
+    per_seed = []
+    n_cells = n_samples = 0
+    for d in ruler_payloads or []:
+        cells = _ruler_cell_sample_outcomes(d)
+        if not cells:
+            continue
+        by_task = {}
+        for (task, _ctx), samples in cells.items():
+            vals = np.asarray(list(samples.values()), dtype=float)
+            if vals.size == 0:
+                by_task = None
+                break
+            by_task.setdefault(task, []).append(vals)
+            n_cells += 1
+            n_samples += int(vals.size)
+        if by_task:
+            per_seed.append(by_task)
+    if not per_seed:
+        return None
+    rng = np.random.default_rng(rng_seed)
+    reps = []
+    for _ in range(max(1, int(n_boot))):
+        seed_macros = []
+        for by_task in per_seed:
+            task_means = []
+            for arrays in by_task.values():
+                cell_means = []
+                for vals in arrays:
+                    idx = rng.integers(0, vals.size, size=vals.size)
+                    cell_means.append(float(vals[idx].mean()))
+                task_means.append(float(np.mean(cell_means)))
+            seed_macros.append(float(np.mean(task_means)))
+        reps.append(float(np.mean(seed_macros)))
+    lo, hi = np.percentile(reps, [2.5, 97.5])
+    return {
+        "ci95": [float(lo), float(hi)],
+        "n_seeds": len(per_seed),
+        "n_cells": n_cells,
+        "n_samples": n_samples,
+        "method": ("fixed observed seeds; resample samples within each "
+                   "(task, ctx) cell; task-equal macro; average over seeds"),
+    }
+
+
 def _ruler_sample_paired_tests(runs, pairs) -> list:
     """固定评测样例上的配对 McNemar 检验（探索性稳健性证据）。
 
@@ -4114,6 +4169,11 @@ def build_summary(results_dir: str, audit: dict = None,
                if s.get("ruler") is not None]
         rns = [n for n in rns if n is not None]
         row["ruler_min_n_min"] = min(rns) if rns else None
+        ruler_payloads = [s.get("ruler") for s in m.values()
+                          if isinstance(s.get("ruler"), dict)]
+        raci = _ruler_macro_absolute_ci(ruler_payloads)
+        row["ruler_avg_ci95"] = raci["ci95"] if raci else None
+        row["ruler_avg_ci_n_seeds"] = raci["n_seeds"] if raci else None
         # 运行时指标（取全部变体的最大公共 ctx、batch=1）；不受种子影响，测一次
         e = lat_entries.get(v)
         if e and common_ctx is not None:
@@ -4240,6 +4300,7 @@ def build_summary(results_dir: str, audit: dict = None,
             ("ckpt_step", "选型步"),
             ("selection_step_fraction", "选型步/计划"),
             ("ruler_avg", "RULER平均↑"),
+            ("ruler_avg_ci95", "RULER评估CI"),
             ("ruler_niah_synth", "niah_synth↑"),
             ("ruler_niah_corpus", "niah_corpus↑"),
             ("ruler_niah_multikey", "multikey↑"),
@@ -4298,7 +4359,13 @@ def build_summary(results_dir: str, audit: dict = None,
         for r in rows:
             cells = []
             for k, _ in cols:
-                if k in stat_keys:
+                if k == "ruler_avg_ci95":
+                    ci = r.get(k)
+                    cells.append(
+                        f"[{ci[0]:.3f}, {ci[1]:.3f}]"
+                        if isinstance(ci, (list, tuple)) and len(ci) == 2
+                        else "-")
+                elif k in stat_keys:
                     cells.append(fmt_stat_cell(r, k))
                 else:
                     cells.append(_fmt_scalar(r.get(k)))
@@ -4328,6 +4395,11 @@ def build_summary(results_dir: str, audit: dict = None,
             "训练覆盖与曲线谨慎解读。",
             "注: niah/fwe/vt 为各上下文档位平均后的跨种子均值，"
             "每格样本数见 ruler_*.json（各变体同 seed 使用同一批样本）；",
+            "注: `RULER评估CI` 为绝对 macro EM 的分层 bootstrap 95% 区间："
+            "固定已观测种子，在每个 (任务, 上下文) 单元格内对样例有放回"
+            "重采样，任务等权平均后跨种子平均；它只覆盖评测样例抽样，"
+            "不覆盖训练种子随机性（后者看 Mean ± Std 与配对检验）。"
+            "旧产物缺逐样例记录时显示 '-'，不伪造区间。",
             "“集中但看错率”= P(max_p>τ 且注意力落点不在答案数值跨度 value_span 内)，"
             "见机制分析。",
             "注: PPL 单元格标注 ⚠含截断值时，该变体至少有 1 个种子验证损失 >20，"
