@@ -305,13 +305,16 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     # decode_tokens - 1 步才是真正的单 token decode 前向。
     per_tok = [(t - pf_med) / (decode_tokens - 1) * 1000.0
                for t in run_times]
-    # 保留全部逐次样本（含个别偏负值，来自 prefill 基线的抖动）；
-    # 只有中位数都非正时才说明 prefill 基线不稳定/过长，测量不可靠。
+    # 逐次样本可能因 prefill 基线抖动而略偏负；timing_stats 只统计
+    # 非负计时，因此必须同时报告总样本数与负样本数，避免把 n=较小值
+    # 误读成“只测了这么多次”。中位数非正才说明基线不可靠。
     if not per_tok or statistics.median(per_tok) <= 0:
         raise RuntimeError(
             "decode 总时长中位数不大于 prefill 基线，无法可靠扣除；请增加 "
             "iters/decode_tokens 或确认 prefill 基线对应 batch=1 且长度正确")
     stats = timing_stats(per_tok)
+    stats["n_samples"] = len(per_tok)
+    stats["n_negative_samples"] = sum(1 for v in per_tok if v < 0)
     stats["n_nonpositive_samples"] = sum(1 for v in per_tok if v <= 0)
     stats["prefill_baseline_median_ms"] = round(pf_med * 1000.0, 6)
     stats["prefill_baseline_spread_pct"] = pf_stats["spread_pct"]

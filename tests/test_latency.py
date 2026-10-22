@@ -61,6 +61,11 @@ def test_latency_stats_carry_measurement_noise():
     assert pf_len == 16 and dst["median_ms"] > 0
     assert dst["prefill_baseline_median_ms"] > 0
     assert dst["prefill_baseline_spread_pct"] is not None
+    # timing_stats 剔除负样本：总数/负样本/有效样本必须同时可见，
+    # 不能把 n（有效计时数）误读成实际重复次数。
+    assert dst["n_samples"] >= dst["n"] > 0, dst
+    assert 0 <= dst["n_negative_samples"] <= dst["n_nonpositive_samples"]
+    assert dst["n_nonpositive_samples"] <= dst["n_samples"]
     # 兼容接口返回值与统计口径一致
     assert bench_prefill(model, "cpu", ctx=16, batch_size=1, iters=2, warmup=1,
                          vocab=64) > 0
