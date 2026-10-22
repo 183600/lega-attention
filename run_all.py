@@ -3007,15 +3007,18 @@ def _render_parameter_matched_control(t, capacity_test=None, ran=False) -> list:
     p_adj = _finite_number(t.get("p_adj"))
     eq = t.get("equivalence") if isinstance(t.get("equivalence"), dict) else {}
     eq_status = eq.get("status", "-")
-    if mean is not None and p_adj is not None and p_adj < ALPHA and mean < 0:
+    # 等价性结论优先于优效性 p：TOST 已判定差异落在 SESOI 内时，即使
+    # 5 个种子方向一致、p_adj<alpha，也不能宣称“容量红利不能解释”——
+    # 那会与同表“PPL SESOI 等价性=equivalent”自相矛盾。
+    if eq_status == "equivalent":
+        reading = ("落入 SESOI 等价区：无法区分 LEGA 与噪声证据对照，"
+                   "不能把收益归因于 B/C 证据（容量/优化红利未被排除）")
+    elif mean is not None and p_adj is not None and p_adj < ALPHA and mean < 0:
         if t.get("within_noise") or t.get("loo_sign_stable") is False:
             reading = "方向有利但效应落在种子噪声内/留一翻转：只能算线索"
         else:
             reading = ("证据特定性成立：同参数/同 FLOPs 下，真实 B/C 证据优于"
                        "噪声证据；容量/优化红利不能单独解释")
-    elif eq_status == "equivalent":
-        reading = ("落入 SESOI 等价区：无法区分 LEGA 与噪声证据对照，"
-                   "不能把收益归因于 B/C 证据（容量/优化红利未被排除）")
     elif mean is not None and mean > 0 and p_adj is not None and p_adj < ALPHA:
         reading = "噪声证据反而更好：B/C 证据项可能有害或训练不稳定"
     else:
@@ -3039,11 +3042,11 @@ def _render_parameter_matched_control(t, capacity_test=None, ran=False) -> list:
                  and all(_finite_number(x) is not None for x in ci2) else "-")
         eq2 = (capacity_test.get("equivalence")
                if isinstance(capacity_test.get("equivalence"), dict) else {})
-        if m2 is not None and p2 is not None and p2 < ALPHA and m2 < 0:
+        if eq2.get("status") == "equivalent":
+            read2 = "噪声特征与 qgate 落在等价区：额外容量本身无实质影响"
+        elif m2 is not None and p2 is not None and p2 < ALPHA and m2 < 0:
             read2 = ("额外容量/优化自由度单独即可降低 PPL：lega vs placebo 的"
                      "差异必须在该容量红利背景下解读")
-        elif eq2.get("status") == "equivalent":
-            read2 = "噪声特征与 qgate 落在等价区：额外容量本身无实质影响"
         elif m2 is not None and p2 is not None and p2 < ALPHA and m2 > 0:
             read2 = ("噪声特征显著差于 qgate：对照可能“有害”，"
                      "lega > placebo 不能单独证明 B/C 证据有用")

@@ -14,7 +14,8 @@ from lega.equivalence import (assess_paired_equivalence, interpret_equivalence,
                               metric_margin, t_critical, tost_from_diffs,
                               tost_paired)
 from run_all import (_apply_holm, _causal_eq_note, _enrich_paired,
-                     _equivalence_overview, build_summary)
+                     _equivalence_overview, _render_parameter_matched_control,
+                     build_summary)
 
 
 def test_tost_equivalent_and_non_equivalent():
@@ -222,6 +223,23 @@ def test_apply_holm_adjusts_tost_and_sensitivity_families():
     assert tiny["equivalence"]["p_tost_adj"] is None, tiny
     assert tiny["equivalence"]["status"] == "insufficient_seeds", tiny
     print("  [ok] TOST 主族/敏感性网格 Holm 与 n<3 排除")
+
+
+def test_parameter_matched_render_prefers_tost_equivalence():
+    """TOST 等价时不能把“5 个种子方向一致”渲染成容量红利已被排除。"""
+    t = {"candidate": "lega", "reference": "lega_placebo", "metric": "PPL",
+         "n": 5, "mean_diff": -0.001, "std_diff": 0.0, "p_adj": 0.0,
+         "equivalence": {"status": "equivalent"}}
+    md = "\n".join(_render_parameter_matched_control(t))
+    assert "SESOI 等价区" in md, md
+    assert "证据特定性成立" not in md, md
+    cap = {"candidate": "lega_placebo", "reference": "qgate", "metric": "PPL",
+           "n": 5, "mean_diff": -0.001, "std_diff": 0.0, "p_adj": 0.0,
+           "equivalence": {"status": "equivalent"}}
+    md2 = "\n".join(_render_parameter_matched_control(t, capacity_test=cap))
+    assert "噪声特征与 qgate 落在等价区" in md2, md2
+    assert "单独即可降低 PPL" not in md2, md2
+    print("  [ok] 参数匹配安慰剂：等价性优先于显著的微小方向差")
 
 
 def test_holm_adjusted_tost_does_not_keep_raw_noninferior():
