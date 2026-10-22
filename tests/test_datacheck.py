@@ -1765,3 +1765,18 @@ def test_data_report_without_fit_on_does_not_claim_safe_provenance():
     assert rep["protocol"]["fit_on"] is None
     issues = data_report_protocol_issues(rep)
     assert any("fit_on" in msg for msg in issues), issues
+
+
+def test_summarize_test_access_tolerates_non_iterable_ledger():
+    """损坏的访问账本（bool/数字）不能让评测入口在汇总时崩溃。"""
+    from lega.datacheck import summarize_test_access
+    for bad in (None, True, False, 0, 1.5, {"a": 1}):
+        out = summarize_test_access(bad)
+        assert out["evaluations"] == 0 and out["distinct_checkpoints"] == 0
+    out = summarize_test_access([
+        {"ckpt_sha256": "a" * 64, "time": "t1"},
+        {"ckpt": "b", "test_data_fingerprint": "v1", "time": "t2"},
+        "bad", None, 3])
+    assert out["evaluations"] == 2
+    assert out["distinct_checkpoints"] == 2
+    assert out["first_time"] == "t1" and out["last_time"] == "t2"

@@ -1042,7 +1042,10 @@ def summarize_test_access(records) -> dict:
     在新测试集上评测是合法的新实验，不应被旧账本误拒绝；反过来，同一版本
     上的重复评测必须能被识别。旧记录没有 test 指纹时按版本未知分组。
     """
-    records = [r for r in (records or []) if isinstance(r, dict)]
+    # 账本可能损坏成 bool/数字（JSON null/true）；不能对非可迭代对象做
+    # 列表推导，否则一个坏文件会让评测入口在写访问账本时崩溃。
+    records = ([r for r in records if isinstance(r, dict)]
+               if isinstance(records, (list, tuple)) else [])
     counts = {}
     versions = set()
     for r in records:
