@@ -418,4 +418,14 @@ def test_causal_ablation_marks_noop_and_skips_not_applicable():
     ablations2 = {"lega": {1: {"variant": "lega", "seed": 1, "lesions": [
         {"lesion": "no_len", "applicable": False, "reason": "缺少 gate_b"}]}}}
     assert _ablation_lesion_records(ablations2) == []
-    print("  [ok] 因果消融：no-op 与不适用如实标注，不伪造 0 效应")
+    # 未真正施加（applied=false 或缺少 applied）的坏记录即使带着 ΔNLL，
+    # 也不能进入跨种子检验，否则会把“没做干预”伪装成效应。
+    for rec in ({"lesion": "no_query", "applicable": True,
+                 "applied": False, "delta_loss_mean": 0.5, "n_windows": 10},
+                {"lesion": "no_query", "applicable": True,
+                 "delta_loss_mean": 0.5, "n_windows": 10}):
+        bad = {"lega": {s: {"variant": "lega", "seed": s, "lesions": [dict(rec)]}
+                        for s in (1, 2, 3)}}
+        assert _ablation_lesion_records(bad) == [], rec
+    print("  [ok] 因果消融：no-op 与不适用/未施加记录如实标注，"
+          "不伪造 0 效应")

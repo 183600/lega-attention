@@ -2963,12 +2963,17 @@ def _ablation_lesion_records(ablations):
                 if not isinstance(payload, dict):
                     continue
                 recs = payload.get("lesions")
-                rec = next((r for r in recs
-                            if isinstance(r, dict)
-                            and r.get("lesion") == lesion_id), None)                     if isinstance(recs, list) else None
+                rec = (next((r for r in recs
+                             if isinstance(r, dict)
+                             and r.get("lesion") == lesion_id), None)
+                       if isinstance(recs, list) else None)
                 if not isinstance(rec, dict):
                     continue
-                if rec.get("applicable") is False:
+                # 只有真正施加成功的病灶才有 ΔNLL 证据。旧/损坏产物若把
+                # applied=false（或缺少 applied）的记录连同 delta 一起写进来，
+                # 不能让它进入跨种子检验——那会把“没做干预”伪装成效应。
+                if (rec.get("applicable") is False
+                        or rec.get("applied") is not True):
                     not_applicable += 1
                     continue
                 delta = _finite_number(rec.get("delta_loss_mean"))
