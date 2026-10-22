@@ -1692,6 +1692,40 @@ def main():
         final_rec["early_stop"] = True
     log_f.write(json.dumps(final_rec, ensure_ascii=False) + "\n")
     log_f.close()
+
+    # 训练成功收尾：把完成状态、实际数据顺序指纹与最终产物哈希写回
+    # run_manifest。开训前的 manifest 只能证明“准备跑什么”；这里补上
+    # “实际跑了多少、产出了哪几个文件”，使 checkpoint/eval/日志都能被
+    # manifest 直接绑定。崩溃/中止时不会写 completion，台账 aborted 记录
+    # 与缺少该字段的 manifest 互相印证，而不是把半成品伪装成完整 run。
+    def _artifact_entry(path: str):
+        try:
+            return {"sha256": sha256_file(path),
+                    "bytes": int(os.path.getsize(path))}
+        except OSError:
+            return None
+
+    artifact_names = ("config_used.json", "train_log.jsonl", "eval.json",
+                      "model.pt", "model_best.pt")
+    manifest["artifacts"] = {
+        name: entry for name in artifact_names
+        if (entry := _artifact_entry(os.path.join(out_dir, name))) is not None}
+    manifest["data_order_sha256"] = data_order_sha256
+    manifest["completion"] = {
+        "status": "completed",
+        "time_end": now_str(),
+        "variant": args.variant,
+        "seed": seed,
+        "steps": final_step,
+        "steps_planned": steps,
+        "early_stopped": stopped_early,
+        "tokens_seen": tokens_seen,
+        "val_loss": final_val_loss,
+        "val_ppl": final_ppl,
+        "data_order_sha256": data_order_sha256,
+    }
+    save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
+
     if stopped_early:
         print(f"[train] 早停于 step {final_step}/{steps}（连续 "
               f"{evals_since_improve} 次评测无实质改善）；"

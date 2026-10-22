@@ -1013,7 +1013,22 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
         with open(os.path.join(out_dir, "eval.json"), encoding="utf-8") as f:
             ev = json.load(f)
         assert ev["sanity_passed"] is True
-    print("  [ok] train manifest：sanity 证据 + 精度开关已记录")
+        # 成功收尾必须把完成状态与最终产物哈希写回 manifest：checkpoint
+        # 与 eval/train_log 均可由 manifest 直接核对。
+        assert manifest["completion"]["status"] == "completed"
+        assert manifest["completion"]["steps"] == 1
+        assert manifest["data_order_sha256"] == ev["data_order_sha256"]
+        for name in ("config_used.json", "train_log.jsonl", "eval.json",
+                     "model.pt"):
+            entry = manifest["artifacts"][name]
+            assert entry["sha256"] == sha256_file(
+                os.path.join(out_dir, name)), name
+            assert entry["bytes"] == os.path.getsize(
+                os.path.join(out_dir, name)), name
+        if os.path.exists(os.path.join(out_dir, "model_best.pt")):
+            assert manifest["artifacts"]["model_best.pt"]["sha256"] == \
+                sha256_file(os.path.join(out_dir, "model_best.pt"))
+    print("  [ok] train manifest：sanity 证据 + 精度开关 + 完成态/产物哈希")
 
 
 def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
