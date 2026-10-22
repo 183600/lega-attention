@@ -50,7 +50,23 @@ def test_early_stop_update_semantics():
     # 非有限值由 NaN 防护路径中止，这里不消费、也不误判改善
     best, cnt, stop = early_stop_update(float("nan"), 2.9, 1, 0.0, 1)
     assert best == 2.9 and cnt == 1 and not stop
-    print("  [ok] early_stop_update（严格最优 + min_delta + patience 口径）")
+    # 验证抽样噪声：val=2.99 vs best=3.0 只改善 0.33%，但 CI 半宽 ±2%
+    # → 不算实质改善（不重置耐心），最新点仍进入 best checkpoint
+    best, cnt, stop = early_stop_update(
+        2.99, 3.0, 0, 0.0, 2, val_ci95=[2.9302, 3.0498])
+    assert best == 2.99 and cnt == 1 and not stop, (best, cnt, stop)
+    # 改善超过噪声阈值才重置耐心
+    best, cnt, stop = early_stop_update(
+        2.90, 3.0, 1, 0.0, 2, val_ci95=[2.842, 2.958])
+    assert best == 2.90 and cnt == 0 and not stop, (best, cnt, stop)
+    # 噪声阈值与 min_delta 取更严格者；非法/退化区间不改变原口径
+    best, cnt, stop = early_stop_update(
+        2.94, 3.0, 0, 0.0, 2, val_ci95=[3.0, 2.0])
+    assert cnt == 0, (best, cnt, stop)
+    best, cnt, stop = early_stop_update(
+        2.94, 3.0, 0, 0.0, 2, val_ci95=[float("nan"), 3.0])
+    assert cnt == 0, (best, cnt, stop)
+    print("  [ok] early_stop_update（严格最优 + min_delta/验证噪声 + patience）")
 
 
 def test_config_int_rejects_bool_fraction_and_below_min():

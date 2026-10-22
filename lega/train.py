@@ -11,6 +11,7 @@ import math
 import os
 import statistics
 import time
+from typing import Optional
 
 # 须在任何 CUDA 初始化之前生效。
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -833,15 +834,38 @@ def _config_min_delta(value) -> float:
     return value
 
 
+def _val_ci_rel(vl: float, val_ci95) -> Optional[float]:
+    """当前验证损失 95% CI 的相对半宽；缺失/非法区间返回 None。
+
+    早停与曲线诊断必须用同一噪声口径：有限验证窗口的抽样误差不是改善。
+    区间必须有限、有序且 vl>0，否则不参与阈值（旧日志/坏区间保持原行为）。
+    """
+    if not isinstance(val_ci95, (list, tuple)) or len(val_ci95) != 2:
+        return None
+    try:
+        lo, hi = float(val_ci95[0]), float(val_ci95[1])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (not math.isfinite(lo) or not math.isfinite(hi)
+            or hi < lo or not math.isfinite(vl) or vl <= 0):
+        return None
+    return (hi - lo) / 2.0 / vl
+
+
 def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
-                      min_delta: float = 0.0, patience: int = 0):
+                      min_delta: float = 0.0, patience: int = 0,
+                      val_ci95=None):
     """一次验证评测后更新早停状态，返回 (best_val, evals_since_improve, stop)。
 
     口径（与曲线诊断的"过拟合→早停"建议衔接，默认关闭、显式开启才生效）：
       * 改善 = 验证损失相对当前最优有实质下降（vl < best·(1−min_delta)），
         相对阈值不随任务损失尺度漂移；min_delta=0 退化为严格更优；
+      * val_ci95 可用时，实质改善还必须超过当前验证损失的 95% CI 相对半宽
+        （有效阈值 max(min_delta, ci_rel)）：有限窗口的抽样噪声里的“改善”
+        不算改善，否则每隔几次评测的小幅噪声下降会不断重置耐心、让早停
+        永远无法触发；也不应把噪声下降当成模型真的变好；
       * best_val 按严格最小维护（checkpoint 选择口径不变），因此
-        min_delta>0 时"小幅改善"仍会保存 checkpoint，但不重置耐心计数；
+        min_delta>0 或噪声内的“小幅改善”仍会保存 checkpoint，但不重置耐心；
       * 连续 patience 次评测无实质改善 → stop=True；patience<=0 时功能关闭，
         计数仍如实维护（供日志显示"距最优已多少次评测未改善"）；
       * 非有限 vl 由 NaN 防护路径负责中止，这里不消费也不误判改善。
@@ -850,7 +874,9 @@ def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
         return best_val, evals_since_improve, False
     if best_val == float("inf"):
         return float(vl), 0, False
-    improved = float(vl) < best_val * (1.0 - max(0.0, float(min_delta)))
+    noise_rel = _val_ci_rel(float(vl), val_ci95)
+    threshold = max(0.0, float(min_delta), noise_rel or 0.0)
+    improved = float(vl) < best_val * (1.0 - threshold)
     new_best = float(vl) if float(vl) < best_val else best_val
     if improved:
         return new_best, 0, False
@@ -1250,7 +1276,7 @@ def main():
         prev_best = best_val
         best_val, evals_since_improve, should_stop = early_stop_update(
             vl, best_val, evals_since_improve, early_stop_min_delta,
-            early_stop_patience)
+            early_stop_patience, val_ci95=metrics.get("val_loss_ci95"))
         gap_s = None
         if math.isfinite(prev_best) and prev_best > 0:
             gap = (vl - prev_best) / prev_best
@@ -1429,7 +1455,8 @@ def main():
         # 此刻已结束，早停状态只用于如实记录。
         best_val, evals_since_improve, _ = early_stop_update(
             final_metrics["val_loss"], best_val, evals_since_improve,
-            early_stop_min_delta, 0)
+            early_stop_min_delta, 0,
+            val_ci95=final_metrics.get("val_loss_ci95"))
         if improved_for_ckpt:
             save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
                             extra={"variant": args.variant, "step": steps,
