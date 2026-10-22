@@ -1266,27 +1266,42 @@ def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOO
                               rng_seed: int = 20240517):
     """RULER macro 的分层 bootstrap 区间（固定种子，单元格内重采样样例）。
 
-    macro 估计量把每个 (任务, 上下文) 单元格等权，因此重采样也必须在单元格
-    内进行、再对单元格均值等权平均；直接重采样所有样例会退化成 micro。
-    固定 rng_seed 保证同一输入产生同一区间，便于审计复现。
+    预注册的 macro 估计量是“任务等权、任务内上下文档位等权”：先对每个
+    (任务, 上下文) 单元格内的样例重采样并求均值，再在任务内对单元格等权
+    平均，最后对任务等权平均；直接重采样所有样例会退化成 micro，只对
+    单元格等权则会在任务间格数不等时偏离预注册口径。固定 rng_seed 保证
+    同一输入产生同一区间，便于审计复现。
     """
     cells = [c for c in (per_seed_cell_diffs or []) if isinstance(c, dict)]
-    arrays = [[np.asarray(v, dtype=float) for v in c.values() if len(v)]
-              for c in cells]
-    arrays = [a for a in arrays if a]
-    if not arrays:
+    by_seed = []
+    for c in cells:
+        by_task = {}
+        for key, vals in c.items():
+            arr = np.asarray(vals, dtype=float)
+            if arr.size == 0:
+                continue
+            # cell key 约定为 (task, ctx)；旧/手工输入不是序列时按整键成组。
+            task = key[0] if isinstance(key, (tuple, list)) and key else key
+            by_task.setdefault(task, []).append(arr)
+        if by_task:
+            by_seed.append(by_task)
+    if not by_seed:
         return None
     rng = np.random.default_rng(rng_seed)
     reps = []
     for _ in range(max(1, int(n_boot))):
         seed_means = []
-        for cell_arrays in arrays:
-            cell_means = []
-            for vals in cell_arrays:
-                idx = rng.integers(0, vals.size, size=vals.size)
-                cell_means.append(float(vals[idx].mean()))
-            if cell_means:
-                seed_means.append(float(np.mean(cell_means)))
+        for by_task in by_seed:
+            task_means = []
+            for cell_arrays in by_task.values():
+                cell_means = []
+                for vals in cell_arrays:
+                    idx = rng.integers(0, vals.size, size=vals.size)
+                    cell_means.append(float(vals[idx].mean()))
+                if cell_means:
+                    task_means.append(float(np.mean(cell_means)))
+            if task_means:
+                seed_means.append(float(np.mean(task_means)))
         if seed_means:
             reps.append(float(np.mean(seed_means)))
     if not reps:
@@ -1364,8 +1379,9 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
     discordant 计数相加做精确检验（同一样例在不同训练种子下重复出现，
     故该合并口径只作探索性证据；逐种子明细一并落盘供核对）。
     同时报告两种效应量口径：`mean_diff` 为样例等权 micro（与 McNemar
-    池化计数一致），`macro_mean_diff` 为单元格等权（与预注册 `RULER平均`
-    的 macro 估计量一致）；两者不一致说明结论依赖“平均值”定义。
+    池化计数一致），`macro_mean_diff` 为任务等权、任务内上下文档位等权
+    （与预注册 `RULER平均` 的 macro 估计量一致）；两者不一致说明结论依赖
+    “平均值”定义。
     该检验与跨种子 t 检验回答不同问题，不能互相替代：前者是“固定题面
     上的样例级差异”，后者是“训练随机性下的种子级差异”。
     """
@@ -1411,11 +1427,21 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                     continue
                 diffs = [oa[sid] - ob[sid] for sid in sorted(oa)]
                 cell_paired[ck] = diffs
-                cell_diffs.append(sum(diffs) / len(diffs))
+                # 预注册 macro = 任务等权、任务内上下文档位等权：先按任务
+                # 收集单元格差，最后先任务内平均、再任务间平均。不能直接
+                # 对所有单元格等权——任务间格数不等时会偏离预注册估计量。
+                task = ck[0] if isinstance(ck, (tuple, list)) and ck else ck
+                cell_diffs.append((task, sum(diffs) / len(diffs)))
             if not cell_ok:
                 skipped += 1
                 continue
             per_seed_cell_diffs.append(cell_paired)
+            task_cell_diffs = {}
+            for task, diff in cell_diffs:
+                task_cell_diffs.setdefault(task, []).append(diff)
+            macro_seed = (float(np.mean([np.mean(v) for v in
+                                         task_cell_diffs.values()]))
+                          if task_cell_diffs else None)
             oa = {sid: em for cell_out in ca.values()
                   for sid, em in cell_out.items()}
             ob = {sid: em for cell_out in cb.values()
@@ -1439,8 +1465,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 "candidate_only": s_cand, "reference_only": s_ref,
                 "both_correct": s_both1, "both_wrong": s_both0,
                 "mean_diff": ((s_cand - s_ref) / n_s) if n_s else None,
-                "macro_mean_diff": (sum(cell_diffs) / len(cell_diffs)
-                                    if cell_diffs else None),
+                "macro_mean_diff": macro_seed,
                 "n_cells": len(cell_diffs),
                 "p": _mcnemar_exact_p(s_cand, s_ref),
             })
@@ -1462,7 +1487,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         macro_mean_diff = (sum(macro_diffs) / len(macro_diffs)
                            if macro_diffs else None)
         # macro 的抽样不确定性：固定已观测种子，在每个 (任务, 上下文) 单元格
-        # 内对配对样例重采样（保持 macro 的单元格等权），再对种子取平均。
+        # 内对配对样例重采样，再任务内、任务间等权平均（与预注册 macro 同口径）。
         # 该区间只覆盖评测样例抽样，不覆盖训练种子随机性（后者见种子级 t 检验）。
         macro_ci = _ruler_macro_bootstrap_ci(per_seed_cell_diffs)
         # 样例聚类（cluster-robust）：每个 sample_id 先跨种子平均，再作为
@@ -1506,8 +1531,9 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             "note": ("同一批 sample_id 上的逐样例配对；只消费 discordant "
                      "对（候选对/参照错 vs 反之），与跨种子聚合 EM 检验"
                      "回答不同问题，属探索性证据。mean_diff 为样例等权 "
-                     "micro，macro_mean_diff 为单元格等权（对应预注册 "
-                     "RULER平均 的 macro 口径）；macro_mean_diff_ci95 为"
+                     "micro，macro_mean_diff 为任务等权、任务内上下文档位"
+                     "等权（对应预注册 RULER平均 的 macro 口径）；"
+                     "macro_mean_diff_ci95 为"
                      "固定种子、单元格内样例重采样的分层 bootstrap 区间"
                      "（只覆盖评测抽样，不覆盖训练随机性）。cluster_* 为"
                      "按 sample_id 聚合跨种子后的样例级稳健性检验：每个"
@@ -6017,7 +6043,7 @@ def build_summary(results_dir: str, audit: dict = None,
            "独立 Holm 家族。", ""]
     if ruler_sample_tests:
         md += ["| 对比 | 配对种子 | 配对样例 | 候选独对/参照独对 | "
-               "ΔEM micro(候选−参照) | ΔEM macro(单元格等权) | "
+               "ΔEM micro(候选−参照) | ΔEM macro(任务等权) | "
                "ΔEM macro 95% CI | 种子胜/负/平 | p_adj(Holm) | "
                "种子级判定（供对照） | 结论 |",
                "|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -6043,9 +6069,10 @@ def build_summary(results_dir: str, audit: dict = None,
         md += ["", "注: McNemar 只使用 discordant 对，n_samples 是参与配对的总样例"
                "数而非独立证据数；多个训练种子重复使用同一批 sample_id，合并"
                "检验只作探索性证据。`ΔEM micro` 样例等权、与 McNemar 池化计数"
-               "对应；`ΔEM macro` 单元格等权，与预注册 `RULER平均` 及上表种子级"
+               "对应；`ΔEM macro` 任务等权、任务内上下文档位等权，与预注册 "
+               "`RULER平均` 及上表种子级"
                "判定同一估计量。`ΔEM macro 95% CI` 固定已观测种子，在每个"
-               "(任务, 上下文) 单元格内重采样配对样例并保持单元格等权，只覆盖"
+               "(任务, 上下文) 单元格内重采样配对样例，再任务内、任务间等权平均，只覆盖"
                "评测抽样不确定性；种子数很少时该区间可能很窄，不能替代种子级"
                "检验。两者方向不一致时，结论依赖“平均值”定义，不能"
                "只挑对主张有利的口径。若样例级显著而种子级不显著（或反之），"
