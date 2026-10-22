@@ -44,7 +44,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       load_registered_hypotheses, ngram_baseline_comparison,
                       parse_variants, registration_scope_check,
                       abort_ledger_on_failure, record_aborted_sanity,
-                      mark_repro_failed,
+                      mark_repro_failed, check_sanity_results,
                       resolve_ngram_split, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
@@ -3909,6 +3909,43 @@ def test_aborted_record_marks_repro_failed_without_losing_start_facts():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] repro.json 失败终态：保留启动事实 + 缺失/畸形容错")
+
+
+def test_check_sanity_results_reads_back_verdict_not_exit_code():
+    """退出码 0 不能代替证据：逐个复核 sanity 结果文件。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        def _write(name, obj):
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+
+        checks = {"loss_below_threshold": True,
+                  "next_token_shift_consistent": True}
+        _write("sanity_good.json", {"passed": True, "variant": "good",
+                                    "checks": checks})
+        _write("sanity_bad.json", {"passed": False, "variant": "bad",
+                                   "checks": dict(checks,
+                                                  loss_below_threshold=False)})
+        # passed=true 但 checks 为空：sanity_summary 判 malformed/不通过
+        _write("sanity_empty.json", {"passed": True, "variant": "empty",
+                                     "checks": {}})
+        with open(os.path.join(tmp, "sanity_unparseable.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{bad")
+        verdict, failures = check_sanity_results(
+            ["good", "bad", "empty", "unparseable", "missing"], tmp)
+        assert verdict == {"good": "pass"}, verdict
+        by_variant = {x["variant"]: x for x in failures}
+        assert set(by_variant) == {"bad", "empty", "unparseable", "missing"}
+        assert by_variant["bad"]["reason"] == "not_passed"
+        assert by_variant["empty"]["reason"] == "not_passed"
+        assert by_variant["missing"]["reason"] == "missing_or_unparseable"
+        # 文件存在但 JSON 不可解析：present=true 但 passed=None，复核同样阻断
+        assert by_variant["unparseable"]["reason"] == "not_passed"
+        assert by_variant["bad"]["path"].endswith("sanity_bad.json")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] sanity 结果读回复核：passed=false/空 checks/缺失均阻断")
 
 
 def test_abort_ledger_context_records_postrun_stage_failure():

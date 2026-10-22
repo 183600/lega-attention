@@ -424,6 +424,31 @@ def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
     return failed
 
 
+def check_sanity_results(variants, results_dir: str):
+    """读回本次 sanity 结果文件，返回 (verdict, failures)。
+
+    子进程退出码 0 不等于闸门通过：结果文件可能缺失/不可解析/仍写着
+    passed=false，或包含 malformed 证据。全量训练前逐个复核，失败项带
+    variant/reason/summary，供 aborted 记录与排查信息复用。
+    """
+    verdict, failures = {}, []
+    for v in variants:
+        path = os.path.join(results_dir, f"sanity_{v}.json")
+        summary = sanity_summary(path)
+        if summary.get("present") is not True:
+            failures.append({"variant": v, "reason": "missing_or_unparseable",
+                             "summary": summary, "path": path})
+        elif summary.get("passed") is not True:
+            failures.append({"variant": v, "reason": "not_passed",
+                             "summary": summary, "path": path})
+        elif summary.get("malformed") is True:
+            failures.append({"variant": v, "reason": "malformed",
+                             "summary": summary, "path": path})
+        else:
+            verdict[v] = "pass"
+    return verdict, failures
+
+
 def _seed_tag(seed: int, n_seeds: int) -> str:
     """多种子运行时给结果文件名加 _seed<seed> 后缀；单种子保持旧文件名。"""
     return f"_seed{seed}" if n_seeds > 1 else ""
@@ -6948,8 +6973,30 @@ def main():
                 f"sanity check 失败（变体 {v}，退出码 {e.returncode}）：无法过拟合小批量，"
                 "说明梯度反传/损失计算/标签对齐存在严重问题；请先排查再开全量"
                 f"训练。结果见 {os.path.join(results_dir, f'sanity_{v}.json')}。")
-        for v in variants:
-            sanity[v] = "pass"
+        except BaseException as e:
+            # 非“子进程非零退出”的异常（OSError/ValueError/KeyboardInterrupt
+            # 等）同样会把已 started 的轮次留在台账里；补 aborted 后再抛。
+            append_aborted_record(
+                ledger, ledger_common, error="sanity_stage_failed",
+                stage="sanity", returncode=getattr(e, "returncode", None))
+            raise
+        # 不能只信子进程退出码：逐个读回本次 sanity 文件，确认它真的
+        # present=true 且 passed=true（旧/空/被手改的文件签不出 PASS），
+        # 否则在全量训练前就中止，而不是等 train --sanity_file 再报错。
+        sanity_verdict, sanity_failures = check_sanity_results(
+            variants, results_dir)
+        if sanity_failures:
+            first = sanity_failures[0]
+            v = first["variant"]
+            record_aborted_sanity(ledger, ledger_common, v, 0, results_dir)
+            summary = first.get("summary") or {}
+            raise SystemExit(
+                f"sanity check 退出码为 0，但结果文件未通过复核："
+                f"{first.get('path')}（reason={first['reason']}, "
+                f"passed={summary.get('passed')!r}, "
+                f"failed={summary.get('failed_checks')!r}）。"
+                "不能把没有证据的退出码当作闸门通过。")
+        sanity = sanity_verdict
         print(f"[run_all] sanity check 全部通过: {', '.join(sanity.keys())}")
 
     # 每个 (变体, 种子) 是一个独立 run：训练 → 独立评测 → RULER → 机制分析。
@@ -7018,6 +7065,14 @@ def main():
                 "系统排查路径；报告含检测点前的整个 log 区间候选批次与区间内"
                 "首个非有限损失步 first_bad_step，数据/激活排查针对失败现场而"
                 f"非最后一步批次），排查后重跑；命令: {' '.join(e.cmd)}")
+        except BaseException as e:
+            # 非“子进程非零退出”的异常（OSError/ValueError/KeyboardInterrupt）
+            # 不能让已 started 的轮次永久悬空：补 aborted 终态后再抛。
+            append_aborted_record(
+                ledger, ledger_common, error="run_chain_failed",
+                stage="train/eval/ruler/analysis",
+                returncode=getattr(e, "returncode", None))
+            raise
 
     # 坏案例报告：把每个变体预测错误的样本逐一归因成 Markdown；
     # 错误样本是改进思路的最重要来源，不能只留聚合分数。
