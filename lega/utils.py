@@ -607,7 +607,13 @@ def _obs_array(values) -> np.ndarray:
     # NumPy 解析（"1_0" → 10.0），绕过 _finite_observation 对下划线数字串
     # 的显式拒绝；必须逐元素走同一套严格解析。
     if (isinstance(values, np.ndarray) and arr.dtype.kind in "iuf"):
-        return arr.astype(np.float64, copy=False).ravel()
+        out = arr.astype(np.float64, copy=False).ravel()
+        if out.dtype.kind == "f" and not np.isfinite(out).all():
+            # 数值 ndarray 的快速路径也必须遵守“非有限值记 NaN”的契约：
+            # 否则 np.inf 会绕过 pearson 的成对缺失剔除，让整条相关系数
+            # 变成 None，而不是忽略该观测后计算其余点。
+            out = np.where(np.isfinite(out), out, np.nan)
+        return out
     vals = [_finite_observation(v)
             for v in np.asarray(values, dtype=object).ravel()]
     return np.array([np.nan if v is None else v for v in vals],

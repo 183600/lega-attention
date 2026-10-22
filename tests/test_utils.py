@@ -331,6 +331,15 @@ def test_pearson_guards():
     xn[0] = np.nan
     yn[1] = np.nan
     assert abs(pearson(xn, yn) - 1.0) < 1e-9
+    # numpy 浮点数组里的 Inf 与 NaN 同口径成对剔除；不能因整条相关
+    # 计算变成 NaN 就丢掉其余有效观测。
+    xinf = x.copy()
+    xinf[3] = np.inf
+    assert abs(pearson(xinf, 2 * x + 1) - 1.0) < 1e-9
+    from lega.utils import _obs_array
+    arr = _obs_array(np.array([1.0, np.inf, -np.inf, np.nan, 2.0]))
+    assert np.isfinite(arr[[0, 4]]).all()
+    assert np.isnan(arr[[1, 2, 3]]).all()
     # bool 不是连续观测：True/False 不能被当作 1.0/0.0 算相关系数
     assert pearson([True, False, True, False, True], x[:5].tolist()) is None
     assert pearson(np.array([True, False, True, False]), x[:4]) is None
