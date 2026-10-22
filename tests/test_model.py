@@ -103,6 +103,49 @@ def test_chunked_prefill_matches_full_forward():
         print(f"  [ok] {v}: 分块预填充一致 (max diff {(full - inc).abs().max().item():.2e})")
 
 
+def test_placebo_evidence_uses_absolute_positions():
+    """lega_placebo 的伪证据必须按绝对位置生成，分块预填/逐 token 解码与全量一致。
+
+    回归：旧实现用当前前向内的 0..T-1，T=1 的解码永远落在位置 0，分块预填
+    每块也从 0 重新开始；默认 gate_a=gate_b=0 时该错误被完全掩盖。
+    """
+    torch.manual_seed(0)
+    model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=2,
+                n_heads=2, ffn_mult=4, variant="lega_placebo")
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "gate_a" in name or "gate_b" in name:
+                p.normal_(0, 0.5)
+            elif "gate_w" in name:
+                p.normal_(0, 0.1)
+    model.eval()
+    idx = torch.randint(0, 64, (1, 10))
+    with torch.no_grad():
+        full = model(idx)["logits"]
+        # 分块预填 + KV 缓存
+        past, chunks = None, []
+        for lo in (0, 5):
+            out = model(idx[:, lo:lo + 5], past_kv=past)
+            past = out["past_kv"]
+            chunks.append(out["logits"])
+        chunked = torch.cat(chunks, dim=1)
+        assert torch.allclose(full, chunked, atol=1e-4, rtol=1e-4), (
+            "lega_placebo 分块预填与全量不一致, max diff="
+            f"{(full - chunked).abs().max().item()}")
+        # 静态 KV 缓存逐 token 解码
+        kv = [(torch.empty(1, 2, 32, 16), torch.empty(1, 2, 32, 16))
+              for _ in range(2)]
+        outs = [model(idx[:, :5], kv_cache=kv, cache_pos=0)["logits"]]
+        for pos in range(5, 10):
+            outs.append(model(idx[:, pos:pos + 1], kv_cache=kv,
+                              cache_pos=pos)["logits"])
+        decoded = torch.cat(outs, dim=1)
+        assert torch.allclose(full, decoded, atol=1e-4, rtol=1e-4), (
+            "lega_placebo 逐 token 解码与全量不一致, max diff="
+            f"{(full - decoded).abs().max().item()}")
+    print("  [ok] lega_placebo 伪证据按绝对位置生成（分块/解码与全量一致）")
+
+
 def test_variants_share_base_weights_same_seed():
     """公平对比前提：同 seed 下所有变体的共享基础参数必须逐元素一致。"""
     def build(v):

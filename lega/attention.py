@@ -212,12 +212,13 @@ def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
     return _log_n_table(dev, past_len + T)[past_len:past_len + T]
 
 
-def _placebo_evidence(x: torch.Tensor, n_heads: int, salt: float) -> torch.Tensor:
+def _placebo_evidence(x: torch.Tensor, n_heads: int, salt: float,
+                      pos_offset: int = 0) -> torch.Tensor:
     """参数匹配安慰剂使用的确定性“伪证据”特征。
 
-    返回与 ``x`` 同形状、取值在 [-1, 1] 的高频伪随机数（由当前前向内 token 位置与
-    头索引哈希得到）。它不是任何真实查询/注意力/长度的函数，也不消耗全局
-    RNG，因此：
+    返回与 ``x`` 同形状、取值在 [-1, 1] 的高频伪随机数（由 **绝对** token
+    位置与头索引哈希得到）。它不是任何真实查询/注意力/长度的函数，也不
+    消耗全局 RNG，因此：
 
     * 门控参数个数、前向 FLOPs、初始化与优化器分组均与 LEGA 相同；
     * 训练期不会因为随机流被额外扰动而破坏“同 seed、同数据顺序”的公平性；
@@ -230,8 +231,13 @@ def _placebo_evidence(x: torch.Tensor, n_heads: int, salt: float) -> torch.Tenso
         return x
     T = int(x.shape[-1])
     dev = x.device
+    pos_offset = int(pos_offset)
     with torch.no_grad():
-        pos = torch.arange(T, device=dev, dtype=torch.float32).view(1, 1, T)
+        # 伪证据必须是绝对位置的函数：全量前向的 0..T-1 与 KV 缓存逐 token
+        # 解码/分块预填的局部 0..T-1 不能混为一谈，否则同一 checkpoint 在
+        # 不同 prefill/decode 切分下会得到不同的门控与 logits。
+        pos = torch.arange(pos_offset, pos_offset + T, device=dev,
+                           dtype=torch.float32).view(1, 1, T)
         head = torch.arange(int(n_heads), device=dev,
                             dtype=torch.float32).view(1, -1, 1)
         z = torch.sin((pos + 1.0) * (12.9898 + salt)
@@ -387,7 +393,7 @@ class CausalSelfAttention(nn.Module):
     def _gate_logit(self, qterm: Optional[torch.Tensor],
                     max_p: Optional[torch.Tensor],
                     log_n: Optional[torch.Tensor], bht: Tuple[int, int, int],
-                    keep_terms: bool = False):
+                    keep_terms: bool = False, pos_offset: int = 0):
         """按 variant 组合门控 logit；返回 (g, logit, qterm)，不适用项为 None。
 
         qterm 为 RoPE 旋转前的查询内容向量与门控权重 w 的归约结果
@@ -417,14 +423,16 @@ class CausalSelfAttention(nn.Module):
             if self.variant in CONTROL_VARIANTS:
                 # 参数匹配安慰剂：保留 a 的形状与梯度路径，但把它乘的
                 # “集中度证据”换成与真实统计无关的确定性噪声。
-                c = _placebo_evidence(c, H, salt=1.0)
+                c = _placebo_evidence(c, H, salt=1.0,
+                                      pos_offset=pos_offset)
             a = self.gate_a.float().view(1, H, 1)
             logit = a * c if logit is None else logit.addcmul_(a, c)
         if self.use_len:
             len_term = log_n
             if self.variant in CONTROL_VARIANTS:
                 # 与 c 相同：保留 b 的参数/计算，只把长度证据替换为噪声。
-                len_term = _placebo_evidence(log_n, H, salt=2.0)
+                len_term = _placebo_evidence(
+                    log_n, H, salt=2.0, pos_offset=pos_offset)
             b = self.gate_b.float().view(1, H, 1)
             logit = b * len_term if logit is None else logit.addcmul_(b, len_term)
         dterm = self.gate_d.float().view(1, H, 1)
@@ -659,7 +667,8 @@ class CausalSelfAttention(nn.Module):
                     qterm_in = qt_full.clone()
                 gg, lg, qt = self._gate_logit(
                     qterm_in, max_p_all, log_n, (B, H, T),
-                    keep_terms=collect_stats and keep_gate_terms)
+                    keep_terms=collect_stats and keep_gate_terms,
+                    pos_offset=past_len)
                 chunk_out[0], chunk_out[1], chunk_out[2] = max_p_all, gg, lg
                 chunk_out[3] = qt
                 o.mul_(gg.to(o.dtype).transpose(1, 2).unsqueeze(-1))
@@ -897,8 +906,9 @@ class CausalSelfAttention(nn.Module):
                 # 与显式路径相同的门控公式（qgate: w·q+d；lega_no_conc: w·q+b·log n+d）
                 # 轻量诊断（stats_argmax=False）只消费 g：不保留 qterm/logit，
                 # sigmoid 原地完成
-                g, logit, qterm = self._gate_logit(qterm_pre, None, log_n,
-                                                   (B, H, T), keep_terms=full_stats)
+                g, logit, qterm = self._gate_logit(
+                    qterm_pre, None, log_n, (B, H, T), keep_terms=full_stats,
+                    pos_offset=past_len)
                 if torch.is_grad_enabled():
                     # SDPA 输出的反向依赖该张量本身，不能原地乘
                     o = o * g.to(o.dtype).unsqueeze(-1)
@@ -1019,8 +1029,9 @@ class CausalSelfAttention(nn.Module):
 
                 # 输出门控（惰性累加：仅偏置项 (1,H,1) 参与广播）
                 if self.variant in _GATED:
-                    g, logit, qterm = self._gate_logit(qterm_pre, max_p, log_n,
-                                                       (B, H, T), keep_terms=full_stats)
+                    g, logit, qterm = self._gate_logit(
+                        qterm_pre, max_p, log_n, (B, H, T),
+                        keep_terms=full_stats, pos_offset=past_len)
                     # 原地乘法：o 的全部反向依赖 p/v，mul_ 自身被 autograd 正确处理
                     o.mul_(g.to(o.dtype).unsqueeze(-1))                   # o' = g * o
 
