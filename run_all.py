@@ -3178,7 +3178,13 @@ def _factorial_protocol_ok(maps, seed, metric) -> bool:
     if metric == "PPL":
         evals = [s.get("eval") if isinstance(s.get("eval"), dict) else {}
                  for s in slots]
-        if len({e.get("split", "val") for e in evals}) > 1:
+        # 不能把 split 原值直接放进 set：外部/旧版 eval.json 的 split 可能
+        # 是数组/对象（不可哈希），会让整份汇总在交互检验处 TypeError。
+        # 用与协议核对相同的规范化比较，既保留“缺失=None 与 None 相同”
+        # 的旧口径，也能安全处理任意 JSON 值。
+        splits = [e.get("split", "val") for e in evals]
+        if any(not _same_protocol_value(splits[0], x)
+               for x in splits[1:]):
             return False
         protocols = [_ppl_protocol(e) for e in evals]
     else:

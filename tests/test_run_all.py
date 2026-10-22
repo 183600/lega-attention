@@ -22,6 +22,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _eval_matches_window_spec,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
+                      _factorial_protocol_ok,
                       _int_or_zero, _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _noise_verdict_note, _loo_stability_str, _num_or_none,
@@ -5173,3 +5174,19 @@ def test_log_ppl_ratio_unrepresentable_is_flagged_not_crash():
         assert t["ppl_ratio_overflow"] is True, t
         assert "PPL 比值尺度敏感性" in out["markdown"]
     print("  [ok] 汇总 log-PPL：不可表示的几何均值比标缺失而非崩溃")
+
+
+def test_factorial_protocol_handles_unhashable_split_value():
+    """eval.json 的 split 被手改成数组/对象时，交互检验不能因 set() 崩溃。"""
+    from run_all import _FACTORIAL_CONTRAST_CELLS
+    maps = {
+        cell: {1: {"eval": {"split": [], "eval_ctx": 16, "eval_iters": 4,
+                            "val_windows": 100, "val_tokens_evaluated": 64}}}
+        for cell in _FACTORIAL_CONTRAST_CELLS
+    }
+    # 全部相同但不可哈希：协议比较应给出布尔结果，而不是抛 TypeError。
+    assert _factorial_protocol_ok(maps, 1, "PPL") is True
+    # 与其他 split（字符串）不一致时必须判为不可配对。
+    maps["ABC"][1]["eval"]["split"] = "val"
+    assert _factorial_protocol_ok(maps, 1, "PPL") is False
+    print("  [ok] 全因子协议核对：不可哈希 split 不再让汇总崩溃")
