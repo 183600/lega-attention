@@ -1344,6 +1344,19 @@ def test_build_summary_rejects_malformed_latency_values():
         assert row.get("prefill_ms") is None, row
         assert row.get("prefill_rel_pct") is None, row
         assert row.get("decode_ms_per_tok") is None, row
+        # 有限但比例不可表示的计时（baseline=1ms、候选 1e308ms）也不能
+        # 变成 inf；同时 PPL 相对收益不可表示时 -None 不能抛 TypeError。
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": 1.0}},
+                         "decode_ms_per_tok": {"256": 1.0}},
+            "lega": {"prefill_ms": {"256": {"1": 1e308}},
+                     "decode_ms_per_tok": {"256": 1e308}}}})
+        out2 = build_summary(tmp)
+        row2 = next(r for r in out2["rows"] if r["variant"] == "lega")
+        assert row2.get("prefill_rel_pct") is None, row2
+        assert row2.get("eff_prefill_delta_pct") is None, row2
+        assert row2.get("eff_benefit_ppl_pct") is not None and math.isfinite(
+            row2["eff_benefit_ppl_pct"]), row2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（畸形延迟值按缺失处理）")

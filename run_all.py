@@ -6174,8 +6174,10 @@ def build_summary(results_dir: str, audit: dict = None,
         if (base_ms and base_ms > 0 and r.get("prefill_ms") is not None
                 and r["prefill_ms"] > 0
                 and r["variant"] not in ("standard", "standard_sdpa")):
-            r["prefill_rel_pct"] = round(
-                (r["prefill_ms"] - base_ms) / base_ms * 100, 2)
+            # 两端有限但比值不可表示时按缺失处理，不能把 inf 写进汇总行。
+            rel = _rel_pct(base_ms, r["prefill_ms"])
+            if rel is not None:
+                r["prefill_rel_pct"] = round(rel, 2)
 
     # --- 配对显著性检验（同种子）：PPL 与 RULER 平均
     # 单因素消融（去一法 + 全因子增量）与整体对比分开构造；B-only/C-only
@@ -8262,7 +8264,8 @@ def build_summary(results_dir: str, audit: dict = None,
             ppl = r.get("val_ppl")
             std_row = next((x for x in rows if x["variant"] == "standard"), None)
             std_ppl = (std_row or {}).get("val_ppl")
-            benefit = (-_rel_pct(std_ppl, ppl)) if (ppl is not None and std_ppl) else None
+            ppl_rel = _rel_pct(std_ppl, ppl) if (ppl is not None and std_ppl) else None
+            benefit = -ppl_rel if ppl_rel is not None else None
             t = ppl_test.get(v)
             p_adj = t.get("p_adj") if t else None
             n_ppl = t.get("n") if t else None
