@@ -3838,7 +3838,21 @@ def test_verify_controlled_setup_rejects_fractional_steps():
             raise AssertionError("布尔步数/tokens_seen 不能被当作训练量")
         except SystemExit:
             pass
-    print("  [ok] 受控变量审计：小数/布尔步数不会被截断为整数")
+        # "1_0" 经 int()/float() 都会变成 10；下划线写法不是训练量。
+        for v in variants:
+            p = os.path.join(tmp, v, "eval.json")
+            ev = json.load(open(p, encoding="utf-8"))
+            ev["steps_planned"] = "1_0"
+            ev["steps"] = "1_0"
+            ev["tokens_seen"] = "1_0"
+            _write_json(p, ev)
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("下划线步数/tokens_seen 不能被当作训练量")
+        except SystemExit:
+            pass
+    print("  [ok] 受控变量审计：小数/布尔/下划线步数不会被截断为整数")
 
 
 def test_verify_controlled_setup_rejects_fractional_seeds():

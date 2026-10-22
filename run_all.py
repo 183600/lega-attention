@@ -670,6 +670,10 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             return True
         if isinstance(a, (bool, np.bool_)) or isinstance(b, (bool, np.bool_)):
             return False
+        # float("1_0")==10.0：下划线写法不是合法训练量，不能与 10 相等。
+        if ((isinstance(a, str) and "_" in a)
+                or (isinstance(b, str) and "_" in b)):
+            return False
         try:
             fa, fb = float(a), float(b)
         except (TypeError, ValueError, OverflowError):
