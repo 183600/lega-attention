@@ -255,6 +255,15 @@ def test_loss_spike_in_short_curve_and_final_point_detected():
                              val_steps=[100, 200, 300, 400, 500]))
     assert d2["has_loss_spike"] and any(
         s["step"] == 200 for s in d2["loss_spikes"]), d2["loss_spikes"]
+    # 局部中位数极小、尖峰极大时 ratio 会溢出；输出必须是有限数并标记封顶，
+    # 否则 json.dumps(..., allow_nan=False) 直接失败。
+    recs = [{"step": i, "loss": 1e-300} for i in range(10)]
+    recs[5]["loss"] = 1e308
+    d3 = diagnose_curve(recs)
+    spike = next(s for s in d3["loss_spikes"] if s["step"] == 5)
+    assert math.isfinite(spike["ratio"]), spike
+    assert spike.get("ratio_clamped") is True, spike
+    json.dumps(d3, allow_nan=False)
     print("  [ok] 短曲线/末尾训练损失尖峰均被检出")
 
 

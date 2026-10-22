@@ -348,10 +348,17 @@ def _detect_series_spikes(points: List[Dict],
         if med <= 0:
             continue
         ratio = points[i]["value"] / med
+        clamped = not math.isfinite(ratio)
+        if clamped and points[i]["value"] > med:
+            # 合法但极端的尖峰（如 1e308 / 1e-300）比值会溢出成 inf；
+            # JSON/汇总不能写 inf，用最大可表示浮点封顶并显式标记。
+            ratio = float(np.finfo(np.float64).max)
         if ratio >= factor:
-            spikes.append({"step": points[i]["step"],
-                           "value": points[i]["value"],
-                           "local_median": med, "ratio": ratio})
+            rec = {"step": points[i]["step"], "value": points[i]["value"],
+                   "local_median": med, "ratio": ratio}
+            if clamped:
+                rec["ratio_clamped"] = True
+            spikes.append(rec)
     return spikes
 
 
