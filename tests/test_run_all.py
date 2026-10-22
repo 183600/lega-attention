@@ -556,6 +556,13 @@ def test_tradeoff_verdict_rejects_bad_deals():
                          ruler_benefit_pp=1.0, ruler_p_adj=0.01,
                          ruler_n_seeds=2.9)
     assert v.startswith("种子") and "RULER" in v, v
+    # 外部 JSON 的 bool/非数值不能伪装成 p=0 或抛 TypeError。
+    assert tradeoff_verdict(5.0, False, 1.0, n_seeds=5).startswith(
+        "说服力有限")
+    assert tradeoff_verdict(True, 0.01, 1.0, n_seeds=5) == "数据不足"
+    assert tradeoff_verdict(5.0, "bad", 1.0, n_seeds=5).startswith(
+        "说服力有限")
+    assert tradeoff_verdict(5.0, 0.01, "bad", n_seeds=5) == "数据不足"
     print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比/负收益/种子不足）")
 
 

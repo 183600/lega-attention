@@ -5797,6 +5797,14 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
       * 有正向涨点但不显著 → 说服力有限（增幅>10% 判不可行）。
     微小涨点伴随巨大增幅的改进在这里会被明确拒绝。
     """
+    # 外部/旧汇总可能把数值写成 bool/字符串/NaN；先在入口统一成有限数值或
+    # None，避免 False 被 `False < alpha` 当成显著 p=0，也避免字符串比较
+    # 直接抛 TypeError。
+    benefit_pct = _num_or_none(benefit_pct)
+    cost_pct = _num_or_none(cost_pct)
+    ruler_benefit_pp = _num_or_none(ruler_benefit_pp)
+    p_adj = _num_or_none(p_adj)
+    ruler_p_adj = _num_or_none(ruler_p_adj)
     if (benefit_pct is None and ruler_benefit_pp is None) or cost_pct is None:
         return "数据不足"
     raw_n, raw_ruler_n = n_seeds, ruler_n_seeds
