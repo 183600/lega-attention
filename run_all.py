@@ -3467,9 +3467,10 @@ def _render_registration_integrity(integrity: dict,
     scope = _as_dict(sc.get("scope"))
     scope_failed = False
     if scope or sc:
-        # 只有登记表声明了 scope 时才谈得上“范围核对失败”
+        # 只有登记表声明了 scope 时才谈得上“范围核对失败”。checked 必须是
+        # 真正的 bool true，字符串 "false"/1 不能渲染成“已核对在范围内”。
         scope_failed = bool(scope) and (
-            bool(sc.get("problems")) or not sc.get("checked"))
+            bool(sc.get("problems")) or sc.get("checked") is not True)
         lines.append("")
         lines.append("#### 预注册范围核对（确认性资格的前提）")
         sc_problems = _as_text_list(sc.get("problems"))
@@ -3477,7 +3478,7 @@ def _render_registration_integrity(integrity: dict,
             lines.append("- ⛔ 本次运行超出预注册范围：")
             for p in sc_problems:
                 lines.append(f"  - {p}")
-        elif sc.get("checked"):
+        elif sc.get("checked") is True:
             cfg_note = (f"模型/训练规模与 `{scope.get('config')}` 一致"
                         if scope.get("config") else "未声明配置范围")
             tok_note = ("；数据分词器与 scope.data 一致"
@@ -3495,7 +3496,7 @@ def _render_registration_integrity(integrity: dict,
                             "登记表未声明 scope，完整性判定不受影响。"))
         for w in _as_text_list(sc.get("warnings")):
             lines.append(f"- ⚠ {w}")
-    if integrity.get("confirmatory_valid") and not scope_failed:
+    if integrity.get("confirmatory_valid") is True and not scope_failed:
         lines.append("- 修订规则：既有假设只增不改不删；新增假设必须经 "
                      "`python -m lega.hypotheses --amend --reason ...` 留痕，"
                      "否则判违反。")

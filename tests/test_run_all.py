@@ -2848,6 +2848,11 @@ def test_registration_scope_render_matches_gate_and_paths():
     text2 = "\n".join(_render_registration_integrity(
         {"status": "intact", "confirmatory_valid": True}, sc2))
     assert "不可确认" in text2 and "降级" in text2
+    # 损坏的 checked/confirmatory_valid 不能被渲染成“已核对/有效”。
+    text_bad = "\n".join(_render_registration_integrity(
+        {"status": "intact", "confirmatory_valid": "false"},
+        {"scope": {"config": "x"}, "checked": "false", "problems": []}))
+    assert "不可确认" in text_bad and "失效" in text_bad, text_bad
     tmp = tempfile.mkdtemp()
     try:
         reg = os.path.join(tmp, "reg.json")
