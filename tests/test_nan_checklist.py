@@ -508,4 +508,13 @@ def test_checklist_optimization_reports_earlier_gradient_peak_after_recovery():
                              amp_dtype=None, vocab_size=64)
     assert "历史上出现过爆炸性尖峰" not in " ".join(
         rep2["checklist_optimization"]["findings"])
+    # 偶数个接近 float 上限的梯度：中位数不能因 a+b 溢出成 inf，比值必须
+    # 保持有限（最大/中位数=1），否则会伪造尖峰或写出非法 JSON。
+    rep3 = run_nan_checklist(m, _batches(), "cpu", 8, "train_loss",
+                             float("nan"), lr=1e-3,
+                             grad_norm_history=[1e308, 1e308, 1e308, 1e308],
+                             amp_dtype=None, vocab_size=64)
+    opt3 = rep3["checklist_optimization"]
+    assert opt3["grad_norm_history_median"] == 1e308, opt3
+    assert opt3["grad_norm_history_spike_ratio"] == 1.0, opt3
     print("  [ok] 排查步骤 4（优化）：历史尖峰（当前已恢复）仍被报告")

@@ -33,8 +33,8 @@ from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     sha256_file, write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, config_bool, data_rng,
                     enable_tf32, now_str, save_json, set_seed,
-                    state_dict_fingerprint, strict_int,
-                    t_critical_95)
+                    state_dict_fingerprint, strict_int, t_critical_95,
+                    _stable_median)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -454,7 +454,7 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         finite = [g for g in hist if math.isfinite(g)]
         last = hist[-1]
         if finite and len(finite) >= 3:
-            med = statistics.median(finite[:-1]) or 1e-12
+            med = _stable_median(finite[:-1]) or 1e-12
             if last > 10 * med:
                 spike_note = f"（尖峰 ×{last / med:.0f}，**疑似梯度爆炸**）"
             elif trigger_nonfinite:
@@ -468,9 +468,15 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             # 整个有限历史里的最坏峰值：尖峰可能发生在更早的 log 点、
             # 当前已恢复；只看最后一点会漏掉“爆炸后恢复”的脆弱训练。
             hist_max = float(max(finite))
-            hist_med = float(statistics.median(finite))
-            if hist_med > 0:
-                hist_spike_ratio = hist_max / hist_med
+            hist_med = _stable_median(finite)
+            if hist_med is not None and hist_med > 0:
+                try:
+                    hist_spike_ratio = hist_max / hist_med
+                except (OverflowError, ZeroDivisionError):
+                    hist_spike_ratio = None
+                if (hist_spike_ratio is not None
+                        and not math.isfinite(hist_spike_ratio)):
+                    hist_spike_ratio = None
             if hist_spike_ratio is not None and hist_spike_ratio >= 10:
                 opt_findings.append(
                     f"历史 pre-clip 梯度范数峰值 {hist_max:.3e} 为中位数 "
