@@ -3758,7 +3758,10 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
         try:
             import math as _math
             with open(meta_path, "r", encoding="utf-8") as f:
-                log_vocab = _math.log(int(json.load(f)["vocab_size"]))
+                vocab = _integral_value(json.load(f)["vocab_size"])
+            if vocab is None or vocab <= 0:
+                raise ValueError(f"meta.vocab_size 非法: {vocab!r}")
+            log_vocab = _math.log(vocab)
         except (OSError, ValueError, KeyError, TypeError):
             log_vocab = None
     diag = {}
@@ -5236,11 +5239,11 @@ def build_summary(results_dir: str, audit: dict = None,
             for s in _sorted_seeds(_variant_seed_map(runs, v)):
                 cand = (_variant_seed_map(runs, v)[s].get("eval") or {})
                 sc = cand.get("worst_window_scope")
-                screened = (_num_or_none(sc.get("screened"))
+                screened = (_integral_value(sc.get("screened"))
                             if isinstance(sc, dict) else None)
                 if screened is not None:
-                    total = _num_or_none(sc.get("total"))
-                    scopes.add((int(screened), int(total or 0)))
+                    total = _integral_value(sc.get("total"))
+                    scopes.add((screened, total if total is not None else 0))
         if scopes:
             md.append("")
             lo_cov = min((scr / tot) if tot else 1.0 for scr, tot in scopes)
@@ -5324,7 +5327,9 @@ def build_summary(results_dir: str, audit: dict = None,
         r = rows_by_var.get(v)
         if not r:
             return name, f"{v}（未运行）"
-        n = int(r.get("n_seeds") or 0)
+        n = _integral_value(r.get("n_seeds"))
+        if n is None or n < 0:
+            n = 0
         if n < MIN_SEEDS:
             return name, f"{v}（种子不足 n={n}<{MIN_SEEDS}）"
         return name, f"{VARIANT_CN.get(v, v)}（n={n}）"
