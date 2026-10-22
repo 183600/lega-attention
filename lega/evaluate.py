@@ -300,6 +300,32 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
             "gate_mean": gmean}
 
 
+def _resolve_eval_amp(cfg_used: dict, device: str) -> bool:
+    """按 checkpoint 记录的实际 AMP 精度决定评测是否启用 autocast。
+
+    config_used.json 同时记录请求开关 ``amp`` 与训练时真正生效的
+    ``amp_dtype``（bf16 不可用时为 null）。若只重算 ``amp``，在支持 bf16 的
+    机器上会把“训练时 fp32 回退”的 checkpoint 用 bf16 评测，PPL/门控指标
+    与训练内验证不是同一数值路径。旧 checkpoint 没有 amp_dtype 时保留按
+    ``amp`` 重算的兼容行为。
+    """
+    cfg_used = cfg_used if isinstance(cfg_used, dict) else {}
+    if "amp_dtype" in cfg_used:
+        raw = cfg_used.get("amp_dtype")
+        if raw is None:
+            return False
+        if not isinstance(raw, str):
+            return False
+        name = raw.strip().lower().replace("torch.", "")
+        if name not in ("bfloat16", "float16"):
+            return False
+        available = amp_dtype_for(device, True)
+        return (available is not None
+                and str(available).replace("torch.", "") == name)
+    return amp_dtype_for(
+        device, config_bool(cfg_used.get("amp", True), "amp")) is not None
+
+
 def _read_run_eval(run_dir: str) -> dict:
     """读取训练 run 的 eval.json；缺失/损坏/结构异常返回空 dict（不阻塞评测）。"""
     path = os.path.join(run_dir, "eval.json")
@@ -505,9 +531,9 @@ def main():
             print(f"[eval] 警告：{cfg_path} 不是 JSON 对象，按缺失配置处理")
             cfg_used = {}
         train_ctx = cfg_used.get("train_ctx")
-        # 与训练内评测口径一致：尊重训练配置的 amp 设置
-        use_amp = amp_dtype_for(
-            device, config_bool(cfg_used.get("amp", True), "amp")) is not None
+        # 与训练内评测口径一致：优先沿用训练时实际生效的精度（amp_dtype），
+        # 避免在支持 bf16 的机器上把 fp32 回退训练的 checkpoint 用 bf16 评测。
+        use_amp = _resolve_eval_amp(cfg_used, device)
     else:
         # 缺少训练配置时评测上下文静默变为 block_size，PPL 口径与训练内评测不一致
         print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "
@@ -553,6 +579,10 @@ def main():
         "loss": vl,
         "val_ppl_clamped": norm["val_ppl_clamped"],
         "eval_ctx": ctx,
+        # 评测实际使用的数值精度：旧产物无 amp_dtype 时也能从结果反查。
+        "amp": bool(use_amp),
+        "amp_dtype": (str(amp_dtype_for(device, use_amp)).replace("torch.", "")
+                      if amp_dtype_for(device, use_amp) is not None else None),
         "gate_mean": gmean,
         "gate_std": metrics.get("gate_std"),
         "gate_frac_low": metrics.get("gate_frac_low"),

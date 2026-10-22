@@ -531,3 +531,19 @@ def test_evaluate_warns_when_data_differs_from_training_manifest(capsys):
         assert res["eval_data_fingerprint"] == res["data_fingerprint"]
         assert res["train_data_fingerprint"] == "0" * 64
     print("  [ok] 评测数据与训练清单不一致时显式告警并分别落盘两侧指纹")
+
+
+def test_eval_amp_honors_recorded_effective_dtype():
+    """评测精度必须优先沿用 checkpoint 记录的 amp_dtype（fp32 回退不能变 bf16）。"""
+    from lega.evaluate import _resolve_eval_amp
+    from lega.utils import amp_dtype_for
+    avail = amp_dtype_for("cpu", True) is not None
+    assert _resolve_eval_amp({"amp": True, "amp_dtype": None}, "cpu") is False
+    assert (_resolve_eval_amp({"amp": True, "amp_dtype": "bfloat16"}, "cpu")
+            is avail)
+    assert _resolve_eval_amp({"amp": True, "amp_dtype": "float16"}, "cpu") is False
+    # 旧 checkpoint 没有 amp_dtype：回退到请求开关。
+    assert _resolve_eval_amp({"amp": True}, "cpu") is avail
+    assert _resolve_eval_amp({"amp": False}, "cpu") is False
+    # 字段类型损坏时不能静默猜测为启用精度。
+    assert _resolve_eval_amp({"amp": True, "amp_dtype": ["bf16"]}, "cpu") is False
