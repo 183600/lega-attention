@@ -270,6 +270,22 @@ def test_linear_probe_comparison_direction_and_missing():
     print("  [ok] linear_probe 对照方向/缺失显式化")
 
 
+def test_combined_primary_reports_both_probe_metric_verdicts():
+    """主指标为“并报”时不能只取 AUROC 判定而掩盖显著的 PR-AUC 反证。"""
+    from run_all import linear_probe_baseline_comparison
+    runs = {}
+    for s in (1, 2, 3, 4, 5):
+        an = _analysis(s, 0.50, 0.30, 0.70, 0.70)
+        an["linear_probe"]["primary_detection_metric"] = "AUROC 与 PR-AUC 并报"
+        runs[s] = {"analysis": an}
+    out = linear_probe_baseline_comparison({"lega": runs})
+    row = out["rows"][0]
+    assert row["p_adj_auprc"] < 0.05 and row["p_adj_auroc"] >= 0.05
+    assert "PR-AUC" in row["verdict"] and "简单监督基线更好" in row["verdict"]
+    assert "AUROC" in row["verdict"], row["verdict"]
+    print("  [ok] 探针“并报”主指标同时呈现 PR-AUC/AUROC 判定")
+
+
 def test_render_baseline_sections_shows_probe_table_and_missing():
     """汇总页必须渲染探针表与缺失警告（与门控 logit 并排）。"""
     runs = {"lega": {s: {"analysis": _analysis(s, 0.55, 0.30 + 0.01 * s,

@@ -5183,8 +5183,21 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
         r["p_adj_auroc"] = (t_aud or {}).get("p_adj")
         r["delta_auprc_ci95"] = (t_ap or {}).get("mean_diff_ci95")
         r["delta_auroc_ci95"] = (t_aud or {}).get("mean_diff_ci95")
-        r["verdict"] = ((t_ap if r.get("primary_detection_metric") == "PR-AUC"
-                         else t_aud) or {}).get("verdict")
+        primary_detection = r.get("primary_detection_metric")
+        if primary_detection == "PR-AUC":
+            r["verdict"] = (t_ap or {}).get("verdict")
+        elif primary_detection == "AUROC":
+            r["verdict"] = (t_aud or {}).get("verdict")
+        else:
+            # “AUROC 与 PR-AUC 并报”（以及旧产物缺失主指标）：不能默认只
+            # 看 AUROC。两个检验可能一个显著、另一个不显著，单取任一个都
+            # 会隐藏另一指标上的反证；并列渲染两者的判定。
+            parts = []
+            if t_ap is not None:
+                parts.append("PR-AUC：" + str(t_ap.get("verdict") or "-"))
+            if t_aud is not None:
+                parts.append("AUROC：" + str(t_aud.get("verdict") or "-"))
+            r["verdict"] = "；".join(parts) if parts else "-"
     return {
         "metrics": {"ap": LINEAR_PROBE_AP_METRIC,
                     "auroc": LINEAR_PROBE_AUROC_METRIC},
