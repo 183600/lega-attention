@@ -3004,6 +3004,11 @@ def test_large_integer_identity_does_not_round_through_float():
     assert _same_protocol_value(a, str(a))
     assert not _same_protocol_value(a, b)
     assert not _same_protocol_value(True, 1)
+    # int("1_0") 会得到 10，但下划线写法不是规范整数串，不能与种子/协议值
+    # 10 静默合并（strict_int 对同一输入显式报错）。
+    assert _integral_value("1_0") is None
+    assert not _same_seed("1_0", 10)
+    assert not _same_protocol_value("1_0", 10)
     print("  [ok] 大整数身份不经 float 丢精度")
 
 

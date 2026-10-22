@@ -390,10 +390,13 @@ def _protocol_value(v):
     if isinstance(v, (int, np.integer)):
         return ("num", int(v))
     if isinstance(v, str):
-        try:
+        # Python 的 int()/float() 都接受 "1_0"（=10），会把拼写不同的
+        # 协议值（以及种子）静默合并；与 strict_int 一样显式拒绝下划线。
+        if "_" in v:
+            return ("raw", repr(v))
+        # 只把普通十进制整数字符串规范化；"10" 与整数 10 视为同一协议值。
+        if re.fullmatch(r"[+-]?\d+", v.strip()) is not None:
             return ("num", int(v))
-        except ValueError:
-            pass
     if isinstance(v, (float, np.floating)) or isinstance(v, str):
         try:
             f = float(v)
@@ -416,10 +419,12 @@ def _integral_value(value):
     if isinstance(value, (int, np.integer)):
         return int(value)
     if isinstance(value, str):
-        try:
+        # Python 的 int()/float() 都接受 "1_0"（=10）：下划线写法既不是
+        # 规范整数串，也不该与种子 10 视为同一身份（strict_int 同口径拒绝）。
+        if "_" in value:
+            return None
+        if re.fullmatch(r"[+-]?\d+", value.strip()) is not None:
             return int(value)
-        except ValueError:
-            pass
     try:
         f = float(value)
     except (TypeError, ValueError, OverflowError):
