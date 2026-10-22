@@ -917,6 +917,22 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         ss = sanity_summary(bad_seed)
         assert ss["passed"] is False and ss["malformed"] is True
         assert ss["seed_verified"] is None
+        # seed_report 本身或其中的指纹字段类型损坏，也不能当作“无证据”。
+        bad_seed_report = os.path.join(d, "bad_seed_report.json")
+        with open(bad_seed_report, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": {"a": True},
+                       "manifest": {"seed_report": "not-an-object"}}, f)
+        sr = sanity_summary(bad_seed_report)
+        assert sr["passed"] is False and sr["malformed"] is True
+        bad_fp = os.path.join(d, "bad_fp.json")
+        with open(bad_fp, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": {"a": True},
+                       "manifest": {"seed_report": {
+                           "seed_verified": True,
+                           "data_order_rng_fingerprint": 123}}}, f)
+        sfp = sanity_summary(bad_fp)
+        assert sfp["passed"] is False and sfp["malformed"] is True
+        assert sfp["data_order_rng_fingerprint"] is None
         bad_manifest = os.path.join(d, "bad_manifest.json")
         with open(bad_manifest, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "checks": {"a": True},

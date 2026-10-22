@@ -518,6 +518,12 @@ def sanity_summary(path: str) -> dict:
             if isinstance(seed_rep.get("data_order_rng_fingerprint"), str):
                 out["data_order_rng_fingerprint"] = \
                     seed_rep["data_order_rng_fingerprint"]
+            elif "data_order_rng_fingerprint" in seed_rep:
+                # 指纹存在但类型错误同样不能当成“没有该证据”。
+                out["malformed"] = True
+        elif seed_rep is not None:
+            # seed_report 存在但不是对象：种子审计证据结构损坏。
+            out["malformed"] = True
         git = manifest.get("git")
         if isinstance(git, dict):
             out["git_commit"] = git.get("commit")
