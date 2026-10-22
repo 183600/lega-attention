@@ -400,16 +400,56 @@ def _load_train_curve(out_dir: str, max_points: int = 1000):
     }
 
 
+def _eval_identity_mismatches(ev: dict, variant: str, seed) -> list:
+    """返回评测结果与本 run 身份不符的字段描述（空表示一致）。"""
+    mismatches = []
+    ev_variant = ev.get("variant")
+    if ev_variant is not None and ev_variant != variant:
+        mismatches.append(f"variant={ev_variant}")
+    ev_seed = ev.get("seed")
+    if ev_seed is not None:
+        try:
+            if _ledger_seed(ev_seed) != int(seed):
+                mismatches.append(f"seed={ev_seed}")
+        except (TypeError, ValueError, OverflowError):
+            mismatches.append(f"seed={ev_seed!r}")
+    return mismatches
+
+
+def _compact_eval(ev: dict) -> dict:
+    """评测结果内嵌字段：保留可复核指标，剔除可能很大的逐样本/worst 列表。
+
+    独立评测（held-out test）和训练内 val 评测共用同一口径，额外保留 split
+    与 checkpoint 身份字段，避免只有文件哈希、文件被覆盖后最终结论无法还原。
+    """
+    return {k: ev.get(k) for k in (
+        "split", "val_ppl", "val_loss", "ppl", "loss",
+        "val_ppl_clamped", "eval_ctx", "eval_iters_requested", "eval_iters",
+        "val_windows", "val_tokens_evaluated", "val_loss_se",
+        "val_loss_ci95", "val_ppl_ci95", "val_loss_min", "val_loss_max",
+        "gate_mean", "gate_std", "gate_frac_low", "gate_frac_high",
+        "n_params", "n_gate_extra", "steps", "steps_planned",
+        "early_stopped", "tokens_seen", "ckpt", "ckpt_sha256",
+        "selection_set_is_eval_set", "code_commit", "code_dirty",
+        "data_fingerprint", "train_data_fingerprint",
+        "eval_data_fingerprint", "data_fingerprint_matches_training",
+        "config_sha256", "sanity_passed", "sanity_verified",
+        "data_order_sha256", "train_step_time_ms", "train_tokens_per_sec",
+        "train_peak_mem_mb", "epochs_seen", "training_precision")}
+
+
 def snapshot_train_run(variant: str, seed: int, out_dir: str,
-                       known_ckpt_sha256=None, known_ckpt_path=None) -> dict:
+                       known_ckpt_sha256=None, known_ckpt_path=None,
+                       heldout_path: str = None) -> dict:
     """把一个 (变体, 种子) run 压缩成台账条目。
 
-    最终指标取自 eval.json；同时记录 config_used.json / train_log.jsonl /
-    run_manifest.json / eval.json 的路径与哈希，以及被评测 checkpoint
-    （model_best.pt / model.pt）的内容哈希 —— 训练曲线或结果文件后续被
-    覆盖、手改、甚至换掉 checkpoint，都能通过哈希比对发现。训练曲线本身
-    也内嵌进台账（train_curve，超长时显式下采样）：同 tag 重跑覆盖文件后，
-    历史曲线仍可从台账还原，而不只是留下一个已失效的文件哈希。
+    训练内指标取自 out_dir/eval.json；heldout_path 给定时，把独立评测
+    （通常是 held-out test）的结果也内嵌为 final_eval。后者不是文件哈希的
+    替代品：结果文件被覆盖后，最终指标仍可从台账还原。同时记录
+    config_used.json / train_log.jsonl / run_manifest.json / eval.json 的
+    路径与哈希，以及被评测 checkpoint（model_best.pt / model.pt）的内容
+    哈希。训练曲线本身也内嵌进台账（train_curve，超长时显式下采样）：同
+    tag 重跑覆盖文件后，历史曲线仍可从台账还原。
 
     evaluate 阶段已对同一 checkpoint 做过全量 SHA-256（写在 results_dir
     的 eval_<variant><suffix>.json 及 test 访问账本）：调用方通过
@@ -468,17 +508,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     if isinstance(ev, dict) and ev:
         # eval 身份与本次快照不符（旧 eval.json 被复用）时显式标记：
         # 不能把别的 (variant, seed) 的结果当作本 run 的最终指标。
-        mismatches = []
-        ev_variant = ev.get("variant")
-        if ev_variant is not None and ev_variant != variant:
-            mismatches.append(f"variant={ev_variant}")
-        ev_seed = ev.get("seed")
-        if ev_seed is not None:
-            try:
-                if _ledger_seed(ev_seed) != int(seed):
-                    mismatches.append(f"seed={ev_seed}")
-            except (TypeError, ValueError, OverflowError):
-                mismatches.append(f"seed={ev_seed!r}")
+        mismatches = _eval_identity_mismatches(ev, variant, seed)
         if mismatches:
             rec["eval_identity_mismatches"] = mismatches
         rec["result"] = {k: ev.get(k) for k in (
@@ -493,6 +523,28 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
         if isinstance(prec, dict):
             rec["result"]["amp_enabled"] = prec.get("amp_enabled")
             rec["result"]["amp_dtype"] = prec.get("amp_dtype")
+    # 独立评测结果（held-out test）：不只留文件哈希，指标本身也进台账。
+    fe = _load_json(heldout_path) if heldout_path else None
+    if isinstance(fe, dict) and fe:
+        rec["final_eval"] = _compact_eval(fe)
+        # 结果文件的路径不写绝对路径（跨机器不可移植），但哈希/大小写进
+        # 台账：内嵌指标与当时文件内容可用哈希互相校验。
+        rec["final_eval"]["source"] = "independent_eval"
+        try:
+            rec["final_eval_file"] = {
+                "sha256": sha256_file(heldout_path),
+                "size": int(os.path.getsize(heldout_path)),
+            }
+        except OSError:
+            pass
+        mismatches = _eval_identity_mismatches(fe, variant, seed)
+        if mismatches:
+            rec["final_eval_identity_mismatches"] = mismatches
+    elif heldout_path:
+        # 文件存在但无法解析/为空：显式记录，不能静默当作“未评测”。
+        rec["final_eval"] = {"source": "independent_eval", "available": False,
+                             "reason": ("missing" if not os.path.exists(heldout_path)
+                                        else "unparseable_or_empty")}
     return rec
 
 

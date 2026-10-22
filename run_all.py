@@ -6593,10 +6593,11 @@ def main():
         if isinstance(rec, dict) and rec.get("ckpt_sha256") and rec.get("ckpt"):
             known_ckpt[(v, seed)] = (str(rec["ckpt_sha256"]), str(rec["ckpt"]))
     run_snapshots = []
-    for v, seed, vdir, _suffix in chain:
+    for v, seed, vdir, suffix in chain:
         sha, ckpt = known_ckpt.get((v, seed), (None, None))
         run_snapshots.append(snapshot_train_run(
-            v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt))
+            v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt,
+            heldout_path=os.path.join(results_dir, f"eval_{v}{suffix}.json")))
     result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
                     if os.path.isfile(p)]
     # 收尾身份核对：长实验期间代码/数据若被改动，开始时记录的 commit/指纹

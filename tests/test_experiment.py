@@ -245,6 +245,53 @@ def test_snapshot_train_run_embeds_config_used():
     print("  [ok] run 快照内嵌 config_used.json（含缺失降级）")
 
 
+def test_snapshot_embeds_independent_heldout_eval():
+    """独立评测结果必须内嵌：结果文件被覆盖后最终指标仍可从台账还原。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "lega")
+        res = os.path.join(tmp, "results")
+        os.makedirs(out)
+        os.makedirs(res)
+        path = os.path.join(res, "eval_lega.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"variant": "lega", "seed": 7, "split": "test",
+                       "val_ppl": 9.5, "val_loss": 2.25, "ppl": 9.5,
+                       "loss": 2.25, "eval_ctx": 64, "eval_iters": 20,
+                       "val_windows": 5, "val_loss_ci95": [2.0, 2.5],
+                       "ckpt": "/tmp/model_best.pt",
+                       "ckpt_sha256": "f" * 64, "sanity_verified": True,
+                       "worst_windows": [{"huge": "x" * 1000}]}, f)
+        snap = snapshot_train_run("lega", 7, out, heldout_path=path)
+        fe = snap["final_eval"]
+        assert fe["source"] == "independent_eval"
+        assert fe["split"] == "test" and fe["val_ppl"] == 9.5
+        assert fe["ckpt_sha256"] == "f" * 64
+        assert "worst_windows" not in fe       # 大字段不随台账膨胀
+        assert "final_eval_identity_mismatches" not in snap
+        # 身份不符必须显式标记（旧评测文件复用）
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"variant": "standard", "seed": 8, "ppl": 1.0}, f)
+        snap = snapshot_train_run("lega", 7, out, heldout_path=path)
+        assert snap["final_eval"]["ppl"] == 1.0
+        assert any("variant" in x
+                   for x in snap["final_eval_identity_mismatches"])
+        assert any("seed" in x
+                   for x in snap["final_eval_identity_mismatches"])
+        # 文件缺失/畸形时显式标记不可用，不静默当作未评测
+        missing = os.path.join(res, "missing.json")
+        snap = snapshot_train_run("lega", 7, out, heldout_path=missing)
+        assert snap["final_eval"]["available"] is False
+        assert snap["final_eval"]["reason"] == "missing"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{bad")
+        snap = snapshot_train_run("lega", 7, out, heldout_path=path)
+        assert snap["final_eval"]["reason"] == "unparseable_or_empty"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] run 快照内嵌独立 held-out 评测并核对身份")
+
+
 def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
     """台账快照必须自含 seed_report/环境/sanity；旧 eval 不得冒充本 run。"""
     tmp = tempfile.mkdtemp()
