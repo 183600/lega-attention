@@ -4086,14 +4086,18 @@ def build_summary(results_dir: str, audit: dict = None,
             continue
         usable = set()
         for c, by_bs in prefill.items():
-            if (not isinstance(by_bs, dict)
+            if (not isinstance(c, str)
+                    or not isinstance(by_bs, dict)
                     or _num_or_none(by_bs.get("1")) is None
                     or _num_or_none(decode.get(c)) is None):
                 continue
-            try:
-                usable.add(int(c))
-            except (TypeError, ValueError, OverflowError):
+            # int("1_0")==10、int("040")==40，但这些非规范 key 在
+            # _lat_metric_at 里按 str(ctx) 查找时并不存在；若拿来求公共
+            # ctx，会选中一个没有真实量测的“最大上下文”。
+            ctx = _integral_value(c)
+            if ctx is None or c != str(ctx):
                 continue
+            usable.add(ctx)
         common_ctxs = usable if common_ctxs is None else (common_ctxs & usable)
     common_ctx = max(common_ctxs) if common_ctxs else None
 

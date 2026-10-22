@@ -3404,6 +3404,33 @@ def test_tradeoff_baseline_requires_data_at_common_ctx():
     print("  [ok] 涨点-增幅：基线必须在公共 ctx 上有量测数据")
 
 
+def test_tradeoff_ignores_noncanonical_latency_ctx_keys():
+    """latency 的 ctx key 必须与 str(ctx) 完全一致。
+
+    int("4_0")==40、int("040")==40，但 _lat_metric_at 查的是 str(ctx)；
+    若把畸形 key 纳入公共 ctx，可能选中一个根本没有量测数据的最大上下文。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3})
+
+        def _lat(cells):
+            return {"prefill_ms": {c: {"1": p} for c, (p, _d) in cells.items()},
+                    "decode_ms_per_tok": {c: d for c, (_p, d) in cells.items()}}
+
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": _lat({"4_0": (4.0, 0.4), "32": (3.0, 0.3)}),
+            "lega": _lat({"4_0": (4.4, 0.44), "32": (3.3, 0.33)})}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["latency_ctx"] == 32, row
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 涨点-增幅：latency 公共 ctx 忽略下划线/非规范 key")
+
+
 def test_scope_missing_config_or_data_is_not_confirmed():
     """缺 config/data 时范围核对必须“不可确认”，不能因种子匹配就通过。"""
     tmp = tempfile.mkdtemp()
