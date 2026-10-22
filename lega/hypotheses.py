@@ -48,6 +48,10 @@ LOCK_PATH = os.path.join(ROOT, "preregistration", "hypotheses.lock.json")
 # 科学内容字段：只有这些字段参与逐假设摘要；说明/注释类字段可自由补充。
 HYPOTHESIS_FIELDS = ("id", "claim", "metric", "candidate", "reference",
                      "direction")
+# 判定参数：这些顶层字段决定“什么算确认性证据/这次 run 是否在范围内”。
+# 若只把它们留给整文档 SHA 的 warning，改写 scope 就能把范围外 run 洗成
+# confirmatory；因此单独计算锁定摘要，由锁文件顶层 locked_document 保护。
+LOCKED_DOCUMENT_FIELDS = ("scope", "decision_rule")
 VALID_DIRECTIONS = ("candidate_better", "candidate_worse")
 
 VALID_STATUSES = ("intact", "amended", "violated", "missing_lock",
@@ -81,14 +85,33 @@ def _hypothesis_key(hid) -> str:
     return hid if isinstance(hid, str) else _canonical(hid)
 
 
+def locked_document_digest(doc) -> str:
+    """判定参数（scope/decision_rule）的摘要。
+
+    逐假设摘要保护“主张本身”，但范围与判定规则同样能改变确认性结论：
+    把 scope 改成 tiny/任意种子，就能让越界 run 重新“合格”。这里把
+    LOCKED_DOCUMENT_FIELDS 单独规范化摘要，锁文件顶层 locked_document
+    保存其基线值；改写任一字段都会使摘要变化并被验证器判为 violated。
+    """
+    core = {k: ((doc or {}).get(k) if isinstance(doc, dict) else None)
+            for k in LOCKED_DOCUMENT_FIELDS}
+    return _sha256_text(_canonical(core))[:16]
+
+
 def fingerprint(doc) -> dict:
-    """登记文本的指纹：整文档 SHA-256 + 逐假设摘要表 + 条数与顺序。"""
+    """登记文本的指纹：整文档 SHA-256 + 逐假设摘要表 + 条数与顺序。
+
+    额外记录判定参数摘要（scope/decision_rule），供锁文件独立锁定；
+    逐假设摘要仍只覆盖科学内容字段，注释类字段可自由补充。
+    """
     doc = doc if isinstance(doc, dict) else {}
     hs = doc.get("hypotheses")
     hs = hs if isinstance(hs, list) else []
     ids = [h.get("id") for h in hs if isinstance(h, dict)]
     return {
         "document_sha256": _sha256_text(_canonical(doc)),
+        "locked_document_sha256": locked_document_digest(doc),
+        "locked_document_fields": list(LOCKED_DOCUMENT_FIELDS),
         "n_hypotheses": len(hs),
         "hypothesis_ids": ids,
         "hypotheses": {_hypothesis_key(h.get("id")): hypothesis_digest(h)
@@ -170,6 +193,44 @@ def _lock_baseline(lock) -> dict:
     return b if isinstance(b, dict) else {}
 
 
+def locked_document_check(lock, doc) -> dict:
+    """检查登记表判定参数是否与锁文件顶层 locked_document 一致。
+
+    返回 {locked, expected, current, fields, problems, warning}。旧锁文件
+    没有 locked_document 时只记 warning（不追溯否决已完成的确认性判定），
+    但升级后任何 scope/decision_rule 改写都会判 violated。
+    """
+    current = locked_document_digest(doc)
+    guard = lock.get("locked_document") if isinstance(lock, dict) else None
+    out = {"locked": False, "expected": None, "current": current,
+           "fields": None, "problems": [], "warning": None}
+    if guard is None:
+        out["warning"] = (
+            "锁文件未锁定 scope/decision_rule（旧格式）：改写范围或判定参数"
+            "只会改变整文档哈希并触发 warning，无法否决 confirmatory。请运行 "
+            "`python -m lega.hypotheses --upgrade-lock --reason ...` 升级锁文件。")
+        return out
+    if not isinstance(guard, dict) or not isinstance(guard.get("sha256"), str):
+        out["problems"].append(
+            "锁文件 locked_document 结构非法（缺 sha256 字符串）：判定参数"
+            "完整性证据已损坏，不能确认 scope/decision_rule 未被改写")
+        return out
+    fields = guard.get("fields")
+    if fields != list(LOCKED_DOCUMENT_FIELDS):
+        out["problems"].append(
+            "锁文件 locked_document.fields 与当前协议不一致（"
+            f"{fields!r} ≠ {list(LOCKED_DOCUMENT_FIELDS)!r}）：无法确认"
+            "范围/判定参数被锁定，按完整性不足处理")
+        return out
+    out.update({"locked": True, "expected": guard["sha256"], "fields": fields})
+    if guard["sha256"] != current:
+        out["problems"].append(
+            "判定参数 scope/decision_rule 被改写（锁定摘要 "
+            f"{guard['sha256']} → {current}）：确认性判定的适用范围与规则"
+            "已不可信，须从 git 恢复登记表或给出新的、事前登记的版本")
+    return out
+
+
 def transition_problems(before: dict, after: dict) -> list:
     """一次状态转移的 append-only 检查：既有假设只许原样保留。
 
@@ -187,6 +248,17 @@ def transition_problems(before: dict, after: dict) -> list:
             problems.append(
                 f"已登记的假设 {hid} 科学内容被改写"
                 f"（摘要 {digest} → {a[hid]}）")
+    # 判定参数（scope/decision_rule）也必须 append-only。旧锁状态没有该
+    # 字段时跳过（由顶层 locked_document 的旧格式 warning 处理），一旦链上
+    # 出现过就必须逐环保持一致。
+    if ("locked_document_sha256" in before
+            and "locked_document_sha256" in after
+            and before["locked_document_sha256"]
+            != after["locked_document_sha256"]):
+        problems.append(
+            "判定参数 scope/decision_rule 被改写"
+            f"（锁定摘要 {before['locked_document_sha256']} → "
+            f"{after['locked_document_sha256']}）")
     return problems
 
 
@@ -335,6 +407,20 @@ def verify_registration(registry_path: str = None,
                 "（登记后新增假设必须经 --amend 留痕，否则等于事后补登记）")
     report["document_sha256_matches_chain_head"] = bool(
         fp["document_sha256"] == head.get("document_sha256"))
+    # 判定参数（scope/decision_rule）独立于逐假设摘要：只改范围就能让
+    # 越界 run 重新“合格”，因此必须在任何 confirmatory 判定前检查。
+    locked = locked_document_check(lock, doc)
+    report.update({
+        "locked_document_fields": locked.get("fields"),
+        "locked_document_sha256": locked.get("current"),
+        "locked_document_expected": locked.get("expected"),
+        "locked_document_matches": (
+            None if not locked.get("locked")
+            else locked.get("expected") == locked.get("current")),
+    })
+    problems += locked.get("problems") or []
+    if locked.get("warning"):
+        report["warnings"].append(locked["warning"])
     if problems:
         report["status"] = "violated"
         report["problems"] = problems
@@ -398,6 +484,12 @@ def init_lock(registry_path: str = None, lock_path: str = None,
     lock = {
         "algo": "sha256",
         "baseline": fingerprint(doc),
+        # 判定参数的独立锁：逐假设摘要保护主张，这里保护“哪些 run 算范围内、
+        # 用什么规则判定”不被静默改写。
+        "locked_document": {
+            "fields": list(LOCKED_DOCUMENT_FIELDS),
+            "sha256": locked_document_digest(doc),
+        },
         "created_at": at or time.strftime("%Y-%m-%d %H:%M:%S"),
         "reason": reason or "首次登记",
         "chain": [],
@@ -430,6 +522,14 @@ def append_amendment(registry_path: str = None, lock_path: str = None,
     head, problems = _replay_chain(lock)
     if head is None or problems:
         raise ValueError("锁文件已损坏（链无法重放）：" + "；".join(problems))
+    guard = locked_document_check(lock, doc)
+    if guard.get("problems"):
+        raise ValueError("判定参数完整性检查失败：" + "；".join(guard["problems"]))
+    if not guard.get("locked"):
+        raise ValueError(
+            "锁文件未锁定 scope/decision_rule（旧格式），追加假设前请先运行 "
+            "`python -m lega.hypotheses --upgrade-lock --reason ...`，"
+            "否则范围/判定参数仍可被静默改写")
     fp = fingerprint(doc)
     problems += transition_problems(head, fp)
     if fp["hypotheses"] == head["hypotheses"]:
@@ -450,6 +550,79 @@ def append_amendment(registry_path: str = None, lock_path: str = None,
     return link
 
 
+def upgrade_lock(registry_path: str = None, lock_path: str = None,
+                 reason: str = None, at: str = None) -> dict:
+    """给旧锁文件补上判定参数（scope/decision_rule）锁定，不改写修订链。
+
+    旧版锁只保护逐假设摘要：把 scope 改成 tiny 或任意种子，整文档哈希虽变
+    却仅触发 warning，confirmatory 仍然有效。升级会在锁文件顶层写入
+    locked_document 摘要；这是对**当前**登记表的一次显式、带理由的锁定，
+    不追溯否决历史判定，也不允许覆盖已有的不同摘要（那会把篡改洗成升级）。
+    """
+    if not reason:
+        raise ValueError("升级锁文件必须给出 --reason（说明升级时点与范围）")
+    registry_path = registry_path or REGISTRY_PATH
+    lock_path = lock_path or LOCK_PATH
+    lock = load_lock(lock_path)
+    if lock is None:
+        raise ValueError(f"锁文件不存在或不可解析：{lock_path}；首次登记请用 --init")
+    doc = load_registration(registry_path)
+    if doc is None:
+        raise ValueError(f"登记表不存在或不可解析：{registry_path}")
+    errors = validate_registration(doc)
+    if errors:
+        raise ValueError("登记表结构错误，拒绝升级锁文件：" + "；".join(errors))
+    head, problems = _replay_chain(lock)
+    if head is None or problems:
+        raise ValueError("锁文件已损坏（链无法重放）：" + "；".join(problems))
+    fp = fingerprint(doc)
+    problems += transition_problems(head, fp)
+    if fp["hypotheses"] != head["hypotheses"]:
+        added = sorted(set(fp["hypotheses"]) - set(head["hypotheses"]))
+        if added:
+            problems.append("登记表含未留痕的新假设：" + ", ".join(added))
+    if problems:
+        raise ValueError("登记表未通过 append-only 校验，拒绝锁定：" +
+                         "；".join(problems))
+    current = locked_document_digest(doc)
+    existing = lock.get("locked_document")
+    if existing is not None:
+        if (not isinstance(existing, dict)
+                or existing.get("fields") != list(LOCKED_DOCUMENT_FIELDS)
+                or not isinstance(existing.get("sha256"), str)):
+            raise ValueError("锁文件 existing locked_document 结构非法，拒绝覆盖")
+        if existing["sha256"] != current:
+            raise ValueError(
+                "锁文件已锁定另一组 scope/decision_rule（摘要 "
+                f"{existing['sha256']} ≠ 当前 {current}）：不能把改写过的判定"
+                "参数当作“升级”覆盖；请从 git 恢复登记表或人工审计")
+        return {"upgraded": False, "sha256": current,
+                "fields": list(LOCKED_DOCUMENT_FIELDS),
+                "reason": "locked_document 已存在且与当前登记表一致"}
+    lock["locked_document"] = {
+        "fields": list(LOCKED_DOCUMENT_FIELDS),
+        "sha256": current,
+        "locked_at": at or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": reason,
+    }
+    upgrades = lock.get("upgrades")
+    if upgrades is None:
+        upgrades = []
+    if not isinstance(upgrades, list):
+        raise ValueError("锁文件 upgrades 字段结构非法（应为列表），拒绝覆盖")
+    upgrades.append({
+        "at": at or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "type": "lock_scope_decision_rule",
+        "reason": reason,
+        "fields": list(LOCKED_DOCUMENT_FIELDS),
+        "sha256": current,
+    })
+    lock["upgrades"] = upgrades
+    _write_json(lock, lock_path)
+    return {"upgraded": True, "sha256": current,
+            "fields": list(LOCKED_DOCUMENT_FIELDS), "reason": reason}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="预注册假设登记表的完整性与防篡改工具")
@@ -459,7 +632,10 @@ def main(argv=None) -> int:
                    help="首次登记：生成锁基线（锁已存在时拒绝）")
     g.add_argument("--amend", action="store_true",
                    help="把当前登记表作为一次修订留痕（只允许新增假设）")
-    ap.add_argument("--reason", default=None, help="修订理由（--amend 必填）")
+    g.add_argument("--upgrade-lock", action="store_true",
+                   help="为旧锁文件补上 scope/decision_rule 锁定（不改修订链）")
+    ap.add_argument("--reason", default=None,
+                    help="修订/升级理由（--amend/--upgrade-lock 必填）")
     ap.add_argument("--registry", default=None)
     ap.add_argument("--lock", default=None)
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
@@ -489,6 +665,14 @@ def main(argv=None) -> int:
             lock = init_lock(reason=args.reason, **kw)
             print(f"✅ 已生成锁基线：{args.lock or LOCK_PATH}"
                   f"（{lock['baseline']['n_hypotheses']} 条假设）")
+        elif args.upgrade_lock:
+            up = upgrade_lock(reason=args.reason, **kw)
+            if up["upgraded"]:
+                print(f"✅ 已锁定判定参数 {up['fields']}"
+                      f"（摘要 {up['sha256']}）：{args.lock or LOCK_PATH}")
+            else:
+                print(f"✅ 无需升级：{up['reason']}"
+                      f"（摘要 {up['sha256']}）")
         else:
             link = append_amendment(reason=args.reason, **kw)
             print(f"✅ 已追加修订（{link['at']}）：{link['reason']}"

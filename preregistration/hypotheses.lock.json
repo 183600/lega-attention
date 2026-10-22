@@ -113,5 +113,26 @@
         }
       }
     }
+  ],
+  "locked_document": {
+    "fields": [
+      "scope",
+      "decision_rule"
+    ],
+    "sha256": "407b07091ae57631",
+    "locked_at": "2026-10-22 07:29:17",
+    "reason": "锁定预注册范围与判定规则，防止越界 run 被洗成 confirmatory"
+  },
+  "upgrades": [
+    {
+      "at": "2026-10-22 07:29:17",
+      "type": "lock_scope_decision_rule",
+      "reason": "锁定预注册范围与判定规则，防止越界 run 被洗成 confirmatory",
+      "fields": [
+        "scope",
+        "decision_rule"
+      ],
+      "sha256": "407b07091ae57631"
+    }
   ]
 }

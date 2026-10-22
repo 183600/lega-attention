@@ -16,8 +16,8 @@ import tempfile
 from lega.hypotheses import (HYPOTHESIS_FIELDS, LOCK_PATH, REGISTRY_PATH,
                              append_amendment, fingerprint,
                              hypothesis_digest, init_lock, load_registration,
-                             main, transition_problems, validate_registration,
-                             verify_registration)
+                             main, transition_problems, upgrade_lock,
+                             validate_registration, verify_registration)
 
 
 def _doc(claims):
@@ -118,30 +118,83 @@ def test_verify_intact_then_silent_tamper_detected():
 
 
 def test_document_sha_change_warns_without_voiding_confirmatory():
-    """锁链未覆盖字段（decision_rule/scope/note）变化：科学摘要未变 → 不判
-    违反（注释类字段允许改），但必须给出 warning 提示人工核对 git diff。"""
+    """注释类字段可改（只 warning）；判定参数 decision_rule/scope 被改写
+    必须判 violated——否则改范围就能把越界 run 洗成 confirmatory。"""
     tmp = tempfile.mkdtemp()
     try:
         reg, lock = _pair(tmp)
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
         d = load_registration(reg)
-        d["decision_rule"] = {"alpha": 0.5}   # 改写判定参数（锁链不摘要）
+        d["decision_rule"] = {"alpha": 0.5}   # 改写判定参数 → 必须否决
         _write(reg, d)
         r = verify_registration(registry_path=reg, lock_path=lock)
-        assert r["status"] in ("intact", "amended") and r["confirmatory_valid"]
-        assert r["document_sha256_matches_chain_head"] is False
-        assert any("decision_rule" in w for w in r["warnings"])
-        # 追加 note（明确允许的可读性字段）同样只警告不判违反
+        assert r["status"] == "violated" and not r["confirmatory_valid"]
+        assert r["locked_document_matches"] is False
+        assert any("decision_rule" in p for p in r["problems"])
+        # 追加 note（明确允许的可读性字段）只警告不判违反
         d2 = load_registration(reg)
         d2.pop("decision_rule")
         d2["hypotheses"][0]["note"] = "补充阅读说明"
         _write(reg, d2)
         r2 = verify_registration(registry_path=reg, lock_path=lock)
         assert r2["confirmatory_valid"] and r2["warnings"]
+        assert r2["document_sha256_matches_chain_head"] is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] verify_registration：文档哈希变化 → warning 而非静默通过")
+    print("  [ok] verify_registration：注释警告、判定参数改写 → violated")
+
+
+def test_scope_tamper_rejected_and_legacy_lock_upgrade():
+    """旧锁未锁定 scope 时给 warning；升级后改写 scope → violated，
+    且不能用 --amend 把改写过的范围“补手续”。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        reg, lock = _pair(tmp)
+        _write(reg, _doc([("H1", "c1")]))
+        init_lock(registry_path=reg, lock_path=lock)
+        # 模拟旧锁：删掉 locked_document（旧版锁只有 baseline+chain）
+        lk = json.load(open(lock, encoding="utf-8"))
+        lk.pop("locked_document")
+        _write(lock, lk)
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["confirmatory_valid"] and not r["locked_document_matches"]
+        assert any("upgrade-lock" in w for w in r["warnings"])
+        # 显式升级后锁定当前 scope/decision_rule
+        up = upgrade_lock(registry_path=reg, lock_path=lock,
+                          reason="补锁判定参数", at="2026-01-01 00:00:00")
+        assert up["upgraded"] is True
+        assert verify_registration(registry_path=reg, lock_path=lock)[
+            "confirmatory_valid"]
+        # 静默改写 scope → violated
+        d = load_registration(reg)
+        d["scope"] = {"config": "configs/tiny.json", "seeds": [1]}
+        _write(reg, d)
+        r = verify_registration(registry_path=reg, lock_path=lock)
+        assert r["status"] == "violated" and not r["confirmatory_valid"]
+        assert any("scope/decision_rule" in p for p in r["problems"])
+        # 追加假设也不能绕过范围锁
+        d["hypotheses"].append({"id": "H2", "claim": "c2", "metric": "PPL",
+                                "candidate": "a", "reference": "b",
+                                "direction": "candidate_worse"})
+        _write(reg, d)
+        try:
+            append_amendment(registry_path=reg, lock_path=lock, reason="补 H2")
+            raise AssertionError("改写范围后不得追加修订")
+        except ValueError as e:
+            assert "判定参数" in str(e)
+        # 已有的不同摘要不能被“升级”覆盖（先恢复假设集合，隔离范围改写）
+        d2 = _doc([("H1", "c1")])
+        d2["scope"] = {"config": "configs/small.json"}
+        _write(reg, d2)
+        try:
+            upgrade_lock(registry_path=reg, lock_path=lock, reason="洗白")
+            raise AssertionError("不同判定参数不得被升级覆盖")
+        except ValueError as e:
+            assert "判定参数" in str(e) or "另一组" in str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] scope/decision_rule 独立锁定、旧锁升级与防洗白")
 
 
 def test_amendment_appends_only_and_rejects_forbidden_edits():
