@@ -1889,6 +1889,12 @@ def test_log_ppl_sensitivity_can_reverse_arithmetic_verdict():
     assert log2 == [], log2
     assert _log_ppl_of({"ppl": 0}) is None
     assert _log_ppl_of({"ppl": -1}) is None
+    # PPL 恒为正：非正数在原始 PPL 家族里也必须按缺失处理，不能进入
+    # 跨种子均值/配对检验；极小正值仍是合法观测。
+    assert _ppl_of({"ppl": 0}) is None
+    assert _ppl_of({"ppl": -1}) is None
+    assert _ppl_of({"val_ppl": 0.0}) is None
+    assert _ppl_of({"ppl": 1e-300}) == 1e-300
     print("  [ok] log-PPL 敏感性：几何均值比可反转算术 PPL 的均值方向，协议门槛一致")
 
 

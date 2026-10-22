@@ -242,6 +242,7 @@ def single_factor_audit():
         name, loo_pair, add_pair, _primary = entry
         for pair in (loo_pair, add_pair):
             if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                    or not all(isinstance(x, str) for x in pair)
                     or tuple(pair) not in audited_pairs):
                 problems.append(
                     f"组件 {name!r} 使用了未审计的单因素对比：{pair!r}")
@@ -1326,7 +1327,10 @@ def _ppl_of(d):
     v = d.get("ppl")
     if v is None:
         v = d.get("val_ppl")
-    return _finite_number(v)
+    v = _finite_number(v)
+    # PPL = exp(loss) 恒为正。0/负值只可能来自损坏或手改产物；若照常
+    # 进入跨种子均值/配对检验，会制造“某个变体困惑度接近 0”的假证据。
+    return v if v is not None and v > 0 else None
 
 
 def _log_ppl_of(d):
