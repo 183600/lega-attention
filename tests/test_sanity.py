@@ -1,4 +1,5 @@
 """过拟合小批量 sanity check 测试：正常模型必须通过、梯度断流必须被拦下。"""
+import numpy as np
 import torch
 
 from lega.model import GPT
@@ -86,7 +87,7 @@ def test_overfit_check_rejects_invalid_numeric_args():
                 log_every=1)
     for name in ("lr", "grad_clip", "loss_threshold", "acc_threshold",
                  "initial_loss_tol"):
-        for bad in (True, float("nan"), float("inf"), "bad"):
+        for bad in (True, np.bool_(True), float("nan"), float("inf"), "bad"):
             kwargs = dict(base)
             kwargs[name] = bad
             try:

@@ -191,7 +191,7 @@ def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
 
 def _finite_float_arg(value, name: str) -> float:
     """有限浮点配置；bool/NaN/Inf/非数值显式拒绝（True 不能冒充 1.0）。"""
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
     try:
         f = float(value)
@@ -498,7 +498,8 @@ def main():
         n_heads=_cfg_positive_int("n_heads"),
         ffn_mult=_cfg_positive_int("ffn_mult", 4),
         dropout=0.0, attn_dropout=0.0, variant=args.variant,
-        gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
+        gate_bias_init=_finite_float_arg(
+            cfg.get("gate_bias_init", 2.0), "gate_bias_init"),
         use_sdpa_standard=config_bool(
             cfg.get("use_sdpa_standard", True), "use_sdpa_standard"),
     ).to(device)
