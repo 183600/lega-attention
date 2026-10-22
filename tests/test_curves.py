@@ -7,8 +7,8 @@ import os
 import shutil
 import tempfile
 
-from lega.curves import (LIVE_WARN_EVALS, _finite_points, _val_ci_rel,
-                         curve_observability_warnings, diagnose_curve,
+from lega.curves import (LIVE_WARN_EVALS, _finite_points, _step_or_none,
+                         _val_ci_rel, curve_observability_warnings, diagnose_curve,
                          diagnose_run_dir, live_overfit_hint, load_train_log,
                          worst_status, STATUS_ORDER)
 
@@ -760,3 +760,22 @@ def test_gradient_peak_uses_interval_max_and_reports_step():
     assert d3["grad_norm_nonfinite_steps"] == [10]
     assert d3["grad_norm_max"] == 1.2
     print("  [ok] pre-clip 梯度峰值/非有限：区间峰值 + 发生步")
+
+
+def test_curve_step_beyond_float_exact_range_is_skipped():
+    """巨大 step 不能进入分段均值：int→float 溢出会让整份诊断崩溃。"""
+    assert _step_or_none(10 ** 400) is None
+    assert _step_or_none(1e308) is None
+    assert _step_or_none(-1e308) is None
+    assert _step_or_none(2 ** 53 + 1) is None
+    assert _step_or_none(10) == 10
+    # 一段正常曲线混入巨大 step 时，坏记录被跳过，诊断仍能完成。
+    recs = [{"step": 10, "loss": 4.0}, {"step": 20, "loss": 3.0},
+            {"step": 30, "loss": 2.5},
+            {"step": 50, "val_loss": 4.2}, {"step": 100, "val_loss": 3.0},
+            {"step": 150, "val_loss": 2.4},
+            {"step": 1e308, "loss": 1.0},
+            {"step": -1e308, "val_loss": 1.0}]
+    d = diagnose_curve(recs, log_vocab=10.0)
+    assert isinstance(d, dict) and d.get("status")
+    print("  [ok] 曲线诊断跳过超出 float 精确范围的巨大 step")

@@ -187,12 +187,16 @@ def _step_or_none(value) -> Optional[int]:
         if not math.isfinite(f) or not f.is_integer():
             return None
         value = int(f)
+    # 曲线分段均值把 step 差与浮点比例相乘；超过 2^53 的 step 不能精确
+    # 表示为 float，两个巨大 step 的差（如 1e308 − (−1e308)）还会让
+    # int→float 转换直接 OverflowError。训练步数远小于该上限，按坏记录
+    # 跳过而不是让整份曲线诊断崩溃。
+    if abs(value) > 2 ** 53:
+        return None
     try:
         if not math.isfinite(float(value)):
             return None
     except (OverflowError, ValueError):
-        # step 可能是 JSON 里的 Infinity/1e999 或超出 float 范围的巨大整数：
-        # 分段均值需要 float(step)，这类值同样必须按坏记录跳过。
         return None
     return value
 
