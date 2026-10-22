@@ -4847,14 +4847,22 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         res.update({"candidate": v, "reference": ref_name,
                     "metric": "PPL vs ngram", "lower_is_better": True})
         res = _enrich_paired(res, vals, [ref_ppl] * len(vals))
-        mean_ppl = float(sum(vals) / len(vals))
+        # 与其它汇总统计同口径：朴素 sum 会在多个 1e308 的合法 PPL 上溢出。
+        mean_ppl, std_ppl = mean_std(vals)
+        ratio = (mean_ppl / ref_ppl
+                 if mean_ppl is not None and ref_ppl > 0 else None)
+        if ratio is not None and not math.isfinite(ratio):
+            ratio = None
+        reduction_pct = ((1.0 - ratio) * 100.0
+                         if ratio is not None else None)
+        if reduction_pct is not None and not math.isfinite(reduction_pct):
+            reduction_pct = None
         rows.append({
             "variant": v, "n": len(vals), "seeds": st["seeds"],
             "mean_ppl": mean_ppl,
-            "std_ppl": mean_std(vals)[1],
-            "ratio": mean_ppl / ref_ppl if ref_ppl > 0 else None,
-            "reduction_pct": (1.0 - mean_ppl / ref_ppl) * 100.0
-            if ref_ppl > 0 else None,
+            "std_ppl": std_ppl,
+            "ratio": ratio,
+            "reduction_pct": reduction_pct,
             "p": res.get("p"), "p_adj": None,
             "mean_diff": res.get("mean_diff"),
             "mean_diff_ci95": res.get("mean_diff_ci95"),
