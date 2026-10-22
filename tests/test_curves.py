@@ -695,3 +695,59 @@ def test_best_on_final_eval_flags_truncated_training():
     assert d2["val_still_improving_at_end"] is True
     assert any("无需干预" in r for r in d2["recommendations"]), d2
     print("  [ok] best 在末次评测且仍下降 → 提示训练预算可能是上限")
+
+
+def test_recent_tail_detects_late_rebound_and_plateau():
+    """全程首/末分段仍显示验证下降时，末段回升/停滞必须单独识别。
+
+    场景：验证早先大幅下降、后 1/3 才回升（或停步）。只看首→末会把这种
+    过拟合误判为正常收敛/欠拟合；末段（后 1/3 vs 中 1/3）必须给出信号。
+    """
+    # 训练末段已平台，验证末段回升：即使全程验证仍在下降，也按过拟合处理
+    d = diagnose_curve(_log([3.0, 2.0, 1.9, 1.9, 1.9, 1.9],
+                            [3.2, 2.4, 2.0, 1.95, 2.1, 2.4]))
+    assert d["status"] == "过拟合", d
+    assert d["recent_trend_available"] is True
+    assert d["val_recent_up"] is True and d["recent_overfit_signal"] is True
+    assert any("末段趋势" in e for e in d["evidence"]), d["evidence"]
+    assert any("早停" in r for r in d["recommendations"]), d["recommendations"]
+
+    # 训练末段仍在下降、验证末段停步：全程验证仍下降，但已进入过拟合趋势
+    d2 = diagnose_curve(_log([3.0, 2.7, 2.4, 2.1, 1.8, 1.5],
+                             [3.2, 2.4, 2.0, 1.96, 1.97, 1.98]))
+    assert d2["status"] == "过拟合趋势", d2
+    assert d2["train_recent_down"] is True
+    assert d2["val_recent_unresolved"] is True
+    assert any("末段" in e and "无实质变化" in e for e in d2["evidence"]), d2["evidence"]
+
+    # 正常同步下降不得误报末段信号
+    d3 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    assert d3["status"] == "正常收敛", d3
+    assert not d3["recent_overfit_signal"] and not d3["recent_trend_signal"]
+    print("  [ok] 末段趋势：晚期回升/停步不被全程均值掩盖")
+
+
+def test_gradient_peak_uses_interval_max_and_reports_step():
+    """新版日志的 grad_norm_max 是区间峰值：不能只看区间最后一步。"""
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    # 末步梯度正常（1.0），区间内峰值 80.0：旧口径会漏掉尖峰
+    recs.append({"step": 10, "grad_norm": 1.0, "grad_norm_max": 80.0})
+    recs.append({"step": 20, "grad_norm": 1.1, "grad_norm_max": 1.1})
+    recs.append({"step": 30, "grad_norm": 1.0, "grad_norm_max": 1.0})
+    recs.append({"step": 40, "grad_norm": 1.05, "grad_norm_max": 1.05})
+    d = diagnose_curve(recs)
+    assert d["has_grad_spike"], d
+    assert d["grad_norm_max"] == 80.0 and d["grad_norm_max_step"] == 10
+    assert d["grad_spikes"] and d["grad_spikes"][0]["step"] == 10
+    assert any("step 10" in e for e in d["evidence"]), d["evidence"]
+
+    # 区间峰值非有限：即使损失曲线正常，也要报非有限梯度并带步号
+    recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    recs2.append({"step": 10, "grad_norm": 1.0,
+                  "grad_norm_max": float("inf")})
+    d2 = diagnose_curve(recs2)
+    assert d2["grad_norm_nonfinite"] == 1
+    assert d2["grad_norm_nonfinite_steps"] == [10]
+    assert any("step 10" in e for e in d2["evidence"])
+    print("  [ok] pre-clip 梯度峰值/非有限：区间峰值 + 发生步")

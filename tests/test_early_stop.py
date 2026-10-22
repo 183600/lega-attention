@@ -419,3 +419,35 @@ def test_curve_marks_early_stop_not_data_insufficient():
                          {"step": 100, "val_loss": 3.2}])
     assert d2["early_stopped"] is False and d2["early_stop_step"] is None
     print("  [ok] 曲线诊断：早停标注为设计内截断（不误判数据不足/建议续训）")
+
+
+def test_train_log_records_interval_peaks_for_spike_diagnostics():
+    """log 区间必须同时记录梯度/单步损失峰值，不能只留区间最后一步。
+
+    旧口径只在 log 点写区间末步 grad_norm；一次落在区间中段的梯度爆炸会
+    被静默漏掉。这里用 lr=0 的短训练核对新增字段的区间语义。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg = _cfg()
+        cfg.update({"lr": 0.0, "steps": 6, "log_every": 2, "eval_every": 2})
+        out_dir = os.path.join(tmp, "run")
+        _run_train(cfg, data_dir, out_dir)
+        recs = load_train_log(os.path.join(out_dir, "train_log.jsonl"))
+        train_recs = [r for r in recs if "loss" in r]
+        assert train_recs
+        for r in train_recs:
+            assert "grad_norm_max" in r and "grad_norm_max_step" in r, r
+            assert "loss_max" in r and "loss_max_step" in r, r
+            # 区间峰值按定义不小于区间均值/末步观测
+            assert r["loss_max"] >= r["loss"] - 1e-6, r
+            assert r["grad_norm_max"] >= r["grad_norm"] - 1e-6, r
+            assert 1 <= r["grad_norm_max_step"] <= r["step"], r
+            assert 1 <= r["loss_max_step"] <= r["step"], r
+        # 最后一个区间只含 1 步时峰值与均值相同（不能因区间边界漏报/错报）
+        last = train_recs[-1]
+        assert last["loss_max"] >= last["loss"] - 1e-6
+    print("  [ok] train_log 区间峰值（grad_norm_max/loss_max）供尖峰诊断")

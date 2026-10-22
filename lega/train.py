@@ -303,12 +303,13 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             continue
         lab = labels[i] if i < len(labels) else None
         labeled.append((f"失败区间批{i}@step{lab}" if lab is not None
-                        else f"失败步批{i}", b))
-    labeled += [(f"待训练批{i}", b) for i, b in enumerate(pending_batches or [])
-                if b is not None]
+                        else f"失败步批{i}", b, lab))
+    labeled += [(f"待训练批{i}", b, None)
+                for i, b in enumerate(pending_batches or []) if b is not None]
     data_findings = []
+    bad_data = []
     n_checked = 0
-    for label, batch in labeled:
+    for label, batch, batch_step in labeled:
         x, y = batch
         for name, t in (("x", x), ("y", y)):
             n_checked += 1
@@ -318,18 +319,31 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                 data_findings.append(
                     f"{label} {name}: 整数 id 范围 [{lo}, {hi}]，"
                     + ("**越界 vocab**" if bad else "合法"))
+                if bad:
+                    bad_data.append({"batch": label, "batch_step": batch_step,
+                                     "tensor": name, "kind": "id_out_of_range",
+                                     "min_id": lo, "max_id": hi})
             else:
                 n_nan = int(torch.isnan(t).sum())
                 n_inf = int(torch.isinf(t).sum())
                 data_findings.append(
                     f"{label} {name}: 浮点输入 NaN={n_nan}/Inf={n_inf}"
                     + ("（**数据侧混入非法值**）" if n_nan or n_inf else ""))
+                if n_nan or n_inf:
+                    bad_data.append({"batch": label, "batch_step": batch_step,
+                                     "tensor": name, "kind": "nonfinite_input",
+                                     "nan": n_nan, "inf": n_inf})
+    bad_steps = sorted({d["batch_step"] for d in bad_data
+                        if d.get("batch_step") is not None})
     report["checklist_data"] = {
         "findings": data_findings,
         "n_tensors_checked": n_checked,
         "n_consumed_batches": sum(1 for b in (consumed_batches or [])
                                   if b is not None),
         "first_bad_step": report["first_bad_step"],
+        "bad_batches": bad_data,
+        "first_bad_data_step": (bad_steps[0] if bad_steps else None),
+        "n_bad_batches": len({d["batch"] for d in bad_data}),
         "note": ("失败区间批=检测点所在 log 区间内每一步消费的候选批次"
                  "（优先检查；NaN 可能早在区间中段出现，预取已覆盖 batches）；"
                  + (f"本区间首个非有限损失步={int(first_bad_step)}，"
@@ -489,6 +503,12 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         "并观察梯度范数是否再出尖峰",
     ]
     report["suggested_actions"] = actions
+    # 固定排查顺序显式落盘：消费方不应依赖 JSON 对象键的插入顺序来恢复
+    # “数据→代码→混合精度→优化”的因果链。
+    report["checklist_order"] = [
+        "checklist_data", "checklist_params", "checklist_activations",
+        "checklist_precision", "checklist_optimization",
+    ]
     return report
 
 
@@ -1204,6 +1224,13 @@ def main():
     # 历史尾部供 NaN 排查判断"梯度爆炸 vs 学习率过大"
     gn_dev_recent = []
     gn_hist = []
+    # log 区间峰值：只记录区间最后一步会漏掉区间中段的梯度爆炸/单步损失
+    # 尖峰。用设备标量累积，log 点才 .item()，不引入每步同步。
+    gn_max_dev = torch.full((), -1.0, device=device)
+    gn_max_step_dev = torch.full((), -1.0, device=device)
+    gn_nonfinite_dev = torch.zeros((), dtype=torch.bool, device=device)
+    loss_max_dev = torch.full((), -1.0, device=device)
+    loss_max_step_dev = torch.full((), -1.0, device=device)
     # 最近训练日志损失：验证停步时用来区分过拟合（训练仍在降）与
     # 欠拟合/优化不足（训练也停滞或上升），见 curves.live_overfit_hint。
     train_loss_hist = []
@@ -1357,13 +1384,22 @@ def main():
                 out = model(x, targets=y)
                 # grad_accum==1（默认配置）时除法结果就是 loss 本身
                 loss = out["loss"] if grad_accum == 1 else out["loss"] / grad_accum
+            step_loss = out["loss"].detach()
             # 设备端标记区间内首个非有限损失步（0-based），log 点统一读取。
-            bad_now = ~torch.isfinite(out["loss"].detach())
+            bad_now = ~torch.isfinite(step_loss)
             interval_first_bad_dev = torch.where(
                 (interval_first_bad_dev < 0) & bad_now,
                 step_dev, interval_first_bad_dev)
+            # 区间内单步损失峰值：区间均值会把“一步异常”稀释到阈值以下，
+            # 峰值序列供 curves 的瞬态尖峰诊断单独检查。
+            finite_step_loss = torch.isfinite(step_loss)
+            new_loss_max = finite_step_loss & (
+                (loss_max_dev < 0) | (step_loss > loss_max_dev))
+            loss_max_dev = torch.where(new_loss_max, step_loss, loss_max_dev)
+            loss_max_step_dev = torch.where(new_loss_max, step_dev,
+                                            loss_max_step_dev)
             loss.backward()
-            loss_acc_dev.add_(out["loss"].detach(), alpha=1.0 / grad_accum)
+            loss_acc_dev.add_(step_loss, alpha=1.0 / grad_accum)
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
             del out, loss
         # pre-clip 梯度范数：clip_grad_norm_ 返回裁剪前的总范数，保留设备标量
@@ -1371,6 +1407,13 @@ def main():
         gn_dev_recent.append(gn_dev)
         if len(gn_dev_recent) > log_every + grad_accum + 8:
             gn_dev_recent.pop(0)
+        # pre-clip 梯度范数区间峰值（含非有限值）：log 点最后一步之外的一次
+        # 梯度爆炸同样是 NaN 之前的信号，不能被区间采样漏掉。
+        gn_finite = torch.isfinite(gn_dev)
+        new_gn_max = gn_finite & ((gn_max_dev < 0) | (gn_dev > gn_max_dev))
+        gn_max_dev = torch.where(new_gn_max, gn_dev, gn_max_dev)
+        gn_max_step_dev = torch.where(new_gn_max, step_dev, gn_max_step_dev)
+        gn_nonfinite_dev = gn_nonfinite_dev | (~gn_finite)
         opt.step()
         tokens_seen += batch_size * train_ctx * grad_accum
 
@@ -1383,6 +1426,15 @@ def main():
             interval = ((interval_batches[0][0] + 1, step + 1)
                         if interval_batches else None)
             gn_last = float(gn_dev_recent[-1].item()) if gn_dev_recent else None
+            gn_max = (float(gn_max_dev.item())
+                      if bool((gn_max_dev >= 0).item()) else None)
+            gn_nonfinite = bool(gn_nonfinite_dev.item())
+            gn_max_step = (int(gn_max_step_dev.item()) + 1
+                           if gn_max_step_dev >= 0 else None)
+            loss_max = (float(loss_max_dev.item())
+                        if bool((loss_max_dev >= 0).item()) else None)
+            loss_max_step = (int(loss_max_step_dev.item()) + 1
+                             if loss_max_step_dev >= 0 else None)
             # .item() 已同步本区间全部前向/反向/优化器内核，
             # 此处墙钟差为区间步时（扣除评测）
             t_now = time.perf_counter()
@@ -1394,13 +1446,25 @@ def main():
             interval_t0 = t_now
             interval_steps = 0
             pending_eval_s = 0.0
-            if gn_last is not None and math.isfinite(gn_last):
-                gn_hist.append(gn_last)
+            # 历史保留区间峰值（有限时）：NaN 排查看“区间内最坏梯度”而不是
+            # 恰好落在 log 边界的最后一步。
+            gn_hist_val = (gn_max if (gn_max is not None
+                                      and math.isfinite(gn_max)) else gn_last)
+            if gn_hist_val is not None and math.isfinite(gn_hist_val):
+                gn_hist.append(gn_hist_val)
                 if len(gn_hist) > 200:
                     gn_hist.pop(0)
             _nan_guard("train_loss", loss_acc, step + 1,
                        first_bad_step=first_bad_step, interval=interval)
-            _nan_guard("grad_norm", gn_last, step + 1,
+            # 区间内任一步非有限时即使最后一步已恢复也要中止（梯度已爆炸）。
+            if gn_nonfinite or (gn_last is not None
+                                and not math.isfinite(gn_last)):
+                gn_guard = (gn_max if (gn_max is not None
+                                       and not math.isfinite(gn_max))
+                            else float("inf"))
+            else:
+                gn_guard = gn_max if gn_max is not None else gn_last
+            _nan_guard("grad_norm", gn_guard, step + 1,
                        first_bad_step=first_bad_step, interval=interval)
             # 本区间现场已检查完毕（异常路径已在中止前写出报告）：清空，
             # 避免跨区间串批、控制引用数量 ≤ log_every 步
@@ -1413,6 +1477,12 @@ def main():
                    "lr": base_lrs[0] * lr_f, "time": now_str()}
             if gn_last is not None:
                 rec["grad_norm"] = gn_last
+            if gn_max is not None:
+                rec["grad_norm_max"] = gn_max
+                rec["grad_norm_max_step"] = gn_max_step
+            if loss_max is not None:
+                rec["loss_max"] = loss_max
+                rec["loss_max_step"] = loss_max_step
             if step_ms is not None:
                 rec["step_time_ms"] = round(step_ms, 3)
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -1422,8 +1492,18 @@ def main():
                   + (f" gnorm={gn_last:.2f}" if gn_last is not None else ""))
             if wb:
                 wb.log({"loss": loss_acc, "lr": base_lrs[0] * lr_f,
-                        **({"grad_norm": gn_last} if gn_last is not None else {})},
+                        **({"grad_norm": gn_last} if gn_last is not None else {}),
+                        **({"grad_norm_max": gn_max}
+                           if gn_max is not None else {}),
+                        **({"loss_max": loss_max}
+                           if loss_max is not None else {})},
                        step=step + 1)
+            # 区间统计已落盘，清空峰值以统计下一个 log 区间。
+            gn_max_dev.fill_(-1.0)
+            gn_max_step_dev.fill_(-1.0)
+            gn_nonfinite_dev.fill_(False)
+            loss_max_dev.fill_(-1.0)
+            loss_max_step_dev.fill_(-1.0)
         if (step + 1) % eval_every == 0:
             do_eval(step + 1)
             # 早停：验证连续 patience 次评测无实质改善即终止（下游评测

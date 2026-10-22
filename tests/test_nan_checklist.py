@@ -81,6 +81,36 @@ def test_checklist_labels_interval_candidates_and_first_bad_step():
     print("  [ok] 排查步骤 1（数据）：区间候选批次带步标签 + 首个失败步")
 
 
+def test_checklist_data_structured_bad_batches_and_fixed_order():
+    """数据步骤除字符串 findings 外，还要有结构化坏批与首个坏数据步；
+    报告显式给出固定排查顺序，消费方不依赖 JSON 键顺序。"""
+    m = _model()
+    bad = _batches(bad_ids=True)
+    rep = run_nan_checklist(m, bad, "cpu", 40, "train_loss", float("nan"),
+                            lr=1e-3, grad_norm_history=[], amp_dtype=None,
+                            vocab_size=64,
+                            consumed_batches=bad * 2,
+                            consumed_step_labels=[36, 40],
+                            first_bad_step=36, interval=(36, 40))
+    data = rep["checklist_data"]
+    assert data["n_bad_batches"] >= 1, data
+    assert data["bad_batches"], data
+    first = data["bad_batches"][0]
+    assert first["kind"] == "id_out_of_range"
+    assert first["batch_step"] == 36 and first["tensor"] == "y"
+    assert data["first_bad_data_step"] == 36
+    assert rep["checklist_order"] == [
+        "checklist_data", "checklist_params", "checklist_activations",
+        "checklist_precision", "checklist_optimization"]
+    # 合法批次不产生结构化坏批
+    rep2 = run_nan_checklist(m, _batches(), "cpu", 1, "train_loss",
+                             float("nan"), lr=1e-3, grad_norm_history=[],
+                             amp_dtype=None, vocab_size=64)
+    assert rep2["checklist_data"]["bad_batches"] == []
+    assert rep2["checklist_data"]["first_bad_data_step"] is None
+    print("  [ok] 排查步骤 1（数据）：结构化坏批/首个坏步 + 固定报告顺序")
+
+
 def test_activation_audit_iterates_interval_candidates():
     """激活定位必须逐批检查区间候选：NaN 出现在后一批时不能只审计第一批。"""
     m = _model()

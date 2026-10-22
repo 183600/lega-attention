@@ -9,6 +9,9 @@
   * 过拟合趋势    训练损失仍在实质下降而验证损失无实质变化（±REL_TOL 内）——
                   验证不再随训练改善、泛化差距扩大中的早期信号；按过拟合
                   早期处理（正则化/早停），不要仅凭训练损失还在降就续训；
+                  除全程首/末分段外，还比较末段（后 1/3 vs 中 1/3）：验证
+                  早先大幅下降、后段才平台/回升时，全程变化仍可能显示下降，
+                  只看首末会漏掉这一信号；
   * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
   * 验证倒挂      验证损失显著低于训练损失（与泛化差距方向相反）——
@@ -21,6 +24,8 @@
                   回升/下降”——避免把有限窗口的评估噪声误判成过拟合；
   * 瞬态损失尖峰  单步损失远超邻近点中位数（分段均值会掩盖）——异常批次或
                   一次梯度爆炸的信号，即使趋势正常也应先核对批次与梯度；
+                  训练日志同时记录 log 区间内单步峰值 loss_max 时，另按峰值
+                  检测，避免“一步尖峰被区间均值平均掉”；
   * 坏记录        值/step 无法解析的日志行被跳过并计数，结论只基于其余点。
 
 诊断输出为结构化 JSON（含建议清单），由 run_all 汇总进 summary.md；
@@ -252,8 +257,55 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
     return pts, bad, malformed
 
 
-def _detect_loss_spikes(train_pts: List[Dict]) -> List[Dict]:
-    """检出瞬态训练损失尖峰：值 ≥ LOSS_SPIKE_FACTOR × 两侧邻居中位数。
+def _gradient_points(records: List[Dict]):
+    """提取每个 log 点的 pre-clip 梯度范数，优先区间峰值 grad_norm_max。
+
+    训练循环原先只在 log 点记录区间最后一步的 grad_norm：一次落在区间中段
+    的梯度爆炸会被静默漏掉。新版日志另写 grad_norm_max（区间内最大 pre-clip
+    范数），这里按 step 合并：同一步有峰值就用峰值，旧日志回退 grad_norm。
+    返回 (pts, nonfinite_count, malformed_count, nonfinite_steps)。
+    """
+    by_step: Dict[int, Dict] = {}
+    nonfinite_steps = set()
+    malformed = 0
+    for r in records if isinstance(records, (list, tuple)) else []:
+        if not isinstance(r, dict):
+            malformed += 1
+            continue
+        step = _step_or_none(r.get("step"))
+        chosen = None
+        for key in ("grad_norm_max", "grad_norm"):
+            if key not in r or r.get(key) is None:
+                continue
+            raw = r.get(key)
+            if isinstance(raw, (bool, np.bool_)) or (
+                    isinstance(raw, str) and "_" in raw):
+                malformed += 1
+                chosen = None
+                break
+            try:
+                val = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                malformed += 1
+                chosen = None
+                break
+            if not math.isfinite(val):
+                if step is not None:
+                    nonfinite_steps.add(step)
+                chosen = None
+                break
+            chosen = val
+            break
+        if step is None or chosen is None:
+            continue
+        by_step[step] = {"step": step, "value": chosen}
+    pts = sorted(by_step.values(), key=lambda p: p["step"])
+    return pts, len(nonfinite_steps), malformed, sorted(nonfinite_steps)
+
+
+def _detect_series_spikes(points: List[Dict],
+                          factor: float = LOSS_SPIKE_FACTOR) -> List[Dict]:
+    """检出单点尖峰：值 ≥ factor × 两侧邻居中位数。
 
     只比较局部邻居（每侧最多 LOSS_SPIKE_WINDOW 个点）而非全局中位数/均值：
     损失整体单调下降时，全局统计会把早期高点误报为尖峰，而局部比较对
@@ -261,24 +313,45 @@ def _detect_loss_spikes(train_pts: List[Dict]) -> List[Dict]:
     邻居判定（否则训练最后一步的尖峰会被完全漏掉）；左侧邻居少于 2 个时
     无法区分“初始高损失”与尖峰，跳过该点。
     """
-    n = len(train_pts)
+    n = len(points)
     w = LOSS_SPIKE_WINDOW
     spikes = []
     for i in range(2, n):
-        left = [p["value"] for p in train_pts[max(0, i - w):i]]
+        left = [p["value"] for p in points[max(0, i - w):i]]
         if len(left) < 2:
             continue
-        right = [p["value"] for p in train_pts[i + 1:i + 1 + w]]
+        right = [p["value"] for p in points[i + 1:i + 1 + w]]
         neigh = left + right
         med = statistics.median(neigh)
         if med <= 0:
             continue
-        ratio = train_pts[i]["value"] / med
-        if ratio >= LOSS_SPIKE_FACTOR:
-            spikes.append({"step": train_pts[i]["step"],
-                           "value": train_pts[i]["value"],
+        ratio = points[i]["value"] / med
+        if ratio >= factor:
+            spikes.append({"step": points[i]["step"],
+                           "value": points[i]["value"],
                            "local_median": med, "ratio": ratio})
     return spikes
+
+
+def _detect_loss_spikes(train_pts: List[Dict]) -> List[Dict]:
+    """兼容旧调用：对训练损失（区间均值）做局部单点尖峰检测。"""
+    return _detect_series_spikes(train_pts, LOSS_SPIKE_FACTOR)
+
+
+def _tail_change(points: List[Dict], min_points: int = 5):
+    """末段趋势：最后 1/3 相对中 1/3 的均值变化。
+
+    全程首/末分段对“早期大幅改善、后期才平台/回升”不敏感：只要早段足够
+    低，末段即使已经恶化，首→末仍可能是下降。这里单独比较中段与末段，
+    用于捕捉过拟合早期（验证先停步）与平台期回升。点太少（<min_points）
+    时中/末段各可能只有 1 个点，变化完全由单点噪声决定，返回 None。
+    """
+    if len(points) < min_points:
+        return None
+    prev = _seg_mean(points, 1 / 3, 2 / 3)
+    last = _seg_mean(points, 2 / 3, 1.0)
+    return {"prev": prev, "last": last,
+            "rel_change": _rel_change(prev, last)}
 
 
 def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
@@ -614,22 +687,40 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报
     nan_count = train_bad + val_bad
     malformed_count = train_malformed + val_malformed
-    # 梯度范数体检：尖峰/非有限是发散与 NaN 的早期信号，损失曲线可能还没反映
-    grad_pts, grad_bad, grad_malformed = _finite_points(records, "grad_norm")
+    # 梯度范数体检：尖峰/非有限是发散与 NaN 的早期信号，损失曲线可能还没反映。
+    # 优先用区间峰值 grad_norm_max：只记录 log 点最后一步会漏掉区间中段的爆炸。
+    grad_pts, grad_bad, grad_malformed, grad_bad_steps = \
+        _gradient_points(records)
     malformed_count += grad_malformed
-    # 瞬态损失尖峰：分段均值会把它平均掉，必须按点单独体检（与损失状态独立）
-    loss_spikes = _detect_loss_spikes(train_pts)
+    # 瞬态损失尖峰：分段均值会把它平均掉，必须按点单独体检（与损失状态独立）。
+    # loss_max 是同一 log 区间内的单步峰值：一步异常批次被区间均值稀释时，
+    # 均值序列可能看不到 8× 尖峰，峰值序列仍能看到。
+    loss_spikes = _detect_series_spikes(train_pts, LOSS_SPIKE_FACTOR)
+    loss_peak_pts, _, loss_peak_malformed = _finite_points(records, "loss_max")
+    malformed_count += loss_peak_malformed
+    # 旧日志/新版日志峰值与均值相同（区间只有 1 步）时避免重复报告同一尖峰
+    if [(p["step"], p["value"]) for p in loss_peak_pts] == \
+            [(p["step"], p["value"]) for p in train_pts]:
+        loss_peak_pts = []
+    loss_peak_spikes = _detect_series_spikes(loss_peak_pts, LOSS_SPIKE_FACTOR)
     grad_vals = [p["value"] for p in grad_pts]
     grad_med = None
     grad_max = None
     grad_spike_ratio = None
+    grad_spikes = []
+    grad_max_step = None
     if grad_vals:
         grad_med = float(statistics.median(grad_vals))
-        grad_max = float(max(grad_vals))
+        peak = max(grad_pts, key=lambda p: p["value"])
+        grad_max, grad_max_step = float(peak["value"]), peak["step"]
         if grad_med > 0:
             grad_spike_ratio = grad_max / grad_med
-    grad_spike = (grad_spike_ratio is not None
-                  and grad_spike_ratio >= GRAD_SPIKE_FACTOR)
+            grad_spikes = [dict(p, ratio=p["value"] / grad_med)
+                           for p in grad_pts
+                           if p["value"] / grad_med >= GRAD_SPIKE_FACTOR]
+    grad_spike = bool(grad_spikes)
+    worst_grad_spike = (max(grad_spikes, key=lambda p: p["ratio"])
+                        if grad_spikes else None)
 
     first_train = _seg_mean(train_pts, 0.0, 1 / 3)
     last_train = _seg_mean(train_pts, 2 / 3, 1.0)
@@ -657,6 +748,30 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     val_down = val_delta is not None and val_delta < -val_tol
     val_up = val_delta is not None and val_delta > val_tol
     val_unresolved = (val_delta is not None and abs(val_delta) <= val_tol)
+    # 末段趋势（后 1/3 vs 中 1/3）：全程首/末分段对“早先大幅改善、后段
+    # 平台/回升”不敏感。验证早段已降到很低时，末段回升后首→末仍可能为负，
+    # 只看全程会漏掉过拟合；训练末段已停但全程仍在降也会被当成正常收敛。
+    recent_train = _tail_change(train_pts)
+    recent_val = _tail_change(val_pts)
+    recent_train_delta = (recent_train or {}).get("rel_change")
+    recent_val_delta = (recent_val or {}).get("rel_change")
+    train_recent_down = (recent_train_delta is not None
+                         and recent_train_delta < -REL_TOL)
+    train_recent_flat = (recent_train_delta is not None
+                         and abs(recent_train_delta) <= REL_TOL)
+    train_recent_up = (recent_train_delta is not None
+                       and recent_train_delta > REL_TOL)
+    val_recent_down = (recent_val_delta is not None
+                       and recent_val_delta < -val_tol)
+    val_recent_up = (recent_val_delta is not None
+                     and recent_val_delta > val_tol)
+    val_recent_unresolved = (recent_val_delta is not None
+                             and abs(recent_val_delta) <= val_tol)
+    recent_available = recent_train is not None and recent_val is not None
+    recent_overfit = bool(recent_available and val_recent_up
+                          and (train_recent_down or train_recent_flat))
+    recent_trend = bool(recent_available and train_recent_down
+                        and val_recent_unresolved and not val_recent_up)
 
     best_val, best_step = None, None
     for p in val_pts:
@@ -721,21 +836,38 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                                    "并检查梯度范数是否出现尖峰")
         elif ((train_down and (val_up or gain_sig))
               or (train_delta is not None and not train_down and not train_up
-                  and val_up and gain_sig)):
-            # 平台期过拟合：训练不再下降而验证回升，同样需要早停/正则化；
-            # 若按"训练没降"误判成欠拟合，会给出"延长训练/增大模型"的反向建议。
+                  and val_up and (gain_sig or recent_overfit))
+              or recent_overfit):
+            # 过拟合/平台期过拟合：训练不再下降（或总体仍在降但末段已停）
+            # 而验证回升，同样需要早停/正则化。若按"训练没降"误判成欠拟合，
+            # 会给出"延长训练/增大模型"的反向建议。
             status = "过拟合"
             if train_down:
-                ev = [f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                ev = [f"全程首/末分段：训练损失 "
+                      f"{_fmt_num(first_train)}→{_fmt_num(last_train)}"
                       f"（{_fmt_rel(train_delta)}）而验证损失 "
                       f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
                       f"（{_fmt_rel(val_delta)}）"]
             else:
-                ev = [f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                ev = [f"全程首/末分段：训练损失 "
+                      f"{_fmt_num(first_train)}→{_fmt_num(last_train)}"
                       f"（{_fmt_rel(train_delta)}）已停滞/不再实质下降，而验证损失 "
                       f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
                       f"（{_fmt_rel(val_delta)}）上升——泛化先于训练损失恶化，"
                       "按平台期过拟合处理"]
+            # 末段趋势是独立证据：全程仍显示验证下降时，末段回升同样构成
+            # 过拟合（早期改善不能抵消最近的泛化恶化）。
+            if recent_available and (recent_overfit or val_recent_up):
+                ev.append(
+                    f"末段趋势（后 1/3 vs 中 1/3）：训练 "
+                    f"{_fmt_num((recent_train or {}).get('prev'))}→"
+                    f"{_fmt_num((recent_train or {}).get('last'))}"
+                    f"（{_fmt_rel(recent_train_delta)}），验证 "
+                    f"{_fmt_num((recent_val or {}).get('prev'))}→"
+                    f"{_fmt_num((recent_val or {}).get('last'))}"
+                    f"（{_fmt_rel(recent_val_delta)}）"
+                    + ("；验证末段回升，按过拟合处理"
+                       if val_recent_up else ""))
             if gain_sig:
                 ev.append(f"最终验证损失劣于 step {best_step} 的最优值 "
                           f"{best_val:.4f} 达 {early_stop_gain:+.1%}"
@@ -772,7 +904,30 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 "若验证损失自始未改善且训练降幅也很小：先按欠拟合排查学习率/"
                 "数据管道，再考虑扩容",
             ]
-        elif not train_down:
+        elif recent_trend and not best_selection_noise:
+            # 全程首→末验证仍在下降（早段改善占主导），但末段训练继续降、
+            # 验证已停步：泛化改善停滞，按过拟合早期处理，不能因全程均值为
+            # “下降”就判正常收敛/继续训练。
+            status = "过拟合趋势"
+            evidence.append(
+                f"末段趋势（后 1/3 vs 中 1/3）：训练 "
+                f"{_fmt_num((recent_train or {}).get('prev'))}→"
+                f"{_fmt_num((recent_train or {}).get('last'))}"
+                f"（{_fmt_rel(recent_train_delta)}）仍在下降，而验证 "
+                f"{_fmt_num((recent_val or {}).get('prev'))}→"
+                f"{_fmt_num((recent_val or {}).get('last'))}"
+                f"（{_fmt_rel(recent_val_delta)}）已无实质变化"
+                + (f"（评估噪声 ±{val_ci_rel:.1%}）" if val_ci_rel is not None
+                   else "")
+                + "：全程首/末分段仍显示验证下降（早段改善占主导），但末段"
+                "验证不再随训练改善，泛化差距在扩大")
+            recommendations += [
+                "训练降而验证末段停滞：按过拟合早期信号处理——启用/加强正则化"
+                "（dropout / weight decay），对比使用 val 最优的 model_best.pt",
+                "不要仅因全程验证损失仍在下降就延长训练：末段新增收益只体现在"
+                "训练集",
+            ]
+        elif not train_down and not train_recent_down:
             status = "欠拟合/学习不充分"
             trend = "不降反升" if train_up else "没有实质下降"
             evidence.append(
@@ -850,7 +1005,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                     f"最终验证损失比 step {best_step} 的最优值差 "
                     f"{early_stop_gain:.1%}，但未超过评估噪声 "
                     f"±{val_ci_rel:.1%}：不据此判定过拟合")
-            elif not (loss_spikes or grad_bad or grad_spike
+            elif not (loss_spikes or loss_peak_spikes or grad_bad or grad_spike
                       or early_stopped or malformed_count):
                 # 任一独立告警（损失尖峰/梯度尖峰/早停/坏记录）存在时都不写
                 # “无需干预”，否则会与随后追加的诊断建议自相矛盾。
@@ -945,18 +1100,27 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # 梯度范数体检（与损失状态独立）：非有限/尖峰是梯度爆炸的早期信号，
     # 损失曲线可能尚未发散，只看最终损失会漏掉。
     if grad_bad:
-        evidence.append(f"pre-clip 梯度范数出现 {grad_bad} 个非有限值"
+        steps_txt = ("，step " + ", ".join(str(x) for x in grad_bad_steps[:8])
+                     + ("…" if len(grad_bad_steps) > 8 else "")
+                     if grad_bad_steps else "")
+        evidence.append(f"pre-clip 梯度范数出现 {grad_bad} 个非有限值{steps_txt}"
                         "（梯度已爆炸，先于或伴随损失 NaN）")
         recommendations.append(
             "梯度爆炸：降低学习率、收紧 grad_clip（如 0.5）、延长 warmup，"
-            "并确认 train_log.jsonl 的 grad_norm 不再出现非有限值")
-    elif grad_spike:
+            "并确认 train_log.jsonl 的 grad_norm/grad_norm_max 不再出现非有限值")
+    if grad_spike and worst_grad_spike is not None:
         evidence.append(
-            f"pre-clip 梯度范数最大 {grad_max:.2e} 为中位数 {grad_med:.2e} 的 "
-            f"{grad_spike_ratio:.1f} 倍（爆炸性尖峰）")
+            f"pre-clip 梯度范数最大 {grad_max:.2e}（step {grad_max_step}）"
+            f"为中位数 {grad_med:.2e} 的 {grad_spike_ratio:.1f} 倍"
+            f"；共 {len(grad_spikes)} 个 ≥{GRAD_SPIKE_FACTOR:g}× 尖峰，"
+            f"最严重在 step {worst_grad_spike['step']}（×{worst_grad_spike['ratio']:.1f}）"
+            + ("；此处的 grad_norm 优先采用 log 区间内峰值 grad_norm_max"
+               if any("grad_norm_max" in r for r in records
+                      if isinstance(r, dict)) else ""))
         recommendations.append(
-            f"检测到梯度范数尖峰（×{grad_spike_ratio:.0f}）：这是 NaN 之前的"
-            "典型信号，应降低学习率/收紧 grad_clip 后再验证曲线")
+            f"检测到梯度范数尖峰（×{worst_grad_spike['ratio']:.0f} "
+            f"@step {worst_grad_spike['step']}）：这是 NaN 之前的典型信号，"
+            "应降低学习率/收紧 grad_clip 后再验证曲线")
 
     # 瞬态损失尖峰（与分段状态独立）：某一步损失突然跳升又恢复。分段均值/
     # 首末值会把这个点平均掉，只看趋势会漏；它常来自异常批次或一次梯度爆炸。
@@ -971,6 +1135,18 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             f"损失尖峰（×{worst_spike['ratio']:.0f} @step {worst_spike['step']}）："
             "先查该步批次是否含异常样本（见 datacheck/该步附近数据）与梯度范数"
             "是否同步尖峰，再考虑收紧 grad_clip 或降低学习率后重跑")
+    if loss_peak_spikes:
+        worst_peak = max(loss_peak_spikes, key=lambda s: s["ratio"])
+        evidence.append(
+            f"log 区间内单步损失峰值出现 {len(loss_peak_spikes)} 个尖峰，最大在 "
+            f"step {worst_peak['step']}: 单步峰值 {worst_peak['value']:.4f} 是邻近"
+            f"峰值中位数 {worst_peak['local_median']:.4f} 的 "
+            f"{worst_peak['ratio']:.1f} 倍——区间均值可能把单步异常批次平均掉，"
+            "该信号需要单独核对批次")
+        recommendations.append(
+            f"单步损失峰值尖峰（×{worst_peak['ratio']:.0f} "
+            f"@step {worst_peak['step']}）：优先复核该 log 区间内哪一 micro-step "
+            "消费了异常批次/标签，并对照同一区间 grad_norm_max 是否尖峰")
 
     # 坏记录（值/step 无法解析）：结构化日志被中断或手工编辑的信号；明确
     # 报告已跳过多少点，避免剩余曲线被当作完整曲线解读。
@@ -1038,18 +1214,35 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "val_below_train": bool(val_below_train),
         "grad_norm_points": len(grad_pts),
         "grad_norm_nonfinite": int(grad_bad),
+        "grad_norm_nonfinite_steps": grad_bad_steps,
         "grad_norm_median": grad_med,
         "grad_norm_max": grad_max,
+        "grad_norm_max_step": grad_max_step,
         "grad_spike_ratio": grad_spike_ratio,
+        "grad_spikes": grad_spikes,
         "has_grad_spike": bool(grad_spike or grad_bad),
         "loss_spikes": loss_spikes,
-        "has_loss_spike": bool(loss_spikes),
+        "loss_peak_spikes": loss_peak_spikes,
+        "has_loss_spike": bool(loss_spikes or loss_peak_spikes),
+        "has_single_step_loss_spike": bool(loss_peak_spikes),
+        # 末段趋势：全程仍“下降”时，末段平台/回升是更早的过拟合信号。
+        "train_recent_rel_change": recent_train_delta,
+        "val_recent_rel_change": recent_val_delta,
+        "train_recent_down": bool(train_recent_down),
+        "train_recent_stalled": bool(train_recent_flat),
+        "val_recent_up": bool(val_recent_up),
+        "val_recent_unresolved": bool(val_recent_unresolved),
+        "recent_overfit_signal": bool(recent_overfit),
+        "recent_trend_signal": bool(recent_trend),
+        "recent_trend_available": bool(recent_available),
+        "recent_comparison": {"train": recent_train, "val": recent_val},
         "gate_health": gate,
         "thresholds": {"rel_tol": REL_TOL, "diverge_factor": DIVERGE_FACTOR,
                        "early_stop_tol": EARLY_STOP_TOL,
                        "grad_spike_factor": GRAD_SPIKE_FACTOR,
                        "loss_spike_factor": LOSS_SPIKE_FACTOR,
-                       "loss_spike_window": LOSS_SPIKE_WINDOW},
+                       "loss_spike_window": LOSS_SPIKE_WINDOW,
+                       "recent_window": "last 1/3 vs middle 1/3"},
     }
 
 
