@@ -35,6 +35,8 @@ from itertools import combinations
 from math import factorial
 from typing import Dict, Iterable, Mapping
 
+import numpy as np
+
 FACTOR_ORDER = ("A", "B", "C")
 FACTORS = frozenset(FACTOR_ORDER)
 
@@ -54,9 +56,16 @@ _CELL_FACTORS = {
 
 
 def _finite_float(value, name: str) -> float:
-    """严格有限浮点：拒绝 bool/字符串/NaN/Inf。"""
-    if isinstance(value, bool):
+    """严格有限浮点：拒绝 bool/字符串下划线写法/NaN/Inf。
+
+    与项目其他外部证据解析入口（run_all._finite_number、utils._finite_observation
+    等）同口径：``float("1_0") == 10.0`` 不是规范数值，``np.bool_(True)``
+    也不能经 float() 伪装成 1.0，否则损坏的 Shapley 单元格会被当作真实观测。
+    """
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
     try:
         out = float(value)
     except (TypeError, ValueError, OverflowError) as e:

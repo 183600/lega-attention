@@ -79,7 +79,23 @@ def test_shapley_requires_all_cells_and_finite_values():
         raise AssertionError("NaN 应显式报错")
     except ValueError:
         pass
-    print("  [ok] Shapley：缺格/非有限值显式拒绝，不伪造单元格")
+    # 下划线数字串与 np.bool_ 不是规范观测：float("1_0")==10、bool→1
+    # 会把损坏的外部证据伪装成另一个真实单元格值。
+    for poor in ("1_0", np.bool_(True), True):
+        bad = {c: 1.0 for c in CELL_ORDER}
+        bad["AC"] = poor
+        try:
+            shapley_values(bad)
+            raise AssertionError(f"{poor!r} 应显式报错")
+        except ValueError:
+            pass
+        try:
+            oriented_value("PPL", poor)
+            raise AssertionError(f"PPL 原始值 {poor!r} 应显式报错")
+        except ValueError:
+            pass
+    print("  [ok] Shapley：缺格/非有限值/下划线数字串/bool 显式拒绝，"
+          "不伪造单元格")
 
 
 def test_oriented_value_direction_and_ppl_ratio():
