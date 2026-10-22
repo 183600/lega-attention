@@ -3296,7 +3296,7 @@ def registration_scope_check(registered: dict, repro: dict,
 
     checked_any = False
     unverifiable = []
-    if repro.get("smoke"):
+    if repro.get("smoke") is True:
         out["problems"].append("冒烟运行（--smoke）不在预注册范围（正式配置/全部种子）内")
         checked_any = True
 
@@ -4151,8 +4151,10 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             try:
                 with open(rfp, "r", encoding="utf-8") as f:
                     doc = json.load(f)
-                # 合法 JSON 但非对象（数组/标量）按缺 repro 处理。
-                smoke = bool(doc.get("smoke")) if isinstance(doc, dict) else False
+                # 合法 JSON 但非对象（数组/标量）按缺 repro 处理；smoke 只接受
+                # 真正的 bool true，字符串 "false" 不能伪装成冒烟运行。
+                smoke = (doc.get("smoke") is True
+                         if isinstance(doc, dict) else False)
             except (OSError, ValueError):
                 smoke = False
     lines = ["", "## 基线合理性（简单基线 + 调优证据）", ""]
@@ -4869,7 +4871,9 @@ def build_summary(results_dir: str, audit: dict = None,
     ablation_scope = repro.get("ablation")
     if isinstance(ablation_scope, dict):
         # 本轮显式关闭消融时，绝不复用旧 ablation 文件冒充本轮证据。
-        allow_ablation = bool(ablation_scope.get("executed"))
+        # executed 必须是真正的 bool true：字符串 "false"/1 经 truthiness
+        # 会打开复用，把上一轮的病灶结果算进本轮结论。
+        allow_ablation = ablation_scope.get("executed") is True
         ablation_variants = (ablation_scope.get("variants")
                              if isinstance(ablation_scope.get("variants"), list)
                              else [])
@@ -5510,7 +5514,7 @@ def build_summary(results_dir: str, audit: dict = None,
     ngram_cmp = ngram_baseline_comparison(runs, results_dir)
     probe_cmp = linear_probe_baseline_comparison(runs)
     md += _render_baseline_sections(results_dir,
-                                    smoke=bool((repro or {}).get("smoke")),
+                                    smoke=((repro or {}).get("smoke") is True),
                                     ngram_cmp=ngram_cmp,
                                     probe_cmp=probe_cmp,
                                     variants=sorted(runs))

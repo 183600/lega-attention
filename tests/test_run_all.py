@@ -4469,6 +4469,41 @@ def test_build_summary_excludes_multifactor_ablation_pairs():
     print("  [ok] 汇总排除 B-only/C-only vs Full 的多因子“消融”对比")
 
 
+def test_build_summary_only_reuses_ablation_when_scope_is_true_bool():
+    """repro.ablation.executed 必须是真正的 true 才复用旧病灶结果。
+
+    "false"/1 经 truthiness 会把上一轮 ablation_*.json 冒充成本轮证据，
+    让“本轮 --skip_ablation”的汇总仍带着推理期因果结论。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": ["lega"], "seeds": [1], "smoke": "false",
+            "ablation": {"executed": "false", "variants": ["lega"]}})
+        _write_json(os.path.join(tmp, "ablation_lega.json"), {
+            "variant": "lega", "seed": 1,
+            "lesions": [{"lesion": "no_query", "label": "去查询项",
+                         "applicable": True, "applied": True,
+                         "delta_loss_mean": 0.1, "n_windows": 10}]})
+        build_summary(tmp)
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert sig["causal_ablation"] == [], sig["causal_ablation"]
+        # 显式 executed=true 时才消费同一份文件（n=1 仍会如实报告）。
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": ["lega"], "seeds": [1], "smoke": False,
+            "ablation": {"executed": True, "variants": ["lega"]}})
+        build_summary(tmp)
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert len(sig["causal_ablation"]) == 1, sig["causal_ablation"]
+        assert sig["causal_ablation"][0]["lesion"] == "no_query"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 消融证据只在 executed 为真正 true 时复用，"
+          "malformed repro 不会冒充本轮结论")
+
+
 def test_verify_controlled_setup_rejects_eval_protocol_mismatch():
     """同一训练 config 但独立评测用了不同窗口/上下文，PPL 不可配对。"""
     with tempfile.TemporaryDirectory() as tmp:
