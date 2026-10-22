@@ -886,6 +886,12 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         sb = sanity_summary(bad_checks)
         assert sb["passed"] is False and sb["malformed"] is True
         assert sb["checks_consistent"] is False
+        bad_manifest = os.path.join(d, "bad_manifest.json")
+        with open(bad_manifest, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": {"a": True},
+                       "manifest": ["not", "an", "object"]}, f)
+        sm = sanity_summary(bad_manifest)
+        assert sm["passed"] is False and sm["malformed"] is True
         good = os.path.join(d, "sanity_lega.json")
         with open(good, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "variant": "lega", "seed": 3,

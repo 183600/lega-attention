@@ -489,6 +489,11 @@ def sanity_summary(path: str) -> dict:
         out["final_loss"] = final.get("loss")
         out["token_acc"] = final.get("token_acc")
     manifest = rec.get("manifest")
+    if manifest is not None and not isinstance(manifest, dict):
+        # 身份清单存在但不是对象：无法核对来源，属于损坏证据。
+        out["malformed"] = True
+        if out["passed"] is True:
+            out["passed"] = False
     if isinstance(manifest, dict):
         for key in ("config_sha256",):
             if manifest.get(key) is not None:
