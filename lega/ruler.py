@@ -366,7 +366,7 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
 # 字符串全等比较。只截取 \d{4,} 会把 -7021853、7021853.9、7021853abc 都
 # 误判为命中 7021853。
 _NUM_RE = re.compile(
-    r"(?<![\w.+-])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    r"(?<![\w.+\-*/%\u2212])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
     # 数字后若紧跟 "." 再接单词/数字，说明这是残缺的数值 token（.9abc/.x），
     # 不能回退成只匹配点号前的整数；单独句号（"7021853."）仍允许。
     # 运算符/比值/范围后缀（7021853/2、+1、:123 等）说明这是表达式而非
@@ -374,13 +374,49 @@ _NUM_RE = re.compile(
     r"(?![\w]|\.\w|\s*[+\-*/%\u2212]\s*\d|\s*:\s*\d)")
 _WORD_RE = re.compile(r"[a-z]+")
 
+# 表达式运算符：出现在候选数字左侧（允许空格）时，该数字是运算数而非独立答案。
+_NUM_EXPR_OPS = "+-*/%\u2212"
+
+
+def standalone_numeric_tokens(text: str) -> List[str]:
+    """提取“独立答案”位置的数值 token，排除表达式/比值中的运算数。
+
+    `_NUM_RE` 的后缀前瞻会拒绝 `7021853/2` 里的前缀数字，但正则引擎随后仍可
+    从 `/` 之后匹配到 `2`，把表达式的右操作数误当成模型答案。本函数逐个
+    检查候选左侧上下文：
+      * 左侧（跳过空格）是算术运算符 -> 该 token 是运算数，跳过；
+      * 左侧是冒号且冒号前是数字/右括号 -> 比值/范围（123:456），跳过；
+      * 冒号前是普通文本（answer: 123 / answer:123）-> 标签，保留。
+    这样 `7021853 / 2`、`3*4`、`123:456` 都不会被计为独立回答，而
+    `answer: 2` 仍能正常解析。返回顺序与原文本一致。
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    out = []
+    for m in _NUM_RE.finditer(text):
+        j = m.start() - 1
+        while j >= 0 and text[j].isspace():
+            j -= 1
+        if j >= 0:
+            ch = text[j]
+            if ch in _NUM_EXPR_OPS:
+                continue
+            if ch == ":":
+                k = j - 1
+                while k >= 0 and text[k].isspace():
+                    k -= 1
+                if k >= 0 and (text[k].isdigit() or text[k] in ".)]"):
+                    continue
+        out.append(m.group(0))
+    return out
+
 
 def score_prediction(task: str, answer: str, pred_text: str,
                      answer_words: Optional[List[str]] = None) -> Dict:
     if task in ("niah_synth", "niah_corpus", "niah_multikey", "vt"):
         # EM 只承认“第一个数值回答”：若模型先答错、随后在同一输出里再蒙中正确答案，
         # 记为命中会系统性地高估检索能力。
-        nums = _NUM_RE.findall(pred_text)
+        nums = standalone_numeric_tokens(pred_text)
         return {"em": float(bool(nums) and nums[0] == answer), "recall": None,
                 "precision": None, "f1": None}
     if task == "fwe":
@@ -633,7 +669,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         n += 1
                         if collect_badcases and sc["em"] < 1.0:
                             prompt_text = tok.decode(ex["ids"])
-                            prompt_nums = set(_NUM_RE.findall(prompt_text))
+                            prompt_nums = set(standalone_numeric_tokens(
+                                prompt_text))
                             qs, qe = ex["query_span"]
                             badcases.append({
                                 "sample_id": ex.get("sample_id"),

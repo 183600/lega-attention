@@ -116,6 +116,15 @@ def test_score_predictions():
                 " 7021853/2", " 7021853 + 1", " 7021853-1",
                 " 7021853:123", " 7021853*2", " 7021853%2"):
         assert score_prediction("niah_synth", "7021853", bad)["em"] == 0.0, bad
+    # 右操作数同样不能成为“第一个数值回答”：否则 7021853/2 会在 gold=2
+    # 时把表达式里的 2 误判为命中（表达式不是独立答案）。
+    for bad, gold in ((" 7021853/2", "2"), (" 7021853 / 2", "2"),
+                      (" 3*4", "4"), (" 10%3", "3"),
+                      (" 123:456", "456"), (" 7021853 - 2", "2")):
+        assert score_prediction("niah_synth", gold, bad)["em"] == 0.0, (bad, gold)
+    # 标签后的数值仍是独立回答（冒号前是普通文本，不是范围/表达式）
+    for ok in (" answer: 2", " answer:2", "The answer is: 2."):
+        assert score_prediction("niah_synth", "2", ok)["em"] == 1.0, ok
     # 标点边界仍算命中
     for ok in ("7021853.", " 7021853,", "(7021853)"):
         assert score_prediction("niah_synth", "7021853", ok)["em"] == 1.0, ok

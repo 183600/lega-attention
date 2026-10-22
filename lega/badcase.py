@@ -42,7 +42,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from .ruler import _NUM_RE
+from .ruler import standalone_numeric_tokens
 from .utils import holm_bonferroni, mcnemar_exact_p, wilson_score_ci
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
@@ -146,7 +146,7 @@ def categorize_case(rec: Dict) -> Dict:
         return r
     # 3) 数值任务：按输出的第一个数字归因（与 EM 计分口径一致）；
     # pred 可能是数字等非字符串类型，显式 str() 后再解析
-    nums = _NUM_RE.findall(_pred_text(r))
+    nums = standalone_numeric_tokens(_pred_text(r))
     if not nums:
         r["category"] = "no_answer"
         r["explanation"] = "模型没有给出可解析的数字回答（可能复读问题或提前停止）"
@@ -681,13 +681,13 @@ def _word_set(raw) -> set:
 
 def _num_set(raw) -> set:
     if isinstance(raw, str):
-        return set(_NUM_RE.findall(raw))
+        return set(standalone_numeric_tokens(raw))
     if not isinstance(raw, (list, tuple, set)):
         return set()
     out = set()
     for v in raw:
         if v is not None:
-            out.update(_NUM_RE.findall(str(v)))
+            out.update(standalone_numeric_tokens(str(v)))
     return out
 
 
