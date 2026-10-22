@@ -971,10 +971,17 @@ def test_train_aborts_on_failed_or_missing_sanity_gate():
             json.dump({"passed": False, "variant": "lega", "seed": 5,
                        "checks": {"token_acc_above_threshold": False},
                        "initial": {}, "final": {}}, f)
+        unverified = os.path.join(d, "sanity_unverified.json")
+        with open(unverified, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "variant": "lega", "seed": 5,
+                       "checks": {},
+                       "manifest": {"seed_report": {"seed": 5,
+                                                    "seed_verified": False}}}, f)
         for label, sfile, needle in (
                 ("failed", sanity_path, "sanity 闸门未通过"),
                 ("missing", os.path.join(d, "missing.json"),
-                 "sanity 闸门证据不可用")):
+                 "sanity 闸门证据不可用"),
+                ("unverified", unverified, "seed_verified=false")):
             out_dir = os.path.join(d, f"out_{label}")
             r = subprocess.run(
                 [sys.executable, "-m", "lega.train", "--config", cfg_path,

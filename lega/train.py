@@ -1093,6 +1093,15 @@ def main():
                 f"sanity 闸门未通过（{args.sanity_file}）：{reason}。"
                 "固定小批量都无法过拟合说明梯度反传/损失计算/标签对齐存在"
                 "严重问题；中止全量训练，请先排查。")
+        if sanity_info.get("seed_verified") is False:
+            # 新版 sanity 清单会内嵌 seed_report；明确标记“未生效”意味着
+            # 这次过拟合不是在该 seed 的确定性随机流下完成的，PASS 不可信。
+            # None 表示旧文件没有该证据字段，按 legacy 允许（train 仍会
+            # 通过身份核对限制可继承范围）。
+            raise SystemExit(
+                f"sanity 闸门证据不可信（{args.sanity_file}）：结果清单的 "
+                "seed_report 明确标记 seed_verified=false，说明检查不是在该"
+                "随机种子的确定性随机流下完成；中止全量训练，请重跑 sanity。")
     manifest = build_run_manifest(
         tag=tag, variant=args.variant, seed=seed, config_path=args.config,
         data_dir=args.data_dir, device=device, sanity=sanity_info)
