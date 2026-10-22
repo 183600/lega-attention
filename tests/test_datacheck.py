@@ -929,6 +929,15 @@ def test_write_clean_lines_preserves_blank_line_boundaries():
         write_clean_lines(io.StringIO("aaaa\n\nbbbb\n\ncccc\n"), dst2, 1)
         with open(dst2, "r", encoding="utf-8") as f:
             assert f.read() == "aaaa"
+        # max_tokens 是数据规模身份：bool/小数/下划线串不能被截断成另一个
+        # 预算后仍返回“写入成功”。
+        for bad in (True, 1.5, "1_0"):
+            try:
+                write_clean_lines(io.StringIO("a\nb\n"), dst2, bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 max_tokens 未被拒绝: {bad!r}")
     print("  [ok] 数据准备：空行块边界被保留，截断仍只发生在完整行")
 
 

@@ -158,7 +158,13 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
     max_tokens > 0 时按 1 token ≈ 3.6 字符、留 20% 余量截断。
     截断只在**完整行边界**发生：写入半行会制造被截断的标签/文档，并可能让
     同一段落的残片跨 split。边读边写，写入临时文件后原子替换。
+
+    max_tokens 是数据规模身份：bool/小数/下划线数字串经 int()/乘法会变成
+    另一个预算（True→1、1.5→1、float("1_0")→10），却仍报告“截断成功”；
+    入口先严格整数化，负值显式拒绝。
     """
+    from lega.utils import strict_int
+    max_tokens = strict_int(max_tokens, "max_tokens")
     if max_tokens < 0:
         # 负上限会立刻截断第一行，产出三个空 split，却仍可能被后续
         # “无重叠”检查判为通过；必须在写入前显式拒绝。
