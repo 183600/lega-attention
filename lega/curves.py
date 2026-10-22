@@ -325,6 +325,18 @@ def _gradient_points(records: List[Dict]):
             sorted(nonfinite_steps))
 
 
+def _stable_median(values):
+    """有限观测的中位数；偶数样本先各除 2 再相加，避免 a+b 溢出。"""
+    arr = sorted(values)
+    n = len(arr)
+    if n == 0:
+        return None
+    mid = n // 2
+    if n % 2:
+        return float(arr[mid])
+    return float(arr[mid - 1] / 2.0 + arr[mid] / 2.0)
+
+
 def _safe_ratio(value: float, denom: float):
     """安全比值：分母<=0/不可表示返回 (None, False)；溢出时封顶并标记。"""
     if denom is None or denom <= 0 or value is None:
@@ -362,7 +374,7 @@ def _detect_series_spikes(points: List[Dict],
             continue
         right = [p["value"] for p in points[i + 1:i + 1 + w]]
         neigh = left + right
-        med = statistics.median(neigh)
+        med = _stable_median(neigh)
         if med <= 0:
             continue
         ratio, clamped = _safe_ratio(points[i]["value"], med)
@@ -443,7 +455,7 @@ def _val_ci_rel(records: List[Dict]) -> Optional[float]:
             # 非有限相对半宽不能进入趋势阈值/JSON。
             if math.isfinite(rel):
                 vals.append(rel)
-    return float(statistics.median(vals)) if vals else None
+    return _stable_median(vals)
 
 
 def _rel_change(first: Optional[float], last: Optional[float]) -> Optional[float]:
@@ -785,7 +797,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     grad_spikes = []
     grad_max_step = None
     if grad_vals:
-        grad_med = float(statistics.median(grad_vals))
+        grad_med = _stable_median(grad_vals)
         peak = max(grad_pts, key=lambda p: p["value"])
         grad_max, grad_max_step = float(peak["value"]), peak["step"]
         if grad_med > 0:
