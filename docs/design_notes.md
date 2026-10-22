@@ -12,7 +12,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 ## 变体
 
-`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。
+`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；详见下文。
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
@@ -53,6 +53,9 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
 | `no_conc` | `gate_a := 0` | 推理期去 B |
 | `no_len` | `gate_b := 0` | 推理期去 C（只去 b·log n；`c` 里的 log n 仍随 `a·c` 保留，与训练期单因素定义一致） |
 | `no_evidence` | `gate_w/a/b := 0` | 推理期退化为 `gate_only`（只留学习到的 d） |
+| `query_only` | `gate_a/b := 0` | 推理期只留 A（`w·q + d`），补齐 2^3 的 A 格 |
+| `conc_only` | `gate_w/b := 0` | 推理期只留 B（`a·c + d`），补齐 B 格 |
+| `len_only` | `gate_w/a := 0` | 推理期只留 C（`b·log n + d`），补齐 C 格 |
 | `gate_open` | 证据项 0，`d := +30` | 门恒开：门控是否在抑制某些写回 |
 | `gate_closed` | 证据项 0，`d := −30` | 阳性对照：关闭注意力输出必须显著变差 |
 | `gate_constant_mean` | 证据项 0，`d_h := logit(E[g_h])` | 去掉逐位置/逐查询变化，保留每个头/层的平均写入强度 |
@@ -76,8 +79,63 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
 - **边界（必须如实声明）**：`head_permute` 是**推理期**的容量/分布安慰剂，
   不是训练期的参数量匹配对照；`no_evidence` 在推理期保留全部参数、只关掉
   证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数
-  是否带来优化红利”这一混淆。后者仍需参数匹配的对照变体（训练期）才能回答，
-  现有证据只能按参数开销 + 推理期病灶 + 单因素消融三者合读。
+  是否带来优化红利”这一混淆。后者由下面的训练期 `lega_placebo` 对照回答；
+  推理期 Shapley 只回答“最终前向的组件结构”，不能替代训练期因果问题。
+
+### 同一 checkpoint 内的 2^3 全因子与 Shapley
+
+`query_only/conc_only/len_only`、`no_query/no_conc/no_len`、`no_evidence`
+与正常基线 `ABC` 共同构成**同一 checkpoint 内的 8 格干预设计**（`lega/ablate.py`
+的 `INFERENCE_FACTORIAL_CELLS`）。它与训练期全因子消融的关键区别是：
+不重新训练，只清零训练好的门控系数，因此没有“再训练补偿”或优化轨迹改变。
+`run_all` 对齐全 8 格、且与基线共享同一批 `window_indices` 的种子计算
+精确 Shapley 值（PPL 用 `−log` 价值函数），再跨种子配对 t + Holm
+（`significance.json.inference_factorial_shapley`），并与训练期 Shapley
+逐因子并列比较符号。三个单因子格（`query_only/conc_only/len_only`）相对
+Full 同时去掉另外两个因子，因此**不进入**单病灶 ΔNLL 因果表，只用于
+2^3 的全因子/Shapley 分解；否则会把“去掉 B+C”误写成“A 的因果贡献”。
+这样可以把两种冲突显式化：
+
+- 训练期 φ 显著、推理期 φ≈0：收益可能来自训练期优化/正则化，最终前向
+  并未真正使用该组件；
+- 训练期 φ≈0、推理期 φ 显著：训练期消融可能被再训练补偿；
+- 两期符号相反：组件贡献依赖训练轨迹或参照格，不能只报有利的一期。
+
+该分析仍是**探索性**的：干预的是已训练系数，不是重新拟合的反事实；
+推理期 φ 依赖基线/病灶的零点定义，且未预注册。
+
+### 参数匹配安慰剂（训练期容量/优化红利对照）
+
+`lega_placebo` 与 `lega` 的门控形状、参数个数、门控 FLOPs、初始化与
+优化器分组完全相同：
+
+```
+lega        : g = sigmoid(w·q + a·c + b·log n + d)
+lega_placebo: g = sigmoid(w·q + a·u + b·v + d)
+```
+
+其中 `u/v` 是由当前前向内的 token 位置与头索引确定性哈希得到的伪随机特征（取值
+[-1,1]，不消耗全局 RNG，训练/推理/逐 token 解码一致），不含任何查询、
+注意力集中度或长度信息。二者唯一的系统差别是 B/C 证据是否有信息，因此
+`lega vs lega_placebo` 的 PPL 配对差用于回答：
+
+- 若 LEGA 显著更低 PPL 且效应不在种子噪声内：B/C 证据的增量不能由
+  “多几个门控参数/一次门控运算”解释；
+- 若二者 TOST 等价：不能把 LEGA 的收益归因于 B/C 证据，容量/优化红利
+  尚未被排除；
+- 若 placebo 反而更好：B/C 证据项可能有害或训练不稳定。
+
+同时报告 `lega_placebo vs qgate`：若噪声特征显著差于 qgate，说明对照本身
+可能“有害”，此时 `lega > placebo` 不能单独证明 B/C 证据有用；若二者等价，
+则额外容量本身无实质影响；若 placebo 反而优于 qgate，则容量/优化红利确实
+存在，`lega vs placebo` 的差异必须在这个背景下解读。
+
+运行方式：`python run_all.py ... --param_control`（或直接在 `--variants`
+中点名 `lega_placebo`）。该变体**不进入**默认 10 变体矩阵、不进入
+`GATE_FACTORS`/全因子 8 格，也不参与组件归因；汇总页在未运行时显式提示
+“容量解释尚未排除”，不会默认已控制。该对照属探索性分析，未预注册，
+不能替代 H2–H5。
+
 
 命令：
 
@@ -87,6 +145,9 @@ python -m lega.ablate --ckpt out/small/lega/seed1337/model_best.pt \
 # 全流水线默认对 lega,qgate 做（--ablate_variants 可加 gate_only 作对照）
 python run_all.py --config configs/small.json --data_dir data/wikitext103 \
     --ablate_variants lega,qgate
+# 追加训练期参数匹配安慰剂（lega vs lega_placebo 容量对照）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --param_control
 ```
 
 输出 `ablation_<variant>[_seed<seed>].json`：基线/各病灶的 val_loss、PPL、

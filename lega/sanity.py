@@ -34,7 +34,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .attention import VARIANTS, VARIANT_CN
+from .attention import RUNNABLE_VARIANTS, VARIANT_CN
 from .data import load_bin, load_meta, get_train_batch
 from .datacheck import check_vocab_capacity
 from .model import GPT, count_params
@@ -602,7 +602,7 @@ def main():
     p = argparse.ArgumentParser(description="过拟合小批量 sanity check")
     p.add_argument("--config", required=True)
     p.add_argument("--data_dir", required=True)
-    p.add_argument("--variant", required=True, choices=VARIANTS)
+    p.add_argument("--variant", required=True, choices=RUNNABLE_VARIANTS)
     p.add_argument("--out", default=None, help="结果 JSON 输出路径")
     p.add_argument("--device", default="auto")
     p.add_argument("--steps", type=int, default=None)

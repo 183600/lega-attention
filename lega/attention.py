@@ -13,6 +13,10 @@
     lega_no_query :  g = sigmoid(a*c + b*log n + d)                （消融：去掉查询项）
     lega_conc_only:  g = sigmoid(a*c + d)                          （全因子消融：仅集中度项 B）
     lega_len_only :  g = sigmoid(b*log n + d)                      （全因子消融：仅长度项 C）
+    lega_placebo  :  g = sigmoid(w·q + a*u + b*v + d)              （对照：u/v 为确定性
+                     伪随机特征，参数个数/门控 FLOPs 与 lega 相同，但不含任何
+                     查询/注意力/长度信息；用于隔离“多几个门控参数/一次门控
+                     运算”的训练期优化红利）
 
 全因子消融矩阵（门控内 2^3：无=gate_only, A=查询, B=集中度, C=长度）：
     无   -> gate_only        A    -> qgate          B   -> lega_conc_only
@@ -41,9 +45,18 @@ import torch.utils.checkpoint
 
 from .utils import config_finite_float, config_probability
 
-# 全部变体名（配置/命令行使用）
+# 主实验变体（配置/命令行默认使用；与预注册的 2^3 门控矩阵一致）
 VARIANTS = ("standard", "gate_only", "qgate", "null", "lega", "lega_no_len",
             "lega_no_conc", "lega_no_query", "lega_conc_only", "lega_len_only")
+
+# 额外的对照变体：不进入主矩阵/默认 run，但可被训练、评测与汇总。
+# lega_placebo 是训练期的**参数匹配安慰剂**：门控结构与 LEGA 完全相同
+# （w·q + a·u + b·v + d，u/v 为逐位置/逐头的确定性伪随机特征），
+# 参数个数、门控 FLOPs、初始化与优化器分组都与 LEGA 一致，但 u/v 不携带
+# 任何查询/注意力/长度信息。它回答“LEGA 的收益是否只是多了几个门控参数/
+# 一次额外门控运算带来的优化红利”，而不是“是否用到了 B/C 证据”。
+CONTROL_VARIANTS = ("lega_placebo",)
+RUNNABLE_VARIANTS = VARIANTS + CONTROL_VARIANTS
 
 # 供图表与汇总表使用的中文名
 VARIANT_CN = {
@@ -57,29 +70,36 @@ VARIANT_CN = {
     "lega_no_query": "LEGA去查询项",
     "lega_conc_only": "仅集中度门控",
     "lega_len_only": "仅长度门控",
+    "lega_placebo": "LEGA参数匹配安慰剂(证据=噪声)",
 }
 
 # 各公式项出现的变体
-_USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc")      # w·q 项
+_USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc",
+              "lega_placebo")                                      # w·q 项
 _USE_CONC = ("lega", "lega_no_len", "lega_no_query",
-             "lega_conc_only")                                     # a*c, c=log(n*max_j p_j)
+             "lega_conc_only",
+             "lega_placebo")                                      # a*c, c=log(n*max_j p_j)
 _USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
-            "lega_len_only")                                       # log n 项
+            "lega_len_only",
+            "lega_placebo")                                        # log n 项
 # 有输出门
 _GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
-          "lega_no_query", "lega_conc_only", "lega_len_only")
+          "lega_no_query", "lega_conc_only", "lega_len_only",
+          "lega_placebo")
 # 门依赖注意力统计（需要 max_j p_j）
-_LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only")
+_LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only",
+                "lega_placebo")
 
 # 门控内三因子 A/B/C 的激活表（单一事实来源）：直接从上面的
 # _USE_QUERY/_USE_CONC/_USE_LEN 派生，避免“实验设计元数据”与实现漂移。
 # 消融对比是否只改变一个因子，由 run_all 的单因素审计消费；standard/null
-# 不属于门控内 2^3 消融，故不出现在此表中。
+# 不属于门控内 2^3 消融，故不出现在此表中。参数匹配安慰剂虽然形式上带
+# A/B/C 三个槽位，但不是任何一个真实证据因子，必须排除在组件归因之外。
 GATE_FACTORS = {
     v: frozenset(f for f, enabled in (("A", v in _USE_QUERY),
                                       ("B", v in _USE_CONC),
                                       ("C", v in _USE_LEN)) if enabled)
-    for v in _GATED
+    for v in _GATED if v not in CONTROL_VARIANTS
 }
 
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
@@ -192,6 +212,45 @@ def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
     return _log_n_table(dev, past_len + T)[past_len:past_len + T]
 
 
+def _placebo_evidence(x: torch.Tensor, n_heads: int, salt: float) -> torch.Tensor:
+    """参数匹配安慰剂使用的确定性“伪证据”特征。
+
+    返回与 ``x`` 同形状、取值在 [-1, 1] 的高频伪随机数（由当前前向内 token 位置与
+    头索引哈希得到）。它不是任何真实查询/注意力/长度的函数，也不消耗全局
+    RNG，因此：
+
+    * 门控参数个数、前向 FLOPs、初始化与优化器分组均与 LEGA 相同；
+    * 训练期不会因为随机流被额外扰动而破坏“同 seed、同数据顺序”的公平性；
+    * 推理期全序列/逐 token 解码都不依赖 RNG，同形状调用可复现。
+
+    单个标量系数 ``a``/``b`` 无法用这种高频特征逼近 ``log n`` 或集中度，
+    因此该变体隔离的是“多出的门控容量/优化自由度”，而不是真实的 B/C 证据。
+    """
+    if x.numel() == 0:
+        return x
+    T = int(x.shape[-1])
+    dev = x.device
+    with torch.no_grad():
+        pos = torch.arange(T, device=dev, dtype=torch.float32).view(1, 1, T)
+        head = torch.arange(int(n_heads), device=dev,
+                            dtype=torch.float32).view(1, -1, 1)
+        z = torch.sin((pos + 1.0) * (12.9898 + salt)
+                      + (head + 1.0) * (78.233 + 0.37 * salt)) * 43758.5453
+        z = z - torch.floor(z)
+        z = z * 2.0 - 1.0
+    if x.dim() == 1:
+        # 与真实 log n 一致：逐位置标量（b 再把它变成逐头项）。
+        z = z.view(int(n_heads), T)[0].view(T)
+    elif x.dim() == 3 and int(x.shape[-2]) == int(n_heads):
+        # c: (B,H,T)，保留头间差异。
+        z = z.view(1, int(n_heads), T)
+    else:
+        # 任意广播形状（如 (1,1,T)/(B,T)）：逐位置标量，避免把头维错配。
+        z = z.view(int(n_heads), T)[0].view(
+            *([1] * (x.dim() - 1)), T)
+    return z.to(dtype=x.dtype).expand_as(x)
+
+
 def _ensure_mm_input(t: torch.Tensor) -> torch.Tensor:
     """仅当批量 matmul 无法直接消费时才连续化。
 
@@ -235,7 +294,7 @@ class CausalSelfAttention(nn.Module):
                  use_sdpa_standard: bool = True):
         super().__init__()
         assert d_model % n_heads == 0, "d_model 必须能被 n_heads 整除"
-        assert variant in VARIANTS, f"未知变体: {variant}"
+        assert variant in RUNNABLE_VARIANTS, f"未知变体: {variant}"
         attn_dropout = config_probability(attn_dropout, "attn_dropout")
         gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
         self.d_model = d_model
@@ -355,11 +414,19 @@ class CausalSelfAttention(nn.Module):
             # （lega_no_len / lega_conc_only），a*c 里的长度归一化也不能丢，
             # 否则 Full−C 实际多去掉了 a·log n，不再是单组件消融。
             c += log_n
+            if self.variant in CONTROL_VARIANTS:
+                # 参数匹配安慰剂：保留 a 的形状与梯度路径，但把它乘的
+                # “集中度证据”换成与真实统计无关的确定性噪声。
+                c = _placebo_evidence(c, H, salt=1.0)
             a = self.gate_a.float().view(1, H, 1)
             logit = a * c if logit is None else logit.addcmul_(a, c)
         if self.use_len:
+            len_term = log_n
+            if self.variant in CONTROL_VARIANTS:
+                # 与 c 相同：保留 b 的参数/计算，只把长度证据替换为噪声。
+                len_term = _placebo_evidence(log_n, H, salt=2.0)
             b = self.gate_b.float().view(1, H, 1)
-            logit = b * log_n if logit is None else logit.addcmul_(b, log_n)
+            logit = b * len_term if logit is None else logit.addcmul_(b, len_term)
         dterm = self.gate_d.float().view(1, H, 1)
         if logit is None:
             # 防御分支：当前全部变体至少含一个门控项，logit 不会为 None。

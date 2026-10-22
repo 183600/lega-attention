@@ -4,12 +4,17 @@
 变体（相同参数量级与训练步数）:
   standard | gate_only | qgate | null | lega | lega_no_len | lega_no_conc
   | lega_no_query | lega_conc_only | lega_len_only
+  可选参数匹配安慰剂：lega_placebo（--param_control；不进入默认矩阵）
 
 对比与消融协议（科研统计口径）:
   * 受控变量：所有变体 × 种子使用同一 config 训练（同一优化器/学习率策略/
     训练步数/数据顺序），训练后自动核对各 run 的 config_used.json 与
     eval.json 溯源（数据指纹/代码 commit/实际训练步数），任何与“除变体外
     全部一致”相悖的差异都会直接报错，避免把调参收益或数据差异误归因给方法；
+  * 容量对照：--param_control 加入 lega_placebo——门控参数个数/形状/门控
+    FLOPs 与 lega 完全相同，但 B/C 证据替换为确定性伪随机特征；lega vs
+    lega_placebo 的 PPL 配对差用于排除“多几个门控参数的容量/优化红利”，
+    未运行时汇总页显式提示“容量解释尚未排除”；
   * 多种子：关键指标跨随机种子报告 Mean ± Std（种子一致 → 变体间配对比较），
     配对 t 检验的同指标家族做 Holm–Bonferroni 校正以控制 FWER，并报告
     Cohen's d_z 效应量；默认种子数见 configs（tiny 3 / small 5），可用
@@ -37,6 +42,9 @@
     Full；全因子增量 X-only vs gate_only）。B-only/C-only 与 Full 相差
     两个因子，不再进入单因素对比表；审计结果写入 significance.json 与
     汇总页，防止多因子差异被误写成单组件证据。
+  * 推理期 2^3：除去一法病灶外，同一 checkpoint 还施加 query_only/
+    conc_only/len_only 补齐 8 格，计算推理期 Shapley 并与训练期 Shapley
+    逐因子比对符号——区分“重新训练后的组件贡献”与“最终前向实际使用”。
 
 用法:
   # 冒烟测试（tiny 配置 + 伪数据，仅验证全流程可跑通；默认只跑 1 个种子）
@@ -69,8 +77,10 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from lega.attention import GATE_FACTORS, VARIANTS, VARIANT_CN  # noqa: E402
-from lega.ablate import (LESION_BY_ID as ABLATION_LESION_BY_ID,  # noqa: E402
+from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
+                            RUNNABLE_VARIANTS, VARIANTS, VARIANT_CN)
+from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
+                         LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER)
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
@@ -111,6 +121,10 @@ from lega.utils import (bootstrap_mean_ci, config_bool,
                         seed_int, seed_plan, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
+# 参数匹配安慰剂：不是主实验矩阵的一部分，只有显式 --param_control 或
+# --variants 里点名时才训练；它不进入 GATE_FACTORS/全因子 8 格。
+PARAM_CONTROL_VARIANT = CONTROL_VARIANTS[0]
+PARAM_CONTROL_PAIR = ("lega", PARAM_CONTROL_VARIANT)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
 # null 变体虽无 g/logit，仍应纳入；standard 无需诊断，保持跳过。
 GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
@@ -280,6 +294,17 @@ def build_comparison_pairs(runs, registered=None):
     runs = runs if isinstance(runs, dict) else {}
     pairs = [(cand, "standard") for cand in ALL_VARIANTS
              if cand != "standard"]
+    # 参数匹配安慰剂只在显式运行时才进入对比，且核心对比是 lega vs placebo
+    # （不是 vs standard）：二者门控参数/FLOPs 相同，差别只在证据是否有信息。
+    if PARAM_CONTROL_VARIANT in runs:
+        pairs.append((PARAM_CONTROL_VARIANT, "standard"))
+        if "lega" in runs:
+            pairs.append(PARAM_CONTROL_PAIR)
+        # 安慰剂 vs qgate：若噪声特征本身与 qgate 等价/更好，说明“多出的
+        # 门控容量”单独不伤害优化；若明显更差，则噪声特征可能有害，
+        # lega vs placebo 的差异不能单独归因于证据（汇总页会并列提示）。
+        if "qgate" in runs:
+            pairs.append((PARAM_CONTROL_VARIANT, "qgate"))
     # gate_only 未运行时，三个“只加 X”的全因子增量对无法估计；去一法对
     # 仍保留（缺 lega 时下游会如实报“未运行”，而不是伪造证据）。
     pairs += [(cand, ref) for cand, ref in SINGLE_FACTOR_PAIRS
@@ -2666,6 +2691,138 @@ def _causal_equivalence_overview(causal_tests) -> dict:
     }
 
 
+def _render_parameter_matched_control(t, capacity_test=None, ran=False) -> list:
+    """渲染训练期参数匹配安慰剂对照（lega vs 同参数/同 FLOPs 的噪声证据门）。"""
+    md = ["", "### 参数匹配安慰剂对照（训练期：容量/优化红利）", ""]
+    if not isinstance(t, dict):
+        if ran:
+            md.append("⚠ 本轮运行了 `lega_placebo`，但没有与 `lega` 可配对的"
+                      "共同种子/一致评测协议，无法形成容量对照；请检查 "
+                      "seed 与 eval 协议，不能据此声称容量已排除。")
+        else:
+            md.append("⚠ 本轮未运行 `lega_placebo`。LEGA vs standard 的差异仍混有"
+                      "“多出的门控参数/一次门控运算”这一容量解释；需要排除时应显式"
+                      "加 `--param_control`（或在 `--variants` 中点名 "
+                      "`lega_placebo`）后重跑。")
+        return md
+    mean = _finite_number(t.get("mean_diff"))
+    std = _finite_number(t.get("std_diff"))
+    ci = t.get("mean_diff_ci95")
+    ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+            if isinstance(ci, (list, tuple)) and len(ci) == 2
+            and all(_finite_number(x) is not None for x in ci) else "-")
+    p_adj = _finite_number(t.get("p_adj"))
+    eq = t.get("equivalence") if isinstance(t.get("equivalence"), dict) else {}
+    eq_status = eq.get("status", "-")
+    if mean is not None and p_adj is not None and p_adj < ALPHA and mean < 0:
+        if t.get("within_noise") or t.get("loo_sign_stable") is False:
+            reading = "方向有利但效应落在种子噪声内/留一翻转：只能算线索"
+        else:
+            reading = ("证据特定性成立：同参数/同 FLOPs 下，真实 B/C 证据优于"
+                       "噪声证据；容量/优化红利不能单独解释")
+    elif eq_status == "equivalent":
+        reading = ("落入 SESOI 等价区：无法区分 LEGA 与噪声证据对照，"
+                   "不能把收益归因于 B/C 证据（容量/优化红利未被排除）")
+    elif mean is not None and mean > 0 and p_adj is not None and p_adj < ALPHA:
+        reading = "噪声证据反而更好：B/C 证据项可能有害或训练不稳定"
+    else:
+        reading = "未定：方向/显著性不足，须对照 MDE 与 TOST 解读，不能写成“无差异”"
+    md.append("| 对比 | ΔPPL均值 ± ΔSD | Δ 95% CI | n | 胜/负/平 | p_adj(Holm) | "
+              "PPL SESOI 等价性 | 解读 |")
+    md.append("|---|---|---|---|---|---|---|---|")
+    delta = ("-" if mean is None else
+             f"{mean:+.4f}" + (f" ± {std:.4f}" if std is not None else ""))
+    md.append(f"| lega vs lega_placebo | {delta} | {ci_s} | {t.get('n', '-')} | "
+              f"{_seed_winloss_str(t)} | "
+              f"{'-' if p_adj is None else f'{p_adj:.4f}'} | {eq_status} | "
+              f"{reading} |")
+    if isinstance(capacity_test, dict):
+        m2 = _finite_number(capacity_test.get("mean_diff"))
+        s2 = _finite_number(capacity_test.get("std_diff"))
+        p2 = _finite_number(capacity_test.get("p_adj"))
+        ci2 = capacity_test.get("mean_diff_ci95")
+        ci2_s = (f"[{ci2[0]:+.4f}, {ci2[1]:+.4f}]"
+                 if isinstance(ci2, (list, tuple)) and len(ci2) == 2
+                 and all(_finite_number(x) is not None for x in ci2) else "-")
+        eq2 = (capacity_test.get("equivalence")
+               if isinstance(capacity_test.get("equivalence"), dict) else {})
+        if m2 is not None and p2 is not None and p2 < ALPHA and m2 < 0:
+            read2 = ("额外容量/优化自由度单独即可降低 PPL：lega vs placebo 的"
+                     "差异必须在该容量红利背景下解读")
+        elif eq2.get("status") == "equivalent":
+            read2 = "噪声特征与 qgate 落在等价区：额外容量本身无实质影响"
+        elif m2 is not None and p2 is not None and p2 < ALPHA and m2 > 0:
+            read2 = ("噪声特征显著差于 qgate：对照可能“有害”，"
+                     "lega > placebo 不能单独证明 B/C 证据有用")
+        else:
+            read2 = "未定：容量本身的影响方向/显著性不足"
+        d2 = ("-" if m2 is None else
+              f"{m2:+.4f}" + (f" ± {s2:.4f}" if s2 is not None else ""))
+        md.append(f"| lega_placebo vs qgate（容量本身） | {d2} | {ci2_s} | "
+                  f"{capacity_test.get('n', '-')} | "
+                  f"{_seed_winloss_str(capacity_test)} | "
+                  f"{'-' if p2 is None else f'{p2:.4f}'} | "
+                  f"{eq2.get('status', '-')} | {read2} |")
+    else:
+        md.append("| lega_placebo vs qgate（容量本身） | - | - | - | - | - | - | "
+                  "未运行/缺少 qgate，无法判断噪声特征本身是中性还是有害 |")
+    md.append("")
+    md.append("注: `lega_placebo` 的门控形状/参数个数/门控 FLOPs 与 `lega` 完全相同"
+              "（w·q + a·u + b·v + d），但 u/v 是逐位置/逐头的确定性伪随机特征，"
+              "不含任何查询/注意力/长度信息。二者唯一差别是 B/C 证据是否有信息，"
+              "因此该对比把“多几个门控参数的容量/优化红利”从 B/C 证据效应中分离"
+              "出来。它是探索性对照（未预注册），不能替代 H2–H5 的确认性检验；"
+              "ΔPPL<0 表示 LEGA 更低。")
+    return md
+
+
+def _render_inference_shapley(inference_tests) -> list:
+    """渲染同一 checkpoint 内的 2^3 干预 Shapley（与训练期 Shapley 并列）。"""
+    rows = [t for t in (inference_tests if isinstance(inference_tests, list)
+                        else []) if isinstance(t, dict)]
+    md = ["", "### 推理期全因子 Shapley（同一 checkpoint 内干预；探索性）", ""]
+    if not rows:
+        md.append("⚠ 无法计算推理期 Shapley：需要 `lega` 的 8 个推理期格子"
+                  "（正常基线、no_evidence 以及 query_only/conc_only/len_only/"
+                  "no_query/no_conc/no_len）全部施加成功、且与基线共享同一批 "
+                  "val 窗口。缺格或旧产物缺 `window_indices` 时如实跳过，"
+                  "不按 0 补齐。")
+        return md
+    md.append("训练期全因子消融改变优化轨迹；本表在同一 checkpoint 上只清零门控"
+              "项，直接对**训练好的前向**做 2^3 干预并计算 Shapley 值 "
+              "`φ_A+φ_B+φ_C=ABC−none`。φ>0 表示该因子在最终前向中降低 PPL，"
+              "`exp(−φ)` 为 PPL 几何均值比。与训练期 φ 符号不一致时，说明"
+              "“重新训练后的组件贡献结构”没有在最终前向复现，应并列披露。")
+    md += ["", "| 因子 | φ(推理期) | PPL几何比 | 占总效应 | n种子 | p_adj(Holm) | "
+           "φ(训练期) | 符号一致 | 判定 |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for t in rows:
+        phi = _finite_number(t.get("mean_diff"))
+        ratio = _finite_number(t.get("shapley_ppl_ratio"))
+        share = _finite_number(t.get("shapley_share"))
+        tr = _finite_number(t.get("training_phi_mean"))
+        agree = t.get("training_inference_sign_agree")
+        p_adj = _finite_number(t.get("p_adj"))
+        p_adj_s = "-" if p_adj is None else f"{p_adj:.4f}"
+        md.append(
+            f"| {t.get('shapley_factor_label', t.get('shapley_factor'))} | "
+            f"{'-' if phi is None else f'{phi:+.4f}'} | "
+            f"{'-' if ratio is None else f'{ratio:.4f}'} | "
+            f"{'-' if share is None else f'{share*100:.1f}%'} | "
+            f"{t.get('n', '-')} | "
+            f"{p_adj_s} | "
+            f"{'-' if tr is None else f'{tr:+.4f}'} | "
+            f"{'-' if agree is None else ('是' if agree else '否 ⚠')} | "
+            f"{t.get('verdict', '-')} |")
+    md.append("")
+    md.append("注: 推理期 φ 由 `query_only/conc_only/len_only`（单因子格）、"
+              "`no_query/no_conc/no_len`（两因子格）与 `no_evidence`（无因子格）"
+              "同基线共同分解；这些格子只改门控参数、不重新训练，因此是"
+              "“最终前向是否使用该组件”的机制证据，不是“重新训练后是否有用”的"
+              "训练期证据。推理期与训练期 Shapley 属探索性分析，未预注册。")
+    return md
+
+
 def _verdict_head(value) -> str:
     """取结论首词（去掉括号解释），用于跨尺度/口径一致性比较。"""
     return str(value if value is not None else "-").split("（")[0]
@@ -3370,6 +3527,131 @@ def _factorial_shapley_tests(runs) -> list:
     return _apply_holm(out)
 
 
+# 推理期全因子 Shapley：同一 checkpoint 上干预 2^3 个门控格，而不是重新
+# 训练。它回答“训练好的前向里，组件的平均贡献与交互结构是否与训练期
+# 全因子消融一致”，不能替代训练期确认性检验。
+INFERENCE_SHAPLEY_METRIC = "推理期Shapley(PPL)"
+
+
+def _inference_shapley_tests(ablations):
+    """由推理期 2^3 病灶格计算逐种子 Shapley 值并做跨种子检验。
+
+    每个种子必须齐全 8 个格（ABC=正常基线，none=A/B/C 全关，其余为
+    只保留一个/两个因子的病灶），且每个病灶与基线共享同一批 val 窗口。
+    缺格、未真正施加、或窗口不一致的种子整条剔除，不按 0 补齐。
+
+    价值函数与训练期一致：v = −log(PPL)（越大越好），因此 φ>0 表示该
+    因子在训练好的前向里降低 PPL；exp(−φ) 为该因子的 PPL 几何均值比。
+    """
+    out = []
+    ablations = ablations if isinstance(ablations, dict) else {}
+    for variant in sorted(ablations):
+        seed_map = ablations.get(variant)
+        if not isinstance(seed_map, dict):
+            continue
+        per_seed = {}
+        all_seeds = _sorted_seeds(seed_map)
+        for seed in all_seeds:
+            payload = seed_map.get(seed)
+            if not isinstance(payload, dict):
+                continue
+            baseline = payload.get("baseline")
+            if not isinstance(baseline, dict):
+                continue
+            base_ppl = _finite_number(baseline.get("val_ppl"))
+            if base_ppl is None or base_ppl <= 0:
+                continue
+            base_windows = payload.get("window_indices")
+            if not isinstance(base_windows, list) or not base_windows:
+                continue
+            recs = payload.get("lesions")
+            recs = recs if isinstance(recs, list) else []
+            # 外部/旧产物可能把 lesion 写成数组/对象；不可哈希的键会直接让
+            # dict 构造失败，必须逐条校验而不是相信 JSON 结构。
+            by_id = {}
+            for r in recs:
+                if not isinstance(r, dict):
+                    continue
+                lid = r.get("lesion")
+                if isinstance(lid, str):
+                    by_id[lid] = r
+            raw = {"ABC": base_ppl}
+            ok = True
+            for cell, lesion_id in INFERENCE_FACTORIAL_CELLS.items():
+                if lesion_id is None:
+                    continue
+                rec = by_id.get(lesion_id)
+                if not isinstance(rec, dict):
+                    ok = False
+                    break
+                # 只接受真正施加成功、且与基线同窗口的病灶。
+                if rec.get("applied") is not True:
+                    ok = False
+                    break
+                if rec.get("window_indices") != base_windows:
+                    ok = False
+                    break
+                ppl = _finite_number(rec.get("val_ppl"))
+                if ppl is None or ppl <= 0:
+                    ok = False
+                    break
+                raw[cell] = ppl
+            if not ok or len(raw) != len(FACTORIAL_CELL_ORDER):
+                continue
+            try:
+                oriented = {
+                    c: factorial_oriented_value("PPL", raw[c])
+                    for c in FACTORIAL_CELL_ORDER}
+                per_seed[seed] = factorial_decomposition(oriented)
+            except (TypeError, ValueError):
+                continue
+        if not per_seed:
+            continue
+        ordered = _sorted_seeds(per_seed)
+        totals = [per_seed[s]["total_effect"] for s in ordered]
+        total_mean = float(np.mean(totals)) if totals else None
+        share_ok = bool(totals) and all(float(v) > 1e-12 for v in totals)
+        for factor in ("A", "B", "C"):
+            vals = [per_seed[s]["phi"].get(factor) for s in ordered]
+            vals = [v for v in vals if _finite_number(v) is not None]
+            if not vals:
+                continue
+            res = paired_t_test(vals, [0.0] * len(vals))
+            res.update({
+                "candidate": f"{factor} 的推理期 Shapley 贡献",
+                "reference": "0（无贡献）",
+                "metric": INFERENCE_SHAPLEY_METRIC,
+                "lower_is_better": False,
+                "variant": variant,
+                "shapley_factor": factor,
+                "shapley_factor_label": SHAPLEY_FACTOR_LABEL[factor],
+                "shapley_metric": "PPL",
+                "inference_time": True,
+                "shapley_total_effect_mean": total_mean,
+                "shapley_total_effect_std": (
+                    float(np.std(totals, ddof=1)) if len(totals) >= 2 else None),
+                "shapley_share": (
+                    float(np.mean([per_seed[s]["phi"][factor]
+                                   / per_seed[s]["total_effect"]
+                                   for s in ordered])) if share_ok else None),
+                "shapley_efficiency_gap_max": (
+                    max(abs(per_seed[s]["efficiency_gap"])
+                        for s in ordered)),
+                "n_protocol_seeds": len(ordered),
+                "excluded_protocol_mismatches": (
+                    len(all_seeds) - len(ordered)),
+                "exploratory": True,
+            })
+            mean_phi = _finite_number(res.get("mean_diff"))
+            res["shapley_ppl_ratio"] = (
+                math.exp(max(-20.0, min(20.0, -float(mean_phi))))
+                if mean_phi is not None else None)
+            res["shapley_ppl_ratio_note"] = (
+                "exp(−φ)：<1 表示该因子在训练好的前向里平均降低 PPL")
+            out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
+    return _apply_holm(out)
+
+
 # 因果病灶消融（推理期权重干预）的跨种子指标名与判定口径。
 CAUSAL_ABLATION_METRIC = "因果消融ΔNLL(lesion−normal)"
 
@@ -3389,6 +3671,11 @@ def _ablation_lesion_records(ablations):
             continue
         for lesion_id in ABLATION_LESION_ORDER:
             spec = ABLATION_LESION_BY_ID.get(lesion_id, {})
+            # query_only/conc_only/len_only 是同一 checkpoint 2^3 的“只保留
+            # 单因子”格；它们相对 Full 的 ΔNLL 同时去掉另外两个因子，不能
+            # 当成单组件因果证据。它们只进入推理期 Shapley/交互分解。
+            if spec.get("factorial_cell"):
+                continue
             vals, seeds_used, no_op_seeds = [], [], 0
             window_n = 0
             not_applicable = 0
@@ -5359,7 +5646,7 @@ def build_summary(results_dir: str, audit: dict = None,
             continue
         ablations.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
 
-    variants = sorted(v for v in runs if v in VARIANTS)
+    variants = sorted(v for v in runs if v in RUNNABLE_VARIANTS)
     eval_splits = set()
     invalid_eval_split = False
     for v in variants:
@@ -5667,6 +5954,34 @@ def build_summary(results_dir: str, audit: dict = None,
     # 推理期因果病灶消融：与训练期消融回答不同的因果问题（见 lega.ablate
     # 模块文档）。独立指标家族、独立 Holm，不混入上面的变体间配对表。
     causal_tests = _ablation_lesion_records(ablations)
+    # 同一 checkpoint 内的 2^3 干预 → 推理期 Shapley；与训练期 Shapley 并列，
+    # 用于检验“重新训练后的组件结构”是否也存在于最终前向。探索性证据。
+    inference_shapley = _inference_shapley_tests(ablations)
+    train_phi = {t.get("shapley_factor"): _finite_number(t.get("mean_diff"))
+                 for t in shapley_tests
+                 if t.get("shapley_metric") == "PPL"}
+    for t in inference_shapley:
+        tr = train_phi.get(t.get("shapley_factor"))
+        ph = _finite_number(t.get("mean_diff"))
+        t["training_phi_mean"] = tr
+        t["training_inference_sign_agree"] = (
+            None if tr is None or ph is None else bool(
+                (tr > 0) == (ph > 0) or (tr == 0 and ph == 0)))
+    # 参数匹配安慰剂（lega vs 同参数/同 FLOPs、但证据为噪声的 lega_placebo）。
+    # 只有显式运行时才有这条对比；未运行时汇总页显式提示，不默认“容量已排除”。
+    param_control_test = next(
+        (t for t in tests
+         if t.get("metric") == "PPL"
+         and t.get("candidate") == PARAM_CONTROL_PAIR[0]
+         and t.get("reference") == PARAM_CONTROL_PAIR[1]), None)
+    if param_control_test is not None:
+        param_control_test["capacity_control"] = True
+        param_control_test["exploratory"] = True
+    capacity_only_test = next(
+        (t for t in tests
+         if t.get("metric") == "PPL"
+         and t.get("candidate") == PARAM_CONTROL_VARIANT
+         and t.get("reference") == "qgate"), None)
     # 样例级配对（McNemar）：固定题面上的评测抽样不确定性，与上面的
     # 跨种子聚合 EM 检验互补；独立 Holm 家族、探索性证据。
     ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
@@ -7131,6 +7446,13 @@ def build_summary(results_dir: str, audit: dict = None,
     #     写成“安慰剂无效应”，必须看 TOST 是否把差异限制在 SESOI 内。
     md += _render_causal_equivalence_section(causal_tests)
 
+    # --- 训练期参数匹配安慰剂（容量/优化红利的对照）与同一 checkpoint 内的
+    #     2^3 推理期 Shapley（与训练期 Shapley 并列）。
+    md += _render_parameter_matched_control(
+        param_control_test, capacity_only_test,
+        ran=PARAM_CONTROL_VARIANT in runs)
+    md += _render_inference_shapley(inference_shapley)
+
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
@@ -7842,15 +8164,36 @@ def build_summary(results_dir: str, audit: dict = None,
                    "causal_ablation": causal_tests,
                    "causal_ablation_equivalence": _causal_equivalence_overview(
                        causal_tests),
+                   "parameter_matched_control": {
+                       "variant": PARAM_CONTROL_VARIANT,
+                       "pair": list(PARAM_CONTROL_PAIR),
+                       "available": bool(param_control_test),
+                       "test": param_control_test,
+                       "capacity_only_test": capacity_only_test,
+                       "note": ("训练期参数匹配安慰剂：lega_placebo 与 lega 的"
+                                "门控参数形状/个数/门控 FLOPs 完全相同，但把 "
+                                "B/C 证据替换为确定性伪随机特征；lega vs "
+                                "lega_placebo 的 PPL 配对差用于排除“多几个门控"
+                                "参数的容量/优化红利”。探索性、未预注册；"
+                                "未运行该变体时 available=false，不得默认容量"
+                                "已排除。")},
+                   "inference_factorial_shapley": inference_shapley,
+                   "inference_factorial_shapley_note": (
+                       "同一 checkpoint 内的 2^3 门控干预（正常基线、"
+                       "query_only/conc_only/len_only、no_query/no_conc/no_len、"
+                       "no_evidence）上的 Shapley 分解（探索性）：φ>0 表示该"
+                       "因子在训练好的前向里降低 PPL；与训练期 Shapley 并列，"
+                       "用于区分“重新训练后的组件贡献”与“最终前向实际使用”。"),
                    "causal_ablation_note": (
                        "推理期因果病灶消融（lega.ablate，val split）：同一 "
                        "checkpoint/同一批窗口上只改门控参数，逐窗口配对 ΔNLL；"
                        "no_query/no_conc/no_len/no_evidence 是训练期去一法的"
-                       "推理期对应，head_permute 是容量/分布不变的安慰剂对照，"
-                       "gate_open/closed/constant_mean 检验写回强度与逐位置变化；"
-                       "跨种子 p 经 Holm 校正，窗口级 p 仅描述性；"
-                       "equivalence 字段给出 ΔNLL 相对 0.01 nat SESOI 的 TOST "
-                       "结果，no_op 不作等价性判定"),
+                       "推理期对应，query_only/conc_only/len_only 补齐同一 "
+                       "checkpoint 的 2^3 单因子格；head_permute 是容量/分布"
+                       "不变的安慰剂对照，gate_open/closed/constant_mean 检验"
+                       "写回强度与逐位置变化；跨种子 p 经 Holm 校正，窗口级 p "
+                       "仅描述性；equivalence 字段给出 ΔNLL 相对 0.01 nat "
+                       "SESOI 的 TOST 结果，no_op 不作等价性判定"),
                    "factorial_interactions_note": (
                        "全因子 2^3 的 A×B/A×C/B×C 交互对比（探索性，独立 "
                        "Holm 家族，基准 gate_only）：交互=0 表示组件效应可加；"
@@ -7874,6 +8217,8 @@ def build_summary(results_dir: str, audit: dict = None,
             "ruler_sample_tests": ruler_sample_tests,
             "ppl_window_tests": ppl_window_tests,
             "factorial_shapley": shapley_tests,
+            "inference_factorial_shapley": inference_shapley,
+            "parameter_matched_control": param_control_test,
             "causal_ablation": causal_tests}
 
 
@@ -7883,7 +8228,15 @@ def main():
     p.add_argument("--data_dir", default="data/dummy")
     p.add_argument("--out_root", default="out")
     p.add_argument("--results_dir", default=None, help="默认 results/<tag>")
-    p.add_argument("--variants", default=",".join(ALL_VARIANTS))
+    p.add_argument("--variants", default=",".join(ALL_VARIANTS),
+                   help="逗号分隔的变体；默认主实验矩阵。可额外点名 "
+                        "lega_placebo（参数匹配安慰剂），或直接用 "
+                        "--param_control 追加")
+    p.add_argument("--param_control", action="store_true",
+                   help="追加训练期参数匹配安慰剂 lega_placebo：门控参数/"
+                        "FLOPs 与 lega 相同，但 B/C 证据替换为确定性噪声；"
+                        "汇总页给出 lega vs lega_placebo 的容量对照。"
+                        "默认关闭（不影响主实验规模）")
     p.add_argument("--seeds", default=None,
                    help="逗号分隔的随机种子；默认取配置 seeds（冒烟模式仅取首个）")
     p.add_argument("--smoke", action="store_true")
@@ -7971,10 +8324,13 @@ def main():
         # 空 --variants 会让流水线“成功”跑完但没有任何 run，下游汇总为空；
         # 这是显式配置错误，不能当作合法实验。
         p.error("--variants 不能为空：至少指定一个变体（可选："
-                + ", ".join(ALL_VARIANTS) + "）")
-    invalid = sorted(set(variants) - set(ALL_VARIANTS))
+                + ", ".join(RUNNABLE_VARIANTS) + "）")
+    if args.param_control and PARAM_CONTROL_VARIANT not in variants:
+        variants.append(PARAM_CONTROL_VARIANT)
+    invalid = sorted(set(variants) - set(RUNNABLE_VARIANTS))
     if invalid:
-        p.error(f"未知变体: {', '.join(invalid)}；可选: {', '.join(ALL_VARIANTS)}")
+        p.error(f"未知变体: {', '.join(invalid)}；可选: "
+                f"{', '.join(RUNNABLE_VARIANTS)}")
     ablate_variants = ([] if args.skip_ablation
                        else parse_variants(args.ablate_variants))
     invalid_ablate = sorted(set(ablate_variants) - set(GATE_FACTORS))

@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .attention import CausalSelfAttention, VARIANTS
+from .attention import CausalSelfAttention, RUNNABLE_VARIANTS
 from .utils import config_bool, config_finite_float, config_probability
 
 
@@ -441,7 +441,7 @@ class GPT(nn.Module):
                  variant: str = "lega", gate_bias_init: float = 2.0,
                  use_sdpa_standard: bool = True):
         super().__init__()
-        assert variant in VARIANTS, f"未知变体: {variant}"
+        assert variant in RUNNABLE_VARIANTS, f"未知变体: {variant}"
         dropout = config_probability(dropout, "dropout")
         attn_dropout = config_probability(attn_dropout, "attn_dropout")
         gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
@@ -802,6 +802,8 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
         "lega_no_query": 3,           # a, b, d
         "lega_conc_only": 2,          # a, d
         "lega_len_only": 2,           # b, d
+        # 参数匹配安慰剂与 lega 的门控参数形状完全相同（w, a, b, d）。
+        "lega_placebo": d_head + 3,   # w, a, b, d（证据为噪声，参数量相同）
     }[variant]
     return per * n_heads * n_layers
 

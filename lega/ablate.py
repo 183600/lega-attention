@@ -15,6 +15,14 @@
     no_conc    : gate_a := 0                 （去 B：集中度项）
     no_len     : gate_b := 0                 （去 C：长度项）
     no_evidence: gate_w, gate_a, gate_b := 0 （A+B+C 全去，只留学习到的 d）
+    query_only : gate_a, gate_b := 0          （仅 A：w·q + d）
+    conc_only  : gate_w, gate_b := 0          （仅 B：a·c + d）
+    len_only   : gate_w, gate_a := 0          （仅 C：b·log n + d）
+
+  上述 8 个格子（含正常基线 ABC）构成**同一 checkpoint 内的 2^3 全因子
+  干预设计**：训练期全因子消融回答“重新训练时去掉组件会怎样”，这里则
+  直接干预训练好的门控，回答“最终前向的组件结构与交互是否一致”，并可在
+  同一 checkpoint 上做推理期 Shapley 分解。
 
   门控强度/信息病灶
     gate_open        : 所有证据系数 := 0，d := +30（g→1，等价于不门控）
@@ -138,9 +146,52 @@ LESION_SPECS = (
         "expected": "worse",
         "note": "保留幅度与容量、反转证据方向；若不变，门控对证据方向不敏感",
     },
+    # 以下三个“只保留单因子”格用于同一 checkpoint 的 2^3 全因子/Shapley；
+    # 它们相对 Full 同时去掉另外两个因子，故标记 factorial_cell，不进入
+    # 单病灶 ΔNLL 因果表（见 run_all._ablation_lesion_records）。
+    {
+        "id": "query_only", "label": "仅查询项 A（gate_a=gate_b=0）",
+        "target": "A 查询项 w·q", "kind": "zero", "factorial_cell": True,
+        "params": ("gate_a", "gate_b"), "requires": ("query",),
+        "expected": "worse",
+        "note": "推理期全因子 2^3 的 A 格：保留 w·q + d，清零 B/C；"
+                "与训练期 qgate 对照（若模型还含 B/C，二者不再等价）",
+    },
+    {
+        "id": "conc_only", "label": "仅集中度项 B（gate_w=gate_b=0）",
+        "target": "B 集中度证据 a·c", "kind": "zero", "factorial_cell": True,
+        "params": ("gate_w", "gate_b"), "requires": ("conc",),
+        "expected": "worse",
+        "note": "推理期全因子 2^3 的 B 格：保留 a·c + d，清零 A/C；"
+                "与训练期 lega_conc_only 对照",
+    },
+    {
+        "id": "len_only", "label": "仅长度项 C（gate_w=gate_a=0）",
+        "target": "C 长度校准 b·log n", "kind": "zero", "factorial_cell": True,
+        "params": ("gate_w", "gate_a"), "requires": ("len",),
+        "expected": "worse",
+        "note": "推理期全因子 2^3 的 C 格：保留 b·log n + d，清零 A/B；"
+                "与训练期 lega_len_only 对照",
+    },
 )
 LESION_BY_ID = {spec["id"]: spec for spec in LESION_SPECS}
 LESION_ORDER = tuple(spec["id"] for spec in LESION_SPECS)
+
+# 同一 checkpoint 内的 2^3 全因子干预设计：cell -> 病灶 id。
+# "ABC" 是正常基线（不施加病灶），None 表示调用方读取 baseline 指标。
+# 映射与 lega.factorial.CELL_ORDER 一致，供推理期 Shapley 分解复用。
+INFERENCE_FACTORIAL_CELLS = {
+    "none": "no_evidence",   # 只留 d
+    "A": "query_only",       # w·q + d
+    "B": "conc_only",        # a·c + d
+    "C": "len_only",         # b·log n + d
+    "AB": "no_len",          # Full−C
+    "AC": "no_conc",         # Full−B
+    "BC": "no_query",        # Full−A
+    "ABC": None,             # 正常前向（基线）
+}
+INFERENCE_FACTORIAL_ORDER = tuple(INFERENCE_FACTORIAL_CELLS)
+
 
 
 def _finite_or_none(value):
@@ -691,8 +742,10 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
             "split": "val",
             "same_windows": True,
             "note": ("同一 checkpoint、同一批验证窗口上的权重病灶；"
-                     "窗口级 p 仅描述性（相邻窗口可能相关），跨种子配对"
-                     "检验由 run_all 汇总"),
+                     "query_only/conc_only/len_only 是 2^3 的单因子格，"
+                     "与 no_* 及基线共同用于推理期 Shapley，不作单病灶"
+                     "因果归因；窗口级 p 仅描述性（相邻窗口可能相关），"
+                     "跨种子配对检验由 run_all 汇总"),
         },
         "provenance": load_provenance(ckpt_dir, data_dir),
         "generated_at": now_str(),

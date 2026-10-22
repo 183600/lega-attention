@@ -22,7 +22,9 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
                       _enrich_paired, _eval_matches_window_spec,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
-                      _factorial_protocol_ok,
+                      _factorial_protocol_ok, _inference_shapley_tests,
+                      INFERENCE_SHAPLEY_METRIC, PARAM_CONTROL_VARIANT,
+                      PARAM_CONTROL_PAIR,
                       _int_or_zero, _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _noise_verdict_note, _loo_stability_str, _num_or_none,
@@ -30,6 +32,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
                       _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
+                      _render_inference_shapley,
+                      _render_parameter_matched_control,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
                       _ruler_depth_gap, _ruler_depth_means,
                       _ruler_fwe_recall, _ruler_min_cell_n,
@@ -5190,3 +5194,64 @@ def test_factorial_protocol_handles_unhashable_split_value():
     maps["ABC"][1]["eval"]["split"] = "val"
     assert _factorial_protocol_ok(maps, 1, "PPL") is False
     print("  [ok] 全因子协议核对：不可哈希 split 不再让汇总崩溃")
+
+
+def test_parameter_matched_control_and_inference_shapley_wiring():
+    """参数匹配安慰剂与推理期 Shapley 必须真正进入汇总/显著性 JSON。
+
+    仅有 lega_placebo 变体名不够：必须 (1) 生成 lega vs placebo 的配对检验；
+    (2) 汇总页显式区分“证据特定性”与“容量/优化红利”；(3) 缺推理期全因子
+    数据时如实提示，而不是伪造 8 格或把缺失当 0。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        seeds = [1, 2, 3]
+        base = {"standard": 10.0, "qgate": 9.8, "lega": 9.4,
+                "lega_placebo": 9.45}
+        for v, ppl in base.items():
+            for s in seeds:
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s, "val_ppl": ppl + 0.01 * s,
+                    "val_loss": math.log(ppl), "n_params": 100,
+                    "n_gate_extra": 0, "split": "val"})
+        reg = {"hypotheses": []}
+        intact = {"status": "intact", "confirmatory_valid": True,
+                  "problems": [], "registry_sha256": "a" * 64,
+                  "n_hypotheses": 0, "baseline_document_sha256": "b" * 64,
+                  "chain_length": 0}
+        with mock.patch("run_all.load_registered_hypotheses",
+                        return_value=reg), \
+                mock.patch("run_all.verify_registration",
+                           return_value=intact):
+            out = build_summary(tmp)
+        md = out["markdown"]
+        assert "参数匹配安慰剂对照" in md
+        assert "lega_placebo" in md and "容量/优化红利" in md
+        assert "推理期全因子 Shapley" in md
+        assert "无法计算推理期 Shapley" in md  # 无 ablation 产物时如实提示
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        pmc = sig["parameter_matched_control"]
+        assert pmc["available"] is True
+        assert tuple(pmc["pair"]) == PARAM_CONTROL_PAIR
+        assert pmc["test"] is not None
+        assert pmc["test"]["capacity_control"] is True
+        assert pmc["capacity_only_test"] is not None
+        assert pmc["capacity_only_test"]["candidate"] == PARAM_CONTROL_VARIANT
+        assert pmc["capacity_only_test"]["reference"] == "qgate"
+        assert "容量本身" in md
+        assert sig["inference_factorial_shapley"] == []
+        assert any(t["candidate"] == "lega"
+                   and t["reference"] == "lega_placebo"
+                   and t["metric"] == "PPL" for t in sig["pairs"])
+        pairs = build_comparison_pairs(
+            {"lega": {1: {}}, "lega_placebo": {1: {}}, "standard": {1: {}}})
+        assert ("lega", "lega_placebo") in pairs
+        # 没运行 placebo 时不得声称“容量已排除”。
+        assert "未运行 `lega_placebo`" in "\n".join(
+            _render_parameter_matched_control(None))
+        assert "无法计算推理期 Shapley" in "\n".join(
+            _render_inference_shapley([]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 参数匹配安慰剂/推理期 Shapley 进入汇总与 significance.json")

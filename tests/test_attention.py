@@ -13,7 +13,9 @@ from unittest import mock
 import torch
 
 import lega.attention as attention_mod
-from lega.attention import (CausalSelfAttention, GATE_FACTORS, VARIANTS)
+from lega.attention import (CONTROL_VARIANTS, CausalSelfAttention,
+                            GATE_FACTORS, RUNNABLE_VARIANTS, VARIANTS,
+                            _placebo_evidence)
 from lega.model import (GPT, RoPE, expected_gate_extras,
                         gate_extra_params, gate_extra_params_per_head)
 
@@ -420,3 +422,60 @@ def test_all_variants_support_zero_length_input():
         out2, cache2, stats2 = attn(x, need_stats=True)
         assert out2.shape == (2, 0, C)
         assert isinstance(stats2, dict) and stats2["g"] is None
+
+
+def test_placebo_control_matches_capacity_but_not_evidence():
+    """参数匹配安慰剂：同门控参数/FLOPs，但 B/C 证据换成无信息噪声。
+
+    该对照回答“LEGA 的收益是否只是多几个门控参数的优化红利”。测试必须
+    同时验证 (1) 参数预算与 LEGA 完全一致；(2) 它确实不是 LEGA 的等价
+    前向（否则对照没有区分力）；(3) 安慰剂特征确定、有界、不消耗 RNG。
+    """
+    assert "lega_placebo" in RUNNABLE_VARIANTS
+    assert "lega_placebo" in CONTROL_VARIANTS
+    assert "lega_placebo" not in VARIANTS
+    assert "lega_placebo" not in GATE_FACTORS
+    torch.manual_seed(0)
+    real = CausalSelfAttention(32, 2, variant="lega", use_sdpa_standard=False)
+    torch.manual_seed(0)
+    plac = CausalSelfAttention(32, 2, variant="lega_placebo",
+                               use_sdpa_standard=False)
+    assert expected_gate_extras("lega_placebo", 16, 2, 2) == \
+        expected_gate_extras("lega", 16, 2, 2)
+    for name in ("gate_w", "gate_a", "gate_b", "gate_d"):
+        assert getattr(real, name).shape == getattr(plac, name).shape, name
+    assert sum(p.numel() for p in real.parameters()) == \
+        sum(p.numel() for p in plac.parameters())
+
+    with torch.no_grad():
+        for m in (real, plac):
+            m.gate_w.normal_(0.0, 0.02)
+            m.gate_a.fill_(0.5)
+            m.gate_b.fill_(-0.3)
+            m.gate_d.fill_(1.0)
+    x = torch.randn(2, 12, 32)
+    real.eval(); plac.eval()
+    with torch.no_grad():
+        o1, _, _ = real(x)
+        o2, _, _ = plac(x)
+    assert o1.shape == o2.shape
+    assert not torch.allclose(o1, o2, atol=1e-6), \
+        "安慰剂与 LEGA 前向完全相同，说明证据没有被置换"
+
+    # 特征确定、有界、同形状；同一输入两次调用逐位相同（不消耗全局 RNG）。
+    z = torch.zeros(2, 3, 7)
+    f1 = _placebo_evidence(z, 3, 1.0)
+    f2 = _placebo_evidence(z, 3, 1.0)
+    assert torch.equal(f1, f2)
+    assert f1.shape == z.shape and float(f1.abs().max()) <= 1.0
+    ln = torch.zeros(9)
+    assert _placebo_evidence(ln, 4, 2.0).shape == ln.shape
+
+    # 梯度仍能经 a/b 回传（不是被 detach 的死支路）。
+    plac.train()
+    out, _, _ = plac(x)
+    out.sum().backward()
+    for name in ("gate_a", "gate_b"):
+        g = getattr(plac, name).grad
+        assert g is not None and torch.isfinite(g).all(), name
+    print("  [ok] lega_placebo：参数匹配、证据被置换、梯度可达")

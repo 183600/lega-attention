@@ -19,7 +19,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import numpy as np
 import torch
 
-from .attention import VARIANTS, VARIANT_CN
+from .attention import RUNNABLE_VARIANTS, VARIANT_CN
 from .curves import (GATE_SAT_HIGH, GATE_SAT_LOW, LIVE_WARN_EVALS,
                      curve_observability_warnings, live_overfit_hint)
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
@@ -944,7 +944,7 @@ def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
 def main():
     p = argparse.ArgumentParser(description="LEGA 训练")
     p.add_argument("--config", required=True, help="实验配置 JSON")
-    p.add_argument("--variant", required=True, choices=VARIANTS)
+    p.add_argument("--variant", required=True, choices=RUNNABLE_VARIANTS)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out_dir", default=None, help="默认 out/<config名>/<variant>")
     p.add_argument("--smoke", action="store_true", help="冒烟模式（极少步数，验证流程）")

@@ -24,7 +24,7 @@ from typing import Dict
 import numpy as np
 import torch
 
-from .attention import VARIANTS, _LEGA_FAMILY, _USE_QUERY
+from .attention import RUNNABLE_VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .datacheck import check_vocab_capacity
 from .model import GPT, load_model, count_params
@@ -431,7 +431,7 @@ def main():
     results: Dict = {}
     for v in variants:
         vname, use_sdpa, backend_forced = resolve_backend(v)
-        assert vname in VARIANTS, f"未知变体 {v}"
+        assert vname in RUNNABLE_VARIANTS, f"未知变体 {v}"
         # 与 evaluate/ruler/analysis 口径一致：优先 val 上选出的 best-checkpoint。
         # 兼容两种布局：单种子 out/<tag>/<variant>/，多种子 out/<tag>/<variant>/seed<seed>/；
         # 多种子时按最小种子号的 checkpoint 测量（该指标由架构决定，与种子无关）。

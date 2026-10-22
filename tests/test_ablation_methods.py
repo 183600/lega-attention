@@ -13,7 +13,8 @@ import tempfile
 import numpy as np
 import torch
 
-from lega.ablate import (LESION_BY_ID, LESION_ORDER, apply_lesion,
+from lega.ablate import (INFERENCE_FACTORIAL_CELLS, LESION_BY_ID,
+                         LESION_ORDER, apply_lesion,
                          gate_capabilities, gate_head_means,
                          lesion_applicability, restore_gate_params,
                          run_ablation, snapshot_gate_params,
@@ -23,7 +24,8 @@ from lega.factorial import (CELL_ORDER, decomposition, oriented_value,
                             ppl_ratio_from_phi, shapley_values)
 from lega.model import GPT, save_checkpoint
 from run_all import (_ablation_lesion_records, _factorial_shapley_tests,
-                     CAUSAL_ABLATION_METRIC, SHAPLEY_PPL_METRIC)
+                     _inference_shapley_tests, CAUSAL_ABLATION_METRIC,
+                     INFERENCE_SHAPLEY_METRIC, SHAPLEY_PPL_METRIC)
 
 
 def _tiny(variant):
@@ -440,3 +442,105 @@ def test_causal_ablation_marks_noop_and_skips_not_applicable():
         assert _ablation_lesion_records(bad) == [], rec
     print("  [ok] 因果消融：no-op 与不适用/未施加记录如实标注，"
           "不伪造 0 效应")
+
+
+def test_inference_factorial_cells_complete_2x3_and_zero_only_targets():
+    """推理期补齐 2^3：单因子格只清零目标项，不动其它门控参数。
+
+    训练期全因子改变优化轨迹；同一 checkpoint 内的 2^3 干预才能回答
+    “最终前向是否真的使用该组件/交互”。这里核对每个格子的清零模式，
+    防止把 B-only 误写成“去掉 A”、或把 no_len 误当成“完全移除长度依赖”。
+    """
+    m = _tiny("lega")
+    with torch.no_grad():
+        for block in m.blocks:
+            block.attn.gate_w.normal_(0, 0.05)
+            block.attn.gate_a.normal_()
+            block.attn.gate_b.normal_()
+            block.attn.gate_d.normal_()
+    snap = snapshot_gate_params(m)
+    expected_zero = {
+        "no_evidence": {"gate_w", "gate_a", "gate_b"},
+        "query_only": {"gate_a", "gate_b"},
+        "conc_only": {"gate_w", "gate_b"},
+        "len_only": {"gate_w", "gate_a"},
+        "no_len": {"gate_b"},
+        "no_conc": {"gate_a"},
+        "no_query": {"gate_w"},
+    }
+    assert set(INFERENCE_FACTORIAL_CELLS) == set(CELL_ORDER)
+    assert LESION_BY_ID["query_only"].get("factorial_cell") is True
+    assert LESION_BY_ID["conc_only"].get("factorial_cell") is True
+    assert LESION_BY_ID["len_only"].get("factorial_cell") is True
+    for cell, lesion_id in INFERENCE_FACTORIAL_CELLS.items():
+        if lesion_id is None:
+            assert cell == "ABC"
+            continue
+        rec = apply_lesion(m, lesion_id, perm_seed=0)
+        assert rec["applied"] is True, (cell, lesion_id, rec)
+        for li, block in enumerate(m.blocks):
+            attn = block.attn
+            for name in ("gate_w", "gate_a", "gate_b"):
+                p = getattr(attn, name)
+                key = f"blocks.{li}.attn.{name}"
+                if name in expected_zero[lesion_id]:
+                    assert torch.count_nonzero(p) == 0, (cell, name)
+                else:
+                    assert torch.equal(p, snap[key]), (cell, name)
+            # d 永远保留（none 格只留学习到的偏置）。
+            assert torch.equal(attn.gate_d, snap[f"blocks.{li}.attn.gate_d"])
+        restore_gate_params(m, snap)
+    print("  [ok] 推理期 2^3 单因子格：只清零目标项，d 始终保留")
+
+
+def _inference_payload(seed, const=3.0, weights=None):
+    """按可加价值函数 v=const+Σw_i 生成 8 格 PPL，Shapley 应精确等于 w_i。"""
+    weights = dict(weights or {"A": 0.2, "B": 0.3, "C": 0.4})
+    # ABC 基线必须包含全部因子；否则“总效应”会被错误地定义成负值。
+    base_ppl = math.exp(-(const + sum(weights.values())))
+    recs = []
+    for cell, lesion_id in INFERENCE_FACTORIAL_CELLS.items():
+        if lesion_id is None:
+            continue
+        factors = set() if cell == "none" else set(cell)
+        v = const + sum(weights[f] for f in factors)
+        ppl = math.exp(-v)
+        recs.append({"lesion": lesion_id, "applied": True,
+                     "window_indices": [0, 1, 2], "val_ppl": ppl})
+    return {"variant": "lega", "seed": seed, "window_indices": [0, 1, 2],
+            "baseline": {"val_ppl": base_ppl}, "lesions": recs}
+
+
+def test_inference_shapley_recovers_additive_components_across_seeds():
+    weights = {"A": 0.2, "B": 0.3, "C": 0.4}
+    abl = {"lega": {s: _inference_payload(s, 3.0 + 0.01 * s, weights)
+                    for s in (1, 2, 3)}}
+    out = _inference_shapley_tests(abl)
+    assert len(out) == 3, out
+    by = {t["shapley_factor"]: t for t in out}
+    for f, w in weights.items():
+        t = by[f]
+        assert t["metric"] == INFERENCE_SHAPLEY_METRIC
+        assert abs(t["mean_diff"] - w) < 1e-9, (f, t["mean_diff"])
+        assert abs(t["shapley_ppl_ratio"] - math.exp(-w)) < 1e-9
+        assert t["n"] == 3
+        assert t["inference_time"] is True
+        assert t["shapley_efficiency_gap_max"] < 1e-9
+
+    # 缺格/窗口不一致时必须整条跳过，而不是把缺失格当 0。
+    broken = {"lega": {"1": _inference_payload(1)}}
+    broken["lega"]["1"]["lesions"] = broken["lega"]["1"]["lesions"][:-1]
+    assert _inference_shapley_tests(broken) == []
+    mism = {"lega": {"1": _inference_payload(1)}}
+    mism["lega"]["1"]["lesions"][0]["window_indices"] = [0, 1]
+    assert _inference_shapley_tests(mism) == []
+    # 单因子格相对 Full 同时去掉另外两个因子，不能混进单病灶因果表。
+    causal_payload = _inference_payload(1)
+    for rec in causal_payload["lesions"]:
+        rec["delta_loss_mean"] = 0.1
+    causal = _ablation_lesion_records({"lega": {"1": causal_payload}})
+    assert causal, causal
+    assert not any(t.get("lesion") in {"query_only", "conc_only", "len_only"}
+                   for t in causal), causal
+    print("  [ok] 推理期 Shapley：可加价值下精确还原 φ，缺格/错窗跳过；"
+          "单因子格不混入单病灶因果表")
