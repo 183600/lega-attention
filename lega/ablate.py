@@ -536,10 +536,16 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
     paired = paired_t_test(deltas, [0.0] * len(deltas))
     sign = paired_sign_test(deltas, [0.0] * len(deltas))
     ci = bootstrap_mean_ci(deltas)
-    mean = float(np.mean(deltas))
+    # 与 paired_t_test 共用同一套缩放后的稳定均值/标准差：deltas 都是有限值，
+    # 但 [1e308, 1e308] 的朴素 np.mean/np.std 会在求和/平方时溢出成 inf，
+    # 让点估计、PPL 比与 JSON 结果出现非有限值。paired 的 n 已剔除缺失窗口。
+    mean = paired.get("mean_diff")
     se = None
-    if len(deltas) >= 2:
-        se = float(np.std(deltas, ddof=1) / math.sqrt(len(deltas)))
+    std = paired.get("std_diff")
+    if std is not None and paired.get("n", 0) >= 2:
+        se = float(std / math.sqrt(paired["n"]))
+        if not math.isfinite(se):
+            se = None
     out = {
         "n_windows": len(deltas),
         "delta_loss_mean": mean,

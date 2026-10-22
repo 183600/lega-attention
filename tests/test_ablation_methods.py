@@ -349,8 +349,14 @@ def test_window_delta_stats_pairs_by_window():
     assert st_bad["delta_losses"] == [1.0, 1.0], st_bad
     assert math.isfinite(st_bad["delta_loss_mean"]), st_bad
     assert _window_delta_stats([float("nan")], [1.0])["n_windows"] == 0
+    # 合法但接近 float 上限的窗口差：朴素 np.mean/np.std 会溢出成 inf；
+    # 点估计/标准误必须仍是有限值（不能把坏 JSON 值写进 ablation 结果）。
+    huge = _window_delta_stats([1e308, 1e308], [0.0, 0.0])
+    assert huge["n_windows"] == 2, huge
+    assert huge["delta_loss_mean"] == -1e308, huge
+    assert huge["delta_loss_se"] == 0.0, huge
     print("  [ok] 病灶窗口差按位置配对，Δ=lesion−normal；"
-          "坏窗口 loss 不污染均值与配对样本量")
+          "坏窗口 loss 不污染均值与配对样本量；巨大有限差值不溢出")
 
 
 def test_ablate_numeric_and_seed_guards():
