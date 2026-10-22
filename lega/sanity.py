@@ -189,6 +189,117 @@ def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
                              abs_tol=float(abs_tol)))
 
 
+def batch_contract(x, y, vocab_size: int) -> dict:
+    """检查固定批是否构成可学习的 next-token 数据。"""
+    out = {
+        "ok": False,
+        "errors": [],
+        "n_tokens": None,
+        "n_unique_tokens": None,
+        "min_token": None,
+        "max_token": None,
+        "n_out_of_range": None,
+        "integer_dtype": False,
+        "same_shape": False,
+        "nonempty": False,
+        "not_constant": False,
+        "tokens_in_vocab": False,
+    }
+    for name, value in (("x", x), ("y", y)):
+        if not torch.is_tensor(value):
+            out["errors"].append(f"{name}_not_tensor")
+    if out["errors"]:
+        return out
+    out["same_shape"] = bool(x.dim() == 2 and x.shape == y.shape)
+    if x.dim() != 2 or y.dim() != 2:
+        out["errors"].append("not_2d")
+    if not out["same_shape"]:
+        out["errors"].append("shape_mismatch")
+        return out
+    out["nonempty"] = bool(x.numel() > 0 and y.numel() > 0)
+    if not out["nonempty"]:
+        out["errors"].append("empty_batch")
+    out["integer_dtype"] = bool(
+        x.dtype in (torch.int8, torch.int16, torch.int32, torch.int64)
+        and y.dtype in (torch.int8, torch.int16, torch.int32, torch.int64))
+    if not out["integer_dtype"]:
+        out["errors"].append("non_integer_dtype")
+    if out["nonempty"] and out["integer_dtype"]:
+        try:
+            out["min_token"] = int(torch.minimum(x.min(), y.min()))
+            out["max_token"] = int(torch.maximum(x.max(), y.max()))
+            out["n_out_of_range"] = int(
+                ((x < 0) | (x >= int(vocab_size))).sum()
+                + ((y < 0) | (y >= int(vocab_size))).sum())
+            out["tokens_in_vocab"] = out["n_out_of_range"] == 0
+            if not out["tokens_in_vocab"]:
+                out["errors"].append("token_out_of_range")
+            out["n_tokens"] = int(x.numel() + y.numel())
+            out["n_unique_tokens"] = int(torch.unique(torch.cat(
+                [x.reshape(-1), y.reshape(-1)])).numel())
+            out["not_constant"] = out["n_unique_tokens"] > 1
+            if not out["not_constant"]:
+                out["errors"].append("constant_batch")
+        except (RuntimeError, TypeError, ValueError, OverflowError) as e:
+            out["errors"].append(f"token_scan_failed:{e}")
+    out["ok"] = not out["errors"]
+    return out
+
+
+def _failed_contract_result(contract: dict, *, steps: int, lr: float,
+                            loss_threshold: float, acc_threshold: float,
+                            initial_loss_tol: float, model,
+                            active_reg) -> dict:
+    checks = {
+        "batch_contract_ok": False,
+        "batch_nonempty": contract["nonempty"],
+        "batch_shape_2d": bool(contract["same_shape"]),
+        "batch_same_shape": contract["same_shape"],
+        "batch_integer_tokens": contract["integer_dtype"],
+        "batch_tokens_in_vocab": contract["tokens_in_vocab"],
+        "batch_not_constant": contract["not_constant"],
+        "loss_below_threshold": False,
+        "token_acc_above_threshold": False,
+        "loss_decreased": False,
+        "finite": False,
+        "loss_requires_grad": False,
+        "gradient_nonzero_first_step": False,
+        "all_params_get_grads": False,
+        "no_zero_grads_first_step": False,
+        "grads_finite": False,
+        "train_loss_matches_direct_logits": False,
+        "next_token_shift_consistent": False,
+        "initial_loss_near_log_vocab": False,
+        "regularization_disabled": not active_reg,
+    }
+    return {
+        "check": "overfit_small_batch",
+        "passed": False,
+        "checks": checks,
+        "thresholds": {"loss": float(loss_threshold),
+                       "token_acc": float(acc_threshold),
+                       "initial_loss_tol": float(initial_loss_tol)},
+        "initial": None,
+        "final": None,
+        "log_vocab": math.log(model.vocab_size),
+        "initial_loss_minus_log_vocab": None,
+        "active_regularization": active_reg,
+        "first_grad_norm": None,
+        "first_grad_norm_preclip": None,
+        "first_grad_norm_postclip": None,
+        "first_grad_norm_was_clipped": False,
+        "grad_clip": None,
+        "first_train_loss": None,
+        "loss_consistency": None,
+        "grad_coverage": None,
+        "batch_contract": contract,
+        "steps": int(steps),
+        "lr": float(lr),
+        "history": [],
+        "caveat": "固定批未通过数据契约检查，未执行过拟合训练。",
+    }
+
+
 def _finite_float_arg(value, name: str) -> float:
     """有限浮点配置；bool/NaN/Inf/非数值显式拒绝（True 不能冒充 1.0）。"""
     if isinstance(value, (bool, np.bool_)):
@@ -248,7 +359,12 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     acc_threshold = _finite_float_arg(acc_threshold, "acc_threshold")
     initial_loss_tol = _finite_float_arg(initial_loss_tol, "initial_loss_tol")
     set_seed(seed)
-    # 标签映射硬校验：固定批必须在消费点满足 next-token 移位关系
+    contract = batch_contract(x, y, model.vocab_size)
+    if not contract["ok"]:
+        return _failed_contract_result(
+            contract, steps=steps, lr=lr, loss_threshold=loss_threshold,
+            acc_threshold=acc_threshold, initial_loss_tol=initial_loss_tol,
+            model=model, active_reg=active_regularization(model))
     shift_ok = (x.dim() == 2 and x.shape == y.shape
                 and bool(torch.equal(x[:, 1:], y[:, :-1])))
     active_reg = active_regularization(model)
@@ -328,6 +444,13 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         math.isfinite(initial_loss_gap)
         and abs(initial_loss_gap) <= float(initial_loss_tol))
     checks = {
+        "batch_contract_ok": bool(contract["ok"]),
+        "batch_nonempty": bool(contract["nonempty"]),
+        "batch_shape_2d": bool(x.dim() == 2 and y.dim() == 2),
+        "batch_same_shape": bool(contract["same_shape"]),
+        "batch_integer_tokens": bool(contract["integer_dtype"]),
+        "batch_tokens_in_vocab": bool(contract["tokens_in_vocab"]),
+        "batch_not_constant": bool(contract["not_constant"]),
         "loss_below_threshold": final["loss"] <= float(loss_threshold),
         "token_acc_above_threshold": final["token_acc"] >= float(acc_threshold),
         "loss_decreased": final["loss"] < initial["loss"],
@@ -368,6 +491,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "log_vocab": log_vocab,
         "initial_loss_minus_log_vocab": initial_loss_gap,
         "active_regularization": active_reg,
+        "batch_contract": contract,
         # first_grad_norm 保留旧字段名（clip 前原始范数）；新增后范数、
         # 是否触发裁剪与阈值，避免把“截断后的稳定”误当健康。
         "first_grad_norm": first_grad_norm_preclip,
@@ -533,13 +657,17 @@ def main():
             config_path=args.config, data_dir=args.data_dir, device=device),
     })
     last = res["history"][-1]["loss"] if res["history"] else float("nan")
-    print(f"[sanity] {'PASS' if res['passed'] else 'FAIL'}: "
-          f"loss {res['initial']['loss']:.4f} -> {res['final']['loss']:.4f} "
-          f"(曲线末值 {last:.4f}, logV={res['log_vocab']:.3f}, "
-          f"初始偏差 {res['initial_loss_minus_log_vocab']:+.3f}/"
-          f"±{res['thresholds']['initial_loss_tol']:.2f}), "
-          f"token_acc={res['final']['token_acc']:.4f}, "
-          f"exact={res['final']['exact_match']:.3f}")
+    if res.get("initial") is None or res.get("final") is None:
+        print(f"[sanity] FAIL: 固定批数据契约不满足: "
+              f"{', '.join(res['batch_contract']['errors'])}")
+    else:
+        print(f"[sanity] {'PASS' if res['passed'] else 'FAIL'}: "
+              f"loss {res['initial']['loss']:.4f} -> {res['final']['loss']:.4f} "
+              f"(曲线末值 {last:.4f}, logV={res['log_vocab']:.3f}, "
+              f"初始偏差 {res['initial_loss_minus_log_vocab']:+.3f}/"
+              f"±{res['thresholds']['initial_loss_tol']:.2f}), "
+              f"token_acc={res['final']['token_acc']:.4f}, "
+              f"exact={res['final']['exact_match']:.3f}")
     if not res["passed"]:
         failed = [k for k, ok in res["checks"].items() if not ok]
         print(f"[sanity] 未通过项: {', '.join(failed)}；"

@@ -78,6 +78,38 @@ def test_overfit_check_passes_on_healthy_model():
           f"acc={res['final']['token_acc']:.3f}")
 
 
+def test_overfit_check_rejects_degenerate_and_oov_batches():
+    """固定批自身必须是可学习数据：常量批/越界 token/形状错误先被拦下。"""
+    model = _model()
+    base = dict(steps=2, lr=1e-3, device="cpu", seed=0, log_every=1)
+    constant = torch.zeros(4, 17, dtype=torch.long)
+    res = run_overfit_check(model, constant, constant, **base)
+    assert not res["passed"]
+    assert res["checks"]["batch_not_constant"] is False
+    assert "constant_batch" in res["batch_contract"]["errors"]
+    assert res["initial"] is None and res["final"] is None
+
+    oov = torch.full((4, 17), 64, dtype=torch.long)
+    res = run_overfit_check(model, oov, oov, **base)
+    assert not res["passed"]
+    assert res["checks"]["batch_tokens_in_vocab"] is False
+    assert res["batch_contract"]["n_out_of_range"] == oov.numel() * 2
+    assert res["initial"] is None and res["final"] is None
+
+    x = torch.zeros(4, 17, dtype=torch.long)
+    res = run_overfit_check(model, x, x[:, :-1], **base)
+    assert not res["passed"]
+    assert res["checks"]["batch_same_shape"] is False
+    assert "shape_mismatch" in res["batch_contract"]["errors"]
+
+    floats = torch.zeros(4, 17, dtype=torch.float32)
+    res = run_overfit_check(model, floats, floats, **base)
+    assert not res["passed"]
+    assert res["checks"]["batch_integer_tokens"] is False
+    assert "non_integer_dtype" in res["batch_contract"]["errors"]
+    print("  [ok] sanity 拒绝常量批/越界 token/形状错误/非整数 token")
+
+
 def test_overfit_check_rejects_invalid_numeric_args():
     """sanity 数值参数不能被 bool/NaN/Inf/非数值静默改写。"""
     import math
