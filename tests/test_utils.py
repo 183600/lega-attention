@@ -215,7 +215,13 @@ def test_average_precision_properties():
     # 非有限分数剔除而非污染
     nan_scores = np.array([np.nan, 3.0, 2.0, 1.0])
     assert abs(average_precision(nan_scores, np.array([1, 1, 0, 0])) - 1.0) < 1e-12
-    print("  [ok] average_precision（随机基线/可分/反序/NaN 剔除）")
+    # 非二值标签不能计入累计正类数：否则 TP 可超过 n_pos、AP>1（旧实现
+    # 对 [0,1,2,1] 会给出 2.67）。与 auroc 一样只承认 0/1 标签。
+    assert abs(average_precision(
+        np.array([1.0, 2.0, 3.0, 4.0]), np.array([0.0, 1.0, 2.0, 1.0])) - 1.0) < 1e-12
+    assert math.isnan(average_precision(
+        np.array([1.0, 2.0, 3.0]), np.array([1.0, 1.0, 2.0])))
+    print("  [ok] average_precision（随机基线/可分/反序/NaN/非二值标签剔除）")
 
 
 def test_roc_pr_aucs_bitwise_equals_separate_metrics():

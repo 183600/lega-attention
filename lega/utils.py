@@ -1131,7 +1131,10 @@ def average_precision(scores, labels) -> float:
     与并列取平均秩的 AUROC 一样对并列稳健。单一类别或空输入返回 NaN。
     """
     scores, labels = _score_label_arrays(scores, labels, np.float64)
-    m = np.isfinite(scores)
+    # 与 auroc 同口径：只承认 0/1 标签。非二值标签若被计入累计正类数，
+    # TP 可超过 n_pos，AP 会算出 >1 的非法值（例如 label=2 会把 AP 抬到
+    # 2.67），直接污染“优于随机基线”的结论。
+    m = np.isfinite(scores) & ((labels == 0.0) | (labels == 1.0))
     scores, labels = scores[m], labels[m]
     n_pos = int((labels == 1).sum())
     if n_pos == 0 or n_pos == len(labels):
