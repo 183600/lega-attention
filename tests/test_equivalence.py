@@ -292,3 +292,38 @@ def test_build_summary_renders_equivalence_section():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 汇总页渲染 SESOI/TOST 段并与显著性分开")
+
+
+def test_invalid_equivalence_status_survives_holm_and_render():
+    """损坏/不可表示的等价性证据必须保留 invalid，不能被重算成种子不足。"""
+    invalid = {"status": "invalid",
+               "label": "无法计算等价性（ValueError: broken）",
+               "equivalent": False, "multiplicity_adjusted": False,
+               "p_used": None, "reason": "broken"}
+    t = {"candidate": "lega", "reference": "standard", "metric": "PPL",
+         "n": None, "p": None, "mean_diff": None, "std_diff": None,
+         "lower_is_better": True, "equivalence": invalid}
+    out = _apply_holm([t])[0]
+    assert out["equivalence"]["status"] == "invalid", out["equivalence"]
+    assert "broken" in out["equivalence"]["label"], out["equivalence"]
+    # interpret 单独调用同样不能把 invalid 变成 insufficient_seeds。
+    from lega.equivalence import interpret_equivalence
+    r = interpret_equivalence(invalid, p_adj=0.9)
+    assert r["status"] == "invalid" and "broken" in r["label"], r
+    print("  [ok] invalid 等价性证据在 Holm/重算后仍保留")
+
+
+def test_tost_extreme_finite_values_are_invalid_not_crash_or_nan():
+    """有限但超出 float 表示范围的观测必须判 invalid，不能抛错或写 NaN/Inf。"""
+    # 和超出 float 上限（sum -> inf，fsum 也溢出）。
+    huge = tost_from_diffs([1e308] * 5, 0.01)
+    assert huge["status"] == "invalid", huge
+    assert huge["p_tost"] is None and huge["equivalent"] is False, huge
+    # 均值可精确抵消，但方差超出 float 上限（朴素平方会 OverflowError）。
+    spread = tost_from_diffs([1e308, -1e308] * 3, 0.01)
+    assert spread["status"] == "invalid", spread
+    assert spread["std_diff"] is None and spread["p_tost"] is None, spread
+    # 极端但可表示的普通数值保持原判定，不能因硬化而误伤。
+    normal = tost_from_diffs([0.001] * 5, 0.01)
+    assert normal["equivalent"] is True and normal["std_diff"] == 0.0, normal
+    print("  [ok] TOST 极端有限值安全降级为 invalid")

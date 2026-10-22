@@ -157,6 +157,30 @@ def _validate_alpha(alpha) -> float:
     return alpha
 
 
+def _invalid_result(result: dict, reason: str) -> dict:
+    """把无法可靠计算的 TOST 结果标为 invalid，而不是抛错或写入 NaN/Inf。
+
+    输入观测本身都通过了有限性检查，但有限值的和/方差仍可能超出 float
+    可表示范围（如 ±1e308 交替）。这种数据无法给出有意义的 t 区间，必须
+    与“种子不足”“未定”区分开；下游 ``interpret_equivalence`` 会保留 invalid
+    状态，不能把它改写成“没有效应”。
+    """
+    result.update({
+        "status": "invalid",
+        "equivalent": False,
+        "noninferior": False,
+        "p_low": None,
+        "p_high": None,
+        "p_h0_mu_le_neg_margin": None,
+        "p_h0_mu_ge_pos_margin": None,
+        "p_tost": None,
+        "ci90": None,
+        "ci95": None,
+        "note": f"无法可靠计算 TOST：{reason}（按 invalid 处理，不代表等价/无差异）",
+    })
+    return result
+
+
 def _paired_diffs(a, b, kind: str):
     """按位置配对并应用尺度变换；坏观测整对剔除。
 
@@ -264,12 +288,41 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
     if n == 0:
         result["note"] = "无有效配对观测，无法做等价性检验。"
         return result
-    mean = sum(vals) / n
+    total = sum(vals)
+    if not math.isfinite(total):
+        # 有限观测的和也可能超出 float 上限（如 5×1e308）。fsum 对可抵消
+        # 的巨大正负值给出精确结果；仍不可表示时按 invalid 处理。
+        try:
+            total = math.fsum(vals)
+        except (OverflowError, ValueError):
+            return _invalid_result(result, "有效观测之和超出 float 表示范围")
+    mean = total / n
+    if not math.isfinite(mean):
+        return _invalid_result(result, "均值超出 float 表示范围")
     result["mean_diff"] = float(mean)
     if n < 2:
         return result
-    variance = sum((v - mean) ** 2 for v in vals) / (n - 1)
+    try:
+        variance = sum((v - mean) ** 2 for v in vals) / (n - 1)
+    except (OverflowError, ZeroDivisionError):
+        variance = float("inf")
+    if not math.isfinite(variance):
+        # 朴素平方可能中间溢出，而真实方差仍在 float 范围内：先按最大
+        # 偏差缩放，再还原。仍不可表示时如实标为 invalid（不能写 NaN/Inf）。
+        scale = max(abs(v - mean) for v in vals)
+        if scale == 0.0:
+            variance = 0.0
+        else:
+            try:
+                normalized = sum(((v - mean) / scale) ** 2 for v in vals)
+                variance = scale * scale * normalized / (n - 1)
+            except (OverflowError, ZeroDivisionError):
+                return _invalid_result(result, "方差超出 float 表示范围")
+            if not math.isfinite(variance):
+                return _invalid_result(result, "方差超出 float 表示范围")
     sd = math.sqrt(max(0.0, variance))
+    if not math.isfinite(sd):
+        return _invalid_result(result, "标准差超出 float 表示范围")
     df = n - 1
     result.update({"df": df, "std_diff": float(sd)})
     if sd == 0.0:
@@ -304,6 +357,12 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
                      if crit95 is not None else None),
         })
     p_tost = result.get("p_tost")
+    if p_tost is None or not math.isfinite(float(p_tost)):
+        return _invalid_result(result, "TOST p 值非有限")
+    for key in ("ci90", "ci95"):
+        ci = result.get(key)
+        if ci is not None and not all(math.isfinite(float(x)) for x in ci):
+            return _invalid_result(result, f"{key} 超出 float 表示范围")
     result["equivalent"] = bool(
         n >= min_seeds and p_tost is not None and p_tost < alpha)
     result["significant"] = bool(
@@ -388,6 +447,12 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
     else:
         out.update({"direction": None, "beyond_margin": None,
                     "practically_meaningful": None})
+    if out.get("status") == "invalid":
+        # 数值不可表示（而非种子不足/未定）：保留 invalid 与原因，不能继续
+        # 走下面的 status 分支把它改写成 insufficient_seeds/not_equivalent。
+        out.update({"p_noninf_worse": None, "noninferior": False,
+                    "sensitivity": []})
+        return out
     # 非劣性：只检验“劣化不超过 SESOI”这一侧（方向随 lower_is_better 翻转）。
     p_low, p_high = out.get("p_low"), out.get("p_high")
     if lower_is_better:
@@ -468,6 +533,15 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
                 "label": (eq.get("not_applicable_reason")
                           or _STATUS_LABELS["not_applicable"]),
                 "equivalent": False, "multiplicity_adjusted": False,
+                "p_used": None}
+    if eq.get("status") == "invalid":
+        # 输入损坏或统计量不可表示：必须保留 invalid，不能在重算时退化成
+        # “种子不足/未定”（那会让损坏证据看起来只是样本少）。
+        return {"status": "invalid",
+                "label": (eq.get("label") or _STATUS_LABELS["invalid"]),
+                "equivalent": False,
+                "multiplicity_adjusted": bool(
+                    eq.get("multiplicity_adjusted") is True),
                 "p_used": None}
     alpha = _validate_alpha(alpha)
     n = eq.get("n")
