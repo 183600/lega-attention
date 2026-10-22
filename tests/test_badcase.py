@@ -11,6 +11,7 @@ from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
                            process_eval_json, process_ruler_json,
                            synthesize_cross_improvements,
                            synthesize_ruler_improvements,
+                           synthesize_window_improvements,
                            write_badcase_md, write_worstcase_md)
 
 
@@ -1381,3 +1382,23 @@ def test_cross_improvement_synthesis_tolerates_malformed_fields():
     assert synthesize_cross_improvements({"variants": ["a", "b"],
                                           "per_variant": [1, 2]}) == []
     print("  [ok] 跨变体改进方向：坏计数/坏结构安全降级")
+
+
+def test_window_improvement_synthesis_tolerates_malformed_cases_and_rate():
+    """最差窗口改进方向不能被坏 cases 列表或坏全局可见率中断。"""
+    malformed = {
+        "n_windows": 10,
+        "category_counts": {"confident_bias": 5, "low_confidence": 5},
+        "cases": 5,  # 非列表：不能直接迭代
+        "gold_in_context_rate": {"bad": 1},  # 非数值：不能参与比较
+    }
+    recs = synthesize_window_improvements(malformed)
+    assert isinstance(recs, list) and recs, recs
+    assert any("缺少 gold_in_context" in r["trigger"] for r in recs), recs
+    # 越界比例同样按缺失处理（<0 或 >1 不是合法可见率）。
+    for bad in ("0.7", [0.7], -0.1, 1.5, True):
+        out = synthesize_window_improvements({
+            "n_windows": 10, "category_counts": {"confident_bias": 10},
+            "cases": [], "gold_in_context_rate": bad})
+        assert isinstance(out, list) and out, (bad, out)
+    print("  [ok] 窗口改进方向：坏 cases/坏可见率安全降级")

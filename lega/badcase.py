@@ -815,8 +815,10 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
         # 分支判定只看 confident_bias 这批窗口：全局 gold_in_context_rate 会把
         # 其它类别（如 repetition_attractor）的可见性算进来，可能把"这批窗口
         # 的 gold 根本没见过"错判成"模型看得到却没抄对"。
+        cases = ana.get("cases")
+        cases = cases if isinstance(cases, list) else []
         cb_gic = [bool(c.get("gold_in_context"))
-                  for c in (ana.get("cases") or [])
+                  for c in cases
                   if isinstance(c, dict)
                   and c.get("category") == "confident_bias"
                   and c.get("gold_in_context") is not None]
@@ -825,8 +827,11 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
             scope = "其中"
         else:
             # 旧格式窗口缺 gold_in_context 字段：退回全局率但显式标注口径，
-            # 不把它冒充成这批窗口自身的比例。
-            gic = ana.get("gold_in_context_rate")
+            # 不把它冒充成这批窗口自身的比例。外部 JSON 的全局率可能是
+            # 字符串/数组/越界值：按缺失处理，避免 `gic >= 0.5` 抛 TypeError。
+            gic = _finite_float(ana.get("gold_in_context_rate"))
+            if gic is not None and not 0.0 <= gic <= 1.0:
+                gic = None
             scope = "全部最差窗口中"
         if gic is None:
             # 旧格式/导出缺失 gold_in_context：既不能断言“看得到没抄对”，
