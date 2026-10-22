@@ -42,7 +42,7 @@ def repeated_test_checkpoint(test_access, ckpt_sha256,
     (checkpoint, test 版本) 精确判定：重建 test.bin 后的评测不是旧版本的
     重复访问，不应误拒绝。
     """
-    if not test_access or not ckpt_sha256:
+    if not isinstance(test_access, dict) or not test_access or not ckpt_sha256:
         return False
     prefix = str(ckpt_sha256)[:16]
     details = test_access.get("repeated_evaluations")

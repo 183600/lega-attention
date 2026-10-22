@@ -392,6 +392,9 @@ def test_repeated_test_checkpoint_gate():
     assert not repeated_test_checkpoint(None, "a" * 64)
     assert not repeated_test_checkpoint({}, "a" * 64)
     assert not repeated_test_checkpoint(summary, None)
+    # 账本损坏成列表/字符串时不能 .get 崩溃，按“无法确认重复”处理。
+    for bad in ([1, 2], "bad", 5, True):
+        assert not repeated_test_checkpoint(bad, "a" * 64), bad
     assert not repeated_test_checkpoint(
         {"checkpoints_evaluated_multiple_times": []}, "a" * 64)
 
