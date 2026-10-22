@@ -45,7 +45,8 @@ def test_tost_zero_variance_and_boundary():
 
 
 def test_tost_rejects_bad_margin_alpha_and_pairs():
-    for bad in (True, 0, -0.01, float("nan"), float("inf"), "0.01", None):
+    for bad in (True, 0, -0.01, float("nan"), float("inf"), "0.01", None,
+                10 ** 400):
         try:
             tost_from_diffs([0.001] * 5, bad)
             raise AssertionError(f"非法 margin 应被拒绝: {bad!r}")
@@ -184,6 +185,9 @@ def test_t_critical_known_values():
     assert t_critical(0, 0.05) is None
     assert t_critical(4, 0.0) is None
     assert t_critical(4, 1.0) is None
+    # 合法但超出 float 上限的整数自由度不是可计算值：必须返回 None，
+    # 不能把 OverflowError 抛给调用方。
+    assert t_critical(10 ** 400, 0.05) is None
     print("  [ok] t 临界值已知数值")
 
 

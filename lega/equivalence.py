@@ -53,7 +53,12 @@ def _strict_number(value, name: str) -> float:
         raise ValueError(f"{name} 必须是有限实数，收到 bool {value!r}")
     if isinstance(value, str) or not isinstance(value, Real):
         raise ValueError(f"{name} 必须是有限实数，收到 {value!r}")
-    f = float(value)
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        # 合法但超出 float 上限的整数（如 10**400）不是“有限实数”意义上的
+        # 可计算值；统一按 ValueError 拒绝，避免裸 OverflowError 穿透。
+        raise ValueError(f"{name} 必须是有限实数，收到 {value!r}") from e
     if not math.isfinite(f):
         raise ValueError(f"{name} 必须是有限实数，收到 {value!r}")
     return f
