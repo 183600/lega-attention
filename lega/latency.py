@@ -439,6 +439,7 @@ def main():
                     break
                 ckpt_path = None
         ckpt_seed = None
+        ckpt_sha256 = None
         if ckpt_path and os.path.exists(ckpt_path):
             model, ck = load_model(ckpt_path, device=device,
                                    use_sdpa_standard=use_sdpa)
@@ -447,6 +448,9 @@ def main():
                              if ck.get("seed") is not None else None)
             except ValueError:
                 ckpt_seed = None
+            # 基准绑定到具体权重文件：同目录权重被覆盖后，旧延迟数值不能
+            # 继续声称对应当前 checkpoint。
+            ckpt_sha256 = sha256_file(ckpt_path)
             src = "ckpt"
         else:
             model_cfg = dict(
@@ -466,6 +470,8 @@ def main():
         model.eval()
         entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa,
                  "weights": src, "ckpt_seed": ckpt_seed,
+                 "ckpt": (os.path.abspath(ckpt_path) if ckpt_path else None),
+                 "ckpt_sha256": ckpt_sha256,
                  "n_params": count_params(model), "prefill_ms": {},
                  "prefill_ms_spread_pct": {},
                  "decode_ms_per_tok": {}, "decode_ms_spread_pct": {},

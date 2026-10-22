@@ -180,6 +180,7 @@ def test_latency_main_records_seed_provenance():
         assert payload["meta"]["seed"] == 2024
         entry = payload["variants"]["standard"]
         assert entry["weights"] == "random" and entry["ckpt_seed"] is None
+        assert entry["ckpt"] is None and entry["ckpt_sha256"] is None
     print("  [ok] latency --seed 进入 set_seed 并落盘 meta/ckpt_seed")
 
 
