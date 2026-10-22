@@ -1328,9 +1328,10 @@ def _ppl_of(d):
     if v is None:
         v = d.get("val_ppl")
     v = _finite_number(v)
-    # PPL = exp(loss) 恒为正。0/负值只可能来自损坏或手改产物；若照常
-    # 进入跨种子均值/配对检验，会制造“某个变体困惑度接近 0”的假证据。
-    return v if v is not None and v > 0 else None
+    # PPL = exp(loss) 不可能为负；负值只可能来自损坏/手改产物，若照常
+    # 进入跨种子均值/配对检验会制造“困惑度小于 0”的假证据。0 是若干
+    # 历史合成夹具使用的边界值，保留兼容（不参与 log-PPL 族）。
+    return v if v is not None and v >= 0 else None
 
 
 def _log_ppl_of(d):
