@@ -846,7 +846,16 @@ def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
     记录**实际采样顺序**的 SHA-256：仅比较 seed/config 不足以证明各变体
     真的消费了同一批训练数据（例如采样代码路径被改、RNG 被提前消耗），
     而数据顺序不同会让“方法对比”混入数据混杂。
+
+    ctx/batch_size 是采样形状身份：bool/小数经 int() 截断或负值会让
+    ``len(train) - ctx`` 变成另一个采样范围/形状，必须在构造索引前拒绝。
     """
+    ctx = strict_int(ctx, "ctx")
+    batch_size = strict_int(batch_size, "batch_size")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size 必须 >= 1，收到 {batch_size}")
     if len(train) < ctx + 1:
         raise ValueError(f"训练集只有 {len(train)} tokens，不足以采样 ctx={ctx}")
     ix = rng.integers(0, len(train) - ctx, size=batch_size)
@@ -866,12 +875,46 @@ def get_val_batch(val: np.memmap, ctx: int, idx: int, device: str):
 
 
 def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
-    """一次取多个不重叠窗口拼成批量 (n, ctx)。"""
+    """一次取多个不重叠窗口拼成批量 (n, ctx)。
+
+    窗口序号是 ``s·ctx`` 的非负下标（与 ``_val_eval_indices`` 同口径）；
+    负数/小数/bool 不是合法窗口身份，不能靠取模静默映射到另一个窗口。
+    标量序号按单窗口处理（``get_val_batch`` 的元组调用保持原语义）。
+    """
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx}")
+    try:
+        raw = np.atleast_1d(np.asarray(indices))
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"indices 必须是整数窗口序号，收到 {indices!r}") from e
+    int64_max = int(np.iinfo(np.int64).max)
+    if raw.dtype.kind in "iu":
+        if raw.size and (int(raw.min()) < 0 or int(raw.max()) > int64_max):
+            raise ValueError(
+                f"窗口序号必须是 [0, {int64_max}] 内的整数，收到 {indices!r}")
+        idx = raw.astype(np.int64, copy=False)
+    else:
+        # 浮点/对象/字符串逐元素走 strict_int：1.5/True/"1_0" 不能被
+        # np.asarray(..., dtype=int64) 静默截断/当成 1/10。
+        vals = []
+        for v in raw.reshape(-1).tolist():
+            try:
+                iv = strict_int(v, "窗口序号")
+            except (TypeError, ValueError, OverflowError) as e:
+                raise ValueError(
+                    f"窗口序号必须是整数，收到 {indices!r}") from e
+            if iv < 0 or iv > int64_max:
+                raise ValueError(
+                    f"窗口序号必须在 [0, {int64_max}] 内，收到 {indices!r}")
+            vals.append(iv)
+        idx = np.asarray(vals, dtype=np.int64)
     n_windows = (len(val) - 1) // ctx
     if n_windows <= 0:
         raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
-    # indices 常已是 np 数组切片：asarray 直接转 int64
-    starts = (np.asarray(indices, dtype=np.int64) % n_windows) * ctx
+    # 允许 idx >= n_windows 的循环取用；负值已在上方拒绝。
+    starts = (idx % n_windows) * ctx
     span = _make_span(starts, ctx)
     # (val, span) 元组：memmap 花式索引直写 pinned 缓冲，设备端升 long 并切 x/y
     both = _stage_to_device((val, span), device)

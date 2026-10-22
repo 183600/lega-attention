@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from lega.attention import CausalSelfAttention, VARIANTS
+from lega.data import get_train_batch, get_val_windows
 from lega.model import GPT, load_model, save_checkpoint
 from lega.train import _val_eval_indices, evaluate_val
 
@@ -674,3 +675,43 @@ def test_forward_rejects_misaligned_targets_shape():
     # 正确形状仍可训练
     out = m(x, targets=torch.randint(0, 64, (2, 8)))
     assert out["loss"] is not None
+
+
+def test_data_sampling_rejects_invalid_window_identity():
+    """采样形状/窗口序号是整数身份：bool/小数/负数不能被截断或取模洗白。"""
+    data = np.arange(200, dtype=np.uint16)
+    rng = np.random.default_rng(0)
+    for bad_ctx in (0, -1, True, 2.5, "x"):
+        try:
+            get_train_batch(data, bad_ctx, 2, "cpu", rng)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad_ctx
+    for bad_bs in (0, -2, True, 2.5):
+        try:
+            get_train_batch(data, 8, bad_bs, "cpu", rng)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad_bs
+    for bad_ctx in (0, -1, True):
+        try:
+            get_val_windows(data, bad_ctx, [0], "cpu")
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad_ctx
+    for bad_idx in (-1, [-1, 2], [1.5], [10 ** 400]):
+        try:
+            get_val_windows(data, 8, bad_idx, "cpu")
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad_idx
+    # 标量序号/循环取用保持可用，且仍满足 y 右移一位。
+    x1, y1 = get_val_windows(data, 8, 0, "cpu")
+    assert x1.shape == (1, 8) and torch.equal(x1[:, 1:], y1[:, :-1])
+    xn, yn = get_val_windows(data, 8, 10**6, "cpu")
+    assert xn.shape == (1, 8) and torch.equal(xn[:, 1:], yn[:, :-1])
+    print("  [ok] 数据采样拒绝 bool/小数/负数窗口身份，标量/循环序号可用")
