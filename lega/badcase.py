@@ -1285,16 +1285,22 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
         else:
             new_keys, fixed_keys = [], []
 
-        def _example_for(k):
-            """该变体对 key 的原始记录（逐变体保存；缺失时回退代表样本）。"""
-            return items[k]["examples"].get(v, items[k]["example"])
+        def _example_for(k, prefer):
+            """该变体对 key 的原始记录（优先 preferred 变体，缺失时回退）。
 
-        def _cat_counts(keys):
+            new_keys 属于当前变体 v，fixed_keys 属于参照变体；若 fixed 仍按
+            v 取记录，v 在该 key 上没有失败记录，会回退到“排序后第一个失败
+            变体”的样本，把别的变体的预测/归因算到参照头上。
+            """
+            ex = items[k]["examples"].get(prefer)
+            return ex if ex is not None else items[k]["example"]
+
+        def _cat_counts(keys, prefer):
             # 对全部新增/改对样本归因（不只展示的前 N 条），供改进方向统计；
-            # 归因必须基于该变体自己的记录。
+            # 归因必须基于对应变体自己的记录。
             cc = Counter()
             for k in keys:
-                c = _categorize_any(_example_for(k))
+                c = _categorize_any(_example_for(k, prefer))
                 if c:
                     cc[c["category"]] += 1
             return dict(cc)
@@ -1316,12 +1322,13 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
             "paired_discordant": discordant,
             "mcnemar_p": p_raw,
             "mcnemar_p_holm": None,
-            "new_category_counts": _cat_counts(new_keys),
-            "fixed_category_counts": _cat_counts(fixed_keys),
-            "new_vs_reference": [_case_brief(_example_for(k))
+            "new_category_counts": _cat_counts(new_keys, v),
+            "fixed_category_counts": _cat_counts(fixed_keys, reference),
+            "new_vs_reference": [_case_brief(_example_for(k, v))
                                  for k in new_keys[:CROSS_LIST_LIMIT]],
-            "fixed_vs_reference": [_case_brief(_example_for(k))
-                                   for k in fixed_keys[:CROSS_LIST_LIMIT]],
+            "fixed_vs_reference": [_case_brief(
+                _example_for(k, reference))
+                for k in fixed_keys[:CROSS_LIST_LIMIT]],
         }
     # 同一次对照内对多个候选做配对检验：Holm 逐步校正，避免“多比几次总
     # 有一个显著”。参照自身不检验（p=None）。

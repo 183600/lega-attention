@@ -1337,3 +1337,18 @@ def test_cross_variant_shared_failure_share_has_ci():
                if "共识失败" in r["trigger"])
     assert "Wilson 95% CI" in rec["trigger"], rec
     print("  [ok] 跨变体共识失败占比附 Wilson CI（小样本不冒充主导）")
+
+
+def test_cross_variant_fixed_cases_use_reference_record():
+    """“改对”个案必须取参照变体的失败记录，而不是排序后第一个失败变体。"""
+    std = _case_sid("niah_synth@256#0", pred="5550001", ctx_nums=[])
+    null = _case_sid("niah_synth@256#0", pred="7654321",
+                     ctx_nums=["7654321"])
+    cross = cross_variant_analysis(
+        {"lega": [], "null": [null], "standard": [std]},
+        reference="standard")
+    pv = cross["per_variant"]["lega"]
+    assert pv["n_fixed_vs_reference"] == 1
+    assert pv["fixed_category_counts"] == {"hallucinated": 1}, pv
+    assert pv["fixed_vs_reference"][0]["pred"] == "5550001", pv
+    assert pv["fixed_vs_reference"][0]["category"] == "hallucinated"
