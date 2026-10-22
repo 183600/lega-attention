@@ -2231,7 +2231,8 @@ def _eval_window_losses(d):
     for loss, idx in zip(losses, indices):
         v = _num_or_none(loss)
         i = _integral_value(idx)
-        if v is None or v < 0.0 or i is None or i in out:
+        # 窗口序号是 s·ctx 的非负下标；负数/重复都不是同一批评测单元。
+        if v is None or v < 0.0 or i is None or i < 0 or i in out:
             return None
         out[i] = v
     return out

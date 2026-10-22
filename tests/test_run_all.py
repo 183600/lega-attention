@@ -5124,6 +5124,11 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     # 交叉熵不可能为负：坏记录整表按不可用处理，不能污染 avg NLL 差。
     assert _eval_window_losses({"window_losses": [1.0, -0.5],
                                 "window_indices": [0, 1]}) is None
+    # 窗口序号必须是唯一的非负下标；负值/重复都是损坏记录。
+    assert _eval_window_losses({"window_losses": [1.0, 2.0],
+                                "window_indices": [0, 0]}) is None
+    assert _eval_window_losses({"window_losses": [1.0, 2.0],
+                                "window_indices": [-1, 1]}) is None
     out = _ppl_window_paired_tests(runs, [("lega", "standard")],
                                    n_resamples=200)
     assert len(out) == 1, out
