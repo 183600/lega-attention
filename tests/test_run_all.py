@@ -2657,6 +2657,16 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
         assert abs(rows["lega"]["ratio"] - 22.0 / 100.0) < 1e-12
         assert rows["lega"]["verdict"] == "显著优于统计基线"
         assert rows["lega"]["p_adj"] is not None and rows["lega"]["p_adj"] < ALPHA
+        # 只有 n>=MIN_SEEDS 的行进入 Holm 家族：n=1 的行 p=None 不占家族大小。
+        runs_family = {"standard": {1: {"eval": {"variant": "standard",
+                                                 "split": "test", "ppl": 30.0}}},
+                       "lega": {s: {"eval": {"variant": "lega",
+                                             "split": "test",
+                                             "ppl": 20.0 + s}}
+                                for s in (1, 2, 3)}}
+        out_family = ngram_baseline_comparison(runs_family, tmp)
+        assert out_family["holm_family_size"] == 1, out_family
+        assert out_family["n_rows"] == 2
         # 合法但接近 float 上限的 PPL：朴素均值/比值会溢出成 inf。
         _write_json(os.path.join(tmp, "ngram_baseline.json"), {
             "split": "test", "ppl": {"bigram": 1e308}, "selected_model": "bigram"})

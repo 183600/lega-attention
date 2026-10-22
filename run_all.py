@@ -5003,7 +5003,11 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "window_paired_reference_model": ng_win_model,
             "window_paired_available": bool(ng_win is not None),
             "fallback_reason": fallback_reason,
-            "holm_family_size": len(rows),
+            # Holm 家族只包含实际参与检验（p 非 None）的行；n<MIN_SEEDS
+            # 的变体不占家族大小，渲染时不能把总行数说成校正家族大小。
+            "holm_family_size": sum(1 for r in rows
+                                    if r.get("p") is not None),
+            "n_rows": len(rows),
             "note": note}
 
 
