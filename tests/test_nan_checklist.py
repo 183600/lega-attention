@@ -370,10 +370,14 @@ def test_val_audit_batch_uses_real_validation_window():
     val = np.arange(0, 200, dtype=np.int64)
     fb = _batches()
     batch = val_audit_batch(val, ctx=16, iters=2, device="cpu", fallback=fb)
-    assert len(batch) == 1 and batch[0] is not fb[0]
-    x, y = batch[0]
-    assert x.shape == (1, 16) and y.shape == (1, 16)
-    assert torch.equal(x[:, 1:], y[:, :-1]), "y 必须是 x 的右移一位（与训练口径一致）"
+    # 两个评测窗口都必须进入排查输入；只检查第 0 个窗口会漏掉后段 NaN。
+    assert len(batch) == 2 and all(b is not fb[0] for b in batch)
+    for b in batch:
+        x, y = b
+        assert x.shape == (1, 16) and y.shape == (1, 16)
+        assert torch.equal(x[:, 1:], y[:, :-1]), "y 必须是 x 的右移一位（与训练口径一致）"
+    # 两个批次对应不同窗口（不能重复审计同一个窗口）
+    assert not torch.equal(batch[0][0], batch[1][0])
     # 验证集过短组不成窗口 → 回退到训练批次而不是崩溃
     short = np.arange(0, 10, dtype=np.int64)
     batch2 = val_audit_batch(short, ctx=16, iters=2, device="cpu", fallback=fb)

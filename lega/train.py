@@ -600,7 +600,11 @@ def val_audit_batch(val, ctx: int, iters: int, device: str, fallback=None):
     """
     try:
         indices, _ = _val_eval_indices(len(val), ctx, iters)
-        return [get_val_windows(val, ctx, indices[:1], device)]
+        # 逐窗口返回：evaluate_val 在多个等间隔窗口上求平均，NaN 可能由其中
+        # 任意一个窗口触发。只审计第 0 个窗口会把“后段窗口溢出”误判成
+        # “前向全有限、NaN 在聚合环节”。每个窗口单独一批，报告可定位到
+        # 具体窗口（checked_batch_index）。
+        return [get_val_windows(val, ctx, [int(i)], device) for i in indices]
     except (ValueError, OSError, RuntimeError):
         return [b for b in (fallback or []) if b is not None]
 
