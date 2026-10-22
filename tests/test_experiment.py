@@ -529,6 +529,27 @@ def test_verify_ledger_checks_embedded_seed_evidence():
                              "variants": ["lega"], "seeds": [7],
                              "runs": [_run(7)],
                              "seed_audit": {"7": seed_plan(8)}})
+        # 种子 1 时 Python 的 True == 1：非规范布尔字段不能在相等比较中
+        # 冒充真实种子证据。
+        bool_plan = seed_plan(1)
+        bool_plan.update({"python_random": True, "numpy_global": True,
+                          "torch_cpu": True, "torch_cuda": True,
+                          "data_order_seed": True})
+        append_record(path, {"run_id": "audit_bool", "status": "started",
+                             "variants": ["lega"], "seeds": [1],
+                             "seed_audit": {"1": bool_plan}})
+        append_record(path, {"run_id": "audit_bool", "status": "completed",
+                             "variants": ["lega"], "seeds": [1],
+                             "runs": [_run(1)],
+                             "seed_audit": {"1": bool_plan}})
+        # seed_report 内嵌证据字段类型损坏时同样不能继承“已验证”。
+        bad_evidence = _run(7, seed_verified="false",
+                            data_order_rng_fingerprint=123)
+        append_record(path, {"run_id": "bad_evidence", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "bad_evidence", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [bad_evidence]})
         rep = verify_ledger(path)
         by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
         assert "good" not in by_id and "legacy" not in by_id, by_id
@@ -536,6 +557,16 @@ def test_verify_ledger_checks_embedded_seed_evidence():
         assert "seed_audit_seed_mismatch" in by_id["audit_bad"]["issues"]
         assert ("seed_audit_data_order_fingerprint_mismatch"
                 in by_id["audit_bad"]["issues"])
+        for issue in ("seed_audit_python_random_mismatch",
+                      "seed_audit_numpy_global_mismatch",
+                      "seed_audit_torch_cpu_mismatch",
+                      "seed_audit_torch_cuda_mismatch",
+                      "seed_audit_data_order_seed_mismatch"):
+            assert issue in by_id["audit_bool"]["issues"], by_id["audit_bool"]
+        assert ("seed_report_seed_verified_malformed"
+                in by_id["bad_evidence"]["issues"])
+        assert ("seed_report_data_order_fingerprint_malformed"
+                in by_id["bad_evidence"]["issues"])
         assert "seed_report_seed_mismatch" in by_id["copied"]["issues"]
         assert "seed_report_data_order_seed_mismatch" in by_id["copied"]["issues"]
         assert "seed_report_data_order_fingerprint_mismatch" in by_id["copied"]["issues"]

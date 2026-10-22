@@ -117,13 +117,20 @@ def _seed_evidence_issues(run, run_seed: int) -> list:
 
     if "seed" in sr and _bad_seed(sr.get("seed")):
         issues.append("seed_report_seed_mismatch")
-    if sr.get("seed_verified") is False:
-        issues.append("seed_report_unverified")
+    if "seed_verified" in sr:
+        if sr.get("seed_verified") is False:
+            issues.append("seed_report_unverified")
+        elif not isinstance(sr.get("seed_verified"), bool):
+            # 字符串 "false"/1 等经相等/truthiness 比较会退化成“未检查”；
+            # 台账里的种子生效证据必须是真正的布尔值。
+            issues.append("seed_report_seed_verified_malformed")
     if "data_order_seed" in sr and _bad_seed(sr.get("data_order_seed")):
         issues.append("seed_report_data_order_seed_mismatch")
     fp = sr.get("data_order_rng_fingerprint")
-    if isinstance(fp, str) and fp:
-        if fp != data_rng_state_fingerprint(int(run_seed)):
+    if fp is not None:
+        if not isinstance(fp, str) or not fp:
+            issues.append("seed_report_data_order_fingerprint_malformed")
+        elif fp != data_rng_state_fingerprint(int(run_seed)):
             issues.append("seed_report_data_order_fingerprint_mismatch")
     return issues
 
@@ -182,9 +189,17 @@ def _seed_audit_issues(record, declared_seeds) -> list:
             issues.append("seed_audit_seed_mismatch")
         if entry.get("is_plan") is not True:
             issues.append("seed_audit_not_marked_plan")
+
+        def _same_seed_field(key):
+            """字段必须严格等于 seed；bool/1.0/"1" 中的非规范写法不能冒充。"""
+            try:
+                return strict_int(entry.get(key), f"seed_audit.{key}") == seed
+            except (TypeError, ValueError, OverflowError):
+                return False
+
         for key in ("python_random", "numpy_global", "torch_cpu",
                     "data_order_seed"):
-            if entry.get(key) != seed:
+            if not _same_seed_field(key):
                 issues.append(f"seed_audit_{key}_mismatch")
         if entry.get("pythonhashseed_child_env") != str(seed):
             issues.append("seed_audit_pythonhashseed_mismatch")
@@ -192,7 +207,7 @@ def _seed_audit_issues(record, declared_seeds) -> list:
         if not isinstance(fp, str) or fp != data_rng_state_fingerprint(seed):
             issues.append("seed_audit_data_order_fingerprint_mismatch")
         cuda = entry.get("torch_cuda")
-        if cuda is not None and cuda != seed:
+        if cuda is not None and not _same_seed_field("torch_cuda"):
             issues.append("seed_audit_torch_cuda_mismatch")
     return issues
 
