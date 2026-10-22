@@ -3723,6 +3723,11 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                         "- ⚠ 留一复选既翻转选择、又未在留出种子上优于默认："
                         "网格调优的泛化收益缺乏稳定性证据，正式结论应以"
                         "新种子复验为准。")
+        elif len(sel_seeds) >= 2:
+            lines.append(
+                "- ⚠ 调优报告缺少 `selection_diagnostics`（旧格式）：无法核对"
+                "逐种子支持率、最优−次优噪声差距与留一种子复选；请重跑 "
+                "`--tune_baseline` 后再据此宣称基线已稳定调优。")
         if tune.get("default_is_optimal") is True:
             lines.append("- ✅ 默认超参数即为网格最优/在容差内：基线的对比不受"
                          "“选了不利学习率”的质疑。全流水线所有变体使用同一"
@@ -4705,6 +4710,15 @@ def build_summary(results_dir: str, audit: dict = None,
                            + "；".join(flags)
                            + "。这会把总 EM 抬到看似可接受的水平；需结合逐箱 "
                            "Wilson CI 与样本文本复核，不能只用 RULER平均 下结论。"]
+        else:
+            niah_rows = [r for r in rows
+                         if any(r.get(f"ruler_{t}") is not None for t in (
+                             "niah_synth", "niah_corpus", "niah_multikey"))]
+            if niah_rows:
+                md += ["", "⚠ 本次 RULER 产物不含 needle 位置分层"
+                           "（`em_by_depth`，旧格式）：总 EM 可能掩盖 "
+                           "lost-in-the-middle。旧结果不能补算，需用当前版本"
+                           "重跑 RULER 后才能给出位置分层结论。"]
     else:
         md.append("（暂无结果，先运行训练评测）")
 

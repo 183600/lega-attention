@@ -2301,6 +2301,14 @@ def test_render_baseline_selection_stability():
         assert "最优−次优" in text and "一个种子噪声 SD 内" in text
         assert "留一种子复选" in text and "胜/平/负 1/0/2" in text
         assert "既翻转选择、又未在留出种子上优于默认" in text
+        # 旧调优报告（多种子但无 selection_diagnostics）不得静默当作稳定
+        doc = json.load(open(os.path.join(tmp, "baseline_tuning.json"),
+                             encoding="utf-8"))
+        doc.pop("selection_diagnostics")
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), doc)
+        text_old = "\n".join(_render_baseline_sections(tmp))
+        assert "缺少 `selection_diagnostics`" in text_old
+        assert "重跑 `--tune_baseline`" in text_old
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] _render_baseline_sections：调优选择稳定性证据")
@@ -3292,6 +3300,16 @@ def test_build_summary_ruler_depth_stratification():
         row = next(r for r in out["rows"] if r["variant"] == "lega")
         assert abs(row["ruler_depth_middle"] - 0.2) < 1e-12, row
         assert abs(row["ruler_depth_early_minus_late"]) < 1e-12, row
+        # 旧产物（无 em_by_depth）必须显式警告无法排除 lost-in-the-middle，
+        # 而不是静默地少一张表。
+        for s in (1, 2, 3):
+            for v in depths:
+                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s,
+                    "results": {"niah_synth": {"256": {"em": 0.5, "n": 30}}}})
+        old = build_summary(tmp)
+        assert "不含 needle 位置分层" in old["markdown"]
+        assert "重跑 RULER" in old["markdown"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary：RULER 位置分层表与 middle 塌陷提示")
