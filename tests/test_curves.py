@@ -360,6 +360,15 @@ def test_boolean_log_values_are_malformed_not_numeric():
                          "val_loss_ci95": [True, 4.0]}]) is None
     assert abs(_val_ci_rel([{"val_loss": 3.0,
                              "val_loss_ci95": [2.0, 4.0]}]) - 1 / 3) < 1e-12
+    # 区间两端有限但 hi−lo 溢出成 inf 时，相对半宽不可表示，按缺失处理；
+    # 否则 val_ci_rel=inf 会进入 JSON/把全部变化当成噪声。
+    assert _val_ci_rel([{"val_loss": 3.0,
+                         "val_loss_ci95": [-1e308, 1e308]}]) is None
+    d_ci = diagnose_curve(
+        [{"step": i, "loss": 1.0, "val_loss": 1.0,
+          "val_loss_ci95": [-1e308, 1e308]} for i in range(10)])
+    assert d_ci["val_ci_rel"] is None, d_ci.get("val_ci_rel")
+    assert d_ci["val_best_ci_rel"] is None
     assert live_overfit_hint(5, True, 4.0) is None
     d = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
                             [4.3, 3.8, 3.3, 2.9, 2.6])

@@ -413,7 +413,14 @@ def _val_ci_rel(records: List[Dict]) -> Optional[float]:
         lo, hi, v = _finite_value(ci[0]), _finite_value(ci[1]), _finite_value(v)
         if lo is not None and hi is not None and v is not None and v > 0 \
                 and hi >= lo:
-            vals.append((hi - lo) / 2.0 / v)
+            try:
+                rel = (hi - lo) / 2.0 / v
+            except (OverflowError, ZeroDivisionError):
+                continue
+            # 两端有限不代表差/比值可表示：hi−lo 或除以极小 v 仍可能溢出。
+            # 非有限相对半宽不能进入趋势阈值/JSON。
+            if math.isfinite(rel):
+                vals.append(rel)
     return float(statistics.median(vals)) if vals else None
 
 
@@ -496,7 +503,12 @@ def live_overfit_hint(evals_since_improve, best_val, val,
     if isinstance(val_ci95, (list, tuple)) and len(val_ci95) == 2:
         lo, hi = _finite_value(val_ci95[0]), _finite_value(val_ci95[1])
         if (lo is not None and hi is not None and hi >= lo and val_f > 0):
-            ci_rel = (hi - lo) / 2.0 / val_f
+            try:
+                ci_rel = (hi - lo) / 2.0 / val_f
+            except (OverflowError, ZeroDivisionError):
+                ci_rel = None
+            if ci_rel is not None and not math.isfinite(ci_rel):
+                ci_rel = None
     if ci_rel is not None and abs(gap) <= ci_rel + 1e-12:
         label = "回升" if gap > LIVE_OVERFIT_GAP else "平台"
         return (f"验证损失{label}（较历史最优 {gap:+.1%}）仍在 95% 抽样噪声内"
@@ -838,7 +850,12 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     best_ci_rel = None
     if best_step in val_ci_by_step:
         lo, hi, v = val_ci_by_step[best_step]
-        best_ci_rel = (hi - lo) / 2.0 / v
+        try:
+            best_ci_rel = (hi - lo) / 2.0 / v
+        except (OverflowError, ZeroDivisionError):
+            best_ci_rel = None
+        if best_ci_rel is not None and not math.isfinite(best_ci_rel):
+            best_ci_rel = None
     sorted_val = sorted(p["value"] for p in val_pts)
     second_best = sorted_val[1] if len(sorted_val) >= 2 else None
     best_margin_rel = (_rel_change(best_val, second_best)
