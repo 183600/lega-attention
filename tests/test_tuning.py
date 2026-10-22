@@ -429,7 +429,7 @@ def test_selection_diagnostics_reports_flip_noise_and_loo():
     assert {w["lr"] for w in diag["per_seed_winners"]} == {1.0, 2.0}
     ru = diag["runner_up"]
     assert ru["lr"] == 1.0
-    assert abs(ru["selected_minus_runner_up_mean"] - (1 / 30)) < 1e-12
+    assert abs(ru["selected_minus_runner_up_mean"] + (1 / 30)) < 1e-12
     assert ru["within_seed_noise"] is True
     assert abs(ru["paired_delta_mean"] - 1 / 30) < 1e-12
     loo = diag["leave_one_seed_out"]

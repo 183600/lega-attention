@@ -512,8 +512,10 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
     others = [g for g in complete if g is not sel_stat]
     if others:
         runner = min(others, key=lambda g: g["val_loss_best_mean"])
-        margin = (runner["val_loss_best_mean"]
-                  - sel_stat["val_loss_best_mean"])
+        # 字段名是 selected − runner-up：selected 是均值最小者，故该值应
+        # 为负（越小越好）；逐种子 paired_delta 则按“次优−最优”定义。
+        margin = (sel_stat["val_loss_best_mean"]
+                  - runner["val_loss_best_mean"])
         deltas = [runner["val_loss_best_per_seed"][s]
                   - sel_stat["val_loss_best_per_seed"][s] for s in common]
         dmean = sum(deltas) / len(deltas)
@@ -531,7 +533,8 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
             "paired_delta_std": dstd,
             "paired_delta_sem": dsem,
             # 均值差不超过逐种子配对差的 1 个标准差：差距与种子噪声同量级。
-            "within_seed_noise": (None if dstd is None else margin <= dstd),
+            "within_seed_noise": (None if dstd is None
+                                  else abs(margin) <= dstd),
         }
 
     if len(common) >= 3 and len(complete) >= 2:
