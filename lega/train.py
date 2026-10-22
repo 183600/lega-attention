@@ -26,7 +26,7 @@ from .model import GPT, configure_optimizer, count_params, gate_extra_params, sa
 from .preflight import (allow_protocol_violations,  # noqa: E402
                         data_protocol_preflight)
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
-                    write_worktree_patch)
+                    sha256_file, write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, config_bool, data_rng,
                     enable_tf32, now_str, save_json, set_seed, strict_int,
                     t_critical_95)
@@ -1067,8 +1067,15 @@ def main():
         "eval_every": eval_every, "eval_iters": eval_iters,
         "batch_size": batch_size,
     })
-    with open(os.path.join(out_dir, "config_used.json"), "w", encoding="utf-8") as f:
+    config_used_path = os.path.join(out_dir, "config_used.json")
+    with open(config_used_path, "w", encoding="utf-8") as f:
         json.dump(cfg_used, f, ensure_ascii=False, indent=2)
+    config_used_sha256 = sha256_file(config_used_path)
+    manifest["config_used"] = cfg_used
+    manifest["config_used_sha256"] = config_used_sha256
+    save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
+    provenance["config_used_sha256"] = config_used_sha256
+    provenance["resolved_config"] = cfg_used
 
     model_cfg = dict(
         vocab_size=vocab_size, block_size=block_size,

@@ -13,8 +13,11 @@ import os
 import sys
 import tempfile
 
+import torch
+
 from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
+from lega.repro import sha256_file
 from lega.train import (_config_finite_float, _config_int, _config_min_delta,
                         _config_nonneg_float, _config_probability,
                         _meta_vocab_size, early_stop_update)
@@ -259,9 +262,19 @@ def test_train_early_stop_end_to_end():
         assert ev["tokens_seen"] == 4 * 2 * 32
         assert ev["data_order_sha256"] and len(ev["data_order_sha256"]) == 64, ev
         assert ev["train_peak_mem_mb"] is None, "CPU 训练没有 CUDA 进程统计"
-        cfg_used = json.load(open(os.path.join(out_dir, "config_used.json"),
-                                  encoding="utf-8"))
+        cfg_path = os.path.join(out_dir, "config_used.json")
+        cfg_used = json.load(open(cfg_path, encoding="utf-8"))
         assert cfg_used["early_stop_patience"] == 1, "CLI 覆盖必须进入受控变量记录"
+        manifest = json.load(open(os.path.join(out_dir, "run_manifest.json"),
+                                  encoding="utf-8"))
+        cfg_sha = sha256_file(cfg_path)
+        assert manifest["config_used_sha256"] == cfg_sha
+        assert manifest["config_used"] == cfg_used
+        ckpt = torch.load(os.path.join(out_dir, "model.pt"), map_location="cpu",
+                          weights_only=True)
+        assert ckpt["config_used_sha256"] == cfg_sha
+        assert ckpt["resolved_config"] == cfg_used
+        assert ckpt["resolved_config"]["early_stop_patience"] == 1
         assert os.path.exists(os.path.join(out_dir, "model_best.pt"))
         recs = load_train_log(os.path.join(out_dir, "train_log.jsonl"))
         assert any(r.get("early_stop") for r in recs), "train_log 必须留下早停标记"
