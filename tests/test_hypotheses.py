@@ -156,10 +156,15 @@ def test_scope_tamper_rejected_and_legacy_lock_upgrade():
         # 模拟旧锁：删掉 locked_document（旧版锁只有 baseline+chain）
         lk = json.load(open(lock, encoding="utf-8"))
         lk.pop("locked_document")
+        if isinstance(lk.get("baseline"), dict):
+            lk["baseline"].pop("locked_document_sha256", None)
         _write(lock, lk)
         r = verify_registration(registry_path=reg, lock_path=lock)
-        assert r["confirmatory_valid"] and not r["locked_document_matches"]
-        assert any("upgrade-lock" in w for w in r["warnings"])
+        # 没有任何 scope/decision_rule 锁定摘要：在显式升级前不能给
+        # confirmatory 结论，否则旧锁可被静默改写范围。
+        assert r["status"] == "violated" and not r["confirmatory_valid"]
+        assert not r["locked_document_matches"]
+        assert any("upgrade-lock" in p for p in r["problems"]), r
         # 显式升级后锁定当前 scope/decision_rule
         up = upgrade_lock(registry_path=reg, lock_path=lock,
                           reason="补锁判定参数", at="2026-01-01 00:00:00")

@@ -205,9 +205,22 @@ def locked_document_check(lock, doc) -> dict:
     out = {"locked": False, "expected": None, "current": current,
            "fields": None, "problems": [], "warning": None}
     if guard is None:
+        # 旧格式可能把锁定摘要只放在 baseline 里（没有顶层 locked_document）。
+        # 有该摘要时仍可核对；两者都没有则是真正的“未锁定”，确认性判定
+        # 必须失效，直到显式 --upgrade-lock 建立当前基线。
+        baseline_digest = _lock_baseline(lock).get("locked_document_sha256")
+        if isinstance(baseline_digest, str) and baseline_digest:
+            out.update({"locked": True, "expected": baseline_digest,
+                        "fields": list(LOCKED_DOCUMENT_FIELDS)})
+            if baseline_digest != current:
+                out["problems"].append(
+                    "判定参数 scope/decision_rule 被改写（基线锁定摘要 "
+                    f"{baseline_digest} → {current}）：确认性判定的适用范围与"
+                    "规则已不可信，须从 git 恢复登记表或重新登记")
+            return out
         out["warning"] = (
-            "锁文件未锁定 scope/decision_rule（旧格式）：改写范围或判定参数"
-            "只会改变整文档哈希并触发 warning，无法否决 confirmatory。请运行 "
+            "锁文件未锁定 scope/decision_rule（且 baseline 也无锁定摘要）："
+            "无法确认判定参数未被改写，确认性判定不可用。请运行 "
             "`python -m lega.hypotheses --upgrade-lock --reason ...` 升级锁文件。")
         return out
     if not isinstance(guard, dict) or not isinstance(guard.get("sha256"), str):
@@ -421,6 +434,13 @@ def verify_registration(registry_path: str = None,
     problems += locked.get("problems") or []
     if locked.get("warning"):
         report["warnings"].append(locked["warning"])
+    if not locked.get("locked"):
+        # 旧格式且没有任何锁定摘要：范围/判定规则可被静默改写，故不能
+        # 继续给出 confirmatory 结论；升级锁文件后才恢复。
+        problems.append(
+            "锁文件未锁定 scope/decision_rule，且无基线摘要可供核对："
+            "确认性判定无效；请先运行 `python -m lega.hypotheses "
+            "--upgrade-lock --reason ...`")
     if problems:
         report["status"] = "violated"
         report["problems"] = problems
