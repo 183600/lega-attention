@@ -1299,3 +1299,18 @@ def test_worst_window_rates_report_wilson_ci():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 最差窗口比例附 Wilson CI（小样本不冒充稳定比例）")
+
+
+def test_cross_variant_shared_failure_share_has_ci():
+    """共识失败占比也要给 CI：2 个失败样本里 1 个共识失败时点估计 50%，
+    但 95% CI 可低至约 9%，不能据此断言“失败以共识为主”是稳定结论。"""
+    a = _case_sid("niah_synth@256#0")
+    b = _case_sid("niah_synth@256#1")
+    cross = cross_variant_analysis(
+        {"standard": [a], "lega": [a, b], "qgate": [a]}, reference="standard")
+    lo, hi = cross["shared_all_ci95"]
+    assert 0.0 <= lo < 0.5 < hi <= 1.0
+    rec = next(r for r in cross["recommendations"]
+               if "共识失败" in r["trigger"])
+    assert "Wilson 95% CI" in rec["trigger"], rec
+    print("  [ok] 跨变体共识失败占比附 Wilson CI（小样本不冒充主导）")

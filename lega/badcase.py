@@ -1162,9 +1162,15 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
     n_unique = _count_int(cross.get("n_unique_failed_items")) or 0
     shared = _count_int(cross.get("n_shared_all_failures")) or 0
     if n_unique and _share(shared, n_unique) >= 0.5:
+        ci = cross.get("shared_all_ci95")
+        ci_s = ""
+        if (isinstance(ci, (list, tuple)) and len(ci) == 2
+                and all(_finite_float(x) is not None for x in ci)):
+            ci_s = (f"；Wilson 95% CI {_finite_float(ci[0]):.0%}–"
+                    f"{_finite_float(ci[1]):.0%}")
         recs.append(_advice(
             "数据/难度", "高",
-            f"{shared}/{n_unique} 个失败样本为全体已评测变体共识失败",
+            f"{shared}/{n_unique} 个失败样本为全体已评测变体共识失败{ci_s}",
             "失败以共识为主：优先怀疑数据/构造/内在难度，而不是方法本身；"
             "先修数据再比方法，否则结论会指向错误的对象",
             "人工复核共识失败样例的标注与可解性；修正后重跑评测再对比"))
@@ -1249,7 +1255,8 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     if len(variants) < 2:
         return {"variants": variants, "reference": reference,
                 "n_unique_failed_items": len(items),
-                "n_shared_all_failures": 0, "shared_failures": [],
+                "n_shared_all_failures": 0,
+                "shared_all_ci95": None, "shared_failures": [],
                 "per_variant": {}, "recommendations": [],
                 "note": "少于 2 个变体的错误样本，无法做跨变体对照"}
     all_set = set(variants)
@@ -1315,11 +1322,15 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     adj = holm_bonferroni([per_v[v]["mcnemar_p"] for v in tested])
     for v, p_adj in zip(tested, adj):
         per_v[v]["mcnemar_p_holm"] = p_adj
+    shared_ci = (wilson_score_ci(len(shared), len(items))
+                 if items else None)
     out = {
         "variants": variants, "reference": reference,
         "reference_available": has_ref,
         "n_unique_failed_items": len(items),
         "n_shared_all_failures": len(shared),
+        "shared_all_ci95": ([float(shared_ci[0]), float(shared_ci[1])]
+                            if shared_ci is not None else None),
         "shared_failures": [_case_brief(items[k]["example"])
                             for k in shared[:CROSS_LIST_LIMIT]],
         "per_variant": per_v,

@@ -5176,11 +5176,18 @@ def build_summary(results_dir: str, audit: dict = None,
                                            reference="standard")
         md += ["", "### 跨变体错误对照（共识失败 vs 方法特异性）", ""]
         n_shared = bad_cross["n_shared_all_failures"]
+        shared_ci = bad_cross.get("shared_all_ci95")
+        shared_ci_s = ""
+        if (isinstance(shared_ci, (list, tuple)) and len(shared_ci) == 2
+                and all(isinstance(x, (int, float)) for x in shared_ci)):
+            shared_ci_s = (f"（Wilson 95% CI {shared_ci[0]:.0%}–"
+                           f"{shared_ci[1]:.0%}）")
         md.append(
             f"各变体取最小种子的错误清单（样本集相同，可逐条对齐；RULER 已"
             f"评测但零错误的变体按“全部通过”计入，不会被误算作共识失败）：共 "
             f"{bad_cross['n_unique_failed_items']} 个不同的失败样本，"
-            f"{n_shared} 个为全体（已评测）变体共识失败——共识失败（尤其当 "
+            f"{n_shared} 个为全体（已评测）变体共识失败{shared_ci_s}——"
+            "共识失败（尤其当 "
             "standard 也错）更可能是数据/构造/内在难度问题，不应算作某一"
             "方法的问题；相对 standard 的新增错误才是该方法的特异性盲区，"
             "优先逐条分析。")
