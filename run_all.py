@@ -57,6 +57,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -436,10 +437,25 @@ def _integral_value(value):
     if isinstance(value, str):
         # Python 的 int()/float() 都接受 "1_0"（=10）：下划线写法既不是
         # 规范整数串，也不该与种子 10 视为同一身份（strict_int 同口径拒绝）。
-        if "_" in value:
+        s = value.strip()
+        if not s or "_" in s:
             return None
-        if re.fullmatch(r"[+-]?\d+", value.strip()) is not None:
-            return int(value)
+        if re.fullmatch(r"[+-]?\d+", s) is not None:
+            return int(s)
+        # 小数/科学计数法字符串必须精确解析：经 float() 往返会让
+        # "9007199254740993.0" 变成 9007199254740992，从而伪造种子/步数
+        # 身份相等。Decimal 保留十进制精确值，仅在确实为整数时转换。
+        if re.fullmatch(
+                r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?",
+                s) is None:
+            return None
+        try:
+            d = Decimal(s)
+        except (InvalidOperation, ValueError):
+            return None
+        if not d.is_finite() or d != d.to_integral_value():
+            return None
+        return int(d)
     try:
         f = float(value)
     except (TypeError, ValueError, OverflowError):
