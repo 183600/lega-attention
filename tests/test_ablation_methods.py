@@ -373,7 +373,18 @@ def test_ablate_numeric_and_seed_guards():
                        gate_head_mean=[["0.2_5", 0.5], [0.5, 0.5]])
     assert bad["applied"] is False, bad
     restore_gate_params(model, snap)
-    print("  [ok] 病灶消融：坏数值/截断种子显式拒绝，头置换仍确定性非恒等")
+    # 快照形状不符时 copy_ 会按广播静默写入：必须显式拒绝，不能留下半恢复
+    # 的门控参数。
+    bad_snap = dict(snap)
+    bad_snap[next(iter(bad_snap))] = torch.zeros(1)
+    try:
+        restore_gate_params(model, bad_snap)
+        raise AssertionError("形状不符的快照应显式报错")
+    except (ValueError, RuntimeError):
+        pass
+    restore_gate_params(model, snap)
+    print("  [ok] 病灶消融：坏数值/截断种子显式拒绝，头置换仍确定性非恒等；"
+          "快照形状不符不静默广播")
 
 
 

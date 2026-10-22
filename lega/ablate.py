@@ -214,14 +214,27 @@ def snapshot_gate_params(model) -> Dict[str, torch.Tensor]:
 
 
 def restore_gate_params(model, snapshot: Mapping[str, torch.Tensor]) -> None:
-    """把门控参数恢复到快照；缺失参数显式报错（不能静默留下病灶）。"""
+    """把门控参数恢复到快照；缺失/形状不符显式报错（不能静默留下病灶）。
+
+    形状不符时 ``copy_`` 会按广播规则写入而不报错，可能只改一部分门控值；
+    恢复失败必须显式暴露，不能把被污染的模型继续用于后续病灶评测。
+    """
     if not snapshot:
         raise ValueError("门控参数快照为空：该模型没有可恢复的门控参数")
     seen = set()
     with torch.no_grad():
         for name, p in model.named_parameters():
             if name in snapshot:
-                p.copy_(snapshot[name])
+                value = snapshot[name]
+                if not torch.is_tensor(value):
+                    raise ValueError(
+                        f"恢复门控参数失败：快照 {name} 不是张量"
+                        f"（{type(value).__name__}）")
+                if tuple(value.shape) != tuple(p.shape):
+                    raise ValueError(
+                        f"恢复门控参数失败：{name} 形状不一致 "
+                        f"（快照 {tuple(value.shape)} vs 模型 {tuple(p.shape)}）")
+                p.copy_(value)
                 seen.add(name)
     missing = sorted(set(snapshot) - seen)
     if missing:
