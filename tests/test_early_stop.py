@@ -335,6 +335,70 @@ def test_train_early_stop_end_to_end():
     print("  [ok] train 端到端早停（CLI 覆盖 + 标记落盘 + 默认关闭兼容）")
 
 
+def test_train_rerun_same_seed_is_bitwise_reproducible_on_cpu():
+    """同机同 seed 重跑：初始化、数据顺序、优化后权重与日志必须一致。
+
+    仅记录 seed 不够：本测试真实重跑两次 tiny 训练，逐位比较两个 run 的
+    init_state_fingerprint / data_order_sha256 / 最终权重张量 / 训练损失，
+    把“同机重跑稳定”从文档承诺变成可执行断言。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg = _cfg()
+        cfg["lr"] = 3e-3
+        out1 = os.path.join(tmp, "run1")
+        out2 = os.path.join(tmp, "run2")
+        _run_train(cfg, data_dir, out1)
+        _run_train(cfg, data_dir, out2)
+
+        def _load(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        m1 = _load(os.path.join(out1, "run_manifest.json"))
+        m2 = _load(os.path.join(out2, "run_manifest.json"))
+        assert m1["init_state_fingerprint"] == m2["init_state_fingerprint"]
+        assert m1["data_order_sha256"] == m2["data_order_sha256"]
+        assert m1["config_used_sha256"] == m2["config_used_sha256"]
+        # 逐随机源种子 + RNG 状态短指纹必须完全一致，且各自声明可复算
+        for key in ("rng_fingerprints", "data_order_rng_fingerprint",
+                    "python_random", "numpy_global", "torch_cpu"):
+            assert m1["seed_report"][key] == m2["seed_report"][key], key
+        assert m1["seed_report"]["rng_fingerprints_match_expected"] is True
+        assert m2["seed_report"]["rng_fingerprints_match_expected"] is True
+        e1 = _load(os.path.join(out1, "eval.json"))
+        e2 = _load(os.path.join(out2, "eval.json"))
+        assert e1["data_order_sha256"] == e2["data_order_sha256"]
+        assert e1["val_loss"] == e2["val_loss"]
+        assert e1["tokens_seen"] == e2["tokens_seen"]
+        l1 = load_train_log(os.path.join(out1, "train_log.jsonl"))
+        l2 = load_train_log(os.path.join(out2, "train_log.jsonl"))
+        # 墙钟字段（time/step_time_ms）天然不同；其余训练数值必须逐位一致。
+        drop = ("time", "step_time_ms")
+        assert [{k: v for k, v in r.items() if k not in drop} for r in l1] == \
+            [{k: v for k, v in r.items() if k not in drop} for r in l2]
+        c1 = torch.load(os.path.join(out1, "model.pt"), map_location="cpu",
+                        weights_only=True)
+        c2 = torch.load(os.path.join(out2, "model.pt"), map_location="cpu",
+                        weights_only=True)
+        s1, s2 = c1["state_dict"], c2["state_dict"]
+        assert set(s1) == set(s2)
+        for name in s1:
+            assert torch.equal(s1[name], s2[name]), name
+        b1 = torch.load(os.path.join(out1, "model_best.pt"),
+                        map_location="cpu", weights_only=True)
+        b2 = torch.load(os.path.join(out2, "model_best.pt"),
+                        map_location="cpu", weights_only=True)
+        assert set(b1["state_dict"]) == set(b2["state_dict"])
+        for name in b1["state_dict"]:
+            assert torch.equal(b1["state_dict"][name],
+                               b2["state_dict"][name]), name
+    print("  [ok] 同机同 seed 重跑：初始化/数据顺序/权重/日志逐位一致")
+
+
 def test_final_eval_improvement_resets_patience_counter(monkeypatch):
     """最终补评测若刷新历史最优，evals_since_best 必须归零。
 
