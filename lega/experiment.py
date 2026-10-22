@@ -562,7 +562,7 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
                             time_end: str = None, sanity=None, runs=None,
                             artifacts=None, extra=None,
                             registration=None, config=None,
-                            worktree=None) -> dict:
+                            worktree=None, seed_audit=None) -> dict:
     """组装标准台账记录；字段与 config_used.json/run_manifest.json 同口径。
 
     registration（可选）为预注册完整性快照：登记表指纹 + 锁链校验结论
@@ -587,6 +587,10 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
         "config": config,
         "variants": [str(v) for v in variants],
         "seeds": [seed_int(s, "seed") for s in seeds],
+        # 声明式逐 seed 随机源计划（见 utils.seed_plan）：started 记录因此
+        # 在训练尚未产出 run_manifest 时也带种子审计；实际 RNG 状态指纹
+        # 仍在各 run 的 seed_report 中。
+        "seed_audit": seed_audit,
         "smoke": bool(smoke),
         "argv": [str(a) for a in argv],
         "git": git,

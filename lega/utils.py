@@ -373,6 +373,35 @@ def seed_report(seed: int) -> dict:
     }
 
 
+def seed_plan(seed: int) -> dict:
+    """声明式种子计划：不修改任何全局 RNG，供流水线启动时先落盘审计。
+
+    ``set_seed`` 的实际生效证据保存在各 run 的 ``run_manifest.seed_report``
+    （含真实 RNG 状态指纹）。但 run_all 在启动时（训练子进程尚未运行、台账
+    刚写入 started）也需要回答“这轮准备覆盖哪些 seed、数据顺序 RNG 会是
+    什么”。本函数只做纯查询：
+      * 逐随机源声明将使用的 seed（Python/NumPy/PyTorch/CUDA/PYTHONHASHSEED）；
+      * 由 seed 独立复算的 data_rng 初始状态短指纹，第三方可核对；
+      * ``is_plan=True`` 明确这是计划而非“已生效”证据，实际指纹见
+        ``run_manifest.seed_report``。
+    不调用 set_seed，因此不会消耗/改变调用方的任何随机源。
+    """
+    seed = seed_int(seed, "seed")
+    return {
+        "seed": seed,
+        "is_plan": True,
+        "python_random": seed,
+        "numpy_global": seed,
+        "torch_cpu": seed,
+        "torch_cuda": seed if torch.cuda.is_available() else None,
+        # 仅对之后启动的子进程生效；父进程自身哈希盐在解释器启动时已固定
+        "pythonhashseed_child_env": str(seed),
+        "data_order_seed": seed,
+        "data_order_rng_fingerprint": data_rng_state_fingerprint(seed),
+        "verification": "run_manifest.seed_report（实际 RNG 状态指纹）",
+    }
+
+
 def now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 

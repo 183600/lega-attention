@@ -17,7 +17,7 @@ from lega.repro import (build_run_manifest, data_fingerprint, git_info,
                         test_data_fingerprint as _test_data_fingerprint,
                         worktree_state, write_worktree_patch)
 from lega.utils import (data_rng, data_rng_state_fingerprint, set_seed,
-                        seed_report, state_dict_fingerprint)
+                        seed_plan, seed_report, state_dict_fingerprint)
 
 
 def test_set_seed_covers_python_numpy_torch():
@@ -264,6 +264,35 @@ def test_seed_report_covers_all_random_sources():
     json.dumps(rep)
     print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA)、数据顺序 RNG "
           "与确定性开关")
+
+
+def test_seed_plan_is_side_effect_free_audit():
+    """启动期种子计划：逐源声明 + 可复算的数据顺序指纹，且不消耗全局 RNG。"""
+    set_seed(77)
+    before = (random.random(), float(np.random.rand()), torch.rand(2).tolist())
+    set_seed(77)
+    plan = seed_plan(77)
+    after = (random.random(), float(np.random.rand()), torch.rand(2).tolist())
+    # seed_plan 只查询，不改变调用方已播种的随机流（否则会改变实验本身）
+    assert before == after
+    assert plan["seed"] == 77 and plan["is_plan"] is True
+    for key in ("python_random", "numpy_global", "torch_cpu",
+                "data_order_seed"):
+        assert plan[key] == 77, (key, plan)
+    assert plan["torch_cuda"] in (None, 77)
+    assert plan["pythonhashseed_child_env"] == "77"
+    assert plan["data_order_rng_fingerprint"] == \
+        data_rng_state_fingerprint(77)
+    json.dumps(plan)
+    # 非法 seed 与 set_seed 同口径拒绝（bool/越界）
+    for bad in (True, -1, 2 ** 32):
+        try:
+            seed_plan(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"seed_plan 未拒绝非法 seed: {bad!r}")
+    print("  [ok] seed_plan 提供逐源声明/数据顺序指纹且无 RNG 副作用")
 
 
 def test_seed_report_rng_fingerprints_are_seed_evidence():

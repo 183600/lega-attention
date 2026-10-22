@@ -193,8 +193,10 @@ def test_experiment_record_embeds_resolved_hyperparameters():
         argv=["run_all.py"], git={"commit": "c" * 40, "dirty": False},
         data_fingerprint="fp", runtime={"torch": "x"}, out_root="out/t",
         results_dir="results/t", time_start="2026-01-01 00:00:00",
-        config={"lr": 3e-4, "steps": 100, "seeds": [1]})
+        config={"lr": 3e-4, "steps": 100, "seeds": [1]},
+        seed_audit={"1": {"seed": 1, "is_plan": True}})
     assert rec["config"] == {"lr": 3e-4, "steps": 100, "seeds": [1]}
+    assert rec["seed_audit"] == {"1": {"seed": 1, "is_plan": True}}
     # 未提供 config 的旧调用方保持兼容（字段为 None）
     rec2 = build_experiment_record(
         run_id="r2", status="started", tag="t", config_path="c.json",

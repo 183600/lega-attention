@@ -97,7 +97,7 @@ from lega.utils import (bootstrap_mean_ci, config_bool,
                         min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
                         paired_t_test, save_json,
-                        seed_int, strict_int)  # noqa: E402
+                        seed_int, seed_plan, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
@@ -6793,6 +6793,9 @@ def main():
         "config_file": args.config,
         "config_sha256": config_sha256,
         "seeds": seeds,
+        # 逐 seed 的声明式审计：各随机源将使用的 seed 与可独立复算的数据
+        # 顺序 RNG 初始指纹。实际生效证据在各 run_manifest.seed_report。
+        "seed_audit": {str(s): seed_plan(s) for s in seeds},
         "variants": variants,
         "smoke": bool(args.smoke),
         "git": git,
@@ -6816,6 +6819,9 @@ def main():
         # 快照而不是引用：started/completed 两条记录必须对应同一份配置
         config=json.loads(json.dumps(cfg)), variants=variants,
         seeds=seeds,
+        # started 就落盘种子计划：即使进程随后崩溃、逐 run manifest 尚未
+        # 生成，台账仍能回答“准备用哪些 seed、数据顺序 RNG 应是什么”。
+        seed_audit=repro["seed_audit"],
         smoke=bool(args.smoke), argv=sys.argv, git=git,
         worktree=worktree,
         data_fingerprint=data_digest, runtime=repro["runtime"],
