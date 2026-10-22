@@ -1462,3 +1462,13 @@ def test_window_improvement_synthesis_tolerates_malformed_cases_and_rate():
             "cases": [], "gold_in_context_rate": bad})
         assert isinstance(out, list) and out, (bad, out)
     print("  [ok] 窗口改进方向：坏 cases/坏可见率安全降级")
+
+
+def test_badcase_median_survives_huge_even_values():
+    """偶数个合法超大观测的中位数不能因 a+b 溢出变成 inf。"""
+    from lega.badcase import _median
+    assert _median([1e308, 1e308]) == 1e308
+    assert _median([1e308, 1e308, 1e308]) == 1e308
+    assert _median([1.0, 2.0, 3.0, 4.0]) == 2.5
+    assert _median([None, True, float("nan")]) is None
+    print("  [ok] badcase 中位数：超大偶数样本不溢出，坏值剔除")

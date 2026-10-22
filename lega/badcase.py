@@ -758,7 +758,16 @@ def _median(vals):
         f = _finite_float(v)
         if f is not None:
             out.append(f)
-    return statistics.median(out) if out else None
+    if not out:
+        return None
+    out.sort()
+    n = len(out)
+    mid = n // 2
+    if n % 2:
+        return float(out[mid])
+    # 偶数样本朴素 (a+b)/2 在接近 float 上限的合法观测上会溢出成 inf；
+    # 先各自除以 2 再相加保持有限。
+    return float(out[mid - 1] / 2.0 + out[mid] / 2.0)
 
 
 def _mean(vals):
