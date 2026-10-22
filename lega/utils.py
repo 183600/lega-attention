@@ -955,16 +955,23 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
     k = int(min(max(k, 0), n))
     z = statistics.NormalDist().inv_cdf(1.0 - (1.0 - ci) / 2.0)
     z2 = z * z
+    # 用整数除法先求 1/n 与 1/n²：n 是合法大整数（如 10**400）时
+    # ``z2 / n`` 会先把 n 转成 float 并抛 OverflowError，而 ``1 / n``
+    # 走 Python 的整数真除法，可安全下溢到 0.0。公式与原来逐项等价。
+    n_inv = 1 / n
+    n2_inv = 1 / (n * n)
+    z2_n = z2 * n_inv
     if k == 0:
         # 端点闭式：p=0 时区间为 [0, z²/(n+z²)]（避免浮点残差 1e-17 进 JSON）
-        return 0.0, z2 / (n + z2)
+        return 0.0, z2_n / (1.0 + z2_n)
     if k == n:
         # p=1 时区间为 [n/(n+z²), 1]
-        return n / (n + z2), 1.0
+        return 1.0 / (1.0 + z2_n), 1.0
     p = k / n
-    den = 1.0 + z2 / n
-    center = (p + z2 / (2.0 * n)) / den
-    half = z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n)) / den
+    den = 1.0 + z2_n
+    center = (p + z2_n / 2.0) / den
+    half = z * math.sqrt(p * (1.0 - p) * n_inv
+                         + z2 * n2_inv / 4.0) / den
     return max(0.0, center - half), min(1.0, center + half)
 
 

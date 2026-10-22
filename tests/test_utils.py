@@ -778,7 +778,16 @@ def test_wilson_score_ci():
         else:
             raise AssertionError(f"非法 ci 未被拒绝: {bad!r}")
     assert wilson_score_ci("8", "10", ci="0.95")
-    print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄/非法参数拒绝）")
+    # 合法大整数计数不能让 z²/n 的 int→float 转换溢出；n 极大时区间宽度
+    # 在 float 精度下趋近 0，但端点与中心仍必须合法。
+    huge_n = 10 ** 400
+    lo0, hi0 = wilson_score_ci(0, huge_n)
+    assert lo0 == 0.0 and 0.0 <= hi0 < 1.0, (lo0, hi0)
+    lo1, hi1 = wilson_score_ci(huge_n, huge_n)
+    assert 0.0 < lo1 <= 1.0 and hi1 == 1.0, (lo1, hi1)
+    lo_mid, hi_mid = wilson_score_ci(huge_n // 2, huge_n)
+    assert 0.0 <= lo_mid <= hi_mid <= 1.0, (lo_mid, hi_mid)
+    print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄/大整数/非法参数拒绝）")
 
 
 def test_calibration_metrics_brier_ece_and_baseline():
