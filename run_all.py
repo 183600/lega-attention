@@ -8241,7 +8241,10 @@ def build_summary(results_dir: str, audit: dict = None,
                 return None
             vals.sort()
             n = len(vals)
-            return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+            if n % 2:
+                return vals[n // 2]
+            # 合法但接近 float 上限的计时/内存中位数：先加后除会溢出。
+            return vals[n // 2 - 1] / 2.0 + vals[n // 2] / 2.0
 
         def _train_peak_mem_mb(v):
             """该变体各种子训练进程峰值的跨种子中位数（MB；旧 eval.json 无→None）。
@@ -8259,7 +8262,10 @@ def build_summary(results_dir: str, audit: dict = None,
                 return None
             vals.sort()
             n = len(vals)
-            return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+            if n % 2:
+                return vals[n // 2]
+            # 合法但接近 float 上限的计时/内存中位数：先加后除会溢出。
+            return vals[n // 2 - 1] / 2.0 + vals[n // 2] / 2.0
 
         md.append("")
         md.append("| 变体 | PPL 相对基线 | p_adj(PPL) | RULER Δ(pp) | p_adj(RULER) "

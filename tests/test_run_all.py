@@ -1672,7 +1672,25 @@ def test_summary_tolerates_huge_int_train_stats():
         assert row.get("eff_train_peak_mem_mb") is None, row
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] 训练 ms/step 与峰值内存的超大整数安全降级")
+    # 多个种子都是合法但接近上限的有限计时：偶数个中位数的“先加后除”
+    # 会溢出成 inf，汇总字段必须仍是有限值。
+    tmp2 = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            for seed in (1, 2):
+                _write_json(os.path.join(tmp2, f"eval_{v}_seed{seed}.json"), {
+                    "variant": v, "seed": seed, "val_ppl": 10.0,
+                    "val_loss": 2.3, "gate_mean": 0.5, "n_params": 100,
+                    "n_gate_extra": 0, "train_step_time_ms": 1e308,
+                    "train_peak_mem_mb": 1e308, "split": "val"})
+        out2 = build_summary(tmp2)
+        for r in out2["rows"]:
+            assert r["eff_train_step_ms"] == 1e308, r
+            assert r["eff_train_peak_mem_mb"] == 1e308, r
+            assert math.isfinite(r["eff_train_step_ms"]), r
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+    print("  [ok] 训练 ms/step 与峰值内存的超大整数/上限值安全降级")
 
 
 def test_summary_tolerates_huge_int_tuning_loo_counts():
