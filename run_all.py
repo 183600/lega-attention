@@ -56,6 +56,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -319,6 +320,24 @@ def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
     append_record(ledger, build_experiment_record(
         status="aborted", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
         sanity=sanity, extra=extra, **ledger_common))
+
+
+@contextmanager
+def abort_ledger_on_failure(ledger: str, ledger_common: dict, stage):
+    """任一阶段抛错时为已 started 的轮次补写 aborted 终态。"""
+    try:
+        yield
+    except BaseException as e:
+        stage_name = stage() if callable(stage) else stage
+        try:
+            append_aborted_record(
+                ledger, ledger_common, error="postrun_stage_failed",
+                stage=str(stage_name),
+                returncode=getattr(e, "returncode", None))
+        except Exception as ledger_err:
+            print(f"[repro] ⚠ aborted 台账写入失败（{ledger_err}）；"
+                  f"原异常仍将抛出")
+        raise
 
 
 def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
@@ -6538,102 +6557,110 @@ def main():
         print(f"[badcase] {os.path.basename(fp)}: 最差窗口 {ana['n_windows']} 个"
               f" —— {top} -> worstcases_*.md")
 
-    if not args.skip_latency:
-        # 显式给出基准的变体清单：lega.latency 的默认值不含消融变体，
-        # 不传会让汇总表的消融变体对应列恒为 "-"。多种子时按各变体首个
-        # 种子的 checkpoint 测量（该指标由架构决定，与训练种子无关）。
-        lat_variants = ",".join(dict.fromkeys(["standard", "standard_sdpa"] + variants))
-        run([py, "-m", "lega.latency", "--config", args.config,
-             "--data_dir", args.data_dir, "--ckpt_dir", out_root,
-             "--out", os.path.join(results_dir, "latency.json"),
-             "--variants", lat_variants,
-             "--device", args.device] + (["--smoke"] if args.smoke else []))
+    post_stage = "latency"
+    with abort_ledger_on_failure(ledger, ledger_common, lambda: post_stage):
+        if not args.skip_latency:
+            # 显式给出基准的变体清单：lega.latency 的默认值不含消融变体，
+            # 不传会让汇总表的消融变体对应列恒为 "-"。多种子时按各变体首个
+            # 种子的 checkpoint 测量（该指标由架构决定，与训练种子无关）。
+            lat_variants = ",".join(dict.fromkeys(["standard", "standard_sdpa"] + variants))
+            run([py, "-m", "lega.latency", "--config", args.config,
+                 "--data_dir", args.data_dir, "--ckpt_dir", out_root,
+                 "--out", os.path.join(results_dir, "latency.json"),
+                 "--variants", lat_variants,
+                 "--device", args.device] + (["--smoke"] if args.smoke else []))
 
-    if not args.skip_plots:
-        run([py, "-m", "lega.plots", "--results_dir", results_dir,
-             "--train_root", out_root])
+        post_stage = "plots"
+        if not args.skip_plots:
+            run([py, "-m", "lega.plots", "--results_dir", results_dir,
+                 "--train_root", out_root])
 
-    # 训练曲线诊断：曲线体检（过拟合/欠拟合/发散/NaN）在汇总前完成，
-    # 结果落盘 curve_diagnosis.json 并进入 summary.md
-    diagnose_training_curves(chain, args.data_dir, results_dir)
+        # 训练曲线诊断：曲线体检（过拟合/欠拟合/发散/NaN）在汇总前完成，
+        # 结果落盘 curve_diagnosis.json 并进入 summary.md
+        post_stage = "curve_diagnosis"
+        diagnose_training_curves(chain, args.data_dir, results_dir)
 
-    # 数据协议防泄漏报告（prepare_bins 生成）：在所有评测结束后重新读取，连同
-    # 实时测试集访问账本复制进 results，供汇总与审计（测试账本已在本轮更新）。
-    data_report = load_data_report(args.data_dir)
-    if data_report is None:
-        print("[repro] 警告：数据目录缺少可解析的 data_report.json"
-              "（旧数据或未走统一入口），汇总将标注防泄漏自检缺失")
-    if data_report is not None:
-        data_report["test_access"] = summarize_test_access(
-            read_test_access_log(args.data_dir))
-        save_json(data_report, os.path.join(results_dir, "data_report.json"))
-        print(f"[repro] 防泄漏报告 -> {os.path.join(results_dir, 'data_report.json')}")
-    else:
-        print("[repro] 警告：数据目录缺少 data_report.json（旧数据或未走统一入口），"
-              "汇总将标注防泄漏自检缺失")
+        # 数据协议防泄漏报告（prepare_bins 生成）：在所有评测结束后重新读取，连同
+        # 实时测试集访问账本复制进 results，供汇总与审计（测试账本已在本轮更新）。
+        post_stage = "data_report"
+        data_report = load_data_report(args.data_dir)
+        if data_report is None:
+            print("[repro] 警告：数据目录缺少可解析的 data_report.json"
+                  "（旧数据或未走统一入口），汇总将标注防泄漏自检缺失")
+        if data_report is not None:
+            data_report["test_access"] = summarize_test_access(
+                read_test_access_log(args.data_dir))
+            save_json(data_report, os.path.join(results_dir, "data_report.json"))
+            print(f"[repro] 防泄漏报告 -> {os.path.join(results_dir, 'data_report.json')}")
+        else:
+            print("[repro] 警告：数据目录缺少 data_report.json（旧数据或未走统一入口），"
+                  "汇总将标注防泄漏自检缺失")
 
-    audit = verify_controlled_setup(out_root, variants, seeds, n_seeds,
-                                    expected_data_digest=data_digest)
-    build_summary(results_dir, audit=audit, data_report=data_report,
-                  preloaded=preloaded)
+        post_stage = "audit"
+        audit = verify_controlled_setup(out_root, variants, seeds, n_seeds,
+                                        expected_data_digest=data_digest)
+        post_stage = "summary"
+        build_summary(results_dir, audit=audit, data_report=data_report,
+                      preloaded=preloaded)
 
-    # 收尾台账：最终指标（逐 run 的 eval.json）+ 全部结果文件的 SHA-256。
-    # 曲线/结果文件后续被覆盖或手改，都能通过哈希与当时记录比对发现。
-    # evaluate 阶段已对本 run 的 model_best.pt 做过全量哈希（写在
-    # results_dir/eval_<variant><suffix>.json 的 ckpt/ckpt_sha256）；
-    # 路径匹配时台账使用该值，否则（未评测/旧评测文件）重算。
-    known_ckpt = {}
-    for v, seed, _vdir, suffix in chain:
+        # 收尾台账：最终指标（逐 run 的 eval.json）+ 全部结果文件的 SHA-256。
+        # 曲线/结果文件后续被覆盖或手改，都能通过哈希与当时记录比对发现。
+        # evaluate 阶段已对本 run 的 model_best.pt 做过全量哈希（写在
+        # results_dir/eval_<variant><suffix>.json 的 ckpt/ckpt_sha256）；
+        # 路径匹配时台账使用该值，否则（未评测/旧评测文件）重算。
+        post_stage = "ledger_finalize"
+        known_ckpt = {}
+        for v, seed, _vdir, suffix in chain:
+            try:
+                with open(os.path.join(results_dir, f"eval_{v}{suffix}.json"),
+                          "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except (OSError, ValueError):
+                rec = None
+            if isinstance(rec, dict) and rec.get("ckpt_sha256") and rec.get("ckpt"):
+                known_ckpt[(v, seed)] = (str(rec["ckpt_sha256"]), str(rec["ckpt"]))
+        run_snapshots = []
+        for v, seed, vdir, suffix in chain:
+            sha, ckpt = known_ckpt.get((v, seed), (None, None))
+            run_snapshots.append(snapshot_train_run(
+                v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt,
+                heldout_path=os.path.join(results_dir, f"eval_{v}{suffix}.json")))
+        result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
+                        if os.path.isfile(p)]
+        # 收尾身份核对：长实验期间代码/数据若被改动，开始时记录的 commit/指纹
+        # 已不足以代表整轮实验。把结束快照与漂移结论一并写入 completed 记录，
+        # 让“全程同一版本”成为可核对的事实而不是假设。
+        end_git = git_info()
+        end_worktree = worktree_state()
         try:
-            with open(os.path.join(results_dir, f"eval_{v}{suffix}.json"),
-                      "r", encoding="utf-8") as f:
-                rec = json.load(f)
-        except (OSError, ValueError):
-            rec = None
-        if isinstance(rec, dict) and rec.get("ckpt_sha256") and rec.get("ckpt"):
-            known_ckpt[(v, seed)] = (str(rec["ckpt_sha256"]), str(rec["ckpt"]))
-    run_snapshots = []
-    for v, seed, vdir, suffix in chain:
-        sha, ckpt = known_ckpt.get((v, seed), (None, None))
-        run_snapshots.append(snapshot_train_run(
-            v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt,
-            heldout_path=os.path.join(results_dir, f"eval_{v}{suffix}.json")))
-    result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
-                    if os.path.isfile(p)]
-    # 收尾身份核对：长实验期间代码/数据若被改动，开始时记录的 commit/指纹
-    # 已不足以代表整轮实验。把结束快照与漂移结论一并写入 completed 记录，
-    # 让“全程同一版本”成为可核对的事实而不是假设。
-    end_git = git_info()
-    end_worktree = worktree_state()
-    try:
-        end_data_digest = data_fingerprint(args.data_dir)["digest"]
-    except FileNotFoundError:
-        end_data_digest = None
-    drift = provenance_drift(
-        {"git": git, "worktree": worktree,
-         "data_fingerprint": data_digest},
-        {"git": end_git, "worktree": end_worktree,
-         "data_fingerprint": end_data_digest})
-    tracking_end = {
-        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "git": end_git,
-        "worktree": end_worktree,
-        "data_fingerprint": end_data_digest,
-        "drift": drift,
-    }
-    if drift["changed"]:
-        print("[repro] ⚠ 实验期间代码或数据身份发生变化："
-              + "; ".join(f"{m['field']} {m['start']} -> {m['end']}"
-                          for m in drift["mismatches"])
-              + "；该轮 completed 记录已显式标注，结果不得声称对应单一版本")
-    append_record(ledger, build_experiment_record(
-        status="completed", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
-        sanity={"executed": bool(sanity), "verdict": sanity},
-        runs=run_snapshots,
-        artifacts=collect_artifacts(result_files, rel_to=ROOT),
-        extra={"tracking_end": tracking_end},
-        **ledger_common))
-    print(f"[repro] 实验台账已记录 completed（run_id={run_id}）-> {ledger}")
+            end_data_digest = data_fingerprint(args.data_dir)["digest"]
+        except FileNotFoundError:
+            end_data_digest = None
+        drift = provenance_drift(
+            {"git": git, "worktree": worktree,
+             "data_fingerprint": data_digest},
+            {"git": end_git, "worktree": end_worktree,
+             "data_fingerprint": end_data_digest})
+        tracking_end = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "git": end_git,
+            "worktree": end_worktree,
+            "data_fingerprint": end_data_digest,
+            "drift": drift,
+        }
+        if drift["changed"]:
+            print("[repro] ⚠ 实验期间代码或数据身份发生变化："
+                  + "; ".join(f"{m['field']} {m['start']} -> {m['end']}"
+                              for m in drift["mismatches"])
+                  + "；该轮 completed 记录已显式标注，结果不得声称对应单一版本")
+        append_record(ledger, build_experiment_record(
+            status="completed", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
+            sanity={"executed": bool(sanity), "verdict": sanity},
+            runs=run_snapshots,
+            artifacts=collect_artifacts(result_files, rel_to=ROOT),
+            extra={"tracking_end": tracking_end},
+            **ledger_common))
+        print(f"[repro] 实验台账已记录 completed（run_id={run_id}）-> {ledger}")
     print(f"\n[run_all] 全部完成；结果目录: {results_dir}")
 
 

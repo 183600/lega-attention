@@ -41,7 +41,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       evaluate_registered_hypotheses,
                       load_registered_hypotheses, ngram_baseline_comparison,
                       parse_variants, registration_scope_check,
-                      record_aborted_sanity,
+                      abort_ledger_on_failure, record_aborted_sanity,
                       resolve_ngram_split, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
@@ -3487,6 +3487,42 @@ def test_append_aborted_record_covers_run_chain_failures():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] run 链失败落 aborted（阶段/变体/退出码）")
+
+
+def test_abort_ledger_context_records_postrun_stage_failure():
+    """训练链之后任何阶段失败都必须把 started 收成 aborted（含当前阶段）。"""
+    from lega.experiment import read_records
+    tmp = tempfile.mkdtemp()
+    try:
+        ledger = os.path.join(tmp, "experiments.jsonl")
+        common = dict(
+            run_id="rid3", tag="t", config_path="configs/tiny.json",
+            config_sha256="c" * 64, config={"lr": 1e-3}, variants=["lega"],
+            seeds=[7], smoke=False, argv=["run_all.py"], git={},
+            data_fingerprint="fp", runtime={}, out_root="out/t",
+            results_dir="results/t", time_start="2026-01-01 00:00:00")
+        stage = {"name": "latency"}
+        try:
+            with abort_ledger_on_failure(ledger, common, lambda: stage["name"]):
+                stage["name"] = "plots"
+                raise subprocess.CalledProcessError(3, ["plots-cmd"])
+        except subprocess.CalledProcessError as e:
+            assert e.returncode == 3
+        else:
+            raise AssertionError("原异常必须继续抛出")
+        rec = read_records(ledger)[0]
+        assert rec["status"] == "aborted"
+        assert rec["extra"] == {"error": "postrun_stage_failed",
+                                "stage": "plots", "returncode": 3}
+        # 正常退出不得写 aborted；记录阶段快照而不是事后猜测
+        ledger2 = os.path.join(tmp, "exp2.jsonl")
+        stage["name"] = "summary"
+        with abort_ledger_on_failure(ledger2, common, lambda: stage["name"]):
+            pass
+        assert read_records(ledger2) == []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] postrun 阶段失败自动补 aborted（阶段/退出码）")
 
 
 def test_summary_tolerates_malformed_sanity_and_baseline_tuning():
