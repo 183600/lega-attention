@@ -751,17 +751,19 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             # True，把畸形清单伪装成已通过的 sanity 闸门。
             failed_checks = msanity.get("failed_checks")
             malformed = msanity.get("malformed")
+            checks_consistent = msanity.get("checks_consistent")
             passed = msanity.get("passed")
             if isinstance(failed_checks, list):
                 out["sanity_failed_checks"] = failed_checks
-            if isinstance(msanity.get("checks_consistent"), bool):
-                out["sanity_checks_consistent"] = \
-                    msanity["checks_consistent"]
+            if isinstance(checks_consistent, bool):
+                out["sanity_checks_consistent"] = checks_consistent
             if isinstance(malformed, bool):
                 out["sanity_malformed"] = malformed
-            # 失败检查项/损坏记录与 passed=true 矛盾时，以检查结果为准：
-            # 旧 manifest 可能由旧版 train 写入，不能因字段存在就继承 PASS。
-            gate_broken = (bool(failed_checks) or malformed is True)
+            # 失败检查项/损坏记录/自相矛盾的 checks 与 passed=true 矛盾时，
+            # 以检查结果为准：旧 manifest 可能由旧版 train 写入，不能因字段
+            # 存在就继承 PASS。
+            gate_broken = (bool(failed_checks) or malformed is True
+                           or checks_consistent is False)
             if isinstance(passed, bool) and not hard_mismatches:
                 out["sanity_passed"] = bool(passed) and not gate_broken
             elif gate_broken:

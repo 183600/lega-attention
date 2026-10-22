@@ -537,6 +537,12 @@ def test_load_provenance_rejects_stale_sanity_evidence():
                                               "verified": True}})
         assert malformed_pass["sanity_passed"] is False
         assert malformed_pass["sanity_malformed"] is True
+        inconsistent = _write({"present": True, "passed": True,
+                               "checks_consistent": False,
+                               "identity": {"hard_mismatches": [],
+                                            "verified": True}})
+        assert inconsistent["sanity_passed"] is False
+        assert inconsistent["sanity_checks_consistent"] is False
         # 旧清单/无法核对：保留 PASS 但不冒充已验证
         legacy = _write({"present": True, "passed": True, "variant": "lega"})
         assert legacy["sanity_passed"] is True
