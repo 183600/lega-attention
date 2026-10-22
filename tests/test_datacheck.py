@@ -945,6 +945,13 @@ def test_write_clean_lines_preserves_blank_line_boundaries():
                 pass
             else:
                 raise AssertionError(f"非法 max_tokens 未被拒绝: {bad!r}")
+        # 合法但极大的整数预算不应因 int→float 溢出而崩溃：语义上等同于
+        # “不截断”，两行必须完整写入。
+        huge = os.path.join(d, "huge_budget.txt")
+        n_huge = write_clean_lines(io.StringIO("a\nb\n"), huge, 10 ** 400)
+        with open(huge, "r", encoding="utf-8") as f:
+            assert f.read() == "a\nb"
+        assert n_huge == 3
     print("  [ok] 数据准备：空行块边界被保留，截断仍只发生在完整行")
 
 

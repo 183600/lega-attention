@@ -169,7 +169,10 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
         # 负上限会立刻截断第一行，产出三个空 split，却仍可能被后续
         # “无重叠”检查判为通过；必须在写入前显式拒绝。
         raise ValueError(f"max_tokens 不能为负，收到 {max_tokens!r}")
-    limit = int(max_tokens * 3.6 * 1.2) if max_tokens else None
+    # 3.6 字符/token × 1.2 余量 = 4.32；用整数除法而不是 `int(max_tokens *
+    # 3.6 * 1.2)`：后者在合法但极大的整数预算（如 10**400）上会因 int→float
+    # 转换溢出而抛 OverflowError，预算本应只是“不截断”却让整个数据准备失败。
+    limit = max_tokens * 432 // 100 if max_tokens else None
     tmp = dst + ".part"
     used, wrote, n_parts = 0, 0, 0
     pending_blank = False
