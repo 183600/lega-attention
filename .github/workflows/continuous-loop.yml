@@ -137,7 +137,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Configure swap (safe version)
         run: |
@@ -196,8 +196,18 @@ jobs:
             || echo "[warn] requirements-ci.txt 预热安装失败（不影响主流程，测试门会自行安装依赖）"
           exit 0
 
-      - name: Install opencode
-        run: npm i -g opencode-ai
+      - name: Install DeepSeek Harness (dsh)
+        run: |
+          npm i -g @deepseek-ai/dsh@0.2.1-rc.2
+          dsh --version
+
+      - name: Configure dsh (DeepSeek official API)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -e
+          [ -n "$DEEPSEEK_API_KEY" ] || { echo "[error] secrets.DEEPSEEK_API_KEY 未配置" >&2; exit 1; }
+          echo "[info] dsh $(dsh --version) | provider=deepseek-official | model=deepseek-flash"
 
       - name: Configure git
         run: |
@@ -207,8 +217,10 @@ jobs:
           git config i18n.commitEncoding utf-8
           git config core.quotepath false
 
-      - name: Run opencode for ~3 hours (phases per iteration)
+      - name: Run dsh for ~3 hours (phases per iteration)
         timeout-minutes: 180
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           set +e
           set -o pipefail
@@ -246,7 +258,7 @@ jobs:
           # 主力：opencode 自带的免费 deepseek —— Zen 网关 deepseek-v4.1-flash-free，
           #       在 opencode 客户端内调用免鉴权，支持 tool call 与 reasoning effort；
           # 本仓库不接入 NVIDIA NIM（integrate.api.nvidia.com）——不探测、不配置、不调用。
-          # harness 永远是 opencode：provider 一律通过 `opencode run -m ...` 调用。
+          # harness 固定为 DeepSeek Harness（dsh）：provider 一律通过 `dsh --profile headless ...` 调用。
           FREE_MODEL="opencode/deepseek-v4.1-flash-free"
           # ⭐ 兜底：免费 deepseek-v4.1-flash-free 不可用（限流/下线/调用失败）时，
           #           切换同为 Zen 网关免费的 big-pickle（Big Pickle）。
@@ -278,7 +290,7 @@ jobs:
 
           # ---------- 一次性模型探测（每个 run 只做一次） ----------
           # run 开始时探测一次，选定 SELECTED_MODEL；之后所有阶段直接
-          #   opencode run -m "$SELECTED_MODEL" "$prompt"
+          #   dsh --profile headless "$prompt"
           # 只有收到 429 / 5xx / 连接失败 / 非零退出时，才重新探测并跳过已判定失效的候选。
           # 候选顺序：免费 deepseek → big-pickle（本仓库不接入 NVIDIA）。
           # 注意：只看 /models 目录不够——必须真跑一次冒烟调用，否则会选中
@@ -287,7 +299,7 @@ jobs:
             local m="$1" extra=""
             case "$m" in "$FREE_MODEL") [ -n "$VARIANT" ] && extra="--variant $VARIANT" ;; esac
             # shellcheck disable=SC2086
-            timeout --kill-after=30 120 opencode run -m "$m" $extra "只回复两个字：OK" > /tmp/smoke_test.log 2>&1
+            timeout --kill-after=30 120 dsh --profile headless "只回复两个字：OK" > /tmp/smoke_test.log 2>&1
           }
 
           detect_provider() {
@@ -351,6 +363,40 @@ jobs:
           esac
           echo "[info] 免费deepseek=$FREE_MODEL (100%，不使用 NVIDIA NIM) | 免费路径思考强度=${VARIANT:-<不设置>} (detect=$VRESULT)"
           # run 开始时探测一次；失败也不阻塞，run_phase 需要时会再试
+          # ================= harness: DeepSeek Harness (dsh) + DeepSeek 官方 API =================
+          # 固定 provider=deepseek-official、model=deepseek-flash；API key 从启动环境
+          # DEEPSEEK_API_KEY 读取（headless profile 不读 GUI 凭据库）。
+          # 本段覆盖下方（或上方）原有的 provider 探测实现：不再探测 NVIDIA / opencode Zen。
+          SELECTED_MODEL="deepseek-official/deepseek-flash"
+          SELECTED_PROVIDER="deepseek-official"
+          CURRENT_MODEL="$SELECTED_MODEL"
+          CURRENT_PROVIDER="$SELECTED_PROVIDER"
+          pick_model() {
+            CURRENT_MODEL="deepseek-official/deepseek-flash"
+            CURRENT_PROVIDER="deepseek-official"
+            return 0
+          }
+          pick_provider() {
+            CURRENT_MODEL="deepseek-official/deepseek-flash"
+            CURRENT_PROVIDER="deepseek-official"
+            return 0
+          }
+          smoke_test() {
+            timeout --kill-after=30 180 dsh --profile headless "只回复两个字：OK" > /tmp/smoke_test.log 2>&1
+          }
+          detect_provider() {
+            SELECTED_MODEL="deepseek-official/deepseek-flash"
+            SELECTED_PROVIDER="deepseek-official"
+            CURRENT_MODEL="$SELECTED_MODEL"
+            CURRENT_PROVIDER="$SELECTED_PROVIDER"
+            export SELECTED_MODEL SELECTED_PROVIDER
+            echo "[provider] 固定使用 $SELECTED_MODEL（DeepSeek 官方 API）"
+            if smoke_test; then
+              return 0
+            fi
+            echo "[warn] dsh 冒烟测试失败（API key / 网络 / 配额）"
+            return 1
+          }
           if detect_provider; then :; else echo "[warn] 启动时未选出可用模型，第一个阶段会再探测一次"; fi
 
           i=0
@@ -469,7 +515,7 @@ jobs:
               record_model "$SELECTED_MODEL"
               echo "=========== iter #$i | phase=$phase | attempt=$attempt | model=$SELECTED_MODEL ==========="
               # shellcheck disable=SC2086
-              timeout --kill-after=180 "$budget_now" opencode run -m "$SELECTED_MODEL" $extra "$prompt" 2>&1 | tee "$OUT"
+              timeout --kill-after=180 "$budget_now" dsh --profile headless "$prompt" 2>&1 | tee "$OUT"
               local EC=$?
 
               # 成功
@@ -515,7 +561,7 @@ jobs:
 
           # ================= 测试门（每次提交后执行）=================
           # 在写代码阶段（bug / sci）的 opencode 调用提交之后触发（调用点见主循环守卫）。
-          # 每次都跑一遍本仓库的测试；跑不通 → 调用 opencode 修复 →
+          # 每次都跑一遍本仓库的测试；跑不通 → 调用 dsh 修复 →
           # 修复结果按本仓库既有提交路径落到 main/master。
           maybe_run_tests() {
             local iter="$1"
@@ -558,7 +604,7 @@ jobs:
               echo "[test-gate] 测试超时/被中断 (exit=$TG_EC)，结果不确定，本轮不修复"
               return 0
             fi
-            echo "[test-gate] 测试未通过 (exit=$TG_EC)，调用 opencode 修复"
+            echo "[test-gate] 测试未通过 (exit=$TG_EC)，调用 dsh 修复"
             local TG_FIX_BUDGET=$(( DEADLINE - $(date +%s) - 900 ))
             if [ "$TG_FIX_BUDGET" -lt 900 ]; then
               echo "[test-gate] 剩余时间不足以安排修复，仅记录失败"
