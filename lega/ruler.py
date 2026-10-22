@@ -54,7 +54,7 @@ def depth_bin(value) -> Optional[str]:
     边界按半开区间 [0,1/3)、[1/3,2/3)、[2/3,1]；位置恰好为 1 的末期样本
     必须落入 late，不能因浮点边界被丢弃。
     """
-    if value is None or isinstance(value, (bool, str, bytes)):
+    if value is None or isinstance(value, (bool, np.bool_, str, bytes)):
         return None
     try:
         d = float(value)
