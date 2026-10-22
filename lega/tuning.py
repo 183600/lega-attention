@@ -406,16 +406,37 @@ def _grid_stats(grid, trials, seeds):
     “最优配置”换一个种子重跑就可能翻转。多种子时按平均 val_loss 选择，
     并给出跨种子标准差，让“最优−默认”的差距可对照噪声解读。
     """
-    seed_list = [int(s) for s in seeds]
+    seed_list = []
+    for s in seeds:
+        sid = _as_int(s)
+        if sid is None:
+            raise ValueError(f"seeds 必须是整数种子，收到 {s!r}")
+        seed_list.append(sid)
     out = []
     for lr, wd in grid:
-        ts = [t for t in trials if t["lr"] == lr and t["weight_decay"] == wd]
+        ts = [t for t in trials
+              if isinstance(t, dict)
+              and t.get("lr") == lr and t.get("weight_decay") == wd]
+
+        def _best(t):
+            raw = t.get("val_loss_best")
+            if raw is None:
+                return None
+            try:
+                return _finite_number(raw, "val_loss_best")
+            except ValueError:
+                return None
+
         # 按种子去重：同一配置/种子重复跑的记录不能把均值与 n_seeds 撑大。
+        # 种子身份必须严格整数化：int(True)==1、int(1.5)==1 会把两次不同
+        # 声明折叠成同一颗种子，均值与 missing 判定随之失真。
         per_seed = {}
         for t in ts:
-            if t.get("val_loss_best") is None or t.get("seed") is None:
+            sid = _as_int(t.get("seed"))
+            best = _best(t)
+            if sid is None or best is None:
                 continue
-            per_seed[str(int(t["seed"]))] = t["val_loss_best"]
+            per_seed[str(sid)] = best
         vals = list(per_seed.values())
         mean = (sum(vals) / len(vals)) if vals else None
         std = None
@@ -424,8 +445,8 @@ def _grid_stats(grid, trials, seeds):
             std = math.sqrt(var)
         missing = [s for s in seed_list if str(s) not in per_seed]
         n_failed = sum(1 for t in ts
-                       if t.get("val_loss_best") is None
-                       or t.get("seed") is None)
+                       if _as_int(t.get("seed")) is None
+                       or _best(t) is None)
         out.append({
             "lr": lr, "weight_decay": wd,
             "n_seeds": len(per_seed), "n_failed": n_failed,

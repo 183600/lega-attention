@@ -461,7 +461,23 @@ def test_grid_stats_duplicate_success_is_not_counted_as_failure():
     assert g["n_seeds"] == 1 and g["missing_seeds"] == [8]
     assert g["n_failed"] == 1, g
     assert g["complete"] is False
-    print("  [ok] _grid_stats：重复成功去重、失败计数不虚增")
+    # 种子/损失值是身份与观测：True→1、1.5→1 的截断会把不同 trial 折叠成
+    # 同一颗种子；bool 损失也不是数值。
+    bad = [
+        {"lr": 1.0, "weight_decay": 0.1, "seed": True, "val_loss_best": 1.0},
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 1.5, "val_loss_best": 1.0},
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 7, "val_loss_best": True},
+    ]
+    g = _grid_stats([(1.0, 0.1)], bad, [7])[0]
+    assert g["n_seeds"] == 0 and g["n_failed"] == 3, g
+    assert g["missing_seeds"] == [7] and g["complete"] is False
+    try:
+        _grid_stats([(1.0, 0.1)], trials, [True])
+        raise AssertionError("选择种子 True 应显式报错")
+    except ValueError:
+        pass
+    print("  [ok] _grid_stats：重复成功去重、失败计数不虚增；"
+          "坏种子/坏损失不截断合并")
 
 
 def test_tune_excludes_partial_seed_coverage_and_dedupes_seeds():
