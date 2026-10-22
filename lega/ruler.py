@@ -102,6 +102,20 @@ def _cached_encode(tok, text: str) -> List[int]:
     return ids
 
 
+def _tokenizer_roundtrip(tok, text: str) -> bool:
+    """分词器能否无损表示 ``text``（不含 <unk> 等替换）。
+
+    字符级分词器只在 train 上拟合词表，train 没有数字时所有数值答案都会
+    编码成同一个 ``<unk>``：此时 RULER 的 gold 跨度根本无法定位，构造器
+    必须在编码前拒绝该样例（由调用方按 ContextTooSmall 记录 skipped），
+    而不是在 ``_token_span_for_text`` 里抛 AssertionError。
+    """
+    try:
+        return tok.decode(tok.encode(text)) == text
+    except Exception:
+        return False
+
+
 class ContextTooSmall(Exception):
     """上下文长度空间不足以容纳 needle + 问题（该样例跳过）。"""
 
@@ -145,6 +159,14 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
                multikey: bool = False, corpus_sents: Optional[List[str]] = None) -> Dict:
     key = rng.choice(KEY_WORDS)
     value = _rand_digit(rng, 7, 7)
+    # 字符级词表只在 train 上拟合：train 没有数字时数值答案会被映射成
+    # <unk>，gold 跨度无法定位。此时按可跳过的构造失败处理，而不是把
+    # AssertionError 抛到评测主循环。键词/模板的 OOV 不会阻断数值跨度定位，
+    # 保持旧行为（否则普通英文 char 词表只要缺一个字母就会跳过全部 NIAH）。
+    if not _tokenizer_roundtrip(tok, value):
+        raise ContextTooSmall(
+            "tokenizer 无法无损表示 niah 的数值答案（字符级词表缺少数字；"
+            f"value={value!r}）")
     needle_ids = tok.encode("\n" + NEEDLE_TMPL.format(key=key, value=value))
     # 问题模板只随 key 变化（30 个键），跨样例缓存编码结果
     question_ids = _cached_encode(tok, QUESTION_TMPL.format(key=key))
@@ -252,7 +274,16 @@ FWE_QUESTION = ("\nWhat are the 10 most common words in the above list?"
 
 def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
     q_ids = _cached_encode(tok, FWE_QUESTION)
-    words = _pseudo_words(rng, 120)
+    # 字符级词表可能缺少某些字母：OOV 伪词会被编码成 <unk>，既把正文
+    # 变成重复的 unk 串，也会让“从 decode 文本统计 gold”选出 unk/残词。
+    # 只保留能被分词器无损表示的伪词；不足时按可跳过样例处理。
+    candidates = _pseudo_words(rng, 240)
+    words = [w for w in candidates
+             if _tokenizer_roundtrip(tok, " " + w)]
+    if len(words) < 20:
+        raise ContextTooSmall(
+            "tokenizer 无法无损表示足够的 fwe 伪词（字符级词表缺少字母）")
+    words = words[:120]
     freq = set(rng.sample(words, 10))
     # 目标正文 token 长度空间；高频词出现 k 次、低频词 2 次
     room = ctx - len(q_ids)
@@ -287,10 +318,14 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
         else:
             raise ContextTooSmall(f"fwe 长度空间不足: room={room}, 需要更大 ctx")
     ids = body_ids + q_ids
-    # 以“实际进入正文”的词频确定 top-10（裁剪后词频会变）
-    body_text = tok.decode(body_ids)
-    cnt = Counter(re.findall(r"[a-z]+", body_text))
+    # gold 必须由“计划写入正文的词”统计，而不是 decode(encoded_ids)：
+    # 字符级 <unk> 会把不同 OOV 词折叠成 unk，decode 后的词频已不是
+    # 题目真正要求的高频词。
+    cnt = Counter(tokens)
     top10 = [w for w, _ in cnt.most_common(10)]
+    if len(top10) < 10:
+        raise ContextTooSmall(
+            f"fwe 正文只有 {len(top10)} 个可区分的词，无法构造 top-10")
     return {
         "task": "fwe",
         "ids": ids,
@@ -319,6 +354,11 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
             f"depth 必须是 >= 1 的整数（问题模板会引用 VAR L1），收到 {depth_raw!r}")
     letters = ["A", "B", "C", "D", "E", "F"][:n_chains]
     values = {L: _rand_digit(rng, 5, 5) for L in letters}
+    # 数值答案必须能被分词器无损表示（字符级词表可能没有数字）；否则
+    # gold 跨度会定位失败。键/问题模板的字符缺失同样会让题目不可读。
+    if any(not _tokenizer_roundtrip(tok, v) for v in values.values()):
+        raise ContextTooSmall(
+            "tokenizer 无法无损表示 vt 的数值答案（字符级词表缺少数字）")
     lines = []
     for L in letters:
         lines.append(f"VAR {L}1 = {values[L]}.")

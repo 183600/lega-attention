@@ -65,6 +65,36 @@ def test_build_all_tasks():
         print(f"  [ok] {task}: n_tokens={ex['meta']['n_tokens']}")
 
 
+def test_char_tokenizer_missing_digits_skips_numeric_tasks():
+    """字符词表没有数字时可跳过，不能让 gold 跨度定位抛 AssertionError。"""
+    letters = sorted(set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ .\n"))
+    tok = CharTokenizer(letters, add_unk=True)
+    for fn in (lambda: build_niah(tok, 512, random.Random(1), mode="synth"),
+               lambda: build_vt(tok, 512, random.Random(1))):
+        try:
+            fn()
+        except ContextTooSmall:
+            pass
+        else:
+            raise AssertionError("缺少数字的字符词表应可跳过数值任务")
+    print("  [ok] 字符词表缺数字：niah/vt 以 ContextTooSmall 跳过")
+
+
+def test_fwe_gold_uses_planned_words_not_unk_decoded_text():
+    """字符词表 OOV 不能把 decode 出来的 unk/残词写成 fwe gold。"""
+    chars = sorted(set("abcdefghijklmnoprstuvwyABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                       " .\n?:0123456789"))
+    tok = CharTokenizer(chars, add_unk=True)
+    ex = build_fwe(tok, 3072, random.Random(0))
+    assert "unk" not in ex["answer"].split()
+    assert "unk" not in ex["answer_words"]
+    assert ex["answer_words"] and len(ex["answer_words"]) == 10
+    body = tok.decode(ex["ids"][:ex["query_span"][0]])
+    for word in ex["answer_words"]:
+        assert word in body, (word, body[:200])
+    print("  [ok] fwe gold 来自计划写入的词，不受 <unk> 解码污染")
+
+
 def test_niah_needle_span_contains_answer():
     tok = _tok()
     for i in range(5):
