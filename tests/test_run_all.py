@@ -5325,6 +5325,8 @@ def test_window_bootstrap_survives_huge_finite_window_diffs():
     assert all(math.isfinite(x) for x in st["mean_diff_ci95"]), st
     assert all(math.isfinite(x) for x in st["block_mean_diff_ci95"]), st
     assert math.isfinite(st["p"]) and 0.0 <= st["p"] <= 1.0, st
+    # 常数序列没有 lag-1 相关；巨大常数不能因溢出变成 NaN/警告。
+    assert st["mean_lag1_autocorr"] is None, st
     # 正负巨大值抵消时均值应为 0，而不是 NaN。
     mixed = [[1e308, -1e308], [1e308, -1e308]]
     st2 = _window_bootstrap_stats(mixed, n_resamples=50, seed=0)

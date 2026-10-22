@@ -2337,6 +2337,12 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
     for d in arrays:
         if d.size >= 3:
             x, y = d[:-1], d[1:]
+            # 相关系数对尺度不变；先按本条序列的最大绝对值缩放，避免
+            # 1e308 量级的窗口差在 np.std/corrcoef 内平方求和溢出成 inf/inf
+            # （只会产生 NaN 与运行时警告，lag-1 信息也被静默丢弃）。
+            scale_d = float(np.max(np.abs(d)))
+            if scale_d > 0.0:
+                x, y = x / scale_d, y / scale_d
             if np.std(x) > 0 and np.std(y) > 0:
                 v = float(np.corrcoef(x, y)[0, 1])
                 if math.isfinite(v):
