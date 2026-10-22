@@ -458,10 +458,18 @@ def sanity_summary(path: str) -> dict:
         return out
     checks = rec.get("checks")
     if isinstance(checks, dict):
-        # 只有真正的 JSON true 才算通过：0/1/"true"/null 都不能伪装成功。
-        out["failed_checks"] = sorted(k for k, v in checks.items()
-                                      if v is not True)
-        out["checks_consistent"] = not out["failed_checks"]
+        if not checks:
+            # 空对象虽然类型正确，但不构成任何检查证据：真实 sanity 结果
+            # 永远至少包含过拟合/损失/梯度等检查项。把空 checks 当成
+            # “全部通过”会让 {"passed": true, "checks": {}} 绕过训练闸门。
+            out["failed_checks"] = []
+            out["checks_consistent"] = False
+            out["malformed"] = True
+        else:
+            # 只有真正的 JSON true 才算通过：0/1/"true"/null 都不能伪装成功。
+            out["failed_checks"] = sorted(k for k, v in checks.items()
+                                          if v is not True)
+            out["checks_consistent"] = not out["failed_checks"]
     elif checks is not None:
         # checks 存在但不是对象（数组/字符串等）：结构已损坏，不能当作
         # “旧文件没有 checks”而放行。
@@ -502,6 +510,11 @@ def sanity_summary(path: str) -> dict:
         if isinstance(seed_rep, dict):
             if isinstance(seed_rep.get("seed_verified"), bool):
                 out["seed_verified"] = seed_rep["seed_verified"]
+            elif "seed_verified" in seed_rep:
+                # 种子生效证据必须是真正的布尔值：字符串 "false"/0/1 若被
+                # 静默忽略，会退化成“旧文件无法核对”，从而让一个明确自报
+                # 未验证（或伪造）的清单继续以 PASS 身份进入训练闸门。
+                out["malformed"] = True
             if isinstance(seed_rep.get("data_order_rng_fingerprint"), str):
                 out["data_order_rng_fingerprint"] = \
                     seed_rep["data_order_rng_fingerprint"]
@@ -517,6 +530,10 @@ def sanity_summary(path: str) -> dict:
             out["worktree_recorded"] = True
             out["worktree_available"] = worktree.get("available")
             out["worktree_diff_sha256"] = worktree.get("diff_sha256")
+    # 结构损坏的证据不能同时声称 PASS：即使失败来自 seed_report 等不会被
+    # checks/passed 交叉校验覆盖的字段，也必须按“不可验证”处理。
+    if out["malformed"] and out["passed"] is True:
+        out["passed"] = False
     return out
 
 
@@ -756,17 +773,29 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             malformed = msanity.get("malformed")
             checks_consistent = msanity.get("checks_consistent")
             passed = msanity.get("passed")
+            gate_broken = False
             if isinstance(failed_checks, list):
                 out["sanity_failed_checks"] = failed_checks
+                gate_broken = bool(failed_checks)
+            elif failed_checks is not None:
+                # 字段存在但不是列表：结构已损坏，不能静默当作“无失败项”。
+                gate_broken = True
+                out["sanity_malformed"] = True
             if isinstance(checks_consistent, bool):
                 out["sanity_checks_consistent"] = checks_consistent
+                gate_broken = gate_broken or checks_consistent is False
+            elif checks_consistent is not None:
+                gate_broken = True
+                out["sanity_malformed"] = True
             if isinstance(malformed, bool):
                 out["sanity_malformed"] = malformed
+                gate_broken = gate_broken or malformed is True
+            elif malformed is not None:
+                gate_broken = True
+                out["sanity_malformed"] = True
             # 失败检查项/损坏记录/自相矛盾的 checks 与 passed=true 矛盾时，
             # 以检查结果为准：旧 manifest 可能由旧版 train 写入，不能因字段
             # 存在就继承 PASS。
-            gate_broken = (bool(failed_checks) or malformed is True
-                           or checks_consistent is False)
             if isinstance(passed, bool) and not hard_mismatches:
                 out["sanity_passed"] = bool(passed) and not gate_broken
             elif gate_broken:

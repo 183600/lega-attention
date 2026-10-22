@@ -543,6 +543,14 @@ def test_load_provenance_rejects_stale_sanity_evidence():
                                             "verified": True}})
         assert inconsistent["sanity_passed"] is False
         assert inconsistent["sanity_checks_consistent"] is False
+        # 字段存在但类型损坏（非列表/非布尔）不能让 PASS 蒙混过关。
+        bad_fields = _write({"present": True, "passed": True,
+                             "failed_checks": "oops",
+                             "checks_consistent": "false",
+                             "identity": {"hard_mismatches": [],
+                                          "verified": True}})
+        assert bad_fields["sanity_passed"] is False
+        assert bad_fields["sanity_malformed"] is True
         # 旧清单/无法核对：保留 PASS 但不冒充已验证
         legacy = _write({"present": True, "passed": True, "variant": "lega"})
         assert legacy["sanity_passed"] is True
@@ -892,6 +900,23 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         sb = sanity_summary(bad_checks)
         assert sb["passed"] is False and sb["malformed"] is True
         assert sb["checks_consistent"] is False
+        # 空 checks 是“没有任何检查证据”，不能让 vacuous truth 通过闸门。
+        empty_checks = os.path.join(d, "empty_checks.json")
+        with open(empty_checks, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": {}}, f)
+        se = sanity_summary(empty_checks)
+        assert se["passed"] is False and se["malformed"] is True
+        assert se["checks_consistent"] is False
+        # seed_verified 必须是真正的布尔值：字符串 "false" 不能被忽略成
+        # “旧文件无法核对”，否则明确自报未验证的清单仍会被当成 PASS。
+        bad_seed = os.path.join(d, "bad_seed.json")
+        with open(bad_seed, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": {"a": True},
+                       "manifest": {"seed_report": {
+                           "seed_verified": "false"}}}, f)
+        ss = sanity_summary(bad_seed)
+        assert ss["passed"] is False and ss["malformed"] is True
+        assert ss["seed_verified"] is None
         bad_manifest = os.path.join(d, "bad_manifest.json")
         with open(bad_manifest, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "checks": {"a": True},
@@ -974,7 +999,7 @@ def test_train_aborts_on_failed_or_missing_sanity_gate():
         unverified = os.path.join(d, "sanity_unverified.json")
         with open(unverified, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "variant": "lega", "seed": 5,
-                       "checks": {},
+                       "checks": {"overfit": True},
                        "manifest": {"seed_report": {"seed": 5,
                                                     "seed_verified": False}}}, f)
         for label, sfile, needle in (
@@ -1022,7 +1047,7 @@ def test_train_aborts_on_stale_sanity_evidence_identity():
         sanity_path = os.path.join(d, "sanity_lega.json")
         with open(sanity_path, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "variant": "lega", "seed": 5,
-                       "checks": {}, "initial": {}, "final": {},
+                       "checks": {"overfit": True}, "initial": {}, "final": {},
                        "manifest": {
                            "config_sha256": "f" * 64,       # 旧配置
                            "git": {"commit": "a" * 40, "dirty": False},
@@ -1069,7 +1094,7 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
         sanity_path = os.path.join(d, "sanity_lega.json")
         with open(sanity_path, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "variant": "lega", "seed": 5,
-                       "checks": {}, "initial": {}, "final": {}}, f)
+                       "checks": {"overfit": True}, "initial": {}, "final": {}}, f)
         out_dir = os.path.join(d, "out")
         r = subprocess.run(
             [sys.executable, "-m", "lega.train", "--config", cfg_path,
