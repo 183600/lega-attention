@@ -3830,11 +3830,16 @@ def build_summary(results_dir: str, audit: dict = None,
         by_ctx = e.get(key)
         if not isinstance(by_ctx, dict):
             return None
-        return by_ctx.get(str(ctx))
+        return _num_or_none(by_ctx.get(str(ctx)))
 
     def _prefill_at(e, ctx):
-        cell = _lat_metric_at(e, "prefill_ms", ctx)
-        return cell.get("1") if isinstance(cell, dict) else None
+        if not isinstance(e, dict) or ctx is None:
+            return None
+        by_ctx = e.get("prefill_ms")
+        if not isinstance(by_ctx, dict):
+            return None
+        cell = by_ctx.get(str(ctx))
+        return _num_or_none(cell.get("1")) if isinstance(cell, dict) else None
 
     common_ctxs = None
     for v in variants:
@@ -3847,8 +3852,9 @@ def build_summary(results_dir: str, audit: dict = None,
             continue
         usable = set()
         for c, by_bs in prefill.items():
-            if (not isinstance(by_bs, dict) or by_bs.get("1") is None
-                    or decode.get(c) is None):
+            if (not isinstance(by_bs, dict)
+                    or _num_or_none(by_bs.get("1")) is None
+                    or _num_or_none(decode.get(c)) is None):
                 continue
             try:
                 usable.add(int(c))

@@ -1124,6 +1124,30 @@ def test_build_summary_missing_latency_entry():
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
 
 
+def test_build_summary_rejects_malformed_latency_values():
+    """latency.json 里的字符串/布尔计时不能参与相对基线比较或崩溃汇总。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": 0.5 if v == "lega" else None,
+                "n_params": 100, "n_gate_extra": 0})
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
+            "standard": {"prefill_ms": {"256": {"1": "bad"}},
+                         "decode_ms_per_tok": {"256": True}},
+            "lega": {"prefill_ms": {"256": {"1": 2.0}},
+                     "decode_ms_per_tok": {"256": 0.2}}}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row.get("prefill_ms") is None, row
+        assert row.get("prefill_rel_pct") is None, row
+        assert row.get("decode_ms_per_tok") is None, row
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（畸形延迟值按缺失处理）")
+
+
 def test_build_summary_surfaces_loss_spike_diagnosis():
     """瞬态损失尖峰（分段均值会掩盖）必须进入 summary.md 的显著提醒，
     不能只躺在 curve_diagnosis.json 里。"""
