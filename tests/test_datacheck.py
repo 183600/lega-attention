@@ -1685,3 +1685,24 @@ def test_short_ngram_overlap_and_alerts_are_diagnostic_only():
         assert short_overlap_alerts({"train_test": {"overlap_rate": bad}}) == [], bad
     assert short_overlap_alerts(None) == []
     print("  [ok] 短 n-gram 重叠：检出整句复用且仅告警、不进硬闸门")
+
+
+def test_verify_splits_disjoint_compares_custom_required_splits():
+    """required_splits 含 dev 等非标准名称时，也必须与其它 split 逐一比对。"""
+    from lega.datacheck import verify_splits_disjoint
+    shared = "T" * 60
+    with tempfile.TemporaryDirectory() as d:
+        paths = {s: os.path.join(d, f"{s}.txt")
+                 for s in ("train", "val", "dev")}
+        with open(paths["train"], "w", encoding="utf-8") as f:
+            f.write(shared + "\n")
+        with open(paths["val"], "w", encoding="utf-8") as f:
+            f.write("V" * 60 + "\n")
+        with open(paths["dev"], "w", encoding="utf-8") as f:
+            f.write(shared + "\n")
+        r = verify_splits_disjoint(paths,
+                                   required_splits=("train", "val", "dev"))
+        assert r["missing_files"] == []
+        assert r["verified_disjoint"] is False
+        assert r["overlap_long_lines"]["train_dev"]["exact_lines"] == 1
+        assert "val_dev" in r["overlap_long_lines"]

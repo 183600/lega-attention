@@ -1457,15 +1457,19 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40,
             missing.append(split)
     overlaps = {}
     overlaps_short = {}
-    for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
-        if a not in sets or b not in sets:
-            continue
-        overlaps[f"{a}_{b}"] = {
-            "exact_lines": len(sets[a][0] & sets[b][0]),
-            "normalized_lines": len(sets[a][1] & sets[b][1])}
-        overlaps_short[f"{a}_{b}"] = {
-            "exact_lines": len(short_sets[a][0] & short_sets[b][0]),
-            "normalized_lines": len(short_sets[a][1] & short_sets[b][1])}
+    # 不能只比较硬编码的 train/val/test 三对：required_splits 允许调用方
+    # 声明 dev 等额外 held-out。只比较固定三对会让 train 与 dev 的重复
+    # 完全不被检查，却仍返回 verified_disjoint=True。
+    ordered = ([s for s in ("train", "val", "test") if s in sets]
+               + sorted(s for s in sets if s not in ("train", "val", "test")))
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            overlaps[f"{a}_{b}"] = {
+                "exact_lines": len(sets[a][0] & sets[b][0]),
+                "normalized_lines": len(sets[a][1] & sets[b][1])}
+            overlaps_short[f"{a}_{b}"] = {
+                "exact_lines": len(short_sets[a][0] & short_sets[b][0]),
+                "normalized_lines": len(short_sets[a][1] & short_sets[b][1])}
     disjoint = (not missing and bool(overlaps)
                 and all(v["exact_lines"] == 0
                         and v["normalized_lines"] == 0
