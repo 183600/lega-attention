@@ -232,7 +232,7 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
             malformed += 1
             continue
         v, s = r.get(key), r.get("step")
-        if v is None or s is None:
+        if v is None:
             continue
         s = _step_or_none(s)
         if isinstance(v, (bool, np.bool_)):
@@ -246,6 +246,8 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
         except (TypeError, ValueError, OverflowError):
             malformed += 1
             continue
+        # 有值但 step 缺失/无法解析同样是损坏记录：不能静默当成“没有这条点”，
+        # 否则截断的日志会以更少的曲线点被当作完整日志诊断。
         if s is None:
             malformed += 1
             continue
@@ -683,8 +685,9 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         early_stop_steps.append(s)
     es_step = (early_stop_steps[0] if early_stop_steps
                else (train_pts[-1]["step"] if train_pts else None))
-    # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报
-    nan_count = train_bad + val_bad
+    # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报。
+    # 单步峰值 loss_max 也属于训练损失序列：区间均值有限但单步峰值 NaN/Inf
+    # 时训练已经失效，不能因为只看均值而漏报。
     malformed_count = train_malformed + val_malformed
     # 梯度范数体检：尖峰/非有限是发散与 NaN 的早期信号，损失曲线可能还没反映。
     # 优先用区间峰值 grad_norm_max：只记录 log 点最后一步会漏掉区间中段的爆炸。
@@ -695,8 +698,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # loss_max 是同一 log 区间内的单步峰值：一步异常批次被区间均值稀释时，
     # 均值序列可能看不到 8× 尖峰，峰值序列仍能看到。
     loss_spikes = _detect_series_spikes(train_pts, LOSS_SPIKE_FACTOR)
-    loss_peak_pts, _, loss_peak_malformed = _finite_points(records, "loss_max")
+    loss_peak_pts, loss_peak_bad, loss_peak_malformed = \
+        _finite_points(records, "loss_max")
     malformed_count += loss_peak_malformed
+    nan_count = train_bad + val_bad + loss_peak_bad
     # 旧日志/新版日志峰值与均值相同（区间只有 1 步）时避免重复报告同一尖峰
     if [(p["step"], p["value"]) for p in loss_peak_pts] == \
             [(p["step"], p["value"]) for p in train_pts]:
@@ -817,7 +822,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     if nan_count:
         status = "NaN/Inf"
         evidence.append(f"训练日志出现 {nan_count} 个非有限损失值"
-                        f"（训练 {train_bad}、验证 {val_bad}）")
+                        f"（训练 {train_bad}、验证 {val_bad}、单步峰值 "
+                        f"{loss_peak_bad}）")
         recommendations.append(
             "训练已失效：按数据 → 代码(log(0)/除零/softmax 溢出) → 混合精度下溢 "
             "→ 梯度爆炸/学习率的顺序排查（见该 run 目录 nan_report.json）")
@@ -1174,6 +1180,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "n_train_points": n_train,
         "n_val_points": n_val,
         "nonfinite_values": int(nan_count),
+        "loss_peak_nonfinite": int(loss_peak_bad),
         "malformed_records": int(malformed_count),
         "train_loss_first": first_train,
         "train_loss_last": last_train,
