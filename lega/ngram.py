@@ -305,6 +305,10 @@ def _validate_alpha(alpha) -> float:
     """平滑系数必须是有限非负数；NaN/Inf/负值会把 PPL 变成非法数值。"""
     if isinstance(alpha, (bool, np.bool_)):
         raise ValueError(f"平滑系数 α 必须是数值，收到 bool {alpha!r}")
+    # float("1_0")==10.0：下划线数字串不是规范 JSON 数值，不能静默变成
+    # 另一个（可能大 10 倍的）平滑系数；与 strict_int/其他解析入口同口径。
+    if isinstance(alpha, str) and "_" in alpha:
+        raise ValueError(f"平滑系数 α 必须是有限非负数: {alpha!r}")
     try:
         alpha = float(alpha)
     except (TypeError, ValueError, OverflowError):
@@ -318,6 +322,10 @@ def _validate_lambda(lam) -> float:
     """插值权重必须在 [0, 1] 内，否则组合出来的“概率”不再合法。"""
     if isinstance(lam, (bool, np.bool_)):
         raise ValueError(f"插值权重 λ 必须是数值，收到 bool {lam!r}")
+    # "0.0_5" 会被 float() 解析成 0.05 并通过 [0,1] 检查：下划线写法
+    # 同样不是规范 JSON 数值，必须拒绝而不是接受一个拼写不同的权重。
+    if isinstance(lam, str) and "_" in lam:
+        raise ValueError(f"插值权重 λ 必须是 [0, 1] 内的数值: {lam!r}")
     try:
         lam = float(lam)
     except (TypeError, ValueError, OverflowError):
