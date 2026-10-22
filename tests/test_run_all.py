@@ -3015,7 +3015,9 @@ def test_large_integer_identity_does_not_round_through_float():
 def test_summary_rejects_bool_as_numeric_observation():
     """外部 JSON 的 true/false 不能被当成 1.0/0.0 进入均值或配对检验。"""
     assert _num_or_none(True) is None and _num_or_none(False) is None
-    assert _stat([True, False, 2.0]) == {"mean": 2.0, "std": None, "n": 1}
+    assert _num_or_none("1_0") is None
+    assert _stat([True, False, "1_0", 2.0]) == {
+        "mean": 2.0, "std": None, "n": 1}
     assert _ppl_of({"ppl": True}) is None
     assert _ppl_ci_rel_pct({"ppl": 1.0, "val_ppl_ci95": [True, 2.0]}) is None
     assert _ruler_task_means({"results": {"niah": {

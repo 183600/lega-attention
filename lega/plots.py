@@ -75,6 +75,9 @@ def _finite_float(v):
     """
     if v is None or isinstance(v, (bool, np.bool_)):
         return None
+    # float("1_0")==10.0：下划线数字串不是规范 JSON 数值，不能伪装成图上的点。
+    if isinstance(v, str) and "_" in v:
+        return None
     try:
         f = float(v)
     except (TypeError, ValueError, OverflowError):

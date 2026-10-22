@@ -436,7 +436,8 @@ def test_fig_latency_ignores_noncanonical_ctx_keys():
         return
     import matplotlib.axes as maxes
     from unittest import mock
-    from lega.plots import _ctx_int, _ctx_key_int
+    from lega.plots import _ctx_int, _ctx_key_int, _finite_float
+    assert _finite_float("1_0") is None
     assert _ctx_key_int("256") == 256
     assert _ctx_key_int("1_0") is None
     assert _ctx_key_int("040") is None

@@ -247,6 +247,8 @@ def test_analysis_tolerates_malformed_external_records():
         {"hit": 1.0, "max_p": 0.9, "logit": 1.0, "qterm": 0.5,
          "c": 1.2, "g": 0.9, "log_n": 4.0, "layer": 0, "head": 0},
     ]
+    from lega.analysis import _finite_float
+    assert _finite_float("1_0") is None
     s = summarize(records, "unknown_variant", 0.5)
     assert s["n_records"] == len(records)
     assert s["variant_cn"] == "unknown_variant"

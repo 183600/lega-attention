@@ -402,6 +402,8 @@ def test_config_float_and_probability_validation():
     assert config_probability(0, "p") == 0.0
     assert config_probability(1, "p") == 1.0
     assert config_probability("0.25", "p") == 0.25
+    from lega.utils import _finite_observation
+    assert _finite_observation("1_0") is None
     print("  [ok] config_finite_float/config_probability 拒绝 bool/NaN/Inf/越界")
 
 

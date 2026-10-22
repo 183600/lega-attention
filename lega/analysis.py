@@ -271,6 +271,9 @@ def _finite_float(value):
         # bool 是 int 子类，float(True)=1.0；在 max_p/hit 这类统计列里
         # 会把坏记录伪装成合法观测，必须按缺失处理。
         return None
+    if isinstance(value, str) and "_" in value:
+        # float("1_0")==10.0：下划线数字串不是规范 JSON 数值。
+        return None
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError):

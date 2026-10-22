@@ -183,6 +183,9 @@ def _finite_number(value):
     """
     if value is None or isinstance(value, (bool, np.bool_)):
         return None
+    # float("1_0")==10.0：下划线数字串不是规范 JSON 数值，不能伪装成观测。
+    if isinstance(value, str) and "_" in value:
+        return None
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError):
