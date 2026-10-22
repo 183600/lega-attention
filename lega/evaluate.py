@@ -635,6 +635,20 @@ def main():
     run_dir = os.path.dirname(os.path.abspath(args.ckpt))
     prov = load_provenance(run_dir, args.data_dir)
     res.update(prov)
+    # 与训练完成时写回 run_manifest 的 checkpoint 哈希交叉核对：目录里的
+    # 权重若在训练后被替换/覆盖，eval.json 仍绑定实际内容，但必须显式标出
+    # “它已不是训练清单记录的那一份”，不能让旧清单替新权重背书。
+    expected_ckpt = ((prov.get("manifest_checkpoint_hashes") or {})
+                     .get(os.path.basename(os.path.abspath(args.ckpt))))
+    if isinstance(expected_ckpt, str):
+        res["checkpoint_matches_manifest"] = (expected_ckpt == ckpt_sha256)
+        if expected_ckpt != ckpt_sha256:
+            print("[eval] ⚠ 被评测 checkpoint 的内容哈希与训练 run_manifest "
+                  f"记录不一致（manifest={expected_ckpt[:16]}…, "
+                  f"actual={ckpt_sha256[:16]}…）：权重可能已被替换/覆盖，"
+                  "本次结果不能声称对应该清单的训练产物")
+    else:
+        res["checkpoint_matches_manifest"] = None
     if prov.get("data_fingerprint_matches_training") is False:
         print("[eval] ⚠ 当前 data_dir 的数据指纹与 checkpoint 训练清单不一致："
               "本次指标来自另一份数据，不能与训练时的 val/test 结果直接比较；"

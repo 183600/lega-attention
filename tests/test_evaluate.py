@@ -511,7 +511,8 @@ def test_evaluate_warns_when_data_differs_from_training_manifest(capsys):
         save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
         with open(os.path.join(run_dir, "run_manifest.json"), "w",
                   encoding="utf-8") as f:
-            json.dump({"data": {"digest": "0" * 64}}, f)
+            json.dump({"data": {"digest": "0" * 64},
+                       "artifacts": {"model.pt": {"sha256": "f" * 64}}}, f)
         out = os.path.join(d, "eval.json")
         old_argv = sys.argv
         sys.argv = ["evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
@@ -522,8 +523,10 @@ def test_evaluate_warns_when_data_differs_from_training_manifest(capsys):
             sys.argv = old_argv
         text = capsys.readouterr().out
         assert "数据指纹与 checkpoint 训练清单不一致" in text
+        assert "被评测 checkpoint 的内容哈希与训练 run_manifest 记录不一致" in text
         with open(out, encoding="utf-8") as f:
             res = json.load(f)
+        assert res["checkpoint_matches_manifest"] is False
         assert res["data_fingerprint_matches_training"] is False
         assert res["eval_data_fingerprint"] == res["data_fingerprint"]
         assert res["train_data_fingerprint"] == "0" * 64

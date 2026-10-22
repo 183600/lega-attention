@@ -500,6 +500,7 @@ def _compact_eval(ev: dict) -> dict:
         "n_params", "n_gate_extra", "n_gate_per_head", "n_heads",
         "n_layers", "d_head", "steps", "steps_planned",
         "early_stopped", "tokens_seen", "ckpt", "ckpt_sha256",
+        "checkpoint_matches_manifest",
         "selection_set_is_eval_set", "code_commit", "code_dirty",
         "data_fingerprint", "train_data_fingerprint",
         "eval_data_fingerprint", "data_fingerprint_matches_training",

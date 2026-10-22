@@ -444,6 +444,8 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
         _manifest({"git": {"commit": "abc", "branch": "main"},
                    "config_sha256": "deadbeef",
                    "config_used_sha256": "feedface",
+                   "artifacts": {"model.pt": {"sha256": "a" * 64},
+                                 "eval.json": {"sha256": "b" * 64}},
                    "seed_report": {"seed": 5, "seed_verified": True},
                    "precision": {"amp_enabled": True,
                                  "amp_dtype": "bfloat16"}})
@@ -451,6 +453,7 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
         assert p2["code_commit"] == "abc" and p2["code_branch"] == "main"
         assert p2["config_sha256"] == "deadbeef"
         assert p2["config_used_sha256"] == "feedface"
+        assert p2["manifest_checkpoint_hashes"] == {"model.pt": "a" * 64}
         assert p2["data_fingerprint"] is None
         assert p2["seed_report"]["seed_verified"] is True
         assert p2["training_precision"]["amp_dtype"] == "bfloat16"

@@ -687,6 +687,9 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         # eval.json 也能核对“哪个 seed/bf16 还是 fp32”而不是只信目录名。
         "seed_report": None,
         "training_precision": None,
+        # 训练完成时写回 run_manifest 的 checkpoint 内容哈希。评测方可用
+        # 它核对“当前被评测权重”是否就是训练清单记录的那一份。
+        "manifest_checkpoint_hashes": None,
     }
     if isinstance(manifest, dict) and manifest:
         mgit = manifest.get("git")
@@ -718,6 +721,15 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         mprec = manifest.get("precision")
         if isinstance(mprec, dict):
             out["training_precision"] = mprec
+        arts = manifest.get("artifacts")
+        if isinstance(arts, dict):
+            ck = {name: entry.get("sha256")
+                  for name, entry in arts.items()
+                  if isinstance(name, str) and name.endswith(".pt")
+                  and isinstance(entry, dict)
+                  and isinstance(entry.get("sha256"), str)
+                  and len(entry["sha256"]) == 64}
+            out["manifest_checkpoint_hashes"] = ck or None
         msanity = manifest.get("sanity")
         if isinstance(msanity, dict):
             identity = msanity.get("identity")
