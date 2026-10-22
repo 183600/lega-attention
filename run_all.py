@@ -30,6 +30,10 @@
     结论，不能替代种子级确认性检验；
   * 机制主张检验：auroc_logit − auroc_qterm 的同种子配对差作为独立指标
     家族正式检验（与逐 run 样例聚类 bootstrap 区间互为印证）；
+  * 长度剂量-反应：RULER 不只看跨 ctx 平均——逐 ctx 配对 ΔEM、逐种子
+    ΔEM~log2(ctx) 斜率、最长−最短落差分别作为独立探索性 Holm 家族；
+    总平均与最长档/趋势方向相反、或总平均在 SESOI 内而最长档超出时显式
+    告警，避免“短上下文涨、长上下文跌”被平均成一个看似中性的数；
   * 预注册：preregistration/hypotheses.json 在正式实验前登记方向性主张，
     汇总时逐条判定 支持/拒绝/未定；未登记的对比一律为事后（exploratory）
     分析，只能作为线索（登记表刻意不放 docs/：该目录会被流水线自动清理）；
@@ -86,6 +90,8 @@ from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)
+from lega.lengtheffect import (context_macro_means,  # noqa: E402
+                               log2_slope, span_contrast)
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,
@@ -1898,6 +1904,429 @@ def _ruler_pair_protocol_ok(ra, rb) -> bool:
 
 RULER_MACRO_BOOTSTRAP = 1000
 
+# 上下文长度剂量-反应的检验族名。刻意不使用 ``RULER:<task>`` 前缀：
+# 逐任务检验是“同一估计量在任务上的分解”，而长度分层是另一个估计量
+# （每个 ctx 内的 macro），混进同一 Holm 家族会改变既有逐任务校正的家族
+# 大小。三者各自成族，且都标 exploratory。
+LENGTH_CTX_METRIC = "RULER@ctx"
+LENGTH_SLOPE_METRIC = "RULER@length_slope"
+LENGTH_SPAN_METRIC = "RULER@length_span"
+LENGTH_MIN_CONTEXTS = 2
+# 与等价性层的 RULER SESOI 对齐（1.00 pp）。只用于“总平均是否掩盖了
+# 实际重要的长上下文效应”的描述性标记，不是新的显著性门槛。
+LENGTH_SESOI = 0.01
+
+
+def _length_close(a, b, tol: float = 1e-9) -> bool:
+    """两个 [0,1] 量级的 EM 均值是否在数值误差内相等。"""
+    if a is None or b is None:
+        return False
+    try:
+        fa, fb = float(a), float(b)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not (math.isfinite(fa) and math.isfinite(fb)):
+        return False
+    return abs(fa - fb) <= tol
+
+
+def _length_trend_verdict(t: dict, kind: str) -> str:
+    """趋势检验的专用结论：不能沿用“候选显著优于参照”的措辞。
+
+    ``_apply_holm`` 的通用 verdict 只区分“更好/更差”，对“优势随长度增大”
+    这类交互没有语义；这里在保留 p_adj/置换/噪声信息的前提下改写。
+    """
+    n = t.get("n")
+    padj = t.get("p_adj")
+    if t.get("p") is None or padj is None:
+        base = "无法检验（种子不足或配对差方差退化）"
+    elif not isinstance(n, int) or isinstance(n, bool) or n < MIN_SEEDS:
+        base = f"种子不足（n={n}<{MIN_SEEDS}），无法判定长度趋势"
+    elif padj < ALPHA:
+        delta = _finite_number(t.get("mean_diff"))
+        if delta is None:
+            base = "无法检验（斜率/落差不可表示）"
+            return base
+        if kind == "slope":
+            direction = "增大" if delta > 0 else "减小"
+            base = (f"优势随上下文长度显著{direction}"
+                    f"（每翻倍 {delta * 100.0:+.2f} pp，Holm p={padj:.4f}）")
+        else:
+            direction = "更长上下文更有利" if delta > 0 else "更长上下文更不利"
+            base = (f"长−短上下文优势差显著（{direction}，"
+                    f"{delta * 100.0:+.2f} pp，Holm p={padj:.4f}）")
+    else:
+        base = f"未检出长度趋势（Holm p={padj:.4f}）"
+    return base + _noise_verdict_note(t)
+
+
+def _ruler_length_analysis(runs, pairs) -> dict:
+    """RULER 上下文长度分层 + 剂量-反应检验（探索性）。
+
+    回答一个只报“RULER 平均”时无法回答的问题：**候选相对参照的优势是否
+    随上下文长度变化？** 对每个 (候选, 参照)：
+
+    1. 每个种子在每个公共请求档位（payload 的 ``ctx_lens``；不同任务的
+       ``room_ctx`` 因生成预算不同，先按请求档位对齐）上先算任务等权的
+       macro EM，再逐 ctx
+       做同种子配对 t + 符号翻转置换 + bootstrap CI（家族 ``RULER@ctx``）；
+    2. 每个种子对 ``ΔEM ~ log2(ctx)`` 拟合斜率（单位：长度每翻一倍），
+       跨种子检验斜率是否偏离 0（家族 ``RULER@length_slope``）；
+    3. 每个种子算 ``ΔEM(最长) − ΔEM(最短)``，不假定线性（家族
+       ``RULER@length_span``）。
+
+    三条证据互补：斜率回答“是否随长度系统变化”，首末落差回答“端点是否
+    同向”，逐 ctx 表回答“哪一档在驱动结论”。任一方向与总体 RULER 平均
+    相反时显式标 ``overall_vs_*_sign_flip``，避免用总平均掩盖长上下文失效。
+
+    边界：探索性、未预注册，不改变 H1–H7 的确认性判定；每个 ctx 的估计
+    仍受“有限评测样例”影响（Wilson CI 见 ruler_*.json），跨种子 t 检验
+    只覆盖训练随机性；``n<MIN_SEEDS`` 只报描述、不判定。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    ctx_tests, slope_tests, span_tests, pair_rows = [], [], [], []
+    for cand, ref in (pairs if isinstance(pairs, list) else []):
+        if cand not in runs or ref not in runs:
+            continue
+        cm = _variant_seed_map(runs, cand)
+        rm = _variant_seed_map(runs, ref)
+        seeds = [s for s in _sorted_seeds(cm) if s in rm]
+        if not seeds:
+            continue
+        excluded = {"protocol_mismatch": 0, "missing_ruler": 0,
+                    "missing_contexts": 0, "non_finite_overall": 0}
+        seed_rows = []
+        for s in seeds:
+            sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
+            sb = rm.get(s) if isinstance(rm.get(s), dict) else {}
+            ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else None
+            rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else None
+            if ra is None or rb is None:
+                excluded["missing_ruler"] += 1
+                continue
+            if not _ruler_pair_protocol_ok(ra, rb):
+                excluded["protocol_mismatch"] += 1
+                continue
+            ca = context_macro_means(ra, align_requested=True)
+            cb = context_macro_means(rb, align_requested=True)
+            if not ca or not cb or set(ca) != set(cb):
+                excluded["missing_contexts"] += 1
+                continue
+            ctxs = sorted(ca)
+            diffs = {ctx: ca[ctx] - cb[ctx] for ctx in ctxs}
+            if not all(math.isfinite(v) for v in diffs.values()):
+                excluded["non_finite_overall"] += 1
+                continue
+            overall = None
+            oa, ob = _ruler_avg_of(ra), _ruler_avg_of(rb)
+            if oa is not None and ob is not None:
+                maybe = oa - ob
+                if math.isfinite(maybe):
+                    overall = maybe
+            seed_rows.append({
+                "seed": _integral_value(s),
+                "candidate": ca, "reference": cb, "diffs": diffs,
+                "overall_diff": overall,
+                "ctx_average_diff": (
+                    sum(diffs.values()) / len(diffs) if diffs else None),
+            })
+        if not seed_rows:
+            continue
+        # 所有种子必须共享同一组上下文档位，否则各档的 n 不同，跨种子的
+        # “同 ctx 配对”不再成立。取交集并丢弃缺档种子，同时记账。
+        common = set.intersection(*[set(r["diffs"]) for r in seed_rows])
+        if not common:
+            continue
+        kept = [r for r in seed_rows if common <= set(r["diffs"])]
+        dropped = len(seed_rows) - len(kept)
+        if dropped:
+            excluded["missing_contexts"] += dropped
+        ctxs = sorted(common)
+        n_seeds = len(kept)
+        per_context = []
+        for ctx in ctxs:
+            diffs = [r["diffs"][ctx] for r in kept]
+            cand_vals = [r["candidate"][ctx] for r in kept]
+            ref_vals = [r["reference"][ctx] for r in kept]
+            res = paired_t_test(diffs, [0.0] * len(diffs))
+            res.update({
+                "candidate": cand, "reference": ref,
+                "metric": LENGTH_CTX_METRIC,
+                "lower_is_better": False,
+                "contrast_type": "length_slice",
+                "ruler_ctx": ctx,
+                "n_contexts": len(ctxs),
+                "candidate_mean": (sum(cand_vals) / len(cand_vals)
+                                   if cand_vals else None),
+                "reference_mean": (sum(ref_vals) / len(ref_vals)
+                                   if ref_vals else None),
+                "exploratory": True,
+                "note": ("同一档上下文内的任务等权 macro EM 配对差（候选−"
+                         "参照）；只覆盖训练种子随机性，不覆盖评测样例抽样"
+                         "（后者见 ruler_*.json 的 Wilson CI）。"),
+            })
+            res = _enrich_paired(res, diffs, [0.0] * len(diffs))
+            per_context.append(res)
+            ctx_tests.append(res)
+
+        # 斜率：每个种子独立拟合，跨种子检验“斜率均值是否为 0”。不能先
+        # 把各 ctx 的点估计合并成一条曲线再拟合——那会把种子噪声当成
+        # 确定性趋势，失去配对结构。
+        slopes = []
+        slope_skipped = 0
+        for r in kept:
+            sl = log2_slope(ctxs, [r["diffs"][c] for c in ctxs])
+            if sl is None:
+                slope_skipped += 1
+            else:
+                slopes.append(sl)
+        if len(slopes) >= 1:
+            res = paired_t_test(slopes, [0.0] * len(slopes))
+            res.update({
+                "candidate": cand, "reference": ref,
+                "metric": LENGTH_SLOPE_METRIC,
+                "lower_is_better": False,
+                "contrast_type": "length_trend",
+                "ruler_length_trend": "slope",
+                "contexts": ctxs,
+                "unit": "EM per doubling of context length",
+                "exploratory": True,
+                "note": ("逐种子 OLS 斜率 ΔEM~log2(ctx) 的单样本配对检验；"
+                         "正值表示候选相对参照的优势随长度增大。斜率依赖"
+                         "评测点间距，仅作趋势方向证据，不替代逐 ctx 表。"),
+            })
+            res = _enrich_paired(res, slopes, [0.0] * len(slopes))
+            if slope_skipped:
+                res["excluded_slope_seeds"] = slope_skipped
+            slope_tests.append(res)
+            slope_row = res
+        else:
+            slope_row = None
+
+        # 首末落差：不假定线性，作为斜率的稳健对照。
+        spans = []
+        span_skipped = 0
+        for r in kept:
+            sp = span_contrast(ctxs, [r["diffs"][c] for c in ctxs])
+            if sp is None:
+                span_skipped += 1
+            else:
+                spans.append(sp)
+        if len(spans) >= 1:
+            res = paired_t_test(spans, [0.0] * len(spans))
+            res.update({
+                "candidate": cand, "reference": ref,
+                "metric": LENGTH_SPAN_METRIC,
+                "lower_is_better": False,
+                "contrast_type": "length_trend",
+                "ruler_length_trend": "span",
+                "contexts": ctxs,
+                "short_ctx": ctxs[0], "long_ctx": ctxs[-1],
+                "unit": "EM(longest) - EM(shortest)",
+                "exploratory": True,
+                "note": ("逐种子“最长−最短上下文”配对差的单样本检验；"
+                         "不假定线性，与斜率方向不一致时说明效应集中在中间"
+                         "档位。"),
+            })
+            res = _enrich_paired(res, spans, [0.0] * len(spans))
+            if span_skipped:
+                res["excluded_span_seeds"] = span_skipped
+            span_tests.append(res)
+            span_row = res
+        else:
+            span_row = None
+
+        overall_vals = [r["overall_diff"] for r in kept
+                        if r["overall_diff"] is not None]
+        ctx_avg_vals = [r["ctx_average_diff"] for r in kept
+                        if r["ctx_average_diff"] is not None]
+        overall_mean = (sum(overall_vals) / len(overall_vals)
+                        if overall_vals else None)
+        ctx_avg_mean = (sum(ctx_avg_vals) / len(ctx_avg_vals)
+                        if ctx_avg_vals else None)
+        # 平衡性：总体 macro 应等于各档 macro 的等权平均。不等说明任务×
+        # 档位有缺失，分层均值不是总体均值的严格分解，必须显式提示。
+        balanced = None
+        if overall_mean is not None and ctx_avg_mean is not None:
+            balanced = _length_close(overall_mean, ctx_avg_mean)
+        per_ctx_means = [c.get("mean_diff") for c in per_context]
+        pos = sum(1 for v in per_ctx_means if v is not None and v > 0)
+        neg = sum(1 for v in per_ctx_means if v is not None and v < 0)
+        zero = len(per_ctx_means) - pos - neg
+        longest = per_context[-1].get("mean_diff") if per_context else None
+        slope_mean = slope_row.get("mean_diff") if slope_row else None
+        span_mean = span_row.get("mean_diff") if span_row else None
+        # 留一上下文（leave-one-ctx-out）：只有 2~3 档 ctx 时，斜率可能
+        # 完全由某一档的偶然波动驱动。逐种子在去掉任一档后重新拟合，
+        # 再看跨种子平均斜率符号是否翻转；翻转说明“趋势”不是各档共同的
+        # 方向，而是单点造成。与留一法检查种子同构，只作描述性稳健性。
+        loo_ctx_means = {}
+        if len(ctxs) >= 3:
+            for j, ctx in enumerate(ctxs):
+                sub = [c for k, c in enumerate(ctxs) if k != j]
+                vals = []
+                for r in kept:
+                    sl = log2_slope(sub, [r["diffs"][c] for c in sub])
+                    if sl is not None:
+                        vals.append(sl)
+                if vals:
+                    loo_ctx_means[str(ctx)] = sum(vals) / len(vals)
+        slope_loo_stable = None
+        if loo_ctx_means and slope_mean is not None:
+            if abs(slope_mean) <= 1e-12:
+                slope_loo_stable = None
+            else:
+                sign = slope_mean > 0
+                slope_loo_stable = all(
+                    (v > 0) == sign for v in loo_ctx_means.values())
+        reversal_long = (overall_mean is not None and longest is not None
+                         and overall_mean * longest < 0
+                         and abs(longest) > 1e-12)
+        reversal_slope = (overall_mean is not None and slope_mean is not None
+                          and overall_mean * slope_mean < 0
+                          and abs(slope_mean) > 1e-12)
+        reversal_span = (overall_mean is not None and span_mean is not None
+                         and overall_mean * span_mean < 0
+                         and abs(span_mean) > 1e-12)
+        # 总体在 SESOI 内、最长档却超过 SESOI：总平均“看起来没差别”，
+        # 但方法恰在声称有效的长上下文上失效/获益。零与负号不构成严格
+        # sign flip，因此单列 masking，避免用“0 组方向相反”掩盖这一情形。
+        longest_masking = bool(
+            longest is not None and overall_mean is not None
+            and abs(longest) >= LENGTH_SESOI
+            and abs(overall_mean) < LENGTH_SESOI)
+        heterogeneity = None
+        finite_means = [v for v in per_ctx_means if v is not None]
+        if finite_means:
+            heterogeneity = max(finite_means) - min(finite_means)
+        pair_rows.append({
+            "candidate": cand, "reference": ref,
+            "n_seeds": n_seeds,
+            "contexts": ctxs,
+            "n_contexts": len(ctxs),
+            "minimum_contexts_ok": len(ctxs) >= LENGTH_MIN_CONTEXTS,
+            "overall_mean_diff": overall_mean,
+            "context_average_mean_diff": ctx_avg_mean,
+            "balanced_contexts": balanced,
+            "per_context": [
+                {"ctx": c.get("ruler_ctx"),
+                 "candidate_mean": c.get("candidate_mean"),
+                 "reference_mean": c.get("reference_mean"),
+                 "mean_diff": c.get("mean_diff"),
+                 "std_diff": c.get("std_diff"),
+                 "mean_diff_ci95": c.get("mean_diff_ci95"),
+                 "mde": c.get("mde"),
+                 "p": c.get("p"), "p_adj": c.get("p_adj"),
+                 "p_perm": c.get("p_perm"),
+                 "p_perm_adj": c.get("p_perm_adj"),
+                 "n": c.get("n"),
+                 "n_seed_wins": c.get("n_seed_wins"),
+                 "n_seed_losses": c.get("n_seed_losses"),
+                 "n_seed_ties": c.get("n_seed_ties"),
+                 "loo_sign_stable": c.get("loo_sign_stable"),
+                 "within_noise": c.get("within_noise"),
+                 "verdict": c.get("verdict")}
+                for c in per_context],
+            "slope_per_doubling": (None if slope_row is None else {
+                "mean_diff": slope_row.get("mean_diff"),
+                "std_diff": slope_row.get("std_diff"),
+                "mean_diff_ci95": slope_row.get("mean_diff_ci95"),
+                "mde": slope_row.get("mde"),
+                "p": slope_row.get("p"), "p_adj": slope_row.get("p_adj"),
+                "p_perm": slope_row.get("p_perm"),
+                "p_perm_adj": slope_row.get("p_perm_adj"),
+                "n": slope_row.get("n"),
+                "n_seed_wins": slope_row.get("n_seed_wins"),
+                "n_seed_losses": slope_row.get("n_seed_losses"),
+                "n_seed_ties": slope_row.get("n_seed_ties"),
+                "loo_sign_stable": slope_row.get("loo_sign_stable"),
+                "within_noise": slope_row.get("within_noise"),
+                "verdict": slope_row.get("verdict")}),
+            "long_minus_short": (None if span_row is None else {
+                "short_ctx": ctxs[0], "long_ctx": ctxs[-1],
+                "mean_diff": span_row.get("mean_diff"),
+                "std_diff": span_row.get("std_diff"),
+                "mean_diff_ci95": span_row.get("mean_diff_ci95"),
+                "mde": span_row.get("mde"),
+                "p": span_row.get("p"), "p_adj": span_row.get("p_adj"),
+                "p_perm": span_row.get("p_perm"),
+                "p_perm_adj": span_row.get("p_perm_adj"),
+                "n": span_row.get("n"),
+                "n_seed_wins": span_row.get("n_seed_wins"),
+                "n_seed_losses": span_row.get("n_seed_losses"),
+                "n_seed_ties": span_row.get("n_seed_ties"),
+                "loo_sign_stable": span_row.get("loo_sign_stable"),
+                "within_noise": span_row.get("within_noise"),
+                "verdict": span_row.get("verdict")}),
+            "direction_consistency": {"positive": pos, "negative": neg,
+                                      "zero": zero},
+            "heterogeneity_pp": (None if heterogeneity is None
+                                 else heterogeneity * 100.0),
+            "overall_vs_longest_sign_flip": bool(reversal_long),
+            "overall_vs_slope_sign_flip": bool(reversal_slope),
+            "overall_vs_span_sign_flip": bool(reversal_span),
+            "long_context_masking": longest_masking,
+            "slope_leave_one_ctx_out": loo_ctx_means,
+            "slope_loo_sign_stable": slope_loo_stable,
+            "per_seed": [
+                {"seed": r["seed"],
+                 "overall_diff": r["overall_diff"],
+                 "context_average_diff": r["ctx_average_diff"],
+                 "slope": log2_slope(ctxs, [r["diffs"][c] for c in ctxs]),
+                 "long_minus_short": span_contrast(
+                     ctxs, [r["diffs"][c] for c in ctxs]),
+                 "diffs": {str(c): r["diffs"][c] for c in ctxs}}
+                for r in kept],
+            "excluded": excluded,
+            "exploratory": True,
+        })
+
+    ctx_tests = _apply_holm(ctx_tests)
+    slope_tests = _apply_holm(slope_tests)
+    span_tests = _apply_holm(span_tests)
+    for t in slope_tests:
+        t["verdict"] = _length_trend_verdict(t, "slope")
+    for t in span_tests:
+        t["verdict"] = _length_trend_verdict(t, "span")
+    # 把校正后的 p/结论回填到 pair 行，避免 summary 与 significance.json
+    # 出现两套互相矛盾的判定。
+    by_ctx = {(t["candidate"], t["reference"], t["ruler_ctx"]): t
+              for t in ctx_tests}
+    by_slope = {(t["candidate"], t["reference"]): t for t in slope_tests}
+    by_span = {(t["candidate"], t["reference"]): t for t in span_tests}
+    for row in pair_rows:
+        key = (row["candidate"], row["reference"])
+        for cell in row["per_context"]:
+            t = by_ctx.get((row["candidate"], row["reference"], cell["ctx"]))
+            if t is not None:
+                for k in ("p_adj", "p_perm", "verdict"):
+                    cell[k] = t.get(k)
+        if row["slope_per_doubling"] is not None:
+            t = by_slope.get(key)
+            if t is not None:
+                for k in ("p_adj", "p_perm", "verdict"):
+                    row["slope_per_doubling"][k] = t.get(k)
+        if row["long_minus_short"] is not None:
+            t = by_span.get(key)
+            if t is not None:
+                for k in ("p_adj", "p_perm", "verdict"):
+                    row["long_minus_short"][k] = t.get(k)
+    return {
+        "pairs": pair_rows,
+        "ctx_tests": ctx_tests,
+        "slope_tests": slope_tests,
+        "span_tests": span_tests,
+        "min_seeds": MIN_SEEDS,
+        "alpha": ALPHA,
+        "min_contexts": LENGTH_MIN_CONTEXTS,
+        "note": ("RULER 上下文长度分层与剂量-反应（探索性，未预注册）："
+                 "逐 ctx 的 Δmacro EM 配对检验、逐种子斜率（ΔEM~log2 ctx）"
+                 "与首末落差；三个独立 Holm 家族。用于回答“优势是否随长度"
+                 "变化”，不替代预注册的 RULER平均 确认性判定。"
+                 "overall_vs_longest/slope/span_sign_flip 表示总平均与长上下文/"
+                 "趋势方向相反，此时只报总平均会掩盖长上下文失效。"),
+    }
+
 
 def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOOTSTRAP,
                               rng_seed: int = 20240517):
@@ -3136,6 +3565,127 @@ def _render_inference_shapley(inference_tests) -> list:
               "同基线共同分解；这些格子只改门控参数、不重新训练，因此是"
               "“最终前向是否使用该组件”的机制证据，不是“重新训练后是否有用”的"
               "训练期证据。推理期与训练期 Shapley 属探索性分析，未预注册。")
+    return md
+
+
+def _render_ruler_length(analysis) -> list:
+    """渲染 RULER 上下文长度剂量-反应（逐 ctx + 斜率 + 首末落差）。"""
+    analysis = analysis if isinstance(analysis, dict) else {}
+    rows = [p for p in (analysis.get("pairs") or []) if isinstance(p, dict)]
+    md = ["", "### RULER 上下文长度剂量-反应（探索性；检验“长度校准”是否兑现）", ""]
+    if not rows:
+        md.append("⚠ 无法做上下文长度分层：缺少同一批种子的 RULER 产物，或"
+                  "payload 没有按 ctx 分档的 `results`。只报跨长度平均会把"
+                  "“短上下文涨、长上下文跌”与“所有长度小涨”混成同一个数，"
+                  "因此不能在没有本表时宣称“长上下文有效”。")
+        return md
+    md.append("本方法的核心主张是随上下文长度校准门控，因此结果分析必须回答"
+              "“优势是否随长度变化”，而不只是报一个跨长度平均。下表把每个"
+              "种子的 RULER macro EM 先按**请求的 `ctx_lens` 档位**分档（任务"
+              "等权；不同任务的 room_ctx 可能因生成预算被 clamp 到不同值，"
+              "按请求档位对齐以免把任务组成变化当成新长度档），再对同一档做"
+              "同种子配对差 `Δ=候选−参照`：逐 ctx 表回答哪一档驱动结论；斜率"
+              "为逐种子 `ΔEM~log2(ctx)` 的 OLS 系数（长度每翻一倍的 EM 变化，"
+              "pp/2×）；长−短为最长与最短档的落差，不假定线性。三者是三个"
+              "独立 Holm 家族，全部为探索性、未预注册，不改变 H1–H7 的确认性"
+              "判定。")
+
+    def _pp(v):
+        return "-" if v is None else f"{v * 100.0:+.2f}"
+
+    def _padj(t):
+        p = _finite_number((t or {}).get("p_adj"))
+        return "-" if p is None else f"{p:.4f}"
+
+    multi = [p for p in rows if (p.get("n_contexts") or 0) >= LENGTH_MIN_CONTEXTS]
+    single = [p for p in rows if (p.get("n_contexts") or 0) < LENGTH_MIN_CONTEXTS]
+    if single:
+        md += ["", f"⚠ {len(single)} 组对比只有 1 个公共请求档位，无法检验"
+                   "长度趋势（只能报该档的描述统计）；如需回答长度主张，"
+                   "`ruler.ctx_lens` 至少要覆盖 2 档、建议 3 档以上。"]
+    if multi:
+        md += ["", "| 对比 | 种子 | 请求ctx | 总体Δ(pp) | 最长ctx Δ(pp) | "
+                   "长−短(pp) | 斜率(pp/2×) | 方向 正/负/零 | 长度趋势判定 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        n_reversal = n_trend = n_unbalanced = n_masking = n_loo = 0
+        for p in multi:
+            slope = p.get("slope_per_doubling") or {}
+            span = p.get("long_minus_short") or {}
+            per_ctx = p.get("per_context") or []
+            longest = (per_ctx[-1].get("mean_diff") if per_ctx else None)
+            dc = p.get("direction_consistency") or {}
+            flags = []
+            if p.get("overall_vs_longest_sign_flip"):
+                flags.append("⚠ 总平均与最长ctx反向")
+            if p.get("overall_vs_slope_sign_flip"):
+                flags.append("⚠ 总平均与斜率反向")
+            if p.get("overall_vs_span_sign_flip"):
+                flags.append("⚠ 总平均与长−短反向")
+            if p.get("long_context_masking"):
+                flags.append("⚠ 总平均在SESOI内但最长ctx超出SESOI（平均掩盖长度效应）")
+            if p.get("slope_loo_sign_stable") is False:
+                flags.append("⚠ 删掉任一单个ctx后斜率符号翻转（趋势依赖个别档位）")
+            if p.get("balanced_contexts") is False:
+                flags.append("⚠ 各档任务集合不等权（分层均值≠总体分解）")
+            n_reversal += int(bool(p.get("overall_vs_longest_sign_flip")))
+            n_masking += int(bool(p.get("long_context_masking")))
+            n_loo += int(p.get("slope_loo_sign_stable") is False)
+            n_unbalanced += int(p.get("balanced_contexts") is False)
+            slope_verdict = slope.get("verdict") or "-"
+            if "显著" in slope_verdict and "未检出" not in slope_verdict:
+                n_trend += 1
+            verdict = slope_verdict
+            if flags:
+                verdict += "；" + "；".join(flags)
+            md.append(
+                f"| {p.get('candidate')} vs {p.get('reference')} | "
+                f"{p.get('n_seeds', '-')} | "
+                f"{', '.join(str(c) for c in (p.get('contexts') or []))} | "
+                f"{_pp(p.get('overall_mean_diff'))} | {_pp(longest)} | "
+                f"{_pp(span.get('mean_diff'))} | "
+                f"{_pp(slope.get('mean_diff'))} | "
+                f"{dc.get('positive', 0)}/{dc.get('negative', 0)}/"
+                f"{dc.get('zero', 0)} | {verdict} |")
+        md += ["", f"本次 {len(multi)} 组可分解对比：{n_trend} 组斜率经 Holm 校正"
+                   f"后显著，{n_reversal} 组出现“总平均与最长上下文方向相反”，"
+                   f"{n_masking} 组“总平均在 ±1pp SESOI 内、最长档却超出”，"
+                   f"{n_loo} 组斜率在删掉任一单个 ctx 后符号翻转，"
+                   f"{n_unbalanced} 组各档任务集合不等权。方向相反、平均掩盖或"
+                   "留一翻转时不能只报总体 RULER 平均；不等权时分层均值只是"
+                   "描述，不是总体均值的严格分解。"]
+
+    md += ["", "**逐上下文配对明细（Δ=候选−参照，pp）**", "",
+           "| 对比 | ctx | n种子 | 候选EM | 参照EM | Δ(pp) | 95% CI(pp) | "
+           "p | p_adj(Holm) | 结论 |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    for p in rows:
+        for c in (p.get("per_context") or []):
+            ci = c.get("mean_diff_ci95")
+            ci_s = ("-"
+                    if not (isinstance(ci, (list, tuple)) and len(ci) == 2
+                            and all(_finite_number(x) is not None for x in ci))
+                    else f"[{ci[0] * 100.0:+.2f}, {ci[1] * 100.0:+.2f}]")
+            p_raw = _finite_number(c.get("p"))
+            md.append(
+                f"| {p.get('candidate')} vs {p.get('reference')} | "
+                f"{c.get('ctx')} | {c.get('n', '-')} | "
+                f"{_fmt4(c.get('candidate_mean'))} | "
+                f"{_fmt4(c.get('reference_mean'))} | "
+                f"{_pp(c.get('mean_diff'))} | {ci_s} | "
+                f"{'-' if p_raw is None else f'{p_raw:.4f}'} | "
+                f"{_padj(c)} | {c.get('verdict') or '-'} |")
+    md += ["", "注: 逐 ctx 检验只覆盖训练种子随机性；每个格子只有 20~30 个评测"
+              "样例，评测抽样误差另见 `ruler_*.json` 的逐格 Wilson CI。斜率/长−短"
+              "的替代解释是“长度效应集中在中段”：斜率显著而首末落差≈0、或二者"
+              "方向不一致时，不能写成“上下文越长越好/越差”。所有对比的同一"
+              f"检验族共用一次 Holm 校正（本次 m={len(analysis.get('ctx_tests') or [])}"
+              f"/{len(analysis.get('slope_tests') or [])}"
+              f"/{len(analysis.get('span_tests') or [])}，分别对应逐 ctx/斜率/长−短；"
+              "保守）；`n<3` 只报描述统计。未检出趋势只说明当前种子数/档位数"
+              "下无法检出，不等于“无长度效应”，需对照 JSON 的 `mde`、逐档 "
+              "CI 与种子胜负后再解读。完整逐种子"
+              "斜率、逐 ctx 差与检验 p 值见 `significance.json` 的 "
+              "`ruler_length_pairs` / `ruler_length_tests`。"]
     return md
 
 
@@ -6369,6 +6919,48 @@ def build_summary(results_dir: str, audit: dict = None,
     tests += _factorial_interaction_tests(runs)
     tests += _factorial_shapley_tests(runs)
     tests = _apply_holm(tests)
+    # RULER 上下文长度剂量-反应（探索性）：只报跨长度平均会把“短涨长跌”
+    # 与“全长度小涨”混成同一个数。独立 Holm 家族，不进入主检验表，也不
+    # 改变预注册假设的确认性判定。
+    length_analysis = _ruler_length_analysis(runs, pairs)
+    # 把 vs standard 的长度剂量-反应摘要并入 summary.json/csv 的变体行，
+    # 使“跨长度平均是否掩盖长上下文效应”可被程序消费（完整逐 ctx/逐种子
+    # 明细仍在 significance.json）。没有配对（standard 本身/未跑 RULER）时
+    # 保持 None，不伪造趋势。
+    length_by_pair = {(p.get("candidate"), p.get("reference")): p
+                      for p in length_analysis.get("pairs", [])
+                      if isinstance(p, dict)}
+
+    def _length_pp(v):
+        f = _finite_number(v)
+        return None if f is None else round(f * 100.0, 4)
+
+    for row in rows:
+        pair = length_by_pair.get((row.get("variant"), "standard"))
+        if not isinstance(pair, dict):
+            continue
+        per_ctx = pair.get("per_context") or []
+        slope = pair.get("slope_per_doubling") or {}
+        span = pair.get("long_minus_short") or {}
+        row["ruler_length_contexts"] = pair.get("contexts")
+        row["ruler_length_overall_delta_pp"] = _length_pp(
+            pair.get("overall_mean_diff"))
+        row["ruler_length_longest_delta_pp"] = _length_pp(
+            per_ctx[-1].get("mean_diff") if per_ctx else None)
+        row["ruler_length_long_minus_short_pp"] = _length_pp(
+            span.get("mean_diff"))
+        row["ruler_length_slope_pp_per_doubling"] = _length_pp(
+            slope.get("mean_diff"))
+        row["ruler_length_slope_p_adj"] = slope.get("p_adj")
+        row["ruler_length_span_p_adj"] = span.get("p_adj")
+        row["ruler_length_sign_flip"] = bool(
+            pair.get("overall_vs_longest_sign_flip")
+            or pair.get("overall_vs_slope_sign_flip")
+            or pair.get("overall_vs_span_sign_flip"))
+        row["ruler_length_masking"] = bool(pair.get("long_context_masking"))
+        row["ruler_length_loo_sign_stable"] = pair.get(
+            "slope_loo_sign_stable")
+        row["ruler_length_balanced"] = pair.get("balanced_contexts")
     shapley_tests = [t for t in tests if t.get("shapley_factor")]
     # 推理期因果病灶消融：与训练期消融回答不同的因果问题（见 lega.ablate
     # 模块文档）。独立指标家族、独立 Holm，不混入上面的变体间配对表。
@@ -6681,6 +7273,10 @@ def build_summary(results_dir: str, audit: dict = None,
                            "（`em_by_depth`，旧格式）：总 EM 可能掩盖 "
                            "lost-in-the-middle。旧结果不能补算，需用当前版本"
                            "重跑 RULER 后才能给出位置分层结论。"]
+        # 上下文长度剂量-反应：位置分层回答“上下文内部的 needle 在哪”，
+        # 长度分层回答“上下文本身变长时方法是否更有效”——两者是不同轴，
+        # 不能互相替代；方法名为 length-calibrated，这一轴是核心主张。
+        md += _render_ruler_length(length_analysis)
     else:
         md.append("（暂无结果，先运行训练评测）")
 
@@ -8691,6 +9287,13 @@ def build_summary(results_dir: str, audit: dict = None,
                    "ngram_comparison": ngram_cmp,
                    "linear_probe_comparison": probe_cmp,
                    "ruler_sample_pairs": ruler_sample_tests,
+                   "ruler_length_pairs": length_analysis.get("pairs", []),
+                   "ruler_length_tests": {
+                       "per_context": length_analysis.get("ctx_tests", []),
+                       "slope": length_analysis.get("slope_tests", []),
+                       "long_minus_short": length_analysis.get(
+                           "span_tests", [])},
+                   "ruler_length_note": length_analysis.get("note"),
                    "ppl_window_pairs": ppl_window_tests,
                    "ppl_log_pairs": [
                        t for t in tests if t.get("metric") == "PPL(log)"],
@@ -8757,6 +9360,7 @@ def build_summary(results_dir: str, audit: dict = None,
           f"（配对检验 {len(tests)} 组）")
     return {"rows": rows, "markdown": md_text, "tests": tests,
             "ruler_sample_tests": ruler_sample_tests,
+            "ruler_length": length_analysis,
             "ppl_window_tests": ppl_window_tests,
             "factorial_shapley": shapley_tests,
             "inference_factorial_shapley": inference_shapley,
