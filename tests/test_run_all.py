@@ -1034,6 +1034,28 @@ def test_build_summary_worst_windows_and_cross_variant():
     print("  [ok] build_summary（最差窗口与跨变体错误对照进入汇总）")
 
 
+def test_build_summary_worst_window_unknown_gold_context_not_false():
+    """缺 gold_in_context 的旧窗口不能渲染成“gold 不在上下文中”：
+    未知与明确的 False 必须区分，避免把未记录误读成可归因的错误。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1], "smoke": False})
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "n_params": 10, "split": "test",
+            "worst_windows": [{"window": 1, "split": "test", "loss": 8.0,
+                               "gold_next": " green",
+                               "pred_top5": [[" blue", 0.3]]}]})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "gold 是否在上下文中未记录" in md, md
+        assert "gold 不在上下文中" not in md, md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（未知 gold_in_context 不伪装成 False）")
+
+
 def test_build_summary_worst_windows_falls_back_to_seed_with_data():
     """最小种子没转储最差窗口（未开 --worst_n）时，不得把其他种子的
     窗口一并静默丢弃。"""

@@ -5340,8 +5340,12 @@ def build_summary(results_dir: str, audit: dict = None,
             tail = str(c.get("context_tail") or "").replace("\n", " ")[-100:]
             p1 = c.get("top1_prob")
             p1_s = f"（p={p1:.3f}）" if p1 is not None else ""
-            tag = ("gold 在上下文中" if c.get("gold_in_context")
-                   else "gold 不在上下文中")
+            if c.get("gold_in_context") is True:
+                tag = "gold 在上下文中"
+            elif c.get("gold_in_context") is False:
+                tag = "gold 不在上下文中"
+            else:
+                tag = "gold 是否在上下文中未记录"
             md += [f"- **{VARIANT_CN.get(v, v)} · 窗口 #{c.get('window')}"
                    + (f"（{c['split']}）" if c.get("split") else "")
                    + f"** —— {WINDOW_CATEGORY_CN.get(c['category'], c['category'])}",
