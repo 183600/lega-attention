@@ -459,7 +459,7 @@ def test_verify_ledger_checks_embedded_seed_evidence():
     “已固定种子”。这里对 seed/播种状态/数据顺序 seed/指纹逐项核对；缺字段
     的旧台账保持兼容，不误报。
     """
-    from lega.utils import data_rng_state_fingerprint
+    from lega.utils import data_rng_state_fingerprint, seed_plan
     tmp = tempfile.mkdtemp()
     try:
         path = os.path.join(tmp, "experiments.jsonl")
@@ -502,9 +502,29 @@ def test_verify_ledger_checks_embedded_seed_evidence():
         append_record(path, {"run_id": "legacy", "status": "completed",
                              "variants": ["lega"], "seeds": [7],
                              "runs": [{"variant": "lega", "seed": 7}]})
+        # 启动期 seed_audit：启动/完成两条记录都必须与声明 seed 自洽；
+        # 把别的 seed 的计划复制进来要被发现。
+        append_record(path, {"run_id": "audit_ok", "status": "started",
+                             "variants": ["lega"], "seeds": [7],
+                             "seed_audit": {"7": seed_plan(7)}})
+        append_record(path, {"run_id": "audit_ok", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7)],
+                             "seed_audit": {"7": seed_plan(7)}})
+        append_record(path, {"run_id": "audit_bad", "status": "started",
+                             "variants": ["lega"], "seeds": [7],
+                             "seed_audit": {"7": seed_plan(8)}})
+        append_record(path, {"run_id": "audit_bad", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7)],
+                             "seed_audit": {"7": seed_plan(8)}})
         rep = verify_ledger(path)
         by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
         assert "good" not in by_id and "legacy" not in by_id, by_id
+        assert "audit_ok" not in by_id, by_id
+        assert "seed_audit_seed_mismatch" in by_id["audit_bad"]["issues"]
+        assert ("seed_audit_data_order_fingerprint_mismatch"
+                in by_id["audit_bad"]["issues"])
         assert "seed_report_seed_mismatch" in by_id["copied"]["issues"]
         assert "seed_report_data_order_seed_mismatch" in by_id["copied"]["issues"]
         assert "seed_report_data_order_fingerprint_mismatch" in by_id["copied"]["issues"]

@@ -135,6 +135,68 @@ def _ledger_seed(value):
     return seed_int(value, "seed")
 
 
+def _seed_audit_issues(record, declared_seeds) -> list:
+    """核验启动期 ``seed_audit`` 计划与声明的 seeds 自洽且指纹可复算。
+
+    台账在 started 阶段就写入逐 seed 的随机源计划（utils.seed_plan），它
+    早于任何 run_manifest。只核对生命周期/覆盖无法发现“把别的 seed 的计划
+    或指纹复制进来”；这里要求键集合恰好等于声明 seeds，且每个条目的
+    seed/PYTHONHASHSEED/data_order 指纹都可由该 seed 独立复算。旧台账没有
+    seed_audit 时保持兼容（不误报）。
+    """
+    audit = record.get("seed_audit")
+    if audit is None:
+        return []
+    if not isinstance(audit, dict):
+        return ["seed_audit_malformed"]
+    try:
+        declared = {_ledger_seed(s) for s in declared_seeds}
+    except (TypeError, ValueError, OverflowError):
+        # scope 解析问题已由调用方报告，避免重复/二次报错。
+        return []
+    issues = []
+    parsed = {}
+    for key, entry in audit.items():
+        try:
+            seed = _ledger_seed(key)
+        except (TypeError, ValueError, OverflowError):
+            issues.append("seed_audit_unparseable")
+            continue
+        if seed in parsed:
+            issues.append("seed_audit_duplicate_seed")
+            continue
+        if not isinstance(entry, dict):
+            issues.append("seed_audit_entry_malformed")
+            continue
+        parsed[seed] = entry
+    if set(parsed) != declared:
+        issues.append("seed_audit_scope_mismatch")
+    for seed, entry in parsed.items():
+        try:
+            recorded_seed = strict_int(entry.get("seed"),
+                                       "seed_audit.seed")
+        except (TypeError, ValueError, OverflowError):
+            issues.append("seed_audit_seed_malformed")
+            continue
+        if recorded_seed != seed:
+            issues.append("seed_audit_seed_mismatch")
+        if entry.get("is_plan") is not True:
+            issues.append("seed_audit_not_marked_plan")
+        for key in ("python_random", "numpy_global", "torch_cpu",
+                    "data_order_seed"):
+            if entry.get(key) != seed:
+                issues.append(f"seed_audit_{key}_mismatch")
+        if entry.get("pythonhashseed_child_env") != str(seed):
+            issues.append("seed_audit_pythonhashseed_mismatch")
+        fp = entry.get("data_order_rng_fingerprint")
+        if not isinstance(fp, str) or fp != data_rng_state_fingerprint(seed):
+            issues.append("seed_audit_data_order_fingerprint_mismatch")
+        cuda = entry.get("torch_cuda")
+        if cuda is not None and cuda != seed:
+            issues.append("seed_audit_torch_cuda_mismatch")
+    return issues
+
+
 def verify_ledger(path: str = None, check_artifacts: bool = False,
                   root: str = None, max_reported: int = 20) -> dict:
     """核验台账完整性：生命周期链与（可选）产物哈希。
@@ -182,6 +244,9 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 seen_terminal = True
             elif seen_terminal:
                 run_issues.append("record_after_terminal")
+            declared_seeds = r.get("seeds")
+            if isinstance(declared_seeds, list):
+                run_issues.extend(_seed_audit_issues(r, declared_seeds))
         # 同一 run_id 的配置哈希必须始终一致：重建同名实验却改写记录（或
         # 误把不同配置的 started/completed 拼在一起）会让“run_id 即配置”
         # 的假设失效。非空字符串以外的值不能因为“不是字符串”就被静默忽略，
