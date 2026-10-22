@@ -43,6 +43,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from .ruler import _NUM_RE
+from .utils import wilson_score_ci
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
 # \d{4,}，带符号/小数/科学计数法或短数字会被截成不同字符串，误抄会被
@@ -331,16 +332,27 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
         by_task_ctx.setdefault(key, Counter())[c["category"]] += 1
     hard = sum(1 for c in cases if c.get("hard_sample"))
     label_errors = cat_counts.get("label_error", 0)
+    # 错误归因是“提出改进思路”的线索，不是精确比例：错误数常常只有个位数，
+    # 1/3 与 2/6 的排序可能完全由抽样波动决定。给每个类别与深位失败率
+    # 附 Wilson 95% 区间，避免把点估计当成稳定模式。
+    category_ci95 = {}
+    for k, v in cat_counts.items():
+        ci = wilson_score_ci(int(v), len(cases))
+        if ci is not None:
+            category_ci95[k] = [float(ci[0]), float(ci[1])]
     # 深度信息只在 niah 家族存在（vt meta.depth 是链深度而非位置）；给出
     # 深位（>0.75）失败占比用于判断"是样本极难，还是模型系统性盲区"
     with_depth = [c for c in cases if c.get("depth") is not None
                   and str(c.get("task") or "").startswith("niah")
                   and c.get("category") not in ("label_error", "label_unknown")]
     deep_fail = sum(1 for c in with_depth if c["depth"] > 0.75)
+    deep_ci = (wilson_score_ci(deep_fail, len(with_depth))
+               if with_depth else None)
     out = {
         "variant": variant,
         "n_badcases": len(cases),
         "category_counts": dict(cat_counts),
+        "category_ci95": category_ci95,
         "category_cn": {k: CATEGORY_CN.get(k, k) for k in cat_counts},
         "axis_counts": dict(axis_counts),
         "axis_cn": {k: AXIS_CN.get(k, k) for k in axis_counts},
@@ -348,6 +360,8 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
         "hard_sample_ratio": (hard / len(cases)) if cases else None,
         "deep_position_fail_ratio": (deep_fail / len(with_depth)
                                       if with_depth else None),
+        "deep_position_fail_ci95": ([float(deep_ci[0]), float(deep_ci[1])]
+                                     if deep_ci is not None else None),
         "label_errors": label_errors,
         "cases": cases,
     }
@@ -418,6 +432,20 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
                "| 类别 | 数量 | 占比 |", "|---|---|---|"]
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
+        ci_map = analysis.get("category_ci95")
+        if isinstance(ci_map, dict):
+            ci_bits = []
+            for cat, n in sorted(clean, key=lambda kv: -kv[1]):
+                ci = ci_map.get(cat)
+                if (isinstance(ci, (list, tuple)) and len(ci) == 2
+                        and all(_finite_float(x) is not None for x in ci)):
+                    lo, hi = _finite_float(ci[0]), _finite_float(ci[1])
+                    ci_bits.append(f"{CATEGORY_CN.get(cat, cat)} "
+                                   f"{n}/{total} [{lo:.0%}, {hi:.0%}]")
+            if ci_bits:
+                md += ["", "各类别占比的 Wilson 95% CI（小样本下比点估计更诚实；"
+                           "区间重叠时不要断言某类别“主导”）："
+                           + "；".join(ci_bits) + "。"]
         axis = analysis.get("axis_counts")
         axis = axis if isinstance(axis, dict) else {}
         if axis:
@@ -431,9 +459,16 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
             md += ["", f"粗归因轴（数据/难度/模型）：{axis_s}。"]
         deep_ratio = _finite_float(analysis.get("deep_position_fail_ratio"))
         if deep_ratio is not None:
+            deep_ci = analysis.get("deep_position_fail_ci95")
+            ci_s = ""
+            if (isinstance(deep_ci, (list, tuple)) and len(deep_ci) == 2
+                    and all(_finite_float(x) is not None for x in deep_ci)):
+                ci_s = (f"（Wilson 95% CI "
+                        f"[{_finite_float(deep_ci[0]):.0%}, "
+                        f"{_finite_float(deep_ci[1]):.0%}]）")
             md += ["",
                    f"needle 深位（>0.75）失败占 niah 类错误的 "
-                   f"{deep_ratio:.0%}——"
+                   f"{deep_ratio:.0%}{ci_s}——"
                    "高占比说明是长程检索边界问题，低占比说明是系统性盲区。"]
         le_report = _count_int(analysis.get("label_errors")) or 0
         if le_report:
@@ -828,10 +863,16 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
     axis_counts = Counter(case_axis(c) for c in cases)
     distances = [c.get("gold_distance_tokens") for c in cases
                  if isinstance(c.get("gold_distance_tokens"), (int, float))]
+    category_ci95 = {}
+    for k, v in cat_counts.items():
+        ci = wilson_score_ci(int(v), len(cases))
+        if ci is not None:
+            category_ci95[k] = [float(ci[0]), float(ci[1])]
     out = {
         "variant": variant,
         "n_windows": len(cases),
         "category_counts": dict(cat_counts),
+        "category_ci95": category_ci95,
         "category_cn": {k: WINDOW_CATEGORY_CN.get(k, k) for k in cat_counts},
         "axis_counts": dict(axis_counts),
         "axis_cn": {k: AXIS_CN.get(k, k) for k in axis_counts},
@@ -917,6 +958,20 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
                "| 类别 | 数量 | 占比 |", "|---|---|---|"]
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {WINDOW_CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
+        ci_map = analysis.get("category_ci95")
+        if isinstance(ci_map, dict):
+            ci_bits = []
+            for cat, n in sorted(clean, key=lambda kv: -kv[1]):
+                ci = ci_map.get(cat)
+                if (isinstance(ci, (list, tuple)) and len(ci) == 2
+                        and all(_finite_float(x) is not None for x in ci)):
+                    lo, hi = _finite_float(ci[0]), _finite_float(ci[1])
+                    ci_bits.append(f"{WINDOW_CATEGORY_CN.get(cat, cat)} "
+                                   f"{n}/{total} [{lo:.0%}, {hi:.0%}]")
+            if ci_bits:
+                md += ["", "各类别占比的 Wilson 95% CI（窗口数少时区间很宽，"
+                           "不能把点估计排序当成稳定模式）："
+                           + "；".join(ci_bits) + "。"]
         stats = []
         mtp = _finite_float(analysis.get("mean_top1_prob"))
         if mtp is not None:

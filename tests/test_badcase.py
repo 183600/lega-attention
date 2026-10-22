@@ -1182,3 +1182,44 @@ def test_write_reports_tolerate_malformed_analysis():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 坏案例报告：畸形 analysis 字段安全降级")
+
+
+def test_error_category_shares_carry_wilson_ci():
+    """错误类别占比不能只给点估计：小样本下必须带 Wilson 95% CI。
+
+    同时检查深位失败率区间与 Markdown 渲染，防止 2/3 这类比例被当成
+    稳定“主导模式”。
+    """
+    cases = [
+        _case(pred="The number is 1234567.", ctx_nums=["1234567", "9988776"],
+              depth=0.9),
+        _case(pred="The number is 1234567.", ctx_nums=["1234567", "9988776"],
+              depth=0.8),
+        _case(pred="The number is 5550001.", ctx_nums=["1234567"], depth=0.2),
+    ]
+    ana = analyze_badcases(cases)
+    assert ana["category_ci95"]["copy_distractor"][0] < 2 / 3
+    assert ana["category_ci95"]["copy_distractor"][1] > 2 / 3
+    deep_lo, deep_hi = ana["deep_position_fail_ci95"]
+    assert 0.0 <= deep_lo < deep_hi <= 1.0  # 小样本区间明显宽于点估计
+    assert deep_hi - deep_lo > 0.3
+
+    win = analyze_worst_windows([
+        _win(pred_top5=[[" red", 0.9]]),
+        _win(pred_top5=[[" blue", 0.9]]),
+    ])
+    total = sum(win["category_counts"].values())
+    for cat, n in win["category_counts"].items():
+        lo, hi = win["category_ci95"][cat]
+        assert 0.0 <= lo <= n / total <= hi <= 1.0, (cat, n, lo, hi)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "badcases.md")
+        write_badcase_md(ana, p)
+        text = open(p, encoding="utf-8").read()
+        assert "Wilson 95% CI" in text and "copy_distractor" not in text
+        assert "误抄干扰" in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 错误类别占比/深位失败率附 Wilson 95% CI")
