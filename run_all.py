@@ -83,6 +83,8 @@ from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
                          diagnose_run_dir, worst_status)
 from lega.datacheck import (read_test_access_log,  # noqa: E402
                             summarize_test_access)
+from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
+                              interpret_equivalence, metric_margin)
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
                              collect_artifacts, ledger_path, new_run_id,
                              snapshot_train_run)
@@ -2298,6 +2300,28 @@ def _enrich_paired(res: dict, a, b) -> dict:
         res["loo_sign_stable"] = bool(
             all((m > 0) == (sign > 0) for m in loo_means))
         res["loo_min_abs_mean"] = float(min(abs(m) for m in loo_means))
+
+    # SESOI 解释层（TOST）：显著性检验不能证明“无差异”。这里为每个有
+    # 明确定义 SESOI 的指标附加“差异是否小于实际重要阈值”的证据；
+    # 最终 status 会在 _apply_holm 里用同一指标家族内 Holm 校正后的
+    # TOST p 重新判定（此处先用原始 p 给独立调用方一个可用值）。
+    res["equivalence"] = None
+    try:
+        eq = assess_paired_equivalence(
+            a, b, res.get("metric"),
+            lower_is_better=(res.get("lower_is_better") is True),
+            alpha=ALPHA, min_seeds=MIN_SEEDS)
+    except (TypeError, ValueError, OverflowError) as exc:
+        res["equivalence"] = {
+            "status": "invalid",
+            "label": f"无法计算等价性（{type(exc).__name__}: {exc}）",
+            "equivalent": False, "multiplicity_adjusted": False,
+            "p_used": None, "reason": str(exc)}
+    else:
+        if eq is not None:
+            eq.update(interpret_equivalence(
+                eq, res.get("p_adj"), alpha=ALPHA, min_seeds=MIN_SEEDS))
+            res["equivalence"] = eq
     return res
 
 
@@ -2314,6 +2338,321 @@ def _loo_stability_str(t: dict) -> str:
     if not isinstance(t, dict) or t.get("loo_sign_stable") is None:
         return "-"
     return "✅" if t["loo_sign_stable"] else "❌"
+
+
+def _fmt_eq_value(value, eq) -> str:
+    """把 TOST 尺度上的数值换算为报告单位（相对差/对数比/绝对差）。"""
+    f = _finite_number(value)
+    if f is None or not isinstance(eq, dict):
+        return "-"
+    kind = eq.get("kind")
+    if kind == "relative":
+        return f"{f * 100.0:+.2f}%"
+    if kind == "log_ratio":
+        try:
+            return f"{math.expm1(f) * 100.0:+.2f}%"
+        except OverflowError:
+            return "溢出"
+    scale = _finite_number(eq.get("display_scale"))
+    scale = 1.0 if scale is None or scale == 0 else scale
+    unit = eq.get("display_unit") or ""
+    v = f * scale
+    if unit == "pp":
+        return f"{v:+.2f} pp"
+    if unit == "nat":
+        return f"{v:+.4f} nat"
+    if unit:
+        return f"{v:+.4f} {unit}"
+    return f"{v:+.4f}"
+
+
+def _fmt_eq_margin(eq) -> str:
+    """渲染 SESOI 阈值（带 ± 与单位）。"""
+    if not isinstance(eq, dict):
+        return "-"
+    m = _finite_number(eq.get("margin"))
+    if m is None:
+        return "-"
+    if eq.get("kind") == "relative":
+        return f"±{m * 100.0:.2f}%"
+    if eq.get("kind") == "log_ratio":
+        try:
+            return f"±{math.expm1(m) * 100.0:.2f}%"
+        except OverflowError:
+            return "±溢出"
+    scale = _finite_number(eq.get("display_scale"))
+    scale = 1.0 if scale is None or scale == 0 else scale
+    unit = eq.get("display_unit") or ""
+    v = m * scale
+    if unit == "pp":
+        return f"±{v:.2f} pp"
+    if unit == "nat":
+        return f"±{v:.4f} nat"
+    if unit:
+        return f"±{v:.4f} {unit}"
+    return f"±{v:.4f}"
+
+
+def _eq_p_str(eq) -> str:
+    """TOST p：优先 Holm 校正值；未校正时用 † 标注。"""
+    if not isinstance(eq, dict):
+        return "-"
+    p = _finite_number(eq.get("p_tost_adj"))
+    suffix = ""
+    if p is None:
+        p = _finite_number(eq.get("p_tost"))
+        suffix = "†"
+    if p is None:
+        return "-"
+    return f"{p:.4f}{suffix}"
+
+
+def _eq_sensitivity_str(eq) -> str:
+    """0.5×/1×/2× 网格的等价性标记（每格独立 Holm 校正）。"""
+    if not isinstance(eq, dict):
+        return "-"
+    sens = eq.get("sensitivity")
+    if not isinstance(sens, list) or not sens:
+        return "-"
+    parts = []
+    for cell in sens:
+        if not isinstance(cell, dict):
+            continue
+        factor = _finite_number(cell.get("factor"))
+        n = cell.get("n")
+        n_ok = (isinstance(n, int) and not isinstance(n, bool)
+                and n >= MIN_SEEDS)
+        if not n_ok:
+            mark = "–"
+        else:
+            mark = "✅" if cell.get("equivalent") is True else "❌"
+        f_s = f"{factor:g}×" if factor is not None else "?"
+        parts.append(f"{f_s}{mark}")
+    return " ".join(parts) if parts else "-"
+
+
+# 主表之外单独做 SESOI 解释的核心指标；交互/Shapley/逐任务等探索性指标
+# 若也定义 SESOI 会淹没主线，保留在 significance.json 而不进汇总主段。
+# 这里用与 AUROC_DIFF_METRIC/AP_DIFF_METRIC 相同的字面量，避免常量定义
+# 顺序造成的导入期 NameError（函数体在调用时才解析该元组）。
+_EQ_CORE_METRICS = ("PPL", "RULER平均",
+                    "AUROC差(logit−仅查询)", "AP差(logit−仅查询)")
+
+
+def _equivalence_rows(tests) -> list:
+    rows = []
+    for t in (tests if isinstance(tests, list) else []):
+        if not isinstance(t, dict):
+            continue
+        if t.get("interaction") or t.get("ruler_task") or t.get("shapley_factor"):
+            continue
+        eq = t.get("equivalence")
+        if not isinstance(eq, dict):
+            continue
+        if t.get("metric") not in _EQ_CORE_METRICS:
+            continue
+        if t.get("mean_diff") is None:
+            continue
+        rows.append(t)
+    order = {m: i for i, m in enumerate(_EQ_CORE_METRICS)}
+    rows.sort(key=lambda t: (order.get(t.get("metric"), 99),
+                             str(t.get("candidate")),
+                             str(t.get("reference"))))
+    return rows
+
+
+def _equivalence_overview(tests) -> dict:
+    """significance.json 用的等价性计数（只统计核心指标，与汇总表一致）。"""
+    rows = _equivalence_rows(tests)
+    counts = {}
+    for t in rows:
+        status = (t.get("equivalence") or {}).get("status")
+        counts[status] = counts.get(status, 0) + 1
+    margins = {}
+    for t in rows:
+        eq = t.get("equivalence") or {}
+        metric = t.get("metric")
+        if metric not in margins and metric is not None:
+            margins[metric] = {
+                "margin": eq.get("margin"), "kind": eq.get("kind"),
+                "label": eq.get("margin_label")}
+    return {
+        "method": ("双单侧配对 t 检验（TOST）；等价=100(1−2α)% 区间完全落在 "
+                   "±SESOI 内；TOST p 在同一指标家族内 Holm 校正"),
+        "alpha": ALPHA,
+        "n_rows": len(rows),
+        "counts": counts,
+        "margins": margins,
+        "sensitivity_factors": [0.5, 1.0, 2.0],
+        "note": ("SESOI 是分析前声明的协议阈值，不由当前数据估计；等价只说明"
+                 "差异小于 SESOI，不等于效应为 0；未定不能写成无差异；"
+                 "该解释层不改变预注册假设的 支持/拒绝/未定 判定。"),
+    }
+
+
+def _render_equivalence_section(tests) -> list:
+    rows = _equivalence_rows(tests)
+    md = ["", "### SESOI 与等价性/非劣性（TOST；补充性解释）", ""]
+    md.append("显著性检验只能回答“能否拒绝 Δ=0”，不能证明“没有差异”。"
+              "本表在预先声明的 SESOI（最小重要差异）上做双单侧 t 检验"
+              "（TOST）：**只有 TOST 校正后显著且 90% 区间完全落在 ±SESOI "
+              "内，才可写“实际等价”**；区间跨过 0 或 SESOI 边界时只能写"
+              "“未定”，不能写成“无差异”。")
+    if not rows:
+        md.append("")
+        md.append("（没有定义了 SESOI 的核心对比；或旧产物缺少 equivalence 字段。）")
+        return md
+    md.append("")
+    md.append("| 对比 | 指标 | n | Δ | SESOI | 90% CI | p_TOST(Holm) | "
+              "实际意义判定 | 0.5×/1×/2× |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for t in rows:
+        eq = t.get("equivalence") or {}
+        ci = eq.get("ci90")
+        ci_s = ("-"
+                if not (isinstance(ci, (list, tuple)) and len(ci) == 2)
+                else f"[{_fmt_eq_value(ci[0], eq)}, {_fmt_eq_value(ci[1], eq)}]")
+        n = eq.get("n")
+        md.append(
+            f"| {t.get('candidate')} vs {t.get('reference')} | "
+            f"{t.get('metric')} | {n if n is not None else '-'} | "
+            f"{_fmt_eq_value(eq.get('mean_diff'), eq)} | "
+            f"{_fmt_eq_margin(eq)} | {ci_s} | {_eq_p_str(eq)} | "
+            f"{eq.get('label', '-')} | {_eq_sensitivity_str(eq)} |")
+    counts = {}
+    for t in rows:
+        status = (t.get("equivalence") or {}).get("status")
+        counts[status] = counts.get(status, 0) + 1
+    md.append("")
+    md.append(
+        f"本次核心对比 {len(rows)} 组：等价 "
+        f"{counts.get('equivalent', 0)}、非劣 "
+        f"{counts.get('noninferior', 0)}、显著但低于 SESOI "
+        f"{counts.get('significant_below_sesoi', 0)}、显著且实际有意义 "
+        f"{counts.get('significant_meaningful_better', 0) + counts.get('significant_meaningful_worse', 0)}、"
+        f"未定 {counts.get('undetermined', 0)}、种子不足 "
+        f"{counts.get('insufficient_seeds', 0)}、无效 "
+        f"{counts.get('invalid', 0)}。")
+    md.append("")
+    md.append("注: 默认 SESOI 为 PPL 相对差 1%（log-PPL 为几何均值比 1%）、"
+              "RULER EM 1.00 pp、AUROC/PR-AUC 0.010、因果 ΔNLL 0.01 nat、"
+              "Shapley 0.01（PPL 为 −log 单位，RULER 为 1.00 pp）。这些是"
+              "**协议约定**而非从当前数据估计；0.5×/1×/2× 网格各自在同一"
+              "指标家族内 Holm 校正，结论若依赖网格点必须并列披露。"
+              "p_TOST 后的 † 表示该对比未进入家族校正（通常 n<3 或补充性"
+              "基线），只能作描述；等价/非劣不改变预注册的优效性判定，"
+              "也不能把“未定”解释成“无差异”。")
+    return md
+
+
+# 因果病灶中“零假设本身有科学含义”的关键对照：安慰剂、阳性对照、
+# 门恒开/恒关、证据反号、去全部证据。其余病灶仍以“是否有因果贡献”为主，
+# 不强行套等价性解读。
+_CAUSAL_EQ_LESIONS = ("head_permute", "gate_open", "gate_closed",
+                      "sign_flip", "no_evidence")
+
+
+def _causal_eq_note(t) -> str:
+    """把因果病灶的 TOST 结果翻译成“该对照实际说明了什么”。"""
+    if not isinstance(t, dict):
+        return "-"
+    eq = t.get("equivalence")
+    if not isinstance(eq, dict):
+        return "-"
+    n = _integral_value(t.get("n"))
+    no_op = _integral_value(t.get("n_no_op_seeds"))
+    if (n is not None and n > 0 and no_op == n):
+        return ("全部种子 no-op：训练后该组件系数已为 0，病灶没有真正改变"
+                "前向；不作等价性判定（“无差异”不是“无效应”）")
+    status = eq.get("status")
+    lesion = t.get("lesion")
+    if status == "equivalent":
+        if lesion == "head_permute":
+            return ("安慰剂差异在 SESOI 内：与“容量/参数分布即可解释”一致；"
+                    "但不能证明效应恰为 0，也不能据此宣称头—证据对应有因果作用")
+        if lesion == "gate_closed":
+            return ("⚠ 阳性对照失败：关闭注意力输出仍与正常等价（差异小于 "
+                    "SESOI），应先排查实现/评测，而不是解释方法")
+        if lesion == "gate_open":
+            return ("门控接近恒等：差异小于 SESOI，方法在该 checkpoint "
+                    "退化为标准注意力")
+        if lesion == "sign_flip":
+            return ("门控对证据方向不敏感：反号后的差异小于 SESOI")
+        if lesion == "no_evidence":
+            return ("去掉全部证据项后的差异小于 SESOI：推理期证据输入的"
+                    "可检测贡献有限")
+        return "病灶差异小于 SESOI：推理期该机制的可检测贡献有限"
+    if status == "significant_meaningful_worse":
+        if lesion == "head_permute":
+            return ("安慰剂显著变差且超过 SESOI：头—证据对应有因果作用，"
+                    "容量/分布解释不足以说明收益")
+        if lesion == "gate_closed":
+            return "阳性对照通过：关闭注意力输出显著变差且超过 SESOI"
+        if lesion == "gate_open":
+            return "门控抑制写回：恒开显著变差且超过 SESOI"
+        if lesion == "sign_flip":
+            return "反号显著变差且超过 SESOI：门控确实在使用证据方向"
+        return "病灶显著变差且超过 SESOI：推理期该机制有实际重要贡献"
+    if status == "significant_meaningful_better":
+        return ("病灶显著改善且超过 SESOI：该机制在推理期反向有害/冗余，"
+                "不能写成“机制有用”")
+    if status == "significant_below_sesoi":
+        return ("统计显著但幅度低于 SESOI：有可重复差异，实际意义有限")
+    if status == "noninferior":
+        return "非劣：未检出超过 SESOI 的劣化"
+    if status == "undetermined":
+        return ("未定：置信区间未排除 SESOI，不能宣称安慰剂无效应或该机制"
+                "无贡献；需补种子/降方差")
+    if status == "insufficient_seeds":
+        return "种子不足：不作等价性判定"
+    return eq.get("label") or "-"
+
+
+def _render_causal_equivalence_section(causal_tests) -> list:
+    rows = [t for t in (causal_tests if isinstance(causal_tests, list) else [])
+            if isinstance(t, dict)
+            and t.get("lesion") in _CAUSAL_EQ_LESIONS
+            and isinstance(t.get("equivalence"), dict)
+            and t.get("mean_diff") is not None]
+    md = ["", "#### 关键病灶的 SESOI 解读（安慰剂/阳性对照不能只看 p>0.05）", ""]
+    if not rows:
+        md.append("（缺少可解释的因果病灶等价性结果。）")
+        return md
+    md.append("| 变体 | 病灶 | ΔNLL | SESOI | p_TOST | 解读 |")
+    md.append("|---|---|---|---|---|---|")
+    for t in rows:
+        eq = t["equivalence"]
+        p_s = "-" if eq.get("not_applicable") is True else _eq_p_str(eq)
+        md.append(
+            f"| {t.get('variant')} | {t.get('lesion_label', t.get('lesion'))} | "
+            f"{_fmt_eq_value(eq.get('mean_diff'), eq)} | "
+            f"{_fmt_eq_margin(eq)} | {p_s} | {_causal_eq_note(t)} |")
+    md.append("")
+    md.append("注: 病灶 ΔNLL 的 SESOI 为 0.01 nat（约 1% PPL），是协议约定。"
+              "`head_permute` 是推理期容量/分布安慰剂：**等价**支持“仅靠容量/"
+              "分布即可解释”，**显著变差且超过 SESOI** 才支持头—证据对应有"
+              "因果作用；`gate_closed` 是阳性对照，若等价则说明实验灵敏度不足，"
+              "必须先排查实现/评测。`no_op` 行不参与等价性判定。")
+    return md
+
+
+def _causal_equivalence_overview(causal_tests) -> dict:
+    """因果病灶的 SESOI 计数摘要（significance.json）。"""
+    rows = [t for t in (causal_tests if isinstance(causal_tests, list) else [])
+            if isinstance(t, dict)
+            and t.get("lesion") in _CAUSAL_EQ_LESIONS
+            and isinstance(t.get("equivalence"), dict)]
+    counts = {}
+    for t in rows:
+        status = (t.get("equivalence") or {}).get("status")
+        counts[status] = counts.get(status, 0) + 1
+    return {
+        "method": "TOST on ΔNLL vs 0，SESOI=0.01 nat；同一指标家族 Holm",
+        "n_rows": len(rows), "counts": counts,
+        "lesions": list(_CAUSAL_EQ_LESIONS),
+        "note": ("no_op 不参与等价性判定；安慰剂等价只支持“容量/分布可解释”，"
+                 "不等于效应恰为 0；gate_closed 等价是阳性对照失败信号。"),
+    }
 
 
 def _verdict_head(value) -> str:
@@ -2410,6 +2749,61 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
     return out
 
 
+def _adjust_equivalence_family(group, min_seeds=MIN_SEEDS,
+                               alpha=ALPHA) -> None:
+    """在同一指标家族内对 TOST p 做 Holm 校正（独立于优效性检验族）。
+
+    为什么单独校正：等价性假设（|Δ|<SESOI）与优效性假设（Δ=0）是两类不同
+    的推断；把两者混进同一 Holm 家族会双重惩罚。这里只对“有 SESOI 定义且
+    n>=min_seeds”的对比计数，n 不足的对比不占家族大小（p 置 None，但仍保留
+    原始 TOST p 供描述）。敏感性网格的每个尺度也各自在同一家族内校正，
+    否则 0.5×/1×/2× 的“等价/不等价”会受未校正的网格搜索影响。
+    """
+    eq_tests = [t for t in group if isinstance(t.get("equivalence"), dict)]
+    if not eq_tests:
+        return
+
+    def _n_ok(obj):
+        if not isinstance(obj, dict) or obj.get("not_applicable") is True:
+            return False
+        n = obj.get("n")
+        return (isinstance(n, int) and not isinstance(n, bool)
+                and n >= min_seeds)
+
+    pads = holm_bonferroni([
+        (t["equivalence"].get("p_tost") if _n_ok(t["equivalence"]) else None)
+        for t in eq_tests])
+    for t, padj in zip(eq_tests, pads):
+        eq = t["equivalence"]
+        eq["p_tost_adj"] = padj
+        eq["multiplicity_adjusted"] = padj is not None
+
+    n_grid = 0
+    for t in eq_tests:
+        sens = t["equivalence"].get("sensitivity")
+        if isinstance(sens, list):
+            n_grid = max(n_grid, len(sens))
+    for j in range(n_grid):
+        cells = []
+        for t in eq_tests:
+            sens = t["equivalence"].get("sensitivity")
+            if (isinstance(sens, list) and len(sens) > j
+                    and isinstance(sens[j], dict)):
+                cells.append(sens[j])
+        if not cells:
+            continue
+        adjs = holm_bonferroni([
+            (c.get("p_tost") if _n_ok(c) else None) for c in cells])
+        for c, padj in zip(cells, adjs):
+            c["p_tost_adj"] = padj
+            c["multiplicity_adjusted"] = padj is not None
+            c["equivalent"] = bool(
+                _n_ok(c) and padj is not None and padj < alpha)
+            c["status"] = ("equivalent" if c["equivalent"]
+                           else "insufficient_seeds" if not _n_ok(c)
+                           else "not_equivalent")
+
+
 def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     """对同一指标家族内的全部配对检验做 Holm–Bonferroni 校正并给出结论。
 
@@ -2430,6 +2824,7 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     for t in tests:
         by_metric.setdefault(t.get("metric"), []).append(t)
     for group in by_metric.values():
+        _adjust_equivalence_family(group, min_seeds=min_seeds, alpha=alpha)
         pads = holm_bonferroni([t.get("p") for t in group])
         ppads = holm_bonferroni([t.get("p_perm") for t in group])
         psads = holm_bonferroni([t.get("p_sign") for t in group])
@@ -2489,6 +2884,11 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
             note = _noise_verdict_note(t)
             if note and isinstance(t.get("verdict"), str):
                 t["verdict"] += note
+            # 等价性 status 依赖优效性 p_adj：必须在 p_adj 写入后重算。
+            eq = t.get("equivalence")
+            if isinstance(eq, dict):
+                eq.update(interpret_equivalence(
+                    eq, t.get("p_adj"), alpha=alpha, min_seeds=min_seeds))
     return tests
 
 
@@ -3032,6 +3432,17 @@ def _ablation_lesion_records(ablations):
                     and not (-20.0 <= float(mean_delta) <= 20.0)),
             })
             _enrich_paired(res, vals, [0.0] * len(vals))
+            # 全部种子 no-op：干预没有真正改变前向，零差不能当“等价证据”。
+            if (len(vals) > 0 and no_op_seeds == len(vals)
+                    and isinstance(res.get("equivalence"), dict)):
+                res["equivalence"].update({
+                    "not_applicable": True,
+                    "not_applicable_reason": (
+                        "不适用：全部种子 no-op（训练后该组件系数已为 0，"
+                        "干预未改变前向）"),
+                    "status": "not_applicable",
+                    "equivalent": False,
+                })
             out.append(res)
     # 判定必须在 Holm 校正之后：p_adj 是“显著”的唯一门槛，提前读取会
     # 把全部病灶误判成“未检出”。
@@ -3186,6 +3597,32 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
             note = _noise_verdict_note(t)
             if note and item.get("detail"):
                 item["detail"] += note
+            # 预注册判定只回答“方向是否显著”，不等价于“效应有实际意义”。
+            # 把 TOST/SESOI 作为补充字段挂上，避免把“显著但 0.1%”写成
+            # 重要收益，也避免把“未定”直接读成“无差异”。
+            eq = t.get("equivalence")
+            if isinstance(eq, dict):
+                item.update({
+                    "equivalence_status": eq.get("status"),
+                    "equivalence_label": eq.get("label"),
+                    "equivalence_p_tost_adj": eq.get("p_tost_adj"),
+                    "equivalence_margin": eq.get("margin"),
+                    "equivalence_margin_label": eq.get("margin_label"),
+                })
+                eq_status = eq.get("status")
+                if item.get("status") in ("支持", "拒绝"):
+                    if eq_status == "significant_below_sesoi":
+                        item["detail"] += ("；幅度低于 SESOI，实际意义有限"
+                                           "（不能只报“显著”就当作重要收益）")
+                elif item.get("status") == "未定":
+                    if eq_status == "equivalent":
+                        item["detail"] += ("；等价性：差异小于 SESOI"
+                                           "（不能据此说效应恰为 0）")
+                    elif eq_status == "significant_below_sesoi":
+                        item["detail"] += "；统计显著但幅度低于 SESOI"
+                    elif eq_status == "undetermined":
+                        item["detail"] += ("；等价性未定（区间未排除 SESOI，"
+                                           "不能宣称无差异）")
         out.append(item)
     return apply_global_fwer(out, alpha=alpha)
 
@@ -6660,6 +7097,10 @@ def build_summary(results_dir: str, audit: dict = None,
                   "组件结论目前只有训练期消融证据，不能据此声称“推理期使用了"
                   "该组件”。")
 
+    # --- 关键病灶的等价性解读（尤其安慰剂/阳性对照）：p>0.05 不能直接
+    #     写成“安慰剂无效应”，必须看 TOST 是否把差异限制在 SESOI 内。
+    md += _render_causal_equivalence_section(causal_tests)
+
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
@@ -6742,6 +7183,9 @@ def build_summary(results_dir: str, audit: dict = None,
     else:
         md.append("（无可配对的对比；请对多个变体运行同一组种子）")
 
+    # --- SESOI/TOST：把“不显著”与“实际等价”分开。
+    md += _render_equivalence_section(tests)
+
     # --- PPL 比值尺度敏感性（探索性）：log-PPL 几何均值比。
     log_tests = [t for t in tests
                  if t.get("metric") == "PPL(log)"
@@ -6754,7 +7198,8 @@ def build_summary(results_dir: str, audit: dict = None,
                "得到。该表只检验结论是否依赖尺度；预注册主判定仍是原始 PPL，"
                "不能在两种尺度中挑对主张有利的口径。", "",
                "| 对比 | n | ΔlogPPL | PPL几何比 | 比值95% CI | p_adj(Holm) | "
-               "原始PPL判定 | 尺度结论 |", "|---|---|---|---|---|---|---|---|"]
+               "SESOI等价性(±1%) | 原始PPL判定 | 尺度结论 |",
+               "|---|---|---|---|---|---|---|---|---|"]
         n_mismatch = 0
         for t in log_tests:
             raw = _find_test(tests, (t.get("candidate"), t.get("reference")),
@@ -6772,10 +7217,15 @@ def build_summary(results_dir: str, audit: dict = None,
                         and log_verdict != "未定")
             n_mismatch += int(mismatch)
             mark = ("⚠ 尺度结论不一致" if mismatch else log_verdict)
+            eq = t.get("equivalence") if isinstance(t.get("equivalence"), dict) else {}
+            eq_p = _eq_p_str(eq) if eq else "-"
+            eq_s = ("-" if not eq else
+                    f"{eq.get('label') or '-'}"
+                    + ("" if eq_p == "-" else f"（p={eq_p}）"))
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n']} | "
                 f"{t['mean_diff']:+.4f} | {ratio} | {ci_s} | {padj} | "
-                f"{raw_verdict} | {mark} |")
+                f"{eq_s} | {raw_verdict} | {mark} |")
         md += ["", "注: 几何均值比只改变“平均”的尺度，不改变配对结构；"
                f"原始 PPL 与 log-PPL 的结论{('有' if n_mismatch else '没有')}"
                f"不一致（{n_mismatch} 组），不一致时必须同时报告并解释为"
@@ -7319,6 +7769,7 @@ def build_summary(results_dir: str, audit: dict = None,
                             "verdict 中的 ⚠ 标注；mean_diff_ci95 为配对差 "
                             "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
                             "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"),
+                   "equivalence": _equivalence_overview(tests),
                    "component_evidence": comp,
                    "training_budget": {
                        "comparable": not _as_text_list(
@@ -7359,13 +7810,17 @@ def build_summary(results_dir: str, audit: dict = None,
                        "Full−none 的总效应（效率性），交互效应被平均分摊到"
                        "参与因子；不替代预注册的单因素确认检验"),
                    "causal_ablation": causal_tests,
+                   "causal_ablation_equivalence": _causal_equivalence_overview(
+                       causal_tests),
                    "causal_ablation_note": (
                        "推理期因果病灶消融（lega.ablate，val split）：同一 "
                        "checkpoint/同一批窗口上只改门控参数，逐窗口配对 ΔNLL；"
                        "no_query/no_conc/no_len/no_evidence 是训练期去一法的"
                        "推理期对应，head_permute 是容量/分布不变的安慰剂对照，"
                        "gate_open/closed/constant_mean 检验写回强度与逐位置变化；"
-                       "跨种子 p 经 Holm 校正，窗口级 p 仅描述性"),
+                       "跨种子 p 经 Holm 校正，窗口级 p 仅描述性；"
+                       "equivalence 字段给出 ΔNLL 相对 0.01 nat SESOI 的 TOST "
+                       "结果，no_op 不作等价性判定"),
                    "factorial_interactions_note": (
                        "全因子 2^3 的 A×B/A×C/B×C 交互对比（探索性，独立 "
                        "Holm 家族，基准 gate_only）：交互=0 表示组件效应可加；"

@@ -252,3 +252,51 @@ missing_registry（不可确认）；run_all 把登记表指纹与完整性报�
 - **早停是实际机制而非仅建议**（`train.py` 的 `early_stop_update` + `--early_stop_patience`/配置 `early_stop_min_delta`）：验证连续 patience 次评测无实质改善（相对阈值，不随损失尺度漂移）即终止。默认关闭（0）保证受控对比不受影响；启用时 `eval.json` 同时记录计划/实际步数与 `early_stopped`，train_log 写入 `early_stop` 终标记，曲线诊断据此把截断标注为设计行为（不再建议"增加步数"或"延长训练"），受控变量审计改为按计划步数核对并把逐 run 实际步数如实列出——不让早停把"实际步数不同"伪装成"受控条件一致"。模型选择口径不变：始终用 val 选出的 `model_best.pt`。审计同时核对实际评测协议：PPL 的 `split/eval_ctx/eval_iters/val_windows/val_tokens_evaluated` 必须同批 token，RULER 的 `ctx_lens/n_samples/sample_seed/corpus_source/max_new` 与已评测 (任务, 上下文) 格集合必须一致；配对检验还会逐种子整对剔除协议/格不一致的观测，避免独立重评或不同题面混入“同种子配对”。确认性判定由 `apply_budget_gate` 降级；`component_evidence` 的每条证据也带 `training_budget_comparable`/`fragile`/`confirmatory_supported`/`evidence_status`，机器读取时不会把统计上显著但预算不等或效应不稳健的组件证据当成确认性结论。除声明配置外，审计还核对**实际训练批次序列**：`get_train_batch` 把每批窗口起点写入 SHA-256，`eval.json` 记录 `data_order_sha256`，同 seed 下各变体必须消费完全相同的序列（只比较非早停 run）；并核对 `config_used.json` 的设备类型，CPU/CUDA 混跑直接判失败。消融矩阵的“覆盖完整”同时要求每格种子数 ≥ `MIN_SEEDS`，单种子格显式标为“种子不足”，不再因变体名出现就显示 8/8。
 - **NaN 系统排查**（`train.run_nan_checklist` → `nan_report.json`）：固定顺序 数据（**优先检查失败所在 log 区间的全部候选批次**——NaN 在 log 点才由区间累计损失发现，首个失败步可能早于检测点、预取已覆盖 `batches`，训练循环按区间保存逐步批次引用（≤ log_every 步）并以设备标量标记 `first_bad_step`，传入 `consumed_batches`/`consumed_step_labels` 才不漏罪魁数据；*val 损失非有限时改用真实验证窗口，训练批次仅作取窗失败回退*；NaN/Inf/越界 id）→ 代码（非有限参数定位 + **前向钩子逐批检查候选输入、定位首个“输入有限、输出非有限”的模块**，即 `origin`，附 log(0)/除零/softmax 溢出的排查指向）→ 混合精度（bf16/fp16 下溢-上溢风险；amp 实际生效且出现非有限时，**对命中批次做 fp32 隔离复测**：fp32 全部有限=混合精度数值问题，fp32 同样非有限=排除精度因素）→ 优化（梯度范数尖峰与学习率）。NaN 即中止训练并落盘报告，避免污染曲线；报告显式给出 `checklist_order`、结构化 `bad_batches` 与 `first_bad_data_step`。门控开销另在汇总页单列：实际逐头参数量、额外参数占比、解析门控 FLOPs/token 与总 FLOPs 占比，收益必须对照开销解读。
 - **坏案例**（`lega/badcase.py`）：RULER 错误样本按标注错误/误抄干扰值/幻觉/无数值回答归因，语言建模按最差窗口归因；跨变体对照区分共识失败与特异性盲区，逐案例 Markdown 可读。分析不止步于分类：每个案例附**粗归因轴**（数据/构造、校准、难度边界、评测/导出、模型/方法；排位对但置信低的 top1_correct 归“校准”，先于深位难度判定），主导错误模式再按确定性阈值（占比 1/3、深位失败 1/2、最小样本 3 等）合成为**改进方向**（触发证据→建议→下一步实验，按高/中/低优先级），跨变体侧统计每个变体相对 standard 的新增错误类别，把"共识失败→先修数据、特异性新增→方法盲区"落成可执行条目。改进方向进入逐案例 md、`badcase_summary.json`（带 `source` 标注）与 `summary.md`——坏案例分析是提出新改进思路的最重要来源，不能止于分类表。
+
+### SESOI 与等价性/非劣性（TOST；把“不显著”与“无差异”分开）
+
+显著性检验只回答“能否拒绝 Δ=0”。本项目种子数只有 3~5 个，`p>0.05` 既可能
+是“真的没有实际重要差异”，也可能只是功效不足；**不能把两者混写成“无差异”**。
+`lega/equivalence.py` 因此增加一层 SESOI（smallest effect size of interest，
+最小重要差异）解释：
+
+- **SESOI 是分析前声明的协议阈值**，不是从当前数据估计出来的。默认值：
+  PPL 逐种子相对差 **1%**（log-PPL 为几何均值比 1%）、RULER EM **1.00 pp**、
+  AUROC / PR-AUC 差 **0.010**、因果病灶 ΔNLL **0.01 nat**（约 1% PPL）、
+  Shapley 的 PPL 值 **0.01**（−log PPL 单位）与 RULER 值 **1.00 pp**。
+- **等价（TOST）**：对配对差做双单侧 t 检验，H0_low: μ≤−SESOI、
+  H0_high: μ≥+SESOI；只有两个单侧检验都在 α 下显著（等价于
+  100(1−2α)% 区间完全落在 ±SESOI 内）才判“等价”。
+- **非劣**：只检验“候选比参照差不超过 SESOI”这一侧；用于“新方法没有
+  明显更差”的主张，方向随指标好坏翻转（PPL 越小越好，AUROC/RULER 越大越好）。
+- **统计显著但幅度低于 SESOI**：差异可重复，但实际意义有限；不能只报
+  “显著优于”就当作重要收益。
+- **未定**：区间既不能排除 0，也不能排除超过 SESOI 的差异；不能写成
+  “无差异/无效应”，只能写“未定，需补种子或降方差”。
+
+TOST 的 p 与优效性 t 检验是**不同的检验族**：`run_all` 在同一指标家族内对
+TOST 原始 p 单独做 Holm 校正（`_adjust_equivalence_family`），n<3 的对比不占
+家族大小、也不判等价。0.5×/1×/2× 的 SESOI 敏感性网格各自再做一次 Holm；
+若结论随网格翻转，必须在报告中并列披露，不能只挑对主张有利的阈值。等价性
+判定**不改变**预注册假设的 支持/拒绝/未定 状态，只作为“实际意义”补充；
+`significance.json` 的 `pairs[*].equivalence` 保留 `p_tost`、`p_tost_adj`、
+90%/95% 区间、方向、`beyond_margin`、`noninferior`、`sensitivity` 与最终
+`status`；顶层 `equivalence` 给出核心指标的计数与 margin 清单；预注册假设
+另带 `equivalence_status`/`equivalence_label`。
+
+**因果病灶中的零假设**尤其需要这一层：`head_permute` 是推理期容量/分布
+安慰剂，“p>0.05”不能直接写成“安慰剂无效应”。只有 TOST 判等价，才能说
+“差异小于 SESOI，与容量/分布解释一致”；若显著变差且超过 SESOI，才支持
+“头—证据对应有因果作用”。`gate_closed` 是阳性对照，若它与正常等价，
+说明实验灵敏度不足，必须先排查实现/评测；`no_op`（训练后系数已为 0）不参与
+等价性判定，因为干预根本没有改变前向，“无差异”不是“无效应”的证据。
+`summary.md` 的“SESOI 与等价性/非劣性”表与“关键病灶的 SESOI 解读”表分别
+呈现这两类证据。
+
+边界必须如实声明：TOST 仍是 t 分布近似，小样本下与置换检验/MDE 合读；
+SESOI 是协议约定，换一个 margin 结论可能改变，所以敏感性网格是必报项；
+“等价”只说明差异小于某个实际重要阈值，不说明效应恰好为 0，也不替代
+优效性检验或预注册判定。**目前的 SESOI 未写入
+`preregistration/hypotheses.json` 的锁链**，因此所有等价性判定一律按
+补充性/描述性证据处理；若要把某条“等价/非劣”升级为确认性主张，必须先把
+margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的种子/数据上检验。
