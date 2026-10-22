@@ -194,6 +194,8 @@ def test_bool_seeds_are_not_integer_seed_one():
         assert _seed_int(True) is None and _seed_int(False) is None
         assert _seed_int(1.0) == 1 and _seed_int("2") == 2
         assert _seed_int(1.5) is None and _seed_int([1]) is None
+        # NumPy 大整数必须保持身份，不能经 float 往返丢精度
+        assert _seed_int(np.int64(2**53 + 1)) == 2**53 + 1
         # 单种子约定下，带 bool seed 的裸文件不能冒充 seed1 的结果
         _w(tmp, "repro.json", {"seeds": [1]})
         _w(tmp, "eval_lega.json",

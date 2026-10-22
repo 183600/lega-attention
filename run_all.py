@@ -6416,7 +6416,8 @@ def main():
 
     # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
     # 模板约 211 token，128 会让 RULER 全部任务与机制分析被跳过）
-    smoke_ctx = min(256, int(cfg.get("block_size", 256))) if args.smoke else 0
+    smoke_ctx = (min(256, strict_int(cfg.get("block_size", 256),
+                                    "block_size")) if args.smoke else 0)
 
     # 过拟合小批量 sanity check：全量训练前的代码正确性闸门（梯度/损失/标签）。
     # 每个变体跑一次（用首个种子），失败立即中止——连小批量都无法过拟合时不应

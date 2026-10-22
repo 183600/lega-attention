@@ -90,10 +90,10 @@ def _seed_int(v):
     原样保留（>2**53 的 JSON 大整数不经 float 往返丢精度），"1" 这类整数
     字符串与 1 等价（旧产物既有用法）。
     """
-    if isinstance(v, bool):
+    if isinstance(v, (bool, np.bool_)):
         return None
-    if isinstance(v, int):
-        return v
+    if isinstance(v, (int, np.integer)):
+        return int(v)
     f = _finite_float(v)
     if f is None or f != math.floor(f):
         return None
