@@ -3329,7 +3329,9 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 repro_doc = json.load(f)
         except (OSError, ValueError):
             repro_doc = None
-        expected_fp = ((repro_doc.get("data") or {}).get("digest")
+        # repro.json 是外部/旧产物：data 合法 JSON 但不是对象（数组/标量）
+        # 时按“无法核对指纹”处理，不能在整个汇总页上抛 AttributeError。
+        expected_fp = (_as_dict(repro_doc.get("data")).get("digest")
                        if isinstance(repro_doc, dict) else None)
         actual_fp = ng.get("data_fingerprint")
         if (isinstance(expected_fp, str) and expected_fp

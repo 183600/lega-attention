@@ -2518,6 +2518,28 @@ def test_ngram_comparison_rejects_baseline_from_other_data():
     print("  [ok] ngram 基线数据指纹与本次 run 绑定")
 
 
+def test_ngram_comparison_tolerates_malformed_repro_data():
+    """repro.json 的 data 不是对象时，指纹核对应降级为不可核对而非崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"), {"data": ["not", "dict"]})
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "data_fingerprint": "old-data-digest",
+            "ppl": {"unigram": 100.0, "bigram": 80.0,
+                    "interpolated_bigram": 70.0},
+            "selected_model": "interpolated_bigram"})
+        out = ngram_baseline_comparison({}, tmp)
+        assert "error" not in out, out
+        # 合法对象仍按原规则拒绝跨数据基线
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"data": {"digest": "new-data-digest"}})
+        bad = ngram_baseline_comparison({}, tmp)
+        assert "数据指纹" in bad.get("error", ""), bad
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram 指纹核对容忍 repro.json 的畸形 data 字段")
+
+
 def test_ngram_comparison_uses_val_selected_strongest_baseline():
     """简单基线参照必须取 val 选出的最强模型，而不是固定拿 bigram 当靶子。"""
     tmp = tempfile.mkdtemp()
