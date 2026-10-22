@@ -1084,6 +1084,8 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
         assert manifest["sanity"]["present"] is True
         assert manifest["sanity"]["passed"] is True
         assert manifest["sanity"]["variant"] == "lega"
+        # 训练入口实际执行的防泄漏闸门结论必须进入 manifest
+        assert manifest["data_protocol_preflight"]["report_present"] is False
         # 精度开关必须如实记录（顺序错误会记成训练前默认值）
         assert isinstance(manifest["runtime"]["tf32_matmul"], bool)
         assert isinstance(manifest["runtime"]["tf32_cudnn"], bool)

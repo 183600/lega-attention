@@ -1105,6 +1105,9 @@ def main():
     manifest = build_run_manifest(
         tag=tag, variant=args.variant, seed=seed, config_path=args.config,
         data_dir=args.data_dir, device=device, sanity=sanity_info)
+    # 训练入口实际执行的防泄漏闸门结论必须随 run 落盘：只打印到 stdout
+    # 无法在事后回答“这个 checkpoint 是否在已知泄露的数据上训练”。
+    manifest["data_protocol_preflight"] = data_preflight
     # 精度与 tf32 是影响数值可比性的受控变量，且只有 enable_tf32 之后才是
     # 训练实际取值；紧随 build_run_manifest 补入，保证随后写出的 manifest/
     # checkpoint/台账携带的是生效值而不是配置默认值。
@@ -1170,6 +1173,8 @@ def main():
         # 时为 None，而不是假称已验证）
         "sanity_verified": (identity.get("verified")
                             if isinstance(identity, dict) else None),
+        # checkpoint 自含数据协议闸门结论，manifest 被移走也能审计
+        "data_protocol_preflight": data_preflight,
     }
 
     # 记录实际生效的数值（含 train_ctx 的 min 截断与字符串/整数值浮点规范化），
