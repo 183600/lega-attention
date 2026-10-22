@@ -613,9 +613,10 @@ def categorize_window(rec: Dict) -> Dict:
         r["gold_in_context"] = None
     elif isinstance(recorded_ctx, bool):
         r["gold_in_context"] = recorded_ctx
-    elif isinstance(tail_raw, str):
-        # 旧格式没有完整窗口布尔：只有确实拿到尾部文本时才可退回尾部检查
-        # （“尾部未出现”仍不等于“窗口内从未出现”）。
+    elif isinstance(tail_raw, str) and tail_raw.strip():
+        # 旧格式没有完整窗口布尔：只有确实拿到非空尾部文本时才可退回尾部
+        # 检查（“尾部未出现”仍不等于“窗口内从未出现”）。空串/纯空白不是
+        # 证据，必须与缺失一样记为 unknown，否则会把未知伪造成“未出现”。
         r["gold_in_context"] = gold_txt in tail
     else:
         # 既无完整窗口布尔也无尾部文本：无法判断，不能伪造成“从未出现”。
@@ -1055,9 +1056,11 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
         if git5 is not None:
             stats.append(f"gold 进入 top-5 的比例={git5:.0%}"
                          + _ci_s(git5, "gold_in_top5_ci95"))
-        dist_i = _safe_int(analysis.get("median_gold_distance_tokens"))
-        if dist_i is not None:
-            stats.append(f"gold 距预测位的中位距离={dist_i} tokens")
+        # 中位数在偶数个窗口时可以是 12.5 这类小数：不能套 _safe_int，
+        # 否则汇总分析算出的距离会在 Markdown 报告里被静默丢掉。
+        dist = _finite_float(analysis.get("median_gold_distance_tokens"))
+        if dist is not None:
+            stats.append(f"gold 距预测位的中位距离={dist:.1f} tokens")
         if stats:
             md += ["", "；".join(stats) + "。"]
         cases = analysis.get("cases")

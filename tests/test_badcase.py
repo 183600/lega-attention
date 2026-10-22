@@ -348,10 +348,14 @@ def test_categorize_window_prefers_full_context_flag():
     assert c2["gold_in_context"] is True
     assert "未被复制" in c2["explanation"]
     # 既无完整窗口布尔也无 context_tail：不能伪造成“从未出现”
-    unknown = {"window": 8, "loss": 1.0, "gold_next": "blue",
-               "context_tail": None, "pred_top5": [[" red", 0.85]]}
-    c3 = categorize_window(unknown)
-    assert c3["gold_in_context"] is None and "未记录" in c3["explanation"]
+    for empty_tail in (None, "", "   "):
+        unknown = {"window": 8, "loss": 1.0, "gold_next": "blue",
+                   "context_tail": empty_tail,
+                   "pred_top5": [[" red", 0.85]]}
+        c3 = categorize_window(unknown)
+        # 空/空白尾部不含任何证据，不能伪造成“gold 从未出现”（False）。
+        assert c3["gold_in_context"] is None, (empty_tail, c3)
+        assert "未记录" in c3["explanation"]
     assert "未记录" in "\n".join(format_window_case(1, c3))
     ana = analyze_worst_windows([
         _win(gold=" blue", tail="a blue car", gold_in_context=True,
@@ -434,6 +438,27 @@ def test_analyze_worst_windows_and_md():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 最差窗口汇总与 Markdown 报告")
+
+
+def test_worstcase_md_keeps_fractional_median_gold_distance():
+    """偶数窗口的中位距离可以是 12.5；报告不能因非整数而静默省略。"""
+    wins = [
+        _win(window=1, pred_top5=[[" red", 0.1]],
+             gold_distance_tokens=10),
+        _win(window=2, pred_top5=[[" red", 0.1]],
+             gold_distance_tokens=15),
+    ]
+    ana = analyze_worst_windows(wins)
+    assert ana["median_gold_distance_tokens"] == 12.5, ana
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "worstcases.md")
+        write_worstcase_md(ana, path)
+        text = open(path, encoding="utf-8").read()
+        assert "中位距离=12.5 tokens" in text, text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 最差窗口报告保留小数中位距离")
 
 
 def test_repeats_context_rate_excludes_unknown_cases():
