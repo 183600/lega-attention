@@ -139,6 +139,31 @@ def data_report_protocol_issues(report) -> list:
             # 证据，同样无法确认三个 split 互斥。
             add("报告声明 split_protocol.verified_disjoint=False，但未记录"
                 "跨 split 长行重叠或缺失文件：无法确认划分互斥性")
+    # 清洗后复核独立于 alerts：即使有人把 alerts 清空，报告里的
+    # train_eval_clean=False 仍是“去污染未闭合”的直接证据，必须拦截。
+    duplicates = report.get("duplicates")
+    if isinstance(duplicates, dict):
+        post = duplicates.get("post_cleanup")
+        if post is not None and not isinstance(post, dict):
+            add("报告 duplicates.post_cleanup="
+                f"{type(post).__name__} 不是对象：无法核对清洗后是否残留重复")
+        elif isinstance(post, dict):
+            clean = post.get("train_eval_clean")
+            if clean is not None and not isinstance(clean, bool):
+                add("报告 duplicates.post_cleanup.train_eval_clean="
+                    f"{clean!r} 不是布尔值：无法确认清洗后无残留重复")
+            elif clean is False:
+                overlaps = post.get("overlap_long_lines")
+                blocks = post.get("overlap_blocks")
+                add("报告声明清洗后 train 仍与 val/test 共享精确/归一化长行或"
+                    f"多行块（长行 {overlaps!r}，块 {blocks!r}）：去污染未闭合，"
+                    "不能进入训练")
+            # checked_pairs 为空表示“无 train↔eval 对可核对”，不能据此判
+            # 通过；若字段存在但结构损坏，显式记录无法核对。
+            checked = post.get("checked_pairs")
+            if checked is not None and not isinstance(checked, list):
+                add("报告 duplicates.post_cleanup.checked_pairs="
+                    f"{type(checked).__name__} 不是列表：无法核对清洗后残留")
     return issues
 
 

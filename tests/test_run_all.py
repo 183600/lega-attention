@@ -154,6 +154,20 @@ def test_data_report_protocol_declarations_block_training():
     msgs = data_report_protocol_issues(malformed_evidence)
     assert any("overlap_long_lines" in m for m in msgs), msgs
     assert any("missing_files" in m for m in msgs), msgs
+    # 清洗后复核失败必须独立于 alerts 被拦截；结构损坏不能当成缺失放行。
+    residual = {"duplicates": {"post_cleanup": {
+        "checked_pairs": [["train", "val"]], "train_eval_clean": False,
+        "overlap_long_lines": {"train_val": {"exact_lines": 2}},
+        "overlap_blocks": {"train_val": 1}}}}
+    assert any("去污染未闭合" in m
+               for m in data_report_protocol_issues(residual))
+    malformed_post = {"duplicates": {"post_cleanup": {
+        "checked_pairs": "train,val", "train_eval_clean": "no"}}}
+    post_msgs = data_report_protocol_issues(malformed_post)
+    assert any("checked_pairs" in m for m in post_msgs), post_msgs
+    assert any("train_eval_clean" in m for m in post_msgs), post_msgs
+    assert data_report_protocol_issues({"duplicates": {"post_cleanup": {
+        "checked_pairs": [["train", "val"]], "train_eval_clean": True}}}) == []
     with tempfile.TemporaryDirectory() as d:
         _write_json(os.path.join(d, "data_report.json"),
                     {"alerts": [], "protocol": {"test_sealed": False}})
@@ -5649,13 +5663,52 @@ def test_build_summary_renders_near_duplicate_audit():
                 "candidate_pairs": 40,
                 "candidate_pairs_truncated": False,
                 "oversized_groups_truncated": 0,
+                "min_chars": 200,
+                "train_chars_coverage_fraction": 0.62,
+                "train_chars_skipped_short": 1200,
+                "train_chars_skipped_few_shingles": 0,
+                "train_chars_skipped_too_large": 800,
+                "threshold_sensitivity_removal": {
+                    "0.7": {"train_blocks_removed_total": 5,
+                            "train_chars_removed": 5000,
+                            "removal_fraction_chars": 0.05},
+                    "0.8": {"train_blocks_removed_total": 3,
+                            "train_chars_removed": 3000,
+                            "removal_fraction_chars": 0.03},
+                    "0.9": {"train_blocks_removed_total": 1,
+                            "train_chars_removed": 1000,
+                            "removal_fraction_chars": 0.01},
+                },
+            }, "post_cleanup": {
+                "checked_pairs": [["train", "val"]],
+                "train_eval_clean": True,
+                "overlap_long_lines": {},
+                "overlap_blocks": {},
             }},
+            "accounting": {
+                "train": {"tokens": 1000, "chars": 4000,
+                          "utf8_bytes": 4000, "bytes_per_token": 4.0},
+            },
         }
         out = build_summary(tmp, data_report=data_report)
         md = out["markdown"]
         assert "近似重复去污染" in md
         assert "98.650%" in md
         assert "只改 train" in md
+        # 覆盖率与三档“实际删除量”必须进入汇总页，而不只是判定对数
+        assert "近似重复扫描覆盖" in md and "62.0%" in md
+        assert "阈值敏感性（实际删除量" in md
+        assert "τ=0.7" in md and "τ=0.9" in md
+        assert "清洗后复核" in md and "已无共享" in md
+        assert "bytes/token" in md and "4.0000" in md
+        # 旧/损坏产物里的阈值键可能是任意文本：渲染不能因此崩溃
+        data_report["duplicates"]["near_duplicate"][
+            "threshold_sensitivity_removal"] = {
+                "bad-key": {"train_blocks_removed_total": 1,
+                            "train_chars_removed": 10,
+                            "removal_fraction_chars": 0.001}}
+        md_bad = build_summary(tmp, data_report=data_report)["markdown"]
+        assert "τ=bad-key" in md_bad
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary：近似重复审计进入汇总页")

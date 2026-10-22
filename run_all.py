@@ -6791,6 +6791,25 @@ def build_summary(results_dir: str, audit: dict = None,
                           f"文档跨切点={cross if cross is not None else '-'}；"
                           f"段落跨切点={pcross if pcross is not None else '-'}"
                           + warn)
+            actual = _as_dict(sp.get("actual_fractions"))
+            target = _as_dict(sp.get("target_fractions"))
+            dev = _finite_number(sp.get("max_abs_fraction_deviation"))
+            if actual:
+                def _fr(d, k):
+                    f = _finite_number(d.get(k))
+                    return "-" if f is None else f"{f:.1%}"
+                md.append(
+                    "- 划分比例：实际 "
+                    + " / ".join(f"{k}={_fr(actual, k)}"
+                                 for k in ("train", "val", "test"))
+                    + ("；目标 " + " / ".join(
+                        f"{k}={_fr(target, k)}"
+                        for k in ("train", "val", "test")) if target else "")
+                    + (f"；最大绝对偏差 {dev:.1%}" if dev is not None else "")
+                    + (f"；切点相对目标偏移 {sp.get('cut_deviation_chars')} 字符"
+                       if sp.get("cut_deviation_chars") is not None else "")
+                    + "。切点吸附到文档/段落边界会改变实际训练/评测规模，"
+                      "解读固定比例与检验功效时须按实际值")
         tok = _as_dict(data_report.get("tokenizer"))
         unk = _as_dict(tok.get("unk_rate"))
         unk_s = "、".join(f"{k}={_fmt_rate(v)}" for k, v in unk.items())
@@ -6831,10 +6850,60 @@ def build_summary(results_dir: str, audit: dict = None,
                 f"LSH 理论召回率 {_fmt_rate(near.get('lsh_recall_at_threshold'))}；"
                 f"候选对 {_int_or_zero(near.get('candidate_pairs')):,}"
                 "（阈值敏感性见 data_report.json）")
+            cov = _finite_number(near.get("train_chars_coverage_fraction"))
+            if cov is not None:
+                md.append(
+                    f"- 近似重复扫描覆盖：{cov:.1%} 的 train 字符达到 "
+                    f"min_chars={near.get('min_chars', '-')} 且 shingle 数达标；"
+                    f"未扫描字符：短块 "
+                    f"{_int_or_zero(near.get('train_chars_skipped_short')):,}、"
+                    f"少 shingle "
+                    f"{_int_or_zero(near.get('train_chars_skipped_few_shingles')):,}、"
+                    f"超大块 "
+                    f"{_int_or_zero(near.get('train_chars_skipped_too_large')):,}"
+                    "（近重复结论只对已覆盖部分成立）")
+            removal = _as_dict(near.get("threshold_sensitivity_removal"))
+            if removal:
+                def _tau_key(x):
+                    try:
+                        return (0, float(x))
+                    except (TypeError, ValueError):
+                        return (1, str(x))
+                parts = []
+                for key in sorted(removal, key=_tau_key):
+                    r = _as_dict(removal.get(key))
+                    parts.append(
+                        f"τ={key}: 删 "
+                        f"{_int_or_zero(r.get('train_blocks_removed_total'))} 块/"
+                        f"{_int_or_zero(r.get('train_chars_removed')):,} 字符/"
+                        f"{_fmt_rate(r.get('removal_fraction_chars'))}")
+                md.append("- 近似重复阈值敏感性（实际删除量，不只是判定对数）："
+                          + "；".join(parts)
+                          + "。阈值是分析前声明的协议参数，不能按下游结果回头挑选")
             if (near.get("candidate_pairs_truncated")
                     or _int_or_zero(near.get("oversized_groups_truncated"))):
                 md.append("- ⚠ 近似重复扫描触发候选簇/候选总数上限：删除量是下界，"
                           "须降低语料规模或提高上限后重跑")
+        post = _as_dict(dup.get("post_cleanup"))
+        if post.get("checked_pairs"):
+            clean = post.get("train_eval_clean")
+            if clean is True:
+                md.append("- 清洗后复核：train 与 val/test 已无共享精确/归一化"
+                          "长行或多行块（短行与近似重复另见对应条目）")
+            elif clean is False:
+                md.append("- ⚠ 清洗后复核：train 仍与 val/test 共享精确/归一化"
+                          "长行或多行块，去污染未闭合，须重建数据")
+        acct = _as_dict(data_report.get("accounting"))
+        if acct:
+            md.append(
+                "- 语料核算（与分词器无关的分母）：" + "；".join(
+                    f"{k} {_int_or_zero(_as_dict(v).get('tokens')):,} tokens / "
+                    f"{_int_or_zero(_as_dict(v).get('chars')):,} 字符 / "
+                    f"{_int_or_zero(_as_dict(v).get('utf8_bytes')):,} UTF-8 字节"
+                    f"（{_fmt4(_as_dict(v).get('bytes_per_token'))} bytes/token）"
+                    for k, v in acct.items())
+                + "。字符级兜底与 BPE 的 token PPL 不可直接比较，"
+                  "规模与分母以字节/字符核算为准")
         md.append(
             f"- 去污染：与 val/test 重复的训练长行移除 "
             f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"

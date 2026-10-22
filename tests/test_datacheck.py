@@ -30,7 +30,8 @@ from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             CRITICAL_SPLIT_ALERT_CODES,
-                            leakage_alerts, read_test_access_log, sanitize_text,
+                            leakage_alerts, post_cleanup_residual,
+                            read_test_access_log, sanitize_text,
                             short_ngram_overlap, short_overlap_alerts,
                             split_protocol_alerts, temporal_split_text,
                             text_length_stats, token_stream_stats,
@@ -646,6 +647,8 @@ def test_critical_split_alerts_filters_actionable_violations():
     assert critical_split_alerts({}) == []
     assert critical_split_alerts(None) == []
     assert critical_split_alerts({"alerts": 5}) == []
+    # 清洗后仍残留 train↔eval 精确重复是训练前必须拦截的直接证据
+    assert "post_cleanup_residual_overlap" in CRITICAL_SPLIT_ALERT_CODES
     assert split_protocol_alerts("not-a-dict") == []
     print("  [ok] critical_split_alerts 只筛出必须先处理的泄露（含跨 split 复制），"
           "分布漂移不拦截")
@@ -2124,3 +2127,159 @@ def test_prepare_bins_cache_invalidated_on_near_duplicate_params():
         meta3 = prepare_bins(d, kind="char", near_dup_threshold=1.0)
         assert meta3["train_tokens"] == meta2["train_tokens"]
     print("  [ok] prepare_bins：近似去污染阈值进入缓存身份，变化即重建")
+
+
+def test_near_duplicate_threshold_sensitivity_reports_actual_removal():
+    """三档阈值必须给出真实删除量，而不只是判定对数。
+
+    阈值从 0.7 收紧到 0.9 时，删除的块/字符数只能不增；且选定阈值那一档
+    必须与函数实际执行的删除量一致，否则汇总页会展示一套、bin 里是另一套。
+    """
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth").replace(
+        "several decades", "many decades").replace(
+        "public library", "public museum")
+    train_unique = ("A train-only paragraph with enough distinct material to "
+                    "remain after decontamination and keep the corpus large.")
+    texts = {"train": f"{edited}\n\n{train_unique}", "val": base, "test": ""}
+    out, stats = decontaminate_near_duplicates(texts)
+    assert "history of the town" not in out["train"]
+    sens = stats["threshold_sensitivity_removal"]
+    assert set(sens) == {"0.7", "0.8", "0.9"}
+    # 删除量随阈值单调不增（更严格 → 删得更少）
+    assert (sens["0.7"]["train_chars_removed"]
+            >= sens["0.8"]["train_chars_removed"]
+            >= sens["0.9"]["train_chars_removed"])
+    chosen = sens[str(round(stats["threshold"], 4))]
+    assert chosen["train_blocks_removed_total"] == stats[
+        "train_blocks_dropped_total"]
+    assert chosen["train_chars_removed"] == stats["train_chars_dropped"]
+    assert chosen["removal_fraction_chars"] == stats["removal_fraction_chars"]
+    # 判定对数与删除量是两个口径：都必须在报告里，不可互相替代
+    assert stats["threshold_sensitivity"]["0.8"]["train_val"] >= 1
+    print("  [ok] 近似重复：三档阈值报告真实删除块/字符量并与执行结果一致")
+
+
+def test_near_duplicate_reports_scan_char_coverage():
+    """短块/少 shingle 被跳过时必须报告未覆盖字符，不能暗示全语料已扫描。"""
+    short = "= References ="
+    long_block = ("A long train paragraph that is long enough to enter the "
+                  "near-duplicate scanner and provide a denominator. " * 6)
+    _, stats = decontaminate_near_duplicates(
+        {"train": f"{short}\n\n{long_block}", "val": "", "test": ""})
+    near = stats
+    assert near["train_blocks_skipped_short"] >= 1
+    assert near["train_chars_skipped_short"] > 0
+    assert 0.0 < near["train_chars_coverage_fraction"] < 1.0
+    assert near["train_chars_coverage_fraction"] == (
+        near["train_chars_eligible"] / near["train_chars_total"])
+    assert near["near_duplicate_min_coverage"] > 0
+    print("  [ok] 近似重复：扫描字符覆盖率与被跳过字符数显式落盘")
+
+
+def test_post_cleanup_residual_verifies_exact_removal():
+    """清洗后复核：删除后必须证明剩余为零；未清洗时必须判为未闭合。"""
+    shared = ("This is a long shared paragraph that appears verbatim on both "
+              "sides of the split and must be removed from train only.")
+    clean_texts, _ = decontaminate_texts(
+        {"train": shared + "\n" + "train-only " * 20,
+         "val": shared, "test": ""}, min_chars=40)
+    audit = post_cleanup_residual(clean_texts, min_chars=40, min_lines=2)
+    assert audit["checked_pairs"]
+    assert audit["train_eval_clean"] is True
+    assert audit["overlap_long_lines"]["train_val"]["normalized_lines"] == 0
+    # 未清洗时同一内容必须被复核抓到（否则复核只是形式）
+    dirty = {"train": shared, "val": shared, "test": ""}
+    bad = post_cleanup_residual(dirty, min_chars=40, min_lines=2)
+    assert bad["train_eval_clean"] is False
+    assert bad["overlap_long_lines"]["train_val"]["exact_lines"] >= 1
+    # 短行重复单独计数，不因“精确长行已干净”而消失
+    short_dirty = {"train": "= Same Title =", "val": "= Same Title =",
+                   "test": ""}
+    short_audit = post_cleanup_residual(short_dirty, min_chars=40)
+    assert short_audit["train_eval_clean"] is True
+    assert short_audit["overlap_short_lines"]["train_val"]["exact_lines"] == 1
+    print("  [ok] 清洗后复核：train↔eval 精确/归一化重复闭合，短行单独计数")
+
+
+def test_post_cleanup_residual_detects_multiline_block_copy():
+    """多行块复制即使每行都短于 min_chars，也必须被块级复核抓到。"""
+    block = "\n".join(["short line one", "short line two", "short line three"])
+    audit = post_cleanup_residual(
+        {"train": block + "\n", "val": "other\n\n" + block, "test": ""},
+        min_chars=40, min_lines=2)
+    assert audit["overlap_blocks"]["train_val"] >= 1
+    assert audit["train_eval_clean"] is False
+    print("  [ok] 清洗后复核：多行短行块的跨 split 复制可被识别")
+
+
+def test_temporal_split_reports_actual_fraction_skew():
+    """切点吸附会让实际比例偏离声明目标；必须落盘偏差并生成告警。"""
+    # 文档边界在 70% 与 95% 附近，最近的可用切点会把 80/10/10 拉偏
+    text = ("= A =\n" + ("alpha " * 120) + "\n\n"
+            "= B =\n" + ("beta " * 40) + "\n\n"
+            "= C =\n" + ("gamma " * 12) + "\n")
+    train, val, test, info = temporal_split_text(text)
+    assert train + val + test == text
+    assert info["target_fractions"]["train"] == 0.8
+    assert abs(sum(info["actual_fractions"].values()) - 1.0) < 1e-12
+    assert info["max_abs_fraction_deviation"] > 0.05
+    assert len(info["cut_deviation_chars"]) == 2
+    codes = {a["code"] for a in split_protocol_alerts(info)}
+    assert "split_fraction_skew" in codes
+    # 未超过容差时不应误报
+    codes_ok = {a["code"] for a in split_protocol_alerts(
+        {"actual_fractions": {"train": 0.8, "val": 0.1, "test": 0.1},
+         "target_fractions": {"train": 0.8, "val": 0.1, "test": 0.1},
+         "max_abs_fraction_deviation": 0.0,
+         "fraction_tolerance": 0.05})}
+    assert "split_fraction_skew" not in codes_ok
+    print("  [ok] 时序划分：目标/实际比例、切点偏移与偏斜告警可审计")
+
+
+def test_text_and_token_stats_report_data_accounting():
+    """字符/字节/词表覆盖度是数据规模与退化的可复核分母。"""
+    st = text_length_stats("a\n中文")
+    assert st["chars"] == 4
+    assert st["utf8_bytes"] == 8
+    assert text_length_stats("")["utf8_bytes"] == 0
+    tok = token_stream_stats(np.array([0, 0, 1, 2], dtype=np.uint16), 10,
+                             "train")
+    assert tok["tokens"] == 4 and tok["distinct_ids"] == 3
+    assert abs(tok["type_token_ratio"] - 0.75) < 1e-12
+    assert abs(tok["most_common_token_share"] - 0.5) < 1e-12
+    assert abs(tok["singleton_token_mass"] - 0.5) < 1e-12
+    assert abs(tok["token_entropy_bits"] - 1.5) < 1e-12
+    assert abs(tok["vocab_coverage"] - 0.3) < 1e-12
+    print("  [ok] 数据核算：UTF-8 字节、词表覆盖度与 token 熵可复核")
+
+
+def test_prepare_bins_report_includes_post_cleanup_and_accounting():
+    """新增证据必须进入 data_report，而不是只存在于独立工具函数。"""
+    shared = ("A long shared paragraph present in both train and validation "
+              "that the decontamination pass must remove from train.")
+    unique = ("A distinct train-only paragraph long enough to remain after "
+              "decontamination and give the report a real denominator.")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{shared}\n\n{unique}\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write(shared + "\n")
+        with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
+            f.write("held-out test text with enough characters to encode.\n")
+        prepare_bins(d, kind="char", force=True)
+        with open(os.path.join(d, "data_report.json"), "r",
+                  encoding="utf-8") as f:
+            rep = json.load(f)
+        post = rep["duplicates"]["post_cleanup"]
+        assert post["train_eval_clean"] is True
+        assert post["overlap_long_lines"]["train_val"]["exact_lines"] == 0
+        acct = rep["accounting"]
+        assert acct["train"]["tokens"] > 0
+        assert acct["train"]["utf8_bytes"] > 0
+        assert acct["train"]["bytes_per_token"] is not None
+        near = rep["duplicates"]["near_duplicate"]
+        assert 0.0 <= near["train_chars_coverage_fraction"] <= 1.0
+        codes = {a["code"] for a in rep["alerts"]}
+        assert "post_cleanup_verified" in codes
+    print("  [ok] prepare_bins：清洗后复核与字符/字节核算进入 data_report")

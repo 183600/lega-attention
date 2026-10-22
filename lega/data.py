@@ -29,6 +29,7 @@ from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
                         decontaminate_documents, decontaminate_near_duplicates,
                         decontaminate_texts,
                         distribution_shift, ngram_overlap,
+                        post_cleanup_residual,
                         read_test_access_log, sanitize_text,
                         short_ngram_overlap,
                         summarize_test_access, text_length_stats,
@@ -45,7 +46,10 @@ _GPT2_CACHE = {}
 # v7：加入近似重复（MinHash/LSH）去污染，并把阈值/min_chars 写入 meta
 # 作为缓存身份；旧缓存没有执行该步骤或参数不同，必须重建，否则 data_report
 # 会声称已做预处理而实际 bin 仍是未去近重复（或不同阈值）的旧流。
-CACHE_SCHEMA = 7
+# v8：data_report 新增近重复扫描覆盖率、三档真实删除量、清洗后残留复核与
+# 字符/字节核算。旧报告缺少这些闭合证据，若继续命中缓存，汇总页会把“未
+# 审计”显示成“无问题”；因此必须重建，让审计字段与 token 流同批产出。
+CACHE_SCHEMA = 8
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -423,6 +427,11 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             document_stats[key] = (int(document_stats.get(key, 0))
                                    + int(post_doc_stats.get(key, 0)))
         duplicate_stats["post_near_dup_exact_cleanup"] = post_doc_stats
+    # 清洗后复核：不只报告“删了多少”，还要证明最终 train 里没有残留的
+    # 精确/归一化跨 split 长行或多行块。该核对不改写任何 split，失败只
+    # 触发告警（供下游硬闸门/人工复核），不会静默放过。
+    duplicate_stats["post_cleanup"] = post_cleanup_residual(
+        texts, min_chars=40, min_lines=2)
     # 近似去污染是自动改写训练集，必须防止“阈值/语料异常导致 train 被删空”
     # 被当成一次正常实验静默跑完：>90% 或删空直接失败，要求人工核查。
     if near_stats["removal_fraction_chars"] > 0.90:

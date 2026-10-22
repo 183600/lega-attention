@@ -526,6 +526,10 @@ NEAR_DUP_MAX_BLOCK_CHARS = 2_000_000
 NEAR_DUP_MAX_GROUP = 64
 NEAR_DUP_MAX_CANDIDATES = 1_000_000
 NEAR_DUP_CACHE_BLOCKS = 10_000
+# 近似重复扫描的“可审计覆盖率”下限：低于该比例时，报告不能暗示全语料都已
+# 做过近重复筛查。短块（标题/固定用语）与超大块被跳过是协议选择，但跳过了
+# 多少字符必须显式可见；覆盖率不足只告警、不自动改阈值，避免按结果挑参数。
+NEAR_DUP_MIN_COVERAGE = 0.80
 # 包含关系（containment）候选的确定性锚点数。MinHash/LSH 估计的是
 # Jaccard：短 val 段被整段抄进长 train 文档时 Jaccard 很低，band 不会碰撞，
 # 但 containment=1。这里从每个块的 shingle 集合中均匀取少量真实 shingle
@@ -675,24 +679,37 @@ def _near_dup_collect(text: str, split: str, min_chars: int,
                       min_shingles: int, max_chars: int,
                       collect_anchors: bool = False,
                       anchor_index=None):
-    """把文本切成段落块并计算签名；返回 (metadata, signatures, counts)。"""
+    """把文本切成段落块并计算签名；返回 (metadata, signatures, counts)。
+
+    counts 同时记录块数与字符数：只报“扫描了 N 个块”无法说明这些块覆盖了
+    语料的多少字符；短块/超大块被跳过的影响必须用字符覆盖率量化。
+    """
     metas, sigs = [], []
-    counts = {"scanned": 0, "short": 0, "few_shingles": 0, "too_large": 0}
+    counts = {"scanned": 0, "short": 0, "few_shingles": 0, "too_large": 0,
+              "chars_scanned": 0, "chars_short": 0,
+              "chars_few_shingles": 0, "chars_too_large": 0,
+              "chars_eligible": 0}
     for start, end, _digest, n_lines in _iter_blocks(text, min_lines=1):
+        block_chars = int(end - start)
         counts["scanned"] += 1
+        counts["chars_scanned"] += block_chars
         if end - start > int(max_chars):
             counts["too_large"] += 1
+            counts["chars_too_large"] += block_chars
             continue
         norm = _near_dup_normalize(text[start:end])
         if len(norm) < int(min_chars):
             counts["short"] += 1
+            counts["chars_short"] += block_chars
             continue
         hashes = _near_dup_shingles(norm)
         if hashes.size < int(min_shingles):
             counts["few_shingles"] += 1
+            counts["chars_few_shingles"] += block_chars
             continue
         meta = {"split": str(split), "start": int(start),
                 "end": int(end), "lines": int(n_lines)}
+        counts["chars_eligible"] += block_chars
         if collect_anchors:
             meta["_anchors"] = _near_dup_anchor_ids(hashes)
         if anchor_index is not None:
@@ -792,6 +809,21 @@ def decontaminate_near_duplicates(texts: dict,
     pair_types = ("train_val", "train_test", "train_train", "val_test")
     sens_counts = {sens_keys[t]: {k: 0 for k in pair_types}
                    for t in sensitivity}
+    # 每个敏感性阈值下“实际会删掉哪些块”。只报候选/判定对数无法回答
+    # “阈值从 0.7 调到 0.9，训练集少多少字符”，也无法与 removal_fraction
+    # 对照；这里逐阈值维护删除集合，最后统一换算为块/行/字符量。
+    sens_removal = {
+        sens_keys[t]: {"cross": set(), "intra": set()}
+        for t in sensitivity}
+    sens_removal_stats = {
+        sens_keys[t]: {
+            "train_blocks_removed_cross_split": 0,
+            "train_blocks_removed_intra_split": 0,
+            "train_blocks_removed_total": 0,
+            "train_lines_removed": 0,
+            "train_chars_removed": 0,
+            "removal_fraction_chars": 0.0,
+        } for t in sensitivity}
     max_score = 0.0
     top_examples = []
     candidate_pairs = 0
@@ -916,9 +948,10 @@ def decontaminate_near_duplicates(texts: dict,
         remove_cross, remove_intra = set(), set()
         # 签名预筛：18 个 MinHash 的相等比例是 Jaccard/containment 的无偏
         # 估计（SE≈0.1）。远低于阈值的候选对直接跳过，避免在模板化/重复
-        # 语料上把预算耗在精确哈希上；预筛阈值取 0.6×协议阈值，给估计
-        # 噪声留足余量，跳过的对数单列在报告里，不静默丢弃。
-        prefilter_floor = float(threshold) * 0.6
+        # 语料上把预算耗在精确哈希上。地板按**敏感性网格的最低阈值**而不是
+        # 当前协议阈值计算：否则把阈值设得较高时，低阈值那一档的“若放宽会
+        # 删多少”会因预筛漏掉候选而被低估。跳过的对数单列在报告里。
+        prefilter_floor = float(min(sensitivity)) * 0.6
         for a, b in candidates:
             ma, mb = metas[a], metas[b]
             # 锚点候选由 containment 召回：MinHash 相等比例估计的是
@@ -936,18 +969,27 @@ def decontaminate_near_duplicates(texts: dict,
             if score > max_score:
                 max_score = score
             ptype = _near_dup_pair_type(ma["split"], mb["split"])
+            # 先确定该对“若达阈值会删哪一侧”，再按每个敏感性阈值登记。
+            # 跨 split 只删 train 侧；train 内部只删后出现的副本。
+            train_idx = later = None
+            if ptype in ("train_val", "train_test"):
+                train_idx = a if ma["split"] == "train" else b
+            elif ptype == "train_train":
+                later = a if (ma["start"], ma["end"]) > (
+                    mb["start"], mb["end"]) else b
             for t in sensitivity:
                 if score >= t:
-                    sens_counts[sens_keys[t]][ptype] += 1
+                    key = sens_keys[t]
+                    sens_counts[key][ptype] += 1
+                    if train_idx is not None:
+                        sens_removal[key]["cross"].add(train_idx)
+                    elif later is not None:
+                        sens_removal[key]["intra"].add(later)
             if score >= threshold:
                 verified_pairs += 1
-                if ptype in ("train_val", "train_test"):
-                    train_idx = a if ma["split"] == "train" else b
+                if train_idx is not None:
                     remove_cross.add(train_idx)
-                elif ptype == "train_train":
-                    # 保留 train 中先出现的那块；只删后出现的副本。
-                    later = a if (ma["start"], ma["end"]) > (
-                        mb["start"], mb["end"]) else b
+                elif later is not None:
                     remove_intra.add(later)
                 if len(top_examples) < 10 or score > top_examples[-1]["score"]:
                     top_examples.append({
@@ -965,6 +1007,23 @@ def decontaminate_near_duplicates(texts: dict,
         dropped_lines = sum(int(metas[i]["lines"]) for i in remove_all)
         dropped_chars = sum(int(metas[i]["end"] - metas[i]["start"])
                             for i in remove_all)
+        for t in sensitivity:
+            key = sens_keys[t]
+            cross = sens_removal[key]["cross"]
+            intra = sens_removal[key]["intra"] - cross
+            removed = cross | intra
+            removed_chars = sum(
+                int(metas[i]["end"] - metas[i]["start"]) for i in removed)
+            sens_removal_stats[key] = {
+                "train_blocks_removed_cross_split": int(len(cross)),
+                "train_blocks_removed_intra_split": int(len(intra)),
+                "train_blocks_removed_total": int(len(removed)),
+                "train_lines_removed": int(sum(
+                    int(metas[i]["lines"]) for i in removed)),
+                "train_chars_removed": int(removed_chars),
+                "removal_fraction_chars": float(
+                    removed_chars / max(1, len(train_text))),
+            }
     else:
         remove_cross, remove_intra = set(), set()
         dropped_lines = 0
@@ -973,6 +1032,9 @@ def decontaminate_near_duplicates(texts: dict,
     def _eval_count(split, key):
         return int(eval_counts.get(split, {}).get(key, 0))
 
+    train_chars_total = int(len(train_text))
+    train_chars_eligible = int(train_counts["chars_eligible"])
+    train_chars_scanned = int(train_counts["chars_scanned"])
     stats = {
         "method": "minhash_lsh_exact_verify",
         "similarity": ("max(jaccard, containment) for cross-split; "
@@ -989,11 +1051,27 @@ def decontaminate_near_duplicates(texts: dict,
         "lsh_recall_at_threshold": float(
             1.0 - (1.0 - threshold ** NEAR_DUP_ROWS) ** NEAR_DUP_BANDS),
         "threshold_sensitivity": sens_counts,
+        # 与 threshold_sensitivity（判定对数）互补：实际删除的块/行/字符量。
+        # 阈值升高会同时减少“判为近重复的对”和“被删掉的训练数据”，两者
+        # 不能互相替代；只报对数会让读者误以为删除量也随之线性变化。
+        "threshold_sensitivity_removal": sens_removal_stats,
         "train_blocks_scanned": int(train_counts["scanned"]),
         "train_blocks_eligible": int(n_train),
         "train_blocks_skipped_short": int(train_counts["short"]),
         "train_blocks_skipped_few_shingles": int(train_counts["few_shingles"]),
         "train_blocks_skipped_too_large": int(train_counts["too_large"]),
+        # 覆盖率：短块/超大块会被跳过，因此“没有近重复”只在已扫描的
+        # 字符范围内成立。把分母写清楚，避免把未扫描部分当成已验证。
+        "train_chars_scanned": train_chars_scanned,
+        "train_chars_skipped_short": int(train_counts["chars_short"]),
+        "train_chars_skipped_few_shingles": int(
+            train_counts["chars_few_shingles"]),
+        "train_chars_skipped_too_large": int(train_counts["chars_too_large"]),
+        "train_chars_coverage_fraction": float(
+            train_chars_eligible / max(1, train_chars_total)),
+        "train_scanned_block_char_coverage_fraction": float(
+            train_chars_eligible / max(1, train_chars_scanned)),
+        "near_duplicate_min_coverage": float(NEAR_DUP_MIN_COVERAGE),
         "val_blocks_scanned": _eval_count("val", "scanned"),
         "val_blocks_eligible": _eval_count("val", "eligible"),
         "val_blocks_skipped_short": _eval_count("val", "short"),
@@ -1006,7 +1084,7 @@ def decontaminate_near_duplicates(texts: dict,
         "test_blocks_skipped_too_large": _eval_count("test", "too_large"),
         "candidate_pairs": int(candidate_pairs),
         "containment_candidate_pairs": int(containment_candidate_pairs),
-        "signature_prefilter_floor": float(threshold) * 0.6,
+        "signature_prefilter_floor": float(min(sensitivity) * 0.6),
         "signature_prefilter_skipped": int(prefilter_skipped),
         "candidate_pairs_truncated": bool(truncated_candidates),
         "oversized_groups_truncated": int(truncated_groups),
@@ -1022,11 +1100,10 @@ def decontaminate_near_duplicates(texts: dict,
         "train_blocks_dropped_total": int(len(remove_cross | remove_intra)),
         "train_lines_dropped": int(dropped_lines),
         "train_chars_dropped": int(dropped_chars),
-        "train_chars_eligible": int(sum(
-            int(m["end"] - m["start"]) for m in train_metas)),
-        "train_chars_total": int(len(train_text)),
+        "train_chars_eligible": train_chars_eligible,
+        "train_chars_total": train_chars_total,
         "removal_fraction_chars": float(
-            dropped_chars / max(1, len(train_text))),
+            dropped_chars / max(1, train_chars_total)),
         "val_test_near_duplicate_pairs": int(
             sens_counts[sens_keys[threshold]]["val_test"]),
         "val_test_near_duplicate_pairs_by_threshold": {
@@ -1048,6 +1125,23 @@ def _iter_line_lengths(text: str):
         start = i + 1
 
 
+def _utf8_byte_length(text: str, chunk_chars: int = 1 << 20) -> int:
+    """UTF-8 字节数（按字符边界分块编码，避免对超大语料整串复制）。
+
+    ``len(text.encode("utf-8"))`` 会同时持有原文与编码副本；WikiText-103
+    训练集数百 MB，准备阶段再复制一份不必要。按 Python 字符边界切片不会
+    拆开多字节字符，因此分块编码的字节数与整串编码完全一致。
+    """
+    if not text:
+        return 0
+    if len(text) <= chunk_chars:
+        return len(text.encode("utf-8"))
+    total = 0
+    for i in range(0, len(text), chunk_chars):
+        total += len(text[i:i + chunk_chars].encode("utf-8"))
+    return int(total)
+
+
 def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
     """逐行长度分布：用于发现异常值（超长行会主导训练窗口）。
 
@@ -1062,12 +1156,16 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
     if huge_line_chars < 0:
         raise ValueError(f"huge_line_chars 必须 >= 0，收到 {huge_line_chars!r}")
     if not text:
-        return {"lines": 0, "chars": 0}
+        return {"lines": 0, "chars": 0, "utf8_bytes": 0}
     lens = np.fromiter(_iter_line_lengths(text), dtype=np.int64,
                        count=text.count("\n") + 1)
     return {
         "lines": int(lens.size),
         "chars": int(len(text)),
+        # 字节级核算与分词器无关：PPL 是 token 级指标，字符级兜底与 BPE
+        # 的 token 数不同，只有 bytes/token 与 UTF-8 字节数能把“分母”
+        # 写清楚，便于判断不同分词器/不同语料规模的结果是否可比。
+        "utf8_bytes": int(_utf8_byte_length(text)),
         "line_chars_p50": float(np.percentile(lens, 50)),
         "line_chars_p99": float(np.percentile(lens, 99)),
         "line_chars_max": int(lens.max()),
@@ -1127,9 +1225,27 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
         raise ValueError(
             f"{split} token id 越界: [{vmin}, {vmax}] 不在 [0, {vocab_size}) "
             "或超出 uint16 可存储范围（<= 65535），数据/词表不一致")
-    # 至此 vmax <= 65535 由本函数保证，写入 uint16 无损
+    # 至此 vmax <= 65535 由本函数保证，写入 uint16 无损。
+    # 词表覆盖/集中度是“数据退化”的早期信号：重复串、模板化或分词失败
+    # 会让少数 token 占据绝大多数位置。它们在 token 流层面确定性可算，
+    # 与模型无关，随 data_report 落盘，便于跨数据版本比较。
+    counts = np.bincount(arr_i, minlength=0)
+    total = int(counts.sum())
+    observed = counts[counts > 0]
+    probs = observed.astype(np.float64) / float(total)
+    entropy_bits = float(-np.sum(probs * np.log2(probs))) if probs.size else 0.0
+    distinct = int(observed.size)
+    singleton_mass = float(counts[counts == 1].sum() / total) if total else 0.0
+    top_share = float(observed.max() / total) if total and observed.size else 0.0
     return {"split": str(split), "tokens": int(arr.size), "dtype": str(arr.dtype),
-            "min_id": vmin, "max_id": vmax, "nan": n_nan, "inf": n_inf}
+            "min_id": vmin, "max_id": vmax, "nan": n_nan, "inf": n_inf,
+            "distinct_ids": distinct,
+            "type_token_ratio": float(distinct / total) if total else 0.0,
+            "token_entropy_bits": entropy_bits,
+            "most_common_token_share": top_share,
+            "singleton_token_mass": singleton_mass,
+            "vocab_coverage": (float(distinct / int(vocab_size))
+                               if int(vocab_size) > 0 else 0.0)}
 
 
 def unknown_char_rate(tok, text: str):
@@ -1323,6 +1439,11 @@ _NEWLINE_RE = re.compile("\n")
 # 空行：两个换行之间只允许空白（兼容 CRLF 与“有空格的行”）。
 _BLANK_LINE_RE = re.compile(r"(?<=\n)[ \t\r]*\n")
 
+# 时序划分的“实际比例偏离目标”告警线（绝对百分点）。切点对齐文档/段落
+# 边界可能把 80/10/10 拉成 70/12/18；这不是错误，但必须显式报告，否则
+# “train 占 80%”只是目标值，读者会误以为实际语料也按此规模训练。
+SPLIT_FRACTION_TOLERANCE = 0.05
+
 
 def _boundary_candidates(text: str, lo: int, hi: int, kind: str):
     # 换行/空行候选用正则扫描；标题候选额外校验真实行首（切片首位的
@@ -1501,11 +1622,35 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         group_unit = "blank_line_paragraph"
     else:
         group_unit = "line_segment"
+    # 目标比例 vs 实际比例：切点吸附到文档/段落边界后，实际训练规模可能
+    # 偏离协议声明。偏差本身不是泄露，但会让“80/10/10”的规模描述失真，
+    # 也可能导致 val/test 过小、检验功效不足，因此逐项落盘并设告警线。
+    target_fractions = {
+        "train": float(train_frac),
+        "val": float(val_frac),
+        "test": float(1.0 - train_frac - val_frac),
+    }
+    actual_fractions = {
+        "train": float(len(train_text) / n),
+        "val": float(len(val_text) / n),
+        "test": float(len(test_text) / n),
+    }
+    fraction_deviation = {
+        k: float(actual_fractions[k] - target_fractions[k])
+        for k in target_fractions}
     info = {
         "order": "temporal:train(earliest)->val->test(latest)",
         "cut_offsets": [int(p1), int(p2)], "cut_kinds": [str(k1), str(k2)],
+        "target_offsets": [int(t1), int(t2)],
+        "cut_deviation_chars": [int(p1 - t1), int(p2 - t2)],
         "window_chars": int(window), "fallback_char_cut": bool(fallback),
         "shuffled": False,
+        "target_fractions": target_fractions,
+        "actual_fractions": actual_fractions,
+        "fraction_deviation": fraction_deviation,
+        "max_abs_fraction_deviation": float(
+            max(abs(v) for v in fraction_deviation.values())),
+        "fraction_tolerance": float(SPLIT_FRACTION_TOLERANCE),
         # 群组自检：标题定义文档、空行定义段落；为 True 表示群组跨了切点
         "n_headings": int(len(heads)),
         "n_paragraph_boundaries": int(len(paragraphs)),
@@ -1809,6 +1954,36 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
             f"有 {_count(near.get('train_blocks_skipped_too_large'))} 个 train 块"
             f"超过 {near.get('max_block_chars', NEAR_DUP_MAX_BLOCK_CHARS)} 字符"
             "未参与近似重复扫描：该块的近重复无法被排除，须人工核查")
+    # 覆盖率：近重复结论只对“已扫描且达到 min_chars 的字符”成立。低于
+    # 协议下限时必须显式说明剩余风险，不能把“未扫描”写成“无近重复”。
+    coverage = _num(near.get("train_chars_coverage_fraction"))
+    min_cov = _num(near.get("near_duplicate_min_coverage"))
+    if min_cov is None:
+        min_cov = float(NEAR_DUP_MIN_COVERAGE)
+    if coverage is not None and coverage < min_cov:
+        add("warning", "near_duplicate_low_coverage",
+            f"近似重复扫描仅覆盖 train 全部字符的 {coverage:.1%}"
+            f"（协议下限 {min_cov:.0%}；短块 "
+            f"{_count(near.get('train_chars_skipped_short')):,} 字符、"
+            f"少 shingle "
+            f"{_count(near.get('train_chars_skipped_few_shingles')):,} 字符、"
+            f"超大块 "
+            f"{_count(near.get('train_chars_skipped_too_large')):,} 字符未扫描）："
+            "近重复结论只对已覆盖部分成立，须人工核查未扫描语料")
+    # 清洗后复核：证明“剩下的已干净”，而不只是“删过一些”。
+    post = dup.get("post_cleanup")
+    post = post if isinstance(post, dict) else {}
+    if post.get("checked_pairs"):
+        if post.get("train_eval_clean") is False:
+            add("warning", "post_cleanup_residual_overlap",
+                "清洗后复核发现 train 仍与 val/test 共享精确/归一化长行或多行块："
+                f"长行 {post.get('overlap_long_lines', {})}、多行块 "
+                f"{post.get('overlap_blocks', {})}。去污染并非闭合，"
+                "须核查删除顺序/短行边界并重建数据")
+        elif post.get("train_eval_clean") is True:
+            add("info", "post_cleanup_verified",
+                "清洗后复核：train 与 val/test 已无共享精确/归一化长行或多行块"
+                "（短行与近似重复另见对应条目；val/test 保持尘封未改写）")
     n_eval_dup = _count(dup.get("val_test_overlap_long_lines"))
     n_eval_dup_norm = _count(
         dup.get("val_test_overlap_normalized_long_lines"))
@@ -1855,7 +2030,12 @@ CRITICAL_SPLIT_ALERT_CODES = (
     "split_paragraphs_cross_cut",
     "ngram_overlap_train_val", "ngram_overlap_train_test",
     "ngram_overlap_val_test",
-    "eval_splits_overlap", "eval_splits_overlap_documents")
+    "eval_splits_overlap", "eval_splits_overlap_documents",
+    # 清洗后复核发现 train 仍与 val/test 共享精确/归一化长行或多行块：
+    # 这是“去污染本应删除却仍残留”的直接证据，必须像 n-gram 重叠一样
+    # 在训练前拦截，而不是只在汇总页提示。
+    "post_cleanup_residual_overlap",
+)
 
 
 def critical_split_alerts(data_report: dict) -> list:
@@ -1889,6 +2069,16 @@ def split_protocol_alerts(split_protocol: dict) -> list:
     if p.get("shuffled"):
         add("warning", "split_shuffled",
             "划分协议声明 shuffled=True：时序先后/群组完整性不可保证，须人工核查")
+    dev = p.get("max_abs_fraction_deviation")
+    tol = p.get("fraction_tolerance", SPLIT_FRACTION_TOLERANCE)
+    if (isinstance(dev, (int, float)) and not isinstance(dev, bool)
+            and isinstance(tol, (int, float)) and not isinstance(tol, bool)
+            and dev > float(tol)):
+        add("warning", "split_fraction_skew",
+            f"实际 split 比例偏离目标 {dev:.1%}（> {float(tol):.1%}）："
+            f"目标 {p.get('target_fractions', '?')}，实际 "
+            f"{p.get('actual_fractions', '?')}；切点吸附到文档/段落边界会"
+            "改变实际训练/评测规模，解读“80/10/10”与检验功效时须按实际值")
     if p.get("fallback_char_cut"):
         add("warning", "split_char_cut",
             "无可用换行或文档边界，退化为字符切分——同一文档可能跨 split"
@@ -1960,6 +2150,109 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             "上游声明 verified_disjoint=False，但未记录跨 split 长行重叠或"
             "缺失文件：无法确认划分互斥性")
     return alerts
+
+
+def _text_line_digest_sets(text: str, min_chars: int):
+    """返回一行文本的 (长行精确/归一化, 短行精确/归一化) 摘要集合。
+
+    与 decontaminate_texts / verify_splits_disjoint 同口径：按归一化内容
+    长度划分长短行，避免“仅空白差异”让同一行在两侧落入不同集合。
+    """
+    long_exact, long_norm = set(), set()
+    short_exact, short_norm = set(), set()
+    if not isinstance(text, str):
+        return long_exact, long_norm, short_exact, short_norm
+    for line in _iter_lines(text):
+        s = line.strip()
+        if not s:
+            continue
+        sn = _normalize_line(s)
+        d = _line_digest(s)
+        dn = d if sn == s else _line_digest(sn)
+        if len(sn) < min_chars:
+            short_exact.add(d)
+            short_norm.add(dn)
+        else:
+            long_exact.add(d)
+            long_norm.add(dn)
+    return long_exact, long_norm, short_exact, short_norm
+
+
+def post_cleanup_residual(texts: dict, min_chars: int = 40,
+                          min_lines: int = 2) -> dict:
+    """清洗后复核：最终 train 里是否仍残留与 val/test 相同的行/多行块。
+
+    去污染函数只报告“删了多少”，这不能证明“剩下的已干净”。本函数对清洗
+    后的文本再做一次独立核对（不重新删除、不改写 val/test），把“已应用
+    去污染”升级为“已在当前文本上验证无精确/归一化重复”。它只覆盖精确
+    行/块，不替代近似重复扫描；短行（标题/固定用语）单独计数，不因
+    “已核对”而假装它们不存在。
+
+    返回 JSON 原生类型；``train_eval_clean`` 仅在 train 与至少一个 eval
+    split 都存在时给出布尔值，否则为 None（不可判定，不写成通过）。
+    """
+    min_chars = strict_int(min_chars, "min_chars")
+    min_lines = strict_int(min_lines, "min_lines")
+    if min_chars < 0:
+        raise ValueError(f"min_chars 必须 >= 0，收到 {min_chars!r}")
+    if min_lines < 1:
+        raise ValueError(f"min_lines 必须 >= 1，收到 {min_lines!r}")
+    texts = texts if isinstance(texts, dict) else {}
+    present = [s for s in ("train", "val", "test")
+               if isinstance(texts.get(s), str)]
+    line_sets, block_sets = {}, {}
+    for split in present:
+        line_sets[split] = _text_line_digest_sets(texts[split], min_chars)
+        block_sets[split] = {d for _, _, d, _ in
+                             _iter_blocks(texts[split], min_lines)}
+
+    def _pair(a, b):
+        return f"{a}_{b}"
+
+    pairs = []
+    for i, a in enumerate(present):
+        for b in present[i + 1:]:
+            pairs.append((a, b))
+    overlap_long, overlap_short, overlap_blocks = {}, {}, {}
+    for a, b in pairs:
+        la, lan, sa, san = line_sets[a]
+        lb, lbn, sb, sbn = line_sets[b]
+        key = _pair(a, b)
+        overlap_long[key] = {
+            "exact_lines": int(len(la & lb)),
+            "normalized_lines": int(len(lan & lbn))}
+        overlap_short[key] = {
+            "exact_lines": int(len(sa & sb)),
+            "normalized_lines": int(len(san & sbn))}
+        overlap_blocks[key] = int(len(block_sets[a] & block_sets[b]))
+    train_pairs = [p for p in pairs if "train" in p]
+    clean = None
+    if train_pairs:
+        clean = all(
+            overlap_long[_pair(*p)]["exact_lines"] == 0
+            and overlap_long[_pair(*p)]["normalized_lines"] == 0
+            and overlap_blocks[_pair(*p)] == 0
+            for p in train_pairs)
+    vt_key = "val_test"
+    return {
+        "scope": ("exact/whitespace-normalized long lines and multi-line "
+                  "blocks after all decontamination passes"),
+        "min_chars": int(min_chars),
+        "min_lines": int(min_lines),
+        "checked_splits": present,
+        "checked_pairs": [list(p) for p in pairs],
+        "overlap_long_lines": overlap_long,
+        "overlap_short_lines": overlap_short,
+        "overlap_blocks": overlap_blocks,
+        # 只对 train↔eval 下结论：val/test 之间的重复按协议保持尘封不改写，
+        # 只能诊断并告警，不能算作“清洗失败”。
+        "train_eval_clean": clean,
+        "val_test_overlap_long_lines": (
+            overlap_long.get(vt_key, {}).get("normalized_lines", 0)),
+        "val_test_overlap_blocks": int(overlap_blocks.get(vt_key, 0)),
+        "note": ("短行重复只计数；val/test 不被改写。本核对不覆盖低于 "
+                 "min_chars 的短行或近似重复，那部分由 near_duplicate 报告"),
+    }
 
 
 def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40,
@@ -2150,8 +2443,16 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "train 内部重复长行（保留首次出现）；val/test 不被改写；",
             "精确去重之后再做近似重复筛查：字符 5-gram MinHash + LSH 找候选，"
             "候选对精确计算 Jaccard/containment，跨 split 用 max(Jaccard, "
-            "containment)、train 内部只用 Jaccard，阈值与三档敏感性见 "
-            "duplicates.near_duplicate；只有 train 被改写；",
+            "containment)、train 内部只用 Jaccard，阈值与三档敏感性（判定对数"
+            "与真实删除量）见 duplicates.near_duplicate；只有 train 被改写；",
+            "近重复扫描只覆盖达到 min_chars 且 shingle 数达标的字符："
+            "duplicates.near_duplicate 同时报告覆盖率与被跳过字符数，"
+            "低于协议下限会告警，不能把未扫描部分当作已验证；",
+            "所有删除完成后，duplicates.post_cleanup 对最终文本再核对一次"
+            "train 与 val/test 是否仍共享精确/归一化长行或多行块；"
+            "train_eval_clean=False 进入 alerts 并作为训练前严重违规；",
+            "accounting 逐 split 记录 tokens/字符/UTF-8 字节与 bytes/token："
+            "token 级 PPL 的分母随分词器变化，规模比较以字节/字符核算为准；",
             "val 与 test 之间的重复/64-gram 重叠单独统计并告警：两侧均不改写，"
             "但重叠会削弱 final test 相对 val 选择集的独立性；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",
@@ -2161,6 +2462,46 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "复核提示（见 alert_thresholds），不是显著性检验。",
         ],
     }
+    # 语料规模核算：token 数之外同时记录字符数与 UTF-8 字节数。PPL 的
+    # 分母是 token，字符级兜底与 BPE 的 token 粒度不同；bytes/token 与
+    # 总字节数让读者能判断不同分词器/不同数据版本的结果是否可比，也便于
+    # 发现“token 数正常但字节数异常”的分词/清洗事故。
+    def _account_int(value):
+        if isinstance(value, (bool, np.bool_)):
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return n if n >= 0 else None
+
+    accounting = {}
+    splits_d = splits if isinstance(splits, dict) else {}
+    text_stats_d = text_stats if isinstance(text_stats, dict) else {}
+    for split in ("train", "val", "test"):
+        st = splits_d.get(split)
+        ts = text_stats_d.get(split)
+        st = st if isinstance(st, dict) else {}
+        ts = ts if isinstance(ts, dict) else {}
+        tokens = _account_int(st.get("tokens"))
+        chars = _account_int(ts.get("chars"))
+        nbytes = _account_int(ts.get("utf8_bytes"))
+        entry = {
+            "tokens": tokens,
+            "chars": chars,
+            "utf8_bytes": nbytes,
+            "chars_per_token": None,
+            "bytes_per_token": None,
+            "bytes_per_char": None,
+        }
+        if tokens and chars is not None:
+            entry["chars_per_token"] = float(chars / tokens)
+        if tokens and nbytes is not None:
+            entry["bytes_per_token"] = float(nbytes / tokens)
+        if chars and nbytes is not None:
+            entry["bytes_per_char"] = float(nbytes / chars)
+        accounting[split] = entry
+    report["accounting"] = accounting
     if isinstance(extra, dict):
         # extra 只允许扩充报告，不能覆盖自检结论本身：否则上游元数据里的
         # 一个 "alerts": [] / "protocol": {...} 就能把防泄漏告警清空或把
