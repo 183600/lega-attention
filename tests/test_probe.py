@@ -352,6 +352,11 @@ def test_linear_probe_tolerates_non_numeric_columns():
 def test_probe_rejects_numpy_bools_and_cache_identity():
     """np.bool_ 不能被当成 1.0/L2=1；特征缓存也不能跨 records 对象复用。"""
     assert math.isnan(_float_or_nan(np.bool_(True)))
+    # float("1_0")==10.0：下划线数字串不是规范 JSON 数值，不能把坏记录的
+    # 特征值 10 当成真实观测（会污染标准化、λ 选择与 OOF 指标）。
+    assert math.isnan(_float_or_nan("1_0"))
+    assert math.isnan(_float_or_nan(" 1_0 "))
+    assert _float_or_nan("10") == 10.0 and _float_or_nan(1.5) == 1.5
     for bad in (np.bool_(True), np.bool_(False), "1_0"):
         try:
             _finite_nonnegative(bad, "l2")

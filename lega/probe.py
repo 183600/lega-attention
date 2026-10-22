@@ -157,8 +157,16 @@ def predict_logreg(model: Dict, X: np.ndarray) -> np.ndarray:
 
 
 def _float_or_nan(v) -> float:
-    """外部/旧格式记录的单列取值：缺失或非数值一律按缺失（NaN）处理。"""
+    """外部/旧格式记录的单列取值：缺失或非数值一律按缺失（NaN）处理。
+
+    与 analysis/badcase/plots 等模块的有限数值解析同口径：bool 不是数值
+    观测，``float("1_0") == 10.0`` 的下划线写法也不是规范 JSON 数值。
+    若放行，坏记录里的 "1_0" 会被当成真实特征值 10，线性探针的标准化、
+    λ 选择与 OOF 指标都会建立在伪造的强特征上。
+    """
     if v is None or isinstance(v, (bool, np.bool_)):
+        return float("nan")
+    if isinstance(v, str) and "_" in v:
         return float("nan")
     try:
         return float(v)
