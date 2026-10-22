@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .repro import ROOT, sha256_file
-from .utils import data_rng_state_fingerprint, strict_int
+from .utils import data_rng_state_fingerprint, seed_int, strict_int
 
 LEDGER_FILENAME = "experiments.jsonl"
 
@@ -129,10 +129,10 @@ def _seed_evidence_issues(run, run_seed: int) -> list:
 
 
 def _ledger_seed(value):
-    # 与 build_experiment_record 共用 strict_int：字符串 "1_0"/空串、bool、
-    # 小数都不能在核验侧被 int()/float() 静默折叠成另一个合法种子，
-    # 否则台账可以用一个“看起来不同”的种子通过覆盖核对。
-    return strict_int(value, "seed")
+    # 与 build_experiment_record 共用 seed_int：字符串 "1_0"/空串、bool、
+    # 小数都不能在核验侧被 int()/float() 静默折叠成另一个合法种子；
+    # 负数/超出 2^32-1 的种子在 set_seed 中也不可能被执行，同样按非法身份处理。
+    return seed_int(value, "seed")
 
 
 def verify_ledger(path: str = None, check_artifacts: bool = False,
@@ -184,10 +184,14 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 run_issues.append("record_after_terminal")
         # 同一 run_id 的配置哈希必须始终一致：重建同名实验却改写记录（或
         # 误把不同配置的 started/completed 拼在一起）会让“run_id 即配置”
-        # 的假设失效。
-        shas = sorted({r.get("config_sha256") for _, r in items
-                       if isinstance(r.get("config_sha256"), str)
-                       and r.get("config_sha256")})
+        # 的假设失效。非空字符串以外的值不能因为“不是字符串”就被静默忽略，
+        # 否则把 completed 的哈希改成 123/数组即可绕过一致性核对。
+        raw_shas = [r.get("config_sha256") for _, r in items]
+        if any(v is not None
+               and (not isinstance(v, str) or not v) for v in raw_shas):
+            run_issues.append("config_sha256_malformed")
+        shas = sorted({v for v in raw_shas
+                       if isinstance(v, str) and v})
         if len(shas) > 1:
             run_issues.append("config_sha256_rewritten")
         # started/completed 声明的 variants×seeds 必须一致：否则可以用
@@ -582,7 +586,7 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
         "config_sha256": config_sha256,
         "config": config,
         "variants": [str(v) for v in variants],
-        "seeds": [strict_int(s, "seed") for s in seeds],
+        "seeds": [seed_int(s, "seed") for s in seeds],
         "smoke": bool(smoke),
         "argv": [str(a) for a in argv],
         "git": git,
