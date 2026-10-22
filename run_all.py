@@ -7049,8 +7049,6 @@ def main():
             run_snapshots.append(snapshot_train_run(
                 v, seed, vdir, known_ckpt_sha256=sha, known_ckpt_path=ckpt,
                 heldout_path=os.path.join(results_dir, f"eval_{v}{suffix}.json")))
-        result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
-                        if os.path.isfile(p)]
         # 收尾身份核对：长实验期间代码/数据若被改动，开始时记录的 commit/指纹
         # 已不足以代表整轮实验。把结束快照与漂移结论一并写入 completed 记录，
         # 让“全程同一版本”成为可核对的事实而不是假设。
@@ -7072,6 +7070,24 @@ def main():
             "data_fingerprint": end_data_digest,
             "drift": drift,
         }
+        # 把逐 run 的**实际**种子审计回填到 repro.json：启动时只有 seed_plan
+        # 声明，这里补上每个 (变体, 种子) run_manifest.seed_report 的真实 RNG
+        # 状态指纹。repro.json 因此即使脱离 out/ 目录也能自证种子覆盖；失败
+        # 轮次不会走到这里，仍保留启动期的计划与台账 aborted 记录。
+        repro["seed_reports"] = {
+            f"{v}/seed{seed}": ((snap.get("provenance") or {}).get("seed_report"))
+            for (v, seed, _vdir, _suffix), snap
+            in zip(chain, run_snapshots)}
+        repro["tracking_end"] = tracking_end
+        repro["status"] = ("completed_with_drift" if drift["changed"]
+                           else "completed")
+        save_json(repro, os.path.join(results_dir, "repro.json"))
+        print(f"[repro] 逐 run 种子审计已回填 -> "
+              f"{os.path.join(results_dir, 'repro.json')}")
+        # repro.json 必须在最终哈希前写入：completed 台账的产物哈希要覆盖
+        # 回填后的版本，否则重算会显示“repro 被改写”。
+        result_files = [p for p in glob.glob(os.path.join(results_dir, "*"))
+                        if os.path.isfile(p)]
         if drift["changed"]:
             print("[repro] ⚠ 实验期间代码或数据身份发生变化："
                   + "; ".join(f"{m['field']} {m['start']} -> {m['end']}"
