@@ -848,3 +848,13 @@ def test_ledger_rejects_sanity_evidence_with_present_false():
         {"variant": "lega", "seed": 7, "provenance": {"sanity": bogus}}]}
     issues = _sanity_evidence_issues(rec_bogus)
     assert any("malformed" in x for x in issues), issues
+
+
+def test_sanity_evidence_does_not_crash_on_malformed_variants_scope():
+    """verify_ledger 必须报告畸形 variants，而不是在迭代时抛 TypeError。"""
+    from lega.experiment import _sanity_evidence_issues
+    gate = {"executed": True, "verdict": {"lega": "pass"}}
+    for bad_variants in (5, True, 3.5, "lega"):
+        rec = {"variants": bad_variants, "sanity": gate, "runs": []}
+        issues = _sanity_evidence_issues(rec)
+        assert "sanity_verdict_scope_mismatch" in issues, (bad_variants, issues)

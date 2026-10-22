@@ -312,11 +312,20 @@ def _sanity_evidence_issues(record) -> list:
         if verdict:
             issues.append("sanity_verdict_without_execution")
         return issues
-    variants = [str(v) for v in (record.get("variants") or [])]
+    raw_variants = record.get("variants")
+    bad_scope = False
+    if raw_variants is None or isinstance(raw_variants, (list, tuple)):
+        variants = [str(v) for v in (raw_variants or [])]
+    else:
+        # 损坏的 variants（数字/字符串/bool 等）不能直接迭代：int/bool 抛
+        # TypeError 会让整份台账核验崩溃，而 verify_ledger 的契约是报告问题。
+        # 按“作用域无法核对”处理，后续 run 证据仍继续逐条检查。
+        variants = []
+        bad_scope = True
     if not isinstance(verdict, dict):
         issues.append("sanity_verdict_malformed")
     else:
-        if set(verdict) != set(variants):
+        if bad_scope or set(verdict) != set(variants):
             issues.append("sanity_verdict_scope_mismatch")
         if any(v != "pass" for v in verdict.values()):
             issues.append("sanity_verdict_not_pass")
