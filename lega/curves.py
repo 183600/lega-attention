@@ -665,6 +665,33 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     final_val = val_pts[-1]["value"] if val_pts else None
     final_step = val_pts[-1]["step"] if val_pts else None
     early_stop_gain = _rel_change(best_val, final_val)  # >0 表示最终劣于最优
+    # best checkpoint 选型可靠性：best 只是 val 点估计的最小值，未必与次优
+    # 点有可区分的差异。若 best 与次优的差距落在该点 95% CI 内，选型可能
+    # 由窗口抽样噪声决定（winner's curse）；此时不能只报告 best 的数字。
+    val_ci_by_step = {}
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        ci, v = r.get("val_loss_ci95"), _finite_value(r.get("val_loss"))
+        s_ = _step_or_none(r.get("step"))
+        if (s_ is None or v is None or not isinstance(ci, (list, tuple))
+                or len(ci) != 2):
+            continue
+        lo, hi = _finite_value(ci[0]), _finite_value(ci[1])
+        if lo is not None and hi is not None and hi >= lo and v > 0:
+            val_ci_by_step.setdefault(s_, (lo, hi, v))
+    best_ci_rel = None
+    if best_step in val_ci_by_step:
+        lo, hi, v = val_ci_by_step[best_step]
+        best_ci_rel = (hi - lo) / 2.0 / v
+    sorted_val = sorted(p["value"] for p in val_pts)
+    second_best = sorted_val[1] if len(sorted_val) >= 2 else None
+    best_margin_rel = (_rel_change(best_val, second_best)
+                       if (best_val is not None and second_best is not None)
+                       else None)
+    best_selection_noise = bool(
+        best_ci_rel is not None and best_margin_rel is not None
+        and best_step != final_step and best_margin_rel <= best_ci_rel)
     # 早停空间同样要扣除评估噪声：final 比 best 差 2% 但单点 CI 就有 ±3% 时，
     # 不能据此断言“已经过拟合、早停能挽回”。
     gain_tol = max(EARLY_STOP_TOL, val_ci_rel or 0.0)
@@ -840,6 +867,22 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             "（窗口抽样误差；分段均值会进一步降低该项，按保守口径使用）："
             "小于该量级的验证变化按噪声处理，不作为过拟合/收敛证据")
 
+    # best checkpoint 选型也可能是噪声：best 与次优点的差距小于该点 CI 时，
+    # 谁被选中取决于有限验证窗口的抽样波动，而不是真实泛化差异。
+    if best_selection_noise:
+        evidence.append(
+            f"best checkpoint 在 step {best_step}，但仅比次优验证损失 "
+            f"{second_best:.4f} 好 {best_margin_rel:.1%}，小于该点 95% CI "
+            f"相对半宽 ±{best_ci_rel:.1%}：最优与次优无法区分，"
+            "选型可能由验证窗口抽样噪声决定（winner's curse）")
+        recommendations.append(
+            f"best checkpoint 选型落在评估噪声内（margin {best_margin_rel:.1%} "
+            f"≤ CI ±{best_ci_rel:.1%}）：不要只报告 best 的指标；同时报告"
+            "final/多种子均值，并增大 eval_iters 或验证集以缩小选型噪声；"
+            "若结论依赖 best 与次优的排序，应视为未定")
+        recommendations[:] = [r for r in recommendations
+                              if "无需干预" not in r]
+
     # 训练数据覆盖率（来自 eval.json）：曲线下降 ≠ 已收敛。只见过不足
     # 1 个 epoch 时，验证损失仍在快速变化，此时比较方法/下“无需干预”的
     # 结论都不稳；必须把“还没学完”与真正的收敛区分开。
@@ -943,6 +986,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "val_best_step": best_step,
         "val_final_step": final_step,
         "early_stop_gain_rel": early_stop_gain,
+        "val_second_best": second_best,
+        "val_best_margin_rel": best_margin_rel,
+        "val_best_ci_rel": best_ci_rel,
+        "best_checkpoint_within_noise": best_selection_noise,
         # 验证侧噪声量级与“变化是否超出噪声”的显式标记：下游可据此避免
         # 把窗口抽样误差当成过拟合/收敛信号。
         "val_ci_rel": val_ci_rel,
