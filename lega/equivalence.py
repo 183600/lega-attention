@@ -404,15 +404,44 @@ def tost_paired(a, b, margin: float, alpha: float = DEFAULT_ALPHA,
 
 
 def _margin_for_factor(spec: dict, factor: float) -> float:
-    """按敏感性因子换算 margin；log_ratio 按几何比换算而不是直接乘 log。"""
+    """按敏感性因子换算 margin；log_ratio 按几何比换算而不是直接乘 log。
+
+    因子/基础 margin 必须是能够表示的有限数：合法但超出 float 上限的整数
+    factor 若直接参与乘法会抛 OverflowError（或得到 inf），不能穿透到
+    敏感性网格/汇总。无法表示时显式 ValueError，而不是伪造一个无穷阈值。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError(f"margin 规格必须是对象，收到 {spec!r}")
+    factor = _strict_number(factor, "margin factor")
+    if factor < 0:
+        raise ValueError(f"margin factor 必须 >= 0，收到 {factor!r}")
     kind = spec.get("kind")
-    base = float(spec.get("margin"))
+    base = _strict_number(spec.get("margin"), "margin")
+    if base <= 0:
+        raise ValueError(f"margin 必须 > 0，收到 {base!r}")
     if kind == "log_ratio":
         rel = spec.get("relative_margin")
-        if rel is None:
-            rel = math.expm1(base)
-        return math.log1p(float(rel) * factor)
-    return base * factor
+        rel = math.expm1(base) if rel is None else _strict_number(
+            rel, "relative_margin")
+        if rel < 0:
+            raise ValueError(f"relative_margin 必须 >= 0，收到 {rel!r}")
+        try:
+            out = math.log1p(rel * factor)
+        except (OverflowError, ValueError):
+            raise ValueError(
+                f"log-ratio margin 不可表示（relative_margin={rel!r}, "
+                f"factor={factor!r}）") from None
+    else:
+        try:
+            out = base * factor
+        except OverflowError:
+            raise ValueError(
+                f"margin 不可表示（margin={base!r}, factor={factor!r}）"
+            ) from None
+    if not math.isfinite(out):
+        raise ValueError(
+            f"margin 不可表示（margin={base!r}, factor={factor!r}）")
+    return float(out)
 
 
 def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,

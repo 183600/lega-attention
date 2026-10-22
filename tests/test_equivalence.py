@@ -11,8 +11,8 @@ import shutil
 import tempfile
 
 from lega.equivalence import (assess_paired_equivalence, interpret_equivalence,
-                              metric_margin, t_critical, tost_from_diffs,
-                              tost_paired)
+                              interpolate_margin, metric_margin, t_critical,
+                              tost_from_diffs, tost_paired)
 from run_all import (_apply_holm, _causal_eq_note, _enrich_paired,
                      _equivalence_overview, _render_parameter_matched_control,
                      build_summary)
@@ -397,3 +397,27 @@ def test_tost_unrepresentable_integer_observations_are_skipped():
     assert eq is not None and eq["n"] == 0, eq
     assert eq["status"] == "insufficient_seeds", eq
     print("  [ok] TOST 不可表示的大整数观测按缺失剔除，不抛 OverflowError")
+
+
+def test_interpolate_margin_rejects_unrepresentable_factor():
+    """敏感性 margin 换算不能因超范围 factor 泄漏 OverflowError/inf。"""
+    spec = {"kind": "absolute", "margin": 0.01}
+    assert abs(interpolate_margin(spec, 2.0) - 0.02) < 1e-15
+    log_spec = {"kind": "log_ratio", "margin": math.log1p(0.01),
+                "relative_margin": 0.01}
+    assert abs(interpolate_margin(log_spec, 0.5)
+               - math.log1p(0.005)) < 1e-15
+    for bad in (10 ** 400, -1.0, float("nan"), float("inf")):
+        try:
+            interpolate_margin(spec, bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    try:
+        interpolate_margin({"kind": "absolute", "margin": 1e308}, 1e308)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    print("  [ok] interpolate_margin 拒绝不可表示/非法 factor，不返回 inf")
