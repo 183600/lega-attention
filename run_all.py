@@ -194,6 +194,17 @@ def _finite_number(value):
     return value if math.isfinite(value) else None
 
 
+def _rate_or_none(value):
+    """外部 JSON 的 AUROC/PR-AUC/F1/基率等比例 → [0,1] 内有限 float。
+
+    这些指标有天然上界 1：坏/手改产物里的 1.5 或 -0.2 若被当成合法观测，
+    会直接进入跨种子均值与配对检验，甚至伪造出“机制判别显著更好”的结论。
+    越界值按缺失处理，与 analysis/ruler 的取值校验同口径。
+    """
+    value = _finite_number(value)
+    return value if value is not None and 0.0 <= value <= 1.0 else None
+
+
 def _cmd_env(cmd, env=None):
     """为单条子进程命令构造环境：PYTHONHASHSEED 与该命令 --seed 对齐。
 
@@ -2263,8 +2274,8 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
             an = slot.get("analysis") if isinstance(slot, dict) else None
             if not isinstance(an, dict):
                 continue
-            al = _num_or_none(an.get(key_cand + "_logit"))
-            aq = _num_or_none(an.get(key_cand + "_qterm"))
+            al = _rate_or_none(an.get(key_cand + "_logit"))
+            aq = _rate_or_none(an.get(key_cand + "_qterm"))
             if al is None or aq is None:
                 continue
             a.append(al)
@@ -3274,13 +3285,13 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             fs = _as_dict(_as_dict(lp.get("feature_sets")).get(
                 primary if isinstance(primary, str) else ""))
             oof = _as_dict(fs.get("oof"))
-            probe_auprc = _num_or_none(oof.get("auprc"))
-            probe_auroc = _num_or_none(oof.get("auroc"))
+            probe_auprc = _rate_or_none(oof.get("auprc"))
+            probe_auroc = _rate_or_none(oof.get("auroc"))
             if probe_auprc is None or probe_auroc is None:
                 continue
-            probe_f1_fixed = _num_or_none(
+            probe_f1_fixed = _rate_or_none(
                 _as_dict(oof.get("f1")).get("macro"))
-            probe_f1_tuned = _num_or_none(
+            probe_f1_tuned = _rate_or_none(
                 _as_dict(oof.get("f1_tuned")).get("macro"))
             per_seed.append({
                 # 无 seed 字段（_seed_key 返回 None）时按缺种子信息处理。
@@ -3290,11 +3301,11 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
                 "probe_auroc": probe_auroc,
                 "probe_f1_fixed": probe_f1_fixed,
                 "probe_f1_tuned": probe_f1_tuned,
-                "gate_auprc": _num_or_none(an.get("auprc_logit")),
-                "gate_auroc": _num_or_none(an.get("auroc_logit")),
-                "rule_auprc": _num_or_none(an.get("auprc_maxp")),
-                "rule_auroc": _num_or_none(an.get("auroc_maxp")),
-                "base_rate": _num_or_none(an.get("hit_base_rate")),
+                "gate_auprc": _rate_or_none(an.get("auprc_logit")),
+                "gate_auroc": _rate_or_none(an.get("auroc_logit")),
+                "rule_auprc": _rate_or_none(an.get("auprc_maxp")),
+                "rule_auroc": _rate_or_none(an.get("auroc_maxp")),
+                "base_rate": _rate_or_none(an.get("hit_base_rate")),
                 "probe_l2": fs.get("selected_l2"),
                 "probe_features": fs.get("features"),
                 "folds": lp.get("folds"),

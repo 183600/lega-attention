@@ -24,6 +24,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _int_or_zero, _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
                       _noise_verdict_note, _loo_stability_str, _num_or_none,
+                      _rate_or_none,
                       _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
                       _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
@@ -2146,6 +2147,8 @@ def test_auroc_diff_tests_family():
         "standard": {1: {}},
         # 单侧缺失的种子整对剔除（auroc_qterm=None 不算配对）
         "lega_no_len": {1: _slot(0.8, None), 2: _slot(None, None)},
+        # AUROC 越界（坏/手改产物）按缺失处理，不能制造一条“显著”检验
+        "lega_no_conc": {1: _slot(1.5, 0.5), 2: _slot(-0.1, 0.4)},
     }
     tests = _auroc_diff_tests(runs)
     by_v = {t["candidate"]: t for t in tests}
@@ -3091,6 +3094,10 @@ def test_summary_rejects_bool_as_numeric_observation():
     """外部 JSON 的 true/false 不能被当成 1.0/0.0 进入均值或配对检验。"""
     assert _num_or_none(True) is None and _num_or_none(False) is None
     assert _num_or_none("1_0") is None
+    # AUROC/PR-AUC/F1/基率是 [0,1] 比例：越界值不能进入均值/配对检验。
+    assert _rate_or_none(0.5) == 0.5 and _rate_or_none("0.25") == 0.25
+    for bad in (1.5, -0.1, True, "1_0", float("nan"), float("inf"), None):
+        assert _rate_or_none(bad) is None, bad
     assert _stat([True, False, "1_0", 2.0]) == {
         "mean": 2.0, "std": None, "n": 1}
     assert _ppl_of({"ppl": True}) is None
