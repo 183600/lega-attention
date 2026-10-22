@@ -313,6 +313,8 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
                        "completion": {"status": "completed", "steps": 10},
                        "artifacts": {"model.pt": {"sha256": "m" * 64}},
                        "data_order_sha256": "o" * 16,
+                       "data_protocol_preflight":
+                           {"report_present": False},
                        "git": {"commit": "a" * 40, "dirty": False},
                        "worktree": {"available": True, "diff_sha256": None},
                        "data": {"digest": "d" * 16},
@@ -332,6 +334,7 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
         assert prov["completion"]["status"] == "completed"
         assert prov["artifacts"]["model.pt"]["sha256"] == "m" * 64
         assert prov["data_order_sha256"] == "o" * 16
+        assert prov["data_protocol_preflight"]["report_present"] is False
         assert prov["worktree"]["diff_sha256"] is None
         assert prov["precision"]["amp_dtype"] == "bfloat16"
         assert snap["result"]["data_order_sha256"] == "o" * 16

@@ -583,6 +583,8 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "completion": manifest.get("completion"),
             "artifacts": manifest.get("artifacts"),
             "data_order_sha256": manifest.get("data_order_sha256"),
+            "data_protocol_preflight":
+                manifest.get("data_protocol_preflight"),
         }
     if isinstance(ev, dict) and ev:
         # eval 身份与本次快照不符（旧 eval.json 被复用）时显式标记：
