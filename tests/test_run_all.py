@@ -944,6 +944,31 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
 
 
+def test_verify_controlled_setup_reports_malformed_attention_switch():
+    """config_used 的 use_sdpa_standard 非法时，审计应报告问题而非崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "use_sdpa_standard": "maybe",
+                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024})
+        try:
+            verify_controlled_setup(tmp, ["standard", "lega"], [7], 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("非法 use_sdpa_standard 应触发 SystemExit")
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 受控变量审计：非法注意力开关报告问题而非崩溃")
+
+
 def test_verify_controlled_setup_infers_missing_attention_switch():
     """缺省 use_sdpa_standard 时 train.py 用默认 True，审计不能静默跳过。
 

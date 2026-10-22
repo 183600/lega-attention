@@ -910,9 +910,21 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                         device_missing.append(f"{v}/seed{seed}")
                     if "use_sdpa_standard" in cfg:
                         attention_key_seen = True
-                        sdpa_on = config_bool(
-                            cfg.get("use_sdpa_standard"), "use_sdpa_standard")
-                        attention_backends[v] = _attention_backend(v, sdpa_on)
+                        try:
+                            sdpa_on = config_bool(
+                                cfg.get("use_sdpa_standard"),
+                                "use_sdpa_standard")
+                        except (TypeError, ValueError) as e:
+                            # 外部 config_used.json 的坏值不能让审计函数自己
+                            # 崩溃（它的契约是报告问题并 SystemExit），也不能
+                            # 静默按默认 True 推断。
+                            mismatches.append(
+                                f"{v}/seed{seed}: use_sdpa_standard 非法"
+                                f"（{e}）；无法确认注意力实现路径")
+                            attention_backends[v] = "invalid"
+                        else:
+                            attention_backends[v] = _attention_backend(
+                                v, sdpa_on)
                     else:
                         # train.py 的默认值是 True；config_used 未写该键时
                         # 实际仍走 SDPA。先记录缺失，稍后在有任一 run 显式
