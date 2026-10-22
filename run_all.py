@@ -1081,6 +1081,54 @@ def _ruler_avg_micro(d):
     return (num / total) if total > 0 else None
 
 
+def _ruler_depth_means(d):
+    """NIAH 位置分层的 macro 平均 EM：{early/middle/late: mean}。
+
+    只统计 niah_* 任务的 (任务, 上下文, 位置箱) 单元格，每格等权，避免
+    某一上下文长度或任务因样本多而支配分层分数。旧产物没有 `em_by_depth`
+    时返回空 dict（不伪造）；空箱不进入结果。分层样本彼此不同，不能把
+    三个均值直接当作同批样例做显著性检验——逐格 Wilson CI 见 ruler_*.json。
+    """
+    if not isinstance(d, dict):
+        return {}
+    results = d.get("results")
+    if not isinstance(results, dict):
+        return {}
+    vals = {b: [] for b in ("early", "middle", "late")}
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or not task.startswith("niah")
+                or not isinstance(by_ctx, dict)):
+            continue
+        for cell in by_ctx.values():
+            if not isinstance(cell, dict):
+                continue
+            by_depth = cell.get("em_by_depth")
+            if not isinstance(by_depth, dict):
+                continue
+            for b in vals:
+                rec = by_depth.get(b)
+                if not isinstance(rec, dict):
+                    continue
+                v = _finite_number(rec.get("em"))
+                n = _integral_value(rec.get("n"))
+                if (v is None or n is None or n <= 0
+                        or not 0.0 <= v <= 1.0):
+                    continue
+                vals[b].append(v)
+    return {b: float(sum(v) / len(v)) for b, v in vals.items() if v}
+
+
+def _ruler_depth_gap(d):
+    """NIAH 位置落差 = early EM − late EM（正=经典“中间/末期更差”方向）。
+
+    仅当两端都有数据时定义；中部单独一列，不用它替代两端落差。
+    """
+    dm = _ruler_depth_means(d)
+    if "early" not in dm or "late" not in dm:
+        return None
+    return dm["early"] - dm["late"]
+
+
 def _ruler_min_cell_n(d):
     """单次 RULER 结果里 (任务, 上下文) 单元的最小样本数。
 
@@ -4114,6 +4162,16 @@ def build_summary(results_dir: str, audit: dict = None,
         ("ruler_avg_micro", lambda m: _stat_series(
             m, "ruler", _ruler_avg_micro)),
         ("ruler_min_n", lambda m: _stat_series(m, "ruler", _ruler_min_cell_n)),
+        # NIAH 位置分层：聚合 EM 会把早期高分与中部塌陷互相抵消；分层
+        # 指标进入 summary.json/csv，Markdown 汇总另设小节（旧产物缺失）。
+        ("ruler_depth_early", lambda m: _stat_series(
+            m, "ruler", lambda d: _ruler_depth_means(d).get("early"))),
+        ("ruler_depth_middle", lambda m: _stat_series(
+            m, "ruler", lambda d: _ruler_depth_means(d).get("middle"))),
+        ("ruler_depth_late", lambda m: _stat_series(
+            m, "ruler", lambda d: _ruler_depth_means(d).get("late"))),
+        ("ruler_depth_early_minus_late", lambda m: _stat_series(
+            m, "ruler", _ruler_depth_gap)),
     ]
     ruler_tasks = RULER_TASKS
     for task in ruler_tasks:
@@ -4538,6 +4596,52 @@ def build_summary(results_dir: str, audit: dict = None,
                        if macro is not None and micro is not None else None)
                 md.append(f"| {r.get('variant_cn') or r.get('variant')} | "
                           f"{_fmt4(macro)} | {_fmt4(micro)} | {_fmt4(gap)} |")
+        # NIAH 位置分层：只报总 EM 会让“early/late 高、middle 塌陷”平均成
+        # 看似正常的中等分；分层单独成表，并明确样本不可跨箱配对。
+        depth_rows = [r for r in rows
+                      if any(r.get(k) is not None for k in (
+                          "ruler_depth_early", "ruler_depth_middle",
+                          "ruler_depth_late"))]
+        if depth_rows:
+            md += ["", "### RULER NIAH 位置分层（early / middle / late）", "",
+                   "按 needle 在上下文中的相对位置三分位分箱（[0,1/3)、"
+                   "[1/3,2/3)、[2/3,1]），对 niah_* 任务的 (任务, 上下文) "
+                   "单元格等权平均 EM。总 EM 掩盖位置差异：早期与末期的高分"
+                   "会抵消中部塌陷（lost-in-the-middle），因此位置分层是"
+                   "机制诊断的必报项。三个箱使用**不同评测样例**，不能直接"
+                   "当作同批配对样本做显著性检验；每箱样本数与 Wilson 95% "
+                   "CI 见 ruler_*.json 的 `em_by_depth`。", "",
+                   "| 变体 | early↑ | middle↑ | late↑ | early−late |",
+                   "|---|---|---|---|---|"]
+            for r in depth_rows:
+                e, m, l = (r.get("ruler_depth_early"),
+                           r.get("ruler_depth_middle"),
+                           r.get("ruler_depth_late"))
+                gap = r.get("ruler_depth_early_minus_late")
+                md.append(f"| {r.get('variant_cn') or r.get('variant')} | "
+                          f"{_fmt4(e)} | {_fmt4(m)} | {_fmt4(l)} | "
+                          f"{_fmt4(gap)} |")
+            flags = []
+            for r in depth_rows:
+                e, m, l = (r.get("ruler_depth_early"),
+                           r.get("ruler_depth_middle"),
+                           r.get("ruler_depth_late"))
+                name = r.get("variant_cn") or r.get("variant")
+                if None not in (e, m, l):
+                    mid_drop = min(e, l) - m
+                    if mid_drop >= 0.10:
+                        flags.append(
+                            f"{name} 的 middle 比两端较低者低 "
+                            f"{mid_drop * 100:.1f} pp")
+                gap = r.get("ruler_depth_early_minus_late")
+                if gap is not None and gap >= 0.10:
+                    flags.append(f"{name} 的 early−late 落差 "
+                                 f"{gap * 100:.1f} pp")
+            if flags:
+                md += ["", "⚠ 位置不均衡（描述性提示，非显著性判定）："
+                           + "；".join(flags)
+                           + "。这会把总 EM 抬到看似可接受的水平；需结合逐箱 "
+                           "Wilson CI 与样本文本复核，不能只用 RULER平均 下结论。"]
     else:
         md.append("（暂无结果，先运行训练评测）")
 

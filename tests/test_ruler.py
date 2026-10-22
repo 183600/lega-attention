@@ -6,7 +6,8 @@ import shutil
 import tempfile
 
 from lega.data import CharTokenizer
-from lega.ruler import (build_fwe, build_niah, build_vt, load_corpus_sents,
+from lega.ruler import (DEPTH_BINS, build_fwe, build_niah, build_vt,
+                        depth_bin, load_corpus_sents,
                         load_corpus_sents_with_source, record_corpus_test_access,
                         score_prediction,
                         ContextTooSmall, TASKS, _stable_hash)
@@ -421,4 +422,29 @@ def test_run_ruler_records_per_sample_outcomes():
     assert all(isinstance(s["sample_id"], str) and s["sample_id"] for s in samples)
     assert all(s["em"] in (0.0, 1.0) for s in samples)
     assert sum(s["em"] for s in samples) / len(samples) == cell["em"]
+    # NIAH 逐样例带 needle 位置与分箱；分层汇总必须与样本逐条一致。
+    assert all(s["depth_bin"] in DEPTH_BINS for s in samples), samples
+    assert all(isinstance(s["depth"], float) and 0.0 <= s["depth"] <= 1.0
+               for s in samples), samples
+    assert set(cell["em_by_depth"]) == {s["depth_bin"] for s in samples}
+    for b, rec in cell["em_by_depth"].items():
+        rows = [s for s in samples if s["depth_bin"] == b]
+        assert rec["n"] == len(rows)
+        assert abs(rec["em"] - sum(s["em"] for s in rows) / len(rows)) < 1e-12
+        lo, hi = rec["em_ci95_wilson"]
+        assert 0.0 <= lo <= rec["em"] <= hi <= 1.0
     print("  [ok] run_ruler 逐样例 EM 落盘（sample_id 唯一、与聚合 EM 一致）")
+
+
+def test_depth_bin_boundaries_and_invalid_values():
+    """位置分箱必须半开且覆盖端点：1/3→middle、2/3→late、1.0→late。"""
+    assert depth_bin(0.0) == "early"
+    assert depth_bin(0.3333) == "early"
+    assert depth_bin(1.0 / 3.0) == "middle"
+    assert depth_bin(0.5) == "middle"
+    assert depth_bin(2.0 / 3.0) == "late"
+    assert depth_bin(1.0) == "late"
+    for bad in (None, True, False, -0.01, 1.01, float("nan"),
+                float("inf"), "0.5", object()):
+        assert depth_bin(bad) is None, bad
+    print("  [ok] depth_bin（半开边界、末期含 1.0、非法值返回 None）")

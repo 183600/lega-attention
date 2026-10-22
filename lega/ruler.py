@@ -41,6 +41,32 @@ NEEDLE_TMPL = "One of the special magic numbers for {key} is: {value}. "
 QUESTION_TMPL = ("\nWhat is the special magic number for {key} mentioned in the provided text?"
                  "\nAnswer: The special magic number for {key} mentioned in the provided text is")
 TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
+# NIAH 的 needle 相对位置分箱：早期/中部/末期。长上下文模型常见
+# “lost in the middle”，只报任务平均 EM 会让早/晚期的高分抵消中部塌陷；
+# 因此每个 niah 单元格同时落盘分层 EM 与 Wilson CI（样本量按箱计）。
+DEPTH_BINS = ("early", "middle", "late")
+DEPTH_EDGES = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
+
+
+def depth_bin(value) -> Optional[str]:
+    """needle 位置比例（0~1）→ early/middle/late；非法输入返回 None。
+
+    边界按半开区间 [0,1/3)、[1/3,2/3)、[2/3,1]；位置恰好为 1 的末期样本
+    必须落入 late，不能因浮点边界被丢弃。
+    """
+    if value is None or isinstance(value, (bool, str, bytes)):
+        return None
+    try:
+        d = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(d) or d < 0.0 or d > 1.0:
+        return None
+    if d < DEPTH_EDGES[1]:
+        return "early"
+    if d < DEPTH_EDGES[2]:
+        return "middle"
+    return "late"
 
 
 def _int_or_none(value):
@@ -561,6 +587,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             # （McNemar）才能回答“在固定的这批评测样例上，候选是否更常
             # 答对”，同时避免把 n=20~30 的评测抽样误差当成模型差异。
             outcomes: List[Dict] = []
+            depth_ems: Dict[str, List[float]] = {}
             for length in sorted(by_len):
                 grp = by_len[length]
                 total = min(length + max_gen, model.block_size)
@@ -581,8 +608,20 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         sc = score_prediction(task, ex["answer"], pred_text,
                                               ex["answer_words"])
                         ems.append(sc["em"])
-                        outcomes.append({"sample_id": ex.get("sample_id"),
-                                         "em": float(sc["em"])})
+                        rec = {"sample_id": ex.get("sample_id"),
+                               "em": float(sc["em"])}
+                        if task.startswith("niah"):
+                            # 位置分层只在 NIAH 有意义（vt 的 meta.depth 是
+                            # 链深度而非 token 位置，不能混用）。
+                            dval = ex.get("meta", {}).get("depth")
+                            db = depth_bin(dval)
+                            rec["depth"] = (float(dval) if db is not None
+                                            else None)
+                            rec["depth_bin"] = db
+                            if db is not None:
+                                depth_ems.setdefault(db, []).append(
+                                    float(sc["em"]))
+                        outcomes.append(rec)
                         if sc["recall"] is not None:
                             recalls.append(sc["recall"])
                         if sc.get("precision") is not None:
@@ -638,6 +677,20 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 样例级配对检验，见 run_all 的 RULER 样例配对小节。
                     "samples": outcomes,
                 }
+                if task.startswith("niah"):
+                    # 位置分层：早期高分与中期塌陷会在总 EM 里互相抵消。
+                    # 每箱独立 Wilson CI（n 为箱内样本数），避免拿总 n
+                    # 冒充分层精度；空箱不写入，下游按缺失处理。
+                    results[task][str(room_ctx)]["em_by_depth"] = {
+                        b: {
+                            "n": len(depth_ems[b]),
+                            "em": float(sum(depth_ems[b]) / len(depth_ems[b])),
+                            "em_ci95_wilson": list(wilson_score_ci(
+                                int(round(sum(depth_ems[b]))),
+                                len(depth_ems[b]))),
+                        }
+                        for b in DEPTH_BINS if depth_ems.get(b)
+                    }
                 if verbose:
                     r = results[task][str(room_ctx)]
                     extra = (f" recall={r['recall']:.3f}"

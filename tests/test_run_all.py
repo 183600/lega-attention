@@ -28,6 +28,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
+                      _ruler_depth_gap, _ruler_depth_means,
                       _ruler_fwe_recall, _ruler_min_cell_n,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
@@ -3149,6 +3150,47 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe EM 口径）")
 
 
+def test_ruler_depth_means_excludes_non_niah_and_missing():
+    """位置分层只汇总 niah_*，格等权，旧产物缺 em_by_depth 时不伪造。
+
+    总 EM 掩盖 lost-in-the-middle：early/late 的高分可与 middle 塌陷抵消。
+    分层均值必须按 (任务, 上下文, 位置箱) 等权，不能让大 n 格支配；fwe/vt
+    的 depth 语义不同（vt 是链深度），绝不能混入。
+    """
+    doc = {"results": {
+        "niah_synth": {
+            "8": {"em_by_depth": {
+                "early": {"em": 1.0, "n": 1},
+                "middle": {"em": 0.0, "n": 9}}},
+            "16": {"em_by_depth": {
+                "early": {"em": 0.0, "n": 1},
+                "middle": {"em": 1.0, "n": 1},
+                "late": {"em": 0.5, "n": 2}}}},
+        "niah_multikey": {
+            "8": {"em_by_depth": {
+                "late": {"em": 0.0, "n": 2}}}},
+        # 非 niah 任务即使带同名键也不得进入分层统计
+        "vt": {"8": {"em_by_depth": {"early": {"em": 1.0, "n": 1}}}},
+        "fwe": {"8": {"em_by_depth": {"middle": {"em": 1.0, "n": 1}}}},
+    }}
+    dm = _ruler_depth_means(doc)
+    # early 两格 (1.0, 0.0) 等权；middle (0.0,1.0) 等权；
+    # late (0.5, 0.0) 两格等权。
+    assert abs(dm["early"] - 0.5) < 1e-12, dm
+    assert abs(dm["middle"] - 0.5) < 1e-12, dm
+    assert abs(dm["late"] - 0.25) < 1e-12, dm
+    assert abs(_ruler_depth_gap(doc) - 0.25) < 1e-12
+    # 旧产物 / 损坏字段 → 缺失而非伪造
+    assert _ruler_depth_means({"results": {"niah_synth": {"8": {"em": 1.0}}}}) == {}
+    assert _ruler_depth_means({"results": {"niah_synth": {"8": {
+        "em_by_depth": {"early": {"em": "x", "n": 2}}}}}}) == {}
+    assert _ruler_depth_means({"results": {"niah_synth": {"8": {
+        "em_by_depth": {"early": {"em": 1.0, "n": 0}}}}}}) == {}
+    assert _ruler_depth_gap({"results": {"niah_synth": {"8": {
+        "em_by_depth": {"early": {"em": 1.0, "n": 1}}}}}}) is None
+    print("  [ok] _ruler_depth_means（仅 niah、格等权、缺失不伪造）")
+
+
 def test_build_summary_fwe_precision_f1_columns():
     """fwe 除严格 EM 外，必须把 precision/F1 诊断量渲染进汇总表。"""
     tmp = tempfile.mkdtemp()
@@ -3173,6 +3215,42 @@ def test_build_summary_fwe_precision_f1_columns():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary：fwe precision/F1 诊断列")
+
+
+
+
+def test_build_summary_ruler_depth_stratification():
+    """汇总必须单独显示 NIAH 位置分层，并对 lost-in-the-middle 给出提示。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        depths = {
+            "standard": {"early": 0.9, "middle": 0.9, "late": 0.9},
+            "lega": {"early": 0.9, "middle": 0.2, "late": 0.9},
+        }
+        for s in (1, 2, 3):
+            for v, dm in depths.items():
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s, "val_ppl": 10.0, "val_loss": 2.3,
+                    "n_params": 100, "n_gate_extra": 0, "split": "val"})
+                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s,
+                    "results": {"niah_synth": {"256": {
+                        "em": sum(dm.values()) / 3.0, "n": 30,
+                        "em_by_depth": {
+                            b: {"em": val, "n": 10,
+                                "em_ci95_wilson": [0.5, 0.99]}
+                            for b, val in dm.items()}}}}})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "RULER NIAH 位置分层" in md, md[-2000:]
+        assert "early−late" in md
+        assert "位置不均衡" in md and "middle 比两端较低者低 70.0 pp" in md
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert abs(row["ruler_depth_middle"] - 0.2) < 1e-12, row
+        assert abs(row["ruler_depth_early_minus_late"]) < 1e-12, row
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：RULER 位置分层表与 middle 塌陷提示")
 
 
 def test_build_summary_per_task_ruler_breakdown():
