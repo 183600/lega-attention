@@ -4867,7 +4867,10 @@ def build_summary(results_dir: str, audit: dict = None,
                   "验证回升同样判过拟合（平台期泛化先恶化，不按欠拟合处理）；"
                   "训练仍在实质下降而验证无实质变化=过拟合趋势（验证不再随训练"
                   "改善的早期信号，按正则化/早停处理，不据此续训）；"
-                  "两者都不降=欠拟合/学习率不当/数据管道问题；曲线虽在降但"
+                  "两者都不降=欠拟合/学习率不当/数据管道问题；"
+                  "验证损失显著低于训练损失（倒挂）=泄漏/划分错配/评估口径"
+                  "不一致，不能当“验证更好”；best 与次优差距落在评估噪声内="
+                  "checkpoint 选型不可靠（winner's curse）；曲线虽在降但"
                   "训练覆盖 <1 epoch=训练不足（还没学完，不能当收敛）；"
                   "出现 NaN=训练失效；"
                   "瞬态损失尖峰（分段均值会掩盖）与损坏日志行单独报告。"
@@ -4880,6 +4883,8 @@ def build_summary(results_dir: str, audit: dict = None,
         any_grad_spike = False
         any_loss_spike = False
         any_malformed = False
+        any_inversion = False
+        any_selection_noise = False
         observability = set()
         for v in variants:
             by_seed = curve.get(v)
@@ -4898,6 +4903,10 @@ def build_summary(results_dir: str, audit: dict = None,
             any_loss_spike = any_loss_spike or lspike
             any_malformed = any_malformed or any(d.get("malformed_records")
                                                  for d in diags)
+            any_inversion = any_inversion or any(d.get("val_below_train")
+                                                 for d in diags)
+            any_selection_noise = any_selection_noise or any(
+                d.get("best_checkpoint_within_noise") for d in diags)
             for d in diags:
                 for w in (d.get("curve_observability_warnings") or []):
                     if isinstance(w, str) and w.strip():
@@ -4962,6 +4971,19 @@ def build_summary(results_dir: str, audit: dict = None,
                       "（过拟合/过拟合趋势→正则化/增数据/早停，欠拟合→查学习率"
                       "与数据管道，训练不足→延长训练/增大数据覆盖）后重跑，"
                       "再进入对比结论。")
+        if any_inversion:
+            md.append("")
+            md.append("⚠ 存在验证损失显著低于训练损失的 run（与泛化差距方向"
+                      "相反）：先按 datacheck 审计跨 split 重复/n-gram 重叠与"
+                      "划分边界，再核对 train/val 的 dropout 状态、精度与损失"
+                      "统计口径；排除泄漏/错配前，该 run 的验证指标不得用于"
+                      "方法比较。")
+        if any_selection_noise:
+            md.append("")
+            md.append("⚠ 存在 best checkpoint 与次优验证损失差距落在该点 95% CI "
+                      "内的 run：最优与次优无法区分（winner's curse），"
+                      "不能只报告 best 数字；应同时报告 final/多种子均值，"
+                      "并增大 eval_iters 或验证集后再据此选型。")
         if any_grad_spike:
             md.append("")
             md.append("⚠ 检测到 pre-clip 梯度范数非有限或爆炸性尖峰"
