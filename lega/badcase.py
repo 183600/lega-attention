@@ -88,8 +88,11 @@ def categorize_case(rec: Dict) -> Dict:
     # depth 归一化为数值或 None：外部/旧格式 JSON 里的字符串 depth 不能
     # 让整个归因流程崩溃（一个坏样本不应毁掉报告）。
     # 非有限 depth（NaN/Inf）不是位置比例：NaN 会破坏 JSON，Inf 会被
-    # 误判成“极深位置”的难度边界样本；两者都按缺失处理。
+    # 误判成“极深位置”的难度边界样本；两者都按缺失处理。位置比例必须落在
+    # [0,1]，越界值同样按缺失处理，不能把 depth=2 当成“比末尾更深”。
     depth = _finite_float(r.get("depth"))
+    if depth is not None and not 0.0 <= depth <= 1.0:
+        depth = None
     r["depth"] = depth
     positional = depth is not None and str(task or "").startswith("niah")
     r["hard_sample"] = bool(positional and depth > 0.75)
@@ -551,9 +554,13 @@ def _window_top1(rec: Dict):
         token = _token_text(item[0])
         if token is None:
             return None, None
-        # 概率必须是有限数：inf 会被当成“高置信”伪造 confident_bias，
-        # NaN 还会让报告 JSON 非法。
-        return token, _finite_float(item[1])
+        # 概率必须是 [0,1] 内的有限数：inf 会被当成“高置信”伪造
+        # confident_bias，NaN 还会让报告 JSON 非法；1.5 或 -0.5 同样不是
+        # 合法概率质量，按缺失处理，避免负概率进入解释文案。
+        p = _finite_float(item[1])
+        if p is not None and not 0.0 <= p <= 1.0:
+            p = None
+        return token, p
     token = _token_text(item)
     return (token, None) if token is not None else (None, None)
 
