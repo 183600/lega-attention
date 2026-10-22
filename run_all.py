@@ -5081,7 +5081,9 @@ def build_summary(results_dir: str, audit: dict = None,
                   "checkpoint 选型不可靠（winner's curse）；曲线虽在降但"
                   "训练覆盖 <1 epoch=训练不足（还没学完，不能当收敛）；"
                   "出现 NaN=训练失效；"
-                  "瞬态损失尖峰（分段均值会掩盖）与损坏日志行单独报告。"
+                  "瞬态损失尖峰（分段均值会掩盖；另查区间单步峰值 loss_max）"
+                  "与损坏日志行单独报告；全程首/末之外还比较末段（后 1/3 vs "
+                  "中 1/3），晚期平台/回升不被早段大幅改善掩盖。"
                   "逐 run 明细见 `curve_diagnosis.json`。")
         md.append("")
         md.append("| 变体 | 状态（最差种子） | 训练覆盖(epoch) | 训练损失 首→末 "
@@ -5175,7 +5177,8 @@ def build_summary(results_dir: str, audit: dict = None,
                       "损失步 `first_bad_step`，排查的是失败现场而非最后一步"
                       "批次），处理前该变体的一切指标都不可信。")
         else:
-            md.append("注：全部 run 无 NaN/Inf；有异常状态的变体请按建议处理"
+            md.append("注：全部 run 的损失曲线无 NaN/Inf（梯度非有限另见下）；"
+                      "有异常状态的变体请按建议处理"
                       "（过拟合/过拟合趋势→正则化/增数据/早停，欠拟合→查学习率"
                       "与数据管道，训练不足→延长训练/增大数据覆盖）后重跑，"
                       "再进入对比结论。")
@@ -5195,15 +5198,18 @@ def build_summary(results_dir: str, audit: dict = None,
         if any_grad_spike:
             md.append("")
             md.append("⚠ 检测到 pre-clip 梯度范数非有限或爆炸性尖峰"
-                      "（最大/中位数 ≥10×）的 run：这是 NaN/发散的早期信号，"
+                      "（区间峰值/中位数 ≥10×）的 run：这是 NaN/发散的早期信号，"
                       "即使损失曲线看似正常也应先降低学习率/收紧 grad_clip "
-                      "后重跑，细节见 `curve_diagnosis.json` 的 grad_norm 字段。")
+                      "后重跑；发生步与逐点清单见 `curve_diagnosis.json` 的 "
+                      "`grad_norm_max*`/`grad_spikes` 字段。")
         if any_loss_spike:
             md.append("")
             md.append(f"⚠ 检测到训练损失瞬态尖峰（某点 > 邻近中位数 "
-                      f"{LOSS_SPIKE_FACTOR:.0f}×，分段均值会掩盖）：先核对该"
+                      f"{LOSS_SPIKE_FACTOR:.0f}×，分段均值会掩盖；"
+                      "区间单步峰值 loss_max 另查）：先核对该"
                       "步批次数据与梯度范数，再决定收紧 grad_clip/降低学习率；"
-                      "细节见 `curve_diagnosis.json` 的 loss_spikes 字段。")
+                      "细节见 `curve_diagnosis.json` 的 "
+                      "`loss_spikes`/`loss_peak_spikes` 字段。")
         if any_malformed:
             md.append("")
             md.append("⚠ 部分 train_log.jsonl 记录无法解析（已跳过并计数）："

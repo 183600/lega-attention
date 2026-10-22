@@ -274,6 +274,8 @@ def _gradient_points(records: List[Dict]):
             continue
         step = _step_or_none(r.get("step"))
         chosen = None
+        # 两个键都要检查：grad_norm_max 有限但 grad_norm 非有限（或反过来）
+        # 仍是训练失效证据；不能因为优先键可解析就静默忽略另一个。
         for key in ("grad_norm_max", "grad_norm"):
             if key not in r or r.get(key) is None:
                 continue
@@ -281,21 +283,18 @@ def _gradient_points(records: List[Dict]):
             if isinstance(raw, (bool, np.bool_)) or (
                     isinstance(raw, str) and "_" in raw):
                 malformed += 1
-                chosen = None
-                break
+                continue
             try:
                 val = float(raw)
             except (TypeError, ValueError, OverflowError):
                 malformed += 1
-                chosen = None
-                break
+                continue
             if not math.isfinite(val):
                 if step is not None:
                     nonfinite_steps.add(step)
-                chosen = None
-                break
-            chosen = val
-            break
+                continue
+            if chosen is None:
+                chosen = val
         if step is None or chosen is None:
             continue
         by_step[step] = {"step": step, "value": chosen}

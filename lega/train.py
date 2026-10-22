@@ -23,7 +23,9 @@ from .attention import VARIANTS, VARIANT_CN
 from .curves import (GATE_SAT_HIGH, GATE_SAT_LOW, LIVE_WARN_EVALS,
                      curve_observability_warnings, live_overfit_hint)
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
-from .model import GPT, configure_optimizer, count_params, gate_extra_params, save_checkpoint
+from .model import (GPT, configure_optimizer, count_params,
+                    gate_extra_params, gate_extra_params_per_head,
+                    save_checkpoint)
 from .preflight import (allow_protocol_violations,  # noqa: E402
                         data_protocol_preflight)
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
@@ -1158,8 +1160,11 @@ def main():
     set_seed(seed)
     n_params = count_params(model)
     n_extra = gate_extra_params(model)
+    n_per_head = gate_extra_params_per_head(model)
     print(f"[train] variant={args.variant}({VARIANT_CN[args.variant]}) device={device} "
-          f"params={n_params:,} (门控额外 {n_extra:,})")
+          f"params={n_params:,} (门控额外 {n_extra:,}"
+          + (f"，逐头 {n_per_head:g}" if n_per_head is not None else "")
+          + ")")
     print(f"[train] steps={steps} batch={batch_size} ctx={train_ctx} "
           f"tokens/step={batch_size * train_ctx:,} seed={seed}")
 

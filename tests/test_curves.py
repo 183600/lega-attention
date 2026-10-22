@@ -750,4 +750,13 @@ def test_gradient_peak_uses_interval_max_and_reports_step():
     assert d2["grad_norm_nonfinite"] == 1
     assert d2["grad_norm_nonfinite_steps"] == [10]
     assert any("step 10" in e for e in d2["evidence"])
+
+    # 峰值有限但末步非有限（或反之）：两个键都要检查，不能因优先键可解析
+    # 就漏掉另一个键里的非有限证据。
+    recs3 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    recs3.append({"step": 10, "grad_norm": float("nan"),
+                  "grad_norm_max": 1.2})
+    d3 = diagnose_curve(recs3)
+    assert d3["grad_norm_nonfinite_steps"] == [10]
+    assert d3["grad_norm_max"] == 1.2
     print("  [ok] pre-clip 梯度峰值/非有限：区间峰值 + 发生步")
