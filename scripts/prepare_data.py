@@ -224,6 +224,11 @@ def main():
                     choices=["auto", "parquet", "zip", "rows", "local"])
     ap.add_argument("--local_txt", default=None, help="本地 txt 路径（--source local）")
     ap.add_argument("--tokenizer", default="gpt2", choices=["gpt2", "auto"])
+    ap.add_argument("--near_dup_threshold", default="0.80",
+                    help="近似重复阈值（(0,1]；1.0 近似于只保留精确去重）；"
+                         "协议参数会写入 data_report")
+    ap.add_argument("--near_dup_min_chars", default="200",
+                    help="参与近似重复扫描的最小块字符数（>=1）")
     ap.add_argument("--force", action="store_true",
                     help="强制重建 token bin；不传时复用与当前 txt 一致的缓存")
     ap.add_argument("--allow_leaky_split", action="store_true",
@@ -250,6 +255,19 @@ def main():
         "val": _budget(args.val_tokens, "--val_tokens"),
         "test": _budget(args.test_tokens, "--test_tokens"),
     }
+    try:
+        near_dup_threshold = float(args.near_dup_threshold)
+    except (TypeError, ValueError, OverflowError):
+        ap.error("--near_dup_threshold 必须是 (0,1] 内的数值")
+    if not (near_dup_threshold > 0.0 and near_dup_threshold <= 1.0):
+        ap.error("--near_dup_threshold 必须在 (0,1] 内")
+    try:
+        near_dup_min_chars = strict_int(args.near_dup_min_chars,
+                                        "--near_dup_min_chars")
+    except (TypeError, ValueError) as e:
+        ap.error(str(e))
+    if near_dup_min_chars < 1:
+        ap.error("--near_dup_min_chars 必须 >= 1")
 
     os.makedirs(args.out_dir, exist_ok=True)
     txt_paths = {"train": os.path.join(args.out_dir, "train.txt"),
@@ -417,7 +435,9 @@ def main():
     # 一致则复用、变化则自动重建；传 --force 则无条件重建。
     prepare_bins(args.out_dir, kind=args.tokenizer, force=args.force,
                  extra_report={"source": source_used,
-                               "split_protocol": split_protocol})
+                               "split_protocol": split_protocol},
+                 near_dup_threshold=near_dup_threshold,
+                 near_dup_min_chars=near_dup_min_chars)
     print("[data] WikiText-103 准备完成")
 
 

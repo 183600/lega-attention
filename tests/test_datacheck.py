@@ -26,6 +26,7 @@ from lega.data import (CACHE_SCHEMA, CharTokenizer, get_tokenizer, load_bin,
 from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             build_data_report, check_vocab_capacity,
                             critical_split_alerts, decontaminate_documents,
+                            decontaminate_near_duplicates,
                             decontaminate_texts,
                             distribution_shift, ngram_overlap,
                             CRITICAL_SPLIT_ALERT_CODES,
@@ -1823,3 +1824,259 @@ def test_prepare_data_rows_api_uses_validated_integer_budget(monkeypatch):
         for name in ("train.txt", "val.txt", "test.txt"):
             assert os.path.exists(os.path.join(out_dir, name)), name
     print("  [ok] prepare_data：rows 兜底路径使用校验后的整数预算")
+
+
+def _near_dup_base():
+    return (
+        "The history of the town begins in the early nineteenth century, when "
+        "a small settlement grew around the river crossing. Merchants and "
+        "farmers brought goods to the weekly market, and the population "
+        "increased steadily over several decades. By the end of the century "
+        "the railway had arrived, connecting the town to larger cities and "
+        "changing the local economy in lasting ways. Schools, churches, and a "
+        "public library were established during this period of growth.")
+
+
+def _near_dup_unrelated():
+    return (
+        "Quantum chromodynamics describes the strong interaction between "
+        "quarks and gluons. Lattice calculations provide numerical predictions "
+        "for hadron masses and coupling constants, while effective field "
+        "theories organize the low energy behavior. Experiments at colliders "
+        "test these predictions with increasing precision, and the agreement "
+        "between theory and data constrains possible new physics scenarios.")
+
+
+def test_near_duplicate_removes_train_copies_only():
+    """改了几个词的 train 副本也必须删除；val/test 逐字节保持原样。"""
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth").replace(
+        "several decades", "many decades")
+    train_unique = "A train-only paragraph that is unrelated to the evaluation."
+    texts = {"train": f"{edited}\n\n{train_unique}",
+             "val": base, "test": base}
+    out, stats = decontaminate_near_duplicates(texts)
+    assert "history of the town" not in out["train"]
+    assert train_unique in out["train"]
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    near = stats
+    assert near["train_blocks_dropped_as_near_duplicates_of_eval"] == 1
+    assert near["train_blocks_dropped_total"] == 1
+    assert near["threshold_sensitivity"]["0.8"]["train_val"] >= 1
+    assert 0.0 < near["lsh_recall_at_threshold"] <= 1.0
+    print("  [ok] 近似重复：只从 train 删除跨 split 副本，val/test 不改写")
+
+
+def test_near_duplicate_containment_catches_longer_train_block():
+    """val 的小段被整段抄进更长 train 块：Jaccard 被长度稀释，
+    containment 仍应识别（跨 split 用 max(Jaccard, containment)）。"""
+    base = _near_dup_base()
+    val_block = base[:260]
+    prefix = "A long train document that embeds an evaluation passage: "
+    suffix = " " + ("additional train-only material " * 30)
+    texts = {"train": f"{prefix}{val_block}{suffix}",
+             "val": val_block, "test": ""}
+    out, stats = decontaminate_near_duplicates(texts)
+    assert out["train"].strip() == ""
+    assert out["val"] == texts["val"]
+    assert stats["train_blocks_dropped_as_near_duplicates_of_eval"] == 1
+    # 报告里保留两种相似度，而不是只给一个无法复核的分数
+    assert stats["top_similarities"]
+    assert "containment" in stats["top_similarities"][0]
+    print("  [ok] 近似重复：containment 捕捉“短 eval 段被长 train 文档包含”")
+
+
+def test_near_duplicate_intra_train_keeps_first_and_short_blocks_ignored():
+    """train 内部近似重复保留首次出现；短块不参与，避免误删标题/固定语。"""
+    base = _near_dup_base()
+    edited = base.replace("river crossing", "river ford")
+    train_unique = "Another train-only paragraph that is not a duplicate."
+    texts = {"train": f"{base}\n\n{edited}\n\n{train_unique}",
+             "val": _near_dup_unrelated(), "test": ""}
+    out, stats = decontaminate_near_duplicates(texts)
+    assert out["train"].count(base) == 1
+    assert "river ford" not in out["train"]
+    assert train_unique in out["train"]
+    assert stats["train_intra_split_near_duplicates_removed"] == 1
+    # 短于 min_chars 的块即使内容相同也不进入扫描（避免误删标题）
+    short = "= References ="
+    out2, stats2 = decontaminate_near_duplicates(
+        {"train": short, "val": short, "test": ""})
+    assert out2["train"] == short
+    assert stats2["train_blocks_skipped_short"] == 1
+    print("  [ok] 近似重复：train 内部保留首次出现；短块显式跳过")
+
+
+def test_near_duplicate_val_test_is_diagnostic_only_and_threshold_sensitivity():
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth")
+    texts = {"train": _near_dup_unrelated(), "val": base, "test": edited}
+    out, stats = decontaminate_near_duplicates(texts)
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    assert stats["val_test_near_duplicate_pairs"] >= 1
+    assert stats["val_test_near_duplicate_pairs_by_threshold"]["0.7"] >= 1
+    # 更严格的阈值会减少判定数：删除量对协议阈值有依赖，不能只报一个点。
+    _, strict = decontaminate_near_duplicates(texts, threshold=0.99)
+    assert strict["val_test_near_duplicate_pairs"] == 0
+    assert strict["threshold_sensitivity"]["0.7"]["val_test"] >= 1
+    # 阈值恰好等于显示键（0.7）时不能重复计数
+    _, at70 = decontaminate_near_duplicates(texts, threshold=0.7)
+    assert (at70["val_test_near_duplicate_pairs"]
+            == at70["threshold_sensitivity"]["0.7"]["val_test"])
+    print("  [ok] 近似重复：val/test 只诊断不改写；三档阈值敏感性可见")
+
+
+def test_near_duplicate_tolerates_bad_input_and_validates_params():
+    for texts in (None, [], {}, {"train": 123, "val": ["x"]}):
+        out, stats = decontaminate_near_duplicates(texts)
+        assert isinstance(out, dict)
+        assert stats["train_blocks_dropped_total"] == 0
+    for bad in (True, 0, 1.2, float("nan"), "bad"):
+        try:
+            decontaminate_near_duplicates({"train": "x" * 300}, threshold=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 threshold 未被拒绝: {bad!r}")
+    for bad in (True, 0, -1, 1.5, "bad"):
+        try:
+            decontaminate_near_duplicates({"train": "x" * 300}, min_chars=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 min_chars 未被拒绝: {bad!r}")
+    print("  [ok] 近似重复：容忍损坏输入，threshold/min_chars 严格校验")
+
+
+def test_prepare_bins_applies_near_duplicate_decontamination():
+    """近似去污染必须真正进入 bin/报告/告警，而不只是一个独立工具函数。"""
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth").replace(
+        "public library", "public museum")
+    train_unique = ("A train-only paragraph with enough characters to survive "
+                    "tokenization and remain after decontamination.")
+    val_unique = ("A val-only paragraph with enough characters for a held-out "
+                  "selection split.")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{edited}\n\n{train_unique}\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{base}\n\n{val_unique}\n")
+        with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
+            f.write(_near_dup_unrelated() + "\n")
+        prepare_bins(d, kind="char", force=True)
+        with open(os.path.join(d, "data_report.json"), "r",
+                  encoding="utf-8") as f:
+            rep = json.load(f)
+        near = rep["duplicates"]["near_duplicate"]
+        assert near["train_blocks_dropped_as_near_duplicates_of_eval"] == 1
+        assert near["threshold"] == 0.8
+        assert near["threshold_sensitivity"]["0.8"]["train_val"] >= 1
+        codes = {a["code"] for a in rep["alerts"]}
+        assert "near_duplicate_decontamination_applied" in codes
+        decoded = load_tokenizer(d).decode(load_bin(d, "train"))
+        assert "history of the town" not in decoded
+        assert "train-only paragraph" in decoded
+        # val 必须逐字节保留：尘封 split 不被近似去污染改写
+        with open(os.path.join(d, "val.txt"), "r", encoding="utf-8") as f:
+            assert f.read().startswith(base)
+    print("  [ok] prepare_bins：近似去污染进入 bin/报告/告警，val 不改写")
+
+def test_leakage_alerts_surface_near_duplicate_evidence():
+    """近似去污染的删除/val-test 重叠/高删除比例都必须进入 alerts。"""
+    dup = {"near_duplicate": {
+        "threshold": 0.8,
+        "train_blocks_dropped_as_near_duplicates_of_eval": 2,
+        "train_intra_split_near_duplicates_removed": 1,
+        "train_lines_dropped": 3,
+        "val_test_near_duplicate_pairs": 4,
+        "removal_fraction_chars": 0.4,
+        "candidate_pairs_truncated": False,
+        "oversized_groups_truncated": 0,
+    }}
+    alerts = leakage_alerts({}, {}, dup, {}, {})
+    codes = {a["code"] for a in alerts}
+    assert "near_duplicate_decontamination_applied" in codes
+    assert "eval_splits_near_duplicates" in codes
+    assert "near_duplicate_removal_high_fraction" in codes
+    # 截断时额外告警；未截断时不出现
+    dup["near_duplicate"]["candidate_pairs_truncated"] = True
+    codes2 = {a["code"] for a in leakage_alerts({}, {}, dup, {}, {})}
+    assert "near_duplicate_scan_truncated" in codes2
+    print("  [ok] 近似重复：删除/val-test 重叠/高删除比例/截断均进入告警")
+
+def test_prepare_bins_rejects_catastrophic_near_duplicate_removal():
+    """近似去污染若会删空/删除 >90% train，必须失败而不是静默训练空集。"""
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth")
+    val = base.replace("public library", "public museum")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write(edited + "\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write(val + "\n")
+        try:
+            prepare_bins(d, kind="char", force=True)
+        except ValueError as e:
+            assert "近似重复去污染" in str(e)
+        else:
+            raise AssertionError("近似去污染删空 train 时未失败")
+    print("  [ok] prepare_bins：近似去污染删空 train 时 fail closed")
+
+def test_prepare_data_passes_near_duplicate_protocol(monkeypatch):
+    """近似去污染的协议阈值必须能从数据准备入口显式设置并原样传递。"""
+    import sys
+    import lega.data as data_mod
+    import scripts.prepare_data as prep
+
+    seen = {}
+
+    def fake_rows(max_rows, retries=4):
+        return {"train": ["train line " + "a" * 80],
+                "val": ["val line " + "b" * 80],
+                "test": ["test line " + "c" * 80]}
+
+    def fake_prepare_bins(data_dir, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(prep, "from_rows_api", fake_rows)
+    monkeypatch.setattr(data_mod, "prepare_bins", fake_prepare_bins)
+    with tempfile.TemporaryDirectory() as d:
+        out_dir = os.path.join(d, "out")
+        monkeypatch.setattr(sys, "argv", [
+            "prepare_data", "--out_dir", out_dir, "--source", "rows",
+            "--max_tokens", "600", "--near_dup_threshold", "0.7",
+            "--near_dup_min_chars", "250"])
+        prep.main()
+        assert seen["near_dup_threshold"] == 0.7
+        assert seen["near_dup_min_chars"] == 250
+    print("  [ok] prepare_data：近似去污染协议参数可显式设置并传递")
+
+def test_prepare_bins_cache_invalidated_on_near_duplicate_params():
+    """同一份 txt 用不同近似去污染阈值构建的 bin 不同，缓存必须失效重建。"""
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth")
+    train_unique = ("A legitimate train-only paragraph that is unrelated to the "
+                    "evaluation split and long enough to keep the removal fraction "
+                    "below the catastrophic guard threshold.")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{edited}\n\n{train_unique}\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write(base + "\n")
+        meta1 = prepare_bins(d, kind="char", force=True)
+        assert meta1["near_dup"]["threshold"] == 0.8
+        n1 = meta1["train_tokens"]
+        decoded1 = load_tokenizer(d).decode(load_bin(d, "train"))
+        assert "history of the town" not in decoded1
+        # 阈值提高到 1.0：编辑副本不再算近重复，必须重建并保留该块
+        meta2 = prepare_bins(d, kind="char", near_dup_threshold=1.0)
+        assert meta2["near_dup"]["threshold"] == 1.0
+        assert meta2["train_tokens"] > n1
+        decoded2 = load_tokenizer(d).decode(load_bin(d, "train"))
+        assert "history of the town" in decoded2
+        # 参数相同则继续命中缓存
+        meta3 = prepare_bins(d, kind="char", near_dup_threshold=1.0)
+        assert meta3["train_tokens"] == meta2["train_tokens"]
+    print("  [ok] prepare_bins：近似去污染阈值进入缓存身份，变化即重建")

@@ -5523,3 +5523,31 @@ def test_summary_rendering_tolerates_missing_effect_mean():
         md = out["markdown"]
         assert "A×B" in md and "无法检验" in md
     print("  [ok] 汇总渲染：缺失/非有限均值显示 '-'，交互表不再 TypeError")
+
+def test_build_summary_renders_near_duplicate_audit():
+    """近似重复的删除量/阈值/召回率必须进入 summary.md，而不是只躺在 JSON。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        data_report = {
+            "protocol": {"split_first_then_preprocess": True},
+            "duplicates": {"near_duplicate": {
+                "shingle_size": 5,
+                "threshold": 0.8,
+                "lsh_recall_at_threshold": 0.9865,
+                "train_lines_dropped": 12,
+                "train_blocks_dropped_as_near_duplicates_of_eval": 3,
+                "train_intra_split_near_duplicates_removed": 2,
+                "val_test_near_duplicate_pairs": 1,
+                "candidate_pairs": 40,
+                "candidate_pairs_truncated": False,
+                "oversized_groups_truncated": 0,
+            }},
+        }
+        out = build_summary(tmp, data_report=data_report)
+        md = out["markdown"]
+        assert "近似重复去污染" in md
+        assert "98.650%" in md
+        assert "只改 train" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：近似重复审计进入汇总页")

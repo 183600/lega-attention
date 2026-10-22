@@ -6751,6 +6751,26 @@ def build_summary(results_dir: str, audit: dict = None,
                 f"（共 {doc.get('train_lines_dropped', '-')} 行）；"
                 f"val↔test 多行块重叠 {doc.get('val_test_overlap_blocks', '-')} 个"
                 "（只改 train，val/test 保持尘封）")
+        near = _as_dict(dup.get("near_duplicate"))
+        if near:
+            md.append(
+                f"- 近似重复去污染（MinHash/LSH，字符 "
+                f"{near.get('shingle_size', '-')}-gram，协议阈值 "
+                f"{near.get('threshold', '-')}）：与 val/test 近似块移除 "
+                f"{_int_or_zero(near.get('train_blocks_dropped_as_near_duplicates_of_eval')):,} 个、"
+                f"train 内部近似重复块移除 "
+                f"{_int_or_zero(near.get('train_intra_split_near_duplicates_removed')):,} 个"
+                f"（共 {_int_or_zero(near.get('train_lines_dropped')):,} 行；"
+                "只改 train，val/test 保持尘封）；"
+                f"val↔test 近似对 "
+                f"{_int_or_zero(near.get('val_test_near_duplicate_pairs')):,}；"
+                f"LSH 理论召回率 {_fmt_rate(near.get('lsh_recall_at_threshold'))}；"
+                f"候选对 {_int_or_zero(near.get('candidate_pairs')):,}"
+                "（阈值敏感性见 data_report.json）")
+            if (near.get("candidate_pairs_truncated")
+                    or _int_or_zero(near.get("oversized_groups_truncated"))):
+                md.append("- ⚠ 近似重复扫描触发候选簇/候选总数上限：删除量是下界，"
+                          "须降低语料规模或提高上限后重跑")
         md.append(
             f"- 去污染：与 val/test 重复的训练长行移除 "
             f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"

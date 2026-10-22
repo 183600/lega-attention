@@ -23,8 +23,11 @@ from typing import List
 import numpy as np
 import torch
 
-from .datacheck import (UNK_TOKEN, build_data_report, check_vocab_capacity,
-                        decontaminate_documents, decontaminate_texts,
+from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
+                        NEAR_DUP_THRESHOLD, build_data_report,
+                        check_vocab_capacity,
+                        decontaminate_documents, decontaminate_near_duplicates,
+                        decontaminate_texts,
                         distribution_shift, ngram_overlap,
                         read_test_access_log, sanitize_text,
                         short_ngram_overlap,
@@ -39,7 +42,10 @@ _GPT2_CACHE = {}
 # 否则会用旧协议产出的 bin 静默训练，防泄漏自检报告也与实际数据不符。
 # v6：meta 记录 train/val/test.bin 的内容哈希，缓存命中与 load_bin 均核对，
 # 防止同尺寸替换 bin 后绕过源文本/报告哈希核对。
-CACHE_SCHEMA = 6
+# v7：加入近似重复（MinHash/LSH）去污染，并把阈值/min_chars 写入 meta
+# 作为缓存身份；旧缓存没有执行该步骤或参数不同，必须重建，否则 data_report
+# 会声称已做预处理而实际 bin 仍是未去近重复（或不同阈值）的旧流。
+CACHE_SCHEMA = 7
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -232,15 +238,20 @@ def tokenizer_fit_source_ok(tokenizer, fit_on) -> bool:
 
 
 def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
-                 report: bool = True, extra_report: dict = None) -> dict:
+                 report: bool = True, extra_report: dict = None,
+                 near_dup_threshold: float = NEAR_DUP_THRESHOLD,
+                 near_dup_min_chars: int = NEAR_DUP_MIN_CHARS) -> dict:
     """把 train.txt/val.txt（以及若存在的 test.txt）编码为 uint16 bin
     （已存在则跳过，force=True 重建）。
 
     这是所有文本进入训练/评测的唯一入口，因此在此集中执行防泄漏处理：
-      1) 文本清洗（坏字符）与跨 split 重复行去污染（只改 train）；
+      1) 文本清洗（坏字符）、跨 split 精确去污染与近似重复去污染（只改
+         train；近似去污染用 near_dup_threshold/near_dup_min_chars 作为
+         协议参数，默认 0.80/200 字符）；
       2) 分词器只在 train 上拟合（字符级词表 + <unk>）；
       3) val/test 只 transform，随后对三条 token 流做硬校验；
-      4) 生成 data_report.json（重复、64-gram 重叠、分布漂移、访问账本）。
+      4) 生成 data_report.json（重复、近似重复、64-gram 重叠、分布漂移、
+         访问账本）。
     extra_report 用于记录数据来源/划分协议等上游元数据（原样并入报告）。
     """
     meta_path = os.path.join(data_dir, "meta.json")
@@ -270,11 +281,29 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             # 旧版 meta 无 requested_kind：按实际分词器推断，
             # 避免 char 缓存被 gpt2 请求静默复用（反之亦然）。
             cached_kind = "gpt2" if meta.get("tokenizer") == "gpt2_bpe" else "char"
+        # 近似去污染参数是缓存身份的一部分：同一份 txt 用不同阈值构建出的
+        # bin 不同，不能因为源文件哈希未变就静默复用旧阈值的 token 流。
+        cached_near = meta.get("near_dup")
+        near_ok = False
+        if isinstance(cached_near, dict):
+            try:
+                near_ok = (
+                    float(cached_near.get("threshold"))
+                    == float(near_dup_threshold)
+                    and int(cached_near.get("min_chars"))
+                    == int(near_dup_min_chars))
+            except (TypeError, ValueError, OverflowError):
+                near_ok = False
         # 旧缓存可能是在 val/test 上拟合词表（泄露）或缺少防泄漏报告，必须重建
         fit_ok = tokenizer_fit_source_ok(meta.get("tokenizer"),
                                          meta.get("fit_on"))
         integrity_ok, integrity_issue, no_sources = _cache_integrity(
             data_dir, meta, report_path, report)
+        if no_sources:
+            # 纯 bin 目录无法重建，也无法核对近似去污染参数/源哈希；与
+            # _cache_integrity 的“不可判定放行”同口径，保留旧行为并让
+            # 调用方打印警告，而不是因缺少 train.txt 在重建路径崩溃。
+            near_ok = True
 
         def _meta_int(key):
             # 缓存是派生数据，字段缺失/类型异常按“与 bin 不一致”处理。
@@ -309,7 +338,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             and os.path.exists(test_bin)
             and os.path.getsize(test_bin) == _meta_int("test_tokens") * 2)
         if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
-                and test_valid and fit_ok and integrity_ok:
+                and test_valid and fit_ok and near_ok and integrity_ok:
             if no_sources:
                 print("[data] 警告：数据目录只有 bin 没有源 txt，"
                       "无法核对缓存与源文本一致性（按不可判定放行）")
@@ -328,6 +357,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             print("[data] 缓存 bin/meta 大小不一致，重建 bin")
         elif not fit_ok:
             print("[data] 旧缓存词表可能在全量数据上拟合（泄露风险），重建 bin")
+        elif not near_ok:
+            print("[data] 近似去污染参数与缓存不一致（或旧缓存未记录），重建 bin")
         elif not integrity_ok:
             print(f"[data] {integrity_issue}，重建 bin")
         else:
@@ -369,6 +400,41 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             document_stats[key] = (int(document_stats.get(key, 0))
                                    + int(post_doc_stats.get(key, 0)))
     duplicate_stats["document_level"] = document_stats
+    # 近似重复去污染：精确行/块去重只能抓住逐字节（或仅空白/NFKC 差异）
+    # 的复制；改了几个词的副本仍会让 train 记住 val/test 的内容、并在 train
+    # 内部放大同一段文本的权重。阈值是协议参数（0.80），报告同时给出
+    # 0.70/0.80/0.90 三档敏感性与 LSH 理论召回率，删除量对阈值的依赖可见。
+    texts, near_stats = decontaminate_near_duplicates(
+        texts, threshold=near_dup_threshold, min_chars=near_dup_min_chars)
+    duplicate_stats["near_duplicate"] = near_stats
+    if near_stats["train_blocks_dropped_total"]:
+        print(f"[data] 近似重复去污染：从 train 移除 "
+              f"{near_stats['train_blocks_dropped_as_near_duplicates_of_eval']:,} "
+              f"个与 val/test 近似的块、"
+              f"{near_stats['train_intra_split_near_duplicates_removed']:,} 个 "
+              f"train 内部近似重复块（共 {near_stats['train_lines_dropped']:,} 行；"
+              "val/test 不改写）")
+        # 删除整块可能让相邻块合并成新的精确副本；再跑一次精确块去重到
+        # 不动点。结果单列，避免把“近似去重后的补充清理”混进首轮统计。
+        texts, post_doc_stats = decontaminate_documents(texts)
+        for key in ("train_blocks_dropped_as_duplicates_of_eval",
+                    "train_intra_split_duplicate_blocks_removed",
+                    "train_lines_dropped", "train_chars_dropped"):
+            document_stats[key] = (int(document_stats.get(key, 0))
+                                   + int(post_doc_stats.get(key, 0)))
+        duplicate_stats["post_near_dup_exact_cleanup"] = post_doc_stats
+    # 近似去污染是自动改写训练集，必须防止“阈值/语料异常导致 train 被删空”
+    # 被当成一次正常实验静默跑完：>90% 或删空直接失败，要求人工核查。
+    if near_stats["removal_fraction_chars"] > 0.90:
+        raise ValueError(
+            "近似重复去污染将移除 train 可用字符的 "
+            f"{near_stats['removal_fraction_chars']:.1%}（>90%）：语料可能"
+            "高度重复或阈值过宽，拒绝静默产出几乎为空的训练集；请核查 "
+            "data_report 的 duplicates.near_duplicate 或调整协议阈值")
+    if near_stats["train_blocks_dropped_total"] and not texts["train"].strip():
+        raise ValueError(
+            "近似重复去污染后 train 为空：所有训练块都被判为 val/test 的"
+            "近似副本；请核查去污染证据后再决定是否调整阈值/划分")
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
     # 原文此后只由局部变量引用：逐段编码完即释放
     del texts
@@ -520,7 +586,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 读取，不用于任何选择）。显式记录，避免账本 0 次被误读成“test 从未被碰”。
     data_report["test_reads_at_prep"] = {
         "encoded": bool(te is not None),
-        "purpose": "编码 test.bin + 跨 split 重叠/分布漂移诊断（模型无关）",
+        "purpose": "编码 test.bin + 跨 split 精确/近似重叠与分布漂移诊断（模型无关）",
         "used_for_selection": False,
     }
     data_report["test_access"] = summarize_test_access(
@@ -552,6 +618,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             "cache_schema": int(CACHE_SCHEMA),
             "source_sha256": source_sha256,
             "bin_sha256": bin_sha256,
+            "near_dup": {"threshold": float(near_dup_threshold),
+                         "min_chars": int(near_dup_min_chars)},
             "train_tokens": int(tr.size), "val_tokens": int(va.size)}
     if te is not None:
         meta["test_tokens"] = int(te.size)

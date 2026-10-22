@@ -154,6 +154,35 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 门控均值/标准差/饱和比例、逐窗口 ΔNLL、窗口级 t/符号检验、`no_op` 标记与
 溯源字段。`--skip_ablation` 可关闭；`standard`/`null` 无输出门，不能做该分析。
 
+## 数据卫生：精确去重之后的近似重复
+
+精确行/块去重只覆盖逐字节（以及 NFKC/空白归一化后）相同的复制。真实语料中
+“改了几个词、删了一段”的近似复制更常见：它同样会让 train 记住 val/test 的
+内容，也会在 train 内部放大同一段文本的权重。`lega/datacheck.py` 的
+`decontaminate_near_duplicates` 在精确去重之后补一层近似重复筛查：
+
+- **表示**：NFKC + casefold + 空白折叠后取 UTF-8 字节 5-gram，集合去重；
+  不依赖分词器，英文/CJK/符号走同一确定性路径；
+- **候选**：8 个 MinHash 签名（4 band × 2 row）做 LSH；对阈值 0.80，至少一个
+  band 相同的理论概率为 `1-(1-0.80²)^4≈98.3%`，漏检只发生在低相似度一侧；
+- **核实**：候选对再精确计算 Jaccard 与 containment。跨 split 用
+  `max(Jaccard, containment)`——val 的一小段被整段抄进更长的 train 文档时，
+  Jaccard 会被长度稀释，containment 才能发现；**train 内部只用 Jaccard**，
+  避免“短段被长文档包含”造成过度删除；
+- **作用域**：只从 train 删除；val/test 逐字节不动。阈值 0.80 是分析前声明的
+  协议参数（`scripts/prepare_data.py --near_dup_threshold/--near_dup_min_chars` 可显式设置），不是从当前数据估计出来的；报告同时落盘 0.70/0.80/0.90 三档
+  删除量与 LSH 理论召回率，候选簇/候选总数/超大块触发的截断都显式标记，
+  不把“没扫到”写成“没有近似重复”；
+- **证据位置**：`data_report.json` 的 `duplicates.near_duplicate`，并生成
+  `near_duplicate_decontamination_applied` / `eval_splits_near_duplicates` /
+  `near_duplicate_scan_truncated` 等告警；bin 缓存协议升至 v7，旧缓存必须
+  重建，避免报告声称已做近重复处理而实际 token 流未处理。
+
+**局限**：LSH 是近似检索，不是精确全对比；containment 对模板化文本/固定
+用语可能偏激进，因此只在跨 split 去污染时启用；三档敏感性只说明“删除量对
+阈值有依赖”，不证明下游 PPL/RULER 对阈值不敏感。正式对比必须固定在同一
+预处理版本（同一 `data_report`/bin 哈希）上，不能按测试结果回头挑阈值。
+
 ## 评测
 
 - WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）；

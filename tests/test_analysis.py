@@ -8,7 +8,7 @@ import math
 from lega.analysis import (_bounded_float, _float_grid, _int_at_least,
                            auroc_cluster_bootstrap, collect_records,
                            resolve_analysis_ctx, summarize, tau_sensitivity)
-from lega.data import CharTokenizer
+from lega.data import CACHE_SCHEMA, CharTokenizer
 from lega.model import GPT
 
 _TEXT = ("The quick brown fox jumps over the lazy dog. "
@@ -458,7 +458,7 @@ def test_analysis_payload_binds_checkpoint_hash(monkeypatch):
         itos = sorted(set(text))
         with open(os.path.join(data, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"tokenizer": "char", "itos": itos, "char_unk": False,
-                       "vocab_size": len(itos), "cache_schema": 6,
+                       "vocab_size": len(itos), "cache_schema": CACHE_SCHEMA,
                        "fit_on": "train"}, f)
         arr = np.array([itos.index(c) for c in text], dtype=np.uint16)
         arr.tofile(os.path.join(data, "train.bin"))

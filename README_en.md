@@ -80,7 +80,7 @@ Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA)
 - **Data protocol (leakage-proof, fully auditable)**:
   1. **Split first, preprocess second**: train/val/test text is produced before encoding; the character-level vocabulary (feature engineering) is fit on train only, val/test are only transformed, and unseen characters map to `<unk>` (GPT-2 BPE is a public pretrained vocabulary, independent of this project's data);
   2. **Temporal split**: with `--local_txt`, the earliest 80% is train, the next 10% is val and the latest 10% is test; cut points align to document boundaries (heading lines > blank-line paragraphs > newlines) and are never shuffled at split time (batch-level random sampling of training samples during training is allowed and not leakage); the official WikiText-103 split is document-disjoint and inherently held out;
-  3. **Groups never cross sides**: documents/paragraphs are the group unit and land entirely in one split; training lines that exactly duplicate val/test lines are decontaminated (val/test stay sealed and untouched), and sampled 64-gram hashing screens for token-level copies across splits;
+  3. **Groups never cross sides**: documents/paragraphs are the group unit and land entirely in one split; training lines/blocks that exactly duplicate val/test lines (including NFKC/whitespace variants) are decontaminated, and **near-duplicates** are screened with UTF-8 byte 5-gram MinHash + LSH candidates followed by exact Jaccard/containment verification (cross-split score = max(Jaccard, containment), train-internal = Jaccard; protocol threshold 0.80, with 0.70/0.80/0.90 sensitivity and the LSH theoretical recall reported). Only train copies are removed (val/test stay sealed and untouched); sampled 64-gram hashing additionally screens for token-level copies across splits;
   4. **Cleaning & anomaly checks**: corrupt characters (U+FFFD/NUL/illegal control chars) are deterministically removed; token streams are hard-validated (integer, finite, id range); duplicate samples, overlong lines and train-vs-val/test unigram shift (TV/JS, OOV) are all written to `data_report.json`;
   5. **Test seal**: checkpoint selection and early stopping use val only; test is accessed for final evaluation only, and every test evaluation appends to the `data_dir/.test_access_log.jsonl` ledger; the summary reports the total count and any repeatedly evaluated checkpoint.
 - **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, two layers are cross-checked automatically: `config_used.json` (hyperparameters item by item) and the `eval.json` provenance (data fingerprint, code commit, config SHA-256, actual steps and tokens_seen, also compared against the pipeline's data fingerprint), plus the **actual evaluation protocol** (PPL must share `split/eval_ctx/eval_iters/val_windows/val_tokens_evaluated`, i.e. the same token batch; RULER must share `ctx_lens/n_samples/sample_seed/corpus_source/max_new` and evaluated cells, otherwise EM is not paired on the same items). Any difference fails the pipeline; the random seed is replayed after model construction so training-time randomness (dropout etc.) is also identical across variants — fairness is an executable assertion, not a verbal promise.
@@ -125,7 +125,8 @@ Smoke mode automatically shrinks: 20 steps/variant, a single seed, ctx=min(256, 
 ```bash
 # 1) Data (~300MB download; offline: point --local_txt at local text)
 python scripts/prepare_data.py --out_dir data/wikitext103
-# optional --max_tokens 30000000 to control training size
+# optional --max_tokens 30000000 to control training size;
+# near-duplicate protocol: --near_dup_threshold 0.8 --near_dup_min_chars 200
 
 # 2) Full pipeline: 10 variants x multiple seeds (5 by default) -> PPL -> RULER
 #    -> latency -> analysis -> plots -> summary (Mean ± Std + paired tests)
@@ -172,7 +173,7 @@ Outputs:
 | `results/<tag>/summary.md` | **Summary (Mean ± Std + ablation matrix + controlled-variable audit + reproducibility/sanity)** |
 | `results/<tag>/repro.json` | Pipeline-level provenance (code version, data fingerprint, seeds, runtime) |
 | `results/experiments.jsonl` | **Append-only experiment ledger: per-run run_id, code version/worktree diff, resolved hyperparameters, per-run seed audit/RNG fingerprints, data fingerprint, sanity verdict+identity, final metrics and artifact hashes (started/completed/aborted lifecycle; failures carry the reason); `python -m lega.experiment --check_artifacts` verifies the chain and hashes** |
-| `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
+| `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, exact + near-duplicate decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
 | `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
 | `results/<tag>/baseline_tuning.json` | Baseline (`standard`) lr/weight-decay tuning evidence (val only; includes the `default_is_optimal` verdict, `selection_seeds`/per-seed val_loss details, and per-trial provenance) |
 | `results/<tag>/ngram_baseline.json` | Simple statistical baseline: unigram/bigram/interpolated-bigram smoothed n-gram held-out PPL (α/λ jointly selected on val, `selected_model` is the strongest on val; test needs an explicit opt-in; the pipeline matches the neural eval split by default) |
@@ -287,7 +288,7 @@ lega-attention/
 │   ├── attention.py           # core: causal attention for 10 variants (LEGA gate + ablation matrix)
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback, vocab fit on train only) + bin cache + batch sampling
-│   ├── datacheck.py           # leakage-proofing: temporal/document split, decontamination, token hard checks, shift screening, test-access ledger
+│   ├── datacheck.py           # leakage-proofing: temporal/document split, exact + near-duplicate decontamination, token hard checks, shift screening, test-access ledger
 │   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + systematic NaN audit (activation hooks) + provenance manifest
 │   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept

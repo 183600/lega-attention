@@ -18,6 +18,7 @@
 """
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -496,6 +497,392 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
         "val_test_overlap_blocks": int(val_test_overlap),
         "val_test_overlap_rate": float(
             val_test_overlap / max(1, len(val_hashes))),
+    }
+    return out, stats
+
+
+# ---------------------------------------------------------------- 近似重复
+#
+# 精确行/块去重只能抓住逐字节（或仅空白/NFKC 差异）的复制。真实语料里更常见
+# 的是“改了几个词/删了一段”的近似复制：它同样会让 train 记住 val/test 的
+# 内容，也会在 train 内部放大同一段文本的权重。这里用字符 5-gram 的
+# MinHash + LSH 做近似重复筛查，再对候选对精确计算 Jaccard/containment。
+#
+# 口径：
+#   * 只从 train 删除；val/test 逐字节不动（与精确去污染一致）；
+#   * 跨 split 用 max(Jaccard, containment)：val 的一小段被整段抄进更长的
+#     train 文档时，Jaccard 会被长度稀释，containment 才能发现；
+#   * train 内部只用 Jaccard，避免“短段落被长文档包含”导致过度删除；
+#   * 阈值是协议参数而不是从数据估计出来的；报告同时给出 0.70/阈值/0.90
+#     三档敏感性，读者能看出删除量对阈值的依赖。
+NEAR_DUP_SHINGLE = 5
+NEAR_DUP_THRESHOLD = 0.80
+NEAR_DUP_MIN_CHARS = 200
+NEAR_DUP_MIN_SHINGLES = 20
+NEAR_DUP_BANDS = 6
+NEAR_DUP_ROWS = 3
+NEAR_DUP_HASHES = NEAR_DUP_BANDS * NEAR_DUP_ROWS
+NEAR_DUP_MAX_BLOCK_CHARS = 2_000_000
+NEAR_DUP_MAX_GROUP = 64
+NEAR_DUP_MAX_CANDIDATES = 1_000_000
+NEAR_DUP_CACHE_BLOCKS = 10_000
+
+_U64 = np.uint64
+_U64_GOLDEN = _U64(0x9E3779B97F4A7C15)
+_U64_MIX1 = _U64(0xBF58476D1CE4E5B9)
+_U64_MIX2 = _U64(0x94D049BB133111EB)
+_U64_BASE = _U64(1099511628211)
+
+
+def _near_dup_normalize(text: str) -> str:
+    """近似重复比较键：NFKC + casefold + 空白折叠。
+
+    只做确定性的等价归一化，不做同义词/词干替换：那会把语义不同的文本
+    判成重复。保留标点与词序，使 5-gram 仍能区分“同一段但改了关键否定词”。
+    """
+    s = unicodedata.normalize("NFKC", text).casefold()
+    return " ".join(s.split())
+
+
+def _mix64(x):
+    """SplitMix64 的向量化混合；输入/输出均按 uint64 环绕。"""
+    x = x + _U64_GOLDEN
+    x = (x ^ (x >> _U64(30))) * _U64_MIX1
+    x = (x ^ (x >> _U64(27))) * _U64_MIX2
+    return x ^ (x >> _U64(31))
+
+
+def _near_dup_shingles(norm: str, n: int = NEAR_DUP_SHINGLE):
+    """归一化文本的 UTF-8 字节 n-gram 哈希（排序去重后的 uint64 数组）。
+
+    用字节而不是字符：多语言语料无需分词器，CJK/英文/符号走同一条确定性
+    路径；NFKC 已把兼容字符折叠，字节边界不会改变同一文本的哈希口径。
+    """
+    b = np.frombuffer(norm.encode("utf-8"), dtype=np.uint8).astype(np.uint64)
+    if b.size < n:
+        return np.zeros(0, dtype=np.uint64)
+    with np.errstate(over="ignore"):
+        h = b[: b.size - n + 1].copy()
+        for k in range(1, n):
+            h *= _U64_BASE
+            h += b[k: b.size - n + 1 + k]
+        h = _mix64(h)
+    return np.unique(h)
+
+
+def _near_dup_signature(hashes, n_hashes: int = NEAR_DUP_HASHES):
+    """MinHash 签名：每个 hash 函数取 shingle 哈希的最小值。
+
+    18 个独立混合种子、6 band × 3 row：J=0.80 时至少一个 band 相同的概率为
+    1-(1-0.80³)^6≈98.7%，漏检只发生在低相似度一侧，且会在报告里给出
+    该理论召回率，而不是把 LSH 当作精确算法。
+    """
+    sig = np.empty(int(n_hashes), dtype=np.uint64)
+    for i in range(int(n_hashes)):
+        seed = _U64(((i + 1) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF)
+        sig[i] = _mix64(hashes ^ seed).min()
+    return sig
+
+
+def _near_dup_similarity(a, b):
+    """返回 (Jaccard, containment)；两者都基于去重后的 shingle 集合。"""
+    if a.size == 0 or b.size == 0:
+        return 0.0, 0.0
+    inter = int(np.intersect1d(a, b, assume_unique=True).size)
+    union = int(a.size) + int(b.size) - inter
+    jac = float(inter / union) if union > 0 else 0.0
+    denom = min(int(a.size), int(b.size))
+    con = float(inter / denom) if denom > 0 else 0.0
+    return jac, con
+
+
+def _near_dup_collect(text: str, split: str, min_chars: int,
+                      min_shingles: int, max_chars: int):
+    """把文本切成段落块并计算签名；返回 (metadata, signatures, counts)。"""
+    metas, sigs = [], []
+    counts = {"scanned": 0, "short": 0, "few_shingles": 0, "too_large": 0}
+    for start, end, _digest, n_lines in _iter_blocks(text, min_lines=1):
+        counts["scanned"] += 1
+        if end - start > int(max_chars):
+            counts["too_large"] += 1
+            continue
+        norm = _near_dup_normalize(text[start:end])
+        if len(norm) < int(min_chars):
+            counts["short"] += 1
+            continue
+        hashes = _near_dup_shingles(norm)
+        if hashes.size < int(min_shingles):
+            counts["few_shingles"] += 1
+            continue
+        metas.append({"split": str(split), "start": int(start),
+                      "end": int(end), "lines": int(n_lines)})
+        sigs.append(_near_dup_signature(hashes))
+    return metas, sigs, counts
+
+
+def _near_dup_pair_type(split_a: str, split_b: str) -> str:
+    """把无序 split 对映射到报告字段名（train/val/test 为封闭枚举）。
+
+    按协议顺序而不是字典序排序：字典序会把 val/test 写成 ``test_val``，
+    与报告里固定的 ``val_test`` 字段/告警查表不一致。
+    """
+    order = {"train": 0, "val": 1, "test": 2}
+    a, b = sorted((str(split_a), str(split_b)),
+                  key=lambda x: (order.get(x, 99), x))
+    return f"{a}_{b}"
+
+
+def decontaminate_near_duplicates(texts: dict,
+                                  threshold: float = NEAR_DUP_THRESHOLD,
+                                  min_chars: int = NEAR_DUP_MIN_CHARS,
+                                  min_shingles: int = NEAR_DUP_MIN_SHINGLES):
+    """近似重复去污染：只改写 train，val/test 逐字节保持原样。
+
+    返回 (cleaned_texts, stats)。统计写入 data_report.json 的
+    ``duplicates.near_duplicate``，包括候选/核实对数、删除行数、三档阈值
+    敏感性、LSH 理论召回率与截断标记。任何截断（超大块、超大候选簇、
+    候选总数上限）都显式记录，避免把“没扫到”写成“没有近似重复”。
+    """
+    if isinstance(threshold, bool):
+        raise ValueError(f"threshold 必须是 (0,1] 内的数值，收到 {threshold!r}")
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"threshold 必须是 (0,1] 内的数值，收到 {threshold!r}") from e
+    if not math.isfinite(threshold) or not 0.0 < threshold <= 1.0:
+        raise ValueError(f"threshold 必须是 (0,1] 内的数值，收到 {threshold!r}")
+    min_chars = strict_int(min_chars, "min_chars")
+    min_shingles = strict_int(min_shingles, "min_shingles")
+    if min_chars < 1:
+        raise ValueError(f"min_chars 必须 >= 1，收到 {min_chars}")
+    if min_shingles < 1:
+        raise ValueError(f"min_shingles 必须 >= 1，收到 {min_shingles}")
+
+    texts = texts if isinstance(texts, dict) else {}
+    out = dict(texts)
+    train_text = texts.get("train")
+    if not isinstance(train_text, str):
+        train_text = ""
+        if "train" in out:
+            # 与 decontaminate_documents 一致：损坏的 train 字段按空文本处理，
+            # 不把非字符串原样传给下游编码器。
+            out["train"] = ""
+
+    eval_metas, eval_sigs = [], []
+    eval_counts = {}
+    for split in ("val", "test"):
+        t = texts.get(split)
+        if not isinstance(t, str) or not t:
+            eval_counts[split] = {"scanned": 0, "short": 0,
+                                  "few_shingles": 0, "too_large": 0,
+                                  "eligible": 0}
+            continue
+        metas, sigs, counts = _near_dup_collect(
+            t, split, min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS)
+        eval_counts[split] = dict(counts, eligible=len(metas))
+        eval_metas.extend(metas)
+        eval_sigs.extend(sigs)
+
+    train_metas, train_sigs, train_counts = _near_dup_collect(
+        train_text, "train", min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS)
+    n_eval = len(eval_metas)
+    n_train = len(train_metas)
+
+    # 以 4 位小数的显示键去重：threshold 恰好/极接近 0.70 或 0.90 时，
+    # 若按键分组后仍对多个浮点值循环，会把同一候选对重复计数。
+    sens_values = {}
+    for t in (0.70, float(threshold), 0.90):
+        sens_values[str(round(float(t), 4))] = float(t)
+    sensitivity = sorted(sens_values.values())
+    sens_keys = {v: k for k, v in sens_values.items()}
+    pair_types = ("train_val", "train_test", "train_train", "val_test")
+    sens_counts = {sens_keys[t]: {k: 0 for k in pair_types}
+                   for t in sensitivity}
+    max_score = 0.0
+    top_examples = []
+    candidate_pairs = 0
+    truncated_groups = 0
+    truncated_candidates = False
+    prefilter_skipped = 0
+    verified_pairs = 0
+
+    if n_train and (n_eval or n_train > 1):
+        eval_arr = (np.asarray(eval_sigs, dtype=np.uint64)
+                    if eval_sigs else np.zeros(
+                        (0, NEAR_DUP_HASHES), dtype=np.uint64))
+        train_arr = (np.asarray(train_sigs, dtype=np.uint64)
+                     if train_sigs else np.zeros(
+                         (0, NEAR_DUP_HASHES), dtype=np.uint64))
+        sigs = np.vstack([eval_arr, train_arr])
+        metas = eval_metas + train_metas
+        n_all = len(metas)
+        # LSH：逐 band 建桶再丢弃，内存只与一个 band 的块数有关。
+        candidates = set()
+        for band in range(NEAR_DUP_BANDS):
+            i0 = band * NEAR_DUP_ROWS
+            buckets = {}
+            for i in range(n_all):
+                key = (int(sigs[i, i0]), int(sigs[i, i0 + 1]))
+                buckets.setdefault(key, []).append(i)
+            for ids in buckets.values():
+                if len(ids) < 2:
+                    continue
+                if len(ids) > NEAR_DUP_MAX_GROUP:
+                    truncated_groups += 1
+                    ids = ids[:NEAR_DUP_MAX_GROUP]
+                for x in range(len(ids)):
+                    for y in range(x + 1, len(ids)):
+                        a, b = ids[x], ids[y]
+                        # val-val / test-test 的内部近似重复与跨 split 去污染
+                        # 无关，保留它们只会放大候选集；val-test 仍需保留诊断。
+                        if (metas[a]["split"] == metas[b]["split"]
+                                and metas[a]["split"] != "train"):
+                            continue
+                        pair = (a, b) if a < b else (b, a)
+                        if pair in candidates:
+                            continue
+                        candidates.add(pair)
+                        if len(candidates) >= NEAR_DUP_MAX_CANDIDATES:
+                            truncated_candidates = True
+                            break
+                    if truncated_candidates:
+                        break
+                if truncated_candidates:
+                    break
+            if truncated_candidates:
+                break
+        candidate_pairs = len(candidates)
+
+        # 只对候选对做精确相似度；缓存 shingle 集合，超过上限时清空重算。
+        cache = {}
+
+        def _hashes(idx):
+            arr = cache.get(idx)
+            if arr is None:
+                m = metas[idx]
+                norm = _near_dup_normalize(
+                    texts[m["split"]][m["start"]:m["end"]])
+                arr = _near_dup_shingles(norm)
+                if len(cache) >= NEAR_DUP_CACHE_BLOCKS:
+                    cache.clear()
+                cache[idx] = arr
+            return arr
+
+        remove_cross, remove_intra = set(), set()
+        # 签名预筛：18 个 MinHash 的相等比例是 Jaccard/containment 的无偏
+        # 估计（SE≈0.1）。远低于阈值的候选对直接跳过，避免在模板化/重复
+        # 语料上把预算耗在精确哈希上；预筛阈值取 0.6×协议阈值，给估计
+        # 噪声留足余量，跳过的对数单列在报告里，不静默丢弃。
+        prefilter_floor = float(threshold) * 0.6
+        for a, b in candidates:
+            ma, mb = metas[a], metas[b]
+            est = float(np.mean(sigs[a] == sigs[b]))
+            if est < prefilter_floor:
+                prefilter_skipped += 1
+                continue
+            jac, con = _near_dup_similarity(_hashes(a), _hashes(b))
+            if ma["split"] == "train" and mb["split"] == "train":
+                score = jac
+            else:
+                score = max(jac, con)
+            if score > max_score:
+                max_score = score
+            ptype = _near_dup_pair_type(ma["split"], mb["split"])
+            for t in sensitivity:
+                if score >= t:
+                    sens_counts[sens_keys[t]][ptype] += 1
+            if score >= threshold:
+                verified_pairs += 1
+                if ptype in ("train_val", "train_test"):
+                    train_idx = a if ma["split"] == "train" else b
+                    remove_cross.add(train_idx)
+                elif ptype == "train_train":
+                    # 保留 train 中先出现的那块；只删后出现的副本。
+                    later = a if (ma["start"], ma["end"]) > (
+                        mb["start"], mb["end"]) else b
+                    remove_intra.add(later)
+                if len(top_examples) < 10 or score > top_examples[-1]["score"]:
+                    top_examples.append({
+                        "pair": ptype, "jaccard": float(jac),
+                        "containment": float(con), "score": float(score),
+                        "chars_a": int(ma["end"] - ma["start"]),
+                        "chars_b": int(mb["end"] - mb["start"])})
+                    top_examples.sort(key=lambda r: -r["score"])
+                    del top_examples[10:]
+        remove_all = remove_cross | remove_intra
+        if remove_all:
+            ranges = [(metas[i]["start"], metas[i]["end"])
+                      for i in sorted(remove_all)]
+            out["train"] = _remove_ranges(train_text, ranges)
+        dropped_lines = sum(int(metas[i]["lines"]) for i in remove_all)
+        dropped_chars = sum(int(metas[i]["end"] - metas[i]["start"])
+                            for i in remove_all)
+    else:
+        remove_cross, remove_intra = set(), set()
+        dropped_lines = 0
+        dropped_chars = 0
+
+    def _eval_count(split, key):
+        return int(eval_counts.get(split, {}).get(key, 0))
+
+    stats = {
+        "method": "minhash_lsh_exact_verify",
+        "similarity": ("max(jaccard, containment) for cross-split; "
+                       "jaccard for train-internal"),
+        "shingle_size": int(NEAR_DUP_SHINGLE),
+        "shingle_unit": "utf-8 byte n-grams after NFKC+casefold+whitespace",
+        "threshold": float(threshold),
+        "min_chars": int(min_chars),
+        "min_shingles": int(min_shingles),
+        "max_block_chars": int(NEAR_DUP_MAX_BLOCK_CHARS),
+        "signature_hashes": int(NEAR_DUP_HASHES),
+        "lsh_bands": int(NEAR_DUP_BANDS),
+        "lsh_rows": int(NEAR_DUP_ROWS),
+        "lsh_recall_at_threshold": float(
+            1.0 - (1.0 - threshold ** NEAR_DUP_ROWS) ** NEAR_DUP_BANDS),
+        "threshold_sensitivity": sens_counts,
+        "train_blocks_scanned": int(train_counts["scanned"]),
+        "train_blocks_eligible": int(n_train),
+        "train_blocks_skipped_short": int(train_counts["short"]),
+        "train_blocks_skipped_few_shingles": int(train_counts["few_shingles"]),
+        "train_blocks_skipped_too_large": int(train_counts["too_large"]),
+        "val_blocks_scanned": _eval_count("val", "scanned"),
+        "val_blocks_eligible": _eval_count("val", "eligible"),
+        "val_blocks_skipped_short": _eval_count("val", "short"),
+        "val_blocks_skipped_few_shingles": _eval_count("val", "few_shingles"),
+        "val_blocks_skipped_too_large": _eval_count("val", "too_large"),
+        "test_blocks_scanned": _eval_count("test", "scanned"),
+        "test_blocks_eligible": _eval_count("test", "eligible"),
+        "test_blocks_skipped_short": _eval_count("test", "short"),
+        "test_blocks_skipped_few_shingles": _eval_count("test", "few_shingles"),
+        "test_blocks_skipped_too_large": _eval_count("test", "too_large"),
+        "candidate_pairs": int(candidate_pairs),
+        "signature_prefilter_floor": float(threshold) * 0.6,
+        "signature_prefilter_skipped": int(prefilter_skipped),
+        "candidate_pairs_truncated": bool(truncated_candidates),
+        "oversized_groups_truncated": int(truncated_groups),
+        "verified_pairs_at_threshold": int(verified_pairs),
+        "max_similarity": float(max_score),
+        "max_similarity_scope": "LSH candidates passing signature prefilter",
+        "top_similarities": top_examples,
+        "train_blocks_dropped_as_near_duplicates_of_eval": int(
+            len(remove_cross)),
+        "train_intra_split_near_duplicates_removed": int(
+            len(remove_intra - remove_cross)),
+        "train_blocks_dropped_total": int(len(remove_cross | remove_intra)),
+        "train_lines_dropped": int(dropped_lines),
+        "train_chars_dropped": int(dropped_chars),
+        "train_chars_eligible": int(sum(
+            int(m["end"] - m["start"]) for m in train_metas)),
+        "train_chars_total": int(len(train_text)),
+        "removal_fraction_chars": float(
+            dropped_chars / max(1, len(train_text))),
+        "val_test_near_duplicate_pairs": int(
+            sens_counts[sens_keys[threshold]]["val_test"]),
+        "val_test_near_duplicate_pairs_by_threshold": {
+            sens_keys[t]: int(sens_counts[sens_keys[t]]["val_test"])
+            for t in sensitivity},
     }
     return out, stats
 
@@ -1239,6 +1626,40 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
             f"val 与 test 有 {n_doc_eval_dup} 个多行块重复：两侧均保持尘封"
             "未改写，但 val 选型会部分预演 test，最终 test 指标的独立性下降，"
             "须核查/重建划分")
+    near = dup.get("near_duplicate")
+    near = near if isinstance(near, dict) else {}
+    n_near_cross = _count(
+        near.get("train_blocks_dropped_as_near_duplicates_of_eval"))
+    n_near_intra = _count(
+        near.get("train_intra_split_near_duplicates_removed"))
+    if n_near_cross or n_near_intra:
+        add("info", "near_duplicate_decontamination_applied",
+            f"已从 train 移除近似重复块：与 val/test 近似 {n_near_cross} 个、"
+            f"train 内部近似重复 {n_near_intra} 个"
+            f"（共 {_count(near.get('train_lines_dropped'))} 行；"
+            "val/test 未改写；阈值与三档敏感性见 duplicates.near_duplicate）")
+    n_near_vt = _count(near.get("val_test_near_duplicate_pairs"))
+    if n_near_vt:
+        add("warning", "eval_splits_near_duplicates",
+            f"val 与 test 有 {n_near_vt} 对近似重复块（阈值 "
+            f"{near.get('threshold', '?')}）：两侧均保持尘封未改写，但 val 选型"
+            "会部分预演 test，最终 test 指标的独立性下降，须核查/重建划分")
+    if near.get("candidate_pairs_truncated") or _count(
+            near.get("oversized_groups_truncated")):
+        add("warning", "near_duplicate_scan_truncated",
+            "近似重复扫描触发了候选簇/候选总数上限，可能有未核实的近似副本；"
+            "报告中的删除量是下界，须降低语料规模或提高上限后重跑")
+    frac = _num(near.get("removal_fraction_chars"))
+    if frac is not None and frac > 0.25:
+        add("warning", "near_duplicate_removal_high_fraction",
+            f"近似去污染将移除 train 可用字符的 {frac:.1%}（>25%）：可能语料"
+            "高度重复或阈值过宽，须人工核查 duplicates.near_duplicate 的"
+            "阈值敏感性与示例后再决定是否沿用该预处理")
+    if _count(near.get("train_blocks_skipped_too_large")):
+        add("warning", "near_duplicate_scan_incomplete",
+            f"有 {_count(near.get('train_blocks_skipped_too_large'))} 个 train 块"
+            f"超过 {near.get('max_block_chars', NEAR_DUP_MAX_BLOCK_CHARS)} 字符"
+            "未参与近似重复扫描：该块的近重复无法被排除，须人工核查")
     n_eval_dup = _count(dup.get("val_test_overlap_long_lines"))
     n_eval_dup_norm = _count(
         dup.get("val_test_overlap_normalized_long_lines"))
@@ -1578,6 +1999,10 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "去污染只改写 train：先删除与 val/test 重复的多行块及 train 内部"
             "重复块（单行块交给行级逻辑），再移除与 val/test 重复的长行并删除"
             "train 内部重复长行（保留首次出现）；val/test 不被改写；",
+            "精确去重之后再做近似重复筛查：字符 5-gram MinHash + LSH 找候选，"
+            "候选对精确计算 Jaccard/containment，跨 split 用 max(Jaccard, "
+            "containment)、train 内部只用 Jaccard，阈值与三档敏感性见 "
+            "duplicates.near_duplicate；只有 train 被改写；",
             "val 与 test 之间的重复/64-gram 重叠单独统计并告警：两侧均不改写，"
             "但重叠会削弱 final test 相对 val 选择集的独立性；",
             "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",

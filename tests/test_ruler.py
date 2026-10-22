@@ -5,7 +5,7 @@ import re
 import shutil
 import tempfile
 
-from lega.data import CharTokenizer
+from lega.data import CACHE_SCHEMA, CharTokenizer
 from lega.ruler import (DEPTH_BINS, build_fwe, build_niah, build_vt,
                         depth_bin, load_corpus_sents,
                         load_corpus_sents_with_source, record_corpus_test_access,
@@ -493,7 +493,7 @@ def test_ruler_payload_binds_checkpoint_hash(monkeypatch):
         itos = sorted(set(text))
         with open(os.path.join(data, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"tokenizer": "char", "itos": itos, "char_unk": False,
-                       "vocab_size": len(itos), "cache_schema": 6,
+                       "vocab_size": len(itos), "cache_schema": CACHE_SCHEMA,
                        "fit_on": "train"}, f)
         arr = np.array([itos.index(c) for c in text], dtype=np.uint16)
         arr.tofile(os.path.join(data, "train.bin"))
