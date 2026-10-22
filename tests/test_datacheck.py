@@ -1317,6 +1317,20 @@ def test_load_bin_test_split_is_sealed_by_default():
         # train/val 不受影响
         assert load_bin(d, "train").size > 0
         assert load_bin(d, "val").size > 0
+        # split 别名/路径不能绕过尘封闸门："./test" 与绝对路径都会被
+        # os.path.join 解析到 test.bin，必须与字面 "test" 同口径拒绝。
+        for alias in ("./test", os.path.join(d, "test")):
+            try:
+                load_bin(d, alias)
+                raise AssertionError(f"split={alias!r} 绕过了 test 尘封闸门")
+            except ValueError:
+                pass
+        for bad in ("", "Test", "../test", "train/../../test", None, 1):
+            try:
+                load_bin(d, bad, allow_test=True)
+                raise AssertionError(f"非法 split={bad!r} 必须被拒绝")
+            except ValueError:
+                pass
     print("  [ok] 测试集尘封：load_bin('test') 默认拒绝，allow_test=True 显式放行")
 
 

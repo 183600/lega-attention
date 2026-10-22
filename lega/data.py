@@ -626,6 +626,12 @@ def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
     load_bin(..., "test") 时必须显式传 allow_test=True，把“读测试集”
     从默认行为变成需要主动声明的动作。
     """
+    # split 必须是封闭枚举，而不是任意路径片段：`"./test"`、`"test/../test"`
+    # 或绝对路径都会绕过上面的 `split == "test"` 尘封闸门（os.path.join 对
+    # 绝对路径还会丢弃 data_dir）。只允许数据协议定义的三个 split。
+    if not isinstance(split, str) or split not in ("train", "val", "test"):
+        raise ValueError(
+            f"split 必须是 'train'/'val'/'test' 之一，收到 {split!r}")
     if split == "test" and allow_test is not True:
         # 只接受真正的 bool True：字符串 "false"、1 等真值若按 truthiness
         # 放行，会把“显式开锁”的闸门变成任何非空值都能绕过。
