@@ -146,6 +146,14 @@ def test_data_report_protocol_declarations_block_training():
     unexplained = {"split_protocol": {"verified_disjoint": False}}
     assert any("未记录" in msg
                for msg in data_report_protocol_issues(unexplained))
+    # 交叉证据字段存在但类型损坏：不能当成缺失而放行 verified_disjoint。
+    malformed_evidence = {"split_protocol": {
+        "verified_disjoint": True,
+        "overlap_long_lines": ["train_val"],
+        "missing_files": "test"}}
+    msgs = data_report_protocol_issues(malformed_evidence)
+    assert any("overlap_long_lines" in m for m in msgs), msgs
+    assert any("missing_files" in m for m in msgs), msgs
     with tempfile.TemporaryDirectory() as d:
         _write_json(os.path.join(d, "data_report.json"),
                     {"alerts": [], "protocol": {"test_sealed": False}})

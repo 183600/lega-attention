@@ -103,7 +103,13 @@ def data_report_protocol_issues(report) -> list:
                 f"{verified!r} 不是布尔值，无法确认划分互斥性")
         overlaps = split_protocol.get("overlap_long_lines")
         bad_overlaps = {}
-        if isinstance(overlaps, dict):
+        if overlaps is not None and not isinstance(overlaps, dict):
+            # 字段存在但结构损坏（数组/字符串）不能当成“没有重叠证据”；
+            # 尤其 verified_disjoint=True 时，损坏本身就无法确认互斥性。
+            add("报告 split_protocol.overlap_long_lines="
+                f"{type(overlaps).__name__} 不是对象：无法核对跨 split 重叠，"
+                "不能确认划分互斥性")
+        elif isinstance(overlaps, dict):
             for pair, val in overlaps.items():
                 if not isinstance(val, dict):
                     continue
@@ -118,7 +124,10 @@ def data_report_protocol_issues(report) -> list:
             add(f"{prefix}实测存在跨 split 共享长行 {bad_overlaps}："
                 "声明与内容矛盾，不能按“已核对互斥”处理")
         missing = split_protocol.get("missing_files")
-        if isinstance(missing, list) and missing:
+        if missing is not None and not isinstance(missing, list):
+            add("报告 split_protocol.missing_files="
+                f"{type(missing).__name__} 不是列表：无法核对划分互斥性")
+        elif isinstance(missing, list) and missing:
             prefix = ("报告声明 split_protocol.verified_disjoint=True，但"
                       if verified is True else "")
             add(f"{prefix}缺少 split 文件 {missing}："
