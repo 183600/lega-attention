@@ -55,6 +55,11 @@ def _mk(cand, ref, metric, mean_diff, p, n=5, lower=True):
 
 
 def _write_json(path, obj):
+    # 测试 fixture 默认模拟“配置显式统一走显式注意力路径”；需要测试缺键/
+    # 默认值行为的用例直接写文件，避免被这里的默认值掩盖。
+    if (os.path.basename(path) == "config_used.json"
+            and isinstance(obj, dict) and "use_sdpa_standard" not in obj):
+        obj = dict(obj, use_sdpa_standard=False)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)
 
@@ -930,6 +935,55 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
+
+
+def test_verify_controlled_setup_infers_missing_attention_switch():
+    """缺省 use_sdpa_standard 时 train.py 用默认 True，审计不能静默跳过。
+
+    config_used.json 没写该键时实际仍走 SDPA；standard/qgate 与必须显式
+    softmax 的 lega 因而实现路径不同。旧实现只在“键存在”时才比较，导致
+    一份完全省略该开关的配置绕过混合后端检查。
+    """
+    def fixture(variants):
+        tmp = tempfile.mkdtemp()
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            # 直接写文件：不经测试 helper 的默认注入，模拟真实旧配置缺键。
+            with open(os.path.join(d, "config_used.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"lr": 0.001, "steps": 10, "variant": v,
+                           "seed": 7, "device": "cpu", "tag": "t"}, f)
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024})
+        return tmp
+    tmp = fixture(["standard", "lega"])
+    try:
+        try:
+            verify_controlled_setup(tmp, ["standard", "lega"], [7], 1,
+                                    expected_data_digest="abc123")
+            raise AssertionError("缺键默认 True 导致的混合后端应触发 SystemExit")
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # 两个都缺键但都含集中度项：默认 True 不影响它们（仍需显式 softmax），
+    # 实际后端一致为 explicit；审计通过并显式记录“推断自默认值”。
+    tmp = fixture(["lega", "lega_no_len"])
+    try:
+        audit = verify_controlled_setup(
+            tmp, ["lega", "lega_no_len"], [7], 1,
+            expected_data_digest="abc123")
+        assert audit["ok"] and not audit["mixed_attention"], audit
+        assert audit["attention_key_seen"] is False
+        assert set(audit["attention_backends"].values()) == {"explicit"}
+        assert len(audit["attention_missing"]) == 2
+        assert len(audit["attention_inferred"]) == 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 缺省注意力开关按默认值推断，混合后端不再漏检")
 
 
 def test_verify_controlled_setup_rejects_mixed_device_types():

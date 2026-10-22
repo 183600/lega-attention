@@ -559,6 +559,15 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     data_order_missing = []
     attention_backends = {}
     attention_key_seen = False
+    attention_missing = []
+
+    def _attention_backend(variant: str, sdpa_on: bool) -> str:
+        # 含集中度项的门控必须读取 softmax 概率，无法走 SDPA；其它变体在
+        # sdpa_on 时走 SDPA。若配置开启 SDPA，两类变体的注意力实现就不同，
+        # PPL 差异不能全部归因于门控。
+        needs_probs = variant in ("lega", "lega_no_len",
+                                  "lega_no_query", "lega_conc_only")
+        return "explicit" if needs_probs or not sdpa_on else "sdpa"
     devices = {}
     device_missing = []
     for v in variants:
@@ -595,14 +604,13 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
                         attention_key_seen = True
                         sdpa_on = config_bool(
                             cfg.get("use_sdpa_standard"), "use_sdpa_standard")
-                        # 含集中度项的门控必须读取 softmax 概率，无法走 SDPA；
-                        # 其它变体在 sdpa_on 时走 SDPA。若配置开启 SDPA，两类
-                        # 变体的注意力实现就不同，PPL 差异不能全部归因于门控。
-                        needs_probs = v in ("lega", "lega_no_len",
-                                            "lega_no_query", "lega_conc_only")
-                        attention_backends[v] = (
-                            "explicit" if needs_probs or not sdpa_on
-                            else "sdpa")
+                        attention_backends[v] = _attention_backend(v, sdpa_on)
+                    else:
+                        # train.py 的默认值是 True；config_used 未写该键时
+                        # 实际仍走 SDPA。先记录缺失，稍后在有任一 run 显式
+                        # 记录该键时按默认值补全，否则“部分 run 缺键”会让
+                        # 混合后端漏检。
+                        attention_missing.append(f"{v}/seed{seed}")
                     ctrl = {k: val for k, val in cfg.items()
                             if k not in _AUDIT_EXEMPT_KEYS}
                     if ref is None:
@@ -791,7 +799,18 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             "训练设备类型不一致（" + "；".join(mixed_device)
             + "）：不同设备/精度后端的数值行为不同，正式对比必须同设备类型")
     mixed_attention = []
-    if attention_key_seen and len(set(attention_backends.values())) > 1:
+    attention_inferred = []
+    if attention_missing:
+        # train.py 对缺键使用默认 True；因此无论是否有 run 显式记录该开关，
+        # 缺键 run 都必须按默认值补全后再做混合后端判定。否则一份完全没有
+        # 写 use_sdpa_standard 的配置会让 standard/qgate 实际走 SDPA、lega
+        # 走显式 softmax，却因“没有可比较的键”被审计静默放行。
+        for name in attention_missing:
+            v = name.split("/seed", 1)[0]
+            if v not in attention_backends:
+                attention_backends[v] = _attention_backend(v, True)
+                attention_inferred.append(name)
+    if len(set(attention_backends.values())) > 1:
         by_backend = {}
         for v, b in attention_backends.items():
             by_backend.setdefault(b, []).append(v)
@@ -811,6 +830,18 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
               "无法核对是否在同一批 token 上评测: "
               + ", ".join(eval_protocol_missing[:6])
               + (" ..." if len(eval_protocol_missing) > 6 else ""))
+    if attention_missing:
+        if attention_key_seen:
+            print(f"[audit] 警告：{len(attention_missing)} 个 run 的 "
+                  "config_used.json 缺少 use_sdpa_standard，已按 train.py 的"
+                  "默认值 True 推断实际注意力后端: "
+                  + ", ".join(attention_missing[:6])
+                  + (" ..." if len(attention_missing) > 6 else ""))
+        else:
+            print(f"[audit] 警告：全部 config_used.json 都缺少 "
+                  f"use_sdpa_standard（{len(attention_missing)} 个 run），"
+                  "已按 train.py 的默认值 True 推断实际注意力后端；"
+                  "正式实验建议在配置中显式写入该开关")
     if data_order_missing:
         print(f"[audit] 警告：{len(data_order_missing)} 个 run 的 eval.json "
               "缺少 data_order_sha256，无法证明实际训练批次序列一致: "
@@ -867,6 +898,9 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
             "missing_configs": missing, "mismatches": mismatches,
             "attention_backends": attention_backends,
             "mixed_attention": mixed_attention,
+            "attention_key_seen": bool(attention_key_seen),
+            "attention_missing": attention_missing,
+            "attention_inferred": attention_inferred,
             "training_budget_comparable": not early_stop_runs,
             "meta_checked": meta_checked, "missing_evals": meta_missing,
             "meta_mismatches": meta_mismatches,
