@@ -1266,7 +1266,12 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
 
     gap = None
     if last_train is not None and final_val is not None:
-        gap = final_val - last_train
+        try:
+            gap = final_val - last_train
+        except OverflowError:
+            gap = None
+        if gap is not None and not math.isfinite(gap):
+            gap = None
 
     gate = diagnose_gate(records)
     if gate["evidence"]:

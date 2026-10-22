@@ -270,6 +270,13 @@ def test_loss_spike_in_short_curve_and_final_point_detected():
     grecs[5]["grad_norm"] = 1e308
     gd = diagnose_curve(grecs)
     assert gd["has_grad_spike"], gd
+    # 外部坏日志的 train/val 可能异号且接近 float 上限；泛化差距的减法
+    # 溢出时按缺失处理，不能把 inf 写进 JSON。
+    gap_recs = [{"step": i, "loss": -1e308, "val_loss": 1e308}
+                for i in range(10)]
+    gap_diag = diagnose_curve(gap_recs)
+    assert gap_diag["generalization_gap"] is None, gap_diag
+    json.dumps(gap_diag, allow_nan=False)
     assert math.isfinite(gd["grad_spike_ratio"]), gd["grad_spike_ratio"]
     gspike = next(s for s in gd["grad_spikes"] if s["step"] == 5)
     assert math.isfinite(gspike["ratio"]), gspike
