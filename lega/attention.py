@@ -632,6 +632,23 @@ class CausalSelfAttention(nn.Module):
         past_len = (0 if past_kv is None else past_kv[0].shape[2]) \
             if kv_cache is None else cache_pos
 
+        if T == 0:
+            # 空查询序列没有注意力可算。standard/qgate/null 原本会返回空
+            # 张量，但集中度门控变体会在 max/amax 的空维上抛 IndexError。
+            # 统一契约：输出与 cache 均为空（已有缓存原样返回），统计为
+            # 空值，不执行投影/RoPE/softmax。
+            if kv_cache is not None:
+                cache = kv_cache
+            elif past_kv is not None:
+                cache = past_kv
+            else:
+                empty_kv = x.new_empty((B, H, 0, Dh))
+                cache = (empty_kv, empty_kv)
+            stats = ({"max_p": None, "log_n": None, "argmax": None,
+                      "qterm": None, "g": None, "logit": None}
+                     if need_stats else None)
+            return x.new_empty((B, 0, C)), cache, stats
+
         # 训练态使用三个独立投影（各自独立的 autograd 路径）；
         # 推理态权重不变，走下方融合权重缓存。
         if torch.is_grad_enabled():

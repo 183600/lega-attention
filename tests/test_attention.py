@@ -381,3 +381,18 @@ def test_mask_cache_byte_limit_uses_lru():
         attention_mod._CACHE_CAP = old_cap
         attention_mod._MASK_CACHE_MAX_BYTES = old_limit
         attention_mod._TRI_CACHE_MAX_BYTES = old_tri_limit
+
+
+def test_all_variants_support_zero_length_input():
+    """空查询序列对所有变体都必须返回空输出/缓存，而不是只在部分变体崩溃。"""
+    C = 16
+    x = torch.empty(2, 0, C)
+    for v in VARIANTS:
+        attn = CausalSelfAttention(C, 2, variant=v)
+        out, cache, stats = attn(x)
+        assert out.shape == (2, 0, C), (v, out.shape)
+        assert cache[0].shape == (2, 2, 0, C // 2), (v, cache[0].shape)
+        assert stats is None
+        out2, cache2, stats2 = attn(x, need_stats=True)
+        assert out2.shape == (2, 0, C)
+        assert isinstance(stats2, dict) and stats2["g"] is None
