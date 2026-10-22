@@ -434,6 +434,29 @@ def test_analyze_worst_windows_and_md():
     print("  [ok] 最差窗口汇总与 Markdown 报告")
 
 
+def test_repeats_context_rate_excludes_unknown_cases():
+    """unparsed/label_unknown 没有 repeats_context 字段：比例分母必须与
+    Wilson CI 一致，只统计明确记录为布尔的案例，不能把未知算成 False。"""
+    wins = [
+        _win(pred_top5=[[" blue", 0.7]]),
+        _win(gold=" xyzzy", tail="a blue car", window=8,
+             pred_top5=[[" red", 0.85]]),
+        # unparsed：没有 top5 预测，categorize_window 提前返回
+        {"window": 9, "split": "val", "loss": 9.0,
+         "context_tail": "a blue car", "gold_next": " car"},
+        # label_unknown：gold 缺失，同样提前返回
+        {"window": 10, "split": "val", "loss": 9.0,
+         "context_tail": "a blue car", "gold_next": "",
+         "pred_top5": [[" blue", 0.7]]},
+    ]
+    ana = analyze_worst_windows(wins)
+    # 两个明确布尔值：一个复读 True、一个 False；两个未知不进分母
+    assert ana["repeats_context_rate"] == 0.5, ana
+    lo, hi = ana["repeats_context_ci95"]
+    assert lo <= 0.5 <= hi and hi - lo < 0.9, ana
+    print("  [ok] repeats_context_rate 与 CI 同分母（未知名不拉低比例）")
+
+
 def test_process_eval_json_end_to_end():
     tmp = tempfile.mkdtemp()
     try:

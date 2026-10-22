@@ -917,9 +917,10 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
         "axis_counts": dict(axis_counts),
         "axis_cn": {k: AXIS_CN.get(k, k) for k in axis_counts},
         "mean_top1_prob": _mean([c.get("top1_prob") for c in cases]),
-        "repeats_context_rate": (sum(1 for c in cases
-                                     if c.get("repeats_context"))
-                                 / len(cases)) if cases else None,
+        # 与 _known_bool_stats 同口径：unparsed/label_unknown 记录在
+        # categorize_window 中提前返回、没有 repeats_context 字段，不能把
+        # 这些“未知”算进分母（否则 rate 与 CI 的分母不一致、系统性低估）。
+        "repeats_context_rate": rep_rate,
         "repeats_context_ci95": rep_ci,
         # 与 gold_in_context 同口径：gold 缺失的窗口记为 None，不能把
         # “无真值”算成“gold 未进 top5”而拉低复制/检索成功率。
