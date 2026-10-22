@@ -875,10 +875,20 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     return recs[:MAX_ADVICE]
 
 
+def _known_bool_stats(cases: List[Dict], key: str):
+    """仅在字段被明确记录为布尔时计算比例与 Wilson 95% CI；未知不进分母。"""
+    known = [c.get(key) for c in cases if isinstance(c.get(key), bool)]
+    if not known:
+        return None, None
+    k = sum(1 for v in known if v)
+    ci = wilson_score_ci(k, len(known))
+    rate = k / len(known)
+    return rate, ([float(ci[0]), float(ci[1])] if ci is not None else None)
+
+
 def _known_bool_rate(cases: List[Dict], key: str) -> Optional[float]:
     """仅在字段被明确记录为布尔时计算比例；未知记录不进入分母。"""
-    known = [c.get(key) for c in cases if isinstance(c.get(key), bool)]
-    return (sum(1 for v in known if v) / len(known)) if known else None
+    return _known_bool_stats(cases, key)[0]
 
 
 def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
@@ -895,6 +905,9 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
         ci = wilson_score_ci(int(v), len(cases))
         if ci is not None:
             category_ci95[k] = [float(ci[0]), float(ci[1])]
+    gic_rate, gic_ci = _known_bool_stats(cases, "gold_in_context")
+    git5_rate, git5_ci = _known_bool_stats(cases, "gold_in_top5")
+    rep_rate, rep_ci = _known_bool_stats(cases, "repeats_context")
     out = {
         "variant": variant,
         "n_windows": len(cases),
@@ -907,10 +920,13 @@ def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
         "repeats_context_rate": (sum(1 for c in cases
                                      if c.get("repeats_context"))
                                  / len(cases)) if cases else None,
+        "repeats_context_ci95": rep_ci,
         # 与 gold_in_context 同口径：gold 缺失的窗口记为 None，不能把
         # “无真值”算成“gold 未进 top5”而拉低复制/检索成功率。
-        "gold_in_top5_rate": _known_bool_rate(cases, "gold_in_top5"),
-        "gold_in_context_rate": _known_bool_rate(cases, "gold_in_context"),
+        "gold_in_top5_rate": git5_rate,
+        "gold_in_top5_ci95": git5_ci,
+        "gold_in_context_rate": gic_rate,
+        "gold_in_context_ci95": gic_ci,
         # gold 距预测位的 token 距离（只在 gold 出现时定义）：区分“远处检索
         # 失败”与“近处复制失败”，后者更像注意力/复制机制问题。
         "median_gold_distance_tokens": _median(distances),
@@ -1003,12 +1019,22 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
         mtp = _finite_float(analysis.get("mean_top1_prob"))
         if mtp is not None:
             stats.append(f"平均 top-1 概率={mtp:.3f}")
+        def _ci_s(v, key):
+            ci = analysis.get(key)
+            if (isinstance(ci, (list, tuple)) and len(ci) == 2
+                    and all(_finite_float(x) is not None for x in ci)):
+                return (f"（Wilson 95% CI {_finite_float(ci[0]):.0%}–"
+                        f"{_finite_float(ci[1]):.0%}）")
+            return ""
+
         gic = _finite_float(analysis.get("gold_in_context_rate"))
         if gic is not None:
-            stats.append(f"gold 出现在上下文中的比例={gic:.0%}")
+            stats.append(f"gold 出现在上下文中的比例={gic:.0%}"
+                         + _ci_s(gic, "gold_in_context_ci95"))
         git5 = _finite_float(analysis.get("gold_in_top5_rate"))
         if git5 is not None:
-            stats.append(f"gold 进入 top-5 的比例={git5:.0%}")
+            stats.append(f"gold 进入 top-5 的比例={git5:.0%}"
+                         + _ci_s(git5, "gold_in_top5_ci95"))
         dist_i = _safe_int(analysis.get("median_gold_distance_tokens"))
         if dist_i is not None:
             stats.append(f"gold 距预测位的中位距离={dist_i} tokens")

@@ -1270,3 +1270,32 @@ def test_improvement_priority_respects_category_ci():
     copy_rec = next(r for r in strong if "误抄干扰" in r["trigger"])
     assert copy_rec["priority"] == "高", copy_rec
     print("  [ok] 改进方向优先级按类别占比 CI 下界降级（小样本不当主导模式）")
+
+
+def test_worst_window_rates_report_wilson_ci():
+    """gold 在上下文中/top-5 的比例同样是小样本比例，必须带 CI。
+
+    2/2 的 Wilson 下界也仅约 34%，不能把“金标都在上下文里”当成稳定结论。
+    """
+    wins = [
+        _win(pred_top5=[[" red", 0.9]], gold_in_context=True,
+             gold_in_top5=False),
+        _win(pred_top5=[[" blue", 0.9]], gold_in_context=True,
+             gold_in_top5=True),
+    ]
+    ana = analyze_worst_windows(wins)
+    for rate_key, ci_key in (("gold_in_context_rate", "gold_in_context_ci95"),
+                             ("gold_in_top5_rate", "gold_in_top5_ci95")):
+        rate = ana[rate_key]
+        lo, hi = ana[ci_key]
+        assert 0.0 <= lo <= rate <= hi <= 1.0, (rate_key, rate, lo, hi)
+        assert hi - lo > 0.2
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "worst.md")
+        write_worstcase_md(ana, p)
+        text = open(p, encoding="utf-8").read()
+        assert "Wilson 95% CI" in text and "gold 出现在上下文中的比例" in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 最差窗口比例附 Wilson CI（小样本不冒充稳定比例）")
