@@ -969,6 +969,18 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         sfp = sanity_summary(bad_fp)
         assert sfp["passed"] is False and sfp["malformed"] is True
         assert sfp["data_order_rng_fingerprint"] is None
+        # 字符串字段也要是 16 位小写十六进制短哈希：任意字符串不能冒充
+        # 可复算的 RNG 证据，否则损坏/伪造的指纹会原样进入训练闸门。
+        for bad_val in ("", "not-a-fingerprint", "A" * 16, "b" * 64, "0" * 15):
+            fp_path = os.path.join(d, "bad_fp_str.json")
+            with open(fp_path, "w", encoding="utf-8") as f:
+                json.dump({"passed": True, "checks": {"a": True},
+                           "manifest": {"seed_report": {
+                               "seed_verified": True,
+                               "data_order_rng_fingerprint": bad_val}}}, f)
+            sfs = sanity_summary(fp_path)
+            assert sfs["passed"] is False and sfs["malformed"] is True, bad_val
+            assert sfs["data_order_rng_fingerprint"] is None, bad_val
         bad_manifest = os.path.join(d, "bad_manifest.json")
         with open(bad_manifest, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "checks": {"a": True},

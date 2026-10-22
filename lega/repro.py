@@ -621,9 +621,15 @@ def sanity_summary(path: str) -> dict:
                 # 静默忽略，会退化成“旧文件无法核对”，从而让一个明确自报
                 # 未验证（或伪造）的清单继续以 PASS 身份进入训练闸门。
                 out["malformed"] = True
-            if isinstance(seed_rep.get("data_order_rng_fingerprint"), str):
-                out["data_order_rng_fingerprint"] = \
-                    seed_rep["data_order_rng_fingerprint"]
+            fp = seed_rep.get("data_order_rng_fingerprint")
+            if isinstance(fp, str):
+                # 指纹必须是本项目的 16 位小写十六进制短哈希；任意字符串
+                # （空串/64 位 SHA/拼写错误）不能冒充可核对的随机源证据。
+                if (len(fp) != 16
+                        or any(ch not in "0123456789abcdef" for ch in fp)):
+                    out["malformed"] = True
+                else:
+                    out["data_order_rng_fingerprint"] = fp
             elif "data_order_rng_fingerprint" in seed_rep:
                 # 指纹存在但类型错误同样不能当成“没有该证据”。
                 out["malformed"] = True
