@@ -96,6 +96,27 @@ def data_rng_state_fingerprint(seed: int) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _python_random_state_fingerprint(state) -> str:
+    """Python ``random`` 状态对象的短指纹（供全局/本地构造器共用）。"""
+    return hashlib.sha256(repr(state).encode("utf-8")).hexdigest()[:16]
+
+
+def _numpy_state_fingerprint(state) -> str:
+    """NumPy 旧式 RandomState 状态元组的短指纹。"""
+    ns = state
+    h = hashlib.sha256()
+    h.update(str(ns[0]).encode("ascii"))
+    h.update(np.asarray(ns[1], dtype="<u4").tobytes())
+    h.update(int(ns[2]).to_bytes(8, "little"))
+    h.update(repr(ns[3:]).encode("ascii"))
+    return h.hexdigest()[:16]
+
+
+def _torch_state_fingerprint(state) -> str:
+    """Torch CPU RNG 字节状态的短指纹。"""
+    return hashlib.sha256(state.numpy().tobytes()).hexdigest()[:16]
+
+
 def rng_state_fingerprint() -> dict:
     """各全局 RNG **当前状态**的短指纹（只读：get_state 不消耗随机数）。
 
@@ -105,25 +126,41 @@ def rng_state_fingerprint() -> dict:
     真的生效。Python random / NumPy MT19937 的状态跨平台一致；PyTorch CPU
     为 MT19937 字节状态，同版本跨平台一致；CUDA 状态哈希在无 GPU 时不出现。
     """
-    fp = {
-        "python_random": hashlib.sha256(
-            repr(random.getstate()).encode("utf-8")).hexdigest()[:16],
-    }
-    ns = np.random.get_state()
-    h = hashlib.sha256()
-    h.update(str(ns[0]).encode("ascii"))
-    h.update(np.asarray(ns[1], dtype="<u4").tobytes())
-    h.update(int(ns[2]).to_bytes(8, "little"))
-    h.update(repr(ns[3:]).encode("ascii"))
-    fp["numpy_global"] = h.hexdigest()[:16]
-    fp["torch_cpu"] = hashlib.sha256(
-        torch.get_rng_state().numpy().tobytes()).hexdigest()[:16]
+    fp = {"python_random": _python_random_state_fingerprint(
+        random.getstate())}
+    fp["numpy_global"] = _numpy_state_fingerprint(np.random.get_state())
+    fp["torch_cpu"] = _torch_state_fingerprint(torch.get_rng_state())
     if torch.cuda.is_available():
         h = hashlib.sha256()
         for st in torch.cuda.get_rng_state_all():
             h.update(st.cpu().numpy().tobytes())
         fp["torch_cuda_all"] = h.hexdigest()[:16]
     return fp
+
+
+def expected_rng_state_fingerprint(seed: int) -> dict:
+    """由 seed 独立复算的 RNG **初始状态**短指纹（不触碰全局 RNG）。
+
+    ``rng_state_fingerprint`` 记录的是进程内全局 RNG 的当前状态，适合作为
+    “这个 seed 真的被 set_seed 执行过”的运行时证据；但审计方不能在只读
+    台账时调用它（会消耗/改写自己的全局随机流）。本函数用与 set_seed 等价的
+    **本地**构造器（random.Random / np.random.RandomState / torch.Generator）
+    复算同一初始状态，因此第三方可在不污染自己实验随机源的前提下核对
+    ``seed_report.rng_fingerprints`` 与 ``seed_plan.rng_fingerprints``。
+
+    只覆盖 CPU 三个随机源：Python random 与 NumPy MT19937 的初始状态跨版本
+    稳定，Torch CPU 状态同版本一致；CUDA 生成器需要初始化设备，且其状态
+    跨版本/硬件不保证一致，不在此处伪造期望值。
+    """
+    seed = seed_int(seed, "seed")
+    return {
+        "python_random": _python_random_state_fingerprint(
+            random.Random(seed).getstate()),
+        "numpy_global": _numpy_state_fingerprint(
+            np.random.RandomState(seed).get_state()),
+        "torch_cpu": _torch_state_fingerprint(
+            torch.Generator().manual_seed(seed).get_state()),
+    }
 
 
 def state_dict_fingerprint(state_dict) -> dict:
@@ -341,6 +378,13 @@ def seed_report(seed: int) -> dict:
     # 一致时，这些随机源才真的被该 seed 固定。否则记录 None，避免请求旧/
     # 未设置种子的报告冒充实际 RNG 证据（与 rng_fingerprints 的口径一致）。
     verified_seed = seed if fp is not None else None
+    # 期望指纹由 seed 独立复算（不触碰全局 RNG）：把“实际状态指纹”与
+    # “该 seed 应产生的初始状态”并排记录，审计方即使不重跑 set_seed 也能
+    # 发现被复制/手改的指纹字段。CUDA 状态不在期望值内（跨版本/硬件不稳定）。
+    expected_fp = expected_rng_state_fingerprint(seed) if fp is not None else None
+    match_expected = (None if (fp is None or expected_fp is None)
+                      else all(fp.get(key) == value
+                               for key, value in expected_fp.items()))
     return {
         "seed": seed,
         "seed_verified": fp is not None,
@@ -369,7 +413,11 @@ def seed_report(seed: int) -> dict:
         # data_rng_state_fingerprint(seed) 独立复算；未验证时同样不给证据。
         "data_order_rng_fingerprint": (
             data_rng_state_fingerprint(seed) if fp is not None else None),
+        # 实际全局 RNG 状态指纹；expected 为由 seed 本地复算的初始状态，
+        # 二者一致才说明这些指纹确实来自该 seed，而不是被复制/改写。
         "rng_fingerprints": dict(fp) if fp else None,
+        "rng_fingerprints_expected": expected_fp,
+        "rng_fingerprints_match_expected": match_expected,
     }
 
 
@@ -382,6 +430,8 @@ def seed_plan(seed: int) -> dict:
     什么”。本函数只做纯查询：
       * 逐随机源声明将使用的 seed（Python/NumPy/PyTorch/CUDA/PYTHONHASHSEED）；
       * 由 seed 独立复算的 data_rng 初始状态短指纹，第三方可核对；
+      * 由 seed 本地复算的全局 RNG 初始状态指纹（``rng_fingerprints``），
+        供没有 run_manifest 的 started 记录也能核对“计划播种的随机源”；
       * ``is_plan=True`` 明确这是计划而非“已生效”证据，实际指纹见
         ``run_manifest.seed_report``。
     不调用 set_seed，因此不会消耗/改变调用方的任何随机源。
@@ -398,6 +448,7 @@ def seed_plan(seed: int) -> dict:
         "pythonhashseed_child_env": str(seed),
         "data_order_seed": seed,
         "data_order_rng_fingerprint": data_rng_state_fingerprint(seed),
+        "rng_fingerprints": expected_rng_state_fingerprint(seed),
         "verification": "run_manifest.seed_report（实际 RNG 状态指纹）",
     }
 

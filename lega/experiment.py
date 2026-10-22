@@ -22,7 +22,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .repro import ROOT, sha256_file
-from .utils import data_rng_state_fingerprint, seed_int, strict_int
+from .utils import (data_rng_state_fingerprint, expected_rng_state_fingerprint,
+                    seed_int, strict_int)
 
 LEDGER_FILENAME = "experiments.jsonl"
 
@@ -96,12 +97,42 @@ def read_records(path: str) -> list:
     return out
 
 
+def _fingerprint_issues(fps, expected, prefix: str) -> list:
+    """校验一组 RNG 初始状态短指纹的结构与可复算性。
+
+    ``expected`` 由 seed 本地复算（utils.expected_rng_state_fingerprint），
+    比较 Python random / NumPy 两个跨版本稳定的源；Torch CPU 只校验格式，
+    避免用别的 torch 版本复核历史台账时误报（状态字节格式随版本可能变化）。
+    CUDA 指纹不在期望值内，只要求存在时是合法短哈希。
+    """
+    if not isinstance(fps, dict):
+        return [f"{prefix}_malformed"]
+    issues = []
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        value = fps.get(key)
+        if (not isinstance(value, str) or len(value) != 16
+                or any(ch not in "0123456789abcdef" for ch in value)):
+            issues.append(f"{prefix}_malformed")
+            return issues
+    cuda = fps.get("torch_cuda_all")
+    if cuda is not None and (
+            not isinstance(cuda, str) or len(cuda) != 16
+            or any(ch not in "0123456789abcdef" for ch in cuda)):
+        issues.append(f"{prefix}_malformed")
+    for key in ("python_random", "numpy_global"):
+        if isinstance(expected, dict) and fps.get(key) != expected.get(key):
+            issues.append(f"{prefix}_mismatch")
+            break
+    return issues
+
+
 def _seed_evidence_issues(run, run_seed: int) -> list:
     """核验台账 run 内嵌的 seed_report 是否真的对应声明的 run_seed。
 
     旧台账可能完全没有 seed_report（保留兼容，不误报）；但只要该字段存在，
-    seed 身份、是否实际播种、数据顺序 seed 与可复算指纹就不能与 run.seed
-    冲突。否则手改/拼接一条 provenance 即可让“已固定种子”的证据说谎。
+    seed 身份、是否实际播种、逐随机源种子、数据顺序 seed、可复算指纹与
+    RNG 状态短指纹就不能与 run.seed 冲突。否则手改/拼接一条 provenance
+    即可让“已固定种子”的证据说谎。
     """
     prov = run.get("provenance")
     sr = prov.get("seed_report") if isinstance(prov, dict) else None
@@ -124,6 +155,18 @@ def _seed_evidence_issues(run, run_seed: int) -> list:
             # 字符串 "false"/1 等经相等/truthiness 比较会退化成“未检查”；
             # 台账里的种子生效证据必须是真正的布尔值。
             issues.append("seed_report_seed_verified_malformed")
+    # 逐随机源的实际种子：只核对存在且非 null 的字段（旧/最小报告兼容）。
+    # 只核对 seed 字段会漏掉“seed 对、但某个随机源被改成别的值”的伪造。
+    for key in ("python_random", "numpy_global", "torch_cpu", "torch_cuda"):
+        if key in sr and sr.get(key) is not None and _bad_seed(sr.get(key)):
+            issues.append(f"seed_report_{key}_mismatch")
+    if "pythonhashseed_env" in sr and sr.get("pythonhashseed_env") is not None:
+        if str(sr.get("pythonhashseed_env")) != str(int(run_seed)):
+            issues.append("seed_report_pythonhashseed_env_mismatch")
+    if "pythonhashseed_effective" in sr:
+        eff = sr.get("pythonhashseed_effective")
+        if eff is not None and not isinstance(eff, bool):
+            issues.append("seed_report_pythonhashseed_effective_malformed")
     if "data_order_seed" in sr and _bad_seed(sr.get("data_order_seed")):
         issues.append("seed_report_data_order_seed_mismatch")
     fp = sr.get("data_order_rng_fingerprint")
@@ -132,6 +175,26 @@ def _seed_evidence_issues(run, run_seed: int) -> list:
             issues.append("seed_report_data_order_fingerprint_malformed")
         elif fp != data_rng_state_fingerprint(int(run_seed)):
             issues.append("seed_report_data_order_fingerprint_mismatch")
+    if "rng_fingerprints" in sr:
+        # 新版报告会带实际全局 RNG 状态指纹；存在时必须是可复算的短哈希，
+        # 不能被复制成别的 seed 的指纹。缺失/为 null 仍按旧格式兼容；
+        # 但“自报 seed_verified=true 却没有指纹”是自相矛盾证据。
+        fps = sr.get("rng_fingerprints")
+        if fps is None:
+            if sr.get("seed_verified") is True:
+                issues.append("seed_report_rng_fingerprints_missing")
+        else:
+            issues.extend(_fingerprint_issues(
+                fps, expected_rng_state_fingerprint(int(run_seed)),
+                "seed_report_rng_fingerprints"))
+    if "rng_fingerprints_match_expected" in sr:
+        match = sr.get("rng_fingerprints_match_expected")
+        if match is not None and not isinstance(match, bool):
+            issues.append("seed_report_rng_fingerprints_match_malformed")
+        elif match is False and "rng_fingerprints" in sr:
+            # 报告自己声明“实际指纹与 seed 复算不符”：即使字段结构合法，
+            # 也不能把这条 run 当作种子已固定的证据。
+            issues.append("seed_report_rng_fingerprints_mismatch")
     return issues
 
 
@@ -209,6 +272,14 @@ def _seed_audit_issues(record, declared_seeds) -> list:
         cuda = entry.get("torch_cuda")
         if cuda is not None and not _same_seed_field("torch_cuda"):
             issues.append("seed_audit_torch_cuda_mismatch")
+        # 新版 seed_plan 附带的全局 RNG 初始状态指纹：started 记录因此在
+        # 训练子进程尚未产出 run_manifest 时也有可独立复算的证据。旧计划
+        # 没有该字段时保持兼容；存在则必须与本地复算一致。
+        if entry.get("rng_fingerprints") is not None:
+            issues.extend(_fingerprint_issues(
+                entry.get("rng_fingerprints"),
+                expected_rng_state_fingerprint(seed),
+                "seed_audit_rng_fingerprints"))
     return issues
 
 

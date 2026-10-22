@@ -16,7 +16,8 @@ from lega.repro import (build_run_manifest, data_fingerprint, git_info,
                         sanity_identity_check, sha256_file,
                         test_data_fingerprint as _test_data_fingerprint,
                         worktree_state, write_worktree_patch)
-from lega.utils import (data_rng, data_rng_state_fingerprint, set_seed,
+from lega.utils import (data_rng, data_rng_state_fingerprint,
+                        expected_rng_state_fingerprint, set_seed,
                         seed_plan, seed_report, state_dict_fingerprint)
 
 
@@ -283,6 +284,10 @@ def test_seed_plan_is_side_effect_free_audit():
     assert plan["pythonhashseed_child_env"] == "77"
     assert plan["data_order_rng_fingerprint"] == \
         data_rng_state_fingerprint(77)
+    # 启动期记录就带可独立复算的全局 RNG 初始状态指纹：即使训练子进程
+    # 还没产出 run_manifest，started 台账也不是只有“声明”。
+    assert plan["rng_fingerprints"] == \
+        expected_rng_state_fingerprint(77)
     json.dumps(plan)
     # 非法 seed 与 set_seed 同口径拒绝（bool/越界）
     for bad in (True, -1, 2 ** 32):
@@ -322,6 +327,36 @@ def test_seed_report_rng_fingerprints_are_seed_evidence():
     json.dumps(fp_a)
     print("  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/"
           "不冒充）")
+
+
+def test_expected_rng_fingerprint_is_recomputable_without_side_effects():
+    """期望指纹必须由 seed 本地复算，且不消耗审计方自己的全局随机流。
+
+    这是“第三方只读核对”的前提：若复算期望值要调用 set_seed，就会改写
+    审计进程的随机源，破坏被审计实验本身。
+    """
+    seed = 4242
+    set_seed(seed)
+    before = (random.getstate(), np.random.get_state(),
+              torch.get_rng_state().clone())
+    expected = expected_rng_state_fingerprint(seed)
+    after = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    assert before[0] == after[0]
+    assert np.array_equal(before[1][1], after[1][1])
+    assert before[1][2] == after[1][2]
+    assert torch.equal(before[2], after[2])
+    rep = seed_report(seed)
+    assert rep["rng_fingerprints_match_expected"] is True
+    assert rep["rng_fingerprints_expected"] == expected
+    for key, value in expected.items():
+        assert rep["rng_fingerprints"][key] == value, (key, rep)
+    # 不同 seed 的期望值必然不同；同 seed 多次复算稳定。
+    other = expected_rng_state_fingerprint(seed + 1)
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        assert other[key] != expected[key], key
+    assert expected_rng_state_fingerprint(seed) == expected
+    json.dumps(expected)
+    print("  [ok] expected_rng_state_fingerprint：无副作用、可复算、与 seed 绑定")
 
 
 def test_data_rng_is_seeded_and_reproducible():

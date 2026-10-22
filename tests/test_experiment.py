@@ -550,6 +550,44 @@ def test_verify_ledger_checks_embedded_seed_evidence():
         append_record(path, {"run_id": "bad_evidence", "status": "completed",
                              "variants": ["lega"], "seeds": [7],
                              "runs": [bad_evidence]})
+        # seed 字段本身正确、但逐随机源种子被改写：不能只看 seed 字面量。
+        src_tampered = _run(7)
+        src_tampered["provenance"]["seed_report"].update({
+            "python_random": 8, "pythonhashseed_env": "8"})
+        append_record(path, {"run_id": "src_tampered", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "src_tampered", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [src_tampered]})
+        # RNG 状态短指纹被复制/改写：期望值由 seed 本地复算，必须能发现。
+        from lega.utils import expected_rng_state_fingerprint
+        fp_tampered = _run(7)
+        fps = dict(expected_rng_state_fingerprint(7))
+        fps["numpy_global"] = "0" * 16
+        fp_tampered["provenance"]["seed_report"]["rng_fingerprints"] = fps
+        append_record(path, {"run_id": "fp_tampered", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "fp_tampered", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [fp_tampered]})
+        fp_malformed = _run(7, rng_fingerprints="not-a-dict")
+        append_record(path, {"run_id": "fp_malformed", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "fp_malformed", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [fp_malformed]})
+        # 启动期 seed_audit 的期望 RNG 指纹同样不能是“复制品”。
+        audit_fp_bad = seed_plan(7)
+        audit_fp_bad["rng_fingerprints"] = dict(
+            expected_rng_state_fingerprint(7))
+        audit_fp_bad["rng_fingerprints"]["python_random"] = "0" * 16
+        append_record(path, {"run_id": "audit_fp_bad", "status": "started",
+                             "variants": ["lega"], "seeds": [7],
+                             "seed_audit": {"7": audit_fp_bad}})
+        append_record(path, {"run_id": "audit_fp_bad", "status": "completed",
+                             "variants": ["lega"], "seeds": [7],
+                             "runs": [_run(7)],
+                             "seed_audit": {"7": audit_fp_bad}})
         rep = verify_ledger(path)
         by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
         assert "good" not in by_id and "legacy" not in by_id, by_id
@@ -572,6 +610,15 @@ def test_verify_ledger_checks_embedded_seed_evidence():
         assert "seed_report_data_order_fingerprint_mismatch" in by_id["copied"]["issues"]
         assert "seed_report_unverified" in by_id["unverified"]["issues"]
         assert "seed_report_data_order_fingerprint_mismatch" in by_id["tampered"]["issues"]
+        assert "seed_report_python_random_mismatch" in by_id["src_tampered"]["issues"]
+        assert ("seed_report_pythonhashseed_env_mismatch"
+                in by_id["src_tampered"]["issues"])
+        assert ("seed_report_rng_fingerprints_mismatch"
+                in by_id["fp_tampered"]["issues"])
+        assert ("seed_report_rng_fingerprints_malformed"
+                in by_id["fp_malformed"]["issues"])
+        assert ("seed_audit_rng_fingerprints_mismatch"
+                in by_id["audit_fp_bad"]["issues"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：run.seed 与内嵌 seed_report/数据指纹一致")
