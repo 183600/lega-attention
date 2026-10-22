@@ -1007,6 +1007,11 @@ def _ruler_task_means(d, metric: str = "em"):
     默认 `metric="em"`，与预注册假设 H4 的“RULER 平均 EM”逐字一致。
     fwe 的 recall 不进入主平均（recall 不惩罚“把上下文词全列出来”的灌水
     策略），仅由 `_ruler_fwe_recall` 单独报告作诊断。
+
+    所有进入平均的指标（EM/recall/precision/F1）都是 [0,1] 比例：坏/手改
+    产物里的 1.5 或 -1 若被当成合法观测，会把 RULER 平均推到 100% 以上或
+    负值，直接制造“方法有效/失效”的假结论。越界值按缺失处理，与
+    `_ruler_depth_means` 的校验口径一致。
     """
     if not isinstance(d, dict):
         return {}
@@ -1023,7 +1028,7 @@ def _ruler_task_means(d, metric: str = "em"):
             if not isinstance(m, dict):
                 continue
             v = _finite_number(m.get(metric))
-            if v is not None:
+            if v is not None and 0.0 <= v <= 1.0:
                 vals.append(v)
         if vals:
             out[task] = float(sum(vals) / len(vals))
@@ -1074,7 +1079,8 @@ def _ruler_avg_micro(d):
             if not isinstance(cell, dict):
                 continue
             v, n = _finite_number(cell.get("em")), _integral_value(cell.get("n"))
-            if v is None or n is None or n <= 0:
+            # 与 macro 口径同校：EM 是 [0,1] 比例，越界值不能参与按 n 加权。
+            if v is None or not 0.0 <= v <= 1.0 or n is None or n <= 0:
                 continue
             num += v * n
             total += n

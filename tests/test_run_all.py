@@ -3199,6 +3199,14 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     assert _ruler_avg_micro([1]) is None
     assert _ruler_avg_micro({"results": [1]}) is None
     assert _ruler_avg_micro({"results": {"vt": {"8": {"n": 0}}}}) is None
+    # EM/F1 等是 [0,1] 比例：越界值不能参与 macro 或 micro 平均（否则汇总
+    # 会出现 >100% 的“RULER 平均”并制造方法有效的假象）。
+    bad = {"results": {"niah_synth": {"8": {"em": 1.5, "n": 10},
+                                      "16": {"em": -1.0, "n": 10},
+                                      "32": {"em": 0.5, "n": 10}}}}
+    assert abs(_ruler_avg_of(bad) - 0.5) < 1e-12
+    assert abs(_ruler_avg_micro(bad) - 0.5) < 1e-12
+    assert _ruler_task_means({"results": {"vt": {"8": {"recall": 2.0}}}}) == {}
     print("  [ok] _ruler_avg_micro/_ruler_avg_of（macro/micro 定义与 fwe EM 口径）")
 
 
