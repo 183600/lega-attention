@@ -325,6 +325,24 @@ def _gradient_points(records: List[Dict]):
             sorted(nonfinite_steps))
 
 
+def _safe_ratio(value: float, denom: float):
+    """安全比值：分母<=0/不可表示返回 (None, False)；溢出时封顶并标记。"""
+    if denom is None or denom <= 0 or value is None:
+        return None, False
+    try:
+        ratio = value / denom
+    except (OverflowError, ZeroDivisionError):
+        return None, False
+    clamped = not math.isfinite(ratio)
+    if clamped:
+        # 合法但极端的尖峰（如 1e308 / 1e-300）比值会溢出成 inf；
+        # JSON/汇总不能写 inf，用最大可表示浮点封顶并显式标记。
+        if value > denom:
+            return float(np.finfo(np.float64).max), True
+        return None, False
+    return ratio, False
+
+
 def _detect_series_spikes(points: List[Dict],
                           factor: float = LOSS_SPIKE_FACTOR) -> List[Dict]:
     """检出单点尖峰：值 ≥ factor × 两侧邻居中位数。
@@ -347,12 +365,9 @@ def _detect_series_spikes(points: List[Dict],
         med = statistics.median(neigh)
         if med <= 0:
             continue
-        ratio = points[i]["value"] / med
-        clamped = not math.isfinite(ratio)
-        if clamped and points[i]["value"] > med:
-            # 合法但极端的尖峰（如 1e308 / 1e-300）比值会溢出成 inf；
-            # JSON/汇总不能写 inf，用最大可表示浮点封顶并显式标记。
-            ratio = float(np.finfo(np.float64).max)
+        ratio, clamped = _safe_ratio(points[i]["value"], med)
+        if ratio is None:
+            continue
         if ratio >= factor:
             rec = {"step": points[i]["step"], "value": points[i]["value"],
                    "local_median": med, "ratio": ratio}
@@ -766,6 +781,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     grad_med = None
     grad_max = None
     grad_spike_ratio = None
+    grad_spike_ratio_clamped = False
     grad_spikes = []
     grad_max_step = None
     if grad_vals:
@@ -773,10 +789,17 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         peak = max(grad_pts, key=lambda p: p["value"])
         grad_max, grad_max_step = float(peak["value"]), peak["step"]
         if grad_med > 0:
-            grad_spike_ratio = grad_max / grad_med
-            grad_spikes = [dict(p, ratio=p["value"] / grad_med)
-                           for p in grad_pts
-                           if p["value"] / grad_med >= GRAD_SPIKE_FACTOR]
+            grad_spike_ratio, ratio_clamped = _safe_ratio(grad_max, grad_med)
+            grad_spikes = []
+            for p in grad_pts:
+                r, clamped = _safe_ratio(p["value"], grad_med)
+                if r is not None and r >= GRAD_SPIKE_FACTOR:
+                    rec = dict(p, ratio=r)
+                    if clamped:
+                        rec["ratio_clamped"] = True
+                    grad_spikes.append(rec)
+            if ratio_clamped:
+                grad_spike_ratio_clamped = True
     grad_spike = bool(grad_spikes)
     worst_grad_spike = (max(grad_spikes, key=lambda p: p["ratio"])
                         if grad_spikes else None)
@@ -1306,6 +1329,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "grad_norm_max": grad_max,
         "grad_norm_max_step": grad_max_step,
         "grad_spike_ratio": grad_spike_ratio,
+        "grad_spike_ratio_clamped": bool(grad_spike_ratio_clamped),
         "grad_spikes": grad_spikes,
         "has_grad_spike": bool(grad_spike or grad_bad),
         "loss_spikes": loss_spikes,

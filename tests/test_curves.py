@@ -264,6 +264,18 @@ def test_loss_spike_in_short_curve_and_final_point_detected():
     assert math.isfinite(spike["ratio"]), spike
     assert spike.get("ratio_clamped") is True, spike
     json.dumps(d3, allow_nan=False)
+    # 梯度范数同样可能「极大值 / 极小中位数」溢出；尖峰与总体比值都必须
+    # 是有限数，否则汇总 JSON 会出现 Infinity。
+    grecs = [{"step": i, "loss": 1.0, "grad_norm": 1e-300} for i in range(10)]
+    grecs[5]["grad_norm"] = 1e308
+    gd = diagnose_curve(grecs)
+    assert gd["has_grad_spike"], gd
+    assert math.isfinite(gd["grad_spike_ratio"]), gd["grad_spike_ratio"]
+    gspike = next(s for s in gd["grad_spikes"] if s["step"] == 5)
+    assert math.isfinite(gspike["ratio"]), gspike
+    assert gspike.get("ratio_clamped") is True
+    assert gd["grad_spike_ratio_clamped"] is True
+    json.dumps(gd, allow_nan=False)
     print("  [ok] 短曲线/末尾训练损失尖峰均被检出")
 
 
