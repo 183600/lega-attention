@@ -603,8 +603,10 @@ def _obs_array(values) -> np.ndarray:
     bool 身份，因此非数值 ndarray 必须逐元素走 _finite_observation。
     """
     arr = np.asarray(values)
-    if (isinstance(values, np.ndarray) and arr.dtype != object
-            and arr.dtype.kind != "b"):
+    # 只有真正的数值 dtype 才能走 astype 快路。字符串 ndarray 也会被
+    # NumPy 解析（"1_0" → 10.0），绕过 _finite_observation 对下划线数字串
+    # 的显式拒绝；必须逐元素走同一套严格解析。
+    if (isinstance(values, np.ndarray) and arr.dtype.kind in "iuf"):
         return arr.astype(np.float64, copy=False).ravel()
     vals = [_finite_observation(v)
             for v in np.asarray(values, dtype=object).ravel()]

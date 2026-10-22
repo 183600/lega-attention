@@ -861,3 +861,17 @@ def test_calibration_metrics_brier_decomposition_within_bin_terms():
                + c["brier_uncertainty"] + c["brier_within_score"]
                - 2.0 * c["brier_within_cov"] - c["brier"]) < 1e-15
     print("  [ok] Brier 分解补箱内方差/协方差项，连续分数下恒等")
+
+
+def test_obs_array_string_arrays_use_strict_numeric_parsing():
+    """NumPy 字符串数组不能绕过 _finite_observation 的严格解析。"""
+    import numpy as np
+    from lega.utils import _obs_array, calibration_metrics
+    for values in (["1_0", "0.5"], np.array(["1_0", "0.5"])):
+        arr = _obs_array(values)
+        assert np.isnan(arr[0]), (values, arr)
+        assert arr[1] == 0.5, (values, arr)
+    # 非法字符串按缺失剔除：只剩一个有效 score，不能把 1_0 当成 1.0 置信度。
+    cal = calibration_metrics(np.array(["1_0", "0.5"]),
+                              np.array([1.0, 0.0]))
+    assert cal["n"] == 1 and cal["n_pos"] == 0, cal
