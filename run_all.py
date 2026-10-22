@@ -3912,7 +3912,10 @@ def build_summary(results_dir: str, audit: dict = None,
     for key in ("auroc_logit", "auroc_qterm", "misleading_rate",
                 "misleading_given_conc", "p_hit_given_conc",
                 "auprc_logit", "auprc_qterm", "hit_base_rate",
-                "brier_g", "ece_g", "brier_g_constant", "brier_g_skill"):
+                "brier_g", "ece_g", "ece_g_adaptive",
+                "brier_g_constant", "brier_g_skill",
+                "brier_g_reliability", "brier_g_resolution",
+                "brier_g_uncertainty"):
         metric_specs.append(
             (key, (lambda k: lambda m: _stat_series(
                 m, "analysis", _clock_extractor(k)))(key)))
@@ -4289,12 +4292,15 @@ def build_summary(results_dir: str, audit: dict = None,
                "可信”。Brier 越小越好；常数基率预测（永远输出 hit_base_rate）"
                "的 Brier 是无信息基线，`Brier skill=1−Brier/Brier_常数` >0 "
                "才说明概率预测优于常数。ECE 为 10 个等宽分箱的加权平均"
-               "|置信−准确率|，样本少/正类稀少时只能作描述性证据；线性探针"
-               "为有标签监督的 OOF 概率，门控 g 为语言建模副产品，两者"
-               "校准口径不同，不能只凭 Brier 判定方法优劣。", "",
+               "|置信−准确率|；等频 ECE 按分数排序均分样本，避免分数聚集/"
+               "小样本下大量空箱或每个样本独占一箱把 ECE 机械压低。两者"
+               "都只作描述性证据；线性探针为有标签监督的 OOF 概率，门控 g "
+               "为语言建模副产品，两者校准口径不同，不能只凭 Brier 判定"
+               "方法优劣。", "",
                "| 变体 | 命中基线率 | 门控Brier↓ | 常数基率Brier | "
-               "Brier skill↑ | 门控ECE↓ | 探针Brier↓ | 探针ECE↓ |",
-               "|---|---|---|---|---|---|---|---|"]
+               "Brier skill↑ | 门控ECE↓ | 门控ECE(等频)↓ | "
+               "探针Brier↓ | 探针ECE↓ |",
+               "|---|---|---|---|---|---|---|---|---|"]
         for r in cal_rows:
             md.append(
                 f"| {r.get('variant_cn') or r.get('variant')} | "
@@ -4303,12 +4309,15 @@ def build_summary(results_dir: str, audit: dict = None,
                 f"{_fmt4(r.get('brier_g_constant'))} | "
                 f"{_fmt4(r.get('brier_g_skill'))} | "
                 f"{_fmt4(r.get('ece_g'))} | "
+                f"{_fmt4(r.get('ece_g_adaptive'))} | "
                 f"{_fmt4(r.get('probe_brier'))} | "
                 f"{_fmt4(r.get('probe_ece'))} |")
         md += ["",
                "注：门控 Brier/ECE 与固定 0.5 阈值无关；它们评估的是 g 的"
                "概率数值，而不是某个决策点的 F1。逐分箱的置信/准确率、"
-               "n 与 gap 见 `analysis_*.json` 的 `calibration_g.bins`。"]
+               "n 与 gap 见 `analysis_*.json` 的 `calibration_g.bins`；"
+               "Brier 的 Murphy 分解（reliability/resolution/uncertainty）"
+               "与等频分箱明细见 `calibration_g.brier_*` 与 `ece_adaptive`。"]
 
     # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线
     #     + 机制判别的线性探针简单监督基线）

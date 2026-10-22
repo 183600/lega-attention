@@ -25,9 +25,13 @@
                        不平衡下学习到的门控 F1 必须比多数类规则更有信息量，
                        否则门控的“决策价值”无从谈起
   calibration_g        门控 g 的概率校准：Brier（严格评分规则）、ECE/MCE
-                       （等宽分箱）与常数基率 Brier 基线。排序指标（AUROC/
-                       PR-AUC）回答“能不能区分”，校准回答“g=0.8 时命中率
-                       是否真的约 80%”；g 被当作软权重/概率使用，两者都要看。
+                       （等宽分箱与等频分箱两套口径）与常数基率 Brier 基线。
+                       等宽箱在分数聚集/小样本时可能大量为空，等频箱提供
+                       对分箱选择不敏感的第二组证据；Brier 另给 Murphy 分解
+                       （reliability/resolution/uncertainty）。排序指标
+                       （AUROC/PR-AUC）回答“能不能区分”，校准回答“g=0.8
+                       时命中率是否真的约 80%”；g 被当作软权重/概率使用，
+                       两者都要看。
   linear_probe         同特征集（log max_p、log n、qterm）的 L2 逻辑回归
                        **简单监督基线**：按样例分组并按标签分层的嵌套 CV，
                        标准化统计只用训练折；λ 在内层 OOF 上按主指标
@@ -588,13 +592,20 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         summary["calibration_g"] = calibration_g
         summary["brier_g"] = calibration_g.get("brier")
         summary["ece_g"] = calibration_g.get("ece")
+        summary["ece_g_adaptive"] = calibration_g.get("ece_adaptive")
         summary["brier_g_constant"] = calibration_g.get("brier_constant")
         summary["brier_g_skill"] = calibration_g.get("brier_skill")
+        summary["brier_g_reliability"] = calibration_g.get("brier_reliability")
+        summary["brier_g_resolution"] = calibration_g.get("brier_resolution")
+        summary["brier_g_uncertainty"] = calibration_g.get("brier_uncertainty")
         summary["calibration_g_n"] = calibration_g.get("n")
     else:
         summary["calibration_g"] = None
         summary["brier_g"] = summary["ece_g"] = None
+        summary["ece_g_adaptive"] = None
         summary["brier_g_constant"] = summary["brier_g_skill"] = None
+        summary["brier_g_reliability"] = summary["brier_g_resolution"] = None
+        summary["brier_g_uncertainty"] = None
         summary["calibration_g_n"] = None
     # 逐头统计：对整段数组按 (layer, head) 掩码切片。缺字段/非整数的
     # 记录无法归属到具体头，跳过该记录而不是让整份汇总崩溃。
@@ -914,7 +925,8 @@ def main():
         print(f"[analysis] 门控概率校准：Brier={cal['brier']:.4f}"
               f"（常数基率基线={fmt(cal.get('brier_constant'))}，"
               f"skill={skill_txt}）"
-              f" ECE={fmt(cal.get('ece'))}（排序好≠概率可信）")
+              f" ECE={fmt(cal.get('ece'))} / 等频ECE="
+              f"{fmt(cal.get('ece_adaptive'))}（排序好≠概率可信）")
     probe = summary.get("linear_probe") or {}
     pset = (probe.get("feature_sets") or {}).get(probe.get("primary") or "") or {}
     poof = pset.get("oof") or {}

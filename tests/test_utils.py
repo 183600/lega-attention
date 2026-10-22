@@ -750,6 +750,12 @@ def test_calibration_metrics_brier_ece_and_baseline():
     c = calibration_metrics(perfect, y, n_bins=10)
     assert c["brier"] == 0.0 and c["ece"] == 0.0 and c["mce"] == 0.0
     assert c["brier_skill"] == 1.0
+    assert c["ece_adaptive"] == 0.0 and c["mce_adaptive"] == 0.0
+    # Murphy 分解是恒等式（任何分箱都成立），且各分量有限
+    assert abs(c["brier_reliability"] - c["brier_resolution"]
+               + c["brier_uncertainty"] - c["brier"]) < 1e-12
+    assert c["brier_reliability"] == 0.0
+    assert abs(c["brier_uncertainty"] - 0.2 * 0.8) < 1e-12
     # 常数基率预测：Brier 恰为 p(1-p)，skill≈0
     const = calibration_metrics([0.2] * len(y), y, n_bins=10)
     assert abs(const["brier"] - 0.2 * 0.8) < 1e-12
@@ -758,14 +764,22 @@ def test_calibration_metrics_brier_ece_and_baseline():
     over = [0.9 if v == 1.0 else 0.6 for v in y]
     c2 = calibration_metrics(over, y, n_bins=10)
     assert c2["brier"] > 0.0 and c2["ece"] > 0.2
+    assert c2["ece_adaptive"] > 0.2 and c2["mce_adaptive"] >= c2["ece_adaptive"]
     # 分箱计数/边界：10 箱内计数总和等于样本数
     assert sum(b["n"] for b in c2["bins"]) == len(y)
     assert c2["n"] == len(y) and c2["n_pos"] == 20
+    assert abs(c2["brier_reliability"] - c2["brier_resolution"]
+               + c2["brier_uncertainty"] - c2["brier"]) < 1e-12
+    # 等频分箱：n_bins=4 时每组样本数相差不超过 1（200/4 恰为 50）
+    c4 = calibration_metrics(over, y, n_bins=4)
+    assert c4["ece_adaptive"] is not None and c4["mce_adaptive"] >= 0.0
     # 单类/空输入：Brier 可算，ECE 不可解释地返回 None
     one = calibration_metrics([0.7, 0.8], [1.0, 1.0])
     assert one["brier"] is not None and one["ece"] is None
+    assert one["ece_adaptive"] is None and one["brier_reliability"] is None
     empty = calibration_metrics([], [])
     assert empty["n"] == 0 and empty["brier"] is None
+    assert empty["ece_adaptive"] is None and empty["mce_adaptive"] is None
     # n_bins 是计数身份：bool/小数/非数值不能被 int() 截断或让 range() 崩溃
     for bad in (True, 10.5, "bad", None):
         try:

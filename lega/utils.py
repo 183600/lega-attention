@@ -1002,8 +1002,18 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     与“校准好”。ECE 依赖等宽分箱，样本少时噪声大，只作描述性证据。
 
     返回 {n, n_pos, base_rate, brier, brier_constant, brier_skill,
-    ece, mce, n_bins, bins}；分数先 clip 到 [0,1]，非有限值与非法标签剔除；
+    ece, mce, n_bins, bins, ece_adaptive, mce_adaptive,
+    brier_reliability, brier_resolution, brier_uncertainty,
+    brier_decomposition_bins}；分数先 clip 到 [0,1]，非有限值与非法标签剔除；
     单一类别时 brier 仍可算，但 ECE 的“校准”语义不完整，返回 None。
+
+    `ece`/`mce` 用等宽分箱（与 `bins` 一致）；`ece_adaptive`/`mce_adaptive`
+    改用等频分箱（按分数排序后均分样本）。等宽分箱在分数聚集或样本少时
+    可能大量空箱，单个样本独占一箱还会让 ECE 机械地趋近 0；等频口径给出
+    对分箱选择不敏感的第二组证据。两者都只作描述性证据，不替代 Brier。
+    Brier 的 Murphy 分解 `brier = reliability - resolution + uncertainty`
+    用等频箱计算（任何划分下恒等式都成立），分别对应“分箱内校准误差”、
+    “分箱区分度”与“标签固有不确定性”。
     """
     n_bins = strict_int(n_bins, "n_bins")
     scores = _obs_array(scores)
@@ -1017,7 +1027,11 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     if n == 0:
         return {"n": 0, "n_pos": 0, "base_rate": None, "brier": None,
                 "brier_constant": None, "brier_skill": None, "ece": None,
-                "mce": None, "n_bins": int(n_bins), "bins": []}
+                "mce": None, "n_bins": int(n_bins), "bins": [],
+                "ece_adaptive": None, "mce_adaptive": None,
+                "brier_reliability": None, "brier_resolution": None,
+                "brier_uncertainty": None,
+                "brier_decomposition_bins": "equal_frequency"}
     scores = np.clip(scores, 0.0, 1.0)
     n_pos = int((labels == 1.0).sum())
     base_rate = float(n_pos / n)
@@ -1028,7 +1042,11 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     out = {"n": n, "n_pos": n_pos, "base_rate": base_rate,
            "brier": brier, "brier_constant": brier_constant,
            "brier_skill": skill, "ece": None, "mce": None,
-           "n_bins": int(n_bins), "bins": []}
+           "n_bins": int(n_bins), "bins": [],
+           "ece_adaptive": None, "mce_adaptive": None,
+           "brier_reliability": None, "brier_resolution": None,
+           "brier_uncertainty": None,
+           "brier_decomposition_bins": "equal_frequency"}
     if len(set(labels.tolist())) != 2 or n_bins < 1:
         return out
     idx = np.clip((scores * n_bins).astype(np.int64), 0, n_bins - 1)
@@ -1051,6 +1069,29 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     out["ece"] = float(ece)
     out["mce"] = float(mce)
     out["bins"] = bins
+    # 等频（adaptive）分箱：按分数排序后均分，避免等宽箱在分数聚集/小样本
+    # 下大量为空，或每个样本独占一箱使 ECE 被机械压低。箱内仍用样本加权，
+    # 因此 ECE 的含义与等宽口径完全一致，只是划分方式不同。
+    groups = np.array_split(np.argsort(scores, kind="mergesort"),
+                            int(n_bins))
+    ece_adapt, mce_adapt = 0.0, 0.0
+    reliability, resolution = 0.0, 0.0
+    for g in groups:
+        nb = int(g.size)
+        if nb == 0:
+            continue
+        mean_score = float(scores[g].mean())
+        mean_label = float(labels[g].mean())
+        gap = abs(mean_score - mean_label)
+        ece_adapt += (nb / n) * gap
+        mce_adapt = max(mce_adapt, gap)
+        reliability += (nb / n) * (mean_score - mean_label) ** 2
+        resolution += (nb / n) * (mean_label - base_rate) ** 2
+    out["ece_adaptive"] = float(ece_adapt)
+    out["mce_adaptive"] = float(mce_adapt)
+    out["brier_reliability"] = float(reliability)
+    out["brier_resolution"] = float(resolution)
+    out["brier_uncertainty"] = float(base_rate * (1.0 - base_rate))
     return out
 
 
