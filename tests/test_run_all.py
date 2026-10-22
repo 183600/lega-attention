@@ -43,6 +43,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       apply_budget_gate, apply_integrity_gate, apply_scope_gate,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_comparison_pairs, build_summary,
+                      _fmt_mean_std, _fmt_signed,
                       changed_gate_factors,
                       component_evidence, cross_variant_badcase_map,
                       COMPONENT_TESTS,
@@ -5282,3 +5283,42 @@ def test_parameter_matched_control_and_inference_shapley_wiring():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 参数匹配安慰剂/推理期 Shapley 进入汇总与 significance.json")
+
+
+def test_summary_rendering_tolerates_missing_effect_mean():
+    """交互/Shapley/病灶表不能假设每个检验都有有限均值。
+
+    极端有限观测可让交互对比的和溢出，_paired_diffs 会剔除不可表示的配对，
+    于是 n=0、mean_diff=None；渲染层若直接 ``f"{mean:+.4f}"`` 会让整份
+    汇总 TypeError。缺失均值必须显示 '-'，而不是让报告崩溃。
+    """
+    assert _fmt_signed(None) == "-"
+    assert _fmt_signed(float("nan")) == "-"
+    assert _fmt_signed(float("inf")) == "-"
+    assert _fmt_signed(0.0) == "+0.0000"
+    assert _fmt_mean_std({"mean_diff": None, "std_diff": None}) == "-"
+    assert _fmt_mean_std({"mean_diff": 1.5, "std_diff": None}) == "+1.5000"
+    with tempfile.TemporaryDirectory() as tmp:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "split": "val",
+                "val_ppl": 10.0, "val_loss": math.log(10.0),
+                "n_params": 100, "n_gate_extra": 4,
+            })
+        bad_inter = [{
+            "interaction": "A×B", "metric": "PPL交互",
+            "mean_diff": None, "std_diff": None, "n": 0,
+            "p_adj": None, "verdict": "无法检验",
+        }]
+        with mock.patch("run_all._factorial_interaction_tests",
+                        return_value=bad_inter), \
+                mock.patch("run_all._factorial_shapley_tests",
+                           return_value=[]), \
+                mock.patch("run_all._ablation_lesion_records",
+                           return_value=[]), \
+                mock.patch("run_all._inference_shapley_tests",
+                           return_value=[]):
+            out = build_summary(tmp)
+        md = out["markdown"]
+        assert "A×B" in md and "无法检验" in md
+    print("  [ok] 汇总渲染：缺失/非有限均值显示 '-'，交互表不再 TypeError")

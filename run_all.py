@@ -2363,6 +2363,27 @@ def _enrich_paired(res: dict, a, b) -> dict:
     return res
 
 
+def _fmt_signed(value, spec: str = "+.4f") -> str:
+    """有限数值按带符号格式渲染；None/NaN/Inf 等缺失值显示 '-'。
+
+    汇总表直接对 t['mean_diff'] 做格式化的前提是统计检验一定给出了有限
+    均值；n=0、方差退化或输入不可表示时该字段为 None。缺少这个保护会让
+    一个坏结果文件把整份汇总变成 TypeError。
+    """
+    f = _finite_number(value)
+    return "-" if f is None else format(f, spec)
+
+
+def _fmt_mean_std(t, key: str = "mean_diff", spec: str = "+.4f") -> str:
+    """配对检验的“均值 ± 标准差”渲染；任一缺失时只渲染可用部分。"""
+    t = t if isinstance(t, dict) else {}
+    mean = _finite_number(t.get(key))
+    if mean is None:
+        return "-"
+    std = _finite_number(t.get("std_diff"))
+    return format(mean, spec) + (f" ± {std:.4f}" if std is not None else "")
+
+
 def _seed_winloss_str(t: dict) -> str:
     """逐种子配对差符号计数渲染为“胜/负/平”（无信息时返回 '-'）。"""
     if not isinstance(t, dict) or t.get("n_seed_wins") is None:
@@ -7346,9 +7367,7 @@ def build_summary(results_dir: str, audit: dict = None,
            "结论 |", "|---|---|---|---|---|---|"]
     if inter:
         for t in inter:
-            std = t.get("std_diff")
-            delta = (f"{t['mean_diff']:+.4f}"
-                     + (f" ± {std:.4f}" if std is not None else ""))
+            delta = _fmt_mean_std(t)
             padj = (f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-")
             md.append(f"| {t['interaction']} | {t['metric']} | {delta} | "
                       f"{t['n']} | {padj} | {t.get('verdict', '-')} |")
@@ -7376,9 +7395,7 @@ def build_summary(results_dir: str, audit: dict = None,
                "|---|---|---|---|---|---|---|---|---|"]
         for t in shapley_tests:
             factor = t.get("shapley_factor_label") or t.get("shapley_factor")
-            std = t.get("std_diff")
-            delta = (f"{t['mean_diff']:+.4f}"
-                     + (f" ± {std:.4f}" if std is not None else ""))
+            delta = _fmt_mean_std(t)
             ci = t.get("mean_diff_ci95")
             ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-")
             share = (f"{t['shapley_share']*100:.1f}%"
@@ -7420,9 +7437,7 @@ def build_summary(results_dir: str, audit: dict = None,
                "逐种子胜负 | 留一 | p_adj(Holm) | 判定 |",
                "|---|---|---|---|---|---|---|---|---|---|"]
         for t in causal_tests:
-            std = t.get("std_diff")
-            delta = (f"{t['mean_diff']:+.4f}"
-                     + (f" ± {std:.4f}" if std is not None else ""))
+            delta = _fmt_mean_std(t)
             ratio = (f"{t['mean_ppl_ratio']:.4f}"
                      + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
                      if t.get("mean_ppl_ratio") is not None else "-")
@@ -7585,7 +7600,7 @@ def build_summary(results_dir: str, audit: dict = None,
                     + ("" if eq_p == "-" else f"（p={eq_p}）"))
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n']} | "
-                f"{t['mean_diff']:+.4f} | {ratio} | {ci_s} | {padj} | "
+                f"{_fmt_signed(t.get('mean_diff'))} | {ratio} | {ci_s} | {padj} | "
                 f"{eq_s} | {raw_verdict} | {mark} |")
         md += ["", "注: 几何均值比只改变“平均”的尺度，不改变配对结构；"
                f"原始 PPL 与 log-PPL 的结论{('有' if n_mismatch else '没有')}"
@@ -7625,7 +7640,8 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
                 f"{t['n_windows_min']}–{t['n_windows_max']} | "
-                f"{t['mean_diff']:+.4f} | {ci_s} | {bci_s} | {ratio} | {padj} | "
+                f"{_fmt_signed(t.get('mean_diff'))} | {ci_s} | {bci_s} | "
+                f"{ratio} | {padj} | "
                 f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
         md += ["", "注: ΔNLL 为负表示候选的窗口平均交叉熵更低（更好）。"
                "分层 bootstrap 的 p 值由中心化重采样分布计算，与种子级 t "
@@ -7660,9 +7676,7 @@ def build_summary(results_dir: str, audit: dict = None,
                    "p_adj(Holm) | 结论 |",
                    "|---|---|---|---|---|---|---|---|"]
             for t in shown:
-                std = t.get("std_diff")
-                delta = (f"{t['mean_diff']:+.4f}"
-                         + (f" ± {std:.4f}" if std is not None else ""))
+                delta = _fmt_mean_std(t)
                 padj = (f"{t['p_adj']:.4f}"
                         if t.get("p_adj") is not None else "-")
                 wl = _seed_winloss_str(t)
@@ -7741,7 +7755,8 @@ def build_summary(results_dir: str, audit: dict = None,
                         if t.get("cluster_p_adj") is not None else "-")
                 md.append(
                     f"| {t['candidate']} vs {t['reference']} | "
-                    f"{t.get('cluster_n')} | {t['cluster_mean_diff']:+.4f} | "
+                    f"{t.get('cluster_n')} | "
+                    f"{_fmt_signed(t.get('cluster_mean_diff'))} | "
                     f"{ci_s} | {padj} | {t.get('cluster_verdict', '-')} |")
             md += ["", "注: 聚类检验先把每个 sample_id 在多个训练种子下的配对差"
                    "取平均，再以样例为独立单位做符号翻转（n≤16 精确，否则固定"
@@ -7790,8 +7805,7 @@ def build_summary(results_dir: str, audit: dict = None,
                 n_global_downgraded += 1
             pp = (f"{h['p_perm_adj']:.4f}"
                   if h.get("p_perm_adj") is not None else "-")
-            delta = (f"{h['mean_diff']:+.4f}"
-                     if h.get("mean_diff") is not None else "-")
+            delta = _fmt_signed(h.get("mean_diff"))
             mde = f"{h['mde']:+.4f}" if h.get("mde") is not None else "-"
             mark = {"支持": "✅", "拒绝": "❌"}.get(h["status"], "—")
             if not h.get("confirmatory_valid"):
@@ -7838,15 +7852,26 @@ def build_summary(results_dir: str, audit: dict = None,
         per_head = _num_or_none(r.get("n_gate_per_head"))
         extra = _num_or_none(r.get("gate_extra"))
         params = _num_or_none(r.get("params"))
-        param_pct = ((extra / params * 100.0)
-                     if (extra is not None and params) else None)
+        # 参数/FLOPs 来自外部结果文件：负参数、0/极小分母或负开销都会把
+        # “占比”算成 inf/-inf。占比只在两端都是非负有限且分母 >0 时定义，
+        # 结果非有限则按缺失处理，不能写进汇总表/JSON。
+        param_pct = None
+        if (extra is not None and extra >= 0.0
+                and params is not None and params > 0.0):
+            param_pct = extra / params * 100.0
+            if not math.isfinite(param_pct):
+                param_pct = None
         e = lat_entries.get(v)
         gate_flops = (_eff_cell(e, "gate_flops", common_ctx)
                       if common_ctx is not None else None)
         total_flops = (_eff_cell(e, "flops", common_ctx)
                        if common_ctx is not None else None)
-        flop_pct = ((gate_flops / total_flops * 100.0)
-                    if (gate_flops is not None and total_flops) else None)
+        flop_pct = None
+        if (gate_flops is not None and gate_flops >= 0.0
+                and total_flops is not None and total_flops > 0.0):
+            flop_pct = gate_flops / total_flops * 100.0
+            if not math.isfinite(flop_pct):
+                flop_pct = None
         r["gate_param_pct"] = (round(param_pct, 4)
                                if param_pct is not None else None)
         r["gate_flops_per_tok"] = gate_flops
