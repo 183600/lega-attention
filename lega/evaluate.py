@@ -412,7 +412,7 @@ def main():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True, help="输出 JSON 路径")
-    p.add_argument("--eval_iters", type=int, default=None,
+    p.add_argument("--eval_iters", default=None,
                    help="评测窗口数；默认继承训练配置，训练配置缺失时为 50"
                         "（与 train.py 的默认值一致，保证窗口规格可比）")
     p.add_argument("--worst_n", type=int, default=0,
@@ -434,9 +434,15 @@ def main():
                    help="即使 data_report 检测到划分/重叠泄露也继续评测（仅用于"
                         "复现历史实验；报告会标记 override，结果不得用于正式结论）")
     args = p.parse_args()
-    if (args.eval_iters is not None
-            and _positive_int_or_none(args.eval_iters) is None):
-        p.error("--eval_iters 必须是正整数")
+    if args.eval_iters is not None:
+        # 保留原始字符串后再 strict_int：argparse 的 type=int 会把 "1_0"
+        # 静默解析成 10，绕过“非法数值显式拒绝”的入口约定。
+        try:
+            args.eval_iters = strict_int(args.eval_iters, "--eval_iters")
+        except (TypeError, ValueError) as e:
+            p.error(str(e))
+        if args.eval_iters <= 0:
+            p.error("--eval_iters 必须是正整数")
 
     # 评测同样不能在已标记泄露的数据上产出“正式指标”：训练闸门只保护
     # checkpoint 生产，独立 evaluate/复现历史 run 也必须先过同一份报告。

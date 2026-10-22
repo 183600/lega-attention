@@ -127,7 +127,7 @@ def test_evaluate_cli_rejects_nonpositive_eval_iters():
     from lega.evaluate import main as evaluate_main
     old = sys.argv
     try:
-        for bad in ("0", "-3"):
+        for bad in ("0", "-3", "1_0", "+1_0"):
             sys.argv = ["lega.evaluate", "--ckpt", "x", "--data_dir", "x",
                         "--out", "x", "--eval_iters", bad]
             try:
