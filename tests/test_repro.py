@@ -515,6 +515,22 @@ def test_load_provenance_rejects_stale_sanity_evidence():
                          "verified": True}})
         assert fresh["sanity_passed"] is True
         assert fresh["sanity_verified"] is True
+        # 即使清单自称 PASS，只要保留失败检查项/标记 malformed，就不能继承。
+        broken = _write({"present": True, "passed": True,
+                         "failed_checks": ["token_acc_above_threshold"],
+                         "checks_consistent": False,
+                         "identity": {"hard_mismatches": [],
+                                      "unknown_fields": [], "verified": True}})
+        assert broken["sanity_passed"] is False
+        assert broken["sanity_failed_checks"] == [
+            "token_acc_above_threshold"]
+        assert broken["sanity_checks_consistent"] is False
+        malformed_pass = _write({"present": True, "passed": True,
+                                 "malformed": True,
+                                 "identity": {"hard_mismatches": [],
+                                              "verified": True}})
+        assert malformed_pass["sanity_passed"] is False
+        assert malformed_pass["sanity_malformed"] is True
         # 旧清单/无法核对：保留 PASS 但不冒充已验证
         legacy = _write({"present": True, "passed": True, "variant": "lega"})
         assert legacy["sanity_passed"] is True
