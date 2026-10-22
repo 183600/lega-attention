@@ -894,10 +894,18 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     p = 2·P(Bin(n, 0.5) ≤ min(b, c))（截断到 1）。n 可能达数千，用
     log-gamma + log-sum-exp 稳定求和，避免组合数溢出。
     """
-    n = int(candidate_only) + int(reference_only)
+    # discordant 计数必须是非负整数：bool/小数/负数会被 int() 静默截断或
+    # 让后续组合数求和退化为空序列（max() 抛 ValueError），必须显式拒绝。
+    candidate_only = strict_int(candidate_only, "candidate_only")
+    reference_only = strict_int(reference_only, "reference_only")
+    if candidate_only < 0 or reference_only < 0:
+        raise ValueError(
+            "candidate_only/reference_only 必须是 >= 0 的整数，收到 "
+            f"{candidate_only}/{reference_only}")
+    n = candidate_only + reference_only
     if n <= 0:
         return 1.0
-    k = min(int(candidate_only), int(reference_only))
+    k = min(candidate_only, reference_only)
     log2 = math.log(2.0)
     logs = [math.lgamma(n + 1) - math.lgamma(i + 1)
             - math.lgamma(n - i + 1) - n * log2 for i in range(k + 1)]
