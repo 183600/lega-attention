@@ -515,3 +515,31 @@ def test_train_log_records_interval_peaks_for_spike_diagnostics():
         last = train_recs[-1]
         assert last["loss_max"] >= last["loss"] - 1e-6
     print("  [ok] train_log 区间峰值（grad_norm_max/loss_max）供尖峰诊断")
+
+
+def test_train_does_not_sample_batches_beyond_final_step():
+    """grad_accum>1 时最后一步不得预取从未消费的批次（污染数据顺序指纹）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_data(data_dir)
+        prepare_bins(data_dir, kind="char", force=True)
+        cfg = _cfg()
+        cfg.update({"steps": 2, "grad_accum": 2, "log_every": 2,
+                    "eval_every": 2, "eval_iters": 2})
+        out_dir = os.path.join(tmp, "run")
+        import lega.train as train_mod
+        orig = train_mod.get_train_batch
+        calls = []
+
+        def _counting(*args, **kwargs):
+            calls.append(1)
+            return orig(*args, **kwargs)
+
+        train_mod.get_train_batch = _counting
+        try:
+            _run_train(cfg, data_dir, out_dir)
+        finally:
+            train_mod.get_train_batch = orig
+        # 初始预热 grad_accum 个 + 每个非末步预取 grad_accum 个
+        assert len(calls) == cfg["steps"] * cfg["grad_accum"], len(calls)

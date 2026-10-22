@@ -1447,10 +1447,10 @@ def main():
         step_dev.fill_(step)
         for mi in range(grad_accum):
             x, y = batches[mi]
-            # 预取下一 micro-batch：在当前步前向/反向之前发起 memmap 收集与
-            # pinned H2D 提交（_stage_to_device 乒乓暂存双槽 + event 保护，
-            # 两批在途互不干扰）。rng 抽取顺序与逐次采样完全一致，确定性不变。
-            if step + 1 < steps or mi + 1 < grad_accum:
+            # 最后一步不再预取：否则 grad_accum>1 时会为已不存在的下一步
+            # 额外采样并写入 data_order_hasher，使“实际消费的数据顺序”
+            # 指纹包含从未消费的窗口，也会污染 NaN 排查的候选批次列表。
+            if step + 1 < steps:
                 batches[mi] = get_train_batch(
                     train, train_ctx, batch_size, device, rng,
                     order_hasher=data_order_hasher)
