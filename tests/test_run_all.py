@@ -3971,10 +3971,19 @@ def test_snapshot_existing_runs_preserves_failed_round_evidence():
                               runs=runs)
         rec = read_records(ledger)[0]
         assert rec["status"] == "aborted" and rec["runs"] == runs
-        # 上一轮残留（manifest mtime 早于本轮开始）不得当成本轮证据
+        # 上一轮残留（manifest mtime 早于本轮开始）不得当成本轮证据；
+        # 只早 0.5 秒同样必须排除，不能有“2 秒宽限”把上一轮末尾收进来。
         old = start - 3600
-        os.utime(os.path.join(vdir, "run_manifest.json"), (old, old))
+        mpath = os.path.join(vdir, "run_manifest.json")
+        os.utime(mpath, (old, old))
         assert _snapshot_existing_runs(common) == []
+        floor = time.mktime(time.strptime(common["time_start"],
+                                         "%Y-%m-%d %H:%M:%S"))
+        os.utime(mpath, (floor - 0.5, floor - 0.5))
+        assert _snapshot_existing_runs(common) == []
+        # 开始时刻不可解析时无法证明目录属于本轮：保守返回空，不能全收。
+        os.utime(mpath, (time.time() + 1, time.time() + 1))
+        assert _snapshot_existing_runs(dict(common, time_start="bad")) == []
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 失败轮次快照已产生的 run 证据；旧目录不冒充本轮")

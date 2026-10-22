@@ -381,12 +381,14 @@ def _snapshot_existing_runs(ledger_common: dict) -> list:
     seeds = ledger_common.get("seeds") or []
     if not out_root or not variants or not seeds:
         return []
+    n_seeds = len(seeds)
     try:
-        n_seeds = len(seeds)
         start = time.mktime(time.strptime(
             str(ledger_common.get("time_start")), "%Y-%m-%d %H:%M:%S"))
     except (TypeError, ValueError, OverflowError):
-        n_seeds, start = len(seeds), None
+        # 无法解析本轮开始时刻就无法证明目录属于本轮；宁可少收证据，
+        # 也不能把上一轮残留 manifest 当成本轮快照。
+        return []
     runs = []
     for v in variants:
         for seed in seeds:
@@ -394,12 +396,13 @@ def _snapshot_existing_runs(ledger_common: dict) -> list:
             manifest = os.path.join(vdir, "run_manifest.json")
             if not os.path.isfile(manifest):
                 continue
-            if start is not None:
-                try:
-                    if os.path.getmtime(manifest) < start - 2.0:
-                        continue
-                except OSError:
+            try:
+                # 只接受本轮开始之后写入的清单；不设回退宽限（time_start
+                # 精确到秒，manifest 在本轮内写入必然 >= start）。
+                if os.path.getmtime(manifest) < start:
                     continue
+            except OSError:
+                continue
             try:
                 runs.append(snapshot_train_run(str(v), int(seed), vdir))
             except Exception as e:  # noqa: BLE001 - 失败路径不阻塞主异常
