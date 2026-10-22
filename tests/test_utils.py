@@ -19,7 +19,8 @@ from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         calibration_metrics, config_bool, config_finite_float,
                         config_probability, f1_scores, holm_bonferroni, mean_std,
                         min_detectable_effect, paired_sign_flip_test,
-                        paired_t_test, pearson, roc_pr_aucs, save_json,
+                        paired_sign_test, paired_t_test, pearson,
+                        roc_pr_aucs, save_json,
                         student_t_two_sided_p, t_critical_95, wilson_score_ci)
 
 
@@ -569,6 +570,36 @@ def test_paired_sign_flip_exact_p_values():
     r = paired_sign_flip_test([1.0, 1.0], [1.0, 1.0])
     assert r["p_perm"] == 1.0
     print("  [ok] paired_sign_flip_test 精确 p 与独立枚举一致（n=3~6）")
+
+
+def test_paired_sign_test_exact_and_zeros():
+    """符号检验：只数方向、零差剔除，精确双侧 p 与二项定义一致。"""
+    r = paired_sign_test([1.0, 2.0, 3.0, 4.0, 5.0], [0.0] * 5)
+    assert r["median_diff"] == 3.0
+    assert (r["n_pos"], r["n_neg"], r["n_zero"]) == (5, 0, 0)
+    assert abs(r["p_sign"] - 2.0 / 32.0) < 1e-12
+    # 零差不提供方向信息：3 正 + 1 零 → nz=3，p=2/8=0.25
+    r = paired_sign_test([1.0, 2.0, 3.0, 0.0], [0.0] * 4)
+    assert r["n_zero"] == 1 and r["p_sign"] == 0.25
+    # 方向各半 → p=1（双侧精确值上限截断）
+    r = paired_sign_test([1.0, -1.0, 2.0, -2.0, 0.0], [0.0] * 5)
+    assert r["n_pos"] == 2 and r["n_neg"] == 2 and r["p_sign"] == 1.0
+    assert r["median_diff"] == 0.0
+    # 全零差 → p=1；n=0 字段为 None 而不是崩溃
+    r = paired_sign_test([1.0, 1.0], [1.0, 1.0])
+    assert r["p_sign"] == 1.0 and r["n_zero"] == 2
+    r = paired_sign_test([], [])
+    assert r["n"] == 0 and r["p_sign"] is None and r["median_diff"] is None
+    # 与 t 检验共用配对口径：None 必须成对、bool/非有限值跳过
+    assert paired_sign_test([1.0, None, 3.0], [0.0, None, 2.0])["n"] == 2
+    try:
+        paired_sign_test([1.0, None], [None, 2.0])
+        raise AssertionError("None 位置不一致应抛 ValueError")
+    except ValueError:
+        pass
+    r = paired_sign_test([1.0, float("nan"), True], [0.0, 1.0, 1.0])
+    assert r["n"] == 1 and r["p_sign"] == 1.0
+    print("  [ok] paired_sign_test（精确符号 p、零差剔除、边界）")
 
 
 def test_paired_sign_flip_mc_and_guards():

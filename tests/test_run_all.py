@@ -1973,6 +1973,9 @@ def test_enrich_paired_adds_robustness_fields():
     res = _enrich_paired({"n": 5, "mean_diff": 0.5, "std_diff": 0.1}, a, b)
     assert res["p_perm"] is not None and 0.0 <= res["p_perm"] <= 1.0
     assert res["perm_exact"] is True          # n=5 <= 16 → 全枚举精确
+    assert res["median_diff"] is not None and res["p_sign"] is not None
+    assert (res["sign_n_pos"] + res["sign_n_neg"]
+            + res["sign_n_zero"]) == 5
     lo, hi = res["mean_diff_ci95"]
     assert lo <= res["mean_diff"] <= hi
     assert res["mde"] > 0
@@ -1980,9 +1983,11 @@ def test_enrich_paired_adds_robustness_fields():
     res0 = _enrich_paired({"n": 3, "mean_diff": 0.0, "std_diff": 0.2},
                            [1, 2, 3], [1, 2, 3])
     assert res0["p_perm"] == 1.0 and res0["mde"] > 0
+    assert res0["median_diff"] == 0.0 and res0["p_sign"] == 1.0
     # n=1 / 无均值：字段为 None 而不是崩溃
     res1 = _enrich_paired({"n": 0, "mean_diff": None, "std_diff": None}, [], [])
     assert res1["p_perm"] is None and res1["mean_diff_ci95"] is None
+    assert res1["median_diff"] is None and res1["p_sign"] is None
     # bool 配对观测与检验主体同口径跳过：胜负计数不能多于实际 n。
     res2 = _enrich_paired({"n": 2, "mean_diff": 1.5, "std_diff": 0.5},
                           [True, 2.0, 3.0], [1.0, 1.0, 1.0])
@@ -2044,6 +2049,9 @@ def test_apply_holm_permutation_agreement():
     t_ok["p_perm"] = 0.001
     _apply_holm([t_ok])
     assert t_ok["p_perm_adj"] == 0.001
+    t_ok["p_sign"] = 0.01
+    _apply_holm([t_ok])
+    assert t_ok["p_sign_adj"] == 0.01
     assert t_ok["t_perm_agree"] is True and "⚠" not in t_ok["verdict"]
     # t 显著（p=0.02，家族 m=1）但置换不显著（p_perm=0.3）→ ⚠ 标注
     t_warn = _mk("lega", "standard", "PPL", -0.3, 0.02, 4)
@@ -2062,9 +2070,13 @@ def test_apply_holm_permutation_agreement():
            _mk("b", "standard", "PPL", -0.4, 0.05, 5)]
     fam[0]["p_perm"] = 0.01
     fam[1]["p_perm"] = 0.05
+    fam[0]["p_sign"] = 0.02
+    fam[1]["p_sign"] = 0.04
     _apply_holm(fam)
     assert abs(fam[0]["p_perm_adj"] - 0.02) < 1e-12
     assert abs(fam[1]["p_perm_adj"] - 0.05) < 1e-12
+    assert abs(fam[0]["p_sign_adj"] - 0.04) < 1e-12
+    assert abs(fam[1]["p_sign_adj"] - 0.04) < 1e-12
     # 种子不足：不进入 agree 判定
     t_small = _mk("x", "y", "PPL", 1.0, 0.01, 2)
     t_small["p_perm"] = 0.01
@@ -2707,6 +2719,7 @@ def test_build_summary_renders_confirmatory_sections():
         # 每条 pair 检验都带稳健性字段
         for t in sig["pairs"]:
             assert "p_perm" in t and "mean_diff_ci95" in t and "mde" in t
+            assert "median_diff" in t and "p_sign_adj" in t
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（注册假设/置换/CI/MDE 进入汇总页与 JSON）")

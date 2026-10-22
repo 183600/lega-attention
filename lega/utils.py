@@ -11,6 +11,8 @@ macro / micro / weighted（三者在不平衡数据上可能差异巨大，macro
   * paired_t_test            —— 参数检验（主判定依据）；
   * paired_sign_flip_test    —— 符号翻转置换检验（H0 下精确/分布无关，n<=16 时
                                 全枚举精确，否则固定种子 Monte-Carlo）；
+  * paired_sign_test         —— 逐对差值符号的精确二项检验（忽略幅度，对离群
+                                种子稳健；零差按标准做法从符号检验中剔除）；
   * bootstrap_mean_ci        —— 配对差的百分位 bootstrap 置信区间；
   * min_detectable_effect    —— 给定种子数与配对差标准差的最小可检测效应，
                                 用于区分"没有效应"与"功效不足"；
@@ -612,6 +614,37 @@ def _paired_diffs(a, b) -> np.ndarray:
             continue
         diffs.append(xf - yf)
     return np.asarray(diffs, dtype=np.float64)
+
+
+def paired_sign_test(a, b) -> dict:
+    """逐对差值符号的精确双侧二项检验（符号检验）。
+
+    只使用 d_i = a_i − b_i 的符号，不使用幅度：少数离群种子可以把 t 检验
+    的均值/方差拉向显著或掩盖稳定的小效应，符号检验则回答“多数配对方向
+    是否一致”。零差按经典符号检验口径剔除（不提供方向信息），有效样本量
+    为 nz = n_pos + n_neg；nz=0 时 p=1。H0 下正负概率各 1/2，双侧精确
+    p = min(1, 2·P(Bin(nz, 1/2) ≤ min(n_pos, n_neg)))。返回
+    {n, median_diff, n_pos, n_neg, n_zero, p_sign, exact}。
+    """
+    d = _paired_diffs(a, b)
+    n = int(d.size)
+    out = {"n": n, "median_diff": None, "n_pos": None, "n_neg": None,
+           "n_zero": None, "p_sign": None, "exact": True}
+    if n == 0:
+        return out
+    out["median_diff"] = float(np.median(d))
+    n_pos = int(np.count_nonzero(d > 0))
+    n_neg = int(np.count_nonzero(d < 0))
+    n_zero = int(np.count_nonzero(d == 0))
+    out.update({"n_pos": n_pos, "n_neg": n_neg, "n_zero": n_zero})
+    nz = n_pos + n_neg
+    if nz == 0:
+        out["p_sign"] = 1.0
+        return out
+    k = min(n_pos, n_neg)
+    tail = sum(math.comb(nz, i) for i in range(k + 1)) / (2 ** nz)
+    out["p_sign"] = min(1.0, 2.0 * tail)
+    return out
 
 
 def paired_t_test(a, b) -> dict:

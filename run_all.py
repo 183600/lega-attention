@@ -91,7 +91,8 @@ from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E
                         worktree_state, write_worktree_patch)
 from lega.utils import (bootstrap_mean_ci, config_bool, get_device,
                         holm_bonferroni, mean_std, min_detectable_effect,
-                        paired_sign_flip_test, paired_t_test, save_json,
+                        paired_sign_flip_test, paired_sign_test,
+                        paired_t_test, save_json,
                         seed_int, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
@@ -1643,11 +1644,19 @@ def _enrich_paired(res: dict, a, b) -> dict:
         perm = paired_sign_flip_test(a, b)
         res["p_perm"] = perm.get("p_perm")
         res["perm_exact"] = perm.get("exact")
+        sign = paired_sign_test(a, b)
+        res["median_diff"] = sign.get("median_diff")
+        res["p_sign"] = sign.get("p_sign")
+        res["sign_n_pos"] = sign.get("n_pos")
+        res["sign_n_neg"] = sign.get("n_neg")
+        res["sign_n_zero"] = sign.get("n_zero")
         res["mean_diff_ci95"] = bootstrap_mean_ci(
             [x - y for x, y in zip(a, b)])
         res["mde"] = min_detectable_effect(res.get("std_diff"), res.get("n"))
     else:
         res["p_perm"] = res["perm_exact"] = None
+        res["median_diff"] = res["p_sign"] = None
+        res["sign_n_pos"] = res["sign_n_neg"] = res["sign_n_zero"] = None
         res["mean_diff_ci95"] = res["mde"] = None
 
     # 效应 vs 噪声：同一对比里“显著”与“幅度有意义”是两件事。配对差
@@ -1817,10 +1826,12 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     运气产生。结论一律基于同一指标家族内校正后的 p_adj；原始 p 仍保留在
     结果 JSON 中供查阅。
 
-    置换检验的 p_perm 在同一指标家族内单独做 Holm 校正（它与 t 检验是两套
-    独立的检验族，合并会双重惩罚）：校正后两套结论是否一致被显式记录为
-    t_perm_agree；t 显著而置换不显著（小样本下 t 的正态假设失效的典型症状）
-    时在结论里追加警示，而不是让读者只看到一个 p 值。
+    置换检验的 p_perm 与符号检验的 p_sign 各自在同一指标家族内单独做 Holm
+    校正（它们与 t 检验是独立的检验族，合并会双重惩罚）：t 与置换结论是否
+    一致被显式记录为 t_perm_agree；t 显著而置换不显著（小样本下 t 的正态
+    假设失效的典型症状）时在结论里追加警示，而不是让读者只看到一个 p 值。
+    符号检验只作稳健性对照，不参与确认性判定（nz<6 时其双侧精确 p 的
+    下限 2/2^nz>0.05，不显著可能只是粒度所限）。
     """
     tests = [t for t in (tests if isinstance(tests, list) else [])
              if isinstance(t, dict)]
@@ -1830,9 +1841,11 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     for group in by_metric.values():
         pads = holm_bonferroni([t.get("p") for t in group])
         ppads = holm_bonferroni([t.get("p_perm") for t in group])
-        for t, padj, ppadj in zip(group, pads, ppads):
+        psads = holm_bonferroni([t.get("p_sign") for t in group])
+        for t, padj, ppadj, psadj in zip(group, pads, ppads, psads):
             t["p_adj"] = padj
             t["p_perm_adj"] = ppadj
+            t["p_sign_adj"] = psadj
             n = t.get("n")
             n_valid = (isinstance(n, int) and not isinstance(n, bool)
                        and n >= 0)
@@ -5376,9 +5389,10 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
-        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | Δ 95% CI | d_z | n | 胜/负/平 | "
-                  "留一稳定 | p | p_adj(Holm) | p_perm(Holm) | MDE | 结论 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | Δ中位数 | Δ 95% CI | d_z | "
+                  "n | 胜/负/平 | 留一稳定 | p | p_adj(Holm) | "
+                  "p_perm(Holm) | p_sign(Holm) | MDE | 结论 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for t in tests:
             if t.get("interaction"):
                 continue  # 交互效应单独成表，避免与主效应表重复
@@ -5391,6 +5405,8 @@ def build_summary(results_dir: str, audit: dict = None,
             std = t.get("std_diff")
             delta = (f"{t['mean_diff']:+.4f}"
                      + (f" ± {std:.4f}" if std is not None else ""))
+            med = (f"{t['median_diff']:+.4f}"
+                   if t.get("median_diff") is not None else "-")
             ci = t.get("mean_diff_ci95")
             ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
                     if ci else "-")
@@ -5398,13 +5414,16 @@ def build_summary(results_dir: str, audit: dict = None,
             padj = (f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-")
             ppadj = (f"{t['p_perm_adj']:.4f}"
                      if t.get("p_perm_adj") is not None else "-")
+            psadj = (f"{t['p_sign_adj']:.4f}"
+                     if t.get("p_sign_adj") is not None else "-")
             dz = f"{t['d_z']:+.2f}" if t.get("d_z") is not None else "-"
             mde = (f"{t['mde']:+.4f}" if t.get("mde") is not None else "-")
             wl = _seed_winloss_str(t)
             loo = _loo_stability_str(t)
             md.append(f"| {t['candidate']} vs {t['reference']} | {t['metric']} | "
-                      f"{delta} | {ci_s} | {dz} | {t['n']} | {wl} | {loo} | "
-                      f"{p} | {padj} | {ppadj} | {mde} | {t.get('verdict', '-')} |")
+                      f"{delta} | {med} | {ci_s} | {dz} | {t['n']} | {wl} | "
+                      f"{loo} | {p} | {padj} | {ppadj} | {psadj} | {mde} | "
+                      f"{t.get('verdict', '-')} |")
         md.append("")
         md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER/AUROC差 越大越好；"
                   "d_z = Δ均值/Δ标准差为配对 Cohen's d 效应量。"
@@ -5419,7 +5438,11 @@ def build_summary(results_dir: str, audit: dict = None,
                   "n=3 时 0.25、n=5 时 0.0625、n=6 才降至 0.03125：种子数 <6 "
                   "时“置换不显著”是粒度所限而非 t 检验一定虚警，此时显著性"
                   "完全依赖 t 的正态假设；n≥6 后两套检验不一致才是真实的"
-                  "稳健性警报。Δ 95% CI 为配对差的 bootstrap 区间；MDE = 当前"
+                  "稳健性警报。Δ中位数为逐种子配对差中位数（对离群种子不敏感）；"
+                  "p_sign 为忽略零差后的精确符号检验，在同一指标家族内独立"
+                  "Holm 校正，仅作稳健性对照、不参与确认性判定：有效非零"
+                  "配对数 nz<6 时其双侧精确 p 的下限 2/2^nz>0.05，"
+                  "“不显著”可能只是粒度所限。Δ 95% CI 为配对差的 bootstrap 区间；MDE = 当前"
                   "种子数与方差下 80% 功效可检测的最小效应：观测差远小于 "
                   "MDE 的“不显著”是功效不足，不是无效应。效应/噪声比 = "
                   "|Δ|/ΔSD（ΔSD 为逐种子配对差的标准差）：|Δ|<ΔSD 的结果"
