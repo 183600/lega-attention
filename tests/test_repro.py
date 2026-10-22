@@ -879,6 +879,13 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
             json.dump({"passed": 1, "variant": "lega", "seed": 3}, f)
         sf = sanity_summary(fake_pass)
         assert sf["passed"] is None and sf["malformed"] is True
+        # checks 非对象（数组）同样是损坏结构，不能当作“旧文件无 checks”
+        bad_checks = os.path.join(d, "bad_checks.json")
+        with open(bad_checks, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": [True, False]}, f)
+        sb = sanity_summary(bad_checks)
+        assert sb["passed"] is False and sb["malformed"] is True
+        assert sb["checks_consistent"] is False
         good = os.path.join(d, "sanity_lega.json")
         with open(good, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "variant": "lega", "seed": 3,

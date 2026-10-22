@@ -462,6 +462,11 @@ def sanity_summary(path: str) -> dict:
         out["failed_checks"] = sorted(k for k, v in checks.items()
                                       if v is not True)
         out["checks_consistent"] = not out["failed_checks"]
+    elif checks is not None:
+        # checks 存在但不是对象（数组/字符串等）：结构已损坏，不能当作
+        # “旧文件没有 checks”而放行。
+        out["checks_consistent"] = False
+        out["malformed"] = True
     raw_passed = rec.get("passed")
     if isinstance(raw_passed, bool):
         out["passed"] = raw_passed
