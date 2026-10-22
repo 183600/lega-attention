@@ -862,6 +862,10 @@ def _config_min_delta(value) -> float:
     """
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"config.early_stop_min_delta 必须是数值，收到 bool {value!r}")
+    # float("0.0_5")==0.05：下划线数字串不是规范配置数值，不能静默改变早停阈值。
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(
+            f"config.early_stop_min_delta 必须是数值，收到 {value!r}")
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as e:
