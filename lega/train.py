@@ -1074,9 +1074,25 @@ def main():
     # 与 config_used.json（超参数）和 train_log.jsonl（训练曲线）共同构成
     # 可复现、可追溯的完整记录。
     sanity_info = sanity_summary(args.sanity_file) if args.sanity_file else None
-    if sanity_info and not sanity_info.get("present"):
-        print(f"[train] ⚠ --sanity_file 指定的结果文件不存在：{args.sanity_file}"
-              "（manifest 按 present=false 记录，不冒充通过）")
+    if args.sanity_file:
+        # 显式传入闸门证据时，必须真的能证明“本模型链路已通过小批量
+        # 过拟合”。缺失/不可解析/未通过都中止全量训练，而不是只写一个
+        # sanity_passed=false 继续跑——那等于带着已知的梯度/损失/标签
+        # 问题消耗完整算力，并产生无法用于结论的 checkpoint。
+        if not sanity_info.get("present"):
+            raise SystemExit(
+                f"sanity 闸门证据不可用（{args.sanity_file} 缺失或不可解析）："
+                "已显式指定 --sanity_file，不能在全量训练时跳过代码正确性"
+                "闸门。请先运行 `python -m lega.sanity ...`，或移除该参数"
+                "（run_all 默认会先跑闸门）。")
+        if sanity_info.get("passed") is not True:
+            failed = sanity_info.get("failed_checks") or []
+            reason = (f"未通过项: {', '.join(failed)}" if failed
+                      else "结果未声明 passed=true，或 passed 与 checks 矛盾")
+            raise SystemExit(
+                f"sanity 闸门未通过（{args.sanity_file}）：{reason}。"
+                "固定小批量都无法过拟合说明梯度反传/损失计算/标签对齐存在"
+                "严重问题；中止全量训练，请先排查。")
     manifest = build_run_manifest(
         tag=tag, variant=args.variant, seed=seed, config_path=args.config,
         data_dir=args.data_dir, device=device, sanity=sanity_info)
@@ -1104,7 +1120,14 @@ def main():
         if identity["hard_mismatches"]:
             print("[train] ⚠ sanity 证据身份不一致（"
                   + ", ".join(identity["hard_mismatches"])
-                  + "）：该 PASS 不属于本 run，manifest/eval 按未验证记录")
+                  + "）：该 PASS 不属于本 run")
+            # 旧的/别的配置/数据/代码的 PASS 不是本 run 的闸门证据。
+            # 已显式要求绑定 sanity 时继续训练，等于用无法验证的结论开跑。
+            raise SystemExit(
+                "sanity 证据身份不一致（"
+                + ", ".join(identity["hard_mismatches"])
+                + "）：该结果不是针对本 run 的代码/配置/数据生成的，"
+                "不能作为开训闸门。请用当前配置/数据重跑 `lega.sanity`。")
         elif identity["unknown_fields"]:
             print("[train] ⚠ sanity 证据缺少身份字段（"
                   + ", ".join(identity["unknown_fields"])

@@ -428,14 +428,23 @@ def sanity_summary(path: str) -> dict:
     """
     out = {"file": os.path.abspath(path) if path else None, "present": False,
            "sha256": None, "passed": None, "variant": None, "seed": None,
-           "failed_checks": None, "initial_loss": None, "final_loss": None,
+           "failed_checks": None,
+           # passed 与 checks 是否自洽。损坏/手改的 sanity JSON 可能写
+           # "passed": true 却保留失败检查项；只有两者同时通过才算证据。
+           "checks_consistent": None,
+           # 非 null 表示字段结构损坏：调用方必须按“未通过/不可验证”
+           # 处理，不能把 malformed 当成 legacy 的“无法核对”而放行。
+           "malformed": False,
+           "initial_loss": None, "final_loss": None,
            "token_acc": None,
            # 证据身份：只有与当前 run 的 config/data/git 一致时，PASS 才能
            # 算作本 run 的代码正确性闸门（见 sanity_identity_check）
            "config_sha256": None, "data_fingerprint": None,
            "git_commit": None, "git_dirty": None,
            "worktree_diff_sha256": None, "worktree_recorded": False,
-           "worktree_available": None}
+           "worktree_available": None,
+           # 种子生效证据（sanity 自己也是 set_seed 后的产物）
+           "seed_verified": None, "data_order_rng_fingerprint": None}
     if not path or not os.path.exists(path):
         return out
     out["present"] = True
@@ -449,8 +458,22 @@ def sanity_summary(path: str) -> dict:
         return out
     checks = rec.get("checks")
     if isinstance(checks, dict):
-        out["failed_checks"] = sorted(k for k, v in checks.items() if not v)
-    for key in ("passed", "variant", "seed"):
+        # 只有真正的 JSON true 才算通过：0/1/"true"/null 都不能伪装成功。
+        out["failed_checks"] = sorted(k for k, v in checks.items()
+                                      if v is not True)
+        out["checks_consistent"] = not out["failed_checks"]
+    raw_passed = rec.get("passed")
+    if isinstance(raw_passed, bool):
+        out["passed"] = raw_passed
+    elif raw_passed is not None:
+        # 数字/字符串形式的 "passed" 是损坏记录，不得经 bool() 变成 PASS。
+        out["malformed"] = True
+    # 交叉校验：声明 passed=true 但存在失败检查项时，以检查结果为准并
+    # 显式标记不一致。这样 train/汇总/下游继承都不会被伪造的 PASS 骗过。
+    if out["passed"] is True and out["checks_consistent"] is False:
+        out["passed"] = False
+        out["malformed"] = True
+    for key in ("variant", "seed"):
         if rec.get(key) is not None:
             out[key] = rec[key]
     initial = rec.get("initial")
@@ -465,6 +488,13 @@ def sanity_summary(path: str) -> dict:
         for key in ("config_sha256",):
             if manifest.get(key) is not None:
                 out[key] = manifest[key]
+        seed_rep = manifest.get("seed_report")
+        if isinstance(seed_rep, dict):
+            if isinstance(seed_rep.get("seed_verified"), bool):
+                out["seed_verified"] = seed_rep["seed_verified"]
+            if isinstance(seed_rep.get("data_order_rng_fingerprint"), str):
+                out["data_order_rng_fingerprint"] = \
+                    seed_rep["data_order_rng_fingerprint"]
         git = manifest.get("git")
         if isinstance(git, dict):
             out["git_commit"] = git.get("commit")
@@ -645,6 +675,10 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "sanity_verified": None,
         "sanity_variant": None,
         "sanity_file": None,
+        # 闸门证据的自洽性：失败检查项/结构损坏不能继承成 PASS
+        "sanity_failed_checks": None,
+        "sanity_checks_consistent": None,
+        "sanity_malformed": None,
         # 训练 run 的种子生效证据与实际精度：下游评测结果继承后，单看
         # eval.json 也能核对“哪个 seed/bf16 还是 fp32”而不是只信目录名。
         "seed_report": None,
@@ -688,9 +722,23 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             # 才拒绝继承 PASS；旧清单缺 identity 时保留 PASS 但标记未验证。
             # 只继承真正的 JSON 布尔值："false"/"0"/1 经 bool() 会变成
             # True，把畸形清单伪装成已通过的 sanity 闸门。
+            failed_checks = msanity.get("failed_checks")
+            malformed = msanity.get("malformed")
             passed = msanity.get("passed")
+            if isinstance(failed_checks, list):
+                out["sanity_failed_checks"] = failed_checks
+            if isinstance(msanity.get("checks_consistent"), bool):
+                out["sanity_checks_consistent"] = \
+                    msanity["checks_consistent"]
+            if isinstance(malformed, bool):
+                out["sanity_malformed"] = malformed
+            # 失败检查项/损坏记录与 passed=true 矛盾时，以检查结果为准：
+            # 旧 manifest 可能由旧版 train 写入，不能因字段存在就继承 PASS。
+            gate_broken = (bool(failed_checks) or malformed is True)
             if isinstance(passed, bool) and not hard_mismatches:
-                out["sanity_passed"] = passed
+                out["sanity_passed"] = bool(passed) and not gate_broken
+            elif gate_broken:
+                out["sanity_passed"] = False
             verified = identity.get("verified")
             if isinstance(verified, bool):
                 out["sanity_verified"] = verified

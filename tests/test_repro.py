@@ -812,10 +812,26 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
             f.write("[1, 2]")
         assert sanity_summary(bad)["present"] is True
         assert sanity_summary(bad)["passed"] is None
+        # passed=true 与失败检查项矛盾：以 checks 为准，不能把伪造 PASS
+        # 写进 manifest/台账。
+        contradictory = os.path.join(d, "contradictory.json")
+        with open(contradictory, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "variant": "lega", "seed": 3,
+                       "checks": {"a": False, "b": True}}, f)
+        sc = sanity_summary(contradictory)
+        assert sc["passed"] is False and sc["malformed"] is True
+        assert sc["failed_checks"] == ["a"]
+        assert sc["checks_consistent"] is False
+        # 非布尔 passed 同样不能经 bool() 伪装成 PASS。
+        fake_pass = os.path.join(d, "fake_pass.json")
+        with open(fake_pass, "w", encoding="utf-8") as f:
+            json.dump({"passed": 1, "variant": "lega", "seed": 3}, f)
+        sf = sanity_summary(fake_pass)
+        assert sf["passed"] is None and sf["malformed"] is True
         good = os.path.join(d, "sanity_lega.json")
         with open(good, "w", encoding="utf-8") as f:
             json.dump({"passed": True, "variant": "lega", "seed": 3,
-                       "checks": {"a": True, "b": False},
+                       "checks": {"a": True, "b": True},
                        "initial": {"loss": 4.1}, "final": {"loss": 0.01,
                                                           "token_acc": 0.99},
                        "manifest": {
@@ -826,7 +842,7 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
                                         "diff_sha256": None}}}, f)
         s = sanity_summary(good)
         assert s["passed"] is True and s["variant"] == "lega" and s["seed"] == 3
-        assert s["failed_checks"] == ["b"]
+        assert s["failed_checks"] == [] and s["checks_consistent"] is True
         assert s["final_loss"] == 0.01 and s["token_acc"] == 0.99
         assert len(s["sha256"]) == 64
         # 身份字段提取：train 据此核对闸门是否属于本 run
@@ -857,8 +873,54 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
     print("  [ok] sanity 摘要绑定 manifest，load_provenance 继承 sanity_passed")
 
 
-def test_train_rejects_stale_sanity_evidence_identity():
-    """端到端：sanity 文件声明的 config 与本 run 不一致时不得冒充 PASS。"""
+def test_train_aborts_on_failed_or_missing_sanity_gate():
+    """端到端：显式 --sanity_file 未通过/缺失时不得进入全量训练。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=1024, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin"))
+        rng.integers(0, 64, size=128, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin"))
+        with open(os.path.join(data_dir, "meta.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "vocab_size": 64,
+                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
+                       "block_size": 32, "batch_size": 2, "steps": 1,
+                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
+                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
+                       "seed": 5, "log_every": 1, "eval_every": 1,
+                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+        sanity_path = os.path.join(d, "sanity_lega.json")
+        with open(sanity_path, "w", encoding="utf-8") as f:
+            json.dump({"passed": False, "variant": "lega", "seed": 5,
+                       "checks": {"token_acc_above_threshold": False},
+                       "initial": {}, "final": {}}, f)
+        for label, sfile, needle in (
+                ("failed", sanity_path, "sanity 闸门未通过"),
+                ("missing", os.path.join(d, "missing.json"),
+                 "sanity 闸门证据不可用")):
+            out_dir = os.path.join(d, f"out_{label}")
+            r = subprocess.run(
+                [sys.executable, "-m", "lega.train", "--config", cfg_path,
+                 "--variant", "lega", "--data_dir", data_dir,
+                 "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
+                 "--sanity_file", sfile],
+                cwd=root, capture_output=True, text=True)
+            assert r.returncode != 0, (label, r.stdout)
+            assert needle in r.stderr, (label, r.stderr)
+            assert not os.path.exists(os.path.join(out_dir, "model.pt"))
+            assert not os.path.exists(os.path.join(out_dir, "eval.json"))
+    print("  [ok] 失败/缺失的 sanity 证据中止训练，不产生 checkpoint")
+
+
+def test_train_aborts_on_stale_sanity_evidence_identity():
+    """端到端：sanity 文件身份与本 run 不一致时必须中止，而不是继续训练。"""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with tempfile.TemporaryDirectory() as d:
         data_dir = os.path.join(d, "data")
@@ -897,17 +959,11 @@ def test_train_rejects_stale_sanity_evidence_identity():
              "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
              "--sanity_file", sanity_path],
             cwd=root, capture_output=True, text=True)
-        assert r.returncode == 0, r.stderr
-        with open(os.path.join(out_dir, "run_manifest.json"),
-                  encoding="utf-8") as f:
-            manifest = json.load(f)
-        ident = manifest["sanity"]["identity"]
-        assert "config_sha256" in ident["hard_mismatches"]
-        assert ident["verified"] is False
-        with open(os.path.join(out_dir, "eval.json"), encoding="utf-8") as f:
-            ev = json.load(f)
-        assert ev["sanity_passed"] is None and ev["sanity_verified"] is False
-    print("  [ok] 旧配置的 sanity PASS 被身份校验拒绝绑定到本 run")
+        assert r.returncode != 0, r.stdout
+        assert "身份不一致" in r.stderr
+        assert not os.path.exists(os.path.join(out_dir, "eval.json"))
+        assert not os.path.exists(os.path.join(out_dir, "model.pt"))
+    print("  [ok] 旧配置的 sanity PASS 被身份校验拒绝并中止训练")
 
 
 def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
