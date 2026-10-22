@@ -1015,6 +1015,29 @@ def main():
     amp_enabled = config_bool(cfg.get("amp", True), "amp")
     amp_dt = amp_dtype_for(device, amp_enabled)
 
+    block_size = _config_int(cfg["block_size"], "block_size", 1)
+    train_ctx = min(_config_int(cfg.get("train_ctx", block_size),
+                                "train_ctx", 1), block_size)
+    d_model = _config_int(cfg["d_model"], "d_model", 1)
+    n_layers = _config_int(cfg["n_layers"], "n_layers", 1)
+    n_heads = _config_int(cfg["n_heads"], "n_heads", 1)
+    ffn_mult = _config_int(cfg.get("ffn_mult", 4), "ffn_mult", 1)
+    steps = _config_int(cfg["steps"], "steps", 1)
+    warmup = _config_int(cfg.get("warmup", 100), "warmup", 0)
+    grad_accum = _config_int(cfg.get("grad_accum", 1), "grad_accum", 1)
+    log_every = _config_int(cfg.get("log_every", 10), "log_every", 1)
+    eval_every = _config_int(cfg.get("eval_every", 500), "eval_every", 1)
+    eval_iters = _config_int(cfg.get("eval_iters", 50), "eval_iters", 1)
+    batch_size = _config_int(cfg["batch_size"], "batch_size", 1)
+    # 模型结构合法性也要在创建 out_dir/写 manifest 之前检查：否则非法
+    # d_model/n_heads 会在 GPT 构造时才失败，留下一个空的 run 产物目录。
+    if d_model % n_heads:
+        raise ValueError(
+            f"config.d_model={d_model} 必须能被 config.n_heads={n_heads} 整除")
+    if (d_model // n_heads) % 2:
+        raise ValueError(
+            f"config.d_model/n_heads={d_model // n_heads} 必须是偶数（RoPE）")
+
     tag = os.path.splitext(os.path.basename(args.config))[0] + ("_smoke" if args.smoke else "")
     out_dir = args.out_dir or os.path.join("out", tag, args.variant)
     os.makedirs(out_dir, exist_ok=True)
@@ -1117,20 +1140,6 @@ def main():
                             if isinstance(identity, dict) else None),
     }
 
-    block_size = _config_int(cfg["block_size"], "block_size", 1)
-    train_ctx = min(_config_int(cfg.get("train_ctx", block_size),
-                                "train_ctx", 1), block_size)
-    d_model = _config_int(cfg["d_model"], "d_model", 1)
-    n_layers = _config_int(cfg["n_layers"], "n_layers", 1)
-    n_heads = _config_int(cfg["n_heads"], "n_heads", 1)
-    ffn_mult = _config_int(cfg.get("ffn_mult", 4), "ffn_mult", 1)
-    steps = _config_int(cfg["steps"], "steps", 1)
-    warmup = _config_int(cfg.get("warmup", 100), "warmup", 0)
-    grad_accum = _config_int(cfg.get("grad_accum", 1), "grad_accum", 1)
-    log_every = _config_int(cfg.get("log_every", 10), "log_every", 1)
-    eval_every = _config_int(cfg.get("eval_every", 500), "eval_every", 1)
-    eval_iters = _config_int(cfg.get("eval_iters", 50), "eval_iters", 1)
-    batch_size = _config_int(cfg["batch_size"], "batch_size", 1)
     # 记录实际生效的数值（含 train_ctx 的 min 截断与字符串/整数值浮点规范化），
     # 保证下游评测复现同一口径，而不是复述未经执行的原始配置。
     cfg_used.update({
