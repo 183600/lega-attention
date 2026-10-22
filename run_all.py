@@ -6597,13 +6597,17 @@ def main():
     # 种子一律严格解析：int("1.5") 会直接抛错，而 int(1.5)/int(True) 会把
     # 1.5、true 静默截断成 1——结果目录与台账都会用错种子，且两个"不同"
     # 种子经 dict.fromkeys 去重后只剩一个，N 个种子的结论凭空变少。
-    if args.seeds:
+    if args.seeds is not None:
         seeds = _parse_seed_list(args.seeds, p, "--seeds")
     else:
-        cfg_seeds = cfg.get("seeds") or [cfg.get("seed", 1337)]
+        # 只有“未提供 seeds”才回退到单个 seed；显式 seeds=[]（或 --seeds ""）
+        # 是“没有种子”的配置错误，不能被 `or` 静默替换成默认种子。
+        cfg_seeds = cfg.get("seeds")
+        if cfg_seeds is None:
+            cfg_seeds = [cfg.get("seed", 1337)]
         if not isinstance(cfg_seeds, (list, tuple)):
             p.error(f"配置 seeds 需要整数列表，收到 {cfg_seeds!r}")
-        if args.smoke:
+        if args.smoke and cfg_seeds:
             seeds = [_strict_seed_int(cfg_seeds[0], p, "配置 seed")]
         else:
             seeds = [_strict_seed_int(s, p, "配置 seeds") for s in cfg_seeds]
