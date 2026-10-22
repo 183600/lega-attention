@@ -1553,9 +1553,10 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             # 而 GPT-2 BPE 是公开预训练词表（与语料无关、不构成泄露）。统一
             # 写死 "train_only" 会与 tokenizer.fit_on 矛盾，使“无全量拟合”
             # 的审计声明失真。
+            # 缺失时写 None（未知），不能默认成安全的 "train_only"：
+            # 报告没有来源证据时，预检必须能区分“未知”与“已在 train 上拟合”。
             "fit_on": (tokenizer.get("fit_on")
-                       if isinstance(tokenizer, dict) and tokenizer.get("fit_on")
-                       else "train_only"),
+                       if isinstance(tokenizer, dict) else None),
             "test_sealed": True,
             "shuffle_at_split_time": shuffle_at_split,
             "batch_shuffle_during_training_allowed": True,

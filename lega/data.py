@@ -209,6 +209,21 @@ def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
 
 # ---------------------------------------------------------------- bin 缓存
 
+def tokenizer_fit_source_ok(tokenizer, fit_on) -> bool:
+    """分词器种类与 fit_on 声明必须匹配。
+
+    char 词表只能在 train 上拟合；GPT-2 BPE 是公开预训练词表。只检查
+    fit_on 是否属于 {train, gpt2_pretrained} 会让 ``tokenizer="char"`` +
+    ``fit_on="gpt2_pretrained"``（或反向）通过，等于允许一份被篡改/旧流程
+    生成的缓存冒充“安全来源”。tokenizer 缺失时（旧 meta）保持兼容，只按
+    fit_on 判断。
+    """
+    if tokenizer in (None, ""):
+        return fit_on in ("train", "gpt2_pretrained")
+    return ((str(tokenizer) == "char" and fit_on == "train")
+            or (str(tokenizer) == "gpt2_bpe" and fit_on == "gpt2_pretrained"))
+
+
 def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                  report: bool = True, extra_report: dict = None) -> dict:
     """把 train.txt/val.txt（以及若存在的 test.txt）编码为 uint16 bin
@@ -249,7 +264,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             # 避免 char 缓存被 gpt2 请求静默复用（反之亦然）。
             cached_kind = "gpt2" if meta.get("tokenizer") == "gpt2_bpe" else "char"
         # 旧缓存可能是在 val/test 上拟合词表（泄露）或缺少防泄漏报告，必须重建
-        fit_ok = meta.get("fit_on") in ("train", "gpt2_pretrained")
+        fit_ok = tokenizer_fit_source_ok(meta.get("tokenizer"),
+                                         meta.get("fit_on"))
         integrity_ok, integrity_issue, no_sources = _cache_integrity(
             data_dir, meta, report_path, report)
 

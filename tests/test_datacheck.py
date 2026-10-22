@@ -1706,3 +1706,40 @@ def test_verify_splits_disjoint_compares_custom_required_splits():
         assert r["verified_disjoint"] is False
         assert r["overlap_long_lines"]["train_dev"]["exact_lines"] == 1
         assert "val_dev" in r["overlap_long_lines"]
+
+
+def test_tokenizer_fit_source_must_match_tokenizer_kind():
+    """char 必须 fit_on=train，GPT-2 BPE 必须 fit_on=gpt2_pretrained。"""
+    from lega.data import CACHE_SCHEMA, tokenizer_fit_source_ok
+    from lega.preflight import data_cache_schema_issue
+    assert tokenizer_fit_source_ok("char", "train") is True
+    assert tokenizer_fit_source_ok("gpt2_bpe", "gpt2_pretrained") is True
+    assert tokenizer_fit_source_ok("char", "gpt2_pretrained") is False
+    assert tokenizer_fit_source_ok("gpt2_bpe", "train") is False
+    # 旧 meta 没有 tokenizer 字段：保持兼容，仅按 fit_on 判断。
+    assert tokenizer_fit_source_ok(None, "train") is True
+    with tempfile.TemporaryDirectory() as d:
+        meta = os.path.join(d, "meta.json")
+
+        def _write(tok, fit_on):
+            with open(meta, "w", encoding="utf-8") as f:
+                json.dump({"cache_schema": CACHE_SCHEMA,
+                           "tokenizer": tok, "fit_on": fit_on}, f)
+        _write("char", "train")
+        assert data_cache_schema_issue(d) is None
+        _write("char", "gpt2_pretrained")
+        assert data_cache_schema_issue(d), "char+pretrained 不能通过"
+        _write("gpt2_bpe", "gpt2_pretrained")
+        assert data_cache_schema_issue(d) is None
+        _write("gpt2_bpe", "train")
+        assert data_cache_schema_issue(d), "bpe+train 不能通过"
+
+
+def test_data_report_without_fit_on_does_not_claim_safe_provenance():
+    """tokenizer 段缺少 fit_on 时，报告不能默认声明安全的 train_only。"""
+    from lega.preflight import data_report_protocol_issues
+    rep = build_data_report({"kind": "char", "vocab_size": 5},
+                            {}, {}, {}, {}, {})
+    assert rep["protocol"]["fit_on"] is None
+    issues = data_report_protocol_issues(rep)
+    assert any("fit_on" in msg for msg in issues), issues

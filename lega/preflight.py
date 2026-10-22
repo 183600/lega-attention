@@ -9,7 +9,7 @@
 import json
 import os
 
-from .data import CACHE_SCHEMA
+from .data import CACHE_SCHEMA, tokenizer_fit_source_ok
 from .datacheck import critical_split_alerts
 from .repro import sha256_file
 from .utils import strict_int
@@ -60,7 +60,12 @@ def data_report_protocol_issues(report) -> list:
     tokenizer = report.get("tokenizer")
     if isinstance(tokenizer, dict):
         fit_on = tokenizer.get("fit_on")
-        if fit_on is not None and str(fit_on) not in _SAFE_FIT_ON:
+        if fit_on is None:
+            # 非空 tokenizer 段却没有任何拟合来源：不能默认成安全来源。
+            if tokenizer:
+                add("报告 tokenizer 段缺少 fit_on：无法确认词表只在 train 上"
+                    "拟合（或使用公开预训练词表），按来源未知处理")
+        elif str(fit_on) not in _SAFE_FIT_ON:
             add(f"报告 tokenizer.fit_on={fit_on!r} 不可信："
                 "字符词表只能拟合 train，BPE 只能用公开预训练词表")
     prep_read = report.get("test_reads_at_prep")
@@ -315,9 +320,11 @@ def data_cache_schema_issue(data_dir: str):
     # 语料（含 val/test）上拟合过词表。prepare_bins 命中缓存时会检查
     # fit_on，但直接训练入口绕过它，这里必须补上同一道检查。
     fit_on = meta.get("fit_on")
-    if fit_on not in ("train", "gpt2_pretrained"):
-        return (f"数据缓存 fit_on={fit_on!r} 不可信：字符词表必须在 train 上"
-                "拟合（GPT-2 BPE 为公开预训练词表）；请重建 bin")
+    tokenizer = meta.get("tokenizer")
+    if not tokenizer_fit_source_ok(tokenizer, fit_on):
+        return (f"数据缓存 tokenizer={tokenizer!r}/fit_on={fit_on!r} 不可信："
+                "字符词表必须在 train 上拟合，GPT-2 BPE 必须使用公开预训练"
+                "词表；请重建 bin")
     return None
 
 
