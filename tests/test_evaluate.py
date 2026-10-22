@@ -550,3 +550,6 @@ def test_eval_amp_honors_recorded_effective_dtype():
     assert _resolve_eval_amp({"amp": False}, "cpu") is False
     # 字段类型损坏时不能静默猜测为启用精度。
     assert _resolve_eval_amp({"amp": True, "amp_dtype": ["bf16"]}, "cpu") is False
+    # 无 amp_dtype 的旧配置里 amp 损坏时同样保守回退 fp32，而不是崩溃。
+    for bad in ("maybe", 2, [True], {"on": 1}):
+        assert _resolve_eval_amp({"amp": bad}, "cpu") is False, bad

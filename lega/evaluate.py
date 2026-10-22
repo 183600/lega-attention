@@ -322,8 +322,13 @@ def _resolve_eval_amp(cfg_used: dict, device: str) -> bool:
         available = amp_dtype_for(device, True)
         return (available is not None
                 and str(available).replace("torch.", "") == name)
-    return amp_dtype_for(
-        device, config_bool(cfg_used.get("amp", True), "amp")) is not None
+    # 旧 checkpoint 没有 amp_dtype：回退到请求开关。损坏的 amp 值不能
+    # 让评测入口崩溃，也不能静默按 True 启用 bf16——保守回退到 fp32。
+    try:
+        amp_on = config_bool(cfg_used.get("amp", True), "amp")
+    except (TypeError, ValueError):
+        return False
+    return amp_dtype_for(device, amp_on) is not None
 
 
 def _read_run_eval(run_dir: str) -> dict:
