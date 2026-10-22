@@ -663,6 +663,16 @@ def test_validation_below_train_flags_leakage_or_mismatch():
                              [4.3, 3.8, 3.3, 2.9, 2.6]))
     assert d2["status"] == "正常收敛" and d2["val_below_train"] is False, d2
     assert any("无需干预" in r for r in d2["recommendations"]), d2
+    # 倒挂信号与曲线形状独立：训练仍下降、验证停滞（本会被判为过拟合趋势）
+    # 时也必须升级为泄漏/口径排查，不能给出“加正则化”的错误建议。
+    d3 = diagnose_curve(_log(
+        [4.2, 3.9, 3.6, 3.3, 3.0, 2.7, 2.5, 2.35, 2.2, 2.1],
+        [2.0, 2.01, 1.99, 2.0, 2.02, 2.0, 2.01, 2.0, 1.99, 2.0]))
+    assert d3["val_below_train"] is True, d3
+    assert d3["status"] == "验证损失倒挂（疑似泄漏/口径不一致）", d3
+    assert any("泄漏" in e for e in d3["evidence"]), d3["evidence"]
+    assert not any("正则化" in r or "早停" in r
+                   for r in d3["recommendations"]), d3["recommendations"]
     print("  [ok] 验证-训练损失倒挂 → 泄漏/口径排查（正常曲线不误报）")
 
 

@@ -1006,21 +1006,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"（{_fmt_rel(train_delta)}），"
                 f"验证损失 {_fmt_num(first_val)}→{_fmt_num(last_val)}"
                 f"（{_fmt_rel(val_delta)}）")
-            if val_below_train:
-                status = "验证损失倒挂（疑似泄漏/口径不一致）"
-                evidence.append(
-                    f"验证损失末段 {last_val:.4f} 显著低于训练损失末段 "
-                    f"{last_train:.4f}（{val_below_train_rel:+.1%}）："
-                    "这与常规泛化差距方向相反，不能按“收敛更好”解读；"
-                    "优先排查数据划分/预处理泄漏（train 与 val 文档重叠、"
-                    "词表或归一化在 val 上拟合）、训练与验证的评估口径差异"
-                    "（dropout/eval 模式、滑动平均、不同 token 集合）")
-                recommendations.append(
-                    "验证损失倒挂：先做数据泄漏/协议审计（datacheck 的跨 split "
-                    "重复与 n-gram 重叠、split 时序与文档边界），并核对训练/验证"
-                    "是否使用同一精度、同一 dropout 状态与同一损失口径；"
-                    "排除泄漏前不要报告该 run 的验证指标")
-            elif gain_sig:
+            if gain_sig:
                 evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
                                 f"{early_stop_gain:.1%}（超过评估噪声），"
                                 "已按 best-checkpoint 口径评测")
@@ -1039,6 +1025,29 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             recommendations.append(
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
+        # 验证-训练倒挂是数据/评测口径的完整性问题，与曲线形状（过拟合/
+        # 平台/欠拟合）独立：不能只在“正常收敛”分支里检查，否则一个仍在
+        # 下降但验证停滞的 run 会一边写 val_below_train=True、一边建议加
+        # 正则化。倒挂一旦成立，优先排查泄漏/口径，而不是调正则化。
+        if (val_below_train
+                and status in ("正常收敛", "过拟合", "过拟合趋势")):
+            status = "验证损失倒挂（疑似泄漏/口径不一致）"
+            evidence.append(
+                f"验证损失末段 {last_val:.4f} 显著低于训练损失末段 "
+                f"{last_train:.4f}（{val_below_train_rel:+.1%}）："
+                "这与常规泛化差距方向相反，不能按“收敛更好”解读；"
+                "优先排查数据划分/预处理泄漏（train 与 val 文档重叠、"
+                "词表或归一化在 val 上拟合）、训练与验证的评估口径差异"
+                "（dropout/eval 模式、滑动平均、不同 token 集合）")
+            recommendations[:] = [
+                r for r in recommendations
+                if not any(key in r for key in
+                           ("正则化", "早停", "无需干预", "过拟合"))]
+            recommendations.append(
+                "验证损失倒挂：先做数据泄漏/协议审计（datacheck 的跨 split "
+                "重复与 n-gram 重叠、split 时序与文档边界），并核对训练/验证"
+                "是否使用同一精度、同一 dropout 状态与同一损失口径；"
+                "排除泄漏前不要报告该 run 的验证指标")
 
     if val_ci_rel is not None:
         evidence.append(
