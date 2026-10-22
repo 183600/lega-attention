@@ -371,17 +371,37 @@ def test_cmd_env_sets_pythonhashseed_per_command_seed():
     """每条命令的 PYTHONHASHSEED 必须等于它自己的 --seed，而不是父进程基准值。"""
     e = _cmd_env([sys.executable, "-m", "lega.train", "--seed", "2024"])
     assert e["PYTHONHASHSEED"] == "2024"
-    assert e["CUBLAS_WORKSPACE_CONFIG"]  # CUDA 初始化前必须存在
+    assert e["CUBLAS_WORKSPACE_CONFIG"] in (":4096:8", ":16:8")
+    e_eq = _cmd_env([sys.executable, "-m", "lega.train", "--seed=2025"])
+    assert e_eq["PYTHONHASHSEED"] == "2025"
     base = dict(os.environ)
     base["PYTHONHASHSEED"] = "1337"
     assert _cmd_env([sys.executable, "x.py"], base)["PYTHONHASHSEED"] == "1337"
-    assert _cmd_env([sys.executable, "x.py", "--seed", "notint"], base
-                    )["PYTHONHASHSEED"] == "1337"
+    for bad in ("notint", "1.5", "-1", "True"):
+        try:
+            _cmd_env([sys.executable, "x.py", "--seed", bad], base)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 --seed 未被拒绝: {bad!r}")
+    try:
+        _cmd_env([sys.executable, "x.py", "--seed"], base)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("缺失 --seed 取值未被拒绝")
+    # 继承的 CUBLAS 值无效时必须改写为受支持配置；有效值保留
+    bad_cublas = dict(base, CUBLAS_WORKSPACE_CONFIG=":bad:")
+    assert _cmd_env([sys.executable, "x.py"], bad_cublas)[
+        "CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+    good_cublas = dict(base, CUBLAS_WORKSPACE_CONFIG=":16:8")
+    assert _cmd_env([sys.executable, "x.py"], good_cublas)[
+        "CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
     # 真实子进程验证：退出码非 0 即断言失败
     code = ("import os,sys;"
             "assert os.environ['PYTHONHASHSEED']==sys.argv[1], "
             "os.environ['PYTHONHASHSEED']")
-    run_many([[sys.executable, "-c", code, "42", "--seed", "42"]], 1)
+    run_many([[sys.executable, "-c", code, "42", "--seed=42"]], 1)
     print("  [ok] _cmd_env/run_many 逐命令对齐 PYTHONHASHSEED 与 --seed")
 
 

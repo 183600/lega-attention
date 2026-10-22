@@ -324,6 +324,24 @@ def test_seed_report_distinguishes_process_hashseed_from_child_env():
     print("  [ok] PYTHONHASHSEED 审计区分解释器启动值/子进程 env（不自证）")
 
 
+def test_set_seed_repairs_invalid_cublas_workspace_config():
+    """继承的非法 CUBLAS 配置会让确定性 CUDA 算法启动失败，必须改写。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("import os\n"
+            "from lega.utils import set_seed\n"
+            "set_seed(11)\n"
+            "print(os.environ['CUBLAS_WORKSPACE_CONFIG'])\n")
+    for bad, want in ((":bad:", ":4096:8"), ("", ":4096:8"),
+                      (":16:8", ":16:8")):
+        env = os.environ.copy()
+        env["CUBLAS_WORKSPACE_CONFIG"] = bad
+        r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip().splitlines()[-1] == want, (bad, r.stdout)
+    print("  [ok] set_seed 修正非法 CUBLAS_WORKSPACE_CONFIG 且保留合法值")
+
+
 def test_run_manifest_embeds_seed_report_and_runtime():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "train.bin"), "wb") as f:

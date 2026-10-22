@@ -59,6 +59,19 @@ def deterministic_algorithms_warn_only():
     return _LAST_SEED.get("deterministic_warn_only")
 
 
+CUBLAS_WORKSPACE_CONFIGS = (":4096:8", ":16:8")
+
+
+def ensure_cublas_workspace_config(env=None) -> str:
+    """确保 CUDA 确定性工作区配置有效；无效/缺失时改为标准值。"""
+    target = os.environ if env is None else env
+    value = target.get("CUBLAS_WORKSPACE_CONFIG")
+    if value not in CUBLAS_WORKSPACE_CONFIGS:
+        value = ":4096:8"
+        target["CUBLAS_WORKSPACE_CONFIG"] = value
+    return value
+
+
 def data_rng(seed: int) -> np.random.Generator:
     """项目唯一的“dataloader”随机源：显式种子的 NumPy Generator。
 
@@ -239,7 +252,7 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     # 训练结论依赖同 seed 的变体间对比；禁用 cudnn 自动调优并启用确定性算法
     # （warn_only 避免因个别无确定实现的 CUDA 算子直接中断，同时给出警告）。
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    ensure_cublas_workspace_config()
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     try:

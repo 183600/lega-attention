@@ -90,7 +90,8 @@ from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E402
                         runtime_info, sanity_summary, sha256_file,
                         worktree_state, write_worktree_patch)
-from lega.utils import (bootstrap_mean_ci, config_bool, get_device,
+from lega.utils import (bootstrap_mean_ci, config_bool,
+                        ensure_cublas_workspace_config, get_device,
                         holm_bonferroni, mean_std, min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
                         paired_t_test, save_json,
@@ -198,14 +199,19 @@ def _cmd_env(cmd, env=None):
     （没有 --seed 的命令如 latency/plots 沿用基准值）。
     """
     e = dict(env if env is not None else os.environ)
-    if "--seed" in cmd:
-        i = cmd.index("--seed")
-        if i + 1 < len(cmd):
-            try:
-                e["PYTHONHASHSEED"] = str(int(cmd[i + 1]))
-            except (TypeError, ValueError):
-                pass
-    e.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    seed_value = None
+    for i, arg in enumerate(cmd):
+        if arg == "--seed":
+            if i + 1 >= len(cmd):
+                raise ValueError("--seed 缺少取值")
+            seed_value = cmd[i + 1]
+            break
+        if isinstance(arg, str) and arg.startswith("--seed="):
+            seed_value = arg.split("=", 1)[1]
+            break
+    if seed_value is not None:
+        e["PYTHONHASHSEED"] = str(seed_int(seed_value, "--seed"))
+    ensure_cublas_workspace_config(e)
     return e
 
 
@@ -6269,8 +6275,8 @@ def main():
     # 子进程随机性/确定性环境：PYTHONHASHSEED 必须在解释器启动前设置；
     # 这里给出基准值（无 --seed 的命令用），带 --seed 的命令由 _cmd_env 逐条
     # 覆盖为自身种子。CUBLAS 工作区配置须在任何 CUDA 初始化前生效。
-    os.environ.setdefault("PYTHONHASHSEED", str(seeds[0]))
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    os.environ["PYTHONHASHSEED"] = str(seeds[0])
+    ensure_cublas_workspace_config()
 
     # 基线调优（可选）：先调 standard 的 lr/权重衰减（只用验证集，test 不加载），
     # 把最优组合注入配置并统一用于所有变体——保证对比是“调过的基线 vs 新方法”，
