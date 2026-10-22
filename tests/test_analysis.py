@@ -7,7 +7,7 @@ import math
 
 from lega.analysis import (_bounded_float, _float_grid, _int_at_least,
                            auroc_cluster_bootstrap, collect_records,
-                           summarize, tau_sensitivity)
+                           resolve_analysis_ctx, summarize, tau_sensitivity)
 from lega.data import CharTokenizer
 from lega.model import GPT
 
@@ -136,6 +136,26 @@ def test_analysis_numeric_args_reject_invalid_values():
     assert _int_at_least(2.0, "n_examples", 1) == 2
     assert _int_at_least(0, "bootstrap_resamples", 0) == 0
     print("  [ok] 分析数值参数：拒绝 bool/NaN/越界/显式 0 回退")
+
+
+def test_analysis_ctx_resolution_rejects_empty_room():
+    """ctx/max_new 非法或生成预算占满 block_size 时显式报错。
+
+    旧行为会把 ctx 夹成 <=0，所有样例被 ContextTooSmall 跳过，最终落盘一份
+    n_records=0 的“成功”空分析，配置错误被伪装成正常结果。
+    """
+    assert resolve_analysis_ctx(256, 512, 12) == 243
+    assert resolve_analysis_ctx(256, 64, 12) == 64
+    for args in ((256, 0, 12), (256, -5, 12), (256, 64, 0),
+                 (256, 64, -1), (10, 64, 12), (256, 64, 300),
+                 (True, 64, 12), (256, 1.5, 12)):
+        try:
+            resolve_analysis_ctx(*args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法分析 ctx 参数未被拒绝: {args!r}")
+    print("  [ok] 分析 ctx 预留生成位置并拒绝空 room/非法参数")
 
 
 def test_tau_sensitivity_sweep():

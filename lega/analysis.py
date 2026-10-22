@@ -131,6 +131,27 @@ def _int_at_least(value, name: str, minimum: int) -> int:
         raise ValueError(f"{name} 必须 >= {minimum}，收到 {out}")
     return out
 
+
+def resolve_analysis_ctx(block_size, requested_ctx, max_new) -> int:
+    """机制分析实际使用的上下文长度：为生成长度预留位置并显式校验。
+
+    与 `ruler.run_ruler` 的 room_ctx 口径一致：
+    ``min(requested_ctx, block_size - max_new - 1)``。若 max_new 非法（<=0）
+    或为生成预留后没有可用位置，必须显式报错而不是把 ctx 夹成 <=0：后者会
+    让所有样例以 ContextTooSmall 被跳过，最终写出 n_records=0 的“成功”
+    空分析，掩盖配置错误。requested_ctx 也必须 >=1（负值/零无法构造样例）。
+    """
+    block_size = _int_at_least(block_size, "block_size", 1)
+    requested_ctx = _int_at_least(requested_ctx, "ctx", 1)
+    max_new = _int_at_least(max_new, "ruler.max_new", 1)
+    room = block_size - max_new - 1
+    if room < 1:
+        raise ValueError(
+            f"block_size={block_size} 无法为 ruler.max_new={max_new} 的生成"
+            "预留至少 1 个 prompt 位置：机制分析 ctx 会 <=0，样例全部被跳过。"
+            "请减小 max_new 或增大 block_size")
+    return min(requested_ctx, room)
+
 # 命中判别（hit vs miss）正类率低于该值时以 PR-AUC 为主指标：此时负样本
 # 基数使 ROC-AUC 过于乐观（FPR 增长缓慢）。阈值集中在 lega.probe 定义
 # （线性探针基线复用同一口径），此处导入别名避免两处漂移。
@@ -789,9 +810,11 @@ def main():
                 f"ruler.ctx_lens 需要整数列表，收到 {raw_ctx_lens!r}")
         ctx = max(strict_int(x, "ruler.ctx_lens") for x in raw_ctx_lens)
     # run_ruler 为生成预留 max_new 个位置；机制分析必须使用同一个实际 room_ctx，
-    # 否则机制统计与 RULER 得分并不来自同一批样本。
+    # 否则机制统计与 RULER 得分并不来自同一批样本。非法 ctx/max_new（如
+    # 负数/零/生成预算占满 block_size）必须显式报错，而不是夹成 <=0 后
+    # 静默写出空分析。
     max_new = _cfg_int("ruler", "max_new", 12)
-    ctx = min(ctx, model.block_size - max_new - 1)
+    ctx = resolve_analysis_ctx(model.block_size, ctx, max_new)
     ruler_seed = _cfg_int("ruler", "seed", 1234)
 
     sents, corpus_source = load_corpus_sents_with_source(
