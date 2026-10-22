@@ -59,7 +59,7 @@ from .repro import load_provenance, sha256_file
 from .train import _val_eval_indices, evaluate_val
 from .utils import (amp_autocast, bootstrap_mean_ci, enable_tf32,
                     get_device, now_str, paired_sign_test, paired_t_test,
-                    save_json, set_seed, strict_int)
+                    save_json, seed_int, set_seed, strict_int)
 
 # 病灶定义（单一事实来源，run_all 汇总复用标签/目标/顺序）。
 # requires：需要的门控能力（query/conc/len/gated），任一缺失则该病灶不适用；
@@ -144,7 +144,15 @@ LESION_ORDER = tuple(spec["id"] for spec in LESION_SPECS)
 
 
 def _finite_or_none(value):
-    if isinstance(value, bool):
+    """严格有限浮点；bool/下划线数字串/NaN/Inf/坏类型返回 None。
+
+    门控干预的参数可能来自外部 JSON（逐头均值等）。与项目其他证据解析入口
+    同口径：``float("1_0") == 10.0``、``np.bool_(True)`` 经 float() 变成 1.0
+    都会把损坏/伪造的值伪装成合法门控强度。
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    if isinstance(value, str) and "_" in value:
         return None
     try:
         f = float(value)
@@ -221,9 +229,20 @@ def restore_gate_params(model, snapshot: Mapping[str, torch.Tensor]) -> None:
 
 
 def _layer_permutation(n_heads: int, seed: int, layer: int):
-    """确定性的非恒等头置换（恒等置换会让“安慰剂”变成空操作）。"""
-    rng = np.random.default_rng(int(seed) + 1000003 * int(layer))
-    perm = rng.permutation(int(n_heads))
+    """确定性的非恒等头置换（恒等置换会让“安慰剂”变成空操作）。
+
+    置换种子必须是合法的非负整数：``int(1.5)`` 会截断成 1，``int(True)``
+    会变成 1，使两次声明不同的置换实际相同，安慰剂对照的可复现性失真。
+    """
+    n_heads = strict_int(n_heads, "n_heads")
+    if n_heads < 1:
+        raise ValueError(f"n_heads 必须 >= 1，收到 {n_heads}")
+    seed = strict_int(seed, "perm_seed")
+    if seed < 0:
+        raise ValueError(f"perm_seed 必须 >= 0，收到 {seed}")
+    layer = strict_int(layer, "layer")
+    rng = np.random.default_rng(seed + 1000003 * layer)
+    perm = rng.permutation(n_heads)
     if n_heads > 1 and np.array_equal(perm, np.arange(n_heads)):
         perm = np.roll(np.arange(n_heads), 1)
     return perm
@@ -371,8 +390,10 @@ def gate_head_means(model, val, ctx: int, device: str, eval_iters: int,
     `[[head0_mean, ...], ...]`（层顺序与 `model.blocks` 一致）；某层没有
     门控统计时该层为 None（调用方会退化为全局均值或拒绝）。
     """
-    indices, _n_windows = _val_eval_indices(len(val), int(ctx), int(eval_iters))
-    batch_windows = max(1, min(16384 // max(1, int(ctx)), len(indices)))
+    ctx = strict_int(ctx, "ctx")
+    eval_iters = strict_int(eval_iters, "eval_iters")
+    indices, _n_windows = _val_eval_indices(len(val), ctx, eval_iters)
+    batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
     sums = None
     counts = None
     was_training = model.training
@@ -425,14 +446,29 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
     窗口级 t/符号检验只作描述：PPL 窗口按时间顺序排列、相邻窗口可能相关，
     i.i.d. 假设会低估不确定性。跨种子的确认性口径在 run_all 汇总（每个
     种子先聚合成一个 Δ，再对种子做配对检验）。
+
+    非有限/非数值/下划线数字串的窗口 loss 按缺失剔除，并在 ``n_invalid_windows``
+    如实计数：把 NaN 传给 paired_t_test 会让 n 与实际 ``n_windows`` 不一致，
+    均值也会变成 NaN，下游 PPL 比/显著性由此失真。
     """
     if len(base_losses) != len(lesion_losses):
         return {"n_windows": 0, "error": "窗口数不一致",
                 "delta_losses": []}
-    deltas = [float(a) - float(b)
-              for a, b in zip(lesion_losses, base_losses)]
+    deltas = []
+    invalid = 0
+    for a, b in zip(lesion_losses, base_losses):
+        fa, fb = _finite_or_none(a), _finite_or_none(b)
+        if fa is None or fb is None:
+            invalid += 1
+            continue
+        delta = fa - fb
+        if not math.isfinite(delta):
+            invalid += 1
+            continue
+        deltas.append(delta)
     if not deltas:
-        return {"n_windows": 0, "error": "无窗口", "delta_losses": []}
+        return {"n_windows": 0, "error": "无有效窗口", "delta_losses": [],
+                "n_invalid_windows": invalid}
     paired = paired_t_test(deltas, [0.0] * len(deltas))
     sign = paired_sign_test(deltas, [0.0] * len(deltas))
     ci = bootstrap_mean_ci(deltas)
@@ -440,7 +476,7 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
     se = None
     if len(deltas) >= 2:
         se = float(np.std(deltas, ddof=1) / math.sqrt(len(deltas)))
-    return {
+    out = {
         "n_windows": len(deltas),
         "delta_loss_mean": mean,
         "delta_loss_se": se,
@@ -452,6 +488,9 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
         "window_n_neg": sign.get("n_neg"),
         "delta_losses": deltas,
     }
+    if invalid:
+        out["n_invalid_windows"] = invalid
+    return out
 
 
 def _evaluate_once(model, val, ctx, device, eval_iters, amp) -> Dict:
@@ -495,12 +534,20 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
             "该分析只适用于 gate_only/qgate/lega 及其消融")
 
     ckpt_seed = ck.get("seed")
-    if seed is None and ckpt_seed is not None:
-        try:
-            seed = strict_int(ckpt_seed, "checkpoint seed")
-        except (TypeError, ValueError):
-            seed = None
-    set_seed(0 if seed is None else int(seed))
+    if seed is None:
+        if ckpt_seed is not None:
+            try:
+                seed = seed_int(ckpt_seed, "checkpoint seed")
+            except (TypeError, ValueError):
+                seed = None
+    else:
+        # 显式传入的 seed 同样走全项目统一的严格种子口径：int(True)==1、
+        # int(1.5)==1 会让实际播种/写入结果的种子与调用方声明不一致。
+        seed = seed_int(seed, "seed")
+    perm_seed = strict_int(perm_seed, "perm_seed")
+    if perm_seed < 0:
+        raise ValueError(f"perm_seed 必须 >= 0，收到 {perm_seed}")
+    set_seed(0 if seed is None else seed)
 
     # 与 lega.evaluate 相同的评测上下文/窗口数/AMP 口径：病灶前后的差异
     # 必须只来自门控参数，不能混入评测协议变化。
@@ -657,8 +704,8 @@ def main():
     p.add_argument("--seed", default=None,
                    help="覆盖 checkpoint 记录的种子（只影响确定性置换/播种，"
                         "不改变权重）")
-    p.add_argument("--perm_seed", type=int, default=0,
-                   help="头置换病灶的确定性随机种子（默认 0）")
+    p.add_argument("--perm_seed", default="0",
+                   help="头置换病灶的确定性随机种子（默认 0；严格整数）")
     p.add_argument("--allow_data_protocol_violations", action="store_true",
                    help="即使 data_report 有严重泄露告警也继续（仅复现历史；"
                         "结果不得用于正式结论）")
@@ -670,9 +717,15 @@ def main():
         except (TypeError, ValueError) as e:
             p.error(str(e))
     try:
+        perm_seed = strict_int(args.perm_seed, "--perm_seed")
+    except (TypeError, ValueError) as e:
+        p.error(str(e))
+    if perm_seed < 0:
+        p.error(f"--perm_seed 必须 >= 0，收到 {perm_seed}")
+    try:
         payload = run_ablation(
             args.ckpt, args.data_dir, eval_iters=args.eval_iters, ctx=args.ctx,
-            device=args.device, seed=seed, perm_seed=args.perm_seed,
+            device=args.device, seed=seed, perm_seed=perm_seed,
             allow_data_protocol_violations=args.allow_data_protocol_violations)
     except (ValueError, FileNotFoundError) as e:
         p.error(str(e))

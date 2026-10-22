@@ -17,6 +17,7 @@ from lega.ablate import (LESION_BY_ID, LESION_ORDER, apply_lesion,
                          gate_capabilities, gate_head_means,
                          lesion_applicability, restore_gate_params,
                          run_ablation, snapshot_gate_params,
+                         _finite_or_none, _layer_permutation,
                          _window_delta_stats)
 from lega.factorial import (CELL_ORDER, decomposition, oriented_value,
                             ppl_ratio_from_phi, shapley_values)
@@ -296,6 +297,21 @@ def test_run_ablation_end_to_end_tiny_checkpoint():
                        "amp_dtype": None}, f)
         tokens = (np.arange(1024, dtype=np.uint16) % 64).astype(np.uint16)
         tokens.tofile(os.path.join(d, "val.bin"))
+        # 显式 seed / perm_seed 不能经 int() 截断：True→1、1.5→1 会让落盘
+        # seed 与实际播种不一致，甚至两次声明不同置换实际相同。
+        for bad in (True, 1.5, -1, 2**32):
+            try:
+                run_ablation(ckpt, d, eval_iters=2, ctx=16,
+                             device="cpu", seed=bad)
+                raise AssertionError(f"seed={bad!r} 应显式报错")
+            except ValueError:
+                pass
+        try:
+            run_ablation(ckpt, d, eval_iters=2, ctx=16, device="cpu",
+                         seed=1, perm_seed=True)
+            raise AssertionError("perm_seed=True 应显式报错")
+        except ValueError:
+            pass
         payload = run_ablation(ckpt, d, eval_iters=2, ctx=16,
                                device="cpu", seed=1)
         assert payload["variant"] == "lega"
@@ -321,7 +337,44 @@ def test_window_delta_stats_pairs_by_window():
     assert abs(st["delta_loss_mean"] - 0.5) < 1e-12
     assert st["delta_losses"] == [0.5, 0.5, 0.5, 0.5]
     assert st["p_window_t"] is not None
-    print("  [ok] 病灶窗口差按位置配对，Δ=lesion−normal")
+    # 坏窗口 loss 不能污染均值/有效样本量：NaN、bool、下划线数字串按缺失剔除，
+    # 并如实报告被剔除的窗口数。
+    st_bad = _window_delta_stats(
+        [1.0, float("nan"), 3.0, 4.0, True, "1_0"],
+        [2.0, 2.0, 4.0, float("inf"), 5.0, 6.0])
+    assert st_bad["n_windows"] == 2, st_bad
+    assert st_bad["n_invalid_windows"] == 4, st_bad
+    assert st_bad["delta_losses"] == [1.0, 1.0], st_bad
+    assert math.isfinite(st_bad["delta_loss_mean"]), st_bad
+    assert _window_delta_stats([float("nan")], [1.0])["n_windows"] == 0
+    print("  [ok] 病灶窗口差按位置配对，Δ=lesion−normal；"
+          "坏窗口 loss 不污染均值与配对样本量")
+
+
+def test_ablate_numeric_and_seed_guards():
+    """新模块的严格数值/种子口径与全项目一致。"""
+    for poor in ("1_0", True, np.bool_(True), float("nan"),
+                 float("inf"), None, "bad"):
+        assert _finite_or_none(poor) is None, poor
+    assert _finite_or_none("0.25") == 0.25
+    for poor in (True, 1.5, -1, "1_0"):
+        try:
+            _layer_permutation(2, poor, 0)
+            raise AssertionError(f"perm_seed={poor!r} 应显式报错")
+        except ValueError:
+            pass
+    perm = _layer_permutation(4, 7, 0)
+    assert sorted(perm.tolist()) == [0, 1, 2, 3]
+    assert not np.array_equal(perm, np.arange(4))
+    # 逐头恒定门均值同样拒绝坏类型/下划线数字串，不静默写成合法门控。
+    model = _tiny("lega")
+    snap = snapshot_gate_params(model)
+    bad = apply_lesion(model, "gate_constant_mean",
+                       gate_head_mean=[["0.2_5", 0.5], [0.5, 0.5]])
+    assert bad["applied"] is False, bad
+    restore_gate_params(model, snap)
+    print("  [ok] 病灶消融：坏数值/截断种子显式拒绝，头置换仍确定性非恒等")
+
 
 
 def _payload(variant, seed, lesion_deltas, no_op=False):
