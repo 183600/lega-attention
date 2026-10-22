@@ -11,6 +11,7 @@ import tempfile
 
 import numpy as np
 
+import lega.plots as plots
 from lega.plots import (_HAS_MPL, _expected_tagged, _group_by_variant,
                         _group_items, _load_train_logs, _mean_by_step,
                         _ppl_split_label, _prefer_seeded, _read_records,
@@ -512,6 +513,29 @@ def test_plots_tolerate_malformed_nested_fields():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 图表：畸形嵌套字段/CSV 单元格安全跳过")
+
+
+def test_fig_ruler_plots_converted_numeric_string_metric(monkeypatch):
+    """数值字符串先转 float 再画：直接乘 100 会变成字符串分类轴。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_ruler 数值字符串测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "ruler_lega.json", {
+            "variant": "lega",
+            "results": {"niah_synth": {
+                "256": {"em": "0.5"}, "512": {"em": 0.25}}}})
+        captured = []
+        monkeypatch.setattr(plots.plt, "close",
+                            lambda fig: captured.append(fig))
+        assert fig_ruler(tmp) is True
+        assert captured
+        ys = captured[0].axes[0].lines[0].get_ydata()
+        assert np.allclose(np.asarray(ys, dtype=float), [50.0, 25.0]), ys
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] RULER 图：数值字符串指标按真实数值绘制")
 
 
 def test_fig_auroc_heads_tolerates_non_list_per_head():

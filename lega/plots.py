@@ -415,8 +415,14 @@ def fig_ruler(rdir):
             items.sort(key=lambda it: it[0])
             # fwe 主指标是 top-10 recall；其余检索任务为 EM。
             metric = "recall" if task == "fwe" else "em"
-            points = [(x, m[metric]) for x, m in items
-                      if _finite_float(m.get(metric)) is not None]
+            # 校验通过后必须用转换后的 float 画图：旧版产物里数值可能是
+            # "0.5" 这类字符串，直接乘 100 会变成重复字符串，被 matplotlib
+            # 当成分类轴静默画到 0 附近（图错误但不报错）。
+            points = []
+            for x, m in items:
+                val = _finite_float(m.get(metric))
+                if val is not None:
+                    points.append((x, val))
             if not points:
                 continue
             xs = [x for x, _ in points]
