@@ -549,9 +549,13 @@ def test_plots_tolerate_malformed_nested_fields():
         assert fig_auroc_heads(tmp, variant="lega") is True
         with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
                   encoding="utf-8") as f:
-            f.write("task,g,hit,c,log_n\nx,zzz,1,1,2\n")
+            f.write("task,g,hit,c,log_n\nx,zzz,1,1,2\n"
+                    "y,1_0,1,inf,2\n")
         cols = _read_records(tmp, "lega")
         assert np.isnan(cols["g"][0])
+        # "1_0"（=10.0）与 "inf" 不是规范观测：按缺失处理，不能画出伪点。
+        assert np.isnan(cols["g"][1]) and np.isnan(cols["c"][1])
+        assert cols["hit"][1] == 1.0 and cols["log_n"][1] == 2.0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 图表：畸形嵌套字段/CSV 单元格安全跳过")

@@ -656,10 +656,18 @@ def _read_records(rdir, variant):
                     if v in ("", "None", "nan"):
                         file_cols[name].append(np.nan)
                         continue
+                    # 与 _finite_float 同口径拒绝下划线数字串；CSV 单元格里的
+                    # "1_0"（=10.0）、"inf" 不是规范观测，按缺失处理，避免
+                    # 坏记录伪造出图上的点或把坐标轴拉到无穷。
+                    if "_" in v:
+                        file_cols[name].append(np.nan)
+                        continue
                     try:
-                        file_cols[name].append(float(v))
+                        f = float(v)
                     except (TypeError, ValueError, OverflowError):
                         file_cols[name].append(np.nan)
+                        continue
+                    file_cols[name].append(f if math.isfinite(f) else np.nan)
         per_file.append((file_cols, n_rows))
     out = {}
     # 合并多种子文件时表头可能因代码版本不同而缺列。每个文件在行空间里占
