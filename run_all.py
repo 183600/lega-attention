@@ -4426,10 +4426,25 @@ def build_summary(results_dir: str, audit: dict = None,
                 else:
                     cells.append(_fmt_scalar(r.get(k)))
             md.append("| " + " | ".join(cells) + " |")
-        split_note = ("PPL 在 held-out test 集上评测（checkpoint 选择在 val 上完成）"
-                      if eval_splits == {"test"} and not invalid_eval_split else
-                      "⚠ PPL 在 val 集上评测，该集同时用于 best-checkpoint 选择，"
-                      "数值偏乐观；请用 prepare_data.py 生成 held-out test 后重跑评测")
+        if invalid_eval_split or len(eval_splits) != 1:
+            shown_splits = sorted((str(x) for x in eval_splits))
+            split_note = (
+                "⚠ PPL 评测 split 缺失、非法或不一致"
+                + (f"（{', '.join(shown_splits)}）" if shown_splits else "")
+                + "：跨变体数值可能来自不同切片，不能直接比较；请统一用 "
+                "held-out test（或在同一 val 上）重跑评测")
+        elif "test" in eval_splits:
+            split_note = ("PPL 在 held-out test 集上评测（checkpoint 选择在 "
+                          "val 上完成）")
+        elif "val" in eval_splits:
+            split_note = ("⚠ PPL 在 val 集上评测，该集同时用于 best-checkpoint "
+                          "选择，数值偏乐观；请用 prepare_data.py 生成 "
+                          "held-out test 后重跑评测")
+        else:
+            only_split = next(iter(eval_splits))
+            split_note = (f"⚠ PPL 在 {only_split} 集上评测（非 val/test 口径）："
+                          "该切片的绝对 PPL 不能与 val/test 数值直接比较，"
+                          "也不能用于 held-out 泛化结论")
         min_n = min((r.get("n_seeds") or 1) for r in rows)
         seed_note = (f"关键指标至少 {min_n} 个随机种子；变体间比较为同种子配对。"
                      if min_n >= 3 else

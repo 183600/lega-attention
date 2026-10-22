@@ -3313,6 +3313,27 @@ def test_build_summary_worst_window_scope_requires_valid_total():
     print("  [ok] build_summary：缺失/非法 worst_window_scope.total 不伪造覆盖率")
 
 
+def test_build_summary_split_note_matches_actual_eval_split():
+    """非 val/test 或混合 split 不能被报告说成“在 val 集上评测”。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+            "split": "train"})
+        md = build_summary(tmp)["markdown"]
+        assert "PPL 在 val 集上评测" not in md, md
+        assert "PPL 在 train 集上评测" in md, md
+        # 不同变体混用 val/test 时也不得只挑一边来宣传。
+        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
+            "variant": "standard", "seed": 1, "val_ppl": 11.0,
+            "val_loss": 2.4, "split": "test"})
+        md2 = build_summary(tmp)["markdown"]
+        assert "评测 split 缺失、非法或不一致" in md2, md2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：PPL split 标注与真实评测集一致")
+
+
 def test_tradeoff_prefers_sdpa_runtime_baseline():
     """涨点-增幅的运行时要与主表同一基线（standard_sdpa 优先）。"""
     tmp = tempfile.mkdtemp()
