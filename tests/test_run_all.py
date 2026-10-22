@@ -2400,6 +2400,8 @@ def test_ngram_window_paired_test_uses_same_window_indices():
         assert out["reference_source"] == "window_matched", out
         assert r["window_paired_n_seeds"] == 3, r
         assert abs(r["window_paired_mean_diff"] - 0.5) < 1e-12, r
+        assert r["window_paired_block_ci95"] is not None, r
+        assert r["window_paired_block_length_min"] >= 1, r
         assert r["window_paired_p_adj"] is not None, r
         assert r["window_paired_verdict"].startswith("窗口级显著劣于"), r
         text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
@@ -3931,6 +3933,9 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     assert abs(t["mean_diff"] - (-0.75)) < 1e-12, t  # seed7 -1, seed8 -0.5
     assert t["ppl_ratio"] < 1.0, t
     assert t["mean_diff_ci95"][1] < 0, t
+    assert t["block_mean_diff_ci95"][1] < 0, t
+    assert t["block_length_min"] >= 1 and t["block_length_max"] >= 1, t
+    assert "mean_lag1_autocorr" in t, t
     assert t["p_adj"] is not None and t["p_adj"] < 0.05, t
     assert t["verdict"].startswith("窗口级显著优于"), t
 

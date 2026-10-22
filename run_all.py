@@ -1403,7 +1403,14 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
 
     输入 seed_diffs 是每个种子的窗口差数组；返回平均差、百分位区间、
     中心化零分布 p 值（P(|mean*−obs| ≥ |obs|)）与同号重采样比例。
-    固定 seed 保证可复现；窗口独立重采样忽略空间相关，区间仅为近似。
+    固定 seed 保证可复现。
+
+    同时给出 i.i.d. 窗口重采样与移动块（moving-block）重采样：窗口按时间
+    顺序排列时，相邻窗口可能受同一文本片段/上下文漂移影响，把它们当成
+    独立观测会低估区间。块长取各序列 ``round(n^(1/3))``（n<4 时退化为 1，
+    即与 i.i.d. 相同），块起点在循环序列上均匀抽取；同时报告 lag-1
+    自相关均值，便于判断两种区间为何不同。块 bootstrap 仍是近似，只作
+    探索性稳健性证据。
     """
     arrays = [np.asarray(d, dtype=np.float64) for d in (seed_diffs or [])
               if np.asarray(d).size]
@@ -1428,8 +1435,49 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
               if obs != 0 else 1.0)
     same_sign = (float(np.mean((reps > 0) == (obs > 0)))
                  if obs != 0 else 0.0)
+
+    # 移动块 bootstrap：块内保留窗口顺序/相邻相关，块间独立。块长用
+    # n^(1/3) 的经验规则；n<4 时块长 1（等价于 i.i.d. 重采样）。
+    def _block_len(n):
+        return max(1, int(round(int(n) ** (1.0 / 3.0)))) if n >= 4 else 1
+    block_lengths = [_block_len(d.size) for d in arrays]
+    block_reps = np.empty(int(n_resamples), dtype=np.float64)
+    for r in range(int(n_resamples)):
+        sidx = rng.integers(0, n_seeds, n_seeds)
+        means = []
+        for si in sidx:
+            d = arrays[int(si)]
+            bl = block_lengths[int(si)]
+            if bl <= 1:
+                idx = rng.integers(0, d.size, d.size)
+            else:
+                n_blocks = (d.size + bl - 1) // bl
+                starts = rng.integers(0, d.size, n_blocks)
+                idx = ((starts[:, None] + np.arange(bl)[None, :]) % d.size)
+                idx = idx.reshape(-1)[:d.size]
+            means.append(float(d[idx].mean()))
+        block_reps[r] = float(np.mean(means))
+    b_lo, b_hi = np.quantile(block_reps, [alpha, 1.0 - alpha])
+    b_ge = int((np.abs(block_reps - obs) >= abs(obs)).sum())
+    p_block = (((b_ge + 1) / (int(n_resamples) + 1))
+               if obs != 0 else 1.0)
+    b_same_sign = (float(np.mean((block_reps > 0) == (obs > 0)))
+                   if obs != 0 else 0.0)
+    lag1 = []
+    for d in arrays:
+        if d.size >= 3:
+            x, y = d[:-1], d[1:]
+            if np.std(x) > 0 and np.std(y) > 0:
+                v = float(np.corrcoef(x, y)[0, 1])
+                if math.isfinite(v):
+                    lag1.append(v)
     return {"mean_diff": obs, "mean_diff_ci95": [float(lo), float(hi)],
             "p": p_boot, "bootstrap_same_sign": same_sign,
+            "block_mean_diff_ci95": [float(b_lo), float(b_hi)],
+            "block_p": p_block, "block_bootstrap_same_sign": b_same_sign,
+            "block_length_min": int(min(block_lengths)),
+            "block_length_max": int(max(block_lengths)),
+            "mean_lag1_autocorr": (float(np.mean(lag1)) if lag1 else None),
             "n_resamples": int(n_resamples),
             "n_seeds": n_seeds,
             "n_windows_min": int(min(d.size for d in arrays)),
@@ -1520,6 +1568,12 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "min_windows_per_seed": MIN_PPL_WINDOWS,
             "mean_diff": obs,
             "mean_diff_ci95": stats["mean_diff_ci95"],
+            "block_mean_diff_ci95": stats.get("block_mean_diff_ci95"),
+            "block_p": stats.get("block_p"),
+            "block_bootstrap_same_sign": stats.get("block_bootstrap_same_sign"),
+            "block_length_min": stats.get("block_length_min"),
+            "block_length_max": stats.get("block_length_max"),
+            "mean_lag1_autocorr": stats.get("mean_lag1_autocorr"),
             "ppl_ratio": float(math.exp(min(20.0, obs))),
             "p": stats["p"], "p_adj": None,
             "bootstrap_same_sign": stats["bootstrap_same_sign"],
@@ -1527,8 +1581,9 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "per_seed": per_seed,
             "verdict": None,
             "note": ("逐窗口 NLL 差（候选−参照），负值=候选更好；"
-                     "分层 bootstrap 同时重采样种子与窗口，窗口独立重采样"
-                     "忽略空间相关，仅作探索性稳健性证据"),
+                     "分层 bootstrap 同时重采样种子与窗口；i.i.d. 口径忽略"
+                     "窗口相关，block_* 为移动块重采样（块长 n^(1/3)）的"
+                     "稳健性对照，二者均为探索性证据"),
         }
         if skipped:
             res["excluded_runs"] = skipped
@@ -2871,6 +2926,16 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                                         if win_stats else None),
             "window_paired_ci95": (win_stats["mean_diff_ci95"]
                                    if win_stats else None),
+            "window_paired_block_ci95": (
+                win_stats.get("block_mean_diff_ci95") if win_stats else None),
+            "window_paired_block_p": (
+                win_stats.get("block_p") if win_stats else None),
+            "window_paired_block_length_min": (
+                win_stats.get("block_length_min") if win_stats else None),
+            "window_paired_block_length_max": (
+                win_stats.get("block_length_max") if win_stats else None),
+            "window_paired_mean_lag1_autocorr": (
+                win_stats.get("mean_lag1_autocorr") if win_stats else None),
             "window_paired_ppl_ratio": (
                 float(math.exp(min(20.0, win_stats["mean_diff"])))
                 if win_stats else None),
@@ -3299,14 +3364,17 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 "  **逐窗口配对（探索性；比“与常数做单样本检验”多利用窗口"
                 "抽样信息）**",
                 "",
-                "| 变体 | 种子 | 窗口数 | ΔNLL(神经−n-gram) | 95% CI | PPL比 | "
-                "p_adj(Holm) | 判定 |",
-                "|---|---|---|---|---|---|---|---|",
+                "| 变体 | 种子 | 窗口数 | ΔNLL(神经−n-gram) | 95% CI | "
+                "块bootstrap 95% CI | PPL比 | p_adj(Holm) | 判定 |",
+                "|---|---|---|---|---|---|---|---|---|",
             ]
             for r in win_rows:
                 ci = r.get("window_paired_ci95") or [None, None]
                 ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
                         if ci[0] is not None and ci[1] is not None else "-")
+                bci = r.get("window_paired_block_ci95") or [None, None]
+                bci_s = (f"[{bci[0]:+.4f}, {bci[1]:+.4f}]"
+                         if bci[0] is not None and bci[1] is not None else "-")
                 ratio = (f"{r['window_paired_ppl_ratio']:.4f}"
                          if r.get("window_paired_ppl_ratio") is not None else "-")
                 padj = (_fmt4(r.get("window_paired_p_adj"))
@@ -3316,10 +3384,13 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                     f"{r.get('window_paired_n_windows_min')}–"
                     f"{r.get('window_paired_n_windows_max')} | "
                     f"{_fmt4(r.get('window_paired_mean_diff'))} | {ci_s} | "
-                    f"{ratio} | {padj} | {r.get('window_paired_verdict')} |")
+                    f"{bci_s} | {ratio} | {padj} | "
+                    f"{r.get('window_paired_verdict')} |")
             lines += ["", "  注: ΔNLL<0 表示神经模型在相同窗口上更好；分层 "
                       "bootstrap 同时重采样训练种子与评测窗口，窗口独立"
-                      "重采样忽略空间相关，故只作探索性证据。该检验要求"
+                      "重采样忽略空间相关；块bootstrap 用移动块（块长 "
+                      "n^(1/3)）保留相邻窗口相关，两者并报，以更宽区间"
+                      "解读稳健性，故只作探索性证据。该检验要求"
                       "神经与 n-gram 使用同一批窗口序号；不满足时主表仍"
                       "保留，但逐窗口行不生成。"]
     elif cmp.get("error"):
@@ -5372,8 +5443,8 @@ def build_summary(results_dir: str, audit: dict = None,
            "个窗口时只报点估计/区间，不生成“显著”措辞（重采样自由度不足）。", ""]
     if ppl_window_tests:
         md += ["| 对比 | 种子 | 窗口数(最小–最大) | ΔNLL均值 | 分层bootstrap 95% CI | "
-               "PPL比 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",
-               "|---|---|---|---|---|---|---|---|---|"]
+               "块bootstrap 95% CI | PPL比 | p_adj(Holm) | 种子级判定（供对照） | 结论 |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
         for t in ppl_window_tests:
             seed_t = _find_test(tests, (t.get("candidate"), t.get("reference")),
                                 "PPL")
@@ -5382,6 +5453,9 @@ def build_summary(results_dir: str, audit: dict = None,
             ci = t.get("mean_diff_ci95") or [None, None]
             ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
                     if ci[0] is not None and ci[1] is not None else "-")
+            bci = t.get("block_mean_diff_ci95") or [None, None]
+            bci_s = (f"[{bci[0]:+.4f}, {bci[1]:+.4f}]"
+                     if bci[0] is not None and bci[1] is not None else "-")
             ratio = (f"{t['ppl_ratio']:.4f}"
                      if t.get("ppl_ratio") is not None else "-")
             padj = (f"{t['p_adj']:.4f}"
@@ -5389,13 +5463,15 @@ def build_summary(results_dir: str, audit: dict = None,
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
                 f"{t['n_windows_min']}–{t['n_windows_max']} | "
-                f"{t['mean_diff']:+.4f} | {ci_s} | {ratio} | {padj} | "
+                f"{t['mean_diff']:+.4f} | {ci_s} | {bci_s} | {ratio} | {padj} | "
                 f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
         md += ["", "注: ΔNLL 为负表示候选的窗口平均交叉熵更低（更好）。"
                "分层 bootstrap 的 p 值由中心化重采样分布计算，与种子级 t "
-               "检验不是同一个零假设；两者冲突时说明“换训练种子”和“换评测"
-               "窗口”给出不同信息，均不足以单独升级为确认性结论。逐种子"
-               "窗口胜负明细见 `significance.json` 的 `ppl_window_pairs`。"]
+               "检验不是同一个零假设；块bootstrap 用移动块（块长 n^(1/3)）"
+               "保留相邻窗口相关，与 i.i.d. 区间并报，以更宽者解读稳健性。"
+               "两者冲突时说明“换训练种子”和“换评测窗口”给出不同信息，"
+               "均不足以单独升级为确认性结论。逐种子窗口胜负明细见 "
+               "`significance.json` 的 `ppl_window_pairs`。"]
     else:
         md.append("（缺少逐窗口损失（旧产物）或没有同 split/同协议的配对 run；"
                   "重新运行独立评测即可启用。）")
