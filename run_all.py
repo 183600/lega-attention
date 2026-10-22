@@ -3386,7 +3386,9 @@ def apply_scope_gate(hyp_eval: list, scope_check: dict) -> list:
         # 不因“没有可核对的字段”本身降级已通过的完整性判定。
         return hyp_eval
     problems = _as_text_list(scope_check.get("problems"))
-    if not problems and scope_check.get("checked"):
+    # checked 必须是真正的 bool true：字符串 "false"/1 经 truthiness 会被
+    # 当成“已核对在范围内”，从而跳过缺 repro/config 时的确认性降级。
+    if not problems and scope_check.get("checked") is True:
         return hyp_eval
     reason = ("本次运行超出预注册范围：" + "；".join(problems)
               if problems else

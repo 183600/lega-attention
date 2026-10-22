@@ -4282,6 +4282,12 @@ def test_registration_paths_tolerate_malformed_hypotheses_and_status():
     apply_scope_gate(hyp, {"scope": {"config": "x"}, "checked": False,
                            "problems": [1]})
     assert hyp[0]["confirmatory_valid"] is False
+    # checked 字段损坏时不能经 truthiness 当成“已核对在范围内”。
+    for bogus in ("false", 1, "yes", [1], {"ok": True}, None):
+        hp = [{"confirmatory_valid": True}]
+        apply_scope_gate(hp, {"scope": {"config": "x"},
+                              "checked": bogus, "problems": []})
+        assert hp[0]["confirmatory_valid"] is False, bogus
     md = _render_registration_integrity(
         {"status": [1, 2], "problems": [1], "warnings": 5},
         {"scope": 5, "checked": False, "problems": "x"})
