@@ -3541,6 +3541,16 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     assert _ruler_avg_micro([1]) is None
     assert _ruler_avg_micro({"results": [1]}) is None
     assert _ruler_avg_micro({"results": {"vt": {"8": {"n": 0}}}}) is None
+    # n=0 / 非法 n 的单元格没有有效观测，不能用一个空洞的 em=0 拉低 macro。
+    zero_cell = {"results": {
+        "niah_synth": {"8": {"em": 1.0, "n": 10},
+                       "16": {"em": 0.0, "n": 0}}}}
+    assert abs(_ruler_avg_of(zero_cell) - 1.0) < 1e-12
+    assert abs(_ruler_avg_micro(zero_cell) - 1.0) < 1e-12
+    bad_n_cell = {"results": {
+        "niah_synth": {"8": {"em": 1.0, "n": 10},
+                       "16": {"em": 0.0, "n": 1.5}}}}
+    assert abs(_ruler_avg_of(bad_n_cell) - 1.0) < 1e-12
     # EM/F1 等是 [0,1] 比例：越界值不能参与 macro 或 micro 平均（否则汇总
     # 会出现 >100% 的“RULER 平均”并制造方法有效的假象）。
     bad = {"results": {"niah_synth": {"8": {"em": 1.5, "n": 10},

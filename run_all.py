@@ -1644,6 +1644,11 @@ def _ruler_task_means(d, metric: str = "em"):
     产物里的 1.5 或 -1 若被当成合法观测，会把 RULER 平均推到 100% 以上或
     负值，直接制造“方法有效/失效”的假结论。越界值按缺失处理，与
     `_ruler_depth_means` 的校验口径一致。
+
+    单元格的 n 是样本数：n=0（或负数/非整数）表示该格没有有效观测，不能
+    用一个空洞的 em=0 拉低 macro 平均；这与 `_ruler_avg_micro` /
+    `_ruler_depth_means` 只接受正计数的口径一致。旧产物缺 n 字段时保持
+    兼容（保留该格），显式 n 非法则按缺失处理。
     """
     if not isinstance(d, dict):
         return {}
@@ -1659,6 +1664,10 @@ def _ruler_task_means(d, metric: str = "em"):
         for m in by_ctx.values():
             if not isinstance(m, dict):
                 continue
+            if "n" in m and m.get("n") is not None:
+                n = _integral_value(m.get("n"))
+                if n is None or n <= 0:
+                    continue
             v = _finite_number(m.get(metric))
             if v is not None and 0.0 <= v <= 1.0:
                 vals.append(v)
