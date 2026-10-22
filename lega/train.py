@@ -635,11 +635,15 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                     f"batch_windows 必须是正整数，收到 {batch_windows}")
         # 设备端累积，循环结束后统一读取。
         # 窗口等长，权重即窗口数，用 Python int 就地累计。
+        # 设备端累积。用 float64：默认初始化下 g 可能逐 token 完全相同，
+        # E[g²]−E[g]² 在 fp32 会发生灾难性抵消，把常数值算出随 batch 分组
+        # 变化的 1e-4 级“假 std”。二阶矩与门控分布统计都必须在 fp64 上累加。
+        _gate_dtype = torch.float64
         loss_acc = torch.zeros((), device=device)
-        gate_acc = torch.zeros((), device=device)
-        gate_sq_acc = torch.zeros((), device=device)
-        gate_low_acc = torch.zeros((), device=device)
-        gate_high_acc = torch.zeros((), device=device)
+        gate_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        gate_sq_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        gate_low_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        gate_high_acc = torch.zeros((), dtype=_gate_dtype, device=device)
         gate_layer_acc = []
         total_w = 0
         gate_w_total = 0
@@ -679,13 +683,14 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                         g = s_.get("g")
                         if g is None:
                             continue
-                        gf = g.detach().float()
+                        gf = g.detach().to(_gate_dtype)
                         means.append(gf.mean())
                         sqs.append((gf * gf).mean())
-                        lows.append((gf < GATE_SAT_LOW).float().mean())
-                        highs.append((gf > GATE_SAT_HIGH).float().mean())
+                        lows.append((gf < GATE_SAT_LOW).to(_gate_dtype).mean())
+                        highs.append((gf > GATE_SAT_HIGH).to(_gate_dtype).mean())
                         if li >= len(gate_layer_acc):
-                            gate_layer_acc.append(torch.zeros((), device=device))
+                            gate_layer_acc.append(
+                                torch.zeros((), dtype=_gate_dtype, device=device))
                         gate_layer_acc[li].add_(means[-1], alpha=float(nb))
                     if means:
                         gate_acc.add_(torch.stack(means).mean(), alpha=float(nb))

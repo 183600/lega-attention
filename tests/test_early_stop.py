@@ -543,3 +543,21 @@ def test_train_does_not_sample_batches_beyond_final_step():
             train_mod.get_train_batch = orig
         # 初始预热 grad_accum 个 + 每个非末步预取 grad_accum 个
         assert len(calls) == cfg["steps"] * cfg["grad_accum"], len(calls)
+
+
+def test_gate_std_is_not_batch_grouping_noise_for_constant_gate():
+    """默认门控初始化下 g 恒定，gate_std 必须是 0 且与 batch_windows 无关。"""
+    import numpy as np
+    from lega.model import GPT
+    from lega.train import evaluate_val
+    torch.manual_seed(0)
+    model = GPT(vocab_size=64, block_size=32, d_model=16, n_layers=2,
+                n_heads=2, ffn_mult=2, variant="lega", dropout=0.0,
+                attn_dropout=0.0)
+    val = (np.arange(0, 200, dtype=np.int64) % 64).astype(np.uint16)
+    a = evaluate_val(model, val, 32, "cpu", 6, batch_windows=1)
+    b = evaluate_val(model, val, 32, "cpu", 6, batch_windows=3)
+    assert a["gate_std"] is not None and a["gate_std"] < 1e-12, a["gate_std"]
+    assert b["gate_std"] is not None and b["gate_std"] < 1e-12, b["gate_std"]
+    assert abs(a["gate_std"] - b["gate_std"]) < 1e-12
+    assert abs(a["gate_mean"] - b["gate_mean"]) < 1e-12
