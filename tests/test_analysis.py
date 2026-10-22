@@ -298,6 +298,29 @@ def test_summarize_rejects_non_binary_hit_and_missing_maxp():
     print("  [ok] summarize：非二值 hit 被剔除、缺 max_p 不产生 NaN、超范围层头跳过")
 
 
+def test_out_of_range_probabilities_are_missing_not_evidence():
+    """max_p/g 越界不可能来自 softmax/sigmoid，不能伪造集中率或完美校准。"""
+    recs = [
+        {"example": 0, "hit": 1.0, "max_p": 2.0, "g": 2.0,
+         "logit": 2.0, "qterm": 0.5, "c": 1.0, "log_n": 4.0,
+         "layer": 0, "head": 0},
+        {"example": 1, "hit": 0.0, "max_p": -1.0, "g": -1.0,
+         "logit": -2.0, "qterm": -0.5, "c": -1.0, "log_n": 4.0,
+         "layer": 0, "head": 0},
+    ]
+    s = summarize(recs, "lega", 0.5)
+    assert s["hit_rate"] == 0.5
+    assert s["conc_rate"] is None, s
+    assert s["p_hit_given_conc"] is None and s["p_hit_given_notconc"] is None
+    assert s["misleading_rate"] is None
+    assert s["calibration_g"] is None and s["brier_g"] is None
+    assert s["mean_g_hit"] is None and s["mean_g_miss"] is None
+    ts = tau_sensitivity(recs, [0.3, 0.5])
+    assert ts["conc_rate"] == [None, None], ts
+    assert ts["p_hit_given_conc"] == [None, None], ts
+    print("  [ok] 越界 max_p/g 按缺失处理，不伪造集中与校准证据")
+
+
 def test_bootstrap_filters_missing_scores_per_resample():
     """部分分数缺失不应让整个 bootstrap 重采样作废。"""
     recs = []

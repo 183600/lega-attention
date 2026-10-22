@@ -283,6 +283,18 @@ def _record_arrays(records: List[Dict], key: str) -> np.ndarray:
     return np.array(vals, dtype=np.float64)
 
 
+def _probability_arrays(records: List[Dict], key: str) -> np.ndarray:
+    """提取概率列，并把 [0,1] 外的值按缺失处理。
+
+    max_p 来自 softmax、g 来自 sigmoid，越界值只可能是损坏/伪造记录。
+    若照常参与统计，max_p=2 会被当成“永远集中”，g=2 会得到 Brier=0
+    的假完美校准，直接把机制结论推向相反方向。
+    """
+    values = _record_arrays(records, key)
+    values[(values < 0.0) | (values > 1.0)] = np.nan
+    return values
+
+
 def _conc_stats(hit: np.ndarray, max_p: np.ndarray, tau: float) -> Dict:
     """给定集中度阈值 τ 的全部条件统计（misleading 系与 P(hit|集中) 系）。
 
@@ -319,7 +331,7 @@ def tau_sensitivity(records: List[Dict], taus: List[float]) -> Dict:
     逐 τ 输出全部条件统计，供汇总表并列展示与人工审视。
     """
     hit = _record_arrays(records, "hit")
-    max_p = _record_arrays(records, "max_p")
+    max_p = _probability_arrays(records, "max_p")
     # 与 summarize 同一口径：hit 必须是 0/1 标签，其他有限值（如 1.5、-1）
     # 不能冒充命中/未命中，否则条件概率会越界或方向错误。
     hit[(hit != 0.0) & (hit != 1.0)] = np.nan
@@ -456,8 +468,8 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     if n == 0:
         return {"variant": variant, "n_records": 0}
     hit = _record_arrays(records, "hit")
-    max_p = _record_arrays(records, "max_p")
-    g = _record_arrays(records, "g")
+    max_p = _probability_arrays(records, "max_p")
+    g = _probability_arrays(records, "g")
     logit = _record_arrays(records, "logit")
     qterm = _record_arrays(records, "qterm")
     c = _record_arrays(records, "c")
