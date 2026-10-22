@@ -3,7 +3,8 @@ import numpy as np
 import torch
 
 from lega.model import GPT
-from lega.sanity import (active_regularization, batch_metrics,
+from lega.sanity import (active_regularization, batch_contract,
+                         batch_fingerprint, batch_metrics,
                          gradient_coverage, losses_consistent,
                          run_overfit_check)
 
@@ -385,3 +386,20 @@ def test_overfit_check_requires_regularization_disabled():
     assert res["checks"]["regularization_disabled"] is False
     assert res["active_regularization"] == active
     print(f"  [ok] 未关闭正则化被 sanity 自动拦下（{len(active)} 处）")
+
+
+def test_batch_fingerprint_detects_content_and_label_changes():
+    """固定批指纹必须由 dtype/形状/内容决定，改标签或挪一位都要变。"""
+    x, y = _batch()
+    fp = batch_fingerprint(x, y)
+    assert len(fp) == 64
+    assert batch_fingerprint(x.clone(), y.clone()) == fp
+    y2 = y.clone()
+    y2[0, 0] = (int(y2[0, 0]) + 1) % 64
+    assert batch_fingerprint(x, y2) != fp
+    # 错误的 y=x（未右移一位）既会被 batch_contract 的移位检查拦下，
+    # 也会产生不同内容指纹。
+    assert batch_fingerprint(x, x[:, :-1]) != fp
+    bad = torch.zeros(1, 1, dtype=torch.long)
+    assert batch_contract(bad, bad, 64)["errors"]
+    print("  [ok] sanity 固定批内容指纹对标签/内容变化敏感")

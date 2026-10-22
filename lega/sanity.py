@@ -24,6 +24,7 @@ log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 
 退出码：0=通过，1=未通过（run_all 会用其阻断后续全量训练）。
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -193,6 +194,28 @@ def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
     return (math.isfinite(fa) and math.isfinite(fb)
             and math.isclose(fa, fb, rel_tol=float(rel_tol),
                              abs_tol=float(abs_tol)))
+
+
+def batch_fingerprint(x, y) -> str:
+    """固定批的内容指纹：dtype/形状/原始字节，供第三方独立复算核对。
+
+    只记录 seed 证明不了“这次实际消费的是哪一批数据”（RNG 被提前消耗、
+    采样代码或 memmap 内容变化都会产生不同批次）。sanity 结果内嵌该指纹后，
+    任何人可用同一 seed + data_rng(seed) 重建首步固定批并比对。
+    """
+    h = hashlib.sha256()
+    for name, t in (("x", x), ("y", y)):
+        if not torch.is_tensor(t):
+            raise ValueError(f"{name} 不是张量")
+        a = t.detach().cpu().contiguous().numpy()
+        h.update(name.encode("ascii"))
+        h.update(b"\0")
+        h.update(str(a.dtype).encode("ascii"))
+        h.update(b"\0")
+        h.update(str(tuple(a.shape)).encode("ascii"))
+        h.update(b"\0")
+        h.update(a.tobytes())
+    return h.hexdigest()
 
 
 def batch_contract(x, y, vocab_size: int) -> dict:
@@ -655,19 +678,25 @@ def main():
         loss_threshold=float(opt["loss_threshold"]),
         acc_threshold=float(opt["acc_threshold"]),
         initial_loss_tol=float(opt["initial_loss_tol"]))
+    sanity_manifest = build_run_manifest(
+        tag="sanity", variant=args.variant, seed=seed,
+        config_path=args.config, data_dir=args.data_dir, device=device)
     res.update({
         "variant": args.variant,
         "variant_cn": VARIANT_CN[args.variant],
         "seed": seed,
         "batch_size": batch_size,
         "ctx": ctx,
+        # 实际消费的固定批内容指纹（与 seed/data_rng 复算结果对账）
+        "batch_sha256": batch_fingerprint(x, y),
+        "data_order_rng_fingerprint":
+            sanity_manifest.get("seed_report", {}).get(
+                "data_order_rng_fingerprint"),
         "device": device,
         "config_file": os.path.abspath(args.config),
         "data_dir": os.path.abspath(args.data_dir),
         "data_protocol_preflight": data_preflight,
-        "manifest": build_run_manifest(
-            tag="sanity", variant=args.variant, seed=seed,
-            config_path=args.config, data_dir=args.data_dir, device=device),
+        "manifest": sanity_manifest,
     })
     last = res["history"][-1]["loss"] if res["history"] else float("nan")
     if res.get("initial") is None or res.get("final") is None:
