@@ -199,6 +199,8 @@ def test_bool_seeds_are_not_integer_seed_one():
         assert _seed_int("1_0") is None
         # NumPy 大整数必须保持身份，不能经 float 往返丢精度
         assert _seed_int(np.int64(2**53 + 1)) == 2**53 + 1
+        # 大整数“字符串”同样不能经 float 往返后与相邻种子合并
+        assert _seed_int("9007199254740993") == 2**53 + 1
         # 单种子约定下，带 bool seed 的裸文件不能冒充 seed1 的结果
         _w(tmp, "repro.json", {"seeds": [1]})
         _w(tmp, "eval_lega.json",
@@ -425,6 +427,42 @@ def test_fig_latency_respects_variant_scope():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 延迟图：范围外变体不进入 prefill/decode 曲线")
+
+
+def test_fig_latency_ignores_noncanonical_ctx_keys():
+    """ctx key "1_0"/"040" 不能经 int() 变成 10/40 并出现在图上。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_latency 非规范 ctx 测试")
+        return
+    import matplotlib.axes as maxes
+    from unittest import mock
+    from lega.plots import _ctx_int, _ctx_key_int
+    assert _ctx_key_int("256") == 256
+    assert _ctx_key_int("1_0") is None
+    assert _ctx_key_int("040") is None
+    assert _ctx_key_int("256.0") is None
+    assert _ctx_int(256.0) == 256 and _ctx_int(256.5) is None
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "latency.json", {"variants": {
+            "lega": {"prefill_ms": {"1_0": {"1": 10.0},
+                                     "256": {"1": 12.0}},
+                     "decode_ms_per_tok": {"1_0": 1.0, "256": 1.2},
+                     "decode_prefill_ctx": {"1_0": "1_0", "256": 256.0}}}})
+        xs = []
+        orig = maxes.Axes.plot
+
+        def spy(self, *a, **kw):
+            if kw.get("marker") in ("o", "s"):
+                xs.append(tuple(a[0]))
+            return orig(self, *a, **kw)
+
+        with mock.patch.object(maxes.Axes, "plot", spy):
+            assert fig_latency(tmp) is True
+        assert xs == [(256,), (256,)], xs
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 延迟图：非规范 ctx key/实际 ctx 不进入曲线")
 
 
 def test_ppl_split_label_reports_actual_split():

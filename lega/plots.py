@@ -94,13 +94,47 @@ def _seed_int(v):
         return None
     if isinstance(v, (int, np.integer)):
         return int(v)
-    # float("1_0")==10.0：下划线写法不是规范整数串，不能静默合并到种子 10。
-    if isinstance(v, str) and "_" in v:
-        return None
+    if isinstance(v, str):
+        s = v.strip()
+        # float("1_0")==10.0：下划线写法不是规范整数串，不能静默合并到种子 10。
+        if "_" in s:
+            return None
+        # 纯整数串直接 int()，避免大整数（>2**53）经 float 往返后与相邻
+        # 种子合并；"1.0"/"1e3" 等旧产物数值串仍走 float 路径。
+        if re.fullmatch(r"[+-]?\d+", s) is not None:
+            return int(s)
     f = _finite_float(v)
     if f is None or f != math.floor(f):
         return None
     return int(f)
+
+
+def _ctx_int(v):
+    """上下文长度/数值 → 严格整数；bool/小数/非有限/下划线串 → None。"""
+    if isinstance(v, (bool, np.bool_)):
+        return None
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if "_" in s or re.fullmatch(r"[+-]?\d+", s) is None:
+            return None
+        return int(s)
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(f) or not f.is_integer():
+        return None
+    return int(f)
+
+
+def _ctx_key_int(k):
+    """JSON 对象的 ctx key → 规范整数；"1_0"/"040"/" 256 " 等不合并。"""
+    ctx = _ctx_int(k)
+    if ctx is None or not isinstance(k, str) or k != str(ctx):
+        return None
+    return ctx
 
 
 def _load(path):
@@ -410,9 +444,8 @@ def fig_ruler(rdir):
                 continue
             items = []
             for k, m in r[task].items():
-                try:
-                    ctx = int(k)
-                except (TypeError, ValueError, OverflowError):
+                ctx = _ctx_key_int(k)
+                if ctx is None:
                     continue
                 items.append((ctx, m))
             items.sort(key=lambda it: it[0])
@@ -467,10 +500,10 @@ def fig_latency(rdir):
         for c, cell in prefill.items():
             if not isinstance(cell, dict):
                 continue
-            try:
-                by_ctx[int(c)] = cell
-            except (TypeError, ValueError, OverflowError):
+            ctx = _ctx_key_int(c)
+            if ctx is None:
                 continue
+            by_ctx[ctx] = cell
         if by_ctx:
             series.append((v, e, by_ctx))
     def _usable_batch_keys(by_ctx):
@@ -544,12 +577,11 @@ def fig_latency(rdir):
             dec = _finite_float(val)
             if dec is None:
                 continue
-            try:
-                ctx = int(c)
-            except (TypeError, ValueError, OverflowError):
+            ctx = _ctx_key_int(c)
+            if ctx is None:
                 continue
-            actual_ctx = _finite_float(actual.get(c))
-            x = int(actual_ctx) if actual_ctx is not None else ctx
+            actual_ctx = _ctx_int(actual.get(c))
+            x = actual_ctx if actual_ctx is not None else ctx
             points.append((x, dec))
         if not points:
             continue
