@@ -634,6 +634,8 @@ def test_verify_ledger_checks_embedded_sanity_evidence():
         def _good_sanity():
             return {"passed": True, "malformed": False,
                     "checks_consistent": True, "failed_checks": [],
+                    "checks_complete": True, "missing_checks": [],
+                    "steps_complete": True, "batch_sha256": "b" * 64,
                     "seed_verified": True, "variant": "lega",
                     "identity": {"hard_mismatches": []}}
 
@@ -672,6 +674,16 @@ def test_verify_ledger_checks_embedded_sanity_evidence():
         mismatch = _good_sanity()
         mismatch["variant"] = "standard"
         _add("variant_bad", None, [_run(sanity=mismatch)])
+        incomplete = _good_sanity()
+        incomplete.update({"checks_complete": False,
+                           "missing_checks": ["grads_finite"]})
+        _add("checks_incomplete", None, [_run(sanity=incomplete)])
+        short = _good_sanity()
+        short["steps_complete"] = False
+        _add("steps_short", None, [_run(sanity=short)])
+        badbatch = _good_sanity()
+        badbatch["batch_sha256"] = "xyz"
+        _add("batch_bad", None, [_run(sanity=badbatch)])
         _add("verdict_bad", None, [_run(sanity=_good_sanity())],
              verdict={"lega": "fail"})
         # aborted 记录的 sanity 本就是 fail（失败历史），verify 不得因此报错
@@ -697,6 +709,14 @@ def test_verify_ledger_checks_embedded_sanity_evidence():
                    for x in by_id["identity_bad"]["issues"]), by_id["identity_bad"]
         assert any("variant_mismatch" in x
                    for x in by_id["variant_bad"]["issues"]), by_id["variant_bad"]
+        assert any("checks_incomplete" in x
+                   for x in by_id["checks_incomplete"]["issues"]), by_id["checks_incomplete"]
+        assert any("checks_missing" in x
+                   for x in by_id["checks_incomplete"]["issues"]), by_id["checks_incomplete"]
+        assert any("steps_incomplete" in x
+                   for x in by_id["steps_short"]["issues"]), by_id["steps_short"]
+        assert any("batch_fingerprint_malformed" in x
+                   for x in by_id["batch_bad"]["issues"]), by_id["batch_bad"]
         assert any("verdict_not_pass" in x
                    for x in by_id["verdict_bad"]["issues"]), by_id["verdict_bad"]
     finally:

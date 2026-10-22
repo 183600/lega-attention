@@ -21,12 +21,26 @@ import sys
 import numpy as np
 import torch
 
-from .utils import deterministic_algorithms_warn_only
+from .utils import deterministic_algorithms_warn_only, strict_int
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FINGERPRINT_ALGO = "sha256-16"
 _CACHE_NAME = ".lega_fingerprint.json"
+
+# 完整 sanity 结果必须覆盖的“代码正确性”检查项（与 lega.sanity 的输出同名）。
+# 只在结果文件带 batch_sha256（可区分“最小手写/旧格式”与真实 CLI 产物）
+# 时强制要求，避免把 checks 子集当成完整闸门；旧文件缺失时保持兼容，
+# 但会记录 missing_checks=None 而不是伪造“完整”。
+SANITY_REQUIRED_CHECKS = frozenset({
+    "batch_contract_ok",
+    "loss_below_threshold", "token_acc_above_threshold", "loss_decreased",
+    "finite", "loss_requires_grad",
+    "gradient_nonzero_first_step", "all_params_get_grads",
+    "no_zero_grads_first_step", "grads_finite",
+    "train_loss_matches_direct_logits", "next_token_shift_consistent",
+    "initial_loss_near_log_vocab", "regularization_disabled",
+})
 
 
 def _git(args, cwd):
@@ -435,6 +449,12 @@ def sanity_summary(path: str) -> dict:
            # 非 null 表示字段结构损坏：调用方必须按“未通过/不可验证”
            # 处理，不能把 malformed 当成 legacy 的“无法核对”而放行。
            "malformed": False,
+           # 完整检查覆盖：缺项时即使其余项全 true 也不能算“完整闸门”。
+           "missing_checks": None, "checks_complete": None,
+           # 固定批内容指纹与实际执行的优化步数（计划 vs 实际）。
+           "batch_sha256": None,
+           "steps_planned": None, "steps_executed": None,
+           "steps_complete": None,
            "initial_loss": None, "final_loss": None,
            "token_acc": None,
            # 证据身份：只有与当前 run 的 config/data/git 一致时，PASS 才能
@@ -475,6 +495,42 @@ def sanity_summary(path: str) -> dict:
         # “旧文件没有 checks”而放行。
         out["checks_consistent"] = False
         out["malformed"] = True
+    batch = rec.get("batch_sha256")
+    if batch is not None:
+        if (not isinstance(batch, str) or len(batch) != 64
+                or any(ch not in "0123456789abcdef" for ch in batch)):
+            out["malformed"] = True
+        else:
+            out["batch_sha256"] = batch
+    if (isinstance(checks, dict) and checks
+            and out["batch_sha256"] is not None):
+        # batch_sha256 是真实 sanity CLI 的产物标记：此时 checks 必须是完整
+        # 的现代检查集，不能被裁剪成“只剩 loss”仍冒充通过。
+        missing = sorted(SANITY_REQUIRED_CHECKS - set(checks))
+        out["missing_checks"] = missing
+        out["checks_complete"] = not missing
+        if missing:
+            out["malformed"] = True
+    for key in ("steps_planned", "steps_executed"):
+        value = rec.get(key)
+        if value is None:
+            continue
+        try:
+            value = strict_int(value, f"sanity.{key}")
+        except (TypeError, ValueError, OverflowError):
+            out["malformed"] = True
+            continue
+        if value < 0:
+            out["malformed"] = True
+            continue
+        out[key] = value
+    if out["steps_planned"] is not None and out["steps_executed"] is not None:
+        out["steps_complete"] = (out["steps_planned"] > 0
+                                 and out["steps_executed"]
+                                 == out["steps_planned"])
+        if out["steps_complete"] is False:
+            # 计划步数未跑完（NaN/断流提前 break）却声明 PASS：证据自相矛盾。
+            out["malformed"] = True
     raw_passed = rec.get("passed")
     if isinstance(raw_passed, bool):
         out["passed"] = raw_passed

@@ -11,7 +11,8 @@ import numpy as np
 import torch
 
 from lega.data import CACHE_SCHEMA, get_train_batch
-from lega.repro import (build_run_manifest, data_fingerprint, git_info,
+from lega.repro import (SANITY_REQUIRED_CHECKS, build_run_manifest,
+                        data_fingerprint, git_info,
                         load_provenance, provenance_drift, runtime_info,
                         sanity_identity_check, sha256_file,
                         test_data_fingerprint as _test_data_fingerprint,
@@ -998,6 +999,46 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         assert s["worktree_recorded"] is True
         assert s["worktree_available"] is True
         assert s["worktree_diff_sha256"] is None
+        # 现代完整 sanity 产物（带 batch_sha256）：必须覆盖全部必需检查项，
+        # 且计划步数全部执行，才算完整闸门。
+        all_checks = {k: True for k in SANITY_REQUIRED_CHECKS}
+        modern = os.path.join(d, "modern.json")
+        with open(modern, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "batch_sha256": "b" * 64,
+                       "steps_planned": 10, "steps_executed": 10,
+                       "checks": all_checks}, f)
+        sm = sanity_summary(modern)
+        assert sm["passed"] is True and sm["malformed"] is False
+        assert sm["batch_sha256"] == "b" * 64
+        assert sm["missing_checks"] == [] and sm["checks_complete"] is True
+        assert sm["steps_complete"] is True
+        # 只保留一项检查：checks 子集不能冒充完整闸门
+        subset = os.path.join(d, "subset.json")
+        with open(subset, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "batch_sha256": "b" * 64,
+                       "steps_planned": 10, "steps_executed": 10,
+                       "checks": {"loss_below_threshold": True}}, f)
+        ss = sanity_summary(subset)
+        assert ss["checks_complete"] is False and ss["missing_checks"]
+        assert ss["passed"] is False and ss["malformed"] is True
+        # 提前中止（执行步数 < 计划步数）却声明 PASS：自相矛盾
+        short = os.path.join(d, "short.json")
+        with open(short, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "batch_sha256": "b" * 64,
+                       "steps_planned": 10, "steps_executed": 5,
+                       "checks": all_checks}, f)
+        sh = sanity_summary(short)
+        assert sh["steps_complete"] is False
+        assert sh["passed"] is False and sh["malformed"] is True
+        # 固定批指纹格式损坏：不能作为可复算证据
+        badbatch = os.path.join(d, "badbatch.json")
+        with open(badbatch, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "batch_sha256": "xyz",
+                       "steps_planned": 10, "steps_executed": 10,
+                       "checks": all_checks}, f)
+        sb = sanity_summary(badbatch)
+        assert sb["batch_sha256"] is None
+        assert sb["passed"] is False and sb["malformed"] is True
         # 清单内嵌 + 下游 provenance 继承
         cfg = os.path.join(d, "cfg.json")
         with open(cfg, "w", encoding="utf-8") as f:

@@ -363,6 +363,29 @@ def _sanity_evidence_issues(record) -> list:
                 issues.append(f"sanity_run_identity_mismatch: {tag}")
             elif hard is not None and not isinstance(hard, list):
                 issues.append(f"sanity_run_identity_mismatch: {tag}")
+        # 完整检查覆盖与“计划步数全部执行”：checks 子集或提前中止即使
+        # 其余项全 true，也不是完整闸门。旧摘要没有这些字段时保持兼容。
+        complete = ev.get("checks_complete")
+        if complete is False:
+            issues.append(f"sanity_run_checks_incomplete: {tag}")
+        elif complete is not None and not isinstance(complete, bool):
+            issues.append(f"sanity_run_checks_incomplete: {tag}")
+        missing = ev.get("missing_checks")
+        if isinstance(missing, list):
+            if missing:
+                issues.append(f"sanity_run_checks_missing: {tag}")
+        elif missing is not None:
+            issues.append(f"sanity_run_checks_missing: {tag}")
+        batch = ev.get("batch_sha256")
+        if batch is not None and (
+                not isinstance(batch, str) or len(batch) != 64
+                or any(ch not in "0123456789abcdef" for ch in batch)):
+            issues.append(f"sanity_run_batch_fingerprint_malformed: {tag}")
+        steps_complete = ev.get("steps_complete")
+        if steps_complete is False:
+            issues.append(f"sanity_run_steps_incomplete: {tag}")
+        elif steps_complete is not None and not isinstance(steps_complete, bool):
+            issues.append(f"sanity_run_steps_incomplete: {tag}")
     return issues
 
 
