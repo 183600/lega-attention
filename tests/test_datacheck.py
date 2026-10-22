@@ -1887,6 +1887,34 @@ def test_near_duplicate_containment_catches_longer_train_block():
     print("  [ok] 近似重复：containment 捕捉“短 eval 段被长 train 文档包含”")
 
 
+def test_near_duplicate_containment_without_lsh_collision():
+    """containment=1 但 Jaccard 很低时也必须进入候选并删除。
+
+    短 val 段被抄进极长 train 文档时，MinHash/LSH 的 Jaccard band 不会碰撞；
+    若候选阶段只看 Jaccard，副本会留在 train 中（数据泄漏）。
+    """
+    base = _near_dup_base()
+    val_block = base[:260]
+    texts = {"train": ("A long train document that embeds an evaluation "
+                       "passage: " + val_block + " " + "x" * 2000),
+             "val": val_block, "test": ""}
+    out, stats = decontaminate_near_duplicates(texts)
+    assert val_block not in out["train"]
+    assert stats["containment_candidate_pairs"] >= 1
+    assert stats["train_blocks_dropped_as_near_duplicates_of_eval"] == 1
+    print("  [ok] 近似重复：低 Jaccard/high containment 也走候选并删除")
+
+
+def test_near_duplicate_val_test_diagnostic_does_not_depend_on_train():
+    """train 没有可扫描块时，val/test 近似重复诊断仍必须运行。"""
+    base = _near_dup_base()
+    texts = {"train": "short train", "val": base, "test": base}
+    _, stats = decontaminate_near_duplicates(texts)
+    assert stats["val_test_near_duplicate_pairs"] >= 1
+    assert stats["candidate_pairs"] >= 1
+    print("  [ok] 近似重复：val/test 诊断不依赖 train 是否有候选块")
+
+
 def test_near_duplicate_intra_train_keeps_first_and_short_blocks_ignored():
     """train 内部近似重复保留首次出现；短块不参与，避免误删标题/固定语。"""
     base = _near_dup_base()

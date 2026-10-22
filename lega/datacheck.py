@@ -526,6 +526,12 @@ NEAR_DUP_MAX_BLOCK_CHARS = 2_000_000
 NEAR_DUP_MAX_GROUP = 64
 NEAR_DUP_MAX_CANDIDATES = 1_000_000
 NEAR_DUP_CACHE_BLOCKS = 10_000
+# 包含关系（containment）候选的确定性锚点数。MinHash/LSH 估计的是
+# Jaccard：短 val 段被整段抄进长 train 文档时 Jaccard 很低，band 不会碰撞，
+# 但 containment=1。这里从每个块的 shingle 集合中均匀取少量真实 shingle
+# 作为锚点；扫描另一侧时统计命中的锚点数，达到阈值比例即进入候选，再由
+# 精确 Jaccard/containment 裁决。候选阶段只需高召回，精确阶段保证不误删。
+NEAR_DUP_ANCHORS = 8
 
 _U64 = np.uint64
 _U64_GOLDEN = _U64(0x9E3779B97F4A7C15)
@@ -596,6 +602,63 @@ def _near_dup_band_key(signature, band: int):
     return tuple(int(signature[i0 + j]) for j in range(NEAR_DUP_ROWS))
 
 
+def _near_dup_anchor_ids(hashes) -> np.ndarray:
+    """从去重 shingle 集合中均匀取少量真实 shingle 作为包含候选锚点。"""
+    n = int(hashes.size)
+    if n <= 0:
+        return np.zeros(0, dtype=np.uint64)
+    k = min(int(NEAR_DUP_ANCHORS), n)
+    if k == 1:
+        idx = np.zeros(1, dtype=np.int64)
+    else:
+        idx = np.unique(np.round(np.linspace(0, n - 1, k)).astype(np.int64))
+    return np.asarray(hashes[idx], dtype=np.uint64)
+
+
+def _near_dup_build_anchor_index(metas, threshold: float):
+    """由块元数据里的 ``_anchors`` 建倒排索引，返回 (index, required)。
+
+    锚点是块内真实存在的 shingle 哈希，因此“块 A 被块 B 完整包含”时，
+    A 的每个锚点都会出现在 B 的 shingle 集合里；扫描 B 的 shingle 即可
+    发现候选。required 是每个块需要命中的锚点数（阈值的宽松下界），只用于
+    候选阶段；最终是否删除仍由精确 Jaccard/containment 决定。
+    """
+    by_key = {}
+    required = {}
+    for idx, m in enumerate(metas):
+        anchors = m.pop("_anchors", None)
+        if anchors is None or int(anchors.size) == 0:
+            continue
+        # 阈值的 0.5 倍：候选阶段偏向高召回（近阈值副本可能只命中部分
+        # 锚点），避免把“近似重复”漏成“没有候选”。精确阶段仍按原阈值。
+        req = max(1, int(math.floor(NEAR_DUP_ANCHORS * float(threshold)
+                                      * 0.5)))
+        req = min(req, int(anchors.size))
+        required[idx] = req
+        for h in anchors.tolist():
+            by_key.setdefault(int(h), []).append(idx)
+    keys = np.asarray(sorted(by_key), dtype=np.uint64)
+    ids_by_key = [tuple(by_key[int(k)]) for k in keys.tolist()]
+    return (keys, ids_by_key), required
+
+
+def _near_dup_anchor_hits(hashes, anchor_index) -> dict:
+    """返回 {块索引: 命中锚点数}；hashes 为该块去重后的 shingle 集合。"""
+    keys, ids_by_key = anchor_index
+    if hashes.size == 0 or keys.size == 0:
+        return {}
+    pos = np.searchsorted(keys, hashes)
+    pos_clip = np.clip(pos, 0, keys.size - 1)
+    hit = keys[pos_clip] == hashes
+    if not bool(hit.any()):
+        return {}
+    counts = {}
+    for j in pos_clip[hit].tolist():
+        for idx in ids_by_key[j]:
+            counts[idx] = counts.get(idx, 0) + 1
+    return counts
+
+
 def _near_dup_similarity(a, b):
     """返回 (Jaccard, containment)；两者都基于去重后的 shingle 集合。"""
     if a.size == 0 or b.size == 0:
@@ -609,7 +672,9 @@ def _near_dup_similarity(a, b):
 
 
 def _near_dup_collect(text: str, split: str, min_chars: int,
-                      min_shingles: int, max_chars: int):
+                      min_shingles: int, max_chars: int,
+                      collect_anchors: bool = False,
+                      anchor_index=None):
     """把文本切成段落块并计算签名；返回 (metadata, signatures, counts)。"""
     metas, sigs = [], []
     counts = {"scanned": 0, "short": 0, "few_shingles": 0, "too_large": 0}
@@ -626,8 +691,15 @@ def _near_dup_collect(text: str, split: str, min_chars: int,
         if hashes.size < int(min_shingles):
             counts["few_shingles"] += 1
             continue
-        metas.append({"split": str(split), "start": int(start),
-                      "end": int(end), "lines": int(n_lines)})
+        meta = {"split": str(split), "start": int(start),
+                "end": int(end), "lines": int(n_lines)}
+        if collect_anchors:
+            meta["_anchors"] = _near_dup_anchor_ids(hashes)
+        if anchor_index is not None:
+            hits = _near_dup_anchor_hits(hashes, anchor_index)
+            if hits:
+                meta["_anchor_hits"] = hits
+        metas.append(meta)
         sigs.append(_near_dup_signature(hashes))
     return metas, sigs, counts
 
@@ -691,13 +763,22 @@ def decontaminate_near_duplicates(texts: dict,
                                   "eligible": 0}
             continue
         metas, sigs, counts = _near_dup_collect(
-            t, split, min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS)
+            t, split, min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS,
+            collect_anchors=True)
         eval_counts[split] = dict(counts, eligible=len(metas))
         eval_metas.extend(metas)
         eval_sigs.extend(sigs)
 
+    # 包含关系候选：MinHash 只估计 Jaccard。先用 eval 块的锚点建倒排索引，
+    # 扫描 train 块可发现“短 eval 段被长 train 文档整体包含”（Jaccard 低、
+    # containment 高）的副本；train 锚点索引稍后反向扫描 eval 块。
+    eval_anchor_index, eval_anchor_required = _near_dup_build_anchor_index(
+        eval_metas, threshold)
     train_metas, train_sigs, train_counts = _near_dup_collect(
-        train_text, "train", min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS)
+        train_text, "train", min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS,
+        collect_anchors=True, anchor_index=eval_anchor_index)
+    train_anchor_index, train_anchor_required = _near_dup_build_anchor_index(
+        train_metas, threshold)
     n_eval = len(eval_metas)
     n_train = len(train_metas)
 
@@ -714,12 +795,15 @@ def decontaminate_near_duplicates(texts: dict,
     max_score = 0.0
     top_examples = []
     candidate_pairs = 0
+    containment_candidate_pairs = 0
     truncated_groups = 0
     truncated_candidates = False
     prefilter_skipped = 0
     verified_pairs = 0
 
-    if n_train and (n_eval or n_train > 1):
+    # 只要有至少两个块可比就运行：train 为空时仍需做 val-test 诊断；
+    # train 只有 1 块且无 eval 时没有任何 pair，可跳过。
+    if (n_train + n_eval) >= 2 and (n_train > 0 or n_eval > 1):
         eval_arr = (np.asarray(eval_sigs, dtype=np.uint64)
                     if eval_sigs else np.zeros(
                         (0, NEAR_DUP_HASHES), dtype=np.uint64))
@@ -763,8 +847,6 @@ def decontaminate_near_duplicates(texts: dict,
                     break
             if truncated_candidates:
                 break
-        candidate_pairs = len(candidates)
-
         # 只对候选对做精确相似度；缓存 shingle 集合，超过上限时清空重算。
         cache = {}
 
@@ -780,6 +862,57 @@ def decontaminate_near_duplicates(texts: dict,
                 cache[idx] = arr
             return arr
 
+        # 包含关系候选（Jaccard-LSH 无法覆盖）：train 块里命中 eval 锚点，
+        # 或 eval 块里命中 train/另一 eval 块锚点。只进入候选集，是否删除
+        # 仍由下方精确 max(Jaccard, containment) 按协议阈值决定。
+        anchor_candidates = set()
+
+        def _add_anchor_candidate(a, b):
+            nonlocal truncated_candidates
+            if a == b:
+                return
+            pair = (a, b) if a < b else (b, a)
+            anchor_candidates.add(pair)
+            if pair in candidates:
+                return
+            if len(candidates) >= NEAR_DUP_MAX_CANDIDATES:
+                truncated_candidates = True
+                return
+            candidates.add(pair)
+
+        # train 块命中 eval 锚点：覆盖“短 eval 段被长 train 文档包含”。
+        for ti, m in enumerate(train_metas):
+            hits = m.pop("_anchor_hits", None)
+            if not hits or truncated_candidates:
+                continue
+            for ei, count in hits.items():
+                if count >= eval_anchor_required.get(ei, 1):
+                    _add_anchor_candidate(ei, n_eval + ti)
+        # eval 块命中 train 锚点（短 train 段被长 eval 文档包含）以及
+        # eval 内部锚点（val-test containment 诊断）。train 为空时后者
+        # 仍必须运行，不能把 val/test 诊断错误地绑定到 train 是否存在。
+        if not truncated_candidates and (n_train or n_eval > 1):
+            for ei, m in enumerate(eval_metas):
+                if truncated_candidates:
+                    break
+                hits = _near_dup_anchor_hits(_hashes(ei), train_anchor_index)
+                for ti, count in hits.items():
+                    if count >= train_anchor_required.get(ti, 1):
+                        _add_anchor_candidate(ei, n_eval + ti)
+                if n_eval > 1:
+                    hits = _near_dup_anchor_hits(_hashes(ei), eval_anchor_index)
+                    for ej, count in hits.items():
+                        if ej == ei:
+                            continue
+                        if count < eval_anchor_required.get(ej, 1):
+                            continue
+                        if (metas[ei]["split"] == metas[ej]["split"]
+                                and metas[ei]["split"] != "train"):
+                            continue
+                        _add_anchor_candidate(ei, ej)
+        containment_candidate_pairs = len(anchor_candidates)
+        candidate_pairs = len(candidates)
+
         remove_cross, remove_intra = set(), set()
         # 签名预筛：18 个 MinHash 的相等比例是 Jaccard/containment 的无偏
         # 估计（SE≈0.1）。远低于阈值的候选对直接跳过，避免在模板化/重复
@@ -788,10 +921,13 @@ def decontaminate_near_duplicates(texts: dict,
         prefilter_floor = float(threshold) * 0.6
         for a, b in candidates:
             ma, mb = metas[a], metas[b]
-            est = float(np.mean(sigs[a] == sigs[b]))
-            if est < prefilter_floor:
-                prefilter_skipped += 1
-                continue
+            # 锚点候选由 containment 召回：MinHash 相等比例估计的是
+            # Jaccard，对“短段被长文包含”会远低于阈值，不能拿它预筛。
+            if (a, b) not in anchor_candidates:
+                est = float(np.mean(sigs[a] == sigs[b]))
+                if est < prefilter_floor:
+                    prefilter_skipped += 1
+                    continue
             jac, con = _near_dup_similarity(_hashes(a), _hashes(b))
             if ma["split"] == "train" and mb["split"] == "train":
                 score = jac
@@ -869,13 +1005,15 @@ def decontaminate_near_duplicates(texts: dict,
         "test_blocks_skipped_few_shingles": _eval_count("test", "few_shingles"),
         "test_blocks_skipped_too_large": _eval_count("test", "too_large"),
         "candidate_pairs": int(candidate_pairs),
+        "containment_candidate_pairs": int(containment_candidate_pairs),
         "signature_prefilter_floor": float(threshold) * 0.6,
         "signature_prefilter_skipped": int(prefilter_skipped),
         "candidate_pairs_truncated": bool(truncated_candidates),
         "oversized_groups_truncated": int(truncated_groups),
         "verified_pairs_at_threshold": int(verified_pairs),
         "max_similarity": float(max_score),
-        "max_similarity_scope": "LSH candidates passing signature prefilter",
+        "max_similarity_scope": ("LSH and containment-anchor candidates "
+                                 "passing exact verification"),
         "top_similarities": top_examples,
         "train_blocks_dropped_as_near_duplicates_of_eval": int(
             len(remove_cross)),
