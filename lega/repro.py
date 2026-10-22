@@ -787,6 +787,7 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         # 硬身份不一致时不得把旧 PASS 继承到下游结果。
         "sanity_passed": None,
         "sanity_verified": None,
+        "sanity_present": None,
         "sanity_variant": None,
         "sanity_file": None,
         # 闸门证据的自洽性：失败检查项/结构损坏不能继承成 PASS
@@ -854,6 +855,17 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             checks_consistent = msanity.get("checks_consistent")
             passed = msanity.get("passed")
             gate_broken = False
+            # present=False 表示结果文件缺失/不可读，此时任何内嵌的
+            # passed=true 都是自相矛盾（或伪造）的证据，绝不能继承为 PASS。
+            # 旧清单没有 present 字段时保持兼容。
+            present = msanity.get("present")
+            out["sanity_present"] = present
+            if present is False:
+                gate_broken = True
+                out["sanity_malformed"] = True
+            elif present is not None and present is not True:
+                gate_broken = True
+                out["sanity_malformed"] = True
             if isinstance(failed_checks, list):
                 out["sanity_failed_checks"] = failed_checks
                 gate_broken = bool(failed_checks)
@@ -882,7 +894,11 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
                 out["sanity_passed"] = False
             verified = identity.get("verified")
             if isinstance(verified, bool):
-                out["sanity_verified"] = verified
+                # 身份核对为真也不能把缺失/损坏/硬不匹配的证据标成已验证：
+                # “已验证的 PASS”必须是 present 且闸门自身未被破坏。
+                out["sanity_verified"] = bool(
+                    verified and not gate_broken
+                    and present is not False and not hard_mismatches)
             elif hard_mismatches:
                 # 身份已确认不一致时，即使旧清单没有 verified 字段也不能
                 # 留 None 让下游误以为“尚未核对”。

@@ -823,3 +823,28 @@ def test_verify_ledger_rejects_fractional_seed_values():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：小数种子显式报畸形，不截断为整数")
+
+
+def test_ledger_rejects_sanity_evidence_with_present_false():
+    """completed 台账不能继承 present=False 的内嵌 sanity PASS。"""
+    from lega.experiment import _sanity_evidence_issues
+    ev = {"present": True, "passed": True, "malformed": False,
+          "checks_consistent": True, "failed_checks": [],
+          "checks_complete": True, "missing_checks": [],
+          "steps_complete": True, "batch_sha256": "b" * 64,
+          "seed_verified": True, "variant": "lega",
+          "identity": {"hard_mismatches": []}}
+    gate = {"executed": True, "verdict": {"lega": "pass"}}
+    rec = {"variants": ["lega"], "sanity": gate, "runs": [
+        {"variant": "lega", "seed": 7, "provenance": {"sanity": ev}}]}
+    assert _sanity_evidence_issues(rec) == []
+    bad = dict(ev, present=False)
+    rec_bad = {"variants": ["lega"], "sanity": gate, "runs": [
+        {"variant": "lega", "seed": 7, "provenance": {"sanity": bad}}]}
+    issues = _sanity_evidence_issues(rec_bad)
+    assert any("evidence_missing" in x for x in issues), issues
+    bogus = dict(ev, present="false")
+    rec_bogus = {"variants": ["lega"], "sanity": gate, "runs": [
+        {"variant": "lega", "seed": 7, "provenance": {"sanity": bogus}}]}
+    issues = _sanity_evidence_issues(rec_bogus)
+    assert any("malformed" in x for x in issues), issues

@@ -1293,3 +1293,38 @@ def test_sanity_summary_rejects_modern_result_without_checks_or_steps():
         s = sanity_summary(p)
         assert s["passed"] is True and s["malformed"] is False
         assert s["steps_complete"] is None
+
+
+def test_load_provenance_rejects_sanity_present_false():
+    """present=False 的 sanity 证据（文件缺失/不可读）不能被继承成 PASS。"""
+    from lega.repro import load_provenance
+    with tempfile.TemporaryDirectory() as d:
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _write(sanity):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump({"sanity": sanity}, f)
+            return load_provenance(d)
+
+        missing = _write({
+            "present": False, "passed": True,
+            "identity": {"hard_mismatches": [], "unknown_fields": [],
+                         "verified": True}})
+        assert missing["sanity_passed"] is False
+        assert missing["sanity_verified"] is False
+        assert missing["sanity_present"] is False
+        assert missing["sanity_malformed"] is True
+        # present 字段类型损坏同样不能当作“旧格式缺字段”放行。
+        bogus = _write({
+            "present": "false", "passed": True,
+            "identity": {"hard_mismatches": [], "verified": True}})
+        assert bogus["sanity_passed"] is False
+        assert bogus["sanity_verified"] is False
+        assert bogus["sanity_malformed"] is True
+        # 旧清单没有 present 字段：保持兼容，但仍按身份证据决定是否 verified。
+        legacy = _write({
+            "passed": True,
+            "identity": {"hard_mismatches": [], "verified": True}})
+        assert legacy["sanity_passed"] is True
+        assert legacy["sanity_verified"] is True
+        assert legacy["sanity_present"] is None

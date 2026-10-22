@@ -330,6 +330,14 @@ def _sanity_evidence_issues(record) -> list:
         if not isinstance(ev, dict):
             issues.append(f"sanity_run_evidence_missing: {tag}")
             continue
+        # present 是 sanity_summary 对“结果文件是否存在且可读”的显式结论。
+        # present=False 时内嵌 passed=true 属于自相矛盾/伪造证据；旧清单没有
+        # present 字段时保持兼容（不能把缺失字段当成 False）。
+        present = ev.get("present")
+        if present is False:
+            issues.append(f"sanity_run_evidence_missing: {tag}")
+        elif present is not None and present is not True:
+            issues.append(f"sanity_run_malformed: {tag}")
         if ev.get("passed") is not True:
             issues.append(f"sanity_run_not_passed: {tag}")
         malformed = ev.get("malformed")
