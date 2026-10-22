@@ -11,6 +11,9 @@
                   早期处理（正则化/早停），不要仅凭训练损失还在降就续训；
   * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
+  * 验证倒挂      验证损失显著低于训练损失（与泛化差距方向相反）——
+                  优先排查数据泄漏/划分错配，或 train/val 评估口径不一致；
+                  不能当作“验证更好”的收敛证据；
   * 训练不足      训练/验证都在下降，但累计只见过不足 1 个 epoch 的训练
                   数据——这是“还没学完”，不能当作收敛或“无需干预”；
   * 早停空间      最终验证损失劣于历史最优的程度——量化"早停能挽回多少"；
@@ -635,6 +638,16 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
 
     train_delta = _rel_change(first_train, last_train)
     val_delta = _rel_change(first_val, last_val)
+    # 验证-训练损失倒挂：验证损失显著低于训练损失不是“收敛更好”，而是
+    # 数据泄漏/划分错配/评估口径不一致（如 train 侧仍开 dropout、train loss
+    # 用区间滑动均值而 val 用 eval 模式）的典型信号。只看两条曲线各自下降
+    # 会完全漏掉这一点，必须把两条线的相对水平也纳入诊断。
+    val_below_train_rel = None
+    if (last_train is not None and last_val is not None
+            and last_train > 0):
+        val_below_train_rel = _rel_change(last_train, last_val)
+    val_below_train = (val_below_train_rel is not None
+                       and val_below_train_rel < -REL_TOL)
     train_down = train_delta is not None and train_delta < -REL_TOL
     train_up = train_delta is not None and train_delta > REL_TOL
     # 验证侧判定必须扣除评估抽样噪声：val_loss_ci95 存在时，变化幅度不超过
@@ -787,7 +800,21 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"（{_fmt_rel(train_delta)}），"
                 f"验证损失 {_fmt_num(first_val)}→{_fmt_num(last_val)}"
                 f"（{_fmt_rel(val_delta)}）")
-            if gain_sig:
+            if val_below_train:
+                status = "验证损失倒挂（疑似泄漏/口径不一致）"
+                evidence.append(
+                    f"验证损失末段 {last_val:.4f} 显著低于训练损失末段 "
+                    f"{last_train:.4f}（{val_below_train_rel:+.1%}）："
+                    "这与常规泛化差距方向相反，不能按“收敛更好”解读；"
+                    "优先排查数据划分/预处理泄漏（train 与 val 文档重叠、"
+                    "词表或归一化在 val 上拟合）、训练与验证的评估口径差异"
+                    "（dropout/eval 模式、滑动平均、不同 token 集合）")
+                recommendations.append(
+                    "验证损失倒挂：先做数据泄漏/协议审计（datacheck 的跨 split "
+                    "重复与 n-gram 重叠、split 时序与文档边界），并核对训练/验证"
+                    "是否使用同一精度、同一 dropout 状态与同一损失口径；"
+                    "排除泄漏前不要报告该 run 的验证指标")
+            elif gain_sig:
                 evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
                                 f"{early_stop_gain:.1%}（超过评估噪声），"
                                 "已按 best-checkpoint 口径评测")
@@ -801,7 +828,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 # 任一独立告警（损失尖峰/梯度尖峰/早停/坏记录）存在时都不写
                 # “无需干预”，否则会与随后追加的诊断建议自相矛盾。
                 recommendations.append("无需干预；对比实验使用 model_best.pt")
-        if gain_sig and status != "过拟合":
+        if gain_sig and status not in ("过拟合",
+                                       "验证损失倒挂（疑似泄漏/口径不一致）"):
             recommendations.append(
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
                 f"{early_stop_gain:.1%}")
@@ -931,6 +959,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "train_budget_sufficient": (None if epochs_seen is None
                                     else not budget_insufficient),
         "generalization_gap": gap,
+        # 末段验证损失相对训练损失的变化（负=验证低于训练）；倒挂是泄漏/
+        # 口径不一致信号，而不是更好的泛化。
+        "val_below_train_rel": val_below_train_rel,
+        "val_below_train": bool(val_below_train),
         "grad_norm_points": len(grad_pts),
         "grad_norm_nonfinite": int(grad_bad),
         "grad_norm_median": grad_med,
@@ -951,6 +983,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
 # 状态严重度排序（汇总时取"最差种子"的状态代表整个变体）
 STATUS_ORDER = {
     "NaN/Inf": 6, "发散": 5, "过拟合": 4,
+    "验证损失倒挂（疑似泄漏/口径不一致）": 3.5,
     "欠拟合/学习不充分": 3, "训练不足（数据覆盖不足）": 2.5,
     "过拟合趋势": 2, "数据不足": 1, "正常收敛": 0,
 }

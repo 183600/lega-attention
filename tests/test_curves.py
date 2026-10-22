@@ -624,3 +624,25 @@ def test_gate_health_flags_drift_and_ignores_malformed_stats():
     assert not d2["gate_health"]["available"], d2["gate_health"]
     assert not d2["gate_health"]["recommendations"]
     print("  [ok] 门控漂移检测与坏统计值跳过")
+
+
+def test_validation_below_train_flags_leakage_or_mismatch():
+    """验证损失显著低于训练损失（倒挂）不是收敛，而是泄漏/口径不一致信号。
+
+    只看两条曲线各自下降会漏掉相对水平；倒挂必须进入状态与建议，且不得
+    再写“无需干预”。
+    """
+    d = diagnose_curve(_log([4.2, 3.9, 3.6, 3.3, 3.0, 2.8],
+                            [3.5, 3.2, 2.9, 2.6, 2.4]))
+    assert d["status"] == "验证损失倒挂（疑似泄漏/口径不一致）", d
+    assert d["val_below_train"] is True and d["val_below_train_rel"] < -0.03, d
+    assert any("泄漏" in e for e in d["evidence"]), d["evidence"]
+    assert any("泄漏" in r or "协议" in r for r in d["recommendations"]), d
+    assert not any("无需干预" in r for r in d["recommendations"]), d
+
+    # 正常的“验证略高”与小幅波动不得误报
+    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
+                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    assert d2["status"] == "正常收敛" and d2["val_below_train"] is False, d2
+    assert any("无需干预" in r for r in d2["recommendations"]), d2
+    print("  [ok] 验证-训练损失倒挂 → 泄漏/口径排查（正常曲线不误报）")
