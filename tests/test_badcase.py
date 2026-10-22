@@ -706,6 +706,35 @@ def test_main_skips_non_dict_ruler_and_keeps_cross_variant():
     print("  [ok] main：非对象 JSON 跳过且不污染跨变体对照")
 
 
+def test_empty_top1_token_is_unparsed_not_confident_bias():
+    """空/纯空白 top1 是导出失败，不能归因成高置信模型盲区。"""
+    c = categorize_window({"window": 1, "loss": 9.0, "gold_next": "x",
+                           "context_tail": "abc",
+                           "pred_top5": [["", 0.9]]})
+    assert c["category"] == "unparsed", c
+    assert c["top1"] is None
+    c2 = categorize_window({"window": 1, "loss": 9.0, "gold_next": "x",
+                            "context_tail": "abc",
+                            "pred_top5": [["   ", 0.9]]})
+    assert c2["category"] == "unparsed", c2
+    print("  [ok] 空 top1 归入导出问题而非高置信错答")
+
+
+def test_ruler_improvements_sorted_by_priority():
+    """改进方向必须按高/中/低排序；渲染层按顺序截断时不能丢掉高优先级。"""
+    recs = synthesize_ruler_improvements({
+        "n_badcases": 6,
+        "category_counts": {"label_unknown": 3, "copy_distractor": 3},
+        "label_errors": 0,
+    })
+    assert len(recs) >= 2, recs
+    rank = {"高": 0, "中": 1, "低": 2}
+    ranks = [rank.get(r.get("priority"), 9) for r in recs]
+    assert ranks == sorted(ranks), recs
+    assert recs[0]["priority"] == "高", recs
+    print("  [ok] 改进方向按优先级稳定排序")
+
+
 def test_empty_gold_not_counted_as_top1_correct():
     """gold 缺失/空串时，空的 top1 不能因空串相等被判“top1 正确”。"""
     c = categorize_window(_win(gold=None, pred_top5=[["", 0.1], ["x", 0.2]]))

@@ -345,6 +345,10 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
             recs.append(_advice(ax, hi,
                                 f"{trig}（{c}/{model_n}）{_share_ci_text(c)}",
                                 sugg, nxt))
+    # 文档承诺“按优先级排序”：渲染层按顺序截断，不能把高优先级方向排到
+    # 中/低优先级之后。稳定排序保留同优先级内部的插入顺序。
+    rank = {"高": 0, "中": 1, "低": 2}
+    recs.sort(key=lambda r: rank.get(r.get("priority"), 9))
     return recs[:MAX_ADVICE]
 
 
@@ -553,7 +557,9 @@ def _window_top1(rec: Dict):
         if len(item) < 2:
             return None, None
         token = _token_text(item[0])
-        if token is None:
+        # 空/纯空白不是可解码的预测词项（多为导出失败），不能当成一个
+        # 高置信 token 去归因给模型；否则会伪造 confident_bias。
+        if token is None or not token.strip():
             return None, None
         # 概率必须是 [0,1] 内的有限数：inf 会被当成“高置信”伪造
         # confident_bias，NaN 还会让报告 JSON 非法；1.5 或 -0.5 同样不是
