@@ -3836,6 +3836,19 @@ def test_record_aborted_sanity_writes_reason_and_failed_checks():
         failed2 = record_aborted_sanity(ledger2, common, "lega", 2, results_dir)
         assert failed2["present"] is False
         assert read_records(ledger2)[0]["status"] == "aborted"
+        # 文件看起来 PASS 但属于别的变体/种子/上一轮：aborted 证据必须
+        # 写入失败原因并显式把摘要 passed 改为 False，避免自相矛盾。
+        _write_json(os.path.join(results_dir, "sanity_lega.json"), {
+            "passed": True, "variant": "lega", "seed": 7,
+            "checks": {"a": True}})
+        ledger3 = os.path.join(tmp, "exp3.jsonl")
+        failed3 = record_aborted_sanity(
+            ledger3, common, "lega", 0, results_dir, reason="stale_result")
+        assert failed3["gate_failure_reason"] == "stale_result"
+        assert failed3["passed"] is False
+        rec3 = read_records(ledger3)[0]
+        assert rec3["sanity"]["reason"] == "stale_result"
+        assert rec3["sanity"]["failed"]["passed"] is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 台账 aborted 记录：失败原因 + 未通过项 + 缺失结果容错")

@@ -455,19 +455,26 @@ def abort_ledger_on_failure(ledger: str, ledger_common: dict, stage):
 
 
 def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
-                          returncode: int, results_dir: str) -> dict:
+                          returncode: int, results_dir: str,
+                          reason: str = None) -> dict:
     """sanity 闸门失败时向台账追写 aborted 记录，返回结果文件摘要。
 
     只留 dangling started 无法区分“被中止”与“崩溃”，也没有失败原因；
     aborted 记录内嵌失败变体、退出码与该变体的 sanity 结果摘要（含未通过
-    项），供事后复现失败现场。
+    项），供事后复现失败现场。reason 用于 stale/variant/seed 等“文件本身
+    看起来 PASS 但不属于本轮”的失败：显式写入原因并把摘要 passed 改为
+    False，避免 aborted 记录里出现 verdict=fail 却 failed.passed=true。
     """
     failed = sanity_summary(os.path.join(results_dir, f"sanity_{variant}.json"))
+    if reason is not None:
+        failed["gate_failure_reason"] = reason
+        if reason != "not_passed":
+            failed["passed"] = False
     append_aborted_record(
         ledger, ledger_common, error="sanity_gate_failed", stage="sanity",
         variant=variant, returncode=returncode,
         sanity={"executed": True, "verdict": {variant: "fail"},
-                "failed": failed})
+                "reason": reason, "failed": failed})
     return failed
 
 
@@ -7065,7 +7072,8 @@ def main():
         if sanity_failures:
             first = sanity_failures[0]
             v = first["variant"]
-            record_aborted_sanity(ledger, ledger_common, v, 0, results_dir)
+            record_aborted_sanity(ledger, ledger_common, v, 0, results_dir,
+                                  reason=first["reason"])
             summary = first.get("summary") or {}
             raise SystemExit(
                 f"sanity check 退出码为 0，但结果文件未通过复核："
