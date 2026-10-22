@@ -92,7 +92,8 @@ from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E
                         worktree_state, write_worktree_patch)
 from lega.utils import (bootstrap_mean_ci, config_bool,
                         ensure_cublas_workspace_config, get_device,
-                        holm_bonferroni, mean_std, min_detectable_effect,
+                        holm_bonferroni, mcnemar_exact_p, mean_std,
+                        min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
                         paired_t_test, save_json,
                         seed_int, strict_int)  # noqa: E402
@@ -1163,23 +1164,8 @@ def _ruler_sample_outcomes(d):
 
 
 def _mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
-    """配对二分类的精确 McNemar 检验（双侧，等价于 discordant 上的符号检验）。
-
-    只使用两侧结果不同的配对（candidate_only / reference_only），相同结果
-    不提供方向信息。H0 下每个 discordant 对等概率偏向任一侧，故
-    p = 2·P(Bin(n, 0.5) ≤ min(b, c))（截断到 1）。n 可能达数千，用
-    log-gamma + log-sum-exp 稳定求和，避免组合数溢出。
-    """
-    n = int(candidate_only) + int(reference_only)
-    if n <= 0:
-        return 1.0
-    k = min(int(candidate_only), int(reference_only))
-    log2 = math.log(2.0)
-    logs = [math.lgamma(n + 1) - math.lgamma(i + 1)
-            - math.lgamma(n - i + 1) - n * log2 for i in range(k + 1)]
-    m = max(logs)
-    log_tail = m + math.log(math.fsum(math.exp(x - m) for x in logs))
-    return min(1.0, 2.0 * math.exp(log_tail))
+    """兼容旧调用点：委托给 lega.utils.mcnemar_exact_p（单一实现）。"""
+    return mcnemar_exact_p(candidate_only, reference_only)
 
 
 def _ruler_pair_protocol_ok(ra, rb) -> bool:
@@ -5177,17 +5163,26 @@ def build_summary(results_dir: str, audit: dict = None,
             "方法的问题；相对 standard 的新增错误才是该方法的特异性盲区，"
             "优先逐条分析。")
         md += ["", "| 变体 | 错误样本数 | 全体共识失败 | 相对standard新增 "
-                   "| 相对standard改对 |", "|---|---|---|---|---|"]
+                   "| 相对standard改对 | 配对p (Holm) |",
+                   "|---|---|---|---|---|---|"]
         for v in bad_cross["variants"]:
             pv = (bad_cross["per_variant"] or {}).get(v) or {}
 
             def _cnt(x):
                 return "-" if x is None else str(x)
 
+            p_adj = pv.get("mcnemar_p_holm")
+            p_s = (f"{p_adj:.3g}" if isinstance(p_adj, (int, float))
+                   else "-")
             md.append(f"| {VARIANT_CN.get(v, v)} | {_cnt(pv.get('n_failed'))} "
                       f"| {_cnt(pv.get('n_shared_all'))} "
                       f"| {_cnt(pv.get('n_new_vs_reference'))} "
-                      f"| {_cnt(pv.get('n_fixed_vs_reference'))} |")
+                      f"| {_cnt(pv.get('n_fixed_vs_reference'))} "
+                      f"| {p_s} |")
+        md.append(
+            "注: 新增/改对是同一批样本上的配对计数，p 为精确 McNemar 检验"
+            "（多候选 Holm 校正）；p≥0.05 时只能当方向性线索，不能据此"
+            "断言方法优劣。")
         # 展示至多 2 条特异性新增错误（方法盲区的最直接线索）
         shown = 0
         for v in bad_cross["variants"]:

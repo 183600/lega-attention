@@ -43,7 +43,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from .ruler import _NUM_RE
-from .utils import wilson_score_ci
+from .utils import holm_bonferroni, mcnemar_exact_p, wilson_score_ci
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
 # \d{4,}，带符号/小数/科学计数法或短数字会被截成不同字符串，误抄会被
@@ -1121,27 +1121,37 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
             continue
         pv = (cross.get("per_variant") or {}).get(v) or {}
         n_new = pv.get("n_new_vs_reference")
+        n_fixed = pv.get("n_fixed_vs_reference")
+        p_holm = _finite_float(pv.get("mcnemar_p_holm"))
+        sig_s = ""
+        if p_holm is not None:
+            sig_s = (f"；配对 McNemar 检验（Holm 校正）p={p_holm:.3g}，"
+                     + ("差异显著" if p_holm < 0.05 else
+                        "差异不显著，只能作方向性线索"))
         if n_new:
             cats = pv.get("new_category_counts") or {}
             top = sorted(cats.items(), key=lambda kv: -kv[1])
             cat_s = (f"，主导类别 {CATEGORY_CN.get(top[0][0], top[0][0])}×{top[0][1]}"
                      if top else "")
             recs.append(_advice(
-                "模型/方法", "高",
-                f"{v} 相对 {ref} 新增 {n_new} 个错误{cat_s}",
+                "模型/方法", "高" if p_holm is None or p_holm < 0.05 else "中",
+                f"{v} 相对 {ref} 新增 {n_new} 个错误{cat_s}{sig_s}",
                 "特异性新增错误是该方法盲区最直接的线索，优先逐条分析这些样例，"
-                "不要只看平均 EM",
+                "不要只看平均 EM；新增/改对是同一批样本上的配对结果，"
+                "必须用配对检验判断净差异是否超出抽样波动",
                 f"对 {v} 的 new_vs_reference 样例做注意力/门控可视化，定位与 "
-                f"{ref} 的行为差异；若是难度边界样本占比高，先分层再归因"))
+                f"{ref} 的行为差异；若 p 不显著，先增大评测样本/多种子再下结论；"
+                "若是难度边界样本占比高，先分层再归因"))
         # 只有“改对”而没有“新增错误”的变体同样要报告：净收益不能因新增
         # 为 0 就静默丢掉正收益证据。
-        n_fixed = pv.get("n_fixed_vs_reference")
         if n_fixed:
             recs.append(_advice(
                 "模型/方法", "低",
-                f"{v} 相对 {ref} 改对 {n_fixed} 个样本",
-                "改对与新增要并看：净收益 = 改对 − 新增，只有单侧数字会误导",
-                f"结合新增错误做净收益统计与配对显著性检验（significance.json）"))
+                f"{v} 相对 {ref} 改对 {n_fixed} 个样本{sig_s}",
+                "改对与新增要并看：净收益 = 改对 − 新增，只有单侧数字会误导；"
+                "小样本下改对数本身也可能由评测波动造成",
+                f"结合新增错误看配对净收益与 McNemar/Holm 校正后的 p 值，"
+                "不要仅凭改对条数排序方法"))
     return recs[:MAX_ADVICE]
 
 
@@ -1220,11 +1230,23 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
                     cc[c["category"]] += 1
             return dict(cc)
 
+        discordant = (len(new_keys) + len(fixed_keys)
+                      if has_ref and v != reference else 0)
+        p_raw = (mcnemar_exact_p(len(new_keys), len(fixed_keys))
+                 if has_ref and v != reference else None)
         per_v[v] = {
             "n_failed": len(failed),
             "n_shared_all": len(failed & set(shared)),
             "n_new_vs_reference": len(new_keys) if has_ref else None,
             "n_fixed_vs_reference": len(fixed_keys) if has_ref else None,
+            "net_fixed_minus_new": ((len(fixed_keys) - len(new_keys))
+                                    if has_ref and v != reference else None),
+            # 配对显著性：只统计两侧结果不同的样本。n_new/ n_fixed 本身
+            # 就是 discordant 计数，直接送入精确 McNemar；多候选比较再用
+            # Holm 校正控制族错误率。
+            "paired_discordant": discordant,
+            "mcnemar_p": p_raw,
+            "mcnemar_p_holm": None,
             "new_category_counts": _cat_counts(new_keys),
             "fixed_category_counts": _cat_counts(fixed_keys),
             "new_vs_reference": [_case_brief(_example_for(k))
@@ -1232,6 +1254,14 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
             "fixed_vs_reference": [_case_brief(_example_for(k))
                                    for k in fixed_keys[:CROSS_LIST_LIMIT]],
         }
+    # 同一次对照内对多个候选做配对检验：Holm 逐步校正，避免“多比几次总
+    # 有一个显著”。参照自身不检验（p=None）。
+    tested = [v for v in variants
+              if has_ref and v != reference
+              and per_v[v].get("mcnemar_p") is not None]
+    adj = holm_bonferroni([per_v[v]["mcnemar_p"] for v in tested])
+    for v, p_adj in zip(tested, adj):
+        per_v[v]["mcnemar_p_holm"] = p_adj
     out = {
         "variants": variants, "reference": reference,
         "reference_available": has_ref,
@@ -1242,6 +1272,8 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
         "per_variant": per_v,
         "note": ("共识失败（所有变体都错，含标准基线）优先怀疑数据/构造/内在"
                  "难度；相对参照新增的错误才是该方法的特异性盲区，优先分析。"
+                 "新增/改对为同一批样本上的配对计数，已附精确 McNemar 检验"
+                 "（多候选按 Holm 校正）；p 不显著时只能作方向性线索。"
                  + ("" if has_ref else f"⚠ 参照变体 {reference} 未评测或没有"
                                         "可用错误清单（不等于零错误），"
                                         "新增/改对计数不可得。")

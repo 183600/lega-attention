@@ -1223,3 +1223,25 @@ def test_error_category_shares_carry_wilson_ci():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 错误类别占比/深位失败率附 Wilson 95% CI")
+
+
+def test_cross_variant_pairing_reports_mcnemar_and_holm():
+    """跨变体新增/改对是配对计数，必须给精确 McNemar 与 Holm 校正 p。
+
+    6 个仅参照失败的样本：原始 p=0.03125，但同时对两个候选比较时经
+    Holm 校正后 p=0.0625——正好说明“多比几个变体总有一个显著”不可取。
+    """
+    std = [_case_sid(f"niah_synth@256#{i}") for i in range(6)]
+    cross = cross_variant_analysis(
+        {"standard": std, "lega": [], "qgate": [std[0]]}, reference="standard")
+    lv = cross["per_variant"]["lega"]
+    assert lv["n_new_vs_reference"] == 0 and lv["n_fixed_vs_reference"] == 6
+    assert lv["net_fixed_minus_new"] == 6 and lv["paired_discordant"] == 6
+    assert abs(lv["mcnemar_p"] - 0.03125) < 1e-12
+    assert abs(lv["mcnemar_p_holm"] - 0.0625) < 1e-12
+    qg = cross["per_variant"]["qgate"]
+    assert qg["paired_discordant"] == 5
+    assert abs(qg["mcnemar_p"] - 0.0625) < 1e-12
+    assert cross["per_variant"]["standard"]["mcnemar_p"] is None
+    json.dumps(cross, ensure_ascii=False, allow_nan=False)
+    print("  [ok] 跨变体配对 McNemar + Holm 校正（小样本不做单侧排序）")

@@ -886,6 +886,26 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
     return max(0.0, center - half), min(1.0, center + half)
 
 
+def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
+    """配对二分类的精确 McNemar 检验（双侧，等价于 discordant 上的符号检验）。
+
+    只使用两侧结果不同的配对（candidate_only / reference_only），相同结果
+    不提供方向信息。H0 下每个 discordant 对等概率偏向任一侧，故
+    p = 2·P(Bin(n, 0.5) ≤ min(b, c))（截断到 1）。n 可能达数千，用
+    log-gamma + log-sum-exp 稳定求和，避免组合数溢出。
+    """
+    n = int(candidate_only) + int(reference_only)
+    if n <= 0:
+        return 1.0
+    k = min(int(candidate_only), int(reference_only))
+    log2 = math.log(2.0)
+    logs = [math.lgamma(n + 1) - math.lgamma(i + 1)
+            - math.lgamma(n - i + 1) - n * log2 for i in range(k + 1)]
+    m = max(logs)
+    log_tail = m + math.log(math.fsum(math.exp(x - m) for x in logs))
+    return min(1.0, 2.0 * math.exp(log_tail))
+
+
 def holm_bonferroni(pvals) -> list:
     """Holm–Bonferroni 逐步下降法（step-down）校正的单步族错误率 p 值。
 
