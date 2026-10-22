@@ -620,6 +620,12 @@ def _read_records(rdir, variant):
     失效；缓存保留多个 key（LRU 上限 8）。
     """
     import csv
+    # 当前 run 的 repro.json 变体白名单优先：目录里可能残留上一轮的
+    # analysis_records_<v>.csv（尤其 main() 固定请求 lega），不能把范围外
+    # 变体的旧记录画进本次报告。
+    variant_scope, _ = _run_scope(rdir)
+    if variant_scope is not None and variant not in variant_scope:
+        return {}
     # 兼容单种子 analysis_records_<v>.csv 与多种子 analysis_records_<v>_seed<s>.csv，
     # 多种子记录合并后画图（分布图上的种子差异会自然体现为更宽的分布）。
     paths = _prefer_seeded(
@@ -798,6 +804,9 @@ def fig_misleading(rdir):
 
 
 def fig_auroc_heads(rdir, variant="lega"):
+    variant_scope, _ = _run_scope(rdir)
+    if variant_scope is not None and variant not in variant_scope:
+        return False
     files = _prefer_seeded(
         [os.path.join(rdir, f"analysis_{variant}.json")]
         + sorted(glob.glob(os.path.join(

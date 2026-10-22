@@ -429,6 +429,31 @@ def test_fig_latency_respects_variant_scope():
     print("  [ok] 延迟图：范围外变体不进入 prefill/decode 曲线")
 
 
+def test_analysis_figures_respect_variant_scope():
+    """当前 run 只含 standard 时，旧的 analysis_lega 产物不得被画出来。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过分析图变体范围测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "repro.json", {"variants": ["standard"], "seeds": [1]})
+        _w(tmp, "analysis_lega.json", {
+            "variant": "lega", "seed": 1, "n_records": 10,
+            "per_head": [{"layer": 0, "head": 0,
+                          "auroc_qterm": 0.6, "auroc_logit": 0.7}]})
+        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
+                  encoding="utf-8") as f:
+            f.write("task,g,hit,c,log_n\nx,0.5,1,1,2\n")
+        assert _read_records(tmp, "lega") == {}
+        assert fig_auroc_heads(tmp, variant="lega") is False
+        assert plots.fig_gate_hist(tmp, variant="lega") is False
+        assert not os.path.exists(os.path.join(tmp, "fig_auroc_heads.png"))
+        assert not os.path.exists(os.path.join(tmp, "fig_gate_hist.png"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 分析图尊重 repro.json 变体范围（范围外旧产物不渲染）")
+
+
 def test_fig_latency_ignores_noncanonical_ctx_keys():
     """ctx key "1_0"/"040" 不能经 int() 变成 10/40 并出现在图上。"""
     if not _HAS_MPL:
