@@ -437,6 +437,12 @@ def test_t_critical_95_matches_known_table():
     assert abs(t_critical_95(201) - 1.97184) < 5e-5
     assert abs(t_critical_95(500) - 1.96472) < 5e-5
     assert abs(t_critical_95(1000) - 1.96234) < 5e-5
+    # 大自由度必须走正态极限：朴素 x=df/(df+t²) 在 df≈1e18 时会舍入到 1，
+    # 把 p 错算成 1、临界值错算成 8/90。
+    assert abs(student_t_two_sided_p(2, 10 ** 18)
+               - math.erfc(2 / math.sqrt(2))) < 1e-12
+    assert abs(t_critical_95(10 ** 18) - 1.9599639845) < 1e-6
+    assert abs(t_critical_95(10 ** 400) - 1.9599639845) < 1e-6
     # 非法自由度安全返回 None，不抛异常
     assert t_critical_95(0) is None and t_critical_95(None) is None
     assert t_critical_95(float("inf")) is None

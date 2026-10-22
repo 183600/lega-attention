@@ -692,15 +692,42 @@ def _betai(a: float, b: float, x: float) -> float:
     return 1.0 - front * _betacf(b, a, 1.0 - x) / b
 
 
+# 大自由度下 t 分布与标准正态的差异 < O(1/df)；df≥1e7 时临界值差异远小于
+# 报告精度。直接走正态尾概率还能避开 x=df/(df+t²) 在 df 很大时舍入成 1.0、
+# 使 p 值错误地变成 1 的灾难性抵消。
+_T_NORMAL_DF = 1e7
+
+
+def _normal_two_sided_p(t: float) -> float:
+    """标准正态双侧 p 值（无 scipy）：erfc(|t|/√2)。"""
+    return float(math.erfc(abs(float(t)) / math.sqrt(2.0)))
+
+
 def student_t_two_sided_p(t: float, df: float) -> float:
     """Student-t 分布双侧 p 值（无 scipy 依赖）。
 
-    NaN 输入返回 NaN（不能当作最显著）；±Inf 返回 0。
+    NaN 输入返回 NaN（不能当作最显著）；±Inf 返回 0。df 无效时返回 NaN。
+    大自由度使用正态极限，避免 ``df/(df+t²)`` 在 float 中舍入到 1 后把
+    p 错算成 1（df≈1e18 时该错误会把 0.0455 变成 1.0）。
     """
     if math.isnan(t):
         return float("nan")
     if math.isinf(t):
         return 0.0
+    try:
+        df = float(df)
+    except (TypeError, ValueError, OverflowError):
+        if isinstance(df, (int, np.integer)) and not isinstance(
+                df, (bool, np.bool_)) and df > 0:
+            # 合法但超出 float 上限的整数自由度：等价于无穷自由度。
+            return _normal_two_sided_p(t)
+        return float("nan")
+    if not math.isfinite(df):
+        return (_normal_two_sided_p(t) if df > 0 else float("nan"))
+    if df <= 0:
+        return float("nan")
+    if df >= _T_NORMAL_DF:
+        return _normal_two_sided_p(t)
     x = df / (df + t * t)
     return float(_betai(df / 2.0, 0.5, x))
 
@@ -709,14 +736,21 @@ def t_critical_95(df: float) -> float:
     """95% 双侧 Student-t 临界值（用现有 t 分布 p 值二分求根，无 scipy）。
 
     小样本（如验证窗口仅 eval_iters=20 个）用正态 1.96 会低估区间宽度；
-    df<=0 返回 None，df>200 时 t→z 近似 1.96 直接返回以免无谓迭代。
+    df<=0/无效返回 None。大自由度（含超出 float 上限的整数 df）走 t 的
+    正态极限，df=1e18 时不会再把临界值错算成 8 或 90。
     """
     if df is None or isinstance(df, (bool, np.bool_)):
         return None
     try:
         df = float(df)
     except (TypeError, ValueError, OverflowError):
-        return None
+        if (isinstance(df, (int, np.integer))
+                and not isinstance(df, (bool, np.bool_)) and df > 0):
+            # 合法但超出 float 上限的整数自由度：t 已收敛到正态，用阈值
+            # 自由度求根即可；显式 float("inf") 仍按“无效自由度”返回 None。
+            df = _T_NORMAL_DF
+        else:
+            return None
     if not math.isfinite(df) or df <= 0:
         return None
     # 不要用 df>200 就退化为正态近似：df=201 的 t 临界值仍有 1.972，
