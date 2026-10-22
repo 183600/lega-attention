@@ -330,6 +330,43 @@ def _repo_path(path: str) -> str:
     return path if os.path.isabs(path) else os.path.abspath(os.path.join(ROOT, path))
 
 
+def mark_repro_failed(results_dir: str, *, error: str, stage: str,
+                      variant: str = None, returncode: int = None) -> bool:
+    """把本轮 ``repro.json`` 标成 aborted（失败轮次不能看起来仍在运行）。
+
+    台账已有 aborted 终态，但全局 repro 是人工/下游最先打开的溯源文件：
+    只写 ``started`` 内容会让失败轮次与“仍在跑”无法区分。这里保留启动期
+    已记录的 git/worktree/seed_audit 等事实，只补失败终态，不伪造 completed
+    的 tracking_end。文件不存在/不可解析时静默返回 False——失败路径不能
+    因为补写溯源而掩盖原异常。
+    """
+    if not results_dir:
+        return False
+    path = os.path.join(results_dir, "repro.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    failure = {"time": ts, "error": error, "stage": stage}
+    if variant is not None:
+        failure["variant"] = variant
+    if returncode is not None:
+        failure["returncode"] = int(returncode)
+    doc["status"] = "aborted"
+    doc["failure"] = failure
+    doc["tracking_end"] = dict(failure)
+    try:
+        save_json(doc, path)
+    except OSError as e:
+        print(f"[repro] ⚠ 失败终态写入 repro.json 失败（{e}）")
+        return False
+    return True
+
+
 def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
                           stage: str, variant: str = None,
                           returncode: int = None, sanity: dict = None) -> None:
@@ -342,6 +379,14 @@ def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
     append_record(ledger, build_experiment_record(
         status="aborted", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
         sanity=sanity, extra=extra, **ledger_common))
+    # 台账 aborted 与全局 repro 的失败终态必须一起落盘；后者写失败不能
+    # 影响前者的完整性，也不能掩盖调用方即将抛出的原始异常。
+    try:
+        mark_repro_failed(
+            ledger_common.get("results_dir"), error=error, stage=stage,
+            variant=variant, returncode=returncode)
+    except Exception as repro_err:  # noqa: BLE001 - 失败路径只告警
+        print(f"[repro] ⚠ 失败终态写入 repro.json 异常（{repro_err}）")
 
 
 @contextmanager

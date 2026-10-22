@@ -44,6 +44,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       load_registered_hypotheses, ngram_baseline_comparison,
                       parse_variants, registration_scope_check,
                       abort_ledger_on_failure, record_aborted_sanity,
+                      mark_repro_failed,
                       resolve_ngram_split, run_many,
                       tradeoff_verdict, verify_controlled_setup)
 
@@ -3863,6 +3864,51 @@ def test_append_aborted_record_covers_run_chain_failures():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] run 链失败落 aborted（阶段/变体/退出码）")
+
+
+def test_aborted_record_marks_repro_failed_without_losing_start_facts():
+    """失败轮次的 repro.json 必须标成 aborted，不能看起来仍在运行。"""
+    from run_all import append_aborted_record
+    tmp = tempfile.mkdtemp()
+    try:
+        results_dir = os.path.join(tmp, "results")
+        os.makedirs(results_dir)
+        repro_path = os.path.join(results_dir, "repro.json")
+        start = {"status": None, "seed_audit": {"7": {"is_plan": True}},
+                 "git": {"commit": "a" * 40}, "tag": "t"}
+        with open(repro_path, "w", encoding="utf-8") as f:
+            json.dump(start, f)
+        ledger = os.path.join(tmp, "experiments.jsonl")
+        common = dict(
+            run_id="rid_fail", tag="t", config_path="configs/tiny.json",
+            config_sha256="b" * 64, config={"lr": 1e-3}, variants=["lega"],
+            seeds=[7], smoke=False, argv=["run_all.py"], git={},
+            data_fingerprint="fp", runtime={}, out_root="out/t",
+            results_dir=results_dir, time_start="2026-01-01 00:00:00")
+        append_aborted_record(ledger, common, error="sanity_gate_failed",
+                              stage="sanity", variant="lega", returncode=2,
+                              sanity={"executed": True,
+                                      "verdict": {"lega": "fail"}})
+        with open(repro_path, "r", encoding="utf-8") as f:
+            repro = json.load(f)
+        assert repro["status"] == "aborted"
+        assert repro["failure"]["error"] == "sanity_gate_failed"
+        assert repro["failure"]["stage"] == "sanity"
+        assert repro["failure"]["variant"] == "lega"
+        assert repro["failure"]["returncode"] == 2
+        assert repro["tracking_end"]["stage"] == "sanity"
+        # 启动期事实（seed_audit/git/tag）不能被失败终态覆盖
+        assert repro["seed_audit"] == start["seed_audit"]
+        assert repro["git"] == start["git"] and repro["tag"] == "t"
+        # 缺失/畸形 repro 不阻塞台账，也不抛异常
+        assert mark_repro_failed(os.path.join(tmp, "missing"),
+                                 error="x", stage="y") is False
+        with open(repro_path, "w", encoding="utf-8") as f:
+            f.write("{bad")
+        assert mark_repro_failed(results_dir, error="x", stage="y") is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] repro.json 失败终态：保留启动事实 + 缺失/畸形容错")
 
 
 def test_abort_ledger_context_records_postrun_stage_failure():
