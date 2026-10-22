@@ -482,3 +482,26 @@ def test_train_nan_report_uses_first_bad_step_and_interval_candidates():
         act = rep["checklist_activations"]
         assert act["n_batches_checked"] >= 1, act
     print("  [ok] train 端到端：NaN 报告定位首个失败步并检查区间候选批次")
+
+
+def test_checklist_optimization_reports_earlier_gradient_peak_after_recovery():
+    """尖峰可能发生在更早的 log 点、当前已恢复：只看最后一点会漏掉。"""
+    m = _model()
+    hist = [1.0, 1.1, 0.9, 50.0, 1.0, 1.1, 0.95]
+    rep = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss",
+                            float("nan"), lr=1e-3,
+                            grad_norm_history=hist, amp_dtype=None,
+                            vocab_size=64)
+    opt = rep["checklist_optimization"]
+    assert opt["grad_norm_history_max"] == 50.0
+    assert opt["grad_norm_history_spike_ratio"] >= 10
+    findings = " ".join(opt["findings"])
+    assert "历史上出现过爆炸性尖峰" in findings, findings
+    # 平缓历史不伪造峰值告警
+    rep2 = run_nan_checklist(m, _batches(), "cpu", 7, "train_loss",
+                             float("nan"), lr=1e-3,
+                             grad_norm_history=[1.0, 1.1, 0.9, 1.0],
+                             amp_dtype=None, vocab_size=64)
+    assert "历史上出现过爆炸性尖峰" not in " ".join(
+        rep2["checklist_optimization"]["findings"])
+    print("  [ok] 排查步骤 4（优化）：历史尖峰（当前已恢复）仍被报告")

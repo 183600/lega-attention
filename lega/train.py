@@ -448,6 +448,7 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     if trigger_nonfinite:
         opt_findings.append(
             f"本次 pre-clip 梯度范数 {float(loss_value):.3e} 非有限 → 梯度已爆炸")
+    hist_max = hist_med = hist_spike_ratio = None
     if hist:
         finite = [g for g in hist if math.isfinite(g)]
         last = hist[-1]
@@ -462,6 +463,19 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             opt_findings.append(
                 f"最近 pre-clip 梯度范数 {last:.3e}，此前中位数 {med:.3e}"
                 + spike_note)
+        if len(finite) >= 3:
+            # 整个有限历史里的最坏峰值：尖峰可能发生在更早的 log 点、
+            # 当前已恢复；只看最后一点会漏掉“爆炸后恢复”的脆弱训练。
+            hist_max = float(max(finite))
+            hist_med = float(statistics.median(finite))
+            if hist_med > 0:
+                hist_spike_ratio = hist_max / hist_med
+            if hist_spike_ratio is not None and hist_spike_ratio >= 10:
+                opt_findings.append(
+                    f"历史 pre-clip 梯度范数峰值 {hist_max:.3e} 为中位数 "
+                    f"{hist_med:.3e} 的 {hist_spike_ratio:.0f} 倍"
+                    "（历史上出现过爆炸性尖峰；即使当前已恢复也要检查学习率/"
+                    "grad_clip 与对应步批次）")
         if not math.isfinite(last):
             opt_findings.append("最近一次 pre-clip 梯度范数非有限 → 梯度已爆炸")
     else:
@@ -486,6 +500,9 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     report["checklist_optimization"] = {
         "findings": opt_findings,
         "grad_norm_history_tail": hist[-20:],
+        "grad_norm_history_max": hist_max,
+        "grad_norm_history_median": hist_med,
+        "grad_norm_history_spike_ratio": hist_spike_ratio,
         "nonfinite_grads": bad_grads,
         "nonfinite_optimizer_state": bad_opt_state,
         "n_optimizer_state_tensors_checked": n_state_tensors,
