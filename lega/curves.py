@@ -1048,6 +1048,18 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 "重复与 n-gram 重叠、split 时序与文档边界），并核对训练/验证"
                 "是否使用同一精度、同一 dropout 状态与同一损失口径；"
                 "排除泄漏前不要报告该 run 的验证指标")
+        elif val_below_train:
+            # 发散/欠拟合等状态也不应把倒挂信号藏起来：保留曲线状态判定，
+            # 但并列报告完整性告警，避免读者只看到“欠拟合→扩容量”等建议。
+            evidence.append(
+                f"注意：验证损失末段 {last_val:.4f} 也低于训练损失末段 "
+                f"{last_train:.4f}（{val_below_train_rel:+.1%}），存在"
+                "验证-训练倒挂；该信号独立于当前曲线状态，优先排查数据划分/"
+                "预处理泄漏与训练/验证评估口径差异")
+            recommendations.append(
+                "同时存在验证-训练倒挂：在按上述建议调参/扩容量前，先完成"
+                "跨 split 重复与 n-gram 重叠审计，并核对训练/验证的精度、"
+                "dropout 状态与损失口径；排除泄漏前不要报告该 run 的验证指标")
 
     if val_ci_rel is not None:
         evidence.append(

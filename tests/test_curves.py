@@ -137,6 +137,11 @@ def test_divergence_and_nan():
     d = diagnose_curve(_log([4.0, 4.5, 5.5, 7.0, 9.5, 13.0], [4.1, 4.6, 5.4, 6.8, 9.0]))
     assert d["status"] == "发散", d
     assert any("学习率" in r for r in d["recommendations"])
+    # 发散状态下验证仍低于训练：不能把倒挂信号藏起来（状态保留“发散”，
+    # 但证据/建议里要并列提示先排查泄漏/口径）。
+    assert d["val_below_train"] is True and any(
+        "倒挂" in e for e in d["evidence"]), d["evidence"]
+    assert any("倒挂" in r for r in d["recommendations"]), d["recommendations"]
     # 任何序列出现 NaN/Inf → NaN/Inf 状态 + 排查路径建议
     recs = _log([4.2, 3.5, 3.0], [4.3, 3.2, 2.9])
     recs.append({"step": 40, "loss": float("nan")})
