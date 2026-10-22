@@ -9,6 +9,7 @@ import functools
 import json
 import math
 import os
+import re
 
 import numpy as np
 import torch
@@ -93,10 +94,10 @@ def _positive_int_or_none(value):
     if isinstance(value, (int, np.integer)):
         value = int(value)
     elif isinstance(value, str):
-        try:
-            value = int(value.strip())
-        except (TypeError, ValueError, OverflowError):
+        # int("1_0")==10：下划线不是规范整数串，不能冒充另一个配置值。
+        if re.fullmatch(r"[+-]?\d+", value.strip()) is None:
             return None
+        value = int(value)
     else:
         try:
             f = float(value)

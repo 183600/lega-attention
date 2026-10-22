@@ -827,6 +827,9 @@ def test_main_picks_smallest_seed_per_variant_not_lexicographic_first():
                                         "badcases": [a]},
             "ruler_lega_seed1000.json": {"variant": "lega", "seed": 1000,
                                          "badcases": []},
+            # int("1_0")/float("1_0") 都会得到 10；畸形种子不能抢走最小种子。
+            "ruler_lega_seedx.json": {"variant": "lega", "seed": "1_0",
+                                      "badcases": []},
         }
         for name, obj in payloads.items():
             with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
@@ -840,9 +843,9 @@ def test_main_picks_smallest_seed_per_variant_not_lexicographic_first():
         with open(os.path.join(tmp, "badcase_summary.json"),
                   encoding="utf-8") as f:
             merged = json.load(f)
-        assert merged["n_files"] == 3
+        assert merged["n_files"] == 4
         pv = merged["cross_variant"]["per_variant"]["lega"]
-        assert pv["n_failed"] == 1, pv      # seed999，而非字典序在前的 seed1000
+        assert pv["n_failed"] == 1, pv      # seed999，而非 seed1000 或畸形 "1_0"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] badcase.main 按数值最小种子对齐跨变体对照")

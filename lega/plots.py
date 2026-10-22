@@ -94,6 +94,9 @@ def _seed_int(v):
         return None
     if isinstance(v, (int, np.integer)):
         return int(v)
+    # float("1_0")==10.0：下划线写法不是规范整数串，不能静默合并到种子 10。
+    if isinstance(v, str) and "_" in v:
+        return None
     f = _finite_float(v)
     if f is None or f != math.floor(f):
         return None

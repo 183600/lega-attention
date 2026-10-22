@@ -28,6 +28,7 @@ import argparse
 import json
 import math
 import os
+import re
 import statistics
 from typing import Dict, List, Optional, Tuple
 
@@ -163,10 +164,11 @@ def _step_or_none(value) -> Optional[int]:
     if isinstance(value, (int, np.integer)):
         value = int(value)
     elif isinstance(value, str):
-        try:
-            value = int(value.strip())
-        except (TypeError, ValueError, OverflowError):
+        # int("1_0")==10：下划线写法会让坏日志冒充第 10 步，与其他整数
+        # 解析入口（strict_int）的拒绝口径不一致。
+        if re.fullmatch(r"[+-]?\d+", value.strip()) is None:
             return None
+        value = int(value)
     else:
         try:
             f = float(value)

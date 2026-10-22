@@ -1298,10 +1298,14 @@ def main():
         elif isinstance(raw, (int, np.integer)):
             seed = int(raw)
         elif isinstance(raw, str):
-            try:
-                seed = int(raw)
-            except ValueError:
-                seed = _finite_float(raw)
+            # int("1_0")/float("1_0") 都会得到 10：下划线写法不能冒充种子 10。
+            if "_" in raw:
+                seed = None
+            else:
+                try:
+                    seed = int(raw)
+                except ValueError:
+                    seed = _finite_float(raw)
         else:
             seed = _finite_float(raw)
         # 种子身份必须是整数：1.9 与 1.1 截断成同一个 1 会让跨变体

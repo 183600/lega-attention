@@ -245,11 +245,13 @@ def test_malformed_log_records_do_not_crash_diagnosis():
     recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": "oops"},
             {"step": "x", "loss": 4.0}, {"step": 30, "loss": 3.0},
             {"step": 40, "loss": 2.0}, {"step": 50, "loss": 1.5},
+            {"step": "1_0", "loss": 4.0},
             {"step": 10, "val_loss": 5.0}, {"step": 30, "val_loss": 3.2},
             {"step": 50, "val_loss": 2.0}, {"step": 60, "val_loss": "bad"}]
     d = diagnose_curve(recs)
     assert d["status"] in ("正常收敛", "过拟合趋势", "欠拟合/学习不充分"), d
-    assert d["malformed_records"] == 3, d
+    # "1_0" 若经 int() 会变成第 10 步，与真实 step=10 混淆。
+    assert d["malformed_records"] == 4, d
     assert any("无法解析" in e for e in d["evidence"]), d["evidence"]
     print("  [ok] 损坏日志记录跳过并计数（诊断正常完成）")
 
