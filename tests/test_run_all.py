@@ -2512,6 +2512,29 @@ def test_render_baseline_sections_reads_evidence_and_warns():
     print("  [ok] _render_baseline_sections（证据渲染/缺失警告）")
 
 
+def test_probe_table_renders_both_metric_p_values():
+    """判定可能由 AUROC 驱动时，表格不能只显示 PR-AUC 的 p 值造成自相矛盾。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        row = {"variant": "lega", "n_seeds": 5, "hit_base_rate": 0.10,
+               "features": ["log_maxp", "log_n", "qterm"],
+               "rule_auprc": 0.1, "probe_auprc": 0.30,
+               "gate_auprc": 0.32, "probe_auroc": 0.80,
+               "gate_auroc": 0.70, "probe_f1_fixed": 0.4,
+               "probe_f1_tuned": 0.45, "delta_auprc": -0.02,
+               "delta_auprc_ci95": [-0.05, 0.01],
+               "delta_auroc": 0.10, "delta_auroc_ci95": [0.01, 0.19],
+               "p_adj_auprc": 0.80, "p_adj_auroc": 0.01,
+               "primary_detection_metric": "AUROC 与 PR-AUC 并报",
+               "verdict": "门控显著优于最简监督线性基线"}
+        text = "\n".join(_render_baseline_sections(
+            tmp, probe_cmp={"rows": [row], "missing": []}))
+        assert "p_adj(PR-AUC)" in text and "p_adj(AUROC)" in text, text
+        assert "0.8000" in text and "0.0100" in text, text
+        assert "ΔAUROC" in text and "+0.100" in text, text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 线性探针表同时展示 PR-AUC/AUROC 的 Δ 与 p_adj")
 
 
 def test_render_baseline_selection_stability():

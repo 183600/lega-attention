@@ -5562,19 +5562,26 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             "| 变体 | n | 命中基线率 | 特征集 | PR-AUC规则(max_p) | "
             "PR-AUC探针(OOF) | PR-AUC门控(logit) | AUROC探针(OOF) | "
             "AUROC门控(logit) | F1探针(macro,0.5) | F1探针(macro,调优) | "
-            "ΔPR-AUC(探针−门控) | p_adj | 判定 |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "ΔPR-AUC(探针−门控) | p_adj(PR-AUC) | ΔAUROC(探针−门控) | "
+            "p_adj(AUROC) | 判定 |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
+
+        def _delta_ci(r, key):
+            delta = r.get(key)
+            ci = r.get(key + "_ci95")
+            if delta is None:
+                return "-"
+            text = f"{delta:+.3f}"
+            if (isinstance(ci, (list, tuple)) and len(ci) == 2
+                    and all(_finite_number(x) is not None for x in ci)):
+                text += f" [{_finite_number(ci[0]):+.3f}, "
+                text += f"{_finite_number(ci[1]):+.3f}]"
+            return text
+
         for r in probe["rows"]:
             feat = r.get("features")
             feat_s = "+".join(str(x) for x in feat) if feat else "-"
-            delta = r.get("delta_auprc")
-            ci = r.get("delta_auprc_ci95")
-            delta_s = ("-" if delta is None else
-                       f"{delta:+.3f}"
-                       + (f" [{(ci or [None, None])[0]:+.3f}, "
-                          f"{(ci or [None, None])[1]:+.3f}]"
-                          if ci else ""))
             lines.append(
                 f"| {r.get('variant')} | {r.get('n_seeds')} | "
                 f"{_fmt4(r.get('hit_base_rate'))} | {feat_s} | "
@@ -5584,8 +5591,11 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"{_fmt4(r.get('probe_auroc'))} | "
                 f"{_fmt4(r.get('gate_auroc'))} | "
                 f"{_fmt4(r.get('probe_f1_fixed'))} | "
-                f"{_fmt4(r.get('probe_f1_tuned'))} | {delta_s} | "
+                f"{_fmt4(r.get('probe_f1_tuned'))} | "
+                f"{_delta_ci(r, 'delta_auprc')} | "
                 f"{_fmt4(r.get('p_adj_auprc'))} | "
+                f"{_delta_ci(r, 'delta_auroc')} | "
+                f"{_fmt4(r.get('p_adj_auroc'))} | "
                 f"{r.get('verdict') or '-'} |")
         lines += ["", f"  {probe.get('note', '')}"]
         lines.append(
