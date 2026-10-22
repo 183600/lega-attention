@@ -2582,6 +2582,9 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
         assert hrow["mean_ppl"] == 1e308, hrow
         assert hrow["ratio"] == 1.0, hrow
         assert math.isfinite(hrow["mean_ppl"]), hrow
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "test", "ppl": {"unigram": 200.0, "bigram": 100.0},
+            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
         # 显著劣于统计基线要被点名（神经模型连 n-gram 都打不过）
         runs_bad = {"lega": {s: {"eval": {"variant": "lega", "split": "test",
                                           "ppl": 120.0 + s}}
