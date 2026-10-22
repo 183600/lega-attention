@@ -100,11 +100,16 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
             for t0 in range(0, lf.size(0), ce_tokens):
                 lc = lf[t0:t0 + ce_tokens]
                 tc = tgt[t0:t0 + ce_tokens]
+                # F.cross_entropy 默认把 -100 当作忽略目标；分母与准确率
+                # 必须使用同一批“有效目标”，否则忽略位置会稀释 loss。
+                valid = tc != -100
                 total_loss += float(F.cross_entropy(lc, tc, reduction="sum"))
                 pred[t0:t0 + ce_tokens] = lc.argmax(dim=-1)
-            correct += int((pred == tgt).sum())
-            n_tokens += int(tgt.numel())
-            exact += int((pred.reshape(xb.shape[0], T) == yb).all(dim=1).sum())
+                correct += int(((pred[t0:t0 + ce_tokens] == tc) & valid).sum())
+                n_tokens += int(valid.sum())
+            valid_rows = (yb != -100)
+            row_correct = (pred.reshape(xb.shape[0], T) == yb) | (~valid_rows)
+            exact += int(row_correct.all(dim=1).sum())
         return {
             "loss": total_loss / max(1, n_tokens),
             "token_acc": correct / max(1, n_tokens),
@@ -360,6 +365,11 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     # 从而伪造一个看似合法的过拟合/准确率门槛。
     loss_threshold = _finite_float_arg(loss_threshold, "loss_threshold")
     acc_threshold = _finite_float_arg(acc_threshold, "acc_threshold")
+    # 准确率门槛必须落在 [0,1]：负值会让 token_acc >= threshold 恒真，
+    # 把“几乎全错”的模型放行；>1 则任何模型都不可能通过，属于配置错误。
+    if not 0.0 <= acc_threshold <= 1.0:
+        raise ValueError(
+            f"acc_threshold 必须在 [0,1] 内，收到 {acc_threshold!r}")
     initial_loss_tol = _finite_float_arg(initial_loss_tol, "initial_loss_tol")
     set_seed(seed)
     contract = batch_contract(x, y, model.vocab_size)
