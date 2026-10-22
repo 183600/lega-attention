@@ -305,6 +305,8 @@ def _finite_float_arg(value, name: str) -> float:
     """有限浮点配置；bool/NaN/Inf/非数值显式拒绝（True 不能冒充 1.0）。"""
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
     try:
         f = float(value)
     except (TypeError, ValueError, OverflowError) as e:

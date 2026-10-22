@@ -352,7 +352,7 @@ def test_linear_probe_tolerates_non_numeric_columns():
 def test_probe_rejects_numpy_bools_and_cache_identity():
     """np.bool_ 不能被当成 1.0/L2=1；特征缓存也不能跨 records 对象复用。"""
     assert math.isnan(_float_or_nan(np.bool_(True)))
-    for bad in (np.bool_(True), np.bool_(False)):
+    for bad in (np.bool_(True), np.bool_(False), "1_0"):
         try:
             _finite_nonnegative(bad, "l2")
             raise AssertionError(f"np.bool_ 应被拒绝: {bad!r}")

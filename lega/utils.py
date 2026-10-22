@@ -211,6 +211,8 @@ def config_finite_float(value, name: str = "值") -> float:
     """
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
     try:
         out = float(value)
     except (TypeError, ValueError, OverflowError) as e:

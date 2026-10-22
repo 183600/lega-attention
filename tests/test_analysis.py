@@ -99,7 +99,7 @@ def _mk_records():
 
 def test_analysis_numeric_args_reject_invalid_values():
     """τ/网格/计数不能被 bool、NaN、负值或显式 0 静默改写。"""
-    for bad in (True, "x", float("nan"), float("inf")):
+    for bad in (True, "x", "1_0", float("nan"), float("inf")):
         try:
             _bounded_float(bad, "tau", minimum=0.0, maximum=1.0)
         except ValueError:

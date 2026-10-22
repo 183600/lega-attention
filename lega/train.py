@@ -764,6 +764,8 @@ def _config_nonneg_float(value, name: str) -> float:
     """
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"config.{name} 必须是数值，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"config.{name} 必须是数值，收到 {value!r}")
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as e:
@@ -783,6 +785,8 @@ def _config_finite_float(value, name: str) -> float:
     """
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"config.{name} 必须是数值，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"config.{name} 必须是数值，收到 {value!r}")
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as e:

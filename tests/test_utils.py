@@ -384,7 +384,7 @@ def test_config_bool_validation():
 def test_config_float_and_probability_validation():
     """模型配置浮点不能把 bool/NaN/Inf 静默转成数值，概率还须落在 [0, 1]。"""
     for bad in (True, False, np.bool_(True), float("nan"), float("inf"),
-                float("-inf"), None, "abc", []):
+                float("-inf"), None, "abc", "1_0", []):
         for fn in (config_finite_float, config_probability):
             try:
                 fn(bad, "x")

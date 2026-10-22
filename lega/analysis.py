@@ -92,6 +92,8 @@ def _bounded_float(value, name: str, minimum=None, maximum=None) -> float:
     """有限浮点配置；拒绝 bool/NaN/Inf，并按语义上下界显式报错。"""
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"{name} 必须是有限数值，收到 {value!r}")
     try:
         out = float(value)
     except (TypeError, ValueError, OverflowError) as e:

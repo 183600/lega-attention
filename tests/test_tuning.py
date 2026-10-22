@@ -506,7 +506,7 @@ def test_tuning_manifest_identity_rejects_numpy_scalars():
     for bad in (np.bool_(True), np.float32(7.5), np.float64(7.5)):
         assert _as_int(bad) is None, bad
     assert _as_int(np.float64(7.0)) == 7
-    for bad in (np.bool_(True), np.bool_(False)):
+    for bad in (np.bool_(True), np.bool_(False), "1_0"):
         try:
             _finite_number(bad, "x")
             raise AssertionError(f"np.bool_ 应被拒绝: {bad!r}")

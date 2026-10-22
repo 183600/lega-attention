@@ -119,7 +119,8 @@ def test_overfit_check_rejects_invalid_numeric_args():
                 log_every=1)
     for name in ("lr", "grad_clip", "loss_threshold", "acc_threshold",
                  "initial_loss_tol"):
-        for bad in (True, np.bool_(True), float("nan"), float("inf"), "bad"):
+        for bad in (True, np.bool_(True), float("nan"), float("inf"),
+                    "bad", "1_0"):
             kwargs = dict(base)
             kwargs[name] = bad
             try:

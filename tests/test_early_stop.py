@@ -102,7 +102,8 @@ def test_config_min_delta_rejects_nonfinite_and_out_of_range():
 
 def test_config_float_and_probability_reject_invalid_values():
     """模型正则化超参数不允许 bool/NaN/Inf 或越界概率静默进入训练。"""
-    for bad in (True, False, float("nan"), float("inf"), "nan", None, object()):
+    for bad in (True, False, float("nan"), float("inf"), "nan", "1_0",
+                None, object()):
         try:
             _config_finite_float(bad, "gate_bias_init")
         except ValueError:
@@ -112,7 +113,7 @@ def test_config_float_and_probability_reject_invalid_values():
     assert _config_finite_float(2, "gate_bias_init") == 2.0
     assert _config_finite_float("2.5", "gate_bias_init") == 2.5
     for bad in (True, False, -0.1, 1.1, float("nan"), float("inf"),
-                "nan", None, object()):
+                "nan", "1_0", None, object()):
         try:
             _config_probability(bad, "dropout")
         except ValueError:

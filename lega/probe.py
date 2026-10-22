@@ -93,6 +93,8 @@ def _finite_nonnegative(value, name: str = "l2") -> float:
     """有限非负浮点；bool/NaN/Inf/负值显式拒绝（负数 L2 会破坏凸性）。"""
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限非负数，收到 bool {value!r}")
+    if isinstance(value, str) and "_" in value:
+        raise ValueError(f"{name} 必须是有限非负数，收到 {value!r}")
     try:
         out = float(value)
     except (TypeError, ValueError, OverflowError) as e:
