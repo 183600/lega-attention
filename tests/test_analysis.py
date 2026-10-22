@@ -414,3 +414,54 @@ def test_summarize_reports_imbalance_aware_metrics():
         ], "lega", 0.5)
     assert s4["mean_g_hit"] is None and s4["mean_g_miss"] is not None
     print("  [ok] summarize（正类率/主指标/PR-AUC/三口径门控 F1/全缺 g 切片）")
+
+
+def test_analysis_payload_binds_checkpoint_hash(monkeypatch):
+    """机制分析结果必须绑定被分析 checkpoint 的路径与内容指纹。"""
+    import json
+    import os
+    import shutil
+    import sys
+    import tempfile
+
+    import numpy as np
+    import torch
+
+    from lega.model import GPT, save_checkpoint
+    from lega.repro import sha256_file
+
+    d = tempfile.mkdtemp()
+    try:
+        data = os.path.join(d, "data")
+        os.makedirs(data)
+        text = "The quick brown fox jumps over the lazy dog. 0123456789"
+        itos = sorted(set(text))
+        with open(os.path.join(data, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "itos": itos, "char_unk": False,
+                       "vocab_size": len(itos), "cache_schema": 6,
+                       "fit_on": "train"}, f)
+        arr = np.array([itos.index(c) for c in text], dtype=np.uint16)
+        arr.tofile(os.path.join(data, "train.bin"))
+        arr.tofile(os.path.join(data, "val.bin"))
+        ckpt = os.path.join(d, "model.pt")
+        torch.manual_seed(0)
+        model = GPT(vocab_size=len(itos), block_size=128, d_model=8,
+                    n_layers=1, n_heads=1, ffn_mult=2, variant="lega",
+                    dropout=0.0, attn_dropout=0.0, gate_bias_init=2.0)
+        save_checkpoint(ckpt, model, extra={"variant": "lega", "seed": 5})
+        out_dir = os.path.join(d, "results")
+        os.makedirs(out_dir)
+        monkeypatch.setattr(sys, "argv", [
+            "analysis", "--ckpt", ckpt, "--data_dir", data,
+            "--out_dir", out_dir, "--ctx", "64", "--n_examples", "1",
+            "--device", "cpu"])
+        from lega.analysis import main as analysis_main
+        analysis_main()
+        with open(os.path.join(out_dir, "analysis_lega.json"),
+                  encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["ckpt"] == os.path.abspath(ckpt)
+        assert payload["ckpt_sha256"] == sha256_file(ckpt)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("  [ok] analysis payload 绑定 checkpoint 路径与内容哈希")

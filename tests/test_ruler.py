@@ -448,3 +448,53 @@ def test_depth_bin_boundaries_and_invalid_values():
                 float("inf"), "0.5", object()):
         assert depth_bin(bad) is None, bad
     print("  [ok] depth_bin（半开边界、末期含 1.0、非法值返回 None）")
+
+
+def test_ruler_payload_binds_checkpoint_hash(monkeypatch):
+    """RULER 结果必须绑定被评测 checkpoint 的路径与内容指纹。
+
+    只写目录名/seed 不够：同一路径的权重被覆盖后，旧 RULER 分数仍会被当作
+    当前模型结果引用。这里跑一次最小 CLI（任务因 ctx 过小被跳过，但仍落盘
+    payload），核对 ckpt_sha256 与文件内容一致。
+    """
+    import json
+    import sys
+
+    import numpy as np
+    import torch
+
+    from lega.model import GPT, save_checkpoint
+    from lega.repro import sha256_file
+
+    d = tempfile.mkdtemp()
+    try:
+        data = os.path.join(d, "data")
+        os.makedirs(data)
+        text = "The quick brown fox jumps over the lazy dog. 0123456789"
+        itos = sorted(set(text))
+        with open(os.path.join(data, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "itos": itos, "char_unk": False,
+                       "vocab_size": len(itos), "cache_schema": 6,
+                       "fit_on": "train"}, f)
+        arr = np.array([itos.index(c) for c in text], dtype=np.uint16)
+        arr.tofile(os.path.join(data, "train.bin"))
+        arr.tofile(os.path.join(data, "val.bin"))
+        ckpt = os.path.join(d, "model.pt")
+        torch.manual_seed(0)
+        model = GPT(vocab_size=len(itos), block_size=128, d_model=8,
+                    n_layers=1, n_heads=1, ffn_mult=2, variant="lega",
+                    dropout=0.0, attn_dropout=0.0, gate_bias_init=2.0)
+        save_checkpoint(ckpt, model, extra={"variant": "lega", "seed": 5})
+        out = os.path.join(d, "ruler.json")
+        monkeypatch.setattr(sys, "argv", [
+            "ruler", "--ckpt", ckpt, "--data_dir", data, "--out", out,
+            "--ctx_lens", "64", "--n_samples", "1", "--device", "cpu"])
+        from lega.ruler import main as ruler_main
+        ruler_main()
+        with open(out, encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["ckpt"] == os.path.abspath(ckpt)
+        assert payload["ckpt_sha256"] == sha256_file(ckpt)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("  [ok] RULER payload 绑定 checkpoint 路径与内容哈希")
