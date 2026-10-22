@@ -50,6 +50,13 @@ def test_early_stop_update_semantics():
     # 非有限值由 NaN 防护路径中止，这里不消费、也不误判改善
     best, cnt, stop = early_stop_update(float("nan"), 2.9, 1, 0.0, 1)
     assert best == 2.9 and cnt == 1 and not stop
+    # 合法但超出 float 上限的整数观测不可比较：不消费、不误触发早停，
+    # 也不能让 float()/math.isfinite 的 OverflowError 穿透。
+    best, cnt, stop = early_stop_update(10 ** 400, 2.9, 1, 0.0, 1)
+    assert best == 2.9 and cnt == 1 and not stop
+    # best 超出 float 上限时，任何可表示的 vl 都严格更优。
+    best, cnt, stop = early_stop_update(2.5, 10 ** 400, 1, 0.0, 1)
+    assert best == 2.5 and cnt == 0 and not stop
     # 验证抽样噪声：val=2.99 vs best=3.0 只改善 0.33%，但 CI 半宽 ±2%
     # → 不算实质改善（不重置耐心），最新点仍进入 best checkpoint
     best, cnt, stop = early_stop_update(

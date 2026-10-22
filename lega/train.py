@@ -900,12 +900,17 @@ def _val_ci_rel(vl: float, val_ci95) -> Optional[float]:
         return None
     try:
         lo, hi = float(val_ci95[0]), float(val_ci95[1])
+        vl = float(vl)
     except (TypeError, ValueError, OverflowError):
         return None
     if (not math.isfinite(lo) or not math.isfinite(hi)
             or hi < lo or not math.isfinite(vl) or vl <= 0):
         return None
-    return (hi - lo) / 2.0 / vl
+    try:
+        out = (hi - lo) / 2.0 / vl
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
@@ -926,14 +931,28 @@ def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
         计数仍如实维护（供日志显示"距最优已多少次评测未改善"）；
       * 非有限 vl 由 NaN 防护路径负责中止，这里不消费也不误判改善。
     """
-    if not math.isfinite(float(vl)):
+    # vl/best_val 可能来自外部 JSON 的合法大整数（超出 float 表示范围）。
+    # 这种观测无法参与相对阈值比较，按“不可消费”处理而不是让
+    # float()/math.isfinite 的 OverflowError 穿透。
+    try:
+        vl_f = float(vl)
+    except (TypeError, ValueError, OverflowError):
         return best_val, evals_since_improve, False
-    if best_val == float("inf"):
-        return float(vl), 0, False
-    noise_rel = _val_ci_rel(float(vl), val_ci95)
+    if not math.isfinite(vl_f):
+        return best_val, evals_since_improve, False
+    try:
+        best_f = float(best_val)
+    except OverflowError:
+        # best 超出 float 上限：任何可表示 vl 都严格更优。
+        best_f = float("inf")
+    except (TypeError, ValueError):
+        return best_val, evals_since_improve, False
+    if best_f == float("inf"):
+        return vl_f, 0, False
+    noise_rel = _val_ci_rel(vl_f, val_ci95)
     threshold = max(0.0, float(min_delta), noise_rel or 0.0)
-    improved = float(vl) < best_val * (1.0 - threshold)
-    new_best = float(vl) if float(vl) < best_val else best_val
+    improved = vl_f < best_f * (1.0 - threshold)
+    new_best = vl_f if vl_f < best_f else best_val
     if improved:
         return new_best, 0, False
     count = int(evals_since_improve) + 1
