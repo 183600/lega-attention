@@ -208,6 +208,16 @@ def test_answer_in_prompt_requires_bool():
     print("  [ok] answer_in_prompt 非布尔值按无法核对处理")
 
 
+def test_report_counts_reject_underscore_numeric_strings():
+    """Python 数字字面量写法 "1_0" 不能被解析成 10 并伪造计数。"""
+    from lega.badcase import _count_int, _safe_int
+    assert _count_int("1_0") is None
+    assert _safe_int("1_0") is None
+    assert _count_int("10") == 10
+    assert _safe_int("10") == 10
+    print("  [ok] 计数/窗口整数字段拒绝下划线数字串")
+
+
 def test_report_counts_reject_bool_and_fractional():
     """报告计数分母不能把 True/2.5 强转成 1/2 而伪造错误样本数。"""
     tmp = tempfile.mkdtemp()
