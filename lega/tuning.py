@@ -128,6 +128,12 @@ def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
     for wd in wds:
         for m in lr_mults:
             lr = lr0 * m
+            # 两个有限数的乘积仍可能溢出成 inf（如 1e308 × 2）；这种
+            # trial 配置无法写入合法 JSON/无法训练，必须在建网格时拒绝。
+            if not math.isfinite(lr) or not math.isfinite(wd):
+                raise ValueError(
+                    f"网格组合不可表示：lr0={lr0!r} × {m!r} = {lr!r}, "
+                    f"wd={wd!r}")
             pair = (lr, wd)
             if pair not in grid:
                 grid.append(pair)

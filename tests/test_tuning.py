@@ -4,6 +4,7 @@
 显式容差；trial 失败必须如实记录而不是静默当作某个损失值。
 """
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -626,3 +627,18 @@ def test_trial_identity_tolerates_malformed_manifest_fields():
     # 合法字符串仍保留供审计；畸形值只把 consistent 置 False。
     assert bad["data_fingerprints"] == ["d" * 16]
     assert bad["git_commits"] == ["c" * 40]
+
+
+def test_build_grid_rejects_unrepresentable_lr_product():
+    """有限 lr0/mult 相乘溢出时不能生成 inf 的 trial 配置。"""
+    from lega.tuning import build_grid
+    try:
+        build_grid(1e308, 0.1, lr_mults=(2.0,))
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    g = build_grid(1e-3, 0.1, lr_mults=(0.5, 2.0))
+    assert g[0] == (1e-3, 0.1)
+    assert all(math.isfinite(x) and math.isfinite(w) for x, w in g)
+    print("  [ok] 调优网格拒绝溢出为 inf 的 lr 组合")
