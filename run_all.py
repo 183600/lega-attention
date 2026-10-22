@@ -33,6 +33,10 @@
     Holm 校正后的显著证据逐一判定 A/B/C 组件是否“有用”——组合齐全但证据
     不足时不会下“各组件均有用”的结论；全因子另做 A×B/A×C/B×C 交互效应
     检验（探索性，独立 Holm 家族），区分“主效应可加”与“协同/次可加”。
+  * 单因素审计：组件归因只使用每次仅改一个因子的对比（去一法 Full−X vs
+    Full；全因子增量 X-only vs gate_only）。B-only/C-only 与 Full 相差
+    两个因子，不再进入单因素对比表；审计结果写入 significance.json 与
+    汇总页，防止多因子差异被误写成单组件证据。
 
 用法:
   # 冒烟测试（tiny 配置 + 伪数据，仅验证全流程可跑通；默认只跑 1 个种子）
@@ -65,7 +69,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from lega.attention import VARIANTS, VARIANT_CN  # noqa: E402
+from lega.attention import GATE_FACTORS, VARIANTS, VARIANT_CN  # noqa: E402
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,
@@ -136,6 +140,110 @@ LOO_CELLS = (
     ("Full−B（去集中度）", "lega_no_conc"),
     ("Full−C（去长度）", "lega_no_len"),
 )
+
+# 单因素消融对比：每一项只改变一个门控因子。这是“组件是否有用”唯一允许
+# 进入归因的对比集合——去一法在每个因子取 1 时删掉它（Full−X vs Full），
+# 全因子增量在每个因子取 0 时只加它（X-only vs gate_only）。B-only/C-only
+# 与 Full 相比同时改了另外两个因子，不能当作 B/C 的单因素消融证据。
+# (因子, 方向, 候选, 参照)；方向仅用于报告，不参与统计方向判定。
+SINGLE_FACTOR_CONTRASTS = (
+    ("A", "remove", "lega_no_query", "lega"),
+    ("B", "remove", "lega_no_conc", "lega"),
+    ("C", "remove", "lega_no_len", "lega"),
+    ("A", "add", "qgate", "gate_only"),
+    ("B", "add", "lega_conc_only", "gate_only"),
+    ("C", "add", "lega_len_only", "gate_only"),
+)
+SINGLE_FACTOR_PAIRS = tuple(
+    (cand, ref) for _factor, _direction, cand, ref in SINGLE_FACTOR_CONTRASTS)
+
+
+def changed_gate_factors(candidate, reference):
+    """两个门控变体之间激活因子集合的对称差；任一方不在门控内返回 None。
+
+    单因素对比要求对称差恰好一个因子。standard/null 不属于门控内 2^3，
+    与它们的对比（如 LEGA vs standard）是整体方法对比，不参与组件归因。
+    """
+    c = GATE_FACTORS.get(candidate)
+    r = GATE_FACTORS.get(reference)
+    if c is None or r is None:
+        return None
+    return frozenset(c.symmetric_difference(r))
+
+
+def single_factor_change(candidate, reference):
+    """候选−参照恰好只改一个因子时返回该因子（A/B/C），否则返回 None。"""
+    diff = changed_gate_factors(candidate, reference)
+    if diff is not None and len(diff) == 1:
+        return next(iter(diff))
+    return None
+
+
+def single_factor_audit():
+    """核对“需要单因素的消融对比”确实只改变一个门控因子。
+
+    这是运行期自检：GATE_FACTORS 从变体实现派生，SINGLE_FACTOR_CONTRASTS
+    是汇总与组件判定的唯一单因素对比表。任何一侧漂移（新增变体、改公式、
+    误把 B-only/C-only 与 Full 配对）都会在这里显形，而不是被静默当成
+    单组件证据。返回值写入 significance.json 并渲染进汇总页。
+    """
+    problems = []
+    contrasts = []
+    factorial_variants = [v for _name, v in FACTORIAL_CELLS]
+    if len(set(factorial_variants)) != 8 or set(factorial_variants) != set(GATE_FACTORS):
+        problems.append(
+            "全因子 8 格与 GATE_FACTORS 不一致："
+            f"cells={sorted(set(factorial_variants))}，"
+            f"factors={sorted(GATE_FACTORS)}")
+    for factor, direction, cand, ref in SINGLE_FACTOR_CONTRASTS:
+        diff = changed_gate_factors(cand, ref)
+        if diff is None:
+            problems.append(f"{cand} vs {ref} 不在门控变体内，无法做单因素归因")
+            continue
+        if diff != frozenset({factor}):
+            problems.append(
+                f"{cand} vs {ref} 声明为单因素 {factor}，实际改变 "
+                f"{sorted(diff) or '无'}")
+            continue
+        contrasts.append({"factor": factor, "direction": direction,
+                          "candidate": cand, "reference": ref,
+                          "changed_factors": sorted(diff)})
+    return {"ok": not problems, "problems": problems,
+            "contrasts": contrasts,
+            "factors": {v: sorted(f) for v, f in sorted(GATE_FACTORS.items())},
+            "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
+                     "X-only vs gate_only；整体对比（vs standard、LEGA vs "
+                     "qgate）可跨多个因子，不作组件归因。")}
+
+
+def build_comparison_pairs(runs, registered=None):
+    """构造汇总用的同种子配对对比表。
+
+    刻意把“单因素消融”和“整体方法对比”分开：
+      * 单因素：SINGLE_FACTOR_PAIRS（去一法 3 组 + 全因子增量 3 组）；
+      * 整体：各变体 vs standard，以及预注册的其它整体对比（如 H5）；
+      * 不再把 lega_conc_only / lega_len_only 与 lega 相比——它们与 Full
+        同时差两个因子（A+C / A+B），不是单组件消融。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    pairs = [(cand, "standard") for cand in ALL_VARIANTS
+             if cand != "standard"]
+    # gate_only 未运行时，三个“只加 X”的全因子增量对无法估计；去一法对
+    # 仍保留（缺 lega 时下游会如实报“未运行”，而不是伪造证据）。
+    pairs += [(cand, ref) for cand, ref in SINGLE_FACTOR_PAIRS
+              if ref != "gate_only" or "gate_only" in runs]
+    registered = _as_dict(registered)
+    hypotheses = registered.get("hypotheses")
+    for h in (hypotheses if isinstance(hypotheses, list) else []):
+        if not isinstance(h, dict):
+            continue
+        c, r = h.get("candidate"), h.get("reference")
+        if h.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
+            continue  # 单样本机制族，由 _auroc_diff_tests/_ap_diff_tests 覆盖
+        if c in VARIANTS and r in VARIANTS:
+            pairs.append((c, r))
+    return list(dict.fromkeys(pairs))
+
 
 def _ablation_coverage(cells, present, rows_by_var):
     """按“变体存在且种子数≥MIN_SEEDS”判定消融单元格覆盖。
@@ -2201,8 +2309,14 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         if not a:
             continue
         res = paired_t_test(a, b)
+        change = single_factor_change(cand, ref)
         res.update({"candidate": cand, "reference": ref, "metric": metric_name,
-                    "lower_is_better": bool(lower_better)})
+                    "lower_is_better": bool(lower_better),
+                    # 单因素标记进入 significance.json：只有单因素对比可用于
+                    # 组件归因；vs standard / LEGA vs qgate 等整体对比即使显著
+                    # 也不能把差异归给某一个 A/B/C 因子。
+                    "contrast_type": ("single_factor" if change else "overall"),
+                    "changed_factors": ([change] if change else [])})
         if split_skipped:
             res["excluded_split_mismatches"] = split_skipped
         if protocol_skipped:
@@ -4666,33 +4780,14 @@ def build_summary(results_dir: str, audit: dict = None,
                 (r["prefill_ms"] - base_ms) / base_ms * 100, 2)
 
     # --- 配对显著性检验（同种子）：PPL 与 RULER 平均
-    pairs = []
-    for cand in ALL_VARIANTS:
-        if cand != "standard":
-            pairs.append((cand, "standard"))
-    leafless = ("lega_no_len", "lega_no_conc", "lega_no_query",
-                "lega_conc_only", "lega_len_only")
-    pairs += [(c, "lega") for c in leafless]
-    # 组件“加入 X”的受控对照：X-only vs 只含门控偏置的 gate_only。
-    # standard 不是合适对照——它连输出门都没有，qgate/B-only/C-only 相对
-    # standard 的差异混入了“门本身”的效应。
-    if "gate_only" in runs:
-        pairs += [(c, "gate_only") for c in
-                  ("qgate", "lega_conc_only", "lega_len_only")]
-    # 预注册假设涉及的变体间对照必须可估计：登记的 (候选, 参照) 若不在
-    # 常规矩阵里（如 lega vs qgate 的“vs 已有工作”主张），在此补入，
-    # 保证每条 confirmatory 主张都有对应检验，而不是“登记了却没检验”。
+    # 单因素消融（去一法 + 全因子增量）与整体对比分开构造；B-only/C-only
+    # 不再与 Full 配对（那会同时改变 A+C / A+B，不能归因给单个组件）。
     registered = _as_dict(load_registered_hypotheses())
-    hypotheses = registered.get("hypotheses")
-    for h in (hypotheses if isinstance(hypotheses, list) else []):
-        if not isinstance(h, dict):
-            continue
-        c, r = h.get("candidate"), h.get("reference")
-        if h.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
-            continue  # 单样本机制族，由 _auroc_diff_tests/_ap_diff_tests 覆盖
-        if c in VARIANTS and r in VARIANTS and (c, r) not in pairs:
-            pairs.append((c, r))
-    pairs = list(dict.fromkeys(pairs))
+    sf_audit = single_factor_audit()
+    if not sf_audit["ok"]:
+        print("[run_all] ⚠ 单因素消融审计未通过："
+              + "；".join(sf_audit["problems"]))
+    pairs = build_comparison_pairs(runs, registered)
     tests = []
     tests += _paired_comparisons(
         runs, pairs, "PPL", lambda slot: _ppl_of(slot.get("eval")),
@@ -4744,6 +4839,13 @@ def build_summary(results_dir: str, audit: dict = None,
     # PPL 的窗口级配对：评估抽样不确定性，与种子级 PPL 检验互补。
     ppl_window_tests = _ppl_window_paired_tests(runs, pairs)
     comp = component_evidence(tests, audit=audit)
+    # 单因素审计失败时，任何“组件有用”的统计证据都不能升级为确认性结论：
+    # 对比本身不是单因素，归因对象不成立。证据数值保留供排查。
+    for c in comp:
+        c["single_factor_audit_ok"] = bool(sf_audit["ok"])
+        if not sf_audit["ok"]:
+            c["confirmatory_supported"] = False
+            c["evidence_status"] = "exploratory"
     # 预注册假设判定：confirmatory（登记主张）与 exploratory（其余对比）。
     # 完整性锁链把“事后静默改写登记表”变成可检测事件：校验未通过时
     # 全部确认性判定被显式降级（apply_integrity_gate），不会假装边界仍成立。
@@ -5953,6 +6055,35 @@ def build_summary(results_dir: str, audit: dict = None,
                   + (" ..." if len(underpowered_cells) > 8 else "")
                   + "；这些格不参与覆盖完整性宣称。")
 
+    # --- 单因素消融审计：需要单因素的实验必须每次只改一个因子。
+    md += ["", "### 单因素消融审计（每次只改变一个因子）", ""]
+    if sf_audit["ok"]:
+        md.append("✅ 组件归因所用的 6 组消融对比均只改变一个门控因子"
+                  "（去一法 Full−X vs Full，全因子增量 X-only vs `gate_only`）；"
+                  "不存在“B-only/C-only vs Full”这类同时改两个因子却被当作"
+                  "单组件证据的对比。")
+    else:
+        md.append("⚠ **单因素消融审计未通过**："
+                  + "；".join(sf_audit["problems"])
+                  + "。这些对比不能用于组件归因，需先修正变体/配对定义。")
+    md.append("")
+    md.append("| 对比 | 方向 | 改变的因子 | 实际因子差 |")
+    md.append("|---|---|---|---|")
+    direction_cn = {"remove": "去一法：去掉该因子",
+                    "add": "全因子增量：只加该因子"}
+    for c in sf_audit["contrasts"]:
+        md.append(f"| {c['candidate']} vs {c['reference']} "
+                  f"| {direction_cn.get(c['direction'], c['direction'])} "
+                  f"| {c['factor']} "
+                  f"| {', '.join(c['changed_factors'])} |")
+    md.append("")
+    md.append("注: 全因子 2^3 本身是多因子设计（用于 A×B/A×C/B×C 交互检验，"
+              "见下表，属探索性）；组件主效应只从上述单因素边估计。"
+              "各变体 vs `standard` 与 LEGA vs `qgate` 是整体方法对比，"
+              "可同时含多个因子，不得把差异归因给某一个 A/B/C 组件。"
+              "单因素审计结果同时写入 `significance.json` 的 "
+              "`single_factor_audit`。")
+
     # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
     md += ["", "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）", ""]
     md.append("判定只用预注册主指标（A/B=PPL，C=RULER）；另一指标仅作探索性"
@@ -5980,24 +6111,25 @@ def build_summary(results_dir: str, audit: dict = None,
     unsupported = [c["component"] for c in comp if not c["supported"]]
     fragile = [c["component"] for c in comp if c.get("fragile")]
     inconsistent = [c["component"] for c in comp if not c.get("consistent")]
+    sf_ok = bool(sf_audit["ok"])
     if not comp:
         md.append("")
         md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
     elif (not unsupported and not fragile and not factorial_missing
-          and not loo_missing and not inconsistent):
+          and not loo_missing and not inconsistent and sf_ok):
         md.append("")
         md.append("✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均在预注册主指标上"
                   "有 Holm 校正后的显著且稳健证据，去一法与全因子两套消融一致，"
                   "且门控内全因子 8/8、去一法完整。")
     elif (not unsupported and not fragile and not factorial_missing
-          and not loo_missing):
+          and not loo_missing and sf_ok):
         md.append("")
         md.append("✅ 统计证据支持各组件有用，但仅部分组件同时得到两套消融支持："
                   + "、".join(inconsistent)
                   + "；另一套未检出可能只是功效不足，报告时不得写成"
                   "“两套消融交叉印证”。")
     elif (not unsupported and not factorial_missing and not loo_missing
-          and fragile):
+          and fragile and sf_ok):
         md.append("")
         md.append("⚠ **不能下“各组件均有用”的稳健结论**："
                   + "、".join(fragile)
@@ -6006,6 +6138,9 @@ def build_summary(results_dir: str, audit: dict = None,
                   "需增加种子/降低方差后重跑才能确认。")
     else:
         md.append("")
+        if not sf_ok:
+            md.append("⚠ **不能下组件有效性结论**：单因素消融审计未通过，"
+                      "上述对比不满足“每次只改一个因子”，不能用于组件归因。")
         if unsupported:
             md.append("⚠ **不能下“各组件均有用”的结论**："
                       + "、".join(unsupported)
@@ -6069,10 +6204,10 @@ def build_summary(results_dir: str, audit: dict = None,
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
-        md.append("| 对比 | 指标 | Δ均值 ± Δ标准差 | Δ中位数 | Δ 95% CI | d_z | "
+        md.append("| 对比 | 类型 | 指标 | Δ均值 ± Δ标准差 | Δ中位数 | Δ 95% CI | d_z | "
                   "n | 胜/负/平 | 留一稳定 | p | p_adj(Holm) | "
                   "p_perm(Holm) | p_sign(Holm) | MDE | 结论 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for t in tests:
             if t.get("interaction"):
                 continue  # 交互效应单独成表，避免与主效应表重复
@@ -6082,6 +6217,12 @@ def build_summary(results_dir: str, audit: dict = None,
                 continue  # 比值尺度敏感性单独成表，避免与原始 PPL 重复
             if t.get("mean_diff") is None:
                 continue
+            if t.get("contrast_type") == "single_factor":
+                typ = ("单因素 " + "/".join(t.get("changed_factors") or []))
+            elif t.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
+                typ = "同 run 机制对比"
+            else:
+                typ = "整体/多因素"
             std = t.get("std_diff")
             delta = (f"{t['mean_diff']:+.4f}"
                      + (f" ± {std:.4f}" if std is not None else ""))
@@ -6100,10 +6241,16 @@ def build_summary(results_dir: str, audit: dict = None,
             mde = (f"{t['mde']:+.4f}" if t.get("mde") is not None else "-")
             wl = _seed_winloss_str(t)
             loo = _loo_stability_str(t)
-            md.append(f"| {t['candidate']} vs {t['reference']} | {t['metric']} | "
+            md.append(f"| {t['candidate']} vs {t['reference']} | {typ} "
+                      f"| {t['metric']} | "
                       f"{delta} | {med} | {ci_s} | {dz} | {t['n']} | {wl} | "
                       f"{loo} | {p} | {padj} | {ppadj} | {psadj} | {mde} | "
                       f"{t.get('verdict', '-')} |")
+        md.append("")
+        md.append("注: **单因素** = 候选与参照只差一个门控因子（去一法 Full−X "
+                  "vs Full，或全因子增量 X-only vs gate_only），只有这类对比"
+                  "可用于组件归因；**整体/多因素**（各变体 vs standard、"
+                  "LEGA vs qgate 等）回答总体性能，不能把差异归给单个组件。")
         md.append("")
         md.append("注: Δ = 候选 − 参照；PPL 越小越好、RULER/AUROC差 越大越好；"
                   "d_z = Δ均值/Δ标准差为配对 Cohen's d 效应量。"
@@ -6701,6 +6848,7 @@ def build_summary(results_dir: str, audit: dict = None,
     with open(os.path.join(results_dir, "significance.json"), "w",
               encoding="utf-8") as f:
         json.dump({"pairs": tests,
+                   "single_factor_audit": sf_audit,
                    "note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
                             f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
                             f"n<{MIN_SEEDS} 不判定显著性；"

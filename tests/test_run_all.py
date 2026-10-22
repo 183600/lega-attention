@@ -37,8 +37,10 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _seed_key, _strict_seed_int, _parse_seed_list,
                       apply_budget_gate, apply_integrity_gate, apply_scope_gate,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
-                      build_summary,
+                      build_comparison_pairs, build_summary,
+                      changed_gate_factors,
                       component_evidence, cross_variant_badcase_map,
+                      COMPONENT_TESTS,
                       main as run_all_main,
                       data_protocol_preflight, data_report_binding_issue,
                       evaluate_registered_hypotheses,
@@ -48,6 +50,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       mark_repro_failed, check_sanity_results,
                       _snapshot_existing_runs,
                       resolve_ngram_split, run_many,
+                      single_factor_audit, single_factor_change,
+                      SINGLE_FACTOR_CONTRASTS, SINGLE_FACTOR_PAIRS,
                       tradeoff_verdict, verify_controlled_setup)
 
 
@@ -2924,8 +2928,12 @@ def test_build_summary_renders_confirmatory_sections():
         # 配对检验表的新列
         assert "p_perm(Holm)" in md and "MDE" in md and "Δ 95% CI" in md
         assert "AUROC差" in md
+        # 单因素审计必须进入汇总页与 significance.json
+        assert "单因素消融审计" in md
         sig = json.load(open(os.path.join(tmp, "significance.json"),
                              encoding="utf-8"))
+        assert sig["single_factor_audit"]["ok"] is True
+        assert len(sig["single_factor_audit"]["contrasts"]) == 6
         assert any(t["metric"] == AUROC_DIFF_METRIC for t in sig["pairs"])
         assert sig["registered_hypotheses"], "注册假设判定必须进 significance.json"
         h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")
@@ -4258,6 +4266,124 @@ def test_ablation_coverage_requires_min_seeds_per_cell():
         cells, {"a"}, {"a": {"variant": "a", "n_seeds": "3"}})
     assert done == [("A", "a")], done
     print("  [ok] 消融矩阵覆盖按每格种子数判定，单种子格明确标为不足")
+
+
+def test_single_factor_audit_and_pair_construction():
+    """单因素消融必须只改一个 A/B/C 因子；B-only/C-only 不能与 Full 配对。"""
+    audit = single_factor_audit()
+    assert audit["ok"] and not audit["problems"], audit
+    assert len(audit["contrasts"]) == 6
+    assert {c["factor"] for c in audit["contrasts"]} == {"A", "B", "C"}
+    assert {c["direction"] for c in audit["contrasts"]} == {"remove", "add"}
+    for c in audit["contrasts"]:
+        assert c["changed_factors"] == [c["factor"]], c
+    assert len(SINGLE_FACTOR_PAIRS) == 6
+    assert len(set(SINGLE_FACTOR_PAIRS)) == 6
+
+    # 去一法：Full−X vs Full 只改变 X
+    assert single_factor_change("lega_no_query", "lega") == "A"
+    assert single_factor_change("lega_no_conc", "lega") == "B"
+    assert single_factor_change("lega_no_len", "lega") == "C"
+    # 全因子增量：X-only vs gate_only 只加入 X
+    assert single_factor_change("qgate", "gate_only") == "A"
+    assert single_factor_change("lega_conc_only", "gate_only") == "B"
+    assert single_factor_change("lega_len_only", "gate_only") == "C"
+    # B-only/C-only vs Full 同时改变两个因子，不能进单因素对比表
+    assert changed_gate_factors("lega_conc_only", "lega") == {"A", "C"}
+    assert changed_gate_factors("lega_len_only", "lega") == {"A", "B"}
+    assert single_factor_change("lega_conc_only", "lega") is None
+    assert single_factor_change("lega_len_only", "lega") is None
+    # vs standard / LEGA vs qgate 是整体方法对比，不是门控内单因素
+    assert single_factor_change("lega", "standard") is None
+    assert single_factor_change("lega", "qgate") is None
+
+    # 组件有效性判定实际消费的每个检验对都必须是已审计的单因素对比
+    expected_factor = {"A 查询项": "A", "B 集中度证据": "B",
+                       "C 长度校准": "C"}
+    assert {name for name, *_ in COMPONENT_TESTS} == set(expected_factor)
+    for name, loo_pair, add_pair, _primary in COMPONENT_TESTS:
+        factor = expected_factor[name]
+        assert loo_pair in SINGLE_FACTOR_PAIRS, (name, loo_pair)
+        assert add_pair in SINGLE_FACTOR_PAIRS, (name, add_pair)
+        assert single_factor_change(*loo_pair) == factor, (name, loo_pair)
+        assert single_factor_change(*add_pair) == factor, (name, add_pair)
+
+    runs = {"standard": {1: {}}, "gate_only": {1: {}},
+            "qgate": {1: {}}, "lega_conc_only": {1: {}},
+            "lega_len_only": {1: {}}, "lega": {1: {}},
+            "lega_no_len": {1: {}}, "lega_no_conc": {1: {}},
+            "lega_no_query": {1: {}}}
+    pairs = build_comparison_pairs(runs, {"hypotheses": []})
+    for c, r in SINGLE_FACTOR_PAIRS:
+        assert (c, r) in pairs, (c, r)
+    assert ("lega_conc_only", "lega") not in pairs
+    assert ("lega_len_only", "lega") not in pairs
+    # 非 vs standard 的对比要么是单因素消融，要么是显式登记的整体假设
+    for c, r in pairs:
+        if r != "standard":
+            assert (c, r) in SINGLE_FACTOR_PAIRS, (c, r)
+    reg = {"hypotheses": [{"metric": "PPL", "candidate": "lega",
+                           "reference": "qgate"}]}
+    pairs = build_comparison_pairs(runs, reg)
+    assert ("lega", "qgate") in pairs
+    assert single_factor_change("lega", "qgate") is None
+    print("  [ok] 单因素审计：6 组对比只改一个因子，多因子对比不混入")
+
+
+def test_paired_comparisons_marks_contrast_type():
+    """配对结果必须机器可读地标出 single_factor/overall，避免事后误归因。"""
+    runs = {}
+    for v, base in (("standard", 12.0), ("gate_only", 11.0),
+                    ("qgate", 10.0), ("lega_conc_only", 9.0),
+                    ("lega_len_only", 9.5), ("lega", 8.0),
+                    ("lega_no_len", 8.5), ("lega_no_conc", 8.2),
+                    ("lega_no_query", 8.8)):
+        runs[v] = {s: {"eval": {"val_ppl": base + 0.01 * s, "split": "val"}}
+                   for s in (1, 2, 3)}
+    pairs = list(SINGLE_FACTOR_PAIRS) + [
+        ("lega", "standard"), ("lega", "qgate"),
+        ("lega_conc_only", "lega")]
+    out = _paired_comparisons(
+        runs, pairs, "PPL", lambda slot: _ppl_of(slot.get("eval")),
+        lower_better=True)
+    by = {(t["candidate"], t["reference"]): t for t in out}
+    for c, r in SINGLE_FACTOR_PAIRS:
+        t = by[(c, r)]
+        assert t["contrast_type"] == "single_factor", (c, r, t)
+        assert len(t["changed_factors"]) == 1, t
+    assert by[("lega", "standard")]["contrast_type"] == "overall"
+    assert by[("lega", "qgate")]["contrast_type"] == "overall"
+    assert by[("lega_conc_only", "lega")]["contrast_type"] == "overall"
+    print("  [ok] 配对检验结果带 single_factor/overall 机器可读标记")
+
+
+def test_build_summary_excludes_multifactor_ablation_pairs():
+    """汇总不得再把 B-only/C-only 与 Full 的差异当成单组件消融。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        bases = {"standard": 11.0, "gate_only": 10.5, "qgate": 10.2,
+                 "lega_conc_only": 10.0, "lega_len_only": 10.3,
+                 "lega": 9.5, "lega_no_len": 9.7, "lega_no_conc": 9.6,
+                 "lega_no_query": 9.9}
+        for v, base in bases.items():
+            for s in (1, 2, 3):
+                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
+                    "variant": v, "seed": s, "split": "val",
+                    "val_ppl": base + 0.01 * s, "val_loss": 2.3,
+                    "n_params": 100, "n_gate_extra": 0})
+        out = build_summary(tmp)
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        pairs = {(t["candidate"], t["reference"]) for t in sig["pairs"]}
+        assert ("lega_conc_only", "lega") not in pairs
+        assert ("lega_len_only", "lega") not in pairs
+        for pair in SINGLE_FACTOR_PAIRS:
+            assert pair in pairs, pair
+        assert sig["single_factor_audit"]["ok"] is True
+        assert "单因素消融审计" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总排除 B-only/C-only vs Full 的多因子“消融”对比")
 
 
 def test_verify_controlled_setup_rejects_eval_protocol_mismatch():

@@ -13,7 +13,7 @@ from unittest import mock
 import torch
 
 import lega.attention as attention_mod
-from lega.attention import CausalSelfAttention, VARIANTS
+from lega.attention import (CausalSelfAttention, GATE_FACTORS, VARIANTS)
 from lega.model import (GPT, RoPE, expected_gate_extras,
                         gate_extra_params, gate_extra_params_per_head)
 
@@ -109,6 +109,30 @@ def test_concentration_ablations_keep_length_normalization():
         expected = 0.5 * (math.log(0.25) + math.log(8.0))
         assert abs(logit.item() - expected) < 1e-5, (variant, logit.item())
     print("  [ok] 集中度消融保留 c=log(n*max_p) 的长度归一化")
+
+
+def test_gate_factor_metadata_matches_variant_formulas():
+    """单因素实验的因子元数据必须与变体实际启用的门控项一致。"""
+    expected = {
+        "gate_only": set(),
+        "qgate": {"A"},
+        "lega_conc_only": {"B"},
+        "lega_len_only": {"C"},
+        "lega_no_len": {"A", "B"},
+        "lega_no_conc": {"A", "C"},
+        "lega_no_query": {"B", "C"},
+        "lega": {"A", "B", "C"},
+    }
+    assert set(GATE_FACTORS) == set(expected)
+    # standard/null 不属于门控内 2^3，不能出现在因子表里
+    assert "standard" not in GATE_FACTORS and "null" not in GATE_FACTORS
+    for variant, factors in expected.items():
+        assert GATE_FACTORS[variant] == frozenset(factors), variant
+        m = _mk_attn(variant=variant)
+        actual = {f for f, on in (("A", m.use_query), ("B", m.use_conc),
+                                  ("C", m.use_len)) if on}
+        assert actual == factors, (variant, actual, factors)
+    print("  [ok] 门控因子元数据与各变体 A/B/C 实际开关一致")
 
 
 def test_gate_query_term_uses_pre_rope_query():

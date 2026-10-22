@@ -71,6 +71,17 @@ _GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
 # 门依赖注意力统计（需要 max_j p_j）
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only")
 
+# 门控内三因子 A/B/C 的激活表（单一事实来源）：直接从上面的
+# _USE_QUERY/_USE_CONC/_USE_LEN 派生，避免“实验设计元数据”与实现漂移。
+# 消融对比是否只改变一个因子，由 run_all 的单因素审计消费；standard/null
+# 不属于门控内 2^3 消融，故不出现在此表中。
+GATE_FACTORS = {
+    v: frozenset(f for f, enabled in (("A", v in _USE_QUERY),
+                                      ("B", v in _USE_CONC),
+                                      ("C", v in _USE_LEN)) if enabled)
+    for v in _GATED
+}
+
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
