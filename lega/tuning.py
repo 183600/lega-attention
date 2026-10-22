@@ -54,6 +54,10 @@ def parse_floats(s):
         x = x.strip()
         if not x:
             continue
+        # float("1_0")==10.0：下划线数字串不是规范数值，不能静默变成另一个
+        # 学习率/WD 乘数（网格报告会与命令行声明不一致）。
+        if "_" in x:
+            raise ValueError(f"需要逗号分隔的数值，收到 {x!r}")
         try:
             v = float(x)
         except ValueError as e:

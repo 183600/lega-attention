@@ -29,8 +29,9 @@ def test_build_grid_default_first_and_dedup():
     assert grid3[0] == (6e-4, 0.1)
     assert set(w for _, w in grid3) == {0.1, 0.01}
     assert parse_floats("0.5, 1,2") == [0.5, 1.0, 2.0]
-    # 非有限值/非数值不能进入网格（NaN lr 会让所有 trial 失效且污染报告）
-    for bad in ("nan", "inf", "-inf", "0.5,nan", "oops"):
+    # 非有限值/非数值/下划线数字串不能进入网格（NaN lr 会让所有 trial 失效
+    # 且污染报告；float("1_0")=10.0 会静默放大学习率）。
+    for bad in ("nan", "inf", "-inf", "0.5,nan", "oops", "1_0", "0.5,1_0"):
         try:
             parse_floats(bad)
             raised = False
