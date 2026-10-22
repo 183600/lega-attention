@@ -624,6 +624,86 @@ def test_verify_ledger_checks_embedded_seed_evidence():
     print("  [ok] verify_ledger：run.seed 与内嵌 seed_report/数据指纹一致")
 
 
+def test_verify_ledger_checks_embedded_sanity_evidence():
+    """completed 的 sanity 判定与逐 run 闸门证据必须自洽，aborted 的 fail 合法。"""
+    from lega.experiment import append_record, verify_ledger
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+
+        def _good_sanity():
+            return {"passed": True, "malformed": False,
+                    "checks_consistent": True, "failed_checks": [],
+                    "seed_verified": True, "variant": "lega",
+                    "identity": {"hard_mismatches": []}}
+
+        def _run(seed=7, sanity=None):
+            return {"variant": "lega", "seed": seed,
+                    "provenance": {"sanity": sanity}}
+
+        def _add(rid, sanity, runs, status="completed", verdict=None):
+            append_record(path, {"run_id": rid, "status": "started",
+                                 "variants": ["lega"], "seeds": [7]})
+            rec = {"run_id": rid, "status": status,
+                   "variants": ["lega"], "seeds": [7], "runs": runs}
+            if status == "completed":
+                rec["sanity"] = {
+                    "executed": True,
+                    "verdict": verdict if verdict is not None
+                    else {"lega": "pass"}}
+            else:
+                rec["sanity"] = sanity
+            append_record(path, rec)
+
+        _add("good", None, [_run(sanity=_good_sanity())])
+        _add("missing", None, [{"variant": "lega", "seed": 7}])
+        hurt = _good_sanity()
+        hurt.update({"passed": False, "failed_checks": ["loss"]})
+        _add("not_passed", None, [_run(sanity=hurt)])
+        bad = _good_sanity()
+        bad["malformed"] = True
+        _add("malformed", None, [_run(sanity=bad)])
+        unver = _good_sanity()
+        unver["seed_verified"] = False
+        _add("seed_unverified", None, [_run(sanity=unver)])
+        ident = _good_sanity()
+        ident["identity"] = {"hard_mismatches": ["config_sha256"]}
+        _add("identity_bad", None, [_run(sanity=ident)])
+        mismatch = _good_sanity()
+        mismatch["variant"] = "standard"
+        _add("variant_bad", None, [_run(sanity=mismatch)])
+        _add("verdict_bad", None, [_run(sanity=_good_sanity())],
+             verdict={"lega": "fail"})
+        # aborted 记录的 sanity 本就是 fail（失败历史），verify 不得因此报错
+        append_record(path, {"run_id": "aborted_fail", "status": "started",
+                             "variants": ["lega"], "seeds": [7]})
+        append_record(path, {"run_id": "aborted_fail", "status": "aborted",
+                             "sanity": {"executed": True,
+                                        "verdict": {"lega": "fail"}}})
+        rep = verify_ledger(path)
+        by_id = {i.get("run_id"): i for i in rep["issues"] if i.get("run_id")}
+        assert "good" not in by_id and "aborted_fail" not in by_id, by_id
+        assert any("evidence_missing" in x
+                   for x in by_id["missing"]["issues"]), by_id["missing"]
+        assert any("not_passed" in x
+                   for x in by_id["not_passed"]["issues"]), by_id["not_passed"]
+        assert any("failed_checks" in x
+                   for x in by_id["not_passed"]["issues"]), by_id["not_passed"]
+        assert any("malformed" in x
+                   for x in by_id["malformed"]["issues"]), by_id["malformed"]
+        assert any("seed_unverified" in x
+                   for x in by_id["seed_unverified"]["issues"]), by_id["seed_unverified"]
+        assert any("identity_mismatch" in x
+                   for x in by_id["identity_bad"]["issues"]), by_id["identity_bad"]
+        assert any("variant_mismatch" in x
+                   for x in by_id["variant_bad"]["issues"]), by_id["variant_bad"]
+        assert any("verdict_not_pass" in x
+                   for x in by_id["verdict_bad"]["issues"]), by_id["verdict_bad"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] verify_ledger：sanity 闸门证据自洽（completed 严格/aborted 容错）")
+
+
 def test_verify_ledger_lifecycle_and_artifact_hashes():
     tmp = tempfile.mkdtemp()
     try:

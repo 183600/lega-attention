@@ -283,6 +283,89 @@ def _seed_audit_issues(record, declared_seeds) -> list:
     return issues
 
 
+def _sanity_evidence_issues(record) -> list:
+    """核验 completed 记录的 sanity 闸门证据自洽且逐 run 可继承。
+
+    台账顶层 ``sanity`` 是流水线判定（variant→pass/fail），逐 run 的
+    ``provenance.sanity`` 是训练清单内嵌摘要（sanity_summary）。只核对
+    覆盖/哈希而不核对这两者，会让“声明 executed=true”却缺少逐 run 证据、
+    或 passed=false/malformed/seed_verified=false 的记录通过完整性检查。
+    aborted 记录允许 verdict=fail（失败本身就是历史），因此只对 completed
+    调用本函数。
+    """
+    sanity = record.get("sanity")
+    if sanity is None:
+        return []
+    if not isinstance(sanity, dict):
+        return ["sanity_malformed"]
+    issues = []
+    executed = sanity.get("executed")
+    if not isinstance(executed, bool):
+        return issues + ["sanity_executed_malformed"]
+    verdict = sanity.get("verdict")
+    if verdict is not None and not isinstance(verdict, dict):
+        issues.append("sanity_verdict_malformed")
+        verdict = None
+    if executed is False:
+        # 显式跳过 sanity（--skip_sanity/--skip_train）是合法选择；但既然
+        # 没有执行，就不能同时留下“某个变体 pass”的判定。
+        if verdict:
+            issues.append("sanity_verdict_without_execution")
+        return issues
+    variants = [str(v) for v in (record.get("variants") or [])]
+    if not isinstance(verdict, dict):
+        issues.append("sanity_verdict_malformed")
+    else:
+        if set(verdict) != set(variants):
+            issues.append("sanity_verdict_scope_mismatch")
+        if any(v != "pass" for v in verdict.values()):
+            issues.append("sanity_verdict_not_pass")
+    runs = record.get("runs")
+    for run in (runs if isinstance(runs, list) else []):
+        if not isinstance(run, dict):
+            continue
+        prov = run.get("provenance")
+        ev = prov.get("sanity") if isinstance(prov, dict) else None
+        tag = f"{run.get('variant')}/seed{run.get('seed')}"
+        if not isinstance(ev, dict):
+            issues.append(f"sanity_run_evidence_missing: {tag}")
+            continue
+        if ev.get("passed") is not True:
+            issues.append(f"sanity_run_not_passed: {tag}")
+        malformed = ev.get("malformed")
+        if malformed is True:
+            issues.append(f"sanity_run_malformed: {tag}")
+        elif malformed is not None and not isinstance(malformed, bool):
+            issues.append(f"sanity_run_malformed: {tag}")
+        consistent = ev.get("checks_consistent")
+        if consistent is False:
+            issues.append(f"sanity_run_checks_inconsistent: {tag}")
+        elif consistent is not None and not isinstance(consistent, bool):
+            issues.append(f"sanity_run_checks_inconsistent: {tag}")
+        failed = ev.get("failed_checks")
+        if isinstance(failed, list):
+            if failed:
+                issues.append(f"sanity_run_failed_checks: {tag}")
+        elif failed is not None:
+            issues.append(f"sanity_run_failed_checks: {tag}")
+        verified = ev.get("seed_verified")
+        if verified is False:
+            issues.append(f"sanity_run_seed_unverified: {tag}")
+        elif verified is not None and not isinstance(verified, bool):
+            issues.append(f"sanity_run_seed_unverified: {tag}")
+        if ev.get("variant") is not None and str(ev.get("variant")) != str(
+                run.get("variant")):
+            issues.append(f"sanity_run_variant_mismatch: {tag}")
+        identity = ev.get("identity")
+        if isinstance(identity, dict):
+            hard = identity.get("hard_mismatches")
+            if isinstance(hard, list) and hard:
+                issues.append(f"sanity_run_identity_mismatch: {tag}")
+            elif hard is not None and not isinstance(hard, list):
+                issues.append(f"sanity_run_identity_mismatch: {tag}")
+    return issues
+
+
 def verify_ledger(path: str = None, check_artifacts: bool = False,
                   root: str = None, max_reported: int = 20) -> dict:
     """核验台账完整性：生命周期链与（可选）产物哈希。
@@ -374,6 +457,12 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
         for _, r in items:
             if r.get("status") != "completed":
                 continue
+            # 闸门证据必须自洽：顶层 executed/verdict 与逐 run 内嵌
+            # sanity_summary 不能互相矛盾，也不能把 failed/malformed/
+            # seed_verified=false 的检查冒充成本 run 通过的证据。
+            # 放在 runs 覆盖校验之前：旧记录即使缺 runs，也不能带着
+            # 自相矛盾的 sanity 声明通过完整性检查。
+            run_issues.extend(_sanity_evidence_issues(r))
             variants, seeds, runs = (r.get("variants"), r.get("seeds"),
                                      r.get("runs"))
             if not (isinstance(variants, list) and isinstance(seeds, list)
