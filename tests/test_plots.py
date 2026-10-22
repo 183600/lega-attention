@@ -5,6 +5,7 @@
 约定只取本次 run 的产物，否则同一次实验会被多算一次、过期结果混入均值。
 """
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -306,7 +307,13 @@ def test_mean_by_step_rejects_fractional_and_boolean_steps():
     xs, ys = _mean_by_step(runs, "loss")
     assert xs == [1, 2, 3], (xs, ys)
     assert ys == [2.0, 1.0, 0.5], ys
-    print("  [ok] 训练曲线均值：小数/布尔/下划线 step 与布尔值不参与均值")
+    # 巨大但有限的损失点求均值不能溢出成 inf（合法 JSON/坐标轴）。
+    huge = [[{"step": 1, "loss": 1e308},
+             {"step": 1, "loss": 1e308}]]
+    hx, hy = _mean_by_step(huge, "loss")
+    assert hx == [1] and math.isfinite(hy[0]) and hy[0] == 1e308, (hx, hy)
+    print("  [ok] 训练曲线均值：小数/布尔/下划线 step 与布尔值不参与均值；"
+          "巨大有限损失不溢出")
 
 
 def test_fig_latency_uses_each_variant_batch_when_no_common_batch():

@@ -25,6 +25,7 @@ except ImportError:
 import numpy as np
 
 from .attention import VARIANT_CN
+from .utils import mean_std
 
 # 中文字体：自动发现 Noto Sans SC / 霞鹜文楷 / 文泉驿等 CJK 字体；找不到则退回默认
 import glob as _glob
@@ -976,7 +977,13 @@ def _mean_by_step(runs, key):
                 continue
             acc.setdefault(step, []).append(val)
     xs = sorted(acc)
-    return xs, [float(np.mean(acc[x])) for x in xs]
+    ys = []
+    for x in xs:
+        # 多个 1e308 的合法损失点用 np.mean 求和会溢出成 inf；与统计模块
+        # 同口径先缩放再求均值，画图数据也保持有限。
+        mean, _std = mean_std(acc[x])
+        ys.append(mean)
+    return xs, ys
 
 
 def fig_train_curves(rdir, train_root):
