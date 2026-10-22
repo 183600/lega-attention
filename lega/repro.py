@@ -668,6 +668,10 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "train_data_fingerprint": None,
         "data_fingerprint_matches_training": None,
         "config_sha256": (sha256_file(cfg) if os.path.exists(cfg) else None),
+        # 训练实际生效的 config_used.json 哈希（CLI/调优覆盖后与源配置不同）。
+        # 旧清单没有该字段时回退到上面同一份 config_used 文件；有清单时优先
+        # 采用训练时记录的值，避免 checkpoint 目录被覆盖后误用新配置。
+        "config_used_sha256": (sha256_file(cfg) if os.path.exists(cfg) else None),
         # 训练 run 是否通过了小批量过拟合 sanity 闸门（无清单/旧清单为 None）。
         # sanity_verified 区分“PASS 已核对身份”与“旧证据/无法核对”：
         # 硬身份不一致时不得把旧 PASS 继承到下游结果。
@@ -693,7 +697,8 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
                 ("code_commit", mgit, "commit"),
                 ("code_dirty", mgit, "dirty"),
                 ("code_branch", mgit, "branch"),
-                ("config_sha256", manifest, "config_sha256")):
+                ("config_sha256", manifest, "config_sha256"),
+                ("config_used_sha256", manifest, "config_used_sha256")):
             val = src.get(field)
             if val is not None:
                 out[key] = val

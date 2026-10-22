@@ -503,7 +503,8 @@ def _compact_eval(ev: dict) -> dict:
         "selection_set_is_eval_set", "code_commit", "code_dirty",
         "data_fingerprint", "train_data_fingerprint",
         "eval_data_fingerprint", "data_fingerprint_matches_training",
-        "config_sha256", "sanity_passed", "sanity_verified",
+        "config_sha256", "config_used_sha256",
+        "sanity_passed", "sanity_verified",
         "data_order_sha256", "train_step_time_ms", "train_tokens_per_sec",
         "train_peak_mem_mb", "epochs_seen", "training_precision")}
 
@@ -586,7 +587,8 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
             "early_stopped", "tokens_seen",
             "n_params", "code_commit", "code_dirty", "data_fingerprint",
-            "config_sha256", "sanity_passed", "sanity_verified",
+            "config_sha256", "config_used_sha256",
+            "sanity_passed", "sanity_verified",
             "data_order_sha256")}
         # 训练实际精度嵌在 provenance.training_precision（eval.json 顶层），
         # 台账 result 提升为标量，便于跨 run 直接核对 bf16/fp32。
