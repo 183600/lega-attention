@@ -71,7 +71,7 @@ tests A×B/A×C/B×C interactions (exploratory, separate Holm family, with
 `gate_only` as the no-component baseline) to check whether component gains are
 additive or synergistic/sub-additive.
 
-Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA), <0.02% of the model (`null` is $2d_{head}$ per head). Scripts print the exact numbers at the start of training.
+Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA), <0.02% of the model (`null` is $2d_{head}$ per head). Scripts print the exact numbers at the start of training. The summary page also has a dedicated "gate overhead" section listing actual per-head parameters, extra-parameter share, analytical gate FLOPs/token, and its share of total FLOPs; the concentration term's `max_j p_j` scan grows linearly with context length, so gains must be read against both overheads.
 
 ---
 
@@ -212,11 +212,16 @@ Result-analysis protocol (see the matching sections in `summary.md`): diagnose t
 training curves rather than final values only — besides overfitting/underfitting/
 divergence, pre-clip **gradient-norm spikes/non-finite values** are reported
 independently (an early signal of NaN/divergence that the loss curve may not show
-yet); a plateaued training loss with rising validation loss is also diagnosed as
+yet; the log records `grad_norm_max` per log interval with its step, so a mid-interval
+explosion is not missed by sampling only the last step) and **single-step loss
+peaks** (`loss_max` prevents a one-step anomalous batch from being diluted by the
+interval mean); a plateaued training loss with rising validation loss is also diagnosed as
 overfitting (generalization degrades before the training loss does, so it is not
 misread as underfitting), while a training loss that is still falling with a
 stalled validation loss is diagnosed separately as an **overfitting trend**
-(regularize/early-stop; do not extend training on that basis); for NaN follow the
+(regularize/early-stop; do not extend training on that basis); beyond the global
+first/last segments, the tail (last 1/3 vs middle 1/3) is compared so that a late
+plateau/rebound is not hidden by earlier large improvements; for NaN follow the
 checklist order data → code (log(0)/
 division by zero/softmax overflow; forward hooks localize the first module whose
 finite input yields a non-finite output, the `origin`) → mixed-precision underflow →
