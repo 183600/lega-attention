@@ -133,7 +133,9 @@ def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
             frac = None
     val_loss = None
     raw_loss = ck.get("val_loss")
-    if raw_loss is not None and not isinstance(raw_loss, (bool, np.bool_)):
+    if (raw_loss is not None
+            and not isinstance(raw_loss, (bool, np.bool_))
+            and not (isinstance(raw_loss, str) and "_" in raw_loss)):
         try:
             val_loss = float(raw_loss)
         except (TypeError, ValueError, OverflowError):
@@ -269,8 +271,10 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
     raw_loss = metrics.get("val_loss")
     try:
         # bool 是 int 子类，float(True)=1.0；坏记录不能伪装成 val_loss=1.0
-        # （对应一个看似正常的 PPL）。
-        vl = None if isinstance(raw_loss, (bool, np.bool_)) else float(raw_loss)
+        # （对应一个看似正常的 PPL）。下划线数字串同样不是规范 JSON 数值。
+        vl = (None if isinstance(raw_loss, (bool, np.bool_))
+              or (isinstance(raw_loss, str) and "_" in raw_loss)
+              else float(raw_loss))
     except (TypeError, ValueError, OverflowError):
         vl = None
     if vl is not None and math.isfinite(vl):
@@ -280,7 +284,8 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
         ppl, loss, clamped = None, None, None
     gmean = metrics.get("gate_mean")
     if gmean is not None:
-        if isinstance(gmean, (bool, np.bool_)):
+        if (isinstance(gmean, (bool, np.bool_))
+                or (isinstance(gmean, str) and "_" in gmean)):
             gmean = None
         else:
             try:
@@ -310,6 +315,8 @@ def _read_run_eval(run_dir: str) -> dict:
 def _nonnegative_metric(v):
     """训练统计字段的非负有限数值规范化；坏值返回 None（不伪造吞吐）。"""
     if v is None or isinstance(v, (bool, np.bool_)):
+        return None
+    if isinstance(v, str) and "_" in v:
         return None
     try:
         v = float(v)
@@ -361,7 +368,9 @@ def load_train_coverage(run_dir: str):
         if v >= 0:
             out[dst] = v
     e = d.get("epochs_seen")
-    if e is not None and not isinstance(e, (bool, np.bool_)):
+    if (e is not None
+            and not isinstance(e, (bool, np.bool_))
+            and not (isinstance(e, str) and "_" in e)):
         try:
             e = float(e)
             if math.isfinite(e) and e >= 0:

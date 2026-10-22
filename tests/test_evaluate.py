@@ -150,6 +150,10 @@ def test_load_train_throughput_propagates_and_degrades_safely():
             json.dump({"train_step_time_ms": 12.5,
                        "train_tokens_per_sec": 81920.0}, f)
         assert load_train_throughput(tmp) == (12.5, 81920.0)
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_step_time_ms": "1_0",
+                       "train_tokens_per_sec": "1_0"}, f)
+        assert load_train_throughput(tmp) == (None, None)
         # 旧格式（无该字段）→ None 而非 KeyError
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"val_ppl": 10.0}, f)
@@ -177,6 +181,9 @@ def test_load_train_peak_mem_propagates_and_degrades_safely():
         assert load_train_peak_mem_mb(tmp) is None
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"train_peak_mem_mb": "n/a"}, f)
+        assert load_train_peak_mem_mb(tmp) is None
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"train_peak_mem_mb": "1_0"}, f)
         assert load_train_peak_mem_mb(tmp) is None
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"train_peak_mem_mb": float("inf")}, f)
@@ -209,6 +216,9 @@ def test_load_train_coverage_propagates_and_degrades_safely():
         # 旧格式/非法值/损坏/结构异常 → 安全降级，不阻塞评测
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"epochs_seen": float("inf"), "train_tokens": "x"}, f)
+        assert load_train_coverage(tmp) == {}
+        with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
+            json.dump({"epochs_seen": "1_0"}, f)
         assert load_train_coverage(tmp) == {}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"epochs_seen": 10 ** 400}, f)
@@ -293,7 +303,7 @@ def test_checkpoint_selection_info_records_step_and_rejects_garbage():
     assert info["steps_planned"] == 100
     assert math.isclose(info["selection_step_fraction"], 0.4)
     # bool/小数/非有限值不能冒充整数步数；丢失字段返回 None 而非编造
-    for bad in (True, 2.5, float("inf"), "x"):
+    for bad in (True, 2.5, float("inf"), "x", "1_0"):
         info = checkpoint_selection_info(
             {"step": bad, "steps_planned": bad, "val_loss": bad})
         assert info["ckpt_step"] is None
@@ -366,6 +376,8 @@ def test_json_safe_eval_metrics_tolerates_malformed_fields():
     assert out["val_ppl"] == math.exp(2.0) and out["gate_mean"] is None
     out = json_safe_eval_metrics({"val_loss": 2.0, "gate_mean": "0.5"})
     assert out["gate_mean"] == 0.5
+    assert json_safe_eval_metrics({"val_loss": "1_0",
+                                   "gate_mean": "1_0"}) == empty
     print("  [ok] 评测指标：畸形 val_loss/gate_mean 安全降级")
 
 
