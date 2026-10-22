@@ -2012,8 +2012,18 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
             n = t.get("n")
             n_valid = (isinstance(n, int) and not isinstance(n, bool)
                        and n >= 0)
+            p_norm = _finite_number(t.get("p"))
+            p_valid = (p_norm is not None
+                       and 0.0 <= p_norm <= 1.0)
             if t.get("p") is None:
                 t["verdict"] = f"无法检验（n={n} 或方差退化），不作判定"
+            elif not p_valid:
+                # holm_bonferroni 会把 NaN/Inf/bool/越界/不可比较的 p 归一化
+                # 为 None；此时不能顺着“p_adj=None”落到“不显著”，否则损坏
+                # 的 p 值会被报告成“没有效应”。
+                t["verdict"] = (
+                    f"无法检验（p 值非法或不可解析 p={t.get('p')!r}），"
+                    "不作判定")
             elif not n_valid:
                 # 汇总文件可能来自旧版本/手工编辑：缺 n 不能让整个报告
                 # KeyError 崩溃，也不能默认满足最小种子数而给出显著性结论。
