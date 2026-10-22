@@ -839,6 +839,13 @@ def test_prepare_bins_rejects_token_id_overflow_before_uint16_cast(monkeypatch):
 def test_char_vocab_fit_on_train_only():
     tok = get_tokenizer("char", train_text="abc def", val_text="!!!zzz")
     assert isinstance(tok, CharTokenizer)
+    # 未知/拼写错误的 kind 不能静默退化成字符级分词。
+    for bad in ("gpt2 ", "", "GPT2", None, 1, True):
+        try:
+            get_tokenizer(bad, train_text="abc")
+            raise AssertionError(f"非法 tokenizer kind 未被拒绝: {bad!r}")
+        except ValueError:
+            pass
     assert "!" not in tok.stoi and "z" not in tok.stoi
     ids = tok.encode("az")
     assert ids[0] == tok.stoi["a"]

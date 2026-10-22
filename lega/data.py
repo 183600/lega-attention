@@ -189,11 +189,18 @@ def get_gpt2_tokenizer() -> GPT2Tokenizer:
 
 
 def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
-    """kind ∈ {gpt2, auto}；gpt2 失败时 auto 退化为字符级，gpt2 直接抛错。
+    """kind ∈ {gpt2, auto, char}；gpt2 失败时 auto 退化为字符级，gpt2 直接抛错。
+
+    未知 kind（拼写错误、None、非字符串）必须显式拒绝：静默退化成字符级会
+    让产物 meta 记的“请求分词方式”与实际 token 流不一致，后续缓存命中/
+    复用判断也随之失真。
 
     字符级词表只在 train_text 上拟合（val_text 仅为兼容旧调用保留、不参与），
     这保证 val/test 不通过词表构造向训练侧泄露统计信息。
     """
+    if not isinstance(kind, str) or kind not in ("gpt2", "auto", "char"):
+        raise ValueError(
+            f"tokenizer kind 必须是 'gpt2'/'auto'/'char' 之一，收到 {kind!r}")
     if kind in ("gpt2", "auto"):
         try:
             return get_gpt2_tokenizer()
