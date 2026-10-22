@@ -191,7 +191,7 @@ def _seed_audit_issues(record, declared_seeds) -> list:
             issues.append("seed_audit_not_marked_plan")
 
         def _same_seed_field(key):
-            """字段必须严格等于 seed；bool/1.0/"1" 中的非规范写法不能冒充。"""
+            """字段必须严格解析为同一个整数种子；bool/小数/非法串不能冒充。"""
             try:
                 return strict_int(entry.get(key), f"seed_audit.{key}") == seed
             except (TypeError, ValueError, OverflowError):
@@ -352,12 +352,18 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
     artifact_issues = []
     if check_artifacts:
         def _check(rel_key, entry, base):
+            if not isinstance(rel_key, str) or not rel_key:
+                return f"malformed_key: {rel_key!r}"
+            if not isinstance(entry, dict):
+                return f"malformed_entry: {rel_key}"
+            want = entry.get("sha256")
+            if not isinstance(want, str) or len(want) != 64:
+                # 产物条目缺哈希/哈希类型错误时不能按“没有可核对值”放行：
+                # 那会让篡改者删掉 sha256 字段就绕过产物完整性检查。
+                return f"malformed_entry: {rel_key}"
             p = rel_key if os.path.isabs(rel_key) else os.path.join(base, rel_key)
             if not os.path.exists(p):
                 return f"missing: {rel_key}"
-            want = entry.get("sha256") if isinstance(entry, dict) else None
-            if not want:
-                return None
             if sha256_file(p) != want:
                 return f"sha256_mismatch: {rel_key}"
             return None

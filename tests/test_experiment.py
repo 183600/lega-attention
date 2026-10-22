@@ -610,6 +610,15 @@ def test_verify_ledger_lifecycle_and_artifact_hashes():
         append_record(path2, {"run_id": "ok", "status": "started"})
         append_record(path2, {"run_id": "ok", "status": "completed"})
         assert verify_ledger(path2)["ok"] is True
+        # 产物条目缺哈希/哈希类型错误不能被当成“无需核对”：删掉 sha256
+        # 字段就能绕过完整性检查会掏空台账审计。
+        path3 = os.path.join(tmp, "malformed_artifacts.jsonl")
+        append_record(path3, {"run_id": "bad-art", "status": "started"})
+        append_record(path3, {"run_id": "bad-art", "status": "completed",
+                              "artifacts": {"summary.md": {"size": 2}}})
+        rep3 = verify_ledger(path3, check_artifacts=True, root=tmp)
+        assert rep3["ok"] is False
+        assert any("malformed_entry" in str(i) for i in rep3["issues"]), rep3
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：悬挂/重复终态/无 started/产物哈希可发现")
