@@ -28,9 +28,23 @@ from .attention import VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
-from .utils import (amp_autocast, amp_dtype_for, config_finite_float,
-                    enable_tf32, get_device, save_json, seed_int, set_seed,
-                    strict_int)
+from .utils import (amp_autocast, amp_dtype_for, config_bool,
+                    config_finite_float, enable_tf32, get_device, save_json,
+                    seed_int, set_seed, strict_int)
+
+
+def resolve_backend(label: str):
+    """latency 变体标签 → (真实变体名, 强制后端, 是否强制)。
+
+    只有 standard / standard_sdpa 是显式指定后端；其余变体必须沿用
+    checkpoint（没有 checkpoint 时沿用配置）的实际后端，否则同一张对比表
+    会把 SDPA 与显式实现混在一起计时。强制值为 None 表示“不覆盖”。
+    """
+    if label == "standard_sdpa":
+        return "standard", True, True
+    if label == "standard":
+        return "standard", False, True
+    return label, None, False
 
 
 def _cfg_int(cfg, key, default):
@@ -411,12 +425,7 @@ def main():
     set_seed(seed)
     results: Dict = {}
     for v in variants:
-        if v == "standard_sdpa":
-            vname, use_sdpa = "standard", True
-        elif v == "standard":
-            vname, use_sdpa = "standard", False
-        else:
-            vname, use_sdpa = v, True
+        vname, use_sdpa, backend_forced = resolve_backend(v)
         assert vname in VARIANTS, f"未知变体 {v}"
         # 与 evaluate/ruler/analysis 口径一致：优先 val 上选出的 best-checkpoint。
         # 兼容两种布局：单种子 out/<tag>/<variant>/，多种子 out/<tag>/<variant>/seed<seed>/；
@@ -453,6 +462,9 @@ def main():
             ckpt_sha256 = sha256_file(ckpt_path)
             src = "ckpt"
         else:
+            random_backend = (use_sdpa if backend_forced else
+                             config_bool(cfg.get("use_sdpa_standard", True),
+                                         "use_sdpa_standard"))
             model_cfg = dict(
                 vocab_size=strict_int(meta.get("vocab_size"),
                                       "meta.vocab_size"),
@@ -464,11 +476,15 @@ def main():
                 dropout=0.0, attn_dropout=0.0, variant=vname,
                 gate_bias_init=config_finite_float(
                     cfg.get("gate_bias_init", 2.0), "gate_bias_init"),
-                use_sdpa_standard=use_sdpa)
+                use_sdpa_standard=random_backend)
             model = GPT(**model_cfg).to(device)
             src = "random"
         model.eval()
-        entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa,
+        # 记录实际生效的后端（checkpoint 可能选择与标签/配置不同的路径），
+        # 而不是强制值或推测值。
+        actual_sdpa = bool(model.blocks[0].attn.use_sdpa)
+        entry = {"label": v, "variant": vname, "use_sdpa": actual_sdpa,
+                 "backend_forced": bool(backend_forced),
                  "weights": src, "ckpt_seed": ckpt_seed,
                  "ckpt": (os.path.abspath(ckpt_path) if ckpt_path else None),
                  "ckpt_sha256": ckpt_sha256,

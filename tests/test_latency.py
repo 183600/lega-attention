@@ -210,3 +210,30 @@ def test_latency_config_ints_reject_fractional_and_bool():
             raised = True
         assert raised, bad
     print("  [ok] latency 配置整数/整数列表拒绝 bool/小数截断")
+
+
+def test_latency_non_standard_variants_keep_configured_backend():
+    """非 standard 变体不得被强制切到 SDPA：必须沿用配置/checkpoint 后端。"""
+    from lega.latency import main, resolve_backend
+    assert resolve_backend("standard") == ("standard", False, True)
+    assert resolve_backend("standard_sdpa") == ("standard", True, True)
+    assert resolve_backend("qgate") == ("qgate", None, False)
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"vocab_size": 64}, f)
+        out = os.path.join(d, "latency.json")
+        argv = [sys.argv[0], "--config", os.path.join(ROOT, "configs", "tiny.json"),
+                "--data_dir", d, "--out", out, "--variants", "qgate",
+                "--seed", "7", "--smoke", "--device", "cpu"]
+        old = sys.argv
+        sys.argv = argv
+        try:
+            main()
+        finally:
+            sys.argv = old
+        with open(out, encoding="utf-8") as f:
+            payload = json.load(f)
+        entry = payload["variants"]["qgate"]
+        # configs/tiny.json 明确 use_sdpa_standard=false，SDPA 会改变实现路径。
+        assert entry["use_sdpa"] is False, entry
+        assert entry["backend_forced"] is False
