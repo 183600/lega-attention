@@ -511,7 +511,14 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
 
     只统计长度，不做删改；极端行的处置留给数据源（本流程不把长行当噪声删除，
     以免引入未记录的人为分布改动）。
+
+    huge_line_chars 是判定身份：bool/小数/字符串经 int() 截断会改变阈值
+    （True→1 让所有非空行都算“超长”，40.5→40 改变审计口径），必须先严格
+    整数化；负数没有可行语义，也显式拒绝。
     """
+    huge_line_chars = strict_int(huge_line_chars, "huge_line_chars")
+    if huge_line_chars < 0:
+        raise ValueError(f"huge_line_chars 必须 >= 0，收到 {huge_line_chars!r}")
     if not text:
         return {"lines": 0, "chars": 0}
     lens = np.fromiter(_iter_line_lengths(text), dtype=np.int64,

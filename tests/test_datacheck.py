@@ -899,6 +899,15 @@ def test_text_length_stats_outlier_detection():
     assert st["lines"] == 3
     assert st["line_chars_max"] == 200001
     assert st["lines_gt_huge_threshold"] == 1
+    # 阈值是审计身份：bool/小数/下划线串不能被 int() 截断成另一个口径。
+    assert text_length_stats(text, huge_line_chars="100000")[
+        "lines_gt_huge_threshold"] == 1
+    for bad in (True, 40.5, "1_0", None, -1):
+        try:
+            text_length_stats(text, huge_line_chars=bad)
+            raise AssertionError(f"非法 huge_line_chars 应报错: {bad!r}")
+        except ValueError:
+            pass
     print("  [ok] 行长度统计：超长行作为异常值被单独计数")
 
 
