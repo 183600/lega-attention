@@ -1480,8 +1480,17 @@ def _ruler_avg_micro(d):
             # 与 macro 口径同校：EM 是 [0,1] 比例，越界值不能参与按 n 加权。
             if v is None or not 0.0 <= v <= 1.0 or n is None or n <= 0:
                 continue
-            num += v * n
-            total += n
+            # n 是样本计数，但外部 JSON 可写入超出 float 范围的合法大整数。
+            # 直接 v*n 会 OverflowError；无法表示为有限浮点的计数按损坏元数据
+            # 跳过，而不是让整份汇总崩溃。
+            try:
+                nf = float(n)
+            except (OverflowError, ValueError):
+                continue
+            if not math.isfinite(nf):
+                continue
+            num += v * nf
+            total += nf
     return (num / total) if total > 0 else None
 
 

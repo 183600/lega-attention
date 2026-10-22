@@ -3217,6 +3217,13 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
         "512": {"n": True, "em": 0.5},
         "1024": {"n": "2", "em": 1.0}}}}
     assert _ruler_avg_micro(bad_n) == 1.0
+    # n 是合法大整数（超出 float 范围）时，v*n 会 OverflowError；坏计数按
+    # 缺失跳过，其余格仍可估计，不能中断汇总。
+    assert _ruler_avg_micro({"results": {"niah": {
+        "256": {"n": 10 ** 400, "em": 1.0},
+        "512": {"n": 2, "em": 1.0}}}}) == 1.0
+    assert _ruler_avg_micro({"results": {"niah": {
+        "256": {"n": 10 ** 400, "em": 1.0}}}}) is None
     assert _ruler_cell_signature(bad_n) == frozenset({
         ("niah", "256", None), ("niah", "512", None),
         ("niah", "1024", 2)})
