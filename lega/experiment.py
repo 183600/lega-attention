@@ -562,9 +562,15 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 # 那会让篡改者删掉 sha256 字段就绕过产物完整性检查。
                 return f"malformed_entry: {rel_key}"
             p = rel_key if os.path.isabs(rel_key) else os.path.join(base, rel_key)
-            if not os.path.exists(p):
+            # 目录/设备文件不是可重放的产物：os.path.exists 会让目录通过，
+            # 随后 sha256_file 抛 IsADirectoryError，把完整性核验变成崩溃。
+            if not os.path.isfile(p):
                 return f"missing: {rel_key}"
-            if sha256_file(p) != want:
+            try:
+                actual = sha256_file(p)
+            except OSError as e:
+                return f"unreadable: {rel_key} ({e})"
+            if actual != want:
                 return f"sha256_mismatch: {rel_key}"
             return None
 
@@ -582,6 +588,13 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 if not isinstance(run, dict):
                     continue
                 out_dir = run.get("out_dir") or ""
+                if not isinstance(out_dir, str):
+                    # JSON 里 out_dir 可能是数字/数组；os.path.isabs 会抛
+                    # TypeError。产物无法定位时记为审计问题并继续其余 run。
+                    artifact_issues.append(
+                        f"{run.get('variant')}/seed{run.get('seed')}: "
+                        f"malformed_out_dir: {out_dir!r}")
+                    continue
                 base = out_dir if os.path.isabs(out_dir) \
                     else os.path.join(root, out_dir)
                 files = run.get("files")

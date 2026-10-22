@@ -858,3 +858,34 @@ def test_sanity_evidence_does_not_crash_on_malformed_variants_scope():
         rec = {"variants": bad_variants, "sanity": gate, "runs": []}
         issues = _sanity_evidence_issues(rec)
         assert "sanity_verdict_scope_mismatch" in issues, (bad_variants, issues)
+
+
+def test_verify_ledger_artifacts_tolerate_malformed_paths():
+    """产物核验遇到数字 out_dir / 目录路径必须报告问题，而不是抛异常。"""
+    from lega.experiment import append_record, verify_ledger
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "experiments.jsonl")
+        os.makedirs(os.path.join(tmp, "dir_art"))
+        entry = {"sha256": "0" * 64, "size": 0}
+        for rid, run in (
+                ("bad_out_dir", {"variant": "lega", "seed": 7,
+                                 "out_dir": 5, "files": {}}),
+                ("dir_artifact", {"variant": "lega", "seed": 7,
+                                  "out_dir": ".", "files": {}})):
+            append_record(path, {"run_id": rid, "status": "started",
+                                 "variants": ["lega"], "seeds": [7]})
+            append_record(path, {
+                "run_id": rid, "status": "completed",
+                "variants": ["lega"], "seeds": [7], "runs": [run],
+                "artifacts": {"dir_art": entry}})
+        rep = verify_ledger(path, check_artifacts=True, root=tmp)
+        assert rep["ok"] is False
+        text = "\n".join(
+            f"{i.get('run_id')}: {i.get('issues')}"
+            if "run_id" in i else str(i.get("issue"))
+            for i in rep["issues"])
+        assert "malformed_out_dir" in text, text
+        assert "missing: dir_art" in text or "unreadable" in text, text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
