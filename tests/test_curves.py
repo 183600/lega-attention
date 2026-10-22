@@ -1,6 +1,8 @@
 """训练曲线诊断测试：过拟合/欠拟合/发散/NaN 的自动判定与早停空间分析。"""
 import json
 import math
+
+import numpy as np
 import os
 import shutil
 import tempfile
@@ -317,7 +319,14 @@ def test_fractional_and_boolean_steps_are_malformed():
     d = diagnose_curve(recs2)
     assert d["early_stopped"] is True
     assert d["early_stop_step"] == 60, d
-    print("  [ok] 小数/布尔 step 按坏记录跳过（不截断）")
+
+    # 非布尔真值不能伪造早停；只有 JSON 布尔 true 才算。
+    for bad in ("false", "0", 1, np.bool_(True)):
+        recs3 = _log([4.2, 3.9, 3.5], [4.3, 3.8, 3.3])
+        recs3.append({"step": 40, "early_stop": bad})
+        d = diagnose_curve(recs3)
+        assert d["early_stopped"] is False, (bad, d["early_stopped"])
+    print("  [ok] 小数/布尔 step 按坏记录跳过（不截断）；非布尔早停标记不采信")
 
 
 def test_boolean_log_values_are_malformed_not_numeric():
@@ -581,7 +590,14 @@ def test_gate_health_distinguishes_collapse_saturation_and_constant():
     assert d["gate_health"]["status"] == "健康", d["gate_health"]
     assert not d["gate_health"]["recommendations"]
     assert "无需干预" in " ".join(d["recommendations"])
-    print("  [ok] 门控健康：塌缩/饱和/常数门与健康门控区分")
+
+    # 只有 gate_mean 无法证明样本级变化，不能判健康。
+    mean_only = base + [{"step": 50, "gate_mean": 0.5}]
+    d = diagnose_curve(mean_only)
+    gh = d["gate_health"]
+    assert gh["status"] != "健康" and "数据不足" in gh["status"], gh
+    assert not any("样本级变化，未贴近" in e for e in gh["evidence"]), gh
+    print("  [ok] 门控健康：塌缩/饱和/常数门与健康门控区分；仅均值判数据不足")
 
 
 def test_gate_health_flags_drift_and_ignores_malformed_stats():

@@ -525,7 +525,17 @@ def diagnose_gate(records: List[Dict]) -> Dict:
         recs.append(
             "门控剧烈漂移：优先检查学习率/梯度尖峰（见同页 grad_norm），"
             "并用多个评测点的门控曲线而不是最终 gate_mean 解释机制")
-    if status == "健康":
+    if status == "健康" and std is None:
+        # 只有均值无法证明“仍有样本级变化”，也无法排除常数门；中值
+        # 既未塌缩也未饱和时只能判为数据不足，不能给机制背书。
+        status = "数据不足（缺少门控分布统计）"
+        evidence.append(
+            f"门控末点均值 {mean:.3f}，但日志缺少 gate_std/低高饱和比例："
+            "无法确认门控是否存在样本级变化，也不能排除常数门")
+        recs.append(
+            "门控只有均值：补充记录 gate_std、gate_frac_low、gate_frac_high "
+            "后重跑诊断；在此之前不要用该 run 声称门控机制有效")
+    elif status == "健康":
         evidence.append(
             f"门控末点均值 {mean:.3f}"
             + (f"、std={std:.3f}" if std is not None else "")
@@ -567,8 +577,10 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # 建议不再指向"延长训练"（验证已连续无改善）。
     # step 只采信可解析的有限值；缺失/损坏（外部或截断的日志）时回退到
     # 最后一个有限训练点，既保留早停标注，又不把 "step None" 写进证据。
+    # 只认真正的布尔 true；外部日志里的 "false"/"0"/1 等真值会被
+    # truthiness 误判成“早停终止”，从而伪造训练提前结束的证据。
     early_stop_recs = [r for r in records
-                       if isinstance(r, dict) and r.get("early_stop")]
+                       if isinstance(r, dict) and r.get("early_stop") is True]
     early_stopped = bool(early_stop_recs)
     early_stop_steps = []
     for r in early_stop_recs:
