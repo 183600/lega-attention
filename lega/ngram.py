@@ -801,16 +801,31 @@ def main():
                    help="逗号分隔的 α 网格，默认 0.01,0.1,1.0")
     p.add_argument("--allow_test", action="store_true",
                    help="允许在 test 上评测（写访问账本）")
-    p.add_argument("--window_ctx", type=int, default=None,
+    p.add_argument("--window_ctx", default=None,
                    help="神经评测的窗口长度（与 --window_iters 一起给出时，"
                         "额外报告与神经评测逐位置对齐的 PPL）")
-    p.add_argument("--window_iters", type=int, default=None,
+    p.add_argument("--window_iters", default=None,
                    help="神经评测的窗口数（与 --window_ctx 成对使用）")
     p.add_argument("--allow_data_protocol_violations", action="store_true",
                    help="即使 data_report 标记泄露也继续评测（仅用于复现历史"
                         "实验；结果不得用于正式结论）")
     args = p.parse_args()
-    if (args.window_ctx is None) != (args.window_iters is None):
+    # argparse 的 type=int 接受 Python 下划线数字串（"1_0"→10），与
+    # _validate_alpha/strict_int 的规范数值口径不一致；这里保留原始字符串，
+    # 解析后统一严格校验。
+    def _cli_int(raw, label):
+        try:
+            v = strict_int(raw, label)
+        except (TypeError, ValueError) as e:
+            p.error(str(e))
+        if v < 1:
+            p.error(f"{label} 必须是正整数，收到 {v}")
+        return v
+    window_ctx = (None if args.window_ctx is None
+                  else _cli_int(args.window_ctx, "--window_ctx"))
+    window_iters = (None if args.window_iters is None
+                    else _cli_int(args.window_iters, "--window_iters"))
+    if (window_ctx is None) != (window_iters is None):
         p.error("--window_ctx 与 --window_iters 必须成对给出")
     data_preflight = data_protocol_preflight(
         args.data_dir,
@@ -823,10 +838,15 @@ def main():
         print(f"[ngram] ⚠ 数据协议自检发现 "
               f"{len(data_preflight['critical_violations'])} 个严重问题，"
               "但已显式放行（结果不得用于正式结论）")
-    window_spec = ({"ctx": args.window_ctx, "iters": args.window_iters}
-                   if args.window_ctx is not None else None)
-    alphas = (tuple(float(x) for x in args.alphas.split(","))
-              if args.alphas else ALPHA_GRID)
+    window_spec = ({"ctx": window_ctx, "iters": window_iters}
+                   if window_ctx is not None else None)
+    try:
+        # 先经 _validate_alpha 再进 evaluate：CLI 的裸 float() 会把
+        # "1_0" 静默变成 10，绕过该函数专门做的下划线拒绝。
+        alphas = (tuple(_validate_alpha(x) for x in args.alphas.split(","))
+                  if args.alphas else ALPHA_GRID)
+    except ValueError as e:
+        p.error(str(e))
     report = evaluate(args.data_dir, split=args.split, alphas=alphas,
                       allow_test=args.allow_test, window_spec=window_spec)
     report["data_protocol_preflight"] = data_preflight
