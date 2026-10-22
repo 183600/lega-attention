@@ -40,6 +40,8 @@ import statistics
 from collections import Counter
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from .ruler import _NUM_RE
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
@@ -621,7 +623,7 @@ def _num_set(raw) -> set:
 
 
 def _finite_float(v):
-    if v is None or isinstance(v, bool):
+    if v is None or isinstance(v, (bool, np.bool_)):
         return None
     try:
         f = float(v)
@@ -638,17 +640,18 @@ def _pred_text(rec: Dict) -> str:
     处理（False 也不应被解析成单词 false）。
     """
     pred = rec.get("pred") if isinstance(rec, dict) else None
-    if pred is None or isinstance(pred, (bool, dict, list, tuple, set)):
+    if pred is None or isinstance(pred, (bool, np.bool_, dict, list, tuple, set)):
         return ""
     return str(pred)
 
 
 def _safe_int(v):
-    if _finite_float(v) is None:
+    f = _finite_float(v)
+    if f is None or not f.is_integer():
         return None
     try:
-        return int(v)
-    except (TypeError, ValueError, OverflowError):
+        return int(f)
+    except (OverflowError, ValueError):
         return None
 
 

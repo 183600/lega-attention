@@ -6,6 +6,7 @@
 import math
 from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -631,7 +632,7 @@ class GPT(nn.Module):
                 # 温度直接改变采样分布：<=0 若被 max(temperature, 1e-6)
                 # 静默夹成极小值，会退化为近乎贪心；NaN 则让 multinomial
                 # 在生成中途抛错。必须在预分配/生成前显式拒绝。
-                if isinstance(temperature, bool):
+                if isinstance(temperature, (bool, np.bool_)):
                     raise ValueError(
                         f"temperature 必须是有限正数，收到 bool {temperature!r}")
                 try:

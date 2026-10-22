@@ -90,7 +90,7 @@ ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无
 
 def _bounded_float(value, name: str, minimum=None, maximum=None) -> float:
     """有限浮点配置；拒绝 bool/NaN/Inf，并按语义上下界显式报错。"""
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是有限数值，收到 bool {value!r}")
     try:
         out = float(value)
@@ -267,7 +267,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
 
 def _finite_float(value):
     """把外部记录中的标量转为有限 float；缺失/类型错误/NaN/Inf 返回 None。"""
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         # bool 是 int 子类，float(True)=1.0；在 max_p/hit 这类统计列里
         # 会把坏记录伪装成合法观测，必须按缺失处理。
         return None

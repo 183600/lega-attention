@@ -762,7 +762,7 @@ def _config_nonneg_float(value, name: str) -> float:
     朝错误方向更新，负的 grad_clip 会让 ``clip_grad_norm_`` 把梯度整体反号。
     这些配置错误必须在开训/写任何 run 产物之前失败。
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"config.{name} 必须是数值，收到 bool {value!r}")
     try:
         value = float(value)
@@ -781,7 +781,7 @@ def _config_finite_float(value, name: str) -> float:
     ``float(True)=1.0`` 会让布尔值冒充真实超参数；NaN/Inf 一旦进入模型
     初始化或优化器，会在训练若干步后才污染参数，无法从 run 产物区分。
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"config.{name} 必须是数值，收到 bool {value!r}")
     try:
         value = float(value)
@@ -816,7 +816,7 @@ def _config_min_delta(value) -> float:
     “改善”（best*(1-1)<=0），耐心计数将无限累加。NaN 还会绕过比较，
     因此必须在开训前显式拒绝，而不是交给 max()/float() 静默处理。
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"config.early_stop_min_delta 必须是数值，收到 bool {value!r}")
     try:
         value = float(value)

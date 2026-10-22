@@ -860,7 +860,7 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     ratios = {}
     for name, value in (("train_frac", train_frac), ("val_frac", val_frac),
                         ("window_frac", window_frac)):
-        if isinstance(value, bool):
+        if isinstance(value, (bool, np.bool_)):
             raise ValueError(f"{name} 必须是数值比例，收到 bool {value!r}")
         try:
             ratios[name] = float(value)
@@ -1077,7 +1077,7 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     没有告警时返回空列表——"无告警"与"没有自检"是两回事，后者由报告缺失表示。
     """
     def _num(v):
-        if isinstance(v, bool):
+        if isinstance(v, (bool, np.bool_)):
             return None
         try:
             f = float(v)
@@ -1461,7 +1461,7 @@ def short_overlap_alerts(short_contamination: dict) -> list:
         d = d if isinstance(d, dict) else {}
         raw = d.get("overlap_rate")
         # bool 是 int 子类（True→1.0）：不能把 true 当成 100% 重叠率触发告警。
-        if raw is None or isinstance(raw, bool):
+        if raw is None or isinstance(raw, (bool, np.bool_)):
             continue
         try:
             rate = float(raw)

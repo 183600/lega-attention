@@ -73,7 +73,7 @@ def _finite_float(v):
     ``"seed": true`` 或 ``"em": true`` 悄悄当成 1，跨变体对照与图表分组会把
     两个不同的 run 混成同一种子。
     """
-    if v is None or isinstance(v, bool):
+    if v is None or isinstance(v, (bool, np.bool_)):
         return None
     try:
         f = float(v)
@@ -245,7 +245,7 @@ def _group_items(items, rdir=None):
         # 去重槽位用严格整数身份：bool 不能落进种子 1 的槽位（True 与 1 在
         # dict 里同键，两次实验会被算成一次），"1" 与 1 必须归并到同一槽；
         # 1.9 这类非整数身份保留为独立槽位，既不截断也不冒充别的种子。
-        if isinstance(seed, bool):
+        if isinstance(seed, (bool, np.bool_)):
             slot_key = None
         else:
             slot_key = _seed_int(seed)
@@ -866,17 +866,23 @@ def _step_or_none(v):
     小数 step 若被 int() 截断，1.5 与 1.0 会合并到同一 x 坐标，多 run
     均值因而失真；整数值浮点（2.0）仍是合法 step，与 curves 同口径。
     """
-    if isinstance(v, bool):
+    if isinstance(v, (bool, np.bool_)):
         return None
-    if isinstance(v, float):
-        if not math.isfinite(v) or not v.is_integer():
-            return None
+    if isinstance(v, (int, np.integer)):
         v = int(v)
-    else:
+    elif isinstance(v, str):
         try:
-            v = int(v)
+            v = int(v.strip())
         except (TypeError, ValueError, OverflowError):
             return None
+    else:
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(f) or not f.is_integer():
+            return None
+        v = int(f)
     try:
         if not math.isfinite(float(v)):
             return None

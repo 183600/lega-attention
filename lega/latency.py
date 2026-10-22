@@ -21,14 +21,16 @@ import statistics
 import time
 from typing import Dict
 
+import numpy as np
 import torch
 
 from .attention import VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
-from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
-                    save_json, seed_int, set_seed, strict_int)
+from .utils import (amp_autocast, amp_dtype_for, config_finite_float,
+                    enable_tf32, get_device, save_json, seed_int, set_seed,
+                    strict_int)
 
 
 def _cfg_int(cfg, key, default):
@@ -80,7 +82,7 @@ def timing_stats(times_ms) -> dict:
     """
     vals = []
     for t in times_ms:
-        if t is None or isinstance(t, bool):
+        if t is None or isinstance(t, (bool, np.bool_)):
             continue
         try:
             f = float(t)
@@ -454,7 +456,8 @@ def main():
                 n_heads=_arch_int("n_heads"),
                 ffn_mult=_arch_int("ffn_mult", 4),
                 dropout=0.0, attn_dropout=0.0, variant=vname,
-                gate_bias_init=float(cfg.get("gate_bias_init", 2.0)),
+                gate_bias_init=config_finite_float(
+                    cfg.get("gate_bias_init", 2.0), "gate_bias_init"),
                 use_sdpa_standard=use_sdpa)
             model = GPT(**model_cfg).to(device)
             src = "random"

@@ -258,7 +258,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             # bool 是 int 子类，小数 int() 会截断；两者都能伪造出与 bin
             # 大小相符的 token 数，让损坏/过期缓存被当成有效。
             raw = meta.get(key, -1)
-            if isinstance(raw, bool):
+            if isinstance(raw, (bool, np.bool_)):
                 return -1
             try:
                 f = float(raw)

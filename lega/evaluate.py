@@ -10,6 +10,7 @@ import json
 import math
 import os
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -87,17 +88,23 @@ def _positive_int_or_none(value):
     配置是外部可改的评测协议；把 8.5 截断成 8 或把 True 当成 1 会让评测
     声称使用了与训练配置不同的上下文/窗口数，PPL 因而不可比。
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         return None
-    if isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            return None
+    if isinstance(value, (int, np.integer)):
         value = int(value)
-    else:
+    elif isinstance(value, str):
         try:
-            value = int(value)
+            value = int(value.strip())
         except (TypeError, ValueError, OverflowError):
             return None
+    else:
+        try:
+            f = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(f) or not f.is_integer():
+            return None
+        value = int(f)
     return value if value > 0 else None
 
 
@@ -125,7 +132,7 @@ def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
             frac = None
     val_loss = None
     raw_loss = ck.get("val_loss")
-    if raw_loss is not None and not isinstance(raw_loss, bool):
+    if raw_loss is not None and not isinstance(raw_loss, (bool, np.bool_)):
         try:
             val_loss = float(raw_loss)
         except (TypeError, ValueError, OverflowError):
@@ -262,7 +269,7 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
     try:
         # bool 是 int 子类，float(True)=1.0；坏记录不能伪装成 val_loss=1.0
         # （对应一个看似正常的 PPL）。
-        vl = None if isinstance(raw_loss, bool) else float(raw_loss)
+        vl = None if isinstance(raw_loss, (bool, np.bool_)) else float(raw_loss)
     except (TypeError, ValueError, OverflowError):
         vl = None
     if vl is not None and math.isfinite(vl):
@@ -272,7 +279,7 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
         ppl, loss, clamped = None, None, None
     gmean = metrics.get("gate_mean")
     if gmean is not None:
-        if isinstance(gmean, bool):
+        if isinstance(gmean, (bool, np.bool_)):
             gmean = None
         else:
             try:
@@ -301,7 +308,7 @@ def _read_run_eval(run_dir: str) -> dict:
 
 def _nonnegative_metric(v):
     """训练统计字段的非负有限数值规范化；坏值返回 None（不伪造吞吐）。"""
-    if v is None or isinstance(v, bool):
+    if v is None or isinstance(v, (bool, np.bool_)):
         return None
     try:
         v = float(v)
@@ -353,7 +360,7 @@ def load_train_coverage(run_dir: str):
         if v >= 0:
             out[dst] = v
     e = d.get("epochs_seen")
-    if e is not None and not isinstance(e, bool):
+    if e is not None and not isinstance(e, (bool, np.bool_)):
         try:
             e = float(e)
             if math.isfinite(e) and e >= 0:

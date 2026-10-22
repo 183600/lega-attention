@@ -181,7 +181,7 @@ def _finite_number(value):
     数值观测，进入跨种子均值、配对检验或 RULER 平均。汇总层读取的是外部/
     旧版产物，必须按缺失处理而不是替上游猜值。
     """
-    if value is None or isinstance(value, bool):
+    if value is None or isinstance(value, (bool, np.bool_)):
         return None
     try:
         value = float(value)
@@ -385,8 +385,8 @@ _PPL_PROTOCOL_KEYS = ("split", "eval_ctx", "eval_iters",
 
 def _protocol_value(v):
     """把评测协议字段规范化后比较（"10" 与 10、[256,512] 与元组视为相同）。"""
-    if isinstance(v, bool):
-        return ("bool", v)
+    if isinstance(v, (bool, np.bool_)):
+        return ("bool", bool(v))
     if isinstance(v, (int, float, str)):
         try:
             f = float(v)
@@ -404,7 +404,7 @@ def _same_protocol_value(a, b) -> bool:
 
 def _integral_value(value):
     """把外部 JSON 数值规范为整数；bool/非有限/小数返回 None。"""
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         return None
     try:
         f = float(value)
@@ -649,7 +649,7 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
         # 静默接受会让被污染的外部元数据冒充同一训练预算。
         if a is None and b is None:
             return True
-        if isinstance(a, bool) or isinstance(b, bool):
+        if isinstance(a, (bool, np.bool_)) or isinstance(b, (bool, np.bool_)):
             return False
         try:
             fa, fb = float(a), float(b)

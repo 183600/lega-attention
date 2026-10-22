@@ -31,6 +31,8 @@ import os
 import statistics
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 # 相对变化阈值：低于该幅度视为"没有实质下降/上升"（覆盖常见噪声量级）
 REL_TOL = 0.03
 # 发散判定：后期均值超过前期均值的该倍数
@@ -84,7 +86,7 @@ def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
     for value in (steps, eval_every, log_every):
         # bool 是 int 子类（True→1），小数不能静默截断成另一个采样间隔；
         # 这里只告警不阻断，但必须明确说“无法评估”而不是给出错误点数。
-        if isinstance(value, bool):
+        if isinstance(value, (bool, np.bool_)):
             return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
         try:
             f = float(value)
@@ -156,17 +158,23 @@ def _step_or_none(value) -> Optional[int]:
     小数 step 若被 int() 截断（1.5 → 1、True → 1），不同记录会折叠到同一
     步上，曲线与早停标记随之错位；整数值浮点（2.0）仍是合法 step。
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         return None
-    if isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            return None
+    if isinstance(value, (int, np.integer)):
         value = int(value)
-    else:
+    elif isinstance(value, str):
         try:
-            value = int(value)
+            value = int(value.strip())
         except (TypeError, ValueError, OverflowError):
             return None
+    else:
+        try:
+            f = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(f) or not f.is_integer():
+            return None
+        value = int(f)
     try:
         if not math.isfinite(float(value)):
             return None
@@ -183,7 +191,7 @@ def _finite_value(value) -> Optional[float]:
     bool 是 int 子类，float(True)=1.0；若当成 loss/grad_norm/val_loss，
     坏日志会伪造一个“正常”的数值点，污染趋势、尖峰与噪声诊断。
     """
-    if value is None or isinstance(value, bool):
+    if value is None or isinstance(value, (bool, np.bool_)):
         return None
     try:
         f = float(value)
@@ -212,7 +220,7 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
         if v is None or s is None:
             continue
         s = _step_or_none(s)
-        if isinstance(v, bool):
+        if isinstance(v, (bool, np.bool_)):
             malformed += 1
             continue
         try:
