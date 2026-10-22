@@ -585,7 +585,12 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
             beyond = eq.get("beyond_margin")
             status = _MEANINGFUL.get((direction, bool(beyond)),
                                      "significant_below_sesoi")
-        elif eq.get("noninferior") is True and n_ok:
+        elif (eq.get("noninferior") is True and n_ok
+              # 校正后 p 不显著时不能退回原始 noninferior 标志：那会出
+              # 现“multiplicity_adjusted=True、p_used>alpha、却判非劣”的
+              # 自相矛盾结论。只有明确记录了已校正的非劣性证据才采信。
+              and (not adjusted
+                   or eq.get("noninferior_adjusted") is True)):
             status = "noninferior"
     label = _STATUS_LABELS.get(status, status)
     if status == "significant_below_sesoi" and eq.get("direction") == "worse":

@@ -3239,9 +3239,20 @@ def _adjust_equivalence_family(group, min_seeds=MIN_SEEDS,
     pads = holm_bonferroni([
         (t["equivalence"].get("p_tost") if _n_ok(t["equivalence"]) else None)
         for t in eq_tests])
-    for t, padj in zip(eq_tests, pads):
+    # 非劣性是单侧假设，必须与 TOST 分开校正：把 TOST 的校正 p 拿来当作
+    # 非劣性证据会既漏报（单侧 p 更小）又谎报（校正后不显著仍沿用原始
+    # noninferior 标志）。这里对同一家族内的单侧 p 独立做 Holm。
+    noninf_pads = holm_bonferroni([
+        (t["equivalence"].get("p_noninf_worse")
+         if _n_ok(t["equivalence"]) else None)
+        for t in eq_tests])
+    for t, padj, noninf_adj in zip(eq_tests, pads, noninf_pads):
         eq = t["equivalence"]
         eq["p_tost_adj"] = padj
+        eq["p_noninf_worse_adj"] = noninf_adj
+        eq["noninferior_adjusted"] = True
+        eq["noninferior"] = bool(
+            _n_ok(eq) and noninf_adj is not None and noninf_adj < alpha)
         eq["multiplicity_adjusted"] = padj is not None
 
     n_grid = 0

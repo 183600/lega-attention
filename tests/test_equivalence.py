@@ -224,6 +224,34 @@ def test_apply_holm_adjusts_tost_and_sensitivity_families():
     print("  [ok] TOST 主族/敏感性网格 Holm 与 n<3 排除")
 
 
+def test_holm_adjusted_tost_does_not_keep_raw_noninferior():
+    """校正后 TOST p 不显著时，不能沿用校正前的 noninferior 原始标志。"""
+    def mk(p):
+        return {"candidate": "c", "reference": "r", "metric": "PPL",
+                "n": 5, "p": 0.5, "mean_diff": 0.002, "std_diff": 0.001,
+                "lower_is_better": True,
+                "equivalence": {"n": 5, "p_tost": p, "p_tost_adj": None,
+                                "mean_diff": 0.002, "margin": 0.01,
+                                "direction": "worse", "beyond_margin": False,
+                                "noninferior": True, "p_noninf_worse": p,
+                                "multiplicity_adjusted": False,
+                                "sensitivity": []}}
+    out = _apply_holm([mk(0.03), mk(0.04)])
+    for t in out:
+        eq = t["equivalence"]
+        assert eq["p_tost_adj"] == 0.06, eq
+        assert eq["p_noninf_worse_adj"] == 0.06, eq
+        assert eq["noninferior"] is False, eq
+        assert eq["status"] != "noninferior", eq
+    # 外部/手写结果若只带校正 p、没有可校正的单侧证据，也不能退回原始标志。
+    stale = {"n": 5, "p_tost": 0.03, "p_tost_adj": 0.06,
+             "mean_diff": 0.002, "margin": 0.01, "direction": "worse",
+             "beyond_margin": False, "noninferior": True}
+    r = interpret_equivalence(stale, p_adj=None)
+    assert r["status"] != "noninferior", r
+    print("  [ok] Holm 校正后不再沿用原始 noninferior 标志")
+
+
 def test_enrich_paired_attaches_equivalence_and_renders_status():
     a = [99.8, 100.1, 99.9, 100.2, 100.0]
     b = [100.0] * 5
