@@ -121,30 +121,35 @@ def worktree_state(root: str = None, max_files: int = 500) -> dict:
                 "n_changed": None, "n_untracked": None,
                 "diff_sha256": None, "diff_bytes": None,
                 "diff_truncated": False}
-    # 必须保留原始行首空格：porcelain 的 " M path" 前两个字符是状态列，
-    # 若先 strip 整段输出，第一行会变成 "M path" 而把路径截掉一个字符。
-    raw_status = _git_bytes(["status", "--porcelain"], root)
+    # 用 -z 取出 NUL 分隔的原始字节路径：普通 porcelain 会给含空格/非 ASCII
+    # 的路径加引号并做 C 风格转义，line[3:] 记录下来的不是真实文件名。
+    # -z 同时让重命名条目以 `XY new\0old\0` 输出，不会把 " -> " 混进路径。
+    raw_status = _git_bytes(["status", "--porcelain", "-z"], root)
     if raw_status is None:
         return {"available": False, "head": commit, "dirty": None,
                 "changed_files": None, "untracked_files": None,
                 "n_changed": None, "n_untracked": None,
                 "diff_sha256": None, "diff_bytes": None,
                 "diff_truncated": False}
-    status = raw_status.decode("utf-8", "replace")
     changed, untracked = [], []
-    for line in status.splitlines():
-        if len(line) < 4:
+    fields = raw_status.split(b"\0")
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if len(field) < 4:
             continue
-        code, path = line[:2], line[3:]
-        # 重命名行格式为 "R  old -> new"：记录新路径
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
+        code = field[:2].decode("utf-8", "replace")
+        path = field[3:].decode("utf-8", "replace")
+        # 重命名/复制条目：紧随其后的 NUL 字段是原路径（此处只记录新路径）。
+        if code and code[0] in ("R", "C") and i < len(fields):
+            i += 1
         (untracked if code.strip() == "??" else changed).append(path)
     diff, truncated = _worktree_diff_bytes(root)
     return {
         "available": True,
         "head": commit,
-        "dirty": bool(status),
+        "dirty": bool(raw_status),
         "changed_files": changed[:max_files],
         "untracked_files": untracked[:max_files],
         "n_changed": len(changed),
