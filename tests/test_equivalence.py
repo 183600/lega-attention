@@ -331,3 +331,23 @@ def test_tost_extreme_finite_values_are_invalid_not_crash_or_nan():
     normal = tost_from_diffs([0.001] * 5, 0.01)
     assert normal["equivalent"] is True and normal["std_diff"] == 0.0, normal
     print("  [ok] TOST 极端有限值安全降级为 invalid")
+
+
+def test_tost_unrepresentable_integer_observations_are_skipped():
+    """合法但超出 float 上限的整数观测不能以 OverflowError 穿透 TOST 入口。"""
+    huge = [10 ** 400] * 5
+    r = tost_from_diffs(huge, 0.01)
+    assert r["n"] == 0 and r["status"] == "insufficient_seeds", r
+    assert r["p_tost"] is None and r["equivalent"] is False, r
+
+    paired = tost_paired(huge, [0.0] * 5, 0.01)
+    assert paired["n"] == 0 and paired["n_pairs_valid"] == 0, paired
+    # 同一组里可表示的观测仍照常参与，不能因一个坏值丢掉整对/整组。
+    mixed = tost_paired([10 ** 400, 1.0], [0.0, 0.0], 0.5)
+    assert mixed["n"] == 1 and mixed["n_pairs_valid"] == 1, mixed
+    assert mixed["mean_diff"] == 1.0, mixed
+
+    eq = assess_paired_equivalence(huge, [0.0] * 5, "PPL")
+    assert eq is not None and eq["n"] == 0, eq
+    assert eq["status"] == "insufficient_seeds", eq
+    print("  [ok] TOST 不可表示的大整数观测按缺失剔除，不抛 OverflowError")

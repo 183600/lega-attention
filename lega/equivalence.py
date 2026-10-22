@@ -65,7 +65,13 @@ def _strict_number(value, name: str) -> float:
 
 
 def _observation(value):
-    """单条观测：None/非数值/非有限/bool 返回 None（整对剔除）。"""
+    """单条观测：None/非数值/非有限/bool/不可表示值返回 None（整对剔除）。
+
+    合法但超出 float 表示范围的整数（如 10**400）不是可计算的有限观测：
+    ``float()`` 会抛 OverflowError，若让它穿透，TOST 入口会以未捕获异常
+    失败，而不是像其它坏观测一样被剔除。与 ``_strict_number`` 同口径按
+    缺失处理。
+    """
     if value is None or isinstance(value, bool):
         return None
     # numpy.bool_ 不是 numbers.Real，但某些版本会伪装成整数；按类型名挡住。
@@ -73,7 +79,10 @@ def _observation(value):
         return None
     if not isinstance(value, Real):
         return None
-    f = float(value)
+    try:
+        f = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
     return f if math.isfinite(f) else None
 
 
