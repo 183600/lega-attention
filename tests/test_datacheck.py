@@ -235,6 +235,7 @@ def test_temporal_split_rejects_invalid_fractions():
         {"window_frac": 0}, {"window_frac": -0.1},
         {"window_frac": 1.1}, {"window_frac": float("nan")},
         {"window_frac": float("inf")}, {"train_frac": True},
+        {"train_frac": "0_5"},
     ]
     for kwargs in bad_kwargs:
         try:
@@ -1625,6 +1626,11 @@ def test_leakage_alerts_reject_bool_and_fractional_counts():
         None,
         {"val_vs_train": {"tv": True, "js_bits": False}},
         None, None)
+    assert out == [], out
+    # "0_9" 经 float() 会变成 0.9 并伪造分布漂移告警，必须按坏数据忽略
+    out = leakage_alerts(
+        None, None, None, None,
+        {"val_vs_train": {"tv": "0_9"}}, None, None)
     assert out == [], out
     # 真正的整数计数与比率仍然工作
     out = leakage_alerts(

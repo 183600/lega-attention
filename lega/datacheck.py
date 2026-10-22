@@ -862,6 +862,8 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
                         ("window_frac", window_frac)):
         if isinstance(value, (bool, np.bool_)):
             raise ValueError(f"{name} 必须是数值比例，收到 bool {value!r}")
+        if isinstance(value, str) and "_" in value:
+            raise ValueError(f"{name} 必须是数值比例，收到 {value!r}")
         try:
             ratios[name] = float(value)
         except (TypeError, ValueError, OverflowError) as e:
@@ -1078,6 +1080,8 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     """
     def _num(v):
         if isinstance(v, (bool, np.bool_)):
+            return None
+        if isinstance(v, str) and "_" in v:
             return None
         try:
             f = float(v)
