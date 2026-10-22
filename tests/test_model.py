@@ -144,6 +144,9 @@ def test_generate_rejects_invalid_length_and_top_k():
         except ValueError as exc:
             assert "top_k" in str(exc)
     assert torch.equal(model.generate(idx, max_new_tokens=0), idx)
+    out = model.generate(idx, max_new_tokens=np.int64(2), greedy=False,
+                         top_k=np.int64(4))
+    assert out.shape == (1, 7), out.shape
     print("  [ok] generate：拒绝非法 max_new_tokens/top_k")
 
 

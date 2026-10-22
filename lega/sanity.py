@@ -81,8 +81,9 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
     try:
         B, T = x.shape
         V = model.vocab_size
-        max_elems = max(1, int(max_chunk_elems))
-        rows = max(1, min(int(max_chunk_tokens) // max(1, T),
+        max_elems = max(1, strict_int(max_chunk_elems, "max_chunk_elems"))
+        max_chunk_tokens = strict_int(max_chunk_tokens, "max_chunk_tokens")
+        rows = max(1, min(max_chunk_tokens // max(1, T),
                           max_elems // max(1, T * V)))
         # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块一致
         ce_tokens = max(256, min(4096, max_elems // max(1, V)))

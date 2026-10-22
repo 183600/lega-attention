@@ -434,6 +434,7 @@ def test_t_critical_95_matches_known_table():
     # 非法自由度安全返回 None，不抛异常
     assert t_critical_95(0) is None and t_critical_95(None) is None
     assert t_critical_95(float("inf")) is None
+    assert t_critical_95(True) is None and t_critical_95(np.bool_(True)) is None
     print("  [ok] t_critical_95 与 Student-t 临界值表一致")
 
 

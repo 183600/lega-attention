@@ -620,14 +620,17 @@ class GPT(nn.Module):
         try:
             B, T0 = idx.shape
             if (isinstance(max_new_tokens, bool)
-                    or not isinstance(max_new_tokens, int)
+                    or not isinstance(max_new_tokens, (int, np.integer))
                     or max_new_tokens < 0):
                 raise ValueError(
                     f"max_new_tokens 必须是非负整数，收到 {max_new_tokens!r}")
+            max_new_tokens = int(max_new_tokens)
             if top_k is not None and (isinstance(top_k, bool)
-                                      or not isinstance(top_k, int)
+                                      or not isinstance(top_k, (int, np.integer))
                                       or top_k <= 0):
                 raise ValueError(f"top_k 必须是正整数或 None，收到 {top_k!r}")
+            if top_k is not None:
+                top_k = int(top_k)
             if not greedy:
                 # 温度直接改变采样分布：<=0 若被 max(temperature, 1e-6)
                 # 静默夹成极小值，会退化为近乎贪心；NaN 则让 multinomial

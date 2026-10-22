@@ -172,7 +172,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                              "lega_conc_only")
     # 按提示长度分组：只有等长样例可堆叠；每组内再按 batch_size 切批。
     order = sorted(range(len(examples)), key=lambda k: len(examples[k]["ids"]))
-    bs = max(1, int(batch_size))
+    bs = max(1, strict_int(batch_size, "batch_size"))
     g0 = 0
     while g0 < len(order):
         n_len = len(examples[order[g0]]["ids"])

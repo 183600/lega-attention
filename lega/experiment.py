@@ -381,7 +381,7 @@ def _load_train_curve(out_dir: str, max_points: int = 1000):
         return None
     n = len(records)
     sampled = records
-    cap = max(1, int(max_points))
+    cap = max(1, strict_int(max_points, "max_points"))
     if n > cap:
         # 均匀抽取并强制保留首尾（final/early_stop 标记通常在末尾）。
         # 用整除索引生成恰好 cap 条，避免“步长采样 + 追加末点”得到 cap+1 条、

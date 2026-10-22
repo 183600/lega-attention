@@ -624,9 +624,14 @@ def t_critical_95(df: float) -> float:
     小样本（如验证窗口仅 eval_iters=20 个）用正态 1.96 会低估区间宽度；
     df<=0 返回 None，df>200 时 t→z 近似 1.96 直接返回以免无谓迭代。
     """
-    if df is None or not math.isfinite(float(df)) or float(df) <= 0:
+    if df is None or isinstance(df, (bool, np.bool_)):
         return None
-    df = float(df)
+    try:
+        df = float(df)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(df) or df <= 0:
+        return None
     if df > 200:
         return 1.959963984540054
     lo, hi = 0.0, 1e3
