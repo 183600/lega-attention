@@ -5693,11 +5693,20 @@ def _eff_cell(entry, key, ctx):
 
 
 def _rel_pct(base, cand):
-    """cand 相对 base 的百分比变化；任一缺失或 base=0 时返回 None。"""
+    """cand 相对 base 的百分比变化；任一缺失/base=0/结果不可表示时返回 None。
+
+    两端都是有限值不代表百分比可表示：base 极小或 cand−base 溢出时会得到
+    ±inf，写入汇总行后 JSON 只能把它变成 null，而判定逻辑仍可能按 inf 参与
+    max()/比较。这里统一在入口按缺失处理。
+    """
     base, cand = _num_or_none(base), _num_or_none(cand)
     if base is None or cand is None or base == 0:
         return None
-    return (cand - base) / abs(base) * 100.0
+    try:
+        out = (cand - base) / abs(base) * 100.0
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _lat_noise_pct(entry, metric, ctx, bs="1"):
@@ -5725,9 +5734,14 @@ def _noise_floor_pct(base_noise, cand_noise):
     只有两端都有散布信息时才给出噪声下限：一侧缺失时无法判断"差值是否
     小于测量噪声"，按未过滤的原口径处理，避免用单侧散布低估/高估噪声。
     """
-    if base_noise is None or cand_noise is None:
+    if (base_noise is None or cand_noise is None
+            or base_noise < 0.0 or cand_noise < 0.0):
         return None
-    return math.sqrt(base_noise * base_noise + cand_noise * cand_noise)
+    try:
+        floor = math.sqrt(base_noise * base_noise + cand_noise * cand_noise)
+    except (OverflowError, ValueError):
+        return None
+    return floor if math.isfinite(floor) and floor >= 0.0 else None
 
 
 # RULER 收益以 EM 绝对百分点计，与 PPL 的相对百分比单位不同：收支比规则

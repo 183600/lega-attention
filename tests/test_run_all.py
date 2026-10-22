@@ -701,6 +701,9 @@ def test_rel_pct_and_eff_cells():
     assert _rel_pct(None, 10.0) is None
     assert _rel_pct(10.0, None) is None
     assert _rel_pct(0.0, 10.0) is None
+    # 两端有限但百分比不可表示时同样是缺失，不能返回 ±inf 参与 max()。
+    assert _rel_pct(1.0, 1e308) is None
+    assert _rel_pct(1e-308, 1.0) is None
     # _eff_cell 读取 latency 条目的结构与运行时字段
     entry = {"n_params": 100, "efficiency": {
         "n_params": 100, "params_mb": 0.4,
@@ -712,6 +715,10 @@ def test_rel_pct_and_eff_cells():
     assert _eff_cell(entry, "mem", 256) == 3.5
     assert _eff_cell(None, "flops", 256) is None
     assert _eff_cell({"efficiency": {}}, "flops", 256) is None
+    from run_all import _noise_floor_pct
+    assert _noise_floor_pct(3.0, 4.0) == 5.0
+    assert _noise_floor_pct(1e308, 1e308) is None
+    assert _noise_floor_pct(-1.0, 2.0) is None
     print("  [ok] _rel_pct/_eff_cell（缺失安全）")
 
 
