@@ -2402,10 +2402,13 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
                 continue
             seed_diffs.append(diffs)
             window_counts.add(int(diffs.size))
+            # diffs 逐元素有限，但同号巨大值相加会溢出；与分层 bootstrap
+            # 同口径用缩放后的稳定均值，避免 per_seed 明细出现 inf。
+            seed_mean, _ = mean_std(diffs)
             per_seed.append({
                 "seed": _integral_value(s),
                 "n_windows": int(diffs.size),
-                "mean_diff": float(diffs.mean()),
+                "mean_diff": seed_mean,
                 "window_wins": int((diffs < 0).sum()),
                 "window_losses": int((diffs > 0).sum()),
                 "window_ties": int((diffs == 0).sum()),

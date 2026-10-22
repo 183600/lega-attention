@@ -5124,6 +5124,16 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     assert t["p_adj"] is not None and t["p_adj"] < 0.05, t
     assert t["verdict"].startswith("窗口级显著优于"), t
 
+    # 单窗口差值本身有限但同号相加会溢出：per_seed 明细也不能写 inf。
+    huge_idx = list(range(0, 30, 3))
+    huge_runs = {
+        "lega": {7: ev([1.5e308] * 10, huge_idx)},
+        "standard": {7: ev([0.0] * 10, huge_idx)},
+    }
+    huge_t = _ppl_window_paired_tests(huge_runs, [("lega", "standard")],
+                                      n_resamples=50)[0]
+    assert huge_t["per_seed"][0]["mean_diff"] == 1.5e308, huge_t
+    assert math.isfinite(huge_t["mean_diff"]), huge_t
     # 窗口序号不一致 = 不是同一批评测单元，整对剔除而不是按位置强配
     runs2 = {
         "lega": {7: ev([1.0, 1.0], [0, 4])},
