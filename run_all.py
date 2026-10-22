@@ -5064,7 +5064,8 @@ def build_summary(results_dir: str, audit: dict = None,
             shown += 1
             q = _as_text(c.get("question")).strip().replace("\n", " ")[:120]
             pred = _as_text(c.get("pred")).strip().replace("\n", " ")[:80]
-            md += [f"- **{VARIANT_CN.get(v, v)} · {c['task']}@ctx{c.get('ctx')}** "
+            md += [f"- **{VARIANT_CN.get(v, v)} · {c.get('task') or '-'}"
+                   f"@ctx{c.get('ctx')}** "
                    f"—— {BADCASE_CN.get(c['category'], c['category'])}",
                    f"  - 问题：{q}…",
                    f"  - 输出：`{pred}` vs gold `{c.get('answer')}`；"

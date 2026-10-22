@@ -3033,6 +3033,26 @@ def test_build_summary_tolerates_malformed_data_report_and_audit():
     print("  [ok] data_report/audit 嵌套字段非对象：缺失降级而非崩溃")
 
 
+def test_build_summary_tolerates_badcases_without_task():
+    """旧/外部 RULER 错误清单可能缺少 task：汇总页用占位符渲染，不能崩溃。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 10.0,
+            "val_loss": 2.3, "n_params": 10, "split": "test"})
+        _write_json(os.path.join(tmp, "ruler_lega.json"), {
+            "variant": "lega", "seed": 1,
+            "badcases": [None, {"answer_in_prompt": True, "pred": "7",
+                                "answer": "1", "context_numbers": ["7"],
+                                "question": "q"}]})
+        out = build_summary(tmp)
+        assert "坏案例分析" in out["markdown"]
+        assert "-@ctxNone" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：缺 task 的错误样本降级为占位符")
+
+
 def test_ruler_avg_macro_micro_defined_and_reported():
     """RULER 平均必须显式定义：macro（任务/格等权）与 micro（按 n 加权）并报。"""
     doc = {"results": {
