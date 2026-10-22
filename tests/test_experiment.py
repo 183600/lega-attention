@@ -671,6 +671,9 @@ def test_verify_ledger_checks_embedded_sanity_evidence():
         ident = _good_sanity()
         ident["identity"] = {"hard_mismatches": ["config_sha256"]}
         _add("identity_bad", None, [_run(sanity=ident)])
+        ident_type = _good_sanity()
+        ident_type["identity"] = "corrupted"
+        _add("identity_bad_type", None, [_run(sanity=ident_type)])
         mismatch = _good_sanity()
         mismatch["variant"] = "standard"
         _add("variant_bad", None, [_run(sanity=mismatch)])
@@ -707,6 +710,9 @@ def test_verify_ledger_checks_embedded_sanity_evidence():
                    for x in by_id["seed_unverified"]["issues"]), by_id["seed_unverified"]
         assert any("identity_mismatch" in x
                    for x in by_id["identity_bad"]["issues"]), by_id["identity_bad"]
+        assert any("identity_mismatch" in x
+                   for x in by_id["identity_bad_type"]["issues"]), \
+            by_id["identity_bad_type"]
         assert any("variant_mismatch" in x
                    for x in by_id["variant_bad"]["issues"]), by_id["variant_bad"]
         assert any("checks_incomplete" in x
@@ -766,6 +772,22 @@ def test_verify_ledger_lifecycle_and_artifact_hashes():
         rep3 = verify_ledger(path3, check_artifacts=True, root=tmp)
         assert rep3["ok"] is False
         assert any("malformed_entry" in str(i) for i in rep3["issues"]), rep3
+        # artifacts/runs[].files 存在但类型错误（数组/字符串）同样不能被
+        # 当成“没有产物需要核验”而让台账通过。
+        path4 = os.path.join(tmp, "bad_artifact_shapes.jsonl")
+        append_record(path4, {"run_id": "bad-shape", "status": "started",
+                              "variants": ["lega"], "seeds": [7]})
+        append_record(path4, {
+            "run_id": "bad-shape", "status": "completed",
+            "variants": ["lega"], "seeds": [7],
+            "runs": [{"variant": "lega", "seed": 7, "out_dir": ".",
+                      "files": ["bogus"]}],
+            "artifacts": ["also-bogus"]})
+        rep4 = verify_ledger(path4, check_artifacts=True, root=tmp)
+        assert rep4["ok"] is False
+        text4 = "\n".join(str(i) for i in rep4["issues"])
+        assert "malformed_artifacts" in text4 and "malformed_files" in text4, \
+            text4
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_ledger：悬挂/重复终态/无 started/产物哈希可发现")

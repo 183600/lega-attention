@@ -374,7 +374,10 @@ def _sanity_evidence_issues(record) -> list:
                 run.get("variant")):
             issues.append(f"sanity_run_variant_mismatch: {tag}")
         identity = ev.get("identity")
-        if isinstance(identity, dict):
+        if identity is not None and not isinstance(identity, dict):
+            # 身份证据结构损坏不能当成“旧格式没有该字段”而静默放行。
+            issues.append(f"sanity_run_identity_mismatch: {tag}")
+        elif isinstance(identity, dict):
             hard = identity.get("hard_mismatches")
             if isinstance(hard, list) and hard:
                 issues.append(f"sanity_run_identity_mismatch: {tag}")
@@ -578,7 +581,11 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
             if rec.get("status") != "completed":
                 continue
             arts = rec.get("artifacts")
-            if isinstance(arts, dict):
+            if arts is not None and not isinstance(arts, dict):
+                # 存在但不是对象（数组/字符串）说明产物清单已损坏；不能
+                # 当成“旧记录没有 artifacts”而跳过整段完整性核验。
+                artifact_issues.append(f"malformed_artifacts: {type(arts).__name__}")
+            elif isinstance(arts, dict):
                 for key, entry in arts.items():
                     problem = _check(key, entry, root)
                     if problem:
@@ -598,6 +605,11 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                 base = out_dir if os.path.isabs(out_dir) \
                     else os.path.join(root, out_dir)
                 files = run.get("files")
+                if files is not None and not isinstance(files, dict):
+                    artifact_issues.append(
+                        f"{run.get('variant')}/seed{run.get('seed')}: "
+                        f"malformed_files: {type(files).__name__}")
+                    continue
                 if not isinstance(files, dict):
                     continue
                 for key, entry in files.items():
