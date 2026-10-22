@@ -366,8 +366,13 @@ def fig_ppl(rdir):
                 ppls.append(p)
         if not ppls:
             continue
-        mean = float(np.mean(ppls))
-        std = float(np.std(ppls, ddof=1)) if len(ppls) > 1 else 0.0
+        # 跨界种子取稳定均值/样本标准差：np.mean/np.std 对两个 1e308 的
+        # 合法 PPL 会在求和/平方时溢出成 inf，画出无效误差棒。
+        mean, std = mean_std(ppls)
+        if mean is None:
+            continue
+        if len(ppls) < 2 or std is None:
+            std = 0.0
         rows.append((v, mean, std, any(d.get("val_ppl_clamped", False) for d in ds)))
         # 收集全部种子的 split（多种子均在同一 split 上评测；这里避免只看
         # 首个文件时漏掉其它种子的信息，标签才不会误导）

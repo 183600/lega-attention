@@ -520,6 +520,11 @@ def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
            {"variant": "lega", "ppl": None, "val_ppl": 10.0, "split": "val"})
         _w(tmp, "eval_bad.json",
            {"variant": "bad", "ppl": "oops", "val_ppl": None, "split": "val"})
+        # 两个种子都是合法但接近 float 上限的 PPL：稳定均值/标准差不能溢出。
+        _w(tmp, "eval_huge_seed1.json",
+           {"variant": "huge", "seed": 1, "ppl": 1e308, "split": "val"})
+        _w(tmp, "eval_huge_seed2.json",
+           {"variant": "huge", "seed": 2, "ppl": 1e308, "split": "val"})
         assert fig_ppl(tmp) is True
         assert os.path.exists(os.path.join(tmp, "fig_ppl.png"))
     finally:
