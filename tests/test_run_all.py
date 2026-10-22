@@ -5228,6 +5228,26 @@ def test_ruler_sample_macro_micro_estimands_diverge():
     print("  [ok] RULER 样例级效应量：micro 与 macro 口径分歧显式并列并告警")
 
 
+def test_window_bootstrap_survives_huge_finite_window_diffs():
+    """逐窗口差值本身有限但相加会溢出时，bootstrap 均值/区间仍需有限。"""
+    from run_all import _window_bootstrap_stats
+    huge = [[1e308, 1e308], [1e308, 1e308]]
+    st = _window_bootstrap_stats(huge, n_resamples=50, seed=0)
+    assert st is not None, st
+    assert st["mean_diff"] == 1e308, st
+    assert all(math.isfinite(x) for x in st["mean_diff_ci95"]), st
+    assert all(math.isfinite(x) for x in st["block_mean_diff_ci95"]), st
+    assert math.isfinite(st["p"]) and 0.0 <= st["p"] <= 1.0, st
+    # 正负巨大值抵消时均值应为 0，而不是 NaN。
+    mixed = [[1e308, -1e308], [1e308, -1e308]]
+    st2 = _window_bootstrap_stats(mixed, n_resamples=50, seed=0)
+    assert st2 is not None and st2["mean_diff"] == 0.0, st2
+    assert st2["p"] == 1.0, st2
+    # 直接传入非有限窗口差时按缺失过滤；全部无效则返回 None。
+    assert _window_bootstrap_stats([[float("nan")]]) is None
+    print("  [ok] 窗口分层 bootstrap：巨大有限差/正负抵消不溢出，非有限差过滤")
+
+
 def test_ruler_micro_average_survives_huge_finite_weights():
     """两个可表示但相加会溢出的样本计数仍应给出有限加权均值。"""
     both_one = {"results": {"niah": {

@@ -2237,41 +2237,64 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
     自相关均值，便于判断两种区间为何不同。块 bootstrap 仍是近似，只作
     探索性稳健性证据。
     """
-    arrays = [np.asarray(d, dtype=np.float64) for d in (seed_diffs or [])
-              if np.asarray(d).size]
+    arrays = []
+    for d in (seed_diffs or []):
+        arr = np.asarray(d, dtype=np.float64).ravel()
+        # 窗口差应由调用方保证有限；这里仍独立过滤，避免直接调用方把
+        # NaN/Inf 送进均值后让整份探索性证据变成 NaN。
+        arr = arr[np.isfinite(arr)]
+        if arr.size:
+            arrays.append(arr)
     if not arrays:
         return None
     n_seeds = len(arrays)
-    obs = float(np.mean([d.mean() for d in arrays]))
+    # 先按全局最大绝对值缩放再重采样：合法但接近 float 上限的窗口差
+    # （如 ±1e308）在朴素求和/平方时会溢出成 inf，使均值、区间和 p 值
+    # 全部失真。缩放后各值落在 [-1,1]，统计量按尺度等变还原。
+    scale = float(max(np.max(np.abs(d)) for d in arrays))
+    if scale > 0.0:
+        arrays_scaled = [d / scale for d in arrays]
+    else:
+        arrays_scaled = [np.zeros_like(d) for d in arrays]
+    obs_scaled = float(np.mean([d.mean() for d in arrays_scaled]))
+    obs = float(obs_scaled * scale)
+    if not math.isfinite(obs):
+        return None
     rng = np.random.default_rng(seed)
-    reps = np.empty(int(n_resamples), dtype=np.float64)
+    reps_scaled = np.empty(int(n_resamples), dtype=np.float64)
     for r in range(int(n_resamples)):
         sidx = rng.integers(0, n_seeds, n_seeds)
         means = []
         for si in sidx:
-            d = arrays[int(si)]
+            d = arrays_scaled[int(si)]
             w = rng.integers(0, d.size, d.size)
             means.append(float(d[w].mean()))
-        reps[r] = float(np.mean(means))
+        reps_scaled[r] = float(np.mean(means))
+    reps = reps_scaled * scale
+    if not np.all(np.isfinite(reps)):
+        return None
     alpha = 0.025
-    lo, hi = np.quantile(reps, [alpha, 1.0 - alpha])
-    ge = int((np.abs(reps - obs) >= abs(obs)).sum())
+    lo_s, hi_s = np.quantile(reps_scaled, [alpha, 1.0 - alpha])
+    lo, hi = float(lo_s * scale), float(hi_s * scale)
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return None
+    ge = int((np.abs(reps_scaled - obs_scaled) >= abs(obs_scaled)).sum())
     p_boot = (((ge + 1) / (int(n_resamples) + 1))
-              if obs != 0 else 1.0)
-    same_sign = (float(np.mean((reps > 0) == (obs > 0)))
-                 if obs != 0 else 0.0)
+              if obs_scaled != 0 else 1.0)
+    same_sign = (float(np.mean((reps_scaled > 0) == (obs_scaled > 0)))
+                 if obs_scaled != 0 else 0.0)
 
     # 移动块 bootstrap：块内保留窗口顺序/相邻相关，块间独立。块长用
     # n^(1/3) 的经验规则；n<4 时块长 1（等价于 i.i.d. 重采样）。
     def _block_len(n):
         return max(1, int(round(int(n) ** (1.0 / 3.0)))) if n >= 4 else 1
-    block_lengths = [_block_len(d.size) for d in arrays]
-    block_reps = np.empty(int(n_resamples), dtype=np.float64)
+    block_lengths = [_block_len(d.size) for d in arrays_scaled]
+    block_reps_scaled = np.empty(int(n_resamples), dtype=np.float64)
     for r in range(int(n_resamples)):
         sidx = rng.integers(0, n_seeds, n_seeds)
         means = []
         for si in sidx:
-            d = arrays[int(si)]
+            d = arrays_scaled[int(si)]
             bl = block_lengths[int(si)]
             if bl <= 1:
                 idx = rng.integers(0, d.size, d.size)
@@ -2281,13 +2304,19 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
                 idx = ((starts[:, None] + np.arange(bl)[None, :]) % d.size)
                 idx = idx.reshape(-1)[:d.size]
             means.append(float(d[idx].mean()))
-        block_reps[r] = float(np.mean(means))
-    b_lo, b_hi = np.quantile(block_reps, [alpha, 1.0 - alpha])
-    b_ge = int((np.abs(block_reps - obs) >= abs(obs)).sum())
+        block_reps_scaled[r] = float(np.mean(means))
+    block_reps = block_reps_scaled * scale
+    if not np.all(np.isfinite(block_reps)):
+        return None
+    b_lo_s, b_hi_s = np.quantile(block_reps_scaled, [alpha, 1.0 - alpha])
+    b_lo, b_hi = float(b_lo_s * scale), float(b_hi_s * scale)
+    if not (math.isfinite(b_lo) and math.isfinite(b_hi)):
+        return None
+    b_ge = int((np.abs(block_reps_scaled - obs_scaled) >= abs(obs_scaled)).sum())
     p_block = (((b_ge + 1) / (int(n_resamples) + 1))
-               if obs != 0 else 1.0)
-    b_same_sign = (float(np.mean((block_reps > 0) == (obs > 0)))
-                   if obs != 0 else 0.0)
+               if obs_scaled != 0 else 1.0)
+    b_same_sign = (float(np.mean((block_reps_scaled > 0) == (obs_scaled > 0)))
+                   if obs_scaled != 0 else 0.0)
     lag1 = []
     for d in arrays:
         if d.size >= 3:
@@ -2296,9 +2325,9 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
                 v = float(np.corrcoef(x, y)[0, 1])
                 if math.isfinite(v):
                     lag1.append(v)
-    return {"mean_diff": obs, "mean_diff_ci95": [float(lo), float(hi)],
+    return {"mean_diff": obs, "mean_diff_ci95": [lo, hi],
             "p": p_boot, "bootstrap_same_sign": same_sign,
-            "block_mean_diff_ci95": [float(b_lo), float(b_hi)],
+            "block_mean_diff_ci95": [b_lo, b_hi],
             "block_p": p_block, "block_bootstrap_same_sign": b_same_sign,
             "block_length_min": int(min(block_lengths)),
             "block_length_max": int(max(block_lengths)),
