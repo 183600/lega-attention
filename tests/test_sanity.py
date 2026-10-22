@@ -276,7 +276,16 @@ def test_losses_consistent_tolerance():
     assert not losses_consistent(None, 1.0)
     assert not losses_consistent(float("nan"), 1.0)
     assert not losses_consistent(float("inf"), float("inf"))
-    print("  [ok] losses_consistent（容差/None/非有限值判定）")
+    # 非数值/bool/下划线数字串不是 loss 观测；负容差不能让 math.isclose
+    # 抛异常（调用方在训练链路里，崩溃比判失败更糟）。
+    import numpy as np
+    for bad in (True, np.bool_(True), "1_0", "bad", [1.0]):
+        assert not losses_consistent(bad, 1.0), bad
+        assert not losses_consistent(1.0, bad), bad
+    assert losses_consistent("2.0", 2.0)
+    assert not losses_consistent(1.0, 1.0, rel_tol=-0.1)
+    assert not losses_consistent(1.0, 1.0, abs_tol=float("nan"))
+    print("  [ok] losses_consistent（容差/None/非有限/坏类型判定）")
 
 
 def test_overfit_check_detects_loss_computation_mismatch():

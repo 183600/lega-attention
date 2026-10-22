@@ -187,13 +187,29 @@ def grad_norm(params) -> float | None:
 
 def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
                       abs_tol: float = LOSS_CONSISTENCY_ABS_TOL) -> bool:
-    """训练路径 loss 与直接 logits 交叉熵的数值一致性判定（None/非有限即失败）。"""
+    """训练路径 loss 与直接 logits 交叉熵的数值一致性判定。
+
+    None/非数值/bool/下划线数字串/非有限值一律判失败，而不是让 float() 抛错
+    或把 True 当成 1.0；容差也必须是有限非负数（负容差会让 math.isclose
+    抛 ValueError，把一次坏配置变成训练链路的未捕获异常）。
+    """
     if a is None or b is None:
         return False
-    fa, fb = float(a), float(b)
-    return (math.isfinite(fa) and math.isfinite(fb)
-            and math.isclose(fa, fb, rel_tol=float(rel_tol),
-                             abs_tol=float(abs_tol)))
+    for value in (a, b):
+        if isinstance(value, (bool, np.bool_)):
+            return False
+        if isinstance(value, str) and "_" in value:
+            return False
+    try:
+        fa, fb = float(a), float(b)
+        fr, fq = float(rel_tol), float(abs_tol)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not all(math.isfinite(v) for v in (fa, fb, fr, fq)):
+        return False
+    if fr < 0.0 or fq < 0.0:
+        return False
+    return math.isclose(fa, fb, rel_tol=fr, abs_tol=fq)
 
 
 def batch_fingerprint(x, y) -> str:
