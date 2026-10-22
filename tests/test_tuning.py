@@ -534,6 +534,20 @@ def test_read_best_val_loss_skips_non_dict_and_bad_eval():
                   encoding="utf-8") as f:
             json.dump("oops", f)
         assert _read_best_val_loss(tdir2) == (None, None, None, None)
+        # bool / 下划线数字串 / 非有限值不是合法 val_loss：float(True)=1.0、
+        # float("1_0")=10.0 若被接受，网格会按伪造的损失选超参数。
+        tdir3 = os.path.join(tmp, "bad_values")
+        os.makedirs(tdir3)
+        with open(os.path.join(tdir3, "train_log.jsonl"), "w",
+                  encoding="utf-8") as f:
+            for bad in (True, "1_0", "nan", "inf"):
+                f.write(json.dumps({"step": 1, "val_loss": bad}) + "\n")
+            f.write(json.dumps({"step": 2, "val_loss": 0.5}) + "\n")
+        with open(os.path.join(tdir3, "eval.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"val_loss": "1_0"}, f)
+        assert _read_best_val_loss(tdir3) == (0.5, 2, None,
+                                              "train_log.jsonl(min)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 调优日志/eval 非对象或坏值：跳过而不崩溃")
