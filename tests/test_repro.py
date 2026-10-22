@@ -1328,3 +1328,40 @@ def test_load_provenance_rejects_sanity_present_false():
         assert legacy["sanity_passed"] is True
         assert legacy["sanity_verified"] is True
         assert legacy["sanity_present"] is None
+
+
+def test_worktree_state_captures_non_utf8_untracked_path():
+    """非 UTF-8 未跟踪文件名也必须进入可重放补丁，而不是静默丢失。"""
+    if os.name != "posix":
+        return
+    with tempfile.TemporaryDirectory() as d:
+        def _git(*args):
+            subprocess.run(["git"] + list(args), cwd=d, check=True,
+                           capture_output=True)
+        _git("init", "-q")
+        _git("config", "user.email", "a@b")
+        _git("config", "user.name", "a")
+        with open(os.path.join(d, "tracked.txt"), "w", encoding="utf-8") as f:
+            f.write("x")
+        _git("add", ".")
+        _git("commit", "-qm", "init")
+        raw_name = b"bad_\xff_name.txt"
+        with open(os.path.join(os.fsencode(d), raw_name), "wb") as f:
+            f.write(b"payload")
+        st = worktree_state(d)
+        assert st["dirty"] is True and st["n_untracked"] == 1
+        assert st["diff_bytes"] > 0 and st["diff_sha256"] is not None
+        assert st["diff_truncated"] is False
+        # 展示字段必须能安全写进 UTF-8 JSON（不能含 surrogate）。
+        json.dumps(st, ensure_ascii=False).encode("utf-8")
+        # 补丁不可用（hash=None + truncated）必须记为 unknown，而不是
+        # 因“两边都是 None”误判为工作区未变化。
+        drift = provenance_drift(
+            {"worktree": {"available": True, "diff_sha256": None,
+                          "diff_truncated": True},
+             "git": {"commit": st["head"]}, "data_fingerprint": "d"},
+            {"worktree": {"available": True, "diff_sha256": None,
+                          "diff_truncated": True},
+             "git": {"commit": st["head"]}, "data_fingerprint": "d"})
+        assert drift["checked"]["worktree_diff_sha256"] is None
+        assert "worktree_diff_sha256" in drift["unknown"]

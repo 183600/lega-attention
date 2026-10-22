@@ -79,6 +79,17 @@ def git_info(root: str = None) -> dict:
     }
 
 
+def _display_path(path: str) -> str:
+    """文件系统路径 → JSON/UTF-8 安全的展示字符串。
+
+    POSIX 文件名允许任意字节；git status -z 返回原始字节，经 os.fsdecode 后
+    可能含 surrogateescape 字符。直接把 surrogate 写进 UTF-8 JSON 会在
+    ensure_ascii=False 时抛 UnicodeEncodeError。展示层用反斜杠转义保留原始
+    字节信息，实际 git 调用仍使用 os.fsencode 可还原的路径。
+    """
+    return path.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
     """工作区可重放补丁：已跟踪改动 + 未跟踪文件（受字节上限限制）。
 
@@ -86,14 +97,24 @@ def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
     `git ls-files --others --exclude-standard` 列出的每个文件生成
     `git diff --no-index --binary /dev/null <file>` 并拼接。上限用尽时在
     返回值中标记 truncated，调用方可据此知道补丁不完整（绝不静默冒充完整）。
+
+    路径必须保留原始字节：非 UTF-8 文件名经 os.fsdecode（surrogateescape）
+    后再传给 subprocess 可逐字节还原；任何一次 git diff 失败也标记
+    truncated，避免“dirty 但补丁为空”被误读为工作区未变化。
     """
-    tracked = _git_bytes(["diff", "HEAD", "--binary"], root) or b""
+    tracked_raw = _git_bytes(["diff", "HEAD", "--binary"], root)
+    if tracked_raw is None:
+        # git 本身失败（而非“无差异”返回空字节）：补丁不可信。
+        tracked = b""
+        truncated = True
+    else:
+        tracked = tracked_raw
+        truncated = False
     raw = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"],
                      root) or b""
-    files = [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
+    files = [os.fsdecode(p) for p in raw.split(b"\0") if p]
     chunks = [tracked] if tracked else []
     used = len(tracked)
-    truncated = False
     for rel in files:
         if used >= max_untracked_bytes:
             truncated = True
@@ -104,8 +125,12 @@ def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
                  os.devnull, rel],
                 cwd=root, capture_output=True, timeout=15)
         except Exception:
+            truncated = True
             continue
         if r.returncode not in (0, 1):
+            # 路径怪异/权限不足等导致 git 无法生成补丁：必须标记不完整，
+            # 不能跳过该文件后仍声称 diff_sha256 覆盖整个工作区。
+            truncated = True
             continue
         chunk = r.stdout
         if used + len(chunk) > max_untracked_bytes:
@@ -154,18 +179,25 @@ def worktree_state(root: str = None, max_files: int = 500) -> dict:
         if len(field) < 4:
             continue
         code = field[:2].decode("utf-8", "replace")
-        path = field[3:].decode("utf-8", "replace")
+        # 文件名保留原始字节（surrogateescape），供内部定位；对外字段改用
+        # _display_path 的 ASCII 转义形式，避免 surrogate 进入 UTF-8 JSON。
+        path = os.fsdecode(field[3:])
         # 重命名/复制条目：紧随其后的 NUL 字段是原路径（此处只记录新路径）。
         if code and code[0] in ("R", "C") and i < len(fields):
             i += 1
         (untracked if code.strip() == "??" else changed).append(path)
     diff, truncated = _worktree_diff_bytes(root)
+    # dirty 但补丁为空：正常情况只有“未跟踪的空文件”等无内容差异，此时
+    # diff_sha256 无法代表工作区状态；按不完整处理，绝不与 clean 的 None
+    # 判为相同。git diff 失败也已在 _worktree_diff_bytes 中置 truncated。
+    if raw_status and not diff:
+        truncated = True
     return {
         "available": True,
         "head": commit,
         "dirty": bool(raw_status),
-        "changed_files": changed[:max_files],
-        "untracked_files": untracked[:max_files],
+        "changed_files": [_display_path(p) for p in changed[:max_files]],
+        "untracked_files": [_display_path(p) for p in untracked[:max_files]],
         "n_changed": len(changed),
         "n_untracked": len(untracked),
         "diff_sha256": (hashlib.sha256(diff).hexdigest() if diff else None),
