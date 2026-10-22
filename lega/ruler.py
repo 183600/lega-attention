@@ -1028,7 +1028,8 @@ def main():
                # 被当成 held-out 证据引用。
                "data_protocol_preflight": data_preflight}
     payload.update(load_provenance(
-        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir))
+        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir,
+        device=device))
     save_json(payload, args.out)
     print(f"[ruler] 完成 -> {args.out}")
     if badcases:

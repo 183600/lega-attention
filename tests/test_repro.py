@@ -13,8 +13,8 @@ import torch
 from lega.data import CACHE_SCHEMA, get_train_batch
 from lega.repro import (SANITY_REQUIRED_CHECKS, build_run_manifest,
                         data_fingerprint, git_info,
-                        load_provenance, provenance_drift, runtime_info,
-                        sanity_identity_check, sha256_file,
+                        load_provenance, provenance_drift, runtime_drift,
+                        runtime_info, sanity_identity_check, sha256_file,
                         test_data_fingerprint as _test_data_fingerprint,
                         worktree_state, write_worktree_patch)
 from lega.utils import (data_rng, data_rng_state_fingerprint,
@@ -499,6 +499,75 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
         assert p3["config_sha256"] == "x"
         assert p3["code_commit"] == base["code_commit"]
     print("  [ok] load_provenance：缺字段/畸形清单逐字段回退补算")
+
+
+def test_load_provenance_records_eval_runtime_and_detects_version_drift():
+    """评测结果必须同时带训练/评测环境，并显式标记依赖版本漂移。
+
+    仅继承训练清单的 runtime 会让 eval.json 看起来像在训练环境产生；只记录
+    种子/git 也无法发现“在另一套 PyTorch/NumPy/CUDA 上评测”。旧清单没有
+    runtime 时 matches 必须是 None（无法核对），不能默认 True。
+    """
+    current = runtime_info(device="cpu")
+    with tempfile.TemporaryDirectory() as d:
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _write(obj):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+
+        _write({"runtime": current})
+        p = load_provenance(d, device="cpu")
+        assert p["train_runtime"] == current
+        assert p["eval_runtime"]["torch"] == current["torch"]
+        assert p["runtime_matches_training"] is True
+        assert p["runtime_mismatches"] == []
+
+        # 只改版本字段：必须显式列出漂移项，而不是静默继承训练环境
+        drifted = dict(current)
+        drifted["torch"] = "0.0.0+drifted"
+        drifted["numpy"] = "0.0.1+drifted"
+        _write({"runtime": drifted})
+        p = load_provenance(d, device="cpu")
+        assert p["runtime_matches_training"] is False
+        assert {m["field"] for m in p["runtime_mismatches"]} == {
+            "torch", "numpy"}
+
+        # 旧清单没有任何 runtime：无法核对，不能声称一致
+        _write({"tag": "legacy"})
+        p = load_provenance(d, device="cpu")
+        assert p["train_runtime"] is None
+        assert p["runtime_matches_training"] is None
+        assert p["eval_runtime"]["python"] == current["python"]
+
+        # 清单 runtime 结构损坏：按缺失处理，不崩溃也不伪造一致
+        _write({"runtime": ["not", "a", "dict"]})
+        p = load_provenance(d, device="cpu")
+        assert p["train_runtime"] is None
+        assert p["runtime_matches_training"] is None
+
+        # 身份字段缺项（旧清单只记了部分版本）：matches=None + 列出未核对项
+        _write({"runtime": {"python": current["python"],
+                            "torch": current["torch"]}})
+        p = load_provenance(d, device="cpu")
+        assert p["runtime_matches_training"] is None
+        assert set(p["runtime_unknown_fields"]) == {
+            "numpy", "cuda", "cudnn", "gpu"}
+
+    # 直接测试 helper：结构非法/字段缺失都不能被当成“一致”
+    assert runtime_drift(None, {})["matches"] is None
+    assert runtime_drift({}, {})["matches"] is None
+    same = {k: "x" for k in
+            ("python", "torch", "numpy", "cuda", "cudnn", "gpu")}
+    assert runtime_drift(same, dict(same))["matches"] is True
+    one_missing = dict(same)
+    one_missing.pop("cudnn")
+    assert runtime_drift(one_missing, same)["matches"] is None
+    dr = runtime_drift(same, dict(same, python="3.13"))
+    assert dr["matches"] is False
+    assert dr["mismatches"] == [
+        {"field": "python", "train": "x", "eval": "3.13"}]
+    print("  [ok] load_provenance 记录 train/eval runtime 并标记版本漂移")
 
 
 def test_load_provenance_keeps_eval_and_training_data_fingerprints_apart():

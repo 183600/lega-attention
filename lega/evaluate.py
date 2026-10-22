@@ -674,8 +674,17 @@ def main():
             print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
     run_dir = os.path.dirname(os.path.abspath(args.ckpt))
-    prov = load_provenance(run_dir, args.data_dir)
+    prov = load_provenance(run_dir, args.data_dir, device=device)
     res.update(prov)
+    if prov.get("runtime_matches_training") is False:
+        detail = ", ".join(
+            f"{m.get('field')}: {m.get('train')} -> {m.get('eval')}"
+            for m in (prov.get("runtime_mismatches") or [])
+            if isinstance(m, dict))
+        print("[eval] ⚠ 本次评测的 Python/PyTorch/NumPy/CUDA/cuDNN/GPU 与训练"
+              f"清单不一致（{detail}）：同一 checkpoint 可能因浮点内核/算子实现"
+              "差异得到不同数值，结果已记录 train_runtime/eval_runtime，"
+              "不能声称与训练环境完全相同")
     # 与训练完成时写回 run_manifest 的 checkpoint 哈希交叉核对：目录里的
     # 权重若在训练后被替换/覆盖，eval.json 仍绑定实际内容，但必须显式标出
     # “它已不是训练清单记录的那一份”，不能让旧清单替新权重背书。

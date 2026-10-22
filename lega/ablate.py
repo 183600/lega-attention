@@ -753,7 +753,7 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
                      "因果归因；窗口级 p 仅描述性（相邻窗口可能相关），"
                      "跨种子配对检验由 run_all 汇总"),
         },
-        "provenance": load_provenance(ckpt_dir, data_dir),
+        "provenance": load_provenance(ckpt_dir, data_dir, device=device),
         "generated_at": now_str(),
         "argv": list(sys.argv),
     }

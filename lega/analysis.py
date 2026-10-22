@@ -764,7 +764,8 @@ def main():
     ckpt_seed_out = None if ckpt_seed_raw is None else ckpt_seed
     set_seed(ckpt_seed)
     provenance = load_provenance(
-        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir)
+        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir,
+        device=device)
 
     ckpt_cfg_path = os.path.join(
         os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")

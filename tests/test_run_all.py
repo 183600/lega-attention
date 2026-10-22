@@ -701,6 +701,39 @@ def test_build_summary_scopes_discovery_to_current_repro_run():
     print("  [ok] build_summary（repro.json 限定本次运行的变体/种子发现范围）")
 
 
+def test_build_summary_warns_on_eval_runtime_drift():
+    """评测环境与训练清单不一致时，汇总页必须显式警告而不是只写进 JSON。
+
+    只记录全局 repro.json 的 runtime 不够：results 目录可能被另一环境单独
+    补跑（--skip_train / 手工 evaluate），汇总读者看到的仍是同一份表格。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"variants": ["lega"], "seeds": [1], "smoke": False,
+                     "runtime": {"python": "3.12", "torch": "2.14"}})
+        rec = {"variant": "lega", "seed": 1, "val_ppl": 9.0,
+               "val_loss": 2.0, "n_params": 10}
+        _write_json(os.path.join(tmp, "eval_lega.json"), rec)
+        md = build_summary(tmp)["markdown"]
+        assert "评测环境" not in md          # 旧产物没有该字段：不伪造警告
+
+        _write_json(os.path.join(tmp, "eval_lega.json"), dict(
+            rec, runtime_matches_training=True, runtime_mismatches=[]))
+        md = build_summary(tmp)["markdown"]
+        assert "评测环境" not in md
+
+        _write_json(os.path.join(tmp, "eval_lega.json"), dict(
+            rec, runtime_matches_training=False,
+            runtime_mismatches=[{"field": "torch", "train": "2.14",
+                                 "eval": "2.15"}]))
+        md = build_summary(tmp)["markdown"]
+        assert "评测环境" in md and "torch" in md and "lega/seed1" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary 显式警告 eval/train 运行环境漂移")
+
+
 def test_rel_pct_and_eff_cells():
     """相对变化计算：缺失与除零安全返回 None。"""
     assert _rel_pct(100.0, 110.0) == 10.0

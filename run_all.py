@@ -6903,6 +6903,29 @@ def build_summary(results_dir: str, audit: dict = None,
                   f"种子：{repro.get('seeds')}")
         md.append(f"- 运行环境：python={rt.get('python')} torch={rt.get('torch')} "
                   f"device={rt.get('device')} gpu={rt.get('gpu')} cuda={rt.get('cuda')}")
+        # 逐 run 核对评测环境与训练清单：pipeline 内的 eval 通常同环境，但
+        # results 目录可能被另一环境单独补跑（--skip_train/手工 evaluate），
+        # 仅看全局 repro.json 的 pipeline runtime 无法发现这种错配。
+        runtime_drift_rows = []
+        for _v, _seed_map in runs.items():
+            for _seed, _slots in _seed_map.items():
+                _ev = (_slots or {}).get("eval")
+                if not isinstance(_ev, dict) or \
+                        _ev.get("runtime_matches_training") is not False:
+                    continue
+                _fields = ",".join(
+                    str(m.get("field"))
+                    for m in (_ev.get("runtime_mismatches") or [])
+                    if isinstance(m, dict) and m.get("field")) or "unknown"
+                runtime_drift_rows.append(f"{_v}/seed{_seed}（{_fields}）")
+        if runtime_drift_rows:
+            md.append("- ⚠ 以下 run 的**评测环境**与训练 `run_manifest.json` "
+                      "记录不一致："
+                      + "、".join(runtime_drift_rows)
+                      + "；同一 checkpoint 在不同 Python/PyTorch/NumPy/CUDA/"
+                      "cuDNN/GPU 上可能因浮点内核差异得到不同数值，相关指标不得"
+                      "声称与训练环境完全相同（逐项见 `eval_*.json` 的 "
+                      "`train_runtime`/`eval_runtime`）。")
         md.append("- 完整记录：`repro.json`（全局）、各 run 目录 `run_manifest.json`"
                   "（代码/数据/环境/命令行）、`config_used.json`（超参数）、"
                   "`train_log.jsonl`（训练曲线）。")

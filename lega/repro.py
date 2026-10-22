@@ -465,6 +465,60 @@ def runtime_info(device: str = None) -> dict:
     return info
 
 
+# 环境身份只比较会影响数值的依赖/硬件字段。平台/主机名/线程数也会记录在
+# 完整 runtime_info 中，但它们变化不必然意味着结果不可比；把它们混进
+# “是否同一运行环境”的硬判定会产生大量假阳性。cuda/cudnn/gpu 为 None 时
+# 表示该构建/主机没有对应组件（如 CPU-only），两端都为 None 视为一致。
+RUNTIME_IDENTITY_FIELDS = ("python", "torch", "numpy", "cuda", "cudnn",
+                           "gpu")
+
+
+def runtime_drift(train_runtime, eval_runtime) -> dict:
+    """比较训练清单与本次评测进程的运行环境身份。
+
+    为什么需要单独比较：``run_manifest.json`` 记录了训练时的
+    Python/PyTorch/NumPy/CUDA/cuDNN 版本，但评测可能在另一台机器、另一个
+    虚拟环境或升级后的依赖栈上运行。此时代码 commit 与数据指纹都可以完全
+    一致，浮点内核/算子实现却已改变；只把“训练环境”继承到 eval.json，会让
+    读者误以为评测也在同一环境下完成。
+
+    返回：
+      * ``matches``：True=所有身份字段（Python/PyTorch/NumPy/CUDA/cuDNN/
+        GPU 型号）都存在且一致；False=至少一个字段不同；None=清单缺少
+        runtime/身份字段（旧产物），不能声称一致。
+      * ``mismatches``：逐字段的 train/eval 值（仅不同项）。
+      * ``unknown_fields``：无法核对的字段（任一端缺失），不当作一致。
+    """
+    if not isinstance(train_runtime, dict) or not isinstance(eval_runtime, dict):
+        return {"matches": None, "mismatches": [],
+                "unknown_fields": list(RUNTIME_IDENTITY_FIELDS),
+                "note": "缺少可比较的训练/评测运行环境记录"}
+    mismatches, unknown = [], []
+    for field in RUNTIME_IDENTITY_FIELDS:
+        # 字段存在但值为 None 是有效事实（如 CPU-only 构建没有 CUDA/cuDNN），
+        # 两端都为 None 应判一致；只有字段整个缺失才是“无法核对”。
+        if field not in train_runtime or field not in eval_runtime:
+            unknown.append(field)
+            continue
+        train_value = train_runtime.get(field)
+        eval_value = eval_runtime.get(field)
+        if str(train_value) != str(eval_value):
+            mismatches.append({"field": field, "train": train_value,
+                               "eval": eval_value})
+    if mismatches:
+        matches = False
+    elif unknown:
+        matches = None
+    else:
+        matches = True
+    return {"matches": matches, "mismatches": mismatches,
+            "unknown_fields": unknown,
+            "note": ("matches=False 表示评测使用的 Python/PyTorch/NumPy/"
+                     "CUDA/cuDNN 或 GPU 型号与训练清单不同；同一 commit+数据"
+                     "也可能因浮点内核差异得到不同数值，结果不得声称与训练"
+                     "环境完全相同。")}
+
+
 def sanity_summary(path: str) -> dict:
     """sanity 结果 JSON 的紧凑摘要，供训练 run 的 manifest 内嵌代码正确性闸门。
 
@@ -768,7 +822,8 @@ def test_data_fingerprint(data_dir: str):
         return None
 
 
-def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
+def load_provenance(ckpt_dir: str, data_dir: str = None,
+                    device: str = None) -> dict:
     """下游评测统一继承上游 run 的溯源字段；缺失时按当前环境/数据即时补算。
 
     返回平铺字段便于直接 update 进结果 JSON：
@@ -780,6 +835,11 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
     用另一份数据评测 checkpoint 时 eval.json 仍声称是训练数据，数据错配
     无法被发现。两者不一致时显式记录
     ``data_fingerprint_matches_training=False``；无法核对时为 None。
+
+    运行环境同样区分两端：``train_runtime`` 来自清单，``eval_runtime`` 是
+    本次进程的实际环境；``runtime_matches_training`` 只在身份字段齐全且
+    一致时为 True（见 runtime_drift）。这样 eval/ruler/analysis 的结果即使
+    脱离 out/ 目录，也能回答“是否在训练同版本依赖下产生”。
     """
     manifest = None
     mpath = os.path.join(ckpt_dir, "run_manifest.json")
@@ -797,6 +857,7 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
     # 而不是留 None 污染 eval.json 的溯源与受控变量审计。
     cfg = os.path.join(ckpt_dir, "config_used.json")
     git = git_info()
+    eval_runtime = runtime_info(device)
     current_data = None
     if data_dir:
         try:
@@ -815,6 +876,13 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
         "eval_data_fingerprint": current_data,
         "train_data_fingerprint": None,
         "data_fingerprint_matches_training": None,
+        # 训练清单里的环境 vs 本次评测进程的环境：结果文件必须同时带上
+        # 两端，不能只继承训练时的版本而掩盖评测发生在另一依赖栈上。
+        "train_runtime": None,
+        "eval_runtime": eval_runtime,
+        "runtime_matches_training": None,
+        "runtime_mismatches": [],
+        "runtime_unknown_fields": [],
         "config_sha256": cfg_sha,
         # 训练实际生效的 config_used.json 哈希（CLI/调优覆盖后与源配置不同）。
         # 旧清单没有该字段时回退到上面同一份 config_used 文件；有清单时优先
@@ -864,6 +932,13 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             else:
                 out["data_fingerprint_matches_training"] = (
                     current_data == train_data)
+        mruntime = manifest.get("runtime")
+        if isinstance(mruntime, dict) and mruntime:
+            out["train_runtime"] = mruntime
+            drift = runtime_drift(mruntime, eval_runtime)
+            out["runtime_matches_training"] = drift["matches"]
+            out["runtime_mismatches"] = drift["mismatches"]
+            out["runtime_unknown_fields"] = drift["unknown_fields"]
         mseed = manifest.get("seed_report")
         if isinstance(mseed, dict):
             out["seed_report"] = mseed

@@ -830,8 +830,26 @@ def configure_optimizer(model: nn.Module, lr: float, weight_decay: float,
 
 
 def save_checkpoint(path: str, model: GPT, extra: Optional[Dict] = None) -> None:
+    """原子写 checkpoint：临时文件落盘并 fsync 后 os.replace 到目标路径。
+
+    为什么不能直接 ``torch.save(payload, path)``：torch 会先截断目标文件再
+    序列化。训练被 CI 超时/抢占杀死、磁盘写满或序列化中途异常时，目录里
+    会留下一个半截的 ``model.pt``/``model_best.pt``；下游 ``resolve_ckpt``
+    只按文件名存在与否选择权重，可能把损坏文件当成有效 checkpoint，而
+    上一份完整权重已经被破坏。临时文件 + 原子替换保证读者看到的要么是
+    旧完整文件、要么是新完整文件。
+
+    临时文件放在目标目录内的临时子目录中，且保持与原文件相同的 basename：
+    torch 的 zip 归档前缀由 basename 决定，同名可保证同一权重产生的
+    checkpoint 字节稳定（manifest 的 artifact SHA-256 因此可跨重跑核对）。
+    """
     import os
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    import shutil
+    import tempfile
+
+    target = os.path.abspath(path)
+    out_dir = os.path.dirname(target)
+    os.makedirs(out_dir, exist_ok=True)
     state_dict = model.state_dict()
     # torch.compile 的 OptimizedModule 会给 state_dict 键加 "_orig_mod." 前缀，
     # 保存前统一剥掉，保持键名与 load_model 约定一致。
@@ -842,7 +860,39 @@ def save_checkpoint(path: str, model: GPT, extra: Optional[Dict] = None) -> None
     payload = {"model_cfg": model_cfg_dict(model), "state_dict": state_dict}
     if extra:
         payload.update(extra)
-    torch.save(payload, path)
+
+    base = os.path.basename(target)
+    tmp_dir = tempfile.mkdtemp(prefix=f".{base}.tmp-", dir=out_dir)
+    tmp_path = os.path.join(tmp_dir, base)
+    try:
+        torch.save(payload, tmp_path)
+        # 先把权重内容刷到稳定存储，再替换目录项；否则断电/主机崩溃后
+        # rename 可能已可见而数据页尚未落盘，留下零长度/半截文件。
+        try:
+            fd = os.open(tmp_path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            # 某些网络/特殊文件系统不支持对只读 fd fsync；不能因此让
+            # 已完成序列化的 checkpoint 保存失败（原子替换仍然有效）。
+            pass
+        os.replace(tmp_path, target)
+        # POSIX 下目录项本身也需要 fsync，rename 才能在崩溃后持久。
+        try:
+            dfd = os.open(out_dir, os.O_RDONLY
+                          | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    finally:
+        # 成功时临时目录已空；失败时删除半截文件，绝不留下可被误读的
+        # 伪 checkpoint（也不污染 out/ 目录的 glob/快照）。
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def load_model(ckpt_path: str, device: str = "cpu",

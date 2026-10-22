@@ -233,6 +233,48 @@ def test_checkpoint_roundtrip():
         assert torch.allclose(o1, o2, atol=1e-6)
 
 
+def test_checkpoint_save_is_atomic_on_serialization_failure(monkeypatch):
+    """torch.save 中途失败（磁盘满/进程被杀）不能破坏上一份完整 checkpoint。
+
+    torch.save 默认先截断目标文件；若直接写目标路径，一次失败就会让
+    model_best.pt 变成半截文件，而下游 resolve_ckpt 只检查文件是否存在，
+    会把损坏权重当成有效产物。原子保存必须保证旧文件逐字节不变、临时文件
+    被清理，并且新路径在失败时完全不存在。
+    """
+    model = _tiny("lega")
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "model_best.pt")
+        save_checkpoint(path, model, extra={"variant": "lega", "step": 1})
+        before = open(path, "rb").read()
+
+        def broken_save(payload, target, *args, **kwargs):
+            # 模拟写到一半后失败：目标位置已经出现半截内容
+            with open(target, "wb") as f:
+                f.write(b"partial checkpoint bytes")
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(torch, "save", broken_save)
+        for target, should_exist in ((path, True),
+                                     (os.path.join(d, "model.pt"), False)):
+            try:
+                save_checkpoint(target, model, extra={"variant": "lega"})
+            except OSError:
+                pass
+            else:
+                raise AssertionError("torch.save 失败必须向上抛出")
+            if should_exist:
+                assert open(path, "rb").read() == before
+            else:
+                assert not os.path.exists(target)
+        # 临时子目录/半截文件必须被清理，目录里只能有原来的 checkpoint
+        assert os.listdir(d) == ["model_best.pt"]
+        m2, _ = load_model(path)
+        idx = torch.randint(0, 64, (1, 8))
+        with torch.no_grad():
+            assert torch.allclose(model(idx)["logits"], m2(idx)["logits"],
+                                  atol=1e-6)
+
+
 def test_checkpoint_roundtrip_preserves_attention_path():
     """评测恢复必须沿用训练时的注意力实现，不能被默认值静默改写。"""
     torch.manual_seed(0)
