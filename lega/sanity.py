@@ -36,6 +36,7 @@ import torch.nn.functional as F
 
 from .attention import VARIANTS, VARIANT_CN
 from .data import load_bin, load_meta, get_train_batch
+from .datacheck import check_vocab_capacity
 from .model import GPT, count_params
 from .preflight import (allow_protocol_violations,
                          data_protocol_preflight)
@@ -686,6 +687,9 @@ def main():
     if batch_size <= 0:
         raise ValueError(f"batch_size 必须是正整数，收到 {batch_size}")
     vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
+    # token 流是 uint16：词表超出 65536 时模型无法与 bin 的 id 对齐，
+    # 且超大词表会先耗尽内存；与 prepare_bins/训练入口同一道闸门。
+    check_vocab_capacity(vocab_size)
     if vocab_size <= 0:
         raise ValueError(f"meta.vocab_size 必须是正整数，收到 {vocab_size}")
 

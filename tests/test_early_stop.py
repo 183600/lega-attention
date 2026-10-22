@@ -87,7 +87,7 @@ def test_config_int_rejects_bool_fraction_and_below_min():
 def test_meta_vocab_size_requires_exact_positive_int():
     """meta.vocab_size 不允许 int() 截断或非正值，否则模型词表与数据错位。"""
     for bad in (True, False, 1.5, "1.5", 0, -3, None, float("nan"),
-                float("inf"), object()):
+                float("inf"), object(), 65537, 10 ** 20):
         try:
             _meta_vocab_size({"vocab_size": bad})
         except ValueError:

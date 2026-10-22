@@ -23,6 +23,7 @@ from .attention import VARIANTS, VARIANT_CN
 from .curves import (GATE_SAT_HIGH, GATE_SAT_LOW, LIVE_WARN_EVALS,
                      curve_observability_warnings, live_overfit_hint)
 from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
+from .datacheck import check_vocab_capacity
 from .model import (GPT, configure_optimizer, count_params,
                     gate_extra_params, gate_extra_params_per_head,
                     save_checkpoint)
@@ -791,13 +792,16 @@ def _config_int(value, name: str, minimum: int) -> int:
 
 
 def _meta_vocab_size(meta: dict) -> int:
-    """meta.vocab_size 必须是精确正整数。
+    """meta.vocab_size 必须是精确正整数且可被 uint16 token 流表示。
 
     meta.json 是外部输入：``int(True)``/``int(1.5)`` 会静默变成 1，
-    ``int(-3)`` 会构造出负词表并在训练中途才以越界错误失败。模型词表一旦
-    与数据元数据错位，checkpoint 和评测口径都不可比，因此在建模前显式拒绝。
+    ``int(-3)`` 会构造出负词表并在训练中途才以越界错误失败；``10**20``
+    会让 embedding 分配失控，而 bin 的 uint16 id 根本不可能达到该词表。
+    模型词表一旦与数据元数据错位，checkpoint 和评测口径都不可比，因此在
+    建模前显式拒绝。
     """
     vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
+    check_vocab_capacity(vocab_size)
     if vocab_size <= 0:
         raise ValueError(
             f"meta.vocab_size 必须是正整数，收到 {vocab_size}")

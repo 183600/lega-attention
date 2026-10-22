@@ -26,6 +26,7 @@ import torch
 
 from .attention import VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
+from .datacheck import check_vocab_capacity
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
 from .utils import (amp_autocast, amp_dtype_for, config_bool,
@@ -369,6 +370,10 @@ def main():
         raise ValueError(
             f"{args.config} 顶层必须是 JSON 对象，收到 {type(cfg).__name__}")
     meta = load_meta(args.data_dir)
+    # 随机权重基准会用 meta.vocab_size 建模型；token 流是 uint16，
+    # 超过 65536 的词表既与数据不一致，也会先耗尽内存。
+    check_vocab_capacity(strict_int(meta.get("vocab_size"),
+                                    "meta.vocab_size"))
     device = get_device(args.device)
     # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 或支持 bf16 的
     # CPU 上启用 bf16 autocast（--no_amp 可回退 fp32/TF32 以便与旧基准对照）；
