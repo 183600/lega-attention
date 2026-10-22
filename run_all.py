@@ -2768,11 +2768,12 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     （无种子方差），因此每个神经变体的逐种子 PPL 与同一常数配对 = 单样本
     检验；只在两侧 split 一致的种子上比较，split 不一致的 run 显式列出且
     不混入（避免 test-vs-val 错位）。参考值的优先级：全部纳入比较的 run
-    的 eval 字段都与 n-gram 的窗口规格一致时用 `ppl_window_matched`
-    （逐位置对齐）；任一不一致（历史产物/规格缺省）则整体回退全 split
-    参考并在结果里显式标注 `reference_source`——同一 Holm 家族必须共用
-    同一个参考值。多个变体同时对比时沿用 Holm–Bonferroni 校正。该对比
-    不属于预注册假设，标为补充性/探索性证据。
+    的 eval 字段都与 n-gram 的窗口规格一致时，优先用
+    `ppl_window_matched_selected`（在同一批窗口 token 上重新选参），旧
+    产物才用 `ppl_window_matched`（全 val 选参）；任一不一致（历史产物/
+    规格缺省）则整体回退全 split 参考并在结果里显式标注 `reference_source`
+    ——同一 Holm 家族必须共用同一个参考值。多个变体同时对比时沿用
+    Holm–Bonferroni 校正。该对比不属于预注册假设，标为补充性/探索性证据。
     """
     path = os.path.join(results_dir, "ngram_baseline.json")
     if not os.path.exists(path):
@@ -2807,18 +2808,48 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         return {"error": "ngram PPL 非数值"}
     if ref_ppl_full <= 0:
         return {"error": "ngram PPL 非有限值或非正数"}
-    wm_map = ng.get("ppl_window_matched")
-    wm_map = wm_map if isinstance(wm_map, dict) else {}
     wspec = ng.get("window_spec")
     wspec = wspec if isinstance(wspec, dict) else {}
+    # 窗口参考优先使用“在同一批窗口 token 上重新选参”的结果：神经模型
+    # 的 checkpoint 由 eval_iters 个窗口上的 val loss 选出，n-gram 若仍用
+    # 完整 val 选出的 α/λ，选参与比较的 token 集就不同。新产物会落盘
+    # `window_matched_selection` + `ppl_window_matched_selected`；旧产物
+    # 缺少这些字段时回退到全 val 选参的 `ppl_window_matched`（保持兼容）。
+    wm_sel = ng.get("window_matched_selection")
+    wm_sel = wm_sel if isinstance(wm_sel, dict) else {}
+    wm_map_full = ng.get("ppl_window_matched")
+    wm_map_full = wm_map_full if isinstance(wm_map_full, dict) else {}
+    wm_map_sel = ng.get("ppl_window_matched_selected")
+    wm_map_sel = wm_map_sel if isinstance(wm_map_sel, dict) else {}
+    wm_model_sel = wm_sel.get("selected_model")
+    wm_ref_name = ref_name
+    wm_ref = None
+    if (isinstance(wm_model_sel, str)
+            and _finite_number(wm_map_sel.get(wm_model_sel)) is not None):
+        wm_ref_name = wm_model_sel
+        wm_ref = _finite_number(wm_map_sel.get(wm_model_sel))
+        ng_win_field = "window_losses_matched_selected"
+        ng_idx_field = "window_indices_matched_selected"
+        ng_win_model = ng.get("window_losses_matched_selected_model")
+    else:
+        wm_ref = _finite_number(wm_map_full.get(ref_name))
+        ng_win_field = "window_losses_matched"
+        ng_idx_field = "window_indices_matched"
+        ng_win_model = ng.get("window_losses_matched_model")
+    # 选定窗口参考仍不可用/非正时，回到全 val 选参的历史口径。
+    if wm_ref is None or wm_ref <= 0:
+        wm_ref_name = ref_name
+        wm_ref = _finite_number(wm_map_full.get(ref_name))
+        ng_win_field = "window_losses_matched"
+        ng_idx_field = "window_indices_matched"
+        ng_win_model = ng.get("window_losses_matched_model")
     # n-gram 逐窗口损失（选定模型）用于真正的窗口级配对，而不是只把
     # 神经逐种子 PPL 与一个常数比较。缺字段/模型不匹配时显式降级。
-    ng_win_model = ng.get("window_losses_matched_model")
     ng_win = _eval_window_losses({
-        "window_losses": ng.get("window_losses_matched"),
-        "window_indices": ng.get("window_indices_matched")})
+        "window_losses": ng.get(ng_win_field),
+        "window_indices": ng.get(ng_idx_field)})
     if (ng_win is not None and ng_win_model is not None
-            and ng_win_model != ref_name):
+            and ng_win_model != wm_ref_name):
         ng_win = None
         ng_win_model = None
     ng_split = ng.get("split")
@@ -2868,7 +2899,6 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     # 参考值决策（第一步）：全部纳入比较的 run 都与窗口规格一致，且
     # window-matched PPL 可用 → 用逐位置对齐参考；否则整体回退全 split。
     # 同一 Holm 家族必须共用同一参考值，不能逐行混用。
-    wm_ref = _finite_number(wm_map.get(ref_name))
     if wm_ref is not None and wm_ref <= 0:
         wm_ref = None
     all_matched = bool(staged) and all(all(r["matched"]) for r in staged)
@@ -2971,6 +3001,8 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 "reference_source": ref_source,
                 "ngram_ppl_full_split": ref_ppl_full,
                 "ngram_ppl_window_matched": wm_ref,
+                "reference_model_window_matched": wm_ref_name,
+                "window_matched_selection": wm_sel or None,
                 "window_spec": wspec or None,
                 "window_paired_reference_model": ng_win_model,
                 "window_paired_available": bool(ng_win is not None),
@@ -3017,6 +3049,8 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "reference_source": ref_source,
             "ngram_ppl_full_split": ref_ppl_full,
             "ngram_ppl_window_matched": wm_ref,
+            "reference_model_window_matched": wm_ref_name,
+            "window_matched_selection": wm_sel or None,
             "window_spec": wspec or None,
             "window_paired_reference_model": ng_win_model,
             "window_paired_available": bool(ng_win is not None),
@@ -3275,8 +3309,14 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             f"评测 token {_int_or_zero(ngram.get('eval_tokens')):,}、"
             f"词表 {ngram.get('vocab_size')}）。主科学对比仍是神经变体之间；"
             "该基线只回答“绝对难度有多高、神经模型是否显著优于统计基线”。")
-        wm = ngram.get("ppl_window_matched")
+        # 新产物优先展示“在同一批窗口 token 上重新选参”的参考；旧产物
+        # 只有全 val 选参的 ppl_window_matched，保持兼容。
+        wm_sel = ngram.get("ppl_window_matched_selected")
+        wm_sel = wm_sel if isinstance(wm_sel, dict) else {}
+        wm = wm_sel or ngram.get("ppl_window_matched")
         wm = wm if isinstance(wm, dict) else {}
+        wsel = ngram.get("window_matched_selection")
+        wsel = wsel if isinstance(wsel, dict) else {}
         wspec = ngram.get("window_spec")
         wspec = wspec if isinstance(wspec, dict) else {}
         # 只有比较表确实采用了逐位置对齐参考（全部 run 的窗口规格一致）时，
@@ -3296,7 +3336,7 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}、"
                 f"插值二元 PPL={_fmt_scalar_maybe(wm.get('interpolated_bigram'))}"
-                f"（与全 split 口径同一选定 α/λ）。")
+                f"（{('α/λ 在同一批窗口 token 上重新选择，selected=' + str(wsel.get('selected_model'))) if wm_sel and wsel else '与全 split 口径同一选定 α/λ'}）。")
         elif wm and wspec:
             lines.append(
                 f"- 窗口规格参考值（按 n-gram 侧声明规格 ctx={wspec.get('ctx')}、"
@@ -3305,7 +3345,7 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}、"
                 f"插值二元 PPL={_fmt_scalar_maybe(wm.get('interpolated_bigram'))}"
-                f"（与全 split 口径同一选定 α/λ）。⚠ 本次神经评测未全部满足该"
+                f"（{('α/λ 在同一批窗口 token 上重新选择，selected=' + str(wsel.get('selected_model'))) if wm_sel and wsel else '与全 split 口径同一选定 α/λ'}）。⚠ 本次神经评测未全部满足该"
                 "窗口规格，实际比较已回退全 split 参考（见下方比较表），"
                 "这些数字不代表神经评测实际使用的 token 集合。")
         elif ngram.get("window_spec_error"):

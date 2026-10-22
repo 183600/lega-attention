@@ -2345,6 +2345,36 @@ def test_ngram_comparison_prefers_window_matched_reference():
         text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
         assert "逐位置对齐" in text
         assert "在神经评测实际使用的窗口目标 token 上" in text
+        # 有新产物时优先用“同一批窗口 token 上重新选参”的参考，而不是
+        # 仍拿全 val 选出的模型/α；全 split 参考保持原样供绝对难度对照。
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val",
+            "ppl": {"unigram": 200.0, "bigram": 100.0,
+                    "interpolated_bigram": 90.0},
+            "selected_model": "interpolated_bigram",
+            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
+                                   "interpolated_bigram": 90.0,
+                                   "n_tokens": 16},
+            "window_matched_selection": {
+                "selected_model": "bigram",
+                "selected_alpha": {"unigram": 0.1, "bigram": 0.1}},
+            "ppl_window_matched_selected": {"unigram": 170.0,
+                                            "bigram": 70.0,
+                                            "n_tokens": 16},
+            "window_spec": spec})
+        out_win_sel = ngram_baseline_comparison(runs, tmp)
+        assert out_win_sel["reference_source"] == "window_matched"
+        assert out_win_sel["reference_model"] == "interpolated_bigram"
+        assert out_win_sel["reference_model_window_matched"] == "bigram"
+        assert abs(out_win_sel["ngram_ppl_window_matched"] - 70.0) < 1e-12
+        assert abs(out_win_sel["ngram_ppl_full_split"] - 90.0) < 1e-12
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val",
+            "ppl": {"unigram": 200.0, "bigram": 100.0},
+            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
+                                   "n_tokens": 16},
+            "window_spec": spec,
+            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
         # 任一 run 的窗口字段与规格不符 → 整体回退全 split 参考并显式说明
         runs_mis = {"lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s,
                                               eval_iters=3)}

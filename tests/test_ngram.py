@@ -356,6 +356,16 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         assert len(losses) == 2
         assert math.isclose(math.exp(sum(losses) / len(losses)),
                             wm[rep["selected_model"]], rel_tol=1e-12)
+        # 窗口 token 上重新选参：选参与比较的 token 集现在一致
+        wsel = rep["window_matched_selection"]
+        assert wsel["selected_model"] in rep["ppl_window_matched_selected"]
+        assert wsel["n_tokens"] == 16
+        assert rep["window_indices_matched_selected"] == [0, 4]
+        assert (rep["window_losses_matched_selected_model"]
+                == wsel["selected_model"])
+        assert math.isclose(
+            rep["ppl_window_matched_selected"][wsel["selected_model"]],
+            wm[wsel["selected_model"]], rel_tol=1e-12)
         # 一时一用的全 split 口径仍在（保留绝对难度参照）
         assert rep["ppl"]["unigram"] is not None
         # 非法规格：显式报错字段而不是假装对齐
@@ -364,6 +374,8 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         assert rep_bad["window_spec"] is None
         assert rep_bad["window_spec_error"]
         assert "ppl_window_matched" not in rep_bad
+        assert rep_bad["window_matched_selection"] is None
+        assert rep_bad["window_matched_selection_error"]
         # bool/小数规格不能被 int() 截断成整数口径：True → 1、8.5 → 8 都会
         # 让"与神经评测逐位置对齐"悄悄失效（对齐的是另一个 token 集合）。
         for bad in ({"ctx": True, "iters": 2}, {"ctx": 8.5, "iters": 2},
