@@ -782,9 +782,10 @@ def test_calibration_metrics_brier_ece_and_baseline():
     assert c["brier"] == 0.0 and c["ece"] == 0.0 and c["mce"] == 0.0
     assert c["brier_skill"] == 1.0
     assert c["ece_adaptive"] == 0.0 and c["mce_adaptive"] == 0.0
-    # Murphy 分解是恒等式（任何分箱都成立），且各分量有限
+    # Murphy 分解是恒等式（标准三项 + 箱内项），且各分量有限
     assert abs(c["brier_reliability"] - c["brier_resolution"]
-               + c["brier_uncertainty"] - c["brier"]) < 1e-12
+               + c["brier_uncertainty"] + c["brier_within_score"]
+               - 2.0 * c["brier_within_cov"] - c["brier"]) < 1e-12
     assert c["brier_reliability"] == 0.0
     assert abs(c["brier_uncertainty"] - 0.2 * 0.8) < 1e-12
     # 常数基率预测：Brier 恰为 p(1-p)，skill≈0
@@ -800,7 +801,8 @@ def test_calibration_metrics_brier_ece_and_baseline():
     assert sum(b["n"] for b in c2["bins"]) == len(y)
     assert c2["n"] == len(y) and c2["n_pos"] == 20
     assert abs(c2["brier_reliability"] - c2["brier_resolution"]
-               + c2["brier_uncertainty"] - c2["brier"]) < 1e-12
+               + c2["brier_uncertainty"] + c2["brier_within_score"]
+               - 2.0 * c2["brier_within_cov"] - c2["brier"]) < 1e-12
     # 等频分箱：n_bins=4 时每组样本数相差不超过 1（200/4 恰为 50）
     c4 = calibration_metrics(over, y, n_bins=4)
     assert c4["ece_adaptive"] is not None and c4["mce_adaptive"] >= 0.0
@@ -837,3 +839,18 @@ def test_calibration_metrics_brier_ece_and_baseline():
     assert nstr["n_bins"] == 10 and len(nstr["bins"]) == 10
     print("  [ok] calibration_metrics（Brier/ECE/常数基线/边界/"
           "非法 n_bins 与 bool 观测）")
+
+
+def test_calibration_metrics_brier_decomposition_within_bin_terms():
+    """连续分数在等频箱内不恒定：标准三项不足，箱内项必须补上恒等式。"""
+    c = calibration_metrics([0.1, 0.2, 0.8, 0.9], [0, 1, 0, 1], n_bins=2)
+    # 两组箱内分数均不恒定；三项分解会低估/高估原始 Brier，必须带箱内项
+    assert abs(c["brier_within_score"] - 0.0025) < 1e-15
+    assert abs(c["brier_within_cov"] - 0.025) < 1e-15
+    assert abs(c["brier_binning"] - (-0.0475)) < 1e-15
+    assert abs(c["brier_reliability"] - c["brier_resolution"]
+               + c["brier_uncertainty"] - c["brier"]) > 1e-6
+    assert abs(c["brier_reliability"] - c["brier_resolution"]
+               + c["brier_uncertainty"] + c["brier_within_score"]
+               - 2.0 * c["brier_within_cov"] - c["brier"]) < 1e-15
+    print("  [ok] Brier 分解补箱内方差/协方差项，连续分数下恒等")

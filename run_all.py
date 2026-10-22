@@ -4094,7 +4094,8 @@ def build_summary(results_dir: str, audit: dict = None,
                 "brier_g", "ece_g", "ece_g_adaptive",
                 "brier_g_constant", "brier_g_skill",
                 "brier_g_reliability", "brier_g_resolution",
-                "brier_g_uncertainty"):
+                "brier_g_uncertainty", "brier_g_within_score",
+                "brier_g_within_cov", "brier_g_binning"):
         metric_specs.append(
             (key, (lambda k: lambda m: _stat_series(
                 m, "analysis", _clock_extractor(k)))(key)))
@@ -4512,7 +4513,8 @@ def build_summary(results_dir: str, audit: dict = None,
                "注：门控 Brier/ECE 与固定 0.5 阈值无关；它们评估的是 g 的"
                "概率数值，而不是某个决策点的 F1。逐分箱的置信/准确率、"
                "n 与 gap 见 `analysis_*.json` 的 `calibration_g.bins`；"
-               "Brier 的 Murphy 分解（reliability/resolution/uncertainty）"
+               "Brier 的 Murphy 分解（reliability/resolution/uncertainty，"
+               "原始分数非箱内常数时另报 brier_binning 箱内项）"
                "与等频分箱明细见 `calibration_g.brier_*` 与 `ece_adaptive`。"]
 
     # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线

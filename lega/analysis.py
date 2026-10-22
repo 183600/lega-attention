@@ -28,7 +28,8 @@
                        （等宽分箱与等频分箱两套口径）与常数基率 Brier 基线。
                        等宽箱在分数聚集/小样本时可能大量为空，等频箱提供
                        对分箱选择不敏感的第二组证据；Brier 另给 Murphy 分解
-                       （reliability/resolution/uncertainty）。排序指标
+                       （reliability/resolution/uncertainty，分数非箱内
+                       常数时另报 brier_binning 箱内项）。排序指标
                        （AUROC/PR-AUC）回答“能不能区分”，校准回答“g=0.8
                        时命中率是否真的约 80%”；g 被当作软权重/概率使用，
                        两者都要看。
@@ -598,6 +599,10 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         summary["brier_g_reliability"] = calibration_g.get("brier_reliability")
         summary["brier_g_resolution"] = calibration_g.get("brier_resolution")
         summary["brier_g_uncertainty"] = calibration_g.get("brier_uncertainty")
+        summary["brier_g_within_score"] = calibration_g.get(
+            "brier_within_score")
+        summary["brier_g_within_cov"] = calibration_g.get("brier_within_cov")
+        summary["brier_g_binning"] = calibration_g.get("brier_binning")
         summary["calibration_g_n"] = calibration_g.get("n")
     else:
         summary["calibration_g"] = None
@@ -606,6 +611,8 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         summary["brier_g_constant"] = summary["brier_g_skill"] = None
         summary["brier_g_reliability"] = summary["brier_g_resolution"] = None
         summary["brier_g_uncertainty"] = None
+        summary["brier_g_within_score"] = summary["brier_g_within_cov"] = None
+        summary["brier_g_binning"] = None
         summary["calibration_g_n"] = None
     # 逐头统计：对整段数组按 (layer, head) 掩码切片。缺字段/非整数的
     # 记录无法归属到具体头，跳过该记录而不是让整份汇总崩溃。

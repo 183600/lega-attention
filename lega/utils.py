@@ -1037,6 +1037,7 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     返回 {n, n_pos, base_rate, brier, brier_constant, brier_skill,
     ece, mce, n_bins, bins, ece_adaptive, mce_adaptive,
     brier_reliability, brier_resolution, brier_uncertainty,
+    brier_within_score, brier_within_cov, brier_binning,
     brier_decomposition_bins}；分数先 clip 到 [0,1]，非有限值与非法标签剔除；
     单一类别时 brier 仍可算，但 ECE 的“校准”语义不完整，返回 None。
 
@@ -1044,9 +1045,13 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     改用等频分箱（按分数排序后均分样本）。等宽分箱在分数聚集或样本少时
     可能大量空箱，单个样本独占一箱还会让 ECE 机械地趋近 0；等频口径给出
     对分箱选择不敏感的第二组证据。两者都只作描述性证据，不替代 Brier。
-    Brier 的 Murphy 分解 `brier = reliability - resolution + uncertainty`
-    用等频箱计算（任何划分下恒等式都成立），分别对应“分箱内校准误差”、
-    “分箱区分度”与“标签固有不确定性”。
+    Brier 的 Murphy 分解用等频箱计算。标准三项
+    `reliability - resolution + uncertainty` 对应“箱均值预测”的 Brier；
+    原始分数在箱内不为常数时，还须加上箱内项
+    `brier_binning = within_score - 2*within_cov`，恒等式为
+    `brier = reliability - resolution + uncertainty + brier_binning`。
+    其中 `within_score` 是箱内分数方差，`within_cov` 是箱内分数与标签
+    偏离箱均值的协方差；箱内分数恒定时两者均为 0。
     """
     n_bins = strict_int(n_bins, "n_bins")
     scores = _obs_array(scores)
@@ -1064,6 +1069,8 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
                 "ece_adaptive": None, "mce_adaptive": None,
                 "brier_reliability": None, "brier_resolution": None,
                 "brier_uncertainty": None,
+                "brier_within_score": None, "brier_within_cov": None,
+                "brier_binning": None,
                 "brier_decomposition_bins": "equal_frequency"}
     scores = np.clip(scores, 0.0, 1.0)
     n_pos = int((labels == 1.0).sum())
@@ -1079,6 +1086,8 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
            "ece_adaptive": None, "mce_adaptive": None,
            "brier_reliability": None, "brier_resolution": None,
            "brier_uncertainty": None,
+           "brier_within_score": None, "brier_within_cov": None,
+           "brier_binning": None,
            "brier_decomposition_bins": "equal_frequency"}
     if len(set(labels.tolist())) != 2 or n_bins < 1:
         return out
@@ -1109,22 +1118,30 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
                             int(n_bins))
     ece_adapt, mce_adapt = 0.0, 0.0
     reliability, resolution = 0.0, 0.0
+    within_score, within_cov = 0.0, 0.0
     for g in groups:
         nb = int(g.size)
         if nb == 0:
             continue
-        mean_score = float(scores[g].mean())
-        mean_label = float(labels[g].mean())
+        gs, gl = scores[g], labels[g]
+        mean_score = float(gs.mean())
+        mean_label = float(gl.mean())
         gap = abs(mean_score - mean_label)
         ece_adapt += (nb / n) * gap
         mce_adapt = max(mce_adapt, gap)
         reliability += (nb / n) * (mean_score - mean_label) ** 2
         resolution += (nb / n) * (mean_label - base_rate) ** 2
+        within_score += (nb / n) * float(np.mean((gs - mean_score) ** 2))
+        within_cov += (nb / n) * float(np.mean((gs - mean_score)
+                                                * (gl - mean_label)))
     out["ece_adaptive"] = float(ece_adapt)
     out["mce_adaptive"] = float(mce_adapt)
     out["brier_reliability"] = float(reliability)
     out["brier_resolution"] = float(resolution)
     out["brier_uncertainty"] = float(base_rate * (1.0 - base_rate))
+    out["brier_within_score"] = float(within_score)
+    out["brier_within_cov"] = float(within_cov)
+    out["brier_binning"] = float(within_score - 2.0 * within_cov)
     return out
 
 
