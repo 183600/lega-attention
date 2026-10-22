@@ -614,6 +614,10 @@ def load_tokenizer(data_dir: str):
             f"{os.path.join(data_dir, 'meta.json')} 缺少合法的 tokenizer 字段")
     if kind == "gpt2_bpe":
         return get_gpt2_tokenizer()
+    if kind != "char":
+        raise ValueError(
+            f"{os.path.join(data_dir, 'meta.json')} 的 tokenizer={kind!r} 未知："
+            "只支持 'gpt2_bpe' 或 'char'（未知类型不能静默按字符级重建）")
     itos = meta.get("itos")
     if not isinstance(itos, list) or not itos or not all(
             isinstance(ch, str) for ch in itos):

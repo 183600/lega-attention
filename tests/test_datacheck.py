@@ -1603,7 +1603,8 @@ def test_load_tokenizer_rejects_malformed_char_meta():
         path = os.path.join(d, "meta.json")
         cases = ({}, {"tokenizer": True}, {"tokenizer": "char"},
                  {"tokenizer": "char", "itos": []},
-                 {"tokenizer": "char", "itos": ["a", 1]})
+                 {"tokenizer": "char", "itos": ["a", 1]},
+                 {"tokenizer": "char_typo", "itos": ["a", "b"]})
         for meta in cases:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(meta, f)
