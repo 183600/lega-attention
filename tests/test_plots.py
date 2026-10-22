@@ -297,13 +297,14 @@ def test_mean_by_step_rejects_fractional_and_boolean_steps():
              {"step": True, "loss": 99.0},
              {"step": 2.0, "loss": 1.0},
              {"step": "3", "loss": 0.5},
+             {"step": "1_0", "loss": 99.0},
              {"step": 4, "loss": True},
              {"step": 5, "loss": False},
              {"step": 10 ** 400, "loss": 0.0}]]
     xs, ys = _mean_by_step(runs, "loss")
     assert xs == [1, 2, 3], (xs, ys)
     assert ys == [2.0, 1.0, 0.5], ys
-    print("  [ok] 训练曲线均值：小数/布尔 step 与布尔值不参与均值")
+    print("  [ok] 训练曲线均值：小数/布尔/下划线 step 与布尔值不参与均值")
 
 
 def test_fig_latency_uses_each_variant_batch_when_no_common_batch():

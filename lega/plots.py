@@ -880,8 +880,13 @@ def _step_or_none(v):
     if isinstance(v, (int, np.integer)):
         v = int(v)
     elif isinstance(v, str):
+        s = v.strip()
+        # int("1_0")==10：下划线写法会让坏日志冒充第 10 步，与 curves
+        # 及 strict_int 的拒绝口径保持一致。
+        if re.fullmatch(r"[+-]?\d+", s) is None:
+            return None
         try:
-            v = int(v.strip())
+            v = int(s)
         except (TypeError, ValueError, OverflowError):
             return None
     else:
