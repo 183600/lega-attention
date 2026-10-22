@@ -681,11 +681,14 @@ def load_provenance(ckpt_dir: str, data_dir: str = None) -> dict:
             hard_mismatches = identity.get("hard_mismatches")
             # 与 train.py 的 sanity_passed 口径一致：只有硬身份不一致时
             # 才拒绝继承 PASS；旧清单缺 identity 时保留 PASS 但标记未验证。
-            if (msanity.get("passed") is not None
-                    and not hard_mismatches):
-                out["sanity_passed"] = bool(msanity["passed"])
-            if identity.get("verified") is not None:
-                out["sanity_verified"] = bool(identity["verified"])
+            # 只继承真正的 JSON 布尔值："false"/"0"/1 经 bool() 会变成
+            # True，把畸形清单伪装成已通过的 sanity 闸门。
+            passed = msanity.get("passed")
+            if isinstance(passed, bool) and not hard_mismatches:
+                out["sanity_passed"] = passed
+            verified = identity.get("verified")
+            if isinstance(verified, bool):
+                out["sanity_verified"] = verified
             elif hard_mismatches:
                 # 身份已确认不一致时，即使旧清单没有 verified 字段也不能
                 # 留 None 让下游误以为“尚未核对”。

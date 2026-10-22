@@ -448,6 +448,16 @@ def test_load_provenance_rejects_stale_sanity_evidence():
                             "identity": "oops"})
         assert malformed["sanity_passed"] is True
         assert malformed["sanity_verified"] is None
+        # 非布尔字符串/数字不能经 bool() 伪装成 PASS。
+        fake = _write({"present": True, "passed": "false",
+                       "identity": {"hard_mismatches": [],
+                                    "verified": "false"}})
+        assert fake["sanity_passed"] is None
+        assert fake["sanity_verified"] is None
+        fake2 = _write({"present": True, "passed": 1,
+                        "identity": {"hard_mismatches": [], "verified": 1}})
+        assert fake2["sanity_passed"] is None
+        assert fake2["sanity_verified"] is None
     print("  [ok] load_provenance：旧 sanity PASS 的身份核对口径与 train 一致")
 
 
