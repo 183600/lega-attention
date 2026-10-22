@@ -34,7 +34,8 @@ from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
                             short_ngram_overlap, short_overlap_alerts,
                             split_protocol_alerts, temporal_split_text,
                             text_length_stats, token_stream_stats,
-                            unknown_char_rate)
+                            unknown_char_rate,
+                            NEAR_DUP_ROWS, _near_dup_band_key)
 
 
 def _doc(i):
@@ -1905,6 +1906,21 @@ def test_near_duplicate_intra_train_keeps_first_and_short_blocks_ignored():
     assert out2["train"] == short
     assert stats2["train_blocks_skipped_short"] == 1
     print("  [ok] 近似重复：train 内部保留首次出现；短块显式跳过")
+
+
+def test_near_duplicate_lsh_band_uses_declared_rows():
+    """LSH 桶键必须用完一个 band 的全部行；少用一行会让实际召回率与报告不符。"""
+    sig = np.arange(NEAR_DUP_ROWS * 2, dtype=np.uint64)
+    key = _near_dup_band_key(sig, 0)
+    assert len(key) == NEAR_DUP_ROWS
+    # 只改第 3 行（前两行完全一致）也必须改变桶键；旧实现只用前两行，
+    # 会把这一对送进候选集，实际退化为 rows=2 的 LSH。
+    changed = sig.copy()
+    changed[NEAR_DUP_ROWS - 1] += 1
+    assert _near_dup_band_key(changed, 0) != key
+    # 不同 band 的不相交行必须各自参与键。
+    assert _near_dup_band_key(sig, 1) != key
+    print("  [ok] 近似重复：LSH band 使用声明的全部行")
 
 
 def test_near_duplicate_val_test_is_diagnostic_only_and_threshold_sensitivity():

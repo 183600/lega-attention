@@ -584,6 +584,18 @@ def _near_dup_signature(hashes, n_hashes: int = NEAR_DUP_HASHES):
     return sig
 
 
+def _near_dup_band_key(signature, band: int):
+    """一个 LSH band 的桶键：必须使用该 band 的全部 ``NEAR_DUP_ROWS`` 行。
+
+    LSH 的候选召回率公式 ``1-(1-J^rows)^bands`` 与报告字段都按 rows 行计算；
+    桶键若少用一行，实际行为就退化为更小的 rows（召回更高、候选更多，但
+    与声明的签名参数/理论召回率不一致）。这里集中构造键，避免扫描循环与
+    报告口径再次漂移。
+    """
+    i0 = int(band) * NEAR_DUP_ROWS
+    return tuple(int(signature[i0 + j]) for j in range(NEAR_DUP_ROWS))
+
+
 def _near_dup_similarity(a, b):
     """返回 (Jaccard, containment)；两者都基于去重后的 shingle 集合。"""
     if a.size == 0 or b.size == 0:
@@ -720,10 +732,9 @@ def decontaminate_near_duplicates(texts: dict,
         # LSH：逐 band 建桶再丢弃，内存只与一个 band 的块数有关。
         candidates = set()
         for band in range(NEAR_DUP_BANDS):
-            i0 = band * NEAR_DUP_ROWS
             buckets = {}
             for i in range(n_all):
-                key = (int(sigs[i, i0]), int(sigs[i, i0 + 1]))
+                key = _near_dup_band_key(sigs[i], band)
                 buckets.setdefault(key, []).append(i)
             for ids in buckets.values():
                 if len(ids) < 2:
