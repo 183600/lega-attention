@@ -9,6 +9,7 @@ from lega.badcase import (CATEGORY_CN, analyze_badcases, analyze_worst_windows,
                            case_axis, case_key, categorize_case, categorize_window,
                            cross_variant_analysis, format_case, format_window_case,
                            process_eval_json, process_ruler_json,
+                           synthesize_cross_improvements,
                            synthesize_ruler_improvements,
                            write_badcase_md, write_worstcase_md)
 
@@ -1352,3 +1353,31 @@ def test_cross_variant_fixed_cases_use_reference_record():
     assert pv["fixed_category_counts"] == {"hallucinated": 1}, pv
     assert pv["fixed_vs_reference"][0]["pred"] == "5550001", pv
     assert pv["fixed_vs_reference"][0]["category"] == "hallucinated"
+
+
+def test_cross_improvement_synthesis_tolerates_malformed_fields():
+    """跨变体改进方向合成必须容忍旧版/手改 JSON 的坏类型。"""
+    malformed = {
+        "variants": ["lega", "standard", 5, {"bad": "variant"}],
+        "reference": "standard",
+        "n_unique_failed_items": 10,
+        "n_shared_all_failures": 2,
+        "per_variant": {
+            "lega": {"n_new_vs_reference": "3",
+                     "n_fixed_vs_reference": 1,
+                     "mcnemar_p_holm": "bad",
+                     "new_category_counts": {"copy_distractor": "2",
+                                             "hallucinated": True,
+                                             "no_answer": 1.5}},
+            "standard": "not-a-dict",
+        },
+    }
+    recs = synthesize_cross_improvements(malformed)
+    assert isinstance(recs, list) and recs, recs
+    assert any("新增 3 个错误" in r["trigger"] for r in recs), recs
+    assert any("主导类别" in r["trigger"] for r in recs), recs
+    # per_variant/variants 结构整体损坏时返回空表，不因 len/.get 崩溃。
+    assert synthesize_cross_improvements({"variants": 5}) == []
+    assert synthesize_cross_improvements({"variants": ["a", "b"],
+                                          "per_variant": [1, 2]}) == []
+    print("  [ok] 跨变体改进方向：坏计数/坏结构安全降级")

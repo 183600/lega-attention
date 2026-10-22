@@ -1166,7 +1166,9 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
         return []
     recs = []
     variants = cross.get("variants") or []
-    if len(variants) < 2:
+    if not isinstance(variants, (list, tuple)) or len(variants) < 2:
+        # 外部/旧版 JSON 的 variants 可能是数字/对象；不能对非序列调用 len
+        # 或迭代它的“内容”，按无可对照处理。
         return recs
     n_unique = _count_int(cross.get("n_unique_failed_items")) or 0
     shared = _count_int(cross.get("n_shared_all_failures")) or 0
@@ -1184,12 +1186,17 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
             "先修数据再比方法，否则结论会指向错误的对象",
             "人工复核共识失败样例的标注与可解性；修正后重跑评测再对比"))
     ref = cross.get("reference")
+    per_variant = cross.get("per_variant")
+    per_variant = per_variant if isinstance(per_variant, dict) else {}
     for v in variants:
-        if v == ref:
+        # variant 是字典键身份：JSON 里的数组/对象既不能作为键，也不是
+        # 合法变体名；跳过而不是让整份改进方向合成崩溃。
+        if not isinstance(v, str) or v == ref:
             continue
-        pv = (cross.get("per_variant") or {}).get(v) or {}
-        n_new = pv.get("n_new_vs_reference")
-        n_fixed = pv.get("n_fixed_vs_reference")
+        pv = per_variant.get(v)
+        pv = pv if isinstance(pv, dict) else {}
+        n_new = _count_int(pv.get("n_new_vs_reference")) or 0
+        n_fixed = _count_int(pv.get("n_fixed_vs_reference")) or 0
         p_holm = _finite_float(pv.get("mcnemar_p_holm"))
         sig_s = ""
         if p_holm is not None:
@@ -1197,8 +1204,16 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
                      + ("差异显著" if p_holm < 0.05 else
                         "差异不显著，只能作方向性线索"))
         if n_new:
-            cats = pv.get("new_category_counts") or {}
-            top = sorted(cats.items(), key=lambda kv: -kv[1])
+            cats = pv.get("new_category_counts")
+            cats = cats if isinstance(cats, dict) else {}
+            # 类别计数可能是字符串/bool/小数（旧版或手改 JSON）：先按
+            # _count_int 规范化，再按计数降序；否则 -kv[1] 会对非数值抛错。
+            counted = []
+            for cat, cnt in cats.items():
+                ci = _count_int(cnt)
+                if ci is not None and ci > 0:
+                    counted.append((cat, ci))
+            top = sorted(counted, key=lambda kv: (-kv[1], str(kv[0])))
             cat_s = (f"，主导类别 {CATEGORY_CN.get(top[0][0], top[0][0])}×{top[0][1]}"
                      if top else "")
             recs.append(_advice(
