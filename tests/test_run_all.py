@@ -3670,6 +3670,11 @@ def test_summary_helpers_tolerate_nested_non_dict_values():
         "ppl": 1.0, "val_ppl_ci95": [10 ** 400, 1.0]}) is None
     assert _ppl_ci_rel_pct({
         "ppl": 1.0, "val_ppl_ci95": [5.0, 1.0]}) is None
+    # 端点有限但差值/除以极小 PPL 后不可表示时同样按缺失处理，不能写 inf。
+    assert _ppl_ci_rel_pct({
+        "ppl": 1e-300, "val_ppl_ci95": [-1e308, 1e308]}) is None
+    assert _ppl_ci_rel_pct({
+        "ppl": 1e-320, "val_ppl_ci95": [0.0, 1e308]}) is None
     assert _neural_eval_window_spec({"train_ctx": float("inf")}, False) is None
     assert _neural_eval_window_spec({"eval_iters": "x"}, False) is None
     assert _neural_eval_window_spec([1], False) is None

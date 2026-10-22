@@ -1614,7 +1614,14 @@ def _ppl_ci_rel_pct(d):
     lo, hi = _finite_number(ci[0]), _finite_number(ci[1])
     if lo is None or hi is None or hi < lo:
         return None
-    return (hi - lo) / 2.0 / ppl * 100.0
+    # 两端都有限不代表差/比值可表示：hi−lo 或除以极小 ppl 仍可能溢出成
+    # inf。非有限的相对半宽不能写进汇总/JSON，按缺失处理。
+    try:
+        half = (hi - lo) / 2.0
+        rel = half / ppl * 100.0
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return rel if math.isfinite(rel) and rel >= 0.0 else None
 
 
 def _eval_scalar(key):
