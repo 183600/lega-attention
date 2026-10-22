@@ -766,6 +766,12 @@ def load_corpus_sents_with_source(data_dir: str, max_chars: int = 300000,
     """
     import os
     for split in splits:
+        # split 是文件名片段，不能是任意路径："./test" 或绝对路径会绕过
+        # 下面的“test 只有 allow_test=True 才可读”闸门（os.path.join 对绝对
+        # 路径还会丢弃 data_dir）。只允许数据协议定义的三个 split。
+        if not isinstance(split, str) or split not in ("train", "val", "test"):
+            raise ValueError(
+                f"splits 只能包含 'train'/'val'/'test'，收到 {split!r}")
         # 只接受真正的 bool True：非布尔真值（如 "false"）不能打开 test。
         if split == "test" and allow_test is not True:
             continue

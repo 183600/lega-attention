@@ -371,6 +371,13 @@ def test_corpus_sents_seal_test_and_prefer_heldout():
             sents, src = load_corpus_sents_with_source(d, allow_test=bad)
             assert src == "train" and all(s.startswith("T") for s in sents), \
                 (bad, src, sents)
+        # split 别名/绝对路径不能绕过 test 尘封（"./test" 会解析到 test.txt）
+        for alias in ("./test", os.path.join(d, "test"), "../test"):
+            try:
+                load_corpus_sents_with_source(d, splits=(alias,))
+                raise AssertionError(f"splits={alias!r} 绕过了 test 尘封闸门")
+            except ValueError:
+                pass
         # 显式放行才允许 test
         sents, src = load_corpus_sents_with_source(d, allow_test=True)
         assert src == "test" and all(s.startswith("S") for s in sents), (src, sents)
