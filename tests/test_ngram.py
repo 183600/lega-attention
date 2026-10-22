@@ -82,7 +82,7 @@ def test_invalid_smoothing_parameters_rejected():
 
 def test_evaluate_rejects_bad_vocab_meta_and_out_of_range_ids():
     """外部 meta/bin 不一致时必须在拟合前显式报错，不能用错误 V 算 PPL。"""
-    for bad in (True, 2.5, 0, -1, None, "4.5"):
+    for bad in (True, 2.5, 0, -1, None, "4.5", 65537, 10 ** 20):
         tmp = tempfile.mkdtemp()
         try:
             _mk_data(tmp, [0, 1, 2, 3] * 5, [0, 1, 2, 0], vocab_size=bad)

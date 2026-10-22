@@ -30,7 +30,7 @@ import os
 import numpy as np
 
 from .data import load_bin, load_meta
-from .datacheck import append_test_access
+from .datacheck import append_test_access, check_vocab_capacity
 from .preflight import (allow_protocol_violations,
                         data_protocol_preflight)
 from .repro import data_fingerprint, test_data_fingerprint
@@ -498,6 +498,9 @@ def _validate_vocab_and_ids(meta: dict, arrays) -> int:
     计算，最终 PPL 看似正常却对应另一个模型。这里在拟合前显式拒绝。
     """
     vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
+    # token 流以 uint16 存储：V>65536 不仅是“与 bin 不一致”，还会让
+    # prev*V+cur 的 int64 键溢出/对撞，必须与 prepare_bins 同一闸门拒绝。
+    check_vocab_capacity(vocab_size)
     if vocab_size <= 0:
         raise ValueError(
             f"meta.vocab_size 必须为正整数，收到 {vocab_size}")
