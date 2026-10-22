@@ -471,7 +471,8 @@ def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
     return failed
 
 
-def check_sanity_results(variants, results_dir: str, not_before: float = None):
+def check_sanity_results(variants, results_dir: str, not_before: float = None,
+                         expected_seed: int = None):
     """读回本次 sanity 结果文件，返回 (verdict, failures)。
 
     子进程退出码 0 不等于闸门通过：结果文件可能缺失/不可解析/仍写着
@@ -481,6 +482,9 @@ def check_sanity_results(variants, results_dir: str, not_before: float = None):
     ``not_before``（可选，epoch 秒）要求结果文件本次运行后写入：防止
     sanity 子进程异常退出 0 却没写文件时，上一轮的 PASS 被当成本轮证据。
     文件系统 mtime 粒度可能较粗，调用方应传入开始时刻并预留 1 秒余量。
+    ``expected_seed``（可选）核对结果内声明的 seed 与 run_all 传入的
+    首种子一致；``variant`` 也必须与目标变体一致——把别的变体/种子的
+    PASS 文件复制成本文件名时，不能在本轮闸门中复用。
     """
     verdict, failures = {}, []
     for v in variants:
@@ -493,7 +497,18 @@ def check_sanity_results(variants, results_dir: str, not_before: float = None):
             reason = "not_passed"
         elif summary.get("malformed") is True:
             reason = "malformed"
-        elif not_before is not None:
+        elif (summary.get("variant") is not None
+              and str(summary.get("variant")) != str(v)):
+            reason = "variant_mismatch"
+        elif (expected_seed is not None
+              and summary.get("seed") is not None):
+            try:
+                if strict_int(summary.get("seed"),
+                              "sanity.seed") != int(expected_seed):
+                    reason = "seed_mismatch"
+            except (TypeError, ValueError, OverflowError):
+                reason = "seed_mismatch"
+        if reason is None and not_before is not None:
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
@@ -7045,7 +7060,8 @@ def main():
         # present=true 且 passed=true（旧/空/被手改的文件签不出 PASS），
         # 否则在全量训练前就中止，而不是等 train --sanity_file 再报错。
         sanity_verdict, sanity_failures = check_sanity_results(
-            variants, results_dir, not_before=sanity_started)
+            variants, results_dir, not_before=sanity_started,
+            expected_seed=seeds[0])
         if sanity_failures:
             first = sanity_failures[0]
             v = first["variant"]

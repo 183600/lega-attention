@@ -3985,14 +3985,28 @@ def test_check_sanity_results_reads_back_verdict_not_exit_code():
         # passed=true 但 checks 为空：sanity_summary 判 malformed/不通过
         _write("sanity_empty.json", {"passed": True, "variant": "empty",
                                      "checks": {}})
+        _write("sanity_wrongvariant.json",
+               {"passed": True, "variant": "standard", "checks": checks})
+        _write("sanity_wrongseed.json",
+               {"passed": True, "variant": "wrongseed", "seed": 99,
+                "checks": checks})
         with open(os.path.join(tmp, "sanity_unparseable.json"), "w",
                   encoding="utf-8") as f:
             f.write("{bad")
         verdict, failures = check_sanity_results(
-            ["good", "bad", "empty", "unparseable", "missing"], tmp)
+            ["good", "bad", "empty", "unparseable", "missing",
+             "wrongvariant"], tmp)
         assert verdict == {"good": "pass"}, verdict
         by_variant = {x["variant"]: x for x in failures}
-        assert set(by_variant) == {"bad", "empty", "unparseable", "missing"}
+        assert set(by_variant) == {"bad", "empty", "unparseable", "missing",
+                                   "wrongvariant"}
+        assert by_variant["wrongvariant"]["reason"] == "variant_mismatch"
+        # seed 只在显式期望时核对；不传 expected 时 wrongseed 正常通过
+        verdict2, failures2 = check_sanity_results(
+            ["good", "wrongseed"], tmp, expected_seed=7)
+        assert verdict2 == {"good": "pass"}, verdict2
+        assert failures2[0]["variant"] == "wrongseed"
+        assert failures2[0]["reason"] == "seed_mismatch"
         assert by_variant["bad"]["reason"] == "not_passed"
         assert by_variant["empty"]["reason"] == "not_passed"
         assert by_variant["missing"]["reason"] == "missing_or_unparseable"
