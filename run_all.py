@@ -4764,15 +4764,18 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     wm_model_sel = wm_sel.get("selected_model")
     wm_ref_name = ref_name
     wm_ref = None
+    wm_ref_map = wm_map_full
     if (isinstance(wm_model_sel, str)
             and _finite_number(wm_map_sel.get(wm_model_sel)) is not None):
         wm_ref_name = wm_model_sel
         wm_ref = _finite_number(wm_map_sel.get(wm_model_sel))
+        wm_ref_map = wm_map_sel
         ng_win_field = "window_losses_matched_selected"
         ng_idx_field = "window_indices_matched_selected"
         ng_win_model = ng.get("window_losses_matched_selected_model")
     else:
         wm_ref = _finite_number(wm_map_full.get(ref_name))
+        wm_ref_map = wm_map_full
         ng_win_field = "window_losses_matched"
         ng_idx_field = "window_indices_matched"
         ng_win_model = ng.get("window_losses_matched_model")
@@ -4780,6 +4783,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     if wm_ref is None or wm_ref <= 0:
         wm_ref_name = ref_name
         wm_ref = _finite_number(wm_map_full.get(ref_name))
+        wm_ref_map = wm_map_full
         ng_win_field = "window_losses_matched"
         ng_idx_field = "window_indices_matched"
         ng_win_model = ng.get("window_losses_matched_model")
@@ -4950,6 +4954,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 "ngram_ppl_full_split": ref_ppl_full,
                 "ngram_ppl_window_matched": wm_ref,
                 "reference_model_window_matched": wm_ref_name,
+                "window_reference_values": wm_ref_map,
                 "window_matched_selection": wm_sel or None,
                 "window_spec": wspec or None,
                 "window_paired_reference_model": ng_win_model,
@@ -4998,6 +5003,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             "ngram_ppl_full_split": ref_ppl_full,
             "ngram_ppl_window_matched": wm_ref,
             "reference_model_window_matched": wm_ref_name,
+            "window_reference_values": wm_ref_map,
             "window_matched_selection": wm_sel or None,
             "window_spec": wspec or None,
             "window_paired_reference_model": ng_win_model,
@@ -5280,7 +5286,15 @@ def _render_baseline_sections(results_dir: str, smoke=None,
         # 只有全 val 选参的 ppl_window_matched，保持兼容。
         wm_sel = ngram.get("ppl_window_matched_selected")
         wm_sel = wm_sel if isinstance(wm_sel, dict) else {}
-        wm = wm_sel or ngram.get("ppl_window_matched")
+        # 比较表实际采用哪张窗口参考值表由 ngram_baseline_comparison 决定
+        # （selected 表存在但缺少 selection 元数据时会被忽略）。渲染必须
+        # 复用同一选择，否则同一份报告里表格与说明会引用不同基线。
+        cmp_window_values = ((ngram_cmp or {}).get("window_reference_values")
+                             if isinstance(ngram_cmp, dict) else None)
+        if isinstance(cmp_window_values, dict):
+            wm = cmp_window_values
+        else:
+            wm = wm_sel or ngram.get("ppl_window_matched")
         wm = wm if isinstance(wm, dict) else {}
         wsel = ngram.get("window_matched_selection")
         wsel = wsel if isinstance(wsel, dict) else {}

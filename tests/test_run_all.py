@@ -2861,6 +2861,30 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert out_win_sel["reference_model_window_matched"] == "bigram"
         assert abs(out_win_sel["ngram_ppl_window_matched"] - 70.0) < 1e-12
         assert abs(out_win_sel["ngram_ppl_full_split"] - 90.0) < 1e-12
+        # selected 表存在但缺少 window_matched_selection 元数据时，比较层
+        # 必须忽略它并回退 full 窗口表；渲染层也要引用同一张表，不能把
+        # 未采用的 70.0 写成“逐位置对齐口径”的参考值。
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val",
+            "ppl": {"unigram": 200.0, "bigram": 100.0,
+                    "interpolated_bigram": 90.0},
+            "selected_model": "interpolated_bigram",
+            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
+                                   "interpolated_bigram": 90.0,
+                                   "n_tokens": 16},
+            "ppl_window_matched_selected": {"unigram": 170.0,
+                                            "bigram": 70.0,
+                                            "n_tokens": 16},
+            "window_spec": spec})
+        out_no_meta = ngram_baseline_comparison(runs, tmp)
+        assert abs(out_no_meta["ngram_ppl_window_matched"] - 90.0) < 1e-12
+        assert out_no_meta["window_reference_values"] == {
+            "unigram": 180.0, "bigram": 90.0,
+            "interpolated_bigram": 90.0, "n_tokens": 16}
+        text_no_meta = "\n".join(
+            _render_baseline_sections(tmp, ngram_cmp=out_no_meta))
+        assert "180.000" in text_no_meta and "90.000" in text_no_meta
+        assert "170.000" not in text_no_meta and "70.000" not in text_no_meta
         _write_json(os.path.join(tmp, "ngram_baseline.json"), {
             "split": "val",
             "ppl": {"unigram": 200.0, "bigram": 100.0},
