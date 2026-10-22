@@ -1,6 +1,8 @@
 """评测流水线完整性：基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
 import json
 import os
+import sys
+import tempfile
 
 import torch
 
@@ -152,8 +154,33 @@ def test_latency_wired_into_configs_and_runner():
     with open(os.path.join(ROOT, "run_all.py"), encoding="utf-8") as f:
         src = f.read()
     assert "lega.latency" in src, "run_all.py 未接入 lega.latency"
+    assert '"--seed", str(seeds[0])' in src, "run_all.py 未把首个种子传给 latency"
     assert "tradeoff_verdict" in src, "run_all.py 未接入涨点-增幅权衡判定"
     print("  [ok] 结构与运行时基准已接入 configs/run_all/plots")
+
+
+def test_latency_main_records_seed_provenance():
+    """latency 的随机权重/输入必须使用显式 --seed，并把实际种子写入 meta。"""
+    from lega.latency import main
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"vocab_size": 64}, f)
+        out = os.path.join(d, "latency.json")
+        argv = [sys.argv[0], "--config", os.path.join(ROOT, "configs", "tiny.json"),
+                "--data_dir", d, "--out", out, "--variants", "standard",
+                "--seed", "2024", "--smoke", "--device", "cpu"]
+        old = sys.argv
+        sys.argv = argv
+        try:
+            main()
+        finally:
+            sys.argv = old
+        with open(out, encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["meta"]["seed"] == 2024
+        entry = payload["variants"]["standard"]
+        assert entry["weights"] == "random" and entry["ckpt_seed"] is None
+    print("  [ok] latency --seed 进入 set_seed 并落盘 meta/ckpt_seed")
 
 
 def test_latency_config_ints_reject_fractional_and_bool():

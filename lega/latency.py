@@ -28,7 +28,7 @@ from .data import load_meta
 from .model import GPT, load_model, count_params
 from .repro import data_fingerprint, git_info, sha256_file
 from .utils import (amp_autocast, amp_dtype_for, enable_tf32, get_device,
-                    save_json, set_seed, strict_int)
+                    save_json, seed_int, set_seed, strict_int)
 
 
 def _cfg_int(cfg, key, default):
@@ -340,6 +340,8 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--no_amp", action="store_true",
                    help="禁用 bf16 autocast（CUDA/支持 bf16 的 CPU）")
+    p.add_argument("--seed", type=int, default=None,
+                   help="随机权重/基准输入的种子（默认 0；run_all 传首个种子）")
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
@@ -401,7 +403,8 @@ def main():
         if value <= 0:
             raise ValueError(f"config.{key} 必须是正整数，收到 {value}")
         return value
-    set_seed(0)
+    seed = seed_int(args.seed if args.seed is not None else 0, "--seed")
+    set_seed(seed)
     results: Dict = {}
     for v in variants:
         if v == "standard_sdpa":
@@ -431,8 +434,15 @@ def main():
                 if os.path.exists(ckpt_path):
                     break
                 ckpt_path = None
+        ckpt_seed = None
         if ckpt_path and os.path.exists(ckpt_path):
-            model, _ = load_model(ckpt_path, device=device, use_sdpa_standard=use_sdpa)
+            model, ck = load_model(ckpt_path, device=device,
+                                   use_sdpa_standard=use_sdpa)
+            try:
+                ckpt_seed = (strict_int(ck["seed"], "checkpoint seed")
+                             if ck.get("seed") is not None else None)
+            except ValueError:
+                ckpt_seed = None
             src = "ckpt"
         else:
             model_cfg = dict(
@@ -449,7 +459,8 @@ def main():
             model = GPT(**model_cfg).to(device)
             src = "random"
         model.eval()
-        entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa, "weights": src,
+        entry = {"label": v, "variant": vname, "use_sdpa": use_sdpa,
+                 "weights": src, "ckpt_seed": ckpt_seed,
                  "n_params": count_params(model), "prefill_ms": {},
                  "prefill_ms_spread_pct": {},
                  "decode_ms_per_tok": {}, "decode_ms_spread_pct": {},
@@ -504,7 +515,8 @@ def main():
     except FileNotFoundError:
         data_fp = None
     payload = {
-        "meta": {"device": device, "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
+        "meta": {"device": device, "seed": seed,
+                 "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
                  "decode_tokens": decode_tokens, "iters": iters, "warmup": warmup,
                  "amp": bool(use_amp), "torch": torch.__version__,
                  "timing": TIMING_NOTE,

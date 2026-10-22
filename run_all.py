@@ -6573,7 +6573,7 @@ def main():
             run([py, "-m", "lega.latency", "--config", args.config,
                  "--data_dir", args.data_dir, "--ckpt_dir", out_root,
                  "--out", os.path.join(results_dir, "latency.json"),
-                 "--variants", lat_variants,
+                 "--variants", lat_variants, "--seed", str(seeds[0]),
                  "--device", args.device] + (["--smoke"] if args.smoke else []))
 
         post_stage = "plots"
