@@ -33,7 +33,7 @@ from .data import load_bin, load_meta
 from .datacheck import append_test_access
 from .preflight import (allow_protocol_violations,
                         data_protocol_preflight)
-from .repro import test_data_fingerprint
+from .repro import data_fingerprint, test_data_fingerprint
 from .utils import strict_int
 
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
@@ -676,11 +676,19 @@ def evaluate(data_dir: str, split: str = "val",
         matched_sel = _select_ngram(
             sel_ids, window_plan["pos_sel"], uni, pair_keys, pair_counts,
             vocab_size, alphas)
+    # 数据身份随基线结果落盘：results/<tag> 被复用（尤其 --skip_ngram）时，
+    # 汇总必须能发现“这份 n-gram PPL 来自另一份数据/旧 test.bin”，否则会把
+    # 旧基线与新神经模型 PPL 放在同一张表里比较。无法计算时如实写 None。
+    try:
+        data_fp = data_fingerprint(data_dir).get("digest")
+    except (OSError, ValueError, TypeError):
+        data_fp = None
     report = {
         "baseline": ("smoothed n-gram (add-α unigram/bigram + val-tuned "
                      "interpolation), no gradient training"),
         "split": split,
         "allow_test": bool(allow_test),
+        "data_fingerprint": data_fp,
         "tokenizer": meta.get("tokenizer"),
         "vocab_size": vocab_size,
         "train_tokens": int(len(train_ids)),

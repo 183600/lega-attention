@@ -3203,6 +3203,30 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     # 合法 JSON 但非对象（如数组）按不可用处理。
     if not isinstance(ng, dict):
         return {"error": "ngram_baseline.json 不是 JSON 对象"}
+    # 旧基线必须绑定到本轮的数据身份：results/<tag> 复用且 --skip_ngram 时
+    # 目录里的 n-gram PPL 可能来自另一份数据（甚至重建后的 test.bin），
+    # 与当前神经 PPL 并排比较会制造“显著优于统计基线”的假结论。新产物
+    # 带 data_fingerprint；旧产物缺该字段时保持兼容（无法核对），但只要有
+    # 指纹且与 repro.json 不一致就直接标记不可用。
+    repro_path = os.path.join(results_dir, "repro.json")
+    if os.path.exists(repro_path):
+        try:
+            with open(repro_path, "r", encoding="utf-8") as f:
+                repro_doc = json.load(f)
+        except (OSError, ValueError):
+            repro_doc = None
+        expected_fp = ((repro_doc.get("data") or {}).get("digest")
+                       if isinstance(repro_doc, dict) else None)
+        actual_fp = ng.get("data_fingerprint")
+        if (isinstance(expected_fp, str) and expected_fp
+                and isinstance(actual_fp, str) and actual_fp
+                and actual_fp != expected_fp):
+            return {"error": "ngram_baseline.json 的数据指纹与本次 run 的 "
+                             "repro.json 不一致：该基线来自另一份数据，"
+                             "不能与当前神经 PPL 直接比较；请重跑 n-gram 基线",
+                    "split": ng.get("split"),
+                    "ngram_data_fingerprint": actual_fp,
+                    "run_data_fingerprint": expected_fp}
     ppl_map = ng.get("ppl")
     if ppl_map is not None and not isinstance(ppl_map, dict):
         return {"error": "ngram_baseline.json 的 ppl 不是 JSON 对象"}

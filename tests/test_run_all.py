@@ -2483,6 +2483,37 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
     print("  [ok] ngram_baseline_comparison（同 split 配对、Holm、错位隔离）")
 
 
+def test_ngram_comparison_rejects_baseline_from_other_data():
+    """results/<tag> 复用时，旧 n-gram 基线的数据指纹必须与本次 run 一致。
+
+    否则 --skip_ngram 会让上一份数据（甚至重建后的 test.bin）的 PPL 与当前
+    神经模型 PPL 并排比较，制造与本次数据无关的“显著优于统计基线”。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "data": {"digest": "new-data-digest"}})
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "data_fingerprint": "old-data-digest",
+            "ppl": {"unigram": 100.0, "bigram": 80.0,
+                    "interpolated_bigram": 70.0},
+            "selected_model": "interpolated_bigram"})
+        out = ngram_baseline_comparison({}, tmp)
+        assert out.get("error"), out
+        assert "数据指纹" in out["error"], out
+        # 数据指纹一致时正常进入比较流程（无 runs 时返回空 rows 而非错误）
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "val", "data_fingerprint": "new-data-digest",
+            "ppl": {"unigram": 100.0, "bigram": 80.0,
+                    "interpolated_bigram": 70.0},
+            "selected_model": "interpolated_bigram"})
+        ok = ngram_baseline_comparison({}, tmp)
+        assert "error" not in ok, ok
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram 基线数据指纹与本次 run 绑定")
+
+
 def test_ngram_comparison_uses_val_selected_strongest_baseline():
     """简单基线参照必须取 val 选出的最强模型，而不是固定拿 bigram 当靶子。"""
     tmp = tempfile.mkdtemp()
