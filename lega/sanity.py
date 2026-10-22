@@ -292,6 +292,7 @@ def _failed_contract_result(contract: dict, *, steps: int, lr: float,
         "loss_decreased": False,
         "finite": False,
         "loss_requires_grad": False,
+        "all_planned_steps_completed": False,
         "gradient_nonzero_first_step": False,
         "all_params_get_grads": False,
         "no_zero_grads_first_step": False,
@@ -323,6 +324,8 @@ def _failed_contract_result(contract: dict, *, steps: int, lr: float,
         "grad_coverage": None,
         "batch_contract": contract,
         "steps": int(steps),
+        "steps_planned": int(steps),
+        "steps_executed": 0,
         "lr": float(lr),
         "history": [],
         "caveat": "固定批未通过数据契约检查，未执行过拟合训练。",
@@ -422,7 +425,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         first_grad_norm_postclip = None
         first_train_loss = None
         nan_seen = False
-        loss_no_grad = False
+        # None 表示“尚未验证 loss 是否挂在图上”：steps=0 时不能把初始值
+        # False 误报成 loss_requires_grad=True（从未执行 forward/backward）。
+        loss_no_grad = None
+        steps_executed = 0
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         for step in range(int(steps)):
             cur_lr = float(lr) * (step + 1) / max(1, warmup) \
@@ -443,6 +449,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             if not loss.requires_grad:
                 loss_no_grad = True
                 break
+            if step == 0:
+                # 明确记录“首步确实检查过且 loss 挂在图上”；steps=0 时保持
+                # None，报告不会把未执行的检查写成 True。
+                loss_no_grad = False
             loss.backward()
             # 首步逐参数覆盖：总范数正常但个别子模块没拿到梯度（图断流）时，
             # 这里能定位到具体参数名（见 gradient_coverage 文档）。
@@ -458,6 +468,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                 first_grad_norm_preclip = preclip
                 first_grad_norm_postclip = postclip
             opt.step()
+            steps_executed += 1
             if at_log:
                 history.append({
                     "step": step + 1, "loss": float(loss.detach()),
@@ -491,7 +502,15 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "token_acc_above_threshold": final["token_acc"] >= float(acc_threshold),
         "loss_decreased": final["loss"] < initial["loss"],
         "finite": (not nan_seen) and math.isfinite(final["loss"]),
-        "loss_requires_grad": not loss_no_grad,
+        # 只有在首步真的执行过 forward/backward 且 loss 挂在图上时才为真；
+        # steps=0 或前向即 NaN 中止时不能把“没检查”写成“检查通过”。
+        "loss_requires_grad": loss_no_grad is False,
+        # 计划步数必须全部执行完：NaN/断流导致提前 break 时，即使最终
+        # 指标碰巧达标，也说明完整训练路径没有被验证过。steps=0 虽与
+        # “计划 0 步全部完成”字面相同，但它没有验证任何前向/反向，
+        # 同样不能算通过训练路径检查。
+        "all_planned_steps_completed": (int(steps) > 0
+                                        and steps_executed == int(steps)),
         # 用 clip 前范数判断“梯度是否非零”：grad_clip=0 或爆炸被截断时，
         # 后范数可能恒为 0/阈值，不能作为梯度存在的证据。
         "gradient_nonzero_first_step": (first_grad_norm_preclip is not None
@@ -546,6 +565,10 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         },
         "grad_coverage": grad_cov,
         "steps": int(steps),
+        # 计划 vs 实际执行步数：NaN/断流提前中止时，单看 steps 会把
+        # “计划 300 步”误读成“真的优化了 300 步”。
+        "steps_planned": int(steps),
+        "steps_executed": steps_executed,
         "lr": float(lr),
         "history": history,
         "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "

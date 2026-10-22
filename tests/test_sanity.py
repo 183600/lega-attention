@@ -73,6 +73,9 @@ def test_overfit_check_passes_on_healthy_model():
     # 中间结果核对：训练路径 loss ≡ 直接 logits CE；标签为 next-token 移位
     assert res["checks"]["train_loss_matches_direct_logits"], res["loss_consistency"]
     assert res["checks"]["next_token_shift_consistent"]
+    assert res["checks"]["all_planned_steps_completed"]
+    assert res["steps_executed"] == res["steps_planned"] == 150
+    assert res["checks"]["loss_requires_grad"] is True
     assert not model.training  # 检查结束后恢复 eval 态，避免污染调用方
     print(f"  [ok] 健康模型可过拟合固定批: loss="
           f"{res['initial']['loss']:.3f}->{res['final']['loss']:.4f}, "
@@ -146,6 +149,12 @@ def test_overfit_check_rejects_invalid_numeric_args():
                             loss_threshold="0.05", acc_threshold="0.99",
                             initial_loss_tol="-1.0")
     assert res["checks"]["initial_loss_near_log_vocab"] is True
+    # steps=0 从未执行 forward/backward：不能把“未检查”写成
+    # loss_requires_grad=True，也不能声称计划步数已完成。
+    assert res["checks"]["loss_requires_grad"] is False
+    assert res["checks"]["all_planned_steps_completed"] is False
+    assert res["steps_executed"] == 0 and res["steps_planned"] == 0
+    assert res["passed"] is False
     print("  [ok] sanity 数值参数拒绝 bool/NaN/Inf/非数值与负 lr/grad_clip")
 
 
