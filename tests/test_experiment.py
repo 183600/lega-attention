@@ -309,6 +309,10 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
         with open(os.path.join(out, "run_manifest.json"), "w",
                   encoding="utf-8") as f:
             json.dump({"config_sha256": "c" * 64,
+                       "config_used_sha256": "e" * 64,
+                       "completion": {"status": "completed", "steps": 10},
+                       "artifacts": {"model.pt": {"sha256": "m" * 64}},
+                       "data_order_sha256": "o" * 16,
                        "git": {"commit": "a" * 40, "dirty": False},
                        "worktree": {"available": True, "diff_sha256": None},
                        "data": {"digest": "d" * 16},
@@ -324,6 +328,10 @@ def test_snapshot_embeds_provenance_and_flags_eval_identity_mismatch():
         assert prov["runtime"]["torch"] == "test"
         assert prov["sanity"]["passed"] is True
         assert prov["data_fingerprint"] == "d" * 16
+        assert prov["config_used_sha256"] == "e" * 64
+        assert prov["completion"]["status"] == "completed"
+        assert prov["artifacts"]["model.pt"]["sha256"] == "m" * 64
+        assert prov["data_order_sha256"] == "o" * 16
         assert prov["worktree"]["diff_sha256"] is None
         assert prov["precision"]["amp_dtype"] == "bfloat16"
         assert snap["result"]["data_order_sha256"] == "o" * 16

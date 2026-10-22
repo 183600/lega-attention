@@ -571,12 +571,18 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "worktree": manifest.get("worktree"),
             "worktree_patch": manifest.get("worktree_patch"),
             "config_sha256": manifest.get("config_sha256"),
+            "config_used_sha256": manifest.get("config_used_sha256"),
             "data_fingerprint": mdata.get("digest"),
             "seed_report": manifest.get("seed_report"),
             "precision": manifest.get("precision"),
             "init_state_fingerprint": manifest.get("init_state_fingerprint"),
             "runtime": manifest.get("runtime"),
             "sanity": manifest.get("sanity"),
+            # 训练完成时写回的完成态/产物哈希/实际数据顺序指纹：即使
+            # out_dir 被删除，台账仍能回答“这轮是否跑完、产出了什么”。
+            "completion": manifest.get("completion"),
+            "artifacts": manifest.get("artifacts"),
+            "data_order_sha256": manifest.get("data_order_sha256"),
         }
     if isinstance(ev, dict) and ev:
         # eval 身份与本次快照不符（旧 eval.json 被复用）时显式标记：
