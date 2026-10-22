@@ -904,6 +904,30 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         if status == "正常收敛":
             status = "训练不足（数据覆盖不足）"
 
+    # best 出现在最后一个评测点：没有观察到“开始变差”的拐点，训练预算
+    # 本身可能就是性能上限。只降不升不是过拟合，但也不能声称已经收敛；
+    # 若验证损失在末端仍显著下降，应把“延长训练”列为补充实验，而不是
+    # 把当前截断点当成方法的收敛性能。
+    best_at_final = bool(best_step is not None and final_step is not None
+                         and best_step == final_step)
+    still_improving = bool(
+        best_at_final and status == "正常收敛"
+        and val_delta is not None and val_delta < 0
+        and (val_delta < -(val_ci_rel if val_ci_rel is not None
+                           else REL_TOL)))
+    if still_improving and epochs_seen is not None:
+        recommendations[:] = [r for r in recommendations
+                              if "无需干预" not in r]
+        recommendations.append(
+            f"最优验证损失出现在最后一个评测点（step {final_step}），"
+            f"且验证损失仍下降 {abs(val_delta):.1%}：没有观察到收敛/过拟合"
+            "拐点，当前训练预算可能就是性能上限；预算允许时应延长训练作为"
+            "补充实验，不能把该 run 的最优值当作方法已收敛的结论")
+        evidence.append(
+            f"best 与 final 为同一评测点（step {final_step}），"
+            f"验证损失首→末 {_fmt_rel(val_delta)} 且末端仍在下降："
+            "训练尚未显示出收敛拐点（不是过拟合）")
+
     # 早停终止：截断是设计行为（不同于日志缺失），独立于状态标注；
     # "数据不足"分支的"增加步数/评测密度"建议与早停矛盾，须替换。
     if early_stopped:
@@ -1003,6 +1027,8 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "early_stop_step": (es_step if early_stopped else None),
         "epochs_seen": epochs_seen,
         "train_tokens": train_tokens,
+        "best_at_final_eval": best_at_final,
+        "val_still_improving_at_end": still_improving,
         "train_budget_sufficient": (None if epochs_seen is None
                                     else not budget_insufficient),
         "generalization_gap": gap,

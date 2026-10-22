@@ -674,3 +674,24 @@ def test_best_checkpoint_selection_noise_is_reported():
     d2 = diagnose_curve(recs2)
     assert d2["best_checkpoint_within_noise"] is False, d2
     print("  [ok] best checkpoint 选型噪声（winner's curse）诊断")
+
+
+def test_best_on_final_eval_flags_truncated_training():
+    """best=最后一个评测点且验证仍降：没有收敛拐点，不能声称已收敛。
+
+    只有知道训练覆盖（epochs_seen）时才提示延长训练；旧日志缺覆盖率信息
+    时保持原“正常收敛/无需干预”口径，避免无依据地要求加训。
+    """
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+    d = diagnose_curve(recs, epochs_seen=2.0)
+    assert d["status"] == "正常收敛", d
+    assert d["best_at_final_eval"] is True
+    assert d["val_still_improving_at_end"] is True
+    assert any("延长训练" in r for r in d["recommendations"]), d
+    assert not any("无需干预" in r for r in d["recommendations"]), d
+
+    d2 = diagnose_curve(recs)
+    assert d2["status"] == "正常收敛"
+    assert d2["val_still_improving_at_end"] is True
+    assert any("无需干预" in r for r in d2["recommendations"]), d2
+    print("  [ok] best 在末次评测且仍下降 → 提示训练预算可能是上限")
