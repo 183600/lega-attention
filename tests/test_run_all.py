@@ -3943,9 +3943,20 @@ def test_check_sanity_results_reads_back_verdict_not_exit_code():
         # 文件存在但 JSON 不可解析：present=true 但 passed=None，复核同样阻断
         assert by_variant["unparseable"]["reason"] == "not_passed"
         assert by_variant["bad"]["path"].endswith("sanity_bad.json")
+        # 本轮 sanity 没有真正写回：旧文件即使 PASS 也不能当作本次证据。
+        import time
+        good_path = os.path.join(tmp, "sanity_good.json")
+        old_ts = time.time() - 3600
+        os.utime(good_path, (old_ts, old_ts))
+        v2, f2 = check_sanity_results(["good"], tmp, not_before=time.time())
+        assert v2 == {} and len(f2) == 1
+        assert f2[0]["reason"] == "stale_result"
+        # mtime 新鲜时同一文件正常通过
+        v3, f3 = check_sanity_results(["good"], tmp, not_before=0.0)
+        assert v3 == {"good": "pass"} and not f3
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] sanity 结果读回复核：passed=false/空 checks/缺失均阻断")
+    print("  [ok] sanity 结果读回复核：passed=false/空 checks/缺失/陈旧均阻断")
 
 
 def test_abort_ledger_context_records_postrun_stage_failure():

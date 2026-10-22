@@ -424,25 +424,38 @@ def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
     return failed
 
 
-def check_sanity_results(variants, results_dir: str):
+def check_sanity_results(variants, results_dir: str, not_before: float = None):
     """读回本次 sanity 结果文件，返回 (verdict, failures)。
 
     子进程退出码 0 不等于闸门通过：结果文件可能缺失/不可解析/仍写着
     passed=false，或包含 malformed 证据。全量训练前逐个复核，失败项带
     variant/reason/summary，供 aborted 记录与排查信息复用。
+
+    ``not_before``（可选，epoch 秒）要求结果文件本次运行后写入：防止
+    sanity 子进程异常退出 0 却没写文件时，上一轮的 PASS 被当成本轮证据。
+    文件系统 mtime 粒度可能较粗，调用方应传入开始时刻并预留 1 秒余量。
     """
     verdict, failures = {}, []
     for v in variants:
         path = os.path.join(results_dir, f"sanity_{v}.json")
         summary = sanity_summary(path)
+        reason = None
         if summary.get("present") is not True:
-            failures.append({"variant": v, "reason": "missing_or_unparseable",
-                             "summary": summary, "path": path})
+            reason = "missing_or_unparseable"
         elif summary.get("passed") is not True:
-            failures.append({"variant": v, "reason": "not_passed",
-                             "summary": summary, "path": path})
+            reason = "not_passed"
         elif summary.get("malformed") is True:
-            failures.append({"variant": v, "reason": "malformed",
+            reason = "malformed"
+        elif not_before is not None:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                reason = "missing_or_unparseable"
+            else:
+                if mtime < float(not_before) - 1.0:
+                    reason = "stale_result"
+        if reason is not None:
+            failures.append({"variant": v, "reason": reason,
                              "summary": summary, "path": path})
         else:
             verdict[v] = "pass"
@@ -6960,6 +6973,7 @@ def main():
                 cmd += ["--smoke"]
             print("+", " ".join(cmd), flush=True)
             cmds.append(cmd)
+        sanity_started = time.time()
         try:
             run_many(cmds, jobs, _jobs_env(jobs))
         except subprocess.CalledProcessError as e:
@@ -6984,7 +6998,7 @@ def main():
         # present=true 且 passed=true（旧/空/被手改的文件签不出 PASS），
         # 否则在全量训练前就中止，而不是等 train --sanity_file 再报错。
         sanity_verdict, sanity_failures = check_sanity_results(
-            variants, results_dir)
+            variants, results_dir, not_before=sanity_started)
         if sanity_failures:
             first = sanity_failures[0]
             v = first["variant"]
