@@ -2537,6 +2537,9 @@ def _enrich_paired(res: dict, a, b) -> dict:
             res["within_noise"] = bool(sd_f > 0 and abs(diff_f) < sd_f)
             res["effect_to_noise"] = (abs(diff_f) / sd_f
                                       if sd_f > 0 else None)
+            if (res["effect_to_noise"] is not None
+                    and not math.isfinite(res["effect_to_noise"])):
+                res["effect_to_noise"] = None
     if diff is not None and res.get("mde") is not None:
         try:
             diff_f, mde_f = abs(float(diff)), float(res["mde"])
@@ -2557,14 +2560,20 @@ def _enrich_paired(res: dict, a, b) -> dict:
         losses = sum(1 for d in diffs if d < 0)
         res["n_seed_wins"], res["n_seed_losses"] = wins, losses
         res["n_seed_ties"] = len(diffs) - wins - losses
+        # 与 _stable_mean_std 同口径：朴素 sum 在多个 1e308 同号配对差上会
+        # 溢出成 inf，使“删一种子后的方向”失去意义。mean_std 先缩放再还原。
         loo_means = []
         for i in range(len(diffs)):
             rest = diffs[:i] + diffs[i + 1:]
-            loo_means.append(sum(rest) / len(rest))
-        sign = 1 if diffs and (sum(diffs) > 0) else -1
-        res["loo_sign_stable"] = bool(
-            all((m > 0) == (sign > 0) for m in loo_means))
-        res["loo_min_abs_mean"] = float(min(abs(m) for m in loo_means))
+            rest_mean, _ = mean_std(rest)
+            if rest_mean is not None:
+                loo_means.append(rest_mean)
+        overall_mean, _ = mean_std(diffs)
+        if overall_mean is not None and loo_means:
+            sign = 1 if overall_mean > 0 else -1
+            res["loo_sign_stable"] = bool(
+                all((m > 0) == (sign > 0) for m in loo_means))
+            res["loo_min_abs_mean"] = float(min(abs(m) for m in loo_means))
 
     # SESOI 解释层（TOST）：显著性检验不能证明“无差异”。这里为每个有
     # 明确定义 SESOI 的指标附加“差异是否小于实际重要阈值”的证据；

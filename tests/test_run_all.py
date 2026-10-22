@@ -2222,6 +2222,28 @@ def test_enrich_paired_adds_robustness_fields():
     print("  [ok] _enrich_paired（置换 p/CI/MDE 字段与口径；bool/坏方差安全）")
 
 
+def test_enrich_paired_huge_finite_diffs_keep_loo_finite():
+    """配对差本身有限但同号相加会溢出时，留一均值/方向仍必须可判定。"""
+    from run_all import _enrich_paired
+    a = [1e308] * 3
+    b = [0.0] * 3
+    res = {"n": 3, "mean_diff": 1e308, "std_diff": 0.0,
+           "metric": "PPL", "lower_is_better": True, "p_adj": 0.01}
+    out = _enrich_paired(res, a, b)
+    assert out["loo_sign_stable"] is True, out
+    assert math.isfinite(out["loo_min_abs_mean"]), out
+    assert out["loo_min_abs_mean"] == 1e308, out
+    # ���负巨大差混合、均值抵消为 0 时，方向不再声称稳定。
+    c = [1e308, -1e308, 1e308]
+    d = [0.0, 0.0, 0.0]
+    out2 = _enrich_paired({"n": 3, "mean_diff": 1e308 / 3.0,
+                           "std_diff": 1.0, "metric": "PPL",
+                           "lower_is_better": True, "p_adj": 0.01}, c, d)
+    assert math.isfinite(out2["loo_min_abs_mean"]), out2
+    assert out2["loo_sign_stable"] is False, out2
+    print("  [ok] 配对稳健性：巨大有限差值的留一均值不溢出")
+
+
 def test_enrich_paired_leave_one_seed_out_stability():
     """n 很小时一个种子可能决定符号：必须给出逐种子胜负与留一方向稳定性。
 
