@@ -368,7 +368,14 @@ def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
     hi_s = steps[0] + hi * (steps[-1] - steps[0])
     vals = [p["value"] for p in pts if lo_s <= p["step"] < hi_s
             or (hi == 1.0 and p["step"] == steps[-1])]
-    return float(sum(vals) / len(vals)) if vals else None
+    if not vals:
+        return None
+    # 与统计模块同口径按最大绝对值缩放：多个 1e308 的合法损失点在朴素
+    # 求和时会溢出成 inf，使分段趋势/倒挂判断全部失真。
+    scale = max(abs(v) for v in vals)
+    if scale == 0.0:
+        return 0.0
+    return float(scale * (sum(v / scale for v in vals) / len(vals)))
 
 
 def _val_ci_rel(records: List[Dict]) -> Optional[float]:
@@ -400,7 +407,11 @@ def _rel_change(first: Optional[float], last: Optional[float]) -> Optional[float
         return None
     if abs(first) < 1e-12:
         return None
-    return (last - first) / abs(first)
+    try:
+        out = (last - first) / abs(first)
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _fmt_num(x: Optional[float], spec: str = ".4f") -> str:
@@ -424,7 +435,11 @@ def _train_trend(train_recent) -> Optional[float]:
             vals.append(f)
     if len(vals) < 2 or abs(vals[0]) < 1e-12:
         return None
-    return (vals[-1] - vals[0]) / abs(vals[0])
+    try:
+        out = (vals[-1] - vals[0]) / abs(vals[0])
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def live_overfit_hint(evals_since_improve, best_val, val,

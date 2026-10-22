@@ -389,6 +389,24 @@ def test_diagnose_curve_tolerates_bad_coverage_metadata():
     print("  [ok] 曲线诊断拒绝 bool/非法覆盖元数据，不崩溃也不误报")
 
 
+def test_huge_finite_losses_keep_curve_stats_finite():
+    """合法但接近 float 上限的损失点不能让分段均值/趋势变成 inf。"""
+    recs = []
+    for i in range(6):
+        recs.append({"step": (i + 1) * 10, "loss": 1e308})
+    for i in range(3):
+        recs.append({"step": (i + 1) * 50, "val_loss": 1e308})
+    d = diagnose_curve(recs)
+    assert d["train_loss_first"] == 1e308, d
+    assert d["train_loss_last"] == 1e308, d
+    assert d["val_loss_first"] == 1e308, d
+    assert d["val_loss_last"] == 1e308, d
+    for key in ("train_rel_change", "val_rel_change",
+                "train_recent_rel_change", "val_recent_rel_change"):
+        assert d[key] is None or math.isfinite(d[key]), (key, d[key])
+    print("  [ok] 巨大有限损失：分段均值/趋势保持有限或显式缺失")
+
+
 def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合"]) == "过拟合"
     assert worst_status(["过拟合", "NaN/Inf"]) == "NaN/Inf"
