@@ -195,7 +195,18 @@ def single_factor_audit():
             "全因子 8 格与 GATE_FACTORS 不一致："
             f"cells={sorted(set(factorial_variants))}，"
             f"factors={sorted(GATE_FACTORS)}")
+    # 审计表必须恰好覆盖 A/B/C 的“加入/去掉”六条单因素边。只逐条校验
+    # 已列出的对比会漏掉“整条对比被删除/重复”这种漂移：表少一行时仍
+    # 全部合法，却不再覆盖某个组件的归因。
+    required = {(factor, direction) for factor in ("A", "B", "C")
+                for direction in ("add", "remove")}
+    seen = set()
     for factor, direction, cand, ref in SINGLE_FACTOR_CONTRASTS:
+        pair = (factor, direction)
+        if pair in seen:
+            problems.append(
+                f"重复的单因素对比声明：{factor}/{direction}")
+        seen.add(pair)
         diff = changed_gate_factors(cand, ref)
         if diff is None:
             problems.append(f"{cand} vs {ref} 不在门控变体内，无法做单因素归因")
@@ -208,6 +219,39 @@ def single_factor_audit():
         contrasts.append({"factor": factor, "direction": direction,
                           "candidate": cand, "reference": ref,
                           "changed_factors": sorted(diff)})
+    missing = required - seen
+    extra = seen - required
+    if missing:
+        problems.append(
+            "缺少单因素对比："
+            + ", ".join(f"{factor}/{direction}"
+                        for factor, direction in sorted(missing)))
+    if extra:
+        problems.append(
+            "存在非 A/B/C 单因素声明的对比："
+            + ", ".join(f"{factor}/{direction}"
+                        for factor, direction in sorted(extra)))
+    # 组件判定实际消费的检验对也必须落在已审计表内；否则改 COMPONENT_TESTS
+    # 就能绕开审计去使用多因子对比（运行期而非仅测试期拦截）。
+    audited_pairs = {(c["candidate"], c["reference"]) for c in contrasts}
+    component_tests = globals().get("COMPONENT_TESTS") or ()
+    for entry in component_tests:
+        if not (isinstance(entry, (tuple, list)) and len(entry) == 4):
+            problems.append(f"组件检验定义结构非法：{entry!r}")
+            continue
+        name, loo_pair, add_pair, _primary = entry
+        for pair in (loo_pair, add_pair):
+            if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                    or tuple(pair) not in audited_pairs):
+                problems.append(
+                    f"组件 {name!r} 使用了未审计的单因素对比：{pair!r}")
+                continue
+            factor = single_factor_change(*pair)
+            expected = str(name)[:1] if str(name)[:1] in "ABC" else None
+            if expected is not None and factor != expected:
+                problems.append(
+                    f"组件 {name!r} 的对比 {pair!r} 实际单因素为 {factor}，"
+                    f"与组件 {expected} 不一致")
     return {"ok": not problems, "problems": problems,
             "contrasts": contrasts,
             "factors": {v: sorted(f) for v, f in sorted(GATE_FACTORS.items())},

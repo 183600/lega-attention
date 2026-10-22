@@ -4352,6 +4352,29 @@ def test_single_factor_audit_and_pair_construction():
     print("  [ok] 单因素审计：6 组对比只改一个因子，多因子对比不混入")
 
 
+def test_single_factor_audit_requires_complete_and_audited_contrasts():
+    """审计表少一条/重复一条、或组件检验绕过审计表，都必须显式失败。"""
+    with mock.patch("run_all.SINGLE_FACTOR_CONTRASTS",
+                    SINGLE_FACTOR_CONTRASTS[:-1]):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("缺少单因素对比" in p for p in audit["problems"]), audit
+    with mock.patch("run_all.SINGLE_FACTOR_CONTRASTS",
+                    SINGLE_FACTOR_CONTRASTS + (SINGLE_FACTOR_CONTRASTS[0],)):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("重复的单因素对比" in p for p in audit["problems"]), audit
+    bad_component = COMPONENT_TESTS + (
+        ("D 额外组件", ("lega_conc_only", "lega"),
+         ("lega_len_only", "lega"), "PPL"),)
+    with mock.patch("run_all.COMPONENT_TESTS", bad_component):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("未审计的单因素对比" in p
+                   for p in audit["problems"]), audit
+    print("  [ok] 单因素审计拒绝缺失/重复对比与绕过审计表的组件检验")
+
+
 def test_paired_comparisons_marks_contrast_type():
     """配对结果必须机器可读地标出 single_factor/overall，避免事后误归因。"""
     runs = {}
