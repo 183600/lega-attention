@@ -727,6 +727,9 @@ def main():
     device = get_device(args.device)
     enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device, use_sdpa_standard=False)
+    # 被分析权重的精确内容指纹：机制统计必须与产生它的 checkpoint 绑定，
+    # 同一路径被新权重覆盖时不会继续沿用旧结论。
+    ckpt_sha256 = sha256_file(args.ckpt)
     tok = load_tokenizer(args.data_dir)
     variant = ck.get("variant", model.variant)
     # 固定全局随机源；样例构造本身使用显式种子的 Random，不受影响。
@@ -792,7 +795,7 @@ def main():
         args.data_dir, allow_test=bool(getattr(args, "allow_test_corpus", False)))
     if corpus_source == "test":
         if record_corpus_test_access(args.data_dir, corpus_source,
-                                     ckpt_sha256=sha256_file(args.ckpt),
+                                     ckpt_sha256=ckpt_sha256,
                                      stage="analysis"):
             print("[analysis] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
                   "已写入 test 访问账本；机制分析输入含测试集文本，需在报告披露")
@@ -835,6 +838,8 @@ def main():
             pass
         save_json({"variant": variant, "seed": ck.get("seed"), "n_records": 0,
                    "note": "no examples", "skipped_tasks": skipped_tasks,
+                   "ckpt": os.path.abspath(args.ckpt),
+                   "ckpt_sha256": ckpt_sha256,
                    "data_protocol_preflight": data_preflight,
                    **provenance},
                   os.path.join(args.out_dir,
@@ -881,6 +886,9 @@ def main():
     # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计
     summary["corpus_source"] = corpus_source
     summary["corpus_held_out"] = corpus_source in ("val", "test")
+    # 被分析 checkpoint 的路径与内容指纹：机制统计与权重一一绑定
+    summary["ckpt"] = os.path.abspath(args.ckpt)
+    summary["ckpt_sha256"] = ckpt_sha256
     summary["data_protocol_preflight"] = data_preflight
     summary.update(provenance)
     if skipped_tasks:

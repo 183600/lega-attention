@@ -826,6 +826,9 @@ def main():
     device = get_device(args.device)
     enable_tf32(device)
     model, ck = load_model(args.ckpt, device=device)
+    # 被评测权重的精确内容指纹：RULER 结果必须与产生它的 checkpoint 一一
+    # 绑定，而不是只信目录名；同一路径被新权重覆盖后可立即发现。
+    ckpt_sha256 = sha256_file(args.ckpt)
     tok = load_tokenizer(args.data_dir)
     seed = ck.get("seed")
     # checkpoint 元数据的种子同样不能被 int() 截断（1.5 → 1、True → 1）：
@@ -887,7 +890,7 @@ def main():
         # test 作为干扰语料是账本旁路的显式放行：必须留痕，否则测试集被
         # prompt 级读取完全不可审计（load_bin 的闸门管不到裸 .txt 读取）。
         if record_corpus_test_access(args.data_dir, corpus_source,
-                                     ckpt_sha256=sha256_file(args.ckpt),
+                                     ckpt_sha256=ckpt_sha256,
                                      variant=ck.get("variant"),
                                      seed=ck.get("seed"), stage="ruler"):
             print("[ruler] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
@@ -930,6 +933,9 @@ def main():
                # 干扰语料来源可审计：train 回退会让检索分数不可比
                "corpus_source": corpus_source,
                "corpus_held_out": corpus_source in ("val", "test"),
+               # 被评测 checkpoint 的路径与内容指纹：结果与权重一一绑定
+               "ckpt": os.path.abspath(args.ckpt),
+               "ckpt_sha256": ckpt_sha256,
                # 评测前的数据协议闸门结论随结果落盘，防止泄露数据的结果
                # 被当成 held-out 证据引用。
                "data_protocol_preflight": data_preflight}
