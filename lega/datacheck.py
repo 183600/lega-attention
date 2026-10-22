@@ -413,6 +413,12 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
     块重复只统计并告警。train 内部重复块保留首次出现。
     返回 (cleaned_texts, stats)。
     """
+    # 块定义（至少几行才算“多行块”）必须是真实整数：bool/小数若被
+    # _iter_blocks 里的 int() 静默截断，会把单行块当成多行块删除，
+    # 去污染统计与 val/test 保持原样的承诺随之失真。
+    min_lines = strict_int(min_lines, "min_lines")
+    if min_lines < 1:
+        raise ValueError(f"min_lines 必须 >= 1，收到 {min_lines}")
     texts = texts if isinstance(texts, dict) else {}
 
     def scan(t):
@@ -538,7 +544,10 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
 
 def check_vocab_capacity(vocab_size: int) -> None:
     """token id 以 uint16 存储，词表必须满足 max_id = vocab_size-1 <= 65535。"""
-    if int(vocab_size) < 1 or int(vocab_size) > 65536:
+    # 词表大小是整数身份：bool（True→1）、小数（4.9→4）与下划线数字串
+    # 都不能被 int() 静默改写成另一个容量后通过 uint16 闸门。
+    vocab_size = strict_int(vocab_size, "vocab_size")
+    if vocab_size < 1 or vocab_size > 65536:
         raise ValueError(
             f"vocab_size={vocab_size} 无法用 uint16 存储（要求 1..65536）")
 
@@ -549,6 +558,11 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
     NaN/Inf 对整数流天然不存在，但对浮点输入（未来若改用连续特征）必须显式
     拒绝——NaN 混入会经 embedding 传播为非法索引或静默取 0。
     """
+    # 词表大小是协议身份：bool/小数/下划线数字串不能经 int() 变成另一个
+    # 容量，否则越界检查会按与声明不同的词表计算。
+    vocab_size = strict_int(vocab_size, "vocab_size")
+    if vocab_size < 1:
+        raise ValueError(f"vocab_size 必须是正整数，收到 {vocab_size}")
     arr = np.asarray(ids)
     if arr.size == 0:
         raise ValueError(f"{split} token 流为空，无法训练/评测")
@@ -705,6 +719,11 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
     max_samples（且小于流长度）时才退化为有放回采样，并在结果中标记
     count_mode="sampled" 供审计。
     """
+    # 词表大小是协议身份：bool/小数/下划线数字串不能被 int() 截断成另一个
+    # 计数区间宽度；负值/零也无法定义 token 分布。
+    vocab_size = strict_int(vocab_size, "vocab_size")
+    if vocab_size < 1:
+        raise ValueError(f"vocab_size 必须是正整数，收到 {vocab_size}")
     if max_samples is None:
         limit = None
     else:
