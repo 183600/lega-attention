@@ -555,6 +555,26 @@ def test_evaluate_val_optional_window_loss_detail_for_pairing():
     print("  [ok] evaluate_val 逐窗口明细可选落盘，且均值与 val_loss 一致")
 
 
+def test_forward_zero_length_targets_returns_finite_zero_loss():
+    """空查询/空 batch 的带标签前向不能因空张量除零而崩溃。"""
+    m = _tiny("lega")
+    for shape in ((2, 0), (0, 4), (0, 0)):
+        x = torch.zeros(shape, dtype=torch.long)
+        with torch.no_grad():
+            out = m(x, targets=x, return_window_losses=True)
+        assert out["logits"] is None
+        assert out["loss"].dim() == 0 and float(out["loss"]) == 0.0, (shape, out["loss"])
+        assert out["loss_per_window"].shape == (shape[0],), (shape, out["loss_per_window"].shape)
+        assert torch.isfinite(out["loss_per_window"]).all()
+    # 需要梯度的空输入也应能完成 backward（零梯度），而不是抛 TypeError
+    x = torch.zeros(2, 0, dtype=torch.long)
+    m.zero_grad(set_to_none=True)
+    loss = m(x, targets=x)["loss"]
+    loss.backward()
+    assert float(loss.detach()) == 0.0
+    print("  [ok] GPT.forward 空输入/空标签返回可反向的有限零损失")
+
+
 def test_forward_rejects_misaligned_targets_shape():
     """targets 与 idx 形状不一致时必须报错，不能静默错配标签算损失。"""
     m = _tiny("lega")

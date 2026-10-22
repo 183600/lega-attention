@@ -558,7 +558,15 @@ class GPT(nn.Module):
             if return_window_losses and needs_grad:
                 raise RuntimeError(
                     "return_window_losses 仅支持无梯度评测（inference_mode）")
-            if needs_grad:
+            if tgt.numel() == 0:
+                # 空查询序列/空 batch 没有可评分 token：与 _ChunkedLinearCE
+                # 的“全部位置被忽略时损失为 0”约定一致，返回可反向的零损失，
+                # 而不是在下面对 None 做除法抛 TypeError。逐窗口损失保持
+                # (B,) 形状，调用方无需为空输入特判。
+                loss = x.sum()
+                if return_window_losses:
+                    loss_per_window = x.new_zeros((B,))
+            elif needs_grad:
                 # 训练路径：分块前向，交叉熵闭式梯度在前向内求出
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
             else:
