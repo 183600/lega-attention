@@ -581,3 +581,30 @@ def test_tuning_manifest_identity_rejects_numpy_scalars():
         except ValueError:
             pass
     print("  [ok] 调优身份核对拒绝 NumPy bool/小数标量")
+
+
+def test_trial_identity_tolerates_malformed_manifest_fields():
+    """manifest 的 data/git 身份为列表等非字符串时，报告不能整体崩溃。"""
+    from lega.tuning import _trial_identity_summary
+
+    def _trial(lr, data, commit):
+        return {"lr": lr, "weight_decay": 0.1, "val_loss_best": 1.0,
+                "seed": 1,
+                "manifest": {"present": True, "seed": 1,
+                             "data_fingerprint": data,
+                             "git_commit": commit,
+                             "seed_verified": True}}
+
+    good = _trial_identity_summary([
+        _trial(0.1, "d" * 16, "c" * 40),
+        _trial(0.2, "d" * 16, "c" * 40)])
+    assert good["consistent"] is True and good["malformed_data_fingerprint"] is False
+    bad = _trial_identity_summary([
+        _trial(0.1, ["d"], "c" * 40),
+        _trial(0.2, "d" * 16, ["c"])])
+    assert bad["consistent"] is False
+    assert bad["malformed_data_fingerprint"] is True
+    assert bad["malformed_git_commit"] is True
+    # 合法字符串仍保留供审计；畸形值只把 consistent 置 False。
+    assert bad["data_fingerprints"] == ["d" * 16]
+    assert bad["git_commits"] == ["c" * 40]

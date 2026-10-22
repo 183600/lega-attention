@@ -262,10 +262,17 @@ def _trial_identity_summary(trials) -> dict:
         m = t.get("manifest")
         if isinstance(m, dict) and m.get("present"):
             manifests.append(m)
-    datas = sorted({m.get("data_fingerprint") for m in manifests
-                    if m.get("data_fingerprint") is not None})
-    commits = sorted({m.get("git_commit") for m in manifests
-                      if m.get("git_commit") is not None})
+    # manifest 字段是外部 JSON：列表/对象不可哈希，直接放进 set 会让整份
+    # 调优报告在全部 trial 跑完后崩溃。只接受字符串身份；非字符串记为
+    # 不可核对（consistent=False），而不是丢弃后当成“一致”。
+    raw_datas = [m.get("data_fingerprint") for m in manifests
+                 if m.get("data_fingerprint") is not None]
+    raw_commits = [m.get("git_commit") for m in manifests
+                   if m.get("git_commit") is not None]
+    datas = sorted({v for v in raw_datas if isinstance(v, str)})
+    commits = sorted({v for v in raw_commits if isinstance(v, str)})
+    malformed_data = any(not isinstance(v, str) for v in raw_datas)
+    malformed_commit = any(not isinstance(v, str) for v in raw_commits)
     seed_mismatches = []
     for t in successful:
         m = t.get("manifest")
@@ -283,6 +290,7 @@ def _trial_identity_summary(trials) -> dict:
     consistent = None
     if checked:
         consistent = (n_missing == 0
+                      and not malformed_data and not malformed_commit
                       and len(datas) <= 1 and len(commits) <= 1
                       and all(m.get("data_fingerprint") is not None
                               for m in manifests)
@@ -299,6 +307,8 @@ def _trial_identity_summary(trials) -> dict:
         "n_missing_manifest": n_missing,
         "data_fingerprints": datas,
         "git_commits": commits,
+        "malformed_data_fingerprint": malformed_data,
+        "malformed_git_commit": malformed_commit,
         "seed_mismatches": seed_mismatches,
         "consistent": consistent,
         "note": ("consistent=True 要求全部成功 trial 的 manifest 都证明种子"
