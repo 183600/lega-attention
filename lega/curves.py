@@ -89,6 +89,8 @@ def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
         # 这里只告警不阻断，但必须明确说“无法评估”而不是给出错误点数。
         if isinstance(value, (bool, np.bool_)):
             return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
+        if isinstance(value, str) and "_" in value:
+            return ["训练步数/评测/日志间隔不是整数，无法评估曲线可观测性"]
         try:
             f = float(value)
         except (TypeError, ValueError, OverflowError):
@@ -195,6 +197,9 @@ def _finite_value(value) -> Optional[float]:
     """
     if value is None or isinstance(value, (bool, np.bool_)):
         return None
+    # float("1_0")==10.0：下划线数字串不是规范 JSON 数值，不能伪装成观测点。
+    if isinstance(value, str) and "_" in value:
+        return None
     try:
         f = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -223,6 +228,9 @@ def _finite_points(records: List[Dict], key: str) -> Tuple[List[Dict], int, int]
             continue
         s = _step_or_none(s)
         if isinstance(v, (bool, np.bool_)):
+            malformed += 1
+            continue
+        if isinstance(v, str) and "_" in v:
             malformed += 1
             continue
         try:

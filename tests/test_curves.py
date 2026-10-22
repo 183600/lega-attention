@@ -245,13 +245,14 @@ def test_malformed_log_records_do_not_crash_diagnosis():
     recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": "oops"},
             {"step": "x", "loss": 4.0}, {"step": 30, "loss": 3.0},
             {"step": 40, "loss": 2.0}, {"step": 50, "loss": 1.5},
-            {"step": "1_0", "loss": 4.0},
+            {"step": "1_0", "loss": 4.0}, {"step": 60, "loss": "1_0"},
             {"step": 10, "val_loss": 5.0}, {"step": 30, "val_loss": 3.2},
-            {"step": 50, "val_loss": 2.0}, {"step": 60, "val_loss": "bad"}]
+            {"step": 50, "val_loss": 2.0}, {"step": 60, "val_loss": "bad"},
+            {"step": 70, "val_loss": "1_0"}]
     d = diagnose_curve(recs)
     assert d["status"] in ("正常收敛", "过拟合趋势", "欠拟合/学习不充分"), d
-    # "1_0" 若经 int() 会变成第 10 步，与真实 step=10 混淆。
-    assert d["malformed_records"] == 4, d
+    # "1_0" 若经 int()/float() 会变成第 10 步/损失 10.0，与真实值混淆。
+    assert d["malformed_records"] == 6, d
     assert any("无法解析" in e for e in d["evidence"]), d["evidence"]
     print("  [ok] 损坏日志记录跳过并计数（诊断正常完成）")
 
@@ -553,7 +554,8 @@ def test_curve_observability_warnings():
     assert any("eval_every=0" in x for x in w), w
     # bool/小数不能被截断成另一个采样间隔（True→1、7.5→7）
     for bad in ((True, 4, 2), (20, 7.5, 2), (20, 4, 2.5),
-                (20, False, 2), (20, 4, float("nan"))):
+                (20, False, 2), (20, 4, float("nan")),
+                ("1_0", 4, 2)):
         w = curve_observability_warnings(*bad)
         assert len(w) == 1 and "不是整数" in w[0], (bad, w)
     assert curve_observability_warnings(20.0, 4.0, 2.0) == []
