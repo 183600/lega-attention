@@ -211,9 +211,12 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_dir", default="data/wikitext103")
-    ap.add_argument("--max_tokens", type=int, default=0, help=">0 时截断训练 token 数")
-    ap.add_argument("--val_tokens", type=int, default=0, help=">0 时截断验证 token 数")
-    ap.add_argument("--test_tokens", type=int, default=0, help=">0 时截断测试 token 数")
+    ap.add_argument("--max_tokens", default=0,
+                    help=">0 时截断训练 token 数")
+    ap.add_argument("--val_tokens", default=0,
+                    help=">0 时截断验证 token 数")
+    ap.add_argument("--test_tokens", default=0,
+                    help=">0 时截断测试 token 数")
     ap.add_argument("--source", default="auto",
                     choices=["auto", "parquet", "zip", "rows", "local"])
     ap.add_argument("--local_txt", default=None, help="本地 txt 路径（--source local）")
@@ -224,13 +227,26 @@ def main():
                     help="显式允许写出群组跨 split / val-test 重叠的划分"
                          "（仅用于复现或诊断；训练前数据协议闸门仍会拦截）")
     args = ap.parse_args()
-    max_tokens = {"train": args.max_tokens, "val": args.val_tokens,
-                  "test": args.test_tokens}
-    bad_limits = [name for name, value in max_tokens.items() if value < 0]
-    if bad_limits:
-        raise SystemExit(
-            f"[data] --max_tokens/--val_tokens/--test_tokens 不能为负，"
-            f"非法项：{bad_limits}")
+    # argparse type=int 会接受 "1_0"（Python 下划线数字串）并静默变成 10，
+    # 与 write_clean_lines 内部的严格整数口径冲突；保留原始字符串后统一校验。
+    from lega.utils import strict_int
+
+    def _budget(raw, label):
+        try:
+            value = strict_int(raw, label)
+        except (TypeError, ValueError) as e:
+            ap.error(str(e))
+        if value < 0:
+            raise SystemExit(
+                f"[data] --max_tokens/--val_tokens/--test_tokens 不能为负，"
+                f"非法项：{label}")
+        return value
+
+    max_tokens = {
+        "train": _budget(args.max_tokens, "--max_tokens"),
+        "val": _budget(args.val_tokens, "--val_tokens"),
+        "test": _budget(args.test_tokens, "--test_tokens"),
+    }
 
     os.makedirs(args.out_dir, exist_ok=True)
     txt_paths = {"train": os.path.join(args.out_dir, "train.txt"),
