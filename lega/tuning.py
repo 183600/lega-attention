@@ -427,6 +427,167 @@ def _grid_stats(grid, trials, seeds):
     return out
 
 
+def _selection_diagnostics(grid_stats, selected, default) -> dict:
+    """网格选择的稳定性证据：逐种子支持、次优差距、留一种子复选。
+
+    只看“均值最优”仍可能把种子噪声当成超参数信号：最优配置也许在多数
+    种子上都不是第一，或与次优的差距小于逐种子配对波动。这里给出
+      1. 每个选择种子的实际赢家与最优配置的支持率；
+      2. 最优−次优的均值差，以及该差的逐种子配对标准差（差距在噪声内
+         时不得把“最优”当作稳定结论）；
+      3. 留一种子复选：在其余种子上重新选配置，再在被留出的种子上比较
+         它与默认配置的 held-out val_loss（全部同批 trial，未用测试集）。
+    这些是描述性稳定性证据，不是新的显著性检验；LOO 折之间也不独立。
+    """
+    complete = [
+        g for g in (grid_stats or [])
+        if isinstance(g, dict) and g.get("complete")
+        and g.get("val_loss_best_mean") is not None
+        and isinstance(g.get("val_loss_best_per_seed"), dict)
+    ]
+    out = {
+        "n_configs": len(complete),
+        "n_seeds": 0,
+        "seeds": [],
+        "selected_support_count": None,
+        "selected_support_fraction": None,
+        "per_seed_winners": [],
+        "runner_up": None,
+        "selection_flip": None,
+        "leave_one_seed_out": None,
+        "note": ("逐种子赢家/支持率与最优−次优差距都是描述性稳定性证据；"
+                 "LOO 折之间不独立，不得把 agreement_rate 当作显著性检验。"),
+    }
+    if not complete or not isinstance(selected, dict):
+        return out
+    # 跨配置的共同种子；顺序沿用报告里的 selection_seeds。
+    seed_order = []
+    for g in complete:
+        for s in g.get("seeds") or []:
+            if str(s) not in seed_order:
+                seed_order.append(str(s))
+    common = [s for s in seed_order
+              if all(s in g["val_loss_best_per_seed"] for g in complete)]
+    out["n_seeds"] = len(common)
+    out["seeds"] = [int(s) for s in common if str(s).lstrip("-").isdigit()] or common
+    if not common:
+        return out
+
+    def _cfg(g):
+        return {"lr": g.get("lr"), "weight_decay": g.get("weight_decay")}
+
+    def _same(a, b):
+        return (isinstance(a, dict) and isinstance(b, dict)
+                and a.get("lr") == b.get("lr")
+                and a.get("weight_decay") == b.get("weight_decay"))
+
+    sel_stat = next((g for g in complete if _same(g, selected)), None)
+    if sel_stat is None:
+        return out
+    winners = []
+    support = 0
+    for s in common:
+        vals = [(g["val_loss_best_per_seed"][s], idx, g)
+                for idx, g in enumerate(complete)]
+        best_val = min(v[0] for v in vals)
+        # 并列最优按网格顺序取第一个，但支持率把并列者都算作支持。
+        tied = [v for v in vals if abs(v[0] - best_val) <= 1e-12]
+        win = min(tied, key=lambda v: v[1])[2]
+        if any(_same(g, selected) for _, _, g in tied):
+            support += 1
+        winners.append({"seed": int(s) if str(s).lstrip("-").isdigit() else s,
+                        "lr": win.get("lr"),
+                        "weight_decay": win.get("weight_decay"),
+                        "val_loss": float(best_val),
+                        "tie": len(tied) > 1})
+    out["per_seed_winners"] = winners
+    out["selected_support_count"] = support
+    out["selected_support_fraction"] = support / len(common)
+    out["selection_flip"] = support < len(common)
+
+    others = [g for g in complete if g is not sel_stat]
+    if others:
+        runner = min(others, key=lambda g: g["val_loss_best_mean"])
+        margin = (runner["val_loss_best_mean"]
+                  - sel_stat["val_loss_best_mean"])
+        deltas = [runner["val_loss_best_per_seed"][s]
+                  - sel_stat["val_loss_best_per_seed"][s] for s in common]
+        dmean = sum(deltas) / len(deltas)
+        dstd = None
+        dsem = None
+        if len(deltas) >= 2:
+            dvar = sum((d - dmean) ** 2 for d in deltas) / (len(deltas) - 1)
+            dstd = math.sqrt(dvar)
+            dsem = dstd / math.sqrt(len(deltas))
+        out["runner_up"] = {
+            **_cfg(runner),
+            "val_loss_best_mean": runner["val_loss_best_mean"],
+            "selected_minus_runner_up_mean": margin,
+            "paired_delta_mean": dmean,
+            "paired_delta_std": dstd,
+            "paired_delta_sem": dsem,
+            # 均值差不超过逐种子配对差的 1 个标准差：差距与种子噪声同量级。
+            "within_seed_noise": (None if dstd is None else margin <= dstd),
+        }
+
+    if len(common) >= 3 and len(complete) >= 2:
+        agreement = 0
+        gains = []
+        per_fold = []
+        for held in common:
+            train = [s for s in common if s != held]
+            loo_stat = min(
+                complete,
+                key=lambda g: sum(g["val_loss_best_per_seed"][s]
+                                  for s in train) / len(train))
+            agree = _same(loo_stat, sel_stat)
+            agreement += int(agree)
+            rec = {
+                "held_out_seed": (int(held) if str(held).lstrip("-").isdigit()
+                                  else held),
+                "selected_lr": loo_stat.get("lr"),
+                "selected_weight_decay": loo_stat.get("weight_decay"),
+                "agrees_with_full_selection": agree,
+                "heldout_val_loss": loo_stat["val_loss_best_per_seed"][held],
+            }
+            if isinstance(default, dict) and _same(default, sel_stat):
+                default_loss = default["val_loss_best_per_seed"].get(held)
+            else:
+                default_loss = (default.get("val_loss_best_per_seed", {}).get(held)
+                                if isinstance(default, dict) else None)
+            if default_loss is not None:
+                gain = default_loss - rec["heldout_val_loss"]
+                rec["heldout_gain_vs_default"] = gain
+                gains.append(gain)
+            per_fold.append(rec)
+        loo = {
+            "n_folds": len(common),
+            "agreement_count": agreement,
+            "agreement_rate": agreement / len(common),
+            "per_fold": per_fold,
+            "heldout_gain_vs_default_mean": None,
+            "heldout_gain_vs_default_std": None,
+            "wins_vs_default": None,
+            "ties_vs_default": None,
+            "losses_vs_default": None,
+        }
+        if gains:
+            gm = sum(gains) / len(gains)
+            gstd = None
+            if len(gains) >= 2:
+                gvar = sum((g - gm) ** 2 for g in gains) / (len(gains) - 1)
+                gstd = math.sqrt(gvar)
+            loo.update({
+                "heldout_gain_vs_default_mean": gm,
+                "heldout_gain_vs_default_std": gstd,
+                "wins_vs_default": sum(1 for g in gains if g > 1e-12),
+                "ties_vs_default": sum(1 for g in gains if abs(g) <= 1e-12),
+                "losses_vs_default": sum(1 for g in gains if g < -1e-12),
+            })
+        out["leave_one_seed_out"] = loo
+    return out
+
+
 def tune(config: str, data_dir: str, out_dir: str,
          variant: str = "standard", seed=None, steps=None,
          lr_mults=DEFAULT_LR_MULTS, wd_list=None, device: str = "auto",
@@ -547,6 +708,10 @@ def tune(config: str, data_dir: str, out_dir: str,
         "config_sha256": sha256_file(config),
         "runtime": runtime_info(),
         "trial_identity": trial_identity,
+        # 选择稳定性：多种子均值最优不等于稳定最优；逐种子支持率、
+        # 最优−次优差距与留一种子复选必须随报告落盘。
+        "selection_diagnostics": _selection_diagnostics(
+            grid_stats, selected, default),
         "grid": grid_stats,
         "trials": trials,
     }

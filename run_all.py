@@ -3660,6 +3660,69 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                          "“最优配置”在下一次抽样中翻转（winner's curse）；"
                          "多组接近时应改用 `--tune_seeds`（多带几个种子按均值"
                          "选择）后重跑，不要据此宣称基线已充分调优。")
+        diag = tune.get("selection_diagnostics")
+        if isinstance(diag, dict) and _int_or_zero(diag.get("n_seeds")) >= 2:
+            n_sel = _int_or_zero(diag.get("n_seeds"))
+            support = _int_or_zero(diag.get("selected_support_count"))
+            frac = _num_or_none(diag.get("selected_support_fraction"))
+            if frac is not None:
+                lines.append(
+                    f"- 选择稳定性：最优配置在 {support}/{n_sel} 个选择种子上"
+                    f"实际取得最低 val_loss（支持率 {frac:.0%}）；逐种子赢家与"
+                    "完整配对值见 `baseline_tuning.json` 的 "
+                    "`selection_diagnostics`。")
+                if support < n_sel:
+                    lines.append(
+                        "- ⚠ 均值最优并非逐种子稳定最优：至少一个种子上另一"
+                        "配置更好，说明排序受种子噪声影响；差距接近噪声时"
+                        "不能把该配置当作“已验证的最佳超参数”。")
+            ru = diag.get("runner_up")
+            if isinstance(ru, dict):
+                margin = _num_or_none(ru.get("selected_minus_runner_up_mean"))
+                dstd = _num_or_none(ru.get("paired_delta_std"))
+                dmean = _num_or_none(ru.get("paired_delta_mean"))
+                noise = ru.get("within_seed_noise")
+                lines.append(
+                    "- 最优−次优：次优 lr="
+                    f"{ru.get('lr')}"
+                    + (f"、weight_decay={ru.get('weight_decay')}"
+                       if ru.get("weight_decay") is not None else "")
+                    + f"，均值差 {_fmt4(margin)}；逐种子（次优−最优）配对差 "
+                    f"mean={_fmt4(dmean)}、SD={_fmt4(dstd)}"
+                    + ("——差距在一个种子噪声 SD 内（不稳定）"
+                       if noise is True else
+                       "——差距大于一个种子噪声 SD"
+                       if noise is False else ""))
+                if noise is True:
+                    lines.append(
+                        "- ⚠ 最优与次优的差距未超过逐种子配对波动：更换种子"
+                        "即可能翻转选择；此时应优先看两者在正式种子上的"
+                        "下游指标，而不是把“网格最优”当成真实优势。")
+            loo = diag.get("leave_one_seed_out")
+            if isinstance(loo, dict):
+                n_folds = _int_or_zero(loo.get("n_folds"))
+                agree = _int_or_zero(loo.get("agreement_count"))
+                gain = _num_or_none(loo.get("heldout_gain_vs_default_mean"))
+                gstd = _num_or_none(loo.get("heldout_gain_vs_default_std"))
+                w, t, l = (loo.get("wins_vs_default"),
+                           loo.get("ties_vs_default"),
+                           loo.get("losses_vs_default"))
+                lines.append(
+                    f"- 留一种子复选：{n_folds} 折中 {agree} 折重新选出的配置"
+                    "与全量选择一致"
+                    + (f"（{agree / n_folds:.0%}）" if n_folds else "")
+                    + "；在被留出的种子上，LOO 选择相对默认配置的 held-out "
+                    f"val_loss 平均增益 {_fmt4(gain)}"
+                    + (f" ± {_fmt4(gstd)}" if gstd is not None else "")
+                    + (f"（胜/平/负 {w}/{t}/{l}；正=优于默认）"
+                       if w is not None else "")
+                    + "。LOO 折不独立，仅作稳定性描述。")
+                if (n_folds and agree < n_folds
+                        and gain is not None and gain <= 0):
+                    lines.append(
+                        "- ⚠ 留一复选既翻转选择、又未在留出种子上优于默认："
+                        "网格调优的泛化收益缺乏稳定性证据，正式结论应以"
+                        "新种子复验为准。")
         if tune.get("default_is_optimal") is True:
             lines.append("- ✅ 默认超参数即为网格最优/在容差内：基线的对比不受"
                          "“选了不利学习率”的质疑。全流水线所有变体使用同一"

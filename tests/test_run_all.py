@@ -2262,6 +2262,50 @@ def test_render_baseline_sections_reads_evidence_and_warns():
     print("  [ok] _render_baseline_sections（证据渲染/缺失警告）")
 
 
+
+
+def test_render_baseline_selection_stability():
+    """调优小节必须渲染逐种子支持、次优噪声差距与 LOO 复选，不能只报最优。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
+            "variant": "standard", "steps": 100, "n_trials": 3,
+            "selection_seeds": [7, 8, 9],
+            "selected": {"lr": 0.0012, "weight_decay": 0.1,
+                         "val_loss_best": 3.1},
+            "default_trial": {"lr": 0.0006, "weight_decay": 0.1,
+                              "val_loss_best": 3.2},
+            "selected_minus_default_val_loss": -0.1,
+            "default_is_optimal": False,
+            "selection_diagnostics": {
+                "n_seeds": 3, "selected_support_count": 2,
+                "selected_support_fraction": 2 / 3,
+                "runner_up": {
+                    "lr": 0.0006, "weight_decay": 0.1,
+                    "val_loss_best_mean": 3.15,
+                    "selected_minus_runner_up_mean": -0.05,
+                    "paired_delta_mean": 0.02,
+                    "paired_delta_std": 0.1,
+                    "within_seed_noise": True},
+                "leave_one_seed_out": {
+                    "n_folds": 3, "agreement_count": 2,
+                    "agreement_rate": 2 / 3,
+                    "heldout_gain_vs_default_mean": -0.01,
+                    "heldout_gain_vs_default_std": 0.02,
+                    "wins_vs_default": 1, "ties_vs_default": 0,
+                    "losses_vs_default": 2},
+            }})
+        text = "\n".join(_render_baseline_sections(tmp))
+        assert "选择稳定性" in text and "2/3" in text
+        assert "均值最优并非逐种子稳定最优" in text
+        assert "最优−次优" in text and "一个种子噪声 SD 内" in text
+        assert "留一种子复选" in text and "胜/平/负 1/0/2" in text
+        assert "既翻转选择、又未在留出种子上优于默认" in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] _render_baseline_sections：调优选择稳定性证据")
+
+
 def test_resolve_ngram_split_auto_matches_neural_eval_rule():
     """auto 必须与 lega.evaluate 的 --split auto 同规则：有非空 test.bin → test。"""
     tmp = tempfile.mkdtemp()

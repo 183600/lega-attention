@@ -10,8 +10,9 @@ import tempfile
 from unittest import mock
 
 from lega.tuning import (DEFAULT_LR_MULTS, _grid_stats, _read_best_val_loss,
-                         _trial_identity_summary, _trial_name, build_grid,
-                         parse_floats, run_trial, trial_env, tune)
+                         _selection_diagnostics, _trial_identity_summary,
+                         _trial_name, build_grid, parse_floats, run_trial,
+                         trial_env, tune)
 
 
 def test_build_grid_default_first_and_dedup():
@@ -383,6 +384,14 @@ def test_tune_multiseed_selects_by_mean_not_lucky_seed():
                    - (0.9 + 1.2 + 1.2) / 3) < 1e-12
         assert by_lr[3e-4]["val_loss_best_std"] > 0
         assert set(by_lr[3e-4]["val_loss_best_per_seed"]) == {"7", "8", "9"}
+        # 稳定性报告随 tune() 落盘：默认配置均值最优，但只在 2/3 种子上
+        # 实际赢；次优与其均值差 0.1，小于逐种子配对差 1 个 SD（噪声内）。
+        diag = report["selection_diagnostics"]
+        assert diag["selected_support_count"] == 2, diag
+        assert diag["selection_flip"] is True
+        assert diag["runner_up"]["lr"] == 3e-4
+        assert diag["runner_up"]["within_seed_noise"] is True
+        assert diag["leave_one_seed_out"]["agreement_rate"] == 1.0
         # 单种子（默认）路径保持旧口径且显式标注“选择只用 1 个种子”
         with mock.patch("lega.tuning.run_trial",
                         side_effect=_fake_trial({(6e-4, 0.1): 1.0,
@@ -391,9 +400,53 @@ def test_tune_multiseed_selects_by_mean_not_lucky_seed():
         assert report_s["single_seed_selection"] is True
         assert report_s["selection_seeds"] == [7]
         assert report_s["selected"]["lr"] == 3e-4       # 单种子仍按点估计选
+        assert report_s["selection_diagnostics"]["n_seeds"] == 1
+        assert report_s["selection_diagnostics"]["leave_one_seed_out"] is None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] tune（多种子按均值选择、幸运种子不翻盘、单种子显式标注）")
+
+
+def test_selection_diagnostics_reports_flip_noise_and_loo():
+    """选择稳定性必须显式量化：均值最优可能只赢 1/3 种子、差距在噪声内。"""
+    def g(lr, vals, default=False):
+        mean = sum(vals) / len(vals)
+        return {"lr": lr, "weight_decay": 0.1, "n_seeds": 3,
+                "seeds": [7, 8, 9], "complete": True,
+                "val_loss_best_mean": mean, "val_loss_best_std": None,
+                "val_loss_best_per_seed": {str(seed): v
+                                           for seed, v in zip((7, 8, 9), vals)},
+                "default": default}
+
+    default = g(1.0, [0.9, 0.9, 1.4], default=True)
+    selected = g(2.0, [1.0, 1.0, 1.1])
+    diag = _selection_diagnostics([default, selected], selected, default)
+    assert diag["n_seeds"] == 3
+    assert diag["selected_support_count"] == 1
+    assert abs(diag["selected_support_fraction"] - 1 / 3) < 1e-12
+    assert diag["selection_flip"] is True
+    assert {w["lr"] for w in diag["per_seed_winners"]} == {1.0, 2.0}
+    ru = diag["runner_up"]
+    assert ru["lr"] == 1.0
+    assert abs(ru["selected_minus_runner_up_mean"] - (1 / 30)) < 1e-12
+    assert ru["within_seed_noise"] is True
+    assert abs(ru["paired_delta_mean"] - 1 / 30) < 1e-12
+    loo = diag["leave_one_seed_out"]
+    assert loo["n_folds"] == 3 and loo["agreement_count"] == 2
+    assert abs(loo["agreement_rate"] - 2 / 3) < 1e-12
+    assert loo["wins_vs_default"] == 0
+    assert loo["ties_vs_default"] == 1
+    assert loo["losses_vs_default"] == 2
+    assert abs(loo["heldout_gain_vs_default_mean"] + 1 / 15) < 1e-12
+    # 单种子 / 缺默认：不得伪造稳定性或 LOO
+    one = g(1.0, [1.0])
+    one["seeds"] = [7]
+    one["val_loss_best_per_seed"] = {"7": 1.0}
+    d1 = _selection_diagnostics([one], one, one)
+    assert d1["n_seeds"] == 1 and d1["leave_one_seed_out"] is None
+    assert d1["selected_support_fraction"] == 1.0
+    assert _selection_diagnostics([], {}, None)["n_seeds"] == 0
+    print("  [ok] _selection_diagnostics（支持率、噪声差距、LOO 复选）")
 
 
 def test_grid_stats_duplicate_success_is_not_counted_as_failure():
