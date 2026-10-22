@@ -1622,6 +1622,25 @@ def test_summary_tolerates_huge_int_train_stats():
     print("  [ok] 训练 ms/step 与峰值内存的超大整数安全降级")
 
 
+def test_summary_tolerates_huge_int_tuning_loo_counts():
+    """调优报告的留一折计数字段是合法大整数时，比例渲染不能溢出。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
+            "variant": "standard", "steps": 10, "selection_seeds": [1, 2],
+            "selected": {"lr": 1.0, "val_loss_best": 1.0},
+            "default_trial": {"lr": 1.0, "val_loss_best": 1.0},
+            "selection_diagnostics": {
+                "n_seeds": 2, "selected_support_count": 1,
+                "leave_one_seed_out": {"n_folds": 10 ** 400,
+                                       "agreement_count": 1}}})
+        lines = _render_baseline_sections(tmp, smoke=False)
+        assert any("留一种子复选" in line for line in lines), lines
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 调优报告的超大留一折计数安全降级")
+
+
 def test_tradeoff_table_surfaces_ruler_benefit():
     """权衡表必须输出 RULER 收益列；PPL 持平而 RULER 显著提升时判定不能
     仍写“说服力有限”（长上下文检索是本项目预注册的核心主张）。"""

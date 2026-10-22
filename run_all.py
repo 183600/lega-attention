@@ -4432,10 +4432,18 @@ def _render_baseline_sections(results_dir: str, smoke=None,
                 w, t, l = (loo.get("wins_vs_default"),
                            loo.get("ties_vs_default"),
                            loo.get("losses_vs_default"))
+                agree_txt = ""
+                if n_folds:
+                    try:
+                        agree_txt = f"（{agree / n_folds:.0%}）"
+                    except (OverflowError, ZeroDivisionError):
+                        # 外部 JSON 的合法大整数可精确解析，但转 float 做
+                        # 比例会溢出；比例按缺失渲染，不能让汇总崩溃。
+                        agree_txt = ""
                 lines.append(
                     f"- 留一种子复选：{n_folds} 折中 {agree} 折重新选出的配置"
                     "与全量选择一致"
-                    + (f"（{agree / n_folds:.0%}）" if n_folds else "")
+                    + agree_txt
                     + "；在被留出的种子上，LOO 选择相对默认配置的 held-out "
                     f"val_loss 平均增益 {_fmt4(gain)}"
                     + (f" ± {_fmt4(gstd)}" if gstd is not None else "")
