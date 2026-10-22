@@ -364,6 +364,63 @@ def _finite_float_arg(value, name: str) -> float:
     return f
 
 
+def _resolve_run_options(sanity_cfg, overrides=None, smoke: bool = False) -> dict:
+    """合并配置/CLI/冒烟覆盖并严格校验，返回实际执行的 sanity 参数。
+
+    旧实现只从 ``cfg["sanity"]`` 读取三个阈值，``steps``/``lr``/``warmup``/
+    ``grad_clip``/``log_every`` 即使写进配置也被静默忽略；命令行值随后又用
+    ``int()``/``float()`` 截断，``1.5`` 会变成 1 步、``true`` 会变成 1.0，
+    而落盘 JSON 记录的是截断后的值，配置声明与实际执行不一致。这里统一在
+    开跑前严格解析，非法值直接失败。
+    """
+    sanity_cfg = sanity_cfg if isinstance(sanity_cfg, dict) else {}
+    opt = dict(DEFAULTS)
+    for name in DEFAULTS:
+        if name in sanity_cfg:
+            opt[name] = sanity_cfg[name]
+    if smoke:
+        opt.update(SMOKE_OVERRIDES)
+    for name, value in (overrides or {}).items():
+        if name in opt and value is not None:
+            opt[name] = value
+
+    opt["steps"] = strict_int(opt["steps"], "sanity.steps")
+    if opt["steps"] < 0:
+        raise ValueError(f"sanity.steps 必须 >= 0，收到 {opt['steps']!r}")
+    opt["batch_size"] = strict_int(opt["batch_size"], "sanity.batch_size")
+    if opt["batch_size"] < 1:
+        raise ValueError(
+            f"sanity.batch_size 必须 >= 1，收到 {opt['batch_size']!r}")
+    opt["ctx"] = strict_int(opt["ctx"], "sanity.ctx")
+    if opt["ctx"] < 1:
+        raise ValueError(f"sanity.ctx 必须 >= 1，收到 {opt['ctx']!r}")
+    opt["lr"] = _finite_float_arg(opt["lr"], "sanity.lr")
+    if opt["lr"] < 0:
+        raise ValueError(f"sanity.lr 必须 >= 0，收到 {opt['lr']!r}")
+    opt["warmup"] = strict_int(opt["warmup"], "sanity.warmup")
+    if opt["warmup"] < 0:
+        raise ValueError(f"sanity.warmup 必须 >= 0，收到 {opt['warmup']!r}")
+    opt["grad_clip"] = _finite_float_arg(opt["grad_clip"], "sanity.grad_clip")
+    if opt["grad_clip"] < 0:
+        raise ValueError(
+            f"sanity.grad_clip 必须 >= 0，收到 {opt['grad_clip']!r}")
+    opt["log_every"] = strict_int(opt["log_every"], "sanity.log_every")
+    if opt["log_every"] < 1:
+        raise ValueError(
+            f"sanity.log_every 必须 >= 1，收到 {opt['log_every']!r}")
+    opt["loss_threshold"] = _finite_float_arg(
+        opt["loss_threshold"], "sanity.loss_threshold")
+    opt["acc_threshold"] = _finite_float_arg(
+        opt["acc_threshold"], "sanity.acc_threshold")
+    if not 0.0 <= opt["acc_threshold"] <= 1.0:
+        raise ValueError(
+            f"sanity.acc_threshold 必须在 [0,1] 内，收到 "
+            f"{opt['acc_threshold']!r}")
+    opt["initial_loss_tol"] = _finite_float_arg(
+        opt["initial_loss_tol"], "sanity.initial_loss_tol")
+    return opt
+
+
 def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
                       steps: int, lr: float, device: str, seed: int,
                       warmup: int = 10, grad_clip: float = 1.0,
@@ -638,33 +695,24 @@ def main():
         raise ValueError(
             f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
             f"{args.config}")
-    opt = dict(DEFAULTS)
     sanity_cfg = cfg.get("sanity") or {}
     if not isinstance(sanity_cfg, dict):
         raise ValueError(
             "配置 sanity 段必须是 JSON 对象，收到 "
             f"{type(sanity_cfg).__name__}: {args.config}")
-    opt["loss_threshold"] = _finite_float_arg(
-        sanity_cfg.get("loss_threshold", DEFAULTS["loss_threshold"]),
-        "sanity.loss_threshold")
-    opt["acc_threshold"] = _finite_float_arg(
-        sanity_cfg.get("acc_threshold", DEFAULTS["acc_threshold"]),
-        "sanity.acc_threshold")
-    opt["initial_loss_tol"] = _finite_float_arg(
-        sanity_cfg.get("initial_loss_tol", DEFAULTS["initial_loss_tol"]),
-        "sanity.initial_loss_tol")
-    if args.smoke:
-        opt.update(SMOKE_OVERRIDES)
-    for name in ("steps", "batch_size", "ctx", "lr", "seed",
-                 "loss_threshold", "acc_threshold", "initial_loss_tol"):
-        val = getattr(args, name)
-        if val is not None:
-            opt[name] = val
+    opt = _resolve_run_options(
+        sanity_cfg,
+        {name: getattr(args, name) for name in
+         ("steps", "batch_size", "ctx", "lr",
+          "loss_threshold", "acc_threshold", "initial_loss_tol")},
+        smoke=args.smoke)
     # 种子必须是精确整数："seed": true/1.5 若被 int() 截断成 1，sanity 会用
     # 与配置声明不同的种子跑固定批过拟合，而结果 JSON 记录的是截断值。
     seed = strict_int(
-        opt.get("seed") if opt.get("seed") is not None
-        else cfg.get("seed", 1337), "seed")
+        args.seed if args.seed is not None
+        else (sanity_cfg.get("seed")
+              if sanity_cfg.get("seed") is not None
+              else cfg.get("seed", 1337)), "seed")
     device = (args.device if args.device != "auto"
               else ("cuda" if torch.cuda.is_available() else "cpu"))
     set_seed(seed)
@@ -715,12 +763,12 @@ def main():
           f"steps={opt['steps']} lr={opt['lr']} seed={seed}")
 
     res = run_overfit_check(
-        model, x, y, steps=int(opt["steps"]), lr=float(opt["lr"]),
-        device=device, seed=seed, warmup=int(opt["warmup"]),
-        grad_clip=float(opt["grad_clip"]), log_every=int(opt["log_every"]),
-        loss_threshold=float(opt["loss_threshold"]),
-        acc_threshold=float(opt["acc_threshold"]),
-        initial_loss_tol=float(opt["initial_loss_tol"]))
+        model, x, y, steps=opt["steps"], lr=opt["lr"],
+        device=device, seed=seed, warmup=opt["warmup"],
+        grad_clip=opt["grad_clip"], log_every=opt["log_every"],
+        loss_threshold=opt["loss_threshold"],
+        acc_threshold=opt["acc_threshold"],
+        initial_loss_tol=opt["initial_loss_tol"])
     sanity_manifest = build_run_manifest(
         tag="sanity", variant=args.variant, seed=seed,
         config_path=args.config, data_dir=args.data_dir, device=device)

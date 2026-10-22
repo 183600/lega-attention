@@ -6,7 +6,7 @@ from lega.model import GPT
 from lega.sanity import (active_regularization, batch_contract,
                          batch_fingerprint, batch_metrics,
                          gradient_coverage, losses_consistent,
-                         run_overfit_check)
+                         run_overfit_check, _resolve_run_options)
 
 
 def _model():
@@ -112,6 +112,43 @@ def test_overfit_check_rejects_degenerate_and_oov_batches():
     assert res["checks"]["batch_integer_tokens"] is False
     assert "non_integer_dtype" in res["batch_contract"]["errors"]
     print("  [ok] sanity 拒绝常量批/越界 token/形状错误/非整数 token")
+
+
+def test_resolve_run_options_honors_config_and_rejects_truncation():
+    """sanity 配置块的执行参数必须真正生效，且不能被 int()/float() 截断。"""
+    opt = _resolve_run_options({
+        "steps": 7, "batch_size": 3, "ctx": 16, "lr": 0.001,
+        "warmup": 2, "grad_clip": 0.5, "log_every": 2,
+        "loss_threshold": 0.1, "acc_threshold": 0.9,
+        "initial_loss_tol": 0.5,
+    })
+    assert (opt["steps"], opt["batch_size"], opt["ctx"]) == (7, 3, 16)
+    assert opt["lr"] == 0.001 and opt["warmup"] == 2
+    assert opt["grad_clip"] == 0.5 and opt["log_every"] == 2
+    # CLI 覆盖优先；None 表示未提供，不覆盖配置
+    over = _resolve_run_options({"steps": 7}, {"steps": 9, "lr": None})
+    assert over["steps"] == 9 and over["lr"] == 0.003
+    # 冒烟覆盖只在未提供 CLI/配置时生效的语义保持不变
+    smoke = _resolve_run_options({}, {"steps": None}, smoke=True)
+    assert smoke["steps"] == 60
+    for bad in (True, np.bool_(True), 1.5, "1.5", float("nan"),
+                float("inf")):
+        try:
+            _resolve_run_options({"steps": bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 sanity.steps 未被拒绝: {bad!r}")
+    for key, bad in (("lr", True), ("lr", float("nan")),
+                     ("grad_clip", -1.0), ("acc_threshold", 1.5),
+                     ("log_every", 0), ("warmup", -1)):
+        try:
+            _resolve_run_options({key: bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 sanity.{key} 未被拒绝: {bad!r}")
+    print("  [ok] sanity 执行参数：配置生效、CLI 优先、拒绝截断/非法值")
 
 
 def test_overfit_check_rejects_invalid_numeric_args():
