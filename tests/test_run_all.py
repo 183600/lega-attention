@@ -1168,6 +1168,37 @@ def test_build_summary_missing_latency_entry():
     print("  [ok] build_summary（latency 缺变体条目时安全跳过）")
 
 
+def test_build_summary_reports_gate_overhead_per_head_and_flops():
+    """门控开销必须逐头核算并对照额外 FLOPs，不能只给总参数差。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
+            "variant": "lega", "seed": 1, "val_ppl": 9.0, "val_loss": 2.0,
+            "gate_mean": 0.5, "n_params": 10000, "n_gate_extra": 400,
+            "n_gate_per_head": 100.0, "n_heads": 2, "n_layers": 2,
+            "d_head": 16})
+        _write_json(os.path.join(tmp, "latency.json"), {"variants": {"lega": {
+            "prefill_ms": {"256": {"1": 1.0}},
+            "decode_ms_per_tok": {"256": 0.1},
+            "efficiency": {
+                "n_params": 10000,
+                "flops_per_tok": {"256": {
+                    "total_flops_per_tok": 10000,
+                    "gate_extra_flops_per_tok": 250}},
+                "peak_mem_mb_prefill": {"256": 1.0}}}}})
+        out = build_summary(tmp)
+        row = next(r for r in out["rows"] if r["variant"] == "lega")
+        assert row["n_gate_per_head"] == 100.0
+        assert row["gate_param_pct"] == 4.0
+        assert row["gate_flops_pct"] == 2.5
+        md = out["markdown"]
+        assert "门控开销核算" in md and "门控参数/头" in md
+        assert "100" in md and "4.0000%" in md and "2.5000%" in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary（逐头门控参数 + 额外 FLOPs 占比披露）")
+
+
 def test_build_summary_rejects_malformed_latency_values():
     """latency.json 里的字符串/布尔计时不能参与相对基线比较或崩溃汇总。"""
     tmp = tempfile.mkdtemp()

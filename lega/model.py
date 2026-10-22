@@ -755,6 +755,20 @@ def gate_extra_params(model: nn.Module) -> int:
                if ("gate_" in n or "_null" in n))
 
 
+def gate_extra_params_per_head(model: nn.Module) -> Optional[float]:
+    """逐头（每层每个注意力头）的门控/空注意力额外参数量。
+
+    开销披露不能只报全模型总增量：LEGA 的 w/a/b/d 是逐头参数，
+    qgate/ null 的每头预算不同。逐头值 = 总额外参数 / (层数×头数)，
+    直接来自实际注册参数（不是理论表），便于和 expected_gate_extras 对账。
+    """
+    n_heads = int(getattr(model, "n_heads", 0) or 0)
+    n_layers = int(getattr(model, "n_layers", 0) or 0)
+    if n_heads <= 0 or n_layers <= 0:
+        return None
+    return gate_extra_params(model) / (n_heads * n_layers)
+
+
 def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int) -> int:
     """理论额外参数量，用于单元测试核对。"""
     per = {

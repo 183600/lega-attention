@@ -3921,13 +3921,16 @@ def _eff_cell(entry, key, ctx):
         return None
     eff = entry.get("efficiency")
     eff = eff if isinstance(eff, dict) else {}
-    if key == "flops":
+    if key in ("flops", "total_flops", "gate_flops"):
         by_ctx = eff.get("flops_per_tok")
         if not isinstance(by_ctx, dict):
             return None
         cell = by_ctx.get(str(ctx))
-        return (_num_or_none(cell.get("total_flops_per_tok"))
-                if isinstance(cell, dict) else None)
+        if not isinstance(cell, dict):
+            return None
+        field = ("gate_extra_flops_per_tok" if key == "gate_flops"
+                 else "total_flops_per_tok")
+        return _num_or_none(cell.get(field))
     if key == "mem":
         by_ctx = eff.get("peak_mem_mb_prefill")
         return (_num_or_none(by_ctx.get(str(ctx)))
@@ -4346,6 +4349,10 @@ def build_summary(results_dir: str, audit: dict = None,
         ev_example = next((s["eval"] for s in m.values() if s.get("eval")), None)
         row["params"] = (ev_example or {}).get("n_params")
         row["gate_extra"] = (ev_example or {}).get("n_gate_extra", 0)
+        row["n_gate_per_head"] = (ev_example or {}).get("n_gate_per_head")
+        row["n_heads"] = (ev_example or {}).get("n_heads")
+        row["n_layers"] = (ev_example or {}).get("n_layers")
+        row["d_head"] = (ev_example or {}).get("d_head")
         row["val_ppl_clamped"] = any(
             (s.get("eval") or {}).get("val_ppl_clamped") for s in m.values())
         # 训练/评估覆盖的“最坏种子”兜底值：均值可能掩盖某个种子只跑了
@@ -4488,7 +4495,8 @@ def build_summary(results_dir: str, audit: dict = None,
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
-            ("gate_extra", "门控额外参数"), ("val_ppl", "PPL↓"),
+            ("gate_extra", "门控额外参数"), ("n_gate_per_head", "门控参数/头"),
+            ("val_ppl", "PPL↓"),
             ("ppl_ci_rel_pct", "PPL评估CI±%"),
             ("epochs_seen", "训练覆盖(epoch)"),
             ("ckpt_step", "选型步"),
@@ -6105,6 +6113,59 @@ def build_summary(results_dir: str, audit: dict = None,
         md.append("- ⚠ 未找到可用的注册假设文件（`preregistration/hypotheses.json`）。"
                   "本页全部对比均为事后分析：没有预注册边界，任何“显著”都只能"
                   "按探索性线索对待。请登记方向性主张后重跑正式实验。")
+
+    # --- 门控开销：逐头参数与额外计算必须如实核算，不能只报“涨点”。
+    # 参数是实际注册参数（gate_extra_params），FLOPs 是 latency.json 的解析
+    # 估计（见 estimate_flops_per_token）；两者都取全部变体公共 ctx，避免
+    # 拿不同上下文的 FLOPs 比较。
+    md += ["", "## 门控开销核算（逐头参数与额外计算）", ""]
+    md.append("门控/空注意力的开销按**逐头参数量**与**解析 FLOPs**分列，"
+              "与收益（PPL/RULER）分开报告：参数量取自实际注册参数，"
+              "FLOPs 为 batch=1 prefill 的解析估计（matmul 2·MACs + "
+              "注意力 4·kv_len·d/层 + 门控项），不是实测延迟。")
+    md.append("")
+    md.append("| 变体 | 门控参数/头 | 门控额外参数 | 占总参数 | "
+              "门控 FLOPs/token | 占总 FLOPs | 说明 |")
+    md.append("|---|---|---|---|---|---|---|")
+    for r in rows:
+        v = r.get("variant")
+        per_head = _num_or_none(r.get("n_gate_per_head"))
+        extra = _num_or_none(r.get("gate_extra"))
+        params = _num_or_none(r.get("params"))
+        param_pct = ((extra / params * 100.0)
+                     if (extra is not None and params) else None)
+        e = lat_entries.get(v)
+        gate_flops = (_eff_cell(e, "gate_flops", common_ctx)
+                      if common_ctx is not None else None)
+        total_flops = (_eff_cell(e, "flops", common_ctx)
+                       if common_ctx is not None else None)
+        flop_pct = ((gate_flops / total_flops * 100.0)
+                    if (gate_flops is not None and total_flops) else None)
+        r["gate_param_pct"] = (round(param_pct, 4)
+                               if param_pct is not None else None)
+        r["gate_flops_per_tok"] = gate_flops
+        r["gate_flops_pct"] = (round(flop_pct, 4)
+                               if flop_pct is not None else None)
+        note = ("无门控（外部基线）" if v in ("standard", "standard_sdpa")
+                else "逐头 w/a/b/d 或 null 槽" if (extra or 0) > 0 else "-")
+        md.append(
+            f"| {VARIANT_CN.get(v, v)} "
+            f"| {'-' if per_head is None else f'{per_head:g}'} "
+            f"| {'-' if extra is None else f'{extra:,.0f}'} "
+            f"| {'-' if param_pct is None else f'{param_pct:.4f}%'} "
+            f"| {'-' if gate_flops is None else f'{gate_flops:,.0f}'} "
+            f"| {'-' if flop_pct is None else f'{flop_pct:.4f}%'} "
+            f"| {note} |")
+    md.append("")
+    md.append("逐头参数 = 总额外参数 / (层数 × 头数)，来自实际注册的 "
+              "gate_w/gate_a/gate_b/gate_d 或 k_null/v_null；LEGA 每头 "
+              "d_head+3，qgate 每头 d_head+1，null 每头 2·d_head，"
+              "gate_only 每头 1。**收益必须对照这两列开销解读**："
+              "“门控参数占比很小”不等于“额外计算可忽略”——集中度项要扫描 "
+              "每个头的 max_j p_j，其 FLOPs 随上下文长度线性增长。"
+              + ("当前公共 ctx=" + str(common_ctx)
+                 + "；不同 ctx 的数值见 latency.json。" if common_ctx
+                 else "当前缺少公共 ctx 的 latency 数据，FLOPs 列不可得。"))
 
     # --- 涨点-增幅权衡：评价改进不能只看指标涨点
     md += ["", "## 涨点-增幅权衡（涨点必须对照增幅）", ""]

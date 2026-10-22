@@ -14,7 +14,8 @@ import torch
 
 import lega.attention as attention_mod
 from lega.attention import CausalSelfAttention, VARIANTS
-from lega.model import GPT, RoPE, expected_gate_extras, gate_extra_params
+from lega.model import (GPT, RoPE, expected_gate_extras,
+                        gate_extra_params, gate_extra_params_per_head)
 
 
 def _mk_attn(d_model=16, n_heads=1, variant="lega_no_query", **kw):
@@ -151,6 +152,8 @@ def test_all_variants_forward_backward_and_params():
         model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=2,
                     n_heads=2, ffn_mult=4, variant=v)
         assert gate_extra_params(model) == expected_gate_extras(v, 16, 2, 2), v
+        per_head = gate_extra_params_per_head(model)
+        assert per_head == expected_gate_extras(v, 16, 2, 2) / (2 * 2), v
         idx = torch.randint(0, 64, (2, 12))
         out = model(idx, targets=idx)
         assert torch.isfinite(out["loss"]).item(), v

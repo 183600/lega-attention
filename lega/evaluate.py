@@ -17,7 +17,8 @@ import torch.nn.functional as F
 
 from .data import get_val_windows, load_bin, load_tokenizer
 from .datacheck import append_test_access
-from .model import load_model, count_params, gate_extra_params
+from .model import (gate_extra_params, gate_extra_params_per_head,
+                    load_model, count_params)
 from .preflight import (allow_protocol_violations,
                         data_protocol_preflight)
 from .repro import (load_provenance, sha256_file,
@@ -555,6 +556,12 @@ def main():
         "gate_layer_mean": metrics.get("gate_layer_mean"),
         "n_params": count_params(model),
         "n_gate_extra": gate_extra_params(model),
+        # 开销披露：逐头参数量与模型结构一并落盘，summary 不必再从名字猜
+        "n_gate_per_head": gate_extra_params_per_head(model),
+        "n_heads": getattr(model, "n_heads", None),
+        "n_layers": getattr(model, "n_layers", None),
+        "d_head": (int(model.d_model // model.n_heads)
+                   if getattr(model, "n_heads", 0) else None),
         **checkpoint_selection_info(
             ck, cfg_used.get("steps") if isinstance(cfg_used, dict) else None),
         "eval_iters_requested": metrics["eval_iters_requested"],
