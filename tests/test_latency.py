@@ -28,7 +28,7 @@ def test_timing_stats_reports_spread():
     assert empty["median_ms"] is None and empty["spread_pct"] is None
     # bool/负数/非有限/非数值不是计时观测，不能伪装成 1ms 或污染散布
     noisy = timing_stats([True, False, -1.0, float("nan"), float("inf"),
-                          "bad", None, 2.0, "4.0"])
+                          "bad", "1_0", None, 2.0, "4.0"])
     assert noisy["n"] == 2 and noisy["median_ms"] == 3.0, noisy
     print("  [ok] timing_stats（中位数/p10/p90/散布；非法计时按缺失）")
 

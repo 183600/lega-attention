@@ -1467,6 +1467,8 @@ def short_overlap_alerts(short_contamination: dict) -> list:
         # bool 是 int 子类（True→1.0）：不能把 true 当成 100% 重叠率触发告警。
         if raw is None or isinstance(raw, (bool, np.bool_)):
             continue
+        if isinstance(raw, str) and "_" in raw:
+            continue
         try:
             rate = float(raw)
         except (TypeError, ValueError, OverflowError):

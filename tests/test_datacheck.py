@@ -1059,16 +1059,16 @@ def test_test_access_ledger():
 
 
 def test_prepare_bins_rejects_bool_or_fractional_token_counts():
-    """缓存元数据的 bool/小数 token 数不能伪造尺寸一致而绕过重建。"""
+    """缓存元数据的 bool/小数/下划线 token 数不能伪造尺寸一致而绕过重建。"""
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
-            f.write("a")
+            f.write("abcdefghij")
         with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
-            f.write("b")
+            f.write("klmnopqrst")
         meta = prepare_bins(d, kind="char", force=True)
-        assert meta["train_tokens"] == 1 and meta["val_tokens"] == 1
+        assert meta["train_tokens"] == 10 and meta["val_tokens"] == 10
         meta_path = os.path.join(d, "meta.json")
-        for bad in (True, 1.5, float("nan"), "bad"):
+        for bad in (True, 1.5, float("nan"), "bad", "1_0"):
             with open(meta_path, encoding="utf-8") as f:
                 m = json.load(f)
             m["train_tokens"] = bad
@@ -1076,9 +1076,9 @@ def test_prepare_bins_rejects_bool_or_fractional_token_counts():
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(m, f)
             rebuilt = prepare_bins(d, kind="char")
-            assert rebuilt["train_tokens"] == 1, (bad, rebuilt)
-            assert rebuilt["val_tokens"] == 1, (bad, rebuilt)
-    print("  [ok] bin 缓存拒绝 bool/小数 token 数，强制重建")
+            assert rebuilt["train_tokens"] == 10, (bad, rebuilt)
+            assert rebuilt["val_tokens"] == 10, (bad, rebuilt)
+    print("  [ok] bin 缓存拒绝 bool/小数/下划线 token 数，强制重建")
 
 
 def test_prepare_bins_writes_report_and_decontaminates():
@@ -1662,7 +1662,8 @@ def test_short_ngram_overlap_and_alerts_are_diagnostic_only():
     assert short_overlap_alerts({"train_test": {"overlap_rate": 0}}) == []
     assert short_overlap_alerts({"train_test": {"overlap_rate": "bad"}}) == []
     # bool/越界比率不是重叠率证据，不能触发 100%/150% 假告警
-    for bad in (True, False, -0.1, 1.5, float("nan"), float("inf"), [0.1]):
+    for bad in (True, False, -0.1, 1.5, float("nan"), float("inf"),
+                "0_5", [0.1]):
         assert short_overlap_alerts({"train_test": {"overlap_rate": bad}}) == [], bad
     assert short_overlap_alerts(None) == []
     print("  [ok] 短 n-gram 重叠：检出整句复用且仅告警、不进硬闸门")

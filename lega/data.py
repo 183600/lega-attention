@@ -260,6 +260,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             raw = meta.get(key, -1)
             if isinstance(raw, (bool, np.bool_)):
                 return -1
+            if isinstance(raw, str) and "_" in raw:
+                return -1
             try:
                 f = float(raw)
             except (TypeError, ValueError, OverflowError):

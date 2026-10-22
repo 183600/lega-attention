@@ -84,6 +84,8 @@ def timing_stats(times_ms) -> dict:
     for t in times_ms:
         if t is None or isinstance(t, (bool, np.bool_)):
             continue
+        if isinstance(t, str) and "_" in t:
+            continue
         try:
             f = float(t)
         except (TypeError, ValueError, OverflowError):
