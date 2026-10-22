@@ -3238,7 +3238,9 @@ def apply_integrity_gate(hyp_eval: list, integrity: dict) -> list:
     地位——逐条标注 valid 标志与原因，汇总页显式降级为探索性，
     而不是假装边界仍然成立。
     """
-    valid = bool(_as_dict(integrity).get("confirmatory_valid"))
+    # 只接受真正的 bool true：字符串 "false"/1 经 truthiness 会错误地授予
+    # 确认性资格，恰好绕过“完整性失败必须降级”的保护。
+    valid = _as_dict(integrity).get("confirmatory_valid") is True
     reason = ("登记表完整性校验通过" if valid else
               "预注册完整性校验未通过（登记表被删/改/无留痕新增，"
               "或锁文件缺失）：判定降级为探索性，不得作为 confirmatory 结论")

@@ -4274,6 +4274,11 @@ def test_registration_paths_tolerate_malformed_hypotheses_and_status():
     assert apply_integrity_gate({"x": 1}, {"confirmatory_valid": True}) == {"x": 1}
     hyp = [{"confirmatory_valid": True}]
     apply_integrity_gate(hyp, {"confirmatory_valid": True})
+    # 损坏的“有效性”字段不能经 truthiness 授予确认性资格。
+    for bogus in ("false", 1, "yes", [1], {"ok": True}, None):
+        hp = [{"confirmatory_valid": True}]
+        apply_integrity_gate(hp, {"confirmatory_valid": bogus})
+        assert hp[0]["confirmatory_valid"] is False, bogus
     apply_scope_gate(hyp, {"scope": {"config": "x"}, "checked": False,
                            "problems": [1]})
     assert hyp[0]["confirmatory_valid"] is False
