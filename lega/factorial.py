@@ -158,8 +158,19 @@ def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:
     total = _finite_float(total_effect, "total_effect")
     if total <= 1e-12:
         return {}
-    return {k: float(_finite_float(v, f"phi {k}")) / total
-            for k, v in phi.items()}
+    out = {}
+    for k, v in phi.items():
+        f = _finite_float(v, f"phi {k}")
+        try:
+            share = f / total
+        except (OverflowError, ZeroDivisionError):
+            return {}
+        # 有限输入相除仍可能溢出（极大 φ / 极小 total）；占比不可表示时
+        # 不能把 inf 写进 JSON/汇总，按“无法给出占比”处理。
+        if not math.isfinite(share):
+            return {}
+        out[k] = float(share)
+    return out
 
 
 def ppl_ratio_from_phi(phi: float) -> float:

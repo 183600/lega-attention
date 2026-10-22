@@ -21,7 +21,7 @@ from lega.ablate import (INFERENCE_FACTORIAL_CELLS, LESION_BY_ID,
                          _finite_or_none, _layer_permutation,
                          _window_delta_stats)
 from lega.factorial import (CELL_ORDER, decomposition, oriented_value,
-                            ppl_ratio_from_phi, shapley_values)
+                            ppl_ratio_from_phi, shapley_values, shares)
 from lega.model import GPT, save_checkpoint
 from run_all import (_ablation_lesion_records, _factorial_shapley_tests,
                      _inference_shapley_tests, CAUSAL_ABLATION_METRIC,
@@ -566,3 +566,13 @@ def test_inference_shapley_only_uses_full_lega_checkpoint():
     assert _inference_shapley_tests({"lega_placebo": {1: payload}}) == []
     print("  [ok] 推理期 Shapley 只使用 Full(=lega) checkpoint，"
           "缺项变体不产生重复因子行")
+
+
+def test_shapley_shares_never_emit_nonfinite_ratios():
+    """有限 φ/total 相除溢出时，占比不可表示，不能返回 inf 污染 JSON。"""
+    assert shares({"A": 1.0, "B": 3.0}, 4.0) == {"A": 0.25, "B": 0.75}
+    assert shares({"A": -1.0}, 0.0) == {}
+    # 极大 φ / 极小 total：真实占比超出 float 范围，按无法表示处理。
+    assert shares({"A": 1e308, "B": 1e308}, 1e-11) == {}
+    assert shares({"A": 1e308}, 1e308) == {"A": 1.0}
+    print("  [ok] Shapley 占比：极小 total/溢出时返回空表，不写出 inf")
