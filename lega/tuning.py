@@ -26,7 +26,7 @@ import time
 
 import numpy as np
 
-from .utils import seed_int, strict_int
+from .utils import ensure_cublas_workspace_config, seed_int, strict_int
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 def _finite_number(value, name: str) -> float:
@@ -102,7 +102,9 @@ def trial_env(seed: int, env=None) -> dict:
     seed = seed_int(seed, "seed")
     e = dict(env if env is not None else os.environ)
     e["PYTHONHASHSEED"] = str(seed)
-    e.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    # 非法/缺失的 CUBLAS 工作区配置必须在任何 CUDA 初始化前修复，不能
+    # 用 setdefault 把父进程继承来的非法值原样传进 trial 子进程。
+    ensure_cublas_workspace_config(e)
     return e
 
 
