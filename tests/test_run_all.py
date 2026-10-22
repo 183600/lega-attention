@@ -4108,6 +4108,34 @@ def test_summary_tolerates_malformed_sanity_and_baseline_tuning():
     print("  [ok] 汇总：sanity/tuning 嵌套字段畸形安全跳过")
 
 
+def test_summary_ignores_sanity_for_other_seed():
+    """同 tag 换种子重跑时，旧种子的 sanity PASS 不能冒充本轮证据。
+
+    run_all 只用首个种子跑 sanity；results/<tag> 被复用且 --skip_sanity 时，
+    旧 sanity_*.json 仍留在目录里。汇总只按变体过滤会把它渲染成本轮闸门，
+    让“本轮未跑 sanity”看上去有 PASS 证据。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": ["standard", "lega"], "seeds": [7]})
+        _write_json(os.path.join(tmp, "sanity_standard.json"), {
+            "variant": "standard", "seed": 7, "passed": True,
+            "initial": {"loss": 4.0}, "final": {"loss": 0.1, "token_acc": 1.0}})
+        _write_json(os.path.join(tmp, "sanity_lega.json"), {
+            "variant": "lega", "seed": 1, "passed": True,
+            "initial": {"loss": 4.0}, "final": {"loss": 9.9, "token_acc": 0.0}})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "0.1000" in md, md
+        # 旧种子（1）的 sanity 必须被剔除，不能显示其最终 loss/准确率
+        assert "9.9000" not in md, md
+        assert "1.0000" in md  # 当前种子 sanity 的 token 准确率
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 汇总：按首个种子剔除旧 sanity 证据")
+
+
 def test_registered_hypothesis_rejects_missing_or_invalid_n():
     """n 缺失/非法时不能仅凭 p_adj 显著就判“支持”。"""
     tests = [

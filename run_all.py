@@ -5273,10 +5273,25 @@ def build_summary(results_dir: str, audit: dict = None,
         d = load(p)
         return d if isinstance(d, dict) else None
 
-    # 与 runs 同一“本次 run”口径（sanity 无种子维度，只按变体过滤）。
+    # 与 runs 同一“本次 run”口径：sanity 虽无“每变体多档种子”，但
+    # run_all 只用首个种子跑 sanity；同一 results 目录被换种子重跑（尤其
+    # --skip_sanity）时，旧种子的 PASS 文件不能在本轮汇总里冒充本次证据。
+    expected_sanity_seed = (_integral_value(scope_seeds[0])
+                            if scope_seeds else None)
     if scope_variants is not None:
         sanity_files = [fp for fp in sanity_files
                         if (_load_dict(fp) or {}).get("variant") in scope_variants]
+    if expected_sanity_seed is not None:
+        kept = []
+        for fp in sanity_files:
+            d = _load_dict(fp) or {}
+            d_seed = _integral_value(d.get("seed"))
+            # 旧 sanity 文件没有 seed 字段时保留（无法核对，不能伪装成
+            # “已属于本次 run”）；明确记录为其他 seed 的文件必须剔除。
+            if d_seed is not None and d_seed != expected_sanity_seed:
+                continue
+            kept.append(fp)
+        sanity_files = kept
     if sanity_files:
         md.append("")
         md.append("| 变体 | sanity | 初始 loss | 最终 loss | token 准确率 |")
