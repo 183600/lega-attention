@@ -1958,6 +1958,17 @@ def _length_trend_verdict(t: dict, kind: str) -> str:
                     f"{delta * 100.0:+.2f} pp，Holm p={padj:.4f}）")
     else:
         base = f"未检出长度趋势（Holm p={padj:.4f}）"
+    # 与 _apply_holm 的通用 verdict 一致：t 与符号翻转置换结论冲突时必须
+    # 显式披露，不能因为这里重写了措辞就把置换证据的警示丢掉。小样本下
+    # 置换 p 的下限可能高于 α，这一句是“显著”结论最重要的稳健性限定。
+    perm = _finite_number(t.get("p_perm_adj"))
+    if (padj is not None and perm is not None
+            and isinstance(n, int) and not isinstance(n, bool)
+            and n >= MIN_SEEDS):
+        if padj < ALPHA and perm >= ALPHA:
+            base += "；⚠ 置换检验不显著（见注）"
+        elif padj >= ALPHA and perm < ALPHA:
+            base += "；置换检验显著（边缘证据，建议补种子确认）"
     return base + _noise_verdict_note(t)
 
 
@@ -2039,15 +2050,20 @@ def _ruler_length_analysis(runs, pairs) -> dict:
             })
         if not seed_rows:
             continue
-        # 所有种子必须共享同一组上下文档位，否则各档的 n 不同，跨种子的
-        # “同 ctx 配对”不再成立。取交集并丢弃缺档种子，同时记账。
+        # 所有被纳入趋势的种子必须共享同一组上下文档位，否则各档的 n 不同，
+        # 跨种子的“同 ctx 配对”不再成立。取交集作为参照网格，只保留实际
+        # 网格恰好等于交集的种子，并记账；若保留“有额外档位”的种子，
+        # overall/ctx-average 会按各 seed 的完整网格计算，与这里报告的
+        # 公共 ctx 轴不一致（汇总行的总体 Δ 将无法对应到 contexts）。
         common = set.intersection(*[set(r["diffs"]) for r in seed_rows])
         if not common:
             continue
-        kept = [r for r in seed_rows if common <= set(r["diffs"])]
+        kept = [r for r in seed_rows if set(r["diffs"]) == common]
         dropped = len(seed_rows) - len(kept)
         if dropped:
             excluded["missing_contexts"] += dropped
+        if not kept:
+            continue
         ctxs = sorted(common)
         n_seeds = len(kept)
         per_context = []
@@ -3654,7 +3670,10 @@ def _render_ruler_length(analysis) -> list:
             n_loo += int(p.get("slope_loo_sign_stable") is False)
             n_unbalanced += int(p.get("balanced_contexts") is False)
             slope_verdict = slope.get("verdict") or "-"
-            if "显著" in slope_verdict and "未检出" not in slope_verdict:
+            # 不能按 “显著” 子串计数：``"不显著（Holm ...）"`` 也包含该词。
+            # 只把校正后 p<α 的斜率检验算作显著趋势。
+            slope_padj = _finite_number(slope.get("p_adj"))
+            if slope_padj is not None and slope_padj < ALPHA:
                 n_trend += 1
             verdict = slope_verdict
             if flags:

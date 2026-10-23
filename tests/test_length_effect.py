@@ -263,6 +263,9 @@ def test_build_summary_length_reversal_is_visible():
         assert row["ruler_length_masking"] is False
         assert pair["slope_loo_sign_stable"] is True
         assert pair["slope_per_doubling"]["p_adj"] is not None
+        # 置换 p 与 t 不一致时，趋势专用结论不能把 _apply_holm 的警示丢掉。
+        assert "置换检验不显著" in pair["slope_per_doubling"]["verdict"]
+        assert "置换检验不显著" in pair["long_minus_short"]["verdict"]
         ctx_tests = sig["ruler_length_tests"]["per_context"]
         # 逐对 JSON 必须回填校正后的置换 p，不能只让 tests 数组里有值。
         assert all(c.get("p_perm_adj") is not None
@@ -559,3 +562,36 @@ def test_render_ruler_length_tolerates_malformed_nested_fields():
                                         for x in md)
     text = "\n".join(md)
     assert "1024" in text and "bad" not in text
+    # “不显著”也包含“显著”二字：不能把它计入显著趋势数。
+    nonsig = {"pairs": [{
+        "candidate": "a", "reference": "b", "n_contexts": 3,
+        "contexts": [512, 1024, 2048],
+        "slope_per_doubling": {
+            "mean_diff": 0.0, "p_adj": 0.9,
+            "verdict": "不显著（Holm 校正后 p=0.9000）"},
+    }]}
+    text = "\n".join(_render_ruler_length(nonsig))
+    assert "0 组斜率经 Holm 校正后显著" in text
+
+
+def test_ruler_length_drops_seeds_with_different_context_grids():
+    """各 seed 网格不一致时只保留恰好等于公共网格的种子并记账。"""
+    runs = {"standard": {}, "lega": {}}
+    for seed in (1, 2, 3, 4):
+        ctxs = [512, 1024, 2048] if seed <= 2 else [512, 1024]
+        for variant, em in (("standard", 0.5), ("lega", 0.6)):
+            runs[variant][seed] = {"ruler": {
+                "ctx_lens": ctxs, "n_samples": 10, "sample_seed": 1,
+                "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
+                "vt_chains": 4, "vt_depth": 4,
+                "results": {"niah_synth": {
+                    str(c): {"em": em, "n": 10} for c in ctxs}}}}
+    out = _ruler_length_analysis(runs, [("lega", "standard")])
+    pair = out["pairs"][0]
+    assert pair["contexts"] == [512, 1024]
+    assert pair["n_seeds"] == 2
+    assert pair["excluded"]["missing_contexts"] == 2
+    # 总体/逐档均值只来自被保留的 2-ctx 种子，必须与报告轴一致。
+    assert abs(pair["overall_mean_diff"] - 0.1) < 1e-12
+    assert abs(pair["context_average_mean_diff"] - 0.1) < 1e-12
+    assert pair["balanced_contexts"] is True
