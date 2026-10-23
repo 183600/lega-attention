@@ -1064,8 +1064,17 @@ def test_distribution_shift_metric():
             raise AssertionError(f"非法 max_samples 应报错: {bad!r}")
         except ValueError:
             pass
+    # uint16 词表上限：超出后密集直方图会按声明容量做巨额分配（10**12 即
+    # TB 级），必须像 prepare_bins 一样显式拒绝，而不是在计数阶段 OOM。
+    for bad_vocab in (0, -1, True, 1.5, "bad", 65537, 10 ** 12):
+        try:
+            distribution_shift(rare, np.array([7, 1], dtype=np.uint16),
+                               bad_vocab)
+            raise AssertionError(f"非法 vocab_size 应报错: {bad_vocab!r}")
+        except ValueError:
+            pass
     print("  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计，"
-          "非法预算显式拒绝")
+          "非法预算/词表显式拒绝")
 
 
 def test_test_access_ledger():

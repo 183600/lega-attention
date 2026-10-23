@@ -1372,10 +1372,13 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
     count_mode="sampled" 供审计。
     """
     # 词表大小是协议身份：bool/小数/下划线数字串不能被 int() 截断成另一个
-    # 计数区间宽度；负值/零也无法定义 token 分布。
+    # 计数区间宽度；负值/零也无法定义 token 分布。token 流以 uint16 存储，
+    # 超出 65536 的词表还会让本函数的密集直方图按未声明的容量分配内存
+    # （10**12 直接尝试 TB 级分配），必须与 prepare_bins 同一闸门拒绝。
     vocab_size = strict_int(vocab_size, "vocab_size")
     if vocab_size < 1:
         raise ValueError(f"vocab_size 必须是正整数，收到 {vocab_size}")
+    check_vocab_capacity(vocab_size)
     if max_samples is None:
         limit = None
     else:
