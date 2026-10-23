@@ -1936,6 +1936,7 @@ def _length_trend_verdict(t: dict, kind: str) -> str:
     ``_apply_holm`` 的通用 verdict 只区分“更好/更差”，对“优势随长度增大”
     这类交互没有语义；这里在保留 p_adj/置换/噪声信息的前提下改写。
     """
+    t = t if isinstance(t, dict) else {}
     n = t.get("n")
     padj = t.get("p_adj")
     if t.get("p") is None or padj is None:

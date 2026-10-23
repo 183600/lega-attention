@@ -15,7 +15,8 @@ import tempfile
 
 from lega.lengtheffect import (context_macro_means, context_task_means,
                                log2_slope, span_contrast)
-from run_all import _render_ruler_length, _ruler_avg_of, build_summary
+from run_all import (_length_trend_verdict, _render_ruler_length,
+                     _ruler_avg_of, build_summary)
 
 
 def _payload(results):
@@ -545,6 +546,7 @@ def test_render_ruler_length_tolerates_malformed_nested_fields():
          ],
          "direction_consistency": {"positive": 1}},
     ]}
+    assert isinstance(_length_trend_verdict(None, "slope"), str)
     md = _render_ruler_length(analysis)
     assert isinstance(md, list) and any("RULER 上下文长度剂量-反应" in x
                                         for x in md)
