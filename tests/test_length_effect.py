@@ -15,7 +15,7 @@ import tempfile
 
 from lega.lengtheffect import (context_macro_means, context_task_means,
                                log2_slope, span_contrast)
-from run_all import build_summary
+from run_all import _ruler_avg_of, build_summary
 
 
 def _payload(results):
@@ -79,6 +79,39 @@ def test_context_task_means_malformed_returns_empty():
     # 全零与“没有观测”必须可区分：前者是有效的 0 分，后者是空。
     zero = _payload({"vt": {"512": {"em": 0.0, "n": 10}}})
     assert context_macro_means(zero) == {512: 0.0}
+
+
+def test_context_task_means_accepts_exact_huge_and_numeric_string_counts():
+    """合法大整数 n 不能因 float 溢出被丢掉；数值字符串与 run_all 同口径。"""
+    huge_n = 10 ** 400
+    payload = _payload({
+        "niah_synth": {
+            "512": {"em": 0.5, "n": huge_n},
+            "1024": {"em": 0.75, "n": "20"},
+            "2048": {"em": 0.25, "n": 4.0},
+        },
+        "vt": {
+            "512": {"em": 0.1, "n": "2e1"},
+            "1024": {"em": 0.25, "n": 5},
+            "2048": {"em": 0.75, "n": 5},
+        },
+    })
+    out = context_task_means(payload)
+    assert out == {
+        512: {"niah_synth": 0.5, "vt": 0.1},
+        1024: {"niah_synth": 0.75, "vt": 0.25},
+        2048: {"niah_synth": 0.25, "vt": 0.75},
+    }
+    # 平衡网格下必须与既有 RULER macro 平均严格一致（含大整数/字符串 n）。
+    macro = context_macro_means(payload)
+    assert abs(sum(macro.values()) / len(macro) - _ruler_avg_of(payload)) < 1e-12
+    # 非规范/非整数/非正的字符串计数仍是损坏元数据，按缺失跳过。
+    bad = _payload({"vt": {
+        "512": {"em": 0.2, "n": "1_0"},
+        "1024": {"em": 0.4, "n": "2.5"},
+        "2048": {"em": 0.6, "n": "0"},
+    }})
+    assert context_task_means(bad) == {}
 
 
 def test_log2_slope_recovers_known_log_linear_relation():

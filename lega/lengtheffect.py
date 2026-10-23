@@ -35,6 +35,7 @@
 时才按升序一一对齐，缺档/多档返回空，避免把任务组成变化当成新的长度档。
 """
 import math
+from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 
 __all__ = [
@@ -72,21 +73,41 @@ def _positive_count(value):
     """正整数字段（样本数 n）；缺省/非整数/非正 → None。
 
     与 run_all 的 RULER 汇总同口径：显式 ``n`` 是“该格有多少有效观测”的
-    声明，0 或负数不能用一个空洞的 EM=0 拉低平均。
+    声明，0 或负数不能用一个空洞的 EM=0 拉低平均。整数必须按**精确值**校验：
+    ``float(10**400)`` 会 OverflowError，但 10**400 仍是合法的正样本数，
+    不能因为无法转成浮点就被当成非法 n 丢掉（否则该格从长度分层中静默
+    消失，且与 ``_ruler_avg_of`` 的单元格集合不一致）。整数字符串/整数值
+    浮点同样规范化为 int，与 run_all 的 ``_integral_value`` 保持同口径。
     """
     if value is None or isinstance(value, bool):
         return None
     if type(value).__name__ == "bool_":
         return None
-    if isinstance(value, str) or not isinstance(value, Real):
+    if isinstance(value, str):
+        s = value.strip()
+        # 下划线数字串不是规范 JSON 数值（与 _integral_value 同口径拒绝）。
+        if not s or "_" in s:
+            return None
+        try:
+            d = Decimal(s)
+        except (InvalidOperation, ValueError):
+            return None
+        if not d.is_finite() or d != d.to_integral_value():
+            return None
+        n = int(d)
+    elif isinstance(value, Integral):
+        n = int(value)
+    elif isinstance(value, Real):
+        try:
+            f = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(f) or not f.is_integer():
+            return None
+        n = int(f)
+    else:
         return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if not math.isfinite(f) or f != math.floor(f) or f <= 0:
-        return None
-    return int(f)
+    return n if n > 0 else None
 
 
 def _canonical_ctx(key):
