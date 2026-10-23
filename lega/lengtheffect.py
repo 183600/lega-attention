@@ -36,7 +36,7 @@
 """
 import math
 from decimal import Decimal, InvalidOperation
-from numbers import Integral, Real
+from numbers import Integral
 
 __all__ = [
     "context_task_means",
@@ -104,7 +104,7 @@ def _positive_count(value):
         n = int(d)
     elif isinstance(value, Integral):
         n = int(value)
-    elif isinstance(value, Real):
+    else:
         try:
             f = float(value)
         except (TypeError, ValueError, OverflowError):
@@ -112,8 +112,6 @@ def _positive_count(value):
         if not math.isfinite(f) or not f.is_integer():
             return None
         n = int(f)
-    else:
-        return None
     return n if n > 0 else None
 
 
