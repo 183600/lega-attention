@@ -246,6 +246,15 @@ def test_build_summary_length_reversal_is_visible():
         assert pair["slope_loo_sign_stable"] is True
         assert pair["slope_per_doubling"]["p_adj"] is not None
         ctx_tests = sig["ruler_length_tests"]["per_context"]
+        # 逐对 JSON 必须回填校正后的置换 p，不能只让 tests 数组里有值。
+        assert all(c.get("p_perm_adj") is not None
+                   for c in pair["per_context"])
+        assert (pair["slope_per_doubling"]["p_perm_adj"]
+                == next(t["p_perm_adj"] for t in
+                        sig["ruler_length_tests"]["slope"]))
+        assert (pair["long_minus_short"]["p_perm_adj"]
+                == next(t["p_perm_adj"] for t in
+                        sig["ruler_length_tests"]["long_minus_short"]))
         assert {t["ruler_ctx"] for t in ctx_tests} == set(ctxs)
         assert all(t.get("exploratory") for t in ctx_tests)
         assert all(t.get("p_adj") is not None for t in ctx_tests)

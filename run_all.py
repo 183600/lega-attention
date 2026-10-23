@@ -2299,17 +2299,17 @@ def _ruler_length_analysis(runs, pairs) -> dict:
         for cell in row["per_context"]:
             t = by_ctx.get((row["candidate"], row["reference"], cell["ctx"]))
             if t is not None:
-                for k in ("p_adj", "p_perm", "verdict"):
+                for k in ("p_adj", "p_perm", "p_perm_adj", "verdict"):
                     cell[k] = t.get(k)
         if row["slope_per_doubling"] is not None:
             t = by_slope.get(key)
             if t is not None:
-                for k in ("p_adj", "p_perm", "verdict"):
+                for k in ("p_adj", "p_perm", "p_perm_adj", "verdict"):
                     row["slope_per_doubling"][k] = t.get(k)
         if row["long_minus_short"] is not None:
             t = by_span.get(key)
             if t is not None:
-                for k in ("p_adj", "p_perm", "verdict"):
+                for k in ("p_adj", "p_perm", "p_perm_adj", "verdict"):
                     row["long_minus_short"][k] = t.get(k)
     return {
         "pairs": pair_rows,
