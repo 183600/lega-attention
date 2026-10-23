@@ -481,6 +481,33 @@ def test_grid_stats_duplicate_success_is_not_counted_as_failure():
           "坏种子/坏损失不截断合并")
 
 
+def test_grid_stats_huge_finite_losses_do_not_overflow():
+    """接近 float 上限的合法 val_loss 不能在均值/方差处溢出成 inf。
+
+    baseline_tuning.json 会原样落盘这些统计；Infinity 不是合法 JSON，
+    下游汇总/比较也会被污染。统计量必须保持有限（标准差不可表示时用
+    None 表示缺失），而不是伪造 inf。
+    """
+    huge = 1e308
+    trials = [
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 7, "val_loss_best": huge},
+        {"lr": 1.0, "weight_decay": 0.1, "seed": 8, "val_loss_best": huge},
+    ]
+    g = _grid_stats([(1.0, 0.1)], trials, [7, 8])[0]
+    assert g["val_loss_best_mean"] == huge
+    assert g["val_loss_best_std"] == 0.0
+    json.dumps(g, allow_nan=False)
+
+    trials[1]["val_loss_best"] = 1.5e308
+    g = _grid_stats([(1.0, 0.1)], trials, [7, 8])[0]
+    assert math.isfinite(g["val_loss_best_mean"])
+    assert math.isclose(g["val_loss_best_mean"], 1.25e308, rel_tol=1e-15)
+    assert math.isfinite(g["val_loss_best_std"])
+    assert abs(g["val_loss_best_std"] - 0.3535533905932738e308) < 1e298
+    json.dumps(g, allow_nan=False)
+    print("  [ok] _grid_stats（巨大有限 val_loss 的均值/标准差保持有限）")
+
+
 def test_tune_excludes_partial_seed_coverage_and_dedupes_seeds():
     """部分种子成功的配置不能靠“留下的幸运种子”赢过完整覆盖的默认配置。"""
     tmp = tempfile.mkdtemp()

@@ -26,7 +26,8 @@ import time
 
 import numpy as np
 
-from .utils import ensure_cublas_workspace_config, seed_int, strict_int
+from .utils import (ensure_cublas_workspace_config, mean_std, seed_int,
+                    strict_int)
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 def _finite_number(value, name: str) -> float:
@@ -444,11 +445,10 @@ def _grid_stats(grid, trials, seeds):
                 continue
             per_seed[str(sid)] = best
         vals = list(per_seed.values())
-        mean = (sum(vals) / len(vals)) if vals else None
-        std = None
-        if len(vals) >= 2:
-            var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
-            std = math.sqrt(var)
+        # 合法但接近 float 上限的 val_loss 在朴素 sum/平方差中会溢出成
+        # inf/nan，使 baseline_tuning.json 成为非法 JSON（Infinity）。
+        # 用缩放后的稳定均值/标准差，保持数值尺度不变。
+        mean, std = mean_std(vals) if vals else (None, None)
         missing = [s for s in seed_list if str(s) not in per_seed]
         n_failed = sum(1 for t in ts
                        if _as_int(t.get("seed")) is None
