@@ -936,10 +936,19 @@ def paired_t_test(a, b) -> dict:
                  if mean_diff != 0.0 else 0.0)
         return {"n": n, "mean_diff": mean_diff, "std_diff": 0.0,
                 "t": t_inf, "df": df, "p": p, "d_z": None}
-    t = mean_diff / (std_diff / math.sqrt(n))
+    se = std_diff / math.sqrt(n)
+    if se == 0.0:
+        # 极小的合法标准差除以 sqrt(n) 可能下溢成 0；此时不能直接做除法
+        # （会抛 ZeroDivisionError）。按标准误不可表示处理：均值为 0 → t=0，
+        # 否则 t 取均值的带符号无穷（p 仍由 student_t 归零）。
+        t = (math.copysign(float("inf"), mean_diff)
+             if mean_diff != 0.0 else 0.0)
+    else:
+        t = mean_diff / se
+    d_z = mean_diff / std_diff
     return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
             "t": float(t), "df": df, "p": student_t_two_sided_p(t, df),
-            "d_z": float(mean_diff / std_diff)}
+            "d_z": float(d_z) if math.isfinite(d_z) else None}
 
 
 # 符号翻转置换检验的精确全枚举上限：2^16 = 65536 次枚举。

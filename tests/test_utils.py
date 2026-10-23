@@ -509,6 +509,13 @@ def test_paired_t_edge_cases():
     noise = paired_t_test([1.0, -1.0, 1.0, -1.0, 1.0],
                           [0.9, -0.9, 0.9, -0.9, 0.9])
     assert noise["p"] > 0.05
+    # 最小次正规差：std/sqrt(n) 下溢成 0 时不能抛 ZeroDivisionError。
+    tiny = [5e-324 if i % 2 == 0 else 0.0 for i in range(4)]
+    r = paired_t_test(tiny, [0.0] * 4)
+    assert r["p"] == 1.0 and r["t"] == 0.0
+    tiny_odd = [5e-324 if i % 2 == 0 else 0.0 for i in range(5)]
+    r = paired_t_test(tiny_odd, [0.0] * 5)
+    assert math.isinf(r["t"]) and r["t"] > 0 and r["p"] == 0.0
     print("  [ok] paired_t_test 边界（全同/零方差/n=1/长度错配/显著与不显著）")
 
 
