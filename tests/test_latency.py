@@ -1,5 +1,6 @@
 """评测流水线完整性：基准模块可运行，且已接入配置、run_all 汇总与绘图链路。"""
 import json
+import math
 import os
 import sys
 import tempfile
@@ -24,6 +25,12 @@ def test_timing_stats_reports_spread():
     assert abs(st["spread_pct"] - 106.667) < 0.01, st
     # 恒定序列散布为 0；空输入安全返回 None
     assert timing_stats([2.0, 2.0])["spread_pct"] == 0.0
+    # 次正规中位数与巨大 p90 的比值超出 float：相对散布不可表示，记 None，
+    # 不能把 inf 写进 latency.json。
+    extreme = timing_stats([5e-324, 5e-324, 1e308])
+    assert extreme["spread_pct"] is None, extreme
+    assert all(math.isfinite(extreme[k])
+               for k in ("median_ms", "p10_ms", "p90_ms")), extreme
     empty = timing_stats([])
     assert empty["median_ms"] is None and empty["spread_pct"] is None
     # bool/负数/非有限/非数值不是计时观测，不能伪装成 1ms 或污染散布

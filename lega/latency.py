@@ -115,6 +115,10 @@ def timing_stats(times_ms) -> dict:
     p10 = _percentile(vals, 0.1)
     p90 = _percentile(vals, 0.9)
     spread = ((p90 - p10) / med * 100.0) if med > 0 else None
+    if spread is not None and not math.isfinite(spread):
+        # 次正规中位数与巨大 p90 的比值可能超出 float 上限：相对散布不可
+        # 表示，按缺失处理，不能把 inf 写进 latency.json。
+        spread = None
     return {"median_ms": round(med, 6), "p10_ms": round(p10, 6),
             "p90_ms": round(p90, 6),
             "spread_pct": (round(spread, 3) if spread is not None else None),
