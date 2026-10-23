@@ -358,6 +358,16 @@ def test_design_plan_rejects_malformed_inputs():
         pass
     else:
         raise AssertionError("负的设计网格必须拒绝")
+    # 网格项必须逐项严格校验，不能把 bool/字符串/NaN/超大整数隐式转成 float。
+    for bad_grid in ([True], ["0.1"], [float("nan")], [10 ** 400]):
+        try:
+            build_design_plan(
+                {"design": {"ppl_paired_sd_rel_grid": bad_grid}},
+                [1, 2, 3], ["lega"], None, known_variants={"lega"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法设计网格必须拒绝：{bad_grid!r}")
     print("  [ok] 设计计划：非法输入显式失败")
 
 

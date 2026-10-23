@@ -124,7 +124,9 @@ def _finite_sequence(values, name: str) -> list:
     if isinstance(values, (str, bytes)) or not isinstance(
             values, (list, tuple)):
         raise ValueError(f"{name} 必须是数值列表，收到 {values!r}")
-    return [float(v) for v in values]
+    # 逐项走严格校验：bool/字符串/NaN/Inf 以及超出 float 上限的整数必须在
+    # 网格入口拒绝，不能让 float(True)=1.0 之类的隐式转换静默进入设计。
+    return [_finite_float(v, name) for v in values]
 
 
 def _open_unit(value, name: str) -> float:
