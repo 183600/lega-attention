@@ -3673,7 +3673,9 @@ def _render_ruler_length(analysis) -> list:
             # 不能按 “显著” 子串计数：``"不显著（Holm ...）"`` 也包含该词。
             # 只把校正后 p<α 的斜率检验算作显著趋势。
             slope_padj = _finite_number(slope.get("p_adj"))
-            if slope_padj is not None and slope_padj < ALPHA:
+            slope_n = _integral_value(slope.get("n"))
+            if (slope_padj is not None and slope_n is not None
+                    and slope_n >= MIN_SEEDS and slope_padj < ALPHA):
                 n_trend += 1
             verdict = slope_verdict
             if flags:

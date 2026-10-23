@@ -572,6 +572,16 @@ def test_render_ruler_length_tolerates_malformed_nested_fields():
     }]}
     text = "\n".join(_render_ruler_length(nonsig))
     assert "0 组斜率经 Holm 校正后显著" in text
+    # n<MIN_SEEDS 时即使原始 p_adj<α 也只报描述，不能计入显著趋势。
+    seeds_short = {"pairs": [{
+        "candidate": "a", "reference": "b", "n_contexts": 3,
+        "contexts": [512, 1024, 2048],
+        "slope_per_doubling": {
+            "mean_diff": -0.1, "p_adj": 0.0, "n": 2,
+            "verdict": "种子不足（n=2<3），无法判定长度趋势"},
+    }]}
+    text = "\n".join(_render_ruler_length(seeds_short))
+    assert "0 组斜率经 Holm 校正后显著" in text
 
 
 def test_ruler_length_drops_seeds_with_different_context_grids():
