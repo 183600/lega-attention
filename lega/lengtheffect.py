@@ -36,7 +36,7 @@
 """
 import math
 from decimal import Decimal, InvalidOperation
-from numbers import Integral
+from numbers import Integral, Real
 
 __all__ = [
     "context_task_means",
@@ -59,13 +59,30 @@ def _is_bool(value):
 
 
 def _finite(value):
-    """有限实数；bool / 非数值 / NaN / Inf / 不可表示的大整数 → None。
+    """有限实数；bool / 字符串 / NaN / Inf / 不可表示的大整数 → None。
 
-    与项目既有的 ``_finite_number`` 同口径：规范数值字符串（如 ``"0.5"``）
-    先转 float 再参与计算。RULER 产物可能来自旧版本/手工整理，数值字符串
-    本身没有歧义；若在这里直接拒绝，同一 payload 在 ``context_task_means``
-    与 ``_ruler_avg_of`` 中会得到不同的单元格集合，长度分层就与总体 RULER
-    平均不可比。带下划线的数字串（``"1_0"``）不是规范 JSON 数值，仍拒绝。
+    趋势函数的输入是已经算好的聚合值（不是外部 JSON 单元格），只接受
+    真正的数值类型；数值字符串由 ``context_task_means`` 读取 payload 时
+    单独规范化，避免 ``"0.1"`` 这类字符串悄悄进入斜率计算。
+    """
+    if value is None or _is_bool(value):
+        return None
+    if not isinstance(value, Real):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _metric_number(value):
+    """外部 RULER 单元格的有限数值；与 ``run_all._finite_number`` 同口径。
+
+    旧产物/手工整理的 payload 可能把 EM 写成 ``"0.5"``。若这里直接拒绝，
+    同一 payload 在 ``context_task_means`` 与 ``_ruler_avg_of`` 中会得到
+    不同的单元格集合，长度分层就与总体 RULER 平均不可比。下划线数字串
+    （``"1_0"``）不是规范 JSON 数值，仍拒绝。
     """
     if value is None or _is_bool(value):
         return None
@@ -80,7 +97,7 @@ def _finite(value):
 
 def _proportion(value):
     """[0,1] 比例；越界值不是合法 EM/recall，返回 None。"""
-    f = _finite(value)
+    f = _metric_number(value)
     if f is None or not 0.0 <= f <= 1.0:
         return None
     return f

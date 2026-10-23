@@ -174,6 +174,10 @@ def test_log2_slope_and_span_reject_undefined_inputs():
     assert log2_slope([512, 512], [0.1, 0.2]) is None
     assert log2_slope(["0512", "1024"], [0.1, 0.2]) is None
     assert log2_slope([512, 1024], [0.1, float("nan")]) is None
+    # 趋势函数只接受已算好的真正数值；数值字符串属于 payload 解析层，
+    # 不能绕过类型检查进入 OLS。
+    assert log2_slope([512, 1024], ["0.1", "0.2"]) is None
+    assert span_contrast([512, 1024], ["0.1", "0.2"]) is None
     assert log2_slope([512, 1024], [0.1]) is None
     assert span_contrast([512, 0], [0.1, 0.2]) is None
 
