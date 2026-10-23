@@ -269,7 +269,12 @@ def t_critical(df, two_sided_alpha: float = 0.05):
             hi = mid
         if hi - lo <= 1e-12 * max(1.0, hi):
             break
-    return 0.5 * (lo + hi)
+    root = 0.5 * (lo + hi)
+    # 与 utils.t_critical_95 同口径：df 极小时真实临界值可能远超搜索上限，
+    # 此时返回点实际 p 仍明显大于 alpha。不能把搜索边界 1e12 当成临界值。
+    if abs(student_t_two_sided_p(root, df) - alpha) > 1e-6:
+        return None
+    return root
 
 
 def _one_sided_upper(t, df):

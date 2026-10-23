@@ -200,6 +200,8 @@ def test_t_critical_known_values():
     # 合法但超出 float 上限的整数自由度不是可计算值：必须返回 None，
     # 不能把 OverflowError 抛给调用方。
     assert t_critical(10 ** 400, 0.05) is None
+    # df 为最小次正规数时真实临界值远超搜索上限；不能把搜索边界当成结果。
+    assert t_critical(5e-324, 0.05) is None
     print("  [ok] t 临界值已知数值")
 
 
