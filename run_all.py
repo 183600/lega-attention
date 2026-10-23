@@ -1986,8 +1986,14 @@ def _ruler_length_analysis(runs, pairs) -> dict:
     """
     runs = runs if isinstance(runs, dict) else {}
     ctx_tests, slope_tests, span_tests, pair_rows = [], [], [], []
-    for cand, ref in (pairs if isinstance(pairs, list) else []):
-        if cand not in runs or ref not in runs:
+    for entry in (pairs if isinstance(pairs, list) else []):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        cand, ref = entry
+        try:
+            if cand not in runs or ref not in runs:
+                continue
+        except TypeError:
             continue
         cm = _variant_seed_map(runs, cand)
         rm = _variant_seed_map(runs, ref)
