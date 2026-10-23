@@ -188,6 +188,12 @@ def test_log2_slope_and_span_reject_undefined_inputs():
     assert span_contrast([512, 1024], ["0.1", "0.2"]) is None
     assert log2_slope([512, 1024], [0.1]) is None
     assert span_contrast([512, 0], [0.1, 0.2]) is None
+    # 合法但极大的有限常数序列：斜率应为 0，不能因求均值溢出而变成 None。
+    huge = 1e308
+    assert log2_slope([512, 1024], [huge, huge]) == 0.0
+    assert span_contrast([512, 1024], [huge, huge]) == 0.0
+    # 首末差本身超出 float 表示范围时仍按“无法定义”处理。
+    assert span_contrast([512, 1024], [huge, -huge]) is None
 
 
 def _write_runs(tmp, values_by_variant, ctxs, seeds=(1, 2, 3, 4),

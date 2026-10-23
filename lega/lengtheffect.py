@@ -337,6 +337,22 @@ def _validated_pairs(contexts, values):
     return pairs
 
 
+def _mean(values):
+    """有限实数序列的均值；朴素求和溢出时改用最大绝对值缩放。
+
+    多个 1e308 这样的合法有限观测直接相加会得到 inf，之后 ``y-my`` 变成
+    NaN，常数序列的斜率本应为 0 却被误报成“无法定义”。先按最大绝对值
+    缩放再求均值，可保证均值不超过输入的绝对值上界。
+    """
+    total = sum(values)
+    if math.isfinite(total):
+        return total / len(values)
+    scale = max(abs(v) for v in values)
+    if scale == 0.0:
+        return total / len(values)
+    return scale * (sum(v / scale for v in values) / len(values))
+
+
 def log2_slope(contexts, values):
     """``value`` 对 ``log2(ctx)`` 的 OLS 斜率（每翻倍变化量）；无法定义→None。
 
@@ -349,8 +365,8 @@ def log2_slope(contexts, values):
         return None
     xs = [math.log2(c) for c, _ in pairs]
     ys = [v for _, v in pairs]
-    mx = sum(xs) / len(xs)
-    my = sum(ys) / len(ys)
+    mx = _mean(xs)
+    my = _mean(ys)
     sxx = sum((x - mx) ** 2 for x in xs)
     if not math.isfinite(sxx) or sxx <= 0.0:
         return None
