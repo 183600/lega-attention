@@ -1135,6 +1135,32 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
     return max(0.0, center - half), min(1.0, center + half)
 
 
+# 精确 McNemar 的枚举上限：超过后改用带连续性校正的正态近似。
+# 该函数曾被直接传入 1e308/10**400 这样的计数，``math.lgamma(n+1)`` 会
+# OverflowError，k=10**20 时 ``range(k+1)`` 更是永不结束；正态近似保证
+# 极端/损坏计数也能返回有限 p，而不是让汇总崩溃或挂起。
+_MCNEMAR_EXACT_MAX = 100000
+
+
+def _mcnemar_normal_approx(n: int, k: int) -> float:
+    """二项尾的双侧正态近似（连续性校正），用于超出精确枚举上限的计数。"""
+    try:
+        sqrt_n = math.exp(0.5 * math.log(n))
+    except (OverflowError, ValueError):
+        return 1.0
+    if not math.isfinite(sqrt_n) or sqrt_n <= 0.0:
+        return 1.0 if k >= n // 2 else 0.0
+    # z = (k + 0.5 - n/2) / (sqrt(n)/2) = (2k + 1 - n) / sqrt(n)
+    # 先除以 n 得到 [-1,1] 附近的比例，避免巨大整数直接转 float 溢出。
+    centered = (2 * k + 1 - n) / n
+    z = centered * sqrt_n
+    if not math.isfinite(z):
+        return 0.0 if z < 0 else 1.0
+    # 2 * Phi(z) = erfc(-z / sqrt(2))；k<=n/2 时 z 不会明显为正。
+    p = math.erfc(-z / math.sqrt(2.0))
+    return min(1.0, max(0.0, p))
+
+
 def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     """配对二分类的精确 McNemar 检验（双侧，等价于 discordant 上的符号检验）。
 
@@ -1155,6 +1181,10 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     if n <= 0:
         return 1.0
     k = min(candidate_only, reference_only)
+    # 大计数：精确枚举既可能溢出 lgamma，也可能因 range(k+1) 过长而挂起。
+    # 极端尾（k=0/k=n）的精确 p 本就下溢到 0/上溢到 1，近似同样给出端点。
+    if n > _MCNEMAR_EXACT_MAX or k > _MCNEMAR_EXACT_MAX:
+        return _mcnemar_normal_approx(n, k)
     log2 = math.log(2.0)
     logs = [math.lgamma(n + 1) - math.lgamma(i + 1)
             - math.lgamma(n - i + 1) - n * log2 for i in range(k + 1)]

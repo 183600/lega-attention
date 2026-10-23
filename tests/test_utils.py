@@ -18,8 +18,9 @@ import numpy as np
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         calibration_metrics, config_bool, config_finite_float,
                         config_probability, f1_scores, holm_bonferroni, mean_std,
-                        min_detectable_effect, paired_sign_flip_test,
-                        paired_sign_test, paired_t_test, pearson,
+                        mcnemar_exact_p, min_detectable_effect,
+                        paired_sign_flip_test, paired_sign_test,
+                        paired_t_test, pearson,
                         roc_pr_aucs, save_json,
                         student_t_two_sided_p, t_critical_95, wilson_score_ci)
 
@@ -1005,3 +1006,17 @@ def test_f1_scores_rejects_out_of_range_or_wrapping_class_ids():
     r = f1_scores([0, 1], [0, 1])
     assert r["micro"] == 1.0
     print("  [ok] f1_scores 拒绝 uint64 回绕/超出 int64 的类别标签")
+
+
+def test_mcnemar_exact_p_handles_huge_counts_without_overflow_or_hang():
+    """巨大计数不能触发 lgamma OverflowError 或 range(k+1) 挂起。"""
+    assert mcnemar_exact_p(10 ** 400, 0) == 0.0
+    assert mcnemar_exact_p(1e308, 0) == 0.0
+    assert mcnemar_exact_p(10 ** 20, 10 ** 20) == 1.0
+    # 极端不平衡/平衡在近似下仍落在 [0,1] 且方向正确。
+    assert mcnemar_exact_p(10 ** 20, 1) == 0.0
+    p = mcnemar_exact_p(10 ** 20, 10 ** 20 - 10 ** 10)
+    assert 0.0 <= p <= 1.0
+    # 小计数保持精确枚举口径。
+    assert abs(mcnemar_exact_p(5, 0) - 0.0625) < 1e-12
+    assert abs(mcnemar_exact_p(0, 6) - 0.03125) < 1e-12
