@@ -81,6 +81,28 @@ def test_context_task_means_malformed_returns_empty():
     assert context_macro_means(zero) == {512: 0.0}
 
 
+def test_context_task_means_rejects_numpy_bools_like_run_all():
+    """np.bool_ 在 NumPy 2.x 的类型名是 "bool"：必须按 bool 拒绝。"""
+    import numpy as np
+    from lega.lengtheffect import _finite, _positive_count
+    assert _finite(np.True_) is None
+    assert _finite(np.False_) is None
+    assert _positive_count(np.True_) is None
+    assert _positive_count(np.False_) is None
+    payload = _payload({"a": {
+        "512": {"em": np.True_, "n": 10},
+        "1024": {"em": 0.5, "n": 10},
+    }})
+    # em=True 不能成为 1.0：否则长度分层会多出一格总体 RULER 平均没有的观测。
+    assert context_task_means(payload) == {1024: {"a": 0.5}}
+    bad_n = _payload({"a": {
+        "512": {"em": 1.0, "n": np.True_},
+        "1024": {"em": 0.5, "n": 10},
+    }})
+    assert context_task_means(bad_n) == {1024: {"a": 0.5}}
+    assert abs(context_macro_means(bad_n)[1024] - _ruler_avg_of(bad_n)) < 1e-12
+
+
 def test_context_task_means_accepts_exact_huge_and_numeric_string_counts():
     """合法大整数 n 不能因 float 溢出被丢掉；数值字符串与 run_all 同口径。"""
     huge_n = 10 ** 400

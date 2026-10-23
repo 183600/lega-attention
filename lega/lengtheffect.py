@@ -46,6 +46,18 @@ __all__ = [
 ]
 
 
+def _is_bool(value):
+    """bool / numpy.bool_ → True。
+
+    不能只判断 ``type(value).__name__ == "bool_"``：NumPy 2.x 把
+    ``np.bool_`` 的类型名改成了 ``"bool"``，旧守卫在 CI 固定版本上会失效，
+    ``np.True_`` 就会被当成 1.0/1 混进 EM 或样本数，伪造出一格
+    ``_ruler_avg_of`` 从未使用的观测。
+    """
+    return (isinstance(value, bool)
+            or type(value).__name__ in ("bool", "bool_"))
+
+
 def _finite(value):
     """有限实数；bool / 非数值 / NaN / Inf / 不可表示的大整数 → None。
 
@@ -55,9 +67,7 @@ def _finite(value):
     与 ``_ruler_avg_of`` 中会得到不同的单元格集合，长度分层就与总体 RULER
     平均不可比。带下划线的数字串（``"1_0"``）不是规范 JSON 数值，仍拒绝。
     """
-    if value is None or isinstance(value, bool):
-        return None
-    if type(value).__name__ == "bool_":  # numpy.bool_
+    if value is None or _is_bool(value):
         return None
     if isinstance(value, str) and "_" in value:
         return None
@@ -86,9 +96,7 @@ def _positive_count(value):
     消失，且与 ``_ruler_avg_of`` 的单元格集合不一致）。整数字符串/整数值
     浮点同样规范化为 int，与 run_all 的 ``_integral_value`` 保持同口径。
     """
-    if value is None or isinstance(value, bool):
-        return None
-    if type(value).__name__ == "bool_":
+    if value is None or _is_bool(value):
         return None
     if isinstance(value, str):
         s = value.strip()
