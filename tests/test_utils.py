@@ -1020,3 +1020,13 @@ def test_mcnemar_exact_p_handles_huge_counts_without_overflow_or_hang():
     # 小计数保持精确枚举口径。
     assert abs(mcnemar_exact_p(5, 0) - 0.0625) < 1e-12
     assert abs(mcnemar_exact_p(0, 6) - 0.03125) < 1e-12
+
+
+def test_calibration_metrics_caps_requested_bins_to_observations():
+    """巨大 n_bins 不能构造/遍历无意义的空箱，更不能挂起或耗尽内存。"""
+    c = calibration_metrics([0.1, 0.9], [0.0, 1.0], n_bins=10 ** 400)
+    assert c["n_bins"] == c["n"] == 2, c
+    assert len(c["bins"]) == 2, c["bins"]
+    assert sum(b["n"] for b in c["bins"]) == 2
+    assert c["ece"] is not None and c["ece_adaptive"] is not None
+    print("  [ok] calibration_metrics 把巨大 n_bins 限制到有效样本数")

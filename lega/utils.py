@@ -1458,6 +1458,10 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     m = np.isfinite(scores) & ((labels == 0.0) | (labels == 1.0))
     scores, labels = scores[m], labels[m]
     n = int(scores.size)
+    # 有效箱数不超过有效样本数：超过 n 的等宽箱必然大量为空，等频箱也只能
+    # 反复切出空组；更关键的是外部传入 10**20 之类的合法大整数时，逐个
+    # 构造/遍历箱会挂起或耗尽内存。箱数超过 n 不增加任何校准分辨率。
+    n_bins = min(n_bins, max(1, n))
     if n == 0:
         return {"n": 0, "n_pos": 0, "base_rate": None, "brier": None,
                 "brier_constant": None, "brier_skill": None, "ece": None,
