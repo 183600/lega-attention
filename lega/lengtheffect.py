@@ -230,8 +230,20 @@ def _requested_macro(task_means, requested):
         return {}
     cells = {ctx: [] for ctx in requested}
     for values in per_task.values():
-        for actual, req in zip(sorted(values), requested):
-            cells[req].append(values[actual])
+        actual = sorted(values)
+        # 实际 room_ctx 只可能由请求档位被生成预算向下 clamp 得到：
+        #   actual_i = min(requested_i, cap)，cap 对该任务固定。
+        # 因此 actual_i 必须落在上一请求档位与当前请求档位之间；若 actual
+        # 反而大于请求值（例如请求 1024 却出现 2048），或某一档跌到上一个
+        # 请求档位以下（顺序整体错位），就无法把实际键对应到请求档位。
+        # 此时按升序硬配会凭空造出一条不存在的长度趋势，必须拒绝。
+        for i, (a, req) in enumerate(zip(actual, requested)):
+            if a > req:
+                return {}
+            if i and a <= requested[i - 1]:
+                return {}
+        for actual_ctx, req in zip(actual, requested):
+            cells[req].append(values[actual_ctx])
     return {req: float(sum(v) / len(v))
             for req, v in cells.items() if v}
 

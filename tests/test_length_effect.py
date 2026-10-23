@@ -411,6 +411,40 @@ def test_context_macro_means_aligns_requested_context_lengths():
     assert context_macro_means(old_bad, align_requested=True) == {}
 
 
+def test_context_macro_means_rejects_impossible_context_alignment():
+    """实际 ctx 只能是请求档位向下 clamp：向上/错位网格不能硬配成假趋势。"""
+    # 请求 1024，实际却出现 2048（生成预算只会缩短上下文，不会变长）。
+    upward = {
+        "ctx_lens": [256, 512, 1024],
+        "results": {
+            "a": {"256": {"em": 0.9, "n": 10},
+                  "512": {"em": 0.5, "n": 10},
+                  "2048": {"em": 0.1, "n": 10}},
+            "b": {"256": {"em": 0.8, "n": 10},
+                  "512": {"em": 0.4, "n": 10},
+                  "2048": {"em": 0.0, "n": 10}},
+        },
+    }
+    assert context_macro_means(upward, align_requested=True) == {}
+    # 实际档位整体向下错位（128/256/512 对 256/512/1024）：每档都跌到
+    # 上一请求档位或以下，说明网格与 ctx_lens 不是同一套请求档位。
+    shifted = {
+        "ctx_lens": [256, 512, 1024],
+        "results": {
+            "a": {"128": {"em": 0.9, "n": 10},
+                  "256": {"em": 0.5, "n": 10},
+                  "512": {"em": 0.1, "n": 10}},
+        },
+    }
+    assert context_macro_means(shifted, align_requested=True) == {}
+    # 单档只有向下 clamp（请求 1024、实际 979）仍应保留描述统计。
+    clamped = {
+        "ctx_lens": [1024],
+        "results": {"a": {"979": {"em": 0.6, "n": 10}}},
+    }
+    assert context_macro_means(clamped, align_requested=True) == {1024: 0.6}
+
+
 def test_context_macro_means_matches_ruler_avg_when_balanced():
     """平衡设计下，逐档等权平均应严格等于项目既有的 RULER macro 平均。"""
     from run_all import _ruler_avg_of
