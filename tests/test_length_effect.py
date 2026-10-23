@@ -15,7 +15,7 @@ import tempfile
 
 from lega.lengtheffect import (context_macro_means, context_task_means,
                                log2_slope, span_contrast)
-from run_all import _ruler_avg_of, build_summary
+from run_all import _render_ruler_length, _ruler_avg_of, build_summary
 
 
 def _payload(results):
@@ -518,3 +518,35 @@ def test_context_macro_means_matches_ruler_avg_when_balanced():
     assert math.isclose(log2_slope([512, 1024, 2048],
                                    [macro[c] for c in (512, 1024, 2048)]),
                         -0.05, rel_tol=0.0, abs_tol=1e-12)
+
+
+def test_render_ruler_length_tolerates_malformed_nested_fields():
+    """significance.json 的损坏嵌套字段不能让汇总页渲染崩溃。"""
+    analysis = {"pairs": [
+        {"candidate": "x", "reference": "standard",
+         "n_contexts": "bad", "per_context": {"oops": 1}},
+        {"candidate": "a", "reference": "standard", "n_contexts": 3,
+         "contexts": 123,
+         "slope_per_doubling": {"mean_diff": "bad", "verdict": None},
+         "long_minus_short": ["not", "a", "dict"],
+         "per_context": {"bad": 1},
+         "direction_consistency": "bad"},
+        {"candidate": "b", "reference": "standard", "n_contexts": 2,
+         "contexts": [512, 1024],
+         "slope_per_doubling": {"mean_diff": 0.1, "p_adj": 0.2,
+                                "verdict": "ok"},
+         "long_minus_short": {"mean_diff": 0.1, "p_adj": 0.2},
+         "per_context": [
+             None,
+             {"ctx": 512, "mean_diff": float("inf"), "p": "bad",
+              "candidate_mean": "bad"},
+             {"ctx": 1024, "mean_diff": 0.1, "p": 0.2,
+              "candidate_mean": 0.5, "reference_mean": 0.4},
+         ],
+         "direction_consistency": {"positive": 1}},
+    ]}
+    md = _render_ruler_length(analysis)
+    assert isinstance(md, list) and any("RULER 上下文长度剂量-反应" in x
+                                        for x in md)
+    text = "\n".join(md)
+    assert "1024" in text and "bad" not in text

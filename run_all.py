@@ -3571,7 +3571,9 @@ def _render_inference_shapley(inference_tests) -> list:
 def _render_ruler_length(analysis) -> list:
     """渲染 RULER 上下文长度剂量-反应（逐 ctx + 斜率 + 首末落差）。"""
     analysis = analysis if isinstance(analysis, dict) else {}
-    rows = [p for p in (analysis.get("pairs") or []) if isinstance(p, dict)]
+    raw_pairs = analysis.get("pairs")
+    rows = ([p for p in raw_pairs if isinstance(p, dict)]
+            if isinstance(raw_pairs, list) else [])
     md = ["", "### RULER 上下文长度剂量-反应（探索性；检验“长度校准”是否兑现）", ""]
     if not rows:
         md.append("⚠ 无法做上下文长度分层：缺少同一批种子的 RULER 产物，或"
@@ -3591,14 +3593,21 @@ def _render_ruler_length(analysis) -> list:
               "判定。")
 
     def _pp(v):
-        return "-" if v is None else f"{v * 100.0:+.2f}"
+        # 配对行来自外部/旧版 significance.json：损坏的字符串/NaN/Inf 不能
+        # 让整份汇总页在格式化时崩溃，按缺失显示 "-"。
+        f = _finite_number(v)
+        return "-" if f is None else f"{f * 100.0:+.2f}"
 
     def _padj(t):
         p = _finite_number((t or {}).get("p_adj"))
         return "-" if p is None else f"{p:.4f}"
 
-    multi = [p for p in rows if (p.get("n_contexts") or 0) >= LENGTH_MIN_CONTEXTS]
-    single = [p for p in rows if (p.get("n_contexts") or 0) < LENGTH_MIN_CONTEXTS]
+    def _n_contexts(p):
+        n = _finite_number(p.get("n_contexts"))
+        return int(n) if n is not None and n >= 0 else 0
+
+    multi = [p for p in rows if _n_contexts(p) >= LENGTH_MIN_CONTEXTS]
+    single = [p for p in rows if _n_contexts(p) < LENGTH_MIN_CONTEXTS]
     if single:
         md += ["", f"⚠ {len(single)} 组对比只有 1 个公共请求档位，无法检验"
                    "长度趋势（只能报该档的描述统计）；如需回答长度主张，"
@@ -3609,11 +3618,17 @@ def _render_ruler_length(analysis) -> list:
                "|---|---|---|---|---|---|---|---|---|"]
         n_reversal = n_trend = n_unbalanced = n_masking = n_loo = 0
         for p in multi:
-            slope = p.get("slope_per_doubling") or {}
-            span = p.get("long_minus_short") or {}
-            per_ctx = p.get("per_context") or []
+            slope = (p.get("slope_per_doubling")
+                     if isinstance(p.get("slope_per_doubling"), dict)
+                     else {})
+            span = (p.get("long_minus_short")
+                    if isinstance(p.get("long_minus_short"), dict) else {})
+            per_ctx = ([c for c in p.get("per_context")
+                        if isinstance(c, dict)]
+                       if isinstance(p.get("per_context"), list) else [])
             longest = (per_ctx[-1].get("mean_diff") if per_ctx else None)
-            dc = p.get("direction_consistency") or {}
+            dc = (p.get("direction_consistency")
+                  if isinstance(p.get("direction_consistency"), dict) else {})
             flags = []
             if p.get("overall_vs_longest_sign_flip"):
                 flags.append("⚠ 总平均与最长ctx反向")
@@ -3637,10 +3652,13 @@ def _render_ruler_length(analysis) -> list:
             verdict = slope_verdict
             if flags:
                 verdict += "；" + "；".join(flags)
+            contexts = (p.get("contexts")
+                        if isinstance(p.get("contexts"), (list, tuple))
+                        else [])
             md.append(
                 f"| {p.get('candidate')} vs {p.get('reference')} | "
                 f"{p.get('n_seeds', '-')} | "
-                f"{', '.join(str(c) for c in (p.get('contexts') or []))} | "
+                f"{', '.join(str(c) for c in contexts) if contexts else '-'} | "
                 f"{_pp(p.get('overall_mean_diff'))} | {_pp(longest)} | "
                 f"{_pp(span.get('mean_diff'))} | "
                 f"{_pp(slope.get('mean_diff'))} | "
@@ -3659,7 +3677,10 @@ def _render_ruler_length(analysis) -> list:
            "p | p_adj(Holm) | 结论 |",
            "|---|---|---|---|---|---|---|---|---|---|"]
     for p in rows:
-        for c in (p.get("per_context") or []):
+        per_ctx = ([c for c in p.get("per_context")
+                    if isinstance(c, dict)]
+                   if isinstance(p.get("per_context"), list) else [])
+        for c in per_ctx:
             ci = c.get("mean_diff_ci95")
             ci_s = ("-"
                     if not (isinstance(ci, (list, tuple)) and len(ci) == 2
