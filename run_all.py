@@ -3626,8 +3626,8 @@ def _render_ruler_length(analysis) -> list:
         return "-" if p is None else f"{p:.4f}"
 
     def _n_contexts(p):
-        n = _finite_number(p.get("n_contexts"))
-        return int(n) if n is not None and n >= 0 else 0
+        n = _integral_value(p.get("n_contexts"))
+        return n if n is not None and n >= 0 else 0
 
     multi = [p for p in rows if _n_contexts(p) >= LENGTH_MIN_CONTEXTS]
     single = [p for p in rows if _n_contexts(p) < LENGTH_MIN_CONTEXTS]
