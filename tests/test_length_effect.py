@@ -437,6 +437,14 @@ def test_context_macro_means_rejects_impossible_context_alignment():
         },
     }
     assert context_macro_means(shifted, align_requested=True) == {}
+    # 多档时第一档被 clamp 会让后面档位也 clamp 到同一实际值并少档；
+    # 能凑满档数却从更小的第一档开始，说明不是同一套请求网格。
+    first_clamped = {
+        "ctx_lens": [512, 1024],
+        "results": {"a": {"256": {"em": 0.9, "n": 10},
+                          "1024": {"em": 0.1, "n": 10}}},
+    }
+    assert context_macro_means(first_clamped, align_requested=True) == {}
     # 单档只有向下 clamp（请求 1024、实际 979）仍应保留描述统计。
     clamped = {
         "ctx_lens": [1024],

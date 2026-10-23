@@ -240,6 +240,11 @@ def _requested_macro(task_means, requested):
                 return {}
             if i and a <= requested[i - 1]:
                 return {}
+        # 多档时第一档若被 clamp，后续档位也会 clamp 到同一值并因去重少档；
+        # 因此“档数完整”的多档任务第一档必须就是请求值。单档允许向下
+        # clamp（例如请求 1024、实际 979），仍保留描述统计。
+        if len(requested) > 1 and actual[0] != requested[0]:
+            return {}
         for actual_ctx, req in zip(actual, requested):
             cells[req].append(values[actual_ctx])
     return {req: float(sum(v) / len(v))
