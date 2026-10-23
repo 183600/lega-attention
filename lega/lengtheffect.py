@@ -147,7 +147,7 @@ def _canonical_ctx(key):
     都可能是两个不同键指向同一档位，若静默 ``int()`` 合并，会把同一格
     的重复观测折叠、夸大精度。bool 也不是合法上下文长度。
     """
-    if isinstance(key, bool):
+    if _is_bool(key):
         return None
     if isinstance(key, Integral):
         value = int(key)

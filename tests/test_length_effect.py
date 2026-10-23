@@ -101,6 +101,13 @@ def test_context_task_means_rejects_numpy_bools_like_run_all():
     }})
     assert context_task_means(bad_n) == {1024: {"a": 0.5}}
     assert abs(context_macro_means(bad_n)[1024] - _ruler_avg_of(bad_n)) < 1e-12
+    # 上下文键也不能是 numpy bool（否则可能被当成 1）。
+    assert context_task_means(_payload({"a": {
+        np.True_: {"em": 0.5, "n": 10}}})) == {}
+    assert context_macro_means(
+        {"ctx_lens": [np.True_],
+         "results": {"a": {"1": {"em": 0.5, "n": 10}}}},
+        align_requested=True) == {}
 
 
 def test_context_task_means_accepts_exact_huge_and_numeric_string_counts():
