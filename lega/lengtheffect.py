@@ -372,7 +372,20 @@ def log2_slope(contexts, values):
         return None
     sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
     slope = sxy / sxx
-    return float(slope) if math.isfinite(slope) else None
+    if math.isfinite(slope):
+        return float(slope)
+    # 巨大但有限的 y 在中心化乘积求和时可能先溢出成 inf，即使真实斜率仍
+    # 可表示（例如 [1e308, 1e308, -1e308]）。按最大绝对值缩放后重算，
+    # 最后再把尺度乘回去；仍不可表示时返回 None。
+    scale = max(abs(v) for v in ys)
+    if scale == 0.0:
+        return 0.0
+    scaled = [v / scale for v in ys]
+    my = _mean(scaled)
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, scaled))
+    slope = sxy / sxx
+    out = scale * slope
+    return float(out) if math.isfinite(out) else None
 
 
 def span_contrast(contexts, values):
