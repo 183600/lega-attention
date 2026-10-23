@@ -167,6 +167,17 @@ def test_interpret_equivalence_categories():
                                "beyond_margin": False, "noninferior": True},
                               p_adj=0.9)
     assert i["status"] == "insufficient_seeds", i
+    # 合法但超出 float 上限的 p 值按缺失证据处理：不能让 OverflowError
+    # 穿透判定入口，也不能把不可表示值当成显著。
+    huge_adj = interpret_equivalence(
+        {"n": 5, "p_tost": 0.9, "p_tost_adj": 10 ** 400}, p_adj=10 ** 400)
+    assert huge_adj["status"] == "undetermined", huge_adj
+    assert huge_adj["p_used"] == 0.9
+    assert huge_adj["multiplicity_adjusted"] is False
+    huge_raw = interpret_equivalence({"n": 5, "p_tost": 10 ** 400},
+                                     p_adj=10 ** 400)
+    assert huge_raw["status"] == "undetermined", huge_raw
+    assert huge_raw["p_used"] is None
     # no-op 的零差不是等价证据。
     noop = interpret_equivalence({"n": 5, "mean_diff": 0.0, "margin": 0.01,
                                   "p_tost": 0.0, "direction": "same",

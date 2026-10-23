@@ -64,6 +64,26 @@ def _strict_number(value, name: str) -> float:
     return f
 
 
+def _finite_p(value):
+    """p 值 → float；bool/非数值/非有限/超出 float 上限的值按缺失处理。
+
+    报告可能被手工编辑或从外部 JSON 重建，p 值字段可能是合法但巨大的整数
+    （如 10**400）。``float()``/``math.isfinite()`` 会抛 OverflowError，不能
+    让它穿透判定入口；与 ``_observation`` 同口径视为不可用证据。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if type(value).__name__ == "bool_":
+        return None
+    if not isinstance(value, Real):
+        return None
+    try:
+        f = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def _observation(value):
     """单条观测：None/非数值/非有限/bool/不可表示值返回 None（整对剔除）。
 
@@ -590,26 +610,18 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
     n = eq.get("n")
     n_ok = (isinstance(n, int) and not isinstance(n, bool)
             and n >= min_seeds)
-    p_tost_adj = eq.get("p_tost_adj")
-    p_tost_raw = eq.get("p_tost")
-    adjusted = (p_tost_adj is not None
-                and isinstance(p_tost_adj, Real)
-                and not isinstance(p_tost_adj, bool)
-                and math.isfinite(float(p_tost_adj)))
-    p_used = (float(p_tost_adj) if adjusted else
-              (float(p_tost_raw) if isinstance(p_tost_raw, Real)
-               and not isinstance(p_tost_raw, bool)
-               and math.isfinite(float(p_tost_raw)) else None))
+    p_tost_adj = _finite_p(eq.get("p_tost_adj"))
+    p_tost_raw = _finite_p(eq.get("p_tost"))
+    adjusted = p_tost_adj is not None
+    p_used = p_tost_adj if adjusted else p_tost_raw
     status = "undetermined"
     if not n_ok:
         status = "insufficient_seeds"
     elif p_used is not None and p_used < alpha:
         status = "equivalent"
     else:
-        pa = p_adj
-        pa_ok = (isinstance(pa, Real) and not isinstance(pa, bool)
-                 and math.isfinite(float(pa)))
-        if pa_ok and float(pa) < alpha:
+        pa = _finite_p(p_adj)
+        if pa is not None and pa < alpha:
             direction = eq.get("direction")
             beyond = eq.get("beyond_margin")
             status = _MEANINGFUL.get((direction, bool(beyond)),
