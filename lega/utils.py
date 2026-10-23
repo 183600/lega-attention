@@ -837,14 +837,31 @@ def t_critical_95(df: float) -> float:
         return None
     # 不要用 df>200 就退化为正态近似：df=201 的 t 临界值仍有 1.972，
     # 与 1.960 的差异会系统性收窄验证区间。现有二分代价很低，直接求根。
-    lo, hi = 0.0, 1e3
-    for _ in range(80):
+    # 上界不能写死 1e3：df<0.5 时 95% 临界值可远大于 1000（df=0.1 约
+    # 1.6e16），固定上界会让二分收敛到 1000——此时 p(1000) 仍远大于
+    # 0.05，返回的根本不是临界值。先指数扩张到真正跨过根；df 极小时
+    # 临界值本身可能超出 float 上限，此时如实返回 None 而非伪造 1e3。
+    lo, hi = 0.0, 1.0
+    max_hi = 1e300
+    while student_t_two_sided_p(hi, df) > 0.05:
+        if hi >= max_hi:
+            return None
+        hi = min(hi * 2.0, max_hi)
+    for _ in range(200):
         mid = 0.5 * (lo + hi)
         if student_t_two_sided_p(mid, df) > 0.05:
             lo = mid
         else:
             hi = mid
-    return 0.5 * (lo + hi)
+        if hi - lo <= 1e-12 * max(1.0, hi):
+            break
+    root = 0.5 * (lo + hi)
+    # 数值验证：df 极小时 x=df/(df+t²) 可能下溢、t² 也可能溢出，使 p(t)
+    # 在 float 边界处出现虚假的“已跨过 0.05”。若返回点实际 p 不是 0.05，
+    # 说明真正的临界值超出 float 可表示范围，如实返回 None。
+    if abs(student_t_two_sided_p(root, df) - 0.05) > 1e-6:
+        return None
+    return root
 
 
 def _paired_diffs(a, b) -> np.ndarray:
