@@ -1,0 +1,535 @@
+"""实验设计与准备层测试：先验功效、设计计划、分析人群与确认性降级。
+
+覆盖：
+  * 配对 t / McNemar 的功效与所需样本数互为逆运算，且拒绝非法输入；
+  * 计划在训练前写死种子/变体/SESOI 灵敏度，缺登记种子时 fail；
+  * 计划内 (变体, 种子) 单元缺失时，只降级受影响假设的确认性判定；
+  * 旧产物没有 design_plan.json 时不误降级（向后兼容）。
+"""
+import json
+import math
+import os
+import shutil
+import tempfile
+
+from lega.design import (analysis_population, apply_design_gate,
+                         build_design_plan, design_conformance,
+                         load_design_plan, main as design_main,
+                         mcnemar_mde, mcnemar_power,
+                         mcnemar_required_samples,
+                         max_discordance_for_effect, max_sd_for_effect,
+                         min_detectable_effect, observed_design_sensitivity,
+                         paired_t_power, plan_digest, render_design_section,
+                         required_pairs, save_design_plan)
+
+
+def _write_json(path, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+
+
+def _plan(seeds=(1, 2, 3, 4, 5), variants=("lega", "standard", "qgate"),
+          registered=None, **kw):
+    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+           "design": {"alpha": 0.05, "power": 0.8}}
+    if registered is None:
+        registered = {"hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega",
+             "reference": "standard", "direction": "candidate_better"},
+            {"id": "H5", "metric": "PPL", "candidate": "lega",
+             "reference": "qgate", "direction": "candidate_better"},
+        ]}
+    return build_design_plan(cfg, list(seeds), list(variants), registered,
+                             known_variants={"lega", "standard", "qgate"},
+                             **kw)
+
+
+def test_paired_power_and_required_seeds():
+    """配对 t：功效随 n 单调增，required_pairs 与 power 互为逆运算。"""
+    for n in (3, 5, 8, 12):
+        assert paired_t_power(0.01, 0.01, n) > paired_t_power(
+            0.01, 0.01, n - 1), n
+    n = required_pairs(0.01, 0.01, alpha=0.05, power=0.8)
+    assert n == 8, n
+    assert paired_t_power(0.01, 0.01, n) >= 0.8
+    assert paired_t_power(0.01, 0.01, n - 1) < 0.8
+    # MDE 与功效是同一公式的两种写法。
+    mde = min_detectable_effect(0.01, 5)
+    assert abs(paired_t_power(mde, 0.01, 5) - 0.8) < 1e-5
+    # 80% 功效下可容忍的最大 SD：把 SD 设为该值，功效恰为 0.8。
+    sd_max = max_sd_for_effect(0.01, 5)
+    assert abs(paired_t_power(0.01, sd_max, 5) - 0.8) < 1e-5
+    # 与全项目使用的 MDE 口径逐位一致，避免两套公式漂移。
+    from lega.utils import min_detectable_effect as utils_mde
+    for sd in (0.002, 0.01, 0.05):
+        for nn in (3, 5, 10):
+            assert abs(min_detectable_effect(sd, nn)
+                       - utils_mde(sd, nn)) < 1e-15
+    # 非法输入显式拒绝，不静默返回“看起来显著”的值。
+    for args in (("x", 0.01, 5), (0.01, 0, 5), (0.01, 0.01, True),
+                 (0.01, 0.01, 1)):
+        try:
+            paired_t_power(*args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"应拒绝非法输入 {args}")
+    print("  [ok] 配对 t 功效/所需种子数与非法输入")
+
+
+def test_mcnemar_power_and_required_samples():
+    """McNemar：小样本精确功效、大样本近似、所需样本数互为逆运算。"""
+    small = mcnemar_power(30, 0.10, 0.01)
+    assert small["method"] == "exact"
+    # n=30 时期望不一致对只有 3 个，精确检验对 1pp 几乎无功效。
+    assert small["power"] < 0.05, small
+    big = mcnemar_power(8000, 0.10, 0.01)
+    assert big["method"] == "normal_approx"
+    assert big["power"] >= 0.8, big
+    need = mcnemar_required_samples(0.01, 0.10)
+    assert need is not None and 7000 <= need <= 9000, need
+    assert mcnemar_power(need, 0.10, 0.01)["power"] >= 0.8
+    assert mcnemar_power(need - 1, 0.10, 0.01)["power"] < 0.8
+    # MDE 与所需样本数同源：n=30、π=0.1 时约 16pp。
+    mde = mcnemar_mde(30, 0.10)
+    assert 0.15 < mde < 0.17, mde
+    # 效应越大功效越高。
+    assert mcnemar_power(200, 0.2, 0.10)["power"] > \
+        mcnemar_power(200, 0.2, 0.01)["power"]
+    # 边际差大于不一致率在概率上不可能。
+    try:
+        mcnemar_power(30, 0.05, 0.10)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("|effect|>discordance 必须拒绝")
+    # 可容忍不一致率与 n 成正比。
+    assert max_discordance_for_effect(0.01, 60) > \
+        max_discordance_for_effect(0.01, 30)
+    print("  [ok] McNemar 精确/近似功效与所需每格样本数")
+
+
+def test_build_design_plan_flags_missing_registered_seeds():
+    """少跑预注册种子：计划必须 fail 并在 checks 中写明。"""
+    reg = {"scope": {"seeds": [1, 2, 3, 4, 5]},
+           "hypotheses": [
+               {"id": "H1", "metric": "PPL", "candidate": "lega",
+                "reference": "standard", "direction": "candidate_better"}]}
+    plan = _plan(seeds=(1, 2, 3), registered=reg)
+    assert plan["status"] == "fail", plan["status"]
+    by_id = {c["id"]: c for c in plan["checks"]}
+    assert by_id["seed_scope"]["status"] == "fail"
+    assert "4" in by_id["seed_scope"]["detail"]
+    assert by_id["hypothesis_variants"]["status"] == "pass"
+    # 灵敏度表必须存在，且 PPL 的 1% SESOI 与 n=3 的断点可读。
+    ppl = plan["endpoints"]["ppl"]
+    assert ppl["planned_seeds"] == 3
+    assert len(ppl["sensitivity"]) >= 3
+    assert ppl["max_paired_sd_for_sesoi"] is not None
+    ruler = plan["endpoints"]["ruler"]
+    assert ruler["samples_per_cell"] == 30
+    assert ruler["cells"] == 2 * 5
+    assert any(r["discordance"] == 0.1 for r in ruler["sensitivity"])
+    assert plan["plan_digest"] == plan_digest(plan)
+    # 摘要里必须包含“分析人群/排除规则”的先验声明与登记假设快照。
+    assert plan["analysis_protocol"]["exclusions"]
+    assert plan["registered_plan"][0]["id"] == "H1"
+    assert plan["registered_plan"][0]["metric"] == "PPL"
+    print("  [ok] 设计计划：缺失预注册种子判 fail，灵敏度表完整")
+
+
+def test_build_design_plan_smoke_downgrades_fail():
+    """冒烟运行的 fail 降为 warn：流程检查不应冒充正式设计失败。"""
+    reg = {"scope": {"seeds": [1, 2, 3, 4, 5]},
+           "hypotheses": [
+               {"id": "H1", "metric": "PPL", "candidate": "lega",
+                "reference": "standard"}]}
+    plan = _plan(seeds=(1,), registered=reg, smoke=True,
+                 ruler_n_samples=2)
+    assert plan["status"] == "warning", plan["status"]
+    seed = {c["id"]: c for c in plan["checks"]}["seed_scope"]
+    assert seed["status"] == "warn"
+    assert "冒烟" in seed["detail"]
+    print("  [ok] 设计计划：冒烟把 fail 降为 warn 并留痕")
+
+
+def test_analysis_population_and_conformance():
+    """计划内单元缺失必须显式进入 population/problems。"""
+    plan = _plan()
+    runs = {
+        "lega": {1: {"eval": {}, "ruler": {}, "analysis": {}},
+                 2: {"eval": {}, "ruler": {}, "analysis": {}},
+                 3: {"eval": {}}},                     # 缺 ruler/analysis
+        "standard": {1: {"eval": {}, "ruler": {}, "analysis": {}},
+                     2: {"eval": {}, "ruler": {}, "analysis": {}},
+                     3: {"eval": {}, "ruler": {}, "analysis": {}}},
+        "qgate": {1: {"eval": {}, "ruler": {}, "analysis": {}},
+                  2: {"eval": {}, "ruler": {}, "analysis": {}}},  # 缺 seed3
+    }
+    pop = analysis_population(plan, runs)
+    assert pop["expected_cells"] == 15
+    assert pop["observed_eval_cells"] == 8
+    assert "qgate/seed3" in pop["missing_eval"]
+    assert "lega/seed3" in pop["missing_ruler"]
+    assert pop["complete_eval"] is False
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False,
+             "config_sha256": plan["inputs"]["config_sha256"]}
+    conf = design_conformance(plan, repro, runs,
+                              stages={"ruler": True, "analysis": True})
+    assert conf["checked"] is True
+    assert conf["in_plan"] is False
+    assert any("qgate/seed3" in p for p in conf["problems"])
+    # repro 与计划不一致（上一轮遗留计划）时不据此降级。
+    conf2 = design_conformance(plan, dict(repro, seeds=[1, 2]),
+                               runs)
+    assert conf2["checked"] is False
+    assert conf2["reason"] == "plan_repro_seed_mismatch"
+    # 完全没有计划（旧产物）：checked=False，不误判。
+    conf3 = design_conformance({}, repro, runs)
+    assert conf3["checked"] is False
+    assert conf3["reason"] == "missing_plan"
+    assert load_design_plan(tempfile.mkdtemp()) == {}
+    print("  [ok] 分析人群/设计符合性：缺失单元与计划错配均显形")
+
+
+def test_apply_design_gate_targets_only_affected_hypotheses():
+    """缺 qgate 只降级 H5/含 qgate 的假设；H1、H6 不受影响。"""
+    plan = _plan(seeds=(1, 2, 3))
+    runs = {
+        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                 for s in (1, 2, 3)},
+        "standard": {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                     for s in (1, 2, 3)},
+        "qgate": {1: {"eval": {}, "ruler": {}, "analysis": {}},
+                  2: {"eval": {}, "ruler": {}, "analysis": {}}},
+    }
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    conf = design_conformance(plan, repro, runs)
+    hyps = [
+        {"id": "H1", "metric": "PPL", "candidate": "lega",
+         "reference": "standard", "confirmatory_valid": True},
+        {"id": "H5", "metric": "PPL", "candidate": "lega",
+         "reference": "qgate", "confirmatory_valid": True},
+        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
+         "reference": "standard", "confirmatory_valid": True},
+        {"id": "H6", "metric": "AUROC差(logit−仅查询)", "candidate": "lega",
+         "reference": "仅查询项基线", "confirmatory_valid": True},
+    ]
+    out = apply_design_gate(hyps, conf, plan)
+    by = {h["id"]: h for h in out}
+    assert by["H1"]["confirmatory_valid"] is True
+    assert by["H1"]["design_population_ok"] is True
+    assert by["H5"]["confirmatory_valid"] is False
+    assert by["H5"]["design_population_ok"] is False
+    assert "分析人群不完整" in by["H5"]["confirmatory_note"]
+    assert by["H4"]["confirmatory_valid"] is True  # RULER 单元齐全
+    assert by["H6"]["confirmatory_valid"] is True  # analysis 单元齐全
+    # 已因其他门降级的条目保留原原因，不被覆盖。
+    hyps2 = [{"id": "H5", "metric": "PPL", "candidate": "lega",
+              "reference": "qgate", "confirmatory_valid": False,
+              "confirmatory_note": "预注册完整性失败"}]
+    out2 = apply_design_gate(hyps2, conf, plan)
+    assert out2[0]["confirmatory_note"] == "预注册完整性失败"
+    # 计划不可核对时不降级。
+    hyps3 = [{"id": "H1", "metric": "PPL", "candidate": "lega",
+              "reference": "standard", "confirmatory_valid": True}]
+    out3 = apply_design_gate(hyps3, {"checked": False}, plan)
+    assert out3[0]["confirmatory_valid"] is True
+    assert out3[0]["design_population_ok"] is None
+    print("  [ok] 设计门：只降级受影响假设，保留更早的降级原因")
+
+
+def test_observed_design_sensitivity():
+    """实测 SD 反推 MDE：与 SESOI 同尺度比较，不伪装成观测功效。"""
+    tests = [
+        {"candidate": "lega", "reference": "standard", "metric": "PPL",
+         "equivalence": {"status": "not_equivalent", "std_diff": 0.01,
+                         "n": 5, "margin": 0.01}},
+        {"candidate": "lega", "reference": "qgate", "metric": "PPL",
+         "equivalence": {"status": "not_equivalent", "std_diff": 0.002,
+                         "n": 5, "margin": 0.01}},
+        {"candidate": "bad", "reference": "x", "metric": "PPL",
+         "equivalence": {"status": "invalid", "std_diff": 0.1,
+                         "n": 5, "margin": 0.01}},
+    ]
+    rows = observed_design_sensitivity(tests)
+    assert len(rows) == 2
+    r0, r1 = rows
+    assert r0["adequate_for_sesoi"] is False
+    assert r0["observed_mde_sesoi_units"] > r0["sesoi_margin"]
+    assert r1["adequate_for_sesoi"] is True
+    assert r1["power_for_sesoi"] > 0.99
+    print("  [ok] 实测灵敏度：MDE 与 SESOI 比较、跳过 invalid")
+
+
+def test_render_design_section_with_and_without_plan():
+    """汇总页必须把计划、检查、灵敏度与人群偏差渲染出来。"""
+    plan = _plan(seeds=(1, 2, 3))
+    runs = {
+        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                 for s in (1, 2)},
+        "standard": {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                     for s in (1, 2, 3)},
+        "qgate": {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                  for s in (1, 2, 3)},
+    }
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    conf = design_conformance(plan, repro, runs)
+    md = "\n".join(render_design_section(
+        plan, conf, observed=observed_design_sensitivity([])))
+    assert "实验设计与分析人群" in md
+    assert "PPL 先验灵敏度" in md and "RULER 先验灵敏度" in md
+    assert "设计符合性与分析人群" in md
+    assert "lega/seed3" in md
+    assert "确认性判定已自动降级" in md
+    assert "配对差SD" in md
+    md2 = "\n".join(render_design_section({}, None))
+    assert "未找到 `design_plan.json`" in md2
+    print("  [ok] 汇总页：计划/检查/灵敏度/人群偏差与无计划告警")
+
+
+def test_design_cli_writes_plan_and_exit_code():
+    """CLI：写出计划；有 fail 时退出码 2，警告时 0。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg = {"seeds": [1, 2, 3], "seed": 1,
+               "ruler": {"ctx_lens": [256], "n_samples": 30}}
+        cfg_path = os.path.join(tmp, "cfg.json")
+        _write_json(cfg_path, cfg)
+        reg = {"hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega",
+             "reference": "standard"}]}
+        reg_path = os.path.join(tmp, "reg.json")
+        _write_json(reg_path, reg)
+        out = os.path.join(tmp, "plan.json")
+        rc = design_main(["--config", cfg_path, "--variants", "lega,standard",
+                          "--registered", reg_path, "--out", out,
+                          "--quiet"])
+        assert rc == 0, rc
+        plan = json.load(open(out, encoding="utf-8"))
+        assert plan["inputs"]["seeds"] == [1, 2, 3]
+        assert plan["status"] in ("ok", "warning")
+        # 少跑预注册种子 → fail → 退出码 2。
+        _write_json(reg_path, {"scope": {"seeds": [1, 2, 3, 4, 5]},
+                               "hypotheses": reg["hypotheses"]})
+        rc2 = design_main(["--config", cfg_path, "--variants",
+                           "lega,standard", "--registered", reg_path,
+                           "--out", out, "--quiet"])
+        assert rc2 == 2, rc2
+        plan2 = json.load(open(out, encoding="utf-8"))
+        assert plan2["status"] == "fail"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] design CLI：写计划、fail 退出码 2、重写原子落盘")
+
+
+def test_plan_digest_tracks_scientific_content():
+    """计划摘要对种子/变体敏感，对生成时间不敏感。"""
+    p1 = _plan()
+    p2 = _plan()
+    assert p1["plan_digest"] == p2["plan_digest"]
+    p3 = _plan(seeds=(1, 2, 3, 4, 5, 6))
+    assert p3["plan_digest"] != p1["plan_digest"]
+    p4 = _plan(variants=("lega", "standard"))
+    assert p4["plan_digest"] != p1["plan_digest"]
+    print("  [ok] 计划摘要：同一设计稳定、内容变化即变")
+
+
+def test_design_plan_rejects_malformed_inputs():
+    """非法种子/变体/配置必须在训练前显式失败。"""
+    for seeds, variants in (([], ["lega"]), ([1, 1], ["lega"]),
+                            ([1], []), ([1], ["lega", "lega"])):
+        try:
+            build_design_plan({}, seeds, variants, None,
+                              known_variants={"lega"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"应拒绝 seeds={seeds}, variants={variants}")
+    # 配置里的设计网格非法时不能静默跳过检查。
+    try:
+        build_design_plan({"design": {"ppl_paired_sd_rel_grid": [0.1, -1]}},
+                          [1, 2, 3], ["lega"], None,
+                          known_variants={"lega"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("负的设计网格必须拒绝")
+    print("  [ok] 设计计划：非法输入显式失败")
+
+
+def test_build_summary_downgrades_confirmatory_on_missing_planned_seed():
+    """端到端：汇总读入先验计划，缺计划内种子的 H1 降级为探索性。"""
+    from unittest import mock
+    import run_all
+
+    tmp = tempfile.mkdtemp()
+    try:
+        seeds = [1, 2, 3]
+        variants = ["lega", "standard"]
+        reg = {"hypotheses": [
+            {"id": "H1", "claim": "LEGA 优于 standard", "metric": "PPL",
+             "candidate": "lega", "reference": "standard",
+             "direction": "candidate_better"}]}
+        plan = build_design_plan(
+            {"ruler": {"ctx_lens": [256], "n_samples": 30}},
+            seeds, variants, reg, known_variants=set(variants))
+        save_design_plan(plan, os.path.join(tmp, "design_plan.json"))
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": variants, "seeds": seeds, "smoke": False,
+            "config_sha256": plan["inputs"]["config_sha256"],
+            "design": {"stages": {"ruler": False, "analysis": False}},
+        })
+        for s in seeds:
+            _write_json(os.path.join(tmp, f"eval_standard_seed{s}.json"), {
+                "variant": "standard", "seed": s, "val_ppl": 10.0 + 0.1 * s,
+                "val_loss": 2.3, "n_params": 100, "split": "val"})
+        for s in (1, 2):  # seed3 缺失
+            _write_json(os.path.join(tmp, f"eval_lega_seed{s}.json"), {
+                "variant": "lega", "seed": s, "val_ppl": 9.0 + 0.1 * s,
+                "val_loss": 2.2, "n_params": 100, "split": "val"})
+        intact = {"status": "intact", "confirmatory_valid": True,
+                  "problems": [], "registry_sha256": "a" * 64,
+                  "n_hypotheses": 1, "baseline_document_sha256": "b" * 64,
+                  "chain_length": 0}
+        with mock.patch("run_all.load_registered_hypotheses",
+                        return_value=reg), \
+                mock.patch("run_all.verify_registration",
+                           return_value=intact):
+            out = run_all.build_summary(tmp)
+        md = out["markdown"]
+        assert "实验设计与分析人群" in md
+        assert "lega/seed3" in md
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")
+        assert h1["design_population_ok"] is False
+        assert h1["confirmatory_valid"] is False
+        assert "分析人群不完整" in h1["confirmatory_note"]
+        conf = json.load(open(os.path.join(tmp, "design_conformance.json"),
+                              encoding="utf-8"))
+        assert conf["checked"] is True and conf["in_plan"] is False
+        assert "lega/seed3" in " ".join(conf["problems"])
+        # 计划/实测灵敏度也必须进入 significance.json，供程序扫描。
+        assert sig["design_plan"]["plan_digest"] == plan["plan_digest"]
+        assert isinstance(sig["observed_design_sensitivity"], list)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 端到端：缺计划内种子 → H1 确认性降级 + 产物落盘")
+
+
+def test_missing_registered_seeds_trigger_global_design_gate():
+    """计划只用 3 个登记种子时，即使 3×变体人口齐全也必须全局降级。"""
+    reg = {"scope": {"seeds": [1, 2, 3, 4, 5]},
+           "hypotheses": [
+               {"id": "H1", "metric": "PPL", "candidate": "lega",
+                "reference": "standard"}]}
+    plan = build_design_plan(
+        {"ruler": {"ctx_lens": [256], "n_samples": 30}},
+        [1, 2, 3], ["lega", "standard"], reg,
+        known_variants={"lega", "standard"})
+    assert plan["status"] == "fail"
+    runs = {v: {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                for s in (1, 2, 3)} for v in ("lega", "standard")}
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    conf = design_conformance(plan, repro, runs)
+    assert conf["checked"] is True
+    assert conf["global_plan_gate"] is True
+    assert conf["population"]["complete_eval"] is True  # 3×2 都齐全
+    hyps = [{"id": "H1", "metric": "PPL", "candidate": "lega",
+             "reference": "standard", "confirmatory_valid": True}]
+    out = apply_design_gate(hyps, conf, plan)
+    assert out[0]["confirmatory_valid"] is False
+    assert out[0]["design_population_ok"] is False
+    assert "预注册种子" in out[0]["confirmatory_note"]
+    print("  [ok] 设计门：少跑预注册种子触发全局降级（人口齐全也不例外）")
+
+
+def test_plan_digest_ignores_machine_specific_config_path():
+    """同一设计在不同工作目录/路径下摘要一致；内容变化仍会变。"""
+    cfg = {"ruler": {"ctx_lens": [256], "n_samples": 30}}
+    reg = {"hypotheses": [{"id": "H1", "metric": "PPL",
+                           "candidate": "lega", "reference": "standard"}]}
+    a = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
+                          config_file="/mnt/a/configs/small.json",
+                          known_variants={"lega", "standard"})
+    b = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
+                          config_file="/home/other/small.json",
+                          known_variants={"lega", "standard"})
+    assert a["plan_digest"] == b["plan_digest"]
+    c = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
+                          config_sha256="f" * 64,
+                          known_variants={"lega", "standard"})
+    assert c["plan_digest"] != a["plan_digest"]
+    print("  [ok] 计划摘要：忽略机器路径、对配置内容敏感")
+
+
+def test_design_plan_history_preserves_redesign_events():
+    """计划历史：同 digest 去重、不同 digest 追加、损坏行跳过。"""
+    from lega.design import load_design_plan_history
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "design_plan.json")
+        p1 = _plan()
+        p2 = _plan()
+        save_design_plan(p1, out)
+        save_design_plan(p2, out)  # 同 digest：不重复追加
+        hist = load_design_plan_history(tmp)
+        assert len(hist) == 1, hist
+        p3 = _plan(seeds=(1, 2, 3, 4, 5, 6))
+        save_design_plan(p3, out)
+        hist = load_design_plan_history(out)
+        assert len(hist) == 2
+        assert hist[-1]["plan_digest"] == p3["plan_digest"]
+        with open(os.path.join(tmp, "design_plan_history.jsonl"),
+                  "a", encoding="utf-8") as f:
+            f.write("not-json\n")
+        assert len(load_design_plan_history(tmp)) == 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 计划历史：去重、追加、损坏行容错")
+
+
+def test_design_plan_checks_context_span_for_length_claims():
+    """只有一档/跨度过窄的 ctx 不能支撑长度校准主张，计划必须告警。"""
+    def check(ctx):
+        p = build_design_plan(
+            {"ruler": {"ctx_lens": ctx, "n_samples": 30}},
+            [1, 2, 3], ["lega"], None, known_variants={"lega"})
+        return {c["id"]: c for c in p["checks"]}["ruler_context_span"]
+
+    assert check([256])["status"] == "warn"
+    assert check([512, 600])["status"] == "warn"
+    assert check([256, 512, 1024])["status"] == "pass"
+    print("  [ok] 设计计划：上下文档位跨度不足时告警")
+
+
+def test_analysis_population_ignores_variants_without_analysis_support():
+    """standard 不产出机制分析：不得因此把它算成“分析人群缺失”。"""
+    reg = {"hypotheses": [{"id": "H1", "metric": "PPL",
+                           "candidate": "lega", "reference": "standard"}]}
+    plan = build_design_plan(
+        {"ruler": {"ctx_lens": [256], "n_samples": 30}},
+        [1, 2, 3], ["lega", "standard"], reg,
+        known_variants={"lega", "standard"},
+        analysis_variants=["lega"])
+    runs = {
+        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}}
+                 for s in (1, 2, 3)},
+        "standard": {s: {"eval": {}, "ruler": {}}
+                     for s in (1, 2, 3)},
+    }
+    pop = analysis_population(plan, runs)
+    assert pop["complete_eval"] is True
+    assert pop["complete_ruler"] is True
+    assert pop["complete_analysis"] is True
+    assert pop["missing_analysis"] == []
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    conf = design_conformance(plan, repro, runs)
+    assert conf["checked"] is True and conf["in_plan"] is True
+    print("  [ok] 分析人群：不为无分析能力的标准变体伪造缺失")

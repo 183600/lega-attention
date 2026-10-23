@@ -102,6 +102,11 @@ from lega.datacheck import (read_test_access_log,  # noqa: E402
                             summarize_test_access)
 from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
                               interpret_equivalence, metric_margin)
+from lega.design import (apply_design_gate,  # noqa: E402
+                         build_design_plan, design_conformance,
+                         load_design_plan, load_design_plan_history,
+                         observed_design_sensitivity, render_design_section,
+                         save_design_plan)
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
                              collect_artifacts, ledger_path, new_run_id,
                              snapshot_train_run)
@@ -7062,12 +7067,29 @@ def build_summary(results_dir: str, audit: dict = None,
     # 范围门：登记表完整还不够——本次 run 必须真的落在登记的实验范围内
     # （config 规模/数据/种子计划），否则同样不能给 confirmatory 判定。
     scope_check = registration_scope_check(registered, repro)
-    hyp_eval = apply_budget_gate(
-        apply_scope_gate(
-            apply_integrity_gate(
-                evaluate_registered_hypotheses(registered, tests), integrity),
-            scope_check),
-        audit)
+    # 设计符合性门：先验计划里的 (变体, 种子) 单元必须齐全；缺失只影响
+    # 涉及该变体/指标端点的假设，不搞“一刀切”降级，也不能把缺失当无效应。
+    design_plan = load_design_plan(results_dir)
+    design_stages = _as_dict(
+        _as_dict(repro.get("design")).get("stages"))
+    design_conf = design_conformance(
+        design_plan, repro, runs, audit=audit, stages=design_stages)
+    design_hist = load_design_plan_history(results_dir)
+    if len(design_hist) > 1:
+        design_conf["plan_history_count"] = len(design_hist)
+        design_conf.setdefault("warnings", []).append(
+            f"本结果目录已有 {len(design_hist)} 份设计计划记录"
+            "（重跑/改种子/改样本量）：历史见 design_plan_history.jsonl；"
+            "当前判定只对应最新计划，不得把旧计划下的产物混入")
+    hyp_eval = apply_design_gate(
+        apply_budget_gate(
+            apply_scope_gate(
+                apply_integrity_gate(
+                    evaluate_registered_hypotheses(registered, tests),
+                    integrity),
+                scope_check),
+            audit),
+        design_conf, design_plan)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -7377,6 +7399,11 @@ def build_summary(results_dir: str, audit: dict = None,
                                     ngram_cmp=ngram_cmp,
                                     probe_cmp=probe_cmp,
                                     variants=sorted(runs))
+
+    # --- 先验设计计划与分析人群（训练前声明，汇总时核对）
+    md += render_design_section(
+        design_plan, design_conf,
+        observed=observed_design_sensitivity(tests))
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
@@ -9295,6 +9322,12 @@ def build_summary(results_dir: str, audit: dict = None,
             w.writerows(rows)
     with open(os.path.join(results_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
+    # 设计符合性单独落盘：即使 summary.md 被删改，计划/实际人群的偏差仍可
+    # 机读；significance.json 内同时保留一份。
+    save_json({"plan_digest": design_plan.get("plan_digest"),
+               "plan_status": design_plan.get("status"),
+               **design_conf},
+              os.path.join(results_dir, "design_conformance.json"))
     with open(os.path.join(results_dir, "significance.json"), "w",
               encoding="utf-8") as f:
         json.dump({"pairs": tests,
@@ -9333,6 +9366,10 @@ def build_summary(results_dir: str, audit: dict = None,
                            and h.get("p_adj_confirmatory") is not None)},
                    "registration_integrity": integrity,
                    "registration_scope": scope_check,
+                   "design_plan": design_plan,
+                   "design_conformance": design_conf,
+                   "observed_design_sensitivity": (
+                       observed_design_sensitivity(tests)),
                    "ngram_comparison": ngram_cmp,
                    "linear_probe_comparison": probe_cmp,
                    "ruler_sample_pairs": ruler_sample_tests,
@@ -9677,6 +9714,36 @@ def main():
         print(f"[repro] 预注册完整性 {reg_integrity.get('status')}"
               f"（假设 {reg_integrity.get('n_hypotheses')} 条，"
               f"修订链 {reg_integrity.get('chain_length')} 环）")
+
+    # 先验设计计划：在正式训练/评测之前落盘“计划内 (变体, 种子) 单元、
+    # 种子数/RULER 每格样本量对 SESOI 的灵敏度、分析人群与排除规则”。
+    # 它不读取任何结果或 test，故可作为“开跑前声明”的证据；汇总时据此
+    # 核对实际分析人群，计划内单元缺失会使受影响确认性判定降级。
+    try:
+        design_plan = build_design_plan(
+            cfg, seeds, variants, reg_doc,
+            config_file=args.config, config_sha256=config_sha256,
+            ruler_n_samples=(2 if args.smoke else None),
+            smoke=bool(args.smoke), known_variants=set(RUNNABLE_VARIANTS),
+            analysis_variants=[v for v in variants
+                               if v in GATED_FOR_ANALYSIS])
+    except ValueError as e:
+        p.error(f"设计计划生成失败（检查配置的 design/ruler 字段）：{e}")
+    design_plan_path = os.path.join(results_dir, "design_plan.json")
+    save_design_plan(design_plan, design_plan_path)
+    print(f"[design] 先验计划 status={design_plan.get('status')} "
+          f"digest={str(design_plan.get('plan_digest'))[:12]} -> "
+          f"{design_plan_path}")
+    _design_hist = load_design_plan_history(results_dir)
+    if len(_design_hist) > 1:
+        print(f"[design] ⚠ 本结果目录已有 {len(_design_hist)} 份设计计划记录"
+              "（重跑/改种子/改样本量）；历史见 design_plan_history.jsonl，"
+              "当前计划以最新 digest 为准")
+    for _c in design_plan.get("checks", []):
+        if isinstance(_c, dict) and _c.get("status") in ("warn", "fail"):
+            print(f"[design] {_c['status']}: {_c.get('title')} — "
+                  f"{_c.get('detail')}")
+
     try:
         data_fp = data_fingerprint(args.data_dir)
         data_digest = data_fp["digest"]
@@ -9721,6 +9788,23 @@ def main():
         "data": data_fp,
         "runtime": runtime_info(args.device),
         "registration": reg_info,
+        # 先验设计计划摘要 + 各阶段是否实际执行：汇总据此区分“计划内但
+        # 被 --skip_* 关闭”与“产物缺失”，不把跳过的阶段当成完整分析人群。
+        "design": {
+            "plan_path": os.path.relpath(design_plan_path, ROOT),
+            "plan_digest": design_plan.get("plan_digest"),
+            "status": design_plan.get("status"),
+            "checks": [
+                {"id": c.get("id"), "status": c.get("status")}
+                for c in design_plan.get("checks", [])
+                if isinstance(c, dict)],
+            "stages": {
+                "ruler": bool(not args.skip_ruler),
+                "analysis": bool(not args.skip_analysis),
+                "latency": bool(not args.skip_latency),
+                "ablation": bool(not args.skip_ablation and ablate_variants),
+            },
+        },
         "data_protocol_preflight": data_preflight,
     }
     save_json(repro, os.path.join(results_dir, "repro.json"))
