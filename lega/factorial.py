@@ -121,19 +121,40 @@ def shapley_values(values: Mapping[str, float]) -> Dict[str, float]:
     if unknown:
         raise ValueError(f"Shapley 分解包含未知单元格: {sorted(unknown)}")
     v = {c: _finite_float(values[c], f"单元格 {c}") for c in CELL_ORDER}
-    n = len(FACTOR_ORDER)
-    phi = {}
-    for i in FACTOR_ORDER:
-        others = [j for j in FACTOR_ORDER if j != i]
-        total = 0.0
-        for r in range(len(others) + 1):
-            weight = (factorial(r) * factorial(n - r - 1) / factorial(n))
-            for subset in combinations(others, r):
-                s = frozenset(subset)
-                with_i = s | {i}
-                total += weight * (v[cell_key(with_i)] - v[cell_key(s)])
-        phi[i] = float(total)
-    return phi
+
+    def _raw(vals):
+        n = len(FACTOR_ORDER)
+        phi = {}
+        for i in FACTOR_ORDER:
+            others = [j for j in FACTOR_ORDER if j != i]
+            total = 0.0
+            for r in range(len(others) + 1):
+                weight = (factorial(r) * factorial(n - r - 1) / factorial(n))
+                for subset in combinations(others, r):
+                    s = frozenset(subset)
+                    with_i = s | {i}
+                    total += weight * (vals[cell_key(with_i)] - vals[cell_key(s)])
+            phi[i] = float(total)
+        return phi
+
+    phi = _raw(v)
+    if all(math.isfinite(val) for val in phi.values()):
+        return phi
+    # 两个接近 float 上限、符号相反的单元格值之差可能溢出成 ±inf；即使
+    # 有限项随后互相抵消，朴素累加也会留下 inf/nan。Shapley 值对价值函数
+    # 是尺度线性齐次的：先按最大绝对值缩放再还原，只影响舍入，不改变真值。
+    scale = max(abs(val) for val in v.values())
+    if scale == 0.0:
+        return phi
+    scaled = _raw({c: val / scale for c, val in v.items()})
+    out = {}
+    for factor, val in scaled.items():
+        value = val * scale
+        if not math.isfinite(value):
+            raise ValueError(
+                f"Shapley 值 {factor} 超出 float 表示范围（scale={scale!r}）")
+        out[factor] = float(value)
+    return out
 
 
 def decomposition(values: Mapping[str, float]) -> Dict:
@@ -143,10 +164,28 @@ def decomposition(values: Mapping[str, float]) -> Dict:
     efficiency_gap = Σφ − total_effect，浮点误差量级（应接近 0）。
     """
     phi = shapley_values(values)
-    total = (_finite_float(values["ABC"], "ABC")
-             - _finite_float(values["none"], "none"))
+    abc = _finite_float(values["ABC"], "ABC")
+    none = _finite_float(values["none"], "none")
+    total = abc - none
+    if not math.isfinite(total):
+        # 两个有限值符号相反且幅度和超过 float 上限时，真实总效应不可表示；
+        # 不能把 inf 写进报告，按无法分解处理（调用方会跳过该种子）。
+        raise ValueError(
+            f"Shapley 总效应超出 float 表示范围（ABC={abc!r}, none={none!r}）")
+    try:
+        gap = math.fsum(phi.values()) - total
+    except OverflowError:
+        gap = float("nan")
+    if not math.isfinite(gap):
+        # 逐项相加可能中间溢出；按最大幅度缩放后再求和，效率性残差仍可
+        # 表示，不能因为求和顺序把有效的分解写成 inf/nan。
+        scale = max([abs(total)] + [abs(val) for val in phi.values()])
+        gap = (math.fsum(val / scale for val in phi.values())
+               - total / scale) * scale
+        if not math.isfinite(gap):
+            raise ValueError("Shapley 效率性残差超出 float 表示范围")
     return {"phi": phi, "total_effect": float(total),
-            "efficiency_gap": float(sum(phi.values()) - total)}
+            "efficiency_gap": float(gap)}
 
 
 def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:

@@ -576,3 +576,28 @@ def test_shapley_shares_never_emit_nonfinite_ratios():
     assert shares({"A": 1e308, "B": 1e308}, 1e-11) == {}
     assert shares({"A": 1e308}, 1e308) == {"A": 1.0}
     print("  [ok] Shapley 占比：极小 total/溢出时返回空表，不写出 inf")
+
+
+def test_shapley_rescales_opposite_huge_cell_values():
+    """有限单元格之差溢出后，Shapley 仍须给出可表示的有限结果。"""
+    a = 1e308
+    values = {"none": 0.0, "A": 0.0, "B": -a, "AB": a,
+              "C": a, "AC": -a, "BC": 0.0, "ABC": 0.0}
+    phi = shapley_values(values)
+    assert all(abs(v) < 1e-12 for v in phi.values()), phi
+    dec = decomposition(values)
+    assert dec["total_effect"] == 0.0
+    assert abs(dec["efficiency_gap"]) < 1e-12
+    # 真实总效应（2e308）不可表示：显式拒绝，不能把 inf 写进报告；
+    # 单因子 φ 仍可表示时照常返回。
+    bad = {c: 0.0 for c in CELL_ORDER}
+    bad["ABC"], bad["none"] = 1e308, -1e308
+    phi_bad = shapley_values(bad)
+    assert all(math.isfinite(v) for v in phi_bad.values()), phi_bad
+    try:
+        decomposition(bad)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    print("  [ok] Shapley：反向极值先缩放再差分，总效应不可表示时显式拒绝")
