@@ -451,6 +451,30 @@ def test_selection_diagnostics_reports_flip_noise_and_loo():
     print("  [ok] _selection_diagnostics（支持率、噪声差距、LOO 复选）")
 
 
+def test_selection_diagnostics_huge_losses_stay_finite():
+    """稳定性诊断的 sum/方差同样必须抗溢出：巨大有限损失差不能写成 inf。"""
+    def g(lr, vals):
+        scale = max(vals)
+        mean = scale * (sum(v / scale for v in vals) / len(vals))
+        return {"lr": lr, "weight_decay": 0.1, "n_seeds": 3,
+                "seeds": [7, 8, 9], "complete": True,
+                "val_loss_best_mean": mean, "val_loss_best_std": None,
+                "val_loss_best_per_seed": {str(seed): v
+                                           for seed, v in zip((7, 8, 9), vals)}}
+
+    selected = g(1.0, [1.0e308, 1.0e308, 1.0e308])
+    runner = g(2.0, [1.1e308, 1.4e308, 1.7e308])
+    diag = _selection_diagnostics([selected, runner], selected, runner)
+    assert math.isfinite(diag["runner_up"]["paired_delta_mean"])
+    assert math.isfinite(diag["runner_up"]["paired_delta_std"])
+    assert math.isfinite(diag["runner_up"]["paired_delta_sem"])
+    loo = diag["leave_one_seed_out"]
+    assert math.isfinite(loo["heldout_gain_vs_default_mean"])
+    assert math.isfinite(loo["heldout_gain_vs_default_std"])
+    json.dumps(diag, allow_nan=False)
+    print("  [ok] _selection_diagnostics（巨大有限损失差的诊断量保持有限）")
+
+
 def test_grid_stats_duplicate_success_is_not_counted_as_failure():
     """同一配置/种子重复成功的 trial 只去重，不得被算成失败。"""
     trials = [

@@ -555,13 +555,11 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
                   - runner["val_loss_best_mean"])
         deltas = [runner["val_loss_best_per_seed"][s]
                   - sel_stat["val_loss_best_per_seed"][s] for s in common]
-        dmean = sum(deltas) / len(deltas)
-        dstd = None
-        dsem = None
-        if len(deltas) >= 2:
-            dvar = sum((d - dmean) ** 2 for d in deltas) / (len(deltas) - 1)
-            dstd = math.sqrt(dvar)
-            dsem = dstd / math.sqrt(len(deltas))
+        # 与网格均值同一套缩放口径：接近 float 上限的 val_loss 差值
+        # 在朴素 sum/平方中会溢出为 inf，使诊断字段成为非法 JSON。
+        dmean, dstd = mean_std(deltas)
+        dsem = (dstd / math.sqrt(len(deltas))
+                if dstd is not None else None)
         out["runner_up"] = {
             **_cfg(runner),
             "val_loss_best_mean": runner["val_loss_best_mean"],
@@ -582,8 +580,8 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
             train = [s for s in common if s != held]
             loo_stat = min(
                 complete,
-                key=lambda g: sum(g["val_loss_best_per_seed"][s]
-                                  for s in train) / len(train))
+                key=lambda g: mean_std(
+                    [g["val_loss_best_per_seed"][s] for s in train])[0])
             agree = _same(loo_stat, sel_stat)
             agreement += int(agree)
             rec = {
@@ -616,11 +614,7 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
             "losses_vs_default": None,
         }
         if gains:
-            gm = sum(gains) / len(gains)
-            gstd = None
-            if len(gains) >= 2:
-                gvar = sum((g - gm) ** 2 for g in gains) / (len(gains) - 1)
-                gstd = math.sqrt(gvar)
+            gm, gstd = mean_std(gains)
             loo.update({
                 "heldout_gain_vs_default_mean": gm,
                 "heldout_gain_vs_default_std": gstd,
