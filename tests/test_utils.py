@@ -477,6 +477,12 @@ def test_t_critical_95_matches_known_table():
     assert student_t_two_sided_p(-10 ** 400, 3) == 0.0
     assert abs(t_critical_95(10 ** 18) - 1.9599639845) < 1e-6
     assert abs(t_critical_95(10 ** 400) - 1.9599639845) < 1e-6
+    # df 是最小次正规数时 df/2 下溢为 0；t 分布的尾部极限使双侧 p→1，
+    # 不能让 lgamma(0) 的 ValueError 穿透；其临界值超出 float 上限，须返回 None。
+    tiny_df = 5e-324
+    assert student_t_two_sided_p(1.0, tiny_df) == 1.0
+    assert student_t_two_sided_p(1e10, tiny_df) == 1.0
+    assert t_critical_95(tiny_df) is None
     # 非法自由度安全返回 None，不抛异常
     assert t_critical_95(0) is None and t_critical_95(None) is None
     assert t_critical_95(float("inf")) is None

@@ -810,8 +810,14 @@ def student_t_two_sided_p(t: float, df: float) -> float:
         return float("nan")
     if df >= _T_NORMAL_DF:
         return _normal_two_sided_p(t)
+    a = df / 2.0
+    if a == 0.0:
+        # df 是最小次正规数时 df/2 下溢为 0，lgamma(0) 会抛 ValueError。
+        # 对任意有限 t，a→0 的正则化不完全 beta 极限为 1（df 越小尾部
+        # 越重，双侧 p 越接近 1）；显式返回 1 而不是让 math 域错误穿透。
+        return 1.0
     x = df / (df + t * t)
-    return float(_betai(df / 2.0, 0.5, x))
+    return float(_betai(a, 0.5, x))
 
 
 def t_critical_95(df: float) -> float:
