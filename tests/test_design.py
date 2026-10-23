@@ -543,3 +543,33 @@ def test_analysis_population_ignores_variants_without_analysis_support():
     conf = design_conformance(plan, repro, runs)
     assert conf["checked"] is True and conf["in_plan"] is True
     print("  [ok] 分析人群：不为无分析能力的标准变体伪造缺失")
+
+
+def test_design_power_helpers_tolerate_counts_beyond_float_range():
+    """合法的大整数样本数不能让功效/MDE 计算抛 OverflowError。"""
+    huge = 10 ** 400  # √n = 1e200 仍可表示
+    assert paired_t_power(0.01, 0.01, huge) == 1.0
+    assert abs(paired_t_power(0.0, 0.01, huge) - 0.05) < 1e-12
+    mde = min_detectable_effect(0.01, huge)
+    assert mde is not None and 0.0 < mde < 1e-190, mde
+    sd_max = max_sd_for_effect(0.1, huge)
+    assert sd_max is not None and sd_max > 1e190, sd_max
+    mc = mcnemar_power(huge, 0.1, 0.01)
+    assert mc["method"] == "normal_approx" and mc["power"] == 1.0
+    assert mc["expected_discordant"] is None
+    assert mcnemar_power(huge, 0.1, 0.0)["power"] < 0.06
+    mde_bin = mcnemar_mde(huge, 0.1)
+    assert mde_bin is not None and 0.0 < mde_bin < 1e-190, mde_bin
+    assert max_discordance_for_effect(0.1, huge) == 1.0
+    # 极大效应/极大计数不能让平方或乘法中间结果溢出。
+    assert max_discordance_for_effect(1e200, 2) == 1.0
+
+    astronomical = 10 ** 1000  # √n 本身已超出 float 上限
+    assert paired_t_power(0.01, 0.01, astronomical) == 1.0
+    assert abs(paired_t_power(0.0, 0.01, astronomical) - 0.05) < 1e-12
+    assert min_detectable_effect(0.01, astronomical) is None
+    assert max_sd_for_effect(0.1, astronomical) is None
+    assert mcnemar_power(astronomical, 0.1, 0.01)["power"] == 1.0
+    assert mcnemar_mde(astronomical, 0.1) is None
+    assert max_discordance_for_effect(0.1, astronomical) == 1.0
+    print("  [ok] 设计功效函数：超 float 范围的合法大 n 不抛错/不产出 inf")

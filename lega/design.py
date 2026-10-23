@@ -142,6 +142,22 @@ def _z_sum(alpha: float, power: float) -> float:
     return nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
 
 
+def _sqrt_count(n: int):
+    """√n，允许 n 是超出 float 上限的合法大整数；√n 本身不可表示时返回 None。"""
+    try:
+        root = math.sqrt(n)
+    except OverflowError:
+        # math.sqrt(int) 会先把 n 转成 float；但 √n 仍可能可表示
+        # （如 n=10**400 → 1e200）。用对数求根，超出 float 时如实返回 None。
+        try:
+            root = math.exp(0.5 * math.log(n))
+        except (OverflowError, ValueError):
+            return None
+    if not (math.isfinite(root) and root > 0.0):
+        return None
+    return root
+
+
 def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
                    power: float = None) -> float:
     """配对 t 检验（双侧）的正态近似功效。
@@ -160,13 +176,17 @@ def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")
     nd = statistics.NormalDist()
-    try:
-        root_n = math.sqrt(n)
-    except OverflowError:
-        root_n = math.exp(0.5 * math.log(n))
-    if not (math.isfinite(root_n) and root_n > 0.0):
-        raise ValueError(f"n={n!r} 的平方根不可表示")
-    ncp = effect / (sd / root_n)
+    root_n = _sqrt_count(n)
+    # √n 超出 float 上限时，非零效应对应的 ncp 必为 +∞（功效 1），零效应
+    # 则为 0（功效 α）；不能把合法的大 n 当成非法输入抛错。
+    if root_n is None:
+        ncp = math.inf if effect > 0.0 else 0.0
+    else:
+        scaled_sd = sd / root_n
+        # sd/√n 可能下溢为 0（极大 n + 次正规 sd）：此时非零效应的 ncp
+        # 实际为 +∞，不能执行 0 除法。
+        ncp = (0.0 if effect == 0.0
+               else (math.inf if scaled_sd == 0.0 else effect / scaled_sd))
     if not math.isfinite(ncp):
         return 1.0 if ncp > 0 else float(alpha)
     z = nd.inv_cdf(1.0 - alpha / 2.0)
@@ -182,10 +202,9 @@ def min_detectable_effect(effect_sd, n, alpha: float = DEFAULT_ALPHA,
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
     z = _z_sum(alpha, power)
-    try:
-        root_n = math.sqrt(n)
-    except OverflowError:
-        root_n = math.exp(0.5 * math.log(n))
+    root_n = _sqrt_count(n)
+    if root_n is None:
+        return None
     out = z * sd / root_n
     return float(out) if math.isfinite(out) else None
 
@@ -228,10 +247,9 @@ def max_sd_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
-    try:
-        root_n = math.sqrt(n)
-    except OverflowError:
-        root_n = math.exp(0.5 * math.log(n))
+    root_n = _sqrt_count(n)
+    if root_n is None:
+        return None
     out = effect * root_n / _z_sum(alpha, power)
     return float(out) if math.isfinite(out) else None
 
@@ -347,7 +365,9 @@ def _mcnemar_power_normal(n: int, pi: float, effect: float,
                           alpha: float) -> float:
     nd = statistics.NormalDist()
     z = nd.inv_cdf(1.0 - alpha / 2.0)
-    ncp = math.sqrt(n) * abs(effect) / math.sqrt(pi)
+    root_n = _sqrt_count(n)
+    ncp = ((math.inf if effect != 0.0 else 0.0) if root_n is None
+           else root_n * abs(effect) / math.sqrt(pi))
     out = nd.cdf(ncp - z) + nd.cdf(-ncp - z)
     return float(min(1.0, max(0.0, out)))
 
@@ -371,10 +391,18 @@ def mcnemar_power(n, discordance, effect, alpha: float = DEFAULT_ALPHA) -> dict:
     else:
         pw = _mcnemar_power_normal(n, pi, float(effect), alpha)
         method = "normal_approx"
+    # n 是合法大整数时 n*π 可能超出 float 上限；期望不一致对数不可表示
+    # 就记为缺失，不能让幂计算整体抛 OverflowError。
+    try:
+        expected = float(n * pi)
+    except OverflowError:
+        expected = None
+    if expected is not None and not math.isfinite(expected):
+        expected = None
     return {
         "n": n, "discordance": pi, "effect": float(effect),
         "p10": p10, "p01": p01,
-        "expected_discordant": float(n * pi),
+        "expected_discordant": expected,
         "power": pw, "alpha": alpha, "method": method,
     }
 
@@ -421,7 +449,10 @@ def mcnemar_mde(n, discordance, alpha: float = DEFAULT_ALPHA,
         raise ValueError(f"discordance 必须 <= 1，收到 {pi!r}")
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
-    out = _z_sum(alpha, power) * math.sqrt(pi / n)
+    root_n = _sqrt_count(n)
+    if root_n is None:
+        return None
+    out = _z_sum(alpha, power) * math.sqrt(pi) / root_n
     return float(out) if math.isfinite(out) else None
 
 
@@ -432,7 +463,26 @@ def max_discordance_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
-    out = (effect ** 2) * n / (_z_sum(alpha, power) ** 2)
+    z = _z_sum(alpha, power)
+    root_n = _sqrt_count(n)
+    if root_n is None:
+        # n 大到 √n 不可表示：用对数判断是否已超过上界 1，避免先平方
+        # effect 再乘 n 时中间溢出。
+        try:
+            log_out = (2.0 * math.log(effect) - 2.0 * math.log(z)
+                       + math.log(n))
+        except (OverflowError, ValueError):
+            return None
+        if log_out >= 0.0:
+            return 1.0
+        out = math.exp(log_out)
+    else:
+        scaled = abs(effect / z) * root_n
+        # 结果上界是 1：先比较再平方，避免 ratio 已很大时平方抛
+        # OverflowError（有限输入也可能触发）。
+        if not math.isfinite(scaled) or scaled >= 1.0:
+            return 1.0
+        out = scaled * scaled
     if not math.isfinite(out):
         return None
     # 不一致率上界是 1：即使再大的 n 也不可能“容忍 >100% 的不一致”。
