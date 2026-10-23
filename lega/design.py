@@ -419,7 +419,9 @@ def mcnemar_required_samples(effect, discordance,
     max_n = _strict_int(max_n, "max_n", minimum=2)
     try:
         n0 = math.ceil((_z_sum(alpha, power) ** 2) * pi / (effect ** 2))
-    except (OverflowError, ValueError):
+    except (OverflowError, ValueError, ZeroDivisionError):
+        # 极小但合法的 effect 在平方后会下溢为 0；所需样本数远超任何
+        # 可行预算，按“不可达”处理，而不是让除零异常穿透设计入口。
         return None
     if not math.isfinite(n0):
         return None

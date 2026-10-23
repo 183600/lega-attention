@@ -563,6 +563,10 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
     assert max_discordance_for_effect(0.1, huge) == 1.0
     # 极大效应/极大计数不能让平方或乘法中间结果溢出。
     assert max_discordance_for_effect(1e200, 2) == 1.0
+    # 极小但合法的效应平方后会下溢为 0；所需样本数不可达，不能因
+    # effect**2 == 0 抛 ZeroDivisionError。
+    assert mcnemar_required_samples(5e-324, 0.1) is None
+    assert required_pairs(5e-324, 1.0) is None
 
     astronomical = 10 ** 1000  # √n 本身已超出 float 上限
     assert paired_t_power(0.01, 0.01, astronomical) == 1.0
