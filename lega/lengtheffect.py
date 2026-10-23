@@ -47,12 +47,19 @@ __all__ = [
 
 
 def _finite(value):
-    """有限实数；bool / 字符串 / NaN / Inf / 不可表示的大整数 → None。"""
+    """有限实数；bool / 非数值 / NaN / Inf / 不可表示的大整数 → None。
+
+    与项目既有的 ``_finite_number`` 同口径：规范数值字符串（如 ``"0.5"``）
+    先转 float 再参与计算。RULER 产物可能来自旧版本/手工整理，数值字符串
+    本身没有歧义；若在这里直接拒绝，同一 payload 在 ``context_task_means``
+    与 ``_ruler_avg_of`` 中会得到不同的单元格集合，长度分层就与总体 RULER
+    平均不可比。带下划线的数字串（``"1_0"``）不是规范 JSON 数值，仍拒绝。
+    """
     if value is None or isinstance(value, bool):
         return None
     if type(value).__name__ == "bool_":  # numpy.bool_
         return None
-    if not isinstance(value, Real):
+    if isinstance(value, str) and "_" in value:
         return None
     try:
         f = float(value)

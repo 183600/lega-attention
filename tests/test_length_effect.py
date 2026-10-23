@@ -114,6 +114,27 @@ def test_context_task_means_accepts_exact_huge_and_numeric_string_counts():
     assert context_task_means(bad) == {}
 
 
+def test_context_task_means_accepts_numeric_string_metrics_like_run_all():
+    """数值字符串 EM 不能被长度分层单独丢掉，否则与 RULER macro 不可比。"""
+    payload = _payload({
+        "a": {"256": {"em": "0.5", "n": 2},
+              "512": {"em": "0.25", "n": 2}},
+        "b": {"256": {"em": 0.1, "n": "2"},
+              "512": {"em": "0.2", "n": 2}},
+    })
+    out = context_task_means(payload)
+    assert out[256] == {"a": 0.5, "b": 0.1}
+    assert out[512] == {"a": 0.25, "b": 0.2}
+    macro = context_macro_means(payload)
+    assert abs(sum(macro.values()) / len(macro) - _ruler_avg_of(payload)) < 1e-12
+    # 非数值/下划线数字串仍是缺失，不能伪造成观测。
+    bad = _payload({"a": {
+        "256": {"em": "bad", "n": 2},
+        "512": {"em": "1_0", "n": 2},
+    }})
+    assert context_task_means(bad) == {}
+
+
 def test_log2_slope_recovers_known_log_linear_relation():
     ctxs = [512, 1024, 2048, 4096]
     values = [0.30, 0.20, 0.10, 0.00]   # 每翻倍 -0.10
