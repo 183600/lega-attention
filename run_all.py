@@ -4692,6 +4692,11 @@ def _inference_interaction_tests(ablations):
         return out
     ordered = _sorted_seeds(raw_by_seed)
     for pair, (slice_a, slice_b) in _FACTORIAL_CONTRASTS.items():
+        # 协议缺格/错窗对每个交互都成立；但某个交互值本身溢出 float
+        # 只影响该交互，不能把它的排除数累加到后续交互的 n 上——否则
+        # A×C/B×C 会报告一个与自己样本无关的排除数，读者会误以为它们
+        # 也丢了同样的种子。
+        pair_excluded = excluded
         vals = []
         for seed in ordered:
             raw = raw_by_seed[seed]
@@ -4701,9 +4706,8 @@ def _inference_interaction_tests(ablations):
                 vals.append(value)
             else:
                 # 八格都已通过有限正 PPL 校验；None 只可能是交互值本身
-                # 超出 float 表示范围。与旧实现一致，计入排除数而不是
-                # 悄悄缩小 n。
-                excluded += 1
+                # 超出 float 表示范围。计入本交互的排除数而不是悄悄缩小 n。
+                pair_excluded += 1
         if not vals:
             continue
         res = paired_t_test(vals, [0.0] * len(vals))
@@ -4717,7 +4721,7 @@ def _inference_interaction_tests(ablations):
             "variant": "lega",
             "inference_time": True,
             "n_protocol_seeds": len(vals),
-            "excluded_protocol_mismatches": excluded,
+            "excluded_protocol_mismatches": pair_excluded,
             "exploratory": True,
         })
         out.append(_enrich_paired(res, vals, [0.0] * len(vals)))

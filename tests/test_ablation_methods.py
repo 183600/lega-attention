@@ -603,6 +603,10 @@ def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
     assert by["A×B"]["excluded_protocol_mismatches"] == 0, by["A×B"]
     assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
     assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
+    # 单个交互值溢出只影响该交互；A×C/B×C 的排除数不能被 A×B 的溢出
+    # 累加污染（三对交互各自独立报告样本与排除）。
+    assert by["A×C"]["excluded_protocol_mismatches"] == 0, by["A×C"]
+    assert by["B×C"]["excluded_protocol_mismatches"] == 0, by["B×C"]
 
     # 交互值本身超出 float 表示范围（八格仍有限）：该种子不能悄悄消失，
     # 必须计入排除数；其余可表示种子照常进入检验。
