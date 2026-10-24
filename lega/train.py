@@ -646,7 +646,10 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
         # E[g²]−E[g]² 在 fp32 会发生灾难性抵消，把常数值算出随 batch 分组
         # 变化的 1e-4 级“假 std”。二阶矩与门控分布统计都必须在 fp64 上累加。
         _gate_dtype = torch.float64
-        loss_acc = torch.zeros((), device=device)
+        # 每批 loss 是有限 fp32，但跨窗口按 batch 大小加权求和可能超过 fp32
+        # 上限（例如 9 个窗口各 1e38），把有限窗口聚合成 inf；累加器必须用
+        # fp64，最终 val_loss 才是这些有限窗口的真实加权平均。
+        loss_acc = torch.zeros((), dtype=torch.float64, device=device)
         gate_acc = torch.zeros((), dtype=_gate_dtype, device=device)
         gate_sq_acc = torch.zeros((), dtype=_gate_dtype, device=device)
         gate_low_acc = torch.zeros((), dtype=_gate_dtype, device=device)

@@ -448,6 +448,29 @@ def test_evaluate_val_returns_coverage_and_gate_metrics():
     assert std_metrics["gate_layer_mean"] is None
 
 
+def test_evaluate_val_accumulates_finite_huge_losses_without_overflow():
+    """有限窗口损失可能超过 fp32 累加上限，聚合不能把它们变成 inf。"""
+    torch.manual_seed(0)
+    model = _tiny("standard")
+    orig_forward = model.forward
+    huge = 1e38
+
+    def _huge_forward(x, targets=None, **kwargs):
+        out = orig_forward(x, targets=targets, **kwargs)
+        out["loss"] = torch.tensor(huge, dtype=torch.float32)
+        out["loss_per_window"] = torch.full((x.shape[0],), huge,
+                                            dtype=torch.float32)
+        return out
+
+    model.forward = _huge_forward
+    val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
+    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=9,
+                           amp=False)
+    assert np.isfinite(metrics["val_loss"]), metrics["val_loss"]
+    assert all(np.isfinite(x) for x in metrics["val_loss_ci95"])
+    print("  [ok] evaluate_val：有限巨大窗口损失不被 fp32 累加溢出成 inf")
+
+
 def test_evaluate_val_reports_window_sampling_uncertainty():
     """有限个验证窗口的点估计必须附带窗口间抽样标准误与 CI。"""
     torch.manual_seed(0)
