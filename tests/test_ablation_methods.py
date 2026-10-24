@@ -595,6 +595,15 @@ def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
     assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
     assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
 
+    huge = {"none": 1.7e308, "A": 1e-308, "B": 1e-308, "C": 1e-308,
+            "AB": 1.7e308, "AC": 1e-308, "BC": 1e-308, "ABC": 1e-308}
+    abl = {"lega": {s: _inference_ppl_payload(s, huge) for s in (1, 2, 3)}}
+    by = {t["interaction"]: t for t in _inference_interaction_tests(abl)}
+    assert abs(by["A×B"]["mean_diff"] - 1.7e308) < 1e299, by["A×B"]
+    assert by["A×B"]["excluded_protocol_mismatches"] == 0, by["A×B"]
+    assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
+    assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
+
     # 一个种子缺格：该种子整条剔除，n=2 且如实计入排除数。
     broken = {"lega": {s: _inference_ppl_payload(s, additive)
                        for s in (1, 2, 3)}}

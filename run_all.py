@@ -4300,6 +4300,20 @@ _FACTORIAL_CONTRASTS = {
 }
 
 
+def _stable_factorial_interaction(cells):
+    values = [_finite_number(v) for v in cells]
+    if any(v is None for v in values):
+        return None
+    scale = max(abs(v) for v in values)
+    if scale == 0.0:
+        return 0.0
+    total = math.fsum(
+        sign * (v / scale)
+        for v, sign in zip(values, (1, -1, -1, 1, 1, -1, -1, 1)))
+    out = scale * (0.5 * total)
+    return out if math.isfinite(out) else None
+
+
 def _factorial_protocol_ok(maps, seed, metric) -> bool:
     """一个种子的 8 个全因子格是否共享同一评测协议。
 
@@ -4369,26 +4383,11 @@ def _factorial_interaction_tests(runs) -> list:
         for pair, (slice_a, slice_b) in _FACTORIAL_CONTRASTS.items():
             vals = []
             for s_ in seeds:
-                terms = []
-                ok = True
-                for cell, sign in zip(slice_a, (1, -1, -1, 1)):
-                    v = extractor(maps[cell].get(s_))
-                    if v is None:
-                        ok = False
-                        break
-                    terms.append(sign * v)
-                if not ok:
-                    continue
-                second = []
-                for cell, sign in zip(slice_b, (1, -1, -1, 1)):
-                    v = extractor(maps[cell].get(s_))
-                    if v is None:
-                        ok = False
-                        break
-                    second.append(sign * v)
-                if not ok:
-                    continue
-                vals.append(0.5 * (sum(terms) + sum(second)))
+                value = _stable_factorial_interaction(
+                    [extractor(maps[cell].get(s_))
+                     for cell in slice_a + slice_b])
+                if value is not None:
+                    vals.append(value)
             if not vals:
                 continue
             res = paired_t_test(vals, [0.0] * len(vals))
@@ -4685,30 +4684,10 @@ def _inference_interaction_tests(ablations):
         vals = []
         for seed in ordered:
             raw = raw_by_seed[seed]
-            terms = []
-            ok = True
-            for cell, sign in zip(slice_a, (1, -1, -1, 1)):
-                v = _finite_number(raw.get(cell))
-                if v is None:
-                    ok = False
-                    break
-                terms.append(sign * v)
-            if not ok:
-                continue
-            second = []
-            for cell, sign in zip(slice_b, (1, -1, -1, 1)):
-                v = _finite_number(raw.get(cell))
-                if v is None:
-                    ok = False
-                    break
-                second.append(sign * v)
-            if not ok:
-                continue
-            value = 0.5 * (sum(terms) + sum(second))
-            if math.isfinite(value):
+            value = _stable_factorial_interaction(
+                [raw.get(cell) for cell in slice_a + slice_b])
+            if value is not None:
                 vals.append(value)
-            else:
-                excluded += 1
         if not vals:
             continue
         res = paired_t_test(vals, [0.0] * len(vals))
