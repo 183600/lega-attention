@@ -636,6 +636,18 @@ def test_inference_interaction_renderer_flags_sign_disagreement():
     print("  [ok] 推理期交互汇总：训练/推理符号冲突显式标注，缺证据不静默")
 
 
+def test_inference_interaction_renderer_tolerates_unhashable_labels():
+    """外部/旧产物的交互标签可能是 list/dict；不能让 dict 查找崩溃整页汇总。"""
+    infer = [{"interaction": ["A", "B"], "mean_diff": 1.0, "n": 3}]
+    train = [{"interaction": ["A", "B"], "metric": "PPL交互",
+              "mean_diff": 2.0}]
+    md = "\n".join(_render_inference_interactions(infer, train))
+    assert "推理期全因子交互效应" in md and "1.0000" in md, md
+    # 不可哈希标签无法与训练期结果可靠对齐，按缺失处理而不是硬塞进 dict。
+    assert "2.0000" not in md, md
+    print("  [ok] 推理期交互汇总：不可哈希标签按缺失处理，不崩溃")
+
+
 def test_inference_shapley_only_uses_full_lega_checkpoint():
     """推理期 2^3 只在 Full 模型上定义；qgate/placebo 的缺项格不能混入。
 

@@ -590,6 +590,16 @@ def _finite_number(value):
     return value if math.isfinite(value) else None
 
 
+def _test_label_key(value):
+    """交互/Shapley 标签 → 可安全作为 dict key 的非空字符串，否则 None。
+
+    汇总层读取外部/旧版产物时，标签可能是 list/dict（不可哈希）或空串；
+    直接拿去做 dict key 会让整页汇总因 ``TypeError`` 崩溃。标签只用于与
+    训练期结果对齐，畸形值按缺失处理，不影响其余行渲染。
+    """
+    return value if isinstance(value, str) and value else None
+
+
 def _rate_or_none(value):
     """外部 JSON 的 AUROC/PR-AUC/F1/基率等比例 → [0,1] 内有限 float。
 
@@ -3613,16 +3623,17 @@ def _render_inference_interactions(inference_tests, training_tests) -> list:
               "显著非零只说明不能按单组件加总，不套用优/劣方向。")
     train = {}
     for t in (training_tests if isinstance(training_tests, list) else []):
-        if (isinstance(t, dict) and t.get("interaction")
-                and t.get("metric") == "PPL交互"):
-            train[t.get("interaction")] = t
+        key = _test_label_key(t.get("interaction")) if isinstance(t, dict) else None
+        if key is not None and t.get("metric") == "PPL交互":
+            train[key] = t
     md += ["", "| 交互 | ΔPPL均值 ± ΔSD | n种子 | p_adj(Holm) | "
            "训练期ΔPPL | 符号一致 | 判定 |", "|---|---|---|---|---|---|---|"]
     for t in rows:
         tr = _finite_number(t.get("training_interaction_mean"))
         if tr is None:
-            tr = _finite_number((train.get(t.get("interaction")) or {})
-                                .get("mean_diff"))
+            key = _test_label_key(t.get("interaction"))
+            tr = _finite_number((train.get(key) or {}).get("mean_diff")
+                                if key is not None else None)
         ph = _finite_number(t.get("mean_diff"))
         agree = t.get("training_inference_sign_agree")
         if agree is None and tr is not None and ph is not None:
@@ -7135,11 +7146,13 @@ def build_summary(results_dir: str, audit: dict = None,
     # 同一 checkpoint 内的 2^3 干预 → 推理期 Shapley；与训练期 Shapley 并列，
     # 用于检验“重新训练后的组件结构”是否也存在于最终前向。探索性证据。
     inference_shapley = _inference_shapley_tests(ablations)
-    train_phi = {t.get("shapley_factor"): _finite_number(t.get("mean_diff"))
-                 for t in shapley_tests
-                 if t.get("shapley_metric") == "PPL"}
+    train_phi = {}
+    for t in shapley_tests:
+        key = _test_label_key(t.get("shapley_factor"))
+        if key is not None and t.get("shapley_metric") == "PPL":
+            train_phi[key] = _finite_number(t.get("mean_diff"))
     for t in inference_shapley:
-        tr = train_phi.get(t.get("shapley_factor"))
+        tr = train_phi.get(_test_label_key(t.get("shapley_factor")))
         ph = _finite_number(t.get("mean_diff"))
         t["training_phi_mean"] = tr
         t["training_inference_sign_agree"] = (
@@ -7148,11 +7161,13 @@ def build_summary(results_dir: str, audit: dict = None,
     # 推理期交互：与训练期 PPL交互 同尺度并列，检查“训练期交互结构是否在
     # 最终前向复现”。只作探索性证据，不进入确认性判定。
     inference_interactions = _inference_interaction_tests(ablations)
-    train_inter = {t.get("interaction"): _finite_number(t.get("mean_diff"))
-                   for t in tests
-                   if t.get("interaction") and t.get("metric") == "PPL交互"}
+    train_inter = {}
+    for t in tests:
+        key = _test_label_key(t.get("interaction"))
+        if key is not None and t.get("metric") == "PPL交互":
+            train_inter[key] = _finite_number(t.get("mean_diff"))
     for t in inference_interactions:
-        tr = train_inter.get(t.get("interaction"))
+        tr = train_inter.get(_test_label_key(t.get("interaction")))
         ph = _finite_number(t.get("mean_diff"))
         t["training_interaction_mean"] = tr
         t["training_inference_sign_agree"] = (
