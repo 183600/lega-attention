@@ -4699,6 +4699,11 @@ def _inference_interaction_tests(ablations):
                 [raw.get(cell) for cell in slice_a + slice_b])
             if value is not None:
                 vals.append(value)
+            else:
+                # 八格都已通过有限正 PPL 校验；None 只可能是交互值本身
+                # 超出 float 表示范围。与旧实现一致，计入排除数而不是
+                # 悄悄缩小 n。
+                excluded += 1
         if not vals:
             continue
         res = paired_t_test(vals, [0.0] * len(vals))

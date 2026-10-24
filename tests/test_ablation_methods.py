@@ -604,6 +604,17 @@ def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
     assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
     assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
 
+    # 交互值本身超出 float 表示范围（八格仍有限）：该种子不能悄悄消失，
+    # 必须计入排除数；其余可表示种子照常进入检验。
+    unrepresentable = {"none": 1.7e308, "A": 1e-308, "B": 1e-308,
+                       "C": 1.7e308, "AB": 1.7e308, "AC": 1e-308,
+                       "BC": 1e-308, "ABC": 1.7e308}
+    abl = {"lega": {1: _inference_ppl_payload(1, additive),
+                    2: _inference_ppl_payload(2, unrepresentable)}}
+    by = {t["interaction"]: t for t in _inference_interaction_tests(abl)}
+    assert by["A×B"]["n_protocol_seeds"] == 1, by["A×B"]
+    assert by["A×B"]["excluded_protocol_mismatches"] == 1, by["A×B"]
+
     # 一个种子缺格：该种子整条剔除，n=2 且如实计入排除数。
     broken = {"lega": {s: _inference_ppl_payload(s, additive)
                        for s in (1, 2, 3)}}
