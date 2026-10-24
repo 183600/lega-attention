@@ -496,6 +496,12 @@ def test_t_critical_95_matches_known_table():
                - 0.9995319916294519) < 1e-12
     assert abs(student_t_two_sided_p(1e200, 1.0)
                - 6.3661977236758134e-201) < 1e-213
+    # 中等大 df 且 t 较大时 p 可小到 1e-23；x=df/(df+t²) 仍可表示，
+    # 不能改用 1-I_y 的二次补集把尾部抵消成 0。参考值来自 mpmath。
+    assert abs(student_t_two_sided_p(10.0, 1e5)
+               - 1.5633015300321724e-23) < 1e-32
+    assert abs(student_t_two_sided_p(10.0, 1e6)
+               - 1.5278610768050125e-23) < 1e-32
     assert student_t_two_sided_p(1e10, tiny_df) == 1.0
     assert t_critical_95(tiny_df) is None
     # 非法自由度安全返回 None，不抛异常

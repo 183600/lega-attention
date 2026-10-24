@@ -844,12 +844,15 @@ def student_t_two_sided_p(t: float, df: float) -> float:
         # t²/df 超出 float：x 下溢为 0；与上一种情形同样用 log_x 求值。
         return _betai_small_x_log(a, 0.5, math.log(df) - math.log(t2))
     x = 1.0 / (1.0 + ratio)
-    if x < 0.5:
+    if x < 1.0:
+        # 直接计算 I_x(df/2, 1/2)。不能改用互补量 y=t²/(df+t²) 再算
+        # 1-I_y(1/2, df/2)：p 很小时 _betai 内部已经返回 1-小量，再取
+        # 一次补集会二次抵消成 0（如 t=10、df=1e5 的真实 p≈1.6e-23）。
         return float(_betai(a, 0.5, x))
-    # x 接近 1 时不能直接把 x 交给 _betai：t²/df 小于 float 在 1 附近的
-    # 分辨率时 x 会舍入成 1，p 被错算成 1（df 略小于 1e7 且 t 很小时
-    # 误差可达 ~1e-5）。用互补量 y=t²/(df+t²) 计算 1-I_y(0.5, df/2)，
-    # y 不经过 1-x 的抵消。
+    # x 在 float 中舍入为 1：t²/df 小于 1 附近的分辨率，直接算 x 会丢失
+    # 全部信息。用互补量 y=t²/(df+t²) 计算 1-I_y(1/2, df/2)；此时 y 仍
+    # 可表示，且 I_y 通常远小于 1（如 df≈4.7e6、t≈1.8e-5 时尾部
+    # ≈1.45e-5），不会发生二次抵消。
     y = ratio / (1.0 + ratio)
     return float(1.0 - _betai(0.5, a, y))
 
