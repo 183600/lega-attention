@@ -753,6 +753,23 @@ def _betai(a: float, b: float, x: float) -> float:
     return 1.0 - front * _betacf(b, a, 1.0 - x) / b
 
 
+def _betai_small_x_log(a: float, b: float, log_x: float) -> float:
+    """x 小到下溢为 0 时的 I_x(a, b)：在对数域计算，避免 front/a 丢失。
+
+    t 分布里 x=df/(df+t²) 在 df 很小而 |t| 很大时会下溢；此时真实 p 可能
+    仍接近 1（df→0 的尾部极重），不能因为 x 在 float 中变成 0 就返回 0。
+    直接用 I_x = exp(lbeta + a·logx + b·log1p(-x))·cf/a 的对数形式，
+    cf 在 x→0 时趋于 1，log1p(-x) 也可忽略。
+    """
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    log_i = lbeta + a * log_x - math.log(a)
+    if log_i >= 0.0:
+        return 1.0
+    if log_i < -745.0:
+        return 0.0
+    return float(min(1.0, max(0.0, math.exp(log_i))))
+
+
 # 大自由度下 t 分布与标准正态的差异 < O(1/df)；df≥1e7 时临界值差异远小于
 # 报告精度。直接走正态尾概率还能避开 x=df/(df+t²) 在 df 很大时舍入成 1.0、
 # 使 p 值错误地变成 1 的灾难性抵消。
@@ -818,12 +835,14 @@ def student_t_two_sided_p(t: float, df: float) -> float:
         return 1.0
     t2 = t * t
     if math.isinf(t2):
-        # t² 溢出：x=df/(df+t²) 下溢为 0，双侧 p→0。
-        return 0.0
+        # t² 溢出（|t|>1e154）。x=df/(df+t²) 在 float 中下溢为 0，但
+        # df 很小时真实 p 仍可能接近 1（df→0 的尾部极重），不能直接判 0。
+        # 用对数域计算 x，再在对数域求不完全 Beta。
+        return _betai_small_x_log(a, 0.5, math.log(df) - 2.0 * math.log(abs(t)))
     ratio = t2 / df
     if math.isinf(ratio):
-        # t²/df 超出 float：t 相对 sqrt(df) 极大，双侧 p→0。
-        return 0.0
+        # t²/df 超出 float：x 下溢为 0；与上一种情形同样用 log_x 求值。
+        return _betai_small_x_log(a, 0.5, math.log(df) - math.log(t2))
     x = 1.0 / (1.0 + ratio)
     if x < 0.5:
         return float(_betai(a, 0.5, x))

@@ -487,6 +487,15 @@ def test_t_critical_95_matches_known_table():
     # 不能让 lgamma(0) 的 ValueError 穿透；其临界值超出 float 上限，须返回 None。
     tiny_df = 5e-324
     assert student_t_two_sided_p(1.0, tiny_df) == 1.0
+    # df 稍大但仍极小：df/2 不再下溢，而 t²/df 会先溢出。df→0 的尾部
+    # 极重，有限 |t|（甚至 1e200）的双侧 p 仍接近 1；不能把 ratio=inf
+    # 误判成“t 极大、p→0”。参考值来自 mpmath 高精度 betainc。
+    assert abs(student_t_two_sided_p(1.0, 1e-323) - 1.0) < 1e-12
+    assert abs(student_t_two_sided_p(1e200, 1e-323) - 1.0) < 1e-12
+    assert abs(student_t_two_sided_p(1e200, 1e-6)
+               - 0.9995319916294519) < 1e-12
+    assert abs(student_t_two_sided_p(1e200, 1.0)
+               - 6.3661977236758134e-201) < 1e-213
     assert student_t_two_sided_p(1e10, tiny_df) == 1.0
     assert t_critical_95(tiny_df) is None
     # 非法自由度安全返回 None，不抛异常
