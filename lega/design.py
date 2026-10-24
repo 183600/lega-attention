@@ -137,9 +137,40 @@ def _open_unit(value, name: str) -> float:
 
 
 # ------------------------------------------------------- 配对连续指标的功效
+def _normal_two_sided_z(alpha: float) -> float:
+    """双侧显著性水平 alpha 对应的正态临界值 z_{1-alpha/2}。
+
+    alpha 小到 ``1-alpha/2`` 在 float 中舍入为 1 时（alpha < ~2e-16），
+    ``NormalDist.inv_cdf`` 会抛 StatisticsError；此时改用 erfc 的尾概率
+    二分求根。alpha 可小到最小次正规数 5e-324，此时 alpha/2 下溢为 0，
+    因此直接在 erfc 上比较 alpha 本身。
+    """
+    nd = statistics.NormalDist()
+    upper = 1.0 - alpha / 2.0
+    if upper < 1.0:
+        return nd.inv_cdf(upper)
+    lo, hi = 0.0, 1.0
+    while math.erfc(hi / math.sqrt(2.0)) > alpha:
+        hi *= 2.0
+        if hi > 1e3:
+            return math.inf
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if math.erfc(mid / math.sqrt(2.0)) > alpha:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _normal_cdf(x: float) -> float:
+    """标准正态 CDF；用 erfc 保住 z<-8 的尾部（NormalDist.cdf 会下溢为 0）。"""
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
 def _z_sum(alpha: float, power: float) -> float:
     nd = statistics.NormalDist()
-    return nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
+    return _normal_two_sided_z(alpha) + nd.inv_cdf(power)
 
 
 def _sqrt_count(n: int):
@@ -175,7 +206,6 @@ def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     sd = _finite_float(sd, "sd", positive=True)
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")
-    nd = statistics.NormalDist()
     root_n = _sqrt_count(n)
     # √n 超出 float 上限时，非零效应对应的 ncp 必为 +∞（功效 1），零效应
     # 则为 0（功效 α）；不能把合法的大 n 当成非法输入抛错。
@@ -189,8 +219,8 @@ def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
                else (math.inf if scaled_sd == 0.0 else effect / scaled_sd))
     if not math.isfinite(ncp):
         return 1.0 if ncp > 0 else float(alpha)
-    z = nd.inv_cdf(1.0 - alpha / 2.0)
-    out = nd.cdf(ncp - z) + nd.cdf(-ncp - z)
+    z = _normal_two_sided_z(alpha)
+    out = _normal_cdf(ncp - z) + _normal_cdf(-ncp - z)
     return float(min(1.0, max(0.0, out)))
 
 
@@ -314,7 +344,7 @@ def _mcnemar_critical_normal(m: int, alpha: float) -> int:
     """大 m 下用正态近似得到拒绝边界（连续性校正）。"""
     if m <= 0:
         return -1
-    z = statistics.NormalDist().inv_cdf(1.0 - alpha / 2.0)
+    z = _normal_two_sided_z(alpha)
     k = math.floor(m / 2.0 - 0.5 - z * math.sqrt(m) / 2.0)
     return int(max(-1, min(m, k)))
 
@@ -363,12 +393,11 @@ def _mcnemar_power_exact(n: int, pi: float, p10: float,
 
 def _mcnemar_power_normal(n: int, pi: float, effect: float,
                           alpha: float) -> float:
-    nd = statistics.NormalDist()
-    z = nd.inv_cdf(1.0 - alpha / 2.0)
+    z = _normal_two_sided_z(alpha)
     root_n = _sqrt_count(n)
     ncp = ((math.inf if effect != 0.0 else 0.0) if root_n is None
            else root_n * abs(effect) / math.sqrt(pi))
-    out = nd.cdf(ncp - z) + nd.cdf(-ncp - z)
+    out = _normal_cdf(ncp - z) + _normal_cdf(-ncp - z)
     return float(min(1.0, max(0.0, out)))
 
 

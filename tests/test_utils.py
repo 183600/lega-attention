@@ -805,6 +805,13 @@ def test_min_detectable_effect():
             else:
                 raise AssertionError(f"非法 {name} 未被拒绝: {bad!r}")
     assert min_detectable_effect("0.1", "5", alpha="0.05", power="0.8") > 0
+    # alpha 小于 float 在 1 附近的分辨率时，1-alpha/2 会舍入为 1；不能
+    # 让 NormalDist.inv_cdf 抛 StatisticsError。alpha 更小，MDE 应更大。
+    for tiny_alpha in (1e-16, 1e-300, 5e-324):
+        mde = min_detectable_effect(1.0, 10, alpha=tiny_alpha)
+        assert mde is not None and math.isfinite(mde), (tiny_alpha, mde)
+    assert min_detectable_effect(1.0, 10, alpha=1e-300) > \
+        min_detectable_effect(1.0, 10, alpha=1e-16)
     print("  [ok] min_detectable_effect（随 n 递减/口径常数/边界/"
           "非法参数拒绝）")
 

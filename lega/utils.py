@@ -1119,6 +1119,32 @@ def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
     return float(lo), float(hi)
 
 
+def _normal_two_sided_z(alpha: float) -> float:
+    """双侧显著性水平 alpha 对应的正态临界值 z_{1-alpha/2}。
+
+    alpha 小到 ``1-alpha/2`` 在 float 中舍入为 1 时（alpha < ~2e-16），
+    ``NormalDist.inv_cdf`` 会抛 StatisticsError；此时改用 erfc 的尾概率
+    二分求根。alpha 可小到最小次正规数 5e-324，此时 alpha/2 下溢为 0，
+    因此直接在 erfc 上比较 alpha 本身。
+    """
+    nd = statistics.NormalDist()
+    upper = 1.0 - alpha / 2.0
+    if upper < 1.0:
+        return nd.inv_cdf(upper)
+    lo, hi = 0.0, 1.0
+    while math.erfc(hi / math.sqrt(2.0)) > alpha:
+        hi *= 2.0
+        if hi > 1e3:
+            return math.inf
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if math.erfc(mid / math.sqrt(2.0)) > alpha:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
                           power: float = 0.8):
     """配对设计在给定 (配对差标准差, 种子数) 下的最小可检测效应（MDE）。
@@ -1141,8 +1167,8 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
     power = _open_unit_interval(power, "power")
     if not (math.isfinite(std) and std > 0.0):
         return None
-    nd = statistics.NormalDist()
-    z = nd.inv_cdf(1.0 - float(alpha) / 2.0) + nd.inv_cdf(float(power))
+    z = _normal_two_sided_z(float(alpha)) + statistics.NormalDist().inv_cdf(
+        float(power))
     # n 是合法的 Python 大整数时 math.sqrt(n) 会先尝试转 float 并抛
     # OverflowError；但 √n 本身完全可能仍可表示（如 n=10**400 → 1e200）。
     # 用对数求根，避免把“n 很大 → MDE 很小”误当成不可计算。

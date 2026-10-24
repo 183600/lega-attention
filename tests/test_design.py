@@ -568,6 +568,21 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
     assert mcnemar_required_samples(5e-324, 0.1) is None
     assert required_pairs(5e-324, 1.0) is None
 
+    # alpha 小到 1-alpha/2 在 float 中舍入为 1 时，正态临界值不能抛错；
+    # 与 utils.min_detectable_effect 保持同一口径。
+    from lega.utils import min_detectable_effect as utils_mde
+    for tiny_alpha in (1e-16, 1e-300, 5e-324):
+        assert math.isfinite(paired_t_power(1.0, 1.0, 10, alpha=tiny_alpha))
+        assert math.isfinite(min_detectable_effect(
+            1.0, 10, alpha=tiny_alpha))
+        assert math.isfinite(max_sd_for_effect(1.0, 10, alpha=tiny_alpha))
+        assert required_pairs(1.0, 1.0, alpha=tiny_alpha) is not None
+        assert math.isfinite(mcnemar_power(
+            1000, 0.1, 0.01, alpha=tiny_alpha)["power"])
+        assert math.isfinite(mcnemar_mde(1000, 0.1, alpha=tiny_alpha))
+        assert abs(min_detectable_effect(1.0, 10, alpha=tiny_alpha)
+                   - utils_mde(1.0, 10, alpha=tiny_alpha)) < 1e-15
+
     astronomical = 10 ** 1000  # √n 本身已超出 float 上限
     assert paired_t_power(0.01, 0.01, astronomical) == 1.0
     assert abs(paired_t_power(0.0, 0.01, astronomical) - 0.05) < 1e-12
