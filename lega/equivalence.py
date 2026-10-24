@@ -428,12 +428,21 @@ def tost_paired(a, b, margin: float, alpha: float = DEFAULT_ALPHA,
     return res
 
 
+def _log1p_exp(log_value: float) -> float:
+    """稳定计算 log1p(exp(log_value))；log_value 很大时不构造 exp 溢出。"""
+    if log_value > 709.782712893384:
+        return log_value + math.log1p(math.exp(-log_value))
+    return math.log1p(math.exp(log_value))
+
+
 def _margin_for_factor(spec: dict, factor: float) -> float:
     """按敏感性因子换算 margin；log_ratio 按几何比换算而不是直接乘 log。
 
     因子/基础 margin 必须是能够表示的有限数：合法但超出 float 上限的整数
     factor 若直接参与乘法会抛 OverflowError（或得到 inf），不能穿透到
     敏感性网格/汇总。无法表示时显式 ValueError，而不是伪造一个无穷阈值。
+    log_ratio 在对数空间完成换算：即使 ``expm1(margin)`` 本身溢出，
+    ``log1p(expm1(margin) * factor)`` 仍可能是有限值。
     """
     if not isinstance(spec, dict):
         raise ValueError(f"margin 规格必须是对象，收到 {spec!r}")
@@ -446,16 +455,26 @@ def _margin_for_factor(spec: dict, factor: float) -> float:
         raise ValueError(f"margin 必须 > 0，收到 {base!r}")
     if kind == "log_ratio":
         rel = spec.get("relative_margin")
-        rel = math.expm1(base) if rel is None else _strict_number(
-            rel, "relative_margin")
-        if rel < 0:
-            raise ValueError(f"relative_margin 必须 >= 0，收到 {rel!r}")
-        try:
-            out = math.log1p(rel * factor)
-        except (OverflowError, ValueError):
-            raise ValueError(
-                f"log-ratio margin 不可表示（relative_margin={rel!r}, "
-                f"factor={factor!r}）") from None
+        if rel is None:
+            # base = log1p(rel)；expm1(base) 溢出时 log(rel) ≈ base。
+            try:
+                rel = math.expm1(base)
+            except OverflowError:
+                log_rel = base
+            else:
+                if rel == 0.0:
+                    return 0.0
+                log_rel = math.log(rel)
+        else:
+            rel = _strict_number(rel, "relative_margin")
+            if rel < 0:
+                raise ValueError(f"relative_margin 必须 >= 0，收到 {rel!r}")
+            if rel == 0.0:
+                return 0.0
+            log_rel = math.log(rel)
+        if factor == 0.0:
+            return 0.0
+        out = _log1p_exp(log_rel + math.log(factor))
     else:
         try:
             out = base * factor
@@ -544,9 +563,10 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         grid = []
         spec_for_grid = dict(spec, margin=margin)
         if kind == "log_ratio":
-            # 自定义 margin 时也要按当前 margin 重新换算几何比，不能沿用
-            # spec 里的默认 1%。
-            spec_for_grid["relative_margin"] = math.expm1(margin)
+            # 自定义 margin 时按当前 margin（对数尺度）重新换算，不能沿用
+            # spec 里的默认 1%；交给 _margin_for_factor 在对数空间处理，
+            # 避免 expm1(margin) 对巨大有限 margin 溢出。
+            spec_for_grid["relative_margin"] = None
         for factor in SENSITIVITY_FACTORS:
             m2 = _margin_for_factor(spec_for_grid, factor)
             cell = tost_from_diffs(diffs, m2, alpha=alpha,

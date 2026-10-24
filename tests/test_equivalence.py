@@ -412,6 +412,19 @@ def test_tost_unrepresentable_integer_observations_are_skipped():
     print("  [ok] TOST 不可表示的大整数观测按缺失剔除，不抛 OverflowError")
 
 
+def test_log_ratio_margin_stays_finite_for_huge_log_margin():
+    """log_ratio 的 expm1(margin) 可溢出，但换算后的对数 margin 仍可表示。"""
+    huge = {"kind": "log_ratio", "margin": 1e308}
+    assert interpolate_margin(huge, 0.0) == 0.0
+    for factor in (0.5, 1.0, 2.0, 1e308):
+        out = interpolate_margin(huge, factor)
+        assert math.isfinite(out) and out >= 0.0, (factor, out)
+    res = assess_paired_equivalence([1.0, 1.1, 1.2], [1.0, 1.0, 1.0],
+                                    "PPL(log)", margin=1e308)
+    assert all(math.isfinite(c["margin"]) for c in res["sensitivity"])
+    print("  [ok] log_ratio 巨大 margin 在对数空间换算，不抛 OverflowError")
+
+
 def test_interpolate_margin_rejects_unrepresentable_factor():
     """敏感性 margin 换算不能因超范围 factor 泄漏 OverflowError/inf。"""
     spec = {"kind": "absolute", "margin": 0.01}
