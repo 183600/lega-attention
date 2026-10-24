@@ -34,7 +34,7 @@ from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
                         short_ngram_overlap,
                         summarize_test_access, text_length_stats,
                         token_stream_stats, unknown_char_rate)
-from .utils import config_bool, strict_int
+from .utils import config_bool, config_finite_float, strict_int
 
 _GPT2_CACHE = {}
 
@@ -258,6 +258,25 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
          访问账本）。
     extra_report 用于记录数据来源/划分协议等上游元数据（原样并入报告）。
     """
+    # 近似去污染参数既是本次构建口径，也是缓存身份。必须在读缓存前严格
+    # 校验：否则 bool/小数参数可能在 decontaminate_near_duplicates 校验前
+    # 就命中旧缓存，绕过校验并把不同口径的 bin 静默复用。
+    if isinstance(near_dup_threshold, (bool, np.bool_)):
+        raise ValueError(
+            f"near_dup_threshold 必须是 (0,1] 内的数值，收到 {near_dup_threshold!r}")
+    try:
+        near_dup_threshold = config_finite_float(
+            near_dup_threshold, "near_dup_threshold")
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"near_dup_threshold 必须是 (0,1] 内的数值，收到 {near_dup_threshold!r}") from e
+    if not 0.0 < near_dup_threshold <= 1.0:
+        raise ValueError(
+            f"near_dup_threshold 必须在 (0,1] 内，收到 {near_dup_threshold!r}")
+    near_dup_min_chars = strict_int(near_dup_min_chars, "near_dup_min_chars")
+    if near_dup_min_chars < 1:
+        raise ValueError(
+            f"near_dup_min_chars 必须 >= 1，收到 {near_dup_min_chars!r}")
     meta_path = os.path.join(data_dir, "meta.json")
     report_path = os.path.join(data_dir, "data_report.json")
     train_bin = os.path.join(data_dir, "train.bin")
@@ -291,11 +310,13 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         near_ok = False
         if isinstance(cached_near, dict):
             try:
+                cached_threshold = config_finite_float(
+                    cached_near.get("threshold"), "meta.near_dup.threshold")
+                cached_min_chars = strict_int(
+                    cached_near.get("min_chars"), "meta.near_dup.min_chars")
                 near_ok = (
-                    float(cached_near.get("threshold"))
-                    == float(near_dup_threshold)
-                    and int(cached_near.get("min_chars"))
-                    == int(near_dup_min_chars))
+                    cached_threshold == near_dup_threshold
+                    and cached_min_chars == near_dup_min_chars)
             except (TypeError, ValueError, OverflowError):
                 near_ok = False
         # 旧缓存可能是在 val/test 上拟合词表（泄露）或缺少防泄漏报告，必须重建

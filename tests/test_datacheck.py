@@ -2138,6 +2138,51 @@ def test_prepare_bins_cache_invalidated_on_near_duplicate_params():
     print("  [ok] prepare_bins：近似去污染阈值进入缓存身份，变化即重建")
 
 
+def test_prepare_bins_near_duplicate_params_strict_even_on_cache_hit():
+    """近似去污染参数必须严格校验，缓存命中不能绕过 bool/小数校验。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
+            f.write("A train-only paragraph with enough distinct characters "
+                    "to survive near-duplicate scanning and keep a valid bin.\n")
+        with open(os.path.join(d, "val.txt"), "w", encoding="utf-8") as f:
+            f.write("A validation paragraph that is unrelated to the training "
+                    "text and long enough for the tokenizer.\n")
+        prepare_bins(d, kind="char", force=True)
+        # 非法请求参数即使已有可复用缓存也必须拒绝，不能被缓存命中吞掉。
+        for bad in (True, 0, 1.2, float("nan"), "bad", "0_8"):
+            try:
+                prepare_bins(d, kind="char", near_dup_threshold=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 near_dup_threshold 未被拒绝: {bad!r}")
+        for bad in (True, 0, -1, 1.5, "bad", "2_00"):
+            try:
+                prepare_bins(d, kind="char", near_dup_min_chars=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法 near_dup_min_chars 未被拒绝: {bad!r}")
+        meta_path = os.path.join(d, "meta.json")
+        # 小数 min_chars 不能被 int() 截断成 200 后继续命中缓存。
+        with open(meta_path, encoding="utf-8") as f:
+            m = json.load(f)
+        m["near_dup"]["min_chars"] = 200.9
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        rebuilt = prepare_bins(d, kind="char")
+        assert rebuilt["near_dup"]["min_chars"] == 200, rebuilt["near_dup"]
+        # bool threshold 不能被 float(True)==1.0 伪装成请求的 1.0。
+        with open(meta_path, encoding="utf-8") as f:
+            m = json.load(f)
+        m["near_dup"]["threshold"] = True
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        rebuilt = prepare_bins(d, kind="char", near_dup_threshold=1.0)
+        assert rebuilt["near_dup"]["threshold"] == 1.0, rebuilt["near_dup"]
+    print("  [ok] prepare_bins：近似去污染参数严格校验，缓存不能绕过")
+
+
 def test_near_duplicate_threshold_sensitivity_reports_actual_removal():
     """三档阈值必须给出真实删除量，而不只是判定对数。
 
