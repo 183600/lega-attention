@@ -126,6 +126,19 @@ def test_zero_smoothing_unseen_tokens_stay_finite():
     print("  [ok] n-gram：α=0 时未登录 token/上下文仍返回有限 PPL")
 
 
+def test_huge_alpha_reaches_uniform_limit_without_overflow():
+    """α·V 溢出时仍应得到 1/V 的均匀极限，而不是被 clip 成 1e-300。"""
+    uni, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
+    ids = np.array([0, 1])
+    for out in (ppl_unigram(ids, uni, alpha=1e308),
+                ppl_bigram(ids, uni, keys, counts, 1e308, 3),
+                ppl_interpolated_bigram(ids, uni, keys, counts,
+                                        1e308, 1e308, 0.5, 3)):
+        assert math.isfinite(out["ppl"]), out
+        assert math.isclose(out["ppl"], 3.0, rel_tol=1e-12), out
+    print("  [ok] n-gram：巨大 α 平滑得到均匀极限，不因 α·V 溢出而失真")
+
+
 def test_ppl_bigram_matches_closed_form():
     uni, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
     assert uni[0] == 2 and uni[1] == 2

@@ -347,6 +347,23 @@ def _smoothed_probs(counts, denominator) -> np.ndarray:
     return np.clip(out, 1e-300, None)
 
 
+def _alpha_probs(counts, context, alpha: float, vocab_size: int) -> np.ndarray:
+    """加 α 平滑概率；α·V 溢出时按 α 缩放分子/分母，保持 1/V 极限。"""
+    alpha = float(alpha)
+    vocab_size = int(vocab_size)
+    if alpha > 0.0:
+        smooth = alpha * vocab_size
+        if not math.isfinite(smooth):
+            return _smoothed_probs(
+                np.asarray(counts, dtype=np.float64) / alpha + 1.0,
+                np.asarray(context, dtype=np.float64) / alpha + vocab_size)
+    else:
+        smooth = 0.0
+    return _smoothed_probs(
+        np.asarray(counts, dtype=np.float64) + alpha,
+        np.asarray(context, dtype=np.float64) + smooth)
+
+
 def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     """加 α 平滑一元模型的 per-token 平均负对数似然与 PPL。"""
     alpha = _validate_alpha(alpha)
@@ -357,7 +374,7 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     total = float(uni.sum())
     # uint16 流可直接做花式索引
     c = uni[np.asarray(eval_ids)]
-    probs = _smoothed_probs(c + alpha, total + alpha * vocab)
+    probs = _alpha_probs(c, total, alpha, vocab)
     mean_nll = float(-np.log(probs).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
             "mean_nll": mean_nll, "n_tokens": n,
@@ -384,8 +401,7 @@ def _bigram_ppl(c_pair: np.ndarray, c_prev: np.ndarray, n_tokens: int,
     alpha = _validate_alpha(alpha)
     if n_tokens <= 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
-    probs = _smoothed_probs(c_pair + alpha,
-                            c_prev + alpha * int(vocab_size))
+    probs = _alpha_probs(c_pair, c_prev, alpha, vocab_size)
     mean_nll = float(-np.log(probs).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
             "mean_nll": mean_nll, "n_tokens": n_tokens,
@@ -413,10 +429,8 @@ def _interp_ppl_from_counts(cur_ids: np.ndarray, uni: np.ndarray,
     cur = np.asarray(cur_ids, dtype=np.int64)
     vocab_size = int(vocab_size)
     total = float(uni.sum())
-    p_uni = _smoothed_probs(uni[cur] + alpha_uni,
-                            total + alpha_uni * vocab_size)
-    p_bi = _smoothed_probs(c_pair + alpha_bi,
-                           c_prev + alpha_bi * vocab_size)
+    p_uni = _alpha_probs(uni[cur], total, alpha_uni, vocab_size)
+    p_bi = _alpha_probs(c_pair, c_prev, alpha_bi, vocab_size)
     p = float(lam) * p_bi + (1.0 - float(lam)) * p_uni
     mean_nll = float(-np.log(np.clip(p, 1e-300, None)).mean())
     return {"ppl": float(math.exp(min(20.0, mean_nll))),
@@ -571,16 +585,16 @@ def _window_metrics(eval_ids, pos, starts, n_eval: int, ctx: int, uni,
                 m = ppl_unigram(eval_ids[pos], uni, a)
                 if report is not None and order == selected_model:
                     cur = np.asarray(eval_ids[pos], dtype=np.int64)
-                    probs = _smoothed_probs(
-                        uni[cur] + a, float(uni.sum()) + a * vocab_size)
+                    probs = _alpha_probs(
+                        uni[cur], float(uni.sum()), a, vocab_size)
                     _set_ngram_window_losses(report, probs, starts, n_eval,
                                              ctx, order, field=field)
             else:
                 m = _bigram_ppl(c_pair, ctx_counts[prev], int(pos.size), a,
                                 vocab_size)
                 if report is not None and order == selected_model:
-                    probs = _smoothed_probs(
-                        c_pair + a, ctx_counts[prev] + a * vocab_size)
+                    probs = _alpha_probs(
+                        c_pair, ctx_counts[prev], a, vocab_size)
                     _set_ngram_window_losses(report, probs, starts, n_eval,
                                              ctx, order, field=field)
         else:
@@ -593,12 +607,11 @@ def _window_metrics(eval_ids, pos, starts, n_eval: int, ctx: int, uni,
             if report is not None and order == selected_model:
                 cur = np.asarray(eval_ids[pos], dtype=np.int64)
                 total = float(uni.sum())
-                p_uni = _smoothed_probs(
-                    uni[cur] + interp["alpha_unigram"],
-                    total + interp["alpha_unigram"] * vocab_size)
-                p_bi = _smoothed_probs(
-                    c_pair + interp["alpha_bigram"],
-                    ctx_counts[prev] + interp["alpha_bigram"] * vocab_size)
+                p_uni = _alpha_probs(
+                    uni[cur], total, interp["alpha_unigram"], vocab_size)
+                p_bi = _alpha_probs(
+                    c_pair, ctx_counts[prev], interp["alpha_bigram"],
+                    vocab_size)
                 probs = (interp["lambda"] * p_bi
                          + (1.0 - interp["lambda"]) * p_uni)
                 _set_ngram_window_losses(report, probs, starts, n_eval, ctx,
