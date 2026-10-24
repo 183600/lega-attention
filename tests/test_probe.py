@@ -365,6 +365,36 @@ def test_linear_probe_tolerates_non_numeric_columns():
     print("  [ok] 线性探针：非数值列按缺失剔除，不崩溃")
 
 
+def test_linear_probe_handles_extreme_feature_values():
+    """接近 float 上限的合法特征不能因标准化溢出退化为常数模型。"""
+    recs = []
+    for ex in range(12):
+        hit = 1.0 if ex % 2 == 0 else 0.0
+        for j in range(4):
+            recs.append({
+                "example": ex, "hit": hit, "max_p": 0.5, "log_n": 5.0,
+                "qterm": 1e308 if hit else -1e308,
+            })
+    rep = linear_probe(recs, folds=3, l2_grid=[0.0, 0.1], seed=1)
+    fs = rep["feature_sets"]["conc_len_query"]
+    oof = fs["oof"]
+    assert oof["n"] == len(recs)
+    assert oof["auroc"] == 1.0 and oof["auprc"] == 1.0, oof
+    for key in ("logloss", "brier"):
+        assert oof[key] is not None and math.isfinite(oof[key]), (key, oof)
+    for rec in fs["per_fold"]:
+        assert rec["auroc"] == 1.0, rec
+    X = np.array([[1e308], [-1e308], [1e308], [-1e308]])
+    y = np.array([1.0, 0.0, 1.0, 0.0])
+    for l2 in (0.0, 10.0):
+        model = fit_logreg(X, y, l2=l2)
+        assert np.isfinite(model["coef"]).all(), model
+        assert math.isfinite(model["intercept"]), model
+        p = predict_logreg(model, X)
+        assert p[0] > 0.99 and p[1] < 0.01, p
+    print("  [ok] 线性探针：极端特征值标准化/拟合不溢出")
+
+
 def test_probe_rejects_numpy_bools_and_cache_identity():
     """np.bool_ 不能被当成 1.0/L2=1；特征缓存也不能跨 records 对象复用。"""
     assert math.isnan(_float_or_nan(np.bool_(True)))

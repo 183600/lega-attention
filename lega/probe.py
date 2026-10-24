@@ -104,6 +104,37 @@ def _finite_nonnegative(value, name: str = "l2") -> float:
     return out
 
 
+def _irls_solve(X: np.ndarray, y: np.ndarray, l2: float,
+                max_iter: int, tol: float,
+                penalty_scale=None) -> Tuple[np.ndarray, float]:
+    """Newton–IRLS 求解（可选逐列惩罚尺度，供缩放后的等价问题使用）。"""
+    n, d = X.shape
+    Xb = np.hstack([X, np.ones((n, 1), dtype=np.float64)])
+    scale = (np.ones(d) if penalty_scale is None
+             else np.asarray(penalty_scale, dtype=np.float64))
+    pen_diag = np.zeros(d + 1)
+    pen_diag[:-1] = l2 * scale
+    pen = np.diag(pen_diag) + 1e-8 * np.eye(d + 1)  # 数值稳定
+    w = np.zeros(d + 1)
+    for _ in range(int(max_iter)):
+        p = _sigmoid(Xb @ w)
+        grad = Xb.T @ (p - y)
+        grad[:-1] += pen_diag[:-1] * w[:-1]
+        W = np.clip(p * (1.0 - p), 1e-8, None)
+        H = Xb.T @ (Xb * W[:, None]) + pen
+        try:
+            step = np.linalg.solve(H, grad)
+        except np.linalg.LinAlgError:
+            try:
+                step = np.linalg.lstsq(H, grad, rcond=None)[0]
+            except np.linalg.LinAlgError:
+                break
+        w = w - step
+        if float(np.max(np.abs(step))) < float(tol):
+            break
+    return w[:-1].copy(), float(w[-1])
+
+
 def fit_logreg(X: np.ndarray, y: np.ndarray, l2: float = 0.0,
                max_iter: int = 100, tol: float = 1e-10) -> Dict:
     """L2 逻辑回归（Newton–IRLS，无第三方依赖，确定性）。
@@ -122,28 +153,24 @@ def fit_logreg(X: np.ndarray, y: np.ndarray, l2: float = 0.0,
         # 单类训练折：最优常数=先验；概率由 _predict 用位置参数给出。
         return {"coef": np.zeros(d),
                 "intercept": math.inf if y[0] > 0.5 else -math.inf}
-    Xb = np.hstack([X, np.ones((n, 1), dtype=np.float64)])
-    pen = l2 * np.eye(d + 1)
-    pen[-1, -1] = 0.0                      # 截距不惩罚
-    pen = pen + 1e-8 * np.eye(d + 1)       # 数值稳定
-    w = np.zeros(d + 1)
-    for _ in range(int(max_iter)):
-        p = _sigmoid(Xb @ w)
-        grad = Xb.T @ (p - y)
-        grad[:-1] += l2 * w[:-1]
-        W = np.clip(p * (1.0 - p), 1e-8, None)
-        H = Xb.T @ (Xb * W[:, None]) + pen
-        try:
-            step = np.linalg.solve(H, grad)
-        except np.linalg.LinAlgError:
-            try:
-                step = np.linalg.lstsq(H, grad, rcond=None)[0]
-            except np.linalg.LinAlgError:
-                break
-        w = w - step
-        if float(np.max(np.abs(step))) < float(tol):
-            break
-    return {"coef": w[:-1].copy(), "intercept": float(w[-1])}
+    # 极端尺度下 Hessian 的 X² 会溢出（或下溢成奇异矩阵）。按列最大
+    # 绝对值缩放后求解，再把系数换回原尺度：Z=X/s 上 beta 对应原系数
+    # beta/s，L2 惩罚也按 1/s² 缩放，目标函数完全等价。
+    max_abs = float(np.max(np.abs(X)))
+    overflow_safe = math.sqrt(np.finfo(np.float64).max / max(n, 1)) * 0.5
+    # 即使 Hessian 尚未溢出，IRLS 的绝对步长容差也会让大尺度特征在
+    # 远未收敛时提前停止；超过 1e6 即转入等价缩放问题。
+    if max_abs > min(1e6, overflow_safe):
+        col_scale = np.max(np.abs(X), axis=0)
+        col_scale = np.where(col_scale > 0, col_scale, 1.0)
+        with np.errstate(over="ignore", under="ignore"):
+            penalty_scale = 1.0 / (col_scale * col_scale)
+        coef, intercept = _irls_solve(
+            X / col_scale, y, l2, max_iter, tol,
+            penalty_scale=penalty_scale)
+        return {"coef": coef / col_scale, "intercept": intercept}
+    coef, intercept = _irls_solve(X, y, l2, max_iter, tol)
+    return {"coef": coef, "intercept": intercept}
 
 
 def predict_logreg(model: Dict, X: np.ndarray) -> np.ndarray:
@@ -311,6 +338,45 @@ def _safe_auprc(y: np.ndarray, p: np.ndarray) -> Optional[float]:
     return float(v) if np.isfinite(v) else None
 
 
+def _standardization_stats(Xtr: np.ndarray) -> Dict:
+    """训练折的标准化统计量；巨大合法特征值下仍保持有限。
+
+    直接 ``mean``/``std`` 对接近 float 上限的列会在求和/平方时溢出，
+    随后的 ``(X - mu) / sd`` 得到 NaN，探针会静默退化成常数模型。
+    常规范围仍走原路径以保持逐位结果；仅当统计量非有限时按列最大绝对值
+    缩放后再计算，等价且不会溢出。
+    """
+    d = Xtr.shape[1]
+    if Xtr.shape[0] == 0 or d == 0:
+        return {"scale": None, "mu": np.zeros(d), "sd": np.ones(d)}
+    with np.errstate(over="ignore", invalid="ignore"):
+        mu = Xtr.mean(axis=0)
+        sd = Xtr.std(axis=0)
+    if np.isfinite(mu).all() and np.isfinite(sd).all():
+        return {"scale": None, "mu": mu,
+                "sd": np.where(sd > 0, sd, 1.0)}
+    with np.errstate(over="ignore", invalid="ignore"):
+        scale = np.max(np.abs(Xtr), axis=0)
+    scale = np.where((scale > 0) & np.isfinite(scale), scale, 1.0)
+    scaled = Xtr / scale
+    mu = scaled.mean(axis=0)
+    sd = scaled.std(axis=0)
+    return {"scale": scale, "mu": mu,
+            "sd": np.where(sd > 0, sd, 1.0)}
+
+
+def _apply_standardization(X: np.ndarray, stats: Dict) -> np.ndarray:
+    """按训练折统计量标准化；极端外推产生的非有限 z 按饱和处理。"""
+    scale = stats["scale"]
+    with np.errstate(over="ignore", invalid="ignore"):
+        z = ((X - stats["mu"]) if scale is None
+             else (X / scale - stats["mu"])) / stats["sd"]
+    if not np.isfinite(z).all():
+        # 逻辑回归只需知道 z 已饱和；不能把 inf/NaN 送进 IRLS。
+        z = np.nan_to_num(z, nan=0.0, posinf=1e6, neginf=-1e6)
+    return z
+
+
 def _fold_views(X: np.ndarray, folds: np.ndarray):
     """每折的掩码与标准化后切片。
 
@@ -323,10 +389,9 @@ def _fold_views(X: np.ndarray, folds: np.ndarray):
         tr = ~te
         if not tr.any():
             continue
-        mu = X[tr].mean(axis=0)
-        sd = X[tr].std(axis=0)
-        sd = np.where(sd > 0, sd, 1.0)
-        views.append((te, (X[tr] - mu) / sd, (X[te] - mu) / sd))
+        stats = _standardization_stats(X[tr])
+        views.append((te, _apply_standardization(X[tr], stats),
+                      _apply_standardization(X[te], stats)))
     return views
 
 
@@ -397,11 +462,9 @@ def _score_block(y: np.ndarray, p: np.ndarray,
 def _fit_predict(Xtr: np.ndarray, ytr: np.ndarray, Xte: np.ndarray,
                  l2: float) -> np.ndarray:
     """只用训练折统计量标准化后拟合 L2 逻辑回归并预测留出折。"""
-    mu = Xtr.mean(axis=0)
-    sd = Xtr.std(axis=0)
-    sd = np.where(sd > 0, sd, 1.0)
-    model = fit_logreg((Xtr - mu) / sd, ytr, l2=l2)
-    return predict_logreg(model, (Xte - mu) / sd)
+    stats = _standardization_stats(Xtr)
+    model = fit_logreg(_apply_standardization(Xtr, stats), ytr, l2=l2)
+    return predict_logreg(model, _apply_standardization(Xte, stats))
 
 
 def _select_threshold(y: np.ndarray, p: np.ndarray) -> Tuple[float, Optional[float]]:
