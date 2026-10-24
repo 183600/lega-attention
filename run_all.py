@@ -3596,6 +3596,53 @@ def _render_inference_shapley(inference_tests) -> list:
     return md
 
 
+def _render_inference_interactions(inference_tests, training_tests) -> list:
+    """渲染同一 checkpoint 内的 2^3 交互（与训练期交互并列）。"""
+    rows = [t for t in (inference_tests if isinstance(inference_tests, list)
+                        else []) if isinstance(t, dict)]
+    md = ["", "### 推理期全因子交互效应（同一 checkpoint 内干预；探索性）", ""]
+    if not rows:
+        md.append("⚠ 无法计算推理期交互：需要 `lega` 的 8 个推理期格子全部"
+                  "施加成功、且与基线共享同一批 val 窗口；缺格或旧产物缺 "
+                  "`window_indices` 时如实跳过，不按 0 补齐。")
+        return md
+    md.append("训练期交互回答“重新训练时组件收益能否按单组件加总”；本表在同一"
+              "checkpoint 上对 2^3 格子做同样的 A×B/A×C/B×C 对比，回答"
+              "“训练好的前向里交互结构是否仍然存在”。数值为原始 PPL 的"
+              "标准交互对比（与训练期 `PPL交互` 同尺度），交互=0 表示可加；"
+              "显著非零只说明不能按单组件加总，不套用优/劣方向。")
+    train = {}
+    for t in (training_tests if isinstance(training_tests, list) else []):
+        if (isinstance(t, dict) and t.get("interaction")
+                and t.get("metric") == "PPL交互"):
+            train[t.get("interaction")] = t
+    md += ["", "| 交互 | ΔPPL均值 ± ΔSD | n种子 | p_adj(Holm) | "
+           "训练期ΔPPL | 符号一致 | 判定 |", "|---|---|---|---|---|---|---|"]
+    for t in rows:
+        tr = _finite_number(t.get("training_interaction_mean"))
+        if tr is None:
+            tr = _finite_number((train.get(t.get("interaction")) or {})
+                                .get("mean_diff"))
+        ph = _finite_number(t.get("mean_diff"))
+        agree = t.get("training_inference_sign_agree")
+        if agree is None and tr is not None and ph is not None:
+            agree = bool((tr > 0) == (ph > 0) or (tr == 0 and ph == 0))
+        p_adj = _finite_number(t.get("p_adj"))
+        md.append(
+            f"| {t.get('interaction', '-')} | {_fmt_mean_std(t)} | "
+            f"{t.get('n', '-')} | "
+            f"{'-' if p_adj is None else f'{p_adj:.4f}'} | "
+            f"{'-' if tr is None else f'{tr:+.4f}'} | "
+            f"{'-' if agree is None else ('是' if agree else '否 ⚠')} | "
+            f"{t.get('verdict', '-')} |")
+    md.append("")
+    md.append("注: 推理期交互与训练期交互都属探索性、未预注册；二者符号不一致"
+              "说明“重新训练后是否可加”没有在最终前向复现，应并列披露而不是"
+              "只报有利的一期。n<3 或 Holm 校正后不显著只表示未检出，"
+              "不等于交互不存在。")
+    return md
+
+
 def _render_ruler_length(analysis) -> list:
     """渲染 RULER 上下文长度剂量-反应（逐 ctx + 斜率 + 首末落差）。"""
     analysis = analysis if isinstance(analysis, dict) else {}
@@ -4467,45 +4514,47 @@ def _factorial_shapley_tests(runs) -> list:
 # 训练。它回答“训练好的前向里，组件的平均贡献与交互结构是否与训练期
 # 全因子消融一致”，不能替代训练期确认性检验。
 INFERENCE_SHAPLEY_METRIC = "推理期Shapley(PPL)"
+INFERENCE_INTERACTION_METRIC = "推理期交互PPL"
 
 
-def _inference_shapley_tests(ablations):
-    """由推理期 2^3 病灶格计算逐种子 Shapley 值并做跨种子检验。
+def _inference_factorial_values(ablations):
+    """校验并提取 `lega` 每个种子的推理期 2^3 八格 PPL。
 
-    每个种子必须齐全 8 个格（ABC=正常基线，none=A/B/C 全关，其余为
-    只保留一个/两个因子的病灶），且每个病灶与基线共享同一批 val 窗口。
-    缺格、未真正施加、或窗口不一致的种子整条剔除，不按 0 补齐。
+    返回 ``(per_seed, n_excluded)``：``per_seed[seed]`` 只在
+    ABC 基线、7 个病灶全部真正施加、且每个病灶与基线共享同一批
+    ``window_indices`` 时才建立；缺格/窗口不一致/非正 PPL 的种子整条剔除，
+    不按 0 补齐，也不把“没做干预”伪装成某个单元格的观测。非 `lega` 变体
+    不计入排除数：它们的 2^3 本来就不完整，不属于“损坏的 lega 证据”。
 
-    价值函数与训练期一致：v = −log(PPL)（越大越好），因此 φ>0 表示该
-    因子在训练好的前向里降低 PPL；exp(−φ) 为该因子的 PPL 几何均值比。
+    推理期八个格子只有在 Full 模型上才同时具备 A/B/C 三个真实因子；
+    qgate/gate_only 等变体缺项，清零会得到大量 no-op 格，Shapley/交互值
+    退化为“只有存在的因子”，与训练期全因子不可比，故一律不消费。
     """
-    out = []
+    per_seed = {}
+    excluded = 0
     ablations = ablations if isinstance(ablations, dict) else {}
     for variant in sorted(ablations):
-        # 推理期 2^3 的八个格子只有在 Full 模型上才同时具备 A/B/C 三个
-        # 真实因子；qgate/gate_only 等变体本来就缺项，对它们做同样的病灶
-        # 清零会得到大量 no-op 格，Shapley 值退化为“只有存在的因子”，
-        # 与训练期全因子 Shapley（由 lega 的 8 格定义）不可比。汇总页的
-        # 推理期表也没有变体列，混入多个变体会出现无法区分的重复因子行。
         if variant != "lega":
             continue
         seed_map = ablations.get(variant)
         if not isinstance(seed_map, dict):
             continue
-        per_seed = {}
-        all_seeds = _sorted_seeds(seed_map)
-        for seed in all_seeds:
+        for seed in _sorted_seeds(seed_map):
             payload = seed_map.get(seed)
             if not isinstance(payload, dict):
+                excluded += 1
                 continue
             baseline = payload.get("baseline")
             if not isinstance(baseline, dict):
+                excluded += 1
                 continue
             base_ppl = _finite_number(baseline.get("val_ppl"))
             if base_ppl is None or base_ppl <= 0:
+                excluded += 1
                 continue
             base_windows = payload.get("window_indices")
             if not isinstance(base_windows, list) or not base_windows:
+                excluded += 1
                 continue
             recs = payload.get("lesions")
             recs = recs if isinstance(recs, list) else []
@@ -4540,16 +4589,35 @@ def _inference_shapley_tests(ablations):
                     break
                 raw[cell] = ppl
             if not ok or len(raw) != len(FACTORIAL_CELL_ORDER):
+                excluded += 1
                 continue
-            try:
-                oriented = {
-                    c: factorial_oriented_value("PPL", raw[c])
-                    for c in FACTORIAL_CELL_ORDER}
-                per_seed[seed] = factorial_decomposition(oriented)
-            except (TypeError, ValueError):
-                continue
-        if not per_seed:
-            continue
+            per_seed[seed] = raw
+    return per_seed, excluded
+
+
+def _inference_shapley_tests(ablations):
+    """由推理期 2^3 病灶格计算逐种子 Shapley 值并做跨种子检验。
+
+    每个种子必须齐全 8 个格（ABC=正常基线，none=A/B/C 全关，其余为
+    只保留一个/两个因子的病灶），且每个病灶与基线共享同一批 val 窗口。
+    缺格、未真正施加、或窗口不一致的种子整条剔除，不按 0 补齐。
+
+    价值函数与训练期一致：v = −log(PPL)（越大越好），因此 φ>0 表示该
+    因子在训练好的前向里降低 PPL；exp(−φ) 为该因子的 PPL 几何均值比。
+    """
+    out = []
+    raw_by_seed, excluded = _inference_factorial_values(ablations)
+    per_seed = {}
+    for seed in sorted(raw_by_seed):
+        raw = raw_by_seed[seed]
+        try:
+            oriented = {
+                c: factorial_oriented_value("PPL", raw[c])
+                for c in FACTORIAL_CELL_ORDER}
+            per_seed[seed] = factorial_decomposition(oriented)
+        except (TypeError, ValueError):
+            excluded += 1
+    if per_seed:
         ordered = _sorted_seeds(per_seed)
         totals = [per_seed[s]["total_effect"] for s in ordered]
         total_mean = float(np.mean(totals)) if totals else None
@@ -4565,7 +4633,7 @@ def _inference_shapley_tests(ablations):
                 "reference": "0（无贡献）",
                 "metric": INFERENCE_SHAPLEY_METRIC,
                 "lower_is_better": False,
-                "variant": variant,
+                "variant": "lega",
                 "shapley_factor": factor,
                 "shapley_factor_label": SHAPLEY_FACTOR_LABEL[factor],
                 "shapley_metric": "PPL",
@@ -4581,8 +4649,7 @@ def _inference_shapley_tests(ablations):
                     max(abs(per_seed[s]["efficiency_gap"])
                         for s in ordered)),
                 "n_protocol_seeds": len(ordered),
-                "excluded_protocol_mismatches": (
-                    len(all_seeds) - len(ordered)),
+                "excluded_protocol_mismatches": excluded,
                 "exploratory": True,
             })
             mean_phi = _finite_number(res.get("mean_diff"))
@@ -4592,6 +4659,73 @@ def _inference_shapley_tests(ablations):
             res["shapley_ppl_ratio_note"] = (
                 "exp(−φ)：<1 表示该因子在训练好的前向里平均降低 PPL")
             out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
+    return _apply_holm(out)
+
+
+def _inference_interaction_tests(ablations):
+    """推理期 2^3 干预的 A×B/A×C/B×C 交互检验（探索性，独立 Holm 家族）。
+
+    训练期交互检验回答“重新训练时组件收益能否按单组件加总”；这里在同一
+    checkpoint 的 8 个推理期格子上回答“训练好的前向里交互结构是否还
+    存在”。使用与训练期相同的标准 2^3 对比（对第三个因子取平均）：
+
+        I_AB = ½[(AB−A−B+none) + (ABC−AC−BC+C)]
+
+    数值仍用原始 PPL（与训练期 `PPL交互` 同尺度，便于逐交互对照符号），
+    不套用方向判定：交互=0 表示可加，显著非零只说明“不能按单组件加总”。
+    与 Shapley 一样只消费 `lega` 的完整 8 格；缺格/未施加/窗口不一致的
+    种子整条剔除，不按 0 补齐。
+    """
+    out = []
+    raw_by_seed, excluded = _inference_factorial_values(ablations)
+    if not raw_by_seed:
+        return out
+    ordered = _sorted_seeds(raw_by_seed)
+    for pair, (slice_a, slice_b) in _FACTORIAL_CONTRASTS.items():
+        vals = []
+        for seed in ordered:
+            raw = raw_by_seed[seed]
+            terms = []
+            ok = True
+            for cell, sign in zip(slice_a, (1, -1, -1, 1)):
+                v = _finite_number(raw.get(cell))
+                if v is None:
+                    ok = False
+                    break
+                terms.append(sign * v)
+            if not ok:
+                continue
+            second = []
+            for cell, sign in zip(slice_b, (1, -1, -1, 1)):
+                v = _finite_number(raw.get(cell))
+                if v is None:
+                    ok = False
+                    break
+                second.append(sign * v)
+            if not ok:
+                continue
+            value = 0.5 * (sum(terms) + sum(second))
+            if math.isfinite(value):
+                vals.append(value)
+            else:
+                excluded += 1
+        if not vals:
+            continue
+        res = paired_t_test(vals, [0.0] * len(vals))
+        res.update({
+            "candidate": f"{pair} 推理期交互",
+            "reference": "可加性（交互=0）",
+            "metric": INFERENCE_INTERACTION_METRIC,
+            "lower_is_better": True,
+            "no_direction": True,
+            "interaction": pair,
+            "variant": "lega",
+            "inference_time": True,
+            "n_protocol_seeds": len(vals),
+            "excluded_protocol_mismatches": excluded,
+            "exploratory": True,
+        })
+        out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
     return _apply_holm(out)
 
 
@@ -7032,6 +7166,19 @@ def build_summary(results_dir: str, audit: dict = None,
         t["training_inference_sign_agree"] = (
             None if tr is None or ph is None else bool(
                 (tr > 0) == (ph > 0) or (tr == 0 and ph == 0)))
+    # 推理期交互：与训练期 PPL交互 同尺度并列，检查“训练期交互结构是否在
+    # 最终前向复现”。只作探索性证据，不进入确认性判定。
+    inference_interactions = _inference_interaction_tests(ablations)
+    train_inter = {t.get("interaction"): _finite_number(t.get("mean_diff"))
+                   for t in tests
+                   if t.get("interaction") and t.get("metric") == "PPL交互"}
+    for t in inference_interactions:
+        tr = train_inter.get(t.get("interaction"))
+        ph = _finite_number(t.get("mean_diff"))
+        t["training_interaction_mean"] = tr
+        t["training_inference_sign_agree"] = (
+            None if tr is None or ph is None else bool(
+                (tr > 0) == (ph > 0) or (tr == 0 and ph == 0)))
     # 参数匹配安慰剂（lega vs 同参数/同 FLOPs、但证据为噪声的 lega_placebo）。
     # 只有显式运行时才有这条对比；未运行时汇总页显式提示，不默认“容量已排除”。
     param_control_test = next(
@@ -8649,6 +8796,7 @@ def build_summary(results_dir: str, audit: dict = None,
         param_control_test, capacity_only_test,
         ran=PARAM_CONTROL_VARIANT in runs)
     md += _render_inference_shapley(inference_shapley)
+    md += _render_inference_interactions(inference_interactions, tests)
 
     # --- 配对检验表
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
@@ -9415,6 +9563,12 @@ def build_summary(results_dir: str, audit: dict = None,
                        "no_evidence）上的 Shapley 分解（探索性）：φ>0 表示该"
                        "因子在训练好的前向里降低 PPL；与训练期 Shapley 并列，"
                        "用于区分“重新训练后的组件贡献”与“最终前向实际使用”。"),
+                   "inference_factorial_interactions": inference_interactions,
+                   "inference_factorial_interactions_note": (
+                       "同一 checkpoint 内的 2^3 干预上的 A×B/A×C/B×C 交互"
+                       "检验（探索性、独立 Holm 家族）：与训练期 `PPL交互` "
+                       "同尺度并列，检查“重新训练后的交互结构能否在最终前向"
+                       "复现”；交互=0 表示可加，显著非零不等于某个组件有用。"),
                    "causal_ablation_note": (
                        "推理期因果病灶消融（lega.ablate，val split）：同一 "
                        "checkpoint/同一批窗口上只改门控参数，逐窗口配对 ΔNLL；"
@@ -9450,6 +9604,7 @@ def build_summary(results_dir: str, audit: dict = None,
             "ppl_window_tests": ppl_window_tests,
             "factorial_shapley": shapley_tests,
             "inference_factorial_shapley": inference_shapley,
+            "inference_interactions": inference_interactions,
             "parameter_matched_control": param_control_test,
             "causal_ablation": causal_tests}
 

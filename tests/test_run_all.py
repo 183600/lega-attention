@@ -23,7 +23,8 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _enrich_paired, _eval_matches_window_spec,
                       _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
                       _factorial_protocol_ok, _inference_shapley_tests,
-                      INFERENCE_SHAPLEY_METRIC, PARAM_CONTROL_VARIANT,
+                      INFERENCE_INTERACTION_METRIC, INFERENCE_SHAPLEY_METRIC,
+                      PARAM_CONTROL_VARIANT,
                       PARAM_CONTROL_PAIR,
                       _int_or_zero, _lat_noise_pct,
                       _neural_eval_window_spec, _noise_floor_pct,
@@ -5657,6 +5658,58 @@ def test_parameter_matched_control_and_inference_shapley_wiring():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 参数匹配安慰剂/推理期 Shapley 进入汇总与 significance.json")
+
+
+def test_inference_factorial_interactions_enter_summary_and_significance():
+    """推理期 2^3 交互必须与 Shapley 一起写入汇总页与 significance.json。
+
+    只做 Shapley 会把交互平均分摊到因子上；同一批 8 格还必须给出
+    A×B/A×C/B×C 的独立交互对比，且缺格时如实提示，不能静默省略。
+    """
+    from lega.ablate import INFERENCE_FACTORIAL_CELLS
+    tmp = tempfile.mkdtemp()
+    try:
+        seeds = [1, 2, 3]
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": ["lega"], "seeds": seeds, "smoke": False,
+            "ablation": {"executed": True, "variants": ["lega"]}})
+        for s in seeds:
+            _write_json(os.path.join(tmp, f"eval_lega_seed{s}.json"), {
+                "variant": "lega", "seed": s, "split": "val",
+                "val_ppl": 17.0, "val_loss": math.log(17.0),
+                "n_params": 100, "n_gate_extra": 4})
+            # 可加基线 + 纯 A×B 交互：AB/ABC 同时多 2，其余六格保持可加。
+            vals = {"none": 10.0, "A": 11.0, "B": 12.0, "C": 14.0,
+                    "AB": 15.0, "AC": 15.0, "BC": 16.0, "ABC": 19.0}
+            vals = {c: v + 0.01 * s for c, v in vals.items()}
+            recs = [{"lesion": lesion, "applied": True,
+                     "window_indices": [0, 1, 2],
+                     "val_ppl": float(vals[cell])}
+                    for cell, lesion in INFERENCE_FACTORIAL_CELLS.items()
+                    if lesion is not None]
+            _write_json(os.path.join(tmp, f"ablation_lega_seed{s}.json"), {
+                "variant": "lega", "seed": s,
+                "window_indices": [0, 1, 2],
+                "baseline": {"val_ppl": float(vals["ABC"])},
+                "lesions": recs})
+        out = build_summary(tmp)
+        md = out["markdown"]
+        assert "推理期全因子交互效应" in md
+        assert "A×B" in md and "符号一致" in md
+        assert len(out["inference_interactions"]) == 3
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        got = {t["interaction"]: t
+               for t in sig["inference_factorial_interactions"]}
+        assert set(got) == {"A×B", "A×C", "B×C"}
+        assert abs(got["A×B"]["mean_diff"] - 2.0) < 1e-9, got["A×B"]
+        assert abs(got["A×C"]["mean_diff"]) < 1e-9, got["A×C"]
+        assert abs(got["B×C"]["mean_diff"]) < 1e-9, got["B×C"]
+        assert all(t["metric"] == INFERENCE_INTERACTION_METRIC
+                   for t in got.values())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 推理期交互进入汇总页与 significance.json，纯 A×B 归属正确")
 
 
 def test_summary_rendering_tolerates_missing_effect_mean():

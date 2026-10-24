@@ -24,7 +24,9 @@ from lega.factorial import (CELL_ORDER, decomposition, oriented_value,
                             ppl_ratio_from_phi, shapley_values, shares)
 from lega.model import GPT, save_checkpoint
 from run_all import (_ablation_lesion_records, _factorial_shapley_tests,
-                     _inference_shapley_tests, CAUSAL_ABLATION_METRIC,
+                     _inference_interaction_tests, _inference_shapley_tests,
+                     _render_inference_interactions,
+                     CAUSAL_ABLATION_METRIC, INFERENCE_INTERACTION_METRIC,
                      INFERENCE_SHAPLEY_METRIC, SHAPLEY_PPL_METRIC)
 
 
@@ -550,6 +552,79 @@ def test_inference_shapley_recovers_additive_components_across_seeds():
                    for t in causal), causal
     print("  [ok] 推理期 Shapley：可加价值下精确还原 φ，缺格/错窗跳过；"
           "单因子格不混入单病灶因果表")
+
+
+def _inference_ppl_payload(seed, values):
+    """用原始 PPL 单元格构造推理期 2^3 payload（交互检验与 Shapley 同结构）。"""
+    recs = []
+    for cell, lesion_id in INFERENCE_FACTORIAL_CELLS.items():
+        if lesion_id is None:
+            continue
+        recs.append({"lesion": lesion_id, "applied": True,
+                     "window_indices": [0, 1, 2],
+                     "val_ppl": float(values[cell])})
+    return {"variant": "lega", "seed": seed, "window_indices": [0, 1, 2],
+            "baseline": {"val_ppl": float(values["ABC"])}, "lesions": recs}
+
+
+def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
+    """推理期交互：可加 PPL 下 A×B/A×C/B×C 为 0；纯 A×B 交互只落在 A×B。
+
+    这里刻意用原始 PPL（与训练期 `PPL交互` 同尺度），避免把 Shapley 的
+    −log 口径直接搬来后与训练期符号不可比。缺格/错窗/非 lega 必须整条
+    剔除，不能按 0 补齐伪造“可加性成立”。
+    """
+    additive = {"none": 10.0, "A": 11.0, "B": 12.0, "C": 14.0,
+                "AB": 13.0, "AC": 15.0, "BC": 16.0, "ABC": 17.0}
+    abl = {"lega": {s: _inference_ppl_payload(s, additive)
+                    for s in (1, 2, 3)}}
+    out = _inference_interaction_tests(abl)
+    assert len(out) == 3, out
+    by = {t["interaction"]: t for t in out}
+    assert all(t["metric"] == INFERENCE_INTERACTION_METRIC for t in out)
+    assert all(abs(t["mean_diff"]) < 1e-9 for t in out), by
+    assert all(t["inference_time"] is True and t["no_direction"] is True
+               for t in out)
+
+    pure = dict(additive)
+    pure["AB"] += 2.0
+    pure["ABC"] += 2.0
+    abl = {"lega": {s: _inference_ppl_payload(s, pure) for s in (1, 2, 3)}}
+    by = {t["interaction"]: t for t in _inference_interaction_tests(abl)}
+    assert abs(by["A×B"]["mean_diff"] - 2.0) < 1e-9, by["A×B"]
+    assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
+    assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
+
+    # 一个种子缺格：该种子整条剔除，n=2 且如实计入排除数。
+    broken = {"lega": {s: _inference_ppl_payload(s, additive)
+                       for s in (1, 2, 3)}}
+    broken["lega"][3]["lesions"] = broken["lega"][3]["lesions"][:-1]
+    out = _inference_interaction_tests(broken)
+    assert out and all(t["n"] == 2 for t in out), out
+    assert all(t["excluded_protocol_mismatches"] == 1 for t in out), out
+    # 窗口不一致同缺格；非 lega 的 2^3 本来不完整，不消费也不计入排除。
+    bad_win = {"lega": {s: _inference_ppl_payload(s, additive)
+                        for s in (1, 2, 3)}}
+    bad_win["lega"][1]["lesions"][0]["window_indices"] = [0, 1]
+    assert _inference_interaction_tests(bad_win)[0]["n"] == 2
+    assert _inference_interaction_tests(
+        {"qgate": {s: _inference_ppl_payload(s, additive)
+                   for s in (1, 2, 3)}}) == []
+    print("  [ok] 推理期交互：同训练期 PPL 尺度、纯交互归属正确，"
+          "缺格/错窗整条剔除")
+
+
+def test_inference_interaction_renderer_flags_sign_disagreement():
+    """汇总页必须把训练期/推理期交互符号不一致显式标 ⚠，而不是只报一期。"""
+    infer = [{"interaction": "A×B", "mean_diff": -1.5, "std_diff": 0.2,
+              "n": 3, "p_adj": 0.01, "verdict": "显著偏离可加性",
+              "training_interaction_mean": 2.0,
+              "training_inference_sign_agree": False}]
+    md = "\n".join(_render_inference_interactions(infer, []))
+    assert "A×B" in md and "否 ⚠" in md and "-1.5000" in md, md
+    absent = "\n".join(_render_inference_interactions([], []))
+    assert "无法计算推理期交互" in absent
+    print("  [ok] 推理期交互汇总：训练/推理符号冲突显式标注，缺证据不静默")
 
 
 def test_inference_shapley_only_uses_full_lega_checkpoint():
