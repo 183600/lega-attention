@@ -37,6 +37,7 @@ from numbers import Real
 DEFAULT_ALPHA = 0.05
 DEFAULT_POWER = 0.8
 MIN_SEEDS = 3
+MAX_SEED = 2 ** 32 - 1
 SCHEMA_VERSION = 1
 
 # 精确 McNemar 功效的规模上限：每增加一个 n 要枚举不一致数 m 与条件拒绝域，
@@ -117,6 +118,14 @@ def _strict_int(value, name: str, minimum: int = 1) -> int:
             raise ValueError(f"{name} 必须是整数，收到 {value!r}") from None
     if out < minimum:
         raise ValueError(f"{name} 必须 >= {minimum}，收到 {out}")
+    return out
+
+
+def _seed_int(value, name: str = "seed") -> int:
+    """设计计划里的种子与 :func:`lega.utils.seed_int` 同口径（0..2^32-1）。"""
+    out = _strict_int(value, name, minimum=0)
+    if out > MAX_SEED:
+        raise ValueError(f"{name} 必须在 0..{MAX_SEED} 内，收到 {out}")
     return out
 
 
@@ -571,7 +580,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
     config = _as_dict(config)
     if not isinstance(seeds, (list, tuple)) or not seeds:
         raise ValueError("seeds 必须是非空列表")
-    seeds = [_strict_int(s, "seed") for s in seeds]
+    seeds = [_seed_int(s, "seed") for s in seeds]
     if len(set(seeds)) != len(seeds):
         raise ValueError("seeds 不能重复")
     if not isinstance(variants, (list, tuple)) or not variants:
@@ -623,7 +632,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
     scope_seeds_int = None
     if scope_seeds is not None:
         try:
-            scope_seeds_int = [_strict_int(s, "预注册 scope seed")
+            scope_seeds_int = [_seed_int(s, "预注册 scope seed")
                                for s in scope_seeds]
         except ValueError:
             scope_seeds_int = None
@@ -1614,7 +1623,7 @@ def _parse_seeds(spec):
         part = part.strip()
         if not part:
             continue
-        out.append(_strict_int(int(part, 0), "seed"))
+        out.append(_seed_int(int(part, 0), "seed"))
     return out
 
 
@@ -1658,7 +1667,7 @@ def main(argv=None) -> int:
         raw = cfg.get("seeds")
         if raw is None:
             raw = [cfg.get("seed", 1337)]
-        seeds = [_strict_int(s, "seed") for s in raw]
+        seeds = [_seed_int(s, "seed") for s in raw]
 
     registered = None
     reg_path = args.registered

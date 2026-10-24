@@ -338,6 +338,20 @@ def test_plan_digest_tracks_scientific_content():
     print("  [ok] 计划摘要：同一设计稳定、内容变化即变")
 
 
+def test_design_plan_accepts_seed_zero_and_caps_seed_range():
+    """种子 0 与 utils.seed_int 同口径合法；负数/超出 2^32-1 必须拒绝。"""
+    plan = _plan(seeds=(0, 1, 2))
+    assert plan["inputs"]["seeds"] == [0, 1, 2]
+    for bad in (-1, 2 ** 32, 10 ** 400):
+        try:
+            _plan(seeds=(0, bad))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"应拒绝 seed={bad!r}")
+    print("  [ok] 设计计划：seed 0 合法，越界种子显式拒绝")
+
+
 def test_design_plan_rejects_malformed_inputs():
     """非法种子/变体/配置必须在训练前显式失败。"""
     for seeds, variants in (([], ["lega"]), ([1, 1], ["lega"]),
