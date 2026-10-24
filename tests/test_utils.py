@@ -868,6 +868,9 @@ def test_wilson_score_ci():
     assert 0.0 < lo1 <= 1.0 and hi1 == 1.0, (lo1, hi1)
     lo_mid, hi_mid = wilson_score_ci(huge_n // 2, huge_n)
     assert 0.0 <= lo_mid <= hi_mid <= 1.0, (lo_mid, hi_mid)
+    # ci 极接近 1 时 1-(1-ci)/2 舍入为 1：不能泄漏 StatisticsError。
+    lo, hi = wilson_score_ci(1, 10, ci=1.0 - 1e-16)
+    assert 0.0 <= lo <= hi <= 1.0, (lo, hi)
     print("  [ok] wilson_score_ci（手算值/端点钳制/区间收窄/大整数/非法参数拒绝）")
 
 

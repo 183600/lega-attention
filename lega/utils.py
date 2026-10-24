@@ -1199,7 +1199,9 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
         return None
     ci = _open_unit_interval(ci, "ci")
     k = int(min(max(k, 0), n))
-    z = statistics.NormalDist().inv_cdf(1.0 - (1.0 - ci) / 2.0)
+    # ci 极接近 1 时 1-(1-ci)/2 会在 float 中舍入为 1，NormalDist.inv_cdf
+    # 抛 StatisticsError；复用尾概率求根可处理到最小可表示尾。
+    z = _normal_two_sided_z(1.0 - ci)
     z2 = z * z
     # 用整数除法先求 1/n 与 1/n²：n 是合法大整数（如 10**400）时
     # ``z2 / n`` 会先把 n 转成 float 并抛 OverflowError，而 ``1 / n``
