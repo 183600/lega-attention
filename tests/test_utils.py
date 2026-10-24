@@ -471,6 +471,12 @@ def test_t_critical_95_matches_known_table():
     # 把 p 错算成 1、临界值错算成 8/90。
     assert abs(student_t_two_sided_p(2, 10 ** 18)
                - math.erfc(2 / math.sqrt(2))) < 1e-12
+    # df 略低于正态阈值时 t²/df 仍可能小于 1 附近的 float 分辨率：
+    # 朴素 x=df/(df+t²) 会把 x 舍入成 1，使 p 错算成 1（误差 ~1e-5）。
+    # 参考值来自 scipy.stats.t.sf(..., df)*2。
+    assert abs(student_t_two_sided_p(
+        1.8214847522781816e-05, 4658237.908688162)
+        - 0.999985466655165) < 1e-12
     # 合法但超出 float 上限的整数 t：双侧 p 应为 0，不能让 float(t)
     # 的 OverflowError 穿透（符号不影响双侧检验）。
     assert student_t_two_sided_p(10 ** 400, 3) == 0.0

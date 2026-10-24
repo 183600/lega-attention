@@ -816,8 +816,23 @@ def student_t_two_sided_p(t: float, df: float) -> float:
         # 对任意有限 t，a→0 的正则化不完全 beta 极限为 1（df 越小尾部
         # 越重，双侧 p 越接近 1）；显式返回 1 而不是让 math 域错误穿透。
         return 1.0
-    x = df / (df + t * t)
-    return float(_betai(a, 0.5, x))
+    t2 = t * t
+    if math.isinf(t2):
+        # t² 溢出：x=df/(df+t²) 下溢为 0，双侧 p→0。
+        return 0.0
+    ratio = t2 / df
+    if math.isinf(ratio):
+        # t²/df 超出 float：t 相对 sqrt(df) 极大，双侧 p→0。
+        return 0.0
+    x = 1.0 / (1.0 + ratio)
+    if x < 0.5:
+        return float(_betai(a, 0.5, x))
+    # x 接近 1 时不能直接把 x 交给 _betai：t²/df 小于 float 在 1 附近的
+    # 分辨率时 x 会舍入成 1，p 被错算成 1（df 略小于 1e7 且 t 很小时
+    # 误差可达 ~1e-5）。用互补量 y=t²/(df+t²) 计算 1-I_y(0.5, df/2)，
+    # y 不经过 1-x 的抵消。
+    y = ratio / (1.0 + ratio)
+    return float(1.0 - _betai(0.5, a, y))
 
 
 def t_critical_95(df: float) -> float:
