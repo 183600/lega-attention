@@ -653,6 +653,10 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
     assert abs(paired_t_power(0.0, 0.01, huge) - 0.05) < 1e-12
     mde = min_detectable_effect(0.01, huge)
     assert mde is not None and 0.0 < mde < 1e-190, mde
+    mde_huge_sd = min_detectable_effect(1e308, 4)
+    assert mde_huge_sd is not None and 1e308 < mde_huge_sd < 2e308, mde_huge_sd
+    mde_mixed = min_detectable_effect(1e308, huge)
+    assert mde_mixed is not None and 1e108 < mde_mixed < 1e109, mde_mixed
     sd_max = max_sd_for_effect(0.1, huge)
     assert sd_max is not None and sd_max > 1e190, sd_max
     mc = mcnemar_power(huge, 0.1, 0.01)

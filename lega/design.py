@@ -270,7 +270,7 @@ def min_detectable_effect(effect_sd, n, alpha: float = DEFAULT_ALPHA,
     root_n = _sqrt_count(n)
     if root_n is None:
         return None
-    out = z * sd / root_n
+    out = sd * (z / root_n)
     return float(out) if math.isfinite(out) else None
 
 
