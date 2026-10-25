@@ -1392,6 +1392,23 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
         L = int(arr.size)
         if L == 0:
             return None, False
+        # token id 是协议身份：越界 id 会让 minlength 直方图变长，两个 split
+        # 长度不一致时在比较处崩溃；若两边恰好同样越界则会被当成合法 token
+        # 静默参与 TV/JS。负 id 甚至在 bincount 内抛出难懂的下层错误。
+        if arr.dtype.kind == "f":
+            if int(np.isnan(arr).sum()) or int(np.isinf(arr).sum()):
+                raise ValueError(f"{s} token 流含 NaN/Inf，无法统计分布")
+            arr_r = np.rint(arr)
+            if not np.array_equal(arr, arr_r):
+                raise ValueError(f"{s} token 流含非整数 id，无法统计分布")
+            arr = arr_r.astype(np.int64)
+        elif arr.dtype.kind not in "iu":
+            raise ValueError(f"{s} token 流 dtype 非法: {arr.dtype}")
+        lo, hi = int(arr.min()), int(arr.max())
+        if lo < 0 or hi >= int(vocab_size):
+            raise ValueError(
+                f"{s} token id 越界: [{lo}, {hi}] 不在 "
+                f"[0, {vocab_size})")
         sampled = limit is not None and limit < L
         if sampled:
             rng = np.random.default_rng(s)

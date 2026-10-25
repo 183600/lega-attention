@@ -1073,6 +1073,20 @@ def test_distribution_shift_metric():
             raise AssertionError(f"非法 vocab_size 应报错: {bad_vocab!r}")
         except ValueError:
             pass
+    # 越界/非整数/hash 伪装的 id 不能改变直方图长度或静默成为合法 token：
+    # 两边同样越界时 TV/JS 会看似正常却统计了词表外的类别。
+    for bad_ids in (np.array([0, 1, 3]), np.array([-1, 0]),
+                    np.array([0.5, 1.0]), np.array([np.nan, 1.0]),
+                    np.array([True, False])):
+        try:
+            distribution_shift(bad_ids, np.array([0, 1]), 3)
+            raise AssertionError(f"非法 token id 应报错: {bad_ids!r}")
+        except ValueError:
+            pass
+    # 整数值浮点流仍是合法 token id，不能因硬化误伤。
+    d_float = distribution_shift(np.array([0.0, 1.0]), np.array([0.0, 1.0]),
+                                 3)
+    assert d_float["tokens_train"] == 2 and d_float["tv"] == 0.0, d_float
     print("  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计，"
           "非法预算/词表显式拒绝")
 
