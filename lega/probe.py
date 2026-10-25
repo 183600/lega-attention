@@ -162,7 +162,10 @@ def fit_logreg(X: np.ndarray, y: np.ndarray, l2: float = 0.0,
     # 远未收敛时提前停止；超过 1e6 即转入等价缩放问题。
     if max_abs > min(1e6, overflow_safe):
         col_scale = np.max(np.abs(X), axis=0)
-        col_scale = np.where(col_scale > 0, col_scale, 1.0)
+        # 只缩放幅度 >1 的列：极小/次正规列本身不会让 Hessian 的 X²
+        # 溢出，但按 1/s² 反推惩罚尺度会溢出成 inf（l2=0 时 0×inf=NaN，
+        # 使整列系数变成 NaN）。不缩放微小列时其系数与特征同量级，仍可表示。
+        col_scale = np.where(col_scale > 1.0, col_scale, 1.0)
         with np.errstate(over="ignore", under="ignore"):
             penalty_scale = 1.0 / (col_scale * col_scale)
         coef, intercept = _irls_solve(

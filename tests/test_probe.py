@@ -395,6 +395,21 @@ def test_linear_probe_handles_extreme_feature_values():
     print("  [ok] 线性探针：极端特征值标准化/拟合不溢出")
 
 
+def test_fit_logreg_mixed_huge_and_subnormal_features_stays_finite():
+    """混合量级特征不能因 1/s² 溢出把 l2=0 的整列系数污染成 NaN。"""
+    X = np.array([[1e7, 1e-320], [2e7, 2e-320], [3e7, 3e-320],
+                  [4e7, 4e-320], [5e7, 5e-320], [6e7, 6e-320]])
+    y = np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+    for l2 in (0.0, 0.01, 10.0):
+        model = fit_logreg(X, y, l2=l2)
+        assert np.isfinite(model["coef"]).all(), (l2, model)
+        assert math.isfinite(model["intercept"]), (l2, model)
+        p = predict_logreg(model, X)
+        assert np.isfinite(p).all(), (l2, p)
+        assert p[0] < p[-1], (l2, p)
+    print("  [ok] 线性探针：巨大+次正规混合特征下系数/预测保持有限")
+
+
 def test_probe_rejects_numpy_bools_and_cache_identity():
     """np.bool_ 不能被当成 1.0/L2=1；特征缓存也不能跨 records 对象复用。"""
     assert math.isnan(_float_or_nan(np.bool_(True)))
