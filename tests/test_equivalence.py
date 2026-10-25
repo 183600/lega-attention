@@ -30,6 +30,14 @@ def test_tost_equivalent_and_non_equivalent():
     print("  [ok] TOST 等价/非等价与 90% 区间")
 
 
+def test_tost_one_sided_lower_keeps_tiny_tail():
+    diffs = [0.0, 1e-10, -1e-10, 5e-11, -5e-11]
+    r = tost_from_diffs(diffs, 0.01)
+    assert r["p_high"] is not None and r["p_high"] > 0.0, r
+    assert abs(r["p_high"] - r["p_low"]) < 1e-45, r
+    print("  [ok] TOST 单侧下尾在极端 t 下不因补集抵消归零")
+
+
 def test_tost_zero_variance_and_boundary():
     zero = tost_from_diffs([0.0] * 5, 0.01)
     assert zero["equivalent"] is True and zero["p_tost"] == 0.0, zero

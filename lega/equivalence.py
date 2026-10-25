@@ -287,7 +287,10 @@ def _one_sided_upper(t, df):
 
 def _one_sided_lower(t, df):
     """P(T_df <= t)。"""
-    return 1.0 - _one_sided_upper(t, df)
+    p2 = student_t_two_sided_p(t, df)
+    if p2 is None or math.isnan(p2):
+        return float("nan")
+    return p2 / 2.0 if t <= 0 else 1.0 - p2 / 2.0
 
 
 def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
