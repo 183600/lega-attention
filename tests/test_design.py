@@ -3,6 +3,7 @@
 覆盖：
   * 配对 t / McNemar 的功效与所需样本数互为逆运算，且拒绝非法输入；
   * 计划在训练前写死种子/变体/SESOI 灵敏度，缺登记种子时 fail；
+  * 确认性功效按 Holm 家族/全局族的最终 α_eff 规划，并与 run_all 配对一致；
   * 计划内 (变体, 种子) 单元缺失时，只降级受影响假设的确认性判定；
   * 旧产物没有 design_plan.json 时不误降级（向后兼容）。
 """
@@ -18,8 +19,10 @@ from lega.design import (analysis_population, apply_design_gate,
                          mcnemar_mde, mcnemar_power,
                          mcnemar_required_samples,
                          max_discordance_for_effect, max_sd_for_effect,
-                         min_detectable_effect, observed_design_sensitivity,
-                         paired_t_power, plan_digest, render_design_section,
+                         min_detectable_effect, multiplicity_alpha,
+                         observed_design_sensitivity, paired_t_power,
+                         planned_comparison_pairs, planned_family_sizes,
+                         plan_digest, render_design_section,
                          required_pairs, save_design_plan)
 
 
@@ -136,6 +139,84 @@ def test_build_design_plan_flags_missing_registered_seeds():
     assert plan["registered_plan"][0]["id"] == "H1"
     assert plan["registered_plan"][0]["metric"] == "PPL"
     print("  [ok] 设计计划：缺失预注册种子判 fail，灵敏度表完整")
+
+
+def test_confirmatory_power_uses_planned_holm_burden():
+    """先验功效必须按最终 Holm 阈值规划，不能高估确认性灵敏度。"""
+    reg = {"hypotheses": [
+        {"id": "H1", "metric": "PPL", "candidate": "lega",
+         "reference": "standard"},
+        {"id": "H5", "metric": "PPL", "candidate": "lega",
+         "reference": "qgate"}]}
+    plan = _plan(registered=reg)
+    mp = plan["multiplicity_plan"]
+    assert mp["family_sizes"]["PPL"] == 3, mp
+    assert mp["family_sizes"]["global_confirmatory"] == 2, mp
+    alpha_eff = mp["alpha_effective"]["PPL"]
+    assert abs(alpha_eff - 0.05 / 3) < 1e-15, alpha_eff
+    ppl = plan["endpoints"]["ppl"]
+    row = next(r for r in ppl["sensitivity"]
+               if abs(r["paired_sd_relative"] - 0.01) < 1e-12)
+    assert row["power_for_sesoi_confirmatory"] < row["power_for_sesoi"]
+    assert (row["mde_relative_confirmatory"]
+            > row["mde_relative"])
+    assert (row["required_seeds_for_sesoi_confirmatory"]
+            > row["required_seeds_for_sesoi"])
+    assert (ppl["max_paired_sd_for_sesoi_confirmatory"]
+            < ppl["max_paired_sd_for_sesoi"])
+    assert any(c["id"] == "ppl_confirmatory_reference"
+               and c["status"] == "warn" for c in plan["checks"])
+
+    raw = _plan(registered=reg, multiplicity="none")
+    assert abs(raw["multiplicity_plan"]["alpha_effective"]["PPL"]
+               - 0.05) < 1e-15
+    raw_row = next(r for r in raw["endpoints"]["ppl"]["sensitivity"]
+                   if abs(r["paired_sd_relative"] - 0.01) < 1e-12)
+    assert (abs(raw_row["power_for_sesoi_confirmatory"]
+                - raw_row["power_for_sesoi"]) < 1e-15)
+
+    # 正式矩阵：9 个变体 vs standard + 6 个单因素 + 1 个预注册整体对比
+    # = 16 个 PPL/RULER 检验；7 条预注册假设构成全局确认族。
+    variants = ["standard", "gate_only", "qgate", "null", "lega",
+                "lega_no_len", "lega_no_conc", "lega_no_query",
+                "lega_conc_only", "lega_len_only"]
+    analysis = [v for v in variants if v not in ("standard", "gate_only")]
+    reg7 = {"hypotheses": [
+        {"id": f"H{i}", "metric": "PPL", "candidate": "lega",
+         "reference": "standard"} for i in range(1, 7)]
+        + [{"id": "H7", "metric": "PPL", "candidate": "lega",
+            "reference": "qgate"}]}
+    sizes = planned_family_sizes(variants, reg7,
+                                 analysis_variants=analysis)
+    assert sizes["ppl_family_size"] == 16, sizes
+    assert sizes["global_family_size"] == 7, sizes
+    assert sizes["auroc_family_size"] == 8, sizes
+    plan7 = build_design_plan(
+        {"ruler": {"ctx_lens": [256, 512], "n_samples": 30}},
+        [1, 2, 3, 4, 5], variants, reg7,
+        known_variants=set(variants), analysis_variants=analysis)
+    assert abs(plan7["multiplicity_plan"]["alpha_effective"]["PPL"]
+               - 0.05 / 16) < 1e-15
+    assert abs(plan7["multiplicity_plan"]["alpha_effective"]["AUROC"]
+               - 0.05 / 8) < 1e-15
+    # 设计层与汇总层的配对集合必须逐项一致，防止任一侧新增对比后
+    # 设计功效仍按旧家族大小计算。
+    import lega.design as design_mod
+    import run_all
+    assert planned_comparison_pairs(variants, reg7) == \
+        run_all.build_comparison_pairs({v: {} for v in variants}, reg7)
+    assert (set(design_mod._DEFAULT_GATED_FOR_ANALYSIS)
+            == set(run_all.GATED_FOR_ANALYSIS))
+
+    try:
+        _plan(registered=reg, multiplicity="bogus")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("未知 multiplicity 必须拒绝")
+    text = "\n".join(render_design_section(plan))
+    assert "确认性" in text and "α_eff" in text
+    print("  [ok] 确认性功效按 Holm 家族负担规划，并与 run_all 配对一致")
 
 
 def test_build_design_plan_smoke_downgrades_fail():
@@ -596,6 +677,9 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
         assert math.isfinite(mcnemar_mde(1000, 0.1, alpha=tiny_alpha))
         assert abs(min_detectable_effect(1.0, 10, alpha=tiny_alpha)
                    - utils_mde(1.0, 10, alpha=tiny_alpha)) < 1e-15
+    huge_burden = multiplicity_alpha(0.05, 10 ** 400, 1)
+    assert huge_burden["representable"] is False
+    assert huge_burden["alpha_effective"] == 0.05
 
     astronomical = 10 ** 1000  # √n 本身已超出 float 上限
     assert paired_t_power(0.01, 0.01, astronomical) == 1.0

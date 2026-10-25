@@ -522,25 +522,74 @@ margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的�
    配置 SHA-256 不一致时（上一轮遗留计划）不据此降级，但显式告警
    “无法核对分析人群”，避免用旧计划冤枉新实验或反过来放行。
 
+### 确认性功效：按最终判定阈值规划（不是名义 α）
+
+先验功效最容易犯的错误，是用名义 `α=0.05` 计算“5 个种子能检出 1% SESOI”，
+但最终判定并不是单次检验。`run_all.py` 先在同一指标家族内做 Holm 校正
+（`_apply_holm`：PPL、RULER、AUROC/AP 各自成族），再对全部预注册假设做
+一次全局 Holm（`apply_global_fwer`）。Holm 在**最坏情形**下把任一假设的
+阈值收紧到 `α/m`，因此设计阶段必须用
+
+```
+α_eff = α / max(m_family, k_global)
+```
+
+规划，而不是拿 `α` 直接算。这里 `m_family` 是该指标家族计划内全部配对
+（包括探索性对比；Holm 不会因为对比没预注册就不惩罚），`k_global` 是
+计划内可检验的预注册假设数。`design.multiplicity` 可选
+`holm_worst_case`（默认，取两者最大负担）、`family_only`（只按家族）或
+`none`（仅兼容/展示未校正口径）；正式设计必须用前两者之一。
+
+家族大小由**计划配对矩阵**推导，不靠手填：9 个变体 vs `standard`、
+6 个 `SINGLE_FACTOR_PAIRS`、预注册表追加的整体对比（例如 H5 的
+`lega vs qgate`），当前正式矩阵为 16 个 PPL/RULER 检验；全局确认族为
+7 条预注册假设。设计层因此输出两套并列字段，而不是覆盖旧字段：
+
+- 未校正：`mde_relative`、`power_for_sesoi`、`required_seeds_for_sesoi`
+  （旧口径，保留用于对照/向后兼容）；
+- 确认性：`mde_relative_confirmatory`、
+  `power_for_sesoi_confirmatory`、
+  `required_seeds_for_sesoi_confirmatory`；RULER 对应
+  `mde_pp_confirmatory` 等；端点级还有
+  `max_paired_sd_for_sesoi_confirmatory` /
+  `max_discordance_for_sesoi_confirmatory` 与 `multiplicity` 元数据。
+
+`multiplicity_plan` 会把模式、各家族大小、全局族大小、计划配对清单和
+`α_eff` 一并写进计划摘要，并新增 `multiplicity_plan` /
+`ppl_confirmatory_reference` 等检查；声明假设在 `α_eff` 下功效不足时，
+`ppl_confirmatory_power` 直接 fail（冒烟运行降为 warn）。这样“5 个种子
+够不够”与“5 个种子在最终 Holm 判定下够不够”不会混成同一个结论。
+
+**这是保守规划下界，不是精确 Holm 功效**：实际 Holm 阈值取决于同族其他
+p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估；如果其他假设
+很强，真实功效可能高于此下界。反过来，把探索性配对排除出家族大小会
+系统性低估多重比较负担，因此这里不这么做。
+
 ### 计划里必须有什么
 
 `design_plan.json` 在正式训练开始前落盘（基线调优等准备步骤之后；只消费配置与预注册表，不消费任何结果或 test 产物），字段包括：
 
-- `inputs`：配置 SHA-256、变体、种子、α/功效、登记假设 id、预注册
-  `scope.seeds`、可产出机制分析的变体子集 `analysis_variants`（例如
-  `standard` 无输出门、不产出 `analysis_*.json`，不能被误算成缺失）；
+- `inputs`：配置 SHA-256、变体、种子、α/功效、`multiplicity` 模式与
+  `alpha_effective`、登记假设 id、预注册 `scope.seeds`、可产出机制分析
+  的变体子集 `analysis_variants`（例如 `standard` 无输出门、不产出
+  `analysis_*.json`，不能被误算成缺失）；
 - `assumptions`：显式声明的计划假设与“仅作展示横轴”的参考值，二者分开；
-- `endpoints.ppl`：SESOI（默认 1%）、各 SD 下的 MDE/功效/所需种子数、
-  80% 功效下可容忍的最大配对差 SD；
-- `endpoints.ruler`：每格样本数、格子数、各不一致率下的 McNemar 功效/
-  MDE/所需每格样本数、可容忍的最大不一致率；
+  另记录 `multiplicity` 模式；
+- `multiplicity_plan`：模式、PPL/RULER/AUROC/AP 家族大小、全局确认族
+  大小、计划配对清单与四类指标的 `α_eff`，让摘要绑定“最终要做多少次
+  检验”；AUROC/AP 机制族按每个有分析产物的变体计一个检验；
+- `endpoints.ppl`：SESOI（默认 1%）、各 SD 下的未校正与确认性 MDE/
+  功效/所需种子数、两种口径下可容忍的最大配对差 SD；
+- `endpoints.ruler`：每格样本数、格子数、各不一致率下的未校正与确认性
+  McNemar 功效/MDE/所需每格样本数、两种口径下可容忍的最大不一致率；
 - `analysis_protocol`：分析人群、排除规则、缺失数据处理、停止规则、
   test 封存、多重比较策略；
 - `registered_plan`：登记假设的 id/指标/候选/参照/方向的只读快照，
   使计划摘要同时绑定确认性分析计划本身；
 - `checks`：种子数下限、是否覆盖预注册种子、登记假设的候选/参照变体
-  是否都在计划矩阵内、上下文档位是否至少两档且跨度足够（否则长度校准
-  主张不可检验）、声明假设下的功效、分析规则是否声明；
+  是否都在计划矩阵内、确认性多重比较规划与 `α_eff`、上下文档位是否
+  至少两档且跨度足够（否则长度校准主张不可检验）、声明假设下的未校正
+  与确认性功效、分析规则是否声明；
 - `plan_digest`：排除时间戳/机器路径后的内容 SHA-256，供 reproducible 审计。
 
 每次 `save_design_plan` 还会向同目录的 `design_plan_history.jsonl` 追加一行
@@ -548,11 +597,17 @@ margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的�
 `design_plan.json` 静默覆盖。汇总页在历史多于一条时显式告警，读者必须
 按最新计划核对当前产物，不得把旧计划下的结果混入。
 
-**关键设计事实（正式 small 配置）**：5 个种子在 80% 功效下只能容忍配对差
-SD≈0.80%；RULER 每格 30 个样例对 1pp SESOI 的 McNemar 功效极低（参考
-不一致率 10% 时约 0.002，需每格约 7800 个样例）。因此 RULER 的 1pp
-等价/非劣判定只能作描述性证据；若要升级为确认性主张，必须先增加每格
-样本数并重新登记，而不是把“未检出”写成“无差异”。
+**关键设计事实（正式 small 配置）**：计划 PPL/RULER 家族各有 16 个检验，
+全局确认族 7 条，因此 `α_eff=0.05/16=0.003125`。在参考配对差 SD=1% 时，
+5 个种子对 1% SESOI 的未校正功效约 0.61、所需约 8 个种子；按确认性
+`α_eff` 只有约 0.24、需约 15 个种子。80% 功效下可容忍的配对差 SD 从
+未校正约 0.80% 收紧到确认性约 0.59%。RULER 每格 30 个样例对 1pp SESOI
+的 McNemar 功效本来极低（参考不一致率 10% 时约 0.002，需每格约 7800 个
+样例），校正后更低；因此 RULER 的 1pp 等价/非劣判定只能作描述性证据。
+若要升级为确认性主张，必须先增加每格样本数/种子数并重新登记，而不是把
+“未检出”写成“无差异”。这也意味着：当前 5 种子设计适合检出明显大于 1%
+的 PPL 差异，不足以确认 1% SESOI；配置里声明 `design.ppl_paired_sd_rel`
+时计划会直接标出这一点。
 
 ### 实测灵敏度（描述性）
 
@@ -570,7 +625,10 @@ python -m lega.design --config configs/small.json \
     --out results/small/design_plan.json
 ```
 
-`run_all.py` 在训练前自动生成 `results/<tag>/design_plan.json`（摘要进
+`configs/small.json` / `configs/tiny.json` 的 `design` 块显式写死
+`alpha`、`power` 与 `multiplicity`（默认 `holm_worst_case`）；修改这些
+字段等同于改设计前提，必须重新生成计划而不是只重跑汇总。`run_all.py`
+在训练前自动生成 `results/<tag>/design_plan.json`（摘要进
 `repro.json` 的 `design` 字段），汇总时写 `design_conformance.json`，并在
 `significance.json` 增加 `design_plan` / `design_conformance` /
 `observed_design_sensitivity`。`summary.md` 新增“实验设计与分析人群（先验
@@ -581,6 +639,10 @@ python -m lega.design --config configs/small.json \
 
 - 功效公式是正态/t 近似；n=3~5 时它用于设计灵敏度，不是精确功效承诺。
   McNemar 精确功效的边界在 n≤500 时精确枚举，更大时近似。
+- 确认性功效使用 Holm **最坏情形** `α/max(m_family,k_global)`，是保守
+  下界而非精确 Holm 功效；实际阈值依赖同族其他 p 值。家族大小按计划内
+  全部同指标配对计算（含探索性对比），缺失产物只会让实际家族变小，因此
+  这个口径不会系统性低估多重比较负担。
 - 计划假设（SD、不一致率）若来自历史数据，必须在跑之前声明来源；来自
   当前结果再回填就是事后选择，计划摘要会让这种改写可见。
 - “缺失单元”与结果可能相关（例如难训练变体更易 NaN），此时

@@ -40,6 +40,30 @@ MIN_SEEDS = 3
 MAX_SEED = 2 ** 32 - 1
 SCHEMA_VERSION = 1
 
+# 确认性功效必须按“最终判定阈值”规划，而不是按名义 α。run_all 的判定要
+# 同时通过同指标家族 Holm 与跨全部预注册假设的全局 Holm；Holm 在最坏情形
+# 下把任一假设的阈值收紧到 α/m。这里用 max(家族大小, 全局确认族大小) 作为
+# 保守负担，输出一份未校正、一份确认性校正后的灵敏度曲线。
+DEFAULT_MULTIPLICITY = "holm_worst_case"
+MULTIPLICITY_MODES = ("holm_worst_case", "family_only", "none")
+
+# 与 run_all.SINGLE_FACTOR_PAIRS / CONTROL_VARIANTS 同步的事实来源。设计层
+# 不导入 run_all（避免循环依赖与 CLI 拉起整条流水线），因此把“最终会进入
+# 同一指标 Holm 家族的配对”显式列在这里，并由测试核对两边集合一致。
+_SINGLE_FACTOR_PAIRS = (
+    ("lega_no_query", "lega"),
+    ("lega_no_conc", "lega"),
+    ("lega_no_len", "lega"),
+    ("qgate", "gate_only"),
+    ("lega_conc_only", "gate_only"),
+    ("lega_len_only", "gate_only"),
+)
+_PARAM_CONTROL_VARIANT = "lega_placebo"
+_DEFAULT_GATED_FOR_ANALYSIS = (
+    "lega", "qgate", "null", "lega_no_len", "lega_no_conc",
+    "lega_no_query", "lega_conc_only", "lega_len_only",
+)
+
 # 精确 McNemar 功效的规模上限：每增加一个 n 要枚举不一致数 m 与条件拒绝域，
 # 500 以内 O(n^2) 仍在毫秒级；更大时改用正态近似（见 mcnemar_power）。
 EXACT_MCNEMAR_MAX_N = 500
@@ -72,7 +96,9 @@ _ANALYSIS_PROTOCOL = {
         "checkpoint 选择与早停只用 val；test 每次评测写访问账本，重复评测"
         "需要显式放行"),
     "multiplicity": (
-        "同一指标家族内 Holm–Bonferroni；预注册确认族再做一次全局 Holm"),
+        "同一指标家族内 Holm–Bonferroni；预注册确认族再做一次全局 Holm。"
+        "先验功效按最坏情形 α/max(家族大小, 全局确认族大小) 规划，"
+        "并同时报告未校正口径，避免用名义 α 高估可确认性"),
 }
 
 
@@ -563,11 +589,155 @@ def _checklist_status(checks) -> str:
     return "ok"
 
 
+def planned_comparison_pairs(variants, registered: dict = None) -> list:
+    """计划内会进入同一指标 Holm 家族的配对（与 run_all 构造一致）。
+
+    设计层必须知道“最终要做多少次检验”，否则先验功效会按未校正的 5%
+    计算，系统性高估确认性设计的灵敏度。这里复刻 run_all 的配对来源：
+    各变体 vs standard、六个单因素对比、可选的参数匹配安慰剂对比，以及
+    预注册表追加的整体对比；只保留候选和参照都在计划矩阵内的配对。
+    """
+    planned = [str(v) for v in (variants if isinstance(variants, (list, tuple))
+                                else [])]
+    planned_set = set(planned)
+    pairs = [(v, "standard") for v in planned if v != "standard"]
+    if _PARAM_CONTROL_VARIANT in planned_set:
+        if "lega" in planned_set:
+            pairs.append(("lega", _PARAM_CONTROL_VARIANT))
+        if "qgate" in planned_set:
+            pairs.append((_PARAM_CONTROL_VARIANT, "qgate"))
+    pairs += [(c, r) for c, r in _SINGLE_FACTOR_PAIRS
+              if c in planned_set and r in planned_set]
+    for h in _as_list(_as_dict(registered).get("hypotheses")):
+        if not isinstance(h, dict):
+            continue
+        metric = h.get("metric")
+        # 机制族是“同 run 内 logit − 仅查询”的单样本检验，不进入配对族；
+        # run_all 的 build_comparison_pairs 同样跳过它们。
+        if isinstance(metric, str) and (
+                metric.startswith("AUROC") or metric.startswith("AP差")):
+            continue
+        cand, ref = h.get("candidate"), h.get("reference")
+        if (isinstance(cand, str) and isinstance(ref, str)
+                and cand in planned_set and ref in planned_set):
+            pairs.append((cand, ref))
+    # 顺序稳定（同 run_all 的 dict.fromkeys），便于计划摘要复现。
+    return list(dict.fromkeys(pairs))
+
+
+def planned_family_sizes(variants, registered: dict = None,
+                         analysis_variants=None) -> dict:
+    """计划内各指标 Holm 家族大小与全局确认族大小。
+
+    PPL/RULER 家族包含全部计划配对（包括探索性对比：run_all 的 Holm 是
+    按指标整个家族校正，而不是只校正预注册条目）；AUROC/AP 机制族按每个
+    有机制分析的变体各产生一个“完整 logit − 仅查询”检验；全局确认族只
+    包含候选变体在计划内的预注册假设。缺失产物会让实际家族变小，因此这里
+    是保守的设计上界。
+    """
+    planned = [str(v) for v in (variants if isinstance(variants, (list, tuple))
+                                else [])]
+    planned_set = set(planned)
+    if analysis_variants is None:
+        analysis_set = {v for v in planned if v in _DEFAULT_GATED_FOR_ANALYSIS}
+    else:
+        analysis_set = {str(v) for v in analysis_variants} & planned_set
+    pairs = planned_comparison_pairs(planned, registered)
+    hyps = [h for h in _as_list(_as_dict(registered).get("hypotheses"))
+            if isinstance(h, dict)]
+    # 全局确认族：候选必须真的会被训练/分析，否则该假设不会被检验。
+    testable = [
+        h for h in hyps
+        if isinstance(h.get("candidate"), str)
+        and (h.get("candidate") in planned_set
+             or h.get("candidate") in analysis_set)
+    ]
+    return {
+        "pairs": pairs,
+        "n_pairs": len(pairs),
+        "ppl_family_size": max(1, len(pairs)),
+        "ruler_family_size": max(1, len(pairs)),
+        "auroc_family_size": max(1, len(analysis_set)),
+        "ap_family_size": max(1, len(analysis_set)),
+        "registered_tests": len(hyps),
+        "global_family_size": max(1, len(testable)),
+    }
+
+
+def _metric_family_size(metric, sizes: dict) -> int:
+    """指标 → 该指标 Holm 家族的计划大小（未知指标按单检验处理）。"""
+    name = metric if isinstance(metric, str) else ""
+    if name.startswith("PPL"):
+        return int(sizes.get("ppl_family_size") or 1)
+    if name.startswith("RULER"):
+        return int(sizes.get("ruler_family_size") or 1)
+    if name.startswith("AUROC"):
+        return int(sizes.get("auroc_family_size") or 1)
+    if name.startswith("AP差") or name.startswith("PR-AUC"):
+        return int(sizes.get("ap_family_size") or 1)
+    return 1
+
+
+def multiplicity_alpha(alpha: float, family_size: int,
+                       global_family_size: int,
+                       mode: str = DEFAULT_MULTIPLICITY) -> dict:
+    """把名义 α 换算成先验功效规划用的确认性阈值（Holm 最坏情形）。
+
+    ``holm_worst_case``：任一假设要同时通过家族 Holm 与全局 Holm，最坏
+    情形下要求 p < α/max(m_family, m_global)；
+    ``family_only``：只按家族 Holm；
+    ``none``：仅报告未校正口径（不用于正式设计检查）。
+
+    这是**保守下界**，不是精确的 Holm 功效：实际 Holm 阈值取决于同族其他
+    p 值的大小。设计阶段不知道那些 p，只能用最坏情形避免高估。
+    """
+    if mode not in MULTIPLICITY_MODES:
+        raise ValueError(
+            f"未知 multiplicity={mode!r}；可选 {MULTIPLICITY_MODES}")
+    alpha = _open_unit(alpha, "alpha")
+    family_size = _strict_int(family_size, "family_size", minimum=1)
+    global_family_size = _strict_int(global_family_size,
+                                     "global_family_size", minimum=1)
+    if mode == "none":
+        burden = 1
+    elif mode == "family_only":
+        burden = family_size
+    else:
+        burden = max(family_size, global_family_size)
+    try:
+        effective = alpha / burden
+    except OverflowError:
+        # 合法但超出 float 可表示范围的家族大小（int 任意精度）；不能
+        # 让“规划”因极端配置崩溃，下面按不可表示标记并回退到名义 α。
+        effective = 0.0
+    if not (math.isfinite(effective) and effective > 0.0):
+        # 合法但极端大的家族大小可能让 α/m 下溢；此时不能伪造 0 阈值，
+        # 按未校正 α 计算并在字段中如实标注不可表示的负担。
+        effective = alpha
+        representable = False
+    else:
+        effective = float(effective)
+        representable = True
+    return {
+        "mode": mode,
+        "alpha_raw": alpha,
+        "family_size": family_size,
+        "global_family_size": global_family_size,
+        "burden": burden,
+        "alpha_effective": effective,
+        "representable": representable,
+        "method": (
+            "Holm–Bonferroni 最坏情形 α/max(家族, 全局族)；"
+            "保守规划下界，不是精确 Holm 功效"),
+    }
+
+
 def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                       *, config_file: str = None, config_sha256: str = None,
                       alpha: float = None, power: float = None,
                       ruler_n_samples: int = None, smoke: bool = False,
-                      known_variants=None, analysis_variants=None) -> dict:
+                      known_variants=None, analysis_variants=None,
+                      multiplicity: str = None) -> dict:
     """根据配置/种子计划/预注册表生成训练前的设计计划。
 
     不读数据、不训练、不访问 test；只做输入解析与解析式功效计算，因此可以
@@ -640,8 +810,12 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
     known = (set(known_variants) if known_variants is not None
              else _known_variant_names())
     planned = set(variants)
+    analysis_explicit = analysis_variants is not None
     if analysis_variants is None:
-        analysis_variants = list(variants)
+        # 默认只把真正会产出机制分析的门控变体列入分析人群；standard
+        # 无输出门、不写 analysis_*.json，不能因此被判成“分析缺失”。
+        analysis_variants = [v for v in variants
+                             if v in _DEFAULT_GATED_FOR_ANALYSIS]
     if not isinstance(analysis_variants, (list, tuple)):
         raise ValueError("analysis_variants 必须是列表")
     analysis_variants = [str(v) for v in analysis_variants]
@@ -650,6 +824,32 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         raise ValueError(
             f"analysis_variants 含计划外变体：{unknown_analysis}")
     n_seeds = len(seeds)
+
+    mode = (multiplicity if multiplicity is not None
+            else design_cfg.get("multiplicity", DEFAULT_MULTIPLICITY))
+    if not isinstance(mode, str) or mode not in MULTIPLICITY_MODES:
+        raise ValueError(
+            f"design.multiplicity 必须是 {MULTIPLICITY_MODES} 之一，"
+            f"收到 {mode!r}")
+    family_sizes = planned_family_sizes(
+        variants, registered,
+        analysis_variants if analysis_explicit else None)
+    ppl_multiplicity = multiplicity_alpha(
+        alpha, family_sizes["ppl_family_size"],
+        family_sizes["global_family_size"], mode)
+    ruler_multiplicity = multiplicity_alpha(
+        alpha, family_sizes["ruler_family_size"],
+        family_sizes["global_family_size"], mode)
+    auroc_multiplicity = multiplicity_alpha(
+        alpha, family_sizes["auroc_family_size"],
+        family_sizes["global_family_size"], mode)
+    ap_multiplicity = multiplicity_alpha(
+        alpha, family_sizes["ap_family_size"],
+        family_sizes["global_family_size"], mode)
+    ppl_alpha = ppl_multiplicity["alpha_effective"]
+    ruler_alpha = ruler_multiplicity["alpha_effective"]
+    auroc_alpha = auroc_multiplicity["alpha_effective"]
+    ap_alpha = ap_multiplicity["alpha_effective"]
 
     # ---- 检查 1：最小种子数（低于 3 不判定显著性，属协议内但只能探索）
     if n_seeds >= MIN_SEEDS:
@@ -720,6 +920,24 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         checks.append(_check("hypothesis_variants", "预注册假设覆盖",
                              "pass", detail))
 
+    # ---- 检查 4：先验功效必须按最终确认阈值规划，而非名义 α
+    mult_detail = (
+        f"模式={mode}；PPL/RULER 计划家族 m="
+        f"{family_sizes['ppl_family_size']}，全局确认族 k="
+        f"{family_sizes['global_family_size']}；"
+        f"PPL α_eff={ppl_alpha:.6g}、RULER α_eff={ruler_alpha:.6g}、"
+        f"AUROC α_eff={auroc_alpha:.6g}、AP α_eff={ap_alpha:.6g}"
+        f"（名义 α={alpha:.6g}）。按 Holm 最坏情形 α/max(m,k) 规划，"
+        "避免用未校正阈值高估确认性功效")
+    if not (ppl_multiplicity["representable"]
+            and ruler_multiplicity["representable"]):
+        mult_detail += "；警告：家族负担过大导致 α/m 下溢，校正阈值不可表示"
+        mult_status = "warn"
+    else:
+        mult_status = "info"
+    checks.append(_check("multiplicity_plan", "确认性多重比较规划",
+                         mult_status, mult_detail))
+
     # ---- PPL 先验灵敏度：对合理 SD 网格给 MDE/功效/所需种子数
     ppl_margin = 0.01  # 与 lega.equivalence.metric_margin("PPL") 一致
     try:
@@ -736,17 +954,27 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         if can_power:
             mde = min_detectable_effect(sd, n_seeds, alpha, power)
             pw = paired_t_power(ppl_margin, sd, n_seeds, alpha)
+            mde_confirm = min_detectable_effect(
+                sd, n_seeds, ppl_alpha, power)
+            pw_confirm = paired_t_power(ppl_margin, sd, n_seeds, ppl_alpha)
         else:
-            mde = pw = None
+            mde = pw = mde_confirm = pw_confirm = None
         ppl_rows.append({
             "paired_sd_relative": sd,
             "mde_relative": mde,
             "power_for_sesoi": pw,
             "required_seeds_for_sesoi": required_pairs(
                 ppl_margin, sd, alpha, power),
+            "mde_relative_confirmatory": mde_confirm,
+            "power_for_sesoi_confirmatory": pw_confirm,
+            "required_seeds_for_sesoi_confirmatory": required_pairs(
+                ppl_margin, sd, ppl_alpha, power),
         })
     ppl_break_even = (max_sd_for_effect(ppl_margin, n_seeds, alpha, power)
                       if can_power else None)
+    ppl_break_even_confirm = (
+        max_sd_for_effect(ppl_margin, n_seeds, ppl_alpha, power)
+        if can_power else None)
     declared_ppl_sd = None
     declared_disc = None
     if "ppl_paired_sd_rel" in design_cfg:
@@ -774,21 +1002,67 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "配置未声明 design.ppl_paired_sd_rel：不把任一 SD 假设当作已知，"
             "仅报告灵敏度曲线（见 ppl.sensitivity）"))
 
+    if declared_ppl_sd is not None:
+        need_c = required_pairs(ppl_margin, declared_ppl_sd,
+                                ppl_alpha, power)
+        pw_c = (paired_t_power(ppl_margin, declared_ppl_sd,
+                              n_seeds, ppl_alpha)
+                if can_power else None)
+        ok_c = (can_power and need_c is not None and need_c <= n_seeds)
+        checks.append(_check(
+            "ppl_confirmatory_power", "PPL 确认性计划功效（多重比较校正）",
+            "pass" if ok_c else "fail",
+            f"声明配对差 SD={declared_ppl_sd:.4g}；按 {mode} 的 "
+            f"α_eff={ppl_alpha:.6g}（家族 m="
+            f"{family_sizes['ppl_family_size']}，全局 k="
+            f"{family_sizes['global_family_size']}），{n_seeds} 种子对 "
+            f"{ppl_margin:.2%} SESOI 的功效≈"
+            + (f"{pw_c:.3f}" if pw_c is not None else "无法计算（n<2）")
+            + "，"
+            + (f"需 {need_c} 个种子（当前 {n_seeds}）"
+               if need_c is not None else "所需种子数超出可计算范围")
+            + ("" if ok_c else "：通过多重比较后对 SESOI 功效不足，"
+               "当前设计不能确认该效应")))
+    else:
+        checks.append(_check(
+            "ppl_confirmatory_power", "PPL 确认性计划功效（多重比较校正）",
+            "info",
+            "未声明 design.ppl_paired_sd_rel；见 sensitivity 中的 "
+            "power_for_sesoi_confirmatory"))
+
     # 参考 SD 不是数据估计，只用于展示“常见噪声水平下”的设计灵敏度。
     ref_sd = DEFAULT_PPL_SD_REF
     ref_pw = (paired_t_power(ppl_margin, ref_sd, n_seeds, alpha)
               if can_power else None)
+    ref_pw_confirm = (paired_t_power(ppl_margin, ref_sd, n_seeds, ppl_alpha)
+                      if can_power else None)
     ref_need = required_pairs(ppl_margin, ref_sd, alpha, power)
+    ref_need_confirm = required_pairs(ppl_margin, ref_sd, ppl_alpha, power)
     ref_detail = (
         f"若配对差 SD={ref_sd:.1%}（参考值），{n_seeds} 种子对 "
-        f"{ppl_margin:.1%} SESOI 的功效≈"
+        f"{ppl_margin:.1%} SESOI 的未校正功效≈"
         + (f"{ref_pw:.3f}" if ref_pw is not None else "无法计算（n<2）")
-        + (f"，需 {ref_need} 个种子" if ref_need is not None else ""))
+        + (f"；按确认性 α_eff={ppl_alpha:.6g} 仅≈{ref_pw_confirm:.3f}"
+           if ref_pw_confirm is not None else "")
+        + (f"，需 {ref_need} 个种子（校正后 {ref_need_confirm}）"
+           if ref_need is not None and ref_need_confirm is not None
+           else ""))
     if ppl_break_even is not None:
-        ref_detail += f"；在 80% 功效下能容忍的最大 SD≈{ppl_break_even:.3%}"
+        ref_detail += f"；未校正 80% 功效下最大 SD≈{ppl_break_even:.3%}"
+    if ppl_break_even_confirm is not None:
+        ref_detail += f"（确认性 {ppl_break_even_confirm:.3%}）"
     checks.append(_check("ppl_reference_sensitivity",
                          "PPL 参考灵敏度（非数据估计）", "info",
                          ref_detail))
+    if (ref_pw_confirm is not None and ref_pw_confirm < power):
+        checks.append(_check(
+            "ppl_confirmatory_reference", "PPL 确认性参考功效", "warn",
+            f"参考 SD={ref_sd:.1%} 时，{n_seeds} 种子对 "
+            f"{ppl_margin:.1%} SESOI 的确认性功效仅≈{ref_pw_confirm:.3f}"
+            f"（目标 {power:.0%}；α_eff={ppl_alpha:.6g}，"
+            f"需约 {ref_need_confirm} 个种子）。{n_seeds} 个种子只能"
+            "可靠检出远大于 1% 的 PPL 差异；1% SESOI 结论应标为"
+            "描述性/探索性"))
 
     # ---- 上下文档位设计：至少两档且跨度足够，才谈得上“长度校准”
     ctx_values = []
@@ -834,6 +1108,12 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             cell = mcnemar_power(ruler_n_samples, disc, ruler_margin, alpha)
             mde = mcnemar_mde(ruler_n_samples, disc, alpha, power)
             need = mcnemar_required_samples(ruler_margin, disc, alpha, power)
+            cell_confirm = mcnemar_power(
+                ruler_n_samples, disc, ruler_margin, ruler_alpha)
+            mde_confirm = mcnemar_mde(
+                ruler_n_samples, disc, ruler_alpha, power)
+            need_confirm = mcnemar_required_samples(
+                ruler_margin, disc, ruler_alpha, power)
         except ValueError:
             continue
         ruler_rows.append({
@@ -841,9 +1121,14 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "power_for_sesoi": cell["power"],
             "mde_pp": mde,
             "required_samples_per_cell_for_sesoi": need,
+            "power_for_sesoi_confirmatory": cell_confirm["power"],
+            "mde_pp_confirmatory": mde_confirm,
+            "required_samples_per_cell_for_sesoi_confirmatory": need_confirm,
         })
     ruler_break_even = max_discordance_for_effect(
         ruler_margin, ruler_n_samples, alpha, power)
+    ruler_break_even_confirm = max_discordance_for_effect(
+        ruler_margin, ruler_n_samples, ruler_alpha, power)
     declared_disc = design_cfg.get("ruler_discordance")
     if declared_disc is not None:
         declared_disc = _finite_float(declared_disc,
@@ -874,6 +1159,39 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "ruler_declared_power", "RULER 计划功效（声明假设）", "info",
             "配置未声明 design.ruler_discordance：仅报告灵敏度曲线"))
 
+    if declared_disc is not None:
+        try:
+            need_c = mcnemar_required_samples(
+                ruler_margin, declared_disc, ruler_alpha, power)
+            pw_c = mcnemar_power(ruler_n_samples, declared_disc,
+                                 ruler_margin, ruler_alpha)["power"]
+        except ValueError as e:
+            checks.append(_check(
+                "ruler_confirmatory_power",
+                "RULER 确认性计划功效（多重比较校正）", "fail",
+                f"声明的 RULER 不一致率在确认性阈值下无法计算：{e}"))
+        else:
+            ok_c = need_c is not None and need_c <= ruler_n_samples
+            checks.append(_check(
+                "ruler_confirmatory_power",
+                "RULER 确认性计划功效（多重比较校正）",
+                "pass" if ok_c else "warn",
+                f"声明不一致率={declared_disc:.3g}；按 {mode} 的 "
+                f"α_eff={ruler_alpha:.6g}（家族 m="
+                f"{family_sizes['ruler_family_size']}，全局 k="
+                f"{family_sizes['global_family_size']}），每格 "
+                f"n={ruler_n_samples} 对 {ruler_margin:.2%} SESOI 的功效"
+                f"≈{pw_c:.3f}"
+                + (f"，需每格 {need_c} 个样例" if need_c is not None else "")
+                + ("" if ok_c else "：通过多重比较后样本量不足，"
+                   "等价/优效判定只能作描述性证据")))
+    else:
+        checks.append(_check(
+            "ruler_confirmatory_power",
+            "RULER 确认性计划功效（多重比较校正）", "info",
+            "未声明 design.ruler_discordance；见 sensitivity 中的 "
+            "power_for_sesoi_confirmatory"))
+
     ref_disc = DEFAULT_RULER_DISCORDANCE_REF
     try:
         ref_cell = mcnemar_power(ruler_n_samples, ref_disc,
@@ -881,8 +1199,16 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         ref_need = mcnemar_required_samples(ruler_margin, ref_disc,
                                             alpha, power)
         ref_mde = mcnemar_mde(ruler_n_samples, ref_disc, alpha, power)
+        ref_cell_confirm = mcnemar_power(
+            ruler_n_samples, ref_disc, ruler_margin, ruler_alpha)
+        ref_need_confirm = mcnemar_required_samples(
+            ruler_margin, ref_disc, ruler_alpha, power)
+        ref_mde_confirm = mcnemar_mde(
+            ruler_n_samples, ref_disc, ruler_alpha, power)
     except ValueError:
         ref_cell, ref_need, ref_mde = {"power": None}, None, None
+        ref_cell_confirm, ref_need_confirm, ref_mde_confirm = (
+            {"power": None}, None, None)
     cells = n_contexts * _TASKS_FOR_RULER
     pooled_n = ruler_n_samples * cells
     try:
@@ -901,17 +1227,31 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "ruler_reference_sensitivity", "RULER 参考灵敏度（非数据估计）",
         "info",
         f"若不一致率={ref_disc:.0%}（参考值），每格 n={ruler_n_samples} "
-        f"对 {ruler_margin:.1%} SESOI 的功效≈"
+        f"对 {ruler_margin:.1%} SESOI 的未校正功效≈"
         + ((f"{ref_cell.get('power'):.3f}")
            if isinstance(ref_cell.get("power"), float) else "-")
-        + (f"，MDE≈{ref_mde:.2%}" if ref_mde is not None else "")
-        + (f"，需每格 {ref_need} 个样例" if ref_need is not None else "")
+        + (f"；按确认性 α_eff={ruler_alpha:.6g} 仅≈"
+           f"{ref_cell_confirm.get('power'):.3f}"
+           if isinstance(ref_cell_confirm.get("power"), float) else "")
+        + (f"，MDE≈{ref_mde:.2%}"
+           + (f"（确认性 {ref_mde_confirm:.2%}）"
+              if ref_mde_confirm is not None else "")
+           if ref_mde is not None else "")
+        + (f"，需每格 {ref_need} 个样例"
+           + (f"（确认性 {ref_need_confirm}）"
+              if ref_need_confirm is not None else "")
+           if ref_need is not None else "")
         + (f"；在 80% 功效下能容忍的最大不一致率≈{ruler_break_even:.4%}"
+           + (f"（确认性 {ruler_break_even_confirm:.4%}）"
+              if ruler_break_even_confirm is not None else "")
            if ruler_break_even is not None else "")))
     # 参考不一致率下若连 50% 功效都不到，明确告警：这不是“没有效应”，
     # 而是当前每格样本量根本不足以支撑 1pp 级别的实际意义判定。
     ref_power = ref_cell.get("power")
-    if isinstance(ref_power, float) and ref_power < 0.5:
+    ref_power_confirm = ref_cell_confirm.get("power")
+    if (isinstance(ref_power, float) and ref_power < 0.5
+            or isinstance(ref_power_confirm, float)
+            and ref_power_confirm < 0.5):
         best_case = (
             f"即使把 {cells} 个格子当作完全独立的 {pooled_n} 个样例"
             f"（对宏观平均最乐观），MDE≈{pooled_mde:.2%}"
@@ -922,7 +1262,11 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         checks.append(_check(
             "ruler_sample_size", "RULER 每格样本量", "warn",
             f"每格 n={ruler_n_samples} 在参考不一致率={ref_disc:.0%} 下"
-            f"对 {ruler_margin:.1%} SESOI 的功效仅≈{ref_power:.3f}；"
+            + (f"对 {ruler_margin:.1%} SESOI 的未校正功效仅≈"
+               f"{ref_power:.3f}" if isinstance(ref_power, float) else "")
+            + (f"；通过多重比较后仅≈{ref_power_confirm:.3f}"
+               if isinstance(ref_power_confirm, float) else "")
+            + "；"
             + best_case
             + "仍远大于 1pp：RULER 的 SESOI/等价判定只能作描述性证据；"
             "如需确认 1pp 级差异，应按上表增加每格样本数并重新登记"))
@@ -946,6 +1290,8 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "sesoi_source": "predeclared_protocol",
         "planned_seeds": n_seeds,
         "max_paired_sd_for_sesoi": ppl_break_even,
+        "max_paired_sd_for_sesoi_confirmatory": ppl_break_even_confirm,
+        "multiplicity": dict(ppl_multiplicity),
         "sensitivity": ppl_rows,
     }
     endpoint_ruler = {
@@ -959,6 +1305,9 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "mde_pp_pooled_best_case_at_reference": pooled_mde,
         "mde_pp_pooled_best_case_min_over_grid": pooled_min,
         "max_discordance_for_sesoi": ruler_break_even,
+        "max_discordance_for_sesoi_confirmatory":
+            ruler_break_even_confirm,
+        "multiplicity": dict(ruler_multiplicity),
         "sensitivity": ruler_rows,
     }
 
@@ -973,6 +1322,10 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "seeds": list(seeds),
             "n_seeds": n_seeds,
             "alpha": alpha,
+            "alpha_effective": {
+                "PPL": ppl_alpha, "RULER": ruler_alpha,
+                "AUROC": auroc_alpha, "AP": ap_alpha},
+            "multiplicity": mode,
             "power": power,
             "smoke": bool(smoke),
             "registered_hypotheses": [h.get("id") for h in hyps],
@@ -992,9 +1345,30 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "ruler_discordance": declared_disc,
             "reference_ppl_sd_rel": ref_sd,
             "reference_ruler_discordance": ref_disc,
+            "multiplicity": mode,
             "note": (
                 "声明假设来自配置 design 块（分析前写死）；参考值是展示用"
-                "横轴，不是从当前数据估计的效应量，也不参与任何推断"),
+                "横轴，不是从当前数据估计的效应量，也不参与任何推断。"
+                "确认性功效按最终 Holm 判定阈值规划，不能与未校正功效混用"),
+        },
+        "multiplicity_plan": {
+            "mode": mode,
+            "family_sizes": {
+                "PPL": family_sizes["ppl_family_size"],
+                "RULER": family_sizes["ruler_family_size"],
+                "AUROC": family_sizes["auroc_family_size"],
+                "AP": family_sizes["ap_family_size"],
+                "global_confirmatory": family_sizes["global_family_size"],
+            },
+            "registered_tests": family_sizes["registered_tests"],
+            "planned_comparison_pairs": [list(p) for p in family_sizes["pairs"]],
+            "alpha_effective": {
+                "PPL": ppl_alpha, "RULER": ruler_alpha,
+                "AUROC": auroc_alpha, "AP": ap_alpha},
+            "note": (
+                "家族大小按计划内全部同指标配对计算（含探索性对比），"
+                "全局族按计划内可检验的预注册假设计算；缺失产物只会让"
+                "实际家族变小，故这是设计上界/保守口径"),
         },
         "endpoints": {"ppl": endpoint_ppl, "ruler": endpoint_ruler},
         "checks": checks,
@@ -1487,6 +1861,19 @@ def render_design_section(plan: dict, conformance: dict = None,
         f"SHA-256 `{str(plan.get('plan_digest'))[:12]}`（训练前落盘）")
     md.append("- 先验计划只使用配置与预注册范围，不读取任何结果/测试集；"
               "种子数或 RULER 样本量不足时不会在事后被解释成“无效应”。")
+    mp = _as_dict(plan.get("multiplicity_plan"))
+    if mp:
+        sizes = _as_dict(mp.get("family_sizes"))
+        md.append(
+            f"- 确认性多重比较：`{mp.get('mode')}`；PPL 家族 m="
+            f"{sizes.get('PPL')}、RULER 家族 m={sizes.get('RULER')}、"
+            f"全局确认族 k={sizes.get('global_confirmatory')}；"
+            f"PPL/RULER/AUROC/AP 有效阈值 α_eff="
+            f"{_fmt(_as_dict(mp.get('alpha_effective')).get('PPL'), 4)}/"
+            f"{_fmt(_as_dict(mp.get('alpha_effective')).get('RULER'), 4)}/"
+            f"{_fmt(_as_dict(mp.get('alpha_effective')).get('AUROC'), 4)}/"
+            f"{_fmt(_as_dict(mp.get('alpha_effective')).get('AP'), 4)}。"
+            "先验功效同时给出未校正与确认性校正两栏；正式判定以后者为准。")
 
     checks = [c for c in _as_list(plan.get("checks")) if isinstance(c, dict)]
     if checks:
@@ -1502,18 +1889,23 @@ def render_design_section(plan: dict, conformance: dict = None,
     if ppl:
         md += ["", f"**PPL 先验灵敏度**（SESOI={_fmt(ppl.get('sesoi_relative'), 2, pct=True)}；"
                    f"计划 {ppl.get('planned_seeds')} 个种子；"
-                   f"80% 功效下可容忍的配对差 SD≈"
-                   f"{_fmt(ppl.get('max_paired_sd_for_sesoi'), 3, pct=True)}）", "",
-               "| 配对差SD(相对) | MDE(相对) | 对 SESOI 功效 | 所需种子数 |",
-               "|---|---|---|---|"]
+                   f"未校正 80% 功效下可容忍的配对差 SD≈"
+                   f"{_fmt(ppl.get('max_paired_sd_for_sesoi'), 3, pct=True)}；"
+                   f"确认性校正后≈"
+                   f"{_fmt(ppl.get('max_paired_sd_for_sesoi_confirmatory'), 3, pct=True)}）", "",
+               "| 配对差SD(相对) | MDE 未校正 | MDE 确认性 | 功效 未校正 | 功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |",
+               "|---|---|---|---|---|---|---|"]
         for row in _as_list(ppl.get("sensitivity")):
             if not isinstance(row, dict):
                 continue
             md.append("| " + " | ".join([
                 _fmt(row.get("paired_sd_relative"), 3, pct=True),
                 _fmt(row.get("mde_relative"), 3, pct=True),
+                _fmt(row.get("mde_relative_confirmatory"), 3, pct=True),
                 _fmt(row.get("power_for_sesoi"), 3),
+                _fmt(row.get("power_for_sesoi_confirmatory"), 3),
                 _fmt(row.get("required_seeds_for_sesoi"), 0),
+                _fmt(row.get("required_seeds_for_sesoi_confirmatory"), 0),
             ]) + " |")
 
     ruler = _as_dict(_as_dict(plan.get("endpoints")).get("ruler"))
@@ -1521,18 +1913,23 @@ def render_design_section(plan: dict, conformance: dict = None,
         md += ["", f"**RULER 先验灵敏度**（SESOI={_fmt(ruler.get('sesoi_pp'), 2, pct=True)}；"
                    f"每格 n={ruler.get('samples_per_cell')}；"
                    f"格子数≈{ruler.get('cells')}；"
-                   f"80% 功效下可容忍的不一致率≈"
-                   f"{_fmt(ruler.get('max_discordance_for_sesoi'), 4, pct=True)}）", "",
-               "| 不一致率 | 每格MDE | 对 SESOI 功效 | 所需每格样本数 |",
-               "|---|---|---|---|"]
+                   f"未校正 80% 功效下可容忍的不一致率≈"
+                   f"{_fmt(ruler.get('max_discordance_for_sesoi'), 4, pct=True)}；"
+                   f"确认性校正后≈"
+                   f"{_fmt(ruler.get('max_discordance_for_sesoi_confirmatory'), 4, pct=True)}）", "",
+               "| 不一致率 | 每格MDE 未校正 | 每格MDE 确认性 | 功效 未校正 | 功效 确认性 | 所需每格样本 未校正 | 所需每格样本 确认性 |",
+               "|---|---|---|---|---|---|---|"]
         for row in _as_list(ruler.get("sensitivity")):
             if not isinstance(row, dict):
                 continue
             md.append("| " + " | ".join([
                 _fmt(row.get("discordance"), 2, pct=True),
                 _fmt(row.get("mde_pp"), 2, pct=True),
+                _fmt(row.get("mde_pp_confirmatory"), 2, pct=True),
                 _fmt(row.get("power_for_sesoi"), 3),
+                _fmt(row.get("power_for_sesoi_confirmatory"), 3),
                 _fmt(row.get("required_samples_per_cell_for_sesoi"), 0),
+                _fmt(row.get("required_samples_per_cell_for_sesoi_confirmatory"), 0),
             ]) + " |")
         md.append("")
         best_case_note = ""
@@ -1592,7 +1989,7 @@ def render_design_section(plan: dict, conformance: dict = None,
     # ---- 实测灵敏度（描述性）
     observed = [r for r in (observed or []) if isinstance(r, dict)]
     if observed:
-        md += ["", "**本次实测方差下的设计灵敏度（描述性，不作显著性判定）**", "",
+        md += ["", "**本次实测方差下的设计灵敏度（未校正口径，描述性，不作显著性判定）**", "",
                "| 对比 | 指标 | n | 配对差SD | SESOI | 实测MDE | 对SESOI功效 | 是否够用 |",
                "|---|---|---|---|---|---|---|---|"]
         for r in observed[:20]:

@@ -26,6 +26,12 @@
   "eval_every": 250,
   "eval_iters": 20,
 
+  "design": {
+    "alpha": 0.05,
+    "power": 0.8,
+    "multiplicity": "holm_worst_case"
+  },
+
   "ruler": {
     "ctx_lens": [128, 256],
     "n_samples": 20,
