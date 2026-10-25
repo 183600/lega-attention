@@ -65,11 +65,13 @@ def _strict_number(value, name: str) -> float:
 
 
 def _finite_p(value):
-    """p 值 → float；bool/非数值/非有限/超出 float 上限的值按缺失处理。
+    """p 值 → float；非 [0, 1] 的有限值也按缺失处理。
 
-    报告可能被手工编辑或从外部 JSON 重建，p 值字段可能是合法但巨大的整数
-    （如 10**400）。``float()``/``math.isfinite()`` 会抛 OverflowError，不能
-    让它穿透判定入口；与 ``_observation`` 同口径视为不可用证据。
+    bool/非数值/非有限/超出 float 上限的值同样按缺失处理。报告可能被手工
+    编辑或从外部 JSON 重建，p 值字段可能是合法但巨大的整数（如 10**400），
+    也可能是负值或 >1 的损坏值：``float()``/``math.isfinite()`` 会抛
+    OverflowError，负 p 值则会被误判为显著。与 ``_observation`` 同口径视为
+    不可用证据。
     """
     if value is None or isinstance(value, bool):
         return None
@@ -81,7 +83,7 @@ def _finite_p(value):
         f = float(value)
     except (OverflowError, TypeError, ValueError):
         return None
-    return f if math.isfinite(f) else None
+    return f if math.isfinite(f) and 0.0 <= f <= 1.0 else None
 
 
 def _observation(value):

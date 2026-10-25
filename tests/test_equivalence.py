@@ -186,6 +186,18 @@ def test_interpret_equivalence_categories():
                                      p_adj=10 ** 400)
     assert huge_raw["status"] == "undetermined", huge_raw
     assert huge_raw["p_used"] is None
+    # 越界 p 值同样是损坏证据：负 p 不能被当成显著/等价，>1 也不可用。
+    neg_adj = interpret_equivalence(
+        {"n": 5, "p_tost": 0.5, "p_tost_adj": -0.1}, p_adj=-0.1)
+    assert neg_adj["status"] == "undetermined", neg_adj
+    assert neg_adj["p_used"] == 0.5, neg_adj
+    assert neg_adj["multiplicity_adjusted"] is False, neg_adj
+    neg_raw = interpret_equivalence({"n": 5, "p_tost": -0.1})
+    assert neg_raw["status"] == "undetermined", neg_raw
+    assert neg_raw["p_used"] is None, neg_raw
+    over_one = interpret_equivalence({"n": 5, "p_tost": 1.5})
+    assert over_one["status"] == "undetermined", over_one
+    assert over_one["p_used"] is None, over_one
     # no-op 的零差不是等价证据。
     noop = interpret_equivalence({"n": 5, "mean_diff": 0.0, "margin": 0.01,
                                   "p_tost": 0.0, "direction": "same",
