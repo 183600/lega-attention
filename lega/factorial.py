@@ -127,13 +127,22 @@ def shapley_values(values: Mapping[str, float]) -> Dict[str, float]:
         phi = {}
         for i in FACTOR_ORDER:
             others = [j for j in FACTOR_ORDER if j != i]
-            total = 0.0
+            terms = []
             for r in range(len(others) + 1):
                 weight = (factorial(r) * factorial(n - r - 1) / factorial(n))
                 for subset in combinations(others, r):
                     s = frozenset(subset)
                     with_i = s | {i}
-                    total += weight * (vals[cell_key(with_i)] - vals[cell_key(s)])
+                    terms.append(
+                        weight * (vals[cell_key(with_i)] - vals[cell_key(s)]))
+            try:
+                total = math.fsum(terms)
+            except (OverflowError, ValueError):
+                # 极端有限值之差/和可能中间溢出或产生 inf−inf；退回顺序
+                # 累加让下面的缩放回退统一处理，而不是让 fsum 异常穿透。
+                total = 0.0
+                for term in terms:
+                    total += term
             phi[i] = float(total)
         return phi
 

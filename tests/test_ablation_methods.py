@@ -679,6 +679,18 @@ def test_inference_shapley_only_uses_full_lega_checkpoint():
           "缺项变体不产生重复因子行")
 
 
+def test_shapley_efficiency_gap_exact_for_extreme_alternating_cells():
+    """缩放回退后逐项求和残差不能放大成 1e292 量级的假效率缺口。"""
+    v = {"none": -1e308, "A": 1e308, "B": -1e308, "AB": 1e308,
+         "C": 1e308, "AC": -1e308, "BC": 1e308, "ABC": -1e308}
+    phi = shapley_values(v)
+    assert all(math.isfinite(x) for x in phi.values()), phi
+    dec = decomposition(v)
+    assert dec["total_effect"] == 0.0, dec
+    assert dec["efficiency_gap"] == 0.0, dec
+    print("  [ok] Shapley：反向极值下效率性残差精确归零")
+
+
 def test_shapley_shares_never_emit_nonfinite_ratios():
     """有限 φ/total 相除溢出时，占比不可表示，不能返回 inf 污染 JSON。"""
     assert shares({"A": 1.0, "B": 3.0}, 4.0) == {"A": 0.25, "B": 0.75}
