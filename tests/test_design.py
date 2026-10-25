@@ -11,6 +11,7 @@ import json
 import math
 import os
 import shutil
+import statistics
 import tempfile
 
 from lega.design import (analysis_population, apply_design_gate,
@@ -644,6 +645,25 @@ def test_analysis_population_ignores_variants_without_analysis_support():
     conf = design_conformance(plan, repro, runs)
     assert conf["checked"] is True and conf["in_plan"] is True
     print("  [ok] 分析人群：不为无分析能力的标准变体伪造缺失")
+
+
+def test_design_power_helpers_handle_nonpositive_z_sum():
+    """目标功效低到 z 和 <= 0 时，反推量不能除零或返回负值。"""
+    alpha = 0.05
+    z_alpha = statistics.NormalDist().inv_cdf(1.0 - alpha / 2.0)
+    at_alpha = statistics.NormalDist().cdf(-z_alpha)
+    for power in (at_alpha, at_alpha / 2.0):
+        assert min_detectable_effect(1.0, 10, alpha=alpha,
+                                     power=power) == 0.0
+        assert max_sd_for_effect(1.0, 10, alpha=alpha, power=power) is None
+        assert required_pairs(1.0, 1.0, alpha=alpha, power=power) == 2
+        assert required_pairs(1e-300, 1e300, alpha=alpha, power=power) == 2
+        assert mcnemar_mde(10, 0.1, alpha=alpha, power=power) == 0.0
+        assert max_discordance_for_effect(
+            1.0, 10, alpha=alpha, power=power) == 1.0
+        from lega.utils import min_detectable_effect as utils_mde
+        assert utils_mde(1.0, 10, alpha=alpha, power=power) == 0.0
+    print("  [ok] 设计功效函数：z 和 <= 0 时不除零/不返回负值")
 
 
 def test_design_power_helpers_tolerate_counts_beyond_float_range():

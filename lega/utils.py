@@ -1169,6 +1169,8 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
         return None
     z = _normal_two_sided_z(float(alpha)) + statistics.NormalDist().inv_cdf(
         float(power))
+    if z <= 0.0:
+        return 0.0
     # n 是合法的 Python 大整数时 math.sqrt(n) 会先尝试转 float 并抛
     # OverflowError；但 √n 本身完全可能仍可表示（如 n=10**400 → 1e200）。
     # 用对数求根，避免把“n 很大 → MDE 很小”误当成不可计算。

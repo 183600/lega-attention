@@ -267,6 +267,8 @@ def min_detectable_effect(effect_sd, n, alpha: float = DEFAULT_ALPHA,
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
     z = _z_sum(alpha, power)
+    if z <= 0.0:
+        return 0.0
     root_n = _sqrt_count(n)
     if root_n is None:
         return None
@@ -282,11 +284,14 @@ def required_pairs(effect, sd, alpha: float = DEFAULT_ALPHA,
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
     max_n = _strict_int(max_n, "max_n", minimum=2)
+    z = _z_sum(alpha, power)
+    if z <= 0.0:
+        return 2
     ratio = sd / effect
     if not math.isfinite(ratio):
         return None
     try:
-        n0 = math.ceil((ratio * _z_sum(alpha, power)) ** 2)
+        n0 = math.ceil((ratio * z) ** 2)
     except (OverflowError, ValueError):
         return None
     if not math.isfinite(n0):
@@ -315,10 +320,13 @@ def max_sd_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
+    z = _z_sum(alpha, power)
+    if z <= 0.0:
+        return None
     root_n = _sqrt_count(n)
     if root_n is None:
         return None
-    out = effect * (root_n / _z_sum(alpha, power))
+    out = effect * (root_n / z)
     return float(out) if math.isfinite(out) else None
 
 
@@ -520,10 +528,13 @@ def mcnemar_mde(n, discordance, alpha: float = DEFAULT_ALPHA,
         raise ValueError(f"discordance 必须 <= 1，收到 {pi!r}")
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
+    z = _z_sum(alpha, power)
+    if z <= 0.0:
+        return 0.0
     root_n = _sqrt_count(n)
     if root_n is None:
         return None
-    out = _z_sum(alpha, power) * math.sqrt(pi) / root_n
+    out = z * math.sqrt(pi) / root_n
     return float(out) if math.isfinite(out) else None
 
 
@@ -535,6 +546,8 @@ def max_discordance_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
     z = _z_sum(alpha, power)
+    if z <= 0.0:
+        return 1.0
     root_n = _sqrt_count(n)
     if root_n is None:
         # n 大到 √n 不可表示：用对数判断是否已超过上界 1，避免先平方
