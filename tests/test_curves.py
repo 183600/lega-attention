@@ -579,6 +579,11 @@ def test_live_overfit_hint():
     assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, float("nan"), patience=0) is None
     assert live_overfit_hint(LIVE_WARN_EVALS, None, 2.0, patience=0) is None
     assert live_overfit_hint("bad", 2.0, 2.0, patience=0) is None
+    assert live_overfit_hint(float("inf"), 2.0, 2.0, patience=0) is None
+    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5,
+                             patience=float("inf")) is None
+    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5,
+                             patience="bad") is None
 
     # 结合训练侧趋势：验证回升但训练仍在降 = 典型过拟合
     msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2,

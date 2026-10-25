@@ -517,11 +517,15 @@ def live_overfit_hint(evals_since_improve, best_val, val,
     val_ci95: 当前验证损失的 95% 区间（可选）。回升幅度落在抽样误差内时
         只提示"仍在噪声内、继续观察"，不升级为过拟合结论。
     """
-    if patience and int(patience) > 0:
+    try:
+        patience_n = int(patience or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if patience_n > 0:
         return None
     try:
         n = int(evals_since_improve or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if n < LIVE_WARN_EVALS or best_val is None or val is None:
         return None
