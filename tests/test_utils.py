@@ -996,6 +996,11 @@ def test_stats_stable_at_float_limits():
     assert ci == (huge, huge), ci
     # 不可表示的 MDE 返回 None，而不是 inf。
     assert min_detectable_effect(1e308, 2) is None
+    mde_huge_sd = min_detectable_effect(1e308, 4)
+    assert mde_huge_sd is not None and math.isfinite(mde_huge_sd)
+    assert 1e308 < mde_huge_sd < 2e308, mde_huge_sd
+    mde_huge_n = min_detectable_effect(1e308, 10 ** 400)
+    assert mde_huge_n is not None and 1e108 < mde_huge_n < 1e109, mde_huge_n
     # 合法但超出 float 上限的整数 n：√n 仍可表示（10**400 -> 1e200），
     # 不能因 math.sqrt(int) 的转换溢出而崩溃。
     m_huge = min_detectable_effect(0.1, 10 ** 400)

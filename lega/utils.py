@@ -1181,7 +1181,7 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
             return None
     if not math.isfinite(root_n) or root_n <= 0.0:
         return None
-    out = float(z * std / root_n)
+    out = float(std * (z / root_n))
     return out if math.isfinite(out) else None
 
 
