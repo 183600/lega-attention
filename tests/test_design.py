@@ -672,6 +672,9 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
     # effect**2 == 0 抛 ZeroDivisionError。
     assert mcnemar_required_samples(5e-324, 0.1) is None
     assert required_pairs(5e-324, 1.0) is None
+    assert required_pairs(1e308, 1e308) == 8
+    sd_max_huge = max_sd_for_effect(1e308, 4)
+    assert sd_max_huge is not None and 5e307 < sd_max_huge < 1e308, sd_max_huge
 
     # alpha 小到 1-alpha/2 在 float 中舍入为 1 时，正态临界值不能抛错；
     # 与 utils.min_detectable_effect 保持同一口径。

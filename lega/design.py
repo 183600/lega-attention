@@ -282,8 +282,11 @@ def required_pairs(effect, sd, alpha: float = DEFAULT_ALPHA,
     alpha = _open_unit(alpha, "alpha")
     power = _open_unit(power, "power")
     max_n = _strict_int(max_n, "max_n", minimum=2)
+    ratio = sd / effect
+    if not math.isfinite(ratio):
+        return None
     try:
-        n0 = math.ceil((_z_sum(alpha, power) * sd / effect) ** 2)
+        n0 = math.ceil((ratio * _z_sum(alpha, power)) ** 2)
     except (OverflowError, ValueError):
         return None
     if not math.isfinite(n0):
@@ -315,7 +318,7 @@ def max_sd_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
     root_n = _sqrt_count(n)
     if root_n is None:
         return None
-    out = effect * root_n / _z_sum(alpha, power)
+    out = effect * (root_n / _z_sum(alpha, power))
     return float(out) if math.isfinite(out) else None
 
 
