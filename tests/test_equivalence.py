@@ -198,6 +198,15 @@ def test_interpret_equivalence_categories():
     over_one = interpret_equivalence({"n": 5, "p_tost": 1.5})
     assert over_one["status"] == "undetermined", over_one
     assert over_one["p_used"] is None, over_one
+    # 外部报告里损坏的 direction（list/dict）不能作为 dict 键崩掉整份汇总。
+    bad_dir = interpret_equivalence(
+        {"n": 5, "p_tost": 0.9, "direction": ["better"],
+         "beyond_margin": True}, p_adj=0.01)
+    assert bad_dir["status"] == "significant_below_sesoi", bad_dir
+    bad_dir2 = interpret_equivalence(
+        {"n": 5, "p_tost": 0.9, "direction": {"x": 1},
+         "beyond_margin": True}, p_adj=0.01)
+    assert bad_dir2["status"] == "significant_below_sesoi", bad_dir2
     # no-op 的零差不是等价证据。
     noop = interpret_equivalence({"n": 5, "mean_diff": 0.0, "margin": 0.01,
                                   "p_tost": 0.0, "direction": "same",

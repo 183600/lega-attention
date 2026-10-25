@@ -669,7 +669,12 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
     else:
         pa = _finite_p(p_adj)
         if pa is not None and pa < alpha:
+            # direction 可能是外部 JSON 里损坏的 list/dict：不能直接作为
+            # dict 键（TypeError），未知方向按“显著但低于 SESOI”保守处理。
             direction = eq.get("direction")
+            if not isinstance(direction, str) or direction not in ("better",
+                                                                   "worse"):
+                direction = None
             beyond = eq.get("beyond_margin")
             status = _MEANINGFUL.get((direction, bool(beyond)),
                                      "significant_below_sesoi")
