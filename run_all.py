@@ -3238,7 +3238,7 @@ def _eq_sensitivity_str(eq) -> str:
         n = cell.get("n")
         n_ok = (isinstance(n, int) and not isinstance(n, bool)
                 and n >= MIN_SEEDS)
-        if not n_ok:
+        if cell.get("status") == "invalid" or not n_ok:
             mark = "–"
         else:
             mark = "✅" if cell.get("equivalent") is True else "❌"
@@ -3959,6 +3959,13 @@ def _adjust_equivalence_family(group, min_seeds=MIN_SEEDS,
         for c, padj in zip(cells, adjs):
             c["p_tost_adj"] = padj
             c["multiplicity_adjusted"] = padj is not None
+            if c.get("status") == "invalid":
+                # 不可表示/损坏的敏感性档（如 2× 绝对 margin 溢出）没有
+                # 可检验的 p；不能把它改写成“不等价”，否则会把“无法计算”
+                # 冒充成反对等价的证据。
+                c["equivalent"] = False
+                c["status"] = "invalid"
+                continue
             c["equivalent"] = bool(
                 _n_ok(c) and padj is not None and padj < alpha)
             c["status"] = ("equivalent" if c["equivalent"]

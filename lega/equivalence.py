@@ -568,7 +568,24 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
             # 避免 expm1(margin) 对巨大有限 margin 溢出。
             spec_for_grid["relative_margin"] = None
         for factor in SENSITIVITY_FACTORS:
-            m2 = _margin_for_factor(spec_for_grid, factor)
+            try:
+                m2 = _margin_for_factor(spec_for_grid, factor)
+            except ValueError as exc:
+                # 合法有限的绝对 margin 乘以 >1 的因子后可能超出 float
+                # 上限。该敏感性档无法表示，但其他档仍有意义：保留一个
+                # 带 factor 的 invalid 占位格，避免整组等价性评估崩溃，
+                # 也避免下游按索引错配 0.5×/1×/2× 网格。
+                cell = _invalid_result({
+                    "n": out.get("n", 0),
+                    "mean_diff": out.get("mean_diff"),
+                    "std_diff": out.get("std_diff"),
+                    "lower_is_better": bool(lower_is_better),
+                }, f"敏感性 margin 不可表示（factor={factor!r}）：{exc}")
+                cell.update({"factor": factor, "margin": None,
+                             "p_tost_adj": None,
+                             "margin_unrepresentable": True})
+                grid.append(cell)
+                continue
             cell = tost_from_diffs(diffs, m2, alpha=alpha,
                                    min_seeds=min_seeds)
             cell.update({"factor": factor, "margin": m2,

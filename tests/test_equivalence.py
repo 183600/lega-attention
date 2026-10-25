@@ -14,8 +14,8 @@ from lega.equivalence import (assess_paired_equivalence, interpret_equivalence,
                               interpolate_margin, metric_margin, t_critical,
                               tost_from_diffs, tost_paired)
 from run_all import (_apply_holm, _causal_eq_note, _enrich_paired,
-                     _equivalence_overview, _render_parameter_matched_control,
-                     build_summary)
+                     _eq_sensitivity_str, _equivalence_overview,
+                     _render_parameter_matched_control, build_summary)
 
 
 def test_tost_equivalent_and_non_equivalent():
@@ -423,6 +423,28 @@ def test_log_ratio_margin_stays_finite_for_huge_log_margin():
                                     "PPL(log)", margin=1e308)
     assert all(math.isfinite(c["margin"]) for c in res["sensitivity"])
     print("  [ok] log_ratio 巨大 margin 在对数空间换算，不抛 OverflowError")
+
+
+def test_huge_absolute_margin_keeps_sensitivity_grid_aligned():
+    """绝对 margin 的 2× 档溢出时保留 invalid 占位，不让整个评估崩溃。"""
+    res = assess_paired_equivalence([1.0, 1.1, 1.2], [0.0, 0.0, 0.0],
+                                    "RULER平均", margin=1e308)
+    assert res is not None and res["margin"] == 1e308, res
+    sens = res["sensitivity"]
+    assert [c["factor"] for c in sens] == [0.5, 1.0, 2.0], sens
+    assert sens[0]["margin"] == 5e307, sens[0]
+    assert sens[1]["margin"] == 1e308, sens[1]
+    assert sens[2]["margin"] is None, sens[2]
+    assert sens[2]["status"] == "invalid", sens[2]
+    assert sens[2]["p_tost"] is None and sens[2]["equivalent"] is False
+    t = {"candidate": "c", "reference": "r", "metric": "RULER平均",
+         "n": 3, "p": 0.5, "mean_diff": 1.1, "std_diff": 0.1,
+         "lower_is_better": False, "equivalence": res}
+    out = _apply_holm([t])[0]["equivalence"]
+    assert out["sensitivity"][2]["status"] == "invalid", out["sensitivity"]
+    assert out["sensitivity"][2]["p_tost_adj"] is None
+    assert "2×–" in _eq_sensitivity_str(out), _eq_sensitivity_str(out)
+    print("  [ok] 绝对 margin 溢出档保留 invalid 占位且网格不错位")
 
 
 def test_interpolate_margin_rejects_unrepresentable_factor():
