@@ -1303,8 +1303,29 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
     windows = np.lib.stride_tricks.sliding_window_view(ids, n)
     picked = np.ascontiguousarray(windows[np.asarray(starts, dtype=np.int64)])
     picked = picked.astype(np.uint16, copy=False)
-    if ignore_ids:
-        ignore = np.fromiter({int(i) for i in ignore_ids}, dtype=np.uint16)
+    if ignore_ids is not None:
+        # ignore_ids 必须是可表示的真实 token id：bool/小数/越界值经 int()
+        # 或 uint16 转换会变成另一个合法 id，静默排除错误的窗口。漏排除
+        # <unk> 会把 OOV 长串误报成泄漏，误排除普通 token 则可能漏掉真实
+        # 的跨 split 复制；两者都会污染硬闸门结论。
+        try:
+            raw_ignore = list(ignore_ids)
+        except TypeError as e:
+            raise ValueError(
+                f"ignore_ids 必须是可迭代的 token id 集合，收到 {ignore_ids!r}"
+            ) from e
+        ignore_set = set()
+        for value in raw_ignore:
+            try:
+                iv = strict_int(value, "ignore_ids")
+            except ValueError as e:
+                raise ValueError(
+                    f"ignore_ids 中包含非法 token id: {value!r}") from e
+            if iv < 0 or iv > 65535:
+                raise ValueError(
+                    f"ignore_ids 中 token id 越界: {iv} 不在 [0, 65536)")
+            ignore_set.add(iv)
+        ignore = np.fromiter(ignore_set, dtype=np.uint16)
         if ignore.size:
             picked = picked[~np.any(np.isin(picked, ignore), axis=1)]
     out = set()

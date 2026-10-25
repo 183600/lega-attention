@@ -776,7 +776,21 @@ def test_ngram_overlap_rejects_non_token_ids_and_bad_params():
             raise AssertionError(f"非法参数未被拒绝: {kwargs}")
         except ValueError:
             pass
-    print("  [ok] 64-gram 筛查：越界/非整数 id 与非法 n/n_samples 显式拒绝")
+    # ignore_ids 也必须逐个校验：1.5/True 经 int() 会变成 1，越界值经
+    # uint16 转换会变成另一个合法 id，从而静默排除错误窗口。
+    for bad_ignore in ({1.5}, {True}, {-1}, {65536}, {float("nan")}, 5):
+        try:
+            ngram_overlap(ok, ok, n=2, ignore_ids=bad_ignore)
+            raise AssertionError(f"非法 ignore_ids 未被拒绝: {bad_ignore!r}")
+        except ValueError:
+            pass
+    # 整数值浮点/NumPy 整数仍是合法 token id（与 token_stream_stats 同口径）。
+    res = ngram_overlap(np.array([0, 1, 0, 1], dtype=np.int64),
+                        np.array([0, 1, 0, 1], dtype=np.int64),
+                        n=2, ignore_ids={0.0, np.int64(1)})
+    assert res["eval_windows_sampled"] == 0
+    print("  [ok] 64-gram 筛查：越界/非整数 id、非法 n/n_samples 与 "
+          "ignore_ids 显式拒绝")
 
 
 def test_token_stream_hard_checks():
