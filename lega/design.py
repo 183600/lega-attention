@@ -490,8 +490,10 @@ def mcnemar_required_samples(effect, discordance,
     if not math.isfinite(n0):
         return None
     n0 = max(2, int(n0))
-    if n0 > max_n:
-        return None
+    # 正态近似只用于定位起点，可能比精确检验所需样本多；不能仅因起点
+    # 超出 max_n 就判不可达——精确功效在 max_n 处可能已经达标。把起点
+    # 截到预算上限，再按离散功效向下/向上修正。
+    n0 = min(n0, max_n)
 
     def _pw(k: int) -> float:
         return mcnemar_power(k, pi, effect, alpha)["power"]

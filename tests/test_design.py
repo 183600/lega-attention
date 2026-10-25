@@ -93,6 +93,12 @@ def test_mcnemar_power_and_required_samples():
     assert need is not None and 7000 <= need <= 9000, need
     assert mcnemar_power(need, 0.10, 0.01)["power"] >= 0.8
     assert mcnemar_power(need - 1, 0.10, 0.01)["power"] < 0.8
+    # 正态近似起点可能高于精确所需样本数；max_n 恰好覆盖精确解时不能
+    # 因近似起点超限而误报“不可达”。
+    assert mcnemar_required_samples(
+        0.02, 0.02, alpha=0.1, power=0.9, max_n=398) == 398
+    assert mcnemar_required_samples(
+        0.02, 0.02, alpha=0.1, power=0.9, max_n=397) is None
     # MDE 与所需样本数同源：n=30、π=0.1 时约 16pp。
     mde = mcnemar_mde(30, 0.10)
     assert 0.15 < mde < 0.17, mde
