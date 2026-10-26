@@ -624,6 +624,34 @@ def test_fig_ruler_plots_converted_numeric_string_metric(monkeypatch):
     print("  [ok] RULER 图：数值字符串指标按真实数值绘制")
 
 
+def test_fig_rate_plots_skip_out_of_range_values():
+    """越界比率/AUROC 不能进入坐标轴；合法极端值不得让 ticker 溢出。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过比率图越界值测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "analysis_lega_seed1.json", {
+            "variant": "lega", "seed": 1, "n_records": 10,
+            "p_hit_given_conc": 1e308,
+            "p_hit_given_notconc": 0.25,
+            "misleading_rate": -1.0,
+            "per_head": [
+                {"layer": 0, "head": 0,
+                 "auroc_qterm": 0.6, "auroc_logit": 0.7},
+                {"layer": 0, "head": 1,
+                 "auroc_qterm": 1e308, "auroc_logit": -0.1},
+                {"layer": 0, "head": 2,
+                 "auroc_qterm": 1.5, "auroc_logit": 2.0}]})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert fig_misleading(tmp) is True
+            assert fig_auroc_heads(tmp, variant="lega") is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 比率/AUROC 图：越界值按缺失跳过")
+
+
 def test_fig_auroc_heads_tolerates_non_list_per_head():
     """analysis JSON 的 per_head 非列表/层头类型混杂时不崩溃。"""
     if not _HAS_MPL:

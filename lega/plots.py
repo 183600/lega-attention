@@ -92,6 +92,14 @@ def _finite_float(v):
     return f if np.isfinite(f) else None
 
 
+def _unit_float(v):
+    """有限且位于 [0,1] 的比率/AUROC；越界或坏值返回 None。"""
+    f = _finite_float(v)
+    if f is None or f < 0.0 or f > 1.0:
+        return None
+    return f
+
+
 def _seed_int(v):
     """种子字段 → 严格整数身份；bool/小数/非有限/非数值 → None（绝不截断）。
 
@@ -806,7 +814,7 @@ def fig_misleading(rdir):
     for v, ds in grouped.items():
         row = {"variant": v}
         for k in keys:
-            vals = [x for x in (_finite_float(d.get(k)) for d in ds)
+            vals = [x for x in (_unit_float(d.get(k)) for d in ds)
                     if x is not None]
             mean, _std = mean_std(vals)
             row[k] = mean
@@ -861,8 +869,8 @@ def fig_auroc_heads(rdir, variant="lega"):
             except TypeError:
                 continue
             cell = agg.setdefault(key, {"qterm": [], "logit": []})
-            qterm = _finite_float(h.get("auroc_qterm"))
-            logit = _finite_float(h.get("auroc_logit"))
+            qterm = _unit_float(h.get("auroc_qterm"))
+            logit = _unit_float(h.get("auroc_logit"))
             if qterm is not None:
                 cell["qterm"].append(qterm)
             if logit is not None:
