@@ -126,6 +126,78 @@ def _rand_digit(rng: random.Random, lo_digits: int, hi_digits: int) -> str:
     return str(rng.randint(lo, hi))
 
 
+def _depth_position_range(room: int, target: str) -> tuple:
+    """目标深度箱允许的整数插入位置 [lo, hi]（pos/room 必须仍在箱内）。"""
+    idx = DEPTH_BINS.index(target)
+    lower = DEPTH_EDGES[idx]
+    upper = DEPTH_EDGES[idx + 1]
+    max_pos = max(1, room - 1)
+    lo = max(1, int(0.1 * room), int(math.ceil(lower * room)))
+    hi = max_pos
+    if idx + 1 < len(DEPTH_BINS):
+        # early/middle 的上界是开区间；取最后一个整数 pos 使 pos/room < upper。
+        hi = min(hi, int(math.ceil(upper * room)) - 1)
+    if lo > hi:
+        raise ContextTooSmall(
+            f"目标深度箱 {target} 在 room={room} 时无可用插入位置")
+    return lo, hi
+
+
+def _free_position_segments(lo: int, hi: int, blocked) -> List[tuple]:
+    """[lo,hi] 内不被干扰行内部占用的整数区间；端点可插入，行内不可。"""
+    segments: List[tuple] = []
+    cur = lo
+    for a, b in sorted((int(a), int(b)) for a, b in blocked):
+        if b <= cur:
+            continue
+        if a >= hi:
+            break
+        # 严格位于 (a,b) 的整数才会截断干扰行；a/b 本身是安全边界。
+        f_lo, f_hi = max(lo, a + 1), min(hi, b - 1)
+        if f_lo > f_hi:
+            continue
+        if f_lo > cur:
+            segments.append((cur, f_lo - 1))
+        cur = max(cur, f_hi + 1)
+        if cur > hi:
+            break
+    if cur <= hi:
+        segments.append((cur, hi))
+    return segments
+
+
+def _choose_depth_position(rng: random.Random, room: int, target: str,
+                           blocked=()) -> int:
+    """在目标深度箱内均匀选取不被干扰行截断的插入位置。
+
+    直接对允许区间加权抽样，而不是先随机再接受/拒绝：multikey 的干扰行
+    可能占据箱内较大比例，拒绝采样会让实际位置分布偏向空隙少的一侧。
+    """
+    lo, hi = _depth_position_range(room, target)
+    segments = _free_position_segments(lo, hi, blocked)
+    if not segments:
+        # 极端情况下整箱都被干扰行覆盖：退到箱子附近最近的合法边界，
+        # 保持行完整优先于深度分箱（调用方会记录实际 depth，便于审计）。
+        all_segments = _free_position_segments(1, max(1, room - 1), blocked)
+        if not all_segments:
+            return max(1, room - 1)
+        below = [seg for seg in all_segments if seg[1] < lo]
+        above = [seg for seg in all_segments if seg[0] > hi]
+        if below:
+            return below[-1][1]
+        if above:
+            return above[0][0]
+        return all_segments[0][0]
+    total = sum(e - s + 1 for s, e in segments)
+    pick = rng.randint(0, total - 1)
+    for s, e in segments:
+        width = e - s + 1
+        if pick < width:
+            return s + pick
+        pick -= width
+    return segments[-1][1]
+
+
 def _token_span_for_text(tok, ids: List[int], text: str) -> tuple:
     """定位 text 在已编码 token 序列中的精确子跨度（跨 BPE 边界稳健）。
 
@@ -156,7 +228,11 @@ def _token_span_for_text(tok, ids: List[int], text: str) -> tuple:
 # ---------------------------------------------------------------- NIAH 家族
 
 def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
-               multikey: bool = False, corpus_sents: Optional[List[str]] = None) -> Dict:
+               multikey: bool = False, corpus_sents: Optional[List[str]] = None,
+               target_depth: Optional[str] = None) -> Dict:
+    if target_depth is not None and target_depth not in DEPTH_BINS:
+        raise ValueError(
+            f"target_depth 必须是 {DEPTH_BINS} 之一或 None，收到 {target_depth!r}")
     key = rng.choice(KEY_WORDS)
     value = _rand_digit(rng, 7, 7)
     # 字符级词表只在 train 上拟合：train 没有数字时数值答案会被映射成
@@ -224,17 +300,24 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
         filler = filler[:room]
 
     # needle 插入（保证完整放入）
-    max_pos = max(1, room - 1)
-    lo_pos = max(1, int(0.1 * room))
-    pos = rng.randint(lo_pos, max_pos) if max_pos > lo_pos else max_pos
-    if multikey:
-        # needle 也不能把干扰行从中间截断：否则干扰值会裂成两个数字
-        # （与上方“干扰行不得越过截断点”是同一条完整性约定）。就近吸附到
-        # 行边界，不额外消耗随机源，pos 的分布基本不变。
-        for a, b in distractor_spans:
-            if a < pos < b:
-                pos = a if pos - a <= b - pos else b
-                break
+    if target_depth is not None:
+        # 分层抽样：在目标位置箱内抽样，并避开干扰行内部，保证实际
+        # depth_bin 与目标箱一致、early/middle/late 的样本量不随随机种子漂移。
+        pos = _choose_depth_position(
+            rng, room, target_depth,
+            blocked=distractor_spans if multikey else ())
+    else:
+        max_pos = max(1, room - 1)
+        lo_pos = max(1, int(0.1 * room))
+        pos = rng.randint(lo_pos, max_pos) if max_pos > lo_pos else max_pos
+        if multikey:
+            # needle 也不能把干扰行从中间截断：否则干扰值会裂成两个数字
+            # （与上方“干扰行不得越过截断点”是同一条完整性约定）。就近吸附到
+            # 行边界，不额外消耗随机源，pos 的分布基本不变。
+            for a, b in distractor_spans:
+                if a < pos < b:
+                    pos = a if pos - a <= b - pos else b
+                    break
     hay = filler[:pos] + needle_ids + filler[pos:]
     ids = hay + question_ids
     assert len(ids) <= ctx, f"样例长度 {len(ids)} 超过 ctx={ctx}"
@@ -251,7 +334,7 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
         "value_span": (pos + vs, pos + ve),
         "query_span": (len(hay), len(ids)),
         "meta": {"key": key, "value": value, "depth": pos / max(1, room),
-                 "n_tokens": len(ids)},
+                 "depth_target": target_depth, "n_tokens": len(ids)},
     }
 
 
@@ -496,7 +579,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
               corpus_sents: Optional[List[str]] = None,
               tasks: tuple = TASKS, verbose: bool = True,
               amp: bool = True, gen_batch: int = 8,
-              collect_badcases: bool = True) -> Dict:
+              collect_badcases: bool = True,
+              depth_stratified: bool = True) -> Dict:
     """返回 {task: {ctx: {"em":, "em_ci95_wilson":, "recall":, "n"}}}、"_skipped" 与 "_badcases"。
 
     CUDA 上默认启用 bf16 autocast，与 train/evaluate 的评测精度口径一致。
@@ -508,6 +592,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
 
     collect_badcases=True 时，预测错误的样本连同问题、gold 摘录、上下文数值表
     一起落入 "_badcases"：错误样本是改进思路的最重要来源，不能只留聚合分数。
+
+    depth_stratified=True（默认）时，niah_* 每格按 i 轮转分配目标位置箱，
+    并在箱内抽样：n_samples 个样例的 early/middle/late 目标数至多差 1，
+    避免纯随机位置让小样本格的中部箱为空或明显偏少，同时保持跨变体同题。
     """
     # 入口严格规范化：bool/小数在此显式拒绝。int() 截断会把 n_samples=1.5
     # 当成 1、把 ctx_lens=[True] 当成 1（样例全过短被跳过、结果为空却看似
@@ -524,6 +612,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
     vt_chains = strict_int(vt_chains, "vt_chains")
     vt_depth = strict_int(vt_depth, "vt_depth")
     gen_batch = strict_int(gen_batch, "gen_batch")
+    depth_stratified = config_bool(depth_stratified, "depth_stratified")
     if n_samples < 1:
         raise ValueError(f"n_samples 必须 >= 1，收到 {n_samples}")
     if not ctx_lens:
@@ -625,19 +714,30 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
             # 先按原种子顺序构造全部样例（变体间配对比较依赖同一批样本），
             # 再按 prompt 等长分组做批量贪婪解码。
             samples: List[Dict] = []
+            # 起始箱只由 (task, room_ctx) 决定：n_samples=1/2 时也不会永远
+            # 只抽 early；完整网格上 three bins 的目标数仍至多差 1。
+            depth_start = (_stable_hash(f"{task}:{room_ctx}") % len(DEPTH_BINS)
+                           if depth_stratified and task.startswith("niah") else 0)
             for i in range(n_samples):
                 # 种子混入 room_ctx：同一 (task, i) 的样例在不同上下文长度下
                 # 若共用同一 rng 构造序列前缀，needle 的 key/value 会跨长度相关，
                 # 长度扫掠曲线各点误差不再独立。
                 rng = random.Random(seed * 100003 + _stable_hash(task) % 99991
                                     + room_ctx * 31 + i)
+                target_depth = (DEPTH_BINS[(depth_start + i) % len(DEPTH_BINS)]
+                                if depth_stratified and task.startswith("niah")
+                                else None)
                 try:
                     if task == "niah_synth":
-                        ex = build_niah(tok, room_ctx, rng, mode="synth")
+                        ex = build_niah(tok, room_ctx, rng, mode="synth",
+                                        target_depth=target_depth)
                     elif task == "niah_corpus":
-                        ex = build_niah(tok, room_ctx, rng, mode="corpus", corpus_sents=corpus_sents)
+                        ex = build_niah(tok, room_ctx, rng, mode="corpus",
+                                        corpus_sents=corpus_sents,
+                                        target_depth=target_depth)
                     elif task == "niah_multikey":
-                        ex = build_niah(tok, room_ctx, rng, mode="synth", multikey=True)
+                        ex = build_niah(tok, room_ctx, rng, mode="synth",
+                                        multikey=True, target_depth=target_depth)
                     elif task == "fwe":
                         ex = build_fwe(tok, room_ctx, rng)
                     elif task == "vt":
@@ -689,6 +789,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         rec = {"sample_id": ex.get("sample_id"),
                                "em": float(sc["em"])}
                         if task.startswith("niah"):
+                            # 目标箱与实际箱分开落盘：极端构造下插入位置可能
+                            # 被干扰行边界挤到相邻箱，审计时不能把“计划分层”
+                            # 当成“实际分层”。
+                            rec["depth_target"] = target_depth
                             # 位置分层只在 NIAH 有意义（vt 的 meta.depth 是
                             # 链深度而非 token 位置，不能混用）。
                             dval = ex.get("meta", {}).get("depth")
@@ -757,6 +861,23 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     "samples": outcomes,
                 }
                 if task.startswith("niah"):
+                    target_counts = {
+                        b: sum(1 for s in outcomes
+                               if s.get("depth_target") == b)
+                        for b in DEPTH_BINS}
+                    results[task][str(room_ctx)]["depth_stratified"] = bool(
+                        depth_stratified)
+                    results[task][str(room_ctx)]["depth_target_counts"] = (
+                        target_counts)
+                    results[task][str(room_ctx)]["depth_assignment_matches_target"] = (
+                        all(s.get("depth_bin") == s.get("depth_target")
+                            for s in outcomes))
+                    # n>=3 才能覆盖三箱；目标数至多差 1 才算按计划均衡。
+                    results[task][str(room_ctx)]["depth_target_balanced"] = (
+                        (max(target_counts.values())
+                         - min(target_counts.values()) <= 1
+                         and all(v > 0 for v in target_counts.values()))
+                        if depth_stratified and n >= len(DEPTH_BINS) else None)
                     # 位置分层：早期高分与中期塌陷会在总 EM 里互相抵消。
                     # 每箱独立 Wilson CI（n 为箱内样本数），避免拿总 n
                     # 冒充分层精度；空箱不写入，下游按缺失处理。
@@ -971,6 +1092,10 @@ def main():
     vt_depth = _cfg_int("vt_depth", 4)
     # 与训练内评测口径一致：尊重训练配置的 amp 设置（默认开启）
     amp = config_bool(cfg.get("amp", True), "amp") and not args.no_amp
+    # NIAH 位置分层是生成协议的一部分：关闭时落盘 False，旧产物缺字段，
+    # 下游协议核对因此不会把“随机位置”与“分层位置”的 EM 直接配对。
+    depth_stratified = config_bool(
+        rl.get("depth_stratified", True), "ruler.depth_stratified")
 
     corpus_sents, corpus_source = load_corpus_sents_with_source(
         args.data_dir, allow_test=bool(args.allow_test_corpus))
@@ -1003,7 +1128,8 @@ def main():
                         vt_chains=vt_chains,
                         vt_depth=vt_depth,
                         corpus_sents=corpus_sents,
-                        amp=amp, gen_batch=gen_batch)
+                        amp=amp, gen_batch=gen_batch,
+                        depth_stratified=depth_stratified)
     # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务
     badcases = results.pop("_badcases", [])
     payload = {"variant": ck.get("variant", model.variant), "seed": seed,
@@ -1018,6 +1144,7 @@ def main():
                "vt_depth": vt_depth,
                "gen_batch": int(gen_batch),
                "amp": bool(amp),
+               "depth_stratified": bool(depth_stratified),
                # 干扰语料来源可审计：train 回退会让检索分数不可比
                "corpus_source": corpus_source,
                "corpus_held_out": corpus_source in ("val", "test"),
