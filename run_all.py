@@ -3692,7 +3692,11 @@ def _render_ruler_length(analysis) -> list:
         # 配对行来自外部/旧版 significance.json：损坏的字符串/NaN/Inf 不能
         # 让整份汇总页在格式化时崩溃，按缺失显示 "-"。
         f = _finite_number(v)
-        return "-" if f is None else f"{f * 100.0:+.2f}"
+        if f is None:
+            return "-"
+        scaled = f * 100.0
+        # 有限输入乘 100 仍可能溢出（如 1e308），不能写出 +inf。
+        return f"{scaled:+.2f}" if math.isfinite(scaled) else "溢出"
 
     def _padj(t):
         p = _finite_number((t or {}).get("p_adj"))
@@ -3783,10 +3787,14 @@ def _render_ruler_length(analysis) -> list:
                    if isinstance(p.get("per_context"), list) else [])
         for c in per_ctx:
             ci = c.get("mean_diff_ci95")
-            ci_s = ("-"
-                    if not (isinstance(ci, (list, tuple)) and len(ci) == 2
-                            and all(_finite_number(x) is not None for x in ci))
-                    else f"[{ci[0] * 100.0:+.2f}, {ci[1] * 100.0:+.2f}]")
+            if not (isinstance(ci, (list, tuple)) and len(ci) == 2
+                    and all(_finite_number(x) is not None for x in ci)):
+                ci_s = "-"
+            else:
+                lo, hi = ci[0] * 100.0, ci[1] * 100.0
+                ci_s = (f"[{lo:+.2f}, {hi:+.2f}]"
+                        if math.isfinite(lo) and math.isfinite(hi)
+                        else "溢出")
             p_raw = _finite_number(c.get("p"))
             md.append(
                 f"| {p.get('candidate')} vs {p.get('reference')} | "
@@ -7142,7 +7150,12 @@ def build_summary(results_dir: str, audit: dict = None,
 
     def _length_pp(v):
         f = _finite_number(v)
-        return None if f is None else round(f * 100.0, 4)
+        if f is None:
+            return None
+        scaled = f * 100.0
+        # 外部 significance.json 的有限值乘 100 仍可能溢出；None 比 JSON
+        # Infinity（严格 JSON 无法解析）安全。
+        return round(scaled, 4) if math.isfinite(scaled) else None
 
     for row in rows:
         pair = length_by_pair.get((row.get("variant"), "standard"))

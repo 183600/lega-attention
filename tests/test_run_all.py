@@ -33,6 +33,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
                       _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
                       _render_baseline_sections, _result_files,
+                      _render_ruler_length,
                       _render_inference_shapley,
                       _render_parameter_matched_control,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
@@ -5785,6 +5786,31 @@ def test_equivalence_rendering_handles_scaled_overflow():
     assert _fmt_eq_value(float("nan"), {"kind": "relative"}) == "-"
     assert _fmt_eq_margin({"kind": "relative", "margin": float("inf")}) == "-"
     print("  [ok] 等价性渲染：×100/×scale 溢出显示“溢出”，不写出 inf")
+
+
+def test_ruler_length_rendering_handles_scaled_overflow():
+    """长度剂量-反应表：×100 溢出不能写出 inf/nan。"""
+    huge = 1e308
+    row = {
+        "candidate": "cand", "reference": "ref", "n_seeds": 3,
+        "contexts": [128, 256], "n_contexts": 2,
+        "overall_mean_diff": huge,
+        "per_context": [{
+            "ctx": 128, "n": 3, "mean_diff": huge,
+            "mean_diff_ci95": [-huge, huge],
+            "p": 0.5, "p_adj": 0.5, "verdict": "未定",
+            "candidate_mean": 0.5, "reference_mean": 0.4,
+        }],
+        "slope_per_doubling": {
+            "mean_diff": huge, "verdict": "未定", "p_adj": 0.5, "n": 3,
+        },
+        "long_minus_short": {"mean_diff": huge},
+        "direction_consistency": {"positive": 3, "negative": 0, "zero": 0},
+    }
+    md = "\n".join(_render_ruler_length({"pairs": [row]}))
+    assert "inf" not in md and "nan" not in md
+    assert "溢出" in md
+    print("  [ok] RULER 长度渲染：×100 溢出显示“溢出”，不写出 inf")
 
 
 def test_build_summary_renders_near_duplicate_audit():
