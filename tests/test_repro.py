@@ -911,6 +911,19 @@ def test_sanity_identity_check_detects_stale_gate_evidence():
     res_nogit = sanity_identity_check(nogit_sanity, nogit_run)
     assert res_nogit["hard_mismatches"] == []
     assert "worktree_diff_sha256" in res_nogit["unknown_fields"]
+    # 损坏的布尔字段不能被 truthiness 洗成“已记录/可用”，否则工作区 diff
+    # 会在没有有效记录时被伪造成一致。
+    for key in ("worktree_recorded", "worktree_available"):
+        for bad in ("false", "true", 1, 0):
+            corrupt = dict(fresh, **{key: bad})
+            res_bad = sanity_identity_check(corrupt, run)
+            assert res_bad["hard_mismatches"] == [], (key, bad, res_bad)
+            assert "worktree_diff_sha256" in res_bad["unknown_fields"], \
+                (key, bad, res_bad)
+    bad_run = dict(run, worktree={"available": "true", "diff_sha256": None})
+    res_bad_run = sanity_identity_check(fresh, bad_run)
+    assert res_bad_run["hard_mismatches"] == []
+    assert "worktree_diff_sha256" in res_bad_run["unknown_fields"]
     print("  [ok] sanity_identity_check：旧配置/数据/代码/工作区不一致被拦下")
 
 

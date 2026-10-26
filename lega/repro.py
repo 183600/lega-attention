@@ -754,11 +754,15 @@ def sanity_identity_check(sanity: dict, run: dict) -> dict:
     # 工作区补丁是 commit 之外的可重建证据：只有 sanity 清单确实记录了
     # worktree 才参与比较（旧文件缺失记 unknown）。clean 工作区两边都是
     # None，是合法相等而不是“缺字段”。
-    recorded = bool(sanity.get("worktree_recorded"))
+    # 必须是真正的 JSON true：字符串 "false"/1 若按 truthiness 变成“已记录”，
+    # 会让损坏/手改的工作区证据绕过 diff 核对并冒充已验证。
+    recorded = sanity.get("worktree_recorded") is True
     # 旧记录没有 worktree_available 字段：按“已记录即可核对”处理（当时能从
-    # manifest 取到 worktree 才会记录 diff），保持向后兼容。
+    # manifest 取到 worktree 才会记录 diff），保持向后兼容；但显式写了
+    # 非布尔值说明记录已损坏，只能按 unknown 处理。
     sanity_avail = sanity.get("worktree_available", recorded)
-    if not recorded or sanity_avail is False or not worktree.get("available"):
+    if (not recorded or sanity_avail is not True
+            or worktree.get("available") is not True):
         # 任一侧工作区不可用（如非 git 目录）时无法核对：记 unknown，
         # 不因“无法核对”直接推翻旧证据。
         matches["worktree_diff_sha256"] = None
