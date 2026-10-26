@@ -317,6 +317,33 @@ def test_mean_by_step_rejects_fractional_and_boolean_steps():
           "巨大有限损失不溢出")
 
 
+def test_fig_train_curves_skips_unplottable_losses():
+    """1e308 损失会让 log 轴 ticker 溢出；画图时按缺失跳过。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过训练曲线极端值测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        root = os.path.join(tmp, "out")
+        for variant, loss in (("lega", 1e308), ("standard", 1.0)):
+            d = os.path.join(root, variant, "seed1")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "train_log.jsonl"), "w",
+                      encoding="utf-8") as f:
+                for step in (1, 2, 3):
+                    f.write(json.dumps({"step": step, "loss": loss,
+                                        "val_loss": loss,
+                                        "val_ppl": loss}) + "\n")
+        rdir = os.path.join(tmp, "res")
+        os.makedirs(rdir, exist_ok=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert plots.fig_train_curves(rdir, root) is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 训练曲线：极端损失不触发 log ticker 溢出")
+
+
 def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
     """没有共同 batch 档位时仍要为每个变体取自己的可用档位画线，
     不能拿第一个变体的 batch key 去查所有变体（否则整条线静默消失）。"""

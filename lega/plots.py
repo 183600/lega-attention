@@ -1044,6 +1044,13 @@ def _mean_by_step(runs, key):
     return xs, ys
 
 
+def _plottable_points(xs, ys):
+    """去掉超出 matplotlib 安全范围的 y 点，避免 log ticker 溢出告警。"""
+    points = [(x, y) for x, y in zip(xs, ys)
+              if y is not None and _plottable_float(y) is not None]
+    return [x for x, _ in points], [y for _, y in points]
+
+
 def fig_train_curves(rdir, train_root):
     """训练 loss、val PPL 与训练/验证损失对照三视图。
 
@@ -1061,9 +1068,11 @@ def fig_train_curves(rdir, train_root):
         color = COLORS.get(v, "#34495e")
         lw = 2.0 if v == "lega" else 1.2
         xs, ys = _mean_by_step(series[v], "loss")
+        xs, ys = _plottable_points(xs, ys)
         if xs:
             ax1.plot(xs, ys, label=_label(v), color=color, lw=lw, alpha=0.9)
         xs2, ys2 = _mean_by_step(series[v], "val_ppl")
+        xs2, ys2 = _plottable_points(xs2, ys2)
         if xs2:
             ax2.plot(xs2, ys2, label=_label(v), color=color, marker=".",
                      lw=lw, alpha=0.9)
@@ -1074,6 +1083,7 @@ def fig_train_curves(rdir, train_root):
             ax3.plot(xs, ys, color=color, lw=lw, alpha=0.9,
                      label=("训练 loss" if i == 0 else None))
         xv, yv = _mean_by_step(series[v], "val_loss")
+        xv, yv = _plottable_points(xv, yv)
         if xv:
             ax3.plot(xv, yv, color=color, lw=lw, ls="--", alpha=0.75,
                      label=("验证 loss" if i == 0 else None))
