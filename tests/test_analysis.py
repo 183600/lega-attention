@@ -250,6 +250,19 @@ def test_auroc_cluster_bootstrap_ci():
           "非法重采样与置信水平拒绝）")
 
 
+def test_auroc_cluster_bootstrap_distinguishes_example_types():
+    """True/1 与 2/2.0 是不同样例身份，不能因 dict 键相等而合并 cluster。"""
+    records = [
+        {"example": True, "hit": 1.0, "logit": 2.0, "qterm": 1.0},
+        {"example": 1, "hit": 0.0, "logit": 0.0, "qterm": 0.0},
+        {"example": 2, "hit": 1.0, "logit": 2.0, "qterm": 1.0},
+        {"example": 2.0, "hit": 0.0, "logit": 0.0, "qterm": 0.0},
+    ]
+    out = auroc_cluster_bootstrap(records, n_resamples=50, seed=0)
+    assert out["n_examples"] == 4, out
+    print("  [ok] auroc_cluster_bootstrap 区分类型混杂的 example")
+
+
 def test_analysis_tolerates_malformed_external_records():
     """外部/截断记录缺 example/max_p/log_n/layer/head 时跳过而非崩溃。"""
     records = _mk_records() + [

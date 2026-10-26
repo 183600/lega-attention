@@ -400,7 +400,7 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     if not 0.0 < ci < 1.0:
         raise ValueError(f"ci 必须在 (0,1) 内，收到 {ci!r}")
     records = records if isinstance(records, (list, tuple)) else []
-    clusters: Dict[int, List[Dict]] = {}
+    clusters: Dict[tuple, List[Dict]] = {}
     for r in records:
         if not isinstance(r, dict):
             continue
@@ -416,13 +416,14 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             continue
         if isinstance(example, float) and not math.isfinite(example):
             continue
+        # 样例身份必须包含类型：dict 键会把 True/1 或 2/2.0 视为同一
+        # cluster，合并后少报 n_examples 并低估 bootstrap 区间。与 probe
+        # 的 _ex_key 口径一致。
+        key = ("example", type(example).__name__, str(example))
         rec = dict(r)
         rec["hit"] = hit
-        clusters.setdefault(example, []).append(rec)
-    try:
-        ex_ids = sorted(clusters)
-    except TypeError:
-        ex_ids = sorted(clusters, key=lambda e: (type(e).__name__, repr(e)))
+        clusters.setdefault(key, []).append(rec)
+    ex_ids = sorted(clusters)
     out = {"n_examples": len(ex_ids), "n_resamples": int(n_resamples),
            "ci_level": float(ci), "ci95": {}, "n_valid_resamples": None}
     if len(ex_ids) < 2:
