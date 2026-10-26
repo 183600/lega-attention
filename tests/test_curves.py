@@ -607,6 +607,9 @@ def test_live_overfit_hint():
                             train_recent=[3.0, 2.9, 2.8],
                             val_ci95=[1.99, 2.03])
     assert "抽样噪声" in msg and "不要据此加正则化" in msg, msg
+    # 有限损失差值×100 仍可能溢出：提示文案不能写出 inf%。
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 1e-300, 1e7)
+    assert msg and "inf" not in msg and "溢出" in msg, msg
     print("  [ok] live_overfit_hint（训练趋势区分过拟合/欠拟合 + 验证噪声）")
 
 

@@ -477,9 +477,19 @@ def _fmt_num(x: Optional[float], spec: str = ".4f") -> str:
     return "-" if x is None else format(x, spec)
 
 
+def _fmt_pct(x: Optional[float], *, signed: bool = False) -> str:
+    """百分比缺失时显示 '-'；有限值乘 100 溢出时显示“溢出”。"""
+    if x is None:
+        return "-"
+    scaled = x * 100.0
+    if not math.isfinite(scaled):
+        return "溢出"
+    return f"{x:+.1%}" if signed else f"{x:.1%}"
+
+
 def _fmt_rel(x: Optional[float]) -> str:
     """相对变化缺失时显式显示 '-'（不能把 None 交给百分号格式化）。"""
-    return "-" if x is None else f"{x:+.1%}"
+    return _fmt_pct(x, signed=True)
 
 
 def _train_trend(train_recent) -> Optional[float]:
@@ -549,9 +559,10 @@ def live_overfit_hint(evals_since_improve, best_val, val,
                 ci_rel = None
     if ci_rel is not None and abs(gap) <= ci_rel + 1e-12:
         label = "回升" if gap > LIVE_OVERFIT_GAP else "平台"
-        return (f"验证损失{label}（较历史最优 {gap:+.1%}）仍在 95% 抽样噪声内"
-                f"（±{ci_rel:.1%}），已连续 {n} 次评测未改善：先继续观察，"
-                "不要据此加正则化或触发早停；可增大 eval_iters/验证集。")
+        return (f"验证损失{label}（较历史最优 {_fmt_pct(gap, signed=True)}）"
+                f"仍在 95% 抽样噪声内（±{_fmt_pct(ci_rel)}），已连续 {n} 次"
+                "评测未改善：先继续观察，不要据此加正则化或触发早停；"
+                "可增大 eval_iters/验证集。")
 
     trend = _train_trend(train_recent)
     trend_txt = ""
@@ -560,47 +571,47 @@ def live_overfit_hint(evals_since_improve, best_val, val,
                      "确认训练损失本身是否还在下降后再决定是否延长训练。")
     if trend is not None:
         if trend < -0.01:
-            trend_txt = f"，训练损失仍在下降（{trend:+.1%}）"
+            trend_txt = f"，训练损失仍在下降（{_fmt_pct(trend, signed=True)}）"
             kind = "overfit"
         elif trend > 0.01:
-            trend_txt = f"，且训练损失也在上升（{trend:+.1%}）"
+            trend_txt = f"，且训练损失也在上升（{_fmt_pct(trend, signed=True)}）"
             kind = "unstable"
         else:
-            trend_txt = f"，训练损失已基本停滞（{trend:+.1%}）"
+            trend_txt = f"，训练损失已基本停滞（{_fmt_pct(trend, signed=True)}）"
             kind = "flat"
     else:
         kind = None
 
     if gap > LIVE_OVERFIT_GAP:
         if kind == "overfit":
-            what = f"验证损失在回升（较历史最优 +{gap:.1%}）{trend_txt}，典型过拟合信号"
+            what = f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}，典型过拟合信号"
             tail = overfit_tail
         elif kind == "unstable":
-            what = (f"验证损失在回升（较历史最优 +{gap:.1%}）{trend_txt}："
+            what = (f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
                     "更像优化不稳定/学习率过大，不是典型过拟合")
             tail = underfit_tail
         elif kind == "flat":
-            what = (f"验证损失在回升（较历史最优 +{gap:.1%}）{trend_txt}："
+            what = (f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
                     "训练侧已无改善，优先核对验证集构造与正则化，别只延长训练")
             tail = overfit_tail
         else:
-            what = f"验证损失在回升（较历史最优 +{gap:.1%}），典型过拟合信号"
+            what = f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}），典型过拟合信号"
             tail = overfit_tail
     else:
         if kind == "overfit":
-            what = (f"验证损失进入平台（较历史最优 +{gap:.1%}）{trend_txt}："
+            what = (f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
                     "泛化差距扩大，早期过拟合信号")
             tail = overfit_tail
         elif kind == "unstable":
-            what = (f"验证损失进入平台（较历史最优 +{gap:.1%}）{trend_txt}："
+            what = (f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
                     "更像欠拟合/优化不足，不是过拟合")
             tail = underfit_tail
         elif kind == "flat":
-            what = (f"训练与验证损失同时停滞（验证较历史最优 +{gap:.1%}）："
+            what = (f"训练与验证损失同时停滞（验证较历史最优 {_fmt_pct(gap, signed=True)}）："
                     "更像容量/优化不足（欠拟合），不是过拟合")
             tail = underfit_tail
         else:
-            what = f"验证损失进入平台（较历史最优 +{gap:.1%}，无实质改善）"
+            what = f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}，无实质改善）"
             tail = overfit_tail
     return f"{what}：已连续 {n} 次评测未改善。{tail}"
 
@@ -974,13 +985,13 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                        if val_recent_up else ""))
             if gain_sig:
                 ev.append(f"最终验证损失劣于 step {best_step} 的最优值 "
-                          f"{best_val:.4f} 达 {early_stop_gain:+.1%}"
+                          f"{best_val:.4f} 达 {_fmt_pct(early_stop_gain, signed=True)}"
                           "（超过评估噪声）")
             evidence += ev
             recommendations += [
                 "加正则化（dropout / weight decay）或增大数据量",
                 f"早停：val 最优在 step {best_step}，最终 step {final_step} 已过拟合"
-                + (f"（早停可挽回 {early_stop_gain:.1%} 验证损失）"
+                + (f"（早停可挽回 {_fmt_pct(early_stop_gain)} 验证损失）"
                    if gain_sig else ""),
                 "下游对比应使用 val 上选出的 model_best.pt，而不是最终步模型"]
             if not train_down:
@@ -997,7 +1008,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"（{_fmt_rel(train_delta)}）仍在实质下降，而验证损失 "
                 f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
                 f"（{_fmt_rel(val_delta)}）无实质变化"
-                + (f"（评估噪声 ±{val_ci_rel:.1%}）" if val_ci_rel is not None
+                + (f"（评估噪声 ±{_fmt_pct(val_ci_rel)}）" if val_ci_rel is not None
                    else "")
                 + "：验证不再随训练改善，泛化差距在扩大"
                 "（尚不满足“验证回升”的过拟合判定）")
@@ -1021,7 +1032,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"{_fmt_num((recent_val or {}).get('prev'))}→"
                 f"{_fmt_num((recent_val or {}).get('last'))}"
                 f"（{_fmt_rel(recent_val_delta)}）已无实质变化"
-                + (f"（评估噪声 ±{val_ci_rel:.1%}）" if val_ci_rel is not None
+                + (f"（评估噪声 ±{_fmt_pct(val_ci_rel)}）" if val_ci_rel is not None
                    else "")
                 + "：全程首/末分段仍显示验证下降（早段改善占主导），但末段"
                 "验证不再随训练改善，泛化差距在扩大")
@@ -1088,13 +1099,13 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"（{_fmt_rel(val_delta)}）")
             if gain_sig:
                 evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
-                                f"{early_stop_gain:.1%}（超过评估噪声），"
+                                f"{_fmt_pct(early_stop_gain)}（超过评估噪声），"
                                 "已按 best-checkpoint 口径评测")
             elif (early_stop_gain or 0) > EARLY_STOP_TOL:
                 evidence.append(
                     f"最终验证损失比 step {best_step} 的最优值差 "
-                    f"{early_stop_gain:.1%}，但未超过评估噪声 "
-                    f"±{val_ci_rel:.1%}：不据此判定过拟合")
+                    f"{_fmt_pct(early_stop_gain)}，但未超过评估噪声 "
+                    f"±{_fmt_pct(val_ci_rel)}：不据此判定过拟合")
             elif not (loss_spikes or loss_peak_spikes or grad_bad or grad_spike
                       or early_stopped or malformed_count):
                 # 任一独立告警（损失尖峰/梯度尖峰/早停/坏记录）存在时都不写
@@ -1104,7 +1115,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                                        "验证损失倒挂（疑似泄漏/口径不一致）"):
             recommendations.append(
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
-                f"{early_stop_gain:.1%}")
+                f"{_fmt_pct(early_stop_gain)}")
         # 验证-训练倒挂是数据/评测口径的完整性问题，与曲线形状（过拟合/
         # 平台/欠拟合）独立：不能只在“正常收敛”分支里检查，否则一个仍在
         # 下降但验证停滞的 run 会一边写 val_below_train=True、一边建议加
@@ -1114,7 +1125,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             status = "验证损失倒挂（疑似泄漏/口径不一致）"
             evidence.append(
                 f"验证损失末段 {last_val:.4f} 显著低于训练损失末段 "
-                f"{last_train:.4f}（{val_below_train_rel:+.1%}）："
+                f"{last_train:.4f}（{_fmt_pct(val_below_train_rel, signed=True)}）："
                 "这与常规泛化差距方向相反，不能按“收敛更好”解读；"
                 "优先排查数据划分/预处理泄漏（train 与 val 文档重叠、"
                 "词表或归一化在 val 上拟合）、训练与验证的评估口径差异"
@@ -1133,7 +1144,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             # 但并列报告完整性告警，避免读者只看到“欠拟合→扩容量”等建议。
             evidence.append(
                 f"注意：验证损失末段 {last_val:.4f} 也低于训练损失末段 "
-                f"{last_train:.4f}（{val_below_train_rel:+.1%}），存在"
+                f"{last_train:.4f}（{_fmt_pct(val_below_train_rel, signed=True)}），存在"
                 "验证-训练倒挂；该信号独立于当前曲线状态，优先排查数据划分/"
                 "预处理泄漏与训练/验证评估口径差异")
             recommendations.append(
@@ -1143,7 +1154,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
 
     if val_ci_rel is not None:
         evidence.append(
-            f"验证损失点级 95% CI 相对半宽中位数 ±{val_ci_rel:.1%}"
+            f"验证损失点级 95% CI 相对半宽中位数 ±{_fmt_pct(val_ci_rel)}"
             "（窗口抽样误差；分段均值会进一步降低该项，按保守口径使用）："
             "小于该量级的验证变化按噪声处理，不作为过拟合/收敛证据")
 
@@ -1152,12 +1163,12 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     if best_selection_noise:
         evidence.append(
             f"best checkpoint 在 step {best_step}，但仅比次优验证损失 "
-            f"{second_best:.4f} 好 {best_margin_rel:.1%}，小于该点 95% CI "
-            f"相对半宽 ±{best_ci_rel:.1%}：最优与次优无法区分，"
+            f"{second_best:.4f} 好 {_fmt_pct(best_margin_rel)}，小于该点 95% CI "
+            f"相对半宽 ±{_fmt_pct(best_ci_rel)}：最优与次优无法区分，"
             "选型可能由验证窗口抽样噪声决定（winner's curse）")
         recommendations.append(
-            f"best checkpoint 选型落在评估噪声内（margin {best_margin_rel:.1%} "
-            f"≤ CI ±{best_ci_rel:.1%}）：不要只报告 best 的指标；同时报告"
+            f"best checkpoint 选型落在评估噪声内（margin {_fmt_pct(best_margin_rel)} "
+            f"≤ CI ±{_fmt_pct(best_ci_rel)}）：不要只报告 best 的指标；同时报告"
             "final/多种子均值，并增大 eval_iters 或验证集以缩小选型噪声；"
             "若结论依赖 best 与次优的排序，应视为未定")
         recommendations[:] = [r for r in recommendations
@@ -1200,7 +1211,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                               if "无需干预" not in r]
         recommendations.append(
             f"最优验证损失出现在最后一个评测点（step {final_step}），"
-            f"且验证损失仍下降 {abs(val_delta):.1%}：没有观察到收敛/过拟合"
+            f"且验证损失仍下降 {_fmt_pct(abs(val_delta))}：没有观察到收敛/过拟合"
             "拐点，当前训练预算可能就是性能上限；预算允许时应延长训练作为"
             "补充实验，不能把该 run 的最优值当作方法已收敛的结论")
         evidence.append(
