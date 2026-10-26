@@ -112,6 +112,19 @@ def test_metric_margins_and_transform_scales():
     print("  [ok] 指标 SESOI 尺度与无效参照处理")
 
 
+def test_lower_is_better_requires_explicit_boolean():
+    """字符串 "false"/1 不能经 truthiness 反转候选方向。"""
+    a = [102.0, 102.1, 101.9, 102.0, 102.0]
+    b = [100.0] * 5
+    for bad in ("false", 1, [], {}):
+        res = assess_paired_equivalence(a, b, "PPL", lower_is_better=bad)
+        assert res["lower_is_better"] is False, (bad, res)
+        assert res["direction"] == "better", (bad, res)
+    res = assess_paired_equivalence(a, b, "PPL", lower_is_better=True)
+    assert res["lower_is_better"] is True and res["direction"] == "worse"
+    print("  [ok] lower_is_better 只认显式布尔，坏值不反转方向")
+
+
 def test_sensitivity_grid_marks_only_wide_margin_equivalent():
     # 相对差恒为 +1.5%：0.5%/1% 不判等价，2% 判等价。
     a = [101.5] * 5

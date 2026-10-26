@@ -4061,7 +4061,8 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
                                     if t.get("p_adj") is not None
                                     else "未检出显著交互")
             elif t.get("p_adj") is not None and t["p_adj"] < alpha:
-                better = ((t["mean_diff"] < 0) if t["lower_is_better"]
+                better = ((t["mean_diff"] < 0)
+                          if t.get("lower_is_better") is True
                           else (t["mean_diff"] > 0))
                 t["verdict"] = ("显著优于（Holm 校正后）" if better
                                 else "显著劣于（Holm 校正后）")
@@ -4142,7 +4143,7 @@ def _effect_status(t, removing: bool) -> dict:
             reason += "（效应低于 MDE）"
         return {"supported": False, "opposite": False, "fragile": False,
                 "reason": reason, "p_adj": t.get("p_adj")}
-    lb = bool(t.get("lower_is_better"))
+    lb = t.get("lower_is_better") is True
     if removing:
         evidence = (t["mean_diff"] > 0) if lb else (t["mean_diff"] < 0)
     else:
@@ -4987,7 +4988,8 @@ def evaluate_registered_hypotheses(registered: dict, tests: list,
                                        f"当前种子数可检测的最小效应 "
                                        f"{t['mde']:+.4f}）")
             else:
-                better = (t["mean_diff"] < 0 if t["lower_is_better"]
+                better = (t["mean_diff"] < 0
+                          if t.get("lower_is_better") is True
                           else t["mean_diff"] > 0)
                 supported = (better if h.get("direction") == "candidate_better"
                              else not better)

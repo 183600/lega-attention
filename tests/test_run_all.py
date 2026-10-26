@@ -829,6 +829,18 @@ def test_effect_status_directions():
     print("  [ok] _effect_status（方向、种子门槛）")
 
 
+def test_effect_status_requires_explicit_lower_is_better():
+    """字符串 "false" 不能经 bool() 变成“越低越好”，否则方向判定反转。"""
+    t = _mk("qgate", "standard", "RULER平均", -0.05, 0.01, lower="false")
+    t["p_adj"] = 0.01
+    st = _effect_status(t, removing=False)
+    assert not st["supported"] and st["opposite"], st
+    hm = _mk("qgate", "standard", "PPL", -0.05, 0.01, lower="false")
+    _apply_holm([hm])
+    assert "显著劣于" in hm["verdict"], hm
+    print("  [ok] lower_is_better 只认显式布尔（方向判定不反转）")
+
+
 def test_effect_status_rejects_significant_but_fragile_effects():
     """显著但 |Δ|<ΔSD 或留一翻转不能算组件有用，更不能进入确认性证据。
 

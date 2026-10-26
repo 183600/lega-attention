@@ -513,13 +513,14 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         margin = spec["margin"]
     margin = _validate_margin(margin, kind)
     diffs = _paired_diffs(a, b, kind)
+    lower_better = lower_is_better is True
     out = tost_from_diffs(diffs, margin, alpha=alpha, min_seeds=min_seeds)
     out.update({
         "metric": metric, "kind": kind, "margin": margin,
         "margin_label": spec.get("label", ""),
         "display_scale": spec.get("display_scale", 1.0),
         "display_unit": spec.get("display_unit", ""),
-        "lower_is_better": bool(lower_is_better),
+        "lower_is_better": lower_better,
         "n_pairs_valid": len(diffs),
         "multiplicity_adjusted": False,
     })
@@ -528,7 +529,7 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         if mean == 0.0:
             direction = "same"
         else:
-            better = (mean < 0.0) if lower_is_better else (mean > 0.0)
+            better = (mean < 0.0) if lower_better else (mean > 0.0)
             direction = "better" if better else "worse"
         out.update({
             "direction": direction,
@@ -547,7 +548,7 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         return out
     # 非劣性：只检验“劣化不超过 SESOI”这一侧（方向随 lower_is_better 翻转）。
     p_low, p_high = out.get("p_low"), out.get("p_high")
-    if lower_is_better:
+    if lower_better:
         p_noninf = p_high  # H0: μ >= +margin（候选更差超过 SESOI）
     else:
         p_noninf = p_low   # H0: μ <= −margin（候选更差超过 SESOI）
@@ -584,7 +585,7 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
                     "n": out.get("n", 0),
                     "mean_diff": out.get("mean_diff"),
                     "std_diff": out.get("std_diff"),
-                    "lower_is_better": bool(lower_is_better),
+                    "lower_is_better": lower_better,
                 }, f"敏感性 margin 不可表示（factor={factor!r}）：{exc}")
                 cell.update({"factor": factor, "margin": None,
                              "p_tost_adj": None,
