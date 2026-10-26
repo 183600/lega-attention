@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import tempfile
+import warnings
 
 import numpy as np
 
@@ -525,7 +526,9 @@ def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
            {"variant": "huge", "seed": 1, "ppl": 1e308, "split": "val"})
         _w(tmp, "eval_huge_seed2.json",
            {"variant": "huge", "seed": 2, "ppl": 1e308, "split": "val"})
-        assert fig_ppl(tmp) is True
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert fig_ppl(tmp) is True
         assert os.path.exists(os.path.join(tmp, "fig_ppl.png"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

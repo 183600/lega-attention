@@ -62,9 +62,15 @@ COLORS = {
     "lega_conc_only": "#27ae60", "lega_len_only": "#8e6e00",
 }
 
+_PPL_PLOT_CAP = 1e300
+
 
 def _label(v):
     return VARIANT_CN.get(v, v)
+
+
+def _fmt_ppl(v):
+    return f"{v:.2e}" if abs(v) >= 1e6 else f"{v:.2f}"
 
 
 def _finite_float(v):
@@ -388,15 +394,31 @@ def fig_ppl(rdir):
     names = [_label(v) for v, _, _, _ in rows]
     vals = [p for _, p, _, _ in rows]
     errs = [s for _, _, s, _ in rows]
+    plot_vals = [min(p, _PPL_PLOT_CAP) for p in vals]
+    plot_errs = []
+    for p, s in zip(vals, errs):
+        if s > 0 and p <= _PPL_PLOT_CAP and p + s <= _PPL_PLOT_CAP:
+            plot_errs.append(s)
+        else:
+            plot_errs.append(0.0)
     # 发散运行的 PPL 被截断到 exp(20)，以斜线纹理区分，避免被当作正常数值解读
-    bars = ax.bar(names, vals, yerr=errs if any(errs) else None, capsize=3,
+    bars = ax.bar(names, plot_vals,
+                  yerr=plot_errs if any(plot_errs) else None, capsize=3,
                   color=[COLORS.get(v, "#34495e") for v, _, _, _ in rows])
-    for bar, (_, _, _, clamped) in zip(bars, rows):
-        if clamped:
+    for bar, (_, p, _, clamped) in zip(bars, rows):
+        if clamped or p > _PPL_PLOT_CAP:
             bar.set_hatch("//")
-    ax.bar_label(bars, labels=[("≥ %.2e (发散截断)" % p) if c
-                               else ("%.2f±%.2f" % (p, s) if s else "%.2f" % p)
-                               for (_, p, s, c) in rows], fontsize=9)
+    labels = []
+    for (_, p, s, clamped), err in zip(rows, plot_errs):
+        if p > _PPL_PLOT_CAP:
+            labels.append("≥ %s (超出显示范围)" % _fmt_ppl(p))
+        elif clamped:
+            labels.append("≥ %s (发散截断)" % _fmt_ppl(p))
+        elif err:
+            labels.append("%s±%s" % (_fmt_ppl(p), _fmt_ppl(s)))
+        else:
+            labels.append(_fmt_ppl(p))
+    ax.bar_label(bars, labels=labels, fontsize=9)
     set_name = _ppl_split_label(splits, invalid_split)
     ax.set_ylabel(f"{set_name}困惑度 (PPL, 越低越好)")
     ax.set_title("语言建模困惑度对比（相同配置与步数；误差棒=跨 seed 标准差）")
