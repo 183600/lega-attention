@@ -3163,16 +3163,21 @@ def _fmt_eq_value(value, eq) -> str:
         return "-"
     kind = eq.get("kind")
     if kind == "relative":
-        return f"{f * 100.0:+.2f}%"
+        v = f * 100.0
+        return f"{v:+.2f}%" if math.isfinite(v) else "溢出"
     if kind == "log_ratio":
         try:
-            return f"{math.expm1(f) * 100.0:+.2f}%"
+            v = math.expm1(f) * 100.0
         except OverflowError:
             return "溢出"
+        return f"{v:+.2f}%" if math.isfinite(v) else "溢出"
     scale = _finite_number(eq.get("display_scale"))
     scale = 1.0 if scale is None or scale == 0 else scale
     unit = eq.get("display_unit") or ""
     v = f * scale
+    if not math.isfinite(v):
+        # 有限输入 × 有限 scale 仍可能溢出（如 1e308 × 100）。
+        return "溢出"
     if unit == "pp":
         return f"{v:+.2f} pp"
     if unit == "nat":
@@ -3190,16 +3195,21 @@ def _fmt_eq_margin(eq) -> str:
     if m is None:
         return "-"
     if eq.get("kind") == "relative":
-        return f"±{m * 100.0:.2f}%"
+        v = m * 100.0
+        return f"±{v:.2f}%" if math.isfinite(v) else "±溢出"
     if eq.get("kind") == "log_ratio":
         try:
-            return f"±{math.expm1(m) * 100.0:.2f}%"
+            v = math.expm1(m) * 100.0
         except OverflowError:
             return "±溢出"
+        return f"±{v:.2f}%" if math.isfinite(v) else "±溢出"
     scale = _finite_number(eq.get("display_scale"))
     scale = 1.0 if scale is None or scale == 0 else scale
     unit = eq.get("display_unit") or ""
     v = m * scale
+    if not math.isfinite(v):
+        # 有限 margin × 有限 scale 仍可能溢出。
+        return "±溢出"
     if unit == "pp":
         return f"±{v:.2f} pp"
     if unit == "nat":

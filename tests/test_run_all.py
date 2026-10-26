@@ -44,6 +44,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       apply_budget_gate, apply_integrity_gate, apply_scope_gate,
                       AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
                       build_comparison_pairs, build_summary,
+                      _fmt_eq_margin, _fmt_eq_value,
                       _fmt_mean_std, _fmt_signed,
                       changed_gate_factors,
                       component_evidence, cross_variant_badcase_map,
@@ -5749,6 +5750,23 @@ def test_summary_rendering_tolerates_missing_effect_mean():
         md = out["markdown"]
         assert "A×B" in md and "无法检验" in md
     print("  [ok] 汇总渲染：缺失/非有限均值显示 '-'，交互表不再 TypeError")
+
+
+def test_equivalence_rendering_handles_scaled_overflow():
+    """有限 TOST 值换算后仍可能溢出：报告不能出现 inf/nan。"""
+    huge = 1e308
+    for kind, eq in (
+        ("relative", {"kind": "relative"}),
+        ("log_ratio", {"kind": "log_ratio"}),
+        ("scale", {"kind": "absolute", "display_scale": 100.0,
+                   "display_unit": "pp"}),
+    ):
+        assert _fmt_eq_value(huge, eq) == "溢出", kind
+        assert _fmt_eq_margin(dict(eq, margin=huge)) == "±溢出", kind
+    assert _fmt_eq_value(float("nan"), {"kind": "relative"}) == "-"
+    assert _fmt_eq_margin({"kind": "relative", "margin": float("inf")}) == "-"
+    print("  [ok] 等价性渲染：×100/×scale 溢出显示“溢出”，不写出 inf")
+
 
 def test_build_summary_renders_near_duplicate_audit():
     """近似重复的删除量/阈值/召回率必须进入 summary.md，而不是只躺在 JSON。"""
