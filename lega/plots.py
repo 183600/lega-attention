@@ -63,6 +63,7 @@ COLORS = {
 }
 
 _PPL_PLOT_CAP = 1e300
+_PLOT_VALUE_CAP = 1e300
 
 
 def _label(v):
@@ -96,6 +97,14 @@ def _unit_float(v):
     """有限且位于 [0,1] 的比率/AUROC；越界或坏值返回 None。"""
     f = _finite_float(v)
     if f is None or f < 0.0 or f > 1.0:
+        return None
+    return f
+
+
+def _plottable_float(v):
+    """有限且绝对值不超过 matplotlib 安全范围的数值；坏点返回 None。"""
+    f = _finite_float(v)
+    if f is None or abs(f) > _PLOT_VALUE_CAP:
         return None
     return f
 
@@ -558,7 +567,7 @@ def fig_latency(rdir):
         """
         return {str(k) for cell in by_ctx.values()
                 for k, val in cell.items()
-                if _finite_float(val) is not None}
+                if _plottable_float(val) is not None}
 
     batch_sets = [_usable_batch_keys(by_ctx) for _, _, by_ctx in series]
     common = set.intersection(*batch_sets) if batch_sets else set()
@@ -583,7 +592,7 @@ def fig_latency(rdir):
         used_keys.add(key)
         xs, ys = [], []
         for c in sorted(by_ctx):
-            val = _finite_float(by_ctx[c].get(key))
+            val = _plottable_float(by_ctx[c].get(key))
             if val is not None:
                 xs.append(c)
                 ys.append(val)
@@ -618,7 +627,7 @@ def fig_latency(rdir):
         actual = actual if isinstance(actual, dict) else {}
         points = []
         for c, val in decode.items():
-            dec = _finite_float(val)
+            dec = _plottable_float(val)
             if dec is None:
                 continue
             ctx = _ctx_key_int(c)
@@ -768,7 +777,9 @@ def fig_calibration(rdir, variant="lega"):
     if c is None or g is None or ln is None:
         return False
     m = (np.isfinite(c) & np.isfinite(g) & np.isfinite(ln)
-         & (g >= 0.0) & (g <= 1.0))
+         & (g >= 0.0) & (g <= 1.0)
+         & (np.abs(c) <= _PLOT_VALUE_CAP)
+         & (np.abs(ln) <= _PLOT_VALUE_CAP))
     if int(m.sum()) < 20:
         return False
     c, g, ln = c[m], g[m], ln[m]

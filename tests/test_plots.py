@@ -652,6 +652,34 @@ def test_fig_rate_plots_skip_out_of_range_values():
     print("  [ok] 比率/AUROC 图：越界值按缺失跳过")
 
 
+def test_fig_latency_skips_unplottable_finite_values():
+    """1e308 是有限值但超出 matplotlib ticker 可处理范围，不能崩溃。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_latency 极端值测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "latency.json", {"variants": {
+            "lega": {"prefill_ms": {"256": 1e308},
+                     "decode_ms_per_tok": {"256": 1e308}},
+            "standard": {"prefill_ms": {"256": 12.0},
+                         "decode_ms_per_tok": {"256": 0.5}}}})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert fig_latency(tmp) is True
+        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
+                  encoding="utf-8") as f:
+            f.write("task,g,hit,c,log_n\n")
+            for i in range(40):
+                f.write(f"x,0.5,{i % 2},1e308,1e308\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert plots.fig_calibration(tmp, variant="lega") is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 延迟/校准图：极端有限值按缺失处理，不崩溃")
+
+
 def test_fig_gate_and_calibration_skip_out_of_range_g():
     """g 是 sigmoid 输出；越界值不能制造直方图/校准曲线的伪证据。"""
     if not _HAS_MPL:
