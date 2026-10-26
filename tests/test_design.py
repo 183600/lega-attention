@@ -14,7 +14,7 @@ import shutil
 import statistics
 import tempfile
 
-from lega.design import (analysis_population, apply_design_gate,
+from lega.design import (_fmt, analysis_population, apply_design_gate,
                          build_design_plan, design_conformance,
                          load_design_plan, main as design_main,
                          mcnemar_mde, mcnemar_power,
@@ -377,6 +377,15 @@ def test_render_design_section_with_and_without_plan():
     md2 = "\n".join(render_design_section({}, None))
     assert "未找到 `design_plan.json`" in md2
     print("  [ok] 汇总页：计划/检查/灵敏度/人群偏差与无计划告警")
+
+
+def test_fmt_percent_handles_scaled_overflow():
+    """有限值乘 100 溢出时不能渲染 inf%，也保留正常百分比输出。"""
+    assert _fmt(1e307, 2, pct=True) == "溢出"
+    assert _fmt(1e307, 2, pct=True, signed=True) == "溢出"
+    assert _fmt(0.0123, 2, pct=True) == "1.23%"
+    assert _fmt(0.0123, 2, pct=True, signed=True) == "+1.23%"
+    print("  [ok] 表格百分比防溢出")
 
 
 def test_design_cli_writes_plan_and_exit_code():

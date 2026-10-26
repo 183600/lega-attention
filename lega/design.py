@@ -1853,7 +1853,11 @@ def _fmt(x, nd=4, pct=False, signed=False):
     if not math.isfinite(f):
         return "-"
     if pct:
-        return f"{f * 100:+.{nd}f}%" if signed else f"{f * 100:.{nd}f}%"
+        scaled = f * 100.0
+        # 有限输入乘 100 仍可能溢出（如 1e308），不能写出 inf%。
+        if not math.isfinite(scaled):
+            return "溢出"
+        return f"{scaled:+.{nd}f}%" if signed else f"{scaled:.{nd}f}%"
     return f"{f:+.{nd}f}" if signed else f"{f:.{nd}f}"
 
 
