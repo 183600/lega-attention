@@ -652,6 +652,30 @@ def test_fig_rate_plots_skip_out_of_range_values():
     print("  [ok] 比率/AUROC 图：越界值按缺失跳过")
 
 
+def test_fig_ruler_skips_out_of_range_rates(monkeypatch):
+    """EM/recall 是 [0,1] 比率；1e308 乘 100 会变成 inf 伪点。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 fig_ruler 越界值测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        _w(tmp, "ruler_lega.json", {
+            "variant": "lega",
+            "results": {"niah_synth": {
+                "256": {"em": 1e308}, "512": {"em": 0.5},
+                "1024": {"em": -0.2}, "2048": {"em": True}}}})
+        captured = []
+        monkeypatch.setattr(plots.plt, "close",
+                            lambda fig: captured.append(fig))
+        assert fig_ruler(tmp) is True
+        ys = captured[0].axes[0].lines[0].get_ydata()
+        assert np.all(np.isfinite(np.asarray(ys, dtype=float))), ys
+        assert np.allclose(np.asarray(ys, dtype=float), [50.0]), ys
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] RULER 图：越界 EM/recall 按缺失跳过")
+
+
 def test_fig_auroc_heads_tolerates_non_list_per_head():
     """analysis JSON 的 per_head 非列表/层头类型混杂时不崩溃。"""
     if not _HAS_MPL:

@@ -457,8 +457,8 @@ def fig_ruler(rdir):
                         continue
                     cell = agg.setdefault(task, {}).setdefault(
                         ctx, {"em": [], "recall": []})
-                    em = _finite_float(m.get("em"))
-                    recall = _finite_float(m.get("recall"))
+                    em = _unit_float(m.get("em"))
+                    recall = _unit_float(m.get("recall"))
                     if em is not None:
                         cell["em"].append(em)
                     if recall is not None:
