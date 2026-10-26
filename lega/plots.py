@@ -455,11 +455,16 @@ def fig_ruler(rdir):
                         cell["em"].append(em)
                     if recall is not None:
                         cell["recall"].append(recall)
+        def _mean_cell(vals):
+            # 多种子的合法但接近 float 上限的指标不能用 np.mean 求和：
+            # 两个 1e308 会溢出成 inf，随后乘 100 画出无效点。
+            mean, _std = mean_std(vals)
+            return mean
+
         data[v] = {
             task: {ctx: {
-                "em": (float(np.mean(cell["em"])) if cell["em"] else None),
-                "recall": (float(np.mean(cell["recall"]))
-                           if cell["recall"] else None)}
+                "em": _mean_cell(cell["em"]),
+                "recall": _mean_cell(cell["recall"])}
                 for ctx, cell in by_ctx.items()}
             for task, by_ctx in agg.items()}
     tasks = ["niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt"]
@@ -803,7 +808,8 @@ def fig_misleading(rdir):
         for k in keys:
             vals = [x for x in (_finite_float(d.get(k)) for d in ds)
                     if x is not None]
-            row[k] = float(np.mean(vals)) if vals else None
+            mean, _std = mean_std(vals)
+            row[k] = mean
         rows.append(row)
     if not rows:
         return False
@@ -867,9 +873,14 @@ def fig_auroc_heads(rdir, variant="lega"):
         except (TypeError, ValueError, OverflowError):
             return (1, str(k[0]), str(k[1]))
 
+    def _head_mean(vals):
+        # 跨 seed 的合法极端 AUROC 不能用 np.mean 求和（1e308+1e308→inf）。
+        mean, _std = mean_std(vals)
+        return mean
+
     ph = [{"layer": k[0], "head": k[1],
-           "auroc_qterm": float(np.mean(v["qterm"])),
-           "auroc_logit": float(np.mean(v["logit"]))}
+           "auroc_qterm": _head_mean(v["qterm"]),
+           "auroc_logit": _head_mean(v["logit"])}
           for k, v in sorted(agg.items(), key=lambda kv: _head_key(kv[0]))
           if v["qterm"] and v["logit"]]
     if not ph:
