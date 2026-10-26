@@ -675,9 +675,14 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
             if not isinstance(direction, str) or direction not in ("better",
                                                                    "worse"):
                 direction = None
+            # beyond_margin 也只认显式布尔：外部 JSON 的 "false"/1/[] 经
+            # bool() 会被当成“超过 SESOI”，把显著但幅度有限的差异误报为
+            # 实际有意义。缺失/损坏值按“未证明超过 SESOI”保守处理。
             beyond = eq.get("beyond_margin")
-            status = _MEANINGFUL.get((direction, bool(beyond)),
-                                     "significant_below_sesoi")
+            status = (_MEANINGFUL.get((direction, beyond),
+                                      "significant_below_sesoi")
+                      if isinstance(beyond, bool)
+                      else "significant_below_sesoi")
         elif (eq.get("noninferior") is True and n_ok
               # 校正后 p 不显著时不能退回原始 noninferior 标志：那会出
               # 现“multiplicity_adjusted=True、p_used>alpha、却判非劣”的

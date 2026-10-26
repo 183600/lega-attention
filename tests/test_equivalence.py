@@ -207,6 +207,14 @@ def test_interpret_equivalence_categories():
         {"n": 5, "p_tost": 0.9, "direction": {"x": 1},
          "beyond_margin": True}, p_adj=0.01)
     assert bad_dir2["status"] == "significant_below_sesoi", bad_dir2
+    # beyond_margin 必须是显式布尔：字符串 "false"/1/容器经 bool() 会伪装
+    # 成“超过 SESOI”，从而把显著但实际意义有限的差异升级为“实际有意义”。
+    for bad_beyond in ("false", 1, 0, [], {}):
+        malformed = interpret_equivalence(
+            {"n": 5, "p_tost": 0.9, "direction": "better",
+             "beyond_margin": bad_beyond}, p_adj=0.01)
+        assert malformed["status"] == "significant_below_sesoi", (
+            bad_beyond, malformed)
     # no-op 的零差不是等价证据。
     noop = interpret_equivalence({"n": 5, "mean_diff": 0.0, "margin": 0.01,
                                   "p_tost": 0.0, "direction": "same",
