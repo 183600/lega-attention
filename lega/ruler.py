@@ -791,8 +791,10 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         if task.startswith("niah"):
                             # 目标箱与实际箱分开落盘：极端构造下插入位置可能
                             # 被干扰行边界挤到相邻箱，审计时不能把“计划分层”
-                            # 当成“实际分层”。
-                            rec["depth_target"] = target_depth
+                            # 当成“实际分层”。目标箱必须逐样例从构造结果读取：
+                            # 构造循环结束后循环变量只保留最后一个 i 的目标。
+                            rec["depth_target"] = ex.get(
+                                "meta", {}).get("depth_target")
                             # 位置分层只在 NIAH 有意义（vt 的 meta.depth 是
                             # 链深度而非 token 位置，不能混用）。
                             dval = ex.get("meta", {}).get("depth")
