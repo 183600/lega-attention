@@ -839,11 +839,11 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
         # 的 gold 根本没见过"错判成"模型看得到却没抄对"。
         cases = ana.get("cases")
         cases = cases if isinstance(cases, list) else []
-        cb_gic = [bool(c.get("gold_in_context"))
+        cb_gic = [c.get("gold_in_context")
                   for c in cases
                   if isinstance(c, dict)
                   and c.get("category") == "confident_bias"
-                  and c.get("gold_in_context") is not None]
+                  and isinstance(c.get("gold_in_context"), bool)]
         if cb_gic:
             gic = sum(cb_gic) / len(cb_gic)
             scope = "其中"

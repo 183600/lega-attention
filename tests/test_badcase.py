@@ -1461,6 +1461,13 @@ def test_window_improvement_synthesis_tolerates_malformed_cases_and_rate():
             "n_windows": 10, "category_counts": {"confident_bias": 10},
             "cases": [], "gold_in_context_rate": bad})
         assert isinstance(out, list) and out, (bad, out)
+    # 非布尔 gold_in_context（如字符串 "false"）不是可见性证据：不能因
+    # bool("false")==True 把长尾失败误判成“看得到却没抄对”。
+    out = synthesize_window_improvements({
+        "n_windows": 8, "category_counts": {"confident_bias": 8},
+        "cases": [{"category": "confident_bias", "gold_in_context": "false"}] * 8,
+        "gold_in_context_rate": 0.0})
+    assert any("大多不在上下文中" in r["trigger"] for r in out), out
     print("  [ok] 窗口改进方向：坏 cases/坏可见率安全降级")
 
 
