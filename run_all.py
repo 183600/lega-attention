@@ -988,6 +988,17 @@ def _same_protocol_value(a, b) -> bool:
     return _protocol_value(a) == _protocol_value(b)
 
 
+def _same_protocol_fields(a, b) -> bool:
+    """两侧协议字段集合必须一致，且共同字段逐项相同。
+
+    只比较交集会把“一方是旧产物、缺 eval_ctx/sample_seed”误当成可比：
+    缺失字段无法证明两侧用了同一批 token/样例，不能让它静默参与配对。
+    """
+    if set(a) != set(b):
+        return False
+    return all(_same_protocol_value(a[k], b[k]) for k in a)
+
+
 def _integral_value(value):
     """把外部 JSON 数值规范为整数；bool/非有限/小数返回 None。"""
     if isinstance(value, (bool, np.bool_)):
@@ -1910,8 +1921,7 @@ def _mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
 def _ruler_pair_protocol_ok(ra, rb) -> bool:
     """两个 RULER payload 是否共享题面/抽样/生成预算与已评测格集合。"""
     pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
-    common = set(pa) & set(pb)
-    if any(not _same_protocol_value(pa[k], pb[k]) for k in common):
+    if not _same_protocol_fields(pa, pb):
         return False
     ca, cb = _ruler_cell_signature(ra), _ruler_cell_signature(rb)
     return not (ca is not None and cb is not None and ca != cb)
@@ -2898,8 +2908,7 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
                 skipped += 1
                 continue
             pa, pb = _ppl_protocol(ea), _ppl_protocol(eb)
-            common = set(pa) & set(pb)
-            if any(not _same_protocol_value(pa[k], pb[k]) for k in common):
+            if not _same_protocol_fields(pa, pb):
                 skipped += 1
                 continue
             wa = _eval_window_losses(ea)
@@ -3868,9 +3877,7 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                     split_skipped += 1
                     continue
                 pa, pb = _ppl_protocol(ea), _ppl_protocol(eb)
-                common = set(pa) & set(pb)
-                if any(not _same_protocol_value(pa[k], pb[k])
-                       for k in common):
+                if not _same_protocol_fields(pa, pb):
                     protocol_skipped += 1
                     continue
             elif metric_name == "RULER平均" or metric_name.startswith("RULER:"):
@@ -3881,9 +3888,7 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                 # 逐任务分解（RULER:<task>）与综合平均必须走同一套可比性门槛，
                 # 否则会从不一致的样本数/评测格上得出“逐任务显著”的假结论。
                 pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
-                common = set(pa) & set(pb)
-                if any(not _same_protocol_value(pa[k], pb[k])
-                       for k in common):
+                if not _same_protocol_fields(pa, pb):
                     protocol_skipped += 1
                     continue
                 ca = _ruler_cell_signature(ra)
@@ -4359,8 +4364,8 @@ def _factorial_protocol_ok(maps, seed, metric) -> bool:
 
     交互对比同时用到全部 8 个格；只要任一格的 split/评测窗口或 RULER
     题面/生成预算/已评测单元不同，整条交互线就混入了非受控差异。判定
-    口径与 `_paired_comparisons` 一致：只比较双方都记录的字段，缺失
-    字段不伪造。
+    口径与 `_paired_comparisons` 一致：字段集合必须齐全且逐项相同，
+    缺失字段不能靠“只比较交集”蒙混过关。
     """
     slots = []
     for cell in _FACTORIAL_CONTRAST_CELLS:
@@ -4391,11 +4396,8 @@ def _factorial_protocol_ok(maps, seed, metric) -> bool:
         known = [sig for sig in sigs if sig is not None]
         if len(set(known)) > 1:
             return False
-    common = (set.intersection(*(set(p) for p in protocols))
-              if protocols else set())
     ref = protocols[0] if protocols else {}
-    return not any(not _same_protocol_value(ref[k], p[k])
-                   for p in protocols[1:] for k in common)
+    return all(_same_protocol_fields(ref, p) for p in protocols[1:])
 
 
 def _factorial_interaction_tests(runs) -> list:

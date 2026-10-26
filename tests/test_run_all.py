@@ -2110,7 +2110,17 @@ def test_paired_ppl_skips_eval_protocol_mismatch():
     assert len(out) == 1, out
     assert out[0]["n"] == 1, out
     assert out[0].get("excluded_protocol_mismatches") == 2, out
-    print("  [ok] PPL 配对：同 split 但 ctx/窗口数不一致的种子整对剔除")
+    # 一侧缺协议字段不是“共同字段一致”：无法证明用了同一批 token，整对剔除
+    runs_missing = {
+        "lega": {7: ev(10.0)},
+        "standard": {7: {"eval": {"ppl": 20.0, "split": "val",
+                                  "eval_ctx": 512}}},
+    }
+    out_missing = _paired_comparisons(
+        runs_missing, [("lega", "standard")], "PPL",
+        lambda slot: _ppl_of(slot.get("eval")), lower_better=True)
+    assert out_missing == [], out_missing
+    print("  [ok] PPL 配对：同 split 但 ctx/窗口数不一致或缺协议字段的种子整对剔除")
 
 
 def test_build_summary_renders_log_ppl_sensitivity():
@@ -2192,7 +2202,16 @@ def test_paired_ruler_skips_protocol_and_cell_mismatch():
         runs3, [("lega", "standard")], "RULER平均",
         lambda slot: _ruler_avg_of(slot.get("ruler")), lower_better=False)
     assert out3 == [], out3
-    print("  [ok] RULER 配对：协议/评测格/单元样本数不一致的种子整对剔除")
+    # 一侧缺抽样种子同样不可配对；不能只比较双方都有的字段
+    runs4 = {
+        "lega": {7: rul(0.8)},
+        "standard": {7: rul(0.5, sample_seed=None)},
+    }
+    out4 = _paired_comparisons(
+        runs4, [("lega", "standard")], "RULER平均",
+        lambda slot: _ruler_avg_of(slot.get("ruler")), lower_better=False)
+    assert out4 == [], out4
+    print("  [ok] RULER 配对：协议/评测格/单元样本数不一致或缺协议字段的种子整对剔除")
 
 
 def test_paired_ruler_per_task_skips_protocol_and_cell_mismatch():
@@ -5331,6 +5350,12 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
         "standard": {7: ev([2.0, 2.0], [0, 4], eval_ctx=20)},
     }
     assert _ppl_window_paired_tests(runs3, [("lega", "standard")]) == []
+    # 一侧缺协议字段同样跳过，不能只比较交集后静默配对
+    runs3b = {
+        "lega": {7: ev([1.0, 1.0], [0, 4])},
+        "standard": {7: ev([2.0, 2.0], [0, 4], val_windows=None)},
+    }
+    assert _ppl_window_paired_tests(runs3b, [("lega", "standard")]) == []
 
     # 1 个种子 × 3 个窗口：重采样自由度不足，只能报区间，不能宣称显著
     thin = {
@@ -5617,7 +5642,11 @@ def test_factorial_protocol_handles_unhashable_split_value():
     # 与其他 split（字符串）不一致时必须判为不可配对。
     maps["ABC"][1]["eval"]["split"] = "val"
     assert _factorial_protocol_ok(maps, 1, "PPL") is False
-    print("  [ok] 全因子协议核对：不可哈希 split 不再让汇总崩溃")
+    # 一格缺协议字段不是“共同字段一致”，不能继续做交互比较。
+    maps["ABC"][1]["eval"]["split"] = []
+    del maps["ABC"][1]["eval"]["eval_ctx"]
+    assert _factorial_protocol_ok(maps, 1, "PPL") is False
+    print("  [ok] 全因子协议核对：不可哈希 split/缺字段不再让汇总崩溃或误配")
 
 
 def test_parameter_matched_control_and_inference_shapley_wiring():
