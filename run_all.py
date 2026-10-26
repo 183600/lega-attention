@@ -7096,8 +7096,13 @@ def build_summary(results_dir: str, audit: dict = None,
             except OverflowError:
                 ratio_overflow = True
         t["ppl_ratio_overflow"] = bool(ratio_overflow)
-        t["ppl_delta_pct"] = ((t["ppl_ratio"] - 1.0) * 100.0
-                              if t["ppl_ratio"] is not None else None)
+        t["ppl_delta_pct"] = None
+        if t["ppl_ratio"] is not None:
+            delta_pct = (t["ppl_ratio"] - 1.0) * 100.0
+            # exp(Δ) 本身可表示时，再乘 100 仍可能溢出；派生百分比按缺失
+            # 处理，不能把 inf 写进 significance.json。
+            if math.isfinite(delta_pct):
+                t["ppl_delta_pct"] = delta_pct
         t["exploratory"] = True
     tests += log_tests
     tests += _paired_comparisons(

@@ -5584,6 +5584,25 @@ def test_log_ppl_ratio_unrepresentable_is_flagged_not_crash():
     print("  [ok] 汇总 log-PPL：不可表示的几何均值比标缺失而非崩溃")
 
 
+def test_log_ppl_delta_pct_overflow_is_dropped():
+    """exp(Δ) 可表示但 (ratio−1)×100 溢出时，派生百分比必须为 None。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        for seed in (1, 2, 3):
+            for variant, ppl in (("lega", 1e154), ("standard", 1e-154)):
+                _write_json(os.path.join(tmp, f"eval_{variant}_seed{seed}.json"), {
+                    "variant": variant, "seed": seed, "val_ppl": ppl,
+                    "val_loss": math.log(ppl), "gate_mean": 0.5,
+                    "n_params": 100, "n_gate_extra": 0, "split": "val",
+                    "eval_ctx": 16, "eval_iters": 4, "val_windows": 100,
+                    "val_tokens_evaluated": 64})
+        out = build_summary(tmp)
+        t = next(t for t in out["tests"]
+                 if t.get("metric") == "PPL(log)")
+        assert t["ppl_ratio"] is not None and math.isfinite(t["ppl_ratio"])
+        assert t["ppl_delta_pct"] is None, t
+    print("  [ok] 汇总 log-PPL：派生百分比换算溢出按缺失处理")
+
+
 def test_factorial_protocol_handles_unhashable_split_value():
     """eval.json 的 split 被手改成数组/对象时，交互检验不能因 set() 崩溃。"""
     from run_all import _FACTORIAL_CONTRAST_CELLS
