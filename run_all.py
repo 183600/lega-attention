@@ -1963,14 +1963,18 @@ def _length_trend_verdict(t: dict, kind: str) -> str:
         if delta is None:
             base = "无法检验（斜率/落差不可表示）"
             return base
+        delta_pp = delta * 100.0
+        # 有限输入乘 100 仍可能溢出（如 1e308），不能写出 +inf。
+        pp_text = (f"{delta_pp:+.2f}" if math.isfinite(delta_pp)
+                   else "溢出")
         if kind == "slope":
             direction = "增大" if delta > 0 else "减小"
             base = (f"优势随上下文长度显著{direction}"
-                    f"（每翻倍 {delta * 100.0:+.2f} pp，Holm p={padj:.4f}）")
+                    f"（每翻倍 {pp_text} pp，Holm p={padj:.4f}）")
         else:
             direction = "更长上下文更有利" if delta > 0 else "更长上下文更不利"
             base = (f"长−短上下文优势差显著（{direction}，"
-                    f"{delta * 100.0:+.2f} pp，Holm p={padj:.4f}）")
+                    f"{pp_text} pp，Holm p={padj:.4f}）")
     else:
         base = f"未检出长度趋势（Holm p={padj:.4f}）"
     # 与 _apply_holm 的通用 verdict 一致：t 与符号翻转置换结论冲突时必须

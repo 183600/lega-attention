@@ -588,6 +588,15 @@ def test_render_ruler_length_tolerates_malformed_nested_fields():
     assert "0 组斜率经 Holm 校正后显著" in text
 
 
+def test_length_trend_verdict_handles_scaled_overflow():
+    """有限均值×100 溢出时结论文案不能写出 inf。"""
+    test = {"mean_diff": 1e308, "p": 0.01, "p_adj": 0.01, "n": 3}
+    for kind in ("slope", "span"):
+        verdict = _length_trend_verdict(test, kind)
+        assert "inf" not in verdict and "nan" not in verdict
+        assert "溢出" in verdict
+
+
 def test_ruler_length_drops_seeds_with_different_context_grids():
     """各 seed 网格不一致时只保留恰好等于公共网格的种子并记账。"""
     runs = {"standard": {}, "lega": {}}
