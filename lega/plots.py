@@ -739,7 +739,7 @@ def fig_gate_hist(rdir, variant="lega"):
     g, hit = cols.get("g"), cols.get("hit")
     if g is None or hit is None or g.size == 0:
         return False
-    ok = np.isfinite(g)
+    ok = np.isfinite(g) & (g >= 0.0) & (g <= 1.0)
     g_hit = g[ok & (hit == 1.0)].tolist()
     g_miss = g[ok & (hit == 0.0)].tolist()
     if not g_hit and not g_miss:
@@ -767,7 +767,8 @@ def fig_calibration(rdir, variant="lega"):
     c, g, ln = cols.get("c"), cols.get("g"), cols.get("log_n")
     if c is None or g is None or ln is None:
         return False
-    m = np.isfinite(c) & np.isfinite(g) & np.isfinite(ln)
+    m = (np.isfinite(c) & np.isfinite(g) & np.isfinite(ln)
+         & (g >= 0.0) & (g <= 1.0))
     if int(m.sum()) < 20:
         return False
     c, g, ln = c[m], g[m], ln[m]

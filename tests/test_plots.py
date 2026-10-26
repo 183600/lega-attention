@@ -652,6 +652,27 @@ def test_fig_rate_plots_skip_out_of_range_values():
     print("  [ok] 比率/AUROC 图：越界值按缺失跳过")
 
 
+def test_fig_gate_and_calibration_skip_out_of_range_g():
+    """g 是 sigmoid 输出；越界值不能制造直方图/校准曲线的伪证据。"""
+    if not _HAS_MPL:
+        print("  [跳过] 无 matplotlib，跳过 g 越界值测试")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
+                  encoding="utf-8") as f:
+            f.write("task,g,hit,c,log_n\n")
+            for i in range(40):
+                f.write(f"x,1e308,{i % 2},{(i / 40.0) * 10},{i}\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert plots.fig_gate_hist(tmp, variant="lega") is False
+            assert plots.fig_calibration(tmp, variant="lega") is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 门控图/校准图：越界 g 按缺失跳过")
+
+
 def test_fig_ruler_skips_out_of_range_rates(monkeypatch):
     """EM/recall 是 [0,1] 比率；1e308 乘 100 会变成 inf 伪点。"""
     if not _HAS_MPL:
