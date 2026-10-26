@@ -98,6 +98,22 @@ def test_auroc_filters_nonfinite_like_average_precision():
     print("  [ok] auroc：非有限分数剔除（与 average_precision 同口径）")
 
 
+def test_auroc_ignores_non_binary_labels():
+    """非 0/1 标签必须整条剔除，不能占名次把 AUROC 推到 1 以上。
+
+    坏标签的分数若参与排序、却不进入 pos/neg，正类的秩会被抬高；旧实现
+    对下面的算例返回 1.5，超出 AUROC 的定义域 [0,1]。
+    """
+    scores = np.array([0.1, 0.0, 0.9, 0.8])
+    labels = np.array([0.0, 0.0, 1.0, 2.0])
+    assert abs(auroc(scores, labels) - 1.0) < 1e-12
+    assert math.isnan(auroc(scores, np.array([1.0, 2.0, 2.0, 2.0])))
+    # 与组合入口保持逐位一致
+    auc, ap = roc_pr_aucs(scores, labels)
+    assert abs(auc - 1.0) < 1e-12 and abs(ap - 1.0) < 1e-12
+    print("  [ok] auroc：非二值标签剔除，不产生越界 AUROC")
+
+
 def test_score_label_length_mismatch_is_rejected():
     """分数与标签必须一一对应：长度不同不能静默截断或多出标签。
 

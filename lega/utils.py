@@ -1357,8 +1357,10 @@ def auroc(scores, labels) -> float:
     必须与 `average_precision` 并报；正类率 <5% 时应以 PR-AUC 为主。
     """
     scores, labels = _score_label_arrays(scores, labels)
-    # 与 average_precision 同一口径：先剔除非有限分数。
-    m = np.isfinite(scores)
+    # 与 average_precision 同一口径：剔除非有限分数，并且只承认 0/1 标签。
+    # 非二值标签的分数若留在排序里，会占掉名次却既不算正类也不算负类，
+    # 使秩和超过最大值（例如 1 个正类、2 个负类、1 个坏标签可得到 1.5）。
+    m = np.isfinite(scores) & ((labels == 0.0) | (labels == 1.0))
     scores, labels = scores[m], labels[m]
     pos, neg = scores[labels == 1], scores[labels == 0]
     if len(pos) == 0 or len(neg) == 0:
