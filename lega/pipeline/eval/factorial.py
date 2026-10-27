@@ -17,7 +17,10 @@ def _detection_diff_tests(runs, key_cand: str, metric: str) -> list:
     out = []
     runs = runs if isinstance(runs, dict) else {}
     for v in sorted(runs):
-        if v not in VARIANTS:
+        # 机制分析只对 GATED_FOR_ANALYSIS 中的变体生成；补充对照
+        # （lega_raw / lega_raw_no_len / lega_detach_conc / null_zero）显式运行时
+        # 同样有 analysis JSON，不能按主矩阵 VARIANTS 过滤掉。
+        if v not in GATED_FOR_ANALYSIS:
             continue
         m = _variant_seed_map(runs, v)
         seeds = _sorted_seeds(m)

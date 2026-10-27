@@ -1374,6 +1374,31 @@ def test_auroc_diff_tests_family():
     print("  [ok] _auroc_diff_tests（配对差检验/置换粒度边界/家族校正）")
 
 
+def test_detection_diff_tests_include_supplemental_gated_variants():
+    """补充门控对照有 analysis JSON，机制族不能按主矩阵 VARIANTS 静默漏检。"""
+    def _slot(al, aq):
+        return {"analysis": {"auroc_logit": al, "auroc_qterm": aq}}
+
+    runs = {
+        "lega": {s: _slot(0.80, 0.70) for s in (1, 2, 3)},
+        "lega_raw": {s: _slot(0.78, 0.69) for s in (1, 2, 3)},
+        "lega_detach_conc": {s: _slot(0.77, 0.68) for s in (1, 2, 3)},
+        # 安慰剂不进入分析人群（GATED_FOR_ANALYSIS），即使手改产物也不混入。
+        "lega_placebo": {s: _slot(0.90, 0.60) for s in (1, 2, 3)},
+        "standard": {s: {} for s in (1, 2, 3)},
+    }
+    tests = _auroc_diff_tests(runs)
+    assert {t["candidate"] for t in tests} == {
+        "lega", "lega_raw", "lega_detach_conc"}, tests
+    # 设计层按同一分析人群规划 AUROC/AP 家族大小；实际检验数必须与之一致。
+    from lega.design.power import planned_family_sizes
+    sizes = planned_family_sizes(
+        ["lega", "lega_raw", "lega_detach_conc", "lega_placebo"],
+        analysis_variants=["lega", "lega_raw", "lega_detach_conc"])
+    assert sizes["auroc_family_size"] == len(tests), sizes
+    print("  [ok] _auroc_diff_tests 纳入补充门控变体（与设计家族一致）")
+
+
 def test_ap_diff_tests_family_and_registered_metric():
     """PR-AUC 机制族：不平衡主指标口径下的配对差检验（H7 的判定依据）。"""
     def _slot(al, aq):
