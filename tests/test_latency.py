@@ -158,11 +158,14 @@ def test_latency_wired_into_configs_and_runner():
         with open(os.path.join(ROOT, "configs", name), encoding="utf-8") as f:
             cfg = json.load(f)
         assert "latency" in cfg, f"configs/{name} 缺少 latency 配置块"
-    with open(os.path.join(ROOT, "run_all.py"), encoding="utf-8") as f:
-        src = f.read()
-    assert "lega.latency" in src, "run_all.py 未接入 lega.latency"
-    assert '"--seed", str(seeds[0])' in src, "run_all.py 未把首个种子传给 latency"
-    assert "tradeoff_verdict" in src, "run_all.py 未接入涨点-增幅权衡判定"
+    src = ""
+    for rel in (("lega", "pipeline", "train.py"),
+                ("lega", "pipeline", "report", "tables.py")):
+        with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
+            src += f.read()
+    assert "lega.latency" in src, "流水线未接入 lega.latency"
+    assert '"--seed", str(seeds[0])' in src, "流水线未把首个种子传给 latency"
+    assert "tradeoff_verdict" in src, "流水线未接入涨点-增幅权衡判定"
     print("  [ok] 结构与运行时基准已接入 configs/run_all/plots")
 
 

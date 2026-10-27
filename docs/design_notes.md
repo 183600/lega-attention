@@ -204,7 +204,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 
 精确行/块去重只覆盖逐字节（以及 NFKC/空白归一化后）相同的复制。真实语料中
 “改了几个词、删了一段”的近似复制更常见：它同样会让 train 记住 val/test 的
-内容，也会在 train 内部放大同一段文本的权重。`lega/datacheck.py` 的
+内容，也会在 train 内部放大同一段文本的权重。`lega/datacheck/` 的
 `decontaminate_near_duplicates` 在精确去重之后补一层近似重复筛查：
 
 - **表示**：NFKC + casefold + 空白折叠后取 UTF-8 字节 5-gram，集合去重；
@@ -522,7 +522,7 @@ margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的�
 ## 实验设计与准备（先验功效、分析人群与设计符合性）
 
 前面几节大多在**结果产生之后**做校正；但“这个实验值不值得跑、能回答什么”
-必须在开跑前决定。`lega/design.py` 因此把设计阶段的三件事变成可执行产物：
+必须在开跑前决定。`lega/design/` 因此把设计阶段的三件事变成可执行产物：
 
 1. **先验灵敏度**：在花训练算力之前，回答“计划种子数 / RULER 每格样本数
    能检出多大的效应”。配对 t（PPL/AUROC 的种子级比较）用与

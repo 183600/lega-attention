@@ -516,9 +516,9 @@ def test_build_summary_downgrades_confirmatory_on_missing_planned_seed():
                   "problems": [], "registry_sha256": "a" * 64,
                   "n_hypotheses": 1, "baseline_document_sha256": "b" * 64,
                   "chain_length": 0}
-        with mock.patch("run_all.load_registered_hypotheses",
+        with mock.patch("lega.pipeline.report.summary.load_registered_hypotheses",
                         return_value=reg), \
-                mock.patch("run_all.verify_registration",
+                mock.patch("lega.pipeline.report.summary.verify_registration",
                            return_value=intact):
             out = run_all.build_summary(tmp)
         md = out["markdown"]
