@@ -640,6 +640,28 @@ def test_length_null_n_trials_is_not_silently_clamped_or_truncated():
         length_null_report([8], n_trials=0)
 
 
+def test_length_null_seed_is_strict_and_range_checked():
+    """seed 是身份字段：拒绝 bool/小数/负数/超上限，与 utils.seed_int 同口径。"""
+    import pytest
+
+    from lega.length_null import (length_null_report,
+                                  simulate_concentration)
+
+    assert simulate_concentration(8, n_trials=1, seed=1.0).size == 1
+    assert simulate_concentration(8, n_trials=1, seed="7").size == 1
+    for bad in (True, False, 2.5, -1, 2 ** 32):
+        with pytest.raises(ValueError):
+            simulate_concentration(8, n_trials=1, seed=bad)
+        with pytest.raises(ValueError):
+            length_null_report([8], modes=("uniform",), n_trials=1, seed=bad)
+    # 报告内部派生 seed 会超过 32 位上限，不能因此拒绝合法的用户 seed。
+    rep = length_null_report([8, 16], modes=("uniform",), n_trials=1,
+                             seed=2 ** 32 - 1)
+    assert rep["seed"] == 2 ** 32 - 1
+    with pytest.raises(ValueError):
+        length_null_report([8], modes=("unknown",), n_trials=1)
+
+
 def test_length_null_random_context_concentration_grows_with_length():
     """零假设诊断：随机上下文下 c 随 log2(n) 增长，不能凭均匀特例说解耦。"""
     from lega.length_null import length_null_report

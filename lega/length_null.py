@@ -26,12 +26,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from numbers import Integral, Real
+from numbers import Integral
 from typing import Iterable, List
 
 import numpy as np
 
+from .utils import seed_int
+
 __all__ = ["simulate_concentration", "length_null_report", "main"]
+
+_MODES = ("random", "repeated", "uniform")
 
 
 def _positive_lengths(lengths: Iterable[int]) -> List[int]:
@@ -71,16 +75,9 @@ def _positive_float(value, name: str, *, allow_zero: bool = False) -> float:
     return out
 
 
-def simulate_concentration(length: int, *, score_sd: float = 1.0,
-                           mode: str = "random", n_trials: int = 2000,
-                           seed: int = 0) -> np.ndarray:
-    """返回 ``n_trials`` 个 c = log(n) + log(max softmax p) 样本。"""
-    length = _positive_lengths([length])[0]
-    score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
-    n_trials = _positive_count(n_trials, "n_trials")
-    if mode not in ("random", "repeated", "uniform"):
-        raise ValueError(f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
-    rng = np.random.default_rng(int(seed))
+def _simulate_concentration(length: int, *, score_sd: float, mode: str,
+                            n_trials: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
     if mode == "uniform":
         scores = np.zeros((n_trials, length), dtype=np.float64)
     elif mode == "repeated":
@@ -96,6 +93,20 @@ def simulate_concentration(length: int, *, score_sd: float = 1.0,
     p /= p.sum(axis=1, keepdims=True)
     max_p = p.max(axis=1)
     return np.log(float(length)) + np.log(np.maximum(max_p, 1e-300))
+
+
+def simulate_concentration(length: int, *, score_sd: float = 1.0,
+                           mode: str = "random", n_trials: int = 2000,
+                           seed: int = 0) -> np.ndarray:
+    """返回 ``n_trials`` 个 c = log(n) + log(max softmax p) 样本。"""
+    length = _positive_lengths([length])[0]
+    score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
+    n_trials = _positive_count(n_trials, "n_trials")
+    if mode not in _MODES:
+        raise ValueError(f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
+    seed = seed_int(seed, "seed")
+    return _simulate_concentration(length, score_sd=score_sd, mode=mode,
+                                   n_trials=n_trials, seed=seed)
 
 
 def _summary(values: np.ndarray) -> dict:
@@ -127,16 +138,21 @@ def length_null_report(lengths: Iterable[int], *, score_sd: float = 1.0,
     modes = tuple(modes)
     score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
     n_trials = _positive_count(n_trials, "n_trials")
+    seed = seed_int(seed, "seed")
+    for mode in modes:
+        if mode not in _MODES:
+            raise ValueError(
+                f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
     out = {"lengths": lengths, "score_sd": float(score_sd),
-           "n_trials": n_trials, "seed": int(seed),
+           "n_trials": n_trials, "seed": seed,
            "modes": {}}
     for mode in modes:
         per = {}
         means = []
         for i, n in enumerate(lengths):
-            vals = simulate_concentration(
+            vals = _simulate_concentration(
                 n, score_sd=score_sd, mode=mode, n_trials=n_trials,
-                seed=int(seed) + 1000003 * i)
+                seed=seed + 1000003 * i)
             per[str(n)] = _summary(vals)
             means.append(per[str(n)]["mean"])
         slope = _slope(lengths, means)
