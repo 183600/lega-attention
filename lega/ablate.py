@@ -131,6 +131,15 @@ LESION_SPECS = (
                 "而非整体缩放",
     },
     {
+        "id": "conc_permute", "label": "集中度证据在序列维置换（分布匹配）",
+        "target": "c 的位置对应关系", "kind": "conc_permute",
+        "params": (), "requires": ("conc",),
+        "expected": "worse",
+        "note": "逐位置 c 的多重集、均值/方差与长度分布完全不变，只把 c "
+                "沿序列维循环移位；若仍显著变差，可排除“门控容量/尺度”"
+                "解释。该病灶是推理期临时属性，restore 时清除。",
+    },
+    {
         "id": "head_permute", "label": "门参数在头间置换（安慰剂）",
         "target": "头—证据对应关系", "kind": "head_permute",
         "params": (), "requires": ("gated", "multi_head"),
@@ -267,11 +276,16 @@ def snapshot_gate_params(model) -> Dict[str, torch.Tensor]:
 def restore_gate_params(model, snapshot: Mapping[str, torch.Tensor]) -> None:
     """把门控参数恢复到快照；缺失/形状不符显式报错（不能静默留下病灶）。
 
+    同时清除 ``conc_permute`` 这类不写入参数的推理期临时属性，避免病灶
+    在后续评测中残留（仅恢复参数不足以撤销前向 hook）。
+
     形状不符时 ``copy_`` 会按广播规则写入而不报错，可能只改一部分门控值；
     恢复失败必须显式暴露，不能把被污染的模型继续用于后续病灶评测。
     """
     if not snapshot:
         raise ValueError("门控参数快照为空：该模型没有可恢复的门控参数")
+    for m in gate_modules(model):
+        m.conc_permute_shift = None
     seen = set()
     with torch.no_grad():
         for name, p in model.named_parameters():
@@ -331,6 +345,9 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
     kind = spec["kind"]
     changed = 0
     max_delta = 0.0
+    # 先清除上一次可能残留的临时置换属性；参数病灶恢复由调用方负责。
+    for m in mods:
+        m.conc_permute_shift = None
 
     def _record(old, new):
         nonlocal changed, max_delta
@@ -414,6 +431,12 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
                 else:
                     m.gate_d.fill_(d_value)
                 _record(old, m.gate_d.detach())
+        elif kind == "conc_permute":
+            for li, m in enumerate(mods):
+                # 非零位移才不是空操作；不同层用不同位移，避免所有层同步
+                # 置换导致“整层证据一起错位”恰好抵消。
+                m.conc_permute_shift = 1 + (int(perm_seed) + li) % 7
+                changed += 1
         elif kind == "head_permute":
             for li, m in enumerate(mods):
                 H = int(m.n_heads)

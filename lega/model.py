@@ -804,6 +804,12 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
         "lega_len_only": 2,           # b, d
         # 参数匹配安慰剂与 lega 的门控参数形状完全相同（w, a, b, d）。
         "lega_placebo": d_head + 3,   # w, a, b, d（证据为噪声，参数量相同）
+        # 补充对照：raw 与归一化版本使用同一组 (w, a, b, d) 形状。
+        "lega_raw": d_head + 3,
+        "lega_raw_no_len": d_head + 2,
+        "lega_detach_conc": d_head + 3,
+        # 固定零 value 只保留可学习的 null 键（value 是 buffer）。
+        "null_zero": d_head,
     }[variant]
     return per * n_heads * n_layers
 

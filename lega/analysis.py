@@ -5,9 +5,14 @@
 对每个 (层, 头, 问题区查询位) 收集：
   max_p   本次注意力最大概率（集中度）
   hit     注意力落点 argmax 是否落在答案数值 token 跨度内（是否找对）
+          ——这是“注意力是否盯住答案位置”的代理标签，**不等于该头写入
+          残差流是否有用**：读取键名/语法/VT 中间变量、或命中但 value
+          投影无益，都不会被这个标签识别。
   g/logit 门控值与门控 logit（gated 变体）
   qterm   查询项 w·q（若有）；c = log n + log max_p（含集中度项的全部变体，
           包括去长度项/仅集中度消融——a·c 的长度归一化不能随 b·log n 一起消失）
+  qterm_bias 只含查询项与逐头偏置的 w·q + d。完整 logit 与 qterm 的全局
+          AUC/AP 差会混入逐头偏置 d 的排序效应；必须同时对照 qterm_bias。
 
 关键指标：
   misleading_rate      集中但看错: P(max_p > τ 且 ¬hit)
@@ -24,7 +29,7 @@
   gate_f1_trivial      恒写/恒不写两个固定规则的 F1（无阈值“稻草人”对照）：
                        不平衡下学习到的门控 F1 必须比多数类规则更有信息量，
                        否则门控的“决策价值”无从谈起
-  calibration_g        门控 g 的概率校准：Brier（严格评分规则）、ECE/MCE
+  calibration_g        门控 g 与 hit 标签的数值关系：Brier（严格评分规则）、ECE/MCE
                        （等宽分箱与等频分箱两套口径）与常数基率 Brier 基线。
                        等宽箱在分数聚集/小样本时可能大量为空，等频箱提供
                        对分箱选择不敏感的第二组证据；Brier 另给 Murphy 分解
@@ -32,7 +37,10 @@
                        常数时另报 brier_binning 箱内项）。排序指标
                        （AUROC/PR-AUC）回答“能不能区分”，校准回答“g=0.8
                        时命中率是否真的约 80%”；g 被当作软权重/概率使用，
-                       两者都要看。
+                       两者都要看。**但 g 不是用 hit 标签训练的概率**：它是
+                       语言建模目标下的输出缩放系数，sigmoid 值域本身不赋予
+                       “g=0.8 即 80% 命中率”的含义；Brier/ECE 只能描述
+                       g 与这个代理标签的关系，不能证明门控学会了可靠写入。
   linear_probe         同特征集（log max_p、log n、qterm）的 L2 逻辑回归
                        **简单监督基线**：按样例分组并按标签分层的嵌套 CV，
                        标准化统计只用训练折；λ 在内层 OOF 上按主指标
@@ -252,6 +260,12 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
             # H 倍数据；单独整表堆叠一次转回设备（单次传输），消费时按层取。
             log_ns_all = torch.stack([st["log_n"][qs:qe].float()
                                       for st in out["gate_stats"]]).cpu().tolist()
+            # 逐头门控偏置 d：完整 logit = qterm + 证据项 + d。机制主张若要
+            # 把“完整 logit 优于纯查询”归因于证据项，必须把 d 也放回查询
+            # 侧基线，否则不同头命中率先验会污染全局排序指标。
+            bias_all = [None if st.get("gate_bias") is None else
+                        st["gate_bias"][0].view(-1).float().cpu().tolist()
+                        for st in out["gate_stats"]]
             for li, (st, merged) in enumerate(zip(out["gate_stats"], merged_all)):
                 layer = st["layer"]
                 it = iter(merged)
@@ -267,6 +281,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                 g_l = g.tolist() if g is not None else None
                 logit_l = logit.tolist() if logit is not None else None
                 qterm_l = qterm.tolist() if qterm is not None else None
+                bias_l = bias_all[li]
                 for h in range(model.n_heads):
                     mp_h = mp_l[h]
                     hit_h = hit_l[h] if hit_l is not None else None
@@ -287,6 +302,10 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                             rec["logit"] = logit_h[i]
                         if qterm_h is not None:
                             rec["qterm"] = qterm_h[i]
+                            if bias_l is not None:
+                                rec["qterm_bias"] = qterm_h[i] + bias_l[h]
+                        if bias_l is not None:
+                            rec["gate_bias"] = bias_l[h]
                         if use_c_full:
                             rec["c"] = ln_i + math.log(max(mp_i, 1e-30))
                         records_by_ex[ex_idx].append(rec)
@@ -434,7 +453,7 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
            "ci_level": float(ci), "ci95": {}, "n_valid_resamples": None}
     if len(ex_ids) < 2:
         return out
-    score_keys = [k for k in ("logit", "qterm", "c")
+    score_keys = [k for k in ("logit", "qterm", "qterm_bias", "c")
                   if any(_finite_float(r.get(k)) is not None
                          for cl in clusters.values() for r in cl)]
     if not score_keys:
@@ -462,6 +481,8 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
     samples.update({f"ap_{k}": [] for k in score_keys})
     samples["logit_minus_qterm"] = []
     samples["ap_logit_minus_qterm"] = []
+    samples["logit_minus_qterm_bias"] = []
+    samples["ap_logit_minus_qterm_bias"] = []
     n_valid = 0
     for _ in range(int(n_resamples)):
         idx = rng.integers(0, len(ex_ids), len(ex_ids))
@@ -489,6 +510,14 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             n_valid += 1
         if aps.get("logit") is not None and aps.get("qterm") is not None:
             samples["ap_logit_minus_qterm"].append(aps["logit"] - aps["qterm"])
+        if vals.get("logit") is not None \
+                and vals.get("qterm_bias") is not None:
+            samples["logit_minus_qterm_bias"].append(
+                vals["logit"] - vals["qterm_bias"])
+        if aps.get("logit") is not None \
+                and aps.get("qterm_bias") is not None:
+            samples["ap_logit_minus_qterm_bias"].append(
+                aps["logit"] - aps["qterm_bias"])
     alpha = (1.0 - float(ci)) / 2.0
     for k, vals_list in samples.items():
         if len(vals_list) < 10:
@@ -510,6 +539,7 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     g = _probability_arrays(records, "g")
     logit = _record_arrays(records, "logit")
     qterm = _record_arrays(records, "qterm")
+    qterm_bias = _record_arrays(records, "qterm_bias")
     c = _record_arrays(records, "c")
     log_n = _record_arrays(records, "log_n")
 
@@ -571,17 +601,32 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
                         if (~np.isnan(g[hit == 0])).any() else None),
         "auroc_logit": _auroc(logit, hit, hv),
         "auroc_qterm": _auroc(qterm, hit, hv),
+        "auroc_qterm_bias": _auroc(qterm_bias, hit, hv),
         "auroc_c": _auroc(c, hit, hv),
         "auroc_maxp": _auroc(max_p, hit, hv),
         "auroc_logn": _auroc(log_n, hit, hv),
         "auprc_logit": _auprc(logit, hit, hv),
         "auprc_qterm": _auprc(qterm, hit, hv),
+        "auprc_qterm_bias": _auprc(qterm_bias, hit, hv),
         "auprc_c": _auprc(c, hit, hv),
         "auprc_maxp": _auprc(max_p, hit, hv),
         "auprc_logn": _auprc(log_n, hit, hv),
         "corr_c_g": (pearson(c, g) if (~np.isnan(c)).any() and (~np.isnan(g)).any() else None),
         "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
         "corr_qterm_g": (pearson(qterm, g) if (~np.isnan(qterm)).any() and (~np.isnan(g)).any() else None),
+        "corr_qterm_bias_g": (pearson(qterm_bias, g)
+                              if (~np.isnan(qterm_bias)).any()
+                              and (~np.isnan(g)).any() else None),
+        "gate_is_hit_probability": False,
+        "gate_calibration_note": (
+            "g 由语言建模损失训练，从未使用 hit 标签或概率校准目标；"
+            "Brier/ECE 只描述 g 与“注意力 argmax 命中答案跨度”这一代理"
+            "标签的数值关系，不能据此声称 g 是校准的写入概率。"
+            "写入效用需用逐头/逐位置输出干预对答案 NLL/任务表现的因果"
+            "效应单独测量。"),
+        "hit_label_note": (
+            "hit=注意力 argmax 落在答案数值跨度内，是检索行为的代理，"
+            "不是“该头输出值得写入”的效用标签。"),
     })
     # 门控决策点（g > 0.5 ⇒ 预测“这次写入是对的”）的分类指标。
     # 只对有效（有 hit 标签）且有门控 g 的记录计算；F1 必须注明平均口径。
@@ -670,10 +715,12 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         group_idx = group_idx.reshape(-1)
         g_v, hit_v, c_v = g[lh_ok], hit[lh_ok], c[lh_ok]
         qterm_v, logit_v, max_p_v = qterm[lh_ok], logit[lh_ok], max_p[lh_ok]
+        qterm_bias_v = qterm_bias[lh_ok]
     for gi, (layer, head) in enumerate(groups if lh_ok.any() else []):
         m = group_idx == gi
         gg, hh, cc = g_v[m], hit_v[m], c_v[m]
         qq, ll, mp = qterm_v[m], logit_v[m], max_p_v[m]
+        qb = qterm_bias_v[m]
         hv = ~np.isnan(hh)
 
         def _auroc(scores, labels, mask):
@@ -697,10 +744,15 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
             "hit_rate": float(np.nanmean(hh)) if hv.any() else None,
             "corr_c_g": pearson(cc, gg) if (~np.isnan(cc)).any() and (~np.isnan(gg)).any() else None,
             "corr_qterm_g": pearson(qq, gg) if (~np.isnan(qq)).any() and (~np.isnan(gg)).any() else None,
+            "corr_qterm_bias_g": (pearson(qb, gg)
+                                  if (~np.isnan(qb)).any()
+                                  and (~np.isnan(gg)).any() else None),
             "auroc_logit": _auroc(ll, hh, hv),
             "auroc_qterm": _auroc(qq, hh, hv),
+            "auroc_qterm_bias": _auroc(qb, hh, hv),
             "auprc_logit": _auprc(ll, hh, hv),
             "auprc_qterm": _auprc(qq, hh, hv),
+            "auprc_qterm_bias": _auprc(qb, hh, hv),
         })
     summary["per_head"] = per_head
     return summary

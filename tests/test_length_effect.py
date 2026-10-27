@@ -618,3 +618,18 @@ def test_ruler_length_drops_seeds_with_different_context_grids():
     assert abs(pair["overall_mean_diff"] - 0.1) < 1e-12
     assert abs(pair["context_average_mean_diff"] - 0.1) < 1e-12
     assert pair["balanced_contexts"] is True
+
+
+def test_length_null_random_context_concentration_grows_with_length():
+    """零假设诊断：随机上下文下 c 随 log2(n) 增长，不能凭均匀特例说解耦。"""
+    from lega.length_null import length_null_report
+    rep = length_null_report([32, 64, 128, 256], score_sd=1.0,
+                             modes=("random", "repeated", "uniform"),
+                             n_trials=500, seed=7)
+    random_slope = rep["modes"]["random"]["slope_c_per_log2_n"]
+    assert random_slope is not None and random_slope > 0.1
+    assert rep["modes"]["random"]["length_independent"] is False
+    # 重复上下文与均匀注意力是零斜率特例；报告必须保留这两个对照，
+    # 以免把“均匀时 c=0”误读成一般情况下的长度解耦。
+    assert abs(rep["modes"]["repeated"]["slope_c_per_log2_n"]) < 0.05
+    assert rep["modes"]["uniform"]["slope_c_per_log2_n"] == 0.0

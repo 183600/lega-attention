@@ -25,7 +25,7 @@ $$
 
 ### 1.2 设计直觉
 
-- **c 的性质**：均匀注意力下 $\max_j p_j = 1/n$，故 $c = \log(n\cdot 1/n) = 0$，**与上下文长度无关**。因此 $c$ 度量的是"超出均匀分布的证据集中度"，把"读得集中"和"读得长"这两个混淆因素解耦了。
+- **c 的性质**：均匀注意力下 $\max_j p_j = 1/n$，故 $c = \log(n\cdot 1/n) = 0$。但这只是**均匀分布特例**：一般注意力下 $\max_j p_j$ 未必按 $1/n$ 收缩，$c$ 仍可能随长度增长。因此 $c$ 不能被宣称为"已与长度解耦的充分统计量"；`lega/length_null.py` 给出随机/重复/均匀上下文的零假设诊断，正式主张必须同时报告 $c\sim\log_2 n$ 的斜率，不能只引用均匀情形的单元测试。
 - **b·log n 是长度校准项**：即使集中度 $c$ 相同，长上下文中一次"集中读取"的可信度与短上下文不同。$b$ 让每个头自己学出这条长度校准曲线。
 - **w·q 保留内容语义**：门不是纯统计规则，查询向量仍然参与判断。
 - **初始化**：$w=a=b=0,\ d=2.0$，初始 $g\approx\sigma(2)\approx 0.88$，接近标准注意力，训练稳定启动。
@@ -76,7 +76,7 @@ ABC/`lega`）与去一法（Full/Full−A/Full−B/Full−C）全部实现；无
 
 - **数据协议（防泄漏，全部可审计）**：
   1. **先划分后预处理**：先产出 train/val/test 文本再编码；字符级词表（特征工程）只在 train 上拟合，val/test 只做 transform，未见字符统一映射 `<unk>`（GPT-2 BPE 是公开预训练词表，不依赖本项目数据）；
-  2. **时序划分**：`--local_txt` 按时间先后切分——最早 80% 训练、其后 10% 验证、最新 10% 测试；切点对齐文档边界（标题行 > 空行段落 > 换行），划分时绝不随机打乱（训练阶段对训练样本的 batch 级随机采样不构成泄露）；WikiText-103 官方 split 按文档划分，天然 held-out；
+  2. **划分协议**：`--local_txt` 才按输入顺序做“时序式”切分——最早 80% 训练、其后 10% 验证、最新 10% 测试；切点对齐文档边界（标题行 > 空行段落 > 换行），绝不随机打乱。默认 WikiText-103 官方 split 是**按文档划分**，只保证文档不跨 split，**不保证时间先后**，不能写成“时序外推”或“未来数据”证据；若来源本身含基准测试文本，官方 split 也不能替代下游基准去污染。所有模式都必须通过跨 split 长行/近似重复核对，失败时拒绝写出（`--allow_leaky_split` 仅供诊断）。
   3. **群组不跨侧**：以文档/段落为整体单位，同一文档只落在一个 split；与 val/test 精确/NFKC-空白归一化重复的训练行、多行块自动去污染，并进一步用**近似重复筛查**（UTF-8 字节 5-gram MinHash + LSH 找候选，候选对精确算 Jaccard/containment；跨 split 取 max(Jaccard, containment)，train 内部只用 Jaccard；协议阈值 0.80，报告同时给 0.70/0.80/0.90 三档敏感性与 LSH 理论召回率）只删 train 侧副本（val/test 保持尘封不改写）；另用采样 64-gram 哈希筛查跨 split 的逐 token 复制；
   4. **清洗与异常检查**：坏字符（U+FFFD/NUL/非法控制符）确定性清除；token 流做整数/有限/id 越界硬校验；重复样本、超长行、train 与 val/test 的一元分布漂移（TV/JS、OOV）全部写入 `data_report.json`；
   5. **测试集尘封**：checkpoint 选择与早停只用 val，test 只在最终评估时访问；每次 test 评测写入 `data_dir/.test_access_log.jsonl` 账本，汇总表报告累计次数与被重复评测的 checkpoint。
@@ -85,7 +85,7 @@ ABC/`lega`）与去一法（Full/Full−A/Full−B/Full−C）全部实现；无
 - **对简单基线的显著性（补充性对比）**：`--ngram_split` 默认 `auto`，与神经评测同一规则（有非空 `test.bin` → test，否则 val），从根上避免 val 评测的神经模型与 test 基线的错位比较；**同 split 还不够，必须同 token**——神经 PPL 只在 `eval_iters` 个等间隔窗口的目标 token 上计算，n-gram 因此同时报告逐位置对齐口径 `ppl_window_matched`（`lega.ngram.window_positions` 与 `train._val_eval_indices` 同规则，评分位置为每个窗口的 `s·ctx+1..s·ctx+ctx`），汇总优先用对齐参考；任一 run 的 `eval_ctx/eval_iters/val_windows` 与窗口规格不符（历史产物等）时整体回退全 split 参考并在汇总页显式披露 `fallback_reason`（同一 Holm 家族共用同一参考值）。汇总页把**每个变体逐种子 PPL 与同一常数基线做单样本配对检验**（n-gram 无种子方差），按变体家族 Holm 校正，输出比值/相对降低/p_adj/判定；split 不一致的变体单列为“未纳入比较”，绝不混进表里。此对比未预注册，标注为探索性证据，不替代变体间受控配对检验。
 - **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std** 与配对 Cohen's d 效应量（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对的双侧 t 检验在同一指标家族内做 **Holm–Bonferroni 校正**（控制多重比较 FWER），结论一律基于校正后 p 值（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益；每项配对同时给出 MDE 与效应/噪声比（|Δ|/ΔSD），**|Δ| 小于逐种子配对差标准差时显式标注为“噪声内”的边缘证据**，即使校正后显著也不当作稳健收益。
 - **实际意义与等价性（SESOI/TOST）**：显著性检验只回答“能否拒绝 Δ=0”；p>0.05 既可能是“没有实际重要差异”，也可能只是功效不足。`lega/equivalence.py` 在协议 SESOI（PPL 逐种子相对差 1%、RULER EM 1.00 pp、AUROC/PR-AUC 差 0.010、因果 ΔNLL 0.01 nat）上做配对 TOST：只有 90% 区间完全落在 ±SESOI 内才判“等价”，单侧支持才判“非劣”；统计显著但幅度低于 SESOI 标为“实际意义有限”；区间跨过 0 或 SESOI 只能写“未定”，不能写成“无差异”。TOST p 在同一指标家族内单独 Holm 校正，0.5×/1×/2× margin 网格各自校正并并列披露；**SESOI 是分析前声明的协议约定而非数据估计**，等价性判定不改变预注册的优效性判定；该分析当前未写入预注册锁链，按补充性/描述性证据解读，升级为确认性主张须先登记 margin 与对比并在新数据上检验。`summary.md` 新增“SESOI 与等价性/非劣性”和“关键病灶的 SESOI 解读”两节，`significance.json` 的 `pairs[*].equivalence` 与顶层 `equivalence` 可机器读取；`head_permute` 安慰剂只有在 TOST 判等价时才能说“差异小于 SESOI”，p>0.05 不能直接写成“安慰剂无效应”。
-- **推理期因果消融（训练后病灶，回答“训练好的模型是否真的在用该组件”）**：训练期全因子/去一法消融改变优化轨迹，不能证明最终前向仍在使用某组件。`lega/ablate.py` 在**同一 checkpoint、同一批 val 窗口**上只改门控参数并逐窗口配对：`no_query/no_conc/no_len/no_evidence` 是训练期去一法的推理期对应；`gate_open/gate_closed` 检验门控写回强度（后者是“关闭注意力输出必须显著变差”的阳性对照）；`gate_constant_mean` 保留每个头/层的平均写入强度、去掉逐位置/逐查询变化；`head_permute` 在参数个数/分布/结构完全不变的前提下打乱头—证据对应，是容量解释的**安慰剂对照**；`sign_flip` 保留幅度、反转证据方向。病灶后逐位恢复，`no_op`（系数训练后已为 0）如实标注——“无差异”不是“无效应”的证据。窗口级 p 仅描述单 run；汇总先按种子聚合 ΔNLL，再跨种子配对 t + Holm（`significance.json.causal_ablation`）。默认只在 val 上做（test 尘封，val 是选型集，只作机制定位）。训练期显著而推理期病灶无差异，说明收益可能来自训练期优化/正则化；推理期显著而训练期不显著，则提示训练期消融被再训练补偿——两种证据并列，不能互相替代。边界：`head_permute` 是**推理期**容量/分布安慰剂，不是训练期参数量匹配对照；`no_evidence` 保留全部参数、只关证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数是否带来优化红利”这一混淆，需与参数开销、单因素消融合读。
+- **推理期因果消融（训练后病灶，回答“训练好的模型是否真的在用该组件”）**：训练期全因子/去一法消融改变优化轨迹，不能证明最终前向仍在使用某组件。`lega/ablate.py` 在**同一 checkpoint、同一批 val 窗口**上只改门控参数并逐窗口配对：`no_query/no_conc/no_len/no_evidence` 是训练期去一法的推理期对应；`gate_open/gate_closed` 检验门控写回强度（后者是“关闭注意力输出必须显著变差”的阳性对照）；`gate_constant_mean` 保留每个头/层的平均写入强度、去掉逐位置/逐查询变化；`head_permute` 在参数个数/分布/结构完全不变的前提下打乱头—证据对应，是容量解释的**安慰剂对照**；`conc_permute` 把逐位置 `c` 沿序列维循环移位，保持 c 的逐值分布/均值/方差/长度分布不变，只破坏位置对应，回答“收益是否来自容量/尺度”而不是证据位置；`sign_flip` 保留幅度、反转证据方向。病灶后逐位恢复，`no_op`（系数训练后已为 0）如实标注——“无差异”不是“无效应”的证据。窗口级 p 仅描述单 run；汇总先按种子聚合 ΔNLL，再跨种子配对 t + Holm（`significance.json.causal_ablation`）。默认只在 val 上做（test 尘封，val 是选型集，只作机制定位）。训练期显著而推理期病灶无差异，说明收益可能来自训练期优化/正则化；推理期显著而训练期不显著，则提示训练期消融被再训练补偿——两种证据并列，不能互相替代。边界：`head_permute` 是**推理期**容量/分布安慰剂，不是训练期参数量匹配对照；`no_evidence` 保留全部参数、只关证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数是否带来优化红利”这一混淆，需与参数开销、单因素消融合读。
 - **全因子 Shapley 分解（交互感知的补充归因，探索性）**：单因素边依赖参照格，交互非零时“加入 X 的收益”在 `gate_only` 与 `Full` 基准下并不相同。`lega/factorial.py` 对门控内 8 格做精确 Shapley 分解：PPL 在 `−log(PPL)` 上分解（φ>0 表示降低 PPL，`exp(−φ)` 即 PPL 几何均值比），RULER 用原始 EM；效率性保证 `φ_A+φ_B+φ_C=Full−none`，交互被平均分摊到参与因子。逐种子算 φ，再同种子配对 t + 同指标 Holm；占比只在总效应为正时报告，不强行归一化。该分解未预注册，不能替代预注册的单因素确认检验；与单因素边方向冲突时并列披露。
 - **预注册与防事后改写（confirmatory vs exploratory）**：正式实验前把方向性主张登记在 `preregistration/hypotheses.json`（**刻意不放 `docs/`**：流水线清理会删除该目录下除 `design_notes.md` 外的文件，该登记表曾被自动清理提交多次误删），汇总时逐条对照 Holm 校正后的同种子配对检验，判定 支持 / 拒绝（方向相反且显著=被证伪）/ 未定（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与 `significance.json`；未登记的对比一律属事后（exploratory），只能作为线索。登记表由 `preregistration/hypotheses.lock.json` 防篡改：锁基线记录整文档 SHA-256 与**逐假设科学内容摘要**，修订必须经 `python -m lega.hypotheses --amend --reason ...` 在**修订链**上留痕（既有假设只增不改不删）。删除登记表、改写 claim、调换变体对、删条目或未留痕新增，都会被 `--verify`／汇总页判为 `violated`，并**自动把全部确认性判定降级为探索性**；登记表的意外删除与恢复/迁移事件本身也必须在 amendments 中留痕（本项目已发生过一次清理误删，见 `docs/design_notes.md`）。锁链完整还不够：汇总页还做**预注册范围核对**——登记表里的 `scope`（配置规模、数据/分词器、种子计划）必须与本次实跑（`repro.json` 的 `config_file`/数据指纹/种子）对上；tiny/冒烟/伪数据/非同登记分词器都会判为范围外，确认性判定同样自动降级（调优注入 lr/权重衰减属协议内，不算越界；未登记种子只警告）。
 - **三个评测维度**：
@@ -172,7 +172,7 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 | `results/<tag>/baseline_tuning.json` | 基线（standard）lr/权重衰减调优证据（仅验证集；含 `default_is_optimal` 近优判定、`selection_seeds`/逐种子 val_loss 明细与逐 trial 训练溯源） |
 | `results/<tag>/ngram_baseline.json` | 简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL（α/λ 在 val 上联合选，`selected_model` 取 val 最强；test 需显式开锁；流水线默认与神经评测同 split） |
 | `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）、`registration_scope`（范围核对：配置规模/分词器/种子计划）、`registered_hypotheses`（逐条判定，早停/完整性/范围未过则降级）与 `factorial_interactions`（全因子交互检验，含 `training_budget` 早停可比性标记）；另含 `factorial_shapley`（交互感知的全因子 Shapley 分解）、`causal_ablation`（推理期病灶的跨种子配对检验）与 `equivalence`/`pairs[*].equivalence`（SESOI/TOST 等价性、非劣性、90%/95% 区间、0.5×/1×/2× margin 敏感性及 Holm 校正）；另含 `ngram_comparison`（逐变体 vs 简单基线单样本配对检验） |
-| `results/<tag>/ablation_*.json` | **推理期因果病灶消融**（默认 `lega,qgate`，`--ablate_variants` 可扩展）：同一 checkpoint/同一批 val 窗口上的 `no_query/no_conc/no_len/no_evidence`、`gate_open/closed/constant_mean`、`head_permute`（安慰剂）、`sign_flip` 干预；含逐窗口 ΔNLL、PPL 比、门控统计、`no_op` 标记与溯源 |
+| `results/<tag>/ablation_*.json` | **推理期因果病灶消融**（默认 `lega,qgate`，`--ablate_variants` 可扩展）：同一 checkpoint/同一批 val 窗口上的 `no_query/no_conc/no_len/no_evidence`、`gate_open/closed/constant_mean`、`head_permute`（头参数安慰剂）、`conc_permute`（c 分布匹配置换）、`sign_flip` 干预；含逐窗口 ΔNLL、PPL 比、门控统计、`no_op` 标记与溯源 |
 | `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合（含训练停滞+验证回升的平台期）/过拟合趋势（训练降而验证停滞）/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe）+ 粗归因轴计数 + **改进方向**（触发证据→建议→下一步实验） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现）+ **改进方向** |
@@ -255,7 +255,7 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M 参数冒烟配置（CPU 可跑）
 │   └── small.json             # ~30M 参数正式配置（单卡数小时/变体）
 ├── lega/
-│   ├── attention.py           # 核心：10 个变体的因果注意力（LEGA 门控公式与消融矩阵在此）
+│   ├── attention.py           # 核心：10 个主变体 + 5 个补充/对照的因果注意力（LEGA 门控公式与消融矩阵在此）
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底，词表只在 train 拟合）+ bin 缓存 + 批采样
 │   ├── datacheck.py           # 防泄漏：时序/文档划分、精确+近似去污染、token 硬校验、漂移筛查、test 访问账本
@@ -265,6 +265,8 @@ lega-attention/
 │   ├── latency.py             # prefill / decode 延迟基准
 │   ├── analysis.py            # 机制分析：集中≠找对、门控 Brier/ECE 校准、AUROC + PR-AUC（不平衡主指标）+ 门控 F1（三口径 + 恒写/恒不写稻草人对照）
 │   ├── ablate.py              # 推理期因果病灶消融（训练后权重干预，与训练期消融互补）
+│   ├── length_null.py         # c 的长度零假设诊断（随机/重复/均匀上下文 + 斜率）
+│   ├── output_ablation.py     # 答案 token 的逐层/逐头输出干预（ΔNLL/Δmargin 写回效用）
 │   ├── factorial.py           # 全因子 2^3 的精确 Shapley 分解（交互感知的消融归因）
 │   ├── equivalence.py         # SESOI + TOST 等价性/非劣性（Holm 校正、0.5×/1×/2× 敏感性）
 │   ├── ngram.py               # 简单统计基线：一元/二元/插值二元平滑 n-gram PPL（α/λ 只在 val 联合选；test 需开锁并记账；auto 与神经评测同 split）
@@ -295,13 +297,17 @@ lega-attention/
 - **PPL 的展示边界**：JSON 同时保存精确的 `val_loss`；为避免发散模型的 `exp(loss)` 溢出/淹没表格，`val_ppl` 在 `loss>20` 时记为 `exp(20)`，并显式写入 `val_ppl_clamped: true`。出现这种情况时应比较 `val_loss`。
 - **c 的数值稳定性**：`max_p = exp(zmax − LSE)`，恒有界 (0,1]；`log` 前 clamp 到 `1e-30`。均匀注意力→`c=0` 有单元测试覆盖（`tests/test_attention.py`）。
 - **n 的定义**：查询位置 $t$ 的可读 token 数为 $t+1$（因果），null 槽不计入 $n$；`null` 变体的 null 键不施加 RoPE（位置无关槽）。
-- **门控查询项的定位**：门控里的 $q$ 使用 **RoPE 旋转前**的查询内容向量；注意力打分仍使用旋转后的 $q,k$。这样长度/绝对位置只通过显式的 $\log n$ 进入门控，避免方法主张中的因果混淆。
+- **门控查询项的定位**：门控里的 $q$ 使用 **RoPE 旋转前**的查询内容向量；注意力打分仍使用旋转后的 $q,k$。显式位置编码不进入 $q$，但 token 内容本身仍可能与位置/长度相关，不能据此宣称已消除全部位置混淆；$c$ 中也含 $\log n$，需与 $b\log n$ 一并解读。
 - **可复现性**：`set_seed` 固定 Python/NumPy/PyTorch（CPU/CUDA）种子，CUDA 下同时关闭 cudnn benchmark 并启用确定性算法（`warn_only`），并为子进程设置 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker），数据顺序可复现且有单测。同一组随机种子训练全部变体，变体间用同种子配对统计（`run_all.py --seeds` / configs 中的 `seeds`）。跨硬件架构无法保证逐位一致，同机重跑稳定；每次训练另写 `run_manifest.json`（git/数据指纹/环境/命令行），评测 JSON 内嵌同一溯源字段。训练前默认执行过拟合小批量 sanity check（`--skip_sanity` 可跳过）；基线调优的每个 trial 子进程也把 `PYTHONHASHSEED` 对齐到自己的 seed。
 - **torch.compile**：配置 `"compile": true` 可在 CUDA 上启用 torch.compile；保存检查点时统一使用剥离包装前缀后的参数键名，`load_model`（evaluate/ruler/latency/analysis）可直接加载。
 - **标准注意力双路径**：SDPA 快速路径与显式路径数值一致（有单测），显式路径用于需要注意力统计的变体与延迟公平对比（`standard` vs `standard_sdpa` 两者都测）。
 - **KV 缓存**：gated 变体在增量解码时逐 token 计算门控，缓存等价性有单测（全量前向 vs 逐 token）。
 - **分词**：默认 GPT-2 BPE（tiktoken，首用需联网缓存，公开预训练词表不依赖本项目数据）；无网络时 `--tokenizer auto` 退化为字符级，词表只在 train 上拟合、未见字符映射 `<unk>`（PPL 不可与文献直接对比，但变体间对比有效）。数据进入训练前统一经过 `lega.data.prepare_bins`：坏字符清洗 → 跨 split 精确/近似去污染 → 拟合词表 → token 流硬校验 → 写 `data_report.json`。
-- **设备**：`small.json` 建议 GPU + bf16；CPU 仅适合 tiny 冒烟。正式实验建议先跑 `lega_no_len` 与 `lega` 的对比（长度校准是核心主张）。
+- **设备**：`small.json` 建议 GPU + bf16；CPU 仅适合 tiny 冒烟。正式实验建议先跑 `lega_no_len` 与 `lega` 的对比（长度校准是核心主张）。`eval_iters=50` 只是逐窗口抽样，不是完整 val；summary 必须按窗口抽样误差解读，正式 PPL 结论需补全量 val/多起点滑窗。
+- **输出级写回效用**：`lega/output_ablation.py` 在答案 token 的预测位置对 `wo` 输入逐层/逐头置零或置换，报告同一批答案 token 的 ΔNLL/Δmargin；`hit`/集中度只是注意力分布代理，不能替代该因果干预。
+- **无证据条件**：`lega/ruler.py` 提供可选 `evidence_absent/evidence_wrong/evidence_conflict`（显式要求不可靠时输出 `NONE`，`NONE` 才记 EM=1）。它们不进入默认 5 任务主表，需在调用 `run_ruler(tasks=...)` 时显式加入；用于检验门控是否在无可靠证据时抑制写回。
+- **长度边界**：训练与评测都受 `block_size`（small=1024）限制；RULER 的 256/512/1024 是**域内**长度扫掠，不是长度外推。任何超过 `block_size` 的位置都应被拒绝，不能把 benchmark 的更长上下文结果当作本模型能力。
+- **补充对照**：`lega_raw`（原始 $\log\max_j p_j$，不并入 $\log n$）、`lega_raw_no_len`（原始集中度且无 $b\log n$）、`lega_detach_conc`（集中度统计不回传 Q/K）、`null_zero`（固定零 value、null 键仍可学）不属于主 2^3 因子设计，默认不训练；它们分别诊断“归一化/重参数化”“反传路径”“空槽写入”替代解释。
 - **已知限制**：30M 模型的 RULER 绝对准确率不高（小模型检索能力有限），关注点是**变体间相对差异**与**机制分析指标**，而非绝对分数；`fwe` 的高频词以 k≥3 次、其它词以 2 次出现，答案按词集合评分，不存在词频并列歧义；ctx 过小时个别 `fwe`/`vt` 样例会因长度空间不足被跳过（JSON `_skipped` 字段如实记录，变体间跳过集合一致）。
 
 ## 6. License

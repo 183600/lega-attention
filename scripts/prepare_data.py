@@ -5,12 +5,14 @@
   1. HuggingFace parquet（需 pyarrow）—— Salesforce/wikitext, wikitext-103-raw-v1
   2. Smerity 镜像 zip（zipfile 标准库即可）
   3. rows API（慢，仅适合 --max_tokens 很小的场合）
-  4. --local_txt 直接使用本地文本：按时间先后做叙事性划分——
+  4. --local_txt 直接使用本地文本：按输入顺序做“时序式”划分（不是对
+     官方 WikiText split 的声明）——
      最早 80% 训练、其后 10% 验证、最新 10% 测试；切点对齐文档边界
      （标题行 > 空行段落 > 换行），绝不随机打乱，保证未来信息不穿越。
      val/test 不参与任何拟合；分词词表与去污统计只依据 train。
 
-来源 1-3 使用 WikiText-103 官方 split（按文档划分、天然 held-out test）。
+来源 1-3 使用 WikiText-103 官方 split：只保证按文档划分/不跨 split，
+  不是按时间切分，不能据此宣称时间外推或未来数据证据。
 
 所有来源都会经过统一入口 lega.data.prepare_bins：
   文本坏字符清洗 → 与 val/test 重复的训练行去污染 → 词表只在 train 拟合 →

@@ -6,7 +6,8 @@ import shutil
 import tempfile
 
 from lega.data import CACHE_SCHEMA, CharTokenizer
-from lega.ruler import (DEPTH_BINS, build_fwe, build_niah, build_vt,
+from lega.ruler import (DEPTH_BINS, EVIDENCE_TASKS, build_evidence_condition,
+                        build_fwe, build_niah, build_vt,
                         depth_bin, load_corpus_sents,
                         load_corpus_sents_with_source, record_corpus_test_access,
                         score_prediction,
@@ -547,3 +548,28 @@ def test_ruler_payload_binds_checkpoint_hash(monkeypatch):
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("  [ok] RULER payload 绑定 checkpoint 路径与内容哈希")
+
+
+def test_evidence_absent_wrong_conflict_builders_and_scoring():
+    """无证据/错误证据/冲突证据：答案固定 NONE，且只在 abstain 时给 EM。"""
+    tok = _tok()
+    for i, task in enumerate(EVIDENCE_TASKS):
+        ex = build_evidence_condition(tok, 512, random.Random(100 + i), task)
+        assert ex["task"] == task and ex["answer"] == "NONE"
+        assert len(ex["ids"]) <= 512
+        qs, qe = ex["query_span"]
+        assert 0 <= qs < qe <= len(ex["ids"])
+        inserted = ex["meta"]["inserted"]
+        if task == "evidence_absent":
+            assert inserted == []
+        elif task == "evidence_wrong":
+            assert len(inserted) == 1
+            assert inserted[0]["key"] != ex["meta"]["target_key"]
+        else:
+            assert len(inserted) == 2
+            assert inserted[0]["key"] == inserted[1]["key"]
+            assert inserted[0]["value"] != inserted[1]["value"]
+    assert score_prediction("evidence_absent", "NONE", " NONE")["em"] == 1.0
+    assert score_prediction("evidence_absent", "NONE", " none.")["em"] == 1.0
+    assert score_prediction("evidence_absent", "NONE", " 7021853")["em"] == 0.0
+    assert score_prediction("evidence_conflict", "NONE", " NONE 123")["em"] == 1.0

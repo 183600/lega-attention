@@ -17,6 +17,15 @@
                      伪随机特征，参数个数/门控 FLOPs 与 lega 相同，但不含任何
                      查询/注意力/长度信息；用于隔离“多几个门控参数/一次门控
                      运算”的训练期优化红利）
+    lega_raw      :  g = sigmoid(w·q + a*log max_p + b*log n + d)  （补充对照：
+                     原始最大概率对数，不做 c 的长度归一化；与 lega 的函数
+                     表达能力相同，用于区分“重参数化”与“额外容量”）
+    lega_raw_no_len: g = sigmoid(w·q + a*log max_p + d)            （补充对照：
+                     原始 log max_p 且无显式长度项）
+    lega_detach_conc: g = sigmoid(w·q + a*detach(c) + b*log n + d) （补充对照：
+                     集中度统计只作为前向特征、不向 Q/K 反传）
+    null_zero     :  与 null 相同，但 value 槽固定为 0、不参与训练（补充对照：
+                     把“选择 null”与“写入学习到的内容”分开）
 
 全因子消融矩阵（门控内 2^3：无=gate_only, A=查询, B=集中度, C=长度）：
     无   -> gate_only        A    -> qgate          B   -> lega_conc_only
@@ -30,8 +39,18 @@ Full-B=lega_no_conc, Full-C=lega_no_len。两套消融均被实现，可互相�
 其中 p_j 为因果注意力权重，n 为该查询可读取的真实 token 数（null 槽不计入 n）。
 q 特指 RoPE 旋转前的查询内容向量；注意力打分仍使用旋转后的 q/k。
 
-关键性质：均匀注意力时 max_j p_j = 1/n，因此 c = log(n * 1/n) = 0，与上下文长度无关。
-c 度量的是"超出均匀分布的证据集中度"；b*log n 项让门显式感知长度，二者解耦。
+重要边界（不要过度解读 c）：均匀注意力时 max_j p_j = 1/n，因此
+c = log(n * 1/n) = 0，**只证明均匀分布这一特例与长度无关**。一般情况下
+c = log n + log max_p，若 max_p 不随 n 按 1/n 收缩，c 仍会随长度增长。
+因此“c 已经消除长度混淆”不是可仅靠单元测试成立的命题；必须用随机上下文、
+重复上下文和不同打分方差下的 c 零假设分布来验证（见 lega.length_null）。
+
+重参数化：完整门控可展开为 w·q + a·log max_p + (a+b)·log n + d，与
+“查询 + 原始最大概率对数 + 长度对数”的线性门控同属一个函数族。归一化 c
+改变的是参数化/优化几何与解释，并不增加表达能力；lega_no_len 保留 a·c，
+所以 b=0 检验的是“集中度系数与长度系数相等”，不是“去掉长度信息”。
+lega_raw / lega_raw_no_len 是为此增加的直接对照。
+
 初始时 w=a=b=0、d=2.0，g ≈ 0.88，接近标准注意力，保证训练稳定启动。
 """
 import math
@@ -56,7 +75,12 @@ VARIANTS = ("standard", "gate_only", "qgate", "null", "lega", "lega_no_len",
 # 任何查询/注意力/长度信息。它回答“LEGA 的收益是否只是多了几个门控参数/
 # 一次额外门控运算带来的优化红利”，而不是“是否用到了 B/C 证据”。
 CONTROL_VARIANTS = ("lega_placebo",)
-RUNNABLE_VARIANTS = VARIANTS + CONTROL_VARIANTS
+# 补充对照：不进入主矩阵/默认 run，但用于回答审稿人要求的“重参数化、
+# detach 反传路径、固定零 value null”三类直接对照。它们不属于 A/B/C
+# 因子设计，因此不进入 GATE_FACTORS。
+SUPPLEMENTAL_VARIANTS = ("lega_raw", "lega_raw_no_len",
+                         "lega_detach_conc", "null_zero")
+RUNNABLE_VARIANTS = VARIANTS + CONTROL_VARIANTS + SUPPLEMENTAL_VARIANTS
 
 # 供图表与汇总表使用的中文名
 VARIANT_CN = {
@@ -71,24 +95,34 @@ VARIANT_CN = {
     "lega_conc_only": "仅集中度门控",
     "lega_len_only": "仅长度门控",
     "lega_placebo": "LEGA参数匹配安慰剂(证据=噪声)",
+    "lega_raw": "LEGA原始log max_p(不归一化)",
+    "lega_raw_no_len": "原始log max_p且无长度项",
+    "lega_detach_conc": "集中度统计不反传到Q/K",
+    "null_zero": "空注意力(固定零value)",
 }
 
 # 各公式项出现的变体
 _USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc",
-              "lega_placebo")                                      # w·q 项
+              "lega_placebo", "lega_raw", "lega_raw_no_len",
+              "lega_detach_conc")                                  # w·q 项
 _USE_CONC = ("lega", "lega_no_len", "lega_no_query",
              "lega_conc_only",
-             "lega_placebo")                                      # a*c, c=log(n*max_j p_j)
+             "lega_placebo", "lega_detach_conc")                   # a*c, c=log(n*max_j p_j)
+_USE_RAW_CONC = ("lega_raw", "lega_raw_no_len")                    # a*log max_p（不归一化）
 _USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
             "lega_len_only",
-            "lega_placebo")                                        # log n 项
+            "lega_placebo", "lega_raw", "lega_detach_conc")        # log n 项
 # 有输出门
 _GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
           "lega_no_query", "lega_conc_only", "lega_len_only",
-          "lega_placebo")
+          "lega_placebo", "lega_raw", "lega_raw_no_len",
+          "lega_detach_conc")
 # 门依赖注意力统计（需要 max_j p_j）
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only",
-                "lega_placebo")
+                "lega_placebo", "lega_raw", "lega_raw_no_len",
+                "lega_detach_conc")
+# 固定零 value 的 null 对照：语义上仍是“空注意力”，但 value 槽不学习。
+_IS_NULL = ("null", "null_zero")
 
 # 门控内三因子 A/B/C 的激活表（单一事实来源）：直接从上面的
 # _USE_QUERY/_USE_CONC/_USE_LEN 派生，避免“实验设计元数据”与实现漂移。
@@ -99,7 +133,8 @@ GATE_FACTORS = {
     v: frozenset(f for f, enabled in (("A", v in _USE_QUERY),
                                       ("B", v in _USE_CONC),
                                       ("C", v in _USE_LEN)) if enabled)
-    for v in _GATED if v not in CONTROL_VARIANTS
+    for v in _GATED
+    if v not in CONTROL_VARIANTS and v not in SUPPLEMENTAL_VARIANTS
 }
 
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
@@ -318,18 +353,21 @@ class CausalSelfAttention(nn.Module):
 
         self.use_query = variant in _USE_QUERY
         self.use_conc = variant in _USE_CONC
+        self.use_raw_conc = variant in _USE_RAW_CONC
         self.use_len = variant in _USE_LEN
+        self.is_null = variant in _IS_NULL
+        self.detach_conc = variant == "lega_detach_conc"
 
         Dh = self.d_head
         if self.use_query:
             self.gate_w = nn.Parameter(torch.zeros(n_heads, Dh))      # w
-        if self.use_conc:
+        if self.use_conc or self.use_raw_conc:
             self.gate_a = nn.Parameter(torch.zeros(n_heads))          # a
         if self.use_len:
             self.gate_b = nn.Parameter(torch.zeros(n_heads))          # b
         if variant in _GATED:
             self.gate_d = nn.Parameter(torch.full((n_heads,), float(gate_bias_init)))  # d
-        if variant == "null":
+        if self.is_null:
             # 构造期初始化不能消耗全局 RNG：否则 apply(_init_weights) 重初始化全部
             # 共享参数时 RNG 状态已被 null 变体的 randn 挪动，导致 null 与
             # 其它变体在同 seed 下基础权重不一致，破坏"同一 seed 公平对比"。
@@ -337,7 +375,12 @@ class CausalSelfAttention(nn.Module):
             gen = torch.Generator().manual_seed(0)
             self.k_null = nn.Parameter(
                 torch.randn(n_heads, Dh, generator=gen) * 0.02)
-            self.v_null = nn.Parameter(torch.zeros(n_heads, Dh))
+            if variant == "null_zero":
+                # 固定零 value：注册为 buffer，优化器不会更新；null 键仍可
+                # 学习（“何时读空槽”与“空槽写入什么”由此解耦）。
+                self.register_buffer("v_null", torch.zeros(n_heads, Dh))
+            else:
+                self.v_null = nn.Parameter(torch.zeros(n_heads, Dh))
 
         # 因果掩码 / log_n 分别由模块级 _MASK_CACHE / 设备级 _LOGN_TABLE 提供，
         # 全层共享。
@@ -345,6 +388,10 @@ class CausalSelfAttention(nn.Module):
         # _version。训练态不走缓存（cat 必须参与 autograd 图），且优化器/测试
         # 对权重的原地修改会递增 _version 使缓存自动失效。
         self._qkv_fused = None
+        # 只在推理期病灶分析中临时打开的分布匹配置换：把 c 在序列维
+        # roll 一个非零位移，保持逐值分布不变、破坏位置对应关系。
+        # 训练/普通推理恒为 None，不进入 state_dict。
+        self.conc_permute_shift = None
         # 推理态参数 dtype 转换缓存（与 _qkv_fused 同失效键口径）：
         # gate_w / (k_null, v_null)。
         self._gate_w_cast = None
@@ -380,15 +427,18 @@ class CausalSelfAttention(nn.Module):
         gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
         if self.use_query:
             nn.init.zeros_(self.gate_w)
-        if self.use_conc:
+        if self.use_conc or self.use_raw_conc:
             nn.init.zeros_(self.gate_a)
         if self.use_len:
             nn.init.zeros_(self.gate_b)
         if self.variant in _GATED:
             nn.init.constant_(self.gate_d, float(gate_bias_init))
-        if self.variant == "null":
+        if self.is_null:
             nn.init.normal_(self.k_null, mean=0.0, std=0.02)
-            nn.init.zeros_(self.v_null)
+            if self.variant == "null_zero":
+                self.v_null.zero_()
+            else:
+                nn.init.zeros_(self.v_null)
 
     def _gate_logit(self, qterm: Optional[torch.Tensor],
                     max_p: Optional[torch.Tensor],
@@ -409,17 +459,31 @@ class CausalSelfAttention(nn.Module):
             # qterm 已由调用方预归约并升到 fp32。
             logit = qterm.clone() if keep_terms else qterm
         # logit 累加"标量门控系数 × 统计项"（addcmul_）。
-        if self.use_conc:
-            # 无统计需求且 max_p 不参与反向（推理/统计仅前向消费）时，
+        if self.use_conc or self.use_raw_conc:
+            # detach 对照：集中度只作为前向特征，不让 max_p 的梯度回流到
+            # Q/K；其余参数仍正常训练。
+            src = max_p.detach() if self.detach_conc else max_p
+            # 无统计需求且 src 不参与反向（推理/统计仅前向消费）时，
             # clamp/log 原地完成；max_p 为 max/amax 的反向保存值，需要梯度
             # 时必须保持原值。clamp_min 的输出是一次性中间张量，在其上原地
             # 取 log 不影响反向（反向比较的是 clamp 的输入 max_p）。
-            c = max_p.clamp_min(1e-30).log_() if (keep_terms or max_p.requires_grad) \
-                else max_p.clamp_min_(1e-30).log_()
-            # 集中度项按定义始终是 c=log(n*max_j p_j)：即使 b*log n 被消融
-            # （lega_no_len / lega_conc_only），a*c 里的长度归一化也不能丢，
-            # 否则 Full−C 实际多去掉了 a·log n，不再是单组件消融。
-            c += log_n
+            # detach 时 src 与 max_p 共享存储，绝不能原地改写，否则后续
+            # 统计拿到的 max_p 已被 clamp/log 破坏。
+            c = src.clamp_min(1e-30).log() \
+                if (keep_terms or src.requires_grad or self.detach_conc) \
+                else src.clamp_min_(1e-30).log_()
+            # 归一化集中度项按定义是 c=log(n*max_j p_j)：即使 b*log n 被
+            # 消融（lega_no_len / lega_conc_only），a*c 里的长度归一化也
+            # 不能丢，否则 Full−C 实际多去掉了 a·log n，不再是单组件消融。
+            # raw 对照则刻意保留 log max_p、不并入 log n。
+            if self.use_conc:
+                c = c + log_n
+            shift = getattr(self, "conc_permute_shift", None)
+            if shift is not None and c.shape[-1] > 1:
+                # 病灶 conc_permute：只在序列维循环移位。逐位置 c 的多重集
+                # 完全不变（均值/方差/长度分布匹配），但“哪个位置拿到哪个
+                # 证据”被破坏；用于排除容量/尺度解释，而不是训练期变体。
+                c = torch.roll(c, shifts=int(shift), dims=-1)
             if self.variant in CONTROL_VARIANTS:
                 # 参数匹配安慰剂：保留 a 的形状与梯度路径，但把它乘的
                 # “集中度证据”换成与真实统计无关的确定性噪声。
@@ -500,7 +564,7 @@ class CausalSelfAttention(nn.Module):
         if band_mask is not None:
             att[..., band_start:band_start + band_mask.shape[-1]].masked_fill_(
                 band_mask, float("-inf"))
-        is_null = self.variant == "null"
+        is_null = self.is_null
         k_null_c = v_null_c = None
         lse = None
         if is_null:
@@ -532,7 +596,7 @@ class CausalSelfAttention(nn.Module):
         # keep_gate_terms=False 的轻量统计只消费 g：不为 standard/null 计算
         # max_p，也不为任何变体计算 argmax/p_null 诊断。
         full_diag = collect_stats and keep_gate_terms
-        need_p_stats = full_diag or (self.variant in _LEGA_FAMILY and self.use_conc)
+        need_p_stats = full_diag or (self.variant in _LEGA_FAMILY and (self.use_conc or self.use_raw_conc))
         if need_p_stats:
             if full_diag:
                 max_v, argmax_real = torch.max(p, dim=-1)
@@ -602,7 +666,7 @@ class CausalSelfAttention(nn.Module):
         # 输入传入（而非闭包捕获），反向梯度经输入路径回传。
         null_weights = (self._cast_cached(
             '_null_cast', (self.k_null, self.v_null), v.dtype)
-            if self.variant == "null" else None)
+            if self.is_null else None)
         kT = k.transpose(-2, -1)
         # checkpoint 的前向以 collect_stats=False 运行且返回单个张量，
         # 需要统计时必须走普通调用，否则统计会被静默丢弃（g/logit 全为 None）。
@@ -806,7 +870,8 @@ class CausalSelfAttention(nn.Module):
         single_q = (T == 1)
         use_sdpa = (self.use_sdpa and not full_stats
                     and not (self.variant in _USE_CONC)
-                    and not (self.variant == "null" and single_q))
+                    and not (self.variant in _USE_RAW_CONC)
+                    and not (self.is_null and single_q))
         # is_causal=True 快路（无掩码全量前向）由 SDPA 内部保证因果性，
         # 无需构建显式掩码。
         # 静态 KV 缓存的整段预填充（cache_pos=0）同样满足"无任何历史"，
@@ -814,7 +879,8 @@ class CausalSelfAttention(nn.Module):
         causal_only = (use_sdpa and past_kv is None
                        and (kv_cache is None or cache_pos == 0)
                        and self.variant in ("standard", "gate_only", "qgate",
-                                            "lega_no_conc", "lega_len_only"))
+                                            "lega_no_conc", "lega_len_only",
+                                            "null_zero"))
 
         # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码）。
         elems = B * H * T * S
@@ -874,7 +940,7 @@ class CausalSelfAttention(nn.Module):
                 if mask_entry is None:
                     allowed = None
                 else:
-                    if self.variant == "null":
+                    if self.is_null:
                         if mask_entry[3] is None:
                             with torch.inference_mode(False):
                                 mask_entry[3] = torch.cat([~mask_entry[0], ones_col], dim=3)
@@ -886,7 +952,7 @@ class CausalSelfAttention(nn.Module):
                                 mask_entry[2] = ~mask_entry[0]
                             _mask_cache_grow(mkey, mask_entry, mask_entry[2])
                         allowed = mask_entry[2]
-                if self.variant == "null":
+                if self.is_null:
                     # SDPA 只接受单张量 K/V，这里拼接 null 槽；
                     # 逐 token 解码已在上面分流到显式路径
                     kn, vn = self._cast_cached(
@@ -919,7 +985,9 @@ class CausalSelfAttention(nn.Module):
                 # 轻量门控诊断：g/qterm/logit 均可从查询与 log n 重组，
                 # max_p/argmax 等依赖注意力概率的完整统计为 None
                 stats = {"max_p": None, "log_n": log_n, "argmax": None,
-                         "qterm": qterm, "g": g, "logit": logit}
+                         "qterm": qterm, "g": g, "logit": logit,
+                         "gate_bias": (self.gate_d.float().view(1, H, 1)
+                                       if self.variant in _GATED else None)}
         else:
             # 显式注意力路径：gated / 需要诊断统计时。长上下文按查询块计算并
             # 逐块汇总完整统计，训练态配合逐块 checkpoint。
@@ -956,7 +1024,7 @@ class CausalSelfAttention(nn.Module):
                 #     softmax 只覆盖真实键；逐 token 解码（T==1）走此路径。
                 p_null = None
                 lse = None
-                if self.variant == "null":
+                if self.is_null:
                     k_null_c2, v_null_c2 = self._cast_cached(
                         '_null_cast', (self.k_null, self.v_null), v.dtype)
                     att_n = torch.matmul(q, k_null_c2.unsqueeze(-1))
@@ -993,9 +1061,10 @@ class CausalSelfAttention(nn.Module):
                 # max_p 与完整诊断的 argmax 都必须基于 dropout 前的 softmax 分布。
                 # argmax 落点是 softmax 不变量。
                 need_argmax_real = (bool(need_stats) and stats_argmax
-                                    and self.variant != "null")
-                need_max_real = (self.variant != "null"
-                                 and (self.use_conc or full_stats))
+                                    and not self.is_null)
+                need_max_real = (not self.is_null
+                                 and (self.use_conc or self.use_raw_conc
+                                      or full_stats))
                 if need_max_real and need_argmax_real:
                     max_v, argmax_stat = torch.max(p, dim=-1)
                     max_p = max_v.float()                    # max_j p_j ∈ (0, 1]
@@ -1014,7 +1083,7 @@ class CausalSelfAttention(nn.Module):
                 p_pre = p if full_stats else None
                 if self.attn_dropout > 0 and self.training:
                     p = F.dropout(p, p=self.attn_dropout)
-                if self.variant == "null" and p_null is None:
+                if self.is_null and p_null is None:
                     # 联合 softmax 全列路径：o = p_real @ v + p_null * v_null
                     o = torch.matmul(p[..., :n_real], v)               # (B, H, T, Dh)
                     o.addcmul_(p[..., n_real:], v_null_c2.view(1, H, 1, Dh))
@@ -1046,14 +1115,16 @@ class CausalSelfAttention(nn.Module):
                     "qterm": qterm,
                     "g": g,
                     "logit": logit,
+                    "gate_bias": (self.gate_d.float().view(1, H, 1)
+                                  if self.variant in _GATED else None),
                 }
                 if stats_argmax:
                     if use_chunk:
                         # 完整统计逐块汇总
                         stats["argmax"] = argmax_stat
-                        if self.variant == "null":
+                        if self.is_null:
                             stats["p_null"] = p_null_stat.float()
-                    elif self.variant == "null":
+                    elif self.is_null:
                         # null 变体的统计必须基于含 null 槽的完整 softmax，
                         # 否则会虚增集中度并错误地把 null 槽落点记为真实键。
                         # 真实键 max 给出概率与落点，再与 null 槽比较；

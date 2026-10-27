@@ -160,7 +160,7 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
     if variant in _LEGA_FAMILY:
         # max_j p_j: 每头扫描 kv_len 个概率 -> 每层 kv_len·n_heads
         gate_flops += int(kv_len) * model.n_heads * n_layers
-    if variant == "null":
+    if variant in ("null", "null_zero"):
         # 解析合并的 null 槽：每层多一个 key 的 QK 与 AV -> 4·d
         gate_flops += 4 * d * n_layers
     return {
@@ -341,6 +341,29 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     stats["n_nonpositive_samples"] = sum(1 for v in per_tok if v <= 0)
     stats["prefill_baseline_median_ms"] = round(pf_med * 1000.0, 6)
     stats["prefill_baseline_spread_pct"] = pf_stats["spread_pct"]
+
+    # 直接 decode 区段计时：每次先不计时地做一次 prefill，再只给
+    # decode_tokens-1 步单 token 前向计时。它不依赖“总时长 - prefill 中位数”
+    # 的扣除，避免 prefill 抖动直接污染 decode 估计；与上面的扣除口径并列
+    # 报告，任一异常都能互相校验。
+    direct_times = []
+    for _ in range(iters):
+        out = model(x, kv_cache=kv_cache, cache_pos=0, last_logits_only=True)
+        cur = out["logits"][:, -1].argmax(dim=-1, keepdim=True)
+        _sync(device)
+        t0 = time.perf_counter()
+        for i in range(1, decode_tokens):
+            out = model(cur, kv_cache=kv_cache, cache_pos=pf_len + i - 1,
+                        last_logits_only=True)
+            cur = out["logits"][:, -1].argmax(dim=-1, keepdim=True)
+        _sync(device)
+        direct_times.append((time.perf_counter() - t0) /
+                            (decode_tokens - 1) * 1000.0)
+    direct = timing_stats(direct_times)
+    stats["decode_timing_method"] = "prefill_subtracted_and_direct"
+    stats["direct_decode_median_ms"] = round(direct["median_ms"], 6)
+    stats["direct_decode_spread_pct"] = direct["spread_pct"]
+    stats["direct_decode_n_samples"] = int(len(direct_times))
     return stats, pf_len  # stats["median_ms"] 为每 token 毫秒
 
 
@@ -500,7 +523,8 @@ def main():
                  "n_params": count_params(model), "prefill_ms": {},
                  "prefill_ms_spread_pct": {},
                  "decode_ms_per_tok": {}, "decode_ms_spread_pct": {},
-                 "decode_prefill_ctx": {}}
+                 "decode_timing_method": {}, "direct_decode_ms_per_tok": {},
+                 "direct_decode_spread_pct": {}, "decode_prefill_ctx": {}}
         # 结构指标：参数量/KV 缓存/FLOPs。
         entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
                                                  kv_dtype=kv_dtype)
@@ -529,6 +553,12 @@ def main():
             entry["decode_ms_per_tok"][str(ctx)] = round(
                 dec_stats["median_ms"], 4)
             entry["decode_ms_spread_pct"][str(ctx)] = dec_stats["spread_pct"]
+            entry["decode_timing_method"][str(ctx)] = dec_stats.get(
+                "decode_timing_method")
+            entry["direct_decode_ms_per_tok"][str(ctx)] = dec_stats.get(
+                "direct_decode_median_ms")
+            entry["direct_decode_spread_pct"][str(ctx)] = dec_stats.get(
+                "direct_decode_spread_pct")
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
             # 较短 KV 前缀的数值标注成原 ctx 的数值。
             entry["decode_prefill_ctx"][str(ctx)] = pf_len

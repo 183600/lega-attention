@@ -249,6 +249,36 @@ def test_gate_strength_and_head_permute_lesions():
     print("  [ok] 门强度/恒定门/头置换病灶；全同头时置换如实报告 no-op")
 
 
+def test_conc_permute_preserves_values_but_breaks_position_mapping():
+    """c 的分布匹配置换：逐值多重集不变，但位置对应关系被破坏且可恢复。"""
+    model = _tiny("lega")
+    m = model.blocks[0].attn
+    with torch.no_grad():
+        m.gate_a.fill_(1.0)
+        m.gate_b.zero_()
+    max_p = torch.tensor([[[0.5, 0.25, 0.125, 0.125],
+                           [0.25, 0.5, 0.125, 0.125]]])
+    log_n = torch.full((1, 1, 4), math.log(4.0))
+    qterm = torch.zeros(1, 2, 4)
+    _, base, _ = m._gate_logit(qterm, max_p, log_n, (1, 2, 4),
+                               keep_terms=True)
+    snap = snapshot_gate_params(model)
+    rec = apply_lesion(model, "conc_permute", perm_seed=0)
+    assert rec["applied"] is True and rec["changed_tensors"] > 0
+    _, perm, _ = m._gate_logit(qterm, max_p, log_n, (1, 2, 4),
+                               keep_terms=True)
+    assert not torch.allclose(base, perm)
+    # 置换只改变顺序：每个头内的值多重集必须逐位相同。
+    for h in range(2):
+        assert torch.allclose(torch.sort(base[0, h]).values,
+                              torch.sort(perm[0, h]).values)
+    restore_gate_params(model, snap)
+    assert m.conc_permute_shift is None
+    _, restored, _ = m._gate_logit(qterm, max_p, log_n, (1, 2, 4),
+                                   keep_terms=True)
+    assert torch.allclose(base, restored)
+
+
 def test_constant_mean_rejects_invalid_gate_mean():
     model = _tiny("lega")
     snap = snapshot_gate_params(model)

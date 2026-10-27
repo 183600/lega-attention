@@ -6,13 +6,13 @@
 
 $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
-- $c$ 在均匀注意力下恒为 0，与上下文长度无关，因此可以把"读得集中"和"读得长"解耦；
+- $c$ 在均匀注意力下恒为 0，但这只是一特例；一般情形 $c$ 仍可能随长度增长，不能据此声称已把"读得集中"和"读得长"解耦。`lega/length_null.py` 提供随机/重复/均匀上下文的零假设诊断；任何"长度解耦/长度校准"主张必须同时报告 $c\sim\log_2 n$ 斜率；
 - $b\log n$ 是长度校准项，让每个头自行学习长上下文中"集中读取"可信度的变化；
 - 初始化 $w=a=b=0,\ d=2.0$，接近标准注意力，训练可稳定启动。
 
 ## 变体
 
-`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；详见下文。
+`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；其伪证据仍由绝对位置哈希得到，不能当作分布匹配的置换对照，正式结论需结合推理期 `conc_permute`/`head_permute`。补充训练对照 `lega_raw`、`lega_raw_no_len`、`lega_detach_conc`、`null_zero` 默认不运行，分别检验原始集中度/无长度项、集中度 detach 反传、固定零 value null；它们不进入 `GATE_FACTORS` 的 2^3 矩阵。
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
@@ -40,6 +40,23 @@ RULER 用原始 EM。性质与口径：
 - **探索性**：Shapley 依赖价值函数尺度且未预注册，不能替代预注册的
   单因素确认性检验；与单因素边方向冲突时并列披露“贡献依赖其他因子”。
 
+## 输出级写回效用（不是 hit 代理）
+
+`lega/output_ablation.py` 直接干预答案 token 的预测位置：把某层某头在
+`wo` 输入中的通道置零/置换，重新计算同一批答案 token 的 NLL、正确概率与
+margin，输出 ΔNLL/Δmargin。它回答“该头在该位置的写回是否真的帮助语言建模”，
+而不是“注意力 argmax 是否落在答案跨度”。逐头 hit/AUROC 只能作为机制描述，
+不能替代该干预；输出级干预仍是推理期反事实，不能证明训练期因果。
+
+## 无证据/错误证据/冲突证据（可选条件）
+
+`lega/ruler.py` 的 `EVIDENCE_TASKS` 提供三种 abstention 条件：
+`evidence_absent`（目标键完全缺失）、`evidence_wrong`（只出现错键值）、
+`evidence_conflict`（同一键两个不同值）。问题明确要求无可靠答案时输出
+`NONE`，只有预测 `NONE` 才记 EM=1。它们默认不进入主表，需显式传入
+`run_ruler(tasks=...)`；这是“门控在无可靠证据时是否减少写回”的直接检验，
+不能拿普通 NIAH 的 hit 率代替。
+
 ## 推理期因果消融（训练后病灶）
 
 训练期消融回答的是“**重新训练**时去掉组件会怎样”，它改变优化轨迹；
@@ -60,12 +77,14 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
 | `gate_closed` | 证据项 0，`d := −30` | 阳性对照：关闭注意力输出必须显著变差 |
 | `gate_constant_mean` | 证据项 0，`d_h := logit(E[g_h])` | 去掉逐位置/逐查询变化，保留每个头/层的平均写入强度 |
 | `head_permute` | 门参数在头间置换 | 容量/分布/结构不变，只破坏头—证据对应（安慰剂） |
+| `conc_permute` | 逐位置 `c` 沿序列维循环移位 | c 的逐值分布/均值/方差/长度分布不变，只破坏位置对应；排除容量/尺度解释 |
 | `sign_flip` | 证据项反号 | 保留幅度、反转证据方向 |
 
 要点：
 
-- **只改门控参数**，不动注意力/主干；用 `snapshot_gate_params` /
-  `restore_gate_params` 保证病灶不叠加；
+- **只改门控参数或前向临时属性**，不动注意力/主干；`conc_permute` 通过
+  `conc_permute_shift` 临时属性实现，`restore_gate_params` 会同时清除它，
+  保证病灶不叠加；
 - 与基线使用同一 `ctx/eval_iters/AMP` 口径、同一 `window_indices`，否则拒绝配对；
 - 默认只在 **val** 上做（test 尘封；val 是 checkpoint 选择集，绝对水平
   偏乐观，只作机制定位）；不写 test 访问账本；
@@ -73,11 +92,19 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
   “无效应”的证据；`head_permute` 在全同头时也如实标为 no-op；
 - 窗口级 p 仅描述单 run（相邻窗口可能相关）；正式汇总先按种子聚合
   ΔNLL，再做跨种子配对 t + Holm（`significance.json.causal_ablation`）；
+- **长度边界**：训练/评测都受 `block_size` 限制（small=1024）；RULER 的
+  256/512/1024 是域内扫掠，不是长度外推。超过 `block_size` 的位置必须拒绝，
+  不能把其他模型的长上下文结果归因到本模型。
+- **配对嵌套上下文**：当前 VT 已用中性填充精确补到请求长度并记录
+  `evidence_distance_tokens/actual_tokens`，但尚未实现“同一证据在嵌套上下文
+  中固定位置”的正式配对实验；长度趋势只能作为观测性证据，不能写成严格
+  嵌套配对因果结论。
 - **与训练期消融并列**：训练期显著而推理期病灶无差异 → 收益可能来自
   训练期优化/正则化而非推理期必需；推理期显著而训练期不显著 → 训练期
   消融可能被再训练补偿。两者不能互相替代。
 - **边界（必须如实声明）**：`head_permute` 是**推理期**的容量/分布安慰剂，
-  不是训练期的参数量匹配对照；`no_evidence` 在推理期保留全部参数、只关掉
+  `conc_permute` 是 c 的分布匹配置换，两者都不是训练期的参数量匹配对照；
+  训练期 `lega_placebo` 的伪证据仍含绝对位置哈希，不能替代置换零假设；`no_evidence` 在推理期保留全部参数、只关掉
   证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数
   是否带来优化红利”这一混淆。后者由下面的训练期 `lega_placebo` 对照回答；
   推理期 Shapley 只回答“最终前向的组件结构”，不能替代训练期因果问题。

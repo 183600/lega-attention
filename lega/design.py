@@ -3,9 +3,11 @@
 本模块补的是“开跑之前”的科研口径，而不是又一层事后统计：
 
 * **先验灵敏度**：在花掉训练算力之前，回答“计划中的种子数 / RULER 每格
-  样本数，能检出多大的效应？”。配对 t 用正态近似（与
-  :func:`lega.utils.min_detectable_effect` 同口径）；RULER 的配对二值
-  结果用 McNemar 精确功效（小样本）或正态近似（大样本）。输出的是
+  样本数，能检出多大的效应？”。配对 t 的历史函数仍用正态近似（与
+  :func:`lega.utils.min_detectable_effect` 同口径）；但 3~5 个种子时
+  正态近似偏乐观，正式规划应同时看 :func:`paired_t_power_nct`
+  （非中心 t 的固定种子仿真）。RULER 的配对二值结果用 McNemar 精确
+  功效（小样本）或正态近似（大样本）。输出的是
   **对一系列合理方差/不一致率假设的灵敏度曲线**，不把某一个任意假设
   伪装成数据估计；若配置显式声明了计划假设，则单独核对计划种子数是否
   足够。
@@ -224,9 +226,64 @@ def _sqrt_count(n: int):
     return root
 
 
+def _t_critical(df: int, alpha: float) -> float:
+    """双侧 Student-t 临界值（二分；仅用于小样本功效仿真）。"""
+    from .utils import student_t_two_sided_p
+    lo, hi = 0.0, 1.0
+    while student_t_two_sided_p(hi, df) > alpha:
+        hi *= 2.0
+        if hi > 1e12:
+            raise ValueError("无法在数值范围内求 t 临界值")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if student_t_two_sided_p(mid, df) > alpha:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-12 * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi)
+
+
+def paired_t_power_nct(effect, sd, n, alpha: float = DEFAULT_ALPHA,
+                       n_sim: int = 200000, seed: int = 0) -> dict:
+    """配对 t 检验的非中心 t 功效（固定种子仿真，n 小时优先使用）。
+
+    正态近似在 n=3~5 时会高估功效。这里直接仿真
+    ``T = (Z + δ) / sqrt(V/(n-1))``，其中 Z~N(0,1)、V~χ²(n-1)，
+    δ=|effect|/(sd/√n)，再与双侧 t 临界值比较。返回 ``power`` 与
+    ``method="noncentral_t_simulation"``，便于与历史正态口径并列披露。
+    """
+    effect = _finite_float(effect, "effect", nonnegative=True)
+    sd = _finite_float(sd, "sd", positive=True)
+    n = _strict_int(n, "n", minimum=2)
+    alpha = _open_unit(alpha, "alpha")
+    n_sim = _strict_int(n_sim, "n_sim", minimum=1000)
+    seed = _strict_int(seed, "seed", minimum=0)
+    if effect == 0.0:
+        return {"power": float(alpha), "method": "noncentral_t_simulation",
+                "n_sim": int(n_sim), "seed": int(seed),
+                "ncp": 0.0, "t_critical": _t_critical(n - 1, alpha)}
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    ncp = effect / (sd / math.sqrt(n))
+    df = n - 1
+    tcrit = _t_critical(df, alpha)
+    z = rng.standard_normal(int(n_sim)) + ncp
+    v = rng.chisquare(df, size=int(n_sim))
+    t = z / np.sqrt(v / df)
+    pw = float(np.mean(np.abs(t) >= tcrit))
+    return {"power": pw, "method": "noncentral_t_simulation",
+            "n_sim": int(n_sim), "seed": int(seed), "ncp": float(ncp),
+            "t_critical": float(tcrit)}
+
+
 def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
                    power: float = None) -> float:
     """配对 t 检验（双侧）的正态近似功效。
+
+    历史接口保留正态近似；n=3~5 的正式规划请同时调用
+    :func:`paired_t_power_nct`（非中心 t 仿真），不要把该值当作精确功效。
 
     ``effect`` 为待检出的配对差均值（方向无关，取绝对值），``sd`` 为配对差
     标准差，``n`` 为配对数（种子数）。公式：
@@ -975,12 +1032,16 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             mde_confirm = min_detectable_effect(
                 sd, n_seeds, ppl_alpha, power)
             pw_confirm = paired_t_power(ppl_margin, sd, n_seeds, ppl_alpha)
+            pw_nct = (paired_t_power_nct(
+                ppl_margin, sd, n_seeds, alpha, n_sim=20000, seed=0)["power"]
+                if 2 <= n_seeds <= 10 else None)
         else:
-            mde = pw = mde_confirm = pw_confirm = None
+            mde = pw = mde_confirm = pw_confirm = pw_nct = None
         ppl_rows.append({
             "paired_sd_relative": sd,
             "mde_relative": mde,
             "power_for_sesoi": pw,
+            "power_for_sesoi_nct": pw_nct,
             "required_seeds_for_sesoi": required_pairs(
                 ppl_margin, sd, alpha, power),
             "mde_relative_confirmatory": mde_confirm,

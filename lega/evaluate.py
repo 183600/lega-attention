@@ -420,6 +420,9 @@ def main():
     p.add_argument("--eval_iters", default=None,
                    help="评测窗口数；默认继承训练配置，训练配置缺失时为 50"
                         "（与 train.py 的默认值一致，保证窗口规格可比）")
+    p.add_argument("--full_eval", action="store_true",
+                   help="用全部不重叠窗口评测（与 --eval_iters 互斥）；"
+                        "默认 50 窗口只是抽样，正式 PPL 结论应另跑全量")
     p.add_argument("--worst_n", type=int, default=0,
                    help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）")
     p.add_argument("--worst_on_test", action="store_true",
@@ -439,6 +442,8 @@ def main():
                    help="即使 data_report 检测到划分/重叠泄露也继续评测（仅用于"
                         "复现历史实验；报告会标记 override，结果不得用于正式结论）")
     args = p.parse_args()
+    if args.full_eval and args.eval_iters is not None:
+        p.error("--full_eval 与 --eval_iters 不能同时使用")
     if args.eval_iters is not None:
         # 保留原始字符串后再 strict_int：argparse 的 type=int 会把 "1_0"
         # 静默解析成 10，绕过“非法数值显式拒绝”的入口约定。
@@ -555,9 +560,16 @@ def main():
     # 缺省必须与 train.py 的 eval_iters 默认值（50）一致：否则同一 checkpoint
     # 的独立评测窗口数与训练内评测/选择口径不同，PPL 不可比，run_all 的窗口
     # 对齐检查也会因此回退到全 split 参考。
-    eval_iters = (int(args.eval_iters) if args.eval_iters is not None
-                  else (int(cfg_eval_iters) if cfg_eval_iters is not None
-                        else 50))
+    if args.full_eval:
+        n_windows = (len(val) - 1) // ctx
+        if n_windows < 1:
+            p.error(f"val 只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
+        eval_iters = int(n_windows)
+        print(f"[eval] 全量窗口评测：{eval_iters} 个不重叠窗口")
+    else:
+        eval_iters = (int(args.eval_iters) if args.eval_iters is not None
+                      else (int(cfg_eval_iters) if cfg_eval_iters is not None
+                            else 50))
 
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。

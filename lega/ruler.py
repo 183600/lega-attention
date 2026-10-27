@@ -41,6 +41,9 @@ NEEDLE_TMPL = "One of the special magic numbers for {key} is: {value}. "
 QUESTION_TMPL = ("\nWhat is the special magic number for {key} mentioned in the provided text?"
                  "\nAnswer: The special magic number for {key} mentioned in the provided text is")
 TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt")
+# 可选的“无证据/错误证据/冲突证据”条件。它们不进入默认 TASKS/主表：
+# 主表仍是数值检索，而这三类条件考的是“没有可靠答案时是否 abstain”。
+EVIDENCE_TASKS = ("evidence_absent", "evidence_wrong", "evidence_conflict")
 # NIAH 的 needle 相对位置分箱：早期/中部/末期。长上下文模型常见
 # “lost in the middle”，只报任务平均 EM 会让早/晚期的高分抵消中部塌陷；
 # 因此每个 niah 单元格同时落盘分层 EM 与 Wilson CI（样本量按箱计）。
@@ -338,6 +341,80 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
     }
 
 
+# ---------------------------------------------------------------- 无证据/错误证据/冲突证据
+
+EVIDENCE_QUESTION = ("\nQuestion: What is the value for {key}? "
+                     "If absent/conflicting, answer NONE.\nAnswer:")
+
+
+def build_evidence_condition(tok, ctx: int, rng: random.Random,
+                             condition: str) -> Dict:
+    """构造 abstention 条件：absent（无证据）、wrong（错键值）、conflict。
+
+    与 NIAH 共用键词/数值模板与中性填充；问题明确要求无可靠答案时输出
+    ``NONE``。返回的 ``answer`` 固定为 ``"NONE"``，供逐样例 EM 使用。
+    该任务是可选补充条件，不进入默认 RULER 主表。
+    """
+    if condition not in EVIDENCE_TASKS:
+        raise ValueError(f"condition 必须是 {EVIDENCE_TASKS} 之一，"
+                         f"收到 {condition!r}")
+    key = rng.choice(KEY_WORDS)
+    question_ids = _cached_encode(
+        tok, EVIDENCE_QUESTION.format(key=key))
+    room = ctx - len(question_ids)
+    if room < 24:
+        raise ContextTooSmall(
+            f"{condition} 需要 ctx>=~{len(question_ids)+24}, 当前 {ctx}")
+    unit = _cached_encode(tok, " " + FILLER)
+    filler = (unit * (room // len(unit) + 1))[:room]
+    inserted = []
+    value_span = None
+    if condition == "evidence_wrong":
+        other = rng.choice([k for k in KEY_WORDS if k != key])
+        wrong = _rand_digit(rng, 7, 7)
+        line = tok.encode("\n" + NEEDLE_TMPL.format(key=other, value=wrong))
+        if len(line) + 2 <= room:
+            pos = rng.randint(1, room - len(line) - 1)
+            filler[pos:pos + len(line)] = line
+            filler = filler[:room]
+            inserted.append({"key": other, "value": wrong, "pos": pos})
+    elif condition == "evidence_conflict":
+        v1, v2 = _rand_digit(rng, 7, 7), _rand_digit(rng, 7, 7)
+        while v2 == v1:
+            v2 = _rand_digit(rng, 7, 7)
+        lines = [(value, tok.encode(
+            "\n" + NEEDLE_TMPL.format(key=key, value=value)))
+                 for value in (v1, v2)]
+        max_len = max(len(line) for _, line in lines)
+        if max_len * 2 + 4 <= room:
+            # 两条冲突证据必须各自完整且互不覆盖：先选两个不相交槽位，
+            # 再按升序插入并累计 shift。
+            span = room - max_len
+            p1 = rng.randint(1, max(1, span // 2))
+            p2 = rng.randint(min(span, p1 + max_len + 1), span)
+            shift = 0
+            for value, line in lines:
+                pos = p1 if not inserted else p2
+                at = pos + shift
+                filler[at:at + len(line)] = line
+                inserted.append({"key": key, "value": value,
+                                 "pos": int(at)})
+                shift += len(line)
+            filler = filler[:room]
+    ids = filler + question_ids
+    if len(ids) > ctx:
+        raise ContextTooSmall(f"{condition} 构造长度 {len(ids)} 超过 ctx={ctx}")
+    return {
+        "task": condition, "ids": ids, "answer": "NONE",
+        "answer_words": None,
+        "needle_span": None, "value_span": value_span,
+        "query_span": (len(filler), len(ids)),
+        "meta": {"condition": condition, "target_key": key,
+                 "inserted": inserted, "n_tokens": len(ids),
+                 "nominal_ctx": int(ctx)},
+    }
+
+
 # ---------------------------------------------------------------- FWE
 
 _SYL = ["ka", "ro", "mi", "ta", "lu", "sen", "dor", "vil", "pen", "tor",
@@ -409,6 +486,10 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
     if len(top10) < 10:
         raise ContextTooSmall(
             f"fwe 正文只有 {len(top10)} 个可区分的词，无法构造 top-10")
+    answer_text = " ".join(top10)
+    # 生成长度预算审计：严格 EM 要求完整输出十个词；固定 44 token 的生成
+    # 预算若小于答案本身的 BPE 长度，合法答案也会被截断而系统性压低 EM。
+    answer_token_len = len(tok.encode(" " + answer_text))
     return {
         "task": "fwe",
         "ids": ids,
@@ -416,7 +497,8 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
         "answer_words": top10,
         "needle_span": None,
         "query_span": (len(body_ids), len(ids)),
-        "meta": {"n_tokens": len(ids), "k_high": k},
+        "meta": {"n_tokens": len(ids), "k_high": k,
+                 "answer_token_len": int(answer_token_len)},
     }
 
 
@@ -466,11 +548,25 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
     body_ids = [i for p in parts for i in p]
     if len(body_ids) > room:
         raise ContextTooSmall(f"vt 正文 {len(body_ids)} 超过长度空间 {room}，可减小 vt_chains/vt_depth")
-    ids = body_ids + question_ids
+    # 固定链数/深度的定义正文远短于请求 ctx。若不补足，256/512/1024 档的
+    # 实际上下文几乎相同，长度趋势会把“同一长度的重抽样”误当成“长度效应”。
+    # 这里用中性填充把实际 token 长度补到 ctx（精确到 room），并把“请求长度
+    # vs 实际长度”显式落盘。填充只使用固定 FILLER，不改变答案/定义行。
+    filler_room = room - len(body_ids)
+    filler_ids: List[int] = []
+    if filler_room > 0:
+        unit = _cached_encode(tok, " " + FILLER)
+        if not unit:
+            raise ContextTooSmall("vt 填充文本被分词器编码为空")
+        filler_ids = (unit * (filler_room // len(unit) + 1))[:filler_room]
+    ids = body_ids + filler_ids + question_ids
+    if len(ids) > ctx:
+        raise ContextTooSmall(f"vt 样例长度 {len(ids)} 超过 ctx={ctx}")
     # gold 跨度应锁定到“实际包含目标数值”的定义行（VAR {L}1 = value）。
     target_prefix = f"VAR {qL}1 ="
     _ln, s, e = next((ln, sp, ep) for ln, sp, ep in line_spans if ln.startswith(target_prefix))
     vs, ve = _token_span_for_text(tok, ids[s:e], values[qL])
+    query_start = len(body_ids) + len(filler_ids)
     return {
         "task": "vt",
         "ids": ids,
@@ -478,8 +574,16 @@ def build_vt(tok, ctx: int, rng: random.Random, n_chains: int = 4, depth: int = 
         "answer_words": None,
         "needle_span": (s, e),
         "value_span": (s + vs, s + ve),
-        "query_span": (len(body_ids), len(ids)),
-        "meta": {"chain": qL, "depth": depth, "n_chains": n_chains, "n_tokens": len(ids)},
+        "query_span": (query_start, len(ids)),
+        "meta": {"chain": qL, "depth": depth, "n_chains": n_chains,
+                 "n_tokens": len(ids),
+                 # 实际上下文审计：请求 ctx 与真实 token 长度的差距必须可见，
+                 # 否则 VT 的“长度档”只是名义值。
+                 "nominal_ctx": int(ctx),
+                 "actual_tokens": int(len(ids)),
+                 "definition_tokens": int(len(body_ids)),
+                 "filler_tokens": int(len(filler_ids)),
+                 "evidence_distance_tokens": int(query_start - (s + ve))},
     }
 
 
@@ -542,6 +646,12 @@ def score_prediction(task: str, answer: str, pred_text: str,
         nums = standalone_numeric_tokens(pred_text)
         return {"em": float(bool(nums) and nums[0] == answer), "recall": None,
                 "precision": None, "f1": None}
+    if task in EVIDENCE_TASKS:
+        # 只要生成的答案段出现独立 NONE 即算 abstain；出现数字/其它词即
+        # 视为“把不可靠证据当成答案”，严格 EM=0。大小写与标点不敏感。
+        toks = _WORD_RE.findall(pred_text.lower())
+        em = float("none" in toks)
+        return {"em": em, "recall": None, "precision": None, "f1": None}
     if task == "fwe":
         pred = set(_WORD_RE.findall(pred_text.lower()))
         top = set(answer_words or [])
@@ -742,6 +852,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         ex = build_fwe(tok, room_ctx, rng)
                     elif task == "vt":
                         ex = build_vt(tok, room_ctx, rng, n_chains=vt_chains, depth=vt_depth)
+                    elif task in EVIDENCE_TASKS:
+                        ex = build_evidence_condition(tok, room_ctx, rng, task)
                     else:
                         raise ValueError(task)
                 except ContextTooSmall as e:
@@ -788,6 +900,13 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                         ems.append(sc["em"])
                         rec = {"sample_id": ex.get("sample_id"),
                                "em": float(sc["em"])}
+                        if task == "fwe":
+                            rec["answer_token_len"] = ex.get("meta", {}).get(
+                                "answer_token_len")
+                        if task == "vt":
+                            rec["actual_tokens"] = len(ex["ids"])
+                            rec["nominal_ctx"] = ex.get("meta", {}).get(
+                                "nominal_ctx", ctx)
                         if task.startswith("niah"):
                             # 目标箱与实际箱分开落盘：极端构造下插入位置可能
                             # 被干扰行边界挤到相邻箱，审计时不能把“计划分层”
@@ -862,6 +981,29 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 样例级配对检验，见 run_all 的 RULER 样例配对小节。
                     "samples": outcomes,
                 }
+                if task == "fwe":
+                    lens = [s.get("answer_token_len") for s in outcomes
+                            if s.get("answer_token_len") is not None]
+                    results[task][str(room_ctx)]["generation_budget"] = {
+                        "max_new": int(max_gen),
+                        "max_answer_token_len": (max(lens) if lens else None),
+                        "all_answers_fit": (all(int(x) <= max_gen for x in lens)
+                                            if lens else None),
+                        "note": ("答案 token 长度超过生成预算时严格 EM 会被"
+                                 "截断系统性压低；该字段用于审计而非改分"),
+                    }
+                if task == "vt":
+                    actual = [s.get("actual_tokens") for s in outcomes
+                              if s.get("actual_tokens") is not None]
+                    results[task][str(room_ctx)]["context_length_audit"] = {
+                        "nominal_ctx": int(room_ctx),
+                        "actual_tokens_min": (min(actual) if actual else None),
+                        "actual_tokens_max": (max(actual) if actual else None),
+                        "actual_tokens_mean": (float(sum(actual) / len(actual))
+                                               if actual else None),
+                        "note": ("VT 已用中性填充补到请求长度；若仍与请求"
+                                 "长度差距大，长度趋势解释必须受限"),
+                    }
                 if task.startswith("niah"):
                     target_counts = {
                         b: sum(1 for s in outcomes
@@ -1007,6 +1149,9 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--ctx_lens", default=None, help="逗号分隔，默认用训练配置")
     p.add_argument("--n_samples", type=int, default=None)
+    p.add_argument("--tasks", default=None,
+                   help="逗号分隔；默认主表 5 任务。可显式加入 "
+                        "evidence_absent/evidence_wrong/evidence_conflict")
     p.add_argument("--gen_batch", type=int, default=None,
                    help="等长 prompt 批量贪婪解码的最大批大小")
     p.add_argument("--no_amp", action="store_true", help="禁用 bf16 autocast（CUDA）")
@@ -1018,6 +1163,13 @@ def main():
                    help="即使 data_report 标记泄露也继续评测（仅用于复现历史"
                         "实验；结果不得用于正式结论）")
     args = p.parse_args()
+    tasks = TASKS
+    if args.tasks:
+        tasks = tuple(x.strip() for x in args.tasks.split(",") if x.strip())
+        unknown = sorted(set(tasks) - set(TASKS) - set(EVIDENCE_TASKS))
+        if unknown:
+            p.error(f"未知任务: {', '.join(unknown)}；可选 "
+                    f"{', '.join(TASKS + EVIDENCE_TASKS)}")
 
     data_preflight = data_protocol_preflight(
         args.data_dir,
@@ -1130,6 +1282,7 @@ def main():
                         vt_chains=vt_chains,
                         vt_depth=vt_depth,
                         corpus_sents=corpus_sents,
+                        tasks=tasks,
                         amp=amp, gen_batch=gen_batch,
                         depth_stratified=depth_stratified)
     # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务

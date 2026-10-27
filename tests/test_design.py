@@ -732,3 +732,16 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
     assert mcnemar_mde(astronomical, 0.1) is None
     assert max_discordance_for_effect(0.1, astronomical) == 1.0
     print("  [ok] 设计功效函数：超 float 范围的合法大 n 不抛错/不产出 inf")
+
+
+def test_noncentral_t_power_is_more_conservative_for_small_seeds():
+    """3~5 个种子时，非中心 t 仿真必须低于正态近似（后者高估功效）。"""
+    from lega.design import paired_t_power_nct
+    for n in (3, 5):
+        normal = paired_t_power(0.01, 0.01, n)
+        out = paired_t_power_nct(0.01, 0.01, n, n_sim=20000, seed=3)
+        assert out["method"] == "noncentral_t_simulation"
+        assert 0.0 <= out["power"] <= 1.0
+        assert out["power"] < normal, (n, out["power"], normal)
+    zero = paired_t_power_nct(0.0, 0.01, 5, n_sim=5000, seed=1)
+    assert abs(zero["power"] - 0.05) < 1e-12

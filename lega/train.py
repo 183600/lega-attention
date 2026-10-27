@@ -631,7 +631,8 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     was_training = model.training
     model.eval()
     try:
-        collect_gate = model.variant not in ("standard", "null")
+        collect_gate = (model.variant not in ("standard",)
+                        and not getattr(model.blocks[0].attn, "is_null", False))
         indices, n_windows = _val_eval_indices(len(val), ctx, iters)
         if batch_windows is None:
             batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
