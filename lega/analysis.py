@@ -77,7 +77,8 @@ from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
                     PRIMARY_AP_THRESHOLD as _PRIMARY_AP_THRESHOLD,
                     linear_probe)
 from .repro import load_provenance, sha256_file
-from .ruler import (build_niah, build_vt, load_corpus_sents_with_source,
+from .ruler import (DEPTH_BINS, build_niah, build_vt,
+                    load_corpus_sents_with_source,
                     record_corpus_test_access,
                     ContextTooSmall, _stable_hash)
 from .utils import (amp_autocast, auroc, average_precision,
@@ -161,16 +162,21 @@ _GATE_DECISION_THRESHOLD = 0.5
 
 
 def _example(task: str, tok, ctx: int, rng: Random, corpus_sents: Optional[List[str]] = None,
-             vt_chains: int = 4, vt_depth: int = 4):
+             vt_chains: int = 4, vt_depth: int = 4,
+             target_depth: Optional[str] = None):
     """构造单个带 gold 跨度的分析样例（fwe 无单一 needle，不参与）。"""
     if task == "niah_synth":
-        return build_niah(tok, ctx, rng, mode="synth")
+        return build_niah(tok, ctx, rng, mode="synth",
+                          target_depth=target_depth)
     if task == "niah_corpus":
         if not corpus_sents:
             return None
-        return build_niah(tok, ctx, rng, mode="corpus", corpus_sents=corpus_sents)
+        return build_niah(tok, ctx, rng, mode="corpus",
+                          corpus_sents=corpus_sents,
+                          target_depth=target_depth)
     if task == "niah_multikey":
-        return build_niah(tok, ctx, rng, mode="synth", multikey=True)
+        return build_niah(tok, ctx, rng, mode="synth", multikey=True,
+                          target_depth=target_depth)
     if task == "vt":
         return build_vt(tok, ctx, rng, n_chains=vt_chains, depth=vt_depth)
     return None
@@ -818,6 +824,8 @@ def main():
     max_new = _cfg_int("ruler", "max_new", 12)
     ctx = resolve_analysis_ctx(model.block_size, ctx, max_new)
     ruler_seed = _cfg_int("ruler", "seed", 1234)
+    depth_stratified = config_bool(
+        rcfg.get("depth_stratified", True), "ruler.depth_stratified")
 
     sents, corpus_source = load_corpus_sents_with_source(
         args.data_dir, allow_test=bool(getattr(args, "allow_test_corpus", False)))
@@ -837,10 +845,16 @@ def main():
             # 与 lega.ruler.run_ruler 的播种公式完全相同：EM 分数与逐头机制
             # 记录对应到同一批样例，而不是两个独立抽样。
             rng = Random(ruler_seed * 100003 + _stable_hash(task) % 99991 + ctx * 31 + i)
+            depth_start = (_stable_hash(f"{task}:{ctx}") % len(DEPTH_BINS)
+                           if depth_stratified and task.startswith("niah") else 0)
+            target_depth = (DEPTH_BINS[(depth_start + i) % len(DEPTH_BINS)]
+                            if depth_stratified and task.startswith("niah")
+                            else None)
             try:
                 ex = _example(task, tok, ctx, rng, corpus_sents=sents,
                               vt_chains=_cfg_int("ruler", "vt_chains", 4),
-                              vt_depth=_cfg_int("ruler", "vt_depth", 4))
+                              vt_depth=_cfg_int("ruler", "vt_depth", 4),
+                              target_depth=target_depth)
             except ContextTooSmall:
                 # 预期的可跳过情况（上下文长度不足）；其余异常说明构造逻辑出错，应暴露。
                 continue
@@ -866,6 +880,7 @@ def main():
             pass
         save_json({"variant": variant, "seed": ckpt_seed_out, "n_records": 0,
                    "note": "no examples", "skipped_tasks": skipped_tasks,
+                   "depth_stratified": bool(depth_stratified),
                    "ckpt": os.path.abspath(args.ckpt),
                    "ckpt_sha256": ckpt_sha256,
                    "data_protocol_preflight": data_preflight,
@@ -914,6 +929,7 @@ def main():
     # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计
     summary["corpus_source"] = corpus_source
     summary["corpus_held_out"] = corpus_source in ("val", "test")
+    summary["depth_stratified"] = bool(depth_stratified)
     # 被分析 checkpoint 的路径与内容指纹：机制统计与权重一一绑定
     summary["ckpt"] = os.path.abspath(args.ckpt)
     summary["ckpt_sha256"] = ckpt_sha256

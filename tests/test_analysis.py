@@ -5,7 +5,8 @@
 """
 import math
 
-from lega.analysis import (_bounded_float, _float_grid, _int_at_least,
+from lega.analysis import (_bounded_float, _example as _analysis_example,
+                           _float_grid, _int_at_least,
                            auroc_cluster_bootstrap, collect_records,
                            resolve_analysis_ctx, summarize, tau_sensitivity)
 from lega.data import CACHE_SCHEMA, CharTokenizer
@@ -52,6 +53,26 @@ def test_collect_records_batching_matches_per_example():
     # 批处理后各样例记录仍按原始顺序连续排列
     assert [r["example"] for r in r1] == sorted(r["example"] for r in r1)
     print(f"  [ok] {len(r1)} 条记录逐位一致，样例顺序保持")
+
+
+def test_analysis_examples_follow_ruler_depth_stratification():
+    """机制分析必须与 run_ruler 构造同一批分层位置样例，而不是随机位置。"""
+    from random import Random
+
+    from lega.ruler import DEPTH_BINS, _stable_hash, depth_bin
+    chars = sorted(set(chr(i) for i in range(32, 127)) | {"\n"})
+    tok = CharTokenizer(chars)
+    ctx, seed = 512, 1234
+    for task in ("niah_synth", "niah_multikey"):
+        for i in range(9):
+            target = DEPTH_BINS[i % len(DEPTH_BINS)]
+            rng = Random(seed * 100003 + _stable_hash(task) % 99991
+                         + ctx * 31 + i)
+            ex = _analysis_example(task, tok, ctx, rng,
+                                   target_depth=target)
+            assert ex["meta"]["depth_target"] == target
+            assert depth_bin(ex["meta"]["depth"]) == target
+    print("  [ok] 分析样例的 needle 位置与 RULER 分层目标一致")
 
 
 def test_collect_records_c_keeps_length_normalization_for_ablations():
