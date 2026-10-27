@@ -12,6 +12,31 @@ def _tiny():
                n_heads=2, variant="lega", use_sdpa_standard=False).eval()
 
 
+def test_main_rejects_fractional_answer_positions(monkeypatch):
+    """JSON 里的 answer_start/end 与函数入口同口径，不能被 int() 静默截断。"""
+    import json
+    import os
+    import tempfile
+
+    import lega.model as model_mod
+    from lega.output_ablation import main
+
+    model = _tiny()
+    monkeypatch.setattr(model_mod, "load_model",
+                        lambda *a, **k: (model, {}))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "idx.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"input_ids": [list(range(12))],
+                       "answer_start": 1.5, "answer_end": 4}, f)
+        try:
+            main(["--ckpt", "unused", "--idx_json", path])
+        except ValueError as e:
+            assert "answer_start" in str(e), e
+        else:
+            raise AssertionError("小数 answer_start 必须被拒绝")
+
+
 def test_score_answer_matches_logits_reuse():
     model = _tiny()
     idx = torch.randint(0, 64, (1, 12))

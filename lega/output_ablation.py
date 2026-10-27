@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 from numbers import Integral
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -239,7 +239,7 @@ def main(argv=None) -> int:
              if args.heads else None)
     modes = [x.strip() for x in args.modes.split(",") if x.strip()]
     rep = head_output_intervention_scan(
-        model, idx, int(start), None if end is None else int(end),
+        model, idx, start, end,
         layers=layers, heads=heads, scope=args.scope, modes=modes)
     text = json.dumps(rep, ensure_ascii=False, indent=2)
     if args.out:
