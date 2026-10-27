@@ -206,7 +206,7 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     records_by_ex: List[List[Dict]] = [[] for _ in examples]
     amp_ctx = amp_autocast(device, bool(amp))
     use_c_full = variant in ("lega", "lega_no_query", "lega_no_len",
-                             "lega_conc_only")
+                             "lega_conc_only", "lega_detach_conc")
     # 按提示长度分组：只有等长样例可堆叠；每组内再按 batch_size 切批。
     order = sorted(range(len(examples)), key=lambda k: len(examples[k]["ids"]))
     bs = max(1, strict_int(batch_size, "batch_size"))

@@ -43,12 +43,12 @@ def verify_controlled_setup(out_root: str, variants, seeds, n_seeds: int,
     attention_missing = []
 
     def _attention_backend(variant: str, sdpa_on: bool) -> str:
-        # 含集中度项的门控必须读取 softmax 概率，无法走 SDPA；其它变体在
-        # sdpa_on 时走 SDPA。若配置开启 SDPA，两类变体的注意力实现就不同，
-        # PPL 差异不能全部归因于门控。集中度变体集合直接从 attention 的
-        # _USE_CONC 派生，避免新增变体（如 lega_placebo）漏进审计时被误判
-        # 成 SDPA 路径：lega_placebo 同样 use_conc=True，实际走显式路径。
-        needs_probs = variant in _USE_CONC
+        # 含集中度项（归一化 c 或原始 log max_p）的门控必须读取 softmax
+        # 概率，无法走 SDPA；其它变体在 sdpa_on 时走 SDPA。若配置开启
+        # SDPA，两类变体的注意力实现就不同，PPL 差异不能全部归因于门控。
+        # 集合直接从 attention 的 _USE_CONC/_USE_RAW_CONC 派生，避免新增
+        # 变体（如 lega_placebo、lega_raw）漏进审计时被误判成 SDPA 路径。
+        needs_probs = variant in _USE_CONC or variant in _USE_RAW_CONC
         return "explicit" if needs_probs or not sdpa_on else "sdpa"
     devices = {}
     device_missing = []

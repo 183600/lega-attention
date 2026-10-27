@@ -19,7 +19,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
                             RUNNABLE_VARIANTS, VARIANTS, VARIANT_CN,
-                            _USE_CONC)
+                            _USE_CONC, _USE_RAW_CONC)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER)
@@ -80,7 +80,9 @@ PARAM_CONTROL_PAIR = ("lega", PARAM_CONTROL_VARIANT)
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
 # null 变体虽无 g/logit，仍应纳入；standard 无需诊断，保持跳过。
 GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
-                      "lega_no_query", "lega_conc_only", "lega_len_only")
+                      "lega_no_query", "lega_conc_only", "lega_len_only",
+                      "lega_raw", "lega_raw_no_len", "lega_detach_conc",
+                      "null_zero")
 
 # RULER 逐任务分解的固定任务列表（与 lega.ruler.TASKS 一致，避免导入
 # 评测模块只为拿常量）。

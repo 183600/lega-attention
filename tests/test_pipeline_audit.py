@@ -678,6 +678,32 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
                                  "审计必须拒绝")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # lega_raw 不并入 log n，但仍消费原始 log max_p，必须走显式 softmax；
+    # 与 standard(SDPA) 混跑同样不能被审计放行。
+    tmp = tempfile.mkdtemp()
+    try:
+        variants, seeds = ["standard", "lega_raw"], [7]
+        for v in variants:
+            d = os.path.join(tmp, v)
+            os.makedirs(d)
+            _write_json(os.path.join(d, "config_used.json"), {
+                "lr": 0.001, "steps": 10, "warmup": 2,
+                "use_sdpa_standard": True,
+                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
+            _write_json(os.path.join(d, "eval.json"), {
+                "variant": v, "seed": 7, "data_fingerprint": "abc123",
+                "code_commit": "deadbeef", "config_sha256": "shax",
+                "steps": 10, "tokens_seen": 1024})
+        try:
+            verify_controlled_setup(tmp, variants, seeds, 1,
+                                    expected_data_digest="abc123")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("lega_raw 与 standard 的注意力路径不同，"
+                                 "审计必须拒绝")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
 
 
