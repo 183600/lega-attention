@@ -124,6 +124,7 @@ from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E402
                         runtime_info, sanity_summary, sha256_file,
                         worktree_state, write_worktree_patch)
+from lega.ruler import DEPTH_BINS as RULER_DEPTH_BINS  # noqa: E402
 from lega.utils import (bootstrap_mean_ci, config_bool,
                         ensure_cublas_workspace_config, get_device,
                         holm_bonferroni, mcnemar_exact_p, mean_std,
@@ -1896,6 +1897,50 @@ def _ruler_cell_sample_outcomes(d):
             seen.update(cell_out)
             out[(task, str(ctx))] = cell_out
     return out
+
+
+def _ruler_cell_depth_outcomes(d):
+    """RULER payload → {(task, ctx): {sample_id: {"em", "depth_bin"}}}。
+
+    只保留带 needle 位置信息的 ``niah_*`` 单元格。位置剂量-反应要求
+    **同一批 sample_id** 上候选与参照的比较，因此必须消费逐样例的
+    ``depth_bin``；只有聚合 ``em_by_depth`` 的旧产物无法做样例配对，返回
+    None（下游显式列为“缺少位置信息”，不伪造配对证据）。
+
+    与 ``_ruler_cell_sample_outcomes`` 一样，任一样例 id/EM 损坏、n 与
+    samples 长度不符都整份 payload 判为不可用，避免部分损坏的单元格让
+    不同位置的估计量基于不同的样本集合。
+    """
+    cells = _ruler_cell_sample_outcomes(d)
+    if cells is None:
+        return None
+    results = d.get("results") if isinstance(d, dict) else None
+    if not isinstance(results, dict):
+        return None
+    out = {}
+    for task, by_ctx in results.items():
+        if (not isinstance(task, str) or not task.startswith("niah")
+                or not isinstance(by_ctx, dict)):
+            continue
+        for ctx, cell in by_ctx.items():
+            key = (task, str(ctx))
+            sid_em = cells.get(key)
+            if not isinstance(sid_em, dict) or not isinstance(cell, dict):
+                return None
+            samples = cell.get("samples")
+            if not isinstance(samples, list) or len(samples) != len(sid_em):
+                return None
+            cell_out = {}
+            for rec in samples:
+                if not isinstance(rec, dict):
+                    return None
+                sid = rec.get("sample_id")
+                db = rec.get("depth_bin")
+                if sid not in sid_em or db not in RULER_DEPTH_BINS:
+                    return None
+                cell_out[sid] = {"em": sid_em[sid], "depth_bin": db}
+            out[key] = cell_out
+    return out or None
 
 
 def _ruler_sample_outcomes(d):
