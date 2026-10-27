@@ -876,11 +876,12 @@ class CausalSelfAttention(nn.Module):
         # 无需构建显式掩码。
         # 静态 KV 缓存的整段预填充（cache_pos=0）同样满足"无任何历史"，
         # 注意力只在已写入的 T 个前缀键上做全因果，可同走 is_causal 快路。
+        # null/null_zero 必须把空槽并入 is_causal 之外的掩码分支：is_causal
+        # 快路只对真实键做 softmax，会丢掉 p_null 对输出的归一化/写回。
         causal_only = (use_sdpa and past_kv is None
                        and (kv_cache is None or cache_pos == 0)
                        and self.variant in ("standard", "gate_only", "qgate",
-                                            "lega_no_conc", "lega_len_only",
-                                            "null_zero"))
+                                            "lega_no_conc", "lega_len_only"))
 
         # 显式分块路径只使用逐块对角带掩码（全局共享的严格上三角小掩码）。
         elems = B * H * T * S

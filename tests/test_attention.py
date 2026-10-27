@@ -372,6 +372,46 @@ def test_null_variant_max_p_includes_null_slot():
                           atol=1e-5, rtol=1e-5)
 
 
+def test_null_zero_sdpa_keeps_null_slot():
+    """null_zero 的 SDPA 快路也必须并入空槽，不能只对真实键做 softmax。
+
+    null 的 v_null 初始为 0，与 null_zero 的固定零 value 等价；两者在同一
+    权重下应给出完全相同的输出（prefill 与增量解码）。
+    """
+    torch.manual_seed(0)
+    fast = CausalSelfAttention(32, 2, variant="null_zero",
+                               use_sdpa_standard=True)
+    slow = CausalSelfAttention(32, 2, variant="null_zero",
+                               use_sdpa_standard=False)
+    ref = CausalSelfAttention(32, 2, variant="null",
+                              use_sdpa_standard=True)
+    with torch.no_grad():
+        fast.k_null.normal_(0, 0.5)
+        slow.load_state_dict(fast.state_dict())
+        ref.load_state_dict(fast.state_dict())
+        # 给 null 一个非零 value 并同步到 null_zero 无法表达（buffer 固定为零），
+        # 因此这里只验证零 value 下的路径等价性。
+        ref.v_null.zero_()
+    fast.eval()
+    slow.eval()
+    ref.eval()
+    x = torch.randn(1, 12, 32)
+    with torch.no_grad():
+        o_fast, cache_fast, _ = fast(x)
+        o_slow, cache_slow, _ = slow(x)
+        o_ref, cache_ref, _ = ref(x)
+    assert torch.allclose(o_fast, o_slow, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(o_fast, o_ref, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(cache_fast[0], cache_slow[0])
+    assert torch.allclose(cache_fast[0], cache_ref[0])
+    # 增量解码：单查询步走显式路径，也必须包含 null 槽。
+    nxt = torch.randn(1, 1, 32)
+    with torch.no_grad():
+        o1, _, _ = fast(nxt, past_kv=cache_fast)
+        o2, _, _ = slow(nxt, past_kv=cache_slow)
+    assert torch.allclose(o1, o2, atol=1e-5, rtol=1e-5)
+
+
 def test_mask_cache_byte_limit_uses_lru():
     """全局掩码缓存按字节上限驱逐最旧条目。"""
     old_cap = attention_mod._CACHE_CAP
