@@ -18,7 +18,8 @@ from decimal import Decimal, InvalidOperation
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
-                            RUNNABLE_VARIANTS, VARIANTS, VARIANT_CN,
+                            RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
+                            VARIANTS, VARIANT_CN,
                             _USE_CONC, _USE_RAW_CONC)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,

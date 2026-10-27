@@ -212,6 +212,11 @@ def test_confirmatory_power_uses_planned_holm_burden():
     import run_all
     assert planned_comparison_pairs(variants, reg7) == \
         run_all.build_comparison_pairs({v: {} for v in variants}, reg7)
+    # 显式加入补充对照时，设计层的家族大小同样必须与汇总层一致。
+    from lega.attention import SUPPLEMENTAL_VARIANTS
+    supp = variants + list(SUPPLEMENTAL_VARIANTS)
+    assert planned_comparison_pairs(supp, reg7) == \
+        run_all.build_comparison_pairs({v: {} for v in supp}, reg7)
     assert (set(design_mod._DEFAULT_GATED_FOR_ANALYSIS)
             == set(run_all.GATED_FOR_ANALYSIS))
 

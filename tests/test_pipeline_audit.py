@@ -707,6 +707,31 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
 
 
+def test_supplemental_variants_enter_summary_comparison_pairs():
+    """显式运行的补充对照必须有相对 standard 的配对检验。
+
+    补充变体不属于默认矩阵，历史上若只把它们写进汇总行、却不进入
+    build_comparison_pairs，读者会看到 PPL 数值却没有任何显著性检验；
+    设计层的 planned_comparison_pairs 又把它们算进 Holm 家族，两侧
+    家族大小不一致。
+    """
+    from lega.attention import RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS
+    runs = {v: {1: {}} for v in RUNNABLE_VARIANTS}
+    pairs = build_comparison_pairs(runs, {"hypotheses": []})
+    for v in SUPPLEMENTAL_VARIANTS:
+        assert (v, "standard") in pairs, v
+    # 预注册对比若点名补充/对照变体，也必须真正进入配对表并被检验。
+    reg = {"hypotheses": [{"metric": "PPL", "candidate": "lega_raw",
+                           "reference": "lega"}]}
+    assert ("lega_raw", "lega") in build_comparison_pairs(runs, reg)
+    # 未运行的补充变体不得凭空产生对比。
+    only_standard = build_comparison_pairs(
+        {"standard": {1: {}}}, {"hypotheses": []})
+    for v in SUPPLEMENTAL_VARIANTS:
+        assert (v, "standard") not in only_standard, v
+    print("  [ok] 补充对照进入汇总配对，未运行时不伪造对比")
+
+
 def test_verify_controlled_setup_reports_malformed_attention_switch():
     """config_used 的 use_sdpa_standard 非法时，审计应报告问题而非崩溃。"""
     tmp = tempfile.mkdtemp()

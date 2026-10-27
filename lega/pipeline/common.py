@@ -306,6 +306,11 @@ def build_comparison_pairs(runs, registered=None):
     runs = runs if isinstance(runs, dict) else {}
     pairs = [(cand, "standard") for cand in ALL_VARIANTS
              if cand != "standard"]
+    # 补充对照（raw/detach/null_zero）不在默认矩阵内，但显式运行时同样是
+    # “相对 standard”的整体对比；漏掉会让汇总表出现数值却没有任何配对
+    # 检验，也与设计层 planned_comparison_pairs（按实际计划变体生成）不一致。
+    pairs += [(cand, "standard") for cand in SUPPLEMENTAL_VARIANTS
+              if cand in runs]
     # 参数匹配安慰剂只在显式运行时才进入对比，且核心对比是 lega vs placebo
     # （不是 vs standard）：二者门控参数/FLOPs 相同，差别只在证据是否有信息。
     if PARAM_CONTROL_VARIANT in runs:
@@ -329,7 +334,7 @@ def build_comparison_pairs(runs, registered=None):
         c, r = h.get("candidate"), h.get("reference")
         if h.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
             continue  # 单样本机制族，由 _auroc_diff_tests/_ap_diff_tests 覆盖
-        if c in VARIANTS and r in VARIANTS:
+        if c in RUNNABLE_VARIANTS and r in RUNNABLE_VARIANTS:
             pairs.append((c, r))
     return list(dict.fromkeys(pairs))
 
