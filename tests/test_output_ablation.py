@@ -23,6 +23,39 @@ def test_score_answer_matches_logits_reuse():
         assert abs(a[key] - b[key]) < 1e-6, key
 
 
+def test_head_scan_reports_only_the_target_head_mass():
+    """mean_abs_removed 必须是目标头通道的幅度，而不是所有头的均值。"""
+    model = _tiny()
+    idx = torch.randint(0, 64, (1, 16))
+    start, end = 8, 13
+    rep = head_output_intervention_scan(
+        model, idx, start, end, layers=[0], heads=[0, 1], modes=("zero",))
+
+    captured = {}
+
+    def hook(module, args):
+        captured["x"] = args[0].detach().clone()
+
+    handle = model.blocks[0].attn.wo.register_forward_pre_hook(hook)
+    try:
+        with torch.no_grad():
+            model(idx)
+    finally:
+        handle.remove()
+    x = captured["x"]
+    positions = list(range(start - 1, end - 1))
+    dh = model.blocks[0].attn.d_head
+    for row in rep["interventions"]:
+        lo = row["head"] * dh
+        expected = x[:, positions, lo:lo + dh].abs().mean().item()
+        assert abs(row["mean_abs_removed"] - expected) < 1e-6, row
+    # 两个头不可能恰好有相同的通道幅度；相同说明仍在拿全通道均值。
+    vals = {r["head"]: r["mean_abs_removed"]
+            for r in rep["interventions"]}
+    assert vals[0] != vals[1], vals
+    print("  [ok] 逐头干预的 mean_abs_removed 只统计目标头通道")
+
+
 def test_head_output_scan_reports_paired_deltas_and_permutation():
     model = _tiny()
     idx = torch.randint(0, 64, (1, 16))

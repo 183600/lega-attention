@@ -95,14 +95,16 @@ def _forward_with_head_hook(model, idx: torch.Tensor, layer: int, head: int,
     def hook(module, args):
         x = args[0]
         y = x.clone()
-        take = y.index_select(1, pos)
+        # take 必须只含目标头的通道：mean_abs_removed 是“该头被置零/置换的
+        # 激活幅度”，用全部通道求均值会让不同头报告同一个值，无法解释
+        # 逐头干预差异。
+        take = y.index_select(1, pos)[..., lo:hi]
         if mode == "zero":
             y[:, pos, lo:hi] = 0.0
         elif mode == "permute":
             # 在答案位置之间循环移位；逐值分布不变，只破坏位置对应。
             if take.shape[1] > 1:
-                y[:, pos, lo:hi] = torch.roll(take[..., lo:hi], shifts=1,
-                                              dims=1)
+                y[:, pos, lo:hi] = torch.roll(take, shifts=1, dims=1)
         else:
             raise ValueError(f"未支持的干预模式: {mode!r}")
         removed.append(float(take.abs().mean().item()))
