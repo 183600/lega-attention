@@ -270,6 +270,19 @@ def test_linear_probe_comparison_direction_and_missing():
     print("  [ok] linear_probe 对照方向/缺失显式化")
 
 
+def test_linear_probe_comparison_includes_supplemental_variants():
+    """显式运行的补充对照产出了分析，就必须进入探针配对对照而非被跳过。"""
+    runs = {"lega_raw": {s: {"analysis": _analysis(
+        s, 0.60 + 0.005 * s, 0.20 + 0.002 * s,
+        0.90 + 0.002 * s, 0.70 + 0.002 * s)}
+        for s in (1, 2, 3, 4, 5)}}
+    out = linear_probe_baseline_comparison(runs)
+    assert [r["variant"] for r in out["rows"]] == ["lega_raw"], out
+    assert out["rows"][0]["p_adj_auprc"] < 0.05
+    assert "简单监督基线更好" in out["rows"][0]["verdict"]
+    print("  [ok] 补充对照进入线性探针基线比较")
+
+
 def test_combined_primary_reports_both_probe_metric_verdicts():
     """主指标为“并报”时不能只取 AUROC 判定而掩盖显著的 PR-AUC 反证。"""
     from run_all import linear_probe_baseline_comparison

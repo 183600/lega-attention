@@ -291,6 +291,29 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
     print("  [ok] ngram_baseline_comparison（同 split 配对、Holm、错位隔离）")
 
 
+def test_ngram_comparison_includes_explicit_supplemental_and_control():
+    """显式运行的补充/安慰剂对照必须有同 split 的统计基线检验。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "split": "test", "ppl": {"bigram": 100.0},
+            "selected_model": "bigram"})
+        runs = {}
+        for v, base in (("lega_raw", 60.0),
+                        (PARAM_CONTROL_VARIANT, 80.0)):
+            runs[v] = {s: {"eval": {"variant": v, "split": "test",
+                                    "ppl": base + s}}
+                       for s in (1, 2, 3)}
+        out = ngram_baseline_comparison(runs, tmp)
+        rows = {r["variant"]: r for r in out["rows"]}
+        assert set(rows) == {"lega_raw", PARAM_CONTROL_VARIANT}, out
+        assert rows["lega_raw"]["n"] == 3
+        assert out["holm_family_size"] == 2, out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] ngram_baseline_comparison（补充/安慰剂对照不被静默跳过）")
+
+
 def test_ngram_comparison_rejects_baseline_from_other_data():
     """results/<tag> 复用时，旧 n-gram 基线的数据指纹必须与本次 run 一致。
 

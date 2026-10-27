@@ -237,7 +237,9 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     staged, incomparable = [], []
     runs = runs if isinstance(runs, dict) else {}
     for v in sorted(runs):
-        if v not in VARIANTS:
+        # 显式运行的补充/安慰剂对照同样需要与统计基线做同 split 配对；
+        # 只按默认主矩阵过滤会让这些变体在汇总表里有 PPL 却无基线检验。
+        if v not in RUNNABLE_VARIANTS:
             continue
         m = _variant_seed_map(runs, v)
         vals, seeds_used, eval_splits, excl_seeds = [], [], set(), []
@@ -488,7 +490,9 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
     rows, tests_ap, tests_aud, missing = [], [], [], []
     runs = runs if isinstance(runs, dict) else {}
     for v in sorted(runs):
-        if v not in VARIANTS:
+        # 与 n-gram 对照同理：补充/安慰剂变体显式运行且产出分析后，
+        # 其门控 logit 也应进入与线性探针的配对对照，而不是被静默跳过。
+        if v not in RUNNABLE_VARIANTS:
             continue
         m = _variant_seed_map(runs, v)
         per_seed, has_analysis = [], False
