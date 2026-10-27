@@ -48,6 +48,16 @@ def _positive_lengths(lengths: Iterable[int]) -> List[int]:
     return out
 
 
+def _positive_count(value, name: str) -> int:
+    """严格正整数：拒绝 bool/小数/字符串，避免 int() 静默截断。"""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(f"{name} 必须是正整数，收到 {value!r}")
+    value = int(value)
+    if value < 1:
+        raise ValueError(f"{name} 必须 >= 1，收到 {value}")
+    return value
+
+
 def _positive_float(value, name: str, *, allow_zero: bool = False) -> float:
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是数值，收到 {value!r}")
@@ -67,7 +77,7 @@ def simulate_concentration(length: int, *, score_sd: float = 1.0,
     """返回 ``n_trials`` 个 c = log(n) + log(max softmax p) 样本。"""
     length = _positive_lengths([length])[0]
     score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
-    n_trials = int(_positive_lengths([max(2, int(n_trials))])[0])
+    n_trials = _positive_count(n_trials, "n_trials")
     if mode not in ("random", "repeated", "uniform"):
         raise ValueError(f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
     rng = np.random.default_rng(int(seed))
@@ -115,8 +125,10 @@ def length_null_report(lengths: Iterable[int], *, score_sd: float = 1.0,
     """对每档长度/每种零假设生成 c 分布，并给出随 log2(n) 的斜率。"""
     lengths = _positive_lengths(lengths)
     modes = tuple(modes)
+    score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
+    n_trials = _positive_count(n_trials, "n_trials")
     out = {"lengths": lengths, "score_sd": float(score_sd),
-           "n_trials": int(n_trials), "seed": int(seed),
+           "n_trials": n_trials, "seed": int(seed),
            "modes": {}}
     for mode in modes:
         per = {}

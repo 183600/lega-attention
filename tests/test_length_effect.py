@@ -620,6 +620,26 @@ def test_ruler_length_drops_seeds_with_different_context_grids():
     assert pair["balanced_contexts"] is True
 
 
+def test_length_null_n_trials_is_not_silently_clamped_or_truncated():
+    """n_trials 是样本数：1 必须得到 1 个样本，0/负数/bool/小数必须拒绝。"""
+    import pytest
+
+    from lega.length_null import (length_null_report,
+                                  simulate_concentration)
+
+    assert simulate_concentration(8, n_trials=1, seed=0).size == 1
+    with pytest.raises(ValueError):
+        simulate_concentration(8, n_trials=0)
+    with pytest.raises(ValueError):
+        simulate_concentration(8, n_trials=-1)
+    with pytest.raises(ValueError):
+        simulate_concentration(8, n_trials=True)
+    with pytest.raises(ValueError):
+        simulate_concentration(8, n_trials=2.5)
+    with pytest.raises(ValueError):
+        length_null_report([8], n_trials=0)
+
+
 def test_length_null_random_context_concentration_grows_with_length():
     """零假设诊断：随机上下文下 c 随 log2(n) 增长，不能凭均匀特例说解耦。"""
     from lega.length_null import length_null_report
