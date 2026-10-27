@@ -1059,13 +1059,14 @@ def _ruler_protocol(d) -> dict:
 
     这些字段任一不同，EM 就不是同一批样例/同一生成规则上的配对观测：
     ctx_lens/n_samples/sample_seed 决定题面与抽样，corpus_source 决定
-    干扰文本是否见过，max_new/fwe_max_new/vt_* 决定解码预算。
+    干扰文本是否见过，max_new/fwe_max_new/vt_* 决定解码预算，
+    depth_stratified 决定 needle 位置是分层抽样还是随机抽样。
     """
     if not isinstance(d, dict):
         return {}
     keys = ("ctx_lens", "n_samples", "sample_seed", "corpus_source",
             "corpus_held_out", "max_new", "fwe_max_new", "vt_chains",
-            "vt_depth", "amp")
+            "vt_depth", "amp", "depth_stratified")
     return {k: d[k] for k in keys if k in d and d[k] is not None}
 
 

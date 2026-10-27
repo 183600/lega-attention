@@ -38,7 +38,7 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _render_parameter_matched_control,
                       _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
                       _ruler_depth_gap, _ruler_depth_means,
-                      _ruler_fwe_recall, _ruler_min_cell_n,
+                      _ruler_fwe_recall, _ruler_min_cell_n, _ruler_protocol,
                       _ruler_task_means,
                       _render_registration_integrity, _resolve_jobs, _stat,
                       _seed_key, _strict_seed_int, _parse_seed_list,
@@ -3547,6 +3547,27 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] RULER n=Infinity/非数值指标：跳过而非崩溃")
+
+
+def test_ruler_protocol_tracks_depth_stratification():
+    """分层位置与随机位置不是同一批题面：配对检验必须拒绝跨协议比较。"""
+    from run_all import _same_protocol_fields
+    base = {
+        "ctx_lens": [256], "n_samples": 3, "sample_seed": 1,
+        "corpus_source": "val", "corpus_held_out": True,
+        "max_new": 12, "fwe_max_new": 44, "vt_chains": 4,
+        "vt_depth": 4, "amp": True,
+    }
+    stratified = _ruler_protocol(dict(base, depth_stratified=True))
+    random_pos = _ruler_protocol(dict(base, depth_stratified=False))
+    legacy = _ruler_protocol(base)
+    assert stratified["depth_stratified"] is True
+    assert random_pos["depth_stratified"] is False
+    assert "depth_stratified" not in legacy
+    assert _same_protocol_fields(stratified, dict(stratified))
+    assert not _same_protocol_fields(stratified, random_pos)
+    assert not _same_protocol_fields(stratified, legacy)
+    print("  [ok] RULER 配对协议区分分层/随机位置")
 
 
 def test_int_or_zero_rejects_bool_and_fractional_counts():
