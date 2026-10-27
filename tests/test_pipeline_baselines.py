@@ -189,6 +189,26 @@ def test_render_baseline_selection_stability():
     print("  [ok] _render_baseline_sections：调优选择稳定性证据")
 
 
+def test_render_baseline_huge_support_fraction_does_not_emit_inf():
+    """支持率是有限但极大的外部值时，百分比渲染不能写出 inf%。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
+            "variant": "standard", "steps": 10, "n_trials": 3,
+            "selection_seeds": [7, 8, 9],
+            "selected": {"lr": 0.0012, "val_loss_best": 3.1},
+            "default_trial": {"lr": 0.0006, "val_loss_best": 3.2},
+            "selection_diagnostics": {
+                "n_seeds": 3, "selected_support_count": 2,
+                "selected_support_fraction": 1e307}})
+        text = "\n".join(_render_baseline_sections(tmp))
+        assert "选择稳定性" in text and "溢出" in text
+        assert "inf" not in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 调优支持率溢出安全降级")
+
+
 def test_resolve_ngram_split_auto_matches_neural_eval_rule():
     """auto 必须与 lega.evaluate 的 --split auto 同规则：有非空 test.bin → test。"""
     tmp = tempfile.mkdtemp()

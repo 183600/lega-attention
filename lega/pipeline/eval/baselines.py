@@ -30,7 +30,12 @@ def _int_or_zero(v) -> int:
 
 def _fmt_rate(x) -> str:
     f = _finite_number(x)
-    return "-" if f is None else f"{f:.3%}"
+    if f is None:
+        return "-"
+    # 有限比率乘 100 仍可能溢出（如 1e307），不能写出 inf%。
+    if not math.isfinite(f * 100.0):
+        return "溢出"
+    return f"{f:.3%}"
 
 
 def _fmt4(x) -> str:
@@ -928,9 +933,11 @@ def _render_baseline_sections(results_dir: str, smoke=None,
             support = _int_or_zero(diag.get("selected_support_count"))
             frac = _num_or_none(diag.get("selected_support_fraction"))
             if frac is not None:
+                frac_s = ("溢出" if not math.isfinite(frac * 100.0)
+                          else f"{frac:.0%}")
                 lines.append(
                     f"- 选择稳定性：最优配置在 {support}/{n_sel} 个选择种子上"
-                    f"实际取得最低 val_loss（支持率 {frac:.0%}）；逐种子赢家与"
+                    f"实际取得最低 val_loss（支持率 {frac_s}）；逐种子赢家与"
                     "完整配对值见 `baseline_tuning.json` 的 "
                     "`selection_diagnostics`。")
                 if support < n_sel:

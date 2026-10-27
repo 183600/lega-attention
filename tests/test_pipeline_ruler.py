@@ -222,6 +222,7 @@ def test_int_or_zero_rejects_bool_and_fractional_counts():
         assert _int_or_zero(bad) == 0, bad
     from run_all import _fmt4, _fmt_rate, _fmt_scalar_maybe
     assert _fmt_rate(True) == "-" and _fmt_rate(0.5) == "50.000%"
+    assert _fmt_rate(1e307) == "溢出" and "inf" not in _fmt_rate(1e307)
     assert _fmt4(True) == "-" and _fmt4(1.25) == "1.2500"
     assert _fmt_scalar_maybe(False) == "-" and _fmt_scalar_maybe("n/a") == "n/a"
     assert _fmt_scalar_maybe(2.5) == "2.500"
