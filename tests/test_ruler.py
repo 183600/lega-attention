@@ -6,9 +6,9 @@ import shutil
 import tempfile
 
 from lega.data import CACHE_SCHEMA, CharTokenizer
-from lega.ruler import (DEPTH_BINS, EVIDENCE_TASKS, build_evidence_condition,
-                        build_fwe, build_niah, build_vt,
-                        depth_bin, load_corpus_sents,
+from lega.ruler import (DEPTH_BINS, EVIDENCE_TASKS, NEEDLE_TMPL,
+                        build_evidence_condition, build_fwe, build_niah,
+                        build_vt, depth_bin, load_corpus_sents,
                         load_corpus_sents_with_source, record_corpus_test_access,
                         score_prediction,
                         ContextTooSmall, TASKS, _stable_hash)
@@ -573,3 +573,21 @@ def test_evidence_absent_wrong_conflict_builders_and_scoring():
     assert score_prediction("evidence_absent", "NONE", " none.")["em"] == 1.0
     assert score_prediction("evidence_absent", "NONE", " 7021853")["em"] == 0.0
     assert score_prediction("evidence_conflict", "NONE", " NONE 123")["em"] == 1.0
+
+
+def test_evidence_conflict_keeps_both_evidence_lines_intact():
+    """冲突条件的两条证据都必须完整落在问题之前，不能被 room 截断。"""
+    tok = _tok()
+    for seed in range(200):
+        ex = build_evidence_condition(
+            tok, 512, random.Random(seed), "evidence_conflict")
+        qs, _ = ex["query_span"]
+        assert len(ex["meta"]["inserted"]) == 2
+        for rec in ex["meta"]["inserted"]:
+            line = tok.encode(
+                "\n" + NEEDLE_TMPL.format(key=rec["key"], value=rec["value"]))
+            at = rec["pos"]
+            assert ex["ids"][at:at + len(line)] == line, (
+                f"seed={seed}: 冲突证据在 pos={at} 被截断")
+            assert at + len(line) <= qs, (
+                f"seed={seed}: 冲突证据越过问题起点")

@@ -387,19 +387,20 @@ def build_evidence_condition(tok, ctx: int, rng: random.Random,
                  for value in (v1, v2)]
         max_len = max(len(line) for _, line in lines)
         if max_len * 2 + 4 <= room:
-            # 两条冲突证据必须各自完整且互不覆盖：先选两个不相交槽位，
-            # 再按升序插入并累计 shift。
-            span = room - max_len
-            p1 = rng.randint(1, max(1, span // 2))
-            p2 = rng.randint(min(span, p1 + max_len + 1), span)
-            shift = 0
+            # 两条冲突证据必须各自完整且互不覆盖：在“未被证据占用的填充
+            # 槽位”上先抽前导/中间空隙，再按插入后的最终位置插入。不能用
+            # 旧坐标 + 累计 shift 配合等长切片替换：列表长度不变，shift
+            # 会把第二条推过 room，导致它被截断甚至整条消失（只剩一条
+            # 可回答证据时，该条件就不再是“冲突”）。
+            gap_room = room - len(lines[0][1]) - len(lines[1][1])
+            lead = rng.randint(1, gap_room - 1)
+            mid = rng.randint(1, gap_room - lead)
+            at = lead
             for value, line in lines:
-                pos = p1 if not inserted else p2
-                at = pos + shift
-                filler[at:at + len(line)] = line
+                filler[at:at] = line
                 inserted.append({"key": key, "value": value,
                                  "pos": int(at)})
-                shift += len(line)
+                at += len(line) + mid
             filler = filler[:room]
     ids = filler + question_ids
     if len(ids) > ctx:
