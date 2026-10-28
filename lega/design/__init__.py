@@ -2,10 +2,11 @@
 
 from . import _shared
 from . import power
+from . import scheduling
 from . import planning
 from . import conformance
 
-_MODULES = [_shared, power, planning, conformance]
+_MODULES = [_shared, power, scheduling, planning, conformance]
 _merged = {}
 for _m in _MODULES:
     _merged.update({k: v for k, v in vars(_m).items() if not k.startswith("__")})

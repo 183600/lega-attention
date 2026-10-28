@@ -29,7 +29,8 @@
   "design": {
     "alpha": 0.05,
     "power": 0.8,
-    "multiplicity": "holm_worst_case"
+    "multiplicity": "holm_worst_case",
+    "run_order": "randomized_blocked"
   },
 
   "ruler": {

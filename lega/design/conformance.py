@@ -502,6 +502,20 @@ def render_design_section(plan: dict, conformance: dict = None,
             f"{_fmt(_as_dict(mp.get('alpha_effective')).get('AUROC'), 4)}/"
             f"{_fmt(_as_dict(mp.get('alpha_effective')).get('AP'), 4)}。"
             "先验功效同时给出未校正与确认性校正两栏；正式判定以后者为准。")
+    ro = _as_dict(plan.get("run_order"))
+    if ro:
+        mode = ro.get("mode")
+        extra = ""
+        if mode == "randomized_blocked":
+            extra = (f"；order_seed={ro.get('order_seed')}"
+                     f"（{ro.get('seed_source')}）")
+        md.append(
+            f"- run 顺序：`{mode}`，{ro.get('n_blocks')} 个种子区块 × "
+            f"{len(_as_list(inputs.get('variants')))} 个变体 = "
+            f"{ro.get('n_cells')} 个 run{extra}。"
+            + ("种子为区组、区块内随机化，顺序在跑前写死；"
+               if mode == "randomized_blocked"
+               else "该顺序未随机化，变体可能与时间/硬件漂移混淆；"))
 
     checks = [c for c in _as_list(plan.get("checks")) if isinstance(c, dict)]
     if checks:
@@ -577,6 +591,39 @@ def render_design_section(plan: dict, conformance: dict = None,
             " SESOI 所需时，“等价/非劣”只能作为描述性证据。"
             + best_case_note
             + "要把它升级为确认性主张，须先增加每格样本数并重新登记。")
+
+    endpoints_doc = _as_dict(plan.get("endpoints"))
+    mech_rows = []
+    for key, title in (("auroc", "AUROC"), ("ap", "AP")):
+        ep = _as_dict(endpoints_doc.get(key))
+        if ep:
+            mech_rows.append((key, title, ep))
+    if mech_rows:
+        md += ["", "**机制端点先验灵敏度**（跨种子配对差，绝对尺度；"
+                   "单 run 有限样例误差另由聚类 bootstrap 报告）", "",
+               "| 端点 | SESOI | 配对差SD | MDE 未校正 | MDE 确认性 | "
+               "功效 未校正 | 功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for _key, title, ep in mech_rows:
+            for row in _as_list(ep.get("sensitivity")):
+                if not isinstance(row, dict):
+                    continue
+                md.append("| " + " | ".join([
+                    title,
+                    _fmt(ep.get("sesoi_absolute"), 3),
+                    _fmt(row.get("paired_sd_absolute"), 4),
+                    _fmt(row.get("mde_absolute"), 4),
+                    _fmt(row.get("mde_absolute_confirmatory"), 4),
+                    _fmt(row.get("power_for_sesoi"), 3),
+                    _fmt(row.get("power_for_sesoi_confirmatory"), 3),
+                    _fmt(row.get("required_seeds_for_sesoi"), 0),
+                    _fmt(row.get("required_seeds_for_sesoi_confirmatory"), 0),
+                ]) + " |")
+        md.append("")
+        md.append(
+            "注：本表的 SD 是换训练种子时配对差的标准差，不包含单次评测"
+            "有限样例的抽样误差；后者回答“换题面/样例波动多少”，"
+            "两者不能互相替代。")
 
     # ---- 设计符合性/分析人群
     md += ["", "**设计符合性与分析人群**", ""]

@@ -4,6 +4,87 @@ from ._shared import _install as _shared_install
 
 _shared_install(globals())
 
+from .scheduling import (DEFAULT_RUN_ORDER, RUN_ORDER_MODES,  # noqa: E402
+                         build_run_order, validate_run_order)
+
+
+def _mechanism_endpoint_sensitivity(design_cfg: dict, metric_name: str,
+                                    grid_key: str, declared_key: str,
+                                    n_seeds: int, alpha: float,
+                                    power: float) -> dict:
+    """机制端点（AUROC/AP 的 logit−仅查询配对差）的先验灵敏度。
+
+    这里的 SD 是**跨种子配对差**的标准差，与 PPL 端点同一推断单位；单 run
+    内由有限样例造成的测量误差不在这个公式里，必须另看机制分析的样例聚类
+    bootstrap。把两者混成一个“功效”会高估确认性证据。
+    """
+    margin = design_cfg.get("mechanism_sesoi")
+    if margin is not None:
+        margin = _finite_float(margin, "design.mechanism_sesoi", positive=True)
+    else:
+        margin = 0.01
+        try:
+            from lega.equivalence import metric_margin
+            spec = metric_margin(metric_name)
+            if isinstance(spec, dict) and spec.get("margin") is not None:
+                margin = _finite_float(spec.get("margin"),
+                                       f"{metric_name} SESOI", positive=True)
+        except Exception:  # pragma: no cover - 保持模块可独立使用
+            pass
+    raw_grid = design_cfg.get(grid_key, list(MECHANISM_SD_GRID))
+    grid = sorted({_finite_float(v, grid_key, positive=True)
+                   for v in _finite_sequence(raw_grid, grid_key)})
+    if not grid:
+        raise ValueError(f"设计网格不能为空：{grid_key}")
+    can_power = n_seeds >= 2
+    rows = []
+    for sd in grid:
+        if can_power:
+            mde = min_detectable_effect(sd, n_seeds, alpha, power)
+            pw = paired_t_power(margin, sd, n_seeds, alpha)
+        else:
+            mde = pw = None
+        rows.append({
+            "paired_sd_absolute": sd,
+            "mde_absolute": mde,
+            "power_for_sesoi": pw,
+            "required_seeds_for_sesoi": required_pairs(
+                margin, sd, alpha, power),
+            "mde_absolute_confirmatory": None,
+            "power_for_sesoi_confirmatory": None,
+            "required_seeds_for_sesoi_confirmatory": None,
+        })
+    declared = None
+    if declared_key in design_cfg:
+        declared = _finite_float(design_cfg.get(declared_key), declared_key,
+                                 positive=True)
+    return {
+        "metric": metric_name,
+        "sesoi_absolute": margin,
+        "sesoi_source": "predeclared_protocol",
+        "planned_seeds": n_seeds,
+        "declared_paired_sd": declared,
+        "sensitivity": rows,
+        "measurement_note": (
+            "SD 为跨种子配对差的标准差；单 run 内有限样例的测量误差由"
+            "机制分析的样例聚类 bootstrap 单独报告，不能与本表互相替代"),
+    }
+
+
+def _fill_confirmatory_rows(rows, alpha_effective: float, n_seeds: int,
+                            margin: float, power: float) -> None:
+    """把机制端点表补成确认性 α_eff 口径（原地写入并行字段）。"""
+    for row in rows:
+        sd = row.get("paired_sd_absolute")
+        if n_seeds >= 2 and isinstance(sd, (int, float)):
+            row["mde_absolute_confirmatory"] = min_detectable_effect(
+                sd, n_seeds, alpha_effective, power)
+            row["power_for_sesoi_confirmatory"] = paired_t_power(
+                margin, sd, n_seeds, alpha_effective)
+            row["required_seeds_for_sesoi_confirmatory"] = required_pairs(
+                margin, sd, alpha_effective, power)
+
+
 def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                       *, config_file: str = None, config_sha256: str = None,
                       alpha: float = None, power: float = None,
@@ -36,6 +117,17 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
              else _open_unit(design_cfg.get("alpha", DEFAULT_ALPHA), "alpha"))
     power = (_open_unit(power, "power") if power is not None
              else _open_unit(design_cfg.get("power", DEFAULT_POWER), "power"))
+    order_mode = design_cfg.get("run_order", DEFAULT_RUN_ORDER)
+    if not isinstance(order_mode, str) or order_mode not in RUN_ORDER_MODES:
+        raise ValueError(
+            f"design.run_order 必须是 {RUN_ORDER_MODES} 之一，"
+            f"收到 {order_mode!r}")
+    declared_order_seed = design_cfg.get("run_order_seed")
+    if declared_order_seed is not None:
+        declared_order_seed = _seed_int(declared_order_seed,
+                                        "design.run_order_seed")
+    run_order = build_run_order(variants, seeds, mode=order_mode,
+                                order_seed=declared_order_seed)
     ppl_grid = design_cfg.get("ppl_paired_sd_rel_grid", list(PPL_SD_GRID))
     ruler_grid = design_cfg.get("ruler_discordance_grid",
                                 list(RULER_DISCORDANCE_GRID))
@@ -158,7 +250,28 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                 "seed_scope", "预注册种子计划", "pass",
                 f"计划种子与登记表一致（{seeds}）"))
 
-    # ---- 检查 3：登记假设的候选/参照变体都必须在计划矩阵内
+    # ---- 检查 3：运行顺序必须预先随机化，避免变体与时间/硬件漂移混淆
+    order_problems = validate_run_order(run_order, variants, seeds)
+    if order_problems:
+        checks.append(_check(
+            "run_order", "run 顺序分配", "fail",
+            "；".join(order_problems)))
+    elif order_mode == "variant_major":
+        checks.append(_check(
+            "run_order", "run 顺序分配", "warn",
+            "顺序为 variant_major（每个变体的全部种子连续跑）：变体效应与"
+            "时间/硬件漂移完全混淆，正式实验应改用 randomized_blocked；"
+            "本计划已记录顺序，便于审计但不能消除该混淆"))
+    else:
+        extra = (f"；order_seed={run_order.get('order_seed')}"
+                 f"（{run_order.get('seed_source')}）"
+                 if order_mode == "randomized_blocked" else "；未随机化")
+        checks.append(_check(
+            "run_order", "run 顺序分配", "pass",
+            f"模式={order_mode}，种子为区组，共 {run_order.get('n_blocks')} "
+            f"个区块 × {len(variants)} 个变体{extra}；顺序不读取任何结果"))
+
+    # ---- 检查 4：登记假设的候选/参照变体都必须在计划矩阵内
     missing_hyps = []
     unmapped = []
     for h in hyps:
@@ -192,7 +305,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         checks.append(_check("hypothesis_variants", "预注册假设覆盖",
                              "pass", detail))
 
-    # ---- 检查 4：先验功效必须按最终确认阈值规划，而非名义 α
+    # ---- 检查 5：先验功效必须按最终确认阈值规划，而非名义 α
     mult_detail = (
         f"模式={mode}；PPL/RULER 计划家族 m="
         f"{family_sizes['ppl_family_size']}，全局确认族 k="
@@ -339,6 +452,126 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             f"需约 {ref_need_confirm} 个种子）。{n_seeds} 个种子只能"
             "可靠检出远大于 1% 的 PPL 差异；1% SESOI 结论应标为"
             "描述性/探索性"))
+
+    # ---- 机制端点（H6/H7）的设计灵敏度：跨种子配对差的绝对尺度。
+    # 只规划 PPL/RULER 会漏掉“机制主张是否值得跑”：AUROC/AP 的种子级
+    # 配对差同样需要先验 MDE，否则 5 个种子只能在事后发现功效不足。
+    mechanism_hyps = [
+        h for h in hyps
+        if isinstance(h.get("metric"), str)
+        and (h["metric"].startswith("AUROC") or h["metric"].startswith("AP差"))]
+    missing_mechanism = []
+    for h in mechanism_hyps:
+        cand = h.get("candidate")
+        if isinstance(cand, str) and cand in planned and cand not in set(
+                analysis_variants):
+            missing_mechanism.append(f"{h.get('id', '?')} 的候选 {cand}")
+    if mechanism_hyps and (not analysis_variants or missing_mechanism):
+        checks.append(_check(
+            "mechanism_endpoint_variants", "机制端点分析人群", "fail",
+            "登记了机制假设，但计划内没有可产出机制分析的变体："
+            + ("计划 analysis_variants 为空；" if not analysis_variants else "")
+            + ("；".join(missing_mechanism) if missing_mechanism else "")
+            + "。H6/H7 将无法检验，不能等跑完再把缺失解释成无效应"))
+    elif mechanism_hyps:
+        checks.append(_check(
+            "mechanism_endpoint_variants", "机制端点分析人群", "pass",
+            f"{len(mechanism_hyps)} 条机制假设的候选均在分析变体子集中"
+            f"（{len(analysis_variants)} 个）"))
+    else:
+        checks.append(_check(
+            "mechanism_endpoint_variants", "机制端点分析人群", "info",
+            "登记表没有 AUROC/AP 机制假设；仍保留机制端点灵敏度表作参考"))
+
+    analysis_cfg = _as_dict(config.get("analysis"))
+    n_analysis_examples = analysis_cfg.get("n_examples")
+    if n_analysis_examples is not None:
+        n_analysis_examples = _strict_int(n_analysis_examples,
+                                          "analysis.n_examples", minimum=1)
+        if n_analysis_examples < 10:
+            checks.append(_check(
+                "mechanism_analysis_n", "机制分析样例数", "warn",
+                f"analysis.n_examples={n_analysis_examples} 偏少：单 run 的"
+                "AUROC/AP 及其差值会很不稳定；这是评测抽样误差，"
+                "不会进入种子级 sd 假设表，须看样例聚类 bootstrap"))
+        else:
+            checks.append(_check(
+                "mechanism_analysis_n", "机制分析样例数", "info",
+                f"analysis.n_examples={n_analysis_examples}（单 run 评测"
+                "抽样误差另见聚类 bootstrap，不并入种子级功效）"))
+    else:
+        checks.append(_check(
+            "mechanism_analysis_n", "机制分析样例数", "info",
+            "配置未声明 analysis.n_examples：无法核对机制端点的单 run "
+            "测量精度；默认值由机制分析代码决定"))
+
+    mechanism_endpoints = {}
+    for key, metric_name, grid_key, declared_key, endpoint_alpha in (
+            ("auroc", "AUROC差(logit−仅查询)", "auroc_paired_sd_grid",
+             "auroc_paired_sd", auroc_alpha),
+            ("ap", "AP差(logit−仅查询)", "ap_paired_sd_grid",
+             "ap_paired_sd", ap_alpha)):
+        ep = _mechanism_endpoint_sensitivity(
+            design_cfg, metric_name, grid_key, declared_key,
+            n_seeds, alpha, power)
+        _fill_confirmatory_rows(ep["sensitivity"], endpoint_alpha, n_seeds,
+                                ep["sesoi_absolute"], power)
+        ep["multiplicity"] = dict(
+            auroc_multiplicity if key == "auroc" else ap_multiplicity)
+        mechanism_endpoints[key] = ep
+        declared = ep.get("declared_paired_sd")
+        title = "AUROC" if key == "auroc" else "AP"
+        if declared is not None:
+            need = required_pairs(ep["sesoi_absolute"], declared,
+                                  endpoint_alpha, power)
+            pw = (paired_t_power(ep["sesoi_absolute"], declared, n_seeds,
+                                 endpoint_alpha) if can_power else None)
+            ok = (can_power and need is not None and need <= n_seeds)
+            checks.append(_check(
+                f"{key}_declared_power", f"{title} 确认性计划功效",
+                "pass" if ok else "fail",
+                f"声明跨种子配对差 SD={declared:.4g}；{n_seeds} 种子对 "
+                f"{ep['sesoi_absolute']:.3f} SESOI 的确认性功效≈"
+                + (f"{pw:.3f}" if pw is not None else "无法计算（n<2）")
+                + (f"，需 {need} 个种子" if need is not None else "")
+                + ("" if ok else "：机制端点在最终多重比较阈值下功效不足，"
+                   "H6/H7 的支持/拒绝只能作探索性线索")))
+        else:
+            checks.append(_check(
+                f"{key}_declared_power", f"{title} 确认性计划功效", "info",
+                f"配置未声明 design.{declared_key}：只报告灵敏度曲线，"
+                "不把任一 SD 假设当作已知"))
+
+    ref_sd_mech = DEFAULT_MECHANISM_SD_REF
+    ref_details = []
+    weak_mech = []
+    for key, title in (("auroc", "AUROC"), ("ap", "AP")):
+        ep = mechanism_endpoints[key]
+        endpoint_alpha = (auroc_alpha if key == "auroc" else ap_alpha)
+        try:
+            pw = (paired_t_power(ep["sesoi_absolute"], ref_sd_mech, n_seeds,
+                                 endpoint_alpha) if can_power else None)
+            need = required_pairs(ep["sesoi_absolute"], ref_sd_mech,
+                                  endpoint_alpha, power)
+        except ValueError:
+            pw, need = None, None
+        ref_details.append(
+            f"{title} 参考 SD={ref_sd_mech:.3g} 时确认性功效≈"
+            + (f"{pw:.3f}" if pw is not None else "无法计算")
+            + (f"、需 {need} 个种子" if need is not None else ""))
+        if isinstance(pw, float) and pw < power:
+            weak_mech.append(title)
+    checks.append(_check(
+        "mechanism_reference_sensitivity", "机制端点参考灵敏度（非数据估计）",
+        "info", "；".join(ref_details)
+        + "。参考值是展示用横轴，不是从当前数据估计的效应量"))
+    if weak_mech and mechanism_hyps:
+        checks.append(_check(
+            "mechanism_confirmatory_reference", "机制端点确认性参考功效",
+            "warn",
+            "、".join(weak_mech) + f" 在参考 SD={ref_sd_mech:.3g} 下、按"
+            "最终 Holm 阈值规划时低于目标功效：即使种子级检验显著，"
+            "也不能把 H6/H7 当作稳健机制结论；应增加种子或降低端点方差"))
 
     # ---- 上下文档位设计：至少两档且跨度足够，才谈得上“长度校准”
     ctx_values = []
@@ -608,7 +841,12 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "registration_scope_seeds": scope_seeds_int,
             "analysis_variants": list(analysis_variants),
             "known_variants": sorted(known) if known else None,
+            "run_order_mode": order_mode,
+            "run_order_seed": run_order.get("order_seed"),
+            "run_order_seed_source": run_order.get("seed_source"),
+            "analysis_n_examples": n_analysis_examples,
         },
+        "run_order": run_order,
         "analysis_protocol": dict(_ANALYSIS_PROTOCOL),
         # 确认性分析计划的只读快照：计划摘要因此同时绑定“登记了哪些
         # 假设、用什么指标/候选/参照”，不只是一个种子/样本量清单。
@@ -621,7 +859,13 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "ruler_discordance": declared_disc,
             "reference_ppl_sd_rel": ref_sd,
             "reference_ruler_discordance": ref_disc,
+            "reference_mechanism_sd_abs": ref_sd_mech,
+            "auroc_paired_sd_abs": mechanism_endpoints["auroc"].get(
+                "declared_paired_sd"),
+            "ap_paired_sd_abs": mechanism_endpoints["ap"].get(
+                "declared_paired_sd"),
             "multiplicity": mode,
+            "run_order": order_mode,
             "note": (
                 "声明假设来自配置 design 块（分析前写死）；参考值是展示用"
                 "横轴，不是从当前数据估计的效应量，也不参与任何推断。"
@@ -646,7 +890,12 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                 "全局族按计划内可检验的预注册假设计算；缺失产物只会让"
                 "实际家族变小，故这是设计上界/保守口径"),
         },
-        "endpoints": {"ppl": endpoint_ppl, "ruler": endpoint_ruler},
+        "endpoints": {
+            "ppl": endpoint_ppl,
+            "ruler": endpoint_ruler,
+            "auroc": mechanism_endpoints["auroc"],
+            "ap": mechanism_endpoints["ap"],
+        },
         "checks": checks,
         "status": _checklist_status(checks),
         "warnings": [c["detail"] for c in checks

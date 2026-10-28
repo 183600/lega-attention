@@ -40,10 +40,11 @@ from lega.datacheck import (read_test_access_log,  # noqa: E402
 from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
                               interpret_equivalence, metric_margin)
 from lega.design import (apply_design_gate,  # noqa: E402
-                         build_design_plan, design_conformance,
-                         load_design_plan, load_design_plan_history,
-                         observed_design_sensitivity, render_design_section,
-                         save_design_plan)
+                         build_design_plan, build_run_order,
+                         design_conformance, load_design_plan,
+                         load_design_plan_history, observed_design_sensitivity,
+                         render_design_section, save_design_plan,
+                         validate_run_order)
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
                              collect_artifacts, ledger_path, new_run_id,
                              snapshot_train_run)

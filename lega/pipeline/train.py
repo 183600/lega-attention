@@ -293,6 +293,34 @@ def main():
             print(f"[design] {_c['status']}: {_c.get('title')} — "
                   f"{_c.get('detail')}")
 
+    # 训练 run 的顺序由设计计划预先给出：种子为区组、区块内随机化，避免
+    # “变体主序”把方法效应与时间/硬件漂移混在一起。计划缺失/损坏时不能
+    # 静默退回旧顺序并伪装成随机化，必须在开跑前显式报错。
+    run_order_plan = design_plan.get("run_order")
+    if isinstance(run_order_plan, dict):
+        order_problems = validate_run_order(run_order_plan, variants, seeds)
+        if order_problems:
+            p.error("设计计划的 run_order 非法："
+                    + "；".join(order_problems))
+        order_cells = [(c["variant"], c["seed"])
+                       for c in run_order_plan.get("cells", [])]
+    else:
+        # 兼容极旧版本计划：只能退回旧的变体主序，并在启动日志中明确标注。
+        print("[design] ⚠ 计划缺少 run_order：退回 variant_major 旧顺序，"
+              "变体与时间漂移可能混淆")
+        run_order_plan = build_run_order(
+            variants, seeds, mode="variant_major")
+        order_cells = [(c["variant"], c["seed"])
+                       for c in run_order_plan.get("cells", [])]
+    print(f"[design] run 顺序 mode={run_order_plan.get('mode')} "
+          f"seed={run_order_plan.get('order_seed')} "
+          f"（{run_order_plan.get('seed_source')}）："
+          + " -> ".join(f"{v}@{s}" for v, s in order_cells[:6])
+          + (" ..." if len(order_cells) > 6 else ""))
+    if run_order_plan.get("mode") == "randomized_blocked" and jobs > 1:
+        print("[design] ⚠ jobs>1：随机化的是提交顺序，run 仍会重叠执行；"
+              "严格区组解释请用 --jobs 1")
+
     try:
         data_fp = data_fingerprint(args.data_dir)
         data_digest = data_fp["digest"]
@@ -352,6 +380,15 @@ def main():
                 "analysis": bool(not args.skip_analysis),
                 "latency": bool(not args.skip_latency),
                 "ablation": bool(not args.skip_ablation and ablate_variants),
+            },
+            "run_order": {
+                "mode": run_order_plan.get("mode"),
+                "order_seed": run_order_plan.get("order_seed"),
+                "seed_source": run_order_plan.get("seed_source"),
+                "n_cells": run_order_plan.get("n_cells"),
+                "cells": [[v, s] for v, s in order_cells],
+                "jobs": jobs,
+                "order_is_dispatch_only": bool(jobs > 1),
             },
         },
         "data_protocol_preflight": data_preflight,
@@ -456,44 +493,43 @@ def main():
     # append_test_access 已用进程间文件锁保证不丢记录。
     chain = []
     chain_cmds = []
-    for v in variants:
-        for seed in seeds:
-            vdir = _variant_dir(out_root, v, seed, n_seeds)
-            suffix = _seed_tag(seed, n_seeds)
-            chain.append((v, seed, vdir, suffix))
-            cmd = [py, "-m", "lega.postrun",
-                   "--config", args.config, "--variant", v, "--seed", str(seed),
-                   "--data_dir", args.data_dir, "--out_dir", vdir,
-                   "--results_dir", results_dir, "--suffix", suffix,
-                   "--device", args.device]
-            if args.skip_train:
-                cmd += ["--skip_train"]
-            if args.wandb:
-                cmd += ["--wandb"]
-            if sanity:
-                # 把开训前过拟合闸门的判定与哈希绑定进 run_manifest；
-                # 跳过 sanity 时不透传，避免旧结果文件被当作本次证据。
-                cmd += ["--sanity_file",
-                        os.path.join(results_dir, f"sanity_{v}.json")]
-            if args.early_stop_patience is not None:
-                cmd += ["--early_stop_patience", str(args.early_stop_patience)]
-            if args.worst_n is not None:
-                cmd += ["--worst_n", str(args.worst_n)]
-            if args.worst_on_test:
-                cmd += ["--worst_on_test"]
-            if args.allow_repeat_test:
-                cmd += ["--allow_repeat_test"]
-            if args.smoke:
-                cmd += ["--smoke", "--ruler_ctx_lens", str(smoke_ctx),
-                        "--ruler_n_samples", "2",
-                        "--analysis_n_examples", "2",
-                        "--analysis_ctx", str(smoke_ctx)]
-            if args.skip_ruler:
-                cmd += ["--skip_ruler"]
-            if args.skip_analysis or v not in GATED_FOR_ANALYSIS:
-                cmd += ["--skip_analysis"]
-            print("+", " ".join(cmd), flush=True)
-            chain_cmds.append(cmd)
+    for v, seed in order_cells:
+        vdir = _variant_dir(out_root, v, seed, n_seeds)
+        suffix = _seed_tag(seed, n_seeds)
+        chain.append((v, seed, vdir, suffix))
+        cmd = [py, "-m", "lega.postrun",
+               "--config", args.config, "--variant", v, "--seed", str(seed),
+               "--data_dir", args.data_dir, "--out_dir", vdir,
+               "--results_dir", results_dir, "--suffix", suffix,
+               "--device", args.device]
+        if args.skip_train:
+            cmd += ["--skip_train"]
+        if args.wandb:
+            cmd += ["--wandb"]
+        if sanity:
+            # 把开训前过拟合闸门的判定与哈希绑定进 run_manifest；
+            # 跳过 sanity 时不透传，避免旧结果文件被当作本次证据。
+            cmd += ["--sanity_file",
+                    os.path.join(results_dir, f"sanity_{v}.json")]
+        if args.early_stop_patience is not None:
+            cmd += ["--early_stop_patience", str(args.early_stop_patience)]
+        if args.worst_n is not None:
+            cmd += ["--worst_n", str(args.worst_n)]
+        if args.worst_on_test:
+            cmd += ["--worst_on_test"]
+        if args.allow_repeat_test:
+            cmd += ["--allow_repeat_test"]
+        if args.smoke:
+            cmd += ["--smoke", "--ruler_ctx_lens", str(smoke_ctx),
+                    "--ruler_n_samples", "2",
+                    "--analysis_n_examples", "2",
+                    "--analysis_ctx", str(smoke_ctx)]
+        if args.skip_ruler:
+            cmd += ["--skip_ruler"]
+        if args.skip_analysis or v not in GATED_FOR_ANALYSIS:
+            cmd += ["--skip_analysis"]
+        print("+", " ".join(cmd), flush=True)
+        chain_cmds.append(cmd)
     if chain_cmds:
         try:
             run_many(chain_cmds, jobs, _jobs_env(jobs))
@@ -501,7 +537,7 @@ def main():
             # 失败可能出现在链的任一阶段（postrun stderr 已标明阶段名与等价
             # 命令）；训练中止最常见的原因是 NaN 防护触发（train.py 会先落盘
             # nan_report.json 再退出），把排查入口直接指给用户
-            v0 = variants[chain_cmds.index(e.cmd) // max(1, len(seeds))]
+            v0 = chain[chain_cmds.index(e.cmd)][0]
             append_aborted_record(
                 ledger, ledger_common, error="run_chain_failed",
                 stage="train/eval/ruler/analysis", variant=v0,

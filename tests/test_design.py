@@ -15,7 +15,8 @@ import statistics
 import tempfile
 
 from lega.design import (_fmt, analysis_population, apply_design_gate,
-                         build_design_plan, design_conformance,
+                         build_design_plan, build_run_order,
+                         design_conformance,
                          load_design_plan, main as design_main,
                          mcnemar_mde, mcnemar_power,
                          mcnemar_required_samples,
@@ -24,7 +25,8 @@ from lega.design import (_fmt, analysis_population, apply_design_gate,
                          observed_design_sensitivity, paired_t_power,
                          planned_comparison_pairs, planned_family_sizes,
                          plan_digest, render_design_section,
-                         required_pairs, save_design_plan)
+                         required_pairs, save_design_plan,
+                         validate_run_order)
 
 
 def _write_json(path, obj):
@@ -750,3 +752,110 @@ def test_noncentral_t_power_is_more_conservative_for_small_seeds():
         assert out["power"] < normal, (n, out["power"], normal)
     zero = paired_t_power_nct(0.0, 0.01, 5, n_sim=5000, seed=1)
     assert abs(zero["power"] - 0.05) < 1e-12
+
+
+def test_run_order_is_randomized_blocked_and_reproducible():
+    """run 顺序默认按种子区块随机化：覆盖完整、可复算、旧顺序显式告警。"""
+    p1 = _plan()
+    ro = p1["run_order"]
+    assert ro["mode"] == "randomized_blocked"
+    assert ro["n_cells"] == 15 and ro["n_blocks"] == 5
+    assert ro["seed_source"] == "derived_from_plan_inputs"
+    assert validate_run_order(ro, p1["inputs"]["variants"],
+                              p1["inputs"]["seeds"]) == []
+    for seed in p1["inputs"]["seeds"]:
+        block = [c["variant"] for c in ro["cells"] if c["seed"] == seed]
+        assert sorted(block) == sorted(p1["inputs"]["variants"]), block
+    assert [c["position"] for c in ro["cells"]] == list(range(1, 16))
+    # 同一设计重复生成必须得到同一顺序与摘要（不能依赖时间/机器）。
+    p2 = _plan()
+    assert p2["run_order"]["cells"] == ro["cells"]
+    assert p2["plan_digest"] == p1["plan_digest"]
+
+    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+           "design": {"alpha": 0.05, "power": 0.8,
+                      "run_order_seed": 12345}}
+    p3 = build_design_plan(cfg, [1, 2, 3], ["lega", "standard", "qgate"],
+                           None, known_variants={"lega", "standard", "qgate"})
+    assert p3["run_order"]["seed_source"] == "configured"
+    assert p3["run_order"]["order_seed"] == 12345
+    assert validate_run_order(p3["run_order"],
+                              ["lega", "standard", "qgate"], [1, 2, 3]) == []
+
+    cfg["design"]["run_order"] = "variant_major"
+    p4 = build_design_plan(cfg, [1, 2, 3], ["lega", "standard", "qgate"],
+                           None, known_variants={"lega", "standard", "qgate"})
+    check = {c["id"]: c for c in p4["checks"]}["run_order"]
+    assert check["status"] == "warn" and "混淆" in check["detail"]
+    assert [(c["variant"], c["seed"]) for c in p4["run_order"]["cells"]] == \
+        [(v, s) for v in ["lega", "standard", "qgate"] for s in (1, 2, 3)]
+
+    cfg["design"]["run_order"] = "bogus"
+    try:
+        build_design_plan(cfg, [1, 2, 3], ["lega"], None,
+                          known_variants={"lega"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("未知 run_order 模式必须拒绝")
+
+    assert build_run_order(["a", "b"], [1, 2])["mode"] == "randomized_blocked"
+    print("  [ok] run 顺序：随机化区组、覆盖完整、可复算、旧顺序告警")
+
+
+def test_mechanism_endpoint_sensitivity_and_declared_power():
+    """H6/H7 机制端点也必须先验规划，不能只规划 PPL/RULER。"""
+    reg = {"hypotheses": [
+        {"id": "H6", "metric": "AUROC差(logit−仅查询)", "candidate": "lega",
+         "reference": "仅查询项基线", "direction": "candidate_better"},
+        {"id": "H7", "metric": "AP差(logit−仅查询)", "candidate": "lega",
+         "reference": "仅查询项基线", "direction": "candidate_better"}]}
+    p = _plan(registered=reg)
+    for key, metric in (("auroc", "AUROC差(logit−仅查询)"),
+                        ("ap", "AP差(logit−仅查询)")):
+        ep = p["endpoints"][key]
+        assert ep["metric"] == metric
+        assert ep["sesoi_absolute"] == 0.01
+        row = next(r for r in ep["sensitivity"]
+                   if abs(r["paired_sd_absolute"] - 0.01) < 1e-12)
+        assert row["mde_absolute_confirmatory"] > row["mde_absolute"]
+        assert (row["power_for_sesoi_confirmatory"]
+                < row["power_for_sesoi"])
+        assert row["required_seeds_for_sesoi_confirmatory"] >= \
+            row["required_seeds_for_sesoi"]
+    assert any(c["id"] == "mechanism_endpoint_variants"
+               and c["status"] == "pass" for c in p["checks"])
+
+    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+           "design": {"alpha": 0.05, "power": 0.8,
+                      "auroc_paired_sd": 0.1},
+           "analysis": {"n_examples": 40}}
+    cfg["design"]["mechanism_sesoi"] = 0.02
+    custom = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
+                               known_variants={"lega", "standard"})
+    assert custom["endpoints"]["auroc"]["sesoi_absolute"] == 0.02
+    assert custom["endpoints"]["ap"]["sesoi_absolute"] == 0.02
+    cfg["design"].pop("mechanism_sesoi")
+    bad = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
+                            known_variants={"lega", "standard"})
+    check = {c["id"]: c for c in bad["checks"]}["auroc_declared_power"]
+    assert check["status"] == "fail" and "功效不足" in check["detail"]
+
+    # 有机制假设但候选不在可分析子集：必须 fail，而不是等跑完才发现。
+    no_analysis = build_design_plan(
+        {"ruler": {"ctx_lens": [256, 512], "n_samples": 30}},
+        [1, 2, 3], ["lega", "standard"], reg,
+        known_variants={"lega", "standard"}, analysis_variants=["standard"])
+    check = {c["id"]: c for c in no_analysis["checks"]}[
+        "mechanism_endpoint_variants"]
+    assert check["status"] == "fail" and "lega" in check["detail"]
+    print("  [ok] 机制端点：确认性灵敏度、声明功效不足/分析人群缺失均显形")
+
+
+def test_render_design_section_includes_run_order_and_mechanism():
+    """汇总页必须渲染 run 顺序与机制端点灵敏度。"""
+    md = "\n".join(render_design_section(_plan()))
+    assert "run 顺序" in md and "randomized_blocked" in md
+    assert "机制端点先验灵敏度" in md
+    assert "AUROC" in md and "AP" in md
+    print("  [ok] 汇总页：run 顺序与机制端点灵敏度")

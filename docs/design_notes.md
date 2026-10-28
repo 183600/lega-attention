@@ -549,6 +549,47 @@ margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的�
    配置 SHA-256 不一致时（上一轮遗留计划）不据此降级，但显式告警
    “无法核对分析人群”，避免用旧计划冤枉新实验或反过来放行。
 
+### 执行顺序：种子为区组、区块内随机化
+
+同一台机器上的顺序不是中性的：GPU 温度/降频、文件缓存、驱动状态和后台
+任务都会随轮次漂移。旧的 `for variant: for seed` 让某个变体永远排在固定
+时段，方法效应与时间漂移完全混淆。新计划默认使用**随机化区组**：
+
+- 每个训练种子是一个区组，区内包含全部计划变体各一次；
+- 区内顺序由跑前确定并写入 `design_plan.json` 的 `run_order`，随机流只
+  依赖变体/种子/模式（或显式 `design.run_order_seed`），不读任何结果；
+- `run_all` 按 `run_order.cells` 提交 run，失败归因也按该单元取变体，不再
+  假设变体主序；`design.run_order` 可显式设为 `seed_major` /
+  `variant_major`（旧行为），但后者会在设计检查中告警“可能与时间漂移
+  混淆”；
+- `run_order` 摘要进入 `repro.json` 的 `design` 字段，顺序本身可复算。
+
+**并发限制**：`--jobs>1` 时随机化的是**提交顺序**，多个 run 仍可能重叠
+执行，因此不能把区组随机化当作完全消除漂移。对时间/硬件敏感或需要严格
+区组解释的正式实验，应设 `--jobs 1` 顺序执行；默认 CPU 并发只减少
+“变体主序”这种系统性混淆。
+
+### 机制端点：AUROC/AP 也要先验规划
+
+预注册的 H6/H7 是机制端点（AUROC、AP 的候选−参照配对差），但旧计划只给
+PPL/RULER 算功效，等于对机制主张“先跑再看”。现在 `endpoints.auroc` /
+`endpoints.ap` 与 PPL/RULER 并列给出：
+
+- SESOI 默认 0.01（绝对 AUROC/AP 差），显式配置
+  `design.mechanism_sesoi` 可改；
+- 对 `MECHANISM_SD_GRID` 中每个跨种子配对差 SD 给出未校正与确认性 MDE、
+  功效、所需种子数；
+- 声明 SD 用 `design.auroc_paired_sd` / `design.ap_paired_sd`；声明值在
+  `α_eff` 下功效不足时，`auroc_declared_power` / `ap_declared_power`
+  fail，而不是等到汇总才说“机制结果不显著”；
+- 机制端点的候选变体必须在分析子集内（参照“仅查询项”由同一
+  `analysis_*.json` 内部计算，不是独立变体）；计划阶段
+  `mechanism_endpoint_variants` 会直接检查，避免把“没有分析产物”误当成
+  “无效应”。
+
+这里的 SD 是**换训练种子**时配对差的标准差，不包含单次评测有限样例的
+抽样误差；后者由逐 run 的样例聚类 bootstrap 回答，两者不能互相替代。
+
 ### 确认性功效：按最终判定阈值规划（不是名义 α）
 
 先验功效最容易犯的错误，是用名义 `α=0.05` 计算“5 个种子能检出 1% SESOI”，
@@ -599,9 +640,12 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 - `inputs`：配置 SHA-256、变体、种子、α/功效、`multiplicity` 模式与
   `alpha_effective`、登记假设 id、预注册 `scope.seeds`、可产出机制分析
   的变体子集 `analysis_variants`（例如 `standard` 无输出门、不产出
-  `analysis_*.json`，不能被误算成缺失）；
+  `analysis_*.json`，不能被误算成缺失）；记录 `run_order_mode` /
+  `run_order_seed` / `run_order_seed_source` 与机制端点分析样例数；
+- `run_order`：模式、顺序种子及来源、种子区块数与 run 数、逐 run 的
+  `position/block/variant/seed`；`run_all` 直接消费该清单；
 - `assumptions`：显式声明的计划假设与“仅作展示横轴”的参考值，二者分开；
-  另记录 `multiplicity` 模式；
+  另记录 `multiplicity` 模式、`run_order` 模式与机制端点声明 SD；
 - `multiplicity_plan`：模式、PPL/RULER/AUROC/AP 家族大小、全局确认族
   大小、计划配对清单与四类指标的 `α_eff`，让摘要绑定“最终要做多少次
   检验”；AUROC/AP 机制族按每个有分析产物的变体计一个检验；
@@ -609,14 +653,17 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   功效/所需种子数、两种口径下可容忍的最大配对差 SD；
 - `endpoints.ruler`：每格样本数、格子数、各不一致率下的未校正与确认性
   McNemar 功效/MDE/所需每格样本数、两种口径下可容忍的最大不一致率；
+- `endpoints.auroc` / `endpoints.ap`：机制端点的绝对 SESOI、各跨种子
+  配对差 SD 下的未校正/确认性 MDE、功效、所需种子数，以及声明 SD；
 - `analysis_protocol`：分析人群、排除规则、缺失数据处理、停止规则、
   test 封存、多重比较策略；
 - `registered_plan`：登记假设的 id/指标/候选/参照/方向的只读快照，
   使计划摘要同时绑定确认性分析计划本身；
-- `checks`：种子数下限、是否覆盖预注册种子、登记假设的候选/参照变体
-  是否都在计划矩阵内、确认性多重比较规划与 `α_eff`、上下文档位是否
-  至少两档且跨度足够（否则长度校准主张不可检验）、声明假设下的未校正
-  与确认性功效、分析规则是否声明；
+- `checks`：种子数下限、是否覆盖预注册种子、run 顺序是否为随机化区组、
+  登记假设的候选/参照变体是否都在计划矩阵内、机制端点是否有可分析
+  产物、确认性多重比较规划与 `α_eff`、上下文档位是否至少两档且跨度
+  足够（否则长度校准主张不可检验）、声明假设下的未校正与确认性功效、
+  分析规则是否声明；
 - `plan_digest`：排除时间戳/机器路径后的内容 SHA-256，供 reproducible 审计。
 
 每次 `save_design_plan` 还会向同目录的 `design_plan_history.jsonl` 追加一行
@@ -653,14 +700,16 @@ python -m lega.design --config configs/small.json \
 ```
 
 `configs/small.json` / `configs/tiny.json` 的 `design` 块显式写死
-`alpha`、`power` 与 `multiplicity`（默认 `holm_worst_case`）；修改这些
-字段等同于改设计前提，必须重新生成计划而不是只重跑汇总。`run_all.py`
+`alpha`、`power`、`multiplicity`（默认 `holm_worst_case`）与
+`run_order`（默认 `randomized_blocked`）；修改这些字段等同于改设计前提，
+必须重新生成计划而不是只重跑汇总。`run_all.py`
 在训练前自动生成 `results/<tag>/design_plan.json`（摘要进
-`repro.json` 的 `design` 字段），汇总时写 `design_conformance.json`，并在
-`significance.json` 增加 `design_plan` / `design_conformance` /
+`repro.json` 的 `design` 字段，其中包含 `run_order` 模式、顺序种子与逐
+run 清单），汇总时写 `design_conformance.json`，并在 `significance.json`
+增加 `design_plan` / `design_conformance` /
 `observed_design_sensitivity`。`summary.md` 新增“实验设计与分析人群（先验
-计划 vs 实际）”小节，逐项列出检查状态、PPL/RULER 灵敏度表、计划内单元
-缺失与确认性降级原因。
+计划 vs 实际）”小节，逐项列出检查状态、run 顺序、PPL/RULER/AUROC/AP
+灵敏度表、计划内单元缺失与确认性降级原因。
 
 ### 边界
 

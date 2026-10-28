@@ -82,6 +82,13 @@ EXACT_MCNEMAR_MAX_N = 500
 # 当前数据估计出来的假设值；调用方可通过配置里的 design 块覆盖。
 PPL_SD_GRID = (0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03)
 
+# 机制端点（AUROC/AP 的 logit−仅查询配对差）是绝对尺度。它们是跨种子配对
+# 差的标准差网格，不是单 run 内有限样例带来的测量误差；后者由机制分析里的
+# 样例聚类 bootstrap 负责，两者不能互相替代。
+MECHANISM_SD_GRID = (0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.05)
+
+DEFAULT_MECHANISM_SD_REF = 0.01
+
 RULER_DISCORDANCE_GRID = (0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5)
 
 DEFAULT_RULER_DISCORDANCE_REF = 0.10
@@ -104,6 +111,10 @@ _ANALYSIS_PROTOCOL = {
     "stopping_rule": (
         "不做基于结果的提前停止；早停只允许按验证集与预注册 patience 执行，"
         "且实际训练量不等会使确认性判定降级（见 budget gate）"),
+    "run_order": (
+        "默认随机化区组：种子为区组，每个区块内变体顺序由跑前写死的 order_seed "
+        "确定并记录在 design_plan.json；不得在看到结果后改顺序。显式选择 "
+        "variant_major（旧行为）会把变体与时间/硬件漂移混淆，正式实验应避免"),
     "test_sealing": (
         "checkpoint 选择与早停只用 val；test 每次评测写访问账本，重复评测"
         "需要显式放行"),
