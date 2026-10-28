@@ -159,6 +159,15 @@ def _fmt_mean_std(t, key: str = "mean_diff", spec: str = "+.4f") -> str:
     return format(mean, spec) + (f" ± {std:.4f}" if std is not None else "")
 
 
+def _fmt_pct1(value) -> str:
+    """比例按百分数渲染；缺失显示 '-'，乘 100 溢出时显示“溢出”。"""
+    f = _finite_number(value)
+    if f is None:
+        return "-"
+    scaled = f * 100.0
+    return f"{scaled:.1f}%" if math.isfinite(scaled) else "溢出"
+
+
 def _seed_winloss_str(t: dict) -> str:
     """逐种子配对差符号计数渲染为“胜/负/平”（无信息时返回 '-'）。"""
     if not isinstance(t, dict) or t.get("n_seed_wins") is None:
@@ -615,7 +624,7 @@ def _render_inference_shapley(inference_tests) -> list:
             f"| {t.get('shapley_factor_label', t.get('shapley_factor'))} | "
             f"{'-' if phi is None else f'{phi:+.4f}'} | "
             f"{'-' if ratio is None else f'{ratio:.4f}'} | "
-            f"{'-' if share is None else f'{share*100:.1f}%'} | "
+            f"{_fmt_pct1(share)} | "
             f"{t.get('n', '-')} | "
             f"{p_adj_s} | "
             f"{'-' if tr is None else f'{tr:+.4f}'} | "

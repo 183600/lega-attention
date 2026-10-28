@@ -390,6 +390,42 @@ def test_build_summary_gate_health_overflow_safe():
     print("  [ok] build_summary：门控健康比例溢出安全降级")
 
 
+def test_build_summary_early_stop_overflow_safe():
+    """早停收益是有限但极大的外部值时，汇总不能写出 +inf%。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": None, "n_params": 100, "n_gate_extra": 0})
+        base = {"status": "正常收敛", "evidence": [], "recommendations": ["x"],
+                "nonfinite_values": 0, "malformed_records": 0,
+                "has_grad_spike": False, "has_loss_spike": False,
+                "train_loss_first": 4.0, "train_loss_last": 3.0,
+                "val_loss_first": 4.1, "val_loss_best": 3.4,
+                "val_best_step": 50, "val_loss_last": 3.4,
+                "early_stop_gain_rel": 1e307}
+        _write_json(os.path.join(tmp, "curve_diagnosis.json"),
+                    {"standard": {"1": base}, "lega": {"1": dict(base)}})
+        md = build_summary(tmp)["markdown"]
+        assert "溢出" in md and "inf" not in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：早停收益溢出安全降级")
+
+
+def test_render_inference_shapley_overflow_safe():
+    """推理期 Shapley 占比乘 100 溢出时不能渲染出 inf%。"""
+    md = "\n".join(_render_inference_shapley([{
+        "shapley_factor": "A", "shapley_factor_label": "A",
+        "mean_diff": 1.0, "shapley_ppl_ratio": 1.0,
+        "shapley_share": 1e307, "n": 3, "p_adj": 0.1,
+        "training_phi_mean": 1.0, "training_inference_sign_agree": True,
+        "verdict": "x"}]))
+    assert "溢出" in md and "inf" not in md
+    print("  [ok] 推理期 Shapley：占比溢出安全降级")
+
+
 def test_latency_noise_helpers():
     """测量噪声读取与两段散布的方和根合成：缺失安全。"""
     entry = {"prefill_ms_spread_pct": {"256": {"1": 6.0}},

@@ -4,12 +4,16 @@ from .._shared import _install as _shared_install
 _shared_install(globals())
 
 
-def _fmt_pct0(value) -> str:
+def _fmt_pct(value, spec: str = ".0%") -> str:
     """百分比缺失显示 '-'；有限值乘 100 溢出时显示“溢出”。"""
     f = _finite_number(value)
     if f is None:
         return "-"
-    return "溢出" if not math.isfinite(f * 100.0) else f"{f:.0%}"
+    return "溢出" if not math.isfinite(f * 100.0) else format(f, spec)
+
+
+def _fmt_pct0(value) -> str:
+    return _fmt_pct(value)
 
 
 def _summary_part_b(**kw):
@@ -262,10 +266,11 @@ def _summary_part_b(**kw):
                      f"{_f4(worst.get('val_loss_best'))}"
                      f"@s{worst.get('val_best_step')}"
                      f"→{_f4(worst.get('val_loss_last'))}")
-            es_s = ("-" if not es else
-                    f"{sum(es) / len(es):+.1%}"
+            es_avg = (sum(es) / len(es)) if es else None
+            es_s = ("-" if es_avg is None else
+                    _fmt_pct(es_avg, "+.1%")
                     + ("（最终劣于最优，已用 best checkpoint）"
-                       if sum(es) / len(es) > 0.02 else ""))
+                       if es_avg > 0.02 else ""))
             eps = [x for x in (_num_or_none(d.get("epochs_seen"))
                                for d in diags) if x is not None]
             ep_min = min(eps) if eps else None
@@ -961,8 +966,7 @@ def _summary_part_b(**kw):
             delta = _fmt_mean_std(t)
             ci = t.get("mean_diff_ci95")
             ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-")
-            share = (f"{t['shapley_share']*100:.1f}%"
-                     if t.get("shapley_share") is not None else "-")
+            share = _fmt_pct(t.get("shapley_share"), ".1%")
             ratio = (f"{t['shapley_ppl_ratio']:.4f}"
                      if t.get("shapley_ppl_ratio") is not None else "-")
             padj = (f"{t['p_adj']:.4f}"
