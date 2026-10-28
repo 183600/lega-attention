@@ -3,6 +3,15 @@ from .._shared import _install as _shared_install
 
 _shared_install(globals())
 
+
+def _fmt_pct0(value) -> str:
+    """百分比缺失显示 '-'；有限值乘 100 溢出时显示“溢出”。"""
+    f = _finite_number(value)
+    if f is None:
+        return "-"
+    return "溢出" if not math.isfinite(f * 100.0) else f"{f:.0%}"
+
+
 def _summary_part_b(**kw):
     if "audit" in kw:
         audit = kw["audit"]
@@ -389,8 +398,7 @@ def _summary_part_b(**kw):
                 f"| {VARIANT_CN.get(v, v)} | {status_s} | "
                 f"{'-' if m_last is None else f'{m_last:.3f}'} | "
                 f"{'-' if s_last is None else f'{s_last:.4f}'} | "
-                f"{'-' if lo is None else f'{lo:.0%}'} | "
-                f"{'-' if hi is None else f'{hi:.0%}'} | {layer_s} | {rec} |")
+                f"{_fmt_pct0(lo)} | {_fmt_pct0(hi)} | {layer_s} | {rec} |")
     if gate_rows:
         md.append("门控健康检查的是方法机制本身：门控塌缩/饱和/常数化时，"
                   "PPL 的涨跌不能归因于查询、集中度或长度校准项。逐 run 数值"
@@ -470,7 +478,7 @@ def _summary_part_b(**kw):
         for v, ana, cat_s in bad_rows:
             dfr = ana.get("deep_position_fail_ratio")
             md.append(f"| {VARIANT_CN.get(v, v)} | {ana['n_badcases']} | {cat_s} "
-                      f"| {'-' if dfr is None else f'{dfr:.0%}'} "
+                      f"| {_fmt_pct0(dfr)} "
                       f"| {ana['label_errors'] or 0} |")
         md.append("")
         # 摘 3 条代表性个案放进汇总页：错误必须"看得见"，不能只留在文件里
@@ -511,10 +519,9 @@ def _summary_part_b(**kw):
         n_shared = bad_cross["n_shared_all_failures"]
         shared_ci = bad_cross.get("shared_all_ci95")
         shared_ci_s = ""
-        if (isinstance(shared_ci, (list, tuple)) and len(shared_ci) == 2
-                and all(isinstance(x, (int, float)) for x in shared_ci)):
-            shared_ci_s = (f"（Wilson 95% CI {shared_ci[0]:.0%}–"
-                           f"{shared_ci[1]:.0%}）")
+        if isinstance(shared_ci, (list, tuple)) and len(shared_ci) == 2:
+            shared_ci_s = (f"（Wilson 95% CI {_fmt_pct0(shared_ci[0])}–"
+                           f"{_fmt_pct0(shared_ci[1])}）")
         md.append(
             f"各变体取最小种子的错误清单（样本集相同，可逐条对齐；RULER 已"
             f"评测但零错误的变体按“全部通过”计入，不会被误算作共识失败）：共 "
@@ -642,7 +649,7 @@ def _summary_part_b(**kw):
             shown = "；".join(f"{scr}/{tot}" for scr, tot in sorted(scopes)[:3])
             extra = " 等" if len(scopes) > 3 else ""
             md.append(f"注：最差窗口在等间隔候选窗口子集中排序（本次 "
-                      f"{shown}{extra}，最低覆盖率 {lo_cov:.0%}），不是全量窗口"
+                      f"{shown}{extra}，最低覆盖率 {_fmt_pct0(lo_cov)}），不是全量窗口"
                       "的严格最差；各变体独立选各自的候选窗口，跨变体的归因"
                       "占比是描述性对照，不是同一批样本的配对比较。")
         md += ["", "| 变体 | 最差窗口数 | 主要归因 | 平均 top-1 概率 "
@@ -657,10 +664,8 @@ def _summary_part_b(**kw):
                               for k, n in cats[:3])
             mt1 = ("-" if ana["mean_top1_prob"] is None
                    else f"{ana['mean_top1_prob']:.3f}")
-            gic = ("-" if ana["gold_in_context_rate"] is None
-                   else f"{ana['gold_in_context_rate']:.0%}")
-            g5 = ("-" if ana["gold_in_top5_rate"] is None
-                  else f"{ana['gold_in_top5_rate']:.0%}")
+            gic = _fmt_pct0(ana["gold_in_context_rate"])
+            g5 = _fmt_pct0(ana["gold_in_top5_rate"])
             ml = ("-" if ana["mean_loss"] is None else f"{ana['mean_loss']:.3f}")
             md.append(f"| {VARIANT_CN.get(v, v)} | {ana['n_windows']} | {cat_s} "
                       f"| {mt1} | {gic} | {g5} | {ml} |")

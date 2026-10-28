@@ -361,6 +361,35 @@ def test_build_summary_surfaces_curve_observability_warnings():
     print("  [ok] build_summary（曲线采样不足告警进入汇总页）")
 
 
+def test_build_summary_gate_health_overflow_safe():
+    """门控健康比例是有限但极大的外部值时，汇总不能写出 inf%。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        for v in ("standard", "lega"):
+            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
+                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
+                "gate_mean": None, "n_params": 100, "n_gate_extra": 0})
+        base = {"status": "正常收敛", "evidence": [], "recommendations": ["x"],
+                "nonfinite_values": 0, "malformed_records": 0,
+                "has_grad_spike": False, "has_loss_spike": False,
+                "train_loss_first": 4.0, "train_loss_last": 3.0,
+                "val_loss_first": 4.1, "val_loss_best": 3.4,
+                "val_best_step": 50, "val_loss_last": 3.4,
+                "early_stop_gain_rel": 0.0,
+                "gate_health": {
+                    "available": True, "status": "健康", "mean_last": 0.5,
+                    "std_last": 0.1, "frac_low_last": 1e307,
+                    "frac_high_last": 1e307, "layer_mean_last": [0.5],
+                    "recommendations": ["x"]}}
+        _write_json(os.path.join(tmp, "curve_diagnosis.json"),
+                    {"standard": {"1": base}, "lega": {"1": dict(base)}})
+        md = build_summary(tmp)["markdown"]
+        assert "溢出" in md and "inf" not in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：门控健康比例溢出安全降级")
+
+
 def test_latency_noise_helpers():
     """测量噪声读取与两段散布的方和根合成：缺失安全。"""
     entry = {"prefill_ms_spread_pct": {"256": {"1": 6.0}},
@@ -1138,6 +1167,21 @@ def test_build_summary_marks_clamped_ppl_and_tolerates_null_distribution():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（PPL 截断标注；分布漂移 null 安全）")
+
+
+def test_build_summary_split_fractions_do_not_emit_inf():
+    """有限但极大的划分比例/偏差乘 100 会溢出，汇总不能写出 inf%。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        out = build_summary(tmp, data_report={"split_protocol": {
+            "actual_fractions": {"train": 1e307, "val": 0.1, "test": 0.1},
+            "target_fractions": {"train": 0.8, "val": 0.1, "test": 0.1},
+            "max_abs_fraction_deviation": 1e307}})
+        md = out["markdown"]
+        assert "溢出" in md and "inf" not in md
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary：划分比例溢出安全降级")
 
 
 def test_build_summary_surfaces_group_crossing_split_protocol():

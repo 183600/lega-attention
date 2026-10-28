@@ -959,7 +959,12 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             if actual:
                 def _fr(d, k):
                     f = _finite_number(d.get(k))
-                    return "-" if f is None else f"{f:.1%}"
+                    if f is None:
+                        return "-"
+                    # 有限比例乘 100 仍可能溢出（如 1e307），不能写出 inf%。
+                    return "溢出" if not math.isfinite(f * 100.0) else f"{f:.1%}"
+                dev_s = ("溢出" if not math.isfinite(dev * 100.0)
+                         else f"{dev:.1%}") if dev is not None else None
                 md.append(
                     "- 划分比例：实际 "
                     + " / ".join(f"{k}={_fr(actual, k)}"
@@ -967,7 +972,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                     + ("；目标 " + " / ".join(
                         f"{k}={_fr(target, k)}"
                         for k in ("train", "val", "test")) if target else "")
-                    + (f"；最大绝对偏差 {dev:.1%}" if dev is not None else "")
+                    + (f"；最大绝对偏差 {dev_s}" if dev_s is not None else "")
                     + (f"；切点相对目标偏移 {sp.get('cut_deviation_chars')} 字符"
                        if sp.get("cut_deviation_chars") is not None else "")
                     + "。切点吸附到文档/段落边界会改变实际训练/评测规模，"
@@ -1014,8 +1019,10 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 "（阈值敏感性见 data_report.json）")
             cov = _finite_number(near.get("train_chars_coverage_fraction"))
             if cov is not None:
+                cov_s = ("溢出" if not math.isfinite(cov * 100.0)
+                         else f"{cov:.1%}")
                 md.append(
-                    f"- 近似重复扫描覆盖：{cov:.1%} 的 train 字符达到 "
+                    f"- 近似重复扫描覆盖：{cov_s} 的 train 字符达到 "
                     f"min_chars={near.get('min_chars', '-')} 且 shingle 数达标；"
                     f"未扫描字符：短块 "
                     f"{_int_or_zero(near.get('train_chars_skipped_short')):,}、"

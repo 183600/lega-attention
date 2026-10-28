@@ -754,6 +754,13 @@ def test_build_summary_renders_near_duplicate_audit():
         assert "τ=0.7" in md and "τ=0.9" in md
         assert "清洗后复核" in md and "已无共享" in md
         assert "bytes/token" in md and "4.0000" in md
+        # 有限但极大的比例/覆盖率乘 100 会溢出：不能写出 inf%。
+        near = data_report["duplicates"]["near_duplicate"]
+        near["train_chars_coverage_fraction"] = 1e307
+        near["threshold_sensitivity_removal"]["0.8"][
+            "removal_fraction_chars"] = 1e307
+        md_huge = build_summary(tmp, data_report=data_report)["markdown"]
+        assert "溢出" in md_huge and "inf" not in md_huge
         # 旧/损坏产物里的阈值键可能是任意文本：渲染不能因此崩溃
         data_report["duplicates"]["near_duplicate"][
             "threshold_sensitivity_removal"] = {
