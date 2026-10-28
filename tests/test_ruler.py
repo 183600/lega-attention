@@ -131,6 +131,34 @@ def test_multikey_distractor_lines_stay_complete():
     assert built > 0, "测试未能构造任何 multikey 样例"
 
 
+def test_multikey_never_silently_degrades_to_single_key():
+    """multikey 至少要有干扰行；放不下时跳过，不能改名不换任务。"""
+    tok = CharTokenizer(sorted(set(_TEXT) | set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+    pat = re.compile(r"One of the special magic numbers for \w+ is: \d{7}\.")
+    built = 0
+    for seed in range(100):
+        try:
+            ex = build_niah(tok, 280, random.Random(seed),
+                            mode="synth", multikey=True)
+        except ContextTooSmall:
+            continue
+        built += 1
+        assert len(pat.findall(tok.decode(ex["ids"]))) >= 2, (
+            f"seed={seed}: niah_multikey 没有干扰行")
+    assert built > 0
+    # room 连一条干扰行都放不下时必须跳过，而不是构造单键样例。
+    for seed in range(20):
+        try:
+            build_niah(tok, 250, random.Random(seed),
+                       mode="synth", multikey=True)
+        except ContextTooSmall:
+            pass
+        else:
+            raise AssertionError(f"seed={seed}: 无干扰行仍构造 multikey")
+    print("  [ok] multikey 保证至少一条干扰行，否则 ContextTooSmall")
+
+
 def test_score_predictions():
     # NIAH：数值命中
     sc = score_prediction("niah_synth", "7021853", " The special magic number is 7021853.")
@@ -573,6 +601,22 @@ def test_evidence_absent_wrong_conflict_builders_and_scoring():
     assert score_prediction("evidence_absent", "NONE", " none.")["em"] == 1.0
     assert score_prediction("evidence_absent", "NONE", " 7021853")["em"] == 0.0
     assert score_prediction("evidence_conflict", "NONE", " NONE 123")["em"] == 1.0
+
+
+def test_evidence_wrong_conflict_do_not_degrade_to_absent():
+    """room 放不下必需证据时必须跳过，不能构造出没有证据的 wrong/conflict。"""
+    tok = _tok()
+    for condition in ("evidence_wrong", "evidence_conflict"):
+        for seed in range(20):
+            try:
+                build_evidence_condition(
+                    tok, 120, random.Random(seed), condition)
+            except ContextTooSmall:
+                pass
+            else:
+                raise AssertionError(
+                    f"{condition} seed={seed}: 证据放不下却仍构造了样例")
+    print("  [ok] wrong/conflict 证据放不下时按 ContextTooSmall 跳过")
 
 
 def test_evidence_conflict_keeps_both_evidence_lines_intact():

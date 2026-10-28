@@ -300,7 +300,26 @@ def build_niah(tok, ctx: int, rng: random.Random, mode: str = "synth",
             filler[sp + shift:sp + shift] = line
             distractor_spans.append((sp + shift, sp + shift + len(line)))
             shift += len(line)
-        filler = filler[:room]
+        if not distractor_spans:
+            # 抽样槽位可能全部靠近尾部而放不下；不能因此把 multikey 静默
+            # 退化成单键检索（任务名仍写 niah_multikey，指标却不再考察
+            # “同类干扰项中找目标键”）。room 足够时在保证完整的位置补一条，
+            # 确实放不下则按可跳过样例处理。
+            if room < distract_len + 2:
+                raise ContextTooSmall(
+                    f"niah_multikey 需要 room>={distract_len + 2} 才能完整"
+                    f"插入至少一条干扰行，当前 room={room}")
+            k2 = rng.choice(others)
+            v2 = _rand_digit(rng, 7, 7)
+            while v2 == value:
+                v2 = _rand_digit(rng, 7, 7)
+            line = tok.encode("\n" + NEEDLE_TMPL.format(key=k2, value=v2))
+            sp = rng.randint(2, room - len(line))
+            filler[sp:sp] = line
+            distractor_spans.append((sp, sp + len(line)))
+            filler = filler[:room]
+        else:
+            filler = filler[:room]
 
     # needle 插入（保证完整放入）
     if target_depth is not None:
@@ -373,11 +392,16 @@ def build_evidence_condition(tok, ctx: int, rng: random.Random,
         other = rng.choice([k for k in KEY_WORDS if k != key])
         wrong = _rand_digit(rng, 7, 7)
         line = tok.encode("\n" + NEEDLE_TMPL.format(key=other, value=wrong))
-        if len(line) + 2 <= room:
-            pos = rng.randint(1, room - len(line) - 1)
-            filler[pos:pos + len(line)] = line
-            filler = filler[:room]
-            inserted.append({"key": other, "value": wrong, "pos": pos})
+        if len(line) + 2 > room:
+            # 放不下错误证据时不能静默退化成 absent：该条件的题意是“有错误
+            # 证据但不可回答问题”，没有证据时 abstain 会被误记为条件成功。
+            raise ContextTooSmall(
+                f"evidence_wrong 需要 room>={len(line) + 2} 才能完整插入"
+                f"错误证据，当前 room={room}")
+        pos = rng.randint(1, room - len(line) - 1)
+        filler[pos:pos + len(line)] = line
+        filler = filler[:room]
+        inserted.append({"key": other, "value": wrong, "pos": pos})
     elif condition == "evidence_conflict":
         v1, v2 = _rand_digit(rng, 7, 7), _rand_digit(rng, 7, 7)
         while v2 == v1:
@@ -386,22 +410,28 @@ def build_evidence_condition(tok, ctx: int, rng: random.Random,
             "\n" + NEEDLE_TMPL.format(key=key, value=value)))
                  for value in (v1, v2)]
         max_len = max(len(line) for _, line in lines)
-        if max_len * 2 + 4 <= room:
-            # 两条冲突证据必须各自完整且互不覆盖：在“未被证据占用的填充
-            # 槽位”上先抽前导/中间空隙，再按插入后的最终位置插入。不能用
-            # 旧坐标 + 累计 shift 配合等长切片替换：列表长度不变，shift
-            # 会把第二条推过 room，导致它被截断甚至整条消失（只剩一条
-            # 可回答证据时，该条件就不再是“冲突”）。
-            gap_room = room - len(lines[0][1]) - len(lines[1][1])
-            lead = rng.randint(1, gap_room - 1)
-            mid = rng.randint(1, gap_room - lead)
-            at = lead
-            for value, line in lines:
-                filler[at:at] = line
-                inserted.append({"key": key, "value": value,
-                                 "pos": int(at)})
-                at += len(line) + mid
-            filler = filler[:room]
+        if max_len * 2 + 4 > room:
+            # 两条冲突证据放不下时不能静默退化成 absent（与 wrong 条件同一
+            # 原则）：没有冲突证据却按“冲突应回答 NONE”计分，会把缺失证据
+            # 误记成 abstention 成功。
+            raise ContextTooSmall(
+                f"evidence_conflict 需要 room>={max_len * 2 + 4} 才能完整"
+                f"插入两条冲突证据，当前 room={room}")
+        # 两条冲突证据必须各自完整且互不覆盖：在“未被证据占用的填充
+        # 槽位”上先抽前导/中间空隙，再按插入后的最终位置插入。不能用
+        # 旧坐标 + 累计 shift 配合等长切片替换：列表长度不变，shift
+        # 会把第二条推过 room，导致它被截断甚至整条消失（只剩一条
+        # 可回答证据时，该条件就不再是“冲突”）。
+        gap_room = room - len(lines[0][1]) - len(lines[1][1])
+        lead = rng.randint(1, gap_room - 1)
+        mid = rng.randint(1, gap_room - lead)
+        at = lead
+        for value, line in lines:
+            filler[at:at] = line
+            inserted.append({"key": key, "value": value,
+                             "pos": int(at)})
+            at += len(line) + mid
+        filler = filler[:room]
     ids = filler + question_ids
     if len(ids) > ctx:
         raise ContextTooSmall(f"{condition} 构造长度 {len(ids)} 超过 ctx={ctx}")
