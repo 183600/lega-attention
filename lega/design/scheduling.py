@@ -214,6 +214,22 @@ def validate_run_order(order: dict, variants, seeds) -> list:
     if len(set(positions)) != len(positions) or (
             positions and sorted(positions) != list(range(1, len(cells) + 1))):
         problems.append("run_order.position 必须是 1..n 的排列")
+    if mode in ("randomized_blocked", "seed_major"):
+        # 区块模式不仅要求每个 seed 覆盖全部变体，还要求同一 seed 的
+        # cells 在运行顺序中连续。否则把 variant_major 的计划仅改 mode
+        # 就能伪装成区组设计：每个 seed 仍覆盖全部变体，但时间漂移与
+        # 变体主序完全混淆。
+        seen_seeds = set()
+        current_seed = object()
+        for _, seed in seen:
+            if seed == current_seed:
+                continue
+            if seed in seen_seeds:
+                problems.append(
+                    f"{mode} 的种子区块必须连续：seed {seed} 被拆成多个区块")
+                break
+            seen_seeds.add(seed)
+            current_seed = seed
     if mode == "randomized_blocked":
         if len(seeds) != len(set(seeds)):
             problems.append("randomized_blocked 的种子区块不能重复")

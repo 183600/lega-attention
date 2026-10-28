@@ -803,6 +803,21 @@ def test_run_order_is_randomized_blocked_and_reproducible():
     print("  [ok] run 顺序：随机化区组、覆盖完整、可复算、旧顺序告警")
 
 
+def test_validate_run_order_rejects_noncontiguous_seed_blocks():
+    """区块模式必须按 seed 连续；仅改 mode 的 variant_major 计划应被拒绝。"""
+    variants, seeds = ["a", "b"], [1, 2]
+    sm = build_run_order(variants, seeds, mode="seed_major")
+    assert validate_run_order(sm, variants, seeds) == []
+    vm = build_run_order(variants, seeds, mode="variant_major")
+    for bogus_mode in ("randomized_blocked", "seed_major"):
+        tampered = dict(vm, mode=bogus_mode)
+        problems = validate_run_order(tampered, variants, seeds)
+        assert any("种子区块必须连续" in p for p in problems), problems
+    # 顺序正确但仅把 seed_major 改标为 randomized_blocked 无法从字段上
+    # 区分随机化与固定顺序；这里只保证真正的变体主序会被拒绝。
+    print("  [ok] run 顺序：种子区块不连续的计划不能伪装成区组设计")
+
+
 def test_mechanism_endpoint_sensitivity_and_declared_power():
     """H6/H7 机制端点也必须先验规划，不能只规划 PPL/RULER。"""
     reg = {"hypotheses": [
