@@ -209,11 +209,23 @@ def validate_run_order(order: dict, variants, seeds) -> list:
             problems.append(f"run_order.cells[{i}].position 不是整数")
         else:
             positions.append(pos)
+        block = c.get("block")
+        if not isinstance(block, int) or isinstance(block, bool) or block != s:
+            problems.append(
+                f"run_order.cells[{i}].block 必须与 seed 一致")
     if len(seen) != len(expected) or set(seen) != expected:
         problems.append("run_order 没有恰好覆盖全部 (变体, 种子) 单元")
-    if len(set(positions)) != len(positions) or (
-            positions and sorted(positions) != list(range(1, len(cells) + 1))):
-        problems.append("run_order.position 必须是 1..n 的排列")
+    if positions and positions != list(range(1, len(cells) + 1)):
+        problems.append(
+            "run_order.position 必须按 cells 列表顺序从 1 连续递增")
+    n_cells = order.get("n_cells")
+    if (not isinstance(n_cells, int) or isinstance(n_cells, bool)
+            or n_cells != len(cells)):
+        problems.append("run_order.n_cells 必须等于 cells 数量")
+    n_blocks = order.get("n_blocks")
+    if (not isinstance(n_blocks, int) or isinstance(n_blocks, bool)
+            or n_blocks != len(seeds)):
+        problems.append("run_order.n_blocks 必须等于计划种子数")
     if mode in ("randomized_blocked", "seed_major"):
         # 区块模式不仅要求每个 seed 覆盖全部变体，还要求同一 seed 的
         # cells 在运行顺序中连续。否则把 variant_major 的计划仅改 mode

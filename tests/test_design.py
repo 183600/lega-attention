@@ -818,6 +818,29 @@ def test_validate_run_order_rejects_noncontiguous_seed_blocks():
     print("  [ok] run 顺序：种子区块不连续的计划不能伪装成区组设计")
 
 
+def test_validate_run_order_rejects_stale_positions_and_metadata():
+    """position/block/计数必须与实际 cells 一致，不能只做表面排列检查。"""
+    variants, seeds = ["a", "b"], [1, 2]
+    ro = build_run_order(variants, seeds, mode="randomized_blocked")
+    assert validate_run_order(ro, variants, seeds) == []
+    cells = [dict(c) for c in ro["cells"]]
+    first = [i for i, c in enumerate(cells) if c["seed"] == 1]
+    i, j = first[0], first[1]
+    cells[i], cells[j] = cells[j], cells[i]
+    problems = validate_run_order(dict(ro, cells=cells), variants, seeds)
+    assert any("position 必须按 cells 列表顺序" in p for p in problems), problems
+    for key, value in (("n_cells", len(cells) + 1),
+                       ("n_blocks", len(seeds) + 1)):
+        problems = validate_run_order(dict(ro, **{key: value}),
+                                      variants, seeds)
+        assert any(key in p for p in problems), (key, problems)
+    bad_block = [dict(c) for c in ro["cells"]]
+    bad_block[0]["block"] = 999
+    problems = validate_run_order(dict(ro, cells=bad_block), variants, seeds)
+    assert any("block 必须与 seed 一致" in p for p in problems), problems
+    print("  [ok] run 顺序：position/block/计数与实际 cells 不一致会被拒绝")
+
+
 def test_mechanism_endpoint_sensitivity_and_declared_power():
     """H6/H7 机制端点也必须先验规划，不能只规划 PPL/RULER。"""
     reg = {"hypotheses": [
