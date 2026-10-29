@@ -432,10 +432,13 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
                     m.gate_d.fill_(d_value)
                 _record(old, m.gate_d.detach())
         elif kind == "conc_permute":
+            seed = strict_int(perm_seed, "perm_seed")
+            if seed < 0:
+                raise ValueError(f"perm_seed 必须 >= 0，收到 {seed}")
             for li, m in enumerate(mods):
                 # 非零位移才不是空操作；不同层用不同位移，避免所有层同步
                 # 置换导致“整层证据一起错位”恰好抵消。
-                m.conc_permute_shift = 1 + (int(perm_seed) + li) % 7
+                m.conc_permute_shift = 1 + (seed + li) % 7
                 changed += 1
         elif kind == "head_permute":
             for li, m in enumerate(mods):

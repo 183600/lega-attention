@@ -407,6 +407,15 @@ def test_ablate_numeric_and_seed_guards():
     perm = _layer_permutation(4, 7, 0)
     assert sorted(perm.tolist()) == [0, 1, 2, 3]
     assert not np.array_equal(perm, np.arange(4))
+    seed_model = _tiny("lega")
+    with torch.no_grad():
+        seed_model.blocks[0].attn.gate_a.fill_(1.0)
+    for poor in (True, 1.5, -1, "1_0"):
+        try:
+            apply_lesion(seed_model, "conc_permute", perm_seed=poor)
+            raise AssertionError(f"conc_permute perm_seed={poor!r} 应显式报错")
+        except ValueError:
+            pass
     # 逐头恒定门均值同样拒绝坏类型/下划线数字串，不静默写成合法门控。
     model = _tiny("lega")
     snap = snapshot_gate_params(model)
