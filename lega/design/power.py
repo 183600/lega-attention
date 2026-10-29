@@ -154,7 +154,7 @@ def paired_t_power_nct(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     δ=|effect|/(sd/√n)，再与双侧 t 临界值比较。返回 ``power`` 与
     ``method="noncentral_t_simulation"``，便于与历史正态口径并列披露。
     """
-    effect = _finite_float(effect, "effect", nonnegative=True)
+    effect = abs(_finite_float(effect, "effect"))
     sd = _finite_float(sd, "sd", positive=True)
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")
@@ -194,7 +194,7 @@ def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     与旧调用兼容，不参与计算。
     """
     del power  # 兼容占位；功效由 effect/sd/n/alpha 决定
-    effect = _finite_float(effect, "effect", nonnegative=True)
+    effect = abs(_finite_float(effect, "effect"))
     sd = _finite_float(sd, "sd", positive=True)
     n = _strict_int(n, "n", minimum=2)
     alpha = _open_unit(alpha, "alpha")

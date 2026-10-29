@@ -69,6 +69,9 @@ def test_paired_power_and_required_seeds():
     for n in (3, 5, 8, 12):
         assert paired_t_power(0.01, 0.01, n) > paired_t_power(
             0.01, 0.01, n - 1), n
+        # 双侧检验只看效应幅度，负方向必须与正方向同功效。
+        assert paired_t_power(-0.01, 0.01, n) == paired_t_power(
+            0.01, 0.01, n), n
     n = required_pairs(0.01, 0.01, alpha=0.05, power=0.8)
     assert n == 8, n
     assert paired_t_power(0.01, 0.01, n) >= 0.8
@@ -764,6 +767,9 @@ def test_noncentral_t_power_is_more_conservative_for_small_seeds():
         assert out["method"] == "noncentral_t_simulation"
         assert 0.0 <= out["power"] <= 1.0
         assert out["power"] < normal, (n, out["power"], normal)
+        neg = paired_t_power_nct(-0.01, 0.01, n, n_sim=20000, seed=3)
+        assert neg["power"] == out["power"]
+        assert neg["ncp"] == out["ncp"]
     zero = paired_t_power_nct(0.0, 0.01, 5, n_sim=5000, seed=1)
     assert abs(zero["power"] - 0.05) < 1e-12
 
