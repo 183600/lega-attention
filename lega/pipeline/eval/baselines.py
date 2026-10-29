@@ -292,6 +292,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     use_window = bool(wspec) and wm_ref is not None and all_matched
     ref_ppl = wm_ref if use_window else ref_ppl_full
     ref_source = "window_matched" if use_window else "full_split"
+    ref_model_used = wm_ref_name if use_window else ref_name
     rows = []
     for st in staged:
         v, vals = st["variant"], st["vals"]
@@ -321,7 +322,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         win_stats = (_window_bootstrap_stats(win_diffs)
                      if win_diffs else None)
         res = paired_t_test(vals, [ref_ppl] * len(vals))
-        res.update({"candidate": v, "reference": ref_name,
+        res.update({"candidate": v, "reference": ref_model_used,
                     "metric": "PPL vs ngram", "lower_is_better": True})
         res = _enrich_paired(res, vals, [ref_ppl] * len(vals))
         # 与其它汇总统计同口径：朴素 sum 会在多个 1e308 的合法 PPL 上溢出。
@@ -336,6 +337,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             reduction_pct = None
         rows.append({
             "variant": v, "n": len(vals), "seeds": st["seeds"],
+            "reference": ref_model_used,
             "mean_ppl": mean_ppl,
             "std_ppl": std_ppl,
             "ratio": ratio,
@@ -392,6 +394,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                            f"val_windows 任一字段不符）：{mismatch_variants}")
     if not rows:
         return {"split": ng_split, "reference_model": ref_name,
+                "reference_model_used": ref_model_used,
                 "ngram_ppl": ref_ppl, "rows": [],
                 "reference_source": ref_source,
                 "ngram_ppl_full_split": ref_ppl_full,
@@ -441,6 +444,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                 f"（窗口规格 ctx={wspec.get('ctx')}, iters={wspec.get('iters')}, "
                 f"共 {wspec.get('n_tokens')} 个评分 token）；" + note)
     return {"split": ng_split, "reference_model": ref_name,
+            "reference_model_used": ref_model_used,
             "ngram_ppl": ref_ppl, "rows": rows, "incomparable": incomparable,
             "reference_source": ref_source,
             "ngram_ppl_full_split": ref_ppl_full,
@@ -782,7 +786,8 @@ def _render_baseline_sections(results_dir: str, smoke=None,
     # “复杂模型优于简单基线”的证据，必须给出比值、校正后 p 与判定。
     cmp = ngram_cmp or {}
     if cmp.get("rows"):
-        ref = cmp.get("reference_model")
+        ref = (cmp.get("reference_model_used")
+               or cmp.get("reference_model"))
         matched = cmp.get("reference_source") == "window_matched"
         basis = ("参考值与神经评测逐位置对齐（同一批窗口目标 token）"
                  if matched else

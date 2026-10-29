@@ -471,8 +471,13 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert out_win_sel["reference_source"] == "window_matched"
         assert out_win_sel["reference_model"] == "interpolated_bigram"
         assert out_win_sel["reference_model_window_matched"] == "bigram"
+        assert out_win_sel["reference_model_used"] == "bigram"
+        assert out_win_sel["rows"][0]["reference"] == "bigram"
         assert abs(out_win_sel["ngram_ppl_window_matched"] - 70.0) < 1e-12
         assert abs(out_win_sel["ngram_ppl_full_split"] - 90.0) < 1e-12
+        text_win_sel = "\n".join(
+            _render_baseline_sections(tmp, ngram_cmp=out_win_sel))
+        assert "（bigram，split=val" in text_win_sel, text_win_sel
         # selected 表存在但缺少 window_matched_selection 元数据时，比较层
         # 必须忽略它并回退 full 窗口表；渲染层也要引用同一张表，不能把
         # 未采用的 70.0 写成“逐位置对齐口径”的参考值。
@@ -493,6 +498,7 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert out_no_meta["window_reference_values"] == {
             "unigram": 180.0, "bigram": 90.0,
             "interpolated_bigram": 90.0, "n_tokens": 16}
+        assert out_no_meta["reference_model_used"] == "interpolated_bigram"
         text_no_meta = "\n".join(
             _render_baseline_sections(tmp, ngram_cmp=out_no_meta))
         assert "180.000" in text_no_meta and "90.000" in text_no_meta
@@ -510,6 +516,7 @@ def test_ngram_comparison_prefers_window_matched_reference():
                              for s in (1, 2, 3)}}
         out_mis = ngram_baseline_comparison(runs_mis, tmp)
         assert out_mis["reference_source"] == "full_split"
+        assert out_mis["reference_model_used"] == "bigram"
         assert abs(out_mis["ngram_ppl"] - 100.0) < 1e-12
         assert "lega" in (out_mis["fallback_reason"] or "")
         assert not any(r["token_matched"] for r in out_mis["rows"])
