@@ -170,8 +170,9 @@ def test_data_fingerprint_cache_and_invalidation():
 def test_data_fingerprint_detects_mtime_preserving_edit():
     """同尺寸替换内容并把 mtime 改回旧值，也必须触发重算。
 
-    只看 size+mtime 的缓存会把这种替换误判为“数据未变”，让 run manifest
-    用旧 SHA 冒充当前数据版本；ctime/inode 元数据变化是不可回填的证据。
+    只看 size+mtime/ctime 的缓存会把这种替换误判为“数据未变”，让 run
+    manifest 用旧 SHA 冒充当前数据版本；部分文件系统时间戳粒度粗，ctime
+    也可能不变，因此缓存命中必须重算内容哈希。
     """
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "train.bin")
@@ -186,6 +187,42 @@ def test_data_fingerprint_detects_mtime_preserving_edit():
         assert fp2["digest"] != fp1["digest"]
         assert fp2["files"][0]["sha256"] != fp1["files"][0]["sha256"]
     print("  [ok] 数据指纹识别 mtime 回填的同尺寸内容替换")
+
+
+def test_data_fingerprint_rehashes_when_stats_match_stale_cache():
+    """模拟粗粒度时间戳文件系统：stat 三相等也不得复用旧 SHA。
+
+    同尺寸替换内容并把 mtime 改回旧值后，再把缓存里的 size/mtime/ctime
+    伪造成与当前文件一致（等价于 ctime 未变的文件系统/被回填的时间戳）。
+    此时缓存看起来完全新鲜，但 data_fingerprint 仍必须返回新内容哈希。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "train.bin")
+        with open(p, "wb") as f:
+            f.write(b"aaaa")
+        fp1 = data_fingerprint(d)
+        old_st = os.stat(p)
+        with open(p, "wb") as f:
+            f.write(b"bbbb")                       # 同尺寸、不同内容
+        os.utime(p, ns=(old_st.st_atime_ns, old_st.st_mtime_ns))
+        # 强制缓存看起来仍与当前 stat 完全一致（模拟 ctime 未变/被回填）。
+        cur_st = os.stat(p)
+        cache = os.path.join(d, ".lega_fingerprint.json")
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for e in raw["files"]:
+            if e["name"] == "train.bin":
+                e["size"] = int(cur_st.st_size)
+                e["mtime_ns"] = int(cur_st.st_mtime_ns)
+                e["ctime_ns"] = int(cur_st.st_ctime_ns)
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        fp2 = data_fingerprint(d)
+        assert fp2["digest"] != fp1["digest"]
+        new_sha = sha256_file(p)
+        assert fp2["files"][0]["sha256"] == new_sha
+        assert fp2["files"][0]["sha256"] != fp1["files"][0]["sha256"]
+    print("  [ok] 数据指纹在 stat 全等但内容已变时强制重算 SHA")
 
 
 def test_data_fingerprint_survives_malformed_cache():

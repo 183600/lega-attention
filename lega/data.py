@@ -779,8 +779,9 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     """把 (n, ctx+1) 的 token id 块搬运到目标设备并升为 int64。
 
     src 可以是已物化的 np.ndarray，也可以是 (memmap, span) 二元组：
-    后者把 memmap 的花式索引进 pinned 输出缓冲一步完成（np.take 的 out= 参数）；
-    CPU 目标同样用 out= 一步 gather 成 int64。
+    CUDA 目标把 memmap 的花式索引进同 dtype 的 pinned 输出缓冲（np.take 的
+    out= 参数），再异步拷贝并在设备端升为 int64；CPU 目标先按源 dtype 做
+    花式索引，再写入 int64 缓冲（不能跨 dtype 使用 np.take 的 out=）。
     """
     global _H2D_STAGE_BYTES
     is_span = isinstance(src, tuple)
@@ -788,10 +789,11 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
     dtype = np.uint16 if is_span else src.dtype
     if not device.startswith("cuda"):
         if is_span:
-            # 花式索引直接 gather 进 int64 缓冲：np.take(out=...) 在收集时同步
-            # 完成 uint16→int64 升位。
+            # 花式索引先按源 dtype（uint16）取值，再写入 int64 缓冲。不能把
+            # int64 缓冲直接交给 np.take(out=...)：numpy 要求 out 与源满足
+            # safe-cast，跨 dtype 会抛 TypeError（旧实现依赖未定义行为）。
             arr = np.empty(shape, dtype=np.int64)
-            np.take(src[0], src[1], out=arr)
+            arr[...] = np.asarray(src[0])[src[1]]
             return torch.from_numpy(arr)
         arr = src if src.flags["C_CONTIGUOUS"] else np.ascontiguousarray(src)
         out = torch.from_numpy(arr)

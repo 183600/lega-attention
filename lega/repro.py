@@ -317,9 +317,10 @@ def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
 
 def _file_entry(path: str) -> dict:
     st = os.stat(path)
-    # ctime 记录的是 inode 元数据变更时间，普通用户无法像 mtime 那样用
-    # os.utime 回填。缓存校验同时看 mtime 与 ctime：同尺寸内容替换后再把
-    # mtime 改回旧值，仍会因 ctime 变化而重算，避免拿旧 SHA 冒充当前数据。
+    # size/mtime/ctime 只是缓存新鲜度的廉价提示，不能当作内容未变的证据：
+    # overlayfs 等文件系统时间戳粒度粗，同尺寸内容替换后 ctime/mtime 可能
+    # 完全不变（ctime 也可能被粗粒度时钟吞掉）。缓存命中时仍会重算 SHA-256，
+    # 见 data_fingerprint。
     return {"name": os.path.basename(path), "size": int(st.st_size),
             "mtime_ns": int(st.st_mtime_ns),
             "ctime_ns": int(st.st_ctime_ns), "sha256": sha256_file(path)}
@@ -336,9 +337,11 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
 
     缓存写于 <data_dir>/.lega_fingerprint.json：逐文件记录
     size/mtime_ns/ctime_ns/sha256，任一变化即整体重算。缓存仅供重复调用复用
-    （多种子/多脚本），不影响正确性——缓存命中要求文件集与 stat 完全一致。
-    ctime 用于识别“同尺寸写入后把 mtime 改回旧值”的内容替换；旧缓存没有
-    ctime 字段时视为未命中并重建，而不是沿用可能失真的 SHA。
+    （多种子/多脚本），不影响正确性——缓存命中要求文件集与 stat 完全一致，
+    并且会强制重算参与指纹的文件的 SHA-256。时间戳（含 ctime）在 overlayfs
+    等粗粒度文件系统上可能在“同尺寸内容替换”后完全不变，因此 stat 三相等
+    不能直接信任缓存里的旧 SHA；重算结果不一致时整体重建。旧缓存没有
+    ctime 字段时同样视为未命中并重建。
     """
     names = [n for n in ("train.bin", "val.bin", "test.bin", "meta.json")
              if os.path.exists(os.path.join(data_dir, n))]
@@ -379,11 +382,18 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
                     or int(st.st_ctime_ns) != e.get("ctime_ns")):
                 fresh = False
                 break
+            # stat 三相等仍不足以证明内容未变：粗粒度时间戳文件系统上，
+            # 同尺寸替换可能连 ctime 都不变。强制重算 SHA，避免缓存里的
+            # 旧摘要冒充当前数据版本。
+            if sha256_file(path) != e["sha256"]:
+                fresh = False
+                break
         if fresh:
-            # 缓存是纯派生数据：文件 stat 未变只说明 entries 可能仍有效，
-            # 不代表缓存里的合并摘要/分词器字段没有被损坏或篡改。返回前
-            # 必须验证 digest 与 entries 自洽，且 tokenizer 与当前 meta.json
-            # 一致；否则重建，避免把错误指纹写进 run_manifest。
+            # 缓存是纯派生数据：文件 stat 与内容 SHA 都未变只说明 entries
+            # 可能仍有效，不代表缓存里的合并摘要/分词器字段没有被损坏或
+            # 篡改。返回前必须验证 digest 与 entries 自洽，且 tokenizer 与
+            # 当前 meta.json 一致；否则重建，避免把错误指纹写进
+            # run_manifest。
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)

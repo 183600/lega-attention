@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from lega.attention import CausalSelfAttention, VARIANTS
-from lega.data import get_train_batch, get_val_windows
+from lega.data import _stage_to_device, get_train_batch, get_val_windows
 from lega.model import GPT, load_model, save_checkpoint
 from lega.train import _val_eval_indices, evaluate_val
 
@@ -738,3 +738,23 @@ def test_data_sampling_rejects_invalid_window_identity():
     xn, yn = get_val_windows(data, 8, 10**6, "cpu")
     assert xn.shape == (1, 8) and torch.equal(xn[:, 1:], yn[:, :-1])
     print("  [ok] 数据采样拒绝 bool/小数/负数窗口身份，标量/循环序号可用")
+
+
+def test_stage_to_device_cpu_gathers_uint16_memmap_to_int64():
+    """CPU 分支必须把 uint16 memmap 花式索引结果正确升为 int64。
+
+    回归：旧实现把 int64 缓冲直接传给 np.take(out=...)，numpy 2.x 会因
+    int64→uint16 不满足 safe-cast 抛 TypeError，导致 CPU 训练首步崩溃。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "tokens.bin")
+        src = np.array([0, 1, 2, 65535, 300, 40000], dtype=np.uint16)
+        src.tofile(path)
+        mm = np.memmap(path, dtype=np.uint16, mode="r")
+        span = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+        out = _stage_to_device((mm, span), "cpu")
+        assert out.dtype == torch.int64
+        expected = torch.from_numpy(src[span].astype(np.int64))
+        assert torch.equal(out, expected)
+        del mm
+    print("  [ok] CPU 分支 uint16 memmap 花式索引升 int64 不依赖跨 dtype out=")
