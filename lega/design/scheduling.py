@@ -127,19 +127,16 @@ def build_run_order(variants, seeds, *, mode: str = DEFAULT_RUN_ORDER,
                 f"收到 {order_seed}")
         seed_source = "configured"
 
-    blocks = []
     cells = []
     if mode == "variant_major":
         for variant in variants:
             for seed in seeds:
-                blocks.append({"seed": seed, "variant": variant})
                 cells.append({"position": len(cells) + 1,
                               "block": seed, "variant": variant,
                               "seed": seed})
     elif mode == "seed_major":
         for seed in seeds:
             order = list(variants)
-            blocks.append({"seed": seed, "variants": order})
             for variant in order:
                 cells.append({"position": len(cells) + 1,
                               "block": seed, "variant": variant,
@@ -149,11 +146,18 @@ def build_run_order(variants, seeds, *, mode: str = DEFAULT_RUN_ORDER,
             # 每个种子区块使用独立的流，避免区块顺序影响下一种子的洗牌。
             block_seed = _hash_stream(order_seed, 1_000_000 + block_index)
             order = _shuffle(variants, block_seed)
-            blocks.append({"seed": seed, "variants": order})
             for variant in order:
                 cells.append({"position": len(cells) + 1,
                               "block": seed, "variant": variant,
                               "seed": seed})
+
+    # blocks 必须与 cells 同源：统一按种子列出该区块实际执行的变体顺序。
+    # variant_major 不是按种子连续执行，但仍可按种子过滤得到每块内的顺序；
+    # 不能为它返回 n_cells 个单 run 条目，否则 n_blocks 与 blocks 长度冲突。
+    blocks = [{"seed": seed,
+               "variants": [c["variant"] for c in cells
+                            if c["seed"] == seed]}
+              for seed in seeds]
 
     expected = {(v, s) for v in variants for s in seeds}
     observed = [(c["variant"], c["seed"]) for c in cells]
@@ -184,11 +188,28 @@ def validate_run_order(order: dict, variants, seeds) -> list:
     if mode not in RUN_ORDER_MODES:
         problems.append(f"run_order.mode 非法：{mode!r}")
     variants = list(variants or [])
+    seeds_ok = True
     try:
         seeds = [_strict_int(s, "seed", minimum=0) for s in (seeds or [])]
     except ValueError as e:
         problems.append(f"计划种子非法：{e}")
         seeds = []
+        seeds_ok = False
+    order_seed = order.get("order_seed")
+    if (not isinstance(order_seed, int) or isinstance(order_seed, bool)
+            or not 0 <= order_seed <= MAX_SEED):
+        problems.append(
+            f"run_order.order_seed 必须是 0..{MAX_SEED} 的整数")
+    seed_source = order.get("seed_source")
+    if seed_source not in ("configured", "derived_from_plan_inputs"):
+        problems.append(f"run_order.seed_source 非法：{seed_source!r}")
+    elif (seed_source == "derived_from_plan_inputs"
+          and isinstance(order_seed, int)
+          and not isinstance(order_seed, bool)
+          and mode in RUN_ORDER_MODES):
+        if order_seed != _derived_order_seed(variants, seeds, mode):
+            problems.append(
+                "run_order.order_seed 与计划输入/模式派生的种子不一致")
     cells = order.get("cells")
     if not isinstance(cells, list) or not cells:
         return problems + ["run_order.cells 必须是非空列表"]
@@ -259,4 +280,24 @@ def validate_run_order(order: dict, variants, seeds) -> list:
             block = [(v, s) for v, s in seen if s == seed]
             if [v for v, _ in block] != variants:
                 problems.append(f"种子区块 {seed} 的变体顺序与输入不一致")
+    blocks = order.get("blocks")
+    if seeds_ok:
+        if not isinstance(blocks, list) or len(blocks) != len(seeds):
+            problems.append("run_order.blocks 必须按计划种子逐块列出")
+        elif len(seen) == len(cells):
+            for i, seed in enumerate(seeds):
+                b = blocks[i]
+                if not isinstance(b, dict):
+                    problems.append(f"run_order.blocks[{i}] 不是对象")
+                    continue
+                if (not isinstance(b.get("seed"), int)
+                        or isinstance(b.get("seed"), bool)
+                        or b.get("seed") != seed):
+                    problems.append(
+                        f"run_order.blocks[{i}].seed 必须与计划种子一致")
+                expected_variants = [v for v, s in seen if s == seed]
+                if b.get("variants") != expected_variants:
+                    problems.append(
+                        f"run_order.blocks[{i}].variants 必须与 cells 中"
+                        "该种子区块的实际顺序一致")
     return problems

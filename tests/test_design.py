@@ -823,6 +823,26 @@ def test_validate_run_order_rejects_stale_positions_and_metadata():
     variants, seeds = ["a", "b"], [1, 2]
     ro = build_run_order(variants, seeds, mode="randomized_blocked")
     assert validate_run_order(ro, variants, seeds) == []
+    vm = build_run_order(variants, seeds, mode="variant_major")
+    assert len(vm["blocks"]) == vm["n_blocks"]
+    assert [b["variants"] for b in vm["blocks"]] == [variants, variants]
+    for key, value in (("order_seed", True), ("order_seed", -1),
+                       ("order_seed", ro["order_seed"] + 1),
+                       ("order_seed", None)):
+        problems = validate_run_order(dict(ro, **{key: value}),
+                                      variants, seeds)
+        assert any("order_seed" in p for p in problems), (key, value, problems)
+    for value in ("manual", None, 1):
+        problems = validate_run_order(dict(ro, seed_source=value),
+                                      variants, seeds)
+        assert any("seed_source" in p for p in problems), (value, problems)
+    bad_blocks = [dict(b) for b in ro["blocks"]]
+    bad_blocks[0]["variants"] = list(reversed(bad_blocks[0]["variants"]))
+    problems = validate_run_order(dict(ro, blocks=bad_blocks),
+                                  variants, seeds)
+    assert any("blocks[0].variants" in p for p in problems), problems
+    problems = validate_run_order(dict(ro, blocks=[]), variants, seeds)
+    assert any("run_order.blocks" in p for p in problems), problems
     cells = [dict(c) for c in ro["cells"]]
     first = [i for i, c in enumerate(cells) if c["seed"] == 1]
     i, j = first[0], first[1]
