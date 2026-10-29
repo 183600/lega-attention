@@ -265,6 +265,7 @@ def test_conc_permute_preserves_values_but_breaks_position_mapping():
     snap = snapshot_gate_params(model)
     rec = apply_lesion(model, "conc_permute", perm_seed=0)
     assert rec["applied"] is True and rec["changed_tensors"] > 0
+    assert rec["no_op"] is False
     _, perm, _ = m._gate_logit(qterm, max_p, log_n, (1, 2, 4),
                                keep_terms=True)
     assert not torch.allclose(base, perm)

@@ -462,10 +462,17 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
         else:  # pragma: no cover - 防御分支
             raise ValueError(f"未知病灶类型: {kind!r}")
 
+    if kind == "conc_permute":
+        no_op = not any(
+            getattr(m, "gate_a", None) is not None
+            and bool(float(m.gate_a.detach().abs().max().item()) > 0.0)
+            for m in mods)
+    else:
+        no_op = bool(max_delta == 0.0)
     return {"applied": True, "reason": "",
             "changed_tensors": int(changed),
             "max_abs_delta": float(max_delta),
-            "no_op": bool(max_delta == 0.0)}
+            "no_op": no_op}
 
 
 def gate_head_means(model, val, ctx: int, device: str, eval_iters: int,
