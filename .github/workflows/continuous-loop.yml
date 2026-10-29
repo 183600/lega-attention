@@ -279,6 +279,9 @@ jobs:
           PROMPT_SINGLE='确保需要是单因素实验的实验都是单因素实验。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
           PROMPT_CLEAN='不要修改算力申请.md，确保远程仓库里没有实验结果文件、REPORTxx.md 以及 autodl_budgetxx.json；确保 docs 目录只保留 design_notes.md；确保远程仓库中没有任何关于性能、预算、花费、修复了哪些bug和显存占用的记录（包括注释）。删除所有多余的内容。注意：.github 目录是 CI 配置，必须原样保留，绝对不能删除、修改或移动其中任何文件，它不属于“多余的内容”；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样必须原样保留，绝对不能删除或移动，也不属于“多余的内容”。'
           PROMPT_APPLY='确保算力申请.md没有错误。不要删除或移动 README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）；.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件。'
+          # ================= 新增：docs 阶段提示词（每次循环 1/10 概率执行） =================
+          PROMPT_DOCS='优化这个项目的代码和文档。代码方面：只做不改变功能语义的重构（命名、注释、消除重复、结构清晰），保持数值行为与对外接口完全不变。文档方面：改进 README*.md 与 docs/design_notes.md 的表述、结构与示例，让说明更准确易读；可以修改内容，但不得删除或移动文件，也不得添加关于性能、预算、花费、修复了哪些bug或显存占用的记录。不要输出或写入“优化了哪些内容”的报告。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）同样绝对不能删除或移动。'
+
 
           # 每阶段单次调用的最大时长（秒）
           PERF_TIMEOUT=$((3*3600))     # 3h
@@ -286,6 +289,8 @@ jobs:
           SCI_TIMEOUT=$((3*3600))      # 3h
           CLEAN_TIMEOUT=$((3*3600))    # 3h
           APPLY_TIMEOUT=$((3*3600))    # 3h
+          DOCS_TIMEOUT=$((3*3600))    # 3h（docs 阶段：优化代码与文档，1/10 概率执行）
+
 
           # ================= 模型策略：只用 opencode + Zen 免费模型 =================
           # 已移除 DeepSeek Harness 与 DeepSeek 官方 API 接入：
@@ -708,6 +713,29 @@ jobs:
 
               sleep 5
             done
+
+            # ================= 新增：docs 阶段（每次循环 1/10 概率执行） =================
+            # 每次循环迭代掷一次骰子：1/10 概率命中才执行「优化代码和文档」阶段。
+            # 未命中时直接跳过、不占用本轮预算；命中时复用既有 run_phase / commit_and_push 机制。
+            DOCS_ROLL=$(( RANDOM % 10 ))
+            if [ "$DOCS_ROLL" -eq 0 ]; then
+              echo "[info] docs 阶段命中 1/10 概率（roll=0），本轮执行代码与文档优化"
+              P="$PROMPT_DOCS"
+              T="$DOCS_TIMEOUT"
+              REMAIN=$(( DEADLINE - $(date +%s) ))
+              if [ "$REMAIN" -le 0 ]; then
+                echo "[info] 全局时间已到，跳过 docs 阶段"
+              else
+                if [ "$T" -gt "$REMAIN" ]; then T="$REMAIN"; fi
+                echo ">>> iteration #$i | phase=docs | budget=${T}s"
+                run_phase docs "$P" "$T"
+                commit_and_push "$i-docs"
+                # ⭐ 测试门：docs 阶段也可能触碰代码，提交后与 bug / sci 一样跑全量测试
+                maybe_run_tests "$i"
+              fi
+            else
+              echo "[info] docs 阶段未命中 1/10 概率（roll=$DOCS_ROLL），本轮跳过"
+            fi
           done
 
       - name: Cleanup repo artifacts
