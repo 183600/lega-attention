@@ -695,7 +695,11 @@ def _parse_seeds(spec):
         part = part.strip()
         if not part:
             continue
-        out.append(_seed_int(int(part, 0), "seed"))
+        # 不能先用 int(part, 0)：int("1_0", 0) == 10、int("0x10", 0) == 16，
+        # 会让拼写/进制不同的种子静默变成另一个训练身份。直接用全项目的
+        # 严格种子入口，与 run_all/tuning 的 --seeds 口径一致。
+        from lega.utils import seed_int
+        out.append(seed_int(part, "seed"))
     return out
 
 

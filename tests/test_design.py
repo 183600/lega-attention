@@ -29,6 +29,20 @@ from lega.design import (_fmt, analysis_population, apply_design_gate,
                          validate_run_order)
 
 
+def test_design_cli_seed_parser_is_strict():
+    """--seeds 的 "1_0"/"0x10" 不能经 int(..., 0) 静默变成别的种子。"""
+    from lega.design import _parse_seeds
+    assert _parse_seeds("1, 2") == [1, 2]
+    assert _parse_seeds(" 1 , ,2 ") == [1, 2]
+    for bad in ("1_0", "0x10", "0b10", "1.0", "True", "-1"):
+        try:
+            _parse_seeds(bad)
+            raise AssertionError(f"--seeds={bad!r} 应显式报错")
+        except ValueError:
+            pass
+    print("  [ok] design --seeds 与全项目严格种子口径一致")
+
+
 def _write_json(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)
