@@ -255,10 +255,43 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M 参数冒烟配置（CPU 可跑）
 │   └── small.json             # ~30M 参数正式配置（单卡数小时/变体）
 ├── lega/
+│   ├── __init__.py            # 包入口：研究问题说明、CUDA/确定性环境默认值与版本号
 │   ├── attention.py           # 核心：10 个主变体 + 5 个补充/对照的因果注意力（LEGA 门控公式与消融矩阵在此）
 │   ├── model.py               # GPT 主干 + RoPE + KV 缓存生成 + 参数量工具
 │   ├── data.py                # 分词（GPT-2 BPE/字符级兜底，词表只在 train 拟合）+ bin 缓存 + 批采样
-│   ├── datacheck.py           # 防泄漏：时序/文档划分、精确+近似去污染、token 硬校验、漂移筛查、test 访问账本
+│   ├── datacheck/             # 数据卫生与防泄漏检查（拆分模块，对外接口保持不变）
+│   │   ├── __init__.py        # 聚合子模块对外接口
+│   │   ├── _shared.py         # 拆分模块共享的公共定义与导入
+│   │   ├── text.py            # 文本清洗、精确/近似去污染
+│   │   ├── tokens.py          # 长度统计、token 流校验与泄漏筛查
+│   │   └── reports.py         # 测试集访问账本与数据报告组装
+│   ├── design/                # 实验设计与准备（拆分模块，对外接口与命令行保持不变）
+│   │   ├── __init__.py        # 聚合子模块对外接口
+│   │   ├── __main__.py        # 命令行入口（转调 main）
+│   │   ├── _shared.py         # 共享命名空间注入
+│   │   ├── power.py           # 先验功效与灵敏度计算
+│   │   ├── scheduling.py      # 训练 run 的顺序分配（随机化区组设计）
+│   │   ├── planning.py        # 设计计划与多重比较规划
+│   │   └── conformance.py     # 计划历史、分析人群、设计符合性与渲染/CLI
+│   ├── pipeline/              # 实验流水线包：由原 run_all.py 拆分，保持对外名称与行为不变
+│   │   ├── __init__.py        # 聚合子模块对外接口
+│   │   ├── _shared.py         # 共享导入与常量（由 run_all.py 拆分而来）
+│   │   ├── common.py          # 流水线通用工具、单因素审计与协议辅助函数
+│   │   ├── datacheck.py       # 受控变量与数据/评测协议核对
+│   │   ├── train.py           # 一键流水线主流程编排（argparse、阶段调度与实验台账）
+│   │   ├── eval/              # 评测、统计与基线子包
+│   │   │   ├── __init__.py    # 聚合评测子模块
+│   │   │   ├── stats.py       # 跨种子统计、RULER 长度/样例统计
+│   │   │   ├── windows.py     # PPL 窗口级配对与 bootstrap
+│   │   │   ├── comparisons.py # 配对检验、格式化、等价性与组件证据
+│   │   │   ├── factorial.py   # 全因子/推理期消融、预注册假设与门控
+│   │   │   ├── baselines.py   # 简单统计/线性探针基线与基线合理性渲染
+│   │   │   └── curves.py      # 训练曲线诊断、效率指标与涨点-增幅权衡
+│   │   └── report/            # 汇总报告子包
+│   │       ├── __init__.py    # 聚合报告子模块
+│   │       ├── summary.py     # 汇总统计与 Markdown/JSON 报告生成（第一部分：数据聚合与主表）
+│   │       ├── sections.py    # 汇总报告渲染（第二部分：曲线、坏案例、消融）
+│   │       └── tables.py      # 汇总报告渲染（第三部分：检验表与 JSON 落盘）
 │   ├── train.py               # 训练循环（AdamW、cosine、bf16、W&B 可选）+ NaN 系统排查（激活钩子定位）+ 溯源清单
 │   ├── evaluate.py            # held-out test PPL（缺 test.bin 时回退 val）
 │   ├── ruler.py               # 简化 RULER：5 任务，token 级构造，保留 gold 跨度
@@ -266,13 +299,17 @@ lega-attention/
 │   ├── analysis.py            # 机制分析：集中≠找对、门控 Brier/ECE 校准、AUROC + PR-AUC（不平衡主指标）+ 门控 F1（三口径 + 恒写/恒不写稻草人对照）
 │   ├── ablate.py              # 推理期因果病灶消融（训练后权重干预，与训练期消融互补）
 │   ├── length_null.py         # c 的长度零假设诊断（随机/重复/均匀上下文 + 斜率）
+│   ├── lengtheffect.py        # RULER 上下文长度分层：把“长度校准”从平均分里还原出来
 │   ├── output_ablation.py     # 答案 token 的逐层/逐头输出干预（ΔNLL/Δmargin 写回效用）
 │   ├── factorial.py           # 全因子 2^3 的精确 Shapley 分解（交互感知的消融归因）
 │   ├── equivalence.py         # SESOI + TOST 等价性/非劣性（Holm 校正、0.5×/1×/2× 敏感性）
 │   ├── ngram.py               # 简单统计基线：一元/二元/插值二元平滑 n-gram PPL（α/λ 只在 val 联合选；test 需开锁并记账；auto 与神经评测同 split）
+│   ├── probe.py               # 简单学习基线（线性探针）：“该不该写入”判别的最简监督模型对照
 │   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度尖峰）+ 处理建议
 │   ├── badcase.py             # 错误样本归因（RULER + 语言建模最差窗口）+ 跨变体对照 + 改进方向合成
 │   ├── sanity.py              # 过拟合小批量 sanity check（训练前闸门）
+│   ├── preflight.py           # 数据协议训练前闸门（run_all 与直接训练入口共用）
+│   ├── postrun.py             # 单 run 流水线链：训练 → 独立评测 → RULER → 机制分析（同一进程内顺序执行）
 │   ├── repro.py               # 代码版本/数据指纹/运行环境/种子审计/溯源继承
 │   ├── experiment.py          # 追加式实验台账（跨轮次记录代码/配置/种子/数据/结果哈希）
 │   ├── hypotheses.py          # 预注册完整性：锁基线 + 修订链 + 防篡改校验（CLI --verify/--init/--amend）

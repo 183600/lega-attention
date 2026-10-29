@@ -285,10 +285,43 @@ lega-attention/
 │   ├── tiny.json              # ~6.8M smoke config (CPU-friendly)
 │   └── small.json             # ~30M full config (hours/variant on one GPU)
 ├── lega/
+│   ├── __init__.py            # package entry: research question, CUDA/determinism env defaults and version
 │   ├── attention.py           # core: causal attention for 10 main + 5 supplementary/control variants
 │   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
 │   ├── data.py                # tokenization (GPT-2 BPE / char fallback, vocab fit on train only) + bin cache + batch sampling
-│   ├── datacheck.py           # leakage-proofing: temporal/document split, exact + near-duplicate decontamination, token hard checks, shift screening, test-access ledger
+│   ├── datacheck/             # data hygiene and leakage checks (split modules, public interface unchanged)
+│   │   ├── __init__.py        # aggregates the submodule public interface
+│   │   ├── _shared.py         # shared definitions and imports for the split modules
+│   │   ├── text.py            # text cleaning, exact/near-duplicate decontamination
+│   │   ├── tokens.py          # length statistics, token-stream validation and leakage screening
+│   │   └── reports.py         # test-access ledger and data-report assembly
+│   ├── design/                # experiment design and preparation (split modules; public interface and CLI unchanged)
+│   │   ├── __init__.py        # aggregates the submodule public interface
+│   │   ├── __main__.py        # CLI entry point (delegates to main)
+│   │   ├── _shared.py         # shared namespace injection
+│   │   ├── power.py           # a-priori power and sensitivity calculations
+│   │   ├── scheduling.py      # training-run order assignment (randomized block design)
+│   │   ├── planning.py        # design plan and multiple-comparison planning
+│   │   └── conformance.py     # plan history, analysis population, design conformance and rendering/CLI
+│   ├── pipeline/              # experiment pipeline package: split from run_all.py, public names and behavior unchanged
+│   │   ├── __init__.py        # aggregates the submodule public interface
+│   │   ├── _shared.py         # shared imports and constants (split from run_all.py)
+│   │   ├── common.py          # pipeline utilities, single-factor audit and protocol helpers
+│   │   ├── datacheck.py       # controlled-variable and data/eval protocol checks
+│   │   ├── train.py           # one-command pipeline orchestration (argparse, stage scheduling and experiment ledger)
+│   │   ├── eval/              # evaluation, statistics and baseline subpackage
+│   │   │   ├── __init__.py    # aggregates the evaluation submodules
+│   │   │   ├── stats.py       # cross-seed statistics, RULER length/example statistics
+│   │   │   ├── windows.py     # PPL window-level pairing and bootstrap
+│   │   │   ├── comparisons.py # paired tests, formatting, equivalence and component evidence
+│   │   │   ├── factorial.py   # full-factorial/inference-time ablation, preregistration hypotheses and gates
+│   │   │   ├── baselines.py   # simple statistical/linear-probe baselines and baseline sanity rendering
+│   │   │   └── curves.py      # training-curve diagnosis, efficiency metrics and gain-vs-cost tradeoff
+│   │   └── report/            # summary report subpackage
+│   │       ├── __init__.py    # aggregates the report submodules
+│   │       ├── summary.py     # summary statistics and Markdown/JSON report generation (part 1: aggregation and main tables)
+│   │       ├── sections.py    # summary rendering (part 2: curves, bad cases, ablations)
+│   │       └── tables.py      # summary rendering (part 3: test tables and JSON output)
 │   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + systematic NaN audit (activation hooks) + provenance manifest
 │   ├── evaluate.py            # held-out test PPL (val fallback)
 │   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
@@ -296,13 +329,17 @@ lega-attention/
 │   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate Brier/ECE calibration, AUROC + PR-AUC (primary under imbalance) + gate F1 (three averages + always/never-write straw men)
 │   ├── ablate.py              # inference-time causal lesion study (post-training weight interventions)
 │   ├── length_null.py         # null diagnostic for c vs length (random/repeated/uniform + slope)
+│   ├── lengtheffect.py        # RULER context-length stratification: recover length calibration from the average score
 │   ├── output_ablation.py     # per-layer/head output intervention on answer tokens (ΔNLL/Δmargin)
 │   ├── factorial.py           # exact Shapley decomposition over the 2^3 factorial
 │   ├── equivalence.py         # SESOI + TOST equivalence/non-inferiority (Holm, 0.5×/1×/2× sensitivity)
 │   ├── ngram.py               # simple statistical baseline: unigram/bigram/interpolated-bigram smoothed n-gram PPL (α/λ jointly on val; test opt-in + ledger; pipeline matches the neural eval split by default)
+│   ├── probe.py               # simple learned baseline (linear probe): minimal supervised contrast for the "should we write" decision
 │   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN + grad spikes) + recommendations
 │   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison + improvement synthesis
 │   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
+│   ├── preflight.py           # pre-training data-protocol gate (shared by run_all and direct training entry points)
+│   ├── postrun.py             # single-run pipeline chain: train → standalone eval → RULER → mechanism analysis (sequential, same process)
 │   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance
 │   ├── experiment.py          # append-only experiment ledger (code/config/seed/data/result hashes per run)
 │   ├── hypotheses.py          # pre-registration integrity: lock baseline + amendment chain + tamper check (CLI --verify/--init/--amend)
