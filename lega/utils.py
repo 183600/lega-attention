@@ -1290,12 +1290,15 @@ def holm_bonferroni(pvals) -> list:
     检验越多、至少一次假阳性的概率越大（family-wise error）。Holm 法在
     任意依赖结构下都控制 FWER，且比 Bonferroni 保守度更低。
 
-    输入为 p 值列表（允许 None 表示无法检验，不占家族大小；NaN 与 None 同义），
-    返回同序列表：
+    输入为 p 值可迭代对象（允许 None 表示无法检验，不占家族大小；NaN 与
+    None 同义），返回同序列表：
     p_adj_(i) = max_{j<=i} min(1, (m-j+1) * p_(j))（p 升序的第 j 个观测），
     保证校正后 p 随原始 p 单调不减且 >= 原始 p。
     NaN 与 None 一样不参与排序，也不计入家族大小。
     """
+    # 生成器/迭代器只能消费一次：先物化，后续按位置返回结果和 len 都需要
+    # 完整序列；直接迭代后再 len(pvals) 会抛 TypeError。
+    pvals = list(pvals)
     # p 必须落在 [0,1] 且为有限数值：bool 是 int 子类（True→1），字符串/
     # 容器/NaN/Inf/负数/大于 1 的值都不是可检验的 p，按缺失处理而不参与
     # 家族大小；否则排序会混入不可比较类型或把损坏值当成显著/不显著。

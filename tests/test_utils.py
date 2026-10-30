@@ -619,6 +619,9 @@ def test_holm_bonferroni():
     # 全 None / 空输入
     assert holm_bonferroni([]) == []
     assert holm_bonferroni([None, None]) == [None, None]
+    # 生成器只可消费一次：返回顺序/长度仍须与列表输入一致
+    assert holm_bonferroni(iter([0.01, 0.02, 0.03, 0.04])) == \
+        [0.04, 0.06, 0.06, 0.06]
     # NaN 与 None 同义：不占家族大小，也不得污染其他 p 的校正值
     adj = holm_bonferroni([float("nan"), 0.01, 0.02, 0.5])
     assert adj[0] is None, adj
