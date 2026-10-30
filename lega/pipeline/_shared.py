@@ -68,6 +68,8 @@ from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E
                         runtime_info, sanity_summary, sha256_file,
                         worktree_state, write_worktree_patch)
 from lega.ruler import DEPTH_BINS as RULER_DEPTH_BINS  # noqa: E402
+from lega.uncertainty import (aggregate_variance_components,  # noqa: E402
+                              two_way_variance_components)
 from lega.utils import (bootstrap_mean_ci, config_bool,
                         ensure_cublas_workspace_config, get_device,
                         holm_bonferroni, mcnemar_exact_p, mean_std,

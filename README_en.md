@@ -333,6 +333,7 @@ lega-attention/
 │   ├── output_ablation.py     # per-layer/head output intervention on answer tokens (ΔNLL/Δmargin)
 │   ├── factorial.py           # exact Shapley decomposition over the 2^3 factorial
 │   ├── equivalence.py         # SESOI + TOST equivalence/non-inferiority (Holm, 0.5×/1×/2× sensitivity)
+│   ├── uncertainty.py         # seed × evaluation-unit variance decomposition and RULER hierarchical bootstrap (exploratory)
 │   ├── ngram.py               # simple statistical baseline: unigram/bigram/interpolated-bigram smoothed n-gram PPL (α/λ jointly on val; test opt-in + ledger; pipeline matches the neural eval split by default)
 │   ├── probe.py               # simple learned baseline (linear probe): minimal supervised contrast for the "should we write" decision
 │   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN + grad spikes) + recommendations

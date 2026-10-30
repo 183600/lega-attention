@@ -3,6 +3,30 @@ from .._shared import _install as _shared_install
 
 _shared_install(globals())
 
+
+def _variance_share_str(comp, key):
+    """把方差占比格式化为百分比；缺失/非有限值显示为 '-'。"""
+    value = comp.get(key) if isinstance(comp, dict) else None
+    if not isinstance(value, (int, float)) or not np.isfinite(value):
+        return "-"
+    return f"{value * 100:.1f}%"
+
+
+def _variance_advice(comp):
+    """按均值方差占比给出“补种子/补评测单元”的探索性建议。"""
+    seed_share = comp.get("share_mean_seed") if isinstance(comp, dict) else None
+    unit_share = comp.get("share_mean_unit") if isinstance(comp, dict) else None
+    if (not isinstance(seed_share, (int, float))
+            or not isinstance(unit_share, (int, float))
+            or not np.isfinite(seed_share) or not np.isfinite(unit_share)):
+        return "-"
+    if seed_share >= 0.65:
+        return "优先补种子"
+    if unit_share >= 0.65:
+        return "优先补评测单元"
+    return "两者都需增加"
+
+
 def _summary_part_c(**kw):
     if "_lat_metric_at" in kw:
         _lat_metric_at = kw["_lat_metric_at"]
@@ -339,9 +363,9 @@ def _summary_part_c(**kw):
     if ruler_sample_tests:
         md += ["| 对比 | 配对种子 | 配对样例 | 候选独对/参照独对 | "
                "ΔEM micro(候选−参照) | ΔEM macro(任务等权) | "
-               "ΔEM macro 95% CI | 种子胜/负/平 | p_adj(Holm) | "
-               "种子级判定（供对照） | 结论 |",
-               "|---|---|---|---|---|---|---|---|---|---|---|"]
+               "ΔEM macro 95% CI | ΔEM macro 双层95% CI | 种子胜/负/平 | "
+               "p_adj(Holm) | 种子级判定（供对照） | 结论 |",
+               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for t in ruler_sample_tests:
             seed_t = _find_test(tests, (t.get("candidate"), t.get("reference")),
                                 "RULER平均")
@@ -353,14 +377,17 @@ def _summary_part_c(**kw):
                            if t.get("macro_mean_diff") is not None else "-")
             mci = t.get("macro_mean_diff_ci95")
             mci_s = (f"[{mci[0]:+.4f}, {mci[1]:+.4f}]" if mci else "-")
+            hci = t.get("macro_mean_diff_ci95_hier")
+            hci_s = (f"[{hci[0]:+.4f}, {hci[1]:+.4f}]" if hci else "-")
             padj = (f"{t['p_adj']:.4f}"
                     if t.get("p_adj") is not None else "-")
             md.append(
                 f"| {t['candidate']} vs {t['reference']} | {t['n_seeds']} | "
                 f"{t['n_samples']} | {t['candidate_only']}/{t['reference_only']} | "
-                f"{delta} | {macro_delta} | {mci_s} | {t['n_seed_wins']}/"
-                f"{t['n_seed_losses']}/{t['n_seed_ties']} | {padj} | "
-                f"{str(seed_verdict).split('（')[0]} | {t.get('verdict', '-')} |")
+                f"{delta} | {macro_delta} | {mci_s} | {hci_s} | "
+                f"{t['n_seed_wins']}/{t['n_seed_losses']}/{t['n_seed_ties']} | "
+                f"{padj} | {str(seed_verdict).split('（')[0]} | "
+                f"{t.get('verdict', '-')} |")
         md += ["", "注: McNemar 只使用 discordant 对，n_samples 是参与配对的总样例"
                "数而非独立证据数；多个训练种子重复使用同一批 sample_id，合并"
                "检验只作探索性证据。`ΔEM micro` 样例等权、与 McNemar 池化计数"
@@ -369,7 +396,9 @@ def _summary_part_c(**kw):
                "判定同一估计量。`ΔEM macro 95% CI` 固定已观测种子，在每个"
                "(任务, 上下文) 单元格内重采样配对样例，再任务内、任务间等权平均，只覆盖"
                "评测抽样不确定性；种子数很少时该区间可能很窄，不能替代种子级"
-               "检验。两者方向不一致时，结论依赖“平均值”定义，不能"
+               "检验。`ΔEM macro 双层95% CI` 同时重采样训练种子与配对样例，"
+               "覆盖“换种子且换题面”的合并不确定性（独立 Holm 家族，仍为"
+               "探索性）。两者方向不一致时，结论依赖“平均值”定义，不能"
                "只挑对主张有利的口径。若样例级显著而种子级不显著（或反之），"
                "说明两个不确定性来源给出不同信息：前者多为评测样本量/题目"
                "难度，后者为训练随机性，均不能单独升级为确认性结论。"
@@ -400,6 +429,49 @@ def _summary_part_c(**kw):
     else:
         md.append("（缺少逐样例 EM 或没有协议一致的配对 run；旧产物需重跑 "
                   "RULER 才能启用该分析。）")
+
+    # --- 不确定性来源分解：种子随机性 vs 评测单元抽样。
+    variance_rows = []
+    for v_label, v_items in (("PPL窗口", ppl_window_tests or []),
+                             ("RULER macro", ruler_sample_tests or [])):
+        for v_test in v_items:
+            v_comp = v_test.get("variance_components")
+            if isinstance(v_comp, dict):
+                variance_rows.append((v_label, v_test, v_comp))
+    if variance_rows:
+        md += ["", "### 不确定性来源分解（种子 vs 评测单元；探索性）", "",
+               "把每个 (种子, 评测单元) 单元格内的配对差视为二维矩阵，用两因素"
+               "随机效应 ANOVA 矩估计分解种子/单元/残差方差。`总方差`占比描述"
+               "单次观测的波动；`均值方差`占比已按 1/S、1/U 收缩，才是“补种子"
+               "还是补评测单元”的直接依据。负方差分量按 0 截断（小样本常见），"
+               "不平衡/缺格不插补，仅用所有种子共有的单元格。", "",
+               "| 分析 | 对比 | 种子 | 评测单元/格 | 总方差:种子 | "
+               "总方差:单元 | 总方差:残差 | 均值方差:种子 | "
+               "均值方差:单元 | 建议 |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
+        for v_label, v_test, v_comp in variance_rows:
+            v_units = v_comp.get("n_units")
+            if v_units is None:
+                v_units = v_comp.get("n_cells")
+            md.append(
+                f"| {v_label} | {v_test.get('candidate')} vs "
+                f"{v_test.get('reference')} | "
+                f"{v_comp.get('n_seeds', '-')} | "
+                f"{v_units if v_units is not None else '-'} | "
+                f"{_variance_share_str(v_comp, 'share_seed')} | "
+                f"{_variance_share_str(v_comp, 'share_unit')} | "
+                f"{_variance_share_str(v_comp, 'share_resid')} | "
+                f"{_variance_share_str(v_comp, 'share_mean_seed')} | "
+                f"{_variance_share_str(v_comp, 'share_mean_unit')} | "
+                f"{_variance_advice(v_comp)} |")
+        md += ["", "注: 建议阈值（种子/单元均值方差占比 ≥65%）只是资源分配"
+               "的探索性提示，不是确认性判定；小种子数下 ANOVA 分量本身不"
+               "稳定，应与上方 t 检验、置换检验和双层 bootstrap 区间并读。"
+               "PPL 窗口相邻相关会违反单元独立假设，分量只作近似，区间"
+               "稳健性仍以移动块 bootstrap 为准。RULER 行显示共有单元格数，"
+               "只聚合所有种子共有的 (任务, 上下文) 单元格；被跳过的单元格"
+               "数见 `significance.json` 的 "
+               "`variance_components.n_cells_skipped`。"]
 
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]

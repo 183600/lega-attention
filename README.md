@@ -303,6 +303,7 @@ lega-attention/
 │   ├── output_ablation.py     # 答案 token 的逐层/逐头输出干预（ΔNLL/Δmargin 写回效用）
 │   ├── factorial.py           # 全因子 2^3 的精确 Shapley 分解（交互感知的消融归因）
 │   ├── equivalence.py         # SESOI + TOST 等价性/非劣性（Holm 校正、0.5×/1×/2× 敏感性）
+│   ├── uncertainty.py         # 种子×评测单元方差分解与 RULER 双层 bootstrap（探索性不确定性来源）
 │   ├── ngram.py               # 简单统计基线：一元/二元/插值二元平滑 n-gram PPL（α/λ 只在 val 联合选；test 需开锁并记账；auto 与神经评测同 split）
 │   ├── probe.py               # 简单学习基线（线性探针）：“该不该写入”判别的最简监督模型对照
 │   ├── curves.py              # 训练曲线诊断（过拟合/欠拟合/发散/NaN + 梯度尖峰）+ 处理建议

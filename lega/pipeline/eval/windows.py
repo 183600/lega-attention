@@ -185,6 +185,8 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
         per_seed = []
         skipped = 0
         window_counts = set()
+        window_keys_ref = None
+        window_keys_aligned = True
         for s in seeds:
             sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
             sb = rm.get(s) if isinstance(rm.get(s), dict) else {}
@@ -206,6 +208,10 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
                 skipped += 1
                 continue
             keys = sorted(wa)
+            if window_keys_ref is None:
+                window_keys_ref = keys
+            elif keys != window_keys_ref:
+                window_keys_aligned = False
             diffs = np.asarray([wa[k] - wb[k] for k in keys], dtype=np.float64)
             if diffs.size == 0 or not np.all(np.isfinite(diffs)):
                 skipped += 1
@@ -230,6 +236,9 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
         if stats is None:
             continue
         obs = stats["mean_diff"]
+        variance = None
+        if window_keys_aligned and n_seeds >= 2 and min(window_counts) >= 2:
+            variance = two_way_variance_components(seed_diffs)
         enough = (n_seeds >= MIN_PPL_WINDOW_SEEDS
                   and min(window_counts) >= MIN_PPL_WINDOWS)
         res = {
@@ -240,6 +249,8 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "n_windows_min": min(window_counts),
             "n_windows_max": max(window_counts),
             "n_window_observations": int(sum(d.size for d in seed_diffs)),
+            "variance_components": variance,
+            "variance_components_aligned": bool(window_keys_aligned),
             "enough_windows": bool(enough),
             "min_window_seeds": MIN_PPL_WINDOW_SEEDS,
             "min_windows_per_seed": MIN_PPL_WINDOWS,
@@ -260,7 +271,8 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "note": ("逐窗口 NLL 差（候选−参照），负值=候选更好；"
                      "分层 bootstrap 同时重采样种子与窗口；i.i.d. 口径忽略"
                      "窗口相关，block_* 为移动块重采样（块长 n^(1/3)）的"
-                     "稳健性对照，二者均为探索性证据"),
+                     "稳健性对照；variance_components 把方差分解为种子/"
+                     "窗口/残差三部分。以上均为探索性证据"),
         }
         if skipped:
             res["excluded_runs"] = skipped

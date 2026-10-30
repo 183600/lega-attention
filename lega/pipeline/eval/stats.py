@@ -1,4 +1,6 @@
 """跨种子统计、RULER 长度/样例统计。"""
+from collections import Counter
+
 from .._shared import _install as _shared_install
 
 _shared_install(globals())
@@ -965,6 +967,179 @@ def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOO
     return [float(lo), float(hi)]
 
 
+def _ruler_macro_hierarchical_bootstrap(per_seed_cell_diffs,
+                                        n_boot: int = RULER_MACRO_BOOTSTRAP,
+                                        rng_seed: int = 20240517):
+    """RULER macro 的双层 bootstrap：同时重采样种子与评测样例。
+
+    `_ruler_macro_bootstrap_ci` 固定已观测种子，只覆盖“换一批评测样例”
+    的抽样误差；跨种子 t 检验只覆盖“换训练种子”的随机性。两者都不能单独
+    给出“换种子且换评测样例”时的合并不确定性。本函数先对种子有放回重采样，
+    再在每个被选中种子的 (任务, 上下文) 单元格内对样例有放回重采样，按与
+    预注册 macro 相同的“任务等权、任务内单元格等权”口径聚合。
+
+    返回 ``{ci95, p, same_sign, observed, n_boot, n_seeds, n_cells,
+    n_samples, method}``；``p`` 由中心化 bootstrap 分布计算，``same_sign``
+    是重采样均值与观测值同号的比例。小种子数下 bootstrap 分布本身粒度很粗，
+    该区间只作探索性稳健性证据，不替代预注册的种子级检验。
+    """
+    n_boot = strict_int(n_boot, "n_boot")
+    if n_boot < 1:
+        raise ValueError(f"n_boot 必须 >= 1，收到 {n_boot!r}")
+    rng_seed = strict_int(rng_seed, "rng_seed")
+    if rng_seed < 0:
+        raise ValueError(f"rng_seed 必须 >= 0，收到 {rng_seed!r}")
+    cells = [c for c in (per_seed_cell_diffs or []) if isinstance(c, dict)]
+    by_seed = []
+    structures = []
+    n_cells = n_samples = 0
+    for c in cells:
+        by_task = {}
+        structure = []
+        payload_cells = payload_samples = 0
+        for key, vals in c.items():
+            arr = np.asarray(vals, dtype=float)
+            if arr.size == 0:
+                continue
+            task = key[0] if isinstance(key, (tuple, list)) and key else key
+            by_task.setdefault(task, []).append(arr)
+            structure.append((str(task), str(key), int(arr.size)))
+            payload_cells += 1
+            payload_samples += int(arr.size)
+        if by_task:
+            by_seed.append(by_task)
+            structures.append(tuple(sorted(structure, key=str)))
+            n_cells += payload_cells
+            n_samples += payload_samples
+    if not by_seed:
+        return None
+    # 各被选中种子的任务/单元格结构必须一致，否则“先重采样种子再按任务
+    # 等权”会把结构差异误当成效应。协议一致的 RULER 产物应满足该条件。
+    if any(s != structures[0] for s in structures[1:]):
+        return None
+
+    def _macro(by_task, rng=None):
+        task_means = []
+        for cell_arrays in by_task.values():
+            cell_means = []
+            for vals in cell_arrays:
+                if rng is None:
+                    cell_means.append(float(vals.mean()))
+                else:
+                    idx = rng.integers(0, vals.size, size=vals.size)
+                    cell_means.append(float(vals[idx].mean()))
+            if cell_means:
+                task_means.append(float(np.mean(cell_means)))
+        return float(np.mean(task_means)) if task_means else None
+
+    observed_seed_macros = [m for m in (_macro(bt) for bt in by_seed)
+                            if m is not None]
+    if not observed_seed_macros:
+        return None
+    observed = float(np.mean(observed_seed_macros))
+    rng = np.random.default_rng(rng_seed)
+    reps = []
+    for _ in range(n_boot):
+        seed_idx = rng.integers(0, len(by_seed), size=len(by_seed))
+        seed_macros = []
+        for si in seed_idx:
+            m = _macro(by_seed[int(si)], rng)
+            if m is not None:
+                seed_macros.append(m)
+        if seed_macros:
+            reps.append(float(np.mean(seed_macros)))
+    if not reps:
+        return None
+    lo, hi = np.percentile(reps, [2.5, 97.5])
+    reps_arr = np.asarray(reps, dtype=float)
+    if observed == 0.0:
+        p = 1.0
+        same_sign = 0.0
+    else:
+        ge = int(np.sum(np.abs(reps_arr - observed) >= abs(observed)))
+        p = (ge + 1) / (len(reps_arr) + 1)
+        same_sign = float(np.mean((reps_arr > 0) == (observed > 0)))
+    return {
+        "ci95": [float(lo), float(hi)],
+        "p": float(p),
+        "same_sign": same_sign,
+        "observed": observed,
+        "n_boot": int(n_boot),
+        "n_seeds": len(by_seed),
+        "n_cells": int(n_cells),
+        "n_samples": int(n_samples),
+        "method": ("hierarchical bootstrap: resample training seeds, then "
+                   "resample paired samples within each (task, ctx) cell; "
+                   "task-equal macro"),
+    }
+
+
+def _ruler_macro_variance_components(per_seed_cell_diffs,
+                                     per_seed_cell_ids):
+    """RULER macro 的种子/样例方差分解（按单元格等权聚合）。
+
+    每个 (任务, 上下文) 单元格内是 seed × sample 的配对差矩阵，可分解为
+    种子效应、样例效应与残差；再按预注册 macro 权重（任务等权、任务内
+    单元格等权）聚合各单元格的方差占比。只使用所有种子都存在的单元格且
+    要求 sample_id 完全对齐；不平衡/缺格不插补，返回 ``None``。
+    """
+    diffs = [c for c in (per_seed_cell_diffs or []) if isinstance(c, dict)]
+    ids = [c for c in (per_seed_cell_ids or []) if isinstance(c, dict)]
+    if len(diffs) < 2 or len(ids) != len(diffs):
+        return None
+    common = set(diffs[0])
+    for c in diffs[1:]:
+        common &= set(c)
+    if not common:
+        return None
+    comps, weights, tasks = [], [], []
+    skipped = 0
+    for ck in sorted(common, key=str):
+        ref_ids = ids[0].get(ck)
+        if not isinstance(ref_ids, (list, tuple)) or not ref_ids:
+            skipped += 1
+            continue
+        if any(tuple(ids[i].get(ck) or ()) != tuple(ref_ids)
+               for i in range(1, len(ids))):
+            skipped += 1
+            continue
+        matrix = []
+        ok = True
+        for c in diffs:
+            vals = c.get(ck)
+            if (not isinstance(vals, (list, tuple, np.ndarray))
+                    or len(vals) != len(ref_ids)):
+                ok = False
+                break
+            matrix.append(list(vals))
+        if not ok:
+            skipped += 1
+            continue
+        comp = two_way_variance_components(matrix)
+        if comp is None:
+            skipped += 1
+            continue
+        task = ck[0] if isinstance(ck, (tuple, list)) and ck else ck
+        comps.append(comp)
+        tasks.append(str(task))
+    if not comps:
+        return None
+    counts = Counter(tasks)
+    n_tasks = len(counts)
+    weights = [1.0 / (n_tasks * counts[task]) for task in tasks]
+    agg = aggregate_variance_components(comps, weights)
+    if agg is None:
+        return None
+    agg.update({
+        "n_cells": len(comps),
+        "n_cells_common": len(common),
+        "n_cells_skipped": skipped,
+        "n_seeds": len(diffs),
+        "scope": "RULER macro cells (task-equal, cell-equal)",
+    })
+    return agg
+
+
 def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP,
                              rng_seed: int = 20240517):
     """每个变体 RULER 绝对 macro EM 的分层 bootstrap 区间。
@@ -1063,6 +1238,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         n_samples = 0
         per_seed = []
         per_seed_cell_diffs = []
+        per_seed_cell_ids = []
         # 按 sample_id 聚合跨种子的配对差：同一样例在多个训练种子下重复
         # 出现，pooled McNemar 把它当成多条独立证据；聚类分析先对每个
         # 样例跨种子取平均，再以样例为独立单位做符号翻转检验。
@@ -1083,6 +1259,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 continue
             cell_diffs = []
             cell_paired = {}
+            cell_ids = {}
             cell_ok = True
             for ck in sorted(ca):
                 oa, ob = ca[ck], cb[ck]
@@ -1091,8 +1268,10 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                     break
                 if not oa:
                     continue
-                diffs = [oa[sid] - ob[sid] for sid in sorted(oa)]
+                ids = tuple(sorted(oa))
+                diffs = [oa[sid] - ob[sid] for sid in ids]
                 cell_paired[ck] = diffs
+                cell_ids[ck] = ids
                 # 预注册 macro = 任务等权、任务内上下文档位等权：先按任务
                 # 收集单元格差，最后先任务内平均、再任务间平均。不能直接
                 # 对所有单元格等权——任务间格数不等时会偏离预注册估计量。
@@ -1102,6 +1281,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 skipped += 1
                 continue
             per_seed_cell_diffs.append(cell_paired)
+            per_seed_cell_ids.append(cell_ids)
             task_cell_diffs = {}
             for task, diff in cell_diffs:
                 task_cell_diffs.setdefault(task, []).append(diff)
@@ -1156,6 +1336,11 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         # 内对配对样例重采样，再任务内、任务间等权平均（与预注册 macro 同口径）。
         # 该区间只覆盖评测样例抽样，不覆盖训练种子随机性（后者见种子级 t 检验）。
         macro_ci = _ruler_macro_bootstrap_ci(per_seed_cell_diffs)
+        # 双层 bootstrap：种子与样例同时重采样，给出合并不确定性；方差分解
+        # 则回答两个来源各自占多少，避免“区间很宽但不知道该补哪一边”。
+        macro_hier = _ruler_macro_hierarchical_bootstrap(per_seed_cell_diffs)
+        macro_variance = _ruler_macro_variance_components(
+            per_seed_cell_diffs, per_seed_cell_ids)
         # 样例聚类（cluster-robust）：每个 sample_id 先跨种子平均，再作为
         # 独立观测做符号翻转检验；只有 1 个样例时不做检验（n<2）。
         cluster_vals = [float(np.mean(v)) for v in cluster_sums.values() if v]
@@ -1180,6 +1365,14 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 "cell-stratified sample bootstrap (seeds fixed): resample "
                 "paired samples within each (task, ctx) cell, keep cells "
                 "equal-weighted, then average over observed seeds"),
+            "macro_mean_diff_ci95_hier": (
+                macro_hier.get("ci95") if macro_hier else None),
+            "macro_p_hier": (macro_hier.get("p") if macro_hier else None),
+            "macro_bootstrap_same_sign_hier": (
+                macro_hier.get("same_sign") if macro_hier else None),
+            "macro_ci95_hier_method": (
+                macro_hier.get("method") if macro_hier else None),
+            "variance_components": macro_variance,
             "n_cells": n_cells,
             "p": _mcnemar_exact_p(cand_only, ref_only),
             "p_adj": None,
@@ -1201,7 +1394,10 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                      "等权（对应预注册 RULER平均 的 macro 口径）；"
                      "macro_mean_diff_ci95 为"
                      "固定种子、单元格内样例重采样的分层 bootstrap 区间"
-                     "（只覆盖评测抽样，不覆盖训练随机性）。cluster_* 为"
+                     "（只覆盖评测抽样，不覆盖训练随机性）；"
+                     "macro_mean_diff_ci95_hier 同时重采样种子与样例，"
+                     "给出合并不确定性；variance_components 把 macro 配对"
+                     "差的方差分解为种子/样例/残差三部分。cluster_* 为"
                      "按 sample_id 聚合跨种子后的样例级稳健性检验：每个"
                      "样例先平均、再以样例为独立单位做符号翻转，避免把"
                      "同一样例在多个种子下的重复观测当成独立证据"),
@@ -1242,4 +1438,21 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         else:
             t["cluster_verdict"] = (f"样例聚类后无显著差异（Holm 校正后 "
                                     f"p={padj:.4f}）")
+    # 双层 bootstrap 也是独立 Holm 家族：它同时覆盖种子与样例，和上面的
+    # McNemar（固定题面）及聚类检验（样例等权 micro）回答不同问题。
+    hpads = holm_bonferroni([t.get("macro_p_hier") for t in out])
+    for t, padj in zip(out, hpads):
+        t["macro_p_hier_adj"] = padj
+        delta = t.get("macro_mean_diff")
+        if padj is None or delta is None:
+            t["macro_hier_verdict"] = "无法检验（双层 bootstrap 自由度不足）"
+        elif padj < ALPHA:
+            t["macro_hier_verdict"] = (
+                "双层 bootstrap 支持候选更优（探索性，Holm 校正后）"
+                if delta > 0 else
+                "双层 bootstrap 支持候选更差（探索性，Holm 校正后）")
+        else:
+            t["macro_hier_verdict"] = (
+                f"双层 bootstrap 未显示差异（探索性，Holm 校正后 "
+                f"p={padj:.4f}）")
     return out
