@@ -184,6 +184,12 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     assert "mean_lag1_autocorr" in t, t
     assert t["p_adj"] is not None and t["p_adj"] < 0.05, t
     assert t["verdict"].startswith("窗口级显著优于"), t
+    # 每个种子内部所有窗口同向改善：稳健统计应与均值一致，且覆盖全部窗口。
+    assert abs(t["median_diff"] + 0.75) < 1e-12, t
+    assert abs(t["trimmed_mean_diff_10pct"] + 0.75) < 1e-12, t
+    assert t["window_win_rate"] == 1.0, t
+    assert t["robustness"]["broad_based"] is True, t
+    assert t["robustness"]["outlier_sensitive"] is False, t
 
     # 单窗口差值本身有限但同号相加会溢出：per_seed 明细也不能写 inf。
     huge_idx = list(range(0, 30, 3))
@@ -195,6 +201,10 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
                                       n_resamples=50)[0]
     assert huge_t["per_seed"][0]["mean_diff"] == 1.5e308, huge_t
     assert math.isfinite(huge_t["mean_diff"]), huge_t
+    assert math.isfinite(huge_t["median_diff"]), huge_t
+    assert math.isfinite(huge_t["trimmed_mean_diff_10pct"]), huge_t
+    assert all(math.isfinite(v) for v in huge_t["diff_quantiles"].values()),         huge_t
+    assert huge_t["window_win_rate"] == 0.0, huge_t
     # 窗口序号不一致 = 不是同一批评测单元，整对剔除而不是按位置强配
     runs2 = {
         "lega": {7: ev([1.0, 1.0], [0, 4])},
@@ -226,6 +236,69 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     assert "显著" not in tt["verdict"], tt
     print("  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号/"
           "最小窗口门槛")
+
+
+def test_window_bootstrap_reports_robust_distribution():
+    """窗口级稳健统计：少数极端窗口不能把“普遍改善”的结论带偏。"""
+    from run_all import _window_bootstrap_stats
+
+    # 普遍改善：每个窗口都小幅改善，均值/中位数/截尾均值/胜率必须一致。
+    broad = _window_bootstrap_stats([[-0.10] * 20, [-0.20] * 20],
+                                    n_resamples=100)
+    assert abs(broad["median_diff"] + 0.15) < 1e-12, broad
+    assert abs(broad["trimmed_mean_diff_10pct"] + 0.15) < 1e-12, broad
+    assert broad["window_win_rate"] == 1.0, broad
+    assert broad["window_tie_rate"] == 0.0, broad
+    assert abs(broad["diff_quantiles"]["p50"] + 0.15) < 1e-12, broad
+
+    # 18 个窗口略差 + 2 个窗口巨幅改善：均值为负，但中位数/截尾均值为正，
+    # 改善窗口仅占 10%。这正是“平均值被少数窗口驱动”的典型形态。
+    outlier = [0.01] * 18 + [-2.0] * 2
+    st = _window_bootstrap_stats([outlier, list(outlier)], n_resamples=100)
+    assert st["mean_diff"] < 0.0, st
+    assert abs(st["median_diff"] - 0.01) < 1e-12, st
+    assert abs(st["trimmed_mean_diff_10pct"] - 0.01) < 1e-12, st
+    assert abs(st["window_win_rate"] - 0.10) < 1e-12, st
+    assert abs(st["window_loss_rate"] - 0.90) < 1e-12, st
+    assert st["median_diff_ci95"][0] > 0.0, st
+    assert st["window_win_rate_ci95"][1] < 0.5, st
+    print("  [ok] 窗口级稳健统计：中位数/截尾均值/胜负比例与极端窗口")
+
+
+def test_ppl_window_robustness_flags_outlier_driven_mean():
+    """均值显著但中位数反向/多数窗口未改善时，必须标记为少数窗口驱动。"""
+    from run_all import _ppl_window_paired_tests
+
+    def ev(losses, idx, **kw):
+        base = {"split": "test", "eval_ctx": 10, "eval_iters": len(idx),
+                "val_windows": max(9, len(idx)),
+                "val_tokens_evaluated": 10 * len(idx),
+                "window_losses": losses, "window_indices": idx}
+        base.update(kw)
+        return {"eval": base}
+
+    idx = list(range(0, 60, 3))  # 20 个窗口
+    cand = [2.01] * 18 + [0.0] * 2
+    ref = [2.0] * 20
+    runs = {
+        "lega": {7: ev(cand, idx), 8: ev(cand, idx), 9: ev(cand, idx)},
+        "standard": {7: ev(ref, idx), 8: ev(ref, idx), 9: ev(ref, idx)},
+    }
+    t = _ppl_window_paired_tests(runs, [("lega", "standard")],
+                                 n_resamples=300)[0]
+    assert t["enough_windows"] is True, t
+    assert t["mean_diff"] < 0.0, t
+    assert t["median_diff"] > 0.0, t
+    assert t["trimmed_mean_diff_10pct"] > 0.0, t
+    assert abs(t["window_win_rate"] - 0.10) < 1e-12, t
+    rob = t["robustness"]
+    assert rob["mean_ci_excludes_zero"] is True, t
+    assert rob["direction_consistent"] is False, t
+    assert rob["majority_windows_in_mean_direction"] is False, t
+    assert rob["outlier_sensitive"] is True, t
+    assert rob["broad_based"] is False, t
+    assert "少数窗口驱动" in t["verdict"], t
+    print("  [ok] 窗口级稳健性标记：识别均值由少数极端窗口驱动")
 
 
 def test_build_summary_renders_both_eval_sampling_sections():
@@ -263,10 +336,13 @@ def test_build_summary_renders_both_eval_sampling_sections():
         out = build_summary(tmp)
         md = out["markdown"]
         assert "### PPL 窗口级配对" in md and "PPL比" in md, md[-3000:]
+        assert "窗口级稳健性" in md and "改善窗口占比" in md, md[-3000:]
         assert "### RULER 样例级配对" in md and "候选独对" in md, md[-3000:]
         sig = json.load(open(os.path.join(tmp, "significance.json"),
                              encoding="utf-8"))
         assert len(sig["ppl_window_pairs"]) == 1, sig.keys()
+        assert sig["ppl_window_pairs"][0]["median_diff"] is not None, sig
+        assert sig["ppl_window_pairs"][0]["robustness"]["outlier_sensitive"]             is False, sig
         assert len(sig["ruler_sample_pairs"]) == 1, sig.keys()
         assert len(out["ppl_window_tests"]) == 1
         assert len(out["ruler_sample_tests"]) == 1

@@ -313,6 +313,51 @@ def _summary_part_c(**kw):
                "两者冲突时说明“换训练种子”和“换评测窗口”给出不同信息，"
                "均不足以单独升级为确认性结论。逐种子窗口胜负明细见 "
                "`significance.json` 的 `ppl_window_pairs`。"]
+
+        def _ci_str(ci):
+            if (not isinstance(ci, (list, tuple)) or len(ci) != 2):
+                return "-"
+            lo, hi = _fmt_signed(ci[0]), _fmt_signed(ci[1])
+            return f"[{lo}, {hi}]" if lo != "-" and hi != "-" else "-"
+
+        robust_rows = [
+            t for t in ppl_window_tests
+            if isinstance(t.get("robustness"), dict)
+            and t.get("median_diff") is not None]
+        if robust_rows:
+            md += ["", "**窗口级稳健性：均值是否由少数窗口驱动**", "",
+                   "平均 NLL 改善可能只来自少数困难窗口。下表并列逐种子中位数、"
+                   "10% 截尾均值与改善窗口占比（ΔNLL<0 的窗口比例），区间均由"
+                   "“先重采样种子、再重采样窗口”的分层 bootstrap 得到；移动块"
+                   "版本见 `significance.json` 的 `block_*` 字段。这些是描述性"
+                   "稳健性标记：均值显著但中位数/截尾均值方向不一致或多数窗口"
+                   "未改善时，只能写“均值受少数窗口驱动”，不能写成普遍改善。", "",
+                   "| 对比 | ΔNLL均值 | ΔNLL中位数 [95%CI] | "
+                   "10%截尾均值 [95%CI] | 改善窗口占比 [95%CI] | 稳健性结论 |",
+                   "|---|---|---|---|---|---|"]
+            for t in robust_rows:
+                rob = t.get("robustness") or {}
+                if rob.get("outlier_sensitive"):
+                    verdict = "⚠ 均值可能由少数窗口驱动"
+                elif rob.get("broad_based"):
+                    verdict = "均值/中位数/截尾同向，改善覆盖多数窗口"
+                elif rob.get("direction_consistent"):
+                    verdict = "方向一致，但中位数区间含 0 或多数窗口未同向"
+                else:
+                    verdict = "均值与稳健统计方向不一致"
+                md.append(
+                    f"| {t['candidate']} vs {t['reference']} | "
+                    f"{_fmt_signed(t.get('mean_diff'))} | "
+                    f"{_fmt_signed(t.get('median_diff'))} "
+                    f"{_ci_str(t.get('median_diff_ci95'))} | "
+                    f"{_fmt_signed(t.get('trimmed_mean_diff_10pct'))} "
+                    f"{_ci_str(t.get('trimmed_mean_diff_10pct_ci95'))} | "
+                    f"{_fmt_pct1(t.get('window_win_rate'))} "
+                    f"{_ci_str(t.get('window_win_rate_ci95'))} | {verdict} |")
+            md += ["", "注: 改善窗口占比为逐种子比例的平均；平局窗口计入分母、"
+                   "不计为改善。中位数/截尾均值对极端窗口不敏感，与均值并报"
+                   "用于识别“少数大赢窗口拉高平均”的情形；它们不构成新的"
+                   "显著性检验，也不改变上表的 Holm 判定。"]
     else:
         md.append("（缺少逐窗口损失（旧产物）或没有同 split/同协议的配对 run；"
                   "重新运行独立评测即可启用。）")
