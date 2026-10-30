@@ -60,6 +60,7 @@ def _summary_part_c(**kw):
         design_conf = kw["design_conf"]
     if "design_plan" in kw:
         design_plan = kw["design_plan"]
+    test_reuse = kw.get("test_reuse")
     if "e" in kw:
         e = kw["e"]
     if "extra" in kw:
@@ -901,6 +902,7 @@ def _summary_part_c(**kw):
                    "registration_scope": scope_check,
                    "design_plan": design_plan,
                    "design_conformance": design_conf,
+                   "test_reuse": test_reuse,
                    "observed_design_sensitivity": (
                        observed_design_sensitivity(tests)),
                    "ngram_comparison": ngram_cmp,

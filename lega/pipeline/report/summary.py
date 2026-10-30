@@ -609,6 +609,16 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 设计符合性门：先验计划里的 (变体, 种子) 单元必须齐全；缺失只影响
     # 涉及该变体/指标端点的假设，不搞“一刀切”降级，也不能把缺失当无效应。
     design_plan = load_design_plan(results_dir)
+    design_alpha = _as_dict(
+        _as_dict(design_plan).get("inputs")).get("alpha", ALPHA)
+    test_reuse = test_reuse_report(
+        _as_dict(data_report).get("test_access"),
+        repro_test_data_fingerprint(repro),
+        _as_dict(repro).get("run_id"),
+        _as_dict(design_plan).get("test_look_budget",
+                                  DEFAULT_TEST_LOOK_BUDGET),
+        alpha=design_alpha)
+    test_reuse_metrics = test_dependent_metrics(runs)
     design_stages = _as_dict(
         _as_dict(repro.get("design")).get("stages"))
     design_conf = design_conformance(
@@ -620,15 +630,17 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             f"本结果目录已有 {len(design_hist)} 份设计计划记录"
             "（重跑/改种子/改样本量）：历史见 design_plan_history.jsonl；"
             "当前判定只对应最新计划，不得把旧计划下的产物混入")
-    hyp_eval = apply_design_gate(
-        apply_budget_gate(
-            apply_scope_gate(
-                apply_integrity_gate(
-                    evaluate_registered_hypotheses(registered, tests),
-                    integrity),
-                scope_check),
-            audit),
-        design_conf, design_plan)
+    hyp_eval = apply_test_reuse_gate(
+        apply_design_gate(
+            apply_budget_gate(
+                apply_scope_gate(
+                    apply_integrity_gate(
+                        evaluate_registered_hypotheses(registered, tests),
+                        integrity),
+                    scope_check),
+                audit),
+            design_conf, design_plan),
+        test_reuse, test_reuse_metrics, alpha=design_alpha)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -1247,6 +1259,28 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             md.append(f"- 测试集尘封账本：累计 test 评测 {ta.get('evaluations', 0)} 次、"
                       f"不同 checkpoint {ta.get('distinct_checkpoints', 0)} 个"
                       f"{warn}。测试集只用于最终评估；据此调参即视为泄露。")
+            if test_reuse.get("checked") is True \
+                    and test_reuse.get("current_test_data_fingerprint"):
+                planned = test_reuse.get("planned_looks")
+                observed = test_reuse.get("observed_looks")
+                if test_reuse.get("exceeded") is True:
+                    md.append(
+                        f"- ⚠ 测试集 look 预算超限：当前测试版本已有 "
+                        f"{observed} 个独立流水线运行 > 预算 {planned}；"
+                        "依赖 test 的确认性判定已降级为探索性。")
+                else:
+                    md.append(
+                        f"- 测试集 look 审计：当前测试版本 {observed} 个独立"
+                        f"流水线运行，预算 {planned}；"
+                        + (f"按多次 look 保守阈值 alpha/planned="
+                           f"{test_reuse.get('look_adjusted_alpha'):.6g} 判定。"
+                           if planned and planned > 1 else
+                           "在预算内，确认性资格不受额外 look 惩罚。"))
+                if test_reuse.get("unattributed_records"):
+                    md.append(
+                        f"- ⚠ 测试集 look 审计：当前版本另有 "
+                        f"{test_reuse.get('unattributed_records')} 条旧记录"
+                        "缺少 pipeline_run_id，独立 look 次数可能被低估。")
         else:
             md.append("- 测试集尘封账本：暂无 test 评测记录。")
     else:
@@ -1422,6 +1456,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "target",
         "task",
         "task_tests",
+        "test_reuse",
         "tests",
         "tok",
         "toks",
@@ -1474,5 +1509,6 @@ def build_summary(results_dir: str, audit: dict = None,
         'causal_ablation': ctx["causal_tests"],
         'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
         'budget_sensitivity': ctx["budget_sensitivity"],
+        'test_reuse': ctx.get("test_reuse"),
     }
 

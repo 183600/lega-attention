@@ -1130,6 +1130,61 @@ def test_test_access_ledger():
     print("  [ok] 测试集访问账本：追加、去重统计、按 test 数据版本判定重复")
 
 
+def test_test_access_summary_groups_independent_pipeline_looks():
+    """同一流水线运行只算一个 look；旧记录缺 run_id 时显式标记不可归属。"""
+    from lega.datacheck import summarize_test_access
+
+    out = summarize_test_access([
+        {"ckpt_sha256": "a", "test_data_fingerprint": "v1",
+         "pipeline_run_id": "run-1"},
+        {"ckpt_sha256": "b", "test_data_fingerprint": "v1",
+         "pipeline_run_id": "run-1"},
+        {"ckpt_sha256": "c", "test_data_fingerprint": "v1",
+         "pipeline_run_id": "run-2"},
+        {"ckpt_sha256": "d", "test_data_fingerprint": "v1"},
+        {"ckpt_sha256": "e"},
+    ])
+    assert out["looks_by_test_data_fingerprint"] == {
+        "v1": ["run-1", "run-2"]}
+    assert out["unattributed_records_by_test_data_fingerprint"] == {"v1": 1}
+    assert out["distinct_pipeline_runs"] == 2
+    assert out["records_without_pipeline_run_id"] == 2
+    assert out["records_without_test_data_fingerprint"] == 1
+    print("  [ok] 测试集访问摘要：按 pipeline_run_id 统计独立 look")
+
+
+def test_test_reuse_gate_only_downgrades_test_dependent_metrics():
+    """超过 look 预算只降级依赖 test 的假设；机制端点不受连带影响。"""
+    from lega.testreuse import (apply_test_reuse_gate, test_dependent_metrics,
+                                test_reuse_report)
+
+    runs = {
+        "lega": {1: {"eval": {"split": "test"},
+                     "ruler": {"corpus_source": "val"}}},
+    }
+    assert test_dependent_metrics(runs) == {"PPL"}
+    report = test_reuse_report(
+        {"looks_by_test_data_fingerprint": {"v1": ["run-1", "run-2"]},
+         "unattributed_records_by_test_data_fingerprint": {}},
+        "v1", "run-2", planned_looks=1)
+    assert report["checked"] is True and report["exceeded"] is True
+    hyp = [
+        {"id": "H1", "metric": "PPL", "confirmatory_valid": True},
+        {"id": "H4", "metric": "RULER平均", "confirmatory_valid": True},
+        {"id": "H6", "metric": "AUROC差(logit−仅查询)",
+         "confirmatory_valid": True},
+    ]
+    out = apply_test_reuse_gate(hyp, report, {"PPL"})
+    assert out[0]["confirmatory_valid"] is False
+    assert "look" in out[0]["confirmatory_note"]
+    assert out[1]["confirmatory_valid"] is True
+    assert out[2]["confirmatory_valid"] is True
+
+    old = test_reuse_report({"evaluations": 1}, "v1", "run-1", 1)
+    assert old["checked"] is False
+    print("  [ok] test look 门：仅降级依赖 test 的确认性假设")
+
+
 def test_prepare_bins_rejects_bool_or_fractional_token_counts():
     """缓存元数据的 bool/小数/下划线 token 数不能伪造尺寸一致而绕过重建。"""
     with tempfile.TemporaryDirectory() as d:

@@ -21,7 +21,7 @@ from .model import (gate_extra_params, gate_extra_params_per_head,
                     load_model, count_params)
 from .preflight import (allow_protocol_violations,
                         data_protocol_preflight)
-from .repro import (load_provenance, sha256_file,
+from .repro import (current_pipeline_run_id, load_provenance, sha256_file,
                     test_data_fingerprint as _test_data_fingerprint)
 from .train import evaluate_val, _val_eval_indices
 from .utils import (amp_autocast, amp_dtype_for, config_bool, enable_tf32,
@@ -511,6 +511,7 @@ def main():
                 "variant": ck.get("variant", model.variant),
                 "seed": seed,
                 "test_data_fingerprint": test_data_fingerprint,
+                "pipeline_run_id": current_pipeline_run_id(),
             })
         except OSError as e:
             print(f"[eval] 警告：test 访问账本写入失败（{e}）；"
@@ -682,6 +683,7 @@ def main():
                         "seed": seed,
                         "n_worst": int(args.worst_n),
                         "test_data_fingerprint": test_data_fingerprint,
+                        "pipeline_run_id": current_pipeline_run_id(),
                     })
                     # 结果 JSON 里的账本摘要必须包含刚写入的转储记录；
                     # 否则报告会少报一次 test 读取，审计链断开。

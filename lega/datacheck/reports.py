@@ -67,12 +67,28 @@ def summarize_test_access(records) -> dict:
                if isinstance(records, (list, tuple)) else [])
     counts = {}
     versions = set()
+    looks = {}
+    unattributed = {}
+    run_ids_all = set()
+    without_run_id = 0
+    without_fingerprint = 0
     for r in records:
+        run_id = r.get("pipeline_run_id")
+        run_id = run_id.strip() if isinstance(run_id, str) else ""
+        if not run_id:
+            without_run_id += 1
         c = str(r.get("ckpt_sha256") or r.get("ckpt") or "")
-        if not c:
-            continue
         ver = r.get("test_data_fingerprint")
         ver = str(ver) if ver else None
+        if ver is None:
+            without_fingerprint += 1
+        elif run_id:
+            looks.setdefault(ver, set()).add(run_id)
+            run_ids_all.add(run_id)
+        else:
+            unattributed[ver] = unattributed.get(ver, 0) + 1
+        if not c:
+            continue
         key = (c, ver)
         counts[key] = counts.get(key, 0) + 1
         if ver is not None:
@@ -99,6 +115,13 @@ def summarize_test_access(records) -> dict:
         "repeated_evaluations": repeated_details,
         "distinct_test_data_versions": int(len(versions)),
         "test_data_fingerprints": sorted(versions),
+        "looks_by_test_data_fingerprint": {
+            ver: sorted(ids) for ver, ids in sorted(looks.items())},
+        "unattributed_records_by_test_data_fingerprint": {
+            ver: int(n) for ver, n in sorted(unattributed.items())},
+        "distinct_pipeline_runs": int(len(run_ids_all)),
+        "records_without_pipeline_run_id": int(without_run_id),
+        "records_without_test_data_fingerprint": int(without_fingerprint),
         "first_time": records[0].get("time") if records else None,
         "last_time": records[-1].get("time") if records else None,
     }

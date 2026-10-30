@@ -6,6 +6,7 @@ _shared_install(globals())
 
 from .scheduling import (DEFAULT_RUN_ORDER, RUN_ORDER_MODES,  # noqa: E402
                          build_run_order, validate_run_order)
+from lega.testreuse import DEFAULT_TEST_LOOK_BUDGET  # noqa: E402
 
 
 def _mechanism_endpoint_sensitivity(design_cfg: dict, metric_name: str,
@@ -511,6 +512,24 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "seed_minimum", "种子数下限", "warn",
             f"计划只有 {n_seeds} 个种子（< {MIN_SEEDS}）：只能描述，"
             "不能做显著性/组件有效性判定")]
+
+    look_budget_raw = design_cfg.get("test_look_budget",
+                                     DEFAULT_TEST_LOOK_BUDGET)
+    try:
+        test_look_budget = _strict_int(
+            look_budget_raw, "design.test_look_budget", minimum=1)
+    except ValueError as e:
+        test_look_budget = DEFAULT_TEST_LOOK_BUDGET
+        checks.append(_check(
+            "test_look_budget", "测试集 look 预算", "fail", str(e)))
+    else:
+        explicit_look_budget = "test_look_budget" in design_cfg
+        checks.append(_check(
+            "test_look_budget", "测试集 look 预算",
+            "pass" if explicit_look_budget else "info",
+            f"允许 {test_look_budget} 个独立流水线运行访问同一测试版本；"
+            "超出后依赖测试集的确认性判定降级为探索性"
+            + ("" if explicit_look_budget else "（未显式声明，采用默认 1 次）")))
 
     # ---- 检查 2：与预注册种子计划一致（少跑不等于“范围外”，但确认性
     # 证据不再覆盖登记的全部种子；必须显式降级/告警）
@@ -1264,6 +1283,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "schema_version": SCHEMA_VERSION,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "lega.design",
+        "test_look_budget": test_look_budget,
         "inputs": {
             "config_file": config_file,
             "config_sha256": config_sha256,
@@ -1309,6 +1329,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                 "declared_paired_sd"),
             "multiplicity": mode,
             "run_order": order_mode,
+            "test_look_budget": test_look_budget,
             "note": (
                 "声明假设来自配置 design 块（分析前写死）；参考值是展示用"
                 "横轴，不是从当前数据估计的效应量，也不参与任何推断。"

@@ -663,6 +663,7 @@ def evaluate(data_dir: str, split: str = "val",
             "split": "test", "kind": "ngram_baseline",
             "ckpt": "ngram-baseline",
             "test_data_fingerprint": test_data_fingerprint(data_dir),
+            "pipeline_run_id": current_pipeline_run_id(),
             "note": "简单统计基线评测（α 在 val 上选择）"})
     else:
         eval_ids = np.asarray(load_bin(data_dir, split), dtype=np.int64)

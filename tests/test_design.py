@@ -489,6 +489,33 @@ def test_plan_digest_tracks_scientific_content():
     print("  [ok] 计划摘要：同一设计稳定、内容/数据预算变化即变")
 
 
+def test_design_plan_records_test_look_budget():
+    """测试集 look 预算进入计划；默认 1，非法值显式 fail 而不是静默采用。"""
+    plan = _plan()
+    assert plan["test_look_budget"] == 1
+    check = {c["id"]: c for c in plan["checks"]}["test_look_budget"]
+    assert check["status"] == "info"
+
+    custom = build_design_plan(
+        {"ruler": {"ctx_lens": [256], "n_samples": 30},
+         "design": {"test_look_budget": 2}},
+        [1, 2, 3], ["lega", "standard"], None,
+        known_variants={"lega", "standard"})
+    assert custom["test_look_budget"] == 2
+    check = {c["id"]: c for c in custom["checks"]}["test_look_budget"]
+    assert check["status"] == "pass" and "2" in check["detail"]
+
+    bad = build_design_plan(
+        {"ruler": {"ctx_lens": [256], "n_samples": 30},
+         "design": {"test_look_budget": 0}},
+        [1, 2, 3], ["lega", "standard"], None,
+        known_variants={"lega", "standard"})
+    assert bad["test_look_budget"] == 1
+    check = {c["id"]: c for c in bad["checks"]}["test_look_budget"]
+    assert check["status"] == "fail"
+    print("  [ok] 设计计划：test look 预算默认/显式/非法值均显形")
+
+
 def test_design_plan_accepts_seed_zero_and_caps_seed_range():
     """种子 0 与 utils.seed_int 同口径合法；负数/超出 2^32-1 必须拒绝。"""
     plan = _plan(seeds=(0, 1, 2))

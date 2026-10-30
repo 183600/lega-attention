@@ -1147,6 +1147,7 @@ def record_corpus_test_access(data_dir: str, source, ckpt_sha256: str = None,
         return False
     import os
     from .datacheck import append_test_access
+    from .repro import current_pipeline_run_id
     source_path = os.path.join(data_dir, "test.txt")
     try:
         append_test_access(data_dir, {
@@ -1157,6 +1158,7 @@ def record_corpus_test_access(data_dir: str, source, ckpt_sha256: str = None,
             # 账本统一按 test.bin 版本分组；同时记录实际读取的裸 txt 哈希，
             # 防止 txt 与 bin 不同步时审计链只覆盖派生文件。
             "test_data_fingerprint": test_data_fingerprint(data_dir),
+            "pipeline_run_id": current_pipeline_run_id(),
             "corpus_source_sha256": (sha256_file(source_path)
                                      if os.path.exists(source_path) else None),
         })

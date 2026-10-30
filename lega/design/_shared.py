@@ -146,6 +146,11 @@ _ANALYSIS_PROTOCOL = {
     "test_sealing": (
         "checkpoint 选择与早停只用 val；test 每次评测写访问账本，重复评测"
         "需要显式放行"),
+    "test_look_budget": (
+        "同一 test 数据版本默认只允许一个独立流水线运行（由 run_id 标识）"
+        "产生确认性证据；超过 design.test_look_budget 时，依赖 test 的"
+        "确认性假设降级为探索性；声明多次 look 时按 alpha/planned_looks "
+        "保守校正"),
     "multiplicity": (
         "同一指标家族内 Holm–Bonferroni；预注册确认族再做一次全局 Holm。"
         "先验功效按最坏情形 α/max(家族大小, 全局确认族大小) 规划，"

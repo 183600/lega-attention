@@ -65,6 +65,9 @@ from lega.preflight import (ALLOW_ENV,  # noqa: E402
                             data_cache_schema_issue,
                             data_protocol_preflight,
                             data_report_binding_issue, load_data_report)
+from lega.testreuse import (DEFAULT_TEST_LOOK_BUDGET,  # noqa: E402
+                            apply_test_reuse_gate, repro_test_data_fingerprint,
+                            test_dependent_metrics, test_reuse_report)
 from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
 from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import (PIPELINE_RUN_ID_ENV, data_fingerprint,  # noqa: E402

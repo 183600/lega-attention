@@ -38,7 +38,8 @@
     "alpha": 0.05,
     "power": 0.8,
     "multiplicity": "holm_worst_case",
-    "run_order": "randomized_blocked"
+    "run_order": "randomized_blocked",
+    "test_look_budget": 1
   },
 
   "ruler": {
