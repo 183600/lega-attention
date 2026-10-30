@@ -823,6 +823,33 @@ SESOI 是协议约定，换一个 margin 结论可能改变，所以敏感性网
 补充性/描述性证据处理；若要把某条“等价/非劣”升级为确认性主张，必须先把
 margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的种子/数据上检验。
 
+**先验等价功效（设计阶段，`lega/design/power.py`）**：只在结果出来后算 TOST
+p 值仍然不够，因为“这次没显著”可能从一开始就没有能力判等价。设计计划因此
+为 PPL、RULER 种子级、AUROC、AP 写入 `equivalence_plan`，并生成
+`ppl_equivalence_power` / `ruler_seed_equivalence_power` /
+`auroc_equivalence_power` / `ap_equivalence_power` 四条检查。它们默认只
+`warn`，不阻断正式实验，因为等价/非劣当前仍是补充性证据；但会把“计划种子
+数能支持什么”写死在训练前：
+
+- `tost_power(effect, sd, n, margin)` 对配对差做双单侧检验的功效。小样本用
+  条件 χ² 数值积分（Gauss–Laguerre），n>200 用正态近似；返回
+  `power`、`power_normal` 与 `method`，避免把优效性 `paired_t_power`
+  误当成等价功效。
+- `tost_required_pairs(margin, sd, effect=0)` 给出达到目标功效的最少种子数；
+  真实差异接近或越过 SESOI 时返回 `None`（加种子无法把功效救回来）。
+- `noninferiority_power` / `noninferiority_required_pairs` 单独规划单侧
+  非劣性；它比 TOST 有功效，但**不能替代等价**，报告中必须分开写。
+- 计划表同时列出真实差异为 0、0.5×SESOI 和 SESOI 边界的 TOST 功效。
+  参考 SD=1%、margin=1% 时，5 个种子对“差异=0”的 TOST 功效仅约 0.295
+  （需约 11 个种子才到 80%），非劣性功效约 0.580（需约 8 个）；若真实差异
+  已达 0.5×SESOI，则需约 27 个种子才能有 80% 等价功效。也就是说，
+  **5 种子下 `p>0.05` 既不能写“等价”，通常也不能写“非劣”**；只能写
+  “未检出差异/未定”，并引用 `equivalence_plan` 的所需种子数说明缺口。
+- 这些数字仍依赖声明的配对差 SD 与 margin；换 margin 或 SD 假设会改变
+  结论，所以表按网格给出，不能只挑一行。等价/非劣若要从补充性升级为
+  确认性，仍须先把 margin、对比和种子数登记进预注册锁链，再在新数据上
+  检验；不能在看到结果后静默加种子重算同一个 p 值。
+
 ### 新种子复现预测（均值 CI ≠ 单次复现区间）
 
 跨种子 t 检验与均值置信区间回答的是“当前这组种子的**均值**能否拒绝 0”；
@@ -1040,6 +1067,10 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   配对差 SD 网格、未校正/确认性 MDE、功效、所需种子数与可容忍最大 SD；
 - `endpoints.auroc` / `endpoints.ap`：机制端点的绝对 SESOI、各跨种子
   配对差 SD 下的未校正/确认性 MDE、功效、所需种子数，以及声明 SD；
+- `endpoints.*.equivalence_plan` / `seed_level.equivalence_plan`：等价性
+  （TOST）与非劣性先验功效、真实差异为 0/0.5×SESOI/SESOI 边界时的功效、
+  达到目标功效所需种子数，以及名义 α 仅作补充性证据的声明；对应
+  `*_equivalence_power` 检查默认只 `warn`，不阻断正式实验；
 - `analysis_protocol`：分析人群、排除规则、缺失数据处理、停止规则、
   test 封存、多重比较策略；
 - `test_look_budget`：同一 `test.bin` 版本允许的独立 `pipeline_run_id`

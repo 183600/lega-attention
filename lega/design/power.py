@@ -287,6 +287,243 @@ def max_sd_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
     return float(out) if math.isfinite(out) else None
 
 
+# ------------------------------------------- 配对等价（TOST）/非劣性功效
+def _tost_alpha(alpha: float) -> float:
+    """TOST 需要两个单侧检验，每个用 α；返回单侧临界值用的双侧水平 2α。"""
+    alpha = _open_unit(alpha, "alpha")
+    if alpha >= 0.5:
+        raise ValueError(f"TOST 的 alpha 必须 < 0.5，收到 {alpha!r}")
+    return alpha
+
+
+def _normal_cdf_np(x):
+    """向量化标准正态 CDF（只依赖 math.erfc，避免新增 scipy 依赖）。"""
+    import numpy as np
+    erfc = np.frompyfunc(math.erfc, 1, 1)
+    return 0.5 * erfc(-np.asarray(x, dtype=np.float64)
+                      / math.sqrt(2.0)).astype(np.float64)
+
+
+def _chi2_expectation(func, df: int, n_nodes: int = 96) -> float:
+    """E[func(V)]，V ~ χ²_df，用 Gauss–Laguerre 对 Γ 密度数值积分。
+
+    条件化在样本方差上可以把 TOST 功效写成一维积分；比固定种子仿真更平滑，
+    也让 ``required_pairs`` 的单调搜索不依赖蒙特卡洛噪声。df 很大时调用方
+    会改用正态近似（Γ 密度过窄，固定节点数不再可靠）。
+    """
+    import numpy as np
+    a = df / 2.0 - 1.0
+    nodes, weights = np.polynomial.laguerre.laggauss(n_nodes)
+    # laggauss 积分 ∫_0∞ e^{-x} g(x) dx ≈ Σ w_i g(x_i)；
+    # χ²_df 等价于 2·Gamma(df/2, 1)，故 V=2x，密度权重 x^a/Γ(a+1)。
+    logw = a * np.log(nodes) - math.lgamma(a + 1.0)
+    shift = float(np.max(logw))
+    vals = func(2.0 * nodes) * np.exp(logw - shift)
+    return float(np.sum(weights * vals) * math.exp(shift))
+
+
+def _tost_power_normal(effect: float, sd: float, n: int, margin: float,
+                       alpha: float) -> float:
+    """TOST 功效的正态近似（大 n；也是 required_pairs 的搜索起点）。"""
+    se = sd / math.sqrt(n)
+    z = _normal_two_sided_z(2.0 * alpha)
+    a = (margin - effect) / se - z
+    b = (margin + effect) / se - z
+    return float(min(1.0, max(0.0, _normal_cdf(a) + _normal_cdf(b) - 1.0)))
+
+
+def _tost_power_quadrature(effect: float, sd: float, n: int,
+                           margin: float, alpha: float) -> float:
+    """小样本精确 TOST 功效：条件化在样本方差上对 χ² 积分。"""
+    import numpy as np
+    df = n - 1
+    tcrit = _t_critical(df, 2.0 * alpha)  # 单侧 α 临界值
+    c = math.sqrt(n) / sd
+
+    def conditional(v):
+        scale = np.sqrt(v / df)
+        upper = _normal_cdf_np(c * (margin - effect) - tcrit * scale)
+        lower = _normal_cdf_np(-c * (margin + effect) + tcrit * scale)
+        return np.maximum(0.0, upper - lower)
+
+    return float(min(1.0, max(0.0, _chi2_expectation(conditional, df))))
+
+
+def tost_power(effect, sd, n, margin, alpha: float = DEFAULT_ALPHA,
+               method: str = "auto") -> dict:
+    """配对 TOST（等价性）检验的功效。
+
+    ``effect`` 为真实配对差均值，``sd`` 为配对差标准差，``n`` 为配对数
+    （种子数），``margin`` 为 SESOI。TOST 的“等价”要求两个单侧检验都
+    拒绝，因此功效不是“检出 margin 大小效应”的优效性功效：真实差异为 0
+    时仍可能因样本方差大而无法把区间压进 ±margin。
+
+    ``method="auto"`` 在 n<=200 时用条件 χ² 数值积分（小样本更准确），
+    更大时用正态近似。返回 dict，含 ``power``、``power_normal`` 与方法说明。
+    """
+    effect = _finite_float(effect, "effect")
+    sd = _finite_float(sd, "sd", positive=True)
+    n = _strict_int(n, "n", minimum=2)
+    margin = _finite_float(margin, "margin", positive=True)
+    alpha = _tost_alpha(alpha)
+    if method not in ("auto", "quadrature", "normal"):
+        raise ValueError(
+            f"method 必须是 'auto'/'quadrature'/'normal'，收到 {method!r}")
+    if method == "quadrature" and n > 500:
+        raise ValueError(
+            "quadrature 只验证到 n<=500；更大样本请用 auto/normal，"
+            "固定节点数在窄 χ² 密度上会失真")
+    use = ("quadrature" if n <= 200 else "normal") if method == "auto" \
+        else method
+    normal_pw = _tost_power_normal(effect, sd, n, margin, alpha)
+    if use == "quadrature":
+        pw = _tost_power_quadrature(effect, sd, n, margin, alpha)
+        used = "chi2_quadrature"
+    else:
+        pw = normal_pw
+        used = "normal_approx"
+    return {
+        "power": pw, "power_normal": normal_pw, "method": used,
+        "effect": effect, "sd": sd, "n": n, "margin": margin,
+        "alpha": alpha,
+        "t_critical_one_sided": (_t_critical(n - 1, 2.0 * alpha)
+                                 if n - 1 >= 1 else None),
+        "note": ("TOST 要求两个单侧检验同时显著；真实差异靠近 pivot "
+                 "或样本方差大时，单独报告“不显著”不能推出等价"),
+    }
+
+
+def _required_pairs_from_power(power_fn, sd: float, margin: float,
+                               alpha: float, power: float,
+                               max_n: int, effect: float) -> int:
+    """给定单调功效函数，找达到目标功效的最少配对数。"""
+    if power_fn(2, effect, sd, margin, alpha) >= power:
+        return 2
+    hi = max(2, int(math.ceil(
+        (sd * (_z_sum(2.0 * alpha, power) / margin)) ** 2)))
+    hi = min(hi, max_n)
+    while power_fn(hi, effect, sd, margin, alpha) < power:
+        if hi >= max_n:
+            return None
+        hi = min(max_n, hi * 2)
+    lo = 2
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if power_fn(mid, effect, sd, margin, alpha) >= power:
+            hi = mid
+        else:
+            lo = mid + 1
+    return int(lo)
+
+
+def tost_required_pairs(margin, sd, effect=0.0,
+                        alpha: float = DEFAULT_ALPHA,
+                        power: float = DEFAULT_POWER,
+                        max_n: int = 1_000_000):
+    """达到目标 TOST 功效所需的最少配对数（种子数）；不可达返回 None。
+
+    默认 ``effect=0``（等价性最有利的真实情形）。若真实差异已接近
+    margin，所需样本量会大得多，甚至永远无法达到目标；这正是“不显著
+    不等于等价”的量化版本。
+    """
+    margin = _finite_float(margin, "margin", positive=True)
+    sd = _finite_float(sd, "sd", positive=True)
+    effect = _finite_float(effect, "effect")
+    alpha = _tost_alpha(alpha)
+    power = _open_unit(power, "power")
+    max_n = _strict_int(max_n, "max_n", minimum=2)
+    if abs(effect) >= margin:
+        # 真实差异落在等价带外：TOST 功效随 n 增大趋于 0，不可能达到目标。
+        return None
+
+    def _pw(m, e, s, mar, a):
+        return tost_power(e, s, m, mar, a)["power"]
+
+    return _required_pairs_from_power(_pw, sd, margin, alpha, power,
+                                      max_n, effect)
+
+
+def _noninferiority_power_normal(effect: float, sd: float, n: int,
+                                 margin: float, alpha: float) -> float:
+    se = sd / math.sqrt(n)
+    z = _normal_two_sided_z(2.0 * alpha)
+    return float(min(1.0, max(0.0,
+                              _normal_cdf((margin - effect) / se - z))))
+
+
+def _noninferiority_power_quadrature(effect: float, sd: float, n: int,
+                                     margin: float, alpha: float) -> float:
+    import numpy as np
+    df = n - 1
+    tcrit = _t_critical(df, 2.0 * alpha)
+    c = math.sqrt(n) / sd
+
+    def conditional(v):
+        return _normal_cdf_np(
+            c * (margin - effect) - tcrit * np.sqrt(v / df))
+
+    return float(min(1.0, max(0.0, _chi2_expectation(conditional, df))))
+
+
+def noninferiority_power(effect, sd, n, margin,
+                         alpha: float = DEFAULT_ALPHA,
+                         method: str = "auto") -> dict:
+    """配对非劣性检验（单侧）的功效。
+
+    ``effect`` 用“候选更差”为正的方向；非劣性只要求候选比参照差不超过
+    ``margin``。它与 TOST 是不同检验：非劣性只需一个单侧检验，因此在同样
+    种子数下通常比“等价”更有功效。不要用非劣性功效替等价性背书。
+    """
+    effect = _finite_float(effect, "effect")
+    sd = _finite_float(sd, "sd", positive=True)
+    n = _strict_int(n, "n", minimum=2)
+    margin = _finite_float(margin, "margin", positive=True)
+    alpha = _tost_alpha(alpha)
+    if method not in ("auto", "quadrature", "normal"):
+        raise ValueError(
+            f"method 必须是 'auto'/'quadrature'/'normal'，收到 {method!r}")
+    if method == "quadrature" and n > 500:
+        raise ValueError(
+            "quadrature 只验证到 n<=500；更大样本请用 auto/normal，"
+            "固定节点数在窄 χ² 密度上会失真")
+    use = ("quadrature" if n <= 200 else "normal") if method == "auto" \
+        else method
+    normal_pw = _noninferiority_power_normal(effect, sd, n, margin, alpha)
+    if use == "quadrature":
+        pw = _noninferiority_power_quadrature(effect, sd, n, margin, alpha)
+        used = "chi2_quadrature"
+    else:
+        pw = normal_pw
+        used = "normal_approx"
+    return {
+        "power": pw, "power_normal": normal_pw, "method": used,
+        "effect": effect, "sd": sd, "n": n, "margin": margin,
+        "alpha": alpha,
+        "t_critical_one_sided": _t_critical(n - 1, 2.0 * alpha),
+        "note": ("单侧非劣性只排除“差超过 margin”，不证明差异小于 "
+                 "margin；等价性仍需 TOST"),
+    }
+
+
+def noninferiority_required_pairs(margin, sd, effect=0.0,
+                                  alpha: float = DEFAULT_ALPHA,
+                                  power: float = DEFAULT_POWER,
+                                  max_n: int = 1_000_000):
+    """达到目标非劣性功效所需的最少配对数；不可达返回 None。"""
+    margin = _finite_float(margin, "margin", positive=True)
+    sd = _finite_float(sd, "sd", positive=True)
+    effect = _finite_float(effect, "effect")
+    alpha = _tost_alpha(alpha)
+    power = _open_unit(power, "power")
+    max_n = _strict_int(max_n, "max_n", minimum=2)
+
+    def _pw(m, e, s, mar, a):
+        return noninferiority_power(e, s, m, mar, a)["power"]
+
+    return _required_pairs_from_power(_pw, sd, margin, alpha, power,
+                                      max_n, effect)
+
+
 # ------------------------------------------------- 配对二值指标的功效（McNemar）
 def _paired_binary_rates(discordance, effect):
     """把 (总体不一致率 π, 边际差 Δ) 换成 p10/p01。

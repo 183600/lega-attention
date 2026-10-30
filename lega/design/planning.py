@@ -86,6 +86,132 @@ def _fill_confirmatory_rows(rows, alpha_effective: float, n_seeds: int,
                 margin, sd, alpha_effective, power)
 
 
+def _equivalence_plan(margin, sds, n_seeds, alpha, target_power, *,
+                      reference_sd, declared_sd, sd_key, scale_label):
+    """等价性（TOST）与非劣性检验的先验功效规划。
+
+    优效性功效回答“能否检出与 SESOI 一样大的差异”；等价性/非劣性回答
+    “能否把差异限制在 SESOI 内”，两者不是同一个检验。这里对每个计划
+    SD 给出真实差异为 0、0.5×SESOI 与恰好 SESOI 时的 TOST 功效，以及
+    达到目标功效所需种子数；非劣性另按单侧检验规划。等价性当前是补充性
+    证据，故使用名义 alpha，并明确标注不可据此升级为确认性主张。
+    """
+    margin = _finite_float(margin, "equivalence margin", positive=True)
+    alpha = _open_unit(alpha, "alpha")
+    target_power = _open_unit(target_power, "power")
+    n_seeds = _strict_int(n_seeds, "n_seeds", minimum=1)
+    can_power = n_seeds >= 2
+    grid_sds = [_finite_float(sd, "equivalence sd", positive=True)
+                for sd in sds]
+    for label, extra in (("reference_sd", reference_sd),
+                         ("declared_sd", declared_sd)):
+        if extra is not None:
+            grid_sds.append(_finite_float(extra, f"equivalence {label}",
+                                          positive=True))
+    rows = []
+    for sd in sorted(set(grid_sds)):
+        row = {sd_key: sd}
+        if can_power:
+            row.update({
+                "power_at_null": tost_power(
+                    0.0, sd, n_seeds, margin, alpha)["power"],
+                "power_at_half_sesoi": tost_power(
+                    margin / 2.0, sd, n_seeds, margin, alpha)["power"],
+                "power_at_sesoi_boundary": tost_power(
+                    margin, sd, n_seeds, margin, alpha)["power"],
+                "required_seeds_at_null": tost_required_pairs(
+                    margin, sd, 0.0, alpha, target_power),
+                "required_seeds_at_half_sesoi": tost_required_pairs(
+                    margin, sd, margin / 2.0, alpha, target_power),
+                "noninferiority_power_at_null": noninferiority_power(
+                    0.0, sd, n_seeds, margin, alpha)["power"],
+                "noninferiority_required_seeds_at_null":
+                    noninferiority_required_pairs(
+                        margin, sd, 0.0, alpha, target_power),
+            })
+        else:
+            row.update({
+                "power_at_null": None, "power_at_half_sesoi": None,
+                "power_at_sesoi_boundary": None,
+                "required_seeds_at_null": None,
+                "required_seeds_at_half_sesoi": None,
+                "noninferiority_power_at_null": None,
+                "noninferiority_required_seeds_at_null": None,
+            })
+        rows.append(row)
+
+    def _at(sd):
+        if sd is None or not can_power:
+            return None
+        return next((r for r in rows
+                     if abs(r[sd_key] - float(sd)) < 1e-15), None)
+
+    return {
+        "margin": margin,
+        "margin_scale": scale_label,
+        "alpha": alpha,
+        "alpha_scope": "nominal_descriptive",
+        "target_power": target_power,
+        "planned_seeds": n_seeds,
+        "sd_key": sd_key,
+        "reference_sd": reference_sd,
+        "declared_sd": declared_sd,
+        "at_reference_sd": _at(reference_sd),
+        "at_declared_sd": _at(declared_sd),
+        "sensitivity": rows,
+        "note": (
+            "TOST 功效是“两个单侧检验都拒绝”的概率，不是检出 SESOI 的"
+            "优效性功效；真实差异接近 SESOI 或样本方差大时，所需种子数"
+            "远高于优效性规划。非劣性只排除“更差超过 SESOI”，不等于"
+            "等价。等价/非劣性当前未写入预注册锁链，只能作补充性证据；"
+            "若要在新数据上升级为确认性主张，须先登记 margin 与对比。"),
+    }
+
+
+def _equivalence_check(check_id, title, plan, *, target_power):
+    """把等价/非劣性先验功效写成可读检查（只警告，不阻断正式实验）。"""
+    plan = _as_dict(plan)
+    ref = _as_dict(plan.get("at_reference_sd"))
+    declared = _as_dict(plan.get("at_declared_sd"))
+    basis = declared or ref
+    if not basis:
+        return _check(
+            check_id, title, "info",
+            "种子数不足 2 或未提供参考 SD：无法计算 TOST/非劣性先验功效；"
+            "仍保留灵敏度表供正式规划")
+    basis_label = "声明" if declared else "参考"
+    p_eq = basis.get("power_at_null")
+    p_ni = basis.get("noninferiority_power_at_null")
+    need_eq = basis.get("required_seeds_at_null")
+    need_ni = basis.get("noninferiority_required_seeds_at_null")
+    ok_eq = isinstance(p_eq, float) and p_eq >= target_power
+    ok_ni = isinstance(p_ni, float) and p_ni >= target_power
+    status = "pass" if ok_eq and ok_ni else "warn"
+    sd_key = plan.get("sd_key")
+    detail = (
+        f"{basis_label} SD={_fmt(basis.get(sd_key), 4)}；计划 "
+        f"{plan.get('planned_seeds')} 个种子。真实差异=0 时，等价性(TOST)"
+        "功效≈" + (f"{p_eq:.3f}" if isinstance(p_eq, float) else "-")
+        + (f"（需约 {need_eq} 个种子" if need_eq is not None else "（所需种子")
+        + (f"达到 {target_power:.0%}）" if need_eq is not None else "不可达）")
+        + "；非劣性功效≈"
+        + (f"{p_ni:.3f}" if isinstance(p_ni, float) else "-")
+        + (f"（需约 {need_ni} 个种子）" if need_ni is not None else "")
+        + "。"
+        + ("" if ok_eq else
+           "当前设计不足以支持等价结论，p>0.05 不得写成“无差异/等价”；")
+        + ("" if ok_ni else
+           "非劣性功效也不足，不能写“未明显更差”；")
+        + "增加种子后若要重做检验，须按序贯/预注册规则处理，不能看到"
+          "结果后静默加种子再报同一个 p 值。")
+    if declared and ref:
+        detail += (
+            "（参考 SD 对应的 TOST 功效≈"
+            + _fmt(ref.get("power_at_null"), 3) + "，仅作灵敏度参考；"
+            "若声明 SD 与真实噪声不符，实际功效仍会下降）")
+    return _check(check_id, title, status, detail)
+
+
 _DESIGN_ROOT = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
@@ -771,6 +897,14 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "可靠检出远大于 1% 的 PPL 差异；1% SESOI 结论应标为"
             "描述性/探索性"))
 
+    ppl_equivalence = _equivalence_plan(
+        ppl_margin, ppl_grid, n_seeds, alpha, power,
+        reference_sd=ref_sd, declared_sd=declared_ppl_sd,
+        sd_key="paired_sd_relative", scale_label="relative")
+    checks.append(_equivalence_check(
+        "ppl_equivalence_power", "PPL 等价/非劣性先验功效",
+        ppl_equivalence, target_power=power))
+
     # ---- 机制端点（H6/H7）的设计灵敏度：跨种子配对差的绝对尺度。
     # 只规划 PPL/RULER 会漏掉“机制主张是否值得跑”：AUROC/AP 的种子级
     # 配对差同样需要先验 MDE，否则 5 个种子只能在事后发现功效不足。
@@ -823,6 +957,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "配置未声明 analysis.n_examples：无法核对机制端点的单 run "
             "测量精度；默认值由机制分析代码决定"))
 
+    ref_sd_mech = DEFAULT_MECHANISM_SD_REF
     mechanism_endpoints = {}
     for key, metric_name, grid_key, declared_key, endpoint_alpha in (
             ("auroc", "AUROC差(logit−仅查询)", "auroc_paired_sd_grid",
@@ -836,6 +971,13 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                                 ep["sesoi_absolute"], power)
         ep["multiplicity"] = dict(
             auroc_multiplicity if key == "auroc" else ap_multiplicity)
+        ep["equivalence_plan"] = _equivalence_plan(
+            ep["sesoi_absolute"],
+            [row["paired_sd_absolute"] for row in ep["sensitivity"]],
+            n_seeds, alpha, power,
+            reference_sd=ref_sd_mech,
+            declared_sd=ep.get("declared_paired_sd"),
+            sd_key="paired_sd_absolute", scale_label="absolute")
         mechanism_endpoints[key] = ep
         declared = ep.get("declared_paired_sd")
         title = "AUROC" if key == "auroc" else "AP"
@@ -859,8 +1001,10 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                 f"{key}_declared_power", f"{title} 确认性计划功效", "info",
                 f"配置未声明 design.{declared_key}：只报告灵敏度曲线，"
                 "不把任一 SD 假设当作已知"))
+        checks.append(_equivalence_check(
+            f"{key}_equivalence_power", f"{title} 等价/非劣性先验功效",
+            ep["equivalence_plan"], target_power=power))
 
-    ref_sd_mech = DEFAULT_MECHANISM_SD_REF
     ref_details = []
     weak_mech = []
     for key, title in (("auroc", "AUROC"), ("ap", "AP")):
@@ -1382,6 +1526,14 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "个种子）。当前设计对 RULER 的 1pp 种子级效应只能作"
             "描述性/探索性证据"))
 
+    ruler_equivalence = _equivalence_plan(
+        ruler_margin, ruler_sd_grid, n_seeds, alpha, power,
+        reference_sd=ref_ruler_sd, declared_sd=declared_ruler_sd,
+        sd_key="paired_sd_pp", scale_label="absolute_pp")
+    checks.append(_equivalence_check(
+        "ruler_seed_equivalence_power", "RULER 种子级等价/非劣性先验功效",
+        ruler_equivalence, target_power=power))
+
     # ---- 分析人群/排除规则必须在开跑前声明（不是事后补的叙述）
     checks.append(_check(
         "analysis_protocol", "分析人群与排除规则", "pass",
@@ -1404,6 +1556,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "max_paired_sd_for_sesoi_confirmatory": ppl_break_even_confirm,
         "multiplicity": dict(ppl_multiplicity),
         "sensitivity": ppl_rows,
+        "equivalence_plan": ppl_equivalence,
     }
     endpoint_ruler = {
         "metric": "RULER平均", "sesoi_pp": ruler_margin,
@@ -1438,6 +1591,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                 ruler_seed_break_even_confirm,
             "multiplicity": dict(ruler_multiplicity),
             "sensitivity": ruler_seed_rows,
+            "equivalence_plan": ruler_equivalence,
             "measurement_note": (
                 "SD 为换训练种子时 macro RULER EM 配对差的标准差（绝对 "
                 "EM 尺度）；单 run 内有限样例的评测误差由逐格 McNemar/"

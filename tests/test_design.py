@@ -22,10 +22,13 @@ from lega.design import (_fmt, analysis_population, apply_design_gate,
                          mcnemar_required_samples,
                          max_discordance_for_effect, max_sd_for_effect,
                          min_detectable_effect, multiplicity_alpha,
+                         noninferiority_power,
+                         noninferiority_required_pairs,
                          observed_design_sensitivity, paired_t_power,
                          planned_comparison_pairs, planned_family_sizes,
                          plan_digest, render_design_section,
                          required_pairs, save_design_plan,
+                         tost_power, tost_required_pairs,
                          validate_run_order)
 
 
@@ -1305,3 +1308,99 @@ def test_render_design_section_includes_run_order_and_mechanism():
     assert "机制端点先验灵敏度" in md
     assert "AUROC" in md and "AP" in md
     print("  [ok] 汇总页：run 顺序、RULER 双推断单位与机制端点灵敏度")
+
+
+def test_tost_and_noninferiority_design_power():
+    """等价性必须按 TOST 规划，不能用“不显著”或优效性功效替代。"""
+    for n in (3, 5, 8, 11):
+        assert 0.0 <= tost_power(0.0, 0.01, n, 0.01)["power"] <= 1.0
+    p5 = tost_power(0.0, 0.01, 5, 0.01)
+    assert p5["method"] == "chi2_quadrature"
+    assert 0.25 < p5["power"] < 0.35
+    assert p5["power"] < 0.8
+
+    assert tost_power(0.0, 0.01, 10, 0.01)["power"] < tost_power(
+        0.0, 0.01, 11, 0.01)["power"]
+    assert tost_power(0.0, 0.01, 11, 0.01)["power"] >= 0.8
+    assert tost_required_pairs(0.01, 0.01) == 11
+    assert tost_power(0.0, 0.01, 11, 0.01)["power"] >= 0.8
+    assert tost_power(0.0, 0.01, 10, 0.01)["power"] < 0.8
+
+    # 真实差异接近/越过 SESOI 时，TOST 功效不可能靠加种子救回来。
+    assert tost_power(0.01, 0.01, 5, 0.01)["power"] < 0.1
+    assert tost_required_pairs(0.01, 0.01, effect=0.01) is None
+    assert tost_required_pairs(0.01, 0.01, effect=0.02) is None
+    half = tost_required_pairs(0.01, 0.01, effect=0.005)
+    assert half is not None and half > 11
+
+    ni5 = noninferiority_power(0.0, 0.01, 5, 0.01)
+    assert ni5["power"] > p5["power"]
+    assert noninferiority_required_pairs(0.01, 0.01) == 8
+    assert noninferiority_power(0.0, 0.01, 8, 0.01)["power"] >= 0.8
+    # 方向约定：effect>0 表示候选更差，非劣性功效应下降；
+    # 候选更好（effect<0）时应更容易判非劣。
+    assert noninferiority_power(0.005, 0.01, 5, 0.01)["power"] < ni5[
+        "power"]
+    assert noninferiority_power(-0.01, 0.01, 5, 0.01)["power"] > 0.9
+    assert noninferiority_required_pairs(
+        0.01, 0.01, effect=0.01) is None
+
+    # 大 n 用正态近似，且显式 method 可复现。
+    big = tost_power(0.0, 0.01, 1000, 0.01)
+    assert big["method"] == "normal_approx"
+    assert big["power"] == big["power_normal"]
+    forced = tost_power(0.0, 0.01, 5, 0.01, method="normal")
+    assert forced["method"] == "normal_approx"
+
+    for bad in ({"alpha": 0.5}, {"n": 1}, {"margin": 0},
+                {"effect": float("nan")}, {"sd": float("inf")}):
+        kw = dict(effect=0.0, sd=0.01, n=5, margin=0.01)
+        kw.update(bad)
+        try:
+            tost_power(**kw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"tost_power 应拒绝 {bad!r}")
+    print("  [ok] TOST/非劣性先验功效、所需种子与非法输入")
+
+
+def test_design_plan_equivalence_power_checks_and_render():
+    """计划必须为四个端点写入等价/非劣性规划，并只警告、不误判 fail。"""
+    plan = _plan()
+    ppl_eq = plan["endpoints"]["ppl"]["equivalence_plan"]
+    ruler_eq = plan["endpoints"]["ruler"]["seed_level"]["equivalence_plan"]
+    auroc_eq = plan["endpoints"]["auroc"]["equivalence_plan"]
+    ap_eq = plan["endpoints"]["ap"]["equivalence_plan"]
+    for eq, key in ((ppl_eq, "paired_sd_relative"),
+                    (ruler_eq, "paired_sd_pp"),
+                    (auroc_eq, "paired_sd_absolute"),
+                    (ap_eq, "paired_sd_absolute")):
+        assert eq["margin"] > 0
+        assert eq["planned_seeds"] == 5
+        assert eq["sd_key"] == key
+        assert eq["sensitivity"]
+        assert eq["at_reference_sd"]["power_at_null"] is not None
+
+    assert ppl_eq["at_reference_sd"]["required_seeds_at_null"] == 11
+    assert ppl_eq["at_reference_sd"]["power_at_null"] < 0.8
+    assert ppl_eq["at_reference_sd"][
+        "noninferiority_power_at_null"] < 0.8
+    assert ppl_eq["alpha_scope"] == "nominal_descriptive"
+    assert "不显著" in ppl_eq["note"] or "补充性" in ppl_eq["note"]
+
+    checks = {c["id"]: c for c in plan["checks"]}
+    for cid in ("ppl_equivalence_power", "ruler_seed_equivalence_power",
+                "auroc_equivalence_power", "ap_equivalence_power"):
+        assert checks[cid]["status"] == "warn", checks[cid]
+        assert "功效" in checks[cid]["detail"]
+    assert not any(c["status"] == "fail" for c in plan["checks"]
+                   if "equivalence" in c["id"])
+
+    md = "\n".join(render_design_section(plan))
+    assert "PPL 等价/非劣性先验功效" in md
+    assert "RULER 种子级等价/非劣性先验功效" in md
+    assert "AUROC 等价/非劣性先验功效" in md
+    assert "AP 等价/非劣性先验功效" in md
+    assert "TOST" in md and "非劣性" in md
+    print("  [ok] 设计计划：等价/非劣性规划、警告检查与汇总渲染")

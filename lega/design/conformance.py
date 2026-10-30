@@ -677,6 +677,57 @@ def _fmt(x, nd=4, pct=False, signed=False):
     return f"{f:+.{nd}f}" if signed else f"{f:.{nd}f}"
 
 
+def _render_equivalence(md: list, title: str, eq) -> None:
+    """渲染 TOST/非劣性先验功效表；只陈述设计能力，不替代正式检验。"""
+    eq = _as_dict(eq)
+    if not eq:
+        return
+    scale = eq.get("margin_scale")
+    pct = scale in ("relative", "absolute_pp")
+    margin_txt = _fmt(eq.get("margin"), 2, pct=True) if pct else _fmt(
+        eq.get("margin"), 4)
+    md += ["", f"**{title}**（等价边界 SESOI={margin_txt}；"
+               f"名义 α={_fmt(eq.get('alpha'), 3)}，"
+               "仅作补充性规划；"
+               f"计划 {eq.get('planned_seeds')} 个种子）", "",
+           "| 配对差SD | TOST功效 差异=0 | TOST功效 差异=½SESOI | "
+           "TOST所需种子 差异=0 | 非劣性功效 差异=0 | "
+           "非劣性所需种子 差异=0 |",
+           "|---|---|---|---|---|---|"]
+    for row in _as_list(eq.get("sensitivity")):
+        if not isinstance(row, dict):
+            continue
+        sd = row.get(eq.get("sd_key"))
+        md.append("| " + " | ".join([
+            _fmt(sd, 3, pct=True) if pct else _fmt(sd, 4),
+            _fmt(row.get("power_at_null"), 3),
+            _fmt(row.get("power_at_half_sesoi"), 3),
+            _fmt(row.get("required_seeds_at_null"), 0),
+            _fmt(row.get("noninferiority_power_at_null"), 3),
+            _fmt(row.get("noninferiority_required_seeds_at_null"), 0),
+        ]) + " |")
+    ref = _as_dict(eq.get("at_reference_sd"))
+    declared = _as_dict(eq.get("at_declared_sd"))
+    parts = []
+    if ref:
+        parts.append(
+            "参考 SD 下 TOST 功效≈" + _fmt(ref.get("power_at_null"), 3)
+            + "（所需种子 " + _fmt(ref.get("required_seeds_at_null"), 0)
+            + "）、非劣性功效≈"
+            + _fmt(ref.get("noninferiority_power_at_null"), 3))
+    if declared:
+        parts.append(
+            "声明 SD 下 TOST 功效≈" + _fmt(declared.get("power_at_null"), 3))
+    if parts:
+        md += ["", "；".join(parts) + "。"]
+    md.append(
+        "注：TOST 回答“能否把差异限制在 ±SESOI 内”，统计不显著本身"
+        "不能证明等价；非劣性只排除“更差超过 SESOI”，也不能替代等价。"
+        "真实差异越接近边界、配对差 SD 越大，所需种子越多；若计划种子数"
+        "低于表中所需，结论只能写“未检出差异/探索性”，不能写“无差异、"
+        "等价或非劣”。")
+
+
 def render_design_section(plan: dict, conformance: dict = None,
                           observed: list = None) -> list:
     """把先验计划/设计符合性/实测灵敏度渲染成 summary.md 小节。"""
@@ -799,6 +850,8 @@ def render_design_section(plan: dict, conformance: dict = None,
                 _fmt(row.get("required_seeds_for_sesoi"), 0),
                 _fmt(row.get("required_seeds_for_sesoi_confirmatory"), 0),
             ]) + " |")
+        _render_equivalence(md, "PPL 等价/非劣性先验功效",
+                            ppl.get("equivalence_plan"))
 
     ruler = _as_dict(_as_dict(plan.get("endpoints")).get("ruler"))
     if ruler:
@@ -873,6 +926,9 @@ def render_design_section(plan: dict, conformance: dict = None,
                 "注：本表的 SD 是换训练种子时 macro RULER EM 配对差的标准差"
                 "（绝对 EM 尺度），与上一张逐格 McNemar 表回答不同问题；"
                 "增加每格样例数不会降低种子级方差，反之亦然。")
+            _render_equivalence(
+                md, "RULER 种子级等价/非劣性先验功效",
+                seed.get("equivalence_plan"))
 
     endpoints_doc = _as_dict(plan.get("endpoints"))
     mech_rows = []
@@ -906,6 +962,10 @@ def render_design_section(plan: dict, conformance: dict = None,
             "注：本表的 SD 是换训练种子时配对差的标准差，不包含单次评测"
             "有限样例的抽样误差；后者回答“换题面/样例波动多少”，"
             "两者不能互相替代。")
+        for _key, title, ep in mech_rows:
+            _render_equivalence(
+                md, f"{title} 等价/非劣性先验功效",
+                ep.get("equivalence_plan"))
 
     # ---- 设计符合性/分析人群
     md += ["", "**设计符合性与分析人群**", ""]
