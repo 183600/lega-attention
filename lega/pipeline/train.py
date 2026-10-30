@@ -187,6 +187,10 @@ def main():
                    help="独立 PPL 评测使用全部不重叠窗口（默认只评训练配置的 "
                         "eval_iters 个抽样窗口）；选择 checkpoint 仍只用 val，"
                         "正式 PPL 结论建议开启。")
+    p.add_argument("--window_offsets", default=None, metavar="N",
+                   help="额外评测 N 个均匀窗口相位起点，落盘窗口边界敏感性"
+                        "（window_offset_sensitivity）；仅作描述性诊断，不改变"
+                        "主 PPL 口径。默认关闭。")
     p.add_argument("--skip_sanity", action="store_true",
                    help="跳过过拟合小批量 sanity check（默认每变体训练前必跑，"
                         "失败即中止全量训练）")
@@ -251,6 +255,14 @@ def main():
                    help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
                         "min(4, 核数)（<=4 核时为核数+1），CUDA 或 --wandb 下为 1")
     args = p.parse_args()
+    if args.window_offsets is not None:
+        try:
+            args.window_offsets = strict_int(
+                args.window_offsets, "--window_offsets")
+        except (TypeError, ValueError) as e:
+            p.error(str(e))
+        if args.window_offsets < 2:
+            p.error("--window_offsets 至少为 2（默认关闭）")
     if args.allow_data_protocol_violations:
         # 训练/调优/sanity 子进程继承该环境变量；否则 run_all 放行了、
         # lega.train 仍会按默认策略拒绝同一份数据。
@@ -549,6 +561,7 @@ def main():
         },
         "evaluation": {
             "full_eval": bool(args.full_eval),
+            "window_offsets": args.window_offsets,
             "scope": "independent_eval_only",
             "requirement": ("正式 PPL 结论应使用全量不重叠窗口；"
                             "checkpoint 选择仍只用 val"),
@@ -704,6 +717,8 @@ def main():
             cmd += ["--skip_train"]
         if args.full_eval:
             cmd += ["--full_eval"]
+        if args.window_offsets is not None:
+            cmd += ["--window_offsets", str(args.window_offsets)]
         if args.wandb:
             cmd += ["--wandb"]
         if sanity:

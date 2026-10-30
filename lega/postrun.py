@@ -57,6 +57,8 @@ def _eval_argv(a, ckpt: str) -> List[str]:
             "--worst_n", str(a.worst_n), "--device", a.device]
     if a.full_eval:
         argv += ["--full_eval"]
+    if getattr(a, "window_offsets", None) is not None:
+        argv += ["--window_offsets", str(a.window_offsets)]
     if a.worst_on_test:
         argv += ["--worst_on_test"]
     if a.allow_repeat_test:
@@ -148,6 +150,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--full_eval", action="store_true",
                    help="独立 PPL 评测使用全部不重叠窗口（默认继承训练配置的 "
                         "eval_iters 抽样窗口）")
+    p.add_argument("--window_offsets", default=None, metavar="N",
+                   help="透传 evaluate 的窗口相位敏感性诊断（N 个均匀起点）；"
+                        "默认关闭，不影响主 PPL 口径")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--early_stop_patience", type=int, default=None)

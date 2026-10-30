@@ -200,3 +200,17 @@ def test_full_eval_flag_is_forwarded_to_evaluate():
     # 缺省仍沿用配置里的抽样窗口，避免无意中改变既有口径。
     assert "--full_eval" not in _eval_argv(_ns(), "ckpt")
     print("  [ok] --full_eval 仅在显式开启时透传 evaluate")
+
+
+def test_window_offsets_forwarded_to_evaluate_only_when_requested():
+    """相位敏感性是显式可选诊断，不能被流水线静默丢弃或默认开启。"""
+    assert "--window_offsets" not in _eval_argv(_ns(), "ckpt")
+    a = _parser().parse_args([
+        "--config", "configs/tiny.json", "--variant", "lega",
+        "--seed", "1337", "--data_dir", "data/dummy",
+        "--out_dir", "out/tiny_smoke/lega",
+        "--results_dir", "results/tiny_smoke", "--window_offsets", "4",
+    ])
+    argv = _eval_argv(a, "out/tiny_smoke/lega/model_best.pt")
+    assert argv[argv.index("--window_offsets") + 1] == "4"
+    print("  [ok] --window_offsets 仅在显式开启时透传 evaluate")

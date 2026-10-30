@@ -6,9 +6,11 @@ import numpy as np
 import torch
 
 from lega.attention import CausalSelfAttention, VARIANTS
-from lega.data import _stage_to_device, get_train_batch, get_val_windows
+from lega.data import (_stage_to_device, get_train_batch, get_val_windows,
+                       get_val_windows_at)
 from lega.model import GPT, load_model, save_checkpoint
-from lega.train import _val_eval_indices, evaluate_val
+from lega.train import (_val_eval_indices, _val_eval_window_starts,
+                        evaluate_val)
 
 
 def _tiny(variant):
@@ -420,6 +422,44 @@ def test_val_eval_indices_cover_dataset_without_repeats():
     assert idx.tolist() == [49]            # 单窗估计取中间窗口，避免偏前
 
 
+def test_val_eval_window_starts_phase_shift_matches_indices_at_zero():
+    """相位平移只改窗口边界：offset=0 必须与历史窗口序号逐例一致。"""
+    idx, n_windows = _val_eval_indices(1001, 10, 3)
+    starts, n = _val_eval_window_starts(1001, 10, 3, offset=0)
+    assert n == n_windows == 100
+    assert starts.tolist() == (idx * 10).tolist()
+
+    starts, n = _val_eval_window_starts(1001, 10, 3, offset=5)
+    assert n == 99
+    assert starts.tolist() == [5, 495, 985]
+    assert int(starts[-1]) + 10 <= 1001 - 1
+    # 相位用满 ctx 个 token；offset 必须是 [0, ctx) 内的严格整数
+    for bad in (-1, 10, True, 1.5, "1_0"):
+        try:
+            _val_eval_window_starts(1001, 10, 3, offset=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法 offset 未被拒绝: {bad!r}")
+    print("  [ok] _val_eval_window_starts：相位平移与历史窗口逐例对齐")
+
+
+def test_get_val_windows_at_rejects_unaligned_out_of_range_starts():
+    """显式 token 起点不能靠取模静默换一段验证文本。"""
+    val = np.arange(100, dtype=np.int64).astype(np.uint16)
+    x, y = get_val_windows_at(val, 10, [1, 11], "cpu")
+    assert x[0].tolist() == val[1:11].tolist()
+    assert y[0].tolist() == val[2:12].tolist()
+    for bad in ([-1], [90], [True], [1.5], ["1_0"]):
+        try:
+            get_val_windows_at(val, 10, bad, "cpu")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法窗口起点未被拒绝: {bad!r}")
+    print("  [ok] get_val_windows_at：越界/非整数起点显式拒绝")
+
+
 def test_evaluate_val_returns_coverage_and_gate_metrics():
     """val_loss 与 gate_mean 应来自同一组窗口，并记录实际覆盖范围。"""
     torch.manual_seed(0)
@@ -661,6 +701,19 @@ def test_evaluate_val_optional_window_loss_detail_for_pairing():
     assert abs(sum(metrics["window_losses"]) / 9 - metrics["val_loss"]) < 1e-6
     plain = evaluate_val(model, val, ctx=10, device="cpu", iters=9, amp=False)
     assert "window_losses" not in plain and "window_indices" not in plain
+
+    shifted = evaluate_val(model, val, ctx=10, device="cpu", iters=9,
+                           amp=False, collect_window_losses=True,
+                           window_offset=3)
+    assert shifted["eval_window_offset"] == 3
+    assert shifted["eval_iters"] == 9
+    assert len(shifted["window_losses"]) == 9
+    assert "window_indices" not in shifted
+    starts = shifted["window_starts"]
+    assert len(starts) == 9 and len(set(starts)) == 9
+    assert all(s % 10 == 3 for s in starts)
+    assert abs(sum(shifted["window_losses"]) / 9
+               - shifted["val_loss"]) < 1e-6
     print("  [ok] evaluate_val 逐窗口明细可选落盘，且均值与 val_loss 一致")
 
 

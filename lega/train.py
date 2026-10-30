@@ -22,7 +22,8 @@ import torch
 from .attention import RUNNABLE_VARIANTS, VARIANT_CN
 from .curves import (GATE_SAT_HIGH, GATE_SAT_LOW, LIVE_WARN_EVALS,
                      curve_observability_warnings, live_overfit_hint)
-from .data import load_bin, load_meta, get_train_batch, get_val_batch, get_val_windows
+from .data import (load_bin, load_meta, get_train_batch, get_val_batch,
+                   get_val_windows, get_val_windows_at)
 from .datacheck import check_vocab_capacity
 from .model import (GPT, configure_optimizer, count_params,
                     gate_extra_params, gate_extra_params_per_head,
@@ -598,6 +599,42 @@ def _val_eval_indices(val_len: int, ctx: int, iters: int):
     return indices, n_windows
 
 
+def _val_eval_window_starts(val_len: int, ctx: int, iters: int,
+                            offset: int = 0):
+    """相位平移后的验证窗口起始 token 下标（用于窗口边界敏感性诊断）。
+
+    与 ``_val_eval_indices`` 用同一套“等间隔、含首尾、不循环”抽样规则，
+    但允许把整张窗口网格平移 ``offset`` 个 token（0 <= offset < ctx）。
+    返回 ``(starts, n_windows)``，starts 是 token 下标而非窗口序号；只有
+    offset=0 时 starts 才是 ctx 的整数倍。不同 offset 的窗口相互重叠，
+    因此这些评测不是独立样本，只回答“结论是否依赖窗口边界相位”。
+    """
+    iters = strict_int(iters, "eval_iters")
+    if iters < 1:
+        raise ValueError(f"eval_iters 必须 >= 1，收到 {iters}")
+    val_len = strict_int(val_len, "val_len")
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx}")
+    offset = strict_int(offset, "offset")
+    if offset < 0:
+        raise ValueError(f"offset 必须 >= 0，收到 {offset}")
+    if offset >= ctx:
+        raise ValueError(f"offset 必须 < ctx（{ctx}），收到 {offset}")
+    n_windows = (val_len - 1 - offset) // ctx
+    if n_windows <= 0:
+        raise ValueError(
+            f"验证集只有 {val_len} tokens（offset={offset}），"
+            f"不足以组成 ctx={ctx} 的窗口")
+    n_eval = min(iters, n_windows)
+    if n_eval == 1:
+        windows = np.array([(n_windows - 1) // 2], dtype=np.int64)
+    else:
+        windows = (np.arange(n_eval, dtype=np.int64)
+                   * (n_windows - 1) // (n_eval - 1))
+    return offset + windows * ctx, n_windows
+
+
 def val_audit_batch(val, ctx: int, iters: int, device: str, fallback=None):
     """val_loss 非有限时，取一个真实验证窗口批次作为数据/激活排查的输入。
 
@@ -617,7 +654,7 @@ def val_audit_batch(val, ctx: int, iters: int, device: str, fallback=None):
 
 
 def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int = None,
-                 collect_window_losses: bool = False):
+                 collect_window_losses: bool = False, window_offset: int = 0):
     """在不重复、覆盖全验证集的窗口上同时计算 val_loss 与门控均值。
 
     多个窗口拼成一个批量做前向：每个窗口长度相同，token 加权后的均值
@@ -627,15 +664,21 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     评测入口使用）：供下游按同一批窗口做配对分析，量化“有限窗口抽样”
     对变体差异的影响。训练内评测不需要，避免把几十个浮点写进每次
     train_log。
+
+    window_offset>0 时把窗口网格相位平移若干 token，仅用于诊断“窗口边界
+    落在哪里”是否影响 PPL；此时逐窗口明细记为 ``window_starts`` 而非
+    ``window_indices``（后者只对 offset=0 的全局窗口序号有定义）。不同
+    offset 的窗口相互重叠、不是独立样本。默认 0 保持历史协议不变。
     """
     was_training = model.training
     model.eval()
     try:
         collect_gate = (model.variant not in ("standard",)
                         and not getattr(model.blocks[0].attn, "is_null", False))
-        indices, n_windows = _val_eval_indices(len(val), ctx, iters)
+        starts, n_windows = _val_eval_window_starts(
+            len(val), ctx, iters, offset=window_offset)
         if batch_windows is None:
-            batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
+            batch_windows = max(1, min(16384 // max(1, ctx), len(starts)))
         else:
             batch_windows = strict_int(batch_windows, "batch_windows")
             if batch_windows <= 0:
@@ -665,15 +708,16 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
             # 预取流水线：在当前批前向之前发起下一窗口批的 memmap 收集与 H2D
             # 提交；_stage_to_device 的乒乓暂存（双槽 + event 保护）保证两批
             # 在途互不干扰。
-            n_batches = (len(indices) + batch_windows - 1) // batch_windows
-            xy = get_val_windows(val, ctx, indices[:batch_windows], device)
-            for bi, s in enumerate(range(0, len(indices), batch_windows)):
-                chunk = indices[s:s + batch_windows]
+            n_batches = (len(starts) + batch_windows - 1) // batch_windows
+            xy = get_val_windows_at(val, ctx, starts[:batch_windows], device)
+            for bi, s in enumerate(range(0, len(starts), batch_windows)):
+                chunk = starts[s:s + batch_windows]
                 x, y = xy
                 if bi + 1 < n_batches:
-                    xy = get_val_windows(val, ctx,
-                                         indices[s + batch_windows:s + 2 * batch_windows],
-                                         device)
+                    xy = get_val_windows_at(
+                        val, ctx,
+                        starts[s + batch_windows:s + 2 * batch_windows],
+                        device)
                 with amp_ctx:
                     # 验证评测只消费门控均值 g，使用轻量统计；额外取每窗口损失
                     # 用于估计“有限个验证窗口”带来的抽样误差。
@@ -763,13 +807,17 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
             "gate_frac_high": gate_frac_high,
             "gate_layer_mean": gate_layer_mean,
             "eval_iters_requested": int(iters),
-            "eval_iters": int(len(indices)),
+            "eval_iters": int(len(starts)),
             "val_windows": int(n_windows),
-            "val_tokens_evaluated": int(len(indices) * ctx),
+            "val_tokens_evaluated": int(len(starts) * ctx),
+            "eval_window_offset": int(window_offset),
         }
         if collect_window_losses:
             out["window_losses"] = [float(v) for v in window_losses]
-            out["window_indices"] = [int(i) for i in indices]
+            if window_offset == 0:
+                out["window_indices"] = [int(i // ctx) for i in starts]
+            else:
+                out["window_starts"] = [int(i) for i in starts]
         return out
     finally:
         model.train(was_training)

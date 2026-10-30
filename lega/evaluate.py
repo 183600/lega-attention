@@ -300,6 +300,107 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
             "gate_mean": gmean}
 
 
+def window_phase_offsets(ctx: int, n_offsets: int) -> list:
+    """均匀覆盖 [0, ctx-1] 的窗口相位起点（含首尾）。
+
+    offset 以 token 为单位平移窗口网格；不同 offset 的窗口共享大量 token，
+    因此只能作为“边界相位敏感性”诊断，不能当作独立重复实验。
+    """
+    ctx = strict_int(ctx, "ctx")
+    n_offsets = strict_int(n_offsets, "window_offsets")
+    if ctx < 2:
+        raise ValueError(f"ctx 必须 >= 2 才能做相位诊断，收到 {ctx}")
+    if n_offsets < 2:
+        raise ValueError(f"window_offsets 必须 >= 2，收到 {n_offsets}")
+    if n_offsets > ctx:
+        raise ValueError(
+            f"window_offsets={n_offsets} 超过 ctx={ctx} 个可用相位")
+    return [(k * (ctx - 1)) // (n_offsets - 1)
+            for k in range(n_offsets)]
+
+
+def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
+    """汇总逐相位 PPL 的范围/离散度，回答“窗口边界是否改变结论”。
+
+    只做描述性汇总：重叠窗口不是独立样本，不生成 p 值或置信区间。非有限
+    损失已在 ``json_safe_eval_metrics`` 中记为 None，这里跳过并保持位置对齐。
+    """
+    rows = rows if isinstance(rows, list) else []
+    losses, ppls, offsets = [], [], []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        off = row.get("offset")
+        if isinstance(off, (bool, np.bool_)):
+            continue
+        try:
+            offsets.append(int(off))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        loss = row.get("val_loss")
+        if (isinstance(loss, (bool, np.bool_))
+                or not isinstance(loss, (int, float, np.integer, np.floating))
+                or not math.isfinite(float(loss))):
+            continue
+        losses.append(float(loss))
+        ppl = row.get("val_ppl")
+        if (isinstance(ppl, (bool, np.bool_))
+                or not isinstance(ppl, (int, float, np.integer, np.floating))
+                or not math.isfinite(float(ppl))):
+            ppls.append(None)
+        else:
+            ppls.append(float(ppl))
+    out = {
+        "n_offsets": len(offsets),
+        "offsets": offsets,
+        "eval_iters": (strict_int(eval_iters, "eval_iters")
+                       if eval_iters is not None else None),
+        "val_loss_min": None,
+        "val_loss_max": None,
+        "val_loss_range": None,
+        "val_loss_mean": None,
+        "val_loss_std": None,
+        "val_ppl_min": None,
+        "val_ppl_max": None,
+        "val_ppl_ratio": None,
+        "val_ppl_ratio_clamped": False,
+        "max_abs_delta_val_loss_vs_offset0": None,
+        "note": ("窗口相位敏感性：不同 offset 的窗口相互重叠，不是独立样本；"
+                 "不能据此计算 p 值或置信区间"),
+    }
+    if not losses:
+        return out
+    lo, hi = min(losses), max(losses)
+    mean = math.fsum(losses) / len(losses)
+    std = math.sqrt(math.fsum((x - mean) ** 2 for x in losses) / len(losses))
+    spread = hi - lo
+    out.update({
+        "val_loss_min": lo,
+        "val_loss_max": hi,
+        "val_loss_range": spread,
+        "val_loss_mean": mean,
+        "val_loss_std": std,
+    })
+    finite_ppls = [p for p in ppls if p is not None]
+    if finite_ppls:
+        out["val_ppl_min"] = min(finite_ppls)
+        out["val_ppl_max"] = max(finite_ppls)
+    # PPL 范围 = exp(最大损失 − 最小损失)；损失差过大时按既有 exp(20) 口径
+    # 截断并显式标注，避免 JSON 出现 inf 或把截断值误读成真实比值。
+    out["val_ppl_ratio_clamped"] = bool(spread > 20.0)
+    out["val_ppl_ratio"] = math.exp(min(20.0, spread))
+    base = [r.get("val_loss") for r in rows
+            if isinstance(r, dict) and r.get("offset") == 0]
+    base = [float(v) for v in base
+            if isinstance(v, (int, float, np.integer, np.floating))
+            and not isinstance(v, (bool, np.bool_))
+            and math.isfinite(float(v))]
+    if base:
+        out["max_abs_delta_val_loss_vs_offset0"] = max(
+            abs(x - base[0]) for x in losses)
+    return out
+
+
 def _resolve_eval_amp(cfg_used: dict, device: str) -> bool:
     """按 checkpoint 记录的实际 AMP 精度决定评测是否启用 autocast。
 
@@ -423,6 +524,10 @@ def main():
     p.add_argument("--full_eval", action="store_true",
                    help="用全部不重叠窗口评测（与 --eval_iters 互斥）；"
                         "默认 50 窗口只是抽样，正式 PPL 结论应另跑全量")
+    p.add_argument("--window_offsets", default=None, metavar="N",
+                   help="额外评测 N 个均匀窗口相位起点（0..ctx-1）并落盘"
+                        "window_offset_sensitivity；默认关闭。相位窗口相互重叠，"
+                        "只作边界敏感性诊断，不替代预注册的单起点/全量口径")
     p.add_argument("--worst_n", type=int, default=0,
                    help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）")
     p.add_argument("--worst_on_test", action="store_true",
@@ -453,6 +558,14 @@ def main():
             p.error(str(e))
         if args.eval_iters <= 0:
             p.error("--eval_iters 必须是正整数")
+    if args.window_offsets is not None:
+        try:
+            args.window_offsets = strict_int(
+                args.window_offsets, "--window_offsets")
+        except (TypeError, ValueError) as e:
+            p.error(str(e))
+        if args.window_offsets < 2:
+            p.error("--window_offsets 至少为 2（0=关闭）")
 
     # 评测同样不能在已标记泄露的数据上产出“正式指标”：训练闸门只保护
     # checkpoint 生产，独立 evaluate/复现历史 run 也必须先过同一份报告。
@@ -557,6 +670,8 @@ def main():
               f"model.block_size={model.block_size}，PPL 可能与训练内评测不可比")
     train_ctx = _positive_int_or_none(train_ctx)
     ctx = min(model.block_size, train_ctx) if train_ctx else model.block_size
+    if args.window_offsets is not None and args.window_offsets > ctx:
+        p.error(f"--window_offsets={args.window_offsets} 超过 ctx={ctx} 个可用相位")
     cfg_eval_iters = _positive_int_or_none(cfg_used.get("eval_iters"))
     # 缺省必须与 train.py 的 eval_iters 默认值（50）一致：否则同一 checkpoint
     # 的独立评测窗口数与训练内评测/选择口径不同，PPL 不可比，run_all 的窗口
@@ -583,6 +698,44 @@ def main():
               "val_ppl/val_loss 记为 null（避免写入非法 JSON 字面量、也避免 "
               "min(20, NaN) 恰为 exp(20) 被误读成截断 PPL），"
               "该结果不得与正常 PPL 比较")
+
+    offset_sensitivity = None
+    if args.window_offsets is not None:
+        offsets = window_phase_offsets(ctx, args.window_offsets)
+        # 各相位可用窗口数可能差 1（验证集长度不整除 ctx）；用所有相位都能
+        # 提供的公共窗口预算比较，避免把“窗口数不同”混进相位差异。
+        common_windows = min(
+            (len(val) - 1 - off) // ctx for off in offsets)
+        if common_windows < 1:
+            p.error("验证集太短，无法在全部窗口相位上评测")
+        sens_iters = min(int(metrics["eval_iters"]), int(common_windows))
+        rows = []
+        for off in offsets:
+            if off == 0 and int(metrics["eval_iters"]) == sens_iters:
+                m = metrics
+            else:
+                m = evaluate_val(model, val, ctx, device, sens_iters,
+                                 amp=use_amp, window_offset=off)
+            safe = json_safe_eval_metrics(m)
+            rows.append({
+                "offset": int(off),
+                "eval_iters": int(m["eval_iters"]),
+                "val_windows": int(m["val_windows"]),
+                "val_tokens_evaluated": int(m["val_tokens_evaluated"]),
+                "val_loss": safe["val_loss"],
+                "val_ppl": safe["val_ppl"],
+                "val_ppl_clamped": safe["val_ppl_clamped"],
+                "val_loss_se": m.get("val_loss_se"),
+                "val_loss_ci95": m.get("val_loss_ci95"),
+            })
+        offset_sensitivity = summarize_window_offsets(rows, sens_iters)
+        offset_sensitivity["rows"] = rows
+        if offset_sensitivity["val_loss_range"] is not None:
+            print(f"[eval] 窗口相位敏感性：{len(rows)} 个起点，"
+                  f"val_loss 范围 {offset_sensitivity['val_loss_min']:.4f}–"
+                  f"{offset_sensitivity['val_loss_max']:.4f}"
+                  f"（Δ={offset_sensitivity['val_loss_range']:.4f}）；"
+                  "重叠窗口仅作边界稳健性诊断")
 
     res = {
         "variant": ck.get("variant", model.variant),
@@ -624,6 +777,7 @@ def main():
             ck, cfg_used.get("steps") if isinstance(cfg_used, dict) else None),
         "eval_iters_requested": metrics["eval_iters_requested"],
         "eval_iters": metrics["eval_iters"],
+        "eval_window_offset": metrics.get("eval_window_offset", 0),
         "val_windows": metrics["val_windows"],
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
         # 全量窗口 vs 抽样窗口：PPL 结论的适用范围必须可机器判定。旧结果
@@ -637,6 +791,9 @@ def main():
         # 下游可做窗口级配对（评估抽样不确定性），与跨种子方差分开报告。
         "window_losses": metrics.get("window_losses"),
         "window_indices": metrics.get("window_indices"),
+        # 可选：窗口边界相位敏感性（--window_offsets）。主指标仍是 offset=0；
+        # 这里只描述“把同一网格平移几个 token 后 PPL 的波动范围”。
+        "window_offset_sensitivity": offset_sensitivity,
         # 有限验证窗口的抽样误差：与 PPL 点估计同源，必须一起传递，否则
         # 下游只看到点估计，无法区分“真实差异”与“窗口抽样噪声”。
         "val_loss_se": metrics.get("val_loss_se"),

@@ -14,6 +14,7 @@ from lega.evaluate import (_positive_int_or_none, checkpoint_selection_info,
                            collect_worst_windows, json_safe_eval_metrics,
                            load_train_coverage, load_train_peak_mem_mb,
                            load_train_throughput, repeated_test_checkpoint,
+                           summarize_window_offsets, window_phase_offsets,
                            worst_window_screening, worst_windows_allowed)
 from lega.model import GPT
 
@@ -121,6 +122,44 @@ def test_positive_int_config_value_degrades_to_none():
     # int("1_0")==10，但下划线写法不能冒充配置值 10
     assert _positive_int_or_none("1_0") is None
     print("  [ok] 非法 train_ctx/eval_iters 配置安全降级")
+
+
+def test_window_phase_offsets_cover_ctx_and_reject_invalid():
+    """相位起点覆盖首尾且不重复；N 不能超过 ctx 个可用相位。"""
+    assert window_phase_offsets(10, 2) == [0, 9]
+    assert window_phase_offsets(10, 5) == [0, 2, 4, 6, 9]
+    assert window_phase_offsets(10, 10) == list(range(10))
+    for bad_ctx, bad_n in ((1, 2), (10, 1), (10, 11), (10, True),
+                           (10, 2.5), (10, "2_0")):
+        try:
+            window_phase_offsets(bad_ctx, bad_n)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法相位规格未被拒绝: {bad_ctx}, {bad_n!r}")
+    print("  [ok] window_phase_offsets：覆盖 [0, ctx-1] 且拒绝非法规格")
+
+
+def test_summarize_window_offsets_reports_range_without_pvalues():
+    """相位敏感性只做描述性范围；非有限损失跳过且不伪造显著性。"""
+    rows = [
+        {"offset": 0, "val_loss": 3.0, "val_ppl": math.exp(3.0)},
+        {"offset": 3, "val_loss": 3.2, "val_ppl": math.exp(3.2)},
+        {"offset": 9, "val_loss": None, "val_ppl": None},
+    ]
+    out = summarize_window_offsets(rows, 50)
+    assert out["n_offsets"] == 3
+    assert out["offsets"] == [0, 3, 9]
+    assert out["eval_iters"] == 50
+    assert math.isclose(out["val_loss_range"], 0.2, rel_tol=0, abs_tol=1e-12)
+    assert math.isclose(out["max_abs_delta_val_loss_vs_offset0"], 0.2,
+                        rel_tol=0, abs_tol=1e-12)
+    assert math.isclose(out["val_ppl_ratio"], math.exp(0.2),
+                        rel_tol=1e-12, abs_tol=1e-12)
+    assert out["val_ppl_ratio_clamped"] is False
+    assert not any(k in out for k in ("p_value", "p_adj", "ci95"))
+    assert summarize_window_offsets([], 50)["val_loss_range"] is None
+    print("  [ok] summarize_window_offsets：范围/离散度描述且不生成 p 值")
 
 
 def test_evaluate_cli_rejects_nonpositive_eval_iters():
@@ -433,6 +472,51 @@ def test_evaluate_runs_data_protocol_preflight_before_loading_model():
         finally:
             sys.argv = old_argv
     print("  [ok] 独立评测入口执行数据协议闸门（严重告警默认中止）")
+
+
+def test_evaluate_window_offsets_records_phase_sensitivity(monkeypatch):
+    """CLI 相位诊断只写描述性敏感性字段，主指标仍取 offset=0。"""
+    from lega.data import prepare_bins
+    from lega.evaluate import main as evaluate_main
+    from lega.model import GPT, save_checkpoint
+
+    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
+    alphabet = np.array(list("abcdefghijklmnopqrstuvwxyz "))
+    train = "".join(rng.choice(alphabet, 2000))
+    val = "".join(rng.choice(alphabet, 1200))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "train.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(train)
+        with open(os.path.join(data_dir, "val.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(val)
+        meta = prepare_bins(data_dir, kind="char", force=True)
+        ckpt = os.path.join(d, "run", "model.pt")
+        model = GPT(vocab_size=meta["vocab_size"], block_size=16,
+                    d_model=16, n_layers=1, n_heads=2, variant="standard")
+        save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
+        out = os.path.join(d, "eval.json")
+        monkeypatch.setattr(sys, "argv", [
+            "evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
+            "--out", out, "--device", "cpu", "--eval_iters", "4",
+            "--window_offsets", "4", "--split", "val"])
+        evaluate_main()
+        with open(out, encoding="utf-8") as f:
+            res = json.load(f)
+        assert res["eval_window_offset"] == 0
+        assert res["window_indices"] == sorted(res["window_indices"])
+        sens = res["window_offset_sensitivity"]
+        assert sens["offsets"] == [0, 5, 10, 15]
+        assert sens["n_offsets"] == 4 and sens["eval_iters"] == 4
+        assert len(sens["rows"]) == 4
+        assert sens["val_loss_range"] is not None
+        assert "不是独立样本" in sens["note"]
+        assert not any(k in sens for k in ("p_value", "p_adj", "ci95"))
+    print("  [ok] 窗口相位敏感性落盘（主指标不受影响，不伪造显著性）")
 
 
 def test_worst_windows_allowed_seals_test():

@@ -942,3 +942,49 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
     # (val, span) 元组：memmap 花式索引直写 pinned 缓冲，设备端升 long 并切 x/y
     both = _stage_to_device((val, span), device)
     return both[:, :-1], both[:, 1:]
+
+
+def get_val_windows_at(val: np.memmap, ctx: int, starts, device: str):
+    """按显式 token 起点取验证窗口（用于非 ctx 整数倍的相位平移诊断）。
+
+    与 ``get_val_windows`` 不同，起点不做取模/对齐：相位平移后的窗口起点可以
+    不是 ctx 的整数倍；越界/负数/bool/小数必须显式拒绝，否则会静默读取另一
+    段验证文本。返回 ``(x, y)``，y 为 x 右移一位。
+    """
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx}")
+    try:
+        raw = np.atleast_1d(np.asarray(starts))
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"starts 必须是整数 token 下标，收到 {starts!r}") from e
+    int64_max = int(np.iinfo(np.int64).max)
+    if raw.dtype.kind in "iu":
+        if raw.size and (int(raw.min()) < 0 or int(raw.max()) > int64_max):
+            raise ValueError(
+                f"窗口起点必须是 [0, {int64_max}] 内的整数，收到 {starts!r}")
+        pos = raw.astype(np.int64, copy=False)
+    else:
+        vals = []
+        for v in raw.reshape(-1).tolist():
+            try:
+                iv = strict_int(v, "窗口起点")
+            except (TypeError, ValueError, OverflowError) as e:
+                raise ValueError(
+                    f"窗口起点必须是整数，收到 {starts!r}") from e
+            if iv < 0 or iv > int64_max:
+                raise ValueError(
+                    f"窗口起点必须在 [0, {int64_max}] 内，收到 {starts!r}")
+            vals.append(iv)
+        pos = np.asarray(vals, dtype=np.int64)
+    max_start = len(val) - ctx - 1
+    if max_start < 0:
+        raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
+    if pos.size and int(pos.max()) > max_start:
+        raise ValueError(
+            f"窗口起点最大 {max_start}（len(val)={len(val)}, ctx={ctx}），"
+            f"收到 {starts!r}")
+    span = _make_span(pos, ctx)
+    both = _stage_to_device((val, span), device)
+    return both[:, :-1], both[:, 1:]
