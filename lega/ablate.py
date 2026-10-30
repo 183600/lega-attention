@@ -42,6 +42,11 @@
                         （保留平均写入强度，去掉逐位置/逐查询变化）
     head_permute     : 每层把门参数在头之间置换（容量与参数分布完全不变，
                         破坏“头—证据”对应关系；天然安慰剂对照）
+    conc_permute     : 逐位置集中度证据 c 沿序列维循环移位
+    query_permute    : 逐位置查询证据 w·q 沿序列维循环移位
+    len_permute      : 长度证据 log n 沿序列维做非相邻循环移位
+                       （三者都保持逐值分布/均值/方差不变，只破坏位置对应；
+                        与 head_permute 一起构成 A/B/C 的分布匹配安慰剂）
     sign_flip        : 证据系数整体反号（保留幅度，反转证据使用方向）
 
 所有干预都只改门控参数，不改注意力/主干；评测沿用 `train.evaluate_val`
@@ -178,6 +183,26 @@ LESION_SPECS = (
                 "解释。该病灶是推理期临时属性，restore 时清除。",
     },
     {
+        "id": "query_permute", "label": "查询证据在序列维置换（分布匹配）",
+        "target": "A 查询项 w·q 的位置对应关系", "kind": "query_permute",
+        "params": (), "requires": ("query",),
+        "expected": "worse",
+        "note": "逐位置/逐头 qterm 的取值多重集、均值/方差完全不变，只把 "
+                "qterm 沿序列维循环移位；注意力打分仍使用原位置的 q，因此 "
+                "只有门控看到的查询证据被错位。与 conc_permute 一起把 A/B "
+                "两类逐位置证据做成分布匹配的推理期安慰剂。",
+    },
+    {
+        "id": "len_permute", "label": "长度证据在序列维置换（分布匹配）",
+        "target": "C 长度项 b·log n 的位置对应关系", "kind": "len_permute",
+        "params": (), "requires": ("len",),
+        "expected": "worse",
+        "note": "log n 的取值多重集/均值/方差完全不变，只把每个位置的"
+                "长度证据循环错位约半段（而非相邻一格），避免平滑的 log n "
+                "几乎不变而把干预退化为空操作；与 conc_permute/query_permute "
+                "共同覆盖 A/B/C 三个位置证据通道。",
+    },
+    {
         "id": "head_permute", "label": "门参数在头间置换（安慰剂）",
         "target": "头—证据对应关系", "kind": "head_permute",
         "params": (), "requires": ("gated", "multi_head"),
@@ -312,6 +337,14 @@ def lesion_applicability(model, lesion_id: str):
     return True, "", spec["requires"]
 
 
+def _clear_lesion_state(mods) -> None:
+    """清除不写入参数的推理期临时病灶属性（重新施加前/恢复时调用）。"""
+    for m in mods:
+        m.conc_permute_shift = None
+        m.query_permute_shift = None
+        m.len_permute_fraction = None
+
+
 def snapshot_gate_params(model) -> Dict[str, torch.Tensor]:
     """克隆全部门控参数（按完整参数名），供病灶后逐位恢复。"""
     snap = {}
@@ -325,16 +358,16 @@ def snapshot_gate_params(model) -> Dict[str, torch.Tensor]:
 def restore_gate_params(model, snapshot: Mapping[str, torch.Tensor]) -> None:
     """把门控参数恢复到快照；缺失/形状不符显式报错（不能静默留下病灶）。
 
-    同时清除 ``conc_permute`` 这类不写入参数的推理期临时属性，避免病灶
-    在后续评测中残留（仅恢复参数不足以撤销前向 hook）。
+    同时清除 ``conc_permute/query_permute/len_permute`` 这类不写入参数的
+    推理期临时属性，避免病灶在后续评测中残留（仅恢复参数不足以撤销前向
+    hook）。
 
     形状不符时 ``copy_`` 会按广播规则写入而不报错，可能只改一部分门控值；
     恢复失败必须显式暴露，不能把被污染的模型继续用于后续病灶评测。
     """
     if not snapshot:
         raise ValueError("门控参数快照为空：该模型没有可恢复的门控参数")
-    for m in gate_modules(model):
-        m.conc_permute_shift = None
+    _clear_lesion_state(gate_modules(model))
     seen = set()
     with torch.no_grad():
         for name, p in model.named_parameters():
@@ -396,8 +429,7 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
     changed = 0
     max_delta = 0.0
     # 先清除上一次可能残留的临时置换属性；参数病灶恢复由调用方负责。
-    for m in mods:
-        m.conc_permute_shift = None
+    _clear_lesion_state(mods)
 
     def _record(old, new):
         nonlocal changed, max_delta
@@ -519,14 +551,27 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
                     d_rows[li], dtype=m.gate_d.dtype,
                     device=m.gate_d.device))
                 _record(old_d, m.gate_d.detach())
-        elif kind == "conc_permute":
+        elif kind in ("conc_permute", "query_permute"):
             seed = strict_int(perm_seed, "perm_seed")
             if seed < 0:
                 raise ValueError(f"perm_seed 必须 >= 0，收到 {seed}")
             for li, m in enumerate(mods):
                 # 非零位移才不是空操作；不同层用不同位移，避免所有层同步
                 # 置换导致“整层证据一起错位”恰好抵消。
-                m.conc_permute_shift = 1 + (seed + li) % 7
+                shift = 1 + (seed + li) % 7
+                if kind == "conc_permute":
+                    m.conc_permute_shift = shift
+                else:
+                    m.query_permute_shift = shift
+                changed += 1
+        elif kind == "len_permute":
+            seed = strict_int(perm_seed, "perm_seed")
+            if seed < 0:
+                raise ValueError(f"perm_seed 必须 >= 0，收到 {seed}")
+            for li, m in enumerate(mods):
+                # log n 是平滑单调的；半段左右的错位才能确保每个位置拿到
+                # 明显不同的长度证据。不同层略作变化，避免完全同步。
+                m.len_permute_fraction = 0.5 + 0.05 * ((seed + li) % 5)
                 changed += 1
         elif kind == "head_permute":
             for li, m in enumerate(mods):
@@ -553,10 +598,12 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
         else:  # pragma: no cover - 防御分支
             raise ValueError(f"未知病灶类型: {kind!r}")
 
-    if kind == "conc_permute":
+    if kind in ("conc_permute", "query_permute", "len_permute"):
+        attr = {"conc_permute": "gate_a", "query_permute": "gate_w",
+                "len_permute": "gate_b"}[kind]
         no_op = not any(
-            getattr(m, "gate_a", None) is not None
-            and bool(float(m.gate_a.detach().abs().max().item()) > 0.0)
+            getattr(m, attr, None) is not None
+            and bool(float(getattr(m, attr).detach().abs().max().item()) > 0.0)
             for m in mods)
     elif kind == "zero_matched":
         # d 的匹配平移通常非零；只有系数本就近零且偏移也可忽略时才算
@@ -1131,6 +1178,7 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
         "ckpt": os.path.abspath(ckpt),
         "ckpt_sha256": sha256_file(ckpt),
         "seed": (None if seed is None else int(seed)),
+        "perm_seed": int(perm_seed),
         "split": "val",
         "eval_ctx": int(ctx),
         "eval_iters": int(eval_iters),

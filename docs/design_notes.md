@@ -12,7 +12,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 ## 变体
 
-`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；其伪证据仍由绝对位置哈希得到，不能当作分布匹配的置换对照，正式结论需结合推理期 `conc_permute`/`head_permute`。补充训练对照 `lega_raw`、`lega_raw_no_len`、`lega_raw_conc_only`、`lega_raw_no_query`、`lega_detach_conc`、`null_zero` 默认不运行，分别检验原始集中度/无长度项、原始参数化全因子格、集中度 detach 反传、固定零 value null；它们不进入 `GATE_FACTORS` 的归一化 2^3 矩阵。
+`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；其伪证据仍由绝对位置哈希得到，不能当作分布匹配的置换对照，正式结论需结合推理期 `conc_permute`/`query_permute`/`len_permute`/`head_permute`。补充训练对照 `lega_raw`、`lega_raw_no_len`、`lega_raw_conc_only`、`lega_raw_no_query`、`lega_detach_conc`、`null_zero` 默认不运行，分别检验原始集中度/无长度项、原始参数化全因子格、集中度 detach 反传、固定零 value null；它们不进入 `GATE_FACTORS` 的归一化 2^3 矩阵。
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
@@ -141,13 +141,20 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
 | `gate_constant_mean` | 证据项 0，`d_h := logit(E[g_h])` | 去掉逐位置/逐查询变化，保留每个头/层的平均写入强度 |
 | `head_permute` | 门参数在头间置换 | 容量/分布/结构不变，只破坏头—证据对应（安慰剂） |
 | `conc_permute` | 逐位置 `c` 沿序列维循环移位 | c 的逐值分布/均值/方差/长度分布不变，只破坏位置对应；排除容量/尺度解释 |
+| `query_permute` | 逐位置 `w·q` 沿序列维循环移位 | 查询证据的逐值分布不变、注意力打分仍用原位置 q，只阻断门控使用“本位置查询证据” |
+| `len_permute` | `log n` 沿序列维非相邻循环移位 | 长度证据的逐值分布不变，但每个位置拿到约半段以外的长度；避免相邻 log n 近似不变导致干预退化 |
 | `sign_flip` | 证据项反号 | 保留幅度、反转证据方向 |
 
 要点：
 
-- **只改门控参数或前向临时属性**，不动注意力/主干；`conc_permute` 通过
-  `conc_permute_shift` 临时属性实现，`restore_gate_params` 会同时清除它，
-  保证病灶不叠加；
+- **只改门控参数或前向临时属性**，不动注意力/主干；三类位置证据置换
+  (`conc_permute/query_permute/len_permute`) 分别通过 `conc_permute_shift`、
+  `query_permute_shift`、`len_permute_fraction` 临时属性实现，
+  `restore_gate_params` 会同时清除它们，保证病灶不叠加；
+- **分布匹配的边界**：置换只保持被干预项自身的逐值边际分布（如 `log n`
+  的多重集），Full 模型里其他门控项仍在原位置，因此门控 logit 的联合
+  分布/相关结构会改变；这正是安慰剂要破坏“位置对应”的方式，但不能把
+  它写成“只换了位置、其余分布完全不变”的干预；
 - 与基线使用同一 `ctx/eval_iters/AMP` 口径、同一 `window_indices`，否则拒绝配对；
 - 默认只在 **val** 上做（test 尘封；val 是 checkpoint 选择集，绝对水平
   偏乐观，只作机制定位）；不写 test 访问账本；
@@ -183,7 +190,8 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
   训练期优化/正则化而非推理期必需；推理期显著而训练期不显著 → 训练期
   消融可能被再训练补偿。两者不能互相替代。
 - **边界（必须如实声明）**：`head_permute` 是**推理期**的容量/分布安慰剂，
-  `conc_permute` 是 c 的分布匹配置换，两者都不是训练期的参数量匹配对照；
+  `conc_permute/query_permute/len_permute` 分别是 B/A/C 位置证据的分布匹配
+  置换（保持逐值分布，只破坏位置对应），它们都不是训练期的参数量匹配对照；
   训练期 `lega_placebo` 的伪证据仍含绝对位置哈希，不能替代置换零假设；`no_evidence` 在推理期保留全部参数、只关掉
   证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数
   是否带来优化红利”这一混淆。后者由下面的训练期 `lega_placebo` 对照回答；

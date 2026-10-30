@@ -263,6 +263,32 @@ def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
     return _log_n_table(dev, past_len + T)[past_len:past_len + T]
 
 
+def _permute_positions(x: torch.Tensor, shift, fraction: bool = False):
+    """把张量最后一个维度（序列位置）循环移位，供推理期分布匹配病灶使用。
+
+    ``shift`` 为整数位移；``fraction=True`` 时把它解释为序列长度的一个比例
+    （长度病灶用 0.5 左右，避免只移动一格时相邻位置的 log n 几乎不变）。
+    位移会按 T 取模；若恰好回到恒等，则改用半序列位移，保证序列长度 >1 时
+    置换非平凡。返回值是新张量，不改写共享的 log_n 前缀表/查询张量。
+    """
+    T = int(x.shape[-1])
+    if T <= 1:
+        return x
+    if fraction:
+        frac = float(shift)
+        if not math.isfinite(frac) or not 0.0 < frac < 1.0:
+            raise ValueError(f"置换比例必须在 (0,1) 内，收到 {shift!r}")
+        steps = int(round(frac * T))
+    else:
+        if isinstance(shift, bool):
+            raise ValueError(f"置换位移必须是整数，收到 {shift!r}")
+        steps = int(shift)
+    steps %= T
+    if steps == 0:
+        steps = max(1, T // 2) % T
+    return torch.roll(x, shifts=steps, dims=-1)
+
+
 def _placebo_evidence(x: torch.Tensor, n_heads: int, salt: float,
                       pos_offset: int = 0) -> torch.Tensor:
     """参数匹配安慰剂使用的确定性“伪证据”特征。
@@ -404,10 +430,12 @@ class CausalSelfAttention(nn.Module):
         # _version。训练态不走缓存（cat 必须参与 autograd 图），且优化器/测试
         # 对权重的原地修改会递增 _version 使缓存自动失效。
         self._qkv_fused = None
-        # 只在推理期病灶分析中临时打开的分布匹配置换：把 c 在序列维
-        # roll 一个非零位移，保持逐值分布不变、破坏位置对应关系。
-        # 训练/普通推理恒为 None，不进入 state_dict。
+        # 只在推理期病灶分析中临时打开的分布匹配置换：把 c / qterm /
+        # log n 在序列维 roll 一个非零位移，保持逐值分布不变、破坏位置
+        # 对应关系。训练/普通推理恒为 None，不进入 state_dict。
         self.conc_permute_shift = None
+        self.query_permute_shift = None
+        self.len_permute_fraction = None
         # 推理态参数 dtype 转换缓存（与 _qkv_fused 同失效键口径）：
         # gate_w / (k_null, v_null)。
         self._gate_w_cast = None
@@ -472,8 +500,13 @@ class CausalSelfAttention(nn.Module):
         H = self.n_heads
         logit = None
         if self.use_query:
-            # qterm 已由调用方预归约并升到 fp32。
-            logit = qterm.clone() if keep_terms else qterm
+            # qterm 已由调用方预归约并升到 fp32。query_permute 只改门控
+            # 看到的查询项，不移动注意力打分里的 q；逐位置取值多重集不变。
+            qterm_used = qterm
+            shift = getattr(self, "query_permute_shift", None)
+            if shift is not None:
+                qterm_used = _permute_positions(qterm, shift)
+            logit = qterm_used.clone() if keep_terms else qterm_used
         # logit 累加"标量门控系数 × 统计项"（addcmul_）。
         if self.use_conc or self.use_raw_conc:
             # detach 对照：集中度只作为前向特征，不让 max_p 的梯度回流到
@@ -495,11 +528,11 @@ class CausalSelfAttention(nn.Module):
             if self.use_conc:
                 c = c + log_n
             shift = getattr(self, "conc_permute_shift", None)
-            if shift is not None and c.shape[-1] > 1:
+            if shift is not None:
                 # 病灶 conc_permute：只在序列维循环移位。逐位置 c 的多重集
                 # 完全不变（均值/方差/长度分布匹配），但“哪个位置拿到哪个
                 # 证据”被破坏；用于排除容量/尺度解释，而不是训练期变体。
-                c = torch.roll(c, shifts=int(shift), dims=-1)
+                c = _permute_positions(c, shift)
             if self.variant in CONTROL_VARIANTS:
                 # 参数匹配安慰剂：保留 a 的形状与梯度路径，但把它乘的
                 # “集中度证据”换成与真实统计无关的确定性噪声。
@@ -513,6 +546,12 @@ class CausalSelfAttention(nn.Module):
                 # 与 c 相同：保留 b 的参数/计算，只把长度证据替换为噪声。
                 len_term = _placebo_evidence(
                     log_n, H, salt=2.0, pos_offset=pos_offset)
+            shift = getattr(self, "len_permute_fraction", None)
+            if shift is not None:
+                # len_permute：log n 的取值多重集/均值/方差不变，但每个
+                # 位置拿到另一位置的长度证据。用半段位移而非一格，避免相邻
+                # 位置 log n 近似不变使干预退化。
+                len_term = _permute_positions(len_term, shift, fraction=True)
             b = self.gate_b.float().view(1, H, 1)
             logit = b * len_term if logit is None else logit.addcmul_(b, len_term)
         dterm = self.gate_d.float().view(1, H, 1)

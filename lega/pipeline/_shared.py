@@ -214,10 +214,11 @@ LENGTH_SESOI = 0.01
 _EQ_CORE_METRICS = ("PPL", "RULER平均",
                     "AUROC差(logit−仅查询)", "AP差(logit−仅查询)")
 
-# 因果病灶中“零假设本身有科学含义”的关键对照：安慰剂、阳性对照、
-# 门恒开/恒关、证据反号、去全部证据。其余病灶仍以“是否有因果贡献”为主，
-# 不强行套等价性解读。
-_CAUSAL_EQ_LESIONS = ("head_permute", "gate_open", "gate_closed",
+# 因果病灶中“零假设本身有科学含义”的关键对照：分布匹配置换/头置换安慰剂、
+# 阳性对照、门恒开/恒关、证据反号、去全部证据。其余病灶仍以“是否有因果
+# 贡献”为主，不强行套等价性解读。
+_CAUSAL_EQ_LESIONS = ("head_permute", "conc_permute", "query_permute",
+                      "len_permute", "gate_open", "gate_closed",
                       "sign_flip", "no_evidence")
 
 # 组件有效性判定所用的检验对：组件 -> (去一法检验, 全因子检验, 主指标)。

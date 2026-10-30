@@ -1088,7 +1088,10 @@ def _summary_part_b(**kw):
               "`no_query/no_conc/no_len/no_evidence` 是训练期去一法的推理期"
               "对应；`gate_open/closed/constant_mean` 检验门控写回强度与逐位置"
               "变化；`head_permute` 在参数个数、分布、结构完全不变的前提下打乱"
-              "头—证据对应，是容量解释的安慰剂对照；`sign_flip` 反转证据方向。"
+              "头—证据对应，是容量解释的安慰剂对照；"
+              "`conc_permute/query_permute/len_permute` 分别把 B/A/C 位置证据"
+              "沿序列维循环移位，保持逐值分布、均值/方差不变而只破坏位置对应；"
+              "`sign_flip` 反转证据方向。"
               "默认只在 val 上做（test 尘封；val 同时是 checkpoint 选择集，"
               "故绝对水平偏乐观，本表只作机制定位）。跨种子 p 经 Holm 校正；"
               "窗口级 p 仅描述单 run，不作为确认性证据。")

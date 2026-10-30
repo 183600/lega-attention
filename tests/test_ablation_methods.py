@@ -14,6 +14,7 @@ from unittest import mock
 import numpy as np
 import torch
 
+from lega.attention import _permute_positions
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS, LESION_BY_ID,
                          LESION_ORDER, MATCHED_LESION_IDS,
                          MATCHED_LESION_PAIRS, apply_lesion,
@@ -163,6 +164,9 @@ def test_lesion_capabilities_and_applicability():
     assert lesion_applicability(lega, "no_query")[0] is True
     assert lesion_applicability(gate_only, "no_query")[0] is False
     assert lesion_applicability(gate_only, "gate_open")[0] is True
+    assert lesion_applicability(lega, "query_permute")[0] is True
+    assert lesion_applicability(lega, "len_permute")[0] is True
+    assert lesion_applicability(_tiny("qgate"), "len_permute")[0] is False
     print("  [ok] 病灶适用性由真实注册参数探测，不靠变体名猜测")
 
 
@@ -286,6 +290,77 @@ def test_conc_permute_preserves_values_but_breaks_position_mapping():
     _, restored, _ = m._gate_logit(qterm, max_p, log_n, (1, 2, 4),
                                    keep_terms=True)
     assert torch.allclose(base, restored)
+
+
+def test_query_and_len_permute_match_distribution_but_break_mapping():
+    """A/C 的分布匹配置换：逐值多重集不变、位置对应被破坏且可恢复。"""
+    # 位移按 T 取模后若为 0，必须回退到半序列，不能把病灶悄悄变成恒等。
+    probe = torch.arange(4, dtype=torch.float32).view(1, 1, 4)
+    assert torch.equal(_permute_positions(probe, 4),
+                       torch.tensor([2.0, 3.0, 0.0, 1.0]).view(1, 1, 4))
+    assert torch.equal(_permute_positions(probe, 0.5, fraction=True),
+                       torch.tensor([2.0, 3.0, 0.0, 1.0]).view(1, 1, 4))
+    assert torch.equal(_permute_positions(probe, 1), probe.roll(1, -1))
+    single = torch.tensor([7.0])
+    assert torch.equal(_permute_positions(single, 1), single)
+    try:
+        _permute_positions(probe, 0.0, fraction=True)
+        raise AssertionError("非法置换比例应显式报错")
+    except ValueError:
+        pass
+
+    q_model = _tiny("qgate")
+    qm = q_model.blocks[0].attn
+    with torch.no_grad():
+        qm.gate_w.fill_(1.0)
+    qterm = torch.tensor([[[0.1, -0.2, 0.3, -0.4],
+                           [0.5, 0.6, -0.7, -0.8]]])
+    _, q_base, _ = qm._gate_logit(qterm, None, None, (1, 2, 4),
+                                  keep_terms=True)
+    q_snap = snapshot_gate_params(q_model)
+    rec = apply_lesion(q_model, "query_permute", perm_seed=0)
+    assert rec["applied"] is True and rec["no_op"] is False
+    _, q_perm, returned_q = qm._gate_logit(qterm, None, None, (1, 2, 4),
+                                           keep_terms=True)
+    assert torch.equal(returned_q, qterm)  # 注意力打分用的 q 不被改写
+    assert not torch.allclose(q_base, q_perm)
+    for h in range(2):
+        assert torch.allclose(torch.sort(q_base[0, h]).values,
+                              torch.sort(q_perm[0, h]).values)
+    restore_gate_params(q_model, q_snap)
+    assert qm.query_permute_shift is None
+    _, q_restored, _ = qm._gate_logit(qterm, None, None, (1, 2, 4),
+                                      keep_terms=True)
+    assert torch.allclose(q_base, q_restored)
+
+    l_model = _tiny("lega_len_only")
+    lm = l_model.blocks[0].attn
+    with torch.no_grad():
+        lm.gate_b.fill_(0.7)
+    log_n = torch.log(torch.arange(1.0, 5.0))
+    _, l_base, _ = lm._gate_logit(None, None, log_n, (1, 2, 4),
+                                  keep_terms=True)
+    l_snap = snapshot_gate_params(l_model)
+    rec = apply_lesion(l_model, "len_permute", perm_seed=0)
+    assert rec["applied"] is True and rec["no_op"] is False
+    _, l_perm, _ = lm._gate_logit(None, None, log_n, (1, 2, 4),
+                                  keep_terms=True)
+    assert not torch.allclose(l_base, l_perm)
+    for h in range(2):
+        assert torch.allclose(torch.sort(l_base[0, h]).values,
+                              torch.sort(l_perm[0, h]).values)
+    restore_gate_params(l_model, l_snap)
+    assert lm.len_permute_fraction is None
+    _, l_restored, _ = lm._gate_logit(None, None, log_n, (1, 2, 4),
+                                      keep_terms=True)
+    assert torch.allclose(l_base, l_restored)
+
+    # 系数为 0 时置换无法改变前向：必须如实标记 no-op，而不是“施加成功”。
+    with torch.no_grad():
+        qm.gate_w.zero_()
+    rec = apply_lesion(q_model, "query_permute", perm_seed=0)
+    assert rec["applied"] is True and rec["no_op"] is True
+    print("  [ok] A/C 序列维置换：分布匹配、位置错位、可恢复且诚实报告 no-op")
 
 
 def test_constant_mean_rejects_invalid_gate_mean():
@@ -543,11 +618,12 @@ def test_ablate_numeric_and_seed_guards():
     with torch.no_grad():
         seed_model.blocks[0].attn.gate_a.fill_(1.0)
     for poor in (True, 1.5, -1, "1_0"):
-        try:
-            apply_lesion(seed_model, "conc_permute", perm_seed=poor)
-            raise AssertionError(f"conc_permute perm_seed={poor!r} 应显式报错")
-        except ValueError:
-            pass
+        for lid in ("conc_permute", "query_permute", "len_permute"):
+            try:
+                apply_lesion(seed_model, lid, perm_seed=poor)
+                raise AssertionError(f"{lid} perm_seed={poor!r} 应显式报错")
+            except ValueError:
+                pass
     # 逐头恒定门均值同样拒绝坏类型/下划线数字串，不静默写成合法门控。
     model = _tiny("lega")
     snap = snapshot_gate_params(model)

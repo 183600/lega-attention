@@ -989,8 +989,10 @@ def _summary_part_c(**kw):
                        "活动匹配对照（独立 Holm 家族）；"
                        "query_only/conc_only/len_only 补齐同一 "
                        "checkpoint 的 2^3 单因子格；head_permute 是容量/分布"
-                       "不变的安慰剂对照，gate_open/closed/constant_mean 检验"
-                       "写回强度与逐位置变化；跨种子 p 经 Holm 校正，窗口级 p "
+                       "不变的安慰剂对照，conc_permute/query_permute/"
+                       "len_permute 是 B/A/C 位置证据的分布匹配安慰剂；"
+                       "gate_open/closed/constant_mean 检验写回强度与逐位置"
+                       "变化；跨种子 p 经 Holm 校正，窗口级 p "
                        "仅描述性；equivalence 字段给出 ΔNLL 相对 0.01 nat "
                        "SESOI 的 TOST 结果，no_op 不作等价性判定"),
                    "factorial_interactions_note": (

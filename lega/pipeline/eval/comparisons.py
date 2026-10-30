@@ -495,6 +495,10 @@ def _causal_eq_note(t) -> str:
         if lesion == "head_permute":
             return ("安慰剂差异在 SESOI 内：与“容量/参数分布即可解释”一致；"
                     "但不能证明效应恰为 0，也不能据此宣称头—证据对应有因果作用")
+        if lesion in ("conc_permute", "query_permute", "len_permute"):
+            return ("分布匹配安慰剂差异在 SESOI 内：与“该位置证据的逐点"
+                    "对应关系可被其他位置替换”一致；但只能说明未检出可检测"
+                    "作用，不能证明位置对应恰无贡献")
         if lesion == "gate_closed":
             return ("⚠ 阳性对照失败：关闭注意力输出仍与正常等价（差异小于 "
                     "SESOI），应先排查实现/评测，而不是解释方法")
@@ -511,6 +515,9 @@ def _causal_eq_note(t) -> str:
         if lesion == "head_permute":
             return ("安慰剂显著变差且超过 SESOI：头—证据对应有因果作用，"
                     "容量/分布解释不足以说明收益")
+        if lesion in ("conc_permute", "query_permute", "len_permute"):
+            return ("分布匹配安慰剂显著变差且超过 SESOI：逐点位置对应有"
+                    "可检测的因果作用；逐值分布/容量不能解释该差异")
         if lesion == "gate_closed":
             return "阳性对照通过：关闭注意力输出显著变差且超过 SESOI"
         if lesion == "gate_open":
@@ -591,10 +598,12 @@ def _render_causal_equivalence_section(causal_tests) -> list:
             f"{_fmt_eq_margin(eq)} | {p_s} | {_causal_eq_note(t)} |")
     md.append("")
     md.append("注: 病灶 ΔNLL 的 SESOI 为 0.01 nat（约 1% PPL），是协议约定。"
-              "`head_permute` 是推理期容量/分布安慰剂：**等价**支持“仅靠容量/"
-              "分布即可解释”，**显著变差且超过 SESOI** 才支持头—证据对应有"
-              "因果作用；`gate_closed` 是阳性对照，若等价则说明实验灵敏度不足，"
-              "必须先排查实现/评测。`no_op` 行不参与等价性判定。")
+              "`head_permute` 是推理期容量/分布安慰剂；"
+              "`conc_permute/query_permute/len_permute` 是 B/A/C 位置证据的"
+              "分布匹配安慰剂：**等价**支持“逐值分布/容量或位置可替换即可"
+              "解释”，**显著变差且超过 SESOI** 才支持逐点对应有因果作用；"
+              "`gate_closed` 是阳性对照，若等价则说明实验灵敏度不足，必须先"
+              "排查实现/评测。`no_op` 行不参与等价性判定。")
     return md
 
 
