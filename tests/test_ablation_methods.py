@@ -9,6 +9,7 @@ import json
 import math
 import os
 import tempfile
+from unittest import mock
 
 import numpy as np
 import torch
@@ -33,7 +34,8 @@ from run_all import (build_summary, _ablation_lesion_records,
                      _render_matched_ablation_contrasts,
                      CAUSAL_ABLATION_METRIC, INFERENCE_INTERACTION_METRIC,
                      INFERENCE_SHAPLEY_METRIC, MATCHED_ABLATION_CONTRAST_METRIC,
-                     MATCHED_ABLATION_METRIC, SHAPLEY_PPL_METRIC)
+                     MATCHED_ABLATION_METRIC, SHAPLEY_PPL_METRIC,
+                     single_factor_audit)
 
 
 def _tiny(variant):
@@ -640,6 +642,21 @@ def test_causal_ablation_uses_seed_level_paired_inference():
     print("  [ok] 因果消融：先按种子聚合 ΔNLL，再做跨种子配对+Holm")
 
 
+def test_matched_lesion_verdict_is_labeled_per_record():
+    """活动匹配对照的判定必须按当前病灶标记，不能沿用上一条病灶的 spec。"""
+    deltas = {"no_query": 0.10, "no_query_matched": 0.04}
+    ablations = {"lega": {s: _payload("lega", s, deltas)
+                          for s in (1, 2, 3)}}
+    tests = _ablation_lesion_records(ablations)
+    by = {t["lesion"]: t for t in tests}
+    assert by["no_query"]["causal_verdict"].startswith(
+        "病灶显著变差：推理期该机制有因果贡献")
+    assert by["no_query_matched"]["causal_verdict"].startswith(
+        "活动匹配对照：")
+    assert by["no_query_matched"]["matched_control"] is True
+    print("  [ok] 活动匹配病灶按记录标记，不沿用上一条 spec")
+
+
 def test_causal_ablation_marks_noop_and_skips_not_applicable():
     # 全部种子 no-op：系数已为 0，不能把“无差异”当成“无因果作用”的证据。
     ablations = {"lega": {s: _payload("lega", s, {"no_conc": 0.0}, no_op=True)
@@ -954,3 +971,36 @@ def test_shapley_rescales_opposite_huge_cell_values():
         raised = True
     assert raised
     print("  [ok] Shapley：反向极值先缩放再差分，总效应不可表示时显式拒绝")
+
+
+def test_single_factor_audit_covers_inference_lesion_mappings():
+    """推理期单病灶、活动匹配与 2^3 格也必须保持单因子对应。"""
+    audit = single_factor_audit()
+    assert audit["ok"] and not audit["problems"], audit
+    assert {p["factor"] for p in audit["inference_matched_lesions"]} == {
+        "A", "B", "C"}
+    assert len(audit["inference_factorial_cells"]) == 8
+
+    bad_pairs = (("no_query", "no_query_matched", "B"),
+                 ) + tuple(MATCHED_LESION_PAIRS[1:])
+    with mock.patch("lega.pipeline.common.MATCHED_LESION_PAIRS", bad_pairs):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("实际清零" in p or "matched_factor" in p
+                   for p in audit["problems"]), audit
+
+    bad_cells = dict(INFERENCE_FACTORIAL_CELLS, A="no_evidence")
+    with mock.patch("lega.pipeline.common.INFERENCE_FACTORIAL_CELLS",
+                    bad_cells):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("推理期格 'A'" in p for p in audit["problems"]), audit
+
+    bad_lesions = {k: dict(v) for k, v in LESION_BY_ID.items()}
+    del bad_lesions["len_only"]["factorial_cell"]
+    with mock.patch("lega.pipeline.common.ABLATION_LESION_BY_ID",
+                    bad_lesions):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("factorial_cell" in p for p in audit["problems"]), audit
+    print("  [ok] 单因素审计覆盖推理期病灶/活动匹配/2^3 单因子格")

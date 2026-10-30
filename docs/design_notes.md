@@ -16,7 +16,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
-单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。
+单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对参数化稳健性使用的 4 条原始/归一化单因子边，以及推理期单病灶、活动匹配对照和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。
 
 ### 参数化稳健性：归一化 c vs 原始 log max_p
 

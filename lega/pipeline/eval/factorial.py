@@ -686,7 +686,7 @@ def _ablation_lesion_records(ablations):
         # checkpoint 上根本没被使用”误读成“病灶无效应”。
         if no_op_seeds and no_op_seeds < n:
             verdict = f"部分种子 no-op（{no_op_seeds}/{n}）；" + verdict
-        if spec.get("matched_control"):
+        if res.get("matched_control"):
             verdict = "活动匹配对照：" + verdict
         res["causal_verdict"] = verdict
         res["causal_contribution"] = bool(

@@ -3,6 +3,7 @@ import json
 import math
 import os
 import tempfile
+from unittest import mock
 
 import torch
 
@@ -15,7 +16,7 @@ from lega.reparameterization import (CONTRASTS, NORMALIZED_CELLS, RAW_CELLS,
                                      contrast_effects,
                                      contrast_parameterization_tests)
 from run_all import (_render_reparameterization, _reparameterization_analysis,
-                      build_summary)
+                      build_summary, single_factor_audit)
 from tests.pipeline_helpers import _write_json
 
 
@@ -225,3 +226,44 @@ def test_build_summary_omits_reparameterization_section_when_not_run():
         assert out["reparameterization"]["not_run"] is True
         assert "参数化稳健性（原始" not in out["markdown"]
     print("  [ok] 未运行 raw 对照时汇总保持静默")
+
+
+def test_single_factor_audit_covers_raw_parameterization_edges():
+    """参数化稳健性中的每条原始/归一化边也必须只改变一个因子。"""
+    audit = single_factor_audit()
+    assert audit["ok"] and not audit["problems"], audit
+    edges = {(c["factor"], c["direction"])
+             for c in audit["reparameterization_contrasts"]}
+    assert edges == {("A", "remove"), ("B", "remove"),
+                     ("C", "remove"), ("B", "add")}, edges
+    for c in audit["reparameterization_contrasts"]:
+        assert c["normalized_candidate"] != c["normalized_reference"]
+        assert c["raw_candidate"] != c["raw_reference"]
+
+    bad = []
+    for factor, direction, norm_pair, raw_pair, note in CONTRASTS:
+        if (factor, direction) == ("B", "remove"):
+            raw_pair = ("lega_raw_conc_only", "lega_raw")
+        bad.append((factor, direction, norm_pair, raw_pair, note))
+    with mock.patch("lega.pipeline.common.REPARAMETERIZATION_CONTRASTS",
+                    tuple(bad)):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("原始参数化" in p and "实际改变" in p
+                   for p in audit["problems"]), audit
+
+    missing = tuple(c for c in CONTRASTS
+                    if (c[0], c[1]) != ("B", "add"))
+    with mock.patch("lega.pipeline.common.REPARAMETERIZATION_CONTRASTS",
+                    missing):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("缺少原始参数化单因素对比" in p
+                   for p in audit["problems"]), audit
+
+    bad_cells = dict(RAW_CELLS, B="lega_raw_no_len")
+    with mock.patch("lega.pipeline.common.RAW_FACTORIAL_CELLS", bad_cells):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("RAW_CELLS" in p for p in audit["problems"]), audit
+    print("  [ok] 单因素审计覆盖原始参数化边，并拒绝多因子/缺失/重复格")

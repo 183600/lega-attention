@@ -29,6 +29,7 @@ from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)
 from lega.reparameterization import (  # noqa: E402
+    CONTRASTS as REPARAMETERIZATION_CONTRASTS,
     NORMALIZED_CELLS as NORMALIZED_FACTORIAL_CELLS,
     RAW_CELLS as RAW_FACTORIAL_CELLS,
     RAW_FACTORIAL_VARIANTS, RAW_SPECIFIC_VARIANTS,
