@@ -1601,3 +1601,104 @@ def _render_length_null(report, stale: bool = False) -> list:
               "注意力分布的测量；它约束“c 本身已长度解耦”的措辞，不替代模型"
               "级 c 分布与长度分层 RULER 证据。")
     return md
+
+
+def _length_calib_median(values):
+    vals = [v for v in (_finite_number(x) for x in values) if v is not None]
+    return float(np.median(vals)) if vals else None
+
+
+def _render_length_calibration(calibrations, requested: bool = False,
+                               random_slope=None) -> list:
+    md = ["", "## 经验长度校准审计（训练后模型，val split；探索性）", ""]
+    if not isinstance(calibrations, dict) or not calibrations:
+        if requested:
+            md.append("⚠ 本轮配置请求了经验长度校准审计，但没有找到可用的 "
+                      "`length_calibration_*.json`（checkpoint、val 数据或产物 "
+                      "归属缺失）；不能据此声称模型注意力已长度校准。")
+        return md
+    md.append(
+        "本表直接测量训练后模型在真实 val 文本上的 `c=log(n·max_j p_j)` 随 "
+        "`log2(n)` 的斜率，而不是只依赖合成零假设。suffix 增长固定窗口末尾与 "
+        "query token（只增加前缀），并以 `(window, query_offset)` 固定效应估计"
+        "斜率；prefix 增长固定窗口起点（query token 随长度改变），只作敏感性"
+        "分析。斜率 0 表示 `max_j p_j` 按 1/n 收缩；斜率约 1 表示 `c` 仍随长度"
+        "增长。bootstrap 以窗口为聚类单元，下列为跨种子中位数，逐头区间与 "
+        "p 值见 JSON。")
+    md.append("")
+    md.append("| 变体 | 增长模式 | 长度档 | c 均值(最短→最长) | "
+              "c~log2(n) 斜率 | 斜率=0 的头占比 | log max_p 斜率 | "
+              "门控 logit 斜率 | 窗口数 |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    any_row = False
+    for variant in sorted(calibrations):
+        per_seed = calibrations.get(variant)
+        if not isinstance(per_seed, dict):
+            continue
+        for growth in ("suffix", "prefix"):
+            entries = []
+            lengths = None
+            n_windows = None
+            for seed in _sorted_seeds(per_seed):
+                payload = per_seed.get(seed)
+                if not isinstance(payload, dict):
+                    continue
+                result = (payload.get("results") or {}).get(growth)
+                if not isinstance(result, dict):
+                    continue
+                summary = result.get("summary") or {}
+                entries.append({
+                    "c": (summary.get("c") or {}).get("median"),
+                    "flat": (summary.get("c") or {}).get("fraction_flat"),
+                    "n_heads": (summary.get("c") or {}).get("n_heads"),
+                    "log_max_p": (summary.get("log_max_p") or {}).get("median"),
+                    "gate_logit": (summary.get("gate_logit") or {}).get("median"),
+                    "per_length": result.get("per_length") or {},
+                })
+                if lengths is None:
+                    lengths = result.get("lengths")
+                if n_windows is None:
+                    n_windows = len(payload.get("window_starts") or [])
+            if not entries:
+                continue
+            any_row = True
+            c_values = [e["c"] for e in entries]
+            flat = [e["flat"] for e in entries]
+            logmp = [e["log_max_p"] for e in entries]
+            gate = [e["gate_logit"] for e in entries]
+            c_mean = "-"
+            if isinstance(lengths, list) and lengths:
+                first = _length_calib_median([
+                    ((e["per_length"].get(str(min(lengths))) or {}).get("c")
+                     or {}).get("mean") for e in entries])
+                last = _length_calib_median([
+                    ((e["per_length"].get(str(max(lengths))) or {}).get("c")
+                     or {}).get("mean") for e in entries])
+                if first is not None and last is not None:
+                    c_mean = f"{first:+.3f}→{last:+.3f}"
+            lengths_s = ("-" if not isinstance(lengths, list)
+                         else ",".join(str(x) for x in lengths))
+            flat_med = _length_calib_median(flat)
+            flat_s = ("-" if flat_med is None else f"{flat_med:.0%}")
+            gate_med = _length_calib_median(gate)
+            label = variant + ("（敏感性）" if growth == "prefix" else "")
+            md.append(
+                f"| {label} | {growth} | {lengths_s} | {c_mean} | "
+                f"{_fmt_signed(_length_calib_median(c_values))} | {flat_s} | "
+                f"{_fmt_signed(_length_calib_median(logmp))} | "
+                f"{_fmt_signed(gate_med)} | "
+                f"{'-' if n_windows is None else n_windows} |")
+    if not any_row:
+        md.append("⚠ 产物存在，但没有可解析的 suffix/prefix 结果。")
+        return md
+    md.append("")
+    if random_slope is not None:
+        md.append(
+            f"- 合成 `random` 零假设的 c~log2(n) 斜率为 "
+            f"{_fmt_signed(random_slope)}；经验斜率必须与它及 RULER 分档结果"
+            "合读，不能把 `c` 的绝对值当作长度校准的充分证据。")
+    md.append(
+        "- 边界：这是观测性审计，不改变门控参数；suffix 斜率控制窗口与 query "
+        "位置，prefix 斜率仍可能混入 query token 内容/位置变化。门控 logit 斜率"
+        "是总长度依赖的简化式，不是 `b` 系数的因果估计。")
+    return md

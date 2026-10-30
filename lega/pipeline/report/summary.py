@@ -1006,6 +1006,36 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         and length_null.get("pipeline_run_id") != scope_run_id)
     md += _render_length_null(length_null, stale=length_null_stale)
 
+    # --- 训练后经验长度校准审计（与 length_null 合成诊断互补）
+    length_calibrations = {}
+    lc_scope = repro.get("length_calibration")
+    if isinstance(lc_scope, dict):
+        allow_lc = lc_scope.get("executed") is True
+        lc_variants = (lc_scope.get("variants")
+                       if isinstance(lc_scope.get("variants"), list) else [])
+    else:
+        allow_lc = True
+        lc_variants = None
+    for fp in _result_files(results_dir, "length_calibration", scope_seeds):
+        d = load(fp)
+        if not in_run_scope(fp, d):
+            continue
+        if not allow_lc:
+            continue
+        if lc_variants is not None and d["variant"] not in lc_variants:
+            continue
+        length_calibrations.setdefault(
+            d["variant"], {})[_seed_key(fp, d)] = d
+    lc_requested = bool(isinstance(lc_scope, dict)
+                        and lc_scope.get("executed") is True)
+    random_slope = None
+    if isinstance(length_null, dict):
+        random_slope = ((length_null.get("modes") or {}).get("random") or {}
+                        ).get("slope_c_per_log2_n")
+    md += _render_length_calibration(
+        length_calibrations, requested=lc_requested,
+        random_slope=random_slope)
+
     # --- 先验设计计划与分析人群（训练前声明，汇总时核对）
     md += render_design_section(
         design_plan, design_conf,
@@ -1439,6 +1469,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "lat_variants",
         "length_analysis",
         "length_by_pair",
+        "length_calibrations",
         "length_null",
         "load",
         "log_tests",
@@ -1563,6 +1594,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'ruler_sample_tests': ctx["ruler_sample_tests"],
         'ruler_length': ctx["length_analysis"],
         'length_null': ctx.get("length_null"),
+        'length_calibration': ctx.get("length_calibrations"),
         'ppl_window_tests': ctx["ppl_window_tests"],
         'factorial_shapley': ctx["shapley_tests"],
         'reparameterization': ctx["reparameterization"],

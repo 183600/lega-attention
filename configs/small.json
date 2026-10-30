@@ -34,6 +34,16 @@
     "seed": 1337
   },
 
+  "length_calibration": {
+    "enabled": true,
+    "lengths": [64, 128, 256, 512, 1024],
+    "n_windows": 8,
+    "query_positions": 4,
+    "growth_modes": ["suffix", "prefix"],
+    "bootstrap": 400,
+    "tolerance": 0.05
+  },
+
   "design": {
     "alpha": 0.05,
     "power": 0.8,

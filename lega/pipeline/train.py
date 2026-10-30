@@ -215,6 +215,9 @@ def main():
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
+    p.add_argument("--skip_length_calibration", action="store_true",
+                   help="跳过训练后经验长度校准审计（默认按配置 "
+                        "length_calibration.enabled 执行；结果供汇总页使用）")
     p.add_argument("--skip_ablation", action="store_true",
                    help="跳过推理期因果病灶消融（默认对 --ablate_variants "
                         "指定的门控变体，在同一 checkpoint/同一批 val 窗口上"
@@ -344,6 +347,10 @@ def main():
     if not isinstance(cfg, dict):
         p.error(f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
                 f"{args.config}")
+    lc_cfg = cfg.get("length_calibration")
+    length_calibration_enabled = bool(
+        isinstance(lc_cfg, dict) and lc_cfg.get("enabled") is True
+        and not args.skip_length_calibration)
 
     # 本轮流水线的唯一 run_id：在任何训练/调优/基线产物写入之前确定并通过
     # 环境变量传给全部子进程。结果文件内嵌该值后，汇总能区分本轮产物与同一
@@ -605,6 +612,13 @@ def main():
             "split": "val",
             "note": DOSE_NOTE,
         },
+        "length_calibration": {
+            "executed": bool(length_calibration_enabled),
+            "variants": list(variants),
+            "split": "val",
+            "note": ("训练后经验 c~log2(n) 审计；suffix 固定窗口末尾与 "
+                     "query token，prefix 为敏感性分析；不访问 test"),
+        },
         "evaluation": {
             "full_eval": bool(args.full_eval),
             "window_offsets": args.window_offsets,
@@ -636,6 +650,7 @@ def main():
             "stages": {
                 "ruler": bool(not args.skip_ruler),
                 "analysis": bool(not args.skip_analysis),
+                "length_calibration": bool(length_calibration_enabled),
                 "latency": bool(not args.skip_latency),
                 "ablation": bool(not args.skip_ablation and ablate_variants),
                 "dose_response": bool(args.dose_response and dose_variants),
@@ -791,6 +806,8 @@ def main():
             cmd += ["--skip_ruler"]
         if args.skip_analysis or v not in GATED_FOR_ANALYSIS:
             cmd += ["--skip_analysis"]
+        if not length_calibration_enabled:
+            cmd += ["--skip_length_calibration"]
         print("+", " ".join(cmd), flush=True)
         chain_cmds.append(cmd)
     if chain_cmds:

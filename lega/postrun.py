@@ -13,6 +13,7 @@ PYTHONHASHSEED 由外层命令的 --seed 确定（与 run_all._cmd_env 一致）
 退出码：0=全部执行成功；非零=失败阶段的退出码（stderr 标明阶段名与等价命令）。
 """
 import argparse
+import json
 import os
 import runpy
 import sys
@@ -87,6 +88,31 @@ def _analysis_argv(a, ckpt: str) -> List[str]:
     if a.analysis_ctx is not None:
         argv += ["--ctx", str(a.analysis_ctx)]
     return argv
+
+
+def _length_calibration_argv(a, ckpt: str) -> List[str]:
+    argv = ["--ckpt", ckpt, "--data_dir", a.data_dir,
+            "--config", a.config,
+            "--out", os.path.join(
+                a.results_dir,
+                f"length_calibration_{a.variant}{a.suffix}.json"),
+            "--device", a.device]
+    if a.smoke:
+        argv += ["--lengths", "32,64", "--n_windows", "2",
+                 "--query_positions", "2", "--bootstrap", "50"]
+    return argv
+
+
+def _length_calibration_enabled(config_path: str) -> bool:
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    block = cfg.get("length_calibration")
+    return isinstance(block, dict) and block.get("enabled") is True
 
 
 def _run_module(mod_path: str, argv) -> None:
@@ -169,6 +195,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--skip_ruler", action="store_true")
     p.add_argument("--skip_analysis", action="store_true",
                    help=GATED_FOR_ANALYSIS_HINT)
+    p.add_argument("--skip_length_calibration", action="store_true",
+                   help="跳过训练后经验长度校准审计（默认按配置 "
+                        "length_calibration.enabled 执行）")
     return p
 
 
@@ -188,6 +217,10 @@ def main() -> None:
         _run_stage("ruler", "lega.ruler", _ruler_argv(args, ckpt))
     if not args.skip_analysis:
         _run_stage("analysis", "lega.analysis", _analysis_argv(args, ckpt))
+    if (not args.skip_length_calibration
+            and _length_calibration_enabled(args.config)):
+        _run_stage("length_calibration", "lega.lengthcalib",
+                   _length_calibration_argv(args, ckpt))
 
 
 if __name__ == "__main__":

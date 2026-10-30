@@ -1170,3 +1170,28 @@ run 清单），汇总时写 `design_conformance.json`，并在 `significance.js
   修复缺失机制。
 - 计划 fail 不硬中止流水线（允许明确标注的探索性/冒烟运行），但会进入
   汇总页与确认性降级证据；正式实验应把 `status=ok` 当作开跑前的检查项。
+
+## 训练后经验长度校准审计
+
+`lega/length_null.py` 的合成零假设诊断只回答“随机打分下 c 是否仍随长度
+增长”，不能证明训练模型的注意力已经长度校准。`lega/lengthcalib.py` 因此
+在真实 **val** 文本上做配对审计：
+
+- 对每个窗口和长度 \(n\)，收集每个 `(layer, head, query_offset)` 的
+  \(c=\log(n\cdot\max_j p_j)\)；
+- `suffix` 增长固定窗口末尾与 query token，只增加前缀，并显式使用
+  `(window, query_offset)` 固定效应估计 \(c\sim\log_2 n\) 斜率；`prefix`
+  增长固定窗口起点、query token 随长度改变，只作敏感性分析；
+- 以窗口为聚类单元做 bootstrap，报告逐头斜率、95% 区间与区间是否整体
+  落在 `[-tolerance, tolerance]` 内；同时报告 `log max_p` 与门控
+  `logit` 的简化式长度斜率；
+- 长度、窗口数、query 位置数、bootstrap 次数与容差由配置
+  `length_calibration` 块控制；结果写
+  `results/<tag>/length_calibration_<variant><suffix>.json`（`<suffix>` 为种子后缀，单种子时为空），汇总页新增
+  “经验长度校准审计”小节。
+
+解释边界：suffix 斜率接近 0 是该设计下“最大注意力概率按 \(1/n\) 收缩”的
+证据，但不是因果干预；prefix 斜率可能混入 query token 内容/位置变化；
+门控 `logit` 斜率是总长度依赖的简化式，不是 `b·log n` 系数的因果估计。
+因此该审计必须与 `length_null`、RULER 分档、剂量-反应和病灶消融合读，
+不能单独升级为确认性结论。审计只读取 val，不访问 test。
