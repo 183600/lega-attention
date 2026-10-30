@@ -21,7 +21,7 @@ from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         mcnemar_exact_p, min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
                         paired_t_test, pearson,
-                        roc_pr_aucs, save_json,
+                        roc_pr_aucs, save_json, save_text,
                         student_t_two_sided_p, t_critical_95, wilson_score_ci)
 
 
@@ -171,6 +171,22 @@ def test_save_json_writes_strict_json_atomically():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] save_json：非有限浮点转 null、原子写、失败清理临时文件")
+
+
+def test_save_text_replaces_atomically_without_leftover_temp():
+    """Markdown/CSV 报告也必须原子落盘，不能留下半截内容或临时文件。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "summary.md")
+        save_text("first\n", path)
+        assert open(path, encoding="utf-8", newline="").read() == "first\n"
+        save_text("second\nline\n", path)
+        assert open(path, encoding="utf-8", newline="").read() == (
+            "second\nline\n")
+        assert not [f for f in os.listdir(tmp) if ".tmp" in f]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] save_text：原子替换、无临时文件残留")
 
 
 def _brute_ap(scores, labels):

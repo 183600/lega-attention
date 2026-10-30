@@ -65,8 +65,9 @@ from lega.preflight import (ALLOW_ENV,  # noqa: E402
                             data_report_binding_issue, load_data_report)
 from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
 from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
-from lega.repro import (data_fingerprint, git_info, provenance_drift,  # noqa: E402
-                        runtime_info, sanity_summary, sha256_file,
+from lega.repro import (PIPELINE_RUN_ID_ENV, data_fingerprint,  # noqa: E402
+                        git_info, provenance_drift, runtime_info,
+                        sanity_summary, sha256_file, source_tree_fingerprint,
                         worktree_state, write_worktree_patch)
 from lega.ruler import DEPTH_BINS as RULER_DEPTH_BINS  # noqa: E402
 from lega.uncertainty import (aggregate_variance_components,  # noqa: E402
@@ -76,7 +77,7 @@ from lega.utils import (bootstrap_mean_ci, config_bool,
                         holm_bonferroni, mcnemar_exact_p, mean_std,
                         min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
-                        paired_t_test, save_json,
+                        paired_t_test, save_json, save_text,
                         seed_int, seed_plan, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)

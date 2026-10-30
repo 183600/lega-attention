@@ -335,6 +335,58 @@ def test_build_summary_scopes_discovery_to_current_repro_run():
     print("  [ok] build_summary（repro.json 限定本次运行的变体/种子发现范围）")
 
 
+def test_build_summary_excludes_artifacts_from_other_pipeline_runs():
+    """同一 results 目录重跑时，旧 run_id 或旧数据指纹的产物不得混入汇总。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        repro = {"variants": ["lega"], "seeds": [1, 2], "smoke": False,
+                 "run_id": "run-new", "data": {"digest": "data-new"}}
+        _write_json(os.path.join(tmp, "repro.json"), repro)
+        current = {"variant": "lega", "seed": 1, "val_ppl": 9.8765,
+                   "val_loss": 2.0, "n_params": 10,
+                   "pipeline_run_id": "run-new",
+                   "data_fingerprint": "data-new"}
+        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), current)
+        stale_run = {"variant": "lega", "seed": 2, "val_ppl": 1.2345,
+                     "val_loss": 0.1, "n_params": 10,
+                     "pipeline_run_id": "run-old",
+                     "data_fingerprint": "data-new"}
+        _write_json(os.path.join(tmp, "eval_lega_seed2.json"), stale_run)
+        # 旧流水线还留下一个缺少 run_id 的同 (变体, 种子) 产物：无法证明
+        # 属于本轮，必须排除而不是默认信任。
+        _write_json(os.path.join(tmp, "ruler_lega_seed2.json"),
+                    {"variant": "lega", "seed": 2, "n": 1,
+                     "data_fingerprint": "data-new"})
+        out = build_summary(tmp)
+        assert "1.2345" not in out["markdown"]
+        row = out["rows"][0]
+        assert row["variant"] == "lega"
+        assert row.get("n_seeds") == 1, row
+
+        # run_id 相同但数据指纹不同：仍是另一份数据上的观测。
+        stolen = dict(current)
+        stolen.update(seed=2, val_ppl=5.4321,
+                      data_fingerprint="data-old")
+        _write_json(os.path.join(tmp, "eval_lega_seed2.json"), stolen)
+        out = build_summary(tmp)
+        assert "5.4321" not in out["markdown"]
+        assert out["rows"][0].get("n_seeds") == 1, out["rows"][0]
+
+        # 本轮完整产物（run_id 与数据指纹都匹配）重新纳入，n 回到 2。
+        fresh = dict(current)
+        fresh.update(seed=2, val_ppl=8.0)
+        _write_json(os.path.join(tmp, "eval_lega_seed2.json"), fresh)
+        _write_json(os.path.join(tmp, "ruler_lega_seed2.json"),
+                    {"variant": "lega", "seed": 2, "n": 1,
+                     "pipeline_run_id": "run-new",
+                     "data_fingerprint": "data-new"})
+        out = build_summary(tmp)
+        assert out["rows"][0].get("n_seeds") == 2, out["rows"][0]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] build_summary 按 run_id/数据指纹排除旧流水线产物")
+
+
 def test_build_summary_warns_on_eval_runtime_drift():
     """评测环境与训练清单不一致时，汇总页必须显式警告而不是只写进 JSON。
 
@@ -363,9 +415,16 @@ def test_build_summary_warns_on_eval_runtime_drift():
                                  "eval": "2.15"}]))
         md = build_summary(tmp)["markdown"]
         assert "评测环境" in md and "torch" in md and "lega/seed1" in md
+
+        _write_json(os.path.join(tmp, "eval_lega.json"), dict(
+            rec, source_tree_matches_training=False,
+            train_source_tree_digest="aaa",
+            eval_source_tree_digest="bbb"))
+        md = build_summary(tmp)["markdown"]
+        assert "源码/配置树" in md and "lega/seed1" in md
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] build_summary 显式警告 eval/train 运行环境漂移")
+    print("  [ok] build_summary 显式警告 eval/train 运行环境/源码树漂移")
 
 
 def test_rel_pct_and_eff_cells():

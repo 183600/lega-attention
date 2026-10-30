@@ -28,7 +28,8 @@ from .attention import RUNNABLE_VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .datacheck import check_vocab_capacity
 from .model import GPT, load_model, count_params
-from .repro import data_fingerprint, git_info, sha256_file
+from .repro import (current_pipeline_run_id, data_fingerprint,
+                    git_info, sha256_file)
 from .utils import (amp_autocast, amp_dtype_for, config_bool,
                     config_finite_float, enable_tf32, get_device, save_json,
                     seed_int, set_seed, strict_int)
@@ -582,6 +583,7 @@ def main():
         data_fp = None
     payload = {
         "meta": {"device": device, "seed": seed,
+                 "pipeline_run_id": current_pipeline_run_id(),
                  "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
                  "decode_tokens": decode_tokens, "iters": iters, "warmup": warmup,
                  "amp": bool(use_amp), "torch": torch.__version__,

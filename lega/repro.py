@@ -28,6 +28,81 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FINGERPRINT_ALGO = "sha256-16"
 _CACHE_NAME = ".lega_fingerprint.json"
 
+# 流水线每次调用分配的唯一 run_id 通过环境变量传给所有子进程；结果文件
+# 内嵌同一值后，汇总可以区分“本轮产物”与结果目录里上一轮/手工留下的
+# 同名文件，而不是仅凭变体名与种子猜测来源。
+PIPELINE_RUN_ID_ENV = "LEGA_PIPELINE_RUN_ID"
+
+# 科学代码身份：git 不可用（源码包/快照目录）或工作区状态记录缺失时，
+# 仍能对“产生结果的代码与配置”给出可复算的结构指纹。
+SOURCE_TREE_DIRS = ("lega", "scripts", "configs", "preregistration")
+SOURCE_TREE_FILES = ("run_all.py", "requirements.txt", "requirements-ci.txt")
+_SOURCE_TREE_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache"}
+_SOURCE_TREE_SKIP_SUFFIXES = (".pyc", ".pyo", ".tmp")
+
+
+def current_pipeline_run_id():
+    """当前流水线 run_id（由 run_all 通过环境变量注入）；独立运行返 None。"""
+    value = os.environ.get(PIPELINE_RUN_ID_ENV)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def source_tree_fingerprint(root: str = None) -> dict:
+    """科学代码/配置目录树的稳定内容指纹（不依赖 git）。
+
+    覆盖训练与评测实际执行的代码、实验配置、预注册表与依赖声明；显式排除
+    ``__pycache__``/``.pyc`` 等派生文件以及结果目录。路径统一为 POSIX 风格、
+    按字典序排列，摘要只由“相对路径 + 文件 SHA-256”决定，因此在源码压缩包、
+    无 git 的容器或工作区状态记录缺失时仍可被第三方独立复算。
+
+    返回结构包含逐文件条目，便于回答“到底哪份文件变了”；``digest`` 是整体
+    身份。文件在遍历后消失/不可读时跳过，绝不把半份树冒充完整（调用方可
+    通过 ``files`` 与实际树比对）。
+    """
+    root = os.path.abspath(root or ROOT)
+    rels = []
+    for top in SOURCE_TREE_DIRS:
+        base = os.path.join(root, top)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in _SOURCE_TREE_SKIP_DIRS)
+            for name in sorted(filenames):
+                if name.endswith(_SOURCE_TREE_SKIP_SUFFIXES):
+                    continue
+                rels.append(os.path.relpath(os.path.join(dirpath, name), root))
+    for name in SOURCE_TREE_FILES:
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            rels.append(name)
+    entries = []
+    seen = set()
+    for rel in sorted(rels, key=lambda p: p.replace(os.sep, "/")):
+        rel_norm = rel.replace(os.sep, "/")
+        if rel_norm in seen:
+            continue
+        seen.add(rel_norm)
+        path = os.path.join(root, rel)
+        try:
+            sha = sha256_file(path)
+            size = int(os.path.getsize(path))
+        except OSError:
+            continue
+        entries.append({"path": rel_norm, "size": size, "sha256": sha})
+    h = hashlib.sha256()
+    for entry in entries:
+        h.update(entry["path"].encode("utf-8"))
+        h.update(b"\0")
+        h.update(entry["sha256"].encode("ascii"))
+        h.update(b"\0")
+    return {"algo": "sha256-tree-v1", "digest": h.hexdigest()[:16],
+            "files": len(entries), "entries": entries}
+
+
 # 完整 sanity 结果必须覆盖的“代码正确性”检查项（与 lega.sanity 的输出同名）。
 # 只在结果文件带 batch_sha256（可区分“最小手写/旧格式”与真实 CLI 产物）
 # 时强制要求，避免把 checks 子集当成完整闸门；旧文件缺失时保持兼容，
@@ -270,6 +345,27 @@ def provenance_drift(start: dict, end: dict) -> dict:
             mismatches.append({"field": "data_fingerprint", "start": s_data,
                                "end": e_data})
 
+    # 源码树指纹独立于 git：旧快照没有该字段时保持兼容（不把“未记录”变成
+    # 新的 unknown，否则历史台账会被误判为不可核对）；只有一端记录时才记
+    # unknown，两端都有则内容哈希不同即代码/配置在实验期间被改动。
+    s_src = _get(start, "source_tree")
+    e_src = _get(end, "source_tree")
+    if s_src is None and e_src is None:
+        pass
+    elif not isinstance(s_src, dict) or not isinstance(e_src, dict):
+        checks["source_tree_digest"] = None
+        unknown.append("source_tree_digest")
+    else:
+        s_digest, e_digest = s_src.get("digest"), e_src.get("digest")
+        if not isinstance(s_digest, str) or not isinstance(e_digest, str):
+            checks["source_tree_digest"] = None
+            unknown.append("source_tree_digest")
+        else:
+            checks["source_tree_digest"] = s_digest == e_digest
+            if s_digest != e_digest:
+                mismatches.append({"field": "source_tree_digest",
+                                   "start": s_digest, "end": e_digest})
+
     return {
         "checked": checks,
         "unknown": unknown,
@@ -437,6 +533,37 @@ def _pkg_version(name: str):
         return None
 
 
+_INSTALLED_DIST_CACHE = None
+
+
+def _installed_distributions() -> dict:
+    """完整已安装 Python 包版本清单（只读缓存）。
+
+    只记录 torch/numpy 等少数包无法回答“结果是否在另一套依赖栈上产生”：
+    tokenizer、绘图库乃至间接依赖都可能改变数据/图表。名称按不区分大小写
+    排序，值为发行版声明的版本；读取失败时返回空 dict 而不是阻塞实验。
+    """
+    global _INSTALLED_DIST_CACHE
+    if _INSTALLED_DIST_CACHE is not None:
+        return dict(_INSTALLED_DIST_CACHE)
+    try:
+        from importlib import metadata
+        dists = {}
+        for dist in metadata.distributions():
+            try:
+                name = dist.metadata.get("Name")
+                version = dist.version
+            except Exception:
+                continue
+            if isinstance(name, str) and name.strip() and version:
+                dists.setdefault(name.strip(), str(version))
+        _INSTALLED_DIST_CACHE = dict(
+            sorted(dists.items(), key=lambda kv: kv[0].lower()))
+    except Exception:
+        _INSTALLED_DIST_CACHE = {}
+    return dict(_INSTALLED_DIST_CACHE)
+
+
 def runtime_info(device: str = None) -> dict:
     """运行环境版本与确定性/精度开关（跨机器不可复现时用于排查差异来源）。"""
     info = {
@@ -454,6 +581,9 @@ def runtime_info(device: str = None) -> dict:
         # 未安装时显式为 None，避免“环境已记录”的错觉
         "packages": {name: _pkg_version(name)
                      for name in ("tiktoken", "matplotlib")},
+        # 完整依赖栈（含间接依赖）：requirements 只声明直接依赖，环境漂移
+        # 往往发生在未固定的传递依赖上。
+        "installed_distributions": _installed_distributions(),
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "cudnn_enabled": bool(torch.backends.cudnn.enabled),
@@ -809,6 +939,7 @@ def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
         "tag": tag,
         "variant": variant,
         "seed": seed,
+        "pipeline_run_id": current_pipeline_run_id(),
         "seed_report": seed_report(seed),
         "time": now_str(),
         "config_file": config_path,
@@ -816,6 +947,8 @@ def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
         "git": git_info(),
         # dirty 时 commit 无法重建代码：额外记录 diff 指纹/文件清单
         "worktree": worktree_state(),
+        # 与 git 互补的代码/配置树指纹：源码包或无 git 环境也可复算。
+        "source_tree": source_tree_fingerprint(),
         "data": data_fingerprint(data_dir),
         "runtime": runtime_info(device),
         "sanity": sanity,
@@ -877,6 +1010,10 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
     cfg = os.path.join(ckpt_dir, "config_used.json")
     git = git_info()
     eval_runtime = runtime_info(device)
+    try:
+        current_source = source_tree_fingerprint()
+    except Exception:
+        current_source = None
     current_data = None
     if data_dir:
         try:
@@ -907,6 +1044,12 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
         # 旧清单没有该字段时回退到上面同一份 config_used 文件；有清单时优先
         # 采用训练时记录的值，避免 checkpoint 目录被覆盖后误用新配置。
         "config_used_sha256": cfg_sha,
+        # 流水线 run_id 与两端源码树身份：run_id 用于汇总时排除同目录的
+        # 上一轮遗留产物；source_tree 为无 git 场景提供可复算的代码身份。
+        "pipeline_run_id": current_pipeline_run_id(),
+        "train_source_tree_digest": None,
+        "eval_source_tree_digest": (current_source or {}).get("digest"),
+        "source_tree_matches_training": None,
         # 训练 run 是否通过了小批量过拟合 sanity 闸门（无清单/旧清单为 None）。
         # sanity_verified 区分“PASS 已核对身份”与“旧证据/无法核对”：
         # 硬身份不一致时不得把旧 PASS 继承到下游结果。
@@ -958,6 +1101,22 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
             out["runtime_matches_training"] = drift["matches"]
             out["runtime_mismatches"] = drift["mismatches"]
             out["runtime_unknown_fields"] = drift["unknown_fields"]
+        mrid = manifest.get("pipeline_run_id")
+        if (out.get("pipeline_run_id") is None
+                and isinstance(mrid, str) and mrid.strip()):
+            # 单独/手工评测没有父流水线环境变量时，继承训练清单的 run_id，
+            # 使结果仍能绑定到产出该 checkpoint 的那一轮实验；有当前环境
+            # run_id 时保留当前值（表示本次评测属于新的流水线调用）。
+            out["pipeline_run_id"] = mrid.strip()
+        msrc = manifest.get("source_tree")
+        if isinstance(msrc, dict):
+            train_src = msrc.get("digest")
+            if isinstance(train_src, str):
+                out["train_source_tree_digest"] = train_src
+                eval_src = out.get("eval_source_tree_digest")
+                if isinstance(eval_src, str):
+                    out["source_tree_matches_training"] = (
+                        train_src == eval_src)
         mseed = manifest.get("seed_report")
         if isinstance(mseed, dict):
             out["seed_report"] = mseed

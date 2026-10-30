@@ -114,6 +114,11 @@ def _summary_part_b(**kw):
                   + "）")
         md.append(f"- 配置 SHA-256：`{str(repro.get('config_sha256'))[:16]}…`；"
                   f"种子：{repro.get('seeds')}")
+        src = repro.get("source_tree")
+        if isinstance(src, dict) and isinstance(src.get("digest"), str):
+            md.append(f"- 源码/配置树指纹：`{src['digest']}`"
+                      f"（{src.get('files')} 个文件，独立于 git；"
+                      "无 git 的源码包也可复算）")
         md.append(f"- 运行环境：python={rt.get('python')} torch={rt.get('torch')} "
                   f"device={rt.get('device')} gpu={rt.get('gpu')} cuda={rt.get('cuda')}")
         # 逐 run 核对评测环境与训练清单：pipeline 内的 eval 通常同环境，但
@@ -139,6 +144,21 @@ def _summary_part_b(**kw):
                       "cuDNN/GPU 上可能因浮点内核差异得到不同数值，相关指标不得"
                       "声称与训练环境完全相同（逐项见 `eval_*.json` 的 "
                       "`train_runtime`/`eval_runtime`）。")
+        source_drift_rows = []
+        for _v, _seed_map in runs.items():
+            for _seed, _slots in _seed_map.items():
+                _ev = (_slots or {}).get("eval")
+                if (not isinstance(_ev, dict)
+                        or _ev.get("source_tree_matches_training") is not False):
+                    continue
+                source_drift_rows.append(f"{_v}/seed{_seed}")
+        if source_drift_rows:
+            md.append("- ⚠ 以下 run 的**评测源码/配置树**与训练 "
+                      "`run_manifest.json` 记录不一致："
+                      + "、".join(source_drift_rows)
+                      + "；评测可能运行在已修改的代码/配置上，相关指标不得"
+                      "声称与训练使用同一版本（逐项见 `eval_*.json` 的 "
+                      "`train_source_tree_digest`/`eval_source_tree_digest`）。")
         md.append("- 完整记录：`repro.json`（全局）、各 run 目录 `run_manifest.json`"
                   "（代码/数据/环境/命令行）、`config_used.json`（超参数）、"
                   "`train_log.jsonl`（训练曲线）。")

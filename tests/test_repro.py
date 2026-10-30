@@ -11,10 +11,12 @@ import numpy as np
 import torch
 
 from lega.data import CACHE_SCHEMA, get_train_batch
-from lega.repro import (SANITY_REQUIRED_CHECKS, build_run_manifest,
+from lega.repro import (PIPELINE_RUN_ID_ENV, SANITY_REQUIRED_CHECKS,
+                        build_run_manifest, current_pipeline_run_id,
                         data_fingerprint, git_info,
                         load_provenance, provenance_drift, runtime_drift,
                         runtime_info, sanity_identity_check, sha256_file,
+                        source_tree_fingerprint,
                         test_data_fingerprint as _test_data_fingerprint,
                         worktree_state, write_worktree_patch)
 from lega.utils import (data_rng, data_rng_state_fingerprint,
@@ -1522,3 +1524,105 @@ def test_worktree_state_captures_non_utf8_untracked_path():
              "git": {"commit": st["head"]}, "data_fingerprint": "d"})
         assert drift["checked"]["worktree_diff_sha256"] is None
         assert "worktree_diff_sha256" in drift["unknown"]
+
+
+def test_source_tree_fingerprint_is_stable_and_sensitive_to_content():
+    """源码树指纹必须可复算、忽略派生文件，并对代码/配置改动敏感。"""
+    with tempfile.TemporaryDirectory() as root:
+        for rel in ("lega/sub", "scripts", "configs", "preregistration",
+                    "lega/__pycache__"):
+            os.makedirs(os.path.join(root, rel), exist_ok=True)
+
+        def _write(rel, data):
+            with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+                f.write(data)
+
+        _write("lega/model.py", "MODEL = 1\n")
+        _write("lega/sub/ops.py", "OPS = 2\n")
+        _write("configs/tiny.json", '{"seed": 1}\n')
+        _write("preregistration/hypotheses.json", '{"hypotheses": []}\n')
+        _write("requirements-ci.txt", "torch==2.14.1\n")
+        _write("lega/__pycache__/model.cpython-312.pyc", "cache")
+        fp1 = source_tree_fingerprint(root)
+        fp2 = source_tree_fingerprint(root)
+        assert fp1["digest"] == fp2["digest"]
+        assert fp1["algo"] == "sha256-tree-v1"
+        paths = {e["path"] for e in fp1["entries"]}
+        assert {"lega/model.py", "lega/sub/ops.py", "configs/tiny.json",
+                "preregistration/hypotheses.json",
+                "requirements-ci.txt"} <= paths
+        assert not any("__pycache__" in p or p.endswith(".pyc")
+                       for p in paths)
+        _write("lega/__pycache__/other.pyc", "different cache")
+        assert source_tree_fingerprint(root)["digest"] == fp1["digest"]
+        _write("lega/model.py", "MODEL = 3\n")
+        fp3 = source_tree_fingerprint(root)
+        assert fp3["digest"] != fp1["digest"]
+        old = {e["path"]: e["sha256"] for e in fp1["entries"]}
+        new = {e["path"]: e["sha256"] for e in fp3["entries"]}
+        assert old["lega/model.py"] != new["lega/model.py"]
+        assert old["configs/tiny.json"] == new["configs/tiny.json"]
+    # 非 git 版本时源树仍可提供身份；缺少该字段的旧快照保持兼容。
+    moved = provenance_drift(
+        {"source_tree": {"digest": "old"}},
+        {"source_tree": {"digest": "new"}})
+    assert moved["changed"] is True
+    assert {m["field"] for m in moved["mismatches"]} == {
+        "source_tree_digest"}
+    legacy = provenance_drift({"git": {"commit": "a"}},
+                              {"git": {"commit": "a"}})
+    assert "source_tree_digest" not in legacy["checked"]
+    print("  [ok] 源码树指纹稳定、忽略派生文件、对改动敏感且兼容旧快照")
+
+
+def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
+    """run_id 与源码树摘要必须随训练清单进入下游评测溯源。"""
+    old_env = os.environ.get(PIPELINE_RUN_ID_ENV)
+    try:
+        os.environ[PIPELINE_RUN_ID_ENV] = " run-abc "
+        assert current_pipeline_run_id() == "run-abc"
+        with tempfile.TemporaryDirectory() as d:
+            data = os.path.join(d, "data")
+            ckpt = os.path.join(d, "ckpt")
+            os.makedirs(data, exist_ok=True)
+            os.makedirs(ckpt, exist_ok=True)
+            with open(os.path.join(data, "train.bin"), "wb") as f:
+                f.write(bytes(32))
+            cfg = os.path.join(d, "config.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({"seed": 7}, f)
+            manifest = build_run_manifest(
+                "tiny", "lega", 7, cfg, data, "cpu", argv=["test"])
+            assert manifest["pipeline_run_id"] == "run-abc"
+            fp = source_tree_fingerprint()
+            assert manifest["source_tree"]["digest"] == fp["digest"]
+            with open(os.path.join(ckpt, "run_manifest.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(manifest, f)
+            p = load_provenance(ckpt, data_dir=data, device="cpu")
+            assert p["pipeline_run_id"] == "run-abc"
+            assert p["train_source_tree_digest"] == fp["digest"]
+            assert p["eval_source_tree_digest"] == fp["digest"]
+            assert p["source_tree_matches_training"] is True
+            # 独立/手工评测没有父流水线环境变量时，继承训练清单的 run_id。
+            os.environ.pop(PIPELINE_RUN_ID_ENV, None)
+            assert current_pipeline_run_id() is None
+            p_manual = load_provenance(ckpt, data_dir=data, device="cpu")
+            assert p_manual["pipeline_run_id"] == "run-abc"
+            # 旧清单没有 run_id：不得伪造一个身份。
+            legacy = dict(manifest)
+            legacy.pop("pipeline_run_id")
+            legacy.pop("source_tree")
+            with open(os.path.join(ckpt, "run_manifest.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(legacy, f)
+            p2 = load_provenance(ckpt, data_dir=data, device="cpu")
+            assert p2["pipeline_run_id"] is None
+            assert p2["train_source_tree_digest"] is None
+            assert p2["source_tree_matches_training"] is None
+    finally:
+        if old_env is None:
+            os.environ.pop(PIPELINE_RUN_ID_ENV, None)
+        else:
+            os.environ[PIPELINE_RUN_ID_ENV] = old_env
+    print("  [ok] manifest/load_provenance 继承 run_id 与源码树摘要")

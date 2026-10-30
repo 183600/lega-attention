@@ -492,10 +492,50 @@ def _json_safe(obj):
     return obj
 
 
-def save_json(obj, path: str) -> None:
-    """原子写入 JSON（临时文件 + os.replace），非有限浮点记为 null。
+def _fsync_dir(path: str) -> None:
+    """尽力 fsync 目录项，使 rename 在崩溃/断电后也持久（不支持时忽略）。"""
+    try:
+        fd = os.open(path or ".", os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
-    读者看到的要么是旧完整文件、要么是新完整文件；临时名带 pid。
+
+def save_text(text: str, path: str) -> None:
+    """原子且持久地写入文本（临时文件 + fsync + os.replace + 目录 fsync）。
+
+    报告/表格与 JSON 一样不能出现“半写文件”：崩溃时读者只能看到上一份
+    完整报告或新完整报告，而不是截断的 Markdown/CSV。
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(d)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def save_json(obj, path: str) -> None:
+    """原子且持久地写入 JSON（fsync + os.replace），非有限浮点记为 null。
+
+    读者看到的要么是旧完整文件、要么是新完整文件；临时名带 pid。只做
+    replace 而不 fsync 时，断电后可能留下“文件名已更新、内容未落盘”的
+    空/截断文件，因此 fsync 文件与目录项都是必要步骤。
     """
     d = os.path.dirname(os.path.abspath(path))
     if d:
@@ -504,7 +544,10 @@ def save_json(obj, path: str) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_json_safe(obj), f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(d)
     finally:
         try:
             os.remove(tmp)

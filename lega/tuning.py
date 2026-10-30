@@ -26,8 +26,9 @@ import time
 
 import numpy as np
 
-from .utils import (ensure_cublas_workspace_config, mean_std, seed_int,
-                    strict_int)
+from .repro import current_pipeline_run_id
+from .utils import (ensure_cublas_workspace_config, mean_std, save_json,
+                    seed_int, strict_int)
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 def _finite_number(value, name: str) -> float:
@@ -739,6 +740,7 @@ def tune(config: str, data_dir: str, out_dir: str,
         "test_split_used": False,
         # 调优结论的版本身份：代码 commit/工作区、数据指纹、配置内容、
         # 运行环境，以及逐 trial manifest 的一致性核对结果。
+        "pipeline_run_id": current_pipeline_run_id(),
         "code_commit": git.get("commit"),
         "code_dirty": git.get("dirty"),
         "worktree_diff_sha256": worktree.get("diff_sha256"),
@@ -755,8 +757,7 @@ def tune(config: str, data_dir: str, out_dir: str,
     }
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "baseline_tuning.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    save_json(report, out_path)
     print(f"[tuning] 最优 lr={selected['lr']:.3g} "
           f"wd={selected['weight_decay']:.3g} "
           f"val_loss={selected['val_loss_best']:.4f}"

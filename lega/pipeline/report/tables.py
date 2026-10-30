@@ -1,4 +1,6 @@
 """汇总报告渲染（第三部分：检验表与 JSON 落盘）。"""
+import io
+
 from .._shared import _install as _shared_install
 
 _shared_install(globals())
@@ -843,28 +845,24 @@ def _summary_part_c(**kw):
 
     os.makedirs(results_dir, exist_ok=True)
     md_text = "\n".join(md)
-    with open(os.path.join(results_dir, "summary.md"), "w", encoding="utf-8") as f:
-        f.write(md_text)
+    save_text(md_text, os.path.join(results_dir, "summary.md"))
 
     # CSV（统计列以并列的 mean/std/n 展开，便于程序消费）
     if rows:
         all_keys = sorted({k for r in rows for k in r})
-        with open(os.path.join(results_dir, "summary.csv"), "w", newline="",
-                  encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=all_keys)
-            w.writeheader()
-            w.writerows(rows)
-    with open(os.path.join(results_dir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=all_keys)
+        w.writeheader()
+        w.writerows(rows)
+        save_text(buf.getvalue(), os.path.join(results_dir, "summary.csv"))
+    save_json(rows, os.path.join(results_dir, "summary.json"))
     # 设计符合性单独落盘：即使 summary.md 被删改，计划/实际人群的偏差仍可
     # 机读；significance.json 内同时保留一份。
     save_json({"plan_digest": design_plan.get("plan_digest"),
                "plan_status": design_plan.get("status"),
                **design_conf},
               os.path.join(results_dir, "design_conformance.json"))
-    with open(os.path.join(results_dir, "significance.json"), "w",
-              encoding="utf-8") as f:
-        json.dump({"pairs": tests,
+    significance_payload = {"pairs": tests,
                    "single_factor_audit": sf_audit,
                    "note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
                             f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
@@ -992,8 +990,9 @@ def _summary_part_c(**kw):
                        f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
                        "(变体, 种子) run 的 auroc_logit − auroc_qterm 配对差，"
                        "与逐 run 样例聚类 bootstrap 区间"
-                       "（analysis_*.json 的 auroc_cluster_bootstrap）互为印证")},
-                  f, ensure_ascii=False, indent=2)
+                       "（analysis_*.json 的 auroc_cluster_bootstrap）互为印证")}
+    save_json(significance_payload,
+              os.path.join(results_dir, "significance.json"))
     cross_out = {}
     if bad_cross:
         cross_out["ruler"] = bad_cross

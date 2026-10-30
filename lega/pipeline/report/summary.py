@@ -42,6 +42,43 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         repro.get("variants"), list) else None
     scope_seeds = repro.get("seeds") if isinstance(
         repro.get("seeds"), list) else None
+    # 同一 results/<tag> 会被多次运行复用。仅按 (variant, seed) 过滤时，
+    # --skip_eval/--skip_ruler 等会让上一轮的同名产物被当成本轮观测；新产物
+    # 内嵌 pipeline run_id 后，本轮有 run_id 就要求产物同源（旧产物缺该字段
+    # 时明确视为“无法证明属于本轮”而排除，避免默认信任陈旧文件）。
+    scope_run_id = repro.get("run_id")
+    scope_run_id = scope_run_id if isinstance(scope_run_id, str) and scope_run_id else None
+    scope_data_digest = (repro.get("data").get("digest")
+                         if isinstance(repro.get("data"), dict) else None)
+    scope_data_digest = (scope_data_digest
+                         if isinstance(scope_data_digest, str)
+                         and scope_data_digest else None)
+
+    def _artifact_run_id(d):
+        rid = d.get("pipeline_run_id")
+        if isinstance(rid, str) and rid:
+            return rid
+        prov = d.get("provenance")
+        if isinstance(prov, dict):
+            rid = prov.get("pipeline_run_id")
+            if isinstance(rid, str) and rid:
+                return rid
+        return None
+
+    def _artifact_data_digest(d):
+        # eval/ruler/analysis 用平铺字段；ablation 把 load_provenance 放在
+        # provenance 下，两种结构都要覆盖。
+        for key in ("data_fingerprint", "eval_data_fingerprint"):
+            val = d.get(key)
+            if isinstance(val, str) and val:
+                return val
+        prov = d.get("provenance")
+        if isinstance(prov, dict):
+            for key in ("data_fingerprint", "eval_data_fingerprint"):
+                val = prov.get(key)
+                if isinstance(val, str) and val:
+                    return val
+        return None
 
     def in_run_scope(fp, d):
         # 变体名必须是可哈希字符串：外部 JSON 的数组/对象既不能作为 runs
@@ -52,6 +89,13 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             return False
         if scope_seeds is not None and _seed_key(fp, d) not in scope_seeds:
             return False
+        if scope_run_id is not None:
+            if _artifact_run_id(d) != scope_run_id:
+                return False
+        if scope_data_digest is not None:
+            actual = _artifact_data_digest(d)
+            if actual is not None and actual != scope_data_digest:
+                return False
         return True
 
     # --- 发现所有 run：（变体, 种子） -> {eval, ruler, analysis}
@@ -118,6 +162,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     lat = load(os.path.join(results_dir, "latency.json"))
     if not isinstance(lat, dict):
         lat = {}
+    if scope_run_id is not None and lat:
+        lat_meta = lat.get("meta")
+        lat_meta = lat_meta if isinstance(lat_meta, dict) else {}
+        if lat_meta.get("pipeline_run_id") != scope_run_id:
+            lat = {}
     lat_variants = lat.get("variants")
     lat_variants = lat_variants if isinstance(lat_variants, dict) else {}
     lat_entries = {v: (lat_variants.get(v)

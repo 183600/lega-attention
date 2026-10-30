@@ -360,9 +360,29 @@ def test_ngram_comparison_rejects_baseline_from_other_data():
             "selected_model": "interpolated_bigram"})
         ok = ngram_baseline_comparison({}, tmp)
         assert "error" not in ok, ok
+        # 同一数据也可能来自另一轮流水线（--skip_ngram 复用旧文件）；
+        # run_id 必须与本次 repro 一致，否则不能并排比较。
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "run_id": "run-new", "data": {"digest": "new-data-digest"}})
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "pipeline_run_id": "run-old",
+            "split": "val", "data_fingerprint": "new-data-digest",
+            "ppl": {"unigram": 100.0, "bigram": 80.0,
+                    "interpolated_bigram": 70.0},
+            "selected_model": "interpolated_bigram"})
+        stale = ngram_baseline_comparison({}, tmp)
+        assert "pipeline_run_id" in stale.get("error", ""), stale
+        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+            "pipeline_run_id": "run-new",
+            "split": "val", "data_fingerprint": "new-data-digest",
+            "ppl": {"unigram": 100.0, "bigram": 80.0,
+                    "interpolated_bigram": 70.0},
+            "selected_model": "interpolated_bigram"})
+        fresh = ngram_baseline_comparison({}, tmp)
+        assert "error" not in fresh, fresh
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  [ok] ngram 基线数据指纹与本次 run 绑定")
+    print("  [ok] ngram 基线数据指纹/run_id 与本次 run 绑定")
 
 
 def test_ngram_comparison_tolerates_malformed_repro_data():

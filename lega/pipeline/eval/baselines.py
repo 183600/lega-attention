@@ -167,6 +167,19 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
                     "split": ng.get("split"),
                     "ngram_data_fingerprint": actual_fp,
                     "run_data_fingerprint": expected_fp}
+        expected_run = (repro_doc.get("run_id")
+                        if isinstance(repro_doc, dict) else None)
+        actual_run = ng.get("pipeline_run_id")
+        if (isinstance(expected_run, str) and expected_run
+                and isinstance(actual_run, str) and actual_run
+                and actual_run != expected_run):
+            return {"error": "ngram_baseline.json 的 pipeline_run_id 与本次 "
+                             "run 的 repro.json 不一致：该基线来自另一轮流水线"
+                             "（可能是 --skip_ngram 复用的旧文件），不能与当前"
+                             "神经 PPL 直接比较；请重跑 n-gram 基线",
+                    "split": ng.get("split"),
+                    "ngram_pipeline_run_id": actual_run,
+                    "run_pipeline_run_id": expected_run}
     ppl_map = ng.get("ppl")
     if ppl_map is not None and not isinstance(ppl_map, dict):
         return {"error": "ngram_baseline.json 的 ppl 不是 JSON 对象"}

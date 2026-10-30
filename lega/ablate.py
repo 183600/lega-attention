@@ -74,7 +74,7 @@ from .evaluate import (_positive_int_or_none, _resolve_eval_amp,
 from .model import load_model
 from .preflight import (allow_protocol_violations,
                         data_protocol_preflight)
-from .repro import load_provenance, sha256_file
+from .repro import current_pipeline_run_id, load_provenance, sha256_file
 from .train import _val_eval_indices, evaluate_val
 from .utils import (amp_autocast, bootstrap_mean_ci, enable_tf32,
                     get_device, now_str, paired_sign_test, paired_t_test,
@@ -1126,6 +1126,7 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
 
     payload = {
         "schema": 1,
+        "pipeline_run_id": current_pipeline_run_id(),
         "variant": model.variant,
         "ckpt": os.path.abspath(ckpt),
         "ckpt_sha256": sha256_file(ckpt),

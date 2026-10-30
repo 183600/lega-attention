@@ -33,7 +33,8 @@ from .data import load_bin, load_meta
 from .datacheck import append_test_access, check_vocab_capacity
 from .preflight import (allow_protocol_violations,
                         data_protocol_preflight)
-from .repro import data_fingerprint, test_data_fingerprint
+from .repro import (current_pipeline_run_id, data_fingerprint,
+                    test_data_fingerprint)
 from .utils import strict_int
 
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
@@ -702,6 +703,7 @@ def evaluate(data_dir: str, split: str = "val",
     report = {
         "baseline": ("smoothed n-gram (add-α unigram/bigram + val-tuned "
                      "interpolation), no gradient training"),
+        "pipeline_run_id": current_pipeline_run_id(),
         "split": split,
         "allow_test": bool(allow_test),
         "data_fingerprint": data_fp,

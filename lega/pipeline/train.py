@@ -142,6 +142,15 @@ def main():
         p.error(f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
                 f"{args.config}")
 
+    # 本轮流水线的唯一 run_id：在任何训练/调优/基线产物写入之前确定并通过
+    # 环境变量传给全部子进程。结果文件内嵌该值后，汇总能区分本轮产物与同一
+    # results 目录中上一轮留下的同名文件；调优/ngram/评测共享同一身份。
+    run_id = new_run_id(tag, sha256_file(args.config))
+    os.environ[PIPELINE_RUN_ID_ENV] = run_id
+    # 在任何调优/训练/评测开始前固定源码与配置树身份；结束时的快照与之
+    # 比较，才能发现长实验期间代码被改动，而不是只记录“结束时是什么”。
+    start_source_tree = source_tree_fingerprint()
+
     # 多种子协议：显式 --seeds 优先；否则用配置 seeds；冒烟模式只跑首个种子。
     # 种子一律严格解析：int("1.5") 会直接抛错，而 int(1.5)/int(True) 会把
     # 1.5、true 静默截断成 1——结果目录与台账都会用错种子，且两个"不同"
@@ -352,6 +361,7 @@ def main():
             worktree["patch"] = patch
     repro = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_id": run_id,
         "tag": tag,
         "argv": sys.argv,
         "config_file": args.config,
@@ -372,6 +382,7 @@ def main():
         "smoke": bool(args.smoke),
         "git": git,
         "worktree": worktree,
+        "source_tree": start_source_tree,
         "data": data_fp,
         "runtime": runtime_info(args.device),
         "registration": reg_info,
@@ -404,13 +415,13 @@ def main():
         "data_protocol_preflight": data_preflight,
     }
     save_json(repro, os.path.join(results_dir, "repro.json"))
-    print(f"[repro] code={git.get('commit_short')} dirty={git.get('dirty')} "
-          f"data={data_digest} -> {os.path.join(results_dir, 'repro.json')}")
+    print(f"[repro] run_id={run_id} code={git.get('commit_short')} "
+          f"dirty={git.get('dirty')} data={data_digest} -> "
+          f"{os.path.join(results_dir, 'repro.json')}")
 
     # 实验台账：本轮 started 先落盘（崩溃轮次也留痕），结束时追加同一 run_id
     # 的 completed 记录（含最终指标与产物哈希），跨轮次可追溯，见 lega/experiment.py。
     ledger = ledger_path()
-    run_id = new_run_id(tag, config_sha256)
     ledger_common = dict(
         run_id=run_id, tag=tag, config_path=args.config,
         config_sha256=config_sha256,
@@ -712,19 +723,23 @@ def main():
         # 让“全程同一版本”成为可核对的事实而不是假设。
         end_git = git_info()
         end_worktree = worktree_state()
+        end_source_tree = source_tree_fingerprint()
         try:
             end_data_digest = data_fingerprint(args.data_dir)["digest"]
         except FileNotFoundError:
             end_data_digest = None
         drift = provenance_drift(
             {"git": git, "worktree": worktree,
+             "source_tree": start_source_tree,
              "data_fingerprint": data_digest},
             {"git": end_git, "worktree": end_worktree,
+             "source_tree": end_source_tree,
              "data_fingerprint": end_data_digest})
         tracking_end = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "git": end_git,
             "worktree": end_worktree,
+            "source_tree": end_source_tree,
             "data_fingerprint": end_data_digest,
             "drift": drift,
         }
