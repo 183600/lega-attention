@@ -7,8 +7,9 @@ from unittest import mock
 
 import torch
 
-from lega.attention import (GATE_FACTORS, RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
-                            VARIANT_CN, CausalSelfAttention)
+from lega.attention import (GATE_FACTORS, RAW_GATE_FACTORS, RUNNABLE_VARIANTS,
+                            SUPPLEMENTAL_VARIANTS, VARIANT_CN,
+                            CausalSelfAttention)
 from lega.factorial import CELL_ORDER
 from lega.model import expected_gate_extras, gate_extra_params
 from lega.reparameterization import (CONTRASTS, NORMALIZED_CELLS, RAW_CELLS,
@@ -59,7 +60,20 @@ def test_raw_factorial_design_is_complete_and_named():
     assert set(RAW_FACTORIAL_VARIANTS) - set(VARIANTS) == {
         "lega_raw", "lega_raw_no_len", "lega_raw_conc_only",
         "lega_raw_no_query"}
-    print("  [ok] 原始参数化 8 格完整，且与归一化网格共享 none/A/C 结构")
+    # raw 网格的因子元数据必须从实现开关派生：B 必须是原始 log max_p
+    # 变体，而不是归一化 conc 变体；共享格也不能悄悄换成带 B 的变体。
+    assert set(RAW_GATE_FACTORS) == set(RAW_CELLS.values())
+    for cell, variant in RAW_CELLS.items():
+        expected = frozenset() if cell == "none" else frozenset(cell)
+        assert RAW_GATE_FACTORS[variant] == expected, (cell, variant)
+        m = CausalSelfAttention(32, 2, variant=variant,
+                                use_sdpa_standard=False)
+        actual = {f for f, on in (("A", m.use_query),
+                                  ("B", m.use_raw_conc),
+                                  ("C", m.use_len)) if on}
+        assert actual == expected, (cell, variant, actual, expected)
+    print("  [ok] 原始参数化 8 格完整，因子元数据与实现开关一致，"
+          "且与归一化网格共享 none/A/C 结构")
 
 
 def test_raw_only_variants_forward_and_param_budget():
@@ -266,4 +280,22 @@ def test_single_factor_audit_covers_raw_parameterization_edges():
         audit = single_factor_audit()
         assert not audit["ok"], audit
         assert any("RAW_CELLS" in p for p in audit["problems"]), audit
-    print("  [ok] 单因素审计覆盖原始参数化边，并拒绝多因子/缺失/重复格")
+
+    # 实现漂移：元数据仍写 B，但 raw 变体实际少启用一个因子。只核对
+    # 格名覆盖 2^3 无法发现，必须对照 RAW_GATE_FACTORS 才能拦截。
+    bad_impl = dict(RAW_GATE_FACTORS)
+    bad_impl["lega_raw_no_len"] = frozenset({"A"})
+    with mock.patch("lega.pipeline.common.RAW_GATE_FACTORS", bad_impl):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("实现为" in p for p in audit["problems"]), audit
+
+    # 共享格误用归一化 B 变体：格名仍是 AB，但实现变体不在 raw 表中。
+    wrong_shared = dict(RAW_CELLS, AB="lega_no_len")
+    with mock.patch("lega.pipeline.common.RAW_FACTORIAL_CELLS",
+                    wrong_shared):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("RAW_GATE_FACTORS" in p for p in audit["problems"]), audit
+    print("  [ok] 单因素审计覆盖原始参数化边，并拒绝多因子/缺失/重复格"
+          "与实现漂移")

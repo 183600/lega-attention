@@ -153,6 +153,20 @@ GATE_FACTORS = {
     if v not in CONTROL_VARIANTS and v not in SUPPLEMENTAL_VARIANTS
 }
 
+# 原始集中度参数化补充网格的因子激活表：B 表示 a*log max_p（不并入
+# log n）。raw_* 变体不进入归一化 GATE_FACTORS，但参数化稳健性把它们与
+# 共享的 none/A/C/AC 格组成另一套 2^3。这里同样从实现开关派生，供运行期
+# 审计核对 RAW_CELLS，避免“元数据声明 B、实现却仍用归一化 conc”的漂移。
+# 不含 B 的共享格从 GATE_FACTORS 直接沿用（none/A/C/AC）。
+RAW_GATE_FACTORS = {
+    v: frozenset(f for f, enabled in (("A", v in _USE_QUERY),
+                                      ("B", v in _USE_RAW_CONC),
+                                      ("C", v in _USE_LEN)) if enabled)
+    for v in _GATED
+    if v in _USE_RAW_CONC
+    or (v in GATE_FACTORS and "B" not in GATE_FACTORS[v])
+}
+
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64

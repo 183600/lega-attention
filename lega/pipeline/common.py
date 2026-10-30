@@ -134,6 +134,44 @@ def _audit_reparameterization_contrasts(normalized, problems):
         if set(raw_variants) != set(raw_cells):
             problems.append(
                 "RAW_FACTORIAL_VARIANTS 与 RAW_CELLS 的变体集合不一致")
+    # RAW_CELLS 是实验设计元数据；它必须与 raw 变体实现里实际启用的
+    # A/B/C 开关一致。否则把 B 格写成归一化 conc 变体（或把 AB 格写成
+    # lega_no_len）仍能通过“格名覆盖 2^3”的检查，却不再是原始参数化边。
+    raw_gate_factors = globals().get("RAW_GATE_FACTORS")
+    raw_impl = {}
+    if not isinstance(raw_gate_factors, dict):
+        problems.append(
+            "RAW_GATE_FACTORS 必须是变体 -> A/B/C 因子集合的映射")
+    else:
+        for variant, raw_factors in raw_gate_factors.items():
+            if not isinstance(variant, str):
+                problems.append(
+                    f"RAW_GATE_FACTORS 含非字符串变体键：{variant!r}")
+                continue
+            factors = _gate_factor_set(raw_factors)
+            if factors is None:
+                problems.append(
+                    f"RAW_GATE_FACTORS[{variant!r}] 不是合法的因子集合："
+                    f"{raw_factors!r}")
+                continue
+            unknown = factors - frozenset("ABC")
+            if unknown:
+                problems.append(
+                    f"RAW_GATE_FACTORS[{variant!r}] 含未知因子："
+                    f"{sorted(unknown)}")
+                continue
+            raw_impl[variant] = factors
+        if set(raw_impl) != set(raw_cells):
+            problems.append(
+                "RAW_CELLS 的变体集合与 RAW_GATE_FACTORS 不一致："
+                f"cells={sorted(raw_cells)}，"
+                f"factors={sorted(raw_impl)}")
+        for variant, factors in raw_cells.items():
+            impl = raw_impl.get(variant)
+            if impl is not None and impl != factors:
+                problems.append(
+                    f"RAW_CELLS 的变体 {variant!r} 因子集合为 "
+                    f"{sorted(factors)}，实现为 {sorted(impl)}")
     contrasts = globals().get("REPARAMETERIZATION_CONTRASTS")
     if (not isinstance(contrasts, (tuple, list))
             or isinstance(contrasts, str)):
