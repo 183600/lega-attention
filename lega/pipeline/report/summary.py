@@ -525,6 +525,12 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             "slope_loo_sign_stable")
         row["ruler_length_balanced"] = pair.get("balanced_contexts")
     shapley_tests = [t for t in tests if t.get("shapley_factor")]
+    # 训练预算敏感性（探索性）：只比较已有 train_log.jsonl 中的 val_loss
+    # 轨迹，检查终点结论是否在训练预算之间发生方向翻转。它不重新选
+    # checkpoint，也不改变任何终点/预注册判定；缺日志时显式不可用。
+    budget_curves = curves_from_runs(runs)
+    budget_sensitivity = analyze_budget_sensitivity(
+        budget_curves, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS)
     # 参数化稳健性（探索性）：比较归一化 c 与原始 log max_p 两套完整
     # 2^3 网格上的单因子边与 Shapley 归因。只有显式运行原始对照时才有
     # 内容；缺格/协议不一致会返回可机读原因，不伪造“无差异”。
@@ -1267,6 +1273,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "audit",
         "base_ms",
         "base_name",
+        "budget_curves",
+        "budget_sensitivity",
         "by_bs",
         "c",
         "cal_rows",
@@ -1465,5 +1473,6 @@ def build_summary(results_dir: str, audit: dict = None,
         'parameter_matched_control': ctx["param_control_test"],
         'causal_ablation': ctx["causal_tests"],
         'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
+        'budget_sensitivity': ctx["budget_sensitivity"],
     }
 

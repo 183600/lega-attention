@@ -80,6 +80,26 @@ RULER 用原始 EM。性质与口径：
 - **探索性**：Shapley 依赖价值函数尺度且未预注册，不能替代预注册的
   单因素确认性检验；与单因素边方向冲突时并列披露“贡献依赖其他因子”。
 
+### 训练预算敏感性（终点结论是否覆盖整个训练过程）
+
+训练期消融只比较最终 checkpoint，但“某个组件有用”可能只是优化早期更快、
+后段被其他通路追上，或早期有害、后期才转正。`lega/budget_sensitivity.py`
+读取各 run 已落盘的 `train_log.jsonl`，在**同种子、同评测 step** 上对齐
+候选与参照的 `val_loss`，逐预算计算配对差轨迹：
+
+- 只取精确 step 交集，不插值；轨迹使用所有共同种子的共同 step，避免
+  “不同预算对应不同种子组成”。缺日志/共同 step 时 `available=false`，
+  不伪造一条全量 split 曲线；
+- 输出初始/终点 Δ(logPPL)、逐 step 均值与区间、符号翻转次数、与终点
+  符号一致率、最终方向首次稳定 step，以及 `stable` / `transient` /
+  `reversal_nonsignificant` / `budget_sensitive` 轨迹模式；
+- **探索性**：逐 step p 值高度相关且未做跨 step 校正，`budget_sensitive`
+  只表示至少两个 step 以相反方向达到未校正 p<α，不能当作确认性结论；
+- **不重新选 checkpoint**：轨迹只用于诊断“终点是否代表训练过程”，
+  不能挑一个有利 step 改写主结果；终点仍使用预注册的 held-out 指标；
+- val 同时是 checkpoint 选择集，故轨迹诊断不能替代 test 终点，也不能
+  与跨种子终点检验互相替换；两者冲突时在汇总页并列披露。
+
 ## 输出级写回效用（不是 hit 代理）
 
 `lega/output_ablation.py` 直接干预答案 token 的预测位置：把某层某头在
@@ -394,6 +414,10 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 - **基线必须调过，调优选择本身也要防噪声**：新方法的涨点可能只是超参数红利。`lega/tuning.py` 对基线（standard）做 lr × weight-decay 小网格（默认 lr×{0.5,1,2}），只用验证集选择（`train_log.jsonl` 全评测点最小值，与 `model_best.pt` 同口径；test 从不加载）；`default_is_optimal` 在默认与网格最优的相对差 ≤0.5% 时为真。单一种子上的网格最大值可能是“幸运种子”选出的假最优（winner's curse）：`--tune_seeds` 让每个组合在多个种子上重复训练、按**平均 val_loss** 选择，报告 `selection_seeds` 与逐种子明细；不指定时只用单一种子（汇总页显式警告），正式实验建议 ≥3 个。`run_all --tune_baseline` 把最优组合注入**全部**变体（受控变量仅整体平移），证据写入 `baseline_tuning.json` 并在汇总页渲染；缺证据时汇总页显式警告“未调优基线”。**调优范围必须披露**：该流程只对 `standard` 做网格；`qgate`/`null` 等“已有工作代表”继承同一组 lr/weight_decay，未各自调优，因此“优于已有工作”只能按**同超参受控对照**解读，不能写成“优于各自最佳调优版本”；差距接近 MDE/种子噪声时更不足以支持优越性结论。
 - **机制判别也要有最简监督基线（线性探针）**：门控 logit 是语言建模的副产品、训练时从未见过 hit 标签；“门控 AUROC/PR-AUC 高”不能排除“`log max_p`、`log n`、`qterm` 这些廉价特征本身线性可分，复杂门控结构没有贡献”。`lega/probe.py` 在同一批记录上训练 L2 逻辑回归，并对简单基线同样做**嵌套、按样例分组、按 hit 标签分层**的交叉验证：同一 (层,头,查询位) 记录不独立，按行切分会“背题”；稀有正类可能让某些折没有正类，分层分组降低空正类折造成的基线低估。λ 与决策阈值只在每个外层训练折的内层 CV 上选择（λ 按与主检验对齐的 PR-AUC/AUROC，阈值按内层 OOF macro-F1），最终 OOF 不再参与选参，避免选择偏差；标准化统计只用训练折拟合。报告 OOF 的 AUROC/PR-AUC、Brier/ECE、以及固定 0.5 与调优阈值两套 F1（macro/micro/weighted 三口径）。`run_all.linear_probe_baseline_comparison` 把逐种子 Δ=探针−门控 做配对检验 + Holm 校正并渲染进基线小节：探针超过门控属预期（判别能力本可由线性模型学得），门控不能在主指标上被探针显著超越，才有资格谈“结构优越性”；单统计量规则（max_p）一并列出作最低档次对照；旧产物缺探针时显式警告而不是当作已有对照。该对比与 n-gram 对比一样属补充性/探索性证据，不替代预注册的确认性检验。
 - **不平衡指标必须并报且注明口径**：hit/¬hit 判别是类别极不平衡的二分类，`hit_base_rate`（正类率）即 PR-AUC 的随机基线。正类率 <5% 时 AUROC 因负样本基数巨大、FPR 增长缓慢而乐观，**以 PR-AUC（average precision）为主指标**（<0.1% 尤甚）；正类率 ≥5% 时两者并报。F1 一律注明平均口径（`gate_f1` 同时给 macro/micro/weighted 与逐类明细；macro 对稀有类最诚实，汇总表列 macro）。**任何学习指标都要有无信息对照**：门控 F1 并报恒写/恒不写固定规则的 `gate_f1_trivial`，打不过固定规则就谈不上“门控学会判断”。RULER 的 EM 为生成式指标、无决策阈值，不受此影响（fwe 另报召回率、精确率与 F1 作诊断）。**排序好不等于概率可信**：门控 g 是 sigmoid 输出且被当作软权重/概率使用，必须另报 Brier 与 ECE（与常数基率 Brier 基线对照；`analysis_*.json` 的 `calibration_g`），AUROC/PR-AUC 不能替代校准证据。ECE 同时给等宽与等频两套箱：等宽箱在分数聚集/小样本时可能大量为空，单个样本独占一箱还会把 ECE 机械压低；等频箱按分数排序均分样本，作为对分箱选择不敏感的第二组证据。Brier 另做 Murphy 分解：等频箱内用箱均值预测时 `Brier_bin = reliability − resolution + uncertainty`；原始分数在箱内不恒定时还须加箱内项 `brier_binning = within_score − 2·within_cov`（`brier = reliability − resolution + uncertainty + brier_binning`），否则三项之和并不等于原始 Brier。该分解把“箱内校准误差”“箱间区分度”“标签固有不确定性”与“分箱引入的箱内方差/协方差”分开；这些仍只是描述性证据，不替代正式检验。RULER 平均同时报 **macro**（任务等权、任务内上下文档位等权，预注册口径）与 **micro**（按每格样本数加权），避免“平均”未注明定义而掩盖任务/格大小不均。两者统一用各任务 **EM**（fwe 为严格集合 EM，与 H4 的“RULER 平均 EM”一致）；fwe 的 recall 仅单列诊断、不进入平均——recall 不惩罚“把上下文词全部列出”的灌水策略；precision/F1 一并单列，才能区分“没找到高频词”与“找对但灌水/漏答”。
+
+训练预算轨迹作为补充证据写入 `significance.json` 的
+`budget_sensitivity`，并在汇总页“训练预算敏感性”表中列出发生方向翻转/
+预算敏感的对比；它不进入确认性判定，也不改变任何预注册假设的状态。
 
 ## 统计推断协议（小样本科研口径）
 

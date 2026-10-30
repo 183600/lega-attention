@@ -16,6 +16,72 @@ def _fmt_pct0(value) -> str:
     return _fmt_pct(value)
 
 
+_BUDGET_PATTERN_CN = {
+    "stable": "稳定",
+    "transient": "中途翻转",
+    "reversal_nonsignificant": "首末翻转（未显著）",
+    "budget_sensitive": "预算敏感",
+    "insufficient_steps": "共同步数不足",
+    "all_zero": "全零差",
+}
+
+
+def _render_budget_sensitivity(budget):
+    """渲染训练预算轨迹；只作描述，不改变终点/确认性判定。"""
+    out = ["", "### 训练预算敏感性（探索性：结论是否只在终点成立）", ""]
+    if not isinstance(budget, dict):
+        out.append("⚠ 未生成训练预算敏感性结果（汇总阶段缺少曲线）。")
+        return out
+    pairs = [p for p in (budget.get("pairs") or []) if isinstance(p, dict)]
+    available = [p for p in pairs if p.get("available")]
+    if not available:
+        out.append("⚠ 无可用训练曲线（`train_log.jsonl` 缺失、checkpoint "
+                   "路径不可达，或两侧没有共同评测步）；本轮不评估对比/消融"
+                   "结论是否随训练预算变化，不能据此宣称“终点结论稳定”。")
+        return out
+    out.append("只使用训练日志中已有的 **val** 损失，按同种子、同评测步对齐；"
+               "不插值、不重新选 checkpoint、不改变终点检验。val 同时是选型集，"
+               "逐 step p 值高度相关且未做跨 step 校正，故本表全部为探索性证据，"
+               "不能替代 held-out test 上的终点结论。")
+    out.append("")
+    out.append("| 对比 | 评测步（首→末） | n种子 | 终点Δ(logPPL) | 符号一致率 | "
+               "符号翻转 | 反向显著步 | 轨迹模式 |")
+    out.append("|---|---|---|---|---|---|---|---|")
+    def _order(p):
+        return (not bool(p.get("budget_sensitive")),
+                -(p.get("n_sign_flips") or 0),
+                str(p.get("candidate")), str(p.get("reference")))
+    for p in sorted(available, key=_order)[:14]:
+        delta = _fmt_signed(p.get("final_mean_diff"))
+        agree = _fmt_pct(p.get("sign_agreement_with_final"), ".0%")
+        flips = p.get("n_sign_flips")
+        flips_s = "-" if flips is None else str(flips)
+        if p.get("budget_sensitive"):
+            reverse = "⚠ 是"
+        elif p.get("sign_reversal"):
+            reverse = "方向翻转"
+        else:
+            reverse = "否"
+        pattern = _BUDGET_PATTERN_CN.get(
+            p.get("trajectory_pattern"), str(p.get("trajectory_pattern") or "-"))
+        out.append(
+            f"| {p.get('candidate')} vs {p.get('reference')} "
+            f"| {p.get('initial_step')}→{p.get('final_step')} "
+            f"| {p.get('n_seeds')} | {delta} | {agree} | {flips_s} "
+            f"| {reverse} | {pattern} |")
+    if len(available) > 14:
+        out.append("")
+        out.append(f"（仅列前 14 组；其余 {len(available) - 14} 组的逐 step "
+                   "明细见 `significance.json` 的 `budget_sensitivity`。）")
+    out.append("")
+    out.append("注: Δ(logPPL)=候选−参照（<0 表示候选在该预算更好）；"
+               "“反向显著步”指至少两个评测步以相反符号达到未校正 p<α，"
+               "只提示轨迹不稳定，不是确认性结论。模式 `稳定` 仅表示方向未翻转，"
+               "不代表每个预算都统计显著；`中途翻转` 与 `首末翻转` 才是"
+               "“不能用终点代表整个训练过程”的直接信号。")
+    return out
+
+
 def _summary_part_b(**kw):
     if "audit" in kw:
         audit = kw["audit"]
@@ -28,6 +94,7 @@ def _summary_part_b(**kw):
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
+    budget_sensitivity = kw.get("budget_sensitivity")
     if "ci" in kw:
         ci = kw["ci"]
     if "comp" in kw:
@@ -852,6 +919,8 @@ def _summary_part_b(**kw):
               "可同时含多个因子，不得把差异归因给某一个 A/B/C 组件。"
               "单因素审计结果同时写入 `significance.json` 的 "
               "`single_factor_audit`。")
+
+    md += _render_budget_sensitivity(budget_sensitivity)
 
     # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
     md += ["", "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）", ""]

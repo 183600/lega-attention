@@ -35,6 +35,8 @@ from lega.reparameterization import (  # noqa: E402
     analyze as reparameterization_analyze)
 from lega.lengtheffect import (context_macro_means,  # noqa: E402
                                log2_slope, span_contrast)
+from lega.budget_sensitivity import (  # noqa: E402
+    analyze_budget_sensitivity, curves_from_runs, load_train_curve)
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,

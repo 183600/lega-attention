@@ -38,6 +38,7 @@ def _summary_part_c(**kw):
         audit = kw["audit"]
     if "bad_cross" in kw:
         bad_cross = kw["bad_cross"]
+    budget_sensitivity = kw.get("budget_sensitivity")
     if "capacity_only_test" in kw:
         capacity_only_test = kw["capacity_only_test"]
     if "causal_tests" in kw:
@@ -932,6 +933,14 @@ def _summary_part_c(**kw):
                        "均值比），RULER 用原始 EM；φ_A+φ_B+φ_C 等于 "
                        "Full−none 的总效应（效率性），交互效应被平均分摊到"
                        "参与因子；不替代预注册的单因素确认检验"),
+                   "budget_sensitivity": budget_sensitivity,
+                   "budget_sensitivity_note": (
+                       "训练预算敏感性（探索性）：由 train_log.jsonl 的 "
+                       "val_loss 生成同种子、同 step 的候选−参照轨迹；"
+                       "逐 step p 未做跨 step 校正且各 step 相关，"
+                       "budget_sensitive 只提示方向在训练预算间翻转，"
+                       "不用于重新选 checkpoint，也不改变预注册终点判定。"
+                       "缺 train_log.jsonl/共同 step 时 available=false。"),
                    "causal_ablation": causal_tests,
                    "causal_ablation_equivalence": _causal_equivalence_overview(
                        causal_tests),
@@ -1020,6 +1029,7 @@ def _summary_part_c(**kw):
         "bci",
         "bci_s",
         "benefit",
+        "budget_sensitivity",
         "ci",
         "ci_s",
         "cluster_rows",
