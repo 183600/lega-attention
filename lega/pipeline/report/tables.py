@@ -29,6 +29,116 @@ def _variance_advice(comp):
     return "两者都需增加"
 
 
+def _fdr_marks(row):
+    """FDR 发现行的稳健性备注（噪声内/低于 MDE/留一翻转）。"""
+    marks = []
+    if row.get("within_noise"):
+        marks.append("种子噪声内")
+    if row.get("below_mde"):
+        marks.append("低于 MDE")
+    if row.get("loo_sign_stable") is False:
+        marks.append("留一翻转")
+    return "；".join(marks) or "-"
+
+
+def _render_exploratory_fdr(fdr):
+    """渲染跨分析层的探索性种子级 BH/BY FDR 小节。"""
+    md = ["", "## 探索性发现的 FDR 控制（seed-level BH；"
+              "不改变确认性判定）", ""]
+    if not isinstance(fdr, dict):
+        md.append("- 未生成探索性 FDR 摘要。")
+        return md
+    if not fdr.get("available"):
+        md.append(
+            f"- 未纳入可检验的种子级探索性对比（家族大小 0；输入 "
+            f"{_int_or_zero(fdr.get('n_tests_total'))} 条，排除 "
+            f"{_int_or_zero(fdr.get('n_excluded'))} 条）。")
+        reasons = fdr.get("excluded_by_reason")
+        if isinstance(reasons, dict) and reasons:
+            md.append("- 排除原因：" + "；".join(
+                f"{k}={v}" for k, v in sorted(reasons.items())))
+        md.append("- 这不等于“没有效应”：n<3、p 缺失或分析未运行时本层"
+                  "不生成发现；请对照各层原始表、MDE 与功效解读。")
+        return md
+    m = _int_or_zero(fdr.get("family_size"))
+    n_total = _int_or_zero(fdr.get("n_tests_total"))
+    n_excluded = _int_or_zero(fdr.get("n_excluded"))
+    n_disc = _int_or_zero(fdr.get("n_discoveries"))
+    n_by = _int_or_zero(fdr.get("n_discoveries_by"))
+    expected = fdr.get("expected_false_discoveries_at_fdr")
+    harmonic = fdr.get("harmonic_factor")
+    md.append(f"- 家族：{fdr.get('family_definition')}。")
+    base = (f"- 可检验 m={m}；输入 {n_total} 条，排除 {n_excluded} 条"
+            f"（n<{fdr.get('min_seeds')} 或 p 缺失/非法，不占家族大小）。"
+            f"BH 发现 R={n_disc}")
+    if isinstance(expected, (int, float)) and np.isfinite(expected):
+        md.append(base + f"，按观测 R 折算的期望假发现约 α×R="
+                         f"{expected:.2f}（启发式；BH 保证 E[V/R]≤α，"
+                         "不保证单次实现 V≤αR）。")
+    else:
+        md.append(base + "。")
+    if isinstance(harmonic, (int, float)) and np.isfinite(harmonic):
+        md.append(f"- BY 敏感性（任意依赖，H_m={harmonic:.3f}）：发现 "
+                  f"{n_by} 条；BH 是主结果，BY 更保守。")
+    else:
+        md.append(f"- BY 敏感性：发现 {n_by} 条；BH 是主结果，BY 更保守。")
+    n_reg = _int_or_zero(fdr.get("n_registered_excluded"))
+    if n_reg:
+        md.append(f"- 另有 {n_reg} 条预注册确认性检验不进入本族（由 "
+                  "Holm/FWER 与预注册门单独处理）。")
+    p_thr = fdr.get("p_threshold")
+    q_thr = fdr.get("q_threshold")
+    if n_disc:
+        md.append(f"- BH 阈值：原始 p≤{_fmt4(p_thr)}，q≤{_fmt4(q_thr)}。"
+                  "q 是校正后的 FDR 尺度，不是“假设为真的概率”。")
+    else:
+        md.append("- BH 未发现 q<α 的检验；不能写成“无效应”，只能写"
+                  "“本探索族在 FDR 控制下未发现可报告信号”，并对照 MDE/"
+                  "功效与各层原始 p。")
+    n_by_source = fdr.get("n_by_source")
+    if isinstance(n_by_source, dict) and n_by_source:
+        md.append("- 来源计数：" + "；".join(
+            f"{source_label(k)} {v}"
+            for k, v in sorted(n_by_source.items(),
+                               key=lambda kv: (-kv[1], str(kv[0])))))
+    discoveries = fdr.get("discoveries")
+    discoveries = discoveries if isinstance(discoveries, list) else []
+    if discoveries:
+        md += ["", "| 来源 | 对比 | 指标 | n | p | q_BH | q_BY | "
+                   "Δ均值 | 备注 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for row in discoveries[:20]:
+            if not isinstance(row, dict):
+                continue
+            detail = row.get("detail")
+            note = _fdr_marks(row)
+            if isinstance(detail, dict) and detail:
+                detail_s = "；".join(f"{k}={v}" for k, v in detail.items())
+                note = (detail_s + "；" + note) if note != "-" else detail_s
+            md.append(
+                f"| {source_label(row.get('source'))} "
+                f"| {row.get('candidate') or '-'} vs "
+                f"{row.get('reference') or '-'} "
+                f"| {row.get('metric') or '-'} | {row.get('n', '-')} "
+                f"| {_fmt4(row.get('p'))} | {_fmt4(row.get('q_bh'))} "
+                f"| {_fmt4(row.get('q_by'))} "
+                f"| {_fmt_signed(row.get('mean_diff'))} | {note} |")
+        if len(discoveries) > 20:
+            md.append(f"| … | 仅显示前 20/{len(discoveries)} 条；完整列表见 "
+                      "`significance.json.exploratory_fdr.discoveries` "
+                      "| - | - | - | - | - | - | - |")
+    md.append("")
+    md.append("注：本层把所有**非预注册的种子级探索性检验**合并为一个发现族，"
+              "回答“在全部探索性发现中假发现比例是多少”；它不替代各指标"
+              "家族内的 Holm/FWER，也不改变预注册 支持/拒绝/未定。BH 在"
+              "独立/PRDS 下控制 FDR，共享种子/模型/评测样本带来依赖，故并列"
+              "BY q 作为任意依赖下的保守敏感性。样例级 McNemar、窗口级 PPL、"
+              "RULER 分层 meta 分析、多重宇宙、缺失敏感性与逐 step 预算轨迹"
+              "不进入该族。q<α 是提出后续验证假设的线索，不是确认性结论；"
+              "仍需新种子/新数据预注册后复现。")
+    return md
+
+
 def _summary_part_c(**kw):
     if "_lat_metric_at" in kw:
         _lat_metric_at = kw["_lat_metric_at"]
@@ -144,6 +254,40 @@ def _summary_part_c(**kw):
         win_cross = kw["win_cross"]
     if "wl" in kw:
         wl = kw["wl"]
+
+    for h in (hyp_eval if isinstance(hyp_eval, list) else []):
+        if not isinstance(h, dict):
+            continue
+        t = _find_test(tests, (h.get("candidate"), h.get("reference")),
+                       h.get("metric"))
+        if t is not None:
+            ids = t.setdefault("registered_hypothesis_ids", [])
+            hid = h.get("id")
+            if hid not in ids:
+                ids.append(hid)
+    main_exploratory = [
+        t for t in tests
+        if isinstance(t, dict) and not t.get("registered_hypothesis_ids")]
+    n_registered_excluded = sum(
+        1 for t in tests
+        if isinstance(t, dict) and t.get("registered_hypothesis_ids"))
+    fdr_tests = collect_seed_level_tests(
+        main_tests=main_exploratory,
+        causal_tests=causal_tests,
+        matched_ablation_contrasts=matched_ablation_contrasts,
+        dose_tests=dose_response,
+        inference_shapley=inference_shapley,
+        inference_interactions=inference_interactions,
+        length_analysis=length_analysis,
+        ngram_comparison=ngram_cmp,
+        reparameterization=reparameterization,
+        probe_comparison=probe_cmp,
+    )
+    exploratory_fdr = analyze_exploratory_fdr(
+        fdr_tests, alpha=ALPHA, min_seeds=MIN_SEEDS)
+    exploratory_fdr["n_registered_excluded"] = n_registered_excluded
+    exploratory_fdr["n_seed_level_total"] = (
+        len(fdr_tests) + n_registered_excluded)
 
     md += ["", "## 关键对比（同种子配对，t 检验 + 置换检验双重印证，Holm 校正）", ""]
     if tests:
@@ -543,6 +687,8 @@ def _summary_part_c(**kw):
                "数见 `significance.json` 的 "
                "`variance_components.n_cells_skipped`。"]
 
+    md += _render_exploratory_fdr(exploratory_fdr)
+
     # --- 注册假设判定：confirmatory 与 exploratory 的边界必须是显式的
     md += ["", "## 注册假设判定（confirmatory；其余对比均为事后探索）", ""]
     md += _render_registration_integrity(integrity, scope_check=scope_check)
@@ -931,6 +1077,15 @@ def _summary_part_c(**kw):
               os.path.join(results_dir, "design_conformance.json"))
     significance_payload = {"pairs": tests,
                    "single_factor_audit": sf_audit,
+                   "exploratory_fdr": exploratory_fdr,
+                   "exploratory_fdr_note": (
+                       "探索性种子级发现的 BH FDR（独立/PRDS 下控制 FDR；"
+                       "共享种子/模型存在依赖，故并列 BY q 作为任意依赖下"
+                       "的保守敏感性）。家族包含所有非预注册的种子级探索性"
+                       "检验；不包含样例级 McNemar、窗口级 PPL、分层 meta "
+                       "分析、多重宇宙、缺失敏感性与逐 step 预算轨迹。q 不"
+                       "改变任何 Holm/FWER 判定，也不把探索性发现升级为"
+                       "确认性。"),
                    "note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
                             f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
                             f"n<{MIN_SEEDS} 不判定显著性；"
@@ -1153,6 +1308,7 @@ def _summary_part_c(**kw):
         "eq",
         "eq_p",
         "eq_s",
+        "exploratory_fdr",
         "extra",
         "f",
         "flo_delta",

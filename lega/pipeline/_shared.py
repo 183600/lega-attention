@@ -52,6 +52,11 @@ from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
                          diagnose_run_dir, worst_status)
 from lega.datacheck import (read_test_access_log,  # noqa: E402
                             summarize_test_access)
+from lega.discovery import (benjamini_hochberg,  # noqa: E402
+                            benjamini_yekutieli,
+                            collect_seed_level_tests,
+                            exploratory_fdr as analyze_exploratory_fdr,
+                            source_label)
 from lega.bayes import bayes_paired_evidence  # noqa: E402
 from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
                               interpret_equivalence, metric_margin,
