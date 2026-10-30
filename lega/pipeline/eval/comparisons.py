@@ -29,8 +29,10 @@ def _enrich_paired(res: dict, a, b) -> dict:
     种子数只有 3~5 时 t 检验的正态假设并不可靠：置换检验给出分布无关的
     对照 p 值（两套结论冲突时必须显式标注，而不是静默采信 t 检验）；
     bootstrap CI 展示效应量的不确定范围；MDE 回答"以当前种子方差，
-    多大的效应才检测得到"——区分"没有效应"与"功效不足"。
-    均为确定性计算（固定随机种子），同一输入恒定复现。
+    多大的效应才检测得到"——区分"没有效应"与"功效不足"；新种子复现
+    预测（replication_forecast）回答"再换一个训练种子，方向是否仍一致"，
+    避免把均值 CI 误读成单次复现区间。均为确定性计算（固定随机种子），
+    同一输入恒定复现。
     """
     # 配对差统一按 _paired_diffs 口径构造：bool/None/非有限值不参与，
     # bootstrap CI 与置换/符号检验使用同一批观测。
@@ -114,6 +116,17 @@ def _enrich_paired(res: dict, a, b) -> dict:
                 all((m > 0) == (sign > 0) for m in loo_means))
             res["loo_min_abs_mean"] = float(min(abs(m) for m in loo_means))
 
+    # 新种子复现预测：均值 CI 不是单次复现区间。这里按原始指标尺度给出
+    # “同配置/同数据下再抽一个训练种子”的预测区间与同号概率；指标尺度
+    # （相对 PPL/log 比等）上的 SESOI 概率另由 equivalence.replication 给出。
+    res["replication"] = None
+    try:
+        res["replication"] = replication_forecast(diffs)
+    except (TypeError, ValueError, OverflowError) as exc:
+        res["replication"] = {
+            "status": "invalid", "label": f"无法计算复现预测（{exc}）",
+            "note": "输入不可表示；按缺失处理，不伪造概率。"}
+
     # SESOI 解释层（TOST）：显著性检验不能证明“无差异”。这里为每个有
     # 明确定义 SESOI 的指标附加“差异是否小于实际重要阈值”的证据；
     # 最终 status 会在 _apply_holm 里用同一指标家族内 Holm 校正后的
@@ -166,6 +179,14 @@ def _fmt_pct1(value) -> str:
         return "-"
     scaled = f * 100.0
     return f"{scaled:.1f}%" if math.isfinite(scaled) else "溢出"
+
+
+def _fmt_prob(value) -> str:
+    """预测概率按整数百分比渲染；缺失/损坏显示 '-'。"""
+    f = _finite_number(value)
+    if f is None or not 0.0 <= f <= 1.0:
+        return "-"
+    return f"{f:.0%}"
 
 
 def _seed_winloss_str(t: dict) -> str:
@@ -327,6 +348,12 @@ def _equivalence_overview(tests) -> dict:
             margins[metric] = {
                 "margin": eq.get("margin"), "kind": eq.get("kind"),
                 "label": eq.get("margin_label")}
+    replication_counts = {}
+    for t in rows:
+        rep = (t.get("equivalence") or {}).get("replication") or {}
+        status = rep.get("status") if isinstance(rep, dict) else None
+        if status is not None:
+            replication_counts[status] = replication_counts.get(status, 0) + 1
     return {
         "method": ("双单侧配对 t 检验（TOST）；等价=100(1−2α)% 区间完全落在 "
                    "±SESOI 内；TOST p 在同一指标家族内 Holm 校正"),
@@ -334,6 +361,16 @@ def _equivalence_overview(tests) -> dict:
         "n_rows": len(rows),
         "counts": counts,
         "margins": margins,
+        "replication": {
+            "method": ("新种子 t 预测区间与同号概率（描述性；"
+                       "mean ± t·sd·sqrt(1+1/n)，种子独立可交换正态假设）"),
+            "counts": replication_counts,
+            "directionally_consistent_threshold": 0.95,
+            "directionally_plausible_threshold": 0.80,
+            "note": ("预测的是同配置/同数据/同评测协议下换一个训练种子；"
+                     "不是对均值 CI 的重复，也不外推到新数据/新超参数；"
+                     "不改变确认性判定。"),
+        },
         "sensitivity_factors": [0.5, 1.0, 2.0],
         "note": ("SESOI 是分析前声明的协议阈值，不由当前数据估计；等价只说明"
                  "差异小于 SESOI，不等于效应为 0；未定不能写成无差异；"
@@ -384,6 +421,45 @@ def _render_equivalence_section(tests) -> list:
         f"未定 {counts.get('undetermined', 0)}、种子不足 "
         f"{counts.get('insufficient_seeds', 0)}、无效 "
         f"{counts.get('invalid', 0)}。")
+
+    rep_rows = []
+    for t in rows:
+        rep = (t.get("equivalence") or {}).get("replication")
+        if isinstance(rep, dict):
+            rep_rows.append((t, (t.get("equivalence") or {}), rep))
+    if rep_rows:
+        md += ["", "#### 新种子复现预测（同配置/同数据换训练种子；描述性）", ""]
+        md.append("均值的置信区间描述的是**均值**的不确定性；下面预测的是"
+                  "**单个新训练种子**的配对差。预测区间按 "
+                  "`mean ± t·sd·sqrt(1+1/n)`，同号概率是“种子效应独立可交换"
+                  "正态”模型下的预测概率，不是 p 值、不是复现成功率保证。"
+                  "n<3 不作概率判定；零方差（所有种子配对差完全相同）单列，"
+                  "不能当作强复现证据。该表不改变任何预注册判定。")
+        md += ["", "| 对比 | 指标 | n | 新种子预测区间 | 同号概率 | "
+               "实际重要方向概率 | ±SESOI内概率 | 留一方向一致率 | 状态 |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for t, eq, rep in rep_rows:
+            pi = rep.get("prediction_interval")
+            pi_s = ("-"
+                    if not (isinstance(pi, (list, tuple)) and len(pi) == 2)
+                    else f"[{_fmt_eq_value(pi[0], eq)}, "
+                         f"{_fmt_eq_value(pi[1], eq)}]")
+            md.append(
+                f"| {t.get('candidate')} vs {t.get('reference')} | "
+                f"{t.get('metric')} | {rep.get('n', '-')} | {pi_s} | "
+                f"{_fmt_prob(rep.get('prob_same_sign'))} | "
+                f"{_fmt_prob(rep.get('prob_meaningful_same_direction'))} | "
+                f"{_fmt_prob(rep.get('prob_within_sesoi'))} | "
+                f"{_fmt_prob(rep.get('loo_sign_agreement'))} | "
+                f"{rep.get('label') or rep.get('status') or '-'} |")
+        md.append("")
+        md.append("注: “同号概率”指新种子与本次观测均值同号（候选仍更好或仍"
+                  "更差，取决于 Δ 的符号）；“实际重要方向概率”要求新种子不仅"
+                  "同号而且超过 SESOI；“±SESOI内概率”是预测新种子落在等价带"
+                  "内的概率——三者回答不同问题，不能只挑一个报告。"
+                  "留一方向一致率不使用正态假设，只作朴素对照；"
+                  "3~5 个种子无法检验正态/可交换假设，重尾或种子×数据交互"
+                  "会使预测概率失真。")
     md.append("")
     md.append("注: 默认 SESOI 为 PPL 相对差 1%（log-PPL 为几何均值比 1%）、"
               "RULER EM 1.00 pp、AUROC/PR-AUC 0.010、因果 ΔNLL 0.01 nat、"

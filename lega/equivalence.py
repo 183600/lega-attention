@@ -39,6 +39,7 @@ TOST 的 p 值同样是一个可做多重比较校正的检验族：``run_all`` 
 import math
 from numbers import Real
 
+from .replication import replication_forecast
 from .utils import student_t_two_sided_p
 
 # 与 run_all 的统计协议保持一致；此模块不反向 import run_all，避免循环依赖。
@@ -523,6 +524,8 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         "lower_is_better": lower_better,
         "n_pairs_valid": len(diffs),
         "multiplicity_adjusted": False,
+        "replication": replication_forecast(
+            diffs, margin=margin, alpha=alpha, min_seeds=min_seeds),
     })
     mean = out.get("mean_diff")
     if mean is not None:
