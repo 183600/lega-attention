@@ -6,7 +6,7 @@
 
 $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
-- $c$ 在均匀注意力下恒为 0，但这只是一特例；一般情形 $c$ 仍可能随长度增长，不能据此声称已把"读得集中"和"读得长"解耦。`lega/length_null.py` 提供随机/重复/均匀上下文的零假设诊断；任何"长度解耦/长度校准"主张必须同时报告 $c\sim\log_2 n$ 斜率；
+- $c$ 在均匀注意力下恒为 0，但这只是一特例；一般情形 $c$ 仍可能随长度增长，不能据此声称已把"读得集中"和"读得长"解耦。`lega/length_null.py` 提供随机/重复/均匀上下文的零假设诊断；任何"长度解耦/长度校准"主张必须同时报告 $c\sim\log_2 n$ 斜率。统一流水线现在会在训练前自动生成 `results/<tag>/length_null.json`（`lengths`/`modes`/`score_sd`/`n_trials`/`seed` 由配置 `length_null` 块控制），写入 `pipeline_run_id` 与 `config_sha256`，并在汇总页新增“长度零假设诊断（c ~ log2 n）”小节；缺失或不属于本轮 run 的诊断会被标为证据不足，不能用均匀特例单元测试替代；
 - $b\log n$ 是长度校准项，让每个头自行学习长上下文中"集中读取"可信度的变化；
 - 初始化 $w=a=b=0,\ d=2.0$，接近标准注意力，训练可稳定启动。
 
@@ -321,7 +321,7 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 
 ## 评测
 
-- WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）；
+- WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）。默认只评 `eval_iters` 个抽样窗口，`eval.json` 因此必须落盘 `eval_iters`/`val_windows`/`full_eval`/`eval_window_fraction`，汇总对覆盖率 <1 的 PPL 单独告警；正式 PPL 结论应给 `run_all.py`/`lega.postrun` 加 `--full_eval`，评测全部不重叠窗口（checkpoint 选择仍只用 val）；
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
   每格 em 附带 Wilson 95% 区间（`em_ci95_wilson`）：n_samples 小时点估计的抽样误差不可忽略；
   niah_corpus 的干扰语句优先取 held-out 的 val/test.txt（train 仅在无 held-out

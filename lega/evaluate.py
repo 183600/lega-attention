@@ -625,6 +625,13 @@ def main():
         "eval_iters": metrics["eval_iters"],
         "val_windows": metrics["val_windows"],
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
+        # 全量窗口 vs 抽样窗口：PPL 结论的适用范围必须可机器判定。旧结果
+        # 没有该字段时下游按“未知/抽样”处理，不能默认声称全量。
+        "full_eval": bool(metrics["val_windows"]
+                          and metrics["eval_iters"] >= metrics["val_windows"]),
+        "eval_window_fraction": (
+            float(metrics["eval_iters"]) / float(metrics["val_windows"])
+            if metrics["val_windows"] else None),
         # 逐窗口损失与窗口序号：同 split/同协议下各变体共享同一批窗口，
         # 下游可做窗口级配对（评估抽样不确定性），与跨种子方差分开报告。
         "window_losses": metrics.get("window_losses"),

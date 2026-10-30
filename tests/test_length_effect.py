@@ -675,3 +675,92 @@ def test_length_null_random_context_concentration_grows_with_length():
     # 以免把“均匀时 c=0”误读成一般情况下的长度解耦。
     assert abs(rep["modes"]["repeated"]["slope_c_per_log2_n"]) < 0.05
     assert rep["modes"]["uniform"]["slope_c_per_log2_n"] == 0.0
+
+
+def test_pipeline_length_null_stage_is_validated_and_provenance_bound():
+    """正式流水线必须自动落盘长度零假设诊断，并绑定本次 run_id/配置指纹。"""
+    import pytest
+
+    from run_all import _length_null_spec, _run_length_null_stage
+
+    cfg = {
+        "block_size": 1024,
+        "seeds": [11, 22],
+        "ruler": {"ctx_lens": [128, 2048]},
+        "length_null": {"lengths": [8, 16], "n_trials": 10, "seed": 22},
+    }
+    spec = _length_null_spec(cfg, cfg["seeds"])
+    assert spec["lengths"] == [8, 16]
+    assert spec["n_trials"] == 10 and spec["seed"] == 22
+    # 未显式给 lengths 时覆盖训练/RULER 上下文档但不越过最大可处理长度。
+    default_spec = _length_null_spec({"block_size": 1024, "seeds": [11],
+                                      "ruler": {"ctx_lens": [128, 2048]}},
+                                     [11])
+    assert default_spec["lengths"][-1] == 2048
+    assert default_spec["lengths"][0] >= 2
+    for bad in ({"lengths": [8]}, {"lengths": [1, 8]},
+                {"n_trials": 0}, {"n_trials": True},
+                {"score_sd": -1.0}, {"modes": []}, {"seed": False}):
+        with pytest.raises(ValueError):
+            _length_null_spec(
+                {"length_null": {"lengths": [8, 16], **bad}}, [11])
+
+    tmp = tempfile.mkdtemp(prefix="length_null_stage_")
+    try:
+        info = _run_length_null_stage(cfg, cfg["seeds"], tmp, "run-abc",
+                                      "sha-abc", smoke=True)
+        assert info["executed"] is True
+        assert info["lengths"] == [8, 16]
+        saved = json.load(open(os.path.join(tmp, "length_null.json"),
+                               encoding="utf-8"))
+        assert saved["pipeline_run_id"] == "run-abc"
+        assert saved["config_sha256"] == "sha-abc"
+        assert saved["provenance"]["pipeline_run_id"] == "run-abc"
+        assert set(saved["modes"]) == {"random", "repeated", "uniform"}
+        assert saved["modes"]["random"]["slope_c_per_log2_n"] is not None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_render_length_null_requires_current_run_and_reports_slope():
+    """汇总必须显式暴露缺失/陈旧诊断，不能把均匀特例当作长度解耦证据。"""
+    from run_all import _render_length_null
+
+    missing = "\n".join(_render_length_null(None))
+    assert "未找到 `length_null.json`" in missing
+    stale = "\n".join(_render_length_null(
+        {"pipeline_run_id": "old", "lengths": [8, 16],
+         "n_trials": 10, "seed": 1, "score_sd": 1.0,
+         "modes": {"random": {
+             "per_length": {"8": {"mean": 1.0}, "16": {"mean": 1.2}},
+             "slope_c_per_log2_n": 0.25, "length_independent": False},
+             "uniform": {"per_length": {}, "slope_c_per_log2_n": 0.0,
+                         "length_independent": True}}}, stale=True))
+    assert "不属于本轮" in stale
+    assert "+0.2500" in stale and "random" in stale
+    assert "不能把 c 单独解释为" in stale
+
+
+def test_build_summary_loads_length_null_and_flags_stale_run():
+    """汇总必须读取本轮诊断；旧 run 的同名文件只能作警示，不能当本轮证据。"""
+    tmp = tempfile.mkdtemp(prefix="length_null_summary_")
+    try:
+        _write_json(os.path.join(tmp, "repro.json"),
+                    {"run_id": "run-new", "variants": ["lega"], "seeds": [1]})
+        _write_json(os.path.join(tmp, "length_null.json"), {
+            "pipeline_run_id": "run-old",
+            "lengths": [8, 16], "n_trials": 2, "seed": 1, "score_sd": 1.0,
+            "modes": {"uniform": {
+                "per_length": {"8": {"mean": 0.0}, "16": {"mean": 0.0}},
+                "slope_c_per_log2_n": 0.0, "length_independent": True}},
+        })
+        out = build_summary(tmp)
+        assert out["length_null"]["pipeline_run_id"] == "run-old"
+        assert "不属于本轮" in out["markdown"]
+        assert "长度零假设诊断" in out["markdown"]
+        os.remove(os.path.join(tmp, "length_null.json"))
+        out = build_summary(tmp)
+        assert out["length_null"] is None
+        assert "未找到 `length_null.json`" in out["markdown"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

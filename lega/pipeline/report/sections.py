@@ -1332,3 +1332,82 @@ def _render_reparameterization(reparam):
                       "`normalized_efficiency_gap_max` 与 "
                       "`raw_efficiency_gap_max`。")
     return md
+
+
+def _render_length_null(report, stale: bool = False) -> list:
+    """渲染 c~log2(n) 零假设诊断（README 要求的长度主张必要证据）。"""
+    md = ["", "## 长度零假设诊断（c ~ log2 n）", ""]
+    if not isinstance(report, dict):
+        md.append("- ⚠ 未找到 `length_null.json`：任何“长度解耦/长度校准”"
+                  "正式主张都缺少 README 要求的 c~log2(n) 斜率证据；"
+                  "不能用均匀注意力特例单元测试替代。请重跑统一流水线生成诊断。")
+        return md
+    if stale:
+        md.append("- ⚠ `length_null.json` 不属于本轮 `run_id`（旧结果或手工"
+                  "复制）：不得作为本轮长度主张的证据。")
+    lengths = report.get("lengths")
+    if not isinstance(lengths, list) or not lengths:
+        md.append("- ⚠ 诊断缺少有效长度清单，无法复核斜率。")
+        return md
+    try:
+        score_sd = float(report.get("score_sd"))
+    except (TypeError, ValueError, OverflowError):
+        score_sd = None
+    md.append(
+        f"- 长度档：{', '.join(str(x) for x in lengths)}；"
+        f"每档重复 {report.get('n_trials')} 次；"
+        f"打分标准差={'-' if score_sd is None else f'{score_sd:.3g}'}；"
+        f"随机种子={report.get('seed')}。")
+    modes = report.get("modes")
+    if not isinstance(modes, dict) or not modes:
+        md.append("- ⚠ 诊断缺少 modes 结果。")
+        return md
+    md += ["", "| 零假设模式 | c 均值范围 | c~log2(n) 斜率 | "
+               "是否长度无关(|slope|≤0.05) |", "|---|---|---|---|"]
+    slopes = {}
+    for mode in ("uniform", "repeated", "random"):
+        data = modes.get(mode)
+        if not isinstance(data, dict):
+            continue
+        per = data.get("per_length")
+        means = []
+        if isinstance(per, dict):
+            for n in lengths:
+                row = per.get(str(n))
+                if isinstance(row, dict):
+                    try:
+                        means.append(float(row.get("mean")))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+        slope = data.get("slope_c_per_log2_n")
+        try:
+            slope = float(slope)
+        except (TypeError, ValueError, OverflowError):
+            slope = None
+        slopes[mode] = slope
+        span = ("-" if not means else f"{min(means):+.4f} … {max(means):+.4f}")
+        indep = data.get("length_independent")
+        md.append(f"| {mode} | {span} | "
+                  f"{'-' if slope is None else f'{slope:+.4f}'} | "
+                  f"{'-' if indep is None else ('是' if indep else '否')} |")
+    md.append("")
+    random_slope = slopes.get("random")
+    if isinstance(random_slope, float) and abs(random_slope) > 0.05:
+        md.append(
+            f"- ⚠ 随机上下文下 c 仍随长度增长（slope={random_slope:+.4f}）："
+            "`c=log(n·max_j p_j)` 只在均匀分布特例下与长度无关，不能把 c "
+            "单独解释为“已去除长度混淆的充分证据”。正式结论必须同时报告"
+            "该斜率，并与 `b·log n`、RULER 分档结果合读。")
+    else:
+        md.append("- 随机零假设下 slope 未超过 0.05 阈值；仍需按上表报告，"
+                  "不能只引用均匀特例。")
+    anomalies = [m for m in ("uniform", "repeated")
+                 if isinstance(slopes.get(m), float)
+                 and abs(slopes[m]) > 0.05]
+    if anomalies:
+        md.append("- ⚠ 零斜率对照偏离 0：" + "、".join(anomalies)
+                  + "；这通常意味着诊断实现/样本量异常，先排查再解读 random 斜率。")
+    md.append("- 边界：本表是对**合成零假设分布**的诊断，不是对训练模型实际"
+              "注意力分布的测量；它约束“c 本身已长度解耦”的措辞，不替代模型"
+              "级 c 分布与长度分层 RULER 证据。")
+    return md

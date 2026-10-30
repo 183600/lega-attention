@@ -219,6 +219,18 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     def _clock_extractor(key):
         return lambda d: d.get(key) if isinstance(d, dict) else None
 
+    def _eval_window_fraction(d):
+        if not isinstance(d, dict):
+            return None
+        frac = _num_or_none(d.get("eval_window_fraction"))
+        if frac is not None:
+            return frac
+        used = _num_or_none(d.get("eval_iters"))
+        total = _num_or_none(d.get("val_windows"))
+        if used is None or not total:
+            return None
+        return used / total
+
     metric_specs = [
         ("val_ppl", lambda m: _stat_series(m, "eval", _ppl_of)),
         ("gate_mean", lambda m: _stat_series(m, "eval", _clock_extractor("gate_mean"))),
@@ -236,6 +248,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             m, "eval", _eval_scalar("val_tokens_evaluated"))),
         ("eval_windows", lambda m: _stat_series(
             m, "eval", _eval_scalar("val_windows"))),
+        ("eval_window_fraction", lambda m: _stat_series(
+            m, "eval", _eval_window_fraction)),
         ("ruler_avg", lambda m: _stat_series(m, "ruler", _ruler_avg_of)),
         ("ruler_avg_micro", lambda m: _stat_series(
             m, "ruler", _ruler_avg_micro)),
@@ -768,6 +782,15 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         if missing_cov:
             md += ["", f"注：{len(missing_cov)}/{len(rows)} 个变体的 eval.json "
                       "没有训练覆盖字段（旧结果或手工评测），无法核对训练覆盖。"]
+        sampled = [r for r in rows
+                   if r.get("eval_window_fraction") is not None
+                   and r["eval_window_fraction"] < 1.0]
+        if sampled:
+            worst = min(r["eval_window_fraction"] for r in sampled)
+            md += ["", f"⚠ PPL 为窗口抽样：{len(sampled)}/{len(rows)} 个变体"
+                      f"未评测全部不重叠窗口（最低覆盖 {worst:.1%}）。小于"
+                      "`PPL评估CI` 或种子间差异的 PPL 差值先按评估噪声处理；"
+                      "正式 PPL 结论请用 `run_all.py --full_eval` 重跑。"]
         # 评估噪声门：单 run 的 PPL 窗口抽样 CI 相对半宽若与跨种子差异同量级，
         # 变体间的小 PPL 差异不足以支撑方法结论。
         ci_vals = [r["ppl_ci_rel_pct"] for r in rows
@@ -918,6 +941,14 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                                     ngram_cmp=ngram_cmp,
                                     probe_cmp=probe_cmp,
                                     variants=sorted(runs))
+
+    # --- c~log2(n) 长度零假设诊断（README 要求的长度主张必要证据）
+    length_null = load(os.path.join(results_dir, "length_null.json"))
+    length_null = length_null if isinstance(length_null, dict) else None
+    length_null_stale = bool(
+        length_null and scope_run_id
+        and length_null.get("pipeline_run_id") != scope_run_id)
+    md += _render_length_null(length_null, stale=length_null_stale)
 
     # --- 先验设计计划与分析人群（训练前声明，汇总时核对）
     md += render_design_section(
@@ -1304,6 +1335,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "lat_variants",
         "length_analysis",
         "length_by_pair",
+        "length_null",
         "load",
         "log_tests",
         "m",
@@ -1424,6 +1456,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'tests': ctx["tests"],
         'ruler_sample_tests': ctx["ruler_sample_tests"],
         'ruler_length': ctx["length_analysis"],
+        'length_null': ctx.get("length_null"),
         'ppl_window_tests': ctx["ppl_window_tests"],
         'factorial_shapley': ctx["shapley_tests"],
         'reparameterization': ctx["reparameterization"],

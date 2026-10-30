@@ -3,6 +3,159 @@ from ._shared import _install as _shared_install
 
 _shared_install(globals())
 
+LENGTH_NULL_DEFAULT_LENGTHS = (32, 64, 128, 256, 512, 1024, 2048, 4096)
+
+
+def _length_null_spec(cfg: dict, seeds, smoke: bool = False) -> dict:
+    """解析长度零假设诊断的运行规格（配置错误在开跑前显式拒绝）。"""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    spec = cfg.get("length_null")
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"配置 length_null 需要 JSON 对象，收到 {type(spec).__name__}")
+    if spec.get("enabled") is False:
+        return {"enabled": False}
+
+    raw_lengths = spec.get("lengths")
+    if raw_lengths is None:
+        # 默认覆盖训练/RULER 使用的上下文档位，并保留几个更短的参照点；
+        # 诊断长度不能超过模型可处理的最大上下文，否则斜率会被域外长度主导。
+        block_size = strict_int(cfg.get("block_size", 1024), "block_size")
+        if block_size < 2:
+            raise ValueError(f"block_size 必须 >= 2，收到 {block_size}")
+        ruler_cfg = cfg.get("ruler")
+        ctx_lens = (ruler_cfg.get("ctx_lens")
+                    if isinstance(ruler_cfg, dict) else None)
+        ctx_values = []
+        if isinstance(ctx_lens, (list, tuple)):
+            for value in ctx_lens:
+                value = strict_int(value, "ruler.ctx_lens")
+                if value >= 2:
+                    ctx_values.append(value)
+        max_len = max([block_size] + ctx_values)
+        lengths = [n for n in LENGTH_NULL_DEFAULT_LENGTHS if n <= max_len]
+        if len(lengths) < 2:
+            lengths = sorted({max(2, max_len // 2), max_len})
+    elif isinstance(raw_lengths, str):
+        lengths = []
+        for part in raw_lengths.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            lengths.append(strict_int(part, "length_null.lengths"))
+    elif isinstance(raw_lengths, (list, tuple)):
+        lengths = [strict_int(v, "length_null.lengths") for v in raw_lengths]
+    else:
+        raise ValueError(
+            "length_null.lengths 需要整数列表或逗号分隔字符串，收到 "
+            f"{type(raw_lengths).__name__}")
+    lengths = sorted(set(lengths))
+    if len(lengths) < 2:
+        raise ValueError("length_null.lengths 至少需要两个不同长度")
+    if lengths[0] < 2:
+        raise ValueError("length_null.lengths 中每个长度必须 >= 2")
+
+    raw_modes = spec.get("modes", "random,repeated,uniform")
+    if isinstance(raw_modes, str):
+        modes = [m.strip() for m in raw_modes.split(",") if m.strip()]
+    elif isinstance(raw_modes, (list, tuple)):
+        modes = [str(m).strip() for m in raw_modes if str(m).strip()]
+    else:
+        raise ValueError("length_null.modes 需要字符串或字符串列表")
+    if not modes:
+        raise ValueError("length_null.modes 不能为空")
+
+    score_sd = config_finite_float(
+        spec.get("score_sd", 1.0), "length_null.score_sd")
+    if score_sd < 0.0:
+        raise ValueError(
+            f"length_null.score_sd 不能为负，收到 {score_sd}")
+    n_trials = strict_int(
+        spec.get("n_trials", 200 if smoke else 2000),
+        "length_null.n_trials")
+    if n_trials < 1:
+        raise ValueError(
+            f"length_null.n_trials 必须 >= 1，收到 {n_trials}")
+    seed = spec.get("seed")
+    if seed is None:
+        if not seeds:
+            raise ValueError("length_null 需要至少一个种子")
+        seed = seeds[0]
+    seed = seed_int(seed, "length_null.seed")
+    return {
+        "enabled": True,
+        "lengths": lengths,
+        "modes": modes,
+        "score_sd": score_sd,
+        "n_trials": n_trials,
+        "seed": seed,
+    }
+
+
+def _run_length_null_stage(cfg: dict, seeds, results_dir: str, run_id: str,
+                           config_sha256: str, smoke: bool = False) -> dict:
+    """训练前生成 c = log(n·max_j p_j) 的长度零假设诊断。
+
+    README 明确要求任何“长度解耦/长度校准”正式主张同时报告 c~log2(n)
+    斜率；该诊断此前只能手工运行，正式流水线因此可能产出缺少必要证据的
+    结论。这里把它变成自动准备步骤，并把 run_id/配置指纹写进产物，避免
+    旧结果冒充本轮证据。
+    """
+    from lega.length_null import length_null_report
+
+    spec = _length_null_spec(cfg, seeds, smoke=smoke)
+    path = os.path.join(results_dir, "length_null.json")
+    if not spec.get("enabled", True):
+        print("[length_null] 配置已禁用；汇总页将标注长度主张缺少零假设证据")
+        return {"executed": False, "reason": "disabled_in_config",
+                "path": os.path.relpath(path, ROOT)}
+    report = length_null_report(
+        spec["lengths"], score_sd=spec["score_sd"], modes=spec["modes"],
+        n_trials=spec["n_trials"], seed=spec["seed"])
+    report["pipeline_run_id"] = run_id
+    report["config_sha256"] = config_sha256
+    report["smoke"] = bool(smoke)
+    report["provenance"] = {
+        "pipeline_run_id": run_id,
+        "config_sha256": config_sha256,
+        "source": "lega.length_null.length_null_report",
+    }
+    save_json(report, path)
+    slopes = {
+        mode: (data.get("slope_c_per_log2_n")
+               if isinstance(data, dict) else None)
+        for mode, data in (report.get("modes") or {}).items()
+    }
+    print("[length_null] lengths=" + ",".join(str(x) for x in spec["lengths"])
+          + f" modes={','.join(spec['modes'])} n_trials={spec['n_trials']} "
+          + f"seed={spec['seed']} -> {path}")
+    print("[length_null] c~log2(n) 斜率: " + "；".join(
+        f"{mode}={'-' if slope is None else f'{slope:+.4f}'}"
+        for mode, slope in slopes.items()))
+    random_slope = slopes.get("random")
+    if isinstance(random_slope, (int, float)) and abs(random_slope) > 0.05:
+        print("[length_null] 注：随机上下文下 c 仍随长度增长"
+              f"（slope={random_slope:+.4f}）；不能把 c 宣称为已与长度"
+              "解耦的充分统计量，正式主张必须同时报告该斜率。")
+    return {
+        "executed": True,
+        "path": os.path.relpath(path, ROOT),
+        "lengths": list(spec["lengths"]),
+        "modes": list(spec["modes"]),
+        "score_sd": spec["score_sd"],
+        "n_trials": spec["n_trials"],
+        "seed": spec["seed"],
+        "slopes": slopes,
+        "length_independent": {
+            mode: (data.get("length_independent")
+                   if isinstance(data, dict) else None)
+            for mode, data in (report.get("modes") or {}).items()
+        },
+    }
+
+
 def main():
     p = argparse.ArgumentParser(description="一键实验流水线（多种子 + 受控对比 + 完整消融）")
     p.add_argument("--config", default="configs/tiny.json")
@@ -30,6 +183,10 @@ def main():
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--device", default="auto")
     p.add_argument("--skip_train", action="store_true")
+    p.add_argument("--full_eval", action="store_true",
+                   help="独立 PPL 评测使用全部不重叠窗口（默认只评训练配置的 "
+                        "eval_iters 个抽样窗口）；选择 checkpoint 仍只用 val，"
+                        "正式 PPL 结论建议开启。")
     p.add_argument("--skip_sanity", action="store_true",
                    help="跳过过拟合小批量 sanity check（默认每变体训练前必跑，"
                         "失败即中止全量训练）")
@@ -312,6 +469,16 @@ def main():
             print(f"[design] {_c['status']}: {_c.get('title')} — "
                   f"{_c.get('detail')}")
 
+    # c = log(n·max_j p_j) 的长度零假设诊断：README 把 c~log2(n) 斜率列为
+    # “长度解耦/长度校准”正式主张的必要证据；在此自动生成，避免正式结果
+    # 只有均匀特例单元测试、却没有可审计的斜率。
+    try:
+        length_null = _run_length_null_stage(
+            cfg, seeds, results_dir, run_id, config_sha256,
+            smoke=bool(args.smoke))
+    except (TypeError, ValueError) as e:
+        p.error(f"长度零假设诊断配置非法（检查 length_null 块）：{e}")
+
     # 训练 run 的顺序由设计计划预先给出：种子为区组、区块内随机化，避免
     # “变体主序”把方法效应与时间/硬件漂移混在一起。计划缺失/损坏时不能
     # 静默退回旧顺序并伪装成随机化，必须在开跑前显式报错。
@@ -379,6 +546,12 @@ def main():
             "variants": list(ablate_variants),
             "split": "val",
         },
+        "evaluation": {
+            "full_eval": bool(args.full_eval),
+            "scope": "independent_eval_only",
+            "requirement": ("正式 PPL 结论应使用全量不重叠窗口；"
+                            "checkpoint 选择仍只用 val"),
+        },
         "smoke": bool(args.smoke),
         "git": git,
         "worktree": worktree,
@@ -386,6 +559,9 @@ def main():
         "data": data_fp,
         "runtime": runtime_info(args.device),
         "registration": reg_info,
+        # 长度零假设诊断：记录实际长度、随机种子与各零假设斜率，汇总页据此
+        # 判断长度主张是否具备 README 要求的必要证据。
+        "length_null": length_null,
         # 先验设计计划摘要 + 各阶段是否实际执行：汇总据此区分“计划内但
         # 被 --skip_* 关闭”与“产物缺失”，不把跳过的阶段当成完整分析人群。
         "design": {
@@ -525,6 +701,8 @@ def main():
                "--device", args.device]
         if args.skip_train:
             cmd += ["--skip_train"]
+        if args.full_eval:
+            cmd += ["--full_eval"]
         if args.wandb:
             cmd += ["--wandb"]
         if sanity:

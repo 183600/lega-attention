@@ -185,3 +185,18 @@ def test_train_argv_forwards_sanity_file_only_when_present():
     assert t[t.index("--sanity_file") + 1] == \
         "results/tiny_smoke/sanity_lega.json"
     print("  [ok] postrun 透传 --sanity_file（缺省不夹带）")
+
+
+def test_full_eval_flag_is_forwarded_to_evaluate():
+    """全量窗口评测开关必须从 postrun 透传到 evaluate，不能被静默丢弃。"""
+    a = _parser().parse_args([
+        "--config", "configs/tiny.json", "--variant", "lega",
+        "--seed", "1337", "--data_dir", "data/dummy",
+        "--out_dir", "out/tiny_smoke/lega",
+        "--results_dir", "results/tiny_smoke", "--full_eval",
+    ])
+    argv = _eval_argv(a, "out/tiny_smoke/lega/model_best.pt")
+    assert "--full_eval" in argv
+    # 缺省仍沿用配置里的抽样窗口，避免无意中改变既有口径。
+    assert "--full_eval" not in _eval_argv(_ns(), "ckpt")
+    print("  [ok] --full_eval 仅在显式开启时透传 evaluate")

@@ -25,6 +25,14 @@
   "log_every": 10,
   "eval_every": 250,
   "eval_iters": 20,
+  "length_null": {
+    "enabled": true,
+    "lengths": [32, 64, 128, 256],
+    "modes": ["random", "repeated", "uniform"],
+    "score_sd": 1.0,
+    "n_trials": 500,
+    "seed": 1337
+  },
 
   "design": {
     "alpha": 0.05,
