@@ -710,6 +710,98 @@ def _render_multiverse_section(multiverse) -> list:
     return md
 
 
+def _render_missingness_section(analysis) -> list:
+    """渲染缺失结果敏感性（完成者分析 vs 计划分析人群；探索性）。"""
+    md = ["", "### 缺失结果敏感性（完成者分析 vs 计划分析人群；探索性）", ""]
+    if not isinstance(analysis, dict):
+        md.append("（本次汇总未计算缺失结果敏感性。）")
+        return md
+    endpoints = [e for e in (analysis.get("endpoints") or [])
+                 if isinstance(e, dict)]
+    if not endpoints:
+        md.append("（没有可分析的配对；旧产物或种子/协议不足。）")
+        return md
+
+    def _fmt_effect(value, metric):
+        spec = metric_margin(metric) or {}
+        num = _finite_number(value)
+        if num is None:
+            return "-"
+        try:
+            scaled = num * float(spec.get("display_scale", 1.0))
+        except (TypeError, ValueError, OverflowError):
+            return "-"
+        if not math.isfinite(scaled):
+            return "-"
+        unit = spec.get("display_unit") or ""
+        return f"{scaled:+.3f}{unit}"
+
+    def _range_text(row):
+        rng = row.get("full_mean_range")
+        if (not isinstance(rng, (list, tuple)) or len(rng) != 2):
+            return "-"
+        return (f"[{_fmt_effect(rng[0], row.get('metric'))}, "
+                f"{_fmt_effect(rng[1], row.get('metric'))}]")
+
+    md.append("主检验默认使用候选/参照都成功的种子。若缺失与结果相关"
+              "（例如更难/更大的 run 更容易失败），完成者均值本身可能有偏。"
+              "下表报告计划内缺失模式、两臂缺失率差、缺失配对差取同一值 δ "
+              "时的翻零临界点，以及把缺失值限制在已观测配对差范围内时完整"
+              "均值的可能范围。**这不是 MAR/MCAR 插补或严格最坏情形界**；"
+              "不进入 Holm/FWER，也不改变预注册判定。")
+    md += ["", "| 对比 | 指标 | 计划/观测/缺失 | 缺失(候选/参照/双侧) | "
+           "候选−参照缺失率 | 完整Δ | 观测范围下完整均值 | 翻零需缺失δ | "
+           "结论 |", "|---|---|---|---|---|---|---|---|---|"]
+    order = {"sensitive_within_observed_range": 0,
+             "invalid": 1, "no_observed_pairs": 1, "insufficient": 1,
+             "robust_within_observed_range": 2, "complete": 3}
+    for row in sorted(endpoints,
+                      key=lambda r: (order.get(r.get("status"), 9),
+                                     str(r.get("metric")),
+                                     str(r.get("candidate")),
+                                     str(r.get("reference")))):
+        n_planned = row.get("n_planned")
+        n_observed = row.get("n_observed")
+        n_missing = row.get("n_missing")
+        counts = (f"{n_planned if n_planned is not None else '-'}/"
+                  f"{n_observed if n_observed is not None else '-'}/"
+                  f"{n_missing if n_missing is not None else '-'}")
+        pattern = (f"{len(row.get('missing_candidate') or [])}/"
+                   f"{len(row.get('missing_reference') or [])}/"
+                   f"{len(row.get('missing_both') or [])}")
+        diff = row.get("differential_missingness")
+        diff_s = (f"{diff * 100:+.1f}pp" if isinstance(diff, (int, float))
+                  and math.isfinite(diff) else "-")
+        delta = _fmt_effect(row.get("observed_mean_diff"), row.get("metric"))
+        tip = _fmt_effect(row.get("missing_mean_for_zero"),
+                          row.get("metric"))
+        verdict = row.get("label") or row.get("status") or "-"
+        if row.get("insufficient_seeds"):
+            verdict += "；⚠ 完整配对不足，仅描述"
+        if row.get("protocol_mismatch"):
+            verdict += f"；协议不一致 {row.get('protocol_mismatch')}"
+        md.append(
+            f"| {row.get('candidate')} vs {row.get('reference')} | "
+            f"{row.get('metric')} | {counts} | {pattern} | {diff_s} | "
+            f"{delta} | {_range_text(row)} | {tip} | {verdict} |")
+    summary = analysis.get("summary") or {}
+    md.append("")
+    md.append("计数："
+              f"对比×指标 {summary.get('n_comparisons', 0)}、"
+              f"无缺失 {summary.get('n_complete', 0)}、"
+              f"存在缺失 {summary.get('n_with_missing', 0)}、"
+              f"缺失敏感 {summary.get('n_sensitive', 0)}。")
+    md.append("注: 缺失(候选/参照/双侧) 是计划种子里对应侧不可用的数量；"
+              "两臂缺失率差 = 候选缺失率 − 参照缺失率（非零表示缺失与臂"
+              "相关）。翻零需缺失δ = 所有缺失配对差取同一值时，把完整均值"
+              "推到 0 所需的 δ；若它落在已观测配对差范围内，则少数缺失单元"
+              "即可能翻转方向。观测范围只作透明敏感性尺度：缺失值可以比"
+              "任何已观测种子更极端，“观测范围内稳健”不证明缺失随机。"
+              "完整逐种子缺失清单与 ±SESOI 临界点见 "
+              "`significance.json` 的 `missingness.endpoints`。")
+    return md
+
+
 def _render_ruler_heterogeneity_section(analysis) -> list:
     """渲染 RULER 任务/上下文异质性（探索性解释层）。"""
     md = ["", "### RULER 任务/长度异质性（探索性解释；不改变 H4）", ""]
@@ -1428,6 +1520,131 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
             res["excluded_cell_mismatches"] = cell_skipped
         out.append(_enrich_paired(res, a, b))
     return out
+
+
+def _missingness_endpoint(runs, pairs, planned_seeds, metric_name, extractor,
+                          *, protocol, transform, margin, lower_better):
+    """为某一个指标构造缺失模式与临界点敏感性条目。
+
+    缺失一侧写成 None；协议不一致的整对都写成 None。模块只负责“计划了但
+    不可用”的统计，不重复解释 PPL/RULER 的协议字段。
+    """
+    entries = []
+    for cand, ref in pairs:
+        cm = _variant_seed_map(runs, cand)
+        rm = _variant_seed_map(runs, ref)
+        plan = planned_seeds
+        if plan is None:
+            seeds = {_integral_value(s) for s in (set(cm.keys()) | set(rm.keys()))}
+            plan = sorted(s for s in seeds if s is not None)
+        cand_values = {}
+        ref_values = {}
+        protocol_mismatch = []
+        missing_run = []
+        missing_value = []
+        for s in plan:
+            sa, sb = cm.get(s), rm.get(s)
+            if not isinstance(sa, dict) or not isinstance(sb, dict):
+                missing_run.append(s)
+                cand_values[s] = extractor(sa) if isinstance(sa, dict) else None
+                ref_values[s] = extractor(sb) if isinstance(sb, dict) else None
+                continue
+            if protocol == "ppl":
+                ea = sa.get("eval") if isinstance(sa.get("eval"), dict) else {}
+                eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else {}
+                if (ea.get("split", "val") != eb.get("split", "val")
+                        or not _same_protocol_fields(_ppl_protocol(ea),
+                                                     _ppl_protocol(eb))):
+                    protocol_mismatch.append(s)
+                    cand_values[s] = ref_values[s] = None
+                    continue
+            elif protocol == "ruler":
+                ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else {}
+                rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else {}
+                if not _same_protocol_fields(_ruler_protocol(ra),
+                                             _ruler_protocol(rb)):
+                    protocol_mismatch.append(s)
+                    cand_values[s] = ref_values[s] = None
+                    continue
+                ca = _ruler_cell_signature(ra)
+                cb = _ruler_cell_signature(rb)
+                if ca is not None and cb is not None and ca != cb:
+                    protocol_mismatch.append(s)
+                    cand_values[s] = ref_values[s] = None
+                    continue
+            va, vb = extractor(sa), extractor(sb)
+            if va is None or vb is None:
+                missing_value.append(s)
+            cand_values[s] = va
+            ref_values[s] = vb
+        row = paired_missingness(
+            plan, cand_values, ref_values, transform=transform, margin=margin)
+        row.update({
+            "candidate": cand,
+            "reference": ref,
+            "metric": metric_name,
+            "lower_is_better": bool(lower_better),
+            "protocol_mismatch": len(protocol_mismatch),
+            "protocol_mismatch_seeds": protocol_mismatch,
+            "missing_run": len(missing_run),
+            "missing_run_seeds": missing_run,
+            "missing_value": len(missing_value),
+            "missing_value_seeds": missing_value,
+        })
+        entries.append(row)
+    return entries
+
+
+def _missingness_analysis(runs, pairs, planned_seeds=None,
+                          planned_seeds_source=None):
+    """PPL/RULER 核心端点的缺失结果敏感性（探索性、描述性）。
+
+    只用候选/参照都可用且协议一致的种子做完成者估计，再把计划内缺失的
+    配对差作为敏感性尺度：报告两臂缺失率、临界点与观测范围边界。它回答
+    “完成者结论在什么缺失机制下会翻转”，不改变设计符合性门或预注册判定。
+    """
+    pairs = list(pairs or [])
+
+    def _rel(a, b):
+        if b is None or b <= 0.0:
+            return None
+        return (a - b) / b
+
+    ppl_margin = metric_margin("PPL")
+    ruler_margin = metric_margin("RULER平均")
+    endpoints = []
+    endpoints += _missingness_endpoint(
+        runs, pairs, planned_seeds, "PPL",
+        lambda slot: _ppl_of(slot.get("eval")),
+        protocol="ppl", transform=_rel,
+        margin=(ppl_margin or {}).get("margin"),
+        lower_better=True)
+    endpoints += _missingness_endpoint(
+        runs, pairs, planned_seeds, "RULER平均",
+        lambda slot: _ruler_avg_of(slot.get("ruler")),
+        protocol="ruler", transform=lambda a, b: a - b,
+        margin=(ruler_margin or {}).get("margin"),
+        lower_better=False)
+    summary = aggregate_missingness(endpoints)
+    plan = (endpoints[0].get("planned_seeds") if endpoints else
+            (list(planned_seeds) if planned_seeds is not None else None))
+    if planned_seeds_source is None:
+        planned_seeds_source = ("declared" if planned_seeds is not None
+                                else "observed_union")
+    return {
+        "method": (
+            "complete-case tipping-point / observed-range sensitivity for "
+            "planned (variant, seed) cells"),
+        "planned_seeds": plan,
+        "planned_seeds_source": planned_seeds_source,
+        "endpoints": endpoints,
+        "summary": summary,
+        "note": ("缺失敏感性（探索性）：PPL 用逐种子相对差、RULER 用绝对 EM "
+                 "差与各自 SESOI 对齐；临界点/边界只以“缺失配对差落在已观测"
+                 "范围内”为敏感性尺度，不是 MAR/MCAR 插补或严格最坏情形界。"
+                 "缺失率与两臂差异必须如实报告；本层不进入 Holm/FWER，"
+                 "不改变预注册判定，也不能用“观测范围内稳健”证明缺失随机。"),
+    }
 
 
 def _multiverse_spec(spec_id, cand, ref, metric, dimension, choice, observations,

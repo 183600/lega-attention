@@ -434,6 +434,41 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 单因素消融（去一法 + 全因子增量）与整体对比分开构造；B-only/C-only
     # 不再与 Full 配对（那会同时改变 A+C / A+B，不能归因给单个组件）。
     registered = _as_dict(load_registered_hypotheses())
+    # 先加载设计计划：缺失敏感性需要训练前写死的计划种子，而不是只从
+    # 现有 runs 反推“跑了哪些”。计划缺失时退化为 repro 的种子范围。
+    design_plan = load_design_plan(results_dir)
+    def _normalised_seed_list(values):
+        if not isinstance(values, list):
+            return None
+        out = []
+        for value in values:
+            seed = _integral_value(value)
+            if seed is None:
+                return None
+            if seed not in out:
+                out.append(seed)
+        return out
+
+    plan_inputs = _as_dict(_as_dict(design_plan).get("inputs"))
+    planned_seeds = _normalised_seed_list(plan_inputs.get("seeds"))
+    scope_seed_list = _normalised_seed_list(scope_seeds)
+    plan_variants = plan_inputs.get("variants")
+    repro_variants = repro.get("variants")
+    plan_matches_repro = (
+        planned_seeds is not None
+        and scope_seed_list is not None
+        and isinstance(plan_variants, list)
+        and isinstance(repro_variants, list)
+        and {str(v) for v in plan_variants}
+        == {str(v) for v in repro_variants}
+        and set(planned_seeds) == set(scope_seed_list))
+    planned_seeds_source = "design_plan"
+    if not plan_matches_repro:
+        # 旧计划/改种子后的遗留计划不能当作本轮分析人群，否则会把“计划外
+        # 缺失”算到当前实验头上；退化为本次 repro 的种子范围并标明来源。
+        planned_seeds = scope_seed_list
+        planned_seeds_source = ("repro_scope" if planned_seeds is not None
+                                else "observed_union")
     sf_audit = single_factor_audit()
     if not sf_audit["ok"]:
         print("[run_all] ⚠ 单因素消融审计未通过："
@@ -503,6 +538,15 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     tests += _factorial_interaction_tests(runs)
     tests += _factorial_shapley_tests(runs)
     tests = _apply_holm(tests)
+    # 缺失结果敏感性（探索性）：完整个案是否足以代表计划人群。只用
+    # design_plan 的计划种子识别“计划了但没产出”的单元；不改变任何判定。
+    # 两侧都至少有一个 run 才进入本层：整臂未运行是设计符合性问题，由
+    # analysis_population/design gate 负责，不能在这里膨胀成大量空配对。
+    missingness_pairs = [(c, r) for c, r in pairs
+                         if c in runs and r in runs]
+    missingness = _missingness_analysis(
+        runs, missingness_pairs, planned_seeds,
+        planned_seeds_source=planned_seeds_source)
     # 分析选择多重宇宙（探索性）：同一对比在原始/log PPL、macro/micro
     # RULER、全种子/留一种子等可辩护口径下重算；只披露结论是否依赖分析
     # 选择，不做多重校正，也不改变确认性判定。
@@ -647,7 +691,6 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     scope_check = registration_scope_check(registered, repro)
     # 设计符合性门：先验计划里的 (变体, 种子) 单元必须齐全；缺失只影响
     # 涉及该变体/指标端点的假设，不搞“一刀切”降级，也不能把缺失当无效应。
-    design_plan = load_design_plan(results_dir)
     design_alpha = _as_dict(
         _as_dict(design_plan).get("inputs")).get("alpha", ALPHA)
     test_reuse = test_reuse_report(
@@ -1465,6 +1508,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "design_conf",
         "design_hist",
         "design_plan",
+        "missingness",
         "design_stages",
         "dev",
         "digest",
@@ -1629,6 +1673,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'ruler_sample_tests': ctx["ruler_sample_tests"],
         'ruler_length': ctx["length_analysis"],
         'ruler_heterogeneity': ctx["ruler_heterogeneity"],
+        'missingness': ctx.get("missingness"),
         'length_null': ctx.get("length_null"),
         'length_calibration': ctx.get("length_calibrations"),
         'ppl_window_tests': ctx["ppl_window_tests"],

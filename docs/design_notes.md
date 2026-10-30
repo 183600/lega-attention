@@ -844,6 +844,45 @@ fragile / insufficient / undetermined_reference）。结果写入
 替代 MDE、等价性检验或预注册判定。规格不足/基准为零时只报不可判定，不把
 “无法核对”写成“稳健”。
 
+### 缺失结果敏感性（完成者分析 vs 计划分析人群；探索性）
+
+设计符合性门只回答“计划矩阵是否齐全”，不回答“跑成功的这些种子是否恰好
+更好/更差”。主检验是 available-case / complete-case：候选或参照任一缺失的
+配对直接不进 t 检验。若缺失与结果相关（更大的模型更容易 NaN、更难的种子
+更容易中止），完成者均值本身可能有方向。`lega/missingness.py` 因此对每个
+对比×指标报告：
+
+- **缺失模式**：计划内 (变体, 种子) 中双方齐全、仅候选缺失、仅参照缺失、
+  双方缺失的数量与种子清单；计划缺失率与两臂缺失率之差
+  （differential attrition）。
+- **临界点（tipping point）**：假设所有缺失配对差取同一值 δ，求使完整均值
+  等于 0、+SESOI、−SESOI 的 δ；PPL 用逐种子相对差对齐 1% SESOI，RULER
+  用绝对 EM 差对齐 1.00 pp。δ 落在已观测配对差范围内时标为敏感。
+- **观测范围边界**：把缺失配对差全部设为观测到的最小/最大配对差，给出完整
+  均值的可能范围；范围跨过 0 或 SESOI 时显式警示。
+
+计划种子来自 `design_plan.json` 的 `inputs.seeds`，因此能发现“计划了但两侧
+都没产出”的单元；计划缺失，或计划与本次 `repro.json` 的变体/种子集不一致
+（上一轮遗留计划）时，退化为本次 repro 的种子范围（`planned_seeds_source=
+repro_scope`）；连 repro 种子也没有时退化为现有 runs 的种子并集
+（`observed_union`），后者只能发现单臂缺失。只有两侧都至少有一个实际 run 的
+对比进入本层；整臂未运行属于设计符合性问题，由 `analysis_population` /
+设计门单独处理，不能在这里膨胀成大量空配对。协议不一致
+（PPL split/eval_ctx/eval_iters/val_windows vs RULER 上下文/样本/题面签名）
+的配对按缺失处理并单独计数，不静默混入完成者样本。
+
+**边界**：这不是多重插补，也不假设 MAR/MCAR；观测范围只是透明的敏感性
+尺度，不是概率区间，更不是 Manski 型严格最坏情形界——真实缺失值可以比
+任何已观测种子更极端。“观测范围内稳健”不证明缺失随机，也不能写成
+“无偏”。观测不足（完整配对 < 3）仍给描述性边界，但显式标
+`insufficient_seeds`，不作稳健判词；全部缺失时返回 `no_observed_pairs`，
+不拿 0 个观测做方向判断。该层不进入 Holm/FWER，不改变预注册的
+支持/拒绝/未定，只与设计降级、MDE、TOST 并列披露。结果写入
+`significance.json` 的 `missingness`，在 `summary.md` 的“缺失结果敏感性”
+小节渲染；机器字段包括逐种子缺失清单、`missing_mean_for_zero`、
+`missing_mean_for_plus_margin`、`missing_mean_for_minus_margin`、
+`full_mean_range` 与状态标签。
+
 ### SESOI 与等价性/非劣性（TOST；把“不显著”与“无差异”分开）
 
 显著性检验只回答“能否拒绝 Δ=0”。本项目种子数只有 3~5 个，`p>0.05` 既可能
@@ -1016,7 +1055,8 @@ n<3 仍给描述性后验但 `decision_eligible=false`。换指标尺度、换 R
    `design_plan.json`，并声明排除规则——只允许运行在评测前失败、数据/
    配置/训练预算协议违规、产物损坏、测试集访问违规等**与结果无关**的
    排除；禁止因结果不利、离群或不显著而事后删种子/变体。缺失单元必须
-   报告；可用样本估计（available-case）只能作描述性敏感性分析。
+   报告；可用样本估计（available-case）只能作描述性敏感性分析（实现见
+   “缺失结果敏感性”小节与 `lega/missingness.py`）。
 3. **设计符合性**：汇总时用 `analysis_population` 把实际产物与计划逐格
    比对。计划内单元缺失时，`apply_design_gate` 只降级**受影响假设**的
    确认性判定（候选/参照变体或该指标端点涉及缺失单元），未受影响的

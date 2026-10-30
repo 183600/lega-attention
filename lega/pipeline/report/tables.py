@@ -108,6 +108,7 @@ def _summary_part_c(**kw):
     if "registered" in kw:
         registered = kw["registered"]
     multiverse = kw.get("multiverse")
+    missingness = kw.get("missingness")
     reparameterization = kw.get("reparameterization")
     if "results_dir" in kw:
         results_dir = kw["results_dir"]
@@ -281,6 +282,10 @@ def _summary_part_c(**kw):
     # --- 分析选择多重宇宙（探索性）：结论是否依赖原始/log、macro/micro、
     #     全种子/留一这些同样可辩护的口径。
     md += _render_multiverse_section(multiverse)
+
+    # --- 缺失结果敏感性（探索性）：完成者分析是否足以代表计划人群；
+    #     只披露缺失模式/临界点/观测范围边界，不改变预注册判定。
+    md += _render_missingness_section(missingness)
 
     # --- RULER 任务/长度分层异质性（探索性解释）：macro 平均是否掩盖
     #     方向相反的层；不改变 H4 判定，也不替代长度剂量-反应。
@@ -942,6 +947,14 @@ def _summary_part_c(**kw):
                        "不替代 t/置换/TOST/MDE；每对比较的完整 BF、后验方向/"
                        "区间、ROPE 质量、先验尺度敏感性见 pairs[].bayes。"),
                    "multiverse": multiverse,
+                   "missingness": missingness,
+                   "missingness_note": (
+                       "缺失结果敏感性（探索性）：计划内 (变体, 种子) 单元"
+                       "缺失时，完成者均值可能因缺失机制而有偏。PPL 用相对"
+                       "差、RULER 用绝对 EM 差；临界点/观测范围边界只以"
+                       "“缺失配对差落在已观测范围内”为敏感性尺度，不是 "
+                       "MAR/MCAR 插补或严格最坏情形界。不进入 Holm/FWER，"
+                       "不改变预注册判定；缺失率/两臂差异必须如实报告。"),
                    "multiverse_note": (
                        "分析选择多重宇宙（探索性）：对每个对比重算原始/log "
                        "PPL、macro/micro RULER、全种子/逐个留一等可辩护口径，"

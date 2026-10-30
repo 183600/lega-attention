@@ -59,6 +59,8 @@ from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
 from lega.replication import replication_forecast  # noqa: E402
 from lega.multiverse import (attach_to_hypotheses,  # noqa: E402
                              paired_specification, specification_curve)
+from lega.missingness import (aggregate_missingness,  # noqa: E402
+                              paired_missingness)
 from lega.heterogeneity import (  # noqa: E402
     attach_to_hypotheses as attach_heterogeneity_to_hypotheses,
     meta_analysis_from_seed_matrix)

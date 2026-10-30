@@ -34,7 +34,7 @@ MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
            "tests.test_output_ablation",
            "tests.test_equivalence", "tests.test_replication",
            "tests.test_bayes", "tests.test_multiverse",
-           "tests.test_heterogeneity",
+           "tests.test_heterogeneity", "tests.test_missingness",
            "tests.test_design", "tests.test_nested", "tests.test_run_tests",
            "tests.test_lengthcalib"]
 
