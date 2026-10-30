@@ -29,7 +29,8 @@ from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
                         check_vocab_capacity,
                         decontaminate_documents, decontaminate_near_duplicates,
                         decontaminate_texts,
-                        distribution_shift, manifest_digest, ngram_overlap,
+                        distribution_shift, exact_overlap_alerts,
+                        manifest_digest, ngram_overlap, ngram_overlap_exact,
                         post_cleanup_residual,
                         read_test_access_log, sanitize_text,
                         short_ngram_overlap,
@@ -53,7 +54,10 @@ _GPT2_CACHE = {}
 # v9：data_report 记录原始来源溯源（URL/revision/原始文件 SHA-256），meta
 # 记录其 digest 作为缓存身份；旧缓存没有“数据究竟来自哪份原始字节”的证据，
 # 且原始来源变化而文本恰好未变时旧缓存无法更新报告，必须重建。
-CACHE_SCHEMA = 9
+# v10：data_report 增加全量 train 对 eval 的 64-gram 精确扫描（含逐字节
+# 复核），把采样筛查的“下界”升级为可审计的全量结论；旧缓存没有这份证据，
+# 继续命中会让汇总页把“未扫描”当成“无重叠”，必须重建。
+CACHE_SCHEMA = 10
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -271,8 +275,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
          协议参数，默认 0.80/200 字符）；
       2) 分词器只在 train 上拟合（字符级词表 + <unk>）；
       3) val/test 只 transform，随后对三条 token 流做硬校验；
-      4) 生成 data_report.json（重复、近似重复、64-gram 重叠、分布漂移、
-         访问账本）。
+      4) 生成 data_report.json（重复、近似重复、采样与全量精确 64-gram
+         重叠、分布漂移、访问账本）。
     extra_report 用于记录数据来源/划分协议等上游元数据（原样并入报告）。
     """
     # 近似去污染参数既是本次构建口径，也是缓存身份。必须在读缓存前严格
@@ -602,6 +606,11 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 短 n 更易命中自然搭配，因此只作诊断告警（见 leakage_alerts）。
     contamination_short = {"train_val": short_ngram_overlap(
         tr, va, ignore_ids=ignore_ids)}
+    # 采样 64-gram 重叠只是下界：train/eval 两侧都可能漏抽。这里对 train
+    # 全量扫描、eval 默认全窗口检查，命中后再逐字节复核，结论不再依赖随机
+    # 采样；OOV 窗口仍按 ignore_ids 排除，避免 <unk> 碰撞被当成复制。
+    contamination_exact = {"train_val": ngram_overlap_exact(
+        tr, va, ignore_ids=ignore_ids)}
     distribution = {"val_vs_train": distribution_shift(tr, va, tok.n_vocab)}
     if te is not None:
         contamination["train_test"] = ngram_overlap(
@@ -614,6 +623,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             tr, te, ignore_ids=ignore_ids)
         contamination_short["val_test"] = short_ngram_overlap(
             va, te, ignore_ids=ignore_ids)
+        contamination_exact["train_test"] = ngram_overlap_exact(
+            tr, te, ignore_ids=ignore_ids)
+        contamination_exact["val_test"] = ngram_overlap_exact(
+            va, te, ignore_ids=ignore_ids, reference_split="val")
         distribution["test_vs_train"] = distribution_shift(tr, te, tok.n_vocab)
         distribution["test_vs_val"] = distribution_shift(va, te, tok.n_vocab)
     tokenizer_report = {
@@ -633,16 +646,21 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 短 n-gram 重叠作为诊断指标随报告落盘（告警在下面产生，不进入训练前
     # 硬闸门）：用于抓 64-gram 漏掉的短模板化复用。
     data_report["contamination_short_ngram"] = contamination_short
+    data_report["contamination_exact"] = contamination_exact
     from .datacheck import short_overlap_alerts
     _salerts = short_overlap_alerts(contamination_short)
     if _salerts:
         data_report["alerts"] = list(data_report.get("alerts") or []) + _salerts
+    _xalerts = exact_overlap_alerts(contamination_exact)
+    if _xalerts:
+        data_report["alerts"] = list(data_report.get("alerts") or []) + _xalerts
     # 访问账本只统计“评测级”test 读取；但 prepare_bins 为了编码 test.bin 与
     # 计算跨 split 重叠/分布漂移，本身会在建模前读一次 test（模型无关的诊断
     # 读取，不用于任何选择）。显式记录，避免账本 0 次被误读成“test 从未被碰”。
     data_report["test_reads_at_prep"] = {
         "encoded": bool(te is not None),
-        "purpose": "编码 test.bin + 跨 split 精确/近似重叠与分布漂移诊断（模型无关）",
+        "purpose": ("编码 test.bin + 跨 split 精确/采样 n-gram 重叠、"
+                    "全量精确 n-gram 扫描、近似重复与分布漂移诊断（模型无关）"),
         "used_for_selection": False,
     }
     data_report["test_access"] = summarize_test_access(

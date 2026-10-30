@@ -260,6 +260,203 @@ def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 100000,
 # 短 n 更易被自然语言常见搭配命中，因此只做**告警**、不参与硬闸门。
 
 
+_EXACT_HASH_BASE1 = 1099511628211
+_EXACT_HASH_BASE2 = 0x9E3779B185EBCA87
+_EXACT_HASH_MASK = (1 << 64) - 1
+
+
+def _odd_mod_inverse(base: int) -> int:
+    if base % 2 == 0:
+        raise ValueError(f"滚动哈希基数必须是奇数，收到 {base}")
+    inv = 1
+    for _ in range(6):
+        inv = (inv * (2 - base * inv)) & _EXACT_HASH_MASK
+    return inv
+
+
+def _rolling_window_hashes(ids, n: int, base: int) -> np.ndarray:
+    values = np.asarray(ids, dtype=np.uint64)
+    length = int(values.size)
+    count = length - n + 1
+    if count <= 0:
+        return np.zeros(0, dtype=np.uint64)
+    inv_base = np.uint64(_odd_mod_inverse(base))
+    base = np.uint64(base)
+    inv_pows = np.empty(length, dtype=np.uint64)
+    inv_pows[0] = 1
+    if length > 1:
+        inv_pows[1:] = np.multiply.accumulate(
+            np.full(length - 1, inv_base, dtype=np.uint64))
+    weighted = np.empty(length + 1, dtype=np.uint64)
+    weighted[0] = 0
+    weighted[1:] = np.add.accumulate(values * inv_pows)
+    base_pows = np.empty(length + 1, dtype=np.uint64)
+    base_pows[0] = 1
+    base_pows[1:] = np.multiply.accumulate(
+        np.full(length, base, dtype=np.uint64))
+    prefix = np.empty(length + 1, dtype=np.uint64)
+    prefix[0] = 0
+    prefix[1:] = base_pows[:length] * weighted[1:]
+    return prefix[n:] - base_pows[n] * prefix[:count]
+
+
+def _pair_window_hashes(ids, n: int) -> tuple:
+    return (_rolling_window_hashes(ids, n, _EXACT_HASH_BASE1),
+            _rolling_window_hashes(ids, n, _EXACT_HASH_BASE2))
+
+
+def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
+                        max_eval_windows: int = 2_000_000,
+                        ignore_ids=None, chunk_tokens: int = 1_000_000,
+                        reference_split: str = "train") -> dict:
+    """全量扫描 reference split 的 n-gram，精确判定 eval 窗口是否出现在其中。
+
+    与 ``ngram_overlap`` 的双侧采样不同，本函数对 reference 的所有 n-gram 建
+    双 64-bit 滚动指纹，并对候选命中再做逐字节复核；因此结果不是采样下界。
+    eval 窗口默认全查，只有超过 ``max_eval_windows`` 时才等间隔抽样并在
+    ``screening=True`` 中显式说明，避免把抽样结果误读为全量结论。
+
+    ``reference_split`` 只用于报告标注，说明本次全量基准是 train 还是 val
+    （val/test 互查时基准是 val）。``ignore_ids`` 与 ``_window_hashes`` 同义：
+    含这些 id 的 eval 窗口不计入分母（字符级 <unk> 的 OOV 长串不是复制证据）。
+    返回字段全是 JSON 原生类型，可直接写入 data_report。
+    """
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)):
+        raise ValueError(f"n 必须是正整数，收到 {n!r}")
+    n = int(n)
+    if n <= 0:
+        raise ValueError(f"n 必须是正整数，收到 {n!r}")
+    for name, value in (("max_eval_windows", max_eval_windows),
+                        ("chunk_tokens", chunk_tokens)):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(f"{name} 必须是正整数，收到 {value!r}")
+        if int(value) <= 0:
+            raise ValueError(f"{name} 必须是正整数，收到 {value!r}")
+    max_eval_windows = int(max_eval_windows)
+    chunk_tokens = int(chunk_tokens)
+    if reference_split not in ("train", "val", "test"):
+        raise ValueError(
+            f"reference_split 必须是 train/val/test，收到 {reference_split!r}")
+
+    def _as_token_array(ids, label):
+        arr = np.asarray(ids)
+        if arr.ndim != 1:
+            raise ValueError(f"{label} 必须是一维 token 流")
+        if arr.size:
+            if arr.dtype.kind not in "iu":
+                raise ValueError(
+                    f"{label} token id 必须是整数流，收到 dtype={arr.dtype}")
+            lo, hi = int(arr.min()), int(arr.max())
+            if lo < 0 or hi > 65535:
+                raise ValueError(
+                    f"{label} token id 越界: [{lo}, {hi}] 不在 uint16 token "
+                    "范围 [0, 65536)，拒绝静默环绕")
+        return arr
+
+    reference_ids = _as_token_array(reference_ids, reference_split)
+    eval_ids = _as_token_array(eval_ids, "eval")
+    ignore_set = set()
+    if ignore_ids is not None:
+        try:
+            raw_ignore = list(ignore_ids)
+        except TypeError as e:
+            raise ValueError(
+                f"ignore_ids 必须是可迭代的 token id 集合，收到 {ignore_ids!r}"
+            ) from e
+        for value in raw_ignore:
+            try:
+                iv = strict_int(value, "ignore_ids")
+            except ValueError as e:
+                raise ValueError(
+                    f"ignore_ids 中包含非法 token id: {value!r}") from e
+            if iv < 0 or iv > 65535:
+                raise ValueError(
+                    f"ignore_ids 中 token id 越界: {iv} 不在 [0, 65536)")
+            ignore_set.add(iv)
+
+    reference_total = max(0, int(reference_ids.size) - n + 1)
+    eval_total = max(0, int(eval_ids.size) - n + 1)
+    eval_ignored = 0
+    eval_available = eval_total
+    if ignore_set and eval_total:
+        bad = np.isin(eval_ids, np.fromiter(ignore_set, dtype=np.uint64))
+        csum = np.empty(int(eval_ids.size) + 1, dtype=np.int64)
+        csum[0] = 0
+        np.cumsum(bad, dtype=np.int64, out=csum[1:])
+        valid = (csum[n:] - csum[:-n]) == 0
+        eval_available = int(valid.sum())
+        eval_ignored = eval_total - eval_available
+        starts = np.flatnonzero(valid)
+    else:
+        starts = np.arange(eval_total, dtype=np.int64)
+
+    sampled = eval_available > max_eval_windows
+    if sampled:
+        picked = np.linspace(0, eval_available - 1,
+                             num=max_eval_windows).astype(np.int64)
+        starts = starts[picked]
+
+    checked = int(starts.size)
+    hits = np.zeros(checked, dtype=bool)
+    if checked and reference_total:
+        all_h1, all_h2 = _pair_window_hashes(eval_ids, n)
+        eval_h1, eval_h2 = all_h1[starts], all_h2[starts]
+        order = np.argsort(eval_h1, kind="mergesort")
+        sorted_h1 = eval_h1[order]
+        sorted_h2 = eval_h2[order]
+        resolved = set()
+        for begin in range(0, int(reference_ids.size), chunk_tokens):
+            end = min(int(reference_ids.size), begin + chunk_tokens + n - 1)
+            if end - begin < n:
+                break
+            block = reference_ids[begin:end]
+            block_h1, block_h2 = _pair_window_hashes(block, n)
+            candidate = np.isin(block_h1, sorted_h1)
+            if not candidate.any():
+                continue
+            positions = np.flatnonzero(candidate)
+            pairs = np.stack((block_h1[positions], block_h2[positions]),
+                             axis=1)
+            unique_pairs, first = np.unique(
+                pairs, axis=0, return_index=True)
+            for row, first_idx in zip(unique_pairs, first):
+                key = (int(row[0]), int(row[1]))
+                if key in resolved:
+                    continue
+                resolved.add(key)
+                lo = int(np.searchsorted(sorted_h1, row[0], side="left"))
+                hi = int(np.searchsorted(sorted_h1, row[0], side="right"))
+                if lo >= hi:
+                    continue
+                matched = lo + np.flatnonzero(sorted_h2[lo:hi] == row[1])
+                if not matched.size:
+                    continue
+                local = int(positions[int(first_idx)])
+                window = block[local:local + n]
+                for sorted_pos in matched:
+                    original = int(order[int(sorted_pos)])
+                    start = int(starts[original])
+                    if np.array_equal(eval_ids[start:start + n], window):
+                        hits[original] = True
+
+    found = int(hits.sum())
+    return {
+        "n": int(n),
+        "reference_split": reference_split,
+        "reference_windows_scanned": int(reference_total),
+        "eval_windows_total": int(eval_total),
+        "eval_windows_excluded_ignore": int(eval_ignored),
+        "eval_windows_available": int(eval_available),
+        "eval_windows_checked": checked,
+        "windows_found_in_reference": found,
+        "overlap_rate": (float(found / checked) if checked else None),
+        "exact_scan": True,
+        "eval_sampling": "evenly_spaced" if sampled else "all",
+        "screening": bool(sampled),
+        "hash": "rolling_poly64x2+exact_bytes",
+    }
+
+
 def short_ngram_overlap(train_ids, eval_ids, n: int = SHORT_NGRAM_N,
                         n_samples: int = 100000, seed: int = 0,
                         ignore_ids=None) -> dict:

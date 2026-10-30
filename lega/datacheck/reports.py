@@ -375,8 +375,8 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
 
 # 会让 train/val/test 独立性失效的协议违规：run_all 在训练前据此硬失败
 # （可显式覆盖），避免“报告里有警告但全量训练照跑”。
-# 划分协议违规（群组跨 split / 字符切分 / 打乱）之外，采样 64-gram 跨 split
-# 重叠率 >0 是“语料在 split 间被复制”的直接证据——与分布漂移（temporal split
+# 划分协议违规（群组跨 split / 字符切分 / 打乱）之外，采样/全量精确 64-gram
+# 跨 split 重叠率 >0 是“语料在 split 间被复制”的直接证据——与分布漂移（temporal split
 # 下属正常现象）不同，它必然导致评测读到训练见过的长串，必须训练前拦截。
 
 
@@ -721,6 +721,55 @@ def short_overlap_alerts(short_contamination: dict) -> list:
     return alerts
 
 
+def exact_overlap_alerts(exact_contamination: dict, thresholds: dict = None) -> list:
+    """全量 n-gram 扫描命中的硬告警（eval 侧可比采样筛查更完整）。"""
+    th = dict(ALERT_THRESHOLDS)
+    if isinstance(thresholds, dict):
+        for key, value in thresholds.items():
+            if key not in th:
+                continue
+            if isinstance(value, (bool, np.bool_)):
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if np.isfinite(number):
+                th[key] = number
+    alerts = []
+    c = exact_contamination if isinstance(exact_contamination, dict) else {}
+    for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
+                       ("val_test", "val/test")):
+        d = c.get(key)
+        d = d if isinstance(d, dict) else {}
+        raw = d.get("overlap_rate")
+        if raw is None or isinstance(raw, (bool, np.bool_)):
+            continue
+        if isinstance(raw, str) and "_" in raw:
+            continue
+        try:
+            rate = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not np.isfinite(rate) or not 0.0 < rate <= 1.0:
+            continue
+        if rate <= th["ngram_overlap_rate"]:
+            continue
+        checked = d.get("eval_windows_checked")
+        total = d.get("eval_windows_total")
+        sampling = d.get("eval_sampling")
+        reference = d.get("reference_split", "train")
+        scope = ("全量 eval 窗口" if sampling == "all"
+                 else f"eval 等间隔抽样 {checked}/{total} 窗口")
+        alerts.append({
+            "level": "warning", "code": f"ngram_overlap_exact_{key}",
+            "message": (f"{label} {d.get('n', '?')}-gram 在 {reference} 全量扫描下"
+                        f"重叠率 {rate:.6%}（{scope}，逐字节复核；"
+                        "0 以外的命中均为跨 split 复制证据，须人工核查/重建"
+                        "划分）")})
+    return alerts
+
+
 def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
                       duplicates: dict, contamination: dict,
                       distribution: dict, text_stats: dict = None,
@@ -797,7 +846,10 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "token 级 PPL 的分母随分词器变化，规模比较以字节/字符核算为准；",
             "val 与 test 之间的重复/64-gram 重叠单独统计并告警：两侧均不改写，"
             "但重叠会削弱 final test 相对 val 选择集的独立性；",
-            "64-gram 重叠为采样筛查下界，>0 时应人工核查对应语料；",
+            "64-gram 同时报告采样筛查（contamination）与全量精确扫描"
+            "（contamination_exact，基准 split 全量、逐字节复核）；"
+            "后者覆盖率受 eval_windows_total/max_eval_windows 约束并在"
+            "eval_sampling/screening 中显式标注；",
             "一元分布漂移默认全量精确计数（显式 max_samples 时才采样），"
             "用于提示 split 间分布差异而非统计检验；",
             "alerts 同时包含协议违规（群组/时序，见 split_protocol）与阈值触发的"

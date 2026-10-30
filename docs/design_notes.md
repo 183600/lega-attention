@@ -324,9 +324,37 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
   `duplicates.post_cleanup`，并生成
   `near_duplicate_decontamination_applied` / `eval_splits_near_duplicates` /
   `near_duplicate_scan_truncated` / `near_duplicate_low_coverage` /
-  `post_cleanup_residual_overlap` 等告警；bin 缓存协议升至 v8（本轮进一步
-  升至 v9，见下节），旧缓存必须重建，避免报告声称已做近重复处理而实际
+  `post_cleanup_residual_overlap` 等告警；bin 缓存协议升至 v8（后续升至
+  v9/v10，见下节），旧缓存必须重建，避免报告声称已做近重复处理而实际
   token 流未处理。
+
+### 跨 split n-gram：从采样下界到全量精确扫描
+
+`data_report.contamination` 的 64-gram 重叠率原先对 train/eval 两侧都采样，
+只能证明“抽到的窗口里存在复制”，是泄漏下界：覆盖不到的低占比复制段可能被
+漏掉。`ngram_overlap_exact` 改为对 train 的全部 64-gram 建双 64-bit 滚动
+指纹，对 eval 默认全部窗口查询，命中后再逐字节复核；`data_report` 因此新增
+`contamination_exact`，逐对记录 `reference_split`、`reference_windows_scanned`、
+`eval_windows_total`、`eval_windows_excluded_ignore`、
+`eval_windows_checked`、`windows_found_in_reference` 与 `overlap_rate`。
+
+- **对照口径**：`contamination` 保留为采样筛查，`contamination_exact` 是
+  同一 n=64 的全量结论；两者都排除含 `<unk>` 的窗口，避免字符级 OOV 长串被
+  误判为复制。
+- **抽样边界**：eval 窗口超过 200 万时按等间隔抽样，报告写
+  `eval_sampling=evenly_spaced` 且 `screening=True`；只有 `eval_sampling=all`
+  才是全量 eval 结论。基准 split（train，或 val/test 互查时的 val）始终
+  全量扫描，不做二次抽样；报告用 `reference_split` 标明基准。
+- **硬闸门**：`ngram_overlap_exact_train_val/train_test/val_test` 进入
+  `CRITICAL_SPLIT_ALERT_CODES`，与采样重叠告警同级；精确命中没有“采样没抽到”
+  的余地，训练前必须核查/重建划分。
+- **缓存身份**：报告新增字段使 bin 协议升至 v10，旧缓存重建后才能保证报告
+  与实际 token 流同批产出。
+
+**局限**：64-gram 仍会漏掉短于 64 token 的模板复用（由
+`contamination_short_ngram` 告警）与改写型近似复制（由 MinHash/LSH 筛查），
+三者互补而非互相替代；全量扫描的计算/内存随 train token 数线性增长，超大
+语料需按 `max_eval_windows`/`chunk_tokens` 显式控制。
 
 ### 原始数据来源溯源与完整性
 
@@ -358,8 +386,8 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
   `data_source_provenance` 严重问题拦截训练；
 - **缺失文件的口径**：原始下载可能已被清理，纯 bin 目录也可能只分发结果。
   复核只对仍存在的文件重算哈希，缺失文件跳过，但不会被记成“已核对通过”；
-  报告、meta、独立清单之间的 digest 绑定仍必须存在。bin 缓存协议升至 v9，
-  旧缓存必须重建以补齐来源证据。
+  报告、meta、独立清单之间的 digest 绑定仍必须存在。bin 缓存协议升至 v9
+  补齐来源证据，v10 再加入全量 n-gram 精确扫描；旧缓存必须重建。
 
 **局限**：SHA-256 只能证明“拿到的是同一份字节”，不能证明上游数据本身没有
 污染、偏见或许可问题；rows API 的响应未逐行留存原始哈希，只以清洗后文本

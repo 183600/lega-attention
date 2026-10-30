@@ -7,7 +7,8 @@
   * 连续文本（--local_txt）按时间先后切分：最早 80% 训练、其后 10% 验证、
     最新 10% 测试；切点对齐文档/段落/行边界，同一文档绝不跨 split；
   * 重复样本：与 val/test 精确重复的长行从 train 移除（去污染），val/test
-    保持尘封不动；另用采样 64-gram 哈希筛查跨 split 的 token 级重叠；
+    保持尘封不动；另用采样与全量精确 64-gram 扫描筛查跨 split 的 token 级
+    重叠（全量结果逐字节复核，见 data_report.contamination_exact）；
   * token 流硬校验：整数 dtype、有限值、id ∈ [0, vocab)、uint16 可容纳；
   * 分布漂移：train 与 val/test 的一元 token 分布 TV/JS 散度与 OOV
     （默认全量精确计数，显式 max_samples 时才采样）；
@@ -143,14 +144,18 @@ ALERT_THRESHOLDS = {
 
 # 会让 train/val/test 独立性失效的协议违规：run_all 在训练前据此硬失败
 # （可显式覆盖），避免“报告里有警告但全量训练照跑”。
-# 划分协议违规（群组跨 split / 字符切分 / 打乱）之外，采样 64-gram 跨 split
-# 重叠率 >0 是“语料在 split 间被复制”的直接证据——与分布漂移（temporal split
+# 划分协议违规（群组跨 split / 字符切分 / 打乱）之外，采样/全量精确 64-gram
+# 跨 split 重叠率 >0 是“语料在 split 间被复制”的直接证据——与分布漂移（temporal split
 # 下属正常现象）不同，它必然导致评测读到训练见过的长串，必须训练前拦截。
 CRITICAL_SPLIT_ALERT_CODES = (
     "split_shuffled", "split_char_cut", "split_documents_cross_cut",
     "split_paragraphs_cross_cut",
     "ngram_overlap_train_val", "ngram_overlap_train_test",
     "ngram_overlap_val_test",
+    # 全量 train 扫描 + 逐字节复核的精确版本：采样筛查可能漏掉占比极低的
+    # 复制段，精确命中没有“没抽到”的借口，同样必须在训练前拦截。
+    "ngram_overlap_exact_train_val", "ngram_overlap_exact_train_test",
+    "ngram_overlap_exact_val_test",
     "eval_splits_overlap", "eval_splits_overlap_documents",
     # 清洗后复核发现 train 仍与 val/test 共享精确/归一化长行或多行块：
     # 这是“去污染本应删除却仍残留”的直接证据，必须像 n-gram 重叠一样

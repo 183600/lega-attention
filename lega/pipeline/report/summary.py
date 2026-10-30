@@ -1190,6 +1190,28 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             f"test={_fmt_rate(_as_dict(cont.get('train_test')).get('overlap_rate'))}、"
             f"val↔test={_fmt_rate(_as_dict(cont.get('val_test')).get('overlap_rate'))}"
             "（采样筛查下界，>0 需人工核查）")
+        cexact = _as_dict(data_report.get("contamination_exact"))
+        if cexact:
+            def _exact_scope(entry):
+                d = _as_dict(entry)
+                if d.get("eval_sampling") == "all":
+                    return "全量 eval 窗口"
+                return (f"eval 抽样 "
+                        f"{_int_or_zero(d.get('eval_windows_checked')):,}/"
+                        f"{_int_or_zero(d.get('eval_windows_total')):,} 窗口")
+            tv = _as_dict(cexact.get("train_val"))
+            tt = _as_dict(cexact.get("train_test"))
+            vt = _as_dict(cexact.get("val_test"))
+            md.append(
+                "- 全量精确 n-gram 扫描（基准 split 全量、逐字节复核）："
+                f"val={_fmt_rate(tv.get('overlap_rate'))}（{_exact_scope(tv)}）、"
+                f"test={_fmt_rate(tt.get('overlap_rate'))}（{_exact_scope(tt)}）、"
+                f"val↔test={_fmt_rate(vt.get('overlap_rate'))}"
+                f"（{_exact_scope(vt)}）；"
+                f"OOV 排除窗口 val={_int_or_zero(tv.get('eval_windows_excluded_ignore')):,}、"
+                f"test={_int_or_zero(tt.get('eval_windows_excluded_ignore')):,}、"
+                f"val↔test={_int_or_zero(vt.get('eval_windows_excluded_ignore')):,}"
+                "（>0 即训练前硬拦截）")
         n_short_tv = _int_or_zero(dup.get("train_val_overlap_short_lines"))
         n_short_tt = _int_or_zero(dup.get("train_test_overlap_short_lines"))
         n_short_vt = _int_or_zero(dup.get("val_test_overlap_short_lines"))
