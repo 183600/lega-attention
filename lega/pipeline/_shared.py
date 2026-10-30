@@ -23,7 +23,8 @@ from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
                             _USE_CONC, _USE_RAW_CONC)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
-                         LESION_ORDER as ABLATION_LESION_ORDER)
+                         LESION_ORDER as ABLATION_LESION_ORDER,
+                         MATCHED_LESION_PAIRS)
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)
@@ -268,7 +269,12 @@ INFERENCE_SHAPLEY_METRIC = "推理期Shapley(PPL)"
 INFERENCE_INTERACTION_METRIC = "推理期交互PPL"
 
 # 因果病灶消融（推理期权重干预）的跨种子指标名与判定口径。
+# 原始病灶与活动匹配病灶分成两个 Holm 家族：前者回答“去掉该通道（含平均
+# 门控水平变化）会怎样”，后者回答“在相同平均写回强度下，去掉信息内容会
+# 怎样”。把二者混在同一家族会既改变问题又改变多重比较惩罚。
 CAUSAL_ABLATION_METRIC = "因果消融ΔNLL(lesion−normal)"
+MATCHED_ABLATION_METRIC = "因果消融ΔNLL(活动匹配−normal)"
+MATCHED_ABLATION_CONTRAST_METRIC = "因果消融ΔNLL(未匹配−活动匹配)"
 
 # 预注册 scope 核对的配置字段：模型/训练规模（结论可迁移性的前提）。
 # lr/weight_decay 刻意排除：按本项目协议，基线调优（--tune_baseline）会在

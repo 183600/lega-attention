@@ -27,6 +27,7 @@ def _summary_part_b(**kw):
         capacity_only_test = kw["capacity_only_test"]
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
+    matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
     if "ci" in kw:
         ci = kw["ci"]
     if "comp" in kw:
@@ -1028,13 +1029,26 @@ def _summary_part_b(**kw):
                   "期的优化/正则化而非推理期必需；推理期显著而训练期不显著，"
                   "则提示训练期消融被再训练补偿。两种证据并列，不互相替代。"
                   "`no_len` 只去 b·log n；c 中的 log n 仍随 a·c 保留，"
-                  "因此它检验的是“额外长度系数 C”，不是“完全移除长度依赖”。")
+                  "因此它检验的是“额外长度系数 C”，不是“完全移除长度依赖”。"
+                  "`no_*_matched` 是活动匹配对照：去掉同一组件的同时逐层逐头"
+                  "平移 d，使平均 g 与基线相同；它只匹配平均门控（一阶矩），"
+                  "不匹配方差/饱和比例，故不能把匹配版写成“机制完全匹配”。")
     else:
         md.append("")
         md.append("⚠ 未发现推理期因果消融结果（`--skip_ablation`、"
                   "`--ablate_variants` 为空，或变体不含输出门）；"
                   "组件结论目前只有训练期消融证据，不能据此声称“推理期使用了"
                   "该组件”。")
+
+    # --- 活动匹配对照：原始病灶 − 匹配病灶。若差值显著为正，说明原始
+    #     ΔNLL 中有一部分只是“门平均开度变了”，不能全部归因于信息内容；
+    #     若差值不显著，也不能反过来说原始效应全部来自信息内容（功效问题）。
+    if matched_ablation_contrasts:
+        md += _render_matched_ablation_contrasts(matched_ablation_contrasts)
+    elif causal_tests:
+        md += ["", "⚠ 未发现可用的活动匹配对照（记录缺失、未成功施加或无法"
+               "配对）；原始组件 ΔNLL 仍可能混入平均门控开度变化，不能单独"
+               "归因给信息内容。"]
 
     # --- 关键病灶的等价性解读（尤其安慰剂/阳性对照）：p>0.05 不能直接
     #     写成“安慰剂无效应”，必须看 TOST 是否把差异限制在 SESOI 内。

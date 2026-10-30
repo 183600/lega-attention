@@ -14,20 +14,26 @@ import numpy as np
 import torch
 
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS, LESION_BY_ID,
-                         LESION_ORDER, apply_lesion,
+                         LESION_ORDER, MATCHED_LESION_IDS,
+                         MATCHED_LESION_PAIRS, apply_lesion,
                          gate_capabilities, gate_head_means,
-                         lesion_applicability, restore_gate_params,
-                         run_ablation, snapshot_gate_params,
-                         _finite_or_none, _layer_permutation,
+                         gate_lesion_controls, lesion_applicability,
+                         restore_gate_params, run_ablation,
+                         snapshot_gate_params, _finite_or_none,
+                         _layer_permutation, _match_gate_bias,
                          _window_delta_stats)
 from lega.factorial import (CELL_ORDER, decomposition, oriented_value,
                             ppl_ratio_from_phi, shapley_values, shares)
 from lega.model import GPT, save_checkpoint
-from run_all import (_ablation_lesion_records, _factorial_shapley_tests,
+from run_all import (build_summary, _ablation_lesion_records,
+                     _factorial_shapley_tests,
                      _inference_interaction_tests, _inference_shapley_tests,
+                     _matched_ablation_contrasts,
                      _render_inference_interactions,
+                     _render_matched_ablation_contrasts,
                      CAUSAL_ABLATION_METRIC, INFERENCE_INTERACTION_METRIC,
-                     INFERENCE_SHAPLEY_METRIC, SHAPLEY_PPL_METRIC)
+                     INFERENCE_SHAPLEY_METRIC, MATCHED_ABLATION_CONTRAST_METRIC,
+                     MATCHED_ABLATION_METRIC, SHAPLEY_PPL_METRIC)
 
 
 def _tiny(variant):
@@ -316,6 +322,82 @@ def test_gate_head_means_and_per_head_constant_lesion():
     print("  [ok] 逐头恒定门保留各头均值、抹平位置变化；形状错误显式拒绝")
 
 
+def test_match_gate_bias_solves_per_head_mean_and_rejects_bad_input():
+    z = torch.tensor([[-2.0, -1.0, 0.0, 1.0, 2.0],
+                      [0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float64)
+    target = torch.tensor([0.3, 0.6], dtype=torch.float64)
+    d, achieved, residual = _match_gate_bias(z, target)
+    assert residual < 1e-10, residual
+    assert torch.allclose(achieved, target, atol=1e-10)
+    # 平移必须真的随 logit 分布不同而变化，不能返回同一个常数。
+    assert abs(float(d[0] - d[1])) > 1e-3
+    for bad_z, bad_t in ((torch.zeros(2), torch.tensor([0.5, 0.5])),
+                         (z, torch.tensor([0.0, 0.5])),
+                         (z, torch.tensor([1.0, 0.5])),
+                         (z, torch.tensor([float("nan"), 0.5])),
+                         (torch.tensor([[float("inf")]]), torch.tensor([0.5]))):
+        try:
+            _match_gate_bias(bad_z, bad_t)
+            raise AssertionError(f"坏输入应显式报错: {bad_z!r}, {bad_t!r}")
+        except ValueError:
+            pass
+    try:
+        _match_gate_bias(z, target, iters=0)
+        raise AssertionError("iters=0 应显式报错")
+    except ValueError:
+        pass
+    print("  [ok] 活动匹配：逐头二分解出唯一平移，目标越界/非有限/坏形状显式拒绝")
+
+
+def test_gate_lesion_controls_match_baseline_mean_activity():
+    """匹配病灶去组件后必须保持逐头平均 g，而不是只把系数清零。"""
+    model = _tiny("lega")
+    with torch.no_grad():
+        for block in model.blocks:
+            block.attn.gate_w.normal_(0, 0.1)
+            block.attn.gate_a.normal_(0, 0.3)
+            block.attn.gate_b.normal_(0, 0.3)
+            block.attn.gate_d.fill_(1.0)
+    val = (np.arange(4096, dtype=np.int64) % 64)
+    baseline = gate_head_means(model, val, ctx=16, device="cpu", eval_iters=2)
+    controls = gate_lesion_controls(model, val, ctx=16, device="cpu",
+                                    eval_iters=2)
+    assert set(MATCHED_LESION_IDS) <= set(controls), controls
+    snap = snapshot_gate_params(model)
+    for raw_id, matched_id, _factor in MATCHED_LESION_PAIRS:
+        info = controls[matched_id]
+        assert "error" not in info, (matched_id, info)
+        assert info["max_abs_residual"] < 1e-8, info
+        rec = apply_lesion(model, matched_id,
+                           matched_gate_d=info["gate_d"])
+        assert rec["applied"] is True, rec
+        for li, block in enumerate(model.blocks):
+            attn = block.attn
+            assert torch.count_nonzero(getattr(attn, LESION_BY_ID[matched_id]
+                                               ["params"][0])) == 0
+            for h in range(2):
+                assert abs(info["achieved_head_mean"][li][h]
+                           - baseline[li][h]) < 1e-9
+        observed = gate_head_means(model, val, ctx=16, device="cpu",
+                                   eval_iters=2)
+        for li in range(len(observed)):
+            for h in range(2):
+                # 匹配 d 由重组的 logit 求解，实际 fp32 前向的加法顺序略
+                # 不同；1e-4 的门控均值误差远小于任何可解释的效应尺度，
+                # 但残差元数据不能声称逐位一致。
+                assert abs(observed[li][h] - baseline[li][h]) < 1e-4, (
+                    raw_id, matched_id, li, h, observed[li][h], baseline[li][h])
+        restore_gate_params(model, snap)
+        for key, value in snap.items():
+            assert torch.equal(dict(model.named_parameters())[key], value)
+    # 不适用模型的匹配病灶必须显式说明，不能悄悄回退到未匹配清零。
+    qgate = _tiny("qgate")
+    q_controls = gate_lesion_controls(
+        qgate, val, ctx=16, device="cpu", eval_iters=1)
+    assert "error" in q_controls.get("no_conc_matched", {}), q_controls
+    print("  [ok] 活动匹配病灶：逐头平均门控与基线一致；不适用能力显式拒绝")
+
+
 def test_run_ablation_end_to_end_tiny_checkpoint():
     model = _tiny("lega")
     with torch.no_grad():
@@ -358,11 +440,59 @@ def test_run_ablation_end_to_end_tiny_checkpoint():
         assert ids["gate_constant_mean"]["applied"] is True
         assert ids["gate_constant_mean"]["gate_std_changed"] is True
         assert ids["no_query"]["applied"] is True
+        for lid in MATCHED_LESION_IDS:
+            assert ids[lid]["applied"] is True, (lid, ids[lid])
+            mc = ids[lid]["matched_control"]
+            assert mc["max_abs_residual"] < 1e-6, (lid, mc)
+            for target, achieved in zip(mc["target_head_mean"],
+                                        mc["achieved_head_mean"]):
+                for a, b in zip(target, achieved):
+                    assert abs(a - b) < 1e-6, (lid, target, achieved)
         # 同一个 payload 内每个病灶的窗口必须与基线一致。
         assert all(r.get("n_windows") == ids["no_query"]["n_windows"]
                    for r in payload["lesions"] if r.get("applied"))
     print("  [ok] run_ablation 端到端：tiny checkpoint + 合成 val.bin，"
           "逐窗口配对与逐头恒定门均生效")
+
+
+def test_build_summary_wires_matched_ablation_contrast_into_report_and_json():
+    """匹配对照必须同时进入 markdown、返回结构与 significance.json。"""
+    with tempfile.TemporaryDirectory() as d:
+        for seed in range(1, 6):
+            payload = {
+                "variant": "lega", "seed": seed, "split": "val",
+                "eval_ctx": 16, "eval_iters": 2,
+                "window_indices": [0, 1],
+                "baseline": {"val_loss": 2.0, "val_ppl": 7.4},
+                "lesions": [
+                    {"lesion": "no_query", "applicable": True,
+                     "applied": True, "label": "去 A", "target": "A",
+                     "expected": "worse", "n_windows": 2,
+                     "window_indices": [0, 1],
+                     "delta_loss_mean": 0.10 + 0.001 * seed},
+                    {"lesion": "no_query_matched", "applicable": True,
+                     "applied": True, "label": "去 A（匹配）", "target": "A",
+                     "expected": "worse", "n_windows": 2,
+                     "window_indices": [0, 1],
+                     "delta_loss_mean": 0.04 + 0.001 * seed,
+                     "matched_control": {"matched_of": "no_query",
+                                         "factor": "A",
+                                         "max_abs_residual": 1e-12}},
+                ],
+            }
+            with open(os.path.join(d, f"ablation_lega_seed{seed}.json"),
+                      "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        out = build_summary(d)
+        assert len(out["matched_ablation_contrasts"]) == 1
+        assert "活动匹配病灶" in out["markdown"]
+        with open(os.path.join(d, "significance.json"), "r",
+                  encoding="utf-8") as f:
+            sig = json.load(f)
+        assert len(sig["matched_ablation_contrasts"]) == 1
+        assert "独立 Holm 家族" in sig["matched_ablation_contrasts_note"]
+    print("  [ok] build_summary：匹配对照进入报告与 significance.json")
+
 
 def test_window_delta_stats_pairs_by_window():
     base = [1.0, 2.0, 3.0, 4.0]
@@ -438,6 +568,50 @@ def test_ablate_numeric_and_seed_guards():
 
 
 
+def test_matched_lesion_metric_is_separate_holm_family():
+    payload = _payload("lega", 1, {"no_query": 0.10,
+                                   "no_query_matched": 0.04})
+    tests = _ablation_lesion_records({"lega": {1: payload}})
+    by_lesion = {t["lesion"]: t for t in tests}
+    assert by_lesion["no_query"]["metric"] == CAUSAL_ABLATION_METRIC
+    assert by_lesion["no_query_matched"]["metric"] == MATCHED_ABLATION_METRIC
+    assert by_lesion["no_query_matched"]["matched_control"] is True
+    assert by_lesion["no_query_matched"]["matched_of"] == "no_query"
+    print("  [ok] 活动匹配病灶使用独立指标家族，不混入原始因果 Holm")
+
+
+def test_matched_ablation_contrast_uses_paired_seed_differences():
+    raw = [0.09, 0.10, 0.11, 0.10, 0.10]
+    matched = [0.03, 0.05, 0.04, 0.05, 0.03]
+    ablations = {"lega": {}}
+    for i, (r, m) in enumerate(zip(raw, matched)):
+        seed = i + 1
+        ablations["lega"][seed] = _payload(
+            "lega", seed, {"no_query": r, "no_query_matched": m})
+        for rec in ablations["lega"][seed]["lesions"]:
+            if rec["lesion"] == "no_query_matched":
+                rec["matched_control"] = {"matched_of": "no_query"}
+    tests = _matched_ablation_contrasts(ablations)
+    assert len(tests) == 1, tests
+    t = tests[0]
+    assert t["metric"] == MATCHED_ABLATION_CONTRAST_METRIC
+    assert t["n"] == 5
+    assert abs(t["mean_diff"] - 0.06) < 1e-12, t
+    assert t["seeds_used"] == [1, 2, 3, 4, 5]
+    # 缺一对/未施加的记录必须整对剔除，不能只用 raw 或只用 matched 补齐。
+    ablations["lega"][6] = _payload("lega", 6, {"no_query": 0.2})
+    tests2 = _matched_ablation_contrasts(ablations)
+    t2 = next(t for t in tests2 if t["lesion"] == "no_query_matched")
+    assert t2["n_pairs_missing"] == 1 and t2["n"] == 5, t2
+    # 全部配对 no-op 时仍要保留计数，提醒读者差值不是有效干预证据。
+    for seed, payload in ablations["lega"].items():
+        for rec in payload["lesions"]:
+            rec["no_op"] = True
+    t3 = _matched_ablation_contrasts(ablations)[0]
+    assert t3["n_no_op_pairs"] == 5, t3
+    print("  [ok] 原始−匹配：逐种子配对、缺对整对剔除、no-op 对计数")
+
+
 def _payload(variant, seed, lesion_deltas, no_op=False):
     lesions = []
     for lid, delta in lesion_deltas.items():
@@ -490,6 +664,22 @@ def test_causal_ablation_marks_noop_and_skips_not_applicable():
         assert _ablation_lesion_records(bad) == [], rec
     print("  [ok] 因果消融：no-op 与不适用/未施加记录如实标注，"
           "不伪造 0 效应")
+
+
+def test_render_matched_ablation_contrasts_surfaces_confound_and_boundary():
+    rows = [{
+        "variant": "lega", "lesion": "no_query_matched",
+        "matched_of": "no_query", "matched_factor": "A",
+        "mean_diff": 0.05, "std_diff": 0.01, "n": 5,
+        "n_seed_wins": 5, "n_seed_losses": 0, "n_seed_ties": 0,
+        "p_adj": 0.0123, "matched_verdict": "原始效应部分可由门控开度解释",
+    }]
+    text = "\n".join(_render_matched_ablation_contrasts(rows))
+    assert "活动匹配" in text and "no_query_matched" in text
+    assert "0.0500" in text and "0.0123" in text
+    assert "只保持每个头/层的平均门控" in text
+    assert _render_matched_ablation_contrasts([]) == []
+    print("  [ok] 报告渲染活动匹配对照，并声明只匹配一阶矩的边界")
 
 
 def test_inference_factorial_cells_complete_2x3_and_zero_only_targets():

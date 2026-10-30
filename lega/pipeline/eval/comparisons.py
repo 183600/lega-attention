@@ -457,6 +457,43 @@ def _causal_eq_note(t) -> str:
     return eq.get("label") or "-"
 
 
+def _render_matched_ablation_contrasts(contrasts) -> list:
+    """渲染“原始组件病灶 − 活动匹配病灶”的跨种子对比表。
+
+    这张表不是“信息效应 + 写回效应”的精确分解：匹配只控制逐头平均 g，
+    不控制方差/饱和比例/跨层联合分布。差值显著为正只说明原始 ΔNLL 中有
+    一部分与平均门控开度变化共变；信息特异效应必须另看匹配病灶相对正常
+    基线的检验。
+    """
+    if not contrasts:
+        return []
+    md = ["", "#### 消融混杂控制：活动匹配病灶（原始 ΔNLL − 匹配 ΔNLL）", ""]
+    md.append("直接清零证据系数会同时改变“使用什么信息”和“门平均开多大”。"
+              "匹配病灶在去掉同一组件后逐头平移 d，使平均 g 与基线一致；"
+              "下表检验原始−匹配的跨种子配对差（>0 表示原始病灶中有一部分"
+              "可由平均写回强度变化解释）。该检验与原始病灶/匹配病灶各自"
+              "相对基线的检验分属不同 Holm 家族，不能互相替代：信息特异"
+              "效应看匹配病灶相对基线的独立检验，写回强度混杂看本表。")
+    md += ["", "| 变体 | 组件 | 原始−匹配 ΔNLL均值 ± SD | n种子 | "
+           "逐种子胜负 | p_adj(Holm) | 判定 |",
+           "|---|---|---|---|---|---|---|"]
+    for t in contrasts:
+        padj = (f"{t['p_adj']:.4f}"
+                if t.get("p_adj") is not None else "-")
+        md.append(
+            f"| {t['variant']} | {t.get('matched_factor', '-')} "
+            f"({t.get('matched_of', '-')} − {t['lesion']}) | "
+            f"{_fmt_mean_std(t)} | {t['n']} | {_seed_winloss_str(t)} | "
+            f"{padj} | {t.get('matched_verdict', '-')} |")
+    md.append("")
+    md.append("注: 匹配只保持每个头/层的平均门控，不保持门控方差、饱和比例"
+              "或跨层联合分布；偏移又在同一批 val 窗口上估计（每头/层仅一个"
+              "标量），属于事后均值匹配而非留出样本上的确认性控制。因此"
+              "“原始−匹配”显著只定位一个混杂来源，不是把原始效应精确分解为"
+              "“信息效应 + 写回效应”或形式化中介分解。")
+    return md
+
+
 def _render_causal_equivalence_section(causal_tests) -> list:
     rows = [t for t in (causal_tests if isinstance(causal_tests, list) else [])
             if isinstance(t, dict)

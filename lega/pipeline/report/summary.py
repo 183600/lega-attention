@@ -469,6 +469,9 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 推理期因果病灶消融：与训练期消融回答不同的因果问题（见 lega.ablate
     # 模块文档）。独立指标家族、独立 Holm，不混入上面的变体间配对表。
     causal_tests = _ablation_lesion_records(ablations)
+    # 活动匹配对照：原始病灶 − 匹配病灶。单独 Holm 家族，回答“原始 ΔNLL
+    # 有多少可由平均门控开度变化解释”，不混入原始病灶因果检验。
+    matched_ablation_contrasts = _matched_ablation_contrasts(ablations)
     # 同一 checkpoint 内的 2^3 干预 → 推理期 Shapley；与训练期 Shapley 并列，
     # 用于检验“重新训练后的组件结构”是否也存在于最终前向。探索性证据。
     inference_shapley = _inference_shapley_tests(ablations)
@@ -1190,6 +1193,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "cand",
         "capacity_only_test",
         "causal_tests",
+        "matched_ablation_contrasts",
         "cells",
         "ci",
         "ci_vals",
@@ -1378,5 +1382,6 @@ def build_summary(results_dir: str, audit: dict = None,
         'inference_interactions': ctx["inference_interactions"],
         'parameter_matched_control': ctx["param_control_test"],
         'causal_ablation': ctx["causal_tests"],
+        'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
     }
 

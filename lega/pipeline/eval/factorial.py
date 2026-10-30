@@ -613,12 +613,17 @@ def _ablation_lesion_records(ablations):
             res.update({
                 "candidate": variant,
                 "reference": f"{variant}:normal",
-                "metric": CAUSAL_ABLATION_METRIC,
+                "metric": (MATCHED_ABLATION_METRIC
+                           if spec.get("matched_control")
+                           else CAUSAL_ABLATION_METRIC),
                 "lower_is_better": True,
                 "lesion": lesion_id,
                 "lesion_label": spec.get("label", lesion_id),
                 "target": spec.get("target", ""),
                 "expected": spec.get("expected"),
+                "matched_control": bool(spec.get("matched_control")),
+                "matched_of": spec.get("matched_of"),
+                "matched_factor": spec.get("matched_factor"),
                 "variant": variant,
                 "seeds_used": seeds_used,
                 "n_no_op_seeds": no_op_seeds,
@@ -681,6 +686,8 @@ def _ablation_lesion_records(ablations):
         # checkpoint 上根本没被使用”误读成“病灶无效应”。
         if no_op_seeds and no_op_seeds < n:
             verdict = f"部分种子 no-op（{no_op_seeds}/{n}）；" + verdict
+        if spec.get("matched_control"):
+            verdict = "活动匹配对照：" + verdict
         res["causal_verdict"] = verdict
         res["causal_contribution"] = bool(
             n is not None and n >= MIN_SEEDS
@@ -690,6 +697,122 @@ def _ablation_lesion_records(ablations):
             and not res.get("within_noise")
             and res.get("loo_sign_stable") is not False
             and no_op_seeds < n)
+    return out
+
+
+def _matched_ablation_contrasts(ablations):
+    """原始组件病灶 − 活动匹配病灶的跨种子配对差（独立 Holm 家族）。
+
+    原始 `no_query/no_conc/no_len` 清零系数时，既去掉了信息内容，也改变了
+    该头/层的平均门控开度（写回强度的乘性因子）。匹配病灶在去掉同一
+    组件的同时逐头平移 d，使平均 g 与基线相同。因此逐种子的
+
+        ΔNLL(raw) − ΔNLL(matched)
+
+    与“未匹配版额外改变的平均门控开度（及其伴随的分布变化）”共变的部分。
+    差值显著为正不代表原始病灶没有信息特异效应：它只说明原始效应中有一部分
+    与门控开度变化共变；信息特异部分应直接看匹配病灶相对正常基线的独立
+    检验。
+    配对必须同变体、同种子、同窗口；任一记录未成功施加则整对剔除。
+    """
+    out = []
+    ablations = ablations if isinstance(ablations, dict) else {}
+    for variant in sorted(ablations):
+        seed_map = ablations.get(variant)
+        if not isinstance(seed_map, dict):
+            continue
+        for raw_id, matched_id, factor in MATCHED_LESION_PAIRS:
+            vals, seeds_used = [], []
+            n_pairs_missing = 0
+            n_no_op_pairs = 0
+            for seed in _sorted_seeds(seed_map):
+                payload = seed_map.get(seed)
+                if not isinstance(payload, dict):
+                    continue
+                recs = payload.get("lesions")
+                if not isinstance(recs, list):
+                    continue
+
+                def _find(lid):
+                    return next((r for r in recs
+                                 if isinstance(r, dict)
+                                 and r.get("lesion") == lid), None)
+
+                raw = _find(raw_id)
+                matched = _find(matched_id)
+                if (not isinstance(raw, dict) or not isinstance(matched, dict)
+                        or raw.get("applicable") is False
+                        or matched.get("applicable") is False
+                        or raw.get("applied") is not True
+                        or matched.get("applied") is not True):
+                    n_pairs_missing += 1
+                    continue
+                wi_raw = raw.get("window_indices")
+                wi_matched = matched.get("window_indices")
+                if (isinstance(wi_raw, list) and isinstance(wi_matched, list)
+                        and wi_raw != wi_matched):
+                    n_pairs_missing += 1
+                    continue
+                d_raw = _finite_number(raw.get("delta_loss_mean"))
+                d_matched = _finite_number(matched.get("delta_loss_mean"))
+                if d_raw is None or d_matched is None:
+                    n_pairs_missing += 1
+                    continue
+                diff = d_raw - d_matched
+                if not math.isfinite(diff):
+                    n_pairs_missing += 1
+                    continue
+                vals.append(diff)
+                seeds_used.append(seed)
+                if raw.get("no_op") or matched.get("no_op"):
+                    n_no_op_pairs += 1
+            if not vals:
+                continue
+            res = paired_t_test(vals, [0.0] * len(vals))
+            res.update({
+                "candidate": f"{variant}:{raw_id}",
+                "reference": f"{variant}:{matched_id}",
+                "metric": MATCHED_ABLATION_CONTRAST_METRIC,
+                "no_direction": True,
+                "lesion": matched_id,
+                "lesion_label": f"{factor} 未匹配−活动匹配",
+                "matched_of": raw_id,
+                "matched_factor": factor,
+                "variant": variant,
+                "seeds_used": seeds_used,
+                "n_pairs_missing": n_pairs_missing,
+                "n_no_op_pairs": n_no_op_pairs,
+            })
+            out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
+    out = _apply_holm(out)
+    for res in out:
+        mean_diff = _finite_number(res.get("mean_diff"))
+        n = _integral_value(res.get("n"))
+        if n is None or n < MIN_SEEDS:
+            verdict = f"种子不足（n={n}），不作判定"
+        elif (res.get("p_adj") is not None and res["p_adj"] < ALPHA
+              and mean_diff is not None and mean_diff > 0):
+            verdict = ("原始病灶效应显著大于活动匹配版：原始 ΔNLL 中有一部分"
+                       "可由平均门控开度变化解释；信息特异效应看匹配版")
+        elif (res.get("p_adj") is not None and res["p_adj"] < ALPHA
+              and mean_diff is not None and mean_diff < 0):
+            verdict = ("活动匹配版反而显著更差：原始效应不能由平均门控开度"
+                       "解释，须检查匹配分布差异或该组件的信息作用")
+        elif res.get("p_adj") is not None and res["p_adj"] < ALPHA:
+            verdict = "显著但均值为 0，无法解释"
+        else:
+            verdict = ("未检出原始−匹配差异（Holm 校正后）；不能据此断言"
+                       "原始效应全部来自信息内容或全部来自平均门控开度")
+        if res.get("within_noise"):
+            verdict += "；⚠ 效应落在种子噪声内"
+        if res.get("loo_sign_stable") is False:
+            verdict += "；⚠ 留一法方向翻转"
+        if (res.get("n_no_op_pairs") or 0) > 0:
+            verdict += f"；⚠ {res['n_no_op_pairs']} 对含 no-op 病灶"
+        res["matched_verdict"] = verdict
+        # 对比差值没有“候选更好/更差”的方向，不能把 _apply_holm 的通用
+        # 方向判词留给机器读取；规范字段直接使用本对比专用判词。
+        res["verdict"] = verdict
     return out
 
 

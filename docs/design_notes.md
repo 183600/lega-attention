@@ -109,6 +109,9 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
 | `no_query` | `gate_w := 0` | 推理期去 A（对照训练期 `lega_no_query`） |
 | `no_conc` | `gate_a := 0` | 推理期去 B |
 | `no_len` | `gate_b := 0` | 推理期去 C（只去 b·log n；`c` 里的 log n 仍随 `a·c` 保留，与训练期单因素定义一致） |
+| `no_query_matched` | `gate_w := 0`，逐头平移 d 匹配基线 E[g] | 去 A，但保持平均门控开度；分离“信息内容”与“门控开度” |
+| `no_conc_matched` | `gate_a := 0`，逐头平移 d 匹配基线 E[g] | 去 B 的活动匹配对照 |
+| `no_len_matched` | `gate_b := 0`，逐头平移 d 匹配基线 E[g] | 去 C 的活动匹配对照 |
 | `no_evidence` | `gate_w/a/b := 0` | 推理期退化为 `gate_only`（只留学习到的 d） |
 | `query_only` | `gate_a/b := 0` | 推理期只留 A（`w·q + d`），补齐 2^3 的 A 格 |
 | `conc_only` | `gate_w/b := 0` | 推理期只留 B（`a·c + d`），补齐 B 格 |
@@ -132,6 +135,23 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
   “无效应”的证据；`head_permute` 在全同头时也如实标为 no-op；
 - 窗口级 p 仅描述单 run（相邻窗口可能相关）；正式汇总先按种子聚合
   ΔNLL，再做跨种子配对 t + Holm（`significance.json.causal_ablation`）；
+- **活动匹配病灶（消融混杂控制）**：直接清零 `gate_w/a/b` 同时改变
+  “使用哪类信息”和“门平均开多大”。`no_*_matched` 在去掉同一组件后，用
+  一次完整统计前向反推 `base_z = logit − d`，减去待去项得到去掉组件后的
+  logit，再逐层逐头二分平移 `d'`，使 `mean(sigmoid(z + d'))` 等于该头
+  基线 `mean(g)`。因此匹配版保持平均门控开度（写回强度的乘性因子），只去掉信息
+  内容；它使用独立 Holm 家族
+  `significance.json.causal_ablation` 中的 `因果消融ΔNLL(活动匹配−normal)`，
+  不与原始病灶混合。跨种子配对差
+  `ΔNLL(raw) − ΔNLL(matched)` 写入
+  `significance.json.matched_ablation_contrasts`（独立家族
+  `因果消融ΔNLL(未匹配−活动匹配)`）：差值显著为正，说明原始效应中有一部分
+  可由平均门控开度变化解释；不显著不能反证“全部来自信息内容”，仍受种子
+  数与 MDE 限制。匹配只控制一阶矩，不保持门控方差、饱和比例或跨层联合
+  分布；匹配偏移又在同一批 val 窗口上估计（每头/层仅一个标量），属于事后
+  均值匹配而非留出样本上的确认性控制，故不能写成“机制完全匹配”，也不能
+  把差值当作精确的“信息效应 + 写回效应”或形式化中介分解；信息特异效应
+  仍应直接阅读匹配病灶相对正常基线的独立检验；
 - **长度边界**：训练/评测都受 `block_size` 限制（small=1024）；RULER 的
   256/512/1024 是域内扫掠，不是长度外推。超过 `block_size` 的位置必须拒绝，
   不能把其他模型的长上下文结果归因到本模型。
@@ -241,7 +261,9 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 
 输出 `ablation_<variant>[_seed<seed>].json`：基线/各病灶的 val_loss、PPL、
 门控均值/标准差/饱和比例、逐窗口 ΔNLL、窗口级 t/符号检验、`no_op` 标记与
-溯源字段。`--skip_ablation` 可关闭；`standard`/`null` 无输出门，不能做该分析。
+溯源字段；匹配病灶另含 `matched_control`（逐头 `gate_d` 偏移、目标/实际
+平均 g、最大残差、使用位置数），便于审计“平均门控确实匹配”。`--skip_ablation`
+可关闭；`standard`/`null` 无输出门，不能做该分析。
 
 ## 数据卫生：精确去重之后的近似重复
 

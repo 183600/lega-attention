@@ -40,6 +40,7 @@ def _summary_part_c(**kw):
         capacity_only_test = kw["capacity_only_test"]
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
+    matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
     if "ci" in kw:
         ci = kw["ci"]
     if "ci_s" in kw:
@@ -936,6 +937,15 @@ def _summary_part_c(**kw):
                    "causal_ablation": causal_tests,
                    "causal_ablation_equivalence": _causal_equivalence_overview(
                        causal_tests),
+                   "matched_ablation_contrasts": (
+                       matched_ablation_contrasts),
+                   "matched_ablation_contrasts_note": (
+                       "活动匹配对照（独立 Holm 家族）：原始组件病灶减去"
+                       "逐层逐头匹配平均门控后的病灶；差值为正说明原始 ΔNLL "
+                       "中有一部分可由平均门控开度变化解释。只匹配平均 g"
+                       "（一阶矩），不匹配方差/饱和比例，不能把差值当成精确"
+                       "的“信息效应+写回效应”分解；信息特异效应看匹配病灶"
+                       "相对基线的独立检验"),
                    "parameter_matched_control": {
                        "variant": PARAM_CONTROL_VARIANT,
                        "pair": list(PARAM_CONTROL_PAIR),
@@ -966,7 +976,9 @@ def _summary_part_c(**kw):
                        "推理期因果病灶消融（lega.ablate，val split）：同一 "
                        "checkpoint/同一批窗口上只改门控参数，逐窗口配对 ΔNLL；"
                        "no_query/no_conc/no_len/no_evidence 是训练期去一法的"
-                       "推理期对应，query_only/conc_only/len_only 补齐同一 "
+                       "推理期对应，no_*_matched 是逐层逐头匹配平均门控的"
+                       "活动匹配对照（独立 Holm 家族）；"
+                       "query_only/conc_only/len_only 补齐同一 "
                        "checkpoint 的 2^3 单因子格；head_permute 是容量/分布"
                        "不变的安慰剂对照，gate_open/closed/constant_mean 检验"
                        "写回强度与逐位置变化；跨种子 p 经 Holm 校正，窗口级 p "
