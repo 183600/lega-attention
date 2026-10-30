@@ -371,8 +371,29 @@ python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt \
   `near_duplicate_decontamination_applied` / `eval_splits_near_duplicates` /
   `near_duplicate_scan_truncated` / `near_duplicate_low_coverage` /
   `post_cleanup_residual_overlap` 等告警；bin 缓存协议升至 v8（后续升至
-  v9/v10，见下节），旧缓存必须重建，避免报告声称已做近重复处理而实际
+  v9/v10/v11，见下节），旧缓存必须重建，避免报告声称已做近重复处理而实际
   token 流未处理。
+
+**评测集内部近重复与块级有效样本量**：跨 split 去污染只回答“train 是否
+抄了 eval”，回答不了“val/test 自己的样本是否相互重复”。后者会让名义上的
+N 个评测窗口共享同一批内容，缩小有效独立样本量并低估抽样方差。
+`duplicates.near_duplicate.eval_internal_near_duplicates` 因此对 val-val /
+test-test 也做 MinHash/LSH + containment 锚点召回，再逐对精确计算
+`max(Jaccard, containment)`；只在 val/test 内部建连通簇，**不改写任何评测
+文本**。对每个 split 落盘 `near_duplicate_clusters`、
+`blocks_in_near_duplicate_clusters`、`largest_cluster_blocks`、
+`clustered_chars`、`duplicate_fraction_chars`、`effective_blocks` 与
+`effective_block_fraction`，其中有效块数把每个非平凡连通簇折叠成一个独立
+单元（`eligible − clustered + clusters`），并同时报告 `split_chars_total`/
+`eligible_coverage_fraction`，避免把未达到 min_chars 的块当成“已验证无
+重复”。三档阈值下都给出同一组簇统计；`candidate_pairs_truncated` 显式标明
+簇统计只是下界。达到协议阈值且 `duplicate_fraction_chars > 5%` 时生成
+`val_internal_near_duplicates` / `test_internal_near_duplicates` 告警，低于
+5% 仍以 info 披露；扫描截断另生成
+`eval_internal_near_duplicate_scan_truncated`。该指标是**块级描述性审计**：
+簇内窗口不独立，但块数不能直接替换 token 窗口数，也不构成对 PPL 方差的
+重加权；正式区间仍须用预注册的窗口/种子层级方法，并把该字段作为解释
+有效样本量与窗口重叠的边界证据。
 
 ### 跨 split n-gram：从采样下界到全量精确扫描
 
@@ -400,7 +421,10 @@ python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt \
 **局限**：64-gram 仍会漏掉短于 64 token 的模板复用（由
 `contamination_short_ngram` 告警）与改写型近似复制（由 MinHash/LSH 筛查），
 三者互补而非互相替代；全量扫描的计算/内存随 train token 数线性增长，超大
-语料需按 `max_eval_windows`/`chunk_tokens` 显式控制。
+语料需按 `max_eval_windows`/`chunk_tokens` 显式控制。评测集内部近重复簇
+同样只覆盖达到 `min_chars`/`min_shingles` 的块，且 LSH 候选可能被上限截断；
+它证明的是“已扫描块中存在多少个近重复簇”，不是“整个 val/test 绝对无
+近重复”。
 
 ### 原始数据来源溯源与完整性
 

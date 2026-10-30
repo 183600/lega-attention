@@ -57,7 +57,9 @@ _GPT2_CACHE = {}
 # v10：data_report 增加全量 train 对 eval 的 64-gram 精确扫描（含逐字节
 # 复核），把采样筛查的“下界”升级为可审计的全量结论；旧缓存没有这份证据，
 # 继续命中会让汇总页把“未扫描”当成“无重叠”，必须重建。
-CACHE_SCHEMA = 10
+# v11：data_report 增加 val/test 内部近似重复簇与块级有效样本量审计；旧
+# 缓存缺少这份“评测窗口是否独立”的证据，继续命中会把未审计当成无重复。
+CACHE_SCHEMA = 11
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:

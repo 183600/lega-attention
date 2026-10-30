@@ -660,6 +660,84 @@ def _near_dup_pair_type(split_a: str, split_b: str) -> str:
     return f"{a}_{b}"
 
 
+def _near_dup_eval_cluster_stats(metas, edges, split: str) -> dict:
+    """把一个评测 split 内已核实的近似重复对聚成连通簇。
+
+    只统计达到 ``min_chars``/``min_shingles`` 的块；短块和超大块的覆盖率
+    由调用方另行报告。簇内所有边都已通过精确 Jaccard/containment 验证，
+    LSH/锚点只负责召回候选。有效块数按“每个非平凡连通分量算一个独立单元”
+    计算，是块级审计指标，不等同于对 token 窗口方差做重加权。
+    """
+    idxs = [i for i, m in enumerate(metas) if m.get("split") == split]
+    eligible_chars = int(sum(int(metas[i]["end"]) - int(metas[i]["start"])
+                             for i in idxs))
+    base = {
+        "split": str(split),
+        "eligible_blocks": int(len(idxs)),
+        "eligible_chars": eligible_chars,
+        "verified_pairs": int(len(edges)),
+        "blocks_in_near_duplicate_clusters": 0,
+        "near_duplicate_clusters": 0,
+        "largest_cluster_blocks": 0,
+        "largest_cluster_chars": 0,
+        "clustered_chars": 0,
+        "duplicate_fraction_blocks": 0.0,
+        "duplicate_fraction_chars": 0.0,
+        "effective_blocks": int(len(idxs)),
+        "effective_block_fraction": 0.0,
+    }
+    if not idxs:
+        return base
+    parent = {i: i for i in idxs}
+    rank = {i: 0 for i in idxs}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            ra, rb = rb, ra
+        parent[rb] = ra
+        if rank[ra] == rank[rb]:
+            rank[ra] += 1
+
+    for a, b in edges:
+        if a in parent and b in parent:
+            union(a, b)
+    comps = {}
+    for i in idxs:
+        comps.setdefault(find(i), []).append(i)
+    clusters = [members for members in comps.values() if len(members) >= 2]
+    clustered = [i for members in clusters for i in members]
+    clustered_chars = int(sum(int(metas[i]["end"]) - int(metas[i]["start"])
+                              for i in clustered))
+    effective = int(len(idxs) - len(clustered) + len(clusters))
+    cluster_chars = [int(sum(int(metas[i]["end"]) - int(metas[i]["start"])
+                             for i in members))
+                     for members in clusters]
+    base.update({
+        "blocks_in_near_duplicate_clusters": int(len(clustered)),
+        "near_duplicate_clusters": int(len(clusters)),
+        "largest_cluster_blocks": int(
+            max((len(members) for members in clusters), default=0)),
+        "largest_cluster_chars": int(max(cluster_chars, default=0)),
+        "clustered_chars": clustered_chars,
+        "duplicate_fraction_blocks": float(
+            len(clustered) / max(1, len(idxs))),
+        "duplicate_fraction_chars": float(
+            clustered_chars / max(1, eligible_chars)),
+        "effective_blocks": effective,
+        "effective_block_fraction": float(effective / max(1, len(idxs))),
+    })
+    return base
+
+
 def decontaminate_near_duplicates(texts: dict,
                                   threshold: float = NEAR_DUP_THRESHOLD,
                                   min_chars: int = NEAR_DUP_MIN_CHARS,
@@ -759,6 +837,13 @@ def decontaminate_near_duplicates(texts: dict,
     truncated_candidates = False
     prefilter_skipped = 0
     verified_pairs = 0
+    verified_eval_internal_pairs = 0
+    eval_internal_candidates = set()
+    eval_internal_truncated = False
+    eval_internal_scores = []
+    eval_internal_edges = {sens_keys[t]: [] for t in sensitivity}
+    eval_internal_max_similarity = 0.0
+    eval_internal_top = []
 
     # 只要有至少两个块可比就运行：train 为空时仍需做 val-test 诊断；
     # train 只有 1 块且无 eval 时没有任何 pair，可跳过。
@@ -774,6 +859,19 @@ def decontaminate_near_duplicates(texts: dict,
         n_all = len(metas)
         # LSH：逐 band 建桶再丢弃，内存只与一个 band 的块数有关。
         candidates = set()
+
+        def _add_eval_internal_candidate(a, b):
+            nonlocal eval_internal_truncated
+            if a == b:
+                return
+            pair = (a, b) if a < b else (b, a)
+            if pair in eval_internal_candidates:
+                return
+            if len(eval_internal_candidates) >= NEAR_DUP_MAX_CANDIDATES:
+                eval_internal_truncated = True
+                return
+            eval_internal_candidates.add(pair)
+
         for band in range(NEAR_DUP_BANDS):
             buckets = {}
             for i in range(n_all):
@@ -788,10 +886,11 @@ def decontaminate_near_duplicates(texts: dict,
                 for x in range(len(ids)):
                     for y in range(x + 1, len(ids)):
                         a, b = ids[x], ids[y]
-                        # val-val / test-test 的内部近似重复与跨 split 去污染
-                        # 无关，保留它们只会放大候选集；val-test 仍需保留诊断。
+                        # val-val / test-test 不参与去污染，但必须单独诊断：
+                        # 评测集内部近重复会缩小有效独立样本量。
                         if (metas[a]["split"] == metas[b]["split"]
                                 and metas[a]["split"] != "train"):
+                            _add_eval_internal_candidate(a, b)
                             continue
                         pair = (a, b) if a < b else (b, a)
                         if pair in candidates:
@@ -867,6 +966,7 @@ def decontaminate_near_duplicates(texts: dict,
                             continue
                         if (metas[ei]["split"] == metas[ej]["split"]
                                 and metas[ei]["split"] != "train"):
+                            _add_eval_internal_candidate(ei, ej)
                             continue
                         _add_anchor_candidate(ei, ej)
         containment_candidate_pairs = len(anchor_candidates)
@@ -926,6 +1026,34 @@ def decontaminate_near_duplicates(texts: dict,
                         "chars_b": int(mb["end"] - mb["start"])})
                     top_examples.sort(key=lambda r: -r["score"])
                     del top_examples[10:]
+
+        # 评测集内部近重复：只在 val-val / test-test 内精确核实，
+        # 达到最低敏感性阈值后保留边，供下方逐阈值聚类。
+        min_sens = float(min(sensitivity))
+        for a, b in eval_internal_candidates:
+            ma, mb = metas[a], metas[b]
+            jac, con = _near_dup_similarity(_hashes(a), _hashes(b))
+            score = max(jac, con)
+            if score > eval_internal_max_similarity:
+                eval_internal_max_similarity = score
+            if score < min_sens:
+                continue
+            ptype = _near_dup_pair_type(ma["split"], mb["split"])
+            eval_internal_scores.append({
+                "pair": ptype, "jaccard": float(jac),
+                "containment": float(con), "score": float(score),
+                "chars_a": int(ma["end"] - ma["start"]),
+                "chars_b": int(mb["end"] - mb["start"]),
+                "a": int(a), "b": int(b)})
+            if score >= threshold:
+                verified_eval_internal_pairs += 1
+            for t in sensitivity:
+                if score >= t:
+                    eval_internal_edges[sens_keys[t]].append((a, b))
+        eval_internal_top = [
+            {k: v for k, v in row.items() if k not in ("a", "b")}
+            for row in sorted(eval_internal_scores,
+                              key=lambda r: -r["score"])[:10]]
         remove_all = remove_cross | remove_intra
         if remove_all:
             ranges = [(metas[i]["start"], metas[i]["end"])
@@ -958,6 +1086,34 @@ def decontaminate_near_duplicates(texts: dict,
 
     def _eval_count(split, key):
         return int(eval_counts.get(split, {}).get(key, 0))
+
+    def _eval_total_chars(split):
+        t = texts.get(split)
+        return int(len(t)) if isinstance(t, str) else 0
+
+    eval_internal_by_threshold = {}
+    for t in sensitivity:
+        key = sens_keys[t]
+        per_split = {}
+        for split in ("val", "test"):
+            split_edges = [(a, b) for a, b in eval_internal_edges[key]
+                           if eval_metas[a]["split"] == split]
+            row = _near_dup_eval_cluster_stats(
+                eval_metas, split_edges, split)
+            total_chars = _eval_total_chars(split)
+            row["split_chars_total"] = total_chars
+            row["split_chars_scanned"] = _eval_count(split, "chars_scanned")
+            row["eligible_coverage_fraction"] = float(
+                row["eligible_chars"] / max(1, total_chars))
+            row["clustered_fraction_of_split_chars"] = float(
+                row["clustered_chars"] / max(1, total_chars))
+            per_split[split] = row
+        eval_internal_by_threshold[key] = {
+            "verified_pairs": int(len(eval_internal_edges[key])),
+            "val": per_split["val"],
+            "test": per_split["test"],
+        }
+    chosen_key = sens_keys[threshold]
 
     train_chars_total = int(len(train_text))
     train_chars_eligible = int(train_counts["chars_eligible"])
@@ -1036,6 +1192,27 @@ def decontaminate_near_duplicates(texts: dict,
         "val_test_near_duplicate_pairs_by_threshold": {
             sens_keys[t]: int(sens_counts[sens_keys[t]]["val_test"])
             for t in sensitivity},
+        "eval_internal_near_duplicates": {
+            "method": "minhash_lsh_anchor_recall_exact_verify_cluster",
+            "similarity": "max(jaccard, containment) within val or test",
+            "threshold": float(threshold),
+            "warn_fraction_chars": float(
+                NEAR_DUP_EVAL_CLUSTER_WARN_FRACTION),
+            "scan_possible": bool(n_eval > 1),
+            "candidate_pairs": int(len(eval_internal_candidates)),
+            "candidate_pairs_truncated": bool(
+                eval_internal_truncated or truncated_candidates),
+            "verified_pairs_at_threshold": int(
+                verified_eval_internal_pairs),
+            "max_similarity": float(eval_internal_max_similarity),
+            "top_similarities": eval_internal_top,
+            "val": eval_internal_by_threshold[chosen_key]["val"],
+            "test": eval_internal_by_threshold[chosen_key]["test"],
+            "by_threshold": eval_internal_by_threshold,
+            "note": ("只诊断、不改写 val/test；簇为块级连通分量，"
+                     "duplicate_fraction_chars 的分母是该 split 中达到 "
+                     "min_chars 的块字符；有效块数不是对窗口方差的重加权"),
+        },
     }
     return out, stats
 

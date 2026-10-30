@@ -99,6 +99,11 @@ NEAR_DUP_CACHE_BLOCKS = 10_000
 # 多少字符必须显式可见；覆盖率不足只告警、不自动改阈值，避免按结果挑参数。
 NEAR_DUP_MIN_COVERAGE = 0.80
 
+# 评测集内部近似重复的告警阈值：val/test 内被判为同一近重复簇的字符
+# 占该 split 可扫描字符的比例超过此值，说明窗口的有效独立样本量可能
+# 明显小于名义窗口数，必须显式告警（只诊断，不改写 val/test）。
+NEAR_DUP_EVAL_CLUSTER_WARN_FRACTION = 0.05
+
 # 包含关系（containment）候选的确定性锚点数。MinHash/LSH 估计的是
 # Jaccard：短 val 段被整段抄进长 train 文档时 Jaccard 很低，band 不会碰撞，
 # 但 containment=1。这里从每个块的 shingle 集合中均匀取少量真实 shingle

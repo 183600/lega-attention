@@ -790,6 +790,25 @@ def test_build_summary_renders_near_duplicate_audit():
                 "train_intra_split_near_duplicates_removed": 2,
                 "val_test_near_duplicate_pairs": 1,
                 "candidate_pairs": 40,
+                "eval_internal_near_duplicates": {
+                    "warn_fraction_chars": 0.05,
+                    "val": {
+                        "near_duplicate_clusters": 2,
+                        "blocks_in_near_duplicate_clusters": 5,
+                        "duplicate_fraction_chars": 0.08,
+                        "effective_blocks": 12,
+                        "eligible_blocks": 15,
+                        "eligible_coverage_fraction": 0.9,
+                    },
+                    "test": {
+                        "near_duplicate_clusters": 0,
+                        "blocks_in_near_duplicate_clusters": 0,
+                        "duplicate_fraction_chars": 0.0,
+                        "effective_blocks": 8,
+                        "eligible_blocks": 8,
+                        "eligible_coverage_fraction": 0.75,
+                    },
+                },
                 "candidate_pairs_truncated": False,
                 "oversized_groups_truncated": 0,
                 "min_chars": 200,
@@ -829,6 +848,10 @@ def test_build_summary_renders_near_duplicate_audit():
         assert "阈值敏感性（实际删除量" in md
         assert "τ=0.7" in md and "τ=0.9" in md
         assert "清洗后复核" in md and "已无共享" in md
+        assert "评测集内部近似重复" in md
+        assert "val: 近重复簇 2 个" in md and "8.000%" in md
+        assert "test: 近重复簇 0 个" in md and "75.000%" in md
+        assert "名义窗口数不能直接当作有效样本量" in md
         assert "bytes/token" in md and "4.0000" in md
         # 有限但极大的比例/覆盖率乘 100 会溢出：不能写出 inf%。
         near = data_report["duplicates"]["near_duplicate"]

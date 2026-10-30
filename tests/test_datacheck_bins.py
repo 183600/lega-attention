@@ -817,6 +817,42 @@ def test_near_duplicate_val_test_is_diagnostic_only_and_threshold_sensitivity():
     print("  [ok] 近似重复：val/test 只诊断不改写；三档阈值敏感性可见")
 
 
+def test_near_duplicate_eval_internal_clusters_do_not_rewrite_eval():
+    """val/test 内部近重复必须被诊断，并给出块级有效样本量；两侧不改写。"""
+    base = _near_dup_base()
+    edited = base.replace("early nineteenth", "early twentieth").replace(
+        "public library", "public museum")
+    other = _near_dup_unrelated()
+    texts = {
+        "train": ("A train-only paragraph that is unrelated to the evaluation "
+                  "and long enough to remain after near-duplicate scanning."),
+        "val": f"{base}\n\n{edited}\n\n{other}",
+        "test": f"{base}\n\n{other}",
+    }
+    out, stats = decontaminate_near_duplicates(texts)
+    assert out["val"] == texts["val"] and out["test"] == texts["test"]
+    eint = stats["eval_internal_near_duplicates"]
+    assert eint["scan_possible"] is True
+    assert eint["candidate_pairs"] >= 1
+    assert eint["max_similarity"] >= 0.8
+    assert any(row["pair"] == "val_val"
+               for row in eint["top_similarities"])
+    val = eint["val"]
+    assert val["eligible_blocks"] == 3
+    assert val["near_duplicate_clusters"] >= 1
+    assert val["blocks_in_near_duplicate_clusters"] >= 2
+    assert 0.0 < val["duplicate_fraction_chars"] <= 1.0
+    assert val["effective_blocks"] < val["eligible_blocks"]
+    assert val["eligible_coverage_fraction"] == 1.0
+    # test 里 base/other 不是近重复；val 的簇只属于 val，不能把跨 split 对混入
+    assert eint["test"]["near_duplicate_clusters"] == 0
+    # 三档阈值都保留簇，且更严格阈值不会增加被聚类的字符
+    by_t = eint["by_threshold"]
+    assert by_t["0.7"]["val"]["clustered_chars"] >= (
+        by_t["0.9"]["val"]["clustered_chars"])
+    print("  [ok] 近似重复：val/test 内部近重复聚簇与有效块数可见，eval 不改写")
+
+
 def test_near_duplicate_tolerates_bad_input_and_validates_params():
     for texts in (None, [], {}, {"train": 123, "val": ["x"]}):
         out, stats = decontaminate_near_duplicates(texts)
@@ -837,6 +873,40 @@ def test_near_duplicate_tolerates_bad_input_and_validates_params():
         else:
             raise AssertionError(f"非法 min_chars 未被拒绝: {bad!r}")
     print("  [ok] 近似重复：容忍损坏输入，threshold/min_chars 严格校验")
+
+
+def test_eval_internal_near_duplicates_surface_alerts():
+    """评测集内部近重复必须进入 alerts；超过协议比例时升级为 warning。"""
+    near = {
+        "threshold": 0.8,
+        "eval_internal_near_duplicates": {
+            "warn_fraction_chars": 0.05,
+            "candidate_pairs_truncated": False,
+            "val": {
+                "near_duplicate_clusters": 1,
+                "blocks_in_near_duplicate_clusters": 2,
+                "duplicate_fraction_chars": 0.10,
+                "effective_blocks": 2,
+                "eligible_blocks": 3,
+            },
+            "test": {
+                "near_duplicate_clusters": 1,
+                "blocks_in_near_duplicate_clusters": 2,
+                "duplicate_fraction_chars": 0.01,
+                "effective_blocks": 5,
+                "eligible_blocks": 6,
+            },
+        },
+    }
+    codes = {a["code"]: a["level"] for a in leakage_alerts(
+        {}, {}, {"near_duplicate": near}, {}, {})}
+    assert codes["val_internal_near_duplicates"] == "warning"
+    assert codes["test_internal_near_duplicates"] == "info"
+    near["eval_internal_near_duplicates"]["candidate_pairs_truncated"] = True
+    codes2 = {a["code"] for a in leakage_alerts(
+        {}, {}, {"near_duplicate": near}, {}, {})}
+    assert "eval_internal_near_duplicate_scan_truncated" in codes2
+    print("  [ok] 近似重复：val/test 内部近重复告警与截断标记可见")
 
 
 def test_prepare_bins_applies_near_duplicate_decontamination():
@@ -863,6 +933,10 @@ def test_prepare_bins_applies_near_duplicate_decontamination():
         assert near["train_blocks_dropped_as_near_duplicates_of_eval"] == 1
         assert near["threshold"] == 0.8
         assert near["threshold_sensitivity"]["0.8"]["train_val"] >= 1
+        eint = near["eval_internal_near_duplicates"]
+        assert eint["scan_possible"] is True
+        assert eint["val"]["eligible_blocks"] >= 1
+        assert eint["test"]["eligible_blocks"] >= 1
         codes = {a["code"] for a in rep["alerts"]}
         assert "near_duplicate_decontamination_applied" in codes
         decoded = load_tokenizer(d).decode(load_bin(d, "train"))

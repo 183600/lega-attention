@@ -1190,6 +1190,33 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"LSH 理论召回率 {_fmt_rate(near.get('lsh_recall_at_threshold'))}；"
                 f"候选对 {_int_or_zero(near.get('candidate_pairs')):,}"
                 "（阈值敏感性见 data_report.json）")
+            eint = _as_dict(near.get("eval_internal_near_duplicates"))
+            if eint:
+                parts = []
+                for split in ("val", "test"):
+                    row = _as_dict(eint.get(split))
+                    if not row:
+                        continue
+                    parts.append(
+                        f"{split}: 近重复簇 "
+                        f"{_int_or_zero(row.get('near_duplicate_clusters'))} 个/"
+                        f"涉及 "
+                        f"{_int_or_zero(row.get('blocks_in_near_duplicate_clusters'))} "
+                        "块（"
+                        f"{_fmt_rate(row.get('duplicate_fraction_chars'))} 可扫描字符），"
+                        "块级有效单元 "
+                        f"{_int_or_zero(row.get('effective_blocks'))}/"
+                        f"{_int_or_zero(row.get('eligible_blocks'))}、"
+                        "可扫描覆盖 "
+                        f"{_fmt_rate(row.get('eligible_coverage_fraction'))}")
+                if parts:
+                    md.append(
+                        "- 评测集内部近似重复（只诊断，val/test 不改写）："
+                        + "；".join(parts)
+                        + "。字符占比超过 "
+                        + f"{_fmt_rate(eint.get('warn_fraction_chars'))}"
+                        + " 时告警；同簇窗口不是独立重复，名义窗口数不能直接"
+                        "当作有效样本量")
             cov = _finite_number(near.get("train_chars_coverage_fraction"))
             if cov is not None:
                 cov_s = ("溢出" if not math.isfinite(cov * 100.0)

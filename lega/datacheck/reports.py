@@ -291,6 +291,32 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
             f"val 与 test 有 {n_near_vt} 对近似重复块（阈值 "
             f"{near.get('threshold', '?')}）：两侧均保持尘封未改写，但 val 选型"
             "会部分预演 test，最终 test 指标的独立性下降，须核查/重建划分")
+    eval_internal = near.get("eval_internal_near_duplicates")
+    eval_internal = eval_internal if isinstance(eval_internal, dict) else {}
+    warn_frac = _num(eval_internal.get("warn_fraction_chars"))
+    if warn_frac is None:
+        warn_frac = float(NEAR_DUP_EVAL_CLUSTER_WARN_FRACTION)
+    for split in ("val", "test"):
+        row = eval_internal.get(split)
+        row = row if isinstance(row, dict) else {}
+        n_clusters = _count(row.get("near_duplicate_clusters"))
+        if not n_clusters:
+            continue
+        frac = _num(row.get("duplicate_fraction_chars"))
+        level = "warning" if frac is not None and frac > warn_frac else "info"
+        frac_s = f"{frac:.1%}" if frac is not None else "未知"
+        add(level, f"{split}_internal_near_duplicates",
+            f"{split} 内部有 {n_clusters} 个近似重复簇，涉及 "
+            f"{_count(row.get('blocks_in_near_duplicate_clusters'))} 个块/"
+            f"{frac_s} 的可扫描字符；块级有效独立单元 "
+            f"{_count(row.get('effective_blocks'))}/"
+            f"{_count(row.get('eligible_blocks'))}。"
+            "val/test 未被改写，但同簇窗口不是独立重复，名义窗口数会高估"
+            "独立样本量；若该比例越过告警线，须按簇解释区间或重建评测集")
+    if eval_internal.get("candidate_pairs_truncated"):
+        add("warning", "eval_internal_near_duplicate_scan_truncated",
+            "val/test 内部近似重复扫描触发候选上限，簇统计是下界；"
+            "须降低评测集规模或提高候选上限后复核")
     if near.get("candidate_pairs_truncated") or _count(
             near.get("oversized_groups_truncated")):
         add("warning", "near_duplicate_scan_truncated",
@@ -839,6 +865,10 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "近重复扫描只覆盖达到 min_chars 且 shingle 数达标的字符："
             "duplicates.near_duplicate 同时报告覆盖率与被跳过字符数，"
             "低于协议下限会告警，不能把未扫描部分当作已验证；",
+            "val/test 内部近重复单独聚类到 "
+            "duplicates.near_duplicate.eval_internal_near_duplicates："
+            "报告每侧近重复簇、被聚类字符占比与块级有效单元数；只诊断，"
+            "不改写评测集，块级有效单元不能直接替换 token 窗口数；",
             "所有删除完成后，duplicates.post_cleanup 对最终文本再核对一次"
             "train 与 val/test 是否仍共享精确/归一化长行或多行块；"
             "train_eval_clean=False 进入 alerts 并作为训练前严重违规；",
