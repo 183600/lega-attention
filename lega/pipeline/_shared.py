@@ -49,6 +49,8 @@ from lega.datacheck import (read_test_access_log,  # noqa: E402
 from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
                               interpret_equivalence, metric_margin)
 from lega.replication import replication_forecast  # noqa: E402
+from lega.multiverse import (attach_to_hypotheses,  # noqa: E402
+                             paired_specification, specification_curve)
 from lega.design import (apply_design_gate,  # noqa: E402
                          build_design_plan, build_run_order,
                          design_conformance, load_design_plan,

@@ -477,6 +477,10 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     tests += _factorial_interaction_tests(runs)
     tests += _factorial_shapley_tests(runs)
     tests = _apply_holm(tests)
+    # 分析选择多重宇宙（探索性）：同一对比在原始/log PPL、macro/micro
+    # RULER、全种子/留一种子等可辩护口径下重算；只披露结论是否依赖分析
+    # 选择，不做多重校正，也不改变确认性判定。
+    multiverse = _multiverse_analysis(runs, pairs)
     # RULER 上下文长度剂量-反应（探索性）：只报跨长度平均会把“短涨长跌”
     # 与“全长度小涨”混成同一个数。独立 Holm 家族，不进入主检验表，也不
     # 改变预注册假设的确认性判定。
@@ -641,6 +645,9 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 audit),
             design_conf, design_plan),
         test_reuse, test_reuse_metrics, alpha=design_alpha)
+    # 把规格曲线摘要挂到匹配的预注册假设上：只补充“结论是否依赖分析口径”
+    # 的描述性证据，不改变支持/拒绝/未定或任何确认性门。
+    attach_to_hypotheses(hyp_eval, multiverse)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -1412,6 +1419,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "missing_configs",
         "missing_cov",
         "missing_evals",
+        "multiverse",
         "n_short_tt",
         "n_short_tv",
         "n_short_vt",
@@ -1531,6 +1539,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'causal_ablation': ctx["causal_tests"],
         'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
         'budget_sensitivity': ctx["budget_sensitivity"],
+        'multiverse': ctx["multiverse"],
         'test_reuse': ctx.get("test_reuse"),
     }
 

@@ -477,6 +477,68 @@ def _render_equivalence_section(tests) -> list:
 # 不强行套等价性解读。
 
 
+def _render_multiverse_section(multiverse) -> list:
+    """渲染分析选择多重宇宙（规格曲线）表；只展示可机读的描述性证据。"""
+    md = ["", "### 分析选择多重宇宙（specification curve；探索性稳健性）", ""]
+    if not isinstance(multiverse, dict):
+        md.append("（本次汇总未计算规格曲线。）")
+        return md
+    outcomes = [o for o in (multiverse.get("outcomes") or [])
+                if isinstance(o, dict)]
+    if not outcomes:
+        md.append("（没有可枚举分析规格的配对；旧产物或种子/协议不足。）")
+        return md
+    md.append("同一对比换一种同样可辩护的分析口径，方向/显著性是否还在？"
+              "下表并列 PPL 原始差 vs log 比值、RULER macro vs micro、"
+              "全种子 vs 逐个留一。规格之间高度相关且未穷尽所有选择，"
+              "**不是独立假设、不做多重校正**；本表只用于披露分析选择敏感性，"
+              "不改变预注册判定，也不能用“全部规格显著”替代效应量/SESOI。")
+    md += ["", "| 对比 | 指标 | 规格(有效/总) | 基准Δ | 方向一致率 | "
+           "同向显著率 | 方向翻转规格 | 同向但不显著规格 | 状态 |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    status_order = {"fragile": 0, "undetermined_reference": 1,
+                    "insufficient": 2, "directionally_robust": 3,
+                    "robust": 4}
+    ordered = sorted(
+        outcomes,
+        key=lambda o: (status_order.get(o.get("status"), 9),
+                       str(o.get("candidate")), str(o.get("reference")),
+                       str(o.get("metric"))))
+    for outcome in ordered:
+        flipped = [s.get("choice") for s in (outcome.get("flipped_specs") or [])
+                   if isinstance(s, dict) and s.get("choice") is not None]
+        nonsig = [s.get("choice")
+                  for s in (outcome.get("nonsignificant_specs") or [])
+                  if isinstance(s, dict) and s.get("choice") is not None]
+        dc = outcome.get("direction_consistency")
+        sc = outcome.get("significance_consistency")
+        md.append(
+            f"| {outcome.get('candidate')} vs {outcome.get('reference')} | "
+            f"{outcome.get('metric')} | "
+            f"{outcome.get('n_valid')}/{outcome.get('n_specs')} | "
+            f"{_fmt_signed(outcome.get('reference_effect'))} | "
+            f"{f'{dc:.0%}' if isinstance(dc, (int, float)) else '-'} | "
+            f"{f'{sc:.0%}' if isinstance(sc, (int, float)) else '-'} | "
+            f"{', '.join(flipped) if flipped else '-'} | "
+            f"{', '.join(nonsig) if nonsig else '-'} | "
+            f"{outcome.get('label') or outcome.get('status') or '-'} |")
+    counts = multiverse.get("counts") or {}
+    md.append("")
+    md.append(
+        "状态计数：方向翻转/依赖分析选择 "
+        f"{counts.get('fragile', 0)}、方向一致但部分不显著 "
+        f"{counts.get('directionally_robust', 0)}、全部可检验规格同向显著 "
+        f"{counts.get('robust', 0)}、规格不足 "
+        f"{counts.get('insufficient', 0)}、基准为 0 "
+        f"{counts.get('undetermined_reference', 0)}。")
+    md.append("注: 方向一致率 = 与基准规格同号的规格占比；同向显著率 = "
+              "在可检验规格中“同向且 p<α”的占比。留一规格的自由度更低"
+              "（n 减 1），其“不显著”是功效下降而非反向证据；规格数少时"
+              "不要解读一致率的小数点。完整逐规格效应/p 值见 "
+              "`significance.json` 的 `multiverse.outcomes`。")
+    return md
+
+
 def _causal_eq_note(t) -> str:
     """把因果病灶的 TOST 结果翻译成“该对照实际说明了什么”。"""
     if not isinstance(t, dict):
@@ -982,59 +1044,72 @@ def _noise_verdict_note(t: dict) -> str:
     return ""
 
 
+def _paired_observations(runs, cand, ref, metric_name, extractor):
+    """提取同种子、同评测协议的配对观测 ``[(seed, a, b)]``。
+
+    PPL 的 eval.json 可能分别落在 val/test（旧产物或手工重评）上：跨 split
+    的“配对差”混入了评测集难度差异，不是同条件对照。RULER 的题面/抽样/
+    生成预算/已评测格任一不同，EM 也不是同一批样例上的配对观测。此类种子
+    整对剔除，并返回逐类剔除计数，供调用方显式报告而不是静默丢样本。
+    """
+    if cand not in runs or ref not in runs:
+        return [], 0, 0, 0
+    cm = _variant_seed_map(runs, cand)
+    rm = _variant_seed_map(runs, ref)
+    seeds = [s for s in _sorted_seeds(cm) if s in rm]
+    observations = []
+    split_skipped = protocol_skipped = cell_skipped = 0
+    for s in seeds:
+        sa, sb = cm.get(s), rm.get(s)
+        if not (isinstance(sa, dict) and isinstance(sb, dict)):
+            continue
+        if metric_name.startswith("PPL"):
+            ea = sa.get("eval") if isinstance(sa.get("eval"), dict) else {}
+            eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else {}
+            if ea.get("split", "val") != eb.get("split", "val"):
+                split_skipped += 1
+                continue
+            pa, pb = _ppl_protocol(ea), _ppl_protocol(eb)
+            if not _same_protocol_fields(pa, pb):
+                protocol_skipped += 1
+                continue
+        elif metric_name.startswith("RULER"):
+            ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else {}
+            rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else {}
+            # 同 seed 只保证训练随机性相同；RULER 题面/抽样/生成预算与
+            # 干扰语料来源任一不同，EM 就不是同一批样例上的配对观测。
+            # 逐任务分解（RULER:<task>）、综合平均与 micro 口径必须走同一套
+            # 可比性门槛，否则会从不一致的样本数/评测格上得出假结论。
+            pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
+            if not _same_protocol_fields(pa, pb):
+                protocol_skipped += 1
+                continue
+            ca = _ruler_cell_signature(ra)
+            cb = _ruler_cell_signature(rb)
+            if ca is not None and cb is not None and ca != cb:
+                cell_skipped += 1
+                continue
+        va, vb = extractor(sa), extractor(sb)
+        if va is None or vb is None:
+            continue
+        observations.append((s, va, vb))
+    return observations, split_skipped, protocol_skipped, cell_skipped
+
+
 def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> list:
     """对每个 (候选, 参照) 在共同种子上做配对 t 检验（原始 p，未校正）。
 
-    PPL 的 eval.json 可能分别落在 val/test（旧产物或手工重评）上：跨 split
-    的“配对差”混入了评测集难度差异，不是同条件对照。此类种子整对剔除，
-    并在结果里记录剔除了多少对，避免静默得到虚假的显著性。
+    配对观测由 :func:`_paired_observations` 统一提取；跨 split/协议/格
+    不一致的种子整对剔除，并在结果里记录剔除了多少对。
     """
     out = []
     for cand, ref in pairs:
-        if cand not in runs or ref not in runs:
+        observations, split_skipped, protocol_skipped, cell_skipped = (
+            _paired_observations(runs, cand, ref, metric_name, extractor))
+        if not observations:
             continue
-        cm = _variant_seed_map(runs, cand)
-        rm = _variant_seed_map(runs, ref)
-        seeds = [s for s in _sorted_seeds(cm) if s in rm]
-        a, b = [], []
-        split_skipped = protocol_skipped = cell_skipped = 0
-        for s in seeds:
-            sa, sb = cm.get(s), rm.get(s)
-            if not (isinstance(sa, dict) and isinstance(sb, dict)):
-                continue
-            if metric_name.startswith("PPL"):
-                ea = sa.get("eval") if isinstance(sa.get("eval"), dict) else {}
-                eb = sb.get("eval") if isinstance(sb.get("eval"), dict) else {}
-                if ea.get("split", "val") != eb.get("split", "val"):
-                    split_skipped += 1
-                    continue
-                pa, pb = _ppl_protocol(ea), _ppl_protocol(eb)
-                if not _same_protocol_fields(pa, pb):
-                    protocol_skipped += 1
-                    continue
-            elif metric_name == "RULER平均" or metric_name.startswith("RULER:"):
-                ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else {}
-                rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else {}
-                # 同 seed 只保证训练随机性相同；RULER 题面/抽样/生成预算与
-                # 干扰语料来源任一不同，EM 就不是同一批样例上的配对观测。
-                # 逐任务分解（RULER:<task>）与综合平均必须走同一套可比性门槛，
-                # 否则会从不一致的样本数/评测格上得出“逐任务显著”的假结论。
-                pa, pb = _ruler_protocol(ra), _ruler_protocol(rb)
-                if not _same_protocol_fields(pa, pb):
-                    protocol_skipped += 1
-                    continue
-                ca = _ruler_cell_signature(ra)
-                cb = _ruler_cell_signature(rb)
-                if ca is not None and cb is not None and ca != cb:
-                    cell_skipped += 1
-                    continue
-            va, vb = extractor(sa), extractor(sb)
-            if va is None or vb is None:
-                continue
-            a.append(va)
-            b.append(vb)
-        if not a:
-            continue
+        a = [x for _, x, _ in observations]
+        b = [y for _, _, y in observations]
         res = paired_t_test(a, b)
         change = single_factor_change(cand, ref)
         # 只有审计表登记的六条边才可标成 single_factor。仅凭“对称差=1”会把
@@ -1057,6 +1132,99 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
             res["excluded_cell_mismatches"] = cell_skipped
         out.append(_enrich_paired(res, a, b))
     return out
+
+
+def _multiverse_spec(spec_id, cand, ref, metric, dimension, choice, observations,
+                     lower_better, reference=False, note=None):
+    """构造一个规格并附上对比身份；保持每项规格的配对种子顺序。"""
+    spec = paired_specification(
+        spec_id, dimension, choice,
+        [x for _, x, _ in observations], [y for _, _, y in observations],
+        lower_is_better=lower_better, metric=metric, alpha=ALPHA,
+        min_seeds=MIN_SEEDS, note=note)
+    spec.update({"candidate": cand, "reference": ref,
+                 "reference_spec": bool(reference)})
+    return spec
+
+
+def _multiverse_analysis(runs, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS):
+    """对每个对比/指标枚举可辩护的分析选择并汇总规格曲线。
+
+    当前纳入的维度：
+    * ``metric_scale``：PPL 原始配对差 vs log-PPL（几何均值比）；
+    * ``seed_subset``：全部种子 vs 逐个留一（检验结论是否由单一种子决定）；
+    * ``aggregation``：RULER macro（预注册口径）vs micro（样例加权）。
+
+    这些规格高度相关，因此**不做多重校正**，也不改变任何确认性判定；
+    只回答“换一个同样合理的分析口径，方向/显著性是否还在”。
+    """
+    outcomes = []
+    for cand, ref in pairs:
+        ppl_obs, *_ = _paired_observations(
+            runs, cand, ref, "PPL", lambda slot: _ppl_of(slot.get("eval")))
+        if ppl_obs:
+            specs = [_multiverse_spec(
+                "PPL:raw:all", cand, ref, "PPL", "metric_scale", "raw",
+                ppl_obs, True, reference=True,
+                note="预注册主口径：原始 PPL 配对差")]
+            log_obs = [(s, math.log(a), math.log(b))
+                       for s, a, b in ppl_obs if a > 0 and b > 0]
+            specs.append(_multiverse_spec(
+                "PPL:log:all", cand, ref, "PPL", "metric_scale", "log",
+                log_obs, True,
+                note="log-PPL 配对差（几何均值比尺度）"))
+            for seed, _, _ in ppl_obs:
+                specs.append(_multiverse_spec(
+                    f"PPL:raw:drop_seed{seed}", cand, ref, "PPL",
+                    "seed_subset", f"drop_seed={seed}",
+                    [row for row in ppl_obs if row[0] != seed], True,
+                    note=f"留一稳健性：删除种子 {seed}"))
+            outcomes.append(specification_curve(
+                specs, reference_id="PPL:raw:all", alpha=alpha,
+                min_seeds=min_seeds))
+
+        ruler_obs, *_ = _paired_observations(
+            runs, cand, ref, "RULER平均",
+            lambda slot: _ruler_avg_of(slot.get("ruler")))
+        if ruler_obs:
+            specs = [_multiverse_spec(
+                "RULER:macro:all", cand, ref, "RULER平均", "aggregation",
+                "macro", ruler_obs, False, reference=True,
+                note="预注册口径：任务等权、任务内上下文档位等权")]
+            micro_obs, *_ = _paired_observations(
+                runs, cand, ref, "RULER(micro)",
+                lambda slot: _ruler_avg_micro(slot.get("ruler")))
+            specs.append(_multiverse_spec(
+                "RULER:micro:all", cand, ref, "RULER平均", "aggregation",
+                "micro", micro_obs, False,
+                note="样例加权口径（按每格 n 加权）"))
+            for seed, _, _ in ruler_obs:
+                specs.append(_multiverse_spec(
+                    f"RULER:macro:drop_seed{seed}", cand, ref, "RULER平均",
+                    "seed_subset", f"drop_seed={seed}",
+                    [row for row in ruler_obs if row[0] != seed], False,
+                    note=f"留一稳健性：删除种子 {seed}"))
+            outcomes.append(specification_curve(
+                specs, reference_id="RULER:macro:all", alpha=alpha,
+                min_seeds=min_seeds))
+
+    counts = {}
+    for outcome in outcomes:
+        status = outcome.get("status")
+        counts[status] = counts.get(status, 0) + 1
+    return {
+        "method": ("分析选择多重宇宙/specification curve：同一对比在不同"
+                   "可辩护分析口径下重算配对效应，报告方向一致率、同向"
+                   "显著率与翻转规格；描述性，不做多重校正"),
+        "alpha": alpha,
+        "min_seeds": min_seeds,
+        "counts": counts,
+        "outcomes": outcomes,
+        "note": ("规格之间相关且未穷尽所有分析选择；“全部规格同向显著”"
+                 "不等于证明稳健或达到实际重要差异；方向翻转/不显著只"
+                 "要求同时披露，不改变预注册判定；PPL log 规格与 RULER "
+                 "micro 规格是尺度/聚合选择，不能据此挑选有利口径。"),
+    }
 
 
 def _adjust_equivalence_family(group, min_seeds=MIN_SEEDS,

@@ -105,6 +105,7 @@ def _summary_part_c(**kw):
         ratio = kw["ratio"]
     if "registered" in kw:
         registered = kw["registered"]
+    multiverse = kw.get("multiverse")
     reparameterization = kw.get("reparameterization")
     if "results_dir" in kw:
         results_dir = kw["results_dir"]
@@ -270,6 +271,10 @@ def _summary_part_c(**kw):
                f"不一致（{n_mismatch} 组），不一致时必须同时报告并解释为"
                "尺度敏感性，不能静默选择其中一个。逐种子 log 差与几何比见 "
                "`significance.json` 的 `ppl_log_pairs`。"]
+
+    # --- 分析选择多重宇宙（探索性）：结论是否依赖原始/log、macro/micro、
+    #     全种子/留一这些同样可辩护的口径。
+    md += _render_multiverse_section(multiverse)
 
     # --- PPL 窗口级配对（探索性）：有限窗口抽样的评估不确定性。
     #     与上面的种子级 t 检验回答不同问题，不能互相替代。
@@ -921,6 +926,13 @@ def _summary_part_c(**kw):
                             "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
                             "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"),
                    "equivalence": _equivalence_overview(tests),
+                   "multiverse": multiverse,
+                   "multiverse_note": (
+                       "分析选择多重宇宙（探索性）：对每个对比重算原始/log "
+                       "PPL、macro/micro RULER、全种子/逐个留一等可辩护口径，"
+                       "报告方向一致率、同向显著率与翻转规格。规格相关且未"
+                       "穷尽，不做多重校正，不改变预注册判定；翻转/不显著"
+                       "只要求并列披露，不能据此挑选有利口径。"),
                    "component_evidence": comp,
                    "training_budget": {
                        "comparable": not _as_text_list(
