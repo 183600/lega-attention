@@ -408,6 +408,8 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
     ppl_grid = design_cfg.get("ppl_paired_sd_rel_grid", list(PPL_SD_GRID))
     ruler_grid = design_cfg.get("ruler_discordance_grid",
                                 list(RULER_DISCORDANCE_GRID))
+    ruler_sd_grid = design_cfg.get("ruler_paired_sd_grid",
+                                   list(RULER_SD_GRID))
     try:
         ppl_grid = sorted({_finite_float(x, "ppl_paired_sd_rel_grid",
                                          positive=True)
@@ -418,9 +420,14 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                           upper=1.0)
             for x in _finite_sequence(ruler_grid,
                                       "ruler_discordance_grid")})
+        ruler_sd_grid = sorted({
+            _finite_float(x, "ruler_paired_sd_grid", positive=True,
+                          upper=1.0)
+            for x in _finite_sequence(ruler_sd_grid,
+                                      "ruler_paired_sd_grid")})
     except ValueError as e:
         raise ValueError(f"设计网格非法：{e}") from None
-    if not ppl_grid or not ruler_grid:
+    if not ppl_grid or not ruler_grid or not ruler_sd_grid:
         raise ValueError("设计网格不能为空")
 
     ruler_cfg = _as_dict(config.get("ruler"))
@@ -1239,6 +1246,142 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             + "仍远大于 1pp：RULER 的 SESOI/等价判定只能作描述性证据；"
             "如需确认 1pp 级差异，应按上表增加每格样本数并重新登记"))
 
+    # ---- RULER 种子级先验灵敏度：确认性 H4 走跨种子配对 t（macro EM），
+    # 不是逐格 McNemar。只规划每格样本数会让“确认性检验单位”没有先验
+    # 功效证据：500 个样例也不能替代 5 个种子对种子方差的计划。
+    declared_ruler_sd = None
+    if "ruler_paired_sd" in design_cfg:
+        declared_ruler_sd = _finite_float(
+            design_cfg.get("ruler_paired_sd"), "design.ruler_paired_sd",
+            positive=True, upper=1.0)
+    ruler_seed_rows = []
+    for sd in ruler_sd_grid:
+        if can_power:
+            mde = min_detectable_effect(sd, n_seeds, alpha, power)
+            pw = paired_t_power(ruler_margin, sd, n_seeds, alpha)
+            mde_confirm = min_detectable_effect(
+                sd, n_seeds, ruler_alpha, power)
+            pw_confirm = paired_t_power(
+                ruler_margin, sd, n_seeds, ruler_alpha)
+        else:
+            mde = pw = mde_confirm = pw_confirm = None
+        pw_nct = (paired_t_power_nct(
+            ruler_margin, sd, n_seeds, alpha, n_sim=20000, seed=0)["power"]
+            if 2 <= n_seeds <= 10 else None)
+        ruler_seed_rows.append({
+            "paired_sd_pp": sd,
+            "mde_pp": mde,
+            "power_for_sesoi": pw,
+            "power_for_sesoi_nct": pw_nct,
+            "required_seeds_for_sesoi": required_pairs(
+                ruler_margin, sd, alpha, power),
+            "mde_pp_confirmatory": mde_confirm,
+            "power_for_sesoi_confirmatory": pw_confirm,
+            "required_seeds_for_sesoi_confirmatory": required_pairs(
+                ruler_margin, sd, ruler_alpha, power),
+        })
+    ruler_seed_break_even = (
+        max_sd_for_effect(ruler_margin, n_seeds, alpha, power)
+        if can_power else None)
+    ruler_seed_break_even_confirm = (
+        max_sd_for_effect(ruler_margin, n_seeds, ruler_alpha, power)
+        if can_power else None)
+
+    if declared_ruler_sd is not None:
+        need = required_pairs(ruler_margin, declared_ruler_sd,
+                              alpha, power)
+        pw = (paired_t_power(ruler_margin, declared_ruler_sd,
+                             n_seeds, alpha) if can_power else None)
+        ok = can_power and need is not None and need <= n_seeds
+        checks.append(_check(
+            "ruler_seed_declared_power", "RULER 种子级计划功效（声明假设）",
+            "pass" if ok else "fail",
+            f"声明跨种子配对差 SD={declared_ruler_sd:.4g}（EM 绝对尺度）；"
+            f"{n_seeds} 个种子对 {ruler_margin:.2%} SESOI 的功效≈"
+            + (f"{pw:.3f}" if pw is not None else "无法计算（n<2）")
+            + "，"
+            + (f"需 {need} 个种子（当前 {n_seeds}）"
+               if need is not None else "所需种子数超出可计算范围")
+            + ("" if ok else "：种子级设计对 SESOI 功效不足；"
+               "逐格 McNemar 的样本量不能补上这个缺口")))
+        need_c = required_pairs(ruler_margin, declared_ruler_sd,
+                                ruler_alpha, power)
+        pw_c = (paired_t_power(ruler_margin, declared_ruler_sd,
+                               n_seeds, ruler_alpha) if can_power else None)
+        ok_c = can_power and need_c is not None and need_c <= n_seeds
+        checks.append(_check(
+            "ruler_seed_confirmatory_power",
+            "RULER 种子级确认性计划功效（多重比较校正）",
+            "pass" if ok_c else "fail",
+            f"声明跨种子配对差 SD={declared_ruler_sd:.4g}；按 {mode} 的 "
+            f"α_eff={ruler_alpha:.6g}（家族 m="
+            f"{family_sizes['ruler_family_size']}，全局 k="
+            f"{family_sizes['global_family_size']}），{n_seeds} 个种子对 "
+            f"{ruler_margin:.2%} SESOI 的功效≈"
+            + (f"{pw_c:.3f}" if pw_c is not None else "无法计算（n<2）")
+            + "，"
+            + (f"需 {need_c} 个种子（当前 {n_seeds}）"
+               if need_c is not None else "所需种子数超出可计算范围")
+            + ("" if ok_c else "：通过多重比较后种子级功效不足，"
+               "H4 的支持/拒绝只能作探索性线索")))
+    else:
+        checks.append(_check(
+            "ruler_seed_declared_power",
+            "RULER 种子级计划功效（声明假设）", "info",
+            "配置未声明 design.ruler_paired_sd：不把任一跨种子 SD 假设"
+            "当作已知，仅报告种子级灵敏度曲线"))
+        checks.append(_check(
+            "ruler_seed_confirmatory_power",
+            "RULER 种子级确认性计划功效（多重比较校正）", "info",
+            "未声明 design.ruler_paired_sd；见 seed_level 中的 "
+            "power_for_sesoi_confirmatory"))
+
+    ref_ruler_sd = DEFAULT_RULER_SD_REF
+    ref_ruler_pw = (paired_t_power(ruler_margin, ref_ruler_sd,
+                                   n_seeds, alpha) if can_power else None)
+    ref_ruler_pw_confirm = (
+        paired_t_power(ruler_margin, ref_ruler_sd, n_seeds, ruler_alpha)
+        if can_power else None)
+    ref_ruler_need = required_pairs(
+        ruler_margin, ref_ruler_sd, alpha, power)
+    ref_ruler_need_confirm = required_pairs(
+        ruler_margin, ref_ruler_sd, ruler_alpha, power)
+    ref_ruler_detail = (
+        f"若跨种子配对差 SD={ref_ruler_sd:.1%}（参考值），{n_seeds} 个种子对 "
+        f"{ruler_margin:.1%} SESOI 的未校正功效≈"
+        + (f"{ref_ruler_pw:.3f}" if ref_ruler_pw is not None
+           else "无法计算（n<2）")
+        + (f"；按确认性 α_eff={ruler_alpha:.6g} 仅≈"
+           f"{ref_ruler_pw_confirm:.3f}"
+           if ref_ruler_pw_confirm is not None else "")
+        + (f"，需 {ref_ruler_need} 个种子（校正后 "
+           f"{ref_ruler_need_confirm}）"
+           if ref_ruler_need is not None
+           and ref_ruler_need_confirm is not None else ""))
+    if ruler_seed_break_even is not None:
+        ref_ruler_detail += (
+            f"；未校正 80% 功效下最大 SD≈{ruler_seed_break_even:.3%}")
+    if ruler_seed_break_even_confirm is not None:
+        ref_ruler_detail += (
+            f"（确认性 {ruler_seed_break_even_confirm:.3%}）")
+    checks.append(_check(
+        "ruler_seed_reference_sensitivity",
+        "RULER 种子级参考灵敏度（非数据估计）", "info",
+        ref_ruler_detail
+        + "。这是确认性 H4 的实际推断单位；逐格 McNemar 表只描述"
+        "评测抽样精度，不能替代"))
+    if (ref_ruler_pw_confirm is not None
+            and ref_ruler_pw_confirm < power):
+        checks.append(_check(
+            "ruler_seed_confirmatory_reference",
+            "RULER 种子级确认性参考功效", "warn",
+            f"参考 SD={ref_ruler_sd:.1%} 时，{n_seeds} 个种子对 "
+            f"{ruler_margin:.1%} SESOI 的确认性功效仅≈"
+            f"{ref_ruler_pw_confirm:.3f}（目标 {power:.0%}；"
+            f"α_eff={ruler_alpha:.6g}，需约 {ref_ruler_need_confirm} "
+            "个种子）。当前设计对 RULER 的 1pp 种子级效应只能作"
+            "描述性/探索性证据"))
+
     # ---- 分析人群/排除规则必须在开跑前声明（不是事后补的叙述）
     checks.append(_check(
         "analysis_protocol", "分析人群与排除规则", "pass",
@@ -1277,6 +1420,29 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             ruler_break_even_confirm,
         "multiplicity": dict(ruler_multiplicity),
         "sensitivity": ruler_rows,
+        "inference_units_note": (
+            "sensitivity 是评测样本级配对 McNemar（每格 n 个样例），"
+            "只描述评测抽样精度；seed_level.sensitivity 是确认性 H4 "
+            "实际使用的种子级配对 t（跨种子 macro EM 配对差），两者"
+            "推断单位不同，不能互相替代"),
+        "seed_level": {
+            "inference_unit": "seed",
+            "metric": "RULER平均",
+            "sesoi_pp": ruler_margin,
+            "sesoi_source": "predeclared_protocol",
+            "planned_seeds": n_seeds,
+            "paired_sd_grid_pp": list(ruler_sd_grid),
+            "declared_paired_sd_pp": declared_ruler_sd,
+            "max_paired_sd_for_sesoi_pp": ruler_seed_break_even,
+            "max_paired_sd_for_sesoi_pp_confirmatory":
+                ruler_seed_break_even_confirm,
+            "multiplicity": dict(ruler_multiplicity),
+            "sensitivity": ruler_seed_rows,
+            "measurement_note": (
+                "SD 为换训练种子时 macro RULER EM 配对差的标准差（绝对 "
+                "EM 尺度）；单 run 内有限样例的评测误差由逐格 McNemar/"
+                "样例聚类 bootstrap 回答，不并入本表"),
+        },
     }
 
     plan = {
@@ -1320,8 +1486,10 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             for h in hyps],
         "assumptions": {
             "ppl_paired_sd_rel": declared_ppl_sd,
+            "ruler_paired_sd_pp": declared_ruler_sd,
             "ruler_discordance": declared_disc,
             "reference_ppl_sd_rel": ref_sd,
+            "reference_ruler_sd_pp": ref_ruler_sd,
             "reference_ruler_discordance": ref_disc,
             "reference_mechanism_sd_abs": ref_sd_mech,
             "auroc_paired_sd_abs": mechanism_endpoints["auroc"].get(

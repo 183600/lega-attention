@@ -468,7 +468,9 @@ def test_render_design_section_with_and_without_plan():
     md = "\n".join(render_design_section(
         plan, conf, observed=observed_design_sensitivity([])))
     assert "实验设计与分析人群" in md
-    assert "PPL 先验灵敏度" in md and "RULER 先验灵敏度" in md
+    assert "PPL 先验灵敏度" in md
+    assert "RULER 评测样本级先验灵敏度" in md
+    assert "RULER 种子级先验灵敏度" in md
     assert "设计符合性与分析人群" in md
     assert "lega/seed3" in md
     assert "确认性判定已自动降级" in md
@@ -1238,10 +1240,68 @@ def test_mechanism_endpoint_sensitivity_and_declared_power():
     print("  [ok] 机制端点：确认性灵敏度、声明功效不足/分析人群缺失均显形")
 
 
+def test_ruler_seed_level_sensitivity_and_declared_power():
+    """RULER 的确认性检验单位是种子，不是评测样例：必须单独先验规划。"""
+    p = _plan()
+    ruler = p["endpoints"]["ruler"]
+    seed = ruler["seed_level"]
+    assert seed["inference_unit"] == "seed"
+    assert seed["planned_seeds"] == 5
+    assert seed["sesoi_pp"] == 0.01
+    assert any(abs(row["paired_sd_pp"] - 0.01) < 1e-12
+               for row in seed["sensitivity"])
+    row = next(r for r in seed["sensitivity"]
+               if abs(r["paired_sd_pp"] - 0.01) < 1e-12)
+    assert row["mde_pp_confirmatory"] > row["mde_pp"]
+    assert row["power_for_sesoi_confirmatory"] < row["power_for_sesoi"]
+    assert (row["required_seeds_for_sesoi_confirmatory"]
+            >= row["required_seeds_for_sesoi"])
+    assert isinstance(row["power_for_sesoi_nct"], float)
+    assert "McNemar" in ruler["inference_units_note"]
+    checks = {c["id"]: c for c in p["checks"]}
+    assert checks["ruler_seed_declared_power"]["status"] == "info"
+    assert checks["ruler_seed_confirmatory_power"]["status"] == "info"
+    assert checks["ruler_seed_reference_sensitivity"]["status"] == "info"
+
+    reg = {"hypotheses": [
+        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
+         "reference": "standard", "direction": "candidate_worse"}]}
+    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+           "design": {"alpha": 0.05, "power": 0.8,
+                      "ruler_paired_sd": 0.005}}
+    good = build_design_plan(cfg, [1, 2, 3, 4, 5], ["lega", "standard"],
+                             reg, known_variants={"lega", "standard"})
+    assert good["endpoints"]["ruler"]["seed_level"][
+        "declared_paired_sd_pp"] == 0.005
+    checks = {c["id"]: c for c in good["checks"]}
+    assert checks["ruler_seed_declared_power"]["status"] == "pass", checks
+    assert checks["ruler_seed_confirmatory_power"]["status"] == "pass", checks
+
+    cfg["design"]["ruler_paired_sd"] = 0.05
+    bad = build_design_plan(cfg, [1, 2, 3, 4, 5], ["lega", "standard"],
+                            reg, known_variants={"lega", "standard"})
+    checks = {c["id"]: c for c in bad["checks"]}
+    assert checks["ruler_seed_declared_power"]["status"] == "fail"
+    assert "功效不足" in checks["ruler_seed_declared_power"]["detail"]
+    assert checks["ruler_seed_confirmatory_power"]["status"] == "fail"
+
+    cfg["design"]["ruler_paired_sd"] = 0
+    try:
+        build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
+                          known_variants={"lega", "standard"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ruler_paired_sd=0 应显式拒绝")
+    print("  [ok] RULER 种子级灵敏度：确认性字段、声明功效不足与非法值")
+
+
 def test_render_design_section_includes_run_order_and_mechanism():
-    """汇总页必须渲染 run 顺序与机制端点灵敏度。"""
+    """汇总页必须渲染 run 顺序、RULER 两种推断单位与机制端点灵敏度。"""
     md = "\n".join(render_design_section(_plan()))
     assert "run 顺序" in md and "randomized_blocked" in md
+    assert "RULER 评测样本级先验灵敏度" in md
+    assert "RULER 种子级先验灵敏度" in md
     assert "机制端点先验灵敏度" in md
     assert "AUROC" in md and "AP" in md
-    print("  [ok] 汇总页：run 顺序与机制端点灵敏度")
+    print("  [ok] 汇总页：run 顺序、RULER 双推断单位与机制端点灵敏度")

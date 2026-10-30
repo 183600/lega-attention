@@ -789,16 +789,18 @@ margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的�
 必须在开跑前决定。`lega/design/` 因此把设计阶段的四件事变成可执行产物：
 
 1. **先验灵敏度**：在花训练算力之前，回答“计划种子数 / RULER 每格样本数
-   能检出多大的效应”。配对 t（PPL/AUROC 的种子级比较）用与
-   `min_detectable_effect` 同一正态近似：
+   能检出多大的效应”。配对 t（PPL/RULER/AUROC/AP 的**种子级**确认性
+   比较）用与 `min_detectable_effect` 同一正态近似：
    `power = Φ(|Δ|/(σ/√n) − z_{1−α/2}) + Φ(−|Δ|/(σ/√n) − z_{1−α/2})`；
-   `required_pairs` 是它的逆运算。RULER 的配对二值结果用 McNemar：
-   n≤500 时精确枚举 H0 拒绝域与条件二项分布，更大时用
-   `power ≈ Φ(√n|Δ|/√π − z) + Φ(−√n|Δ|/√π − z)`（π 为不一致率）。
+   `required_pairs` 是它的逆运算。RULER 的逐格配对二值结果另用 McNemar
+   描述**评测样本级**精度：n≤500 时精确枚举 H0 拒绝域与条件二项分布，
+   更大时用 `power ≈ Φ(√n|Δ|/√π − z) + Φ(−√n|Δ|/√π − z)`（π 为
+   不一致率）。两套单位分开规划，不能拿“每格样例数”冒充种子级功效。
    计划输出的是**对一系列合理 SD/不一致率的灵敏度曲线**，不把某一个
    任意假设伪装成数据估计；配置 `design.ppl_paired_sd_rel` /
-   `design.ruler_discordance` 若显式声明，则额外核对计划样本量是否达到
-   目标功效（声明值必须写死在跑之前，不能事后挑）。
+   `design.ruler_paired_sd` / `design.ruler_discordance` 若显式声明，
+   则额外核对计划种子数或每格样本量是否达到目标功效（声明值必须写死在
+   跑之前，不能事后挑）。
 2. **分析人群**：训练前把“计划内 (变体, 种子) 全集”写进
    `design_plan.json`，并声明排除规则——只允许运行在评测前失败、数据/
    配置/训练预算协议违规、产物损坏、测试集访问违规等**与结果无关**的
@@ -866,6 +868,27 @@ PPL/RULER 算功效，等于对机制主张“先跑再看”。现在 `endpoint
 
 这里的 SD 是**换训练种子**时配对差的标准差，不包含单次评测有限样例的
 抽样误差；后者由逐 run 的样例聚类 bootstrap 回答，两者不能互相替代。
+
+### RULER 的两个推断单位：种子级确认 vs 评测样本级精度
+
+RULER 的确认性假设（H4）是对**跨种子 macro EM 配对差**做配对 t 检验，
+推断单位是训练种子；逐格 McNemar 的推断单位是评测样例。旧设计计划只给
+每格样本数算 McNemar 功效，等于用“评测抽样精度”回答“换种子能否复现”，
+两者不能互相替代。现在 `endpoints.ruler` 明确拆成两层：
+
+- `sensitivity`（原有字段）：每格 n 个样例、不同不一致率下的 McNemar
+  MDE/功效/所需每格样本数，只描述**评测抽样精度**；
+- `seed_level`（新增）：按 `RULER_SD_GRID` 中每个跨种子 macro EM 配对差
+  SD（绝对尺度）给出未校正与确认性 MDE、功效、所需种子数，并报告
+  `max_paired_sd_for_sesoi_pp`。这是 H4 实际使用的推断单位。
+
+配置 `design.ruler_paired_sd` / `design.ruler_paired_sd_grid` 分别声明
+计划 SD 与展示网格；声明值在最终 `α_eff` 下功效不足时，
+`ruler_seed_declared_power` / `ruler_seed_confirmatory_power` 直接 fail，
+不会等到汇总才用“逐格样本很多”掩盖种子级功效不足。未声明计划 SD 时，
+`ruler_seed_reference_sensitivity` 只把 1pp 当作展示横轴，
+`ruler_seed_confirmatory_reference` 在参考值功效不足时告警。汇总页同时
+渲染两张表并明确写出“增加每格样例数不会降低种子级方差，反之亦然”。
 
 ### 确认性功效：按最终判定阈值规划（不是名义 α）
 
@@ -939,7 +962,9 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 - `endpoints.ppl`：SESOI（默认 1%）、各 SD 下的未校正与确认性 MDE/
   功效/所需种子数、两种口径下可容忍的最大配对差 SD；
 - `endpoints.ruler`：每格样本数、格子数、各不一致率下的未校正与确认性
-  McNemar 功效/MDE/所需每格样本数、两种口径下可容忍的最大不一致率；
+  McNemar 功效/MDE/所需每格样本数、两种口径下可容忍的最大不一致率
+  （评测样本级）；`seed_level` 另给确认性 H4 实际使用的跨种子 macro EM
+  配对差 SD 网格、未校正/确认性 MDE、功效、所需种子数与可容忍最大 SD；
 - `endpoints.auroc` / `endpoints.ap`：机制端点的绝对 SESOI、各跨种子
   配对差 SD 下的未校正/确认性 MDE、功效、所需种子数，以及声明 SD；
 - `analysis_protocol`：分析人群、排除规则、缺失数据处理、停止规则、
@@ -959,8 +984,9 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   计划矩阵内、机制端点是否有可分析产物、确认性多重比较规划与 `α_eff`、
   上下文档位是否为合法正整数且至少两档/跨度足够、RULER 最长上下文是否
   超过 `block_size`/`train_ctx`、`length_null` 是否覆盖最长档位、声明假设
-  下的未校正与确认性功效、训练 token 触碰次数与 val 窗口是否足够、分析
-  规则是否声明；
+  下的未校正与确认性功效（含 RULER 种子级 `ruler_seed_declared_power` /
+  `ruler_seed_confirmatory_power`）、训练 token 触碰次数与 val 窗口是否
+  足够、分析规则是否声明；
 - `plan_digest`：排除时间戳/机器路径后的内容 SHA-256，供 reproducible 审计。
 
 每次 `save_design_plan` 还会向同目录的 `design_plan_history.jsonl` 追加一行
@@ -975,10 +1001,13 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 未校正约 0.80% 收紧到确认性约 0.59%。RULER 每格 30 个样例对 1pp SESOI
 的 McNemar 功效本来极低（参考不一致率 10% 时约 0.002，需每格约 7800 个
 样例），校正后更低；因此 RULER 的 1pp 等价/非劣判定只能作描述性证据。
-若要升级为确认性主张，必须先增加每格样本数/种子数并重新登记，而不是把
-“未检出”写成“无差异”。这也意味着：当前 5 种子设计适合检出明显大于 1%
-的 PPL 差异，不足以确认 1% SESOI；配置里声明 `design.ppl_paired_sd_rel`
-时计划会直接标出这一点。
+但更关键的是种子级：跨种子 macro EM 配对差 SD 若为 1pp，5 个种子对 1pp
+SESOI 的未校正功效也只有约 0.61、确认性约 0.24（需约 15 个种子），
+与 PPL 的 1% 参考同量级；每格 30 个样例再多也不能补上这个缺口。若要升级
+为确认性主张，必须先增加每格样本数/种子数并重新登记，而不是把“未检出”
+写成“无差异”。这也意味着：当前 5 种子设计适合检出明显大于 1% 的 PPL
+差异，不足以确认 1% SESOI；配置里声明 `design.ppl_paired_sd_rel` /
+`design.ruler_paired_sd` 时计划会直接标出这一点。
 
 ### 端点级设计失败
 

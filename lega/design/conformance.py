@@ -802,7 +802,8 @@ def render_design_section(plan: dict, conformance: dict = None,
 
     ruler = _as_dict(_as_dict(plan.get("endpoints")).get("ruler"))
     if ruler:
-        md += ["", f"**RULER 先验灵敏度**（SESOI={_fmt(ruler.get('sesoi_pp'), 2, pct=True)}；"
+        md += ["", f"**RULER 评测样本级先验灵敏度（配对 McNemar）**"
+                   f"（SESOI={_fmt(ruler.get('sesoi_pp'), 2, pct=True)}；"
                    f"每格 n={ruler.get('samples_per_cell')}；"
                    f"格子数≈{ruler.get('cells')}；"
                    f"未校正 80% 功效下可容忍的不一致率≈"
@@ -837,10 +838,41 @@ def render_design_section(plan: dict, conformance: dict = None,
                     f"{_fmt(ruler.get('mde_pp_pooled_best_case_min_over_grid'), 2, pct=True)}")
             best_case_note += "。"
         md.append(
-            "注：RULER 的配对 McNemar 只使用不一致对；每格样本数远小于"
+            "注：RULER 的配对 McNemar 只使用不一致对，推断单位是评测样例；"
+            "它描述评测抽样精度，不是确认性 H4 的检验单位。每格样本数远小于"
             " SESOI 所需时，“等价/非劣”只能作为描述性证据。"
             + best_case_note
             + "要把它升级为确认性主张，须先增加每格样本数并重新登记。")
+
+        seed = _as_dict(ruler.get("seed_level"))
+        if seed:
+            md += ["", "**RULER 种子级先验灵敏度（确认性 H4 的实际检验单位，"
+                       "配对 t）**（SESOI=" + _fmt(seed.get("sesoi_pp"), 2, pct=True)
+                       + "；"
+                       f"计划 {seed.get('planned_seeds')} 个种子；"
+                       f"未校正 80% 功效下可容忍的跨种子配对差 SD≈"
+                       f"{_fmt(seed.get('max_paired_sd_for_sesoi_pp'), 3, pct=True)}；"
+                       f"确认性校正后≈"
+                       f"{_fmt(seed.get('max_paired_sd_for_sesoi_pp_confirmatory'), 3, pct=True)}）", "",
+                   "| 跨种子配对差SD | MDE 未校正 | MDE 确认性 | 功效 未校正 | 功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |",
+                   "|---|---|---|---|---|---|---|"]
+            for row in _as_list(seed.get("sensitivity")):
+                if not isinstance(row, dict):
+                    continue
+                md.append("| " + " | ".join([
+                    _fmt(row.get("paired_sd_pp"), 3, pct=True),
+                    _fmt(row.get("mde_pp"), 3, pct=True),
+                    _fmt(row.get("mde_pp_confirmatory"), 3, pct=True),
+                    _fmt(row.get("power_for_sesoi"), 3),
+                    _fmt(row.get("power_for_sesoi_confirmatory"), 3),
+                    _fmt(row.get("required_seeds_for_sesoi"), 0),
+                    _fmt(row.get("required_seeds_for_sesoi_confirmatory"), 0),
+                ]) + " |")
+            md.append("")
+            md.append(
+                "注：本表的 SD 是换训练种子时 macro RULER EM 配对差的标准差"
+                "（绝对 EM 尺度），与上一张逐格 McNemar 表回答不同问题；"
+                "增加每格样例数不会降低种子级方差，反之亦然。")
 
     endpoints_doc = _as_dict(plan.get("endpoints"))
     mech_rows = []
