@@ -4,8 +4,9 @@ from . import _shared
 from . import text
 from . import tokens
 from . import reports
+from . import provenance
 
-_MODULES = [_shared, text, tokens, reports]
+_MODULES = [_shared, text, tokens, reports, provenance]
 _merged = {}
 for _m in _MODULES:
     _merged.update({k: v for k, v in vars(_m).items() if not k.startswith("__")})

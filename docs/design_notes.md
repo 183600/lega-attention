@@ -324,8 +324,47 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
   `duplicates.post_cleanup`，并生成
   `near_duplicate_decontamination_applied` / `eval_splits_near_duplicates` /
   `near_duplicate_scan_truncated` / `near_duplicate_low_coverage` /
-  `post_cleanup_residual_overlap` 等告警；bin 缓存协议升至 v8，旧缓存必须
-  重建，避免报告声称已做近重复处理而实际 token 流未处理。
+  `post_cleanup_residual_overlap` 等告警；bin 缓存协议升至 v8（本轮进一步
+  升至 v9，见下节），旧缓存必须重建，避免报告声称已做近重复处理而实际
+  token 流未处理。
+
+### 原始数据来源溯源与完整性
+
+`data_report` 记录的是**处理后文本/bin** 的哈希，回答不了“这些文本究竟来自
+哪一份原始下载或本地文件”。HF `resolve/main`、镜像 zip 与本地文件都可能被
+替换/更新；仅凭相同文件名和相同 split 协议，无法证明两次实验消费的是同一
+份字节。`scripts/prepare_data.py` 因此为每次数据准备写
+`source_manifest.json`，并把同一份 `source_provenance` 嵌入
+`data_report.json`：
+
+- **逐文件证据**：原始 parquet/zip/local 输入记录 role、相对/外部路径、
+  字节数、SHA-256；清洗后的 train/val/test.txt 也作为 `text_split` 条目
+  入清单，把报告里的文本哈希与原始字节绑定；
+- **来源身份**：parquet 记录 HF dataset/config/revision 与逐文件下载 URL；
+  zip 记录镜像 URL；local 记录绝对源路径；rows API 记录 dataset/config 与
+  行数预算。`digest` 是规范化清单（文件、URL、revision、API 参数）的
+  SHA-256，不含时间戳，可稳定复算；
+- **可变 revision**：`--hf_revision` 默认 `main` 并显式告警；正式实验应固定
+  到 commit hash。来源仍会记录本次实际使用的 revision，便于事后核对；
+- **fail closed**：重跑时已有原始文件的哈希与上次清单不一致，默认抛
+  `SourceChangedError`，必须显式 `--allow_source_change` 才继续；变更逐项
+  写入 `changes`，不会静默覆盖。`--source auto` 从 parquet 回退 zip 时不会
+  吞掉该错误；
+- **三方绑定**：`meta.json` 的 `source_provenance_digest` 把来源身份纳入
+  bin 缓存身份；训练前 `lega.preflight` 复核 report 内清单的自洽性与仍存在
+  文件的 size/SHA-256、report 与 meta 的 digest、独立
+  `source_manifest.json` 与 report 是否同版，以及 `text_split` 哈希与
+  `meta.source_sha256` 是否一致。任一不一致都会作为
+  `data_source_provenance` 严重问题拦截训练；
+- **缺失文件的口径**：原始下载可能已被清理，纯 bin 目录也可能只分发结果。
+  复核只对仍存在的文件重算哈希，缺失文件跳过，但不会被记成“已核对通过”；
+  报告、meta、独立清单之间的 digest 绑定仍必须存在。bin 缓存协议升至 v9，
+  旧缓存必须重建以补齐来源证据。
+
+**局限**：SHA-256 只能证明“拿到的是同一份字节”，不能证明上游数据本身没有
+污染、偏见或许可问题；rows API 的响应未逐行留存原始哈希，只以清洗后文本
+哈希为准；local 外部源可能已不在原路径，需自行保存原始文件。来源清单是
+可复核证据，不是数据质量或合规性的替代品。
 
 ### 规模核算与划分比例（让“80/10/10”可核对）
 

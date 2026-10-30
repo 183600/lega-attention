@@ -10,7 +10,9 @@ import json
 import os
 
 from .data import CACHE_SCHEMA, tokenizer_fit_source_ok
-from .datacheck import critical_split_alerts
+from .datacheck import (critical_split_alerts, provenance_text_hashes,
+                        verify_source_manifest_file,
+                        verify_source_provenance)
 from .repro import sha256_file
 from .utils import strict_int
 
@@ -362,6 +364,80 @@ def data_cache_schema_issue(data_dir: str):
     return None
 
 
+def data_source_provenance_issue(data_dir: str):
+    """核对原始来源清单与 data_report/meta/source_manifest 是否同版。
+
+    data_report 里的 source_provenance 回答“原始字节从哪来”，meta 的
+    source_provenance_digest 把它绑定到当前 bin 缓存，独立 source_manifest
+    则是便于单独分发的同一份证据。三者任一被改写/过期都必须拦截；缺失
+    manifest 时只跳过独立文件核对（允许只分发 report 的场景），但 report
+    与 meta 之间的绑定不可省略。
+    """
+    report = load_data_report(data_dir)
+    prov = report.get("source_provenance") if isinstance(report, dict) else None
+    meta_path = os.path.join(data_dir, "meta.json")
+    meta = None
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            return "meta.json 不可解析，无法核对原始来源清单"
+        if not isinstance(meta, dict):
+            return "meta.json 顶层不是对象，无法核对原始来源清单"
+    meta_digest = meta.get("source_provenance_digest") if meta else None
+    manifest_path = os.path.join(data_dir, "source_manifest.json")
+    has_manifest = os.path.exists(manifest_path)
+    if prov is None:
+        if meta_digest is not None:
+            return ("meta.json 记录了 source_provenance_digest，但 "
+                    "data_report.json 缺少 source_provenance：来源证据被删除/"
+                    "报告过期，无法确认数据来自哪份原始字节")
+        if has_manifest:
+            return ("source_manifest.json 存在，但 data_report.json 缺少 "
+                    "source_provenance：两份来源证据不同版，无法绑定当前缓存")
+        return None
+    if not isinstance(prov, dict):
+        return ("data_report.json 的 source_provenance 不是对象："
+                "无法核对原始来源")
+    issues = verify_source_provenance(prov, data_dir)
+    if issues:
+        return "data_report 的 source_provenance 不一致：" + "；".join(issues[:3])
+    digest = prov.get("digest")
+    if not isinstance(meta_digest, str):
+        return ("meta.json 未记录 source_provenance_digest：无法确认当前 bin "
+                "缓存对应的就是报告里的原始来源，须重建数据缓存")
+    if digest != meta_digest:
+        return ("source_provenance.digest 与 meta.json 的 "
+                "source_provenance_digest 不一致：报告/缓存不同版，须重建")
+    if has_manifest:
+        manifest_issues = verify_source_provenance(
+            _load_json_object(manifest_path), data_dir)
+        if manifest_issues:
+            return ("source_manifest.json 不一致：" +
+                    "；".join(manifest_issues[:3]))
+        binding_issues = verify_source_manifest_file(data_dir, prov)
+        if binding_issues:
+            return "；".join(binding_issues)
+    recorded_text = meta.get("source_sha256")
+    if isinstance(recorded_text, dict):
+        for split, sha in provenance_text_hashes(prov).items():
+            expected = recorded_text.get(split)
+            if expected and expected != sha:
+                return (f"source_provenance 记录的 {split}.txt 哈希与 "
+                        "meta.source_sha256 不一致：来源清单与 bin 缓存脱节")
+    return None
+
+
+def _load_json_object(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict:
     """训练前的数据协议闸门：报告缺失只告警，严重违规默认中止。
 
@@ -375,6 +451,7 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     schema_issue = data_cache_schema_issue(data_dir)
     source_hash_issue = data_source_hash_issue(data_dir)
     bin_hash_issue = data_bin_hash_issue(data_dir)
+    provenance_issue = data_source_provenance_issue(data_dir)
     critical = list(critical_split_alerts(report))
     for issue in data_report_protocol_issues(report):
         critical.append({"level": "warning", "code": "data_report_protocol",
@@ -391,12 +468,16 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     if bin_hash_issue:
         critical.append({"level": "warning", "code": "data_bin_hash",
                          "message": bin_hash_issue})
+    if provenance_issue:
+        critical.append({"level": "warning", "code": "data_source_provenance",
+                         "message": provenance_issue})
     info = {
         "report_present": report is not None,
         "binding_issue": binding_issue,
         "cache_schema_issue": schema_issue,
         "source_hash_issue": source_hash_issue,
         "bin_hash_issue": bin_hash_issue,
+        "source_provenance_issue": provenance_issue,
         "critical_violations": critical,
         "override": bool(allow_override),
     }

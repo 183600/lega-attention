@@ -12,7 +12,8 @@
   train.txt / val.txt     原始文本（prepare_data.py 或 make_dummy_data.py 生成）
   train.bin / val.bin     uint16 token 流（prepare_bins 生成）
   meta.json               {"tokenizer": "gpt2_bpe"|"char", "vocab_size": int, ...}
-  data_report.json        防泄漏/清洗/漂移诊断报告
+  data_report.json        防泄漏/清洗/漂移诊断报告（含 source_provenance）
+  source_manifest.json    原始 URL/revision/文件大小/SHA-256 来源清单
 """
 import hashlib
 import json
@@ -28,7 +29,7 @@ from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
                         check_vocab_capacity,
                         decontaminate_documents, decontaminate_near_duplicates,
                         decontaminate_texts,
-                        distribution_shift, ngram_overlap,
+                        distribution_shift, manifest_digest, ngram_overlap,
                         post_cleanup_residual,
                         read_test_access_log, sanitize_text,
                         short_ngram_overlap,
@@ -49,7 +50,10 @@ _GPT2_CACHE = {}
 # v8：data_report 新增近重复扫描覆盖率、三档真实删除量、清洗后残留复核与
 # 字符/字节核算。旧报告缺少这些闭合证据，若继续命中缓存，汇总页会把“未
 # 审计”显示成“无问题”；因此必须重建，让审计字段与 token 流同批产出。
-CACHE_SCHEMA = 8
+# v9：data_report 记录原始来源溯源（URL/revision/原始文件 SHA-256），meta
+# 记录其 digest 作为缓存身份；旧缓存没有“数据究竟来自哪份原始字节”的证据，
+# 且原始来源变化而文本恰好未变时旧缓存无法更新报告，必须重建。
+CACHE_SCHEMA = 9
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -61,6 +65,19 @@ def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
                 break
             h.update(block)
     return h.hexdigest()
+
+
+def _source_provenance_digest(extra_report):
+    """从上游 extra_report 取来源 manifest 的 digest；无来源证据返回 None。"""
+    if not isinstance(extra_report, dict):
+        return None
+    prov = extra_report.get("source_provenance")
+    if not isinstance(prov, dict):
+        return None
+    recorded = prov.get("digest")
+    if isinstance(recorded, str):
+        return recorded
+    return manifest_digest(prov)
 
 
 def _bin_hashes_ok(data_dir: str, meta: dict):
@@ -324,6 +341,12 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                                          meta.get("fit_on"))
         integrity_ok, integrity_issue, no_sources = _cache_integrity(
             data_dir, meta, report_path, report)
+        # 原始来源身份：仅当本次调用显式携带 provenance 时核对。没有来源
+        # 证据的旧调用（例如只对已有 txt 直接 prepare_bins）不应被误判。
+        expected_prov_digest = _source_provenance_digest(extra_report)
+        prov_ok = (expected_prov_digest is None
+                   or meta.get("source_provenance_digest")
+                   == expected_prov_digest)
         if no_sources:
             # 纯 bin 目录无法重建，也无法核对近似去污染参数/源哈希；与
             # _cache_integrity 的“不可判定放行”同口径，保留旧行为并让
@@ -363,7 +386,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             and os.path.exists(test_bin)
             and os.path.getsize(test_bin) == _meta_int("test_tokens") * 2)
         if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
-                and test_valid and fit_ok and near_ok and integrity_ok:
+                and test_valid and fit_ok and near_ok and integrity_ok and prov_ok:
             if no_sources:
                 print("[data] 警告：数据目录只有 bin 没有源 txt，"
                       "无法核对缓存与源文本一致性（按不可判定放行）")
@@ -386,6 +409,9 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             print("[data] 近似去污染参数与缓存不一致（或旧缓存未记录），重建 bin")
         elif not integrity_ok:
             print(f"[data] {integrity_issue}，重建 bin")
+        elif not prov_ok:
+            print("[data] 原始来源 provenance 与缓存身份不一致（来源已更新），"
+                  "重建 bin 以更新报告")
         else:
             print(f"[data] 缓存分词方式({cached_kind})与请求({kind})不一致，重建 bin")
 
@@ -653,6 +679,11 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             "train_tokens": int(tr.size), "val_tokens": int(va.size)}
     if te is not None:
         meta["test_tokens"] = int(te.size)
+    prov_digest = _source_provenance_digest(extra_report)
+    if prov_digest is not None:
+        # 来源身份进入缓存身份：原始 URL/revision/字节变化时，即使清洗后
+        # 文本碰巧相同，报告里的溯源也必须同步更新，不能静默复用旧报告。
+        meta["source_provenance_digest"] = prov_digest
     if tok.name == "char":
         meta["itos"] = tok.itos
         meta["char_unk"] = UNK_TOKEN in tok.stoi
