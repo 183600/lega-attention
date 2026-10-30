@@ -1525,6 +1525,8 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     偏离箱均值的协方差；箱内分数恒定时两者均为 0。
     """
     n_bins = strict_int(n_bins, "n_bins")
+    if n_bins < 1:
+        raise ValueError(f"n_bins 必须是 >= 1 的整数，收到 {n_bins!r}")
     scores = _obs_array(scores)
     labels = _obs_array(labels)
     if scores.size != labels.size:

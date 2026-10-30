@@ -930,7 +930,7 @@ def test_calibration_metrics_brier_ece_and_baseline():
     assert empty["n"] == 0 and empty["brier"] is None
     assert empty["ece_adaptive"] is None and empty["mce_adaptive"] is None
     # n_bins 是计数身份：bool/小数/非数值不能被 int() 截断或让 range() 崩溃
-    for bad in (True, 10.5, "bad", None):
+    for bad in (True, 10.5, "bad", None, 0, -1):
         try:
             calibration_metrics([0.5, 0.6], [0.0, 1.0], n_bins=bad)
         except ValueError:
