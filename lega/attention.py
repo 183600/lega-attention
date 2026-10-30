@@ -28,6 +28,9 @@
                      全因子 B+C 格：集中度与长度，无查询项）
     lega_detach_conc: g = sigmoid(w·q + a*detach(c) + b*log n + d) （补充对照：
                      集中度统计只作为前向特征、不向 Q/K 反传）
+    lega_l2       :  与 lega 相同，但 B 用 q=Σ_j p_j^2、c=log(n*q)
+    lega_entropy  :  与 lega 相同，但 B 用 q=exp(-H(p))、c=log(n*q)
+                     （补充对照：检验结论是否依赖 max_p 这一具体集中度统计量）
     null_zero     :  与 null 相同，但 value 槽固定为 0、不参与训练（补充对照：
                      把“选择 null”与“写入学习到的内容”分开）
 
@@ -87,9 +90,15 @@ CONTROL_VARIANTS = ("lega_placebo",)
 # detach 反传路径、固定零 value null”三类直接对照。其中 raw_* 用于构成
 # 原始集中度参数化的完整 2^3（与归一化网格逐格配对），但它们不属于
 # 归一化 A/B/C 因子设计，因此不进入 GATE_FACTORS。
+# 集中度统计量的构念效度对照：门控结构、参数个数与 lega 完全相同，
+# 只把 B 的证据从 max_j p_j 换成另一种集中度质量 q，并仍按
+# c=log(n*q) 做长度归一化。它们回答“结论是否依赖 max_p 这一具体
+# 统计量”，而不是“换成另一种统计量后效果是否更好”。
+ALT_CONC_VARIANTS = ("lega_l2", "lega_entropy")
 SUPPLEMENTAL_VARIANTS = ("lega_raw", "lega_raw_no_len",
                          "lega_raw_conc_only", "lega_raw_no_query",
-                         "lega_detach_conc", "null_zero")
+                         "lega_detach_conc", "null_zero") \
+    + ALT_CONC_VARIANTS
 RUNNABLE_VARIANTS = VARIANTS + CONTROL_VARIANTS + SUPPLEMENTAL_VARIANTS
 
 # 供图表与汇总表使用的中文名
