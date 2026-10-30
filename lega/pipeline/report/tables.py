@@ -82,6 +82,7 @@ def _summary_part_c(**kw):
         lat_variants = kw["lat_variants"]
     if "length_analysis" in kw:
         length_analysis = kw["length_analysis"]
+    ruler_heterogeneity = kw.get("ruler_heterogeneity")
     if "log_tests" in kw:
         log_tests = kw["log_tests"]
     if "loo" in kw:
@@ -280,6 +281,10 @@ def _summary_part_c(**kw):
     # --- 分析选择多重宇宙（探索性）：结论是否依赖原始/log、macro/micro、
     #     全种子/留一这些同样可辩护的口径。
     md += _render_multiverse_section(multiverse)
+
+    # --- RULER 任务/长度分层异质性（探索性解释）：macro 平均是否掩盖
+    #     方向相反的层；不改变 H4 判定，也不替代长度剂量-反应。
+    md += _render_ruler_heterogeneity_section(ruler_heterogeneity)
 
     # --- PPL 窗口级配对（探索性）：有限窗口抽样的评估不确定性。
     #     与上面的种子级 t 检验回答不同问题，不能互相替代。
@@ -982,6 +987,12 @@ def _summary_part_c(**kw):
                        "long_minus_short": length_analysis.get(
                            "span_tests", [])},
                    "ruler_length_note": length_analysis.get("note"),
+                   "ruler_heterogeneity": ruler_heterogeneity,
+                   "ruler_heterogeneity_note": (
+                       "RULER 任务/上下文分层随机效应 meta 分析（探索性）："
+                       "Q/I²/tau²/预测区间/留一层/按种子 bootstrap。层间共享"
+                       "种子与评测样例，不是独立研究，p 值与 I² 只作描述；"
+                       "不改变 H1–H7 判定，不替代逐层检验或长度剂量-反应。"),
                    "ppl_window_pairs": ppl_window_tests,
                    "ppl_log_pairs": [
                        t for t in tests if t.get("metric") == "PPL(log)"],

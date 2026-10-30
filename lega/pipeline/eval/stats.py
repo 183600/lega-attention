@@ -913,6 +913,160 @@ def _ruler_length_analysis(runs, pairs) -> dict:
     }
 
 
+def _ruler_heterogeneity_analysis(runs, pairs, alpha=ALPHA,
+                                  min_seeds=MIN_SEEDS,
+                                  n_bootstrap: int = 500,
+                                  rng_seed: int = 20261030) -> dict:
+    """RULER 任务/上下文层的效应异质性（探索性）。
+
+    对每个 (候选, 参照) 把同种子 RULER 配对差按两条轴分层：
+
+    * ``task``：各任务的 macro EM 差（任务等权，先对上下文档位平均）；
+    * ``context``：各请求上下文档位的 macro EM 差（档位内任务等权）。
+
+    每个层先由跨种子样本均值/标准误得到一个效应估计，再做随机效应
+    meta 分析（``lega.heterogeneity``）。任务层回答“macro 平均是否掩盖了
+    某些任务的反向效应”；上下文层是既有长度剂量-反应分析的补充，用
+    I²/Q 与预测区间描述层间方差，不替代斜率/首末落差检验。
+
+    只用所有种子都有定义的层（完整矩阵）；缺失层显式记入 ``dropped_labels``，
+    不按 0 补齐。跨层共享种子和评测样例，Q 的 p 值与 I² 只作描述性指标。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    outcomes = []
+    for entry in (pairs if isinstance(pairs, list) else []):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        cand, ref = entry
+        try:
+            if cand not in runs or ref not in runs:
+                continue
+        except TypeError:
+            continue
+        cm = _variant_seed_map(runs, cand)
+        rm = _variant_seed_map(runs, ref)
+        seeds = [s for s in _sorted_seeds(cm) if s in rm]
+        if not seeds:
+            continue
+        excluded = Counter()
+        rows = []
+        for s in seeds:
+            sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
+            sb = rm.get(s) if isinstance(rm.get(s), dict) else {}
+            ra = sa.get("ruler") if isinstance(sa.get("ruler"), dict) else None
+            rb = sb.get("ruler") if isinstance(sb.get("ruler"), dict) else None
+            if ra is None or rb is None:
+                excluded["missing_ruler"] += 1
+                continue
+            if not _ruler_pair_protocol_ok(ra, rb):
+                excluded["protocol_mismatch"] += 1
+                continue
+            ta = _ruler_task_means(ra)
+            tb = _ruler_task_means(rb)
+            ca = context_macro_means(ra, align_requested=True)
+            cb = context_macro_means(rb, align_requested=True)
+            if not ta or not tb:
+                excluded["missing_tasks"] += 1
+                continue
+            if not ca or not cb:
+                excluded["missing_contexts"] += 1
+                continue
+            rows.append({
+                "seed": _integral_value(s),
+                "task": (ta, tb),
+                "context": (ca, cb),
+            })
+        if not rows:
+            continue
+        axes = {}
+        for axis, axis_cn, unit in (
+                ("task", "RULER 任务", "task macro EM difference"),
+                ("context", "RULER 上下文长度", "context macro EM difference")):
+            all_a = set.union(*[set(r[axis][0]) for r in rows])
+            all_b = set.union(*[set(r[axis][1]) for r in rows])
+            common = set.intersection(
+                *[set(r[axis][0]) & set(r[axis][1]) for r in rows])
+            labels = sorted(common)
+            dropped = sorted((all_a | all_b) - common)
+            if len(labels) < 2:
+                axes[axis] = {
+                    "status": "insufficient",
+                    "label": "共同层数不足，无法评估异质性",
+                    "axis": axis,
+                    "axis_label": axis_cn,
+                    "unit": unit,
+                    "k": len(labels),
+                    "n_seeds": len(rows),
+                    "labels": labels,
+                    "dropped_labels": dropped,
+                    "per_stratum": [],
+                    "bootstrap": {"available": False},
+                    "excluded": dict(excluded),
+                    "seed_sufficient": len(rows) >= min_seeds,
+                    "exploratory": True,
+                }
+                continue
+            matrix = [
+                [r[axis][0][label] - r[axis][1][label] for label in labels]
+                for r in rows
+            ]
+            res = meta_analysis_from_seed_matrix(
+                matrix, labels=labels, alpha=alpha, min_k=2,
+                n_bootstrap=n_bootstrap, seed=rng_seed)
+            res.update({
+                "axis": axis,
+                "axis_label": axis_cn,
+                "unit": unit,
+                "n_seeds": len(rows),
+                "dropped_labels": dropped,
+                "excluded": dict(excluded),
+                "seed_sufficient": len(rows) >= min_seeds,
+                "exploratory": True,
+            })
+            if len(rows) < min_seeds:
+                res["note"] = (
+                    f"种子数 n={len(rows)} < {min_seeds}，仅作描述性展示，"
+                    "不据此判定异质性；" + str(res.get("note") or ""))
+            axes[axis] = res
+        if not axes:
+            continue
+        statuses = [a.get("status") for a in axes.values()]
+        if "heterogeneous" in statuses:
+            status = "heterogeneous"
+        elif "moderate_heterogeneity" in statuses:
+            status = "moderate_heterogeneity"
+        elif "no_detected_heterogeneity" in statuses:
+            status = "no_detected_heterogeneity"
+        else:
+            status = "insufficient"
+        outcomes.append({
+            "candidate": cand,
+            "reference": ref,
+            "metric": "RULER平均",
+            "status": status,
+            "axes": axes,
+            "n_seeds": len(rows),
+            "excluded": dict(excluded),
+            "exploratory": True,
+        })
+    counts = Counter(o["status"] for o in outcomes)
+    return {
+        "method": ("RULER 任务/上下文长度分层随机效应 meta 分析"
+                   "（DerSimonian-Laird；I²/Q/预测区间/留一层/bootseed）"),
+        "alpha": alpha,
+        "min_seeds": min_seeds,
+        "min_strata": 2,
+        "n_bootstrap": n_bootstrap,
+        "counts": dict(counts),
+        "outcomes": outcomes,
+        "note": ("探索性、未预注册：任务层与上下文层共享种子及评测样例，"
+                 "不是独立研究，Q 的卡方 p 值与 I² 只作描述性异质性指标；"
+                 "bootstrap 只重采样训练种子。未检出异质性不等于各层同质，"
+                 "I² 高也不表示某一层显著。不改变 H1–H7 的确认性判定，"
+                 "也不能替代逐层检验、长度剂量-反应、SESOI/等价性或 MDE。"),
+    }
+
+
 def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOOTSTRAP,
                               rng_seed: int = 20240517):
     """RULER macro 的分层 bootstrap 区间（固定种子，单元格内重采样样例）。

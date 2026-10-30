@@ -511,6 +511,10 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 与“全长度小涨”混成同一个数。独立 Holm 家族，不进入主检验表，也不
     # 改变预注册假设的确认性判定。
     length_analysis = _ruler_length_analysis(runs, pairs)
+    # RULER 任务/长度分层异质性（探索性解释）：formal Q/I²/预测区间回答
+    # “macro 平均是否代表各层共同效应”，与上面的长度剂量-反应互补但不
+    # 替代；极端层方向相反时只报平均会误导。
+    ruler_heterogeneity = _ruler_heterogeneity_analysis(runs, pairs)
     # 把 vs standard 的长度剂量-反应摘要并入 summary.json/csv 的变体行，
     # 使“跨长度平均是否掩盖长上下文效应”可被程序消费（完整逐 ctx/逐种子
     # 明细仍在 significance.json）。没有配对（standard 本身/未跑 RULER）时
@@ -679,6 +683,9 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 把规格曲线摘要挂到匹配的预注册假设上：只补充“结论是否依赖分析口径”
     # 的描述性证据，不改变支持/拒绝/未定或任何确认性门。
     attach_to_hypotheses(hyp_eval, multiverse)
+    # RULER 分层异质性只挂到同候选/参照的 H4 等 RULER 假设，补充“平均是否
+    # 掩盖反向层”的警示；不改判定，也不把探索性层分析升级为确认性证据。
+    attach_heterogeneity_to_hypotheses(hyp_eval, ruler_heterogeneity)
 
     # --- Markdown
     cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
@@ -1547,6 +1554,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "row",
         "rows",
         "rul_rows",
+        "ruler_heterogeneity",
         "ruler_ns",
         "ruler_payloads",
         "ruler_sample_tests",
@@ -1620,6 +1628,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'tests': ctx["tests"],
         'ruler_sample_tests': ctx["ruler_sample_tests"],
         'ruler_length': ctx["length_analysis"],
+        'ruler_heterogeneity': ctx["ruler_heterogeneity"],
         'length_null': ctx.get("length_null"),
         'length_calibration': ctx.get("length_calibrations"),
         'ppl_window_tests': ctx["ppl_window_tests"],

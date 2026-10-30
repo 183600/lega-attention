@@ -710,6 +710,131 @@ def _render_multiverse_section(multiverse) -> list:
     return md
 
 
+def _render_ruler_heterogeneity_section(analysis) -> list:
+    """渲染 RULER 任务/上下文异质性（探索性解释层）。"""
+    md = ["", "### RULER 任务/长度异质性（探索性解释；不改变 H4）", ""]
+    if not isinstance(analysis, dict):
+        md.append("（本次汇总未计算 RULER 分层异质性。）")
+        return md
+    outcomes = [o for o in (analysis.get("outcomes") or [])
+                if isinstance(o, dict)]
+    if not outcomes:
+        md.append("（没有可分析的 RULER 配对；旧产物或种子/协议不足。）")
+        return md
+
+    def _pp(value):
+        num = _finite_number(value)
+        if num is None:
+            return None
+        return num * 100.0
+
+    def _pp_str(value, signed=True):
+        num = _pp(value)
+        if num is None:
+            return "-"
+        return f"{num:+.2f}" if signed else f"{num:.2f}"
+
+    def _ci_pp(ci):
+        if not isinstance(ci, (list, tuple)) or len(ci) != 2:
+            return "-"
+        lo, hi = _pp(ci[0]), _pp(ci[1])
+        if lo is None or hi is None:
+            return "-"
+        return f"[{lo:+.2f}, {hi:+.2f}]"
+
+    md.append("只报 `RULER平均` 时，显著/不显著的 macro 配对差可能是“所有"
+              "任务与长度同向小幅变化”，也可能是“某些层大涨、另一些层反向"
+              "后抵消”。下表对每个对比按任务层与上下文长度层分别做随机效应 "
+              "meta 分析：合并效应（随机效应，pp=EM 绝对百分点）、Q 的 p 值、"
+              "I²、tau²、预测区间、逐层删除后的合并范围，以及按种子重采样的 "
+              "I² 区间。正值表示候选的 EM 高于参照（更好）。")
+    md += ["", "| 对比 | 轴 | 层数/种子 | 层效应范围(pp) | 合并效应(pp) | "
+           "95% CI(pp) | Q p | I² | 预测区间(pp) | 留一合并范围(pp) | "
+           "I² bootstrap 95% CI | 状态 |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    dropped_notes = []
+    status_order = {"heterogeneous": 0, "moderate_heterogeneity": 1,
+                    "no_detected_heterogeneity": 2,
+                    "insufficient": 3, "invalid": 4}
+    ordered = sorted(
+        outcomes,
+        key=lambda o: (status_order.get(o.get("status"), 9),
+                       str(o.get("candidate")), str(o.get("reference"))))
+    for outcome in ordered:
+        axes = outcome.get("axes") if isinstance(outcome.get("axes"), dict) else {}
+        for axis in ("task", "context"):
+            row = axes.get(axis)
+            if not isinstance(row, dict):
+                continue
+            effects = [s.get("effect") for s in (row.get("per_stratum") or [])
+                       if isinstance(s, dict) and _finite_number(
+                           s.get("effect")) is not None]
+            effect_range = ("-" if not effects else
+                            f"[{min(effects) * 100:+.2f}, "
+                            f"{max(effects) * 100:+.2f}]")
+            qp = _finite_number(row.get("q_p"))
+            qp_s = ("-" if qp is None else
+                    ("<0.0001" if qp < 0.0001 else f"{qp:.4f}"))
+            i2 = _finite_number(row.get("i2_pct"))
+            i2_s = "-" if i2 is None else f"{i2:.1f}%"
+            pred = _ci_pp(row.get("prediction_interval"))
+            loo = row.get("loo_pooled_random_range")
+            if isinstance(loo, (list, tuple)) and len(loo) == 2:
+                lo, hi = _pp(loo[0]), _pp(loo[1])
+                loo_s = (f"[{lo:+.2f}, {hi:+.2f}]"
+                         if lo is not None and hi is not None else "-")
+            else:
+                loo_s = "-"
+            boot = (row.get("bootstrap")
+                    if isinstance(row.get("bootstrap"), dict) else {})
+            raw_boot_i2 = boot.get("i2_ci95")
+            if (isinstance(raw_boot_i2, (list, tuple))
+                    and len(raw_boot_i2) == 2
+                    and _finite_number(raw_boot_i2[0]) is not None
+                    and _finite_number(raw_boot_i2[1]) is not None):
+                boot_i2 = (f"[{float(raw_boot_i2[0]) * 100:.1f}%, "
+                           f"{float(raw_boot_i2[1]) * 100:.1f}%]")
+            else:
+                boot_i2 = "-"
+            status = row.get("label") or row.get("status") or "-"
+            if not row.get("seed_sufficient", True):
+                status = "⚠ 种子不足；" + status
+            if row.get("dropped_labels"):
+                dropped_notes.append(
+                    f"{outcome.get('candidate')} vs {outcome.get('reference')} "
+                    f"{row.get('axis_label')} 丢弃非完整层："
+                    + ", ".join(str(x) for x in row.get("dropped_labels")))
+            md.append(
+                f"| {outcome.get('candidate')} vs {outcome.get('reference')} "
+                f"| {row.get('axis_label') or axis} | {row.get('k')}/"
+                f"{row.get('n_seeds')} | {effect_range} | "
+                f"{_pp_str(row.get('pooled_random'))} | "
+                f"{_ci_pp(row.get('ci95_random'))} | {qp_s} | {i2_s} | "
+                f"{pred} | {loo_s} | {boot_i2} | {status} |")
+    if dropped_notes:
+        md += ["", "⚠ 完整矩阵约束：" + "；".join(dropped_notes)
+               + "。这些层在各训练种子上没有共同定义，未纳入 meta 分析；"
+                 "不按 0 补齐，也不能用其余层的合并效应代替它们。"]
+    counts = analysis.get("counts") or {}
+    md.append("")
+    md.append(
+        "状态计数：显著异质性 "
+        f"{counts.get('heterogeneous', 0)}、I²<50% 的异质性 "
+        f"{counts.get('moderate_heterogeneity', 0)}、未检出异质性 "
+        f"{counts.get('no_detected_heterogeneity', 0)}、层数/种子不足 "
+        f"{counts.get('insufficient', 0) + counts.get('invalid', 0)}。")
+    md.append("注: 任务层与上下文层共享同一批种子/评测样例，**不是独立研究**，"
+              "Q 的卡方 p 值与 I² 只作描述性异质性指标；bootstrap 只重采样"
+              "训练种子，不覆盖层间共享样例。预测区间回答“换一个同质层效应"
+              "可能落在哪里”，不是新层效应的置信区间。**未检出异质性不等于"
+              "各层同质**；I² 高也不表示某一层显著。若任务或长度层方向相反，"
+              "macro 平均不能写成“各层共同效应”，必须并列逐层结果；该分析"
+              "为探索性、未预注册，不改变 H1–H7 判定，也不能替代长度剂量-"
+              "反应、逐层检验、SESOI/等价性或 MDE。完整逐层效应/标准误/权重/"
+              "留一结果见 `significance.json` 的 `ruler_heterogeneity`。")
+    return md
+
+
 def _causal_eq_note(t) -> str:
     """把因果病灶的 TOST 结果翻译成“该对照实际说明了什么”。"""
     if not isinstance(t, dict):
