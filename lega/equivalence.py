@@ -251,6 +251,19 @@ def _paired_diffs(a, b, kind: str):
     return diffs
 
 
+def paired_metric_diffs(a, b, metric):
+    """按指标 SESOI 口径返回配对差；指标无定义时返回 None。
+
+    与 ``assess_paired_equivalence`` 内部使用同一 ``_paired_diffs`` 变换，
+    供 Bayes/ROPE 等补充层复用，避免两套尺度口径。长度不一致/None 位置
+    不一致仍抛 ValueError（由调用方决定按缺失处理还是中止）。
+    """
+    spec = metric_margin(metric)
+    if spec is None:
+        return None
+    return _paired_diffs(a, b, spec["kind"])
+
+
 def t_critical(df, two_sided_alpha: float = 0.05):
     """Student-t 双侧临界值（无 scipy，二分求根）；无效 df/alpha 返回 None。"""
     try:

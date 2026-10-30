@@ -52,8 +52,10 @@ from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
                          diagnose_run_dir, worst_status)
 from lega.datacheck import (read_test_access_log,  # noqa: E402
                             summarize_test_access)
+from lega.bayes import bayes_paired_evidence  # noqa: E402
 from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
-                              interpret_equivalence, metric_margin)
+                              interpret_equivalence, metric_margin,
+                              paired_metric_diffs)
 from lega.replication import replication_forecast  # noqa: E402
 from lega.multiverse import (attach_to_hypotheses,  # noqa: E402
                              paired_specification, specification_curve)

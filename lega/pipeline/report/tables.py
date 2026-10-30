@@ -227,6 +227,10 @@ def _summary_part_c(**kw):
     # --- SESOI/TOST：把“不显著”与“实际等价”分开。
     md += _render_equivalence_section(tests)
 
+    # --- 贝叶斯补充层：BF 不改变预注册判定，只把“证据不足”与“支持 H0/
+    #     H1”分开；ROPE 复用同一 SESOI。
+    md += _render_bayes_section(tests)
+
     # --- PPL 比值尺度敏感性（探索性）：log-PPL 几何均值比。
     log_tests = [t for t in tests
                  if t.get("metric") == "PPL(log)"
@@ -927,6 +931,11 @@ def _summary_part_c(**kw):
                             "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
                             "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"),
                    "equivalence": _equivalence_overview(tests),
+                   "bayes": _bayes_overview(tests),
+                   "bayes_note": (
+                       "JZS Bayes factor/后验为补充性证据：不改变预注册判定，"
+                       "不替代 t/置换/TOST/MDE；每对比较的完整 BF、后验方向/"
+                       "区间、ROPE 质量、先验尺度敏感性见 pairs[].bayes。"),
                    "multiverse": multiverse,
                    "multiverse_note": (
                        "分析选择多重宇宙（探索性）：对每个对比重算原始/log "

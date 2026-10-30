@@ -31,8 +31,9 @@ def _enrich_paired(res: dict, a, b) -> dict:
     bootstrap CI 展示效应量的不确定范围；MDE 回答"以当前种子方差，
     多大的效应才检测得到"——区分"没有效应"与"功效不足"；新种子复现
     预测（replication_forecast）回答"再换一个训练种子，方向是否仍一致"，
-    避免把均值 CI 误读成单次复现区间。均为确定性计算（固定随机种子），
-    同一输入恒定复现。
+    避免把均值 CI 误读成单次复现区间；JZS Bayes factor 与后验方向/ROPE
+    概率补充"当前数据相对支持 H0 还是 H1、证据多强"，但不改变预注册判定。
+    均为确定性计算（固定随机种子），同一输入恒定复现。
     """
     # 配对差统一按 _paired_diffs 口径构造：bool/None/非有限值不参与，
     # bootstrap CI 与置换/符号检验使用同一批观测。
@@ -148,6 +149,30 @@ def _enrich_paired(res: dict, a, b) -> dict:
             eq.update(interpret_equivalence(
                 eq, res.get("p_adj"), alpha=ALPHA, min_seeds=MIN_SEEDS))
             res["equivalence"] = eq
+
+    # 贝叶斯补充层：p>0.05 不能区分“无效应”和“功效不足”。用与 SESOI
+    # 相同的指标尺度构造配对差，并把 SESOI 当作 ROPE；BF 只在同一指标
+    # 家族内描述，不参与 Holm/FWER，也不改写上面的预注册判定。
+    res["bayes"] = None
+    try:
+        metric_diffs = paired_metric_diffs(a, b, res.get("metric"))
+        bayes_diffs = diffs if metric_diffs is None else metric_diffs
+        eq = res.get("equivalence")
+        margin = eq.get("margin") if isinstance(eq, dict) else None
+        res["bayes"] = bayes_paired_evidence(
+            bayes_diffs, rope=margin, min_seeds=MIN_SEEDS)
+    except (TypeError, ValueError, OverflowError, FloatingPointError) as exc:
+        res["bayes"] = {
+            "status": "invalid",
+            "label": f"无法计算贝叶斯证据（{type(exc).__name__}: {exc}）",
+            "bf10": None, "bf01": None, "log_bf10": None,
+            "posterior_prob_positive": None,
+            "posterior_prob_negative": None,
+            "posterior_ci95": None,
+            "sensitivity": [], "sensitivity_verdict": "无法计算",
+            "reason": str(exc),
+            "note": "按缺失处理，不伪造贝叶斯证据。",
+        }
     return res
 
 
@@ -475,6 +500,152 @@ def _render_equivalence_section(tests) -> list:
 # 因果病灶中“零假设本身有科学含义”的关键对照：安慰剂、阳性对照、
 # 门恒开/恒关、证据反号、去全部证据。其余病灶仍以“是否有因果贡献”为主，
 # 不强行套等价性解读。
+
+
+def _fmt_bf(value, log_value=None) -> str:
+    """贝叶斯因子渲染：极大/极小用科学计数，其余保留 2~3 位有效数字。"""
+    f = _finite_number(value)
+    if f is None:
+        # BF 溢出 float 时仍可据 log BF 显示方向性下界，不伪造具体数值。
+        log_f = _finite_number(log_value)
+        if log_f is not None and log_f > 0.0:
+            return ">1e300"
+        if log_f is not None and log_f < 0.0:
+            return "<1e-300"
+        return "-"
+    if f == 0.0:
+        return "<1e-300"
+    if f >= 1000.0 or f < 0.001:
+        return f"{f:.2e}"
+    if f >= 10.0:
+        return f"{f:.1f}"
+    return f"{f:.2f}"
+
+
+def _bayes_direction_str(bayes) -> str:
+    if not isinstance(bayes, dict):
+        return "-"
+    pos = _finite_number(bayes.get("posterior_prob_positive"))
+    neg = _finite_number(bayes.get("posterior_prob_negative"))
+    if pos is None or neg is None:
+        return "-"
+    return f"{pos:.1%} / {neg:.1%}"
+
+
+def _bayes_sensitivity_str(bayes) -> str:
+    if not isinstance(bayes, dict):
+        return "-"
+    cells = bayes.get("sensitivity")
+    parts = []
+    if isinstance(cells, list):
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            factor = _finite_number(cell.get("factor"))
+            f_s = f"{factor:g}×" if factor is not None else "?"
+            parts.append(f"{f_s}:{_fmt_bf(cell.get('bf10'), cell.get('log_bf10'))}")
+    verdict = bayes.get("sensitivity_verdict")
+    grid = " / ".join(parts) if parts else "-"
+    return f"{grid}（{verdict}）" if verdict else grid
+
+
+def _bayes_rows(tests) -> list:
+    """核心指标中带有贝叶斯补充层的对比；其余保留在 significance.json。"""
+    return [t for t in _equivalence_rows(tests)
+            if isinstance(t.get("bayes"), dict)]
+
+
+def _bayes_overview(tests) -> dict:
+    """significance.json 的贝叶斯汇总（核心指标，与汇总表一致）。"""
+    rows = _bayes_rows(tests)
+    counts = {"support_h1": 0, "support_h0": 0, "inconclusive": 0,
+              "insufficient": 0, "unavailable": 0}
+    for t in rows:
+        bayes = t.get("bayes") or {}
+        bf = _finite_number(bayes.get("bf10"))
+        if bf is None:
+            counts["unavailable"] += 1
+        elif bayes.get("decision_eligible") is not True:
+            counts["insufficient"] += 1
+        elif bf > 3.0:
+            counts["support_h1"] += 1
+        elif bf < 1.0 / 3.0:
+            counts["support_h0"] += 1
+        else:
+            counts["inconclusive"] += 1
+    prior_scale = None
+    if rows:
+        prior_scale = _finite_number((rows[0].get("bayes") or {}).get(
+            "prior_scale"))
+    return {
+        "method": ("JZS Bayes factor / posterior on paired differences；"
+                   "Cauchy prior on standardized effect, Jeffreys prior on "
+                   "scale；ROPE 使用同一指标的 SESOI"),
+        "n_rows": len(rows),
+        "prior_scale": prior_scale,
+        "counts": counts,
+        "note": ("补充性证据：不改变预注册判定；BF10>3 才可写“弱支持 H1”，"
+                 "BF10<1/3 才可写“支持 H0”，其余为证据不足；"
+                 "先验尺度 0.5×/1×/2× 的结论翻转必须并列披露。"),
+    }
+
+
+def _render_bayes_section(tests) -> list:
+    rows = _bayes_rows(tests)
+    md = ["", "### 贝叶斯证据（JZS Bayes factor / 后验方向 / ROPE；补充性）", ""]
+    md.append("`p>0.05` 不能区分“真实无效应”和“种子少/功效低”。本表对配对差"
+              "拟合标准 JZS 模型（标准化效应 Cauchy 先验，尺度先验 ∝1/σ），"
+              "给出 BF10（H1 对 H0 的边际似然比）与 μ 的后验方向/区间。"
+              "**BF10>3 才可写“弱支持 H1”，BF10<1/3 才可写“弱支持 H0”，"
+              "1/3≤BF10≤3 只能写“证据不足”**；BF10=1 不是“无效应”。"
+              "ROPE 概率使用与 TOST 相同的 SESOI，但它是后验质量而非抽样分布"
+              "错误率，不能替代 TOST。")
+    if not rows:
+        md.append("")
+        md.append("（没有定义 SESOI 的核心对比，或旧产物缺少 `bayes` 字段。）")
+        return md
+    md.append("")
+    md.append("| 对比 | 指标 | n | BF10 | BF01 | 证据标签 | "
+              "P(Δ>0) / P(Δ<0) | 后验中位数 [95% CI] | P(ROPE) | "
+              "先验尺度 BF10（0.5×/1×/2×） |")
+    md.append("|---|---|---|---|---|---|---|---|---|---|")
+    for t in rows:
+        bayes = t.get("bayes") or {}
+        eq = t.get("equivalence") if isinstance(t.get("equivalence"), dict) else {}
+        ci = bayes.get("posterior_ci95")
+        ci_s = ("-"
+                if not (isinstance(ci, (list, tuple)) and len(ci) == 2)
+                else f"[{_fmt_eq_value(ci[0], eq)}, "
+                     f"{_fmt_eq_value(ci[1], eq)}]")
+        rope_p = _finite_number(bayes.get("prob_in_rope"))
+        rope_s = (f"{rope_p:.1%} ({_fmt_eq_margin(eq)})"
+                  if rope_p is not None else "-")
+        log_bf = _finite_number(bayes.get("log_bf10"))
+        bf01_log = -log_bf if log_bf is not None else None
+        md.append(
+            f"| {t.get('candidate')} vs {t.get('reference')} | "
+            f"{t.get('metric')} | {bayes.get('n', '-')} | "
+            f"{_fmt_bf(bayes.get('bf10'), log_bf)} | "
+            f"{_fmt_bf(bayes.get('bf01'), bf01_log)} | "
+            f"{bayes.get('label', '-')} | {_bayes_direction_str(bayes)} | "
+            f"{_fmt_eq_value(bayes.get('posterior_median'), eq)} {ci_s} | "
+            f"{rope_s} | {_bayes_sensitivity_str(bayes)} |")
+    overview = _bayes_overview(tests)
+    counts = overview["counts"]
+    md.append("")
+    md.append(
+        f"核心对比 {len(rows)} 组：BF10>3（弱以上支持 H1）"
+        f"{counts['support_h1']}、BF10<1/3（弱以上支持 H0）"
+        f"{counts['support_h0']}、证据不足 {counts['inconclusive']}、"
+        f"n<3 只作描述 {counts['insufficient']}、"
+        f"无法计算 {counts['unavailable']}。")
+    md.append("注: 先验尺度固定为 1/√2，并并列 0.5×/1×/2× 敏感性；"
+              "若不同先验尺度改变证据方向，只能写“结论依赖先验”，"
+              "不能只报对主张有利的一档。3~5 个种子无法检验正态/独立假设，"
+              "BF 与后验区间均受先验影响；零方差时 BF 无定义，显示“无法"
+              "计算”而不是强证据。完整字段见 `significance.json` 的 "
+              "`pairs[].bayes`，本表不改变任何预注册判定。")
+    return md
 
 
 def _render_multiverse_section(multiverse) -> list:
