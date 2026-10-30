@@ -539,6 +539,7 @@ def main():
             if patch.get("patch_sha256") != worktree.get("diff_sha256"):
                 patch["differs_from_manifest"] = True
             worktree["patch"] = patch
+    runtime = runtime_info(args.device)
     repro = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "run_id": run_id,
@@ -571,7 +572,8 @@ def main():
         "worktree": worktree,
         "source_tree": start_source_tree,
         "data": data_fp,
-        "runtime": runtime_info(args.device),
+        "runtime": runtime,
+        "environment_lock": environment_lock_report(runtime=runtime),
         "registration": reg_info,
         # 长度零假设诊断：记录实际长度、随机种子与各零假设斜率，汇总页据此
         # 判断长度主张是否具备 README 要求的必要证据。

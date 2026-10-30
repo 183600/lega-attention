@@ -823,6 +823,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "precision": manifest.get("precision"),
             "init_state_fingerprint": manifest.get("init_state_fingerprint"),
             "runtime": manifest.get("runtime"),
+            "environment_lock": manifest.get("environment_lock"),
             "sanity": manifest.get("sanity"),
             # 训练完成时写回的完成态/产物哈希/实际数据顺序指纹：即使
             # out_dir 被删除，台账仍能回答“这轮是否跑完、产出了什么”。

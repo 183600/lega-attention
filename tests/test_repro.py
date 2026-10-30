@@ -13,12 +13,13 @@ import torch
 from lega.data import CACHE_SCHEMA, get_train_batch
 from lega.repro import (PIPELINE_RUN_ID_ENV, SANITY_REQUIRED_CHECKS,
                         build_run_manifest, current_pipeline_run_id,
-                        data_fingerprint, git_info,
-                        load_provenance, provenance_drift, runtime_drift,
-                        runtime_info, sanity_identity_check, sha256_file,
+                        data_fingerprint, environment_lock_report, git_info,
+                        load_provenance, parse_requirements_lock,
+                        provenance_drift, runtime_drift, runtime_info,
+                        sanity_identity_check, sha256_file,
                         source_tree_fingerprint,
                         test_data_fingerprint as _test_data_fingerprint,
-                        worktree_state, write_worktree_patch)
+                        verify_run, worktree_state, write_worktree_patch)
 from lega.utils import (data_rng, data_rng_state_fingerprint,
                         expected_rng_state_fingerprint, set_seed,
                         seed_plan, seed_report, state_dict_fingerprint)
@@ -1594,6 +1595,7 @@ def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
             manifest = build_run_manifest(
                 "tiny", "lega", 7, cfg, data, "cpu", argv=["test"])
             assert manifest["pipeline_run_id"] == "run-abc"
+            assert manifest["environment_lock"]["available"] is True
             fp = source_tree_fingerprint()
             assert manifest["source_tree"]["digest"] == fp["digest"]
             with open(os.path.join(ckpt, "run_manifest.json"), "w",
@@ -1604,6 +1606,9 @@ def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
             assert p["train_source_tree_digest"] == fp["digest"]
             assert p["eval_source_tree_digest"] == fp["digest"]
             assert p["source_tree_matches_training"] is True
+            assert p["eval_environment_lock"]["available"] is True
+            assert (p["train_environment_lock"]["lock_sha256"]
+                    == manifest["environment_lock"]["lock_sha256"])
             # 独立/手工评测没有父流水线环境变量时，继承训练清单的 run_id。
             os.environ.pop(PIPELINE_RUN_ID_ENV, None)
             assert current_pipeline_run_id() is None
@@ -1626,3 +1631,118 @@ def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
         else:
             os.environ[PIPELINE_RUN_ID_ENV] = old_env
     print("  [ok] manifest/load_provenance 继承 run_id 与源码树摘要")
+
+
+def test_requirements_lock_matches_ci_and_detects_environment_drift():
+    """锁文件必须与 CI 固定版本一致，并能区分匹配/缺包/版本/解释器漂移。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lock = parse_requirements_lock(os.path.join(root, "requirements-lock.txt"))
+    ci = parse_requirements_lock(os.path.join(root, "requirements-ci.txt"))
+    assert lock["present"] is True and lock["errors"] == []
+    assert lock["python"] == "3.12"
+    assert lock["packages"]
+    assert set(lock["packages"]).issubset(ci["packages"])
+    for name, version in lock["packages"].items():
+        assert ci["packages"][name] == version
+
+    installed = {name: version for name, version in lock["packages"].items()}
+    installed["torch"] = installed["torch"] + "+cpu"
+    runtime = {"python": "3.12.99", "installed_distributions": installed}
+    report = environment_lock_report(lock["path"], runtime=runtime)
+    assert report["matches"] is True, report
+    assert report["python_matches"] is True
+    assert all(entry["matches"] for entry in report["packages"].values())
+
+    drifted = dict(installed)
+    drifted["numpy"] = "0.0.0"
+    report = environment_lock_report(
+        lock["path"], runtime={"python": "3.12.1",
+                               "installed_distributions": drifted})
+    assert report["matches"] is False
+    assert report["mismatches"][0]["package"] == "numpy"
+
+    missing = dict(installed)
+    missing.pop("torch")
+    report = environment_lock_report(
+        lock["path"], runtime={"python": "3.12.1",
+                               "installed_distributions": missing})
+    assert report["matches"] is False
+    assert "torch" in report["missing"]
+
+    report = environment_lock_report(
+        lock["path"], runtime={"python": "3.11.9",
+                               "installed_distributions": installed})
+    assert report["python_matches"] is False
+    assert report["matches"] is False
+
+    report = environment_lock_report(os.path.join(root, "missing-lock.txt"))
+    assert report["available"] is False
+    assert report["matches"] is None
+    print("  [ok] 环境锁与 CI 版本一致，并检测缺包/版本/Python 漂移")
+
+
+def test_verify_run_passes_complete_run_and_flags_tampering():
+    """单 run 审计：完整清单通过；产物被替换失败；旧清单仅告警。"""
+    with tempfile.TemporaryDirectory() as d:
+        data = os.path.join(d, "data")
+        run_dir = os.path.join(d, "run")
+        os.makedirs(data)
+        os.makedirs(run_dir)
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(64))
+        cfg = os.path.join(d, "config.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        config_used = os.path.join(run_dir, "config_used.json")
+        with open(config_used, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        for name, content in (("model.pt", b"model"),
+                              ("model_best.pt", b"best"),
+                              ("train_log.jsonl", b"{}\n"),
+                              ("eval.json", b"{}\n")):
+            with open(os.path.join(run_dir, name), "wb") as f:
+                f.write(content)
+
+        set_seed(5)
+        manifest = build_run_manifest(
+            "tiny", "lega", 5, cfg, data, "cpu", argv=["test"])
+        manifest["config_used_sha256"] = sha256_file(config_used)
+        artifact_names = ("config_used.json", "model.pt", "model_best.pt",
+                          "train_log.jsonl", "eval.json")
+        manifest["artifacts"] = {
+            name: {"sha256": sha256_file(os.path.join(run_dir, name)),
+                   "bytes": os.path.getsize(os.path.join(run_dir, name))}
+            for name in artifact_names}
+        manifest["completion"] = {"status": "completed"}
+        manifest["sanity"] = {
+            "present": True, "passed": True, "malformed": False,
+            "checks_consistent": True,
+            "identity": {"hard_mismatches": []},
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        report = verify_run(run_dir, data_dir=data)
+        assert report["ok"] is True, report
+        assert report["issues"] == []
+        assert report["checks"]["seed"]["status"] == "pass"
+        assert report["checks"]["environment_lock"]["status"] in (
+            "pass", "warn")
+
+        with open(os.path.join(run_dir, "model.pt"), "ab") as f:
+            f.write(b"tampered")
+        report = verify_run(run_dir, data_dir=data)
+        assert report["ok"] is False
+        assert report["checks"]["artifacts"]["status"] == "fail"
+
+        legacy = dict(manifest)
+        for key in ("completion", "artifacts", "environment_lock", "sanity"):
+            legacy.pop(key, None)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(legacy, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["ok"] is True, report
+        assert report["warnings"]
+        assert verify_run(run_dir, data_dir=data, strict=True)["ok"] is False
+    print("  [ok] verify_run 通过完整 run，检测产物篡改并兼容旧清单")
