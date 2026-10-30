@@ -462,6 +462,10 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             "slope_loo_sign_stable")
         row["ruler_length_balanced"] = pair.get("balanced_contexts")
     shapley_tests = [t for t in tests if t.get("shapley_factor")]
+    # 参数化稳健性（探索性）：比较归一化 c 与原始 log max_p 两套完整
+    # 2^3 网格上的单因子边与 Shapley 归因。只有显式运行原始对照时才有
+    # 内容；缺格/协议不一致会返回可机读原因，不伪造“无差异”。
+    reparameterization = _reparameterization_analysis(runs)
     # 推理期因果病灶消融：与训练期消融回答不同的因果问题（见 lega.ablate
     # 模块文档）。独立指标家族、独立 Holm，不混入上面的变体间配对表。
     causal_tests = _ablation_lesion_records(ablations)
@@ -1286,6 +1290,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "ratio_overflow",
         "registered",
         "rel",
+        "reparameterization",
         "removal",
         "repeated",
         "repro",
@@ -1368,6 +1373,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'ruler_length': ctx["length_analysis"],
         'ppl_window_tests': ctx["ppl_window_tests"],
         'factorial_shapley': ctx["shapley_tests"],
+        'reparameterization': ctx["reparameterization"],
         'inference_factorial_shapley': ctx["inference_shapley"],
         'inference_interactions': ctx["inference_interactions"],
         'parameter_matched_control': ctx["param_control_test"],

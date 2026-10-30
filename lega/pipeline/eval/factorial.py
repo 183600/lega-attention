@@ -71,21 +71,10 @@ def _stable_factorial_interaction(cells):
     return out if math.isfinite(out) else None
 
 
-def _factorial_protocol_ok(maps, seed, metric) -> bool:
-    """一个种子的 8 个全因子格是否共享同一评测协议。
-
-    交互对比同时用到全部 8 个格；只要任一格的 split/评测窗口或 RULER
-    题面/生成预算/已评测单元不同，整条交互线就混入了非受控差异。判定
-    口径与 `_paired_comparisons` 一致：字段集合必须齐全且逐项相同，
-    缺失字段不能靠“只比较交集”蒙混过关。
-    """
-    slots = []
-    for cell in _FACTORIAL_CONTRAST_CELLS:
-        m = maps.get(cell) if isinstance(maps, dict) else None
-        slot = m.get(seed) if isinstance(m, dict) else None
-        if not isinstance(slot, dict):
-            return False
-        slots.append(slot)
+def _factorial_slots_protocol_ok(slots, metric) -> bool:
+    """一组全因子槽位是否共享同一评测协议。"""
+    if not slots:
+        return False
     if metric == "PPL":
         evals = [s.get("eval") if isinstance(s.get("eval"), dict) else {}
                  for s in slots]
@@ -110,6 +99,30 @@ def _factorial_protocol_ok(maps, seed, metric) -> bool:
             return False
     ref = protocols[0] if protocols else {}
     return all(_same_protocol_fields(ref, p) for p in protocols[1:])
+
+
+def _factorial_protocol_ok_for_cells(maps, cells, seed, metric) -> bool:
+    """指定单元格集合在一个种子上是否齐全且协议一致。"""
+    slots = []
+    for cell in cells:
+        m = maps.get(cell) if isinstance(maps, dict) else None
+        slot = m.get(seed) if isinstance(m, dict) else None
+        if not isinstance(slot, dict):
+            return False
+        slots.append(slot)
+    return _factorial_slots_protocol_ok(slots, metric)
+
+
+def _factorial_protocol_ok(maps, seed, metric) -> bool:
+    """一个种子的 8 个归一化全因子格是否共享同一评测协议。
+
+    交互对比同时用到全部 8 个格；只要任一格的 split/评测窗口或 RULER
+    题面/生成预算/已评测单元不同，整条交互线就混入了非受控差异。判定
+    口径与 `_paired_comparisons` 一致：字段集合必须齐全且逐项相同，
+    缺失字段不能靠“只比较交集”蒙混过关。
+    """
+    return _factorial_protocol_ok_for_cells(
+        maps, _FACTORIAL_CONTRAST_CELLS, seed, metric)
 
 
 def _factorial_interaction_tests(runs) -> list:
@@ -257,6 +270,80 @@ def _factorial_shapley_tests(runs) -> list:
                     "单位的 Shapley 值")
             out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
     return _apply_holm(out)
+
+
+def _reparameterization_analysis(runs) -> dict:
+    """对比归一化 c 与原始 log max_p 两种参数化下的因子归因。
+
+    该分析需要两套完整 2^3 网格：主矩阵 8 个归一化格，以及
+    ``RAW_FACTORIAL_CELLS`` 对应的原始格。两套网格在同一批种子上运行时，
+    对每条单因子边和每个 Shapley 分量计算同种子差异
+    ``D = raw − normalized``，用于检验“因子效应是否依赖参数化”。
+
+    这不是预注册确认检验，只在显式运行原始对照时输出；默认 10 变体
+    矩阵不产生该证据。缺格时返回可机读的 ``missing_variants``，不把
+    未运行伪装成“无差异”。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    normalized = {f"norm:{cell}": v
+                  for cell, v in NORMALIZED_FACTORIAL_CELLS.items()}
+    raw = {f"raw:{cell}": v
+           for cell, v in RAW_FACTORIAL_CELLS.items()}
+    all_cells = {**normalized, **raw}
+    required = sorted(set(all_cells.values()))
+    present = [v for v in required if v in runs]
+    missing = [v for v in required if v not in runs]
+    ran_raw = sorted(v for v in RAW_SPECIFIC_VARIANTS if v in runs)
+    out = {
+        "available": False,
+        "not_run": not ran_raw,
+        "required_variants": required,
+        "ran_variants": present,
+        "missing_variants": missing,
+        "metrics": {},
+        "exploratory": True,
+    }
+    if not ran_raw:
+        out["reason"] = ("未运行原始参数化对照（可用 --raw_factorial 追加）")
+        return out
+    if missing:
+        out["reason"] = ("原始/归一化全因子网格不完整，缺少变体："
+                         + "、".join(missing))
+        return out
+
+    maps = {key: _variant_seed_map(runs, v) for key, v in all_cells.items()}
+    seed_sets = [set(m) for m in maps.values()]
+    candidates = (sorted(set.intersection(*seed_sets))
+                  if seed_sets else [])
+    for metric, extractor in (
+            ("PPL", lambda slot: _ppl_of(slot.get("eval"))),
+            ("RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")))):
+        values = {}
+        for variant in required:
+            for seed, slot in _variant_seed_map(runs, variant).items():
+                value = extractor(slot) if isinstance(slot, dict) else None
+                if value is not None:
+                    values.setdefault(seed, {})[variant] = value
+        protocol_seeds = [
+            s for s in candidates
+            if _factorial_protocol_ok_for_cells(maps, all_cells, s, metric)]
+        usable = {
+            s: values[s] for s in protocol_seeds
+            if isinstance(values.get(s), dict)
+            and all(v in values[s] for v in required)}
+        result = reparameterization_analyze(usable, metric)
+        result["n_protocol_seeds"] = len(usable)
+        result["n_seeds_before_protocol_filter"] = len(candidates)
+        result["excluded_missing_or_protocol"] = (
+            len(candidates) - len(usable))
+        out["metrics"][metric] = result
+    out["available"] = any(
+        bool(metric.get("contrasts") or metric.get("shapley"))
+        for metric in out["metrics"].values()
+        if isinstance(metric, dict))
+    out["reason"] = (None if out["available"] else
+                     "没有可配对的同种子原始/归一化观测")
+    return out
 
 
 # 推理期全因子 Shapley：同一 checkpoint 上干预 2^3 个门控格，而不是重新

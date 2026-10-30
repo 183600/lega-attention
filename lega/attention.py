@@ -22,6 +22,10 @@
                      表达能力相同，用于区分“重参数化”与“额外容量”）
     lega_raw_no_len: g = sigmoid(w·q + a*log max_p + d)            （补充对照：
                      原始 log max_p 且无显式长度项）
+    lega_raw_conc_only: g = sigmoid(a*log max_p + d)               （原始参数化
+                     全因子 B 格：仅原始集中度、无查询/长度项）
+    lega_raw_no_query : g = sigmoid(a*log max_p + b*log n + d)     （原始参数化
+                     全因子 B+C 格：集中度与长度，无查询项）
     lega_detach_conc: g = sigmoid(w·q + a*detach(c) + b*log n + d) （补充对照：
                      集中度统计只作为前向特征、不向 Q/K 反传）
     null_zero     :  与 null 相同，但 value 槽固定为 0、不参与训练（补充对照：
@@ -49,7 +53,11 @@ c = log n + log max_p，若 max_p 不随 n 按 1/n 收缩，c 仍会随长度增
 “查询 + 原始最大概率对数 + 长度对数”的线性门控同属一个函数族。归一化 c
 改变的是参数化/优化几何与解释，并不增加表达能力；lega_no_len 保留 a·c，
 所以 b=0 检验的是“集中度系数与长度系数相等”，不是“去掉长度信息”。
-lega_raw / lega_raw_no_len 是为此增加的直接对照。
+lega_raw / lega_raw_no_len 是为此增加的直接对照；补齐
+lega_raw_conc_only / lega_raw_no_query 后，原始参数化也构成同构的完整
+2^3 网格（none=gate_only, A=qgate, B=raw_conc_only, C=len_only,
+AB=raw_no_len, AC=no_conc, BC=raw_no_query, ABC=raw），用于检验
+A/B/C 的主效应、交互与 Shapley 归因是否依赖 c 的归一化选择。
 
 初始时 w=a=b=0、d=2.0，g ≈ 0.88，接近标准注意力，保证训练稳定启动。
 """
@@ -76,9 +84,11 @@ VARIANTS = ("standard", "gate_only", "qgate", "null", "lega", "lega_no_len",
 # 一次额外门控运算带来的优化红利”，而不是“是否用到了 B/C 证据”。
 CONTROL_VARIANTS = ("lega_placebo",)
 # 补充对照：不进入主矩阵/默认 run，但用于回答审稿人要求的“重参数化、
-# detach 反传路径、固定零 value null”三类直接对照。它们不属于 A/B/C
-# 因子设计，因此不进入 GATE_FACTORS。
+# detach 反传路径、固定零 value null”三类直接对照。其中 raw_* 用于构成
+# 原始集中度参数化的完整 2^3（与归一化网格逐格配对），但它们不属于
+# 归一化 A/B/C 因子设计，因此不进入 GATE_FACTORS。
 SUPPLEMENTAL_VARIANTS = ("lega_raw", "lega_raw_no_len",
+                         "lega_raw_conc_only", "lega_raw_no_query",
                          "lega_detach_conc", "null_zero")
 RUNNABLE_VARIANTS = VARIANTS + CONTROL_VARIANTS + SUPPLEMENTAL_VARIANTS
 
@@ -97,6 +107,8 @@ VARIANT_CN = {
     "lega_placebo": "LEGA参数匹配安慰剂(证据=噪声)",
     "lega_raw": "LEGA原始log max_p(不归一化)",
     "lega_raw_no_len": "原始log max_p且无长度项",
+    "lega_raw_conc_only": "仅原始log max_p门控",
+    "lega_raw_no_query": "原始集中度+长度(无查询)",
     "lega_detach_conc": "集中度统计不反传到Q/K",
     "null_zero": "空注意力(固定零value)",
 }
@@ -108,18 +120,22 @@ _USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc",
 _USE_CONC = ("lega", "lega_no_len", "lega_no_query",
              "lega_conc_only",
              "lega_placebo", "lega_detach_conc")                   # a*c, c=log(n*max_j p_j)
-_USE_RAW_CONC = ("lega_raw", "lega_raw_no_len")                    # a*log max_p（不归一化）
+_USE_RAW_CONC = ("lega_raw", "lega_raw_no_len",
+                 "lega_raw_conc_only", "lega_raw_no_query")        # a*log max_p（不归一化）
 _USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
             "lega_len_only",
-            "lega_placebo", "lega_raw", "lega_detach_conc")        # log n 项
+            "lega_placebo", "lega_raw", "lega_raw_no_query",
+            "lega_detach_conc")                                    # log n 项
 # 有输出门
 _GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
           "lega_no_query", "lega_conc_only", "lega_len_only",
           "lega_placebo", "lega_raw", "lega_raw_no_len",
+          "lega_raw_conc_only", "lega_raw_no_query",
           "lega_detach_conc")
 # 门依赖注意力统计（需要 max_j p_j）
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only",
                 "lega_placebo", "lega_raw", "lega_raw_no_len",
+                "lega_raw_conc_only", "lega_raw_no_query",
                 "lega_detach_conc")
 # 固定零 value 的 null 对照：语义上仍是“空注意力”，但 value 槽不学习。
 _IS_NULL = ("null", "null_zero")

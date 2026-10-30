@@ -76,6 +76,7 @@ def _summary_part_c(**kw):
         ratio = kw["ratio"]
     if "registered" in kw:
         registered = kw["registered"]
+    reparameterization = kw.get("reparameterization")
     if "results_dir" in kw:
         results_dir = kw["results_dir"]
     if "rows" in kw:
@@ -846,6 +847,14 @@ def _summary_part_c(**kw):
                    "factorial_interactions": [
                        t for t in tests if t.get("interaction")],
                    "factorial_shapley": shapley_tests,
+                   "reparameterization": reparameterization,
+                   "reparameterization_note": (
+                       "参数化稳健性（探索性）：归一化 c=log(n*max_p) 与原始 "
+                       "log max_p 两套完整 2^3 网格上的单因子边/Shapley 对照。"
+                       "逐种子 D=raw−normalized 做配对 t 检验并 Holm 校正；"
+                       "D 显著或方向不一致表示因子归因依赖参数化，不能把 "
+                       "归一化 c 的效应直接解释为纯集中度；不显著不证明等价。"
+                       "未运行 raw 对照时 not_run=true，不得据此宣称稳健。"),
                    "factorial_shapley_note": (
                        "全因子 2^3 的 Shapley 效应分解（探索性）：PPL 在 "
                        "−log(PPL) 上分解（φ>0 降低 PPL，exp(−φ)=PPL 几何"
@@ -1003,6 +1012,7 @@ def _summary_part_c(**kw):
         "raw",
         "raw_verdict",
         "reg_ruler_pairs",
+        "reparameterization",
         "rt",
         "ruler_benefit_pp",
         "ruler_p_adj",

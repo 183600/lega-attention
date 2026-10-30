@@ -27,6 +27,11 @@ from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)
+from lega.reparameterization import (  # noqa: E402
+    NORMALIZED_CELLS as NORMALIZED_FACTORIAL_CELLS,
+    RAW_CELLS as RAW_FACTORIAL_CELLS,
+    RAW_FACTORIAL_VARIANTS, RAW_SPECIFIC_VARIANTS,
+    analyze as reparameterization_analyze)
 from lega.lengtheffect import (context_macro_means,  # noqa: E402
                                log2_slope, span_contrast)
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
@@ -83,8 +88,8 @@ PARAM_CONTROL_PAIR = ("lega", PARAM_CONTROL_VARIANT)
 # null 变体虽无 g/logit，仍应纳入；standard 无需诊断，保持跳过。
 GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
                       "lega_no_query", "lega_conc_only", "lega_len_only",
-                      "lega_raw", "lega_raw_no_len", "lega_detach_conc",
-                      "null_zero")
+                      "lega_raw", "lega_raw_no_len", "lega_raw_conc_only",
+                      "lega_raw_no_query", "lega_detach_conc", "null_zero")
 
 # RULER 逐任务分解的固定任务列表（与 lega.ruler.TASKS 一致，避免导入
 # 评测模块只为拿常量）。

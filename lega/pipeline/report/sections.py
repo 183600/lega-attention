@@ -61,6 +61,7 @@ def _summary_part_b(**kw):
         r = kw["r"]
     if "repro" in kw:
         repro = kw["repro"]
+    reparameterization = kw.get("reparameterization")
     if "results_dir" in kw:
         results_dir = kw["results_dir"]
     if "rows" in kw:
@@ -986,6 +987,8 @@ def _summary_part_b(**kw):
         md.append("⚠ 无法计算 Shapley 分解：门控内 8 格未全部运行、种子不足，"
                   "或各格评测协议不一致；此时只能参考上面的单因素边与交互表。")
 
+    md += _render_reparameterization(reparameterization)
+
     # --- 推理期因果病灶消融（探索性）：训练期消融回答“重新训练时去掉
     #     组件会怎样”，本表回答“训练好的模型推理时是否真的使用该组件”。
     md += ["", "### 推理期因果消融（权重病灶，val split；探索性）", ""]
@@ -1213,3 +1216,85 @@ def _summary_part_b(**kw):
         "worst_g",
     }
     return {k: v for k, v in locals().items() if k in _assigned}
+
+
+def _render_reparameterization(reparam):
+    """渲染归一化 c vs 原始 log max_p 的参数化稳健性（探索性）。"""
+    if not isinstance(reparam, dict) or not reparam.get("available"):
+        if not isinstance(reparam, dict) or reparam.get("not_run"):
+            return []
+        md = ["", "### 参数化稳健性（原始 log max_p vs 归一化 c；探索性）", ""]
+        reason = reparam.get("reason") or "原始/归一化网格不完整"
+        md.append("⚠ 参数化稳健性分析不可用：" + str(reason))
+        missing = reparam.get("missing_variants") or []
+        if missing:
+            md.append("")
+            md.append("缺少变体：" + "、".join(str(v) for v in missing))
+        return md
+
+    def _num(value, spec="+.4f"):
+        f = _finite_number(value)
+        return format(f, spec) if f is not None else "-"
+
+    def _ci(test):
+        ci = test.get("mean_diff_ci95")
+        return (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+                if ci else "-")
+
+    md = ["", "### 参数化稳健性（原始 log max_p vs 归一化 c；探索性）", ""]
+    md.append(
+        "归一化 c=log(n·max_p) 与原始 log max_p 属于同一线性门控函数族；"
+        "前者把 a·log n 并入 B，导致 B 与显式长度项 C 不正交。本表按同种子"
+        "配对比较两种参数化下的单因子边与 Shapley 贡献：D=原始−归一化，"
+        "PPL 的效应已定向为 −log PPL（正值=候选降低 PPL 更多），RULER 为"
+        "原始 EM 差（正值=原始参数化改善更大）。D 显著非零表示因子归因"
+        "依赖参数化，不能把归一化 c 的效应直接解释为纯集中度；D 不显著"
+        "只表示未拒绝稳健，不证明等价，须对照 MDE。")
+    metrics = reparam.get("metrics") if isinstance(
+        reparam.get("metrics"), dict) else {}
+    for metric in ("PPL", "RULER平均"):
+        result = metrics.get(metric)
+        if not isinstance(result, dict):
+            continue
+        contrasts = [t for t in (result.get("contrasts") or [])
+                     if isinstance(t, dict)]
+        shapley = [t for t in (result.get("shapley") or [])
+                   if isinstance(t, dict)]
+        if not contrasts and not shapley:
+            continue
+        summary = result.get("summary") if isinstance(
+            result.get("summary"), dict) else {}
+        md += ["", f"**{metric}**（n≈{result.get('n_protocol_seeds', '-')}；"
+              f"{summary.get('verdict', '-')}）", ""]
+        if contrasts:
+            md += ["| 因子边 | 归一化效应 | 原始效应 | 原始−归一化 [95% CI] | "
+                   "n | 种子符号一致 | p_adj(Holm) | 判定 |",
+                   "|---|---|---|---|---|---|---|---|"]
+            for t in contrasts:
+                agree = t.get("seed_sign_agreement")
+                agree_s = f"{agree:.0%}" if isinstance(agree, (int, float)) else "-"
+                md.append(
+                    f"| {t.get('factor', '-')}（{t.get('direction', '-')}） "
+                    f"| {_num(t.get('normalized_effect_mean'))} "
+                    f"| {_num(t.get('raw_effect_mean'))} "
+                    f"| {_num(t.get('mean_diff'))} {_ci(t)} "
+                    f"| {t.get('n', '-')} | {agree_s} "
+                    f"| {_num(t.get('p_adj'), '.4f')} "
+                    f"| {t.get('verdict', '-')} |")
+        if shapley:
+            md += ["", "| Shapley 因子 | 归一化 φ | 原始 φ | 原始−归一化 [95% CI] | "
+                   "n | p_adj(Holm) | 判定 |", "|---|---|---|---|---|---|---|"]
+            for t in shapley:
+                md.append(
+                    f"| {t.get('factor_label') or t.get('factor', '-')} "
+                    f"| {_num(t.get('normalized_phi_mean'))} "
+                    f"| {_num(t.get('raw_phi_mean'))} "
+                    f"| {_num(t.get('mean_diff'))} {_ci(t)} "
+                    f"| {t.get('n', '-')} "
+                    f"| {_num(t.get('p_adj'), '.4f')} "
+                    f"| {t.get('verdict', '-')} |")
+            md.append("")
+            md.append("注：φ 的符号仍为“越大越好”；效率性残差分别见 "
+                      "`normalized_efficiency_gap_max` 与 "
+                      "`raw_efficiency_gap_max`。")
+    return md

@@ -12,11 +12,51 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 ## 变体
 
-`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；其伪证据仍由绝对位置哈希得到，不能当作分布匹配的置换对照，正式结论需结合推理期 `conc_permute`/`head_permute`。补充训练对照 `lega_raw`、`lega_raw_no_len`、`lega_detach_conc`、`null_zero` 默认不运行，分别检验原始集中度/无长度项、集中度 detach 反传、固定零 value null；它们不进入 `GATE_FACTORS` 的 2^3 矩阵。
+`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；其伪证据仍由绝对位置哈希得到，不能当作分布匹配的置换对照，正式结论需结合推理期 `conc_permute`/`head_permute`。补充训练对照 `lega_raw`、`lega_raw_no_len`、`lega_raw_conc_only`、`lega_raw_no_query`、`lega_detach_conc`、`null_zero` 默认不运行，分别检验原始集中度/无长度项、原始参数化全因子格、集中度 detach 反传、固定零 value null；它们不进入 `GATE_FACTORS` 的归一化 2^3 矩阵。
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
 单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。
+
+### 参数化稳健性：归一化 c vs 原始 log max_p
+
+默认 B 因子是 $a\,c$，而 $c=\log(n\max_j p_j)$ 可展开为
+$\log\max_j p_j+\log n$。因此 Full−B（`lega_no_conc` vs `lega`）同时
+去掉了 $a\log\max_j p_j$ 与 $a\log n$，Full−C（`lega_no_len` vs `lega`）
+只去掉显式的 $b\log n$；B 与 C 在参数化上并不正交。为把“集中度”与
+“c 中的长度分量”分开，补充网格把 B 改成原始 $a\log\max_j p_j$：
+
+| 格 | 归一化参数化 | 原始参数化 |
+|---|---|---|
+| none | `gate_only` | `gate_only` |
+| A | `qgate` | `qgate` |
+| B | `lega_conc_only`（$a(\log\max p+\log n)$） | `lega_raw_conc_only`（$a\log\max p$） |
+| C | `lega_len_only` | `lega_len_only` |
+| A+B | `lega_no_len` | `lega_raw_no_len` |
+| A+C | `lega_no_conc` | `lega_no_conc` |
+| B+C | `lega_no_query` | `lega_raw_no_query` |
+| A+B+C | `lega` | `lega_raw` |
+
+两种参数化属于同一线性门控函数族，差异是参数化/优化几何与解释，不是
+表达能力。`--raw_factorial` 会追加原始网格缺的 4 个变体，与默认 10 变体
+一起训练；两套网格必须在同一批种子上完整运行，且逐格评测协议一致，才进入
+`lega/reparameterization.py` 的分析。分析对每条单因子边和每个 Shapley
+分量计算同种子差异 $D=\text{raw}-\text{normalized}$，再做配对 t 检验
+（同一指标内 Holm）：PPL 的效应先定向为 $-\log$ PPL（正值=候选降低 PPL
+更多），RULER 用原始 EM 差。结果写入 `significance.json` 的
+`reparameterization` 并在 `summary.md` 单列。
+
+解释规则：
+
+- $D$ 显著非零或方向翻转：因子归因**依赖参数化**，不能把归一化 c 的
+  效应直接写成“纯集中度证据”的贡献；必须同时报告原始网格；
+- $D$ 不显著：只能写“未检出参数化差异”，不能写“稳健等价”；需对照
+  该检验的 MDE 与种子数；
+- 原始网格缺格/协议不一致：`not_run`/`missing_variants` 显式标记，不得
+  把缺失伪装成“无差异”或默认稳健。
+
+该分析属探索性，不替代预注册的单因素确认检验；它的作用是给 B/C 归因
+加上一个可证伪的参数化敏感性边界。
 
 ### 全因子 Shapley 分解（交互感知的补充归因）
 
@@ -194,6 +234,9 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 # 追加训练期参数匹配安慰剂（lega vs lega_placebo 容量对照）
 python run_all.py --config configs/small.json --data_dir data/wikitext103 \
     --param_control
+# 追加原始集中度参数化的完整 2^3 网格（参数化稳健性）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --raw_factorial
 ```
 
 输出 `ablation_<variant>[_seed<seed>].json`：基线/各病灶的 val_loss、PPL、

@@ -807,6 +807,8 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
         # 补充对照：raw 与归一化版本使用同一组 (w, a, b, d) 形状。
         "lega_raw": d_head + 3,
         "lega_raw_no_len": d_head + 2,
+        "lega_raw_conc_only": 2,      # a, d（原始 log max_p，无长度/查询）
+        "lega_raw_no_query": 3,       # a, b, d（原始 log max_p + log n）
         "lega_detach_conc": d_head + 3,
         # 固定零 value 只保留可学习的 null 键（value 是 buffer）。
         "null_zero": d_head,

@@ -18,6 +18,12 @@ def main():
                         "FLOPs 与 lega 相同，但 B/C 证据替换为确定性噪声；"
                         "汇总页给出 lega vs lega_placebo 的容量对照。"
                         "默认关闭（不影响主实验规模）")
+    p.add_argument("--raw_factorial", action="store_true",
+                   help="追加原始集中度参数化的完整 2^3 对照（用 a*log max_p "
+                        "替代 a*log(n*max_p)），与主矩阵的归一化网格逐格配对；"
+                        "汇总页给出参数化稳健性（单因子边与 Shapley）分析。"
+                        "默认关闭（需额外训练 raw_conc_only/raw_no_query/"
+                        "raw_no_len/raw 等补充变体）")
     p.add_argument("--seeds", default=None,
                    help="逗号分隔的随机种子；默认取配置 seeds（冒烟模式仅取首个）")
     p.add_argument("--smoke", action="store_true")
@@ -108,6 +114,10 @@ def main():
                 + ", ".join(RUNNABLE_VARIANTS) + "）")
     if args.param_control and PARAM_CONTROL_VARIANT not in variants:
         variants.append(PARAM_CONTROL_VARIANT)
+    if args.raw_factorial:
+        for v in RAW_FACTORIAL_VARIANTS:
+            if v not in variants:
+                variants.append(v)
     invalid = sorted(set(variants) - set(RUNNABLE_VARIANTS))
     if invalid:
         p.error(f"未知变体: {', '.join(invalid)}；可选: "

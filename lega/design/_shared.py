@@ -71,7 +71,8 @@ _PARAM_CONTROL_VARIANT = "lega_placebo"
 _DEFAULT_GATED_FOR_ANALYSIS = (
     "lega", "qgate", "null", "lega_no_len", "lega_no_conc",
     "lega_no_query", "lega_conc_only", "lega_len_only",
-    "lega_raw", "lega_raw_no_len", "lega_detach_conc", "null_zero",
+    "lega_raw", "lega_raw_no_len", "lega_raw_conc_only",
+    "lega_raw_no_query", "lega_detach_conc", "null_zero",
 )
 
 # 精确 McNemar 功效的规模上限：每增加一个 n 要枚举不一致数 m 与条件拒绝域，
