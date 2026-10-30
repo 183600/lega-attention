@@ -203,12 +203,148 @@ def _audit_reparameterization_contrasts(normalized, problems):
     return audited
 
 
+def _audit_single_factor_pair_table(contrasts, problems):
+    """核对派生配对表与已声明的单因素边完全一致。
+
+    ``SINGLE_FACTOR_PAIRS`` 是汇总/报告实际消费的配对集合；它必须由
+    ``SINGLE_FACTOR_CONTRASTS`` 逐条派生，不能手工增删。若表里混入
+    “B-only vs Full”这类多因子对比，或漏掉一条已审计边，审计必须在
+    运行期显形，而不是让组件归因在别处静默失真。
+    """
+    raw_pairs = globals().get("SINGLE_FACTOR_PAIRS")
+    if (not isinstance(raw_pairs, (tuple, list))
+            or isinstance(raw_pairs, str)):
+        problems.append("SINGLE_FACTOR_PAIRS 必须是对比序列")
+        return []
+    seen = set()
+    pairs = []
+    for entry in raw_pairs:
+        if (not isinstance(entry, (tuple, list)) or len(entry) != 2
+                or not all(isinstance(x, str) and x for x in entry)):
+            problems.append(f"单因素对比对结构非法：{entry!r}")
+            continue
+        candidate, reference = entry
+        pair = (candidate, reference)
+        if candidate == reference:
+            problems.append(
+                f"单因素对比对两侧相同：{candidate} vs {reference}")
+            continue
+        if pair in seen:
+            problems.append(
+                f"重复的单因素对比对：{candidate} vs {reference}")
+            continue
+        seen.add(pair)
+        if single_factor_change(candidate, reference) is None:
+            problems.append(
+                f"单因素对比对 {candidate} vs {reference} 实际不改变"
+                "恰好一个 A/B/C 因子")
+            continue
+        pairs.append(pair)
+    expected = {(c["candidate"], c["reference"]) for c in contrasts}
+    missing = expected - seen
+    extra = seen - expected
+    if missing:
+        problems.append(
+            "SINGLE_FACTOR_PAIRS 缺少已声明对比："
+            + ", ".join(f"{c} vs {r}" for c, r in sorted(missing)))
+    if extra:
+        problems.append(
+            "SINGLE_FACTOR_PAIRS 含未声明对比："
+            + ", ".join(f"{c} vs {r}" for c, r in sorted(extra)))
+    return pairs
+
+
+def _audit_inference_permutation_lesions(problems):
+    """核对 A/B/C 的分布匹配置换病灶各自只干预一个证据通道。
+
+    ``query_permute/conc_permute/len_permute`` 是推理期安慰剂：它们不修改
+    参数，只把对应证据沿序列维错位。若映射把某个因子指到另一个通道，
+    或让同一病灶承担多个因子，报告就会把“位置证据的因果作用”归错组件，
+    因此这里按病灶 kind / requires / params 逐项核对。
+    """
+    entries = globals().get("PERMUTATION_LESION_FACTORS")
+    if (not isinstance(entries, (tuple, list))
+            or isinstance(entries, str)):
+        problems.append("PERMUTATION_LESION_FACTORS 必须是病灶映射序列")
+        return []
+    lesion_by_id = globals().get("ABLATION_LESION_BY_ID")
+    if not isinstance(lesion_by_id, dict):
+        problems.append("LESION_BY_ID 必须是病灶映射")
+        return []
+    expected = {
+        "A": ("query_permute", "query"),
+        "B": ("conc_permute", "conc"),
+        "C": ("len_permute", "len"),
+    }
+    seen_factors = set()
+    seen_ids = set()
+    audited = []
+    for entry in entries:
+        if (not isinstance(entry, (tuple, list)) or len(entry) != 3
+                or not all(isinstance(x, str) for x in entry)):
+            problems.append(f"单因素置换病灶定义结构非法：{entry!r}")
+            continue
+        factor, lesion_id, capability = entry
+        if factor not in expected:
+            problems.append(
+                f"单因素置换病灶的因子非法：{factor!r}")
+            continue
+        if factor in seen_factors:
+            problems.append(f"重复的单因素置换因子：{factor}")
+        seen_factors.add(factor)
+        if lesion_id in seen_ids:
+            problems.append(
+                f"置换病灶 {lesion_id!r} 承担多个单因子映射")
+        seen_ids.add(lesion_id)
+        expected_kind, expected_capability = expected[factor]
+        if capability != expected_capability:
+            problems.append(
+                f"置换病灶 {lesion_id!r} 声明为 {factor}，但能力为 "
+                f"{capability!r}，应为 {expected_capability!r}")
+        spec = lesion_by_id.get(lesion_id)
+        if not isinstance(spec, dict):
+            problems.append(f"置换病灶 {lesion_id!r} 未定义")
+            continue
+        if spec.get("kind") != expected_kind:
+            problems.append(
+                f"置换病灶 {lesion_id!r} 声明为单因素 {factor}，kind 应为 "
+                f"{expected_kind!r}，实际 {spec.get('kind')!r}")
+        requires = spec.get("requires")
+        if (not isinstance(requires, (tuple, list, set, frozenset))
+                or not all(isinstance(x, str) for x in requires)):
+            problems.append(f"置换病灶 {lesion_id!r} 的 requires 结构非法")
+        elif set(requires) != {expected_capability}:
+            problems.append(
+                f"置换病灶 {lesion_id!r} 依赖 {sorted(set(requires)) or '无'}，"
+                f"单因素 {factor} 应只依赖 {expected_capability}")
+        params = spec.get("params")
+        if (not isinstance(params, (tuple, list, set, frozenset))
+                or not all(isinstance(x, str) for x in params)):
+            problems.append(f"置换病灶 {lesion_id!r} 的 params 结构非法")
+        elif params:
+            problems.append(
+                f"置换病灶 {lesion_id!r} 不应清零参数，实际为 "
+                f"{sorted(set(params))}")
+        if spec.get("factorial_cell") is True:
+            problems.append(
+                f"置换病灶 {lesion_id!r} 不应标记为全因子格")
+        audited.append({"factor": factor, "lesion": lesion_id,
+                        "capability": capability,
+                        "kind": expected_kind})
+    missing = set(expected) - seen_factors
+    if missing:
+        problems.append(
+            "缺少单因素置换病灶："
+            + ", ".join(sorted(missing)))
+    return audited
+
+
 def _audit_inference_single_factor_design(problems):
     """核对推理期单病灶/活动匹配/2^3 格仍然只对应已声明的单因子。"""
     lesion_by_id = globals().get("ABLATION_LESION_BY_ID")
     if not isinstance(lesion_by_id, dict):
         problems.append("LESION_BY_ID 必须是病灶映射")
-        return [], []
+        return [], [], []
     pairs = globals().get("MATCHED_LESION_PAIRS")
     if (not isinstance(pairs, (tuple, list)) or isinstance(pairs, str)):
         problems.append("MATCHED_LESION_PAIRS 必须是配对序列")
@@ -242,6 +378,8 @@ def _audit_inference_single_factor_design(problems):
             problems.append(f"活动匹配病灶 {matched_id!r} 未定义")
             continue
         expected_params = {_FACTOR_PARAM[factor]}
+        expected_capability = {"A": "query", "B": "conc",
+                               "C": "len"}[factor]
         for label, lid, spec in (
                 ("原始病灶", raw_id, raw_spec),
                 ("活动匹配病灶", matched_id, matched_spec)):
@@ -257,6 +395,15 @@ def _audit_inference_single_factor_design(problems):
                 problems.append(
                     f"{label} {lid!r} 声明为单因素 {factor}，实际清零 "
                     f"{sorted(set(params)) or '无'}")
+            requires = spec.get("requires")
+            if (not isinstance(requires, (tuple, list, set, frozenset))
+                    or not all(isinstance(x, str) for x in requires)):
+                problems.append(f"{label} {lid!r} 的 requires 结构非法")
+            elif set(requires) != {expected_capability}:
+                problems.append(
+                    f"{label} {lid!r} 声明为单因素 {factor}，但依赖 "
+                    f"{sorted(set(requires)) or '无'}，应为 "
+                    f"{expected_capability}")
         if raw_spec.get("kind") != "zero":
             problems.append(f"原始病灶 {raw_id!r} 不是单因子清零病灶")
         if matched_spec.get("kind") != "zero_matched":
@@ -282,10 +429,12 @@ def _audit_inference_single_factor_design(problems):
         problems.append(
             "缺少活动匹配单因素病灶："
             + ", ".join(sorted(missing_factors)))
+    permutation_lesions = _audit_inference_permutation_lesions(
+        problems)
     cells = globals().get("INFERENCE_FACTORIAL_CELLS")
     if not isinstance(cells, dict):
         problems.append("INFERENCE_FACTORIAL_CELLS 必须是 cell -> 病灶映射")
-        return matched, []
+        return matched, permutation_lesions, []
     audited_cells = []
     seen_subsets = set()
     seen_lesions = set()
@@ -354,7 +503,7 @@ def _audit_inference_single_factor_design(problems):
             + "；多出 "
             + (", ".join(sorted("".join(sorted(s)) or "none"
                                 for s in extra)) or "无"))
-    return matched, audited_cells
+    return matched, permutation_lesions, audited_cells
 
 
 def changed_gate_factors(candidate, reference):
@@ -569,6 +718,11 @@ def single_factor_audit():
             "存在非 A/B/C 单因素声明的对比："
             + ", ".join(f"{factor}/{direction}"
                         for factor, direction in sorted(extra)))
+    # 汇总/报告实际消费的配对表必须与已声明的 6 条边逐项一致；否则
+    # 手工增删 SINGLE_FACTOR_PAIRS 就能让多因子对比混进汇总配对表。
+    single_factor_pairs = _audit_single_factor_pair_table(
+        contrasts, problems)
+    audited_pairs = set(single_factor_pairs)
     # 组件判定实际消费的检验对也必须落在已审计表内；否则改 COMPONENT_TESTS
     # 就能绕开审计去使用多因子对比（运行期而非仅测试期拦截）。
     audited_edges = {(c["candidate"], c["reference"]):
@@ -604,6 +758,10 @@ def single_factor_audit():
                 problems.append(
                     f"组件 {name!r} 的{label}对比结构非法：{pair!r}")
                 continue
+            if tuple(pair) not in audited_pairs:
+                problems.append(
+                    f"组件 {name!r} 的{label}对比 {pair!r} 不在"
+                    " SINGLE_FACTOR_PAIRS 中")
             edge = audited_edges.get(tuple(pair))
             if edge is None:
                 problems.append(
@@ -624,19 +782,21 @@ def single_factor_audit():
             "缺少组件检验：" + ", ".join(sorted(missing_components)))
     reparameterization_contrasts = _audit_reparameterization_contrasts(
         normalized, problems)
-    matched_lesions, inference_cells = (
+    matched_lesions, permutation_lesions, inference_cells = (
         _audit_inference_single_factor_design(problems))
     return {"ok": not problems, "problems": problems,
             "contrasts": contrasts,
+            "pairs": [list(p) for p in single_factor_pairs],
             "factors": {v: sorted(f) for v, f in sorted(normalized.items())},
             "reparameterization_contrasts": reparameterization_contrasts,
             "inference_matched_lesions": matched_lesions,
+            "inference_permutation_lesions": permutation_lesions,
             "inference_factorial_cells": inference_cells,
             "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
                      "X-only vs gate_only；整体对比（vs standard、LEGA vs "
                      "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
                      "归一化/原始参数化的单因子边，以及推理期单病灶、活动"
-                     "匹配和 2^3 格的因子映射。")}
+                     "匹配、A/B/C 分布匹配置换和 2^3 格的因子映射。")}
 
 
 def build_comparison_pairs(runs, registered=None):

@@ -248,6 +248,44 @@ def test_single_factor_audit_requires_complete_and_audited_contrasts():
     print("  [ok] 单因素审计拒绝缺失/重复对比与绕过审计表的组件检验")
 
 
+def test_single_factor_audit_rejects_broken_pair_table():
+    """汇总实际消费的 SINGLE_FACTOR_PAIRS 也必须与声明边逐项一致。"""
+    audit = single_factor_audit()
+    assert audit["ok"] and len(audit["pairs"]) == 6, audit
+
+    with mock.patch("lega.pipeline.common.SINGLE_FACTOR_PAIRS",
+                    SINGLE_FACTOR_PAIRS[:-1]):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("SINGLE_FACTOR_PAIRS 缺少已声明对比" in p
+                   for p in audit["problems"]), audit
+
+    extra = (("lega_conc_only", "lega"),
+             ("lega_len_only", "lega"))
+    with mock.patch("lega.pipeline.common.SINGLE_FACTOR_PAIRS",
+                    SINGLE_FACTOR_PAIRS + extra):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("实际不改变恰好一个" in p
+                   for p in audit["problems"]), audit
+
+    rest = tuple(p for p in SINGLE_FACTOR_PAIRS
+                 if p != ("lega_no_query", "lega"))
+    with mock.patch("lega.pipeline.common.SINGLE_FACTOR_PAIRS", rest):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("不在 SINGLE_FACTOR_PAIRS 中" in p
+                   for p in audit["problems"]), audit
+
+    with mock.patch("lega.pipeline.common.SINGLE_FACTOR_PAIRS",
+                    SINGLE_FACTOR_PAIRS + (SINGLE_FACTOR_PAIRS[0],)):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("重复的单因素对比对" in p
+                   for p in audit["problems"]), audit
+    print("  [ok] 单因素配对表拒绝漏项/多因子/组件缺项/重复项")
+
+
 def test_single_factor_audit_rejects_broken_design_metadata():
     """2^3 设计元数据、方向与组件检验本身损坏时，审计也必须显式失败。"""
     # 8 个变体名都在，但两个变体拥有相同因子集合：某个因子格实际不存在。

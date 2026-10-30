@@ -24,7 +24,7 @@ from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER,
-                         MATCHED_LESION_PAIRS)
+                         MATCHED_LESION_PAIRS, PERMUTATION_LESION_FACTORS)
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)

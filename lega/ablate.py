@@ -260,6 +260,16 @@ MATCHED_LESION_PAIRS = (
 )
 MATCHED_LESION_IDS = tuple(m for _raw, m, _factor in MATCHED_LESION_PAIRS)
 
+# 分布匹配置换病灶 -> 单一证据通道（因子, 病灶, 所需门控能力）。
+# 每个置换只错位一个位置证据通道：query_permute 只动 w·q，conc_permute
+# 只动 c，len_permute 只动 log n。三者是 A/B/C 的单因素推理期安慰剂，
+# 不能把多个通道一起置换；运行期审计会核对这里的映射与病灶定义一致。
+PERMUTATION_LESION_FACTORS = (
+    ("A", "query_permute", "query"),
+    ("B", "conc_permute", "conc"),
+    ("C", "len_permute", "len"),
+)
+
 # 同一 checkpoint 内的 2^3 全因子干预设计：cell -> 病灶 id。
 # "ABC" 是正常基线（不施加病灶），None 表示调用方读取 baseline 指标。
 # 映射与 lega.factorial.CELL_ORDER 一致，供推理期 Shapley 分解复用。

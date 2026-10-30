@@ -17,8 +17,8 @@ import torch
 from lega.attention import _permute_positions
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS, LESION_BY_ID,
                          LESION_ORDER, MATCHED_LESION_IDS,
-                         MATCHED_LESION_PAIRS, apply_lesion,
-                         gate_capabilities, gate_head_means,
+                         MATCHED_LESION_PAIRS, PERMUTATION_LESION_FACTORS,
+                         apply_lesion, gate_capabilities, gate_head_means,
                          gate_lesion_controls, lesion_applicability,
                          restore_gate_params, run_ablation,
                          snapshot_gate_params, _finite_or_none,
@@ -1055,6 +1055,8 @@ def test_single_factor_audit_covers_inference_lesion_mappings():
     assert audit["ok"] and not audit["problems"], audit
     assert {p["factor"] for p in audit["inference_matched_lesions"]} == {
         "A", "B", "C"}
+    assert {p["factor"] for p in audit["inference_permutation_lesions"]} == {
+        "A", "B", "C"}
     assert len(audit["inference_factorial_cells"]) == 8
 
     bad_pairs = (("no_query", "no_query_matched", "B"),
@@ -1064,6 +1066,38 @@ def test_single_factor_audit_covers_inference_lesion_mappings():
         assert not audit["ok"], audit
         assert any("实际清零" in p or "matched_factor" in p
                    for p in audit["problems"]), audit
+
+    bad_permute = (("A", "conc_permute", "conc"),
+                   ) + tuple(PERMUTATION_LESION_FACTORS[1:])
+    with mock.patch("lega.pipeline.common.PERMUTATION_LESION_FACTORS",
+                    bad_permute):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("kind 应为" in p or "能力为" in p
+                   for p in audit["problems"]), audit
+
+    missing_permute = tuple(p for p in PERMUTATION_LESION_FACTORS
+                            if p[0] != "B")
+    with mock.patch("lega.pipeline.common.PERMUTATION_LESION_FACTORS",
+                    missing_permute):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("缺少单因素置换病灶" in p for p in audit["problems"]), audit
+
+    bad_lesions = {k: dict(v) for k, v in LESION_BY_ID.items()}
+    bad_lesions["query_permute"]["requires"] = ("query", "conc")
+    with mock.patch("lega.pipeline.common.ABLATION_LESION_BY_ID",
+                    bad_lesions):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("应只依赖 query" in p for p in audit["problems"]), audit
+    bad_lesions = {k: dict(v) for k, v in LESION_BY_ID.items()}
+    bad_lesions["conc_permute"]["params"] = ("gate_a",)
+    with mock.patch("lega.pipeline.common.ABLATION_LESION_BY_ID",
+                    bad_lesions):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("不应清零参数" in p for p in audit["problems"]), audit
 
     bad_cells = dict(INFERENCE_FACTORIAL_CELLS, A="no_evidence")
     with mock.patch("lega.pipeline.common.INFERENCE_FACTORIAL_CELLS",
