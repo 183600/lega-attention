@@ -1287,6 +1287,7 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "inputs": {
             "config_file": config_file,
             "config_sha256": config_sha256,
+            "analysis_code": _analysis_code_fingerprint(),
             "variants": list(variants),
             "seeds": list(seeds),
             "n_seeds": n_seeds,

@@ -188,6 +188,84 @@ def _stage_enabled(stages, key: str) -> bool:
     return value is not False
 
 
+def _analysis_code_audit(planned: dict, current: dict) -> dict:
+    """比较计划落盘时与汇总时的分析代码/配置树身份。"""
+    planned = _as_dict(planned)
+    current = _as_dict(current)
+    out = {
+        "checked": False, "matches": None, "reason": None,
+        "planned_digest": planned.get("digest"),
+        "current_digest": current.get("digest"),
+        "changed_files": [], "added_files": [], "removed_files": [],
+        "n_changed": 0, "n_added": 0, "n_removed": 0,
+    }
+    planned_digest = planned.get("digest")
+    if not isinstance(planned_digest, str) or not planned_digest:
+        out["reason"] = "legacy_plan_without_code_fingerprint"
+        return out
+    current_digest = current.get("digest")
+    if not isinstance(current_digest, str) or not current_digest:
+        out["reason"] = "current_code_fingerprint_unavailable"
+        out["error"] = current.get("error")
+        return out
+    out["checked"] = True
+    if planned_digest == current_digest:
+        out["matches"] = True
+        out["reason"] = "unchanged"
+        return out
+    out["matches"] = False
+    out["reason"] = "digest_changed"
+    planned_map = {}
+    for e in _as_list(planned.get("entries")):
+        if isinstance(e, dict) and isinstance(e.get("path"), str):
+            planned_map[e["path"]] = e.get("sha256")
+    current_map = {}
+    for e in _as_list(current.get("entries")):
+        if isinstance(e, dict) and isinstance(e.get("path"), str):
+            current_map[e["path"]] = e.get("sha256")
+    changed = sorted(p for p in set(planned_map) & set(current_map)
+                     if planned_map[p] != current_map[p])
+    added = sorted(set(current_map) - set(planned_map))
+    removed = sorted(set(planned_map) - set(current_map))
+    out.update({
+        "changed_files": changed[:20], "added_files": added[:20],
+        "removed_files": removed[:20],
+        "n_changed": len(changed), "n_added": len(added),
+        "n_removed": len(removed),
+    })
+    return out
+
+
+def _provenance_drift_audit(repro: dict) -> dict:
+    """读取实验期间代码/数据身份漂移；缺失时明确标为未核对。"""
+    repro = _as_dict(repro)
+    tracking = _as_dict(repro.get("tracking_end"))
+    drift = _as_dict(tracking.get("drift"))
+    out = {"checked": False, "changed": None, "reason": None,
+           "mismatches": [], "unknown": []}
+    if not drift:
+        if repro.get("status") == "completed_with_drift":
+            out["changed"] = True
+            out["reason"] = "status_completed_with_drift"
+        else:
+            out["reason"] = "tracking_end_missing"
+        return out
+    changed = drift.get("changed")
+    out["mismatches"] = [m for m in _as_list(drift.get("mismatches"))
+                         if isinstance(m, dict)]
+    out["unknown"] = _as_text_list(drift.get("unknown"))
+    if changed is True:
+        out.update({"checked": True, "changed": True,
+                    "reason": "drift_detected"})
+    elif changed is False:
+        out.update({"checked": True, "changed": False,
+                    "reason": ("no_drift_some_unknown" if out["unknown"]
+                               else "no_drift")})
+    else:
+        out["reason"] = "drift_flag_missing"
+    return out
+
+
 def design_conformance(plan: dict, repro: dict, runs: dict,
                        audit: dict = None, stages: dict = None) -> dict:
     """核对“先验设计计划”与本次实际 run 的一致性。
@@ -249,9 +327,32 @@ def design_conformance(plan: dict, repro: dict, runs: dict,
             "对应旧配置，不据此核对/降级")
         return out
 
+    # 启动时 repro.json 已记录计划摘要；汇总时磁盘上的 design_plan.json 若
+    # 与之不同，说明计划在结果产生后被改写。此时后续代码冻结即使“通过”
+    # 也只是对照了改写后的计划，不能作为先验设计证据。
+    run_plan_digest = _as_dict(repro.get("design")).get("plan_digest")
+    file_plan_digest = plan.get("plan_digest")
+    digest_checked = (
+        isinstance(run_plan_digest, str) and bool(run_plan_digest)
+        and isinstance(file_plan_digest, str) and bool(file_plan_digest))
+    out["plan_integrity"] = {
+        "checked": digest_checked,
+        "matches": (run_plan_digest == file_plan_digest
+                    if digest_checked else None),
+        "run_plan_digest": run_plan_digest,
+        "file_plan_digest": file_plan_digest,
+    }
+    out["plan_integrity_gate"] = (
+        digest_checked and run_plan_digest != file_plan_digest)
+
     pop = analysis_population(plan, runs)
     out["population"] = pop
     out["checked"] = True
+    if out["plan_integrity_gate"]:
+        out["problems"].append(
+            "design_plan.json 的 plan_digest 与 repro.json 记录的启动时摘要"
+            "不一致：计划可能在结果产生后被改写，分析人群/设计证据不可信；"
+            "确认性判定降级为探索性")
     if not pop["complete_eval"]:
         out["problems"].append(
             f"计划内 eval 单元缺失 {len(pop['missing_eval'])} 个："
@@ -315,6 +416,53 @@ def design_conformance(plan: dict, repro: dict, runs: dict,
         out["warnings"].append(
             f"{endpoint} 端点相关确认性判定将降级；其他端点不受此特定"
             "检查影响")
+
+    # --- 代码冻结：计划落盘后分析代码/配置不得再变。旧计划没有指纹字段时
+    # 保持兼容（不降级），但必须显式标记“未核对”，不能用未记录冒充未变化。
+    planned_code = _as_dict(inputs.get("analysis_code"))
+    current_code = (_analysis_code_fingerprint()
+                    if planned_code.get("digest") else {})
+    code_audit = _analysis_code_audit(planned_code, current_code)
+    out["analysis_code"] = code_audit
+    out["code_freeze_gate"] = code_audit.get("matches") is False
+    if out["code_freeze_gate"]:
+        changed = code_audit.get("changed_files") or []
+        extra = (f"；变更文件示例：{', '.join(changed[:5])}"
+                 if changed else "")
+        out["problems"].append(
+            "分析代码/配置树在计划落盘后发生变化（代码冻结失败）："
+            f"{str(code_audit.get('planned_digest'))[:12]} -> "
+            f"{str(code_audit.get('current_digest'))[:12]}"
+            f"（变更 {code_audit.get('n_changed', 0)}、新增 "
+            f"{code_audit.get('n_added', 0)}、删除 "
+            f"{code_audit.get('n_removed', 0)} 个文件）{extra}；"
+            "确认性判定降级为探索性")
+    elif code_audit.get("checked") is not True:
+        out["warnings"].append(
+            "分析代码冻结未核对（"
+            + str(code_audit.get("reason") or "unknown")
+            + "）：计划未记录指纹或当前指纹不可用；不据此降级")
+
+    # --- 实验期间漂移：开始时/结束时的 git/工作区/源码树/数据不一致时，
+    # 结果不能声称对应单一版本，确认性判定同样降级。
+    drift_audit = _provenance_drift_audit(repro)
+    out["provenance_drift"] = drift_audit
+    out["provenance_drift_gate"] = drift_audit.get("changed") is True
+    if out["provenance_drift_gate"]:
+        fields = []
+        for m in drift_audit.get("mismatches", []):
+            fields.append(str(m.get("field")))
+        detail = "；".join(f for f in fields if f) or "unknown"
+        out["problems"].append(
+            "实验期间代码/数据身份发生变化（漂移字段："
+            + detail + "）：该轮结果不能声称全程对应单一版本，"
+            "确认性判定降级为探索性")
+    elif drift_audit.get("checked") is not True:
+        out["warnings"].append(
+            "实验期间代码/数据漂移未核对（"
+            + str(drift_audit.get("reason") or "unknown")
+            + "）：仅表示缺少可核对记录，不等于未发生变化")
+
     out["in_plan"] = not out["problems"]
     return out
 
@@ -363,14 +511,38 @@ def apply_design_gate(hyp_eval, conformance: dict, plan: dict = None):
     inputs = _as_dict(plan.get("inputs"))
     plan_variants = [str(v) for v in _as_list(inputs.get("variants"))]
     checked = conf.get("checked") is True
-    global_fail = (checked and conf.get("global_plan_gate") is True)
-    global_reason = (
-        "先验设计检查失败："
-        + "；".join(str(f.get("detail")) for f in
-                   _as_list(conf.get("plan_failures"))
-                   if isinstance(f, dict)
-                   and f.get("id") in GLOBAL_PLAN_FAILURE_IDS)
-        if global_fail else "")
+    global_reasons = []
+    if checked and conf.get("global_plan_gate") is True:
+        global_reasons.append(
+            "先验设计检查失败："
+            + "；".join(str(f.get("detail")) for f in
+                       _as_list(conf.get("plan_failures"))
+                       if isinstance(f, dict)
+                       and f.get("id") in GLOBAL_PLAN_FAILURE_IDS))
+    if checked and conf.get("plan_integrity_gate") is True:
+        global_reasons.append(
+            "design_plan.json 与启动时 repro.json 记录的计划摘要不一致"
+            "（计划在结果产生后被改写）；该确认性判定降级为探索性")
+    if checked and conf.get("code_freeze_gate") is True:
+        code = _as_dict(conf.get("analysis_code"))
+        global_reasons.append(
+            "分析代码/配置树在计划落盘后发生变化（代码冻结失败："
+            f"变更 {code.get('n_changed', 0)}、新增 "
+            f"{code.get('n_added', 0)}、删除 "
+            f"{code.get('n_removed', 0)} 个文件）；"
+            "该确认性判定降级为探索性")
+    if checked and conf.get("provenance_drift_gate") is True:
+        prov = _as_dict(conf.get("provenance_drift"))
+        fields = [str(m.get("field")) for m in
+                  _as_list(prov.get("mismatches"))
+                  if isinstance(m, dict) and m.get("field")]
+        global_reasons.append(
+            "实验期间代码/数据身份发生变化（漂移字段："
+            + ("、".join(fields) if fields else "unknown")
+            + "）；该轮结果不能声称全程对应单一版本，"
+            "该确认性判定降级为探索性")
+    global_fail = bool(global_reasons)
+    global_reason = "；".join(global_reasons)
     for h in hyp_eval:
         if not isinstance(h, dict):
             continue
@@ -717,6 +889,56 @@ def render_design_section(plan: dict, conformance: dict = None,
             f"- 计划内单元格 {pop.get('expected_cells')} 个；"
             f"实际有 eval 产物 {pop.get('observed_eval_cells')} 个；"
             f"完整={pop.get('complete_eval')}")
+        integrity = _as_dict(conf.get("plan_integrity"))
+        if integrity.get("matches") is False:
+            md.append(
+                "- ❌ 计划完整性失败：`design_plan.json` 的 plan_digest 与"
+                "启动时 `repro.json` 记录不一致，计划可能在结果产生后被"
+                "改写；确认性判定已降级。")
+        code = _as_dict(conf.get("analysis_code"))
+        if code:
+            if code.get("matches") is True:
+                md.append(
+                    "- ✅ 分析代码冻结：自计划落盘后未变化（digest "
+                    f"`{str(code.get('current_digest'))[:12]}`）。")
+            elif code.get("matches") is False:
+                files = _as_text_list(code.get("changed_files"))
+                md.append(
+                    "- ❌ 分析代码冻结失败：计划落盘后代码/配置已变化（"
+                    f"变更 {code.get('n_changed', 0)}、新增 "
+                    f"{code.get('n_added', 0)}、删除 "
+                    f"{code.get('n_removed', 0)} 个文件"
+                    + (f"；示例 {', '.join(files[:5])}" if files else "")
+                    + "）；确认性判定已降级。")
+            else:
+                md.append(
+                    "- ⚠ 分析代码冻结未核对（"
+                    + str(code.get("reason") or "unknown")
+                    + "）：不能把“未记录”当成“未变化”。")
+        prov = _as_dict(conf.get("provenance_drift"))
+        if prov:
+            if prov.get("changed") is True:
+                fields = [str(m.get("field")) for m in
+                          _as_list(prov.get("mismatches"))
+                          if isinstance(m, dict) and m.get("field")]
+                md.append(
+                    "- ❌ 实验期间代码/数据身份漂移（"
+                    + ("、".join(fields) if fields else "unknown")
+                    + "）：结果不能声称全程对应单一版本，确认性判定已降级。")
+            elif prov.get("checked") is True:
+                unknown = _as_text_list(prov.get("unknown"))
+                if unknown:
+                    md.append(
+                        "- ⚠ 实验期间代码/数据身份：已核对字段未漂移，但 "
+                        + "、".join(unknown)
+                        + " 未核对；不能把部分核对当成全部一致。")
+                else:
+                    md.append("- ✅ 实验期间代码/数据身份未漂移。")
+            else:
+                md.append(
+                    "- ⚠ 实验期间代码/数据漂移未核对（"
+                    + str(prov.get("reason") or "unknown")
+                    + "）：缺少可核对记录不等于未发生变化。")
         if conf.get("problems"):
             for p in _as_text_list(conf.get("problems"))[:5]:
                 md.append(f"- ❌ {p}")

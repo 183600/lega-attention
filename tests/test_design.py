@@ -305,6 +305,81 @@ def test_analysis_population_and_conformance():
     print("  [ok] 分析人群/设计符合性：缺失单元与计划错配均显形")
 
 
+def test_code_freeze_and_provenance_drift_gate():
+    """计划落盘后改分析代码/实验期间漂移都必须显式降级。"""
+    plan = _plan(seeds=(1, 2, 3))
+    code = plan["inputs"]["analysis_code"]
+    assert isinstance(code.get("digest"), str) and code["digest"]
+    assert isinstance(code.get("entries"), list) and code["entries"]
+    runs = {
+        v: {s: {"eval": {}, "ruler": {}, "analysis": {}}
+            for s in (1, 2, 3)}
+        for v in plan["inputs"]["variants"]
+    }
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False,
+             "design": {"plan_digest": plan["plan_digest"]},
+             "tracking_end": {"drift": {
+                 "checked": {"source_tree_digest": True},
+                 "unknown": [], "changed": False, "mismatches": []}}}
+    conf = design_conformance(plan, repro, runs)
+    assert conf["analysis_code"]["matches"] is True
+    assert conf["code_freeze_gate"] is False
+    assert conf["provenance_drift_gate"] is False
+    assert conf["plan_integrity"]["matches"] is True
+    assert conf["in_plan"] is True
+
+    # 模拟计划落盘后改代码：digest 与逐文件条目都不再匹配。
+    tampered = json.loads(json.dumps(plan))
+    tampered["inputs"]["analysis_code"]["digest"] = "0" * 16
+    tampered["inputs"]["analysis_code"]["entries"][0]["sha256"] = "f" * 64
+    repro_drift = dict(repro, tracking_end={"drift": {
+        "checked": {"source_tree_digest": False},
+        "unknown": [],
+        "changed": True,
+        "mismatches": [{"field": "source_tree_digest",
+                        "start": "a", "end": "b"}]}})
+    conf2 = design_conformance(tampered, repro_drift, runs)
+    assert conf2["checked"] is True
+    assert conf2["code_freeze_gate"] is True
+    assert conf2["provenance_drift_gate"] is True
+    assert conf2["analysis_code"]["n_changed"] >= 1
+    assert conf2["in_plan"] is False
+    md = "\n".join(render_design_section(tampered, conf2))
+    assert "分析代码冻结失败" in md and "身份漂移" in md
+    hyps = [{"id": "H1", "metric": "PPL", "candidate": "lega",
+             "reference": "standard", "confirmatory_valid": True}]
+    out = apply_design_gate(hyps, conf2, tampered)
+    assert out[0]["confirmatory_valid"] is False
+    assert "代码冻结失败" in out[0]["confirmatory_note"]
+    assert "漂移" in out[0]["confirmatory_note"]
+
+    # 旧计划没有代码指纹/漂移记录：明确标记未核对，但不据此降级。
+    legacy = json.loads(json.dumps(plan))
+    legacy["inputs"].pop("analysis_code")
+    conf3 = design_conformance(legacy, repro, runs)
+    assert conf3["analysis_code"]["checked"] is False
+    assert conf3["code_freeze_gate"] is False
+    assert conf3["checked"] is True
+    assert conf3["in_plan"] is True
+    assert any("代码冻结未核对" in w for w in conf3["warnings"])
+
+    # 结果产生后改写计划文件：即使新计划的代码指纹与当前代码一致，也不能
+    # 通过“启动时摘要”核对，必须全局降级。
+    rewritten = json.loads(json.dumps(plan))
+    rewritten["plan_digest"] = "e" * 64
+    conf4 = design_conformance(rewritten, repro, runs)
+    assert conf4["plan_integrity_gate"] is True
+    assert conf4["in_plan"] is False
+    out4 = apply_design_gate(
+        [{"id": "H1", "metric": "PPL", "candidate": "lega",
+          "reference": "standard", "confirmatory_valid": True}],
+        conf4, rewritten)
+    assert out4[0]["confirmatory_valid"] is False
+    assert "计划摘要不一致" in out4[0]["confirmatory_note"]
+    print("  [ok] 代码冻结/实验期间漂移/计划改写：显式降级，旧计划兼容")
+
+
 def test_apply_design_gate_targets_only_affected_hypotheses():
     """缺 qgate 只降级 H5/含 qgate 的假设；H1、H6 不受影响。"""
     plan = _plan(seeds=(1, 2, 3))

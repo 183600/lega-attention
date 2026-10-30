@@ -158,6 +158,32 @@ _ANALYSIS_PROTOCOL = {
 }
 
 
+def _analysis_code_fingerprint():
+    """分析代码/配置树的稳定内容指纹；失败时返回可审计的错误标记。
+
+    设计计划在训练前落盘时记录该指纹，汇总时重新计算并比对。这样“先写
+    计划、后改分析代码/配置、再挑结果”会变成 ``code_freeze_gate`` 显式
+    降级事件，而不是无法发现的静默漂移。惰性导入 ``lega.repro``，避免仅
+    做功效规划时加载训练依赖。
+    """
+    try:
+        from lega.repro import source_tree_fingerprint
+        fp = source_tree_fingerprint()
+    except Exception as e:  # pragma: no cover - 依赖损坏/权限异常
+        return {"algo": None, "digest": None, "files": None,
+                "entries": [], "error": f"{type(e).__name__}: {e}"}
+    if not isinstance(fp, dict):
+        return {"algo": None, "digest": None, "files": None,
+                "entries": [], "error": "source_tree_fingerprint 未返回 dict"}
+    entries = fp.get("entries")
+    return {
+        "algo": fp.get("algo"),
+        "digest": fp.get("digest"),
+        "files": fp.get("files"),
+        "entries": entries if isinstance(entries, list) else [],
+    }
+
+
 def _install(namespace):
     """把共享命名空间注入拆分模块。"""
     for key, value in globals().items():
