@@ -82,6 +82,121 @@ def _render_budget_sensitivity(budget):
     return out
 
 
+def _render_dose_response(dose):
+    """渲染门控系数剂量-反应曲线；只作机制描述，不重选 checkpoint。"""
+    if not isinstance(dose, dict):
+        return []
+    comps = [c for c in (dose.get("components") or [])
+             if isinstance(c, dict)]
+    if not dose.get("available"):
+        if dose.get("requested"):
+            return ["", "### 门控系数剂量-反应（推理期连续消融，val split；探索性）",
+                    "", "⚠ 本轮请求了剂量-反应分析，但没有找到可配对的 "
+                    "`dose_response_*.json`（checkpoint 缺失、变体无输出门，"
+                    "或产物不属于本轮）；不能据此推断剂量效应。"]
+        return []
+    md = ["", "### 门控系数剂量-反应（推理期连续消融，val split；探索性）", ""]
+    md.append(
+        "现有推理期病灶只做全有/全无干预；本表在同一 checkpoint、同一批 val "
+        "窗口上把 A（`gate_w`）、B（`gate_a`）、C（`gate_b`）系数分别乘以 "
+        "λ，逐窗口配对 ΔNLL(λ)=NLL(λ)−NLL(λ=1)。λ=1 是训练得到的原始系数，"
+        "λ=0 精确对应 `no_query/no_conc/no_len` 的推理期清零。局部斜率、"
+        "二次顶点与网格最优 λ 均为**描述性**诊断：固定网格上挑最优会引入 "
+        "winner's curse，不据此重选 checkpoint 或改写预注册判定。")
+    md.append("")
+    md.append("跨种子检验按 (变体, 组件) 取共同 λ 交集，先逐种子聚合 ΔNLL "
+              "再对种子做配对 t；A/B/C 与局部斜率各自按 metric 分 Holm 家族。"
+              "窗口级区间只描述单 run，相邻窗口可能相关，不作为确认性证据。")
+    used_any = False
+    for comp in comps:
+        if not comp.get("available"):
+            if comp.get("reason"):
+                md += ["", f"⚠ {comp.get('variant', '-')} · "
+                       f"{comp.get('component', '-')}：{comp['reason']}"]
+            continue
+        used_any = True
+        variant = comp.get("variant", "-")
+        component = comp.get("component", "-")
+        label = comp.get("label") or component
+        factors = comp.get("common_factors") or []
+        factors_s = "、".join(f"{x:g}" for x in factors
+                             if isinstance(x, (int, float)))
+        md += ["", f"**{variant} · {component}（{label}）**", ""]
+        slope_mean = _finite_number(comp.get("local_slope_mean"))
+        slope_sd = _finite_number(comp.get("local_slope_sd"))
+        slope_s = (format(slope_mean, "+.4f")
+                   + (f" ± {slope_sd:.4f}" if slope_sd is not None else "")
+                   if slope_mean is not None else "-")
+        vertex = _finite_number(comp.get("quadratic_vertex_mean"))
+        vertex_s = format(vertex, "+.4f") if vertex is not None else "-"
+        rate = _finite_number(comp.get("baseline_is_grid_minimum_rate"))
+        rate_s = f"{rate:.0%}" if rate is not None else "-"
+        counts = comp.get("best_factor_counts") or []
+        counts_s = "、".join(
+            f"{c.get('factor'):g}×{c.get('count')}" for c in counts
+            if isinstance(c, dict)
+            and isinstance(c.get("factor"), (int, float))
+            and isinstance(c.get("count"), int))
+        md.append(
+            f"- n={comp.get('n_seeds', '-')} 种子；共同 λ={factors_s or '-'}；"
+            f"λ=1 局部斜率={slope_s}（p_adj="
+            f"{_fmt_signed(comp.get('local_slope_p_adj'), '.4f')}）；"
+            f"二次顶点均值={vertex_s}；网格最优 λ 计数={counts_s or '-'}；"
+            f"基线为网格最小点={rate_s}。")
+        if comp.get("zero_delta_mean") is not None:
+            md.append(
+                f"- λ=0 的 ΔNLL 均值={_fmt_signed(comp.get('zero_delta_mean'), '+.4f')}"
+                f"（应复现对应 `{DOSE_COMPONENT_SPECS.get(component, {}).get('training_variant', '-')}` "
+                "推理期清零；若不一致需先排查实现/窗口协议）。")
+        tests = [t for t in (dose.get("tests") or [])
+                 if isinstance(t, dict)
+                 and t.get("dose_variant") == variant
+                 and t.get("dose_component") == component
+                 and t.get("dose_family") == "factor"]
+        tests.sort(key=lambda t: _finite_number(t.get("dose_factor")) or 0.0)
+        if tests:
+            md += ["", "| λ | ΔNLL均值 ± SD | 95% CI | PPL比 | no-op种子 | "
+                   "逐种子胜负 | p_adj(Holm) | 判定 |",
+                   "|---|---|---|---|---|---|---|---|"]
+            for t in tests:
+                ci = t.get("mean_diff_ci95")
+                ci_s = (f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-")
+                ratio = (f"{t['mean_ppl_ratio']:.4f}"
+                         + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
+                         if t.get("mean_ppl_ratio") is not None else "-")
+                md.append(
+                    f"| {_fmt_signed(t.get('dose_factor'), 'g')} | "
+                    f"{_fmt_mean_std(t)} | {ci_s} | {ratio} | "
+                    f"{t.get('n_no_op_seeds', '-')}/{t.get('n', '-')} | "
+                    f"{_seed_winloss_str(t)} | "
+                    f"{_fmt_signed(t.get('p_adj'), '.4f')} | "
+                    f"{t.get('dose_verdict', '-')} |")
+        slope_test = next(
+            (t for t in (dose.get("tests") or [])
+             if isinstance(t, dict)
+             and t.get("dose_variant") == variant
+             and t.get("dose_component") == component
+             and t.get("dose_family") == "local_slope"), None)
+        if isinstance(slope_test, dict):
+            md += ["", "局部斜率检验（λ=1，负值=增大系数可降低 NLL）："
+                   f"{_fmt_mean_std(slope_test)}，n={slope_test.get('n', '-')}，"
+                   f"p_adj={_fmt_signed(slope_test.get('p_adj'), '.4f')}；"
+                   f"{slope_test.get('dose_verdict', '-')}"]
+        if comp.get("verdict"):
+            md += ["", f"**组件摘要**：{comp['verdict']}"]
+    if not used_any:
+        md.append("")
+        md.append("⚠ 没有可用的组件剂量曲线（组件不适用或剂量点不足）。")
+    md.append("")
+    md.append("注: ΔNLL>0 表示该剂量比 λ=1 更差；PPL比=exp(ΔNLL均值)。"
+              "`no-op` 表示该系数训练后已为 0、干预未改变前向——此时零差"
+              "不是“无效应”的证据。局部斜率显著只说明 λ=1 不是驻点，"
+              "不能单凭曲线在固定网格上的最低点声称“最优剂量”。"
+              "本分析默认只在 val 上做，绝对水平受 checkpoint 选择偏差影响，"
+              "只作机制定位。")
+    return md
+
+
 def _summary_part_b(**kw):
     if "audit" in kw:
         audit = kw["audit"]
@@ -94,6 +209,7 @@ def _summary_part_b(**kw):
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
+    dose_response = kw.get("dose_tests")
     budget_sensitivity = kw.get("budget_sensitivity")
     if "ci" in kw:
         ci = kw["ci"]
@@ -1145,6 +1261,8 @@ def _summary_part_b(**kw):
     # --- 关键病灶的等价性解读（尤其安慰剂/阳性对照）：p>0.05 不能直接
     #     写成“安慰剂无效应”，必须看 TOST 是否把差异限制在 SESOI 内。
     md += _render_causal_equivalence_section(causal_tests)
+
+    md += _render_dose_response(dose_response)
 
     # --- 训练期参数匹配安慰剂（容量/优化红利的对照）与同一 checkpoint 内的
     #     2^3 推理期 Shapley（与训练期 Shapley 并列）。

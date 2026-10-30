@@ -86,6 +86,7 @@ ABC/`lega`）与去一法（Full/Full−A/Full−B/Full−C）全部实现；无
 - **统计可靠性（多种子）**：关键指标跨随机种子报告 **Mean ± Std** 与配对 Cohen's d 效应量（`configs/small.json` 默认 5 个种子，`--seeds` 可覆盖）；变体间同种子配对的双侧 t 检验在同一指标家族内做 **Holm–Bonferroni 校正**（控制多重比较 FWER），结论一律基于校正后 p 值（`results/<tag>/significance.json`）。n<3 时只报描述统计、不判定显著性，避免“提升 0.2%、方差 0.5%”被当成有效增益；每项配对同时给出 MDE 与效应/噪声比（|Δ|/ΔSD），**|Δ| 小于逐种子配对差标准差时显式标注为“噪声内”的边缘证据**，即使校正后显著也不当作稳健收益。
 - **实际意义与等价性（SESOI/TOST）**：显著性检验只回答“能否拒绝 Δ=0”；p>0.05 既可能是“没有实际重要差异”，也可能只是功效不足。`lega/equivalence.py` 在协议 SESOI（PPL 逐种子相对差 1%、RULER EM 1.00 pp、AUROC/PR-AUC 差 0.010、因果 ΔNLL 0.01 nat）上做配对 TOST：只有 90% 区间完全落在 ±SESOI 内才判“等价”，单侧支持才判“非劣”；统计显著但幅度低于 SESOI 标为“实际意义有限”；区间跨过 0 或 SESOI 只能写“未定”，不能写成“无差异”。TOST p 在同一指标家族内单独 Holm 校正，0.5×/1×/2× margin 网格各自校正并并列披露；**SESOI 是分析前声明的协议约定而非数据估计**，等价性判定不改变预注册的优效性判定；该分析当前未写入预注册锁链，按补充性/描述性证据解读，升级为确认性主张须先登记 margin 与对比并在新数据上检验。`summary.md` 新增“SESOI 与等价性/非劣性”和“关键病灶的 SESOI 解读”两节，`significance.json` 的 `pairs[*].equivalence` 与顶层 `equivalence` 可机器读取；`head_permute` 安慰剂只有在 TOST 判等价时才能说“差异小于 SESOI”，p>0.05 不能直接写成“安慰剂无效应”。
 - **推理期因果消融（训练后病灶，回答“训练好的模型是否真的在用该组件”）**：训练期全因子/去一法消融改变优化轨迹，不能证明最终前向仍在使用某组件。`lega/ablate.py` 在**同一 checkpoint、同一批 val 窗口**上只改门控参数并逐窗口配对：`no_query/no_conc/no_len/no_evidence` 是训练期去一法的推理期对应；`gate_open/gate_closed` 检验门控写回强度（后者是“关闭注意力输出必须显著变差”的阳性对照）；`gate_constant_mean` 保留每个头/层的平均写入强度、去掉逐位置/逐查询变化；`head_permute` 在参数个数/分布/结构完全不变的前提下打乱头—证据对应，是容量解释的**安慰剂对照**；`conc_permute` 把逐位置 `c` 沿序列维循环移位，保持 c 的逐值分布/均值/方差/长度分布不变，只破坏位置对应，回答“收益是否来自容量/尺度”而不是证据位置；`sign_flip` 保留幅度、反转证据方向。病灶后逐位恢复，`no_op`（系数训练后已为 0）如实标注——“无差异”不是“无效应”的证据。窗口级 p 仅描述单 run；汇总先按种子聚合 ΔNLL，再跨种子配对 t + Holm（`significance.json.causal_ablation`）。默认只在 val 上做（test 尘封，val 是选型集，只作机制定位）。训练期显著而推理期病灶无差异，说明收益可能来自训练期优化/正则化；推理期显著而训练期不显著，则提示训练期消融被再训练补偿——两种证据并列，不能互相替代。边界：`head_permute` 是**推理期**容量/分布安慰剂，不是训练期参数量匹配对照；`no_evidence` 保留全部参数、只关证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数是否带来优化红利”这一混淆，需与参数开销、单因素消融合读。
+- **连续剂量-反应（推理期系数缩放，探索性）**：二值病灶只能回答“去掉/反号后是否变差”，无法判断训练得到的系数是否落在合理剂量、效应是否单调。`lega/dose_response.py` 在同一 checkpoint、同一批 val 窗口上把 A（`gate_w`）/B（`gate_a`）/C（`gate_b`）系数分别乘以 λ（默认 `0,0.5,0.75,1,1.25,1.5,2`），逐窗口配对 `ΔNLL(λ)=NLL(λ)−NLL(1)`；λ=1 是训练得到的原始系数，λ=0 精确对应 `no_query/no_conc/no_len` 的推理期清零。报告 λ=1 局部斜率（负=增大系数可降低 NLL、当前可能偏小）、二次顶点、网格最优 λ、方向变化与 no-op。每个组件取各种子共同 λ 交集，先按种子聚合再跨种子配对 t + 独立 Holm；局部斜率/顶点/网格最优 λ 均为**描述性**诊断，固定网格上挑最优会引入 winner's curse，不据此重选 checkpoint 或改写预注册判定。默认只在 val 上做，`--dose_response` 开启（默认 `--dose_variants lega`）。
 - **全因子 Shapley 分解（交互感知的补充归因，探索性）**：单因素边依赖参照格，交互非零时“加入 X 的收益”在 `gate_only` 与 `Full` 基准下并不相同。`lega/factorial.py` 对门控内 8 格做精确 Shapley 分解：PPL 在 `−log(PPL)` 上分解（φ>0 表示降低 PPL，`exp(−φ)` 即 PPL 几何均值比），RULER 用原始 EM；效率性保证 `φ_A+φ_B+φ_C=Full−none`，交互被平均分摊到参与因子。逐种子算 φ，再同种子配对 t + 同指标 Holm；占比只在总效应为正时报告，不强行归一化。该分解未预注册，不能替代预注册的单因素确认检验；与单因素边方向冲突时并列披露。
 - **预注册与防事后改写（confirmatory vs exploratory）**：正式实验前把方向性主张登记在 `preregistration/hypotheses.json`（**刻意不放 `docs/`**：流水线清理会删除该目录下除 `design_notes.md` 外的文件，该登记表曾被自动清理提交多次误删），汇总时逐条对照 Holm 校正后的同种子配对检验，判定 支持 / 拒绝（方向相反且显著=被证伪）/ 未定（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与 `significance.json`；未登记的对比一律属事后（exploratory），只能作为线索。登记表由 `preregistration/hypotheses.lock.json` 防篡改：锁基线记录整文档 SHA-256 与**逐假设科学内容摘要**，修订必须经 `python -m lega.hypotheses --amend --reason ...` 在**修订链**上留痕（既有假设只增不改不删）。删除登记表、改写 claim、调换变体对、删条目或未留痕新增，都会被 `--verify`／汇总页判为 `violated`，并**自动把全部确认性判定降级为探索性**；登记表的意外删除与恢复/迁移事件本身也必须在 amendments 中留痕（本项目已发生过一次清理误删，见 `docs/design_notes.md`）。锁链完整还不够：汇总页还做**预注册范围核对**——登记表里的 `scope`（配置规模、数据/分词器、种子计划）必须与本次实跑（`repro.json` 的 `config_file`/数据指纹/种子）对上；tiny/冒烟/伪数据/非同登记分词器都会判为范围外，确认性判定同样自动降级（调优注入 lr/权重衰减属协议内，不算越界；未登记种子只警告）。
 - **三个评测维度**：
@@ -147,6 +148,10 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 python run_all.py --config configs/small.json --data_dir data/wikitext103 \
   --ablate_variants lega,qgate,gate_only
 
+# 可选：连续剂量-反应（同一 checkpoint/同一批 val 窗口，缩放 A/B/C 系数）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+  --dose_response --dose_variants lega
+
 # 可选：早停——验证连续 N 次评测无实质改善即终止（默认关闭；启用后各变体
 # 实际步数可不同，受控变量审计按计划步数核对，汇总页会标注「早停」）
 python run_all.py --config configs/small.json --data_dir data/wikitext103 --early_stop_patience 5
@@ -171,8 +176,9 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 | `results/<tag>/sanity_<variant>.json` | 过拟合小批量 sanity check 结果与阈值 |
 | `results/<tag>/baseline_tuning.json` | 基线（standard）lr/权重衰减调优证据（仅验证集；含 `default_is_optimal` 近优判定、`selection_seeds`/逐种子 val_loss 明细与逐 trial 训练溯源） |
 | `results/<tag>/ngram_baseline.json` | 简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL（α/λ 在 val 上联合选，`selected_model` 取 val 最强；test 需显式开锁；流水线默认与神经评测同 split） |
-| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）、`registration_scope`（范围核对：配置规模/分词器/种子计划）、`registered_hypotheses`（逐条判定，早停/完整性/范围未过则降级）与 `factorial_interactions`（全因子交互检验，含 `training_budget` 早停可比性标记）；另含 `factorial_shapley`（交互感知的全因子 Shapley 分解）、`causal_ablation`（推理期病灶的跨种子配对检验）与 `equivalence`/`pairs[*].equivalence`（SESOI/TOST 等价性、非劣性、90%/95% 区间、0.5×/1×/2× margin 敏感性及 Holm 校正）；另含 `ngram_comparison`（逐变体 vs 简单基线单样本配对检验） |
+| `results/<tag>/significance.json` | 同种子配对 t 检验（Δ均值 ± Δ标准差、配对 Cohen's d_z、原始 p、Holm 校正 p_adj、组件有效性证据）；含 `registration_integrity`（预注册锁链校验）、`registration_scope`（范围核对：配置规模/分词器/种子计划）、`registered_hypotheses`（逐条判定，早停/完整性/范围未过则降级）与 `factorial_interactions`（全因子交互检验，含 `training_budget` 早停可比性标记）；另含 `factorial_shapley`（交互感知的全因子 Shapley 分解）、`causal_ablation`（推理期病灶的跨种子配对检验）、`dose_response`（门控系数连续剂量-反应，含 `dose_response_note` 边界）与 `equivalence`/`pairs[*].equivalence`（SESOI/TOST 等价性、非劣性、90%/95% 区间、0.5×/1×/2× margin 敏感性及 Holm 校正）；另含 `ngram_comparison`（逐变体 vs 简单基线单样本配对检验） |
 | `results/<tag>/ablation_*.json` | **推理期因果病灶消融**（默认 `lega,qgate`，`--ablate_variants` 可扩展）：同一 checkpoint/同一批 val 窗口上的 `no_query/no_conc/no_len/no_evidence`、`gate_open/closed/constant_mean`、`head_permute`（头参数安慰剂）、`conc_permute`（c 分布匹配置换）、`sign_flip` 干预；含逐窗口 ΔNLL、PPL 比、门控统计、`no_op` 标记与溯源 |
+| `results/<tag>/dose_response_*.json` | **门控系数剂量-反应**（`--dose_response`）：同一 checkpoint/同一批 val 窗口上 A/B/C 系数 × λ 的逐窗口 ΔNLL、PPL 比、no-op、局部斜率/二次顶点/网格最优 λ 与溯源；λ=0 对应推理期清零 |
 | `results/<tag>/curve_diagnosis.json` | 逐 run 训练曲线诊断（过拟合（含训练停滞+验证回升的平台期）/过拟合趋势（训练降而验证停滞）/欠拟合/发散/NaN + 梯度范数尖峰/非有限 + 处理建议） |
 | `results/<tag>/badcases_*.md` | RULER 错误样本归因（标注错误/误抄干扰值/幻觉/无数值回答/fwe）+ 粗归因轴计数 + **改进方向**（触发证据→建议→下一步实验） |
 | `results/<tag>/worstcases_*.md` | 语言建模最差窗口归因（复读吸引子/高置信错答/低置信；gold 是否在上下文中出现）+ **改进方向** |
@@ -204,6 +210,7 @@ python -m lega.ruler     --ckpt out/small/lega/model.pt --data_dir data/wikitext
 python -m lega.latency   --config configs/small.json --data_dir data/wikitext103 --ckpt_dir out/small --out results/small/latency.json
 python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
 python -m lega.ablate    --ckpt out/small/lega/seed1337/model_best.pt --data_dir data/wikitext103 --out results/small/ablation_lega_seed1337.json
+python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt --data_dir data/wikitext103 --out results/small/dose_response_lega_seed1337.json
 python -m lega.plots     --results_dir results/small --train_root out/small
 python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
 python -m lega.experiment --check_artifacts                  # 台账完整性/产物哈希核验（0=通过；1=异常）
@@ -298,6 +305,7 @@ lega-attention/
 │   ├── latency.py             # prefill / decode 延迟基准
 │   ├── analysis.py            # 机制分析：集中≠找对、门控 Brier/ECE 校准、AUROC + PR-AUC（不平衡主指标）+ 门控 F1（三口径 + 恒写/恒不写稻草人对照）
 │   ├── ablate.py              # 推理期因果病灶消融（训练后权重干预，与训练期消融互补）
+│   ├── dose_response.py       # 门控系数连续剂量-反应（推理期系数缩放，与二值病灶互补）
 │   ├── length_null.py         # c 的长度零假设诊断（随机/重复/均匀上下文 + 斜率）
 │   ├── lengtheffect.py        # RULER 上下文长度分层：把“长度校准”从平均分里还原出来
 │   ├── output_ablation.py     # 答案 token 的逐层/逐头输出干预（ΔNLL/Δmargin 写回效用）

@@ -147,6 +147,32 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             continue
         ablations.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
 
+    # 连续剂量-反应（每 (变体, 种子) 一个 dose_response_*.json）。与病灶
+    # 消融一样单独存放；是否复用旧文件由本轮 repro 的 executed/variants
+    # 决定，未开启时绝不把上一轮曲线算进本轮证据。
+    doses = {}
+    dose_scope = repro.get("dose_response")
+    if isinstance(dose_scope, dict):
+        allow_dose = dose_scope.get("executed") is True
+        dose_variants = (dose_scope.get("variants")
+                         if isinstance(dose_scope.get("variants"), list)
+                         else [])
+    else:
+        # 旧 repro 没有该字段：保持向后兼容的全量发现（旧实验本就没有
+        # dose_response 产物，不会凭空多出证据）。
+        allow_dose = True
+        dose_variants = None
+    for fp in _result_files(results_dir, "dose_response", scope_seeds):
+        d = load(fp)
+        if not in_run_scope(fp, d):
+            continue
+        if not allow_dose:
+            continue
+        if (dose_variants is not None
+                and d["variant"] not in dose_variants):
+            continue
+        doses.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
+
     variants = sorted(v for v in runs if v in RUNNABLE_VARIANTS)
     eval_splits = set()
     invalid_eval_split = False
@@ -545,6 +571,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 活动匹配对照：原始病灶 − 匹配病灶。单独 Holm 家族，回答“原始 ΔNLL
     # 有多少可由平均门控开度变化解释”，不混入原始病灶因果检验。
     matched_ablation_contrasts = _matched_ablation_contrasts(ablations)
+    # 连续剂量-反应：同一 checkpoint 上缩放 A/B/C 系数，回答“当前剂量是否
+    # 处于局部最优/效应是否单峰”。独立 Holm 家族，不混入二值病灶消融。
+    dose_tests = _dose_response_tests(doses)
+    if isinstance(dose_scope, dict):
+        dose_tests["requested"] = dose_scope.get("executed") is True
     # 同一 checkpoint 内的 2^3 干预 → 推理期 Shapley；与训练期 Shapley 并列，
     # 用于检验“重新训练后的组件结构”是否也存在于最终前向。探索性证据。
     inference_shapley = _inference_shapley_tests(ablations)
@@ -1345,6 +1376,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "capacity_only_test",
         "causal_tests",
         "matched_ablation_contrasts",
+        "dose_tests",
+        "doses",
         "cells",
         "ci",
         "ci_vals",
@@ -1538,6 +1571,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'parameter_matched_control': ctx["param_control_test"],
         'causal_ablation': ctx["causal_tests"],
         'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
+        'dose_response': ctx["dose_tests"],
         'budget_sensitivity': ctx["budget_sensitivity"],
         'multiverse': ctx["multiverse"],
         'test_reuse': ctx.get("test_reuse"),

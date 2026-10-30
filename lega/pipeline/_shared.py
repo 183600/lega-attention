@@ -28,6 +28,12 @@ from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)
+from lega.dose_response import (DEFAULT_FACTORS as DOSE_DEFAULT_FACTORS,  # noqa: E402
+                                COMPONENT_ORDER as DOSE_COMPONENT_ORDER,
+                                COMPONENT_SPECS as DOSE_COMPONENT_SPECS,
+                                DOSE_NOTE, parse_components as parse_dose_components,
+                                parse_factors as parse_dose_factors,
+                                run_dose_response)
 from lega.reparameterization import (  # noqa: E402
     CONTRASTS as REPARAMETERIZATION_CONTRASTS,
     NORMALIZED_CELLS as NORMALIZED_FACTORIAL_CELLS,
@@ -288,6 +294,15 @@ INFERENCE_INTERACTION_METRIC = "推理期交互PPL"
 CAUSAL_ABLATION_METRIC = "因果消融ΔNLL(lesion−normal)"
 MATCHED_ABLATION_METRIC = "因果消融ΔNLL(活动匹配−normal)"
 MATCHED_ABLATION_CONTRAST_METRIC = "因果消融ΔNLL(未匹配−活动匹配)"
+
+# 连续剂量-反应（推理期系数缩放）的跨种子指标名。A/B/C 各自成独立
+# Holm 家族：不同组件回答不同机制问题，不应互相惩罚；同组件的不同 λ
+# 属于同一族（固定网格上的多点比较必须校正）。局部斜率单列一族，因为
+# 它检验的是“λ=1 是否为驻点”，与“某个 λ 相对 1 的差异”不是同一问题。
+DOSE_RESPONSE_METRIC = "剂量反应ΔNLL"
+DOSE_SLOPE_METRIC = "剂量反应局部斜率"
+DOSE_COMPONENT_LABEL = {name: spec["label"]
+                        for name, spec in DOSE_COMPONENT_SPECS.items()}
 
 # 预注册 scope 核对的配置字段：模型/训练规模（结论可迁移性的前提）。
 # lr/weight_decay 刻意排除：按本项目协议，基线调优（--tune_baseline）会在

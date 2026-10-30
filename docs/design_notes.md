@@ -197,6 +197,39 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
   是否带来优化红利”这一混淆。后者由下面的训练期 `lega_placebo` 对照回答；
   推理期 Shapley 只回答“最终前向的组件结构”，不能替代训练期因果问题。
 
+### 连续剂量-反应（门控系数缩放）
+
+二值病灶（清零/反号/置换）回答“去掉某通道是否变差”，但不能回答
+“训练得到的系数是否落在合理剂量、效应是否单调、最优剂量在哪个方向”。
+`lega/dose_response.py` 在**同一 checkpoint、同一批 val 窗口**上把
+A（`gate_w`）、B（`gate_a`）、C（`gate_b`）系数分别乘以
+λ ∈ {0, 0.5, 0.75, 1, 1.25, 1.5, 2}（`--dose_factors` 可改），逐窗口配对
+
+    ΔNLL(λ) = NLL(λ) − NLL(λ=1)
+
+λ=1 是训练得到的原始系数；λ=0 精确等价于对应组件的推理期清零，应与
+`no_query/no_conc/no_len` 的 ΔNLL 一致（不一致先排查实现/窗口协议）。
+每次干预都从基线快照重算 `baseline × λ`，不在当前值上累乘；评测后逐位恢复。
+
+诊断量：
+
+- **局部斜率**：λ=1 两侧最近点的中心差分（只有单侧时显式标注单侧）；
+  NLL 对 λ 的导数 <0 表示增大系数可降低 NLL（当前剂量可能偏小），
+  >0 表示可能偏大。逐窗口斜率区间只描述单 run；
+- **二次顶点/曲率**：对网格做 `NLL≈aλ²+bλ+c` 最小二乘；仅在 `a>0` 且
+  顶点落在网格内时报告内部极小值，线性曲线不伪造顶点；
+- **网格最优 λ**：最小 NLL 的 λ、相对基线的改善量、基线是否为网格最小点；
+- **方向变化/单调性**与 **no-op**：全部种子 no-op 时明确标注“干预未改变
+  前向”，零差不是“该剂量无效应”的证据。
+
+跨种子汇总先按 (变体, 组件) 取各种子共同 λ 交集（避免不同 λ 使用不同
+种子子集），每个种子先聚合 ΔNLL，再对 0 做跨种子单样本配对 t；A/B/C 与
+局部斜率各自按 metric 分 Holm 家族。**边界**：固定网格上挑最优 λ 会引入
+winner's curse，局部斜率/顶点/最优剂量都只是描述性诊断，不据此重选
+checkpoint，也不改写预注册判定；剂量曲线不替代训练期消融，它只回答
+“最终前向对系数剂量的敏感性”，不回答“重新训练时去掉组件会怎样”。
+默认只在 val 上做，test 尘封；val 同时是 checkpoint 选择集，绝对水平偏乐观。
+
 ### 同一 checkpoint 内的 2^3 全因子与 Shapley
 
 `query_only/conc_only/len_only`、`no_query/no_conc/no_len`、`no_evidence`
@@ -285,6 +318,13 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 # 追加原始集中度参数化的完整 2^3 网格（参数化稳健性）
 python run_all.py --config configs/small.json --data_dir data/wikitext103 \
     --raw_factorial
+
+# 连续剂量-反应（默认只扫 lega；同一 checkpoint/同一批 val 窗口）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --dose_response --dose_variants lega
+# 单独运行
+python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt \
+    --data_dir data/wikitext103 --out results/small/dose_response_lega_seed1337.json
 ```
 
 输出 `ablation_<variant>[_seed<seed>].json`：基线/各病灶的 val_loss、PPL、
@@ -292,6 +332,12 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
 溯源字段；匹配病灶另含 `matched_control`（逐头 `gate_d` 偏移、目标/实际
 平均 g、最大残差、使用位置数），便于审计“平均门控确实匹配”。`--skip_ablation`
 可关闭；`standard`/`null` 无输出门，不能做该分析。
+
+剂量-反应输出 `results/<tag>/dose_response_<variant>_seed<seed>.json`：
+每个 λ 的 val_loss/PPL、逐窗口 ΔNLL、λ=0/反号剂量、门控统计与 no-op
+标记，以及局部斜率（含单侧标注）、二次曲率/顶点/R²、网格最优 λ 和
+基线是否为网格最小点。`--dose_response` 默认关闭；`--skip_ablation`
+不影响该阶段。
 
 ## 数据卫生：精确去重之后的近似重复
 

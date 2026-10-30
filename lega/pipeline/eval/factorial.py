@@ -816,6 +816,353 @@ def _matched_ablation_contrasts(ablations):
     return out
 
 
+def _dose_response_tests(doses):
+    """连续剂量-反应的跨种子配对检验与组件级曲线摘要。
+
+    输入 ``{变体: {种子: dose_response payload}}``。每个 (变体, 组件) 先取
+    各种子都存在的 λ 交集，避免“不同 λ 用不同种子子集”导致曲线不可比；
+    再对每个 λ 的 ΔNLL(λ)=NLL(λ)−NLL(λ=1) 做跨种子单样本配对 t 检验。
+    A/B/C 与局部斜率各自按 metric 分 Holm 家族。网格最优 λ、二次顶点与
+    改善量只作曲线描述：固定网格挑最优会引入 winner's curse，不能据此
+    重选 checkpoint 或改写预注册判定。
+    """
+    doses = doses if isinstance(doses, dict) else {}
+    raw_tests = []
+    summaries = []
+    excluded_variants = []
+    for variant in sorted(doses):
+        seed_map = doses.get(variant)
+        if not isinstance(seed_map, dict):
+            excluded_variants.append({"variant": variant,
+                                      "reason": "payload 不是种子映射"})
+            continue
+        components = set()
+        for seed in _sorted_seeds(seed_map):
+            payload = seed_map.get(seed)
+            if (not isinstance(payload, dict)
+                    or payload.get("schema") != 1
+                    or not isinstance(payload.get("components"), dict)):
+                continue
+            components.update(payload["components"].keys())
+        for component in DOSE_COMPONENT_ORDER:
+            if component not in components:
+                continue
+            point_rows = []
+            not_applicable = 0
+            missing = 0
+            for seed in _sorted_seeds(seed_map):
+                payload = seed_map.get(seed)
+                if not isinstance(payload, dict):
+                    missing += 1
+                    continue
+                comp = (payload.get("components") or {}).get(component)
+                if not isinstance(comp, dict):
+                    missing += 1
+                    continue
+                if comp.get("applicable") is False:
+                    not_applicable += 1
+                    continue
+                base_idx = payload.get("window_indices")
+                points = comp.get("points")
+                if not isinstance(points, list):
+                    missing += 1
+                    continue
+                by_factor = {}
+                for point in points:
+                    if not isinstance(point, dict):
+                        continue
+                    if point.get("applied") is not True:
+                        continue
+                    f = _finite_number(point.get("factor"))
+                    delta = _finite_number(point.get("delta_loss_mean"))
+                    if f is None or delta is None:
+                        continue
+                    wi = point.get("window_indices")
+                    if (isinstance(base_idx, list) and isinstance(wi, list)
+                            and wi != base_idx):
+                        continue
+                    by_factor[f] = {
+                        "delta": float(delta),
+                        "no_op": bool(point.get("no_op")),
+                        "n_windows": _integral_value(
+                            point.get("n_windows")) or 0,
+                    }
+                diag = comp.get("diagnostics")
+                if not by_factor or not isinstance(diag, dict):
+                    missing += 1
+                    continue
+                point_rows.append({
+                    "seed": seed,
+                    "points": by_factor,
+                    "diagnostics": diag,
+                })
+            if not point_rows:
+                summaries.append({
+                    "variant": variant,
+                    "component": component,
+                    "label": DOSE_COMPONENT_LABEL.get(component, component),
+                    "available": False,
+                    "reason": "没有可配对的剂量点",
+                    "n_not_applicable_seeds": not_applicable,
+                    "n_missing_seeds": missing,
+                })
+                continue
+
+            common_factors = set(point_rows[0]["points"])
+            for row in point_rows[1:]:
+                common_factors &= set(row["points"])
+            common_factors = sorted(common_factors)
+            non_base = [f for f in common_factors
+                        if abs(f - 1.0) > 1e-12]
+            if not non_base:
+                summaries.append({
+                    "variant": variant,
+                    "component": component,
+                    "label": DOSE_COMPONENT_LABEL.get(component, component),
+                    "available": False,
+                    "reason": "各种子共同剂量只有 λ=1，无法检验剂量效应",
+                    "n_not_applicable_seeds": not_applicable,
+                    "n_missing_seeds": missing,
+                    "common_factors": common_factors,
+                })
+                continue
+
+            rows = [row for row in point_rows
+                    if common_factors and set(common_factors)
+                    <= set(row["points"])]
+            seeds_used = [row["seed"] for row in rows]
+            n_windows_total = sum(
+                row["points"][f]["n_windows"]
+                for row in rows for f in common_factors)
+            component_tests = []
+            for f in non_base:
+                vals = [row["points"][f]["delta"] for row in rows]
+                no_ops = sum(1 for row in rows
+                             if row["points"][f]["no_op"])
+                res = paired_t_test(vals, [0.0] * len(vals))
+                mean_delta = _finite_number(res.get("mean_diff"))
+                res.update({
+                    "candidate": (f"{variant}:{component} "
+                                  f"λ={f:g}"),
+                    "reference": f"{variant}:{component} λ=1",
+                    "metric": f"{DOSE_RESPONSE_METRIC}[{component}]",
+                    "lower_is_better": True,
+                    "dose_variant": variant,
+                    "dose_component": component,
+                    "dose_label": DOSE_COMPONENT_LABEL.get(component,
+                                                           component),
+                    "dose_factor": float(f),
+                    "dose_family": "factor",
+                    "replicates_lesion": (
+                        DOSE_COMPONENT_SPECS.get(component, {}).get(
+                            "training_variant")
+                        if abs(f) <= 1e-12 else None),
+                    "seeds_used": list(seeds_used),
+                    "n_no_op_seeds": int(no_ops),
+                    "all_no_op": bool(no_ops == len(rows)),
+                    "n_windows_total": int(n_windows_total),
+                    "mean_ppl_ratio": (
+                        math.exp(max(-20.0, min(20.0, mean_delta)))
+                        if mean_delta is not None else None),
+                    "ppl_ratio_clamped": bool(
+                        mean_delta is not None
+                        and not (-20.0 <= mean_delta <= 20.0)),
+                    "exploratory": True,
+                })
+                component_tests.append(
+                    _enrich_paired(res, vals, [0.0] * len(vals)))
+
+            slopes = []
+            slope_seeds = []
+            for row in rows:
+                slope = _finite_number(
+                    (row["diagnostics"] or {}).get("local_slope"))
+                if slope is None:
+                    continue
+                slopes.append(float(slope))
+                slope_seeds.append(row["seed"])
+            if slopes:
+                sres = paired_t_test(slopes, [0.0] * len(slopes))
+                sres.update({
+                    "candidate": f"{variant}:{component} λ=1 局部斜率",
+                    "reference": "λ=1 处局部斜率=0",
+                    "metric": f"{DOSE_SLOPE_METRIC}[{component}]",
+                    "lower_is_better": False,
+                    "dose_variant": variant,
+                    "dose_component": component,
+                    "dose_label": DOSE_COMPONENT_LABEL.get(component,
+                                                           component),
+                    "dose_factor": 1.0,
+                    "dose_family": "local_slope",
+                    "seeds_used": slope_seeds,
+                    "n_windows_total": int(n_windows_total),
+                    "exploratory": True,
+                })
+                component_tests.append(
+                    _enrich_paired(sres, slopes, [0.0] * len(slopes)))
+
+            raw_tests.extend(component_tests)
+            best_factors = []
+            vertices = []
+            vertex_in_grid = []
+            slopes_all = []
+            zero_deltas = []
+            flip_deltas = []
+            baseline_min = []
+            for row in rows:
+                diag = row["diagnostics"]
+                bf = _finite_number(diag.get("best_factor"))
+                if bf is not None:
+                    best_factors.append(float(bf))
+                vertex = _finite_number(diag.get("quadratic_vertex"))
+                if vertex is not None:
+                    vertices.append(float(vertex))
+                vertex_in_grid.append(bool(
+                    diag.get("quadratic_vertex_in_grid")))
+                slope = _finite_number(diag.get("local_slope"))
+                if slope is not None:
+                    slopes_all.append(float(slope))
+                zd = _finite_number(diag.get("zero_delta"))
+                if zd is not None:
+                    zero_deltas.append(float(zd))
+                fd = _finite_number(diag.get("sign_flip_delta"))
+                if fd is not None:
+                    flip_deltas.append(float(fd))
+                baseline_min.append(bool(
+                    diag.get("baseline_is_grid_minimum")))
+            slope_mean, slope_sd = mean_std(slopes_all)
+            vertex_mean, vertex_sd = mean_std(vertices)
+            zero_mean, zero_sd = mean_std(zero_deltas)
+            flip_mean, flip_sd = mean_std(flip_deltas)
+            slope_test = next(
+                (t for t in component_tests
+                 if t.get("dose_family") == "local_slope"), {})
+            counts = []
+            for f in sorted(set(best_factors)):
+                counts.append({"factor": float(f),
+                               "count": int(sum(
+                                   1 for x in best_factors
+                                   if abs(x - f) <= 1e-12))})
+            summaries.append({
+                "variant": variant,
+                "component": component,
+                "label": DOSE_COMPONENT_LABEL.get(component, component),
+                "available": True,
+                "common_factors": common_factors,
+                "seeds_used": list(seeds_used),
+                "n_seeds": len(rows),
+                "n_not_applicable_seeds": int(not_applicable),
+                "n_missing_seeds": int(missing),
+                "n_windows_total": int(n_windows_total),
+                "local_slope_mean": slope_mean,
+                "local_slope_sd": slope_sd,
+                "local_slope_p_adj": slope_test.get("p_adj"),
+                "local_slope_verdict": None,
+                "quadratic_vertex_mean": vertex_mean,
+                "quadratic_vertex_sd": vertex_sd,
+                "quadratic_vertex_in_grid_rate": (
+                    sum(vertex_in_grid) / len(vertex_in_grid)
+                    if vertex_in_grid else None),
+                "best_factor_counts": counts,
+                "baseline_is_grid_minimum_rate": (
+                    sum(baseline_min) / len(baseline_min)
+                    if baseline_min else None),
+                "zero_delta_mean": zero_mean,
+                "zero_delta_sd": zero_sd,
+                "sign_flip_delta_mean": flip_mean,
+                "sign_flip_delta_sd": flip_sd,
+                "exploratory": True,
+            })
+
+    raw_tests = _apply_holm(raw_tests)
+    by_component = {}
+    for res in raw_tests:
+        res["holm_verdict"] = res.get("verdict")
+        n = _integral_value(res.get("n"))
+        mean_diff = _finite_number(res.get("mean_diff"))
+        family = res.get("dose_family")
+        if n is None or n < MIN_SEEDS:
+            verdict = f"种子不足（n={n}），不作剂量判定"
+        elif family == "factor" and res.get("all_no_op"):
+            f = res.get("dose_factor")
+            verdict = (f"λ={f:g} 全部种子 no-op：该系数训练后已为 0/未改变"
+                       "前向，不能把零差当作“该剂量无效应”")
+        elif family == "factor" and res.get("p_adj") is not None \
+                and res["p_adj"] < ALPHA and mean_diff is not None:
+            f = res.get("dose_factor")
+            if mean_diff > 0:
+                verdict = (f"λ={f:g} 显著更差：当前系数优于该剂量"
+                           "（Holm 校正后）")
+            elif mean_diff < 0:
+                verdict = (f"λ={f:g} 显著更好：当前系数可能未在最优"
+                           "（Holm 校正后；描述性）")
+            else:
+                verdict = "显著但均值为 0，无法解释"
+        elif family == "factor":
+            f = res.get("dose_factor")
+            verdict = (f"未检出 λ={f:g} 与 λ=1 的差异（Holm 校正后）；"
+                       "不能据此断言该剂量无效应，须对照 MDE")
+        elif family == "local_slope" and res.get("p_adj") is not None \
+                and res["p_adj"] < ALPHA and mean_diff is not None:
+            if mean_diff < 0:
+                verdict = ("λ=1 局部斜率显著为负：增大该系数可降低 NLL，"
+                           "当前剂量可能偏小（描述性）")
+            elif mean_diff > 0:
+                verdict = ("λ=1 局部斜率显著为正：减小该系数可降低 NLL，"
+                           "当前剂量可能偏大（描述性）")
+            else:
+                verdict = "显著但斜率为 0，无法解释"
+        elif family == "local_slope":
+            verdict = ("未检出 λ=1 局部斜率（Holm 校正后）；不能断言当前"
+                       "系数处于最优或非最优")
+        else:
+            verdict = "无法判定剂量反应"
+        if res.get("within_noise"):
+            verdict += "；⚠ 效应落在种子噪声内"
+        if res.get("below_mde"):
+            verdict += "；⚠ 效应小于当前种子数的 MDE"
+        if res.get("loo_sign_stable") is False:
+            verdict += "；⚠ 留一法方向翻转"
+        res["dose_verdict"] = verdict
+        res["verdict"] = verdict
+        by_component.setdefault(
+            (res.get("dose_variant"), res.get("dose_component")),
+            []).append(res)
+
+    for summary in summaries:
+        key = (summary.get("variant"), summary.get("component"))
+        tests = by_component.get(key, [])
+        slope = next((t for t in tests
+                      if t.get("dose_family") == "local_slope"), {})
+        summary["local_slope_p_adj"] = slope.get("p_adj")
+        summary["local_slope_verdict"] = slope.get("dose_verdict")
+        summary["n_tests"] = len(tests)
+        if summary.get("available"):
+            rate = summary.get("baseline_is_grid_minimum_rate")
+            if slope.get("dose_verdict"):
+                summary["verdict"] = slope["dose_verdict"]
+            elif rate is not None and rate < 1.0:
+                summary["verdict"] = (
+                    f"基线仅在 {rate:.0%} 种子上为网格最小点；剂量曲线"
+                    "提示当前系数未必最优（描述性）")
+            else:
+                summary["verdict"] = "剂量曲线不足以判定当前系数是否最优"
+
+    available = any(s.get("available") for s in summaries)
+    return {
+        "available": bool(available),
+        "tests": raw_tests,
+        "components": summaries,
+        "excluded_variants": excluded_variants,
+        "note": ("A/B/C 与局部斜率各自按 metric 分 Holm 家族；λ=1 为训练"
+                 "得到的原始系数，λ=0 等价于对应组件的推理期清零。局部"
+                 "斜率、二次顶点与网格最优 λ 均为描述性诊断；固定网格上"
+                 "挑最优会引入 winner's curse，不据此重选 checkpoint 或"
+                 "改写预注册判定。默认只在 val 上做，绝对水平受选型偏差"
+                 "影响，只作机制定位。"),
+    }
+
+
 def _auroc_diff_tests(runs) -> list:
     """AUROC(logit)−AUROC(qterm) 配对差检验（H6 的判定依据）。"""
     return _detection_diff_tests(runs, "auroc", AUROC_DIFF_METRIC)

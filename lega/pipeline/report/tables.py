@@ -44,6 +44,7 @@ def _summary_part_c(**kw):
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
+    dose_response = kw.get("dose_tests")
     if "ci" in kw:
         ci = kw["ci"]
     if "ci_s" in kw:
@@ -1038,6 +1039,17 @@ def _summary_part_c(**kw):
                        "检验（探索性、独立 Holm 家族）：与训练期 `PPL交互` "
                        "同尺度并列，检查“重新训练后的交互结构能否在最终前向"
                        "复现”；交互=0 表示可加，显著非零不等于某个组件有用。"),
+                   "dose_response": dose_response,
+                   "dose_response_note": (
+                       "门控系数剂量-反应（lega.dose_response，val split，"
+                       "探索性）：同一 checkpoint/同一批窗口上把 A(gate_w)、"
+                       "B(gate_a)、C(gate_b) 系数乘以 λ，逐窗口配对 "
+                       "ΔNLL(λ)=NLL(λ)−NLL(1)；λ=1 为原始系数，λ=0 对应"
+                       "对应组件的推理期清零。A/B/C 与局部斜率各自按 metric "
+                       "分 Holm 家族；局部斜率、二次顶点与网格最优 λ 均为"
+                       "描述性诊断，固定网格挑最优会引入 winner's curse，"
+                       "不据此重选 checkpoint 或改写预注册判定；"
+                       "no_op/全 no-op 不作等价性判定"),
                    "causal_ablation_note": (
                        "推理期因果病灶消融（lega.ablate，val split）：同一 "
                        "checkpoint/同一批窗口上只改门控参数，逐窗口配对 ΔNLL；"

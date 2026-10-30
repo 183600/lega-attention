@@ -224,6 +224,21 @@ def main():
                         "让核心对比的已有门控基线也接受同一套病灶；"
                         "可再加 gate_only 作对照；standard/null 无输出门，"
                         "会被拒绝）")
+    p.add_argument("--dose_response", action="store_true",
+                   help="对 --dose_variants 做推理期门控系数剂量-反应扫描"
+                        "（连续缩放 A/B/C 系数；同一 checkpoint/同一批 val "
+                        "窗口；结果由汇总页读取）。默认关闭，避免无谓的重复"
+                        "评测开销")
+    p.add_argument("--dose_variants", default="lega",
+                   help="做剂量-反应扫描的门控变体（逗号分隔；默认 lega；"
+                        "standard/null 无输出门会被拒绝）")
+    p.add_argument("--dose_factors", default=",".join(
+        f"{x:g}" for x in DOSE_DEFAULT_FACTORS),
+        help="剂量-反应缩放因子网格（逗号分隔；默认 "
+             "0,0.5,0.75,1,1.25,1.5,2；λ=1 为原始系数）")
+    p.add_argument("--dose_components", default=",".join(DOSE_COMPONENT_ORDER),
+                   help="要扫描的门控组件（逗号分隔；A=查询项 w·q，"
+                        "B=集中度证据 a·c，C=长度校准 b·log n）")
     p.add_argument("--skip_plots", action="store_true")
     p.add_argument("--tune_baseline", action="store_true",
                    help="训练前对基线（standard）做 lr/权重衰减网格调优（仅验证集）；"
@@ -302,6 +317,25 @@ def main():
     if not args.skip_ablation and not ablate_variants:
         print("[run_all] 警告：--ablate_variants 与本次 --variants 无交集，"
               "跳过推理期病灶消融")
+
+    try:
+        dose_factors = parse_dose_factors(args.dose_factors)
+        dose_components = parse_dose_components(args.dose_components)
+    except ValueError as e:
+        p.error(str(e))
+    args.dose_factors = ",".join(f"{x:g}" for x in dose_factors)
+    args.dose_components = ",".join(dose_components)
+    dose_variants = ([] if not args.dose_response
+                     else parse_variants(args.dose_variants))
+    invalid_dose = sorted(set(dose_variants) - set(GATE_FACTORS))
+    if invalid_dose:
+        p.error("--dose_variants 含无输出门/未知变体: "
+                + ", ".join(invalid_dose)
+                + "；可选: " + ", ".join(sorted(GATE_FACTORS)))
+    dose_variants = [v for v in dose_variants if v in variants]
+    if args.dose_response and not dose_variants:
+        print("[run_all] 警告：--dose_variants 与本次 --variants 无交集，"
+              "跳过剂量-反应扫描")
 
     if not os.path.exists(args.config):
         p.error(f"配置文件不存在: {args.config}")
@@ -560,6 +594,17 @@ def main():
             "variants": list(ablate_variants),
             "split": "val",
         },
+        # 连续剂量-反应是否真的在本轮执行、覆盖哪些变体/组件/因子。
+        # 汇总据此过滤旧 dose_response_*.json：未开启时不能把上一轮曲线
+        # 静默当成本轮证据。
+        "dose_response": {
+            "executed": bool(args.dose_response and dose_variants),
+            "variants": list(dose_variants),
+            "components": list(dose_components),
+            "factors": list(dose_factors),
+            "split": "val",
+            "note": DOSE_NOTE,
+        },
         "evaluation": {
             "full_eval": bool(args.full_eval),
             "window_offsets": args.window_offsets,
@@ -593,6 +638,7 @@ def main():
                 "analysis": bool(not args.skip_analysis),
                 "latency": bool(not args.skip_latency),
                 "ablation": bool(not args.skip_ablation and ablate_variants),
+                "dose_response": bool(args.dose_response and dose_variants),
             },
             "run_order": {
                 "mode": run_order_plan.get("mode"),
@@ -846,6 +892,32 @@ def main():
                 ablate_cmds.append(cmd)
             if ablate_cmds:
                 run_many(ablate_cmds, jobs, _jobs_env(jobs))
+
+        post_stage = "dose_response"
+        if args.dose_response and dose_variants:
+            dose_cmds = []
+            for v, seed, vdir, suffix in chain:
+                if v not in dose_variants:
+                    continue
+                ckpt = os.path.join(vdir, "model_best.pt")
+                if not os.path.exists(ckpt):
+                    ckpt = os.path.join(vdir, "model.pt")
+                if not os.path.exists(ckpt):
+                    print(f"[dose] 跳过 {v}/seed{seed}：找不到 checkpoint")
+                    continue
+                out = os.path.join(results_dir,
+                                   f"dose_response_{v}{suffix}.json")
+                cmd = [py, "-m", "lega.dose_response", "--ckpt", ckpt,
+                       "--data_dir", args.data_dir, "--out", out,
+                       "--seed", str(seed), "--device", args.device,
+                       "--factors", args.dose_factors,
+                       "--components", args.dose_components]
+                if args.smoke:
+                    cmd += ["--ctx", str(smoke_ctx), "--eval_iters", "2"]
+                print("+", " ".join(cmd), flush=True)
+                dose_cmds.append(cmd)
+            if dose_cmds:
+                run_many(dose_cmds, jobs, _jobs_env(jobs))
 
         post_stage = "latency"
         if not args.skip_latency:
