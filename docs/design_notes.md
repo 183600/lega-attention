@@ -175,10 +175,10 @@ checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
 - **长度边界**：训练/评测都受 `block_size` 限制（small=1024）；RULER 的
   256/512/1024 是域内扫掠，不是长度外推。超过 `block_size` 的位置必须拒绝，
   不能把其他模型的长上下文结果归因到本模型。
-- **配对嵌套上下文**：当前 VT 已用中性填充精确补到请求长度并记录
-  `evidence_distance_tokens/actual_tokens`，但尚未实现“同一证据在嵌套上下文
-  中固定位置”的正式配对实验；长度趋势只能作为观测性证据，不能写成严格
-  嵌套配对因果结论。
+- **配对嵌套上下文**：`lega/nested.py` 已实现“同一证据、同一填充流、精确
+  长度”的配对 NIAH，可把证据位置与到问题距离分开；但它是**可选补充评测**，
+  尚未默认接入主流水线/汇总页，长度趋势的主结论仍以预注册的 RULER/长度
+  端点为准，嵌套结果不得单独写成确认性因果结论。
 - **与训练期消融并列**：训练期显著而推理期病灶无差异 → 收益可能来自
   训练期优化/正则化而非推理期必需；推理期显著而训练期不显著 → 训练期
   消融可能被再训练补偿。两者不能互相替代。
@@ -407,6 +407,38 @@ python run_all.py --config configs/small.json --data_dir data/wikitext103 \
   越界 EM（>1 或 <0）、非法/非正 `n` 都按缺失或损坏处理；缺 `n` 的旧产物
   保持兼容。空 payload 与“每档都是 0 分”由 `{}` 与全零值区分，不伪造
   趋势。
+
+### 嵌套上下文配对 NIAH（把长度与证据位置/距离分开）
+
+RULER 的长度剂量-反应仍是对不同随机样例、不同 needle 位置的观测比较；
+“长上下文变差”可能来自长度、证据绝对位置、证据到问题距离或样例内容中的
+任一项。`lega/nested.py` 增加一个可选的配对设计来分离这些因素：
+
+- **同一 pair 不换题**：每个 `pair_id` 在所有上下文长度与 growth 模式下
+  共享同一 key/value、同一填充流和同一局部上下文（needle 前后各取至多
+  `core_window=16` 个 token 做 SHA-256），只改变远端填充量；样例长度必须
+  精确等于请求 `ctx`，超 `block_size - max_new - 1` 直接拒绝，不做静默截断。
+- **三种 growth**：`suffix` 固定前缀、向右加长后缀（证据绝对位置固定，
+  到问题距离增长）；`prefix` 固定后缀、向左加长前缀（位置增长、距离固定）；
+  `split` 两侧各扩展一半（位置与距离同时增长）。因此 `suffix` 与 `prefix`
+  的对照能把“位置”和“距离”两个混淆项分开。
+- **统计口径**：逐 growth×ctx 报 EM 与 Wilson 95% CI；以最短档为基线，
+  在同一批 `pair_id` 上计算 `base_only/ctx_only/both/neither` 与精确 McNemar
+  p；`EM ~ log2(ctx)` 斜率只作描述性汇总（`n<3` 或无逐样例结果时为 null）。
+  候选与参照比较时按 `pair_id` 对齐，逐档做配对 McNemar，并对全部
+  growth×ctx 检验做 Holm 校正；若同一 pair 的 key/value、needle 位置、
+  到问题距离或局部上下文哈希不一致，直接拒绝比较，绝不把不同题面强行配对。
+- **设计自检**：`analysis.checks` 显式落盘 `lengths_exact`、
+  `core_context_consistent`、`pairing_complete`，以及 suffix 的位置是否固定、
+  prefix 的距离是否固定；自检失败时只报告失败，不把该 payload 当作可用
+  配对证据。
+- **边界**：只覆盖 NIAH synth/corpus，不替代 fwe/vt/多键任务；每个
+  checkpoint 单独运行，跨 checkpoint 比较仍受训练种子与评测抽样误差限制；
+  该设计未预注册，属探索性补充证据；默认 CLI 只跑 `suffix,prefix`，
+  `split` 需显式加入。命令示例：
+  `python -m lega.nested --ckpt out/.../model_best.pt --data_dir data/... --out results/.../nested_lega.json --ctx_lens 256,512,1024 --n_samples 30`；
+  结果含 `design`、逐档 `results[*].outcomes`、`analysis` 与坏案例，
+  `compare_nested(candidate, reference)` 可在同一批 pair 上做候选/参照比较。
 
 ## 基线与指标口径（先测最简单的，再谈复杂模型）
 

@@ -30,7 +30,7 @@ MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
            "tests.test_postrun", "tests.test_plots", "tests.test_probe",
            "tests.test_ablation_methods", "tests.test_output_ablation",
            "tests.test_equivalence", "tests.test_replication",
-           "tests.test_design", "tests.test_run_tests"]
+           "tests.test_design", "tests.test_nested", "tests.test_run_tests"]
 
 
 class _MonkeyPatch:
