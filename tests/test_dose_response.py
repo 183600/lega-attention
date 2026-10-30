@@ -3,18 +3,19 @@ import json
 import math
 import os
 import tempfile
+from unittest import mock
 
 import numpy as np
 
 import torch
 
-from lega.dose_response import (apply_dose,
-                                component_applicability,
+from lega.dose_response import (COMPONENT_ORDER, COMPONENT_SPECS,
+                                apply_dose, component_applicability,
                                 dose_curve_diagnostics, parse_components,
                                 parse_factors, run_dose_response)
 from lega.ablate import restore_gate_params, snapshot_gate_params
 from lega.model import GPT, save_checkpoint
-from run_all import _dose_response_tests, build_summary
+from run_all import _dose_response_tests, build_summary, single_factor_audit
 
 
 def _tiny(variant="lega"):
@@ -141,6 +142,51 @@ def _dose_payload(seed, deltas, *, slope=-0.3, best_factor=1.0,
             }
         },
     }
+
+
+def test_single_factor_audit_covers_dose_response_component_mapping():
+    """剂量-反应 A/B/C 必须各自只缩放一个已登记的单因子参数。"""
+    audit = single_factor_audit()
+    assert audit["ok"] and not audit["problems"], audit
+    rows = {r["component"]: r for r in audit["dose_response_components"]}
+    assert set(rows) == {"A", "B", "C"}
+    assert {c: r["param"] for c, r in rows.items()} == {
+        "A": "gate_w", "B": "gate_a", "C": "gate_b"}
+    assert {c: r["capability"] for c, r in rows.items()} == {
+        "A": "query", "B": "conc", "C": "len"}
+    assert {c: r["training_variant"] for c, r in rows.items()} == {
+        "A": "lega_no_query", "B": "lega_no_conc", "C": "lega_no_len"}
+
+    bad = {k: dict(v) for k, v in COMPONENT_SPECS.items()}
+    bad["B"]["param"] = "gate_w"
+    with mock.patch("lega.pipeline.common.DOSE_COMPONENT_SPECS", bad):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("剂量-反应组件 B" in p and "gate_w" in p
+                   for p in audit["problems"]), audit
+        assert any("共用" in p for p in audit["problems"]), audit
+
+    bad = {k: dict(v) for k, v in COMPONENT_SPECS.items()}
+    bad["C"]["capability"] = "query"
+    with mock.patch("lega.pipeline.common.DOSE_COMPONENT_SPECS", bad):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("剂量-反应组件 C" in p and "门控能力" in p
+                   for p in audit["problems"]), audit
+
+    bad = {k: dict(v) for k, v in COMPONENT_SPECS.items()}
+    bad["A"]["training_variant"] = "standard"
+    with mock.patch("lega.pipeline.common.DOSE_COMPONENT_SPECS", bad):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("训练期对照" in p for p in audit["problems"]), audit
+
+    with mock.patch("lega.pipeline.common.DOSE_COMPONENT_ORDER",
+                    tuple(c for c in COMPONENT_ORDER if c != "C")):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("缺少剂量-反应组件" in p for p in audit["problems"]), audit
+    print("  [ok] 单因素审计覆盖剂量-反应组件映射，拒绝错误/重复/缺失组件")
 
 
 def test_cross_seed_dose_tests_use_paired_seed_deltas_and_component_families():
@@ -353,6 +399,7 @@ if __name__ == "__main__":
     test_apply_dose_rejects_bad_factor_and_missing_component()
     test_dose_curve_quadratic_diagnostics_recover_vertex_and_slope()
     test_dose_curve_linear_has_no_vertex_and_missing_baseline_is_explicit()
+    test_single_factor_audit_covers_dose_response_component_mapping()
     test_parse_helpers_are_strict_and_deduplicate()
     test_cross_seed_dose_tests_use_paired_seed_deltas_and_component_families()
     test_cross_seed_dose_intersects_factors_and_flags_all_noop()

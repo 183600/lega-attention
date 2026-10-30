@@ -23,6 +23,11 @@ def _gate_factor_set(value):
 
 _FACTOR_PARAM = {"A": "gate_w", "B": "gate_a", "C": "gate_b"}
 
+_FACTOR_CAPABILITY = {"A": "query", "B": "conc", "C": "len"}
+
+_FACTOR_LOO_VARIANT = {"A": "lega_no_query", "B": "lega_no_conc",
+                       "C": "lega_no_len"}
+
 
 def _factor_cell_set(cell):
     """把全因子格名规范化为因子集合；非法格名返回 None。"""
@@ -506,6 +511,81 @@ def _audit_inference_single_factor_design(problems):
     return matched, permutation_lesions, audited_cells
 
 
+def _audit_dose_response_components(problems):
+    """核对剂量-反应每个组件只缩放一个已登记的单因子参数。
+
+    ``lega.dose_response`` 在同一 checkpoint、同一批 val 窗口上逐组件把
+    A（gate_w）、B（gate_a）、C（gate_b）系数乘以 λ。若组件规格把某个
+    组件映射到错误的 gate 参数/门控能力，或两个组件共用同一参数，扫描
+    就不再是“只改一个因子”的剂量实验，而会变成未声明的联合干预。这里
+    同时要求 ``COMPONENT_ORDER``/``COMPONENT_SPECS`` 恰好覆盖 A/B/C，
+    且训练期对照仍是该因子的去一法变体。
+    """
+    specs = globals().get("DOSE_COMPONENT_SPECS")
+    order = globals().get("DOSE_COMPONENT_ORDER")
+    expected = ("A", "B", "C")
+    if not isinstance(specs, dict):
+        problems.append("COMPONENT_SPECS 必须是组件 -> 规格映射")
+        specs = {}
+    if (not isinstance(order, (tuple, list))
+            or isinstance(order, str)):
+        problems.append("COMPONENT_ORDER 必须是组件序列")
+        order_entries = []
+    else:
+        order_entries = list(order)
+    seen_order = set()
+    for component in order_entries:
+        if not isinstance(component, str) or component not in expected:
+            problems.append(f"剂量-反应组件名非法：{component!r}")
+            continue
+        if component in seen_order:
+            problems.append(f"重复的剂量-反应组件：{component}")
+        seen_order.add(component)
+    missing_order = set(expected) - seen_order
+    if missing_order:
+        problems.append(
+            "缺少剂量-反应组件：" + ", ".join(sorted(missing_order)))
+    for component in specs:
+        if not isinstance(component, str):
+            problems.append(f"剂量-反应规格含非字符串组件键：{component!r}")
+        elif component not in expected:
+            problems.append(f"存在未登记的剂量-反应组件：{component!r}")
+    fields = (
+        ("param", _FACTOR_PARAM, "缩放参数"),
+        ("capability", _FACTOR_CAPABILITY, "门控能力"),
+        ("training_variant", _FACTOR_LOO_VARIANT, "训练期对照"),
+    )
+    seen_values = {name: {} for name, _mapping, _label in fields}
+    audited = []
+    for component in expected:
+        spec = specs.get(component)
+        if not isinstance(spec, dict):
+            problems.append(f"缺少剂量-反应组件规格：{component}")
+            continue
+        row = {"component": component}
+        for name, expected_map, label in fields:
+            value = spec.get(name)
+            if not isinstance(value, str) or not value:
+                problems.append(
+                    f"剂量-反应组件 {component} 的{label}非法：{value!r}")
+                continue
+            row[name] = value
+            wanted = expected_map[component]
+            if value != wanted:
+                problems.append(
+                    f"剂量-反应组件 {component} 的{label}为 {value!r}，"
+                    f"应为 {wanted!r}，否则不再是单因素剂量实验")
+            prior = seen_values[name].get(value)
+            if prior is not None and prior != component:
+                problems.append(
+                    f"剂量-反应组件 {component} 与 {prior} 共用{label} "
+                    f"{value!r}")
+            else:
+                seen_values[name][value] = component
+        audited.append(row)
+    return audited
+
+
 def changed_gate_factors(candidate, reference):
     """两个门控变体之间激活因子集合的对称差；任一方不在门控内返回 None。
 
@@ -782,6 +862,7 @@ def single_factor_audit():
             "缺少组件检验：" + ", ".join(sorted(missing_components)))
     reparameterization_contrasts = _audit_reparameterization_contrasts(
         normalized, problems)
+    dose_components = _audit_dose_response_components(problems)
     matched_lesions, permutation_lesions, inference_cells = (
         _audit_inference_single_factor_design(problems))
     return {"ok": not problems, "problems": problems,
@@ -789,14 +870,16 @@ def single_factor_audit():
             "pairs": [list(p) for p in single_factor_pairs],
             "factors": {v: sorted(f) for v, f in sorted(normalized.items())},
             "reparameterization_contrasts": reparameterization_contrasts,
+            "dose_response_components": dose_components,
             "inference_matched_lesions": matched_lesions,
             "inference_permutation_lesions": permutation_lesions,
             "inference_factorial_cells": inference_cells,
             "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
                      "X-only vs gate_only；整体对比（vs standard、LEGA vs "
                      "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
-                     "归一化/原始参数化的单因子边，以及推理期单病灶、活动"
-                     "匹配、A/B/C 分布匹配置换和 2^3 格的因子映射。")}
+                     "归一化/原始参数化的单因子边、剂量-反应的 A/B/C 参数"
+                     "映射，以及推理期单病灶、活动匹配、A/B/C 分布匹配置换"
+                     "和 2^3 格的因子映射。")}
 
 
 def build_comparison_pairs(runs, registered=None):
