@@ -15,6 +15,11 @@ def plan_digest(plan: dict) -> str:
     if isinstance(payload.get("inputs"), dict):
         payload["inputs"] = {k: v for k, v in payload["inputs"].items()
                              if k != "config_file"}
+    # 预注册配置文件的位置同样是运行位置；是否一致由 config_diffs 表达。
+    if isinstance(payload.get("scope_readiness"), dict):
+        payload["scope_readiness"] = {
+            k: v for k, v in payload["scope_readiness"].items()
+            if k not in ("declared_config", "config_file")}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -288,7 +293,14 @@ def design_conformance(plan: dict, repro: dict, runs: dict,
     failures = [c for c in plan_checks if c.get("status") == "fail"]
     out["plan_failures"] = [
         {"id": c.get("id"), "detail": c.get("detail")} for c in failures]
-    global_ids = {"seed_scope", "hypothesis_variants"}
+    endpoint_failures = {}
+    for c in failures:
+        endpoint = PLAN_FAILURE_ENDPOINTS.get(c.get("id"))
+        if endpoint:
+            endpoint_failures.setdefault(endpoint, []).append(
+                {"id": c.get("id"), "detail": c.get("detail")})
+    out["endpoint_plan_failures"] = endpoint_failures
+    global_ids = GLOBAL_PLAN_FAILURE_IDS
     out["global_plan_gate"] = any(
         c.get("id") in global_ids for c in failures)
     if out["global_plan_gate"]:
@@ -296,6 +308,13 @@ def design_conformance(plan: dict, repro: dict, runs: dict,
             "先验设计检查失败（全局）："
             + "；".join(str(c.get("detail")) for c in failures
                        if c.get("id") in global_ids))
+    for endpoint, items in sorted(endpoint_failures.items()):
+        out["problems"].append(
+            f"先验设计检查失败（{endpoint} 端点）："
+            + "；".join(str(i.get("detail")) for i in items))
+        out["warnings"].append(
+            f"{endpoint} 端点相关确认性判定将降级；其他端点不受此特定"
+            "检查影响")
     out["in_plan"] = not out["problems"]
     return out
 
@@ -350,7 +369,7 @@ def apply_design_gate(hyp_eval, conformance: dict, plan: dict = None):
         + "；".join(str(f.get("detail")) for f in
                    _as_list(conf.get("plan_failures"))
                    if isinstance(f, dict)
-                   and f.get("id") in ("seed_scope", "hypothesis_variants"))
+                   and f.get("id") in GLOBAL_PLAN_FAILURE_IDS)
         if global_fail else "")
     for h in hyp_eval:
         if not isinstance(h, dict):
@@ -369,6 +388,20 @@ def apply_design_gate(hyp_eval, conformance: dict, plan: dict = None):
                 h["confirmatory_note"] = global_reason
             continue
         endpoint = _metric_endpoint(h.get("metric"))
+        endpoint_fail_items = _as_dict(
+            conf.get("endpoint_plan_failures")).get(endpoint)
+        if isinstance(endpoint_fail_items, list) and endpoint_fail_items:
+            reason = (
+                f"先验设计检查失败（{endpoint} 端点）："
+                + "；".join(str(i.get("detail")) for i in endpoint_fail_items
+                           if isinstance(i, dict))
+                + "；该确认性判定降级为探索性")
+            h["design_population_ok"] = False
+            h["design_note"] = reason
+            if h.get("confirmatory_valid") is not False:
+                h["confirmatory_valid"] = False
+                h["confirmatory_note"] = reason
+            continue
         missing = _as_text_list(pop.get({
             "eval": "missing_eval", "ruler": "missing_ruler",
             "analysis": "missing_analysis"}[endpoint]))
@@ -449,6 +482,11 @@ def observed_design_sensitivity(tests) -> list:
 
 
 # ------------------------------------------------------------------- 渲染
+def _count(value):
+    return f"{value:,}" if isinstance(value, int) and not isinstance(
+        value, bool) else "-"
+
+
 def _fmt(x, nd=4, pct=False, signed=False):
     if x is None:
         return "-"
@@ -526,6 +564,46 @@ def render_design_section(plan: dict, conformance: dict = None,
                       c.get("status"), str(c.get("status")))
             detail = str(c.get("detail", "")).replace("|", "\\|")
             md.append(f"| {c.get('title')} | {st} | {detail} |")
+
+    db = _as_dict(plan.get("data_budget"))
+    if db:
+        md += ["", "**开跑前数据/评测预算**", ""]
+        if not db.get("report_present"):
+            md.append(
+                "- ⚠ 没有 `data_report.json`：计划无法核对训练 token 触碰"
+                "次数与 val/test 窗口；这不改变统计量，但属于准备不完整。")
+        else:
+            epochs = db.get("token_touches_per_train_token")
+            md.append(
+                f"- train tokens={_count(db.get('train_tokens'))}；"
+                f"计划每种子 token 触碰="
+                f"{_count(db.get('planned_tokens_seen_per_seed'))}"
+                + (f"（≈{_fmt(epochs, 2)}×train；预期唯一 token 覆盖≈"
+                   f"{_fmt(db.get('expected_unique_token_fraction'), 1, pct=True)}）"
+                   if epochs is not None else "")
+                + "。>1× 表示语料被重复使用，必须在报告中披露。")
+            md.append(
+                f"- eval_ctx={_count(db.get('eval_ctx'))}；val 可用窗口="
+                f"{_count(db.get('val_windows_available'))} / 计划 "
+                f"eval_iters={_count(db.get('eval_iters_planned'))}；"
+                f"test 可用窗口={_count(db.get('test_windows_available'))}"
+                "（test 只在最终评估访问）。")
+        sr = _as_dict(plan.get("scope_readiness"))
+        if sr:
+            diffs = _as_text_list(sr.get("config_diffs"))
+            scope_check = next(
+                (c for c in checks if c.get("id") == "scope_config"), {})
+            if scope_check.get("status") == "pass" and not diffs:
+                config_note = "配置规模与预注册一致"
+            elif diffs:
+                config_note = "配置不一致：" + "；".join(diffs)
+            else:
+                config_note = (
+                    "配置规模未核对（"
+                    + str(scope_check.get("status") or "unknown") + "）")
+            md.append(
+                "- 预注册范围核对：" + config_note
+                + f"；data_report 分词器={sr.get('actual_tokenizer') or '-'}。")
 
     ppl = _as_dict(_as_dict(plan.get("endpoints")).get("ppl"))
     if ppl:
@@ -715,6 +793,8 @@ def main(argv=None) -> int:
     p.add_argument("--registered", default=None,
                    help="预注册表路径（默认 preregistration/hypotheses.json）")
     p.add_argument("--ruler_n_samples", type=int, default=None)
+    p.add_argument("--data_dir", default=None,
+                   help="数据目录（读取 data_report.json 做 token/窗口预算检查）")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
@@ -749,19 +829,30 @@ def main(argv=None) -> int:
     reg_path = args.registered
     if reg_path is None:
         reg_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "preregistration", "hypotheses.json")
+            _DESIGN_ROOT, "preregistration", "hypotheses.json")
     try:
         with open(reg_path, "r", encoding="utf-8") as f:
             registered = json.load(f)
     except (OSError, ValueError):
         registered = None
 
+    data_report = None
+    if args.data_dir:
+        try:
+            from lega.preflight import load_data_report
+            data_report = load_data_report(args.data_dir)
+        except (ImportError, OSError, ValueError):
+            data_report = None
+        if data_report is None:
+            print("[design] 警告：--data_dir 下缺少可解析的 data_report.json，"
+                  "跳过 token/窗口预算检查", file=sys.stderr)
+
     try:
         plan = build_design_plan(
             cfg, seeds, variants, registered,
             config_file=args.config,
-            ruler_n_samples=args.ruler_n_samples, smoke=args.smoke)
+            ruler_n_samples=args.ruler_n_samples, smoke=args.smoke,
+            data_report=data_report)
     except ValueError as e:
         print(f"[design] 计划生成失败：{e}", file=sys.stderr)
         return 2

@@ -451,7 +451,8 @@ def main():
             ruler_n_samples=(2 if args.smoke else None),
             smoke=bool(args.smoke), known_variants=set(RUNNABLE_VARIANTS),
             analysis_variants=[v for v in variants
-                               if v in GATED_FOR_ANALYSIS])
+                               if v in GATED_FOR_ANALYSIS],
+            data_report=load_data_report(args.data_dir))
     except ValueError as e:
         p.error(f"设计计划生成失败（检查配置的 design/ruler 字段）：{e}")
     design_plan_path = os.path.join(results_dir, "design_plan.json")

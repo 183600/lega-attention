@@ -426,13 +426,21 @@ def test_design_cli_writes_plan_and_exit_code():
         reg_path = os.path.join(tmp, "reg.json")
         _write_json(reg_path, reg)
         out = os.path.join(tmp, "plan.json")
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir)
+        _write_json(os.path.join(data_dir, "data_report.json"), {
+            "accounting": {"train": {"tokens": 100000},
+                           "val": {"tokens": 100000},
+                           "test": {"tokens": 100000}},
+            "tokenizer": {"kind": "char"}})
         rc = design_main(["--config", cfg_path, "--variants", "lega,standard",
                           "--registered", reg_path, "--out", out,
-                          "--quiet"])
+                          "--data_dir", data_dir, "--quiet"])
         assert rc == 0, rc
         plan = json.load(open(out, encoding="utf-8"))
         assert plan["inputs"]["seeds"] == [1, 2, 3]
         assert plan["status"] in ("ok", "warning")
+        assert plan["data_budget"]["report_present"] is True
         # 少跑预注册种子 → fail → 退出码 2。
         _write_json(reg_path, {"scope": {"seeds": [1, 2, 3, 4, 5]},
                                "hypotheses": reg["hypotheses"]})
@@ -447,6 +455,26 @@ def test_design_cli_writes_plan_and_exit_code():
     print("  [ok] design CLI：写计划、fail 退出码 2、重写原子落盘")
 
 
+def test_design_cli_loads_default_preregistration():
+    """不传 --registered 时必须从仓库根目录读取预注册表，而非 lega/ 下。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg = {"seeds": [1337, 2024, 42, 7, 2025],
+               "ruler": {"ctx_lens": [256, 512], "n_samples": 30}}
+        cfg_path = os.path.join(tmp, "cfg.json")
+        _write_json(cfg_path, cfg)
+        out = os.path.join(tmp, "plan.json")
+        design_main(["--config", cfg_path, "--variants", "lega,standard",
+                     "--out", out, "--quiet"])
+        plan = json.load(open(out, encoding="utf-8"))
+        assert plan["inputs"]["registered_hypotheses"], plan["inputs"]
+        assert any(c.get("id") == "scope_config"
+                   for c in plan["checks"] if isinstance(c, dict))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] design CLI：默认预注册表路径正确")
+
+
 def test_plan_digest_tracks_scientific_content():
     """计划摘要对种子/变体敏感，对生成时间不敏感。"""
     p1 = _plan()
@@ -456,7 +484,9 @@ def test_plan_digest_tracks_scientific_content():
     assert p3["plan_digest"] != p1["plan_digest"]
     p4 = _plan(variants=("lega", "standard"))
     assert p4["plan_digest"] != p1["plan_digest"]
-    print("  [ok] 计划摘要：同一设计稳定、内容变化即变")
+    p5 = _plan(data_report={"accounting": {"train": {"tokens": 1000}}})
+    assert p5["plan_digest"] != p1["plan_digest"]
+    print("  [ok] 计划摘要：同一设计稳定、内容/数据预算变化即变")
 
 
 def test_design_plan_accepts_seed_zero_and_caps_seed_range():
@@ -651,6 +681,182 @@ def test_design_plan_checks_context_span_for_length_claims():
     assert check([512, 600])["status"] == "warn"
     assert check([256, 512, 1024])["status"] == "pass"
     print("  [ok] 设计计划：上下文档位跨度不足时告警")
+
+
+def test_design_scope_config_keys_match_pipeline():
+    """设计层与流水线的预注册配置规模字段不能各自漂移。"""
+    from lega.design import SCOPE_CONFIG_KEYS
+    from lega.pipeline._shared import _SCOPE_CONFIG_KEYS
+    assert tuple(SCOPE_CONFIG_KEYS) == tuple(_SCOPE_CONFIG_KEYS)
+    print("  [ok] 设计/流水线 scope.config 字段一致")
+
+
+def test_design_plan_validates_ruler_context_and_model_capacity():
+    """RULER 上下文必须是正整数，且不能超过 block_size/训练上下文。"""
+    def checks(ctx, **extra):
+        cfg = {"ruler": {"ctx_lens": ctx, "n_samples": 30}, **extra}
+        plan = build_design_plan(
+            cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
+        return {c["id"]: c for c in plan["checks"]}
+
+    ok = checks([256, 512], block_size=512, train_ctx=512)
+    assert ok["ruler_context_values"]["status"] == "pass"
+    assert ok["model_context"]["status"] == "pass"
+    assert ok["ruler_context_model"]["status"] == "pass"
+    assert checks([256, 512.5], block_size=512)["ruler_context_values"][
+        "status"] == "fail"
+    assert checks([True, 256], block_size=512)["ruler_context_values"][
+        "status"] == "fail"
+    assert checks([256, 1024], block_size=512, train_ctx=512)[
+        "ruler_context_model"]["status"] == "fail"
+    assert checks([256, 512], block_size=512, train_ctx=256)[
+        "ruler_context_model"]["status"] == "warn"
+    assert checks([256, 512], block_size=256, train_ctx=512)[
+        "model_context"]["status"] == "fail"
+    print("  [ok] 设计计划：RULER 上下文整数/模型容量检查")
+
+
+def test_design_plan_accepts_length_null_defaults_and_string_lists():
+    """length_null 缺省长度/模式由运行时生成，不能在设计层误报 fail。"""
+    cfg = {"block_size": 128, "train_ctx": 128,
+           "ruler": {"ctx_lens": [64, 128], "n_samples": 30},
+           "length_null": {"enabled": True}}
+    plan = build_design_plan(
+        cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
+    by = {c["id"]: c for c in plan["checks"]}
+    assert by["length_null_coverage"]["status"] == "info"
+    cfg["length_null"] = {"enabled": True, "lengths": "64, 128",
+                          "modes": "random,repeated"}
+    plan2 = build_design_plan(
+        cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
+    by2 = {c["id"]: c for c in plan2["checks"]}
+    assert by2["length_null_coverage"]["status"] == "pass"
+    print("  [ok] length_null：默认/字符串长度与模式不被误判")
+
+
+def test_design_plan_checks_data_budget_and_registered_scope():
+    """开跑前用 data_report 核对 token/窗口，并核对预注册配置/分词器。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        declared = os.path.join(tmp, "registered.json")
+        actual = os.path.join(tmp, "actual.json")
+        base = {"d_model": 64, "n_layers": 2, "n_heads": 2,
+                "ffn_mult": 2, "block_size": 128, "train_ctx": 128,
+                "steps": 10}
+        _write_json(declared, base)
+        _write_json(actual, base)
+        cfg = dict(base, batch_size=2, grad_accum=1, eval_iters=5,
+                   ruler={"ctx_lens": [64, 128], "n_samples": 30},
+                   length_null={"enabled": True, "lengths": [64, 128],
+                                "modes": ["random"]})
+        reg = {"scope": {"config": declared, "data": "GPT-2 BPE"},
+               "hypotheses": []}
+        data = {
+            "accounting": {"train": {"tokens": 1000},
+                           "val": {"tokens": 100000},
+                           "test": {"tokens": 100000}},
+            "tokenizer": {"kind": "gpt2"},
+        }
+        plan = build_design_plan(
+            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
+            data_report=data, known_variants={"lega"})
+        by = {c["id"]: c for c in plan["checks"]}
+        assert by["scope_config"]["status"] == "pass"
+        assert by["scope_data"]["status"] == "pass"
+        assert by["data_budget"]["status"] == "info"
+        assert by["eval_budget"]["status"] == "pass"
+        assert by["length_null_coverage"]["status"] == "pass"
+        budget = plan["data_budget"]
+        assert budget["planned_tokens_seen_per_seed"] == 2560
+        assert budget["token_touches_per_train_token"] == 2.56
+        assert budget["val_windows_available"] == (100000 - 1) // 128
+
+        bad_cfg = os.path.join(tmp, "bad.json")
+        _write_json(bad_cfg, dict(base, d_model=32))
+        bad = build_design_plan(
+            cfg, [1, 2, 3], ["lega"], reg, config_file=bad_cfg,
+            data_report=data, known_variants={"lega"})
+        bad_by = {c["id"]: c for c in bad["checks"]}
+        assert bad_by["scope_config"]["status"] == "fail"
+        assert "d_model" in bad_by["scope_config"]["detail"]
+
+        char_data = {
+            "accounting": data["accounting"],
+            "tokenizer": {"kind": "char"},
+        }
+        char = build_design_plan(
+            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
+            data_report=char_data, known_variants={"lega"})
+        char_by = {c["id"]: c for c in char["checks"]}
+        assert char_by["scope_data"]["status"] == "fail"
+
+        tiny_val = {
+            "accounting": {"train": {"tokens": 1000},
+                           "val": {"tokens": 100},
+                           "test": {"tokens": 100000}},
+            "tokenizer": {"kind": "gpt2"},
+        }
+        small = build_design_plan(
+            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
+            data_report=tiny_val, known_variants={"lega"})
+        small_by = {c["id"]: c for c in small["checks"]}
+        assert small_by["eval_budget"]["status"] == "fail"
+
+        empty_train = {
+            "accounting": {"train": {"tokens": 0},
+                           "val": {"tokens": 100000},
+                           "test": {"tokens": 100000}},
+            "tokenizer": {"kind": "gpt2"},
+        }
+        empty = build_design_plan(
+            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
+            data_report=empty_train, known_variants={"lega"})
+        empty_by = {c["id"]: c for c in empty["checks"]}
+        assert empty_by["data_budget"]["status"] == "fail"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [ok] 设计计划：数据/评测预算与预注册 scope 检查")
+
+
+def test_design_gate_downgrades_only_affected_endpoint_on_capacity_failure():
+    """RULER 上下文超容量只降级 RULER 假设，不连带 PPL 对比。"""
+    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+           "block_size": 256, "train_ctx": 256}
+    reg = {"hypotheses": [
+        {"id": "H1", "metric": "PPL", "candidate": "lega",
+         "reference": "standard", "direction": "candidate_better"},
+        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
+         "reference": "standard", "direction": "candidate_better"},
+    ]}
+    plan = build_design_plan(
+        cfg, [1, 2, 3], ["lega", "standard"], reg,
+        known_variants={"lega", "standard"})
+    by = {c["id"]: c for c in plan["checks"]}
+    assert by["ruler_context_model"]["status"] == "fail"
+    runs = {
+        v: {s: {"eval": {}, "ruler": {}, "analysis": {}}
+            for s in (1, 2, 3)}
+        for v in ("lega", "standard")
+    }
+    repro = {"variants": plan["inputs"]["variants"],
+             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    conf = design_conformance(plan, repro, runs)
+    assert conf["global_plan_gate"] is False
+    assert conf["endpoint_plan_failures"]["ruler"][0]["id"] == \
+        "ruler_context_model"
+    hyps = [
+        {"id": "H1", "metric": "PPL", "candidate": "lega",
+         "reference": "standard", "confirmatory_valid": True},
+        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
+         "reference": "standard", "confirmatory_valid": True},
+    ]
+    out = apply_design_gate(hyps, conf, plan)
+    out_by = {h["id"]: h for h in out}
+    assert out_by["H1"]["confirmatory_valid"] is True
+    assert out_by["H1"]["design_population_ok"] is True
+    assert out_by["H4"]["confirmatory_valid"] is False
+    assert "ruler" in out_by["H4"]["confirmatory_note"]
+    print("  [ok] 设计门：端点级失败只降级对应端点")
 
 
 def test_analysis_population_ignores_variants_without_analysis_support():

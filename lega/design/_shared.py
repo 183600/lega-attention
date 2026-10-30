@@ -18,6 +18,10 @@ from __future__ import annotations
 * **设计符合性**：汇总时把实际产物与先验计划逐项比对；计划内单元缺失
   时，受影响的确认性假设自动降级为探索性，避免“只保留跑成功的种子”
   被当成预注册证据。
+* **开跑前就绪**：在训练前核对 RULER 上下文是否为正整数且不超过模型
+  容量、长度零假设诊断是否覆盖最长档位、预注册配置/分词器是否一致，
+  并用 data_report 的语料核算检查 token 触碰次数与 val/test 窗口；端点
+  级失败只降级对应指标，范围/模型规模失败才全局降级。
 * **实测灵敏度**：用本次观测到的配对差标准差反推 MDE，与 SESOI 比较，
   描述“这次设计实际能分辨多小的效应”（描述性，不作显著性判定）。
 
@@ -78,6 +82,29 @@ _DEFAULT_GATED_FOR_ANALYSIS = (
 # 精确 McNemar 功效的规模上限：每增加一个 n 要枚举不一致数 m 与条件拒绝域，
 # 500 以内 O(n^2) 仍在毫秒级；更大时改用正态近似（见 mcnemar_power）。
 EXACT_MCNEMAR_MAX_N = 500
+
+# 预注册 scope 的模型/训练规模字段。与 lega.pipeline._shared._SCOPE_CONFIG_KEYS
+# 保持同一集合（测试核对）：lr/weight_decay 不在此列，因为基线调优按协议在
+# val 上选择后统一注入全部变体，属于预注册流程的一部分。
+SCOPE_CONFIG_KEYS = ("d_model", "n_layers", "n_heads", "ffn_mult",
+                     "block_size", "steps", "train_ctx")
+
+# 设计检查失败时受影响的端点。只降级真正无法检验的假设（例如 RULER 上下文
+# 超出模型容量只影响 RULER 端点，不连带推翻 PPL 对比）；范围/模型规模错误
+# 则作为全局设计失败处理。
+PLAN_FAILURE_ENDPOINTS = {
+    "ruler_context_values": "ruler",
+    "ruler_context_model": "ruler",
+    "length_null_coverage": "ruler",
+    "eval_budget": "eval",
+}
+
+# 视为全局设计失败的检查 id：这些问题使整轮 run 落在计划/预注册范围之外，
+# 或使训练/评测协议本身不可执行。
+GLOBAL_PLAN_FAILURE_IDS = frozenset({
+    "seed_scope", "hypothesis_variants", "scope_config", "scope_data",
+    "model_context", "data_budget",
+})
 
 # 先验灵敏度网格。它们是“展示设计在多大噪声下仍然够用”的横轴，不是从
 # 当前数据估计出来的假设值；调用方可通过配置里的 design 块覆盖。

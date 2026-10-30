@@ -750,9 +750,19 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   `alpha_effective`、登记假设 id、预注册 `scope.seeds`、可产出机制分析
   的变体子集 `analysis_variants`（例如 `standard` 无输出门、不产出
   `analysis_*.json`，不能被误算成缺失）；记录 `run_order_mode` /
-  `run_order_seed` / `run_order_seed_source` 与机制端点分析样例数；
+  `run_order_seed` / `run_order_seed_source`、机制端点分析样例数与是否
+  传入 `data_report`；
 - `run_order`：模式、顺序种子及来源、种子区块数与 run 数、逐 run 的
   `position/block/variant/seed`；`run_all` 直接消费该清单；
+- `scope_readiness`：预注册 `scope.config` 与当前配置的模型/训练规模差异、
+  `scope.data` 声明与 `data_report.tokenizer.kind` 的核对结果；只比较
+  `d_model/n_layers/n_heads/ffn_mult/block_size/steps/train_ctx`，不把
+  按协议统一调优的 lr/weight_decay 误判为范围外；
+- `data_budget`：来自 `data_report.accounting` 的 train/val/test token 数、
+  计划每种子 token 触碰次数（steps × batch × grad_accum × train_ctx）、
+  触碰次数相对 train token 数的倍数、若随机重采样的预期唯一 token 覆盖
+  比例，以及 val/test 在每个 eval_ctx 下的可用窗口数；不读取原始文本，
+  也不访问 test；
 - `assumptions`：显式声明的计划假设与“仅作展示横轴”的参考值，二者分开；
   另记录 `multiplicity` 模式、`run_order` 模式与机制端点声明 SD；
 - `multiplicity_plan`：模式、PPL/RULER/AUROC/AP 家族大小、全局确认族
@@ -768,11 +778,13 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   test 封存、多重比较策略；
 - `registered_plan`：登记假设的 id/指标/候选/参照/方向的只读快照，
   使计划摘要同时绑定确认性分析计划本身；
-- `checks`：种子数下限、是否覆盖预注册种子、run 顺序是否为随机化区组、
-  登记假设的候选/参照变体是否都在计划矩阵内、机制端点是否有可分析
-  产物、确认性多重比较规划与 `α_eff`、上下文档位是否至少两档且跨度
-  足够（否则长度校准主张不可检验）、声明假设下的未校正与确认性功效、
-  分析规则是否声明；
+- `checks`：种子数下限、是否覆盖预注册种子、预注册配置规模/数据分词器
+  是否一致、run 顺序是否为随机化区组、登记假设的候选/参照变体是否都在
+  计划矩阵内、机制端点是否有可分析产物、确认性多重比较规划与 `α_eff`、
+  上下文档位是否为合法正整数且至少两档/跨度足够、RULER 最长上下文是否
+  超过 `block_size`/`train_ctx`、`length_null` 是否覆盖最长档位、声明假设
+  下的未校正与确认性功效、训练 token 触碰次数与 val 窗口是否足够、分析
+  规则是否声明；
 - `plan_digest`：排除时间戳/机器路径后的内容 SHA-256，供 reproducible 审计。
 
 每次 `save_design_plan` 还会向同目录的 `design_plan_history.jsonl` 追加一行
@@ -792,6 +804,17 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 的 PPL 差异，不足以确认 1% SESOI；配置里声明 `design.ppl_paired_sd_rel`
 时计划会直接标出这一点。
 
+### 端点级设计失败
+
+设计检查不再只有“全局降级/不影响”两档。`ruler_context_values`、
+`ruler_context_model`、`length_null_coverage` 失败只影响 RULER 端点，
+`eval_budget` 失败只影响 eval 端点；`seed_scope`、`hypothesis_variants`、
+`scope_config`、`scope_data`、空训练集（`data_budget` fail）与不可执行的
+`model_context` 仍按全局失败处理。`design_conformance.json` 新增 `endpoint_plan_failures`；
+`apply_design_gate` 只把对应指标的假设降级为探索性，同一轮里未受影响的
+PPL 对比不会被 RULER 上下文超容量连带推翻。训练前发现这类问题应优先修正
+配置并重新生成计划，而不是等汇总时解释。
+
 ### 实测灵敏度（描述性）
 
 汇总页另用本次观测到的配对差 SD 反推 MDE，并与同尺度的 SESOI 比较
@@ -804,7 +827,9 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 ```bash
 # 训练前单独生成/检查设计计划（退出码 2 表示设计 fail）
 python -m lega.design --config configs/small.json \
+    --seeds 1337,2024,42,7,2025 \
     --variants standard,gate_only,qgate,null,lega,lega_no_len,lega_no_conc,lega_no_query,lega_conc_only,lega_len_only \
+    --data_dir data \
     --out results/small/design_plan.json
 ```
 
@@ -812,7 +837,8 @@ python -m lega.design --config configs/small.json \
 `alpha`、`power`、`multiplicity`（默认 `holm_worst_case`）与
 `run_order`（默认 `randomized_blocked`）；修改这些字段等同于改设计前提，
 必须重新生成计划而不是只重跑汇总。`run_all.py`
-在训练前自动生成 `results/<tag>/design_plan.json`（摘要进
+在训练前自动生成 `results/<tag>/design_plan.json`，并把
+`data_report.json` 的语料规模核算一并传给设计计划（摘要进
 `repro.json` 的 `design` 字段，其中包含 `run_order` 模式、顺序种子与逐
 run 清单），汇总时写 `design_conformance.json`，并在 `significance.json`
 增加 `design_plan` / `design_conformance` /

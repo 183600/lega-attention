@@ -85,16 +85,292 @@ def _fill_confirmatory_rows(rows, alpha_effective: float, n_seeds: int,
                 margin, sd, alpha_effective, power)
 
 
+_DESIGN_ROOT = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
+_LENGTH_NULL_MODES = ("random", "repeated", "uniform")
+
+
+def _optional_positive_int(value, name: str):
+    """返回 (值, 错误文本)；缺省字段不报错，非法值留给计划检查显形。"""
+    if value is None:
+        return None, None
+    try:
+        return _strict_int(value, name, minimum=1), None
+    except ValueError as e:
+        return None, str(e)
+
+
+def _accounting_tokens(data_report, split: str):
+    """从 data_report.accounting 读取某 split 的 token 数（损坏则 None）。"""
+    report = _as_dict(data_report)
+    accounting = _as_dict(report.get("accounting"))
+    entry = _as_dict(accounting.get(split))
+    value = entry.get("tokens")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _design_data_budget(config: dict, data_report=None) -> tuple:
+    """开跑前的数据/评测预算摘要与检查。
+
+    设计计划此前只看“要跑多少 seed”，不看“这些 seed 会消费多少 token、
+    val/test 是否够组成计划中的窗口”。这里把 data_report 的语料规模核算
+    （prepare_data 已落盘）接到计划里：报告 token 触碰次数（steps × batch ×
+    grad_accum × train_ctx 相对 train token 数）、预期唯一 token 覆盖比例，
+    以及 val/test 可组成的窗口数与计划 eval_iters 的对比。它不读取原始文本，
+    不访问 test，也不改变任何功效公式。
+    """
+    block_size, bs_err = _optional_positive_int(
+        config.get("block_size"), "block_size")
+    train_ctx, tc_err = _optional_positive_int(
+        config.get("train_ctx"), "train_ctx")
+    steps, steps_err = _optional_positive_int(config.get("steps"), "steps")
+    batch_size, batch_err = _optional_positive_int(
+        config.get("batch_size"), "batch_size")
+    grad_accum, ga_err = _optional_positive_int(
+        config.get("grad_accum", 1), "grad_accum")
+    eval_iters, ei_err = _optional_positive_int(
+        config.get("eval_iters"), "eval_iters")
+    eval_ctx = (min(block_size, train_ctx)
+                if block_size is not None and train_ctx is not None
+                else (block_size if block_size is not None else train_ctx))
+
+    train_tokens = _accounting_tokens(data_report, "train")
+    val_tokens = _accounting_tokens(data_report, "val")
+    test_tokens = _accounting_tokens(data_report, "test")
+    tokens_seen = None
+    if None not in (steps, batch_size, grad_accum, train_ctx):
+        tokens_seen = steps * batch_size * grad_accum * train_ctx
+    epochs = (tokens_seen / train_tokens
+              if tokens_seen is not None and train_tokens else None)
+    unique_fraction = (1.0 - math.exp(-epochs)
+                       if epochs is not None and math.isfinite(epochs)
+                       else None)
+    val_windows = ((val_tokens - 1) // eval_ctx
+                   if val_tokens is not None and eval_ctx else None)
+    test_windows = ((test_tokens - 1) // eval_ctx
+                    if test_tokens is not None and eval_ctx else None)
+
+    summary = {
+        "source": ("data_report.accounting" if data_report is not None
+                    else None),
+        "report_present": data_report is not None,
+        "train_tokens": train_tokens,
+        "val_tokens": val_tokens,
+        "test_tokens": test_tokens,
+        "block_size": block_size,
+        "train_ctx": train_ctx,
+        "eval_ctx": eval_ctx,
+        "steps": steps,
+        "batch_size": batch_size,
+        "grad_accum": grad_accum,
+        "eval_iters_planned": eval_iters,
+        "planned_tokens_seen_per_seed": tokens_seen,
+        "token_touches_per_train_token": epochs,
+        "expected_unique_token_fraction": unique_fraction,
+        "val_windows_available": val_windows,
+        "test_windows_available": test_windows,
+    }
+    checks = []
+    if data_report is None:
+        checks.append(_check(
+            "data_budget", "训练 token 预算", "info",
+            "未提供 data_report.json：无法核对计划 token 触碰次数与 train "
+            "语料规模；正式实验应传入 prepare_data 生成的报告"))
+        checks.append(_check(
+            "eval_budget", "评测窗口预算", "info",
+            "未提供 data_report.json：无法核对 val/test 是否足以组成计划中的"
+            "评测窗口"))
+        return summary, checks
+
+    config_errors = [e for e in (bs_err, tc_err, steps_err, batch_err,
+                                 ga_err, ei_err) if e]
+    if config_errors:
+        checks.append(_check(
+            "data_budget", "训练 token 预算", "warn",
+            "配置字段非法，无法计算 token 触碰次数：" + "；".join(config_errors)))
+    elif train_tokens is None:
+        checks.append(_check(
+            "data_budget", "训练 token 预算", "warn",
+            "data_report 缺少可读的 accounting.train.tokens：无法核对计划"
+            "训练量"))
+    elif train_tokens <= 0:
+        checks.append(_check(
+            "data_budget", "训练 token 预算", "fail",
+            "data_report 的 accounting.train.tokens=0：训练集为空，"
+            "训练/评测无法按计划执行"))
+    elif tokens_seen is None:
+        checks.append(_check(
+            "data_budget", "训练 token 预算", "warn",
+            "配置缺少 steps/batch_size/train_ctx，无法计算计划 token 触碰次数"))
+    else:
+        touches = tokens_seen / train_tokens if train_tokens else None
+        status = ("warn" if touches is not None and touches > 4.0
+                  else "info" if touches is not None and touches > 1.0
+                  else "pass")
+        detail = (
+            f"train tokens={train_tokens:,}；计划每种子 token 触碰="
+            f"{tokens_seen:,}"
+            + (f"（≈{touches:.2f}×train，预期覆盖约 "
+               f"{unique_fraction:.1%} 的唯一 token）" if touches is not None
+               else "")
+            + "。>1× 表示训练会重复使用语料；这不自动推翻 held-out 对比，"
+            "但必须在报告中披露，且不能与“更多独立数据”混为一谈")
+        checks.append(_check("data_budget", "训练 token 预算", status, detail))
+
+    budget_errors = [e for e in (bs_err, tc_err, ei_err) if e]
+    if budget_errors:
+        checks.append(_check(
+            "eval_budget", "评测窗口预算", "warn",
+            "配置字段非法，无法核对评测窗口：" + "；".join(budget_errors)))
+    elif val_tokens is None or eval_ctx is None:
+        checks.append(_check(
+            "eval_budget", "评测窗口预算", "warn",
+            "data_report 缺少 accounting.val.tokens 或配置缺少 "
+            "block_size/train_ctx：无法核对 val 评测窗口"))
+    elif val_tokens <= eval_ctx:
+        checks.append(_check(
+            "eval_budget", "评测窗口预算", "fail",
+            f"val tokens={val_tokens}，不足一个 eval_ctx={eval_ctx} 的窗口："
+            "训练内验证/checkpoint 选择无法执行，PPL 端点不可检验"))
+    else:
+        detail = (f"val tokens={val_tokens:,}，eval_ctx={eval_ctx}，可用窗口="
+                  f"{val_windows}")
+        if eval_iters is not None and val_windows < eval_iters:
+            checks.append(_check(
+                "eval_budget", "评测窗口预算", "warn",
+                detail + f"，少于计划 eval_iters={eval_iters}：实际会评估全部"
+                "可用窗口，PPL 的评测抽样误差大于计划口径"))
+        else:
+            checks.append(_check(
+                "eval_budget", "评测窗口预算", "pass",
+                detail + (f"，覆盖计划 eval_iters={eval_iters}"
+                          if eval_iters is not None else "")))
+    if test_tokens is not None and eval_ctx is not None:
+        if test_tokens <= eval_ctx:
+            checks.append(_check(
+                "test_eval_budget", "held-out test 预算", "warn",
+                f"test tokens={test_tokens}，不足一个 eval_ctx={eval_ctx} 的"
+                "窗口：最终 test PPL 无法计算，会回退 val（此时 test 不再是"
+                "独立确认集）"))
+        else:
+            checks.append(_check(
+                "test_eval_budget", "held-out test 预算", "info",
+                f"test tokens={test_tokens:,}，可用窗口={test_windows}；"
+                "test 只在最终评估访问"))
+    return summary, checks
+
+
+def _scope_readiness(registered: dict, config_file, data_report=None) -> tuple:
+    """开跑前核对预注册 scope 的配置规模与数据分词器。
+
+    汇总阶段已有 registration_scope_check，但那时算力已经花掉。设计层在
+    训练前把同一组“结论可迁移性”前提显形：配置规模字段（d_model/n_layers/
+    steps 等）和 scope.data 声明的分词器。lr/weight_decay 不比较，因为基线
+    调优按协议在 val 上选择后统一注入。
+    """
+    registered = _as_dict(registered)
+    scope = _as_dict(registered.get("scope"))
+    summary = {"declared_config": None, "config_diffs": [],
+               "declared_data": scope.get("data"),
+               "actual_tokenizer": None}
+    checks = []
+    want_rel = scope.get("config")
+    if not isinstance(want_rel, str) or not want_rel:
+        checks.append(_check(
+            "scope_config", "预注册配置范围", "info",
+            "登记表未声明 scope.config：无法在开跑前核对模型/训练规模"))
+    elif config_file is None:
+        checks.append(_check(
+            "scope_config", "预注册配置范围", "info",
+            "未提供实际配置路径：无法核对是否落在预注册配置规模内"))
+    else:
+        want_path = (want_rel if os.path.isabs(want_rel)
+                     else os.path.join(_DESIGN_ROOT, want_rel))
+        got_path = (config_file if os.path.isabs(str(config_file))
+                    else os.path.abspath(str(config_file)))
+
+        def _load(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    doc = json.load(f)
+            except (OSError, ValueError):
+                return None
+            return doc if isinstance(doc, dict) else None
+
+        want_cfg = _load(want_path)
+        got_cfg = _load(got_path)
+        summary["declared_config"] = want_rel
+        if want_cfg is None:
+            checks.append(_check(
+                "scope_config", "预注册配置范围", "warn",
+                f"登记 scope.config 不可读：{want_rel}；无法核对配置规模"))
+        elif got_cfg is None:
+            checks.append(_check(
+                "scope_config", "预注册配置范围", "warn",
+                f"实际配置不可读：{got_path}；无法核对配置规模"))
+        else:
+            def _effective(doc, key):
+                if key == "train_ctx" and key not in doc:
+                    return doc.get("block_size")
+                return doc.get(key)
+
+            diffs = [
+                f"{k}: 登记={_effective(want_cfg, k)} vs "
+                f"实际={_effective(got_cfg, k)}"
+                for k in SCOPE_CONFIG_KEYS
+                if k in want_cfg
+                and _effective(want_cfg, k) != _effective(got_cfg, k)]
+            summary["config_diffs"] = diffs
+            if diffs:
+                checks.append(_check(
+                    "scope_config", "预注册配置范围", "fail",
+                    "模型/训练规模与预注册配置不一致（" + "；".join(diffs)
+                    + "）：本轮不在登记范围内，确认性判定将降级"))
+            else:
+                checks.append(_check(
+                    "scope_config", "预注册配置范围", "pass",
+                    f"配置规模与预注册 {want_rel} 一致（"
+                    + ", ".join(SCOPE_CONFIG_KEYS) + "）"))
+
+    scope_data = str(scope.get("data") or "")
+    tokenizer = _as_dict(_as_dict(data_report).get("tokenizer"))
+    actual_tok = tokenizer.get("kind") or tokenizer.get("name")
+    summary["actual_tokenizer"] = actual_tok
+    if not scope_data:
+        checks.append(_check(
+            "scope_data", "预注册数据范围", "info",
+            "登记表未声明 scope.data：无法核对数据/分词器范围"))
+    elif data_report is None or not actual_tok:
+        checks.append(_check(
+            "scope_data", "预注册数据范围", "info",
+            "缺少可读的 data_report/tokenizer：无法在开跑前核对 scope.data"))
+    elif ("gpt2" in scope_data.lower().replace("-", "")
+          and "gpt2" not in str(actual_tok).lower().replace("-", "")):
+        checks.append(_check(
+            "scope_data", "预注册数据范围", "fail",
+            f"登记 scope.data 声明 GPT-2 BPE，实际分词器={actual_tok}："
+            "语言建模任务已改变，不在预注册范围内"))
+    else:
+        checks.append(_check(
+            "scope_data", "预注册数据范围", "pass",
+            f"数据分词器={actual_tok} 与 scope.data 声明一致"))
+    return summary, checks
+
+
 def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                       *, config_file: str = None, config_sha256: str = None,
                       alpha: float = None, power: float = None,
                       ruler_n_samples: int = None, smoke: bool = False,
                       known_variants=None, analysis_variants=None,
-                      multiplicity: str = None) -> dict:
+                      multiplicity: str = None, data_report=None) -> dict:
     """根据配置/种子计划/预注册表生成训练前的设计计划。
 
-    不读数据、不训练、不访问 test；只做输入解析与解析式功效计算，因此可以
-    在正式训练之前（基线调优等准备步骤之后）生成并落盘。``registered`` 为登记表 dict（可空）；
+    不训练、不访问 test；只做输入解析、解析式功效计算，以及可选的
+    ``data_report`` 语料规模核算（token 预算/val 窗口），因此可以在正式
+    训练之前（基线调优等准备步骤之后）生成并落盘。``registered`` 为登记表 dict（可空）；
     ``known_variants`` 用于把假设里的候选/参照映射到变体，缺省时惰性导入。
 
     返回 dict；``status`` 为 ok/warning/fail。``fail`` 不在此处中止实验，
@@ -152,10 +428,21 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
     ruler_n_samples = _strict_int(ruler_n_samples, "ruler n_samples",
                                  minimum=1)
     ctx_lens = ruler_cfg.get("ctx_lens")
-    if isinstance(ctx_lens, (list, tuple)) and ctx_lens:
-        n_contexts = len(set(str(c) for c in ctx_lens))
-    else:
-        n_contexts = 1
+    ctx_values = []
+    ctx_errors = []
+    if ctx_lens is not None:
+        if not isinstance(ctx_lens, (list, tuple)):
+            ctx_errors.append("ruler.ctx_lens 必须是整数列表")
+        elif not ctx_lens:
+            ctx_errors.append("ruler.ctx_lens 不能为空")
+        else:
+            for c in ctx_lens:
+                try:
+                    ctx_values.append(_strict_int(
+                        c, "ruler.ctx_lens", minimum=1))
+                except ValueError as e:
+                    ctx_errors.append(str(e))
+    n_contexts = len(set(ctx_values)) if ctx_values else 1
 
     registered = _as_dict(registered)
     hyps = [h for h in _as_list(registered.get("hypotheses"))
@@ -249,6 +536,11 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             checks.append(_check(
                 "seed_scope", "预注册种子计划", "pass",
                 f"计划种子与登记表一致（{seeds}）"))
+
+    # ---- 检查 2b：开跑前核对预注册 scope 的模型规模与数据分词器
+    scope_readiness, scope_checks = _scope_readiness(
+        registered, config_file, data_report)
+    checks.extend(scope_checks)
 
     # ---- 检查 3：运行顺序必须预先随机化，避免变体与时间/硬件漂移混淆
     order_problems = validate_run_order(run_order, variants, seeds)
@@ -574,32 +866,180 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "也不能把 H6/H7 当作稳健机制结论；应增加种子或降低端点方差"))
 
     # ---- 上下文档位设计：至少两档且跨度足够，才谈得上“长度校准”
-    ctx_values = []
-    if isinstance(ctx_lens, (list, tuple)):
-        for c in ctx_lens:
-            try:
-                v = _finite_float(c, "ctx_lens", positive=True)
-            except ValueError:
-                continue
-            ctx_values.append(v)
-    if len(ctx_values) < 2:
+    if ctx_errors:
         checks.append(_check(
-            "ruler_context_span", "RULER 上下文档位", "warn",
-            f"计划只有 {len(ctx_values)} 个有效上下文档位：无法检验长度"
-            "剂量-反应/长度校准主张，跨长度平均也不能替代分档结果"))
+            "ruler_context_values", "RULER 上下文取值", "fail",
+            "；".join(ctx_errors) + "：RULER 实际入口要求每个档位为正整数"))
+    elif ctx_lens is None:
+        checks.append(_check(
+            "ruler_context_values", "RULER 上下文取值", "info",
+            "配置未声明 ruler.ctx_lens：RULER 端点可能不会运行"))
     else:
-        ratio = max(ctx_values) / min(ctx_values)
-        if ratio < 2.0:
+        checks.append(_check(
+            "ruler_context_values", "RULER 上下文取值", "pass",
+            f"上下文档位均为正整数：{sorted(set(ctx_values))}"))
+
+    if not ctx_errors and ctx_values:
+        unique_ctx = sorted(set(ctx_values))
+        if len(unique_ctx) < 2:
             checks.append(_check(
                 "ruler_context_span", "RULER 上下文档位", "warn",
-                f"上下文档位跨度仅 {min(ctx_values):g}–{max(ctx_values):g}"
-                f"（×{ratio:.2f}）：长度效应可能被限制在过窄范围，"
-                "只能作该范围内的结论"))
+                f"计划只有 {len(unique_ctx)} 个有效上下文档位：无法检验"
+                "长度剂量-反应/长度校准主张，跨长度平均也不能替代分档结果"))
+        else:
+            ratio = max(unique_ctx) / min(unique_ctx)
+            if ratio < 2.0:
+                checks.append(_check(
+                    "ruler_context_span", "RULER 上下文档位", "warn",
+                    f"上下文档位跨度仅 {min(unique_ctx):g}–"
+                    f"{max(unique_ctx):g}（×{ratio:.2f}）：长度效应可能被"
+                    "限制在过窄范围，只能作该范围内的结论"))
+            else:
+                checks.append(_check(
+                    "ruler_context_span", "RULER 上下文档位", "pass",
+                    f"上下文档位 {min(unique_ctx):g}–{max(unique_ctx):g}"
+                    f"（×{ratio:.2f}，{len(unique_ctx)} 档）：可检验长度趋势"))
+
+    block_size, bs_err = _optional_positive_int(
+        config.get("block_size"), "block_size")
+    train_ctx, tc_err = _optional_positive_int(
+        config.get("train_ctx"), "train_ctx")
+    model_errors = [e for e in (bs_err, tc_err) if e]
+    if model_errors:
+        checks.append(_check(
+            "model_context", "模型上下文能力", "fail",
+            "；".join(model_errors) + "：无法核对训练/评测上下文长度"))
+    elif block_size is None or train_ctx is None:
+        checks.append(_check(
+            "model_context", "模型上下文能力", "info",
+            "配置未完整声明 block_size/train_ctx：跳过模型上下文能力核对"))
+    elif train_ctx > block_size:
+        checks.append(_check(
+            "model_context", "模型上下文能力", "fail",
+            f"train_ctx={train_ctx} > block_size={block_size}：训练窗口"
+            "超过模型位置编码容量，训练无法按计划执行"))
+    else:
+        checks.append(_check(
+            "model_context", "模型上下文能力", "pass",
+            f"train_ctx={train_ctx} <= block_size={block_size}；"
+            f"评测上下文按 min(block_size, train_ctx)={min(block_size, train_ctx)}"))
+
+    if ctx_errors:
+        checks.append(_check(
+            "ruler_context_model", "RULER 上下文与模型容量", "info",
+            "上下文取值非法，无法核对模型容量"))
+    elif not ctx_values:
+        checks.append(_check(
+            "ruler_context_model", "RULER 上下文与模型容量", "info",
+            "未声明有效 RULER 上下文档位"))
+    elif block_size is None:
+        checks.append(_check(
+            "ruler_context_model", "RULER 上下文与模型容量", "info",
+            "未声明 block_size：无法核对 RULER 最长上下文是否超出模型容量"))
+    else:
+        max_ctx = max(ctx_values)
+        if max_ctx > block_size:
+            checks.append(_check(
+                "ruler_context_model", "RULER 上下文与模型容量", "fail",
+                f"RULER 最大上下文={max_ctx} > block_size={block_size}："
+                "该档位无法按计划评测；RULER 结论只能限定在可运行档位，"
+                "确认性长度/长上下文主张应降级"))
+        elif train_ctx is not None and max_ctx > train_ctx:
+            checks.append(_check(
+                "ruler_context_model", "RULER 上下文与模型容量", "warn",
+                f"RULER 最大上下文={max_ctx} > train_ctx={train_ctx}："
+                "属于长度外推测试，不能把结果当作训练分布内的长度效应；"
+                "必须在报告中明确区分"))
         else:
             checks.append(_check(
-                "ruler_context_span", "RULER 上下文档位", "pass",
-                f"上下文档位 {min(ctx_values):g}–{max(ctx_values):g}"
-                f"（×{ratio:.2f}，{len(ctx_values)} 档）：可检验长度趋势"))
+                "ruler_context_model", "RULER 上下文与模型容量", "pass",
+                f"RULER 最大上下文={max_ctx} <= block_size={block_size}"
+                + (f" 且 <= train_ctx={train_ctx}" if train_ctx is not None
+                   else "")))
+
+    # ---- 长度零假设诊断：覆盖最长档位，且长度/模式在运行前合法
+    ln_cfg = _as_dict(config.get("length_null"))
+    if ln_cfg.get("enabled") is not True:
+        checks.append(_check(
+            "length_null_coverage", "长度零假设诊断", "info",
+            "未启用 length_null：长度校准主张只能作为探索性结果，"
+            "不能进入确认性判定"))
+    else:
+        ln_errors = []
+        ln_lengths = []
+        raw_lengths = ln_cfg.get("lengths")
+        explicit_lengths = raw_lengths is not None
+        if explicit_lengths:
+            if isinstance(raw_lengths, str):
+                raw_lengths = [part.strip() for part in raw_lengths.split(",")
+                               if part.strip()]
+            if not isinstance(raw_lengths, (list, tuple)) or not raw_lengths:
+                ln_errors.append(
+                    "length_null.lengths 必须是非空整数列表或逗号分隔字符串")
+            else:
+                for value in raw_lengths:
+                    if isinstance(value, str):
+                        text = value.strip()
+                        if text and text.lstrip("+-").isdigit():
+                            value = int(text)
+                    try:
+                        ln_lengths.append(_strict_int(
+                            value, "length_null.lengths", minimum=2))
+                    except ValueError as e:
+                        ln_errors.append(str(e))
+        raw_modes = ln_cfg.get("modes", "random,repeated,uniform")
+        if isinstance(raw_modes, str):
+            modes = [m.strip() for m in raw_modes.split(",") if m.strip()]
+        elif isinstance(raw_modes, (list, tuple)):
+            modes = [str(m).strip() for m in raw_modes if str(m).strip()]
+        else:
+            modes = []
+            ln_errors.append(
+                "length_null.modes 需要字符串或字符串列表")
+        if not modes:
+            ln_errors.append("length_null.modes 必须是非空列表")
+        invalid_modes = sorted(set(modes) - set(_LENGTH_NULL_MODES))
+        if invalid_modes:
+            ln_errors.append(
+                f"length_null.modes 含未知模式 {invalid_modes}，"
+                f"允许 {list(_LENGTH_NULL_MODES)}")
+        if ln_errors:
+            checks.append(_check(
+                "length_null_coverage", "长度零假设诊断", "fail",
+                "；".join(ln_errors)))
+        elif not explicit_lengths:
+            checks.append(_check(
+                "length_null_coverage", "长度零假设诊断", "info",
+                f"未显式声明 length_null.lengths：运行时按 block_size/"
+                f"RULER 档位生成默认长度；模式={modes} 合法。计划不复制"
+                "默认长度生成规则，只核对显式配置"))
+        else:
+            max_ln = max(ln_lengths)
+            if block_size is not None and max_ln > block_size:
+                checks.append(_check(
+                    "length_null_coverage", "长度零假设诊断", "fail",
+                    f"length_null 最长长度={max_ln} > block_size="
+                    f"{block_size}：该诊断无法运行，长度校准证据不完整"))
+            elif ctx_values and max_ln < max(ctx_values):
+                checks.append(_check(
+                    "length_null_coverage", "长度零假设诊断", "warn",
+                    f"length_null 最长长度={max_ln} < RULER 最大上下文="
+                    f"{max(ctx_values)}：最长档位缺少同长度零假设，"
+                    "该档位的长度校准主张证据不足"))
+            elif len(set(ln_lengths)) < 2:
+                checks.append(_check(
+                    "length_null_coverage", "长度零假设诊断", "warn",
+                    f"length_null 只有长度 {set(ln_lengths)}：无法区分"
+                    "固定长度噪声与长度趋势"))
+            else:
+                checks.append(_check(
+                    "length_null_coverage", "长度零假设诊断", "pass",
+                    f"长度={sorted(set(ln_lengths))}，模式={modes}；"
+                    "覆盖最长 RULER 档位"))
+
+    # ---- 数据/评测预算：开跑前用 data_report 核对 token 与窗口
+    data_budget, budget_checks = _design_data_budget(config, data_report)
+    checks.extend(budget_checks)
 
     # ---- RULER 先验灵敏度：每格样本数决定 McNemar 能检出多大的边际差
     ruler_margin = 0.01  # 与 RULER平均 SESOI 一致
@@ -845,8 +1285,11 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "run_order_seed": run_order.get("order_seed"),
             "run_order_seed_source": run_order.get("seed_source"),
             "analysis_n_examples": n_analysis_examples,
+            "data_report_present": data_report is not None,
         },
         "run_order": run_order,
+        "scope_readiness": scope_readiness,
+        "data_budget": data_budget,
         "analysis_protocol": dict(_ANALYSIS_PROTOCOL),
         # 确认性分析计划的只读快照：计划摘要因此同时绑定“登记了哪些
         # 假设、用什么指标/候选/参照”，不只是一个种子/样本量清单。
