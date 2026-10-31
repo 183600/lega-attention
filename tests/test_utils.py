@@ -17,7 +17,8 @@ import numpy as np
 
 from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
                         calibration_metrics, config_bool, config_finite_float,
-                        config_probability, f1_scores, holm_bonferroni, mean_std,
+                        config_probability, f1_scores, holm_bonferroni,
+                        load_config_json, mean_std,
                         mcnemar_exact_p, min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
                         paired_t_test, pearson,
@@ -136,6 +137,46 @@ def test_score_label_length_mismatch_is_rejected():
                 np.array([[0, 0], [1, 1]]))
     assert abs(got - 1.0) < 1e-12, got
     print("  [ok] auroc/average_precision/roc_pr_aucs 拒绝长度不一致")
+
+
+def test_load_config_json_rejects_duplicate_keys_and_non_object():
+    """配置里的重复键必须报错，而不是静默采用后声明值。"""
+    with tempfile.TemporaryDirectory() as d:
+        good = os.path.join(d, "good.json")
+        with open(good, "w", encoding="utf-8") as f:
+            json.dump({"lr": 0.001, "model": {"n_layers": 2}}, f)
+        assert load_config_json(good)["lr"] == 0.001
+
+        dup = os.path.join(d, "dup.json")
+        with open(dup, "w", encoding="utf-8") as f:
+            f.write('{"lr": 0.001, "model": {"n_layers": 2, "n_layers": 3}}')
+        try:
+            load_config_json(dup)
+        except ValueError as e:
+            assert "重复键" in str(e) and "n_layers" in str(e), e
+        else:
+            raise AssertionError("嵌套重复键未被拒绝")
+
+        dup_top = os.path.join(d, "dup_top.json")
+        with open(dup_top, "w", encoding="utf-8") as f:
+            f.write('{"steps": 1, "steps": 2}')
+        try:
+            load_config_json(dup_top)
+        except ValueError as e:
+            assert "重复键" in str(e) and "steps" in str(e), e
+        else:
+            raise AssertionError("顶层重复键未被拒绝")
+
+        arr = os.path.join(d, "array.json")
+        with open(arr, "w", encoding="utf-8") as f:
+            f.write("[1, 2]")
+        try:
+            load_config_json(arr)
+        except ValueError as e:
+            assert "顶层必须是 JSON 对象" in str(e), e
+        else:
+            raise AssertionError("非对象顶层未被拒绝")
+    print("  [ok] load_config_json：拒绝重复键与非对象顶层")
 
 
 def test_save_json_writes_strict_json_atomically():

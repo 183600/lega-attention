@@ -14,7 +14,6 @@ latency.json，下游据此把噪声量级内的差异按不可区分处理。
 import argparse
 import contextlib
 import glob
-import json
 import math
 import os
 import statistics
@@ -31,8 +30,9 @@ from .model import GPT, load_model, count_params
 from .repro import (current_pipeline_run_id, data_fingerprint,
                     git_info, sha256_file)
 from .utils import (amp_autocast, amp_dtype_for, config_bool,
-                    config_finite_float, enable_tf32, get_device, save_json,
-                    seed_int, set_seed, strict_int)
+                    config_finite_float, enable_tf32, get_device,
+                    load_config_json, save_json, seed_int, set_seed,
+                    strict_int)
 
 
 def resolve_backend(label: str):
@@ -392,11 +392,7 @@ def main():
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"{args.config} 顶层必须是 JSON 对象，收到 {type(cfg).__name__}")
+    cfg = load_config_json(args.config)
     meta = load_meta(args.data_dir)
     # 随机权重基准会用 meta.vocab_size 建模型；token 流是 uint16，
     # 超过 65536 的词表既与数据不一致，也会先耗尽内存。

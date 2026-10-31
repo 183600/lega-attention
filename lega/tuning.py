@@ -27,8 +27,8 @@ import time
 import numpy as np
 
 from .repro import current_pipeline_run_id
-from .utils import (ensure_cublas_workspace_config, mean_std, save_json,
-                    seed_int, strict_int)
+from .utils import (ensure_cublas_workspace_config, load_config_json,
+                    mean_std, save_json, seed_int, strict_int)
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
 def _finite_number(value, name: str) -> float:
@@ -327,13 +327,8 @@ def _trial_identity_summary(trials) -> dict:
 
 
 def _load_config_object(path: str) -> dict:
-    """读取配置并拒绝非对象顶层；数组/标量无法按字段继承，必须显式报错。"""
-    with open(path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: {path}")
-    return cfg
+    """读取配置：拒绝重复键与非对象顶层，数组/标量无法按字段继承。"""
+    return load_config_json(path)
 
 
 def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,

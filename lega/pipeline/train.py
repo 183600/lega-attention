@@ -272,6 +272,10 @@ def main():
     p.add_argument("--allow_data_protocol_violations", action="store_true",
                    help="即使 data_report 检测到打乱/字符切分/文档跨 split 也继续"
                         "训练（默认拒绝；仅用于复现历史实验，不推荐）")
+    p.add_argument("--allow_env_mismatch", action="store_true",
+                   help="即使运行环境与 requirements-lock.txt 不一致也继续"
+                        "（默认正式运行中止；仅用于诊断/历史复现，结果不得"
+                        "作为正式可复现结论）")
     p.add_argument("--jobs", type=int, default=None,
                    help="sanity/训练/机制分析阶段的并发子进程数；默认 CPU 上 "
                         "min(4, 核数)（<=4 核时为核数+1），CUDA 或 --wandb 下为 1")
@@ -345,11 +349,25 @@ def main():
 
     if not os.path.exists(args.config):
         p.error(f"配置文件不存在: {args.config}")
-    with open(args.config, "r", encoding="utf-8") as cf:
-        cfg = json.load(cf)
-    if not isinstance(cfg, dict):
-        p.error(f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
-                f"{args.config}")
+    try:
+        cfg = load_config_json(args.config)
+    except (OSError, ValueError) as e:
+        p.error(str(e))
+    # 环境锁闸门：manifest 记录 environment_lock 只能事后审计，不能阻止
+    # “环境已漂移但训练照跑”。正式 run 默认 fail-closed；冒烟与显式
+    # --allow_env_mismatch 降级为 warn，但结论会随 repro/台账留痕。
+    env_report = environment_lock_report(runtime=runtime_info(args.device))
+    env_gate = environment_gate(
+        env_report, smoke=bool(args.smoke),
+        allow_mismatch=bool(args.allow_env_mismatch))
+    print(f"[env] {env_gate['status']}: {env_gate['message']}")
+    if env_gate["problems"]:
+        print("[env] " + "；".join(env_gate["problems"][:5])
+              + (" ..." if len(env_gate["problems"]) > 5 else ""))
+    if env_gate["status"] == "fail":
+        p.error(env_gate["message"] + "。请按 requirements-lock.txt 重建环境，"
+                "或仅在诊断时加 --allow_env_mismatch")
+
     lc_cfg = cfg.get("length_calibration")
     length_calibration_enabled = bool(
         isinstance(lc_cfg, dict) and lc_cfg.get("enabled") is True
@@ -646,7 +664,8 @@ def main():
         "source_tree": start_source_tree,
         "data": data_fp,
         "runtime": runtime,
-        "environment_lock": environment_lock_report(runtime=runtime),
+        "environment_lock": env_report,
+        "environment_gate": env_gate,
         "registration": reg_info,
         # 长度零假设诊断：记录实际长度、随机种子与各零假设斜率，汇总页据此
         # 判断长度主张是否具备 README 要求的必要证据。
@@ -704,8 +723,9 @@ def main():
         data_fingerprint=data_digest, runtime=repro["runtime"],
         out_root=out_root, results_dir=results_dir,
         time_start=repro["time"], registration=reg_info)
-    append_record(ledger, build_experiment_record(status="started",
-                                                  **ledger_common))
+    append_record(ledger, build_experiment_record(
+        status="started", extra={"environment_gate": env_gate},
+        **ledger_common))
     print(f"[repro] 实验台账 run_id={run_id} -> {ledger}")
 
     # 冒烟：少量样例，ctx 取配置 block_size（离线字符分词下 needle+问题
@@ -1073,7 +1093,8 @@ def main():
             sanity={"executed": bool(sanity), "verdict": sanity},
             runs=run_snapshots,
             artifacts=collect_artifacts(result_files, rel_to=ROOT),
-            extra={"tracking_end": tracking_end},
+            extra={"tracking_end": tracking_end,
+                   "environment_gate": env_gate},
             **ledger_common))
         print(f"[repro] 实验台账已记录 completed（run_id={run_id}）-> {ledger}")
     print(f"\n[run_all] 全部完成；结果目录: {results_dir}")

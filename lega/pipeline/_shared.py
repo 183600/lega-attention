@@ -93,9 +93,9 @@ from lega.testreuse import (DEFAULT_TEST_LOOK_BUDGET,  # noqa: E402
 from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
 from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
 from lega.repro import (PIPELINE_RUN_ID_ENV, data_fingerprint,  # noqa: E402
-                        environment_lock_report, git_info, provenance_drift,
-                        runtime_info, sanity_summary, sha256_file,
-                        source_tree_fingerprint, worktree_state,
+                        environment_gate, environment_lock_report, git_info,
+                        provenance_drift, runtime_info, sanity_summary,
+                        sha256_file, source_tree_fingerprint, worktree_state,
                         write_worktree_patch)
 from lega.ruler import DEPTH_BINS as RULER_DEPTH_BINS  # noqa: E402
 from lega.uncertainty import (aggregate_variance_components,  # noqa: E402
@@ -103,8 +103,8 @@ from lega.uncertainty import (aggregate_variance_components,  # noqa: E402
 from lega.utils import (bootstrap_mean_ci, config_bool,
                         config_finite_float,
                         ensure_cublas_workspace_config, get_device,
-                        holm_bonferroni, mcnemar_exact_p, mean_std,
-                        min_detectable_effect,
+                        holm_bonferroni, load_config_json, mcnemar_exact_p,
+                        mean_std, min_detectable_effect,
                         paired_sign_flip_test, paired_sign_test,
                         paired_t_test, save_json, save_text,
                         seed_int, seed_plan, strict_int)  # noqa: E402

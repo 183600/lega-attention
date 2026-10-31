@@ -59,6 +59,55 @@ from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
 
 
 
+def test_run_all_rejects_duplicate_config_keys():
+    """重复配置键必须在开跑前报错，不能静默采用后声明值。"""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = os.path.join(d, "dup.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.write('{"seeds": [1], "seeds": [2]}')
+        argv = ["run_all.py", "--config", cfg,
+                "--data_dir", os.path.join(d, "data"),
+                "--out_root", os.path.join(d, "out"),
+                "--results_dir", os.path.join(d, "results")]
+        with mock.patch.object(sys, "argv", argv):
+            try:
+                run_all_main()
+            except SystemExit as e:
+                assert e.code == 2, e
+            else:
+                raise AssertionError("重复配置键未触发 argparse 错误")
+    print("  [ok] run_all 拒绝重复配置键")
+
+
+def test_run_all_environment_gate_blocks_formal_drift():
+    """正式 run 在环境漂移时必须在任何训练/调优前中止。"""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = os.path.join(d, "cfg.json")
+        _write_json(cfg, {"seeds": [1]})
+        drift = {
+            "matches": False, "python_matches": True,
+            "python": "3.12", "runtime_python": "3.12.9",
+            "missing": [], "errors": [], "path": "requirements-lock.txt",
+            "lock_sha256": "abc",
+            "mismatches": [{"package": "numpy", "expected": "2.5.4",
+                            "installed": "0.0.0"}],
+        }
+        argv = ["run_all.py", "--config", cfg,
+                "--data_dir", os.path.join(d, "data"),
+                "--out_root", os.path.join(d, "out"),
+                "--results_dir", os.path.join(d, "results")]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch("lega.pipeline.train.environment_lock_report",
+                           return_value=drift):
+            try:
+                run_all_main()
+            except SystemExit as e:
+                assert e.code == 2, e
+            else:
+                raise AssertionError("环境漂移时 run_all 未中止")
+    print("  [ok] run_all 环境锁闸门在正式 run 前失败关闭")
+
+
 def test_render_baseline_sections_reads_evidence_and_warns():
     """汇总页必须渲染简单基线 PPL 与基线调优证据；缺失时显式警告。"""
     tmp = tempfile.mkdtemp()

@@ -304,6 +304,16 @@ def _summary_part_b(**kw):
                       "无 git 的源码包也可复算）")
         md.append(f"- 运行环境：python={rt.get('python')} torch={rt.get('torch')} "
                   f"device={rt.get('device')} gpu={rt.get('gpu')} cuda={rt.get('cuda')}")
+        gate = _as_dict(repro.get("environment_gate"))
+        if gate:
+            gate_status = gate.get("status")
+            gate_msg = gate.get("message") or ""
+            if gate_status == "pass":
+                md.append(f"- 环境锁闸门：pass（{gate_msg}）")
+            else:
+                md.append(f"- ⚠ 环境锁闸门：{gate_status}（{gate_msg}）；"
+                          "本轮不得声称在锁定环境中产生，正式复现需按 "
+                          "`requirements-lock.txt` 重建环境后重跑。")
         # 逐 run 核对评测环境与训练清单：pipeline 内的 eval 通常同环境，但
         # results 目录可能被另一环境单独补跑（--skip_train/手工 evaluate），
         # 仅看全局 repro.json 的 pipeline runtime 无法发现这种错配。

@@ -25,7 +25,6 @@ log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 
 """
 import argparse
 import hashlib
-import json
 import math
 import os
 import sys
@@ -41,7 +40,8 @@ from .model import GPT, count_params
 from .preflight import (allow_protocol_violations,
                          data_protocol_preflight)
 from .repro import build_run_manifest
-from .utils import config_bool, data_rng, save_json, set_seed, strict_int
+from .utils import (config_bool, data_rng, load_config_json, save_json,
+                    set_seed, strict_int)
 
 # 训练路径 loss 与直接 logits CE 的一致性容差：1e-3 只用于吸收分块/
 # 归约顺序的浮点噪声，真正的计算错误（错误 chunk 边界、错误归一化/
@@ -689,12 +689,7 @@ def main():
               f"{len(data_preflight['critical_violations'])} 个严重问题，"
               "但已显式放行（结果不得用于正式结论）")
 
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
-            f"{args.config}")
+    cfg = load_config_json(args.config)
     sanity_cfg = cfg.get("sanity") or {}
     if not isinstance(sanity_cfg, dict):
         raise ValueError(

@@ -422,6 +422,18 @@ def test_build_summary_warns_on_eval_runtime_drift():
             eval_source_tree_digest="bbb"))
         md = build_summary(tmp)["markdown"]
         assert "源码/配置树" in md and "lega/seed1" in md
+
+        _write_json(os.path.join(tmp, "repro.json"), {
+            "variants": ["lega"], "seeds": [1], "smoke": True,
+            "runtime": {"python": "3.12", "torch": "2.14"},
+            "environment_gate": {
+                "status": "warn",
+                "message": "冒烟环境与 requirements-lock.txt 不一致",
+            },
+        })
+        md = build_summary(tmp)["markdown"]
+        assert "环境锁闸门" in md and "requirements-lock.txt" in md
+        assert "不得声称在锁定环境中产生" in md
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary 显式警告 eval/train 运行环境/源码树漂移")

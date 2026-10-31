@@ -239,6 +239,73 @@ def environment_lock_report(lock_path: str = None, runtime: dict = None) -> dict
     }
 
 
+def environment_gate(report: dict = None, *, smoke: bool = False,
+                     allow_mismatch: bool = False) -> dict:
+    """把环境锁审计转换成流水线闸门结论（pass/warn/fail）。
+
+    正式实验默认 fail-closed：环境与 ``requirements-lock.txt`` 不一致时中止，
+    避免在未声明的依赖栈上产出无法复现的结论。``smoke=True`` 与显式的
+    ``allow_mismatch=True`` 只降级为 warn，并保留在 repro/台账中；两者都
+    不应被当作正式结果的合格环境。``matches=None``（锁缺失/损坏/版本清单
+    不可用）不能声称一致，但也不伪造失败，统一记为 warn 供人工核对。
+    """
+    report = (report if isinstance(report, dict)
+              else environment_lock_report())
+    matches = report.get("matches")
+    problems = []
+    for err in report.get("errors") or []:
+        problems.append(f"lock 解析错误: {err}")
+    if report.get("python_matches") is False:
+        problems.append(
+            f"Python {report.get('runtime_python')} != lock "
+            f"{report.get('python')}")
+    for name in report.get("missing") or []:
+        problems.append(f"缺少锁定包: {name}")
+    for mismatch in report.get("mismatches") or []:
+        if isinstance(mismatch, dict):
+            problems.append(
+                f"{mismatch.get('package')} {mismatch.get('installed')} != "
+                f"{mismatch.get('expected')}")
+
+    if matches is True:
+        status, code = "pass", "environment_lock_matches"
+        message = "Python 与全部直接运行时依赖匹配 requirements-lock.txt"
+    elif matches is False:
+        if allow_mismatch:
+            status, code = "warn", "environment_lock_mismatch_allowed"
+            message = ("环境与 requirements-lock.txt 不一致，但已显式放行；"
+                       "本轮结果不得作为正式可复现结论")
+        elif smoke:
+            status, code = "warn", "environment_lock_mismatch_smoke"
+            message = ("冒烟环境与 requirements-lock.txt 不一致；仅用于代码"
+                       "正确性检查，不产生正式结论")
+        else:
+            status, code = "fail", "environment_lock_mismatch"
+            message = ("运行环境与 requirements-lock.txt 不一致；正式实验"
+                       "必须在锁定环境执行（诊断可显式 --allow_env_mismatch）")
+    else:
+        status, code = "warn", "environment_lock_unverifiable"
+        message = ("无法核对运行环境与 requirements-lock.txt 是否一致"
+                   "（锁缺失/损坏/版本清单不可用）")
+
+    return {
+        "status": status,
+        "code": code,
+        "matches": matches,
+        "smoke": bool(smoke),
+        "allow_mismatch": bool(allow_mismatch),
+        "lock_path": report.get("path"),
+        "lock_sha256": report.get("lock_sha256"),
+        "python": report.get("python"),
+        "runtime_python": report.get("runtime_python"),
+        "missing": list(report.get("missing") or []),
+        "mismatches": list(report.get("mismatches") or []),
+        "errors": list(report.get("errors") or []),
+        "problems": problems,
+        "message": message,
+    }
+
+
 # 完整 sanity 结果必须覆盖的“代码正确性”检查项（与 lega.sanity 的输出同名）。
 # 只在结果文件带 batch_sha256（可区分“最小手写/旧格式”与真实 CLI 产物）
 # 时强制要求，避免把 checks 子集当成完整闸门；旧文件缺失时保持兼容，

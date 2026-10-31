@@ -33,9 +33,9 @@ from .preflight import (allow_protocol_violations,  # noqa: E402
 from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
                     sha256_file, write_worktree_patch)
 from .utils import (amp_autocast, amp_dtype_for, config_bool, data_rng,
-                    enable_tf32, now_str, save_json, set_seed,
-                    state_dict_fingerprint, strict_int, t_critical_95,
-                    _stable_median)
+                    enable_tf32, load_config_json, now_str, save_json,
+                    set_seed, state_dict_fingerprint, strict_int,
+                    t_critical_95, _stable_median)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
@@ -1061,12 +1061,7 @@ def main():
               f"{len(data_preflight['critical_violations'])} 个严重问题，"
               f"但已显式放行（结果不得用于正式结论）：{detail}")
 
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"配置文件顶层必须是 JSON 对象，收到 {type(cfg).__name__}: "
-            f"{args.config}")
+    cfg = load_config_json(args.config)
     if args.smoke:
         for k, v in SMOKE_OVERRIDES.items():
             cfg[k] = min(v, cfg.get(k, v)) if k in ("batch_size",) else v

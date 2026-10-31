@@ -464,6 +464,41 @@ def load_json(path: str, default=None):
         return json.load(f)
 
 
+class _DuplicateJsonKey(ValueError):
+    """内部异常：object_pairs_hook 检测到重复键。"""
+
+
+def _reject_duplicate_json_keys(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise _DuplicateJsonKey(key)
+        obj[key] = value
+    return obj
+
+
+def load_config_json(path: str) -> dict:
+    """读取实验配置：拒绝重复键与非法顶层，避免静默覆盖声明值。
+
+    Python 的 ``json`` 默认对重复键“后者覆盖前者”且不报错；同一配置里
+    出现两次 ``lr``/``steps`` 时，实际执行值与作者看到的文件可能不同，
+    而 config_sha256 只能证明“这份文件被用了”，无法暴露语义歧义。这里
+    在解析阶段对所有嵌套对象拒绝重复键，并保持顶层必须是对象。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        try:
+            value = json.load(f, object_pairs_hook=_reject_duplicate_json_keys)
+        except _DuplicateJsonKey as e:
+            raise ValueError(
+                f"配置文件 {path} 含重复键 {e.args[0]!r}："
+                "重复键会静默覆盖先声明值，必须删除其中一项") from None
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"配置文件顶层必须是 JSON 对象，收到 {type(value).__name__}: "
+            f"{path}")
+    return value
+
+
 def _json_safe(obj):
     """递归把非有限浮点（NaN/±Inf）转成 None。
 

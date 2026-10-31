@@ -13,7 +13,8 @@ import torch
 from lega.data import CACHE_SCHEMA, get_train_batch
 from lega.repro import (PIPELINE_RUN_ID_ENV, SANITY_REQUIRED_CHECKS,
                         build_run_manifest, current_pipeline_run_id,
-                        data_fingerprint, environment_lock_report, git_info,
+                        data_fingerprint, environment_gate,
+                        environment_lock_report, git_info,
                         load_provenance, parse_requirements_lock,
                         provenance_drift, runtime_drift, runtime_info,
                         sanity_identity_check, sha256_file,
@@ -1679,6 +1680,50 @@ def test_requirements_lock_matches_ci_and_detects_environment_drift():
     assert report["available"] is False
     assert report["matches"] is None
     print("  [ok] 环境锁与 CI 版本一致，并检测缺包/版本/Python 漂移")
+
+
+def test_environment_gate_fails_formal_drift_and_allows_smoke_or_override():
+    """环境锁闸门：正式 run 失败关闭；冒烟/显式放行只降级为警告。"""
+    base = {
+        "matches": True, "python_matches": True, "python": "3.12",
+        "runtime_python": "3.12.9", "missing": [], "mismatches": [],
+        "errors": [], "path": "requirements-lock.txt",
+        "lock_sha256": "abc",
+    }
+    gate = environment_gate(base)
+    assert gate["status"] == "pass", gate
+    assert gate["code"] == "environment_lock_matches"
+    assert gate["problems"] == []
+
+    drift = dict(base, matches=False, mismatches=[
+        {"package": "numpy", "expected": "2.1.0", "installed": "0.0.0"}])
+    gate = environment_gate(drift)
+    assert gate["status"] == "fail", gate
+    assert gate["code"] == "environment_lock_mismatch"
+    assert any("numpy" in p for p in gate["problems"])
+
+    gate = environment_gate(drift, smoke=True)
+    assert gate["status"] == "warn", gate
+    assert gate["code"] == "environment_lock_mismatch_smoke"
+
+    gate = environment_gate(drift, allow_mismatch=True)
+    assert gate["status"] == "warn", gate
+    assert gate["code"] == "environment_lock_mismatch_allowed"
+    assert gate["allow_mismatch"] is True
+
+    unknown = dict(base, matches=None)
+    gate = environment_gate(unknown)
+    assert gate["status"] == "warn", gate
+    assert gate["code"] == "environment_lock_unverifiable"
+
+    missing = dict(base, matches=False, python_matches=False,
+                   runtime_python="3.11.9", missing=["torch"],
+                   mismatches=[])
+    gate = environment_gate(missing)
+    assert gate["status"] == "fail", gate
+    assert any("Python" in p for p in gate["problems"])
+    assert any("torch" in p for p in gate["problems"])
+    print("  [ok] 环境锁闸门：正式漂移失败关闭，冒烟/显式放行留痕降级")
 
 
 def test_verify_run_passes_complete_run_and_flags_tampering():
