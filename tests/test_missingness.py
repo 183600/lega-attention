@@ -88,6 +88,11 @@ def test_insufficient_observation_is_not_called_robust():
                               {1: None, 2: None})
     assert res0["status"] == "no_observed_pairs", res0
     assert res0["sign_robust"] is None
+    pi0 = res0["partial_identification"]
+    assert pi0["mean_diff_bounds"] is None and pi0["sign_score_bounds"] is None
+    resb = paired_missingness([1, 2], {1: None, 2: None},
+                              {1: None, 2: None}, value_bounds=(0.0, 1.0))
+    assert resb["partial_identification"]["mean_diff_bounds"] is None, resb
     print("  [ok] 观测不足/无完整配对：不作稳健判词")
 
 
@@ -117,11 +122,85 @@ def test_planned_none_falls_back_to_observed_union():
     print("  [ok] 未给计划种子时退化为两侧并集，并标明来源")
 
 
+def test_manski_bounds_are_sharp_for_bounded_outcome():
+    res = paired_missingness(
+        [1, 2, 3, 4], {1: 1.0, 2: 0.0, 4: 0.0},
+        {1: 0.0, 2: 1.0, 3: 0.5}, value_bounds=(0.0, 1.0))
+    pi = res["partial_identification"]
+    assert pi["value_bounds"] == [0.0, 1.0], pi
+    lo, hi = pi["mean_diff_bounds"]
+    assert _close(lo, -0.375) and _close(hi, 0.125), pi
+    slo, shi = pi["sign_score_bounds"]
+    assert _close(slo, -0.5) and _close(shi, 0.5), pi
+    assert pi["mean_sign_identified"] is False
+    assert pi["sign_score_identified"] is False
+    assert pi["sign_identified"] is False
+    assert pi["outcome_bounds_violations"] == []
+    print("  [ok] 有界 outcome 的 Manski 均值/符号界为 sharp bounds")
+
+
+def test_manski_bounds_identify_sign_and_margin():
+    res = paired_missingness(
+        [1, 2, 3], {1: 1.0, 2: 1.0}, {1: 0.0, 2: 0.0, 3: 0.0},
+        value_bounds=(0.0, 1.0), margin=0.2)
+    pi = res["partial_identification"]
+    assert pi["sign_identified"] is True, pi
+    assert pi["mean_sign_identified"] is True, pi
+    assert pi["sign_identified_by"] == "mean_diff", pi
+    assert pi["margin_status"] == "beyond_margin_positive", pi
+    assert pi["practical_significance"] == "positive", pi
+    assert pi["mean_diff_bounds"][0] > 0.2, pi
+    print("  [ok] Manski 界可识别符号与实际意义方向")
+
+
+def test_manski_without_outcome_bounds_uses_sign_score_only():
+    res = paired_missingness(
+        [1, 2, 3, 4], {1: 1.0, 2: 1.1, 3: 1.12},
+        {1: 1.1, 2: 1.0, 3: 1.0, 4: 1.0},
+        transform=lambda a, b: (a - b) / b if b else None, margin=0.01)
+    pi = res["partial_identification"]
+    assert pi["mean_diff_bounds"] is None, pi
+    assert pi["sign_score_bounds"] is not None, pi
+    assert pi["sign_identified"] is None or isinstance(
+        pi["sign_identified"], bool), pi
+    print("  [ok] 无界 outcome 只给符号得分 Manski 界")
+
+
+def test_manski_rejects_bad_bounds_and_flags_out_of_range_values():
+    try:
+        paired_missingness([1], {1: 0.0}, {1: 1.0}, value_bounds=(1.0, 1.0))
+        raise AssertionError("空 value_bounds 应报错")
+    except ValueError:
+        pass
+    try:
+        paired_missingness(
+            [1, 2], {1: 1.0, 2: 1.0}, {1: 1.0, 2: 1.0},
+            transform=lambda a, b: (a - b) / b, value_bounds=(0.0, 1.0))
+        raise AssertionError("自定义尺度不应直接套用 outcome 范围")
+    except ValueError:
+        pass
+    res = paired_missingness(
+        [1, 2, 3], {1: 1.2, 2: 0.5}, {1: 0.0, 2: 0.5, 3: 0.0},
+        value_bounds=(0.0, 1.0))
+    pi = res["partial_identification"]
+    assert pi["mean_diff_bounds"] is None, pi
+    assert pi["outcome_bounds_violations"] == [1], pi
+    assert pi["sign_score_bounds"] is not None, pi
+    print("  [ok] 越界观测不伪造均值界，符号界仍保留")
+
+
 def test_aggregate_missingness_does_not_zero_fill():
     entries = [
         {"status": "complete", "n_missing": 0},
-        {"status": "sensitive_within_observed_range", "n_missing": 1},
-        {"status": "no_observed_pairs", "n_missing": 3},
+        {"status": "sensitive_within_observed_range", "n_missing": 1,
+         "partial_identification": {
+             "mean_diff_bounds": None, "mean_sign_identified": None,
+             "sign_score_identified": True}},
+        {"status": "no_observed_pairs", "n_missing": 3,
+         "partial_identification": {
+             "mean_diff_bounds": [-1.0, 1.0],
+             "mean_sign_identified": False,
+             "sign_score_identified": False}},
         {"status": "invalid"},
     ]
     agg = aggregate_missingness(entries)
@@ -130,6 +209,10 @@ def test_aggregate_missingness_does_not_zero_fill():
     assert agg["n_with_missing"] == 2
     assert agg["n_sensitive"] == 1
     assert agg["status_counts"]["invalid"] == 1
+    assert agg["n_manski_mean_bounds"] == 1
+    assert agg["n_manski_mean_sign_undetermined"] == 1
+    assert agg["n_manski_sign_score_identified"] == 1
+    assert agg["n_manski_sign_score_undetermined"] == 1
     print("  [ok] 汇总计数不把不可计算条目算成无缺失")
 
 
@@ -140,7 +223,7 @@ def _runs():
                 "val_tokens_evaluated": ctx * 10}
 
     def ruler(avg):
-        by_ctx = {"256": {"n": 20, "em": avg * 100}}
+        by_ctx = {"256": {"n": 20, "em": avg}}
         return {"ctx_lens": [256], "n_samples": 20, "sample_seed": 1234,
                 "corpus_source": "local", "max_new": 12, "fwe_max_new": 40,
                 "vt_chains": 4, "vt_depth": 4, "amp": True,
@@ -169,6 +252,24 @@ def test_pipeline_adapter_reports_missing_run_and_protocol_mismatch():
     print("  [ok] 流水线适配区分缺 run/缺值与协议不一致")
 
 
+def test_pipeline_manski_bounds_for_ruler_and_ppl():
+    out = _missingness_analysis(_runs(), [("cand", "ref")], [1, 2, 3])
+    ppl = [e for e in out["endpoints"] if e["metric"] == "PPL"][0]
+    ruler = [e for e in out["endpoints"] if e["metric"] == "RULER平均"][0]
+    ppl_pi = ppl["partial_identification"]
+    ruler_pi = ruler["partial_identification"]
+    assert ppl_pi["mean_diff_bounds"] is None, ppl_pi
+    assert ppl_pi["sign_score_bounds"] is not None, ppl_pi
+    assert ruler_pi["value_bounds"] == [0.0, 1.0], ruler_pi
+    assert ruler_pi["mean_diff_bounds"] is not None, ruler_pi
+    assert ruler_pi["mean_sign_identified"] is False, ruler_pi
+    assert ruler_pi["sign_score_identified"] is True, ruler_pi
+    assert out["summary"]["n_manski_mean_bounds"] == 1, out["summary"]
+    assert out["summary"]["n_manski_mean_sign_undetermined"] == 1, \
+        out["summary"]
+    print("  [ok] 流水线对 RULER 给均值界、对 PPL 只给符号界")
+
+
 def test_render_section_includes_boundaries_and_warning():
     out = _missingness_analysis(_runs(), [("cand", "ref")], [1, 2, 3])
     md = "\n".join(_render_missingness_section(out))
@@ -176,6 +277,9 @@ def test_render_section_includes_boundaries_and_warning():
     assert "不是 MAR/MCAR 插补" in md
     assert "cand vs ref" in md and "PPL" in md
     assert "significance.json" in md and "missingness.endpoints" in md
+    assert "Manski均值界" in md and "Manski符号界" in md
+    assert "| 无界 |" in md
+    assert "Manski均值方向未定" in md
     print("  [ok] 汇总渲染包含缺失模式、边界声明与机读字段指引")
 
 

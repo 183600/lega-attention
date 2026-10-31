@@ -743,15 +743,43 @@ def _render_missingness_section(analysis) -> list:
         return (f"[{_fmt_effect(rng[0], row.get('metric'))}, "
                 f"{_fmt_effect(rng[1], row.get('metric'))}]")
 
+    def _mean_bound_text(row):
+        pi = row.get("partial_identification")
+        if not isinstance(pi, dict):
+            return "-"
+        if pi.get("outcome_bounds_violations"):
+            return "越界"
+        if pi.get("value_bounds") is None:
+            return "无界"
+        bounds = pi.get("mean_diff_bounds")
+        if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2):
+            return "-"
+        return (f"[{_fmt_effect(bounds[0], row.get('metric'))}, "
+                f"{_fmt_effect(bounds[1], row.get('metric'))}]")
+
+    def _sign_bound_text(row):
+        pi = row.get("partial_identification")
+        bounds = pi.get("sign_score_bounds") if isinstance(pi, dict) else None
+        if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2):
+            return "-"
+        lo, hi = _finite_number(bounds[0]), _finite_number(bounds[1])
+        if lo is None or hi is None:
+            return "-"
+        return f"[{lo:+.2f}, {hi:+.2f}]"
+
     md.append("主检验默认使用候选/参照都成功的种子。若缺失与结果相关"
               "（例如更难/更大的 run 更容易失败），完成者均值本身可能有偏。"
               "下表报告计划内缺失模式、两臂缺失率差、缺失配对差取同一值 δ "
-              "时的翻零临界点，以及把缺失值限制在已观测配对差范围内时完整"
-              "均值的可能范围。**这不是 MAR/MCAR 插补或严格最坏情形界**；"
-              "不进入 Holm/FWER，也不改变预注册判定。")
+              "时的翻零临界点、把缺失值限制在已观测配对差范围内时完整"
+              "均值的可能范围，以及给定 outcome 范围后的 sharp Manski "
+              "最坏情形界（RULER EM∈[0,1] 给均值差界；所有指标给符号得分"
+              "界）。观测范围**不是 MAR/MCAR 插补，也不是严格最坏情形界**；"
+              "Manski 界才只假设取值范围与计划种子。本层不进入 Holm/FWER，"
+              "也不改变预注册判定。")
     md += ["", "| 对比 | 指标 | 计划/观测/缺失 | 缺失(候选/参照/双侧) | "
            "候选−参照缺失率 | 完整Δ | 观测范围下完整均值 | 翻零需缺失δ | "
-           "结论 |", "|---|---|---|---|---|---|---|---|---|"]
+           "Manski均值界 | Manski符号界 | 结论 |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
     order = {"sensitive_within_observed_range": 0,
              "invalid": 1, "no_observed_pairs": 1, "insufficient": 1,
              "robust_within_observed_range": 2, "complete": 3}
@@ -780,24 +808,43 @@ def _render_missingness_section(analysis) -> list:
             verdict += "；⚠ 完整配对不足，仅描述"
         if row.get("protocol_mismatch"):
             verdict += f"；协议不一致 {row.get('protocol_mismatch')}"
+        pi = row.get("partial_identification")
+        if (isinstance(pi, dict) and isinstance(n_missing, int)
+                and n_missing > 0):
+            if pi.get("mean_sign_identified") is False:
+                verdict += "；Manski均值方向未定"
+            if pi.get("sign_score_identified") is False:
+                verdict += "；Manski符号未定"
         md.append(
             f"| {row.get('candidate')} vs {row.get('reference')} | "
             f"{row.get('metric')} | {counts} | {pattern} | {diff_s} | "
-            f"{delta} | {_range_text(row)} | {tip} | {verdict} |")
+            f"{delta} | {_range_text(row)} | {tip} | {_mean_bound_text(row)} | "
+            f"{_sign_bound_text(row)} | {verdict} |")
     summary = analysis.get("summary") or {}
     md.append("")
     md.append("计数："
               f"对比×指标 {summary.get('n_comparisons', 0)}、"
               f"无缺失 {summary.get('n_complete', 0)}、"
               f"存在缺失 {summary.get('n_with_missing', 0)}、"
-              f"缺失敏感 {summary.get('n_sensitive', 0)}。")
+              f"缺失敏感 {summary.get('n_sensitive', 0)}、"
+              f"Manski均值界 {summary.get('n_manski_mean_bounds', 0)}"
+              f"（方向可识别 "
+              f"{summary.get('n_manski_mean_sign_identified', 0)}、未定 "
+              f"{summary.get('n_manski_mean_sign_undetermined', 0)}）、"
+              f"Manski符号得分可识别 "
+              f"{summary.get('n_manski_sign_score_identified', 0)}、"
+              f"符号得分未定 "
+              f"{summary.get('n_manski_sign_score_undetermined', 0)}。")
     md.append("注: 缺失(候选/参照/双侧) 是计划种子里对应侧不可用的数量；"
               "两臂缺失率差 = 候选缺失率 − 参照缺失率（非零表示缺失与臂"
               "相关）。翻零需缺失δ = 所有缺失配对差取同一值时，把完整均值"
               "推到 0 所需的 δ；若它落在已观测配对差范围内，则少数缺失单元"
               "即可能翻转方向。观测范围只作透明敏感性尺度：缺失值可以比"
               "任何已观测种子更极端，“观测范围内稳健”不证明缺失随机。"
-              "完整逐种子缺失清单与 ±SESOI 临界点见 "
+              "Manski均值界仅对有界 outcome（RULER EM）计算，"
+              "Manski符号界对缺失配对取方向 +1/0/−1 的最坏情形；"
+              "界未定≠无效应，界很宽也不等于结论无效。完整逐种子缺失清单、"
+              "±SESOI 临界点与 `partial_identification` 字段见 "
               "`significance.json` 的 `missingness.endpoints`。")
     return md
 
@@ -1523,7 +1570,8 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
 
 
 def _missingness_endpoint(runs, pairs, planned_seeds, metric_name, extractor,
-                          *, protocol, transform, margin, lower_better):
+                          *, protocol, transform, margin, lower_better,
+                          value_bounds=None):
     """为某一个指标构造缺失模式与临界点敏感性条目。
 
     缺失一侧写成 None；协议不一致的整对都写成 None。模块只负责“计划了但
@@ -1578,7 +1626,8 @@ def _missingness_endpoint(runs, pairs, planned_seeds, metric_name, extractor,
             cand_values[s] = va
             ref_values[s] = vb
         row = paired_missingness(
-            plan, cand_values, ref_values, transform=transform, margin=margin)
+            plan, cand_values, ref_values, transform=transform, margin=margin,
+            value_bounds=value_bounds)
         row.update({
             "candidate": cand,
             "reference": ref,
@@ -1622,9 +1671,9 @@ def _missingness_analysis(runs, pairs, planned_seeds=None,
     endpoints += _missingness_endpoint(
         runs, pairs, planned_seeds, "RULER平均",
         lambda slot: _ruler_avg_of(slot.get("ruler")),
-        protocol="ruler", transform=lambda a, b: a - b,
+        protocol="ruler", transform=None,
         margin=(ruler_margin or {}).get("margin"),
-        lower_better=False)
+        lower_better=False, value_bounds=(0.0, 1.0))
     summary = aggregate_missingness(endpoints)
     plan = (endpoints[0].get("planned_seeds") if endpoints else
             (list(planned_seeds) if planned_seeds is not None else None))
@@ -1633,17 +1682,18 @@ def _missingness_analysis(runs, pairs, planned_seeds=None,
                                 else "observed_union")
     return {
         "method": (
-            "complete-case tipping-point / observed-range sensitivity for "
-            "planned (variant, seed) cells"),
+            "complete-case tipping-point / observed-range / Manski-bounds "
+            "sensitivity for planned (variant, seed) cells"),
         "planned_seeds": plan,
         "planned_seeds_source": planned_seeds_source,
         "endpoints": endpoints,
         "summary": summary,
         "note": ("缺失敏感性（探索性）：PPL 用逐种子相对差、RULER 用绝对 EM "
-                 "差与各自 SESOI 对齐；临界点/边界只以“缺失配对差落在已观测"
-                 "范围内”为敏感性尺度，不是 MAR/MCAR 插补或严格最坏情形界。"
-                 "缺失率与两臂差异必须如实报告；本层不进入 Holm/FWER，"
-                 "不改变预注册判定，也不能用“观测范围内稳健”证明缺失随机。"),
+                 "差与各自 SESOI 对齐；除临界点/观测范围外，RULER 因 EM∈"
+                 "[0,1] 另给均值差的 sharp Manski 最坏情形界，所有指标都给"
+                 "符号得分界；这些界只假设 outcome 范围与计划种子，不假设"
+                 "缺失随机，也不是 MAR/MCAR 插补。缺失率与两臂差异必须如实"
+                 "报告；本层不进入 Holm/FWER，不改变预注册判定。"),
     }
 
 

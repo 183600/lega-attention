@@ -905,6 +905,13 @@ fragile / insufficient / undetermined_reference）。结果写入
   用绝对 EM 差对齐 1.00 pp。δ 落在已观测配对差范围内时标为敏感。
 - **观测范围边界**：把缺失配对差全部设为观测到的最小/最大配对差，给出完整
   均值的可能范围；范围跨过 0 或 SESOI 时显式警示。
+- **Manski 最坏情形界（部分识别）**：RULER EM 是有界 outcome（∈[0,1]），
+  因而可对每个缺失配对构造 sharp 差值区间：候选缺/参照 r 为
+  `[0-r, 1-r]`，参照缺/候选 c 为 `[c-1, c]`，双缺为 `[-1, 1]`；在计划
+  种子数上平均得到 `mean_diff_bounds`，并据此判 `mean_sign_identified`。
+  对所有指标还把缺失配对的方向得分（+1/0/−1）取 `[-1, +1]`，得到
+  `sign_score_bounds` 与 `sign_score_identified`。这两类界只假设 outcome
+  范围与计划种子，不假设缺失随机；PPL 无界，只报符号得分界。
 
 计划种子来自 `design_plan.json` 的 `inputs.seeds`，因此能发现“计划了但两侧
 都没产出”的单元；计划缺失，或计划与本次 `repro.json` 的变体/种子集不一致
@@ -917,16 +924,22 @@ repro_scope`）；连 repro 种子也没有时退化为现有 runs 的种子并�
 的配对按缺失处理并单独计数，不静默混入完成者样本。
 
 **边界**：这不是多重插补，也不假设 MAR/MCAR；观测范围只是透明的敏感性
-尺度，不是概率区间，更不是 Manski 型严格最坏情形界——真实缺失值可以比
-任何已观测种子更极端。“观测范围内稳健”不证明缺失随机，也不能写成
-“无偏”。观测不足（完整配对 < 3）仍给描述性边界，但显式标
-`insufficient_seeds`，不作稳健判词；全部缺失时返回 `no_observed_pairs`，
-不拿 0 个观测做方向判断。该层不进入 Holm/FWER，不改变预注册的
-支持/拒绝/未定，只与设计降级、MDE、TOST 并列披露。结果写入
-`significance.json` 的 `missingness`，在 `summary.md` 的“缺失结果敏感性”
-小节渲染；机器字段包括逐种子缺失清单、`missing_mean_for_zero`、
+尺度，不是概率区间，也不是严格最坏情形界——真实缺失值可以比任何已观测
+种子更极端。“观测范围内稳健”不证明缺失随机，也不能写成“无偏”。新增的
+Manski 界是严格最坏情形界，但仅假设 outcome 范围与计划种子；PPL 无界，
+只能给符号得分界，且界会随缺失数线性变宽。均值界跨 0 时只说明均值方向
+未定，不能写成“无效应”；符号得分界跨 0 同理。“观测范围内稳健”但
+Manski 均值界跨 0 时，报告必须并列两者，不能只引用前者宣称稳健。观测
+不足（完整配对 < 3）仍给描述性边界，但显式标 `insufficient_seeds`，不作
+稳健判词；全部缺失时返回 `no_observed_pairs`，不拿 0 个观测做方向判断，
+也不报告只由 outcome 范围决定的空 Manski 界。该层不进入 Holm/FWER，不
+改变预注册的 支持/拒绝/未定，只与设计降级、MDE、TOST 并列披露。结果
+写入 `significance.json` 的 `missingness`，在 `summary.md` 的“缺失结果
+敏感性”小节渲染；机器字段包括逐种子缺失清单、`missing_mean_for_zero`、
 `missing_mean_for_plus_margin`、`missing_mean_for_minus_margin`、
-`full_mean_range` 与状态标签。
+`full_mean_range`、`partial_identification.mean_diff_bounds`、
+`sign_score_bounds`、`mean_sign_identified`、`sign_score_identified`、
+`within_margin`、`margin_status` 与状态标签。
 
 ### SESOI 与等价性/非劣性（TOST；把“不显著”与“无差异”分开）
 

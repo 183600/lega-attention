@@ -14,19 +14,28 @@
   才能把完整案例均值推到 0、+SESOI 或 −SESOI；δ 是否落在观测到的配对差
   范围内；
 * **观测范围边界**：把缺失配对差全部设为观测到的最小/最大配对差时，完整
-  均值的可能范围；若该范围跨过 0 或实际重要阈值，说明结论对缺失机制敏感。
+  均值的可能范围；若该范围跨过 0 或实际重要阈值，说明结论对缺失机制敏感；
+* **Manski 最坏情形界（部分识别）**：当 outcome 有已知有限范围 ``[L, U]``
+  时，对每个缺失配对利用已知一侧构造差值区间（候选缺/参照 r：
+  ``[L-r, U-r]``；参照缺/候选 c：``[c-U, c-L]``；双缺：
+  ``[L-U, U-L]``），在计划种子数上取平均得到均值差的 sharp bounds。
+  对所有指标还在缺失配对处把符号得分（+1/0/−1）取 ``[-1, +1]``，得到
+  符号得分界。界跨 0 时判“最坏情形方向未定”，这不等于无效应。
 
 边界
 ====
 * 这不是多重插补，也不假设缺失随机（MAR/MCAR）。观测到的配对差范围只是
-  一个**透明的敏感性尺度**，不是缺失值的概率区间，更不是 Manski 型严格
-  最坏情形界——真实缺失值可以比观测范围更极端。
+  一个**透明的敏感性尺度**，不是缺失值的概率区间。它本身仍不是严格最坏
+  情形界；真正的 Manski 界只在给定 outcome 范围时计算，并可能很宽。
 * “临界点在观测范围外”只说明翻转需要比任何已观测种子更极端的缺失结果，
   不证明缺失随机、也不证明结论稳健；样本很小时观测范围本身就很窄。
+* Manski 界只假设 outcome 范围与计划种子，不假设缺失机制；PPL 无界，因此
+  不给均值差界，只给符号得分界。界未定 ≠ 无效应，界很宽也不等于结论无效。
 * 缺失敏感性不进入 Holm/FWER，不改变预注册的 支持/拒绝/未定；它补充的是
   “可用样本结论在何种缺失机制下会失效”，与设计降级、MDE、TOST 并列阅读。
 * 计划种子为空/观测对为空/数值不可表示时显式返回 ``insufficient`` 或
-  ``invalid``，不把“无法计算”写成“没有缺失”或“稳健”。
+  ``invalid``，不把“无法计算”写成“没有缺失”或“稳健”；0 个完整观测时
+  也不报告只由 outcome 范围决定的空 Manski 界。
 """
 import math
 from numbers import Real
@@ -56,8 +65,9 @@ _LABEL_CN = {
 }
 
 _METHOD = (
-    "complete-case tipping-point / observed-range sensitivity analysis "
-    "(缺失值统一取同一配对差 δ；仅作敏感性诊断)")
+    "complete-case tipping-point / observed-range / Manski-bound sensitivity "
+    "analysis (缺失值统一取同一配对差 δ；Manski 界只假设 outcome 范围与"
+    "计划种子)")
 
 
 def _finite(value):
@@ -103,6 +113,24 @@ def _strict_margin(value):
     if out is None or out <= 0.0:
         raise ValueError(f"SESOI margin 必须 > 0，收到 {value!r}")
     return out
+
+
+def _strict_value_bounds(value):
+    """outcome 的有限取值区间；区间必须非空且端点有限。"""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"value_bounds 必须是 [lo, hi]，收到 {value!r}")
+    lo, hi = _finite(value[0]), _finite(value[1])
+    if lo is None or hi is None or lo >= hi:
+        raise ValueError(f"value_bounds 必须满足 lo < hi 且端点有限，收到 {value!r}")
+    try:
+        width = hi - lo
+    except (TypeError, ValueError, OverflowError):
+        width = None
+    if width is None or not math.isfinite(width):
+        raise ValueError(f"value_bounds 宽度不可表示，收到 {value!r}")
+    return (float(lo), float(hi))
 
 
 def _div(num, den):
@@ -172,9 +200,143 @@ def _values_for(mapping, seeds):
     return out
 
 
+def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
+    """在只给定 outcome 范围与计划种子的条件下计算 sharp Manski 界。
+
+    均值差界只在 outcome 有界、至少有一个完整观测且所有已观测值都在界内
+    时计算；符号得分界对任意尺度都可用。缺失配对的符号可以是 +1/0/−1，
+    因此符号界在缺失数上线性变宽；这不是概率模型，也不假设 MAR/MCAR。
+    """
+    n = len(plan)
+    observed_map = {s: d for s, d in observed}
+    missing_n = n - len(observed_map)
+    violations = set()
+    lo_b = hi_b = None
+    if value_bounds is not None:
+        lo_b, hi_b = value_bounds
+
+    sum_lo = 0.0
+    sum_hi = 0.0
+    for s in plan:
+        cv, rv = cand.get(s), ref.get(s)
+        if value_bounds is not None:
+            for value in (cv, rv):
+                if value is not None and not (lo_b <= value <= hi_b):
+                    violations.add(s)
+        if s in observed_map:
+            diff = observed_map[s]
+            sum_lo += diff
+            sum_hi += diff
+            continue
+        if value_bounds is None:
+            continue
+        if cv is not None and rv is not None:
+            sum_lo += lo_b - hi_b
+            sum_hi += hi_b - lo_b
+        elif cv is not None:
+            sum_lo += cv - hi_b
+            sum_hi += cv - lo_b
+        elif rv is not None:
+            sum_lo += lo_b - rv
+            sum_hi += hi_b - rv
+        else:
+            sum_lo += lo_b - hi_b
+            sum_hi += hi_b - lo_b
+
+    mean_lo = mean_hi = None
+    if (value_bounds is not None and n > 0 and observed_map
+            and not violations):
+        lo_candidate = min(sum_lo / n, sum_hi / n)
+        hi_candidate = max(sum_lo / n, sum_hi / n)
+        if math.isfinite(lo_candidate) and math.isfinite(hi_candidate):
+            mean_lo, mean_hi = lo_candidate, hi_candidate
+
+    signs = [1 if d > 0.0 else -1 if d < 0.0 else 0
+             for d in observed_map.values()]
+    sign_sum = sum(signs)
+    sign_lo = (_div(float(sign_sum - missing_n), float(n))
+               if n and observed_map else None)
+    sign_hi = (_div(float(sign_sum + missing_n), float(n))
+               if n and observed_map else None)
+    if sign_lo is not None and sign_hi is not None and sign_lo > sign_hi:
+        sign_lo, sign_hi = sign_hi, sign_lo
+
+    mean_sign_identified = None
+    if mean_lo is not None:
+        mean_sign_identified = bool(mean_lo > 0.0 or mean_hi < 0.0)
+    sign_score_identified = None
+    if sign_lo is not None:
+        sign_score_identified = bool(sign_lo > 0.0 or sign_hi < 0.0)
+
+    sign_identified = None
+    sign_identified_by = None
+    if mean_sign_identified is True:
+        sign_identified = True
+        sign_identified_by = "mean_diff"
+    elif sign_score_identified is True:
+        sign_identified = True
+        sign_identified_by = "sign_score"
+    elif (mean_sign_identified is False
+          or sign_score_identified is False):
+        sign_identified = False
+
+    within_margin = None
+    practical_significance = None
+    margin_status = None
+    if margin is not None and mean_lo is not None:
+        within_margin = bool(mean_lo > -margin and mean_hi < margin)
+        if mean_lo > margin:
+            practical_significance = "positive"
+            margin_status = "beyond_margin_positive"
+        elif mean_hi < -margin:
+            practical_significance = "negative"
+            margin_status = "beyond_margin_negative"
+        elif within_margin:
+            margin_status = "within_margin"
+        else:
+            margin_status = "undetermined"
+
+    if not observed_map:
+        if value_bounds is None:
+            note = ("没有完整配对观测；无界 outcome 下无法计算符号得分界，"
+                    "不能用 0 个观测做方向判断。")
+        else:
+            note = ("没有完整配对观测；Manski 界只剩由 outcome 范围决定的"
+                    "空界，未作为分析结果报告，不能用 0 个观测做方向判断。")
+    elif value_bounds is None:
+        note = ("outcome 无界：不计算均值差最坏情形界；符号得分界只假设缺失"
+                "配对方向未知，仍不假设缺失随机。")
+    elif violations:
+        note = ("已观测 outcome 超出声明范围，均值差 Manski 界不可信，故不"
+                "计算；符号得分界仍可用。")
+    else:
+        note = (f"outcome∈[{lo_b:g}, {hi_b:g}] 下的 sharp Manski 界：只假设"
+                "取值范围与计划种子，不假设缺失随机；界未定≠无效应。")
+
+    return {
+        "method": ("Manski sharp partial-identification bounds under known "
+                   "outcome range and unrestricted missingness"),
+        "value_bounds": ([lo_b, hi_b] if value_bounds is not None else None),
+        "outcome_bounds_violations": sorted(violations),
+        "mean_diff_bounds": ([mean_lo, mean_hi] if mean_lo is not None else None),
+        "sign_score_bounds": ([sign_lo, sign_hi]
+                              if sign_lo is not None else None),
+        "mean_sign_identified": mean_sign_identified,
+        "sign_score_identified": sign_score_identified,
+        "sign_identified": sign_identified,
+        "sign_identified_by": sign_identified_by,
+        "within_margin": within_margin,
+        "practical_significance": practical_significance,
+        "margin_status": margin_status,
+        "n_missing_used": int(missing_n),
+        "note": note,
+    }
+
+
 def paired_missingness(planned_seeds, candidate_values, reference_values,
                        *, transform=None, margin=None,
-                       min_seeds: int = MIN_SEEDS) -> dict:
+                       min_seeds: int = MIN_SEEDS,
+                       value_bounds=None) -> dict:
     """对一组计划种子做缺失模式 + 临界点 + 观测范围敏感性分析。
 
     ``candidate_values`` / ``reference_values`` 为 ``{seed: value}``；缺失、
@@ -184,11 +346,20 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
 
     ``transform(candidate, reference)`` 把原始观测变成分析尺度上的配对差
     （默认 ``candidate - reference``）；PPL 可传相对差以与 1% SESOI 对齐。
-    返回 dict 字段见模块文档；``status`` 不表示统计显著性，只描述缺失模式
-    下结论的脆弱性。
+    ``value_bounds=(lo, hi)`` 声明 outcome 的已知有限范围（例如 RULER EM
+    的 ``(0, 1)``），用于计算均值差的 sharp Manski 最坏情形界；它只适用于
+    默认 identity transform（自定义尺度需先明确该尺度上的差值范围）。
+    无界 outcome 只能计算符号得分界。返回 dict 字段见模块文档；``status``
+    不表示统计显著性，只描述缺失模式下结论的脆弱性。
     """
     min_seeds = _strict_int(min_seeds, "min_seeds", minimum=1)
     margin = None if margin is None else _strict_margin(margin)
+    value_bounds = _strict_value_bounds(value_bounds)
+    identity_transform = transform is None
+    if value_bounds is not None and not identity_transform:
+        raise ValueError(
+            "value_bounds 只适用于默认 identity transform；自定义尺度需先"
+            "明确该尺度上的差值范围")
     if transform is None:
         def transform(a, b):
             return a - b
@@ -264,6 +435,8 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
         "min_seeds": min_seeds,
         "margin": margin,
     }
+    result["partial_identification"] = _partial_identification(
+        plan, cand, ref, observed, value_bounds=value_bounds, margin=margin)
 
     if n_planned == 0:
         result.update({
@@ -418,12 +591,38 @@ def aggregate_missingness(entries) -> dict:
     sensitive = sum(1 for e in rows
                     if e.get("status") == "sensitive_within_observed_range")
     complete = sum(1 for e in rows if e.get("status") == "complete")
+    manski_mean = manski_mean_sign = manski_mean_undetermined = 0
+    manski_sign = manski_undetermined = 0
+    for e in rows:
+        pi = e.get("partial_identification")
+        if not isinstance(pi, dict):
+            continue
+        has_missing = (isinstance(e.get("n_missing"), int)
+                       and e.get("n_missing") > 0)
+        if not has_missing:
+            continue
+        if pi.get("mean_diff_bounds") is not None:
+            manski_mean += 1
+        if pi.get("mean_sign_identified") is True:
+            manski_mean_sign += 1
+        elif pi.get("mean_sign_identified") is False:
+            manski_mean_undetermined += 1
+        if pi.get("sign_score_identified") is True:
+            manski_sign += 1
+        elif pi.get("sign_score_identified") is False:
+            manski_undetermined += 1
     return {
         "n_comparisons": len(rows),
         "n_complete": complete,
         "n_with_missing": with_missing,
         "n_sensitive": sensitive,
+        "n_manski_mean_bounds": manski_mean,
+        "n_manski_mean_sign_identified": manski_mean_sign,
+        "n_manski_mean_sign_undetermined": manski_mean_undetermined,
+        "n_manski_sign_score_identified": manski_sign,
+        "n_manski_sign_score_undetermined": manski_undetermined,
         "status_counts": counts,
         "note": ("计数只覆盖已计算的指标×对比；状态缺失/无法计算的条目不"
-                 "计入“无缺失”，也不按稳健处理。"),
+                 "计入“无缺失”，也不按稳健处理。Manski 计数只统计实际"
+                 "计算出的最坏情形界，不把“无法计算”当成已识别。"),
     }
