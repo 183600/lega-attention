@@ -657,6 +657,67 @@ def single_factor_change(candidate, reference):
     return None
 
 
+def _audit_alt_conc_variants(problems):
+    """核对替代集中度统计是 B-only 构念对照，且不混入结构单因素表。
+
+    lega_l2/lega_entropy 与 lega 共享 A（查询）和 C（长度）以及全部参数
+    形状，只把 B 的统计量 max_j p_j 换成 L2 质量或熵质量。它们是构念效度
+    对照，不是主 2^3 矩阵的另一个 B 格：若误入 GATE_FACTORS，全因子/主效应
+    会把“换统计量”和“开关 B”混为一谈；若漏掉 A/C/门控开关，又会静默退化成
+    标准注意力。这里同时核对两侧，避免元数据与实现漂移。
+    """
+    rows = []
+    alt = globals().get("ALT_CONC_VARIANTS")
+    modes = globals().get("ALT_CONC_STATS")
+    if (not isinstance(alt, (tuple, list)) or isinstance(alt, str)):
+        problems.append("ALT_CONC_VARIANTS 必须是变体序列")
+        return rows
+    if not isinstance(modes, dict):
+        problems.append("ALT_CONC_STATS 必须是变体 -> 统计量映射")
+        return rows
+    if len(set(alt)) != len(alt):
+        problems.append("ALT_CONC_VARIANTS 含重复变体")
+    if set(modes) != set(alt):
+        problems.append(
+            "ALT_CONC_STATS 与 ALT_CONC_VARIANTS 不一致："
+            f"stats={sorted(modes)}，variants={sorted(set(alt))}")
+    for variant in alt:
+        if not isinstance(variant, str):
+            problems.append(f"ALT_CONC_VARIANTS 含非字符串变体：{variant!r}")
+            continue
+        mode = modes.get(variant)
+        if mode not in ("l2", "entropy"):
+            problems.append(
+                f"替代集中度 {variant!r} 的统计量 {mode!r} 未实现")
+            continue
+        if variant in CONTROL_VARIANTS:
+            problems.append(f"替代集中度 {variant!r} 不能作为参数安慰剂")
+        if variant not in RUNNABLE_VARIANTS:
+            problems.append(f"替代集中度 {variant!r} 不可训练/评测")
+        if variant not in SUPPLEMENTAL_VARIANTS:
+            problems.append(f"替代集中度 {variant!r} 未登记为补充对照")
+        if variant in GATE_FACTORS:
+            problems.append(
+                f"替代集中度 {variant!r} 混入了主 A/B/C 因子表；"
+                "它只替换 B 的统计量，不能当作另一个结构格")
+        if variant in RAW_GATE_FACTORS:
+            problems.append(
+                f"替代集中度 {variant!r} 混入了原始参数化因子表")
+        if variant not in _USE_QUERY or variant not in _USE_CONC \
+                or variant not in _USE_LEN:
+            problems.append(
+                f"替代集中度 {variant!r} 未保持 lega 的 A/B/C 门控结构")
+        if variant not in _GATED or variant not in _LEGA_FAMILY:
+            problems.append(
+                f"替代集中度 {variant!r} 未启用输出门或注意力统计")
+        if variant in _USE_RAW_CONC:
+            problems.append(
+                f"替代集中度 {variant!r} 同时启用了原始 B 参数化")
+        rows.append({"variant": variant, "mode": mode,
+                     "replaced_factor": "B", "reference": "lega"})
+    return rows
+
+
 def single_factor_audit():
     """核对“需要单因素的消融对比”确实只改变一个门控因子。
 
@@ -903,6 +964,7 @@ def single_factor_audit():
     dose_components = _audit_dose_response_components(problems)
     matched_lesions, permutation_lesions, inference_cells = (
         _audit_inference_single_factor_design(problems))
+    alt_conc = _audit_alt_conc_variants(problems)
     return {"ok": not problems, "problems": problems,
             "contrasts": contrasts,
             "pairs": [list(p) for p in single_factor_pairs],
@@ -912,12 +974,14 @@ def single_factor_audit():
             "inference_matched_lesions": matched_lesions,
             "inference_permutation_lesions": permutation_lesions,
             "inference_factorial_cells": inference_cells,
+            "alt_conc_contrasts": alt_conc,
             "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
                      "X-only vs gate_only；整体对比（vs standard、LEGA vs "
                      "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
                      "归一化/原始参数化的单因子边、剂量-反应的 A/B/C 参数"
-                     "映射，以及推理期单病灶、活动匹配、A/B/C 分布匹配置换"
-                     "和 2^3 格的因子映射。")}
+                     "映射、推理期单病灶、活动匹配、A/B/C 分布匹配置换、"
+                     "2^3 格的因子映射，以及替代集中度统计的 B-only 构念"
+                     "对照（lega_l2/lega_entropy 不进入主因子表）。")}
 
 
 def build_comparison_pairs(runs, registered=None):

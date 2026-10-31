@@ -95,6 +95,8 @@ CONTROL_VARIANTS = ("lega_placebo",)
 # c=log(n*q) 做长度归一化。它们回答“结论是否依赖 max_p 这一具体
 # 统计量”，而不是“换成另一种统计量后效果是否更好”。
 ALT_CONC_VARIANTS = ("lega_l2", "lega_entropy")
+# 每个构念效度变体替换 B 的具体统计量；其它变体保持默认 max_p 路径。
+ALT_CONC_STATS = {"lega_l2": "l2", "lega_entropy": "entropy"}
 SUPPLEMENTAL_VARIANTS = ("lega_raw", "lega_raw_no_len",
                          "lega_raw_conc_only", "lega_raw_no_query",
                          "lega_detach_conc", "null_zero") \
@@ -119,33 +121,36 @@ VARIANT_CN = {
     "lega_raw_conc_only": "仅原始log max_p门控",
     "lega_raw_no_query": "原始集中度+长度(无查询)",
     "lega_detach_conc": "集中度统计不反传到Q/K",
+    "lega_l2": "LEGA(集中度改为L2质量)",
+    "lega_entropy": "LEGA(集中度改为熵质量)",
     "null_zero": "空注意力(固定零value)",
 }
 
 # 各公式项出现的变体
 _USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc",
               "lega_placebo", "lega_raw", "lega_raw_no_len",
-              "lega_detach_conc")                                  # w·q 项
+              "lega_detach_conc") + ALT_CONC_VARIANTS            # w·q 项
 _USE_CONC = ("lega", "lega_no_len", "lega_no_query",
              "lega_conc_only",
-             "lega_placebo", "lega_detach_conc")                   # a*c, c=log(n*max_j p_j)
+             "lega_placebo", "lega_detach_conc") \
+    + ALT_CONC_VARIANTS                 # a*c, c=log(n*q)，q 由 ALT_CONC_STATS 决定
 _USE_RAW_CONC = ("lega_raw", "lega_raw_no_len",
                  "lega_raw_conc_only", "lega_raw_no_query")        # a*log max_p（不归一化）
 _USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
             "lega_len_only",
             "lega_placebo", "lega_raw", "lega_raw_no_query",
-            "lega_detach_conc")                                    # log n 项
+            "lega_detach_conc") + ALT_CONC_VARIANTS                # log n 项
 # 有输出门
 _GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
           "lega_no_query", "lega_conc_only", "lega_len_only",
           "lega_placebo", "lega_raw", "lega_raw_no_len",
           "lega_raw_conc_only", "lega_raw_no_query",
-          "lega_detach_conc")
-# 门依赖注意力统计（需要 max_j p_j）
+          "lega_detach_conc") + ALT_CONC_VARIANTS
+# 门依赖注意力统计（默认 max_j p_j；alt 变体替换为对应的集中度质量）
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only",
                 "lega_placebo", "lega_raw", "lega_raw_no_len",
                 "lega_raw_conc_only", "lega_raw_no_query",
-                "lega_detach_conc")
+                "lega_detach_conc") + ALT_CONC_VARIANTS
 # 固定零 value 的 null 对照：语义上仍是“空注意力”，但 value 槽不学习。
 _IS_NULL = ("null", "null_zero")
 
@@ -422,6 +427,9 @@ class CausalSelfAttention(nn.Module):
         self.use_len = variant in _USE_LEN
         self.is_null = variant in _IS_NULL
         self.detach_conc = variant == "lega_detach_conc"
+        # B 项的具体集中度统计量：主实验用 max_p；构念效度对照换成
+        # L2 质量 Σp² 或熵质量 exp(-H(p))，其余 A/C 结构与 lega 完全相同。
+        self.conc_mode = ALT_CONC_STATS.get(variant, "max")
 
         Dh = self.d_head
         if self.use_query:
@@ -508,13 +516,15 @@ class CausalSelfAttention(nn.Module):
                 nn.init.zeros_(self.v_null)
 
     def _gate_logit(self, qterm: Optional[torch.Tensor],
-                    max_p: Optional[torch.Tensor],
+                    conc_stat: Optional[torch.Tensor],
                     log_n: Optional[torch.Tensor], bht: Tuple[int, int, int],
                     keep_terms: bool = False, pos_offset: int = 0):
         """按 variant 组合门控 logit；返回 (g, logit, qterm)，不适用项为 None。
 
         qterm 为 RoPE 旋转前的查询内容向量与门控权重 w 的归约结果
-        （(B,H,T) 或 None），由调用方在对应路径上计算。
+        （(B,H,T) 或 None），由调用方在对应路径上计算。conc_stat 为 B 的
+        集中度质量 q（主实验为 max_p；lega_l2/lega_entropy 为替代统计量），
+        归一化路径计算 c=log(q)+log n，raw 路径只计算 log q。
         keep_terms=False（训练/普通推理/轻量诊断）时各项累加进 logit，
         qterm/logit 不在返回中保留（返回 None）。
         keep_terms=True（完整机制分析）时 qterm 需原样返回给统计，logit 在其
@@ -532,14 +542,14 @@ class CausalSelfAttention(nn.Module):
             logit = qterm_used.clone() if keep_terms else qterm_used
         # logit 累加"标量门控系数 × 统计项"（addcmul_）。
         if self.use_conc or self.use_raw_conc:
-            # detach 对照：集中度只作为前向特征，不让 max_p 的梯度回流到
+            # detach 对照：集中度只作为前向特征，不让 q 的梯度回流到
             # Q/K；其余参数仍正常训练。
-            src = max_p.detach() if self.detach_conc else max_p
+            src = conc_stat.detach() if self.detach_conc else conc_stat
             # 无统计需求且 src 不参与反向（推理/统计仅前向消费）时，
-            # clamp/log 原地完成；max_p 为 max/amax 的反向保存值，需要梯度
-            # 时必须保持原值。clamp_min 的输出是一次性中间张量，在其上原地
-            # 取 log 不影响反向（反向比较的是 clamp 的输入 max_p）。
-            # detach 时 src 与 max_p 共享存储，绝不能原地改写，否则后续
+            # clamp/log 原地完成；concentration 统计为 max/amax 的反向保存
+            # 值时，需要梯度必须保持原值。clamp_min 的输出是一次性中间张量，
+            # 在其上原地取 log 不影响反向（反向比较的是 clamp 的输入）。
+            # detach 时 src 与 conc_stat 共享存储，绝不能原地改写，否则后续
             # 统计拿到的 max_p 已被 clamp/log 破坏。
             c = src.clamp_min(1e-30).log() \
                 if (keep_terms or src.requires_grad or self.detach_conc) \
@@ -603,6 +613,29 @@ class CausalSelfAttention(nn.Module):
         """
         return torch.einsum("bhtd,hd->bht", q_content, gw).float()
 
+    def _conc_evidence(self, p: torch.Tensor) -> torch.Tensor:
+        """按 conc_mode 从注意力概率计算 B 的集中度质量 q。
+
+        max 路径由调用方直接取 max_p；这里只处理替代统计量：
+          l2      : q = Σ_j p_j²
+          entropy : q = exp(-H(p)) = exp(Σ_j p_j log p_j)
+        熵路径返回 log q 以便分块时按查询行求和聚合；调用方最后统一
+        ``_finalize_conc_evidence`` 还原为 q。
+        """
+        p = p.float()
+        if self.conc_mode == "l2":
+            return p.pow(2).sum(dim=-1)
+        if self.conc_mode == "entropy":
+            # 先在 fp32 上 clamp 再取 log：autocast 下 p 可能是 fp16/bf16，
+            # 直接 log(0) 会在反向产生 NaN；clamp 后的 0*log(eps)=0，
+            # 而 softmax 对已下溢概率的雅可比为 0，不改变有效梯度。
+            return (p * p.clamp_min(1e-30).log()).sum(dim=-1)
+        raise ValueError(f"{self.variant!r} 不使用替代集中度统计")
+
+    def _finalize_conc_evidence(self, stat: torch.Tensor) -> torch.Tensor:
+        """把分块汇总后的部分统计还原为 q（熵路径取 exp）。"""
+        return stat.exp() if self.conc_mode == "entropy" else stat
+
     def _softmax_reuse(self, att: torch.Tensor) -> torch.Tensor:
         if ((torch.is_grad_enabled() and att.requires_grad)
                 or torch.compiler.is_compiling()):
@@ -618,10 +651,11 @@ class CausalSelfAttention(nn.Module):
         各查询位置的门控值只依赖该位置的 qterm/max_j p_j/log n，逐块与整段
         计算结果逐位一致，因此门控不在此处按块计算。
 
-        collect_stats=False 返回 (o, max_p)；collect_stats=True 返回
-        (o, max_p, argmax_stat, p_null_stat)。max_p 为 (B,H,C) fp32 的
-        max_j p_j（null 变体已按联合 softmax 口径并入空槽），供调用方汇总后
-        计算门控或作为统计返回。
+        collect_stats=False 返回 (o, max_p, conc_stat)；collect_stats=True 返回
+        (o, max_p, conc_stat, argmax_stat, p_null_stat)。max_p 为 (B,H,C) fp32
+        的 max_j p_j（null 变体已按联合 softmax 口径并入空槽）；conc_stat 为
+        替代集中度质量 q 的逐块部分量（熵路径为 log q），供调用方汇总后计算
+        门控。主实验的 conc_stat 为 None，门控直接消费 max_p。
 
         q_rot 是 RoPE 旋转后且已预乘 1/sqrt(Dh) 的查询（打分的 q·k）。
 
@@ -672,10 +706,14 @@ class CausalSelfAttention(nn.Module):
         # 完整统计也按查询块收集。
         max_p = argmax_stat = p_null_stat = None
         # keep_gate_terms=False 的轻量统计只消费 g：不为 standard/null 计算
-        # max_p，也不为任何变体计算 argmax/p_null 诊断。
+        # max_p，也不为任何变体计算 argmax/p_null 诊断。替代集中度统计
+        # （l2/entropy）不走 max_p 门控，因此轻量路径也不需要 max_p。
         full_diag = collect_stats and keep_gate_terms
-        need_p_stats = full_diag or (self.variant in _LEGA_FAMILY and (self.use_conc or self.use_raw_conc))
-        if need_p_stats:
+        need_max_p = full_diag or (
+            self.variant in _LEGA_FAMILY and (
+                self.use_raw_conc
+                or (self.use_conc and self.conc_mode == "max")))
+        if need_max_p:
             if full_diag:
                 max_v, argmax_real = torch.max(p, dim=-1)
                 max_p = max_v.float()                                  # (B,H,C)
@@ -685,6 +723,8 @@ class CausalSelfAttention(nn.Module):
                 max_p = torch.max(p, dim=-1).values.float()            # (B,H,C)
             else:
                 max_p = p.amax(dim=-1).float()                         # (B,H,C)
+        conc_stat = (self._conc_evidence(p)
+                     if self.use_conc and self.conc_mode != "max" else None)
         if full_diag:
             if is_null:
                 # 解析合并的 null 槽参与联合归一化：真实键概率需乘 (1-p_null)，
@@ -709,8 +749,8 @@ class CausalSelfAttention(nn.Module):
             o.mul_(1 - p_null)
             o.addcmul_(p_null, v_null_c.view(1, self.n_heads, 1, -1))
         if not collect_stats:
-            return o, max_p
-        return o, max_p, argmax_stat, p_null_stat
+            return o, max_p, conc_stat
+        return o, max_p, conc_stat, argmax_stat, p_null_stat
 
     def _attend_chunked(self, q_rot: torch.Tensor, q_content: torch.Tensor,
                         k: torch.Tensor, v: torch.Tensor,
@@ -756,9 +796,10 @@ class CausalSelfAttention(nn.Module):
         Dh = v.shape[-1]
 
         def _run_chunks(qt_full, null_c):
-            # max_p 逐块汇总表必须是本次调用的局部变量：训练态 checkpoint
-            # 反向会重算整个函数，闭包列表会在重算时被重复追加。
+            # max_p/conc_stat 逐块汇总表必须是本次调用的局部变量：训练态
+            # checkpoint 反向会重算整个函数，闭包列表会在重算时被重复追加。
             max_ps = []
+            conc_stats = []
             o = v.new_empty(B, T, H, Dh)
             for q0 in range(0, T, cq):
                 q1 = min(T, q0 + cq)
@@ -779,27 +820,41 @@ class CausalSelfAttention(nn.Module):
                 # 逐元素 masked_fill_ 不会对任何元素置 -inf，整块跳过。
                 band_mask = None if q1 - q0 == 1 else _tri_band(q1 - q0, q1 - q0, q_rot.device)
                 if collect_stats:
-                    oc, mp, am, pnl = self._attend_q_chunk(
+                    oc, mp, cs, am, pnl = self._attend_q_chunk(
                         qr, kT_c, v_c, band_start, band_mask, True,
                         keep_gate_terms, null_c)
                     if mp is not None:
                         max_ps.append(mp)
+                    if cs is not None:
+                        conc_stats.append(cs)
                     if am is not None:
                         argmaxes.append(am)
                     if pnl is not None:
                         p_nulls.append(pnl)
                 else:
-                    oc, mp = self._attend_q_chunk(
+                    oc, mp, cs = self._attend_q_chunk(
                         qr, kT_c, v_c, band_start, band_mask, False,
                         null_c=null_c)
                     if mp is not None:
                         max_ps.append(mp)
+                    if cs is not None:
+                        conc_stats.append(cs)
                 # oc 为 (B,H,C,Dh)，目标切片 (B,C,H,Dh)：copy_ 自转置视图，
                 # 布局变换在此完成
                 o[:, q0:q1].copy_(oc.transpose(1, 2))
             # 各块 max_p 按查询维汇成整段：门控值逐位置只依赖
-            # (qterm, max_p, log n)，逐块与整段结果逐位一致。
+            # (qterm, 集中度统计, log n)，逐块与整段结果逐位一致。
+            # max_p 是每个查询行在其全部可见键上的行最大值，逐块结果直接
+            # 拼接；替代集中度 q 也按查询行分别计算，l2 为块内 Σp²，熵路径
+            # 为块内 Σp log p，均按查询维拼接后统一取 exp（熵路径）。
             max_p_all = torch.cat(max_ps, dim=2) if max_ps else None
+            conc_all = None
+            if self.use_conc and self.conc_mode != "max":
+                conc_all = (torch.cat(conc_stats, dim=2)
+                            if conc_stats else None)
+                if conc_all is not None:
+                    conc_all = self._finalize_conc_evidence(conc_all)
+            gate_conc = conc_all if conc_all is not None else max_p_all
             if self.variant in _GATED:
                 # keep_terms=False 时 _gate_logit 原地改写 qterm：checkpoint
                 # 反向会重算本函数并再次读取其输入，必须传副本；非 checkpoint
@@ -808,7 +863,7 @@ class CausalSelfAttention(nn.Module):
                 if qt_full is not None and use_ckpt:
                     qterm_in = qt_full.clone()
                 gg, lg, qt = self._gate_logit(
-                    qterm_in, max_p_all, log_n, (B, H, T),
+                    qterm_in, gate_conc, log_n, (B, H, T),
                     keep_terms=collect_stats and keep_gate_terms,
                     pos_offset=past_len)
                 chunk_out[0], chunk_out[1], chunk_out[2] = max_p_all, gg, lg
@@ -1142,8 +1197,9 @@ class CausalSelfAttention(nn.Module):
                 need_argmax_real = (bool(need_stats) and stats_argmax
                                     and not self.is_null)
                 need_max_real = (not self.is_null
-                                 and (self.use_conc or self.use_raw_conc
-                                      or full_stats))
+                                 and (full_stats or self.use_raw_conc
+                                      or (self.use_conc
+                                          and self.conc_mode == "max")))
                 if need_max_real and need_argmax_real:
                     max_v, argmax_stat = torch.max(p, dim=-1)
                     max_p = max_v.float()                    # max_j p_j ∈ (0, 1]
@@ -1154,6 +1210,10 @@ class CausalSelfAttention(nn.Module):
                              else p.amax(dim=-1)).float()
                 elif need_argmax_real:
                     argmax_stat = p.argmax(dim=-1)
+                conc_stat = max_p
+                if self.use_conc and self.conc_mode != "max":
+                    conc_stat = self._finalize_conc_evidence(
+                        self._conc_evidence(p)).float()
 
                 # 诊断统计（null 变体的 max_p/argmax/p_null 等）必须基于 dropout 之前的
                 # softmax 分布，否则会因 dropout 的 1/(1-p) 重标定与置零而失真；
@@ -1178,7 +1238,7 @@ class CausalSelfAttention(nn.Module):
                 # 输出门控（惰性累加：仅偏置项 (1,H,1) 参与广播）
                 if self.variant in _GATED:
                     g, logit, qterm = self._gate_logit(
-                        qterm_pre, max_p, log_n, (B, H, T),
+                        qterm_pre, conc_stat, log_n, (B, H, T),
                         keep_terms=full_stats, pos_offset=past_len)
                     # 原地乘法：o 的全部反向依赖 p/v，mul_ 自身被 autograd 正确处理
                     o.mul_(g.to(o.dtype).unsqueeze(-1))                   # o' = g * o

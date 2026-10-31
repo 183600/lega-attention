@@ -810,6 +810,9 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
         "lega_raw_conc_only": 2,      # a, d（原始 log max_p，无长度/查询）
         "lega_raw_no_query": 3,       # a, b, d（原始 log max_p + log n）
         "lega_detach_conc": d_head + 3,
+        # 替代集中度统计只改 B 的前向定义，参数形状与 lega 完全相同。
+        "lega_l2": d_head + 3,
+        "lega_entropy": d_head + 3,
         # 固定零 value 只保留可学习的 null 键（value 是 buffer）。
         "null_zero": d_head,
     }[variant]

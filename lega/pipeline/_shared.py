@@ -17,10 +17,12 @@ from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from lega.attention import (CONTROL_VARIANTS, GATE_FACTORS,  # noqa: E402
+from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
+                            CONTROL_VARIANTS, GATE_FACTORS,
                             RAW_GATE_FACTORS, RUNNABLE_VARIANTS,
                             SUPPLEMENTAL_VARIANTS, VARIANTS, VARIANT_CN,
-                            _USE_CONC, _USE_RAW_CONC)
+                            _GATED, _LEGA_FAMILY, _USE_CONC, _USE_LEN,
+                            _USE_QUERY, _USE_RAW_CONC)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER,

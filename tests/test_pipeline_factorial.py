@@ -225,6 +225,45 @@ def test_single_factor_audit_and_pair_construction():
     print("  [ok] 单因素审计：6 组对比只改一个因子，多因子对比不混入")
 
 
+def test_single_factor_audit_rejects_alt_conc_metadata_drift():
+    """替代集中度变体必须保持 B-only，且不能混入主 2^3 因子表。"""
+    from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,
+                                RAW_GATE_FACTORS, _USE_CONC)
+    audit = single_factor_audit()
+    assert audit["ok"] and not audit["problems"], audit
+    rows = audit["alt_conc_contrasts"]
+    assert {r["variant"] for r in rows} == set(ALT_CONC_VARIANTS)
+    for row in rows:
+        assert row["mode"] == ALT_CONC_STATS[row["variant"]]
+        assert row["replaced_factor"] == "B" and row["reference"] == "lega"
+        assert row["variant"] not in GATE_FACTORS
+        assert row["variant"] not in RAW_GATE_FACTORS
+
+    with mock.patch("lega.pipeline.common.ALT_CONC_STATS",
+                    {"lega_l2": "l2"}):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("ALT_CONC_STATS" in p for p in audit["problems"]), audit
+    with mock.patch("lega.pipeline.common.ALT_CONC_STATS",
+                    dict(ALT_CONC_STATS, lega_entropy="max")):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("未实现" in p for p in audit["problems"]), audit
+    bad_factors = dict(GATE_FACTORS)
+    bad_factors["lega_l2"] = frozenset({"A", "B", "C"})
+    with mock.patch("lega.pipeline.common.GATE_FACTORS", bad_factors):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("混入了主" in p for p in audit["problems"]), audit
+    with mock.patch("lega.pipeline.common._USE_CONC",
+                    tuple(v for v in _USE_CONC if v != "lega_entropy")):
+        audit = single_factor_audit()
+        assert not audit["ok"], audit
+        assert any("未保持 lega 的 A/B/C" in p
+                   for p in audit["problems"]), audit
+    print("  [ok] 替代集中度审计：B-only 元数据与主因子表隔离")
+
+
 def test_single_factor_audit_requires_complete_and_audited_contrasts():
     """审计表少一条/重复一条、或组件检验绕过审计表，都必须显式失败。"""
     with mock.patch("lega.pipeline.common.SINGLE_FACTOR_CONTRASTS",
