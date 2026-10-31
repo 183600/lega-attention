@@ -71,6 +71,7 @@ from lega.heterogeneity import (  # noqa: E402
     meta_analysis_from_seed_matrix)
 from lega.design import (apply_design_gate,  # noqa: E402
                          build_design_plan, build_run_order,
+                         capture_preparation,
                          design_conformance, load_design_plan,
                          load_design_plan_history, observed_design_sensitivity,
                          render_design_section, save_design_plan,

@@ -7,6 +7,8 @@ _shared_install(globals())
 from .scheduling import (DEFAULT_RUN_ORDER, RUN_ORDER_MODES,  # noqa: E402
                          build_run_order, validate_run_order)
 from lega.testreuse import DEFAULT_TEST_LOOK_BUDGET  # noqa: E402
+from .preparation import (data_identity_check,  # noqa: E402
+                          test_seal_check, test_seal_precheck)
 
 
 def _mechanism_endpoint_sensitivity(design_cfg: dict, metric_name: str,
@@ -492,12 +494,14 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                       alpha: float = None, power: float = None,
                       ruler_n_samples: int = None, smoke: bool = False,
                       known_variants=None, analysis_variants=None,
-                      multiplicity: str = None, data_report=None) -> dict:
+                      multiplicity: str = None, data_report=None,
+                      preparation: dict = None) -> dict:
     """根据配置/种子计划/预注册表生成训练前的设计计划。
 
-    不训练、不访问 test；只做输入解析、解析式功效计算，以及可选的
-    ``data_report`` 语料规模核算（token 预算/val 窗口），因此可以在正式
-    训练之前（基线调优等准备步骤之后）生成并落盘。``registered`` 为登记表 dict（可空）；
+    不训练、不读取 test token；只做输入解析、解析式功效计算、可选的
+    ``data_report`` 语料规模核算（token 预算/val 窗口），以及可选的
+    ``preparation`` 数据指纹/test 访问账本核查，因此可以在正式训练之前
+    （基线调优等准备步骤之后）生成并落盘。``registered`` 为登记表 dict（可空）；
     ``known_variants`` 用于把假设里的候选/参照映射到变体，缺省时惰性导入。
 
     返回 dict；``status`` 为 ok/warning/fail。``fail`` 不在此处中止实验，
@@ -516,6 +520,9 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         raise ValueError("variants 不能重复")
 
     design_cfg = _as_dict(config.get("design"))
+    preparation = _as_dict(preparation)
+    data_identity = _as_dict(preparation.get("data_identity"))
+    raw_test_access = _as_dict(preparation.get("test_access"))
     alpha = (_open_unit(alpha, "alpha") if alpha is not None
              else _open_unit(design_cfg.get("alpha", DEFAULT_ALPHA), "alpha"))
     power = (_open_unit(power, "power") if power is not None
@@ -663,6 +670,17 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             f"允许 {test_look_budget} 个独立流水线运行访问同一测试版本；"
             "超出后依赖测试集的确认性判定降级为探索性"
             + ("" if explicit_look_budget else "（未显式声明，采用默认 1 次）")))
+
+    # ---- 开跑前准备：计划必须在消费 test 之前绑定数据字节并核对尘封
+    # 账本；这两项写入计划 digest，事后替换数据或补写计划都会被发现。
+    test_access = test_seal_precheck(raw_test_access, test_look_budget)
+    seal_status, seal_detail = test_seal_check(test_access)
+    checks.append(_check("test_access_precheck", "开跑前测试集访问",
+                         seal_status, seal_detail))
+    identity_status, identity_detail = data_identity_check(
+        data_identity, test_access)
+    checks.append(_check("data_identity", "数据身份绑定",
+                         identity_status, identity_detail))
 
     # ---- 检查 2：与预注册种子计划一致（少跑不等于“范围外”，但确认性
     # 证据不再覆盖登记的全部种子；必须显式降级/告警）
@@ -1604,6 +1622,8 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "lega.design",
         "test_look_budget": test_look_budget,
+        "data_identity": data_identity,
+        "test_access": test_access,
         "inputs": {
             "config_file": config_file,
             "config_sha256": config_sha256,

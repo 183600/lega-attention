@@ -156,6 +156,32 @@ def _run_length_null_stage(cfg: dict, seeds, results_dir: str, run_id: str,
     }
 
 
+def _run_ngram_stage(args, cfg, results_dir, split):
+    """运行一次 n-gram 基线；test split 只在设计计划落盘后调用。"""
+    # 窗口规格来自本次配置（含冒烟覆盖）：同 split 还不够，必须同 token——
+    # n-gram 额外在神经评测窗口的目标 token 上打分，供汇总做逐位置对比。
+    window_spec = _neural_eval_window_spec(cfg, args.smoke)
+    try:
+        ng = ngram_evaluate(args.data_dir, split=split,
+                            allow_test=(split == "test"),
+                            window_spec=window_spec)
+        save_json(ng, os.path.join(results_dir, "ngram_baseline.json"))
+        wm = ng.get("ppl_window_matched") or {}
+        print(f"[ngram] 简单基线 {split} PPL: "
+              f"unigram={ng['ppl'].get('unigram')} "
+              f"bigram={ng['ppl'].get('bigram')} "
+              f"interp={ng['ppl'].get('interpolated_bigram')} "
+              f"(α={ng['selected_alpha']}, "
+              f"interp={ng.get('selected_interpolated')}, "
+              f"selected={ng.get('selected_model')})；"
+              f"窗口对齐 PPL: unigram={wm.get('unigram')} "
+              f"bigram={wm.get('bigram')} "
+              f"interp={wm.get('interpolated_bigram')}"
+              f"（spec={ng.get('window_spec')}）")
+    except (OSError, ValueError) as e:
+        print(f"[run_all] ⚠ n-gram 基线跳过：{e}")
+
+
 def main():
     p = argparse.ArgumentParser(description="一键实验流水线（多种子 + 受控对比 + 完整消融）")
     p.add_argument("--config", default="configs/tiny.json")
@@ -467,34 +493,19 @@ def main():
               f"wd={cfg['weight_decay']:.3g} -> {tuned_path}")
 
     # 简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL，给出
-    # “数据绝对难度”参照（零训练；平滑系数/插值权重只在 val 上选）。split
-    # 默认 auto：与神经
-    # 模型的评测 split 完全一致（test.bin 存在且非空 → held-out test），
-    # 否则汇总页的“神经 vs 统计基线”会变成 test-vs-val 的错位比较。
+    # “数据绝对难度”参照（零训练；平滑系数/插值权重只在 val 上选）。
+    # split 默认 auto：与神经模型的评测 split 一致（test.bin 存在且非空 →
+    # held-out test）。test split 必须等设计计划落盘、且全部训练/最终评测
+    # 完成后再访问，否则统计基线本身就成了“先看 test 再设计”。
+    ngram_deferred = None
     if not args.skip_ngram:
         ngram_split = resolve_ngram_split(args.data_dir, args.ngram_split)
-        # 窗口规格来自本次配置（含冒烟覆盖）：同 split 还不够，必须同 token——
-        # n-gram 额外在神经评测窗口的目标 token 上打分，供汇总做逐位置对比。
-        window_spec = _neural_eval_window_spec(cfg, args.smoke)
-        try:
-            ng = ngram_evaluate(args.data_dir, split=ngram_split,
-                                allow_test=(ngram_split == "test"),
-                                window_spec=window_spec)
-            save_json(ng, os.path.join(results_dir, "ngram_baseline.json"))
-            wm = ng.get("ppl_window_matched") or {}
-            print(f"[ngram] 简单基线 {ngram_split} PPL: "
-                  f"unigram={ng['ppl'].get('unigram')} "
-                  f"bigram={ng['ppl'].get('bigram')} "
-                  f"interp={ng['ppl'].get('interpolated_bigram')} "
-                  f"(α={ng['selected_alpha']}, "
-                  f"interp={ng.get('selected_interpolated')}, "
-                  f"selected={ng.get('selected_model')})；"
-                  f"窗口对齐 PPL: unigram={wm.get('unigram')} "
-                  f"bigram={wm.get('bigram')} "
-                  f"interp={wm.get('interpolated_bigram')}"
-                  f"（spec={ng.get('window_spec')}）")
-        except (OSError, ValueError) as e:
-            print(f"[run_all] ⚠ n-gram 基线跳过：{e}")
+        if ngram_split == "test":
+            ngram_deferred = "test"
+            print("[ngram] test 基线延迟：设计计划落盘并完成训练/最终评测后"
+                  "再访问测试集")
+        else:
+            _run_ngram_stage(args, cfg, results_dir, ngram_split)
 
     # 全局溯源清单：本次流水线的代码版本、数据指纹、运行环境与命令。
     git = git_info()
@@ -518,10 +529,36 @@ def main():
               f"（假设 {reg_integrity.get('n_hypotheses')} 条，"
               f"修订链 {reg_integrity.get('chain_length')} 环）")
 
+    # 数据身份必须先于设计计划：计划要绑定实际输入字节，事后重建 bin 或
+    # 沿用旧计划都能在符合性审计中被发现，而不是只依赖 repro 的事后记录。
+    try:
+        data_fp = data_fingerprint(args.data_dir)
+        data_digest = data_fp["digest"]
+    except FileNotFoundError as e:
+        # 数据 bin 尚未生成（如 --skip_train 复用历史产物）时不阻塞流水线，
+        # 但在计数指纹处显式标注缺失，避免汇总页假装数据版本已知。
+        data_fp, data_digest = None, None
+        print(f"[repro] 警告：无法计算数据指纹（{e}）")
+    try:
+        design_preparation = capture_preparation(
+            args.data_dir, data_fingerprint_value=data_fp)
+    except (OSError, ValueError, TypeError) as e:
+        p.error(f"开跑前准备审计失败（数据目录/访问账本）：{e}")
+    _identity = design_preparation.get("data_identity") or {}
+    _seal = design_preparation.get("test_access") or {}
+    if _identity.get("available"):
+        print(f"[design] 数据身份 digest={_identity.get('digest')} "
+              f"（{_identity.get('file_count', 0)} 个文件）")
+    else:
+        print("[design] ⚠ 数据身份不可用：设计计划无法绑定输入数据")
+    print(f"[design] 开跑前 test 访问：账本记录 {_seal.get('records_total', 0)} "
+          f"条，test.bin 指纹={str(_seal.get('test_data_fingerprint'))[:12]}")
+
     # 先验设计计划：在正式训练/评测之前落盘“计划内 (变体, 种子) 单元、
     # 种子数/RULER 每格样本量对 SESOI 的灵敏度、分析人群与排除规则”。
-    # 它不读取任何结果或 test，故可作为“开跑前声明”的证据；汇总时据此
-    # 核对实际分析人群，计划内单元缺失会使受影响确认性判定降级。
+    # 它不读取任何结果，只读取测试集哈希与访问账本（不读 test token），
+    # 故可作为“开跑前声明”的证据；汇总时据此核对实际分析人群，计划内
+    # 单元缺失会使受影响确认性判定降级。
     try:
         design_plan = build_design_plan(
             cfg, seeds, variants, reg_doc,
@@ -530,7 +567,8 @@ def main():
             smoke=bool(args.smoke), known_variants=set(RUNNABLE_VARIANTS),
             analysis_variants=[v for v in variants
                                if v in GATED_FOR_ANALYSIS],
-            data_report=load_data_report(args.data_dir))
+            data_report=load_data_report(args.data_dir),
+            preparation=design_preparation)
     except ValueError as e:
         p.error(f"设计计划生成失败（检查配置的 design/ruler 字段）：{e}")
     design_plan_path = os.path.join(results_dir, "design_plan.json")
@@ -586,14 +624,6 @@ def main():
         print("[design] ⚠ jobs>1：随机化的是提交顺序，run 仍会重叠执行；"
               "严格区组解释请用 --jobs 1")
 
-    try:
-        data_fp = data_fingerprint(args.data_dir)
-        data_digest = data_fp["digest"]
-    except FileNotFoundError as e:
-        # 数据 bin 尚未生成（如 --skip_train 复用历史产物）时不阻塞流水线，
-        # 但在计数指纹处显式标注缺失，避免汇总页假装数据版本已知。
-        data_fp, data_digest = None, None
-        print(f"[repro] 警告：无法计算数据指纹（{e}）")
     # dirty 工作区：commit 之外还需要 diff 指纹与可重放补丁，否则结果无法
     # 仅凭 commit 复原。补丁写入 results_dir 并纳入 completed 台账的产物哈希。
     worktree = worktree_state()
@@ -973,6 +1003,10 @@ def main():
             if dose_cmds:
                 run_many(dose_cmds, jobs, _jobs_env(jobs))
 
+        # test-split n-gram 在此才访问：设计计划已冻结、全部训练/最终评测
+        # 已完成；结果仍进入同一份 data_report/summary。
+        if ngram_deferred:
+            _run_ngram_stage(args, cfg, results_dir, ngram_deferred)
         post_stage = "latency"
         if not args.skip_latency:
             # 显式给出基准的变体清单：lega.latency 的默认值不含消融变体，

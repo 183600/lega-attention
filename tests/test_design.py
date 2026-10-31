@@ -1404,3 +1404,109 @@ def test_design_plan_equivalence_power_checks_and_render():
     assert "AP 等价/非劣性先验功效" in md
     assert "TOST" in md and "非劣性" in md
     print("  [ok] 设计计划：等价/非劣性规划、警告检查与汇总渲染")
+
+
+def test_design_plan_binds_data_identity_and_pre_run_test_seal():
+    """计划在开跑前绑定数据指纹，并按访问账本预检 test look 预算。"""
+    from lega.datacheck import append_test_access
+    from lega.design import capture_preparation, test_seal_precheck
+
+    data_dir = tempfile.mkdtemp()
+    try:
+        for name in ("train.bin", "val.bin", "test.bin", "meta.json"):
+            with open(os.path.join(data_dir, name), "wb") as f:
+                f.write((name + "-bytes").encode("utf-8"))
+        _write_json(os.path.join(data_dir, "meta.json"),
+                    {"tokenizer": "gpt2", "version": 1})
+        prep = capture_preparation(data_dir)
+        identity = prep["data_identity"]
+        assert identity["available"] is True
+        assert identity["digest"]
+        assert identity["file_count"] == 4
+        assert identity["test_bin_sha256"]
+        assert identity["test_bin_sha256"] == \
+            prep["test_access"]["test_data_fingerprint"]
+
+        plan = _plan(preparation=prep)
+        checks = {c["id"]: c for c in plan["checks"]}
+        assert checks["data_identity"]["status"] == "pass", checks["data_identity"]
+        assert checks["test_access_precheck"]["status"] == "pass"
+        assert plan["data_identity"]["digest"] == identity["digest"]
+        assert plan["test_access"]["prior_looks"] == 0
+        assert plan["test_access"]["budget_exhausted_before_run"] is False
+
+        # 数据字节改变后，即使文件大小/名称不变，计划摘要也必须不同。
+        with open(os.path.join(data_dir, "test.bin"), "wb") as f:
+            f.write(b"test-other-bytes")
+        prep_changed = capture_preparation(data_dir)
+        plan_changed = _plan(preparation=prep_changed)
+        assert plan_changed["data_identity"]["digest"] != identity["digest"]
+        assert plan_changed["plan_digest"] != plan["plan_digest"]
+
+        # 同一 test 版本已有一次独立 look：默认预算 1，开跑前预检必须 fail。
+        append_test_access(data_dir, {
+            "ckpt": "old.pt",
+            "test_data_fingerprint":
+                prep_changed["test_access"]["test_data_fingerprint"],
+            "pipeline_run_id": "run-old",
+        })
+        prep_used = capture_preparation(data_dir)
+        seal = test_seal_precheck(prep_used["test_access"], 1)
+        assert seal["prior_looks"] == 1
+        assert seal["budget_exhausted_before_run"] is True
+        assert seal["can_start_confirmatory"] is False
+        plan_used = _plan(preparation=prep_used)
+        checks = {c["id"]: c for c in plan_used["checks"]}
+        assert checks["test_access_precheck"]["status"] == "fail"
+        assert plan_used["status"] == "fail"
+        assert plan_used["test_access"]["reason"]
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)
+    print("  [ok] 设计计划：数据身份绑定、test 哈希核对与开跑前 look 预检")
+
+
+def test_design_conformance_detects_data_identity_swap():
+    """计划数据指纹与本次 repro 不同时，确认性判定必须降级。"""
+    from lega.design import capture_preparation
+
+    data_dir = tempfile.mkdtemp()
+    try:
+        for name in ("train.bin", "val.bin", "test.bin", "meta.json"):
+            with open(os.path.join(data_dir, name), "wb") as f:
+                f.write((name + "-bytes").encode("utf-8"))
+        _write_json(os.path.join(data_dir, "meta.json"), {"tokenizer": "gpt2"})
+        prep = capture_preparation(data_dir)
+        plan = _plan(preparation=prep)
+        repro = {
+            "variants": list(plan["inputs"]["variants"]),
+            "seeds": list(plan["inputs"]["seeds"]),
+            "smoke": False,
+            "data": {"digest": "0" * 16},
+        }
+        conf = design_conformance(plan, repro, {})
+        assert conf["checked"] is True
+        assert conf["data_identity_gate"] is True
+        assert conf["data_identity"]["reason"] == "data_digest_mismatch"
+        assert conf["in_plan"] is False
+        assert any("数据指纹" in p for p in conf["problems"])
+        hyp = [{"id": "H1", "metric": "PPL", "candidate": "lega",
+                "reference": "standard", "confirmatory_valid": True}]
+        gated = apply_design_gate(hyp, conf, plan)
+        assert gated[0]["confirmatory_valid"] is False
+        assert "数据指纹" in gated[0]["confirmatory_note"]
+        md = "\n".join(render_design_section(plan, conf))
+        assert "设计计划数据身份不一致" in md
+
+        # 旧计划没有数据身份字段：只告警“未核对”，不凭缺失字段降级。
+        legacy = _plan()
+        legacy.pop("data_identity", None)
+        legacy["plan_digest"] = plan_digest(legacy)
+        legacy_repro = dict(repro)
+        legacy_repro["data"] = {"digest": prep["data_identity"]["digest"]}
+        legacy_conf = design_conformance(legacy, legacy_repro, {})
+        assert legacy_conf["data_identity_gate"] is False
+        assert legacy_conf["data_identity"]["checked"] is False
+        assert any("未绑定数据指纹" in w for w in legacy_conf["warnings"])
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)
+    print("  [ok] 设计符合性：数据指纹替换触发降级，旧计划保持向后兼容")

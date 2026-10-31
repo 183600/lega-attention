@@ -266,6 +266,42 @@ def _provenance_drift_audit(repro: dict) -> dict:
     return out
 
 
+def _data_identity_audit(plan: dict, repro: dict) -> dict:
+    """核对计划绑定的数据指纹与本次 repro 记录的数据指纹。"""
+    planned = _as_dict(plan.get("data_identity"))
+    actual = _as_dict(repro.get("data"))
+    planned_digest = planned.get("digest")
+    actual_digest = actual.get("digest")
+    if not isinstance(planned_digest, str) or not planned_digest:
+        return {"checked": False, "matches": None,
+                "reason": "legacy_plan_without_data_identity",
+                "planned_digest": planned_digest,
+                "current_digest": actual_digest,
+                "planned_test_bin_sha256": planned.get("test_bin_sha256"),
+                "current_test_bin_sha256": actual.get("test_bin_sha256")}
+    if not isinstance(actual_digest, str) or not actual_digest:
+        return {"checked": False, "matches": None,
+                "reason": "current_data_fingerprint_unavailable",
+                "planned_digest": planned_digest,
+                "current_digest": actual_digest,
+                "planned_test_bin_sha256": planned.get("test_bin_sha256"),
+                "current_test_bin_sha256": actual.get("test_bin_sha256")}
+    matches = planned_digest == actual_digest
+    out = {"checked": True, "matches": matches,
+           "reason": "match" if matches else "data_digest_mismatch",
+           "planned_digest": planned_digest,
+           "current_digest": actual_digest,
+           "planned_test_bin_sha256": planned.get("test_bin_sha256"),
+           "current_test_bin_sha256": actual.get("test_bin_sha256")}
+    if (out["planned_test_bin_sha256"] is not None
+            and out["current_test_bin_sha256"] is not None
+            and out["planned_test_bin_sha256"]
+            != out["current_test_bin_sha256"]):
+        out["matches"] = False
+        out["reason"] = "test_bin_sha256_mismatch"
+    return out
+
+
 def design_conformance(plan: dict, repro: dict, runs: dict,
                        audit: dict = None, stages: dict = None) -> dict:
     """核对“先验设计计划”与本次实际 run 的一致性。
@@ -463,6 +499,24 @@ def design_conformance(plan: dict, repro: dict, runs: dict,
             + str(drift_audit.get("reason") or "unknown")
             + "）：仅表示缺少可核对记录，不等于未发生变化")
 
+    # --- 计划必须绑定到实际输入数据。启动时数据指纹已写入设计计划；
+    # 汇总时若 repro 记录的数据指纹与计划不同，说明计划与产物不是同一份
+    # 数据（例如沿用旧计划后重建 bin），确认性判定不能成立。
+    identity_audit = _data_identity_audit(plan, repro)
+    out["data_identity"] = identity_audit
+    out["data_identity_gate"] = identity_audit.get("matches") is False
+    if out["data_identity_gate"]:
+        out["problems"].append(
+            "设计计划绑定的数据指纹与本次 run 不一致（"
+            f"{str(identity_audit.get('planned_digest'))[:12]} -> "
+            f"{str(identity_audit.get('current_digest'))[:12]}）："
+            "计划与产物不是同一份数据，确认性判定降级为探索性")
+    elif identity_audit.get("checked") is not True:
+        out["warnings"].append(
+            "设计计划未绑定数据指纹（"
+            + str(identity_audit.get("reason") or "unknown")
+            + "）：不据此降级，但无法排除计划落盘后数据被替换")
+
     out["in_plan"] = not out["problems"]
     return out
 
@@ -531,6 +585,13 @@ def apply_design_gate(hyp_eval, conformance: dict, plan: dict = None):
             f"{code.get('n_added', 0)}、删除 "
             f"{code.get('n_removed', 0)} 个文件）；"
             "该确认性判定降级为探索性")
+    if checked and conf.get("data_identity_gate") is True:
+        ident = _as_dict(conf.get("data_identity"))
+        global_reasons.append(
+            "设计计划绑定的数据指纹与本次 run 不一致（"
+            f"{str(ident.get('planned_digest'))[:12]} -> "
+            f"{str(ident.get('current_digest'))[:12]}）；"
+            "计划与产物不是同一份数据，该确认性判定降级为探索性")
     if checked and conf.get("provenance_drift_gate") is True:
         prov = _as_dict(conf.get("provenance_drift"))
         fields = [str(m.get("field")) for m in
@@ -1031,6 +1092,23 @@ def render_design_section(plan: dict, conformance: dict = None,
                     "- ⚠ 实验期间代码/数据漂移未核对（"
                     + str(prov.get("reason") or "unknown")
                     + "）：缺少可核对记录不等于未发生变化。")
+        ident = _as_dict(conf.get("data_identity"))
+        if ident:
+            if ident.get("matches") is True:
+                md.append(
+                    "- ✅ 设计计划数据身份一致：计划与本次 run 的数据指纹均为 "
+                    f"`{str(ident.get('planned_digest'))[:12]}`。")
+            elif ident.get("matches") is False:
+                md.append(
+                    "- ❌ 设计计划数据身份不一致：计划绑定 "
+                    f"`{str(ident.get('planned_digest'))[:12]}`，本次 run 为 "
+                    f"`{str(ident.get('current_digest'))[:12]}`"
+                    f"（{ident.get('reason')}）；确认性判定已降级。")
+            else:
+                md.append(
+                    "- ⚠ 设计计划数据身份未核对（"
+                    + str(ident.get("reason") or "unknown")
+                    + "）：不能把“未记录”当成“数据未变”。")
         if conf.get("problems"):
             for p in _as_text_list(conf.get("problems"))[:5]:
                 md.append(f"- ❌ {p}")
@@ -1151,6 +1229,7 @@ def main(argv=None) -> int:
         registered = None
 
     data_report = None
+    preparation = None
     if args.data_dir:
         try:
             from lega.preflight import load_data_report
@@ -1160,13 +1239,15 @@ def main(argv=None) -> int:
         if data_report is None:
             print("[design] 警告：--data_dir 下缺少可解析的 data_report.json，"
                   "跳过 token/窗口预算检查", file=sys.stderr)
+        from .preparation import capture_preparation
+        preparation = capture_preparation(args.data_dir)
 
     try:
         plan = build_design_plan(
             cfg, seeds, variants, registered,
             config_file=args.config,
             ruler_n_samples=args.ruler_n_samples, smoke=args.smoke,
-            data_report=data_report)
+            data_report=data_report, preparation=preparation)
     except ValueError as e:
         print(f"[design] 计划生成失败：{e}", file=sys.stderr)
         return 2

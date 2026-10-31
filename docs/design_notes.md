@@ -1094,7 +1094,7 @@ n<3 仍给描述性后验但 `decision_eligible=false`。换指标尺度、换 R
 ## 实验设计与准备（先验功效、分析人群与设计符合性）
 
 前面几节大多在**结果产生之后**做校正；但“这个实验值不值得跑、能回答什么”
-必须在开跑前决定。`lega/design/` 因此把设计阶段的四件事变成可执行产物：
+必须在开跑前决定。`lega/design/` 因此把设计阶段的五件事变成可执行产物：
 
 1. **先验灵敏度**：在花训练算力之前，回答“计划种子数 / RULER 每格样本数
    能检出多大的效应”。配对 t（PPL/RULER/AUROC/AP 的**种子级**确认性
@@ -1136,6 +1136,21 @@ n<3 仍给描述性后验但 `decision_eligible=false`。换指标尺度、换 R
    计划在结果产生后被改写，触发 `plan_integrity_gate=True`，避免用新
    计划“追认”旧结果。旧计划没有代码指纹、旧产物没有 `tracking_end`
    时显式标记“未核对”并告警，但不据此降级；**未记录不能当成未变化**。
+5. **开跑前数据身份与测试集尘封**：设计计划必须在任何 test 消费之前
+   绑定**实际输入字节**。`lega/design/preparation.py` 在计划生成前读取
+   `data_fingerprint`（逐文件 SHA-256 + 合并 digest + `test.bin` 哈希）与
+   `.test_access_log.jsonl`，把 `data_identity`、`test_access` 写入计划并
+   纳入 `plan_digest`。`data_identity` 检查核对数据指纹与访问账本中的
+   `test_data_fingerprint` 是否指向同一 test 版本；`test_access_precheck`
+   按 `test_look_budget` 计算**开跑前**同一 test 版本已被多少个独立
+   `pipeline_run_id` 消费、是否已有无法归属 run 的旧记录。预算已耗尽时
+   计划显式 `fail`，避免先看 test 再补设计或重复烧算力。汇总时
+   `data_identity_gate` 再比对计划 digest 与 `repro.json` 的当前数据
+   digest；重建/替换 bin 后沿用旧计划会直接触发确认性降级。旧计划没有
+   数据身份字段时只告警“未核对”，保持向后兼容。
+   同时，`run_all` 把 n-gram 的 **test split** 评测从训练前延迟到设计
+   计划落盘且全部训练/最终评测之后；val split 仍在训练前给出统计基线。
+   这样统计基线本身不会成为“先访问 test 再决定设计”的通道。
 
 ### 执行顺序：种子为区组、区块内随机化
 
@@ -1244,7 +1259,7 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 
 ### 计划里必须有什么
 
-`design_plan.json` 在正式训练开始前落盘（基线调优等准备步骤之后；只消费配置与预注册表，不消费任何结果或 test 产物），字段包括：
+`design_plan.json` 在正式训练开始前落盘（基线调优等准备步骤之后；只消费配置、预注册表、数据文件哈希与 test 访问账本，不读取任何评测结果或 test token 内容），字段包括：
 
 - `inputs`：配置 SHA-256、变体、种子、α/功效、`multiplicity` 模式与
   `alpha_effective`、登记假设 id、预注册 `scope.seeds`、可产出机制分析
@@ -1282,11 +1297,19 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   `*_equivalence_power` 检查默认只 `warn`，不阻断正式实验；
 - `analysis_protocol`：分析人群、排除规则、缺失数据处理、停止规则、
   test 封存、多重比较策略；
+- `data_identity`：计划生成前的实际数据指纹（逐文件 name/size/SHA-256、
+  合并 digest、`test.bin` 哈希；不含 mtime，复制到其他机器仍可比）；
+  汇总时与 `repro.json` 的当前数据 digest 比对，不一致即确认性降级；
+- `test_access`：计划生成前读取的 test 访问账本摘要与开跑前预检：
+  `prior_looks`（排除本次已计数的独立 look）、
+  `budget_exhausted_before_run`、`remaining_before_this_run`、
+  `can_start_confirmatory`、无法归属 run 的旧记录数；`test.bin` 不存在时
+  标记“本轮不消费测试集”，但不会把“无测试集”伪造为“已核对 0 次访问”；
 - `test_look_budget`：同一 `test.bin` 版本允许的独立 `pipeline_run_id`
-  数（默认 1）。汇总按访问账本核对实际 look；超预算时把依赖 test 的
-  PPL/RULER 确认性判定降级为探索性；预先声明多次 look 时以
-  `alpha/planned_looks` 作为保守判定阈值，并单列无法归属 `run_id` 的旧
-  账本记录，避免把“无法核对”当成“只访问过一次”；
+  数（默认 1）。开跑前先按访问账本核对预算是否已耗尽；汇总再核对实际
+  look，超预算时把依赖 test 的 PPL/RULER 确认性判定降级为探索性；预先
+  声明多次 look 时以 `alpha/planned_looks` 作为保守判定阈值，并单列无法
+  归属 `run_id` 的旧账本记录，避免把“无法核对”当成“只访问过一次”；
 - `registered_plan`：登记假设的 id/指标/候选/参照/方向的只读快照，
   使计划摘要同时绑定确认性分析计划本身；
 - `inputs.analysis_code`：计划落盘时的分析代码/配置/预注册/依赖源码树
@@ -1358,7 +1381,8 @@ python -m lega.design --config configs/small.json \
 在训练前自动生成 `results/<tag>/design_plan.json`，并把
 `data_report.json` 的语料规模核算一并传给设计计划（摘要进
 `repro.json` 的 `design` 字段，其中包含 `run_order` 模式、顺序种子与逐
-run 清单），汇总时写 `design_conformance.json`，并在 `significance.json`
+run 清单），汇总时写 `design_conformance.json`（含 `data_identity` 与
+`data_identity_gate`），并在 `significance.json`
 增加 `design_plan` / `design_conformance` /
 `observed_design_sensitivity`。`summary.md` 新增“实验设计与分析人群（先验
 计划 vs 实际）”小节，逐项列出检查状态、run 顺序、PPL/RULER/AUROC/AP
