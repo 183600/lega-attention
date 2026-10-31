@@ -1702,3 +1702,163 @@ def _render_length_calibration(calibrations, requested: bool = False,
         "位置，prefix 斜率仍可能混入 query token 内容/位置变化。门控 logit 斜率"
         "是总长度依赖的简化式，不是 `b` 系数的因果估计。")
     return md
+
+
+_LENGTH_PPL_CLASS_CN = {
+    "increasing": "随长度变差",
+    "decreasing": "随长度变好",
+    "flat": "平坦",
+    "unresolved": "未定",
+    "no_ci": "无CI",
+    "undefined": "不可算",
+}
+
+
+def _length_ppl_class_counts(entries):
+    counts = {}
+    for entry in entries:
+        cls = ((entry.get("nll_slope_per_log2") or {}).get("class"))
+        if cls:
+            counts[cls] = counts.get(cls, 0) + 1
+    if not counts:
+        return "-"
+    total = sum(counts.values())
+    cls, n = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    return f"{_LENGTH_PPL_CLASS_CN.get(cls, cls)} {n}/{total}"
+
+
+def _render_length_ppl(ppls, requested: bool = False,
+                       interactions=None) -> list:
+    md = ["", "## 自然文本 PPL 长度剂量-反应（训练后模型，val split；探索性）", ""]
+    if not isinstance(ppls, dict) or not ppls:
+        if requested:
+            md.append("⚠ 本轮配置请求了自然文本 PPL 长度审计，但没有找到可用的 "
+                      "`length_ppl_*.json`（checkpoint、val 数据或产物归属缺失）；"
+                      "不能据此声称 PPL 随长度已校准。")
+        return md
+    md.append(
+        "本表在真实 val 文本上固定最后 q 个目标 token，只改变前缀长度，直接"
+        "测量下一 token NLL/PPL 随 `log2(L)` 的变化；这是 `lengthcalib` 的"
+        " `c=log(n·max p)` 审计所缺少的“主指标”对照。suffix 模式同一窗口跨"
+        "长度的目标 token 相同，ΔNLL 是逐窗口配对差；prefix 模式目标随长度"
+        "改变，只作敏感性分析。斜率为正表示 NLL 随长度变差，为负表示变好；"
+        "单位为 nat/log2(L)。bootstrap 以窗口为聚类单元。")
+    md.append("")
+    md.append("| 变体 | 模式 | 长度档 | PPL(最短→最长) | "
+              "ΔNLL vs 最长(最短) | NLL~log2(L)斜率 | 斜率类别(种子) | "
+              "目标配对 | 窗口数 |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    any_row = False
+    bad_pairing = []
+    for variant in sorted(ppls):
+        per_seed = ppls.get(variant)
+        if not isinstance(per_seed, dict):
+            continue
+        for growth in ("suffix", "prefix"):
+            entries = []
+            lengths = None
+            for seed in _sorted_seeds(per_seed):
+                payload = per_seed.get(seed)
+                if not isinstance(payload, dict):
+                    continue
+                result = (payload.get("results") or {}).get(growth)
+                if not isinstance(result, dict) or not result.get("available"):
+                    continue
+                entries.append(result)
+                if lengths is None and isinstance(result.get("lengths"), list):
+                    lengths = result.get("lengths")
+            if not entries:
+                continue
+            any_row = True
+            if not isinstance(lengths, list) or not lengths:
+                lengths = [64, 128, 256, 512, 1024]
+            lo, hi = min(lengths), max(lengths)
+            ppl_lo = _length_calib_median([
+                ((e.get("per_length") or {}).get(str(lo)) or {}).get("ppl")
+                for e in entries])
+            ppl_hi = _length_calib_median([
+                ((e.get("per_length") or {}).get(str(hi)) or {}).get("ppl")
+                for e in entries])
+            ppl_s = ("-" if ppl_lo is None or ppl_hi is None
+                     else f"{ppl_lo:.4g}→{ppl_hi:.4g}")
+            delta_lo = None
+            if lo != hi:
+                delta_lo = _length_calib_median([
+                    ((e.get("delta_vs_reference") or {}).get(str(lo))
+                     or {}).get("mean_delta_nll") for e in entries])
+            slope = _length_calib_median([
+                (e.get("nll_slope_per_log2") or {}).get("estimate")
+                for e in entries])
+            class_s = _length_ppl_class_counts(entries)
+            pair_frac = None
+            if growth == "suffix":
+                pair_frac = _length_calib_median([
+                    (e.get("target_pairing") or {}).get("fraction_consistent")
+                    for e in entries])
+                if pair_frac is not None and pair_frac < 1.0:
+                    bad_pairing.append(variant)
+            pair_s = ("-" if pair_frac is None else _fmt_pct(pair_frac))
+            n_windows = _length_calib_median([
+                e.get("n_windows") for e in entries])
+            n_s = "-" if n_windows is None else str(int(round(n_windows)))
+            label = variant + ("（敏感性）" if growth == "prefix" else "")
+            md.append(
+                f"| {label} | {growth} | {lo}–{hi} | {ppl_s} | "
+                f"{_fmt_signed(delta_lo)} | {_fmt_signed(slope)} | "
+                f"{class_s} | {pair_s} | {n_s} |")
+    if not any_row:
+        md.append("⚠ 产物存在，但没有可解析的 suffix/prefix 结果。")
+        return md
+    if bad_pairing:
+        md.append("")
+        md.append("⚠ suffix 目标配对比例低于 100%（"
+                  + "、".join(sorted(set(bad_pairing)))
+                  + "）：逐长度目标 token 不一致，ΔNLL 不能当作配对差，"
+                  "应先排查窗口构造。")
+    interactions = [r for r in (interactions or []) if isinstance(r, dict)]
+    if interactions:
+        md += ["", "**跨变体长度交互（探索性）**", "",
+               "下表对同一批窗口逐长度计算 `ΔNLL=NLL_candidate−NLL_reference`，"
+               "再对 `log2(L)` 回归；斜率显著非 0 表示两变体差距随上下文长度"
+               "变化。p 为跨种子配对 t 检验的**未校正**值，不进入主 Holm 家族，"
+               "只作后续预注册线索。", "",
+               "| 对比 | 种子 | ΔNLL@最短 | ΔNLL@最长 | "
+               "ΔNLL~log2(L)斜率 | p(未校正) | 结论 |",
+               "|---|---|---|---|---|---|---|"]
+        for row in interactions:
+            lengths = row.get("lengths") or []
+            if not lengths:
+                continue
+            lo, hi = min(lengths), max(lengths)
+            per_length = row.get("per_length_mean_delta") or {}
+            d_lo = per_length.get(str(lo))
+            d_hi = per_length.get(str(hi))
+            slope = _finite_number(row.get("slope_median"))
+            p = _finite_number(row.get("slope_p"))
+            n_seeds = row.get("n_seeds")
+            if (not isinstance(n_seeds, int) or n_seeds < 3
+                    or p is None or slope is None):
+                verdict = "种子不足/未定"
+            elif p < 0.05 and slope < 0:
+                verdict = "候选优势随长度增加"
+            elif p < 0.05 and slope > 0:
+                verdict = "候选优势随长度缩小"
+            else:
+                verdict = "未检测到显著交互（未定≠无交互）"
+            p_s = "-" if p is None else f"{p:.4g}"
+            md.append(
+                f"| {row.get('candidate')} vs {row.get('reference')} | "
+                f"{row.get('n_seeds')} | {_fmt_signed(d_lo)} | "
+                f"{_fmt_signed(d_hi)} | {_fmt_signed(slope)} | {p_s} | "
+                f"{verdict} |")
+        md += ["", "注：ΔNLL 为负表示候选 NLL 更低；交互斜率负值表示候选相对"
+               "参考的优势随长度增加。跨种子 p 只描述这批种子，不作为确认性"
+               "证据；样本不足时写“未定”，不能写成“无交互”。"]
+    md.append("")
+    md.append(
+        "- 边界：suffix 固定窗口末尾与最后 q 个目标 token，但 RoPE 绝对位置"
+        "仍随输入长度变化；prefix 的目标 token 也随长度改变。checkpoint 在 "
+        "val 上选择，本曲线只描述长度形状，不是独立 test 集 PPL 证据。该审计"
+        "是观测性描述，不消融门控参数，不替代 RULER 长度分档、`length_null` "
+        "或推理期因果干预；只读 val，不访问 test。")
+    return md

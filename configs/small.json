@@ -44,6 +44,16 @@
     "tolerance": 0.05
   },
 
+  "length_ppl": {
+    "enabled": true,
+    "lengths": [64, 128, 256, 512, 1024],
+    "n_windows": 16,
+    "query_positions": 8,
+    "growth_modes": ["suffix", "prefix"],
+    "bootstrap": 400,
+    "tolerance": 0.01
+  },
+
   "design": {
     "alpha": 0.05,
     "power": 0.8,

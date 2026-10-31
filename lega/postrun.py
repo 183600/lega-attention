@@ -103,6 +103,20 @@ def _length_calibration_argv(a, ckpt: str) -> List[str]:
     return argv
 
 
+def _length_ppl_argv(a, ckpt: str) -> List[str]:
+    argv = ["--ckpt", ckpt, "--data_dir", a.data_dir,
+            "--config", a.config,
+            "--out", os.path.join(
+                a.results_dir,
+                f"length_ppl_{a.variant}{a.suffix}.json"),
+            "--device", a.device]
+    if a.smoke:
+        argv += ["--lengths", "32,64", "--n_windows", "2",
+                 "--query_positions", "2", "--bootstrap", "50",
+                 "--growth_modes", "suffix"]
+    return argv
+
+
 def _length_calibration_enabled(config_path: str) -> bool:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -112,6 +126,18 @@ def _length_calibration_enabled(config_path: str) -> bool:
     if not isinstance(cfg, dict):
         return False
     block = cfg.get("length_calibration")
+    return isinstance(block, dict) and block.get("enabled") is True
+
+
+def _length_ppl_enabled(config_path: str) -> bool:
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    block = cfg.get("length_ppl")
     return isinstance(block, dict) and block.get("enabled") is True
 
 
@@ -198,6 +224,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--skip_length_calibration", action="store_true",
                    help="跳过训练后经验长度校准审计（默认按配置 "
                         "length_calibration.enabled 执行）")
+    p.add_argument("--skip_length_ppl", action="store_true",
+                   help="跳过自然文本 PPL 长度剂量-反应审计（默认按配置 "
+                        "length_ppl.enabled 执行）")
     return p
 
 
@@ -221,6 +250,10 @@ def main() -> None:
             and _length_calibration_enabled(args.config)):
         _run_stage("length_calibration", "lega.lengthcalib",
                    _length_calibration_argv(args, ckpt))
+    if (not args.skip_length_ppl
+            and _length_ppl_enabled(args.config)):
+        _run_stage("length_ppl", "lega.lengthppl",
+                   _length_ppl_argv(args, ckpt))
 
 
 if __name__ == "__main__":

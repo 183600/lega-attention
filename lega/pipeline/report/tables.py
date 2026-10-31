@@ -155,6 +155,7 @@ def _summary_part_c(**kw):
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
     dose_response = kw.get("dose_tests")
+    length_ppl_interactions = kw.get("length_ppl_interactions")
     if "ci" in kw:
         ci = kw["ci"]
     if "ci_s" in kw:
@@ -1228,6 +1229,14 @@ def _summary_part_c(**kw):
                        "同尺度并列，检查“重新训练后的交互结构能否在最终前向"
                        "复现”；交互=0 表示可加，显著非零不等于某个组件有用。"),
                    "dose_response": dose_response,
+                   "length_ppl_interactions": length_ppl_interactions,
+                   "length_ppl_interactions_note": (
+                       "自然文本 PPL 长度交互（lega.lengthppl，val split，"
+                       "探索性）：逐种子对同一批窗口计算 "
+                       "ΔNLL=NLL_candidate−NLL_reference，再对 log2(L) 回归；"
+                       "斜率为负表示候选相对优势随长度增加。跨种子 p 为"
+                       "未校正配对 t 检验，不进入主 Holm 家族；逐窗口曲线见 "
+                       "length_ppl_*.json。"),
                    "dose_response_note": (
                        "门控系数剂量-反应（lega.dose_response，val split，"
                        "探索性）：同一 checkpoint/同一批窗口上把 A(gate_w)、"

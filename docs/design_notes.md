@@ -1390,3 +1390,31 @@ run 清单），汇总时写 `design_conformance.json`，并在 `significance.js
 门控 `logit` 斜率是总长度依赖的简化式，不是 `b·log n` 系数的因果估计。
 因此该审计必须与 `length_null`、RULER 分档、剂量-反应和病灶消融合读，
 不能单独升级为确认性结论。审计只读取 val，不访问 test。
+
+## 自然文本 PPL 长度剂量-反应
+
+`lega/lengthcalib.py` 审计的是注意力统计量 `c=log(n·max_j p_j)`，不是主指标
+PPL。`lega/lengthppl.py` 因此在同一份 **val** 文本上构造嵌套配对窗口，直接
+测量下一 token NLL/PPL 随上下文长度的变化：
+
+- 每个输入窗口只在最后 `query_positions` 个位置计算下一 token NLL，其余
+  目标位置用 `ignore_index` 屏蔽；这样不同长度可以只比较同一批 query
+  token，而不是比较整窗平均（整窗平均会混入前缀 token 难度）；
+- `suffix` 固定窗口末尾与最后 q 个目标 token，只增加前缀，是主分析；
+  `prefix` 固定窗口起点、目标 token 随长度改变，只作敏感性分析；
+- 对每个窗口计算 `NLL(L)-NLL(L_ref)`（默认 `L_ref` 为最长档）与
+  `NLL~log2(L)` 斜率，并以窗口为聚类单元做 bootstrap；跨变体比较对
+  `ΔNLL=NLL_candidate-NLL_reference` 再对 `log2(L)` 回归，斜率非 0 表示
+  两变体差距随长度变化（探索性交互）；
+- 长度、窗口数、query 位置数、growth 模式、bootstrap 次数与容差由配置
+  `length_ppl` 块控制；结果写
+  `results/<tag>/length_ppl_<variant><suffix>.json`，汇总页新增
+  “自然文本 PPL 长度剂量-反应”小节。
+
+解释边界：suffix 固定的是窗口末尾与目标 token，但 RoPE 绝对位置仍随输入
+长度变化；prefix 还改变了目标 token 内容。因此该曲线是观测性描述，不是
+长度因果效应；跨变体交互 p 值为未校正探索性证据，不进入主 Holm 家族，也
+不能替代 RULER 长度分档、`length_null`、`lengthcalib` 或推理期因果干预。
+checkpoint 在 val 上选择，因此该曲线只描述长度形状，不是独立 test 集 PPL
+证据；正式 PPL 结论仍以 held-out test（或明确的 val 回退披露）为准。
+只读 val，不访问 test。

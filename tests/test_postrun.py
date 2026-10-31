@@ -17,8 +17,9 @@ import sys
 import tempfile
 
 from lega.postrun import (_analysis_argv, _eval_argv,
-                          _length_calibration_argv, _parser, _ruler_argv,
-                          _run_module, _train_argv, resolve_ckpt)
+                          _length_calibration_argv, _length_ppl_argv,
+                          _parser, _ruler_argv, _run_module, _train_argv,
+                          resolve_ckpt)
 
 STUB = '''import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as f:
@@ -120,6 +121,11 @@ def test_stage_argv_matches_cli():
                       "--config", "configs/tiny.json"]
     assert lc[lc.index("--out") + 1] == os.path.join(
         "results/tiny_smoke", "length_calibration_lega.json")
+    lp = _length_ppl_argv(a, ckpt)
+    assert lp[:6] == ["--ckpt", ckpt, "--data_dir", "data/dummy",
+                      "--config", "configs/tiny.json"]
+    assert lp[lp.index("--out") + 1] == os.path.join(
+        "results/tiny_smoke", "length_ppl_lega.json")
     print("  [ok] 阶段命令与 run_all 独立命令逐字段一致")
 
 
@@ -150,6 +156,10 @@ def test_smoke_and_seed_suffix_transparency():
     lc = _length_calibration_argv(a, ckpt)
     assert lc[lc.index("--lengths") + 1] == "32,64"
     assert lc[lc.index("--n_windows") + 1] == "2"
+    lp = _length_ppl_argv(a, ckpt)
+    assert lp[lp.index("--lengths") + 1] == "32,64"
+    assert lp[lp.index("--n_windows") + 1] == "2"
+    assert lp[lp.index("--growth_modes") + 1] == "suffix"
     print("  [ok] 冒烟透传/种子后缀/skip 开关映射正确")
 
 
@@ -173,7 +183,7 @@ def test_parser_defaults():
     assert a.device == "auto" and a.worst_n == 10 and a.suffix == ""
     assert not (a.smoke or a.wandb or a.skip_train or a.skip_eval
                 or a.skip_ruler or a.skip_analysis
-                or a.skip_length_calibration)
+                or a.skip_length_calibration or a.skip_length_ppl)
     assert a.ruler_ctx_lens is None and a.early_stop_patience is None
     assert a.sanity_file is None
     assert isinstance(a, argparse.Namespace)

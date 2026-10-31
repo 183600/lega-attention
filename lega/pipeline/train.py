@@ -218,6 +218,9 @@ def main():
     p.add_argument("--skip_length_calibration", action="store_true",
                    help="跳过训练后经验长度校准审计（默认按配置 "
                         "length_calibration.enabled 执行；结果供汇总页使用）")
+    p.add_argument("--skip_length_ppl", action="store_true",
+                   help="跳过自然文本 PPL 长度剂量-反应审计（默认按配置 "
+                        "length_ppl.enabled 执行；结果供汇总页使用）")
     p.add_argument("--skip_ablation", action="store_true",
                    help="跳过推理期因果病灶消融（默认对 --ablate_variants "
                         "指定的门控变体，在同一 checkpoint/同一批 val 窗口上"
@@ -351,6 +354,10 @@ def main():
     length_calibration_enabled = bool(
         isinstance(lc_cfg, dict) and lc_cfg.get("enabled") is True
         and not args.skip_length_calibration)
+    lp_cfg = cfg.get("length_ppl")
+    length_ppl_enabled = bool(
+        isinstance(lp_cfg, dict) and lp_cfg.get("enabled") is True
+        and not args.skip_length_ppl)
 
     # 本轮流水线的唯一 run_id：在任何训练/调优/基线产物写入之前确定并通过
     # 环境变量传给全部子进程。结果文件内嵌该值后，汇总能区分本轮产物与同一
@@ -619,6 +626,13 @@ def main():
             "note": ("训练后经验 c~log2(n) 审计；suffix 固定窗口末尾与 "
                      "query token，prefix 为敏感性分析；不访问 test"),
         },
+        "length_ppl": {
+            "executed": bool(length_ppl_enabled),
+            "variants": list(variants),
+            "split": "val",
+            "note": ("自然文本 PPL 长度剂量-反应；suffix 固定末尾与最后 q "
+                     "个目标 token，prefix 为敏感性分析；不访问 test"),
+        },
         "evaluation": {
             "full_eval": bool(args.full_eval),
             "window_offsets": args.window_offsets,
@@ -651,6 +665,7 @@ def main():
                 "ruler": bool(not args.skip_ruler),
                 "analysis": bool(not args.skip_analysis),
                 "length_calibration": bool(length_calibration_enabled),
+                "length_ppl": bool(length_ppl_enabled),
                 "latency": bool(not args.skip_latency),
                 "ablation": bool(not args.skip_ablation and ablate_variants),
                 "dose_response": bool(args.dose_response and dose_variants),
@@ -808,6 +823,8 @@ def main():
             cmd += ["--skip_analysis"]
         if not length_calibration_enabled:
             cmd += ["--skip_length_calibration"]
+        if not length_ppl_enabled:
+            cmd += ["--skip_length_ppl"]
         print("+", " ".join(cmd), flush=True)
         chain_cmds.append(cmd)
     if chain_cmds:

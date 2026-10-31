@@ -3,6 +3,88 @@ from .._shared import _install as _shared_install
 
 _shared_install(globals())
 
+
+def _length_ppl_interaction_rows(ppls, pairs):
+    """跨变体 PPL 长度交互（探索性）：逐种子配对 ΔNLL~log2(L) 斜率。
+
+    这里不把交互检验塞进主 ``tests`` 家族（避免无意改变既有 Holm/FDR
+    边界），只在汇总页并列展示未校正 p 与逐长度 ΔNLL，供后续预注册。
+    """
+    from lega.lengthppl import compare_length_ppl_payloads
+
+    out = []
+    if not isinstance(ppls, dict):
+        return out
+    for pair in pairs or []:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        cand, ref = pair
+        cand_seeds = ppls.get(cand)
+        ref_seeds = ppls.get(ref)
+        if not isinstance(cand_seeds, dict) or not isinstance(ref_seeds, dict):
+            continue
+        seeds = sorted(set(cand_seeds) & set(ref_seeds),
+                       key=lambda s: (s is None, str(s)))
+        rows = []
+        for seed in seeds:
+            cp = cand_seeds.get(seed)
+            rp = ref_seeds.get(seed)
+            if not isinstance(cp, dict) or not isinstance(rp, dict):
+                continue
+            try:
+                cmp = compare_length_ppl_payloads(
+                    cp, rp, "suffix", n_bootstrap=0)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if not cmp.get("available"):
+                continue
+            rows.append(cmp)
+        if not rows:
+            continue
+        lengths = rows[0].get("lengths") or []
+        slopes = []
+        for row in rows:
+            value = ((row.get("delta_slope_per_log2") or {})
+                     .get("estimate"))
+            value = _finite_number(value)
+            if value is not None:
+                slopes.append(float(value))
+        test = (paired_t_test(slopes, [0.0] * len(slopes))
+                if slopes else {})
+        per_length = {}
+        for length in lengths:
+            vals = []
+            for row in rows:
+                value = (((row.get("per_length") or {}).get(str(length))
+                          or {}).get("mean_delta_nll"))
+                value = _finite_number(value)
+                if value is not None:
+                    vals.append(float(value))
+            per_length[str(length)] = (
+                float(np.median(vals)) if vals else None)
+        pair_fracs = []
+        for row in rows:
+            value = _finite_number(
+                (row.get("target_pairing") or {}).get("fraction_consistent"))
+            if value is not None:
+                pair_fracs.append(value)
+        out.append({
+            "candidate": cand,
+            "reference": ref,
+            "growth": "suffix",
+            "n_seeds": len(rows),
+            "lengths": lengths,
+            "slope_median": (float(np.median(slopes)) if slopes else None),
+            "slope_mean": test.get("mean_diff"),
+            "slope_p": test.get("p"),
+            "slope_n": test.get("n"),
+            "per_length_mean_delta": per_length,
+            "target_pairing_fraction": (
+                float(np.median(pair_fracs)) if pair_fracs else None),
+        })
+    return out
+
+
 def _summary_part_a(results_dir: str, audit: dict = None,
                   data_report: dict = None,
                   preloaded: dict = None) -> dict:
@@ -1086,6 +1168,33 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         length_calibrations, requested=lc_requested,
         random_slope=random_slope)
 
+    # --- 自然文本 PPL 长度剂量-反应（与 c~log2(n) 审计互补）
+    length_ppls = {}
+    lp_scope = repro.get("length_ppl")
+    if isinstance(lp_scope, dict):
+        allow_lp = lp_scope.get("executed") is True
+        lp_variants = (lp_scope.get("variants")
+                       if isinstance(lp_scope.get("variants"), list) else [])
+    else:
+        allow_lp = True
+        lp_variants = None
+    for fp in _result_files(results_dir, "length_ppl", scope_seeds):
+        d = load(fp)
+        if not in_run_scope(fp, d):
+            continue
+        if not allow_lp:
+            continue
+        if lp_variants is not None and d["variant"] not in lp_variants:
+            continue
+        length_ppls.setdefault(
+            d["variant"], {})[_seed_key(fp, d)] = d
+    lp_requested = bool(isinstance(lp_scope, dict)
+                        and lp_scope.get("executed") is True)
+    length_ppl_interactions = _length_ppl_interaction_rows(length_ppls, pairs)
+    md += _render_length_ppl(
+        length_ppls, requested=lp_requested,
+        interactions=length_ppl_interactions)
+
     # --- 先验设计计划与分析人群（训练前声明，汇总时核对）
     md += render_design_section(
         design_plan, design_conf,
@@ -1549,6 +1658,9 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "length_by_pair",
         "length_calibrations",
         "length_null",
+        "length_ppl_interactions",
+        "length_ppls",
+        "lp_requested",
         "load",
         "log_tests",
         "m",
@@ -1677,6 +1789,8 @@ def build_summary(results_dir: str, audit: dict = None,
         'missingness': ctx.get("missingness"),
         'length_null': ctx.get("length_null"),
         'length_calibration': ctx.get("length_calibrations"),
+        'length_ppl': ctx.get("length_ppls"),
+        'length_ppl_interactions': ctx.get("length_ppl_interactions"),
         'ppl_window_tests': ctx["ppl_window_tests"],
         'factorial_shapley': ctx["shapley_tests"],
         'reparameterization': ctx["reparameterization"],
