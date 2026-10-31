@@ -1484,21 +1484,24 @@ def _ruler_protocol(d) -> dict:
     这些字段任一不同，EM 就不是同一批样例/同一生成规则上的配对观测：
     ctx_lens/n_samples/sample_seed 决定题面与抽样，corpus_source 决定
     干扰文本是否见过，max_new/fwe_max_new/vt_* 决定解码预算，
-    depth_stratified 决定 needle 位置是分层抽样还是随机抽样。
+    depth_stratified 决定 needle 位置是分层抽样还是随机抽样；
+    samples_manifest_sha256 进一步绑定实际生成的 prompt/答案内容。
     """
     if not isinstance(d, dict):
         return {}
     keys = ("ctx_lens", "n_samples", "sample_seed", "corpus_source",
             "corpus_held_out", "max_new", "fwe_max_new", "vt_chains",
-            "vt_depth", "amp", "depth_stratified")
+            "vt_depth", "amp", "depth_stratified",
+            "samples_manifest_sha256")
     return {k: d[k] for k in keys if k in d and d[k] is not None}
 
 
 def _ruler_cell_signature(d):
-    """RULER 已评测 (任务, 上下文, 样本数) 单元；缺格或 n 不同均不可配对。
+    """RULER 已评测 (任务, 上下文, 样本数, 内容清单) 单元；缺格均不可配对。
 
     同一 (任务, 上下文) 但 n 不同说明实际参与平均的样例数不同（例如部分
     样例构造失败被跳过），两边的聚合 EM/macro 不是同一批观测上的配对值。
+    新产物还带 samples_sha256：同 seed/计数但题面不同会得到不同签名。
     """
     if not isinstance(d, dict):
         return None
@@ -1514,5 +1517,11 @@ def _ruler_cell_signature(d):
             if not isinstance(cell, dict):
                 continue
             n = _integral_value(cell.get("n"))
-            cells.add((task, str(ctx), n))
+            # 内容清单哈希缺失的旧产物仍是 3 元组；带哈希的新产物与旧产物
+            # 不相等，因此“同 seed 但无法证明同题面”不会静默配对。
+            if "samples_sha256" in cell:
+                digest = _protocol_value(cell.get("samples_sha256"))
+                cells.add((task, str(ctx), n, digest))
+            else:
+                cells.add((task, str(ctx), n))
     return frozenset(cells)

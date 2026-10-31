@@ -1456,3 +1456,27 @@ PPL。`lega/lengthppl.py` 因此在同一份 **val** 文本上构造嵌套配对
 checkpoint 在 val 上选择，因此该曲线只描述长度形状，不是独立 test 集 PPL
 证据；正式 PPL 结论仍以 held-out test（或明确的 val 回退披露）为准。
 只读 val，不访问 test。
+
+## RULER 题面内容身份指纹
+
+RULER 的跨变体配对原先只核对 `sample_seed`、上下文长度、样本数与生成预算。
+这些字段相同并不能证明两个变体真的拿到同一批 prompt：任务构造代码、模板或
+干扰语料一变，同 seed 也会生成不同题面，而 `sample_id` 仍会逐条对齐，配对
+检验就会把“不同评测数据”误当成“同一批固定样例”。
+
+现在 `lega/ruler.py` 对每个构造结果计算 `sample_content_sha256`：覆盖实际
+`ids`、答案、gold 跨度与 `meta` 的规范化 JSON（排除 `sample_id` 等运行
+标签）；每个单元格再记录 `(sample_id, sample_content_sha256)` 的清单哈希
+`samples_sha256`，payload 顶层记录所有单元格的聚合
+`samples_manifest_sha256`。`run_all` 的 RULER 协议核对与单元格签名都消费
+这些字段：
+
+- 同一 seed/计数但实际题面不同，比较会以 `protocol_mismatch` 排除，而不是
+  继续输出逐样例 McNemar/配对差；
+- 旧产物没有内容指纹时不被伪造补齐；新产物与旧产物混合也不视为同一协议，
+  因为无法证明两边题面一致；
+- `sample_id` 仍只作跨变体对齐标签，内容身份由哈希独立证明，二者不互相
+  替代。
+
+该指纹只证明“评测输入内容相同”，不证明构造器本身的正确性；它也不能替代
+数据协议闸门、test 访问账本或对 RULER 构造逻辑的单元测试。

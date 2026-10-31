@@ -213,6 +213,37 @@ def test_ruler_protocol_tracks_depth_stratification():
     print("  [ok] RULER 配对协议区分分层/随机位置")
 
 
+def test_ruler_protocol_tracks_sample_content_fingerprint():
+    """同 seed/计数但题面内容不同：协议与单元格签名都必须拒绝配对。"""
+    from run_all import _same_protocol_fields
+    base = {
+        "ctx_lens": [256], "n_samples": 3, "sample_seed": 1,
+        "corpus_source": "val", "corpus_held_out": True,
+        "max_new": 12, "fwe_max_new": 44, "vt_chains": 4,
+        "vt_depth": 4, "amp": True, "depth_stratified": True,
+    }
+    h1, h2 = "a" * 64, "b" * 64
+    p1 = _ruler_protocol(dict(base, samples_manifest_sha256=h1))
+    p2 = _ruler_protocol(dict(base, samples_manifest_sha256=h2))
+    legacy = _ruler_protocol(base)
+    assert p1["samples_manifest_sha256"] == h1
+    assert _same_protocol_fields(p1, dict(p1))
+    assert not _same_protocol_fields(p1, p2)
+    # 旧产物没有内容证明，不能与新产物静默视为同一题面。
+    assert not _same_protocol_fields(p1, legacy)
+
+    def sig(digest):
+        return {"results": {"niah_synth": {"256": {
+            "n": 3, "samples_sha256": digest}}}}
+    assert _ruler_cell_signature(sig(h1)) != _ruler_cell_signature(sig(h2))
+    assert _ruler_cell_signature(sig(h1)) == _ruler_cell_signature(sig(h1))
+    # 缺字段保留旧产物签名格式；新/旧签名不相等。
+    old_sig = _ruler_cell_signature({"results": {"niah_synth": {
+        "256": {"n": 3}}}})
+    assert _ruler_cell_signature(sig(h1)) != old_sig
+    print("  [ok] RULER 协议核对题面内容清单指纹")
+
+
 def test_int_or_zero_rejects_bool_and_fractional_counts():
     """外部 JSON 的计数不能被 int() 把 True/5.9 伪装成 1/5。"""
     assert _int_or_zero(None) == 0 and _int_or_zero("5") == 5

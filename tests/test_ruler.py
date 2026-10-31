@@ -10,8 +10,9 @@ from lega.ruler import (DEPTH_BINS, EVIDENCE_TASKS, NEEDLE_TMPL,
                         build_evidence_condition, build_fwe, build_niah,
                         build_vt, depth_bin, load_corpus_sents,
                         load_corpus_sents_with_source, record_corpus_test_access,
-                        score_prediction,
-                        ContextTooSmall, TASKS, _stable_hash)
+                        sample_content_sha256, score_prediction,
+                        ContextTooSmall, TASKS, _ruler_samples_manifest_sha256,
+                        _samples_sha256, _stable_hash)
 
 _TEXT = ("One of the special magic numbers for lyre is: 7021853.\n"
          "VAR A1 = 48213.\nVAR A2 = A1.\nVAR B1 = 99321.\nVAR B2 = B1.\n"
@@ -498,6 +499,11 @@ def test_run_ruler_records_per_sample_outcomes():
     ids = [s["sample_id"] for s in samples]
     assert len(set(ids)) == len(ids), ids
     assert all(isinstance(s["sample_id"], str) and s["sample_id"] for s in samples)
+    # 每格/每样例都带实际题面内容指纹；清单必须能由逐样例记录重算。
+    assert re.fullmatch(r"[0-9a-f]{64}", cell["samples_sha256"])
+    assert _samples_sha256(samples) == cell["samples_sha256"]
+    assert all(re.fullmatch(r"[0-9a-f]{64}", s["sample_sha256"])
+               for s in samples)
     assert all(s["em"] in (0.0, 1.0) for s in samples)
     assert sum(s["em"] for s in samples) / len(samples) == cell["em"]
     # NIAH 逐样例带 needle 位置与分箱；分层汇总必须与样本逐条一致。
@@ -511,7 +517,40 @@ def test_run_ruler_records_per_sample_outcomes():
         assert abs(rec["em"] - sum(s["em"] for s in rows) / len(rows)) < 1e-12
         lo, hi = rec["em_ci95_wilson"]
         assert 0.0 <= lo <= rec["em"] <= hi <= 1.0
-    print("  [ok] run_ruler 逐样例 EM 落盘（sample_id 唯一、与聚合 EM 一致）")
+    print("  [ok] run_ruler 逐样例 EM/题面指纹落盘（sample_id 唯一、聚合一致）")
+
+
+def test_sample_content_fingerprint_binds_prompt_not_run_labels():
+    """内容指纹忽略 sample_id/旧指纹，但必须对实际 prompt 改动敏感。"""
+    tok = _tok()
+    ex = build_niah(tok, 400, random.Random(7), mode="synth")
+    ex["sample_id"] = "niah_synth@400#0"
+    h0 = sample_content_sha256(ex)
+    # 运行标签与缓存指纹不是题面内容，不应改变同一题面的身份。
+    relabeled = dict(ex, sample_id="niah_synth@400#99",
+                     sample_sha256="stale")
+    assert sample_content_sha256(relabeled) == h0
+    changed = dict(ex)
+    changed["ids"] = list(ex["ids"])
+    changed["ids"][len(changed["ids"]) // 2] = (
+        changed["ids"][len(changed["ids"]) // 2] + 1) % len(tok.stoi)
+    assert sample_content_sha256(changed) != h0
+    # 单元格清单哈希对 sample_id 与内容指纹的任一改动都敏感。
+    recs = [{"sample_id": ex["sample_id"], "sample_sha256": h0}]
+    h_cell = _samples_sha256(recs)
+    assert re.fullmatch(r"[0-9a-f]{64}", h_cell)
+    assert _samples_sha256([dict(recs[0], sample_id="other")]) != h_cell
+    assert _samples_sha256([dict(recs[0], sample_sha256="0" * 64)]) != h_cell
+    # 缺哈希/重复 sample_id 的清单不可用（不伪造一个“看起来有效”的聚合）。
+    assert _samples_sha256([{"sample_id": "x"}]) is None
+    assert _samples_sha256([recs[0], dict(recs[0])]) is None
+    manifest = {"niah_synth": {"400": {
+        "n": 1, "samples_sha256": h_cell}}}
+    assert re.fullmatch(r"[0-9a-f]{64}",
+                        _ruler_samples_manifest_sha256(manifest))
+    assert _ruler_samples_manifest_sha256({"niah_synth": {"400": {
+        "n": 1}}}) is None
+    print("  [ok] RULER 题面内容指纹绑定 prompt、忽略运行标签")
 
 
 def test_depth_bin_boundaries_and_invalid_values():

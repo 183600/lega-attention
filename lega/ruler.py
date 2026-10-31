@@ -14,6 +14,8 @@
   * 生成采用贪心解码 + KV 缓存，与训练相同的因果语言模型接口；
   * 指标: niah/multikey/vt 用数值命中 EM；fwe 用 top-10 词召回率 recall 与严格 EM。
 """
+import hashlib
+import json
 import math
 import random
 import re
@@ -87,6 +89,72 @@ def _int_or_none(value):
 def _stable_hash(s: str) -> int:
     """跨进程稳定的字符串哈希（内置 hash() 对字符串带随机盐，不可用于实验播种）。"""
     return zlib.crc32(s.encode("utf-8"))
+
+
+def _sha256_json(value) -> str:
+    """对规范化 JSON 求 SHA-256；键排序/紧凑分隔符保证跨进程稳定。"""
+    blob = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def sample_content_sha256(sample: Dict) -> str:
+    """RULER 样例实际题面/答案内容的 SHA-256（不含 sample_id 等运行标签）。
+
+    只比较 sample_seed/计数无法证明两个变体真的拿到同一批题面：构造代码、
+    语料或模板一变，同 seed 也会生成不同 prompt。哈希覆盖构造结果的全部
+    字段（ids、答案、gold 跨度与 meta），供跨变体配对前核验内容身份。
+    """
+    if not isinstance(sample, dict):
+        raise TypeError(f"RULER 样例必须是字典，收到 {type(sample).__name__}")
+    payload = {k: v for k, v in sample.items()
+               if k not in ("sample_id", "sample_sha256")}
+    try:
+        return _sha256_json(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"RULER 样例无法规范化为 JSON: {exc}") from exc
+
+
+def _samples_sha256(samples) -> Optional[str]:
+    """逐样例 ``(sample_id, sample_sha256)`` 的单元格内容清单哈希。"""
+    if not isinstance(samples, list) or not samples:
+        return None
+    rows = []
+    for rec in samples:
+        if not isinstance(rec, dict):
+            return None
+        sid = rec.get("sample_id")
+        digest = rec.get("sample_sha256")
+        if (not isinstance(sid, str) or not sid
+                or not isinstance(digest, str) or not digest):
+            return None
+        rows.append((sid, digest))
+    if len({sid for sid, _ in rows}) != len(rows):
+        return None
+    rows.sort()
+    return _sha256_json(rows)
+
+
+def _ruler_samples_manifest_sha256(results) -> Optional[str]:
+    """全部 RULER 单元格内容清单的聚合哈希；缺哈希即返回 None（不伪造）。"""
+    if not isinstance(results, dict):
+        return None
+    rows = []
+    for task, by_ctx in results.items():
+        if not isinstance(task, str) or task.startswith("_"):
+            continue
+        if not isinstance(by_ctx, dict):
+            return None
+        if not by_ctx:
+            continue
+        for ctx, cell in by_ctx.items():
+            if not isinstance(cell, dict):
+                return None
+            digest = cell.get("samples_sha256")
+            if not isinstance(digest, str) or not digest:
+                return None
+            rows.append((task, str(ctx), digest))
+    return _sha256_json(rows) if rows else None
 
 
 def _cached_encode(tok, text: str) -> List[int]:
@@ -895,6 +963,8 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                 # 稳定标识：各变体用同一 (task, ctx, i) 构造同一批样本，
                 # 跨变体错误对照靠它把错误的个案一一对齐（而不是靠文本猜测）
                 ex["sample_id"] = f"{task}@{room_ctx}#{i}"
+                # 题面内容身份：同 seed/同计数但构造结果不同，不能静默配对。
+                ex["sample_sha256"] = sample_content_sha256(ex)
                 samples.append(ex)
             if not samples:
                 continue
@@ -930,6 +1000,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                                               ex["answer_words"])
                         ems.append(sc["em"])
                         rec = {"sample_id": ex.get("sample_id"),
+                               "sample_sha256": ex.get("sample_sha256"),
                                "em": float(sc["em"])}
                         if task == "fwe":
                             rec["answer_token_len"] = ex.get("meta", {}).get(
@@ -970,6 +1041,7 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                             qs, qe = ex["query_span"]
                             badcases.append({
                                 "sample_id": ex.get("sample_id"),
+                                "sample_sha256": ex.get("sample_sha256"),
                                 "task": task, "ctx": int(room_ctx),
                                 "answer": ex["answer"],
                                 "answer_words": ex["answer_words"],
@@ -1011,6 +1083,9 @@ def run_ruler(model, tok, device: str, ctx_lens: List[int], n_samples: int = 30,
                     # 逐样例 EM（sample_id 跨变体稳定对齐）：供下游做
                     # 样例级配对检验，见 run_all 的 RULER 样例配对小节。
                     "samples": outcomes,
+                    # 单元格内容清单哈希：下游据此核验“同 sample_id 是否
+                    # 真的是同一题面”，而不是只信 seed/计数。
+                    "samples_sha256": _samples_sha256(outcomes),
                 }
                 if task == "fwe":
                     lens = [s.get("answer_token_len") for s in outcomes
@@ -1320,9 +1395,13 @@ def main():
                         depth_stratified=depth_stratified)
     # 坏案例是 "_" 前缀的辅助键：不混入 results，避免下游聚合把它当任务
     badcases = results.pop("_badcases", [])
+    samples_manifest_sha256 = _ruler_samples_manifest_sha256(results)
     payload = {"variant": ck.get("variant", model.variant), "seed": seed,
                "ctx_lens": ctx_lens, "n_samples": n_samples,
                "sample_seed": sample_seed, "results": results,
+               # 全部单元格内容清单的聚合指纹：协议核对用它证明跨变体
+               # 实际拿到的是同一批题面，而不只是同 seed/同样本数。
+               "samples_manifest_sha256": samples_manifest_sha256,
                "badcases": badcases,
                # 生成口径随结果落盘：不同 max_new/解码预算或任务构造参数下的
                # EM 不是同一评测协议，下游不得直接配对（见 run_all 的协议核对）。
