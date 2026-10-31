@@ -1163,6 +1163,237 @@ def _dose_response_tests(doses):
     }
 
 
+
+def _capacity_triples(runs, metric_name, extractor):
+    """提取同一 seed 的 Full / Null_X / No_X 三臂观测。
+
+    三组两两配对都复用 ``_paired_observations`` 的 split/协议/评测格一致性
+    门槛；再对 seed 取交集，确保三方来自同一训练种子与同一评测协议。任一
+    两两配对里的同一变体数值必须逐位一致（同一 run、同一 extractor），否则
+    丢弃该 seed 并计数，避免把产物内部不一致悄悄拼成“精确分解”。
+    """
+    from .comparisons import _paired_observations
+
+    out = {}
+    for factor in ("A", "B", "C"):
+        null = CAPACITY_NULL_VARIANTS[factor]
+        off = CAPACITY_OFF_VARIANTS[factor]
+        fn, *_ = _paired_observations(runs, "lega", null, metric_name,
+                                      extractor)
+        fo, *_ = _paired_observations(runs, "lega", off, metric_name,
+                                      extractor)
+        no, *_ = _paired_observations(runs, null, off, metric_name, extractor)
+        fn = {seed: (a, b) for seed, a, b in fn}
+        fo = {seed: (a, b) for seed, a, b in fo}
+        no = {seed: (a, b) for seed, a, b in no}
+        seeds = sorted(set(fn) & set(fo) & set(no))
+        triples, inconsistent = [], 0
+        for seed in seeds:
+            full_fn, null_fn = fn[seed]
+            full_fo, off_fo = fo[seed]
+            null_no, off_no = no[seed]
+            if not (full_fn == full_fo and null_fn == null_no
+                    and off_fo == off_no):
+                inconsistent += 1
+                continue
+            triples.append((seed, full_fn, null_fn, off_fo))
+        out[factor] = {"triples": triples,
+                       "n_inconsistent_values": inconsistent,
+                       "n_common_seeds": len(seeds)}
+    return out
+
+
+def _capacity_decomposition(runs) -> dict:
+    """训练期逐组件容量匹配证据消融的精确三臂分解（探索性）。
+
+    对 A/B/C 分别检查 Full=lega、Null_X（保留参数、证据置零）与 No_X
+    （参数与证据都去掉）。同一批种子上 info=Full−Null、capacity=Null−No、
+    total=Full−No 恒等，因此残差只反映浮点舍入；各效应的 p 值只回答
+    “是否偏离 0”，不检验 info 与 capacity 的差。独立于主对比表与参数匹配
+    安慰剂，单独 Holm 家族，不改变任何确认性判定。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    requested = any(v in runs for v in CAPACITY_NULL_VARIANTS.values())
+    out = {
+        "requested": bool(requested),
+        "available": False,
+        "components": list(CAPACITY_NULL_VARIANTS),
+        "null_variants": dict(CAPACITY_NULL_VARIANTS),
+        "off_variants": dict(CAPACITY_OFF_VARIANTS),
+        "metrics": {},
+        "tests": [],
+        "note": (
+            "训练期容量匹配对照（探索性）：Null_X 保留 Full 的全部门控参数/"
+            "FLOPs，只把对应证据通道置零；info=Full−Null、capacity=Null−No、"
+            "total=Full−No 在同一 seed 上精确相加。该分解只定位“去掉证据但"
+            "保留参数后仍存在的差异”，不是分布匹配置换零假设，也不检验 "
+            "info 与 capacity 之差。"),
+    }
+    if not requested:
+        return out
+
+    specs = (
+        ("PPL", lambda slot: _ppl_of(slot.get("eval")), True),
+        ("RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")), False),
+    )
+    for metric_name, extractor, lower_better in specs:
+        arms = _capacity_triples(runs, metric_name, extractor)
+        rows = []
+        for factor in ("A", "B", "C"):
+            null = CAPACITY_NULL_VARIANTS[factor]
+            off = CAPACITY_OFF_VARIANTS[factor]
+            missing = [v for v in ("lega", null, off) if v not in runs]
+            rec = {
+                "component": factor,
+                "component_cn": COMPONENT_CN[factor],
+                "metric": metric_name,
+                "full_variant": "lega",
+                "null_variant": null,
+                "off_variant": off,
+                "lower_is_better": bool(lower_better),
+                "status": "estimated",
+                "n": 0,
+                "missing_variants": missing,
+                "n_inconsistent_values": arms[factor][
+                    "n_inconsistent_values"],
+                "n_common_seeds": arms[factor]["n_common_seeds"],
+            }
+            if missing:
+                rec["status"] = "missing_variants"
+                rows.append(rec)
+                continue
+            triples = arms[factor]["triples"]
+            if len(triples) < MIN_SEEDS:
+                rec["status"] = "insufficient_seeds"
+                rec["n"] = len(triples)
+                rows.append(rec)
+                continue
+            full = [x[1] for x in triples]
+            null_values = [x[2] for x in triples]
+            off_values = [x[3] for x in triples]
+            eff = component_effects(full, null_values, off_values,
+                                    lower_better=lower_better)
+            rec["n"] = eff["n"]
+            rec["seeds_used"] = [x[0] for x in triples]
+            rec["info_share"] = eff["info_share"]
+            rec["identity_residual_max_abs"] = eff[
+                "identity_residual_max_abs"]
+            for name in EFFECT_ORDER:
+                rec[f"{name}_mean"] = eff["effects"][name]["mean"]
+                rec[f"{name}_median"] = eff["effects"][name]["median"]
+                values = eff["effects"][name]["values"]
+                res = paired_t_test(values, [0.0] * len(values))
+                res.update({
+                    "candidate": f"{EFFECT_CN[name]}（{factor}）",
+                    "reference": "0（无效应）",
+                    "metric": metric_name,
+                    "lower_is_better": False,
+                    "capacity_factor": factor,
+                    "capacity_effect": name,
+                    "capacity_effect_cn": EFFECT_CN[name],
+                    "full_variant": "lega",
+                    "null_variant": null,
+                    "off_variant": off,
+                    "variant": "lega",
+                    "contrast_type": "capacity_decomposition",
+                    "exploratory": True,
+                    "direction": "positive_means_full_better",
+                    "seeds_used": [x[0] for x in triples],
+                })
+                res = _enrich_paired(res, values, [0.0] * len(values))
+                out["tests"].append(res)
+            rows.append(rec)
+        out["metrics"][metric_name] = rows
+
+    out["tests"] = _apply_holm(out["tests"])
+    index = {(t.get("metric"), t.get("capacity_factor"),
+              t.get("capacity_effect")): t for t in out["tests"]}
+    for metric_name, rows in out["metrics"].items():
+        for rec in rows:
+            for name in EFFECT_ORDER:
+                t = index.get((metric_name, rec["component"], name))
+                if t is None:
+                    continue
+                rec[f"{name}_p"] = t.get("p")
+                rec[f"{name}_p_adj"] = t.get("p_adj")
+    out["available"] = any(
+        rec.get("status") == "estimated"
+        for rows in out["metrics"].values() for rec in rows)
+    return out
+
+
+
+def _render_capacity_decomposition(analysis: dict) -> list:
+    """渲染训练期逐组件容量匹配证据消融（探索性）。"""
+    if not isinstance(analysis, dict) or not analysis.get("requested"):
+        return []
+    md = ["", "## 训练期逐组件容量匹配证据消融（探索性）", ""]
+    md.append("对 A/B/C 分别比较 Full=`lega`、Null_X（保留全部门控参数/FLOPs，"
+              "只把证据置零）与 No_X（`lega_no_*`，参数与证据都去掉）。"
+              "同一批种子上 `info=Full−Null`、`capacity=Null−No`、"
+              "`total=Full−No` 精确相加；正值统一表示 Full 更好"
+              "（PPL 更低 / RULER EM 更高）。")
+    md.append("")
+    md.append("⚠ 边界：Null_X 只置零证据、不改变参数个数/训练流程，"
+              "**不是**分布匹配的置换零假设；容量项混合参数容量、初始化/"
+              "优化红利与置零后表征重分配。各效应 p 值只检验是否偏离 0，"
+              "不检验 info 与 capacity 之差；独立 Holm 家族、探索性，"
+              "不改变确认性判定。")
+    md.append("")
+    if not analysis.get("available"):
+        missing = sorted(set(analysis.get("null_variants", {}).values()))
+        if missing:
+            md.append("⚠ 未发现可计算的完整三臂。需显式训练 `lega`、"
+                      "`lega_no_query/no_conc/no_len` 与 "
+                      + "、".join(f"`{v}`" for v in missing)
+                      + "（可用 `--capacity_ablation` 追加 Null 对照）。")
+        else:
+            md.append("⚠ 三臂数据不足（每组件需要 ≥3 个同协议种子），"
+                      "暂无法计算容量分解。")
+        md.append("")
+        return md
+    for metric, rows in (analysis.get("metrics") or {}).items():
+        if not isinstance(rows, list) or not rows:
+            continue
+        md.append(f"### {metric}")
+        md.append("")
+        md.append("| 组件 | n | 信息效应 Full−Null | 容量效应 Null−No | "
+                  "总效应 Full−No | 恒等残差(max) | 信息占比 | "
+                  "p_adj(info) | p_adj(capacity) | p_adj(total) | 状态 |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        for rec in rows:
+            if not isinstance(rec, dict):
+                continue
+            n = rec.get("n")
+            status = str(rec.get("status") or "-")
+            if status != "estimated":
+                reason = status
+                if rec.get("missing_variants"):
+                    reason += "：" + "、".join(rec["missing_variants"])
+                md.append(
+                    f"| {rec.get('component_cn', '-')} | {n if n is not None else '-'} "
+                    f"| - | - | - | - | - | - | - | - | {reason} |")
+                continue
+            share = _finite_number(rec.get("info_share"))
+            share_s = f"{share * 100.0:+.1f}%" if share is not None else "-"
+            residual = _finite_number(rec.get("identity_residual_max_abs"))
+            residual_s = (f"{residual:.2e}"
+                          if residual is not None else "-")
+            md.append(
+                f"| {rec.get('component_cn', '-')} | {n} "
+                f"| {_fmt_signed(rec.get('info_mean'))} "
+                f"| {_fmt_signed(rec.get('capacity_mean'))} "
+                f"| {_fmt_signed(rec.get('total_mean'))} "
+                f"| {residual_s} "
+                f"| {share_s} "
+                f"| {_fmt_signed(rec.get('info_p_adj'), '.4g')} "
+                f"| {_fmt_signed(rec.get('capacity_p_adj'), '.4g')} "
+                f"| {_fmt_signed(rec.get('total_p_adj'), '.4g')} "
+                f"| {status} |")
+        md.append("")
+    return md
+
+
 def _auroc_diff_tests(runs) -> list:
     """AUROC(logit)−AUROC(qterm) 配对差检验（H6 的判定依据）。"""
     return _detection_diff_tests(runs, "auroc", AUROC_DIFF_METRIC)

@@ -60,6 +60,7 @@ SOURCE_CN = {
     "causal_lesion": "推理期因果病灶",
     "causal_matched_lesion": "活动匹配病灶",
     "causal_matched_contrast": "原始−匹配病灶",
+    "capacity_decomposition": "训练期容量匹配证据消融",
     "dose_response": "剂量-反应",
     "inference_shapley": "推理期 Shapley",
     "inference_interaction": "推理期交互",
@@ -351,6 +352,7 @@ def collect_seed_level_tests(main_tests=None, causal_tests=None,
                              matched_ablation_contrasts=None,
                              dose_tests=None, inference_shapley=None,
                              inference_interactions=None,
+                             capacity_decomposition=None,
                              length_analysis=None, ngram_comparison=None,
                              reparameterization=None, probe_comparison=None):
     """合并各分析层的种子级探索性检验，并写入 ``fdr_source``。
@@ -378,6 +380,8 @@ def collect_seed_level_tests(main_tests=None, causal_tests=None,
         add(dose_tests.get("tests"), "dose_response")
     add(inference_shapley, "inference_shapley")
     add(inference_interactions, "inference_interaction")
+    if isinstance(capacity_decomposition, dict):
+        add(capacity_decomposition.get("tests"), "capacity_decomposition")
     if isinstance(length_analysis, dict):
         add(length_analysis.get("ctx_tests"), "ruler_length_ctx")
         add(length_analysis.get("slope_tests"), "ruler_length_slope")

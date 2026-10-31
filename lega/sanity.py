@@ -34,6 +34,7 @@ import torch
 import torch.nn.functional as F
 
 from .attention import RUNNABLE_VARIANTS, VARIANT_CN
+from .capacity import NULL_EVIDENCE_COMPONENT
 from .data import load_bin, load_meta, get_train_batch
 from .datacheck import check_vocab_capacity
 from .model import GPT, count_params
@@ -143,6 +144,26 @@ def active_regularization(model) -> list:
     return active
 
 
+def _expected_zero_grad_names(model) -> set:
+    """容量匹配对照中“证据被置零”的门控参数名。
+
+    这些参数仍参与前向并保留零梯度（不是图断流），overfit 检查应把
+    missing_grad 当失败、把这里登记的 zero_grad 当设计预期，同时保留
+    ``expected_zero_grad`` 供人工审计。
+    """
+    expected = set()
+    for mod_name, module in model.named_modules():
+        component = NULL_EVIDENCE_COMPONENT.get(
+            getattr(module, "variant", None))
+        if component is None:
+            continue
+        param = {"A": "gate_w", "B": "gate_a", "C": "gate_b"}.get(component)
+        if param is None or not hasattr(module, param):
+            continue
+        expected.add(f"{mod_name}.{param}" if mod_name else param)
+    return expected
+
+
 def gradient_coverage(model) -> dict:
     """逐参数梯度覆盖检查（在第一次 backward 之后调用）。
 
@@ -151,11 +172,13 @@ def gradient_coverage(model) -> dict:
     分类：
       * missing_grad —— grad is None：该参数与 loss 之间图断流（严重问题）；
       * nonfinite_grad —— grad 含 NaN/Inf：数值问题，继续训练只会污染权重；
-      * zero_grad —— grad 全 0：疑似的图断流（如子模块被 detach 后又乘 0）。
-        overfit 检查将其作为独立失败项；若确有“首步本应为 0”的参数，应在
-        报告里人工复核，而不是让整条链路静默通过。
+      * zero_grad —— 未登记的 grad 全 0：疑似的图断流（如子模块被 detach
+        后又乘 0）。overfit 检查将其作为独立失败项。
+      * expected_zero_grad —— 容量匹配变体中证据被有意置零的 gate 参数；
+        其零梯度是设计预期，单独记录而不是让整条链路静默通过。
     """
-    missing, nonfinite, zero = [], [], []
+    missing, nonfinite, zero, expected_zero = [], [], [], []
+    expected = _expected_zero_grad_names(model)
     n_trainable = 0
     for name, p in model.named_parameters():
         if not p.requires_grad:
@@ -167,9 +190,13 @@ def gradient_coverage(model) -> dict:
         elif not bool(torch.isfinite(g).all()):
             nonfinite.append(name)
         elif float(g.detach().abs().max()) == 0.0:
-            zero.append(name)
+            if name in expected:
+                expected_zero.append(name)
+            else:
+                zero.append(name)
     return {"n_trainable": n_trainable, "missing_grad": missing,
-            "nonfinite_grad": nonfinite, "zero_grad": zero}
+            "nonfinite_grad": nonfinite, "zero_grad": zero,
+            "expected_zero_grad": expected_zero}
 
 
 def grad_norm(params) -> float | None:

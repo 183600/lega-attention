@@ -751,6 +751,9 @@ def _summary_part_a(results_dir: str, audit: dict = None,
          if t.get("metric") == "PPL"
          and t.get("candidate") == PARAM_CONTROL_VARIANT
          and t.get("reference") == "qgate"), None)
+    # 逐组件容量匹配对照（Full / Null_X / No_X）：独立于主配对表与整体
+    # 安慰剂，单独 Holm 家族；只有显式训练 null 变体时才有内容。
+    capacity_decomposition = _capacity_decomposition(runs)
     # 样例级配对（McNemar）：固定题面上的评测抽样不确定性，与上面的
     # 跨种子聚合 EM 检验互补；独立 Holm 家族、探索性证据。
     ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
@@ -1590,6 +1593,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "cal_rows",
         "cand",
         "capacity_only_test",
+        "capacity_decomposition",
         "causal_tests",
         "matched_ablation_contrasts",
         "dose_tests",
@@ -1797,6 +1801,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'inference_factorial_shapley': ctx["inference_shapley"],
         'inference_interactions': ctx["inference_interactions"],
         'parameter_matched_control': ctx["param_control_test"],
+        'capacity_decomposition': ctx["capacity_decomposition"],
         'causal_ablation': ctx["causal_tests"],
         'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
         'dose_response': ctx["dose_tests"],

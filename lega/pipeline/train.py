@@ -197,6 +197,13 @@ def main():
                         "FLOPs 与 lega 相同，但 B/C 证据替换为确定性噪声；"
                         "汇总页给出 lega vs lega_placebo 的容量对照。"
                         "默认关闭（不影响主实验规模）")
+    p.add_argument("--capacity_ablation", action="store_true",
+                   help="追加训练期逐组件容量匹配证据消融 "
+                        "lega_null_query/conc/len：保留 Full 的全部门控参数/"
+                        "FLOPs，只把 A/B/C 对应证据置零；与 lega_no_* 组成 "
+                        "Full/Null/No 三臂，把单组件效应精确拆为信息与容量"
+                        "两部分。需同时训练 lega 与对应 lega_no_*（默认矩阵"
+                        "已含）；默认关闭")
     p.add_argument("--raw_factorial", action="store_true",
                    help="追加原始集中度参数化的完整 2^3 对照（用 a*log max_p "
                         "替代 a*log(n*max_p)），与主矩阵的归一化网格逐格配对；"
@@ -334,10 +341,21 @@ def main():
                 + ", ".join(RUNNABLE_VARIANTS) + "）")
     if args.param_control and PARAM_CONTROL_VARIANT not in variants:
         variants.append(PARAM_CONTROL_VARIANT)
+    if args.capacity_ablation:
+        for v in CAPACITY_NULL_VARIANTS.values():
+            if v not in variants:
+                variants.append(v)
     if args.raw_factorial:
         for v in RAW_FACTORIAL_VARIANTS:
             if v not in variants:
                 variants.append(v)
+    if args.capacity_ablation:
+        need = ["lega"] + list(CAPACITY_OFF_VARIANTS.values())
+        absent = [v for v in need if v not in variants]
+        if absent:
+            print("[run_all] 警告：--capacity_ablation 需要同时训练 "
+                  + "、".join(absent)
+                  + "；缺少这些变体时容量分解会显式标记 unavailable")
     invalid = sorted(set(variants) - set(RUNNABLE_VARIANTS))
     if invalid:
         p.error(f"未知变体: {', '.join(invalid)}；可选: "

@@ -458,3 +458,23 @@ def test_batch_fingerprint_detects_content_and_label_changes():
     bad = torch.zeros(1, 1, dtype=torch.long)
     assert batch_contract(bad, bad, 64)["errors"]
     print("  [ok] sanity 固定批内容指纹对标签/内容变化敏感")
+
+
+def test_gradient_coverage_marks_capacity_null_zeros_as_expected():
+    """容量匹配对照的置零证据参数：零梯度是设计预期，不是图断流。"""
+    dead = {"lega_null_query": "gate_w", "lega_null_conc": "gate_a",
+            "lega_null_len": "gate_b"}
+    x, y = _batch()
+    for variant, param in dead.items():
+        torch.manual_seed(0)
+        model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1,
+                    n_heads=2, ffn_mult=4, variant=variant)
+        model(x, targets=y)["loss"].backward()
+        cov = gradient_coverage(model)
+        expected = [n for n in cov["expected_zero_grad"]
+                    if n.endswith("." + param)]
+        assert expected, (variant, cov)
+        assert not [n for n in cov["zero_grad"] if n.endswith("." + param)], \
+            (variant, cov)
+        assert not cov["missing_grad"], (variant, cov)
+    print("  [ok] lega_null_* 的预期零梯度与真实断流被分开记录")

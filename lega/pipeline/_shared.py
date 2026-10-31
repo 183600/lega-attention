@@ -19,10 +19,14 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
                             CONTROL_VARIANTS, GATE_FACTORS,
-                            RAW_GATE_FACTORS, RUNNABLE_VARIANTS,
-                            SUPPLEMENTAL_VARIANTS, VARIANTS, VARIANT_CN,
+                            NULL_EVIDENCE_VARIANTS, RAW_GATE_FACTORS,
+                            RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
+                            VARIANTS, VARIANT_CN,
                             _GATED, _LEGA_FAMILY, _USE_CONC, _USE_LEN,
                             _USE_QUERY, _USE_RAW_CONC)
+from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
+                           CAPACITY_OFF_VARIANTS, COMPONENT_CN,
+                           EFFECT_CN, EFFECT_ORDER, component_effects)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER,

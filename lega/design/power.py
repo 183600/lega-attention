@@ -812,7 +812,8 @@ def planned_comparison_pairs(variants, registered: dict = None) -> list:
     planned = [str(v) for v in (variants if isinstance(variants, (list, tuple))
                                 else [])]
     planned_set = set(planned)
-    pairs = [(v, "standard") for v in planned if v != "standard"]
+    pairs = [(v, "standard") for v in planned
+             if v != "standard" and v not in _CAPACITY_NULL_VARIANTS]
     if _PARAM_CONTROL_VARIANT in planned_set:
         if "lega" in planned_set:
             pairs.append(("lega", _PARAM_CONTROL_VARIANT))

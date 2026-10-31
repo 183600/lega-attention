@@ -17,6 +17,10 @@
                      伪随机特征，参数个数/门控 FLOPs 与 lega 相同，但不含任何
                      查询/注意力/长度信息；用于隔离“多几个门控参数/一次门控
                      运算”的训练期优化红利）
+    lega_null_query/conc/len: 保留 Full 的全部门控参数与 FLOPs，只把 A/B/C
+                     对应证据置零（qterm/c/log n）。与 lega_no_* 组成逐组件
+                     容量匹配三臂：Full、证据置零、参数+证据都去掉，使
+                     total = info + capacity 在同一 seed 上精确成立。
     lega_raw      :  g = sigmoid(w·q + a*log max_p + b*log n + d)  （补充对照：
                      原始最大概率对数，不做 c 的长度归一化；与 lega 的函数
                      表达能力相同，用于区分“重参数化”与“额外容量”）
@@ -73,6 +77,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+from .capacity import NULL_EVIDENCE_COMPONENT
 from .utils import config_finite_float, config_probability
 
 # 主实验变体（配置/命令行默认使用；与预注册的 2^3 门控矩阵一致）
@@ -85,7 +90,12 @@ VARIANTS = ("standard", "gate_only", "qgate", "null", "lega", "lega_no_len",
 # 参数个数、门控 FLOPs、初始化与优化器分组都与 LEGA 一致，但 u/v 不携带
 # 任何查询/注意力/长度信息。它回答“LEGA 的收益是否只是多了几个门控参数/
 # 一次额外门控运算带来的优化红利”，而不是“是否用到了 B/C 证据”。
-CONTROL_VARIANTS = ("lega_placebo",)
+PLACEBO_VARIANTS = ("lega_placebo",)
+# 逐组件容量匹配对照：保留 Full 的全部门控参数与计算，只把 A/B/C 对应
+# 证据置零。与 lega_no_* 组成 Full / Null_X / No_X 三臂，用于把单组件
+# LOO 效应精确拆成“信息贡献”和“参数/优化容量贡献”。
+NULL_EVIDENCE_VARIANTS = tuple(NULL_EVIDENCE_COMPONENT)
+CONTROL_VARIANTS = PLACEBO_VARIANTS + NULL_EVIDENCE_VARIANTS
 # 补充对照：不进入主矩阵/默认 run，但用于回答审稿人要求的“重参数化、
 # detach 反传路径、固定零 value null”三类直接对照。其中 raw_* 用于构成
 # 原始集中度参数化的完整 2^3（与归一化网格逐格配对），但它们不属于
@@ -116,6 +126,9 @@ VARIANT_CN = {
     "lega_conc_only": "仅集中度门控",
     "lega_len_only": "仅长度门控",
     "lega_placebo": "LEGA参数匹配安慰剂(证据=噪声)",
+    "lega_null_query": "LEGA容量匹配对照(查询项置零)",
+    "lega_null_conc": "LEGA容量匹配对照(集中度置零)",
+    "lega_null_len": "LEGA容量匹配对照(长度置零)",
     "lega_raw": "LEGA原始log max_p(不归一化)",
     "lega_raw_no_len": "原始log max_p且无长度项",
     "lega_raw_conc_only": "仅原始log max_p门控",
@@ -129,28 +142,28 @@ VARIANT_CN = {
 # 各公式项出现的变体
 _USE_QUERY = ("qgate", "lega", "lega_no_len", "lega_no_conc",
               "lega_placebo", "lega_raw", "lega_raw_no_len",
-              "lega_detach_conc") + ALT_CONC_VARIANTS            # w·q 项
+              "lega_detach_conc", "lega_null_query") + ALT_CONC_VARIANTS  # w·q 项
 _USE_CONC = ("lega", "lega_no_len", "lega_no_query",
              "lega_conc_only",
-             "lega_placebo", "lega_detach_conc") \
+             "lega_placebo", "lega_detach_conc", "lega_null_conc") \
     + ALT_CONC_VARIANTS                 # a*c, c=log(n*q)，q 由 ALT_CONC_STATS 决定
 _USE_RAW_CONC = ("lega_raw", "lega_raw_no_len",
                  "lega_raw_conc_only", "lega_raw_no_query")        # a*log max_p（不归一化）
 _USE_LEN = ("lega", "lega_no_conc", "lega_no_query",
             "lega_len_only",
             "lega_placebo", "lega_raw", "lega_raw_no_query",
-            "lega_detach_conc") + ALT_CONC_VARIANTS                # log n 项
+            "lega_detach_conc", "lega_null_len") + ALT_CONC_VARIANTS  # log n 项
 # 有输出门
 _GATED = ("gate_only", "qgate", "lega", "lega_no_len", "lega_no_conc",
           "lega_no_query", "lega_conc_only", "lega_len_only",
           "lega_placebo", "lega_raw", "lega_raw_no_len",
           "lega_raw_conc_only", "lega_raw_no_query",
-          "lega_detach_conc") + ALT_CONC_VARIANTS
+          "lega_detach_conc") + ALT_CONC_VARIANTS + NULL_EVIDENCE_VARIANTS
 # 门依赖注意力统计（默认 max_j p_j；alt 变体替换为对应的集中度质量）
 _LEGA_FAMILY = ("lega", "lega_no_len", "lega_no_query", "lega_conc_only",
                 "lega_placebo", "lega_raw", "lega_raw_no_len",
                 "lega_raw_conc_only", "lega_raw_no_query",
-                "lega_detach_conc") + ALT_CONC_VARIANTS
+                "lega_detach_conc") + ALT_CONC_VARIANTS + NULL_EVIDENCE_VARIANTS
 # 固定零 value 的 null 对照：语义上仍是“空注意力”，但 value 槽不学习。
 _IS_NULL = ("null", "null_zero")
 
@@ -421,10 +434,15 @@ class CausalSelfAttention(nn.Module):
         self.wv = nn.Linear(d_model, d_model, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
-        self.use_query = variant in _USE_QUERY
-        self.use_conc = variant in _USE_CONC
+        # 容量匹配对照必须保留 Full 的三个参数槽，只把对应证据置零；
+        # 因此 use_* 同时包含该变体（用于建参数/算统计）与普通公式变体。
+        self.use_query = (variant in _USE_QUERY
+                          or variant in NULL_EVIDENCE_VARIANTS)
+        self.use_conc = (variant in _USE_CONC
+                         or variant in NULL_EVIDENCE_VARIANTS)
         self.use_raw_conc = variant in _USE_RAW_CONC
-        self.use_len = variant in _USE_LEN
+        self.use_len = (variant in _USE_LEN
+                        or variant in NULL_EVIDENCE_VARIANTS)
         self.is_null = variant in _IS_NULL
         self.detach_conc = variant == "lega_detach_conc"
         # B 项的具体集中度统计量：主实验用 max_p；构念效度对照换成
@@ -531,6 +549,7 @@ class CausalSelfAttention(nn.Module):
         副本上累加。
         """
         H = self.n_heads
+        null_component = NULL_EVIDENCE_COMPONENT.get(self.variant)
         logit = None
         if self.use_query:
             # qterm 已由调用方预归约并升到 fp32。query_permute 只改门控
@@ -539,6 +558,10 @@ class CausalSelfAttention(nn.Module):
             shift = getattr(self, "query_permute_shift", None)
             if shift is not None:
                 qterm_used = _permute_positions(qterm, shift)
+            if null_component == "A":
+                # 乘 0 而不是 zeros_like：保留 gate_w 的计算图与零梯度，
+                # 让 sanity 能区分“预期零梯度”与图断流。
+                qterm_used = qterm_used * 0.0
             logit = qterm_used.clone() if keep_terms else qterm_used
         # logit 累加"标量门控系数 × 统计项"（addcmul_）。
         if self.use_conc or self.use_raw_conc:
@@ -566,19 +589,25 @@ class CausalSelfAttention(nn.Module):
                 # 完全不变（均值/方差/长度分布匹配），但“哪个位置拿到哪个
                 # 证据”被破坏；用于排除容量/尺度解释，而不是训练期变体。
                 c = _permute_positions(c, shift)
-            if self.variant in CONTROL_VARIANTS:
+            if self.variant in PLACEBO_VARIANTS:
                 # 参数匹配安慰剂：保留 a 的形状与梯度路径，但把它乘的
                 # “集中度证据”换成与真实统计无关的确定性噪声。
                 c = _placebo_evidence(c, H, salt=1.0,
                                       pos_offset=pos_offset)
+            elif null_component == "B":
+                # 容量匹配对照：只把 B 证据置零，保留 gate_a 参数/梯度路径。
+                c = c * 0.0
             a = self.gate_a.float().view(1, H, 1)
             logit = a * c if logit is None else logit.addcmul_(a, c)
         if self.use_len:
             len_term = log_n
-            if self.variant in CONTROL_VARIANTS:
+            if self.variant in PLACEBO_VARIANTS:
                 # 与 c 相同：保留 b 的参数/计算，只把长度证据替换为噪声。
                 len_term = _placebo_evidence(
                     log_n, H, salt=2.0, pos_offset=pos_offset)
+            elif null_component == "C":
+                # 容量匹配对照：只把 C 证据置零，保留 gate_b 参数/梯度路径。
+                len_term = len_term * 0.0
             shift = getattr(self, "len_permute_fraction", None)
             if shift is not None:
                 # len_permute：log n 的取值多重集/均值/方差不变，但每个
@@ -1002,8 +1031,8 @@ class CausalSelfAttention(nn.Module):
         full_stats = bool(need_stats) and stats_argmax
         single_q = (T == 1)
         use_sdpa = (self.use_sdpa and not full_stats
-                    and not (self.variant in _USE_CONC)
-                    and not (self.variant in _USE_RAW_CONC)
+                    and not self.use_conc
+                    and not self.use_raw_conc
                     and not (self.is_null and single_q))
         # is_causal=True 快路（无掩码全量前向）由 SDPA 内部保证因果性，
         # 无需构建显式掩码。

@@ -74,6 +74,12 @@ _SINGLE_FACTOR_PAIRS = (
 
 _PARAM_CONTROL_VARIANT = "lega_placebo"
 
+# 逐组件容量匹配对照不进入主 Holm 家族（汇总层为它们单独建 Holm 家族），
+# 因此设计层也不能把它们算进“各变体 vs standard”的主配对集合。
+_CAPACITY_NULL_VARIANTS = (
+    "lega_null_query", "lega_null_conc", "lega_null_len",
+)
+
 _DEFAULT_GATED_FOR_ANALYSIS = (
     "lega", "qgate", "null", "lega_no_len", "lega_no_conc",
     "lega_no_query", "lega_conc_only", "lega_len_only",

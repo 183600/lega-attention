@@ -151,6 +151,7 @@ def _summary_part_c(**kw):
     budget_sensitivity = kw.get("budget_sensitivity")
     if "capacity_only_test" in kw:
         capacity_only_test = kw["capacity_only_test"]
+    capacity_decomposition = kw.get("capacity_decomposition")
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
@@ -279,6 +280,7 @@ def _summary_part_c(**kw):
         dose_tests=dose_response,
         inference_shapley=inference_shapley,
         inference_interactions=inference_interactions,
+        capacity_decomposition=capacity_decomposition,
         length_analysis=length_analysis,
         ngram_comparison=ngram_cmp,
         reparameterization=reparameterization,
@@ -1205,6 +1207,17 @@ def _summary_part_c(**kw):
                        "（一阶矩），不匹配方差/饱和比例，不能把差值当成精确"
                        "的“信息效应+写回效应”分解；信息特异效应看匹配病灶"
                        "相对基线的独立检验"),
+                   "capacity_decomposition": (
+                       capacity_decomposition
+                       if isinstance(capacity_decomposition, dict)
+                       else {"requested": False, "available": False}),
+                   "capacity_decomposition_note": (
+                       "训练期逐组件容量匹配证据消融（探索性）："
+                       "Full=lega、Null_X 保留全部参数/FLOPs 但将 A/B/C 证据"
+                       "置零、No_X=lega_no_*；同一 seed 上 info=Full−Null、"
+                       "capacity=Null−No、total=Full−No 精确相加。"
+                       "Null_X 不是分布匹配置换零假设，capacity 混合参数"
+                       "容量与优化红利；独立 Holm 家族，不改变确认性判定。"),
                    "parameter_matched_control": {
                        "variant": PARAM_CONTROL_VARIANT,
                        "pair": list(PARAM_CONTROL_PAIR),

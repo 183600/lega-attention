@@ -804,6 +804,10 @@ def expected_gate_extras(variant: str, d_head: int, n_heads: int, n_layers: int)
         "lega_len_only": 2,           # b, d
         # 参数匹配安慰剂与 lega 的门控参数形状完全相同（w, a, b, d）。
         "lega_placebo": d_head + 3,   # w, a, b, d（证据为噪声，参数量相同）
+        # 逐组件容量匹配对照同样保留全部 (w, a, b, d)，只把对应证据置零。
+        "lega_null_query": d_head + 3,
+        "lega_null_conc": d_head + 3,
+        "lega_null_len": d_head + 3,
         # 补充对照：raw 与归一化版本使用同一组 (w, a, b, d) 形状。
         "lega_raw": d_head + 3,
         "lega_raw_no_len": d_head + 2,

@@ -206,6 +206,7 @@ def _summary_part_b(**kw):
         cand = kw["cand"]
     if "capacity_only_test" in kw:
         capacity_only_test = kw["capacity_only_test"]
+    capacity_decomposition = kw.get("capacity_decomposition")
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = (kw.get("matched_ablation_contrasts") or [])
@@ -1279,6 +1280,7 @@ def _summary_part_b(**kw):
     md += _render_parameter_matched_control(
         param_control_test, capacity_only_test,
         ran=PARAM_CONTROL_VARIANT in runs)
+    md += _render_capacity_decomposition(capacity_decomposition)
     md += _render_inference_shapley(inference_shapley)
     md += _render_inference_interactions(inference_interactions, tests)
 

@@ -18,6 +18,8 @@ from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,
                             GATE_FACTORS, RAW_GATE_FACTORS,
                             RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
                             VARIANTS, VARIANT_CN, _placebo_evidence)
+from lega.capacity import (CAPACITY_NULL_VARIANTS,
+                           NULL_EVIDENCE_COMPONENT)
 from lega.model import (GPT, RoPE, expected_gate_extras,
                         gate_extra_params, gate_extra_params_per_head)
 
@@ -642,3 +644,48 @@ def test_placebo_control_matches_capacity_but_not_evidence():
         g = getattr(plac, name).grad
         assert g is not None and torch.isfinite(g).all(), name
     print("  [ok] lega_placebo：参数匹配、证据被置换、梯度可达")
+
+
+def test_capacity_null_controls_keep_params_but_zero_evidence():
+    """容量匹配对照：同参数/同 FLOPs，只把对应证据通道置零。"""
+    assert set(CAPACITY_NULL_VARIANTS.values()) <= set(CONTROL_VARIANTS)
+    torch.manual_seed(0)
+    real = CausalSelfAttention(32, 2, variant="lega", use_sdpa_standard=False)
+    real_state = {n: tuple(t.shape) for n, t in real.state_dict().items()}
+    dead_param = {"A": "gate_w", "B": "gate_a", "C": "gate_b"}
+    for component, variant in CAPACITY_NULL_VARIANTS.items():
+        assert variant in RUNNABLE_VARIANTS
+        assert variant in VARIANT_CN
+        assert variant not in VARIANTS
+        assert variant not in GATE_FACTORS
+        assert NULL_EVIDENCE_COMPONENT[variant] == component
+        torch.manual_seed(0)
+        model = CausalSelfAttention(32, 2, variant=variant,
+                                    use_sdpa_standard=False)
+        assert {n: tuple(t.shape)
+                for n, t in model.state_dict().items()} == real_state
+        assert expected_gate_extras(variant, 16, 2, 2) == \
+            expected_gate_extras("lega", 16, 2, 2)
+        with torch.no_grad():
+            model.gate_w.normal_(0.0, 0.02)
+            model.gate_a.fill_(0.4)
+            model.gate_b.fill_(-0.2)
+            model.gate_d.fill_(1.2)
+        x = torch.randn(2, 9, 32)
+        model.eval()
+        with torch.no_grad():
+            out1, _, _ = model(x)
+            getattr(model, dead_param[component]).add_(10.0)
+            out2, _, _ = model(x)
+        assert torch.allclose(out1, out2), (
+            f"{variant} 的输出仍依赖被置零的 {component} 证据")
+
+        model.train()
+        model.zero_grad(set_to_none=True)
+        out, _, _ = model(x)
+        out.sum().backward()
+        g = getattr(model, dead_param[component]).grad
+        assert g is not None and torch.isfinite(g).all(), variant
+        assert float(g.abs().max()) == 0.0, (
+            f"{variant} 的 {dead_param[component]} 应保留零梯度而不是断流")
+    print("  [ok] lega_null_*：参数/形状匹配、证据置零、死参数保留零梯度")

@@ -793,3 +793,40 @@ def test_controlled_setup_selection_frac_rejects_bad_planned_steps():
         assert rep["ok"], rep
     print("  [ok] 受控变量审计：选型比例分母拒绝 bool/小数计划步数；"
           "超大整数精确比较且比例溢出安全降级")
+
+
+def test_capacity_decomposition_uses_matched_null_arm():
+    """容量分解：Full/Null/No 三臂同 seed，info+capacity=total。"""
+    from run_all import (_capacity_decomposition,
+                        _render_capacity_decomposition)
+    runs = {}
+    for variant, ppls in {
+        "lega": [10.0, 11.0, 12.0],
+        "lega_null_query": [12.0, 14.0, 15.0],
+        "lega_no_query": [15.0, 18.0, 19.0],
+    }.items():
+        runs[variant] = {
+            seed + 1: {"eval": {"split": "val", "val_ppl": value}}
+            for seed, value in enumerate(ppls)
+        }
+    out = _capacity_decomposition(runs)
+    assert out["requested"] is True and out["available"] is True
+    rows = out["metrics"]["PPL"]
+    row = next(r for r in rows if r["component"] == "A")
+    assert row["status"] == "estimated" and row["n"] == 3
+    assert abs(row["info_mean"] - 2.6666666667) < 1e-6
+    assert abs(row["capacity_mean"] - 3.6666666667) < 1e-6
+    assert abs(row["total_mean"] - 6.3333333334) < 1e-6
+    assert row["identity_residual_max_abs"] == 0.0
+    assert row["info_p_adj"] is not None
+    assert row["capacity_p_adj"] is not None
+    assert row["total_p_adj"] is not None
+    # B/C 只缺对照时必须显式标记，而不是返回空表或伪造估计。
+    for component in ("B", "C"):
+        rec = next(r for r in rows if r["component"] == component)
+        assert rec["status"] == "missing_variants"
+        assert rec["missing_variants"]
+    md = _render_capacity_decomposition(out)
+    assert any("训练期逐组件容量匹配" in line for line in md)
+    assert any("信息效应" in line and "容量效应" in line for line in md)
+    print("  [ok] 容量分解使用同 seed 三臂并保留缺失状态")
