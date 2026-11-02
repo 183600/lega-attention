@@ -4,6 +4,7 @@
 尺度敏感性、零方差/种子不足/坏输入、稳健大数、SESOI 尺度接入、汇总渲染
 与 significance.json 计数。
 """
+
 import math
 
 from lega.bayes import bayes_paired_evidence, evidence_label
@@ -37,15 +38,14 @@ def test_scale_and_sign_symmetry():
     base = [0.1, -0.2, 0.3, 0.05, 0.15]
     ref = bayes_paired_evidence(base, rope=0.2)
     for factor in (1e-6, 1e-3, 1e3, 1e6):
-        scaled = bayes_paired_evidence([x * factor for x in base],
-                                       rope=0.2 * factor)
+        scaled = bayes_paired_evidence([x * factor for x in base], rope=0.2 * factor)
         assert _close(scaled["log_bf10"], ref["log_bf10"], 1e-9), scaled
-        assert _close(scaled["posterior_prob_positive"],
-                      ref["posterior_prob_positive"], 1e-9)
+        assert _close(
+            scaled["posterior_prob_positive"], ref["posterior_prob_positive"], 1e-9
+        )
     neg = bayes_paired_evidence([-x for x in base], rope=0.2)
     assert _close(neg["log_bf10"], ref["log_bf10"], 1e-9)
-    assert _close(neg["posterior_prob_positive"],
-                  ref["posterior_prob_negative"], 1e-9)
+    assert _close(neg["posterior_prob_positive"], ref["posterior_prob_negative"], 1e-9)
     assert _close(neg["posterior_median"], -ref["posterior_median"], 1e-9)
     print("  [ok] 尺度不变、符号对称")
 
@@ -53,10 +53,14 @@ def test_scale_and_sign_symmetry():
 def test_posterior_direction_and_rope_partition():
     r = bayes_paired_evidence([1.0, 2.0, 3.0, 4.0, 5.0], rope=1.0)
     assert 0.0 <= r["posterior_prob_positive"] <= 1.0
-    assert _close(r["posterior_prob_positive"]
-                  + r["posterior_prob_negative"], 1.0, 1e-9)
-    total = (r["prob_in_rope"] + r["prob_meaningful_positive"]
-             + r["prob_meaningful_negative"])
+    assert _close(
+        r["posterior_prob_positive"] + r["posterior_prob_negative"], 1.0, 1e-9
+    )
+    total = (
+        r["prob_in_rope"]
+        + r["prob_meaningful_positive"]
+        + r["prob_meaningful_negative"]
+    )
     assert _close(total, 1.0, 1e-9), r
     assert r["prob_meaningful_positive"] > 0.5
     assert r["posterior_ci95"][0] < r["posterior_median"] < r["posterior_ci95"][1]
@@ -93,11 +97,11 @@ def test_degenerate_insufficient_and_bad_inputs():
     assert two["status"] == "insufficient_seeds"
     assert two["decision_eligible"] is False and two["bf10"] is not None
     # None/bool/非有限/字符串整项剔除。
-    bad = bayes_paired_evidence([1.0, None, 2.0, True, float("nan"),
-                                 float("inf"), "x", 3.0])
+    bad = bayes_paired_evidence(
+        [1.0, None, 2.0, True, float("nan"), float("inf"), "x", 3.0]
+    )
     assert bad["n"] == 3 and bad["status"] == "ok", bad
-    huge = bayes_paired_evidence(
-        [1e308, -1e308, 1e308, -1e308, 1e307], rope=1e306)
+    huge = bayes_paired_evidence([1e308, -1e308, 1e308, -1e308, 1e307], rope=1e306)
     assert huge["status"] == "ok" and huge["bf10"] is not None, huge
     assert huge["posterior_mean"] is None or math.isfinite(huge["posterior_mean"])
     for bad_scale in (True, 0, -1, float("nan"), float("inf"), "0.7", None):
@@ -120,8 +124,7 @@ def test_degenerate_insufficient_and_bad_inputs():
             pass
     for bad_scales in ([], [True], ["0.5"], [0], [float("nan")]):
         try:
-            bayes_paired_evidence([1.0, 2.0, 3.0],
-                                  prior_scales=bad_scales)
+            bayes_paired_evidence([1.0, 2.0, 3.0], prior_scales=bad_scales)
             raise AssertionError(f"非法 prior_scales 应被拒绝: {bad_scales!r}")
         except ValueError:
             pass
@@ -129,21 +132,24 @@ def test_degenerate_insufficient_and_bad_inputs():
 
 
 def test_pipeline_integration_uses_metric_scale_and_rope():
-    from run_all import (_bayes_overview, _enrich_paired,
-                         _render_bayes_section)
+    from run_all import _bayes_overview, _enrich_paired, _render_bayes_section
 
     a = [101.0, 102.0, 103.0, 104.0, 105.0]
     b = [100.0] * 5
-    res = {"n": 5, "mean_diff": 3.0, "std_diff": 1.0,
-           "metric": "PPL", "lower_is_better": True}
+    res = {
+        "n": 5,
+        "mean_diff": 3.0,
+        "std_diff": 1.0,
+        "metric": "PPL",
+        "lower_is_better": True,
+    }
     out = _enrich_paired(res, a, b)
     bayes = out.get("bayes")
     eq = out.get("equivalence")
     assert isinstance(bayes, dict) and isinstance(eq, dict), out
     assert bayes["status"] == "ok" and bayes["bf10"] > 3.0, bayes
     assert _close(bayes["rope"], eq["margin"]), (bayes, eq)
-    direct = bayes_paired_evidence(paired_metric_diffs(a, b, "PPL"),
-                                   rope=eq["margin"])
+    direct = bayes_paired_evidence(paired_metric_diffs(a, b, "PPL"), rope=eq["margin"])
     assert _close(bayes["bf10"], direct["bf10"]), (bayes, direct)
     assert paired_metric_diffs(a, b, "unknown") is None
     md = "\n".join(_render_bayes_section([out]))
@@ -156,8 +162,13 @@ def test_pipeline_integration_uses_metric_scale_and_rope():
     null_a = [100.01, 99.99, 100.005, 99.995, 100.0] * 2
     null_b = [100.0] * 10
     null_raw = [x - y for x, y in zip(null_a, null_b)]
-    null_res = {"n": 10, "mean_diff": sum(null_raw) / 10, "std_diff": 0.01,
-                "metric": "PPL", "lower_is_better": True}
+    null_res = {
+        "n": 10,
+        "mean_diff": sum(null_raw) / 10,
+        "std_diff": 0.01,
+        "metric": "PPL",
+        "lower_is_better": True,
+    }
     null_out = _enrich_paired(null_res, null_a, null_b)
     assert null_out["bayes"]["bf10"] < 1.0 / 3.0, null_out["bayes"]
     null_overview = _bayes_overview([out, null_out])
@@ -165,8 +176,16 @@ def test_pipeline_integration_uses_metric_scale_and_rope():
     assert null_overview["counts"]["support_h0"] == 1, null_overview
     # n<3 仍可算描述性 BF，但不计入支持/反对证据的计数。
     small = _enrich_paired(
-        {"n": 2, "mean_diff": 1.5, "std_diff": 0.7, "metric": "PPL",
-         "lower_is_better": True}, [101.0, 102.0], [100.0, 100.0])
+        {
+            "n": 2,
+            "mean_diff": 1.5,
+            "std_diff": 0.7,
+            "metric": "PPL",
+            "lower_is_better": True,
+        },
+        [101.0, 102.0],
+        [100.0, 100.0],
+    )
     assert small["bayes"]["decision_eligible"] is False
     small_overview = _bayes_overview([small])
     assert small_overview["counts"]["insufficient"] == 1, small_overview

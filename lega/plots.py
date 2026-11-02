@@ -4,6 +4,7 @@
 用法:
   python -m lega.plots --results_dir results/tiny_smoke
 """
+
 import argparse
 import glob
 import json
@@ -14,9 +15,11 @@ from collections import OrderedDict
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.font_manager as fm
     import matplotlib.pyplot as plt
+
     _HAS_MPL = True
 except ImportError:
     # 画图依赖缺失时不应炸掉整条流水线（design: 缺失的图跳过并提示）
@@ -51,15 +54,23 @@ if _HAS_MPL:
     else:
         # 找不到 CJK 字体时图表照常生成，但中文标题/坐标轴会渲染为方框；
         # 与“缺失的图跳过并提示”的设计一致，这里显式提示一次，避免静默产出乱码图。
-        print("[plots] 未找到 CJK 字体（NotoSansSC/WQY 等），图表中文将显示为方框；"
-              "如需中文图表请安装 fonts-noto-cjk")
+        print(
+            "[plots] 未找到 CJK 字体（NotoSansSC/WQY 等），图表中文将显示为方框；"
+            "如需中文图表请安装 fonts-noto-cjk"
+        )
     plt.rcParams["axes.unicode_minus"] = False
 
 COLORS = {
-    "standard": "#7f8c8d", "standard_sdpa": "#bdc3c7", "qgate": "#e67e22",
-    "null": "#8e44ad", "lega": "#c0392b", "lega_no_len": "#e74c3c",
-    "lega_no_conc": "#16a085", "lega_no_query": "#2980b9",
-    "lega_conc_only": "#27ae60", "lega_len_only": "#8e6e00",
+    "standard": "#7f8c8d",
+    "standard_sdpa": "#bdc3c7",
+    "qgate": "#e67e22",
+    "null": "#8e44ad",
+    "lega": "#c0392b",
+    "lega_no_len": "#e74c3c",
+    "lega_no_conc": "#16a085",
+    "lega_no_query": "#2980b9",
+    "lega_conc_only": "#27ae60",
+    "lega_len_only": "#8e6e00",
 }
 
 _PPL_PLOT_CAP = 1e300
@@ -259,13 +270,11 @@ def _prefer_seeded(paths, rdir=None):
     if seed_scope is not None:
         # 先剔除不属于本次种子白名单的过期产物（含同后缀的旧种子）。
         # 过滤后为空时宁可不出图，也不回退去画别的 run 的结果。
-        paths = [p for p in paths
-                 if _seed_in_scope(_path_seed(p), seed_scope)]
+        paths = [p for p in paths if _seed_in_scope(_path_seed(p), seed_scope)]
         if not paths:
             return []
     if expected is not None:
-        keep = [p for p in paths
-                if _is_tagged(p) == expected and os.path.exists(p)]
+        keep = [p for p in paths if _is_tagged(p) == expected and os.path.exists(p)]
         if keep:
             return keep
     seeded = [p for p in paths if _is_tagged(p) and os.path.exists(p)]
@@ -291,8 +300,9 @@ def _group_items(items, rdir=None):
         # 合法 JSON 但非对象（如误放入的数组）或变体名非法（数组/对象既不是
         # 合法标识也不能作为字典键）的文件按无效结果跳过，不让一个坏文件
         # 毁掉整张图（与 curves/badcase 的容错口径一致）。
-        if not (isinstance(d, dict) and isinstance(d.get("variant"), str)
-                and d["variant"]):
+        if not (
+            isinstance(d, dict) and isinstance(d.get("variant"), str) and d["variant"]
+        ):
             continue
         if variant_scope is not None and d["variant"] not in variant_scope:
             continue
@@ -419,9 +429,13 @@ def fig_ppl(rdir):
         else:
             plot_errs.append(0.0)
     # 发散运行的 PPL 被截断到 exp(20)，以斜线纹理区分，避免被当作正常数值解读
-    bars = ax.bar(names, plot_vals,
-                  yerr=plot_errs if any(plot_errs) else None, capsize=3,
-                  color=[COLORS.get(v, "#34495e") for v, _, _, _ in rows])
+    bars = ax.bar(
+        names,
+        plot_vals,
+        yerr=plot_errs if any(plot_errs) else None,
+        capsize=3,
+        color=[COLORS.get(v, "#34495e") for v, _, _, _ in rows],
+    )
     for bar, (_, p, _, clamped) in zip(bars, rows):
         if clamped or p > _PPL_PLOT_CAP:
             bar.set_hatch("//")
@@ -465,13 +479,15 @@ def fig_ruler(rdir):
                     if not isinstance(m, dict):
                         continue
                     cell = agg.setdefault(task, {}).setdefault(
-                        ctx, {"em": [], "recall": []})
+                        ctx, {"em": [], "recall": []}
+                    )
                     em = _unit_float(m.get("em"))
                     recall = _unit_float(m.get("recall"))
                     if em is not None:
                         cell["em"].append(em)
                     if recall is not None:
                         cell["recall"].append(recall)
+
         def _mean_cell(vals):
             # 多种子的合法但接近 float 上限的指标不能用 np.mean 求和：
             # 两个 1e308 会溢出成 inf，随后乘 100 画出无效点。
@@ -479,17 +495,26 @@ def fig_ruler(rdir):
             return mean
 
         data[v] = {
-            task: {ctx: {
-                "em": _mean_cell(cell["em"]),
-                "recall": _mean_cell(cell["recall"])}
-                for ctx, cell in by_ctx.items()}
-            for task, by_ctx in agg.items()}
+            task: {
+                ctx: {
+                    "em": _mean_cell(cell["em"]),
+                    "recall": _mean_cell(cell["recall"]),
+                }
+                for ctx, cell in by_ctx.items()
+            }
+            for task, by_ctx in agg.items()
+        }
     tasks = ["niah_synth", "niah_corpus", "niah_multikey", "fwe", "vt"]
     avail = [t for t in tasks if any(t in r and r[t] for r in data.values())]
     if not avail:
         return False
-    fig, axes = plt.subplots(1, len(avail), figsize=(4.2 * len(avail), 4.0),
-                             constrained_layout=True, squeeze=False)
+    fig, axes = plt.subplots(
+        1,
+        len(avail),
+        figsize=(4.2 * len(avail), 4.0),
+        constrained_layout=True,
+        squeeze=False,
+    )
     axes = axes[0]
     for ax, task in zip(axes, avail):
         for v, r in sorted(data.items()):
@@ -559,15 +584,19 @@ def fig_latency(rdir):
             by_ctx[ctx] = cell
         if by_ctx:
             series.append((v, e, by_ctx))
+
     def _usable_batch_keys(by_ctx):
         """只把至少有一个有限数值的 batch 档位视为可用。
 
         只看字典键会把 {"1": "bad", "8": 20.0} 的 "1" 当成首选档位，
         结果整条线因无数值点被静默丢弃，而真正可用的 "8" 从未尝试。
         """
-        return {str(k) for cell in by_ctx.values()
-                for k, val in cell.items()
-                if _plottable_float(val) is not None}
+        return {
+            str(k)
+            for cell in by_ctx.values()
+            for k, val in cell.items()
+            if _plottable_float(val) is not None
+        }
 
     batch_sets = [_usable_batch_keys(by_ctx) for _, _, by_ctx in series]
     common = set.intersection(*batch_sets) if batch_sets else set()
@@ -577,16 +606,20 @@ def fig_latency(rdir):
             return None
         if "1" in keys:
             return "1"
-        return min(keys, key=lambda k: (not k.isdigit(), int(k)
-                                        if k.isdigit() else 0, k))
+        return min(
+            keys, key=lambda k: (not k.isdigit(), int(k) if k.isdigit() else 0, k)
+        )
 
     common_key = _batch_key(common)
     mixed_batches = common_key is None
     used_keys = set()
     drew_prefill = False
     for v, e, by_ctx in series:
-        key = common_key if common_key is not None else _batch_key(
-            _usable_batch_keys(by_ctx))
+        key = (
+            common_key
+            if common_key is not None
+            else _batch_key(_usable_batch_keys(by_ctx))
+        )
         if key is None:
             continue
         used_keys.add(key)
@@ -598,16 +631,21 @@ def fig_latency(rdir):
                 ys.append(val)
         if not xs:
             continue
-        ax1.plot(xs, ys, marker="o",
-                 label=_label(v) + ("(SDPA)" if e.get("use_sdpa")
-                                    and v == "standard_sdpa" else ""),
-                 color=COLORS.get(v))
+        ax1.plot(
+            xs,
+            ys,
+            marker="o",
+            label=_label(v)
+            + ("(SDPA)" if e.get("use_sdpa") and v == "standard_sdpa" else ""),
+            color=COLORS.get(v),
+        )
         drew_prefill = True
     ax1.set_xlabel("上下文长度 (tokens)")
     if mixed_batches:
         # 没有共同 batch 时说明各变体测的 workload 不同，不能假装可横向比较。
-        batch_label = ("各变体首个可用档位 "
-                       f"({', '.join(sorted(used_keys))})——不可横向比较")
+        batch_label = (
+            "各变体首个可用档位 " f"({', '.join(sorted(used_keys))})——不可横向比较"
+        )
     else:
         batch_label = str(common_key)
     ax1.set_ylabel(f"Prefill (ms, batch={batch_label})")
@@ -670,6 +708,7 @@ def _read_records(rdir, variant):
     失效；缓存保留多个 key（LRU 上限 8）。
     """
     import csv
+
     # 当前 run 的 repro.json 变体白名单优先：目录里可能残留上一轮的
     # analysis_records_<v>.csv（尤其 main() 固定请求 lega），不能把范围外
     # 变体的旧记录画进本次报告。
@@ -680,17 +719,25 @@ def _read_records(rdir, variant):
     # 多种子记录合并后画图（分布图上的种子差异会自然体现为更宽的分布）。
     paths = _prefer_seeded(
         [os.path.join(rdir, f"analysis_records_{variant}.csv")]
-        + sorted(glob.glob(os.path.join(
-            rdir, f"analysis_records_{variant}_seed*.csv"))), rdir=rdir)
-    key = (variant, tuple(
-        (p, os.path.getmtime(p), os.path.getsize(p))
-        for p in paths if os.path.exists(p)))
+        + sorted(
+            glob.glob(os.path.join(rdir, f"analysis_records_{variant}_seed*.csv"))
+        ),
+        rdir=rdir,
+    )
+    key = (
+        variant,
+        tuple(
+            (p, os.path.getmtime(p), os.path.getsize(p))
+            for p in paths
+            if os.path.exists(p)
+        ),
+    )
     cached = _RECORDS_CACHE.get(key)
     if cached is not None:
         _RECORDS_CACHE.move_to_end(key)
         return cached
     names = []
-    per_file = []   # [(file_cols, n_rows), ...]，保持文件顺序
+    per_file = []  # [(file_cols, n_rows), ...]，保持文件顺序
     for path in paths:
         if not os.path.exists(path):
             continue
@@ -756,11 +803,23 @@ def fig_gate_hist(rdir, variant="lega"):
     fig, ax = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
     bins = np.linspace(0, 1, 41)
     if g_miss:
-        ax.hist(g_miss, bins=bins, alpha=0.6, label=f"注意力没找对 (n={len(g_miss)})",
-                color="#7f8c8d", density=True)
+        ax.hist(
+            g_miss,
+            bins=bins,
+            alpha=0.6,
+            label=f"注意力没找对 (n={len(g_miss)})",
+            color="#7f8c8d",
+            density=True,
+        )
     if g_hit:
-        ax.hist(g_hit, bins=bins, alpha=0.6, label=f"注意力找对了 (n={len(g_hit)})",
-                color="#c0392b", density=True)
+        ax.hist(
+            g_hit,
+            bins=bins,
+            alpha=0.6,
+            label=f"注意力找对了 (n={len(g_hit)})",
+            color="#c0392b",
+            density=True,
+        )
     ax.set_xlabel(f"门控值 g（{VARIANT_CN.get(variant, variant)}）")
     ax.set_ylabel("密度")
     ax.set_title("门控值分布：找对 vs 没找对（问题区查询位）")
@@ -776,17 +835,24 @@ def fig_calibration(rdir, variant="lega"):
     c, g, ln = cols.get("c"), cols.get("g"), cols.get("log_n")
     if c is None or g is None or ln is None:
         return False
-    m = (np.isfinite(c) & np.isfinite(g) & np.isfinite(ln)
-         & (g >= 0.0) & (g <= 1.0)
-         & (np.abs(c) <= _PLOT_VALUE_CAP)
-         & (np.abs(ln) <= _PLOT_VALUE_CAP))
+    m = (
+        np.isfinite(c)
+        & np.isfinite(g)
+        & np.isfinite(ln)
+        & (g >= 0.0)
+        & (g <= 1.0)
+        & (np.abs(c) <= _PLOT_VALUE_CAP)
+        & (np.abs(ln) <= _PLOT_VALUE_CAP)
+    )
     if int(m.sum()) < 20:
         return False
     c, g, ln = c[m], g[m], ln[m]
     med = np.median(ln)
     fig, ax = plt.subplots(figsize=(6.4, 4.4), constrained_layout=True)
-    for mask, name, color in ((ln <= med, f"短上下文 log n≤{med:.1f}", "#2980b9"),
-                              (ln > med, f"长上下文 log n>{med:.1f}", "#c0392b")):
+    for mask, name, color in (
+        (ln <= med, f"短上下文 log n≤{med:.1f}", "#2980b9"),
+        (ln > med, f"长上下文 log n>{med:.1f}", "#c0392b"),
+    ):
         if mask.sum() < 5:
             continue
         cc, gg = c[mask], g[mask]
@@ -814,20 +880,22 @@ def fig_calibration(rdir, variant="lega"):
 def fig_misleading(rdir):
     """各变体：集中时找对率 vs 集中但看错率 —— “集中≠找对”的直接证据。"""
     keys = ("p_hit_given_conc", "p_hit_given_notconc", "misleading_rate")
-    files = [(fp, _load(fp))
-             for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json")))
-             if "records" not in os.path.basename(fp)]
+    files = [
+        (fp, _load(fp))
+        for fp in sorted(glob.glob(os.path.join(rdir, "analysis_*.json")))
+        if "records" not in os.path.basename(fp)
+    ]
     # 种子择优必须按变体分别进行（同 _group_by_variant）：全局 _prefer_seeded
     # 会因一个变体有 _seed 文件而把其它变体仅有的无种子结果整体丢弃；同一
     # (变体, 种子) 的裸/带后缀重复文件也在这里按命名约定去重。
-    grouped = _group_items([(fp, d) for fp, d in files
-                            if isinstance(d, dict) and d.get("n_records")], rdir)
+    grouped = _group_items(
+        [(fp, d) for fp, d in files if isinstance(d, dict) and d.get("n_records")], rdir
+    )
     rows = []
     for v, ds in grouped.items():
         row = {"variant": v}
         for k in keys:
-            vals = [x for x in (_unit_float(d.get(k)) for d in ds)
-                    if x is not None]
+            vals = [x for x in (_unit_float(d.get(k)) for d in ds) if x is not None]
             mean, _std = mean_std(vals)
             row[k] = mean
         rows.append(row)
@@ -844,8 +912,13 @@ def fig_misleading(rdir):
     for i, (name, vs) in enumerate(vals.items()):
         # None 表示该指标无数据（如该变体没有集中查询位），画成 0 会造成虚假结论，
         # 用 nan 让 matplotlib 留空
-        ax.bar(x + (i - 1) * w, [np.nan if v is None else v for v in vs], w, label=name,
-               color=["#c0392b", "#2980b9", "#e67e22"][i])
+        ax.bar(
+            x + (i - 1) * w,
+            [np.nan if v is None else v for v in vs],
+            w,
+            label=name,
+            color=["#c0392b", "#2980b9", "#e67e22"][i],
+        )
     ax.set_xticks(x)
     ax.set_xticklabels([_label(r["variant"]) for r in rows], rotation=15, fontsize=9)
     ax.set_ylabel("比率")
@@ -863,8 +936,9 @@ def fig_auroc_heads(rdir, variant="lega"):
         return False
     files = _prefer_seeded(
         [os.path.join(rdir, f"analysis_{variant}.json")]
-        + sorted(glob.glob(os.path.join(
-            rdir, f"analysis_{variant}_seed*.json"))), rdir=rdir)
+        + sorted(glob.glob(os.path.join(rdir, f"analysis_{variant}_seed*.json"))),
+        rdir=rdir,
+    )
     # 多种子：逐 (层, 头) 的 AUROC 跨 seed 求均值后再画
     agg = {}
     for fp in files:
@@ -872,7 +946,7 @@ def fig_auroc_heads(rdir, variant="lega"):
         if not isinstance(d, dict):
             continue
         heads = d.get("per_head")
-        for h in (heads if isinstance(heads, list) else []):
+        for h in heads if isinstance(heads, list) else []:
             if not isinstance(h, dict):
                 continue
             key = (h.get("layer"), h.get("head"))
@@ -887,6 +961,7 @@ def fig_auroc_heads(rdir, variant="lega"):
                 cell["qterm"].append(qterm)
             if logit is not None:
                 cell["logit"].append(logit)
+
     def _head_key(k):
         try:
             return (0, float(k[0]), float(k[1]))
@@ -898,11 +973,16 @@ def fig_auroc_heads(rdir, variant="lega"):
         mean, _std = mean_std(vals)
         return mean
 
-    ph = [{"layer": k[0], "head": k[1],
-           "auroc_qterm": _head_mean(v["qterm"]),
-           "auroc_logit": _head_mean(v["logit"])}
-          for k, v in sorted(agg.items(), key=lambda kv: _head_key(kv[0]))
-          if v["qterm"] and v["logit"]]
+    ph = [
+        {
+            "layer": k[0],
+            "head": k[1],
+            "auroc_qterm": _head_mean(v["qterm"]),
+            "auroc_logit": _head_mean(v["logit"]),
+        }
+        for k, v in sorted(agg.items(), key=lambda kv: _head_key(kv[0]))
+        if v["qterm"] and v["logit"]
+    ]
     if not ph:
         return False
     fig, ax = plt.subplots(figsize=(5.6, 5.0), constrained_layout=True)
@@ -933,9 +1013,9 @@ def _load_train_logs(train_root, rdir=None):
     series = {}
     expected = _expected_tagged(rdir) if rdir else None
     variant_scope, seed_scope = _run_scope(rdir) if rdir else (None, None)
-    paths = (sorted(glob.glob(os.path.join(train_root, "*", "train_log.jsonl")))
-             + sorted(glob.glob(os.path.join(
-                 train_root, "*", "seed*", "train_log.jsonl"))))
+    paths = sorted(
+        glob.glob(os.path.join(train_root, "*", "train_log.jsonl"))
+    ) + sorted(glob.glob(os.path.join(train_root, "*", "seed*", "train_log.jsonl")))
     for path in paths:
         parts = os.path.normpath(path).split(os.sep)
         # 目录结构 .../<variant>/[seed<s>/]train_log.jsonl
@@ -1046,8 +1126,11 @@ def _mean_by_step(runs, key):
 
 def _plottable_points(xs, ys):
     """去掉超出 matplotlib 安全范围的 y 点，避免 log ticker 溢出告警。"""
-    points = [(x, y) for x, y in zip(xs, ys)
-              if y is not None and _plottable_float(y) is not None]
+    points = [
+        (x, y)
+        for x, y in zip(xs, ys)
+        if y is not None and _plottable_float(y) is not None
+    ]
     return [x for x, _ in points], [y for _, y in points]
 
 
@@ -1062,8 +1145,9 @@ def fig_train_curves(rdir, train_root):
     series = _load_train_logs(train_root, rdir)
     if not series:
         return False
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15.5, 4.2),
-                                        constrained_layout=True)
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        1, 3, figsize=(15.5, 4.2), constrained_layout=True
+    )
     for i, v in enumerate(sorted(series)):
         color = COLORS.get(v, "#34495e")
         lw = 2.0 if v == "lega" else 1.2
@@ -1074,19 +1158,33 @@ def fig_train_curves(rdir, train_root):
         xs2, ys2 = _mean_by_step(series[v], "val_ppl")
         xs2, ys2 = _plottable_points(xs2, ys2)
         if xs2:
-            ax2.plot(xs2, ys2, label=_label(v), color=color, marker=".",
-                     lw=lw, alpha=0.9)
+            ax2.plot(
+                xs2, ys2, label=_label(v), color=color, marker=".", lw=lw, alpha=0.9
+            )
         # 同一坐标下的训练/验证损失：实线=训练，虚线=验证；两线间距
         # 即为泛化差距，扩大或验证线走平/上翘即过拟合信号。
         # 图例标签只由首个变体挂一次（线色区分变体），避免无标签图例告警。
         if xs:
-            ax3.plot(xs, ys, color=color, lw=lw, alpha=0.9,
-                     label=("训练 loss" if i == 0 else None))
+            ax3.plot(
+                xs,
+                ys,
+                color=color,
+                lw=lw,
+                alpha=0.9,
+                label=("训练 loss" if i == 0 else None),
+            )
         xv, yv = _mean_by_step(series[v], "val_loss")
         xv, yv = _plottable_points(xv, yv)
         if xv:
-            ax3.plot(xv, yv, color=color, lw=lw, ls="--", alpha=0.75,
-                     label=("验证 loss" if i == 0 else None))
+            ax3.plot(
+                xv,
+                yv,
+                color=color,
+                lw=lw,
+                ls="--",
+                alpha=0.75,
+                label=("验证 loss" if i == 0 else None),
+            )
     ax1.set_xlabel("训练步数")
     ax1.set_ylabel("训练 loss")
     ax1.set_yscale("log")
@@ -1114,8 +1212,11 @@ def fig_train_curves(rdir, train_root):
 def main():
     p = argparse.ArgumentParser(description="结果画图")
     p.add_argument("--results_dir", required=True)
-    p.add_argument("--train_root", default=None,
-                   help="训练输出根目录（out/<tag>），用于绘制训练曲线")
+    p.add_argument(
+        "--train_root",
+        default=None,
+        help="训练输出根目录（out/<tag>），用于绘制训练曲线",
+    )
     args = p.parse_args()
     rdir = args.results_dir
     os.makedirs(rdir, exist_ok=True)

@@ -63,6 +63,7 @@
   python -m lega.analysis --ckpt out/small/lega/model.pt --data_dir data/wikitext103 \
       --out_dir results/small
 """
+
 import argparse
 import csv
 import json
@@ -74,27 +75,49 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from .attention import VARIANTS, VARIANT_CN
+from .attention import VARIANT_CN
 from .data import load_tokenizer
 from .model import load_model
-from .preflight import (allow_protocol_violations,
-                        data_protocol_preflight)
-from .probe import (DEFAULT_FOLDS as _PROBE_FOLDS,
-                    DEFAULT_L2_GRID as _PROBE_L2_GRID,
-                    EXTREME_IMBALANCE_THRESHOLD as _EXTREME_IMBALANCE_THRESHOLD,
-                    PRIMARY_AP_THRESHOLD as _PRIMARY_AP_THRESHOLD,
-                    linear_probe)
+from .preflight import allow_protocol_violations, data_protocol_preflight
+from .probe import (
+    DEFAULT_FOLDS as _PROBE_FOLDS,
+    DEFAULT_L2_GRID as _PROBE_L2_GRID,
+    EXTREME_IMBALANCE_THRESHOLD as _EXTREME_IMBALANCE_THRESHOLD,
+    PRIMARY_AP_THRESHOLD as _PRIMARY_AP_THRESHOLD,
+    linear_probe,
+)
 from .repro import load_provenance, sha256_file
-from .ruler import (DEPTH_BINS, build_niah, build_vt,
-                    load_corpus_sents_with_source,
-                    record_corpus_test_access,
-                    ContextTooSmall, _stable_hash)
-from .utils import (amp_autocast, auroc, average_precision,
-                    calibration_metrics, config_bool, enable_tf32, f1_scores,
-                    get_device, pearson, roc_pr_aucs, save_json, set_seed,
-                    strict_int)
+from .ruler import (
+    DEPTH_BINS,
+    build_niah,
+    build_vt,
+    load_corpus_sents_with_source,
+    record_corpus_test_access,
+    ContextTooSmall,
+    _stable_hash,
+)
+from .utils import (
+    amp_autocast,
+    auroc,
+    average_precision,
+    calibration_metrics,
+    config_bool,
+    enable_tf32,
+    f1_scores,
+    get_device,
+    pearson,
+    roc_pr_aucs,
+    save_json,
+    set_seed,
+    strict_int,
+)
 
-ANALYSIS_TASKS = ("niah_synth", "niah_corpus", "niah_multikey", "vt")  # fwe 无单一 needle 跨度
+ANALYSIS_TASKS = (
+    "niah_synth",
+    "niah_corpus",
+    "niah_multikey",
+    "vt",
+)  # fwe 无单一 needle 跨度
 
 
 def _bounded_float(value, name: str, minimum=None, maximum=None) -> float:
@@ -125,12 +148,14 @@ def _float_grid(values, name: str, minimum=None, maximum=None) -> List[float]:
     elif isinstance(values, (list, tuple)):
         # 配置文件里常见的空项（""/None，如尾逗号被 JSON 化成空串）按“未提供”
         # 跳过，与逗号字符串口径一致；bool/NaN 等非法值仍由 _bounded_float 拒绝。
-        raw = [x for x in values
-               if x is not None and not (isinstance(x, str) and not x.strip())]
+        raw = [
+            x
+            for x in values
+            if x is not None and not (isinstance(x, str) and not x.strip())
+        ]
     else:
         raise ValueError(f"{name} 需要逗号分隔字符串或列表，收到 {values!r}")
-    return [_bounded_float(x, name, minimum=minimum, maximum=maximum)
-            for x in raw]
+    return [_bounded_float(x, name, minimum=minimum, maximum=maximum) for x in raw]
 
 
 def _int_at_least(value, name: str, minimum: int) -> int:
@@ -158,8 +183,10 @@ def resolve_analysis_ctx(block_size, requested_ctx, max_new) -> int:
         raise ValueError(
             f"block_size={block_size} 无法为 ruler.max_new={max_new} 的生成"
             "预留至少 1 个 prompt 位置：机制分析 ctx 会 <=0，样例全部被跳过。"
-            "请减小 max_new 或增大 block_size")
+            "请减小 max_new 或增大 block_size"
+        )
     return min(requested_ctx, room)
+
 
 # 命中判别（hit vs miss）正类率低于该值时以 PR-AUC 为主指标：此时负样本
 # 基数使 ROC-AUC 过于乐观（FPR 增长缓慢）。阈值集中在 lega.probe 定义
@@ -169,31 +196,50 @@ def resolve_analysis_ctx(block_size, requested_ctx, max_new) -> int:
 _GATE_DECISION_THRESHOLD = 0.5
 
 
-def _example(task: str, tok, ctx: int, rng: Random, corpus_sents: Optional[List[str]] = None,
-             vt_chains: int = 4, vt_depth: int = 4,
-             target_depth: Optional[str] = None):
+def _example(
+    task: str,
+    tok,
+    ctx: int,
+    rng: Random,
+    corpus_sents: Optional[List[str]] = None,
+    vt_chains: int = 4,
+    vt_depth: int = 4,
+    target_depth: Optional[str] = None,
+):
     """构造单个带 gold 跨度的分析样例（fwe 无单一 needle，不参与）。"""
     if task == "niah_synth":
-        return build_niah(tok, ctx, rng, mode="synth",
-                          target_depth=target_depth)
+        return build_niah(tok, ctx, rng, mode="synth", target_depth=target_depth)
     if task == "niah_corpus":
         if not corpus_sents:
             return None
-        return build_niah(tok, ctx, rng, mode="corpus",
-                          corpus_sents=corpus_sents,
-                          target_depth=target_depth)
+        return build_niah(
+            tok,
+            ctx,
+            rng,
+            mode="corpus",
+            corpus_sents=corpus_sents,
+            target_depth=target_depth,
+        )
     if task == "niah_multikey":
-        return build_niah(tok, ctx, rng, mode="synth", multikey=True,
-                          target_depth=target_depth)
+        return build_niah(
+            tok, ctx, rng, mode="synth", multikey=True, target_depth=target_depth
+        )
     if task == "vt":
         return build_vt(tok, ctx, rng, n_chains=vt_chains, depth=vt_depth)
     return None
 
 
 @torch.inference_mode()
-def collect_records(model, tok, device: str, examples: List[Dict], task_of: List[str],
-                    ctx_of: List[int], amp: bool = True,
-                    batch_size: int = 8) -> List[Dict]:
+def collect_records(
+    model,
+    tok,
+    device: str,
+    examples: List[Dict],
+    task_of: List[str],
+    ctx_of: List[int],
+    amp: bool = True,
+    batch_size: int = 8,
+) -> List[Dict]:
     """全量前向，展平出逐 (层,头,查询位) 记录。
 
     等长样例合并成批前向：因果注意力的每行只依赖自身前缀，批内各行
@@ -205,8 +251,13 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     variant = model.variant
     records_by_ex: List[List[Dict]] = [[] for _ in examples]
     amp_ctx = amp_autocast(device, bool(amp))
-    use_c_full = variant in ("lega", "lega_no_query", "lega_no_len",
-                             "lega_conc_only", "lega_detach_conc")
+    use_c_full = variant in (
+        "lega",
+        "lega_no_query",
+        "lega_no_len",
+        "lega_conc_only",
+        "lega_detach_conc",
+    )
     # 按提示长度分组：只有等长样例可堆叠；每组内再按 batch_size 切批。
     order = sorted(range(len(examples)), key=lambda k: len(examples[k]["ids"]))
     bs = max(1, strict_int(batch_size, "batch_size"))
@@ -214,14 +265,18 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
     while g0 < len(order):
         n_len = len(examples[order[g0]]["ids"])
         g1 = g0 + 1
-        while (g1 < len(order) and len(examples[order[g1]]["ids"]) == n_len
-               and g1 - g0 < bs):
+        while (
+            g1 < len(order)
+            and len(examples[order[g1]]["ids"]) == n_len
+            and g1 - g0 < bs
+        ):
             g1 += 1
         idxs = order[g0:g1]
         g0 = g1
         # 等长样例分组后可整表转 tensor，再按设备搬移。
         ids = torch.from_numpy(
-            np.asarray([examples[k]["ids"] for k in idxs], dtype=np.int64))
+            np.asarray([examples[k]["ids"] for k in idxs], dtype=np.int64)
+        )
         if device.startswith("cuda"):
             ids = ids.to(device)
         # logits 不参与机制分析；只算最后位置
@@ -243,11 +298,12 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
             # 堆叠维度天然对齐。
             per_layer = []
             for st in out["gate_stats"]:
-                argmax_d = st["argmax"][r][:, qs:qe]                      # (H, width) 设备端
+                argmax_d = st["argmax"][r][:, qs:qe]  # (H, width) 设备端
                 packed = [st["max_p"][r][:, qs:qe].float()]
                 if ns is not None:
-                    packed.append(((argmax_d >= 0) & (argmax_d >= ns)
-                                   & (argmax_d < ne)).float())
+                    packed.append(
+                        ((argmax_d >= 0) & (argmax_d >= ns) & (argmax_d < ne)).float()
+                    )
                 if st.get("g") is not None:
                     packed.append(st["g"][r][:, qs:qe].float())
                 if st.get("logit") is not None:
@@ -255,26 +311,32 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                 if st.get("qterm") is not None:
                     packed.append(st["qterm"][r][:, qs:qe].float())
                 per_layer.append(torch.stack(packed))
-            merged_all = torch.stack(per_layer).cpu().numpy()             # (L, N, H, width)
+            merged_all = torch.stack(per_layer).cpu().numpy()  # (L, N, H, width)
             # log_n 为 (width,)：逐层扩成 (H, width) 再堆进合并表会白白多拷
             # H 倍数据；单独整表堆叠一次转回设备（单次传输），消费时按层取。
-            log_ns_all = torch.stack([st["log_n"][qs:qe].float()
-                                      for st in out["gate_stats"]]).cpu().tolist()
+            log_ns_all = (
+                torch.stack([st["log_n"][qs:qe].float() for st in out["gate_stats"]])
+                .cpu()
+                .tolist()
+            )
             # 逐头门控偏置 d：完整 logit = qterm + 证据项 + d。机制主张若要
             # 把“完整 logit 优于纯查询”归因于证据项，必须把 d 也放回查询
             # 侧基线，否则不同头命中率先验会污染全局排序指标。
-            bias_all = [None if st.get("gate_bias") is None else
-                        st["gate_bias"][0].view(-1).float().cpu().tolist()
-                        for st in out["gate_stats"]]
+            bias_all = [
+                None
+                if st.get("gate_bias") is None
+                else st["gate_bias"][0].view(-1).float().cpu().tolist()
+                for st in out["gate_stats"]
+            ]
             for li, (st, merged) in enumerate(zip(out["gate_stats"], merged_all)):
                 layer = st["layer"]
                 it = iter(merged)
-                max_p = next(it)                                          # (H, width)
+                max_p = next(it)  # (H, width)
                 hit_m = next(it) if ns is not None else None
                 g = next(it) if st.get("g") is not None else None
                 logit = next(it) if st.get("logit") is not None else None
                 qterm = next(it) if st.get("qterm") is not None else None
-                ln_l = log_ns_all[li]                                     # (width,) 已是标量表
+                ln_l = log_ns_all[li]  # (width,) 已是标量表
                 # hit 掩码随合并表一次带回；矩阵整体 tolist() 转 Python 标量。
                 hit_l = hit_m.tolist() if hit_m is not None else None
                 mp_l = max_p.tolist()
@@ -291,8 +353,13 @@ def collect_records(model, tok, device: str, examples: List[Dict], task_of: List
                     for i in range(width):
                         mp_i, ln_i = mp_h[i], ln_l[i]
                         rec = {
-                            "task": task, "ctx": ctx, "example": ex_idx, "layer": layer,
-                            "head": h, "query_pos": qpos[i], "max_p": mp_i,
+                            "task": task,
+                            "ctx": ctx,
+                            "example": ex_idx,
+                            "layer": layer,
+                            "head": h,
+                            "query_pos": qpos[i],
+                            "max_p": mp_i,
                             "log_n": ln_i,
                             "hit": hit_h[i] if hit_h is not None else None,
                         }
@@ -364,18 +431,21 @@ def _conc_stats(hit: np.ndarray, max_p: np.ndarray, tau: float) -> Dict:
     n_conc = int(conc.sum())
     hv = ~np.isnan(hit) & valid
     return {
-        "conc_rate": (float(conc.sum() / valid.sum())
-                      if valid.any() else None),
-        "p_hit_given_conc": (float(np.nanmean(hit[conc]))
-                             if n_conc and hv[conc].any() else None),
-        "p_hit_given_notconc": (float(np.nanmean(hit[valid & ~conc]))
-                                if (valid & ~conc).any()
-                                and hv[valid & ~conc].any() else None),
-        "misleading_rate": (float((conc[hv] & (hit[hv] == 0)).mean())
-                            if hv.any() else None),
+        "conc_rate": (float(conc.sum() / valid.sum()) if valid.any() else None),
+        "p_hit_given_conc": (
+            float(np.nanmean(hit[conc])) if n_conc and hv[conc].any() else None
+        ),
+        "p_hit_given_notconc": (
+            float(np.nanmean(hit[valid & ~conc]))
+            if (valid & ~conc).any() and hv[valid & ~conc].any()
+            else None
+        ),
+        "misleading_rate": (
+            float((conc[hv] & (hit[hv] == 0)).mean()) if hv.any() else None
+        ),
         "misleading_given_conc": (
-            float((hit[hv & conc] == 0).mean())
-            if int((hv & conc).sum()) else None),
+            float((hit[hv & conc] == 0).mean()) if int((hv & conc).sum()) else None
+        ),
     }
 
 
@@ -392,8 +462,13 @@ def tau_sensitivity(records: List[Dict], taus: List[float]) -> Dict:
     # 不能冒充命中/未命中，否则条件概率会越界或方向错误。
     hit[(hit != 0.0) & (hit != 1.0)] = np.nan
     out: Dict = {"taus": [float(t) for t in taus]}
-    fields = ("conc_rate", "p_hit_given_conc", "p_hit_given_notconc",
-              "misleading_rate", "misleading_given_conc")
+    fields = (
+        "conc_rate",
+        "p_hit_given_conc",
+        "p_hit_given_notconc",
+        "misleading_rate",
+        "misleading_given_conc",
+    )
     for f in fields:
         out[f] = []
     for tau in out["taus"]:
@@ -403,8 +478,9 @@ def tau_sensitivity(records: List[Dict], taus: List[float]) -> Dict:
     return out
 
 
-def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
-                            ci: float = 0.95, seed: int = 0) -> Dict:
+def auroc_cluster_bootstrap(
+    records: List[Dict], n_resamples: int = 1000, ci: float = 0.95, seed: int = 0
+) -> Dict:
     """按样例聚类的 bootstrap：给 AUROC、PR-AUC 及其 logit−qterm 差的置信区间。
 
     机制分析的记录不是独立样本：同一样例的全部 (层, 头, 查询位) 记录共享该
@@ -449,13 +525,22 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
         rec["hit"] = hit
         clusters.setdefault(key, []).append(rec)
     ex_ids = sorted(clusters)
-    out = {"n_examples": len(ex_ids), "n_resamples": int(n_resamples),
-           "ci_level": float(ci), "ci95": {}, "n_valid_resamples": None}
+    out = {
+        "n_examples": len(ex_ids),
+        "n_resamples": int(n_resamples),
+        "ci_level": float(ci),
+        "ci95": {},
+        "n_valid_resamples": None,
+    }
     if len(ex_ids) < 2:
         return out
-    score_keys = [k for k in ("logit", "qterm", "qterm_bias", "c")
-                  if any(_finite_float(r.get(k)) is not None
-                         for cl in clusters.values() for r in cl)]
+    score_keys = [
+        k
+        for k in ("logit", "qterm", "qterm_bias", "c")
+        if any(
+            _finite_float(r.get(k)) is not None for cl in clusters.values() for r in cl
+        )
+    ]
     if not score_keys:
         return out
     labels = [np.array([r["hit"] for r in clusters[e]]) for e in ex_ids]
@@ -464,8 +549,9 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
         scores[k] = []
         for e in ex_ids:
             vals = [_finite_float(r.get(k)) for r in clusters[e]]
-            scores[k].append(np.array(
-                [np.nan if v is None else v for v in vals], dtype=np.float64))
+            scores[k].append(
+                np.array([np.nan if v is None else v for v in vals], dtype=np.float64)
+            )
     # 逐聚类预计算“是否含正/负类”：重采样时先按聚类标志判定是否可能
     # 恰有两类，再交给 roc_pr_aucs 按分数有限性逐记录过滤（与 summarize
     # 的点估计口径一致）。不能因为某个聚类含 NaN 分数就丢掉整个重采样：
@@ -510,14 +596,12 @@ def auroc_cluster_bootstrap(records: List[Dict], n_resamples: int = 1000,
             n_valid += 1
         if aps.get("logit") is not None and aps.get("qterm") is not None:
             samples["ap_logit_minus_qterm"].append(aps["logit"] - aps["qterm"])
-        if vals.get("logit") is not None \
-                and vals.get("qterm_bias") is not None:
-            samples["logit_minus_qterm_bias"].append(
-                vals["logit"] - vals["qterm_bias"])
-        if aps.get("logit") is not None \
-                and aps.get("qterm_bias") is not None:
+        if vals.get("logit") is not None and vals.get("qterm_bias") is not None:
+            samples["logit_minus_qterm_bias"].append(vals["logit"] - vals["qterm_bias"])
+        if aps.get("logit") is not None and aps.get("qterm_bias") is not None:
             samples["ap_logit_minus_qterm_bias"].append(
-                aps["logit"] - aps["qterm_bias"])
+                aps["logit"] - aps["qterm_bias"]
+            )
     alpha = (1.0 - float(ci)) / 2.0
     for k, vals_list in samples.items():
         if len(vals_list) < 10:
@@ -591,43 +675,62 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         "detection_metric_note": (
             "hit/¬hit 为二分类；正类率即 hit 率。PR-AUC 的随机基线等于正类率。"
             "正类率 <5% 时 AUROC 会因负样本基数大而过于乐观，以 PR-AUC 为主；"
-            "F1 三种平均口径并列于 gate_f1（macro/micro/weighted）。"),
+            "F1 三种平均口径并列于 gate_f1（macro/micro/weighted）。"
+        ),
     }
     summary.update(_conc_stats(hit, max_p, tau))
-    summary.update({
-        "mean_g_hit": (float(np.nanmean(g[hit == 1]))
-                       if (~np.isnan(g[hit == 1])).any() else None),
-        "mean_g_miss": (float(np.nanmean(g[hit == 0]))
-                        if (~np.isnan(g[hit == 0])).any() else None),
-        "auroc_logit": _auroc(logit, hit, hv),
-        "auroc_qterm": _auroc(qterm, hit, hv),
-        "auroc_qterm_bias": _auroc(qterm_bias, hit, hv),
-        "auroc_c": _auroc(c, hit, hv),
-        "auroc_maxp": _auroc(max_p, hit, hv),
-        "auroc_logn": _auroc(log_n, hit, hv),
-        "auprc_logit": _auprc(logit, hit, hv),
-        "auprc_qterm": _auprc(qterm, hit, hv),
-        "auprc_qterm_bias": _auprc(qterm_bias, hit, hv),
-        "auprc_c": _auprc(c, hit, hv),
-        "auprc_maxp": _auprc(max_p, hit, hv),
-        "auprc_logn": _auprc(log_n, hit, hv),
-        "corr_c_g": (pearson(c, g) if (~np.isnan(c)).any() and (~np.isnan(g)).any() else None),
-        "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
-        "corr_qterm_g": (pearson(qterm, g) if (~np.isnan(qterm)).any() and (~np.isnan(g)).any() else None),
-        "corr_qterm_bias_g": (pearson(qterm_bias, g)
-                              if (~np.isnan(qterm_bias)).any()
-                              and (~np.isnan(g)).any() else None),
-        "gate_is_hit_probability": False,
-        "gate_calibration_note": (
-            "g 由语言建模损失训练，从未使用 hit 标签或概率校准目标；"
-            "Brier/ECE 只描述 g 与“注意力 argmax 命中答案跨度”这一代理"
-            "标签的数值关系，不能据此声称 g 是校准的写入概率。"
-            "写入效用需用逐头/逐位置输出干预对答案 NLL/任务表现的因果"
-            "效应单独测量。"),
-        "hit_label_note": (
-            "hit=注意力 argmax 落在答案数值跨度内，是检索行为的代理，"
-            "不是“该头输出值得写入”的效用标签。"),
-    })
+    summary.update(
+        {
+            "mean_g_hit": (
+                float(np.nanmean(g[hit == 1]))
+                if (~np.isnan(g[hit == 1])).any()
+                else None
+            ),
+            "mean_g_miss": (
+                float(np.nanmean(g[hit == 0]))
+                if (~np.isnan(g[hit == 0])).any()
+                else None
+            ),
+            "auroc_logit": _auroc(logit, hit, hv),
+            "auroc_qterm": _auroc(qterm, hit, hv),
+            "auroc_qterm_bias": _auroc(qterm_bias, hit, hv),
+            "auroc_c": _auroc(c, hit, hv),
+            "auroc_maxp": _auroc(max_p, hit, hv),
+            "auroc_logn": _auroc(log_n, hit, hv),
+            "auprc_logit": _auprc(logit, hit, hv),
+            "auprc_qterm": _auprc(qterm, hit, hv),
+            "auprc_qterm_bias": _auprc(qterm_bias, hit, hv),
+            "auprc_c": _auprc(c, hit, hv),
+            "auprc_maxp": _auprc(max_p, hit, hv),
+            "auprc_logn": _auprc(log_n, hit, hv),
+            "corr_c_g": (
+                pearson(c, g) if (~np.isnan(c)).any() and (~np.isnan(g)).any() else None
+            ),
+            "corr_logn_g": (pearson(log_n, g) if (~np.isnan(g)).any() else None),
+            "corr_qterm_g": (
+                pearson(qterm, g)
+                if (~np.isnan(qterm)).any() and (~np.isnan(g)).any()
+                else None
+            ),
+            "corr_qterm_bias_g": (
+                pearson(qterm_bias, g)
+                if (~np.isnan(qterm_bias)).any() and (~np.isnan(g)).any()
+                else None
+            ),
+            "gate_is_hit_probability": False,
+            "gate_calibration_note": (
+                "g 由语言建模损失训练，从未使用 hit 标签或概率校准目标；"
+                "Brier/ECE 只描述 g 与“注意力 argmax 命中答案跨度”这一代理"
+                "标签的数值关系，不能据此声称 g 是校准的写入概率。"
+                "写入效用需用逐头/逐位置输出干预对答案 NLL/任务表现的因果"
+                "效应单独测量。"
+            ),
+            "hit_label_note": (
+                "hit=注意力 argmax 落在答案数值跨度内，是检索行为的代理，"
+                "不是“该头输出值得写入”的效用标签。"
+            ),
+        }
+    )
     # 门控决策点（g > 0.5 ⇒ 预测“这次写入是对的”）的分类指标。
     # 只对有效（有 hit 标签）且有门控 g 的记录计算；F1 必须注明平均口径。
     gate_f1 = None
@@ -650,16 +753,20 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     gate_f1_trivial = None
     if gm.any() and len(set(hit[gm])) == 2:
         y = hit[gm].astype(np.int64)
-        gate_f1_trivial = {"n": int(len(y)),
-                           "note": "固定规则、无阈值：不平衡下 F1 的稻草人对照"}
-        for name, pred in (("always_write", np.ones_like(y)),
-                           ("never_write", np.zeros_like(y))):
+        gate_f1_trivial = {
+            "n": int(len(y)),
+            "note": "固定规则、无阈值：不平衡下 F1 的稻草人对照",
+        }
+        for name, pred in (
+            ("always_write", np.ones_like(y)),
+            ("never_write", np.zeros_like(y)),
+        ):
             f1s_t = f1_scores(y, pred, labels=[0, 1])
             gate_f1_trivial[name] = {
-                "macro": f1s_t["macro"], "micro": f1s_t["micro"],
+                "macro": f1s_t["macro"],
+                "micro": f1s_t["micro"],
                 "weighted": f1s_t["weighted"],
-                "per_class": {str(k): v
-                              for k, v in f1s_t["per_class"].items()},
+                "per_class": {str(k): v for k, v in f1s_t["per_class"].items()},
             }
     summary["gate_f1_trivial"] = gate_f1_trivial
     # 概率校准：g 是 sigmoid 输出、被当作“该不该写入”的软权重/概率使用。
@@ -677,8 +784,7 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
         summary["brier_g_reliability"] = calibration_g.get("brier_reliability")
         summary["brier_g_resolution"] = calibration_g.get("brier_resolution")
         summary["brier_g_uncertainty"] = calibration_g.get("brier_uncertainty")
-        summary["brier_g_within_score"] = calibration_g.get(
-            "brier_within_score")
+        summary["brier_g_within_score"] = calibration_g.get("brier_within_score")
         summary["brier_g_within_cov"] = calibration_g.get("brier_within_cov")
         summary["brier_g_binning"] = calibration_g.get("brier_binning")
         summary["calibration_g_n"] = calibration_g.get("n")
@@ -699,19 +805,23 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     head_arr = _record_arrays(records, "head")
     # int64 强制转换对超范围浮点会饱和/回绕，把不同的层/头合并成同一
     # 组；层/头索引远小于 2^53，超出即可安全视为畸形记录。
-    limit = float(2 ** 53)
-    lh_ok = (np.isfinite(layer_arr) & np.isfinite(head_arr)
-             & (layer_arr == np.floor(layer_arr))
-             & (head_arr == np.floor(head_arr))
-             & (np.abs(layer_arr) <= limit) & (np.abs(head_arr) <= limit))
+    limit = float(2**53)
+    lh_ok = (
+        np.isfinite(layer_arr)
+        & np.isfinite(head_arr)
+        & (layer_arr == np.floor(layer_arr))
+        & (head_arr == np.floor(head_arr))
+        & (np.abs(layer_arr) <= limit)
+        & (np.abs(head_arr) <= limit)
+    )
     if lh_ok.any():
         layer_v = layer_arr[lh_ok].astype(np.int64)
         head_v = head_arr[lh_ok].astype(np.int64)
         # 一次分组得到每行的组号：逐组重扫全表求 (layer, head) 掩码在记录数
         # 大时是 O(N × 组数)；分组顺序仍为字典序，各组记录顺序不变。
         groups, group_idx = np.unique(
-            np.stack([layer_v, head_v], axis=1), axis=0,
-            return_inverse=True)
+            np.stack([layer_v, head_v], axis=1), axis=0, return_inverse=True
+        )
         group_idx = group_idx.reshape(-1)
         g_v, hit_v, c_v = g[lh_ok], hit[lh_ok], c[lh_ok]
         qterm_v, logit_v, max_p_v = qterm[lh_ok], logit[lh_ok], max_p[lh_ok]
@@ -736,24 +846,35 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
             ap = average_precision(scores[mk], labels[mk])
             return float(ap) if np.isfinite(ap) else None
 
-        per_head.append({
-            "layer": int(layer), "head": int(head), "n": int(m.sum()),
-            "mean_g": float(np.nanmean(gg)) if (~np.isnan(gg)).any() else None,
-            "mean_max_p": (float(np.nanmean(mp))
-                           if (~np.isnan(mp)).any() else None),
-            "hit_rate": float(np.nanmean(hh)) if hv.any() else None,
-            "corr_c_g": pearson(cc, gg) if (~np.isnan(cc)).any() and (~np.isnan(gg)).any() else None,
-            "corr_qterm_g": pearson(qq, gg) if (~np.isnan(qq)).any() and (~np.isnan(gg)).any() else None,
-            "corr_qterm_bias_g": (pearson(qb, gg)
-                                  if (~np.isnan(qb)).any()
-                                  and (~np.isnan(gg)).any() else None),
-            "auroc_logit": _auroc(ll, hh, hv),
-            "auroc_qterm": _auroc(qq, hh, hv),
-            "auroc_qterm_bias": _auroc(qb, hh, hv),
-            "auprc_logit": _auprc(ll, hh, hv),
-            "auprc_qterm": _auprc(qq, hh, hv),
-            "auprc_qterm_bias": _auprc(qb, hh, hv),
-        })
+        per_head.append(
+            {
+                "layer": int(layer),
+                "head": int(head),
+                "n": int(m.sum()),
+                "mean_g": float(np.nanmean(gg)) if (~np.isnan(gg)).any() else None,
+                "mean_max_p": (
+                    float(np.nanmean(mp)) if (~np.isnan(mp)).any() else None
+                ),
+                "hit_rate": float(np.nanmean(hh)) if hv.any() else None,
+                "corr_c_g": pearson(cc, gg)
+                if (~np.isnan(cc)).any() and (~np.isnan(gg)).any()
+                else None,
+                "corr_qterm_g": pearson(qq, gg)
+                if (~np.isnan(qq)).any() and (~np.isnan(gg)).any()
+                else None,
+                "corr_qterm_bias_g": (
+                    pearson(qb, gg)
+                    if (~np.isnan(qb)).any() and (~np.isnan(gg)).any()
+                    else None
+                ),
+                "auroc_logit": _auroc(ll, hh, hv),
+                "auroc_qterm": _auroc(qq, hh, hv),
+                "auroc_qterm_bias": _auroc(qb, hh, hv),
+                "auprc_logit": _auprc(ll, hh, hv),
+                "auprc_qterm": _auprc(qq, hh, hv),
+                "auprc_qterm_bias": _auprc(qb, hh, hv),
+            }
+        )
     summary["per_head"] = per_head
     return summary
 
@@ -765,44 +886,75 @@ def main():
     p.add_argument("--out_dir", required=True)
     p.add_argument("--n_examples", type=int, default=None)
     p.add_argument("--tau", type=float, default=None)
-    p.add_argument("--tau_grid", default=None,
-                   help="逗号分隔的敏感性扫描阈值；默认取配置 analysis.tau_grid "
-                        "（[0.3, 0.5, 0.7]），并并入主阈值 tau")
-    p.add_argument("--bootstrap_resamples", type=int, default=None,
-                   help="按样例聚类的 AUROC bootstrap 重采样次数；"
-                        "默认取配置 analysis.bootstrap_resamples（1000），0 关闭")
-    p.add_argument("--ctx", type=int, default=None, help="分析用上下文长度，默认取 RULER 最长档")
-    p.add_argument("--probe_folds", type=int, default=None,
-                   help="线性探针的分组交叉验证折数（默认取配置 "
-                        "analysis.probe_folds，5）")
-    p.add_argument("--probe_l2", default=None,
-                   help="逗号分隔的 L2 强度网格；默认取配置 "
-                        "analysis.probe_l2_grid（0,0.01,0.1,1）")
-    p.add_argument("--no_probe", action="store_true",
-                   help="跳过线性探针简单基线（默认运行；跳过时汇总页会"
-                        "缺少“门控 vs 最简监督线性模型”的对照）")
-    p.add_argument("--suffix", default="",
-                   help="输出文件名后缀（如 _seed1337），多种子运行避免互相覆盖")
+    p.add_argument(
+        "--tau_grid",
+        default=None,
+        help="逗号分隔的敏感性扫描阈值；默认取配置 analysis.tau_grid "
+        "（[0.3, 0.5, 0.7]），并并入主阈值 tau",
+    )
+    p.add_argument(
+        "--bootstrap_resamples",
+        type=int,
+        default=None,
+        help="按样例聚类的 AUROC bootstrap 重采样次数；"
+        "默认取配置 analysis.bootstrap_resamples（1000），0 关闭",
+    )
+    p.add_argument(
+        "--ctx", type=int, default=None, help="分析用上下文长度，默认取 RULER 最长档"
+    )
+    p.add_argument(
+        "--probe_folds",
+        type=int,
+        default=None,
+        help="线性探针的分组交叉验证折数（默认取配置 " "analysis.probe_folds，5）",
+    )
+    p.add_argument(
+        "--probe_l2",
+        default=None,
+        help="逗号分隔的 L2 强度网格；默认取配置 "
+        "analysis.probe_l2_grid（0,0.01,0.1,1）",
+    )
+    p.add_argument(
+        "--no_probe",
+        action="store_true",
+        help="跳过线性探针简单基线（默认运行；跳过时汇总页会"
+        "缺少“门控 vs 最简监督线性模型”的对照）",
+    )
+    p.add_argument(
+        "--suffix",
+        default="",
+        help="输出文件名后缀（如 _seed1337），多种子运行避免互相覆盖",
+    )
     p.add_argument("--device", default="auto")
-    p.add_argument("--allow_test_corpus", action="store_true",
-                   help="允许 niah_corpus 干扰语句取自 test.txt（尘封 split 默认"
-                        "禁止；放行时写入 test 访问账本）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 标记泄露也继续分析（仅用于复现历史"
-                        "实验；结果不得用于正式结论）")
+    p.add_argument(
+        "--allow_test_corpus",
+        action="store_true",
+        help="允许 niah_corpus 干扰语句取自 test.txt（尘封 split 默认"
+        "禁止；放行时写入 test 访问账本）",
+    )
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 标记泄露也继续分析（仅用于复现历史"
+        "实验；结果不得用于正式结论）",
+    )
     args = p.parse_args()
 
     data_preflight = data_protocol_preflight(
         args.data_dir,
-        allow_override=allow_protocol_violations(
-            args.allow_data_protocol_violations))
+        allow_override=allow_protocol_violations(args.allow_data_protocol_violations),
+    )
     if not data_preflight["report_present"]:
-        print("[analysis] 警告：数据目录缺少 data_report.json，"
-              "无法执行分析前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[analysis] 警告：数据目录缺少 data_report.json，"
+            "无法执行分析前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif data_preflight["critical_violations"]:
-        print(f"[analysis] ⚠ 数据协议自检发现 "
-              f"{len(data_preflight['critical_violations'])} 个严重问题，"
-              "但已显式放行（结果不得用于正式结论）")
+        print(
+            f"[analysis] ⚠ 数据协议自检发现 "
+            f"{len(data_preflight['critical_violations'])} 个严重问题，"
+            "但已显式放行（结果不得用于正式结论）"
+        )
 
     device = get_device(args.device)
     enable_tf32(device)
@@ -816,18 +968,20 @@ def main():
     # checkpoint 元数据的种子不能被 int() 截断（1.5 → 1、True → 1），否则
     # 实际播种的种子与记录的种子不同，审计形同虚设。
     ckpt_seed_raw = ck.get("seed")
-    ckpt_seed = (0 if ckpt_seed_raw is None
-                 else strict_int(ckpt_seed_raw, "checkpoint seed"))
+    ckpt_seed = (
+        0 if ckpt_seed_raw is None else strict_int(ckpt_seed_raw, "checkpoint seed")
+    )
     # 输出用“缺失=None / 有值=规范化整数”，不把缺失种子写成 0；5.0 也
     # 不能原样写进结果，否则与真正 set_seed 的身份不一致。
     ckpt_seed_out = None if ckpt_seed_raw is None else ckpt_seed
     set_seed(ckpt_seed)
     provenance = load_provenance(
-        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir,
-        device=device)
+        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir, device=device
+    )
 
     ckpt_cfg_path = os.path.join(
-        os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
+        os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json"
+    )
     ckpt_cfg = {}
     if os.path.exists(ckpt_cfg_path):
         try:
@@ -856,18 +1010,24 @@ def main():
         return strict_int(table[key], f"{section}.{key}")
 
     n_examples = _int_at_least(
-        args.n_examples if args.n_examples is not None
-        else _cfg_int("analysis", "n_examples", 30), "n_examples", 1)
+        args.n_examples
+        if args.n_examples is not None
+        else _cfg_int("analysis", "n_examples", 30),
+        "n_examples",
+        1,
+    )
     tau = _bounded_float(
         args.tau if args.tau is not None else acfg.get("tau", 0.5),
-        "tau", minimum=0.0, maximum=1.0)
+        "tau",
+        minimum=0.0,
+        maximum=1.0,
+    )
     if args.ctx is not None:
         ctx = args.ctx
     else:
         raw_ctx_lens = rcfg.get("ctx_lens", [model.block_size])
         if not isinstance(raw_ctx_lens, (list, tuple)):
-            raise ValueError(
-                f"ruler.ctx_lens 需要整数列表，收到 {raw_ctx_lens!r}")
+            raise ValueError(f"ruler.ctx_lens 需要整数列表，收到 {raw_ctx_lens!r}")
         ctx = max(strict_int(x, "ruler.ctx_lens") for x in raw_ctx_lens)
     # run_ruler 为生成预留 max_new 个位置；机制分析必须使用同一个实际 room_ctx，
     # 否则机制统计与 RULER 得分并不来自同一批样本。非法 ctx/max_new（如
@@ -877,36 +1037,55 @@ def main():
     ctx = resolve_analysis_ctx(model.block_size, ctx, max_new)
     ruler_seed = _cfg_int("ruler", "seed", 1234)
     depth_stratified = config_bool(
-        rcfg.get("depth_stratified", True), "ruler.depth_stratified")
+        rcfg.get("depth_stratified", True), "ruler.depth_stratified"
+    )
 
     sents, corpus_source = load_corpus_sents_with_source(
-        args.data_dir, allow_test=bool(getattr(args, "allow_test_corpus", False)))
+        args.data_dir, allow_test=bool(getattr(args, "allow_test_corpus", False))
+    )
     if corpus_source == "test":
-        if record_corpus_test_access(args.data_dir, corpus_source,
-                                     ckpt_sha256=ckpt_sha256,
-                                     stage="analysis"):
-            print("[analysis] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
-                  "已写入 test 访问账本；机制分析输入含测试集文本，需在报告披露")
+        if record_corpus_test_access(
+            args.data_dir, corpus_source, ckpt_sha256=ckpt_sha256, stage="analysis"
+        ):
+            print(
+                "[analysis] ⚠ niah_corpus 干扰语料取自 test.txt（尘封 split）："
+                "已写入 test 访问账本；机制分析输入含测试集文本，需在报告披露"
+            )
         else:
-            print("[analysis] ⚠ niah_corpus 干扰语料取自 test.txt 且访问账本"
-                  "写入失败：本次读取未被记录")
+            print(
+                "[analysis] ⚠ niah_corpus 干扰语料取自 test.txt 且访问账本"
+                "写入失败：本次读取未被记录"
+            )
     examples, task_of, ctx_of = [], [], []
     skipped_tasks = []
     for i in range(n_examples):
         for task in ANALYSIS_TASKS:
             # 与 lega.ruler.run_ruler 的播种公式完全相同：EM 分数与逐头机制
             # 记录对应到同一批样例，而不是两个独立抽样。
-            rng = Random(ruler_seed * 100003 + _stable_hash(task) % 99991 + ctx * 31 + i)
-            depth_start = (_stable_hash(f"{task}:{ctx}") % len(DEPTH_BINS)
-                           if depth_stratified and task.startswith("niah") else 0)
-            target_depth = (DEPTH_BINS[(depth_start + i) % len(DEPTH_BINS)]
-                            if depth_stratified and task.startswith("niah")
-                            else None)
+            rng = Random(
+                ruler_seed * 100003 + _stable_hash(task) % 99991 + ctx * 31 + i
+            )
+            depth_start = (
+                _stable_hash(f"{task}:{ctx}") % len(DEPTH_BINS)
+                if depth_stratified and task.startswith("niah")
+                else 0
+            )
+            target_depth = (
+                DEPTH_BINS[(depth_start + i) % len(DEPTH_BINS)]
+                if depth_stratified and task.startswith("niah")
+                else None
+            )
             try:
-                ex = _example(task, tok, ctx, rng, corpus_sents=sents,
-                              vt_chains=_cfg_int("ruler", "vt_chains", 4),
-                              vt_depth=_cfg_int("ruler", "vt_depth", 4),
-                              target_depth=target_depth)
+                ex = _example(
+                    task,
+                    tok,
+                    ctx,
+                    rng,
+                    corpus_sents=sents,
+                    vt_chains=_cfg_int("ruler", "vt_chains", 4),
+                    vt_depth=_cfg_int("ruler", "vt_depth", 4),
+                    target_depth=target_depth,
+                )
             except ContextTooSmall:
                 # 预期的可跳过情况（上下文长度不足）；其余异常说明构造逻辑出错，应暴露。
                 continue
@@ -920,8 +1099,9 @@ def main():
             task_of.append(task)
             ctx_of.append(ctx)
 
-    csv_path = os.path.join(args.out_dir,
-                            f"analysis_records_{variant}{args.suffix}.csv")
+    csv_path = os.path.join(
+        args.out_dir, f"analysis_records_{variant}{args.suffix}.csv"
+    )
     if not examples:
         print("[analysis] 没有可分析的样例（ctx 过小或缺少语料），跳过")
         # 空结果必须清掉上一轮的逐记录 CSV：JSON 已声明 n_records=0，
@@ -930,20 +1110,33 @@ def main():
             os.remove(csv_path)
         except FileNotFoundError:
             pass
-        save_json({"variant": variant, "seed": ckpt_seed_out, "n_records": 0,
-                   "note": "no examples", "skipped_tasks": skipped_tasks,
-                   "depth_stratified": bool(depth_stratified),
-                   "ckpt": os.path.abspath(args.ckpt),
-                   "ckpt_sha256": ckpt_sha256,
-                   "data_protocol_preflight": data_preflight,
-                   **provenance},
-                  os.path.join(args.out_dir,
-                               f"analysis_{variant}{args.suffix}.json"))
+        save_json(
+            {
+                "variant": variant,
+                "seed": ckpt_seed_out,
+                "n_records": 0,
+                "note": "no examples",
+                "skipped_tasks": skipped_tasks,
+                "depth_stratified": bool(depth_stratified),
+                "ckpt": os.path.abspath(args.ckpt),
+                "ckpt_sha256": ckpt_sha256,
+                "data_protocol_preflight": data_preflight,
+                **provenance,
+            },
+            os.path.join(args.out_dir, f"analysis_{variant}{args.suffix}.json"),
+        )
         return
 
     print(f"[analysis] variant={variant} ctx={ctx} 样例数={len(examples)} tau={tau}")
-    records = collect_records(model, tok, device, examples, task_of, ctx_of,
-                              amp=config_bool(ckpt_cfg.get("amp", True), "amp"))
+    records = collect_records(
+        model,
+        tok,
+        device,
+        examples,
+        task_of,
+        ctx_of,
+        amp=config_bool(ckpt_cfg.get("amp", True), "amp"),
+    )
     summary = summarize(records, variant, tau)
     # 简单监督基线（线性探针）：从同一批记录学“该不该写入”的最简线性模型。
     # 探针有 hit 标签监督，门控 logit 没有；对照语义见 lega/probe.py 与
@@ -954,28 +1147,42 @@ def main():
         else:
             probe_l2 = _float_grid(
                 acfg.get("probe_l2_grid", list(_PROBE_L2_GRID)),
-                "analysis.probe_l2_grid", minimum=0.0)
+                "analysis.probe_l2_grid",
+                minimum=0.0,
+            )
         probe_folds = _int_at_least(
-            args.probe_folds if args.probe_folds is not None
+            args.probe_folds
+            if args.probe_folds is not None
             else _cfg_int("analysis", "probe_folds", _PROBE_FOLDS),
-            "probe_folds", 2)
+            "probe_folds",
+            2,
+        )
         summary["linear_probe"] = linear_probe(
-            records, folds=probe_folds, l2_grid=probe_l2, seed=ckpt_seed)
+            records, folds=probe_folds, l2_grid=probe_l2, seed=ckpt_seed
+        )
     # 阈值敏感性：misleading/P(hit|集中) 的结论不能只挂在单一 τ 上
     if args.tau_grid is not None:
         grid = _float_grid(args.tau_grid, "tau_grid", minimum=0.0, maximum=1.0)
     else:
-        grid = _float_grid(acfg.get("tau_grid", [0.3, 0.5, 0.7]),
-                           "analysis.tau_grid", minimum=0.0, maximum=1.0)
+        grid = _float_grid(
+            acfg.get("tau_grid", [0.3, 0.5, 0.7]),
+            "analysis.tau_grid",
+            minimum=0.0,
+            maximum=1.0,
+        )
     summary["tau_sensitivity"] = tau_sensitivity(records, sorted(set(grid) | {tau}))
     # 聚类 bootstrap：同一记录池的 AUROC 置信区间（样例为聚类单元）
     n_boot = _int_at_least(
-        args.bootstrap_resamples if args.bootstrap_resamples is not None
+        args.bootstrap_resamples
+        if args.bootstrap_resamples is not None
         else _cfg_int("analysis", "bootstrap_resamples", 1000),
-        "bootstrap_resamples", 0)
+        "bootstrap_resamples",
+        0,
+    )
     if n_boot > 0:
         summary["auroc_cluster_bootstrap"] = auroc_cluster_bootstrap(
-            records, n_resamples=n_boot, seed=ckpt_seed)
+            records, n_resamples=n_boot, seed=ckpt_seed
+        )
     # 训练种子随分析结果落盘：多种子聚合与配对检验需要它对齐同一批 run
     summary["seed"] = ckpt_seed_out
     # 机制分析与 RULER 用同一干扰语料来源：train 回退必须可审计
@@ -1004,58 +1211,74 @@ def main():
             os.remove(csv_path)
         except FileNotFoundError:
             pass
-    save_json(summary,
-              os.path.join(args.out_dir, f"analysis_{variant}{args.suffix}.json"))
+    save_json(
+        summary, os.path.join(args.out_dir, f"analysis_{variant}{args.suffix}.json")
+    )
 
     def fmt(x):
         return "n/a" if x is None else f"{x:.3f}"
-    print(f"[analysis] hit_rate={fmt(summary.get('hit_rate'))} "
-          f"conc_rate={fmt(summary.get('conc_rate'))} "
-          f"P(hit|conc)={fmt(summary.get('p_hit_given_conc'))} "
-          f"misleading={fmt(summary.get('misleading_rate'))}")
+
+    print(
+        f"[analysis] hit_rate={fmt(summary.get('hit_rate'))} "
+        f"conc_rate={fmt(summary.get('conc_rate'))} "
+        f"P(hit|conc)={fmt(summary.get('p_hit_given_conc'))} "
+        f"misleading={fmt(summary.get('misleading_rate'))}"
+    )
     if summary.get("auroc_logit") is not None:
-        print(f"[analysis] AUROC logit={fmt(summary.get('auroc_logit'))} "
-              f"qterm={fmt(summary.get('auroc_qterm'))} c={fmt(summary.get('auroc_c'))} "
-              f"maxp={fmt(summary.get('auroc_maxp'))}")
-        print(f"[analysis] PR-AUC logit={fmt(summary.get('auprc_logit'))} "
-              f"qterm={fmt(summary.get('auprc_qterm'))} "
-              f"（hit 基线率={fmt(summary.get('hit_base_rate'))}，"
-              f"主指标={summary.get('primary_detection_metric')}）")
+        print(
+            f"[analysis] AUROC logit={fmt(summary.get('auroc_logit'))} "
+            f"qterm={fmt(summary.get('auroc_qterm'))} c={fmt(summary.get('auroc_c'))} "
+            f"maxp={fmt(summary.get('auroc_maxp'))}"
+        )
+        print(
+            f"[analysis] PR-AUC logit={fmt(summary.get('auprc_logit'))} "
+            f"qterm={fmt(summary.get('auprc_qterm'))} "
+            f"（hit 基线率={fmt(summary.get('hit_base_rate'))}，"
+            f"主指标={summary.get('primary_detection_metric')}）"
+        )
     boot = summary.get("auroc_cluster_bootstrap") or {}
     ci = (boot.get("ci95") or {}).get("logit_minus_qterm")
     if ci:
-        print(f"[analysis] AUROC(logit−qterm) 样例聚类 bootstrap 95% CI: "
-              f"[{ci[0]:.3f}, {ci[1]:.3f}]"
-              f"（n_examples={boot.get('n_examples')}，"
-              f"n_resamples={boot.get('n_resamples')}）")
+        print(
+            f"[analysis] AUROC(logit−qterm) 样例聚类 bootstrap 95% CI: "
+            f"[{ci[0]:.3f}, {ci[1]:.3f}]"
+            f"（n_examples={boot.get('n_examples')}，"
+            f"n_resamples={boot.get('n_resamples')}）"
+        )
     ap_ci = (boot.get("ci95") or {}).get("ap_logit_minus_qterm")
     if ap_ci:
-        print(f"[analysis] PR-AUC(logit−qterm) 样例聚类 bootstrap 95% CI: "
-              f"[{ap_ci[0]:.3f}, {ap_ci[1]:.3f}]（不平衡下的主指标口径）")
+        print(
+            f"[analysis] PR-AUC(logit−qterm) 样例聚类 bootstrap 95% CI: "
+            f"[{ap_ci[0]:.3f}, {ap_ci[1]:.3f}]（不平衡下的主指标口径）"
+        )
     cal = summary.get("calibration_g") or {}
     if cal.get("brier") is not None:
         # 单一类别（全 hit 或全 miss）时常数基率 Brier=0，skill 无定义；
         # 缺省值必须显式显示 n/a，不能拿 None 去做带符号浮点格式化。
         skill = cal.get("brier_skill")
         skill_txt = "n/a" if skill is None else f"{skill:+.3f}"
-        print(f"[analysis] 门控概率校准：Brier={cal['brier']:.4f}"
-              f"（常数基率基线={fmt(cal.get('brier_constant'))}，"
-              f"skill={skill_txt}）"
-              f" ECE={fmt(cal.get('ece'))} / 等频ECE="
-              f"{fmt(cal.get('ece_adaptive'))}（排序好≠概率可信）")
+        print(
+            f"[analysis] 门控概率校准：Brier={cal['brier']:.4f}"
+            f"（常数基率基线={fmt(cal.get('brier_constant'))}，"
+            f"skill={skill_txt}）"
+            f" ECE={fmt(cal.get('ece'))} / 等频ECE="
+            f"{fmt(cal.get('ece_adaptive'))}（排序好≠概率可信）"
+        )
     probe = summary.get("linear_probe") or {}
     pset = (probe.get("feature_sets") or {}).get(probe.get("primary") or "") or {}
     poof = pset.get("oof") or {}
     if poof:
         f1 = poof.get("f1") or {}
         f1t = poof.get("f1_tuned") or {}
-        print(f"[analysis] 线性探针简单基线（{pset.get('name')}，"
-              f"{probe.get('folds')} 折嵌套分组 CV、"
-              f"λ={pset.get('selected_l2')}）："
-              f"AUROC={fmt(poof.get('auroc'))} PR-AUC={fmt(poof.get('auprc'))} "
-              f"F1(0.5)={fmt(f1.get('macro'))} "
-              f"F1(调优阈值)={fmt(f1t.get('macro'))} "
-              f"（OOF，有标签监督；门控 logit 无标签监督，务必对照解读）")
+        print(
+            f"[analysis] 线性探针简单基线（{pset.get('name')}，"
+            f"{probe.get('folds')} 折嵌套分组 CV、"
+            f"λ={pset.get('selected_l2')}）："
+            f"AUROC={fmt(poof.get('auroc'))} PR-AUC={fmt(poof.get('auprc'))} "
+            f"F1(0.5)={fmt(f1.get('macro'))} "
+            f"F1(调优阈值)={fmt(f1t.get('macro'))} "
+            f"（OOF，有标签监督；门控 logit 无标签监督，务必对照解读）"
+        )
     elif probe:
         print(f"[analysis] 线性探针跳过：{probe.get('note', '')[:120]}")
     print(f"[analysis] 完成 -> {args.out_dir}")

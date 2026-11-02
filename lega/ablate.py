@@ -63,6 +63,7 @@ PPL、门控均值/标准差/饱和比例、逐窗口 ΔNLL、窗口级配对 t/
   python -m lega.ablate --ckpt out/small/lega/seed1337/model_best.pt \\
       --data_dir data/wikitext103 --out results/small/ablation_lega_seed1337.json
 """
+
 import argparse
 import json
 import math
@@ -74,145 +75,202 @@ import numpy as np
 import torch
 
 from .data import get_val_windows, load_bin
-from .evaluate import (_positive_int_or_none, _resolve_eval_amp,
-                       json_safe_eval_metrics)
+from .evaluate import _positive_int_or_none, _resolve_eval_amp, json_safe_eval_metrics
 from .model import load_model
-from .preflight import (allow_protocol_violations,
-                        data_protocol_preflight)
+from .preflight import allow_protocol_violations, data_protocol_preflight
 from .repro import current_pipeline_run_id, load_provenance, sha256_file
 from .train import _val_eval_indices, evaluate_val
-from .utils import (amp_autocast, bootstrap_mean_ci, enable_tf32,
-                    get_device, now_str, paired_sign_test, paired_t_test,
-                    save_json, seed_int, set_seed, strict_int)
+from .utils import (
+    amp_autocast,
+    bootstrap_mean_ci,
+    enable_tf32,
+    get_device,
+    now_str,
+    paired_sign_test,
+    paired_t_test,
+    save_json,
+    seed_int,
+    set_seed,
+    strict_int,
+)
 
 # 病灶定义（单一事实来源，run_all 汇总复用标签/目标/顺序）。
 # requires：需要的门控能力（query/conc/len/gated），任一缺失则该病灶不适用；
 # expected：若目标机制在推理期确实被使用，ΔNLL 的预期符号（"worse"=变差）。
 LESION_SPECS = (
     {
-        "id": "no_query", "label": "去查询项 A（gate_w=0）",
-        "target": "A 查询项 w·q", "kind": "zero",
-        "params": ("gate_w",), "requires": ("query",),
+        "id": "no_query",
+        "label": "去查询项 A（gate_w=0）",
+        "target": "A 查询项 w·q",
+        "kind": "zero",
+        "params": ("gate_w",),
+        "requires": ("query",),
         "expected": "worse",
         "note": "推理期等价于 Full−A；与训练期去一法 lega_no_query 对照",
     },
     {
-        "id": "no_conc", "label": "去集中度项 B（gate_a=0）",
-        "target": "B 集中度证据 a·c", "kind": "zero",
-        "params": ("gate_a",), "requires": ("conc",),
+        "id": "no_conc",
+        "label": "去集中度项 B（gate_a=0）",
+        "target": "B 集中度证据 a·c",
+        "kind": "zero",
+        "params": ("gate_a",),
+        "requires": ("conc",),
         "expected": "worse",
         "note": "推理期等价于 Full−B；与训练期去一法 lega_no_conc 对照",
     },
     {
-        "id": "no_len", "label": "去长度项 C（gate_b=0）",
-        "target": "C 长度校准 b·log n", "kind": "zero",
-        "params": ("gate_b",), "requires": ("len",),
+        "id": "no_len",
+        "label": "去长度项 C（gate_b=0）",
+        "target": "C 长度校准 b·log n",
+        "kind": "zero",
+        "params": ("gate_b",),
+        "requires": ("len",),
         "expected": "worse",
         "note": "推理期等价于 Full−C：只去 b·log n，c 中的 log n 仍随 "
-                "a·c 保留（与训练期单因素 C 的定义一致，不能解读为"
-                "“完全移除长度依赖”）",
+        "a·c 保留（与训练期单因素 C 的定义一致，不能解读为"
+        "“完全移除长度依赖”）",
     },
     {
-        "id": "no_evidence", "label": "去全部证据项 A+B+C（只留 d）",
-        "target": "全部证据输入", "kind": "zero_evidence",
+        "id": "no_evidence",
+        "label": "去全部证据项 A+B+C（只留 d）",
+        "target": "全部证据输入",
+        "kind": "zero_evidence",
         "params": ("gate_w", "gate_a", "gate_b"),
         "requires": ("any_evidence",),
         "expected": "worse",
         "note": "推理期退化为 gate_only：保留学习到的均值门偏置，去掉全部"
-                "查询/注意力/长度依赖",
+        "查询/注意力/长度依赖",
     },
     {
-        "id": "no_query_matched", "label": "去查询项 A（活动匹配）",
-        "target": "A 查询项 w·q（匹配平均门控）", "kind": "zero_matched",
-        "params": ("gate_w",), "requires": ("query",),
-        "expected": "worse", "matched_control": True,
-        "matched_of": "no_query", "matched_factor": "A",
+        "id": "no_query_matched",
+        "label": "去查询项 A（活动匹配）",
+        "target": "A 查询项 w·q（匹配平均门控）",
+        "kind": "zero_matched",
+        "params": ("gate_w",),
+        "requires": ("query",),
+        "expected": "worse",
+        "matched_control": True,
+        "matched_of": "no_query",
+        "matched_factor": "A",
         "note": "去掉 w·q，同时逐层逐头平移 d，使平均 g 与基线相同；"
-                "与 no_query 的差分离“信息内容”与“平均门控开度”",
+        "与 no_query 的差分离“信息内容”与“平均门控开度”",
     },
     {
-        "id": "no_conc_matched", "label": "去集中度项 B（活动匹配）",
-        "target": "B 集中度证据 a·c（匹配平均门控）", "kind": "zero_matched",
-        "params": ("gate_a",), "requires": ("conc",),
-        "expected": "worse", "matched_control": True,
-        "matched_of": "no_conc", "matched_factor": "B",
+        "id": "no_conc_matched",
+        "label": "去集中度项 B（活动匹配）",
+        "target": "B 集中度证据 a·c（匹配平均门控）",
+        "kind": "zero_matched",
+        "params": ("gate_a",),
+        "requires": ("conc",),
+        "expected": "worse",
+        "matched_control": True,
+        "matched_of": "no_conc",
+        "matched_factor": "B",
         "note": "去掉 a·c，同时逐层逐头平移 d 匹配基线平均 g；"
-                "用于区分集中度信息与门控开度变化",
+        "用于区分集中度信息与门控开度变化",
     },
     {
-        "id": "no_len_matched", "label": "去长度项 C（活动匹配）",
-        "target": "C 长度校准 b·log n（匹配平均门控）", "kind": "zero_matched",
-        "params": ("gate_b",), "requires": ("len",),
-        "expected": "worse", "matched_control": True,
-        "matched_of": "no_len", "matched_factor": "C",
+        "id": "no_len_matched",
+        "label": "去长度项 C（活动匹配）",
+        "target": "C 长度校准 b·log n（匹配平均门控）",
+        "kind": "zero_matched",
+        "params": ("gate_b",),
+        "requires": ("len",),
+        "expected": "worse",
+        "matched_control": True,
+        "matched_of": "no_len",
+        "matched_factor": "C",
         "note": "去掉 b·log n，同时逐层逐头平移 d 匹配基线平均 g；"
-                "不能据此把 a·c 中的 log n 也解释为已移除",
+        "不能据此把 a·c 中的 log n 也解释为已移除",
     },
     {
-        "id": "gate_open", "label": "门恒开（g→1）",
-        "target": "门控写回本身", "kind": "constant",
-        "params": (), "requires": ("gated",),
+        "id": "gate_open",
+        "label": "门恒开（g→1）",
+        "target": "门控写回本身",
+        "kind": "constant",
+        "params": (),
+        "requires": ("gated",),
         "expected": "worse",
         "note": "若显著变差，说明门在抑制某些位置的写回；若不变，门控"
-                "接近恒等，方法退化为标准注意力",
+        "接近恒等，方法退化为标准注意力",
     },
     {
-        "id": "gate_closed", "label": "门恒关（g→0）",
-        "target": "门控写回本身", "kind": "closed",
-        "params": (), "requires": ("gated",),
+        "id": "gate_closed",
+        "label": "门恒关（g→0）",
+        "target": "门控写回本身",
+        "kind": "closed",
+        "params": (),
+        "requires": ("gated",),
         "expected": "worse",
         "note": "阳性对照：关闭注意力输出应显著变差；若不差，说明主干"
-                "完全不依赖该层注意力，评测/实现需排查",
+        "完全不依赖该层注意力，评测/实现需排查",
     },
     {
-        "id": "gate_constant_mean", "label": "门恒为观测均值",
-        "target": "逐位置门控变化", "kind": "constant_mean",
-        "params": (), "requires": ("gated",),
+        "id": "gate_constant_mean",
+        "label": "门恒为观测均值",
+        "target": "逐位置门控变化",
+        "kind": "constant_mean",
+        "params": (),
+        "requires": ("gated",),
         "expected": "worse",
         "note": "保留每个头/层的观测平均写入强度，去掉逐 query/位置的 g "
-                "变化（头间均值差异保留）：检验收益是否来自“按位置调节”"
-                "而非整体缩放",
+        "变化（头间均值差异保留）：检验收益是否来自“按位置调节”"
+        "而非整体缩放",
     },
     {
-        "id": "conc_permute", "label": "集中度证据在序列维置换（分布匹配）",
-        "target": "c 的位置对应关系", "kind": "conc_permute",
-        "params": (), "requires": ("conc",),
+        "id": "conc_permute",
+        "label": "集中度证据在序列维置换（分布匹配）",
+        "target": "c 的位置对应关系",
+        "kind": "conc_permute",
+        "params": (),
+        "requires": ("conc",),
         "expected": "worse",
         "note": "逐位置 c 的多重集、均值/方差与长度分布完全不变，只把 c "
-                "沿序列维循环移位；若仍显著变差，可排除“门控容量/尺度”"
-                "解释。该病灶是推理期临时属性，restore 时清除。",
+        "沿序列维循环移位；若仍显著变差，可排除“门控容量/尺度”"
+        "解释。该病灶是推理期临时属性，restore 时清除。",
     },
     {
-        "id": "query_permute", "label": "查询证据在序列维置换（分布匹配）",
-        "target": "A 查询项 w·q 的位置对应关系", "kind": "query_permute",
-        "params": (), "requires": ("query",),
+        "id": "query_permute",
+        "label": "查询证据在序列维置换（分布匹配）",
+        "target": "A 查询项 w·q 的位置对应关系",
+        "kind": "query_permute",
+        "params": (),
+        "requires": ("query",),
         "expected": "worse",
         "note": "逐位置/逐头 qterm 的取值多重集、均值/方差完全不变，只把 "
-                "qterm 沿序列维循环移位；注意力打分仍使用原位置的 q，因此 "
-                "只有门控看到的查询证据被错位。与 conc_permute 一起把 A/B "
-                "两类逐位置证据做成分布匹配的推理期安慰剂。",
+        "qterm 沿序列维循环移位；注意力打分仍使用原位置的 q，因此 "
+        "只有门控看到的查询证据被错位。与 conc_permute 一起把 A/B "
+        "两类逐位置证据做成分布匹配的推理期安慰剂。",
     },
     {
-        "id": "len_permute", "label": "长度证据在序列维置换（分布匹配）",
-        "target": "C 长度项 b·log n 的位置对应关系", "kind": "len_permute",
-        "params": (), "requires": ("len",),
+        "id": "len_permute",
+        "label": "长度证据在序列维置换（分布匹配）",
+        "target": "C 长度项 b·log n 的位置对应关系",
+        "kind": "len_permute",
+        "params": (),
+        "requires": ("len",),
         "expected": "worse",
         "note": "log n 的取值多重集/均值/方差完全不变，只把每个位置的"
-                "长度证据循环错位约半段（而非相邻一格），避免平滑的 log n "
-                "几乎不变而把干预退化为空操作；与 conc_permute/query_permute "
-                "共同覆盖 A/B/C 三个位置证据通道。",
+        "长度证据循环错位约半段（而非相邻一格），避免平滑的 log n "
+        "几乎不变而把干预退化为空操作；与 conc_permute/query_permute "
+        "共同覆盖 A/B/C 三个位置证据通道。",
     },
     {
-        "id": "head_permute", "label": "门参数在头间置换（安慰剂）",
-        "target": "头—证据对应关系", "kind": "head_permute",
-        "params": (), "requires": ("gated", "multi_head"),
+        "id": "head_permute",
+        "label": "门参数在头间置换（安慰剂）",
+        "target": "头—证据对应关系",
+        "kind": "head_permute",
+        "params": (),
+        "requires": ("gated", "multi_head"),
         "expected": "worse",
         "note": "参数个数、数值分布、门控结构完全不变，只打乱头与证据的"
-                "对应；容量解释无法解释显著变差",
+        "对应；容量解释无法解释显著变差",
     },
     {
-        "id": "sign_flip", "label": "证据系数反号",
-        "target": "证据使用方向", "kind": "sign_flip",
+        "id": "sign_flip",
+        "label": "证据系数反号",
+        "target": "证据使用方向",
+        "kind": "sign_flip",
         "params": ("gate_w", "gate_a", "gate_b"),
         "requires": ("any_evidence",),
         "expected": "worse",
@@ -222,28 +280,40 @@ LESION_SPECS = (
     # 它们相对 Full 同时去掉另外两个因子，故标记 factorial_cell，不进入
     # 单病灶 ΔNLL 因果表（见 run_all._ablation_lesion_records）。
     {
-        "id": "query_only", "label": "仅查询项 A（gate_a=gate_b=0）",
-        "target": "A 查询项 w·q", "kind": "zero", "factorial_cell": True,
-        "params": ("gate_a", "gate_b"), "requires": ("query",),
+        "id": "query_only",
+        "label": "仅查询项 A（gate_a=gate_b=0）",
+        "target": "A 查询项 w·q",
+        "kind": "zero",
+        "factorial_cell": True,
+        "params": ("gate_a", "gate_b"),
+        "requires": ("query",),
         "expected": "worse",
         "note": "推理期全因子 2^3 的 A 格：保留 w·q + d，清零 B/C；"
-                "与训练期 qgate 对照（若模型还含 B/C，二者不再等价）",
+        "与训练期 qgate 对照（若模型还含 B/C，二者不再等价）",
     },
     {
-        "id": "conc_only", "label": "仅集中度项 B（gate_w=gate_b=0）",
-        "target": "B 集中度证据 a·c", "kind": "zero", "factorial_cell": True,
-        "params": ("gate_w", "gate_b"), "requires": ("conc",),
+        "id": "conc_only",
+        "label": "仅集中度项 B（gate_w=gate_b=0）",
+        "target": "B 集中度证据 a·c",
+        "kind": "zero",
+        "factorial_cell": True,
+        "params": ("gate_w", "gate_b"),
+        "requires": ("conc",),
         "expected": "worse",
         "note": "推理期全因子 2^3 的 B 格：保留 a·c + d，清零 A/C；"
-                "与训练期 lega_conc_only 对照",
+        "与训练期 lega_conc_only 对照",
     },
     {
-        "id": "len_only", "label": "仅长度项 C（gate_w=gate_a=0）",
-        "target": "C 长度校准 b·log n", "kind": "zero", "factorial_cell": True,
-        "params": ("gate_w", "gate_a"), "requires": ("len",),
+        "id": "len_only",
+        "label": "仅长度项 C（gate_w=gate_a=0）",
+        "target": "C 长度校准 b·log n",
+        "kind": "zero",
+        "factorial_cell": True,
+        "params": ("gate_w", "gate_a"),
+        "requires": ("len",),
         "expected": "worse",
         "note": "推理期全因子 2^3 的 C 格：保留 b·log n + d，清零 A/B；"
-                "与训练期 lega_len_only 对照",
+        "与训练期 lega_len_only 对照",
     },
 )
 LESION_BY_ID = {spec["id"]: spec for spec in LESION_SPECS}
@@ -274,17 +344,16 @@ PERMUTATION_LESION_FACTORS = (
 # "ABC" 是正常基线（不施加病灶），None 表示调用方读取 baseline 指标。
 # 映射与 lega.factorial.CELL_ORDER 一致，供推理期 Shapley 分解复用。
 INFERENCE_FACTORIAL_CELLS = {
-    "none": "no_evidence",   # 只留 d
-    "A": "query_only",       # w·q + d
-    "B": "conc_only",        # a·c + d
-    "C": "len_only",         # b·log n + d
-    "AB": "no_len",          # Full−C
-    "AC": "no_conc",         # Full−B
-    "BC": "no_query",        # Full−A
-    "ABC": None,             # 正常前向（基线）
+    "none": "no_evidence",  # 只留 d
+    "A": "query_only",  # w·q + d
+    "B": "conc_only",  # a·c + d
+    "C": "len_only",  # b·log n + d
+    "AB": "no_len",  # Full−C
+    "AC": "no_conc",  # Full−B
+    "BC": "no_query",  # Full−A
+    "ABC": None,  # 正常前向（基线）
 }
 INFERENCE_FACTORIAL_ORDER = tuple(INFERENCE_FACTORIAL_CELLS)
-
 
 
 def _finite_or_none(value):
@@ -359,8 +428,7 @@ def snapshot_gate_params(model) -> Dict[str, torch.Tensor]:
     """克隆全部门控参数（按完整参数名），供病灶后逐位恢复。"""
     snap = {}
     for name, p in model.named_parameters():
-        if ".gate_" in name or name.endswith(("gate_w", "gate_a",
-                                              "gate_b", "gate_d")):
+        if ".gate_" in name or name.endswith(("gate_w", "gate_a", "gate_b", "gate_d")):
             snap[name] = p.detach().clone()
     return snap
 
@@ -386,11 +454,13 @@ def restore_gate_params(model, snapshot: Mapping[str, torch.Tensor]) -> None:
                 if not torch.is_tensor(value):
                     raise ValueError(
                         f"恢复门控参数失败：快照 {name} 不是张量"
-                        f"（{type(value).__name__}）")
+                        f"（{type(value).__name__}）"
+                    )
                 if tuple(value.shape) != tuple(p.shape):
                     raise ValueError(
                         f"恢复门控参数失败：{name} 形状不一致 "
-                        f"（快照 {tuple(value.shape)} vs 模型 {tuple(p.shape)}）")
+                        f"（快照 {tuple(value.shape)} vs 模型 {tuple(p.shape)}）"
+                    )
                 p.copy_(value)
                 seen.add(name)
     missing = sorted(set(snapshot) - seen)
@@ -418,10 +488,15 @@ def _layer_permutation(n_heads: int, seed: int, layer: int):
     return perm
 
 
-def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
-                 gate_head_mean: Optional[List[List[float]]] = None,
-                 matched_gate_d: Optional[List[List[float]]] = None,
-                 perm_seed: int = 0) -> Dict:
+def apply_lesion(
+    model,
+    lesion_id: str,
+    *,
+    gate_mean: Optional[float] = None,
+    gate_head_mean: Optional[List[List[float]]] = None,
+    matched_gate_d: Optional[List[List[float]]] = None,
+    perm_seed: int = 0,
+) -> Dict:
     """就地施加指定病灶；返回应用记录（是否生效、改变了多少）。
 
     调用方负责先 `snapshot_gate_params` 并在评测后 `restore_gate_params`。
@@ -432,8 +507,13 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
         raise ValueError(f"未知病灶: {lesion_id!r}")
     applicable, reason, _requires = lesion_applicability(model, lesion_id)
     if not applicable:
-        return {"applied": False, "reason": reason,
-                "changed_tensors": 0, "max_abs_delta": 0.0, "no_op": False}
+        return {
+            "applied": False,
+            "reason": reason,
+            "changed_tensors": 0,
+            "max_abs_delta": 0.0,
+            "no_op": False,
+        }
     mods = gate_modules(model)
     kind = spec["kind"]
     changed = 0
@@ -451,8 +531,7 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
 
     with torch.no_grad():
         if kind in ("zero", "zero_evidence"):
-            names = (spec["params"] if kind == "zero"
-                     else ("gate_w", "gate_a", "gate_b"))
+            names = spec["params"] if kind == "zero" else ("gate_w", "gate_a", "gate_b")
             for m in mods:
                 for name in names:
                     p = getattr(m, name, None)
@@ -468,40 +547,57 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
                 # 变化，保留各头自己的平均写入强度；若调用方只给全局均值，
                 # 则退化为全局常数门（同时抹平头间差异，需在报告中说明）。
                 if gate_head_mean is not None:
-                    if (not isinstance(gate_head_mean, (list, tuple))
-                            or len(gate_head_mean) != len(mods)):
-                        return {"applied": False,
-                                "reason": "逐头平均门控值与模型层数不匹配",
-                                "changed_tensors": 0,
-                                "max_abs_delta": 0.0, "no_op": False}
+                    if not isinstance(gate_head_mean, (list, tuple)) or len(
+                        gate_head_mean
+                    ) != len(mods):
+                        return {
+                            "applied": False,
+                            "reason": "逐头平均门控值与模型层数不匹配",
+                            "changed_tensors": 0,
+                            "max_abs_delta": 0.0,
+                            "no_op": False,
+                        }
                     head_d = []
                     for m, vals in zip(mods, gate_head_mean):
-                        if (not isinstance(vals, (list, tuple))
-                                or len(vals) != int(m.n_heads)):
-                            return {"applied": False,
-                                    "reason": "逐头平均门控值与头数不匹配",
-                                    "changed_tensors": 0,
-                                    "max_abs_delta": 0.0, "no_op": False}
+                        if not isinstance(vals, (list, tuple)) or len(vals) != int(
+                            m.n_heads
+                        ):
+                            return {
+                                "applied": False,
+                                "reason": "逐头平均门控值与头数不匹配",
+                                "changed_tensors": 0,
+                                "max_abs_delta": 0.0,
+                                "no_op": False,
+                            }
                         row = []
                         for g in vals:
                             gf = _finite_or_none(g)
                             if gf is None or not 0.0 < gf < 1.0:
-                                return {"applied": False,
-                                        "reason": (
-                                            f"逐头平均门控值不可用于恒定门"
-                                            f"病灶: {g!r}（需 0<g<1）"),
-                                        "changed_tensors": 0,
-                                        "max_abs_delta": 0.0, "no_op": False}
+                                return {
+                                    "applied": False,
+                                    "reason": (
+                                        f"逐头平均门控值不可用于恒定门"
+                                        f"病灶: {g!r}（需 0<g<1）"
+                                    ),
+                                    "changed_tensors": 0,
+                                    "max_abs_delta": 0.0,
+                                    "no_op": False,
+                                }
                             row.append(math.log(gf / (1.0 - gf)))
                         head_d.append(row)
                 else:
                     g = _finite_or_none(gate_mean)
                     if g is None or not 0.0 < g < 1.0:
-                        return {"applied": False,
-                                "reason": (f"观测平均门控值不可用于恒定门病灶: "
-                                           f"{gate_mean!r}（需 0<g<1）"),
-                                "changed_tensors": 0, "max_abs_delta": 0.0,
-                                "no_op": False}
+                        return {
+                            "applied": False,
+                            "reason": (
+                                f"观测平均门控值不可用于恒定门病灶: "
+                                f"{gate_mean!r}（需 0<g<1）"
+                            ),
+                            "changed_tensors": 0,
+                            "max_abs_delta": 0.0,
+                            "no_op": False,
+                        }
                     d_value = math.log(g / (1.0 - g))
             elif kind == "constant":
                 d_value = 30.0
@@ -517,36 +613,47 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
                     _record(old, p.detach())
                 old = m.gate_d.detach().clone()
                 if head_d is not None:
-                    m.gate_d.copy_(torch.as_tensor(
-                        head_d[li], dtype=m.gate_d.dtype,
-                        device=m.gate_d.device))
+                    m.gate_d.copy_(
+                        torch.as_tensor(
+                            head_d[li], dtype=m.gate_d.dtype, device=m.gate_d.device
+                        )
+                    )
                 else:
                     m.gate_d.fill_(d_value)
                 _record(old, m.gate_d.detach())
         elif kind == "zero_matched":
             # 先完整校验逐层/逐头偏移，再写参数：坏输入不能留下“零了一半”
             # 的门控。偏移来自 gate_lesion_controls 的二分匹配。
-            if (not isinstance(matched_gate_d, (list, tuple))
-                    or len(matched_gate_d) != len(mods)):
-                return {"applied": False,
-                        "reason": "活动匹配门偏置与模型层数不匹配",
-                        "changed_tensors": 0, "max_abs_delta": 0.0,
-                        "no_op": False}
+            if not isinstance(matched_gate_d, (list, tuple)) or len(
+                matched_gate_d
+            ) != len(mods):
+                return {
+                    "applied": False,
+                    "reason": "活动匹配门偏置与模型层数不匹配",
+                    "changed_tensors": 0,
+                    "max_abs_delta": 0.0,
+                    "no_op": False,
+                }
             d_rows = []
             for m, vals in zip(mods, matched_gate_d):
                 H = int(m.n_heads)
-                if (not isinstance(vals, (list, tuple))
-                        or len(vals) != H):
-                    return {"applied": False,
-                            "reason": "活动匹配门偏置与头数不匹配",
-                            "changed_tensors": 0, "max_abs_delta": 0.0,
-                            "no_op": False}
+                if not isinstance(vals, (list, tuple)) or len(vals) != H:
+                    return {
+                        "applied": False,
+                        "reason": "活动匹配门偏置与头数不匹配",
+                        "changed_tensors": 0,
+                        "max_abs_delta": 0.0,
+                        "no_op": False,
+                    }
                 row = [_finite_or_none(v) for v in vals]
                 if any(v is None for v in row):
-                    return {"applied": False,
-                            "reason": "活动匹配门偏置含非有限值",
-                            "changed_tensors": 0, "max_abs_delta": 0.0,
-                            "no_op": False}
+                    return {
+                        "applied": False,
+                        "reason": "活动匹配门偏置含非有限值",
+                        "changed_tensors": 0,
+                        "max_abs_delta": 0.0,
+                        "no_op": False,
+                    }
                 d_rows.append(row)
             for li, m in enumerate(mods):
                 for name in spec["params"]:
@@ -557,9 +664,11 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
                     p.zero_()
                     _record(old, p.detach())
                 old_d = m.gate_d.detach().clone()
-                m.gate_d.copy_(torch.as_tensor(
-                    d_rows[li], dtype=m.gate_d.dtype,
-                    device=m.gate_d.device))
+                m.gate_d.copy_(
+                    torch.as_tensor(
+                        d_rows[li], dtype=m.gate_d.dtype, device=m.gate_d.device
+                    )
+                )
                 _record(old_d, m.gate_d.detach())
         elif kind in ("conc_permute", "query_permute"):
             seed = strict_int(perm_seed, "perm_seed")
@@ -587,8 +696,7 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
             for li, m in enumerate(mods):
                 H = int(m.n_heads)
                 perm = _layer_permutation(H, perm_seed, li)
-                idx = torch.as_tensor(perm, dtype=torch.long,
-                                      device=m.gate_d.device)
+                idx = torch.as_tensor(perm, dtype=torch.long, device=m.gate_d.device)
                 for name in ("gate_w", "gate_a", "gate_b", "gate_d"):
                     p = getattr(m, name, None)
                     if p is None:
@@ -609,26 +717,34 @@ def apply_lesion(model, lesion_id: str, *, gate_mean: Optional[float] = None,
             raise ValueError(f"未知病灶类型: {kind!r}")
 
     if kind in ("conc_permute", "query_permute", "len_permute"):
-        attr = {"conc_permute": "gate_a", "query_permute": "gate_w",
-                "len_permute": "gate_b"}[kind]
+        attr = {
+            "conc_permute": "gate_a",
+            "query_permute": "gate_w",
+            "len_permute": "gate_b",
+        }[kind]
         no_op = not any(
             getattr(m, attr, None) is not None
             and bool(float(getattr(m, attr).detach().abs().max().item()) > 0.0)
-            for m in mods)
+            for m in mods
+        )
     elif kind == "zero_matched":
         # d 的匹配平移通常非零；只有系数本就近零且偏移也可忽略时才算
         # no-op。1e-12 与门控统计的判别阈值同量级，避免把浮点重算当效应。
         no_op = bool(max_delta <= 1e-12)
     else:
         no_op = bool(max_delta == 0.0)
-    return {"applied": True, "reason": "",
-            "changed_tensors": int(changed),
-            "max_abs_delta": float(max_delta),
-            "no_op": no_op}
+    return {
+        "applied": True,
+        "reason": "",
+        "changed_tensors": int(changed),
+        "max_abs_delta": float(max_delta),
+        "no_op": no_op,
+    }
 
 
-def gate_head_means(model, val, ctx: int, device: str, eval_iters: int,
-                    amp: bool = False):
+def gate_head_means(
+    model, val, ctx: int, device: str, eval_iters: int, amp: bool = False
+):
     """逐层、逐头的观测平均门控值（与 `evaluate_val` 同一批窗口/精度）。
 
     用于 `gate_constant_mean`：把每个头的门固定为它自己的平均 g，只去掉
@@ -647,7 +763,7 @@ def gate_head_means(model, val, ctx: int, device: str, eval_iters: int,
     try:
         with torch.inference_mode():
             for s in range(0, len(indices), batch_windows):
-                chunk = indices[s:s + batch_windows]
+                chunk = indices[s : s + batch_windows]
                 x, _y = get_val_windows(val, int(ctx), chunk, device)
                 with amp_autocast(device, bool(amp)):
                     out = model(x, need_stats=True, stats_argmax=False)
@@ -705,8 +821,7 @@ def _head_bias_column(value, n_heads):
     if value is None:
         return None
     x = value.detach().double()
-    if x.dim() == 3 and x.shape[0] == 1 and x.shape[1] == n_heads \
-            and x.shape[2] == 1:
+    if x.dim() == 3 and x.shape[0] == 1 and x.shape[1] == n_heads and x.shape[2] == 1:
         return x
     if x.dim() == 2 and x.shape[0] == 1 and x.shape[1] == n_heads:
         return x.view(1, n_heads, 1)
@@ -741,8 +856,7 @@ def _match_gate_bias(z, target_mean, iters: int = 100):
     target = torch.as_tensor(target_mean, dtype=torch.float64).reshape(-1)
     if z.shape[0] != target.numel():
         raise ValueError("匹配门控：logit 头数与目标均值头数不一致")
-    if (not bool(torch.isfinite(z).all())
-            or not bool(torch.isfinite(target).all())):
+    if not bool(torch.isfinite(z).all()) or not bool(torch.isfinite(target).all()):
         raise ValueError("匹配门控：logit 或目标均值含非有限值")
     if not bool(((target > 0.0) & (target < 1.0)).all()):
         raise ValueError("匹配门控：目标平均 g 必须在 (0,1)")
@@ -781,8 +895,9 @@ def _match_gate_bias(z, target_mean, iters: int = 100):
     return d, achieved, residual
 
 
-def gate_lesion_controls(model, val, ctx: int, device: str,
-                         eval_iters: int, amp: bool = False) -> Dict:
+def gate_lesion_controls(
+    model, val, ctx: int, device: str, eval_iters: int, amp: bool = False
+) -> Dict:
     """计算活动匹配组件病灶所需的逐层/逐头门偏置平移。
 
     同一 checkpoint、同一批验证窗口上跑一次完整统计前向，对每个匹配病灶：
@@ -820,53 +935,70 @@ def gate_lesion_controls(model, val, ctx: int, device: str,
     try:
         with torch.inference_mode():
             for s in range(0, len(indices), batch_windows):
-                chunk = indices[s:s + batch_windows]
+                chunk = indices[s : s + batch_windows]
                 x, _y = get_val_windows(val, int(ctx), chunk, device)
                 with amp_autocast(device, bool(amp)):
-                    stats = (model(x, need_stats=True, stats_argmax=True)
-                             .get("gate_stats") or [])
+                    stats = (
+                        model(x, need_stats=True, stats_argmax=True).get("gate_stats")
+                        or []
+                    )
                 if len(stats) != len(mods):
-                    out.update({lid: {"error": "门控统计层数与模型不一致"}
-                                for lid in active})
+                    out.update(
+                        {lid: {"error": "门控统计层数与模型不一致"} for lid in active}
+                    )
                     return out
                 for li, (m, st) in enumerate(zip(mods, stats)):
                     if not isinstance(st, dict):
-                        out.update({lid: {"error": "门控统计不是字典"}
-                                    for lid in active})
+                        out.update(
+                            {lid: {"error": "门控统计不是字典"} for lid in active}
+                        )
                         return out
                     H = int(m.n_heads)
                     g = _head_bht(st.get("g"), H)
                     logit = _head_bht(st.get("logit"), H)
                     bias = _head_bias_column(st.get("gate_bias"), H)
-                    qterm = (_head_bht(st.get("qterm"), H)
-                             if getattr(m, "use_query", False) else None)
+                    qterm = (
+                        _head_bht(st.get("qterm"), H)
+                        if getattr(m, "use_query", False)
+                        else None
+                    )
                     if g is None or logit is None or bias is None:
-                        out.update({
-                            lid: {"error": "缺少 g/logit/gate_bias 统计"}
-                            for lid in active})
+                        out.update(
+                            {
+                                lid: {"error": "缺少 g/logit/gate_bias 统计"}
+                                for lid in active
+                            }
+                        )
                         return out
-                    log_n = (_position_log_n(st.get("log_n"), g.shape[2])
-                             if getattr(m, "use_len", False) else None)
+                    log_n = (
+                        _position_log_n(st.get("log_n"), g.shape[2])
+                        if getattr(m, "use_len", False)
+                        else None
+                    )
                     if getattr(m, "use_query", False) and qterm is None:
-                        out.update({lid: {"error": "缺少 qterm 统计"}
-                                    for lid in active})
+                        out.update(
+                            {lid: {"error": "缺少 qterm 统计"} for lid in active}
+                        )
                         return out
                     if getattr(m, "use_len", False) and log_n is None:
-                        out.update({lid: {"error": "缺少 log_n 统计"}
-                                    for lid in active})
+                        out.update(
+                            {lid: {"error": "缺少 log_n 统计"} for lid in active}
+                        )
                         return out
                     base_z = logit - bias
-                    term_a = (qterm if qterm is not None
-                              else torch.zeros_like(g))
+                    term_a = qterm if qterm is not None else torch.zeros_like(g)
                     if log_n is not None:
-                        term_c = (m.gate_b.detach().double()
-                                  .view(1, H, 1) * log_n).expand_as(g)
+                        term_c = (
+                            m.gate_b.detach().double().view(1, H, 1) * log_n
+                        ).expand_as(g)
                     else:
                         term_c = torch.zeros_like(g)
-                    has_conc = (getattr(m, "use_conc", False)
-                                or getattr(m, "use_raw_conc", False))
-                    term_b = (base_z - term_a - term_c if has_conc
-                              else torch.zeros_like(g))
+                    has_conc = getattr(m, "use_conc", False) or getattr(
+                        m, "use_raw_conc", False
+                    )
+                    term_b = (
+                        base_z - term_a - term_c if has_conc else torch.zeros_like(g)
+                    )
                     z_by_lesion = {
                         "no_query_matched": base_z - term_a,
                         "no_conc_matched": base_z - term_b,
@@ -881,14 +1013,14 @@ def gate_lesion_controls(model, val, ctx: int, device: str,
                             continue
                         if lid not in active:
                             continue
-                        active[lid][li][0].append(
-                            z.permute(1, 0, 2).reshape(H, -1))
+                        active[lid][li][0].append(z.permute(1, 0, 2).reshape(H, -1))
                         n_batch_pos = g.shape[0] * g.shape[2]
-                        active[lid][li][1].append([
-                            g.sum(dim=(0, 2)),
-                            torch.tensor(float(n_batch_pos),
-                                         dtype=torch.float64),
-                        ])
+                        active[lid][li][1].append(
+                            [
+                                g.sum(dim=(0, 2)),
+                                torch.tensor(float(n_batch_pos), dtype=torch.float64),
+                            ]
+                        )
     finally:
         model.train(was_training)
 
@@ -935,8 +1067,7 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
     均值也会变成 NaN，下游 PPL 比/显著性由此失真。
     """
     if len(base_losses) != len(lesion_losses):
-        return {"n_windows": 0, "error": "窗口数不一致",
-                "delta_losses": []}
+        return {"n_windows": 0, "error": "窗口数不一致", "delta_losses": []}
     deltas = []
     invalid = 0
     for a, b in zip(lesion_losses, base_losses):
@@ -950,8 +1081,12 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
             continue
         deltas.append(delta)
     if not deltas:
-        return {"n_windows": 0, "error": "无有效窗口", "delta_losses": [],
-                "n_invalid_windows": invalid}
+        return {
+            "n_windows": 0,
+            "error": "无有效窗口",
+            "delta_losses": [],
+            "n_invalid_windows": invalid,
+        }
     paired = paired_t_test(deltas, [0.0] * len(deltas))
     sign = paired_sign_test(deltas, [0.0] * len(deltas))
     ci = bootstrap_mean_ci(deltas)
@@ -983,35 +1118,60 @@ def _window_delta_stats(base_losses, lesion_losses) -> Dict:
 
 
 def _evaluate_once(model, val, ctx, device, eval_iters, amp) -> Dict:
-    metrics = evaluate_val(model, val, ctx, device, eval_iters, amp=amp,
-                           collect_window_losses=True)
+    metrics = evaluate_val(
+        model, val, ctx, device, eval_iters, amp=amp, collect_window_losses=True
+    )
     norm = json_safe_eval_metrics(metrics)
     out = dict(norm)
-    for key in ("val_loss_se", "val_loss_ci95", "val_ppl_ci95",
-                "val_loss_min", "val_loss_max", "gate_mean", "gate_std",
-                "gate_frac_low", "gate_frac_high", "gate_layer_mean",
-                "eval_iters_requested", "eval_iters", "val_windows",
-                "val_tokens_evaluated", "window_losses", "window_indices"):
+    for key in (
+        "val_loss_se",
+        "val_loss_ci95",
+        "val_ppl_ci95",
+        "val_loss_min",
+        "val_loss_max",
+        "gate_mean",
+        "gate_std",
+        "gate_frac_low",
+        "gate_frac_high",
+        "gate_layer_mean",
+        "eval_iters_requested",
+        "eval_iters",
+        "val_windows",
+        "val_tokens_evaluated",
+        "window_losses",
+        "window_indices",
+    ):
         out[key] = metrics.get(key)
     return out
 
 
-def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
-                 ctx: Optional[int] = None, device: str = "auto",
-                 seed: Optional[int] = None, perm_seed: int = 0,
-                 allow_data_protocol_violations: bool = False) -> Dict:
+def run_ablation(
+    ckpt: str,
+    data_dir: str,
+    *,
+    eval_iters: Optional[int] = None,
+    ctx: Optional[int] = None,
+    device: str = "auto",
+    seed: Optional[int] = None,
+    perm_seed: int = 0,
+    allow_data_protocol_violations: bool = False,
+) -> Dict:
     """在 val split 上对一个 checkpoint 执行全部适用病灶并返回 payload。"""
     if not os.path.exists(ckpt):
         raise FileNotFoundError(f"checkpoint 不存在: {ckpt}")
     preflight = data_protocol_preflight(
-        data_dir, allow_override=allow_protocol_violations(
-            allow_data_protocol_violations))
+        data_dir,
+        allow_override=allow_protocol_violations(allow_data_protocol_violations),
+    )
     if not preflight.get("report_present"):
-        print("[ablate] 警告：数据目录缺少 data_report.json，"
-              "无法做评测前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[ablate] 警告：数据目录缺少 data_report.json，"
+            "无法做评测前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif preflight.get("critical_violations"):
-        print("[ablate] ⚠ 数据协议自检发现严重问题但已显式放行；"
-              "本分析不得用于正式结论")
+        print(
+            "[ablate] ⚠ 数据协议自检发现严重问题但已显式放行；" "本分析不得用于正式结论"
+        )
 
     device = get_device(device)
     enable_tf32(device)
@@ -1020,7 +1180,8 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
     if not caps["gated"]:
         raise ValueError(
             f"变体 {model.variant!r} 没有输出门，无法做门控病灶消融；"
-            "该分析只适用于 gate_only/qgate/lega 及其消融")
+            "该分析只适用于 gate_only/qgate/lega 及其消融"
+        )
 
     ckpt_seed = ck.get("seed")
     if seed is None:
@@ -1079,48 +1240,65 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
         lid = spec["id"]
         applicable, reason, requires = lesion_applicability(model, lid)
         rec = {
-            "lesion": lid, "label": spec["label"], "target": spec["target"],
-            "expected": spec["expected"], "note": spec["note"],
+            "lesion": lid,
+            "label": spec["label"],
+            "target": spec["target"],
+            "expected": spec["expected"],
+            "note": spec["note"],
             "requires": list(requires),
         }
         if not applicable:
-            rec.update({"applicable": False, "reason": reason,
-                        "applied": False})
+            rec.update({"applicable": False, "reason": reason, "applied": False})
             lesions.append(rec)
             continue
         try:
             if lid == "gate_constant_mean" and head_mean_cache is None:
                 # 只在需要时多跑一遍窗口前向；拿不到逐头统计时回退全局均值。
                 head_mean_cache = gate_head_means(
-                    model, val, ctx, device, eval_iters, amp=amp)
+                    model, val, ctx, device, eval_iters, amp=amp
+                )
             matched_info = None
             if spec.get("matched_control"):
                 if matched_cache is None and matched_error is None:
                     try:
                         matched_cache = gate_lesion_controls(
-                            model, val, ctx, device, eval_iters, amp=amp)
+                            model, val, ctx, device, eval_iters, amp=amp
+                        )
                     except Exception as exc:
                         matched_error = str(exc)
                 if matched_error is not None:
-                    rec.update({"applicable": False,
-                                "reason": f"活动匹配控制不可用: {matched_error}",
-                                "applied": False})
+                    rec.update(
+                        {
+                            "applicable": False,
+                            "reason": f"活动匹配控制不可用: {matched_error}",
+                            "applied": False,
+                        }
+                    )
                     lesions.append(rec)
                     continue
                 matched_info = (matched_cache or {}).get(lid)
                 if not matched_info or matched_info.get("error"):
-                    rec.update({
-                        "applicable": False,
-                        "reason": (matched_info or {}).get(
-                            "error", "活动匹配控制缺失"),
-                        "applied": False})
+                    rec.update(
+                        {
+                            "applicable": False,
+                            "reason": (matched_info or {}).get(
+                                "error", "活动匹配控制缺失"
+                            ),
+                            "applied": False,
+                        }
+                    )
                     lesions.append(rec)
                     continue
-            applied = apply_lesion(model, lid, gate_mean=gate_mean,
-                                   gate_head_mean=head_mean_cache,
-                                   matched_gate_d=(None if matched_info is None
-                                                   else matched_info["gate_d"]),
-                                   perm_seed=perm_seed)
+            applied = apply_lesion(
+                model,
+                lid,
+                gate_mean=gate_mean,
+                gate_head_mean=head_mean_cache,
+                matched_gate_d=(
+                    None if matched_info is None else matched_info["gate_d"]
+                ),
+                perm_seed=perm_seed,
+            )
         except BaseException:
             # 病灶可能已部分写入：先恢复快照再抛出，避免污染后续分析。
             restore_gate_params(model, snapshot)
@@ -1135,8 +1313,9 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
                 "achieved_head_mean": matched_info["achieved_head_mean"],
                 "max_abs_residual": matched_info["max_abs_residual"],
                 "n_positions": matched_info["n_positions"],
-                "note": ("逐头二分平移 d 匹配基线平均 g；只匹配一阶矩，"
-                         "不匹配分布形状"),
+                "note": (
+                    "逐头二分平移 d 匹配基线平均 g；只匹配一阶矩，" "不匹配分布形状"
+                ),
             }
         if not applied.get("applied"):
             rec["applicable"] = False
@@ -1149,20 +1328,25 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
             # 无论评测是否成功，都必须恢复参数，避免后续病灶叠加。
             restore_gate_params(model, snapshot)
         if lesion_eval.get("window_indices") != base.get("window_indices"):
-            rec.update({"applicable": False,
-                        "reason": "病灶评测窗口与基线不一致，拒绝配对"})
+            rec.update(
+                {"applicable": False, "reason": "病灶评测窗口与基线不一致，拒绝配对"}
+            )
             lesions.append(rec)
             continue
         rec.update(lesion_eval)
-        rec.update(_window_delta_stats(base_windows,
-                                       lesion_eval.get("window_losses") or []))
+        rec.update(
+            _window_delta_stats(base_windows, lesion_eval.get("window_losses") or [])
+        )
         delta = rec.get("delta_loss_mean")
-        rec["ppl_ratio"] = (math.exp(min(20.0, max(-20.0, float(delta))))
-                            if delta is not None else None)
+        rec["ppl_ratio"] = (
+            math.exp(min(20.0, max(-20.0, float(delta)))) if delta is not None else None
+        )
         rec["ppl_ratio_clamped"] = bool(
-            delta is not None and not (-20.0 <= float(delta) <= 20.0))
-        rec["delta_ppl_pct"] = ((rec["ppl_ratio"] - 1.0) * 100.0
-                                if rec["ppl_ratio"] is not None else None)
+            delta is not None and not (-20.0 <= float(delta) <= 20.0)
+        )
+        rec["delta_ppl_pct"] = (
+            (rec["ppl_ratio"] - 1.0) * 100.0 if rec["ppl_ratio"] is not None else None
+        )
         # 门控干预是否真的改变了前向：直接看门控分布，而不是相信参数写入。
         # 恒定均值病灶保留均值、只去掉逐位置变化，因此必须同时比较标准差，
         # 否则会把它误判成“没有改变前向”。
@@ -1171,13 +1355,16 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
         les_mean = _finite_or_none(rec.get("gate_mean"))
         les_std = _finite_or_none(rec.get("gate_std"))
         rec["gate_mean_changed"] = bool(
-            base_mean is not None and les_mean is not None
-            and abs(les_mean - base_mean) > 1e-6)
+            base_mean is not None
+            and les_mean is not None
+            and abs(les_mean - base_mean) > 1e-6
+        )
         rec["gate_std_changed"] = bool(
-            base_std is not None and les_std is not None
-            and abs(les_std - base_std) > 1e-6)
-        rec["gate_changed"] = bool(
-            rec["gate_mean_changed"] or rec["gate_std_changed"])
+            base_std is not None
+            and les_std is not None
+            and abs(les_std - base_std) > 1e-6
+        )
+        rec["gate_changed"] = bool(rec["gate_mean_changed"] or rec["gate_std_changed"])
         lesions.append(rec)
     restore_gate_params(model, snapshot)
 
@@ -1197,23 +1384,38 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
         "window_indices": base.get("window_indices"),
         "amp": bool(amp),
         "gate_capabilities": caps,
-        "baseline": {k: base.get(k) for k in (
-            "val_ppl", "val_loss", "val_ppl_clamped", "gate_mean",
-            "gate_std", "gate_frac_low", "gate_frac_high",
-            "gate_layer_mean", "val_loss_se", "val_loss_ci95",
-            "val_ppl_ci95", "val_loss_min", "val_loss_max")},
+        "baseline": {
+            k: base.get(k)
+            for k in (
+                "val_ppl",
+                "val_loss",
+                "val_ppl_clamped",
+                "gate_mean",
+                "gate_std",
+                "gate_frac_low",
+                "gate_frac_high",
+                "gate_layer_mean",
+                "val_loss_se",
+                "val_loss_ci95",
+                "val_ppl_ci95",
+                "val_loss_min",
+                "val_loss_max",
+            )
+        },
         "baseline_window_losses": base_windows,
         "lesions": lesions,
         "protocol": {
             "split": "val",
             "same_windows": True,
-            "note": ("同一 checkpoint、同一批验证窗口上的权重病灶；"
-                     "query_only/conc_only/len_only 是 2^3 的单因子格，"
-                     "与 no_* 及基线共同用于推理期 Shapley，不作单病灶"
-                     "因果归因；no_*_matched 是活动匹配对照（逐层逐头"
-                     "保持平均门控开度），与 no_* 的差用于分离信息内容与"
-                     "门控开度变化，只匹配一阶矩；窗口级 p 仅描述性（相邻窗口"
-                     "可能相关），跨种子配对检验由 run_all 汇总"),
+            "note": (
+                "同一 checkpoint、同一批验证窗口上的权重病灶；"
+                "query_only/conc_only/len_only 是 2^3 的单因子格，"
+                "与 no_* 及基线共同用于推理期 Shapley，不作单病灶"
+                "因果归因；no_*_matched 是活动匹配对照（逐层逐头"
+                "保持平均门控开度），与 no_* 的差用于分离信息内容与"
+                "门控开度变化，只匹配一阶矩；窗口级 p 仅描述性（相邻窗口"
+                "可能相关），跨种子配对检验由 run_all 汇总"
+            ),
         },
         "provenance": load_provenance(ckpt_dir, data_dir, device=device),
         "generated_at": now_str(),
@@ -1224,25 +1426,39 @@ def run_ablation(ckpt: str, data_dir: str, *, eval_iters: Optional[int] = None,
 
 def main():
     p = argparse.ArgumentParser(
-        description="训练后因果病灶消融（同一 checkpoint 的推理期权重干预）")
-    p.add_argument("--ckpt", required=True,
-                   help="model_best.pt / model.pt（必须是带输出门的变体）")
+        description="训练后因果病灶消融（同一 checkpoint 的推理期权重干预）"
+    )
+    p.add_argument(
+        "--ckpt", required=True, help="model_best.pt / model.pt（必须是带输出门的变体）"
+    )
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True, help="输出 JSON 路径")
-    p.add_argument("--eval_iters", default=None,
-                   help="评测窗口数；默认继承 checkpoint 的 config_used.json"
-                        "（缺失时 50，与 lega.evaluate 一致）")
-    p.add_argument("--ctx", default=None,
-                   help="评测上下文；默认继承训练配置的 train_ctx")
+    p.add_argument(
+        "--eval_iters",
+        default=None,
+        help="评测窗口数；默认继承 checkpoint 的 config_used.json"
+        "（缺失时 50，与 lega.evaluate 一致）",
+    )
+    p.add_argument(
+        "--ctx", default=None, help="评测上下文；默认继承训练配置的 train_ctx"
+    )
     p.add_argument("--device", default="auto")
-    p.add_argument("--seed", default=None,
-                   help="覆盖 checkpoint 记录的种子（只影响确定性置换/播种，"
-                        "不改变权重）")
-    p.add_argument("--perm_seed", default="0",
-                   help="头置换病灶的确定性随机种子（默认 0；严格整数）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 有严重泄露告警也继续（仅复现历史；"
-                        "结果不得用于正式结论）")
+    p.add_argument(
+        "--seed",
+        default=None,
+        help="覆盖 checkpoint 记录的种子（只影响确定性置换/播种，" "不改变权重）",
+    )
+    p.add_argument(
+        "--perm_seed",
+        default="0",
+        help="头置换病灶的确定性随机种子（默认 0；严格整数）",
+    )
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 有严重泄露告警也继续（仅复现历史；"
+        "结果不得用于正式结论）",
+    )
     args = p.parse_args()
     seed = None
     if args.seed is not None:
@@ -1258,24 +1474,34 @@ def main():
         p.error(f"--perm_seed 必须 >= 0，收到 {perm_seed}")
     try:
         payload = run_ablation(
-            args.ckpt, args.data_dir, eval_iters=args.eval_iters, ctx=args.ctx,
-            device=args.device, seed=seed, perm_seed=perm_seed,
-            allow_data_protocol_violations=args.allow_data_protocol_violations)
+            args.ckpt,
+            args.data_dir,
+            eval_iters=args.eval_iters,
+            ctx=args.ctx,
+            device=args.device,
+            seed=seed,
+            perm_seed=perm_seed,
+            allow_data_protocol_violations=args.allow_data_protocol_violations,
+        )
     except (ValueError, FileNotFoundError) as e:
         p.error(str(e))
     save_json(payload, args.out)
     base = payload["baseline"]
-    print(f"[ablate] {payload['variant']} seed={payload['seed']} "
-          f"val_loss={base.get('val_loss')} val_ppl={base.get('val_ppl')} "
-          f"gate_mean={base.get('gate_mean')}")
+    print(
+        f"[ablate] {payload['variant']} seed={payload['seed']} "
+        f"val_loss={base.get('val_loss')} val_ppl={base.get('val_ppl')} "
+        f"gate_mean={base.get('gate_mean')}"
+    )
     for rec in payload["lesions"]:
         if rec.get("applicable") is False and rec.get("applied") is False:
             print(f"  - {rec['lesion']}: 不适用（{rec.get('reason')}）")
             continue
-        print(f"  - {rec['lesion']}: ΔNLL={rec.get('delta_loss_mean')} "
-              f"PPL比={rec.get('ppl_ratio')} "
-              f"p_window={rec.get('p_window_t')}"
-              + (" [no-op：该组件系数已为 0]" if rec.get("no_op") else ""))
+        print(
+            f"  - {rec['lesion']}: ΔNLL={rec.get('delta_loss_mean')} "
+            f"PPL比={rec.get('ppl_ratio')} "
+            f"p_window={rec.get('p_window_t')}"
+            + (" [no-op：该组件系数已为 0]" if rec.get("no_op") else "")
+        )
     print(f"[ablate] -> {args.out}")
     return 0
 

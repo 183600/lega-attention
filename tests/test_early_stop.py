@@ -8,6 +8,7 @@
     steps（实际）/steps_planned（计划）、下游仍使用 model_best.pt；
   * curve_diagnosis 把早停识别为"设计内截断"而非数据不足/训练中断。
 """
+
 import json
 import os
 import sys
@@ -18,9 +19,14 @@ import torch
 from lega.curves import diagnose_run_dir, diagnose_curve, load_train_log
 from lega.data import prepare_bins
 from lega.repro import sha256_file
-from lega.train import (_config_finite_float, _config_int, _config_min_delta,
-                        _config_nonneg_float, _config_probability,
-                        _meta_vocab_size, early_stop_update)
+from lega.train import (
+    _config_finite_float,
+    _config_int,
+    _config_min_delta,
+    _config_probability,
+    _meta_vocab_size,
+    early_stop_update,
+)
 
 
 def test_early_stop_update_semantics():
@@ -52,26 +58,24 @@ def test_early_stop_update_semantics():
     assert best == 2.9 and cnt == 1 and not stop
     # 合法但超出 float 上限的整数观测不可比较：不消费、不误触发早停，
     # 也不能让 float()/math.isfinite 的 OverflowError 穿透。
-    best, cnt, stop = early_stop_update(10 ** 400, 2.9, 1, 0.0, 1)
+    best, cnt, stop = early_stop_update(10**400, 2.9, 1, 0.0, 1)
     assert best == 2.9 and cnt == 1 and not stop
     # best 超出 float 上限时，任何可表示的 vl 都严格更优。
-    best, cnt, stop = early_stop_update(2.5, 10 ** 400, 1, 0.0, 1)
+    best, cnt, stop = early_stop_update(2.5, 10**400, 1, 0.0, 1)
     assert best == 2.5 and cnt == 0 and not stop
     # 验证抽样噪声：val=2.99 vs best=3.0 只改善 0.33%，但 CI 半宽 ±2%
     # → 不算实质改善（不重置耐心），最新点仍进入 best checkpoint
-    best, cnt, stop = early_stop_update(
-        2.99, 3.0, 0, 0.0, 2, val_ci95=[2.9302, 3.0498])
+    best, cnt, stop = early_stop_update(2.99, 3.0, 0, 0.0, 2, val_ci95=[2.9302, 3.0498])
     assert best == 2.99 and cnt == 1 and not stop, (best, cnt, stop)
     # 改善超过噪声阈值才重置耐心
-    best, cnt, stop = early_stop_update(
-        2.90, 3.0, 1, 0.0, 2, val_ci95=[2.842, 2.958])
+    best, cnt, stop = early_stop_update(2.90, 3.0, 1, 0.0, 2, val_ci95=[2.842, 2.958])
     assert best == 2.90 and cnt == 0 and not stop, (best, cnt, stop)
     # 噪声阈值与 min_delta 取更严格者；非法/退化区间不改变原口径
-    best, cnt, stop = early_stop_update(
-        2.94, 3.0, 0, 0.0, 2, val_ci95=[3.0, 2.0])
+    best, cnt, stop = early_stop_update(2.94, 3.0, 0, 0.0, 2, val_ci95=[3.0, 2.0])
     assert cnt == 0, (best, cnt, stop)
     best, cnt, stop = early_stop_update(
-        2.94, 3.0, 0, 0.0, 2, val_ci95=[float("nan"), 3.0])
+        2.94, 3.0, 0, 0.0, 2, val_ci95=[float("nan"), 3.0]
+    )
     assert cnt == 0, (best, cnt, stop)
     print("  [ok] early_stop_update（严格最优 + min_delta/验证噪声 + patience）")
 
@@ -93,8 +97,20 @@ def test_config_int_rejects_bool_fraction_and_below_min():
 
 def test_meta_vocab_size_requires_exact_positive_int():
     """meta.vocab_size 不允许 int() 截断或非正值，否则模型词表与数据错位。"""
-    for bad in (True, False, 1.5, "1.5", 0, -3, None, float("nan"),
-                float("inf"), object(), 65537, 10 ** 20):
+    for bad in (
+        True,
+        False,
+        1.5,
+        "1.5",
+        0,
+        -3,
+        None,
+        float("nan"),
+        float("inf"),
+        object(),
+        65537,
+        10**20,
+    ):
         try:
             _meta_vocab_size({"vocab_size": bad})
         except ValueError:
@@ -109,8 +125,18 @@ def test_meta_vocab_size_requires_exact_positive_int():
 
 def test_config_min_delta_rejects_nonfinite_and_out_of_range():
     """min_delta 越界会让改善阈值失真（>=1 永不改善、<0 永不重置）。"""
-    for bad in (True, False, -0.1, 1.0, 2, float("nan"),
-                float("inf"), "nan", None, object()):
+    for bad in (
+        True,
+        False,
+        -0.1,
+        1.0,
+        2,
+        float("nan"),
+        float("inf"),
+        "nan",
+        None,
+        object(),
+    ):
         try:
             _config_min_delta(bad)
         except ValueError:
@@ -125,8 +151,7 @@ def test_config_min_delta_rejects_nonfinite_and_out_of_range():
 
 def test_config_float_and_probability_reject_invalid_values():
     """模型正则化超参数不允许 bool/NaN/Inf 或越界概率静默进入训练。"""
-    for bad in (True, False, float("nan"), float("inf"), "nan", "1_0",
-                None, object()):
+    for bad in (True, False, float("nan"), float("inf"), "nan", "1_0", None, object()):
         try:
             _config_finite_float(bad, "gate_bias_init")
         except ValueError:
@@ -135,8 +160,18 @@ def test_config_float_and_probability_reject_invalid_values():
             raise AssertionError(f"非法浮点配置未被拒绝: {bad!r}")
     assert _config_finite_float(2, "gate_bias_init") == 2.0
     assert _config_finite_float("2.5", "gate_bias_init") == 2.5
-    for bad in (True, False, -0.1, 1.1, float("nan"), float("inf"),
-                "nan", "1_0", None, object()):
+    for bad in (
+        True,
+        False,
+        -0.1,
+        1.1,
+        float("nan"),
+        float("inf"),
+        "nan",
+        "1_0",
+        None,
+        object(),
+    ):
         try:
             _config_probability(bad, "dropout")
         except ValueError:
@@ -165,12 +200,25 @@ def _write_data(d: str) -> None:
 
 def _run_train(cfg: dict, data_dir: str, out_dir: str, extra_argv=()):
     import lega.train as train_mod
+
     cfg_path = os.path.join(data_dir, "cfg.json")
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f)
-    argv = ["lega.train", "--config", cfg_path, "--variant", "standard",
-            "--data_dir", data_dir, "--out_dir", out_dir,
-            "--device", "cpu", "--seed", "1"] + list(extra_argv)
+    argv = [
+        "lega.train",
+        "--config",
+        cfg_path,
+        "--variant",
+        "standard",
+        "--data_dir",
+        data_dir,
+        "--out_dir",
+        out_dir,
+        "--device",
+        "cpu",
+        "--seed",
+        "1",
+    ] + list(extra_argv)
     old = sys.argv
     sys.argv = argv
     try:
@@ -181,12 +229,27 @@ def _run_train(cfg: dict, data_dir: str, out_dir: str, extra_argv=()):
 
 def _cfg():
     return {
-        "d_model": 32, "n_layers": 2, "n_heads": 2, "ffn_mult": 4,
-        "block_size": 32, "dropout": 0.0, "attn_dropout": 0.0,
-        "gate_bias_init": 2.0, "use_sdpa_standard": True,
-        "batch_size": 2, "grad_accum": 1, "steps": 6, "lr": 0.0,
-        "warmup": 1, "weight_decay": 0.0, "grad_clip": 1.0, "train_ctx": 32,
-        "amp": False, "seed": 1, "log_every": 2, "eval_every": 2,
+        "d_model": 32,
+        "n_layers": 2,
+        "n_heads": 2,
+        "ffn_mult": 4,
+        "block_size": 32,
+        "dropout": 0.0,
+        "attn_dropout": 0.0,
+        "gate_bias_init": 2.0,
+        "use_sdpa_standard": True,
+        "batch_size": 2,
+        "grad_accum": 1,
+        "steps": 6,
+        "lr": 0.0,
+        "warmup": 1,
+        "weight_decay": 0.0,
+        "grad_clip": 1.0,
+        "train_ctx": 32,
+        "amp": False,
+        "seed": 1,
+        "log_every": 2,
+        "eval_every": 2,
         "eval_iters": 2,
     }
 
@@ -244,9 +307,11 @@ def test_train_rejects_invalid_model_floats_before_artifacts():
         os.makedirs(data_dir)
         _write_data(data_dir)
         prepare_bins(data_dir, kind="char", force=True)
-        cases = (("dropout", float("nan"), "dropout"),
-                 ("attn_dropout", True, "attn_dropout"),
-                 ("gate_bias_init", float("inf"), "gate_bias_init"))
+        cases = (
+            ("dropout", float("nan"), "dropout"),
+            ("attn_dropout", True, "attn_dropout"),
+            ("gate_bias_init", float("inf"), "gate_bias_init"),
+        )
         for i, (key, bad, needle) in enumerate(cases):
             cfg = _cfg()
             cfg[key] = bad
@@ -274,12 +339,10 @@ def test_train_early_stop_end_to_end():
         _write_data(data_dir)
         prepare_bins(data_dir, kind="char", force=True)
         cfg = _cfg()
-        cfg["early_stop_patience"] = 0     # 配置关闭；CLI 覆盖为 1
+        cfg["early_stop_patience"] = 0  # 配置关闭；CLI 覆盖为 1
         out_dir = os.path.join(tmp, "run1")
-        _run_train(cfg, data_dir, out_dir,
-                   extra_argv=["--early_stop_patience", "1"])
-        ev = json.load(open(os.path.join(out_dir, "eval.json"),
-                            encoding="utf-8"))
+        _run_train(cfg, data_dir, out_dir, extra_argv=["--early_stop_patience", "1"])
+        ev = json.load(open(os.path.join(out_dir, "eval.json"), encoding="utf-8"))
         assert ev["early_stopped"] is True, ev
         assert ev["early_stop_patience"] == 1
         assert ev["steps"] == 4 and ev["steps_planned"] == 6, ev
@@ -289,13 +352,15 @@ def test_train_early_stop_end_to_end():
         cfg_path = os.path.join(out_dir, "config_used.json")
         cfg_used = json.load(open(cfg_path, encoding="utf-8"))
         assert cfg_used["early_stop_patience"] == 1, "CLI 覆盖必须进入受控变量记录"
-        manifest = json.load(open(os.path.join(out_dir, "run_manifest.json"),
-                                  encoding="utf-8"))
+        manifest = json.load(
+            open(os.path.join(out_dir, "run_manifest.json"), encoding="utf-8")
+        )
         cfg_sha = sha256_file(cfg_path)
         assert manifest["config_used_sha256"] == cfg_sha
         assert manifest["config_used"] == cfg_used
-        ckpt = torch.load(os.path.join(out_dir, "model.pt"), map_location="cpu",
-                          weights_only=True)
+        ckpt = torch.load(
+            os.path.join(out_dir, "model.pt"), map_location="cpu", weights_only=True
+        )
         assert ckpt["config_used_sha256"] == cfg_sha
         assert ckpt["resolved_config"] == cfg_used
         assert ckpt["resolved_config"]["early_stop_patience"] == 1
@@ -313,8 +378,7 @@ def test_train_early_stop_end_to_end():
         out_dir2 = os.path.join(tmp, "run2")
         cfg2 = _cfg()
         _run_train(cfg2, data_dir, out_dir2)
-        ev2 = json.load(open(os.path.join(out_dir2, "eval.json"),
-                             encoding="utf-8"))
+        ev2 = json.load(open(os.path.join(out_dir2, "eval.json"), encoding="utf-8"))
         assert ev2["early_stopped"] is False
         assert ev2["steps"] == 6 and ev2["steps_planned"] == 6
         recs2 = load_train_log(os.path.join(out_dir2, "train_log.jsonl"))
@@ -331,12 +395,14 @@ def test_train_early_stop_end_to_end():
         recs3 = load_train_log(os.path.join(out_dir3, "train_log.jsonl"))
         final3 = [r for r in recs3 if r.get("final")]
         assert len(final3) == 1, final3
-        prev_evals = [r for r in recs3
-                      if "val_loss" in r and not r.get("final")]
+        prev_evals = [r for r in recs3 if "val_loss" in r and not r.get("final")]
         assert prev_evals
         prev_best = min(r["val_loss"] for r in prev_evals)
-        expected_cnt = (0 if final3[0]["val_loss"] < prev_best
-                        else prev_evals[-1]["evals_since_best"] + 1)
+        expected_cnt = (
+            0
+            if final3[0]["val_loss"] < prev_best
+            else prev_evals[-1]["evals_since_best"] + 1
+        )
         assert final3[0]["evals_since_best"] == expected_cnt, final3[0]
         assert abs(final3[0]["val_vs_best_rel"]) < 1e-12, final3[0]
     print("  [ok] train 端到端早停（CLI 覆盖 + 标记落盘 + 默认关闭兼容）")
@@ -371,8 +437,13 @@ def test_train_rerun_same_seed_is_bitwise_reproducible_on_cpu():
         assert m1["data_order_sha256"] == m2["data_order_sha256"]
         assert m1["config_used_sha256"] == m2["config_used_sha256"]
         # 逐随机源种子 + RNG 状态短指纹必须完全一致，且各自声明可复算
-        for key in ("rng_fingerprints", "data_order_rng_fingerprint",
-                    "python_random", "numpy_global", "torch_cpu"):
+        for key in (
+            "rng_fingerprints",
+            "data_order_rng_fingerprint",
+            "python_random",
+            "numpy_global",
+            "torch_cpu",
+        ):
             assert m1["seed_report"][key] == m2["seed_report"][key], key
         assert m1["seed_report"]["rng_fingerprints_match_expected"] is True
         assert m2["seed_report"]["rng_fingerprints_match_expected"] is True
@@ -385,24 +456,28 @@ def test_train_rerun_same_seed_is_bitwise_reproducible_on_cpu():
         l2 = load_train_log(os.path.join(out2, "train_log.jsonl"))
         # 墙钟字段（time/step_time_ms）天然不同；其余训练数值必须逐位一致。
         drop = ("time", "step_time_ms")
-        assert [{k: v for k, v in r.items() if k not in drop} for r in l1] == \
-            [{k: v for k, v in r.items() if k not in drop} for r in l2]
-        c1 = torch.load(os.path.join(out1, "model.pt"), map_location="cpu",
-                        weights_only=True)
-        c2 = torch.load(os.path.join(out2, "model.pt"), map_location="cpu",
-                        weights_only=True)
+        assert [{k: v for k, v in r.items() if k not in drop} for r in l1] == [
+            {k: v for k, v in r.items() if k not in drop} for r in l2
+        ]
+        c1 = torch.load(
+            os.path.join(out1, "model.pt"), map_location="cpu", weights_only=True
+        )
+        c2 = torch.load(
+            os.path.join(out2, "model.pt"), map_location="cpu", weights_only=True
+        )
         s1, s2 = c1["state_dict"], c2["state_dict"]
         assert set(s1) == set(s2)
         for name in s1:
             assert torch.equal(s1[name], s2[name]), name
-        b1 = torch.load(os.path.join(out1, "model_best.pt"),
-                        map_location="cpu", weights_only=True)
-        b2 = torch.load(os.path.join(out2, "model_best.pt"),
-                        map_location="cpu", weights_only=True)
+        b1 = torch.load(
+            os.path.join(out1, "model_best.pt"), map_location="cpu", weights_only=True
+        )
+        b2 = torch.load(
+            os.path.join(out2, "model_best.pt"), map_location="cpu", weights_only=True
+        )
         assert set(b1["state_dict"]) == set(b2["state_dict"])
         for name in b1["state_dict"]:
-            assert torch.equal(b1["state_dict"][name],
-                               b2["state_dict"][name]), name
+            assert torch.equal(b1["state_dict"][name], b2["state_dict"][name]), name
     print("  [ok] 同机同 seed 重跑：初始化/数据顺序/权重/日志逐位一致")
 
 
@@ -419,20 +494,33 @@ def test_final_eval_improvement_resets_patience_counter(monkeypatch):
         _write_data(data_dir)
         prepare_bins(data_dir, kind="char", force=True)
         cfg = _cfg()
-        cfg.update({"steps": 3, "eval_every": 2, "log_every": 3,
-                    "eval_iters": 1, "early_stop_patience": 0})
+        cfg.update(
+            {
+                "steps": 3,
+                "eval_every": 2,
+                "log_every": 3,
+                "eval_iters": 1,
+                "early_stop_patience": 0,
+            }
+        )
         out_dir = os.path.join(tmp, "run")
         import lega.train as train_mod
+
         losses = iter([3.0, 2.0])
 
         def fake_evaluate_val(*args, **kwargs):
             vl = next(losses)
             return {
-                "val_loss": vl, "val_loss_se": None,
-                "val_loss_ci95": None, "val_ppl_ci95": None,
-                "val_loss_min": vl, "val_loss_max": vl,
-                "gate_mean": None, "eval_iters_requested": 1,
-                "eval_iters": 1, "val_windows": 1,
+                "val_loss": vl,
+                "val_loss_se": None,
+                "val_loss_ci95": None,
+                "val_ppl_ci95": None,
+                "val_loss_min": vl,
+                "val_loss_max": vl,
+                "gate_mean": None,
+                "eval_iters_requested": 1,
+                "eval_iters": 1,
+                "val_windows": 1,
                 "val_tokens_evaluated": 32,
             }
 
@@ -456,7 +544,7 @@ def test_train_live_overfit_hint_end_to_end():
         _write_data(data_dir)
         prepare_bins(data_dir, kind="char", force=True)
         cfg = _cfg()
-        cfg["steps"] = 10        # eval_every=2 → 5 次评测，足够累积 3 次无改善
+        cfg["steps"] = 10  # eval_every=2 → 5 次评测，足够累积 3 次无改善
         cfg["eval_every"] = 2
         out_dir = os.path.join(tmp, "run")
         _run_train(cfg, data_dir, out_dir)
@@ -471,23 +559,32 @@ def test_train_live_overfit_hint_end_to_end():
 def test_curve_marks_early_stop_not_data_insufficient():
     """早停截断 ≠ 数据不足：少量评测点也须如实说明截断原因，且不得再建议
     "增加训练步数/评测密度"或"延长训练"（与早停决策自相矛盾）。"""
-    recs = [{"step": 10, "loss": 3.0}, {"step": 20, "loss": 2.8},
-            {"step": 30, "loss": 2.6}, {"step": 40, "loss": 2.5}]
+    recs = [
+        {"step": 10, "loss": 3.0},
+        {"step": 20, "loss": 2.8},
+        {"step": 30, "loss": 2.6},
+        {"step": 40, "loss": 2.5},
+    ]
     recs += [{"step": 50, "val_loss": 3.0, "val_ppl": 20.1}]
     recs.append({"step": 50, "early_stop": True})
     d = diagnose_curve(recs)
     assert d["status"] == "数据不足", d
     assert d["early_stopped"] is True and d["early_stop_step"] == 50
-    assert not any("eval_every" in r or "训练步数" in r
-                   for r in d["recommendations"]), d["recommendations"]
+    assert not any(
+        "eval_every" in r or "训练步数" in r for r in d["recommendations"]
+    ), d["recommendations"]
     assert any("早停" in r for r in d["recommendations"])
-    assert not any("延长训练" in r and "不要" not in r
-                   for r in d["recommendations"])
+    assert not any("延长训练" in r and "不要" not in r for r in d["recommendations"])
     # 正常曲线的结论不受影响（无标记 → early_stopped=False）
-    d2 = diagnose_curve([{"step": 10, "loss": 4.2}, {"step": 20, "loss": 3.5},
-                         {"step": 30, "loss": 2.9},
-                         {"step": 50, "val_loss": 4.0},
-                         {"step": 100, "val_loss": 3.2}])
+    d2 = diagnose_curve(
+        [
+            {"step": 10, "loss": 4.2},
+            {"step": 20, "loss": 3.5},
+            {"step": 30, "loss": 2.9},
+            {"step": 50, "val_loss": 4.0},
+            {"step": 100, "val_loss": 3.2},
+        ]
+    )
     assert d2["early_stopped"] is False and d2["early_stop_step"] is None
     print("  [ok] 曲线诊断：早停标注为设计内截断（不误判数据不足/建议续训）")
 
@@ -532,10 +629,18 @@ def test_train_does_not_sample_batches_beyond_final_step():
         _write_data(data_dir)
         prepare_bins(data_dir, kind="char", force=True)
         cfg = _cfg()
-        cfg.update({"steps": 2, "grad_accum": 2, "log_every": 2,
-                    "eval_every": 2, "eval_iters": 2})
+        cfg.update(
+            {
+                "steps": 2,
+                "grad_accum": 2,
+                "log_every": 2,
+                "eval_every": 2,
+                "eval_iters": 2,
+            }
+        )
         out_dir = os.path.join(tmp, "run")
         import lega.train as train_mod
+
         orig = train_mod.get_train_batch
         calls = []
 
@@ -557,10 +662,19 @@ def test_gate_std_is_not_batch_grouping_noise_for_constant_gate():
     import numpy as np
     from lega.model import GPT
     from lega.train import evaluate_val
+
     torch.manual_seed(0)
-    model = GPT(vocab_size=64, block_size=32, d_model=16, n_layers=2,
-                n_heads=2, ffn_mult=2, variant="lega", dropout=0.0,
-                attn_dropout=0.0)
+    model = GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=16,
+        n_layers=2,
+        n_heads=2,
+        ffn_mult=2,
+        variant="lega",
+        dropout=0.0,
+        attn_dropout=0.0,
+    )
     val = (np.arange(0, 200, dtype=np.int64) % 64).astype(np.uint16)
     a = evaluate_val(model, val, 32, "cpu", 6, batch_windows=1)
     b = evaluate_val(model, val, 32, "cpu", 6, batch_windows=3)

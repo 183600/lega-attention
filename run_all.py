@@ -4,6 +4,7 @@
 参数、默认值与各阶段行为保持与拆分前完全一致。完整协议说明见 README
 以及 lega/pipeline 各子模块。
 """
+
 import os
 import sys
 

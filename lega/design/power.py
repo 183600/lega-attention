@@ -1,12 +1,20 @@
 """先验功效与灵敏度计算。"""
+
 from __future__ import annotations
 from ._shared import _install as _shared_install
 
 _shared_install(globals())
 
+
 # ------------------------------------------------------------------ 输入校验
-def _finite_float(value, name: str, *, positive: bool = False,
-                  nonnegative: bool = False, upper: float = None) -> float:
+def _finite_float(
+    value,
+    name: str,
+    *,
+    positive: bool = False,
+    nonnegative: bool = False,
+    upper: float = None,
+) -> float:
     """严格有限浮点：bool/非数值/NaN/Inf 显式拒绝。"""
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{name} 必须是数值，收到 {value!r}")
@@ -40,8 +48,7 @@ def _strict_int(value, name: str, minimum: int = 1) -> int:
             if f is not None and math.isfinite(f) and f.is_integer():
                 out = int(f)
             else:
-                raise ValueError(
-                    f"{name} 必须是整数，收到 {value!r}") from None
+                raise ValueError(f"{name} 必须是整数，收到 {value!r}") from None
         else:
             raise ValueError(f"{name} 必须是整数，收到 {value!r}") from None
     if out < minimum:
@@ -58,8 +65,7 @@ def _seed_int(value, name: str = "seed") -> int:
 
 
 def _finite_sequence(values, name: str) -> list:
-    if isinstance(values, (str, bytes)) or not isinstance(
-            values, (list, tuple)):
+    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
         raise ValueError(f"{name} 必须是数值列表，收到 {values!r}")
     # 逐项走严格校验：bool/字符串/NaN/Inf 以及超出 float 上限的整数必须在
     # 网格入口拒绝，不能让 float(True)=1.0 之类的隐式转换静默进入设计。
@@ -129,6 +135,7 @@ def _sqrt_count(n: int):
 def _t_critical(df: int, alpha: float) -> float:
     """双侧 Student-t 临界值（二分；仅用于小样本功效仿真）。"""
     from ..utils import student_t_two_sided_p
+
     lo, hi = 0.0, 1.0
     while student_t_two_sided_p(hi, df) > alpha:
         hi *= 2.0
@@ -145,8 +152,9 @@ def _t_critical(df: int, alpha: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def paired_t_power_nct(effect, sd, n, alpha: float = DEFAULT_ALPHA,
-                       n_sim: int = 200000, seed: int = 0) -> dict:
+def paired_t_power_nct(
+    effect, sd, n, alpha: float = DEFAULT_ALPHA, n_sim: int = 200000, seed: int = 0
+) -> dict:
     """配对 t 检验的非中心 t 功效（固定种子仿真，n 小时优先使用）。
 
     正态近似在 n=3~5 时会高估功效。这里直接仿真
@@ -161,10 +169,16 @@ def paired_t_power_nct(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     n_sim = _strict_int(n_sim, "n_sim", minimum=1000)
     seed = _strict_int(seed, "seed", minimum=0)
     if effect == 0.0:
-        return {"power": float(alpha), "method": "noncentral_t_simulation",
-                "n_sim": int(n_sim), "seed": int(seed),
-                "ncp": 0.0, "t_critical": _t_critical(n - 1, alpha)}
+        return {
+            "power": float(alpha),
+            "method": "noncentral_t_simulation",
+            "n_sim": int(n_sim),
+            "seed": int(seed),
+            "ncp": 0.0,
+            "t_critical": _t_critical(n - 1, alpha),
+        }
     import numpy as np
+
     rng = np.random.default_rng(seed)
     ncp = effect / (sd / math.sqrt(n))
     df = n - 1
@@ -173,13 +187,19 @@ def paired_t_power_nct(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     v = rng.chisquare(df, size=int(n_sim))
     t = z / np.sqrt(v / df)
     pw = float(np.mean(np.abs(t) >= tcrit))
-    return {"power": pw, "method": "noncentral_t_simulation",
-            "n_sim": int(n_sim), "seed": int(seed), "ncp": float(ncp),
-            "t_critical": float(tcrit)}
+    return {
+        "power": pw,
+        "method": "noncentral_t_simulation",
+        "n_sim": int(n_sim),
+        "seed": int(seed),
+        "ncp": float(ncp),
+        "t_critical": float(tcrit),
+    }
 
 
-def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
-                   power: float = None) -> float:
+def paired_t_power(
+    effect, sd, n, alpha: float = DEFAULT_ALPHA, power: float = None
+) -> float:
     """配对 t 检验（双侧）的正态近似功效。
 
     历史接口保留正态近似；n=3~5 的正式规划请同时调用
@@ -207,8 +227,11 @@ def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
         scaled_sd = sd / root_n
         # sd/√n 可能下溢为 0（极大 n + 次正规 sd）：此时非零效应的 ncp
         # 实际为 +∞，不能执行 0 除法。
-        ncp = (0.0 if effect == 0.0
-               else (math.inf if scaled_sd == 0.0 else effect / scaled_sd))
+        ncp = (
+            0.0
+            if effect == 0.0
+            else (math.inf if scaled_sd == 0.0 else effect / scaled_sd)
+        )
     if not math.isfinite(ncp):
         return 1.0 if ncp > 0 else float(alpha)
     z = _normal_two_sided_z(alpha)
@@ -216,8 +239,9 @@ def paired_t_power(effect, sd, n, alpha: float = DEFAULT_ALPHA,
     return float(min(1.0, max(0.0, out)))
 
 
-def min_detectable_effect(effect_sd, n, alpha: float = DEFAULT_ALPHA,
-                          power: float = DEFAULT_POWER):
+def min_detectable_effect(
+    effect_sd, n, alpha: float = DEFAULT_ALPHA, power: float = DEFAULT_POWER
+):
     """配对设计在给定 (配对差标准差, n) 下的 MDE（正态近似）。"""
     sd = _finite_float(effect_sd, "std_diff", positive=True)
     n = _strict_int(n, "n", minimum=2)
@@ -233,8 +257,13 @@ def min_detectable_effect(effect_sd, n, alpha: float = DEFAULT_ALPHA,
     return float(out) if math.isfinite(out) else None
 
 
-def required_pairs(effect, sd, alpha: float = DEFAULT_ALPHA,
-                   power: float = DEFAULT_POWER, max_n: int = 1_000_000):
+def required_pairs(
+    effect,
+    sd,
+    alpha: float = DEFAULT_ALPHA,
+    power: float = DEFAULT_POWER,
+    max_n: int = 1_000_000,
+):
     """达到目标功效所需的最少配对数（种子数）；无法在 max_n 内达到返回 None。"""
     effect = _finite_float(effect, "effect", positive=True)
     sd = _finite_float(sd, "sd", positive=True)
@@ -266,8 +295,9 @@ def required_pairs(effect, sd, alpha: float = DEFAULT_ALPHA,
     return int(n0)
 
 
-def max_sd_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
-                      power: float = DEFAULT_POWER):
+def max_sd_for_effect(
+    effect, n, alpha: float = DEFAULT_ALPHA, power: float = DEFAULT_POWER
+):
     """在给定 n / 目标功效下，仍能检出 ``effect`` 的最大配对差 SD。
 
     这是“设计能容忍多大噪声”的反推：观测到的配对差 SD 超过该值，就说明
@@ -299,9 +329,11 @@ def _tost_alpha(alpha: float) -> float:
 def _normal_cdf_np(x):
     """向量化标准正态 CDF（只依赖 math.erfc，避免新增 scipy 依赖）。"""
     import numpy as np
+
     erfc = np.frompyfunc(math.erfc, 1, 1)
-    return 0.5 * erfc(-np.asarray(x, dtype=np.float64)
-                      / math.sqrt(2.0)).astype(np.float64)
+    return 0.5 * erfc(-np.asarray(x, dtype=np.float64) / math.sqrt(2.0)).astype(
+        np.float64
+    )
 
 
 def _chi2_expectation(func, df: int, n_nodes: int = 96) -> float:
@@ -312,6 +344,7 @@ def _chi2_expectation(func, df: int, n_nodes: int = 96) -> float:
     会改用正态近似（Γ 密度过窄，固定节点数不再可靠）。
     """
     import numpy as np
+
     a = df / 2.0 - 1.0
     nodes, weights = np.polynomial.laguerre.laggauss(n_nodes)
     # laggauss 积分 ∫_0∞ e^{-x} g(x) dx ≈ Σ w_i g(x_i)；
@@ -322,8 +355,9 @@ def _chi2_expectation(func, df: int, n_nodes: int = 96) -> float:
     return float(np.sum(weights * vals) * math.exp(shift))
 
 
-def _tost_power_normal(effect: float, sd: float, n: int, margin: float,
-                       alpha: float) -> float:
+def _tost_power_normal(
+    effect: float, sd: float, n: int, margin: float, alpha: float
+) -> float:
     """TOST 功效的正态近似（大 n；也是 required_pairs 的搜索起点）。"""
     se = sd / math.sqrt(n)
     z = _normal_two_sided_z(2.0 * alpha)
@@ -332,10 +366,12 @@ def _tost_power_normal(effect: float, sd: float, n: int, margin: float,
     return float(min(1.0, max(0.0, _normal_cdf(a) + _normal_cdf(b) - 1.0)))
 
 
-def _tost_power_quadrature(effect: float, sd: float, n: int,
-                           margin: float, alpha: float) -> float:
+def _tost_power_quadrature(
+    effect: float, sd: float, n: int, margin: float, alpha: float
+) -> float:
     """小样本精确 TOST 功效：条件化在样本方差上对 χ² 积分。"""
     import numpy as np
+
     df = n - 1
     tcrit = _t_critical(df, 2.0 * alpha)  # 单侧 α 临界值
     c = math.sqrt(n) / sd
@@ -349,8 +385,9 @@ def _tost_power_quadrature(effect: float, sd: float, n: int,
     return float(min(1.0, max(0.0, _chi2_expectation(conditional, df))))
 
 
-def tost_power(effect, sd, n, margin, alpha: float = DEFAULT_ALPHA,
-               method: str = "auto") -> dict:
+def tost_power(
+    effect, sd, n, margin, alpha: float = DEFAULT_ALPHA, method: str = "auto"
+) -> dict:
     """配对 TOST（等价性）检验的功效。
 
     ``effect`` 为真实配对差均值，``sd`` 为配对差标准差，``n`` 为配对数
@@ -367,14 +404,13 @@ def tost_power(effect, sd, n, margin, alpha: float = DEFAULT_ALPHA,
     margin = _finite_float(margin, "margin", positive=True)
     alpha = _tost_alpha(alpha)
     if method not in ("auto", "quadrature", "normal"):
-        raise ValueError(
-            f"method 必须是 'auto'/'quadrature'/'normal'，收到 {method!r}")
+        raise ValueError(f"method 必须是 'auto'/'quadrature'/'normal'，收到 {method!r}")
     if method == "quadrature" and n > 500:
         raise ValueError(
             "quadrature 只验证到 n<=500；更大样本请用 auto/normal，"
-            "固定节点数在窄 χ² 密度上会失真")
-    use = ("quadrature" if n <= 200 else "normal") if method == "auto" \
-        else method
+            "固定节点数在窄 χ² 密度上会失真"
+        )
+    use = ("quadrature" if n <= 200 else "normal") if method == "auto" else method
     normal_pw = _tost_power_normal(effect, sd, n, margin, alpha)
     if use == "quadrature":
         pw = _tost_power_quadrature(effect, sd, n, margin, alpha)
@@ -383,24 +419,37 @@ def tost_power(effect, sd, n, margin, alpha: float = DEFAULT_ALPHA,
         pw = normal_pw
         used = "normal_approx"
     return {
-        "power": pw, "power_normal": normal_pw, "method": used,
-        "effect": effect, "sd": sd, "n": n, "margin": margin,
+        "power": pw,
+        "power_normal": normal_pw,
+        "method": used,
+        "effect": effect,
+        "sd": sd,
+        "n": n,
+        "margin": margin,
         "alpha": alpha,
-        "t_critical_one_sided": (_t_critical(n - 1, 2.0 * alpha)
-                                 if n - 1 >= 1 else None),
-        "note": ("TOST 要求两个单侧检验同时显著；真实差异靠近 pivot "
-                 "或样本方差大时，单独报告“不显著”不能推出等价"),
+        "t_critical_one_sided": (
+            _t_critical(n - 1, 2.0 * alpha) if n - 1 >= 1 else None
+        ),
+        "note": (
+            "TOST 要求两个单侧检验同时显著；真实差异靠近 pivot "
+            "或样本方差大时，单独报告“不显著”不能推出等价"
+        ),
     }
 
 
-def _required_pairs_from_power(power_fn, sd: float, margin: float,
-                               alpha: float, power: float,
-                               max_n: int, effect: float) -> int:
+def _required_pairs_from_power(
+    power_fn,
+    sd: float,
+    margin: float,
+    alpha: float,
+    power: float,
+    max_n: int,
+    effect: float,
+) -> int:
     """给定单调功效函数，找达到目标功效的最少配对数。"""
     if power_fn(2, effect, sd, margin, alpha) >= power:
         return 2
-    hi = max(2, int(math.ceil(
-        (sd * (_z_sum(2.0 * alpha, power) / margin)) ** 2)))
+    hi = max(2, int(math.ceil((sd * (_z_sum(2.0 * alpha, power) / margin)) ** 2)))
     hi = min(hi, max_n)
     while power_fn(hi, effect, sd, margin, alpha) < power:
         if hi >= max_n:
@@ -416,10 +465,14 @@ def _required_pairs_from_power(power_fn, sd: float, margin: float,
     return int(lo)
 
 
-def tost_required_pairs(margin, sd, effect=0.0,
-                        alpha: float = DEFAULT_ALPHA,
-                        power: float = DEFAULT_POWER,
-                        max_n: int = 1_000_000):
+def tost_required_pairs(
+    margin,
+    sd,
+    effect=0.0,
+    alpha: float = DEFAULT_ALPHA,
+    power: float = DEFAULT_POWER,
+    max_n: int = 1_000_000,
+):
     """达到目标 TOST 功效所需的最少配对数（种子数）；不可达返回 None。
 
     默认 ``effect=0``（等价性最有利的真实情形）。若真实差异已接近
@@ -439,35 +492,35 @@ def tost_required_pairs(margin, sd, effect=0.0,
     def _pw(m, e, s, mar, a):
         return tost_power(e, s, m, mar, a)["power"]
 
-    return _required_pairs_from_power(_pw, sd, margin, alpha, power,
-                                      max_n, effect)
+    return _required_pairs_from_power(_pw, sd, margin, alpha, power, max_n, effect)
 
 
-def _noninferiority_power_normal(effect: float, sd: float, n: int,
-                                 margin: float, alpha: float) -> float:
+def _noninferiority_power_normal(
+    effect: float, sd: float, n: int, margin: float, alpha: float
+) -> float:
     se = sd / math.sqrt(n)
     z = _normal_two_sided_z(2.0 * alpha)
-    return float(min(1.0, max(0.0,
-                              _normal_cdf((margin - effect) / se - z))))
+    return float(min(1.0, max(0.0, _normal_cdf((margin - effect) / se - z))))
 
 
-def _noninferiority_power_quadrature(effect: float, sd: float, n: int,
-                                     margin: float, alpha: float) -> float:
+def _noninferiority_power_quadrature(
+    effect: float, sd: float, n: int, margin: float, alpha: float
+) -> float:
     import numpy as np
+
     df = n - 1
     tcrit = _t_critical(df, 2.0 * alpha)
     c = math.sqrt(n) / sd
 
     def conditional(v):
-        return _normal_cdf_np(
-            c * (margin - effect) - tcrit * np.sqrt(v / df))
+        return _normal_cdf_np(c * (margin - effect) - tcrit * np.sqrt(v / df))
 
     return float(min(1.0, max(0.0, _chi2_expectation(conditional, df))))
 
 
-def noninferiority_power(effect, sd, n, margin,
-                         alpha: float = DEFAULT_ALPHA,
-                         method: str = "auto") -> dict:
+def noninferiority_power(
+    effect, sd, n, margin, alpha: float = DEFAULT_ALPHA, method: str = "auto"
+) -> dict:
     """配对非劣性检验（单侧）的功效。
 
     ``effect`` 用“候选更差”为正的方向；非劣性只要求候选比参照差不超过
@@ -480,14 +533,13 @@ def noninferiority_power(effect, sd, n, margin,
     margin = _finite_float(margin, "margin", positive=True)
     alpha = _tost_alpha(alpha)
     if method not in ("auto", "quadrature", "normal"):
-        raise ValueError(
-            f"method 必须是 'auto'/'quadrature'/'normal'，收到 {method!r}")
+        raise ValueError(f"method 必须是 'auto'/'quadrature'/'normal'，收到 {method!r}")
     if method == "quadrature" and n > 500:
         raise ValueError(
             "quadrature 只验证到 n<=500；更大样本请用 auto/normal，"
-            "固定节点数在窄 χ² 密度上会失真")
-    use = ("quadrature" if n <= 200 else "normal") if method == "auto" \
-        else method
+            "固定节点数在窄 χ² 密度上会失真"
+        )
+    use = ("quadrature" if n <= 200 else "normal") if method == "auto" else method
     normal_pw = _noninferiority_power_normal(effect, sd, n, margin, alpha)
     if use == "quadrature":
         pw = _noninferiority_power_quadrature(effect, sd, n, margin, alpha)
@@ -496,19 +548,29 @@ def noninferiority_power(effect, sd, n, margin,
         pw = normal_pw
         used = "normal_approx"
     return {
-        "power": pw, "power_normal": normal_pw, "method": used,
-        "effect": effect, "sd": sd, "n": n, "margin": margin,
+        "power": pw,
+        "power_normal": normal_pw,
+        "method": used,
+        "effect": effect,
+        "sd": sd,
+        "n": n,
+        "margin": margin,
         "alpha": alpha,
         "t_critical_one_sided": _t_critical(n - 1, 2.0 * alpha),
-        "note": ("单侧非劣性只排除“差超过 margin”，不证明差异小于 "
-                 "margin；等价性仍需 TOST"),
+        "note": (
+            "单侧非劣性只排除“差超过 margin”，不证明差异小于 " "margin；等价性仍需 TOST"
+        ),
     }
 
 
-def noninferiority_required_pairs(margin, sd, effect=0.0,
-                                  alpha: float = DEFAULT_ALPHA,
-                                  power: float = DEFAULT_POWER,
-                                  max_n: int = 1_000_000):
+def noninferiority_required_pairs(
+    margin,
+    sd,
+    effect=0.0,
+    alpha: float = DEFAULT_ALPHA,
+    power: float = DEFAULT_POWER,
+    max_n: int = 1_000_000,
+):
     """达到目标非劣性功效所需的最少配对数；不可达返回 None。"""
     margin = _finite_float(margin, "margin", positive=True)
     sd = _finite_float(sd, "sd", positive=True)
@@ -520,8 +582,7 @@ def noninferiority_required_pairs(margin, sd, effect=0.0,
     def _pw(m, e, s, mar, a):
         return noninferiority_power(e, s, m, mar, a)["power"]
 
-    return _required_pairs_from_power(_pw, sd, margin, alpha, power,
-                                      max_n, effect)
+    return _required_pairs_from_power(_pw, sd, margin, alpha, power, max_n, effect)
 
 
 # ------------------------------------------------- 配对二值指标的功效（McNemar）
@@ -538,7 +599,8 @@ def _paired_binary_rates(discordance, effect):
     if abs(d) > pi + 1e-15:
         raise ValueError(
             f"|effect| 不能超过 discordance（{abs(d)} > {pi}）："
-            "边际差不可能大于不一致率")
+            "边际差不可能大于不一致率"
+        )
     p10 = (pi + d) / 2.0
     p01 = (pi - d) / 2.0
     # 浮点边界钳制，避免 -1e-17 之类的概率。
@@ -556,14 +618,22 @@ def _mcnemar_critical_exact(m: int, alpha: float) -> int:
     if m <= 0:
         return -1
     mode = m // 2
-    max_log = (math.lgamma(m + 1) - math.lgamma(mode + 1)
-               - math.lgamma(m - mode + 1) - m * math.log(2.0))
+    max_log = (
+        math.lgamma(m + 1)
+        - math.lgamma(mode + 1)
+        - math.lgamma(m - mode + 1)
+        - m * math.log(2.0)
+    )
     # 以众数 pmf 为尺度求和，避免 0.5^m 下溢。
     total = 0.0
     scaled = []
     for k in range(m + 1):
-        logp = (math.lgamma(m + 1) - math.lgamma(k + 1)
-                - math.lgamma(m - k + 1) - m * math.log(2.0))
+        logp = (
+            math.lgamma(m + 1)
+            - math.lgamma(k + 1)
+            - math.lgamma(m - k + 1)
+            - m * math.log(2.0)
+        )
         v = math.exp(logp - max_log)
         scaled.append(v)
         total += v
@@ -602,7 +672,7 @@ def _binom_cdf_exact(m: int, k: int, p: float) -> float:
     terms = []
     for b in range(k + 1):
         try:
-            term = (math.comb(m, b) * (p ** b) * ((1.0 - p) ** (m - b)))
+            term = math.comb(m, b) * (p**b) * ((1.0 - p) ** (m - b))
         except (OverflowError, ValueError):
             continue
         if math.isfinite(term):
@@ -612,31 +682,31 @@ def _binom_cdf_exact(m: int, k: int, p: float) -> float:
     return float(min(1.0, max(0.0, math.fsum(terms))))
 
 
-def _mcnemar_power_exact(n: int, pi: float, p10: float,
-                         alpha: float) -> float:
+def _mcnemar_power_exact(n: int, pi: float, p10: float, alpha: float) -> float:
     """n<=EXACT_MCNEMAR_MAX_N 的精确 McNemar 功效。"""
     q = p10 / pi if pi > 0.0 else 0.0
     total = 0.0
     for m in range(1, n + 1):
-        pm = (math.comb(n, m) * (pi ** m) * ((1.0 - pi) ** (n - m)))
+        pm = math.comb(n, m) * (pi**m) * ((1.0 - pi) ** (n - m))
         if not math.isfinite(pm) or pm <= 0.0:
             continue
         k = _mcnemar_critical_exact(m, alpha)
         if k < 0:
             continue
         # 拒绝域：b<=k 或 m-b<=k（即 b>=m-k）。b~Bin(m,q)。
-        cond = _binom_cdf_exact(m, k, q) + (
-            1.0 - _binom_cdf_exact(m, m - k - 1, q))
+        cond = _binom_cdf_exact(m, k, q) + (1.0 - _binom_cdf_exact(m, m - k - 1, q))
         total += pm * min(1.0, max(0.0, cond))
     return float(min(1.0, max(0.0, total)))
 
 
-def _mcnemar_power_normal(n: int, pi: float, effect: float,
-                          alpha: float) -> float:
+def _mcnemar_power_normal(n: int, pi: float, effect: float, alpha: float) -> float:
     z = _normal_two_sided_z(alpha)
     root_n = _sqrt_count(n)
-    ncp = ((math.inf if effect != 0.0 else 0.0) if root_n is None
-           else root_n * abs(effect) / math.sqrt(pi))
+    ncp = (
+        (math.inf if effect != 0.0 else 0.0)
+        if root_n is None
+        else root_n * abs(effect) / math.sqrt(pi)
+    )
     out = _normal_cdf(ncp - z) + _normal_cdf(-ncp - z)
     return float(min(1.0, max(0.0, out)))
 
@@ -669,17 +739,25 @@ def mcnemar_power(n, discordance, effect, alpha: float = DEFAULT_ALPHA) -> dict:
     if expected is not None and not math.isfinite(expected):
         expected = None
     return {
-        "n": n, "discordance": pi, "effect": float(effect),
-        "p10": p10, "p01": p01,
+        "n": n,
+        "discordance": pi,
+        "effect": float(effect),
+        "p10": p10,
+        "p01": p01,
         "expected_discordant": expected,
-        "power": pw, "alpha": alpha, "method": method,
+        "power": pw,
+        "alpha": alpha,
+        "method": method,
     }
 
 
-def mcnemar_required_samples(effect, discordance,
-                             alpha: float = DEFAULT_ALPHA,
-                             power: float = DEFAULT_POWER,
-                             max_n: int = 1_000_000):
+def mcnemar_required_samples(
+    effect,
+    discordance,
+    alpha: float = DEFAULT_ALPHA,
+    power: float = DEFAULT_POWER,
+    max_n: int = 1_000_000,
+):
     """达到目标 McNemar 功效所需的最少每格样本数；不可达返回 None。"""
     effect = _finite_float(effect, "effect", positive=True)
     pi, _p10, _p01 = _paired_binary_rates(discordance, effect)
@@ -687,7 +765,7 @@ def mcnemar_required_samples(effect, discordance,
     power = _open_unit(power, "power")
     max_n = _strict_int(max_n, "max_n", minimum=2)
     try:
-        n0 = math.ceil((_z_sum(alpha, power) ** 2) * pi / (effect ** 2))
+        n0 = math.ceil((_z_sum(alpha, power) ** 2) * pi / (effect**2))
     except (OverflowError, ValueError, ZeroDivisionError):
         # 极小但合法的 effect 在平方后会下溢为 0；所需样本数远超任何
         # 可行预算，按“不可达”处理，而不是让除零异常穿透设计入口。
@@ -713,8 +791,9 @@ def mcnemar_required_samples(effect, discordance,
     return int(n0)
 
 
-def mcnemar_mde(n, discordance, alpha: float = DEFAULT_ALPHA,
-                power: float = DEFAULT_POWER):
+def mcnemar_mde(
+    n, discordance, alpha: float = DEFAULT_ALPHA, power: float = DEFAULT_POWER
+):
     """给定每格样本数与不一致率时，McNemar 可检出的最小边际差（正态近似）。"""
     n = _strict_int(n, "n", minimum=2)
     pi = _finite_float(discordance, "discordance", positive=True)
@@ -732,8 +811,9 @@ def mcnemar_mde(n, discordance, alpha: float = DEFAULT_ALPHA,
     return float(out) if math.isfinite(out) else None
 
 
-def max_discordance_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
-                               power: float = DEFAULT_POWER):
+def max_discordance_for_effect(
+    effect, n, alpha: float = DEFAULT_ALPHA, power: float = DEFAULT_POWER
+):
     """在给定 n / 目标功效下仍能检出 ``effect`` 的最大不一致率。"""
     effect = _finite_float(effect, "effect", positive=True)
     n = _strict_int(n, "n", minimum=2)
@@ -747,8 +827,7 @@ def max_discordance_for_effect(effect, n, alpha: float = DEFAULT_ALPHA,
         # n 大到 √n 不可表示：用对数判断是否已超过上界 1，避免先平方
         # effect 再乘 n 时中间溢出。
         try:
-            log_out = (2.0 * math.log(effect) - 2.0 * math.log(z)
-                       + math.log(n))
+            log_out = 2.0 * math.log(effect) - 2.0 * math.log(z) + math.log(n)
         except (OverflowError, ValueError):
             return None
         if log_out >= 0.0:
@@ -780,6 +859,7 @@ def _known_variant_names():
     """惰性获取可运行变体名；失败时返回空集合（计划仍可生成）。"""
     try:
         from lega.attention import RUNNABLE_VARIANTS
+
         return set(RUNNABLE_VARIANTS)
     except Exception:  # pragma: no cover - 导入失败只在极端环境发生
         return set()
@@ -788,8 +868,7 @@ def _known_variant_names():
 def _check(check_id: str, title: str, status: str, detail: str) -> dict:
     if status not in ("pass", "warn", "fail", "info"):
         raise ValueError(f"未知检查状态 {status!r}")
-    return {"id": check_id, "title": title, "status": status,
-            "detail": detail}
+    return {"id": check_id, "title": title, "status": status, "detail": detail}
 
 
 def _checklist_status(checks) -> str:
@@ -809,18 +888,23 @@ def planned_comparison_pairs(variants, registered: dict = None) -> list:
     各变体 vs standard、六个单因素对比、可选的参数匹配安慰剂对比，以及
     预注册表追加的整体对比；只保留候选和参照都在计划矩阵内的配对。
     """
-    planned = [str(v) for v in (variants if isinstance(variants, (list, tuple))
-                                else [])]
+    planned = [
+        str(v) for v in (variants if isinstance(variants, (list, tuple)) else [])
+    ]
     planned_set = set(planned)
-    pairs = [(v, "standard") for v in planned
-             if v != "standard" and v not in _CAPACITY_NULL_VARIANTS]
+    pairs = [
+        (v, "standard")
+        for v in planned
+        if v != "standard" and v not in _CAPACITY_NULL_VARIANTS
+    ]
     if _PARAM_CONTROL_VARIANT in planned_set:
         if "lega" in planned_set:
             pairs.append(("lega", _PARAM_CONTROL_VARIANT))
         if "qgate" in planned_set:
             pairs.append((_PARAM_CONTROL_VARIANT, "qgate"))
-    pairs += [(c, r) for c, r in _SINGLE_FACTOR_PAIRS
-              if c in planned_set and r in planned_set]
+    pairs += [
+        (c, r) for c, r in _SINGLE_FACTOR_PAIRS if c in planned_set and r in planned_set
+    ]
     for h in _as_list(_as_dict(registered).get("hypotheses")):
         if not isinstance(h, dict):
             continue
@@ -828,18 +912,24 @@ def planned_comparison_pairs(variants, registered: dict = None) -> list:
         # 机制族是“同 run 内 logit − 仅查询”的单样本检验，不进入配对族；
         # run_all 的 build_comparison_pairs 同样跳过它们。
         if isinstance(metric, str) and (
-                metric.startswith("AUROC") or metric.startswith("AP差")):
+            metric.startswith("AUROC") or metric.startswith("AP差")
+        ):
             continue
         cand, ref = h.get("candidate"), h.get("reference")
-        if (isinstance(cand, str) and isinstance(ref, str)
-                and cand in planned_set and ref in planned_set):
+        if (
+            isinstance(cand, str)
+            and isinstance(ref, str)
+            and cand in planned_set
+            and ref in planned_set
+        ):
             pairs.append((cand, ref))
     # 顺序稳定（同 run_all 的 dict.fromkeys），便于计划摘要复现。
     return list(dict.fromkeys(pairs))
 
 
-def planned_family_sizes(variants, registered: dict = None,
-                         analysis_variants=None) -> dict:
+def planned_family_sizes(
+    variants, registered: dict = None, analysis_variants=None
+) -> dict:
     """计划内各指标 Holm 家族大小与全局确认族大小。
 
     PPL/RULER 家族包含全部计划配对（包括探索性对比：run_all 的 Holm 是
@@ -848,22 +938,26 @@ def planned_family_sizes(variants, registered: dict = None,
     包含候选变体在计划内的预注册假设。缺失产物会让实际家族变小，因此这里
     是保守的设计上界。
     """
-    planned = [str(v) for v in (variants if isinstance(variants, (list, tuple))
-                                else [])]
+    planned = [
+        str(v) for v in (variants if isinstance(variants, (list, tuple)) else [])
+    ]
     planned_set = set(planned)
     if analysis_variants is None:
         analysis_set = {v for v in planned if v in _DEFAULT_GATED_FOR_ANALYSIS}
     else:
         analysis_set = {str(v) for v in analysis_variants} & planned_set
     pairs = planned_comparison_pairs(planned, registered)
-    hyps = [h for h in _as_list(_as_dict(registered).get("hypotheses"))
-            if isinstance(h, dict)]
+    hyps = [
+        h
+        for h in _as_list(_as_dict(registered).get("hypotheses"))
+        if isinstance(h, dict)
+    ]
     # 全局确认族：候选必须真的会被训练/分析，否则该假设不会被检验。
     testable = [
-        h for h in hyps
+        h
+        for h in hyps
         if isinstance(h.get("candidate"), str)
-        and (h.get("candidate") in planned_set
-             or h.get("candidate") in analysis_set)
+        and (h.get("candidate") in planned_set or h.get("candidate") in analysis_set)
     ]
     return {
         "pairs": pairs,
@@ -891,9 +985,12 @@ def _metric_family_size(metric, sizes: dict) -> int:
     return 1
 
 
-def multiplicity_alpha(alpha: float, family_size: int,
-                       global_family_size: int,
-                       mode: str = DEFAULT_MULTIPLICITY) -> dict:
+def multiplicity_alpha(
+    alpha: float,
+    family_size: int,
+    global_family_size: int,
+    mode: str = DEFAULT_MULTIPLICITY,
+) -> dict:
     """把名义 α 换算成先验功效规划用的确认性阈值（Holm 最坏情形）。
 
     ``holm_worst_case``：任一假设要同时通过家族 Holm 与全局 Holm，最坏
@@ -905,12 +1002,12 @@ def multiplicity_alpha(alpha: float, family_size: int,
     p 值的大小。设计阶段不知道那些 p，只能用最坏情形避免高估。
     """
     if mode not in MULTIPLICITY_MODES:
-        raise ValueError(
-            f"未知 multiplicity={mode!r}；可选 {MULTIPLICITY_MODES}")
+        raise ValueError(f"未知 multiplicity={mode!r}；可选 {MULTIPLICITY_MODES}")
     alpha = _open_unit(alpha, "alpha")
     family_size = _strict_int(family_size, "family_size", minimum=1)
-    global_family_size = _strict_int(global_family_size,
-                                     "global_family_size", minimum=1)
+    global_family_size = _strict_int(
+        global_family_size, "global_family_size", minimum=1
+    )
     if mode == "none":
         burden = 1
     elif mode == "family_only":
@@ -941,7 +1038,6 @@ def multiplicity_alpha(alpha: float, family_size: int,
         "representable": representable,
         "method": (
             "Holm–Bonferroni 最坏情形 α/max(家族, 全局族)；"
-            "保守规划下界，不是精确 Holm 功效"),
+            "保守规划下界，不是精确 Holm 功效"
+        ),
     }
-
-

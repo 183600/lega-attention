@@ -1,62 +1,38 @@
 """RULER 分层/逐任务指标与健壮性测试。"""
-import hashlib
+
 import json
-import math
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
-import time
 from unittest import mock
 
-from lega.data import CACHE_SCHEMA
-from tests.pipeline_helpers import _mk, _write_json
-from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
-                      _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _eval_matches_window_spec,
-                      _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
-                      _factorial_protocol_ok, _inference_shapley_tests,
-                      INFERENCE_INTERACTION_METRIC, INFERENCE_SHAPLEY_METRIC,
-                      PARAM_CONTROL_VARIANT,
-                      PARAM_CONTROL_PAIR,
-                      _int_or_zero, _lat_noise_pct,
-                      _neural_eval_window_spec, _noise_floor_pct,
-                      _noise_verdict_note, _loo_stability_str, _num_or_none,
-                      _rate_or_none,
-                      _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
-                      _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
-                      _render_baseline_sections, _result_files,
-                      _render_ruler_length,
-                      _render_inference_shapley,
-                      _render_parameter_matched_control,
-                      _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
-                      _ruler_depth_gap, _ruler_depth_means,
-                      _ruler_fwe_recall, _ruler_min_cell_n, _ruler_protocol,
-                      _ruler_task_means,
-                      _render_registration_integrity, _resolve_jobs, _stat,
-                      _seed_key, _strict_seed_int, _parse_seed_list,
-                      apply_budget_gate, apply_integrity_gate, apply_scope_gate,
-                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
-                      build_comparison_pairs, build_summary,
-                      _fmt_eq_margin, _fmt_eq_value,
-                      _fmt_mean_std, _fmt_signed,
-                      changed_gate_factors,
-                      component_evidence, cross_variant_badcase_map,
-                      COMPONENT_TESTS, GATE_FACTORS,
-                      main as run_all_main,
-                      data_protocol_preflight, data_report_binding_issue,
-                      evaluate_registered_hypotheses,
-                      load_registered_hypotheses, ngram_baseline_comparison,
-                      parse_variants, registration_scope_check,
-                      abort_ledger_on_failure, record_aborted_sanity,
-                      mark_repro_failed, check_sanity_results,
-                      _snapshot_existing_runs,
-                      resolve_ngram_split, run_many,
-                      single_factor_audit, single_factor_change,
-                      SINGLE_FACTOR_CONTRASTS, SINGLE_FACTOR_PAIRS,
-                      tradeoff_verdict, verify_controlled_setup)
-
+from tests.pipeline_helpers import _write_json
+from run_all import (
+    _eval_matches_window_spec,
+    _int_or_zero,
+    _neural_eval_window_spec,
+    _num_or_none,
+    _rate_or_none,
+    _ppl_ci_rel_pct,
+    _ppl_of,
+    _probe_oof,
+    _ruler_avg_micro,
+    _ruler_avg_of,
+    _ruler_cell_signature,
+    _ruler_depth_gap,
+    _ruler_depth_means,
+    _ruler_fwe_recall,
+    _ruler_min_cell_n,
+    _ruler_protocol,
+    _ruler_task_means,
+    _stat,
+    _seed_key,
+    apply_scope_gate,
+    build_summary,
+    ngram_baseline_comparison,
+    registration_scope_check,
+    verify_controlled_setup,
+)
 
 
 def test_ngram_baseline_rejects_non_dict_json():
@@ -78,34 +54,60 @@ def test_ngram_nested_malformed_fields_do_not_crash_summary():
     """ngram_baseline.json 的嵌套字段是列表时按不可用/回退处理，不能崩溃。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
-            "variant": "lega", "seed": 1, "val_ppl": 20.0, "val_loss": 2.0,
-            "split": "val"})
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "ppl": [1], "ppl_window_matched": [1],
-            "window_spec": [1], "train_tokens": 100, "eval_tokens": 50,
-            "vocab_size": 20})
+        _write_json(
+            os.path.join(tmp, "eval_lega_seed1.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "val_ppl": 20.0,
+                "val_loss": 2.0,
+                "split": "val",
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": [1],
+                "ppl_window_matched": [1],
+                "window_spec": [1],
+                "train_tokens": 100,
+                "eval_tokens": 50,
+                "vocab_size": 20,
+            },
+        )
         bad = ngram_baseline_comparison({}, tmp)
         assert bad.get("error") and "ppl" in bad["error"], bad
         out = build_summary(tmp)
         assert "简单基线对比不可用" in out["markdown"]
         # ppl 合法但窗口参考/规格是列表：必须回退全 split 并正常渲染
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "ppl": {"bigram": 100.0},
-            "ppl_window_matched": [1], "window_spec": [1],
-            "train_tokens": 100, "eval_tokens": 50, "vocab_size": 20})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"bigram": 100.0},
+                "ppl_window_matched": [1],
+                "window_spec": [1],
+                "train_tokens": 100,
+                "eval_tokens": 50,
+                "vocab_size": 20,
+            },
+        )
         out2 = build_summary(tmp)
         assert "未使用逐位置对齐参考" in out2["markdown"]
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         cmp_doc = sig["ngram_comparison"]
         assert cmp_doc["reference_source"] == "full_split"
         assert "window_spec" in (cmp_doc["fallback_reason"] or "")
         # token 计数/规格计数非数值时只影响展示，不能让整份汇总崩溃
-        for patch in ({"train_tokens": [1]}, {"eval_tokens": "x"},
-                      {"ppl_window_matched": {"bigram": 90.0},
-                       "window_spec": {"ctx": 8, "iters": 2, "n_eval": 2,
-                                       "n_tokens": [1]}}):
+        for patch in (
+            {"train_tokens": [1]},
+            {"eval_tokens": "x"},
+            {
+                "ppl_window_matched": {"bigram": 90.0},
+                "window_spec": {"ctx": 8, "iters": 2, "n_eval": 2, "n_tokens": [1]},
+            },
+        ):
             doc = {"split": "val", "ppl": {"bigram": 100.0}}
             doc.update(patch)
             _write_json(os.path.join(tmp, "ngram_baseline.json"), doc)
@@ -120,25 +122,44 @@ def test_build_summary_tolerates_malformed_latency_nested_fields():
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "lega"):
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
-                "n_params": 100, "split": "val"})
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {
+                    "variant": v,
+                    "seed": 1,
+                    "val_ppl": 10.0,
+                    "val_loss": 2.3,
+                    "n_params": 100,
+                    "split": "val",
+                },
+            )
         lat_path = os.path.join(tmp, "latency.json")
-        _write_json(lat_path, {"variants": {
-            "standard": [1], "lega": [1]}})
+        _write_json(lat_path, {"variants": {"standard": [1], "lega": [1]}})
         build_summary(tmp)
         # 基线 standard_sdpa 自身嵌套字段畸形：prefill/efficiency/spread
         # 都不能在运行时指标与权衡小节的读取路径上崩溃。
-        _write_json(lat_path, {"variants": {
-            "standard": {"prefill_ms": {"256": {"1": 10.0}},
-                         "decode_ms_per_tok": {"256": 1.0}},
-            "lega": {"prefill_ms": {"256": {"1": 12.0}},
-                     "decode_ms_per_tok": {"256": 1.2}},
-            "standard_sdpa": {
-                "prefill_ms": [1], "decode_ms_per_tok": [1],
-                "efficiency": [1],
-                "prefill_ms_spread_pct": {"256": [1]},
-                "decode_ms_spread_pct": {"256": [1]}}}})
+        _write_json(
+            lat_path,
+            {
+                "variants": {
+                    "standard": {
+                        "prefill_ms": {"256": {"1": 10.0}},
+                        "decode_ms_per_tok": {"256": 1.0},
+                    },
+                    "lega": {
+                        "prefill_ms": {"256": {"1": 12.0}},
+                        "decode_ms_per_tok": {"256": 1.2},
+                    },
+                    "standard_sdpa": {
+                        "prefill_ms": [1],
+                        "decode_ms_per_tok": [1],
+                        "efficiency": [1],
+                        "prefill_ms_spread_pct": {"256": [1]},
+                        "decode_ms_spread_pct": {"256": [1]},
+                    },
+                }
+            },
+        )
         out = build_summary(tmp)
         assert "涨点-增幅权衡" in out["markdown"]
     finally:
@@ -148,43 +169,91 @@ def test_build_summary_tolerates_malformed_latency_nested_fields():
 
 def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
     """RULER n=Infinity 不得触发 OverflowError；非数值指标按缺失/跳过。"""
-    assert _ruler_min_cell_n({"results": {"niah": {
-        "256": {"n": float("inf"), "em": 1.0},
-        "512": {"n": 3, "em": "bad"}}}}) == 3
-    assert _ruler_min_cell_n({"results": {"niah": {
-        "256": {"n": 2.5}, "512": {"n": 3}}}}) == 3
+    assert (
+        _ruler_min_cell_n(
+            {
+                "results": {
+                    "niah": {
+                        "256": {"n": float("inf"), "em": 1.0},
+                        "512": {"n": 3, "em": "bad"},
+                    }
+                }
+            }
+        )
+        == 3
+    )
+    assert (
+        _ruler_min_cell_n({"results": {"niah": {"256": {"n": 2.5}, "512": {"n": 3}}}})
+        == 3
+    )
     # 负数/0 是损坏计数，不是“最小样本数”；忽略后才不会把报告写成 n=-3。
-    assert _ruler_min_cell_n({"results": {"niah": {
-        "256": {"n": -3}, "512": {"n": 4}, "1024": {"n": 0}}}}) == 4
-    assert _ruler_min_cell_n({"results": {"niah": {
-        "256": {"n": -3}}}}) is None
-    assert _ruler_min_cell_n({"results": {"niah": {
-        "256": {"n": True}, "512": {"n": "4"}}}}) == 4
-    bad_n = {"results": {"niah": {
-        "256": {"n": 1.5, "em": 0.0},
-        "512": {"n": True, "em": 0.5},
-        "1024": {"n": "2", "em": 1.0}}}}
+    assert (
+        _ruler_min_cell_n(
+            {"results": {"niah": {"256": {"n": -3}, "512": {"n": 4}, "1024": {"n": 0}}}}
+        )
+        == 4
+    )
+    assert _ruler_min_cell_n({"results": {"niah": {"256": {"n": -3}}}}) is None
+    assert (
+        _ruler_min_cell_n(
+            {"results": {"niah": {"256": {"n": True}, "512": {"n": "4"}}}}
+        )
+        == 4
+    )
+    bad_n = {
+        "results": {
+            "niah": {
+                "256": {"n": 1.5, "em": 0.0},
+                "512": {"n": True, "em": 0.5},
+                "1024": {"n": "2", "em": 1.0},
+            }
+        }
+    }
     assert _ruler_avg_micro(bad_n) == 1.0
     # n 是合法大整数（超出 float 范围）时，v*n 会 OverflowError；坏计数按
     # 缺失跳过，其余格仍可估计，不能中断汇总。
-    assert _ruler_avg_micro({"results": {"niah": {
-        "256": {"n": 10 ** 400, "em": 1.0},
-        "512": {"n": 2, "em": 1.0}}}}) == 1.0
-    assert _ruler_avg_micro({"results": {"niah": {
-        "256": {"n": 10 ** 400, "em": 1.0}}}}) is None
-    assert _ruler_cell_signature(bad_n) == frozenset({
-        ("niah", "256", None), ("niah", "512", None),
-        ("niah", "1024", 2)})
-    assert _ppl_of({"ppl": 10 ** 400}) is None
-    assert _stat([10 ** 400, "bad", float("nan"), 2.0]) == {
-        "mean": 2.0, "std": None, "n": 1}
+    assert (
+        _ruler_avg_micro(
+            {
+                "results": {
+                    "niah": {
+                        "256": {"n": 10**400, "em": 1.0},
+                        "512": {"n": 2, "em": 1.0},
+                    }
+                }
+            }
+        )
+        == 1.0
+    )
+    assert (
+        _ruler_avg_micro({"results": {"niah": {"256": {"n": 10**400, "em": 1.0}}}})
+        is None
+    )
+    assert _ruler_cell_signature(bad_n) == frozenset(
+        {("niah", "256", None), ("niah", "512", None), ("niah", "1024", 2)}
+    )
+    assert _ppl_of({"ppl": 10**400}) is None
+    assert _stat([10**400, "bad", float("nan"), 2.0]) == {
+        "mean": 2.0,
+        "std": None,
+        "n": 1,
+    }
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "ruler_standard_seed1.json"), {
-            "variant": "standard", "seed": 1, "split": "val",
-            "results": {"niah_synth": {
-                "256": {"n": float("inf"), "em": 1.0},
-                "512": {"n": 3, "em": "bad"}}}})
+        _write_json(
+            os.path.join(tmp, "ruler_standard_seed1.json"),
+            {
+                "variant": "standard",
+                "seed": 1,
+                "split": "val",
+                "results": {
+                    "niah_synth": {
+                        "256": {"n": float("inf"), "em": 1.0},
+                        "512": {"n": 3, "em": "bad"},
+                    }
+                },
+            },
+        )
         out = build_summary(tmp)
         assert "standard" in out["markdown"]
     finally:
@@ -195,11 +264,18 @@ def test_summary_tolerates_infinite_ruler_n_and_numeric_garbage():
 def test_ruler_protocol_tracks_depth_stratification():
     """分层位置与随机位置不是同一批题面：配对检验必须拒绝跨协议比较。"""
     from run_all import _same_protocol_fields
+
     base = {
-        "ctx_lens": [256], "n_samples": 3, "sample_seed": 1,
-        "corpus_source": "val", "corpus_held_out": True,
-        "max_new": 12, "fwe_max_new": 44, "vt_chains": 4,
-        "vt_depth": 4, "amp": True,
+        "ctx_lens": [256],
+        "n_samples": 3,
+        "sample_seed": 1,
+        "corpus_source": "val",
+        "corpus_held_out": True,
+        "max_new": 12,
+        "fwe_max_new": 44,
+        "vt_chains": 4,
+        "vt_depth": 4,
+        "amp": True,
     }
     stratified = _ruler_protocol(dict(base, depth_stratified=True))
     random_pos = _ruler_protocol(dict(base, depth_stratified=False))
@@ -216,11 +292,19 @@ def test_ruler_protocol_tracks_depth_stratification():
 def test_ruler_protocol_tracks_sample_content_fingerprint():
     """同 seed/计数但题面内容不同：协议与单元格签名都必须拒绝配对。"""
     from run_all import _same_protocol_fields
+
     base = {
-        "ctx_lens": [256], "n_samples": 3, "sample_seed": 1,
-        "corpus_source": "val", "corpus_held_out": True,
-        "max_new": 12, "fwe_max_new": 44, "vt_chains": 4,
-        "vt_depth": 4, "amp": True, "depth_stratified": True,
+        "ctx_lens": [256],
+        "n_samples": 3,
+        "sample_seed": 1,
+        "corpus_source": "val",
+        "corpus_held_out": True,
+        "max_new": 12,
+        "fwe_max_new": 44,
+        "vt_chains": 4,
+        "vt_depth": 4,
+        "amp": True,
+        "depth_stratified": True,
     }
     h1, h2 = "a" * 64, "b" * 64
     p1 = _ruler_protocol(dict(base, samples_manifest_sha256=h1))
@@ -233,13 +317,12 @@ def test_ruler_protocol_tracks_sample_content_fingerprint():
     assert not _same_protocol_fields(p1, legacy)
 
     def sig(digest):
-        return {"results": {"niah_synth": {"256": {
-            "n": 3, "samples_sha256": digest}}}}
+        return {"results": {"niah_synth": {"256": {"n": 3, "samples_sha256": digest}}}}
+
     assert _ruler_cell_signature(sig(h1)) != _ruler_cell_signature(sig(h2))
     assert _ruler_cell_signature(sig(h1)) == _ruler_cell_signature(sig(h1))
     # 缺字段保留旧产物签名格式；新/旧签名不相等。
-    old_sig = _ruler_cell_signature({"results": {"niah_synth": {
-        "256": {"n": 3}}}})
+    old_sig = _ruler_cell_signature({"results": {"niah_synth": {"256": {"n": 3}}}})
     assert _ruler_cell_signature(sig(h1)) != old_sig
     print("  [ok] RULER 协议核对题面内容清单指纹")
 
@@ -248,10 +331,10 @@ def test_int_or_zero_rejects_bool_and_fractional_counts():
     """外部 JSON 的计数不能被 int() 把 True/5.9 伪装成 1/5。"""
     assert _int_or_zero(None) == 0 and _int_or_zero("5") == 5
     assert _int_or_zero(5.0) == 5
-    for bad in (True, False, 5.5, -3, float("nan"), float("inf"),
-                "bad", [5], {"n": 5}):
+    for bad in (True, False, 5.5, -3, float("nan"), float("inf"), "bad", [5], {"n": 5}):
         assert _int_or_zero(bad) == 0, bad
     from run_all import _fmt4, _fmt_rate, _fmt_scalar_maybe
+
     assert _fmt_rate(True) == "-" and _fmt_rate(0.5) == "50.000%"
     assert _fmt_rate(1e307) == "溢出" and "inf" not in _fmt_rate(1e307)
     assert _fmt4(True) == "-" and _fmt4(1.25) == "1.2500"
@@ -263,6 +346,7 @@ def test_int_or_zero_rejects_bool_and_fractional_counts():
 def test_large_integer_identity_does_not_round_through_float():
     """>2**53 的整数/种子必须逐位比较，不能被 float 往返折叠成同一个值。"""
     from run_all import _integral_value, _same_protocol_value, _same_seed
+
     a, b = 2**53 + 1, 2**53
     assert _integral_value(a) == a
     assert not _same_seed(a, b)
@@ -286,22 +370,32 @@ def test_summary_rejects_bool_as_numeric_observation():
     assert _rate_or_none(0.5) == 0.5 and _rate_or_none("0.25") == 0.25
     for bad in (1.5, -0.1, True, "1_0", float("nan"), float("inf"), None):
         assert _rate_or_none(bad) is None, bad
-    assert _stat([True, False, "1_0", 2.0]) == {
-        "mean": 2.0, "std": None, "n": 1}
+    assert _stat([True, False, "1_0", 2.0]) == {"mean": 2.0, "std": None, "n": 1}
     assert _ppl_of({"ppl": True}) is None
     assert _ppl_ci_rel_pct({"ppl": 1.0, "val_ppl_ci95": [True, 2.0]}) is None
-    assert _ruler_task_means({"results": {"niah": {
-        "256": {"em": True}}}}) == {}
-    assert _ruler_avg_micro({"results": {"niah": {
-        "256": {"em": True, "n": 1}}}}) is None
+    assert _ruler_task_means({"results": {"niah": {"256": {"em": True}}}}) == {}
+    assert (
+        _ruler_avg_micro({"results": {"niah": {"256": {"em": True, "n": 1}}}}) is None
+    )
     # 汇总完整路径：bool PPL/窗口数/训练统计均按缺失降级，而不是 1.0。
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
-            "variant": "standard", "seed": 1, "split": "val",
-            "ppl": True, "val_ppl": False, "val_loss": True,
-            "gate_mean": True, "epochs_seen": True, "val_windows": True,
-            "train_step_time_ms": True, "train_peak_mem_mb": True})
+        _write_json(
+            os.path.join(tmp, "eval_standard_seed1.json"),
+            {
+                "variant": "standard",
+                "seed": 1,
+                "split": "val",
+                "ppl": True,
+                "val_ppl": False,
+                "val_loss": True,
+                "gate_mean": True,
+                "epochs_seen": True,
+                "val_windows": True,
+                "train_step_time_ms": True,
+                "train_peak_mem_mb": True,
+            },
+        )
         out = build_summary(tmp)
         row = next(r for r in out["rows"] if r["variant"] == "standard")
         assert row["val_ppl"] is None
@@ -320,26 +414,36 @@ def test_build_summary_tolerates_malformed_data_report_and_audit():
     tmp = tempfile.mkdtemp()
     try:
         for report in (
-                {"protocol": [1]}, {"splits": [1]},
-                {"tokenizer": {"unk_rate": [1]}},
-                {"contamination": {"train_val": [1]}},
-                {"distribution_shift": {"val_vs_train": [1]}},
-                {"sanitization": [1]}, {"text_stats": [1]},
-                {"alerts": [1]},
-                {"test_access": [1]}, {"splits": {"val": [1]}}):
+            {"protocol": [1]},
+            {"splits": [1]},
+            {"tokenizer": {"unk_rate": [1]}},
+            {"contamination": {"train_val": [1]}},
+            {"distribution_shift": {"val_vs_train": [1]}},
+            {"sanitization": [1]},
+            {"text_stats": [1]},
+            {"alerts": [1]},
+            {"test_access": [1]},
+            {"splits": {"val": [1]}},
+        ):
             out = build_summary(tmp, data_report=report)
             assert "数据协议与防泄漏自检" in out["markdown"]
-        out = build_summary(tmp, data_report={
-            "protocol": {"split_first_then_preprocess": True},
-            "splits": {"val": {"tokens": "x"}},
-            "sanitization": {"train": {"control_chars_deleted": "bad"}},
-            "text_stats": {"train": [1]},
-            "alerts": [1, {"level": "warning", "code": "c", "message": "m"}],
-            "test_access": {"checkpoints_evaluated_multiple_times": 1}})
+        out = build_summary(
+            tmp,
+            data_report={
+                "protocol": {"split_first_then_preprocess": True},
+                "splits": {"val": {"tokens": "x"}},
+                "sanitization": {"train": {"control_chars_deleted": "bad"}},
+                "text_stats": {"train": [1]},
+                "alerts": [1, {"level": "warning", "code": "c", "message": "m"}],
+                "test_access": {"checkpoints_evaluated_multiple_times": 1},
+            },
+        )
         assert "[c] m" in out["markdown"]
-        for audit in ([1], "bad", {"ok": True, "checked": 1,
-                                   "exempt_keys": [1],
-                                   "early_stop_runs": [1]}):
+        for audit in (
+            [1],
+            "bad",
+            {"ok": True, "checked": 1, "exempt_keys": [1], "early_stop_runs": [1]},
+        ):
             build_summary(tmp, audit=audit)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -350,14 +454,34 @@ def test_build_summary_tolerates_badcases_without_task():
     """旧/外部 RULER 错误清单可能缺少 task：汇总页用占位符渲染，不能崩溃。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_lega.json"), {
-            "variant": "lega", "seed": 1, "val_ppl": 10.0,
-            "val_loss": 2.3, "n_params": 10, "split": "test"})
-        _write_json(os.path.join(tmp, "ruler_lega.json"), {
-            "variant": "lega", "seed": 1,
-            "badcases": [None, {"answer_in_prompt": True, "pred": "7",
-                                "answer": "1", "context_numbers": ["7"],
-                                "question": "q"}]})
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "val_ppl": 10.0,
+                "val_loss": 2.3,
+                "n_params": 10,
+                "split": "test",
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "ruler_lega.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "badcases": [
+                    None,
+                    {
+                        "answer_in_prompt": True,
+                        "pred": "7",
+                        "answer": "1",
+                        "context_numbers": ["7"],
+                        "question": "q",
+                    },
+                ],
+            },
+        )
         out = build_summary(tmp)
         assert "坏案例分析" in out["markdown"]
         assert "-@ctxNone" in out["markdown"]
@@ -368,10 +492,12 @@ def test_build_summary_tolerates_badcases_without_task():
 
 def test_ruler_avg_macro_micro_defined_and_reported():
     """RULER 平均必须显式定义：macro（任务/格等权）与 micro（按 n 加权）并报。"""
-    doc = {"results": {
-        "niah_synth": {"8": {"em": 1.0, "n": 1},
-                       "16": {"em": 0.0, "n": 9}},
-        "vt": {"8": {"em": 0.0, "n": 1}, "16": {"em": 0.0, "n": 9}}}}
+    doc = {
+        "results": {
+            "niah_synth": {"8": {"em": 1.0, "n": 1}, "16": {"em": 0.0, "n": 9}},
+            "vt": {"8": {"em": 0.0, "n": 1}, "16": {"em": 0.0, "n": 9}},
+        }
+    }
     # macro：任务内两格等权（0.5 与 0），再任务等权 → 0.25
     assert abs(_ruler_avg_of(doc) - 0.25) < 1e-12
     # micro：按 n 加权，只有 niah_synth@8 的 1 个样例命中 → 1/20
@@ -384,8 +510,13 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     assert abs(_ruler_fwe_recall(fwe) - 0.75) < 1e-12
     assert _ruler_fwe_recall({"results": {"vt": {"8": {"em": 1.0}}}}) is None
     # precision/f1 同为诊断口径，且对“灌水”敏感
-    fwe2 = {"results": {"fwe": {"8": {"em": 0.0, "recall": 1.0,
-                                      "precision": 0.5, "f1": 2 / 3, "n": 4}}}}
+    fwe2 = {
+        "results": {
+            "fwe": {
+                "8": {"em": 0.0, "recall": 1.0, "precision": 0.5, "f1": 2 / 3, "n": 4}
+            }
+        }
+    }
     assert abs(_ruler_task_means(fwe2, "precision").get("fwe") - 0.5) < 1e-12
     assert abs(_ruler_task_means(fwe2, "f1").get("fwe") - 2 / 3) < 1e-12
     # 旧产物无 precision 字段 → 缺失而非崩溃
@@ -395,20 +526,30 @@ def test_ruler_avg_macro_micro_defined_and_reported():
     assert _ruler_avg_micro({"results": [1]}) is None
     assert _ruler_avg_micro({"results": {"vt": {"8": {"n": 0}}}}) is None
     # n=0 / 非法 n 的单元格没有有效观测，不能用一个空洞的 em=0 拉低 macro。
-    zero_cell = {"results": {
-        "niah_synth": {"8": {"em": 1.0, "n": 10},
-                       "16": {"em": 0.0, "n": 0}}}}
+    zero_cell = {
+        "results": {
+            "niah_synth": {"8": {"em": 1.0, "n": 10}, "16": {"em": 0.0, "n": 0}}
+        }
+    }
     assert abs(_ruler_avg_of(zero_cell) - 1.0) < 1e-12
     assert abs(_ruler_avg_micro(zero_cell) - 1.0) < 1e-12
-    bad_n_cell = {"results": {
-        "niah_synth": {"8": {"em": 1.0, "n": 10},
-                       "16": {"em": 0.0, "n": 1.5}}}}
+    bad_n_cell = {
+        "results": {
+            "niah_synth": {"8": {"em": 1.0, "n": 10}, "16": {"em": 0.0, "n": 1.5}}
+        }
+    }
     assert abs(_ruler_avg_of(bad_n_cell) - 1.0) < 1e-12
     # EM/F1 等是 [0,1] 比例：越界值不能参与 macro 或 micro 平均（否则汇总
     # 会出现 >100% 的“RULER 平均”并制造方法有效的假象）。
-    bad = {"results": {"niah_synth": {"8": {"em": 1.5, "n": 10},
-                                      "16": {"em": -1.0, "n": 10},
-                                      "32": {"em": 0.5, "n": 10}}}}
+    bad = {
+        "results": {
+            "niah_synth": {
+                "8": {"em": 1.5, "n": 10},
+                "16": {"em": -1.0, "n": 10},
+                "32": {"em": 0.5, "n": 10},
+            }
+        }
+    }
     assert abs(_ruler_avg_of(bad) - 0.5) < 1e-12
     assert abs(_ruler_avg_micro(bad) - 0.5) < 1e-12
     assert _ruler_task_means({"results": {"vt": {"8": {"recall": 2.0}}}}) == {}
@@ -422,22 +563,29 @@ def test_ruler_depth_means_excludes_non_niah_and_missing():
     分层均值必须按 (任务, 上下文, 位置箱) 等权，不能让大 n 格支配；fwe/vt
     的 depth 语义不同（vt 是链深度），绝不能混入。
     """
-    doc = {"results": {
-        "niah_synth": {
-            "8": {"em_by_depth": {
-                "early": {"em": 1.0, "n": 1},
-                "middle": {"em": 0.0, "n": 9}}},
-            "16": {"em_by_depth": {
-                "early": {"em": 0.0, "n": 1},
-                "middle": {"em": 1.0, "n": 1},
-                "late": {"em": 0.5, "n": 2}}}},
-        "niah_multikey": {
-            "8": {"em_by_depth": {
-                "late": {"em": 0.0, "n": 2}}}},
-        # 非 niah 任务即使带同名键也不得进入分层统计
-        "vt": {"8": {"em_by_depth": {"early": {"em": 1.0, "n": 1}}}},
-        "fwe": {"8": {"em_by_depth": {"middle": {"em": 1.0, "n": 1}}}},
-    }}
+    doc = {
+        "results": {
+            "niah_synth": {
+                "8": {
+                    "em_by_depth": {
+                        "early": {"em": 1.0, "n": 1},
+                        "middle": {"em": 0.0, "n": 9},
+                    }
+                },
+                "16": {
+                    "em_by_depth": {
+                        "early": {"em": 0.0, "n": 1},
+                        "middle": {"em": 1.0, "n": 1},
+                        "late": {"em": 0.5, "n": 2},
+                    }
+                },
+            },
+            "niah_multikey": {"8": {"em_by_depth": {"late": {"em": 0.0, "n": 2}}}},
+            # 非 niah 任务即使带同名键也不得进入分层统计
+            "vt": {"8": {"em_by_depth": {"early": {"em": 1.0, "n": 1}}}},
+            "fwe": {"8": {"em_by_depth": {"middle": {"em": 1.0, "n": 1}}}},
+        }
+    }
     dm = _ruler_depth_means(doc)
     # early 两格 (1.0, 0.0) 等权；middle (0.0,1.0) 等权；
     # late (0.5, 0.0) 两格等权。
@@ -447,12 +595,36 @@ def test_ruler_depth_means_excludes_non_niah_and_missing():
     assert abs(_ruler_depth_gap(doc) - 0.25) < 1e-12
     # 旧产物 / 损坏字段 → 缺失而非伪造
     assert _ruler_depth_means({"results": {"niah_synth": {"8": {"em": 1.0}}}}) == {}
-    assert _ruler_depth_means({"results": {"niah_synth": {"8": {
-        "em_by_depth": {"early": {"em": "x", "n": 2}}}}}}) == {}
-    assert _ruler_depth_means({"results": {"niah_synth": {"8": {
-        "em_by_depth": {"early": {"em": 1.0, "n": 0}}}}}}) == {}
-    assert _ruler_depth_gap({"results": {"niah_synth": {"8": {
-        "em_by_depth": {"early": {"em": 1.0, "n": 1}}}}}}) is None
+    assert (
+        _ruler_depth_means(
+            {
+                "results": {
+                    "niah_synth": {"8": {"em_by_depth": {"early": {"em": "x", "n": 2}}}}
+                }
+            }
+        )
+        == {}
+    )
+    assert (
+        _ruler_depth_means(
+            {
+                "results": {
+                    "niah_synth": {"8": {"em_by_depth": {"early": {"em": 1.0, "n": 0}}}}
+                }
+            }
+        )
+        == {}
+    )
+    assert (
+        _ruler_depth_gap(
+            {
+                "results": {
+                    "niah_synth": {"8": {"em_by_depth": {"early": {"em": 1.0, "n": 1}}}}
+                }
+            }
+        )
+        is None
+    )
     print("  [ok] _ruler_depth_means（仅 niah、格等权、缺失不伪造）")
 
 
@@ -462,15 +634,36 @@ def test_build_summary_fwe_precision_f1_columns():
     try:
         for s in (1, 2, 3):
             for v, prec in (("standard", 0.4), ("lega", 0.6)):
-                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "val_ppl": 10.0, "val_loss": 2.3,
-                    "n_params": 100, "n_gate_extra": 0, "split": "val"})
-                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s,
-                    "results": {"fwe": {"256": {"em": 0.5, "recall": 0.8,
-                                               "precision": prec,
-                                               "f1": 0.5 + prec / 10,
-                                               "n": 30}}}})
+                _write_json(
+                    os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "val_ppl": 10.0,
+                        "val_loss": 2.3,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                    },
+                )
+                _write_json(
+                    os.path.join(tmp, f"ruler_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "results": {
+                            "fwe": {
+                                "256": {
+                                    "em": 0.5,
+                                    "recall": 0.8,
+                                    "precision": prec,
+                                    "f1": 0.5 + prec / 10,
+                                    "n": 30,
+                                }
+                            }
+                        },
+                    },
+                )
         out = build_summary(tmp)
         md = out["markdown"]
         assert "fwe prec↑" in md and "fwe F1↑" in md, md[-2000:]
@@ -480,8 +673,6 @@ def test_build_summary_fwe_precision_f1_columns():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary：fwe precision/F1 诊断列")
-
-
 
 
 def test_build_summary_ruler_depth_stratification():
@@ -494,17 +685,41 @@ def test_build_summary_ruler_depth_stratification():
         }
         for s in (1, 2, 3):
             for v, dm in depths.items():
-                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "val_ppl": 10.0, "val_loss": 2.3,
-                    "n_params": 100, "n_gate_extra": 0, "split": "val"})
-                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s,
-                    "results": {"niah_synth": {"256": {
-                        "em": sum(dm.values()) / 3.0, "n": 30,
-                        "em_by_depth": {
-                            b: {"em": val, "n": 10,
-                                "em_ci95_wilson": [0.5, 0.99]}
-                            for b, val in dm.items()}}}}})
+                _write_json(
+                    os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "val_ppl": 10.0,
+                        "val_loss": 2.3,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                    },
+                )
+                _write_json(
+                    os.path.join(tmp, f"ruler_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "results": {
+                            "niah_synth": {
+                                "256": {
+                                    "em": sum(dm.values()) / 3.0,
+                                    "n": 30,
+                                    "em_by_depth": {
+                                        b: {
+                                            "em": val,
+                                            "n": 10,
+                                            "em_ci95_wilson": [0.5, 0.99],
+                                        }
+                                        for b, val in dm.items()
+                                    },
+                                }
+                            }
+                        },
+                    },
+                )
         out = build_summary(tmp)
         md = out["markdown"]
         assert "RULER NIAH 位置分层" in md, md[-2000:]
@@ -517,9 +732,14 @@ def test_build_summary_ruler_depth_stratification():
         # 而不是静默地少一张表。
         for s in (1, 2, 3):
             for v in depths:
-                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s,
-                    "results": {"niah_synth": {"256": {"em": 0.5, "n": 30}}}})
+                _write_json(
+                    os.path.join(tmp, f"ruler_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "results": {"niah_synth": {"256": {"em": 0.5, "n": 30}}},
+                    },
+                )
         old = build_summary(tmp)
         assert "不含 needle 位置分层" in old["markdown"]
         assert "重跑 RULER" in old["markdown"]
@@ -545,33 +765,68 @@ def test_build_summary_per_task_ruler_breakdown():
         }
         for s in seeds:
             for v in ("lega", "standard"):
-                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "val_ppl": 10.0 + 0.01 * s,
-                    "val_loss": 2.3, "n_params": 100, "n_gate_extra": 0,
-                    "split": "val"})
-                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s,
-                    "ctx_lens": [256], "n_samples": 30, "sample_seed": 1234,
-                    "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
-                    "vt_chains": 4, "vt_depth": 4,
-                    "results": {
-                        t: {"256": {"em": vals[v], "n": 30}}
-                        for t, vals in per_task.items()}})
-        reg = {"hypotheses": [
-            {"id": "H4", "claim": "LEGA 优于 standard（RULER）",
-             "metric": "RULER平均", "candidate": "lega", "reference": "standard",
-             "direction": "candidate_better"}]}
-        intact = {"status": "intact", "confirmatory_valid": True, "problems": [],
-                  "registry_sha256": "a" * 64, "n_hypotheses": 1,
-                  "baseline_document_sha256": "b" * 64, "chain_length": 0}
-        with mock.patch("lega.pipeline.report.summary.load_registered_hypotheses",
-                        return_value=reg), \
-                mock.patch("lega.pipeline.report.summary.verify_registration", return_value=intact):
+                _write_json(
+                    os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "val_ppl": 10.0 + 0.01 * s,
+                        "val_loss": 2.3,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                    },
+                )
+                _write_json(
+                    os.path.join(tmp, f"ruler_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "ctx_lens": [256],
+                        "n_samples": 30,
+                        "sample_seed": 1234,
+                        "corpus_source": "val",
+                        "max_new": 12,
+                        "fwe_max_new": 44,
+                        "vt_chains": 4,
+                        "vt_depth": 4,
+                        "results": {
+                            t: {"256": {"em": vals[v], "n": 30}}
+                            for t, vals in per_task.items()
+                        },
+                    },
+                )
+        reg = {
+            "hypotheses": [
+                {
+                    "id": "H4",
+                    "claim": "LEGA 优于 standard（RULER）",
+                    "metric": "RULER平均",
+                    "candidate": "lega",
+                    "reference": "standard",
+                    "direction": "candidate_better",
+                }
+            ]
+        }
+        intact = {
+            "status": "intact",
+            "confirmatory_valid": True,
+            "problems": [],
+            "registry_sha256": "a" * 64,
+            "n_hypotheses": 1,
+            "baseline_document_sha256": "b" * 64,
+            "chain_length": 0,
+        }
+        with mock.patch(
+            "lega.pipeline.report.summary.load_registered_hypotheses", return_value=reg
+        ), mock.patch(
+            "lega.pipeline.report.summary.verify_registration", return_value=intact
+        ):
             out = build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
-        task_tests = [t for t in sig["pairs"] if t.get("metric", "")
-                      .startswith("RULER:")]
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        task_tests = [
+            t for t in sig["pairs"] if t.get("metric", "").startswith("RULER:")
+        ]
         got = {(t["metric"], t["ruler_task"]) for t in task_tests}
         assert ("RULER:niah_synth", "niah_synth") in got, task_tests
         assert ("RULER:vt", "vt") in got, task_tests
@@ -598,37 +853,54 @@ def test_summary_helpers_tolerate_nested_non_dict_values():
     assert _probe_oof({"linear_probe": [1]}, "auprc") is None
     assert _ppl_of([1]) is None
     assert _ppl_ci_rel_pct([1]) is None
-    assert _ppl_ci_rel_pct({
-        "ppl": 1.0, "val_ppl_ci95": [10 ** 400, 1.0]}) is None
-    assert _ppl_ci_rel_pct({
-        "ppl": 1.0, "val_ppl_ci95": [5.0, 1.0]}) is None
+    assert _ppl_ci_rel_pct({"ppl": 1.0, "val_ppl_ci95": [10**400, 1.0]}) is None
+    assert _ppl_ci_rel_pct({"ppl": 1.0, "val_ppl_ci95": [5.0, 1.0]}) is None
     # 端点有限但差值/除以极小 PPL 后不可表示时同样按缺失处理，不能写 inf。
-    assert _ppl_ci_rel_pct({
-        "ppl": 1e-300, "val_ppl_ci95": [-1e308, 1e308]}) is None
-    assert _ppl_ci_rel_pct({
-        "ppl": 1e-320, "val_ppl_ci95": [0.0, 1e308]}) is None
+    assert _ppl_ci_rel_pct({"ppl": 1e-300, "val_ppl_ci95": [-1e308, 1e308]}) is None
+    assert _ppl_ci_rel_pct({"ppl": 1e-320, "val_ppl_ci95": [0.0, 1e308]}) is None
     assert _neural_eval_window_spec({"train_ctx": float("inf")}, False) is None
     assert _neural_eval_window_spec({"eval_iters": "x"}, False) is None
     assert _neural_eval_window_spec([1], False) is None
-    assert _eval_matches_window_spec(
-        {"eval_ctx": float("inf")},
-        {"ctx": 8, "n_eval": 2, "n_windows": 5}) is False
+    assert (
+        _eval_matches_window_spec(
+            {"eval_ctx": float("inf")}, {"ctx": 8, "n_eval": 2, "n_windows": 5}
+        )
+        is False
+    )
     spec = {"ctx": 8, "n_eval": 2, "n_windows": 5}
-    assert _eval_matches_window_spec(
-        {"eval_ctx": 8.5, "eval_iters": 2, "val_windows": 5}, spec) is False
-    assert _eval_matches_window_spec(
-        {"eval_ctx": True, "eval_iters": 2, "val_windows": 5}, spec) is False
-    assert _eval_matches_window_spec(
-        {"eval_ctx": "8", "eval_iters": "2", "val_windows": "5"}, spec) is True
+    assert (
+        _eval_matches_window_spec(
+            {"eval_ctx": 8.5, "eval_iters": 2, "val_windows": 5}, spec
+        )
+        is False
+    )
+    assert (
+        _eval_matches_window_spec(
+            {"eval_ctx": True, "eval_iters": 2, "val_windows": 5}, spec
+        )
+        is False
+    )
+    assert (
+        _eval_matches_window_spec(
+            {"eval_ctx": "8", "eval_iters": "2", "val_windows": "5"}, spec
+        )
+        is True
+    )
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "ngram_baseline.json"),
-                    {"ppl": {"bigram": float("inf")}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"), {"ppl": {"bigram": float("inf")}}
+        )
         assert ngram_baseline_comparison({}, tmp).get("error")
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "ppl": {"bigram": 100.0},
-            "ppl_window_matched": {"bigram": float("inf")},
-            "window_spec": {"ctx": 8, "iters": 2}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"bigram": 100.0},
+                "ppl_window_matched": {"bigram": float("inf")},
+                "window_spec": {"ctx": 8, "iters": 2},
+            },
+        )
         cmp_doc = ngram_baseline_comparison({}, tmp)
         assert cmp_doc["ngram_ppl_window_matched"] is None, cmp_doc
     finally:
@@ -640,27 +912,49 @@ def test_build_summary_tolerates_malformed_eval_probe_repro_curve():
     """eval/analysis/repro/curve 的字段类型畸形时汇总仍能生成。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
-            "variant": "lega", "seed": 1, "val_ppl": 9.0, "val_loss": 2.2,
-            "split": ["val"], "epochs_seen": "x",
-            "val_tokens_evaluated": "x",
-            "worst_windows": ["bad"], "worst_window_scope": {
-                "screened": "inf", "total": "x"}})
+        _write_json(
+            os.path.join(tmp, "eval_lega_seed1.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "val_ppl": 9.0,
+                "val_loss": 2.2,
+                "split": ["val"],
+                "epochs_seen": "x",
+                "val_tokens_evaluated": "x",
+                "worst_windows": ["bad"],
+                "worst_window_scope": {"screened": "inf", "total": "x"},
+            },
+        )
         # 变体名是数组时既不能进 runs 字典，也不能被当作合法 row。
-        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
-            "variant": ["standard"], "seed": 1, "val_ppl": 10.0})
-        _write_json(os.path.join(tmp, "analysis_lega_seed1.json"), {
-            "variant": "lega", "seed": 1, "auroc_logit": "x",
-            "auroc_qterm": "x", "linear_probe": [1],
-            "gate_f1": [1], "gate_f1_trivial": "x"})
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "ppl": {"bigram": 100.0}})
-        _write_json(os.path.join(tmp, "repro.json"), {
-            "variants": ["lega"], "seeds": [1], "git": [1],
-            "data": {"files": ["x"]}})
-        _write_json(os.path.join(tmp, "curve_diagnosis.json"), {
-            "lega": {"1": {"status": "正常收敛",
-                           "recommendations": {"a": 1}}}})
+        _write_json(
+            os.path.join(tmp, "eval_standard_seed1.json"),
+            {"variant": ["standard"], "seed": 1, "val_ppl": 10.0},
+        )
+        _write_json(
+            os.path.join(tmp, "analysis_lega_seed1.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "auroc_logit": "x",
+                "auroc_qterm": "x",
+                "linear_probe": [1],
+                "gate_f1": [1],
+                "gate_f1_trivial": "x",
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {"split": "val", "ppl": {"bigram": 100.0}},
+        )
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {"variants": ["lega"], "seeds": [1], "git": [1], "data": {"files": ["x"]}},
+        )
+        _write_json(
+            os.path.join(tmp, "curve_diagnosis.json"),
+            {"lega": {"1": {"status": "正常收敛", "recommendations": {"a": 1}}}},
+        )
         out = build_summary(tmp)
         assert [r["variant"] for r in out["rows"]] == ["lega"]
         assert "训练曲线诊断" in out["markdown"]
@@ -673,14 +967,30 @@ def test_build_summary_worst_window_scope_requires_valid_total():
     """缺失/非法 total 不能伪装成 100% 覆盖率，也不能显示 x/0 分母。"""
     tmp = tempfile.mkdtemp()
     try:
+
         def write(v, scope):
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
-                "split": "val", "worst_window_scope": scope,
-                "worst_windows": [{
-                    "window": 1, "split": "val", "loss": 1.0,
-                    "pred_top5": [["a", 0.9]], "gold_next": "b",
-                    "context_tail": "x"}]})
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {
+                    "variant": v,
+                    "seed": 1,
+                    "val_ppl": 10.0,
+                    "val_loss": 2.3,
+                    "split": "val",
+                    "worst_window_scope": scope,
+                    "worst_windows": [
+                        {
+                            "window": 1,
+                            "split": "val",
+                            "loss": 1.0,
+                            "pred_top5": [["a", 0.9]],
+                            "gold_next": "b",
+                            "context_tail": "x",
+                        }
+                    ],
+                },
+            )
+
         write("standard", {"screened": 30, "total": None})
         write("lega", {"screened": 30, "total": "x"})
         md = build_summary(tmp)["markdown"]
@@ -699,16 +1009,30 @@ def test_build_summary_split_note_matches_actual_eval_split():
     """非 val/test 或混合 split 不能被报告说成“在 val 集上评测”。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_lega_seed1.json"), {
-            "variant": "lega", "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
-            "split": "train"})
+        _write_json(
+            os.path.join(tmp, "eval_lega_seed1.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "val_ppl": 10.0,
+                "val_loss": 2.3,
+                "split": "train",
+            },
+        )
         md = build_summary(tmp)["markdown"]
         assert "PPL 在 val 集上评测" not in md, md
         assert "PPL 在 train 集上评测" in md, md
         # 不同变体混用 val/test 时也不得只挑一边来宣传。
-        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
-            "variant": "standard", "seed": 1, "val_ppl": 11.0,
-            "val_loss": 2.4, "split": "test"})
+        _write_json(
+            os.path.join(tmp, "eval_standard_seed1.json"),
+            {
+                "variant": "standard",
+                "seed": 1,
+                "val_ppl": 11.0,
+                "val_loss": 2.4,
+                "split": "test",
+            },
+        )
         md2 = build_summary(tmp)["markdown"]
         assert "评测 split 缺失、非法或不一致" in md2, md2
     finally:
@@ -721,23 +1045,40 @@ def test_tradeoff_prefers_sdpa_runtime_baseline():
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "standard_sdpa", "lega"):
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
-                "gate_mean": 0.5 if v == "lega" else None,
-                "n_params": 100, "n_gate_extra": 0})
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {
+                    "variant": v,
+                    "seed": 1,
+                    "val_ppl": 10.0,
+                    "val_loss": 2.3,
+                    "gate_mean": 0.5 if v == "lega" else None,
+                    "n_params": 100,
+                    "n_gate_extra": 0,
+                },
+            )
 
         def _lat(prefill, dec):
-            return {"prefill_ms": {"256": {"1": prefill}},
-                    "decode_ms_per_tok": {"256": dec},
-                    "efficiency": {
-                        "n_params": 100,
-                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
-                        "peak_mem_mb_prefill": {"256": 1.0}}}
+            return {
+                "prefill_ms": {"256": {"1": prefill}},
+                "decode_ms_per_tok": {"256": dec},
+                "efficiency": {
+                    "n_params": 100,
+                    "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                    "peak_mem_mb_prefill": {"256": 1.0},
+                },
+            }
 
-        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
-            "standard": _lat(10.0, 1.0),        # 显式路径（旧默认基线）
-            "standard_sdpa": _lat(1.0, 0.1),    # 与候选同路径的可比基线
-            "lega": _lat(1.1, 0.11)}})
+        _write_json(
+            os.path.join(tmp, "latency.json"),
+            {
+                "variants": {
+                    "standard": _lat(10.0, 1.0),  # 显式路径（旧默认基线）
+                    "standard_sdpa": _lat(1.0, 0.1),  # 与候选同路径的可比基线
+                    "lega": _lat(1.1, 0.11),
+                }
+            },
+        )
         out = build_summary(tmp)
         row = next(r for r in out["rows"] if r["variant"] == "lega")
         assert row["prefill_rel_pct"] == 10.0, row
@@ -758,23 +1099,40 @@ def test_tradeoff_baseline_requires_data_at_common_ctx():
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "standard_sdpa", "lega"):
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
-                "gate_mean": 0.5 if v == "lega" else None,
-                "n_params": 100, "n_gate_extra": 0})
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {
+                    "variant": v,
+                    "seed": 1,
+                    "val_ppl": 10.0,
+                    "val_loss": 2.3,
+                    "gate_mean": 0.5 if v == "lega" else None,
+                    "n_params": 100,
+                    "n_gate_extra": 0,
+                },
+            )
 
         def _lat(cells):
-            return {"prefill_ms": {c: {"1": p} for c, (p, _d) in cells.items()},
-                    "decode_ms_per_tok": {c: d for c, (_p, d) in cells.items()},
-                    "efficiency": {
-                        "n_params": 100,
-                        "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
-                        "peak_mem_mb_prefill": {"256": 1.0}}}
+            return {
+                "prefill_ms": {c: {"1": p} for c, (p, _d) in cells.items()},
+                "decode_ms_per_tok": {c: d for c, (_p, d) in cells.items()},
+                "efficiency": {
+                    "n_params": 100,
+                    "flops_per_tok": {"256": {"total_flops_per_tok": 1000}},
+                    "peak_mem_mb_prefill": {"256": 1.0},
+                },
+            }
 
-        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
-            "standard": _lat({"256": (10.0, 1.0), "512": (20.0, 2.0)}),
-            "standard_sdpa": _lat({"256": (1.0, 0.1)}),
-            "lega": _lat({"256": (1.1, 0.11), "512": (24.0, 2.4)})}})
+        _write_json(
+            os.path.join(tmp, "latency.json"),
+            {
+                "variants": {
+                    "standard": _lat({"256": (10.0, 1.0), "512": (20.0, 2.0)}),
+                    "standard_sdpa": _lat({"256": (1.0, 0.1)}),
+                    "lega": _lat({"256": (1.1, 0.11), "512": (24.0, 2.4)}),
+                }
+            },
+        )
         out = build_summary(tmp)
         row = next(r for r in out["rows"] if r["variant"] == "lega")
         assert row["latency_ctx"] == 512, row
@@ -795,16 +1153,26 @@ def test_tradeoff_ignores_noncanonical_latency_ctx_keys():
     tmp = tempfile.mkdtemp()
     try:
         for v in ("standard", "lega"):
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3})
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {"variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3},
+            )
 
         def _lat(cells):
-            return {"prefill_ms": {c: {"1": p} for c, (p, _d) in cells.items()},
-                    "decode_ms_per_tok": {c: d for c, (_p, d) in cells.items()}}
+            return {
+                "prefill_ms": {c: {"1": p} for c, (p, _d) in cells.items()},
+                "decode_ms_per_tok": {c: d for c, (_p, d) in cells.items()},
+            }
 
-        _write_json(os.path.join(tmp, "latency.json"), {"variants": {
-            "standard": _lat({"4_0": (4.0, 0.4), "32": (3.0, 0.3)}),
-            "lega": _lat({"4_0": (4.4, 0.44), "32": (3.3, 0.33)})}})
+        _write_json(
+            os.path.join(tmp, "latency.json"),
+            {
+                "variants": {
+                    "standard": _lat({"4_0": (4.0, 0.4), "32": (3.0, 0.3)}),
+                    "lega": _lat({"4_0": (4.4, 0.44), "32": (3.3, 0.33)}),
+                }
+            },
+        )
         out = build_summary(tmp)
         row = next(r for r in out["rows"] if r["variant"] == "lega")
         assert row["latency_ctx"] == 32, row
@@ -819,12 +1187,24 @@ def test_scope_missing_config_or_data_is_not_confirmed():
     try:
         reg = os.path.join(tmp, "reg.json")
         actual = os.path.join(tmp, "actual.json")
-        cfg = {"d_model": 384, "n_layers": 6, "n_heads": 6, "ffn_mult": 4,
-               "block_size": 1024, "steps": 8000, "train_ctx": 1024}
+        cfg = {
+            "d_model": 384,
+            "n_layers": 6,
+            "n_heads": 6,
+            "ffn_mult": 4,
+            "block_size": 1024,
+            "steps": 8000,
+            "train_ctx": 1024,
+        }
         _write_json(reg, cfg)
         _write_json(actual, cfg)
-        registered = {"scope": {"config": reg, "seeds": [1, 2, 3],
-                                "data": "WikiText-103 (gpt2 BPE)"}}
+        registered = {
+            "scope": {
+                "config": reg,
+                "seeds": [1, 2, 3],
+                "data": "WikiText-103 (gpt2 BPE)",
+            }
+        }
 
         # config 与 data 都缺失：即使 seeds 匹配也不能通过
         sc = registration_scope_check(registered, {"seeds": [1]})
@@ -834,19 +1214,20 @@ def test_scope_missing_config_or_data_is_not_confirmed():
         assert apply_scope_gate(hyp, sc)[0]["confirmatory_valid"] is False
 
         # 有 config、缺 data.tokenizer：仍不可确认
-        sc2 = registration_scope_check(registered, {
-            "config_file": actual, "seeds": [1], "data": {}})
+        sc2 = registration_scope_check(
+            registered, {"config_file": actual, "seeds": [1], "data": {}}
+        )
         assert sc2["checked"] is False and sc2["in_scope"] is None, sc2
 
         # 三部分都可核对且匹配：通过；分词器匹配本身也算“已核对”
-        sc3 = registration_scope_check(registered, {
-            "config_file": actual, "seeds": [1],
-            "data": {"tokenizer": "gpt2_bpe"}})
+        sc3 = registration_scope_check(
+            registered,
+            {"config_file": actual, "seeds": [1], "data": {"tokenizer": "gpt2_bpe"}},
+        )
         assert sc3["checked"] is True and sc3["in_scope"] is True, sc3
 
         # scope 未声明 config/data、仅声明 seeds：种子核对通过即可判定
-        sc4 = registration_scope_check({"scope": {"seeds": [1]}},
-                                       {"seeds": [1]})
+        sc4 = registration_scope_check({"scope": {"seeds": [1]}}, {"seeds": [1]})
         assert sc4["checked"] is True and sc4["in_scope"] is True, sc4
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -861,21 +1242,52 @@ def test_verify_controlled_setup_checks_nonearly_runs_with_early_peer():
         for v in variants:
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"), {
-                "lr": 0.001, "steps": 10, "warmup": 2,
-                "early_stop_patience": 2,
-                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
-        common = {"data_fingerprint": "abc123", "code_commit": "deadbeef",
-                  "config_sha256": "shax", "tokens_seen": 1024}
-        _write_json(os.path.join(tmp, "standard", "eval.json"), dict(
-            common, variant="standard", seed=7, steps=8,
-            steps_planned=10, early_stopped=False))
-        _write_json(os.path.join(tmp, "lega", "eval.json"), dict(
-            common, variant="lega", seed=7, steps=6,
-            steps_planned=10, early_stopped=True, tokens_seen=614))
+            _write_json(
+                os.path.join(d, "config_used.json"),
+                {
+                    "lr": 0.001,
+                    "steps": 10,
+                    "warmup": 2,
+                    "early_stop_patience": 2,
+                    "variant": v,
+                    "seed": 7,
+                    "device": "cpu",
+                    "tag": "t",
+                },
+            )
+        common = {
+            "data_fingerprint": "abc123",
+            "code_commit": "deadbeef",
+            "config_sha256": "shax",
+            "tokens_seen": 1024,
+        }
+        _write_json(
+            os.path.join(tmp, "standard", "eval.json"),
+            dict(
+                common,
+                variant="standard",
+                seed=7,
+                steps=8,
+                steps_planned=10,
+                early_stopped=False,
+            ),
+        )
+        _write_json(
+            os.path.join(tmp, "lega", "eval.json"),
+            dict(
+                common,
+                variant="lega",
+                seed=7,
+                steps=6,
+                steps_planned=10,
+                early_stopped=True,
+                tokens_seen=614,
+            ),
+        )
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("非早停 run 实际步数 != 计划步数应触发 SystemExit")
         except SystemExit:
             pass
@@ -896,14 +1308,28 @@ def test_summary_loads_tolerate_null_ppl_and_bad_json_seed():
     assert _seed_key("eval_lega.json", {"seed": float("inf")}) is None
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_standard_seed1.json"), {
-            "variant": "standard", "seed": 1, "val_ppl": 10.0,
-            "val_loss": 2.3, "n_params": 10, "split": "val"})
-        for name in ("repro.json", "latency.json", "baseline_tuning.json",
-                     "curve_diagnosis.json", "sanity_standard.json"):
+        _write_json(
+            os.path.join(tmp, "eval_standard_seed1.json"),
+            {
+                "variant": "standard",
+                "seed": 1,
+                "val_ppl": 10.0,
+                "val_loss": 2.3,
+                "n_params": 10,
+                "split": "val",
+            },
+        )
+        for name in (
+            "repro.json",
+            "latency.json",
+            "baseline_tuning.json",
+            "curve_diagnosis.json",
+            "sanity_standard.json",
+        ):
             _write_json(os.path.join(tmp, name), [1, 2, 3])
-        with open(os.path.join(tmp, "eval_lega_seed1.json"), "w",
-                  encoding="utf-8") as f:
+        with open(
+            os.path.join(tmp, "eval_lega_seed1.json"), "w", encoding="utf-8"
+        ) as f:
             f.write("{ 坏 JSON")
         out = build_summary(tmp)
         assert "standard" in out["markdown"]

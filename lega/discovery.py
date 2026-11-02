@@ -45,6 +45,7 @@ McNemar、窗口级 PPL、RULER 分层 meta 分析、分析选择多重宇宙、
 * n<3 或 p 值缺失/非法的检验不进入家族，也不被算作“不显著”；它们与
   主协议一致，只作描述性证据。
 """
+
 import math
 from numbers import Integral, Real
 
@@ -103,8 +104,7 @@ def _valid_n(value):
         return None
     if isinstance(value, Integral):
         out = int(value)
-    elif isinstance(value, float) and math.isfinite(value) \
-            and value.is_integer():
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
         out = int(value)
     else:
         return None
@@ -186,8 +186,14 @@ def _compact_test(t):
     if candidate is None:
         candidate = t.get("variant")
     detail = {}
-    for key in ("lesion", "ruler_ctx", "dose_factor", "interaction",
-                "shapley_factor", "variant"):
+    for key in (
+        "lesion",
+        "ruler_ctx",
+        "dose_factor",
+        "interaction",
+        "shapley_factor",
+        "variant",
+    ):
         value = t.get(key)
         if value is not None:
             detail[key] = _text(value)
@@ -258,25 +264,20 @@ def exploratory_fdr(tests, alpha=DEFAULT_ALPHA, min_seeds=DEFAULT_MIN_SEEDS):
 
     m = len(included)
     q_bh = benjamini_hochberg([t.get("p") for t in included])
-    harmonic = (math.fsum(1.0 / i for i in range(1, m + 1))
-                if m else None)
+    harmonic = math.fsum(1.0 / i for i in range(1, m + 1)) if m else None
     for t, q in zip(included, q_bh):
         t["q_bh"] = q
-        t["q_by"] = (None if q is None or harmonic is None
-                     else min(1.0, q * harmonic))
+        t["q_by"] = None if q is None or harmonic is None else min(1.0, q * harmonic)
         t["fdr_family_size"] = m
         t["fdr_significant"] = bool(q is not None and q < alpha)
-        t["fdr_by_significant"] = bool(
-            t.get("q_by") is not None and t["q_by"] < alpha)
+        t["fdr_by_significant"] = bool(t.get("q_by") is not None and t["q_by"] < alpha)
     for t in items:
         if t.get("fdr_family_size") is None:
             t["fdr_family_size"] = m
 
-    discoveries = [_compact_test(t) for t in included
-                   if t.get("fdr_significant")]
+    discoveries = [_compact_test(t) for t in included if t.get("fdr_significant")]
     discoveries.sort(key=lambda r: (r.get("q_bh"), r.get("p")))
-    by_discoveries = [_compact_test(t) for t in included
-                      if t.get("fdr_by_significant")]
+    by_discoveries = [_compact_test(t) for t in included if t.get("fdr_by_significant")]
     by_discoveries.sort(key=lambda r: (r.get("q_by"), r.get("p")))
 
     n_by_source, n_discoveries_by_source = {}, {}
@@ -284,29 +285,29 @@ def exploratory_fdr(tests, alpha=DEFAULT_ALPHA, min_seeds=DEFAULT_MIN_SEEDS):
         source = t.get("fdr_source") or "unknown"
         n_by_source[source] = n_by_source.get(source, 0) + 1
         if t.get("fdr_significant"):
-            n_discoveries_by_source[source] = (
-                n_discoveries_by_source.get(source, 0) + 1)
+            n_discoveries_by_source[source] = n_discoveries_by_source.get(source, 0) + 1
     excluded_by_reason = {}
     for row in excluded:
         reason = row.get("fdr_excluded_reason") or "unknown"
         excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
 
     n_discoveries = len(discoveries)
-    p_threshold = (max(r["p"] for r in discoveries)
-                   if discoveries else None)
-    q_threshold = (max(r["q_bh"] for r in discoveries)
-                   if discoveries else None)
+    p_threshold = max(r["p"] for r in discoveries) if discoveries else None
+    q_threshold = max(r["q_bh"] for r in discoveries) if discoveries else None
     return {
         "available": bool(m),
-        "method": ("Benjamini–Hochberg step-up FDR; "
-                   "Benjamini–Yekutieli as dependence-robust sensitivity"),
+        "method": (
+            "Benjamini–Hochberg step-up FDR; "
+            "Benjamini–Yekutieli as dependence-robust sensitivity"
+        ),
         "alpha": alpha,
         "min_seeds": min_seeds,
         "family": "exploratory_seed_level",
         "family_definition": (
             "所有非预注册的种子级探索性检验：主表未登记项、因果病灶/匹配"
             "对照、剂量-反应、推理期 Shapley/交互、RULER 长度、n-gram "
-            "基线、参数化稳健性与线性探针基线（实际运行时）"),
+            "基线、参数化稳健性与线性探针基线（实际运行时）"
+        ),
         "family_size": m,
         "n_tests_total": len(items),
         "n_included": m,
@@ -318,7 +319,8 @@ def exploratory_fdr(tests, alpha=DEFAULT_ALPHA, min_seeds=DEFAULT_MIN_SEEDS):
         "expected_false_discoveries_at_fdr": alpha * n_discoveries,
         "expected_false_discoveries_note": (
             "启发式折算 α×R：BH 保证 E[V/R]≤α，不保证单次实现的假发现数 "
-            "V≤αR；该字段只用于量级沟通，不是逐次上界。"),
+            "V≤αR；该字段只用于量级沟通，不是逐次上界。"
+        ),
         "p_threshold": p_threshold,
         "q_threshold": q_threshold,
         "n_by_source": n_by_source,
@@ -331,7 +333,8 @@ def exploratory_fdr(tests, alpha=DEFAULT_ALPHA, min_seeds=DEFAULT_MIN_SEEDS):
             "故并列 BY q 作为任意依赖下的保守敏感性。q 不是假设为真的概率，"
             "不替代 Holm/FWER、预注册判定、MDE 或 TOST，也不把探索性发现"
             "升级为确认性结论。n<3 或 p 缺失的检验不进入家族，也不等于"
-            "“不显著”。"),
+            "“不显著”。"
+        ),
     }
 
 
@@ -348,13 +351,19 @@ def _main_source(t):
     return "main"
 
 
-def collect_seed_level_tests(main_tests=None, causal_tests=None,
-                             matched_ablation_contrasts=None,
-                             dose_tests=None, inference_shapley=None,
-                             inference_interactions=None,
-                             capacity_decomposition=None,
-                             length_analysis=None, ngram_comparison=None,
-                             reparameterization=None, probe_comparison=None):
+def collect_seed_level_tests(
+    main_tests=None,
+    causal_tests=None,
+    matched_ablation_contrasts=None,
+    dose_tests=None,
+    inference_shapley=None,
+    inference_interactions=None,
+    capacity_decomposition=None,
+    length_analysis=None,
+    ngram_comparison=None,
+    reparameterization=None,
+    probe_comparison=None,
+):
     """合并各分析层的种子级探索性检验，并写入 ``fdr_source``。
 
     只做结构收集，不判断 p/n 是否可检验；过滤与 q 值由
@@ -364,17 +373,20 @@ def collect_seed_level_tests(main_tests=None, causal_tests=None,
     out = []
 
     def add(items, source, source_fn=None):
-        for t in (items if isinstance(items, list) else []):
+        for t in items if isinstance(items, list) else []:
             if not isinstance(t, dict):
                 continue
-            t["fdr_source"] = (source_fn(t) if source_fn is not None
-                               else source)
+            t["fdr_source"] = source_fn(t) if source_fn is not None else source
             out.append(t)
 
     add(main_tests, "main", _main_source)
-    add(causal_tests, "causal_lesion",
-        lambda t: ("causal_matched_lesion"
-                   if t.get("matched_control") else "causal_lesion"))
+    add(
+        causal_tests,
+        "causal_lesion",
+        lambda t: (
+            "causal_matched_lesion" if t.get("matched_control") else "causal_lesion"
+        ),
+    )
     add(matched_ablation_contrasts, "causal_matched_contrast")
     if isinstance(dose_tests, dict):
         add(dose_tests.get("tests"), "dose_response")

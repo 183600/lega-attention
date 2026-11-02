@@ -1,22 +1,31 @@
 """多方案排名稳定性与选择校正检验。"""
+
 import json
 
-from lega.ranking import (analyze_ranking, bootstrap_rank_stability,
-                          permutation_selection_test, ranking_table)
+from lega.ranking import (
+    analyze_ranking,
+    bootstrap_rank_stability,
+    permutation_selection_test,
+    ranking_table,
+)
 
 
 def _scores(values, lower_is_better=False):
     """values: {variant: [per-seed values]} -> 统一种子 0..n-1 的映射。"""
-    return {variant: {i: value for i, value in enumerate(values[variant])}
-            for variant in values}
+    return {
+        variant: {i: value for i, value in enumerate(values[variant])}
+        for variant in values
+    }
 
 
 def test_ranking_table_orders_and_counts():
-    scores = _scores({
-        "A": [10.0, 11.0, 12.0, 13.0],
-        "B": [8.0, 8.5, 9.0, 9.5],
-        "C": [5.0, 5.5, 6.0, 6.5],
-    })
+    scores = _scores(
+        {
+            "A": [10.0, 11.0, 12.0, 13.0],
+            "B": [8.0, 8.5, 9.0, 9.5],
+            "C": [5.0, 5.5, 6.0, 6.5],
+        }
+    )
     out = ranking_table(scores)
     assert out["available"] and out["status"] == "ok"
     assert out["leader"] == "A" and out["leaders"] == ["A"]
@@ -32,11 +41,13 @@ def test_ranking_table_orders_and_counts():
 
 def test_ranking_table_lower_is_better_and_ties():
     # PPL 越低越好：A 最低 -> 名次 1；第二种子 B 与 A 并列 -> 平均名次 1.5。
-    scores = _scores({
-        "A": [1.0, 2.0, 1.0],
-        "B": [2.0, 2.0, 3.0],
-        "C": [3.0, 4.0, 4.0],
-    })
+    scores = _scores(
+        {
+            "A": [1.0, 2.0, 1.0],
+            "B": [2.0, 2.0, 3.0],
+            "C": [3.0, 4.0, 4.0],
+        }
+    )
     out = ranking_table(scores, lower_is_better=True)
     rows = {row["variant"]: row for row in out["rows"]}
     assert abs(rows["A"]["mean_rank"] - 7.0 / 6.0) < 1e-12
@@ -84,11 +95,13 @@ def test_insufficient_seeds_do_not_claim_significance():
 
 
 def test_bootstrap_is_deterministic_and_probabilities_normalized():
-    scores = _scores({
-        "A": [10.0, 10.2, 9.8, 10.1, 9.9],
-        "B": [9.0, 9.1, 8.9, 9.2, 8.8],
-        "C": [8.0, 7.9, 8.1, 8.0, 8.2],
-    })
+    scores = _scores(
+        {
+            "A": [10.0, 10.2, 9.8, 10.1, 9.9],
+            "B": [9.0, 9.1, 8.9, 9.2, 8.8],
+            "C": [8.0, 7.9, 8.1, 8.0, 8.2],
+        }
+    )
     first = bootstrap_rank_stability(scores, n_bootstrap=500, seed=7)
     second = bootstrap_rank_stability(scores, n_bootstrap=500, seed=7)
     assert first == second
@@ -102,11 +115,13 @@ def test_bootstrap_is_deterministic_and_probabilities_normalized():
 
 
 def test_permutation_selection_test_detects_clear_separation():
-    scores = _scores({
-        "A": [30.0, 31.0, 29.0, 30.5, 30.2, 30.1, 30.3],
-        "B": [20.0, 21.0, 19.0, 20.5, 20.2, 20.1, 20.3],
-        "C": [10.0, 11.0, 9.0, 10.5, 10.2, 10.1, 10.3],
-    })
+    scores = _scores(
+        {
+            "A": [30.0, 31.0, 29.0, 30.5, 30.2, 30.1, 30.3],
+            "B": [20.0, 21.0, 19.0, 20.5, 20.2, 20.1, 20.3],
+            "C": [10.0, 11.0, 9.0, 10.5, 10.2, 10.1, 10.3],
+        }
+    )
     out = permutation_selection_test(scores, n_permutations=2000, seed=3)
     assert out["available"]
     assert out["p_max"] is not None and out["p_max"] < 0.01
@@ -118,11 +133,13 @@ def test_permutation_selection_test_detects_clear_separation():
 
 def test_permutation_null_does_not_invent_effect():
     # 三个方案在每个种子上完全相同：没有可检测的方案差异。
-    scores = _scores({
-        "A": [1.0, 2.0, 3.0],
-        "B": [1.0, 2.0, 3.0],
-        "C": [1.0, 2.0, 3.0],
-    })
+    scores = _scores(
+        {
+            "A": [1.0, 2.0, 3.0],
+            "B": [1.0, 2.0, 3.0],
+            "C": [1.0, 2.0, 3.0],
+        }
+    )
     out = permutation_selection_test(scores, n_permutations=500, seed=1)
     assert out["available"]
     assert out["p_max"] == 1.0 and out["p_range"] == 1.0
@@ -137,11 +154,13 @@ def test_permutation_null_does_not_invent_effect():
 def test_selection_test_controls_seed_level_selection():
     # 每个种子内名次结构一致（A>B>C），但种子间整体水平漂移。
     # 普通“挑最好”会乐观；种子内标签置换仍能识别稳定的方案差异。
-    scores = _scores({
-        "A": [11.0, 21.0, 31.0, 41.0, 51.0, 61.0],
-        "B": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "C": [9.0, 19.0, 29.0, 39.0, 49.0, 59.0],
-    })
+    scores = _scores(
+        {
+            "A": [11.0, 21.0, 31.0, 41.0, 51.0, 61.0],
+            "B": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "C": [9.0, 19.0, 29.0, 39.0, 49.0, 59.0],
+        }
+    )
     out = permutation_selection_test(scores, n_permutations=1000, seed=0)
     assert out["available"] and out["winner"] == "A"
     # 名次完全一致时，任何种子内置换都改变不了 A 的领先。
@@ -151,15 +170,16 @@ def test_selection_test_controls_seed_level_selection():
 
 def test_analyze_ranking_is_json_safe_and_handles_bad_input():
     scores = _scores({"A": [3.0, 3.1, 3.2], "B": [2.0, 2.1, 2.2]})
-    out = analyze_ranking(scores, n_bootstrap=200, n_permutations=200,
-                          seed=2)
+    out = analyze_ranking(scores, n_bootstrap=200, n_permutations=200, seed=2)
     assert out["available"]
     json.dumps(out, allow_nan=False)
     bad = analyze_ranking([("not", "a", "mapping")])
     assert bad["status"] == "invalid" and not bad["available"]
-    for func, kwargs in ((ranking_table, {"min_seeds": 1}),
-                         (bootstrap_rank_stability, {"n_bootstrap": 0}),
-                         (permutation_selection_test, {"alpha": 1.0})):
+    for func, kwargs in (
+        (ranking_table, {"min_seeds": 1}),
+        (bootstrap_rank_stability, {"n_bootstrap": 0}),
+        (permutation_selection_test, {"alpha": 1.0}),
+    ):
         try:
             func({"A": {0: 1.0}}, **kwargs)
         except ValueError:
@@ -170,11 +190,13 @@ def test_analyze_ranking_is_json_safe_and_handles_bad_input():
 
 def test_pipeline_ranking_analysis_and_render():
     """流水线层：从 runs 提取 PPL/RULER，渲染不崩溃且无可避免的缺失。"""
-    from lega.pipeline.eval.comparisons import (_ranking_analysis,
-                                                _render_ranking_section)
+    from lega.pipeline.eval.comparisons import (
+        _ranking_analysis,
+        _render_ranking_section,
+    )
+
     runs = {}
-    for variant, base in (("standard", 10.0), ("qgate", 9.5),
-                          ("lega", 9.0)):
+    for variant, base in (("standard", 10.0), ("qgate", 9.5), ("lega", 9.0)):
         runs[variant] = {}
         for seed in (1, 2, 3):
             runs[variant][seed] = {

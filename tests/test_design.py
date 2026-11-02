@@ -7,6 +7,7 @@
   * 计划内 (变体, 种子) 单元缺失时，只降级受影响假设的确认性判定；
   * 旧产物没有 design_plan.json 时不误降级（向后兼容）。
 """
+
 import json
 import math
 import os
@@ -14,27 +15,42 @@ import shutil
 import statistics
 import tempfile
 
-from lega.design import (_fmt, analysis_population, apply_design_gate,
-                         build_design_plan, build_run_order,
-                         design_conformance,
-                         load_design_plan, main as design_main,
-                         mcnemar_mde, mcnemar_power,
-                         mcnemar_required_samples,
-                         max_discordance_for_effect, max_sd_for_effect,
-                         min_detectable_effect, multiplicity_alpha,
-                         noninferiority_power,
-                         noninferiority_required_pairs,
-                         observed_design_sensitivity, paired_t_power,
-                         planned_comparison_pairs, planned_family_sizes,
-                         plan_digest, render_design_section,
-                         required_pairs, save_design_plan,
-                         tost_power, tost_required_pairs,
-                         validate_run_order)
+from lega.design import (
+    _fmt,
+    analysis_population,
+    apply_design_gate,
+    build_design_plan,
+    build_run_order,
+    design_conformance,
+    load_design_plan,
+    main as design_main,
+    mcnemar_mde,
+    mcnemar_power,
+    mcnemar_required_samples,
+    max_discordance_for_effect,
+    max_sd_for_effect,
+    min_detectable_effect,
+    multiplicity_alpha,
+    noninferiority_power,
+    noninferiority_required_pairs,
+    observed_design_sensitivity,
+    paired_t_power,
+    planned_comparison_pairs,
+    planned_family_sizes,
+    plan_digest,
+    render_design_section,
+    required_pairs,
+    save_design_plan,
+    tost_power,
+    tost_required_pairs,
+    validate_run_order,
+)
 
 
 def test_design_cli_seed_parser_is_strict():
     """--seeds 的 "1_0"/"0x10" 不能经 int(..., 0) 静默变成别的种子。"""
     from lega.design import _parse_seeds
+
     assert _parse_seeds("1, 2") == [1, 2]
     assert _parse_seeds(" 1 , ,2 ") == [1, 2]
     for bad in ("1_0", "0x10", "0b10", "1.0", "True", "-1"):
@@ -51,30 +67,48 @@ def _write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False)
 
 
-def _plan(seeds=(1, 2, 3, 4, 5), variants=("lega", "standard", "qgate"),
-          registered=None, **kw):
-    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
-           "design": {"alpha": 0.05, "power": 0.8}}
+def _plan(
+    seeds=(1, 2, 3, 4, 5), variants=("lega", "standard", "qgate"), registered=None, **kw
+):
+    cfg = {
+        "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        "design": {"alpha": 0.05, "power": 0.8},
+    }
     if registered is None:
-        registered = {"hypotheses": [
-            {"id": "H1", "metric": "PPL", "candidate": "lega",
-             "reference": "standard", "direction": "candidate_better"},
-            {"id": "H5", "metric": "PPL", "candidate": "lega",
-             "reference": "qgate", "direction": "candidate_better"},
-        ]}
-    return build_design_plan(cfg, list(seeds), list(variants), registered,
-                             known_variants={"lega", "standard", "qgate"},
-                             **kw)
+        registered = {
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "metric": "PPL",
+                    "candidate": "lega",
+                    "reference": "standard",
+                    "direction": "candidate_better",
+                },
+                {
+                    "id": "H5",
+                    "metric": "PPL",
+                    "candidate": "lega",
+                    "reference": "qgate",
+                    "direction": "candidate_better",
+                },
+            ]
+        }
+    return build_design_plan(
+        cfg,
+        list(seeds),
+        list(variants),
+        registered,
+        known_variants={"lega", "standard", "qgate"},
+        **kw,
+    )
 
 
 def test_paired_power_and_required_seeds():
     """配对 t：功效随 n 单调增，required_pairs 与 power 互为逆运算。"""
     for n in (3, 5, 8, 12):
-        assert paired_t_power(0.01, 0.01, n) > paired_t_power(
-            0.01, 0.01, n - 1), n
+        assert paired_t_power(0.01, 0.01, n) > paired_t_power(0.01, 0.01, n - 1), n
         # 双侧检验只看效应幅度，负方向必须与正方向同功效。
-        assert paired_t_power(-0.01, 0.01, n) == paired_t_power(
-            0.01, 0.01, n), n
+        assert paired_t_power(-0.01, 0.01, n) == paired_t_power(0.01, 0.01, n), n
     n = required_pairs(0.01, 0.01, alpha=0.05, power=0.8)
     assert n == 8, n
     assert paired_t_power(0.01, 0.01, n) >= 0.8
@@ -87,13 +121,12 @@ def test_paired_power_and_required_seeds():
     assert abs(paired_t_power(0.01, sd_max, 5) - 0.8) < 1e-5
     # 与全项目使用的 MDE 口径逐位一致，避免两套公式漂移。
     from lega.utils import min_detectable_effect as utils_mde
+
     for sd in (0.002, 0.01, 0.05):
         for nn in (3, 5, 10):
-            assert abs(min_detectable_effect(sd, nn)
-                       - utils_mde(sd, nn)) < 1e-15
+            assert abs(min_detectable_effect(sd, nn) - utils_mde(sd, nn)) < 1e-15
     # 非法输入显式拒绝，不静默返回“看起来显著”的值。
-    for args in (("x", 0.01, 5), (0.01, 0, 5), (0.01, 0.01, True),
-                 (0.01, 0.01, 1)):
+    for args in (("x", 0.01, 5), (0.01, 0, 5), (0.01, 0.01, True), (0.01, 0.01, 1)):
         try:
             paired_t_power(*args)
         except ValueError:
@@ -118,16 +151,15 @@ def test_mcnemar_power_and_required_samples():
     assert mcnemar_power(need - 1, 0.10, 0.01)["power"] < 0.8
     # 正态近似起点可能高于精确所需样本数；max_n 恰好覆盖精确解时不能
     # 因近似起点超限而误报“不可达”。
-    assert mcnemar_required_samples(
-        0.02, 0.02, alpha=0.1, power=0.9, max_n=398) == 398
-    assert mcnemar_required_samples(
-        0.02, 0.02, alpha=0.1, power=0.9, max_n=397) is None
+    assert mcnemar_required_samples(0.02, 0.02, alpha=0.1, power=0.9, max_n=398) == 398
+    assert mcnemar_required_samples(0.02, 0.02, alpha=0.1, power=0.9, max_n=397) is None
     # MDE 与所需样本数同源：n=30、π=0.1 时约 16pp。
     mde = mcnemar_mde(30, 0.10)
     assert 0.15 < mde < 0.17, mde
     # 效应越大功效越高。
-    assert mcnemar_power(200, 0.2, 0.10)["power"] > \
-        mcnemar_power(200, 0.2, 0.01)["power"]
+    assert (
+        mcnemar_power(200, 0.2, 0.10)["power"] > mcnemar_power(200, 0.2, 0.01)["power"]
+    )
     # 边际差大于不一致率在概率上不可能。
     try:
         mcnemar_power(30, 0.05, 0.10)
@@ -136,17 +168,24 @@ def test_mcnemar_power_and_required_samples():
     else:
         raise AssertionError("|effect|>discordance 必须拒绝")
     # 可容忍不一致率与 n 成正比。
-    assert max_discordance_for_effect(0.01, 60) > \
-        max_discordance_for_effect(0.01, 30)
+    assert max_discordance_for_effect(0.01, 60) > max_discordance_for_effect(0.01, 30)
     print("  [ok] McNemar 精确/近似功效与所需每格样本数")
 
 
 def test_build_design_plan_flags_missing_registered_seeds():
     """少跑预注册种子：计划必须 fail 并在 checks 中写明。"""
-    reg = {"scope": {"seeds": [1, 2, 3, 4, 5]},
-           "hypotheses": [
-               {"id": "H1", "metric": "PPL", "candidate": "lega",
-                "reference": "standard", "direction": "candidate_better"}]}
+    reg = {
+        "scope": {"seeds": [1, 2, 3, 4, 5]},
+        "hypotheses": [
+            {
+                "id": "H1",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_better",
+            }
+        ],
+    }
     plan = _plan(seeds=(1, 2, 3), registered=reg)
     assert plan["status"] == "fail", plan["status"]
     by_id = {c["id"]: c for c in plan["checks"]}
@@ -172,11 +211,12 @@ def test_build_design_plan_flags_missing_registered_seeds():
 
 def test_confirmatory_power_uses_planned_holm_burden():
     """先验功效必须按最终 Holm 阈值规划，不能高估确认性灵敏度。"""
-    reg = {"hypotheses": [
-        {"id": "H1", "metric": "PPL", "candidate": "lega",
-         "reference": "standard"},
-        {"id": "H5", "metric": "PPL", "candidate": "lega",
-         "reference": "qgate"}]}
+    reg = {
+        "hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega", "reference": "standard"},
+            {"id": "H5", "metric": "PPL", "candidate": "lega", "reference": "qgate"},
+        ]
+    }
     plan = _plan(registered=reg)
     mp = plan["multiplicity_plan"]
     assert mp["family_sizes"]["PPL"] == 3, mp
@@ -184,63 +224,93 @@ def test_confirmatory_power_uses_planned_holm_burden():
     alpha_eff = mp["alpha_effective"]["PPL"]
     assert abs(alpha_eff - 0.05 / 3) < 1e-15, alpha_eff
     ppl = plan["endpoints"]["ppl"]
-    row = next(r for r in ppl["sensitivity"]
-               if abs(r["paired_sd_relative"] - 0.01) < 1e-12)
+    row = next(
+        r for r in ppl["sensitivity"] if abs(r["paired_sd_relative"] - 0.01) < 1e-12
+    )
     assert row["power_for_sesoi_confirmatory"] < row["power_for_sesoi"]
-    assert (row["mde_relative_confirmatory"]
-            > row["mde_relative"])
-    assert (row["required_seeds_for_sesoi_confirmatory"]
-            > row["required_seeds_for_sesoi"])
-    assert (ppl["max_paired_sd_for_sesoi_confirmatory"]
-            < ppl["max_paired_sd_for_sesoi"])
-    assert any(c["id"] == "ppl_confirmatory_reference"
-               and c["status"] == "warn" for c in plan["checks"])
+    assert row["mde_relative_confirmatory"] > row["mde_relative"]
+    assert (
+        row["required_seeds_for_sesoi_confirmatory"] > row["required_seeds_for_sesoi"]
+    )
+    assert ppl["max_paired_sd_for_sesoi_confirmatory"] < ppl["max_paired_sd_for_sesoi"]
+    assert any(
+        c["id"] == "ppl_confirmatory_reference" and c["status"] == "warn"
+        for c in plan["checks"]
+    )
 
     raw = _plan(registered=reg, multiplicity="none")
-    assert abs(raw["multiplicity_plan"]["alpha_effective"]["PPL"]
-               - 0.05) < 1e-15
-    raw_row = next(r for r in raw["endpoints"]["ppl"]["sensitivity"]
-                   if abs(r["paired_sd_relative"] - 0.01) < 1e-12)
-    assert (abs(raw_row["power_for_sesoi_confirmatory"]
-                - raw_row["power_for_sesoi"]) < 1e-15)
+    assert abs(raw["multiplicity_plan"]["alpha_effective"]["PPL"] - 0.05) < 1e-15
+    raw_row = next(
+        r
+        for r in raw["endpoints"]["ppl"]["sensitivity"]
+        if abs(r["paired_sd_relative"] - 0.01) < 1e-12
+    )
+    assert (
+        abs(raw_row["power_for_sesoi_confirmatory"] - raw_row["power_for_sesoi"])
+        < 1e-15
+    )
 
     # 正式矩阵：9 个变体 vs standard + 6 个单因素 + 1 个预注册整体对比
     # = 16 个 PPL/RULER 检验；7 条预注册假设构成全局确认族。
-    variants = ["standard", "gate_only", "qgate", "null", "lega",
-                "lega_no_len", "lega_no_conc", "lega_no_query",
-                "lega_conc_only", "lega_len_only"]
+    variants = [
+        "standard",
+        "gate_only",
+        "qgate",
+        "null",
+        "lega",
+        "lega_no_len",
+        "lega_no_conc",
+        "lega_no_query",
+        "lega_conc_only",
+        "lega_len_only",
+    ]
     analysis = [v for v in variants if v not in ("standard", "gate_only")]
-    reg7 = {"hypotheses": [
-        {"id": f"H{i}", "metric": "PPL", "candidate": "lega",
-         "reference": "standard"} for i in range(1, 7)]
-        + [{"id": "H7", "metric": "PPL", "candidate": "lega",
-            "reference": "qgate"}]}
-    sizes = planned_family_sizes(variants, reg7,
-                                 analysis_variants=analysis)
+    reg7 = {
+        "hypotheses": [
+            {
+                "id": f"H{i}",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+            }
+            for i in range(1, 7)
+        ]
+        + [{"id": "H7", "metric": "PPL", "candidate": "lega", "reference": "qgate"}]
+    }
+    sizes = planned_family_sizes(variants, reg7, analysis_variants=analysis)
     assert sizes["ppl_family_size"] == 16, sizes
     assert sizes["global_family_size"] == 7, sizes
     assert sizes["auroc_family_size"] == 8, sizes
     plan7 = build_design_plan(
         {"ruler": {"ctx_lens": [256, 512], "n_samples": 30}},
-        [1, 2, 3, 4, 5], variants, reg7,
-        known_variants=set(variants), analysis_variants=analysis)
-    assert abs(plan7["multiplicity_plan"]["alpha_effective"]["PPL"]
-               - 0.05 / 16) < 1e-15
-    assert abs(plan7["multiplicity_plan"]["alpha_effective"]["AUROC"]
-               - 0.05 / 8) < 1e-15
+        [1, 2, 3, 4, 5],
+        variants,
+        reg7,
+        known_variants=set(variants),
+        analysis_variants=analysis,
+    )
+    assert abs(plan7["multiplicity_plan"]["alpha_effective"]["PPL"] - 0.05 / 16) < 1e-15
+    assert (
+        abs(plan7["multiplicity_plan"]["alpha_effective"]["AUROC"] - 0.05 / 8) < 1e-15
+    )
     # 设计层与汇总层的配对集合必须逐项一致，防止任一侧新增对比后
     # 设计功效仍按旧家族大小计算。
     import lega.design as design_mod
     import run_all
-    assert planned_comparison_pairs(variants, reg7) == \
-        run_all.build_comparison_pairs({v: {} for v in variants}, reg7)
+
+    assert planned_comparison_pairs(variants, reg7) == run_all.build_comparison_pairs(
+        {v: {} for v in variants}, reg7
+    )
     # 显式加入补充对照时，设计层的家族大小同样必须与汇总层一致。
     from lega.attention import SUPPLEMENTAL_VARIANTS
+
     supp = variants + list(SUPPLEMENTAL_VARIANTS)
-    assert planned_comparison_pairs(supp, reg7) == \
-        run_all.build_comparison_pairs({v: {} for v in supp}, reg7)
-    assert (set(design_mod._DEFAULT_GATED_FOR_ANALYSIS)
-            == set(run_all.GATED_FOR_ANALYSIS))
+    assert planned_comparison_pairs(supp, reg7) == run_all.build_comparison_pairs(
+        {v: {} for v in supp}, reg7
+    )
+    assert set(design_mod._DEFAULT_GATED_FOR_ANALYSIS) == set(
+        run_all.GATED_FOR_ANALYSIS
+    )
 
     try:
         _plan(registered=reg, multiplicity="bogus")
@@ -255,12 +325,13 @@ def test_confirmatory_power_uses_planned_holm_burden():
 
 def test_build_design_plan_smoke_downgrades_fail():
     """冒烟运行的 fail 降为 warn：流程检查不应冒充正式设计失败。"""
-    reg = {"scope": {"seeds": [1, 2, 3, 4, 5]},
-           "hypotheses": [
-               {"id": "H1", "metric": "PPL", "candidate": "lega",
-                "reference": "standard"}]}
-    plan = _plan(seeds=(1,), registered=reg, smoke=True,
-                 ruler_n_samples=2)
+    reg = {
+        "scope": {"seeds": [1, 2, 3, 4, 5]},
+        "hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega", "reference": "standard"}
+        ],
+    }
+    plan = _plan(seeds=(1,), registered=reg, smoke=True, ruler_n_samples=2)
     assert plan["status"] == "warning", plan["status"]
     seed = {c["id"]: c for c in plan["checks"]}["seed_scope"]
     assert seed["status"] == "warn"
@@ -272,14 +343,20 @@ def test_analysis_population_and_conformance():
     """计划内单元缺失必须显式进入 population/problems。"""
     plan = _plan()
     runs = {
-        "lega": {1: {"eval": {}, "ruler": {}, "analysis": {}},
-                 2: {"eval": {}, "ruler": {}, "analysis": {}},
-                 3: {"eval": {}}},                     # 缺 ruler/analysis
-        "standard": {1: {"eval": {}, "ruler": {}, "analysis": {}},
-                     2: {"eval": {}, "ruler": {}, "analysis": {}},
-                     3: {"eval": {}, "ruler": {}, "analysis": {}}},
-        "qgate": {1: {"eval": {}, "ruler": {}, "analysis": {}},
-                  2: {"eval": {}, "ruler": {}, "analysis": {}}},  # 缺 seed3
+        "lega": {
+            1: {"eval": {}, "ruler": {}, "analysis": {}},
+            2: {"eval": {}, "ruler": {}, "analysis": {}},
+            3: {"eval": {}},
+        },  # 缺 ruler/analysis
+        "standard": {
+            1: {"eval": {}, "ruler": {}, "analysis": {}},
+            2: {"eval": {}, "ruler": {}, "analysis": {}},
+            3: {"eval": {}, "ruler": {}, "analysis": {}},
+        },
+        "qgate": {
+            1: {"eval": {}, "ruler": {}, "analysis": {}},
+            2: {"eval": {}, "ruler": {}, "analysis": {}},
+        },  # 缺 seed3
     }
     pop = analysis_population(plan, runs)
     assert pop["expected_cells"] == 15
@@ -287,17 +364,20 @@ def test_analysis_population_and_conformance():
     assert "qgate/seed3" in pop["missing_eval"]
     assert "lega/seed3" in pop["missing_ruler"]
     assert pop["complete_eval"] is False
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False,
-             "config_sha256": plan["inputs"]["config_sha256"]}
-    conf = design_conformance(plan, repro, runs,
-                              stages={"ruler": True, "analysis": True})
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+        "config_sha256": plan["inputs"]["config_sha256"],
+    }
+    conf = design_conformance(
+        plan, repro, runs, stages={"ruler": True, "analysis": True}
+    )
     assert conf["checked"] is True
     assert conf["in_plan"] is False
     assert any("qgate/seed3" in p for p in conf["problems"])
     # repro 与计划不一致（上一轮遗留计划）时不据此降级。
-    conf2 = design_conformance(plan, dict(repro, seeds=[1, 2]),
-                               runs)
+    conf2 = design_conformance(plan, dict(repro, seeds=[1, 2]), runs)
     assert conf2["checked"] is False
     assert conf2["reason"] == "plan_repro_seed_mismatch"
     # 完全没有计划（旧产物）：checked=False，不误判。
@@ -315,16 +395,23 @@ def test_code_freeze_and_provenance_drift_gate():
     assert isinstance(code.get("digest"), str) and code["digest"]
     assert isinstance(code.get("entries"), list) and code["entries"]
     runs = {
-        v: {s: {"eval": {}, "ruler": {}, "analysis": {}}
-            for s in (1, 2, 3)}
+        v: {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)}
         for v in plan["inputs"]["variants"]
     }
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False,
-             "design": {"plan_digest": plan["plan_digest"]},
-             "tracking_end": {"drift": {
-                 "checked": {"source_tree_digest": True},
-                 "unknown": [], "changed": False, "mismatches": []}}}
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+        "design": {"plan_digest": plan["plan_digest"]},
+        "tracking_end": {
+            "drift": {
+                "checked": {"source_tree_digest": True},
+                "unknown": [],
+                "changed": False,
+                "mismatches": [],
+            }
+        },
+    }
     conf = design_conformance(plan, repro, runs)
     assert conf["analysis_code"]["matches"] is True
     assert conf["code_freeze_gate"] is False
@@ -336,12 +423,19 @@ def test_code_freeze_and_provenance_drift_gate():
     tampered = json.loads(json.dumps(plan))
     tampered["inputs"]["analysis_code"]["digest"] = "0" * 16
     tampered["inputs"]["analysis_code"]["entries"][0]["sha256"] = "f" * 64
-    repro_drift = dict(repro, tracking_end={"drift": {
-        "checked": {"source_tree_digest": False},
-        "unknown": [],
-        "changed": True,
-        "mismatches": [{"field": "source_tree_digest",
-                        "start": "a", "end": "b"}]}})
+    repro_drift = dict(
+        repro,
+        tracking_end={
+            "drift": {
+                "checked": {"source_tree_digest": False},
+                "unknown": [],
+                "changed": True,
+                "mismatches": [
+                    {"field": "source_tree_digest", "start": "a", "end": "b"}
+                ],
+            }
+        },
+    )
     conf2 = design_conformance(tampered, repro_drift, runs)
     assert conf2["checked"] is True
     assert conf2["code_freeze_gate"] is True
@@ -350,8 +444,15 @@ def test_code_freeze_and_provenance_drift_gate():
     assert conf2["in_plan"] is False
     md = "\n".join(render_design_section(tampered, conf2))
     assert "分析代码冻结失败" in md and "身份漂移" in md
-    hyps = [{"id": "H1", "metric": "PPL", "candidate": "lega",
-             "reference": "standard", "confirmatory_valid": True}]
+    hyps = [
+        {
+            "id": "H1",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        }
+    ]
     out = apply_design_gate(hyps, conf2, tampered)
     assert out[0]["confirmatory_valid"] is False
     assert "代码冻结失败" in out[0]["confirmatory_note"]
@@ -375,9 +476,18 @@ def test_code_freeze_and_provenance_drift_gate():
     assert conf4["plan_integrity_gate"] is True
     assert conf4["in_plan"] is False
     out4 = apply_design_gate(
-        [{"id": "H1", "metric": "PPL", "candidate": "lega",
-          "reference": "standard", "confirmatory_valid": True}],
-        conf4, rewritten)
+        [
+            {
+                "id": "H1",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "confirmatory_valid": True,
+            }
+        ],
+        conf4,
+        rewritten,
+    )
     assert out4[0]["confirmatory_valid"] is False
     assert "计划摘要不一致" in out4[0]["confirmatory_note"]
     print("  [ok] 代码冻结/实验期间漂移/计划改写：显式降级，旧计划兼容")
@@ -387,25 +497,48 @@ def test_apply_design_gate_targets_only_affected_hypotheses():
     """缺 qgate 只降级 H5/含 qgate 的假设；H1、H6 不受影响。"""
     plan = _plan(seeds=(1, 2, 3))
     runs = {
-        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                 for s in (1, 2, 3)},
-        "standard": {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                     for s in (1, 2, 3)},
-        "qgate": {1: {"eval": {}, "ruler": {}, "analysis": {}},
-                  2: {"eval": {}, "ruler": {}, "analysis": {}}},
+        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)},
+        "standard": {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)},
+        "qgate": {
+            1: {"eval": {}, "ruler": {}, "analysis": {}},
+            2: {"eval": {}, "ruler": {}, "analysis": {}},
+        },
     }
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+    }
     conf = design_conformance(plan, repro, runs)
     hyps = [
-        {"id": "H1", "metric": "PPL", "candidate": "lega",
-         "reference": "standard", "confirmatory_valid": True},
-        {"id": "H5", "metric": "PPL", "candidate": "lega",
-         "reference": "qgate", "confirmatory_valid": True},
-        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
-         "reference": "standard", "confirmatory_valid": True},
-        {"id": "H6", "metric": "AUROC差(logit−仅查询)", "candidate": "lega",
-         "reference": "仅查询项基线", "confirmatory_valid": True},
+        {
+            "id": "H1",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        },
+        {
+            "id": "H5",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "qgate",
+            "confirmatory_valid": True,
+        },
+        {
+            "id": "H4",
+            "metric": "RULER平均",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        },
+        {
+            "id": "H6",
+            "metric": "AUROC差(logit−仅查询)",
+            "candidate": "lega",
+            "reference": "仅查询项基线",
+            "confirmatory_valid": True,
+        },
     ]
     out = apply_design_gate(hyps, conf, plan)
     by = {h["id"]: h for h in out}
@@ -417,14 +550,28 @@ def test_apply_design_gate_targets_only_affected_hypotheses():
     assert by["H4"]["confirmatory_valid"] is True  # RULER 单元齐全
     assert by["H6"]["confirmatory_valid"] is True  # analysis 单元齐全
     # 已因其他门降级的条目保留原原因，不被覆盖。
-    hyps2 = [{"id": "H5", "metric": "PPL", "candidate": "lega",
-              "reference": "qgate", "confirmatory_valid": False,
-              "confirmatory_note": "预注册完整性失败"}]
+    hyps2 = [
+        {
+            "id": "H5",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "qgate",
+            "confirmatory_valid": False,
+            "confirmatory_note": "预注册完整性失败",
+        }
+    ]
     out2 = apply_design_gate(hyps2, conf, plan)
     assert out2[0]["confirmatory_note"] == "预注册完整性失败"
     # 计划不可核对时不降级。
-    hyps3 = [{"id": "H1", "metric": "PPL", "candidate": "lega",
-              "reference": "standard", "confirmatory_valid": True}]
+    hyps3 = [
+        {
+            "id": "H1",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        }
+    ]
     out3 = apply_design_gate(hyps3, {"checked": False}, plan)
     assert out3[0]["confirmatory_valid"] is True
     assert out3[0]["design_population_ok"] is None
@@ -434,15 +581,39 @@ def test_apply_design_gate_targets_only_affected_hypotheses():
 def test_observed_design_sensitivity():
     """实测 SD 反推 MDE：与 SESOI 同尺度比较，不伪装成观测功效。"""
     tests = [
-        {"candidate": "lega", "reference": "standard", "metric": "PPL",
-         "equivalence": {"status": "not_equivalent", "std_diff": 0.01,
-                         "n": 5, "margin": 0.01}},
-        {"candidate": "lega", "reference": "qgate", "metric": "PPL",
-         "equivalence": {"status": "not_equivalent", "std_diff": 0.002,
-                         "n": 5, "margin": 0.01}},
-        {"candidate": "bad", "reference": "x", "metric": "PPL",
-         "equivalence": {"status": "invalid", "std_diff": 0.1,
-                         "n": 5, "margin": 0.01}},
+        {
+            "candidate": "lega",
+            "reference": "standard",
+            "metric": "PPL",
+            "equivalence": {
+                "status": "not_equivalent",
+                "std_diff": 0.01,
+                "n": 5,
+                "margin": 0.01,
+            },
+        },
+        {
+            "candidate": "lega",
+            "reference": "qgate",
+            "metric": "PPL",
+            "equivalence": {
+                "status": "not_equivalent",
+                "std_diff": 0.002,
+                "n": 5,
+                "margin": 0.01,
+            },
+        },
+        {
+            "candidate": "bad",
+            "reference": "x",
+            "metric": "PPL",
+            "equivalence": {
+                "status": "invalid",
+                "std_diff": 0.1,
+                "n": 5,
+                "margin": 0.01,
+            },
+        },
     ]
     rows = observed_design_sensitivity(tests)
     assert len(rows) == 2
@@ -458,18 +629,19 @@ def test_render_design_section_with_and_without_plan():
     """汇总页必须把计划、检查、灵敏度与人群偏差渲染出来。"""
     plan = _plan(seeds=(1, 2, 3))
     runs = {
-        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                 for s in (1, 2)},
-        "standard": {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                     for s in (1, 2, 3)},
-        "qgate": {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                  for s in (1, 2, 3)},
+        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2)},
+        "standard": {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)},
+        "qgate": {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)},
     }
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+    }
     conf = design_conformance(plan, repro, runs)
-    md = "\n".join(render_design_section(
-        plan, conf, observed=observed_design_sensitivity([])))
+    md = "\n".join(
+        render_design_section(plan, conf, observed=observed_design_sensitivity([]))
+    )
     assert "实验设计与分析人群" in md
     assert "PPL 先验灵敏度" in md
     assert "RULER 评测样本级先验灵敏度" in md
@@ -496,37 +668,77 @@ def test_design_cli_writes_plan_and_exit_code():
     """CLI：写出计划；有 fail 时退出码 2，警告时 0。"""
     tmp = tempfile.mkdtemp()
     try:
-        cfg = {"seeds": [1, 2, 3], "seed": 1,
-               "ruler": {"ctx_lens": [256], "n_samples": 30}}
+        cfg = {
+            "seeds": [1, 2, 3],
+            "seed": 1,
+            "ruler": {"ctx_lens": [256], "n_samples": 30},
+        }
         cfg_path = os.path.join(tmp, "cfg.json")
         _write_json(cfg_path, cfg)
-        reg = {"hypotheses": [
-            {"id": "H1", "metric": "PPL", "candidate": "lega",
-             "reference": "standard"}]}
+        reg = {
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "metric": "PPL",
+                    "candidate": "lega",
+                    "reference": "standard",
+                }
+            ]
+        }
         reg_path = os.path.join(tmp, "reg.json")
         _write_json(reg_path, reg)
         out = os.path.join(tmp, "plan.json")
         data_dir = os.path.join(tmp, "data")
         os.makedirs(data_dir)
-        _write_json(os.path.join(data_dir, "data_report.json"), {
-            "accounting": {"train": {"tokens": 100000},
-                           "val": {"tokens": 100000},
-                           "test": {"tokens": 100000}},
-            "tokenizer": {"kind": "char"}})
-        rc = design_main(["--config", cfg_path, "--variants", "lega,standard",
-                          "--registered", reg_path, "--out", out,
-                          "--data_dir", data_dir, "--quiet"])
+        _write_json(
+            os.path.join(data_dir, "data_report.json"),
+            {
+                "accounting": {
+                    "train": {"tokens": 100000},
+                    "val": {"tokens": 100000},
+                    "test": {"tokens": 100000},
+                },
+                "tokenizer": {"kind": "char"},
+            },
+        )
+        rc = design_main(
+            [
+                "--config",
+                cfg_path,
+                "--variants",
+                "lega,standard",
+                "--registered",
+                reg_path,
+                "--out",
+                out,
+                "--data_dir",
+                data_dir,
+                "--quiet",
+            ]
+        )
         assert rc == 0, rc
         plan = json.load(open(out, encoding="utf-8"))
         assert plan["inputs"]["seeds"] == [1, 2, 3]
         assert plan["status"] in ("ok", "warning")
         assert plan["data_budget"]["report_present"] is True
         # 少跑预注册种子 → fail → 退出码 2。
-        _write_json(reg_path, {"scope": {"seeds": [1, 2, 3, 4, 5]},
-                               "hypotheses": reg["hypotheses"]})
-        rc2 = design_main(["--config", cfg_path, "--variants",
-                           "lega,standard", "--registered", reg_path,
-                           "--out", out, "--quiet"])
+        _write_json(
+            reg_path,
+            {"scope": {"seeds": [1, 2, 3, 4, 5]}, "hypotheses": reg["hypotheses"]},
+        )
+        rc2 = design_main(
+            [
+                "--config",
+                cfg_path,
+                "--variants",
+                "lega,standard",
+                "--registered",
+                reg_path,
+                "--out",
+                out,
+                "--quiet",
+            ]
+        )
         assert rc2 == 2, rc2
         plan2 = json.load(open(out, encoding="utf-8"))
         assert plan2["status"] == "fail"
@@ -539,17 +751,29 @@ def test_design_cli_loads_default_preregistration():
     """不传 --registered 时必须从仓库根目录读取预注册表，而非 lega/ 下。"""
     tmp = tempfile.mkdtemp()
     try:
-        cfg = {"seeds": [1337, 2024, 42, 7, 2025],
-               "ruler": {"ctx_lens": [256, 512], "n_samples": 30}}
+        cfg = {
+            "seeds": [1337, 2024, 42, 7, 2025],
+            "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        }
         cfg_path = os.path.join(tmp, "cfg.json")
         _write_json(cfg_path, cfg)
         out = os.path.join(tmp, "plan.json")
-        design_main(["--config", cfg_path, "--variants", "lega,standard",
-                     "--out", out, "--quiet"])
+        design_main(
+            [
+                "--config",
+                cfg_path,
+                "--variants",
+                "lega,standard",
+                "--out",
+                out,
+                "--quiet",
+            ]
+        )
         plan = json.load(open(out, encoding="utf-8"))
         assert plan["inputs"]["registered_hypotheses"], plan["inputs"]
-        assert any(c.get("id") == "scope_config"
-                   for c in plan["checks"] if isinstance(c, dict))
+        assert any(
+            c.get("id") == "scope_config" for c in plan["checks"] if isinstance(c, dict)
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] design CLI：默认预注册表路径正确")
@@ -577,19 +801,29 @@ def test_design_plan_records_test_look_budget():
     assert check["status"] == "info"
 
     custom = build_design_plan(
-        {"ruler": {"ctx_lens": [256], "n_samples": 30},
-         "design": {"test_look_budget": 2}},
-        [1, 2, 3], ["lega", "standard"], None,
-        known_variants={"lega", "standard"})
+        {
+            "ruler": {"ctx_lens": [256], "n_samples": 30},
+            "design": {"test_look_budget": 2},
+        },
+        [1, 2, 3],
+        ["lega", "standard"],
+        None,
+        known_variants={"lega", "standard"},
+    )
     assert custom["test_look_budget"] == 2
     check = {c["id"]: c for c in custom["checks"]}["test_look_budget"]
     assert check["status"] == "pass" and "2" in check["detail"]
 
     bad = build_design_plan(
-        {"ruler": {"ctx_lens": [256], "n_samples": 30},
-         "design": {"test_look_budget": 0}},
-        [1, 2, 3], ["lega", "standard"], None,
-        known_variants={"lega", "standard"})
+        {
+            "ruler": {"ctx_lens": [256], "n_samples": 30},
+            "design": {"test_look_budget": 0},
+        },
+        [1, 2, 3],
+        ["lega", "standard"],
+        None,
+        known_variants={"lega", "standard"},
+    )
     assert bad["test_look_budget"] == 1
     check = {c["id"]: c for c in bad["checks"]}["test_look_budget"]
     assert check["status"] == "fail"
@@ -600,7 +834,7 @@ def test_design_plan_accepts_seed_zero_and_caps_seed_range():
     """种子 0 与 utils.seed_int 同口径合法；负数/超出 2^32-1 必须拒绝。"""
     plan = _plan(seeds=(0, 1, 2))
     assert plan["inputs"]["seeds"] == [0, 1, 2]
-    for bad in (-1, 2 ** 32, 10 ** 400):
+    for bad in (-1, 2**32, 10**400):
         try:
             _plan(seeds=(0, bad))
         except ValueError:
@@ -612,30 +846,41 @@ def test_design_plan_accepts_seed_zero_and_caps_seed_range():
 
 def test_design_plan_rejects_malformed_inputs():
     """非法种子/变体/配置必须在训练前显式失败。"""
-    for seeds, variants in (([], ["lega"]), ([1, 1], ["lega"]),
-                            ([1], []), ([1], ["lega", "lega"])):
+    for seeds, variants in (
+        ([], ["lega"]),
+        ([1, 1], ["lega"]),
+        ([1], []),
+        ([1], ["lega", "lega"]),
+    ):
         try:
-            build_design_plan({}, seeds, variants, None,
-                              known_variants={"lega"})
+            build_design_plan({}, seeds, variants, None, known_variants={"lega"})
         except ValueError:
             pass
         else:
             raise AssertionError(f"应拒绝 seeds={seeds}, variants={variants}")
     # 配置里的设计网格非法时不能静默跳过检查。
     try:
-        build_design_plan({"design": {"ppl_paired_sd_rel_grid": [0.1, -1]}},
-                          [1, 2, 3], ["lega"], None,
-                          known_variants={"lega"})
+        build_design_plan(
+            {"design": {"ppl_paired_sd_rel_grid": [0.1, -1]}},
+            [1, 2, 3],
+            ["lega"],
+            None,
+            known_variants={"lega"},
+        )
     except ValueError:
         pass
     else:
         raise AssertionError("负的设计网格必须拒绝")
     # 网格项必须逐项严格校验，不能把 bool/字符串/NaN/超大整数隐式转成 float。
-    for bad_grid in ([True], ["0.1"], [float("nan")], [10 ** 400]):
+    for bad_grid in ([True], ["0.1"], [float("nan")], [10**400]):
         try:
             build_design_plan(
                 {"design": {"ppl_paired_sd_rel_grid": bad_grid}},
-                [1, 2, 3], ["lega"], None, known_variants={"lega"})
+                [1, 2, 3],
+                ["lega"],
+                None,
+                known_variants={"lega"},
+            )
         except ValueError:
             pass
         else:
@@ -652,47 +897,86 @@ def test_build_summary_downgrades_confirmatory_on_missing_planned_seed():
     try:
         seeds = [1, 2, 3]
         variants = ["lega", "standard"]
-        reg = {"hypotheses": [
-            {"id": "H1", "claim": "LEGA 优于 standard", "metric": "PPL",
-             "candidate": "lega", "reference": "standard",
-             "direction": "candidate_better"}]}
+        reg = {
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "claim": "LEGA 优于 standard",
+                    "metric": "PPL",
+                    "candidate": "lega",
+                    "reference": "standard",
+                    "direction": "candidate_better",
+                }
+            ]
+        }
         plan = build_design_plan(
             {"ruler": {"ctx_lens": [256], "n_samples": 30}},
-            seeds, variants, reg, known_variants=set(variants))
+            seeds,
+            variants,
+            reg,
+            known_variants=set(variants),
+        )
         save_design_plan(plan, os.path.join(tmp, "design_plan.json"))
-        _write_json(os.path.join(tmp, "repro.json"), {
-            "variants": variants, "seeds": seeds, "smoke": False,
-            "config_sha256": plan["inputs"]["config_sha256"],
-            "design": {"stages": {"ruler": False, "analysis": False}},
-        })
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {
+                "variants": variants,
+                "seeds": seeds,
+                "smoke": False,
+                "config_sha256": plan["inputs"]["config_sha256"],
+                "design": {"stages": {"ruler": False, "analysis": False}},
+            },
+        )
         for s in seeds:
-            _write_json(os.path.join(tmp, f"eval_standard_seed{s}.json"), {
-                "variant": "standard", "seed": s, "val_ppl": 10.0 + 0.1 * s,
-                "val_loss": 2.3, "n_params": 100, "split": "val"})
+            _write_json(
+                os.path.join(tmp, f"eval_standard_seed{s}.json"),
+                {
+                    "variant": "standard",
+                    "seed": s,
+                    "val_ppl": 10.0 + 0.1 * s,
+                    "val_loss": 2.3,
+                    "n_params": 100,
+                    "split": "val",
+                },
+            )
         for s in (1, 2):  # seed3 缺失
-            _write_json(os.path.join(tmp, f"eval_lega_seed{s}.json"), {
-                "variant": "lega", "seed": s, "val_ppl": 9.0 + 0.1 * s,
-                "val_loss": 2.2, "n_params": 100, "split": "val"})
-        intact = {"status": "intact", "confirmatory_valid": True,
-                  "problems": [], "registry_sha256": "a" * 64,
-                  "n_hypotheses": 1, "baseline_document_sha256": "b" * 64,
-                  "chain_length": 0}
-        with mock.patch("lega.pipeline.report.summary.load_registered_hypotheses",
-                        return_value=reg), \
-                mock.patch("lega.pipeline.report.summary.verify_registration",
-                           return_value=intact):
+            _write_json(
+                os.path.join(tmp, f"eval_lega_seed{s}.json"),
+                {
+                    "variant": "lega",
+                    "seed": s,
+                    "val_ppl": 9.0 + 0.1 * s,
+                    "val_loss": 2.2,
+                    "n_params": 100,
+                    "split": "val",
+                },
+            )
+        intact = {
+            "status": "intact",
+            "confirmatory_valid": True,
+            "problems": [],
+            "registry_sha256": "a" * 64,
+            "n_hypotheses": 1,
+            "baseline_document_sha256": "b" * 64,
+            "chain_length": 0,
+        }
+        with mock.patch(
+            "lega.pipeline.report.summary.load_registered_hypotheses", return_value=reg
+        ), mock.patch(
+            "lega.pipeline.report.summary.verify_registration", return_value=intact
+        ):
             out = run_all.build_summary(tmp)
         md = out["markdown"]
         assert "实验设计与分析人群" in md
         assert "lega/seed3" in md
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")
         assert h1["design_population_ok"] is False
         assert h1["confirmatory_valid"] is False
         assert "分析人群不完整" in h1["confirmatory_note"]
-        conf = json.load(open(os.path.join(tmp, "design_conformance.json"),
-                              encoding="utf-8"))
+        conf = json.load(
+            open(os.path.join(tmp, "design_conformance.json"), encoding="utf-8")
+        )
         assert conf["checked"] is True and conf["in_plan"] is False
         assert "lega/seed3" in " ".join(conf["problems"])
         # 计划/实测灵敏度也必须进入 significance.json，供程序扫描。
@@ -705,25 +989,42 @@ def test_build_summary_downgrades_confirmatory_on_missing_planned_seed():
 
 def test_missing_registered_seeds_trigger_global_design_gate():
     """计划只用 3 个登记种子时，即使 3×变体人口齐全也必须全局降级。"""
-    reg = {"scope": {"seeds": [1, 2, 3, 4, 5]},
-           "hypotheses": [
-               {"id": "H1", "metric": "PPL", "candidate": "lega",
-                "reference": "standard"}]}
+    reg = {
+        "scope": {"seeds": [1, 2, 3, 4, 5]},
+        "hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega", "reference": "standard"}
+        ],
+    }
     plan = build_design_plan(
         {"ruler": {"ctx_lens": [256], "n_samples": 30}},
-        [1, 2, 3], ["lega", "standard"], reg,
-        known_variants={"lega", "standard"})
+        [1, 2, 3],
+        ["lega", "standard"],
+        reg,
+        known_variants={"lega", "standard"},
+    )
     assert plan["status"] == "fail"
-    runs = {v: {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                for s in (1, 2, 3)} for v in ("lega", "standard")}
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    runs = {
+        v: {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)}
+        for v in ("lega", "standard")
+    }
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+    }
     conf = design_conformance(plan, repro, runs)
     assert conf["checked"] is True
     assert conf["global_plan_gate"] is True
     assert conf["population"]["complete_eval"] is True  # 3×2 都齐全
-    hyps = [{"id": "H1", "metric": "PPL", "candidate": "lega",
-             "reference": "standard", "confirmatory_valid": True}]
+    hyps = [
+        {
+            "id": "H1",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        }
+    ]
     out = apply_design_gate(hyps, conf, plan)
     assert out[0]["confirmatory_valid"] is False
     assert out[0]["design_population_ok"] is False
@@ -734,18 +1035,36 @@ def test_missing_registered_seeds_trigger_global_design_gate():
 def test_plan_digest_ignores_machine_specific_config_path():
     """同一设计在不同工作目录/路径下摘要一致；内容变化仍会变。"""
     cfg = {"ruler": {"ctx_lens": [256], "n_samples": 30}}
-    reg = {"hypotheses": [{"id": "H1", "metric": "PPL",
-                           "candidate": "lega", "reference": "standard"}]}
-    a = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
-                          config_file="/mnt/a/configs/small.json",
-                          known_variants={"lega", "standard"})
-    b = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
-                          config_file="/home/other/small.json",
-                          known_variants={"lega", "standard"})
+    reg = {
+        "hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega", "reference": "standard"}
+        ]
+    }
+    a = build_design_plan(
+        cfg,
+        [1, 2, 3],
+        ["lega", "standard"],
+        reg,
+        config_file="/mnt/a/configs/small.json",
+        known_variants={"lega", "standard"},
+    )
+    b = build_design_plan(
+        cfg,
+        [1, 2, 3],
+        ["lega", "standard"],
+        reg,
+        config_file="/home/other/small.json",
+        known_variants={"lega", "standard"},
+    )
     assert a["plan_digest"] == b["plan_digest"]
-    c = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
-                          config_sha256="f" * 64,
-                          known_variants={"lega", "standard"})
+    c = build_design_plan(
+        cfg,
+        [1, 2, 3],
+        ["lega", "standard"],
+        reg,
+        config_sha256="f" * 64,
+        known_variants={"lega", "standard"},
+    )
     assert c["plan_digest"] != a["plan_digest"]
     print("  [ok] 计划摘要：忽略机器路径、对配置内容敏感")
 
@@ -753,6 +1072,7 @@ def test_plan_digest_ignores_machine_specific_config_path():
 def test_design_plan_history_preserves_redesign_events():
     """计划历史：同 digest 去重、不同 digest 追加、损坏行跳过。"""
     from lega.design import load_design_plan_history
+
     tmp = tempfile.mkdtemp()
     try:
         out = os.path.join(tmp, "design_plan.json")
@@ -767,8 +1087,9 @@ def test_design_plan_history_preserves_redesign_events():
         hist = load_design_plan_history(out)
         assert len(hist) == 2
         assert hist[-1]["plan_digest"] == p3["plan_digest"]
-        with open(os.path.join(tmp, "design_plan_history.jsonl"),
-                  "a", encoding="utf-8") as f:
+        with open(
+            os.path.join(tmp, "design_plan_history.jsonl"), "a", encoding="utf-8"
+        ) as f:
             f.write("not-json\n")
         assert len(load_design_plan_history(tmp)) == 2
     finally:
@@ -778,10 +1099,15 @@ def test_design_plan_history_preserves_redesign_events():
 
 def test_design_plan_checks_context_span_for_length_claims():
     """只有一档/跨度过窄的 ctx 不能支撑长度校准主张，计划必须告警。"""
+
     def check(ctx):
         p = build_design_plan(
             {"ruler": {"ctx_lens": ctx, "n_samples": 30}},
-            [1, 2, 3], ["lega"], None, known_variants={"lega"})
+            [1, 2, 3],
+            ["lega"],
+            None,
+            known_variants={"lega"},
+        )
         return {c["id"]: c for c in p["checks"]}["ruler_context_span"]
 
     assert check([256])["status"] == "warn"
@@ -794,48 +1120,67 @@ def test_design_scope_config_keys_match_pipeline():
     """设计层与流水线的预注册配置规模字段不能各自漂移。"""
     from lega.design import SCOPE_CONFIG_KEYS
     from lega.pipeline._shared import _SCOPE_CONFIG_KEYS
+
     assert tuple(SCOPE_CONFIG_KEYS) == tuple(_SCOPE_CONFIG_KEYS)
     print("  [ok] 设计/流水线 scope.config 字段一致")
 
 
 def test_design_plan_validates_ruler_context_and_model_capacity():
     """RULER 上下文必须是正整数，且不能超过 block_size/训练上下文。"""
+
     def checks(ctx, **extra):
         cfg = {"ruler": {"ctx_lens": ctx, "n_samples": 30}, **extra}
         plan = build_design_plan(
-            cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
+            cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"}
+        )
         return {c["id"]: c for c in plan["checks"]}
 
     ok = checks([256, 512], block_size=512, train_ctx=512)
     assert ok["ruler_context_values"]["status"] == "pass"
     assert ok["model_context"]["status"] == "pass"
     assert ok["ruler_context_model"]["status"] == "pass"
-    assert checks([256, 512.5], block_size=512)["ruler_context_values"][
-        "status"] == "fail"
-    assert checks([True, 256], block_size=512)["ruler_context_values"][
-        "status"] == "fail"
-    assert checks([256, 1024], block_size=512, train_ctx=512)[
-        "ruler_context_model"]["status"] == "fail"
-    assert checks([256, 512], block_size=512, train_ctx=256)[
-        "ruler_context_model"]["status"] == "warn"
-    assert checks([256, 512], block_size=256, train_ctx=512)[
-        "model_context"]["status"] == "fail"
+    assert (
+        checks([256, 512.5], block_size=512)["ruler_context_values"]["status"] == "fail"
+    )
+    assert (
+        checks([True, 256], block_size=512)["ruler_context_values"]["status"] == "fail"
+    )
+    assert (
+        checks([256, 1024], block_size=512, train_ctx=512)["ruler_context_model"][
+            "status"
+        ]
+        == "fail"
+    )
+    assert (
+        checks([256, 512], block_size=512, train_ctx=256)["ruler_context_model"][
+            "status"
+        ]
+        == "warn"
+    )
+    assert (
+        checks([256, 512], block_size=256, train_ctx=512)["model_context"]["status"]
+        == "fail"
+    )
     print("  [ok] 设计计划：RULER 上下文整数/模型容量检查")
 
 
 def test_design_plan_accepts_length_null_defaults_and_string_lists():
     """length_null 缺省长度/模式由运行时生成，不能在设计层误报 fail。"""
-    cfg = {"block_size": 128, "train_ctx": 128,
-           "ruler": {"ctx_lens": [64, 128], "n_samples": 30},
-           "length_null": {"enabled": True}}
-    plan = build_design_plan(
-        cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
+    cfg = {
+        "block_size": 128,
+        "train_ctx": 128,
+        "ruler": {"ctx_lens": [64, 128], "n_samples": 30},
+        "length_null": {"enabled": True},
+    }
+    plan = build_design_plan(cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
     by = {c["id"]: c for c in plan["checks"]}
     assert by["length_null_coverage"]["status"] == "info"
-    cfg["length_null"] = {"enabled": True, "lengths": "64, 128",
-                          "modes": "random,repeated"}
-    plan2 = build_design_plan(
-        cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
+    cfg["length_null"] = {
+        "enabled": True,
+        "lengths": "64, 128",
+        "modes": "random,repeated",
+    }
+    plan2 = build_design_plan(cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
     by2 = {c["id"]: c for c in plan2["checks"]}
     assert by2["length_null_coverage"]["status"] == "pass"
     print("  [ok] length_null：默认/字符串长度与模式不被误判")
@@ -847,26 +1192,43 @@ def test_design_plan_checks_data_budget_and_registered_scope():
     try:
         declared = os.path.join(tmp, "registered.json")
         actual = os.path.join(tmp, "actual.json")
-        base = {"d_model": 64, "n_layers": 2, "n_heads": 2,
-                "ffn_mult": 2, "block_size": 128, "train_ctx": 128,
-                "steps": 10}
+        base = {
+            "d_model": 64,
+            "n_layers": 2,
+            "n_heads": 2,
+            "ffn_mult": 2,
+            "block_size": 128,
+            "train_ctx": 128,
+            "steps": 10,
+        }
         _write_json(declared, base)
         _write_json(actual, base)
-        cfg = dict(base, batch_size=2, grad_accum=1, eval_iters=5,
-                   ruler={"ctx_lens": [64, 128], "n_samples": 30},
-                   length_null={"enabled": True, "lengths": [64, 128],
-                                "modes": ["random"]})
-        reg = {"scope": {"config": declared, "data": "GPT-2 BPE"},
-               "hypotheses": []}
+        cfg = dict(
+            base,
+            batch_size=2,
+            grad_accum=1,
+            eval_iters=5,
+            ruler={"ctx_lens": [64, 128], "n_samples": 30},
+            length_null={"enabled": True, "lengths": [64, 128], "modes": ["random"]},
+        )
+        reg = {"scope": {"config": declared, "data": "GPT-2 BPE"}, "hypotheses": []}
         data = {
-            "accounting": {"train": {"tokens": 1000},
-                           "val": {"tokens": 100000},
-                           "test": {"tokens": 100000}},
+            "accounting": {
+                "train": {"tokens": 1000},
+                "val": {"tokens": 100000},
+                "test": {"tokens": 100000},
+            },
             "tokenizer": {"kind": "gpt2"},
         }
         plan = build_design_plan(
-            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
-            data_report=data, known_variants={"lega"})
+            cfg,
+            [1, 2, 3],
+            ["lega"],
+            reg,
+            config_file=actual,
+            data_report=data,
+            known_variants={"lega"},
+        )
         by = {c["id"]: c for c in plan["checks"]}
         assert by["scope_config"]["status"] == "pass"
         assert by["scope_data"]["status"] == "pass"
@@ -881,8 +1243,14 @@ def test_design_plan_checks_data_budget_and_registered_scope():
         bad_cfg = os.path.join(tmp, "bad.json")
         _write_json(bad_cfg, dict(base, d_model=32))
         bad = build_design_plan(
-            cfg, [1, 2, 3], ["lega"], reg, config_file=bad_cfg,
-            data_report=data, known_variants={"lega"})
+            cfg,
+            [1, 2, 3],
+            ["lega"],
+            reg,
+            config_file=bad_cfg,
+            data_report=data,
+            known_variants={"lega"},
+        )
         bad_by = {c["id"]: c for c in bad["checks"]}
         assert bad_by["scope_config"]["status"] == "fail"
         assert "d_model" in bad_by["scope_config"]["detail"]
@@ -892,32 +1260,54 @@ def test_design_plan_checks_data_budget_and_registered_scope():
             "tokenizer": {"kind": "char"},
         }
         char = build_design_plan(
-            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
-            data_report=char_data, known_variants={"lega"})
+            cfg,
+            [1, 2, 3],
+            ["lega"],
+            reg,
+            config_file=actual,
+            data_report=char_data,
+            known_variants={"lega"},
+        )
         char_by = {c["id"]: c for c in char["checks"]}
         assert char_by["scope_data"]["status"] == "fail"
 
         tiny_val = {
-            "accounting": {"train": {"tokens": 1000},
-                           "val": {"tokens": 100},
-                           "test": {"tokens": 100000}},
+            "accounting": {
+                "train": {"tokens": 1000},
+                "val": {"tokens": 100},
+                "test": {"tokens": 100000},
+            },
             "tokenizer": {"kind": "gpt2"},
         }
         small = build_design_plan(
-            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
-            data_report=tiny_val, known_variants={"lega"})
+            cfg,
+            [1, 2, 3],
+            ["lega"],
+            reg,
+            config_file=actual,
+            data_report=tiny_val,
+            known_variants={"lega"},
+        )
         small_by = {c["id"]: c for c in small["checks"]}
         assert small_by["eval_budget"]["status"] == "fail"
 
         empty_train = {
-            "accounting": {"train": {"tokens": 0},
-                           "val": {"tokens": 100000},
-                           "test": {"tokens": 100000}},
+            "accounting": {
+                "train": {"tokens": 0},
+                "val": {"tokens": 100000},
+                "test": {"tokens": 100000},
+            },
             "tokenizer": {"kind": "gpt2"},
         }
         empty = build_design_plan(
-            cfg, [1, 2, 3], ["lega"], reg, config_file=actual,
-            data_report=empty_train, known_variants={"lega"})
+            cfg,
+            [1, 2, 3],
+            ["lega"],
+            reg,
+            config_file=actual,
+            data_report=empty_train,
+            known_variants={"lega"},
+        )
         empty_by = {c["id"]: c for c in empty["checks"]}
         assert empty_by["data_budget"]["status"] == "fail"
     finally:
@@ -927,35 +1317,61 @@ def test_design_plan_checks_data_budget_and_registered_scope():
 
 def test_design_gate_downgrades_only_affected_endpoint_on_capacity_failure():
     """RULER 上下文超容量只降级 RULER 假设，不连带 PPL 对比。"""
-    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
-           "block_size": 256, "train_ctx": 256}
-    reg = {"hypotheses": [
-        {"id": "H1", "metric": "PPL", "candidate": "lega",
-         "reference": "standard", "direction": "candidate_better"},
-        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
-         "reference": "standard", "direction": "candidate_better"},
-    ]}
+    cfg = {
+        "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        "block_size": 256,
+        "train_ctx": 256,
+    }
+    reg = {
+        "hypotheses": [
+            {
+                "id": "H1",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_better",
+            },
+            {
+                "id": "H4",
+                "metric": "RULER平均",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_better",
+            },
+        ]
+    }
     plan = build_design_plan(
-        cfg, [1, 2, 3], ["lega", "standard"], reg,
-        known_variants={"lega", "standard"})
+        cfg, [1, 2, 3], ["lega", "standard"], reg, known_variants={"lega", "standard"}
+    )
     by = {c["id"]: c for c in plan["checks"]}
     assert by["ruler_context_model"]["status"] == "fail"
     runs = {
-        v: {s: {"eval": {}, "ruler": {}, "analysis": {}}
-            for s in (1, 2, 3)}
+        v: {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)}
         for v in ("lega", "standard")
     }
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+    }
     conf = design_conformance(plan, repro, runs)
     assert conf["global_plan_gate"] is False
-    assert conf["endpoint_plan_failures"]["ruler"][0]["id"] == \
-        "ruler_context_model"
+    assert conf["endpoint_plan_failures"]["ruler"][0]["id"] == "ruler_context_model"
     hyps = [
-        {"id": "H1", "metric": "PPL", "candidate": "lega",
-         "reference": "standard", "confirmatory_valid": True},
-        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
-         "reference": "standard", "confirmatory_valid": True},
+        {
+            "id": "H1",
+            "metric": "PPL",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        },
+        {
+            "id": "H4",
+            "metric": "RULER平均",
+            "candidate": "lega",
+            "reference": "standard",
+            "confirmatory_valid": True,
+        },
     ]
     out = apply_design_gate(hyps, conf, plan)
     out_by = {h["id"]: h for h in out}
@@ -968,26 +1384,33 @@ def test_design_gate_downgrades_only_affected_endpoint_on_capacity_failure():
 
 def test_analysis_population_ignores_variants_without_analysis_support():
     """standard 不产出机制分析：不得因此把它算成“分析人群缺失”。"""
-    reg = {"hypotheses": [{"id": "H1", "metric": "PPL",
-                           "candidate": "lega", "reference": "standard"}]}
+    reg = {
+        "hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega", "reference": "standard"}
+        ]
+    }
     plan = build_design_plan(
         {"ruler": {"ctx_lens": [256], "n_samples": 30}},
-        [1, 2, 3], ["lega", "standard"], reg,
+        [1, 2, 3],
+        ["lega", "standard"],
+        reg,
         known_variants={"lega", "standard"},
-        analysis_variants=["lega"])
+        analysis_variants=["lega"],
+    )
     runs = {
-        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}}
-                 for s in (1, 2, 3)},
-        "standard": {s: {"eval": {}, "ruler": {}}
-                     for s in (1, 2, 3)},
+        "lega": {s: {"eval": {}, "ruler": {}, "analysis": {}} for s in (1, 2, 3)},
+        "standard": {s: {"eval": {}, "ruler": {}} for s in (1, 2, 3)},
     }
     pop = analysis_population(plan, runs)
     assert pop["complete_eval"] is True
     assert pop["complete_ruler"] is True
     assert pop["complete_analysis"] is True
     assert pop["missing_analysis"] == []
-    repro = {"variants": plan["inputs"]["variants"],
-             "seeds": plan["inputs"]["seeds"], "smoke": False}
+    repro = {
+        "variants": plan["inputs"]["variants"],
+        "seeds": plan["inputs"]["seeds"],
+        "smoke": False,
+    }
     conf = design_conformance(plan, repro, runs)
     assert conf["checked"] is True and conf["in_plan"] is True
     print("  [ok] 分析人群：不为无分析能力的标准变体伪造缺失")
@@ -999,22 +1422,21 @@ def test_design_power_helpers_handle_nonpositive_z_sum():
     z_alpha = statistics.NormalDist().inv_cdf(1.0 - alpha / 2.0)
     at_alpha = statistics.NormalDist().cdf(-z_alpha)
     for power in (at_alpha, at_alpha / 2.0):
-        assert min_detectable_effect(1.0, 10, alpha=alpha,
-                                     power=power) == 0.0
+        assert min_detectable_effect(1.0, 10, alpha=alpha, power=power) == 0.0
         assert max_sd_for_effect(1.0, 10, alpha=alpha, power=power) is None
         assert required_pairs(1.0, 1.0, alpha=alpha, power=power) == 2
         assert required_pairs(1e-300, 1e300, alpha=alpha, power=power) == 2
         assert mcnemar_mde(10, 0.1, alpha=alpha, power=power) == 0.0
-        assert max_discordance_for_effect(
-            1.0, 10, alpha=alpha, power=power) == 1.0
+        assert max_discordance_for_effect(1.0, 10, alpha=alpha, power=power) == 1.0
         from lega.utils import min_detectable_effect as utils_mde
+
         assert utils_mde(1.0, 10, alpha=alpha, power=power) == 0.0
     print("  [ok] 设计功效函数：z 和 <= 0 时不除零/不返回负值")
 
 
 def test_design_power_helpers_tolerate_counts_beyond_float_range():
     """合法的大整数样本数不能让功效/MDE 计算抛 OverflowError。"""
-    huge = 10 ** 400  # √n = 1e200 仍可表示
+    huge = 10**400  # √n = 1e200 仍可表示
     assert paired_t_power(0.01, 0.01, huge) == 1.0
     assert abs(paired_t_power(0.0, 0.01, huge) - 0.05) < 1e-12
     mde = min_detectable_effect(0.01, huge)
@@ -1045,22 +1467,26 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
     # alpha 小到 1-alpha/2 在 float 中舍入为 1 时，正态临界值不能抛错；
     # 与 utils.min_detectable_effect 保持同一口径。
     from lega.utils import min_detectable_effect as utils_mde
+
     for tiny_alpha in (1e-16, 1e-300, 5e-324):
         assert math.isfinite(paired_t_power(1.0, 1.0, 10, alpha=tiny_alpha))
-        assert math.isfinite(min_detectable_effect(
-            1.0, 10, alpha=tiny_alpha))
+        assert math.isfinite(min_detectable_effect(1.0, 10, alpha=tiny_alpha))
         assert math.isfinite(max_sd_for_effect(1.0, 10, alpha=tiny_alpha))
         assert required_pairs(1.0, 1.0, alpha=tiny_alpha) is not None
-        assert math.isfinite(mcnemar_power(
-            1000, 0.1, 0.01, alpha=tiny_alpha)["power"])
+        assert math.isfinite(mcnemar_power(1000, 0.1, 0.01, alpha=tiny_alpha)["power"])
         assert math.isfinite(mcnemar_mde(1000, 0.1, alpha=tiny_alpha))
-        assert abs(min_detectable_effect(1.0, 10, alpha=tiny_alpha)
-                   - utils_mde(1.0, 10, alpha=tiny_alpha)) < 1e-15
-    huge_burden = multiplicity_alpha(0.05, 10 ** 400, 1)
+        assert (
+            abs(
+                min_detectable_effect(1.0, 10, alpha=tiny_alpha)
+                - utils_mde(1.0, 10, alpha=tiny_alpha)
+            )
+            < 1e-15
+        )
+    huge_burden = multiplicity_alpha(0.05, 10**400, 1)
     assert huge_burden["representable"] is False
     assert huge_burden["alpha_effective"] == 0.05
 
-    astronomical = 10 ** 1000  # √n 本身已超出 float 上限
+    astronomical = 10**1000  # √n 本身已超出 float 上限
     assert paired_t_power(0.01, 0.01, astronomical) == 1.0
     assert abs(paired_t_power(0.0, 0.01, astronomical) - 0.05) < 1e-12
     assert min_detectable_effect(0.01, astronomical) is None
@@ -1074,6 +1500,7 @@ def test_design_power_helpers_tolerate_counts_beyond_float_range():
 def test_noncentral_t_power_is_more_conservative_for_small_seeds():
     """3~5 个种子时，非中心 t 仿真必须低于正态近似（后者高估功效）。"""
     from lega.design import paired_t_power_nct
+
     for n in (3, 5):
         normal = paired_t_power(0.01, 0.01, n)
         out = paired_t_power_nct(0.01, 0.01, n, n_sim=20000, seed=3)
@@ -1094,8 +1521,7 @@ def test_run_order_is_randomized_blocked_and_reproducible():
     assert ro["mode"] == "randomized_blocked"
     assert ro["n_cells"] == 15 and ro["n_blocks"] == 5
     assert ro["seed_source"] == "derived_from_plan_inputs"
-    assert validate_run_order(ro, p1["inputs"]["variants"],
-                              p1["inputs"]["seeds"]) == []
+    assert validate_run_order(ro, p1["inputs"]["variants"], p1["inputs"]["seeds"]) == []
     for seed in p1["inputs"]["seeds"]:
         block = [c["variant"] for c in ro["cells"] if c["seed"] == seed]
         assert sorted(block) == sorted(p1["inputs"]["variants"]), block
@@ -1105,28 +1531,41 @@ def test_run_order_is_randomized_blocked_and_reproducible():
     assert p2["run_order"]["cells"] == ro["cells"]
     assert p2["plan_digest"] == p1["plan_digest"]
 
-    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
-           "design": {"alpha": 0.05, "power": 0.8,
-                      "run_order_seed": 12345}}
-    p3 = build_design_plan(cfg, [1, 2, 3], ["lega", "standard", "qgate"],
-                           None, known_variants={"lega", "standard", "qgate"})
+    cfg = {
+        "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        "design": {"alpha": 0.05, "power": 0.8, "run_order_seed": 12345},
+    }
+    p3 = build_design_plan(
+        cfg,
+        [1, 2, 3],
+        ["lega", "standard", "qgate"],
+        None,
+        known_variants={"lega", "standard", "qgate"},
+    )
     assert p3["run_order"]["seed_source"] == "configured"
     assert p3["run_order"]["order_seed"] == 12345
-    assert validate_run_order(p3["run_order"],
-                              ["lega", "standard", "qgate"], [1, 2, 3]) == []
+    assert (
+        validate_run_order(p3["run_order"], ["lega", "standard", "qgate"], [1, 2, 3])
+        == []
+    )
 
     cfg["design"]["run_order"] = "variant_major"
-    p4 = build_design_plan(cfg, [1, 2, 3], ["lega", "standard", "qgate"],
-                           None, known_variants={"lega", "standard", "qgate"})
+    p4 = build_design_plan(
+        cfg,
+        [1, 2, 3],
+        ["lega", "standard", "qgate"],
+        None,
+        known_variants={"lega", "standard", "qgate"},
+    )
     check = {c["id"]: c for c in p4["checks"]}["run_order"]
     assert check["status"] == "warn" and "混淆" in check["detail"]
-    assert [(c["variant"], c["seed"]) for c in p4["run_order"]["cells"]] == \
-        [(v, s) for v in ["lega", "standard", "qgate"] for s in (1, 2, 3)]
+    assert [(c["variant"], c["seed"]) for c in p4["run_order"]["cells"]] == [
+        (v, s) for v in ["lega", "standard", "qgate"] for s in (1, 2, 3)
+    ]
 
     cfg["design"]["run_order"] = "bogus"
     try:
-        build_design_plan(cfg, [1, 2, 3], ["lega"], None,
-                          known_variants={"lega"})
+        build_design_plan(cfg, [1, 2, 3], ["lega"], None, known_variants={"lega"})
     except ValueError:
         pass
     else:
@@ -1159,20 +1598,20 @@ def test_validate_run_order_rejects_stale_positions_and_metadata():
     vm = build_run_order(variants, seeds, mode="variant_major")
     assert len(vm["blocks"]) == vm["n_blocks"]
     assert [b["variants"] for b in vm["blocks"]] == [variants, variants]
-    for key, value in (("order_seed", True), ("order_seed", -1),
-                       ("order_seed", ro["order_seed"] + 1),
-                       ("order_seed", None)):
-        problems = validate_run_order(dict(ro, **{key: value}),
-                                      variants, seeds)
+    for key, value in (
+        ("order_seed", True),
+        ("order_seed", -1),
+        ("order_seed", ro["order_seed"] + 1),
+        ("order_seed", None),
+    ):
+        problems = validate_run_order(dict(ro, **{key: value}), variants, seeds)
         assert any("order_seed" in p for p in problems), (key, value, problems)
     for value in ("manual", None, 1):
-        problems = validate_run_order(dict(ro, seed_source=value),
-                                      variants, seeds)
+        problems = validate_run_order(dict(ro, seed_source=value), variants, seeds)
         assert any("seed_source" in p for p in problems), (value, problems)
     bad_blocks = [dict(b) for b in ro["blocks"]]
     bad_blocks[0]["variants"] = list(reversed(bad_blocks[0]["variants"]))
-    problems = validate_run_order(dict(ro, blocks=bad_blocks),
-                                  variants, seeds)
+    problems = validate_run_order(dict(ro, blocks=bad_blocks), variants, seeds)
     assert any("blocks[0].variants" in p for p in problems), problems
     problems = validate_run_order(dict(ro, blocks=[]), variants, seeds)
     assert any("run_order.blocks" in p for p in problems), problems
@@ -1182,10 +1621,8 @@ def test_validate_run_order_rejects_stale_positions_and_metadata():
     cells[i], cells[j] = cells[j], cells[i]
     problems = validate_run_order(dict(ro, cells=cells), variants, seeds)
     assert any("position 必须按 cells 列表顺序" in p for p in problems), problems
-    for key, value in (("n_cells", len(cells) + 1),
-                       ("n_blocks", len(seeds) + 1)):
-        problems = validate_run_order(dict(ro, **{key: value}),
-                                      variants, seeds)
+    for key, value in (("n_cells", len(cells) + 1), ("n_blocks", len(seeds) + 1)):
+        problems = validate_run_order(dict(ro, **{key: value}), variants, seeds)
         assert any(key in p for p in problems), (key, problems)
     bad_block = [dict(c) for c in ro["cells"]]
     bad_block[0]["block"] = 999
@@ -1196,49 +1633,74 @@ def test_validate_run_order_rejects_stale_positions_and_metadata():
 
 def test_mechanism_endpoint_sensitivity_and_declared_power():
     """H6/H7 机制端点也必须先验规划，不能只规划 PPL/RULER。"""
-    reg = {"hypotheses": [
-        {"id": "H6", "metric": "AUROC差(logit−仅查询)", "candidate": "lega",
-         "reference": "仅查询项基线", "direction": "candidate_better"},
-        {"id": "H7", "metric": "AP差(logit−仅查询)", "candidate": "lega",
-         "reference": "仅查询项基线", "direction": "candidate_better"}]}
+    reg = {
+        "hypotheses": [
+            {
+                "id": "H6",
+                "metric": "AUROC差(logit−仅查询)",
+                "candidate": "lega",
+                "reference": "仅查询项基线",
+                "direction": "candidate_better",
+            },
+            {
+                "id": "H7",
+                "metric": "AP差(logit−仅查询)",
+                "candidate": "lega",
+                "reference": "仅查询项基线",
+                "direction": "candidate_better",
+            },
+        ]
+    }
     p = _plan(registered=reg)
-    for key, metric in (("auroc", "AUROC差(logit−仅查询)"),
-                        ("ap", "AP差(logit−仅查询)")):
+    for key, metric in (
+        ("auroc", "AUROC差(logit−仅查询)"),
+        ("ap", "AP差(logit−仅查询)"),
+    ):
         ep = p["endpoints"][key]
         assert ep["metric"] == metric
         assert ep["sesoi_absolute"] == 0.01
-        row = next(r for r in ep["sensitivity"]
-                   if abs(r["paired_sd_absolute"] - 0.01) < 1e-12)
+        row = next(
+            r for r in ep["sensitivity"] if abs(r["paired_sd_absolute"] - 0.01) < 1e-12
+        )
         assert row["mde_absolute_confirmatory"] > row["mde_absolute"]
-        assert (row["power_for_sesoi_confirmatory"]
-                < row["power_for_sesoi"])
-        assert row["required_seeds_for_sesoi_confirmatory"] >= \
-            row["required_seeds_for_sesoi"]
-    assert any(c["id"] == "mechanism_endpoint_variants"
-               and c["status"] == "pass" for c in p["checks"])
+        assert row["power_for_sesoi_confirmatory"] < row["power_for_sesoi"]
+        assert (
+            row["required_seeds_for_sesoi_confirmatory"]
+            >= row["required_seeds_for_sesoi"]
+        )
+    assert any(
+        c["id"] == "mechanism_endpoint_variants" and c["status"] == "pass"
+        for c in p["checks"]
+    )
 
-    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
-           "design": {"alpha": 0.05, "power": 0.8,
-                      "auroc_paired_sd": 0.1},
-           "analysis": {"n_examples": 40}}
+    cfg = {
+        "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        "design": {"alpha": 0.05, "power": 0.8, "auroc_paired_sd": 0.1},
+        "analysis": {"n_examples": 40},
+    }
     cfg["design"]["mechanism_sesoi"] = 0.02
-    custom = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
-                               known_variants={"lega", "standard"})
+    custom = build_design_plan(
+        cfg, [1, 2, 3], ["lega", "standard"], reg, known_variants={"lega", "standard"}
+    )
     assert custom["endpoints"]["auroc"]["sesoi_absolute"] == 0.02
     assert custom["endpoints"]["ap"]["sesoi_absolute"] == 0.02
     cfg["design"].pop("mechanism_sesoi")
-    bad = build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
-                            known_variants={"lega", "standard"})
+    bad = build_design_plan(
+        cfg, [1, 2, 3], ["lega", "standard"], reg, known_variants={"lega", "standard"}
+    )
     check = {c["id"]: c for c in bad["checks"]}["auroc_declared_power"]
     assert check["status"] == "fail" and "功效不足" in check["detail"]
 
     # 有机制假设但候选不在可分析子集：必须 fail，而不是等跑完才发现。
     no_analysis = build_design_plan(
         {"ruler": {"ctx_lens": [256, 512], "n_samples": 30}},
-        [1, 2, 3], ["lega", "standard"], reg,
-        known_variants={"lega", "standard"}, analysis_variants=["standard"])
-    check = {c["id"]: c for c in no_analysis["checks"]}[
-        "mechanism_endpoint_variants"]
+        [1, 2, 3],
+        ["lega", "standard"],
+        reg,
+        known_variants={"lega", "standard"},
+        analysis_variants=["standard"],
+    )
+    check = {c["id"]: c for c in no_analysis["checks"]}["mechanism_endpoint_variants"]
     assert check["status"] == "fail" and "lega" in check["detail"]
     print("  [ok] 机制端点：确认性灵敏度、声明功效不足/分析人群缺失均显形")
 
@@ -1251,14 +1713,13 @@ def test_ruler_seed_level_sensitivity_and_declared_power():
     assert seed["inference_unit"] == "seed"
     assert seed["planned_seeds"] == 5
     assert seed["sesoi_pp"] == 0.01
-    assert any(abs(row["paired_sd_pp"] - 0.01) < 1e-12
-               for row in seed["sensitivity"])
-    row = next(r for r in seed["sensitivity"]
-               if abs(r["paired_sd_pp"] - 0.01) < 1e-12)
+    assert any(abs(row["paired_sd_pp"] - 0.01) < 1e-12 for row in seed["sensitivity"])
+    row = next(r for r in seed["sensitivity"] if abs(r["paired_sd_pp"] - 0.01) < 1e-12)
     assert row["mde_pp_confirmatory"] > row["mde_pp"]
     assert row["power_for_sesoi_confirmatory"] < row["power_for_sesoi"]
-    assert (row["required_seeds_for_sesoi_confirmatory"]
-            >= row["required_seeds_for_sesoi"])
+    assert (
+        row["required_seeds_for_sesoi_confirmatory"] >= row["required_seeds_for_sesoi"]
+    )
     assert isinstance(row["power_for_sesoi_nct"], float)
     assert "McNemar" in ruler["inference_units_note"]
     checks = {c["id"]: c for c in p["checks"]}
@@ -1266,23 +1727,41 @@ def test_ruler_seed_level_sensitivity_and_declared_power():
     assert checks["ruler_seed_confirmatory_power"]["status"] == "info"
     assert checks["ruler_seed_reference_sensitivity"]["status"] == "info"
 
-    reg = {"hypotheses": [
-        {"id": "H4", "metric": "RULER平均", "candidate": "lega",
-         "reference": "standard", "direction": "candidate_worse"}]}
-    cfg = {"ruler": {"ctx_lens": [256, 512], "n_samples": 30},
-           "design": {"alpha": 0.05, "power": 0.8,
-                      "ruler_paired_sd": 0.005}}
-    good = build_design_plan(cfg, [1, 2, 3, 4, 5], ["lega", "standard"],
-                             reg, known_variants={"lega", "standard"})
-    assert good["endpoints"]["ruler"]["seed_level"][
-        "declared_paired_sd_pp"] == 0.005
+    reg = {
+        "hypotheses": [
+            {
+                "id": "H4",
+                "metric": "RULER平均",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_worse",
+            }
+        ]
+    }
+    cfg = {
+        "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        "design": {"alpha": 0.05, "power": 0.8, "ruler_paired_sd": 0.005},
+    }
+    good = build_design_plan(
+        cfg,
+        [1, 2, 3, 4, 5],
+        ["lega", "standard"],
+        reg,
+        known_variants={"lega", "standard"},
+    )
+    assert good["endpoints"]["ruler"]["seed_level"]["declared_paired_sd_pp"] == 0.005
     checks = {c["id"]: c for c in good["checks"]}
     assert checks["ruler_seed_declared_power"]["status"] == "pass", checks
     assert checks["ruler_seed_confirmatory_power"]["status"] == "pass", checks
 
     cfg["design"]["ruler_paired_sd"] = 0.05
-    bad = build_design_plan(cfg, [1, 2, 3, 4, 5], ["lega", "standard"],
-                            reg, known_variants={"lega", "standard"})
+    bad = build_design_plan(
+        cfg,
+        [1, 2, 3, 4, 5],
+        ["lega", "standard"],
+        reg,
+        known_variants={"lega", "standard"},
+    )
     checks = {c["id"]: c for c in bad["checks"]}
     assert checks["ruler_seed_declared_power"]["status"] == "fail"
     assert "功效不足" in checks["ruler_seed_declared_power"]["detail"]
@@ -1290,8 +1769,13 @@ def test_ruler_seed_level_sensitivity_and_declared_power():
 
     cfg["design"]["ruler_paired_sd"] = 0
     try:
-        build_design_plan(cfg, [1, 2, 3], ["lega", "standard"], reg,
-                          known_variants={"lega", "standard"})
+        build_design_plan(
+            cfg,
+            [1, 2, 3],
+            ["lega", "standard"],
+            reg,
+            known_variants={"lega", "standard"},
+        )
     except ValueError:
         pass
     else:
@@ -1319,8 +1803,10 @@ def test_tost_and_noninferiority_design_power():
     assert 0.25 < p5["power"] < 0.35
     assert p5["power"] < 0.8
 
-    assert tost_power(0.0, 0.01, 10, 0.01)["power"] < tost_power(
-        0.0, 0.01, 11, 0.01)["power"]
+    assert (
+        tost_power(0.0, 0.01, 10, 0.01)["power"]
+        < tost_power(0.0, 0.01, 11, 0.01)["power"]
+    )
     assert tost_power(0.0, 0.01, 11, 0.01)["power"] >= 0.8
     assert tost_required_pairs(0.01, 0.01) == 11
     assert tost_power(0.0, 0.01, 11, 0.01)["power"] >= 0.8
@@ -1339,11 +1825,9 @@ def test_tost_and_noninferiority_design_power():
     assert noninferiority_power(0.0, 0.01, 8, 0.01)["power"] >= 0.8
     # 方向约定：effect>0 表示候选更差，非劣性功效应下降；
     # 候选更好（effect<0）时应更容易判非劣。
-    assert noninferiority_power(0.005, 0.01, 5, 0.01)["power"] < ni5[
-        "power"]
+    assert noninferiority_power(0.005, 0.01, 5, 0.01)["power"] < ni5["power"]
     assert noninferiority_power(-0.01, 0.01, 5, 0.01)["power"] > 0.9
-    assert noninferiority_required_pairs(
-        0.01, 0.01, effect=0.01) is None
+    assert noninferiority_required_pairs(0.01, 0.01, effect=0.01) is None
 
     # 大 n 用正态近似，且显式 method 可复现。
     big = tost_power(0.0, 0.01, 1000, 0.01)
@@ -1352,8 +1836,13 @@ def test_tost_and_noninferiority_design_power():
     forced = tost_power(0.0, 0.01, 5, 0.01, method="normal")
     assert forced["method"] == "normal_approx"
 
-    for bad in ({"alpha": 0.5}, {"n": 1}, {"margin": 0},
-                {"effect": float("nan")}, {"sd": float("inf")}):
+    for bad in (
+        {"alpha": 0.5},
+        {"n": 1},
+        {"margin": 0},
+        {"effect": float("nan")},
+        {"sd": float("inf")},
+    ):
         kw = dict(effect=0.0, sd=0.01, n=5, margin=0.01)
         kw.update(bad)
         try:
@@ -1372,10 +1861,12 @@ def test_design_plan_equivalence_power_checks_and_render():
     ruler_eq = plan["endpoints"]["ruler"]["seed_level"]["equivalence_plan"]
     auroc_eq = plan["endpoints"]["auroc"]["equivalence_plan"]
     ap_eq = plan["endpoints"]["ap"]["equivalence_plan"]
-    for eq, key in ((ppl_eq, "paired_sd_relative"),
-                    (ruler_eq, "paired_sd_pp"),
-                    (auroc_eq, "paired_sd_absolute"),
-                    (ap_eq, "paired_sd_absolute")):
+    for eq, key in (
+        (ppl_eq, "paired_sd_relative"),
+        (ruler_eq, "paired_sd_pp"),
+        (auroc_eq, "paired_sd_absolute"),
+        (ap_eq, "paired_sd_absolute"),
+    ):
         assert eq["margin"] > 0
         assert eq["planned_seeds"] == 5
         assert eq["sd_key"] == key
@@ -1384,18 +1875,22 @@ def test_design_plan_equivalence_power_checks_and_render():
 
     assert ppl_eq["at_reference_sd"]["required_seeds_at_null"] == 11
     assert ppl_eq["at_reference_sd"]["power_at_null"] < 0.8
-    assert ppl_eq["at_reference_sd"][
-        "noninferiority_power_at_null"] < 0.8
+    assert ppl_eq["at_reference_sd"]["noninferiority_power_at_null"] < 0.8
     assert ppl_eq["alpha_scope"] == "nominal_descriptive"
     assert "不显著" in ppl_eq["note"] or "补充性" in ppl_eq["note"]
 
     checks = {c["id"]: c for c in plan["checks"]}
-    for cid in ("ppl_equivalence_power", "ruler_seed_equivalence_power",
-                "auroc_equivalence_power", "ap_equivalence_power"):
+    for cid in (
+        "ppl_equivalence_power",
+        "ruler_seed_equivalence_power",
+        "auroc_equivalence_power",
+        "ap_equivalence_power",
+    ):
         assert checks[cid]["status"] == "warn", checks[cid]
         assert "功效" in checks[cid]["detail"]
-    assert not any(c["status"] == "fail" for c in plan["checks"]
-                   if "equivalence" in c["id"])
+    assert not any(
+        c["status"] == "fail" for c in plan["checks"] if "equivalence" in c["id"]
+    )
 
     md = "\n".join(render_design_section(plan))
     assert "PPL 等价/非劣性先验功效" in md
@@ -1416,16 +1911,18 @@ def test_design_plan_binds_data_identity_and_pre_run_test_seal():
         for name in ("train.bin", "val.bin", "test.bin", "meta.json"):
             with open(os.path.join(data_dir, name), "wb") as f:
                 f.write((name + "-bytes").encode("utf-8"))
-        _write_json(os.path.join(data_dir, "meta.json"),
-                    {"tokenizer": "gpt2", "version": 1})
+        _write_json(
+            os.path.join(data_dir, "meta.json"), {"tokenizer": "gpt2", "version": 1}
+        )
         prep = capture_preparation(data_dir)
         identity = prep["data_identity"]
         assert identity["available"] is True
         assert identity["digest"]
         assert identity["file_count"] == 4
         assert identity["test_bin_sha256"]
-        assert identity["test_bin_sha256"] == \
-            prep["test_access"]["test_data_fingerprint"]
+        assert (
+            identity["test_bin_sha256"] == prep["test_access"]["test_data_fingerprint"]
+        )
 
         plan = _plan(preparation=prep)
         checks = {c["id"]: c for c in plan["checks"]}
@@ -1444,12 +1941,16 @@ def test_design_plan_binds_data_identity_and_pre_run_test_seal():
         assert plan_changed["plan_digest"] != plan["plan_digest"]
 
         # 同一 test 版本已有一次独立 look：默认预算 1，开跑前预检必须 fail。
-        append_test_access(data_dir, {
-            "ckpt": "old.pt",
-            "test_data_fingerprint":
-                prep_changed["test_access"]["test_data_fingerprint"],
-            "pipeline_run_id": "run-old",
-        })
+        append_test_access(
+            data_dir,
+            {
+                "ckpt": "old.pt",
+                "test_data_fingerprint": prep_changed["test_access"][
+                    "test_data_fingerprint"
+                ],
+                "pipeline_run_id": "run-old",
+            },
+        )
         prep_used = capture_preparation(data_dir)
         seal = test_seal_precheck(prep_used["test_access"], 1)
         assert seal["prior_looks"] == 1
@@ -1489,8 +1990,15 @@ def test_design_conformance_detects_data_identity_swap():
         assert conf["data_identity"]["reason"] == "data_digest_mismatch"
         assert conf["in_plan"] is False
         assert any("数据指纹" in p for p in conf["problems"])
-        hyp = [{"id": "H1", "metric": "PPL", "candidate": "lega",
-                "reference": "standard", "confirmatory_valid": True}]
+        hyp = [
+            {
+                "id": "H1",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "confirmatory_valid": True,
+            }
+        ]
         gated = apply_design_gate(hyp, conf, plan)
         assert gated[0]["confirmatory_valid"] is False
         assert "数据指纹" in gated[0]["confirmatory_note"]
@@ -1514,49 +2022,79 @@ def test_design_conformance_detects_data_identity_swap():
 
 def test_design_plan_accounts_for_repeated_test_looks():
     """多次 test look 必须进入先验功效，而不是只在汇总层事后收紧阈值。"""
-    reg = {"hypotheses": [
-        {"id": "H1", "metric": "PPL", "candidate": "lega",
-         "reference": "standard"}]}
+    reg = {
+        "hypotheses": [
+            {"id": "H1", "metric": "PPL", "candidate": "lega", "reference": "standard"}
+        ]
+    }
     base_cfg = {
         "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
         "design": {"ppl_paired_sd_rel": 0.01, "ruler_paired_sd": 0.01},
     }
     once = build_design_plan(
-        base_cfg, [1, 2, 3, 4, 5], ["lega", "standard"], reg,
-        known_variants={"lega", "standard"})
+        base_cfg,
+        [1, 2, 3, 4, 5],
+        ["lega", "standard"],
+        reg,
+        known_variants={"lega", "standard"},
+    )
     twice_cfg = json.loads(json.dumps(base_cfg))
     twice_cfg["design"]["test_look_budget"] = 2
     twice = build_design_plan(
-        twice_cfg, [1, 2, 3, 4, 5], ["lega", "standard"], reg,
-        known_variants={"lega", "standard"})
+        twice_cfg,
+        [1, 2, 3, 4, 5],
+        ["lega", "standard"],
+        reg,
+        known_variants={"lega", "standard"},
+    )
 
     once_alpha = once["multiplicity_plan"]["alpha_effective_with_looks"]
     twice_alpha = twice["multiplicity_plan"]["alpha_effective_with_looks"]
-    assert once_alpha["PPL"] == once["multiplicity_plan"][
-        "alpha_effective"]["PPL"]
-    assert abs(twice_alpha["PPL"] - twice["multiplicity_plan"][
-        "alpha_effective"]["PPL"] / 2.0) < 1e-15
-    assert abs(twice_alpha["RULER"] - twice["multiplicity_plan"][
-        "alpha_effective"]["RULER"] / 2.0) < 1e-15
+    assert once_alpha["PPL"] == once["multiplicity_plan"]["alpha_effective"]["PPL"]
+    assert (
+        abs(
+            twice_alpha["PPL"]
+            - twice["multiplicity_plan"]["alpha_effective"]["PPL"] / 2.0
+        )
+        < 1e-15
+    )
+    assert (
+        abs(
+            twice_alpha["RULER"]
+            - twice["multiplicity_plan"]["alpha_effective"]["RULER"] / 2.0
+        )
+        < 1e-15
+    )
 
-    row = next(r for r in twice["endpoints"]["ppl"]["sensitivity"]
-               if abs(r["paired_sd_relative"] - 0.01) < 1e-12)
-    assert (row["mde_relative_test_look_adjusted"]
-            > row["mde_relative_confirmatory"])
-    assert (row["power_for_sesoi_test_look_adjusted"]
-            < row["power_for_sesoi_confirmatory"])
-    assert (row["required_seeds_for_sesoi_test_look_adjusted"]
-            > row["required_seeds_for_sesoi_confirmatory"])
+    row = next(
+        r
+        for r in twice["endpoints"]["ppl"]["sensitivity"]
+        if abs(r["paired_sd_relative"] - 0.01) < 1e-12
+    )
+    assert row["mde_relative_test_look_adjusted"] > row["mde_relative_confirmatory"]
+    assert (
+        row["power_for_sesoi_test_look_adjusted"] < row["power_for_sesoi_confirmatory"]
+    )
+    assert (
+        row["required_seeds_for_sesoi_test_look_adjusted"]
+        > row["required_seeds_for_sesoi_confirmatory"]
+    )
     ppl = twice["endpoints"]["ppl"]
-    assert (ppl["max_paired_sd_for_sesoi_test_look_adjusted"]
-            < ppl["max_paired_sd_for_sesoi_confirmatory"])
+    assert (
+        ppl["max_paired_sd_for_sesoi_test_look_adjusted"]
+        < ppl["max_paired_sd_for_sesoi_confirmatory"]
+    )
 
-    seed_row = next(r for r in twice["endpoints"]["ruler"]["seed_level"][
-        "sensitivity"] if abs(r["paired_sd_pp"] - 0.01) < 1e-12)
-    assert (seed_row["power_for_sesoi_test_look_adjusted"]
-            < seed_row["power_for_sesoi_confirmatory"])
-    assert (seed_row["mde_pp_test_look_adjusted"]
-            > seed_row["mde_pp_confirmatory"])
+    seed_row = next(
+        r
+        for r in twice["endpoints"]["ruler"]["seed_level"]["sensitivity"]
+        if abs(r["paired_sd_pp"] - 0.01) < 1e-12
+    )
+    assert (
+        seed_row["power_for_sesoi_test_look_adjusted"]
+        < seed_row["power_for_sesoi_confirmatory"]
+    )
+    assert seed_row["mde_pp_test_look_adjusted"] > seed_row["mde_pp_confirmatory"]
 
     by = {c["id"]: c for c in twice["checks"]}
     assert by["test_look_planning"]["status"] == "warn"

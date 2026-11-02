@@ -20,6 +20,7 @@ macro / micro / weighted（三者在不平衡数据上可能差异巨大，macro
 汇总同时报告以上全部统计量；t 与置换检验结论冲突时会显式标注，而不是静默
 采信任何一方。
 """
+
 import contextlib
 import hashlib
 import json
@@ -43,8 +44,7 @@ _ENV_AT_IMPORT = {"PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED")}
 # 最近一次 set_seed 的随机源状态指纹：(seed, fingerprints)，供 seed_report
 # 给出“种子确实生效”的可核对证据，而不是复述传入参数。同时记录确定性算法
 # 的实际启用模式（严格/warn_only），避免把“只警告”审计成“严格确定性”。
-_LAST_SEED = {"seed": None, "fingerprints": None,
-              "deterministic_warn_only": None}
+_LAST_SEED = {"seed": None, "fingerprints": None, "deterministic_warn_only": None}
 
 
 def deterministic_algorithms_warn_only():
@@ -126,8 +126,7 @@ def rng_state_fingerprint() -> dict:
     真的生效。Python random / NumPy MT19937 的状态跨平台一致；PyTorch CPU
     为 MT19937 字节状态，同版本跨平台一致；CUDA 状态哈希在无 GPU 时不出现。
     """
-    fp = {"python_random": _python_random_state_fingerprint(
-        random.getstate())}
+    fp = {"python_random": _python_random_state_fingerprint(random.getstate())}
     fp["numpy_global"] = _numpy_state_fingerprint(np.random.get_state())
     fp["torch_cpu"] = _torch_state_fingerprint(torch.get_rng_state())
     if torch.cuda.is_available():
@@ -155,11 +154,14 @@ def expected_rng_state_fingerprint(seed: int) -> dict:
     seed = seed_int(seed, "seed")
     return {
         "python_random": _python_random_state_fingerprint(
-            random.Random(seed).getstate()),
+            random.Random(seed).getstate()
+        ),
         "numpy_global": _numpy_state_fingerprint(
-            np.random.RandomState(seed).get_state()),
+            np.random.RandomState(seed).get_state()
+        ),
         "torch_cpu": _torch_state_fingerprint(
-            torch.Generator().manual_seed(seed).get_state()),
+            torch.Generator().manual_seed(seed).get_state()
+        ),
     }
 
 
@@ -191,8 +193,7 @@ def state_dict_fingerprint(state_dict) -> dict:
         h.update(raw)
         n_tensors += 1
         n_elements += int(t.numel())
-    return {"sha256": h.hexdigest(), "tensors": n_tensors,
-            "elements": n_elements}
+    return {"sha256": h.hexdigest(), "tensors": n_tensors, "elements": n_elements}
 
 
 def strict_int(value, name: str = "值") -> int:
@@ -223,7 +224,7 @@ def strict_int(value, name: str = "值") -> int:
         raise ValueError(f"{name} 必须是整数，收到 {value!r}") from e
 
 
-MAX_SEED = 2 ** 32 - 1
+MAX_SEED = 2**32 - 1
 
 
 def seed_int(value, name: str = "种子") -> int:
@@ -372,8 +373,7 @@ def seed_report(seed: int) -> dict:
 
     at_start = _ENV_AT_IMPORT.get("PYTHONHASHSEED")
     start_int = _as_int(at_start)
-    fp = (_LAST_SEED["fingerprints"]
-          if _LAST_SEED["seed"] == seed else None)
+    fp = _LAST_SEED["fingerprints"] if _LAST_SEED["seed"] == seed else None
     # 逐随机源的 seed 不是“复述参数”：只有最近一次 set_seed 的种子与请求
     # 一致时，这些随机源才真的被该 seed 固定。否则记录 None，避免请求旧/
     # 未设置种子的报告冒充实际 RNG 证据（与 rng_fingerprints 的口径一致）。
@@ -382,9 +382,11 @@ def seed_report(seed: int) -> dict:
     # “该 seed 应产生的初始状态”并排记录，审计方即使不重跑 set_seed 也能
     # 发现被复制/手改的指纹字段。CUDA 状态不在期望值内（跨版本/硬件不稳定）。
     expected_fp = expected_rng_state_fingerprint(seed) if fp is not None else None
-    match_expected = (None if (fp is None or expected_fp is None)
-                      else all(fp.get(key) == value
-                               for key, value in expected_fp.items()))
+    match_expected = (
+        None
+        if (fp is None or expected_fp is None)
+        else all(fp.get(key) == value for key, value in expected_fp.items())
+    )
     return {
         "seed": seed,
         "seed_verified": fp is not None,
@@ -395,16 +397,14 @@ def seed_report(seed: int) -> dict:
         "pythonhashseed_at_start": at_start,
         "pythonhashseed_env": os.environ.get("PYTHONHASHSEED"),
         "pythonhashseed_effective": (
-            None if (at_start is not None and start_int is None)
-            else start_int == seed),
+            None if (at_start is not None and start_int is None) else start_int == seed
+        ),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
-        "deterministic_algorithms": bool(
-            torch.are_deterministic_algorithms_enabled()),
+        "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
         # 严格 / 仅告警：只报 deterministic_algorithms=True 会夸大确定性保证
-        "deterministic_algorithms_warn_only":
-            deterministic_algorithms_warn_only(),
+        "deterministic_algorithms_warn_only": deterministic_algorithms_warn_only(),
         "data_order": "data_rng(seed)=np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
         # 项目约定：批采样与本审计共用同一 seed（train/sanity/evaluate 均如此），
         # 机器可读字段便于台账/清单自动核对数据顺序来源
@@ -412,7 +412,8 @@ def seed_report(seed: int) -> dict:
         # 数据顺序 RNG 的初始状态指纹：第三方可用
         # data_rng_state_fingerprint(seed) 独立复算；未验证时同样不给证据。
         "data_order_rng_fingerprint": (
-            data_rng_state_fingerprint(seed) if fp is not None else None),
+            data_rng_state_fingerprint(seed) if fp is not None else None
+        ),
         # 实际全局 RNG 状态指纹；expected 为由 seed 本地复算的初始状态，
         # 二者一致才说明这些指纹确实来自该 seed，而不是被复制/改写。
         "rng_fingerprints": dict(fp) if fp else None,
@@ -477,8 +478,9 @@ def _reject_duplicate_json_keys(pairs):
     return obj
 
 
-def load_config_json(path: str, *, validate: bool = False,
-                     allow_unknown: bool = False) -> dict:
+def load_config_json(
+    path: str, *, validate: bool = False, allow_unknown: bool = False
+) -> dict:
     """读取实验配置：拒绝重复键与非法顶层；可选开启语义审计。
 
     Python 的 ``json`` 默认对重复键“后者覆盖前者”且不报错；同一配置里
@@ -498,13 +500,15 @@ def load_config_json(path: str, *, validate: bool = False,
         except _DuplicateJsonKey as e:
             raise ValueError(
                 f"配置文件 {path} 含重复键 {e.args[0]!r}："
-                "重复键会静默覆盖先声明值，必须删除其中一项") from None
+                "重复键会静默覆盖先声明值，必须删除其中一项"
+            ) from None
     if not isinstance(value, dict):
         raise ValueError(
-            f"配置文件顶层必须是 JSON 对象，收到 {type(value).__name__}: "
-            f"{path}")
+            f"配置文件顶层必须是 JSON 对象，收到 {type(value).__name__}: " f"{path}"
+        )
     if validate:
         from .config_schema import assert_config_valid
+
         assert_config_valid(value, source=path, allow_unknown=allow_unknown)
     return value
 
@@ -621,8 +625,10 @@ def cpu_bf16_available() -> bool:
     bf16 支持为准，缺失该查询接口的构建按“不支持”处理。
     """
     try:
-        return bool(torch.backends.mkldnn.is_available()
-                    and torch.ops.mkldnn._is_mkldnn_bf16_supported())
+        return bool(
+            torch.backends.mkldnn.is_available()
+            and torch.ops.mkldnn._is_mkldnn_bf16_supported()
+        )
     except (AttributeError, RuntimeError, TypeError):
         return False
 
@@ -707,7 +713,7 @@ def _obs_array(values) -> np.ndarray:
     # 只有真正的数值 dtype 才能走 astype 快路。字符串 ndarray 也会被
     # NumPy 解析（"1_0" → 10.0），绕过 _finite_observation 对下划线数字串
     # 的显式拒绝；必须逐元素走同一套严格解析。
-    if (isinstance(values, np.ndarray) and arr.dtype.kind in "iuf"):
+    if isinstance(values, np.ndarray) and arr.dtype.kind in "iuf":
         out = arr.astype(np.float64, copy=False).ravel()
         if out.dtype.kind == "f" and not np.isfinite(out).all():
             # 数值 ndarray 的快速路径也必须遵守“非有限值记 NaN”的契约：
@@ -715,10 +721,8 @@ def _obs_array(values) -> np.ndarray:
             # 变成 None，而不是忽略该观测后计算其余点。
             out = np.where(np.isfinite(out), out, np.nan)
         return out
-    vals = [_finite_observation(v)
-            for v in np.asarray(values, dtype=object).ravel()]
-    return np.array([np.nan if v is None else v for v in vals],
-                    dtype=np.float64)
+    vals = [_finite_observation(v) for v in np.asarray(values, dtype=object).ravel()]
+    return np.array([np.nan if v is None else v for v in vals], dtype=np.float64)
 
 
 def _open_unit_interval(value, name: str) -> float:
@@ -755,8 +759,7 @@ def _stable_mean_std(values):
     if n < 2:
         return (mean if math.isfinite(mean) else None), None
     sd = float(scaled.std(ddof=1)) * scale
-    return (mean if math.isfinite(mean) else None,
-            sd if math.isfinite(sd) else None)
+    return (mean if math.isfinite(mean) else None, sd if math.isfinite(sd) else None)
 
 
 def _stable_median(values):
@@ -904,13 +907,16 @@ def student_t_two_sided_p(t: float, df: float) -> float:
     try:
         df = float(df)
     except (TypeError, ValueError, OverflowError):
-        if isinstance(df, (int, np.integer)) and not isinstance(
-                df, (bool, np.bool_)) and df > 0:
+        if (
+            isinstance(df, (int, np.integer))
+            and not isinstance(df, (bool, np.bool_))
+            and df > 0
+        ):
             # 合法但超出 float 上限的整数自由度：等价于无穷自由度。
             return _normal_two_sided_p(t)
         return float("nan")
     if not math.isfinite(df):
-        return (_normal_two_sided_p(t) if df > 0 else float("nan"))
+        return _normal_two_sided_p(t) if df > 0 else float("nan")
     if df <= 0:
         return float("nan")
     if df >= _T_NORMAL_DF:
@@ -957,8 +963,11 @@ def t_critical_95(df: float) -> float:
     try:
         df = float(df)
     except (TypeError, ValueError, OverflowError):
-        if (isinstance(df, (int, np.integer))
-                and not isinstance(df, (bool, np.bool_)) and df > 0):
+        if (
+            isinstance(df, (int, np.integer))
+            and not isinstance(df, (bool, np.bool_))
+            and df > 0
+        ):
             # 合法但超出 float 上限的整数自由度：t 已收敛到正态，用阈值
             # 自由度求根即可；显式 float("inf") 仍按“无效自由度”返回 None。
             df = _T_NORMAL_DF
@@ -1034,8 +1043,15 @@ def paired_sign_test(a, b) -> dict:
     """
     d = _paired_diffs(a, b)
     n = int(d.size)
-    out = {"n": n, "median_diff": None, "n_pos": None, "n_neg": None,
-           "n_zero": None, "p_sign": None, "exact": True}
+    out = {
+        "n": n,
+        "median_diff": None,
+        "n_pos": None,
+        "n_neg": None,
+        "n_zero": None,
+        "p_sign": None,
+        "exact": True,
+    }
     if n == 0:
         return out
     out["median_diff"] = _stable_median(d)
@@ -1048,7 +1064,7 @@ def paired_sign_test(a, b) -> dict:
         out["p_sign"] = 1.0
         return out
     k = min(n_pos, n_neg)
-    tail = sum(math.comb(nz, i) for i in range(k + 1)) / (2 ** nz)
+    tail = sum(math.comb(nz, i) for i in range(k + 1)) / (2**nz)
     out["p_sign"] = min(1.0, 2.0 * tail)
     return out
 
@@ -1065,46 +1081,77 @@ def paired_t_test(a, b) -> dict:
     d = _paired_diffs(a, b)
     n = int(d.size)
     if n == 0:
-        return {"n": 0, "mean_diff": None, "std_diff": None,
-                "t": None, "df": None, "p": None, "d_z": None}
+        return {
+            "n": 0,
+            "mean_diff": None,
+            "std_diff": None,
+            "t": None,
+            "df": None,
+            "p": None,
+            "d_z": None,
+        }
     mean_diff, std_diff = _stable_mean_std(d)
     if n < 2:
-        return {"n": n, "mean_diff": mean_diff, "std_diff": None,
-                "t": None, "df": None, "p": None, "d_z": None}
+        return {
+            "n": n,
+            "mean_diff": mean_diff,
+            "std_diff": None,
+            "t": None,
+            "df": None,
+            "p": None,
+            "d_z": None,
+        }
     if mean_diff is None or std_diff is None:
         # 差值本身有限，但均值/方差超出 float 表示范围：无法给出可靠检验。
-        return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
-                "t": None, "df": n - 1, "p": None, "d_z": None}
+        return {
+            "n": n,
+            "mean_diff": mean_diff,
+            "std_diff": std_diff,
+            "t": None,
+            "df": n - 1,
+            "p": None,
+            "d_z": None,
+        }
     df = n - 1
     if std_diff == 0.0:
         p = 1.0 if mean_diff == 0.0 else 0.0
         # 零方差时 t 无有限值，方向必须跟随 mean_diff 的符号：
         # 常数负差（方法一致更差）也记 t=+inf 会把方向说反。
-        t_inf = (math.copysign(float("inf"), mean_diff)
-                 if mean_diff != 0.0 else 0.0)
-        return {"n": n, "mean_diff": mean_diff, "std_diff": 0.0,
-                "t": t_inf, "df": df, "p": p, "d_z": None}
+        t_inf = math.copysign(float("inf"), mean_diff) if mean_diff != 0.0 else 0.0
+        return {
+            "n": n,
+            "mean_diff": mean_diff,
+            "std_diff": 0.0,
+            "t": t_inf,
+            "df": df,
+            "p": p,
+            "d_z": None,
+        }
     se = std_diff / math.sqrt(n)
     if se == 0.0:
         # 极小的合法标准差除以 sqrt(n) 可能下溢成 0；此时不能直接做除法
         # （会抛 ZeroDivisionError）。按标准误不可表示处理：均值为 0 → t=0，
         # 否则 t 取均值的带符号无穷（p 仍由 student_t 归零）。
-        t = (math.copysign(float("inf"), mean_diff)
-             if mean_diff != 0.0 else 0.0)
+        t = math.copysign(float("inf"), mean_diff) if mean_diff != 0.0 else 0.0
     else:
         t = mean_diff / se
     d_z = mean_diff / std_diff
-    return {"n": n, "mean_diff": mean_diff, "std_diff": std_diff,
-            "t": float(t), "df": df, "p": student_t_two_sided_p(t, df),
-            "d_z": float(d_z) if math.isfinite(d_z) else None}
+    return {
+        "n": n,
+        "mean_diff": mean_diff,
+        "std_diff": std_diff,
+        "t": float(t),
+        "df": df,
+        "p": student_t_two_sided_p(t, df),
+        "d_z": float(d_z) if math.isfinite(d_z) else None,
+    }
 
 
 # 符号翻转置换检验的精确全枚举上限：2^16 = 65536 次枚举。
 _SIGNFLIP_EXACT_MAX = 16
 
 
-def paired_sign_flip_test(a, b, n_resamples: int = 20000,
-                          seed: int = 0) -> dict:
+def paired_sign_flip_test(a, b, n_resamples: int = 20000, seed: int = 0) -> dict:
     """配对样本的符号翻转置换检验（双侧，分布无关）。
 
     H0：配对差 d_i 关于 0 对称。检验统计量 T = |mean(d)|；H0 下对任意
@@ -1130,8 +1177,13 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
         raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
     d = _paired_diffs(a, b)
     n = int(d.size)
-    out = {"n": n, "mean_diff": None, "p_perm": None,
-           "exact": None, "n_resamples": None}
+    out = {
+        "n": n,
+        "mean_diff": None,
+        "p_perm": None,
+        "exact": None,
+        "n_resamples": None,
+    }
     if n == 0:
         return out
     mean_diff, _ = _stable_mean_std(d)
@@ -1145,16 +1197,19 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
     obs = abs(float(scaled.mean()))
     if obs == 0.0:
         # 全零差：任何翻转都不改变均值，p=1（无可检效应）。
-        out.update({"p_perm": 1.0, "exact": True, "n_resamples": 2 ** n})
+        out.update({"p_perm": 1.0, "exact": True, "n_resamples": 2**n})
         return out
     if n <= _SIGNFLIP_EXACT_MAX:
         # 精确全枚举：2^n 个翻转样本（含观测自身与其全反号）。
-        signs = (np.arange(2 ** n, dtype=np.int64)[:, None]
-                 >> np.arange(n, dtype=np.int64)[None, :]) & 1
+        signs = (
+            np.arange(2**n, dtype=np.int64)[:, None]
+            >> np.arange(n, dtype=np.int64)[None, :]
+        ) & 1
         flipped = scaled[None, :] * (1.0 - 2.0 * signs)
         ge = int((np.abs(flipped.mean(axis=1)) >= obs - 1e-15).sum())
-        out.update({"p_perm": ge / float(2 ** n), "exact": True,
-                    "n_resamples": int(2 ** n)})
+        out.update(
+            {"p_perm": ge / float(2**n), "exact": True, "n_resamples": int(2**n)}
+        )
         return out
     # Monte-Carlo：固定种子可复现。随机翻转每个 d_i 的符号（±1），
     # 双侧口径把观测自身与其全反号一并计入（+2），与精确枚举一致。
@@ -1162,13 +1217,19 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000,
     flips = rng.integers(0, 2, size=(int(n_resamples), n)) * 2.0 - 1.0
     stat = np.abs((scaled[None, :] * flips).mean(axis=1))
     ge = int((stat >= obs - 1e-15).sum())
-    out.update({"p_perm": (ge + 2) / float(n_resamples + 2),
-                "exact": False, "n_resamples": int(n_resamples)})
+    out.update(
+        {
+            "p_perm": (ge + 2) / float(n_resamples + 2),
+            "exact": False,
+            "n_resamples": int(n_resamples),
+        }
+    )
     return out
 
 
-def bootstrap_mean_ci(values, n_resamples: int = 10000, ci: float = 0.95,
-                      seed: int = 0):
+def bootstrap_mean_ci(
+    values, n_resamples: int = 10000, ci: float = 0.95, seed: int = 0
+):
     """样本均值的百分位 bootstrap 置信区间（配对差/任意标量观测通用）。
 
     None/bool/非有限值剔除后 n<2 时返回 None（单点无区间可言）。
@@ -1233,8 +1294,7 @@ def _normal_two_sided_z(alpha: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
-                          power: float = 0.8):
+def min_detectable_effect(std_diff, n: int, alpha: float = 0.05, power: float = 0.8):
     """配对设计在给定 (配对差标准差, 种子数) 下的最小可检测效应（MDE）。
 
     正态近似（大样本 z 口径）：MDE = (z_{1-α/2} + z_{power}) · std/√n。
@@ -1256,7 +1316,8 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05,
     if not (math.isfinite(std) and std > 0.0):
         return None
     z = _normal_two_sided_z(float(alpha)) + statistics.NormalDist().inv_cdf(
-        float(power))
+        float(power)
+    )
     if z <= 0.0:
         return 0.0
     # n 是合法的 Python 大整数时 math.sqrt(n) 会先尝试转 float 并抛
@@ -1308,8 +1369,7 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
     p = k / n
     den = 1.0 + z2_n
     center = (p + z2_n / 2.0) / den
-    half = z * math.sqrt(p * (1.0 - p) * n_inv
-                         + z2 * n2_inv / 4.0) / den
+    half = z * math.sqrt(p * (1.0 - p) * n_inv + z2 * n2_inv / 4.0) / den
     return max(0.0, center - half), min(1.0, center + half)
 
 
@@ -1354,7 +1414,8 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     if candidate_only < 0 or reference_only < 0:
         raise ValueError(
             "candidate_only/reference_only 必须是 >= 0 的整数，收到 "
-            f"{candidate_only}/{reference_only}")
+            f"{candidate_only}/{reference_only}"
+        )
     n = candidate_only + reference_only
     if n <= 0:
         return 1.0
@@ -1364,8 +1425,10 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     if n > _MCNEMAR_EXACT_MAX or k > _MCNEMAR_EXACT_MAX:
         return _mcnemar_normal_approx(n, k)
     log2 = math.log(2.0)
-    logs = [math.lgamma(n + 1) - math.lgamma(i + 1)
-            - math.lgamma(n - i + 1) - n * log2 for i in range(k + 1)]
+    logs = [
+        math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) - n * log2
+        for i in range(k + 1)
+    ]
     m = max(logs)
     log_tail = m + math.log(math.fsum(math.exp(x - m) for x in logs))
     return min(1.0, 2.0 * math.exp(log_tail))
@@ -1429,13 +1492,13 @@ def _score_label_arrays(scores, labels, label_dtype=None):
         scores = _obs_array(scores)
     labels_arr = np.asarray(labels)
     if labels_arr.dtype.kind in "iuf":
-        labels = (labels_arr.astype(label_dtype)
-                  if label_dtype is not None else labels_arr)
+        labels = (
+            labels_arr.astype(label_dtype) if label_dtype is not None else labels_arr
+        )
     else:
         labels = _obs_array(labels)
     if scores.size != labels.size:
-        raise ValueError(
-            f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
+        raise ValueError(f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
     return scores.ravel(), labels.ravel()
 
 
@@ -1468,7 +1531,7 @@ def auroc(scores, labels) -> float:
     avg_ranks = first.astype(np.float64) + (counts + 1.0) / 2.0
     ranks = np.empty(len(allv), dtype=np.float64)
     ranks[order] = np.repeat(avg_ranks, counts)
-    r_pos = ranks[len(neg):].sum()
+    r_pos = ranks[len(neg) :].sum()
     u = r_pos - len(pos) * (len(pos) + 1) / 2.0
     return float(u / (len(pos) * len(neg)))
 
@@ -1621,8 +1684,7 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     scores = _obs_array(scores)
     labels = _obs_array(labels)
     if scores.size != labels.size:
-        raise ValueError(
-            f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
+        raise ValueError(f"scores/labels 长度不一致: {scores.size} vs {labels.size}")
     m = np.isfinite(scores) & ((labels == 0.0) | (labels == 1.0))
     scores, labels = scores[m], labels[m]
     n = int(scores.size)
@@ -1631,32 +1693,54 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     # 构造/遍历箱会挂起或耗尽内存。箱数超过 n 不增加任何校准分辨率。
     n_bins = min(n_bins, max(1, n))
     if n == 0:
-        return {"n": 0, "n_pos": 0, "base_rate": None, "brier": None,
-                "brier_constant": None, "brier_skill": None, "ece": None,
-                "mce": None, "n_bins": int(n_bins), "bins": [],
-                "ece_adaptive": None, "mce_adaptive": None,
-                "brier_reliability": None, "brier_resolution": None,
-                "brier_uncertainty": None,
-                "brier_within_score": None, "brier_within_cov": None,
-                "brier_binning": None,
-                "brier_decomposition_bins": "equal_frequency"}
+        return {
+            "n": 0,
+            "n_pos": 0,
+            "base_rate": None,
+            "brier": None,
+            "brier_constant": None,
+            "brier_skill": None,
+            "ece": None,
+            "mce": None,
+            "n_bins": int(n_bins),
+            "bins": [],
+            "ece_adaptive": None,
+            "mce_adaptive": None,
+            "brier_reliability": None,
+            "brier_resolution": None,
+            "brier_uncertainty": None,
+            "brier_within_score": None,
+            "brier_within_cov": None,
+            "brier_binning": None,
+            "brier_decomposition_bins": "equal_frequency",
+        }
     scores = np.clip(scores, 0.0, 1.0)
     n_pos = int((labels == 1.0).sum())
     base_rate = float(n_pos / n)
     brier = float(np.mean((scores - labels) ** 2))
     brier_constant = float(np.mean((base_rate - labels) ** 2))
-    skill = (1.0 - brier / brier_constant
-             if brier_constant > 0 else None)
-    out = {"n": n, "n_pos": n_pos, "base_rate": base_rate,
-           "brier": brier, "brier_constant": brier_constant,
-           "brier_skill": skill, "ece": None, "mce": None,
-           "n_bins": int(n_bins), "bins": [],
-           "ece_adaptive": None, "mce_adaptive": None,
-           "brier_reliability": None, "brier_resolution": None,
-           "brier_uncertainty": None,
-           "brier_within_score": None, "brier_within_cov": None,
-           "brier_binning": None,
-           "brier_decomposition_bins": "equal_frequency"}
+    skill = 1.0 - brier / brier_constant if brier_constant > 0 else None
+    out = {
+        "n": n,
+        "n_pos": n_pos,
+        "base_rate": base_rate,
+        "brier": brier,
+        "brier_constant": brier_constant,
+        "brier_skill": skill,
+        "ece": None,
+        "mce": None,
+        "n_bins": int(n_bins),
+        "bins": [],
+        "ece_adaptive": None,
+        "mce_adaptive": None,
+        "brier_reliability": None,
+        "brier_resolution": None,
+        "brier_uncertainty": None,
+        "brier_within_score": None,
+        "brier_within_cov": None,
+        "brier_binning": None,
+        "brier_decomposition_bins": "equal_frequency",
+    }
     if len(set(labels.tolist())) != 2 or n_bins < 1:
         return out
     idx = np.clip((scores * n_bins).astype(np.int64), 0, n_bins - 1)
@@ -1665,25 +1749,33 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
         mb = idx == b
         nb = int(mb.sum())
         if nb == 0:
-            bins.append({"bin": b, "n": 0, "mean_score": None,
-                         "mean_label": None, "gap": None})
+            bins.append(
+                {"bin": b, "n": 0, "mean_score": None, "mean_label": None, "gap": None}
+            )
             continue
         mean_score = float(scores[mb].mean())
         mean_label = float(labels[mb].mean())
         gap = abs(mean_score - mean_label)
         ece += (nb / n) * gap
         mce = max(mce, gap)
-        bins.append({"bin": b, "n": nb, "mean_score": mean_score,
-                     "mean_label": mean_label, "gap": gap,
-                     "lo": b / n_bins, "hi": (b + 1) / n_bins})
+        bins.append(
+            {
+                "bin": b,
+                "n": nb,
+                "mean_score": mean_score,
+                "mean_label": mean_label,
+                "gap": gap,
+                "lo": b / n_bins,
+                "hi": (b + 1) / n_bins,
+            }
+        )
     out["ece"] = float(ece)
     out["mce"] = float(mce)
     out["bins"] = bins
     # 等频（adaptive）分箱：按分数排序后均分，避免等宽箱在分数聚集/小样本
     # 下大量为空，或每个样本独占一箱使 ECE 被机械压低。箱内仍用样本加权，
     # 因此 ECE 的含义与等宽口径完全一致，只是划分方式不同。
-    groups = np.array_split(np.argsort(scores, kind="mergesort"),
-                            int(n_bins))
+    groups = np.array_split(np.argsort(scores, kind="mergesort"), int(n_bins))
     ece_adapt, mce_adapt = 0.0, 0.0
     reliability, resolution = 0.0, 0.0
     within_score, within_cov = 0.0, 0.0
@@ -1700,8 +1792,7 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
         reliability += (nb / n) * (mean_score - mean_label) ** 2
         resolution += (nb / n) * (mean_label - base_rate) ** 2
         within_score += (nb / n) * float(np.mean((gs - mean_score) ** 2))
-        within_cov += (nb / n) * float(np.mean((gs - mean_score)
-                                                * (gl - mean_label)))
+        within_cov += (nb / n) * float(np.mean((gs - mean_score) * (gl - mean_label)))
     out["ece_adaptive"] = float(ece_adapt)
     out["mce_adaptive"] = float(mce_adapt)
     out["brier_reliability"] = float(reliability)
@@ -1724,6 +1815,7 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
     返回 {macro, micro, weighted, per_class: {label: {precision, recall, f1,
     support}}, labels}；单一类别或无样本时值为 None（表示不可计算）。
     """
+
     def _class_ids(values, name):
         # 类别是整数身份：int(1.5)=1、int(True)=1 会把不同类静默合并，
         # 同一批预测的 macro/micro/weighted 也就全部失真。
@@ -1735,8 +1827,7 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
             if arr.size:
                 lo, hi = int(arr.min()), int(arr.max())
                 if lo < int(i64.min) or hi > int(i64.max):
-                    raise ValueError(
-                        f"{name} 类别超出 int64 可表示范围: [{lo}, {hi}]")
+                    raise ValueError(f"{name} 类别超出 int64 可表示范围: [{lo}, {hi}]")
             return arr.astype(np.int64, copy=False).ravel()
         vals = []
         for i, v in enumerate(np.asarray(values, dtype=object).ravel()):
@@ -1744,8 +1835,7 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
             # Python 大整数无法作为 int64 标签参与逐元素比较；显式拒绝，
             # 而不是让 NumPy 在 astype 时抛裸 OverflowError。
             if iv < int(i64.min) or iv > int(i64.max):
-                raise ValueError(
-                    f"{name}[{i}] 类别超出 int64 可表示范围: {iv}")
+                raise ValueError(f"{name}[{i}] 类别超出 int64 可表示范围: {iv}")
             vals.append(iv)
         return np.array(vals, dtype=np.int64)
 
@@ -1776,8 +1866,7 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
         prec = tp / (tp + fp) if (tp + fp) else 0.0
         rec = tp / (tp + fn) if (tp + fn) else 0.0
         f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
-        per_class[lb] = {"precision": prec, "recall": rec, "f1": f1,
-                         "support": support}
+        per_class[lb] = {"precision": prec, "recall": rec, "f1": f1, "support": support}
         f1s.append(f1)
         supports.append(support)
         tp_all += tp
@@ -1788,13 +1877,26 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
     # 退化预测看起来完美。与空输入一样按不可计算返回 None，逐类明细保留。
     observed = set(y_true.tolist()) | set(y_pred.tolist())
     if not labels or total == 0 or len(observed) < 2:
-        return {"macro": None, "micro": None, "weighted": None,
-                "per_class": per_class, "labels": labels, "n": total}
+        return {
+            "macro": None,
+            "micro": None,
+            "weighted": None,
+            "per_class": per_class,
+            "labels": labels,
+            "n": total,
+        }
     macro = float(np.mean(f1s)) if f1s else None
-    micro = (2 * tp_all / (2 * tp_all + fp_all + fn_all)
-             if (2 * tp_all + fp_all + fn_all) else None)
-    weighted = (float(np.average(f1s, weights=supports))
-                if sum(supports) else None)
-    return {"macro": macro, "micro": float(micro) if micro is not None else None,
-            "weighted": weighted, "per_class": per_class, "labels": labels,
-            "n": total}
+    micro = (
+        2 * tp_all / (2 * tp_all + fp_all + fn_all)
+        if (2 * tp_all + fp_all + fn_all)
+        else None
+    )
+    weighted = float(np.average(f1s, weights=supports)) if sum(supports) else None
+    return {
+        "macro": macro,
+        "micro": float(micro) if micro is not None else None,
+        "weighted": weighted,
+        "per_class": per_class,
+        "labels": labels,
+        "n": total,
+    }

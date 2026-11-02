@@ -1,68 +1,40 @@
 """RULER/PPL 抽样配对、bootstrap 与推理期证据测试。"""
-import hashlib
+
 import json
 import math
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
-import time
 from unittest import mock
 
-from lega.data import CACHE_SCHEMA
-from tests.pipeline_helpers import _mk, _write_json
-from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
-                      _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _eval_matches_window_spec,
-                      _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
-                      _factorial_protocol_ok, _inference_shapley_tests,
-                      INFERENCE_INTERACTION_METRIC, INFERENCE_SHAPLEY_METRIC,
-                      PARAM_CONTROL_VARIANT,
-                      PARAM_CONTROL_PAIR,
-                      _int_or_zero, _lat_noise_pct,
-                      _neural_eval_window_spec, _noise_floor_pct,
-                      _noise_verdict_note, _loo_stability_str, _num_or_none,
-                      _rate_or_none,
-                      _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
-                      _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
-                      _render_baseline_sections, _result_files,
-                      _render_ruler_length,
-                      _render_inference_shapley,
-                      _render_parameter_matched_control,
-                      _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
-                      _ruler_depth_gap, _ruler_depth_means,
-                      _ruler_fwe_recall, _ruler_min_cell_n, _ruler_protocol,
-                      _ruler_task_means,
-                      _render_registration_integrity, _resolve_jobs, _stat,
-                      _seed_key, _strict_seed_int, _parse_seed_list,
-                      apply_budget_gate, apply_integrity_gate, apply_scope_gate,
-                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
-                      build_comparison_pairs, build_summary,
-                      _fmt_eq_margin, _fmt_eq_value,
-                      _fmt_mean_std, _fmt_signed,
-                      changed_gate_factors,
-                      component_evidence, cross_variant_badcase_map,
-                      COMPONENT_TESTS, GATE_FACTORS,
-                      main as run_all_main,
-                      data_protocol_preflight, data_report_binding_issue,
-                      evaluate_registered_hypotheses,
-                      load_registered_hypotheses, ngram_baseline_comparison,
-                      parse_variants, registration_scope_check,
-                      abort_ledger_on_failure, record_aborted_sanity,
-                      mark_repro_failed, check_sanity_results,
-                      _snapshot_existing_runs,
-                      resolve_ngram_split, run_many,
-                      single_factor_audit, single_factor_change,
-                      SINGLE_FACTOR_CONTRASTS, SINGLE_FACTOR_PAIRS,
-                      tradeoff_verdict, verify_controlled_setup)
-
+from tests.pipeline_helpers import _write_json
+from run_all import (
+    _FACTORIAL_CONTRAST_CELLS,
+    _factorial_protocol_ok,
+    INFERENCE_INTERACTION_METRIC,
+    PARAM_CONTROL_VARIANT,
+    PARAM_CONTROL_PAIR,
+    _render_ruler_length,
+    _render_inference_shapley,
+    _render_parameter_matched_control,
+    _ruler_avg_micro,
+    _ruler_avg_of,
+    build_comparison_pairs,
+    build_summary,
+    _fmt_eq_margin,
+    _fmt_eq_value,
+    _fmt_mean_std,
+    _fmt_signed,
+)
 
 
 def test_ruler_sample_paired_mcnemar_counts_and_exact_p():
     """固定样例上的配对：只消费 discordant 对，精确 McNemar 与计数一致。"""
-    from run_all import (_mcnemar_exact_p, _ruler_sample_outcomes,
-                         _ruler_sample_paired_tests)
+    from run_all import (
+        _mcnemar_exact_p,
+        _ruler_sample_outcomes,
+        _ruler_sample_paired_tests,
+    )
 
     # 已知精确值：n=5 全偏向候选 -> 双侧 p=2/32=0.0625；n=6 -> 0.03125
     assert abs(_mcnemar_exact_p(5, 0) - 0.0625) < 1e-12
@@ -70,25 +42,35 @@ def test_ruler_sample_paired_mcnemar_counts_and_exact_p():
     assert _mcnemar_exact_p(0, 0) == 1.0
 
     def cell(ems):
-        return {"em": sum(ems) / len(ems), "n": len(ems),
-                "samples": [{"sample_id": f"s{i}", "em": float(e)}
-                            for i, e in enumerate(ems)]}
+        return {
+            "em": sum(ems) / len(ems),
+            "n": len(ems),
+            "samples": [
+                {"sample_id": f"s{i}", "em": float(e)} for i, e in enumerate(ems)
+            ],
+        }
 
     def rul(samples, **kw):
         base = {
-            "ctx_lens": [256], "n_samples": len(samples), "sample_seed": 1234,
-            "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
-            "vt_chains": 4, "vt_depth": 4,
+            "ctx_lens": [256],
+            "n_samples": len(samples),
+            "sample_seed": 1234,
+            "corpus_source": "val",
+            "max_new": 12,
+            "fwe_max_new": 44,
+            "vt_chains": 4,
+            "vt_depth": 4,
             "results": {"niah": {"256": cell(samples)}},
         }
         base.update(kw)
         return {"ruler": base}
 
     runs = {
-        "lega": {7: rul([1, 1, 1, 1, 0, 0, 0, 0]),
-                 8: rul([1, 1, 1, 0, 0, 0, 0, 0])},
-        "standard": {7: rul([0, 0, 0, 0, 0, 0, 0, 0]),
-                     8: rul([0, 0, 0, 0, 0, 0, 0, 0])},
+        "lega": {7: rul([1, 1, 1, 1, 0, 0, 0, 0]), 8: rul([1, 1, 1, 0, 0, 0, 0, 0])},
+        "standard": {
+            7: rul([0, 0, 0, 0, 0, 0, 0, 0]),
+            8: rul([0, 0, 0, 0, 0, 0, 0, 0]),
+        },
     }
     d = runs["lega"][7]["ruler"]
     assert _ruler_sample_outcomes(d)["s0"] == 1.0
@@ -99,15 +81,15 @@ def test_ruler_sample_paired_mcnemar_counts_and_exact_p():
     assert t["candidate_only"] == 7 and t["reference_only"] == 0, t
     assert t["n_samples"] == 16 and t["n_seeds"] == 2, t
     assert abs(t["mean_diff"] - 7 / 16) < 1e-12, t
-    assert abs(t["p"] - 2 / (2 ** 7)) < 1e-12, t
+    assert abs(t["p"] - 2 / (2**7)) < 1e-12, t
     assert t["n_seed_wins"] == 2 and t["n_seed_losses"] == 0, t
     assert t["verdict"].startswith("样例级显著优于"), t
 
     # 旧产物没有逐样例字段：返回空结果而不是伪造 0 差异
-    legacy = {"lega": {7: {"ruler": {"results": {"niah": {
-        "256": {"em": 0.5, "n": 8}}}}}},
-              "standard": {7: {"ruler": {"results": {"niah": {
-                  "256": {"em": 0.5, "n": 8}}}}}}}
+    legacy = {
+        "lega": {7: {"ruler": {"results": {"niah": {"256": {"em": 0.5, "n": 8}}}}}},
+        "standard": {7: {"ruler": {"results": {"niah": {"256": {"em": 0.5, "n": 8}}}}}},
+    }
     assert _ruler_sample_paired_tests(legacy, [("lega", "standard")]) == []
     print("  [ok] RULER 样例级 McNemar：discordant 计数、精确 p、旧产物跳过")
 
@@ -117,16 +99,28 @@ def test_ruler_sample_cluster_test_avoids_seed_pseudo_replication():
     from run_all import _ruler_sample_paired_tests
 
     def cell(ems):
-        return {"em": sum(ems) / len(ems), "n": len(ems),
-                "samples": [{"sample_id": f"s{i}", "em": float(e)}
-                            for i, e in enumerate(ems)]}
+        return {
+            "em": sum(ems) / len(ems),
+            "n": len(ems),
+            "samples": [
+                {"sample_id": f"s{i}", "em": float(e)} for i, e in enumerate(ems)
+            ],
+        }
 
     def rul(ems):
-        return {"ruler": {
-            "ctx_lens": [256], "n_samples": len(ems), "sample_seed": 1234,
-            "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
-            "vt_chains": 4, "vt_depth": 4,
-            "results": {"niah": {"256": cell(ems)}}}}
+        return {
+            "ruler": {
+                "ctx_lens": [256],
+                "n_samples": len(ems),
+                "sample_seed": 1234,
+                "corpus_source": "val",
+                "max_new": 12,
+                "fwe_max_new": 44,
+                "vt_chains": 4,
+                "vt_depth": 4,
+                "results": {"niah": {"256": cell(ems)}},
+            }
+        }
 
     # 10 个训练种子反复评测同 2 个样例：池化后有 20 个“discordant 对”，
     # 但独立样例只有 2 个。聚类检验必须给出 n=2、p=0.5（不能显著）。
@@ -149,10 +143,15 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
     from run_all import _eval_window_losses, _ppl_window_paired_tests
 
     def ev(losses, idx, **kw):
-        base = {"split": "test", "eval_ctx": 10, "eval_iters": len(idx),
-                "val_windows": max(9, len(idx)),
-                "val_tokens_evaluated": 10 * len(idx),
-                "window_losses": losses, "window_indices": idx}
+        base = {
+            "split": "test",
+            "eval_ctx": 10,
+            "eval_iters": len(idx),
+            "val_windows": max(9, len(idx)),
+            "val_tokens_evaluated": 10 * len(idx),
+            "window_losses": losses,
+            "window_indices": idx,
+        }
         base.update(kw)
         return {"eval": base}
 
@@ -161,18 +160,22 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
         "lega": {7: ev([1.0] * 10, idx), 8: ev([1.5] * 10, idx)},
         "standard": {7: ev([2.0] * 10, idx), 8: ev([2.0] * 10, idx)},
     }
-    assert _eval_window_losses(runs["lega"][7]["eval"]) == \
-        {i: 1.0 for i in idx}
+    assert _eval_window_losses(runs["lega"][7]["eval"]) == {i: 1.0 for i in idx}
     # 交叉熵不可能为负：坏记录整表按不可用处理，不能污染 avg NLL 差。
-    assert _eval_window_losses({"window_losses": [1.0, -0.5],
-                                "window_indices": [0, 1]}) is None
+    assert (
+        _eval_window_losses({"window_losses": [1.0, -0.5], "window_indices": [0, 1]})
+        is None
+    )
     # 窗口序号必须是唯一的非负下标；负值/重复都是损坏记录。
-    assert _eval_window_losses({"window_losses": [1.0, 2.0],
-                                "window_indices": [0, 0]}) is None
-    assert _eval_window_losses({"window_losses": [1.0, 2.0],
-                                "window_indices": [-1, 1]}) is None
-    out = _ppl_window_paired_tests(runs, [("lega", "standard")],
-                                   n_resamples=200)
+    assert (
+        _eval_window_losses({"window_losses": [1.0, 2.0], "window_indices": [0, 0]})
+        is None
+    )
+    assert (
+        _eval_window_losses({"window_losses": [1.0, 2.0], "window_indices": [-1, 1]})
+        is None
+    )
+    out = _ppl_window_paired_tests(runs, [("lega", "standard")], n_resamples=200)
     assert len(out) == 1, out
     t = out[0]
     assert t["n_seeds"] == 2 and t["n_windows_min"] == 10, t
@@ -197,13 +200,14 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
         "lega": {7: ev([1.5e308] * 10, huge_idx)},
         "standard": {7: ev([0.0] * 10, huge_idx)},
     }
-    huge_t = _ppl_window_paired_tests(huge_runs, [("lega", "standard")],
-                                      n_resamples=50)[0]
+    huge_t = _ppl_window_paired_tests(
+        huge_runs, [("lega", "standard")], n_resamples=50
+    )[0]
     assert huge_t["per_seed"][0]["mean_diff"] == 1.5e308, huge_t
     assert math.isfinite(huge_t["mean_diff"]), huge_t
     assert math.isfinite(huge_t["median_diff"]), huge_t
     assert math.isfinite(huge_t["trimmed_mean_diff_10pct"]), huge_t
-    assert all(math.isfinite(v) for v in huge_t["diff_quantiles"].values()),         huge_t
+    assert all(math.isfinite(v) for v in huge_t["diff_quantiles"].values()), huge_t
     assert huge_t["window_win_rate"] == 0.0, huge_t
     # 窗口序号不一致 = 不是同一批评测单元，整对剔除而不是按位置强配
     runs2 = {
@@ -229,13 +233,13 @@ def test_ppl_window_paired_tests_counts_bootstrap_and_protocol():
         "lega": {7: ev([1.0, 1.0, 1.0], [0, 4, 8])},
         "standard": {7: ev([2.0, 2.0, 2.0], [0, 4, 8])},
     }
-    tt = _ppl_window_paired_tests(thin, [("lega", "standard")],
-                                  n_resamples=50)[0]
+    tt = _ppl_window_paired_tests(thin, [("lega", "standard")], n_resamples=50)[0]
     assert tt["enough_windows"] is False
     assert tt["verdict"].startswith("证据不足"), tt
     assert "显著" not in tt["verdict"], tt
-    print("  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号/"
-          "最小窗口门槛")
+    print(
+        "  [ok] PPL 窗口级配对：逐窗口相减、分层 bootstrap、协议/序号/" "最小窗口门槛"
+    )
 
 
 def test_window_bootstrap_reports_robust_distribution():
@@ -243,8 +247,7 @@ def test_window_bootstrap_reports_robust_distribution():
     from run_all import _window_bootstrap_stats
 
     # 普遍改善：每个窗口都小幅改善，均值/中位数/截尾均值/胜率必须一致。
-    broad = _window_bootstrap_stats([[-0.10] * 20, [-0.20] * 20],
-                                    n_resamples=100)
+    broad = _window_bootstrap_stats([[-0.10] * 20, [-0.20] * 20], n_resamples=100)
     assert abs(broad["median_diff"] + 0.15) < 1e-12, broad
     assert abs(broad["trimmed_mean_diff_10pct"] + 0.15) < 1e-12, broad
     assert broad["window_win_rate"] == 1.0, broad
@@ -270,10 +273,15 @@ def test_ppl_window_robustness_flags_outlier_driven_mean():
     from run_all import _ppl_window_paired_tests
 
     def ev(losses, idx, **kw):
-        base = {"split": "test", "eval_ctx": 10, "eval_iters": len(idx),
-                "val_windows": max(9, len(idx)),
-                "val_tokens_evaluated": 10 * len(idx),
-                "window_losses": losses, "window_indices": idx}
+        base = {
+            "split": "test",
+            "eval_ctx": 10,
+            "eval_iters": len(idx),
+            "val_windows": max(9, len(idx)),
+            "val_tokens_evaluated": 10 * len(idx),
+            "window_losses": losses,
+            "window_indices": idx,
+        }
         base.update(kw)
         return {"eval": base}
 
@@ -284,8 +292,7 @@ def test_ppl_window_robustness_flags_outlier_driven_mean():
         "lega": {7: ev(cand, idx), 8: ev(cand, idx), 9: ev(cand, idx)},
         "standard": {7: ev(ref, idx), 8: ev(ref, idx), 9: ev(ref, idx)},
     }
-    t = _ppl_window_paired_tests(runs, [("lega", "standard")],
-                                 n_resamples=300)[0]
+    t = _ppl_window_paired_tests(runs, [("lega", "standard")], n_resamples=300)[0]
     assert t["enough_windows"] is True, t
     assert t["mean_diff"] < 0.0, t
     assert t["median_diff"] > 0.0, t
@@ -307,42 +314,69 @@ def test_build_summary_renders_both_eval_sampling_sections():
 
     tmp = tempfile.mkdtemp()
     try:
-        def ev(v, losses, ppl):
-            return {"variant": v, "seed": 1, "val_ppl": ppl, "val_loss": 1.0,
-                    "split": "val", "eval_ctx": 10, "eval_iters": 3,
-                    "eval_iters_requested": 3, "val_windows": 3,
-                    "val_tokens_evaluated": 30, "n_params": 100,
-                    "window_losses": losses, "window_indices": [0, 3, 6]}
 
-        _write_json(os.path.join(tmp, "eval_standard.json"),
-                    ev("standard", [2.0, 2.0, 2.0], 10.0))
-        _write_json(os.path.join(tmp, "eval_lega.json"),
-                    ev("lega", [1.0, 1.0, 1.0], 9.0))
+        def ev(v, losses, ppl):
+            return {
+                "variant": v,
+                "seed": 1,
+                "val_ppl": ppl,
+                "val_loss": 1.0,
+                "split": "val",
+                "eval_ctx": 10,
+                "eval_iters": 3,
+                "eval_iters_requested": 3,
+                "val_windows": 3,
+                "val_tokens_evaluated": 30,
+                "n_params": 100,
+                "window_losses": losses,
+                "window_indices": [0, 3, 6],
+            }
+
+        _write_json(
+            os.path.join(tmp, "eval_standard.json"),
+            ev("standard", [2.0, 2.0, 2.0], 10.0),
+        )
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"), ev("lega", [1.0, 1.0, 1.0], 9.0)
+        )
 
         def rul(v, ems):
-            cell = {"em": sum(ems) / len(ems), "n": len(ems),
-                    "samples": [{"sample_id": f"s{i}", "em": float(e)}
-                                for i, e in enumerate(ems)]}
-            return {"variant": v, "seed": 1,
-                    "ctx_lens": [256], "n_samples": len(ems),
-                    "sample_seed": 7, "corpus_source": "val", "max_new": 12,
-                    "fwe_max_new": 44, "vt_chains": 4, "vt_depth": 4,
-                    "results": {"niah": {"256": cell}}}
+            cell = {
+                "em": sum(ems) / len(ems),
+                "n": len(ems),
+                "samples": [
+                    {"sample_id": f"s{i}", "em": float(e)} for i, e in enumerate(ems)
+                ],
+            }
+            return {
+                "variant": v,
+                "seed": 1,
+                "ctx_lens": [256],
+                "n_samples": len(ems),
+                "sample_seed": 7,
+                "corpus_source": "val",
+                "max_new": 12,
+                "fwe_max_new": 44,
+                "vt_chains": 4,
+                "vt_depth": 4,
+                "results": {"niah": {"256": cell}},
+            }
 
-        _write_json(os.path.join(tmp, "ruler_standard.json"),
-                    rul("standard", [0, 0, 0, 0]))
-        _write_json(os.path.join(tmp, "ruler_lega.json"),
-                    rul("lega", [1, 1, 1, 1]))
+        _write_json(
+            os.path.join(tmp, "ruler_standard.json"), rul("standard", [0, 0, 0, 0])
+        )
+        _write_json(os.path.join(tmp, "ruler_lega.json"), rul("lega", [1, 1, 1, 1]))
         out = build_summary(tmp)
         md = out["markdown"]
         assert "### PPL 窗口级配对" in md and "PPL比" in md, md[-3000:]
         assert "窗口级稳健性" in md and "改善窗口占比" in md, md[-3000:]
         assert "### RULER 样例级配对" in md and "候选独对" in md, md[-3000:]
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         assert len(sig["ppl_window_pairs"]) == 1, sig.keys()
         assert sig["ppl_window_pairs"][0]["median_diff"] is not None, sig
-        assert sig["ppl_window_pairs"][0]["robustness"]["outlier_sensitive"]             is False, sig
+        assert (
+            sig["ppl_window_pairs"][0]["robustness"]["outlier_sensitive"] is False
+        ), sig
         assert len(sig["ruler_sample_pairs"]) == 1, sig.keys()
         assert len(out["ppl_window_tests"]) == 1
         assert len(out["ruler_sample_tests"]) == 1
@@ -357,8 +391,7 @@ def test_ruler_macro_bootstrap_preserves_cell_weights_and_is_deterministic():
 
     # 小格 2 个样例全 +1，大格 8 个样例全 0：macro = (1+0)/2 = 0.5。
     # 若错误地池化全部样例再重采样，会得到约 0.2，而不是恒定的 0.5。
-    per_seed = [{("niah", "256"): [1.0, 1.0],
-                 ("niah", "512"): [0.0] * 8}]
+    per_seed = [{("niah", "256"): [1.0, 1.0], ("niah", "512"): [0.0] * 8}]
     ci = _ruler_macro_bootstrap_ci(per_seed, n_boot=200)
     assert ci is not None
     assert abs(ci[0] - 0.5) < 1e-12 and abs(ci[1] - 0.5) < 1e-12, ci
@@ -384,18 +417,25 @@ def test_ruler_macro_bootstrap_preserves_cell_weights_and_is_deterministic():
 
 def test_ruler_macro_absolute_ci_matches_task_equal_estimand():
     """绝对 macro 区间必须匹配任务等权点估计，而不是单元格等权。"""
-    from run_all import _ruler_avg_of, _ruler_macro_absolute_ci
+    from run_all import _ruler_macro_absolute_ci
 
     def cell(ems, prefix):
-        return {"em": sum(ems) / len(ems), "n": len(ems),
-                "samples": [{"sample_id": f"{prefix}{i}", "em": float(e)}
-                            for i, e in enumerate(ems)]}
+        return {
+            "em": sum(ems) / len(ems),
+            "n": len(ems),
+            "samples": [
+                {"sample_id": f"{prefix}{i}", "em": float(e)} for i, e in enumerate(ems)
+            ],
+        }
 
     # 任务 a 只有 1 格全对；任务 b 有 2 格全错。任务等权 macro=0.5；
     # 若错误地按单元格等权会是 (1+0+0)/3≈0.33。
-    payload = {"results": {
-        "a": {"1": cell([1, 1], "a")},
-        "b": {"1": cell([0] * 8, "b1"), "2": cell([0] * 8, "b2")}}}
+    payload = {
+        "results": {
+            "a": {"1": cell([1, 1], "a")},
+            "b": {"1": cell([0] * 8, "b1"), "2": cell([0] * 8, "b2")},
+        }
+    }
     assert abs(_ruler_avg_of(payload) - 0.5) < 1e-12
     r = _ruler_macro_absolute_ci([payload, payload], n_boot=200)
     assert r is not None and r["n_seeds"] == 2 and r["n_cells"] == 6
@@ -415,36 +455,53 @@ def test_ruler_macro_absolute_ci_matches_task_equal_estimand():
     # 多种子混合：只要有一个 payload 缺逐样例记录或含空单元格，就不能
     # 丢掉该种子后仍声称区间覆盖全部观测种子。
     assert _ruler_macro_absolute_ci([payload, legacy]) is None
-    empty_cell = {"results": {"a": {"1": cell([1, 1], "a"),
-                                    "2": {"em": 0.5, "n": 0, "samples": []}}}}
+    empty_cell = {
+        "results": {
+            "a": {"1": cell([1, 1], "a"), "2": {"em": 0.5, "n": 0, "samples": []}}
+        }
+    }
     assert _ruler_macro_absolute_ci([payload, empty_cell]) is None
     print("  [ok] RULER 绝对 macro CI：任务等权、确定性、旧产物不伪造")
 
 
 def test_ruler_sample_macro_micro_estimands_diverge():
     """样例等权 micro 与单元格等权 macro 可给出相反结论，必须同时报告。"""
-    from run_all import _ruler_avg_of, _ruler_sample_paired_tests
+    from run_all import _ruler_sample_paired_tests
 
     def cell(ems, prefix):
-        return {"em": sum(ems) / len(ems), "n": len(ems),
-                "samples": [{"sample_id": f"{prefix}{i}", "em": float(e)}
-                            for i, e in enumerate(ems)]}
+        return {
+            "em": sum(ems) / len(ems),
+            "n": len(ems),
+            "samples": [
+                {"sample_id": f"{prefix}{i}", "em": float(e)} for i, e in enumerate(ems)
+            ],
+        }
 
-    small = cell([1, 1], "a")                  # 小格 +1，2 个样例
-    big = cell([0] * 6, "b")                   # 大格 −1，6 个样例
+    small = cell([1, 1], "a")  # 小格 +1，2 个样例
+    big = cell([0] * 6, "b")  # 大格 −1，6 个样例
     ref = cell([0, 0], "a"), cell([1] * 6, "b")
 
     def rul(v, cells):
-        return {"ruler": {"variant": v, "seed": 1,
-                          "ctx_lens": [256, 512], "n_samples": 8,
-                          "sample_seed": 7, "corpus_source": "val",
-                          "max_new": 12, "fwe_max_new": 44,
-                          "vt_chains": 4, "vt_depth": 4,
-                          "results": {"niah": {"256": cells[0],
-                                               "512": cells[1]}}}}
+        return {
+            "ruler": {
+                "variant": v,
+                "seed": 1,
+                "ctx_lens": [256, 512],
+                "n_samples": 8,
+                "sample_seed": 7,
+                "corpus_source": "val",
+                "max_new": 12,
+                "fwe_max_new": 44,
+                "vt_chains": 4,
+                "vt_depth": 4,
+                "results": {"niah": {"256": cells[0], "512": cells[1]}},
+            }
+        }
 
-    runs = {"lega": {1: rul("lega", (small, big))},
-            "standard": {1: rul("standard", ref)}}
+    runs = {
+        "lega": {1: rul("lega", (small, big))},
+        "standard": {1: rul("standard", ref)},
+    }
     t = _ruler_sample_paired_tests(runs, [("lega", "standard")])[0]
     # micro = (2 胜 − 6 负)/8 = −0.5；macro = (+1 −1)/2 = 0
     assert abs(t["mean_diff"] - (-0.5)) < 1e-12, t
@@ -453,8 +510,9 @@ def test_ruler_sample_macro_micro_estimands_diverge():
     assert t["per_seed"][0]["n_cells"] == 2
     mci = t["macro_mean_diff_ci95"]
     assert mci is not None and mci[0] <= t["macro_mean_diff"] <= mci[1], t
-    seed_macro = (_ruler_avg_of(runs["lega"][1]["ruler"])
-                  - _ruler_avg_of(runs["standard"][1]["ruler"]))
+    seed_macro = _ruler_avg_of(runs["lega"][1]["ruler"]) - _ruler_avg_of(
+        runs["standard"][1]["ruler"]
+    )
     assert abs(seed_macro - t["macro_mean_diff"]) < 1e-12
     assert t["estimand_conflict"] is True
     assert "micro/macro 方向不一致" in t["verdict"], t
@@ -464,6 +522,7 @@ def test_ruler_sample_macro_micro_estimands_diverge():
 def test_window_bootstrap_survives_huge_finite_window_diffs():
     """逐窗口差值本身有限但相加会溢出时，bootstrap 均值/区间仍需有限。"""
     from run_all import _window_bootstrap_stats
+
     huge = [[1e308, 1e308], [1e308, 1e308]]
     st = _window_bootstrap_stats(huge, n_resamples=50, seed=0)
     assert st is not None, st
@@ -497,24 +556,32 @@ def test_window_bootstrap_survives_huge_finite_window_diffs():
     except ValueError:
         raised = True
     assert raised
-    print("  [ok] 窗口分层 bootstrap：巨大有限差/正负抵消不溢出，"
-          "非有限差过滤，重采样预算/种子严格校验")
+    print(
+        "  [ok] 窗口分层 bootstrap：巨大有限差/正负抵消不溢出，"
+        "非有限差过滤，重采样预算/种子严格校验"
+    )
 
 
 def test_ruler_micro_average_survives_huge_finite_weights():
     """两个可表示但相加会溢出的样本计数仍应给出有限加权均值。"""
-    both_one = {"results": {"niah": {
-        "256": {"n": 1e308, "em": 1.0},
-        "512": {"n": 1e308, "em": 1.0}}}}
+    both_one = {
+        "results": {
+            "niah": {"256": {"n": 1e308, "em": 1.0}, "512": {"n": 1e308, "em": 1.0}}
+        }
+    }
     assert _ruler_avg_micro(both_one) == 1.0
-    half = {"results": {"niah": {
-        "256": {"n": 1e308, "em": 1.0},
-        "512": {"n": 1e308, "em": 0.0}}}}
+    half = {
+        "results": {
+            "niah": {"256": {"n": 1e308, "em": 1.0}, "512": {"n": 1e308, "em": 0.0}}
+        }
+    }
     assert abs(_ruler_avg_micro(half) - 0.5) < 1e-12
     # 极大权重与小权重混合时仍按 n 加权，不能被归一化改写成等权。
-    mixed = {"results": {"niah": {
-        "256": {"n": 1e308, "em": 1.0},
-        "512": {"n": 1, "em": 0.0}}}}
+    mixed = {
+        "results": {
+            "niah": {"256": {"n": 1e308, "em": 1.0}, "512": {"n": 1, "em": 0.0}}
+        }
+    }
     assert abs(_ruler_avg_micro(mixed) - 1.0) < 1e-12
     print("  [ok] RULER micro 平均：超大有限样本计数不再溢出成 NaN")
 
@@ -524,15 +591,25 @@ def test_log_ppl_ratio_unrepresentable_is_flagged_not_crash():
     with tempfile.TemporaryDirectory() as tmp:
         for seed in (1, 2, 3):
             for variant, ppl in (("lega", 1e300), ("standard", 1e-300)):
-                _write_json(os.path.join(tmp, f"eval_{variant}_seed{seed}.json"), {
-                    "variant": variant, "seed": seed, "val_ppl": ppl,
-                    "val_loss": math.log(ppl), "gate_mean": 0.5,
-                    "n_params": 100, "n_gate_extra": 0, "split": "val",
-                    "eval_ctx": 16, "eval_iters": 4, "val_windows": 100,
-                    "val_tokens_evaluated": 64})
+                _write_json(
+                    os.path.join(tmp, f"eval_{variant}_seed{seed}.json"),
+                    {
+                        "variant": variant,
+                        "seed": seed,
+                        "val_ppl": ppl,
+                        "val_loss": math.log(ppl),
+                        "gate_mean": 0.5,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                        "eval_ctx": 16,
+                        "eval_iters": 4,
+                        "val_windows": 100,
+                        "val_tokens_evaluated": 64,
+                    },
+                )
         out = build_summary(tmp)
-        log_tests = [t for t in out["tests"]
-                     if t.get("metric") == "PPL(log)"]
+        log_tests = [t for t in out["tests"] if t.get("metric") == "PPL(log)"]
         assert log_tests, out["tests"]
         t = log_tests[0]
         assert t["ppl_ratio"] is None, t
@@ -548,15 +625,25 @@ def test_log_ppl_delta_pct_overflow_is_dropped():
     with tempfile.TemporaryDirectory() as tmp:
         for seed in (1, 2, 3):
             for variant, ppl in (("lega", 1e154), ("standard", 1e-154)):
-                _write_json(os.path.join(tmp, f"eval_{variant}_seed{seed}.json"), {
-                    "variant": variant, "seed": seed, "val_ppl": ppl,
-                    "val_loss": math.log(ppl), "gate_mean": 0.5,
-                    "n_params": 100, "n_gate_extra": 0, "split": "val",
-                    "eval_ctx": 16, "eval_iters": 4, "val_windows": 100,
-                    "val_tokens_evaluated": 64})
+                _write_json(
+                    os.path.join(tmp, f"eval_{variant}_seed{seed}.json"),
+                    {
+                        "variant": variant,
+                        "seed": seed,
+                        "val_ppl": ppl,
+                        "val_loss": math.log(ppl),
+                        "gate_mean": 0.5,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                        "eval_ctx": 16,
+                        "eval_iters": 4,
+                        "val_windows": 100,
+                        "val_tokens_evaluated": 64,
+                    },
+                )
         out = build_summary(tmp)
-        t = next(t for t in out["tests"]
-                 if t.get("metric") == "PPL(log)")
+        t = next(t for t in out["tests"] if t.get("metric") == "PPL(log)")
         assert t["ppl_ratio"] is not None and math.isfinite(t["ppl_ratio"])
         assert t["ppl_delta_pct"] is None, t
     print("  [ok] 汇总 log-PPL：派生百分比换算溢出按缺失处理")
@@ -564,10 +651,18 @@ def test_log_ppl_delta_pct_overflow_is_dropped():
 
 def test_factorial_protocol_handles_unhashable_split_value():
     """eval.json 的 split 被手改成数组/对象时，交互检验不能因 set() 崩溃。"""
-    from run_all import _FACTORIAL_CONTRAST_CELLS
     maps = {
-        cell: {1: {"eval": {"split": [], "eval_ctx": 16, "eval_iters": 4,
-                            "val_windows": 100, "val_tokens_evaluated": 64}}}
+        cell: {
+            1: {
+                "eval": {
+                    "split": [],
+                    "eval_ctx": 16,
+                    "eval_iters": 4,
+                    "val_windows": 100,
+                    "val_tokens_evaluated": 64,
+                }
+            }
+        }
         for cell in _FACTORIAL_CONTRAST_CELLS
     }
     # 全部相同但不可哈希：协议比较应给出布尔结果，而不是抛 TypeError。
@@ -592,31 +687,43 @@ def test_parameter_matched_control_and_inference_shapley_wiring():
     tmp = tempfile.mkdtemp()
     try:
         seeds = [1, 2, 3]
-        base = {"standard": 10.0, "qgate": 9.8, "lega": 9.4,
-                "lega_placebo": 9.45}
+        base = {"standard": 10.0, "qgate": 9.8, "lega": 9.4, "lega_placebo": 9.45}
         for v, ppl in base.items():
             for s in seeds:
-                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "val_ppl": ppl + 0.01 * s,
-                    "val_loss": math.log(ppl), "n_params": 100,
-                    "n_gate_extra": 0, "split": "val"})
+                _write_json(
+                    os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "val_ppl": ppl + 0.01 * s,
+                        "val_loss": math.log(ppl),
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                    },
+                )
         reg = {"hypotheses": []}
-        intact = {"status": "intact", "confirmatory_valid": True,
-                  "problems": [], "registry_sha256": "a" * 64,
-                  "n_hypotheses": 0, "baseline_document_sha256": "b" * 64,
-                  "chain_length": 0}
-        with mock.patch("lega.pipeline.report.summary.load_registered_hypotheses",
-                        return_value=reg), \
-                mock.patch("lega.pipeline.report.summary.verify_registration",
-                           return_value=intact):
+        intact = {
+            "status": "intact",
+            "confirmatory_valid": True,
+            "problems": [],
+            "registry_sha256": "a" * 64,
+            "n_hypotheses": 0,
+            "baseline_document_sha256": "b" * 64,
+            "chain_length": 0,
+        }
+        with mock.patch(
+            "lega.pipeline.report.summary.load_registered_hypotheses", return_value=reg
+        ), mock.patch(
+            "lega.pipeline.report.summary.verify_registration", return_value=intact
+        ):
             out = build_summary(tmp)
         md = out["markdown"]
         assert "参数匹配安慰剂对照" in md
         assert "lega_placebo" in md and "容量/优化红利" in md
         assert "推理期全因子 Shapley" in md
         assert "无法计算推理期 Shapley" in md  # 无 ablation 产物时如实提示
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         pmc = sig["parameter_matched_control"]
         assert pmc["available"] is True
         assert tuple(pmc["pair"]) == PARAM_CONTROL_PAIR
@@ -627,17 +734,21 @@ def test_parameter_matched_control_and_inference_shapley_wiring():
         assert pmc["capacity_only_test"]["reference"] == "qgate"
         assert "容量本身" in md
         assert sig["inference_factorial_shapley"] == []
-        assert any(t["candidate"] == "lega"
-                   and t["reference"] == "lega_placebo"
-                   and t["metric"] == "PPL" for t in sig["pairs"])
+        assert any(
+            t["candidate"] == "lega"
+            and t["reference"] == "lega_placebo"
+            and t["metric"] == "PPL"
+            for t in sig["pairs"]
+        )
         pairs = build_comparison_pairs(
-            {"lega": {1: {}}, "lega_placebo": {1: {}}, "standard": {1: {}}})
+            {"lega": {1: {}}, "lega_placebo": {1: {}}, "standard": {1: {}}}
+        )
         assert ("lega", "lega_placebo") in pairs
         # 没运行 placebo 时不得声称“容量已排除”。
         assert "未运行 `lega_placebo`" in "\n".join(
-            _render_parameter_matched_control(None))
-        assert "无法计算推理期 Shapley" in "\n".join(
-            _render_inference_shapley([]))
+            _render_parameter_matched_control(None)
+        )
+        assert "无法计算推理期 Shapley" in "\n".join(_render_inference_shapley([]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 参数匹配安慰剂/推理期 Shapley 进入汇总与 significance.json")
@@ -650,46 +761,76 @@ def test_inference_factorial_interactions_enter_summary_and_significance():
     A×B/A×C/B×C 的独立交互对比，且缺格时如实提示，不能静默省略。
     """
     from lega.ablate import INFERENCE_FACTORIAL_CELLS
+
     tmp = tempfile.mkdtemp()
     try:
         seeds = [1, 2, 3]
-        _write_json(os.path.join(tmp, "repro.json"), {
-            "variants": ["lega"], "seeds": seeds, "smoke": False,
-            "ablation": {"executed": True, "variants": ["lega"]}})
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {
+                "variants": ["lega"],
+                "seeds": seeds,
+                "smoke": False,
+                "ablation": {"executed": True, "variants": ["lega"]},
+            },
+        )
         for s in seeds:
-            _write_json(os.path.join(tmp, f"eval_lega_seed{s}.json"), {
-                "variant": "lega", "seed": s, "split": "val",
-                "val_ppl": 17.0, "val_loss": math.log(17.0),
-                "n_params": 100, "n_gate_extra": 4})
+            _write_json(
+                os.path.join(tmp, f"eval_lega_seed{s}.json"),
+                {
+                    "variant": "lega",
+                    "seed": s,
+                    "split": "val",
+                    "val_ppl": 17.0,
+                    "val_loss": math.log(17.0),
+                    "n_params": 100,
+                    "n_gate_extra": 4,
+                },
+            )
             # 可加基线 + 纯 A×B 交互：AB/ABC 同时多 2，其余六格保持可加。
-            vals = {"none": 10.0, "A": 11.0, "B": 12.0, "C": 14.0,
-                    "AB": 15.0, "AC": 15.0, "BC": 16.0, "ABC": 19.0}
+            vals = {
+                "none": 10.0,
+                "A": 11.0,
+                "B": 12.0,
+                "C": 14.0,
+                "AB": 15.0,
+                "AC": 15.0,
+                "BC": 16.0,
+                "ABC": 19.0,
+            }
             vals = {c: v + 0.01 * s for c, v in vals.items()}
-            recs = [{"lesion": lesion, "applied": True,
-                     "window_indices": [0, 1, 2],
-                     "val_ppl": float(vals[cell])}
-                    for cell, lesion in INFERENCE_FACTORIAL_CELLS.items()
-                    if lesion is not None]
-            _write_json(os.path.join(tmp, f"ablation_lega_seed{s}.json"), {
-                "variant": "lega", "seed": s,
-                "window_indices": [0, 1, 2],
-                "baseline": {"val_ppl": float(vals["ABC"])},
-                "lesions": recs})
+            recs = [
+                {
+                    "lesion": lesion,
+                    "applied": True,
+                    "window_indices": [0, 1, 2],
+                    "val_ppl": float(vals[cell]),
+                }
+                for cell, lesion in INFERENCE_FACTORIAL_CELLS.items()
+                if lesion is not None
+            ]
+            _write_json(
+                os.path.join(tmp, f"ablation_lega_seed{s}.json"),
+                {
+                    "variant": "lega",
+                    "seed": s,
+                    "window_indices": [0, 1, 2],
+                    "baseline": {"val_ppl": float(vals["ABC"])},
+                    "lesions": recs,
+                },
+            )
         out = build_summary(tmp)
         md = out["markdown"]
         assert "推理期全因子交互效应" in md
         assert "A×B" in md and "符号一致" in md
         assert len(out["inference_interactions"]) == 3
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
-        got = {t["interaction"]: t
-               for t in sig["inference_factorial_interactions"]}
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        got = {t["interaction"]: t for t in sig["inference_factorial_interactions"]}
         assert set(got) == {"A×B", "A×C", "B×C"}
         assert abs(got["A×B"]["mean_diff"] - 2.0) < 1e-9, got["A×B"]
         assert abs(got["A×C"]["mean_diff"]) < 1e-9, got["A×C"]
         assert abs(got["B×C"]["mean_diff"]) < 1e-9, got["B×C"]
-        assert all(t["metric"] == INFERENCE_INTERACTION_METRIC
-                   for t in got.values())
+        assert all(t["metric"] == INFERENCE_INTERACTION_METRIC for t in got.values())
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] 推理期交互进入汇总页与 significance.json，纯 A×B 归属正确")
@@ -710,24 +851,39 @@ def test_summary_rendering_tolerates_missing_effect_mean():
     assert _fmt_mean_std({"mean_diff": 1.5, "std_diff": None}) == "+1.5000"
     with tempfile.TemporaryDirectory() as tmp:
         for v in ("standard", "lega"):
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "split": "val",
-                "val_ppl": 10.0, "val_loss": math.log(10.0),
-                "n_params": 100, "n_gate_extra": 4,
-            })
-        bad_inter = [{
-            "interaction": "A×B", "metric": "PPL交互",
-            "mean_diff": None, "std_diff": None, "n": 0,
-            "p_adj": None, "verdict": "无法检验",
-        }]
-        with mock.patch("lega.pipeline.report.summary._factorial_interaction_tests",
-                        return_value=bad_inter), \
-                mock.patch("lega.pipeline.report.summary._factorial_shapley_tests",
-                           return_value=[]), \
-                mock.patch("lega.pipeline.report.summary._ablation_lesion_records",
-                           return_value=[]), \
-                mock.patch("lega.pipeline.report.summary._inference_shapley_tests",
-                           return_value=[]):
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {
+                    "variant": v,
+                    "seed": 1,
+                    "split": "val",
+                    "val_ppl": 10.0,
+                    "val_loss": math.log(10.0),
+                    "n_params": 100,
+                    "n_gate_extra": 4,
+                },
+            )
+        bad_inter = [
+            {
+                "interaction": "A×B",
+                "metric": "PPL交互",
+                "mean_diff": None,
+                "std_diff": None,
+                "n": 0,
+                "p_adj": None,
+                "verdict": "无法检验",
+            }
+        ]
+        with mock.patch(
+            "lega.pipeline.report.summary._factorial_interaction_tests",
+            return_value=bad_inter,
+        ), mock.patch(
+            "lega.pipeline.report.summary._factorial_shapley_tests", return_value=[]
+        ), mock.patch(
+            "lega.pipeline.report.summary._ablation_lesion_records", return_value=[]
+        ), mock.patch(
+            "lega.pipeline.report.summary._inference_shapley_tests", return_value=[]
+        ):
             out = build_summary(tmp)
         md = out["markdown"]
         assert "A×B" in md and "无法检验" in md
@@ -740,8 +896,7 @@ def test_equivalence_rendering_handles_scaled_overflow():
     for kind, eq in (
         ("relative", {"kind": "relative"}),
         ("log_ratio", {"kind": "log_ratio"}),
-        ("scale", {"kind": "absolute", "display_scale": 100.0,
-                   "display_unit": "pp"}),
+        ("scale", {"kind": "absolute", "display_scale": 100.0, "display_unit": "pp"}),
     ):
         assert _fmt_eq_value(huge, eq) == "溢出", kind
         assert _fmt_eq_margin(dict(eq, margin=huge)) == "±溢出", kind
@@ -754,17 +909,30 @@ def test_ruler_length_rendering_handles_scaled_overflow():
     """长度剂量-反应表：×100 溢出不能写出 inf/nan。"""
     huge = 1e308
     row = {
-        "candidate": "cand", "reference": "ref", "n_seeds": 3,
-        "contexts": [128, 256], "n_contexts": 2,
+        "candidate": "cand",
+        "reference": "ref",
+        "n_seeds": 3,
+        "contexts": [128, 256],
+        "n_contexts": 2,
         "overall_mean_diff": huge,
-        "per_context": [{
-            "ctx": 128, "n": 3, "mean_diff": huge,
-            "mean_diff_ci95": [-huge, huge],
-            "p": 0.5, "p_adj": 0.5, "verdict": "未定",
-            "candidate_mean": 0.5, "reference_mean": 0.4,
-        }],
+        "per_context": [
+            {
+                "ctx": 128,
+                "n": 3,
+                "mean_diff": huge,
+                "mean_diff_ci95": [-huge, huge],
+                "p": 0.5,
+                "p_adj": 0.5,
+                "verdict": "未定",
+                "candidate_mean": 0.5,
+                "reference_mean": 0.4,
+            }
+        ],
         "slope_per_doubling": {
-            "mean_diff": huge, "verdict": "未定", "p_adj": 0.5, "n": 3,
+            "mean_diff": huge,
+            "verdict": "未定",
+            "p_adj": 0.5,
+            "n": 3,
         },
         "long_minus_short": {"mean_diff": huge},
         "direction_consistency": {"positive": 3, "negative": 0, "zero": 0},
@@ -781,61 +949,74 @@ def test_build_summary_renders_near_duplicate_audit():
     try:
         data_report = {
             "protocol": {"split_first_then_preprocess": True},
-            "duplicates": {"near_duplicate": {
-                "shingle_size": 5,
-                "threshold": 0.8,
-                "lsh_recall_at_threshold": 0.9865,
-                "train_lines_dropped": 12,
-                "train_blocks_dropped_as_near_duplicates_of_eval": 3,
-                "train_intra_split_near_duplicates_removed": 2,
-                "val_test_near_duplicate_pairs": 1,
-                "candidate_pairs": 40,
-                "eval_internal_near_duplicates": {
-                    "warn_fraction_chars": 0.05,
-                    "val": {
-                        "near_duplicate_clusters": 2,
-                        "blocks_in_near_duplicate_clusters": 5,
-                        "duplicate_fraction_chars": 0.08,
-                        "effective_blocks": 12,
-                        "eligible_blocks": 15,
-                        "eligible_coverage_fraction": 0.9,
+            "duplicates": {
+                "near_duplicate": {
+                    "shingle_size": 5,
+                    "threshold": 0.8,
+                    "lsh_recall_at_threshold": 0.9865,
+                    "train_lines_dropped": 12,
+                    "train_blocks_dropped_as_near_duplicates_of_eval": 3,
+                    "train_intra_split_near_duplicates_removed": 2,
+                    "val_test_near_duplicate_pairs": 1,
+                    "candidate_pairs": 40,
+                    "eval_internal_near_duplicates": {
+                        "warn_fraction_chars": 0.05,
+                        "val": {
+                            "near_duplicate_clusters": 2,
+                            "blocks_in_near_duplicate_clusters": 5,
+                            "duplicate_fraction_chars": 0.08,
+                            "effective_blocks": 12,
+                            "eligible_blocks": 15,
+                            "eligible_coverage_fraction": 0.9,
+                        },
+                        "test": {
+                            "near_duplicate_clusters": 0,
+                            "blocks_in_near_duplicate_clusters": 0,
+                            "duplicate_fraction_chars": 0.0,
+                            "effective_blocks": 8,
+                            "eligible_blocks": 8,
+                            "eligible_coverage_fraction": 0.75,
+                        },
                     },
-                    "test": {
-                        "near_duplicate_clusters": 0,
-                        "blocks_in_near_duplicate_clusters": 0,
-                        "duplicate_fraction_chars": 0.0,
-                        "effective_blocks": 8,
-                        "eligible_blocks": 8,
-                        "eligible_coverage_fraction": 0.75,
-                    },
-                },
-                "candidate_pairs_truncated": False,
-                "oversized_groups_truncated": 0,
-                "min_chars": 200,
-                "train_chars_coverage_fraction": 0.62,
-                "train_chars_skipped_short": 1200,
-                "train_chars_skipped_few_shingles": 0,
-                "train_chars_skipped_too_large": 800,
-                "threshold_sensitivity_removal": {
-                    "0.7": {"train_blocks_removed_total": 5,
+                    "candidate_pairs_truncated": False,
+                    "oversized_groups_truncated": 0,
+                    "min_chars": 200,
+                    "train_chars_coverage_fraction": 0.62,
+                    "train_chars_skipped_short": 1200,
+                    "train_chars_skipped_few_shingles": 0,
+                    "train_chars_skipped_too_large": 800,
+                    "threshold_sensitivity_removal": {
+                        "0.7": {
+                            "train_blocks_removed_total": 5,
                             "train_chars_removed": 5000,
-                            "removal_fraction_chars": 0.05},
-                    "0.8": {"train_blocks_removed_total": 3,
+                            "removal_fraction_chars": 0.05,
+                        },
+                        "0.8": {
+                            "train_blocks_removed_total": 3,
                             "train_chars_removed": 3000,
-                            "removal_fraction_chars": 0.03},
-                    "0.9": {"train_blocks_removed_total": 1,
+                            "removal_fraction_chars": 0.03,
+                        },
+                        "0.9": {
+                            "train_blocks_removed_total": 1,
                             "train_chars_removed": 1000,
-                            "removal_fraction_chars": 0.01},
+                            "removal_fraction_chars": 0.01,
+                        },
+                    },
                 },
-            }, "post_cleanup": {
-                "checked_pairs": [["train", "val"]],
-                "train_eval_clean": True,
-                "overlap_long_lines": {},
-                "overlap_blocks": {},
-            }},
+                "post_cleanup": {
+                    "checked_pairs": [["train", "val"]],
+                    "train_eval_clean": True,
+                    "overlap_long_lines": {},
+                    "overlap_blocks": {},
+                },
+            },
             "accounting": {
-                "train": {"tokens": 1000, "chars": 4000,
-                          "utf8_bytes": 4000, "bytes_per_token": 4.0},
+                "train": {
+                    "tokens": 1000,
+                    "chars": 4000,
+                    "utf8_bytes": 4000,
+                    "bytes_per_token": 4.0,
+                },
             },
         }
         out = build_summary(tmp, data_report=data_report)
@@ -856,16 +1037,17 @@ def test_build_summary_renders_near_duplicate_audit():
         # 有限但极大的比例/覆盖率乘 100 会溢出：不能写出 inf%。
         near = data_report["duplicates"]["near_duplicate"]
         near["train_chars_coverage_fraction"] = 1e307
-        near["threshold_sensitivity_removal"]["0.8"][
-            "removal_fraction_chars"] = 1e307
+        near["threshold_sensitivity_removal"]["0.8"]["removal_fraction_chars"] = 1e307
         md_huge = build_summary(tmp, data_report=data_report)["markdown"]
         assert "溢出" in md_huge and "inf" not in md_huge
         # 旧/损坏产物里的阈值键可能是任意文本：渲染不能因此崩溃
-        data_report["duplicates"]["near_duplicate"][
-            "threshold_sensitivity_removal"] = {
-                "bad-key": {"train_blocks_removed_total": 1,
-                            "train_chars_removed": 10,
-                            "removal_fraction_chars": 0.001}}
+        data_report["duplicates"]["near_duplicate"]["threshold_sensitivity_removal"] = {
+            "bad-key": {
+                "train_blocks_removed_total": 1,
+                "train_chars_removed": 10,
+                "removal_fraction_chars": 0.001,
+            }
+        }
         md_bad = build_summary(tmp, data_report=data_report)["markdown"]
         assert "τ=bad-key" in md_bad
     finally:

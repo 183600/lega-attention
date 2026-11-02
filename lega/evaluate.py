@@ -4,6 +4,7 @@
   python -m lega.evaluate --ckpt out/tiny/lega/model_best.pt --data_dir data/dummy \
       --out results/tiny/eval_lega.json
 """
+
 import argparse
 import functools
 import json
@@ -17,15 +18,31 @@ import torch.nn.functional as F
 
 from .data import get_val_windows, load_bin, load_tokenizer
 from .datacheck import append_test_access
-from .model import (gate_extra_params, gate_extra_params_per_head,
-                    load_model, count_params)
-from .preflight import (allow_protocol_violations,
-                        data_protocol_preflight)
-from .repro import (current_pipeline_run_id, load_provenance, sha256_file,
-                    test_data_fingerprint as _test_data_fingerprint)
+from .model import (
+    gate_extra_params,
+    gate_extra_params_per_head,
+    load_model,
+    count_params,
+)
+from .preflight import allow_protocol_violations, data_protocol_preflight
+from .repro import (
+    current_pipeline_run_id,
+    load_provenance,
+    sha256_file,
+    test_data_fingerprint as _test_data_fingerprint,
+)
 from .train import evaluate_val, _val_eval_indices
-from .utils import (amp_autocast, amp_dtype_for, config_bool, enable_tf32,
-                    get_device, now_str, save_json, set_seed, strict_int)
+from .utils import (
+    amp_autocast,
+    amp_dtype_for,
+    config_bool,
+    enable_tf32,
+    get_device,
+    now_str,
+    save_json,
+    set_seed,
+    strict_int,
+)
 
 
 # 最差窗口筛查的候选窗口上限：与 PPL 的 eval_iters 各自独立（前者排序、
@@ -33,8 +50,9 @@ from .utils import (amp_autocast, amp_dtype_for, config_bool, enable_tf32,
 WORST_SCREEN_MAX = 64
 
 
-def repeated_test_checkpoint(test_access, ckpt_sha256,
-                             test_data_fingerprint=None) -> bool:
+def repeated_test_checkpoint(
+    test_access, ckpt_sha256, test_data_fingerprint=None
+) -> bool:
     """该 checkpoint 是否已在同一 test 数据版本上评测过。
 
     纯函数，供评测主流程与单元测试共用：重复在 test 上评测是“测试集变隐式
@@ -51,8 +69,10 @@ def repeated_test_checkpoint(test_access, ckpt_sha256,
         for item in details:
             if not isinstance(item, dict):
                 continue
-            if (item.get("ckpt_prefix") == prefix
-                    and item.get("test_data_fingerprint") == ver):
+            if (
+                item.get("ckpt_prefix") == prefix
+                and item.get("test_data_fingerprint") == ver
+            ):
                 return True
         return False
     repeated = test_access.get("checkpoints_evaluated_multiple_times") or []
@@ -72,6 +92,7 @@ def worst_windows_allowed(split, worst_on_test: bool) -> bool:
 
 def _preserve_eval_mode(fn):
     """评测辅助函数临时切到 eval 并在结束时恢复调用方模式（dropout 不影响结果）。"""
+
     @functools.wraps(fn)
     def wrapper(model, *args, **kwargs):
         was_training = model.training
@@ -81,6 +102,7 @@ def _preserve_eval_mode(fn):
         finally:
             if was_training:
                 model.train()
+
     return wrapper
 
 
@@ -134,9 +156,11 @@ def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
             frac = None
     val_loss = None
     raw_loss = ck.get("val_loss")
-    if (raw_loss is not None
-            and not isinstance(raw_loss, (bool, np.bool_))
-            and not (isinstance(raw_loss, str) and "_" in raw_loss)):
+    if (
+        raw_loss is not None
+        and not isinstance(raw_loss, (bool, np.bool_))
+        and not (isinstance(raw_loss, str) and "_" in raw_loss)
+    ):
         try:
             val_loss = float(raw_loss)
         except (TypeError, ValueError, OverflowError):
@@ -148,29 +172,41 @@ def checkpoint_selection_info(ck, steps_planned_fallback=None) -> dict:
         "steps_planned": planned,
         "selection_step_fraction": frac,
         "selection_step_exceeds_planned": bool(
-            step is not None and planned is not None and step > planned),
+            step is not None and planned is not None and step > planned
+        ),
         "ckpt_val_loss": val_loss,
     }
 
 
-def worst_window_screening(val_len: int, ctx: int,
-                           max_windows: int = WORST_SCREEN_MAX) -> dict:
+def worst_window_screening(
+    val_len: int, ctx: int, max_windows: int = WORST_SCREEN_MAX
+) -> dict:
     """最差窗口筛查范围（候选数/总窗口数/覆盖率），供结果落盘与汇总注脚。"""
     max_windows = strict_int(max_windows, "max_windows")
     if max_windows < 1:
         raise ValueError(f"max_windows 必须 >= 1，收到 {max_windows!r}")
     screened, n_windows = _val_eval_indices(val_len, ctx, max_windows)
-    return {"screened": int(len(screened)), "total": int(n_windows),
-            "screen_max": max_windows}
+    return {
+        "screened": int(len(screened)),
+        "total": int(n_windows),
+        "screen_max": max_windows,
+    }
 
 
 @torch.inference_mode()
 @_preserve_eval_mode
-def collect_worst_windows(model, val, ctx: int, device: str, tok,
-                          n_worst: int = 3, amp: bool = False,
-                          max_windows: int = WORST_SCREEN_MAX,
-                          batch_windows: int = None,
-                          split: str = "val") -> list:
+def collect_worst_windows(
+    model,
+    val,
+    ctx: int,
+    device: str,
+    tok,
+    n_worst: int = 3,
+    amp: bool = False,
+    max_windows: int = WORST_SCREEN_MAX,
+    batch_windows: int = None,
+    split: str = "val",
+) -> list:
     """语言建模的坏案例：挑出下一 token 预测最差的验证窗口并解码。
 
     以"窗口末位的下一 token 预测"为坏案例单元（与贪心生成评测口径一致）：
@@ -190,12 +226,11 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
     else:
         batch_windows = _positive_int_or_none(batch_windows)
         if batch_windows is None:
-            raise ValueError(
-                f"batch_windows 必须是正整数，收到 {batch_windows!r}")
+            raise ValueError(f"batch_windows 必须是正整数，收到 {batch_windows!r}")
     amp_ctx = amp_autocast(device, bool(amp))
     rows = []
     for s in range(0, len(indices), batch_windows):
-        chunk = indices[s:s + batch_windows]
+        chunk = indices[s : s + batch_windows]
         x, y = get_val_windows(val, ctx, chunk, device)
         with amp_ctx:
             out = model(x, last_logits_only=True)
@@ -219,8 +254,7 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
             # 上下文尾部只有 160 字符，若 gold 出现在更早位置，人工复核时
             # 看不到证据句，无法区分“标注/构造问题”“检索失败”与“复制失败”。
             # 这里把最后一次出现附近的原文一并落盘，并记录到末尾的距离。
-            gold_positions = [i for i, t in enumerate(x_l[r])
-                              if t == gold_l[r]]
+            gold_positions = [i for i, t in enumerate(x_l[r]) if t == gold_l[r]]
             gold_pos = gold_positions[-1] if gold_positions else None
             gold_excerpt = None
             if gold_pos is not None:
@@ -230,27 +264,34 @@ def collect_worst_windows(model, val, ctx: int, device: str, tok,
                 if len(gold_excerpt) > 240:
                     gold_excerpt = gold_excerpt[:240] + "…"
                 gold_excerpt = gold_excerpt.replace("\n", " ⏎ ")
-            rows.append({
-                "window": int(chunk[r]),
-                "split": str(split),
-                "loss": float(loss_l[r]),
-                "context_tail": ctx_text[-160:],
-                # gold 是否出现在完整上下文窗口内。必须在采集时用全窗口判定：
-                # context_tail 只有 160 字符（窗口尾部），早先出现过的 gold 若只
-                # 看尾部会被误判为"从未出现"（复制/检索失败被错记成预测失败）。
-                # 按 token id 精确判定：字节级 BPE 下单 token decode 可能不是
-                # 完整字符（非 ASCII 时文本包含判定漏报），文本包含还会把
-                # 其他 token 内的子串误报为 gold 出现。
-                "gold_in_context": bool(gold_positions),
-                "gold_next": gold_txt,
-                "gold_occurrences": len(gold_positions),
-                "gold_last_pos": (int(gold_pos) if gold_pos is not None else None),
-                "gold_distance_tokens": (int(len(x_l[r]) - gold_pos - 1)
-                                         if gold_pos is not None else None),
-                "gold_context_excerpt": gold_excerpt,
-                "pred_top5": [(tok.decode([i]), round(float(p), 4))
-                              for p, i in zip(top_p_l[r], top_i_l[r])],
-            })
+            rows.append(
+                {
+                    "window": int(chunk[r]),
+                    "split": str(split),
+                    "loss": float(loss_l[r]),
+                    "context_tail": ctx_text[-160:],
+                    # gold 是否出现在完整上下文窗口内。必须在采集时用全窗口判定：
+                    # context_tail 只有 160 字符（窗口尾部），早先出现过的 gold 若只
+                    # 看尾部会被误判为"从未出现"（复制/检索失败被错记成预测失败）。
+                    # 按 token id 精确判定：字节级 BPE 下单 token decode 可能不是
+                    # 完整字符（非 ASCII 时文本包含判定漏报），文本包含还会把
+                    # 其他 token 内的子串误报为 gold 出现。
+                    "gold_in_context": bool(gold_positions),
+                    "gold_next": gold_txt,
+                    "gold_occurrences": len(gold_positions),
+                    "gold_last_pos": (int(gold_pos) if gold_pos is not None else None),
+                    "gold_distance_tokens": (
+                        int(len(x_l[r]) - gold_pos - 1)
+                        if gold_pos is not None
+                        else None
+                    ),
+                    "gold_context_excerpt": gold_excerpt,
+                    "pred_top5": [
+                        (tok.decode([i]), round(float(p), 4))
+                        for p, i in zip(top_p_l[r], top_i_l[r])
+                    ],
+                }
+            )
     rows.sort(key=lambda r: -r["loss"])
     return rows[:n_worst]
 
@@ -273,9 +314,12 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
     try:
         # bool 是 int 子类，float(True)=1.0；坏记录不能伪装成 val_loss=1.0
         # （对应一个看似正常的 PPL）。下划线数字串同样不是规范 JSON 数值。
-        vl = (None if isinstance(raw_loss, (bool, np.bool_))
-              or (isinstance(raw_loss, str) and "_" in raw_loss)
-              else float(raw_loss))
+        vl = (
+            None
+            if isinstance(raw_loss, (bool, np.bool_))
+            or (isinstance(raw_loss, str) and "_" in raw_loss)
+            else float(raw_loss)
+        )
     except (TypeError, ValueError, OverflowError):
         vl = None
     if vl is not None and math.isfinite(vl):
@@ -285,8 +329,9 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
         ppl, loss, clamped = None, None, None
     gmean = metrics.get("gate_mean")
     if gmean is not None:
-        if (isinstance(gmean, (bool, np.bool_))
-                or (isinstance(gmean, str) and "_" in gmean)):
+        if isinstance(gmean, (bool, np.bool_)) or (
+            isinstance(gmean, str) and "_" in gmean
+        ):
             gmean = None
         else:
             try:
@@ -296,8 +341,12 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
             else:
                 if not math.isfinite(gmean):
                     gmean = None
-    return {"val_ppl": ppl, "val_loss": loss, "val_ppl_clamped": clamped,
-            "gate_mean": gmean}
+    return {
+        "val_ppl": ppl,
+        "val_loss": loss,
+        "val_ppl_clamped": clamped,
+        "gate_mean": gmean,
+    }
 
 
 def window_phase_offsets(ctx: int, n_offsets: int) -> list:
@@ -313,10 +362,8 @@ def window_phase_offsets(ctx: int, n_offsets: int) -> list:
     if n_offsets < 2:
         raise ValueError(f"window_offsets 必须 >= 2，收到 {n_offsets}")
     if n_offsets > ctx:
-        raise ValueError(
-            f"window_offsets={n_offsets} 超过 ctx={ctx} 个可用相位")
-    return [(k * (ctx - 1)) // (n_offsets - 1)
-            for k in range(n_offsets)]
+        raise ValueError(f"window_offsets={n_offsets} 超过 ctx={ctx} 个可用相位")
+    return [(k * (ctx - 1)) // (n_offsets - 1) for k in range(n_offsets)]
 
 
 def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
@@ -338,23 +385,28 @@ def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
         except (TypeError, ValueError, OverflowError):
             continue
         loss = row.get("val_loss")
-        if (isinstance(loss, (bool, np.bool_))
-                or not isinstance(loss, (int, float, np.integer, np.floating))
-                or not math.isfinite(float(loss))):
+        if (
+            isinstance(loss, (bool, np.bool_))
+            or not isinstance(loss, (int, float, np.integer, np.floating))
+            or not math.isfinite(float(loss))
+        ):
             continue
         losses.append(float(loss))
         ppl = row.get("val_ppl")
-        if (isinstance(ppl, (bool, np.bool_))
-                or not isinstance(ppl, (int, float, np.integer, np.floating))
-                or not math.isfinite(float(ppl))):
+        if (
+            isinstance(ppl, (bool, np.bool_))
+            or not isinstance(ppl, (int, float, np.integer, np.floating))
+            or not math.isfinite(float(ppl))
+        ):
             ppls.append(None)
         else:
             ppls.append(float(ppl))
     out = {
         "n_offsets": len(offsets),
         "offsets": offsets,
-        "eval_iters": (strict_int(eval_iters, "eval_iters")
-                       if eval_iters is not None else None),
+        "eval_iters": (
+            strict_int(eval_iters, "eval_iters") if eval_iters is not None else None
+        ),
         "val_loss_min": None,
         "val_loss_max": None,
         "val_loss_range": None,
@@ -365,8 +417,10 @@ def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
         "val_ppl_ratio": None,
         "val_ppl_ratio_clamped": False,
         "max_abs_delta_val_loss_vs_offset0": None,
-        "note": ("窗口相位敏感性：不同 offset 的窗口相互重叠，不是独立样本；"
-                 "不能据此计算 p 值或置信区间"),
+        "note": (
+            "窗口相位敏感性：不同 offset 的窗口相互重叠，不是独立样本；"
+            "不能据此计算 p 值或置信区间"
+        ),
     }
     if not losses:
         return out
@@ -374,13 +428,15 @@ def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
     mean = math.fsum(losses) / len(losses)
     std = math.sqrt(math.fsum((x - mean) ** 2 for x in losses) / len(losses))
     spread = hi - lo
-    out.update({
-        "val_loss_min": lo,
-        "val_loss_max": hi,
-        "val_loss_range": spread,
-        "val_loss_mean": mean,
-        "val_loss_std": std,
-    })
+    out.update(
+        {
+            "val_loss_min": lo,
+            "val_loss_max": hi,
+            "val_loss_range": spread,
+            "val_loss_mean": mean,
+            "val_loss_std": std,
+        }
+    )
     finite_ppls = [p for p in ppls if p is not None]
     if finite_ppls:
         out["val_ppl_min"] = min(finite_ppls)
@@ -389,15 +445,18 @@ def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
     # 截断并显式标注，避免 JSON 出现 inf 或把截断值误读成真实比值。
     out["val_ppl_ratio_clamped"] = bool(spread > 20.0)
     out["val_ppl_ratio"] = math.exp(min(20.0, spread))
-    base = [r.get("val_loss") for r in rows
-            if isinstance(r, dict) and r.get("offset") == 0]
-    base = [float(v) for v in base
-            if isinstance(v, (int, float, np.integer, np.floating))
-            and not isinstance(v, (bool, np.bool_))
-            and math.isfinite(float(v))]
+    base = [
+        r.get("val_loss") for r in rows if isinstance(r, dict) and r.get("offset") == 0
+    ]
+    base = [
+        float(v)
+        for v in base
+        if isinstance(v, (int, float, np.integer, np.floating))
+        and not isinstance(v, (bool, np.bool_))
+        and math.isfinite(float(v))
+    ]
     if base:
-        out["max_abs_delta_val_loss_vs_offset0"] = max(
-            abs(x - base[0]) for x in losses)
+        out["max_abs_delta_val_loss_vs_offset0"] = max(abs(x - base[0]) for x in losses)
     return out
 
 
@@ -421,8 +480,7 @@ def _resolve_eval_amp(cfg_used: dict, device: str) -> bool:
         if name not in ("bfloat16", "float16"):
             return False
         available = amp_dtype_for(device, True)
-        return (available is not None
-                and str(available).replace("torch.", "") == name)
+        return available is not None and str(available).replace("torch.", "") == name
     # 旧 checkpoint 没有 amp_dtype：回退到请求开关。损坏的 amp 值不能
     # 让评测入口崩溃，也不能静默按 True 启用 bf16——保守回退到 fp32。
     try:
@@ -465,8 +523,10 @@ def load_train_throughput(run_dir: str):
     文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
     """
     d = _read_run_eval(run_dir)
-    return (_nonnegative_metric(d.get("train_step_time_ms")),
-            _nonnegative_metric(d.get("train_tokens_per_sec")))
+    return (
+        _nonnegative_metric(d.get("train_step_time_ms")),
+        _nonnegative_metric(d.get("train_tokens_per_sec")),
+    )
 
 
 def load_train_peak_mem_mb(run_dir: str):
@@ -489,8 +549,10 @@ def load_train_coverage(run_dir: str):
     """
     d = _read_run_eval(run_dir)
     out = {}
-    for src, dst in (("tokens_seen", "train_tokens_seen"),
-                     ("train_tokens", "train_tokens")):
+    for src, dst in (
+        ("tokens_seen", "train_tokens_seen"),
+        ("train_tokens", "train_tokens"),
+    ):
         v = d.get(src)
         if v is None:
             continue
@@ -501,9 +563,11 @@ def load_train_coverage(run_dir: str):
         if v >= 0:
             out[dst] = v
     e = d.get("epochs_seen")
-    if (e is not None
-            and not isinstance(e, (bool, np.bool_))
-            and not (isinstance(e, str) and "_" in e)):
+    if (
+        e is not None
+        and not isinstance(e, (bool, np.bool_))
+        and not (isinstance(e, str) and "_" in e)
+    ):
         try:
             e = float(e)
             if math.isfinite(e) and e >= 0:
@@ -514,38 +578,66 @@ def load_train_coverage(run_dir: str):
 
 
 def main():
-    p = argparse.ArgumentParser(description="PPL 评测（默认 held-out test，缺 test.bin 时回退 val）")
+    p = argparse.ArgumentParser(
+        description="PPL 评测（默认 held-out test，缺 test.bin 时回退 val）"
+    )
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True, help="输出 JSON 路径")
-    p.add_argument("--eval_iters", default=None,
-                   help="评测窗口数；默认继承训练配置，训练配置缺失时为 50"
-                        "（与 train.py 的默认值一致，保证窗口规格可比）")
-    p.add_argument("--full_eval", action="store_true",
-                   help="用全部不重叠窗口评测（与 --eval_iters 互斥）；"
-                        "默认 50 窗口只是抽样，正式 PPL 结论应另跑全量")
-    p.add_argument("--window_offsets", default=None, metavar="N",
-                   help="额外评测 N 个均匀窗口相位起点（0..ctx-1）并落盘"
-                        "window_offset_sensitivity；默认关闭。相位窗口相互重叠，"
-                        "只作边界敏感性诊断，不替代预注册的单起点/全量口径")
-    p.add_argument("--worst_n", type=int, default=0,
-                   help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）")
-    p.add_argument("--worst_on_test", action="store_true",
-                   help="允许在 test split 上转储最差窗口（坏案例）。默认关闭："
-                        "test 只能最终评估一次，把 test 错误清单交给人工迭代会"
-                        "让测试集变成隐式训练集。需要审阅 test 错误时显式开启。")
-    p.add_argument("--split", default="auto",
-                   choices=["auto", "test", "val"],
-                   help="默认 auto：存在 test.bin 时用 held-out test（checkpoint 选择在 "
-                        "val 上完成，报告指标必须在独立 split 上），否则回退 val")
+    p.add_argument(
+        "--eval_iters",
+        default=None,
+        help="评测窗口数；默认继承训练配置，训练配置缺失时为 50"
+        "（与 train.py 的默认值一致，保证窗口规格可比）",
+    )
+    p.add_argument(
+        "--full_eval",
+        action="store_true",
+        help="用全部不重叠窗口评测（与 --eval_iters 互斥）；"
+        "默认 50 窗口只是抽样，正式 PPL 结论应另跑全量",
+    )
+    p.add_argument(
+        "--window_offsets",
+        default=None,
+        metavar="N",
+        help="额外评测 N 个均匀窗口相位起点（0..ctx-1）并落盘"
+        "window_offset_sensitivity；默认关闭。相位窗口相互重叠，"
+        "只作边界敏感性诊断，不替代预注册的单起点/全量口径",
+    )
+    p.add_argument(
+        "--worst_n",
+        type=int,
+        default=0,
+        help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）",
+    )
+    p.add_argument(
+        "--worst_on_test",
+        action="store_true",
+        help="允许在 test split 上转储最差窗口（坏案例）。默认关闭："
+        "test 只能最终评估一次，把 test 错误清单交给人工迭代会"
+        "让测试集变成隐式训练集。需要审阅 test 错误时显式开启。",
+    )
+    p.add_argument(
+        "--split",
+        default="auto",
+        choices=["auto", "test", "val"],
+        help="默认 auto：存在 test.bin 时用 held-out test（checkpoint 选择在 "
+        "val 上完成，报告指标必须在独立 split 上），否则回退 val",
+    )
     p.add_argument("--device", default="auto")
-    p.add_argument("--allow_repeat_test", action="store_true",
-                   help="允许同一 checkpoint 在 test 上重复评测（尘封协议下这是"
-                        "泄露前兆：测试集只能最终一次性评估；默认拒绝，确需重测"
-                        "时显式放行，账本仍会留痕）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 检测到划分/重叠泄露也继续评测（仅用于"
-                        "复现历史实验；报告会标记 override，结果不得用于正式结论）")
+    p.add_argument(
+        "--allow_repeat_test",
+        action="store_true",
+        help="允许同一 checkpoint 在 test 上重复评测（尘封协议下这是"
+        "泄露前兆：测试集只能最终一次性评估；默认拒绝，确需重测"
+        "时显式放行，账本仍会留痕）",
+    )
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 检测到划分/重叠泄露也继续评测（仅用于"
+        "复现历史实验；报告会标记 override，结果不得用于正式结论）",
+    )
     args = p.parse_args()
     if args.full_eval and args.eval_iters is not None:
         p.error("--full_eval 与 --eval_iters 不能同时使用")
@@ -560,8 +652,7 @@ def main():
             p.error("--eval_iters 必须是正整数")
     if args.window_offsets is not None:
         try:
-            args.window_offsets = strict_int(
-                args.window_offsets, "--window_offsets")
+            args.window_offsets = strict_int(args.window_offsets, "--window_offsets")
         except (TypeError, ValueError) as e:
             p.error(str(e))
         if args.window_offsets < 2:
@@ -569,17 +660,21 @@ def main():
 
     # 评测同样不能在已标记泄露的数据上产出“正式指标”：训练闸门只保护
     # checkpoint 生产，独立 evaluate/复现历史 run 也必须先过同一份报告。
-    allow_override = allow_protocol_violations(
-        args.allow_data_protocol_violations)
+    allow_override = allow_protocol_violations(args.allow_data_protocol_violations)
     data_preflight = data_protocol_preflight(
-        args.data_dir, allow_override=allow_override)
+        args.data_dir, allow_override=allow_override
+    )
     if not data_preflight["report_present"]:
-        print("[eval] 警告：数据目录缺少 data_report.json，"
-              "无法执行评测前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[eval] 警告：数据目录缺少 data_report.json，"
+            "无法执行评测前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif data_preflight["critical_violations"]:
-        print(f"[eval] ⚠ 数据协议自检发现 "
-              f"{len(data_preflight['critical_violations'])} 个严重问题，"
-              "但已显式放行（结果不得用于正式结论）")
+        print(
+            f"[eval] ⚠ 数据协议自检发现 "
+            f"{len(data_preflight['critical_violations'])} 个严重问题，"
+            "但已显式放行（结果不得用于正式结论）"
+        )
 
     device = get_device(args.device)
     enable_tf32(device)
@@ -591,25 +686,32 @@ def main():
     seed_raw = ck.get("seed")
     # 输出/播种都用规范化后的整数：源元数据里的 5.0 不能写成 5.0，否则
     # eval.json 与台账的 seed 身份会与真正 set_seed 的值不同。
-    seed = (None if seed_raw is None
-            else strict_int(seed_raw, "checkpoint seed"))
+    seed = None if seed_raw is None else strict_int(seed_raw, "checkpoint seed")
     set_seed(0 if seed is None else seed)
     split = args.split
     if split == "auto":
-        split = "test" if (os.path.exists(os.path.join(args.data_dir, "test.bin"))
-                           and os.path.getsize(os.path.join(args.data_dir, "test.bin")) > 0) \
+        split = (
+            "test"
+            if (
+                os.path.exists(os.path.join(args.data_dir, "test.bin"))
+                and os.path.getsize(os.path.join(args.data_dir, "test.bin")) > 0
+            )
             else "val"
+        )
     if split == "val":
         # 与 checkpoint 选择（best on val）共用同一 split：报告指标存在选择偏差，
         # 须明确提示而非静默；正式数据请用 prepare_data.py 生成 held-out test。
-        print("[eval] 警告：正在 val split 上评测——这也是 best checkpoint 的选择集，"
-              "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测")
+        print(
+            "[eval] 警告：正在 val split 上评测——这也是 best checkpoint 的选择集，"
+            "报告 PPL 偏乐观；可用 prepare_bins 生成 test.bin 后在 held-out test 上评测"
+        )
     # checkpoint 内容指纹：test 访问账本与结果 JSON 共用同一值。
     ckpt_sha256 = sha256_file(args.ckpt)
     # 账本必须绑定 test 数据版本：只看 checkpoint 会把“重建 test 后的合法
     # 重测”误判为重复，也无法审计同一模型到底评测过哪些测试集。
-    test_data_fingerprint = (None if split != "test"
-                             else _test_data_fingerprint(args.data_dir))
+    test_data_fingerprint = (
+        None if split != "test" else _test_data_fingerprint(args.data_dir)
+    )
     test_access = None
     if split == "test":
         # 测试集尘封协议：每次在 test 上评测都写入访问账本（data_dir 下），
@@ -617,37 +719,45 @@ def main():
         # 变成隐式训练集；账本让这种行为可审计。
         # 只读数据目录等无法写账本的情况不阻塞评测，但必须显式告警。
         try:
-            test_access = append_test_access(args.data_dir, {
-                "time": now_str(),
-                "ckpt": os.path.abspath(args.ckpt),
-                "ckpt_sha256": ckpt_sha256,
-                "variant": ck.get("variant", model.variant),
-                "seed": seed,
-                "test_data_fingerprint": test_data_fingerprint,
-                "pipeline_run_id": current_pipeline_run_id(),
-            })
+            test_access = append_test_access(
+                args.data_dir,
+                {
+                    "time": now_str(),
+                    "ckpt": os.path.abspath(args.ckpt),
+                    "ckpt_sha256": ckpt_sha256,
+                    "variant": ck.get("variant", model.variant),
+                    "seed": seed,
+                    "test_data_fingerprint": test_data_fingerprint,
+                    "pipeline_run_id": current_pipeline_run_id(),
+                },
+            )
         except OSError as e:
-            print(f"[eval] 警告：test 访问账本写入失败（{e}）；"
-                  "本次 test 评测未被记录")
-        if repeated_test_checkpoint(test_access, ckpt_sha256,
-                                    test_data_fingerprint):
+            print(
+                f"[eval] 警告：test 访问账本写入失败（{e}）；" "本次 test 评测未被记录"
+            )
+        if repeated_test_checkpoint(test_access, ckpt_sha256, test_data_fingerprint):
             # 同一 checkpoint 重复在 test 上评测是“测试集变隐式训练集”的直接
             # 信号：账本已记录，但仅打印警告不足以阻止泄露循环（如反复
             # run_all --skip_train 据 test 迭代）。默认拒绝，需显式放行。
-            print(f"[eval] ⚠ 同一 checkpoint 在 test 上被重复评测"
-                  f"（累计 {test_access['evaluations']} 次、"
-                  f"{test_access['distinct_checkpoints']} 个 checkpoint）；"
-                  "测试集只能用于最终一次性评估，反复评测/据此调参视为泄露")
+            print(
+                f"[eval] ⚠ 同一 checkpoint 在 test 上被重复评测"
+                f"（累计 {test_access['evaluations']} 次、"
+                f"{test_access['distinct_checkpoints']} 个 checkpoint）；"
+                "测试集只能用于最终一次性评估，反复评测/据此调参视为泄露"
+            )
             if getattr(args, "allow_repeat_test", False) is not True:
                 raise SystemExit(
                     f"拒绝重复 test 评测：checkpoint {ckpt_sha256[:16]} 已在 test "
                     "上评测过（账本见 data_dir/.test_access_log.jsonl）。测试集只"
                     "用于最终一次性评估；确需重测请显式加 --allow_repeat_test"
-                    "（账本仍会记录，报告中须披露）。")
+                    "（账本仍会记录，报告中须披露）。"
+                )
     # test 已在上面写入访问账本；此处显式放行是“尘封协议”的唯一合法出口
     val = load_bin(args.data_dir, split, allow_test=(split == "test"))
     # 与训练时的评估保持一致：优先使用训练配置里的 train_ctx
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json")
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json"
+    )
     train_ctx = None
     use_amp = amp_dtype_for(device, True) is not None
     cfg_used = {}
@@ -666,8 +776,10 @@ def main():
         use_amp = _resolve_eval_amp(cfg_used, device)
     else:
         # 缺少训练配置时评测上下文静默变为 block_size，PPL 口径与训练内评测不一致
-        print(f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "
-              f"model.block_size={model.block_size}，PPL 可能与训练内评测不可比")
+        print(
+            f"[eval] 警告：未找到 {cfg_path}，评测上下文退化为 "
+            f"model.block_size={model.block_size}，PPL 可能与训练内评测不可比"
+        )
     train_ctx = _positive_int_or_none(train_ctx)
     ctx = min(model.block_size, train_ctx) if train_ctx else model.block_size
     if args.window_offsets is not None and args.window_offsets > ctx:
@@ -683,29 +795,33 @@ def main():
         eval_iters = int(n_windows)
         print(f"[eval] 全量窗口评测：{eval_iters} 个不重叠窗口")
     else:
-        eval_iters = (int(args.eval_iters) if args.eval_iters is not None
-                      else (int(cfg_eval_iters) if cfg_eval_iters is not None
-                            else 50))
+        eval_iters = (
+            int(args.eval_iters)
+            if args.eval_iters is not None
+            else (int(cfg_eval_iters) if cfg_eval_iters is not None else 50)
+        )
 
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。
-    metrics = evaluate_val(model, val, ctx, device, eval_iters, amp=use_amp,
-                           collect_window_losses=True)
+    metrics = evaluate_val(
+        model, val, ctx, device, eval_iters, amp=use_amp, collect_window_losses=True
+    )
     norm = json_safe_eval_metrics(metrics)
     ppl, vl, gmean = norm["val_ppl"], norm["val_loss"], norm["gate_mean"]
     if vl is None:
-        print("[eval] 警告：验证损失非有限（NaN/Inf），该 checkpoint 已失效；"
-              "val_ppl/val_loss 记为 null（避免写入非法 JSON 字面量、也避免 "
-              "min(20, NaN) 恰为 exp(20) 被误读成截断 PPL），"
-              "该结果不得与正常 PPL 比较")
+        print(
+            "[eval] 警告：验证损失非有限（NaN/Inf），该 checkpoint 已失效；"
+            "val_ppl/val_loss 记为 null（避免写入非法 JSON 字面量、也避免 "
+            "min(20, NaN) 恰为 exp(20) 被误读成截断 PPL），"
+            "该结果不得与正常 PPL 比较"
+        )
 
     offset_sensitivity = None
     if args.window_offsets is not None:
         offsets = window_phase_offsets(ctx, args.window_offsets)
         # 各相位可用窗口数可能差 1（验证集长度不整除 ctx）；用所有相位都能
         # 提供的公共窗口预算比较，避免把“窗口数不同”混进相位差异。
-        common_windows = min(
-            (len(val) - 1 - off) // ctx for off in offsets)
+        common_windows = min((len(val) - 1 - off) // ctx for off in offsets)
         if common_windows < 1:
             p.error("验证集太短，无法在全部窗口相位上评测")
         sens_iters = min(int(metrics["eval_iters"]), int(common_windows))
@@ -714,28 +830,33 @@ def main():
             if off == 0 and int(metrics["eval_iters"]) == sens_iters:
                 m = metrics
             else:
-                m = evaluate_val(model, val, ctx, device, sens_iters,
-                                 amp=use_amp, window_offset=off)
+                m = evaluate_val(
+                    model, val, ctx, device, sens_iters, amp=use_amp, window_offset=off
+                )
             safe = json_safe_eval_metrics(m)
-            rows.append({
-                "offset": int(off),
-                "eval_iters": int(m["eval_iters"]),
-                "val_windows": int(m["val_windows"]),
-                "val_tokens_evaluated": int(m["val_tokens_evaluated"]),
-                "val_loss": safe["val_loss"],
-                "val_ppl": safe["val_ppl"],
-                "val_ppl_clamped": safe["val_ppl_clamped"],
-                "val_loss_se": m.get("val_loss_se"),
-                "val_loss_ci95": m.get("val_loss_ci95"),
-            })
+            rows.append(
+                {
+                    "offset": int(off),
+                    "eval_iters": int(m["eval_iters"]),
+                    "val_windows": int(m["val_windows"]),
+                    "val_tokens_evaluated": int(m["val_tokens_evaluated"]),
+                    "val_loss": safe["val_loss"],
+                    "val_ppl": safe["val_ppl"],
+                    "val_ppl_clamped": safe["val_ppl_clamped"],
+                    "val_loss_se": m.get("val_loss_se"),
+                    "val_loss_ci95": m.get("val_loss_ci95"),
+                }
+            )
         offset_sensitivity = summarize_window_offsets(rows, sens_iters)
         offset_sensitivity["rows"] = rows
         if offset_sensitivity["val_loss_range"] is not None:
-            print(f"[eval] 窗口相位敏感性：{len(rows)} 个起点，"
-                  f"val_loss 范围 {offset_sensitivity['val_loss_min']:.4f}–"
-                  f"{offset_sensitivity['val_loss_max']:.4f}"
-                  f"（Δ={offset_sensitivity['val_loss_range']:.4f}）；"
-                  "重叠窗口仅作边界稳健性诊断")
+            print(
+                f"[eval] 窗口相位敏感性：{len(rows)} 个起点，"
+                f"val_loss 范围 {offset_sensitivity['val_loss_min']:.4f}–"
+                f"{offset_sensitivity['val_loss_max']:.4f}"
+                f"（Δ={offset_sensitivity['val_loss_range']:.4f}）；"
+                "重叠窗口仅作边界稳健性诊断"
+            )
 
     res = {
         "variant": ck.get("variant", model.variant),
@@ -758,8 +879,11 @@ def main():
         "eval_ctx": ctx,
         # 评测实际使用的数值精度：旧产物无 amp_dtype 时也能从结果反查。
         "amp": bool(use_amp),
-        "amp_dtype": (str(amp_dtype_for(device, use_amp)).replace("torch.", "")
-                      if amp_dtype_for(device, use_amp) is not None else None),
+        "amp_dtype": (
+            str(amp_dtype_for(device, use_amp)).replace("torch.", "")
+            if amp_dtype_for(device, use_amp) is not None
+            else None
+        ),
         "gate_mean": gmean,
         "gate_std": metrics.get("gate_std"),
         "gate_frac_low": metrics.get("gate_frac_low"),
@@ -771,10 +895,14 @@ def main():
         "n_gate_per_head": gate_extra_params_per_head(model),
         "n_heads": getattr(model, "n_heads", None),
         "n_layers": getattr(model, "n_layers", None),
-        "d_head": (int(model.d_model // model.n_heads)
-                   if getattr(model, "n_heads", 0) else None),
+        "d_head": (
+            int(model.d_model // model.n_heads)
+            if getattr(model, "n_heads", 0)
+            else None
+        ),
         **checkpoint_selection_info(
-            ck, cfg_used.get("steps") if isinstance(cfg_used, dict) else None),
+            ck, cfg_used.get("steps") if isinstance(cfg_used, dict) else None
+        ),
         "eval_iters_requested": metrics["eval_iters_requested"],
         "eval_iters": metrics["eval_iters"],
         "eval_window_offset": metrics.get("eval_window_offset", 0),
@@ -782,11 +910,14 @@ def main():
         "val_tokens_evaluated": metrics["val_tokens_evaluated"],
         # 全量窗口 vs 抽样窗口：PPL 结论的适用范围必须可机器判定。旧结果
         # 没有该字段时下游按“未知/抽样”处理，不能默认声称全量。
-        "full_eval": bool(metrics["val_windows"]
-                          and metrics["eval_iters"] >= metrics["val_windows"]),
+        "full_eval": bool(
+            metrics["val_windows"] and metrics["eval_iters"] >= metrics["val_windows"]
+        ),
         "eval_window_fraction": (
             float(metrics["eval_iters"]) / float(metrics["val_windows"])
-            if metrics["val_windows"] else None),
+            if metrics["val_windows"]
+            else None
+        ),
         # 逐窗口损失与窗口序号：同 split/同协议下各变体共享同一批窗口，
         # 下游可做窗口级配对（评估抽样不确定性），与跨种子方差分开报告。
         "window_losses": metrics.get("window_losses"),
@@ -809,45 +940,62 @@ def main():
     # test 上转储默认关闭：最差窗口会连同上下文/预测暴露 test 内容，交人工
     # 迭代 = 据 test 改进模型（测试集变隐式训练集）。需要审阅时显式开启。
     worst_on_test_ok = worst_windows_allowed(
-        split, getattr(args, "worst_on_test", False))
+        split, getattr(args, "worst_on_test", False)
+    )
     if args.worst_n > 0 and not worst_on_test_ok:
         res["worst_windows_skipped_reason"] = "test_sealed"
-        print("[eval] 已跳过 test 最差窗口转储（默认不在 test 上做坏案例迭代）；"
-              "确需审阅 test 错误请显式加 --worst_on_test，并在报告中披露")
+        print(
+            "[eval] 已跳过 test 最差窗口转储（默认不在 test 上做坏案例迭代）；"
+            "确需审阅 test 错误请显式加 --worst_on_test，并在报告中披露"
+        )
     if args.worst_n > 0 and worst_on_test_ok:
         res["worst_windows_on_test"] = bool(split == "test")
         try:
             tok = load_tokenizer(args.data_dir)
             res["worst_windows"] = collect_worst_windows(
-                model, val, ctx, device, tok, n_worst=int(args.worst_n),
-                amp=use_amp, split=split)
+                model,
+                val,
+                ctx,
+                device,
+                tok,
+                n_worst=int(args.worst_n),
+                amp=use_amp,
+                split=split,
+            )
             # 把筛查范围随结果落盘：最差窗口来自“候选窗口子集”而非全量排序，
             # 汇总层必须能区分 64/665 与 64/64 两种覆盖度。
             res["worst_window_scope"] = worst_window_screening(
-                len(val), ctx, WORST_SCREEN_MAX)
-            print(f"[eval] 最差 {len(res['worst_windows'])} 个窗口已随结果落盘"
-                  f"（候选 {res['worst_window_scope']['screened']}/"
-                  f"{res['worst_window_scope']['total']} 个窗口；"
-                  "res['worst_windows']）")
+                len(val), ctx, WORST_SCREEN_MAX
+            )
+            print(
+                f"[eval] 最差 {len(res['worst_windows'])} 个窗口已随结果落盘"
+                f"（候选 {res['worst_window_scope']['screened']}/"
+                f"{res['worst_window_scope']['total']} 个窗口；"
+                "res['worst_windows']）"
+            )
             if split == "test":
                 # 落盘即意味着 test 内容进入可读报告：必须留痕，供审计。
                 try:
-                    test_access = append_test_access(args.data_dir, {
-                        "time": now_str(),
-                        "reason": "worst_window_dump_on_test",
-                        "ckpt_sha256": ckpt_sha256,
-                        "variant": ck.get("variant", model.variant),
-                        "seed": seed,
-                        "n_worst": int(args.worst_n),
-                        "test_data_fingerprint": test_data_fingerprint,
-                        "pipeline_run_id": current_pipeline_run_id(),
-                    })
+                    test_access = append_test_access(
+                        args.data_dir,
+                        {
+                            "time": now_str(),
+                            "reason": "worst_window_dump_on_test",
+                            "ckpt_sha256": ckpt_sha256,
+                            "variant": ck.get("variant", model.variant),
+                            "seed": seed,
+                            "n_worst": int(args.worst_n),
+                            "test_data_fingerprint": test_data_fingerprint,
+                            "pipeline_run_id": current_pipeline_run_id(),
+                        },
+                    )
                     # 结果 JSON 里的账本摘要必须包含刚写入的转储记录；
                     # 否则报告会少报一次 test 读取，审计链断开。
                     res["test_access"] = test_access
                 except OSError as e:
-                    print(f"[eval] 警告：test 最差窗口转储的访问记录写入失败"
-                          f"（{e}）")
+                    print(
+                        f"[eval] 警告：test 最差窗口转储的访问记录写入失败" f"（{e}）"
+                    )
         except Exception as e:  # 坏案例转储失败不应阻塞评测本身
             print(f"[eval] 警告：最差窗口转储失败（{e}）")
     # 继承训练 run 的代码/数据溯源信息（run_manifest.json），保证结果可追溯
@@ -858,32 +1006,41 @@ def main():
         detail = ", ".join(
             f"{m.get('field')}: {m.get('train')} -> {m.get('eval')}"
             for m in (prov.get("runtime_mismatches") or [])
-            if isinstance(m, dict))
-        print("[eval] ⚠ 本次评测的 Python/PyTorch/NumPy/CUDA/cuDNN/GPU 与训练"
-              f"清单不一致（{detail}）：同一 checkpoint 可能因浮点内核/算子实现"
-              "差异得到不同数值，结果已记录 train_runtime/eval_runtime，"
-              "不能声称与训练环境完全相同")
+            if isinstance(m, dict)
+        )
+        print(
+            "[eval] ⚠ 本次评测的 Python/PyTorch/NumPy/CUDA/cuDNN/GPU 与训练"
+            f"清单不一致（{detail}）：同一 checkpoint 可能因浮点内核/算子实现"
+            "差异得到不同数值，结果已记录 train_runtime/eval_runtime，"
+            "不能声称与训练环境完全相同"
+        )
     # 与训练完成时写回 run_manifest 的 checkpoint 哈希交叉核对：目录里的
     # 权重若在训练后被替换/覆盖，eval.json 仍绑定实际内容，但必须显式标出
     # “它已不是训练清单记录的那一份”，不能让旧清单替新权重背书。
-    expected_ckpt = ((prov.get("manifest_checkpoint_hashes") or {})
-                     .get(os.path.basename(os.path.abspath(args.ckpt))))
+    expected_ckpt = (prov.get("manifest_checkpoint_hashes") or {}).get(
+        os.path.basename(os.path.abspath(args.ckpt))
+    )
     if isinstance(expected_ckpt, str):
-        res["checkpoint_matches_manifest"] = (expected_ckpt == ckpt_sha256)
+        res["checkpoint_matches_manifest"] = expected_ckpt == ckpt_sha256
         if expected_ckpt != ckpt_sha256:
-            print("[eval] ⚠ 被评测 checkpoint 的内容哈希与训练 run_manifest "
-                  f"记录不一致（manifest={expected_ckpt[:16]}…, "
-                  f"actual={ckpt_sha256[:16]}…）：权重可能已被替换/覆盖，"
-                  "本次结果不能声称对应该清单的训练产物")
+            print(
+                "[eval] ⚠ 被评测 checkpoint 的内容哈希与训练 run_manifest "
+                f"记录不一致（manifest={expected_ckpt[:16]}…, "
+                f"actual={ckpt_sha256[:16]}…）：权重可能已被替换/覆盖，"
+                "本次结果不能声称对应该清单的训练产物"
+            )
     else:
         res["checkpoint_matches_manifest"] = None
     if prov.get("data_fingerprint_matches_training") is False:
-        print("[eval] ⚠ 当前 data_dir 的数据指纹与 checkpoint 训练清单不一致："
-              "本次指标来自另一份数据，不能与训练时的 val/test 结果直接比较；"
-              "已分别写入 eval_data_fingerprint / train_data_fingerprint")
+        print(
+            "[eval] ⚠ 当前 data_dir 的数据指纹与 checkpoint 训练清单不一致："
+            "本次指标来自另一份数据，不能与训练时的 val/test 结果直接比较；"
+            "已分别写入 eval_data_fingerprint / train_data_fingerprint"
+        )
     # 训练过程统计随被评测 checkpoint 一起绑定（run_all 从本文件读取）
-    res["train_step_time_ms"], res["train_tokens_per_sec"] = \
-        load_train_throughput(run_dir)
+    res["train_step_time_ms"], res["train_tokens_per_sec"] = load_train_throughput(
+        run_dir
+    )
     res["train_peak_mem_mb"] = load_train_peak_mem_mb(run_dir)
     # 训练数据覆盖率随 checkpoint 绑定：epochs_seen<1 时下游必须把这份
     # 评测标为“未充分训练”，而不是与跑满数据的 run 直接比 PPL。

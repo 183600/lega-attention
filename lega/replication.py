@@ -32,6 +32,7 @@
 * n<3 与项目其余协议一致，不作判定；零方差（所有种子配对差完全相同）
   是模型退化情形，单独标记，不能当作强复现证据。
 """
+
 import math
 from numbers import Real
 
@@ -142,7 +143,7 @@ def _loo_sign_agreement(diffs):
         return None
     score = 0.0
     for i, d in enumerate(diffs):
-        rest = diffs[:i] + diffs[i + 1:]
+        rest = diffs[:i] + diffs[i + 1 :]
         rest_mean, _ = mean_std(rest)
         if rest_mean is None or rest_mean == 0.0 or d == 0.0:
             score += 0.5
@@ -154,27 +155,39 @@ def _loo_sign_agreement(diffs):
 def _empty_result(n: int, alpha: float, min_seeds: int, margin):
     return {
         "method": "t 预测区间 + 正态种子模型下的同号概率（描述性）",
-        "n": int(n), "df": None, "alpha": alpha, "level": 1.0 - alpha,
+        "n": int(n),
+        "df": None,
+        "alpha": alpha,
+        "level": 1.0 - alpha,
         "min_seeds": min_seeds,
-        "mean_diff": None, "sd_diff": None, "se_mean": None,
-        "prediction_sd": None, "prediction_interval": None,
-        "pi_excludes_zero": None, "expected_sign": None,
-        "prob_same_sign": None, "prob_opposite_sign": None,
-        "sesoi": margin, "prob_meaningful_same_direction": None,
+        "mean_diff": None,
+        "sd_diff": None,
+        "se_mean": None,
+        "prediction_sd": None,
+        "prediction_interval": None,
+        "pi_excludes_zero": None,
+        "expected_sign": None,
+        "prob_same_sign": None,
+        "prob_opposite_sign": None,
+        "sesoi": margin,
+        "prob_meaningful_same_direction": None,
         "prob_meaningful_opposite_direction": None,
         "prob_within_sesoi": None,
         "loo_sign_agreement": None,
         "zero_variance": None,
         "status": "invalid",
         "label": _STATUS_CN["invalid"],
-        "note": ("预测的是“同配置/同数据/同评测协议下换一个训练种子”，"
-                 "不外推到新数据、新超参数或新硬件；描述性证据，不改变"
-                 "预注册判定。"),
+        "note": (
+            "预测的是“同配置/同数据/同评测协议下换一个训练种子”，"
+            "不外推到新数据、新超参数或新硬件；描述性证据，不改变"
+            "预注册判定。"
+        ),
     }
 
 
-def replication_forecast(values, margin=None, alpha: float = DEFAULT_ALPHA,
-                         min_seeds: int = MIN_SEEDS) -> dict:
+def replication_forecast(
+    values, margin=None, alpha: float = DEFAULT_ALPHA, min_seeds: int = MIN_SEEDS
+) -> dict:
     """对一组（已按指标尺度变换的）配对差做新种子复现预测。
 
     ``values`` 为 ``d_i = 候选_i − 参照_i``；调用方负责先把 PPL 转成相对差/
@@ -192,7 +205,7 @@ def replication_forecast(values, margin=None, alpha: float = DEFAULT_ALPHA,
     margin = None if margin is None else _strict_margin(margin)
 
     vals = []
-    for v in (values if isinstance(values, (list, tuple)) else list(values)):
+    for v in values if isinstance(values, (list, tuple)) else list(values):
         f = _finite_observation(v)
         if f is not None:
             vals.append(f)
@@ -209,8 +222,9 @@ def replication_forecast(values, margin=None, alpha: float = DEFAULT_ALPHA,
     out["loo_sign_agreement"] = _loo_sign_agreement(vals)
     if mean is None:
         return out
-    out["expected_sign"] = ("positive" if mean > 0.0 else
-                            "negative" if mean < 0.0 else "zero")
+    out["expected_sign"] = (
+        "positive" if mean > 0.0 else "negative" if mean < 0.0 else "zero"
+    )
     if n < min_seeds:
         out["status"] = "insufficient_seeds"
         out["label"] = _STATUS_CN["insufficient_seeds"]
@@ -255,7 +269,7 @@ def replication_forecast(values, margin=None, alpha: float = DEFAULT_ALPHA,
             return out
         out["prob_same_sign"] = _clamp01(prob)
         out["prob_opposite_sign"] = _clamp01(1.0 - prob)
-        if (out["pi_excludes_zero"] or out["prob_same_sign"] >= 0.95):
+        if out["pi_excludes_zero"] or out["prob_same_sign"] >= 0.95:
             out["status"] = "directionally_consistent"
         elif out["prob_same_sign"] >= 0.8:
             out["status"] = "directionally_plausible"
@@ -270,12 +284,14 @@ def replication_forecast(values, margin=None, alpha: float = DEFAULT_ALPHA,
         pred_sd = out.get("prediction_sd")
         if pred_sd == 0.0:
             within = 1.0 if abs(mean) < margin else 0.0
-            same = (mean >= margin if mean > 0.0 else
-                    mean <= -margin if mean < 0.0 else 0.0)
+            same = (
+                mean >= margin if mean > 0.0 else mean <= -margin if mean < 0.0 else 0.0
+            )
             out["prob_meaningful_same_direction"] = 1.0 if same else 0.0
             out["prob_within_sesoi"] = within
-            out["prob_meaningful_opposite_direction"] = 1.0 - within - (
-                1.0 if same else 0.0)
+            out["prob_meaningful_opposite_direction"] = (
+                1.0 - within - (1.0 if same else 0.0)
+            )
         elif pred_sd is not None and math.isfinite(pred_sd) and pred_sd > 0.0:
             c_hi = _t_cdf((margin - mean) / pred_sd, df)
             c_lo = _t_cdf((-margin - mean) / pred_sd, df)
@@ -286,6 +302,5 @@ def replication_forecast(values, margin=None, alpha: float = DEFAULT_ALPHA,
                     out["prob_meaningful_opposite_direction"] = _clamp01(c_lo)
                 else:
                     out["prob_meaningful_same_direction"] = _clamp01(c_lo)
-                    out["prob_meaningful_opposite_direction"] = _clamp01(
-                        1.0 - c_hi)
+                    out["prob_meaningful_opposite_direction"] = _clamp01(1.0 - c_hi)
     return out

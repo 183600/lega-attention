@@ -30,6 +30,7 @@ a·c，c=log(n·max_j p_j)）、C（长度项 b·log n）的完整 2^3 矩阵，
 * Shapley 分解是**探索性**证据：它没有预注册，不能替代预注册的
   单因素确认性检验；两者方向冲突时并列展示，不挑选有利口径。
 """
+
 import math
 from itertools import combinations
 from math import factorial
@@ -103,7 +104,8 @@ def oriented_value(metric: str, raw) -> float:
         return value
     raise ValueError(
         f"未知指标 {metric!r}：只支持 PPL（转 −log）或 "
-        "RULER平均/EM/AUROC/PR-AUC（越大越好）")
+        "RULER平均/EM/AUROC/PR-AUC（越大越好）"
+    )
 
 
 def shapley_values(values: Mapping[str, float]) -> Dict[str, float]:
@@ -129,12 +131,11 @@ def shapley_values(values: Mapping[str, float]) -> Dict[str, float]:
             others = [j for j in FACTOR_ORDER if j != i]
             terms = []
             for r in range(len(others) + 1):
-                weight = (factorial(r) * factorial(n - r - 1) / factorial(n))
+                weight = factorial(r) * factorial(n - r - 1) / factorial(n)
                 for subset in combinations(others, r):
                     s = frozenset(subset)
                     with_i = s | {i}
-                    terms.append(
-                        weight * (vals[cell_key(with_i)] - vals[cell_key(s)]))
+                    terms.append(weight * (vals[cell_key(with_i)] - vals[cell_key(s)]))
             try:
                 total = math.fsum(terms)
             except (OverflowError, ValueError):
@@ -161,7 +162,8 @@ def shapley_values(values: Mapping[str, float]) -> Dict[str, float]:
         value = val * scale
         if not math.isfinite(value):
             raise ValueError(
-                f"Shapley 值 {factor} 超出 float 表示范围（scale={scale!r}）")
+                f"Shapley 值 {factor} 超出 float 表示范围（scale={scale!r}）"
+            )
         out[factor] = float(value)
     return out
 
@@ -180,7 +182,8 @@ def decomposition(values: Mapping[str, float]) -> Dict:
         # 两个有限值符号相反且幅度和超过 float 上限时，真实总效应不可表示；
         # 不能把 inf 写进报告，按无法分解处理（调用方会跳过该种子）。
         raise ValueError(
-            f"Shapley 总效应超出 float 表示范围（ABC={abc!r}, none={none!r}）")
+            f"Shapley 总效应超出 float 表示范围（ABC={abc!r}, none={none!r}）"
+        )
     try:
         gap = math.fsum(phi.values()) - total
     except OverflowError:
@@ -189,12 +192,10 @@ def decomposition(values: Mapping[str, float]) -> Dict:
         # 逐项相加可能中间溢出；按最大幅度缩放后再求和，效率性残差仍可
         # 表示，不能因为求和顺序把有效的分解写成 inf/nan。
         scale = max([abs(total)] + [abs(val) for val in phi.values()])
-        gap = (math.fsum(val / scale for val in phi.values())
-               - total / scale) * scale
+        gap = (math.fsum(val / scale for val in phi.values()) - total / scale) * scale
         if not math.isfinite(gap):
             raise ValueError("Shapley 效率性残差超出 float 表示范围")
-    return {"phi": phi, "total_effect": float(total),
-            "efficiency_gap": float(gap)}
+    return {"phi": phi, "total_effect": float(total), "efficiency_gap": float(gap)}
 
 
 def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:

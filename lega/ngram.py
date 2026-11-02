@@ -22,6 +22,7 @@
 约定：训练统计只来自 `train.bin`；评测 split 内容绝不参与拟合或选参
 （split="val" 时 α 选择与报告同集，属轻微乐观，已在输出中显式注明）。
 """
+
 import argparse
 import json
 import math
@@ -31,10 +32,8 @@ import numpy as np
 
 from .data import load_bin, load_meta
 from .datacheck import append_test_access, check_vocab_capacity
-from .preflight import (allow_protocol_violations,
-                        data_protocol_preflight)
-from .repro import (current_pipeline_run_id, data_fingerprint,
-                    test_data_fingerprint)
+from .preflight import allow_protocol_violations, data_protocol_preflight
+from .repro import current_pipeline_run_id, data_fingerprint, test_data_fingerprint
 from .utils import strict_int
 
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
@@ -85,8 +84,11 @@ def _merge_counted(pieces):
     while len(pieces) > 1:
         merged = []
         for i in range(0, len(pieces), 2):
-            merged.append(_merge_two_counted(pieces[i], pieces[i + 1])
-                          if i + 1 < len(pieces) else pieces[i])
+            merged.append(
+                _merge_two_counted(pieces[i], pieces[i + 1])
+                if i + 1 < len(pieces)
+                else pieces[i]
+            )
         pieces = merged
     return pieces[0]
 
@@ -129,15 +131,15 @@ def fit_counts(ids: np.ndarray, vocab_size: int):
     uni = np.zeros(max(1, vocab_size), dtype=np.float64)
     n = int(len(ids))
     for start in range(0, n, _PAIR_CHUNK_TOKENS):
-        chunk = np.asarray(ids[start:start + _PAIR_CHUNK_TOKENS],
-                           dtype=np.int64)
+        chunk = np.asarray(ids[start : start + _PAIR_CHUNK_TOKENS], dtype=np.int64)
         uni += np.bincount(chunk, minlength=vocab_size)
     pair_keys, pair_counts = _pair_counts_chunked(ids, vocab_size)
     return uni, pair_keys, pair_counts.astype(np.float64)
 
 
-def _bigram_counts_for(pair_keys: np.ndarray, pair_counts: np.ndarray,
-                       keys: np.ndarray) -> np.ndarray:
+def _bigram_counts_for(
+    pair_keys: np.ndarray, pair_counts: np.ndarray, keys: np.ndarray
+) -> np.ndarray:
     """查 eval 二元组的训练频次：排序键上二分，未出现即 0。"""
     if len(pair_keys) == 0 or len(keys) == 0:
         return np.zeros(len(keys), dtype=np.float64)
@@ -147,8 +149,9 @@ def _bigram_counts_for(pair_keys: np.ndarray, pair_counts: np.ndarray,
     return np.where(hit, pair_counts[pos_clip], 0.0)
 
 
-def _context_counts(pair_keys: np.ndarray, pair_counts: np.ndarray,
-                    vocab_size: int) -> np.ndarray:
+def _context_counts(
+    pair_keys: np.ndarray, pair_counts: np.ndarray, vocab_size: int
+) -> np.ndarray:
     """训练流中每个 token 作为“前文”出现的次数（即其后确实有 token 的次数）。
 
     不能用 ``uni[prev]``：一元频次包含训练流最后一个 token，但它没有后继，
@@ -159,12 +162,12 @@ def _context_counts(pair_keys: np.ndarray, pair_counts: np.ndarray,
     if len(pair_keys) == 0:
         return np.zeros(max(1, vocab_size), dtype=np.float64)
     prev = np.asarray(pair_keys, dtype=np.int64) // vocab_size
-    return np.bincount(prev, weights=pair_counts,
-                       minlength=max(1, vocab_size)).astype(np.float64)
+    return np.bincount(prev, weights=pair_counts, minlength=max(1, vocab_size)).astype(
+        np.float64
+    )
 
 
-def _selection_terms(ids, positions, uni, pair_keys, pair_counts,
-                    vocab_size: int):
+def _selection_terms(ids, positions, uni, pair_keys, pair_counts, vocab_size: int):
     """选参用的逐 token 频次；positions=None 表示整个 split。
 
     positions 是 `window_positions` 给出的神经评测目标 token 下标。二元项
@@ -177,34 +180,43 @@ def _selection_terms(ids, positions, uni, pair_keys, pair_counts,
     ctx_counts = _context_counts(pair_keys, pair_counts, vocab_size)
     if positions is None:
         c_pair, c_prev, n_bigram = _bigram_terms(
-            ids, uni, pair_keys, pair_counts, vocab_size)
-        return {"cur_unigram": ids,
-                "cur_bigram": ids[1:1 + int(n_bigram or 0)],
-                "c_pair": c_pair, "c_prev": c_prev,
-                "n_bigram": int(n_bigram or 0)}
+            ids, uni, pair_keys, pair_counts, vocab_size
+        )
+        return {
+            "cur_unigram": ids,
+            "cur_bigram": ids[1 : 1 + int(n_bigram or 0)],
+            "c_pair": c_pair,
+            "c_prev": c_prev,
+            "n_bigram": int(n_bigram or 0),
+        }
     pos = np.asarray(positions, dtype=np.int64)
     if pos.size == 0:
-        return {"cur_unigram": np.empty(0, dtype=np.int64),
-                "cur_bigram": np.empty(0, dtype=np.int64),
-                "c_pair": np.empty(0), "c_prev": np.empty(0),
-                "n_bigram": 0}
+        return {
+            "cur_unigram": np.empty(0, dtype=np.int64),
+            "cur_bigram": np.empty(0, dtype=np.int64),
+            "c_pair": np.empty(0),
+            "c_prev": np.empty(0),
+            "n_bigram": 0,
+        }
     prev = ids[pos - 1]
     keys = prev * vocab_size
     keys += ids[pos]
-    return {"cur_unigram": ids[pos], "cur_bigram": ids[pos],
-            "c_pair": _bigram_counts_for(pair_keys, pair_counts, keys),
-            "c_prev": ctx_counts[prev], "n_bigram": int(pos.size)}
+    return {
+        "cur_unigram": ids[pos],
+        "cur_bigram": ids[pos],
+        "c_pair": _bigram_counts_for(pair_keys, pair_counts, keys),
+        "c_prev": ctx_counts[prev],
+        "n_bigram": int(pos.size),
+    }
 
 
-def _select_ngram(ids, positions, uni, pair_keys, pair_counts, vocab_size,
-                  alphas):
+def _select_ngram(ids, positions, uni, pair_keys, pair_counts, vocab_size, alphas):
     """在给定 token 集（整个 split 或神经评测窗口）上选 α/λ 与最强模型。
 
     选择目标与报告模型选择一致：mean token NLL（避免 exp 截断干扰排序）。
     返回字段与旧的内联选参逻辑逐一对应，便于保持产物兼容。
     """
-    terms = _selection_terms(ids, positions, uni, pair_keys, pair_counts,
-                             vocab_size)
+    terms = _selection_terms(ids, positions, uni, pair_keys, pair_counts, vocab_size)
     best = {"unigram": None, "bigram": None}
     for order in ("unigram", "bigram"):
         best_nll = None
@@ -212,8 +224,9 @@ def _select_ngram(ids, positions, uni, pair_keys, pair_counts, vocab_size,
             if order == "unigram":
                 m = ppl_unigram(terms["cur_unigram"], uni, a)
             else:
-                m = _bigram_ppl(terms["c_pair"], terms["c_prev"],
-                                terms["n_bigram"], a, vocab_size)
+                m = _bigram_ppl(
+                    terms["c_pair"], terms["c_prev"], terms["n_bigram"], a, vocab_size
+                )
             if m["mean_nll"] is None:
                 continue
             if best_nll is None or m["mean_nll"] < best_nll:
@@ -227,39 +240,53 @@ def _select_ngram(ids, positions, uni, pair_keys, pair_counts, vocab_size,
             for au in alphas:
                 for ab in alphas:
                     m = _interp_ppl_from_counts(
-                        terms["cur_bigram"], uni, terms["c_pair"],
-                        terms["c_prev"], terms["n_bigram"], au, ab, lam,
-                        vocab_size)
+                        terms["cur_bigram"],
+                        uni,
+                        terms["c_pair"],
+                        terms["c_prev"],
+                        terms["n_bigram"],
+                        au,
+                        ab,
+                        lam,
+                        vocab_size,
+                    )
                     if m["mean_nll"] is None:
                         continue
-                    if (best_lam is None
-                            or m["mean_nll"] < best_lam["val_mean_nll"]):
-                        best_lam = {"lambda": float(lam),
-                                    "alpha_unigram": float(au),
-                                    "alpha_bigram": float(ab),
-                                    "val_mean_nll": m["mean_nll"]}
+                    if best_lam is None or m["mean_nll"] < best_lam["val_mean_nll"]:
+                        best_lam = {
+                            "lambda": float(lam),
+                            "alpha_unigram": float(au),
+                            "alpha_bigram": float(ab),
+                            "val_mean_nll": m["mean_nll"],
+                        }
             if best_lam is not None:
                 interp_by_lambda[str(lam)] = best_lam
-                if (interp is None
-                        or best_lam["val_mean_nll"] < interp["val_mean_nll"]):
+                if interp is None or best_lam["val_mean_nll"] < interp["val_mean_nll"]:
                     interp = best_lam
     val_mean_nll = {}
     if best["unigram"] is not None:
         val_mean_nll["unigram"] = ppl_unigram(
-            terms["cur_unigram"], uni, best["unigram"])["mean_nll"]
+            terms["cur_unigram"], uni, best["unigram"]
+        )["mean_nll"]
     if best["bigram"] is not None:
         val_mean_nll["bigram"] = _bigram_ppl(
-            terms["c_pair"], terms["c_prev"], terms["n_bigram"],
-            best["bigram"], vocab_size)["mean_nll"]
+            terms["c_pair"],
+            terms["c_prev"],
+            terms["n_bigram"],
+            best["bigram"],
+            vocab_size,
+        )["mean_nll"]
     if interp is not None:
         val_mean_nll["interpolated_bigram"] = interp["val_mean_nll"]
     usable = {k: v for k, v in val_mean_nll.items() if v is not None}
     selected_model = min(usable, key=usable.get) if usable else None
-    return {"selected_alpha": best,
-            "selected_interpolated": interp,
-            "interpolated_by_lambda": interp_by_lambda,
-            "val_mean_nll": val_mean_nll,
-            "selected_model": selected_model}
+    return {
+        "selected_alpha": best,
+        "selected_interpolated": interp,
+        "interpolated_by_lambda": interp_by_lambda,
+        "val_mean_nll": val_mean_nll,
+        "selected_model": selected_model,
+    }
 
 
 def _parse_window_plan(window_spec, n_eval: int, n_sel: int):
@@ -274,32 +301,49 @@ def _parse_window_plan(window_spec, n_eval: int, n_sel: int):
     try:
         if not isinstance(window_spec, dict):
             raise TypeError
-        spec_ctx = (None if window_spec.get("ctx") is None
-                    else strict_int(window_spec.get("ctx") or 0,
-                                    "window_spec.ctx"))
-        spec_iters = (None if window_spec.get("iters") is None
-                      else strict_int(window_spec.get("iters") or 0,
-                                      "window_spec.iters"))
+        spec_ctx = (
+            None
+            if window_spec.get("ctx") is None
+            else strict_int(window_spec.get("ctx") or 0, "window_spec.ctx")
+        )
+        spec_iters = (
+            None
+            if window_spec.get("iters") is None
+            else strict_int(window_spec.get("iters") or 0, "window_spec.iters")
+        )
     except (ValueError, TypeError):
         spec_ctx = spec_iters = None
     if spec_ctx is None or spec_iters is None:
-        return {"error": (f"窗口规格无效或评测流过短（ctx={spec_ctx}, "
-                          f"iters={spec_iters}, eval_tokens={n_eval}），"
-                          "无法逐位置对齐")}
-    windows = window_positions(n_eval, spec_ctx, spec_iters,
-                               return_starts=True)
+        return {
+            "error": (
+                f"窗口规格无效或评测流过短（ctx={spec_ctx}, "
+                f"iters={spec_iters}, eval_tokens={n_eval}），"
+                "无法逐位置对齐"
+            )
+        }
+    windows = window_positions(n_eval, spec_ctx, spec_iters, return_starts=True)
     if windows is None:
-        return {"error": (f"窗口规格无效或评测流过短（ctx={spec_ctx}, "
-                          f"iters={spec_iters}, eval_tokens={n_eval}），"
-                          "无法逐位置对齐")}
+        return {
+            "error": (
+                f"窗口规格无效或评测流过短（ctx={spec_ctx}, "
+                f"iters={spec_iters}, eval_tokens={n_eval}），"
+                "无法逐位置对齐"
+            )
+        }
     pos, starts = windows
     n_windows = (int(n_eval) - 1) // int(spec_ctx)
     n_eval_eff = min(int(spec_iters), n_windows)
     pos_sel = window_positions(n_sel, spec_ctx, spec_iters)
-    return {"ctx": int(spec_ctx), "iters": int(spec_iters),
-            "n_windows": int(n_windows), "n_eval": int(n_eval_eff),
-            "pos": pos, "starts": starts, "pos_sel": pos_sel,
-            "error": None}
+    return {
+        "ctx": int(spec_ctx),
+        "iters": int(spec_iters),
+        "n_windows": int(n_windows),
+        "n_eval": int(n_eval_eff),
+        "pos": pos,
+        "starts": starts,
+        "pos_sel": pos_sel,
+        "error": None,
+    }
 
 
 def _validate_alpha(alpha) -> float:
@@ -340,8 +384,7 @@ def _smoothed_probs(counts, denominator) -> np.ndarray:
     """加 α 概率；α=0 且上下文频次为 0 时概率记为 0 而不是 0/0=NaN。"""
     numerator = np.asarray(counts, dtype=np.float64)
     denominator = np.asarray(denominator, dtype=np.float64)
-    out = np.zeros(np.broadcast(numerator, denominator).shape,
-                   dtype=np.float64)
+    out = np.zeros(np.broadcast(numerator, denominator).shape, dtype=np.float64)
     np.divide(numerator, denominator, out=out, where=denominator > 0)
     # 0 概率的 -log 是 Inf，会让报告出现 NaN/Inf；与插值路径一致地
     # 用 1e-300 下限保留“几乎不可能”的排序，同时输出有限 NLL。
@@ -357,12 +400,14 @@ def _alpha_probs(counts, context, alpha: float, vocab_size: int) -> np.ndarray:
         if not math.isfinite(smooth):
             return _smoothed_probs(
                 np.asarray(counts, dtype=np.float64) / alpha + 1.0,
-                np.asarray(context, dtype=np.float64) / alpha + vocab_size)
+                np.asarray(context, dtype=np.float64) / alpha + vocab_size,
+            )
     else:
         smooth = 0.0
     return _smoothed_probs(
         np.asarray(counts, dtype=np.float64) + alpha,
-        np.asarray(context, dtype=np.float64) + smooth)
+        np.asarray(context, dtype=np.float64) + smooth,
+    )
 
 
 def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
@@ -377,14 +422,21 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     c = uni[np.asarray(eval_ids)]
     probs = _alpha_probs(c, total, alpha, vocab)
     mean_nll = float(-np.log(probs).mean())
-    return {"ppl": float(math.exp(min(20.0, mean_nll))),
-            "mean_nll": mean_nll, "n_tokens": n,
-            "ppl_clamped": bool(mean_nll > 20.0)}
+    return {
+        "ppl": float(math.exp(min(20.0, mean_nll))),
+        "mean_nll": mean_nll,
+        "n_tokens": n,
+        "ppl_clamped": bool(mean_nll > 20.0),
+    }
 
 
-def _bigram_terms(eval_ids: np.ndarray, uni: np.ndarray,
-                  pair_keys: np.ndarray, pair_counts: np.ndarray,
-                  vocab_size: int):
+def _bigram_terms(
+    eval_ids: np.ndarray,
+    uni: np.ndarray,
+    pair_keys: np.ndarray,
+    pair_counts: np.ndarray,
+    vocab_size: int,
+):
     """评测流的逐 token 二元项：返回 (相邻对训练频次, 前文频次, 计分 token 数)。"""
     if len(eval_ids) < 2:
         return None, None, 0
@@ -396,31 +448,49 @@ def _bigram_terms(eval_ids: np.ndarray, uni: np.ndarray,
     return c_pair, c_prev, int(len(keys))
 
 
-def _bigram_ppl(c_pair: np.ndarray, c_prev: np.ndarray, n_tokens: int,
-                alpha: float, vocab_size: int) -> dict:
+def _bigram_ppl(
+    c_pair: np.ndarray, c_prev: np.ndarray, n_tokens: int, alpha: float, vocab_size: int
+) -> dict:
     """由预计算的逐 token 频次给出加 α 平滑二元模型的 PPL。"""
     alpha = _validate_alpha(alpha)
     if n_tokens <= 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
     probs = _alpha_probs(c_pair, c_prev, alpha, vocab_size)
     mean_nll = float(-np.log(probs).mean())
-    return {"ppl": float(math.exp(min(20.0, mean_nll))),
-            "mean_nll": mean_nll, "n_tokens": n_tokens,
-            "ppl_clamped": bool(mean_nll > 20.0)}
+    return {
+        "ppl": float(math.exp(min(20.0, mean_nll))),
+        "mean_nll": mean_nll,
+        "n_tokens": n_tokens,
+        "ppl_clamped": bool(mean_nll > 20.0),
+    }
 
 
-def ppl_bigram(eval_ids: np.ndarray, uni: np.ndarray, pair_keys: np.ndarray,
-               pair_counts: np.ndarray, alpha: float, vocab_size: int) -> dict:
+def ppl_bigram(
+    eval_ids: np.ndarray,
+    uni: np.ndarray,
+    pair_keys: np.ndarray,
+    pair_counts: np.ndarray,
+    alpha: float,
+    vocab_size: int,
+) -> dict:
     """加 α 平滑二元模型；第一个 token 无前文，从第二个 token 起计分。"""
-    c_pair, c_prev, n_tokens = _bigram_terms(eval_ids, uni, pair_keys,
-                                             pair_counts, vocab_size)
+    c_pair, c_prev, n_tokens = _bigram_terms(
+        eval_ids, uni, pair_keys, pair_counts, vocab_size
+    )
     return _bigram_ppl(c_pair, c_prev, n_tokens, alpha, vocab_size)
 
 
-def _interp_ppl_from_counts(cur_ids: np.ndarray, uni: np.ndarray,
-                            c_pair: np.ndarray, c_prev: np.ndarray,
-                            n_tokens: int, alpha_uni: float, alpha_bi: float,
-                            lam: float, vocab_size: int) -> dict:
+def _interp_ppl_from_counts(
+    cur_ids: np.ndarray,
+    uni: np.ndarray,
+    c_pair: np.ndarray,
+    c_prev: np.ndarray,
+    n_tokens: int,
+    alpha_uni: float,
+    alpha_bi: float,
+    lam: float,
+    vocab_size: int,
+) -> dict:
     """由“当前 token + 预计算上下文频次”给出插值 bigram 的 PPL。"""
     alpha_uni = _validate_alpha(alpha_uni)
     alpha_bi = _validate_alpha(alpha_bi)
@@ -434,40 +504,58 @@ def _interp_ppl_from_counts(cur_ids: np.ndarray, uni: np.ndarray,
     p_bi = _alpha_probs(c_pair, c_prev, alpha_bi, vocab_size)
     p = float(lam) * p_bi + (1.0 - float(lam)) * p_uni
     mean_nll = float(-np.log(np.clip(p, 1e-300, None)).mean())
-    return {"ppl": float(math.exp(min(20.0, mean_nll))),
-            "mean_nll": mean_nll, "n_tokens": int(n_tokens),
-            "ppl_clamped": bool(mean_nll > 20.0)}
+    return {
+        "ppl": float(math.exp(min(20.0, mean_nll))),
+        "mean_nll": mean_nll,
+        "n_tokens": int(n_tokens),
+        "ppl_clamped": bool(mean_nll > 20.0),
+    }
 
 
-def _interp_ppl_from_terms(eval_ids: np.ndarray, uni: np.ndarray,
-                           c_pair: np.ndarray, c_prev: np.ndarray,
-                           n_tokens: int, alpha_uni: float, alpha_bi: float,
-                           lam: float, vocab_size: int) -> dict:
+def _interp_ppl_from_terms(
+    eval_ids: np.ndarray,
+    uni: np.ndarray,
+    c_pair: np.ndarray,
+    c_prev: np.ndarray,
+    n_tokens: int,
+    alpha_uni: float,
+    alpha_bi: float,
+    lam: float,
+    vocab_size: int,
+) -> dict:
     """由预计算频次给出插值 bigram 的 PPL（λ 在 val 上选）。"""
     # 评测 token 从第二个开始计分；与 _bigram_terms 的 c_pair/c_prev 对齐。
     ids = np.asarray(eval_ids, dtype=np.int64)
-    cur = ids[1:1 + int(n_tokens)]
-    return _interp_ppl_from_counts(cur, uni, c_pair, c_prev, n_tokens,
-                                   alpha_uni, alpha_bi, lam, vocab_size)
+    cur = ids[1 : 1 + int(n_tokens)]
+    return _interp_ppl_from_counts(
+        cur, uni, c_pair, c_prev, n_tokens, alpha_uni, alpha_bi, lam, vocab_size
+    )
 
 
-def ppl_interpolated_bigram(eval_ids: np.ndarray, uni: np.ndarray,
-                            pair_keys: np.ndarray, pair_counts: np.ndarray,
-                            alpha_uni: float, alpha_bi: float, lam: float,
-                            vocab_size: int) -> dict:
+def ppl_interpolated_bigram(
+    eval_ids: np.ndarray,
+    uni: np.ndarray,
+    pair_keys: np.ndarray,
+    pair_counts: np.ndarray,
+    alpha_uni: float,
+    alpha_bi: float,
+    lam: float,
+    vocab_size: int,
+) -> dict:
     """插值 bigram：λ·P_addα(w|prev) + (1−λ)·P_addα(w)。
 
     相比纯 add-α bigram，未出现过的上下文不再只回退到近似均匀分布，
     而是回退到一元分布；这是仍属“简单统计基线”的更强版本。
     """
-    c_pair, c_prev, n_tokens = _bigram_terms(eval_ids, uni, pair_keys,
-                                             pair_counts, vocab_size)
-    return _interp_ppl_from_terms(eval_ids, uni, c_pair, c_prev, n_tokens,
-                                  alpha_uni, alpha_bi, lam, vocab_size)
+    c_pair, c_prev, n_tokens = _bigram_terms(
+        eval_ids, uni, pair_keys, pair_counts, vocab_size
+    )
+    return _interp_ppl_from_terms(
+        eval_ids, uni, c_pair, c_prev, n_tokens, alpha_uni, alpha_bi, lam, vocab_size
+    )
 
 
-def window_positions(n_tokens: int, ctx: int, iters: int,
-                     return_starts: bool = False):
+def window_positions(n_tokens: int, ctx: int, iters: int, return_starts: bool = False):
     """神经评测窗口实际打分的 token 位置（与 train._val_eval_indices 同规则）。
 
     神经 PPL 只在 `eval_iters` 个等间隔、不重复的窗口上评测：窗口序号按
@@ -495,8 +583,7 @@ def window_positions(n_tokens: int, ctx: int, iters: int,
     if n_eval == 1:
         starts = np.array([(n_windows - 1) // 2], dtype=np.int64)
     else:
-        starts = (np.arange(n_eval, dtype=np.int64) * (n_windows - 1)
-                  // (n_eval - 1))
+        starts = np.arange(n_eval, dtype=np.int64) * (n_windows - 1) // (n_eval - 1)
     offsets = np.arange(1, ctx + 1, dtype=np.int64)
     pos = (starts[:, None] * ctx + offsets[None, :]).reshape(-1)
     # return_starts 供逐窗口对齐：窗口序号是 s·ctx（与神经评测的
@@ -517,8 +604,7 @@ def _validate_vocab_and_ids(meta: dict, arrays) -> int:
     # prev*V+cur 的 int64 键溢出/对撞，必须与 prepare_bins 同一闸门拒绝。
     check_vocab_capacity(vocab_size)
     if vocab_size <= 0:
-        raise ValueError(
-            f"meta.vocab_size 必须为正整数，收到 {vocab_size}")
+        raise ValueError(f"meta.vocab_size 必须为正整数，收到 {vocab_size}")
     for name, ids in arrays:
         n = int(len(ids))
         if n == 0:
@@ -529,13 +615,20 @@ def _validate_vocab_and_ids(meta: dict, arrays) -> int:
                 f"{name} 含非法 token id（范围 {lo}..{hi}，"
                 f"meta.vocab_size={vocab_size}，合法范围 "
                 f"0..{vocab_size - 1}）：meta 与 bin 不一致，"
-                "拒绝用错误词表计算 n-gram 基线")
+                "拒绝用错误词表计算 n-gram 基线"
+            )
     return vocab_size
 
 
-def _set_ngram_window_losses(report: dict, probs, starts, n_eval: int,
-                             ctx: int, order: str,
-                             field: str = "window_losses_matched") -> None:
+def _set_ngram_window_losses(
+    report: dict,
+    probs,
+    starts,
+    n_eval: int,
+    ctx: int,
+    order: str,
+    field: str = "window_losses_matched",
+) -> None:
     """把选定简单模型的逐 token NLL 聚成逐窗口平均损失（与神经口径一致）。
 
     神经 `window_losses` 是每个窗口内目标 token 的平均交叉熵，窗口序号是
@@ -544,21 +637,33 @@ def _set_ngram_window_losses(report: dict, probs, starts, n_eval: int,
     """
     if starts is None or n_eval <= 0:
         return
-    nll = -np.log(np.clip(np.asarray(probs, dtype=np.float64),
-                          1e-300, None))
+    nll = -np.log(np.clip(np.asarray(probs, dtype=np.float64), 1e-300, None))
     if nll.size != int(n_eval) * int(ctx):
         return
     losses = nll.reshape(int(n_eval), int(ctx)).mean(axis=1)
     report[field] = [float(v) for v in losses]
     report[field.replace("window_losses", "window_indices", 1)] = [
-        int(v) for v in starts[:int(n_eval)]]
+        int(v) for v in starts[: int(n_eval)]
+    ]
     report[field + "_model"] = order
 
 
-def _window_metrics(eval_ids, pos, starts, n_eval: int, ctx: int, uni,
-                    pair_keys, pair_counts, vocab_size, best, interp,
-                    selected_model, report=None,
-                    field: str = "window_losses_matched"):
+def _window_metrics(
+    eval_ids,
+    pos,
+    starts,
+    n_eval: int,
+    ctx: int,
+    uni,
+    pair_keys,
+    pair_counts,
+    vocab_size,
+    best,
+    interp,
+    selected_model,
+    report=None,
+    field: str = "window_losses_matched",
+):
     """在窗口目标 token 上计算 n-gram PPL；可选落盘选定模型的逐窗口损失。
 
     同一函数服务两套选参协议（全 val / 窗口 token），保证评分位置、前文
@@ -568,8 +673,9 @@ def _window_metrics(eval_ids, pos, starts, n_eval: int, ctx: int, uni,
     wm = {
         "n_tokens": int(pos.size),
         "positions": "每个窗口 s·ctx+1 .. s·ctx+ctx（0-based），"
-                     "与 get_val_windows 的目标 token 集合逐位置一致",
-        "unigram": None, "bigram": None,
+        "与 get_val_windows 的目标 token 集合逐位置一致",
+        "unigram": None,
+        "bigram": None,
         "interpolated_bigram": None,
     }
     ctx_counts = _context_counts(pair_keys, pair_counts, vocab_size)
@@ -586,44 +692,55 @@ def _window_metrics(eval_ids, pos, starts, n_eval: int, ctx: int, uni,
                 m = ppl_unigram(eval_ids[pos], uni, a)
                 if report is not None and order == selected_model:
                     cur = np.asarray(eval_ids[pos], dtype=np.int64)
-                    probs = _alpha_probs(
-                        uni[cur], float(uni.sum()), a, vocab_size)
-                    _set_ngram_window_losses(report, probs, starts, n_eval,
-                                             ctx, order, field=field)
+                    probs = _alpha_probs(uni[cur], float(uni.sum()), a, vocab_size)
+                    _set_ngram_window_losses(
+                        report, probs, starts, n_eval, ctx, order, field=field
+                    )
             else:
-                m = _bigram_ppl(c_pair, ctx_counts[prev], int(pos.size), a,
-                                vocab_size)
+                m = _bigram_ppl(c_pair, ctx_counts[prev], int(pos.size), a, vocab_size)
                 if report is not None and order == selected_model:
-                    probs = _alpha_probs(
-                        c_pair, ctx_counts[prev], a, vocab_size)
-                    _set_ngram_window_losses(report, probs, starts, n_eval,
-                                             ctx, order, field=field)
+                    probs = _alpha_probs(c_pair, ctx_counts[prev], a, vocab_size)
+                    _set_ngram_window_losses(
+                        report, probs, starts, n_eval, ctx, order, field=field
+                    )
         else:
             if interp is None:
                 continue
             m = _interp_ppl_from_counts(
-                eval_ids[pos], uni, c_pair, ctx_counts[prev], int(pos.size),
-                interp["alpha_unigram"], interp["alpha_bigram"],
-                interp["lambda"], vocab_size)
+                eval_ids[pos],
+                uni,
+                c_pair,
+                ctx_counts[prev],
+                int(pos.size),
+                interp["alpha_unigram"],
+                interp["alpha_bigram"],
+                interp["lambda"],
+                vocab_size,
+            )
             if report is not None and order == selected_model:
                 cur = np.asarray(eval_ids[pos], dtype=np.int64)
                 total = float(uni.sum())
                 p_uni = _alpha_probs(
-                    uni[cur], total, interp["alpha_unigram"], vocab_size)
+                    uni[cur], total, interp["alpha_unigram"], vocab_size
+                )
                 p_bi = _alpha_probs(
-                    c_pair, ctx_counts[prev], interp["alpha_bigram"],
-                    vocab_size)
-                probs = (interp["lambda"] * p_bi
-                         + (1.0 - interp["lambda"]) * p_uni)
-                _set_ngram_window_losses(report, probs, starts, n_eval, ctx,
-                                         order, field=field)
+                    c_pair, ctx_counts[prev], interp["alpha_bigram"], vocab_size
+                )
+                probs = interp["lambda"] * p_bi + (1.0 - interp["lambda"]) * p_uni
+                _set_ngram_window_losses(
+                    report, probs, starts, n_eval, ctx, order, field=field
+                )
         wm[order] = m["ppl"]
     return wm
 
 
-def evaluate(data_dir: str, split: str = "val",
-             alphas=ALPHA_GRID, allow_test: bool = False,
-             window_spec: dict = None) -> dict:
+def evaluate(
+    data_dir: str,
+    split: str = "val",
+    alphas=ALPHA_GRID,
+    allow_test: bool = False,
+    window_spec: dict = None,
+) -> dict:
     """拟合并评测 n-gram 基线，返回完整报告 dict（不写文件）。
 
     选参协议：α 与插值权重 λ 只在 **val** 上按 mean NLL 联合选优
@@ -654,34 +771,45 @@ def evaluate(data_dir: str, split: str = "val",
         if allow_test is not True:
             raise PermissionError(
                 "test 集已尘封：评测 n-gram 基线需显式 allow_test=True"
-                "（不接受非布尔真值），并会写入访问账本")
-        eval_ids = np.asarray(load_bin(data_dir, "test", allow_test=True),
-                              dtype=np.int64)
+                "（不接受非布尔真值），并会写入访问账本"
+            )
+        eval_ids = np.asarray(
+            load_bin(data_dir, "test", allow_test=True), dtype=np.int64
+        )
         # 访问账本必须在选参/拟合/读 val 之前落盘：否则 val 缺失、拟合失败
         # 或账本写入异常会让 test 已被消费却没有访问记录，尘封协议失效。
-        test_access = append_test_access(data_dir, {
-            "split": "test", "kind": "ngram_baseline",
-            "ckpt": "ngram-baseline",
-            "test_data_fingerprint": test_data_fingerprint(data_dir),
-            "pipeline_run_id": current_pipeline_run_id(),
-            "note": "简单统计基线评测（α 在 val 上选择）"})
+        test_access = append_test_access(
+            data_dir,
+            {
+                "split": "test",
+                "kind": "ngram_baseline",
+                "ckpt": "ngram-baseline",
+                "test_data_fingerprint": test_data_fingerprint(data_dir),
+                "pipeline_run_id": current_pipeline_run_id(),
+                "note": "简单统计基线评测（α 在 val 上选择）",
+            },
+        )
     else:
         eval_ids = np.asarray(load_bin(data_dir, split), dtype=np.int64)
     # 选参流固定为 val：即使调用方要求报告 train（诊断用），α/λ 也不能
     # 在报告集上选择，否则 alpha_selected_on 的声明与真实协议不符。
-    sel_ids = (eval_ids if split == "val"
-               else np.asarray(load_bin(data_dir, "val"), dtype=np.int64))
+    sel_ids = (
+        eval_ids
+        if split == "val"
+        else np.asarray(load_bin(data_dir, "val"), dtype=np.int64)
+    )
     vocab_size = _validate_vocab_and_ids(
-        meta, (("train", train_ids), (split, eval_ids), ("val", sel_ids)))
+        meta, (("train", train_ids), (split, eval_ids), ("val", sel_ids))
+    )
     uni, pair_keys, pair_counts = fit_counts(train_ids, vocab_size)
     # 选参与报告各自评测流的逐 token 二元项。选参默认在完整 val 上做
     # （所选 α/λ 用于全 split 报告）；若请求窗口对齐，另在**神经评测实际
     # 打分的窗口目标 token** 上独立选一套参数，避免“选参 token 集”与
     # “比较 token 集”不一致造成的选择偏差。
-    eval_terms = _bigram_terms(eval_ids, uni, pair_keys, pair_counts,
-                               vocab_size)
-    sel_full = _select_ngram(sel_ids, None, uni, pair_keys, pair_counts,
-                             vocab_size, alphas)
+    eval_terms = _bigram_terms(eval_ids, uni, pair_keys, pair_counts, vocab_size)
+    sel_full = _select_ngram(
+        sel_ids, None, uni, pair_keys, pair_counts, vocab_size, alphas
+    )
     best = sel_full["selected_alpha"]
     interp = sel_full["selected_interpolated"]
     interp_by_lambda = sel_full["interpolated_by_lambda"]
@@ -689,11 +817,20 @@ def evaluate(data_dir: str, split: str = "val",
     selected_model = sel_full["selected_model"]
     window_plan = _parse_window_plan(window_spec, len(eval_ids), len(sel_ids))
     matched_sel = None
-    if (window_plan is not None and window_plan.get("error") is None
-            and window_plan.get("pos_sel") is not None):
+    if (
+        window_plan is not None
+        and window_plan.get("error") is None
+        and window_plan.get("pos_sel") is not None
+    ):
         matched_sel = _select_ngram(
-            sel_ids, window_plan["pos_sel"], uni, pair_keys, pair_counts,
-            vocab_size, alphas)
+            sel_ids,
+            window_plan["pos_sel"],
+            uni,
+            pair_keys,
+            pair_counts,
+            vocab_size,
+            alphas,
+        )
     # 数据身份随基线结果落盘：results/<tag> 被复用（尤其 --skip_ngram）时，
     # 汇总必须能发现“这份 n-gram PPL 来自另一份数据/旧 test.bin”，否则会把
     # 旧基线与新神经模型 PPL 放在同一张表里比较。无法计算时如实写 None。
@@ -702,8 +839,10 @@ def evaluate(data_dir: str, split: str = "val",
     except (OSError, ValueError, TypeError):
         data_fp = None
     report = {
-        "baseline": ("smoothed n-gram (add-α unigram/bigram + val-tuned "
-                     "interpolation), no gradient training"),
+        "baseline": (
+            "smoothed n-gram (add-α unigram/bigram + val-tuned "
+            "interpolation), no gradient training"
+        ),
         "pipeline_run_id": current_pipeline_run_id(),
         "split": split,
         "allow_test": bool(allow_test),
@@ -737,19 +876,23 @@ def evaluate(data_dir: str, split: str = "val",
             "n_tokens": int(len(window_plan["pos_sel"])),
             "alpha_selected_on": (
                 "val 的神经评测窗口目标 token（mean NLL，与 eval_iters "
-                "窗口同 token 集）"),
+                "窗口同 token 集）"
+            ),
             "selected_model_selected_on": (
                 "val 的神经评测窗口目标 token（mean NLL，与 eval_iters "
-                "窗口同 token 集）"),
+                "窗口同 token 集）"
+            ),
             "selection_note": (
                 "α/λ 在与神经评测逐位置对齐的窗口 token 上重新选择；"
                 "全 split 的 selected_alpha/selected_model 仍在完整 val "
-                "上选择，两套参数分别用于 ppl 与 ppl_window_matched_selected"),
+                "上选择，两套参数分别用于 ppl 与 ppl_window_matched_selected"
+            ),
         }
     elif window_plan is not None:
         report["window_matched_selection_error"] = (
             window_plan.get("error")
-            or "选参 split 过短，无法生成与神经评测同规格的窗口")
+            or "选参 split 过短，无法生成与神经评测同规格的窗口"
+        )
     if split == "test":
         report["test_access"] = test_access
     for order in ("unigram", "bigram", "interpolated_bigram"):
@@ -758,13 +901,21 @@ def evaluate(data_dir: str, split: str = "val",
             m = ppl_unigram(eval_ids, uni, a) if a is not None else None
         elif order == "bigram":
             a = best["bigram"]
-            m = (_bigram_ppl(*eval_terms, a, vocab_size)
-                 if a is not None else None)
+            m = _bigram_ppl(*eval_terms, a, vocab_size) if a is not None else None
         else:
-            m = (_interp_ppl_from_terms(
-                eval_ids, uni, *eval_terms, interp["alpha_unigram"],
-                interp["alpha_bigram"], interp["lambda"], vocab_size)
-                if interp is not None else None)
+            m = (
+                _interp_ppl_from_terms(
+                    eval_ids,
+                    uni,
+                    *eval_terms,
+                    interp["alpha_unigram"],
+                    interp["alpha_bigram"],
+                    interp["lambda"],
+                    vocab_size,
+                )
+                if interp is not None
+                else None
+            )
         if m is None:
             report["ppl"][order] = None
             continue
@@ -790,7 +941,8 @@ def evaluate(data_dir: str, split: str = "val",
             report["window_spec_error"] = (
                 (window_plan or {}).get("error")
                 or f"窗口规格无效或评测流过短（eval_tokens={len(eval_ids)}），"
-                   "无法逐位置对齐")
+                "无法逐位置对齐"
+            )
         else:
             spec_ctx = int(window_plan["ctx"])
             spec_iters = int(window_plan["iters"])
@@ -799,20 +951,43 @@ def evaluate(data_dir: str, split: str = "val",
             pos = np.asarray(window_plan["pos"], dtype=np.int64)
             starts = np.asarray(window_plan["starts"], dtype=np.int64)
             report["ppl_window_matched"] = _window_metrics(
-                eval_ids, pos, starts, n_eval, spec_ctx, uni, pair_keys,
-                pair_counts, vocab_size, best, interp, selected_model,
-                report=report, field="window_losses_matched")
+                eval_ids,
+                pos,
+                starts,
+                n_eval,
+                spec_ctx,
+                uni,
+                pair_keys,
+                pair_counts,
+                vocab_size,
+                best,
+                interp,
+                selected_model,
+                report=report,
+                field="window_losses_matched",
+            )
             if matched_sel is not None:
                 report["ppl_window_matched_selected"] = _window_metrics(
-                    eval_ids, pos, starts, n_eval, spec_ctx, uni, pair_keys,
-                    pair_counts, vocab_size,
+                    eval_ids,
+                    pos,
+                    starts,
+                    n_eval,
+                    spec_ctx,
+                    uni,
+                    pair_keys,
+                    pair_counts,
+                    vocab_size,
                     matched_sel["selected_alpha"],
                     matched_sel["selected_interpolated"],
                     matched_sel["selected_model"],
-                    report=report, field="window_losses_matched_selected")
+                    report=report,
+                    field="window_losses_matched_selected",
+                )
             report["window_spec"] = {
-                "ctx": spec_ctx, "iters": spec_iters,
-                "n_windows": n_windows, "n_eval": n_eval,
+                "ctx": spec_ctx,
+                "iters": spec_iters,
+                "n_windows": n_windows,
+                "n_eval": n_eval,
                 "n_tokens": int(pos.size),
             }
     return report
@@ -820,23 +995,36 @@ def evaluate(data_dir: str, split: str = "val",
 
 def main():
     p = argparse.ArgumentParser(
-        description="简单统计基线：一元/二元/插值二元平滑 n-gram PPL")
+        description="简单统计基线：一元/二元/插值二元平滑 n-gram PPL"
+    )
     p.add_argument("--data_dir", required=True)
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--out", default=None, help="JSON 输出路径（默认打印）")
-    p.add_argument("--alphas", default=None,
-                   help="逗号分隔的 α 网格，默认 0.01,0.1,1.0")
-    p.add_argument("--allow_test", action="store_true",
-                   help="允许在 test 上评测（写访问账本）")
-    p.add_argument("--window_ctx", default=None,
-                   help="神经评测的窗口长度（与 --window_iters 一起给出时，"
-                        "额外报告与神经评测逐位置对齐的 PPL）")
-    p.add_argument("--window_iters", default=None,
-                   help="神经评测的窗口数（与 --window_ctx 成对使用）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 标记泄露也继续评测（仅用于复现历史"
-                        "实验；结果不得用于正式结论）")
+    p.add_argument(
+        "--alphas", default=None, help="逗号分隔的 α 网格，默认 0.01,0.1,1.0"
+    )
+    p.add_argument(
+        "--allow_test", action="store_true", help="允许在 test 上评测（写访问账本）"
+    )
+    p.add_argument(
+        "--window_ctx",
+        default=None,
+        help="神经评测的窗口长度（与 --window_iters 一起给出时，"
+        "额外报告与神经评测逐位置对齐的 PPL）",
+    )
+    p.add_argument(
+        "--window_iters",
+        default=None,
+        help="神经评测的窗口数（与 --window_ctx 成对使用）",
+    )
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 标记泄露也继续评测（仅用于复现历史"
+        "实验；结果不得用于正式结论）",
+    )
     args = p.parse_args()
+
     # argparse 的 type=int 接受 Python 下划线数字串（"1_0"→10），与
     # _validate_alpha/strict_int 的规范数值口径不一致；这里保留原始字符串，
     # 解析后统一严格校验。
@@ -848,34 +1036,52 @@ def main():
         if v < 1:
             p.error(f"{label} 必须是正整数，收到 {v}")
         return v
-    window_ctx = (None if args.window_ctx is None
-                  else _cli_int(args.window_ctx, "--window_ctx"))
-    window_iters = (None if args.window_iters is None
-                    else _cli_int(args.window_iters, "--window_iters"))
+
+    window_ctx = (
+        None if args.window_ctx is None else _cli_int(args.window_ctx, "--window_ctx")
+    )
+    window_iters = (
+        None
+        if args.window_iters is None
+        else _cli_int(args.window_iters, "--window_iters")
+    )
     if (window_ctx is None) != (window_iters is None):
         p.error("--window_ctx 与 --window_iters 必须成对给出")
     data_preflight = data_protocol_preflight(
         args.data_dir,
-        allow_override=allow_protocol_violations(
-            args.allow_data_protocol_violations))
+        allow_override=allow_protocol_violations(args.allow_data_protocol_violations),
+    )
     if not data_preflight["report_present"]:
-        print("[ngram] 警告：数据目录缺少 data_report.json，"
-              "无法执行评测前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[ngram] 警告：数据目录缺少 data_report.json，"
+            "无法执行评测前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif data_preflight["critical_violations"]:
-        print(f"[ngram] ⚠ 数据协议自检发现 "
-              f"{len(data_preflight['critical_violations'])} 个严重问题，"
-              "但已显式放行（结果不得用于正式结论）")
-    window_spec = ({"ctx": window_ctx, "iters": window_iters}
-                   if window_ctx is not None else None)
+        print(
+            f"[ngram] ⚠ 数据协议自检发现 "
+            f"{len(data_preflight['critical_violations'])} 个严重问题，"
+            "但已显式放行（结果不得用于正式结论）"
+        )
+    window_spec = (
+        {"ctx": window_ctx, "iters": window_iters} if window_ctx is not None else None
+    )
     try:
         # 先经 _validate_alpha 再进 evaluate：CLI 的裸 float() 会把
         # "1_0" 静默变成 10，绕过该函数专门做的下划线拒绝。
-        alphas = (tuple(_validate_alpha(x) for x in args.alphas.split(","))
-                  if args.alphas else ALPHA_GRID)
+        alphas = (
+            tuple(_validate_alpha(x) for x in args.alphas.split(","))
+            if args.alphas
+            else ALPHA_GRID
+        )
     except ValueError as e:
         p.error(str(e))
-    report = evaluate(args.data_dir, split=args.split, alphas=alphas,
-                      allow_test=args.allow_test, window_spec=window_spec)
+    report = evaluate(
+        args.data_dir,
+        split=args.split,
+        alphas=alphas,
+        allow_test=args.allow_test,
+        window_spec=window_spec,
+    )
     report["data_protocol_preflight"] = data_preflight
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
@@ -883,11 +1089,13 @@ def main():
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(text + "\n")
     print(text)
-    print(f"[ngram] {args.split} PPL: unigram={report['ppl'].get('unigram')} "
-          f"bigram={report['ppl'].get('bigram')} "
-          f"interp={report['ppl'].get('interpolated_bigram')} "
-          f"(selected={report.get('selected_model')}, "
-          f"λ={((report.get('selected_interpolated') or {}).get('lambda'))})")
+    print(
+        f"[ngram] {args.split} PPL: unigram={report['ppl'].get('unigram')} "
+        f"bigram={report['ppl'].get('bigram')} "
+        f"interp={report['ppl'].get('interpolated_bigram')} "
+        f"(selected={report.get('selected_model')}, "
+        f"λ={((report.get('selected_interpolated') or {}).get('lambda'))})"
+    )
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@
   达到 p<alpha。这是描述性别名，不是确认性结论（未做跨 step 多重校正，
   且各 step 相关）。
 """
+
 from __future__ import annotations
 
 import json
@@ -133,7 +134,8 @@ def curves_from_runs(runs) -> Dict[str, Dict]:
             if not isinstance(ckpt, str) or not ckpt:
                 continue
             curve = load_train_curve(
-                os.path.join(os.path.dirname(ckpt), "train_log.jsonl"))
+                os.path.join(os.path.dirname(ckpt), "train_log.jsonl")
+            )
             if curve:
                 out.setdefault(variant, {})[seed] = curve
     return out
@@ -189,8 +191,9 @@ def _step_record(step: int, diffs: List[float], alpha: float) -> Dict:
     }
 
 
-def _pair_analysis(curves, candidate: str, reference: str,
-                   alpha: float, min_seeds: int) -> Dict:
+def _pair_analysis(
+    curves, candidate: str, reference: str, alpha: float, min_seeds: int
+) -> Dict:
     base = {
         "candidate": candidate,
         "reference": reference,
@@ -214,8 +217,7 @@ def _pair_analysis(curves, candidate: str, reference: str,
         return base
     c_curves = {s: _as_curve(c_map.get(s)) for s in common_seeds}
     r_curves = {s: _as_curve(r_map.get(s)) for s in common_seeds}
-    common_seeds = [s for s in common_seeds
-                    if c_curves[s] and r_curves[s]]
+    common_seeds = [s for s in common_seeds if c_curves[s] and r_curves[s]]
     if not common_seeds:
         base["reason"] = "共同种子的训练曲线为空"
         return base
@@ -226,43 +228,48 @@ def _pair_analysis(curves, candidate: str, reference: str,
         steps = set(c_curves[s]) & set(r_curves[s])
         common_steps = steps if common_steps is None else (common_steps & steps)
     steps = sorted(common_steps or [])
-    base.update({
-        "available": bool(steps),
-        "reason": "" if steps else "两侧没有共同评测步",
-        "n_seeds": len(common_seeds),
-        "seeds": [str(s) for s in common_seeds],
-        "steps": steps,
-        "n_steps": len(steps),
-    })
+    base.update(
+        {
+            "available": bool(steps),
+            "reason": "" if steps else "两侧没有共同评测步",
+            "n_seeds": len(common_seeds),
+            "seeds": [str(s) for s in common_seeds],
+            "steps": steps,
+            "n_steps": len(steps),
+        }
+    )
     if not steps:
         return base
 
     per_step = []
     for step in steps:
-        diffs = [c_curves[s][step] - r_curves[s][step]
-                 for s in common_seeds]
+        diffs = [c_curves[s][step] - r_curves[s][step] for s in common_seeds]
         rec = _step_record(step, diffs, alpha)
         per_step.append(rec)
 
     final = per_step[-1]
     initial = per_step[0]
-    means = [r.get("mean_diff") for r in per_step
-             if r.get("mean_diff") is not None]
+    means = [r.get("mean_diff") for r in per_step if r.get("mean_diff") is not None]
     signs = [r.get("sign") for r in per_step if r.get("sign") is not None]
     nonzero = [s for s in signs if s != 0]
     n_flips = sum(1 for a, b in zip(nonzero, nonzero[1:]) if a != b)
     final_sign = _sign(final.get("mean_diff"))
     initial_sign = _sign(initial.get("mean_diff"))
-    agreeing = (sum(1 for s in nonzero if s == final_sign) / len(nonzero)
-                if nonzero and final_sign != 0 else None)
-    significant = [r for r in per_step
-                   if r.get("p") is not None and r["p"] < alpha
-                   and (r.get("mean_diff") or 0.0) != 0.0]
+    agreeing = (
+        sum(1 for s in nonzero if s == final_sign) / len(nonzero)
+        if nonzero and final_sign != 0
+        else None
+    )
+    significant = [
+        r
+        for r in per_step
+        if r.get("p") is not None
+        and r["p"] < alpha
+        and (r.get("mean_diff") or 0.0) != 0.0
+    ]
     significant_signs = {_sign(r.get("mean_diff")) for r in significant}
-    opposite_significant = (-1 in significant_signs
-                            and 1 in significant_signs)
-    sign_reversal = (initial_sign != 0 and final_sign != 0
-                     and initial_sign != final_sign)
+    opposite_significant = -1 in significant_signs and 1 in significant_signs
+    sign_reversal = initial_sign != 0 and final_sign != 0 and initial_sign != final_sign
     crosses_zero = bool(means) and min(means) < 0.0 < max(means)
     inferential = len(common_seeds) >= min_seeds and len(steps) >= 2
     if len(steps) < 2:
@@ -288,42 +295,50 @@ def _pair_analysis(curves, candidate: str, reference: str,
                 idx = i + 1
                 break
         stable_from_step = next(
-            (r["step"] for r in per_step[idx:] if r.get("sign") == final_sign),
-            steps[0])
+            (r["step"] for r in per_step[idx:] if r.get("sign") == final_sign), steps[0]
+        )
     significant_steps = [r["step"] for r in significant]
     mean_range = [min(means), max(means)] if means else None
-    base.update({
-        "per_step": per_step,
-        "initial_step": initial["step"],
-        "initial_mean_diff": initial.get("mean_diff"),
-        "final_step": final["step"],
-        "final_mean_diff": final.get("mean_diff"),
-        "final_ci95": final.get("ci95"),
-        "final_p": final.get("p"),
-        "final_mde": final.get("mde"),
-        "mean_diff_range": mean_range,
-        "sign_agreement_with_final": agreeing,
-        "n_sign_flips": n_flips,
-        "initial_sign": initial_sign,
-        "final_sign": final_sign,
-        "sign_reversal": bool(sign_reversal),
-        "crosses_zero": bool(crosses_zero),
-        "significant_steps": significant_steps,
-        "opposite_significant_steps": bool(opposite_significant),
-        "budget_sensitive": bool(
-            sign_reversal and opposite_significant and inferential),
-        "stable_from_step": stable_from_step,
-        "trajectory_pattern": pattern,
-        "inferential": bool(inferential),
-        "note": ("轨迹只作描述；逐 step p 值高度相关且未做跨 step 校正，"
-                 "不用于挑选有利 checkpoint，也不改变预注册终点判定。"),
-    })
+    base.update(
+        {
+            "per_step": per_step,
+            "initial_step": initial["step"],
+            "initial_mean_diff": initial.get("mean_diff"),
+            "final_step": final["step"],
+            "final_mean_diff": final.get("mean_diff"),
+            "final_ci95": final.get("ci95"),
+            "final_p": final.get("p"),
+            "final_mde": final.get("mde"),
+            "mean_diff_range": mean_range,
+            "sign_agreement_with_final": agreeing,
+            "n_sign_flips": n_flips,
+            "initial_sign": initial_sign,
+            "final_sign": final_sign,
+            "sign_reversal": bool(sign_reversal),
+            "crosses_zero": bool(crosses_zero),
+            "significant_steps": significant_steps,
+            "opposite_significant_steps": bool(opposite_significant),
+            "budget_sensitive": bool(
+                sign_reversal and opposite_significant and inferential
+            ),
+            "stable_from_step": stable_from_step,
+            "trajectory_pattern": pattern,
+            "inferential": bool(inferential),
+            "note": (
+                "轨迹只作描述；逐 step p 值高度相关且未做跨 step 校正，"
+                "不用于挑选有利 checkpoint，也不改变预注册终点判定。"
+            ),
+        }
+    )
     return base
 
 
-def analyze_budget_sensitivity(curves, pairs: Iterable[Tuple[str, str]],
-                               alpha: float = ALPHA,
-                               min_seeds: int = MIN_SEEDS) -> Dict:
+def analyze_budget_sensitivity(
+    curves,
+    pairs: Iterable[Tuple[str, str]],
+    alpha: float = ALPHA,
+    min_seeds: int = MIN_SEEDS,
+) -> Dict:
     """对一组对比逐预算做同种子配对差轨迹。
 
     ``curves`` 为 ``{variant: {seed: {step: val_loss}}}``（也接受训练日志
@@ -334,14 +349,17 @@ def analyze_budget_sensitivity(curves, pairs: Iterable[Tuple[str, str]],
     alpha_f = _finite(alpha)
     if alpha_f is None or not 0.0 < alpha_f < 1.0:
         raise ValueError(f"alpha 必须在 (0,1)，收到 {alpha!r}")
-    if (isinstance(min_seeds, bool) or not isinstance(min_seeds, Integral)
-            or int(min_seeds) < 2):
+    if (
+        isinstance(min_seeds, bool)
+        or not isinstance(min_seeds, Integral)
+        or int(min_seeds) < 2
+    ):
         raise ValueError(f"min_seeds 必须 >= 2，收到 {min_seeds!r}")
     min_seeds = int(min_seeds)
     curves = curves if isinstance(curves, Mapping) else {}
     results = []
     seen = set()
-    for pair in (pairs or []):
+    for pair in pairs or []:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             continue
         candidate, reference = pair
@@ -350,8 +368,7 @@ def analyze_budget_sensitivity(curves, pairs: Iterable[Tuple[str, str]],
         if candidate == reference or (candidate, reference) in seen:
             continue
         seen.add((candidate, reference))
-        results.append(_pair_analysis(curves, candidate, reference,
-                                      alpha_f, min_seeds))
+        results.append(_pair_analysis(curves, candidate, reference, alpha_f, min_seeds))
     available = [r for r in results if r.get("available")]
     sensitive = [r for r in available if r.get("budget_sensitive")]
     return {
@@ -361,15 +378,16 @@ def analyze_budget_sensitivity(curves, pairs: Iterable[Tuple[str, str]],
         "lower_is_better": True,
         "alpha": alpha_f,
         "min_seeds": min_seeds,
-        "n_curves": sum(len(v) for v in curves.values()
-                        if isinstance(v, Mapping)),
+        "n_curves": sum(len(v) for v in curves.values() if isinstance(v, Mapping)),
         "n_pairs": len(results),
         "n_available": len(available),
         "n_budget_sensitive": len(sensitive),
         "pairs": results,
-        "note": ("训练日志 val_loss 上的同种子、同 step 配对差轨迹；"
-                 "用于检查对比/消融结论是否只在终点成立。val 同时是 "
-                 "checkpoint 选择集，且逐 step p 未做跨 step 校正，"
-                 "故全部为探索性证据；不重新选 checkpoint，"
-                 "不替代 held-out test 上的终点检验。"),
+        "note": (
+            "训练日志 val_loss 上的同种子、同 step 配对差轨迹；"
+            "用于检查对比/消融结论是否只在终点成立。val 同时是 "
+            "checkpoint 选择集，且逐 step p 未做跨 step 校正，"
+            "故全部为探索性证据；不重新选 checkpoint，"
+            "不替代 held-out test 上的终点检验。"
+        ),
     }

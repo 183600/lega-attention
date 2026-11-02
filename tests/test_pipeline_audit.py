@@ -1,62 +1,29 @@
 """统计校正、组件证据与受控变量审计测试。"""
-import hashlib
+
 import json
-import math
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
-import time
-from unittest import mock
 
-from lega.data import CACHE_SCHEMA
 from tests.pipeline_helpers import _mk, _write_json
-from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
-                      _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _eval_matches_window_spec,
-                      _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
-                      _factorial_protocol_ok, _inference_shapley_tests,
-                      INFERENCE_INTERACTION_METRIC, INFERENCE_SHAPLEY_METRIC,
-                      PARAM_CONTROL_VARIANT,
-                      PARAM_CONTROL_PAIR,
-                      _int_or_zero, _lat_noise_pct,
-                      _neural_eval_window_spec, _noise_floor_pct,
-                      _noise_verdict_note, _loo_stability_str, _num_or_none,
-                      _rate_or_none,
-                      _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
-                      _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
-                      _render_baseline_sections, _result_files,
-                      _render_ruler_length,
-                      _render_inference_shapley,
-                      _render_parameter_matched_control,
-                      _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
-                      _ruler_depth_gap, _ruler_depth_means,
-                      _ruler_fwe_recall, _ruler_min_cell_n, _ruler_protocol,
-                      _ruler_task_means,
-                      _render_registration_integrity, _resolve_jobs, _stat,
-                      _seed_key, _strict_seed_int, _parse_seed_list,
-                      apply_budget_gate, apply_integrity_gate, apply_scope_gate,
-                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
-                      build_comparison_pairs, build_summary,
-                      _fmt_eq_margin, _fmt_eq_value,
-                      _fmt_mean_std, _fmt_signed,
-                      changed_gate_factors,
-                      component_evidence, cross_variant_badcase_map,
-                      COMPONENT_TESTS, GATE_FACTORS,
-                      main as run_all_main,
-                      data_protocol_preflight, data_report_binding_issue,
-                      evaluate_registered_hypotheses,
-                      load_registered_hypotheses, ngram_baseline_comparison,
-                      parse_variants, registration_scope_check,
-                      abort_ledger_on_failure, record_aborted_sanity,
-                      mark_repro_failed, check_sanity_results,
-                      _snapshot_existing_runs,
-                      resolve_ngram_split, run_many,
-                      single_factor_audit, single_factor_change,
-                      SINGLE_FACTOR_CONTRASTS, SINGLE_FACTOR_PAIRS,
-                      tradeoff_verdict, verify_controlled_setup)
-
+from run_all import (
+    ALPHA,
+    MIN_SEEDS,
+    _apply_holm,
+    _effect_status,
+    _noise_floor_pct,
+    _rel_pct,
+    _result_files,
+    _stat,
+    build_comparison_pairs,
+    build_summary,
+    component_evidence,
+    cross_variant_badcase_map,
+    load_registered_hypotheses,
+    single_factor_audit,
+    tradeoff_verdict,
+    verify_controlled_setup,
+)
 
 
 def test_apply_holm_verdicts():
@@ -133,8 +100,8 @@ def test_component_evidence_requires_valid_seed_count():
 def test_component_evidence_flags_contradiction():
     """一套消融显著支持、另一套显著反向时必须判冲突，不能用 OR 静默取胜。"""
     tests = [
-        _mk("lega_no_query", "lega", "PPL", 0.4, 0.005),   # 去 A 变差：支持
-        _mk("qgate", "gate_only", "PPL", 0.3, 0.004),      # 加 A 反而变差：反向
+        _mk("lega_no_query", "lega", "PPL", 0.4, 0.005),  # 去 A 变差：支持
+        _mk("qgate", "gate_only", "PPL", 0.3, 0.004),  # 加 A 反而变差：反向
     ]
     _apply_holm(tests)
     a = next(c for c in component_evidence(tests) if c["component"] == "A 查询项")
@@ -142,12 +109,11 @@ def test_component_evidence_flags_contradiction():
     assert a["verdict"].startswith("证据冲突")
     # 只有一套显著反向、另一套不显著时仍必须判冲突，不能降格成“证据不足”
     one_sided = [
-        _mk("lega_no_query", "lega", "PPL", 0.4, 0.5),      # 去 A 不显著
-        _mk("qgate", "gate_only", "PPL", 0.3, 0.005),       # 加 A 显著反向
+        _mk("lega_no_query", "lega", "PPL", 0.4, 0.5),  # 去 A 不显著
+        _mk("qgate", "gate_only", "PPL", 0.3, 0.005),  # 加 A 显著反向
     ]
     _apply_holm(one_sided)
-    a2 = next(c for c in component_evidence(one_sided)
-              if c["component"] == "A 查询项")
+    a2 = next(c for c in component_evidence(one_sided) if c["component"] == "A 查询项")
     assert a2["verdict"].startswith("证据冲突"), a2
     print("  [ok] component_evidence（任一套显著反向 -> 证据冲突，另一套不显著亦然）")
 
@@ -172,8 +138,10 @@ def test_tradeoff_verdict_rejects_bad_deals():
     # 数据缺失 → 不下结论
     assert tradeoff_verdict(None, 0.01, 10.0) == "数据不足"
     assert tradeoff_verdict(1.0, 0.01, None) == "数据不足"
-    assert tradeoff_verdict(None, None, 10.0,
-                            ruler_benefit_pp=None, ruler_p_adj=None) == "数据不足"
+    assert (
+        tradeoff_verdict(None, None, 10.0, ruler_benefit_pp=None, ruler_p_adj=None)
+        == "数据不足"
+    )
     # PPL 显著变差不是“收益”：绝不能得到“可接受”
     v = tradeoff_verdict(benefit_pct=-5.0, p_adj=0.01, cost_pct=1.0)
     assert v.startswith("不可行") and "可接受" not in v, v
@@ -186,16 +154,20 @@ def test_tradeoff_verdict_rejects_bad_deals():
     for bad in (True, 3.9, "bad", -2):
         v = tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=bad)
         assert v.startswith("种子"), (bad, v)
-    v = tradeoff_verdict(5.0, 0.01, 1.0, n_seeds=5,
-                         ruler_benefit_pp=1.0, ruler_p_adj=0.01,
-                         ruler_n_seeds=2.9)
+    v = tradeoff_verdict(
+        5.0,
+        0.01,
+        1.0,
+        n_seeds=5,
+        ruler_benefit_pp=1.0,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=2.9,
+    )
     assert v.startswith("种子") and "RULER" in v, v
     # 外部 JSON 的 bool/非数值不能伪装成 p=0 或抛 TypeError。
-    assert tradeoff_verdict(5.0, False, 1.0, n_seeds=5).startswith(
-        "说服力有限")
+    assert tradeoff_verdict(5.0, False, 1.0, n_seeds=5).startswith("说服力有限")
     assert tradeoff_verdict(True, 0.01, 1.0, n_seeds=5) == "数据不足"
-    assert tradeoff_verdict(5.0, "bad", 1.0, n_seeds=5).startswith(
-        "说服力有限")
+    assert tradeoff_verdict(5.0, "bad", 1.0, n_seeds=5).startswith("说服力有限")
     assert tradeoff_verdict(5.0, 0.01, "bad", n_seeds=5) == "数据不足"
     print("  [ok] tradeoff_verdict（不显著/大增幅/收益增幅比/负收益/种子不足）")
 
@@ -204,39 +176,80 @@ def test_tradeoff_verdict_covers_ruler_primary_metric():
     """权衡判定必须覆盖 RULER 主指标：只看 PPL 会误判长上下文涨点，
     也会漏掉 RULER 显著退步。"""
     # PPL 持平（不显著）+ RULER 显著涨点 + 增幅温和 → 有涨点且注明依据
-    v = tradeoff_verdict(benefit_pct=0.1, p_adj=0.6, cost_pct=8.0,
-                         n_seeds=5, ruler_benefit_pp=1.5, ruler_p_adj=0.01,
-                         ruler_n_seeds=5)
+    v = tradeoff_verdict(
+        benefit_pct=0.1,
+        p_adj=0.6,
+        cost_pct=8.0,
+        n_seeds=5,
+        ruler_benefit_pp=1.5,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=5,
+    )
     assert v.startswith("可接受") and "RULER" in v, v
     # RULER 单独显著改善 + 增幅超过 10×收益（RULER 独立阈值）→ 比值不利
-    v = tradeoff_verdict(benefit_pct=0.1, p_adj=0.6, cost_pct=30.0,
-                         n_seeds=5, ruler_benefit_pp=1.0, ruler_p_adj=0.01,
-                         ruler_n_seeds=5)
+    v = tradeoff_verdict(
+        benefit_pct=0.1,
+        p_adj=0.6,
+        cost_pct=30.0,
+        n_seeds=5,
+        ruler_benefit_pp=1.0,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=5,
+    )
     assert "收益-增幅比不利" in v and "RULER" in v, v
     # RULER 显著改善但 PPL 显著退步 → 权衡，而不是“不可行”
-    v = tradeoff_verdict(benefit_pct=-3.0, p_adj=0.01, cost_pct=10.0,
-                         n_seeds=5, ruler_benefit_pp=2.0, ruler_p_adj=0.01,
-                         ruler_n_seeds=5)
-    assert v.startswith("权衡") and "PPL" in v and "RULER" in v \
-        and "不可行" not in v, v
+    v = tradeoff_verdict(
+        benefit_pct=-3.0,
+        p_adj=0.01,
+        cost_pct=10.0,
+        n_seeds=5,
+        ruler_benefit_pp=2.0,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=5,
+    )
+    assert v.startswith("权衡") and "PPL" in v and "RULER" in v and "不可行" not in v, v
     # PPL 显著改善但 RULER 显著退步 → 权衡（核心检索目标受损必须显式）
-    v = tradeoff_verdict(benefit_pct=4.0, p_adj=0.01, cost_pct=5.0,
-                         n_seeds=5, ruler_benefit_pp=-2.0, ruler_p_adj=0.01,
-                         ruler_n_seeds=5)
+    v = tradeoff_verdict(
+        benefit_pct=4.0,
+        p_adj=0.01,
+        cost_pct=5.0,
+        n_seeds=5,
+        ruler_benefit_pp=-2.0,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=5,
+    )
     assert v.startswith("权衡") and "RULER" in v and "受损" in v, v
     # RULER 显著退步且无 PPL 涨点 → 不可行（不能因 PPL 不动就静默放过）
-    v = tradeoff_verdict(benefit_pct=0.0, p_adj=0.6, cost_pct=5.0,
-                         n_seeds=5, ruler_benefit_pp=-1.5, ruler_p_adj=0.01,
-                         ruler_n_seeds=5)
+    v = tradeoff_verdict(
+        benefit_pct=0.0,
+        p_adj=0.6,
+        cost_pct=5.0,
+        n_seeds=5,
+        ruler_benefit_pp=-1.5,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=5,
+    )
     assert v.startswith("不可行") and "RULER" in v, v
     # 两个主指标都显著改善 → 依据两者；RULER 侧种子不足同样不能判定
-    v = tradeoff_verdict(benefit_pct=3.0, p_adj=0.01, cost_pct=8.0,
-                         n_seeds=5, ruler_benefit_pp=1.0, ruler_p_adj=0.01,
-                         ruler_n_seeds=5)
+    v = tradeoff_verdict(
+        benefit_pct=3.0,
+        p_adj=0.01,
+        cost_pct=8.0,
+        n_seeds=5,
+        ruler_benefit_pp=1.0,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=5,
+    )
     assert v.startswith("可接受") and "PPL+RULER" in v, v
-    v = tradeoff_verdict(benefit_pct=3.0, p_adj=0.01, cost_pct=8.0,
-                         n_seeds=5, ruler_benefit_pp=1.0, ruler_p_adj=0.01,
-                         ruler_n_seeds=2)
+    v = tradeoff_verdict(
+        benefit_pct=3.0,
+        p_adj=0.01,
+        cost_pct=8.0,
+        n_seeds=5,
+        ruler_benefit_pp=1.0,
+        ruler_p_adj=0.01,
+        ruler_n_seeds=2,
+    )
     assert v.startswith("种子不足") and "RULER" in v, v
     print("  [ok] tradeoff_verdict（RULER 涨点/退步/权衡/独立阈值）")
 
@@ -261,8 +274,7 @@ def test_build_summary_audit_zero_checked_is_warning_not_failure():
     """ok=True 但 checked=0 表示“没有可核对的 run”，不能渲染成 ❌ 未通过。"""
     tmp = tempfile.mkdtemp()
     try:
-        out = build_summary(tmp, audit={"ok": True, "checked": 0,
-                                        "mismatches": []})
+        out = build_summary(tmp, audit={"ok": True, "checked": 0, "mismatches": []})
         md = out["markdown"]
         assert "未检查受控变量" in md
         assert "❌ 未通过" not in md
@@ -276,20 +288,24 @@ def test_cross_variant_badcase_map_min_seed_even_when_empty():
     最小种子无可用的 RULER 错误清单时退化到最小的有清单的种子；未评测不进表。"""
     cases99 = [{"sample_id": "x"}]
     # 最小种子（7）零错误，较大种子（99）有错 → 仍取最小种子的 []
-    runs = {"lega": {7: {"ruler": {"badcases": []}},
-                     99: {"ruler": {"badcases": cases99}}}}
+    runs = {
+        "lega": {7: {"ruler": {"badcases": []}}, 99: {"ruler": {"badcases": cases99}}}
+    }
     assert cross_variant_badcase_map(runs, ["lega"]) == {"lega": []}
     # 最小种子没有 RULER 结果 → 退化到最小有结果的种子
     runs2 = {"lega": {1: {}, 5: {"ruler": {"badcases": cases99}}}}
     assert cross_variant_badcase_map(runs2, ["lega"]) == {"lega": cases99}
     # 最小种子的 ruler 产物缺 badcases 键/非列表 → 不是“零错误”，
     # 退化到下一个有合法清单的种子；全无合法清单则排除该变体。
-    runs3 = {"lega": {1: {"ruler": {"results": {}}},
-                      2: {"ruler": {"badcases": "bad"}},
-                      5: {"ruler": {"badcases": cases99}}}}
+    runs3 = {
+        "lega": {
+            1: {"ruler": {"results": {}}},
+            2: {"ruler": {"badcases": "bad"}},
+            5: {"ruler": {"badcases": cases99}},
+        }
+    }
     assert cross_variant_badcase_map(runs3, ["lega"]) == {"lega": cases99}
-    runs4 = {"lega": {1: {"ruler": {"results": {}}},
-                      2: {"ruler": {"badcases": "bad"}}}}
+    runs4 = {"lega": {1: {"ruler": {"results": {}}}, 2: {"ruler": {"badcases": "bad"}}}}
     assert cross_variant_badcase_map(runs4, ["lega"]) == {}
     # 完全未跑 RULER → 不注册（无法参与对照）
     assert cross_variant_badcase_map({"lega": {1: {}}}, ["lega"]) == {}
@@ -301,34 +317,66 @@ def test_build_summary_scopes_discovery_to_current_repro_run():
     eval/sanity（不同实验的观测不相配成对）。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "repro.json"),
-                    {"variants": ["lega"], "seeds": [1], "smoke": False})
-        _write_json(os.path.join(tmp, "eval_lega.json"),
-                    {"variant": "lega", "seed": 1, "val_ppl": 9.0,
-                     "val_loss": 2.0, "n_params": 10})
-        _write_json(os.path.join(tmp, "sanity_lega.json"),
-                    {"variant": "lega", "passed": True,
-                     "initial": {"loss": 2.5},
-                     "final": {"loss": 1.0, "token_acc": 0.4}})
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {"variants": ["lega"], "seeds": [1], "smoke": False},
+        )
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"),
+            {
+                "variant": "lega",
+                "seed": 1,
+                "val_ppl": 9.0,
+                "val_loss": 2.0,
+                "n_params": 10,
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "sanity_lega.json"),
+            {
+                "variant": "lega",
+                "passed": True,
+                "initial": {"loss": 2.5},
+                "final": {"loss": 1.0, "token_acc": 0.4},
+            },
+        )
         # 上一轮遗留：旧变体、旧种子、未通过的旧 sanity
-        _write_json(os.path.join(tmp, "eval_standard.json"),
-                    {"variant": "standard", "seed": 1, "val_ppl": 10.0,
-                     "val_loss": 2.3, "n_params": 10})
-        _write_json(os.path.join(tmp, "eval_lega_seed99.json"),
-                    {"variant": "lega", "seed": 99, "val_ppl": 1.0,
-                     "val_loss": 0.1, "n_params": 10})
-        _write_json(os.path.join(tmp, "sanity_standard.json"),
-                    {"variant": "standard", "passed": False,
-                     "initial": {"loss": 9.9},
-                     "final": {"loss": 9.9, "token_acc": 0.01}})
+        _write_json(
+            os.path.join(tmp, "eval_standard.json"),
+            {
+                "variant": "standard",
+                "seed": 1,
+                "val_ppl": 10.0,
+                "val_loss": 2.3,
+                "n_params": 10,
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "eval_lega_seed99.json"),
+            {
+                "variant": "lega",
+                "seed": 99,
+                "val_ppl": 1.0,
+                "val_loss": 0.1,
+                "n_params": 10,
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "sanity_standard.json"),
+            {
+                "variant": "standard",
+                "passed": False,
+                "initial": {"loss": 9.9},
+                "final": {"loss": 9.9, "token_acc": 0.01},
+            },
+        )
         out = build_summary(tmp)
         assert [r["variant"] for r in out["rows"]] == ["lega"]
         md = out["markdown"]
-        assert "❌ 未通过" not in md           # 旧 sanity 不得混入
-        assert "10.0000" not in md            # 旧 standard 的 PPL 不得混入
-        assert "0.1000" not in md             # 旧种子的 val_loss 不得混入
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        assert "❌ 未通过" not in md  # 旧 sanity 不得混入
+        assert "10.0000" not in md  # 旧 standard 的 PPL 不得混入
+        assert "0.1000" not in md  # 旧种子的 val_loss 不得混入
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         assert sig["pairs"] == []
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -339,24 +387,40 @@ def test_build_summary_excludes_artifacts_from_other_pipeline_runs():
     """同一 results 目录重跑时，旧 run_id 或旧数据指纹的产物不得混入汇总。"""
     tmp = tempfile.mkdtemp()
     try:
-        repro = {"variants": ["lega"], "seeds": [1, 2], "smoke": False,
-                 "run_id": "run-new", "data": {"digest": "data-new"}}
+        repro = {
+            "variants": ["lega"],
+            "seeds": [1, 2],
+            "smoke": False,
+            "run_id": "run-new",
+            "data": {"digest": "data-new"},
+        }
         _write_json(os.path.join(tmp, "repro.json"), repro)
-        current = {"variant": "lega", "seed": 1, "val_ppl": 9.8765,
-                   "val_loss": 2.0, "n_params": 10,
-                   "pipeline_run_id": "run-new",
-                   "data_fingerprint": "data-new"}
+        current = {
+            "variant": "lega",
+            "seed": 1,
+            "val_ppl": 9.8765,
+            "val_loss": 2.0,
+            "n_params": 10,
+            "pipeline_run_id": "run-new",
+            "data_fingerprint": "data-new",
+        }
         _write_json(os.path.join(tmp, "eval_lega_seed1.json"), current)
-        stale_run = {"variant": "lega", "seed": 2, "val_ppl": 1.2345,
-                     "val_loss": 0.1, "n_params": 10,
-                     "pipeline_run_id": "run-old",
-                     "data_fingerprint": "data-new"}
+        stale_run = {
+            "variant": "lega",
+            "seed": 2,
+            "val_ppl": 1.2345,
+            "val_loss": 0.1,
+            "n_params": 10,
+            "pipeline_run_id": "run-old",
+            "data_fingerprint": "data-new",
+        }
         _write_json(os.path.join(tmp, "eval_lega_seed2.json"), stale_run)
         # 旧流水线还留下一个缺少 run_id 的同 (变体, 种子) 产物：无法证明
         # 属于本轮，必须排除而不是默认信任。
-        _write_json(os.path.join(tmp, "ruler_lega_seed2.json"),
-                    {"variant": "lega", "seed": 2, "n": 1,
-                     "data_fingerprint": "data-new"})
+        _write_json(
+            os.path.join(tmp, "ruler_lega_seed2.json"),
+            {"variant": "lega", "seed": 2, "n": 1, "data_fingerprint": "data-new"},
+        )
         out = build_summary(tmp)
         assert "1.2345" not in out["markdown"]
         row = out["rows"][0]
@@ -365,8 +429,7 @@ def test_build_summary_excludes_artifacts_from_other_pipeline_runs():
 
         # run_id 相同但数据指纹不同：仍是另一份数据上的观测。
         stolen = dict(current)
-        stolen.update(seed=2, val_ppl=5.4321,
-                      data_fingerprint="data-old")
+        stolen.update(seed=2, val_ppl=5.4321, data_fingerprint="data-old")
         _write_json(os.path.join(tmp, "eval_lega_seed2.json"), stolen)
         out = build_summary(tmp)
         assert "5.4321" not in out["markdown"]
@@ -376,10 +439,16 @@ def test_build_summary_excludes_artifacts_from_other_pipeline_runs():
         fresh = dict(current)
         fresh.update(seed=2, val_ppl=8.0)
         _write_json(os.path.join(tmp, "eval_lega_seed2.json"), fresh)
-        _write_json(os.path.join(tmp, "ruler_lega_seed2.json"),
-                    {"variant": "lega", "seed": 2, "n": 1,
-                     "pipeline_run_id": "run-new",
-                     "data_fingerprint": "data-new"})
+        _write_json(
+            os.path.join(tmp, "ruler_lega_seed2.json"),
+            {
+                "variant": "lega",
+                "seed": 2,
+                "n": 1,
+                "pipeline_run_id": "run-new",
+                "data_fingerprint": "data-new",
+            },
+        )
         out = build_summary(tmp)
         assert out["rows"][0].get("n_seeds") == 2, out["rows"][0]
     finally:
@@ -395,42 +464,71 @@ def test_build_summary_warns_on_eval_runtime_drift():
     """
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "repro.json"),
-                    {"variants": ["lega"], "seeds": [1], "smoke": False,
-                     "runtime": {"python": "3.12", "torch": "2.14"}})
-        rec = {"variant": "lega", "seed": 1, "val_ppl": 9.0,
-               "val_loss": 2.0, "n_params": 10}
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {
+                "variants": ["lega"],
+                "seeds": [1],
+                "smoke": False,
+                "runtime": {"python": "3.12", "torch": "2.14"},
+            },
+        )
+        rec = {
+            "variant": "lega",
+            "seed": 1,
+            "val_ppl": 9.0,
+            "val_loss": 2.0,
+            "n_params": 10,
+        }
         _write_json(os.path.join(tmp, "eval_lega.json"), rec)
         md = build_summary(tmp)["markdown"]
-        assert "评测环境" not in md          # 旧产物没有该字段：不伪造警告
+        assert "评测环境" not in md  # 旧产物没有该字段：不伪造警告
 
-        _write_json(os.path.join(tmp, "eval_lega.json"), dict(
-            rec, runtime_matches_training=True, runtime_mismatches=[]))
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"),
+            dict(rec, runtime_matches_training=True, runtime_mismatches=[]),
+        )
         md = build_summary(tmp)["markdown"]
         assert "评测环境" not in md
 
-        _write_json(os.path.join(tmp, "eval_lega.json"), dict(
-            rec, runtime_matches_training=False,
-            runtime_mismatches=[{"field": "torch", "train": "2.14",
-                                 "eval": "2.15"}]))
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"),
+            dict(
+                rec,
+                runtime_matches_training=False,
+                runtime_mismatches=[
+                    {"field": "torch", "train": "2.14", "eval": "2.15"}
+                ],
+            ),
+        )
         md = build_summary(tmp)["markdown"]
         assert "评测环境" in md and "torch" in md and "lega/seed1" in md
 
-        _write_json(os.path.join(tmp, "eval_lega.json"), dict(
-            rec, source_tree_matches_training=False,
-            train_source_tree_digest="aaa",
-            eval_source_tree_digest="bbb"))
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"),
+            dict(
+                rec,
+                source_tree_matches_training=False,
+                train_source_tree_digest="aaa",
+                eval_source_tree_digest="bbb",
+            ),
+        )
         md = build_summary(tmp)["markdown"]
         assert "源码/配置树" in md and "lega/seed1" in md
 
-        _write_json(os.path.join(tmp, "repro.json"), {
-            "variants": ["lega"], "seeds": [1], "smoke": True,
-            "runtime": {"python": "3.12", "torch": "2.14"},
-            "environment_gate": {
-                "status": "warn",
-                "message": "冒烟环境与 requirements-lock.txt 不一致",
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {
+                "variants": ["lega"],
+                "seeds": [1],
+                "smoke": True,
+                "runtime": {"python": "3.12", "torch": "2.14"},
+                "environment_gate": {
+                    "status": "warn",
+                    "message": "冒烟环境与 requirements-lock.txt 不一致",
+                },
             },
-        })
+        )
         md = build_summary(tmp)["markdown"]
         assert "环境锁闸门" in md and "requirements-lock.txt" in md
         assert "不得声称在锁定环境中产生" in md
@@ -450,11 +548,17 @@ def test_rel_pct_and_eff_cells():
     assert _rel_pct(1.0, 1e308) is None
     assert _rel_pct(1e-308, 1.0) is None
     # _eff_cell 读取 latency 条目的结构与运行时字段
-    entry = {"n_params": 100, "efficiency": {
-        "n_params": 100, "params_mb": 0.4,
-        "flops_per_tok": {"256": {"total_flops_per_tok": 12345}},
-        "peak_mem_mb_prefill": {"256": 3.5}}}
+    entry = {
+        "n_params": 100,
+        "efficiency": {
+            "n_params": 100,
+            "params_mb": 0.4,
+            "flops_per_tok": {"256": {"total_flops_per_tok": 12345}},
+            "peak_mem_mb_prefill": {"256": 3.5},
+        },
+    }
     from run_all import _eff_cell
+
     assert _eff_cell(entry, "params", 256) == 100
     assert _eff_cell(entry, "flops", 256) == 12345
     assert _eff_cell(entry, "mem", 256) == 3.5
@@ -464,10 +568,9 @@ def test_rel_pct_and_eff_cells():
     # 处理，而不是把 OverflowError 抛给汇总或写出 inf。
     old_kv = {"efficiency": {"kv_cache_mb_per_tok": 2.0}}
     assert _eff_cell(old_kv, "kv_mem", 256) == 512.0
-    assert _eff_cell(old_kv, "kv_mem", 10 ** 400) is None
+    assert _eff_cell(old_kv, "kv_mem", 10**400) is None
     huge_kv = {"efficiency": {"kv_cache_mb_per_tok": 1e308}}
     assert _eff_cell(huge_kv, "kv_mem", 1e308) is None
-    from run_all import _noise_floor_pct
     assert _noise_floor_pct(3.0, 4.0) == 5.0
     assert _noise_floor_pct(1e308, 1e308) is None
     assert _noise_floor_pct(-1.0, 2.0) is None
@@ -485,8 +588,8 @@ def test_result_files_empty_scope_does_not_fall_back_to_all():
         for name in ("eval_standard.json", "eval_lega_seed1.json"):
             _write_json(os.path.join(tmp, name), {"variant": "x"})
         assert _result_files(tmp, "eval", None) == sorted(
-            os.path.join(tmp, n) for n in
-            ("eval_standard.json", "eval_lega_seed1.json"))
+            os.path.join(tmp, n) for n in ("eval_standard.json", "eval_lega_seed1.json")
+        )
         assert _result_files(tmp, "eval", []) == []
         assert len(_result_files(tmp, "eval", [1])) == 2
     finally:
@@ -564,15 +667,33 @@ def test_verify_controlled_setup_consistency():
         for v in variants:
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"), {
-                "lr": 0.001, "steps": 10, "warmup": 2,
-                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
-            _write_json(os.path.join(d, "eval.json"), {
-                "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                "code_commit": "deadbeef", "config_sha256": "shax",
-                "steps": 10, "tokens_seen": 1024})
-        audit = verify_controlled_setup(tmp, variants, seeds, 1,
-                                        expected_data_digest="abc123")
+            _write_json(
+                os.path.join(d, "config_used.json"),
+                {
+                    "lr": 0.001,
+                    "steps": 10,
+                    "warmup": 2,
+                    "variant": v,
+                    "seed": 7,
+                    "device": "cpu",
+                    "tag": "t",
+                },
+            )
+            _write_json(
+                os.path.join(d, "eval.json"),
+                {
+                    "variant": v,
+                    "seed": 7,
+                    "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef",
+                    "config_sha256": "shax",
+                    "steps": 10,
+                    "tokens_seen": 1024,
+                },
+            )
+        audit = verify_controlled_setup(
+            tmp, variants, seeds, 1, expected_data_digest="abc123"
+        )
         assert audit["ok"] and audit["checked"] == 2
         assert audit["meta_checked"] == 2 and not audit["meta_mismatches"]
 
@@ -582,8 +703,9 @@ def test_verify_controlled_setup_consistency():
         ev["data_fingerprint"] = "different"
         _write_json(ev_path, ev)
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("数据指纹不一致应触发 SystemExit")
         except SystemExit:
             pass
@@ -593,8 +715,9 @@ def test_verify_controlled_setup_consistency():
         ev["steps"] = 12
         _write_json(ev_path, ev)
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("训练步数不一致应触发 SystemExit")
         except SystemExit:
             pass
@@ -607,8 +730,9 @@ def test_verify_controlled_setup_consistency():
         cfg["lr"] = 0.002
         _write_json(cfg_path, cfg)
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("学习率不一致应触发 SystemExit")
         except SystemExit:
             pass
@@ -618,8 +742,9 @@ def test_verify_controlled_setup_consistency():
         cfg["seed"] = None
         _write_json(cfg_path, cfg)
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("config seed=null 应触发 SystemExit")
         except SystemExit:
             pass
@@ -628,8 +753,9 @@ def test_verify_controlled_setup_consistency():
         ev["seed"] = None
         _write_json(ev_path, ev)
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("eval seed=null 应触发 SystemExit")
         except SystemExit:
             pass
@@ -640,9 +766,16 @@ def test_verify_controlled_setup_consistency():
     try:
         d = os.path.join(tmp2, "standard")
         os.makedirs(d)
-        _write_json(os.path.join(d, "config_used.json"),
-                    {"lr": 0.001, "variant": "standard", "seed": 1,
-                     "device": "cpu", "tag": "t"})
+        _write_json(
+            os.path.join(d, "config_used.json"),
+            {
+                "lr": 0.001,
+                "variant": "standard",
+                "seed": 1,
+                "device": "cpu",
+                "tag": "t",
+            },
+        )
         audit = verify_controlled_setup(tmp2, ["standard"], [1], 1)
         assert audit["ok"] and audit["meta_checked"] == 0
         assert audit["missing_evals"] == ["standard/seed1"]
@@ -655,37 +788,51 @@ def test_verify_controlled_setup_checks_actual_data_order():
     """同 seed 下各变体必须消费同一训练批次序列，而不只是 config/seed 相同。"""
     with tempfile.TemporaryDirectory() as tmp:
         variants, seeds = ["standard", "lega"], [7]
-        base = {"lr": 0.001, "steps": 10, "variant": None, "seed": 7,
-                "device": "cpu", "tag": "t"}
-        meta = {"data_fingerprint": "abc123", "code_commit": "deadbeef",
-                "config_sha256": "shax", "steps": 10, "tokens_seen": 1024}
+        base = {
+            "lr": 0.001,
+            "steps": 10,
+            "variant": None,
+            "seed": 7,
+            "device": "cpu",
+            "tag": "t",
+        }
+        meta = {
+            "data_fingerprint": "abc123",
+            "code_commit": "deadbeef",
+            "config_sha256": "shax",
+            "steps": 10,
+            "tokens_seen": 1024,
+        }
         for v in variants:
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"),
-                        dict(base, variant=v))
-            _write_json(os.path.join(d, "eval.json"), dict(
-                meta, variant=v, seed=7, data_order_sha256="order-A"))
-        audit = verify_controlled_setup(tmp, variants, seeds, 1,
-                                        expected_data_digest="abc123")
+            _write_json(os.path.join(d, "config_used.json"), dict(base, variant=v))
+            _write_json(
+                os.path.join(d, "eval.json"),
+                dict(meta, variant=v, seed=7, data_order_sha256="order-A"),
+            )
+        audit = verify_controlled_setup(
+            tmp, variants, seeds, 1, expected_data_digest="abc123"
+        )
         assert audit["ok"] and audit["data_order_checked"] == 1, audit
         assert not audit["data_order_missing"], audit
         # 同 seed 但实际采样序列不同：即使 config/seed 完全一致也必须失败
-        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"),
-                            encoding="utf-8"))
+        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"), encoding="utf-8"))
         ev["data_order_sha256"] = "order-B"
         _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
             raise AssertionError("数据顺序指纹不一致应触发 SystemExit")
         except SystemExit:
             pass
         # 旧产物缺少指纹：只警告，不伪造一致
         ev.pop("data_order_sha256")
         _write_json(os.path.join(tmp, "lega", "eval.json"), ev)
-        audit = verify_controlled_setup(tmp, variants, seeds, 1,
-                                        expected_data_digest="abc123")
+        audit = verify_controlled_setup(
+            tmp, variants, seeds, 1, expected_data_digest="abc123"
+        )
         assert audit["ok"] and audit["data_order_missing"] == ["lega/seed7"]
     print("  [ok] 受控变量审计：同 seed 实际训练数据顺序指纹必须一致")
 
@@ -699,27 +846,48 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
             for v in variants:
                 d = os.path.join(tmp, v)
                 os.makedirs(d)
-                _write_json(os.path.join(d, "config_used.json"), {
-                    "lr": 0.001, "steps": 10, "warmup": 2,
-                    "use_sdpa_standard": sdpa,
-                    "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
-                _write_json(os.path.join(d, "eval.json"), {
-                    "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                    "code_commit": "deadbeef", "config_sha256": "shax",
-                    "steps": 10, "tokens_seen": 1024})
+                _write_json(
+                    os.path.join(d, "config_used.json"),
+                    {
+                        "lr": 0.001,
+                        "steps": 10,
+                        "warmup": 2,
+                        "use_sdpa_standard": sdpa,
+                        "variant": v,
+                        "seed": 7,
+                        "device": "cpu",
+                        "tag": "t",
+                    },
+                )
+                _write_json(
+                    os.path.join(d, "eval.json"),
+                    {
+                        "variant": v,
+                        "seed": 7,
+                        "data_fingerprint": "abc123",
+                        "code_commit": "deadbeef",
+                        "config_sha256": "shax",
+                        "steps": 10,
+                        "tokens_seen": 1024,
+                    },
+                )
             if should_fail:
                 try:
-                    verify_controlled_setup(tmp, variants, seeds, 1,
-                                            expected_data_digest="abc123")
+                    verify_controlled_setup(
+                        tmp, variants, seeds, 1, expected_data_digest="abc123"
+                    )
                     raise AssertionError("混合 SDPA/显式路径应触发 SystemExit")
                 except SystemExit:
                     pass
             else:
                 audit = verify_controlled_setup(
-                    tmp, variants, seeds, 1, expected_data_digest="abc123")
+                    tmp, variants, seeds, 1, expected_data_digest="abc123"
+                )
                 assert audit["ok"]
                 assert audit["attention_backends"] == {
-                    "standard": "explicit", "lega": "explicit"}
+                    "standard": "explicit",
+                    "lega": "explicit",
+                }
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     # lega_placebo 也注册了集中度项（a·c 的槽位保留、证据为噪声），实际
@@ -731,22 +899,41 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
         for v in variants:
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"), {
-                "lr": 0.001, "steps": 10, "warmup": 2,
-                "use_sdpa_standard": True,
-                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
-            _write_json(os.path.join(d, "eval.json"), {
-                "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                "code_commit": "deadbeef", "config_sha256": "shax",
-                "steps": 10, "tokens_seen": 1024})
+            _write_json(
+                os.path.join(d, "config_used.json"),
+                {
+                    "lr": 0.001,
+                    "steps": 10,
+                    "warmup": 2,
+                    "use_sdpa_standard": True,
+                    "variant": v,
+                    "seed": 7,
+                    "device": "cpu",
+                    "tag": "t",
+                },
+            )
+            _write_json(
+                os.path.join(d, "eval.json"),
+                {
+                    "variant": v,
+                    "seed": 7,
+                    "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef",
+                    "config_sha256": "shax",
+                    "steps": 10,
+                    "tokens_seen": 1024,
+                },
+            )
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
         except SystemExit:
             pass
         else:
-            raise AssertionError("lega_placebo 与 standard 的注意力路径不同，"
-                                 "审计必须拒绝")
+            raise AssertionError(
+                "lega_placebo 与 standard 的注意力路径不同，" "审计必须拒绝"
+            )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # lega_raw 不并入 log n，但仍消费原始 log max_p，必须走显式 softmax；
@@ -757,22 +944,41 @@ def test_verify_controlled_setup_rejects_mixed_attention_backend():
         for v in variants:
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"), {
-                "lr": 0.001, "steps": 10, "warmup": 2,
-                "use_sdpa_standard": True,
-                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
-            _write_json(os.path.join(d, "eval.json"), {
-                "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                "code_commit": "deadbeef", "config_sha256": "shax",
-                "steps": 10, "tokens_seen": 1024})
+            _write_json(
+                os.path.join(d, "config_used.json"),
+                {
+                    "lr": 0.001,
+                    "steps": 10,
+                    "warmup": 2,
+                    "use_sdpa_standard": True,
+                    "variant": v,
+                    "seed": 7,
+                    "device": "cpu",
+                    "tag": "t",
+                },
+            )
+            _write_json(
+                os.path.join(d, "eval.json"),
+                {
+                    "variant": v,
+                    "seed": 7,
+                    "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef",
+                    "config_sha256": "shax",
+                    "steps": 10,
+                    "tokens_seen": 1024,
+                },
+            )
         try:
-            verify_controlled_setup(tmp, variants, seeds, 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, variants, seeds, 1, expected_data_digest="abc123"
+            )
         except SystemExit:
             pass
         else:
-            raise AssertionError("lega_raw 与 standard 的注意力路径不同，"
-                                 "审计必须拒绝")
+            raise AssertionError(
+                "lega_raw 与 standard 的注意力路径不同，" "审计必须拒绝"
+            )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] verify_controlled_setup（混合注意力实现路径被拒绝）")
@@ -787,17 +993,18 @@ def test_supplemental_variants_enter_summary_comparison_pairs():
     家族大小不一致。
     """
     from lega.attention import RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS
+
     runs = {v: {1: {}} for v in RUNNABLE_VARIANTS}
     pairs = build_comparison_pairs(runs, {"hypotheses": []})
     for v in SUPPLEMENTAL_VARIANTS:
         assert (v, "standard") in pairs, v
     # 预注册对比若点名补充/对照变体，也必须真正进入配对表并被检验。
-    reg = {"hypotheses": [{"metric": "PPL", "candidate": "lega_raw",
-                           "reference": "lega"}]}
+    reg = {
+        "hypotheses": [{"metric": "PPL", "candidate": "lega_raw", "reference": "lega"}]
+    }
     assert ("lega_raw", "lega") in build_comparison_pairs(runs, reg)
     # 未运行的补充变体不得凭空产生对比。
-    only_standard = build_comparison_pairs(
-        {"standard": {1: {}}}, {"hypotheses": []})
+    only_standard = build_comparison_pairs({"standard": {1: {}}}, {"hypotheses": []})
     for v in SUPPLEMENTAL_VARIANTS:
         assert (v, "standard") not in only_standard, v
     print("  [ok] 补充对照进入汇总配对，未运行时不伪造对比")
@@ -810,16 +1017,34 @@ def test_verify_controlled_setup_reports_malformed_attention_switch():
         for v in ("standard", "lega"):
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"), {
-                "lr": 0.001, "steps": 10, "use_sdpa_standard": "maybe",
-                "variant": v, "seed": 7, "device": "cpu", "tag": "t"})
-            _write_json(os.path.join(d, "eval.json"), {
-                "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                "code_commit": "deadbeef", "config_sha256": "shax",
-                "steps": 10, "tokens_seen": 1024})
+            _write_json(
+                os.path.join(d, "config_used.json"),
+                {
+                    "lr": 0.001,
+                    "steps": 10,
+                    "use_sdpa_standard": "maybe",
+                    "variant": v,
+                    "seed": 7,
+                    "device": "cpu",
+                    "tag": "t",
+                },
+            )
+            _write_json(
+                os.path.join(d, "eval.json"),
+                {
+                    "variant": v,
+                    "seed": 7,
+                    "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef",
+                    "config_sha256": "shax",
+                    "steps": 10,
+                    "tokens_seen": 1024,
+                },
+            )
         try:
-            verify_controlled_setup(tmp, ["standard", "lega"], [7], 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, ["standard", "lega"], [7], 1, expected_data_digest="abc123"
+            )
             raise AssertionError("非法 use_sdpa_standard 应触发 SystemExit")
         except SystemExit:
             pass
@@ -835,26 +1060,45 @@ def test_verify_controlled_setup_infers_missing_attention_switch():
     softmax 的 lega 因而实现路径不同。旧实现只在“键存在”时才比较，导致
     一份完全省略该开关的配置绕过混合后端检查。
     """
+
     def fixture(variants):
         tmp = tempfile.mkdtemp()
         for v in variants:
             d = os.path.join(tmp, v)
             os.makedirs(d)
             # 直接写文件：不经测试 helper 的默认注入，模拟真实旧配置缺键。
-            with open(os.path.join(d, "config_used.json"), "w",
-                      encoding="utf-8") as f:
-                json.dump({"lr": 0.001, "steps": 10, "variant": v,
-                           "seed": 7, "device": "cpu", "tag": "t"}, f)
-            _write_json(os.path.join(d, "eval.json"), {
-                "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                "code_commit": "deadbeef", "config_sha256": "shax",
-                "steps": 10, "tokens_seen": 1024})
+            with open(os.path.join(d, "config_used.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "lr": 0.001,
+                        "steps": 10,
+                        "variant": v,
+                        "seed": 7,
+                        "device": "cpu",
+                        "tag": "t",
+                    },
+                    f,
+                )
+            _write_json(
+                os.path.join(d, "eval.json"),
+                {
+                    "variant": v,
+                    "seed": 7,
+                    "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef",
+                    "config_sha256": "shax",
+                    "steps": 10,
+                    "tokens_seen": 1024,
+                },
+            )
         return tmp
+
     tmp = fixture(["standard", "lega"])
     try:
         try:
-            verify_controlled_setup(tmp, ["standard", "lega"], [7], 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, ["standard", "lega"], [7], 1, expected_data_digest="abc123"
+            )
             raise AssertionError("缺键默认 True 导致的混合后端应触发 SystemExit")
         except SystemExit:
             pass
@@ -865,8 +1109,8 @@ def test_verify_controlled_setup_infers_missing_attention_switch():
     tmp = fixture(["lega", "lega_no_len"])
     try:
         audit = verify_controlled_setup(
-            tmp, ["lega", "lega_no_len"], [7], 1,
-            expected_data_digest="abc123")
+            tmp, ["lega", "lega_no_len"], [7], 1, expected_data_digest="abc123"
+        )
         assert audit["ok"] and not audit["mixed_attention"], audit
         assert audit["attention_key_seen"] is False
         assert set(audit["attention_backends"].values()) == {"explicit"}
@@ -879,24 +1123,43 @@ def test_verify_controlled_setup_infers_missing_attention_switch():
 
 def test_verify_controlled_setup_rejects_mixed_device_types():
     """不同变体跑在 CPU/CUDA 上时 PPL 差异无法归因于方法，必须拒绝。"""
+
     def fixture(devices):
         tmp = tempfile.mkdtemp()
         for v, dev in zip(("standard", "lega"), devices):
             d = os.path.join(tmp, v)
             os.makedirs(d)
-            _write_json(os.path.join(d, "config_used.json"), {
-                "lr": 0.001, "steps": 10, "variant": v, "seed": 7,
-                "device": dev, "tag": "t"})
-            _write_json(os.path.join(d, "eval.json"), {
-                "variant": v, "seed": 7, "data_fingerprint": "abc123",
-                "code_commit": "deadbeef", "config_sha256": "shax",
-                "steps": 10, "tokens_seen": 1024})
+            _write_json(
+                os.path.join(d, "config_used.json"),
+                {
+                    "lr": 0.001,
+                    "steps": 10,
+                    "variant": v,
+                    "seed": 7,
+                    "device": dev,
+                    "tag": "t",
+                },
+            )
+            _write_json(
+                os.path.join(d, "eval.json"),
+                {
+                    "variant": v,
+                    "seed": 7,
+                    "data_fingerprint": "abc123",
+                    "code_commit": "deadbeef",
+                    "config_sha256": "shax",
+                    "steps": 10,
+                    "tokens_seen": 1024,
+                },
+            )
         return tmp
+
     tmp = fixture(("cpu", "cuda:0"))
     try:
         try:
-            verify_controlled_setup(tmp, ["standard", "lega"], [7], 1,
-                                    expected_data_digest="abc123")
+            verify_controlled_setup(
+                tmp, ["standard", "lega"], [7], 1, expected_data_digest="abc123"
+            )
             raise AssertionError("混合 CPU/CUDA 应触发 SystemExit")
         except SystemExit:
             pass
@@ -904,8 +1167,8 @@ def test_verify_controlled_setup_rejects_mixed_device_types():
         tmp2 = fixture(("cuda:0", "cuda:1"))
         try:
             audit = verify_controlled_setup(
-                tmp2, ["standard", "lega"], [7], 1,
-                expected_data_digest="abc123")
+                tmp2, ["standard", "lega"], [7], 1, expected_data_digest="abc123"
+            )
             assert audit["ok"] and not audit["mixed_device"], audit
             assert set(audit["device_types"].values()) == {"cuda"}, audit
         finally:
@@ -918,8 +1181,8 @@ def test_verify_controlled_setup_rejects_mixed_device_types():
         _write_json(evpath, cfg)
         try:
             audit = verify_controlled_setup(
-                tmp3, ["standard", "lega"], [7], 1,
-                expected_data_digest="abc123")
+                tmp3, ["standard", "lega"], [7], 1, expected_data_digest="abc123"
+            )
             assert audit["ok"] and audit["device_missing"] == ["lega/seed7"], audit
         finally:
             shutil.rmtree(tmp3, ignore_errors=True)
@@ -932,7 +1195,7 @@ def test_stat_counts_finite_only():
     """_stat 的 n 与 mean/std 口径一致：NaN/Inf 不参与也不虚增样本量。"""
     st = _stat([1.0, float("nan"), 3.0, None])
     assert st["n"] == 2 and st["mean"] == 2.0
-    assert abs(st["std"] - 2 ** 0.5) < 1e-12
+    assert abs(st["std"] - 2**0.5) < 1e-12
     assert _stat([float("nan"), float("inf"), None]) is None
     assert _stat([2.5]) == {"mean": 2.5, "std": None, "n": 1}
     print("  [ok] _stat（NaN 不计入 n，与 mean/std 口径一致）")
@@ -948,6 +1211,7 @@ def test_single_factor_audit_covers_implementation_factors():
     ``ok=False`` 并给出可读原因，(3) 缺参数/置错通道/漏登记同样显形。
     """
     import lega.attention as attention_mod
+
     audit = single_factor_audit()
     assert audit["ok"] is True, audit["problems"]
     rows = {r["variant"]: r for r in audit["implementation_factors"]}
@@ -958,13 +1222,14 @@ def test_single_factor_audit_covers_implementation_factors():
     assert rows["lega"]["effective"] == ["A", "B", "C"]
     assert rows["lega_conc_only"]["effective"] == ["B"]
     # 容量匹配对照：参数全保留，只有自己那条证据通道失效
-    for component, variant in (("A", "lega_null_query"),
-                               ("B", "lega_null_conc"),
-                               ("C", "lega_null_len")):
+    for component, variant in (
+        ("A", "lega_null_query"),
+        ("B", "lega_null_conc"),
+        ("C", "lega_null_len"),
+    ):
         row = rows[variant]
         assert set(row["params"]) == {"gate_w", "gate_a", "gate_b"}, row
-        assert row["effective"] == sorted(
-            set("ABC") - {component}), row
+        assert row["effective"] == sorted(set("ABC") - {component}), row
         assert row["null_component"] == component, row
 
     real_probe = attention_mod.probe_gate_factors
@@ -981,14 +1246,22 @@ def test_single_factor_audit_covers_implementation_factors():
     finally:
         attention_mod.probe_gate_factors = real_probe
     assert drifted_audit["ok"] is False
-    assert any("实现层生效因子" in p for p in drifted_audit["problems"]), (
-        drifted_audit["problems"])
+    assert any("实现层生效因子" in p for p in drifted_audit["problems"]), drifted_audit[
+        "problems"
+    ]
 
     def broken(variant, **kw):
-        return {"variant": variant, "gated": True, "params": ["gate_w"],
-                "effective": ["A"], "bias_effective": False,
-                "error": None, "null_component": None,
-                "use_raw_conc": False, "conc_mode": "max"}
+        return {
+            "variant": variant,
+            "gated": True,
+            "params": ["gate_w"],
+            "effective": ["A"],
+            "bias_effective": False,
+            "error": None,
+            "null_component": None,
+            "use_raw_conc": False,
+            "conc_mode": "max",
+        }
 
     attention_mod.probe_gate_factors = broken
     try:
@@ -996,8 +1269,10 @@ def test_single_factor_audit_covers_implementation_factors():
     finally:
         attention_mod.probe_gate_factors = real_probe
     assert unregistered["ok"] is False
-    assert any("置零组件" in p or "参数" in p or "生效因子" in p
-               for p in unregistered["problems"]), unregistered["problems"]
+    assert any(
+        "置零组件" in p or "参数" in p or "生效因子" in p
+        for p in unregistered["problems"]
+    ), unregistered["problems"]
     print("  [ok] 单因素审计覆盖实现层因子（声明漂移/参数缺失/漏登记均显形）")
 
 
@@ -1013,10 +1288,14 @@ def test_single_factor_audit_covers_registered_ablation_hypotheses():
     import copy
     import json
     import lega.hypotheses as hypotheses_mod
+
     audit = single_factor_audit()
     assert audit["ok"] is True, audit["problems"]
-    rows = {r["id"]: r for r in audit["registered_single_factor"]
-            if isinstance(r, dict) and r.get("id")}
+    rows = {
+        r["id"]: r
+        for r in audit["registered_single_factor"]
+        if isinstance(r, dict) and r.get("id")
+    }
     assert {"H1", "H2", "H3", "H4", "H5", "H6", "H7"} <= set(rows), rows
     for hyp_id, factor in (("H2", "A"), ("H3", "B"), ("H4", "C")):
         assert rows[hyp_id]["claims_single_factor"] is True, rows[hyp_id]
@@ -1028,14 +1307,15 @@ def test_single_factor_audit_covers_registered_ablation_hypotheses():
     assert rows["H5"]["contrast_type"] == "multi_factor"
     assert rows["H5"]["changed_factors"] == ["B", "C"], rows["H5"]
     assert rows["H6"]["contrast_type"] == "overall"
-    assert not any("H1" in p or "H5" in p or "H6" in p
-                   for p in audit["problems"]), audit["problems"]
+    assert not any(
+        "H1" in p or "H5" in p or "H6" in p for p in audit["problems"]
+    ), audit["problems"]
 
     registry = json.load(open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8"))
     drifted = copy.deepcopy(registry)
     by_id = {h["id"]: h for h in drifted["hypotheses"]}
-    by_id["H3"]["candidate"] = "lega_conc_only"      # 变成同时改 A+C
-    by_id["H4"]["direction"] = "candidate_better"    # 与 remove 边写反
+    by_id["H3"]["candidate"] = "lega_conc_only"  # 变成同时改 A+C
+    by_id["H4"]["direction"] = "candidate_better"  # 与 remove 边写反
     real_loader = hypotheses_mod.load_registration
     hypotheses_mod.load_registration = lambda path=None: drifted
     try:

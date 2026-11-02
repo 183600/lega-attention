@@ -11,6 +11,7 @@
 上下文中的条件比较。分析只做描述性斜率与配对 McNemar，不改写预注册的
 确认性判定。
 """
+
 import hashlib
 import json
 import math
@@ -20,13 +21,32 @@ from typing import Dict, List, Optional
 
 import torch
 
-from .ruler import (ContextTooSmall, FILLER, KEY_WORDS, NEEDLE_TMPL,
-                    QUESTION_TMPL, _cached_encode, _needle_excerpt, _rand_digit,
-                    _stable_hash, _token_span_for_text, _tokenizer_roundtrip,
-                    record_corpus_test_access, score_prediction,
-                    standalone_numeric_tokens)
-from .utils import (amp_autocast, amp_dtype_for, config_bool, holm_bonferroni,
-                    mcnemar_exact_p, save_json, strict_int, wilson_score_ci)
+from .ruler import (
+    ContextTooSmall,
+    FILLER,
+    KEY_WORDS,
+    NEEDLE_TMPL,
+    QUESTION_TMPL,
+    _cached_encode,
+    _needle_excerpt,
+    _rand_digit,
+    _stable_hash,
+    _token_span_for_text,
+    _tokenizer_roundtrip,
+    record_corpus_test_access,
+    score_prediction,
+    standalone_numeric_tokens,
+)
+from .utils import (
+    amp_autocast,
+    amp_dtype_for,
+    config_bool,
+    holm_bonferroni,
+    mcnemar_exact_p,
+    save_json,
+    strict_int,
+    wilson_score_ci,
+)
 
 GROWTH_MODES = ("suffix", "prefix", "split")
 DEFAULT_GROWTH_MODES = ("suffix", "prefix")
@@ -35,8 +55,7 @@ CORE_WINDOW = 16
 
 def _normalize_ctx_lens(ctx_lens) -> List[int]:
     if isinstance(ctx_lens, (str, bytes)):
-        raise ValueError(
-            f"ctx_lens 必须是整数序列，收到字符串 {ctx_lens!r}")
+        raise ValueError(f"ctx_lens 必须是整数序列，收到字符串 {ctx_lens!r}")
     vals = [strict_int(c, "ctx_lens") for c in ctx_lens]
     if len(vals) < 2:
         raise ValueError(f"嵌套设计至少需要两个上下文长度，收到 {vals}")
@@ -49,15 +68,13 @@ def _normalize_ctx_lens(ctx_lens) -> List[int]:
 
 def _normalize_growth_modes(growth_modes) -> tuple:
     if isinstance(growth_modes, (str, bytes)):
-        raise ValueError(
-            f"growth_modes 必须是序列，收到字符串 {growth_modes!r}")
+        raise ValueError(f"growth_modes 必须是序列，收到字符串 {growth_modes!r}")
     vals = tuple(growth_modes)
     if not vals:
         raise ValueError("growth_modes 不能为空")
     unknown = sorted(set(vals) - set(GROWTH_MODES))
     if unknown:
-        raise ValueError(
-            f"未知 growth 模式 {unknown}；可选 {', '.join(GROWTH_MODES)}")
+        raise ValueError(f"未知 growth 模式 {unknown}；可选 {', '.join(GROWTH_MODES)}")
     if len(set(vals)) != len(vals):
         raise ValueError(f"growth_modes 不能重复，收到 {vals}")
     return vals
@@ -68,8 +85,9 @@ def _hash_ids(ids: List[int]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _make_filler(tok, length: int, seed: int, mode: str,
-                 corpus_sents: Optional[List[str]]) -> List[int]:
+def _make_filler(
+    tok, length: int, seed: int, mode: str, corpus_sents: Optional[List[str]]
+) -> List[int]:
     if length < 1:
         raise ValueError(f"填充流长度必须 >= 1，收到 {length}")
     rng = random.Random(int(seed))
@@ -91,24 +109,30 @@ def _make_filler(tok, length: int, seed: int, mode: str,
     return (unit * (length // len(unit) + 1))[:length]
 
 
-def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
-                      value: Optional[str] = None, filler_seed: int = 0,
-                      filler_ids: Optional[List[int]] = None,
-                      pair_id: Optional[str] = None, mode: str = "synth",
-                      corpus_sents: Optional[List[str]] = None,
-                      base_ctx: Optional[int] = None) -> List[Dict]:
+def build_nested_niah(
+    tok,
+    ctx_lens,
+    growth: str,
+    *,
+    key: Optional[str] = None,
+    value: Optional[str] = None,
+    filler_seed: int = 0,
+    filler_ids: Optional[List[int]] = None,
+    pair_id: Optional[str] = None,
+    mode: str = "synth",
+    corpus_sents: Optional[List[str]] = None,
+    base_ctx: Optional[int] = None,
+) -> List[Dict]:
     """构造同一证据、同一填充流、不同上下文的配对 NIAH 样例。"""
     if growth not in GROWTH_MODES:
-        raise ValueError(
-            f"growth 必须是 {GROWTH_MODES} 之一，收到 {growth!r}")
+        raise ValueError(f"growth 必须是 {GROWTH_MODES} 之一，收到 {growth!r}")
     ctxs = _normalize_ctx_lens(ctx_lens)
     filler_seed = strict_int(filler_seed, "filler_seed")
     if mode not in ("synth", "corpus"):
         raise ValueError(f"mode 必须是 'synth'/'corpus'，收到 {mode!r}")
     base = ctxs[0] if base_ctx is None else strict_int(base_ctx, "base_ctx")
     if base != ctxs[0]:
-        raise ValueError(
-            f"base_ctx 必须等于最短上下文 {ctxs[0]}，收到 {base}")
+        raise ValueError(f"base_ctx 必须等于最短上下文 {ctxs[0]}，收到 {base}")
 
     core_rng = random.Random(_stable_hash(f"nested-core:{filler_seed}"))
     if key is None:
@@ -127,7 +151,8 @@ def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
     if not _tokenizer_roundtrip(tok, value):
         raise ContextTooSmall(
             "tokenizer 无法无损表示 niah 数值答案，无法定位 gold 跨度；"
-            f"value={value!r}")
+            f"value={value!r}"
+        )
     needle_ids = tok.encode("\n" + NEEDLE_TMPL.format(key=key, value=value))
     question_ids = _cached_encode(tok, QUESTION_TMPL.format(key=key))
     if not needle_ids or not question_ids:
@@ -141,7 +166,8 @@ def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
     if base_room < 8:
         raise ContextTooSmall(
             f"嵌套 NIAH 需要最短 ctx >= {len(needle_ids)+len(question_ids)+8}，"
-            f"收到 {base}")
+            f"收到 {base}"
+        )
     base_left = max(1, base_room // 4)
     base_right = base_room - base_left
     if base_right < 1:
@@ -151,14 +177,19 @@ def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
     filler_len = base_room + 2 * max_extra
     if filler_ids is None:
         filler_ids = _make_filler(
-            tok, filler_len,
-            _stable_hash(f"nested-filler:{filler_seed}"), mode, corpus_sents)
+            tok,
+            filler_len,
+            _stable_hash(f"nested-filler:{filler_seed}"),
+            mode,
+            corpus_sents,
+        )
     else:
         filler_ids = [strict_int(x, "filler_ids") for x in filler_ids]
         if len(filler_ids) < filler_len:
             raise ValueError(
                 f"filler_ids 长度 {len(filler_ids)} < 设计所需 {filler_len}；"
-                "不能截断/重采样，否则跨长度填充流不再相同")
+                "不能截断/重采样，否则跨长度填充流不再相同"
+            )
     filler_ids = filler_ids[:filler_len]
     filler_hash = _hash_ids(filler_ids)
     pivot = base_left + max_extra
@@ -182,14 +213,16 @@ def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
         if start < 0 or end > len(filler_ids):
             raise AssertionError(
                 f"内部填充切片越界: start={start}, end={end}, "
-                f"len={len(filler_ids)}, ctx={ctx}, growth={growth}")
+                f"len={len(filler_ids)}, ctx={ctx}, growth={growth}"
+            )
         prefix = filler_ids[start:pivot]
         suffix = filler_ids[pivot:end]
         ids = prefix + needle_ids + suffix + question_ids
         if len(ids) != ctx:
             raise AssertionError(
                 f"嵌套样例长度 {len(ids)} != 请求 ctx={ctx}："
-                "精确长度是配对设计的前提")
+                "精确长度是配对设计的前提"
+            )
         core_ids = prefix[-window:] + needle_ids + suffix[:window]
         meta = {
             "key": key,
@@ -201,8 +234,8 @@ def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
             "n_tokens": len(ids),
             "base_ctx": base,
             "needle_pos": len(prefix),
-            "evidence_position_fraction": len(prefix) / max(
-                1, len(ids) - len(question_ids)),
+            "evidence_position_fraction": len(prefix)
+            / max(1, len(ids) - len(question_ids)),
             "evidence_distance_tokens": len(suffix),
             "distance_to_query_tokens": len(suffix),
             "prefix_tokens": len(prefix),
@@ -212,37 +245,43 @@ def build_nested_niah(tok, ctx_lens, growth: str, *, key: Optional[str] = None,
             "core_context_sha256": _hash_ids(core_ids),
             "core_window": window,
         }
-        out.append({
-            "task": "niah_nested",
-            "source_task": "niah_corpus" if mode == "corpus" else "niah_synth",
-            "ids": ids,
-            "answer": value,
-            "answer_words": None,
-            "needle_span": (len(prefix), len(prefix) + len(needle_ids)),
-            "value_span": (len(prefix) + vs, len(prefix) + ve),
-            "query_span": (len(prefix) + len(needle_ids) + len(suffix), len(ids)),
-            "sample_id": f"{pair_id}@{growth}@{ctx}",
-            "instance_id": f"{pair_id}@{ctx}",
-            "pair_id": pair_id,
-            "growth": growth,
-            "meta": meta,
-        })
+        out.append(
+            {
+                "task": "niah_nested",
+                "source_task": "niah_corpus" if mode == "corpus" else "niah_synth",
+                "ids": ids,
+                "answer": value,
+                "answer_words": None,
+                "needle_span": (len(prefix), len(prefix) + len(needle_ids)),
+                "value_span": (len(prefix) + vs, len(prefix) + ve),
+                "query_span": (len(prefix) + len(needle_ids) + len(suffix), len(ids)),
+                "sample_id": f"{pair_id}@{growth}@{ctx}",
+                "instance_id": f"{pair_id}@{ctx}",
+                "pair_id": pair_id,
+                "growth": growth,
+                "meta": meta,
+            }
+        )
     return out
 
 
-def build_nested_sample(tok, ctx_lens, *, seed: int = 1234,
-                        sample_index: int = 0,
-                        growth_modes=DEFAULT_GROWTH_MODES,
-                        mode: str = "synth",
-                        corpus_sents: Optional[List[str]] = None,
-                        base_ctx: Optional[int] = None) -> Dict:
+def build_nested_sample(
+    tok,
+    ctx_lens,
+    *,
+    seed: int = 1234,
+    sample_index: int = 0,
+    growth_modes=DEFAULT_GROWTH_MODES,
+    mode: str = "synth",
+    corpus_sents: Optional[List[str]] = None,
+    base_ctx: Optional[int] = None,
+) -> Dict:
     """为同一 pair 构造全部 growth 模式；任一模式失败则整个 pair 不可用。"""
     ctxs = _normalize_ctx_lens(ctx_lens)
     seed = strict_int(seed, "seed")
     sample_index = strict_int(sample_index, "sample_index")
     growth_modes = _normalize_growth_modes(growth_modes)
-    core_rng = random.Random(
-        _stable_hash(f"nested-core:{seed}:{sample_index}"))
+    core_rng = random.Random(_stable_hash(f"nested-core:{seed}:{sample_index}"))
     key = core_rng.choice(KEY_WORDS)
     value = _rand_digit(core_rng, 7, 7)
     filler_seed = _stable_hash(f"nested-filler-sample:{seed}:{sample_index}")
@@ -252,14 +291,27 @@ def build_nested_sample(tok, ctx_lens, *, seed: int = 1234,
     for growth in growth_modes:
         try:
             built[growth] = build_nested_niah(
-                tok, ctxs, growth, key=key, value=value,
-                filler_seed=filler_seed, pair_id=pair_id, mode=mode,
-                corpus_sents=corpus_sents, base_ctx=base_ctx)
+                tok,
+                ctxs,
+                growth,
+                key=key,
+                value=value,
+                filler_seed=filler_seed,
+                pair_id=pair_id,
+                mode=mode,
+                corpus_sents=corpus_sents,
+                base_ctx=base_ctx,
+            )
         except ContextTooSmall as e:
             skipped.append(f"{growth}@{pair_id}: {e}")
-    return {"pair_id": pair_id, "key": key, "value": value,
-            "growth": built, "skipped": skipped,
-            "ok": not skipped and len(built) == len(growth_modes)}
+    return {
+        "pair_id": pair_id,
+        "key": key,
+        "value": value,
+        "growth": built,
+        "skipped": skipped,
+        "ok": not skipped and len(built) == len(growth_modes),
+    }
 
 
 def _outcome_records(cell: Dict, where: str) -> Optional[Dict[str, Dict]]:
@@ -277,21 +329,19 @@ def _outcome_records(cell: Dict, where: str) -> Optional[Dict[str, Dict]]:
             raise ValueError(f"{where}.outcomes[{i}].pair_id 必须是非空字符串")
         if pid in out:
             raise ValueError(
-                f"{where}.outcomes 中 pair_id={pid!r} 重复；配对键必须唯一")
+                f"{where}.outcomes 中 pair_id={pid!r} 重复；配对键必须唯一"
+            )
         em = rec.get("em")
         if em not in (0, 0.0, 1, 1.0):
-            raise ValueError(
-                f"{where}.outcomes[{i}].em 必须是 0/1，收到 {em!r}")
+            raise ValueError(f"{where}.outcomes[{i}].em 必须是 0/1，收到 {em!r}")
         out[pid] = rec
     n = cell.get("n")
     if n is not None and strict_int(n, f"{where}.n") != len(out):
-        raise ValueError(
-            f"{where}.n={n} 与 outcomes 长度 {len(out)} 不一致")
+        raise ValueError(f"{where}.n={n} 与 outcomes 长度 {len(out)} 不一致")
     if cell.get("em") is not None and out:
         mean = sum(int(r["em"]) for r in out.values()) / len(out)
         if abs(float(cell["em"]) - mean) > 1e-9:
-            raise ValueError(
-                f"{where}.em={cell['em']} 与 outcomes 均值 {mean} 不一致")
+            raise ValueError(f"{where}.em={cell['em']} 与 outcomes 均值 {mean} 不一致")
     return out
 
 
@@ -330,14 +380,16 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
         for raw_ctx, cell in cells.items():
             ctx = strict_int(raw_ctx, f"{growth}.ctx")
             if ctx in by_ctx:
-                raise ValueError(
-                    f"growth={growth} 中 ctx={ctx} 以不同键重复出现")
+                raise ValueError(f"growth={growth} 中 ctx={ctx} 以不同键重复出现")
             by_ctx[ctx] = cell
             all_ctx.add(ctx)
         normalized[growth] = dict(sorted(by_ctx.items()))
-    base = (strict_int(base_ctx, "base_ctx") if base_ctx is not None
-            else design.get("base_ctx"))
-    base = (strict_int(base, "base_ctx") if base is not None else min(all_ctx))
+    base = (
+        strict_int(base_ctx, "base_ctx")
+        if base_ctx is not None
+        else design.get("base_ctx")
+    )
+    base = strict_int(base, "base_ctx") if base is not None else min(all_ctx)
     if base not in all_ctx:
         raise ValueError(f"base_ctx={base} 不在任何 growth 的档位中")
 
@@ -357,8 +409,9 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
         cells = normalized[growth]
         ctxs = list(cells)
         growth_base = base if base in cells else ctxs[0]
-        records = {ctx: _outcome_records(cells[ctx], f"results.{growth}.{ctx}")
-                   for ctx in ctxs}
+        records = {
+            ctx: _outcome_records(cells[ctx], f"results.{growth}.{ctx}") for ctx in ctxs
+        }
         if any(rec is not None for rec in records.values()):
             any_outcomes = True
         else:
@@ -375,25 +428,34 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
                 em = k / n if n else None
                 ci = wilson_score_ci(k, n) if n else None
             else:
-                n = (strict_int(cell["n"], f"results.{growth}.{ctx}.n")
-                     if cell.get("n") is not None else 0)
-                em = (float(cell["em"]) if cell.get("em") is not None
-                      else None)
+                n = (
+                    strict_int(cell["n"], f"results.{growth}.{ctx}.n")
+                    if cell.get("n") is not None
+                    else 0
+                )
+                em = float(cell["em"]) if cell.get("em") is not None else None
                 ci = cell.get("em_ci95_wilson")
-            rec = {"ctx": ctx, "n": n, "em": em,
-                   "em_ci95_wilson": list(ci) if ci is not None else None,
-                   "outcomes_present": recs is not None}
+            rec = {
+                "ctx": ctx,
+                "n": n,
+                "em": em,
+                "em_ci95_wilson": list(ci) if ci is not None else None,
+                "outcomes_present": recs is not None,
+            }
             if recs is not None:
-                rec["n_correct"] = int(sum(int(r["em"])
-                                           for r in recs.values()))
+                rec["n_correct"] = int(sum(int(r["em"]) for r in recs.values()))
             stats[str(ctx)] = rec
 
             if cell.get("actual_tokens") is not None:
                 length_checked = True
                 if checks["lengths_exact"] is None:
                     checks["lengths_exact"] = True
-                if strict_int(cell["actual_tokens"],
-                              f"results.{growth}.{ctx}.actual_tokens") != ctx:
+                if (
+                    strict_int(
+                        cell["actual_tokens"], f"results.{growth}.{ctx}.actual_tokens"
+                    )
+                    != ctx
+                ):
                     checks["lengths_exact"] = False
             if recs is not None:
                 for r in recs.values():
@@ -401,26 +463,28 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
                         length_checked = True
                         if checks["lengths_exact"] is None:
                             checks["lengths_exact"] = True
-                        if strict_int(r["actual_tokens"],
-                                      "outcome.actual_tokens") != ctx:
+                        if (
+                            strict_int(r["actual_tokens"], "outcome.actual_tokens")
+                            != ctx
+                        ):
                             checks["lengths_exact"] = False
 
-        all_pids = [set(recs) for recs in records.values()
-                    if recs is not None]
+        all_pids = [set(recs) for recs in records.values() if recs is not None]
         complete_pids = set.intersection(*all_pids) if all_pids else set()
         if not all_pids or len(all_pids) != len(ctxs):
             checks["pairing_complete"] = False
         if all_pids and complete_pids != set.union(*all_pids):
             checks["pairing_complete"] = False
         for pid in complete_pids:
-            pair_recs = [recs[pid] for recs in records.values()
-                         if recs is not None]
+            pair_recs = [recs[pid] for recs in records.values() if recs is not None]
             cores = [r.get("core_context_sha256") for r in pair_recs]
             key_values = [(r.get("key"), r.get("value")) for r in pair_recs]
-            if (any(c is None for c in cores) or len(set(cores)) != 1
-                    or any(k is None or v is None
-                           for k, v in key_values)
-                    or len(set(key_values)) != 1):
+            if (
+                any(c is None for c in cores)
+                or len(set(cores)) != 1
+                or any(k is None or v is None for k, v in key_values)
+                or len(set(key_values)) != 1
+            ):
                 checks["core_context_consistent"] = False
 
         transitions = []
@@ -432,51 +496,69 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
                 cmap = records[ctx]
                 common = sorted(set(bmap) & set(cmap))
                 if not common:
-                    transitions.append({
-                        "ctx": ctx, "n_pairs": 0,
-                        "reason": "没有共同 pair_id",
-                    })
+                    transitions.append(
+                        {
+                            "ctx": ctx,
+                            "n_pairs": 0,
+                            "reason": "没有共同 pair_id",
+                        }
+                    )
                     continue
-                base_only = sum(1 for p in common
-                                if int(bmap[p]["em"]) == 1
-                                and int(cmap[p]["em"]) == 0)
-                ctx_only = sum(1 for p in common
-                               if int(bmap[p]["em"]) == 0
-                               and int(cmap[p]["em"]) == 1)
-                both = sum(1 for p in common
-                           if int(bmap[p]["em"]) == 1
-                           and int(cmap[p]["em"]) == 1)
-                neither = sum(1 for p in common
-                              if int(bmap[p]["em"]) == 0
-                              and int(cmap[p]["em"]) == 0)
+                base_only = sum(
+                    1
+                    for p in common
+                    if int(bmap[p]["em"]) == 1 and int(cmap[p]["em"]) == 0
+                )
+                ctx_only = sum(
+                    1
+                    for p in common
+                    if int(bmap[p]["em"]) == 0 and int(cmap[p]["em"]) == 1
+                )
+                both = sum(
+                    1
+                    for p in common
+                    if int(bmap[p]["em"]) == 1 and int(cmap[p]["em"]) == 1
+                )
+                neither = sum(
+                    1
+                    for p in common
+                    if int(bmap[p]["em"]) == 0 and int(cmap[p]["em"]) == 0
+                )
                 b_em = sum(int(bmap[p]["em"]) for p in common) / len(common)
                 c_em = sum(int(cmap[p]["em"]) for p in common) / len(common)
-                transitions.append({
-                    "ctx": ctx,
-                    "base_ctx": growth_base,
-                    "n_pairs": len(common),
-                    "base_em": b_em,
-                    "ctx_em": c_em,
-                    "em_diff": c_em - b_em,
-                    "both_correct": both,
-                    "base_only": base_only,
-                    "ctx_only": ctx_only,
-                    "neither": neither,
-                    "mcnemar_p": mcnemar_exact_p(ctx_only, base_only),
-                })
+                transitions.append(
+                    {
+                        "ctx": ctx,
+                        "base_ctx": growth_base,
+                        "n_pairs": len(common),
+                        "base_em": b_em,
+                        "ctx_em": c_em,
+                        "em_diff": c_em - b_em,
+                        "both_correct": both,
+                        "base_only": base_only,
+                        "ctx_only": ctx_only,
+                        "neither": neither,
+                        "mcnemar_p": mcnemar_exact_p(ctx_only, base_only),
+                    }
+                )
 
-        xs = [math.log2(c) for c in ctxs
-              if stats[str(c)]["em"] is not None]
-        ys = [stats[str(c)]["em"] for c in ctxs
-              if stats[str(c)]["em"] is not None]
+        xs = [math.log2(c) for c in ctxs if stats[str(c)]["em"] is not None]
+        ys = [stats[str(c)]["em"] for c in ctxs if stats[str(c)]["em"] is not None]
         slope = _slope(xs, ys)
-        positions = [r.get("needle_pos") for recs in records.values()
-                     if recs is not None for r in recs.values()
-                     if r.get("needle_pos") is not None]
-        distances = [r.get("evidence_distance_tokens")
-                     for recs in records.values() if recs is not None
-                     for r in recs.values()
-                     if r.get("evidence_distance_tokens") is not None]
+        positions = [
+            r.get("needle_pos")
+            for recs in records.values()
+            if recs is not None
+            for r in recs.values()
+            if r.get("needle_pos") is not None
+        ]
+        distances = [
+            r.get("evidence_distance_tokens")
+            for recs in records.values()
+            if recs is not None
+            for r in recs.values()
+            if r.get("evidence_distance_tokens") is not None
+        ]
         if positions:
             if growth == "suffix":
                 checks["suffix_position_fixed"] = len(set(positions)) == 1
@@ -494,17 +576,24 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
             "cells": stats,
             "paired_transitions": transitions,
             "em_slope_per_log2_ctx": slope,
-            "em_slope_pp_per_doubling": (slope * 100.0
-                                         if slope is not None else None),
+            "em_slope_pp_per_doubling": (slope * 100.0 if slope is not None else None),
             "streams": {
-                "filler_stream_sha256": sorted({
-                    c.get("filler_stream_sha256") for c in cells.values()
-                    if c.get("filler_stream_sha256")}),
-                "core_context_sha256": sorted({
-                    r.get("core_context_sha256")
-                    for recs in records.values() if recs is not None
-                    for r in recs.values()
-                    if r.get("core_context_sha256")}),
+                "filler_stream_sha256": sorted(
+                    {
+                        c.get("filler_stream_sha256")
+                        for c in cells.values()
+                        if c.get("filler_stream_sha256")
+                    }
+                ),
+                "core_context_sha256": sorted(
+                    {
+                        r.get("core_context_sha256")
+                        for recs in records.values()
+                        if recs is not None
+                        for r in recs.values()
+                        if r.get("core_context_sha256")
+                    }
+                ),
             },
         }
     if not any_outcomes:
@@ -512,9 +601,12 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
         checks["core_context_consistent"] = False
     if not length_checked:
         checks["lengths_exact"] = None
-    transitions = [t for g in out_growth.values()
-                   for t in g["paired_transitions"]
-                   if t.get("mcnemar_p") is not None]
+    transitions = [
+        t
+        for g in out_growth.values()
+        for t in g["paired_transitions"]
+        if t.get("mcnemar_p") is not None
+    ]
     adjusted = holm_bonferroni([t["mcnemar_p"] for t in transitions])
     for rec, p_adj in zip(transitions, adjusted):
         rec["p_holm"] = p_adj
@@ -561,58 +653,73 @@ def compare_nested(candidate, reference) -> Dict:
         cv, rv = c_design.get(field), r_design.get(field)
         if cv is not None and rv is not None and cv != rv:
             raise ValueError(
-                f"candidate/reference design.{field} 不一致: {cv!r} vs {rv!r}")
+                f"candidate/reference design.{field} 不一致: {cv!r} vs {rv!r}"
+            )
 
     tests: List[Dict] = []
     for growth in common_growth:
         c_cells = _normalize_cells(c_res[growth], f"candidate.{growth}")
         r_cells = _normalize_cells(r_res[growth], f"reference.{growth}")
         for ctx in sorted(set(c_cells) & set(r_cells)):
-            crecs = _outcome_records(
-                c_cells[ctx], f"candidate.{growth}.{ctx}")
-            rrecs = _outcome_records(
-                r_cells[ctx], f"reference.{growth}.{ctx}")
+            crecs = _outcome_records(c_cells[ctx], f"candidate.{growth}.{ctx}")
+            rrecs = _outcome_records(r_cells[ctx], f"reference.{growth}.{ctx}")
             if crecs is None or rrecs is None:
                 continue
             common = sorted(set(crecs) & set(rrecs))
             if not common:
                 continue
             for pid in common:
-                for field in ("core_context_sha256", "key", "value",
-                              "needle_pos", "evidence_distance_tokens"):
+                for field in (
+                    "core_context_sha256",
+                    "key",
+                    "value",
+                    "needle_pos",
+                    "evidence_distance_tokens",
+                ):
                     cv = crecs[pid].get(field)
                     rv = rrecs[pid].get(field)
                     if cv is not None and rv is not None and cv != rv:
                         raise ValueError(
                             f"{growth}@{ctx} pair={pid} 的 {field} 不一致；"
-                            "两侧不是同一批配对题面，不能做配对 McNemar")
-            c_only = sum(1 for p in common
-                         if int(crecs[p]["em"]) == 1
-                         and int(rrecs[p]["em"]) == 0)
-            r_only = sum(1 for p in common
-                         if int(crecs[p]["em"]) == 0
-                         and int(rrecs[p]["em"]) == 1)
-            both = sum(1 for p in common
-                       if int(crecs[p]["em"]) == 1
-                       and int(rrecs[p]["em"]) == 1)
-            neither = sum(1 for p in common
-                          if int(crecs[p]["em"]) == 0
-                          and int(rrecs[p]["em"]) == 0)
+                            "两侧不是同一批配对题面，不能做配对 McNemar"
+                        )
+            c_only = sum(
+                1
+                for p in common
+                if int(crecs[p]["em"]) == 1 and int(rrecs[p]["em"]) == 0
+            )
+            r_only = sum(
+                1
+                for p in common
+                if int(crecs[p]["em"]) == 0 and int(rrecs[p]["em"]) == 1
+            )
+            both = sum(
+                1
+                for p in common
+                if int(crecs[p]["em"]) == 1 and int(rrecs[p]["em"]) == 1
+            )
+            neither = sum(
+                1
+                for p in common
+                if int(crecs[p]["em"]) == 0 and int(rrecs[p]["em"]) == 0
+            )
             c_em = sum(int(crecs[p]["em"]) for p in common) / len(common)
             r_em = sum(int(rrecs[p]["em"]) for p in common) / len(common)
-            tests.append({
-                "growth": growth,
-                "ctx": ctx,
-                "n_pairs": len(common),
-                "candidate_em": c_em,
-                "reference_em": r_em,
-                "em_diff": c_em - r_em,
-                "both_correct": both,
-                "candidate_only": c_only,
-                "reference_only": r_only,
-                "neither": neither,
-                "mcnemar_p": mcnemar_exact_p(c_only, r_only),
-            })
+            tests.append(
+                {
+                    "growth": growth,
+                    "ctx": ctx,
+                    "n_pairs": len(common),
+                    "candidate_em": c_em,
+                    "reference_em": r_em,
+                    "em_diff": c_em - r_em,
+                    "both_correct": both,
+                    "candidate_only": c_only,
+                    "reference_only": r_only,
+                    "neither": neither,
+                    "mcnemar_p": mcnemar_exact_p(c_only, r_only),
+                }
+            )
     pvals = [t["mcnemar_p"] for t in tests]
     adjusted = holm_bonferroni(pvals)
     for rec, p_adj in zip(tests, adjusted):
@@ -629,10 +736,8 @@ def compare_nested(candidate, reference) -> Dict:
         r_em = []
         for ctx in common_ctx:
             c_cell, r_cell = c_cells[ctx], r_cells[ctx]
-            c_em.append(float(c_cell["em"])
-                        if c_cell.get("em") is not None else None)
-            r_em.append(float(r_cell["em"])
-                        if r_cell.get("em") is not None else None)
+            c_em.append(float(c_cell["em"]) if c_cell.get("em") is not None else None)
+            r_em.append(float(r_cell["em"]) if r_cell.get("em") is not None else None)
         if all(v is not None for v in c_em + r_em):
             xs = [math.log2(c) for c in common_ctx]
             cs = _slope(xs, c_em)
@@ -641,8 +746,7 @@ def compare_nested(candidate, reference) -> Dict:
                 "common_ctx": common_ctx,
                 "candidate_slope": cs,
                 "reference_slope": rs,
-                "slope_diff": (cs - rs if cs is not None and rs is not None
-                               else None),
+                "slope_diff": (cs - rs if cs is not None and rs is not None else None),
             }
     return {
         "task": "niah_nested_comparison",
@@ -666,14 +770,23 @@ def _device_ids(rows: List[List[int]], device: str) -> torch.Tensor:
 
 
 @torch.inference_mode()
-def run_nested_niah(model, tok, device: str, ctx_lens, n_samples: int = 30,
-                    seed: int = 1234, max_new: int = 12,
-                    growth_modes=DEFAULT_GROWTH_MODES,
-                    mode: str = "synth",
-                    corpus_sents: Optional[List[str]] = None,
-                    base_ctx: Optional[int] = None, gen_batch: int = 8,
-                    amp: bool = True, verbose: bool = True,
-                    collect_badcases: bool = True) -> Dict:
+def run_nested_niah(
+    model,
+    tok,
+    device: str,
+    ctx_lens,
+    n_samples: int = 30,
+    seed: int = 1234,
+    max_new: int = 12,
+    growth_modes=DEFAULT_GROWTH_MODES,
+    mode: str = "synth",
+    corpus_sents: Optional[List[str]] = None,
+    base_ctx: Optional[int] = None,
+    gen_batch: int = 8,
+    amp: bool = True,
+    verbose: bool = True,
+    collect_badcases: bool = True,
+) -> Dict:
     """在单个 checkpoint 上运行嵌套 NIAH，返回逐档 EM 与逐 pair 结果。"""
     ctxs = _normalize_ctx_lens(ctx_lens)
     n_samples = strict_int(n_samples, "n_samples")
@@ -693,22 +806,30 @@ def run_nested_niah(model, tok, device: str, ctx_lens, n_samples: int = 30,
     if limit < 1:
         raise ValueError(
             f"max_new={max_new} 过大：block_size={model.block_size} "
-            "无法为 prompt 留出位置")
+            "无法为 prompt 留出位置"
+        )
     too_long = [c for c in ctxs if c > limit]
     if too_long:
         raise ValueError(
             f"ctx_lens={too_long} 超过 block_size={model.block_size} - "
             f"max_new={max_new} - 1 的可容纳上限 {limit}；"
-            "嵌套设计要求精确长度，不能静默截断")
+            "嵌套设计要求精确长度，不能静默截断"
+        )
 
     samples = []
     skipped: List[str] = []
     for i in range(n_samples):
         try:
             sample = build_nested_sample(
-                tok, ctxs, seed=seed, sample_index=i,
-                growth_modes=growth_modes, mode=mode,
-                corpus_sents=corpus_sents, base_ctx=base_ctx)
+                tok,
+                ctxs,
+                seed=seed,
+                sample_index=i,
+                growth_modes=growth_modes,
+                mode=mode,
+                corpus_sents=corpus_sents,
+                base_ctx=base_ctx,
+            )
         except ContextTooSmall as e:
             skipped.append(f"sample {i}: {e}")
             continue
@@ -728,59 +849,73 @@ def run_nested_niah(model, tok, device: str, ctx_lens, n_samples: int = 30,
         for ctx in ctxs:
             examples = []
             for sample in samples:
-                ex = next((e for e in sample["growth"][growth]
-                           if e["meta"]["nominal_ctx"] == ctx), None)
+                ex = next(
+                    (
+                        e
+                        for e in sample["growth"][growth]
+                        if e["meta"]["nominal_ctx"] == ctx
+                    ),
+                    None,
+                )
                 if ex is None:
                     raise AssertionError(
-                        f"pair={sample['pair_id']} growth={growth} 缺少 ctx={ctx}")
+                        f"pair={sample['pair_id']} growth={growth} 缺少 ctx={ctx}"
+                    )
                 examples.append(ex)
             outcomes: List[Dict] = []
             for s0 in range(0, len(examples), gen_batch):
-                part = examples[s0:s0 + gen_batch]
+                part = examples[s0 : s0 + gen_batch]
                 length = len(part[0]["ids"])
                 for ex in part:
                     if len(ex["ids"]) != length:
                         raise AssertionError("同格样例长度不一致，无法批量解码")
                 ids = _device_ids([e["ids"] for e in part], device)
                 with amp_ctx:
-                    out_ids = model.generate(
-                        ids, max_new_tokens=max_new)
+                    out_ids = model.generate(ids, max_new_tokens=max_new)
                 out_l = out_ids[:, length:].tolist()
                 for row, ex in enumerate(part):
                     pred_text = tok.decode(out_l[row])
                     sc = score_prediction(
                         "niah_corpus" if mode == "corpus" else "niah_synth",
-                        ex["answer"], pred_text)
+                        ex["answer"],
+                        pred_text,
+                    )
                     meta = ex["meta"]
-                    outcomes.append({
-                        "pair_id": ex["pair_id"],
-                        "sample_id": ex["sample_id"],
-                        "em": float(sc["em"]),
-                        "key": meta["key"],
-                        "value": meta["value"],
-                        "actual_tokens": meta["actual_tokens"],
-                        "needle_pos": meta["needle_pos"],
-                        "evidence_distance_tokens":
-                            meta["evidence_distance_tokens"],
-                        "depth": meta["depth"],
-                        "core_context_sha256": meta["core_context_sha256"],
-                    })
+                    outcomes.append(
+                        {
+                            "pair_id": ex["pair_id"],
+                            "sample_id": ex["sample_id"],
+                            "em": float(sc["em"]),
+                            "key": meta["key"],
+                            "value": meta["value"],
+                            "actual_tokens": meta["actual_tokens"],
+                            "needle_pos": meta["needle_pos"],
+                            "evidence_distance_tokens": meta[
+                                "evidence_distance_tokens"
+                            ],
+                            "depth": meta["depth"],
+                            "core_context_sha256": meta["core_context_sha256"],
+                        }
+                    )
                     if collect_badcases and sc["em"] < 1.0:
                         prompt_text = tok.decode(ex["ids"])
-                        badcases.append({
-                            "sample_id": ex["sample_id"],
-                            "pair_id": ex["pair_id"],
-                            "growth": growth,
-                            "ctx": ctx,
-                            "task": "niah_nested",
-                            "answer": ex["answer"],
-                            "pred": pred_text.strip(),
-                            "key": meta["key"],
-                            "needle_excerpt": _needle_excerpt(tok, ex),
-                            "answer_in_prompt": ex["answer"] in prompt_text,
-                            "context_numbers": standalone_numeric_tokens(
-                                prompt_text),
-                        })
+                        badcases.append(
+                            {
+                                "sample_id": ex["sample_id"],
+                                "pair_id": ex["pair_id"],
+                                "growth": growth,
+                                "ctx": ctx,
+                                "task": "niah_nested",
+                                "answer": ex["answer"],
+                                "pred": pred_text.strip(),
+                                "key": meta["key"],
+                                "needle_excerpt": _needle_excerpt(tok, ex),
+                                "answer_in_prompt": ex["answer"] in prompt_text,
+                                "context_numbers": standalone_numeric_tokens(
+                                    prompt_text
+                                ),
+                            }
+                        )
             n = len(outcomes)
             k = sum(o["em"] for o in outcomes)
             em = (k / n) if n else None
@@ -792,20 +927,19 @@ def run_nested_niah(model, tok, device: str, ctx_lens, n_samples: int = 30,
                 "em_ci95_wilson": list(ci) if ci is not None else None,
                 "actual_tokens": ctx,
                 "needle_pos": first.get("needle_pos"),
-                "evidence_distance_tokens": first.get(
-                    "evidence_distance_tokens"),
+                "evidence_distance_tokens": first.get("evidence_distance_tokens"),
                 "filler_stream_sha256": first.get("filler_stream_sha256"),
                 "outcomes": outcomes,
             }
             if verbose:
                 print(
                     f"[nested] {growth}@{ctx}: em={em:.3f} (n={n})"
-                    if em is not None else
-                    f"[nested] {growth}@{ctx}: 无有效样例")
+                    if em is not None
+                    else f"[nested] {growth}@{ctx}: 无有效样例"
+                )
     design = {
         "ctx_lens": ctxs,
-        "base_ctx": ctxs[0] if base_ctx is None else strict_int(
-            base_ctx, "base_ctx"),
+        "base_ctx": ctxs[0] if base_ctx is None else strict_int(base_ctx, "base_ctx"),
         "growth_modes": list(growth_modes),
         "n_samples": n_samples,
         "seed": seed,
@@ -823,8 +957,13 @@ def run_nested_niah(model, tok, device: str, ctx_lens, n_samples: int = 30,
             "split": "grow_both_sides",
         },
     }
-    return {"task": "niah_nested", "design": design, "results": results,
-            "_skipped": skipped, "_badcases": badcases}
+    return {
+        "task": "niah_nested",
+        "design": design,
+        "results": results,
+        "_skipped": skipped,
+        "_badcases": badcases,
+    }
 
 
 def main() -> None:
@@ -832,52 +971,65 @@ def main() -> None:
 
     from .data import load_tokenizer
     from .model import load_model
-    from .preflight import (allow_protocol_violations,
-                            data_protocol_preflight)
+    from .preflight import allow_protocol_violations, data_protocol_preflight
     from .repro import load_provenance, sha256_file
     from .ruler import load_corpus_sents_with_source
     from .utils import enable_tf32, get_device, set_seed
 
     p = argparse.ArgumentParser(
-        description="嵌套上下文配对 NIAH：同一证据、同一填充流、精确长度")
+        description="嵌套上下文配对 NIAH：同一证据、同一填充流、精确长度"
+    )
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--ctx_lens", default=None, help="逗号分隔；至少两档")
     p.add_argument("--n_samples", type=int, default=None)
     p.add_argument("--growth_modes", default=",".join(DEFAULT_GROWTH_MODES))
-    p.add_argument("--base_ctx", type=int, default=None,
-                   help="基线档位；必须等于最短 ctx，默认最短档")
+    p.add_argument(
+        "--base_ctx",
+        type=int,
+        default=None,
+        help="基线档位；必须等于最短 ctx，默认最短档",
+    )
     p.add_argument("--mode", default="synth", choices=["synth", "corpus"])
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--max_new", type=int, default=None)
     p.add_argument("--gen_batch", type=int, default=None)
     p.add_argument("--no_amp", action="store_true")
     p.add_argument("--device", default="auto")
-    p.add_argument("--allow_test_corpus", action="store_true",
-                   help="允许 niah_corpus 干扰语句取自 test.txt（写访问账本）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 标记泄露也继续（结果不得用于正式结论）")
+    p.add_argument(
+        "--allow_test_corpus",
+        action="store_true",
+        help="允许 niah_corpus 干扰语句取自 test.txt（写访问账本）",
+    )
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 标记泄露也继续（结果不得用于正式结论）",
+    )
     args = p.parse_args()
 
     ctx_lens = None
     if args.ctx_lens:
-        ctx_lens = [strict_int(x, "--ctx_lens")
-                    for x in args.ctx_lens.split(",")]
+        ctx_lens = [strict_int(x, "--ctx_lens") for x in args.ctx_lens.split(",")]
     growth_modes = _normalize_growth_modes(
-        tuple(x.strip() for x in args.growth_modes.split(",") if x.strip()))
+        tuple(x.strip() for x in args.growth_modes.split(",") if x.strip())
+    )
 
     data_preflight = data_protocol_preflight(
         args.data_dir,
-        allow_override=allow_protocol_violations(
-            args.allow_data_protocol_violations))
+        allow_override=allow_protocol_violations(args.allow_data_protocol_violations),
+    )
     if not data_preflight["report_present"]:
-        print("[nested] 警告：数据目录缺少 data_report.json，"
-              "无法执行评测前防泄漏闸门")
+        print(
+            "[nested] 警告：数据目录缺少 data_report.json，" "无法执行评测前防泄漏闸门"
+        )
     elif data_preflight["critical_violations"]:
-        print(f"[nested] ⚠ 数据协议自检发现 "
-              f"{len(data_preflight['critical_violations'])} 个严重问题，"
-              "但已显式放行（结果不得用于正式结论）")
+        print(
+            f"[nested] ⚠ 数据协议自检发现 "
+            f"{len(data_preflight['critical_violations'])} 个严重问题，"
+            "但已显式放行（结果不得用于正式结论）"
+        )
 
     device = get_device(args.device)
     enable_tf32(device)
@@ -885,12 +1037,12 @@ def main() -> None:
     ckpt_sha256 = sha256_file(args.ckpt)
     tok = load_tokenizer(args.data_dir)
     seed_raw = ck.get("seed")
-    seed = (None if seed_raw is None
-            else strict_int(seed_raw, "checkpoint seed"))
+    seed = None if seed_raw is None else strict_int(seed_raw, "checkpoint seed")
     set_seed(0 if seed is None else seed)
 
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)),
-                            "config_used.json")
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(args.ckpt)), "config_used.json"
+    )
     cfg = {}
     if os.path.exists(cfg_path):
         try:
@@ -912,43 +1064,64 @@ def main() -> None:
         raw = rl.get("ctx_lens")
         if not isinstance(raw, (list, tuple)):
             raise ValueError(
-                "未提供 --ctx_lens 且 checkpoint 配置缺少 ruler.ctx_lens 列表")
+                "未提供 --ctx_lens 且 checkpoint 配置缺少 ruler.ctx_lens 列表"
+            )
         ctx_lens = [strict_int(x, "ruler.ctx_lens") for x in raw]
-    n_samples = (args.n_samples if args.n_samples is not None
-                 else _cfg_int("n_samples", 30))
-    sample_seed = (args.seed if args.seed is not None
-                   else _cfg_int("seed", 1234))
-    max_new = (args.max_new if args.max_new is not None
-               else _cfg_int("max_new", 12))
-    gen_batch = (args.gen_batch if args.gen_batch is not None
-                 else _cfg_int("gen_batch", 8))
+    n_samples = (
+        args.n_samples if args.n_samples is not None else _cfg_int("n_samples", 30)
+    )
+    sample_seed = args.seed if args.seed is not None else _cfg_int("seed", 1234)
+    max_new = args.max_new if args.max_new is not None else _cfg_int("max_new", 12)
+    gen_batch = (
+        args.gen_batch if args.gen_batch is not None else _cfg_int("gen_batch", 8)
+    )
     amp = config_bool(cfg.get("amp", True), "amp") and not args.no_amp
 
     corpus_sents, corpus_source = (None, None)
     if args.mode == "corpus":
         corpus_sents, corpus_source = load_corpus_sents_with_source(
-            args.data_dir, allow_test=bool(args.allow_test_corpus))
+            args.data_dir, allow_test=bool(args.allow_test_corpus)
+        )
         if corpus_source == "test":
             if record_corpus_test_access(
-                    args.data_dir, corpus_source, ckpt_sha256=ckpt_sha256,
-                    variant=ck.get("variant"), seed=seed, stage="nested"):
-                print("[nested] ⚠ 干扰语料取自 test.txt（尘封 split）："
-                      "已写入 test 访问账本")
+                args.data_dir,
+                corpus_source,
+                ckpt_sha256=ckpt_sha256,
+                variant=ck.get("variant"),
+                seed=seed,
+                stage="nested",
+            ):
+                print(
+                    "[nested] ⚠ 干扰语料取自 test.txt（尘封 split）："
+                    "已写入 test 访问账本"
+                )
             else:
                 print("[nested] ⚠ 干扰语料取自 test.txt 且访问账本写入失败")
         elif corpus_source == "train":
-            print("[nested] ⚠ 干扰语料回退到 train.txt：评测上下文与训练语料"
-                  "重叠，分数不可与 held-out 运行直接比较")
+            print(
+                "[nested] ⚠ 干扰语料回退到 train.txt：评测上下文与训练语料"
+                "重叠，分数不可与 held-out 运行直接比较"
+            )
         elif corpus_source is None:
             print("[nested] ⚠ 未找到可用干扰语料；niah_corpus 将无有效样例")
         else:
             print(f"[nested] niah_corpus 干扰语料来源: {corpus_source}.txt")
 
     result = run_nested_niah(
-        model, tok, device, ctx_lens=ctx_lens, n_samples=n_samples,
-        seed=sample_seed, max_new=max_new, growth_modes=growth_modes,
-        mode=args.mode, corpus_sents=corpus_sents, base_ctx=args.base_ctx,
-        gen_batch=gen_batch, amp=amp)
+        model,
+        tok,
+        device,
+        ctx_lens=ctx_lens,
+        n_samples=n_samples,
+        seed=sample_seed,
+        max_new=max_new,
+        growth_modes=growth_modes,
+        mode=args.mode,
+        corpus_sents=corpus_sents,
+        base_ctx=args.base_ctx,
+        gen_batch=gen_batch,
+        amp=amp,
+    )
     badcases = result.pop("_badcases")
     skipped = result.pop("_skipped")
     if any(result["results"].get(g) for g in result["results"]):
@@ -980,9 +1153,11 @@ def main() -> None:
         "ckpt_sha256": ckpt_sha256,
         "data_protocol_preflight": data_preflight,
     }
-    payload.update(load_provenance(
-        os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir,
-        device=device))
+    payload.update(
+        load_provenance(
+            os.path.dirname(os.path.abspath(args.ckpt)), args.data_dir, device=device
+        )
+    )
     save_json(payload, args.out)
     print(f"[nested] 完成 -> {args.out}")
     checks = analysis["checks"]

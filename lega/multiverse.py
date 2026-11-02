@@ -16,6 +16,7 @@ RULER 用 macro 还是 micro、保留全部种子还是逐个留一。主检验�
   n<``min_seeds`` 的规格显式标为不可检验，不参与一致率分母；
 * 本模块只比较同一指标内的规格；不同指标的效应量纲不同，不混合平均。
 """
+
 import math
 from numbers import Real
 
@@ -72,10 +73,19 @@ def _sign(value):
     return 0
 
 
-def paired_specification(spec_id, dimension, choice, values_a, values_b,
-                         lower_is_better, metric=None,
-                         alpha=DEFAULT_ALPHA, min_seeds=MIN_SEEDS,
-                         inferential=True, note=None):
+def paired_specification(
+    spec_id,
+    dimension,
+    choice,
+    values_a,
+    values_b,
+    lower_is_better,
+    metric=None,
+    alpha=DEFAULT_ALPHA,
+    min_seeds=MIN_SEEDS,
+    inferential=True,
+    note=None,
+):
     """把一组对齐的配对观测压缩成一个分析规格。
 
     ``values_a`` / ``values_b`` 必须一一对应（同种子/同单元）。返回字段：
@@ -107,7 +117,8 @@ def paired_specification(spec_id, dimension, choice, values_a, values_b,
     if len(va) != len(vb):
         raise ValueError(
             f"配对观测长度不一致：{len(va)} != {len(vb)}；"
-            "调用方必须先按种子/单元对齐，不能按位置猜测")
+            "调用方必须先按种子/单元对齐，不能按位置猜测"
+        )
 
     pairs = []
     for x, y in zip(va, vb):
@@ -146,21 +157,24 @@ def paired_specification(spec_id, dimension, choice, values_a, values_b,
         return spec
     oriented = -effect if lower_is_better else effect
     p = _finite(test.get("p")) if inferential else None
-    spec.update({
-        "effect": effect,
-        "oriented_effect": oriented,
-        "std_diff": _finite(test.get("std_diff")),
-        "p": p,
-        "significant": (bool(p < alpha) if p is not None else None),
-        "valid": True,
-    })
+    spec.update(
+        {
+            "effect": effect,
+            "oriented_effect": oriented,
+            "std_diff": _finite(test.get("std_diff")),
+            "p": p,
+            "significant": (bool(p < alpha) if p is not None else None),
+            "valid": True,
+        }
+    )
     if inferential and p is None:
         spec["reason"] = "配对 t 检验 p 值不可表示；方向仍有效但不可判显著"
     return spec
 
 
-def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
-                        min_seeds=MIN_SEEDS):
+def specification_curve(
+    specs, reference_id=None, alpha=DEFAULT_ALPHA, min_seeds=MIN_SEEDS
+):
     """汇总同一指标/对比下的多个分析规格。
 
     返回方向一致率、同向显著率、翻转与不显著规格清单、按维度分解，以及
@@ -184,8 +198,11 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
             raise ValueError(f"规格 id 重复：{spec['id']!r}")
         seen.add(spec["id"])
         spec["valid"] = bool(spec.get("valid") is True)
-        spec["n"] = _strict_int(spec.get("n", 0), "n") if isinstance(
-            spec.get("n", 0), int) and not isinstance(spec.get("n"), bool) else 0
+        spec["n"] = (
+            _strict_int(spec.get("n", 0), "n")
+            if isinstance(spec.get("n", 0), int) and not isinstance(spec.get("n"), bool)
+            else 0
+        )
         spec["oriented_effect"] = _finite(spec.get("oriented_effect"))
         spec["effect"] = _finite(spec.get("effect"))
         spec["p"] = _finite(spec.get("p"))
@@ -194,32 +211,35 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
         if spec["n"] < min_seeds:
             spec["valid"] = False
             if not spec.get("reason"):
-                spec["reason"] = (
-                    f"n={spec['n']} < min_seeds={min_seeds}，不可检验")
+                spec["reason"] = f"n={spec['n']} < min_seeds={min_seeds}，不可检验"
         normalized.append(spec)
 
     valid = [s for s in normalized if s["valid"]]
     reference = None
     if reference_id is not None:
         reference = next((s for s in normalized if s["id"] == reference_id), None)
-        ref_reason = (None if reference is not None
-                      else f"找不到 reference_id={reference_id!r}")
+        ref_reason = (
+            None if reference is not None else f"找不到 reference_id={reference_id!r}"
+        )
     else:
-        reference = next((s for s in normalized
-                          if s.get("reference_spec") is True), None)
+        reference = next(
+            (s for s in normalized if s.get("reference_spec") is True), None
+        )
         ref_reason = None
         if reference is None and valid:
             reference = valid[0]
             ref_reason = "未指定 reference_id，回退到第一个可检验规格"
     if reference is not None and not reference["valid"]:
-        ref_reason = (f"基准规格 {reference['id']!r} 不可检验："
-                      f"{reference.get('reason') or '未知原因'}")
+        ref_reason = (
+            f"基准规格 {reference['id']!r} 不可检验："
+            f"{reference.get('reason') or '未知原因'}"
+        )
         reference = None
 
     ref_dir = _sign(reference["oriented_effect"]) if reference else 0
     n_valid = len(valid)
-    ref_effect = (reference["effect"] if reference is not None else None)
-    ref_oriented = (reference["oriented_effect"] if reference is not None else None)
+    ref_effect = reference["effect"] if reference is not None else None
+    ref_oriented = reference["oriented_effect"] if reference is not None else None
 
     n_same = n_opposite = n_zero = 0
     n_inferential = n_sig_same = n_sig_opposite = 0
@@ -234,8 +254,9 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
             n_same += 1
         else:
             n_opposite += 1
-        inferential = bool(spec.get("inferential") is True
-                           and spec.get("p") is not None)
+        inferential = bool(
+            spec.get("inferential") is True and spec.get("p") is not None
+        )
         significant = bool(inferential and spec["p"] < alpha)
         if inferential:
             n_inferential += 1
@@ -261,11 +282,19 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
     by_dimension = {}
     for spec in valid:
         dimension = spec.get("dimension") or "unknown"
-        cell = by_dimension.setdefault(dimension, {
-            "n": 0, "n_valid": 0, "choices": [],
-            "n_same": 0, "n_opposite": 0, "n_zero": 0,
-            "n_inferential": 0, "n_significant_same": 0,
-        })
+        cell = by_dimension.setdefault(
+            dimension,
+            {
+                "n": 0,
+                "n_valid": 0,
+                "choices": [],
+                "n_same": 0,
+                "n_opposite": 0,
+                "n_zero": 0,
+                "n_inferential": 0,
+                "n_significant_same": 0,
+            },
+        )
         cell["choices"].append(spec.get("choice"))
         cell["n"] += 1
         cell["n_valid"] += 1
@@ -276,18 +305,22 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
             cell["n_same"] += 1
         else:
             cell["n_opposite"] += 1
-        inferential = bool(spec.get("inferential") is True
-                           and spec.get("p") is not None)
+        inferential = bool(
+            spec.get("inferential") is True and spec.get("p") is not None
+        )
         if inferential:
             cell["n_inferential"] += 1
             if spec["p"] < alpha and direction == ref_dir and direction != 0:
                 cell["n_significant_same"] += 1
     for cell in by_dimension.values():
         cell["direction_consistency"] = (
-            cell["n_same"] / cell["n_valid"] if cell["n_valid"] > 0 else None)
+            cell["n_same"] / cell["n_valid"] if cell["n_valid"] > 0 else None
+        )
         cell["significance_consistency"] = (
             cell["n_significant_same"] / cell["n_inferential"]
-            if cell["n_inferential"] > 0 else None)
+            if cell["n_inferential"] > 0
+            else None
+        )
 
     if reference is None:
         status = "insufficient"
@@ -304,15 +337,16 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
 
     dropped = [
         {"id": s["id"], "reason": s.get("reason") or "不可检验"}
-        for s in normalized if not s["valid"]]
+        for s in normalized
+        if not s["valid"]
+    ]
 
     def _common(key):
         values = {s.get(key) for s in normalized if s.get(key) is not None}
         return values.pop() if len(values) == 1 else None
 
     direction_consistency = (n_same / n_valid) if n_valid > 0 else None
-    significance_consistency = (
-        n_sig_same / n_inferential if n_inferential > 0 else None)
+    significance_consistency = n_sig_same / n_inferential if n_inferential > 0 else None
     return {
         "candidate": _common("candidate"),
         "reference": _common("reference"),
@@ -321,8 +355,12 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
         "reference_effect": ref_effect,
         "reference_oriented_effect": ref_oriented,
         "reference_direction": (
-            "candidate_better" if ref_dir > 0
-            else "candidate_worse" if ref_dir < 0 else "zero"),
+            "candidate_better"
+            if ref_dir > 0
+            else "candidate_worse"
+            if ref_dir < 0
+            else "zero"
+        ),
         "reference_reason": ref_reason,
         "n_specs": len(normalized),
         "n_valid": n_valid,
@@ -345,9 +383,11 @@ def specification_curve(specs, reference_id=None, alpha=DEFAULT_ALPHA,
         "alpha": alpha,
         "min_seeds": min_seeds,
         "specs": normalized,
-        "note": ("描述性规格曲线：规格之间相关、未穷尽所有分析选择，"
-                 "不做多重校正，不改变预注册/确认性判定；全一致不等于"
-                 "证明稳健，方向一致也不等于效应达到实际重要差异"),
+        "note": (
+            "描述性规格曲线：规格之间相关、未穷尽所有分析选择，"
+            "不做多重校正，不改变预注册/确认性判定；全一致不等于"
+            "证明稳健，方向一致也不等于效应达到实际重要差异"
+        ),
     }
 
 
@@ -367,8 +407,11 @@ def attach_to_hypotheses(hyp_eval, multiverse):
     for outcome in outcomes:
         if not isinstance(outcome, dict):
             continue
-        key = (outcome.get("candidate"), outcome.get("reference"),
-               outcome.get("metric"))
+        key = (
+            outcome.get("candidate"),
+            outcome.get("reference"),
+            outcome.get("metric"),
+        )
         lookup[key] = outcome
     for h in hyp_eval:
         if not isinstance(h, dict):
@@ -379,33 +422,44 @@ def attach_to_hypotheses(hyp_eval, multiverse):
             continue
         h["multiverse_status"] = outcome.get("status")
         h["multiverse_label"] = outcome.get("label")
-        h["multiverse_direction_consistency"] = outcome.get(
-            "direction_consistency")
+        h["multiverse_direction_consistency"] = outcome.get("direction_consistency")
         h["multiverse_significance_consistency"] = outcome.get(
-            "significance_consistency")
+            "significance_consistency"
+        )
         h["multiverse_n_specs"] = outcome.get("n_specs")
         h["multiverse_n_valid"] = outcome.get("n_valid")
         h["multiverse_flipped_specs"] = [
-            s.get("id") for s in (outcome.get("flipped_specs") or [])
-            if isinstance(s, dict)]
+            s.get("id")
+            for s in (outcome.get("flipped_specs") or [])
+            if isinstance(s, dict)
+        ]
         h["multiverse_nonsignificant_specs"] = [
-            s.get("id") for s in (outcome.get("nonsignificant_specs") or [])
-            if isinstance(s, dict)]
+            s.get("id")
+            for s in (outcome.get("nonsignificant_specs") or [])
+            if isinstance(s, dict)
+        ]
         h["multiverse_flipped_choices"] = [
-            s.get("choice") for s in (outcome.get("flipped_specs") or [])
-            if isinstance(s, dict) and s.get("choice") is not None]
+            s.get("choice")
+            for s in (outcome.get("flipped_specs") or [])
+            if isinstance(s, dict) and s.get("choice") is not None
+        ]
         h["multiverse_nonsignificant_choices"] = [
-            s.get("choice") for s in (outcome.get("nonsignificant_specs") or [])
-            if isinstance(s, dict) and s.get("choice") is not None]
+            s.get("choice")
+            for s in (outcome.get("nonsignificant_specs") or [])
+            if isinstance(s, dict) and s.get("choice") is not None
+        ]
         if h.get("status") in ("支持", "拒绝"):
             if outcome.get("status") == "fragile":
                 flipped = h["multiverse_flipped_choices"]
-                h["detail"] = ((h.get("detail") or "")
-                               + "；⚠ 分析选择多重宇宙存在方向翻转规格"
-                               + (f"（{', '.join(flipped)}）" if flipped else "")
-                               + "，结论依赖分析口径")
+                h["detail"] = (
+                    (h.get("detail") or "")
+                    + "；⚠ 分析选择多重宇宙存在方向翻转规格"
+                    + (f"（{', '.join(flipped)}）" if flipped else "")
+                    + "，结论依赖分析口径"
+                )
             elif outcome.get("status") == "directionally_robust":
-                h["detail"] = ((h.get("detail") or "")
-                               + "；分析选择多重宇宙下方向一致，但部分规格"
-                                 "不显著（见 multiverse_nonsignificant_specs）")
+                h["detail"] = (
+                    (h.get("detail") or "") + "；分析选择多重宇宙下方向一致，但部分规格"
+                    "不显著（见 multiverse_nonsignificant_specs）"
+                )
     return hyp_eval

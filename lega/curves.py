@@ -32,12 +32,12 @@
 也可独立运行：
   python -m lega.curves --run_dir out/tiny/lega [--out curve.json]
 """
+
 import argparse
 import json
 import math
 import os
 import re
-import statistics
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -121,7 +121,8 @@ def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
                 f"验证点预计仅 {n_eval} 个（steps={steps}, "
                 f"eval_every={eval_every}）：过拟合/早停/验证噪声诊断至少需要 "
                 f"{MIN_CURVE_EVAL_POINTS} 个点；建议 eval_every<={suggest} "
-                "或增加 steps（冒烟训练可忽略，但结论不能外推）")
+                "或增加 steps（冒烟训练可忽略，但结论不能外推）"
+            )
     if log_every < 1:
         warnings.append(f"log_every={log_every} 非法（必须 >=1），无法记录训练点")
     else:
@@ -134,7 +135,8 @@ def curve_observability_warnings(steps, eval_every, log_every) -> List[str]:
                 f"训练日志预计仅 {n_log} 个点（steps={steps}, "
                 f"log_every={log_every}）：训练侧趋势/瞬态尖峰检测至少需要 "
                 f"{MIN_CURVE_LOG_POINTS} 个点；建议 log_every<={suggest} "
-                "或增加 steps（冒烟训练可忽略，但结论不能外推）")
+                "或增加 steps（冒烟训练可忽略，但结论不能外推）"
+            )
     return warnings
 
 
@@ -191,7 +193,7 @@ def _step_or_none(value) -> Optional[int]:
     # 表示为 float，两个巨大 step 的差（如 1e308 − (−1e308)）还会让
     # int→float 转换直接 OverflowError。训练步数远小于该上限，按坏记录
     # 跳过而不是让整份曲线诊断崩溃。
-    if abs(value) > 2 ** 53:
+    if abs(value) > 2**53:
         return None
     try:
         if not math.isfinite(float(value)):
@@ -293,7 +295,8 @@ def _gradient_points(records: List[Dict]):
                 continue
             raw = r.get(key)
             if isinstance(raw, (bool, np.bool_)) or (
-                    isinstance(raw, str) and "_" in raw):
+                isinstance(raw, str) and "_" in raw
+            ):
                 malformed += 1
                 continue
             try:
@@ -321,8 +324,12 @@ def _gradient_points(records: List[Dict]):
             continue
         by_step[step] = {"step": step, "value": chosen}
     pts = sorted(by_step.values(), key=lambda p: p["step"])
-    return (pts, len(nonfinite_steps) + nonfinite_unknown, malformed,
-            sorted(nonfinite_steps))
+    return (
+        pts,
+        len(nonfinite_steps) + nonfinite_unknown,
+        malformed,
+        sorted(nonfinite_steps),
+    )
 
 
 def _stable_median(values):
@@ -355,8 +362,9 @@ def _safe_ratio(value: float, denom: float):
     return ratio, False
 
 
-def _detect_series_spikes(points: List[Dict],
-                          factor: float = LOSS_SPIKE_FACTOR) -> List[Dict]:
+def _detect_series_spikes(
+    points: List[Dict], factor: float = LOSS_SPIKE_FACTOR
+) -> List[Dict]:
     """检出单点尖峰：值 ≥ factor × 两侧邻居中位数。
 
     只比较局部邻居（每侧最多 LOSS_SPIKE_WINDOW 个点）而非全局中位数/均值：
@@ -369,10 +377,10 @@ def _detect_series_spikes(points: List[Dict],
     w = LOSS_SPIKE_WINDOW
     spikes = []
     for i in range(2, n):
-        left = [p["value"] for p in points[max(0, i - w):i]]
+        left = [p["value"] for p in points[max(0, i - w) : i]]
         if len(left) < 2:
             continue
-        right = [p["value"] for p in points[i + 1:i + 1 + w]]
+        right = [p["value"] for p in points[i + 1 : i + 1 + w]]
         neigh = left + right
         med = _stable_median(neigh)
         if med <= 0:
@@ -381,8 +389,12 @@ def _detect_series_spikes(points: List[Dict],
         if ratio is None:
             continue
         if ratio >= factor:
-            rec = {"step": points[i]["step"], "value": points[i]["value"],
-                   "local_median": med, "ratio": ratio}
+            rec = {
+                "step": points[i]["step"],
+                "value": points[i]["value"],
+                "local_median": med,
+                "ratio": ratio,
+            }
             if clamped:
                 rec["ratio_clamped"] = True
             spikes.append(rec)
@@ -406,8 +418,7 @@ def _tail_change(points: List[Dict], min_points: int = 5):
         return None
     prev = _seg_mean(points, 1 / 3, 2 / 3)
     last = _seg_mean(points, 2 / 3, 1.0)
-    return {"prev": prev, "last": last,
-            "rel_change": _rel_change(prev, last)}
+    return {"prev": prev, "last": last, "rel_change": _rel_change(prev, last)}
 
 
 def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
@@ -417,8 +428,11 @@ def _seg_mean(pts: List[Dict], lo: float, hi: float) -> Optional[float]:
     steps = [p["step"] for p in pts]
     lo_s = steps[0] + lo * (steps[-1] - steps[0])
     hi_s = steps[0] + hi * (steps[-1] - steps[0])
-    vals = [p["value"] for p in pts if lo_s <= p["step"] < hi_s
-            or (hi == 1.0 and p["step"] == steps[-1])]
+    vals = [
+        p["value"]
+        for p in pts
+        if lo_s <= p["step"] < hi_s or (hi == 1.0 and p["step"] == steps[-1])
+    ]
     if not vals:
         return None
     # 与统计模块同口径按最大绝对值缩放：多个 1e308 的合法损失点在朴素
@@ -445,8 +459,7 @@ def _val_ci_rel(records: List[Dict]) -> Optional[float]:
         if not isinstance(ci, (list, tuple)) or len(ci) != 2:
             continue
         lo, hi, v = _finite_value(ci[0]), _finite_value(ci[1]), _finite_value(v)
-        if lo is not None and hi is not None and v is not None and v > 0 \
-                and hi >= lo:
+        if lo is not None and hi is not None and v is not None and v > 0 and hi >= lo:
             try:
                 rel = (hi - lo) / 2.0 / v
             except (OverflowError, ZeroDivisionError):
@@ -510,9 +523,14 @@ def _train_trend(train_recent) -> Optional[float]:
     return out if math.isfinite(out) else None
 
 
-def live_overfit_hint(evals_since_improve, best_val, val,
-                      patience: int = 0, train_recent=None,
-                      val_ci95=None) -> Optional[str]:
+def live_overfit_hint(
+    evals_since_improve,
+    best_val,
+    val,
+    patience: int = 0,
+    train_recent=None,
+    val_ci95=None,
+) -> Optional[str]:
     """训练中途的曲线预警：连续多次评测无实质改善时返回提示文案。
 
     只看最终数值会漏掉"训练 loss 仍降、验证早已停步"的过程信号；早停关闭
@@ -550,7 +568,7 @@ def live_overfit_hint(evals_since_improve, best_val, val,
     ci_rel = None
     if isinstance(val_ci95, (list, tuple)) and len(val_ci95) == 2:
         lo, hi = _finite_value(val_ci95[0]), _finite_value(val_ci95[1])
-        if (lo is not None and hi is not None and hi >= lo and val_f > 0):
+        if lo is not None and hi is not None and hi >= lo and val_f > 0:
             try:
                 ci_rel = (hi - lo) / 2.0 / val_f
             except (OverflowError, ZeroDivisionError):
@@ -559,16 +577,20 @@ def live_overfit_hint(evals_since_improve, best_val, val,
                 ci_rel = None
     if ci_rel is not None and abs(gap) <= ci_rel + 1e-12:
         label = "回升" if gap > LIVE_OVERFIT_GAP else "平台"
-        return (f"验证损失{label}（较历史最优 {_fmt_pct(gap, signed=True)}）"
-                f"仍在 95% 抽样噪声内（±{_fmt_pct(ci_rel)}），已连续 {n} 次"
-                "评测未改善：先继续观察，不要据此加正则化或触发早停；"
-                "可增大 eval_iters/验证集。")
+        return (
+            f"验证损失{label}（较历史最优 {_fmt_pct(gap, signed=True)}）"
+            f"仍在 95% 抽样噪声内（±{_fmt_pct(ci_rel)}），已连续 {n} 次"
+            "评测未改善：先继续观察，不要据此加正则化或触发早停；"
+            "可增大 eval_iters/验证集。"
+        )
 
     trend = _train_trend(train_recent)
     trend_txt = ""
     overfit_tail = "检查训练/验证曲线是否分叉，必要时加正则化/数据或显式开启 --early_stop_patience。"
-    underfit_tail = ("先检查学习率/数据管道/模型容量，不要盲目加正则化；"
-                     "确认训练损失本身是否还在下降后再决定是否延长训练。")
+    underfit_tail = (
+        "先检查学习率/数据管道/模型容量，不要盲目加正则化；"
+        "确认训练损失本身是否还在下降后再决定是否延长训练。"
+    )
     if trend is not None:
         if trend < -0.01:
             trend_txt = f"，训练损失仍在下降（{_fmt_pct(trend, signed=True)}）"
@@ -587,28 +609,38 @@ def live_overfit_hint(evals_since_improve, best_val, val,
             what = f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}，典型过拟合信号"
             tail = overfit_tail
         elif kind == "unstable":
-            what = (f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
-                    "更像优化不稳定/学习率过大，不是典型过拟合")
+            what = (
+                f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
+                "更像优化不稳定/学习率过大，不是典型过拟合"
+            )
             tail = underfit_tail
         elif kind == "flat":
-            what = (f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
-                    "训练侧已无改善，优先核对验证集构造与正则化，别只延长训练")
+            what = (
+                f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
+                "训练侧已无改善，优先核对验证集构造与正则化，别只延长训练"
+            )
             tail = overfit_tail
         else:
             what = f"验证损失在回升（较历史最优 {_fmt_pct(gap, signed=True)}），典型过拟合信号"
             tail = overfit_tail
     else:
         if kind == "overfit":
-            what = (f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
-                    "泛化差距扩大，早期过拟合信号")
+            what = (
+                f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
+                "泛化差距扩大，早期过拟合信号"
+            )
             tail = overfit_tail
         elif kind == "unstable":
-            what = (f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
-                    "更像欠拟合/优化不足，不是过拟合")
+            what = (
+                f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}）{trend_txt}："
+                "更像欠拟合/优化不足，不是过拟合"
+            )
             tail = underfit_tail
         elif kind == "flat":
-            what = (f"训练与验证损失同时停滞（验证较历史最优 {_fmt_pct(gap, signed=True)}）："
-                    "更像容量/优化不足（欠拟合），不是过拟合")
+            what = (
+                f"训练与验证损失同时停滞（验证较历史最优 {_fmt_pct(gap, signed=True)}）："
+                "更像容量/优化不足（欠拟合），不是过拟合"
+            )
             tail = underfit_tail
         else:
             what = f"验证损失进入平台（较历史最优 {_fmt_pct(gap, signed=True)}，无实质改善）"
@@ -630,16 +662,25 @@ def _gate_points(records: List[Dict]) -> List[Dict]:
         low = _finite_value(r.get("gate_frac_low"))
         high = _finite_value(r.get("gate_frac_high"))
         layer = r.get("gate_layer_mean")
-        layer = [f for f in (_finite_value(x) for x in layer)
-                 if f is not None and 0.0 <= f <= 1.0] \
-            if isinstance(layer, (list, tuple)) else None
-        points.append({
-            "step": step, "mean": mean,
-            "std": std if std is not None and std >= 0 else None,
-            "frac_low": low if low is not None and 0.0 <= low <= 1.0 else None,
-            "frac_high": high if high is not None and 0.0 <= high <= 1.0 else None,
-            "layer_mean": layer,
-        })
+        layer = (
+            [
+                f
+                for f in (_finite_value(x) for x in layer)
+                if f is not None and 0.0 <= f <= 1.0
+            ]
+            if isinstance(layer, (list, tuple))
+            else None
+        )
+        points.append(
+            {
+                "step": step,
+                "mean": mean,
+                "std": std if std is not None and std >= 0 else None,
+                "frac_low": low if low is not None and 0.0 <= low <= 1.0 else None,
+                "frac_high": high if high is not None and 0.0 <= high <= 1.0 else None,
+                "layer_mean": layer,
+            }
+        )
     points.sort(key=lambda p: p["step"])
     return points
 
@@ -654,17 +695,28 @@ def diagnose_gate(records: List[Dict]) -> Dict:
     """
     points = _gate_points(records)
     if not points:
-        return {"available": False, "status": "不适用（无门控统计）",
-                "n_points": 0, "evidence": [], "recommendations": []}
+        return {
+            "available": False,
+            "status": "不适用（无门控统计）",
+            "n_points": 0,
+            "evidence": [],
+            "recommendations": [],
+        }
     first, last = points[0], points[-1]
     mean, std = last["mean"], last["std"]
     low, high = last["frac_low"], last["frac_high"]
-    collapsed_low = ((low is not None and low >= GATE_SAT_FRAC)
-                     or (mean <= 0.02 and (std is None or std <= 0.05)))
-    collapsed_high = ((high is not None and high >= GATE_SAT_FRAC)
-                      or (mean >= 0.98 and (std is None or std <= 0.05)))
-    constant = (std is not None and std <= GATE_MIN_STD
-                and not collapsed_low and not collapsed_high)
+    collapsed_low = (low is not None and low >= GATE_SAT_FRAC) or (
+        mean <= 0.02 and (std is None or std <= 0.05)
+    )
+    collapsed_high = (high is not None and high >= GATE_SAT_FRAC) or (
+        mean >= 0.98 and (std is None or std <= 0.05)
+    )
+    constant = (
+        std is not None
+        and std <= GATE_MIN_STD
+        and not collapsed_low
+        and not collapsed_high
+    )
     drifts = []
     for a, b in zip(points, points[1:]):
         d = b["mean"] - a["mean"]
@@ -677,35 +729,43 @@ def diagnose_gate(records: List[Dict]) -> Dict:
         evidence.append(
             f"门控均值 {mean:.3f}"
             + (f"、std={std:.3f}" if std is not None else "")
-            + (f"、低于 {GATE_SAT_LOW:g} 的比例 {low:.0%}" if low is not None
-               else "")
+            + (f"、低于 {GATE_SAT_LOW:g} 的比例 {low:.0%}" if low is not None else "")
             + "：门几乎关闭，输出被整体压制；此时 PPL 变化不能归因于"
-              "集中度/长度校准机制")
+            "集中度/长度校准机制"
+        )
         recs.append(
             "门控塌缩：检查门控偏置 d、w/a/b 权重与学习率是否把 g 压到 0；"
             "若门控确实学成关闭，应报告“机制未生效”，不要用该 run 的 PPL "
-            "给门控机制背书")
+            "给门控机制背书"
+        )
     elif collapsed_high:
         status = "门控饱和（退化为标准注意力）"
         evidence.append(
             f"门控均值 {mean:.3f}"
             + (f"、std={std:.3f}" if std is not None else "")
-            + (f"、高于 {GATE_SAT_HIGH:g} 的比例 {high:.0%}" if high is not None
-               else "")
-            + "：g≈1 时 LEGA 退化为标准注意力，长度/集中度项没有实际作用")
+            + (
+                f"、高于 {GATE_SAT_HIGH:g} 的比例 {high:.0%}"
+                if high is not None
+                else ""
+            )
+            + "：g≈1 时 LEGA 退化为标准注意力，长度/集中度项没有实际作用"
+        )
         recs.append(
             "门控饱和：g≈1 时方法退化为标准注意力，不能声称门控机制有效；"
             "检查 gate_bias_init 是否过高、a/b 是否未学习，必要时降低初值"
-            "或加门控正则后重跑")
+            "或加门控正则后重跑"
+        )
     elif constant:
         status = "门控近似常数（无样本级区分）"
         evidence.append(
             f"门控 std={std:.4f} ≤ {GATE_MIN_STD:g}（均值 {mean:.3f}）："
             "所有 token 得到几乎相同的门值，门控只相当于全局缩放，"
-            "并未按查询/集中度/长度做样本级决策")
+            "并未按查询/集中度/长度做样本级决策"
+        )
         recs.append(
             "门控无样本级区分：检查 w/a/b 是否被 weight decay 压到 0、"
-            "学习率是否过小；若门控参数未离开初始化，不要报告门控机制有效")
+            "学习率是否过小；若门控参数未离开初始化，不要报告门控机制有效"
+        )
     if drifts:
         worst = max(drifts, key=lambda x: abs(x[2]))
         if status == "健康":
@@ -713,38 +773,57 @@ def diagnose_gate(records: List[Dict]) -> Dict:
         evidence.append(
             f"门控均值在评测间最大变化 {worst[2]:+.2f}"
             f"（step {worst[0]}→{worst[1]}，阈值 ±{GATE_DRIFT_TOL:g}）："
-            "门控行为不稳定，不能只拿最终均值代表训练过程")
+            "门控行为不稳定，不能只拿最终均值代表训练过程"
+        )
         recs.append(
             "门控剧烈漂移：优先检查学习率/梯度尖峰（见同页 grad_norm），"
-            "并用多个评测点的门控曲线而不是最终 gate_mean 解释机制")
+            "并用多个评测点的门控曲线而不是最终 gate_mean 解释机制"
+        )
     if status == "健康" and std is None:
         # 只有均值无法证明“仍有样本级变化”，也无法排除常数门；中值
         # 既未塌缩也未饱和时只能判为数据不足，不能给机制背书。
         status = "数据不足（缺少门控分布统计）"
         evidence.append(
             f"门控末点均值 {mean:.3f}，但日志缺少 gate_std/低高饱和比例："
-            "无法确认门控是否存在样本级变化，也不能排除常数门")
+            "无法确认门控是否存在样本级变化，也不能排除常数门"
+        )
         recs.append(
             "门控只有均值：补充记录 gate_std、gate_frac_low、gate_frac_high "
-            "后重跑诊断；在此之前不要用该 run 声称门控机制有效")
+            "后重跑诊断；在此之前不要用该 run 声称门控机制有效"
+        )
     elif status == "健康":
         evidence.append(
             f"门控末点均值 {mean:.3f}"
             + (f"、std={std:.3f}" if std is not None else "")
-            + (f"、低饱和 {low:.0%}/高饱和 {high:.0%}"
-               if low is not None and high is not None else "")
-            + f"：门控在训练末段仍有样本级变化，未贴近 0/1 极值")
-    return {"available": True, "status": status, "n_points": len(points),
-            "mean_first": first["mean"], "mean_last": mean,
-            "std_last": std, "frac_low_last": low, "frac_high_last": high,
-            "layer_mean_last": last["layer_mean"],
-            "drift_max": (max(abs(d[2]) for d in drifts) if drifts else 0.0),
-            "evidence": evidence, "recommendations": recs}
+            + (
+                f"、低饱和 {low:.0%}/高饱和 {high:.0%}"
+                if low is not None and high is not None
+                else ""
+            )
+            + "：门控在训练末段仍有样本级变化，未贴近 0/1 极值"
+        )
+    return {
+        "available": True,
+        "status": status,
+        "n_points": len(points),
+        "mean_first": first["mean"],
+        "mean_last": mean,
+        "std_last": std,
+        "frac_low_last": low,
+        "frac_high_last": high,
+        "layer_mean_last": last["layer_mean"],
+        "drift_max": (max(abs(d[2]) for d in drifts) if drifts else 0.0),
+        "evidence": evidence,
+        "recommendations": recs,
+    }
 
 
-def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
-                   epochs_seen: Optional[float] = None,
-                   train_tokens: Optional[int] = None) -> Dict:
+def diagnose_curve(
+    records: List[Dict],
+    log_vocab: Optional[float] = None,
+    epochs_seen: Optional[float] = None,
+    train_tokens: Optional[int] = None,
+) -> Dict:
     """从单条 train_log 记录序列给出结构化诊断。
 
     records: load_train_log 的输出（含 'loss' 训练点与 'val_loss' 验证点）。
@@ -771,8 +850,9 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # 最后一个有限训练点，既保留早停标注，又不把 "step None" 写进证据。
     # 只认真正的布尔 true；外部日志里的 "false"/"0"/1 等真值会被
     # truthiness 误判成“早停终止”，从而伪造训练提前结束的证据。
-    early_stop_recs = [r for r in records
-                       if isinstance(r, dict) and r.get("early_stop") is True]
+    early_stop_recs = [
+        r for r in records if isinstance(r, dict) and r.get("early_stop") is True
+    ]
     early_stopped = bool(early_stop_recs)
     early_stop_steps = []
     for r in early_stop_recs:
@@ -780,28 +860,32 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         if s is None:
             continue
         early_stop_steps.append(s)
-    es_step = (early_stop_steps[0] if early_stop_steps
-               else (train_pts[-1]["step"] if train_pts else None))
+    es_step = (
+        early_stop_steps[0]
+        if early_stop_steps
+        else (train_pts[-1]["step"] if train_pts else None)
+    )
     # 累计门控/统计点上的 NaN 只在对应序列里报；任何序列出现即整体报。
     # 单步峰值 loss_max 也属于训练损失序列：区间均值有限但单步峰值 NaN/Inf
     # 时训练已经失效，不能因为只看均值而漏报。
     malformed_count = train_malformed + val_malformed
     # 梯度范数体检：尖峰/非有限是发散与 NaN 的早期信号，损失曲线可能还没反映。
     # 优先用区间峰值 grad_norm_max：只记录 log 点最后一步会漏掉区间中段的爆炸。
-    grad_pts, grad_bad, grad_malformed, grad_bad_steps = \
-        _gradient_points(records)
+    grad_pts, grad_bad, grad_malformed, grad_bad_steps = _gradient_points(records)
     malformed_count += grad_malformed
     # 瞬态损失尖峰：分段均值会把它平均掉，必须按点单独体检（与损失状态独立）。
     # loss_max 是同一 log 区间内的单步峰值：一步异常批次被区间均值稀释时，
     # 均值序列可能看不到 8× 尖峰，峰值序列仍能看到。
     loss_spikes = _detect_series_spikes(train_pts, LOSS_SPIKE_FACTOR)
-    loss_peak_pts, loss_peak_bad, loss_peak_malformed = \
-        _finite_points(records, "loss_max")
+    loss_peak_pts, loss_peak_bad, loss_peak_malformed = _finite_points(
+        records, "loss_max"
+    )
     malformed_count += loss_peak_malformed
     nan_count = train_bad + val_bad + loss_peak_bad
     # 旧日志/新版日志峰值与均值相同（区间只有 1 步）时避免重复报告同一尖峰
-    if [(p["step"], p["value"]) for p in loss_peak_pts] == \
-            [(p["step"], p["value"]) for p in train_pts]:
+    if [(p["step"], p["value"]) for p in loss_peak_pts] == [
+        (p["step"], p["value"]) for p in train_pts
+    ]:
         loss_peak_pts = []
     loss_peak_spikes = _detect_series_spikes(loss_peak_pts, LOSS_SPIKE_FACTOR)
     grad_vals = [p["value"] for p in grad_pts]
@@ -828,8 +912,9 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             if ratio_clamped:
                 grad_spike_ratio_clamped = True
     grad_spike = bool(grad_spikes)
-    worst_grad_spike = (max(grad_spikes, key=lambda p: p["ratio"])
-                        if grad_spikes else None)
+    worst_grad_spike = (
+        max(grad_spikes, key=lambda p: p["ratio"]) if grad_spikes else None
+    )
 
     first_train = _seg_mean(train_pts, 0.0, 1 / 3)
     last_train = _seg_mean(train_pts, 2 / 3, 1.0)
@@ -843,11 +928,9 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # 用区间滑动均值而 val 用 eval 模式）的典型信号。只看两条曲线各自下降
     # 会完全漏掉这一点，必须把两条线的相对水平也纳入诊断。
     val_below_train_rel = None
-    if (last_train is not None and last_val is not None
-            and last_train > 0):
+    if last_train is not None and last_val is not None and last_train > 0:
         val_below_train_rel = _rel_change(last_train, last_val)
-    val_below_train = (val_below_train_rel is not None
-                       and val_below_train_rel < -REL_TOL)
+    val_below_train = val_below_train_rel is not None and val_below_train_rel < -REL_TOL
     train_down = train_delta is not None and train_delta < -REL_TOL
     train_up = train_delta is not None and train_delta > REL_TOL
     # 验证侧判定必须扣除评估抽样噪声：val_loss_ci95 存在时，变化幅度不超过
@@ -856,7 +939,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     val_tol = max(REL_TOL, val_ci_rel or 0.0)
     val_down = val_delta is not None and val_delta < -val_tol
     val_up = val_delta is not None and val_delta > val_tol
-    val_unresolved = (val_delta is not None and abs(val_delta) <= val_tol)
+    val_unresolved = val_delta is not None and abs(val_delta) <= val_tol
     # 末段趋势（后 1/3 vs 中 1/3）：全程首/末分段对“早先大幅改善、后段
     # 平台/回升”不敏感。验证早段已降到很低时，末段回升后首→末仍可能为负，
     # 只看全程会漏掉过拟合；训练末段已停但全程仍在降也会被当成正常收敛。
@@ -864,23 +947,26 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     recent_val = _tail_change(val_pts)
     recent_train_delta = (recent_train or {}).get("rel_change")
     recent_val_delta = (recent_val or {}).get("rel_change")
-    train_recent_down = (recent_train_delta is not None
-                         and recent_train_delta < -REL_TOL)
-    train_recent_flat = (recent_train_delta is not None
-                         and abs(recent_train_delta) <= REL_TOL)
-    train_recent_up = (recent_train_delta is not None
-                       and recent_train_delta > REL_TOL)
-    val_recent_down = (recent_val_delta is not None
-                       and recent_val_delta < -val_tol)
-    val_recent_up = (recent_val_delta is not None
-                     and recent_val_delta > val_tol)
-    val_recent_unresolved = (recent_val_delta is not None
-                             and abs(recent_val_delta) <= val_tol)
+    train_recent_down = recent_train_delta is not None and recent_train_delta < -REL_TOL
+    train_recent_flat = (
+        recent_train_delta is not None and abs(recent_train_delta) <= REL_TOL
+    )
+    train_recent_up = recent_train_delta is not None and recent_train_delta > REL_TOL
+    val_recent_down = recent_val_delta is not None and recent_val_delta < -val_tol
+    val_recent_up = recent_val_delta is not None and recent_val_delta > val_tol
+    val_recent_unresolved = (
+        recent_val_delta is not None and abs(recent_val_delta) <= val_tol
+    )
     recent_available = recent_train is not None and recent_val is not None
-    recent_overfit = bool(recent_available and val_recent_up
-                          and (train_recent_down or train_recent_flat))
-    recent_trend = bool(recent_available and train_recent_down
-                        and val_recent_unresolved and not val_recent_up)
+    recent_overfit = bool(
+        recent_available and val_recent_up and (train_recent_down or train_recent_flat)
+    )
+    recent_trend = bool(
+        recent_available
+        and train_recent_down
+        and val_recent_unresolved
+        and not val_recent_up
+    )
 
     best_val, best_step = None, None
     for p in val_pts:
@@ -898,8 +984,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             continue
         ci, v = r.get("val_loss_ci95"), _finite_value(r.get("val_loss"))
         s_ = _step_or_none(r.get("step"))
-        if (s_ is None or v is None or not isinstance(ci, (list, tuple))
-                or len(ci) != 2):
+        if s_ is None or v is None or not isinstance(ci, (list, tuple)) or len(ci) != 2:
             continue
         lo, hi = _finite_value(ci[0]), _finite_value(ci[1])
         if lo is not None and hi is not None and hi >= lo and v > 0:
@@ -915,12 +1000,17 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             best_ci_rel = None
     sorted_val = sorted(p["value"] for p in val_pts)
     second_best = sorted_val[1] if len(sorted_val) >= 2 else None
-    best_margin_rel = (_rel_change(best_val, second_best)
-                       if (best_val is not None and second_best is not None)
-                       else None)
+    best_margin_rel = (
+        _rel_change(best_val, second_best)
+        if (best_val is not None and second_best is not None)
+        else None
+    )
     best_selection_noise = bool(
-        best_ci_rel is not None and best_margin_rel is not None
-        and best_step != final_step and best_margin_rel <= best_ci_rel)
+        best_ci_rel is not None
+        and best_margin_rel is not None
+        and best_step != final_step
+        and best_margin_rel <= best_ci_rel
+    )
     # 早停空间同样要扣除评估噪声：final 比 best 差 2% 但单点 CI 就有 ±3% 时，
     # 不能据此断言“已经过拟合、早停能挽回”。
     gain_tol = max(EARLY_STOP_TOL, val_ci_rel or 0.0)
@@ -931,12 +1021,15 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
 
     if nan_count:
         status = "NaN/Inf"
-        evidence.append(f"训练日志出现 {nan_count} 个非有限损失值"
-                        f"（训练 {train_bad}、验证 {val_bad}、单步峰值 "
-                        f"{loss_peak_bad}）")
+        evidence.append(
+            f"训练日志出现 {nan_count} 个非有限损失值"
+            f"（训练 {train_bad}、验证 {val_bad}、单步峰值 "
+            f"{loss_peak_bad}）"
+        )
         recommendations.append(
             "训练已失效：按数据 → 代码(log(0)/除零/softmax 溢出) → 混合精度下溢 "
-            "→ 梯度爆炸/学习率的顺序排查（见该 run 目录 nan_report.json）")
+            "→ 梯度爆炸/学习率的顺序排查（见该 run 目录 nan_report.json）"
+        )
     elif n_train < 3 or n_val < 2:
         status = "数据不足"
         evidence.append(f"曲线点过少（训练 {n_train}、验证 {n_val}），只能描述统计")
@@ -946,30 +1039,43 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             status = "发散"
             evidence.append(
                 f"训练损失后期均值 {last_train:.4f} 为前期 {first_train:.4f} 的 "
-                f"{last_train / first_train:.2f} 倍")
-            recommendations.append("疑似发散：优先降低学习率或加强梯度裁剪，"
-                                   "并检查梯度范数是否出现尖峰")
-        elif ((train_down and (val_up or gain_sig))
-              or (train_delta is not None and not train_down and not train_up
-                  and val_up and (gain_sig or recent_overfit))
-              or recent_overfit):
+                f"{last_train / first_train:.2f} 倍"
+            )
+            recommendations.append(
+                "疑似发散：优先降低学习率或加强梯度裁剪，" "并检查梯度范数是否出现尖峰"
+            )
+        elif (
+            (train_down and (val_up or gain_sig))
+            or (
+                train_delta is not None
+                and not train_down
+                and not train_up
+                and val_up
+                and (gain_sig or recent_overfit)
+            )
+            or recent_overfit
+        ):
             # 过拟合/平台期过拟合：训练不再下降（或总体仍在降但末段已停）
             # 而验证回升，同样需要早停/正则化。若按"训练没降"误判成欠拟合，
             # 会给出"延长训练/增大模型"的反向建议。
             status = "过拟合"
             if train_down:
-                ev = [f"全程首/末分段：训练损失 "
-                      f"{_fmt_num(first_train)}→{_fmt_num(last_train)}"
-                      f"（{_fmt_rel(train_delta)}）而验证损失 "
-                      f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
-                      f"（{_fmt_rel(val_delta)}）"]
+                ev = [
+                    f"全程首/末分段：训练损失 "
+                    f"{_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                    f"（{_fmt_rel(train_delta)}）而验证损失 "
+                    f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                    f"（{_fmt_rel(val_delta)}）"
+                ]
             else:
-                ev = [f"全程首/末分段：训练损失 "
-                      f"{_fmt_num(first_train)}→{_fmt_num(last_train)}"
-                      f"（{_fmt_rel(train_delta)}）已停滞/不再实质下降，而验证损失 "
-                      f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
-                      f"（{_fmt_rel(val_delta)}）上升——泛化先于训练损失恶化，"
-                      "按平台期过拟合处理"]
+                ev = [
+                    f"全程首/末分段：训练损失 "
+                    f"{_fmt_num(first_train)}→{_fmt_num(last_train)}"
+                    f"（{_fmt_rel(train_delta)}）已停滞/不再实质下降，而验证损失 "
+                    f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
+                    f"（{_fmt_rel(val_delta)}）上升——泛化先于训练损失恶化，"
+                    "按平台期过拟合处理"
+                ]
             # 末段趋势是独立证据：全程仍显示验证下降时，末段回升同样构成
             # 过拟合（早期改善不能抵消最近的泛化恶化）。
             if recent_available and (recent_overfit or val_recent_up):
@@ -981,24 +1087,31 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                     f"{_fmt_num((recent_val or {}).get('prev'))}→"
                     f"{_fmt_num((recent_val or {}).get('last'))}"
                     f"（{_fmt_rel(recent_val_delta)}）"
-                    + ("；验证末段回升，按过拟合处理"
-                       if val_recent_up else ""))
+                    + ("；验证末段回升，按过拟合处理" if val_recent_up else "")
+                )
             if gain_sig:
-                ev.append(f"最终验证损失劣于 step {best_step} 的最优值 "
-                          f"{best_val:.4f} 达 {_fmt_pct(early_stop_gain, signed=True)}"
-                          "（超过评估噪声）")
+                ev.append(
+                    f"最终验证损失劣于 step {best_step} 的最优值 "
+                    f"{best_val:.4f} 达 {_fmt_pct(early_stop_gain, signed=True)}"
+                    "（超过评估噪声）"
+                )
             evidence += ev
             recommendations += [
                 "加正则化（dropout / weight decay）或增大数据量",
                 f"早停：val 最优在 step {best_step}，最终 step {final_step} 已过拟合"
-                + (f"（早停可挽回 {_fmt_pct(early_stop_gain)} 验证损失）"
-                   if gain_sig else ""),
-                "下游对比应使用 val 上选出的 model_best.pt，而不是最终步模型"]
+                + (
+                    f"（早停可挽回 {_fmt_pct(early_stop_gain)} 验证损失）"
+                    if gain_sig
+                    else ""
+                ),
+                "下游对比应使用 val 上选出的 model_best.pt，而不是最终步模型",
+            ]
             if not train_down:
                 recommendations.append(
                     "训练已停滞而验证恶化：按平台期过拟合处理（早停/正则化），"
-                    "并先确认学习率不过小（训练推得动）；不要按欠拟合扩大容量或续训")
-        elif (train_down and val_unresolved and not gain_sig):
+                    "并先确认学习率不过小（训练推得动）；不要按欠拟合扩大容量或续训"
+                )
+        elif train_down and val_unresolved and not gain_sig:
             # 训练仍在实质下降而验证无实质变化（|Δ|<REL_TOL）：验证不再随
             # 训练改善，泛化差距在扩大——过拟合的早期形态。它比"验证回升"
             # 更早出现；只看最终数值或只等验证回升会漏掉这一信号。
@@ -1008,10 +1121,14 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"（{_fmt_rel(train_delta)}）仍在实质下降，而验证损失 "
                 f"{_fmt_num(first_val)}→{_fmt_num(last_val)}"
                 f"（{_fmt_rel(val_delta)}）无实质变化"
-                + (f"（评估噪声 ±{_fmt_pct(val_ci_rel)}）" if val_ci_rel is not None
-                   else "")
+                + (
+                    f"（评估噪声 ±{_fmt_pct(val_ci_rel)}）"
+                    if val_ci_rel is not None
+                    else ""
+                )
                 + "：验证不再随训练改善，泛化差距在扩大"
-                "（尚不满足“验证回升”的过拟合判定）")
+                "（尚不满足“验证回升”的过拟合判定）"
+            )
             recommendations += [
                 "训练降而验证停滞：按过拟合早期信号处理——启用/加强正则化"
                 "（dropout / weight decay），对比使用 val 最优的 model_best.pt",
@@ -1032,96 +1149,121 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"{_fmt_num((recent_val or {}).get('prev'))}→"
                 f"{_fmt_num((recent_val or {}).get('last'))}"
                 f"（{_fmt_rel(recent_val_delta)}）已无实质变化"
-                + (f"（评估噪声 ±{_fmt_pct(val_ci_rel)}）" if val_ci_rel is not None
-                   else "")
+                + (
+                    f"（评估噪声 ±{_fmt_pct(val_ci_rel)}）"
+                    if val_ci_rel is not None
+                    else ""
+                )
                 + "：全程首/末分段仍显示验证下降（早段改善占主导），但末段"
-                "验证不再随训练改善，泛化差距在扩大")
+                "验证不再随训练改善，泛化差距在扩大"
+            )
             recommendations += [
                 "训练降而验证末段停滞：按过拟合早期信号处理——启用/加强正则化"
                 "（dropout / weight decay），对比使用 val 最优的 model_best.pt",
-                "不要仅因全程验证损失仍在下降就延长训练：末段新增收益只体现在"
-                "训练集",
+                "不要仅因全程验证损失仍在下降就延长训练：末段新增收益只体现在" "训练集",
             ]
         elif not train_down and not train_recent_down:
             status = "欠拟合/学习不充分"
             trend = "不降反升" if train_up else "没有实质下降"
             evidence.append(
                 f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
-                f"（{_fmt_rel(train_delta)}），{trend}")
-            if (log_vocab is not None and last_train is not None
-                    and last_train > RANDOM_LEVEL_TOL * log_vocab):
+                f"（{_fmt_rel(train_delta)}），{trend}"
+            )
+            if (
+                log_vocab is not None
+                and last_train is not None
+                and last_train > RANDOM_LEVEL_TOL * log_vocab
+            ):
                 evidence.append(
                     f"训练损失停在随机猜测水平 log(V)={log_vocab:.3f} 的 "
-                    f"{RANDOM_LEVEL_TOL:.0%} 以内——学习链路基本未起作用")
+                    f"{RANDOM_LEVEL_TOL:.0%} 以内——学习链路基本未起作用"
+                )
                 recommendations.append(
                     "先排查数据管道（标签是否随机/错位、特征与标签是否对齐），"
-                    "再调学习率（过大→震荡，过小→停滞）")
+                    "再调学习率（过大→震荡，过小→停滞）"
+                )
             else:
                 recommendations += [
                     "检查学习率是否过小/过大（观察 loss 曲线是否停滞或震荡）",
-                    "检查数据管道（标签错位、特征污染）与 batch 组成"]
+                    "检查数据管道（标签错位、特征污染）与 batch 组成",
+                ]
                 if train_up:
                     recommendations.append(
                         "训练损失不降反升：优先降低学习率并检查数据顺序/批组成；"
-                        "容量不足通常表现为低损失平台，而非上升")
+                        "容量不足通常表现为低损失平台，而非上升"
+                    )
                 elif val_up:
                     recommendations.append(
                         "容量不足应表现为训练/验证同步的低损失平台；这里验证在"
-                        "上升而训练不降，先排除过拟合/训练不稳，不要盲目增大模型")
+                        "上升而训练不降，先排除过拟合/训练不稳，不要盲目增大模型"
+                    )
                 else:
                     recommendations.append("若容量不足：增大模型或延长训练")
             if train_up:
                 if val_up:
                     recommendations.append(
                         "训练与验证损失同步上升：更像学习率过大/训练不稳，"
-                        "按发散前期处理而不是欠拟合")
+                        "按发散前期处理而不是欠拟合"
+                    )
             elif val_up:
                 recommendations.append(
                     "训练不降而验证上升：按平台期过拟合处理（早停/正则化），"
-                    "不要按欠拟合延长训练")
+                    "不要按欠拟合延长训练"
+                )
             elif val_down:
                 # 验证仍在实质下降时绝不能套用"验证损失同样不降"的论断
                 # （会把在改善的 run 说成停滞）；先自检训练链路再谈容量。
                 recommendations.append(
                     "训练不降而验证损失仍在下降：先确认训练损失记录与优化"
                     "链路（日志/梯度）是否正常，再判断是否需要更大容量或"
-                    "更长训练")
+                    "更长训练"
+                )
             else:
                 recommendations.append(
                     "训练与验证损失均无实质下降（波动未超噪声阈值），"
-                    "与欠拟合判断一致")
+                    "与欠拟合判断一致"
+                )
         else:
             status = "正常收敛"
             evidence.append(
                 f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
                 f"（{_fmt_rel(train_delta)}），"
                 f"验证损失 {_fmt_num(first_val)}→{_fmt_num(last_val)}"
-                f"（{_fmt_rel(val_delta)}）")
+                f"（{_fmt_rel(val_delta)}）"
+            )
             if gain_sig:
-                evidence.append(f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
-                                f"{_fmt_pct(early_stop_gain)}（超过评估噪声），"
-                                "已按 best-checkpoint 口径评测")
+                evidence.append(
+                    f"注意：最终验证损失仍比 step {best_step} 的最优值差 "
+                    f"{_fmt_pct(early_stop_gain)}（超过评估噪声），"
+                    "已按 best-checkpoint 口径评测"
+                )
             elif (early_stop_gain or 0) > EARLY_STOP_TOL:
                 evidence.append(
                     f"最终验证损失比 step {best_step} 的最优值差 "
                     f"{_fmt_pct(early_stop_gain)}，但未超过评估噪声 "
-                    f"±{_fmt_pct(val_ci_rel)}：不据此判定过拟合")
-            elif not (loss_spikes or loss_peak_spikes or grad_bad or grad_spike
-                      or early_stopped or malformed_count):
+                    f"±{_fmt_pct(val_ci_rel)}：不据此判定过拟合"
+                )
+            elif not (
+                loss_spikes
+                or loss_peak_spikes
+                or grad_bad
+                or grad_spike
+                or early_stopped
+                or malformed_count
+            ):
                 # 任一独立告警（损失尖峰/梯度尖峰/早停/坏记录）存在时都不写
                 # “无需干预”，否则会与随后追加的诊断建议自相矛盾。
                 recommendations.append("无需干预；对比实验使用 model_best.pt")
-        if gain_sig and status not in ("过拟合",
-                                       "验证损失倒挂（疑似泄漏/口径不一致）"):
+        if gain_sig and status not in ("过拟合", "验证损失倒挂（疑似泄漏/口径不一致）"):
             recommendations.append(
                 f"早停提示：最终验证损失劣于 step {best_step} 最优值 "
-                f"{_fmt_pct(early_stop_gain)}")
+                f"{_fmt_pct(early_stop_gain)}"
+            )
         # 验证-训练倒挂是数据/评测口径的完整性问题，与曲线形状（过拟合/
         # 平台/欠拟合）独立：不能只在“正常收敛”分支里检查，否则一个仍在
         # 下降但验证停滞的 run 会一边写 val_below_train=True、一边建议加
         # 正则化。倒挂一旦成立，优先排查泄漏/口径，而不是调正则化。
-        if (val_below_train
-                and status in ("正常收敛", "过拟合", "过拟合趋势")):
+        if val_below_train and status in ("正常收敛", "过拟合", "过拟合趋势"):
             status = "验证损失倒挂（疑似泄漏/口径不一致）"
             evidence.append(
                 f"验证损失末段 {last_val:.4f} 显著低于训练损失末段 "
@@ -1129,16 +1271,19 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 "这与常规泛化差距方向相反，不能按“收敛更好”解读；"
                 "优先排查数据划分/预处理泄漏（train 与 val 文档重叠、"
                 "词表或归一化在 val 上拟合）、训练与验证的评估口径差异"
-                "（dropout/eval 模式、滑动平均、不同 token 集合）")
+                "（dropout/eval 模式、滑动平均、不同 token 集合）"
+            )
             recommendations[:] = [
-                r for r in recommendations
-                if not any(key in r for key in
-                           ("正则化", "早停", "无需干预", "过拟合"))]
+                r
+                for r in recommendations
+                if not any(key in r for key in ("正则化", "早停", "无需干预", "过拟合"))
+            ]
             recommendations.append(
                 "验证损失倒挂：先做数据泄漏/协议审计（datacheck 的跨 split "
                 "重复与 n-gram 重叠、split 时序与文档边界），并核对训练/验证"
                 "是否使用同一精度、同一 dropout 状态与同一损失口径；"
-                "排除泄漏前不要报告该 run 的验证指标")
+                "排除泄漏前不要报告该 run 的验证指标"
+            )
         elif val_below_train:
             # 发散/欠拟合等状态也不应把倒挂信号藏起来：保留曲线状态判定，
             # 但并列报告完整性告警，避免读者只看到“欠拟合→扩容量”等建议。
@@ -1146,17 +1291,20 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
                 f"注意：验证损失末段 {last_val:.4f} 也低于训练损失末段 "
                 f"{last_train:.4f}（{_fmt_pct(val_below_train_rel, signed=True)}），存在"
                 "验证-训练倒挂；该信号独立于当前曲线状态，优先排查数据划分/"
-                "预处理泄漏与训练/验证评估口径差异")
+                "预处理泄漏与训练/验证评估口径差异"
+            )
             recommendations.append(
                 "同时存在验证-训练倒挂：在按上述建议调参/扩容量前，先完成"
                 "跨 split 重复与 n-gram 重叠审计，并核对训练/验证的精度、"
-                "dropout 状态与损失口径；排除泄漏前不要报告该 run 的验证指标")
+                "dropout 状态与损失口径；排除泄漏前不要报告该 run 的验证指标"
+            )
 
     if val_ci_rel is not None:
         evidence.append(
             f"验证损失点级 95% CI 相对半宽中位数 ±{_fmt_pct(val_ci_rel)}"
             "（窗口抽样误差；分段均值会进一步降低该项，按保守口径使用）："
-            "小于该量级的验证变化按噪声处理，不作为过拟合/收敛证据")
+            "小于该量级的验证变化按噪声处理，不作为过拟合/收敛证据"
+        )
 
     # best checkpoint 选型也可能是噪声：best 与次优点的差距小于该点 CI 时，
     # 谁被选中取决于有限验证窗口的抽样波动，而不是真实泛化差异。
@@ -1165,33 +1313,33 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             f"best checkpoint 在 step {best_step}，但仅比次优验证损失 "
             f"{second_best:.4f} 好 {_fmt_pct(best_margin_rel)}，小于该点 95% CI "
             f"相对半宽 ±{_fmt_pct(best_ci_rel)}：最优与次优无法区分，"
-            "选型可能由验证窗口抽样噪声决定（winner's curse）")
+            "选型可能由验证窗口抽样噪声决定（winner's curse）"
+        )
         recommendations.append(
             f"best checkpoint 选型落在评估噪声内（margin {_fmt_pct(best_margin_rel)} "
             f"≤ CI ±{_fmt_pct(best_ci_rel)}）：不要只报告 best 的指标；同时报告"
             "final/多种子均值，并增大 eval_iters 或验证集以缩小选型噪声；"
-            "若结论依赖 best 与次优的排序，应视为未定")
-        recommendations[:] = [r for r in recommendations
-                              if "无需干预" not in r]
+            "若结论依赖 best 与次优的排序，应视为未定"
+        )
+        recommendations[:] = [r for r in recommendations if "无需干预" not in r]
 
     # 训练数据覆盖率（来自 eval.json）：曲线下降 ≠ 已收敛。只见过不足
     # 1 个 epoch 时，验证损失仍在快速变化，此时比较方法/下“无需干预”的
     # 结论都不稳；必须把“还没学完”与真正的收敛区分开。
-    budget_insufficient = (epochs_seen is not None
-                           and epochs_seen < MIN_TRAIN_EPOCHS)
+    budget_insufficient = epochs_seen is not None and epochs_seen < MIN_TRAIN_EPOCHS
     if budget_insufficient:
-        tok_s = (f"（{train_tokens:,} 训练 token）"
-                 if train_tokens else "")
+        tok_s = f"（{train_tokens:,} 训练 token）" if train_tokens else ""
         evidence.append(
             f"训练覆盖仅约 {epochs_seen:.3f} 个 epoch{tok_s}："
             f"低于 {MIN_TRAIN_EPOCHS:g} 个 epoch，曲线下降主要反映“还没学完”，"
-            "不能据此判定收敛或比较方法优劣")
-        recommendations[:] = [r for r in recommendations
-                              if "无需干预" not in r]
+            "不能据此判定收敛或比较方法优劣"
+        )
+        recommendations[:] = [r for r in recommendations if "无需干预" not in r]
         recommendations.append(
             f"训练数据覆盖不足（约 {epochs_seen:.3f} epoch）：先继续训练/增大"
             "训练覆盖至少 1 个 epoch，并保持当前验证密度；在此之前"
-            "不要把验证损失变化解释为收敛或方法差异")
+            "不要把验证损失变化解释为收敛或方法差异"
+        )
         if status == "正常收敛":
             status = "训练不足（数据覆盖不足）"
 
@@ -1199,25 +1347,29 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     # 本身可能就是性能上限。只降不升不是过拟合，但也不能声称已经收敛；
     # 若验证损失在末端仍显著下降，应把“延长训练”列为补充实验，而不是
     # 把当前截断点当成方法的收敛性能。
-    best_at_final = bool(best_step is not None and final_step is not None
-                         and best_step == final_step)
+    best_at_final = bool(
+        best_step is not None and final_step is not None and best_step == final_step
+    )
     still_improving = bool(
-        best_at_final and status == "正常收敛"
-        and val_delta is not None and val_delta < 0
-        and (val_delta < -(val_ci_rel if val_ci_rel is not None
-                           else REL_TOL)))
+        best_at_final
+        and status == "正常收敛"
+        and val_delta is not None
+        and val_delta < 0
+        and (val_delta < -(val_ci_rel if val_ci_rel is not None else REL_TOL))
+    )
     if still_improving and epochs_seen is not None:
-        recommendations[:] = [r for r in recommendations
-                              if "无需干预" not in r]
+        recommendations[:] = [r for r in recommendations if "无需干预" not in r]
         recommendations.append(
             f"最优验证损失出现在最后一个评测点（step {final_step}），"
             f"且验证损失仍下降 {_fmt_pct(abs(val_delta))}：没有观察到收敛/过拟合"
             "拐点，当前训练预算可能就是性能上限；预算允许时应延长训练作为"
-            "补充实验，不能把该 run 的最优值当作方法已收敛的结论")
+            "补充实验，不能把该 run 的最优值当作方法已收敛的结论"
+        )
         evidence.append(
             f"best 与 final 为同一评测点（step {final_step}），"
             f"验证损失首→末 {_fmt_rel(val_delta)} 且末端仍在下降："
-            "训练尚未显示出收敛拐点（不是过拟合）")
+            "训练尚未显示出收敛拐点（不是过拟合）"
+        )
 
     # 早停终止：截断是设计行为（不同于日志缺失），独立于状态标注；
     # "数据不足"分支的"增加步数/评测密度"建议与早停矛盾，须替换。
@@ -1225,38 +1377,54 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         es_txt = f"（step {es_step}）" if es_step is not None else ""
         evidence.append(
             f"该 run 由早停终止{es_txt}：验证损失连续无实质改善，"
-            "训练按设计提前结束，曲线被截断而非日志缺失/训练中断")
+            "训练按设计提前结束，曲线被截断而非日志缺失/训练中断"
+        )
         if status == "数据不足":
-            recommendations[:] = [r for r in recommendations
-                                  if "训练步数" not in r and "eval_every" not in r]
+            recommendations[:] = [
+                r
+                for r in recommendations
+                if "训练步数" not in r and "eval_every" not in r
+            ]
         recommendations.append(
             "已早停：不要以“曲线未走完”为由延长训练；对比使用 val 选出的 "
-            "model_best.pt，先按上述诊断处理（正则化/数据/学习率）再决定是否重跑")
+            "model_best.pt，先按上述诊断处理（正则化/数据/学习率）再决定是否重跑"
+        )
 
     # 梯度范数体检（与损失状态独立）：非有限/尖峰是梯度爆炸的早期信号，
     # 损失曲线可能尚未发散，只看最终损失会漏掉。
     if grad_bad:
-        steps_txt = ("，step " + ", ".join(str(x) for x in grad_bad_steps[:8])
-                     + ("…" if len(grad_bad_steps) > 8 else "")
-                     if grad_bad_steps else "")
-        evidence.append(f"pre-clip 梯度范数出现 {grad_bad} 个非有限值{steps_txt}"
-                        "（梯度已爆炸，先于或伴随损失 NaN）")
+        steps_txt = (
+            "，step "
+            + ", ".join(str(x) for x in grad_bad_steps[:8])
+            + ("…" if len(grad_bad_steps) > 8 else "")
+            if grad_bad_steps
+            else ""
+        )
+        evidence.append(
+            f"pre-clip 梯度范数出现 {grad_bad} 个非有限值{steps_txt}"
+            "（梯度已爆炸，先于或伴随损失 NaN）"
+        )
         recommendations.append(
             "梯度爆炸：降低学习率、收紧 grad_clip（如 0.5）、延长 warmup，"
-            "并确认 train_log.jsonl 的 grad_norm/grad_norm_max 不再出现非有限值")
+            "并确认 train_log.jsonl 的 grad_norm/grad_norm_max 不再出现非有限值"
+        )
     if grad_spike and worst_grad_spike is not None:
         evidence.append(
             f"pre-clip 梯度范数最大 {grad_max:.2e}（step {grad_max_step}）"
             f"为中位数 {grad_med:.2e} 的 {grad_spike_ratio:.1f} 倍"
             f"；共 {len(grad_spikes)} 个 ≥{GRAD_SPIKE_FACTOR:g}× 尖峰，"
             f"最严重在 step {worst_grad_spike['step']}（×{worst_grad_spike['ratio']:.1f}）"
-            + ("；此处的 grad_norm 优先采用 log 区间内峰值 grad_norm_max"
-               if any("grad_norm_max" in r for r in records
-                      if isinstance(r, dict)) else ""))
+            + (
+                "；此处的 grad_norm 优先采用 log 区间内峰值 grad_norm_max"
+                if any("grad_norm_max" in r for r in records if isinstance(r, dict))
+                else ""
+            )
+        )
         recommendations.append(
             f"检测到梯度范数尖峰（×{worst_grad_spike['ratio']:.0f} "
             f"@step {worst_grad_spike['step']}）：这是 NaN 之前的典型信号，"
-            "应降低学习率/收紧 grad_clip 后再验证曲线")
+            "应降低学习率/收紧 grad_clip 后再验证曲线"
+        )
 
     # 瞬态损失尖峰（与分段状态独立）：某一步损失突然跳升又恢复。分段均值/
     # 首末值会把这个点平均掉，只看趋势会漏；它常来自异常批次或一次梯度爆炸。
@@ -1266,11 +1434,13 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             f"训练损失出现 {len(loss_spikes)} 个瞬态尖峰，最大在 step "
             f"{worst_spike['step']}: {worst_spike['value']:.4f} 是邻近点中位数 "
             f"{worst_spike['local_median']:.4f} 的 {worst_spike['ratio']:.1f} 倍"
-            "（分段均值会将其掩盖）")
+            "（分段均值会将其掩盖）"
+        )
         recommendations.append(
             f"损失尖峰（×{worst_spike['ratio']:.0f} @step {worst_spike['step']}）："
             "先查该步批次是否含异常样本（见 datacheck/该步附近数据）与梯度范数"
-            "是否同步尖峰，再考虑收紧 grad_clip 或降低学习率后重跑")
+            "是否同步尖峰，再考虑收紧 grad_clip 或降低学习率后重跑"
+        )
     if loss_peak_spikes:
         worst_peak = max(loss_peak_spikes, key=lambda s: s["ratio"])
         evidence.append(
@@ -1278,18 +1448,21 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
             f"step {worst_peak['step']}: 单步峰值 {worst_peak['value']:.4f} 是邻近"
             f"峰值中位数 {worst_peak['local_median']:.4f} 的 "
             f"{worst_peak['ratio']:.1f} 倍——区间均值可能把单步异常批次平均掉，"
-            "该信号需要单独核对批次")
+            "该信号需要单独核对批次"
+        )
         recommendations.append(
             f"单步损失峰值尖峰（×{worst_peak['ratio']:.0f} "
             f"@step {worst_peak['step']}）：优先复核该 log 区间内哪一 micro-step "
-            "消费了异常批次/标签，并对照同一区间 grad_norm_max 是否尖峰")
+            "消费了异常批次/标签，并对照同一区间 grad_norm_max 是否尖峰"
+        )
 
     # 坏记录（值/step 无法解析）：结构化日志被中断或手工编辑的信号；明确
     # 报告已跳过多少点，避免剩余曲线被当作完整曲线解读。
     if malformed_count:
         evidence.append(
             f"训练日志有 {malformed_count} 条记录的 step/值无法解析（已跳过）："
-            "日志可能被中断或损坏，上述结论只基于其余记录点")
+            "日志可能被中断或损坏，上述结论只基于其余记录点"
+        )
 
     gap = None
     if last_train is not None and final_val is not None:
@@ -1306,8 +1479,7 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
     if gate["recommendations"]:
         recommendations += gate["recommendations"]
         if gate["status"] != "健康":
-            recommendations[:] = [r for r in recommendations
-                                  if "无需干预" not in r]
+            recommendations[:] = [r for r in recommendations if "无需干预" not in r]
 
     return {
         "status": status,
@@ -1336,19 +1508,24 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         # 把窗口抽样误差当成过拟合/收敛信号。
         "val_ci_rel": val_ci_rel,
         "val_change_above_noise": (
-            None if (val_delta is None or val_ci_rel is None)
-            else bool(abs(val_delta) > val_ci_rel)),
+            None
+            if (val_delta is None or val_ci_rel is None)
+            else bool(abs(val_delta) > val_ci_rel)
+        ),
         "early_stop_gain_above_noise": (
-            None if (early_stop_gain is None or val_ci_rel is None)
-            else bool(early_stop_gain > val_ci_rel)),
+            None
+            if (early_stop_gain is None or val_ci_rel is None)
+            else bool(early_stop_gain > val_ci_rel)
+        ),
         "early_stopped": early_stopped,
         "early_stop_step": (es_step if early_stopped else None),
         "epochs_seen": epochs_seen,
         "train_tokens": train_tokens,
         "best_at_final_eval": best_at_final,
         "val_still_improving_at_end": still_improving,
-        "train_budget_sufficient": (None if epochs_seen is None
-                                    else not budget_insufficient),
+        "train_budget_sufficient": (
+            None if epochs_seen is None else not budget_insufficient
+        ),
         "generalization_gap": gap,
         # 末段验证损失相对训练损失的变化（负=验证低于训练）；倒挂是泄漏/
         # 口径不一致信号，而不是更好的泛化。
@@ -1380,28 +1557,37 @@ def diagnose_curve(records: List[Dict], log_vocab: Optional[float] = None,
         "recent_trend_available": bool(recent_available),
         "recent_comparison": {"train": recent_train, "val": recent_val},
         "gate_health": gate,
-        "thresholds": {"rel_tol": REL_TOL, "diverge_factor": DIVERGE_FACTOR,
-                       "early_stop_tol": EARLY_STOP_TOL,
-                       "grad_spike_factor": GRAD_SPIKE_FACTOR,
-                       "loss_spike_factor": LOSS_SPIKE_FACTOR,
-                       "loss_spike_window": LOSS_SPIKE_WINDOW,
-                       "recent_window": "last 1/3 vs middle 1/3"},
+        "thresholds": {
+            "rel_tol": REL_TOL,
+            "diverge_factor": DIVERGE_FACTOR,
+            "early_stop_tol": EARLY_STOP_TOL,
+            "grad_spike_factor": GRAD_SPIKE_FACTOR,
+            "loss_spike_factor": LOSS_SPIKE_FACTOR,
+            "loss_spike_window": LOSS_SPIKE_WINDOW,
+            "recent_window": "last 1/3 vs middle 1/3",
+        },
     }
 
 
 # 状态严重度排序（汇总时取"最差种子"的状态代表整个变体）
 STATUS_ORDER = {
-    "NaN/Inf": 6, "发散": 5, "过拟合": 4,
+    "NaN/Inf": 6,
+    "发散": 5,
+    "过拟合": 4,
     "验证损失倒挂（疑似泄漏/口径不一致）": 3.5,
-    "欠拟合/学习不充分": 3, "训练不足（数据覆盖不足）": 2.5,
-    "过拟合趋势": 2, "数据不足": 1, "正常收敛": 0,
+    "欠拟合/学习不充分": 3,
+    "训练不足（数据覆盖不足）": 2.5,
+    "过拟合趋势": 2,
+    "数据不足": 1,
+    "正常收敛": 0,
 }
 
 
 def worst_status(statuses) -> str:
     """多个种子的诊断状态里取最严重的（汇总表口径）。"""
-    return max(statuses, key=lambda s: STATUS_ORDER.get(s, -1)) \
-        if statuses else "数据不足"
+    return (
+        max(statuses, key=lambda s: STATUS_ORDER.get(s, -1)) if statuses else "数据不足"
+    )
 
 
 def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
@@ -1421,13 +1607,11 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
                 # bool 是 int 子类，float(True)=1.0；直接 int(1.9)=1 也会
                 # 伪造训练覆盖率。类型不符/负数/非有限值按缺失处理，避免
                 # “训练不足”诊断被坏元数据静默改写。
-                if (not isinstance(e, bool)
-                        and isinstance(e, (int, float))):
+                if not isinstance(e, bool) and isinstance(e, (int, float)):
                     ef = float(e)
                     if math.isfinite(ef) and ef >= 0:
                         epochs_seen = ef
-                if (not isinstance(t, bool)
-                        and isinstance(t, int) and t >= 0):
+                if not isinstance(t, bool) and isinstance(t, int) and t >= 0:
                     train_tokens = t
                 cw = ev.get("curve_observability_warnings")
                 if isinstance(cw, list):
@@ -1436,9 +1620,9 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
                     diag_warnings = []
         except (OSError, ValueError, TypeError, OverflowError):
             diag_warnings = []
-    diag = diagnose_curve(records, log_vocab=log_vocab,
-                          epochs_seen=epochs_seen,
-                          train_tokens=train_tokens)
+    diag = diagnose_curve(
+        records, log_vocab=log_vocab, epochs_seen=epochs_seen, train_tokens=train_tokens
+    )
     if diag_warnings:
         # 采样过稀是配置级限制：随诊断结果进入 summary，避免只看汇总时
         # 把 2 个验证点的曲线当成可靠趋势。
@@ -1455,9 +1639,15 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
 
 def main():
     p = argparse.ArgumentParser(description="训练曲线诊断（过拟合/欠拟合/发散/NaN）")
-    p.add_argument("--run_dir", required=True, help="训练输出目录（含 train_log.jsonl）")
-    p.add_argument("--log_vocab", type=float, default=None,
-                   help="随机猜测水平 log(V)，用于识别'停在随机水平'的欠拟合")
+    p.add_argument(
+        "--run_dir", required=True, help="训练输出目录（含 train_log.jsonl）"
+    )
+    p.add_argument(
+        "--log_vocab",
+        type=float,
+        default=None,
+        help="随机猜测水平 log(V)，用于识别'停在随机水平'的欠拟合",
+    )
     p.add_argument("--out", default=None, help="诊断 JSON 输出路径（默认打印）")
     args = p.parse_args()
     diag = diagnose_run_dir(args.run_dir, log_vocab=args.log_vocab)

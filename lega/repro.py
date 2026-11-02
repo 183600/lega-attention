@@ -10,6 +10,7 @@
 设计约定：所有字段必须是 JSON 原生类型（str/bool/int/float/None），
 以便直接写入结果 JSON 或 torch checkpoint（weights_only=True 反序列化）。
 """
+
 import hashlib
 import json
 import os
@@ -22,9 +23,13 @@ import sys
 import numpy as np
 import torch
 
-from .utils import (data_rng_state_fingerprint,
-                    deterministic_algorithms_warn_only,
-                    expected_rng_state_fingerprint, seed_int, strict_int)
+from .utils import (
+    data_rng_state_fingerprint,
+    deterministic_algorithms_warn_only,
+    expected_rng_state_fingerprint,
+    seed_int,
+    strict_int,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,14 +44,19 @@ PIPELINE_RUN_ID_ENV = "LEGA_PIPELINE_RUN_ID"
 # 科学代码身份：git 不可用（源码包/快照目录）或工作区状态记录缺失时，
 # 仍能对“产生结果的代码与配置”给出可复算的结构指纹。
 SOURCE_TREE_DIRS = ("lega", "scripts", "configs", "preregistration")
-SOURCE_TREE_FILES = ("run_all.py", "requirements.txt", "requirements-ci.txt",
-                     "requirements-lock.txt")
+SOURCE_TREE_FILES = (
+    "run_all.py",
+    "requirements.txt",
+    "requirements-ci.txt",
+    "requirements-lock.txt",
+)
 _SOURCE_TREE_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache"}
 _SOURCE_TREE_SKIP_SUFFIXES = (".pyc", ".pyo", ".tmp")
 
 LOCK_FILENAME = "requirements-lock.txt"
 _LOCK_PYTHON_RE = re.compile(
-    r"^#\s*python\s*:\s*([0-9]+(?:\.[0-9]+){1,2})\s*$", re.IGNORECASE)
+    r"^#\s*python\s*:\s*([0-9]+(?:\.[0-9]+){1,2})\s*$", re.IGNORECASE
+)
 
 
 def current_pipeline_run_id():
@@ -77,8 +87,7 @@ def source_tree_fingerprint(root: str = None) -> dict:
         if not os.path.isdir(base):
             continue
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(
-                d for d in dirnames if d not in _SOURCE_TREE_SKIP_DIRS)
+            dirnames[:] = sorted(d for d in dirnames if d not in _SOURCE_TREE_SKIP_DIRS)
             for name in sorted(filenames):
                 if name.endswith(_SOURCE_TREE_SKIP_SUFFIXES):
                     continue
@@ -107,8 +116,12 @@ def source_tree_fingerprint(root: str = None) -> dict:
         h.update(b"\0")
         h.update(entry["sha256"].encode("ascii"))
         h.update(b"\0")
-    return {"algo": "sha256-tree-v1", "digest": h.hexdigest()[:16],
-            "files": len(entries), "entries": entries}
+    return {
+        "algo": "sha256-tree-v1",
+        "digest": h.hexdigest()[:16],
+        "files": len(entries),
+        "entries": entries,
+    }
 
 
 def _canonical_package_name(name: str) -> str:
@@ -131,8 +144,14 @@ def parse_requirements_lock(path: str = None) -> dict:
     反过来阻塞实验。版本比较时忽略 ``+cpu``/``+cu121`` 等本地构建后缀。
     """
     path = os.path.abspath(path or os.path.join(ROOT, LOCK_FILENAME))
-    out = {"path": path, "present": False, "sha256": None,
-           "python": None, "packages": {}, "errors": []}
+    out = {
+        "path": path,
+        "present": False,
+        "sha256": None,
+        "python": None,
+        "packages": {},
+        "errors": [],
+    }
     if not os.path.isfile(path):
         out["errors"].append("lock 文件不存在")
         return out
@@ -158,8 +177,7 @@ def parse_requirements_lock(path: str = None) -> dict:
         if not line:
             continue
         if "==" not in line:
-            out["errors"].append(
-                f"第 {lineno} 行不是 name==version: {line}")
+            out["errors"].append(f"第 {lineno} 行不是 name==version: {line}")
             continue
         name, version = line.split("==", 1)
         name = name.split("[", 1)[0].strip()
@@ -190,8 +208,10 @@ def environment_lock_report(lock_path: str = None, runtime: dict = None) -> dict
     installed_known = isinstance(installed_raw, dict)
     installed = {}
     if installed_known:
-        installed = {_canonical_package_name(name): str(version)
-                     for name, version in installed_raw.items()}
+        installed = {
+            _canonical_package_name(name): str(version)
+            for name, version in installed_raw.items()
+        }
     python_expected = lock.get("python")
     python_actual = runtime.get("python")
     python_matches = None
@@ -211,8 +231,8 @@ def environment_lock_report(lock_path: str = None, runtime: dict = None) -> dict
                 entry["matches"] = _same_public_version(actual, expected)
                 if not entry["matches"]:
                     mismatches.append(
-                        {"package": name, "expected": expected,
-                         "installed": actual})
+                        {"package": name, "expected": expected, "installed": actual}
+                    )
         packages[name] = entry
     if not lock["present"] or not lock["packages"] or lock["errors"]:
         matches = None
@@ -239,8 +259,9 @@ def environment_lock_report(lock_path: str = None, runtime: dict = None) -> dict
     }
 
 
-def environment_gate(report: dict = None, *, smoke: bool = False,
-                     allow_mismatch: bool = False) -> dict:
+def environment_gate(
+    report: dict = None, *, smoke: bool = False, allow_mismatch: bool = False
+) -> dict:
     """把环境锁审计转换成流水线闸门结论（pass/warn/fail）。
 
     正式实验默认 fail-closed：环境与 ``requirements-lock.txt`` 不一致时中止，
@@ -249,23 +270,23 @@ def environment_gate(report: dict = None, *, smoke: bool = False,
     不应被当作正式结果的合格环境。``matches=None``（锁缺失/损坏/版本清单
     不可用）不能声称一致，但也不伪造失败，统一记为 warn 供人工核对。
     """
-    report = (report if isinstance(report, dict)
-              else environment_lock_report())
+    report = report if isinstance(report, dict) else environment_lock_report()
     matches = report.get("matches")
     problems = []
     for err in report.get("errors") or []:
         problems.append(f"lock 解析错误: {err}")
     if report.get("python_matches") is False:
         problems.append(
-            f"Python {report.get('runtime_python')} != lock "
-            f"{report.get('python')}")
+            f"Python {report.get('runtime_python')} != lock " f"{report.get('python')}"
+        )
     for name in report.get("missing") or []:
         problems.append(f"缺少锁定包: {name}")
     for mismatch in report.get("mismatches") or []:
         if isinstance(mismatch, dict):
             problems.append(
                 f"{mismatch.get('package')} {mismatch.get('installed')} != "
-                f"{mismatch.get('expected')}")
+                f"{mismatch.get('expected')}"
+            )
 
     if matches is True:
         status, code = "pass", "environment_lock_matches"
@@ -273,20 +294,28 @@ def environment_gate(report: dict = None, *, smoke: bool = False,
     elif matches is False:
         if allow_mismatch:
             status, code = "warn", "environment_lock_mismatch_allowed"
-            message = ("环境与 requirements-lock.txt 不一致，但已显式放行；"
-                       "本轮结果不得作为正式可复现结论")
+            message = (
+                "环境与 requirements-lock.txt 不一致，但已显式放行；"
+                "本轮结果不得作为正式可复现结论"
+            )
         elif smoke:
             status, code = "warn", "environment_lock_mismatch_smoke"
-            message = ("冒烟环境与 requirements-lock.txt 不一致；仅用于代码"
-                       "正确性检查，不产生正式结论")
+            message = (
+                "冒烟环境与 requirements-lock.txt 不一致；仅用于代码"
+                "正确性检查，不产生正式结论"
+            )
         else:
             status, code = "fail", "environment_lock_mismatch"
-            message = ("运行环境与 requirements-lock.txt 不一致；正式实验"
-                       "必须在锁定环境执行（诊断可显式 --allow_env_mismatch）")
+            message = (
+                "运行环境与 requirements-lock.txt 不一致；正式实验"
+                "必须在锁定环境执行（诊断可显式 --allow_env_mismatch）"
+            )
     else:
         status, code = "warn", "environment_lock_unverifiable"
-        message = ("无法核对运行环境与 requirements-lock.txt 是否一致"
-                   "（锁缺失/损坏/版本清单不可用）")
+        message = (
+            "无法核对运行环境与 requirements-lock.txt 是否一致"
+            "（锁缺失/损坏/版本清单不可用）"
+        )
 
     return {
         "status": status,
@@ -310,21 +339,31 @@ def environment_gate(report: dict = None, *, smoke: bool = False,
 # 只在结果文件带 batch_sha256（可区分“最小手写/旧格式”与真实 CLI 产物）
 # 时强制要求，避免把 checks 子集当成完整闸门；旧文件缺失时保持兼容，
 # 但会记录 missing_checks=None 而不是伪造“完整”。
-SANITY_REQUIRED_CHECKS = frozenset({
-    "batch_contract_ok",
-    "loss_below_threshold", "token_acc_above_threshold", "loss_decreased",
-    "finite", "loss_requires_grad",
-    "gradient_nonzero_first_step", "all_params_get_grads",
-    "no_zero_grads_first_step", "grads_finite",
-    "train_loss_matches_direct_logits", "next_token_shift_consistent",
-    "initial_loss_near_log_vocab", "regularization_disabled",
-})
+SANITY_REQUIRED_CHECKS = frozenset(
+    {
+        "batch_contract_ok",
+        "loss_below_threshold",
+        "token_acc_above_threshold",
+        "loss_decreased",
+        "finite",
+        "loss_requires_grad",
+        "gradient_nonzero_first_step",
+        "all_params_get_grads",
+        "no_zero_grads_first_step",
+        "grads_finite",
+        "train_loss_matches_direct_logits",
+        "next_token_shift_consistent",
+        "initial_loss_near_log_vocab",
+        "regularization_disabled",
+    }
+)
 
 
 def _git(args, cwd):
     try:
-        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True,
-                           text=True, timeout=15)
+        r = subprocess.run(
+            ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=15
+        )
     except Exception:
         return None
     return r.stdout.strip() if r.returncode == 0 else None
@@ -333,8 +372,7 @@ def _git(args, cwd):
 def _git_bytes(args, cwd):
     """git 的原始字节输出（diff --binary 必须按字节哈希/落盘，不能经过文本解码）。"""
     try:
-        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True,
-                           timeout=15)
+        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, timeout=15)
     except Exception:
         return None
     return r.stdout if r.returncode == 0 else None
@@ -345,8 +383,7 @@ def git_info(root: str = None) -> dict:
     root = root or ROOT
     commit = _git(["rev-parse", "HEAD"], root)
     if not commit:
-        return {"commit": None, "commit_short": None, "branch": None,
-                "dirty": None}
+        return {"commit": None, "commit_short": None, "branch": None, "dirty": None}
     status = _git(["status", "--porcelain"], root)
     return {
         "commit": commit,
@@ -388,8 +425,7 @@ def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
     else:
         tracked = tracked_raw
         truncated = False
-    raw = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"],
-                     root)
+    raw = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"], root)
     if raw is None:
         # 无法列出未跟踪文件时补丁不完整：不能把“空列表”当成“没有未跟踪
         # 文件”，否则 diff_sha256 会静默漏掉新代码且 truncated 仍为 False。
@@ -404,9 +440,11 @@ def _worktree_diff_bytes(root: str, max_untracked_bytes: int = 8 << 20):
             break
         try:
             r = subprocess.run(
-                ["git", "diff", "--no-index", "--binary", "--",
-                 os.devnull, rel],
-                cwd=root, capture_output=True, timeout=15)
+                ["git", "diff", "--no-index", "--binary", "--", os.devnull, rel],
+                cwd=root,
+                capture_output=True,
+                timeout=15,
+            )
         except Exception:
             truncated = True
             continue
@@ -438,21 +476,35 @@ def worktree_state(root: str = None, max_files: int = 500) -> dict:
     root = root or ROOT
     commit = _git(["rev-parse", "--verify", "HEAD"], root)
     if not commit:
-        return {"available": False, "head": None, "dirty": None,
-                "changed_files": None, "untracked_files": None,
-                "n_changed": None, "n_untracked": None,
-                "diff_sha256": None, "diff_bytes": None,
-                "diff_truncated": False}
+        return {
+            "available": False,
+            "head": None,
+            "dirty": None,
+            "changed_files": None,
+            "untracked_files": None,
+            "n_changed": None,
+            "n_untracked": None,
+            "diff_sha256": None,
+            "diff_bytes": None,
+            "diff_truncated": False,
+        }
     # 用 -z 取出 NUL 分隔的原始字节路径：普通 porcelain 会给含空格/非 ASCII
     # 的路径加引号并做 C 风格转义，line[3:] 记录下来的不是真实文件名。
     # -z 同时让重命名条目以 `XY new\0old\0` 输出，不会把 " -> " 混进路径。
     raw_status = _git_bytes(["status", "--porcelain", "-z"], root)
     if raw_status is None:
-        return {"available": False, "head": commit, "dirty": None,
-                "changed_files": None, "untracked_files": None,
-                "n_changed": None, "n_untracked": None,
-                "diff_sha256": None, "diff_bytes": None,
-                "diff_truncated": False}
+        return {
+            "available": False,
+            "head": commit,
+            "dirty": None,
+            "changed_files": None,
+            "untracked_files": None,
+            "n_changed": None,
+            "n_untracked": None,
+            "diff_sha256": None,
+            "diff_bytes": None,
+            "diff_truncated": False,
+        }
     changed, untracked = [], []
     fields = raw_status.split(b"\0")
     i = 0
@@ -498,6 +550,7 @@ def provenance_drift(start: dict, end: dict) -> dict:
     worktree 用 diff_sha256 比较（含未跟踪文件补丁），因此 commit 不变但
     工作区代码被改动也能发现。
     """
+
     def _get(d, key):
         return d.get(key) if isinstance(d, dict) else None
 
@@ -516,8 +569,9 @@ def provenance_drift(start: dict, end: dict) -> dict:
     else:
         checks["code_commit"] = s_commit == e_commit
         if s_commit != e_commit:
-            mismatches.append({"field": "code_commit", "start": s_commit,
-                               "end": e_commit})
+            mismatches.append(
+                {"field": "code_commit", "start": s_commit, "end": e_commit}
+            )
 
     s_avail, e_avail = s_wt.get("available"), e_wt.get("available")
     if not s_avail or not e_avail:
@@ -527,10 +581,13 @@ def provenance_drift(start: dict, end: dict) -> dict:
         same = s_wt.get("diff_sha256") == e_wt.get("diff_sha256")
         if not same:
             checks["worktree_diff_sha256"] = False
-            mismatches.append({
-                "field": "worktree_diff_sha256",
-                "start": s_wt.get("diff_sha256"),
-                "end": e_wt.get("diff_sha256")})
+            mismatches.append(
+                {
+                    "field": "worktree_diff_sha256",
+                    "start": s_wt.get("diff_sha256"),
+                    "end": e_wt.get("diff_sha256"),
+                }
+            )
         elif s_wt.get("diff_truncated") or e_wt.get("diff_truncated"):
             checks["worktree_diff_sha256"] = None
             unknown.append("worktree_diff_sha256")
@@ -545,8 +602,9 @@ def provenance_drift(start: dict, end: dict) -> dict:
     else:
         checks["data_fingerprint"] = s_data == e_data
         if s_data != e_data:
-            mismatches.append({"field": "data_fingerprint", "start": s_data,
-                               "end": e_data})
+            mismatches.append(
+                {"field": "data_fingerprint", "start": s_data, "end": e_data}
+            )
 
     # 源码树指纹独立于 git：旧快照没有该字段时保持兼容（不把“未记录”变成
     # 新的 unknown，否则历史台账会被误判为不可核对）；只有一端记录时才记
@@ -566,17 +624,20 @@ def provenance_drift(start: dict, end: dict) -> dict:
         else:
             checks["source_tree_digest"] = s_digest == e_digest
             if s_digest != e_digest:
-                mismatches.append({"field": "source_tree_digest",
-                                   "start": s_digest, "end": e_digest})
+                mismatches.append(
+                    {"field": "source_tree_digest", "start": s_digest, "end": e_digest}
+                )
 
     return {
         "checked": checks,
         "unknown": unknown,
         "changed": bool(mismatches),
         "mismatches": mismatches,
-        "note": ("changed=True 表示实验期间代码或数据身份发生变化；该轮结果"
-                 "不能声称全程对应开始时记录的版本，需要按完整时长重跑或"
-                 "在台账中显式标注。"),
+        "note": (
+            "changed=True 表示实验期间代码或数据身份发生变化；该轮结果"
+            "不能声称全程对应开始时记录的版本，需要按完整时长重跑或"
+            "在台账中显式标注。"
+        ),
     }
 
 
@@ -589,8 +650,12 @@ def write_worktree_patch(path: str, root: str = None) -> dict:
     """
     diff, truncated = _worktree_diff_bytes(root or ROOT)
     if not diff:
-        return {"patch_file": None, "patch_sha256": None, "patch_bytes": 0,
-                "patch_truncated": truncated}
+        return {
+            "patch_file": None,
+            "patch_sha256": None,
+            "patch_bytes": 0,
+            "patch_truncated": truncated,
+        }
     d = os.path.dirname(os.path.abspath(path))
     if d:
         os.makedirs(d, exist_ok=True)
@@ -598,9 +663,12 @@ def write_worktree_patch(path: str, root: str = None) -> dict:
     with open(tmp, "wb") as f:
         f.write(diff)
     os.replace(tmp, path)
-    return {"patch_file": os.path.abspath(path),
-            "patch_sha256": hashlib.sha256(diff).hexdigest(),
-            "patch_bytes": len(diff), "patch_truncated": truncated}
+    return {
+        "patch_file": os.path.abspath(path),
+        "patch_sha256": hashlib.sha256(diff).hexdigest(),
+        "patch_bytes": len(diff),
+        "patch_truncated": truncated,
+    }
 
 
 def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
@@ -620,14 +688,20 @@ def _file_entry(path: str) -> dict:
     # overlayfs 等文件系统时间戳粒度粗，同尺寸内容替换后 ctime/mtime 可能
     # 完全不变（ctime 也可能被粗粒度时钟吞掉）。缓存命中时仍会重算 SHA-256，
     # 见 data_fingerprint。
-    return {"name": os.path.basename(path), "size": int(st.st_size),
-            "mtime_ns": int(st.st_mtime_ns),
-            "ctime_ns": int(st.st_ctime_ns), "sha256": sha256_file(path)}
+    return {
+        "name": os.path.basename(path),
+        "size": int(st.st_size),
+        "mtime_ns": int(st.st_mtime_ns),
+        "ctime_ns": int(st.st_ctime_ns),
+        "sha256": sha256_file(path),
+    }
 
 
 def _digest_of(entries) -> str:
-    canon = "|".join(f"{e['name']}:{e['size']}:{e['sha256']}"
-                     for e in sorted(entries, key=lambda e: e["name"]))
+    canon = "|".join(
+        f"{e['name']}:{e['size']}:{e['sha256']}"
+        for e in sorted(entries, key=lambda e: e["name"])
+    )
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
 
@@ -642,8 +716,11 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
     不能直接信任缓存里的旧 SHA；重算结果不一致时整体重建。旧缓存没有
     ctime 字段时同样视为未命中并重建。
     """
-    names = [n for n in ("train.bin", "val.bin", "test.bin", "meta.json")
-             if os.path.exists(os.path.join(data_dir, n))]
+    names = [
+        n
+        for n in ("train.bin", "val.bin", "test.bin", "meta.json")
+        if os.path.exists(os.path.join(data_dir, n))
+    ]
     # 先确认目录里确有可指纹化文件，再读取缓存：否则一个 files=[] 的空缓存
     # 能通过下面的“文件集完全一致”校验并直接返回，绕过“无数据文件”报错。
     if not names:
@@ -659,14 +736,19 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
             cached = None
     # 结构校验：缓存是纯派生数据，语法合法但结构畸形（非对象、files 非列表、
     # 元素非对象）时必须视为未命中并重建，而不是抛 AttributeError/TypeError。
-    if isinstance(cached, dict) and cached.get("algo") == FINGERPRINT_ALGO \
-            and isinstance(cached.get("digest"), str) \
-            and isinstance(cached.get("files"), list) \
-            and all(isinstance(e, dict)
-                    and isinstance(e.get("sha256"), str)
-                    and len(e["sha256"]) == 64
-                    for e in cached["files"]) \
-            and [e.get("name") for e in cached["files"]] == names:
+    if (
+        isinstance(cached, dict)
+        and cached.get("algo") == FINGERPRINT_ALGO
+        and isinstance(cached.get("digest"), str)
+        and isinstance(cached.get("files"), list)
+        and all(
+            isinstance(e, dict)
+            and isinstance(e.get("sha256"), str)
+            and len(e["sha256"]) == 64
+            for e in cached["files"]
+        )
+        and [e.get("name") for e in cached["files"]] == names
+    ):
         fresh = True
         for e in cached["files"]:
             path = os.path.join(data_dir, e["name"])
@@ -675,10 +757,12 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
             except OSError:
                 fresh = False
                 break
-            if (e.get("ctime_ns") is None
-                    or int(st.st_size) != e.get("size")
-                    or int(st.st_mtime_ns) != e.get("mtime_ns")
-                    or int(st.st_ctime_ns) != e.get("ctime_ns")):
+            if (
+                e.get("ctime_ns") is None
+                or int(st.st_size) != e.get("size")
+                or int(st.st_mtime_ns) != e.get("mtime_ns")
+                or int(st.st_ctime_ns) != e.get("ctime_ns")
+            ):
                 fresh = False
                 break
             # stat 三相等仍不足以证明内容未变：粗粒度时间戳文件系统上，
@@ -696,12 +780,15 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
-                current_tokenizer = (meta.get("tokenizer")
-                                     if isinstance(meta, dict) else None)
+                current_tokenizer = (
+                    meta.get("tokenizer") if isinstance(meta, dict) else None
+                )
             except (OSError, ValueError):
                 current_tokenizer = None
-            if (cached.get("digest") == _digest_of(cached["files"])
-                    and cached.get("tokenizer") == current_tokenizer):
+            if (
+                cached.get("digest") == _digest_of(cached["files"])
+                and cached.get("tokenizer") == current_tokenizer
+            ):
                 return cached
     entries = [_file_entry(os.path.join(data_dir, n)) for n in names]
     tokenizer = None
@@ -711,12 +798,15 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
                 meta = json.load(f)
             # 语法合法但结构畸形（数组/标量）的 meta 视为无 tokenizer，
             # 与缓存结构校验同口径，不让指纹计算崩溃。
-            tokenizer = (meta.get("tokenizer")
-                         if isinstance(meta, dict) else None)
+            tokenizer = meta.get("tokenizer") if isinstance(meta, dict) else None
         except (OSError, ValueError):
             tokenizer = None
-    fp = {"algo": FINGERPRINT_ALGO, "digest": _digest_of(entries),
-          "tokenizer": tokenizer, "files": entries}
+    fp = {
+        "algo": FINGERPRINT_ALGO,
+        "digest": _digest_of(entries),
+        "tokenizer": tokenizer,
+        "files": entries,
+    }
     if use_cache:
         try:
             with open(cache_path + ".tmp", "w", encoding="utf-8") as f:
@@ -731,6 +821,7 @@ def _pkg_version(name: str):
     """已安装包版本；未安装（可选依赖）时返回 None。"""
     try:
         from importlib import metadata
+
         return metadata.version(name)
     except Exception:
         return None
@@ -751,6 +842,7 @@ def _installed_distributions() -> dict:
         return dict(_INSTALLED_DIST_CACHE)
     try:
         from importlib import metadata
+
         dists = {}
         for dist in metadata.distributions():
             try:
@@ -761,7 +853,8 @@ def _installed_distributions() -> dict:
             if isinstance(name, str) and name.strip() and version:
                 dists.setdefault(name.strip(), str(version))
         _INSTALLED_DIST_CACHE = dict(
-            sorted(dists.items(), key=lambda kv: kv[0].lower()))
+            sorted(dists.items(), key=lambda kv: kv[0].lower())
+        )
     except Exception:
         _INSTALLED_DIST_CACHE = {}
     return dict(_INSTALLED_DIST_CACHE)
@@ -775,15 +868,16 @@ def runtime_info(device: str = None) -> dict:
         "numpy": np.__version__,
         "platform": platform.platform(),
         "cuda": torch.version.cuda,
-        "cudnn": (torch.backends.cudnn.version() if torch.backends.cudnn.is_available()
-                  else None),
+        "cudnn": (
+            torch.backends.cudnn.version()
+            if torch.backends.cudnn.is_available()
+            else None
+        ),
         "device": device,
-        "gpu": (torch.cuda.get_device_name(0)
-                if torch.cuda.is_available() else None),
+        "gpu": (torch.cuda.get_device_name(0) if torch.cuda.is_available() else None),
         # 影响产物的可选依赖版本（分词器变更会改变 token 流，绘图库影响图表），
         # 未安装时显式为 None，避免“环境已记录”的错觉
-        "packages": {name: _pkg_version(name)
-                     for name in ("tiktoken", "matplotlib")},
+        "packages": {name: _pkg_version(name) for name in ("tiktoken", "matplotlib")},
         # 完整依赖栈（含间接依赖）：requirements 只声明直接依赖，环境漂移
         # 往往发生在未固定的传递依赖上。
         "installed_distributions": _installed_distributions(),
@@ -792,8 +886,7 @@ def runtime_info(device: str = None) -> dict:
         "cudnn_enabled": bool(torch.backends.cudnn.enabled),
         "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
         # True=仅告警而非严格模式；只记 deterministic_algorithms 会夸大数据一致性
-        "deterministic_algorithms_warn_only":
-            deterministic_algorithms_warn_only(),
+        "deterministic_algorithms_warn_only": deterministic_algorithms_warn_only(),
         "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
         # cudnn conv 默认 allow_tf32=True：不记录会把“训练实际用 TF32”漏掉
         "tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
@@ -805,10 +898,16 @@ def runtime_info(device: str = None) -> dict:
         "hostname": socket.gethostname(),
         "python_executable": sys.executable,
         "cpu_count": os.cpu_count(),
-        "threads_env": {k: os.environ.get(k) for k in
-                        ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
-                         "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
-                        if os.environ.get(k) is not None},
+        "threads_env": {
+            k: os.environ.get(k)
+            for k in (
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+            )
+            if os.environ.get(k) is not None
+        },
     }
     return info
 
@@ -817,8 +916,7 @@ def runtime_info(device: str = None) -> dict:
 # 完整 runtime_info 中，但它们变化不必然意味着结果不可比；把它们混进
 # “是否同一运行环境”的硬判定会产生大量假阳性。cuda/cudnn/gpu 为 None 时
 # 表示该构建/主机没有对应组件（如 CPU-only），两端都为 None 视为一致。
-RUNTIME_IDENTITY_FIELDS = ("python", "torch", "numpy", "cuda", "cudnn",
-                           "gpu")
+RUNTIME_IDENTITY_FIELDS = ("python", "torch", "numpy", "cuda", "cudnn", "gpu")
 
 
 def runtime_drift(train_runtime, eval_runtime) -> dict:
@@ -838,9 +936,12 @@ def runtime_drift(train_runtime, eval_runtime) -> dict:
       * ``unknown_fields``：无法核对的字段（任一端缺失），不当作一致。
     """
     if not isinstance(train_runtime, dict) or not isinstance(eval_runtime, dict):
-        return {"matches": None, "mismatches": [],
-                "unknown_fields": list(RUNTIME_IDENTITY_FIELDS),
-                "note": "缺少可比较的训练/评测运行环境记录"}
+        return {
+            "matches": None,
+            "mismatches": [],
+            "unknown_fields": list(RUNTIME_IDENTITY_FIELDS),
+            "note": "缺少可比较的训练/评测运行环境记录",
+        }
     mismatches, unknown = [], []
     for field in RUNTIME_IDENTITY_FIELDS:
         # 字段存在但值为 None 是有效事实（如 CPU-only 构建没有 CUDA/cuDNN），
@@ -851,20 +952,26 @@ def runtime_drift(train_runtime, eval_runtime) -> dict:
         train_value = train_runtime.get(field)
         eval_value = eval_runtime.get(field)
         if str(train_value) != str(eval_value):
-            mismatches.append({"field": field, "train": train_value,
-                               "eval": eval_value})
+            mismatches.append(
+                {"field": field, "train": train_value, "eval": eval_value}
+            )
     if mismatches:
         matches = False
     elif unknown:
         matches = None
     else:
         matches = True
-    return {"matches": matches, "mismatches": mismatches,
-            "unknown_fields": unknown,
-            "note": ("matches=False 表示评测使用的 Python/PyTorch/NumPy/"
-                     "CUDA/cuDNN 或 GPU 型号与训练清单不同；同一 commit+数据"
-                     "也可能因浮点内核差异得到不同数值，结果不得声称与训练"
-                     "环境完全相同。")}
+    return {
+        "matches": matches,
+        "mismatches": mismatches,
+        "unknown_fields": unknown,
+        "note": (
+            "matches=False 表示评测使用的 Python/PyTorch/NumPy/"
+            "CUDA/cuDNN 或 GPU 型号与训练清单不同；同一 commit+数据"
+            "也可能因浮点内核差异得到不同数值，结果不得声称与训练"
+            "环境完全相同。"
+        ),
+    }
 
 
 def sanity_summary(path: str) -> dict:
@@ -874,31 +981,44 @@ def sanity_summary(path: str) -> dict:
     检查了哪些项、当时结果文件是什么”。文件缺失/损坏时不阻塞训练，但摘要
     显式 present=False（不假装通过）。
     """
-    out = {"file": os.path.abspath(path) if path else None, "present": False,
-           "sha256": None, "passed": None, "variant": None, "seed": None,
-           "failed_checks": None,
-           # passed 与 checks 是否自洽。损坏/手改的 sanity JSON 可能写
-           # "passed": true 却保留失败检查项；只有两者同时通过才算证据。
-           "checks_consistent": None,
-           # 非 null 表示字段结构损坏：调用方必须按“未通过/不可验证”
-           # 处理，不能把 malformed 当成 legacy 的“无法核对”而放行。
-           "malformed": False,
-           # 完整检查覆盖：缺项时即使其余项全 true 也不能算“完整闸门”。
-           "missing_checks": None, "checks_complete": None,
-           # 固定批内容指纹与实际执行的优化步数（计划 vs 实际）。
-           "batch_sha256": None,
-           "steps_planned": None, "steps_executed": None,
-           "steps_complete": None,
-           "initial_loss": None, "final_loss": None,
-           "token_acc": None,
-           # 证据身份：只有与当前 run 的 config/data/git 一致时，PASS 才能
-           # 算作本 run 的代码正确性闸门（见 sanity_identity_check）
-           "config_sha256": None, "data_fingerprint": None,
-           "git_commit": None, "git_dirty": None,
-           "worktree_diff_sha256": None, "worktree_recorded": False,
-           "worktree_available": None,
-           # 种子生效证据（sanity 自己也是 set_seed 后的产物）
-           "seed_verified": None, "data_order_rng_fingerprint": None}
+    out = {
+        "file": os.path.abspath(path) if path else None,
+        "present": False,
+        "sha256": None,
+        "passed": None,
+        "variant": None,
+        "seed": None,
+        "failed_checks": None,
+        # passed 与 checks 是否自洽。损坏/手改的 sanity JSON 可能写
+        # "passed": true 却保留失败检查项；只有两者同时通过才算证据。
+        "checks_consistent": None,
+        # 非 null 表示字段结构损坏：调用方必须按“未通过/不可验证”
+        # 处理，不能把 malformed 当成 legacy 的“无法核对”而放行。
+        "malformed": False,
+        # 完整检查覆盖：缺项时即使其余项全 true 也不能算“完整闸门”。
+        "missing_checks": None,
+        "checks_complete": None,
+        # 固定批内容指纹与实际执行的优化步数（计划 vs 实际）。
+        "batch_sha256": None,
+        "steps_planned": None,
+        "steps_executed": None,
+        "steps_complete": None,
+        "initial_loss": None,
+        "final_loss": None,
+        "token_acc": None,
+        # 证据身份：只有与当前 run 的 config/data/git 一致时，PASS 才能
+        # 算作本 run 的代码正确性闸门（见 sanity_identity_check）
+        "config_sha256": None,
+        "data_fingerprint": None,
+        "git_commit": None,
+        "git_dirty": None,
+        "worktree_diff_sha256": None,
+        "worktree_recorded": False,
+        "worktree_available": None,
+        # 种子生效证据（sanity 自己也是 set_seed 后的产物）
+        "seed_verified": None,
+        "data_order_rng_fingerprint": None,
+    }
     if not path or not os.path.exists(path):
         return out
     out["present"] = True
@@ -921,8 +1041,7 @@ def sanity_summary(path: str) -> dict:
             out["malformed"] = True
         else:
             # 只有真正的 JSON true 才算通过：0/1/"true"/null 都不能伪装成功。
-            out["failed_checks"] = sorted(k for k, v in checks.items()
-                                          if v is not True)
+            out["failed_checks"] = sorted(k for k, v in checks.items() if v is not True)
             out["checks_consistent"] = not out["failed_checks"]
     elif checks is not None:
         # checks 存在但不是对象（数组/字符串等）：结构已损坏，不能当作
@@ -931,8 +1050,11 @@ def sanity_summary(path: str) -> dict:
         out["malformed"] = True
     batch = rec.get("batch_sha256")
     if batch is not None:
-        if (not isinstance(batch, str) or len(batch) != 64
-                or any(ch not in "0123456789abcdef" for ch in batch)):
+        if (
+            not isinstance(batch, str)
+            or len(batch) != 64
+            or any(ch not in "0123456789abcdef" for ch in batch)
+        ):
             out["malformed"] = True
         else:
             out["batch_sha256"] = batch
@@ -965,22 +1087,21 @@ def sanity_summary(path: str) -> dict:
     if modern_marker:
         # 现代 sanity CLI 一定同时写计划/执行步数：只保留其中一个字段即可
         # 绕过“计划步数未跑完”的一致性检查，必须按不完整证据处理。
-        if (out["steps_planned"] is None
-                or out["steps_executed"] is None):
+        if out["steps_planned"] is None or out["steps_executed"] is None:
             out["steps_complete"] = False
             out["malformed"] = True
         else:
-            out["steps_complete"] = (out["steps_planned"] > 0
-                                     and out["steps_executed"]
-                                     == out["steps_planned"])
+            out["steps_complete"] = (
+                out["steps_planned"] > 0
+                and out["steps_executed"] == out["steps_planned"]
+            )
             if out["steps_complete"] is False:
                 # 计划步数未跑完（NaN/断流提前 break）却声明 PASS：证据自相矛盾。
                 out["malformed"] = True
-    elif (out["steps_planned"] is not None
-          and out["steps_executed"] is not None):
-        out["steps_complete"] = (out["steps_planned"] > 0
-                                 and out["steps_executed"]
-                                 == out["steps_planned"])
+    elif out["steps_planned"] is not None and out["steps_executed"] is not None:
+        out["steps_complete"] = (
+            out["steps_planned"] > 0 and out["steps_executed"] == out["steps_planned"]
+        )
         if out["steps_complete"] is False:
             out["malformed"] = True
     raw_passed = rec.get("passed")
@@ -1027,8 +1148,7 @@ def sanity_summary(path: str) -> dict:
             if isinstance(fp, str):
                 # 指纹必须是本项目的 16 位小写十六进制短哈希；任意字符串
                 # （空串/64 位 SHA/拼写错误）不能冒充可核对的随机源证据。
-                if (len(fp) != 16
-                        or any(ch not in "0123456789abcdef" for ch in fp)):
+                if len(fp) != 16 or any(ch not in "0123456789abcdef" for ch in fp):
                     out["malformed"] = True
                 else:
                     out["data_order_rng_fingerprint"] = fp
@@ -1070,8 +1190,7 @@ def sanity_identity_check(sanity: dict, run: dict) -> dict:
     run = run if isinstance(run, dict) else {}
     git = run.get("git") if isinstance(run.get("git"), dict) else {}
     data = run.get("data") if isinstance(run.get("data"), dict) else {}
-    worktree = (run.get("worktree")
-                if isinstance(run.get("worktree"), dict) else {})
+    worktree = run.get("worktree") if isinstance(run.get("worktree"), dict) else {}
     current = {
         "variant": run.get("variant"),
         "config_sha256": run.get("config_sha256"),
@@ -1079,8 +1198,7 @@ def sanity_identity_check(sanity: dict, run: dict) -> dict:
         "git_commit": git.get("commit"),
         "seed": run.get("seed"),
     }
-    hard_fields = ("variant", "config_sha256", "data_fingerprint",
-                   "git_commit")
+    hard_fields = ("variant", "config_sha256", "data_fingerprint", "git_commit")
     matches, mismatches, unknown = {}, [], []
     for key, want in current.items():
         got = sanity.get(key)
@@ -1104,8 +1222,11 @@ def sanity_identity_check(sanity: dict, run: dict) -> dict:
     # manifest 取到 worktree 才会记录 diff），保持向后兼容；但显式写了
     # 非布尔值说明记录已损坏，只能按 unknown 处理。
     sanity_avail = sanity.get("worktree_available", recorded)
-    if (not recorded or sanity_avail is not True
-            or worktree.get("available") is not True):
+    if (
+        not recorded
+        or sanity_avail is not True
+        or worktree.get("available") is not True
+    ):
         # 任一侧工作区不可用（如非 git 目录）时无法核对：记 unknown，
         # 不因“无法核对”直接推翻旧证据。
         matches["worktree_diff_sha256"] = None
@@ -1124,15 +1245,23 @@ def sanity_identity_check(sanity: dict, run: dict) -> dict:
     }
 
 
-def build_run_manifest(tag: str, variant: str, seed: int, config_path: str,
-                       data_dir: str, device: str, argv=None,
-                       sanity: dict = None) -> dict:
+def build_run_manifest(
+    tag: str,
+    variant: str,
+    seed: int,
+    config_path: str,
+    data_dir: str,
+    device: str,
+    argv=None,
+    sanity: dict = None,
+) -> dict:
     """单个 (变体, 种子) run 的完整溯源清单。
 
     sanity（可选）为 lega.sanity 结果的紧凑摘要（见 sanity_summary）：把
     “开训前通过小批量过拟合闸门”的代码正确性证据绑定到本 run 的 checkpoint。
     """
     from .utils import now_str, seed_report, strict_int
+
     config_path = os.path.abspath(config_path)
     data_dir = os.path.abspath(data_dir)
     # manifest 的种子字段必须与 seed_report 同口径：int(1.5)==1、int(True)==1
@@ -1179,8 +1308,7 @@ def test_data_fingerprint(data_dir: str):
         return None
 
 
-def verify_run(run_dir: str, data_dir: str = None,
-               strict: bool = False) -> dict:
+def verify_run(run_dir: str, data_dir: str = None, strict: bool = False) -> dict:
     """核验单个训练 run 目录的完成状态、产物哈希与溯源证据。
 
     检查项按“能否独立复算”组织：completion/artifacts/config/checkpoint
@@ -1226,13 +1354,15 @@ def verify_run(run_dir: str, data_dir: str = None,
 
     completion = manifest.get("completion")
     if not isinstance(completion, dict):
-        record("completion", "warn",
-               "旧清单缺少 completion，无法证明训练正常收尾")
+        record("completion", "warn", "旧清单缺少 completion，无法证明训练正常收尾")
     elif completion.get("status") == "completed":
         record("completion", "pass", "completion.status=completed")
     else:
-        record("completion", "fail",
-               f"completion.status={completion.get('status')!r}，不是 completed")
+        record(
+            "completion",
+            "fail",
+            f"completion.status={completion.get('status')!r}，不是 completed",
+        )
 
     config_path = os.path.join(run_dir, "config_used.json")
     if not os.path.isfile(config_path):
@@ -1241,11 +1371,11 @@ def verify_run(run_dir: str, data_dir: str = None,
         actual = sha256_file(config_path)
         expected = manifest.get("config_used_sha256")
         if not isinstance(expected, str):
-            record("config", "warn",
-                   "清单缺少 config_used_sha256，无法核对解析后配置")
+            record("config", "warn", "清单缺少 config_used_sha256，无法核对解析后配置")
         elif actual != expected:
-            record("config", "fail",
-                   f"config_used.json 哈希不匹配: {actual} != {expected}")
+            record(
+                "config", "fail", f"config_used.json 哈希不匹配: {actual} != {expected}"
+            )
         else:
             record("config", "pass", "config_used.json 哈希匹配")
 
@@ -1282,15 +1412,18 @@ def verify_run(run_dir: str, data_dir: str = None,
                 actual_bytes = int(os.path.getsize(path))
                 if actual_bytes != expected_bytes:
                     problems.append(
-                        f"{name}: 字节数 {actual_bytes} != {expected_bytes}")
+                        f"{name}: 字节数 {actual_bytes} != {expected_bytes}"
+                    )
         if problems:
             record("artifacts", "fail", "; ".join(problems))
         else:
-            record("artifacts", "pass",
-                   f"{len(artifacts)} 个产物哈希与大小均匹配")
+            record("artifacts", "pass", f"{len(artifacts)} 个产物哈希与大小均匹配")
 
-    checkpoints = [name for name in ("model.pt", "model_best.pt")
-                   if os.path.isfile(os.path.join(run_dir, name))]
+    checkpoints = [
+        name
+        for name in ("model.pt", "model_best.pt")
+        if os.path.isfile(os.path.join(run_dir, name))
+    ]
     if not checkpoints:
         record("checkpoint", "fail", "model.pt/model_best.pt 均不存在")
     else:
@@ -1308,8 +1441,7 @@ def verify_run(run_dir: str, data_dir: str = None,
     elif seed is not None:
         problems = []
         if seed_report.get("seed") != seed:
-            problems.append(
-                f"seed_report.seed={seed_report.get('seed')!r} != {seed}")
+            problems.append(f"seed_report.seed={seed_report.get('seed')!r} != {seed}")
         if seed_report.get("seed_verified") is not True:
             problems.append("seed_verified 不是 true")
         actual_fp = seed_report.get("rng_fingerprints")
@@ -1345,8 +1477,7 @@ def verify_run(run_dir: str, data_dir: str = None,
         if isinstance(identity, dict):
             hard = identity.get("hard_mismatches")
             if hard:
-                problems.append(
-                    "sanity 硬身份不匹配: " + ", ".join(map(str, hard)))
+                problems.append("sanity 硬身份不匹配: " + ", ".join(map(str, hard)))
             if identity.get("verified") is False:
                 missing.append("sanity identity.verified=false")
         elif sanity.get("present") is True:
@@ -1359,8 +1490,9 @@ def verify_run(run_dir: str, data_dir: str = None,
             record("sanity", "pass", "sanity 闸门证据自洽")
 
     manifest_data = manifest.get("data")
-    expected_data = (manifest_data.get("digest")
-                     if isinstance(manifest_data, dict) else None)
+    expected_data = (
+        manifest_data.get("digest") if isinstance(manifest_data, dict) else None
+    )
     if not data_dir:
         record("data", "warn", "未提供 data_dir，无法重算数据指纹")
     else:
@@ -1372,14 +1504,16 @@ def verify_run(run_dir: str, data_dir: str = None,
             if not isinstance(expected_data, str):
                 record("data", "warn", "清单缺少 data.digest")
             elif actual_data != expected_data:
-                record("data", "fail",
-                       f"数据指纹不匹配: {actual_data} != {expected_data}")
+                record(
+                    "data", "fail", f"数据指纹不匹配: {actual_data} != {expected_data}"
+                )
             else:
                 record("data", "pass", "数据指纹匹配")
 
     manifest_source = manifest.get("source_tree")
-    expected_source = (manifest_source.get("digest")
-                       if isinstance(manifest_source, dict) else None)
+    expected_source = (
+        manifest_source.get("digest") if isinstance(manifest_source, dict) else None
+    )
     try:
         actual_source = source_tree_fingerprint()["digest"]
     except Exception as e:
@@ -1388,8 +1522,11 @@ def verify_run(run_dir: str, data_dir: str = None,
         if not isinstance(expected_source, str):
             record("source_tree", "warn", "清单缺少 source_tree.digest")
         elif actual_source != expected_source:
-            record("source_tree", "warn",
-                   "当前源码树与训练时不同；重放前需 checkout 对应版本")
+            record(
+                "source_tree",
+                "warn",
+                "当前源码树与训练时不同；重放前需 checkout 对应版本",
+            )
         else:
             record("source_tree", "pass", "源码树指纹匹配")
 
@@ -1403,9 +1540,11 @@ def verify_run(run_dir: str, data_dir: str = None,
             problems.append("训练时环境与 lock 不一致")
         manifest_lock_sha = manifest_lock.get("lock_sha256")
         current_lock_sha = current_lock.get("lock_sha256")
-        if (isinstance(manifest_lock_sha, str)
-                and isinstance(current_lock_sha, str)
-                and manifest_lock_sha != current_lock_sha):
+        if (
+            isinstance(manifest_lock_sha, str)
+            and isinstance(current_lock_sha, str)
+            and manifest_lock_sha != current_lock_sha
+        ):
             problems.append("当前 lock 文件与训练时不同")
         if current_lock.get("matches") is False:
             problems.append("当前环境与 lock 不一致")
@@ -1414,14 +1553,12 @@ def verify_run(run_dir: str, data_dir: str = None,
         elif manifest_lock.get("matches") is True:
             record("environment_lock", "pass", "训练与当前环境均匹配 lock")
         else:
-            record("environment_lock", "warn",
-                   "训练时无法核对环境锁，不能声称一致")
+            record("environment_lock", "warn", "训练时无法核对环境锁，不能声称一致")
 
     return finish()
 
 
-def load_provenance(ckpt_dir: str, data_dir: str = None,
-                    device: str = None) -> dict:
+def load_provenance(ckpt_dir: str, data_dir: str = None, device: str = None) -> dict:
     """下游评测统一继承上游 run 的溯源字段；缺失时按当前环境/数据即时补算。
 
     返回平铺字段便于直接 update 进结果 JSON：
@@ -1530,11 +1667,12 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
         mgit = mgit if isinstance(mgit, dict) else {}
         mdata = mdata if isinstance(mdata, dict) else {}
         for key, src, field in (
-                ("code_commit", mgit, "commit"),
-                ("code_dirty", mgit, "dirty"),
-                ("code_branch", mgit, "branch"),
-                ("config_sha256", manifest, "config_sha256"),
-                ("config_used_sha256", manifest, "config_used_sha256")):
+            ("code_commit", mgit, "commit"),
+            ("code_dirty", mgit, "dirty"),
+            ("code_branch", mgit, "branch"),
+            ("config_sha256", manifest, "config_sha256"),
+            ("config_used_sha256", manifest, "config_used_sha256"),
+        ):
             val = src.get(field)
             if val is not None:
                 out[key] = val
@@ -1546,8 +1684,7 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
                 # 但不冒充“已核对一致”。
                 out["data_fingerprint"] = train_data
             else:
-                out["data_fingerprint_matches_training"] = (
-                    current_data == train_data)
+                out["data_fingerprint_matches_training"] = current_data == train_data
         mruntime = manifest.get("runtime")
         if isinstance(mruntime, dict) and mruntime:
             out["train_runtime"] = mruntime
@@ -1560,17 +1697,23 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
             out["train_environment_lock"] = mlock
             train_lock_sha = mlock.get("lock_sha256")
             eval_lock_sha = eval_environment_lock.get("lock_sha256")
-            if (isinstance(train_lock_sha, str)
-                    and isinstance(eval_lock_sha, str)
-                    and mlock.get("matches") is not None
-                    and eval_environment_lock.get("matches") is not None):
+            if (
+                isinstance(train_lock_sha, str)
+                and isinstance(eval_lock_sha, str)
+                and mlock.get("matches") is not None
+                and eval_environment_lock.get("matches") is not None
+            ):
                 out["environment_lock_matches_training"] = bool(
                     train_lock_sha == eval_lock_sha
                     and mlock.get("matches") is True
-                    and eval_environment_lock.get("matches") is True)
+                    and eval_environment_lock.get("matches") is True
+                )
         mrid = manifest.get("pipeline_run_id")
-        if (out.get("pipeline_run_id") is None
-                and isinstance(mrid, str) and mrid.strip()):
+        if (
+            out.get("pipeline_run_id") is None
+            and isinstance(mrid, str)
+            and mrid.strip()
+        ):
             # 单独/手工评测没有父流水线环境变量时，继承训练清单的 run_id，
             # 使结果仍能绑定到产出该 checkpoint 的那一轮实验；有当前环境
             # run_id 时保留当前值（表示本次评测属于新的流水线调用）。
@@ -1582,8 +1725,7 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
                 out["train_source_tree_digest"] = train_src
                 eval_src = out.get("eval_source_tree_digest")
                 if isinstance(eval_src, str):
-                    out["source_tree_matches_training"] = (
-                        train_src == eval_src)
+                    out["source_tree_matches_training"] = train_src == eval_src
         mseed = manifest.get("seed_report")
         if isinstance(mseed, dict):
             out["seed_report"] = mseed
@@ -1592,12 +1734,15 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
             out["training_precision"] = mprec
         arts = manifest.get("artifacts")
         if isinstance(arts, dict):
-            ck = {name: entry.get("sha256")
-                  for name, entry in arts.items()
-                  if isinstance(name, str) and name.endswith(".pt")
-                  and isinstance(entry, dict)
-                  and isinstance(entry.get("sha256"), str)
-                  and len(entry["sha256"]) == 64}
+            ck = {
+                name: entry.get("sha256")
+                for name, entry in arts.items()
+                if isinstance(name, str)
+                and name.endswith(".pt")
+                and isinstance(entry, dict)
+                and isinstance(entry.get("sha256"), str)
+                and len(entry["sha256"]) == 64
+            }
             out["manifest_checkpoint_hashes"] = ck or None
         msanity = manifest.get("sanity")
         if isinstance(msanity, dict):
@@ -1655,8 +1800,11 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
                 # 身份核对为真也不能把缺失/损坏/硬不匹配的证据标成已验证：
                 # “已验证的 PASS”必须是 present 且闸门自身未被破坏。
                 out["sanity_verified"] = bool(
-                    verified and not gate_broken
-                    and present is not False and not hard_mismatches)
+                    verified
+                    and not gate_broken
+                    and present is not False
+                    and not hard_mismatches
+                )
             elif hard_mismatches:
                 # 身份已确认不一致时，即使旧清单没有 verified 字段也不能
                 # 留 None 让下游误以为“尚未核对”。
@@ -1671,19 +1819,25 @@ def load_provenance(ckpt_dir: str, data_dir: str = None,
 def main(argv=None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="环境锁与单个 run 目录的独立复现审计")
+    parser = argparse.ArgumentParser(description="环境锁与单个 run 目录的独立复现审计")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--check-env", action="store_true",
-                       help="对照 requirements-lock.txt 检查当前环境")
-    group.add_argument("--verify-run", metavar="RUN_DIR",
-                       help="核验单个训练 run 目录的清单与产物")
-    parser.add_argument("--data_dir", default=None,
-                        help="--verify-run 时重算数据指纹所用目录")
-    parser.add_argument("--strict", action="store_true",
-                        help="--verify-run 时把 warning 也视为失败")
-    parser.add_argument("--lock", default=None,
-                        help="--check-env 时使用的 lock 文件路径")
+    group.add_argument(
+        "--check-env",
+        action="store_true",
+        help="对照 requirements-lock.txt 检查当前环境",
+    )
+    group.add_argument(
+        "--verify-run", metavar="RUN_DIR", help="核验单个训练 run 目录的清单与产物"
+    )
+    parser.add_argument(
+        "--data_dir", default=None, help="--verify-run 时重算数据指纹所用目录"
+    )
+    parser.add_argument(
+        "--strict", action="store_true", help="--verify-run 时把 warning 也视为失败"
+    )
+    parser.add_argument(
+        "--lock", default=None, help="--check-env 时使用的 lock 文件路径"
+    )
     args = parser.parse_args(argv)
 
     if args.check_env:
@@ -1698,14 +1852,15 @@ def main(argv=None) -> int:
         print("[repro] 无法核对环境锁")
         return 2
 
-    report = verify_run(args.verify_run, data_dir=args.data_dir,
-                        strict=args.strict)
+    report = verify_run(args.verify_run, data_dir=args.data_dir, strict=args.strict)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["ok"]:
         print(f"[repro] run 核验通过：{report['run_dir']}")
         return 0
-    print(f"[repro] run 核验失败：{len(report['issues'])} 个问题，"
-          f"{len(report['warnings'])} 个警告")
+    print(
+        f"[repro] run 核验失败：{len(report['issues'])} 个问题，"
+        f"{len(report['warnings'])} 个警告"
+    )
     return 1
 
 

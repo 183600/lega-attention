@@ -19,6 +19,7 @@
 标记；不平衡矩阵不做插补，直接返回 ``None``，由调用方按缺失处理。该分析
 只作探索性稳健性证据，不改变任何确认性判定。
 """
+
 import numpy as np
 
 
@@ -85,7 +86,7 @@ def two_way_variance_components(rows):
     ss_seed = float(n_units * np.sum((row_means - grand) ** 2))
     ss_unit = float(n_seeds * np.sum((col_means - grand) ** 2))
     resid = scaled - row_means[:, None] - col_means[None, :] + grand
-    ss_resid = float(np.sum(resid ** 2))
+    ss_resid = float(np.sum(resid**2))
     df_seed = n_seeds - 1
     df_unit = n_units - 1
     df_resid = df_seed * df_unit
@@ -98,15 +99,17 @@ def two_way_variance_components(rows):
     var_unit = max(0.0, float(var_unit_raw))
     var_resid = max(0.0, float(ms_resid))
     total = var_seed + var_unit + var_resid
-    var_mean_scaled = (var_seed / n_seeds
-                       + var_unit / n_units
-                       + var_resid / (n_seeds * n_units))
+    var_mean_scaled = (
+        var_seed / n_seeds + var_unit / n_units + var_resid / (n_seeds * n_units)
+    )
     scale_sq = scale * scale
     rescaled = {}
-    for key, value in (("var_seed", var_seed),
-                       ("var_unit", var_unit),
-                       ("var_resid", var_resid),
-                       ("var_mean", var_mean_scaled)):
+    for key, value in (
+        ("var_seed", var_seed),
+        ("var_unit", var_unit),
+        ("var_resid", var_resid),
+        ("var_mean", var_mean_scaled),
+    ):
         out = value * scale_sq
         rescaled[key] = float(out) if np.isfinite(out) else None
     return {
@@ -122,14 +125,15 @@ def two_way_variance_components(rows):
         "share_resid": _share(var_resid, total),
         "share_mean_seed": _share(var_seed / n_seeds, var_mean_scaled),
         "share_mean_unit": _share(var_unit / n_units, var_mean_scaled),
-        "share_mean_resid": _share(
-            var_resid / (n_seeds * n_units), var_mean_scaled),
+        "share_mean_resid": _share(var_resid / (n_seeds * n_units), var_mean_scaled),
         "icc_seed": _share(var_seed, total),
         "icc_unit": _share(var_unit, total),
         "negative_seed_component": bool(var_seed_raw < 0.0),
         "negative_unit_component": bool(var_unit_raw < 0.0),
-        "method": ("two-way random-effects ANOVA moment estimator on "
-                   "seed x evaluation-unit paired differences"),
+        "method": (
+            "two-way random-effects ANOVA moment estimator on "
+            "seed x evaluation-unit paired differences"
+        ),
     }
 
 
@@ -146,8 +150,7 @@ def aggregate_variance_components(components, weights=None):
         return None
     if weights is None:
         weights = [1.0] * len(comps)
-    if (not isinstance(weights, (list, tuple))
-            or len(weights) != len(comps)):
+    if not isinstance(weights, (list, tuple)) or len(weights) != len(comps):
         return None
     pairs = []
     for comp, weight in zip(comps, weights):
@@ -159,8 +162,14 @@ def aggregate_variance_components(components, weights=None):
             pairs.append((comp, w))
     if not pairs:
         return None
-    keys = ("share_seed", "share_unit", "share_resid",
-            "share_mean_seed", "share_mean_unit", "share_mean_resid")
+    keys = (
+        "share_seed",
+        "share_unit",
+        "share_resid",
+        "share_mean_seed",
+        "share_mean_unit",
+        "share_mean_resid",
+    )
     out = {}
     for key in keys:
         vals = []
@@ -169,12 +178,15 @@ def aggregate_variance_components(components, weights=None):
             if isinstance(value, (int, float)) and np.isfinite(value):
                 vals.append((float(value), weight))
         total_w = sum(w for _, w in vals)
-        out[key] = (sum(v * w for v, w in vals) / total_w
-                    if total_w > 0.0 else None)
-    out.update({
-        "n_cells": len(pairs),
-        "weight_sum": float(sum(w for _, w in pairs)),
-        "method": ("weighted average of per-cell two-way variance "
-                   "components (macro cell weights)"),
-    })
+        out[key] = sum(v * w for v, w in vals) / total_w if total_w > 0.0 else None
+    out.update(
+        {
+            "n_cells": len(pairs),
+            "weight_sum": float(sum(w for _, w in pairs)),
+            "method": (
+                "weighted average of per-cell two-way variance "
+                "components (macro cell weights)"
+            ),
+        }
+    )
     return out

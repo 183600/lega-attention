@@ -1,4 +1,5 @@
 """汇总统计与 Markdown/JSON 报告生成（第一部分：数据聚合与主表）。"""
+
 from .._shared import _install as _shared_install
 
 _shared_install(globals())
@@ -23,8 +24,9 @@ def _length_ppl_interaction_rows(ppls, pairs):
         ref_seeds = ppls.get(ref)
         if not isinstance(cand_seeds, dict) or not isinstance(ref_seeds, dict):
             continue
-        seeds = sorted(set(cand_seeds) & set(ref_seeds),
-                       key=lambda s: (s is None, str(s)))
+        seeds = sorted(
+            set(cand_seeds) & set(ref_seeds), key=lambda s: (s is None, str(s))
+        )
         rows = []
         for seed in seeds:
             cp = cand_seeds.get(seed)
@@ -32,8 +34,7 @@ def _length_ppl_interaction_rows(ppls, pairs):
             if not isinstance(cp, dict) or not isinstance(rp, dict):
                 continue
             try:
-                cmp = compare_length_ppl_payloads(
-                    cp, rp, "suffix", n_bootstrap=0)
+                cmp = compare_length_ppl_payloads(cp, rp, "suffix", n_bootstrap=0)
             except (TypeError, ValueError, KeyError):
                 continue
             if not cmp.get("available"):
@@ -44,50 +45,55 @@ def _length_ppl_interaction_rows(ppls, pairs):
         lengths = rows[0].get("lengths") or []
         slopes = []
         for row in rows:
-            value = ((row.get("delta_slope_per_log2") or {})
-                     .get("estimate"))
+            value = (row.get("delta_slope_per_log2") or {}).get("estimate")
             value = _finite_number(value)
             if value is not None:
                 slopes.append(float(value))
-        test = (paired_t_test(slopes, [0.0] * len(slopes))
-                if slopes else {})
+        test = paired_t_test(slopes, [0.0] * len(slopes)) if slopes else {}
         per_length = {}
         for length in lengths:
             vals = []
             for row in rows:
-                value = (((row.get("per_length") or {}).get(str(length))
-                          or {}).get("mean_delta_nll"))
+                value = ((row.get("per_length") or {}).get(str(length)) or {}).get(
+                    "mean_delta_nll"
+                )
                 value = _finite_number(value)
                 if value is not None:
                     vals.append(float(value))
-            per_length[str(length)] = (
-                float(np.median(vals)) if vals else None)
+            per_length[str(length)] = float(np.median(vals)) if vals else None
         pair_fracs = []
         for row in rows:
             value = _finite_number(
-                (row.get("target_pairing") or {}).get("fraction_consistent"))
+                (row.get("target_pairing") or {}).get("fraction_consistent")
+            )
             if value is not None:
                 pair_fracs.append(value)
-        out.append({
-            "candidate": cand,
-            "reference": ref,
-            "growth": "suffix",
-            "n_seeds": len(rows),
-            "lengths": lengths,
-            "slope_median": (float(np.median(slopes)) if slopes else None),
-            "slope_mean": test.get("mean_diff"),
-            "slope_p": test.get("p"),
-            "slope_n": test.get("n"),
-            "per_length_mean_delta": per_length,
-            "target_pairing_fraction": (
-                float(np.median(pair_fracs)) if pair_fracs else None),
-        })
+        out.append(
+            {
+                "candidate": cand,
+                "reference": ref,
+                "growth": "suffix",
+                "n_seeds": len(rows),
+                "lengths": lengths,
+                "slope_median": (float(np.median(slopes)) if slopes else None),
+                "slope_mean": test.get("mean_diff"),
+                "slope_p": test.get("p"),
+                "slope_n": test.get("n"),
+                "per_length_mean_delta": per_length,
+                "target_pairing_fraction": (
+                    float(np.median(pair_fracs)) if pair_fracs else None
+                ),
+            }
+        )
     return out
 
 
-def _summary_part_a(results_dir: str, audit: dict = None,
-                  data_report: dict = None,
-                  preloaded: dict = None) -> dict:
+def _summary_part_a(
+    results_dir: str,
+    audit: dict = None,
+    data_report: dict = None,
+    preloaded: dict = None,
+) -> dict:
     """汇总 PPL / RULER / 参数量等指标为 Markdown + CSV + JSON。
 
     多种子口径：每个变体的每个指标先按种子聚合为 Mean ± Std；变体间比较使用
@@ -120,21 +126,26 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 合法 JSON 但非对象（数组/标量）的 repro.json 按“无 repro”处理，
     # 不能让汇总在 .get 上崩溃。
     repro = repro_doc if isinstance(repro_doc, dict) else {}
-    scope_variants = repro.get("variants") if isinstance(
-        repro.get("variants"), list) else None
-    scope_seeds = repro.get("seeds") if isinstance(
-        repro.get("seeds"), list) else None
+    scope_variants = (
+        repro.get("variants") if isinstance(repro.get("variants"), list) else None
+    )
+    scope_seeds = repro.get("seeds") if isinstance(repro.get("seeds"), list) else None
     # 同一 results/<tag> 会被多次运行复用。仅按 (variant, seed) 过滤时，
     # --skip_eval/--skip_ruler 等会让上一轮的同名产物被当成本轮观测；新产物
     # 内嵌 pipeline run_id 后，本轮有 run_id 就要求产物同源（旧产物缺该字段
     # 时明确视为“无法证明属于本轮”而排除，避免默认信任陈旧文件）。
     scope_run_id = repro.get("run_id")
-    scope_run_id = scope_run_id if isinstance(scope_run_id, str) and scope_run_id else None
-    scope_data_digest = (repro.get("data").get("digest")
-                         if isinstance(repro.get("data"), dict) else None)
-    scope_data_digest = (scope_data_digest
-                         if isinstance(scope_data_digest, str)
-                         and scope_data_digest else None)
+    scope_run_id = (
+        scope_run_id if isinstance(scope_run_id, str) and scope_run_id else None
+    )
+    scope_data_digest = (
+        repro.get("data").get("digest") if isinstance(repro.get("data"), dict) else None
+    )
+    scope_data_digest = (
+        scope_data_digest
+        if isinstance(scope_data_digest, str) and scope_data_digest
+        else None
+    )
 
     def _artifact_run_id(d):
         rid = d.get("pipeline_run_id")
@@ -185,7 +196,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
 
     def slot(v, s):
         return runs.setdefault(v, {}).setdefault(
-            s, {"eval": None, "ruler": None, "analysis": None})
+            s, {"eval": None, "ruler": None, "analysis": None}
+        )
 
     for fp in _result_files(results_dir, "eval", scope_seeds):
         d = load(fp)
@@ -211,9 +223,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         # executed 必须是真正的 bool true：字符串 "false"/1 经 truthiness
         # 会打开复用，把上一轮的病灶结果算进本轮结论。
         allow_ablation = ablation_scope.get("executed") is True
-        ablation_variants = (ablation_scope.get("variants")
-                             if isinstance(ablation_scope.get("variants"), list)
-                             else [])
+        ablation_variants = (
+            ablation_scope.get("variants")
+            if isinstance(ablation_scope.get("variants"), list)
+            else []
+        )
     else:
         # 旧 repro 没有该字段：保持向后兼容的全量发现。
         allow_ablation = True
@@ -224,8 +238,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             continue
         if not allow_ablation:
             continue
-        if (ablation_variants is not None
-                and d["variant"] not in ablation_variants):
+        if ablation_variants is not None and d["variant"] not in ablation_variants:
             continue
         ablations.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
 
@@ -236,9 +249,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     dose_scope = repro.get("dose_response")
     if isinstance(dose_scope, dict):
         allow_dose = dose_scope.get("executed") is True
-        dose_variants = (dose_scope.get("variants")
-                         if isinstance(dose_scope.get("variants"), list)
-                         else [])
+        dose_variants = (
+            dose_scope.get("variants")
+            if isinstance(dose_scope.get("variants"), list)
+            else []
+        )
     else:
         # 旧 repro 没有该字段：保持向后兼容的全量发现（旧实验本就没有
         # dose_response 产物，不会凭空多出证据）。
@@ -250,8 +265,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             continue
         if not allow_dose:
             continue
-        if (dose_variants is not None
-                and d["variant"] not in dose_variants):
+        if dose_variants is not None and d["variant"] not in dose_variants:
             continue
         doses.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
 
@@ -277,9 +291,10 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             lat = {}
     lat_variants = lat.get("variants")
     lat_variants = lat_variants if isinstance(lat_variants, dict) else {}
-    lat_entries = {v: (lat_variants.get(v)
-                       if isinstance(lat_variants.get(v), dict) else None)
-                   for v in variants}
+    lat_entries = {
+        v: (lat_variants.get(v) if isinstance(lat_variants.get(v), dict) else None)
+        for v in variants
+    }
 
     def _lat_metric_at(e, key, ctx):
         if not isinstance(e, dict) or ctx is None:
@@ -309,10 +324,12 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             continue
         usable = set()
         for c, by_bs in prefill.items():
-            if (not isinstance(c, str)
-                    or not isinstance(by_bs, dict)
-                    or _num_or_none(by_bs.get("1")) is None
-                    or _num_or_none(decode.get(c)) is None):
+            if (
+                not isinstance(c, str)
+                or not isinstance(by_bs, dict)
+                or _num_or_none(by_bs.get("1")) is None
+                or _num_or_none(decode.get(c)) is None
+            ):
                 continue
             # int("1_0")==10、int("040")==40，但这些非规范 key 在
             # _lat_metric_at 里按 str(ctx) 查找时并不存在；若拿来求公共
@@ -350,104 +367,186 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         # model_best.pt 的选型步：同一最大预算下，各变体可能在差异很大的步
         # 被 val 选中。记录后才能审计“同预算”之外的选型差异。
         ("ckpt_step", lambda m: _stat_series(m, "eval", _eval_scalar("ckpt_step"))),
-        ("selection_step_fraction", lambda m: _stat_series(
-            m, "eval", _eval_scalar("selection_step_fraction"))),
-        ("eval_tokens", lambda m: _stat_series(
-            m, "eval", _eval_scalar("val_tokens_evaluated"))),
-        ("eval_windows", lambda m: _stat_series(
-            m, "eval", _eval_scalar("val_windows"))),
-        ("eval_window_fraction", lambda m: _stat_series(
-            m, "eval", _eval_window_fraction)),
+        (
+            "selection_step_fraction",
+            lambda m: _stat_series(m, "eval", _eval_scalar("selection_step_fraction")),
+        ),
+        (
+            "eval_tokens",
+            lambda m: _stat_series(m, "eval", _eval_scalar("val_tokens_evaluated")),
+        ),
+        (
+            "eval_windows",
+            lambda m: _stat_series(m, "eval", _eval_scalar("val_windows")),
+        ),
+        (
+            "eval_window_fraction",
+            lambda m: _stat_series(m, "eval", _eval_window_fraction),
+        ),
         ("ruler_avg", lambda m: _stat_series(m, "ruler", _ruler_avg_of)),
-        ("ruler_avg_micro", lambda m: _stat_series(
-            m, "ruler", _ruler_avg_micro)),
+        ("ruler_avg_micro", lambda m: _stat_series(m, "ruler", _ruler_avg_micro)),
         ("ruler_min_n", lambda m: _stat_series(m, "ruler", _ruler_min_cell_n)),
         # NIAH 位置分层：聚合 EM 会把早期高分与中部塌陷互相抵消；分层
         # 指标进入 summary.json/csv，Markdown 汇总另设小节（旧产物缺失）。
-        ("ruler_depth_early", lambda m: _stat_series(
-            m, "ruler", lambda d: _ruler_depth_means(d).get("early"))),
-        ("ruler_depth_middle", lambda m: _stat_series(
-            m, "ruler", lambda d: _ruler_depth_means(d).get("middle"))),
-        ("ruler_depth_late", lambda m: _stat_series(
-            m, "ruler", lambda d: _ruler_depth_means(d).get("late"))),
-        ("ruler_depth_early_minus_late", lambda m: _stat_series(
-            m, "ruler", _ruler_depth_gap)),
+        (
+            "ruler_depth_early",
+            lambda m: _stat_series(
+                m, "ruler", lambda d: _ruler_depth_means(d).get("early")
+            ),
+        ),
+        (
+            "ruler_depth_middle",
+            lambda m: _stat_series(
+                m, "ruler", lambda d: _ruler_depth_means(d).get("middle")
+            ),
+        ),
+        (
+            "ruler_depth_late",
+            lambda m: _stat_series(
+                m, "ruler", lambda d: _ruler_depth_means(d).get("late")
+            ),
+        ),
+        (
+            "ruler_depth_early_minus_late",
+            lambda m: _stat_series(m, "ruler", _ruler_depth_gap),
+        ),
     ]
     ruler_tasks = RULER_TASKS
     for task in ruler_tasks:
         metric_specs.append(
-            (f"ruler_{task}",
-             (lambda t: lambda m: _stat_series(
-                 m, "ruler", lambda d: _ruler_task_means(d).get(t)))(task)))
+            (
+                f"ruler_{task}",
+                (
+                    lambda t: lambda m: _stat_series(
+                        m, "ruler", lambda d: _ruler_task_means(d).get(t)
+                    )
+                )(task),
+            )
+        )
     # fwe 召回率仅作诊断单列：recall 不惩罚“把上下文词全部列出”的灌水
     # 策略，不能进入预注册的 RULER 平均（主口径为严格集合 EM）。
     metric_specs.append(
-        ("ruler_fwe_recall",
-         lambda m: _stat_series(m, "ruler", _ruler_fwe_recall)))
+        ("ruler_fwe_recall", lambda m: _stat_series(m, "ruler", _ruler_fwe_recall))
+    )
     # fwe precision/F1 同为诊断：precision 才惩罚“多答”，与 recall 并排
     # 才能区分“没找到高频词”与“找对但灌水/漏答”；均不进主平均。
     metric_specs.append(
-        ("ruler_fwe_precision",
-         lambda m: _stat_series(
-             m, "ruler", lambda d: _ruler_task_means(d, "precision").get("fwe"))))
+        (
+            "ruler_fwe_precision",
+            lambda m: _stat_series(
+                m, "ruler", lambda d: _ruler_task_means(d, "precision").get("fwe")
+            ),
+        )
+    )
     metric_specs.append(
-        ("ruler_fwe_f1",
-         lambda m: _stat_series(
-             m, "ruler", lambda d: _ruler_task_means(d, "f1").get("fwe"))))
-    for key in ("auroc_logit", "auroc_qterm", "misleading_rate",
-                "misleading_given_conc", "p_hit_given_conc",
-                "auprc_logit", "auprc_qterm", "hit_base_rate",
-                "brier_g", "ece_g", "ece_g_adaptive",
-                "brier_g_constant", "brier_g_skill",
-                "brier_g_reliability", "brier_g_resolution",
-                "brier_g_uncertainty", "brier_g_within_score",
-                "brier_g_within_cov", "brier_g_binning"):
+        (
+            "ruler_fwe_f1",
+            lambda m: _stat_series(
+                m, "ruler", lambda d: _ruler_task_means(d, "f1").get("fwe")
+            ),
+        )
+    )
+    for key in (
+        "auroc_logit",
+        "auroc_qterm",
+        "misleading_rate",
+        "misleading_given_conc",
+        "p_hit_given_conc",
+        "auprc_logit",
+        "auprc_qterm",
+        "hit_base_rate",
+        "brier_g",
+        "ece_g",
+        "ece_g_adaptive",
+        "brier_g_constant",
+        "brier_g_skill",
+        "brier_g_reliability",
+        "brier_g_resolution",
+        "brier_g_uncertainty",
+        "brier_g_within_score",
+        "brier_g_within_cov",
+        "brier_g_binning",
+    ):
         metric_specs.append(
-            (key, (lambda k: lambda m: _stat_series(
-                m, "analysis", _clock_extractor(k)))(key)))
+            (
+                key,
+                (lambda k: lambda m: _stat_series(m, "analysis", _clock_extractor(k)))(
+                    key
+                ),
+            )
+        )
     # 门控决策点 F1（g>0.5）：显式只取 macro 进汇总表（不平衡下对稀有类
     # 最诚实的口径）；micro/weighted 与逐类明细在 analysis_*.json 中
     # 的 gate_f1 字段并列完整保留，避免“只写 F1 不注明平均口径”。
     metric_specs.append(
-        ("gate_f1_macro", lambda m: _stat_series(
-            m, "analysis",
-            lambda d: _as_dict(d.get("gate_f1")).get("macro"))))
+        (
+            "gate_f1_macro",
+            lambda m: _stat_series(
+                m, "analysis", lambda d: _as_dict(d.get("gate_f1")).get("macro")
+            ),
+        )
+    )
     # 恒写（全判 hit）规则的 macro F1：门控决策的“稻草人”对照。
     # 不平衡下门控 F1 若不明显高于该固定规则，就没有决策价值。
     metric_specs.append(
-        ("gate_f1_macro_always_write", lambda m: _stat_series(
-            m, "analysis",
-            lambda d: _as_dict(
-                _as_dict(d.get("gate_f1_trivial")).get("always_write")
-            ).get("macro"))))
+        (
+            "gate_f1_macro_always_write",
+            lambda m: _stat_series(
+                m,
+                "analysis",
+                lambda d: _as_dict(
+                    _as_dict(d.get("gate_f1_trivial")).get("always_write")
+                ).get("macro"),
+            ),
+        )
+    )
     # 线性探针（有标签监督的简单基线）OOF 指标：进入 summary.json/csv，
     # 供“门控 vs 最简线性模型”的补充性对照审计（渲染见基线合理性小节）。
     metric_specs.append(
-        ("probe_auprc", lambda m: _stat_series(
-            m, "analysis", lambda d: _probe_oof(d, "auprc"))))
+        (
+            "probe_auprc",
+            lambda m: _stat_series(m, "analysis", lambda d: _probe_oof(d, "auprc")),
+        )
+    )
     metric_specs.append(
-        ("probe_auroc", lambda m: _stat_series(
-            m, "analysis", lambda d: _probe_oof(d, "auroc"))))
+        (
+            "probe_auroc",
+            lambda m: _stat_series(m, "analysis", lambda d: _probe_oof(d, "auroc")),
+        )
+    )
     metric_specs.append(
-        ("probe_f1_fixed", lambda m: _stat_series(
-            m, "analysis",
-            lambda d: _probe_oof(d, "f1", "macro"))))
+        (
+            "probe_f1_fixed",
+            lambda m: _stat_series(
+                m, "analysis", lambda d: _probe_oof(d, "f1", "macro")
+            ),
+        )
+    )
     metric_specs.append(
-        ("probe_f1_tuned", lambda m: _stat_series(
-            m, "analysis",
-            lambda d: _probe_oof(d, "f1_tuned", "macro"))))
+        (
+            "probe_f1_tuned",
+            lambda m: _stat_series(
+                m, "analysis", lambda d: _probe_oof(d, "f1_tuned", "macro")
+            ),
+        )
+    )
     metric_specs.append(
-        ("probe_brier", lambda m: _stat_series(
-            m, "analysis", lambda d: _probe_oof(d, "brier"))))
+        (
+            "probe_brier",
+            lambda m: _stat_series(m, "analysis", lambda d: _probe_oof(d, "brier")),
+        )
+    )
     metric_specs.append(
-        ("probe_ece", lambda m: _stat_series(
-            m, "analysis", lambda d: _probe_oof(d, "ece"))))
+        (
+            "probe_ece",
+            lambda m: _stat_series(m, "analysis", lambda d: _probe_oof(d, "ece")),
+        )
+    )
 
     rows = []
     for v in variants:
         m = _variant_seed_map(runs, v)
-        row = {"variant": v, "variant_cn": VARIANT_CN.get(v, v),
-               "n_seeds": len(m)}
+        row = {"variant": v, "variant_cn": VARIANT_CN.get(v, v), "n_seeds": len(m)}
         for key, fn in metric_specs:
             st = fn(m)
             if st:
@@ -464,24 +563,35 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         row["n_layers"] = (ev_example or {}).get("n_layers")
         row["d_head"] = (ev_example or {}).get("d_head")
         row["val_ppl_clamped"] = any(
-            (s.get("eval") or {}).get("val_ppl_clamped") for s in m.values())
+            (s.get("eval") or {}).get("val_ppl_clamped") for s in m.values()
+        )
         # 训练/评估覆盖的“最坏种子”兜底值：均值可能掩盖某个种子只跑了
         # 极少数据或只评测了极少窗口的情况，汇总警告以最小值触发。
         evals_v = [s["eval"] for s in m.values() if s.get("eval")]
-        eps = [x for x in (_num_or_none(e.get("epochs_seen"))
-                           for e in evals_v) if x is not None]
+        eps = [
+            x
+            for x in (_num_or_none(e.get("epochs_seen")) for e in evals_v)
+            if x is not None
+        ]
         row["epochs_seen_min"] = min(eps) if eps else None
-        toks = [x for x in (_num_or_none(e.get("val_tokens_evaluated"))
-                            for e in evals_v) if x is not None]
+        toks = [
+            x
+            for x in (_num_or_none(e.get("val_tokens_evaluated")) for e in evals_v)
+            if x is not None
+        ]
         row["eval_tokens_min"] = min(toks) if toks else None
         row["val_loss_ci95"] = (ev_example or {}).get("val_loss_ci95")
         row["val_ppl_ci95"] = (ev_example or {}).get("val_ppl_ci95")
-        rns = [_ruler_min_cell_n(s.get("ruler")) for s in m.values()
-               if s.get("ruler") is not None]
+        rns = [
+            _ruler_min_cell_n(s.get("ruler"))
+            for s in m.values()
+            if s.get("ruler") is not None
+        ]
         rns = [n for n in rns if n is not None]
         row["ruler_min_n_min"] = min(rns) if rns else None
-        ruler_payloads = [s.get("ruler") for s in m.values()
-                          if isinstance(s.get("ruler"), dict)]
+        ruler_payloads = [
+            s.get("ruler") for s in m.values() if isinstance(s.get("ruler"), dict)
+        ]
         raci = _ruler_macro_absolute_ci(ruler_payloads)
         row["ruler_avg_ci95"] = raci["ci95"] if raci else None
         row["ruler_avg_ci_n_seeds"] = raci["n_seeds"] if raci else None
@@ -490,9 +600,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         if e and common_ctx is not None:
             row["prefill_ms"] = _prefill_at(e, common_ctx)
             row["decode_ms_per_tok"] = _lat_metric_at(
-                e, "decode_ms_per_tok", common_ctx)
+                e, "decode_ms_per_tok", common_ctx
+            )
             row["decode_prefill_ctx"] = _lat_metric_at(
-                e, "decode_prefill_ctx", common_ctx)
+                e, "decode_prefill_ctx", common_ctx
+            )
             row["latency_ctx"] = common_ctx
         rows.append(row)
 
@@ -504,9 +616,13 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             base_ms, base_name = _prefill_at(lat_all.get(cand), common_ctx), cand
             break
     for r in rows:
-        if (base_ms and base_ms > 0 and r.get("prefill_ms") is not None
-                and r["prefill_ms"] > 0
-                and r["variant"] not in ("standard", "standard_sdpa")):
+        if (
+            base_ms
+            and base_ms > 0
+            and r.get("prefill_ms") is not None
+            and r["prefill_ms"] > 0
+            and r["variant"] not in ("standard", "standard_sdpa")
+        ):
             # 两端有限但比值不可表示时按缺失处理，不能把 inf 写进汇总行。
             rel = _rel_pct(base_ms, r["prefill_ms"])
             if rel is not None:
@@ -519,6 +635,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 先加载设计计划：缺失敏感性需要训练前写死的计划种子，而不是只从
     # 现有 runs 反推“跑了哪些”。计划缺失时退化为 repro 的种子范围。
     design_plan = load_design_plan(results_dir)
+
     def _normalised_seed_list(values):
         if not isinstance(values, list):
             return None
@@ -541,30 +658,34 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         and scope_seed_list is not None
         and isinstance(plan_variants, list)
         and isinstance(repro_variants, list)
-        and {str(v) for v in plan_variants}
-        == {str(v) for v in repro_variants}
-        and set(planned_seeds) == set(scope_seed_list))
+        and {str(v) for v in plan_variants} == {str(v) for v in repro_variants}
+        and set(planned_seeds) == set(scope_seed_list)
+    )
     planned_seeds_source = "design_plan"
     if not plan_matches_repro:
         # 旧计划/改种子后的遗留计划不能当作本轮分析人群，否则会把“计划外
         # 缺失”算到当前实验头上；退化为本次 repro 的种子范围并标明来源。
         planned_seeds = scope_seed_list
-        planned_seeds_source = ("repro_scope" if planned_seeds is not None
-                                else "observed_union")
+        planned_seeds_source = (
+            "repro_scope" if planned_seeds is not None else "observed_union"
+        )
     sf_audit = single_factor_audit()
     if not sf_audit["ok"]:
-        print("[run_all] ⚠ 单因素消融审计未通过："
-              + "；".join(sf_audit["problems"]))
+        print("[run_all] ⚠ 单因素消融审计未通过：" + "；".join(sf_audit["problems"]))
     pairs = build_comparison_pairs(runs, registered)
     tests = []
     tests += _paired_comparisons(
-        runs, pairs, "PPL", lambda slot: _ppl_of(slot.get("eval")),
-        lower_better=True)
+        runs, pairs, "PPL", lambda slot: _ppl_of(slot.get("eval")), lower_better=True
+    )
     # PPL 是比值尺度：算术均值差会被高 PPL 种子主导。log-PPL 配对给出
     # 几何均值比（exp(Δ)），作为独立敏感性家族；预注册主判定仍是原始 PPL。
     log_tests = _paired_comparisons(
-        runs, pairs, "PPL(log)", lambda slot: _log_ppl_of(slot.get("eval")),
-        lower_better=True)
+        runs,
+        pairs,
+        "PPL(log)",
+        lambda slot: _log_ppl_of(slot.get("eval")),
+        lower_better=True,
+    )
     for t in log_tests:
         md = t.get("mean_diff")
         ci = t.get("mean_diff_ci95")
@@ -579,12 +700,13 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             except OverflowError:
                 ratio_overflow = True
         t["ppl_ratio_ci95"] = None
-        if (isinstance(ci, (list, tuple)) and len(ci) == 2
-                and all(isinstance(x, (int, float)) and math.isfinite(x)
-                        for x in ci)):
+        if (
+            isinstance(ci, (list, tuple))
+            and len(ci) == 2
+            and all(isinstance(x, (int, float)) and math.isfinite(x) for x in ci)
+        ):
             try:
-                t["ppl_ratio_ci95"] = [math.exp(float(ci[0])),
-                                       math.exp(float(ci[1]))]
+                t["ppl_ratio_ci95"] = [math.exp(float(ci[0])), math.exp(float(ci[1]))]
             except OverflowError:
                 ratio_overflow = True
         t["ppl_ratio_overflow"] = bool(ratio_overflow)
@@ -598,17 +720,23 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         t["exploratory"] = True
     tests += log_tests
     tests += _paired_comparisons(
-        runs, pairs, "RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")),
-        lower_better=False)
+        runs,
+        pairs,
+        "RULER平均",
+        lambda slot: _ruler_avg_of(slot.get("ruler")),
+        lower_better=False,
+    )
     # RULER 逐任务分解（探索性）：综合平均可能让方向相反的任务互相抵消。
     # 每个任务单独作为指标家族做同种子配对 + Holm；综合平均仍是预注册
     # 主判定，逐任务结果只用于定位“效果来自哪个任务/是否被平均掩盖”。
     for task in RULER_TASKS:
         task_tests = _paired_comparisons(
-            runs, pairs, f"RULER:{task}",
-            (lambda t: lambda slot: _ruler_task_means(
-                slot.get("ruler")).get(t))(task),
-            lower_better=False)
+            runs,
+            pairs,
+            f"RULER:{task}",
+            (lambda t: lambda slot: _ruler_task_means(slot.get("ruler")).get(t))(task),
+            lower_better=False,
+        )
         for t in task_tests:
             t["ruler_task"] = task
             t["exploratory"] = True
@@ -624,11 +752,13 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # design_plan 的计划种子识别“计划了但没产出”的单元；不改变任何判定。
     # 两侧都至少有一个 run 才进入本层：整臂未运行是设计符合性问题，由
     # analysis_population/design gate 负责，不能在这里膨胀成大量空配对。
-    missingness_pairs = [(c, r) for c, r in pairs
-                         if c in runs and r in runs]
+    missingness_pairs = [(c, r) for c, r in pairs if c in runs and r in runs]
     missingness = _missingness_analysis(
-        runs, missingness_pairs, planned_seeds,
-        planned_seeds_source=planned_seeds_source)
+        runs,
+        missingness_pairs,
+        planned_seeds,
+        planned_seeds_source=planned_seeds_source,
+    )
     # 分析选择多重宇宙（探索性）：同一对比在原始/log PPL、macro/micro
     # RULER、全种子/留一种子等可辩护口径下重算；只披露结论是否依赖分析
     # 选择，不做多重校正，也不改变确认性判定。
@@ -646,9 +776,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # 使“跨长度平均是否掩盖长上下文效应”可被程序消费（完整逐 ctx/逐种子
     # 明细仍在 significance.json）。没有配对（standard 本身/未跑 RULER）时
     # 保持 None，不伪造趋势。
-    length_by_pair = {(p.get("candidate"), p.get("reference")): p
-                      for p in length_analysis.get("pairs", [])
-                      if isinstance(p, dict)}
+    length_by_pair = {
+        (p.get("candidate"), p.get("reference")): p
+        for p in length_analysis.get("pairs", [])
+        if isinstance(p, dict)
+    }
 
     def _length_pp(v):
         f = _finite_number(v)
@@ -667,23 +799,21 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         slope = pair.get("slope_per_doubling") or {}
         span = pair.get("long_minus_short") or {}
         row["ruler_length_contexts"] = pair.get("contexts")
-        row["ruler_length_overall_delta_pp"] = _length_pp(
-            pair.get("overall_mean_diff"))
+        row["ruler_length_overall_delta_pp"] = _length_pp(pair.get("overall_mean_diff"))
         row["ruler_length_longest_delta_pp"] = _length_pp(
-            per_ctx[-1].get("mean_diff") if per_ctx else None)
-        row["ruler_length_long_minus_short_pp"] = _length_pp(
-            span.get("mean_diff"))
-        row["ruler_length_slope_pp_per_doubling"] = _length_pp(
-            slope.get("mean_diff"))
+            per_ctx[-1].get("mean_diff") if per_ctx else None
+        )
+        row["ruler_length_long_minus_short_pp"] = _length_pp(span.get("mean_diff"))
+        row["ruler_length_slope_pp_per_doubling"] = _length_pp(slope.get("mean_diff"))
         row["ruler_length_slope_p_adj"] = slope.get("p_adj")
         row["ruler_length_span_p_adj"] = span.get("p_adj")
         row["ruler_length_sign_flip"] = bool(
             pair.get("overall_vs_longest_sign_flip")
             or pair.get("overall_vs_slope_sign_flip")
-            or pair.get("overall_vs_span_sign_flip"))
+            or pair.get("overall_vs_span_sign_flip")
+        )
         row["ruler_length_masking"] = bool(pair.get("long_context_masking"))
-        row["ruler_length_loo_sign_stable"] = pair.get(
-            "slope_loo_sign_stable")
+        row["ruler_length_loo_sign_stable"] = pair.get("slope_loo_sign_stable")
         row["ruler_length_balanced"] = pair.get("balanced_contexts")
     shapley_tests = [t for t in tests if t.get("shapley_factor")]
     # 训练预算敏感性（探索性）：只比较已有 train_log.jsonl 中的 val_loss
@@ -691,7 +821,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # checkpoint，也不改变任何终点/预注册判定；缺日志时显式不可用。
     budget_curves = curves_from_runs(runs)
     budget_sensitivity = analyze_budget_sensitivity(
-        budget_curves, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS)
+        budget_curves, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS
+    )
     # 参数化稳健性（探索性）：比较归一化 c 与原始 log max_p 两套完整
     # 2^3 网格上的单因子边与 Shapley 归因。只有显式运行原始对照时才有
     # 内容；缺格/协议不一致会返回可机读原因，不伪造“无差异”。
@@ -720,8 +851,10 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         ph = _finite_number(t.get("mean_diff"))
         t["training_phi_mean"] = tr
         t["training_inference_sign_agree"] = (
-            None if tr is None or ph is None else bool(
-                (tr > 0) == (ph > 0) or (tr == 0 and ph == 0)))
+            None
+            if tr is None or ph is None
+            else bool((tr > 0) == (ph > 0) or (tr == 0 and ph == 0))
+        )
     # 推理期交互：与训练期 PPL交互 同尺度并列，检查“训练期交互结构是否在
     # 最终前向复现”。只作探索性证据，不进入确认性判定。
     inference_interactions = _inference_interaction_tests(ablations)
@@ -735,23 +868,35 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         ph = _finite_number(t.get("mean_diff"))
         t["training_interaction_mean"] = tr
         t["training_inference_sign_agree"] = (
-            None if tr is None or ph is None else bool(
-                (tr > 0) == (ph > 0) or (tr == 0 and ph == 0)))
+            None
+            if tr is None or ph is None
+            else bool((tr > 0) == (ph > 0) or (tr == 0 and ph == 0))
+        )
     # 参数匹配安慰剂（lega vs 同参数/同 FLOPs、但证据为噪声的 lega_placebo）。
     # 只有显式运行时才有这条对比；未运行时汇总页显式提示，不默认“容量已排除”。
     param_control_test = next(
-        (t for t in tests
-         if t.get("metric") == "PPL"
-         and t.get("candidate") == PARAM_CONTROL_PAIR[0]
-         and t.get("reference") == PARAM_CONTROL_PAIR[1]), None)
+        (
+            t
+            for t in tests
+            if t.get("metric") == "PPL"
+            and t.get("candidate") == PARAM_CONTROL_PAIR[0]
+            and t.get("reference") == PARAM_CONTROL_PAIR[1]
+        ),
+        None,
+    )
     if param_control_test is not None:
         param_control_test["capacity_control"] = True
         param_control_test["exploratory"] = True
     capacity_only_test = next(
-        (t for t in tests
-         if t.get("metric") == "PPL"
-         and t.get("candidate") == PARAM_CONTROL_VARIANT
-         and t.get("reference") == "qgate"), None)
+        (
+            t
+            for t in tests
+            if t.get("metric") == "PPL"
+            and t.get("candidate") == PARAM_CONTROL_VARIANT
+            and t.get("reference") == "qgate"
+        ),
+        None,
+    )
     # 逐组件容量匹配对照（Full / Null_X / No_X）：独立于主配对表与整体
     # 安慰剂，单独 Holm 家族；只有显式训练 null 变体时才有内容。
     capacity_decomposition = _capacity_decomposition(runs)
@@ -777,38 +922,45 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     scope_check = registration_scope_check(registered, repro)
     # 设计符合性门：先验计划里的 (变体, 种子) 单元必须齐全；缺失只影响
     # 涉及该变体/指标端点的假设，不搞“一刀切”降级，也不能把缺失当无效应。
-    design_alpha = _as_dict(
-        _as_dict(design_plan).get("inputs")).get("alpha", ALPHA)
+    design_alpha = _as_dict(_as_dict(design_plan).get("inputs")).get("alpha", ALPHA)
     test_reuse = test_reuse_report(
         _as_dict(data_report).get("test_access"),
         repro_test_data_fingerprint(repro),
         _as_dict(repro).get("run_id"),
-        _as_dict(design_plan).get("test_look_budget",
-                                  DEFAULT_TEST_LOOK_BUDGET),
-        alpha=design_alpha)
+        _as_dict(design_plan).get("test_look_budget", DEFAULT_TEST_LOOK_BUDGET),
+        alpha=design_alpha,
+    )
     test_reuse_metrics = test_dependent_metrics(runs)
-    design_stages = _as_dict(
-        _as_dict(repro.get("design")).get("stages"))
+    design_stages = _as_dict(_as_dict(repro.get("design")).get("stages"))
     design_conf = design_conformance(
-        design_plan, repro, runs, audit=audit, stages=design_stages)
+        design_plan, repro, runs, audit=audit, stages=design_stages
+    )
     design_hist = load_design_plan_history(results_dir)
     if len(design_hist) > 1:
         design_conf["plan_history_count"] = len(design_hist)
         design_conf.setdefault("warnings", []).append(
             f"本结果目录已有 {len(design_hist)} 份设计计划记录"
             "（重跑/改种子/改样本量）：历史见 design_plan_history.jsonl；"
-            "当前判定只对应最新计划，不得把旧计划下的产物混入")
+            "当前判定只对应最新计划，不得把旧计划下的产物混入"
+        )
     hyp_eval = apply_test_reuse_gate(
         apply_design_gate(
             apply_budget_gate(
                 apply_scope_gate(
                     apply_integrity_gate(
-                        evaluate_registered_hypotheses(registered, tests),
-                        integrity),
-                    scope_check),
-                audit),
-            design_conf, design_plan),
-        test_reuse, test_reuse_metrics, alpha=design_alpha)
+                        evaluate_registered_hypotheses(registered, tests), integrity
+                    ),
+                    scope_check,
+                ),
+                audit,
+            ),
+            design_conf,
+            design_plan,
+        ),
+        test_reuse,
+        test_reuse_metrics,
+        alpha=design_alpha,
+    )
     # 把规格曲线摘要挂到匹配的预注册假设上：只补充“结论是否依赖分析口径”
     # 的描述性证据，不改变支持/拒绝/未定或任何确认性门。
     attach_to_hypotheses(hyp_eval, multiverse)
@@ -817,40 +969,47 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     attach_heterogeneity_to_hypotheses(hyp_eval, ruler_heterogeneity)
 
     # --- Markdown
-    cols = [("variant_cn", "变体"), ("n_seeds", "种子数"), ("params", "参数量"),
-            ("gate_extra", "门控额外参数"), ("n_gate_per_head", "门控参数/头"),
-            ("val_ppl", "PPL↓"),
-            ("ppl_ci_rel_pct", "PPL评估CI±%"),
-            ("epochs_seen", "训练覆盖(epoch)"),
-            ("ckpt_step", "选型步"),
-            ("selection_step_fraction", "选型步/计划"),
-            ("ruler_avg", "RULER平均↑"),
-            ("ruler_avg_ci95", "RULER评估CI"),
-            ("ruler_niah_synth", "niah_synth↑"),
-            ("ruler_niah_corpus", "niah_corpus↑"),
-            ("ruler_niah_multikey", "multikey↑"),
-            ("ruler_fwe", "fwe EM↑"),
-            ("ruler_fwe_recall", "fwe recall↑"),
-            ("ruler_fwe_precision", "fwe prec↑"),
-            ("ruler_fwe_f1", "fwe F1↑"),
-            ("ruler_vt", "vt↑"), ("prefill_ms", "Prefill ms↓"),
-            ("prefill_rel_pct", "相对基线%"),
-            ("decode_ms_per_tok", "Decode ms/tok↓"),
-            ("gate_mean", "门控均值"), ("misleading_rate", "集中但看错率"),
-            ("misleading_given_conc", "集中后看错率"),
-            ("hit_base_rate", "命中基线率"),
-            ("auroc_logit", "AUROC(logit)"), ("auroc_qterm", "AUROC(仅查询)"),
-            ("auprc_logit", "PR-AUC(logit)↑"), ("auprc_qterm", "PR-AUC(仅查询)↑"),
-            ("gate_f1_macro", "门控F1(macro)↑"),
-            ("gate_f1_macro_always_write", "恒写基线F1(macro)")]
+    cols = [
+        ("variant_cn", "变体"),
+        ("n_seeds", "种子数"),
+        ("params", "参数量"),
+        ("gate_extra", "门控额外参数"),
+        ("n_gate_per_head", "门控参数/头"),
+        ("val_ppl", "PPL↓"),
+        ("ppl_ci_rel_pct", "PPL评估CI±%"),
+        ("epochs_seen", "训练覆盖(epoch)"),
+        ("ckpt_step", "选型步"),
+        ("selection_step_fraction", "选型步/计划"),
+        ("ruler_avg", "RULER平均↑"),
+        ("ruler_avg_ci95", "RULER评估CI"),
+        ("ruler_niah_synth", "niah_synth↑"),
+        ("ruler_niah_corpus", "niah_corpus↑"),
+        ("ruler_niah_multikey", "multikey↑"),
+        ("ruler_fwe", "fwe EM↑"),
+        ("ruler_fwe_recall", "fwe recall↑"),
+        ("ruler_fwe_precision", "fwe prec↑"),
+        ("ruler_fwe_f1", "fwe F1↑"),
+        ("ruler_vt", "vt↑"),
+        ("prefill_ms", "Prefill ms↓"),
+        ("prefill_rel_pct", "相对基线%"),
+        ("decode_ms_per_tok", "Decode ms/tok↓"),
+        ("gate_mean", "门控均值"),
+        ("misleading_rate", "集中但看错率"),
+        ("misleading_given_conc", "集中后看错率"),
+        ("hit_base_rate", "命中基线率"),
+        ("auroc_logit", "AUROC(logit)"),
+        ("auroc_qterm", "AUROC(仅查询)"),
+        ("auprc_logit", "PR-AUC(logit)↑"),
+        ("auprc_qterm", "PR-AUC(仅查询)↑"),
+        ("gate_f1_macro", "门控F1(macro)↑"),
+        ("gate_f1_macro_always_write", "恒写基线F1(macro)"),
+    ]
 
     def fmt_stat_cell(r, key):
-        st = {"mean": r.get(key), "std": r.get(f"{key}_std"),
-              "n": r.get(f"{key}_n")}
+        st = {"mean": r.get(key), "std": r.get(f"{key}_std"), "n": r.get(f"{key}_n")}
         # 评估 CI 半宽与 epoch 覆盖用 2 位小数：0.03 epoch 的差异不应被
         # 四舍五入成 0.0 而看起来像“没有训练”；CI ±12.5% 也需要小数位。
-        cell = _fmt_stat(st, nd=2 if key in ("ppl_ci_rel_pct", "epochs_seen")
-                         else 3)
+        cell = _fmt_stat(st, nd=2 if key in ("ppl_ci_rel_pct", "epochs_seen") else 3)
         # PPL 被钳制在 exp(20) 的 run（发散）必须显式标注：不能与正常 PPL
         # 在同一列表头中静默比较（行级 val_ppl_clamped 由评测写入）。
         if key == "val_ppl" and r.get("val_ppl_clamped"):
@@ -864,20 +1023,37 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             return f"{x:.3f}" if abs(x) < 10 else f"{x:,.0f}"
         return str(x)
 
-    md = ["# LEGA 实验汇总", "",
-          f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}；"
-          f"PPL/RULER 为跨随机种子的 Mean ± Std（变体间同种子配对，"
-          f"显著性经 Holm–Bonferroni 校正），运行时指标在相同配置下测得。", ""]
+    md = [
+        "# LEGA 实验汇总",
+        "",
+        f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}；"
+        f"PPL/RULER 为跨随机种子的 Mean ± Std（变体间同种子配对，"
+        f"显著性经 Holm–Bonferroni 校正），运行时指标在相同配置下测得。",
+        "",
+    ]
     if rows:
-        stat_keys = {"val_ppl", "ruler_avg", "ruler_avg_micro",
-                     "gate_mean", "misleading_rate",
-                     "misleading_given_conc", "auroc_logit", "auroc_qterm",
-                     "auprc_logit", "auprc_qterm", "hit_base_rate",
-                     "gate_f1_macro", "gate_f1_macro_always_write",
-                     "ppl_ci_rel_pct", "epochs_seen", "ckpt_step",
-                     "selection_step_fraction", "ruler_fwe_recall",
-                     "ruler_fwe_precision", "ruler_fwe_f1"} \
-            | {f"ruler_{t}" for t in ruler_tasks}
+        stat_keys = {
+            "val_ppl",
+            "ruler_avg",
+            "ruler_avg_micro",
+            "gate_mean",
+            "misleading_rate",
+            "misleading_given_conc",
+            "auroc_logit",
+            "auroc_qterm",
+            "auprc_logit",
+            "auprc_qterm",
+            "hit_base_rate",
+            "gate_f1_macro",
+            "gate_f1_macro_always_write",
+            "ppl_ci_rel_pct",
+            "epochs_seen",
+            "ckpt_step",
+            "selection_step_fraction",
+            "ruler_fwe_recall",
+            "ruler_fwe_precision",
+            "ruler_fwe_f1",
+        } | {f"ruler_{t}" for t in ruler_tasks}
         header = "| " + " | ".join(c for _, c in cols) + " |"
         sep = "|" + "---|" * len(cols)
         md += [header, sep]
@@ -889,7 +1065,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                     cells.append(
                         f"[{ci[0]:.3f}, {ci[1]:.3f}]"
                         if isinstance(ci, (list, tuple)) and len(ci) == 2
-                        else "-")
+                        else "-"
+                    )
                 elif k in stat_keys:
                     cells.append(fmt_stat_cell(r, k))
                 else:
@@ -901,25 +1078,33 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 "⚠ PPL 评测 split 缺失、非法或不一致"
                 + (f"（{', '.join(shown_splits)}）" if shown_splits else "")
                 + "：跨变体数值可能来自不同切片，不能直接比较；请统一用 "
-                "held-out test（或在同一 val 上）重跑评测")
+                "held-out test（或在同一 val 上）重跑评测"
+            )
         elif "test" in eval_splits:
-            split_note = ("PPL 在 held-out test 集上评测（checkpoint 选择在 "
-                          "val 上完成）")
+            split_note = (
+                "PPL 在 held-out test 集上评测（checkpoint 选择在 " "val 上完成）"
+            )
         elif "val" in eval_splits:
-            split_note = ("⚠ PPL 在 val 集上评测，该集同时用于 best-checkpoint "
-                          "选择，数值偏乐观；请用 prepare_data.py 生成 "
-                          "held-out test 后重跑评测")
+            split_note = (
+                "⚠ PPL 在 val 集上评测，该集同时用于 best-checkpoint "
+                "选择，数值偏乐观；请用 prepare_data.py 生成 "
+                "held-out test 后重跑评测"
+            )
         else:
             only_split = next(iter(eval_splits))
-            split_note = (f"⚠ PPL 在 {only_split} 集上评测（非 val/test 口径）："
-                          "该切片的绝对 PPL 不能与 val/test 数值直接比较，"
-                          "也不能用于 held-out 泛化结论")
+            split_note = (
+                f"⚠ PPL 在 {only_split} 集上评测（非 val/test 口径）："
+                "该切片的绝对 PPL 不能与 val/test 数值直接比较，"
+                "也不能用于 held-out 泛化结论"
+            )
         min_n = min((r.get("n_seeds") or 1) for r in rows)
-        seed_note = (f"关键指标至少 {min_n} 个随机种子；变体间比较为同种子配对。"
-                     if min_n >= 3 else
-                     f"⚠ 当前最少只有 {min_n} 个随机种子（<3），"
-                     "无法可靠评估方差，结论只能是探索性的；"
-                     "正式实验请用 ≥3 个种子（configs 默认已达要求）。")
+        seed_note = (
+            f"关键指标至少 {min_n} 个随机种子；变体间比较为同种子配对。"
+            if min_n >= 3
+            else f"⚠ 当前最少只有 {min_n} 个随机种子（<3），"
+            "无法可靠评估方差，结论只能是探索性的；"
+            "正式实验请用 ≥3 个种子（configs 默认已达要求）。"
+        )
         cols_notes = [
             "注: 统计单元格为 Mean ± Std (n=种子数)；n=1 时 Std 不可估计。",
             "注: `PPL评估CI` 为单次 run 内验证窗口抽样的 95% 相对半宽"
@@ -954,130 +1139,190 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             "基线时，门控的决策价值不成立（`gate_f1_trivial` 另含恒不写"
             "规则）。RULER 的 EM 是生成式准确率、无决策阈值，不受此口径"
             "影响；fwe 另报召回率。",
-            seed_note, split_note, ""]
+            seed_note,
+            split_note,
+            "",
+        ]
         if common_ctx is not None:
-            cols_notes.insert(1, f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
-                                 f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；")
+            cols_notes.insert(
+                1,
+                f"“相对基线%”以 {base_name or 'standard'} 的 prefill 为基线"
+                f"（公共 ctx={common_ctx}、batch=1，见 latency.json）；",
+            )
         md += [""] + cols_notes
         # 训练覆盖门：不足 1 epoch 的 PPL 下降只是“还没学完”，与“方法有效”
         # 是两回事；在表格外单独给醒目警告，避免读者把可跑通当结论。
-        insufficient = [r for r in rows
-                        if r.get("epochs_seen_min") is not None
-                        and r["epochs_seen_min"] < 1.0]
+        insufficient = [
+            r
+            for r in rows
+            if r.get("epochs_seen_min") is not None and r["epochs_seen_min"] < 1.0
+        ]
         missing_cov = [r for r in rows if r.get("epochs_seen_min") is None]
         if insufficient:
             worst_cov = min(r["epochs_seen_min"] for r in insufficient)
-            md += ["", f"⚠ 训练覆盖不足：{len(insufficient)}/{len(rows)} 个变体"
-                      f"的最少训练覆盖仅约 {worst_cov:.2f} 个 epoch（<1）——"
-                      "训练/验证曲线同时下降只说明“还在学”，不能作为收敛证据；"
-                      "下表的 PPL/RULER 差异先按“没学完”处理，延长训练后重评。"]
+            md += [
+                "",
+                f"⚠ 训练覆盖不足：{len(insufficient)}/{len(rows)} 个变体"
+                f"的最少训练覆盖仅约 {worst_cov:.2f} 个 epoch（<1）——"
+                "训练/验证曲线同时下降只说明“还在学”，不能作为收敛证据；"
+                "下表的 PPL/RULER 差异先按“没学完”处理，延长训练后重评。",
+            ]
         if missing_cov:
-            md += ["", f"注：{len(missing_cov)}/{len(rows)} 个变体的 eval.json "
-                      "没有训练覆盖字段（旧结果或手工评测），无法核对训练覆盖。"]
-        sampled = [r for r in rows
-                   if r.get("eval_window_fraction") is not None
-                   and r["eval_window_fraction"] < 1.0]
+            md += [
+                "",
+                f"注：{len(missing_cov)}/{len(rows)} 个变体的 eval.json "
+                "没有训练覆盖字段（旧结果或手工评测），无法核对训练覆盖。",
+            ]
+        sampled = [
+            r
+            for r in rows
+            if r.get("eval_window_fraction") is not None
+            and r["eval_window_fraction"] < 1.0
+        ]
         if sampled:
             worst = min(r["eval_window_fraction"] for r in sampled)
-            md += ["", f"⚠ PPL 为窗口抽样：{len(sampled)}/{len(rows)} 个变体"
-                      f"未评测全部不重叠窗口（最低覆盖 {worst:.1%}）。小于"
-                      "`PPL评估CI` 或种子间差异的 PPL 差值先按评估噪声处理；"
-                      "正式 PPL 结论请用 `run_all.py --full_eval` 重跑。"]
+            md += [
+                "",
+                f"⚠ PPL 为窗口抽样：{len(sampled)}/{len(rows)} 个变体"
+                f"未评测全部不重叠窗口（最低覆盖 {worst:.1%}）。小于"
+                "`PPL评估CI` 或种子间差异的 PPL 差值先按评估噪声处理；"
+                "正式 PPL 结论请用 `run_all.py --full_eval` 重跑。",
+            ]
         # 评估噪声门：单 run 的 PPL 窗口抽样 CI 相对半宽若与跨种子差异同量级，
         # 变体间的小 PPL 差异不足以支撑方法结论。
-        ci_vals = [r["ppl_ci_rel_pct"] for r in rows
-                   if r.get("ppl_ci_rel_pct") is not None]
+        ci_vals = [
+            r["ppl_ci_rel_pct"] for r in rows if r.get("ppl_ci_rel_pct") is not None
+        ]
         if ci_vals and max(ci_vals) > 5.0:
-            md += ["", f"注：单 run 内 PPL 评估 95% CI 相对半宽最大 "
-                      f"±{max(ci_vals):.1f}%（窗口抽样）；小于该量级的 PPL "
-                      "差异不能脱离评估噪声解读。"]
+            md += [
+                "",
+                f"注：单 run 内 PPL 评估 95% CI 相对半宽最大 "
+                f"±{max(ci_vals):.1f}%（窗口抽样）；小于该量级的 PPL "
+                "差异不能脱离评估噪声解读。",
+            ]
         # RULER 每格样本数门：n=2 与 n=30 的相同 EM 不是同样可信的证据；
         # 汇总层显式提示最小 n，读者需对照 ruler_*.json 的 Wilson CI。
-        ruler_ns = [r["ruler_min_n_min"] for r in rows
-                    if r.get("ruler_min_n_min") is not None]
+        ruler_ns = [
+            r["ruler_min_n_min"] for r in rows if r.get("ruler_min_n_min") is not None
+        ]
         if ruler_ns and min(ruler_ns) < 10:
-            md += ["", f"⚠ RULER 每格样本数不足：最小 n={min(ruler_ns)}（<10）——"
-                      "EM 的 Wilson 95% CI 在该样本量下很宽（n=2 时接近 [0,0.84]），"
-                      "RULER 的变体差异只能作方向性线索；逐格区间见 "
-                      "ruler_*.json 的 `em_ci95_wilson`，正式结论需增大 "
-                      "`ruler.n_samples` 后重跑。"]
+            md += [
+                "",
+                f"⚠ RULER 每格样本数不足：最小 n={min(ruler_ns)}（<10）——"
+                "EM 的 Wilson 95% CI 在该样本量下很宽（n=2 时接近 [0,0.84]），"
+                "RULER 的变体差异只能作方向性线索；逐格区间见 "
+                "ruler_*.json 的 `em_ci95_wilson`，正式结论需增大 "
+                "`ruler.n_samples` 后重跑。",
+            ]
         # RULER 平均口径：macro 与 micro 可能因任务/格大小不均而不同。
         # “平均”不注明定义就等于给读者留了事后择优的空间，这里显式固定
         # 预注册口径（macro）并给出样本加权口径供对照。
         rul_rows = [r for r in rows if r.get("ruler_avg") is not None]
         if rul_rows:
-            md += ["", "### RULER 平均口径（macro / micro）", "",
-                   "macro = 各任务内先对上下文档位等权平均，再对任务等权平均"
-                   "（预注册“RULER平均”固定指此口径）；micro = 按每格样本数 n "
-                   "加权（所有评测样例等权）。两者统一用各任务 EM；fwe 用"
-                   "严格集合 EM（与预注册 H4 的“RULER 平均 EM”一致），其"
-                   "recall 仅作诊断单列、不进入平均——recall 不惩罚“把上下文"
-                   "词全部列出”的灌水策略。两者差异大说明任务难度/每格样本数"
-                   "不均衡会改变“平均分”的读法，结论应同时对照逐任务列与"
-                   "Wilson CI。", "",
-                   "| 变体 | RULER平均 macro↑ | RULER平均 micro↑ | "
-                   "macro−micro |", "|---|---|---|---|"]
+            md += [
+                "",
+                "### RULER 平均口径（macro / micro）",
+                "",
+                "macro = 各任务内先对上下文档位等权平均，再对任务等权平均"
+                "（预注册“RULER平均”固定指此口径）；micro = 按每格样本数 n "
+                "加权（所有评测样例等权）。两者统一用各任务 EM；fwe 用"
+                "严格集合 EM（与预注册 H4 的“RULER 平均 EM”一致），其"
+                "recall 仅作诊断单列、不进入平均——recall 不惩罚“把上下文"
+                "词全部列出”的灌水策略。两者差异大说明任务难度/每格样本数"
+                "不均衡会改变“平均分”的读法，结论应同时对照逐任务列与"
+                "Wilson CI。",
+                "",
+                "| 变体 | RULER平均 macro↑ | RULER平均 micro↑ | " "macro−micro |",
+                "|---|---|---|---|",
+            ]
             for r in rul_rows:
                 macro, micro = r.get("ruler_avg"), r.get("ruler_avg_micro")
-                gap = (macro - micro
-                       if macro is not None and micro is not None else None)
-                md.append(f"| {r.get('variant_cn') or r.get('variant')} | "
-                          f"{_fmt4(macro)} | {_fmt4(micro)} | {_fmt4(gap)} |")
+                gap = macro - micro if macro is not None and micro is not None else None
+                md.append(
+                    f"| {r.get('variant_cn') or r.get('variant')} | "
+                    f"{_fmt4(macro)} | {_fmt4(micro)} | {_fmt4(gap)} |"
+                )
         # NIAH 位置分层：只报总 EM 会让“early/late 高、middle 塌陷”平均成
         # 看似正常的中等分；分层单独成表，并明确样本不可跨箱配对。
-        depth_rows = [r for r in rows
-                      if any(r.get(k) is not None for k in (
-                          "ruler_depth_early", "ruler_depth_middle",
-                          "ruler_depth_late"))]
+        depth_rows = [
+            r
+            for r in rows
+            if any(
+                r.get(k) is not None
+                for k in ("ruler_depth_early", "ruler_depth_middle", "ruler_depth_late")
+            )
+        ]
         if depth_rows:
-            md += ["", "### RULER NIAH 位置分层（early / middle / late）", "",
-                   "按 needle 在上下文中的相对位置三分位分箱（[0,1/3)、"
-                   "[1/3,2/3)、[2/3,1]），对 niah_* 任务的 (任务, 上下文) "
-                   "单元格等权平均 EM。总 EM 掩盖位置差异：早期与末期的高分"
-                   "会抵消中部塌陷（lost-in-the-middle），因此位置分层是"
-                   "机制诊断的必报项。三个箱使用**不同评测样例**，不能直接"
-                   "当作同批配对样本做显著性检验；每箱样本数与 Wilson 95% "
-                   "CI 见 ruler_*.json 的 `em_by_depth`。", "",
-                   "| 变体 | early↑ | middle↑ | late↑ | early−late |",
-                   "|---|---|---|---|---|"]
+            md += [
+                "",
+                "### RULER NIAH 位置分层（early / middle / late）",
+                "",
+                "按 needle 在上下文中的相对位置三分位分箱（[0,1/3)、"
+                "[1/3,2/3)、[2/3,1]），对 niah_* 任务的 (任务, 上下文) "
+                "单元格等权平均 EM。总 EM 掩盖位置差异：早期与末期的高分"
+                "会抵消中部塌陷（lost-in-the-middle），因此位置分层是"
+                "机制诊断的必报项。三个箱使用**不同评测样例**，不能直接"
+                "当作同批配对样本做显著性检验；每箱样本数与 Wilson 95% "
+                "CI 见 ruler_*.json 的 `em_by_depth`。",
+                "",
+                "| 变体 | early↑ | middle↑ | late↑ | early−late |",
+                "|---|---|---|---|---|",
+            ]
             for r in depth_rows:
-                e, m, l = (r.get("ruler_depth_early"),
-                           r.get("ruler_depth_middle"),
-                           r.get("ruler_depth_late"))
+                e, m, l = (
+                    r.get("ruler_depth_early"),
+                    r.get("ruler_depth_middle"),
+                    r.get("ruler_depth_late"),
+                )
                 gap = r.get("ruler_depth_early_minus_late")
-                md.append(f"| {r.get('variant_cn') or r.get('variant')} | "
-                          f"{_fmt4(e)} | {_fmt4(m)} | {_fmt4(l)} | "
-                          f"{_fmt4(gap)} |")
+                md.append(
+                    f"| {r.get('variant_cn') or r.get('variant')} | "
+                    f"{_fmt4(e)} | {_fmt4(m)} | {_fmt4(l)} | "
+                    f"{_fmt4(gap)} |"
+                )
             flags = []
             for r in depth_rows:
-                e, m, l = (r.get("ruler_depth_early"),
-                           r.get("ruler_depth_middle"),
-                           r.get("ruler_depth_late"))
+                e, m, l = (
+                    r.get("ruler_depth_early"),
+                    r.get("ruler_depth_middle"),
+                    r.get("ruler_depth_late"),
+                )
                 name = r.get("variant_cn") or r.get("variant")
                 if None not in (e, m, l):
                     mid_drop = min(e, l) - m
                     if mid_drop >= 0.10:
                         flags.append(
                             f"{name} 的 middle 比两端较低者低 "
-                            f"{mid_drop * 100:.1f} pp")
+                            f"{mid_drop * 100:.1f} pp"
+                        )
                 gap = r.get("ruler_depth_early_minus_late")
                 if gap is not None and gap >= 0.10:
-                    flags.append(f"{name} 的 early−late 落差 "
-                                 f"{gap * 100:.1f} pp")
+                    flags.append(f"{name} 的 early−late 落差 " f"{gap * 100:.1f} pp")
             if flags:
-                md += ["", "⚠ 位置不均衡（描述性提示，非显著性判定）："
-                           + "；".join(flags)
-                           + "。这会把总 EM 抬到看似可接受的水平；需结合逐箱 "
-                           "Wilson CI 与样本文本复核，不能只用 RULER平均 下结论。"]
+                md += [
+                    "",
+                    "⚠ 位置不均衡（描述性提示，非显著性判定）："
+                    + "；".join(flags)
+                    + "。这会把总 EM 抬到看似可接受的水平；需结合逐箱 "
+                    "Wilson CI 与样本文本复核，不能只用 RULER平均 下结论。",
+                ]
         else:
-            niah_rows = [r for r in rows
-                         if any(r.get(f"ruler_{t}") is not None for t in (
-                             "niah_synth", "niah_corpus", "niah_multikey"))]
+            niah_rows = [
+                r
+                for r in rows
+                if any(
+                    r.get(f"ruler_{t}") is not None
+                    for t in ("niah_synth", "niah_corpus", "niah_multikey")
+                )
+            ]
             if niah_rows:
-                md += ["", "⚠ 本次 RULER 产物不含 needle 位置分层"
-                           "（`em_by_depth`，旧格式）：总 EM 可能掩盖 "
-                           "lost-in-the-middle。旧结果不能补算，需用当前版本"
-                           "重跑 RULER 后才能给出位置分层结论。"]
+                md += [
+                    "",
+                    "⚠ 本次 RULER 产物不含 needle 位置分层"
+                    "（`em_by_depth`，旧格式）：总 EM 可能掩盖 "
+                    "lost-in-the-middle。旧结果不能补算，需用当前版本"
+                    "重跑 RULER 后才能给出位置分层结论。",
+                ]
         # 上下文长度剂量-反应：位置分层回答“上下文内部的 needle 在哪”，
         # 长度分层回答“上下文本身变长时方法是否更有效”——两者是不同轴，
         # 不能互相替代；方法名为 length-calibrated，这一轴是核心主张。
@@ -1087,24 +1332,31 @@ def _summary_part_a(results_dir: str, audit: dict = None,
 
     # --- 门控概率校准：排序好 ≠ 概率数值可信。g 被当作“该不该写入”的
     #     软权重/概率使用，Brier/ECE 必须与 AUROC/PR-AUC 分开报告。
-    cal_rows = [r for r in rows
-                if r.get("brier_g") is not None
-                or r.get("probe_brier") is not None]
+    cal_rows = [
+        r
+        for r in rows
+        if r.get("brier_g") is not None or r.get("probe_brier") is not None
+    ]
     if cal_rows:
-        md += ["", "### 门控概率校准（Brier / ECE）", "",
-               "排序指标回答“能不能区分 hit/¬hit”，校准回答“g 的数值是否"
-               "可信”。Brier 越小越好；常数基率预测（永远输出 hit_base_rate）"
-               "的 Brier 是无信息基线，`Brier skill=1−Brier/Brier_常数` >0 "
-               "才说明概率预测优于常数。ECE 为 10 个等宽分箱的加权平均"
-               "|置信−准确率|；等频 ECE 按分数排序均分样本，避免分数聚集/"
-               "小样本下大量空箱或每个样本独占一箱把 ECE 机械压低。两者"
-               "都只作描述性证据；线性探针为有标签监督的 OOF 概率，门控 g "
-               "为语言建模副产品，两者校准口径不同，不能只凭 Brier 判定"
-               "方法优劣。", "",
-               "| 变体 | 命中基线率 | 门控Brier↓ | 常数基率Brier | "
-               "Brier skill↑ | 门控ECE↓ | 门控ECE(等频)↓ | "
-               "探针Brier↓ | 探针ECE↓ |",
-               "|---|---|---|---|---|---|---|---|---|"]
+        md += [
+            "",
+            "### 门控概率校准（Brier / ECE）",
+            "",
+            "排序指标回答“能不能区分 hit/¬hit”，校准回答“g 的数值是否"
+            "可信”。Brier 越小越好；常数基率预测（永远输出 hit_base_rate）"
+            "的 Brier 是无信息基线，`Brier skill=1−Brier/Brier_常数` >0 "
+            "才说明概率预测优于常数。ECE 为 10 个等宽分箱的加权平均"
+            "|置信−准确率|；等频 ECE 按分数排序均分样本，避免分数聚集/"
+            "小样本下大量空箱或每个样本独占一箱把 ECE 机械压低。两者"
+            "都只作描述性证据；线性探针为有标签监督的 OOF 概率，门控 g "
+            "为语言建模副产品，两者校准口径不同，不能只凭 Brier 判定"
+            "方法优劣。",
+            "",
+            "| 变体 | 命中基线率 | 门控Brier↓ | 常数基率Brier | "
+            "Brier skill↑ | 门控ECE↓ | 门控ECE(等频)↓ | "
+            "探针Brier↓ | 探针ECE↓ |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
         for r in cal_rows:
             md.append(
                 f"| {r.get('variant_cn') or r.get('variant')} | "
@@ -1115,31 +1367,38 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"{_fmt4(r.get('ece_g'))} | "
                 f"{_fmt4(r.get('ece_g_adaptive'))} | "
                 f"{_fmt4(r.get('probe_brier'))} | "
-                f"{_fmt4(r.get('probe_ece'))} |")
-        md += ["",
-               "注：门控 Brier/ECE 与固定 0.5 阈值无关；它们评估的是 g 的"
-               "概率数值，而不是某个决策点的 F1。逐分箱的置信/准确率、"
-               "n 与 gap 见 `analysis_*.json` 的 `calibration_g.bins`；"
-               "Brier 的 Murphy 分解（reliability/resolution/uncertainty，"
-               "原始分数非箱内常数时另报 brier_binning 箱内项）"
-               "与等频分箱明细见 `calibration_g.brier_*` 与 `ece_adaptive`。"]
+                f"{_fmt4(r.get('probe_ece'))} |"
+            )
+        md += [
+            "",
+            "注：门控 Brier/ECE 与固定 0.5 阈值无关；它们评估的是 g 的"
+            "概率数值，而不是某个决策点的 F1。逐分箱的置信/准确率、"
+            "n 与 gap 见 `analysis_*.json` 的 `calibration_g.bins`；"
+            "Brier 的 Murphy 分解（reliability/resolution/uncertainty，"
+            "原始分数非箱内常数时另报 brier_binning 箱内项）"
+            "与等频分箱明细见 `calibration_g.brier_*` 与 `ece_adaptive`。",
+        ]
 
     # --- 基线合理性（简单统计基线 + 基线调优证据 + 逐变体 vs 统计基线
     #     + 机制判别的线性探针简单监督基线）
     ngram_cmp = ngram_baseline_comparison(runs, results_dir)
     probe_cmp = linear_probe_baseline_comparison(runs)
-    md += _render_baseline_sections(results_dir,
-                                    smoke=((repro or {}).get("smoke") is True),
-                                    ngram_cmp=ngram_cmp,
-                                    probe_cmp=probe_cmp,
-                                    variants=sorted(runs))
+    md += _render_baseline_sections(
+        results_dir,
+        smoke=((repro or {}).get("smoke") is True),
+        ngram_cmp=ngram_cmp,
+        probe_cmp=probe_cmp,
+        variants=sorted(runs),
+    )
 
     # --- c~log2(n) 长度零假设诊断（README 要求的长度主张必要证据）
     length_null = load(os.path.join(results_dir, "length_null.json"))
     length_null = length_null if isinstance(length_null, dict) else None
     length_null_stale = bool(
-        length_null and scope_run_id
-        and length_null.get("pipeline_run_id") != scope_run_id)
+        length_null
+        and scope_run_id
+        and length_null.get("pipeline_run_id") != scope_run_id
+    )
     md += _render_length_null(length_null, stale=length_null_stale)
 
     # --- 训练后经验长度校准审计（与 length_null 合成诊断互补）
@@ -1147,8 +1406,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     lc_scope = repro.get("length_calibration")
     if isinstance(lc_scope, dict):
         allow_lc = lc_scope.get("executed") is True
-        lc_variants = (lc_scope.get("variants")
-                       if isinstance(lc_scope.get("variants"), list) else [])
+        lc_variants = (
+            lc_scope.get("variants")
+            if isinstance(lc_scope.get("variants"), list)
+            else []
+        )
     else:
         allow_lc = True
         lc_variants = None
@@ -1160,25 +1422,27 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             continue
         if lc_variants is not None and d["variant"] not in lc_variants:
             continue
-        length_calibrations.setdefault(
-            d["variant"], {})[_seed_key(fp, d)] = d
-    lc_requested = bool(isinstance(lc_scope, dict)
-                        and lc_scope.get("executed") is True)
+        length_calibrations.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
+    lc_requested = bool(isinstance(lc_scope, dict) and lc_scope.get("executed") is True)
     random_slope = None
     if isinstance(length_null, dict):
-        random_slope = ((length_null.get("modes") or {}).get("random") or {}
-                        ).get("slope_c_per_log2_n")
+        random_slope = ((length_null.get("modes") or {}).get("random") or {}).get(
+            "slope_c_per_log2_n"
+        )
     md += _render_length_calibration(
-        length_calibrations, requested=lc_requested,
-        random_slope=random_slope)
+        length_calibrations, requested=lc_requested, random_slope=random_slope
+    )
 
     # --- 自然文本 PPL 长度剂量-反应（与 c~log2(n) 审计互补）
     length_ppls = {}
     lp_scope = repro.get("length_ppl")
     if isinstance(lp_scope, dict):
         allow_lp = lp_scope.get("executed") is True
-        lp_variants = (lp_scope.get("variants")
-                       if isinstance(lp_scope.get("variants"), list) else [])
+        lp_variants = (
+            lp_scope.get("variants")
+            if isinstance(lp_scope.get("variants"), list)
+            else []
+        )
     else:
         allow_lp = True
         lp_variants = None
@@ -1190,19 +1454,17 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             continue
         if lp_variants is not None and d["variant"] not in lp_variants:
             continue
-        length_ppls.setdefault(
-            d["variant"], {})[_seed_key(fp, d)] = d
-    lp_requested = bool(isinstance(lp_scope, dict)
-                        and lp_scope.get("executed") is True)
+        length_ppls.setdefault(d["variant"], {})[_seed_key(fp, d)] = d
+    lp_requested = bool(isinstance(lp_scope, dict) and lp_scope.get("executed") is True)
     length_ppl_interactions = _length_ppl_interaction_rows(length_ppls, pairs)
     md += _render_length_ppl(
-        length_ppls, requested=lp_requested,
-        interactions=length_ppl_interactions)
+        length_ppls, requested=lp_requested, interactions=length_ppl_interactions
+    )
 
     # --- 先验设计计划与分析人群（训练前声明，汇总时核对）
     md += render_design_section(
-        design_plan, design_conf,
-        observed=observed_design_sensitivity(tests))
+        design_plan, design_conf, observed=observed_design_sensitivity(tests)
+    )
 
     # --- 受控变量自检
     md += ["", "## 对比实验受控变量自检", ""]
@@ -1211,21 +1473,29 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         stopped = _as_text_list(audit.get("early_stop_runs"))
         if audit.get("ok"):
             if audit.get("checked"):
-                md.append(f"- ✅ 通过：{audit['checked']} 个 run 的优化器、学习率、"
-                          f"训练步数、数据顺序等受控设置逐项一致；逐 run 仅 "
-                          f"`{'`, `'.join(exempt_keys)}` 不同。")
+                md.append(
+                    f"- ✅ 通过：{audit['checked']} 个 run 的优化器、学习率、"
+                    f"训练步数、数据顺序等受控设置逐项一致；逐 run 仅 "
+                    f"`{'`, `'.join(exempt_keys)}` 不同。"
+                )
             else:
-                md.append("- ⚠ 未检查受控变量：没有 run 可用于核对"
-                          "（全部缺少 config_used.json），不能据此声称一致性。")
+                md.append(
+                    "- ⚠ 未检查受控变量：没有 run 可用于核对"
+                    "（全部缺少 config_used.json），不能据此声称一致性。"
+                )
             if audit.get("meta_checked"):
                 digest = audit.get("expected_data_digest")
-                md.append(f"- ✅ 训练溯源一致：{audit['meta_checked']} 个 run 的"
-                          f"数据指纹、代码提交、配置 SHA-256、计划训练步数"
-                          f"逐项一致"
-                          + ("；实际步数差异为早停所致（见下条）"
-                             if stopped else "")
-                          + (f"（数据指纹 `{digest}`，并与本次流水线数据比对）"
-                             if digest else "。"))
+                md.append(
+                    f"- ✅ 训练溯源一致：{audit['meta_checked']} 个 run 的"
+                    f"数据指纹、代码提交、配置 SHA-256、计划训练步数"
+                    f"逐项一致"
+                    + ("；实际步数差异为早停所致（见下条）" if stopped else "")
+                    + (
+                        f"（数据指纹 `{digest}`，并与本次流水线数据比对）"
+                        if digest
+                        else "。"
+                    )
+                )
             if stopped:
                 md.append(
                     f"- ⏹ 早停启用：{len(stopped)} 个 run 未跑满"
@@ -1235,18 +1505,23 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                     "有效训练量不等；受控变量按计划步数核对，但预注册"
                     "确认性判定已自动降级为探索性（见 `significance.json` "
                     "的 registered_hypotheses）。逐 run 实际步数与 tokens_seen "
-                    "见各 eval.json。")
+                    "见各 eval.json。"
+                )
         else:
             md.append(f"- ❌ 未通过：{audit.get('mismatches') or audit}")
         missing_configs = _as_text_list(audit.get("missing_configs"))
         if missing_configs:
-            md.append(f"- ⚠ 缺少配置文件的 run：{', '.join(missing_configs[:8])}"
-                      + (" …" if len(missing_configs) > 8 else ""))
+            md.append(
+                f"- ⚠ 缺少配置文件的 run：{', '.join(missing_configs[:8])}"
+                + (" …" if len(missing_configs) > 8 else "")
+            )
         missing_evals = _as_text_list(audit.get("missing_evals"))
         if missing_evals:
-            md.append(f"- ⚠ 缺少 eval.json、无法核对数据/代码/训练步数的 run："
-                      f"{', '.join(missing_evals[:8])}"
-                      + (" …" if len(missing_evals) > 8 else ""))
+            md.append(
+                f"- ⚠ 缺少 eval.json、无法核对数据/代码/训练步数的 run："
+                f"{', '.join(missing_evals[:8])}"
+                + (" …" if len(missing_evals) > 8 else "")
+            )
     else:
         md.append("- ⚠ 未执行（直接调用 build_summary 或缺少 out 目录）。")
 
@@ -1258,22 +1533,33 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             f"- 协议：先划分后预处理={proto.get('split_first_then_preprocess')}、"
             f"拟合统计只来自 {proto.get('fit_on')}、"
             f"划分时打乱={proto.get('shuffle_at_split_time')}；"
-            "训练阶段 batch 级随机采样（shuffle）不构成泄露。")
+            "训练阶段 batch 级随机采样（shuffle）不构成泄露。"
+        )
         sp = _as_dict(data_report.get("split_protocol"))
         if sp:
-            md.append(f"- 划分方式：{sp.get('mode', '-')}；"
-                      f"顺序 {sp.get('order', '-')}；"
-                      f"文档边界回退={sp.get('fallback_char_cut', '-')}"
-                      + ("（⚠ 字符切分可能让同一文档跨 split）"
-                         if sp.get("fallback_char_cut") else ""))
+            md.append(
+                f"- 划分方式：{sp.get('mode', '-')}；"
+                f"顺序 {sp.get('order', '-')}；"
+                f"文档边界回退={sp.get('fallback_char_cut', '-')}"
+                + (
+                    "（⚠ 字符切分可能让同一文档跨 split）"
+                    if sp.get("fallback_char_cut")
+                    else ""
+                )
+            )
             # 声明与文本核对结果：document_disjoint 是上游声明，verified_disjoint
             # 是对实际写出的三份文本做跨 split 长行核对后的结论。
             if "verified_disjoint" in sp:
                 vd = sp.get("verified_disjoint")
-                md.append(f"- 划分声明核对：无共享长行={vd}"
-                          + ("" if vd else
-                             "（⚠ 实际文本存在跨 split 共享长行，声明被证伪，"
-                             "见 overlap_long_lines）"))
+                md.append(
+                    f"- 划分声明核对：无共享长行={vd}"
+                    + (
+                        ""
+                        if vd
+                        else "（⚠ 实际文本存在跨 split 共享长行，声明被证伪，"
+                        "见 overlap_long_lines）"
+                    )
+                )
             group = sp.get("group_unit")
             cross = sp.get("documents_cross_cut")
             pcross = sp.get("paragraphs_cross_cut")
@@ -1283,48 +1569,70 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                     warn += "（⚠ 文档群组跨 split，见告警 split_documents_cross_cut）"
                 if pcross:
                     warn += "（⚠ 段落群组跨 split，见告警 split_paragraphs_cross_cut）"
-                md.append(f"- 群组完整性：群组单位={group or '-'}；"
-                          f"标题数={sp.get('n_headings', '-')}；"
-                          f"段落边界数={sp.get('n_paragraph_boundaries', '-')}；"
-                          f"文档跨切点={cross if cross is not None else '-'}；"
-                          f"段落跨切点={pcross if pcross is not None else '-'}"
-                          + warn)
+                md.append(
+                    f"- 群组完整性：群组单位={group or '-'}；"
+                    f"标题数={sp.get('n_headings', '-')}；"
+                    f"段落边界数={sp.get('n_paragraph_boundaries', '-')}；"
+                    f"文档跨切点={cross if cross is not None else '-'}；"
+                    f"段落跨切点={pcross if pcross is not None else '-'}" + warn
+                )
             actual = _as_dict(sp.get("actual_fractions"))
             target = _as_dict(sp.get("target_fractions"))
             dev = _finite_number(sp.get("max_abs_fraction_deviation"))
             if actual:
+
                 def _fr(d, k):
                     f = _finite_number(d.get(k))
                     if f is None:
                         return "-"
                     # 有限比例乘 100 仍可能溢出（如 1e307），不能写出 inf%。
                     return "溢出" if not math.isfinite(f * 100.0) else f"{f:.1%}"
-                dev_s = ("溢出" if not math.isfinite(dev * 100.0)
-                         else f"{dev:.1%}") if dev is not None else None
+
+                dev_s = (
+                    ("溢出" if not math.isfinite(dev * 100.0) else f"{dev:.1%}")
+                    if dev is not None
+                    else None
+                )
                 md.append(
                     "- 划分比例：实际 "
-                    + " / ".join(f"{k}={_fr(actual, k)}"
-                                 for k in ("train", "val", "test"))
-                    + ("；目标 " + " / ".join(
-                        f"{k}={_fr(target, k)}"
-                        for k in ("train", "val", "test")) if target else "")
+                    + " / ".join(
+                        f"{k}={_fr(actual, k)}" for k in ("train", "val", "test")
+                    )
+                    + (
+                        "；目标 "
+                        + " / ".join(
+                            f"{k}={_fr(target, k)}" for k in ("train", "val", "test")
+                        )
+                        if target
+                        else ""
+                    )
                     + (f"；最大绝对偏差 {dev_s}" if dev_s is not None else "")
-                    + (f"；切点相对目标偏移 {sp.get('cut_deviation_chars')} 字符"
-                       if sp.get("cut_deviation_chars") is not None else "")
+                    + (
+                        f"；切点相对目标偏移 {sp.get('cut_deviation_chars')} 字符"
+                        if sp.get("cut_deviation_chars") is not None
+                        else ""
+                    )
                     + "。切点吸附到文档/段落边界会改变实际训练/评测规模，"
-                      "解读固定比例与检验功效时须按实际值")
+                    "解读固定比例与检验功效时须按实际值"
+                )
         tok = _as_dict(data_report.get("tokenizer"))
         unk = _as_dict(tok.get("unk_rate"))
         unk_s = "、".join(f"{k}={_fmt_rate(v)}" for k, v in unk.items())
-        md.append(f"- 分词器：{tok.get('kind')}（vocab={tok.get('vocab_size')}，"
-                  f"拟合集={tok.get('fit_on')}）；OOV 字符率：{unk_s or 'N/A'}"
-                  "（未知字符映射 <unk>，val/test 不参与词表拟合）")
+        md.append(
+            f"- 分词器：{tok.get('kind')}（vocab={tok.get('vocab_size')}，"
+            f"拟合集={tok.get('fit_on')}）；OOV 字符率：{unk_s or 'N/A'}"
+            "（未知字符映射 <unk>，val/test 不参与词表拟合）"
+        )
         splits = _as_dict(data_report.get("splits"))
-        md.append("- token 流硬校验：" + "；".join(
-            f"{k} {_int_or_zero(_as_dict(v).get('tokens')):,} tokens"
-            f"（id∈[{_as_dict(v).get('min_id')},{_as_dict(v).get('max_id')}]，"
-            f"NaN={_as_dict(v).get('nan')}，Inf={_as_dict(v).get('inf')}）"
-            for k, v in splits.items()))
+        md.append(
+            "- token 流硬校验："
+            + "；".join(
+                f"{k} {_int_or_zero(_as_dict(v).get('tokens')):,} tokens"
+                f"（id∈[{_as_dict(v).get('min_id')},{_as_dict(v).get('max_id')}]，"
+                f"NaN={_as_dict(v).get('nan')}，Inf={_as_dict(v).get('inf')}）"
+                for k, v in splits.items()
+            )
+        )
         dup = _as_dict(data_report.get("duplicates"))
         cont = _as_dict(data_report.get("contamination"))
         doc = _as_dict(dup.get("document_level"))
@@ -1336,7 +1644,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"{doc.get('train_intra_split_duplicate_blocks_removed', '-')} 个"
                 f"（共 {doc.get('train_lines_dropped', '-')} 行）；"
                 f"val↔test 多行块重叠 {doc.get('val_test_overlap_blocks', '-')} 个"
-                "（只改 train，val/test 保持尘封）")
+                "（只改 train，val/test 保持尘封）"
+            )
         near = _as_dict(dup.get("near_duplicate"))
         if near:
             md.append(
@@ -1352,7 +1661,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"{_int_or_zero(near.get('val_test_near_duplicate_pairs')):,}；"
                 f"LSH 理论召回率 {_fmt_rate(near.get('lsh_recall_at_threshold'))}；"
                 f"候选对 {_int_or_zero(near.get('candidate_pairs')):,}"
-                "（阈值敏感性见 data_report.json）")
+                "（阈值敏感性见 data_report.json）"
+            )
             eint = _as_dict(near.get("eval_internal_near_duplicates"))
             if eint:
                 parts = []
@@ -1371,7 +1681,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                         f"{_int_or_zero(row.get('effective_blocks'))}/"
                         f"{_int_or_zero(row.get('eligible_blocks'))}、"
                         "可扫描覆盖 "
-                        f"{_fmt_rate(row.get('eligible_coverage_fraction'))}")
+                        f"{_fmt_rate(row.get('eligible_coverage_fraction'))}"
+                    )
                 if parts:
                     md.append(
                         "- 评测集内部近似重复（只诊断，val/test 不改写）："
@@ -1379,11 +1690,11 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                         + "。字符占比超过 "
                         + f"{_fmt_rate(eint.get('warn_fraction_chars'))}"
                         + " 时告警；同簇窗口不是独立重复，名义窗口数不能直接"
-                        "当作有效样本量")
+                        "当作有效样本量"
+                    )
             cov = _finite_number(near.get("train_chars_coverage_fraction"))
             if cov is not None:
-                cov_s = ("溢出" if not math.isfinite(cov * 100.0)
-                         else f"{cov:.1%}")
+                cov_s = "溢出" if not math.isfinite(cov * 100.0) else f"{cov:.1%}"
                 md.append(
                     f"- 近似重复扫描覆盖：{cov_s} 的 train 字符达到 "
                     f"min_chars={near.get('min_chars', '-')} 且 shingle 数达标；"
@@ -1393,14 +1704,17 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                     f"{_int_or_zero(near.get('train_chars_skipped_few_shingles')):,}、"
                     f"超大块 "
                     f"{_int_or_zero(near.get('train_chars_skipped_too_large')):,}"
-                    "（近重复结论只对已覆盖部分成立）")
+                    "（近重复结论只对已覆盖部分成立）"
+                )
             removal = _as_dict(near.get("threshold_sensitivity_removal"))
             if removal:
+
                 def _tau_key(x):
                     try:
                         return (0, float(x))
                     except (TypeError, ValueError):
                         return (1, str(x))
+
                 parts = []
                 for key in sorted(removal, key=_tau_key):
                     r = _as_dict(removal.get(key))
@@ -1408,34 +1722,47 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                         f"τ={key}: 删 "
                         f"{_int_or_zero(r.get('train_blocks_removed_total'))} 块/"
                         f"{_int_or_zero(r.get('train_chars_removed')):,} 字符/"
-                        f"{_fmt_rate(r.get('removal_fraction_chars'))}")
-                md.append("- 近似重复阈值敏感性（实际删除量，不只是判定对数）："
-                          + "；".join(parts)
-                          + "。阈值是分析前声明的协议参数，不能按下游结果回头挑选")
-            if (near.get("candidate_pairs_truncated")
-                    or _int_or_zero(near.get("oversized_groups_truncated"))):
-                md.append("- ⚠ 近似重复扫描触发候选簇/候选总数上限：删除量是下界，"
-                          "须降低语料规模或提高上限后重跑")
+                        f"{_fmt_rate(r.get('removal_fraction_chars'))}"
+                    )
+                md.append(
+                    "- 近似重复阈值敏感性（实际删除量，不只是判定对数）："
+                    + "；".join(parts)
+                    + "。阈值是分析前声明的协议参数，不能按下游结果回头挑选"
+                )
+            if near.get("candidate_pairs_truncated") or _int_or_zero(
+                near.get("oversized_groups_truncated")
+            ):
+                md.append(
+                    "- ⚠ 近似重复扫描触发候选簇/候选总数上限：删除量是下界，"
+                    "须降低语料规模或提高上限后重跑"
+                )
         post = _as_dict(dup.get("post_cleanup"))
         if post.get("checked_pairs"):
             clean = post.get("train_eval_clean")
             if clean is True:
-                md.append("- 清洗后复核：train 与 val/test 已无共享精确/归一化"
-                          "长行或多行块（短行与近似重复另见对应条目）")
+                md.append(
+                    "- 清洗后复核：train 与 val/test 已无共享精确/归一化"
+                    "长行或多行块（短行与近似重复另见对应条目）"
+                )
             elif clean is False:
-                md.append("- ⚠ 清洗后复核：train 仍与 val/test 共享精确/归一化"
-                          "长行或多行块，去污染未闭合，须重建数据")
+                md.append(
+                    "- ⚠ 清洗后复核：train 仍与 val/test 共享精确/归一化"
+                    "长行或多行块，去污染未闭合，须重建数据"
+                )
         acct = _as_dict(data_report.get("accounting"))
         if acct:
             md.append(
-                "- 语料核算（与分词器无关的分母）：" + "；".join(
+                "- 语料核算（与分词器无关的分母）："
+                + "；".join(
                     f"{k} {_int_or_zero(_as_dict(v).get('tokens')):,} tokens / "
                     f"{_int_or_zero(_as_dict(v).get('chars')):,} 字符 / "
                     f"{_int_or_zero(_as_dict(v).get('utf8_bytes')):,} UTF-8 字节"
                     f"（{_fmt4(_as_dict(v).get('bytes_per_token'))} bytes/token）"
-                    for k, v in acct.items())
+                    for k, v in acct.items()
+                )
                 + "。字符级兜底与 BPE 的 token PPL 不可直接比较，"
-                  "规模与分母以字节/字符核算为准")
+                "规模与分母以字节/字符核算为准"
+            )
         md.append(
             f"- 去污染：与 val/test 重复的训练长行移除 "
             f"{dup.get('train_lines_dropped_as_duplicates_of_eval', '-')} 行；"
@@ -1447,16 +1774,21 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             f"val={_fmt_rate(_as_dict(cont.get('train_val')).get('overlap_rate'))}、"
             f"test={_fmt_rate(_as_dict(cont.get('train_test')).get('overlap_rate'))}、"
             f"val↔test={_fmt_rate(_as_dict(cont.get('val_test')).get('overlap_rate'))}"
-            "（采样筛查下界，>0 需人工核查）")
+            "（采样筛查下界，>0 需人工核查）"
+        )
         cexact = _as_dict(data_report.get("contamination_exact"))
         if cexact:
+
             def _exact_scope(entry):
                 d = _as_dict(entry)
                 if d.get("eval_sampling") == "all":
                     return "全量 eval 窗口"
-                return (f"eval 抽样 "
-                        f"{_int_or_zero(d.get('eval_windows_checked')):,}/"
-                        f"{_int_or_zero(d.get('eval_windows_total')):,} 窗口")
+                return (
+                    f"eval 抽样 "
+                    f"{_int_or_zero(d.get('eval_windows_checked')):,}/"
+                    f"{_int_or_zero(d.get('eval_windows_total')):,} 窗口"
+                )
+
             tv = _as_dict(cexact.get("train_val"))
             tt = _as_dict(cexact.get("train_test"))
             vt = _as_dict(cexact.get("val_test"))
@@ -1469,7 +1801,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"OOV 排除窗口 val={_int_or_zero(tv.get('eval_windows_excluded_ignore')):,}、"
                 f"test={_int_or_zero(tt.get('eval_windows_excluded_ignore')):,}、"
                 f"val↔test={_int_or_zero(vt.get('eval_windows_excluded_ignore')):,}"
-                "（>0 即训练前硬拦截）")
+                "（>0 即训练前硬拦截）"
+            )
         n_short_tv = _int_or_zero(dup.get("train_val_overlap_short_lines"))
         n_short_tt = _int_or_zero(dup.get("train_test_overlap_short_lines"))
         n_short_vt = _int_or_zero(dup.get("val_test_overlap_short_lines"))
@@ -1483,7 +1816,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"{_int_or_zero(dup.get('train_val_overlap_normalized_short_lines'))}/"
                 f"{_int_or_zero(dup.get('train_test_overlap_normalized_short_lines'))}/"
                 f"{_int_or_zero(dup.get('val_test_overlap_normalized_short_lines'))}）；"
-                "重复样本会削弱 held-out 独立性，须人工核查")
+                "重复样本会削弱 held-out 独立性，须人工核查"
+            )
         cshort = _as_dict(data_report.get("contamination_short_ngram"))
         if cshort:
             md.append(
@@ -1492,7 +1826,8 @@ def _summary_part_a(results_dir: str, audit: dict = None,
                 f"val={_fmt_rate(_as_dict(cshort.get('train_val')).get('overlap_rate'))}、"
                 f"test={_fmt_rate(_as_dict(cshort.get('train_test')).get('overlap_rate'))}、"
                 f"val↔test={_fmt_rate(_as_dict(cshort.get('val_test')).get('overlap_rate'))}"
-                "（短 n 易有自然搭配假阳性，不进硬闸门）")
+                "（短 n 易有自然搭配假阳性，不进硬闸门）"
+            )
         dist = _as_dict(data_report.get("distribution_shift"))
         dv = _as_dict(dist.get("val_vs_train"))
         dt = _as_dict(dist.get("test_vs_train"))
@@ -1502,84 +1837,115 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             f"JS={_fmt4(dv.get('js_bits'))} bit；test−train TV={_fmt4(dt.get('tv'))}、"
             f"JS={_fmt4(dt.get('js_bits'))} bit；test−val TV={_fmt4(dvt.get('tv'))}、"
             f"JS={_fmt4(dvt.get('js_bits'))} bit；test OOV token 率="
-            f"{_fmt_rate(dt.get('eval_oov_token_rate'))}")
+            f"{_fmt_rate(dt.get('eval_oov_token_rate'))}"
+        )
         san = _as_dict(data_report.get("sanitization"))
-        noise = sum(_int_or_zero(_as_dict(san.get(s)).get(
-            "replacement_char_replaced_with_space")) for s in san)
-        ctrl = sum(_int_or_zero(_as_dict(san.get(s)).get(
-            "control_chars_deleted")) for s in san)
-        md.append(f"- 文本清洗（标签噪声）：U+FFFD 替换 {noise:,} 处、"
-                  f"非法控制符删除 {ctrl:,} 处；清洗为逐字符确定性规则，"
-                  "不依赖跨样本统计量。")
+        noise = sum(
+            _int_or_zero(
+                _as_dict(san.get(s)).get("replacement_char_replaced_with_space")
+            )
+            for s in san
+        )
+        ctrl = sum(
+            _int_or_zero(_as_dict(san.get(s)).get("control_chars_deleted")) for s in san
+        )
+        md.append(
+            f"- 文本清洗（标签噪声）：U+FFFD 替换 {noise:,} 处、"
+            f"非法控制符删除 {ctrl:,} 处；清洗为逐字符确定性规则，"
+            "不依赖跨样本统计量。"
+        )
         ts = _as_dict(data_report.get("text_stats"))
         if ts:
-            md.append("- 行长度异常检查：" + "；".join(
-                f"{k} 行数={_int_or_zero(_as_dict(v).get('lines')):,}、"
-                f"最长行={_int_or_zero(_as_dict(v).get('line_chars_max')):,} 字符、"
-                f"超长行(>10万字符)={_int_or_zero(_as_dict(v).get('lines_gt_huge_threshold'))}"
-                for k, v in ts.items()))
+            md.append(
+                "- 行长度异常检查："
+                + "；".join(
+                    f"{k} 行数={_int_or_zero(_as_dict(v).get('lines')):,}、"
+                    f"最长行={_int_or_zero(_as_dict(v).get('line_chars_max')):,} 字符、"
+                    f"超长行(>10万字符)={_int_or_zero(_as_dict(v).get('lines_gt_huge_threshold'))}"
+                    for k, v in ts.items()
+                )
+            )
         alerts = _as_dict_list(data_report.get("alerts"))
         if alerts:
             n_warn = sum(1 for a in alerts if a.get("level") == "warning")
-            shown = "；".join(f"[{a.get('code')}] {a.get('message')}"
-                              for a in alerts[:5])
-            md.append(f"- ⚠ 自检告警（{n_warn} warning / 共 {len(alerts)} 条）："
-                      + shown + (" …" if len(alerts) > 5 else "")
-                      + "（阈值见 data_report.json 的 alert_thresholds）")
+            shown = "；".join(
+                f"[{a.get('code')}] {a.get('message')}" for a in alerts[:5]
+            )
+            md.append(
+                f"- ⚠ 自检告警（{n_warn} warning / 共 {len(alerts)} 条）："
+                + shown
+                + (" …" if len(alerts) > 5 else "")
+                + "（阈值见 data_report.json 的 alert_thresholds）"
+            )
         else:
-            md.append("- 自检告警：无（全部指标在 alert_thresholds 阈值内；"
-                      "阈值是复核触发线而非显著性检验）")
+            md.append(
+                "- 自检告警：无（全部指标在 alert_thresholds 阈值内；"
+                "阈值是复核触发线而非显著性检验）"
+            )
         ta = _as_dict(data_report.get("test_access"))
         if ta:
-            repeated = _as_text_list(
-                ta.get("checkpoints_evaluated_multiple_times"))
-            warn = ("" if not repeated
-                    else "；⚠ 存在被重复评测的 checkpoint："
-                         + "、".join(repeated[:4]))
-            md.append(f"- 测试集尘封账本：累计 test 评测 {ta.get('evaluations', 0)} 次、"
-                      f"不同 checkpoint {ta.get('distinct_checkpoints', 0)} 个"
-                      f"{warn}。测试集只用于最终评估；据此调参即视为泄露。")
+            repeated = _as_text_list(ta.get("checkpoints_evaluated_multiple_times"))
+            warn = (
+                ""
+                if not repeated
+                else "；⚠ 存在被重复评测的 checkpoint：" + "、".join(repeated[:4])
+            )
+            md.append(
+                f"- 测试集尘封账本：累计 test 评测 {ta.get('evaluations', 0)} 次、"
+                f"不同 checkpoint {ta.get('distinct_checkpoints', 0)} 个"
+                f"{warn}。测试集只用于最终评估；据此调参即视为泄露。"
+            )
             chain = _as_dict(ta.get("ledger_integrity"))
             if chain:
                 if chain.get("ok") is False:
                     md.append(
                         "- ⚠ 测试集访问账本哈希链断裂：中间记录可能被改写/"
-                        "删除/重排；依赖 test 的确认性判定已降级为探索性。")
+                        "删除/重排；依赖 test 的确认性判定已降级为探索性。"
+                    )
                 elif chain.get("legacy_records"):
                     md.append(
                         f"- 测试集访问账本链：{chain.get('chained_records', 0)} "
                         f"条已链接、{chain.get('legacy_records', 0)} 条旧格式"
-                        "记录无链字段（旧记录无法事后补链，不能当作已核验）。")
+                        "记录无链字段（旧记录无法事后补链，不能当作已核验）。"
+                    )
                 elif chain.get("fully_chained") is True:
                     md.append("- 测试集访问账本链：全部记录通过 SHA-256 链校验。")
-            if test_reuse.get("checked") is True \
-                    and test_reuse.get("current_test_data_fingerprint"):
+            if test_reuse.get("checked") is True and test_reuse.get(
+                "current_test_data_fingerprint"
+            ):
                 planned = test_reuse.get("planned_looks")
                 observed = test_reuse.get("observed_looks")
                 if test_reuse.get("exceeded") is True:
                     md.append(
                         f"- ⚠ 测试集 look 预算超限：当前测试版本已有 "
                         f"{observed} 个独立流水线运行 > 预算 {planned}；"
-                        "依赖 test 的确认性判定已降级为探索性。")
+                        "依赖 test 的确认性判定已降级为探索性。"
+                    )
                 else:
                     md.append(
                         f"- 测试集 look 审计：当前测试版本 {observed} 个独立"
                         f"流水线运行，预算 {planned}；"
-                        + (f"按多次 look 保守阈值 alpha/planned="
-                           f"{test_reuse.get('look_adjusted_alpha'):.6g} 判定。"
-                           if planned and planned > 1 else
-                           "在预算内，确认性资格不受额外 look 惩罚。"))
+                        + (
+                            f"按多次 look 保守阈值 alpha/planned="
+                            f"{test_reuse.get('look_adjusted_alpha'):.6g} 判定。"
+                            if planned and planned > 1
+                            else "在预算内，确认性资格不受额外 look 惩罚。"
+                        )
+                    )
                 if test_reuse.get("unattributed_records"):
                     md.append(
                         f"- ⚠ 测试集 look 审计：当前版本另有 "
                         f"{test_reuse.get('unattributed_records')} 条旧记录"
-                        "缺少 pipeline_run_id，独立 look 次数可能被低估。")
+                        "缺少 pipeline_run_id，独立 look 次数可能被低估。"
+                    )
         else:
             md.append("- 测试集尘封账本：暂无 test 评测记录。")
     else:
-        md.append("- ⚠ 未找到 `data_report.json`（旧数据或未走统一数据入口）；"
-                  "请用 `scripts/prepare_data.py` / `scripts/make_dummy_data.py` "
-                  "重建数据以生成防泄漏自检。")
+        md.append(
+            "- ⚠ 未找到 `data_report.json`（旧数据或未走统一数据入口）；"
+            "请用 `scripts/prepare_data.py` / `scripts/make_dummy_data.py` "
+            "重建数据以生成防泄漏自检。"
+        )
 
     _assigned = {
         "_",
@@ -1779,8 +2145,13 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     }
     return {k: v for k, v in locals().items() if k in _assigned}
 
-def build_summary(results_dir: str, audit: dict = None,
-                  data_report: dict = None, preloaded: dict = None) -> dict:
+
+def build_summary(
+    results_dir: str,
+    audit: dict = None,
+    data_report: dict = None,
+    preloaded: dict = None,
+) -> dict:
     """汇总 PPL / RULER / 参数量等指标为 Markdown + CSV + JSON。
 
     拆分后由多个阶段函数顺序生成；对外接口与返回结构保持不变。
@@ -1798,31 +2169,30 @@ def build_summary(results_dir: str, audit: dict = None,
     ctx.update(_summary_part_b(**ctx))
     ctx.update(_summary_part_c(**ctx))
     return {
-        'rows': ctx["rows"],
-        'markdown': ctx["md_text"],
-        'tests': ctx["tests"],
-        'exploratory_fdr': ctx.get("exploratory_fdr"),
-        'ruler_sample_tests': ctx["ruler_sample_tests"],
-        'ruler_length': ctx["length_analysis"],
-        'ruler_heterogeneity': ctx["ruler_heterogeneity"],
-        'missingness': ctx.get("missingness"),
-        'length_null': ctx.get("length_null"),
-        'length_calibration': ctx.get("length_calibrations"),
-        'length_ppl': ctx.get("length_ppls"),
-        'length_ppl_interactions': ctx.get("length_ppl_interactions"),
-        'ppl_window_tests': ctx["ppl_window_tests"],
-        'factorial_shapley': ctx["shapley_tests"],
-        'reparameterization': ctx["reparameterization"],
-        'inference_factorial_shapley': ctx["inference_shapley"],
-        'inference_interactions': ctx["inference_interactions"],
-        'parameter_matched_control': ctx["param_control_test"],
-        'capacity_decomposition': ctx["capacity_decomposition"],
-        'causal_ablation': ctx["causal_tests"],
-        'matched_ablation_contrasts': ctx["matched_ablation_contrasts"],
-        'dose_response': ctx["dose_tests"],
-        'budget_sensitivity': ctx["budget_sensitivity"],
-        'multiverse': ctx["multiverse"],
-        'ranking': ctx.get("ranking"),
-        'test_reuse': ctx.get("test_reuse"),
+        "rows": ctx["rows"],
+        "markdown": ctx["md_text"],
+        "tests": ctx["tests"],
+        "exploratory_fdr": ctx.get("exploratory_fdr"),
+        "ruler_sample_tests": ctx["ruler_sample_tests"],
+        "ruler_length": ctx["length_analysis"],
+        "ruler_heterogeneity": ctx["ruler_heterogeneity"],
+        "missingness": ctx.get("missingness"),
+        "length_null": ctx.get("length_null"),
+        "length_calibration": ctx.get("length_calibrations"),
+        "length_ppl": ctx.get("length_ppls"),
+        "length_ppl_interactions": ctx.get("length_ppl_interactions"),
+        "ppl_window_tests": ctx["ppl_window_tests"],
+        "factorial_shapley": ctx["shapley_tests"],
+        "reparameterization": ctx["reparameterization"],
+        "inference_factorial_shapley": ctx["inference_shapley"],
+        "inference_interactions": ctx["inference_interactions"],
+        "parameter_matched_control": ctx["param_control_test"],
+        "capacity_decomposition": ctx["capacity_decomposition"],
+        "causal_ablation": ctx["causal_tests"],
+        "matched_ablation_contrasts": ctx["matched_ablation_contrasts"],
+        "dose_response": ctx["dose_tests"],
+        "budget_sensitivity": ctx["budget_sensitivity"],
+        "multiverse": ctx["multiverse"],
+        "ranking": ctx.get("ranking"),
+        "test_reuse": ctx.get("test_reuse"),
     }
-

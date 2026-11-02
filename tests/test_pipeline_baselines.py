@@ -1,63 +1,31 @@
 """基线合理性、n-gram 与预注册确认性判定测试。"""
-import hashlib
+
 import json
 import math
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
-import time
 from unittest import mock
 
-from lega.data import CACHE_SCHEMA
 import lega.attention as lega_attention
 from tests.pipeline_helpers import _mk, _write_json
-from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
-                      _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
-                      _enrich_paired, _eval_matches_window_spec,
-                      _factorial_interaction_tests, _FACTORIAL_CONTRAST_CELLS,
-                      _factorial_protocol_ok, _inference_shapley_tests,
-                      INFERENCE_INTERACTION_METRIC, INFERENCE_SHAPLEY_METRIC,
-                      PARAM_CONTROL_VARIANT,
-                      PARAM_CONTROL_PAIR,
-                      _int_or_zero, _lat_noise_pct,
-                      _neural_eval_window_spec, _noise_floor_pct,
-                      _noise_verdict_note, _loo_stability_str, _num_or_none,
-                      _rate_or_none,
-                      _seed_winloss_str, _paired_comparisons, _ppl_ci_rel_pct,
-                      _log_ppl_of, _ppl_of, _probe_oof, _rel_pct,
-                      _render_baseline_sections, _result_files,
-                      _render_ruler_length,
-                      _render_inference_shapley,
-                      _render_parameter_matched_control,
-                      _ruler_avg_micro, _ruler_avg_of, _ruler_cell_signature,
-                      _ruler_depth_gap, _ruler_depth_means,
-                      _ruler_fwe_recall, _ruler_min_cell_n, _ruler_protocol,
-                      _ruler_task_means,
-                      _render_registration_integrity, _resolve_jobs, _stat,
-                      _seed_key, _strict_seed_int, _parse_seed_list,
-                      apply_budget_gate, apply_integrity_gate, apply_scope_gate,
-                      AUROC_DIFF_METRIC, AUROC_DIFF_REFERENCE,
-                      build_comparison_pairs, build_summary,
-                      _fmt_eq_margin, _fmt_eq_value,
-                      _fmt_mean_std, _fmt_signed,
-                      changed_gate_factors,
-                      component_evidence, cross_variant_badcase_map,
-                      COMPONENT_TESTS, GATE_FACTORS,
-                      main as run_all_main,
-                      data_protocol_preflight, data_report_binding_issue,
-                      evaluate_registered_hypotheses,
-                      load_registered_hypotheses, ngram_baseline_comparison,
-                      parse_variants, registration_scope_check,
-                      abort_ledger_on_failure, record_aborted_sanity,
-                      mark_repro_failed, check_sanity_results,
-                      _snapshot_existing_runs,
-                      resolve_ngram_split, run_many,
-                      single_factor_audit, single_factor_change,
-                      SINGLE_FACTOR_CONTRASTS, SINGLE_FACTOR_PAIRS,
-                      tradeoff_verdict, verify_controlled_setup)
-
+from run_all import (
+    ALPHA,
+    _apply_holm,
+    PARAM_CONTROL_VARIANT,
+    _neural_eval_window_spec,
+    _render_baseline_sections,
+    _render_registration_integrity,
+    apply_scope_gate,
+    AUROC_DIFF_METRIC,
+    build_summary,
+    main as run_all_main,
+    evaluate_registered_hypotheses,
+    ngram_baseline_comparison,
+    registration_scope_check,
+    resolve_ngram_split,
+)
 
 
 def test_run_all_rejects_duplicate_config_keys():
@@ -66,10 +34,17 @@ def test_run_all_rejects_duplicate_config_keys():
         cfg = os.path.join(d, "dup.json")
         with open(cfg, "w", encoding="utf-8") as f:
             f.write('{"seeds": [1], "seeds": [2]}')
-        argv = ["run_all.py", "--config", cfg,
-                "--data_dir", os.path.join(d, "data"),
-                "--out_root", os.path.join(d, "out"),
-                "--results_dir", os.path.join(d, "results")]
+        argv = [
+            "run_all.py",
+            "--config",
+            cfg,
+            "--data_dir",
+            os.path.join(d, "data"),
+            "--out_root",
+            os.path.join(d, "out"),
+            "--results_dir",
+            os.path.join(d, "results"),
+        ]
         with mock.patch.object(sys, "argv", argv):
             try:
                 run_all_main()
@@ -86,20 +61,32 @@ def test_run_all_environment_gate_blocks_formal_drift():
         cfg = os.path.join(d, "cfg.json")
         _write_json(cfg, {"seeds": [1]})
         drift = {
-            "matches": False, "python_matches": True,
-            "python": "3.12", "runtime_python": "3.12.9",
-            "missing": [], "errors": [], "path": "requirements-lock.txt",
+            "matches": False,
+            "python_matches": True,
+            "python": "3.12",
+            "runtime_python": "3.12.9",
+            "missing": [],
+            "errors": [],
+            "path": "requirements-lock.txt",
             "lock_sha256": "abc",
-            "mismatches": [{"package": "numpy", "expected": "2.5.4",
-                            "installed": "0.0.0"}],
+            "mismatches": [
+                {"package": "numpy", "expected": "2.5.4", "installed": "0.0.0"}
+            ],
         }
-        argv = ["run_all.py", "--config", cfg,
-                "--data_dir", os.path.join(d, "data"),
-                "--out_root", os.path.join(d, "out"),
-                "--results_dir", os.path.join(d, "results")]
-        with mock.patch.object(sys, "argv", argv), \
-                mock.patch("lega.pipeline.train.environment_lock_report",
-                           return_value=drift):
+        argv = [
+            "run_all.py",
+            "--config",
+            cfg,
+            "--data_dir",
+            os.path.join(d, "data"),
+            "--out_root",
+            os.path.join(d, "out"),
+            "--results_dir",
+            os.path.join(d, "results"),
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch(
+            "lega.pipeline.train.environment_lock_report", return_value=drift
+        ):
             try:
                 run_all_main()
             except SystemExit as e:
@@ -119,19 +106,32 @@ def test_render_baseline_sections_reads_evidence_and_warns():
         assert "基线合理性" in text
         assert "未运行" in text
         # 提供证据：调优选择、最优/默认差距与 ngram PPL 都要出现
-        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
-            "variant": "standard", "steps": 100, "n_trials": 3,
-            "selected": {"lr": 0.0012, "weight_decay": 0.1,
-                         "val_loss_best": 3.1},
-            "default_trial": {"lr": 0.0006, "weight_decay": 0.1,
-                              "val_loss_best": 3.2},
-            "selected_minus_default_val_loss": -0.1,
-            "default_is_optimal": False,
-        })
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "train_tokens": 1000, "eval_tokens": 100,
-            "vocab_size": 50, "ppl": {"unigram": 90.0, "bigram": 45.0},
-        })
+        _write_json(
+            os.path.join(tmp, "baseline_tuning.json"),
+            {
+                "variant": "standard",
+                "steps": 100,
+                "n_trials": 3,
+                "selected": {"lr": 0.0012, "weight_decay": 0.1, "val_loss_best": 3.1},
+                "default_trial": {
+                    "lr": 0.0006,
+                    "weight_decay": 0.1,
+                    "val_loss_best": 3.2,
+                },
+                "selected_minus_default_val_loss": -0.1,
+                "default_is_optimal": False,
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "train_tokens": 1000,
+                "eval_tokens": 100,
+                "vocab_size": 50,
+                "ppl": {"unigram": 90.0, "bigram": 45.0},
+            },
+        )
         _write_json(os.path.join(tmp, "repro.json"), {"smoke": False})
         text2 = "\n".join(_render_baseline_sections(tmp))
         assert "0.0012" in text2 and "3.1000" in text2
@@ -139,20 +139,30 @@ def test_render_baseline_sections_reads_evidence_and_warns():
         assert "全流水线" in text2 and "受控变量" in text2
         # 已有工作代表未各自调优：汇总页必须限定“同超参受控对照”，
         # 不能把 qgate/null 的对比写成“优于各自最佳调优版本”。
-        text_scope = "\n".join(_render_baseline_sections(
-            tmp, variants=["standard", "qgate", "null", "lega"]))
+        text_scope = "\n".join(
+            _render_baseline_sections(
+                tmp, variants=["standard", "qgate", "null", "lega"]
+            )
+        )
         assert "调优范围" in text_scope and "同超参受控对照" in text_scope
         assert "`qgate`" in text_scope and "`null`" in text_scope
         # 只有 standard/lega 时不产生无关警告
-        text_no_scope = "\n".join(_render_baseline_sections(
-            tmp, variants=["standard", "lega"]))
+        text_no_scope = "\n".join(
+            _render_baseline_sections(tmp, variants=["standard", "lega"])
+        )
         assert "调优范围" not in text_no_scope
         # 默认组合 trial 失败（default_is_optimal=None）：不得冒充“并非最优”
-        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
-            "variant": "standard", "n_trials": 2, "selected": {
-                "lr": 0.0012, "weight_decay": 0.1, "val_loss_best": 3.1},
-            "default_trial": None, "default_is_optimal": None,
-            "selected_minus_default_val_loss": None})
+        _write_json(
+            os.path.join(tmp, "baseline_tuning.json"),
+            {
+                "variant": "standard",
+                "n_trials": 2,
+                "selected": {"lr": 0.0012, "weight_decay": 0.1, "val_loss_best": 3.1},
+                "default_trial": None,
+                "default_is_optimal": None,
+                "selected_minus_default_val_loss": None,
+            },
+        )
         text4 = "\n".join(_render_baseline_sections(tmp))
         assert "无法判定默认是否" in text4
         # 调优缺证据但 ngram 在：仍必须点名“未调优基线”的风险
@@ -168,19 +178,30 @@ def test_probe_table_renders_both_metric_p_values():
     """判定可能由 AUROC 驱动时，表格不能只显示 PR-AUC 的 p 值造成自相矛盾。"""
     tmp = tempfile.mkdtemp()
     try:
-        row = {"variant": "lega", "n_seeds": 5, "hit_base_rate": 0.10,
-               "features": ["log_maxp", "log_n", "qterm"],
-               "rule_auprc": 0.1, "probe_auprc": 0.30,
-               "gate_auprc": 0.32, "probe_auroc": 0.80,
-               "gate_auroc": 0.70, "probe_f1_fixed": 0.4,
-               "probe_f1_tuned": 0.45, "delta_auprc": -0.02,
-               "delta_auprc_ci95": [-0.05, 0.01],
-               "delta_auroc": 0.10, "delta_auroc_ci95": [0.01, 0.19],
-               "p_adj_auprc": 0.80, "p_adj_auroc": 0.01,
-               "primary_detection_metric": "AUROC 与 PR-AUC 并报",
-               "verdict": "门控显著优于最简监督线性基线"}
-        text = "\n".join(_render_baseline_sections(
-            tmp, probe_cmp={"rows": [row], "missing": []}))
+        row = {
+            "variant": "lega",
+            "n_seeds": 5,
+            "hit_base_rate": 0.10,
+            "features": ["log_maxp", "log_n", "qterm"],
+            "rule_auprc": 0.1,
+            "probe_auprc": 0.30,
+            "gate_auprc": 0.32,
+            "probe_auroc": 0.80,
+            "gate_auroc": 0.70,
+            "probe_f1_fixed": 0.4,
+            "probe_f1_tuned": 0.45,
+            "delta_auprc": -0.02,
+            "delta_auprc_ci95": [-0.05, 0.01],
+            "delta_auroc": 0.10,
+            "delta_auroc_ci95": [0.01, 0.19],
+            "p_adj_auprc": 0.80,
+            "p_adj_auroc": 0.01,
+            "primary_detection_metric": "AUROC 与 PR-AUC 并报",
+            "verdict": "门控显著优于最简监督线性基线",
+        }
+        text = "\n".join(
+            _render_baseline_sections(tmp, probe_cmp={"rows": [row], "missing": []})
+        )
         assert "p_adj(PR-AUC)" in text and "p_adj(AUROC)" in text, text
         assert "0.8000" in text and "0.0100" in text, text
         assert "ΔAUROC" in text and "+0.100" in text, text
@@ -193,33 +214,47 @@ def test_render_baseline_selection_stability():
     """调优小节必须渲染逐种子支持、次优噪声差距与 LOO 复选，不能只报最优。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
-            "variant": "standard", "steps": 100, "n_trials": 3,
-            "selection_seeds": [7, 8, 9],
-            "selected": {"lr": 0.0012, "weight_decay": 0.1,
-                         "val_loss_best": 3.1},
-            "default_trial": {"lr": 0.0006, "weight_decay": 0.1,
-                              "val_loss_best": 3.2},
-            "selected_minus_default_val_loss": -0.1,
-            "default_is_optimal": False,
-            "selection_diagnostics": {
-                "n_seeds": 3, "selected_support_count": 2,
-                "selected_support_fraction": 2 / 3,
-                "runner_up": {
-                    "lr": 0.0006, "weight_decay": 0.1,
-                    "val_loss_best_mean": 3.15,
-                    "selected_minus_runner_up_mean": -0.05,
-                    "paired_delta_mean": 0.02,
-                    "paired_delta_std": 0.1,
-                    "within_seed_noise": True},
-                "leave_one_seed_out": {
-                    "n_folds": 3, "agreement_count": 2,
-                    "agreement_rate": 2 / 3,
-                    "heldout_gain_vs_default_mean": -0.01,
-                    "heldout_gain_vs_default_std": 0.02,
-                    "wins_vs_default": 1, "ties_vs_default": 0,
-                    "losses_vs_default": 2},
-            }})
+        _write_json(
+            os.path.join(tmp, "baseline_tuning.json"),
+            {
+                "variant": "standard",
+                "steps": 100,
+                "n_trials": 3,
+                "selection_seeds": [7, 8, 9],
+                "selected": {"lr": 0.0012, "weight_decay": 0.1, "val_loss_best": 3.1},
+                "default_trial": {
+                    "lr": 0.0006,
+                    "weight_decay": 0.1,
+                    "val_loss_best": 3.2,
+                },
+                "selected_minus_default_val_loss": -0.1,
+                "default_is_optimal": False,
+                "selection_diagnostics": {
+                    "n_seeds": 3,
+                    "selected_support_count": 2,
+                    "selected_support_fraction": 2 / 3,
+                    "runner_up": {
+                        "lr": 0.0006,
+                        "weight_decay": 0.1,
+                        "val_loss_best_mean": 3.15,
+                        "selected_minus_runner_up_mean": -0.05,
+                        "paired_delta_mean": 0.02,
+                        "paired_delta_std": 0.1,
+                        "within_seed_noise": True,
+                    },
+                    "leave_one_seed_out": {
+                        "n_folds": 3,
+                        "agreement_count": 2,
+                        "agreement_rate": 2 / 3,
+                        "heldout_gain_vs_default_mean": -0.01,
+                        "heldout_gain_vs_default_std": 0.02,
+                        "wins_vs_default": 1,
+                        "ties_vs_default": 0,
+                        "losses_vs_default": 2,
+                    },
+                },
+            },
+        )
         text = "\n".join(_render_baseline_sections(tmp))
         assert "选择稳定性" in text and "2/3" in text
         assert "均值最优并非逐种子稳定最优" in text
@@ -227,8 +262,9 @@ def test_render_baseline_selection_stability():
         assert "留一种子复选" in text and "胜/平/负 1/0/2" in text
         assert "既翻转选择、又未在留出种子上优于默认" in text
         # 旧调优报告（多种子但无 selection_diagnostics）不得静默当作稳定
-        doc = json.load(open(os.path.join(tmp, "baseline_tuning.json"),
-                             encoding="utf-8"))
+        doc = json.load(
+            open(os.path.join(tmp, "baseline_tuning.json"), encoding="utf-8")
+        )
         doc.pop("selection_diagnostics")
         _write_json(os.path.join(tmp, "baseline_tuning.json"), doc)
         text_old = "\n".join(_render_baseline_sections(tmp))
@@ -243,14 +279,22 @@ def test_render_baseline_huge_support_fraction_does_not_emit_inf():
     """支持率是有限但极大的外部值时，百分比渲染不能写出 inf%。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "baseline_tuning.json"), {
-            "variant": "standard", "steps": 10, "n_trials": 3,
-            "selection_seeds": [7, 8, 9],
-            "selected": {"lr": 0.0012, "val_loss_best": 3.1},
-            "default_trial": {"lr": 0.0006, "val_loss_best": 3.2},
-            "selection_diagnostics": {
-                "n_seeds": 3, "selected_support_count": 2,
-                "selected_support_fraction": 1e307}})
+        _write_json(
+            os.path.join(tmp, "baseline_tuning.json"),
+            {
+                "variant": "standard",
+                "steps": 10,
+                "n_trials": 3,
+                "selection_seeds": [7, 8, 9],
+                "selected": {"lr": 0.0012, "val_loss_best": 3.1},
+                "default_trial": {"lr": 0.0006, "val_loss_best": 3.2},
+                "selection_diagnostics": {
+                    "n_seeds": 3,
+                    "selected_support_count": 2,
+                    "selected_support_fraction": 1e307,
+                },
+            },
+        )
         text = "\n".join(_render_baseline_sections(tmp))
         assert "选择稳定性" in text and "溢出" in text
         assert "inf" not in text
@@ -266,11 +310,11 @@ def test_resolve_ngram_split_auto_matches_neural_eval_rule():
         assert resolve_ngram_split(tmp, "auto") == "val"
         with open(os.path.join(tmp, "test.bin"), "wb") as f:
             f.write(b"")
-        assert resolve_ngram_split(tmp, "auto") == "val"   # 空文件不算
+        assert resolve_ngram_split(tmp, "auto") == "val"  # 空文件不算
         with open(os.path.join(tmp, "test.bin"), "wb") as f:
             f.write(b"\x01")
         assert resolve_ngram_split(tmp, "auto") == "test"
-        assert resolve_ngram_split(tmp, "val") == "val"    # 显式选择透传
+        assert resolve_ngram_split(tmp, "val") == "val"  # 显式选择透传
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] resolve_ngram_split（auto 与神经评测 split 规则一致）")
@@ -280,14 +324,20 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
     """神经变体 vs 简单基线：同 split 才可比、单样本配对检验 + Holm 判定。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "test", "ppl": {"unigram": 200.0, "bigram": 100.0},
-            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "test",
+                "ppl": {"unigram": 200.0, "bigram": 100.0},
+                "selected_alpha": {"unigram": 0.1, "bigram": 0.1},
+            },
+        )
         runs = {}
         for v, base in (("standard", 30.0), ("lega", 20.0)):
-            runs[v] = {s: {"eval": {"variant": v, "split": "test",
-                                    "ppl": base + s}}
-                       for s in (1, 2, 3)}
+            runs[v] = {
+                s: {"eval": {"variant": v, "split": "test", "ppl": base + s}}
+                for s in (1, 2, 3)
+            }
         out = ngram_baseline_comparison(runs, tmp)
         assert out["split"] == "test" and out["reference_model"] == "bigram"
         assert abs(out["ngram_ppl"] - 100.0) < 1e-12
@@ -297,53 +347,73 @@ def test_ngram_baseline_comparison_same_split_stats_and_mismatch():
         assert rows["lega"]["verdict"] == "显著优于统计基线"
         assert rows["lega"]["p_adj"] is not None and rows["lega"]["p_adj"] < ALPHA
         # 只有 n>=MIN_SEEDS 的行进入 Holm 家族：n=1 的行 p=None 不占家族大小。
-        runs_family = {"standard": {1: {"eval": {"variant": "standard",
-                                                 "split": "test", "ppl": 30.0}}},
-                       "lega": {s: {"eval": {"variant": "lega",
-                                             "split": "test",
-                                             "ppl": 20.0 + s}}
-                                for s in (1, 2, 3)}}
+        runs_family = {
+            "standard": {
+                1: {"eval": {"variant": "standard", "split": "test", "ppl": 30.0}}
+            },
+            "lega": {
+                s: {"eval": {"variant": "lega", "split": "test", "ppl": 20.0 + s}}
+                for s in (1, 2, 3)
+            },
+        }
         out_family = ngram_baseline_comparison(runs_family, tmp)
         assert out_family["holm_family_size"] == 1, out_family
         assert out_family["n_rows"] == 2
         # 合法但接近 float 上限的 PPL：朴素均值/比值会溢出成 inf。
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "test", "ppl": {"bigram": 1e308}, "selected_model": "bigram"})
-        huge_runs = {"lega": {s: {"eval": {"variant": "lega", "split": "test",
-                                          "ppl": 1e308}}
-                              for s in (1, 2, 3)}}
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {"split": "test", "ppl": {"bigram": 1e308}, "selected_model": "bigram"},
+        )
+        huge_runs = {
+            "lega": {
+                s: {"eval": {"variant": "lega", "split": "test", "ppl": 1e308}}
+                for s in (1, 2, 3)
+            }
+        }
         huge = ngram_baseline_comparison(huge_runs, tmp)
         hrow = huge["rows"][0]
         assert hrow["mean_ppl"] == 1e308, hrow
         assert hrow["ratio"] == 1.0, hrow
         assert math.isfinite(hrow["mean_ppl"]), hrow
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "test", "ppl": {"unigram": 200.0, "bigram": 100.0},
-            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "test",
+                "ppl": {"unigram": 200.0, "bigram": 100.0},
+                "selected_alpha": {"unigram": 0.1, "bigram": 0.1},
+            },
+        )
         # 显著劣于统计基线要被点名（神经模型连 n-gram 都打不过）
-        runs_bad = {"lega": {s: {"eval": {"variant": "lega", "split": "test",
-                                          "ppl": 120.0 + s}}
-                             for s in (1, 2, 3)}}
+        runs_bad = {
+            "lega": {
+                s: {"eval": {"variant": "lega", "split": "test", "ppl": 120.0 + s}}
+                for s in (1, 2, 3)
+            }
+        }
         out_bad = ngram_baseline_comparison(runs_bad, tmp)
         assert out_bad["rows"][0]["verdict"] == "显著劣于统计基线（严重）"
         # split 错位（val 评测 vs test 基线）不得混入比较，必须显式列出
-        runs_mix = {"qgate": {1: {"eval": {"variant": "qgate", "split": "val",
-                                            "ppl": 25.0}}}}
+        runs_mix = {
+            "qgate": {1: {"eval": {"variant": "qgate", "split": "val", "ppl": 25.0}}}
+        }
         out_mix = ngram_baseline_comparison(runs_mix, tmp)
         assert out_mix["rows"] == []
         assert out_mix["incomparable"][0]["variant"] == "qgate"
         # 部分种子 split 错位：可比种子照常进 rows，但错位种子必须显式列出，
         # 不能因为“还有可比种子”就静默丢弃
-        runs_partial = {"qgate": {
-            1: {"eval": {"variant": "qgate", "split": "val", "ppl": 25.0}},
-            2: {"eval": {"variant": "qgate", "split": "test", "ppl": 24.0}},
-            3: {"eval": {"variant": "qgate", "split": "test", "ppl": 26.0}}}}
+        runs_partial = {
+            "qgate": {
+                1: {"eval": {"variant": "qgate", "split": "val", "ppl": 25.0}},
+                2: {"eval": {"variant": "qgate", "split": "test", "ppl": 24.0}},
+                3: {"eval": {"variant": "qgate", "split": "test", "ppl": 26.0}},
+            }
+        }
         out_partial = ngram_baseline_comparison(runs_partial, tmp)
         assert out_partial["rows"][0]["n"] == 2
         assert out_partial["incomparable"] == [
-            {"variant": "qgate", "eval_splits": ["val"], "excluded_seeds": [1]}]
-        text_partial = "\n".join(
-            _render_baseline_sections(tmp, ngram_cmp=out_partial))
+            {"variant": "qgate", "eval_splits": ["val"], "excluded_seeds": [1]}
+        ]
+        text_partial = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out_partial))
         assert "未纳入比较" in text_partial and "[1]" in text_partial
         # 渲染：比较表与错位警告都必须出现在基线小节
         text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
@@ -365,15 +435,16 @@ def test_ngram_comparison_includes_explicit_supplemental_and_control():
     """显式运行的补充/安慰剂对照必须有同 split 的统计基线检验。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "test", "ppl": {"bigram": 100.0},
-            "selected_model": "bigram"})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {"split": "test", "ppl": {"bigram": 100.0}, "selected_model": "bigram"},
+        )
         runs = {}
-        for v, base in (("lega_raw", 60.0),
-                        (PARAM_CONTROL_VARIANT, 80.0)):
-            runs[v] = {s: {"eval": {"variant": v, "split": "test",
-                                    "ppl": base + s}}
-                       for s in (1, 2, 3)}
+        for v, base in (("lega_raw", 60.0), (PARAM_CONTROL_VARIANT, 80.0)):
+            runs[v] = {
+                s: {"eval": {"variant": v, "split": "test", "ppl": base + s}}
+                for s in (1, 2, 3)
+            }
         out = ngram_baseline_comparison(runs, tmp)
         rows = {r["variant"]: r for r in out["rows"]}
         assert set(rows) == {"lega_raw", PARAM_CONTROL_VARIANT}, out
@@ -392,42 +463,61 @@ def test_ngram_comparison_rejects_baseline_from_other_data():
     """
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "repro.json"), {
-            "data": {"digest": "new-data-digest"}})
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "data_fingerprint": "old-data-digest",
-            "ppl": {"unigram": 100.0, "bigram": 80.0,
-                    "interpolated_bigram": 70.0},
-            "selected_model": "interpolated_bigram"})
+        _write_json(
+            os.path.join(tmp, "repro.json"), {"data": {"digest": "new-data-digest"}}
+        )
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "data_fingerprint": "old-data-digest",
+                "ppl": {"unigram": 100.0, "bigram": 80.0, "interpolated_bigram": 70.0},
+                "selected_model": "interpolated_bigram",
+            },
+        )
         out = ngram_baseline_comparison({}, tmp)
         assert out.get("error"), out
         assert "数据指纹" in out["error"], out
         # 数据指纹一致时正常进入比较流程（无 runs 时返回空 rows 而非错误）
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "data_fingerprint": "new-data-digest",
-            "ppl": {"unigram": 100.0, "bigram": 80.0,
-                    "interpolated_bigram": 70.0},
-            "selected_model": "interpolated_bigram"})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "data_fingerprint": "new-data-digest",
+                "ppl": {"unigram": 100.0, "bigram": 80.0, "interpolated_bigram": 70.0},
+                "selected_model": "interpolated_bigram",
+            },
+        )
         ok = ngram_baseline_comparison({}, tmp)
         assert "error" not in ok, ok
         # 同一数据也可能来自另一轮流水线（--skip_ngram 复用旧文件）；
         # run_id 必须与本次 repro 一致，否则不能并排比较。
-        _write_json(os.path.join(tmp, "repro.json"), {
-            "run_id": "run-new", "data": {"digest": "new-data-digest"}})
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "pipeline_run_id": "run-old",
-            "split": "val", "data_fingerprint": "new-data-digest",
-            "ppl": {"unigram": 100.0, "bigram": 80.0,
-                    "interpolated_bigram": 70.0},
-            "selected_model": "interpolated_bigram"})
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {"run_id": "run-new", "data": {"digest": "new-data-digest"}},
+        )
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "pipeline_run_id": "run-old",
+                "split": "val",
+                "data_fingerprint": "new-data-digest",
+                "ppl": {"unigram": 100.0, "bigram": 80.0, "interpolated_bigram": 70.0},
+                "selected_model": "interpolated_bigram",
+            },
+        )
         stale = ngram_baseline_comparison({}, tmp)
         assert "pipeline_run_id" in stale.get("error", ""), stale
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "pipeline_run_id": "run-new",
-            "split": "val", "data_fingerprint": "new-data-digest",
-            "ppl": {"unigram": 100.0, "bigram": 80.0,
-                    "interpolated_bigram": 70.0},
-            "selected_model": "interpolated_bigram"})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "pipeline_run_id": "run-new",
+                "split": "val",
+                "data_fingerprint": "new-data-digest",
+                "ppl": {"unigram": 100.0, "bigram": 80.0, "interpolated_bigram": 70.0},
+                "selected_model": "interpolated_bigram",
+            },
+        )
         fresh = ngram_baseline_comparison({}, tmp)
         assert "error" not in fresh, fresh
     finally:
@@ -440,16 +530,21 @@ def test_ngram_comparison_tolerates_malformed_repro_data():
     tmp = tempfile.mkdtemp()
     try:
         _write_json(os.path.join(tmp, "repro.json"), {"data": ["not", "dict"]})
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "data_fingerprint": "old-data-digest",
-            "ppl": {"unigram": 100.0, "bigram": 80.0,
-                    "interpolated_bigram": 70.0},
-            "selected_model": "interpolated_bigram"})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "data_fingerprint": "old-data-digest",
+                "ppl": {"unigram": 100.0, "bigram": 80.0, "interpolated_bigram": 70.0},
+                "selected_model": "interpolated_bigram",
+            },
+        )
         out = ngram_baseline_comparison({}, tmp)
         assert "error" not in out, out
         # 合法对象仍按原规则拒绝跨数据基线
-        _write_json(os.path.join(tmp, "repro.json"),
-                    {"data": {"digest": "new-data-digest"}})
+        _write_json(
+            os.path.join(tmp, "repro.json"), {"data": {"digest": "new-data-digest"}}
+        )
         bad = ngram_baseline_comparison({}, tmp)
         assert "数据指纹" in bad.get("error", ""), bad
     finally:
@@ -461,32 +556,46 @@ def test_ngram_comparison_uses_val_selected_strongest_baseline():
     """简单基线参照必须取 val 选出的最强模型，而不是固定拿 bigram 当靶子。"""
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val",
-            "ppl": {"unigram": 200.0, "bigram": 100.0,
-                    "interpolated_bigram": 80.0},
-            "selected_model": "interpolated_bigram",
-            "selected_interpolated": {"lambda": 0.7, "alpha_unigram": 0.1,
-                                      "alpha_bigram": 0.1,
-                                      "val_mean_nll": 4.0},
-            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
-        runs = {"lega": {s: {"eval": {"variant": "lega", "split": "val",
-                                      "ppl": 70.0 + s}}
-                         for s in (1, 2, 3)}}
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"unigram": 200.0, "bigram": 100.0, "interpolated_bigram": 80.0},
+                "selected_model": "interpolated_bigram",
+                "selected_interpolated": {
+                    "lambda": 0.7,
+                    "alpha_unigram": 0.1,
+                    "alpha_bigram": 0.1,
+                    "val_mean_nll": 4.0,
+                },
+                "selected_alpha": {"unigram": 0.1, "bigram": 0.1},
+            },
+        )
+        runs = {
+            "lega": {
+                s: {"eval": {"variant": "lega", "split": "val", "ppl": 70.0 + s}}
+                for s in (1, 2, 3)
+            }
+        }
         out = ngram_baseline_comparison(runs, tmp)
         assert out["reference_model"] == "interpolated_bigram"
         assert abs(out["ngram_ppl"] - 80.0) < 1e-12
         assert out["rows"][0]["verdict"] == "显著优于统计基线"
         # 历史产物没有 selected_model：按插值→bigram→unigram 的强度顺序回退
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val",
-            "ppl": {"unigram": 200.0, "bigram": 100.0,
-                    "interpolated_bigram": 80.0}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"unigram": 200.0, "bigram": 100.0, "interpolated_bigram": 80.0},
+            },
+        )
         out_old = ngram_baseline_comparison(runs, tmp)
         assert out_old["reference_model"] == "interpolated_bigram"
         # 更老产物连插值都没有：仍回退 bigram
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "ppl": {"unigram": 200.0, "bigram": 100.0}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {"split": "val", "ppl": {"unigram": 200.0, "bigram": 100.0}},
+        )
         out_older = ngram_baseline_comparison(runs, tmp)
         assert out_older["reference_model"] == "bigram"
     finally:
@@ -498,19 +607,32 @@ def test_ngram_comparison_prefers_window_matched_reference():
     """同 split 之后还要同 token：窗口规格一致时用逐位置对齐参考并披露。"""
     tmp = tempfile.mkdtemp()
     try:
-        spec = {"ctx": 8, "iters": 2, "n_windows": 5, "n_eval": 2,
-                "n_tokens": 16}
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
+        spec = {"ctx": 8, "iters": 2, "n_windows": 5, "n_eval": 2, "n_tokens": 16}
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"unigram": 200.0, "bigram": 100.0},
+                "ppl_window_matched": {
+                    "unigram": 180.0,
+                    "bigram": 90.0,
+                    "n_tokens": 16,
+                },
+                "window_spec": spec,
+                "selected_alpha": {"unigram": 0.1, "bigram": 0.1},
+            },
+        )
+        matched_eval = {
+            "variant": "lega",
             "split": "val",
-            "ppl": {"unigram": 200.0, "bigram": 100.0},
-            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
-                                   "n_tokens": 16},
-            "window_spec": spec,
-            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
-        matched_eval = {"variant": "lega", "split": "val", "ppl": 20.0 + 0,
-                        "eval_ctx": 8, "eval_iters": 2, "val_windows": 5}
-        runs = {"lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s)}
-                         for s in (1, 2, 3)}}
+            "ppl": 20.0 + 0,
+            "eval_ctx": 8,
+            "eval_iters": 2,
+            "val_windows": 5,
+        }
+        runs = {
+            "lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s)} for s in (1, 2, 3)}
+        }
         out = ngram_baseline_comparison(runs, tmp)
         assert out["reference_source"] == "window_matched"
         assert abs(out["ngram_ppl"] - 90.0) < 1e-12
@@ -522,21 +644,30 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert "在神经评测实际使用的窗口目标 token 上" in text
         # 有新产物时优先用“同一批窗口 token 上重新选参”的参考，而不是
         # 仍拿全 val 选出的模型/α；全 split 参考保持原样供绝对难度对照。
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val",
-            "ppl": {"unigram": 200.0, "bigram": 100.0,
-                    "interpolated_bigram": 90.0},
-            "selected_model": "interpolated_bigram",
-            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
-                                   "interpolated_bigram": 90.0,
-                                   "n_tokens": 16},
-            "window_matched_selection": {
-                "selected_model": "bigram",
-                "selected_alpha": {"unigram": 0.1, "bigram": 0.1}},
-            "ppl_window_matched_selected": {"unigram": 170.0,
-                                            "bigram": 70.0,
-                                            "n_tokens": 16},
-            "window_spec": spec})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"unigram": 200.0, "bigram": 100.0, "interpolated_bigram": 90.0},
+                "selected_model": "interpolated_bigram",
+                "ppl_window_matched": {
+                    "unigram": 180.0,
+                    "bigram": 90.0,
+                    "interpolated_bigram": 90.0,
+                    "n_tokens": 16,
+                },
+                "window_matched_selection": {
+                    "selected_model": "bigram",
+                    "selected_alpha": {"unigram": 0.1, "bigram": 0.1},
+                },
+                "ppl_window_matched_selected": {
+                    "unigram": 170.0,
+                    "bigram": 70.0,
+                    "n_tokens": 16,
+                },
+                "window_spec": spec,
+            },
+        )
         out_win_sel = ngram_baseline_comparison(runs, tmp)
         assert out_win_sel["reference_source"] == "window_matched"
         assert out_win_sel["reference_model"] == "interpolated_bigram"
@@ -545,45 +676,64 @@ def test_ngram_comparison_prefers_window_matched_reference():
         assert out_win_sel["rows"][0]["reference"] == "bigram"
         assert abs(out_win_sel["ngram_ppl_window_matched"] - 70.0) < 1e-12
         assert abs(out_win_sel["ngram_ppl_full_split"] - 90.0) < 1e-12
-        text_win_sel = "\n".join(
-            _render_baseline_sections(tmp, ngram_cmp=out_win_sel))
+        text_win_sel = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out_win_sel))
         assert "（bigram，split=val" in text_win_sel, text_win_sel
         # selected 表存在但缺少 window_matched_selection 元数据时，比较层
         # 必须忽略它并回退 full 窗口表；渲染层也要引用同一张表，不能把
         # 未采用的 70.0 写成“逐位置对齐口径”的参考值。
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val",
-            "ppl": {"unigram": 200.0, "bigram": 100.0,
-                    "interpolated_bigram": 90.0},
-            "selected_model": "interpolated_bigram",
-            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
-                                   "interpolated_bigram": 90.0,
-                                   "n_tokens": 16},
-            "ppl_window_matched_selected": {"unigram": 170.0,
-                                            "bigram": 70.0,
-                                            "n_tokens": 16},
-            "window_spec": spec})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"unigram": 200.0, "bigram": 100.0, "interpolated_bigram": 90.0},
+                "selected_model": "interpolated_bigram",
+                "ppl_window_matched": {
+                    "unigram": 180.0,
+                    "bigram": 90.0,
+                    "interpolated_bigram": 90.0,
+                    "n_tokens": 16,
+                },
+                "ppl_window_matched_selected": {
+                    "unigram": 170.0,
+                    "bigram": 70.0,
+                    "n_tokens": 16,
+                },
+                "window_spec": spec,
+            },
+        )
         out_no_meta = ngram_baseline_comparison(runs, tmp)
         assert abs(out_no_meta["ngram_ppl_window_matched"] - 90.0) < 1e-12
         assert out_no_meta["window_reference_values"] == {
-            "unigram": 180.0, "bigram": 90.0,
-            "interpolated_bigram": 90.0, "n_tokens": 16}
+            "unigram": 180.0,
+            "bigram": 90.0,
+            "interpolated_bigram": 90.0,
+            "n_tokens": 16,
+        }
         assert out_no_meta["reference_model_used"] == "interpolated_bigram"
-        text_no_meta = "\n".join(
-            _render_baseline_sections(tmp, ngram_cmp=out_no_meta))
+        text_no_meta = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out_no_meta))
         assert "180.000" in text_no_meta and "90.000" in text_no_meta
         assert "170.000" not in text_no_meta and "70.000" not in text_no_meta
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val",
-            "ppl": {"unigram": 200.0, "bigram": 100.0},
-            "ppl_window_matched": {"unigram": 180.0, "bigram": 90.0,
-                                   "n_tokens": 16},
-            "window_spec": spec,
-            "selected_alpha": {"unigram": 0.1, "bigram": 0.1}})
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"unigram": 200.0, "bigram": 100.0},
+                "ppl_window_matched": {
+                    "unigram": 180.0,
+                    "bigram": 90.0,
+                    "n_tokens": 16,
+                },
+                "window_spec": spec,
+                "selected_alpha": {"unigram": 0.1, "bigram": 0.1},
+            },
+        )
         # 任一 run 的窗口字段与规格不符 → 整体回退全 split 参考并显式说明
-        runs_mis = {"lega": {s: {"eval": dict(matched_eval, ppl=20.0 + s,
-                                              eval_iters=3)}
-                             for s in (1, 2, 3)}}
+        runs_mis = {
+            "lega": {
+                s: {"eval": dict(matched_eval, ppl=20.0 + s, eval_iters=3)}
+                for s in (1, 2, 3)
+            }
+        }
         out_mis = ngram_baseline_comparison(runs_mis, tmp)
         assert out_mis["reference_source"] == "full_split"
         assert out_mis["reference_model_used"] == "bigram"
@@ -598,8 +748,10 @@ def test_ngram_comparison_prefers_window_matched_reference():
         # 历史产物缺窗口规格 → 同样回退且如实说明原因
         tmp2 = tempfile.mkdtemp()
         try:
-            _write_json(os.path.join(tmp2, "ngram_baseline.json"), {
-                "split": "val", "ppl": {"bigram": 100.0}})
+            _write_json(
+                os.path.join(tmp2, "ngram_baseline.json"),
+                {"split": "val", "ppl": {"bigram": 100.0}},
+            )
             out_old = ngram_baseline_comparison(runs, tmp2)
             assert out_old["reference_source"] == "full_split"
             assert "window_spec" in (out_old["fallback_reason"] or "")
@@ -615,22 +767,32 @@ def test_ngram_window_paired_test_uses_same_window_indices():
     tmp = tempfile.mkdtemp()
     try:
         idx = list(range(0, 30, 3))  # 10 个窗口，越过最低窗口门槛
-        spec = {"ctx": 8, "iters": 10, "n_windows": 20, "n_eval": 10,
-                "n_tokens": 80}
-        _write_json(os.path.join(tmp, "ngram_baseline.json"), {
-            "split": "val", "ppl": {"bigram": 100.0},
-            "selected_model": "bigram",
-            "ppl_window_matched": {"bigram": 100.0, "n_tokens": 80},
-            "window_losses_matched": [1.0] * 10,
-            "window_indices_matched": idx,
-            "window_losses_matched_model": "bigram",
-            "window_spec": spec})
-        base = {"variant": "lega", "split": "val", "ppl": 20.0,
-                "eval_ctx": 8, "eval_iters": 10, "val_windows": 20,
-                "val_tokens_evaluated": 80,
-                "window_losses": [1.5] * 10, "window_indices": idx}
-        runs = {"lega": {s: {"eval": dict(base, ppl=20.0 + s)}
-                         for s in (1, 2, 3)}}
+        spec = {"ctx": 8, "iters": 10, "n_windows": 20, "n_eval": 10, "n_tokens": 80}
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "split": "val",
+                "ppl": {"bigram": 100.0},
+                "selected_model": "bigram",
+                "ppl_window_matched": {"bigram": 100.0, "n_tokens": 80},
+                "window_losses_matched": [1.0] * 10,
+                "window_indices_matched": idx,
+                "window_losses_matched_model": "bigram",
+                "window_spec": spec,
+            },
+        )
+        base = {
+            "variant": "lega",
+            "split": "val",
+            "ppl": 20.0,
+            "eval_ctx": 8,
+            "eval_iters": 10,
+            "val_windows": 20,
+            "val_tokens_evaluated": 80,
+            "window_losses": [1.5] * 10,
+            "window_indices": idx,
+        }
+        runs = {"lega": {s: {"eval": dict(base, ppl=20.0 + s)} for s in (1, 2, 3)}}
         out = ngram_baseline_comparison(runs, tmp)
         r = out["rows"][0]
         assert out["reference_source"] == "window_matched", out
@@ -643,14 +805,17 @@ def test_ngram_window_paired_test_uses_same_window_indices():
         text = "\n".join(_render_baseline_sections(tmp, ngram_cmp=out))
         assert "逐窗口配对（探索性" in text and "ΔNLL(神经−n-gram)" in text
         # 窗口序号不一致：整行逐窗口统计必须放弃，并写明原因
-        bad = {s: {"eval": dict(base, ppl=20.0 + s, window_indices=[0, 4] * 5)}
-               for s in (1, 2, 3)}
+        bad = {
+            s: {"eval": dict(base, ppl=20.0 + s, window_indices=[0, 4] * 5)}
+            for s in (1, 2, 3)
+        }
         out_bad = ngram_baseline_comparison({"lega": bad}, tmp)
         rb = out_bad["rows"][0]
         assert rb["window_paired_mean_diff"] is None, rb
         assert "窗口序号不一致" in (rb["window_paired_skip_reason"] or ""), rb
         assert "逐窗口配对（探索性" not in "\n".join(
-            _render_baseline_sections(tmp, ngram_cmp=out_bad))
+            _render_baseline_sections(tmp, ngram_cmp=out_bad)
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] n-gram 对比：逐窗口配对 + 窗口序号不一致显式降级")
@@ -663,16 +828,22 @@ def test_neural_eval_window_spec_matches_train_overrides():
     # 冒烟：train.py 的 SMOKE_OVERRIDES（train_ctx=128、eval_iters=2）必须生效
     assert _neural_eval_window_spec(tiny, True) == {"ctx": 128, "iters": 2}
     # train_ctx 被 block_size 截断；默认 eval_iters=50；非法规格返回 None
-    assert _neural_eval_window_spec(
-        {"block_size": 64, "train_ctx": 256}, False) == {"ctx": 64, "iters": 50}
+    assert _neural_eval_window_spec({"block_size": 64, "train_ctx": 256}, False) == {
+        "ctx": 64,
+        "iters": 50,
+    }
     assert _neural_eval_window_spec({}, False) is None
     # bool/小数不得截断成“另一个窗口规格”
-    for bad in ({"eval_iters": True}, {"eval_iters": 2.5},
-                {"train_ctx": True}, {"block_size": 64.5}):
+    for bad in (
+        {"eval_iters": True},
+        {"eval_iters": 2.5},
+        {"train_ctx": True},
+        {"block_size": 64.5},
+    ):
         assert _neural_eval_window_spec(bad, False) is None, bad
     assert _neural_eval_window_spec(
-        {"block_size": 64, "train_ctx": 256.0, "eval_iters": 20.0},
-        False) == {"ctx": 64, "iters": 20}
+        {"block_size": 64, "train_ctx": 256.0, "eval_iters": 20.0}, False
+    ) == {"ctx": 64, "iters": 20}
     print("  [ok] _neural_eval_window_spec（与 train/evaluate 口径一致）")
 
 
@@ -680,9 +851,19 @@ def test_main_rejects_empty_variants():
     """--variants 全为空项时必须在启动流水线前报错，不能产生空实验。"""
     tmp = tempfile.mkdtemp()
     try:
-        with mock.patch.object(sys, "argv", [
-                "run_all.py", "--variants", ", ,", "--out_root", tmp,
-                "--results_dir", tmp]):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "run_all.py",
+                "--variants",
+                ", ,",
+                "--out_root",
+                tmp,
+                "--results_dir",
+                tmp,
+            ],
+        ):
             try:
                 run_all_main()
                 raise AssertionError("空 --variants 应触发 argparse 错误")
@@ -699,19 +880,36 @@ def test_registration_scope_check_and_gate():
     try:
         reg_cfg = os.path.join(tmp, "registered.json")
         act_cfg = os.path.join(tmp, "actual.json")
-        base = {"d_model": 384, "n_layers": 6, "n_heads": 6, "ffn_mult": 4,
-                "block_size": 1024, "steps": 8000, "train_ctx": 1024,
-                "lr": 6e-4, "weight_decay": 0.1}
+        base = {
+            "d_model": 384,
+            "n_layers": 6,
+            "n_heads": 6,
+            "ffn_mult": 4,
+            "block_size": 1024,
+            "steps": 8000,
+            "train_ctx": 1024,
+            "lr": 6e-4,
+            "weight_decay": 0.1,
+        }
         _write_json(reg_cfg, base)
         # 调优注入的 lr/wd 改变不算越界（协议内），其它字段必须一致
         _write_json(act_cfg, dict(base, lr=3e-4))
-        registered = {"scope": {"config": reg_cfg, "seeds": [1, 2, 3],
-                                "data": "WikiText-103 (gpt2 BPE)"}}
-        repro = {"config_file": act_cfg, "seeds": [1, 2, 4], "smoke": False,
-                 "data": {"tokenizer": "gpt2"}}
+        registered = {
+            "scope": {
+                "config": reg_cfg,
+                "seeds": [1, 2, 3],
+                "data": "WikiText-103 (gpt2 BPE)",
+            }
+        }
+        repro = {
+            "config_file": act_cfg,
+            "seeds": [1, 2, 4],
+            "smoke": False,
+            "data": {"tokenizer": "gpt2"},
+        }
         sc = registration_scope_check(registered, repro)
         assert sc["checked"] and sc["in_scope"] is True and not sc["problems"]
-        assert any("4" in w for w in sc["warnings"])   # 未登记种子显式警告
+        assert any("4" in w for w in sc["warnings"])  # 未登记种子显式警告
         hyp = [{"id": "H1", "confirmatory_valid": True}]
         assert apply_scope_gate(hyp, sc)[0]["confirmatory_valid"] is True
         # 训练规模与登记配置不一致（如 tiny 配置冒充正式实验）→ 范围外
@@ -723,14 +921,26 @@ def test_registration_scope_check_and_gate():
         _write_json(act_cfg, base)
         # 伪数据（字符分词）冒充 gpt2 BPE → 范围外
         sc3 = registration_scope_check(
-            registered, {"config_file": act_cfg, "seeds": [1],
-                         "smoke": False, "data": {"tokenizer": "char"}})
+            registered,
+            {
+                "config_file": act_cfg,
+                "seeds": [1],
+                "smoke": False,
+                "data": {"tokenizer": "char"},
+            },
+        )
         assert sc3["in_scope"] is False
         assert any("分词器" in p for p in sc3["problems"])
         # 冒烟运行 → 范围外
         sc4 = registration_scope_check(
-            registered, {"config_file": act_cfg, "seeds": [1],
-                         "smoke": True, "data": {"tokenizer": "gpt2"}})
+            registered,
+            {
+                "config_file": act_cfg,
+                "seeds": [1],
+                "smoke": True,
+                "data": {"tokenizer": "gpt2"},
+            },
+        )
         assert sc4["in_scope"] is False
         # 缺 repro → 不可确认（不能默认通过）→ 降级
         sc5 = registration_scope_check(registered, {})
@@ -753,8 +963,11 @@ def test_registration_scope_render_matches_gate_and_paths():
     hyp = [{"id": "H1", "confirmatory_valid": True}]
     apply_scope_gate(hyp, sc)
     assert hyp[0]["confirmatory_valid"] is True
-    text = "\n".join(_render_registration_integrity(
-        {"status": "intact", "confirmatory_valid": True}, sc))
+    text = "\n".join(
+        _render_registration_integrity(
+            {"status": "intact", "confirmatory_valid": True}, sc
+        )
+    )
     assert "不可确认" not in text and "降级" not in text
     assert "未声明 scope" in text
     # 声明了 scope 却核不动 → 实际降级，渲染必须同样声明降级
@@ -762,24 +975,32 @@ def test_registration_scope_render_matches_gate_and_paths():
     hyp2 = [{"id": "H1", "confirmatory_valid": True}]
     apply_scope_gate(hyp2, sc2)
     assert hyp2[0]["confirmatory_valid"] is False
-    text2 = "\n".join(_render_registration_integrity(
-        {"status": "intact", "confirmatory_valid": True}, sc2))
+    text2 = "\n".join(
+        _render_registration_integrity(
+            {"status": "intact", "confirmatory_valid": True}, sc2
+        )
+    )
     assert "不可确认" in text2 and "降级" in text2
     # 损坏的 checked/confirmatory_valid 不能被渲染成“已核对/有效”。
-    text_bad = "\n".join(_render_registration_integrity(
-        {"status": "intact", "confirmatory_valid": "false"},
-        {"scope": {"config": "x"}, "checked": "false", "problems": []}))
+    text_bad = "\n".join(
+        _render_registration_integrity(
+            {"status": "intact", "confirmatory_valid": "false"},
+            {"scope": {"config": "x"}, "checked": "false", "problems": []},
+        )
+    )
     assert "不可确认" in text_bad and "失效" in text_bad, text_bad
     tmp = tempfile.mkdtemp()
     try:
         reg = os.path.join(tmp, "reg.json")
         _write_json(reg, {"d_model": 8})
         _write_json(os.path.join(tmp, "actual.json"), {"d_model": 16})
-        sc3 = registration_scope_check({"scope": {"config": reg}},
-                                       {"config_file": "actual.json"}, root=tmp)
+        sc3 = registration_scope_check(
+            {"scope": {"config": reg}}, {"config_file": "actual.json"}, root=tmp
+        )
         assert sc3["problems"] and "d_model" in sc3["problems"][0]
-        sc4 = registration_scope_check({"scope": {"config": reg}},
-                                       {"config_file": {"x": 1}}, root=tmp)
+        sc4 = registration_scope_check(
+            {"scope": {"config": reg}}, {"config_file": {"x": 1}}, root=tmp
+        )
         assert sc4["warnings"] and sc4["checked"] is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -790,29 +1011,56 @@ def test_registered_hypotheses_evaluation():
     """预注册假设判定：支持/拒绝/未定的边界与未登记文件时的提示。"""
     tests = [
         _mk("lega", "standard", "PPL", -0.5, 0.01, 5),
-        _mk("lega_no_len", "lega", "PPL", 0.4, 0.02, 5),   # 去掉长度项显著变差
-        _mk("qgate", "standard", "PPL", 0.1, 0.5, 5),      # 不显著
-        _mk("x", "y", "PPL", 1.0, 0.01, 2),                # 种子不足
+        _mk("lega_no_len", "lega", "PPL", 0.4, 0.02, 5),  # 去掉长度项显著变差
+        _mk("qgate", "standard", "PPL", 0.1, 0.5, 5),  # 不显著
+        _mk("x", "y", "PPL", 1.0, 0.01, 2),  # 种子不足
     ]
     # 让 p_adj 直接可判（单家族 m=4 Holm：0.01→0.04, 0.02→0.06, ...）
     _apply_holm(tests)
-    reg = {"hypotheses": [
-        {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
-         "candidate": "lega", "reference": "standard",
-         "direction": "candidate_better"},
-        {"id": "H2", "claim": "长度校准有用（去一法）", "metric": "PPL",
-         "candidate": "lega_no_len", "reference": "lega",
-         "direction": "candidate_worse"},
-        {"id": "H3", "claim": "LEGA 优于 qgate（PPL）", "metric": "PPL",
-         "candidate": "lega", "reference": "qgate",   # 未运行 → 未检验
-         "direction": "candidate_better"},
-        {"id": "H4", "claim": "方向登记反了的假设", "metric": "PPL",
-         "candidate": "lega", "reference": "standard",
-         "direction": "candidate_worse"},             # 显著但方向相反 → 拒绝
-        {"id": "H5", "claim": "种子不足的对比", "metric": "PPL",
-         "candidate": "x", "reference": "y",
-         "direction": "candidate_better"},
-    ]}
+    reg = {
+        "hypotheses": [
+            {
+                "id": "H1",
+                "claim": "LEGA 优于 standard（PPL）",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_better",
+            },
+            {
+                "id": "H2",
+                "claim": "长度校准有用（去一法）",
+                "metric": "PPL",
+                "candidate": "lega_no_len",
+                "reference": "lega",
+                "direction": "candidate_worse",
+            },
+            {
+                "id": "H3",
+                "claim": "LEGA 优于 qgate（PPL）",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "qgate",  # 未运行 → 未检验
+                "direction": "candidate_better",
+            },
+            {
+                "id": "H4",
+                "claim": "方向登记反了的假设",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_worse",
+            },  # 显著但方向相反 → 拒绝
+            {
+                "id": "H5",
+                "claim": "种子不足的对比",
+                "metric": "PPL",
+                "candidate": "x",
+                "reference": "y",
+                "direction": "candidate_better",
+            },
+        ]
+    }
     ev = {h["id"]: h for h in evaluate_registered_hypotheses(reg, tests)}
     assert ev["H1"]["status"] == "支持"
     assert ev["H2"]["status"] == "支持"
@@ -820,10 +1068,18 @@ def test_registered_hypotheses_evaluation():
     assert ev["H4"]["status"] == "拒绝"
     assert ev["H5"]["status"] == "未定" and "种子不足" in ev["H5"]["detail"]
     # 不显著 → 未定，且 detail 提示 MDE（有均值/方差可估时）
-    reg2 = {"hypotheses": [
-        {"id": "H6", "claim": "qgate 优于 standard", "metric": "PPL",
-         "candidate": "qgate", "reference": "standard",
-         "direction": "candidate_better"}]}
+    reg2 = {
+        "hypotheses": [
+            {
+                "id": "H6",
+                "claim": "qgate 优于 standard",
+                "metric": "PPL",
+                "candidate": "qgate",
+                "reference": "standard",
+                "direction": "candidate_better",
+            }
+        ]
+    }
     ev2 = evaluate_registered_hypotheses(reg2, tests)
     assert ev2[0]["status"] == "未定" and "不显著" in ev2[0]["detail"]
     # 空注册文件：不判定
@@ -843,25 +1099,32 @@ def test_global_fwer_gate_across_registered_hypotheses():
     for i in range(6):
         metric = f"M{i}"
         cand, ref = f"cand{i}", f"ref{i}"
-        reg["hypotheses"].append({
-            "id": f"H{i + 1}", "claim": f"claim {i}", "metric": metric,
-            "candidate": cand, "reference": ref,
-            "direction": "candidate_better"})
+        reg["hypotheses"].append(
+            {
+                "id": f"H{i + 1}",
+                "claim": f"claim {i}",
+                "metric": metric,
+                "candidate": cand,
+                "reference": ref,
+                "direction": "candidate_better",
+            }
+        )
         tests.append(_mk(cand, ref, metric, -0.5, 0.02, 5))
     _apply_holm(tests)
     ev = evaluate_registered_hypotheses(reg, tests)
     assert len(ev) == 6, ev
     assert all(h["status_family"] == "支持" for h in ev), ev
     assert all(h["status"] == "未定" for h in ev), ev
-    assert all(h["p_adj_confirmatory"] is not None
-               and h["p_adj_confirmatory"] >= 0.05 for h in ev), ev
+    assert all(
+        h["p_adj_confirmatory"] is not None and h["p_adj_confirmatory"] >= 0.05
+        for h in ev
+    ), ev
     assert all("全局 Holm" in h["detail"] for h in ev), ev
 
     reg2 = {"hypotheses": reg["hypotheses"][:2]}
     ev2 = evaluate_registered_hypotheses(reg2, tests)
     assert all(h["status"] == "支持" for h in ev2), ev2
-    assert all(abs(h["p_adj_confirmatory"] - 0.04) < 1e-12
-               for h in ev2), ev2
+    assert all(abs(h["p_adj_confirmatory"] - 0.04) < 1e-12 for h in ev2), ev2
     print("  [ok] 全局确认族 Holm（跨指标家族 FWER；仅家族内显著会降级）")
 
 
@@ -871,31 +1134,61 @@ def test_build_summary_renders_confirmatory_sections():
     try:
         seeds = [1, 2, 3]
         for v, ppl, al, aq in (
-                ("standard", 10.0, None, None),
-                ("lega", 9.4, 0.8, 0.7),
-                ("lega_no_len", 9.9, 0.75, 0.7),
-                ("qgate", 9.8, 0.72, 0.71)):
+            ("standard", 10.0, None, None),
+            ("lega", 9.4, 0.8, 0.7),
+            ("lega_no_len", 9.9, 0.75, 0.7),
+            ("qgate", 9.8, 0.72, 0.71),
+        ):
             for s in seeds:
                 jitter = 0.02 * s
-                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "val_ppl": ppl + jitter,
-                    "val_loss": 2.3, "n_params": 100,
-                    "n_gate_extra": 0, "split": "val"})
+                _write_json(
+                    os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "val_ppl": ppl + jitter,
+                        "val_loss": 2.3,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                    },
+                )
                 if al is not None:
-                    _write_json(os.path.join(tmp, f"analysis_{v}_seed{s}.json"), {
-                        "variant": v, "seed": s, "auroc_logit": al + 0.01 * s,
-                        "auroc_qterm": aq - 0.01 * s})
-        reg = {"hypotheses": [
-            {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
-             "candidate": "lega", "reference": "standard",
-             "direction": "candidate_better"}]}
-        intact = {"status": "intact", "confirmatory_valid": True, "problems": [],
-                  "registry_sha256": "a" * 64, "n_hypotheses": 1,
-                  "baseline_document_sha256": "b" * 64, "chain_length": 0}
-        with mock.patch("lega.pipeline.report.summary.load_registered_hypotheses",
-                        return_value=reg), \
-                mock.patch("lega.pipeline.report.summary.verify_registration",
-                           return_value=intact):
+                    _write_json(
+                        os.path.join(tmp, f"analysis_{v}_seed{s}.json"),
+                        {
+                            "variant": v,
+                            "seed": s,
+                            "auroc_logit": al + 0.01 * s,
+                            "auroc_qterm": aq - 0.01 * s,
+                        },
+                    )
+        reg = {
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "claim": "LEGA 优于 standard（PPL）",
+                    "metric": "PPL",
+                    "candidate": "lega",
+                    "reference": "standard",
+                    "direction": "candidate_better",
+                }
+            ]
+        }
+        intact = {
+            "status": "intact",
+            "confirmatory_valid": True,
+            "problems": [],
+            "registry_sha256": "a" * 64,
+            "n_hypotheses": 1,
+            "baseline_document_sha256": "b" * 64,
+            "chain_length": 0,
+        }
+        with mock.patch(
+            "lega.pipeline.report.summary.load_registered_hypotheses", return_value=reg
+        ), mock.patch(
+            "lega.pipeline.report.summary.verify_registration", return_value=intact
+        ):
             out = build_summary(tmp)
         md = out["markdown"]
         assert "注册假设判定" in md
@@ -908,18 +1201,18 @@ def test_build_summary_renders_confirmatory_sections():
         # 实现层因子核对（扰动门控参数真正生效的因子）也必须落盘/渲染
         assert "实现层核对" in md
         assert "lega_null_query" in md
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         assert sig["single_factor_audit"]["ok"] is True
         assert len(sig["single_factor_audit"]["contrasts"]) == 6
-        impl = {r["variant"]: r
-                for r in sig["single_factor_audit"]["implementation_factors"]}
+        impl = {
+            r["variant"]: r
+            for r in sig["single_factor_audit"]["implementation_factors"]
+        }
         assert len(impl) == len(lega_attention._GATED)
         assert all(r["ok"] for r in impl.values())
         assert impl["lega"]["effective"] == ["A", "B", "C"]
         assert impl["lega_conc_only"]["effective"] == ["B"]
-        assert impl["lega_null_conc"]["params"] == [
-            "gate_a", "gate_b", "gate_w"]
+        assert impl["lega_null_conc"]["params"] == ["gate_a", "gate_b", "gate_w"]
         assert impl["lega_null_conc"]["null_component"] == "B"
         assert any(t["metric"] == AUROC_DIFF_METRIC for t in sig["pairs"])
         assert sig["registered_hypotheses"], "注册假设判定必须进 significance.json"
@@ -929,8 +1222,7 @@ def test_build_summary_renders_confirmatory_sections():
         assert sig["registration_integrity"]["status"] in ("intact", "amended")
         assert sig["registration_integrity"]["confirmatory_valid"] is True
         assert "预注册完整性" in md and "防事后静默改写" in md
-        assert all(h.get("confirmatory_valid") for h in
-                   sig["registered_hypotheses"])
+        assert all(h.get("confirmatory_valid") for h in sig["registered_hypotheses"])
         # 每条 pair 检验都带稳健性字段
         for t in sig["pairs"]:
             assert "p_perm" in t and "mean_diff_ci95" in t and "mde" in t
@@ -945,39 +1237,67 @@ def test_build_summary_downgrades_confirmatory_when_integrity_violated():
     tmp = tempfile.mkdtemp()
     try:
         for s in (1, 2, 3):
-            _write_json(os.path.join(tmp, f"eval_lega_seed{s}.json"), {
-                "variant": "lega", "seed": s, "val_ppl": 9.0 + 0.01 * s,
-                "val_loss": 2.2, "n_params": 100, "n_gate_extra": 0,
-                "split": "val"})
-            _write_json(os.path.join(tmp, f"eval_standard_seed{s}.json"), {
-                "variant": "standard", "seed": s, "val_ppl": 10.0 + 0.01 * s,
-                "val_loss": 2.3, "n_params": 100, "n_gate_extra": 0,
-                "split": "val"})
-        reg = {"hypotheses": [
-            {"id": "H1", "claim": "LEGA 优于 standard（PPL）", "metric": "PPL",
-             "candidate": "lega", "reference": "standard",
-             "direction": "candidate_better"}]}
-        violated = {"status": "violated", "confirmatory_valid": False,
-                    "problems": ["已登记的假设 H1 科学内容被改写"],
-                    "registry_sha256": "a" * 64, "n_hypotheses": 1,
-                    "baseline_document_sha256": "b" * 64,
-                    "chain_length": 0}
-        with mock.patch("lega.pipeline.report.summary.load_registered_hypotheses",
-                        return_value=reg), \
-                mock.patch("lega.pipeline.report.summary.verify_registration",
-                           return_value=violated):
+            _write_json(
+                os.path.join(tmp, f"eval_lega_seed{s}.json"),
+                {
+                    "variant": "lega",
+                    "seed": s,
+                    "val_ppl": 9.0 + 0.01 * s,
+                    "val_loss": 2.2,
+                    "n_params": 100,
+                    "n_gate_extra": 0,
+                    "split": "val",
+                },
+            )
+            _write_json(
+                os.path.join(tmp, f"eval_standard_seed{s}.json"),
+                {
+                    "variant": "standard",
+                    "seed": s,
+                    "val_ppl": 10.0 + 0.01 * s,
+                    "val_loss": 2.3,
+                    "n_params": 100,
+                    "n_gate_extra": 0,
+                    "split": "val",
+                },
+            )
+        reg = {
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "claim": "LEGA 优于 standard（PPL）",
+                    "metric": "PPL",
+                    "candidate": "lega",
+                    "reference": "standard",
+                    "direction": "candidate_better",
+                }
+            ]
+        }
+        violated = {
+            "status": "violated",
+            "confirmatory_valid": False,
+            "problems": ["已登记的假设 H1 科学内容被改写"],
+            "registry_sha256": "a" * 64,
+            "n_hypotheses": 1,
+            "baseline_document_sha256": "b" * 64,
+            "chain_length": 0,
+        }
+        with mock.patch(
+            "lega.pipeline.report.summary.load_registered_hypotheses", return_value=reg
+        ), mock.patch(
+            "lega.pipeline.report.summary.verify_registration", return_value=violated
+        ):
             out = build_summary(tmp)
         md = out["markdown"]
         assert "已登记的假设 H1 科学内容被改写" in md
         assert "失效" in md and "降级为探索性" in md
         assert "⚠（无效）" in md
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         assert sig["registration_integrity"]["status"] == "violated"
-        assert all(not h["confirmatory_valid"]
-                   for h in sig["registered_hypotheses"])
-        assert all("降级" in h["confirmatory_note"]
-                   for h in sig["registered_hypotheses"])
+        assert all(not h["confirmatory_valid"] for h in sig["registered_hypotheses"])
+        assert all(
+            "降级" in h["confirmatory_note"] for h in sig["registered_hypotheses"]
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] build_summary（完整性违反 → 确认性判定显式降级）")
@@ -987,24 +1307,44 @@ def test_build_summary_zero_failure_variant_blocks_consensus():
     """RULER 已评测且零错误的变体必须进入跨变体对照（n_failed=0）。"""
     tmp = tempfile.mkdtemp()
     try:
-        case = {"sample_id": "niah_synth@256#0", "task": "niah_synth",
-                "ctx": 256, "answer": "1234567", "answer_words": None,
-                "pred": "7654321", "em": 0.0, "recall": None,
-                "question": "What is the special magic number?",
-                "needle_excerpt": "magic number is: 1234567.",
-                "depth": 0.5, "meta": {}, "context_numbers": ["7654321"],
-                "answer_in_prompt": True}
+        case = {
+            "sample_id": "niah_synth@256#0",
+            "task": "niah_synth",
+            "ctx": 256,
+            "answer": "1234567",
+            "answer_words": None,
+            "pred": "7654321",
+            "em": 0.0,
+            "recall": None,
+            "question": "What is the special magic number?",
+            "needle_excerpt": "magic number is: 1234567.",
+            "depth": 0.5,
+            "meta": {},
+            "context_numbers": ["7654321"],
+            "answer_in_prompt": True,
+        }
         for v, cases in (("standard", [case]), ("lega", [case]), ("qgate", [])):
-            _write_json(os.path.join(tmp, f"ruler_{v}_seed1.json"),
-                        {"variant": v, "seed": 1, "results": {},
-                         "badcases": cases})
-            _write_json(os.path.join(tmp, f"eval_{v}_seed1.json"), {
-                "variant": v, "seed": 1, "val_ppl": 10.0, "val_loss": 2.3,
-                "gate_mean": 0.5, "n_params": 100, "n_gate_extra": 0,
-                "split": "test"})
+            _write_json(
+                os.path.join(tmp, f"ruler_{v}_seed1.json"),
+                {"variant": v, "seed": 1, "results": {}, "badcases": cases},
+            )
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed1.json"),
+                {
+                    "variant": v,
+                    "seed": 1,
+                    "val_ppl": 10.0,
+                    "val_loss": 2.3,
+                    "gate_mean": 0.5,
+                    "n_params": 100,
+                    "n_gate_extra": 0,
+                    "split": "test",
+                },
+            )
         out = build_summary(tmp)
-        cross = json.load(open(os.path.join(tmp, "badcase_cross.json"),
-                               encoding="utf-8"))
+        cross = json.load(
+            open(os.path.join(tmp, "badcase_cross.json"), encoding="utf-8")
+        )
         assert cross["ruler"]["per_variant"]["qgate"]["n_failed"] == 0
         assert cross["ruler"]["n_shared_all_failures"] == 0
         assert "全部通过" in out["markdown"]
@@ -1021,27 +1361,56 @@ def test_build_summary_tolerates_seedless_artifacts():
     """
     tmp = tempfile.mkdtemp()
     try:
-        _write_json(os.path.join(tmp, "eval_standard.json"),
-                    {"variant": "standard", "val_ppl": 10.0, "val_loss": 2.3,
-                     "n_params": 10, "split": "val"})
+        _write_json(
+            os.path.join(tmp, "eval_standard.json"),
+            {
+                "variant": "standard",
+                "val_ppl": 10.0,
+                "val_loss": 2.3,
+                "n_params": 10,
+                "split": "val",
+            },
+        )
         # 无 seed 且 split 与 ngram 不一致 → 进入 excluded_seeds 分支
-        _write_json(os.path.join(tmp, "eval_lega.json"),
-                    {"variant": "lega", "val_ppl": 9.0, "val_loss": 2.2,
-                     "n_params": 10, "split": "test"})
-        _write_json(os.path.join(tmp, "ngram_baseline.json"),
-                    {"ppl": {"unigram": 100.0, "bigram": 50.0},
-                     "split": "val", "train_tokens": 100, "eval_tokens": 50,
-                     "vocab_size": 20})
-        _write_json(os.path.join(tmp, "analysis_lega.json"), {
-            "variant": "lega",
-            "linear_probe": {"primary": "conc_len_query",
-                             "feature_sets": {"conc_len_query": {
-                                 "oof": {"auprc": 0.5, "auroc": 0.6}}}}})
+        _write_json(
+            os.path.join(tmp, "eval_lega.json"),
+            {
+                "variant": "lega",
+                "val_ppl": 9.0,
+                "val_loss": 2.2,
+                "n_params": 10,
+                "split": "test",
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "ngram_baseline.json"),
+            {
+                "ppl": {"unigram": 100.0, "bigram": 50.0},
+                "split": "val",
+                "train_tokens": 100,
+                "eval_tokens": 50,
+                "vocab_size": 20,
+            },
+        )
+        _write_json(
+            os.path.join(tmp, "analysis_lega.json"),
+            {
+                "variant": "lega",
+                "linear_probe": {
+                    "primary": "conc_len_query",
+                    "feature_sets": {
+                        "conc_len_query": {"oof": {"auprc": 0.5, "auroc": 0.6}}
+                    },
+                },
+            },
+        )
         build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
-        excl = [x for x in sig["ngram_comparison"].get("incomparable", [])
-                if x["variant"] == "lega"]
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        excl = [
+            x
+            for x in sig["ngram_comparison"].get("incomparable", [])
+            if x["variant"] == "lega"
+        ]
         assert excl and excl[0]["excluded_seeds"] == [None], sig
         probe = sig["linear_probe_comparison"]
         assert probe["rows"] and probe["rows"][0]["seeds"] == [None]

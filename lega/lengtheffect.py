@@ -34,6 +34,7 @@
 不同（如 niah 的 1011 与 fwe 的 979）；只有每个任务恰好覆盖全部请求档位
 时才按升序一一对齐，缺档/多档返回空，避免把任务组成变化当成新的长度档。
 """
+
 import math
 from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
@@ -54,8 +55,7 @@ def _is_bool(value):
     ``np.True_`` 就会被当成 1.0/1 混进 EM 或样本数，伪造出一格
     ``_ruler_avg_of`` 从未使用的观测。
     """
-    return (isinstance(value, bool)
-            or type(value).__name__ in ("bool", "bool_"))
+    return isinstance(value, bool) or type(value).__name__ in ("bool", "bool_")
 
 
 def _finite(value):
@@ -184,8 +184,11 @@ def context_task_means(payload, metric="em"):
     metric = metric if isinstance(metric, str) and metric else "em"
     out = {}
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or task.startswith("_")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or task.startswith("_")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         # 重复检测必须按任务隔离：不同任务在同一档位有同名的 ctx 键是
         # 正常设计，只有同一任务内部出现 "512"/"0512" 这类并列键才说明
@@ -272,8 +275,7 @@ def _requested_macro(task_means, requested):
             return {}
         for actual_ctx, req in zip(actual, requested):
             cells[req].append(values[actual_ctx])
-    return {req: float(sum(v) / len(v))
-            for req, v in cells.items() if v}
+    return {req: float(sum(v) / len(v)) for req, v in cells.items() if v}
 
 
 def context_macro_means(payload, metric="em", align_requested=False):
@@ -318,9 +320,12 @@ def _validated_pairs(contexts, values):
     要求：等长、至少 2 个点、ctx 为互不重复的正整数、value 为有限实数。
     只在这里做一次严格校验，两个趋势函数共用同一口径。
     """
-    if (not isinstance(contexts, (list, tuple))
-            or not isinstance(values, (list, tuple))
-            or len(contexts) != len(values) or len(contexts) < 2):
+    if (
+        not isinstance(contexts, (list, tuple))
+        or not isinstance(values, (list, tuple))
+        or len(contexts) != len(values)
+        or len(contexts) < 2
+    ):
         return None
     pairs = []
     seen = set()

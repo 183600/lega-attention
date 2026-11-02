@@ -1,15 +1,26 @@
 """输出级干预测试：答案 NLL/margin 的逐头写回效用，而不是 hit 代理。"""
+
 import torch
 
 from lega.model import GPT
-from lega.output_ablation import (head_output_intervention_scan, score_answer,
-                                  score_answer_from_logits)
+from lega.output_ablation import (
+    head_output_intervention_scan,
+    score_answer,
+    score_answer_from_logits,
+)
 
 
 def _tiny():
     torch.manual_seed(0)
-    return GPT(vocab_size=64, block_size=32, d_model=16, n_layers=2,
-               n_heads=2, variant="lega", use_sdpa_standard=False).eval()
+    return GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=16,
+        n_layers=2,
+        n_heads=2,
+        variant="lega",
+        use_sdpa_standard=False,
+    ).eval()
 
 
 def test_main_rejects_fractional_answer_positions(monkeypatch):
@@ -22,13 +33,14 @@ def test_main_rejects_fractional_answer_positions(monkeypatch):
     from lega.output_ablation import main
 
     model = _tiny()
-    monkeypatch.setattr(model_mod, "load_model",
-                        lambda *a, **k: (model, {}))
+    monkeypatch.setattr(model_mod, "load_model", lambda *a, **k: (model, {}))
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "idx.json")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"input_ids": [list(range(12))],
-                       "answer_start": 1.5, "answer_end": 4}, f)
+            json.dump(
+                {"input_ids": [list(range(12))], "answer_start": 1.5, "answer_end": 4},
+                f,
+            )
         try:
             main(["--ckpt", "unused", "--idx_json", path])
         except ValueError as e:
@@ -54,7 +66,8 @@ def test_head_scan_reports_only_the_target_head_mass():
     idx = torch.randint(0, 64, (1, 16))
     start, end = 8, 13
     rep = head_output_intervention_scan(
-        model, idx, start, end, layers=[0], heads=[0, 1], modes=("zero",))
+        model, idx, start, end, layers=[0], heads=[0, 1], modes=("zero",)
+    )
 
     captured = {}
 
@@ -72,11 +85,10 @@ def test_head_scan_reports_only_the_target_head_mass():
     dh = model.blocks[0].attn.d_head
     for row in rep["interventions"]:
         lo = row["head"] * dh
-        expected = x[:, positions, lo:lo + dh].abs().mean().item()
+        expected = x[:, positions, lo : lo + dh].abs().mean().item()
         assert abs(row["mean_abs_removed"] - expected) < 1e-6, row
     # 两个头不可能恰好有相同的通道幅度；相同说明仍在拿全通道均值。
-    vals = {r["head"]: r["mean_abs_removed"]
-            for r in rep["interventions"]}
+    vals = {r["head"]: r["mean_abs_removed"] for r in rep["interventions"]}
     assert vals[0] != vals[1], vals
     print("  [ok] 逐头干预的 mean_abs_removed 只统计目标头通道")
 
@@ -85,8 +97,15 @@ def test_head_output_scan_reports_paired_deltas_and_permutation():
     model = _tiny()
     idx = torch.randint(0, 64, (1, 16))
     rep = head_output_intervention_scan(
-        model, idx, 8, 13, layers=[0, 1], heads=[0, 1],
-        scope="answer", modes=("zero", "permute"))
+        model,
+        idx,
+        8,
+        13,
+        layers=[0, 1],
+        heads=[0, 1],
+        scope="answer",
+        modes=("zero", "permute"),
+    )
     rows = rep["interventions"]
     assert len(rows) == 8
     base = rep["baseline"]

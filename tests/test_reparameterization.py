@@ -1,4 +1,5 @@
 """原始集中度参数化与参数化稳健性分析的单元测试。"""
+
 import json
 import math
 import os
@@ -7,29 +8,51 @@ from unittest import mock
 
 import torch
 
-from lega.attention import (GATE_FACTORS, RAW_GATE_FACTORS, RUNNABLE_VARIANTS,
-                            SUPPLEMENTAL_VARIANTS, VARIANT_CN,
-                            CausalSelfAttention)
+from lega.attention import (
+    GATE_FACTORS,
+    RAW_GATE_FACTORS,
+    RUNNABLE_VARIANTS,
+    SUPPLEMENTAL_VARIANTS,
+    VARIANT_CN,
+    CausalSelfAttention,
+)
 from lega.factorial import CELL_ORDER
 from lega.model import expected_gate_extras, gate_extra_params
-from lega.reparameterization import (CONTRASTS, NORMALIZED_CELLS, RAW_CELLS,
-                                     RAW_FACTORIAL_VARIANTS, analyze,
-                                     contrast_effects,
-                                     contrast_parameterization_tests)
-from run_all import (_render_reparameterization, _reparameterization_analysis,
-                      build_summary, single_factor_audit)
+from lega.reparameterization import (
+    CONTRASTS,
+    NORMALIZED_CELLS,
+    RAW_CELLS,
+    RAW_FACTORIAL_VARIANTS,
+    analyze,
+    contrast_parameterization_tests,
+)
+from run_all import (
+    _render_reparameterization,
+    _reparameterization_analysis,
+    build_summary,
+    single_factor_audit,
+)
 from tests.pipeline_helpers import _write_json
 
 
 def _ppl_cell(ppl, seed=1):
-    return {"eval": {"variant": "x", "seed": seed, "split": "val",
-                     "val_ppl": float(ppl)}}
+    return {
+        "eval": {"variant": "x", "seed": seed, "split": "val", "val_ppl": float(ppl)}
+    }
 
 
 def _full_grid(seed, raw_b_ppl=7.0):
     """同一组 A/B/C 因子的归一化/原始 PPL 网格。"""
-    norm = {"none": 10.0, "A": 9.0, "B": 8.0, "C": 6.0,
-            "AB": 7.0, "AC": 5.0, "BC": 4.0, "ABC": 3.0}
+    norm = {
+        "none": 10.0,
+        "A": 9.0,
+        "B": 8.0,
+        "C": 6.0,
+        "AB": 7.0,
+        "AC": 5.0,
+        "BC": 4.0,
+        "ABC": 3.0,
+    }
     raw = dict(norm)
     raw["B"] = raw_b_ppl
     values = {}
@@ -57,33 +80,38 @@ def test_raw_factorial_design_is_complete_and_named():
     assert RAW_CELLS["C"] == NORMALIZED_CELLS["C"] == "lega_len_only"
     assert RAW_CELLS["AC"] == NORMALIZED_CELLS["AC"] == "lega_no_conc"
     from lega.attention import VARIANTS
+
     assert set(RAW_FACTORIAL_VARIANTS) - set(VARIANTS) == {
-        "lega_raw", "lega_raw_no_len", "lega_raw_conc_only",
-        "lega_raw_no_query"}
+        "lega_raw",
+        "lega_raw_no_len",
+        "lega_raw_conc_only",
+        "lega_raw_no_query",
+    }
     # raw 网格的因子元数据必须从实现开关派生：B 必须是原始 log max_p
     # 变体，而不是归一化 conc 变体；共享格也不能悄悄换成带 B 的变体。
     assert set(RAW_GATE_FACTORS) == set(RAW_CELLS.values())
     for cell, variant in RAW_CELLS.items():
         expected = frozenset() if cell == "none" else frozenset(cell)
         assert RAW_GATE_FACTORS[variant] == expected, (cell, variant)
-        m = CausalSelfAttention(32, 2, variant=variant,
-                                use_sdpa_standard=False)
-        actual = {f for f, on in (("A", m.use_query),
-                                  ("B", m.use_raw_conc),
-                                  ("C", m.use_len)) if on}
+        m = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=False)
+        actual = {
+            f
+            for f, on in (("A", m.use_query), ("B", m.use_raw_conc), ("C", m.use_len))
+            if on
+        }
         assert actual == expected, (cell, variant, actual, expected)
-    print("  [ok] 原始参数化 8 格完整，因子元数据与实现开关一致，"
-          "且与归一化网格共享 none/A/C 结构")
+    print(
+        "  [ok] 原始参数化 8 格完整，因子元数据与实现开关一致，"
+        "且与归一化网格共享 none/A/C 结构"
+    )
 
 
 def test_raw_only_variants_forward_and_param_budget():
     """补齐的 raw 变体可训练、参数预算与公式一致。"""
     for variant in ("lega_raw_conc_only", "lega_raw_no_query"):
         torch.manual_seed(0)
-        m = CausalSelfAttention(32, 2, variant=variant,
-                                use_sdpa_standard=False)
-        assert gate_extra_params(m) == expected_gate_extras(
-            variant, 16, 2, 1), variant
+        m = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=False)
+        assert gate_extra_params(m) == expected_gate_extras(variant, 16, 2, 1), variant
         x = torch.randn(2, 6, 32)
         out, _, stats = m(x, rope=None, need_stats=True)
         assert torch.isfinite(out).all(), variant
@@ -100,18 +128,16 @@ def test_raw_gate_formula_does_not_include_log_n_for_b_alone():
     max_p = torch.full((1, 1, 1), 0.25)
     log_n = torch.full((1, 1, 1), math.log(8.0))
     for variant, expected in (
-            ("lega_raw_conc_only", 0.5 * math.log(0.25)),
-            ("lega_raw_no_query",
-             0.5 * math.log(0.25) - 0.25 * math.log(8.0))):
-        m = CausalSelfAttention(16, 1, variant=variant,
-                                use_sdpa_standard=False)
+        ("lega_raw_conc_only", 0.5 * math.log(0.25)),
+        ("lega_raw_no_query", 0.5 * math.log(0.25) - 0.25 * math.log(8.0)),
+    ):
+        m = CausalSelfAttention(16, 1, variant=variant, use_sdpa_standard=False)
         with torch.no_grad():
             m.gate_a.fill_(0.5)
             if hasattr(m, "gate_b"):
                 m.gate_b.fill_(-0.25)
             m.gate_d.zero_()
-        _, logit, _ = m._gate_logit(None, max_p, log_n, (1, 1, 1),
-                                    keep_terms=True)
+        _, logit, _ = m._gate_logit(None, max_p, log_n, (1, 1, 1), keep_terms=True)
         assert abs(logit.item() - expected) < 1e-6, (variant, logit.item())
     print("  [ok] 原始 B 不含 log n；B+C 格才含显式长度项")
 
@@ -180,8 +206,9 @@ def test_pipeline_reparameterization_requires_both_complete_grids():
     assert ppl["summary"]["status"] == "parameterization_dependent"
     assert ppl["summary"]["n_significant"] >= 1
 
-    partial = {v: m for v, m in runs.items()
-               if v not in ("lega_raw", "lega_raw_no_query")}
+    partial = {
+        v: m for v, m in runs.items() if v not in ("lega_raw", "lega_raw_no_query")
+    }
     out = _reparameterization_analysis(partial)
     assert out["available"] is False
     assert out["not_run"] is False
@@ -208,19 +235,24 @@ def test_build_summary_wires_reparameterization_into_report_and_json():
     with tempfile.TemporaryDirectory() as tmp:
         for seed in (1, 2, 3):
             for variant, ppl in _full_grid(seed, raw_b_ppl=7.0)[seed].items():
-                _write_json(os.path.join(
-                    tmp, f"eval_{variant}_seed{seed}.json"), {
-                        "variant": variant, "seed": seed, "split": "val",
-                        "val_ppl": ppl, "val_loss": math.log(ppl),
-                        "n_params": 100, "n_gate_extra": 4})
+                _write_json(
+                    os.path.join(tmp, f"eval_{variant}_seed{seed}.json"),
+                    {
+                        "variant": variant,
+                        "seed": seed,
+                        "split": "val",
+                        "val_ppl": ppl,
+                        "val_loss": math.log(ppl),
+                        "n_params": 100,
+                        "n_gate_extra": 4,
+                    },
+                )
         out = build_summary(tmp)
         assert out["reparameterization"]["available"] is True
-        with open(os.path.join(tmp, "significance.json"),
-                  "r", encoding="utf-8") as f:
+        with open(os.path.join(tmp, "significance.json"), "r", encoding="utf-8") as f:
             sig = json.load(f)
         assert sig["reparameterization"]["available"] is True
-        assert "参数化稳健性（原始 log max_p vs 归一化 c；探索性）" in \
-            out["markdown"]
+        assert "参数化稳健性（原始 log max_p vs 归一化 c；探索性）" in out["markdown"]
         assert "B（add）" in out["markdown"]
     print("  [ok] build_summary 将参数化稳健性写入报告与 significance.json")
 
@@ -229,13 +261,24 @@ def test_build_summary_omits_reparameterization_section_when_not_run():
     """默认矩阵未跑 raw 对照时，summary 不出现空的参数化小节。"""
     with tempfile.TemporaryDirectory() as tmp:
         for seed in (1, 2, 3):
-            for variant, ppl in (("standard", 10.0), ("lega", 8.0),
-                                 ("gate_only", 9.0), ("qgate", 8.5)):
-                _write_json(os.path.join(
-                    tmp, f"eval_{variant}_seed{seed}.json"), {
-                        "variant": variant, "seed": seed, "split": "val",
-                        "val_ppl": ppl, "val_loss": math.log(ppl),
-                        "n_params": 100, "n_gate_extra": 4})
+            for variant, ppl in (
+                ("standard", 10.0),
+                ("lega", 8.0),
+                ("gate_only", 9.0),
+                ("qgate", 8.5),
+            ):
+                _write_json(
+                    os.path.join(tmp, f"eval_{variant}_seed{seed}.json"),
+                    {
+                        "variant": variant,
+                        "seed": seed,
+                        "split": "val",
+                        "val_ppl": ppl,
+                        "val_loss": math.log(ppl),
+                        "n_params": 100,
+                        "n_gate_extra": 4,
+                    },
+                )
         out = build_summary(tmp)
         assert out["reparameterization"]["not_run"] is True
         assert "参数化稳健性（原始" not in out["markdown"]
@@ -246,10 +289,15 @@ def test_single_factor_audit_covers_raw_parameterization_edges():
     """参数化稳健性中的每条原始/归一化边也必须只改变一个因子。"""
     audit = single_factor_audit()
     assert audit["ok"] and not audit["problems"], audit
-    edges = {(c["factor"], c["direction"])
-             for c in audit["reparameterization_contrasts"]}
-    assert edges == {("A", "remove"), ("B", "remove"),
-                     ("C", "remove"), ("B", "add")}, edges
+    edges = {
+        (c["factor"], c["direction"]) for c in audit["reparameterization_contrasts"]
+    }
+    assert edges == {
+        ("A", "remove"),
+        ("B", "remove"),
+        ("C", "remove"),
+        ("B", "add"),
+    }, edges
     for c in audit["reparameterization_contrasts"]:
         assert c["normalized_candidate"] != c["normalized_reference"]
         assert c["raw_candidate"] != c["raw_reference"]
@@ -259,21 +307,18 @@ def test_single_factor_audit_covers_raw_parameterization_edges():
         if (factor, direction) == ("B", "remove"):
             raw_pair = ("lega_raw_conc_only", "lega_raw")
         bad.append((factor, direction, norm_pair, raw_pair, note))
-    with mock.patch("lega.pipeline.common.REPARAMETERIZATION_CONTRASTS",
-                    tuple(bad)):
+    with mock.patch("lega.pipeline.common.REPARAMETERIZATION_CONTRASTS", tuple(bad)):
         audit = single_factor_audit()
         assert not audit["ok"], audit
-        assert any("原始参数化" in p and "实际改变" in p
-                   for p in audit["problems"]), audit
+        assert any(
+            "原始参数化" in p and "实际改变" in p for p in audit["problems"]
+        ), audit
 
-    missing = tuple(c for c in CONTRASTS
-                    if (c[0], c[1]) != ("B", "add"))
-    with mock.patch("lega.pipeline.common.REPARAMETERIZATION_CONTRASTS",
-                    missing):
+    missing = tuple(c for c in CONTRASTS if (c[0], c[1]) != ("B", "add"))
+    with mock.patch("lega.pipeline.common.REPARAMETERIZATION_CONTRASTS", missing):
         audit = single_factor_audit()
         assert not audit["ok"], audit
-        assert any("缺少原始参数化单因素对比" in p
-                   for p in audit["problems"]), audit
+        assert any("缺少原始参数化单因素对比" in p for p in audit["problems"]), audit
 
     bad_cells = dict(RAW_CELLS, B="lega_raw_no_len")
     with mock.patch("lega.pipeline.common.RAW_FACTORIAL_CELLS", bad_cells):
@@ -292,10 +337,8 @@ def test_single_factor_audit_covers_raw_parameterization_edges():
 
     # 共享格误用归一化 B 变体：格名仍是 AB，但实现变体不在 raw 表中。
     wrong_shared = dict(RAW_CELLS, AB="lega_no_len")
-    with mock.patch("lega.pipeline.common.RAW_FACTORIAL_CELLS",
-                    wrong_shared):
+    with mock.patch("lega.pipeline.common.RAW_FACTORIAL_CELLS", wrong_shared):
         audit = single_factor_audit()
         assert not audit["ok"], audit
         assert any("RAW_GATE_FACTORS" in p for p in audit["problems"]), audit
-    print("  [ok] 单因素审计覆盖原始参数化边，并拒绝多因子/缺失/重复格"
-          "与实现漂移")
+    print("  [ok] 单因素审计覆盖原始参数化边，并拒绝多因子/缺失/重复格" "与实现漂移")

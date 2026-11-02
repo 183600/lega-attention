@@ -1,4 +1,5 @@
 """可复现性与溯源测试：种子覆盖、数据批采样确定、文件/数据指纹稳定。"""
+
 import hashlib
 import json
 import os
@@ -11,19 +12,37 @@ import numpy as np
 import torch
 
 from lega.data import CACHE_SCHEMA, get_train_batch
-from lega.repro import (PIPELINE_RUN_ID_ENV, SANITY_REQUIRED_CHECKS,
-                        build_run_manifest, current_pipeline_run_id,
-                        data_fingerprint, environment_gate,
-                        environment_lock_report, git_info,
-                        load_provenance, parse_requirements_lock,
-                        provenance_drift, runtime_drift, runtime_info,
-                        sanity_identity_check, sha256_file,
-                        source_tree_fingerprint,
-                        test_data_fingerprint as _test_data_fingerprint,
-                        verify_run, worktree_state, write_worktree_patch)
-from lega.utils import (data_rng, data_rng_state_fingerprint,
-                        expected_rng_state_fingerprint, set_seed,
-                        seed_plan, seed_report, state_dict_fingerprint)
+from lega.repro import (
+    PIPELINE_RUN_ID_ENV,
+    SANITY_REQUIRED_CHECKS,
+    build_run_manifest,
+    current_pipeline_run_id,
+    data_fingerprint,
+    environment_gate,
+    environment_lock_report,
+    git_info,
+    load_provenance,
+    parse_requirements_lock,
+    provenance_drift,
+    runtime_drift,
+    runtime_info,
+    sanity_identity_check,
+    sha256_file,
+    source_tree_fingerprint,
+    test_data_fingerprint as _test_data_fingerprint,
+    verify_run,
+    worktree_state,
+    write_worktree_patch,
+)
+from lega.utils import (
+    data_rng,
+    data_rng_state_fingerprint,
+    expected_rng_state_fingerprint,
+    set_seed,
+    seed_plan,
+    seed_report,
+    state_dict_fingerprint,
+)
 
 
 def test_set_seed_covers_python_numpy_torch():
@@ -62,10 +81,12 @@ def test_set_seed_overwrites_stale_child_hashseed():
         set_seed(4321)
         assert os.environ["PYTHONHASHSEED"] == "4321"
         r = subprocess.run(
-            [sys.executable, "-c",
-             "import os; print(os.environ['PYTHONHASHSEED'])"],
+            [sys.executable, "-c", "import os; print(os.environ['PYTHONHASHSEED'])"],
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            env=os.environ.copy(), capture_output=True, text=True)
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+        )
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "4321", r.stdout
     finally:
@@ -83,8 +104,22 @@ def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
     np.random.seed 处以 TypeError 半途失败（PYTHONHASHSEED 已被写成 "1"）。
     两者都必须在入口就显式拒绝。
     """
-    for bad in (True, False, 1.5, -0.5, -1, 2 ** 32, float("nan"),
-                float("inf"), "1.5", "abc", "", [1], {"seed": 1}, None):
+    for bad in (
+        True,
+        False,
+        1.5,
+        -0.5,
+        -1,
+        2**32,
+        float("nan"),
+        float("inf"),
+        "1.5",
+        "abc",
+        "",
+        [1],
+        {"seed": 1},
+        None,
+    ):
         for fn in (set_seed, seed_report):
             try:
                 fn(bad)
@@ -93,6 +128,7 @@ def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
                 raised = True
             assert raised, (fn.__name__, bad)
     from lega.utils import MAX_SEED, seed_int
+
     assert seed_int(0) == 0 and seed_int(MAX_SEED) == MAX_SEED
     for bad in (-1, MAX_SEED + 1):
         try:
@@ -114,6 +150,7 @@ def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
 def test_state_dict_fingerprint_tracks_init_seed_and_layout():
     """初始化指纹必须随真实权重变化，且不受 state_dict 键顺序影响。"""
     from collections import OrderedDict
+
     set_seed(7)
     m1 = torch.nn.Linear(4, 3)
     fp1 = state_dict_fingerprint(m1.state_dict())
@@ -161,11 +198,14 @@ def test_data_fingerprint_cache_and_invalidation():
         with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"tokenizer": "char", "vocab_size": 8}, f)
         fp1 = data_fingerprint(d)
-        assert sorted(e["name"] for e in fp1["files"]) == \
-            ["meta.json", "train.bin", "val.bin"]
+        assert sorted(e["name"] for e in fp1["files"]) == [
+            "meta.json",
+            "train.bin",
+            "val.bin",
+        ]
         assert data_fingerprint(d)["digest"] == fp1["digest"]  # 缓存命中
         with open(os.path.join(d, "train.bin"), "ab") as f:
-            f.write(b"\xff")                                   # 大小/mtime 变化
+            f.write(b"\xff")  # 大小/mtime 变化
         fp2 = data_fingerprint(d)
         assert fp2["digest"] != fp1["digest"]
     print("  [ok] 数据指纹缓存命中/内容变化失效")
@@ -185,7 +225,7 @@ def test_data_fingerprint_detects_mtime_preserving_edit():
         fp1 = data_fingerprint(d)
         st = os.stat(p)
         with open(p, "wb") as f:
-            f.write(b"bbbb")                       # 同尺寸、不同内容
+            f.write(b"bbbb")  # 同尺寸、不同内容
         os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
         fp2 = data_fingerprint(d)
         assert fp2["digest"] != fp1["digest"]
@@ -207,7 +247,7 @@ def test_data_fingerprint_rehashes_when_stats_match_stale_cache():
         fp1 = data_fingerprint(d)
         old_st = os.stat(p)
         with open(p, "wb") as f:
-            f.write(b"bbbb")                       # 同尺寸、不同内容
+            f.write(b"bbbb")  # 同尺寸、不同内容
         os.utime(p, ns=(old_st.st_atime_ns, old_st.st_mtime_ns))
         # 强制缓存看起来仍与当前 stat 完全一致（模拟 ctime 未变/被回填）。
         cur_st = os.stat(p)
@@ -237,8 +277,13 @@ def test_data_fingerprint_survives_malformed_cache():
             f.write(bytes(32))
         cache = os.path.join(d, ".lega_fingerprint.json")
         ref = data_fingerprint(d)
-        for bad in ([1, 2], "oops", 5, {"algo": "sha256-16", "files": None},
-                    {"algo": "sha256-16", "files": [1, "x"]}):
+        for bad in (
+            [1, 2],
+            "oops",
+            5,
+            {"algo": "sha256-16", "files": None},
+            {"algo": "sha256-16", "files": [1, "x"]},
+        ):
             with open(cache, "w", encoding="utf-8") as f:
                 json.dump(bad, f)
             assert data_fingerprint(d)["digest"] == ref["digest"]
@@ -302,11 +347,12 @@ def test_seed_report_covers_all_random_sources():
     assert rep["data_order_seed"] == 2024
     # 数据顺序 RNG 不仅是"声明用了 seed"：初始状态指纹可由 seed 独立复算，
     # 且与全局 NumPy RNG 相互独立（全局状态被模型初始化消耗也不影响）。
-    assert rep["data_order_rng_fingerprint"] == \
-        data_rng_state_fingerprint(2024)
+    assert rep["data_order_rng_fingerprint"] == data_rng_state_fingerprint(2024)
     json.dumps(rep)
-    print("  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA)、数据顺序 RNG "
-          "与确定性开关")
+    print(
+        "  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA)、数据顺序 RNG "
+        "与确定性开关"
+    )
 
 
 def test_seed_plan_is_side_effect_free_audit():
@@ -319,20 +365,17 @@ def test_seed_plan_is_side_effect_free_audit():
     # seed_plan 只查询，不改变调用方已播种的随机流（否则会改变实验本身）
     assert before == after
     assert plan["seed"] == 77 and plan["is_plan"] is True
-    for key in ("python_random", "numpy_global", "torch_cpu",
-                "data_order_seed"):
+    for key in ("python_random", "numpy_global", "torch_cpu", "data_order_seed"):
         assert plan[key] == 77, (key, plan)
     assert plan["torch_cuda"] in (None, 77)
     assert plan["pythonhashseed_child_env"] == "77"
-    assert plan["data_order_rng_fingerprint"] == \
-        data_rng_state_fingerprint(77)
+    assert plan["data_order_rng_fingerprint"] == data_rng_state_fingerprint(77)
     # 启动期记录就带可独立复算的全局 RNG 初始状态指纹：即使训练子进程
     # 还没产出 run_manifest，started 台账也不是只有“声明”。
-    assert plan["rng_fingerprints"] == \
-        expected_rng_state_fingerprint(77)
+    assert plan["rng_fingerprints"] == expected_rng_state_fingerprint(77)
     json.dumps(plan)
     # 非法 seed 与 set_seed 同口径拒绝（bool/越界）
-    for bad in (True, -1, 2 ** 32):
+    for bad in (True, -1, 2**32):
         try:
             seed_plan(bad)
         except ValueError:
@@ -353,22 +396,28 @@ def test_seed_report_rng_fingerprints_are_seed_evidence():
     assert fp_a and {"python_random", "numpy_global", "torch_cpu"} <= set(fp_a)
     assert all(isinstance(v, str) and len(v) == 16 for v in fp_a.values())
     set_seed(11)
-    assert seed_report(11)["rng_fingerprints"] == fp_a     # 同 seed 可复算
+    assert seed_report(11)["rng_fingerprints"] == fp_a  # 同 seed 可复算
     set_seed(12)
     fp_b = seed_report(12)["rng_fingerprints"]
     for key in ("python_random", "numpy_global", "torch_cpu"):
-        assert fp_b[key] != fp_a[key], key               # 异 seed 状态不同
+        assert fp_b[key] != fp_a[key], key  # 异 seed 状态不同
     stale = seed_report(11)
-    assert stale["rng_fingerprints"] is None   # 不冒充旧 seed
+    assert stale["rng_fingerprints"] is None  # 不冒充旧 seed
     # 逐随机源的 seed 也不能复述请求参数：当前 RNG 属于 seed 12，
     # 请求 seed 11 的报告必须把各源标为未验证/未知，而不是伪造 11。
     assert stale["seed_verified"] is False
-    for key in ("python_random", "numpy_global", "torch_cpu",
-                "data_order_seed", "data_order_rng_fingerprint"):
+    for key in (
+        "python_random",
+        "numpy_global",
+        "torch_cpu",
+        "data_order_seed",
+        "data_order_rng_fingerprint",
+    ):
         assert stale[key] is None, (key, stale)
     json.dumps(fp_a)
-    print("  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/"
-          "不冒充）")
+    print(
+        "  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/" "不冒充）"
+    )
 
 
 def test_expected_rng_fingerprint_is_recomputable_without_side_effects():
@@ -379,8 +428,7 @@ def test_expected_rng_fingerprint_is_recomputable_without_side_effects():
     """
     seed = 4242
     set_seed(seed)
-    before = (random.getstate(), np.random.get_state(),
-              torch.get_rng_state().clone())
+    before = (random.getstate(), np.random.get_state(), torch.get_rng_state().clone())
     expected = expected_rng_state_fingerprint(seed)
     after = (random.getstate(), np.random.get_state(), torch.get_rng_state())
     assert before[0] == after[0]
@@ -409,16 +457,15 @@ def test_data_rng_is_seeded_and_reproducible():
     用同一 seed 复算。
     """
     data = np.arange(4096, dtype=np.uint16)
-    for seed in (0, 7, 2 ** 32 - 1):
+    for seed in (0, 7, 2**32 - 1):
         r1, r2 = data_rng(seed), data_rng(seed)
         x1, y1 = get_train_batch(data, 16, 4, "cpu", r1)
         x2, y2 = get_train_batch(data, 16, 4, "cpu", r2)
         assert torch.equal(x1, x2) and torch.equal(y1, y2)
-        assert data_rng_state_fingerprint(seed) == \
-            data_rng_state_fingerprint(seed)
+        assert data_rng_state_fingerprint(seed) == data_rng_state_fingerprint(seed)
     assert data_rng_state_fingerprint(7) != data_rng_state_fingerprint(8)
     # 非法种子不能被 np.random.default_rng 静默接受（bool/负数/小数）
-    for bad in (True, -1, 1.5, 2 ** 32):
+    for bad in (True, -1, 1.5, 2**32):
         try:
             data_rng(bad)
             raised = False
@@ -435,14 +482,17 @@ def test_seed_report_distinguishes_process_hashseed_from_child_env():
     env，字段会永远等于 seed，“当前进程哈希随机化其实没固定”会被掩盖。
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    code = ("import json\n"
-            "from lega.utils import set_seed, seed_report\n"
-            "set_seed(7)\n"
-            "print(json.dumps(seed_report(7)))\n")
+    code = (
+        "import json\n"
+        "from lega.utils import set_seed, seed_report\n"
+        "set_seed(7)\n"
+        "print(json.dumps(seed_report(7)))\n"
+    )
     env = os.environ.copy()
     env.pop("PYTHONHASHSEED", None)
-    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
-                       capture_output=True, text=True)
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True
+    )
     assert r.returncode == 0, r.stderr
     rep_unset = json.loads(r.stdout.strip().splitlines()[-1])
     assert rep_unset["pythonhashseed_at_start"] is None
@@ -450,8 +500,9 @@ def test_seed_report_distinguishes_process_hashseed_from_child_env():
     assert rep_unset["pythonhashseed_effective"] is False
 
     env["PYTHONHASHSEED"] = "7"
-    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
-                       capture_output=True, text=True)
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True
+    )
     assert r.returncode == 0, r.stderr
     rep_set = json.loads(r.stdout.strip().splitlines()[-1])
     assert rep_set["pythonhashseed_at_start"] == "7"
@@ -462,16 +513,22 @@ def test_seed_report_distinguishes_process_hashseed_from_child_env():
 def test_set_seed_repairs_invalid_cublas_workspace_config():
     """继承的非法 CUBLAS 配置会让确定性 CUDA 算法启动失败，必须改写。"""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    code = ("import os\n"
-            "from lega.utils import set_seed\n"
-            "set_seed(11)\n"
-            "print(os.environ['CUBLAS_WORKSPACE_CONFIG'])\n")
-    for bad, want in ((":bad:", ":4096:8"), ("", ":4096:8"),
-                      (":16:8", ":16:8")):
+    code = (
+        "import os\n"
+        "from lega.utils import set_seed\n"
+        "set_seed(11)\n"
+        "print(os.environ['CUBLAS_WORKSPACE_CONFIG'])\n"
+    )
+    for bad, want in ((":bad:", ":4096:8"), ("", ":4096:8"), (":16:8", ":16:8")):
         env = os.environ.copy()
         env["CUBLAS_WORKSPACE_CONFIG"] = bad
-        r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip().splitlines()[-1] == want, (bad, r.stdout)
     print("  [ok] set_seed 修正非法 CUBLAS_WORKSPACE_CONFIG 且保留合法值")
@@ -486,8 +543,9 @@ def test_run_manifest_embeds_seed_report_and_runtime():
             json.dump({"seed": 5}, f)
         # manifest 只记录已实际固定到该 seed 的 RNG；调用方须先 set_seed
         set_seed(5)
-        manifest = build_run_manifest(tag="t", variant="lega", seed=5,
-                                      config_path=cfg, data_dir=d, device="cpu")
+        manifest = build_run_manifest(
+            tag="t", variant="lega", seed=5, config_path=cfg, data_dir=d, device="cpu"
+        )
         assert manifest["seed_report"]["seed_verified"] is True
         assert manifest["seed_report"]["python_random"] == 5
         assert manifest["runtime"]["hostname"]
@@ -507,7 +565,7 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
             with open(mpath, "w", encoding="utf-8") as f:
                 json.dump(obj, f)
 
-        base = load_provenance(d)          # 无清单：按当前环境/配置补算
+        base = load_provenance(d)  # 无清单：按当前环境/配置补算
         assert base["config_sha256"] == sha256_file(cfg)
         assert base["config_used_sha256"] == sha256_file(cfg)
         assert base["seed_report"] is None
@@ -518,14 +576,19 @@ def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
         assert p1["config_sha256"] == sha256_file(cfg)
         assert p1["code_commit"] == base["code_commit"]
         # 已有字段优先于当前环境，数据摘要缺失时保持 None 而不是乱填
-        _manifest({"git": {"commit": "abc", "branch": "main"},
-                   "config_sha256": "deadbeef",
-                   "config_used_sha256": "feedface",
-                   "artifacts": {"model.pt": {"sha256": "a" * 64},
-                                 "eval.json": {"sha256": "b" * 64}},
-                   "seed_report": {"seed": 5, "seed_verified": True},
-                   "precision": {"amp_enabled": True,
-                                 "amp_dtype": "bfloat16"}})
+        _manifest(
+            {
+                "git": {"commit": "abc", "branch": "main"},
+                "config_sha256": "deadbeef",
+                "config_used_sha256": "feedface",
+                "artifacts": {
+                    "model.pt": {"sha256": "a" * 64},
+                    "eval.json": {"sha256": "b" * 64},
+                },
+                "seed_report": {"seed": 5, "seed_verified": True},
+                "precision": {"amp_enabled": True, "amp_dtype": "bfloat16"},
+            }
+        )
         p2 = load_provenance(d)
         assert p2["code_commit"] == "abc" and p2["code_branch"] == "main"
         assert p2["config_sha256"] == "deadbeef"
@@ -571,8 +634,7 @@ def test_load_provenance_records_eval_runtime_and_detects_version_drift():
         _write({"runtime": drifted})
         p = load_provenance(d, device="cpu")
         assert p["runtime_matches_training"] is False
-        assert {m["field"] for m in p["runtime_mismatches"]} == {
-            "torch", "numpy"}
+        assert {m["field"] for m in p["runtime_mismatches"]} == {"torch", "numpy"}
 
         # 旧清单没有任何 runtime：无法核对，不能声称一致
         _write({"tag": "legacy"})
@@ -588,33 +650,28 @@ def test_load_provenance_records_eval_runtime_and_detects_version_drift():
         assert p["runtime_matches_training"] is None
 
         # 身份字段缺项（旧清单只记了部分版本）：matches=None + 列出未核对项
-        _write({"runtime": {"python": current["python"],
-                            "torch": current["torch"]}})
+        _write({"runtime": {"python": current["python"], "torch": current["torch"]}})
         p = load_provenance(d, device="cpu")
         assert p["runtime_matches_training"] is None
-        assert set(p["runtime_unknown_fields"]) == {
-            "numpy", "cuda", "cudnn", "gpu"}
+        assert set(p["runtime_unknown_fields"]) == {"numpy", "cuda", "cudnn", "gpu"}
 
     # 直接测试 helper：结构非法/字段缺失都不能被当成“一致”
     assert runtime_drift(None, {})["matches"] is None
     assert runtime_drift({}, {})["matches"] is None
-    same = {k: "x" for k in
-            ("python", "torch", "numpy", "cuda", "cudnn", "gpu")}
+    same = {k: "x" for k in ("python", "torch", "numpy", "cuda", "cudnn", "gpu")}
     assert runtime_drift(same, dict(same))["matches"] is True
     one_missing = dict(same)
     one_missing.pop("cudnn")
     assert runtime_drift(one_missing, same)["matches"] is None
     dr = runtime_drift(same, dict(same, python="3.13"))
     assert dr["matches"] is False
-    assert dr["mismatches"] == [
-        {"field": "python", "train": "x", "eval": "3.13"}]
+    assert dr["mismatches"] == [{"field": "python", "train": "x", "eval": "3.13"}]
     print("  [ok] load_provenance 记录 train/eval runtime 并标记版本漂移")
 
 
 def test_load_provenance_keeps_eval_and_training_data_fingerprints_apart():
     """用另一份数据评测 checkpoint 时，不能把清单里的训练指纹当评测指纹。"""
-    with tempfile.TemporaryDirectory() as ckpt, \
-            tempfile.TemporaryDirectory() as data:
+    with tempfile.TemporaryDirectory() as ckpt, tempfile.TemporaryDirectory() as data:
         with open(os.path.join(data, "train.bin"), "wb") as f:
             f.write(bytes(32))
         eval_fp = data_fingerprint(data)["digest"]
@@ -654,47 +711,82 @@ def test_load_provenance_rejects_stale_sanity_evidence():
                 json.dump({"sanity": sanity}, f)
             return load_provenance(d)
 
-        stale = _write({
-            "present": True, "passed": True, "variant": "lega",
-            "identity": {"hard_mismatches": ["config_sha256"],
-                         "unknown_fields": [], "verified": False}})
+        stale = _write(
+            {
+                "present": True,
+                "passed": True,
+                "variant": "lega",
+                "identity": {
+                    "hard_mismatches": ["config_sha256"],
+                    "unknown_fields": [],
+                    "verified": False,
+                },
+            }
+        )
         assert stale["sanity_passed"] is None
         assert stale["sanity_verified"] is False
         # 身份核对通过：PASS 与 verified 都继承
-        fresh = _write({
-            "present": True, "passed": True, "variant": "lega",
-            "identity": {"hard_mismatches": [], "unknown_fields": [],
-                         "verified": True}})
+        fresh = _write(
+            {
+                "present": True,
+                "passed": True,
+                "variant": "lega",
+                "identity": {
+                    "hard_mismatches": [],
+                    "unknown_fields": [],
+                    "verified": True,
+                },
+            }
+        )
         assert fresh["sanity_passed"] is True
         assert fresh["sanity_verified"] is True
         # 即使清单自称 PASS，只要保留失败检查项/标记 malformed，就不能继承。
-        broken = _write({"present": True, "passed": True,
-                         "failed_checks": ["token_acc_above_threshold"],
-                         "checks_consistent": False,
-                         "identity": {"hard_mismatches": [],
-                                      "unknown_fields": [], "verified": True}})
+        broken = _write(
+            {
+                "present": True,
+                "passed": True,
+                "failed_checks": ["token_acc_above_threshold"],
+                "checks_consistent": False,
+                "identity": {
+                    "hard_mismatches": [],
+                    "unknown_fields": [],
+                    "verified": True,
+                },
+            }
+        )
         assert broken["sanity_passed"] is False
-        assert broken["sanity_failed_checks"] == [
-            "token_acc_above_threshold"]
+        assert broken["sanity_failed_checks"] == ["token_acc_above_threshold"]
         assert broken["sanity_checks_consistent"] is False
-        malformed_pass = _write({"present": True, "passed": True,
-                                 "malformed": True,
-                                 "identity": {"hard_mismatches": [],
-                                              "verified": True}})
+        malformed_pass = _write(
+            {
+                "present": True,
+                "passed": True,
+                "malformed": True,
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
         assert malformed_pass["sanity_passed"] is False
         assert malformed_pass["sanity_malformed"] is True
-        inconsistent = _write({"present": True, "passed": True,
-                               "checks_consistent": False,
-                               "identity": {"hard_mismatches": [],
-                                            "verified": True}})
+        inconsistent = _write(
+            {
+                "present": True,
+                "passed": True,
+                "checks_consistent": False,
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
         assert inconsistent["sanity_passed"] is False
         assert inconsistent["sanity_checks_consistent"] is False
         # 字段存在但类型损坏（非列表/非布尔）不能让 PASS 蒙混过关。
-        bad_fields = _write({"present": True, "passed": True,
-                             "failed_checks": "oops",
-                             "checks_consistent": "false",
-                             "identity": {"hard_mismatches": [],
-                                          "verified": True}})
+        bad_fields = _write(
+            {
+                "present": True,
+                "passed": True,
+                "failed_checks": "oops",
+                "checks_consistent": "false",
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
         assert bad_fields["sanity_passed"] is False
         assert bad_fields["sanity_malformed"] is True
         # 旧清单/无法核对：保留 PASS 但不冒充已验证
@@ -702,18 +794,26 @@ def test_load_provenance_rejects_stale_sanity_evidence():
         assert legacy["sanity_passed"] is True
         assert legacy["sanity_verified"] is None
         # 结构畸形的 identity 也不能让闸门结论崩溃或冒充已验证
-        malformed = _write({"present": True, "passed": True,
-                            "identity": "oops"})
+        malformed = _write({"present": True, "passed": True, "identity": "oops"})
         assert malformed["sanity_passed"] is True
         assert malformed["sanity_verified"] is None
         # 非布尔字符串/数字不能经 bool() 伪装成 PASS。
-        fake = _write({"present": True, "passed": "false",
-                       "identity": {"hard_mismatches": [],
-                                    "verified": "false"}})
+        fake = _write(
+            {
+                "present": True,
+                "passed": "false",
+                "identity": {"hard_mismatches": [], "verified": "false"},
+            }
+        )
         assert fake["sanity_passed"] is None
         assert fake["sanity_verified"] is None
-        fake2 = _write({"present": True, "passed": 1,
-                        "identity": {"hard_mismatches": [], "verified": 1}})
+        fake2 = _write(
+            {
+                "present": True,
+                "passed": 1,
+                "identity": {"hard_mismatches": [], "verified": 1},
+            }
+        )
         assert fake2["sanity_passed"] is None
         assert fake2["sanity_verified"] is None
     print("  [ok] load_provenance：旧 sanity PASS 的身份核对口径与 train 一致")
@@ -733,28 +833,72 @@ def test_same_seed_training_is_bitwise_reproducible():
         os.makedirs(data_dir)
         rng = np.random.default_rng(0)
         rng.integers(0, 64, size=4096, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "train.bin"))
+            os.path.join(data_dir, "train.bin")
+        )
         rng.integers(0, 64, size=512, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "val.bin"))
+            os.path.join(data_dir, "val.bin")
+        )
         with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
-                       "block_size": 32, "batch_size": 4, "steps": 2,
-                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
-                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
-                       "seed": 5, "log_every": 1, "eval_every": 2,
-                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 4,
+                    "steps": 2,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 2,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
         outs = []
         for name in ("run_a", "run_b"):
             out_dir = os.path.join(d, name)
             r = subprocess.run(
-                [sys.executable, "-m", "lega.train", "--config", cfg_path,
-                 "--variant", "lega", "--data_dir", data_dir,
-                 "--out_dir", out_dir, "--device", "cpu", "--seed", "5"],
-                cwd=root, capture_output=True, text=True)
+                [
+                    sys.executable,
+                    "-m",
+                    "lega.train",
+                    "--config",
+                    cfg_path,
+                    "--variant",
+                    "lega",
+                    "--data_dir",
+                    data_dir,
+                    "--out_dir",
+                    out_dir,
+                    "--device",
+                    "cpu",
+                    "--seed",
+                    "5",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
             assert r.returncode == 0, r.stderr
             outs.append(out_dir)
 
@@ -762,17 +906,19 @@ def test_same_seed_training_is_bitwise_reproducible():
             with open(os.path.join(p, "train_log.jsonl"), encoding="utf-8") as f:
                 recs = [json.loads(ln) for ln in f if ln.strip()]
             for rec in recs:
-                rec.pop("time", None)      # 时间戳不参与数值比对
+                rec.pop("time", None)  # 时间戳不参与数值比对
                 # 步时是墙钟测量，天然不可逐位复现（与 time 同口径剔除）；
                 # 模型权重与损失数值仍逐位比对
                 rec.pop("step_time_ms", None)
             return recs
 
         assert curves(outs[0]) == curves(outs[1])
-        w_a = torch.load(os.path.join(outs[0], "model.pt"), map_location="cpu",
-                         weights_only=True)["state_dict"]
-        w_b = torch.load(os.path.join(outs[1], "model.pt"), map_location="cpu",
-                         weights_only=True)["state_dict"]
+        w_a = torch.load(
+            os.path.join(outs[0], "model.pt"), map_location="cpu", weights_only=True
+        )["state_dict"]
+        w_b = torch.load(
+            os.path.join(outs[1], "model.pt"), map_location="cpu", weights_only=True
+        )["state_dict"]
         assert w_a.keys() == w_b.keys()
         diff = [k for k in w_a if not torch.equal(w_a[k], w_b[k])]
         assert diff == [], diff
@@ -781,9 +927,9 @@ def test_same_seed_training_is_bitwise_reproducible():
 
 def _init_git_repo(d):
     def git(*args):
-        r = subprocess.run(["git"] + list(args), cwd=d, capture_output=True,
-                           text=True)
+        r = subprocess.run(["git"] + list(args), cwd=d, capture_output=True, text=True)
         assert r.returncode == 0, (args, r.stderr)
+
     git("init", "-q")
     git("config", "user.email", "t@example.com")
     git("config", "user.name", "t")
@@ -813,16 +959,21 @@ def test_provenance_drift_flags_code_and_data_changes_without_false_positive():
     d1 = provenance_drift(start, moved)
     assert d1["changed"] is True
     assert {m["field"] for m in d1["mismatches"]} == {
-        "code_commit", "worktree_diff_sha256", "data_fingerprint"}
+        "code_commit",
+        "worktree_diff_sha256",
+        "data_fingerprint",
+    }
     # 非 git/工作区不可用/数据缺失：unknown 而不是“未变化”
     unknown = provenance_drift(
-        {"git": {}, "worktree": {"available": False},
-         "data_fingerprint": None},
-        {"git": {}, "worktree": {"available": False},
-         "data_fingerprint": None})
+        {"git": {}, "worktree": {"available": False}, "data_fingerprint": None},
+        {"git": {}, "worktree": {"available": False}, "data_fingerprint": None},
+    )
     assert unknown["changed"] is False
     assert set(unknown["unknown"]) == {
-        "code_commit", "worktree_diff_sha256", "data_fingerprint"}
+        "code_commit",
+        "worktree_diff_sha256",
+        "data_fingerprint",
+    }
     # commit 不变但工作区改动同样必须被抓到
     dirty = dict(same, worktree={"available": True, "diff_sha256": "d9"})
     assert provenance_drift(start, dirty)["changed"] is True
@@ -834,7 +985,10 @@ def test_provenance_drift_tolerates_malformed_snapshots():
     res = provenance_drift([], "bad")
     assert res["changed"] is False
     assert set(res["unknown"]) == {
-        "code_commit", "worktree_diff_sha256", "data_fingerprint"}
+        "code_commit",
+        "worktree_diff_sha256",
+        "data_fingerprint",
+    }
     assert all(v is None for v in res["checked"].values())
     print("  [ok] 畸形溯源快照按 unknown 降级")
 
@@ -879,6 +1033,7 @@ def test_worktree_state_and_patch_capture_dirty_code():
 def test_worktree_failed_untracked_listing_is_marked_truncated(monkeypatch):
     """git ls-files 失败时补丁不完整，必须标记 truncated 而不是静默漏文件。"""
     import lega.repro as repro
+
     with tempfile.TemporaryDirectory() as d:
         git = _init_git_repo(d)
         with open(os.path.join(d, "code.py"), "w", encoding="utf-8") as f:
@@ -906,20 +1061,32 @@ def test_worktree_state_degrades_outside_git():
     with tempfile.TemporaryDirectory() as d:
         st = worktree_state(d)
         assert st["available"] is False and st["dirty"] is None
-        assert write_worktree_patch(
-            os.path.join(d, "p.patch"), root=d)["patch_file"] is None
+        assert (
+            write_worktree_patch(os.path.join(d, "p.patch"), root=d)["patch_file"]
+            is None
+        )
     print("  [ok] 非 git 目录：工作区快照显式不可用，不阻塞实验")
 
 
 def test_sanity_identity_check_detects_stale_gate_evidence():
     """旧配置/旧数据/旧代码的 sanity PASS 不得绑定到当前 run。"""
-    run = {"variant": "lega", "config_sha256": "c" * 64, "seed": 5,
-           "git": {"commit": "a" * 40, "dirty": False},
-           "data": {"digest": "d" * 16},
-           "worktree": {"available": True, "diff_sha256": None}}
-    fresh = {"variant": "lega", "config_sha256": "c" * 64, "seed": 5,
-             "git_commit": "a" * 40, "data_fingerprint": "d" * 16,
-             "worktree_recorded": True, "worktree_diff_sha256": None}
+    run = {
+        "variant": "lega",
+        "config_sha256": "c" * 64,
+        "seed": 5,
+        "git": {"commit": "a" * 40, "dirty": False},
+        "data": {"digest": "d" * 16},
+        "worktree": {"available": True, "diff_sha256": None},
+    }
+    fresh = {
+        "variant": "lega",
+        "config_sha256": "c" * 64,
+        "seed": 5,
+        "git_commit": "a" * 40,
+        "data_fingerprint": "d" * 16,
+        "worktree_recorded": True,
+        "worktree_diff_sha256": None,
+    }
     ok = sanity_identity_check(fresh, run)
     assert ok["hard_mismatches"] == [] and ok["verified"] is True
     assert ok["unknown_fields"] == []
@@ -927,10 +1094,12 @@ def test_sanity_identity_check_detects_stale_gate_evidence():
     deeper = dict(fresh, seed=9)
     assert sanity_identity_check(deeper, run)["hard_mismatches"] == []
     assert sanity_identity_check(deeper, run)["seed_mismatch"] is True
-    for field, bad in (("config_sha256", "e" * 64),
-                       ("data_fingerprint", "f" * 16),
-                       ("git_commit", "b" * 40),
-                       ("variant", "standard")):
+    for field, bad in (
+        ("config_sha256", "e" * 64),
+        ("data_fingerprint", "f" * 16),
+        ("git_commit", "b" * 40),
+        ("variant", "standard"),
+    ):
         stale = dict(fresh, **{field: bad})
         res = sanity_identity_check(stale, run)
         assert field in res["hard_mismatches"], (field, res)
@@ -939,8 +1108,10 @@ def test_sanity_identity_check_detects_stale_gate_evidence():
     dirty_run = dict(run, worktree={"available": True, "diff_sha256": "1" * 64})
     dirty_ok = dict(fresh, worktree_diff_sha256="1" * 64)
     assert sanity_identity_check(dirty_ok, dirty_run)["verified"] is True
-    assert ("worktree_diff_sha256"
-            in sanity_identity_check(fresh, dirty_run)["hard_mismatches"])
+    assert (
+        "worktree_diff_sha256"
+        in sanity_identity_check(fresh, dirty_run)["hard_mismatches"]
+    )
     # 旧版 sanity 缺身份字段：记为 unknown，不冒充已验证
     old = {"variant": "lega", "seed": 5}
     res_old = sanity_identity_check(old, run)
@@ -959,8 +1130,11 @@ def test_sanity_identity_check_detects_stale_gate_evidence():
             corrupt = dict(fresh, **{key: bad})
             res_bad = sanity_identity_check(corrupt, run)
             assert res_bad["hard_mismatches"] == [], (key, bad, res_bad)
-            assert "worktree_diff_sha256" in res_bad["unknown_fields"], \
-                (key, bad, res_bad)
+            assert "worktree_diff_sha256" in res_bad["unknown_fields"], (
+                key,
+                bad,
+                res_bad,
+            )
     bad_run = dict(run, worktree={"available": "true", "diff_sha256": None})
     res_bad_run = sanity_identity_check(fresh, bad_run)
     assert res_bad_run["hard_mismatches"] == []
@@ -971,11 +1145,18 @@ def test_sanity_identity_check_detects_stale_gate_evidence():
 def test_data_fingerprint_empty_cache_cannot_bypass_missing_files():
     """目录里只有 files=[] 的缓存时仍须报“无数据文件”，不能返回空指纹。"""
     with tempfile.TemporaryDirectory() as d:
-        with open(os.path.join(d, ".lega_fingerprint.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"algo": "sha256-16",
-                       "digest": "e3b0c44298fc1c14",  # sha256("")[:16]
-                       "tokenizer": None, "files": []}, f)
+        with open(
+            os.path.join(d, ".lega_fingerprint.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump(
+                {
+                    "algo": "sha256-16",
+                    "digest": "e3b0c44298fc1c14",  # sha256("")[:16]
+                    "tokenizer": None,
+                    "files": [],
+                },
+                f,
+            )
         try:
             data_fingerprint(d)
             raise AssertionError("空目录 + 空缓存必须报 FileNotFoundError")
@@ -1008,6 +1189,7 @@ def test_data_fingerprint_tolerates_non_object_meta():
 def test_seed_report_and_runtime_record_warn_only_mode_honestly():
     """确定性算法只记 True 会夸大保证：必须如实标注 warn_only 而非严格模式。"""
     from lega.utils import deterministic_algorithms_warn_only
+
     set_seed(31)
     rep = seed_report(31)
     mode = rep["deterministic_algorithms_warn_only"]
@@ -1025,19 +1207,26 @@ def test_seed_report_and_runtime_record_warn_only_mode_honestly():
 def test_runtime_info_records_precision_threads_and_device_visibility():
     """影响数值复现的精度开关/线程数/CUDA 可见性必须进入环境快照。"""
     rt = runtime_info("cpu")
-    for key in ("tf32_matmul", "tf32_cudnn", "cudnn_enabled",
-                "torch_threads", "torch_interop_threads",
-                "cuda_visible_devices"):
+    for key in (
+        "tf32_matmul",
+        "tf32_cudnn",
+        "cudnn_enabled",
+        "torch_threads",
+        "torch_interop_threads",
+        "cuda_visible_devices",
+    ):
         assert key in rt, key
     assert isinstance(rt["tf32_matmul"], bool)
     assert isinstance(rt["tf32_cudnn"], bool)
     assert rt["torch_threads"] >= 1 and rt["torch_interop_threads"] >= 1
-    assert rt["cuda_visible_devices"] in (None, "") or \
-        isinstance(rt["cuda_visible_devices"], str)
+    assert rt["cuda_visible_devices"] in (None, "") or isinstance(
+        rt["cuda_visible_devices"], str
+    )
     json.dumps(rt)
     # 精度开关记录的是“当前实际状态”，而不是硬编码默认值：
     # enable_tf32 之后 runtime_info 必须如实反映
     from lega.utils import enable_tf32
+
     prev_mm = torch.backends.cuda.matmul.allow_tf32
     prev_cudnn = torch.backends.cudnn.allow_tf32
     try:
@@ -1055,6 +1244,7 @@ def test_runtime_info_records_precision_threads_and_device_visibility():
 def test_sanity_summary_binds_gate_evidence_to_manifest():
     """sanity 结果摘要与 manifest 绑定：缺失/畸形不得冒充“通过”。"""
     from lega.repro import sanity_summary
+
     with tempfile.TemporaryDirectory() as d:
         assert sanity_summary(os.path.join(d, "missing.json"))["present"] is False
         bad = os.path.join(d, "bad.json")
@@ -1066,8 +1256,15 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         # 写进 manifest/台账。
         contradictory = os.path.join(d, "contradictory.json")
         with open(contradictory, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "variant": "lega", "seed": 3,
-                       "checks": {"a": False, "b": True}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 3,
+                    "checks": {"a": False, "b": True},
+                },
+                f,
+            )
         sc = sanity_summary(contradictory)
         assert sc["passed"] is False and sc["malformed"] is True
         assert sc["failed_checks"] == ["a"]
@@ -1096,25 +1293,45 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         # “旧文件无法核对”，否则明确自报未验证的清单仍会被当成 PASS。
         bad_seed = os.path.join(d, "bad_seed.json")
         with open(bad_seed, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "checks": {"a": True},
-                       "manifest": {"seed_report": {
-                           "seed_verified": "false"}}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": {"seed_report": {"seed_verified": "false"}},
+                },
+                f,
+            )
         ss = sanity_summary(bad_seed)
         assert ss["passed"] is False and ss["malformed"] is True
         assert ss["seed_verified"] is None
         # seed_report 本身或其中的指纹字段类型损坏，也不能当作“无证据”。
         bad_seed_report = os.path.join(d, "bad_seed_report.json")
         with open(bad_seed_report, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "checks": {"a": True},
-                       "manifest": {"seed_report": "not-an-object"}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": {"seed_report": "not-an-object"},
+                },
+                f,
+            )
         sr = sanity_summary(bad_seed_report)
         assert sr["passed"] is False and sr["malformed"] is True
         bad_fp = os.path.join(d, "bad_fp.json")
         with open(bad_fp, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "checks": {"a": True},
-                       "manifest": {"seed_report": {
-                           "seed_verified": True,
-                           "data_order_rng_fingerprint": 123}}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": {
+                        "seed_report": {
+                            "seed_verified": True,
+                            "data_order_rng_fingerprint": 123,
+                        }
+                    },
+                },
+                f,
+            )
         sfp = sanity_summary(bad_fp)
         assert sfp["passed"] is False and sfp["malformed"] is True
         assert sfp["data_order_rng_fingerprint"] is None
@@ -1123,31 +1340,53 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         for bad_val in ("", "not-a-fingerprint", "A" * 16, "b" * 64, "0" * 15):
             fp_path = os.path.join(d, "bad_fp_str.json")
             with open(fp_path, "w", encoding="utf-8") as f:
-                json.dump({"passed": True, "checks": {"a": True},
-                           "manifest": {"seed_report": {
-                               "seed_verified": True,
-                               "data_order_rng_fingerprint": bad_val}}}, f)
+                json.dump(
+                    {
+                        "passed": True,
+                        "checks": {"a": True},
+                        "manifest": {
+                            "seed_report": {
+                                "seed_verified": True,
+                                "data_order_rng_fingerprint": bad_val,
+                            }
+                        },
+                    },
+                    f,
+                )
             sfs = sanity_summary(fp_path)
             assert sfs["passed"] is False and sfs["malformed"] is True, bad_val
             assert sfs["data_order_rng_fingerprint"] is None, bad_val
         bad_manifest = os.path.join(d, "bad_manifest.json")
         with open(bad_manifest, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "checks": {"a": True},
-                       "manifest": ["not", "an", "object"]}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": ["not", "an", "object"],
+                },
+                f,
+            )
         sm = sanity_summary(bad_manifest)
         assert sm["passed"] is False and sm["malformed"] is True
         good = os.path.join(d, "sanity_lega.json")
         with open(good, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "variant": "lega", "seed": 3,
-                       "checks": {"a": True, "b": True},
-                       "initial": {"loss": 4.1}, "final": {"loss": 0.01,
-                                                          "token_acc": 0.99},
-                       "manifest": {
-                           "config_sha256": "c" * 64,
-                           "git": {"commit": "a" * 40, "dirty": False},
-                           "data": {"digest": "d" * 16},
-                           "worktree": {"available": True,
-                                        "diff_sha256": None}}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 3,
+                    "checks": {"a": True, "b": True},
+                    "initial": {"loss": 4.1},
+                    "final": {"loss": 0.01, "token_acc": 0.99},
+                    "manifest": {
+                        "config_sha256": "c" * 64,
+                        "git": {"commit": "a" * 40, "dirty": False},
+                        "data": {"digest": "d" * 16},
+                        "worktree": {"available": True, "diff_sha256": None},
+                    },
+                },
+                f,
+            )
         s = sanity_summary(good)
         assert s["passed"] is True and s["variant"] == "lega" and s["seed"] == 3
         assert s["failed_checks"] == [] and s["checks_consistent"] is True
@@ -1165,9 +1404,16 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         all_checks = {k: True for k in SANITY_REQUIRED_CHECKS}
         modern = os.path.join(d, "modern.json")
         with open(modern, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "batch_sha256": "b" * 64,
-                       "steps_planned": 10, "steps_executed": 10,
-                       "checks": all_checks}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "checks": all_checks,
+                },
+                f,
+            )
         sm = sanity_summary(modern)
         assert sm["passed"] is True and sm["malformed"] is False
         assert sm["batch_sha256"] == "b" * 64
@@ -1176,27 +1422,48 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         # 只保留一项检查：checks 子集不能冒充完整闸门
         subset = os.path.join(d, "subset.json")
         with open(subset, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "batch_sha256": "b" * 64,
-                       "steps_planned": 10, "steps_executed": 10,
-                       "checks": {"loss_below_threshold": True}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "checks": {"loss_below_threshold": True},
+                },
+                f,
+            )
         ss = sanity_summary(subset)
         assert ss["checks_complete"] is False and ss["missing_checks"]
         assert ss["passed"] is False and ss["malformed"] is True
         # 提前中止（执行步数 < 计划步数）却声明 PASS：自相矛盾
         short = os.path.join(d, "short.json")
         with open(short, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "batch_sha256": "b" * 64,
-                       "steps_planned": 10, "steps_executed": 5,
-                       "checks": all_checks}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 5,
+                    "checks": all_checks,
+                },
+                f,
+            )
         sh = sanity_summary(short)
         assert sh["steps_complete"] is False
         assert sh["passed"] is False and sh["malformed"] is True
         # 固定批指纹格式损坏：不能作为可复算证据
         badbatch = os.path.join(d, "badbatch.json")
         with open(badbatch, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "batch_sha256": "xyz",
-                       "steps_planned": 10, "steps_executed": 10,
-                       "checks": all_checks}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "xyz",
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "checks": all_checks,
+                },
+                f,
+            )
         sb = sanity_summary(badbatch)
         assert sb["batch_sha256"] is None
         assert sb["passed"] is False and sb["malformed"] is True
@@ -1208,12 +1475,17 @@ def test_sanity_summary_binds_gate_evidence_to_manifest():
         os.makedirs(data)
         with open(os.path.join(data, "train.bin"), "wb") as f:
             f.write(bytes(8))
-        m = build_run_manifest(tag="t", variant="lega", seed=3,
-                               config_path=cfg, data_dir=data, device="cpu",
-                               sanity=s)
+        m = build_run_manifest(
+            tag="t",
+            variant="lega",
+            seed=3,
+            config_path=cfg,
+            data_dir=data,
+            device="cpu",
+            sanity=s,
+        )
         assert m["sanity"]["sha256"] == s["sha256"]
-        with open(os.path.join(d, "run_manifest.json"), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(d, "run_manifest.json"), "w", encoding="utf-8") as f:
             json.dump(m, f)
         prov = load_provenance(d)
         assert prov["sanity_passed"] is True
@@ -1229,44 +1501,102 @@ def test_train_aborts_on_failed_or_missing_sanity_gate():
         os.makedirs(data_dir)
         rng = np.random.default_rng(0)
         rng.integers(0, 64, size=1024, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "train.bin"))
+            os.path.join(data_dir, "train.bin")
+        )
         rng.integers(0, 64, size=128, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "val.bin"))
-        with open(os.path.join(data_dir, "meta.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
-                       "block_size": 32, "batch_size": 2, "steps": 1,
-                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
-                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
-                       "seed": 5, "log_every": 1, "eval_every": 1,
-                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 2,
+                    "steps": 1,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 1,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
         sanity_path = os.path.join(d, "sanity_lega.json")
         with open(sanity_path, "w", encoding="utf-8") as f:
-            json.dump({"passed": False, "variant": "lega", "seed": 5,
-                       "checks": {"token_acc_above_threshold": False},
-                       "initial": {}, "final": {}}, f)
+            json.dump(
+                {
+                    "passed": False,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"token_acc_above_threshold": False},
+                    "initial": {},
+                    "final": {},
+                },
+                f,
+            )
         unverified = os.path.join(d, "sanity_unverified.json")
         with open(unverified, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "variant": "lega", "seed": 5,
-                       "checks": {"overfit": True},
-                       "manifest": {"seed_report": {"seed": 5,
-                                                    "seed_verified": False}}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"overfit": True},
+                    "manifest": {"seed_report": {"seed": 5, "seed_verified": False}},
+                },
+                f,
+            )
         for label, sfile, needle in (
-                ("failed", sanity_path, "sanity 闸门未通过"),
-                ("missing", os.path.join(d, "missing.json"),
-                 "sanity 闸门证据不可用"),
-                ("unverified", unverified, "seed_verified=false")):
+            ("failed", sanity_path, "sanity 闸门未通过"),
+            ("missing", os.path.join(d, "missing.json"), "sanity 闸门证据不可用"),
+            ("unverified", unverified, "seed_verified=false"),
+        ):
             out_dir = os.path.join(d, f"out_{label}")
             r = subprocess.run(
-                [sys.executable, "-m", "lega.train", "--config", cfg_path,
-                 "--variant", "lega", "--data_dir", data_dir,
-                 "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
-                 "--sanity_file", sfile],
-                cwd=root, capture_output=True, text=True)
+                [
+                    sys.executable,
+                    "-m",
+                    "lega.train",
+                    "--config",
+                    cfg_path,
+                    "--variant",
+                    "lega",
+                    "--data_dir",
+                    data_dir,
+                    "--out_dir",
+                    out_dir,
+                    "--device",
+                    "cpu",
+                    "--seed",
+                    "5",
+                    "--sanity_file",
+                    sfile,
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
             assert r.returncode != 0, (label, r.stdout)
             assert needle in r.stderr, (label, r.stderr)
             assert not os.path.exists(os.path.join(out_dir, "model.pt"))
@@ -1282,38 +1612,91 @@ def test_train_aborts_on_stale_sanity_evidence_identity():
         os.makedirs(data_dir)
         rng = np.random.default_rng(0)
         rng.integers(0, 64, size=1024, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "train.bin"))
+            os.path.join(data_dir, "train.bin")
+        )
         rng.integers(0, 64, size=128, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "val.bin"))
-        with open(os.path.join(data_dir, "meta.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
-                       "block_size": 32, "batch_size": 2, "steps": 1,
-                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
-                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
-                       "seed": 5, "log_every": 1, "eval_every": 1,
-                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 2,
+                    "steps": 1,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 1,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
         sanity_path = os.path.join(d, "sanity_lega.json")
         with open(sanity_path, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "variant": "lega", "seed": 5,
-                       "checks": {"overfit": True}, "initial": {}, "final": {},
-                       "manifest": {
-                           "config_sha256": "f" * 64,       # 旧配置
-                           "git": {"commit": "a" * 40, "dirty": False},
-                           "data": {"digest": "d" * 16},
-                           "worktree": {"available": True,
-                                        "diff_sha256": None}}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"overfit": True},
+                    "initial": {},
+                    "final": {},
+                    "manifest": {
+                        "config_sha256": "f" * 64,  # 旧配置
+                        "git": {"commit": "a" * 40, "dirty": False},
+                        "data": {"digest": "d" * 16},
+                        "worktree": {"available": True, "diff_sha256": None},
+                    },
+                },
+                f,
+            )
         out_dir = os.path.join(d, "out")
         r = subprocess.run(
-            [sys.executable, "-m", "lega.train", "--config", cfg_path,
-             "--variant", "lega", "--data_dir", data_dir,
-             "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
-             "--sanity_file", sanity_path],
-            cwd=root, capture_output=True, text=True)
+            [
+                sys.executable,
+                "-m",
+                "lega.train",
+                "--config",
+                cfg_path,
+                "--variant",
+                "lega",
+                "--data_dir",
+                data_dir,
+                "--out_dir",
+                out_dir,
+                "--device",
+                "cpu",
+                "--seed",
+                "5",
+                "--sanity_file",
+                sanity_path,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
         assert r.returncode != 0, r.stdout
         assert "身份不一致" in r.stderr
         assert not os.path.exists(os.path.join(out_dir, "eval.json"))
@@ -1329,35 +1712,87 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
         os.makedirs(data_dir)
         rng = np.random.default_rng(0)
         rng.integers(0, 64, size=2048, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "train.bin"))
+            os.path.join(data_dir, "train.bin")
+        )
         rng.integers(0, 64, size=256, dtype=np.uint16).tofile(
-            os.path.join(data_dir, "val.bin"))
-        with open(os.path.join(data_dir, "meta.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "vocab_size": 64,
-                       "cache_schema": CACHE_SCHEMA, "fit_on": "train"}, f)
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
         cfg_path = os.path.join(d, "cfg.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({"d_model": 32, "n_layers": 1, "n_heads": 2, "ffn_mult": 4,
-                       "block_size": 32, "batch_size": 2, "steps": 1,
-                       "lr": 1e-3, "warmup": 1, "weight_decay": 0.0,
-                       "grad_clip": 1.0, "train_ctx": 32, "amp": False,
-                       "seed": 5, "log_every": 1, "eval_every": 1,
-                       "eval_iters": 1, "dropout": 0.0, "attn_dropout": 0.0}, f)
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 2,
+                    "steps": 1,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 1,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
         sanity_path = os.path.join(d, "sanity_lega.json")
         with open(sanity_path, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "variant": "lega", "seed": 5,
-                       "checks": {"overfit": True}, "initial": {}, "final": {}}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"overfit": True},
+                    "initial": {},
+                    "final": {},
+                },
+                f,
+            )
         out_dir = os.path.join(d, "out")
         r = subprocess.run(
-            [sys.executable, "-m", "lega.train", "--config", cfg_path,
-             "--variant", "lega", "--data_dir", data_dir,
-             "--out_dir", out_dir, "--device", "cpu", "--seed", "5",
-             "--sanity_file", sanity_path],
-            cwd=root, capture_output=True, text=True)
+            [
+                sys.executable,
+                "-m",
+                "lega.train",
+                "--config",
+                cfg_path,
+                "--variant",
+                "lega",
+                "--data_dir",
+                data_dir,
+                "--out_dir",
+                out_dir,
+                "--device",
+                "cpu",
+                "--seed",
+                "5",
+                "--sanity_file",
+                sanity_path,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
         assert r.returncode == 0, r.stderr
-        with open(os.path.join(out_dir, "run_manifest.json"),
-                  encoding="utf-8") as f:
+        with open(os.path.join(out_dir, "run_manifest.json"), encoding="utf-8") as f:
             manifest = json.load(f)
         assert manifest["sanity"]["present"] is True
         assert manifest["sanity"]["passed"] is True
@@ -1375,16 +1810,14 @@ def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
         assert manifest["completion"]["status"] == "completed"
         assert manifest["completion"]["steps"] == 1
         assert manifest["data_order_sha256"] == ev["data_order_sha256"]
-        for name in ("config_used.json", "train_log.jsonl", "eval.json",
-                     "model.pt"):
+        for name in ("config_used.json", "train_log.jsonl", "eval.json", "model.pt"):
             entry = manifest["artifacts"][name]
-            assert entry["sha256"] == sha256_file(
-                os.path.join(out_dir, name)), name
-            assert entry["bytes"] == os.path.getsize(
-                os.path.join(out_dir, name)), name
+            assert entry["sha256"] == sha256_file(os.path.join(out_dir, name)), name
+            assert entry["bytes"] == os.path.getsize(os.path.join(out_dir, name)), name
         if os.path.exists(os.path.join(out_dir, "model_best.pt")):
-            assert manifest["artifacts"]["model_best.pt"]["sha256"] == \
-                sha256_file(os.path.join(out_dir, "model_best.pt"))
+            assert manifest["artifacts"]["model_best.pt"]["sha256"] == sha256_file(
+                os.path.join(out_dir, "model_best.pt")
+            )
     print("  [ok] train manifest：sanity 证据 + 精度开关 + 完成态/产物哈希")
 
 
@@ -1392,14 +1825,12 @@ def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
     """工作区补丁被截断时，相同哈希不能证明“未变化”，必须记 unknown。"""
     start = {
         "git": {"commit": "a" * 40},
-        "worktree": {"available": True, "diff_sha256": "d1",
-                     "diff_truncated": True},
+        "worktree": {"available": True, "diff_sha256": "d1", "diff_truncated": True},
         "data_fingerprint": "fp1",
     }
     same_truncated = {
         "git": {"commit": "a" * 40},
-        "worktree": {"available": True, "diff_sha256": "d1",
-                     "diff_truncated": True},
+        "worktree": {"available": True, "diff_sha256": "d1", "diff_truncated": True},
         "data_fingerprint": "fp1",
     }
     d = provenance_drift(start, same_truncated)
@@ -1407,8 +1838,10 @@ def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
     assert "worktree_diff_sha256" in d["unknown"], d
     assert d["changed"] is False
     # 哈希已不同时仍能确认发生变化，不因截断而漏报。
-    moved = dict(same_truncated, worktree={
-        "available": True, "diff_sha256": "d2", "diff_truncated": True})
+    moved = dict(
+        same_truncated,
+        worktree={"available": True, "diff_sha256": "d2", "diff_truncated": True},
+    )
     assert provenance_drift(start, moved)["changed"] is True
     print("  [ok] 截断的工作区补丁按 unknown 处理，哈希不同仍可确认变化")
 
@@ -1416,32 +1849,52 @@ def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
 def test_sanity_summary_rejects_modern_result_without_checks_or_steps():
     """现代 sanity 产物（带 batch_sha256）不能靠删字段绕过完整性校验。"""
     from lega.repro import SANITY_REQUIRED_CHECKS, sanity_summary
+
     all_checks = {k: True for k in SANITY_REQUIRED_CHECKS}
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "s.json")
         # 删除整个 checks 字段：batch_sha256 标记仍是“现代产物”，不能因此
         # 跳过必需检查项覆盖校验。
         with open(p, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "batch_sha256": "b" * 64,
-                       "steps_planned": 10, "steps_executed": 10,
-                       "variant": "lega", "seed": 3}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "variant": "lega",
+                    "seed": 3,
+                },
+                f,
+            )
         s = sanity_summary(p)
         assert s["passed"] is False and s["malformed"] is True
         assert s["checks_complete"] is False
         assert set(s["missing_checks"]) == set(SANITY_REQUIRED_CHECKS)
         # checks 结构损坏（不是对象）同样不能当成“旧文件没写 checks”。
         with open(p, "w", encoding="utf-8") as f:
-            json.dump({"passed": True, "batch_sha256": "b" * 64,
-                       "checks": ["loss_below_threshold"],
-                       "steps_planned": 10, "steps_executed": 10}, f)
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "checks": ["loss_below_threshold"],
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                },
+                f,
+            )
         s = sanity_summary(p)
         assert s["passed"] is False and s["malformed"] is True
         assert s["checks_complete"] is False
         # 只删掉计划/执行步数之一：无法证明计划步数全部执行，按不完整处理。
         for missing in ("steps_planned", "steps_executed"):
-            payload = {"passed": True, "batch_sha256": "b" * 64,
-                       "checks": all_checks,
-                       "steps_planned": 10, "steps_executed": 10}
+            payload = {
+                "passed": True,
+                "batch_sha256": "b" * 64,
+                "checks": all_checks,
+                "steps_planned": 10,
+                "steps_executed": 10,
+            }
             payload.pop(missing)
             with open(p, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
@@ -1459,6 +1912,7 @@ def test_sanity_summary_rejects_modern_result_without_checks_or_steps():
 def test_load_provenance_rejects_sanity_present_false():
     """present=False 的 sanity 证据（文件缺失/不可读）不能被继承成 PASS。"""
     from lega.repro import load_provenance
+
     with tempfile.TemporaryDirectory() as d:
         mpath = os.path.join(d, "run_manifest.json")
 
@@ -1467,25 +1921,36 @@ def test_load_provenance_rejects_sanity_present_false():
                 json.dump({"sanity": sanity}, f)
             return load_provenance(d)
 
-        missing = _write({
-            "present": False, "passed": True,
-            "identity": {"hard_mismatches": [], "unknown_fields": [],
-                         "verified": True}})
+        missing = _write(
+            {
+                "present": False,
+                "passed": True,
+                "identity": {
+                    "hard_mismatches": [],
+                    "unknown_fields": [],
+                    "verified": True,
+                },
+            }
+        )
         assert missing["sanity_passed"] is False
         assert missing["sanity_verified"] is False
         assert missing["sanity_present"] is False
         assert missing["sanity_malformed"] is True
         # present 字段类型损坏同样不能当作“旧格式缺字段”放行。
-        bogus = _write({
-            "present": "false", "passed": True,
-            "identity": {"hard_mismatches": [], "verified": True}})
+        bogus = _write(
+            {
+                "present": "false",
+                "passed": True,
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
         assert bogus["sanity_passed"] is False
         assert bogus["sanity_verified"] is False
         assert bogus["sanity_malformed"] is True
         # 旧清单没有 present 字段：保持兼容，但仍按身份证据决定是否 verified。
-        legacy = _write({
-            "passed": True,
-            "identity": {"hard_mismatches": [], "verified": True}})
+        legacy = _write(
+            {"passed": True, "identity": {"hard_mismatches": [], "verified": True}}
+        )
         assert legacy["sanity_passed"] is True
         assert legacy["sanity_verified"] is True
         assert legacy["sanity_present"] is None
@@ -1496,9 +1961,10 @@ def test_worktree_state_captures_non_utf8_untracked_path():
     if os.name != "posix":
         return
     with tempfile.TemporaryDirectory() as d:
+
         def _git(*args):
-            subprocess.run(["git"] + list(args), cwd=d, check=True,
-                           capture_output=True)
+            subprocess.run(["git"] + list(args), cwd=d, check=True, capture_output=True)
+
         _git("init", "-q")
         _git("config", "user.email", "a@b")
         _git("config", "user.name", "a")
@@ -1518,12 +1984,25 @@ def test_worktree_state_captures_non_utf8_untracked_path():
         # 补丁不可用（hash=None + truncated）必须记为 unknown，而不是
         # 因“两边都是 None”误判为工作区未变化。
         drift = provenance_drift(
-            {"worktree": {"available": True, "diff_sha256": None,
-                          "diff_truncated": True},
-             "git": {"commit": st["head"]}, "data_fingerprint": "d"},
-            {"worktree": {"available": True, "diff_sha256": None,
-                          "diff_truncated": True},
-             "git": {"commit": st["head"]}, "data_fingerprint": "d"})
+            {
+                "worktree": {
+                    "available": True,
+                    "diff_sha256": None,
+                    "diff_truncated": True,
+                },
+                "git": {"commit": st["head"]},
+                "data_fingerprint": "d",
+            },
+            {
+                "worktree": {
+                    "available": True,
+                    "diff_sha256": None,
+                    "diff_truncated": True,
+                },
+                "git": {"commit": st["head"]},
+                "data_fingerprint": "d",
+            },
+        )
         assert drift["checked"]["worktree_diff_sha256"] is None
         assert "worktree_diff_sha256" in drift["unknown"]
 
@@ -1531,8 +2010,13 @@ def test_worktree_state_captures_non_utf8_untracked_path():
 def test_source_tree_fingerprint_is_stable_and_sensitive_to_content():
     """源码树指纹必须可复算、忽略派生文件，并对代码/配置改动敏感。"""
     with tempfile.TemporaryDirectory() as root:
-        for rel in ("lega/sub", "scripts", "configs", "preregistration",
-                    "lega/__pycache__"):
+        for rel in (
+            "lega/sub",
+            "scripts",
+            "configs",
+            "preregistration",
+            "lega/__pycache__",
+        ):
             os.makedirs(os.path.join(root, rel), exist_ok=True)
 
         def _write(rel, data):
@@ -1550,11 +2034,14 @@ def test_source_tree_fingerprint_is_stable_and_sensitive_to_content():
         assert fp1["digest"] == fp2["digest"]
         assert fp1["algo"] == "sha256-tree-v1"
         paths = {e["path"] for e in fp1["entries"]}
-        assert {"lega/model.py", "lega/sub/ops.py", "configs/tiny.json",
-                "preregistration/hypotheses.json",
-                "requirements-ci.txt"} <= paths
-        assert not any("__pycache__" in p or p.endswith(".pyc")
-                       for p in paths)
+        assert {
+            "lega/model.py",
+            "lega/sub/ops.py",
+            "configs/tiny.json",
+            "preregistration/hypotheses.json",
+            "requirements-ci.txt",
+        } <= paths
+        assert not any("__pycache__" in p or p.endswith(".pyc") for p in paths)
         _write("lega/__pycache__/other.pyc", "different cache")
         assert source_tree_fingerprint(root)["digest"] == fp1["digest"]
         _write("lega/model.py", "MODEL = 3\n")
@@ -1566,13 +2053,11 @@ def test_source_tree_fingerprint_is_stable_and_sensitive_to_content():
         assert old["configs/tiny.json"] == new["configs/tiny.json"]
     # 非 git 版本时源树仍可提供身份；缺少该字段的旧快照保持兼容。
     moved = provenance_drift(
-        {"source_tree": {"digest": "old"}},
-        {"source_tree": {"digest": "new"}})
+        {"source_tree": {"digest": "old"}}, {"source_tree": {"digest": "new"}}
+    )
     assert moved["changed"] is True
-    assert {m["field"] for m in moved["mismatches"]} == {
-        "source_tree_digest"}
-    legacy = provenance_drift({"git": {"commit": "a"}},
-                              {"git": {"commit": "a"}})
+    assert {m["field"] for m in moved["mismatches"]} == {"source_tree_digest"}
+    legacy = provenance_drift({"git": {"commit": "a"}}, {"git": {"commit": "a"}})
     assert "source_tree_digest" not in legacy["checked"]
     print("  [ok] 源码树指纹稳定、忽略派生文件、对改动敏感且兼容旧快照")
 
@@ -1594,13 +2079,15 @@ def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
             with open(cfg, "w", encoding="utf-8") as f:
                 json.dump({"seed": 7}, f)
             manifest = build_run_manifest(
-                "tiny", "lega", 7, cfg, data, "cpu", argv=["test"])
+                "tiny", "lega", 7, cfg, data, "cpu", argv=["test"]
+            )
             assert manifest["pipeline_run_id"] == "run-abc"
             assert manifest["environment_lock"]["available"] is True
             fp = source_tree_fingerprint()
             assert manifest["source_tree"]["digest"] == fp["digest"]
-            with open(os.path.join(ckpt, "run_manifest.json"), "w",
-                      encoding="utf-8") as f:
+            with open(
+                os.path.join(ckpt, "run_manifest.json"), "w", encoding="utf-8"
+            ) as f:
                 json.dump(manifest, f)
             p = load_provenance(ckpt, data_dir=data, device="cpu")
             assert p["pipeline_run_id"] == "run-abc"
@@ -1608,8 +2095,10 @@ def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
             assert p["eval_source_tree_digest"] == fp["digest"]
             assert p["source_tree_matches_training"] is True
             assert p["eval_environment_lock"]["available"] is True
-            assert (p["train_environment_lock"]["lock_sha256"]
-                    == manifest["environment_lock"]["lock_sha256"])
+            assert (
+                p["train_environment_lock"]["lock_sha256"]
+                == manifest["environment_lock"]["lock_sha256"]
+            )
             # 独立/手工评测没有父流水线环境变量时，继承训练清单的 run_id。
             os.environ.pop(PIPELINE_RUN_ID_ENV, None)
             assert current_pipeline_run_id() is None
@@ -1619,8 +2108,9 @@ def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
             legacy = dict(manifest)
             legacy.pop("pipeline_run_id")
             legacy.pop("source_tree")
-            with open(os.path.join(ckpt, "run_manifest.json"), "w",
-                      encoding="utf-8") as f:
+            with open(
+                os.path.join(ckpt, "run_manifest.json"), "w", encoding="utf-8"
+            ) as f:
                 json.dump(legacy, f)
             p2 = load_provenance(ckpt, data_dir=data, device="cpu")
             assert p2["pipeline_run_id"] is None
@@ -1657,22 +2147,22 @@ def test_requirements_lock_matches_ci_and_detects_environment_drift():
     drifted = dict(installed)
     drifted["numpy"] = "0.0.0"
     report = environment_lock_report(
-        lock["path"], runtime={"python": "3.12.1",
-                               "installed_distributions": drifted})
+        lock["path"], runtime={"python": "3.12.1", "installed_distributions": drifted}
+    )
     assert report["matches"] is False
     assert report["mismatches"][0]["package"] == "numpy"
 
     missing = dict(installed)
     missing.pop("torch")
     report = environment_lock_report(
-        lock["path"], runtime={"python": "3.12.1",
-                               "installed_distributions": missing})
+        lock["path"], runtime={"python": "3.12.1", "installed_distributions": missing}
+    )
     assert report["matches"] is False
     assert "torch" in report["missing"]
 
     report = environment_lock_report(
-        lock["path"], runtime={"python": "3.11.9",
-                               "installed_distributions": installed})
+        lock["path"], runtime={"python": "3.11.9", "installed_distributions": installed}
+    )
     assert report["python_matches"] is False
     assert report["matches"] is False
 
@@ -1685,9 +2175,14 @@ def test_requirements_lock_matches_ci_and_detects_environment_drift():
 def test_environment_gate_fails_formal_drift_and_allows_smoke_or_override():
     """环境锁闸门：正式 run 失败关闭；冒烟/显式放行只降级为警告。"""
     base = {
-        "matches": True, "python_matches": True, "python": "3.12",
-        "runtime_python": "3.12.9", "missing": [], "mismatches": [],
-        "errors": [], "path": "requirements-lock.txt",
+        "matches": True,
+        "python_matches": True,
+        "python": "3.12",
+        "runtime_python": "3.12.9",
+        "missing": [],
+        "mismatches": [],
+        "errors": [],
+        "path": "requirements-lock.txt",
         "lock_sha256": "abc",
     }
     gate = environment_gate(base)
@@ -1695,8 +2190,11 @@ def test_environment_gate_fails_formal_drift_and_allows_smoke_or_override():
     assert gate["code"] == "environment_lock_matches"
     assert gate["problems"] == []
 
-    drift = dict(base, matches=False, mismatches=[
-        {"package": "numpy", "expected": "2.1.0", "installed": "0.0.0"}])
+    drift = dict(
+        base,
+        matches=False,
+        mismatches=[{"package": "numpy", "expected": "2.1.0", "installed": "0.0.0"}],
+    )
     gate = environment_gate(drift)
     assert gate["status"] == "fail", gate
     assert gate["code"] == "environment_lock_mismatch"
@@ -1716,9 +2214,14 @@ def test_environment_gate_fails_formal_drift_and_allows_smoke_or_override():
     assert gate["status"] == "warn", gate
     assert gate["code"] == "environment_lock_unverifiable"
 
-    missing = dict(base, matches=False, python_matches=False,
-                   runtime_python="3.11.9", missing=["torch"],
-                   mismatches=[])
+    missing = dict(
+        base,
+        matches=False,
+        python_matches=False,
+        runtime_python="3.11.9",
+        missing=["torch"],
+        mismatches=[],
+    )
     gate = environment_gate(missing)
     assert gate["status"] == "fail", gate
     assert any("Python" in p for p in gate["problems"])
@@ -1741,26 +2244,39 @@ def test_verify_run_passes_complete_run_and_flags_tampering():
         config_used = os.path.join(run_dir, "config_used.json")
         with open(config_used, "w", encoding="utf-8") as f:
             json.dump({"seed": 5}, f)
-        for name, content in (("model.pt", b"model"),
-                              ("model_best.pt", b"best"),
-                              ("train_log.jsonl", b"{}\n"),
-                              ("eval.json", b"{}\n")):
+        for name, content in (
+            ("model.pt", b"model"),
+            ("model_best.pt", b"best"),
+            ("train_log.jsonl", b"{}\n"),
+            ("eval.json", b"{}\n"),
+        ):
             with open(os.path.join(run_dir, name), "wb") as f:
                 f.write(content)
 
         set_seed(5)
         manifest = build_run_manifest(
-            "tiny", "lega", 5, cfg, data, "cpu", argv=["test"])
+            "tiny", "lega", 5, cfg, data, "cpu", argv=["test"]
+        )
         manifest["config_used_sha256"] = sha256_file(config_used)
-        artifact_names = ("config_used.json", "model.pt", "model_best.pt",
-                          "train_log.jsonl", "eval.json")
+        artifact_names = (
+            "config_used.json",
+            "model.pt",
+            "model_best.pt",
+            "train_log.jsonl",
+            "eval.json",
+        )
         manifest["artifacts"] = {
-            name: {"sha256": sha256_file(os.path.join(run_dir, name)),
-                   "bytes": os.path.getsize(os.path.join(run_dir, name))}
-            for name in artifact_names}
+            name: {
+                "sha256": sha256_file(os.path.join(run_dir, name)),
+                "bytes": os.path.getsize(os.path.join(run_dir, name)),
+            }
+            for name in artifact_names
+        }
         manifest["completion"] = {"status": "completed"}
         manifest["sanity"] = {
-            "present": True, "passed": True, "malformed": False,
+            "present": True,
+            "passed": True,
+            "malformed": False,
             "checks_consistent": True,
             "identity": {"hard_mismatches": []},
         }
@@ -1772,8 +2288,7 @@ def test_verify_run_passes_complete_run_and_flags_tampering():
         assert report["ok"] is True, report
         assert report["issues"] == []
         assert report["checks"]["seed"]["status"] == "pass"
-        assert report["checks"]["environment_lock"]["status"] in (
-            "pass", "warn")
+        assert report["checks"]["environment_lock"]["status"] in ("pass", "warn")
 
         with open(os.path.join(run_dir, "model.pt"), "ab") as f:
             f.write(b"tampered")

@@ -1,4 +1,5 @@
 """RULER 任务构造器测试：跨度有效性、答案一致性、打分函数。"""
+
 import os
 import random
 import re
@@ -6,20 +7,35 @@ import shutil
 import tempfile
 
 from lega.data import CACHE_SCHEMA, CharTokenizer
-from lega.ruler import (DEPTH_BINS, EVIDENCE_TASKS, NEEDLE_TMPL,
-                        build_evidence_condition, build_fwe, build_niah,
-                        build_vt, depth_bin, load_corpus_sents,
-                        load_corpus_sents_with_source, record_corpus_test_access,
-                        sample_content_sha256, score_prediction,
-                        ContextTooSmall, TASKS, _ruler_samples_manifest_sha256,
-                        _samples_sha256, _stable_hash)
+from lega.ruler import (
+    DEPTH_BINS,
+    EVIDENCE_TASKS,
+    NEEDLE_TMPL,
+    build_evidence_condition,
+    build_fwe,
+    build_niah,
+    build_vt,
+    depth_bin,
+    load_corpus_sents,
+    load_corpus_sents_with_source,
+    record_corpus_test_access,
+    sample_content_sha256,
+    score_prediction,
+    ContextTooSmall,
+    TASKS,
+    _ruler_samples_manifest_sha256,
+    _samples_sha256,
+    _stable_hash,
+)
 
-_TEXT = ("One of the special magic numbers for lyre is: 7021853.\n"
-         "VAR A1 = 48213.\nVAR A2 = A1.\nVAR B1 = 99321.\nVAR B2 = B1.\n"
-         "VAR C1 = 13579.\nVAR C2 = C1.\nVAR D1 = 24680.\nVAR D2 = D1.\n"
-         "VAR E1 = 11235.\nVAR E2 = E1.\nVAR F1 = 81321.\nVAR F2 = F1.\n"
-         "The grass is green. The sky is blue. What are the 10 most common words?\n"
-         "ka ro mi ta lu sen dor vil pen tor nal bes qui mon fel gar hil jas ker lum 0123456789")
+_TEXT = (
+    "One of the special magic numbers for lyre is: 7021853.\n"
+    "VAR A1 = 48213.\nVAR A2 = A1.\nVAR B1 = 99321.\nVAR B2 = B1.\n"
+    "VAR C1 = 13579.\nVAR C2 = C1.\nVAR D1 = 24680.\nVAR D2 = D1.\n"
+    "VAR E1 = 11235.\nVAR E2 = E1.\nVAR F1 = 81321.\nVAR F2 = F1.\n"
+    "The grass is green. The sky is blue. What are the 10 most common words?\n"
+    "ka ro mi ta lu sen dor vil pen tor nal bes qui mon fel gar hil jas ker lum 0123456789"
+)
 
 
 def _tok():
@@ -46,9 +62,16 @@ def test_build_all_tasks():
         if task == "niah_synth":
             ex = build_niah(tok, ctx, rng, mode="synth")
         elif task == "niah_corpus":
-            ex = build_niah(tok, ctx, rng, mode="corpus",
-                            corpus_sents=["A quiet river runs through the old town.",
-                                          "Some books are to be tasted, others swallowed."])
+            ex = build_niah(
+                tok,
+                ctx,
+                rng,
+                mode="corpus",
+                corpus_sents=[
+                    "A quiet river runs through the old town.",
+                    "Some books are to be tasted, others swallowed.",
+                ],
+            )
         elif task == "niah_multikey":
             ex = build_niah(tok, ctx, rng, mode="synth", multikey=True)
         elif task == "fwe":
@@ -71,8 +94,10 @@ def test_char_tokenizer_missing_digits_skips_numeric_tasks():
     """字符词表没有数字时可跳过，不能让 gold 跨度定位抛 AssertionError。"""
     letters = sorted(set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ .\n"))
     tok = CharTokenizer(letters, add_unk=True)
-    for fn in (lambda: build_niah(tok, 512, random.Random(1), mode="synth"),
-               lambda: build_vt(tok, 512, random.Random(1))):
+    for fn in (
+        lambda: build_niah(tok, 512, random.Random(1), mode="synth"),
+        lambda: build_vt(tok, 512, random.Random(1)),
+    ):
         try:
             fn()
         except ContextTooSmall:
@@ -84,14 +109,15 @@ def test_char_tokenizer_missing_digits_skips_numeric_tasks():
 
 def test_fwe_gold_uses_planned_words_not_unk_decoded_text():
     """字符词表 OOV 不能把 decode 出来的 unk/残词写成 fwe gold。"""
-    chars = sorted(set("abcdefghijklmnoprstuvwyABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                       " .\n?:0123456789"))
+    chars = sorted(
+        set("abcdefghijklmnoprstuvwyABCDEFGHIJKLMNOPQRSTUVWXYZ" " .\n?:0123456789")
+    )
     tok = CharTokenizer(chars, add_unk=True)
     ex = build_fwe(tok, 3072, random.Random(0))
     assert "unk" not in ex["answer"].split()
     assert "unk" not in ex["answer_words"]
     assert ex["answer_words"] and len(ex["answer_words"]) == 10
-    body = tok.decode(ex["ids"][:ex["query_span"][0]])
+    body = tok.decode(ex["ids"][: ex["query_span"][0]])
     for word in ex["answer_words"]:
         assert word in body, (word, body[:200])
     print("  [ok] fwe gold 来自计划写入的词，不受 <unk> 解码污染")
@@ -110,8 +136,9 @@ def test_multikey_distractor_lines_stay_complete():
     """needle 插入位置不得截断干扰行：干扰值裂成两个数字会破坏任务构造。"""
     # _TEXT 未覆盖 x/z 等字母，未登录字符会静默解码成 id 0（'\\n'），
     # 只有补齐字母表才能用解码文本做行完整性断言。
-    tok = CharTokenizer(sorted(set(_TEXT) | set(
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+    tok = CharTokenizer(
+        sorted(set(_TEXT) | set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    )
     pat = re.compile(r"One of the special magic numbers for \w+ is: \d{7}\.")
     built = 0
     for i in range(60):
@@ -126,7 +153,8 @@ def test_multikey_distractor_lines_stay_complete():
         n_full = len(pat.findall(text))
         assert n_tmpl == n_full, (
             f"seed {i}: {n_tmpl} 处干扰/needle 模板但只有 {n_full} 条完整行"
-            "（行被从中截断）")
+            "（行被从中截断）"
+        )
         for m in re.finditer(r"\d+", text):
             assert len(m.group(0)) == 7, f"seed {i}: 残缺数值 {m.group(0)!r}"
     assert built > 0, "测试未能构造任何 multikey 样例"
@@ -134,25 +162,25 @@ def test_multikey_distractor_lines_stay_complete():
 
 def test_multikey_never_silently_degrades_to_single_key():
     """multikey 至少要有干扰行；放不下时跳过，不能改名不换任务。"""
-    tok = CharTokenizer(sorted(set(_TEXT) | set(
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+    tok = CharTokenizer(
+        sorted(set(_TEXT) | set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    )
     pat = re.compile(r"One of the special magic numbers for \w+ is: \d{7}\.")
     built = 0
     for seed in range(100):
         try:
-            ex = build_niah(tok, 280, random.Random(seed),
-                            mode="synth", multikey=True)
+            ex = build_niah(tok, 280, random.Random(seed), mode="synth", multikey=True)
         except ContextTooSmall:
             continue
         built += 1
-        assert len(pat.findall(tok.decode(ex["ids"]))) >= 2, (
-            f"seed={seed}: niah_multikey 没有干扰行")
+        assert (
+            len(pat.findall(tok.decode(ex["ids"]))) >= 2
+        ), f"seed={seed}: niah_multikey 没有干扰行"
     assert built > 0
     # room 连一条干扰行都放不下时必须跳过，而不是构造单键样例。
     for seed in range(20):
         try:
-            build_niah(tok, 250, random.Random(seed),
-                       mode="synth", multikey=True)
+            build_niah(tok, 250, random.Random(seed), mode="synth", multikey=True)
         except ContextTooSmall:
             pass
         else:
@@ -162,25 +190,43 @@ def test_multikey_never_silently_degrades_to_single_key():
 
 def test_score_predictions():
     # NIAH：数值命中
-    sc = score_prediction("niah_synth", "7021853", " The special magic number is 7021853.")
+    sc = score_prediction(
+        "niah_synth", "7021853", " The special magic number is 7021853."
+    )
     assert sc["em"] == 1.0
     sc = score_prediction("niah_synth", "7021853", " 1234567")
     assert sc["em"] == 0.0
     # 先答错、后附正确答案不算命中
-    assert score_prediction("niah_synth", "7021853",
-                            " 1234567, or maybe 7021853")["em"] == 0.0
+    assert (
+        score_prediction("niah_synth", "7021853", " 1234567, or maybe 7021853")["em"]
+        == 0.0
+    )
     # 只截取数字子串会把负号/小数/字母后缀误当成正确答案
-    for bad in (" -7021853.", " 7021853.9", " 7021853abc", "x7021853",
-                " 7021853e2",
-                # 表达式/比值中的前缀数字不是独立答案，不能判命中
-                " 7021853/2", " 7021853 + 1", " 7021853-1",
-                " 7021853:123", " 7021853*2", " 7021853%2"):
+    for bad in (
+        " -7021853.",
+        " 7021853.9",
+        " 7021853abc",
+        "x7021853",
+        " 7021853e2",
+        # 表达式/比值中的前缀数字不是独立答案，不能判命中
+        " 7021853/2",
+        " 7021853 + 1",
+        " 7021853-1",
+        " 7021853:123",
+        " 7021853*2",
+        " 7021853%2",
+    ):
         assert score_prediction("niah_synth", "7021853", bad)["em"] == 0.0, bad
     # 右操作数同样不能成为“第一个数值回答”：否则 7021853/2 会在 gold=2
     # 时把表达式里的 2 误判为命中（表达式不是独立答案）。
-    for bad, gold in ((" 7021853/2", "2"), (" 7021853 / 2", "2"),
-                      (" 3*4", "4"), (" 10%3", "3"),
-                      (" 123:456", "456"), (" 7021853 - 2", "2")):
+    for bad, gold in (
+        (" 7021853/2", "2"),
+        (" 7021853 / 2", "2"),
+        (" 3*4", "4"),
+        (" 10%3", "3"),
+        (" 123:456", "456"),
+        (" 7021853 - 2", "2"),
+    ):
         assert score_prediction("niah_synth", gold, bad)["em"] == 0.0, (bad, gold)
     # 标签后的数值仍是独立回答（冒号前是普通文本，不是范围/表达式）
     for ok in (" answer: 2", " answer:2", "The answer is: 2."):
@@ -189,7 +235,9 @@ def test_score_predictions():
     for ok in ("7021853.", " 7021853,", "(7021853)"):
         assert score_prediction("niah_synth", "7021853", ok)["em"] == 1.0, ok
     # vt
-    assert score_prediction("vt", "48213", " The value of VAR A4 is 48213.")["em"] == 1.0
+    assert (
+        score_prediction("vt", "48213", " The value of VAR A4 is 48213.")["em"] == 1.0
+    )
     # fwe: 召回率
     top = ["ka", "ro", "mi", "ta"]
     sc = score_prediction("fwe", "ka ro mi ta", " ka ro mi", answer_words=top)
@@ -199,13 +247,11 @@ def test_score_predictions():
     assert sc["recall"] == 1.0 and sc["em"] == 1.0
     assert sc["precision"] == 1.0 and sc["f1"] == 1.0
     # fwe 严格 EM：多答无关词不算命中；precision 惩罚“灌水”
-    sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro extra",
-                          answer_words=top)
+    sc = score_prediction("fwe", "ka ro mi ta", " ta mi ka ro extra", answer_words=top)
     assert sc["recall"] == 1.0 and sc["em"] == 0.0
     assert sc["precision"] == 0.8 and sc["f1"] < 1.0
     # 把上下文全部词都列出来：recall 仍满，但 precision 崩掉
-    sc = score_prediction("fwe", "ka ro mi ta", " ka ro mi ta zz qq",
-                          answer_words=top)
+    sc = score_prediction("fwe", "ka ro mi ta", " ka ro mi ta zz qq", answer_words=top)
     assert sc["recall"] == 1.0 and sc["precision"] < 1.0
     # 空预测：precision 记为 0（无预测不能算“零误报”）
     sc = score_prediction("fwe", "ka ro mi ta", "", answer_words=top)
@@ -223,24 +269,41 @@ def test_run_ruler_dedupes_clamped_ctx():
 
     tok = _tok()
     torch.manual_seed(0)
-    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
-                n_heads=2, ffn_mult=4, variant="standard")
+    model = GPT(
+        vocab_size=len(tok.stoi),
+        block_size=320,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="standard",
+    )
     model.eval()
     max_new = 12
     room = 320 - max_new - 1
-    res = run_ruler(model, tok, "cpu", ctx_lens=[room, room + 100, room + 200],
-                    n_samples=1, max_new=max_new, fwe_max_new=max_new,
-                    tasks=("niah_synth",),
-                    verbose=False)
-    assert list(res["niah_synth"].keys()) == [str(room)], \
-        f"clamp 到同一 room_ctx 的 ctx 档应去重: {list(res['niah_synth'].keys())}"
+    res = run_ruler(
+        model,
+        tok,
+        "cpu",
+        ctx_lens=[room, room + 100, room + 200],
+        n_samples=1,
+        max_new=max_new,
+        fwe_max_new=max_new,
+        tasks=("niah_synth",),
+        verbose=False,
+    )
+    assert list(res["niah_synth"].keys()) == [
+        str(room)
+    ], f"clamp 到同一 room_ctx 的 ctx 档应去重: {list(res['niah_synth'].keys())}"
     cell = res["niah_synth"][str(room)]
     assert 0.0 <= cell["em"] <= 1.0
     # 每格必须附带 Wilson 95% 区间：n=1 时 EM 只能是 0/1，点估计毫无
     # 精度可言，区间把抽样不确定性显式化（端点在 [0,1] 内且覆盖点估计）
     lo, hi = cell["em_ci95_wilson"]
     assert 0.0 <= lo <= cell["em"] <= hi <= 1.0
-    print(f"  [ok] run_ruler 去重 + Wilson CI（em={cell['em']}, CI=[{lo:.3f}, {hi:.3f}]）")
+    print(
+        f"  [ok] run_ruler 去重 + Wilson CI（em={cell['em']}, CI=[{lo:.3f}, {hi:.3f}]）"
+    )
 
 
 def test_run_ruler_collects_badcases():
@@ -253,12 +316,27 @@ def test_run_ruler_collects_badcases():
     tok = _tok()
     torch.manual_seed(0)
     # 随机初始化模型几乎必然答错 → badcases 非空；且 gold 必在 prompt 中
-    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
-                n_heads=2, ffn_mult=4, variant="standard")
+    model = GPT(
+        vocab_size=len(tok.stoi),
+        block_size=320,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="standard",
+    )
     model.eval()
-    res = run_ruler(model, tok, "cpu", ctx_lens=[400], n_samples=2,
-                    max_new=12, fwe_max_new=12, tasks=("niah_synth", "vt"),
-                    verbose=False)
+    res = run_ruler(
+        model,
+        tok,
+        "cpu",
+        ctx_lens=[400],
+        n_samples=2,
+        max_new=12,
+        fwe_max_new=12,
+        tasks=("niah_synth", "vt"),
+        verbose=False,
+    )
     bad = res.get("_badcases", [])
     assert bad, "随机模型应有错误样本被收集"
     for c in bad:
@@ -278,9 +356,18 @@ def test_run_ruler_collects_badcases():
             assert c["depth"] is None
             assert c["meta"].get("depth") is not None
     # 收集开关关闭时不产生 _badcases 键
-    res2 = run_ruler(model, tok, "cpu", ctx_lens=[400], n_samples=1,
-                     max_new=12, fwe_max_new=12, tasks=("niah_synth",),
-                     verbose=False, collect_badcases=False)
+    res2 = run_ruler(
+        model,
+        tok,
+        "cpu",
+        ctx_lens=[400],
+        n_samples=1,
+        max_new=12,
+        fwe_max_new=12,
+        tasks=("niah_synth",),
+        verbose=False,
+        collect_badcases=False,
+    )
     assert "_badcases" not in res2
     print(f"  [ok] run_ruler 坏案例收集（{len(bad)} 条，含问题/gold/数值表）")
 
@@ -299,23 +386,50 @@ def test_run_ruler_rejects_fractional_and_bool_params():
 
     tok = _tok()
     torch.manual_seed(0)
-    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
-                n_heads=2, ffn_mult=4, variant="standard")
+    model = GPT(
+        vocab_size=len(tok.stoi),
+        block_size=320,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="standard",
+    )
     model.eval()
-    base = {"ctx_lens": [256], "n_samples": 1, "max_new": 12,
-            "fwe_max_new": 12, "tasks": ("niah_synth",), "verbose": False}
-    for key, bad in (("ctx_lens", [256.5]), ("ctx_lens", [True]),
-                     ("ctx_lens", "256"), ("ctx_lens", b"256"),
-                     ("n_samples", 2.5), ("n_samples", True),
-                     ("seed", 1.5), ("seed", True),
-                     ("max_new", 6.5), ("fwe_max_new", 9.5),
-                     ("vt_chains", 4.5), ("vt_chains", True),
-                     ("vt_depth", 3.5), ("gen_batch", 2.5),
-                     ("n_samples", 0), ("ctx_lens", [0]),
-                     ("ctx_lens", [-1]), ("ctx_lens", []),
-                     ("max_new", 0), ("fwe_max_new", -1),
-                     ("vt_chains", 0), ("vt_depth", 0),
-                     ("gen_batch", 0), ("max_new", 319)):
+    base = {
+        "ctx_lens": [256],
+        "n_samples": 1,
+        "max_new": 12,
+        "fwe_max_new": 12,
+        "tasks": ("niah_synth",),
+        "verbose": False,
+    }
+    for key, bad in (
+        ("ctx_lens", [256.5]),
+        ("ctx_lens", [True]),
+        ("ctx_lens", "256"),
+        ("ctx_lens", b"256"),
+        ("n_samples", 2.5),
+        ("n_samples", True),
+        ("seed", 1.5),
+        ("seed", True),
+        ("max_new", 6.5),
+        ("fwe_max_new", 9.5),
+        ("vt_chains", 4.5),
+        ("vt_chains", True),
+        ("vt_depth", 3.5),
+        ("gen_batch", 2.5),
+        ("n_samples", 0),
+        ("ctx_lens", [0]),
+        ("ctx_lens", [-1]),
+        ("ctx_lens", []),
+        ("max_new", 0),
+        ("fwe_max_new", -1),
+        ("vt_chains", 0),
+        ("vt_depth", 0),
+        ("gen_batch", 0),
+        ("max_new", 319),
+    ):
         kwargs = dict(base, **{key: bad})
         try:
             run_ruler(model, tok, "cpu", **kwargs)
@@ -323,9 +437,18 @@ def test_run_ruler_rejects_fractional_and_bool_params():
         except ValueError:
             raised = True
         assert raised, (key, bad)
-    res = run_ruler(model, tok, "cpu", ctx_lens=[256.0], n_samples=1.0,
-                    seed=7.0, max_new=12, fwe_max_new=12,
-                    tasks=("niah_synth",), verbose=False)
+    res = run_ruler(
+        model,
+        tok,
+        "cpu",
+        ctx_lens=[256.0],
+        n_samples=1.0,
+        seed=7.0,
+        max_new=12,
+        fwe_max_new=12,
+        tasks=("niah_synth",),
+        verbose=False,
+    )
     assert res["niah_synth"]
     print("  [ok] run_ruler 拒绝小数/布尔/越界参数，整数值浮点仍可用")
 
@@ -346,8 +469,12 @@ def test_vt_rejects_invalid_depth():
 def test_vt_rejects_fractional_and_boolean_chain_counts():
     """VT 的链数/深度必须按整数使用，不能截断或把 bool 当 1。"""
     tok = _tok()
-    for kwargs in ({"n_chains": 2.5}, {"n_chains": True},
-                   {"depth": 4.5}, {"depth": True}):
+    for kwargs in (
+        {"n_chains": 2.5},
+        {"n_chains": True},
+        {"depth": 4.5},
+        {"depth": True},
+    ):
         try:
             build_vt(tok, 512, random.Random(0), **kwargs)
             raised = False
@@ -394,7 +521,9 @@ def test_vt_needle_span_is_value_definition_line():
         ex = build_vt(tok, 512, rng, n_chains=4, depth=4)
         s, e = ex["needle_span"]
         seg = tok.decode(ex["ids"][s:e])
-        assert seg.startswith(f"VAR {ex['meta']['chain']}1 ="), f"跨度不是定义行: {seg!r}"
+        assert seg.startswith(
+            f"VAR {ex['meta']['chain']}1 ="
+        ), f"跨度不是定义行: {seg!r}"
         assert ex["answer"] in seg
         assert f"VAR {ex['meta']['chain']}4" not in seg
 
@@ -410,11 +539,15 @@ def test_corpus_sents_seal_test_and_prefer_heldout():
     """
     d = tempfile.mkdtemp()
     try:
+
         def _write(name, tag, n=5):
             with open(os.path.join(d, name), "w", encoding="utf-8") as f:
-                f.write(" ".join(
-                    f"{tag}{i} sentence has plenty of characters for the filter."
-                    for i in range(n)))
+                f.write(
+                    " ".join(
+                        f"{tag}{i} sentence has plenty of characters for the filter."
+                        for i in range(n)
+                    )
+                )
 
         _write("train.txt", "T")
         _write("val.txt", "V")
@@ -429,8 +562,11 @@ def test_corpus_sents_seal_test_and_prefer_heldout():
         # 非布尔真值不能放行 test
         for bad in (1, "false", "1"):
             sents, src = load_corpus_sents_with_source(d, allow_test=bad)
-            assert src == "train" and all(s.startswith("T") for s in sents), \
-                (bad, src, sents)
+            assert src == "train" and all(s.startswith("T") for s in sents), (
+                bad,
+                src,
+                sents,
+            )
         # split 别名/绝对路径不能绕过 test 尘封（"./test" 会解析到 test.txt）
         for alias in ("./test", os.path.join(d, "test"), "../test"):
             try:
@@ -450,7 +586,9 @@ def test_corpus_sents_seal_test_and_prefer_heldout():
         assert load_corpus_sents_with_source(d) == ([], None)
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    print("  [ok] niah_corpus 干扰语料优先 held-out、test 默认尘封（显式 allow_test 才放行）")
+    print(
+        "  [ok] niah_corpus 干扰语料优先 held-out、test 默认尘封（显式 allow_test 才放行）"
+    )
 
 
 def test_corpus_test_access_recorded():
@@ -458,18 +596,23 @@ def test_corpus_test_access_recorded():
     d = tempfile.mkdtemp()
     try:
         with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
-            f.write(" ".join(
-                f"S{i} sentence has plenty of characters for the filter."
-                for i in range(5)))
+            f.write(
+                " ".join(
+                    f"S{i} sentence has plenty of characters for the filter."
+                    for i in range(5)
+                )
+            )
         ok = record_corpus_test_access(d, "test", stage="ruler")
         assert ok is True
         from lega.datacheck import read_test_access_log
         from lega.repro import sha256_file
+
         records = read_test_access_log(d)
         assert len(records) == 1
         assert records[0]["reason"] == "ruler_niah_corpus_distractors"
-        assert records[0]["corpus_source_sha256"] == \
-            sha256_file(os.path.join(d, "test.txt"))
+        assert records[0]["corpus_source_sha256"] == sha256_file(
+            os.path.join(d, "test.txt")
+        )
         # 非 test 来源不写账本
         assert record_corpus_test_access(d, "val") is False
         assert len(read_test_access_log(d)) == 1
@@ -487,12 +630,27 @@ def test_run_ruler_records_per_sample_outcomes():
 
     tok = _tok()
     torch.manual_seed(0)
-    model = GPT(vocab_size=len(tok.stoi), block_size=320, d_model=32, n_layers=1,
-                n_heads=2, ffn_mult=4, variant="standard")
+    model = GPT(
+        vocab_size=len(tok.stoi),
+        block_size=320,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="standard",
+    )
     model.eval()
-    res = run_ruler(model, tok, "cpu", ctx_lens=[320], n_samples=3,
-                    max_new=12, fwe_max_new=12, tasks=("niah_synth",),
-                    verbose=False)
+    res = run_ruler(
+        model,
+        tok,
+        "cpu",
+        ctx_lens=[320],
+        n_samples=3,
+        max_new=12,
+        fwe_max_new=12,
+        tasks=("niah_synth",),
+        verbose=False,
+    )
     cell = next(iter(res["niah_synth"].values()))
     samples = cell["samples"]
     assert len(samples) == cell["n"] == 3
@@ -502,14 +660,14 @@ def test_run_ruler_records_per_sample_outcomes():
     # 每格/每样例都带实际题面内容指纹；清单必须能由逐样例记录重算。
     assert re.fullmatch(r"[0-9a-f]{64}", cell["samples_sha256"])
     assert _samples_sha256(samples) == cell["samples_sha256"]
-    assert all(re.fullmatch(r"[0-9a-f]{64}", s["sample_sha256"])
-               for s in samples)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", s["sample_sha256"]) for s in samples)
     assert all(s["em"] in (0.0, 1.0) for s in samples)
     assert sum(s["em"] for s in samples) / len(samples) == cell["em"]
     # NIAH 逐样例带 needle 位置与分箱；分层汇总必须与样本逐条一致。
     assert all(s["depth_bin"] in DEPTH_BINS for s in samples), samples
-    assert all(isinstance(s["depth"], float) and 0.0 <= s["depth"] <= 1.0
-               for s in samples), samples
+    assert all(
+        isinstance(s["depth"], float) and 0.0 <= s["depth"] <= 1.0 for s in samples
+    ), samples
     assert set(cell["em_by_depth"]) == {s["depth_bin"] for s in samples}
     for b, rec in cell["em_by_depth"].items():
         rows = [s for s in samples if s["depth_bin"] == b]
@@ -527,13 +685,13 @@ def test_sample_content_fingerprint_binds_prompt_not_run_labels():
     ex["sample_id"] = "niah_synth@400#0"
     h0 = sample_content_sha256(ex)
     # 运行标签与缓存指纹不是题面内容，不应改变同一题面的身份。
-    relabeled = dict(ex, sample_id="niah_synth@400#99",
-                     sample_sha256="stale")
+    relabeled = dict(ex, sample_id="niah_synth@400#99", sample_sha256="stale")
     assert sample_content_sha256(relabeled) == h0
     changed = dict(ex)
     changed["ids"] = list(ex["ids"])
     changed["ids"][len(changed["ids"]) // 2] = (
-        changed["ids"][len(changed["ids"]) // 2] + 1) % len(tok.stoi)
+        changed["ids"][len(changed["ids"]) // 2] + 1
+    ) % len(tok.stoi)
     assert sample_content_sha256(changed) != h0
     # 单元格清单哈希对 sample_id 与内容指纹的任一改动都敏感。
     recs = [{"sample_id": ex["sample_id"], "sample_sha256": h0}]
@@ -544,12 +702,9 @@ def test_sample_content_fingerprint_binds_prompt_not_run_labels():
     # 缺哈希/重复 sample_id 的清单不可用（不伪造一个“看起来有效”的聚合）。
     assert _samples_sha256([{"sample_id": "x"}]) is None
     assert _samples_sha256([recs[0], dict(recs[0])]) is None
-    manifest = {"niah_synth": {"400": {
-        "n": 1, "samples_sha256": h_cell}}}
-    assert re.fullmatch(r"[0-9a-f]{64}",
-                        _ruler_samples_manifest_sha256(manifest))
-    assert _ruler_samples_manifest_sha256({"niah_synth": {"400": {
-        "n": 1}}}) is None
+    manifest = {"niah_synth": {"400": {"n": 1, "samples_sha256": h_cell}}}
+    assert re.fullmatch(r"[0-9a-f]{64}", _ruler_samples_manifest_sha256(manifest))
+    assert _ruler_samples_manifest_sha256({"niah_synth": {"400": {"n": 1}}}) is None
     print("  [ok] RULER 题面内容指纹绑定 prompt、忽略运行标签")
 
 
@@ -561,8 +716,17 @@ def test_depth_bin_boundaries_and_invalid_values():
     assert depth_bin(0.5) == "middle"
     assert depth_bin(2.0 / 3.0) == "late"
     assert depth_bin(1.0) == "late"
-    for bad in (None, True, False, -0.01, 1.01, float("nan"),
-                float("inf"), "0.5", object()):
+    for bad in (
+        None,
+        True,
+        False,
+        -0.01,
+        1.01,
+        float("nan"),
+        float("inf"),
+        "0.5",
+        object(),
+    ):
         assert depth_bin(bad) is None, bad
     print("  [ok] depth_bin（半开边界、末期含 1.0、非法值返回 None）")
 
@@ -590,23 +754,57 @@ def test_ruler_payload_binds_checkpoint_hash(monkeypatch):
         text = "The quick brown fox jumps over the lazy dog. 0123456789"
         itos = sorted(set(text))
         with open(os.path.join(data, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "itos": itos, "char_unk": False,
-                       "vocab_size": len(itos), "cache_schema": CACHE_SCHEMA,
-                       "fit_on": "train"}, f)
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "itos": itos,
+                    "char_unk": False,
+                    "vocab_size": len(itos),
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
         arr = np.array([itos.index(c) for c in text], dtype=np.uint16)
         arr.tofile(os.path.join(data, "train.bin"))
         arr.tofile(os.path.join(data, "val.bin"))
         ckpt = os.path.join(d, "model.pt")
         torch.manual_seed(0)
-        model = GPT(vocab_size=len(itos), block_size=128, d_model=8,
-                    n_layers=1, n_heads=1, ffn_mult=2, variant="lega",
-                    dropout=0.0, attn_dropout=0.0, gate_bias_init=2.0)
+        model = GPT(
+            vocab_size=len(itos),
+            block_size=128,
+            d_model=8,
+            n_layers=1,
+            n_heads=1,
+            ffn_mult=2,
+            variant="lega",
+            dropout=0.0,
+            attn_dropout=0.0,
+            gate_bias_init=2.0,
+        )
         save_checkpoint(ckpt, model, extra={"variant": "lega", "seed": 5})
         out = os.path.join(d, "ruler.json")
-        monkeypatch.setattr(sys, "argv", [
-            "ruler", "--ckpt", ckpt, "--data_dir", data, "--out", out,
-            "--ctx_lens", "64", "--n_samples", "1", "--device", "cpu"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "ruler",
+                "--ckpt",
+                ckpt,
+                "--data_dir",
+                data,
+                "--out",
+                out,
+                "--ctx_lens",
+                "64",
+                "--n_samples",
+                "1",
+                "--device",
+                "cpu",
+            ],
+        )
         from lega.ruler import main as ruler_main
+
         ruler_main()
         with open(out, encoding="utf-8") as f:
             payload = json.load(f)
@@ -648,13 +846,13 @@ def test_evidence_wrong_conflict_do_not_degrade_to_absent():
     for condition in ("evidence_wrong", "evidence_conflict"):
         for seed in range(20):
             try:
-                build_evidence_condition(
-                    tok, 120, random.Random(seed), condition)
+                build_evidence_condition(tok, 120, random.Random(seed), condition)
             except ContextTooSmall:
                 pass
             else:
                 raise AssertionError(
-                    f"{condition} seed={seed}: 证据放不下却仍构造了样例")
+                    f"{condition} seed={seed}: 证据放不下却仍构造了样例"
+                )
     print("  [ok] wrong/conflict 证据放不下时按 ContextTooSmall 跳过")
 
 
@@ -663,14 +861,16 @@ def test_evidence_conflict_keeps_both_evidence_lines_intact():
     tok = _tok()
     for seed in range(200):
         ex = build_evidence_condition(
-            tok, 512, random.Random(seed), "evidence_conflict")
+            tok, 512, random.Random(seed), "evidence_conflict"
+        )
         qs, _ = ex["query_span"]
         assert len(ex["meta"]["inserted"]) == 2
         for rec in ex["meta"]["inserted"]:
             line = tok.encode(
-                "\n" + NEEDLE_TMPL.format(key=rec["key"], value=rec["value"]))
+                "\n" + NEEDLE_TMPL.format(key=rec["key"], value=rec["value"])
+            )
             at = rec["pos"]
-            assert ex["ids"][at:at + len(line)] == line, (
-                f"seed={seed}: 冲突证据在 pos={at} 被截断")
-            assert at + len(line) <= qs, (
-                f"seed={seed}: 冲突证据越过问题起点")
+            assert (
+                ex["ids"][at : at + len(line)] == line
+            ), f"seed={seed}: 冲突证据在 pos={at} 被截断"
+            assert at + len(line) <= qs, f"seed={seed}: 冲突证据越过问题起点"

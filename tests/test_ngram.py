@@ -3,6 +3,7 @@
 科研口径：基线必须零调参空间可复算（公式逐一核对）；平滑系数只在
 验证集上选；“测试集尘封”协议对基线评测同样生效（读取即写访问账本）。
 """
+
 import json
 import math
 import os
@@ -12,11 +13,20 @@ import tempfile
 
 import numpy as np
 
-from lega.ngram import (ALPHA_GRID, INTERP_LAMBDA_GRID, _bigram_ppl,
-                        _interp_ppl_from_counts, _validate_alpha,
-                        _validate_lambda, evaluate, fit_counts,
-                        ppl_bigram, ppl_interpolated_bigram, ppl_unigram,
-                        window_positions)
+from lega.ngram import (
+    ALPHA_GRID,
+    INTERP_LAMBDA_GRID,
+    _bigram_ppl,
+    _interp_ppl_from_counts,
+    _validate_alpha,
+    _validate_lambda,
+    evaluate,
+    fit_counts,
+    ppl_bigram,
+    ppl_interpolated_bigram,
+    ppl_unigram,
+    window_positions,
+)
 from lega.datacheck import TEST_ACCESS_LOG
 
 
@@ -49,27 +59,43 @@ def test_ppl_unigram_matches_closed_form():
 def test_invalid_smoothing_parameters_rejected():
     """α/λ 非有限或越界时显式报错，不能写出 NaN/Inf 报告或静默选参。"""
     uni = np.array([2.0, 1.0, 0.0])
-    for bad in (float("nan"), float("inf"), float("-inf"), -0.1, "bad",
-                True, False, "1_0", "0.0_5"):
+    for bad in (
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        -0.1,
+        "bad",
+        True,
+        False,
+        "1_0",
+        "0.0_5",
+    ):
         try:
             ppl_unigram(np.array([0, 1]), uni, bad)
             raise AssertionError(f"非法 α 应报错: {bad!r}")
         except ValueError:
             pass
     _, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
-    for lam in (float("nan"), float("inf"), -0.1, 1.1, True, False,
-                "0.5_0", "0.0_5"):
+    for lam in (float("nan"), float("inf"), -0.1, 1.1, True, False, "0.5_0", "0.0_5"):
         try:
-            ppl_interpolated_bigram(np.array([0, 1]), uni, keys, counts,
-                                    1.0, 1.0, lam, 3)
+            ppl_interpolated_bigram(
+                np.array([0, 1]), uni, keys, counts, 1.0, 1.0, lam, 3
+            )
             raise AssertionError(f"非法 λ 应报错: {lam!r}")
         except ValueError:
             pass
     tmp = tempfile.mkdtemp()
     try:
         _mk_data(tmp, [0, 1, 2, 3] * 5, [0, 1, 2, 0], vocab_size=4)
-        for grid in ((), (float("nan"),), (float("inf"),), (-1.0,),
-                     (True,), (False,), ("1_0",)):
+        for grid in (
+            (),
+            (float("nan"),),
+            (float("inf"),),
+            (-1.0,),
+            (True,),
+            (False,),
+            ("1_0",),
+        ):
             try:
                 evaluate(tmp, split="val", alphas=grid)
                 raise AssertionError(f"非法 α 网格应报错: {grid!r}")
@@ -82,7 +108,7 @@ def test_invalid_smoothing_parameters_rejected():
 
 def test_evaluate_rejects_bad_vocab_meta_and_out_of_range_ids():
     """外部 meta/bin 不一致时必须在拟合前显式报错，不能用错误 V 算 PPL。"""
-    for bad in (True, 2.5, 0, -1, None, "4.5", 65537, 10 ** 20):
+    for bad in (True, 2.5, 0, -1, None, "4.5", 65537, 10**20):
         tmp = tempfile.mkdtemp()
         try:
             _mk_data(tmp, [0, 1, 2, 3] * 5, [0, 1, 2, 0], vocab_size=bad)
@@ -94,8 +120,9 @@ def test_evaluate_rejects_bad_vocab_meta_and_out_of_range_ids():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     for where, train, val, needle in (
-            ("train", [0, 1, 2, 4] * 5, [0, 1, 2, 0], "train"),
-            ("val", [0, 1, 2, 3] * 5, [0, 1, 9, 0], "val")):
+        ("train", [0, 1, 2, 4] * 5, [0, 1, 2, 0], "train"),
+        ("val", [0, 1, 2, 3] * 5, [0, 1, 9, 0], "val"),
+    ):
         tmp = tempfile.mkdtemp()
         try:
             _mk_data(tmp, train, val, vocab_size=4)
@@ -120,8 +147,9 @@ def test_zero_smoothing_unseen_tokens_stay_finite():
     # prev=2 在训练流中从未作为上下文出现：0/0 不能变成 NaN。
     out2 = ppl_bigram(np.array([2, 2]), uni, keys, counts, 0.0, 3)
     assert math.isfinite(out2["mean_nll"]) and math.isfinite(out2["ppl"])
-    out3 = ppl_interpolated_bigram(np.array([2, 2]), uni, keys, counts,
-                                   0.0, 0.0, 0.5, 3)
+    out3 = ppl_interpolated_bigram(
+        np.array([2, 2]), uni, keys, counts, 0.0, 0.0, 0.5, 3
+    )
     assert math.isfinite(out3["mean_nll"]) and math.isfinite(out3["ppl"])
     print("  [ok] n-gram：α=0 时未登录 token/上下文仍返回有限 PPL")
 
@@ -130,10 +158,11 @@ def test_huge_alpha_reaches_uniform_limit_without_overflow():
     """α·V 溢出时仍应得到 1/V 的均匀极限，而不是被 clip 成 1e-300。"""
     uni, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
     ids = np.array([0, 1])
-    for out in (ppl_unigram(ids, uni, alpha=1e308),
-                ppl_bigram(ids, uni, keys, counts, 1e308, 3),
-                ppl_interpolated_bigram(ids, uni, keys, counts,
-                                        1e308, 1e308, 0.5, 3)):
+    for out in (
+        ppl_unigram(ids, uni, alpha=1e308),
+        ppl_bigram(ids, uni, keys, counts, 1e308, 3),
+        ppl_interpolated_bigram(ids, uni, keys, counts, 1e308, 1e308, 0.5, 3),
+    ):
         assert math.isfinite(out["ppl"]), out
         assert math.isclose(out["ppl"], 3.0, rel_tol=1e-12), out
     print("  [ok] n-gram：巨大 α 平滑得到均匀极限，不因 α·V 溢出而失真")
@@ -143,24 +172,23 @@ def test_ppl_bigram_matches_closed_form():
     uni, keys, counts = fit_counts(np.array([0, 1, 0, 1]), vocab_size=3)
     assert uni[0] == 2 and uni[1] == 2
     # eval=[0,1], α=1, V=3：P(1|0)=(2+1)/(2+3)=0.6 → PPL=1/0.6
-    out = ppl_bigram(np.array([0, 1]), uni, keys, counts, alpha=1.0,
-                     vocab_size=3)
+    out = ppl_bigram(np.array([0, 1]), uni, keys, counts, alpha=1.0, vocab_size=3)
     assert math.isclose(out["ppl"], 1.0 / 0.6, rel_tol=1e-12)
     # 单 token 训练流：无法形成二元组，仍安全返回（未出现对按 0 计数）
     uni2, keys2, counts2 = fit_counts(np.array([1]), vocab_size=3)
-    out2 = ppl_bigram(np.array([0, 1]), uni2, keys2, counts2, alpha=1.0,
-                      vocab_size=3)
+    out2 = ppl_bigram(np.array([0, 1]), uni2, keys2, counts2, alpha=1.0, vocab_size=3)
     assert out2["ppl"] is not None and math.isfinite(out2["ppl"])
     assert ppl_bigram(np.array([1]), uni, keys, counts, 1.0, 3)["ppl"] is None
     # 训练流最后一个 token 没有后继，不能作为二元前文计入分母：
     # train=[0,1,2,0] 时 prev=0 只出现 1 次有效上下文（首个 0），
     # 而不是 uni[0]=2；P(1|0)=(1+1)/(1+3)=0.5，故 PPL=2。
     uni3, keys3, counts3 = fit_counts(np.array([0, 1, 2, 0]), vocab_size=3)
-    out3 = ppl_bigram(np.array([0, 1]), uni3, keys3, counts3, alpha=1.0,
-                      vocab_size=3)
+    out3 = ppl_bigram(np.array([0, 1]), uni3, keys3, counts3, alpha=1.0, vocab_size=3)
     assert math.isclose(out3["ppl"], 2.0, rel_tol=1e-12)
-    print("  [ok] ppl_bigram（条件概率闭式解、单 token 训练流容错、"
-          "末位 token 不计上下文）")
+    print(
+        "  [ok] ppl_bigram（条件概率闭式解、单 token 训练流容错、"
+        "末位 token 不计上下文）"
+    )
 
 
 def test_ppl_interpolated_bigram_matches_closed_form():
@@ -169,23 +197,29 @@ def test_ppl_interpolated_bigram_matches_closed_form():
     # eval=[0,1]，αu=αb=1，V=3：
     # P(1|0)=(2+1)/(2+3)=0.6；P(1)=(2+1)/(4+3)=3/7
     # λ=0.5 → p=0.5·0.6+0.5·3/7；λ=1 → 纯 bigram 0.6
-    half = ppl_interpolated_bigram(np.array([0, 1]), uni, keys, counts,
-                                   1.0, 1.0, 0.5, 3)
+    half = ppl_interpolated_bigram(
+        np.array([0, 1]), uni, keys, counts, 1.0, 1.0, 0.5, 3
+    )
     exp_p = 0.5 * 0.6 + 0.5 * (3.0 / 7.0)
     assert math.isclose(half["ppl"], 1.0 / exp_p, rel_tol=1e-12)
-    full = ppl_interpolated_bigram(np.array([0, 1]), uni, keys, counts,
-                                   1.0, 1.0, 1.0, 3)
+    full = ppl_interpolated_bigram(
+        np.array([0, 1]), uni, keys, counts, 1.0, 1.0, 1.0, 3
+    )
     assert math.isclose(full["ppl"], 1.0 / 0.6, rel_tol=1e-12)
     # 空/过短：安全返回 None 而不是崩溃
-    assert ppl_interpolated_bigram(np.array([1]), uni, keys, counts,
-                                   1.0, 1.0, 0.5, 3)["ppl"] is None
+    assert (
+        ppl_interpolated_bigram(np.array([1]), uni, keys, counts, 1.0, 1.0, 0.5, 3)[
+            "ppl"
+        ]
+        is None
+    )
     print("  [ok] ppl_interpolated_bigram（闭式解、λ=1 退化、边界）")
 
 
 def test_evaluate_end_to_end_and_alpha_selected_on_val():
     tmp = tempfile.mkdtemp()
     try:
-        train = ([0, 1, 2, 3] * 30)
+        train = [0, 1, 2, 3] * 30
         val = [0, 1, 2, 3, 0, 1, 2, 0]
         _mk_data(tmp, train, val, vocab_size=4)
         rep = evaluate(tmp, split="val", alphas=(0.01, 1.0))
@@ -201,8 +235,10 @@ def test_evaluate_end_to_end_and_alpha_selected_on_val():
         assert si["alpha_unigram"] in (0.01, 1.0)
         assert si["alpha_bigram"] in (0.01, 1.0)
         assert rep["selected_model"] in rep["ppl"]
-        assert (rep["val_mean_nll"]["interpolated_bigram"]
-                <= rep["val_mean_nll"]["bigram"] + 1e-9)
+        assert (
+            rep["val_mean_nll"]["interpolated_bigram"]
+            <= rep["val_mean_nll"]["bigram"] + 1e-9
+        )
         assert rep["selected_model_selected_on"].startswith("val")
         assert rep["selection_eval_same_split"] is True
         assert rep["allow_test"] is False
@@ -225,10 +261,68 @@ def test_evaluate_non_val_split_still_selects_alpha_on_val():
     """
     tmp = tempfile.mkdtemp()
     try:
-        train = [3, 2, 2, 1, 1, 0, 0, 0, 0, 3, 2, 3, 2, 2, 3, 2, 2, 2,
-                 2, 3, 1, 3, 2, 0, 1, 3, 2, 0, 3, 2, 3, 0, 0, 3, 0, 2,
-                 0, 1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 1, 2, 3, 1, 1, 3,
-                 3, 3, 1, 2, 3, 2]
+        train = [
+            3,
+            2,
+            2,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            3,
+            2,
+            3,
+            2,
+            2,
+            3,
+            2,
+            2,
+            2,
+            2,
+            3,
+            1,
+            3,
+            2,
+            0,
+            1,
+            3,
+            2,
+            0,
+            3,
+            2,
+            3,
+            0,
+            0,
+            3,
+            0,
+            2,
+            0,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            2,
+            2,
+            2,
+            1,
+            2,
+            3,
+            1,
+            1,
+            3,
+            3,
+            3,
+            1,
+            2,
+            3,
+            2,
+        ]
         val = [3, 2, 2, 1, 3, 0, 2, 2, 3, 2, 1, 1]
         _mk_data(tmp, train, val, vocab_size=4)
         grid = (0.01, 0.1, 1.0)
@@ -237,8 +331,7 @@ def test_evaluate_non_val_split_still_selects_alpha_on_val():
         assert train_rep["eval_tokens"] == len(train)
         assert train_rep["selection_eval_same_split"] is False
         assert train_rep["selected_alpha"] == val_rep["selected_alpha"]
-        assert (train_rep["selected_interpolated"]
-                == val_rep["selected_interpolated"])
+        assert train_rep["selected_interpolated"] == val_rep["selected_interpolated"]
         assert train_rep["val_mean_nll"] == val_rep["val_mean_nll"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -248,14 +341,18 @@ def test_evaluate_non_val_split_still_selects_alpha_on_val():
 def test_test_split_sealed_and_access_logged():
     tmp = tempfile.mkdtemp()
     try:
-        _mk_data(tmp, [0, 1, 2, 3] * 20, [0, 1, 2, 3], vocab_size=4,
-                 test_ids=[0, 1, 2, 3, 0, 1])
+        _mk_data(
+            tmp,
+            [0, 1, 2, 3] * 20,
+            [0, 1, 2, 3],
+            vocab_size=4,
+            test_ids=[0, 1, 2, 3, 0, 1],
+        )
         # 未显式开锁/非布尔真值：必须拒绝
         for bad in (False, None, 1, "false", "1"):
             try:
                 evaluate(tmp, split="test", allow_test=bad)
-                raise AssertionError(
-                    f"allow_test={bad!r} 不是显式 bool True，必须拒绝")
+                raise AssertionError(f"allow_test={bad!r} 不是显式 bool True，必须拒绝")
             except PermissionError:
                 pass
         # 显式开锁：可评测且写访问账本；test 只消费选定 α（不扫网格）
@@ -268,9 +365,12 @@ def test_test_split_sealed_and_access_logged():
         text = open(log_path, encoding="utf-8").read()
         assert "ngram_baseline" in text
         from lega.repro import sha256_file
+
         assert rep["test_access"]["distinct_test_data_versions"] == 1
-        assert sha256_file(os.path.join(tmp, "test.bin")) in \
-            rep["test_access"]["test_data_fingerprints"]
+        assert (
+            sha256_file(os.path.join(tmp, "test.bin"))
+            in rep["test_access"]["test_data_fingerprints"]
+        )
         assert ALPHA_GRID[0] > 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -281,8 +381,9 @@ def test_test_access_logged_even_when_later_setup_fails():
     """test 已读取但后续 val 缺失/拟合失败时，访问账本不能缺失。"""
     tmp = tempfile.mkdtemp()
     try:
-        _mk_data(tmp, [0, 1, 2, 3] * 20, [0, 1, 2, 3], vocab_size=4,
-                 test_ids=[0, 1, 2, 3])
+        _mk_data(
+            tmp, [0, 1, 2, 3] * 20, [0, 1, 2, 3], vocab_size=4, test_ids=[0, 1, 2, 3]
+        )
         os.remove(os.path.join(tmp, "val.bin"))
         try:
             evaluate(tmp, split="test", allow_test=True)
@@ -304,15 +405,25 @@ def test_window_positions_match_neural_eval_rule():
     变成不同 token 集合上的 PPL；这里直接与训练侧实现逐例对照。
     """
     from lega.train import _val_eval_indices
-    cases = [(500, 32, 1), (500, 32, 5), (500, 32, 100), (129, 64, 2),
-             (65, 16, 3), (33, 32, 1), (1000, 128, 50)]
+
+    cases = [
+        (500, 32, 1),
+        (500, 32, 5),
+        (500, 32, 100),
+        (129, 64, 2),
+        (65, 16, 3),
+        (33, 32, 1),
+        (1000, 128, 50),
+    ]
     for n_tokens, ctx, iters in cases:
         starts, _ = _val_eval_indices(n_tokens, ctx, iters)
-        expected = np.concatenate([np.arange(s * ctx + 1, s * ctx + ctx + 1)
-                                   for s in starts])
+        expected = np.concatenate(
+            [np.arange(s * ctx + 1, s * ctx + ctx + 1) for s in starts]
+        )
         got = window_positions(n_tokens, ctx, iters)
-        assert got is not None and np.array_equal(got, expected), \
-            f"不一致: n={n_tokens} ctx={ctx} iters={iters}"
+        assert got is not None and np.array_equal(
+            got, expected
+        ), f"不一致: n={n_tokens} ctx={ctx} iters={iters}"
     # 规格非法/流过短：None 而不是崩溃或静默错位
     assert window_positions(10, 16, 2) is None
     assert window_positions(100, 0, 2) is None
@@ -337,10 +448,16 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         # val 长度 41：ctx=8 时 n_windows=(41-1)//8=5；iters=2 → 窗口 [0, 4]
         val = list(range(4)) * 10 + [0]
         _mk_data(tmp, train, val, vocab_size=4)
-        rep = evaluate(tmp, split="val", alphas=(0.01,),
-                       window_spec={"ctx": 8, "iters": 2})
-        assert rep["window_spec"] == {"ctx": 8, "iters": 2, "n_windows": 5,
-                                      "n_eval": 2, "n_tokens": 16}
+        rep = evaluate(
+            tmp, split="val", alphas=(0.01,), window_spec={"ctx": 8, "iters": 2}
+        )
+        assert rep["window_spec"] == {
+            "ctx": 8,
+            "iters": 2,
+            "n_windows": 5,
+            "n_eval": 2,
+            "n_tokens": 16,
+        }
         wm = rep["ppl_window_matched"]
         assert wm["n_tokens"] == 16
         # 手工复算：同样的 position 集合、同样的选定 α，必须逐位一致
@@ -359,32 +476,44 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         assert math.isclose(wm["bigram"], m_bi["ppl"], rel_tol=1e-12)
         si = rep["selected_interpolated"]
         m_interp = _interp_ppl_from_counts(
-            np.asarray(val)[pos], uni, c_pair, prev_counts[prev], len(pos),
-            si["alpha_unigram"], si["alpha_bigram"], si["lambda"], 4)
-        assert math.isclose(wm["interpolated_bigram"], m_interp["ppl"],
-                            rel_tol=1e-12)
+            np.asarray(val)[pos],
+            uni,
+            c_pair,
+            prev_counts[prev],
+            len(pos),
+            si["alpha_unigram"],
+            si["alpha_bigram"],
+            si["lambda"],
+            4,
+        )
+        assert math.isclose(wm["interpolated_bigram"], m_interp["ppl"], rel_tol=1e-12)
         # 逐窗口损失必须与选定模型/窗口序号对齐，且均值与窗口对齐 PPL 同口径
         assert rep["window_indices_matched"] == [0, 4]
         assert rep["window_losses_matched_model"] == rep["selected_model"]
         losses = rep["window_losses_matched"]
         assert len(losses) == 2
-        assert math.isclose(math.exp(sum(losses) / len(losses)),
-                            wm[rep["selected_model"]], rel_tol=1e-12)
+        assert math.isclose(
+            math.exp(sum(losses) / len(losses)),
+            wm[rep["selected_model"]],
+            rel_tol=1e-12,
+        )
         # 窗口 token 上重新选参：选参与比较的 token 集现在一致
         wsel = rep["window_matched_selection"]
         assert wsel["selected_model"] in rep["ppl_window_matched_selected"]
         assert wsel["n_tokens"] == 16
         assert rep["window_indices_matched_selected"] == [0, 4]
-        assert (rep["window_losses_matched_selected_model"]
-                == wsel["selected_model"])
+        assert rep["window_losses_matched_selected_model"] == wsel["selected_model"]
         assert math.isclose(
             rep["ppl_window_matched_selected"][wsel["selected_model"]],
-            wm[wsel["selected_model"]], rel_tol=1e-12)
+            wm[wsel["selected_model"]],
+            rel_tol=1e-12,
+        )
         # 一时一用的全 split 口径仍在（保留绝对难度参照）
         assert rep["ppl"]["unigram"] is not None
         # 非法规格：显式报错字段而不是假装对齐
-        rep_bad = evaluate(tmp, split="val", alphas=(0.01,),
-                           window_spec={"ctx": 999, "iters": 2})
+        rep_bad = evaluate(
+            tmp, split="val", alphas=(0.01,), window_spec={"ctx": 999, "iters": 2}
+        )
         assert rep_bad["window_spec"] is None
         assert rep_bad["window_spec_error"]
         assert "ppl_window_matched" not in rep_bad
@@ -392,16 +521,26 @@ def test_evaluate_window_matched_restricts_scoring_positions():
         assert rep_bad["window_matched_selection_error"]
         # bool/小数规格不能被 int() 截断成整数口径：True → 1、8.5 → 8 都会
         # 让"与神经评测逐位置对齐"悄悄失效（对齐的是另一个 token 集合）。
-        for bad in ({"ctx": True, "iters": 2}, {"ctx": 8.5, "iters": 2},
-                    {"ctx": 8, "iters": True}, {"ctx": float("nan"), "iters": 2}):
+        for bad in (
+            {"ctx": True, "iters": 2},
+            {"ctx": 8.5, "iters": 2},
+            {"ctx": 8, "iters": True},
+            {"ctx": float("nan"), "iters": 2},
+        ):
             rb = evaluate(tmp, split="val", alphas=(0.01,), window_spec=bad)
             assert rb["window_spec"] is None, bad
             assert rb["window_spec_error"], bad
         # 整数值浮点/整数字符串语义明确，仍走对齐（JSON 既有用法）
-        rep_ok = evaluate(tmp, split="val", alphas=(0.01,),
-                          window_spec={"ctx": 8.0, "iters": "2"})
-        assert rep_ok["window_spec"] == {"ctx": 8, "iters": 2, "n_windows": 5,
-                                         "n_eval": 2, "n_tokens": 16}
+        rep_ok = evaluate(
+            tmp, split="val", alphas=(0.01,), window_spec={"ctx": 8.0, "iters": "2"}
+        )
+        assert rep_ok["window_spec"] == {
+            "ctx": 8,
+            "iters": 2,
+            "n_windows": 5,
+            "n_eval": 2,
+            "n_tokens": 16,
+        }
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] evaluate（window_spec 逐位置对齐、非法规格显式报错）")
@@ -410,13 +549,22 @@ def test_evaluate_window_matched_restricts_scoring_positions():
 def test_ngram_cli_runs_data_protocol_preflight():
     """独立 n-gram 评测也必须在已标记泄露的数据前中止。"""
     from lega.ngram import main as ngram_main
+
     old = sys.argv
     with tempfile.TemporaryDirectory() as d:
-        with open(os.path.join(d, "data_report.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"alerts": [{"level": "warning",
-                                   "code": "split_shuffled",
-                                   "message": "打乱"}]}, f)
+        with open(os.path.join(d, "data_report.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "alerts": [
+                        {
+                            "level": "warning",
+                            "code": "split_shuffled",
+                            "message": "打乱",
+                        }
+                    ]
+                },
+                f,
+            )
         sys.argv = ["ngram", "--data_dir", d]
         try:
             ngram_main()
@@ -430,9 +578,11 @@ def test_ngram_cli_runs_data_protocol_preflight():
 
 def test_ngram_rejects_numpy_bool_smoothing():
     """np.bool_ 不是数值平滑系数/L2 权重，不能被 float() 变成 1.0。"""
-    for fn, val in ((_validate_alpha, np.bool_(True)),
-                    (_validate_lambda, np.bool_(True)),
-                    (_validate_lambda, np.bool_(False))):
+    for fn, val in (
+        (_validate_alpha, np.bool_(True)),
+        (_validate_lambda, np.bool_(True)),
+        (_validate_lambda, np.bool_(False)),
+    ):
         try:
             fn(val)
             raise AssertionError(f"np.bool_ 应被拒绝: {val!r}")

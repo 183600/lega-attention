@@ -36,6 +36,7 @@ TOST 的 p 值同样是一个可做多重比较校正的检验族：``run_all`` 
 只有 3~5 个时 t 分布假设仍是大样本近似，等价区间应结合 MDE、置换检验与
 逐种子方向一起读，不能单独当成“证明无效”的强证据。
 """
+
 import math
 from numbers import Real
 
@@ -120,59 +121,110 @@ def metric_margin(metric):
     * ``display_scale`` / ``display_unit``：汇总渲染用的换算。
     """
     specs = {
-        "PPL": {"kind": "relative", "margin": 0.01,
-                "label": "相对 PPL ±1%",
-                "display_scale": 100.0, "display_unit": "%"},
-        "PPL(log)": {"kind": "log_ratio", "margin": math.log1p(0.01),
-                     "relative_margin": 0.01,
-                     "label": "PPL 几何均值比 ±1%",
-                     "display_scale": 100.0, "display_unit": "%"},
-        "PPL vs ngram": {"kind": "relative", "margin": 0.01,
-                         "label": "相对 PPL ±1%（vs 统计基线）",
-                         "display_scale": 100.0, "display_unit": "%"},
-        "PPL窗口配对": {"kind": "absolute", "margin": 0.01,
-                       "label": "逐窗口 NLL ±0.01 nat",
-                       "display_scale": 1.0, "display_unit": "nat"},
-        "RULER平均": {"kind": "absolute", "margin": 0.01,
-                     "label": "RULER EM ±1.00 pp",
-                     "display_scale": 100.0, "display_unit": "pp"},
-        "RULER样例配对": {"kind": "absolute", "margin": 0.01,
-                        "label": "RULER 样例配对差 ±1.00 pp",
-                        "display_scale": 100.0, "display_unit": "pp"},
+        "PPL": {
+            "kind": "relative",
+            "margin": 0.01,
+            "label": "相对 PPL ±1%",
+            "display_scale": 100.0,
+            "display_unit": "%",
+        },
+        "PPL(log)": {
+            "kind": "log_ratio",
+            "margin": math.log1p(0.01),
+            "relative_margin": 0.01,
+            "label": "PPL 几何均值比 ±1%",
+            "display_scale": 100.0,
+            "display_unit": "%",
+        },
+        "PPL vs ngram": {
+            "kind": "relative",
+            "margin": 0.01,
+            "label": "相对 PPL ±1%（vs 统计基线）",
+            "display_scale": 100.0,
+            "display_unit": "%",
+        },
+        "PPL窗口配对": {
+            "kind": "absolute",
+            "margin": 0.01,
+            "label": "逐窗口 NLL ±0.01 nat",
+            "display_scale": 1.0,
+            "display_unit": "nat",
+        },
+        "RULER平均": {
+            "kind": "absolute",
+            "margin": 0.01,
+            "label": "RULER EM ±1.00 pp",
+            "display_scale": 100.0,
+            "display_unit": "pp",
+        },
+        "RULER样例配对": {
+            "kind": "absolute",
+            "margin": 0.01,
+            "label": "RULER 样例配对差 ±1.00 pp",
+            "display_scale": 100.0,
+            "display_unit": "pp",
+        },
         "AUROC差(logit−仅查询)": {
-            "kind": "absolute", "margin": 0.01,
+            "kind": "absolute",
+            "margin": 0.01,
             "label": "AUROC 差 ±0.010",
-            "display_scale": 1.0, "display_unit": ""},
+            "display_scale": 1.0,
+            "display_unit": "",
+        },
         "AP差(logit−仅查询)": {
-            "kind": "absolute", "margin": 0.01,
+            "kind": "absolute",
+            "margin": 0.01,
             "label": "PR-AUC 差 ±0.010",
-            "display_scale": 1.0, "display_unit": ""},
+            "display_scale": 1.0,
+            "display_unit": "",
+        },
         "PR-AUC差(探针−门控)": {
-            "kind": "absolute", "margin": 0.01,
+            "kind": "absolute",
+            "margin": 0.01,
             "label": "PR-AUC 差 ±0.010",
-            "display_scale": 1.0, "display_unit": ""},
+            "display_scale": 1.0,
+            "display_unit": "",
+        },
         "AUROC差(探针−门控)": {
-            "kind": "absolute", "margin": 0.01,
+            "kind": "absolute",
+            "margin": 0.01,
             "label": "AUROC 差 ±0.010",
-            "display_scale": 1.0, "display_unit": ""},
+            "display_scale": 1.0,
+            "display_unit": "",
+        },
         "因果消融ΔNLL(lesion−normal)": {
-            "kind": "absolute", "margin": 0.01,
+            "kind": "absolute",
+            "margin": 0.01,
             "label": "ΔNLL ±0.01 nat",
-            "display_scale": 1.0, "display_unit": "nat"},
-        "Shapley(PPL)": {"kind": "absolute", "margin": 0.01,
-                        "label": "Shapley φ ±0.01（−log PPL 单位）",
-                        "display_scale": 1.0, "display_unit": ""},
-        "Shapley(RULER平均)": {"kind": "absolute", "margin": 0.01,
-                              "label": "Shapley φ ±1.00 pp",
-                              "display_scale": 100.0, "display_unit": "pp"},
+            "display_scale": 1.0,
+            "display_unit": "nat",
+        },
+        "Shapley(PPL)": {
+            "kind": "absolute",
+            "margin": 0.01,
+            "label": "Shapley φ ±0.01（−log PPL 单位）",
+            "display_scale": 1.0,
+            "display_unit": "",
+        },
+        "Shapley(RULER平均)": {
+            "kind": "absolute",
+            "margin": 0.01,
+            "label": "Shapley φ ±1.00 pp",
+            "display_scale": 100.0,
+            "display_unit": "pp",
+        },
     }
     if not isinstance(metric, str):
         return None
     spec = specs.get(metric)
     if spec is None and metric.startswith("RULER:"):
-        spec = {"kind": "absolute", "margin": 0.01,
-                "label": "RULER 任务 EM ±1.00 pp",
-                "display_scale": 100.0, "display_unit": "pp"}
+        spec = {
+            "kind": "absolute",
+            "margin": 0.01,
+            "label": "RULER 任务 EM ±1.00 pp",
+            "display_scale": 100.0,
+            "display_unit": "pp",
+        }
     return dict(spec) if isinstance(spec, dict) else None
 
 
@@ -202,19 +254,21 @@ def _invalid_result(result: dict, reason: str) -> dict:
     与“种子不足”“未定”区分开；下游 ``interpret_equivalence`` 会保留 invalid
     状态，不能把它改写成“没有效应”。
     """
-    result.update({
-        "status": "invalid",
-        "equivalent": False,
-        "noninferior": False,
-        "p_low": None,
-        "p_high": None,
-        "p_h0_mu_le_neg_margin": None,
-        "p_h0_mu_ge_pos_margin": None,
-        "p_tost": None,
-        "ci90": None,
-        "ci95": None,
-        "note": f"无法可靠计算 TOST：{reason}（按 invalid 处理，不代表等价/无差异）",
-    })
+    result.update(
+        {
+            "status": "invalid",
+            "equivalent": False,
+            "noninferior": False,
+            "p_low": None,
+            "p_high": None,
+            "p_h0_mu_le_neg_margin": None,
+            "p_h0_mu_ge_pos_margin": None,
+            "p_tost": None,
+            "ci90": None,
+            "ci95": None,
+            "note": f"无法可靠计算 TOST：{reason}（按 invalid 处理，不代表等价/无差异）",
+        }
+    )
     return result
 
 
@@ -227,8 +281,7 @@ def _paired_diffs(a, b, kind: str):
     """
     a_list, b_list = list(a), list(b)
     if len(a_list) != len(b_list):
-        raise ValueError(
-            f"配对样本长度不一致: {len(a_list)} vs {len(b_list)}")
+        raise ValueError(f"配对样本长度不一致: {len(a_list)} vs {len(b_list)}")
     diffs = []
     for x, y in zip(a_list, b_list):
         if (x is None) != (y is None):
@@ -275,7 +328,7 @@ def t_critical(df, two_sided_alpha: float = 0.05):
         return None
     lo, hi = 0.0, 1.0
     # 先指数扩张上界，避免极小 alpha/极大 df 时 1e3 不够。
-    while (student_t_two_sided_p(hi, df) > alpha and hi < 1e12):
+    while student_t_two_sided_p(hi, df) > alpha and hi < 1e12:
         hi *= 2.0
     for _ in range(200):
         mid = 0.5 * (lo + hi)
@@ -319,8 +372,9 @@ def _cohen_d(mean_diff, std_diff):
     return float(mean_diff / std_diff)
 
 
-def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
-                    min_seeds: int = MIN_SEEDS) -> dict:
+def tost_from_diffs(
+    diffs, margin: float, alpha: float = DEFAULT_ALPHA, min_seeds: int = MIN_SEEDS
+) -> dict:
     """对已变换的配对差做 TOST；返回完整统计量，不依赖原始 a/b。
 
     H0_low: μ <= −margin；H0_high: μ >= +margin。TOST p = max(p_low, p_high)。
@@ -333,25 +387,39 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
     if min_seeds < 1:
         raise ValueError(f"min_seeds 必须 >= 1，收到 {min_seeds!r}")
     vals = []
-    for v in (diffs if isinstance(diffs, (list, tuple)) else list(diffs)):
+    for v in diffs if isinstance(diffs, (list, tuple)) else list(diffs):
         f = _observation(v)
         if f is not None:
             vals.append(f)
     n = len(vals)
     result = {
         "method": "TOST（配对 t，双单侧）",
-        "n": n, "df": None, "mean_diff": None, "std_diff": None, "se": None,
-        "margin": margin, "alpha": alpha, "min_seeds": min_seeds,
-        "t_low": None, "t_high": None,
-        "p_low": None, "p_high": None,
-        "p_h0_mu_le_neg_margin": None, "p_h0_mu_ge_pos_margin": None,
+        "n": n,
+        "df": None,
+        "mean_diff": None,
+        "std_diff": None,
+        "se": None,
+        "margin": margin,
+        "alpha": alpha,
+        "min_seeds": min_seeds,
+        "t_low": None,
+        "t_high": None,
+        "p_low": None,
+        "p_high": None,
+        "p_h0_mu_le_neg_margin": None,
+        "p_h0_mu_ge_pos_margin": None,
         "p_tost": None,
-        "ci90": None, "ci95": None,
-        "equivalent": False, "noninferior": False,
-        "p_noninf_worse": None, "significant": None,
+        "ci90": None,
+        "ci95": None,
+        "equivalent": False,
+        "noninferior": False,
+        "p_noninf_worse": None,
+        "significant": None,
         "status": "insufficient_seeds" if n < min_seeds else "undetermined",
-        "note": ("margin 为分析前声明的 SESOI；等价=差异小于 SESOI，"
-                 "不是“效应恰为 0”；n<3 不作判定。"),
+        "note": (
+            "margin 为分析前声明的 SESOI；等价=差异小于 SESOI，"
+            "不是“效应恰为 0”；n<3 不作判定。"
+        ),
         "cohen_d": None,
     }
     if n == 0:
@@ -405,28 +473,46 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
             p_low = 1.0
         if mean >= margin:
             p_high = 1.0
-        result.update({"se": 0.0, "t_low": None, "t_high": None,
-                       "p_low": p_low, "p_high": p_high,
-                       "p_tost": max(p_low, p_high),
-                       "ci90": [float(mean), float(mean)],
-                       "ci95": [float(mean), float(mean)]})
+        result.update(
+            {
+                "se": 0.0,
+                "t_low": None,
+                "t_high": None,
+                "p_low": p_low,
+                "p_high": p_high,
+                "p_tost": max(p_low, p_high),
+                "ci90": [float(mean), float(mean)],
+                "ci95": [float(mean), float(mean)],
+            }
+        )
     else:
         se = sd / math.sqrt(n)
         t_low = (mean + margin) / se
         t_high = (mean - margin) / se
-        p_low = _one_sided_upper(t_low, df)   # H0: μ <= −margin
+        p_low = _one_sided_upper(t_low, df)  # H0: μ <= −margin
         p_high = _one_sided_lower(t_high, df)  # H0: μ >= +margin
         crit90 = t_critical(df, 2.0 * alpha)
         crit95 = t_critical(df, alpha)
-        result.update({
-            "se": float(se), "t_low": float(t_low), "t_high": float(t_high),
-            "p_low": float(p_low), "p_high": float(p_high),
-            "p_tost": float(max(p_low, p_high)),
-            "ci90": ([float(mean - crit90 * se), float(mean + crit90 * se)]
-                     if crit90 is not None else None),
-            "ci95": ([float(mean - crit95 * se), float(mean + crit95 * se)]
-                     if crit95 is not None else None),
-        })
+        result.update(
+            {
+                "se": float(se),
+                "t_low": float(t_low),
+                "t_high": float(t_high),
+                "p_low": float(p_low),
+                "p_high": float(p_high),
+                "p_tost": float(max(p_low, p_high)),
+                "ci90": (
+                    [float(mean - crit90 * se), float(mean + crit90 * se)]
+                    if crit90 is not None
+                    else None
+                ),
+                "ci95": (
+                    [float(mean - crit95 * se), float(mean + crit95 * se)]
+                    if crit95 is not None
+                    else None
+                ),
+            }
+        )
     p_tost = result.get("p_tost")
     if p_tost is None or not math.isfinite(float(p_tost)):
         return _invalid_result(result, "TOST p 值非有限")
@@ -435,21 +521,34 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
         if ci is not None and not all(math.isfinite(float(x)) for x in ci):
             return _invalid_result(result, f"{key} 超出 float 表示范围")
     result["equivalent"] = bool(
-        n >= min_seeds and p_tost is not None and p_tost < alpha)
+        n >= min_seeds and p_tost is not None and p_tost < alpha
+    )
     result["significant"] = bool(
-        n >= min_seeds and result.get("ci95") is not None
-        and (result["ci95"][0] > 0.0 or result["ci95"][1] < 0.0))
-    result["status"] = ("equivalent" if result["equivalent"]
-                        else "insufficient_seeds" if n < min_seeds
-                        else "not_equivalent")
+        n >= min_seeds
+        and result.get("ci95") is not None
+        and (result["ci95"][0] > 0.0 or result["ci95"][1] < 0.0)
+    )
+    result["status"] = (
+        "equivalent"
+        if result["equivalent"]
+        else "insufficient_seeds"
+        if n < min_seeds
+        else "not_equivalent"
+    )
     # 显式别名，避免把 p_low/p_high 误读成“下/上尾”而不是两个单侧 H0。
     result["p_h0_mu_le_neg_margin"] = result.get("p_low")
     result["p_h0_mu_ge_pos_margin"] = result.get("p_high")
     return result
 
 
-def tost_paired(a, b, margin: float, alpha: float = DEFAULT_ALPHA,
-                kind: str = "absolute", min_seeds: int = MIN_SEEDS) -> dict:
+def tost_paired(
+    a,
+    b,
+    margin: float,
+    alpha: float = DEFAULT_ALPHA,
+    kind: str = "absolute",
+    min_seeds: int = MIN_SEEDS,
+) -> dict:
     """对配对样本 a−b 做 TOST（kind=relative/log_ratio/absolute）。"""
     if kind not in ("absolute", "relative", "log_ratio"):
         raise ValueError(f"未知的 TOST 尺度 kind={kind!r}")
@@ -515,18 +614,22 @@ def _margin_for_factor(spec: dict, factor: float) -> float:
                 f"margin 不可表示（margin={base!r}, factor={factor!r}）"
             ) from None
     if not math.isfinite(out):
-        raise ValueError(
-            f"margin 不可表示（margin={base!r}, factor={factor!r}）")
+        raise ValueError(f"margin 不可表示（margin={base!r}, factor={factor!r}）")
     return float(out)
 
 
-def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
-                              alpha: float = DEFAULT_ALPHA,
-                              margin=None,
-                              min_seeds: int = MIN_SEEDS,
-                              sensitivity: bool = True,
-                              n_bootstrap: int = 2000,
-                              bootstrap_seed: int = 42):
+def assess_paired_equivalence(
+    a,
+    b,
+    metric,
+    lower_is_better: bool = False,
+    alpha: float = DEFAULT_ALPHA,
+    margin=None,
+    min_seeds: int = MIN_SEEDS,
+    sensitivity: bool = True,
+    n_bootstrap: int = 2000,
+    bootstrap_seed: int = 42,
+):
     """对一组配对观测做“SESOI 解释层”，返回 None 表示该指标未定义 SESOI。
 
     返回 dict 既包含 TOST 原始统计量，也包含方向/是否超过 SESOI/非劣性与
@@ -537,8 +640,8 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
     - ``bootstrap_ci95``：配对差的 95% 足位 bootstrap 置信区间（固定种子复现）。
     - ``cohen_d``：配对 Cohen's d 效应量（从 tost_from_diffs 继承）。
     """
-    import numpy as np
     from .utils import bootstrap_mean_ci
+
     spec = metric_margin(metric)
     if spec is None:
         return None
@@ -550,17 +653,22 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
     diffs = _paired_diffs(a, b, kind)
     lower_better = lower_is_better is True
     out = tost_from_diffs(diffs, margin, alpha=alpha, min_seeds=min_seeds)
-    out.update({
-        "metric": metric, "kind": kind, "margin": margin,
-        "margin_label": spec.get("label", ""),
-        "display_scale": spec.get("display_scale", 1.0),
-        "display_unit": spec.get("display_unit", ""),
-        "lower_is_better": lower_better,
-        "n_pairs_valid": len(diffs),
-        "multiplicity_adjusted": False,
-        "replication": replication_forecast(
-            diffs, margin=margin, alpha=alpha, min_seeds=min_seeds),
-    })
+    out.update(
+        {
+            "metric": metric,
+            "kind": kind,
+            "margin": margin,
+            "margin_label": spec.get("label", ""),
+            "display_scale": spec.get("display_scale", 1.0),
+            "display_unit": spec.get("display_unit", ""),
+            "lower_is_better": lower_better,
+            "n_pairs_valid": len(diffs),
+            "multiplicity_adjusted": False,
+            "replication": replication_forecast(
+                diffs, margin=margin, alpha=alpha, min_seeds=min_seeds
+            ),
+        }
+    )
     # bootstrap CI for mean difference（固定种子复现，描述性不取代 t-CI）
     bc = bootstrap_mean_ci(diffs, n_resamples=n_bootstrap, seed=bootstrap_seed)
     out["bootstrap_ci95"] = bc
@@ -571,31 +679,34 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         else:
             better = (mean < 0.0) if lower_better else (mean > 0.0)
             direction = "better" if better else "worse"
-        out.update({
-            "direction": direction,
-            "beyond_margin": bool(abs(mean) >= margin),
-            "practically_meaningful": bool(
-                direction != "same" and abs(mean) >= margin),
-        })
+        out.update(
+            {
+                "direction": direction,
+                "beyond_margin": bool(abs(mean) >= margin),
+                "practically_meaningful": bool(
+                    direction != "same" and abs(mean) >= margin
+                ),
+            }
+        )
     else:
-        out.update({"direction": None, "beyond_margin": None,
-                    "practically_meaningful": None})
+        out.update(
+            {"direction": None, "beyond_margin": None, "practically_meaningful": None}
+        )
     if out.get("status") == "invalid":
         # 数值不可表示（而非种子不足/未定）：保留 invalid 与原因，不能继续
         # 走下面的 status 分支把它改写成 insufficient_seeds/not_equivalent。
-        out.update({"p_noninf_worse": None, "noninferior": False,
-                    "sensitivity": []})
+        out.update({"p_noninf_worse": None, "noninferior": False, "sensitivity": []})
         return out
     # 非劣性：只检验“劣化不超过 SESOI”这一侧（方向随 lower_is_better 翻转）。
     p_low, p_high = out.get("p_low"), out.get("p_high")
     if lower_better:
         p_noninf = p_high  # H0: μ >= +margin（候选更差超过 SESOI）
     else:
-        p_noninf = p_low   # H0: μ <= −margin（候选更差超过 SESOI）
+        p_noninf = p_low  # H0: μ <= −margin（候选更差超过 SESOI）
     out["p_noninf_worse"] = p_noninf
     out["noninferior"] = bool(
-        out.get("n", 0) >= min_seeds
-        and p_noninf is not None and p_noninf < alpha)
+        out.get("n", 0) >= min_seeds and p_noninf is not None and p_noninf < alpha
+    )
     if out["equivalent"]:
         out["status"] = "equivalent"
     elif out["noninferior"]:
@@ -621,21 +732,27 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
                 # 上限。该敏感性档无法表示，但其他档仍有意义：保留一个
                 # 带 factor 的 invalid 占位格，避免整组等价性评估崩溃，
                 # 也避免下游按索引错配 0.5×/1×/2× 网格。
-                cell = _invalid_result({
-                    "n": out.get("n", 0),
-                    "mean_diff": out.get("mean_diff"),
-                    "std_diff": out.get("std_diff"),
-                    "lower_is_better": lower_better,
-                }, f"敏感性 margin 不可表示（factor={factor!r}）：{exc}")
-                cell.update({"factor": factor, "margin": None,
-                             "p_tost_adj": None,
-                             "margin_unrepresentable": True})
+                cell = _invalid_result(
+                    {
+                        "n": out.get("n", 0),
+                        "mean_diff": out.get("mean_diff"),
+                        "std_diff": out.get("std_diff"),
+                        "lower_is_better": lower_better,
+                    },
+                    f"敏感性 margin 不可表示（factor={factor!r}）：{exc}",
+                )
+                cell.update(
+                    {
+                        "factor": factor,
+                        "margin": None,
+                        "p_tost_adj": None,
+                        "margin_unrepresentable": True,
+                    }
+                )
                 grid.append(cell)
                 continue
-            cell = tost_from_diffs(diffs, m2, alpha=alpha,
-                                   min_seeds=min_seeds)
-            cell.update({"factor": factor, "margin": m2,
-                         "p_tost_adj": None})
+            cell = tost_from_diffs(diffs, m2, alpha=alpha, min_seeds=min_seeds)
+            cell.update({"factor": factor, "margin": m2, "p_tost_adj": None})
             grid.append(cell)
         out["sensitivity"] = grid
     else:
@@ -664,8 +781,9 @@ _MEANINGFUL = {
 }
 
 
-def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
-                          min_seeds: int = MIN_SEEDS) -> dict:
+def interpret_equivalence(
+    eq, p_adj=None, alpha: float = DEFAULT_ALPHA, min_seeds: int = MIN_SEEDS
+) -> dict:
     """把 TOST 统计量与优效性 p_adj 合成一个可渲染的实际意义判定。
 
     优先级：种子不足 → 等价 → 优效性显著（再分是否超过 SESOI）→ 非劣 →
@@ -674,30 +792,38 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
     假设的 支持/拒绝/未定 状态，只回答“差异是否有实际意义”。
     """
     if not isinstance(eq, dict):
-        return {"status": "invalid", "label": _STATUS_LABELS["invalid"],
-                "equivalent": False, "multiplicity_adjusted": False,
-                "p_used": None}
+        return {
+            "status": "invalid",
+            "label": _STATUS_LABELS["invalid"],
+            "equivalent": False,
+            "multiplicity_adjusted": False,
+            "p_used": None,
+        }
     if eq.get("not_applicable") is True:
         # 典型情形：因果病灶全部种子 no-op（干预没有真正改变前向）。
         # 此时零差不是“等价证据”，必须单列为不适用。
-        return {"status": "not_applicable",
-                "label": (eq.get("not_applicable_reason")
-                          or _STATUS_LABELS["not_applicable"]),
-                "equivalent": False, "multiplicity_adjusted": False,
-                "p_used": None}
+        return {
+            "status": "not_applicable",
+            "label": (
+                eq.get("not_applicable_reason") or _STATUS_LABELS["not_applicable"]
+            ),
+            "equivalent": False,
+            "multiplicity_adjusted": False,
+            "p_used": None,
+        }
     if eq.get("status") == "invalid":
         # 输入损坏或统计量不可表示：必须保留 invalid，不能在重算时退化成
         # “种子不足/未定”（那会让损坏证据看起来只是样本少）。
-        return {"status": "invalid",
-                "label": (eq.get("label") or _STATUS_LABELS["invalid"]),
-                "equivalent": False,
-                "multiplicity_adjusted": bool(
-                    eq.get("multiplicity_adjusted") is True),
-                "p_used": None}
+        return {
+            "status": "invalid",
+            "label": (eq.get("label") or _STATUS_LABELS["invalid"]),
+            "equivalent": False,
+            "multiplicity_adjusted": bool(eq.get("multiplicity_adjusted") is True),
+            "p_used": None,
+        }
     alpha = _validate_alpha(alpha)
     n = eq.get("n")
-    n_ok = (isinstance(n, int) and not isinstance(n, bool)
-            and n >= min_seeds)
+    n_ok = isinstance(n, int) and not isinstance(n, bool) and n >= min_seeds
     p_tost_adj = _finite_p(eq.get("p_tost_adj"))
     p_tost_raw = _finite_p(eq.get("p_tost"))
     adjusted = p_tost_adj is not None
@@ -713,23 +839,25 @@ def interpret_equivalence(eq, p_adj=None, alpha: float = DEFAULT_ALPHA,
             # direction 可能是外部 JSON 里损坏的 list/dict：不能直接作为
             # dict 键（TypeError），未知方向按“显著但低于 SESOI”保守处理。
             direction = eq.get("direction")
-            if not isinstance(direction, str) or direction not in ("better",
-                                                                   "worse"):
+            if not isinstance(direction, str) or direction not in ("better", "worse"):
                 direction = None
             # beyond_margin 也只认显式布尔：外部 JSON 的 "false"/1/[] 经
             # bool() 会被当成“超过 SESOI”，把显著但幅度有限的差异误报为
             # 实际有意义。缺失/损坏值按“未证明超过 SESOI”保守处理。
             beyond = eq.get("beyond_margin")
-            status = (_MEANINGFUL.get((direction, beyond),
-                                      "significant_below_sesoi")
-                      if isinstance(beyond, bool)
-                      else "significant_below_sesoi")
-        elif (eq.get("noninferior") is True and n_ok
-              # 校正后 p 不显著时不能退回原始 noninferior 标志：那会出
-              # 现“multiplicity_adjusted=True、p_used>alpha、却判非劣”的
-              # 自相矛盾结论。只有明确记录了已校正的非劣性证据才采信。
-              and (not adjusted
-                   or eq.get("noninferior_adjusted") is True)):
+            status = (
+                _MEANINGFUL.get((direction, beyond), "significant_below_sesoi")
+                if isinstance(beyond, bool)
+                else "significant_below_sesoi"
+            )
+        elif (
+            eq.get("noninferior") is True
+            and n_ok
+            # 校正后 p 不显著时不能退回原始 noninferior 标志：那会出
+            # 现“multiplicity_adjusted=True、p_used>alpha、却判非劣”的
+            # 自相矛盾结论。只有明确记录了已校正的非劣性证据才采信。
+            and (not adjusted or eq.get("noninferior_adjusted") is True)
+        ):
             status = "noninferior"
     label = _STATUS_LABELS.get(status, status)
     if status == "significant_below_sesoi" and eq.get("direction") == "worse":

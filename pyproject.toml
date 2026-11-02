@@ -58,10 +58,44 @@ lega = ["py.typed"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-q"
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests as requiring GPU",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["lega"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/_test.py",
+    "scripts/*",
+    "run_all.py",
+]
+branch = true
+parallel = true
+concurrency = ["multiprocessing"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+precision = 2
+show_missing = true
+skip_covered = false
+fail_under = 80
 
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true

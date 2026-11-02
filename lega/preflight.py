@@ -6,13 +6,17 @@
 开训，报告里的告警就形同虚设。本模块把检查集中到一处，训练入口默认
 强制，只有显式参数/环境变量才放行历史实验复现。
 """
+
 import json
 import os
 
 from .data import CACHE_SCHEMA, tokenizer_fit_source_ok
-from .datacheck import (critical_split_alerts, provenance_text_hashes,
-                        verify_source_manifest_file,
-                        verify_source_provenance)
+from .datacheck import (
+    critical_split_alerts,
+    provenance_text_hashes,
+    verify_source_manifest_file,
+    verify_source_provenance,
+)
 from .repro import sha256_file
 from .utils import strict_int
 
@@ -41,13 +45,19 @@ def data_report_protocol_issues(report) -> list:
     protocol = report.get("protocol")
     if isinstance(protocol, dict):
         for key, bad, msg in (
-                ("split_first_then_preprocess", False,
-                 "报告声明先预处理后划分（split_first_then_preprocess=False）"),
-                ("shuffle_at_split_time", True,
-                 "报告声明划分阶段随机打乱（shuffle_at_split_time=True），"
-                 "时序/群组完整性不可保证"),
-                ("test_sealed", False,
-                 "报告声明测试集未尘封（test_sealed=False）")):
+            (
+                "split_first_then_preprocess",
+                False,
+                "报告声明先预处理后划分（split_first_then_preprocess=False）",
+            ),
+            (
+                "shuffle_at_split_time",
+                True,
+                "报告声明划分阶段随机打乱（shuffle_at_split_time=True），"
+                "时序/群组完整性不可保证",
+            ),
+            ("test_sealed", False, "报告声明测试集未尘封（test_sealed=False）"),
+        ):
             value = protocol.get(key)
             if value is None:
                 continue
@@ -57,41 +67,58 @@ def data_report_protocol_issues(report) -> list:
                 add(msg)
         fit_on = protocol.get("fit_on")
         if fit_on is not None and str(fit_on) not in _SAFE_FIT_ON:
-            add(f"报告 protocol.fit_on={fit_on!r} 不可信："
-                "字符词表只能拟合 train，BPE 只能用公开预训练词表")
+            add(
+                f"报告 protocol.fit_on={fit_on!r} 不可信："
+                "字符词表只能拟合 train，BPE 只能用公开预训练词表"
+            )
     tokenizer = report.get("tokenizer")
     if isinstance(tokenizer, dict):
         fit_on = tokenizer.get("fit_on")
         if fit_on is None:
             # 非空 tokenizer 段却没有任何拟合来源：不能默认成安全来源。
             if tokenizer:
-                add("报告 tokenizer 段缺少 fit_on：无法确认词表只在 train 上"
-                    "拟合（或使用公开预训练词表），按来源未知处理")
+                add(
+                    "报告 tokenizer 段缺少 fit_on：无法确认词表只在 train 上"
+                    "拟合（或使用公开预训练词表），按来源未知处理"
+                )
         elif str(fit_on) not in _SAFE_FIT_ON:
-            add(f"报告 tokenizer.fit_on={fit_on!r} 不可信："
-                "字符词表只能拟合 train，BPE 只能用公开预训练词表")
+            add(
+                f"报告 tokenizer.fit_on={fit_on!r} 不可信："
+                "字符词表只能拟合 train，BPE 只能用公开预训练词表"
+            )
     prep_read = report.get("test_reads_at_prep")
     if isinstance(prep_read, dict) and "used_for_selection" in prep_read:
         used = prep_read.get("used_for_selection")
         if not isinstance(used, bool):
-            add("报告 test_reads_at_prep.used_for_selection="
-                f"{used!r} 不是布尔值，无法确认 test 未被用于选择")
+            add(
+                "报告 test_reads_at_prep.used_for_selection="
+                f"{used!r} 不是布尔值，无法确认 test 未被用于选择"
+            )
         elif used:
-            add("报告 test_reads_at_prep.used_for_selection=True："
-                "准备阶段读取 test 被用于选择/拟合，测试集不再独立")
+            add(
+                "报告 test_reads_at_prep.used_for_selection=True："
+                "准备阶段读取 test 被用于选择/拟合，测试集不再独立"
+            )
     split_protocol = report.get("split_protocol")
     if isinstance(split_protocol, dict):
         # 非布尔值不能被当成“未声明”：JSON 里的 1/"true"/"yes" 同样意味着
         # 上游在声明协议违约（或报告被手改），必须显式拒绝而不能静默通过。
         for key, msg in (
-                ("shuffled", "报告 split_protocol.shuffled=True：时序/群组完整性不可保证"),
-                ("fallback_char_cut",
-                 "报告 split_protocol.fallback_char_cut=True：退化为字符切分，"
-                 "同一文档可能跨 split"),
-                ("documents_cross_cut",
-                 "报告 split_protocol.documents_cross_cut=True：群组跨 split"),
-                ("paragraphs_cross_cut",
-                 "报告 split_protocol.paragraphs_cross_cut=True：段落群组跨 split")):
+            ("shuffled", "报告 split_protocol.shuffled=True：时序/群组完整性不可保证"),
+            (
+                "fallback_char_cut",
+                "报告 split_protocol.fallback_char_cut=True：退化为字符切分，"
+                "同一文档可能跨 split",
+            ),
+            (
+                "documents_cross_cut",
+                "报告 split_protocol.documents_cross_cut=True：群组跨 split",
+            ),
+            (
+                "paragraphs_cross_cut",
+                "报告 split_protocol.paragraphs_cross_cut=True：段落群组跨 split",
+            ),
+        ):
             value = split_protocol.get(key)
             if value is None:
                 continue
@@ -101,16 +128,20 @@ def data_report_protocol_issues(report) -> list:
                 add(msg)
         verified = split_protocol.get("verified_disjoint")
         if verified is not None and not isinstance(verified, bool):
-            add("报告 split_protocol.verified_disjoint="
-                f"{verified!r} 不是布尔值，无法确认划分互斥性")
+            add(
+                "报告 split_protocol.verified_disjoint="
+                f"{verified!r} 不是布尔值，无法确认划分互斥性"
+            )
         overlaps = split_protocol.get("overlap_long_lines")
         bad_overlaps = {}
         if overlaps is not None and not isinstance(overlaps, dict):
             # 字段存在但结构损坏（数组/字符串）不能当成“没有重叠证据”；
             # 尤其 verified_disjoint=True 时，损坏本身就无法确认互斥性。
-            add("报告 split_protocol.overlap_long_lines="
+            add(
+                "报告 split_protocol.overlap_long_lines="
                 f"{type(overlaps).__name__} 不是对象：无法核对跨 split 重叠，"
-                "不能确认划分互斥性")
+                "不能确认划分互斥性"
+            )
         elif isinstance(overlaps, dict):
             for pair, val in overlaps.items():
                 if not isinstance(val, dict):
@@ -119,53 +150,80 @@ def data_report_protocol_issues(report) -> list:
                 norm = val.get("normalized_lines") or 0
                 if exact or norm:
                     bad_overlaps[str(pair)] = {
-                        "exact_lines": exact, "normalized_lines": norm}
+                        "exact_lines": exact,
+                        "normalized_lines": norm,
+                    }
         if bad_overlaps:
-            prefix = ("报告声明 split_protocol.verified_disjoint=True，但"
-                      if verified is True else "")
-            add(f"{prefix}实测存在跨 split 共享长行 {bad_overlaps}："
-                "声明与内容矛盾，不能按“已核对互斥”处理")
+            prefix = (
+                "报告声明 split_protocol.verified_disjoint=True，但"
+                if verified is True
+                else ""
+            )
+            add(
+                f"{prefix}实测存在跨 split 共享长行 {bad_overlaps}："
+                "声明与内容矛盾，不能按“已核对互斥”处理"
+            )
         missing = split_protocol.get("missing_files")
         if missing is not None and not isinstance(missing, list):
-            add("报告 split_protocol.missing_files="
-                f"{type(missing).__name__} 不是列表：无法核对划分互斥性")
+            add(
+                "报告 split_protocol.missing_files="
+                f"{type(missing).__name__} 不是列表：无法核对划分互斥性"
+            )
         elif isinstance(missing, list) and missing:
-            prefix = ("报告声明 split_protocol.verified_disjoint=True，但"
-                      if verified is True else "")
-            add(f"{prefix}缺少 split 文件 {missing}："
-                "无法核对划分互斥性，缺失 split 的指标不可比较")
-        if (verified is False and not bad_overlaps
-                and not (isinstance(missing, list) and missing)):
+            prefix = (
+                "报告声明 split_protocol.verified_disjoint=True，但"
+                if verified is True
+                else ""
+            )
+            add(
+                f"{prefix}缺少 split 文件 {missing}："
+                "无法核对划分互斥性，缺失 split 的指标不可比较"
+            )
+        if (
+            verified is False
+            and not bad_overlaps
+            and not (isinstance(missing, list) and missing)
+        ):
             # verified_disjoint=False 本身就是“未验证通过”。没有重叠
             # 明细也没有缺失文件时不能当成通过：报告被手改/上游漏写
             # 证据，同样无法确认三个 split 互斥。
-            add("报告声明 split_protocol.verified_disjoint=False，但未记录"
-                "跨 split 长行重叠或缺失文件：无法确认划分互斥性")
+            add(
+                "报告声明 split_protocol.verified_disjoint=False，但未记录"
+                "跨 split 长行重叠或缺失文件：无法确认划分互斥性"
+            )
     # 清洗后复核独立于 alerts：即使有人把 alerts 清空，报告里的
     # train_eval_clean=False 仍是“去污染未闭合”的直接证据，必须拦截。
     duplicates = report.get("duplicates")
     if isinstance(duplicates, dict):
         post = duplicates.get("post_cleanup")
         if post is not None and not isinstance(post, dict):
-            add("报告 duplicates.post_cleanup="
-                f"{type(post).__name__} 不是对象：无法核对清洗后是否残留重复")
+            add(
+                "报告 duplicates.post_cleanup="
+                f"{type(post).__name__} 不是对象：无法核对清洗后是否残留重复"
+            )
         elif isinstance(post, dict):
             clean = post.get("train_eval_clean")
             if clean is not None and not isinstance(clean, bool):
-                add("报告 duplicates.post_cleanup.train_eval_clean="
-                    f"{clean!r} 不是布尔值：无法确认清洗后无残留重复")
+                add(
+                    "报告 duplicates.post_cleanup.train_eval_clean="
+                    f"{clean!r} 不是布尔值：无法确认清洗后无残留重复"
+                )
             elif clean is False:
                 overlaps = post.get("overlap_long_lines")
                 blocks = post.get("overlap_blocks")
-                add("报告声明清洗后 train 仍与 val/test 共享精确/归一化长行或"
+                add(
+                    "报告声明清洗后 train 仍与 val/test 共享精确/归一化长行或"
                     f"多行块（长行 {overlaps!r}，块 {blocks!r}）：去污染未闭合，"
-                    "不能进入训练")
+                    "不能进入训练"
+                )
             # checked_pairs 为空表示“无 train↔eval 对可核对”，不能据此判
             # 通过；若字段存在但结构损坏，显式记录无法核对。
             checked = post.get("checked_pairs")
             if checked is not None and not isinstance(checked, list):
-                add("报告 duplicates.post_cleanup.checked_pairs="
-                    f"{type(checked).__name__} 不是列表：无法核对清洗后残留")
+                add(
+                    "报告 duplicates.post_cleanup.checked_pairs="
+                    f"{type(checked).__name__} 不是列表：无法核对清洗后残留"
+                )
     return issues
 
 
@@ -174,7 +232,11 @@ def allow_protocol_violations(cli_flag: bool = False) -> bool:
     if cli_flag:
         return True
     return str(os.environ.get(ALLOW_ENV, "")).strip().lower() in (
-        "1", "true", "yes", "on")
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def load_data_report(data_dir: str):
@@ -213,19 +275,25 @@ def data_report_binding_issue(data_dir: str):
         # 当前协议下缓存必须记录报告哈希。报告还在却没有哈希，说明 meta
         # 被手改/由旧流程拼接，无法证明报告对应当前数据，不能静默放行。
         if os.path.exists(report_path):
-            return ("meta.json 未记录 data_report.json 哈希：报告无法与当前"
-                    "数据绑定，防泄漏诊断不可信（须重建 bin/报告）")
+            return (
+                "meta.json 未记录 data_report.json 哈希：报告无法与当前"
+                "数据绑定，防泄漏诊断不可信（须重建 bin/报告）"
+            )
         return None
     if not os.path.exists(report_path):
-        return ("meta.json 记录了 data_report.json 哈希，但报告文件缺失："
-                "缓存不完整或报告被删除，防泄漏诊断不可信")
+        return (
+            "meta.json 记录了 data_report.json 哈希，但报告文件缺失："
+            "缓存不完整或报告被删除，防泄漏诊断不可信"
+        )
     try:
         actual = sha256_file(report_path)
     except OSError as e:
         return f"无法读取 data_report.json: {e}"
     if actual != recorded:
-        return ("data_report.json 与 meta.json 记录的哈希不一致"
-                "（报告被改写或已过期），防泄漏诊断不可信")
+        return (
+            "data_report.json 与 meta.json 记录的哈希不一致"
+            "（报告被改写或已过期），防泄漏诊断不可信"
+        )
     return None
 
 
@@ -254,10 +322,13 @@ def data_source_hash_issue(data_dir: str):
         # “没记录”不等于“没变化”，按不可确认处理（纯 bin 目录才放行）。
         has_sources = any(
             os.path.exists(os.path.join(data_dir, f"{s}.txt"))
-            for s in ("train", "val", "test"))
+            for s in ("train", "val", "test")
+        )
         if has_sources:
-            return ("meta.json 未记录源文本哈希：无法确认 bin 由当前 txt 构建，"
-                    "须重建数据缓存")
+            return (
+                "meta.json 未记录源文本哈希：无法确认 bin 由当前 txt 构建，"
+                "须重建数据缓存"
+            )
         return None
     if not isinstance(recorded, dict):
         return "meta.json 的 source_sha256 不是对象，无法核对源文本哈希"
@@ -267,15 +338,19 @@ def data_source_hash_issue(data_dir: str):
             continue
         expected = recorded.get(split)
         if not expected:
-            return (f"{split}.txt 存在但 meta 未记录其源哈希：bin 可能是由"
-                    "旧版/不同文本构建，须重建")
+            return (
+                f"{split}.txt 存在但 meta 未记录其源哈希：bin 可能是由"
+                "旧版/不同文本构建，须重建"
+            )
         try:
             actual = sha256_file(txt_path)
         except OSError as e:
             return f"无法读取 {split}.txt 核对源哈希: {e}"
         if actual != expected:
-            return (f"{split}.txt 与构建 bin 时的源哈希不一致（源文本已改动，"
-                    "缓存过期）：data_report 的诊断不再对应当前语料，须重建")
+            return (
+                f"{split}.txt 与构建 bin 时的源哈希不一致（源文本已改动，"
+                "缓存过期）：data_report 的诊断不再对应当前语料，须重建"
+            )
     return None
 
 
@@ -299,14 +374,20 @@ def data_bin_hash_issue(data_dir: str):
     if not isinstance(meta, dict):
         return "meta.json 顶层不是对象，无法核对 bin 内容哈希"
     recorded = meta.get("bin_sha256")
-    has_bins = any(os.path.exists(os.path.join(data_dir, f"{s}.bin"))
-                   for s in ("train", "val", "test"))
+    has_bins = any(
+        os.path.exists(os.path.join(data_dir, f"{s}.bin"))
+        for s in ("train", "val", "test")
+    )
     if recorded is None:
-        has_sources = any(os.path.exists(os.path.join(data_dir, f"{s}.txt"))
-                          for s in ("train", "val", "test"))
+        has_sources = any(
+            os.path.exists(os.path.join(data_dir, f"{s}.txt"))
+            for s in ("train", "val", "test")
+        )
         if has_bins and has_sources:
-            return ("meta.json 未记录 bin 内容哈希：无法确认 bin 未被同尺寸"
-                    "替换，须重建数据缓存")
+            return (
+                "meta.json 未记录 bin 内容哈希：无法确认 bin 未被同尺寸"
+                "替换，须重建数据缓存"
+            )
         return None
     if not isinstance(recorded, dict):
         return "meta.json 的 bin_sha256 不是对象，无法核对 bin 内容哈希"
@@ -315,8 +396,10 @@ def data_bin_hash_issue(data_dir: str):
         expected = recorded.get(split)
         if not expected:
             if has_bins and os.path.exists(bin_path):
-                return (f"{split}.bin 存在但 meta 未记录其哈希：bin 可能是"
-                        "旧版/不同流程产物，须重建")
+                return (
+                    f"{split}.bin 存在但 meta 未记录其哈希：bin 可能是"
+                    "旧版/不同流程产物，须重建"
+                )
             continue
         if not os.path.exists(bin_path):
             return f"meta 记录了 {split}.bin 哈希但文件缺失：缓存不完整，须重建"
@@ -325,9 +408,11 @@ def data_bin_hash_issue(data_dir: str):
         except OSError as e:
             return f"无法读取 {split}.bin 核对内容哈希: {e}"
         if actual != expected:
-            return (f"{split}.bin 内容与 meta.json 记录的哈希不一致"
-                    "（bin 被替换/篡改/损坏）：token 流与防泄漏诊断已脱节，"
-                    "须重建数据缓存")
+            return (
+                f"{split}.bin 内容与 meta.json 记录的哈希不一致"
+                "（bin 被替换/篡改/损坏）：token 流与防泄漏诊断已脱节，"
+                "须重建数据缓存"
+            )
     return None
 
 
@@ -344,23 +429,26 @@ def data_cache_schema_issue(data_dir: str):
     if not isinstance(meta, dict):
         return "meta.json 顶层不是对象，无法确认数据缓存协议版本"
     try:
-        schema = strict_int(meta.get("cache_schema", 0),
-                            "meta.cache_schema")
+        schema = strict_int(meta.get("cache_schema", 0), "meta.cache_schema")
     except (TypeError, ValueError, OverflowError):
         schema = -1
     if schema != CACHE_SCHEMA:
-        return (f"数据缓存 cache_schema={schema} 与当前管线 "
-                f"{CACHE_SCHEMA} 不一致：旧版清洗/去污染协议不可信，"
-                "请运行 prepare_bins/prepare_data.py 重建 bin 后再训练")
+        return (
+            f"数据缓存 cache_schema={schema} 与当前管线 "
+            f"{CACHE_SCHEMA} 不一致：旧版清洗/去污染协议不可信，"
+            "请运行 prepare_bins/prepare_data.py 重建 bin 后再训练"
+        )
     # schema 相同不代表分词器拟合来源可信：旧缓存/手改 meta 可能在全量
     # 语料（含 val/test）上拟合过词表。prepare_bins 命中缓存时会检查
     # fit_on，但直接训练入口绕过它，这里必须补上同一道检查。
     fit_on = meta.get("fit_on")
     tokenizer = meta.get("tokenizer")
     if not tokenizer_fit_source_ok(tokenizer, fit_on):
-        return (f"数据缓存 tokenizer={tokenizer!r}/fit_on={fit_on!r} 不可信："
-                "字符词表必须在 train 上拟合，GPT-2 BPE 必须使用公开预训练"
-                "词表；请重建 bin")
+        return (
+            f"数据缓存 tokenizer={tokenizer!r}/fit_on={fit_on!r} 不可信："
+            "字符词表必须在 train 上拟合，GPT-2 BPE 必须使用公开预训练"
+            "词表；请重建 bin"
+        )
     return None
 
 
@@ -390,32 +478,39 @@ def data_source_provenance_issue(data_dir: str):
     has_manifest = os.path.exists(manifest_path)
     if prov is None:
         if meta_digest is not None:
-            return ("meta.json 记录了 source_provenance_digest，但 "
-                    "data_report.json 缺少 source_provenance：来源证据被删除/"
-                    "报告过期，无法确认数据来自哪份原始字节")
+            return (
+                "meta.json 记录了 source_provenance_digest，但 "
+                "data_report.json 缺少 source_provenance：来源证据被删除/"
+                "报告过期，无法确认数据来自哪份原始字节"
+            )
         if has_manifest:
-            return ("source_manifest.json 存在，但 data_report.json 缺少 "
-                    "source_provenance：两份来源证据不同版，无法绑定当前缓存")
+            return (
+                "source_manifest.json 存在，但 data_report.json 缺少 "
+                "source_provenance：两份来源证据不同版，无法绑定当前缓存"
+            )
         return None
     if not isinstance(prov, dict):
-        return ("data_report.json 的 source_provenance 不是对象："
-                "无法核对原始来源")
+        return "data_report.json 的 source_provenance 不是对象：" "无法核对原始来源"
     issues = verify_source_provenance(prov, data_dir)
     if issues:
         return "data_report 的 source_provenance 不一致：" + "；".join(issues[:3])
     digest = prov.get("digest")
     if not isinstance(meta_digest, str):
-        return ("meta.json 未记录 source_provenance_digest：无法确认当前 bin "
-                "缓存对应的就是报告里的原始来源，须重建数据缓存")
+        return (
+            "meta.json 未记录 source_provenance_digest：无法确认当前 bin "
+            "缓存对应的就是报告里的原始来源，须重建数据缓存"
+        )
     if digest != meta_digest:
-        return ("source_provenance.digest 与 meta.json 的 "
-                "source_provenance_digest 不一致：报告/缓存不同版，须重建")
+        return (
+            "source_provenance.digest 与 meta.json 的 "
+            "source_provenance_digest 不一致：报告/缓存不同版，须重建"
+        )
     if has_manifest:
         manifest_issues = verify_source_provenance(
-            _load_json_object(manifest_path), data_dir)
+            _load_json_object(manifest_path), data_dir
+        )
         if manifest_issues:
-            return ("source_manifest.json 不一致：" +
-                    "；".join(manifest_issues[:3]))
+            return "source_manifest.json 不一致：" + "；".join(manifest_issues[:3])
         binding_issues = verify_source_manifest_file(data_dir, prov)
         if binding_issues:
             return "；".join(binding_issues)
@@ -424,8 +519,10 @@ def data_source_provenance_issue(data_dir: str):
         for split, sha in provenance_text_hashes(prov).items():
             expected = recorded_text.get(split)
             if expected and expected != sha:
-                return (f"source_provenance 记录的 {split}.txt 哈希与 "
-                        "meta.source_sha256 不一致：来源清单与 bin 缓存脱节")
+                return (
+                    f"source_provenance 记录的 {split}.txt 哈希与 "
+                    "meta.source_sha256 不一致：来源清单与 bin 缓存脱节"
+                )
     return None
 
 
@@ -454,23 +551,41 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     provenance_issue = data_source_provenance_issue(data_dir)
     critical = list(critical_split_alerts(report))
     for issue in data_report_protocol_issues(report):
-        critical.append({"level": "warning", "code": "data_report_protocol",
-                         "message": issue})
+        critical.append(
+            {"level": "warning", "code": "data_report_protocol", "message": issue}
+        )
     if binding_issue:
-        critical.append({"level": "warning", "code": "data_report_binding",
-                         "message": binding_issue})
+        critical.append(
+            {
+                "level": "warning",
+                "code": "data_report_binding",
+                "message": binding_issue,
+            }
+        )
     if schema_issue:
-        critical.append({"level": "warning", "code": "data_cache_schema",
-                         "message": schema_issue})
+        critical.append(
+            {"level": "warning", "code": "data_cache_schema", "message": schema_issue}
+        )
     if source_hash_issue:
-        critical.append({"level": "warning", "code": "data_source_hash",
-                         "message": source_hash_issue})
+        critical.append(
+            {
+                "level": "warning",
+                "code": "data_source_hash",
+                "message": source_hash_issue,
+            }
+        )
     if bin_hash_issue:
-        critical.append({"level": "warning", "code": "data_bin_hash",
-                         "message": bin_hash_issue})
+        critical.append(
+            {"level": "warning", "code": "data_bin_hash", "message": bin_hash_issue}
+        )
     if provenance_issue:
-        critical.append({"level": "warning", "code": "data_source_provenance",
-                         "message": provenance_issue})
+        critical.append(
+            {
+                "level": "warning",
+                "code": "data_source_provenance",
+                "message": provenance_issue,
+            }
+        )
     info = {
         "report_present": report is not None,
         "binding_issue": binding_issue,
@@ -483,10 +598,12 @@ def data_protocol_preflight(data_dir: str, allow_override: bool = False) -> dict
     }
     if critical and not allow_override:
         detail = "；".join(
-            f"[{a.get('code')}] {a.get('message')}" for a in critical[:5])
+            f"[{a.get('code')}] {a.get('message')}" for a in critical[:5]
+        )
         raise SystemExit(
             f"数据协议前置检查失败（{len(critical)} 个严重问题）：{detail}。"
             "请先处理划分/清洗（必要时重建 data_report.json），确认无泄露后再"
             "训练；确需复现历史实验可显式加 --allow_data_protocol_violations "
-            f"或设置 {ALLOW_ENV}=1。")
+            f"或设置 {ALLOW_ENV}=1。"
+        )
     return info

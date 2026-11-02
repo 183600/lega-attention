@@ -11,6 +11,7 @@ latency.json，下游据此把噪声量级内的差异按不可区分处理。
   python -m lega.latency --config configs/small.json --data_dir data/wikitext103 \
       --ckpt_dir out/small --out results/small/latency.json
 """
+
 import argparse
 import contextlib
 import glob
@@ -27,12 +28,20 @@ from .attention import RUNNABLE_VARIANTS, _LEGA_FAMILY, _USE_QUERY
 from .data import load_meta
 from .datacheck import check_vocab_capacity
 from .model import GPT, load_model, count_params
-from .repro import (current_pipeline_run_id, data_fingerprint,
-                    git_info, sha256_file)
-from .utils import (amp_autocast, amp_dtype_for, config_bool,
-                    config_finite_float, enable_tf32, get_device,
-                    load_config_json, save_json, seed_int, set_seed,
-                    strict_int)
+from .repro import current_pipeline_run_id, data_fingerprint, git_info, sha256_file
+from .utils import (
+    amp_autocast,
+    amp_dtype_for,
+    config_bool,
+    config_finite_float,
+    enable_tf32,
+    get_device,
+    load_config_json,
+    save_json,
+    seed_int,
+    set_seed,
+    strict_int,
+)
 
 
 def resolve_backend(label: str):
@@ -85,8 +94,7 @@ def _percentile(sorted_vals, q: float) -> float:
     pos = q * (len(sorted_vals) - 1)
     lo = int(math.floor(pos))
     hi = min(lo + 1, len(sorted_vals) - 1)
-    return float(sorted_vals[lo]
-                 + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo))
+    return float(sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo))
 
 
 def timing_stats(times_ms) -> dict:
@@ -110,8 +118,13 @@ def timing_stats(times_ms) -> dict:
             vals.append(f)
     vals.sort()
     if not vals:
-        return {"median_ms": None, "p10_ms": None, "p90_ms": None,
-                "spread_pct": None, "n": 0}
+        return {
+            "median_ms": None,
+            "p10_ms": None,
+            "p90_ms": None,
+            "spread_pct": None,
+            "n": 0,
+        }
     med = _percentile(vals, 0.5)
     p10 = _percentile(vals, 0.1)
     p90 = _percentile(vals, 0.9)
@@ -120,19 +133,25 @@ def timing_stats(times_ms) -> dict:
         # 次正规中位数与巨大 p90 的比值可能超出 float 上限：相对散布不可
         # 表示，按缺失处理，不能把 inf 写进 latency.json。
         spread = None
-    return {"median_ms": round(med, 6), "p10_ms": round(p10, 6),
-            "p90_ms": round(p90, 6),
-            "spread_pct": (round(spread, 3) if spread is not None else None),
-            "n": len(vals)}
+    return {
+        "median_ms": round(med, 6),
+        "p10_ms": round(p10, 6),
+        "p90_ms": round(p90, 6),
+        "spread_pct": (round(spread, 3) if spread is not None else None),
+        "n": len(vals),
+    }
 
 
 # 计时结果的统一说明，写入 latency.json 的 meta 供下游/复核者读取。
-TIMING_NOTE = ("每个配置重复 iters 次并逐次计时：上报中位数；"
-               "spread_pct=(p90-p10)/median 为同配置测量的相对散布。"
-               "变体间差异小于噪声量级时按不可区分处理。")
+TIMING_NOTE = (
+    "每个配置重复 iters 次并逐次计时：上报中位数；"
+    "spread_pct=(p90-p10)/median 为同配置测量的相对散布。"
+    "变体间差异小于噪声量级时按不可区分处理。"
+)
 
 
 # ---------------------------------------------------------------- 结构指标
+
 
 def estimate_flops_per_token(model, kv_len: int) -> dict:
     """前向 FLOPs/token 的解析估计（增量对比比绝对值更重要）。
@@ -148,16 +167,18 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
     n_layers = len(model.blocks)
     blk = model.blocks[0]
     # 每层 matmul MACs：q/k/v/o 四个 d×d 投影 + FFN 两个 d×(ffn_mult·d)
-    per_layer_macs = sum(lin.weight.numel()
-                         for lin in (blk.attn.wq, blk.attn.wk, blk.attn.wv,
-                                     blk.attn.wo, blk.w1, blk.w2))
-    matmul_macs = per_layer_macs * n_layers \
-        + model.lm_head.weight.numel()   # 与 tok_emb 共享，只计一次
+    per_layer_macs = sum(
+        lin.weight.numel()
+        for lin in (blk.attn.wq, blk.attn.wk, blk.attn.wv, blk.attn.wo, blk.w1, blk.w2)
+    )
+    matmul_macs = (
+        per_layer_macs * n_layers + model.lm_head.weight.numel()
+    )  # 与 tok_emb 共享，只计一次
     attn_flops = 4 * int(kv_len) * d * n_layers
     variant = model.variant
     gate_flops = 0
     if variant in _USE_QUERY:
-        gate_flops += 2 * d * n_layers                 # w·q: 每层 2·d
+        gate_flops += 2 * d * n_layers  # w·q: 每层 2·d
     if variant in _LEGA_FAMILY:
         # max_j p_j: 每头扫描 kv_len 个概率 -> 每层 kv_len·n_heads
         gate_flops += int(kv_len) * model.n_heads * n_layers
@@ -171,7 +192,7 @@ def estimate_flops_per_token(model, kv_len: int) -> dict:
         "total_flops_per_tok": int(2 * matmul_macs + attn_flops + gate_flops),
         "kv_len": int(kv_len),
         "note": "解析估计：matmul 2·MACs + 注意力 4·kv_len·d/层 + 门控项；"
-                "变体间相对差比绝对值更可靠",
+        "变体间相对差比绝对值更可靠",
     }
 
 
@@ -184,8 +205,13 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
     params_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     attn0 = model.blocks[0].attn
     kv_dtype = kv_dtype or attn0.wk.weight.dtype
-    kv_bytes_per_tok = (2 * len(model.blocks) * attn0.n_heads * attn0.d_head
-                        * torch.empty(0, dtype=kv_dtype).element_size())
+    kv_bytes_per_tok = (
+        2
+        * len(model.blocks)
+        * attn0.n_heads
+        * attn0.d_head
+        * torch.empty(0, dtype=kv_dtype).element_size()
+    )
     eff = {
         "n_params": count_params(model),
         "params_mb": round(params_bytes / 2**20, 3),
@@ -195,8 +221,7 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         "peak_mem_mb_prefill": {},
     }
     # 测量口径与真实推理一致：无梯度 + 与基准相同的 AMP dtype。
-    amp = (device.startswith("cuda")
-           and kv_dtype in (torch.bfloat16, torch.float16))
+    amp = device.startswith("cuda") and kv_dtype in (torch.bfloat16, torch.float16)
     for ctx in ctxs:
         if ctx > model.block_size:
             continue
@@ -204,19 +229,24 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
         # 长上下文的内存开销主要是 KV cache（随 ctx 线性增长）；逐 ctx 落盘
         # 便于效率-精度权衡直接比较，而不是只看参数量/单次激活峰值。
         eff["kv_cache_mb_at_ctx"][str(ctx)] = round(
-            kv_bytes_per_tok * int(ctx) / 2**20, 6)
+            kv_bytes_per_tok * int(ctx) / 2**20, 6
+        )
         # 单次 prefill 前向（batch=1）内记录；CPU 无 CUDA 分配语义，记 None
         if device.startswith("cuda"):
             x = torch.randint(0, model.vocab_size, (1, ctx), device=device)
-            ctxmgr = (torch.autocast("cuda", dtype=kv_dtype) if amp
-                      else contextlib.nullcontext())
+            ctxmgr = (
+                torch.autocast("cuda", dtype=kv_dtype)
+                if amp
+                else contextlib.nullcontext()
+            )
             with torch.inference_mode(), ctxmgr:
                 model(x, last_logits_only=True)  # 预热以稳定计时
                 torch.cuda.reset_peak_memory_stats(device)
                 model(x, last_logits_only=True)
             torch.cuda.synchronize(device)
             eff["peak_mem_mb_prefill"][str(ctx)] = round(
-                torch.cuda.max_memory_allocated(device) / 2**20, 3)
+                torch.cuda.max_memory_allocated(device) / 2**20, 3
+            )
             del x
         else:
             eff["peak_mem_mb_prefill"][str(ctx)] = None
@@ -224,8 +254,9 @@ def efficiency_metrics(model, device: str, ctxs, kv_dtype=None) -> dict:
 
 
 @torch.inference_mode()
-def bench_prefill_stats(model, device, ctx: int, batch_size: int, iters: int,
-                        warmup: int, vocab: int) -> dict:
+def bench_prefill_stats(
+    model, device, ctx: int, batch_size: int, iters: int, warmup: int, vocab: int
+) -> dict:
     """prefill 逐次计时 → timing_stats（中位数/p10/p90/散布）。
 
     每次前向后同步设备再取墙钟：逐次采样才能给出测量散布。同步对所有
@@ -246,16 +277,26 @@ def bench_prefill_stats(model, device, ctx: int, batch_size: int, iters: int,
     return timing_stats(times)
 
 
-def bench_prefill(model, device, ctx: int, batch_size: int, iters: int, warmup: int,
-                  vocab: int) -> float:
+def bench_prefill(
+    model, device, ctx: int, batch_size: int, iters: int, warmup: int, vocab: int
+) -> float:
     """兼容旧接口：返回 prefill 中位数毫秒（详细统计用 bench_prefill_stats）。"""
-    return bench_prefill_stats(model, device, ctx, batch_size, iters, warmup,
-                               vocab)["median_ms"]
+    return bench_prefill_stats(model, device, ctx, batch_size, iters, warmup, vocab)[
+        "median_ms"
+    ]
 
 
 @torch.inference_mode()
-def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
-                       warmup: int, vocab: int, kv_dtype=None):
+def bench_decode_stats(
+    model,
+    device,
+    ctx: int,
+    decode_tokens: int,
+    iters: int,
+    warmup: int,
+    vocab: int,
+    kv_dtype=None,
+):
     """返回 (每 token 解码 timing_stats, 实际预填充长度)。
 
     逐 token 基线由本函数按实际 pf_len 带缓存复测，不依赖外部
@@ -269,11 +310,13 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     room = model.block_size - decode_tokens + 1
     if room < 1:
         raise ValueError(
-            f"block_size={model.block_size} 不足以解码 {decode_tokens} 个 token")
+            f"block_size={model.block_size} 不足以解码 {decode_tokens} 个 token"
+        )
     if decode_tokens < 2:
         raise RuntimeError(
             f"decode_tokens={decode_tokens} 过小：第 1 步是 prefill 前向，"
-            "至少需要 2 才能包含 1 步纯 decode")
+            "至少需要 2 才能包含 1 步纯 decode"
+        )
     pf_len = max(1, min(ctx, room))
     x = torch.randint(0, vocab, (1, pf_len), device=device)
 
@@ -283,11 +326,16 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     kvdtype = attn0.wk.weight.dtype if kv_dtype is None else kv_dtype
     total = pf_len + decode_tokens - 1
     kv_cache = [
-        (torch.empty(1, attn0.n_heads, total, attn0.d_head,
-                     dtype=kvdtype, device=device),
-         torch.empty(1, attn0.n_heads, total, attn0.d_head,
-                     dtype=kvdtype, device=device))
-        for _ in model.blocks]
+        (
+            torch.empty(
+                1, attn0.n_heads, total, attn0.d_head, dtype=kvdtype, device=device
+            ),
+            torch.empty(
+                1, attn0.n_heads, total, attn0.d_head, dtype=kvdtype, device=device
+            ),
+        )
+        for _ in model.blocks
+    ]
 
     def run_once():
         # 第 1 步：整个提示词的 prefill（cache_pos=0）
@@ -295,8 +343,9 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
         cur = out["logits"][:, -1].argmax(dim=-1, keepdim=True)
         # 后续 decode_tokens - 1 步：单 token 前向，cache_pos 为绝对写入位置
         for i in range(1, decode_tokens):
-            out = model(cur, kv_cache=kv_cache, cache_pos=pf_len + i - 1,
-                        last_logits_only=True)
+            out = model(
+                cur, kv_cache=kv_cache, cache_pos=pf_len + i - 1, last_logits_only=True
+            )
             cur = out["logits"][:, -1].argmax(dim=-1, keepdim=True)
 
     for _ in range(warmup):
@@ -327,15 +376,15 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     pf_stats = timing_stats([t * 1000.0 for t in prefill_times])
     # run_once 内第 1 步是 prefill 前向（past is None 处理整条 x），其后
     # decode_tokens - 1 步才是真正的单 token decode 前向。
-    per_tok = [(t - pf_med) / (decode_tokens - 1) * 1000.0
-               for t in run_times]
+    per_tok = [(t - pf_med) / (decode_tokens - 1) * 1000.0 for t in run_times]
     # 逐次样本可能因 prefill 基线抖动而略偏负；timing_stats 只统计
     # 非负计时，因此必须同时报告总样本数与负样本数，避免把 n=较小值
     # 误读成“只测了这么多次”。中位数非正才说明基线不可靠。
     if not per_tok or statistics.median(per_tok) <= 0:
         raise RuntimeError(
             "decode 总时长中位数不大于 prefill 基线，无法可靠扣除；请增加 "
-            "iters/decode_tokens 或确认 prefill 基线对应 batch=1 且长度正确")
+            "iters/decode_tokens 或确认 prefill 基线对应 batch=1 且长度正确"
+        )
     stats = timing_stats(per_tok)
     stats["n_samples"] = len(per_tok)
     stats["n_negative_samples"] = sum(1 for v in per_tok if v < 0)
@@ -354,12 +403,12 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
         _sync(device)
         t0 = time.perf_counter()
         for i in range(1, decode_tokens):
-            out = model(cur, kv_cache=kv_cache, cache_pos=pf_len + i - 1,
-                        last_logits_only=True)
+            out = model(
+                cur, kv_cache=kv_cache, cache_pos=pf_len + i - 1, last_logits_only=True
+            )
             cur = out["logits"][:, -1].argmax(dim=-1, keepdim=True)
         _sync(device)
-        direct_times.append((time.perf_counter() - t0) /
-                            (decode_tokens - 1) * 1000.0)
+        direct_times.append((time.perf_counter() - t0) / (decode_tokens - 1) * 1000.0)
     direct = timing_stats(direct_times)
     stats["decode_timing_method"] = "prefill_subtracted_and_direct"
     stats["direct_decode_median_ms"] = round(direct["median_ms"], 6)
@@ -368,11 +417,20 @@ def bench_decode_stats(model, device, ctx: int, decode_tokens: int, iters: int,
     return stats, pf_len  # stats["median_ms"] 为每 token 毫秒
 
 
-def bench_decode(model, device, ctx: int, decode_tokens: int, iters: int, warmup: int,
-                 vocab: int, kv_dtype=None):
+def bench_decode(
+    model,
+    device,
+    ctx: int,
+    decode_tokens: int,
+    iters: int,
+    warmup: int,
+    vocab: int,
+    kv_dtype=None,
+):
     """兼容旧接口：返回 (每 token 解码中位数毫秒, 实际预填充长度)。"""
-    stats, pf_len = bench_decode_stats(model, device, ctx, decode_tokens, iters,
-                                       warmup, vocab, kv_dtype=kv_dtype)
+    stats, pf_len = bench_decode_stats(
+        model, device, ctx, decode_tokens, iters, warmup, vocab, kv_dtype=kv_dtype
+    )
     return stats["median_ms"], pf_len
 
 
@@ -380,15 +438,25 @@ def main():
     p = argparse.ArgumentParser(description="推理基准")
     p.add_argument("--config", required=True)
     p.add_argument("--data_dir", required=True, help="读取 meta.json 获取词表大小")
-    p.add_argument("--ckpt_dir", default=None,
-                   help="若存在 <ckpt_dir>/<variant>/model_best.pt|model.pt 则加载权重")
+    p.add_argument(
+        "--ckpt_dir",
+        default=None,
+        help="若存在 <ckpt_dir>/<variant>/model_best.pt|model.pt 则加载权重",
+    )
     p.add_argument("--out", required=True)
     p.add_argument("--variants", default="standard,standard_sdpa,qgate,null,lega")
     p.add_argument("--device", default="auto")
-    p.add_argument("--no_amp", action="store_true",
-                   help="禁用 bf16 autocast（CUDA/支持 bf16 的 CPU）")
-    p.add_argument("--seed", type=int, default=None,
-                   help="随机权重/基准输入的种子（默认 0；run_all 传首个种子）")
+    p.add_argument(
+        "--no_amp",
+        action="store_true",
+        help="禁用 bf16 autocast（CUDA/支持 bf16 的 CPU）",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="随机权重/基准输入的种子（默认 0；run_all 传首个种子）",
+    )
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
@@ -396,8 +464,7 @@ def main():
     meta = load_meta(args.data_dir)
     # 随机权重基准会用 meta.vocab_size 建模型；token 流是 uint16，
     # 超过 65536 的词表既与数据不一致，也会先耗尽内存。
-    check_vocab_capacity(strict_int(meta.get("vocab_size"),
-                                    "meta.vocab_size"))
+    check_vocab_capacity(strict_int(meta.get("vocab_size"), "meta.vocab_size"))
     device = get_device(args.device)
     # 与 train/evaluate/ruler/analysis 的推理口径一致：CUDA 或支持 bf16 的
     # CPU 上启用 bf16 autocast（--no_amp 可回退 fp32/TF32 以便与旧基准对照）；
@@ -412,8 +479,13 @@ def main():
     lcfg = dict(lcfg_raw) if isinstance(lcfg_raw, dict) else {}
 
     if args.smoke:
-        lcfg = {"ctx_lens": [128, 256], "batch_sizes": [1],
-                "decode_tokens": 16, "iters": 2, "warmup": 1}
+        lcfg = {
+            "ctx_lens": [128, 256],
+            "batch_sizes": [1],
+            "decode_tokens": 16,
+            "iters": 2,
+            "warmup": 1,
+        }
     # 配置整数一律走严格解析：int() 会把 True → 1、256.5 → 256，落盘 meta
     # 记的又是截断值，基准条件与配置声明的差异将无从发现。
     ctx_lens = _cfg_int_list(lcfg, "ctx_lens", [256, 512, 1024])
@@ -425,12 +497,15 @@ def main():
     if any(c < 1 for c in ctx_lens):
         raise ValueError(f"latency.ctx_lens 必须都是 >= 1 的整数，收到 {ctx_lens}")
     if any(b < 1 for b in batch_sizes):
-        raise ValueError(f"latency.batch_sizes 必须都是 >= 1 的整数，收到 {batch_sizes}")
+        raise ValueError(
+            f"latency.batch_sizes 必须都是 >= 1 的整数，收到 {batch_sizes}"
+        )
     decode_tokens = _cfg_int(lcfg, "decode_tokens", 64)
     if decode_tokens < 2:
         raise ValueError(
             f"latency.decode_tokens={decode_tokens} 过小：第 1 步是 prefill 前向，"
-            "至少需要 2 才能包含 1 步纯 decode")
+            "至少需要 2 才能包含 1 步纯 decode"
+        )
     iters = _cfg_int(lcfg, "iters", 20)
     warmup = _cfg_int(lcfg, "warmup", 5)
     if iters < 1:
@@ -450,6 +525,7 @@ def main():
         if value <= 0:
             raise ValueError(f"config.{key} 必须是正整数，收到 {value}")
         return value
+
     seed = seed_int(args.seed if args.seed is not None else 0, "--seed")
     set_seed(seed)
     results: Dict = {}
@@ -463,27 +539,33 @@ def main():
         if args.ckpt_dir:
             base = os.path.join(args.ckpt_dir, vname)
             seed_dirs = sorted(
-                (p for p in glob.glob(os.path.join(base, "seed*"))
-                 if os.path.isdir(p)
-                 and os.path.basename(p)[4:].isdigit()),
-                key=lambda p: int(os.path.basename(p)[4:]))
+                (
+                    p
+                    for p in glob.glob(os.path.join(base, "seed*"))
+                    if os.path.isdir(p) and os.path.basename(p)[4:].isdigit()
+                ),
+                key=lambda p: int(os.path.basename(p)[4:]),
+            )
             # 多种子布局下先检查 seed*：base 目录可能残留上一次单种子
             # 运行（或旧版）的 checkpoint，不能让它压过本次多种子结果。
             for d in seed_dirs + [base]:
                 best = os.path.join(d, "model_best.pt")
-                ckpt_path = (best if os.path.exists(best)
-                             else os.path.join(d, "model.pt"))
+                ckpt_path = (
+                    best if os.path.exists(best) else os.path.join(d, "model.pt")
+                )
                 if os.path.exists(ckpt_path):
                     break
                 ckpt_path = None
         ckpt_seed = None
         ckpt_sha256 = None
         if ckpt_path and os.path.exists(ckpt_path):
-            model, ck = load_model(ckpt_path, device=device,
-                                   use_sdpa_standard=use_sdpa)
+            model, ck = load_model(ckpt_path, device=device, use_sdpa_standard=use_sdpa)
             try:
-                ckpt_seed = (strict_int(ck["seed"], "checkpoint seed")
-                             if ck.get("seed") is not None else None)
+                ckpt_seed = (
+                    strict_int(ck["seed"], "checkpoint seed")
+                    if ck.get("seed") is not None
+                    else None
+                )
             except ValueError:
                 ckpt_seed = None
             # 基准绑定到具体权重文件：同目录权重被覆盖后，旧延迟数值不能
@@ -491,52 +573,72 @@ def main():
             ckpt_sha256 = sha256_file(ckpt_path)
             src = "ckpt"
         else:
-            random_backend = (use_sdpa if backend_forced else
-                             config_bool(cfg.get("use_sdpa_standard", True),
-                                         "use_sdpa_standard"))
+            random_backend = (
+                use_sdpa
+                if backend_forced
+                else config_bool(
+                    cfg.get("use_sdpa_standard", True), "use_sdpa_standard"
+                )
+            )
             model_cfg = dict(
-                vocab_size=strict_int(meta.get("vocab_size"),
-                                      "meta.vocab_size"),
+                vocab_size=strict_int(meta.get("vocab_size"), "meta.vocab_size"),
                 block_size=_arch_int("block_size"),
                 d_model=_arch_int("d_model"),
                 n_layers=_arch_int("n_layers"),
                 n_heads=_arch_int("n_heads"),
                 ffn_mult=_arch_int("ffn_mult", 4),
-                dropout=0.0, attn_dropout=0.0, variant=vname,
+                dropout=0.0,
+                attn_dropout=0.0,
+                variant=vname,
                 gate_bias_init=config_finite_float(
-                    cfg.get("gate_bias_init", 2.0), "gate_bias_init"),
-                use_sdpa_standard=random_backend)
+                    cfg.get("gate_bias_init", 2.0), "gate_bias_init"
+                ),
+                use_sdpa_standard=random_backend,
+            )
             model = GPT(**model_cfg).to(device)
             src = "random"
         model.eval()
         # 记录实际生效的后端（checkpoint 可能选择与标签/配置不同的路径），
         # 而不是强制值或推测值。
         actual_sdpa = bool(model.blocks[0].attn.use_sdpa)
-        entry = {"label": v, "variant": vname, "use_sdpa": actual_sdpa,
-                 "backend_forced": bool(backend_forced),
-                 "weights": src, "ckpt_seed": ckpt_seed,
-                 "ckpt": (os.path.abspath(ckpt_path) if ckpt_path else None),
-                 "ckpt_sha256": ckpt_sha256,
-                 "n_params": count_params(model), "prefill_ms": {},
-                 "prefill_ms_spread_pct": {},
-                 "decode_ms_per_tok": {}, "decode_ms_spread_pct": {},
-                 "decode_timing_method": {}, "direct_decode_ms_per_tok": {},
-                 "direct_decode_spread_pct": {}, "decode_prefill_ctx": {}}
+        entry = {
+            "label": v,
+            "variant": vname,
+            "use_sdpa": actual_sdpa,
+            "backend_forced": bool(backend_forced),
+            "weights": src,
+            "ckpt_seed": ckpt_seed,
+            "ckpt": (os.path.abspath(ckpt_path) if ckpt_path else None),
+            "ckpt_sha256": ckpt_sha256,
+            "n_params": count_params(model),
+            "prefill_ms": {},
+            "prefill_ms_spread_pct": {},
+            "decode_ms_per_tok": {},
+            "decode_ms_spread_pct": {},
+            "decode_timing_method": {},
+            "direct_decode_ms_per_tok": {},
+            "direct_decode_spread_pct": {},
+            "decode_prefill_ctx": {},
+        }
         # 结构指标：参数量/KV 缓存/FLOPs。
-        entry["efficiency"] = efficiency_metrics(model, device, ctx_lens,
-                                                 kv_dtype=kv_dtype)
+        entry["efficiency"] = efficiency_metrics(
+            model, device, ctx_lens, kv_dtype=kv_dtype
+        )
         for ctx in ctx_lens:
             if ctx > model.block_size:
                 # 与 decode 路径的钳制行为一致：超出 block_size 的 ctx 直接跳过，
                 # 避免整个基准因单个配置而崩溃。
-                print(f"[latency] {v}@ctx{ctx}: 跳过，超过 block_size={model.block_size}")
+                print(
+                    f"[latency] {v}@ctx{ctx}: 跳过，超过 block_size={model.block_size}"
+                )
                 continue
             entry["prefill_ms"][str(ctx)] = {}
             entry["prefill_ms_spread_pct"][str(ctx)] = {}
             for bs in batch_sizes:
                 with amp_ctx:
-                    st = bench_prefill_stats(model, device, ctx, bs, iters, warmup,
-                                             model.vocab_size)
+                    st = bench_prefill_stats(
+                        model, device, ctx, bs, iters, warmup, model.vocab_size
+                    )
                 entry["prefill_ms"][str(ctx)][str(bs)] = round(st["median_ms"], 4)
                 entry["prefill_ms_spread_pct"][str(ctx)][str(bs)] = st["spread_pct"]
             # 只有 bs=1 的 prefill 才能作为逐 token decode 的扣除基线；
@@ -545,17 +647,26 @@ def main():
                 raise ValueError("latency.batch_sizes 不能为空")
             with amp_ctx:
                 dec_stats, pf_len = bench_decode_stats(
-                    model, device, ctx, decode_tokens, iters, warmup,
-                    model.vocab_size, kv_dtype=kv_dtype)
-            entry["decode_ms_per_tok"][str(ctx)] = round(
-                dec_stats["median_ms"], 4)
+                    model,
+                    device,
+                    ctx,
+                    decode_tokens,
+                    iters,
+                    warmup,
+                    model.vocab_size,
+                    kv_dtype=kv_dtype,
+                )
+            entry["decode_ms_per_tok"][str(ctx)] = round(dec_stats["median_ms"], 4)
             entry["decode_ms_spread_pct"][str(ctx)] = dec_stats["spread_pct"]
             entry["decode_timing_method"][str(ctx)] = dec_stats.get(
-                "decode_timing_method")
+                "decode_timing_method"
+            )
             entry["direct_decode_ms_per_tok"][str(ctx)] = dec_stats.get(
-                "direct_decode_median_ms")
+                "direct_decode_median_ms"
+            )
             entry["direct_decode_spread_pct"][str(ctx)] = dec_stats.get(
-                "direct_decode_spread_pct")
+                "direct_decode_spread_pct"
+            )
             # decode 因生成余量被钳制时必须如实记录实际 prompt 长度，不能把
             # 较短 KV 前缀的数值标注成原 ctx 的数值。
             entry["decode_prefill_ctx"][str(ctx)] = pf_len
@@ -563,13 +674,18 @@ def main():
             bs_key = "1" if "1" in bs1 else next(iter(bs1))
             pf_spread = entry["prefill_ms_spread_pct"][str(ctx)][bs_key]
             suffix = "" if pf_len == ctx else f"（decode 实际 prefill={pf_len}）"
-            print(f"[latency] {v}@ctx{ctx}: prefill(bs={bs_key})="
-                  f"{bs1[bs_key]:.2f}ms"
-                  + (f"(噪声{pf_spread:.1f}%)" if pf_spread is not None else "")
-                  + f" decode={dec_stats['median_ms']:.3f}ms/tok"
-                  + (f"(噪声{dec_stats['spread_pct']:.1f}%)"
-                     if dec_stats["spread_pct"] is not None else "")
-                  + suffix)
+            print(
+                f"[latency] {v}@ctx{ctx}: prefill(bs={bs_key})="
+                f"{bs1[bs_key]:.2f}ms"
+                + (f"(噪声{pf_spread:.1f}%)" if pf_spread is not None else "")
+                + f" decode={dec_stats['median_ms']:.3f}ms/tok"
+                + (
+                    f"(噪声{dec_stats['spread_pct']:.1f}%)"
+                    if dec_stats["spread_pct"] is not None
+                    else ""
+                )
+                + suffix
+            )
         results[v] = entry
 
     git = git_info()
@@ -578,15 +694,23 @@ def main():
     except FileNotFoundError:
         data_fp = None
     payload = {
-        "meta": {"device": device, "seed": seed,
-                 "pipeline_run_id": current_pipeline_run_id(),
-                 "ctx_lens": ctx_lens, "batch_sizes": batch_sizes,
-                 "decode_tokens": decode_tokens, "iters": iters, "warmup": warmup,
-                 "amp": bool(use_amp), "torch": torch.__version__,
-                 "timing": TIMING_NOTE,
-                 "code_commit": git["commit"], "code_dirty": git["dirty"],
-                 "data_fingerprint": data_fp,
-                 "config_sha256": sha256_file(args.config)},
+        "meta": {
+            "device": device,
+            "seed": seed,
+            "pipeline_run_id": current_pipeline_run_id(),
+            "ctx_lens": ctx_lens,
+            "batch_sizes": batch_sizes,
+            "decode_tokens": decode_tokens,
+            "iters": iters,
+            "warmup": warmup,
+            "amp": bool(use_amp),
+            "torch": torch.__version__,
+            "timing": TIMING_NOTE,
+            "code_commit": git["commit"],
+            "code_dirty": git["dirty"],
+            "data_fingerprint": data_fp,
+            "config_sha256": sha256_file(args.config),
+        },
         "variants": results,
     }
     save_json(payload, args.out)

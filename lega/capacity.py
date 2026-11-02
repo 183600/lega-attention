@@ -32,6 +32,7 @@
 混合了参数容量、初始化/优化红利以及置零后网络重新分配表征的能力，只能
 解释为“去掉证据但保留参数后仍存在的那部分差异”。
 """
+
 from __future__ import annotations
 
 import math
@@ -60,8 +61,7 @@ CAPACITY_OFF_VARIANTS = {
 
 # 反向索引供 attention/sanity 判断“哪个参数应预期零梯度”。
 NULL_EVIDENCE_COMPONENT = {
-    variant: component
-    for component, variant in CAPACITY_NULL_VARIANTS.items()
+    variant: component for component, variant in CAPACITY_NULL_VARIANTS.items()
 }
 
 EFFECT_ORDER = ("info", "capacity", "total")
@@ -106,9 +106,13 @@ def component_effects(full, null, off, lower_better: bool = False) -> dict:
     off = list(off)
     if not (len(full) == len(null) == len(off)):
         raise ValueError("Full/Null/No 三臂必须逐 seed 对齐")
-    if any(isinstance(v, bool) or not isinstance(v, (int, float))
-           or not math.isfinite(float(v)) for arm in (full, null, off)
-           for v in arm):
+    if any(
+        isinstance(v, bool)
+        or not isinstance(v, (int, float))
+        or not math.isfinite(float(v))
+        for arm in (full, null, off)
+        for v in arm
+    ):
         raise ValueError("Full/Null/No 只接受有限数值")
     full = [float(v) for v in full]
     null = [float(v) for v in null]
@@ -118,8 +122,7 @@ def component_effects(full, null, off, lower_better: bool = False) -> dict:
     total = [_benefit(f, o, lower_better) for f, o in zip(full, off)]
     residual = [t - (i + c) for t, i, c in zip(total, info, capacity)]
     effects = {}
-    for name, values in (("info", info), ("capacity", capacity),
-                         ("total", total)):
+    for name, values in (("info", info), ("capacity", capacity), ("total", total)):
         effects[name] = {
             "values": values,
             "mean": _mean(values),
@@ -132,8 +135,8 @@ def component_effects(full, null, off, lower_better: bool = False) -> dict:
         "lower_is_better": bool(lower_better),
         "direction": "positive_means_full_better",
         "effects": effects,
-        "info_share": (info_mean / total_mean
-                       if total_mean not in (None, 0.0) else None),
-        "identity_residual_max_abs": max((abs(r) for r in residual),
-                                         default=None),
+        "info_share": (
+            info_mean / total_mean if total_mean not in (None, 0.0) else None
+        ),
+        "identity_residual_max_abs": max((abs(r) for r in residual), default=None),
     }

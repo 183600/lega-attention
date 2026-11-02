@@ -23,12 +23,12 @@ C 因子 ``b*log n`` 因此并不与 B 因子里的长度分量正交。仅凭
 
 这是探索性分析：它没有预注册，不替代预注册的单因素确认检验。
 """
+
 import math
 from typing import Mapping
 
 from .factorial import CELL_ORDER, decomposition, oriented_value
-from .utils import (holm_bonferroni, mean_std, min_detectable_effect,
-                    paired_t_test)
+from .utils import holm_bonferroni, mean_std, min_detectable_effect, paired_t_test
 
 # 门控内 2^3 的归一化参数化单元格（与主矩阵一致）。
 NORMALIZED_CELLS = {
@@ -55,14 +55,13 @@ RAW_CELLS = {
     "ABC": "lega_raw",
 }
 
-RAW_FACTORIAL_VARIANTS = tuple(
-    dict.fromkeys(RAW_CELLS[cell] for cell in CELL_ORDER))
+RAW_FACTORIAL_VARIANTS = tuple(dict.fromkeys(RAW_CELLS[cell] for cell in CELL_ORDER))
 
 # 只属于原始网格、归一化网格没有的变体。判断“是否运行了 raw 对照”必须
 # 看这些变体；none/A/C 等共享格不能作为原始对照已运行的证据。
 RAW_SPECIFIC_VARIANTS = tuple(
-    v for v in RAW_FACTORIAL_VARIANTS
-    if v not in set(NORMALIZED_CELLS.values()))
+    v for v in RAW_FACTORIAL_VARIANTS if v not in set(NORMALIZED_CELLS.values())
+)
 
 FACTOR_LABELS = {"A": "A 查询项", "B": "B 集中度证据", "C": "C 长度校准"}
 
@@ -75,18 +74,34 @@ ALPHA = 0.05
 # “B 里是否含 a*log n”这一差异隔离出来。B 的增量边同时给出更干净的
 # “只加入 B”对照（gate_only 为共同基准）。
 CONTRASTS = (
-    ("A", "remove", ("lega_no_query", "lega"),
-     ("lega_raw_no_query", "lega_raw"),
-     "Full−A：归一化版同时去掉 a*log n，原始版只去掉 a*log max_p。"),
-    ("B", "remove", ("lega_no_conc", "lega"),
-     ("lega_no_conc", "lega_raw"),
-     "Full−B：归一化版去掉 a*(log max_p+log n)，原始版只去掉 a*log max_p。"),
-    ("C", "remove", ("lega_no_len", "lega"),
-     ("lega_raw_no_len", "lega_raw"),
-     "Full−C：两版都只去掉 b*log n。"),
-    ("B", "add", ("lega_conc_only", "gate_only"),
-     ("lega_raw_conc_only", "gate_only"),
-     "仅加入 B：归一化版为 a*(log max_p+log n)，原始版为 a*log max_p。"),
+    (
+        "A",
+        "remove",
+        ("lega_no_query", "lega"),
+        ("lega_raw_no_query", "lega_raw"),
+        "Full−A：归一化版同时去掉 a*log n，原始版只去掉 a*log max_p。",
+    ),
+    (
+        "B",
+        "remove",
+        ("lega_no_conc", "lega"),
+        ("lega_no_conc", "lega_raw"),
+        "Full−B：归一化版去掉 a*(log max_p+log n)，原始版只去掉 a*log max_p。",
+    ),
+    (
+        "C",
+        "remove",
+        ("lega_no_len", "lega"),
+        ("lega_raw_no_len", "lega_raw"),
+        "Full−C：两版都只去掉 b*log n。",
+    ),
+    (
+        "B",
+        "add",
+        ("lega_conc_only", "gate_only"),
+        ("lega_raw_conc_only", "gate_only"),
+        "仅加入 B：归一化版为 a*(log max_p+log n)，原始版为 a*log max_p。",
+    ),
 )
 
 
@@ -107,8 +122,9 @@ def _ordered_seeds(mapping):
         return sorted(mapping, key=lambda s: (type(s).__name__, str(s)))
 
 
-def contrast_effects(values: Mapping, metric: str, candidate: str,
-                     reference: str) -> dict:
+def contrast_effects(
+    values: Mapping, metric: str, candidate: str, reference: str
+) -> dict:
     """逐种子计算候选−参照的定向效应（正值=改善，PPL 已转 −log）。"""
     out = {}
     if not isinstance(values, Mapping):
@@ -141,12 +157,12 @@ def _effect_summary(effects):
     return {"n": len(vals), "mean": mean, "std": std}
 
 
-def _parameterization_verdict(res, normalized_mean, raw_mean,
-                              alpha=ALPHA, min_seeds=MIN_SEEDS):
+def _parameterization_verdict(
+    res, normalized_mean, raw_mean, alpha=ALPHA, min_seeds=MIN_SEEDS
+):
     n = res.get("n") or 0
     if n < min_seeds:
-        return (f"样本不足（n<{min_seeds}）：仅描述，"
-                "不作参数化稳健性判定")
+        return f"样本不足（n<{min_seeds}）：仅描述，" "不作参数化稳健性判定"
     p_adj = res.get("p_adj")
     if p_adj is None:
         return "无法检验（效应差方差不可估计）"
@@ -167,9 +183,9 @@ def _parameterization_verdict(res, normalized_mean, raw_mean,
 
 
 def _assign_holm(tests, alpha=ALPHA, min_seeds=MIN_SEEDS):
-    pads = holm_bonferroni([
-        (t.get("p") if (t.get("n") or 0) >= min_seeds else None)
-        for t in tests])
+    pads = holm_bonferroni(
+        [(t.get("p") if (t.get("n") or 0) >= min_seeds else None) for t in tests]
+    )
     for test, padj in zip(tests, pads):
         test["p_adj"] = padj
         norm_mean = test.get("normalized_effect_mean")
@@ -179,13 +195,14 @@ def _assign_holm(tests, alpha=ALPHA, min_seeds=MIN_SEEDS):
         if raw_mean is None:
             raw_mean = test.get("raw_phi_mean")
         test["verdict"] = _parameterization_verdict(
-            test, norm_mean, raw_mean, alpha=alpha, min_seeds=min_seeds)
+            test, norm_mean, raw_mean, alpha=alpha, min_seeds=min_seeds
+        )
     return tests
 
 
-def contrast_parameterization_tests(values: Mapping, metric: str,
-                                    min_seeds: int = MIN_SEEDS,
-                                    alpha: float = ALPHA) -> list:
+def contrast_parameterization_tests(
+    values: Mapping, metric: str, min_seeds: int = MIN_SEEDS, alpha: float = ALPHA
+) -> list:
     """逐条单因子边比较“原始参数化−归一化参数化”的效应。"""
     tests = []
     for factor, direction, norm, raw, note in CONTRASTS:
@@ -214,15 +231,18 @@ def contrast_parameterization_tests(values: Mapping, metric: str,
             "normalized_effect_std": norm_sum["std"],
             "raw_effect_mean": raw_sum["mean"],
             "raw_effect_std": raw_sum["std"],
-            "seed_sign_agreement": (
-                float(sum(agree) / len(agree)) if agree else None),
+            "seed_sign_agreement": (float(sum(agree) / len(agree)) if agree else None),
             "sign_agree": (
-                None if (norm_sum["mean"] is None or raw_sum["mean"] is None
-                         or _sign(norm_sum["mean"]) == 0
-                         or _sign(raw_sum["mean"]) == 0)
-                else bool(_sign(norm_sum["mean"]) == _sign(raw_sum["mean"]))),
-            "normalized_effect_by_seed": {
-                str(s): norm_eff[s] for s in seeds},
+                None
+                if (
+                    norm_sum["mean"] is None
+                    or raw_sum["mean"] is None
+                    or _sign(norm_sum["mean"]) == 0
+                    or _sign(raw_sum["mean"]) == 0
+                )
+                else bool(_sign(norm_sum["mean"]) == _sign(raw_sum["mean"]))
+            ),
+            "normalized_effect_by_seed": {str(s): norm_eff[s] for s in seeds},
             "raw_effect_by_seed": {str(s): raw_eff[s] for s in seeds},
             "difference_by_seed": {str(s): d for s, d in zip(seeds, diffs)},
             "mde": min_detectable_effect(res.get("std_diff"), res.get("n")),
@@ -233,16 +253,23 @@ def contrast_parameterization_tests(values: Mapping, metric: str,
         }
         test.update(res)
         if metric == "PPL":
-            for key, effect in (("normalized", norm_sum["mean"]),
-                                ("raw", raw_sum["mean"])):
+            for key, effect in (
+                ("normalized", norm_sum["mean"]),
+                ("raw", raw_sum["mean"]),
+            ):
                 test[f"{key}_ppl_ratio"] = (
                     math.exp(max(-20.0, min(20.0, -float(effect))))
-                    if effect is not None else None)
+                    if effect is not None
+                    else None
+                )
         elif metric == "RULER平均":
-            for key, effect in (("normalized", norm_sum["mean"]),
-                                ("raw", raw_sum["mean"])):
+            for key, effect in (
+                ("normalized", norm_sum["mean"]),
+                ("raw", raw_sum["mean"]),
+            ):
                 test[f"{key}_effect_pp"] = (
-                    float(effect) * 100.0 if effect is not None else None)
+                    float(effect) * 100.0 if effect is not None else None
+                )
         tests.append(test)
     return _assign_holm(tests, alpha=alpha, min_seeds=min_seeds)
 
@@ -266,17 +293,16 @@ def shapley_effects(values: Mapping, cells: Mapping, metric: str) -> dict:
         if not ok:
             continue
         try:
-            oriented = {cell: oriented_value(metric, raw[cell])
-                        for cell in CELL_ORDER}
+            oriented = {cell: oriented_value(metric, raw[cell]) for cell in CELL_ORDER}
         except (TypeError, ValueError):
             continue
         out[seed] = decomposition(oriented)
     return out
 
 
-def shapley_parameterization_tests(values: Mapping, metric: str,
-                                   min_seeds: int = MIN_SEEDS,
-                                   alpha: float = ALPHA) -> list:
+def shapley_parameterization_tests(
+    values: Mapping, metric: str, min_seeds: int = MIN_SEEDS, alpha: float = ALPHA
+) -> list:
     """比较两种参数化下 A/B/C 的 Shapley 贡献（同种子配对）。"""
     norm = shapley_effects(values, NORMALIZED_CELLS, metric)
     raw = shapley_effects(values, RAW_CELLS, metric)
@@ -285,8 +311,7 @@ def shapley_parameterization_tests(values: Mapping, metric: str,
         return []
     tests = []
     for factor in ("A", "B", "C"):
-        diffs = [raw[s]["phi"][factor] - norm[s]["phi"][factor]
-                 for s in seeds]
+        diffs = [raw[s]["phi"][factor] - norm[s]["phi"][factor] for s in seeds]
         res = paired_t_test(diffs, [0.0] * len(diffs))
         norm_phi = [norm[s]["phi"][factor] for s in seeds]
         raw_phi = [raw[s]["phi"][factor] for s in seeds]
@@ -304,23 +329,28 @@ def shapley_parameterization_tests(values: Mapping, metric: str,
             "raw_phi_mean": raw_mean,
             "raw_phi_std": raw_std,
             "sign_agree": (
-                None if (norm_mean is None or raw_mean is None
-                         or _sign(norm_mean) == 0 or _sign(raw_mean) == 0)
-                else bool(_sign(norm_mean) == _sign(raw_mean))),
-            "normalized_phi_by_seed": {
-                str(s): norm[s]["phi"][factor] for s in seeds},
-            "raw_phi_by_seed": {
-                str(s): raw[s]["phi"][factor] for s in seeds},
-            "difference_by_seed": {
-                str(s): d for s, d in zip(seeds, diffs)},
+                None
+                if (
+                    norm_mean is None
+                    or raw_mean is None
+                    or _sign(norm_mean) == 0
+                    or _sign(raw_mean) == 0
+                )
+                else bool(_sign(norm_mean) == _sign(raw_mean))
+            ),
+            "normalized_phi_by_seed": {str(s): norm[s]["phi"][factor] for s in seeds},
+            "raw_phi_by_seed": {str(s): raw[s]["phi"][factor] for s in seeds},
+            "difference_by_seed": {str(s): d for s, d in zip(seeds, diffs)},
             "normalized_total_effect_mean": mean_std(
-                [norm[s]["total_effect"] for s in seeds])[0],
-            "raw_total_effect_mean": mean_std(
-                [raw[s]["total_effect"] for s in seeds])[0],
+                [norm[s]["total_effect"] for s in seeds]
+            )[0],
+            "raw_total_effect_mean": mean_std([raw[s]["total_effect"] for s in seeds])[
+                0
+            ],
             "normalized_efficiency_gap_max": max(
-                abs(norm[s]["efficiency_gap"]) for s in seeds),
-            "raw_efficiency_gap_max": max(
-                abs(raw[s]["efficiency_gap"]) for s in seeds),
+                abs(norm[s]["efficiency_gap"]) for s in seeds
+            ),
+            "raw_efficiency_gap_max": max(abs(raw[s]["efficiency_gap"]) for s in seeds),
             "mde": min_detectable_effect(res.get("std_diff"), res.get("n")),
             "no_direction": True,
             "lower_is_better": None,
@@ -328,11 +358,12 @@ def shapley_parameterization_tests(values: Mapping, metric: str,
         }
         test.update(res)
         if metric == "PPL":
-            for key, effect in (("normalized", norm_mean),
-                                ("raw", raw_mean)):
+            for key, effect in (("normalized", norm_mean), ("raw", raw_mean)):
                 test[f"{key}_ppl_ratio"] = (
                     math.exp(max(-20.0, min(20.0, -float(effect))))
-                    if effect is not None else None)
+                    if effect is not None
+                    else None
+                )
         tests.append(test)
     tests = _assign_holm(tests, alpha=alpha, min_seeds=min_seeds)
     for test in tests:
@@ -341,26 +372,33 @@ def shapley_parameterization_tests(values: Mapping, metric: str,
     return tests
 
 
-def analyze(values: Mapping, metric: str, min_seeds: int = MIN_SEEDS,
-            alpha: float = ALPHA) -> dict:
+def analyze(
+    values: Mapping, metric: str, min_seeds: int = MIN_SEEDS, alpha: float = ALPHA
+) -> dict:
     """对一种指标执行参数化稳健性分析并给出汇总判定。"""
     contrasts = contrast_parameterization_tests(
-        values, metric, min_seeds=min_seeds, alpha=alpha)
+        values, metric, min_seeds=min_seeds, alpha=alpha
+    )
     shapley = shapley_parameterization_tests(
-        values, metric, min_seeds=min_seeds, alpha=alpha)
+        values, metric, min_seeds=min_seeds, alpha=alpha
+    )
     claims = contrasts + shapley
-    eligible = [t for t in claims
-                if (t.get("n") or 0) >= min_seeds
-                and t.get("p_adj") is not None]
+    eligible = [
+        t
+        for t in claims
+        if (t.get("n") or 0) >= min_seeds and t.get("p_adj") is not None
+    ]
     n_sig = sum(1 for t in eligible if t["p_adj"] < alpha)
-    flips = [t["candidate"] for t in eligible
-             if t.get("sign_agree") is False]
+    flips = [t["candidate"] for t in eligible if t.get("sign_agree") is False]
     if not claims or not eligible:
         status = "insufficient"
-        verdict = ("缺少可配对且 n>=" + str(min_seeds)
-                   + " 的原始/归一化观测，无法评估参数化稳健性。"
-                   if claims else
-                   "缺少可配对的原始/归一化网格，无法评估参数化稳健性。")
+        verdict = (
+            "缺少可配对且 n>="
+            + str(min_seeds)
+            + " 的原始/归一化观测，无法评估参数化稳健性。"
+            if claims
+            else "缺少可配对的原始/归一化网格，无法评估参数化稳健性。"
+        )
     elif n_sig or flips:
         status = "parameterization_dependent"
         detail = []
@@ -368,12 +406,17 @@ def analyze(values: Mapping, metric: str, min_seeds: int = MIN_SEEDS,
             detail.append(f"{n_sig} 条差异检验显著")
         if flips:
             detail.append("方向不一致：" + "、".join(flips))
-        verdict = ("参数化稳健性未建立：" + "；".join(detail)
-                   + "。不能把归一化 c 的因子效应直接解释为纯集中度。")
+        verdict = (
+            "参数化稳健性未建立："
+            + "；".join(detail)
+            + "。不能把归一化 c 的因子效应直接解释为纯集中度。"
+        )
     else:
         status = "no_difference_detected"
-        verdict = ("未检出参数化差异；这是“未拒绝稳健”而非“证明等价”，"
-                   "需结合各检验的 MDE 与种子数解读。")
+        verdict = (
+            "未检出参数化差异；这是“未拒绝稳健”而非“证明等价”，"
+            "需结合各检验的 MDE 与种子数解读。"
+        )
     return {
         "metric": metric,
         "contrasts": contrasts,

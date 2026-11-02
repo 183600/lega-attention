@@ -1,7 +1,9 @@
 """文本清洗、精确/近似去污染。"""
+
 from ._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def sanitize_text(text: str):
     """清除会污染标签的坏字符；返回 (clean_text, stats)。
@@ -57,6 +59,7 @@ def sanitize_text(text: str):
 
 
 # ---------------------------------------------------------------- 重复/去污染
+
 
 def _normalize_line(s: str) -> str:
     """行内 NFKC + 空白折叠后的比较键。
@@ -147,10 +150,17 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
                 n_short += 1
                 seen_short.add(d)
                 seen_short_norm.add(dn)
-        return {"n_long": n_long, "n_short": n_short, "long": seen_long,
-                "long_norm": seen_long_norm, "short": seen_short,
-                "short_norm": seen_short_norm, "n_valid": n_valid,
-                "n_uniq": len(seen_valid), "n_uniq_norm": len(seen_valid_norm)}
+        return {
+            "n_long": n_long,
+            "n_short": n_short,
+            "long": seen_long,
+            "long_norm": seen_long_norm,
+            "short": seen_short,
+            "short_norm": seen_short_norm,
+            "n_valid": n_valid,
+            "n_uniq": len(seen_valid),
+            "n_uniq_norm": len(seen_valid_norm),
+        }
 
     eval_lines, eval_norm_lines = set(), set()
     eval_counts, eval_short_counts = {}, {}
@@ -159,8 +169,12 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
         st = scan(texts.get(split))
         eval_lines.update(st["long"])
         eval_norm_lines.update(st["long_norm"])
-        eval_counts[split] = (st["n_long"], st["n_valid"], st["n_uniq"],
-                              st["n_uniq_norm"])
+        eval_counts[split] = (
+            st["n_long"],
+            st["n_valid"],
+            st["n_uniq"],
+            st["n_uniq_norm"],
+        )
         eval_short_counts[split] = st["n_short"]
         split_lines[split] = (st["long"], st["long_norm"])
         split_short[split] = (st["short"], st["short_norm"])
@@ -239,46 +253,62 @@ def decontaminate_texts(texts: dict, min_chars: int = 40):
         out["train"] = merged
     else:
         out["train"] = train_text
-    stats = {"min_chars": min_chars,
-             "normalization": "collapse_whitespace",
-             "unicode_normalization": "NFKC",
-             "train_lines_dropped_as_duplicates_of_eval": int(dropped_exact),
-             "train_lines_dropped_as_normalized_duplicates_of_eval":
-                 int(dropped_norm),
-             "train_intra_split_duplicate_lines_removed":
-                 int(dropped_train_exact),
-             "train_intra_split_normalized_duplicate_lines_removed":
-                 int(dropped_train_norm),
-             "val_test_overlap_long_lines": int(val_test_overlap),
-             "val_test_overlap_normalized_long_lines":
-                 int(val_test_overlap_norm),
-             "val_test_overlap_rate": float(
-                 val_test_overlap / max(1, len(val_long)))}
+    stats = {
+        "min_chars": min_chars,
+        "normalization": "collapse_whitespace",
+        "unicode_normalization": "NFKC",
+        "train_lines_dropped_as_duplicates_of_eval": int(dropped_exact),
+        "train_lines_dropped_as_normalized_duplicates_of_eval": int(dropped_norm),
+        "train_intra_split_duplicate_lines_removed": int(dropped_train_exact),
+        "train_intra_split_normalized_duplicate_lines_removed": int(dropped_train_norm),
+        "val_test_overlap_long_lines": int(val_test_overlap),
+        "val_test_overlap_normalized_long_lines": int(val_test_overlap_norm),
+        "val_test_overlap_rate": float(val_test_overlap / max(1, len(val_long))),
+    }
     short_pairs = {
-        "train_val": (seen_short_train, seen_short_train_norm,
-                      split_short["val"][0], split_short["val"][1],
-                      eval_short_counts["val"]),
-        "train_test": (seen_short_train, seen_short_train_norm,
-                       split_short["test"][0], split_short["test"][1],
-                       eval_short_counts["test"]),
-        "val_test": (split_short["val"][0], split_short["val"][1],
-                     split_short["test"][0], split_short["test"][1],
-                     eval_short_counts["test"]),
+        "train_val": (
+            seen_short_train,
+            seen_short_train_norm,
+            split_short["val"][0],
+            split_short["val"][1],
+            eval_short_counts["val"],
+        ),
+        "train_test": (
+            seen_short_train,
+            seen_short_train_norm,
+            split_short["test"][0],
+            split_short["test"][1],
+            eval_short_counts["test"],
+        ),
+        "val_test": (
+            split_short["val"][0],
+            split_short["val"][1],
+            split_short["test"][0],
+            split_short["test"][1],
+            eval_short_counts["test"],
+        ),
     }
     for key, (a, an, b, bn, denom) in short_pairs.items():
         exact = len(a & b)
         stats[f"{key}_overlap_short_lines"] = int(exact)
         stats[f"{key}_overlap_normalized_short_lines"] = int(len(an & bn))
         stats[f"{key}_short_overlap_rate"] = float(exact / max(1, denom))
-    per_split = {"train": (n_train, n_valid_train, len(seen_valid_train),
-                           len(seen_valid_train_norm)),
-                 "val": eval_counts["val"], "test": eval_counts["test"]}
+    per_split = {
+        "train": (
+            n_train,
+            n_valid_train,
+            len(seen_valid_train),
+            len(seen_valid_train_norm),
+        ),
+        "val": eval_counts["val"],
+        "test": eval_counts["test"],
+    }
     for split, (n_long, n_valid, n_uniq, n_uniq_norm) in per_split.items():
         stats[f"{split}_long_lines"] = int(n_long)
-        stats[f"{split}_intra_split_duplicate_lines"] = int(
-            n_valid - n_uniq)
+        stats[f"{split}_intra_split_duplicate_lines"] = int(n_valid - n_uniq)
         stats[f"{split}_intra_split_normalized_duplicate_lines"] = int(
-            n_valid - n_uniq_norm)
+            n_valid - n_uniq_norm
+        )
     return out, stats
 
 
@@ -440,8 +470,7 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
         "val_blocks_scanned": int(eval_scan["val"][1]),
         "test_blocks_scanned": int(eval_scan["test"][1]),
         "val_test_overlap_blocks": int(val_test_overlap),
-        "val_test_overlap_rate": float(
-            val_test_overlap / max(1, len(val_hashes))),
+        "val_test_overlap_rate": float(val_test_overlap / max(1, len(val_hashes))),
     }
     return out, stats
 
@@ -468,7 +497,6 @@ def decontaminate_documents(texts: dict, min_lines: int = 2):
 # 但 containment=1。这里从每个块的 shingle 集合中均匀取少量真实 shingle
 # 作为锚点；扫描另一侧时统计命中的锚点数，达到阈值比例即进入候选，再由
 # 精确 Jaccard/containment 裁决。候选阶段只需高召回，精确阶段保证不误删。
-
 
 
 def _near_dup_normalize(text: str) -> str:
@@ -502,7 +530,7 @@ def _near_dup_shingles(norm: str, n: int = NEAR_DUP_SHINGLE):
         h = b[: b.size - n + 1].copy()
         for k in range(1, n):
             h *= _U64_BASE
-            h += b[k: b.size - n + 1 + k]
+            h += b[k : b.size - n + 1 + k]
         h = _mix64(h)
     return np.unique(h)
 
@@ -562,8 +590,7 @@ def _near_dup_build_anchor_index(metas, threshold: float):
             continue
         # 阈值的 0.5 倍：候选阶段偏向高召回（近阈值副本可能只命中部分
         # 锚点），避免把“近似重复”漏成“没有候选”。精确阶段仍按原阈值。
-        req = max(1, int(math.floor(NEAR_DUP_ANCHORS * float(threshold)
-                                      * 0.5)))
+        req = max(1, int(math.floor(NEAR_DUP_ANCHORS * float(threshold) * 0.5)))
         req = min(req, int(anchors.size))
         required[idx] = req
         for h in anchors.tolist():
@@ -602,20 +629,32 @@ def _near_dup_similarity(a, b):
     return jac, con
 
 
-def _near_dup_collect(text: str, split: str, min_chars: int,
-                      min_shingles: int, max_chars: int,
-                      collect_anchors: bool = False,
-                      anchor_index=None):
+def _near_dup_collect(
+    text: str,
+    split: str,
+    min_chars: int,
+    min_shingles: int,
+    max_chars: int,
+    collect_anchors: bool = False,
+    anchor_index=None,
+):
     """把文本切成段落块并计算签名；返回 (metadata, signatures, counts)。
 
     counts 同时记录块数与字符数：只报“扫描了 N 个块”无法说明这些块覆盖了
     语料的多少字符；短块/超大块被跳过的影响必须用字符覆盖率量化。
     """
     metas, sigs = [], []
-    counts = {"scanned": 0, "short": 0, "few_shingles": 0, "too_large": 0,
-              "chars_scanned": 0, "chars_short": 0,
-              "chars_few_shingles": 0, "chars_too_large": 0,
-              "chars_eligible": 0}
+    counts = {
+        "scanned": 0,
+        "short": 0,
+        "few_shingles": 0,
+        "too_large": 0,
+        "chars_scanned": 0,
+        "chars_short": 0,
+        "chars_few_shingles": 0,
+        "chars_too_large": 0,
+        "chars_eligible": 0,
+    }
     for start, end, _digest, n_lines in _iter_blocks(text, min_lines=1):
         block_chars = int(end - start)
         counts["scanned"] += 1
@@ -634,8 +673,12 @@ def _near_dup_collect(text: str, split: str, min_chars: int,
             counts["few_shingles"] += 1
             counts["chars_few_shingles"] += block_chars
             continue
-        meta = {"split": str(split), "start": int(start),
-                "end": int(end), "lines": int(n_lines)}
+        meta = {
+            "split": str(split),
+            "start": int(start),
+            "end": int(end),
+            "lines": int(n_lines),
+        }
         counts["chars_eligible"] += block_chars
         if collect_anchors:
             meta["_anchors"] = _near_dup_anchor_ids(hashes)
@@ -655,8 +698,7 @@ def _near_dup_pair_type(split_a: str, split_b: str) -> str:
     与报告里固定的 ``val_test`` 字段/告警查表不一致。
     """
     order = {"train": 0, "val": 1, "test": 2}
-    a, b = sorted((str(split_a), str(split_b)),
-                  key=lambda x: (order.get(x, 99), x))
+    a, b = sorted((str(split_a), str(split_b)), key=lambda x: (order.get(x, 99), x))
     return f"{a}_{b}"
 
 
@@ -669,8 +711,9 @@ def _near_dup_eval_cluster_stats(metas, edges, split: str) -> dict:
     计算，是块级审计指标，不等同于对 token 窗口方差做重加权。
     """
     idxs = [i for i, m in enumerate(metas) if m.get("split") == split]
-    eligible_chars = int(sum(int(metas[i]["end"]) - int(metas[i]["start"])
-                             for i in idxs))
+    eligible_chars = int(
+        sum(int(metas[i]["end"]) - int(metas[i]["start"]) for i in idxs)
+    )
     base = {
         "split": str(split),
         "eligible_blocks": int(len(idxs)),
@@ -715,33 +758,38 @@ def _near_dup_eval_cluster_stats(metas, edges, split: str) -> dict:
         comps.setdefault(find(i), []).append(i)
     clusters = [members for members in comps.values() if len(members) >= 2]
     clustered = [i for members in clusters for i in members]
-    clustered_chars = int(sum(int(metas[i]["end"]) - int(metas[i]["start"])
-                              for i in clustered))
+    clustered_chars = int(
+        sum(int(metas[i]["end"]) - int(metas[i]["start"]) for i in clustered)
+    )
     effective = int(len(idxs) - len(clustered) + len(clusters))
-    cluster_chars = [int(sum(int(metas[i]["end"]) - int(metas[i]["start"])
-                             for i in members))
-                     for members in clusters]
-    base.update({
-        "blocks_in_near_duplicate_clusters": int(len(clustered)),
-        "near_duplicate_clusters": int(len(clusters)),
-        "largest_cluster_blocks": int(
-            max((len(members) for members in clusters), default=0)),
-        "largest_cluster_chars": int(max(cluster_chars, default=0)),
-        "clustered_chars": clustered_chars,
-        "duplicate_fraction_blocks": float(
-            len(clustered) / max(1, len(idxs))),
-        "duplicate_fraction_chars": float(
-            clustered_chars / max(1, eligible_chars)),
-        "effective_blocks": effective,
-        "effective_block_fraction": float(effective / max(1, len(idxs))),
-    })
+    cluster_chars = [
+        int(sum(int(metas[i]["end"]) - int(metas[i]["start"]) for i in members))
+        for members in clusters
+    ]
+    base.update(
+        {
+            "blocks_in_near_duplicate_clusters": int(len(clustered)),
+            "near_duplicate_clusters": int(len(clusters)),
+            "largest_cluster_blocks": int(
+                max((len(members) for members in clusters), default=0)
+            ),
+            "largest_cluster_chars": int(max(cluster_chars, default=0)),
+            "clustered_chars": clustered_chars,
+            "duplicate_fraction_blocks": float(len(clustered) / max(1, len(idxs))),
+            "duplicate_fraction_chars": float(clustered_chars / max(1, eligible_chars)),
+            "effective_blocks": effective,
+            "effective_block_fraction": float(effective / max(1, len(idxs))),
+        }
+    )
     return base
 
 
-def decontaminate_near_duplicates(texts: dict,
-                                  threshold: float = NEAR_DUP_THRESHOLD,
-                                  min_chars: int = NEAR_DUP_MIN_CHARS,
-                                  min_shingles: int = NEAR_DUP_MIN_SHINGLES):
+def decontaminate_near_duplicates(
+    texts: dict,
+    threshold: float = NEAR_DUP_THRESHOLD,
+    min_chars: int = NEAR_DUP_MIN_CHARS,
+    min_shingles: int = NEAR_DUP_MIN_SHINGLES,
+):
     """近似重复去污染：只改写 train，val/test 逐字节保持原样。
 
     返回 (cleaned_texts, stats)。统计写入 data_report.json 的
@@ -754,8 +802,7 @@ def decontaminate_near_duplicates(texts: dict,
     try:
         threshold = float(threshold)
     except (TypeError, ValueError, OverflowError) as e:
-        raise ValueError(
-            f"threshold 必须是 (0,1] 内的数值，收到 {threshold!r}") from e
+        raise ValueError(f"threshold 必须是 (0,1] 内的数值，收到 {threshold!r}") from e
     if not math.isfinite(threshold) or not 0.0 < threshold <= 1.0:
         raise ValueError(f"threshold 必须是 (0,1] 内的数值，收到 {threshold!r}")
     min_chars = strict_int(min_chars, "min_chars")
@@ -780,13 +827,22 @@ def decontaminate_near_duplicates(texts: dict,
     for split in ("val", "test"):
         t = texts.get(split)
         if not isinstance(t, str) or not t:
-            eval_counts[split] = {"scanned": 0, "short": 0,
-                                  "few_shingles": 0, "too_large": 0,
-                                  "eligible": 0}
+            eval_counts[split] = {
+                "scanned": 0,
+                "short": 0,
+                "few_shingles": 0,
+                "too_large": 0,
+                "eligible": 0,
+            }
             continue
         metas, sigs, counts = _near_dup_collect(
-            t, split, min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS,
-            collect_anchors=True)
+            t,
+            split,
+            min_chars,
+            min_shingles,
+            NEAR_DUP_MAX_BLOCK_CHARS,
+            collect_anchors=True,
+        )
         eval_counts[split] = dict(counts, eligible=len(metas))
         eval_metas.extend(metas)
         eval_sigs.extend(sigs)
@@ -795,12 +851,20 @@ def decontaminate_near_duplicates(texts: dict,
     # 扫描 train 块可发现“短 eval 段被长 train 文档整体包含”（Jaccard 低、
     # containment 高）的副本；train 锚点索引稍后反向扫描 eval 块。
     eval_anchor_index, eval_anchor_required = _near_dup_build_anchor_index(
-        eval_metas, threshold)
+        eval_metas, threshold
+    )
     train_metas, train_sigs, train_counts = _near_dup_collect(
-        train_text, "train", min_chars, min_shingles, NEAR_DUP_MAX_BLOCK_CHARS,
-        collect_anchors=True, anchor_index=eval_anchor_index)
+        train_text,
+        "train",
+        min_chars,
+        min_shingles,
+        NEAR_DUP_MAX_BLOCK_CHARS,
+        collect_anchors=True,
+        anchor_index=eval_anchor_index,
+    )
     train_anchor_index, train_anchor_required = _near_dup_build_anchor_index(
-        train_metas, threshold)
+        train_metas, threshold
+    )
     n_eval = len(eval_metas)
     n_train = len(train_metas)
 
@@ -812,14 +876,11 @@ def decontaminate_near_duplicates(texts: dict,
     sensitivity = sorted(sens_values.values())
     sens_keys = {v: k for k, v in sens_values.items()}
     pair_types = ("train_val", "train_test", "train_train", "val_test")
-    sens_counts = {sens_keys[t]: {k: 0 for k in pair_types}
-                   for t in sensitivity}
+    sens_counts = {sens_keys[t]: {k: 0 for k in pair_types} for t in sensitivity}
     # 每个敏感性阈值下“实际会删掉哪些块”。只报候选/判定对数无法回答
     # “阈值从 0.7 调到 0.9，训练集少多少字符”，也无法与 removal_fraction
     # 对照；这里逐阈值维护删除集合，最后统一换算为块/行/字符量。
-    sens_removal = {
-        sens_keys[t]: {"cross": set(), "intra": set()}
-        for t in sensitivity}
+    sens_removal = {sens_keys[t]: {"cross": set(), "intra": set()} for t in sensitivity}
     sens_removal_stats = {
         sens_keys[t]: {
             "train_blocks_removed_cross_split": 0,
@@ -828,7 +889,9 @@ def decontaminate_near_duplicates(texts: dict,
             "train_lines_removed": 0,
             "train_chars_removed": 0,
             "removal_fraction_chars": 0.0,
-        } for t in sensitivity}
+        }
+        for t in sensitivity
+    }
     max_score = 0.0
     top_examples = []
     candidate_pairs = 0
@@ -848,12 +911,16 @@ def decontaminate_near_duplicates(texts: dict,
     # 只要有至少两个块可比就运行：train 为空时仍需做 val-test 诊断；
     # train 只有 1 块且无 eval 时没有任何 pair，可跳过。
     if (n_train + n_eval) >= 2 and (n_train > 0 or n_eval > 1):
-        eval_arr = (np.asarray(eval_sigs, dtype=np.uint64)
-                    if eval_sigs else np.zeros(
-                        (0, NEAR_DUP_HASHES), dtype=np.uint64))
-        train_arr = (np.asarray(train_sigs, dtype=np.uint64)
-                     if train_sigs else np.zeros(
-                         (0, NEAR_DUP_HASHES), dtype=np.uint64))
+        eval_arr = (
+            np.asarray(eval_sigs, dtype=np.uint64)
+            if eval_sigs
+            else np.zeros((0, NEAR_DUP_HASHES), dtype=np.uint64)
+        )
+        train_arr = (
+            np.asarray(train_sigs, dtype=np.uint64)
+            if train_sigs
+            else np.zeros((0, NEAR_DUP_HASHES), dtype=np.uint64)
+        )
         sigs = np.vstack([eval_arr, train_arr])
         metas = eval_metas + train_metas
         n_all = len(metas)
@@ -888,8 +955,10 @@ def decontaminate_near_duplicates(texts: dict,
                         a, b = ids[x], ids[y]
                         # val-val / test-test 不参与去污染，但必须单独诊断：
                         # 评测集内部近重复会缩小有效独立样本量。
-                        if (metas[a]["split"] == metas[b]["split"]
-                                and metas[a]["split"] != "train"):
+                        if (
+                            metas[a]["split"] == metas[b]["split"]
+                            and metas[a]["split"] != "train"
+                        ):
                             _add_eval_internal_candidate(a, b)
                             continue
                         pair = (a, b) if a < b else (b, a)
@@ -912,8 +981,7 @@ def decontaminate_near_duplicates(texts: dict,
             arr = cache.get(idx)
             if arr is None:
                 m = metas[idx]
-                norm = _near_dup_normalize(
-                    texts[m["split"]][m["start"]:m["end"]])
+                norm = _near_dup_normalize(texts[m["split"]][m["start"] : m["end"]])
                 arr = _near_dup_shingles(norm)
                 if len(cache) >= NEAR_DUP_CACHE_BLOCKS:
                     cache.clear()
@@ -964,8 +1032,10 @@ def decontaminate_near_duplicates(texts: dict,
                             continue
                         if count < eval_anchor_required.get(ej, 1):
                             continue
-                        if (metas[ei]["split"] == metas[ej]["split"]
-                                and metas[ei]["split"] != "train"):
+                        if (
+                            metas[ei]["split"] == metas[ej]["split"]
+                            and metas[ei]["split"] != "train"
+                        ):
                             _add_eval_internal_candidate(ei, ej)
                             continue
                         _add_anchor_candidate(ei, ej)
@@ -1002,8 +1072,7 @@ def decontaminate_near_duplicates(texts: dict,
             if ptype in ("train_val", "train_test"):
                 train_idx = a if ma["split"] == "train" else b
             elif ptype == "train_train":
-                later = a if (ma["start"], ma["end"]) > (
-                    mb["start"], mb["end"]) else b
+                later = a if (ma["start"], ma["end"]) > (mb["start"], mb["end"]) else b
             for t in sensitivity:
                 if score >= t:
                     key = sens_keys[t]
@@ -1019,11 +1088,16 @@ def decontaminate_near_duplicates(texts: dict,
                 elif later is not None:
                     remove_intra.add(later)
                 if len(top_examples) < 10 or score > top_examples[-1]["score"]:
-                    top_examples.append({
-                        "pair": ptype, "jaccard": float(jac),
-                        "containment": float(con), "score": float(score),
-                        "chars_a": int(ma["end"] - ma["start"]),
-                        "chars_b": int(mb["end"] - mb["start"])})
+                    top_examples.append(
+                        {
+                            "pair": ptype,
+                            "jaccard": float(jac),
+                            "containment": float(con),
+                            "score": float(score),
+                            "chars_a": int(ma["end"] - ma["start"]),
+                            "chars_b": int(mb["end"] - mb["start"]),
+                        }
+                    )
                     top_examples.sort(key=lambda r: -r["score"])
                     del top_examples[10:]
 
@@ -1039,12 +1113,18 @@ def decontaminate_near_duplicates(texts: dict,
             if score < min_sens:
                 continue
             ptype = _near_dup_pair_type(ma["split"], mb["split"])
-            eval_internal_scores.append({
-                "pair": ptype, "jaccard": float(jac),
-                "containment": float(con), "score": float(score),
-                "chars_a": int(ma["end"] - ma["start"]),
-                "chars_b": int(mb["end"] - mb["start"]),
-                "a": int(a), "b": int(b)})
+            eval_internal_scores.append(
+                {
+                    "pair": ptype,
+                    "jaccard": float(jac),
+                    "containment": float(con),
+                    "score": float(score),
+                    "chars_a": int(ma["end"] - ma["start"]),
+                    "chars_b": int(mb["end"] - mb["start"]),
+                    "a": int(a),
+                    "b": int(b),
+                }
+            )
             if score >= threshold:
                 verified_eval_internal_pairs += 1
             for t in sensitivity:
@@ -1052,32 +1132,35 @@ def decontaminate_near_duplicates(texts: dict,
                     eval_internal_edges[sens_keys[t]].append((a, b))
         eval_internal_top = [
             {k: v for k, v in row.items() if k not in ("a", "b")}
-            for row in sorted(eval_internal_scores,
-                              key=lambda r: -r["score"])[:10]]
+            for row in sorted(eval_internal_scores, key=lambda r: -r["score"])[:10]
+        ]
         remove_all = remove_cross | remove_intra
         if remove_all:
-            ranges = [(metas[i]["start"], metas[i]["end"])
-                      for i in sorted(remove_all)]
+            ranges = [(metas[i]["start"], metas[i]["end"]) for i in sorted(remove_all)]
             out["train"] = _remove_ranges(train_text, ranges)
         dropped_lines = sum(int(metas[i]["lines"]) for i in remove_all)
-        dropped_chars = sum(int(metas[i]["end"] - metas[i]["start"])
-                            for i in remove_all)
+        dropped_chars = sum(
+            int(metas[i]["end"] - metas[i]["start"]) for i in remove_all
+        )
         for t in sensitivity:
             key = sens_keys[t]
             cross = sens_removal[key]["cross"]
             intra = sens_removal[key]["intra"] - cross
             removed = cross | intra
             removed_chars = sum(
-                int(metas[i]["end"] - metas[i]["start"]) for i in removed)
+                int(metas[i]["end"] - metas[i]["start"]) for i in removed
+            )
             sens_removal_stats[key] = {
                 "train_blocks_removed_cross_split": int(len(cross)),
                 "train_blocks_removed_intra_split": int(len(intra)),
                 "train_blocks_removed_total": int(len(removed)),
-                "train_lines_removed": int(sum(
-                    int(metas[i]["lines"]) for i in removed)),
+                "train_lines_removed": int(
+                    sum(int(metas[i]["lines"]) for i in removed)
+                ),
                 "train_chars_removed": int(removed_chars),
                 "removal_fraction_chars": float(
-                    removed_chars / max(1, len(train_text))),
+                    removed_chars / max(1, len(train_text))
+                ),
             }
     else:
         remove_cross, remove_intra = set(), set()
@@ -1096,17 +1179,21 @@ def decontaminate_near_duplicates(texts: dict,
         key = sens_keys[t]
         per_split = {}
         for split in ("val", "test"):
-            split_edges = [(a, b) for a, b in eval_internal_edges[key]
-                           if eval_metas[a]["split"] == split]
-            row = _near_dup_eval_cluster_stats(
-                eval_metas, split_edges, split)
+            split_edges = [
+                (a, b)
+                for a, b in eval_internal_edges[key]
+                if eval_metas[a]["split"] == split
+            ]
+            row = _near_dup_eval_cluster_stats(eval_metas, split_edges, split)
             total_chars = _eval_total_chars(split)
             row["split_chars_total"] = total_chars
             row["split_chars_scanned"] = _eval_count(split, "chars_scanned")
             row["eligible_coverage_fraction"] = float(
-                row["eligible_chars"] / max(1, total_chars))
+                row["eligible_chars"] / max(1, total_chars)
+            )
             row["clustered_fraction_of_split_chars"] = float(
-                row["clustered_chars"] / max(1, total_chars))
+                row["clustered_chars"] / max(1, total_chars)
+            )
             per_split[split] = row
         eval_internal_by_threshold[key] = {
             "verified_pairs": int(len(eval_internal_edges[key])),
@@ -1120,8 +1207,9 @@ def decontaminate_near_duplicates(texts: dict,
     train_chars_scanned = int(train_counts["chars_scanned"])
     stats = {
         "method": "minhash_lsh_exact_verify",
-        "similarity": ("max(jaccard, containment) for cross-split; "
-                       "jaccard for train-internal"),
+        "similarity": (
+            "max(jaccard, containment) for cross-split; " "jaccard for train-internal"
+        ),
         "shingle_size": int(NEAR_DUP_SHINGLE),
         "shingle_unit": "utf-8 byte n-grams after NFKC+casefold+whitespace",
         "threshold": float(threshold),
@@ -1132,7 +1220,8 @@ def decontaminate_near_duplicates(texts: dict,
         "lsh_bands": int(NEAR_DUP_BANDS),
         "lsh_rows": int(NEAR_DUP_ROWS),
         "lsh_recall_at_threshold": float(
-            1.0 - (1.0 - threshold ** NEAR_DUP_ROWS) ** NEAR_DUP_BANDS),
+            1.0 - (1.0 - threshold**NEAR_DUP_ROWS) ** NEAR_DUP_BANDS
+        ),
         "threshold_sensitivity": sens_counts,
         # 与 threshold_sensitivity（判定对数）互补：实际删除的块/行/字符量。
         # 阈值升高会同时减少“判为近重复的对”和“被删掉的训练数据”，两者
@@ -1147,13 +1236,14 @@ def decontaminate_near_duplicates(texts: dict,
         # 字符范围内成立。把分母写清楚，避免把未扫描部分当成已验证。
         "train_chars_scanned": train_chars_scanned,
         "train_chars_skipped_short": int(train_counts["chars_short"]),
-        "train_chars_skipped_few_shingles": int(
-            train_counts["chars_few_shingles"]),
+        "train_chars_skipped_few_shingles": int(train_counts["chars_few_shingles"]),
         "train_chars_skipped_too_large": int(train_counts["chars_too_large"]),
         "train_chars_coverage_fraction": float(
-            train_chars_eligible / max(1, train_chars_total)),
+            train_chars_eligible / max(1, train_chars_total)
+        ),
         "train_scanned_block_char_coverage_fraction": float(
-            train_chars_eligible / max(1, train_chars_scanned)),
+            train_chars_eligible / max(1, train_chars_scanned)
+        ),
         "near_duplicate_min_coverage": float(NEAR_DUP_MIN_COVERAGE),
         "val_blocks_scanned": _eval_count("val", "scanned"),
         "val_blocks_eligible": _eval_count("val", "eligible"),
@@ -1173,47 +1263,48 @@ def decontaminate_near_duplicates(texts: dict,
         "oversized_groups_truncated": int(truncated_groups),
         "verified_pairs_at_threshold": int(verified_pairs),
         "max_similarity": float(max_score),
-        "max_similarity_scope": ("LSH and containment-anchor candidates "
-                                 "passing exact verification"),
+        "max_similarity_scope": (
+            "LSH and containment-anchor candidates " "passing exact verification"
+        ),
         "top_similarities": top_examples,
-        "train_blocks_dropped_as_near_duplicates_of_eval": int(
-            len(remove_cross)),
+        "train_blocks_dropped_as_near_duplicates_of_eval": int(len(remove_cross)),
         "train_intra_split_near_duplicates_removed": int(
-            len(remove_intra - remove_cross)),
+            len(remove_intra - remove_cross)
+        ),
         "train_blocks_dropped_total": int(len(remove_cross | remove_intra)),
         "train_lines_dropped": int(dropped_lines),
         "train_chars_dropped": int(dropped_chars),
         "train_chars_eligible": train_chars_eligible,
         "train_chars_total": train_chars_total,
-        "removal_fraction_chars": float(
-            dropped_chars / max(1, train_chars_total)),
+        "removal_fraction_chars": float(dropped_chars / max(1, train_chars_total)),
         "val_test_near_duplicate_pairs": int(
-            sens_counts[sens_keys[threshold]]["val_test"]),
+            sens_counts[sens_keys[threshold]]["val_test"]
+        ),
         "val_test_near_duplicate_pairs_by_threshold": {
             sens_keys[t]: int(sens_counts[sens_keys[t]]["val_test"])
-            for t in sensitivity},
+            for t in sensitivity
+        },
         "eval_internal_near_duplicates": {
             "method": "minhash_lsh_anchor_recall_exact_verify_cluster",
             "similarity": "max(jaccard, containment) within val or test",
             "threshold": float(threshold),
-            "warn_fraction_chars": float(
-                NEAR_DUP_EVAL_CLUSTER_WARN_FRACTION),
+            "warn_fraction_chars": float(NEAR_DUP_EVAL_CLUSTER_WARN_FRACTION),
             "scan_possible": bool(n_eval > 1),
             "candidate_pairs": int(len(eval_internal_candidates)),
             "candidate_pairs_truncated": bool(
-                eval_internal_truncated or truncated_candidates),
-            "verified_pairs_at_threshold": int(
-                verified_eval_internal_pairs),
+                eval_internal_truncated or truncated_candidates
+            ),
+            "verified_pairs_at_threshold": int(verified_eval_internal_pairs),
             "max_similarity": float(eval_internal_max_similarity),
             "top_similarities": eval_internal_top,
             "val": eval_internal_by_threshold[chosen_key]["val"],
             "test": eval_internal_by_threshold[chosen_key]["test"],
             "by_threshold": eval_internal_by_threshold,
-            "note": ("只诊断、不改写 val/test；簇为块级连通分量，"
-                     "duplicate_fraction_chars 的分母是该 split 中达到 "
-                     "min_chars 的块字符；有效块数不是对窗口方差的重加权"),
+            "note": (
+                "只诊断、不改写 val/test；簇为块级连通分量，"
+                "duplicate_fraction_chars 的分母是该 split 中达到 "
+                "min_chars 的块字符；有效块数不是对窗口方差的重加权"
+            ),
         },
     }
     return out, stats
-
-

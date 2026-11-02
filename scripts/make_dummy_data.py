@@ -4,6 +4,7 @@
 用法:
   python scripts/make_dummy_data.py --out_dir data/dummy
 """
+
 import argparse
 import os
 import random
@@ -11,8 +12,28 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-SYL = ["ka", "ro", "mi", "ta", "lu", "sen", "dor", "vil", "pen", "tor",
-       "nal", "bes", "qui", "mon", "fel", "gar", "hil", "jas", "ker", "lum"]
+SYL = [
+    "ka",
+    "ro",
+    "mi",
+    "ta",
+    "lu",
+    "sen",
+    "dor",
+    "vil",
+    "pen",
+    "tor",
+    "nal",
+    "bes",
+    "qui",
+    "mon",
+    "fel",
+    "gar",
+    "hil",
+    "jas",
+    "ker",
+    "lum",
+]
 KEYS = ["lyre", "orchid", "wolf", "raven", "ember", "cinder", "maple", "slate"]
 
 
@@ -21,8 +42,12 @@ def main():
     ap.add_argument("--out_dir", default="data/dummy")
     ap.add_argument("--train_words", type=int, default=260000)
     ap.add_argument("--val_words", type=int, default=30000)
-    ap.add_argument("--test_words", type=int, default=30000,
-                    help="held-out test 语料词数；<=0 则不生成 test（评测回退 val）")
+    ap.add_argument(
+        "--test_words",
+        type=int,
+        default=30000,
+        help="held-out test 语料词数；<=0 则不生成 test（评测回退 val）",
+    )
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
     # train/val 是训练与选型的基础 split，<=0 会生成只有 1 个 token 的退化流，
@@ -40,9 +65,11 @@ def main():
         vocab.add("".join(rng.choice(SYL) for _ in range(rng.randint(2, 3))))
     vocab = sorted(vocab)
     per = len(vocab) // 3
-    split_vocab = {"train": vocab[:per],
-                   "val": vocab[per:2 * per],
-                   "test": vocab[2 * per:]}
+    split_vocab = {
+        "train": vocab[:per],
+        "val": vocab[per : 2 * per],
+        "test": vocab[2 * per :],
+    }
 
     def make_text(n_words: int, split: str) -> str:
         # split 专属标识词前缀：即使词表分片意外相交，文本层面也不共享任何长串。
@@ -53,13 +80,17 @@ def main():
             r = rng.random()
             if r < 0.04:  # 4% 魔法数字句（给检索一点点可学的信号）
                 k = rng.choice(KEYS)
-                v = rng.randint(10 ** 6, 10 ** 7 - 1)
+                v = rng.randint(10**6, 10**7 - 1)
                 sent = f"One of the special magic numbers for {split} {k} is: {v}."
                 n = 11
-            elif r < 0.18:  # 重复句式（模拟 RULER 合成干扰），带 split 标识避免跨 split 复制
-                sent = (f"The {split} grass is green. The {split} sky is blue. "
-                        f"The {split} sun is yellow. Here we go {split}. "
-                        f"There and back again {split}.")
+            elif (
+                r < 0.18
+            ):  # 重复句式（模拟 RULER 合成干扰），带 split 标识避免跨 split 复制
+                sent = (
+                    f"The {split} grass is green. The {split} sky is blue. "
+                    f"The {split} sun is yellow. Here we go {split}. "
+                    f"There and back again {split}."
+                )
                 # 该模板恰好 24 个空格分隔词；少计会让生成语料超过请求词数。
                 n = 24
             else:
@@ -88,26 +119,35 @@ def main():
 
     from lega.data import prepare_bins
     from lega.datacheck import verify_splits_disjoint
+
     # 协议声明“无共享样本”必须与实际写出的文本核对，而不是只作文本断言
     split_protocol = {
         "mode": "independent_generation",
-        "order": ("train/val/test 各自独立生成（不相交词表分片，"
-                  "无共享样本）"),
+        "order": ("train/val/test 各自独立生成（不相交词表分片，" "无共享样本）"),
         "shuffled": False,
     }
     has_test = os.path.exists(test_txt)
-    split_protocol.update(verify_splits_disjoint({
-        "train": os.path.join(args.out_dir, "train.txt"),
-        "val": os.path.join(args.out_dir, "val.txt"),
-        **({"test": test_txt} if has_test else {})},
-        required_splits=(("train", "val", "test") if has_test
-                         else ("train", "val"))))
+    split_protocol.update(
+        verify_splits_disjoint(
+            {
+                "train": os.path.join(args.out_dir, "train.txt"),
+                "val": os.path.join(args.out_dir, "val.txt"),
+                **({"test": test_txt} if has_test else {}),
+            },
+            required_splits=(
+                ("train", "val", "test") if has_test else ("train", "val")
+            ),
+        )
+    )
     if not split_protocol.get("verified_disjoint", True):
         raise SystemExit(
             "[dummy] 生成器自检失败：split 的实际文本存在跨 split 共享长行"
-            f"（{split_protocol['overlap_long_lines']}），与“无共享样本”声明不符")
+            f"（{split_protocol['overlap_long_lines']}），与“无共享样本”声明不符"
+        )
     meta = prepare_bins(
-        args.out_dir, kind="auto", force=True,
+        args.out_dir,
+        kind="auto",
+        force=True,
         extra_report={
             "source": "dummy_synthetic",
             # 生成器版本信息进 data_report：数据内容指纹之外，种子/规模也可追溯
@@ -119,7 +159,8 @@ def main():
                 "test_words": int(args.test_words),
             },
             "split_protocol": split_protocol,
-        })
+        },
+    )
     print(f"[dummy] 完成: {meta}")
 
 

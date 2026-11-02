@@ -7,16 +7,26 @@
   * 汇总层必须把“总体平均与最长上下文方向相反”“各档任务不等权”显式
     暴露，而不是只用跨长度平均掩盖。
 """
+
 import json
 import math
 import os
 import shutil
 import tempfile
 
-from lega.lengtheffect import (context_macro_means, context_task_means,
-                               log2_slope, span_contrast)
-from run_all import (_length_trend_verdict, _render_ruler_length,
-                     _ruler_avg_of, _ruler_length_analysis, build_summary)
+from lega.lengtheffect import (
+    context_macro_means,
+    context_task_means,
+    log2_slope,
+    span_contrast,
+)
+from run_all import (
+    _length_trend_verdict,
+    _render_ruler_length,
+    _ruler_avg_of,
+    _ruler_length_analysis,
+    build_summary,
+)
 
 
 def _payload(results):
@@ -30,19 +40,21 @@ def _write_json(path, obj):
 
 def test_context_task_means_skips_invalid_cells():
     """非法 n/越界比例/非规范 ctx 键按缺失或损坏处理，不伪造观测。"""
-    payload = _payload({
-        "niah_synth": {
-            "512": {"em": 0.5, "n": 20},
-            "1024": {"em": 1.5, "n": 20},        # EM 越界 → 跳过
-            "2048": {"em": 0.25, "n": 0},        # n=0 → 跳过
-        },
-        "vt": {
-            "512": {"em": 0.25, "n": 10},
-            "1024": {"em": 0.75},                # 旧产物缺 n：保留
-        },
-        "_skipped": ["bad"],
-        "_badcases": [{"x": 1}],
-    })
+    payload = _payload(
+        {
+            "niah_synth": {
+                "512": {"em": 0.5, "n": 20},
+                "1024": {"em": 1.5, "n": 20},  # EM 越界 → 跳过
+                "2048": {"em": 0.25, "n": 0},  # n=0 → 跳过
+            },
+            "vt": {
+                "512": {"em": 0.25, "n": 10},
+                "1024": {"em": 0.75},  # 旧产物缺 n：保留
+            },
+            "_skipped": ["bad"],
+            "_badcases": [{"x": 1}],
+        }
+    )
     out = context_task_means(payload)
     assert set(out) == {512, 1024}, out
     assert out[512] == {"niah_synth": 0.5, "vt": 0.25}
@@ -55,26 +67,31 @@ def test_context_task_means_skips_invalid_cells():
 
 def test_context_task_means_rejects_non_canonical_and_duplicate_keys():
     """'0512' 与 '512' 会合并两个原始键：无法判断是否同档位，整体拒绝。"""
-    bad = _payload({"niah_synth": {
-        "512": {"em": 0.5, "n": 10},
-        "0512": {"em": 0.6, "n": 10},
-    }})
+    bad = _payload(
+        {
+            "niah_synth": {
+                "512": {"em": 0.5, "n": 10},
+                "0512": {"em": 0.6, "n": 10},
+            }
+        }
+    )
     assert context_task_means(bad) == {}
     bad2 = _payload({"niah_synth": {"512.0": {"em": 0.5, "n": 10}}})
     assert context_task_means(bad2) == {}
     bad3 = _payload({"niah_synth": {" 512": {"em": 0.5, "n": 10}}})
     assert context_task_means(bad3) == {}
     # 不同任务在同一 ctx 上的同名键是正常设计，不能误判为重复。
-    ok = _payload({
-        "niah_synth": {"512": {"em": 0.5, "n": 10}},
-        "vt": {"512": {"em": 0.1, "n": 10}},
-    })
+    ok = _payload(
+        {
+            "niah_synth": {"512": {"em": 0.5, "n": 10}},
+            "vt": {"512": {"em": 0.1, "n": 10}},
+        }
+    )
     assert set(context_task_means(ok)) == {512}
 
 
 def test_context_task_means_malformed_returns_empty():
-    for payload in (None, [], {}, {"results": []},
-                    {"results": {"_skipped": ["x"]}}):
+    for payload in (None, [], {}, {"results": []}, {"results": {"_skipped": ["x"]}}):
         assert context_task_means(payload) == {}
         assert context_macro_means(payload) == {}
     # 全零与“没有观测”必须可区分：前者是有效的 0 分，后者是空。
@@ -86,46 +103,59 @@ def test_context_task_means_rejects_numpy_bools_like_run_all():
     """np.bool_ 在 NumPy 2.x 的类型名是 "bool"：必须按 bool 拒绝。"""
     import numpy as np
     from lega.lengtheffect import _finite, _positive_count
+
     assert _finite(np.True_) is None
     assert _finite(np.False_) is None
     assert _positive_count(np.True_) is None
     assert _positive_count(np.False_) is None
-    payload = _payload({"a": {
-        "512": {"em": np.True_, "n": 10},
-        "1024": {"em": 0.5, "n": 10},
-    }})
+    payload = _payload(
+        {
+            "a": {
+                "512": {"em": np.True_, "n": 10},
+                "1024": {"em": 0.5, "n": 10},
+            }
+        }
+    )
     # em=True 不能成为 1.0：否则长度分层会多出一格总体 RULER 平均没有的观测。
     assert context_task_means(payload) == {1024: {"a": 0.5}}
-    bad_n = _payload({"a": {
-        "512": {"em": 1.0, "n": np.True_},
-        "1024": {"em": 0.5, "n": 10},
-    }})
+    bad_n = _payload(
+        {
+            "a": {
+                "512": {"em": 1.0, "n": np.True_},
+                "1024": {"em": 0.5, "n": 10},
+            }
+        }
+    )
     assert context_task_means(bad_n) == {1024: {"a": 0.5}}
     assert abs(context_macro_means(bad_n)[1024] - _ruler_avg_of(bad_n)) < 1e-12
     # 上下文键也不能是 numpy bool（否则可能被当成 1）。
-    assert context_task_means(_payload({"a": {
-        np.True_: {"em": 0.5, "n": 10}}})) == {}
-    assert context_macro_means(
-        {"ctx_lens": [np.True_],
-         "results": {"a": {"1": {"em": 0.5, "n": 10}}}},
-        align_requested=True) == {}
+    assert context_task_means(_payload({"a": {np.True_: {"em": 0.5, "n": 10}}})) == {}
+    assert (
+        context_macro_means(
+            {"ctx_lens": [np.True_], "results": {"a": {"1": {"em": 0.5, "n": 10}}}},
+            align_requested=True,
+        )
+        == {}
+    )
 
 
 def test_context_task_means_accepts_exact_huge_and_numeric_string_counts():
     """合法大整数 n 不能因 float 溢出被丢掉；数值字符串与 run_all 同口径。"""
-    huge_n = 10 ** 400
-    payload = _payload({
-        "niah_synth": {
-            "512": {"em": 0.5, "n": huge_n},
-            "1024": {"em": 0.75, "n": "20"},
-            "2048": {"em": 0.25, "n": 4.0},
-        },
-        "vt": {
-            "512": {"em": 0.1, "n": "2e1"},
-            "1024": {"em": 0.25, "n": 5},
-            "2048": {"em": 0.75, "n": 5},
-        },
-    })
+    huge_n = 10**400
+    payload = _payload(
+        {
+            "niah_synth": {
+                "512": {"em": 0.5, "n": huge_n},
+                "1024": {"em": 0.75, "n": "20"},
+                "2048": {"em": 0.25, "n": 4.0},
+            },
+            "vt": {
+                "512": {"em": 0.1, "n": "2e1"},
+                "1024": {"em": 0.25, "n": 5},
+                "2048": {"em": 0.75, "n": 5},
+            },
+        }
+    )
     out = context_task_means(payload)
     assert out == {
         512: {"niah_synth": 0.5, "vt": 0.1},
@@ -136,42 +166,49 @@ def test_context_task_means_accepts_exact_huge_and_numeric_string_counts():
     macro = context_macro_means(payload)
     assert abs(sum(macro.values()) / len(macro) - _ruler_avg_of(payload)) < 1e-12
     # 非规范/非整数/非正的字符串计数仍是损坏元数据，按缺失跳过。
-    bad = _payload({"vt": {
-        "512": {"em": 0.2, "n": "1_0"},
-        "1024": {"em": 0.4, "n": "2.5"},
-        "2048": {"em": 0.6, "n": "0"},
-    }})
+    bad = _payload(
+        {
+            "vt": {
+                "512": {"em": 0.2, "n": "1_0"},
+                "1024": {"em": 0.4, "n": "2.5"},
+                "2048": {"em": 0.6, "n": "0"},
+            }
+        }
+    )
     assert context_task_means(bad) == {}
 
 
 def test_context_task_means_accepts_numeric_string_metrics_like_run_all():
     """数值字符串 EM 不能被长度分层单独丢掉，否则与 RULER macro 不可比。"""
-    payload = _payload({
-        "a": {"256": {"em": "0.5", "n": 2},
-              "512": {"em": "0.25", "n": 2}},
-        "b": {"256": {"em": 0.1, "n": "2"},
-              "512": {"em": "0.2", "n": 2}},
-    })
+    payload = _payload(
+        {
+            "a": {"256": {"em": "0.5", "n": 2}, "512": {"em": "0.25", "n": 2}},
+            "b": {"256": {"em": 0.1, "n": "2"}, "512": {"em": "0.2", "n": 2}},
+        }
+    )
     out = context_task_means(payload)
     assert out[256] == {"a": 0.5, "b": 0.1}
     assert out[512] == {"a": 0.25, "b": 0.2}
     macro = context_macro_means(payload)
     assert abs(sum(macro.values()) / len(macro) - _ruler_avg_of(payload)) < 1e-12
     # 非数值/下划线数字串仍是缺失，不能伪造成观测。
-    bad = _payload({"a": {
-        "256": {"em": "bad", "n": 2},
-        "512": {"em": "1_0", "n": 2},
-    }})
+    bad = _payload(
+        {
+            "a": {
+                "256": {"em": "bad", "n": 2},
+                "512": {"em": "1_0", "n": 2},
+            }
+        }
+    )
     assert context_task_means(bad) == {}
 
 
 def test_log2_slope_recovers_known_log_linear_relation():
     ctxs = [512, 1024, 2048, 4096]
-    values = [0.30, 0.20, 0.10, 0.00]   # 每翻倍 -0.10
+    values = [0.30, 0.20, 0.10, 0.00]  # 每翻倍 -0.10
     assert abs(log2_slope(ctxs, values) + 0.10) < 1e-12
     # 输入顺序无关（内部按 ctx 排序）。
-    assert abs(log2_slope(list(reversed(ctxs)),
-                          list(reversed(values))) + 0.10) < 1e-12
+    assert abs(log2_slope(list(reversed(ctxs)), list(reversed(values))) + 0.10) < 1e-12
     assert abs(span_contrast(ctxs, values) + 0.30) < 1e-12
 
 
@@ -193,30 +230,49 @@ def test_log2_slope_and_span_reject_undefined_inputs():
     assert log2_slope([512, 1024], [huge, huge]) == 0.0
     assert span_contrast([512, 1024], [huge, huge]) == 0.0
     # 中心化乘积先溢出、但真实斜率仍可表示的序列：缩放重算后应恢复。
-    assert abs(log2_slope([512, 1024, 2048],
-                          [huge, huge, -huge]) + huge) < 1e292
+    assert abs(log2_slope([512, 1024, 2048], [huge, huge, -huge]) + huge) < 1e292
     # 首末差本身超出 float 表示范围时仍按“无法定义”处理。
     assert span_contrast([512, 1024], [huge, -huge]) is None
     assert log2_slope([512, 1024], [huge, -huge]) is None
 
 
-def _write_runs(tmp, values_by_variant, ctxs, seeds=(1, 2, 3, 4),
-                tasks=("niah_synth", "vt")):
+def _write_runs(
+    tmp, values_by_variant, ctxs, seeds=(1, 2, 3, 4), tasks=("niah_synth", "vt")
+):
     """values_by_variant[variant][ctx][task] = EM；写出 eval/ruler 产物。"""
     for s in seeds:
         for v, per_ctx in values_by_variant.items():
-            _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                "variant": v, "seed": s, "val_ppl": 10.0, "val_loss": 2.3,
-                "n_params": 100, "n_gate_extra": 0, "split": "val"})
+            _write_json(
+                os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                {
+                    "variant": v,
+                    "seed": s,
+                    "val_ppl": 10.0,
+                    "val_loss": 2.3,
+                    "n_params": 100,
+                    "n_gate_extra": 0,
+                    "split": "val",
+                },
+            )
             results = {
-                t: {str(c): {"em": per_ctx[c][t], "n": 20} for c in ctxs}
-                for t in tasks
+                t: {str(c): {"em": per_ctx[c][t], "n": 20} for c in ctxs} for t in tasks
             }
-            _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
-                "variant": v, "seed": s, "ctx_lens": list(ctxs),
-                "n_samples": 20, "sample_seed": 1234,
-                "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
-                "vt_chains": 4, "vt_depth": 4, "results": results})
+            _write_json(
+                os.path.join(tmp, f"ruler_{v}_seed{s}.json"),
+                {
+                    "variant": v,
+                    "seed": s,
+                    "ctx_lens": list(ctxs),
+                    "n_samples": 20,
+                    "sample_seed": 1234,
+                    "corpus_source": "val",
+                    "max_new": 12,
+                    "fwe_max_new": 44,
+                    "vt_chains": 4,
+                    "vt_depth": 4,
+                    "results": results,
+                },
+            )
 
 
 def test_build_summary_length_reversal_is_visible():
@@ -229,22 +285,31 @@ def test_build_summary_length_reversal_is_visible():
             "standard": {512: 0.60, 1024: 0.55, 2048: 0.50},
             "lega": {512: 0.75, 1024: 0.55, 2048: 0.40},
         }
-        _write_runs(tmp, {v: {c: {t: val for t in ("niah_synth", "vt")}
-                              for c, val in per_ctx.items()}
-                          for v, per_ctx in by_ctx.items()}, ctxs)
+        _write_runs(
+            tmp,
+            {
+                v: {
+                    c: {t: val for t in ("niah_synth", "vt")}
+                    for c, val in per_ctx.items()
+                }
+                for v, per_ctx in by_ctx.items()
+            },
+            ctxs,
+        )
         out = build_summary(tmp)
         md = out["markdown"]
         assert "RULER 上下文长度剂量-反应" in md, md[-3000:]
         assert "总平均与最长ctx反向" in md
         assert "优势随上下文长度显著减小" in md
 
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         assert "ruler_length_pairs" in sig
         assert "ruler_length_tests" in sig
-        pair = next(p for p in sig["ruler_length_pairs"]
-                    if p["candidate"] == "lega"
-                    and p["reference"] == "standard")
+        pair = next(
+            p
+            for p in sig["ruler_length_pairs"]
+            if p["candidate"] == "lega" and p["reference"] == "standard"
+        )
         assert pair["contexts"] == ctxs
         assert pair["n_seeds"] == 4
         assert pair["balanced_contexts"] is True
@@ -255,8 +320,7 @@ def test_build_summary_length_reversal_is_visible():
         assert abs(diffs[0] - 0.15) < 1e-12
         assert abs(diffs[1]) < 1e-12
         assert abs(diffs[2] + 0.10) < 1e-12
-        assert abs(pair["slope_per_doubling"]["mean_diff"]
-                   + 0.125) < 1e-9
+        assert abs(pair["slope_per_doubling"]["mean_diff"] + 0.125) < 1e-9
         assert abs(pair["long_minus_short"]["mean_diff"] + 0.25) < 1e-12
         assert abs(pair["per_seed"][0]["diffs"]["2048"] + 0.10) < 1e-12
         row = next(r for r in out["rows"] if r["variant"] == "lega")
@@ -272,20 +336,20 @@ def test_build_summary_length_reversal_is_visible():
         assert "置换检验不显著" in pair["long_minus_short"]["verdict"]
         ctx_tests = sig["ruler_length_tests"]["per_context"]
         # 逐对 JSON 必须回填校正后的置换 p，不能只让 tests 数组里有值。
-        assert all(c.get("p_perm_adj") is not None
-                   for c in pair["per_context"])
-        assert (pair["slope_per_doubling"]["p_perm_adj"]
-                == next(t["p_perm_adj"] for t in
-                        sig["ruler_length_tests"]["slope"]))
-        assert (pair["long_minus_short"]["p_perm_adj"]
-                == next(t["p_perm_adj"] for t in
-                        sig["ruler_length_tests"]["long_minus_short"]))
+        assert all(c.get("p_perm_adj") is not None for c in pair["per_context"])
+        assert pair["slope_per_doubling"]["p_perm_adj"] == next(
+            t["p_perm_adj"] for t in sig["ruler_length_tests"]["slope"]
+        )
+        assert pair["long_minus_short"]["p_perm_adj"] == next(
+            t["p_perm_adj"] for t in sig["ruler_length_tests"]["long_minus_short"]
+        )
         assert {t["ruler_ctx"] for t in ctx_tests} == set(ctxs)
         assert all(t.get("exploratory") for t in ctx_tests)
         assert all(t.get("p_adj") is not None for t in ctx_tests)
         # 新检验只进独立的小节/JSON，不污染主配对检验表。
-        assert not any(str(t.get("metric", "")).startswith("RULER@")
-                       for t in out["tests"])
+        assert not any(
+            str(t.get("metric", "")).startswith("RULER@") for t in out["tests"]
+        )
         main_table = md.split("## 关键对比")[0]
         assert "RULER@ctx" not in main_table
     finally:
@@ -301,14 +365,20 @@ def test_build_summary_length_zero_overall_masks_long_context_harm():
             "standard": {512: 0.60, 1024: 0.55, 2048: 0.50},
             "lega": {512: 0.70, 1024: 0.55, 2048: 0.40},
         }
-        _write_runs(tmp, {v: {c: {t: val for t in ("niah_synth", "vt")}
-                              for c, val in per_ctx.items()}
-                          for v, per_ctx in by_ctx.items()}, ctxs)
+        _write_runs(
+            tmp,
+            {
+                v: {
+                    c: {t: val for t in ("niah_synth", "vt")}
+                    for c, val in per_ctx.items()
+                }
+                for v, per_ctx in by_ctx.items()
+            },
+            ctxs,
+        )
         out = build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
-        pair = next(p for p in sig["ruler_length_pairs"]
-                    if p["candidate"] == "lega")
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        pair = next(p for p in sig["ruler_length_pairs"] if p["candidate"] == "lega")
         assert abs(pair["overall_mean_diff"]) < 1e-12
         assert abs(pair["per_context"][-1]["mean_diff"] + 0.10) < 1e-12
         assert pair["overall_vs_longest_sign_flip"] is False
@@ -329,14 +399,20 @@ def test_build_summary_length_trend_depends_on_single_context_is_flagged():
             "standard": {512: 0.5, 1024: 0.5, 2048: 0.5},
             "lega": {512: 0.8, 1024: 0.3, 2048: 0.4},
         }
-        _write_runs(tmp, {v: {c: {t: val for t in ("niah_synth", "vt")}
-                              for c, val in per_ctx.items()}
-                          for v, per_ctx in by_ctx.items()}, ctxs)
+        _write_runs(
+            tmp,
+            {
+                v: {
+                    c: {t: val for t in ("niah_synth", "vt")}
+                    for c, val in per_ctx.items()
+                }
+                for v, per_ctx in by_ctx.items()
+            },
+            ctxs,
+        )
         out = build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
-        pair = next(p for p in sig["ruler_length_pairs"]
-                    if p["candidate"] == "lega")
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        pair = next(p for p in sig["ruler_length_pairs"] if p["candidate"] == "lega")
         assert pair["slope_loo_sign_stable"] is False, pair
         loo = pair["slope_leave_one_ctx_out"]
         assert loo["512"] > 0 > loo["1024"]
@@ -352,18 +428,20 @@ def test_build_summary_length_single_context_is_explicitly_unavailable():
     tmp = tempfile.mkdtemp()
     try:
         ctxs = [1024]
-        _write_runs(tmp, {
-            "standard": {1024: {"niah_synth": 0.4, "vt": 0.4}},
-            "lega": {1024: {"niah_synth": 0.6, "vt": 0.6}},
-        }, ctxs)
+        _write_runs(
+            tmp,
+            {
+                "standard": {1024: {"niah_synth": 0.4, "vt": 0.4}},
+                "lega": {1024: {"niah_synth": 0.6, "vt": 0.6}},
+            },
+            ctxs,
+        )
         out = build_summary(tmp)
         md = out["markdown"]
         assert "只有 1 个公共请求档位" in md
         assert "无法检验长度趋势" in md
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
-        pair = next(p for p in sig["ruler_length_pairs"]
-                    if p["candidate"] == "lega")
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        pair = next(p for p in sig["ruler_length_pairs"] if p["candidate"] == "lega")
         assert pair["n_contexts"] == 1
         assert pair["slope_per_doubling"] is None
         assert pair["long_minus_short"] is None
@@ -391,23 +469,40 @@ def test_build_summary_length_unalignable_grid_is_not_fabricated():
         }
         for s in (1, 2, 3, 4):
             for v, per_ctx in (("standard", standard), ("lega", lega)):
-                _write_json(os.path.join(tmp, f"eval_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "val_ppl": 10.0,
-                    "val_loss": 2.3, "n_params": 100, "n_gate_extra": 0,
-                    "split": "val"})
+                _write_json(
+                    os.path.join(tmp, f"eval_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "val_ppl": 10.0,
+                        "val_loss": 2.3,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                    },
+                )
                 results = {t: {} for t in ("niah_synth", "vt")}
                 for c, task_vals in per_ctx.items():
                     for task, em in task_vals.items():
                         results[task][str(c)] = {"em": em, "n": 20}
-                _write_json(os.path.join(tmp, f"ruler_{v}_seed{s}.json"), {
-                    "variant": v, "seed": s, "ctx_lens": ctxs,
-                    "n_samples": 20, "sample_seed": 1,
-                    "corpus_source": "val", "max_new": 12,
-                    "fwe_max_new": 44, "vt_chains": 4, "vt_depth": 4,
-                    "results": results})
+                _write_json(
+                    os.path.join(tmp, f"ruler_{v}_seed{s}.json"),
+                    {
+                        "variant": v,
+                        "seed": s,
+                        "ctx_lens": ctxs,
+                        "n_samples": 20,
+                        "sample_seed": 1,
+                        "corpus_source": "val",
+                        "max_new": 12,
+                        "fwe_max_new": 44,
+                        "vt_chains": 4,
+                        "vt_depth": 4,
+                        "results": results,
+                    },
+                )
         out = build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"),
-                             encoding="utf-8"))
+        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
         assert sig["ruler_length_pairs"] == []
         assert "无法做上下文长度分层" in out["markdown"]
         row = next(r for r in out["rows"] if r["variant"] == "lega")
@@ -446,24 +541,29 @@ def test_context_macro_means_aligns_requested_context_lengths():
     broken = {
         "ctx_lens": [256, 512, 1024],
         "results": {
-            "niah_synth": {"256": {"em": 0.6, "n": 20},
-                           "512": {"em": 0.5, "n": 20}},
-            "fwe": {"256": {"em": 0.2, "n": 20},
-                    "512": {"em": 0.2, "n": 20},
-                    "979": {"em": 0.2, "n": 20}},
+            "niah_synth": {"256": {"em": 0.6, "n": 20}, "512": {"em": 0.5, "n": 20}},
+            "fwe": {
+                "256": {"em": 0.2, "n": 20},
+                "512": {"em": 0.2, "n": 20},
+                "979": {"em": 0.2, "n": 20},
+            },
         },
     }
     assert context_macro_means(broken, align_requested=True) == {}
     # 旧产物无 ctx_lens：仅在所有任务共享同一实际档位集合时回退。
-    old_ok = _payload({
-        "a": {"256": {"em": 0.5, "n": 20}, "512": {"em": 0.4, "n": 20}},
-        "b": {"256": {"em": 0.3, "n": 20}, "512": {"em": 0.2, "n": 20}},
-    })
+    old_ok = _payload(
+        {
+            "a": {"256": {"em": 0.5, "n": 20}, "512": {"em": 0.4, "n": 20}},
+            "b": {"256": {"em": 0.3, "n": 20}, "512": {"em": 0.2, "n": 20}},
+        }
+    )
     assert set(context_macro_means(old_ok, align_requested=True)) == {256, 512}
-    old_bad = _payload({
-        "a": {"256": {"em": 0.5, "n": 20}, "512": {"em": 0.4, "n": 20}},
-        "b": {"256": {"em": 0.3, "n": 20}},
-    })
+    old_bad = _payload(
+        {
+            "a": {"256": {"em": 0.5, "n": 20}, "512": {"em": 0.4, "n": 20}},
+            "b": {"256": {"em": 0.3, "n": 20}},
+        }
+    )
     assert context_macro_means(old_bad, align_requested=True) == {}
 
 
@@ -473,12 +573,16 @@ def test_context_macro_means_rejects_impossible_context_alignment():
     upward = {
         "ctx_lens": [256, 512, 1024],
         "results": {
-            "a": {"256": {"em": 0.9, "n": 10},
-                  "512": {"em": 0.5, "n": 10},
-                  "2048": {"em": 0.1, "n": 10}},
-            "b": {"256": {"em": 0.8, "n": 10},
-                  "512": {"em": 0.4, "n": 10},
-                  "2048": {"em": 0.0, "n": 10}},
+            "a": {
+                "256": {"em": 0.9, "n": 10},
+                "512": {"em": 0.5, "n": 10},
+                "2048": {"em": 0.1, "n": 10},
+            },
+            "b": {
+                "256": {"em": 0.8, "n": 10},
+                "512": {"em": 0.4, "n": 10},
+                "2048": {"em": 0.0, "n": 10},
+            },
         },
     }
     assert context_macro_means(upward, align_requested=True) == {}
@@ -487,9 +591,11 @@ def test_context_macro_means_rejects_impossible_context_alignment():
     shifted = {
         "ctx_lens": [256, 512, 1024],
         "results": {
-            "a": {"128": {"em": 0.9, "n": 10},
-                  "256": {"em": 0.5, "n": 10},
-                  "512": {"em": 0.1, "n": 10}},
+            "a": {
+                "128": {"em": 0.9, "n": 10},
+                "256": {"em": 0.5, "n": 10},
+                "512": {"em": 0.1, "n": 10},
+            },
         },
     }
     assert context_macro_means(shifted, align_requested=True) == {}
@@ -497,8 +603,7 @@ def test_context_macro_means_rejects_impossible_context_alignment():
     # 能凑满档数却从更小的第一档开始，说明不是同一套请求网格。
     first_clamped = {
         "ctx_lens": [512, 1024],
-        "results": {"a": {"256": {"em": 0.9, "n": 10},
-                          "1024": {"em": 0.1, "n": 10}}},
+        "results": {"a": {"256": {"em": 0.9, "n": 10}, "1024": {"em": 0.1, "n": 10}}},
     }
     assert context_macro_means(first_clamped, align_requested=True) == {}
     # 单档只有向下 clamp（请求 1024、实际 979）仍应保留描述统计。
@@ -512,78 +617,122 @@ def test_context_macro_means_rejects_impossible_context_alignment():
 def test_context_macro_means_matches_ruler_avg_when_balanced():
     """平衡设计下，逐档等权平均应严格等于项目既有的 RULER macro 平均。"""
     from run_all import _ruler_avg_of
-    payload = _payload({
-        "niah_synth": {
-            "512": {"em": 0.8, "n": 20},
-            "1024": {"em": 0.6, "n": 20},
-            "2048": {"em": 0.4, "n": 20},
-        },
-        "vt": {
-            "512": {"em": 0.2, "n": 20},
-            "1024": {"em": 0.3, "n": 20},
-            "2048": {"em": 0.4, "n": 20},
-        },
-    })
+
+    payload = _payload(
+        {
+            "niah_synth": {
+                "512": {"em": 0.8, "n": 20},
+                "1024": {"em": 0.6, "n": 20},
+                "2048": {"em": 0.4, "n": 20},
+            },
+            "vt": {
+                "512": {"em": 0.2, "n": 20},
+                "1024": {"em": 0.3, "n": 20},
+                "2048": {"em": 0.4, "n": 20},
+            },
+        }
+    )
     macro = context_macro_means(payload)
     by_ctx = sum(macro.values()) / len(macro)
     assert abs(by_ctx - _ruler_avg_of(payload)) < 1e-12
     # 每档 macro = (0.8+0.2)/2, (0.6+0.3)/2, (0.4+0.4)/2 = 0.5, 0.45, 0.4
     # 每翻一倍变化 -0.05。
-    assert math.isclose(log2_slope([512, 1024, 2048],
-                                   [macro[c] for c in (512, 1024, 2048)]),
-                        -0.05, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(
+        log2_slope([512, 1024, 2048], [macro[c] for c in (512, 1024, 2048)]),
+        -0.05,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
 
 
 def test_render_ruler_length_tolerates_malformed_nested_fields():
     """significance.json 的损坏嵌套字段不能让汇总页渲染崩溃。"""
-    analysis = {"pairs": [
-        {"candidate": "x", "reference": "standard",
-         "n_contexts": "bad", "per_context": {"oops": 1}},
-        {"candidate": "a", "reference": "standard", "n_contexts": 3,
-         "contexts": 123,
-         "slope_per_doubling": {"mean_diff": "bad", "verdict": None},
-         "long_minus_short": ["not", "a", "dict"],
-         "per_context": {"bad": 1},
-         "direction_consistency": "bad"},
-        {"candidate": "b", "reference": "standard", "n_contexts": 2,
-         "contexts": [512, 1024],
-         "slope_per_doubling": {"mean_diff": 0.1, "p_adj": 0.2,
-                                "verdict": "ok"},
-         "long_minus_short": {"mean_diff": 0.1, "p_adj": 0.2},
-         "per_context": [
-             None,
-             {"ctx": 512, "mean_diff": float("inf"), "p": "bad",
-              "candidate_mean": "bad"},
-             {"ctx": 1024, "mean_diff": 0.1, "p": 0.2,
-              "candidate_mean": 0.5, "reference_mean": 0.4},
-         ],
-         "direction_consistency": {"positive": 1}},
-    ]}
+    analysis = {
+        "pairs": [
+            {
+                "candidate": "x",
+                "reference": "standard",
+                "n_contexts": "bad",
+                "per_context": {"oops": 1},
+            },
+            {
+                "candidate": "a",
+                "reference": "standard",
+                "n_contexts": 3,
+                "contexts": 123,
+                "slope_per_doubling": {"mean_diff": "bad", "verdict": None},
+                "long_minus_short": ["not", "a", "dict"],
+                "per_context": {"bad": 1},
+                "direction_consistency": "bad",
+            },
+            {
+                "candidate": "b",
+                "reference": "standard",
+                "n_contexts": 2,
+                "contexts": [512, 1024],
+                "slope_per_doubling": {"mean_diff": 0.1, "p_adj": 0.2, "verdict": "ok"},
+                "long_minus_short": {"mean_diff": 0.1, "p_adj": 0.2},
+                "per_context": [
+                    None,
+                    {
+                        "ctx": 512,
+                        "mean_diff": float("inf"),
+                        "p": "bad",
+                        "candidate_mean": "bad",
+                    },
+                    {
+                        "ctx": 1024,
+                        "mean_diff": 0.1,
+                        "p": 0.2,
+                        "candidate_mean": 0.5,
+                        "reference_mean": 0.4,
+                    },
+                ],
+                "direction_consistency": {"positive": 1},
+            },
+        ]
+    }
     assert isinstance(_length_trend_verdict(None, "slope"), str)
     assert _ruler_length_analysis({}, [None, ("a",), ("a", "b")])["pairs"] == []
     md = _render_ruler_length(analysis)
-    assert isinstance(md, list) and any("RULER 上下文长度剂量-反应" in x
-                                        for x in md)
+    assert isinstance(md, list) and any("RULER 上下文长度剂量-反应" in x for x in md)
     text = "\n".join(md)
     assert "1024" in text and "bad" not in text
     # “不显著”也包含“显著”二字：不能把它计入显著趋势数。
-    nonsig = {"pairs": [{
-        "candidate": "a", "reference": "b", "n_contexts": 3,
-        "contexts": [512, 1024, 2048],
-        "slope_per_doubling": {
-            "mean_diff": 0.0, "p_adj": 0.9,
-            "verdict": "不显著（Holm 校正后 p=0.9000）"},
-    }]}
+    nonsig = {
+        "pairs": [
+            {
+                "candidate": "a",
+                "reference": "b",
+                "n_contexts": 3,
+                "contexts": [512, 1024, 2048],
+                "slope_per_doubling": {
+                    "mean_diff": 0.0,
+                    "p_adj": 0.9,
+                    "verdict": "不显著（Holm 校正后 p=0.9000）",
+                },
+            }
+        ]
+    }
     text = "\n".join(_render_ruler_length(nonsig))
     assert "0 组斜率经 Holm 校正后显著" in text
     # n<MIN_SEEDS 时即使原始 p_adj<α 也只报描述，不能计入显著趋势。
-    seeds_short = {"pairs": [{
-        "candidate": "a", "reference": "b", "n_contexts": 3,
-        "contexts": [512, 1024, 2048],
-        "slope_per_doubling": {
-            "mean_diff": -0.1, "p_adj": 0.0, "n": 2,
-            "verdict": "种子不足（n=2<3），无法判定长度趋势"},
-    }]}
+    seeds_short = {
+        "pairs": [
+            {
+                "candidate": "a",
+                "reference": "b",
+                "n_contexts": 3,
+                "contexts": [512, 1024, 2048],
+                "slope_per_doubling": {
+                    "mean_diff": -0.1,
+                    "p_adj": 0.0,
+                    "n": 2,
+                    "verdict": "种子不足（n=2<3），无法判定长度趋势",
+                },
+            }
+        ]
+    }
     text = "\n".join(_render_ruler_length(seeds_short))
     assert "0 组斜率经 Holm 校正后显著" in text
 
@@ -603,12 +752,21 @@ def test_ruler_length_drops_seeds_with_different_context_grids():
     for seed in (1, 2, 3, 4):
         ctxs = [512, 1024, 2048] if seed <= 2 else [512, 1024]
         for variant, em in (("standard", 0.5), ("lega", 0.6)):
-            runs[variant][seed] = {"ruler": {
-                "ctx_lens": ctxs, "n_samples": 10, "sample_seed": 1,
-                "corpus_source": "val", "max_new": 12, "fwe_max_new": 44,
-                "vt_chains": 4, "vt_depth": 4,
-                "results": {"niah_synth": {
-                    str(c): {"em": em, "n": 10} for c in ctxs}}}}
+            runs[variant][seed] = {
+                "ruler": {
+                    "ctx_lens": ctxs,
+                    "n_samples": 10,
+                    "sample_seed": 1,
+                    "corpus_source": "val",
+                    "max_new": 12,
+                    "fwe_max_new": 44,
+                    "vt_chains": 4,
+                    "vt_depth": 4,
+                    "results": {
+                        "niah_synth": {str(c): {"em": em, "n": 10} for c in ctxs}
+                    },
+                }
+            }
     out = _ruler_length_analysis(runs, [("lega", "standard")])
     pair = out["pairs"][0]
     assert pair["contexts"] == [512, 1024]
@@ -624,8 +782,7 @@ def test_length_null_n_trials_is_not_silently_clamped_or_truncated():
     """n_trials 是样本数：1 必须得到 1 个样本，0/负数/bool/小数必须拒绝。"""
     import pytest
 
-    from lega.length_null import (length_null_report,
-                                  simulate_concentration)
+    from lega.length_null import length_null_report, simulate_concentration
 
     assert simulate_concentration(8, n_trials=1, seed=0).size == 1
     with pytest.raises(ValueError):
@@ -644,20 +801,18 @@ def test_length_null_seed_is_strict_and_range_checked():
     """seed 是身份字段：拒绝 bool/小数/负数/超上限，与 utils.seed_int 同口径。"""
     import pytest
 
-    from lega.length_null import (length_null_report,
-                                  simulate_concentration)
+    from lega.length_null import length_null_report, simulate_concentration
 
     assert simulate_concentration(8, n_trials=1, seed=1.0).size == 1
     assert simulate_concentration(8, n_trials=1, seed="7").size == 1
-    for bad in (True, False, 2.5, -1, 2 ** 32):
+    for bad in (True, False, 2.5, -1, 2**32):
         with pytest.raises(ValueError):
             simulate_concentration(8, n_trials=1, seed=bad)
         with pytest.raises(ValueError):
             length_null_report([8], modes=("uniform",), n_trials=1, seed=bad)
     # 报告内部派生 seed 会超过 32 位上限，不能因此拒绝合法的用户 seed。
-    rep = length_null_report([8, 16], modes=("uniform",), n_trials=1,
-                             seed=2 ** 32 - 1)
-    assert rep["seed"] == 2 ** 32 - 1
+    rep = length_null_report([8, 16], modes=("uniform",), n_trials=1, seed=2**32 - 1)
+    assert rep["seed"] == 2**32 - 1
     with pytest.raises(ValueError):
         length_null_report([8], modes=("unknown",), n_trials=1)
 
@@ -665,9 +820,14 @@ def test_length_null_seed_is_strict_and_range_checked():
 def test_length_null_random_context_concentration_grows_with_length():
     """零假设诊断：随机上下文下 c 随 log2(n) 增长，不能凭均匀特例说解耦。"""
     from lega.length_null import length_null_report
-    rep = length_null_report([32, 64, 128, 256], score_sd=1.0,
-                             modes=("random", "repeated", "uniform"),
-                             n_trials=500, seed=7)
+
+    rep = length_null_report(
+        [32, 64, 128, 256],
+        score_sd=1.0,
+        modes=("random", "repeated", "uniform"),
+        n_trials=500,
+        seed=7,
+    )
     random_slope = rep["modes"]["random"]["slope_c_per_log2_n"]
     assert random_slope is not None and random_slope > 0.1
     assert rep["modes"]["random"]["length_independent"] is False
@@ -693,26 +853,31 @@ def test_pipeline_length_null_stage_is_validated_and_provenance_bound():
     assert spec["lengths"] == [8, 16]
     assert spec["n_trials"] == 10 and spec["seed"] == 22
     # 未显式给 lengths 时覆盖训练/RULER 上下文档但不越过最大可处理长度。
-    default_spec = _length_null_spec({"block_size": 1024, "seeds": [11],
-                                      "ruler": {"ctx_lens": [128, 2048]}},
-                                     [11])
+    default_spec = _length_null_spec(
+        {"block_size": 1024, "seeds": [11], "ruler": {"ctx_lens": [128, 2048]}}, [11]
+    )
     assert default_spec["lengths"][-1] == 2048
     assert default_spec["lengths"][0] >= 2
-    for bad in ({"lengths": [8]}, {"lengths": [1, 8]},
-                {"n_trials": 0}, {"n_trials": True},
-                {"score_sd": -1.0}, {"modes": []}, {"seed": False}):
+    for bad in (
+        {"lengths": [8]},
+        {"lengths": [1, 8]},
+        {"n_trials": 0},
+        {"n_trials": True},
+        {"score_sd": -1.0},
+        {"modes": []},
+        {"seed": False},
+    ):
         with pytest.raises(ValueError):
-            _length_null_spec(
-                {"length_null": {"lengths": [8, 16], **bad}}, [11])
+            _length_null_spec({"length_null": {"lengths": [8, 16], **bad}}, [11])
 
     tmp = tempfile.mkdtemp(prefix="length_null_stage_")
     try:
-        info = _run_length_null_stage(cfg, cfg["seeds"], tmp, "run-abc",
-                                      "sha-abc", smoke=True)
+        info = _run_length_null_stage(
+            cfg, cfg["seeds"], tmp, "run-abc", "sha-abc", smoke=True
+        )
         assert info["executed"] is True
         assert info["lengths"] == [8, 16]
-        saved = json.load(open(os.path.join(tmp, "length_null.json"),
-                               encoding="utf-8"))
+        saved = json.load(open(os.path.join(tmp, "length_null.json"), encoding="utf-8"))
         assert saved["pipeline_run_id"] == "run-abc"
         assert saved["config_sha256"] == "sha-abc"
         assert saved["provenance"]["pipeline_run_id"] == "run-abc"
@@ -728,14 +893,30 @@ def test_render_length_null_requires_current_run_and_reports_slope():
 
     missing = "\n".join(_render_length_null(None))
     assert "未找到 `length_null.json`" in missing
-    stale = "\n".join(_render_length_null(
-        {"pipeline_run_id": "old", "lengths": [8, 16],
-         "n_trials": 10, "seed": 1, "score_sd": 1.0,
-         "modes": {"random": {
-             "per_length": {"8": {"mean": 1.0}, "16": {"mean": 1.2}},
-             "slope_c_per_log2_n": 0.25, "length_independent": False},
-             "uniform": {"per_length": {}, "slope_c_per_log2_n": 0.0,
-                         "length_independent": True}}}, stale=True))
+    stale = "\n".join(
+        _render_length_null(
+            {
+                "pipeline_run_id": "old",
+                "lengths": [8, 16],
+                "n_trials": 10,
+                "seed": 1,
+                "score_sd": 1.0,
+                "modes": {
+                    "random": {
+                        "per_length": {"8": {"mean": 1.0}, "16": {"mean": 1.2}},
+                        "slope_c_per_log2_n": 0.25,
+                        "length_independent": False,
+                    },
+                    "uniform": {
+                        "per_length": {},
+                        "slope_c_per_log2_n": 0.0,
+                        "length_independent": True,
+                    },
+                },
+            },
+            stale=True,
+        )
+    )
     assert "不属于本轮" in stale
     assert "+0.2500" in stale and "random" in stale
     assert "不能把 c 单独解释为" in stale
@@ -745,15 +926,27 @@ def test_build_summary_loads_length_null_and_flags_stale_run():
     """汇总必须读取本轮诊断；旧 run 的同名文件只能作警示，不能当本轮证据。"""
     tmp = tempfile.mkdtemp(prefix="length_null_summary_")
     try:
-        _write_json(os.path.join(tmp, "repro.json"),
-                    {"run_id": "run-new", "variants": ["lega"], "seeds": [1]})
-        _write_json(os.path.join(tmp, "length_null.json"), {
-            "pipeline_run_id": "run-old",
-            "lengths": [8, 16], "n_trials": 2, "seed": 1, "score_sd": 1.0,
-            "modes": {"uniform": {
-                "per_length": {"8": {"mean": 0.0}, "16": {"mean": 0.0}},
-                "slope_c_per_log2_n": 0.0, "length_independent": True}},
-        })
+        _write_json(
+            os.path.join(tmp, "repro.json"),
+            {"run_id": "run-new", "variants": ["lega"], "seeds": [1]},
+        )
+        _write_json(
+            os.path.join(tmp, "length_null.json"),
+            {
+                "pipeline_run_id": "run-old",
+                "lengths": [8, 16],
+                "n_trials": 2,
+                "seed": 1,
+                "score_sd": 1.0,
+                "modes": {
+                    "uniform": {
+                        "per_length": {"8": {"mean": 0.0}, "16": {"mean": 0.0}},
+                        "slope_c_per_log2_n": 0.0,
+                        "length_independent": True,
+                    }
+                },
+            },
+        )
         out = build_summary(tmp)
         assert out["length_null"]["pipeline_run_id"] == "run-old"
         assert "不属于本轮" in out["markdown"]

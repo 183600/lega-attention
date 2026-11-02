@@ -3,6 +3,7 @@
 覆盖：计划/观测种子分类、两臂缺失率、临界点、观测范围边界、相对尺度
 SESOI、坏输入不伪造稳健，以及 PPL/RULER 流水线适配与汇总渲染。
 """
+
 import json
 import math
 import os
@@ -10,8 +11,7 @@ import shutil
 import tempfile
 
 from lega.missingness import aggregate_missingness, paired_missingness
-from lega.pipeline import (_missingness_analysis,
-                           _render_missingness_section)
+from lega.pipeline import _missingness_analysis, _render_missingness_section
 from run_all import build_summary
 
 
@@ -20,8 +20,7 @@ def _close(a, b, tol=1e-9):
 
 
 def test_complete_case_has_no_tipping_point():
-    res = paired_missingness([1, 2, 3], {1: 10, 2: 11, 3: 12},
-                             {1: 20, 2: 21, 3: 22})
+    res = paired_missingness([1, 2, 3], {1: 10, 2: 11, 3: 12}, {1: 20, 2: 21, 3: 22})
     assert res["status"] == "complete", res
     assert res["n_planned"] == 3 and res["n_observed"] == 3
     assert res["n_missing"] == 0 and res["missing_fraction"] == 0.0
@@ -34,9 +33,12 @@ def test_complete_case_has_no_tipping_point():
 
 def test_missing_candidate_is_robust_when_bounds_exclude_zero():
     res = paired_missingness(
-        [1, 2, 3, 4], {1: 10, 2: 11, 3: 12},
+        [1, 2, 3, 4],
+        {1: 10, 2: 11, 3: 12},
         {1: 20, 2: 21, 3: 22, 4: 23},
-        transform=lambda a, b: (a - b) / b if b else None, margin=0.01)
+        transform=lambda a, b: (a - b) / b if b else None,
+        margin=0.01,
+    )
     assert res["missing_candidate"] == [4], res
     assert res["missing_reference"] == [] and res["missing_both"] == []
     assert _close(res["candidate_missing_fraction"], 0.25)
@@ -53,15 +55,17 @@ def test_missing_within_observed_range_can_flip_sign():
     # 完整配对差 [-0.1, .05, .05] 的均值为 0；缺失一个时，缺失值取
     # 观测范围内任一非零值都会让完整均值离开 0（范围跨过符号边界）。
     res = paired_missingness(
-        [1, 2, 3, 4],
-        {1: 0.9, 2: 1.05, 3: 1.05},
-        {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0})
+        [1, 2, 3, 4], {1: 0.9, 2: 1.05, 3: 1.05}, {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+    )
     assert res["n_observed"] == 3 and res["n_missing"] == 1
     assert res["status"] == "sensitive_within_observed_range", res
     assert res["sign_robust"] is False
     assert res["tipping_within_observed_range"] is True
-    assert res["observed_min_diff"] <= res["missing_mean_for_zero"] \
+    assert (
+        res["observed_min_diff"]
+        <= res["missing_mean_for_zero"]
         <= res["observed_max_diff"]
+    )
     assert res["full_mean_range"][0] < 0.0 < res["full_mean_range"][1]
     print("  [ok] 缺失值落在观测范围内即可翻转符号 -> 显式标敏感")
 
@@ -70,8 +74,11 @@ def test_margin_crossing_is_reported_separately():
     # 观测配对差 [-.1, .1, .12] 的均值为 +0.04；缺失一个时，缺失值
     # 取观测范围内的 -0.08 可把完整均值拉回 +1% SESOI 以内。
     res = paired_missingness(
-        [1, 2, 3, 4], {1: 1.0, 2: 1.1, 3: 1.12},
-        {1: 1.1, 2: 1.0, 3: 1.0, 4: 1.0}, margin=0.01)
+        [1, 2, 3, 4],
+        {1: 1.0, 2: 1.1, 3: 1.12},
+        {1: 1.1, 2: 1.0, 3: 1.0, 4: 1.0},
+        margin=0.01,
+    )
     assert res["status"] == "sensitive_within_observed_range", res
     assert res["sign_robust"] is True
     assert res["margin_robust"] is False
@@ -84,14 +91,14 @@ def test_insufficient_observation_is_not_called_robust():
     assert res["n_observed"] == 1
     assert res.get("insufficient_seeds") is True
     assert "完整配对只有 1 个" in res["note"]
-    res0 = paired_missingness([1, 2], {1: None, 2: None},
-                              {1: None, 2: None})
+    res0 = paired_missingness([1, 2], {1: None, 2: None}, {1: None, 2: None})
     assert res0["status"] == "no_observed_pairs", res0
     assert res0["sign_robust"] is None
     pi0 = res0["partial_identification"]
     assert pi0["mean_diff_bounds"] is None and pi0["sign_score_bounds"] is None
-    resb = paired_missingness([1, 2], {1: None, 2: None},
-                              {1: None, 2: None}, value_bounds=(0.0, 1.0))
+    resb = paired_missingness(
+        [1, 2], {1: None, 2: None}, {1: None, 2: None}, value_bounds=(0.0, 1.0)
+    )
     assert resb["partial_identification"]["mean_diff_bounds"] is None, resb
     print("  [ok] 观测不足/无完整配对：不作稳健判词")
 
@@ -100,12 +107,12 @@ def test_bad_values_and_empty_plan_are_explicit():
     res = paired_missingness([], {}, {})
     assert res["status"] == "insufficient", res
     res2 = paired_missingness(
-        [1, 2, 3, 4],
-        {1: True, 2: float("nan"), 3: "x", 4: 8},
-        {1: 1, 2: 2, 3: 3, 4: 4})
+        [1, 2, 3, 4], {1: True, 2: float("nan"), 3: "x", 4: 8}, {1: 1, 2: 2, 3: 3, 4: 4}
+    )
     assert res2["n_observed"] == 1
-    assert sorted(res2["missing_candidate"] + res2["missing_reference"]
-                  + res2["missing_both"]) == [1, 2, 3]
+    assert sorted(
+        res2["missing_candidate"] + res2["missing_reference"] + res2["missing_both"]
+    ) == [1, 2, 3]
     try:
         paired_missingness([True], {True: 1}, {True: 2})
         raise AssertionError("bool 种子应报错")
@@ -124,8 +131,11 @@ def test_planned_none_falls_back_to_observed_union():
 
 def test_manski_bounds_are_sharp_for_bounded_outcome():
     res = paired_missingness(
-        [1, 2, 3, 4], {1: 1.0, 2: 0.0, 4: 0.0},
-        {1: 0.0, 2: 1.0, 3: 0.5}, value_bounds=(0.0, 1.0))
+        [1, 2, 3, 4],
+        {1: 1.0, 2: 0.0, 4: 0.0},
+        {1: 0.0, 2: 1.0, 3: 0.5},
+        value_bounds=(0.0, 1.0),
+    )
     pi = res["partial_identification"]
     assert pi["value_bounds"] == [0.0, 1.0], pi
     lo, hi = pi["mean_diff_bounds"]
@@ -141,8 +151,12 @@ def test_manski_bounds_are_sharp_for_bounded_outcome():
 
 def test_manski_bounds_identify_sign_and_margin():
     res = paired_missingness(
-        [1, 2, 3], {1: 1.0, 2: 1.0}, {1: 0.0, 2: 0.0, 3: 0.0},
-        value_bounds=(0.0, 1.0), margin=0.2)
+        [1, 2, 3],
+        {1: 1.0, 2: 1.0},
+        {1: 0.0, 2: 0.0, 3: 0.0},
+        value_bounds=(0.0, 1.0),
+        margin=0.2,
+    )
     pi = res["partial_identification"]
     assert pi["sign_identified"] is True, pi
     assert pi["mean_sign_identified"] is True, pi
@@ -155,14 +169,16 @@ def test_manski_bounds_identify_sign_and_margin():
 
 def test_manski_without_outcome_bounds_uses_sign_score_only():
     res = paired_missingness(
-        [1, 2, 3, 4], {1: 1.0, 2: 1.1, 3: 1.12},
+        [1, 2, 3, 4],
+        {1: 1.0, 2: 1.1, 3: 1.12},
         {1: 1.1, 2: 1.0, 3: 1.0, 4: 1.0},
-        transform=lambda a, b: (a - b) / b if b else None, margin=0.01)
+        transform=lambda a, b: (a - b) / b if b else None,
+        margin=0.01,
+    )
     pi = res["partial_identification"]
     assert pi["mean_diff_bounds"] is None, pi
     assert pi["sign_score_bounds"] is not None, pi
-    assert pi["sign_identified"] is None or isinstance(
-        pi["sign_identified"], bool), pi
+    assert pi["sign_identified"] is None or isinstance(pi["sign_identified"], bool), pi
     print("  [ok] 无界 outcome 只给符号得分 Manski 界")
 
 
@@ -174,14 +190,18 @@ def test_manski_rejects_bad_bounds_and_flags_out_of_range_values():
         pass
     try:
         paired_missingness(
-            [1, 2], {1: 1.0, 2: 1.0}, {1: 1.0, 2: 1.0},
-            transform=lambda a, b: (a - b) / b, value_bounds=(0.0, 1.0))
+            [1, 2],
+            {1: 1.0, 2: 1.0},
+            {1: 1.0, 2: 1.0},
+            transform=lambda a, b: (a - b) / b,
+            value_bounds=(0.0, 1.0),
+        )
         raise AssertionError("自定义尺度不应直接套用 outcome 范围")
     except ValueError:
         pass
     res = paired_missingness(
-        [1, 2, 3], {1: 1.2, 2: 0.5}, {1: 0.0, 2: 0.5, 3: 0.0},
-        value_bounds=(0.0, 1.0))
+        [1, 2, 3], {1: 1.2, 2: 0.5}, {1: 0.0, 2: 0.5, 3: 0.0}, value_bounds=(0.0, 1.0)
+    )
     pi = res["partial_identification"]
     assert pi["mean_diff_bounds"] is None, pi
     assert pi["outcome_bounds_violations"] == [1], pi
@@ -192,15 +212,24 @@ def test_manski_rejects_bad_bounds_and_flags_out_of_range_values():
 def test_aggregate_missingness_does_not_zero_fill():
     entries = [
         {"status": "complete", "n_missing": 0},
-        {"status": "sensitive_within_observed_range", "n_missing": 1,
-         "partial_identification": {
-             "mean_diff_bounds": None, "mean_sign_identified": None,
-             "sign_score_identified": True}},
-        {"status": "no_observed_pairs", "n_missing": 3,
-         "partial_identification": {
-             "mean_diff_bounds": [-1.0, 1.0],
-             "mean_sign_identified": False,
-             "sign_score_identified": False}},
+        {
+            "status": "sensitive_within_observed_range",
+            "n_missing": 1,
+            "partial_identification": {
+                "mean_diff_bounds": None,
+                "mean_sign_identified": None,
+                "sign_score_identified": True,
+            },
+        },
+        {
+            "status": "no_observed_pairs",
+            "n_missing": 3,
+            "partial_identification": {
+                "mean_diff_bounds": [-1.0, 1.0],
+                "mean_sign_identified": False,
+                "sign_score_identified": False,
+            },
+        },
         {"status": "invalid"},
     ]
     agg = aggregate_missingness(entries)
@@ -218,24 +247,41 @@ def test_aggregate_missingness_does_not_zero_fill():
 
 def _runs():
     def ev(ppl, ctx=256):
-        return {"ppl": ppl, "split": "val", "eval_ctx": ctx,
-                "eval_iters": 10, "val_windows": 10,
-                "val_tokens_evaluated": ctx * 10}
+        return {
+            "ppl": ppl,
+            "split": "val",
+            "eval_ctx": ctx,
+            "eval_iters": 10,
+            "val_windows": 10,
+            "val_tokens_evaluated": ctx * 10,
+        }
 
     def ruler(avg):
         by_ctx = {"256": {"n": 20, "em": avg}}
-        return {"ctx_lens": [256], "n_samples": 20, "sample_seed": 1234,
-                "corpus_source": "local", "max_new": 12, "fwe_max_new": 40,
-                "vt_chains": 4, "vt_depth": 4, "amp": True,
-                "depth_stratified": True,
-                "results": {"niah_synth": by_ctx}}
+        return {
+            "ctx_lens": [256],
+            "n_samples": 20,
+            "sample_seed": 1234,
+            "corpus_source": "local",
+            "max_new": 12,
+            "fwe_max_new": 40,
+            "vt_chains": 4,
+            "vt_depth": 4,
+            "amp": True,
+            "depth_stratified": True,
+            "results": {"niah_synth": by_ctx},
+        }
 
     return {
-        "cand": {1: {"eval": ev(100), "ruler": ruler(0.5)},
-                 2: {"eval": ev(110), "ruler": ruler(0.6)}},
-        "ref": {1: {"eval": ev(120), "ruler": ruler(0.4)},
-                2: {"eval": ev(130), "ruler": ruler(0.5)},
-                3: {"eval": ev(140), "ruler": ruler(0.6)}},
+        "cand": {
+            1: {"eval": ev(100), "ruler": ruler(0.5)},
+            2: {"eval": ev(110), "ruler": ruler(0.6)},
+        },
+        "ref": {
+            1: {"eval": ev(120), "ruler": ruler(0.4)},
+            2: {"eval": ev(130), "ruler": ruler(0.5)},
+            3: {"eval": ev(140), "ruler": ruler(0.6)},
+        },
     }
 
 
@@ -265,8 +311,7 @@ def test_pipeline_manski_bounds_for_ruler_and_ppl():
     assert ruler_pi["mean_sign_identified"] is False, ruler_pi
     assert ruler_pi["sign_score_identified"] is True, ruler_pi
     assert out["summary"]["n_manski_mean_bounds"] == 1, out["summary"]
-    assert out["summary"]["n_manski_mean_sign_undetermined"] == 1, \
-        out["summary"]
+    assert out["summary"]["n_manski_mean_sign_undetermined"] == 1, out["summary"]
     print("  [ok] 流水线对 RULER 给均值界、对 PPL 只给符号界")
 
 
@@ -286,24 +331,35 @@ def test_render_section_includes_boundaries_and_warning():
 def test_build_summary_wires_missingness_into_report_and_json():
     tmp = tempfile.mkdtemp()
     try:
+
         def write(variant, seed, ppl):
             path = os.path.join(tmp, f"eval_{variant}_seed{seed}.json")
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"variant": variant, "seed": seed, "ppl": ppl,
-                           "val_ppl": ppl, "val_loss": math.log(ppl),
-                           "gate_mean": 0.5, "n_params": 100,
-                           "n_gate_extra": 0, "split": "val",
-                           "eval_ctx": 256, "eval_iters": 10,
-                           "val_windows": 10,
-                           "val_tokens_evaluated": 2560}, f)
+                json.dump(
+                    {
+                        "variant": variant,
+                        "seed": seed,
+                        "ppl": ppl,
+                        "val_ppl": ppl,
+                        "val_loss": math.log(ppl),
+                        "gate_mean": 0.5,
+                        "n_params": 100,
+                        "n_gate_extra": 0,
+                        "split": "val",
+                        "eval_ctx": 256,
+                        "eval_iters": 10,
+                        "val_windows": 10,
+                        "val_tokens_evaluated": 2560,
+                    },
+                    f,
+                )
+
         for seed, ppl in ((1, 100.0), (2, 101.0)):
             write("lega", seed, ppl)
         for seed, ppl in ((1, 102.0), (2, 103.0), (3, 104.0)):
             write("standard", seed, ppl)
-        with open(os.path.join(tmp, "repro.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"variants": ["lega", "standard"],
-                       "seeds": [1, 2, 3]}, f)
+        with open(os.path.join(tmp, "repro.json"), "w", encoding="utf-8") as f:
+            json.dump({"variants": ["lega", "standard"], "seeds": [1, 2, 3]}, f)
         out = build_summary(tmp)
         md = out["markdown"]
         assert "缺失结果敏感性" in md, md
@@ -312,12 +368,12 @@ def test_build_summary_wires_missingness_into_report_and_json():
         endpoints = out["missingness"]["endpoints"]
         assert len(endpoints) == 2, endpoints
         assert {(e["candidate"], e["reference"]) for e in endpoints} == {
-            ("lega", "standard")}, endpoints
+            ("lega", "standard")
+        }, endpoints
         ppl = [e for e in endpoints if e["metric"] == "PPL"][0]
         assert ppl["missing_candidate"] == [3], ppl
         assert ppl.get("insufficient_seeds") is True, ppl
-        with open(os.path.join(tmp, "significance.json"), "r",
-                  encoding="utf-8") as f:
+        with open(os.path.join(tmp, "significance.json"), "r", encoding="utf-8") as f:
             payload = json.load(f)
         assert payload["missingness"]["endpoints"][0]["metric"] == "PPL"
         assert "MAR/MCAR" in payload["missingness_note"]

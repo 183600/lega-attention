@@ -1,7 +1,9 @@
 """流水线通用工具、单因素审计与协议辅助函数。"""
+
 from ._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def _gate_factor_set(value):
     """把 GATE_FACTORS 的值规范化为因子集合；结构非法时返回 None。
@@ -9,8 +11,7 @@ def _gate_factor_set(value):
     只接受字符串集合而不是字符串本身：``"ABC"`` 迭代后也是 A/B/C，若不
     排除会被误当成合法因子集合，掩盖“元数据写成了拼接字符串”的漂移。
     """
-    if isinstance(value, str) or not isinstance(
-            value, (set, frozenset, tuple, list)):
+    if isinstance(value, str) or not isinstance(value, (set, frozenset, tuple, list)):
         return None
     try:
         factors = frozenset(value)
@@ -25,17 +26,19 @@ _FACTOR_PARAM = {"A": "gate_w", "B": "gate_a", "C": "gate_b"}
 
 _FACTOR_CAPABILITY = {"A": "query", "B": "conc", "C": "len"}
 
-_FACTOR_LOO_VARIANT = {"A": "lega_no_query", "B": "lega_no_conc",
-                       "C": "lega_no_len"}
+_FACTOR_LOO_VARIANT = {"A": "lega_no_query", "B": "lega_no_conc", "C": "lega_no_len"}
 
 
 def _factor_cell_set(cell):
     """把全因子格名规范化为因子集合；非法格名返回 None。"""
     if cell == "none":
         return frozenset()
-    if (isinstance(cell, str) and cell
-            and len(set(cell)) == len(cell)
-            and all(ch in "ABC" for ch in cell)):
+    if (
+        isinstance(cell, str)
+        and cell
+        and len(set(cell)) == len(cell)
+        and all(ch in "ABC" for ch in cell)
+    ):
         return frozenset(cell)
     return None
 
@@ -57,8 +60,7 @@ def _audit_factorial_cells(cells, label, problems):
             problems.append(f"{label} 格 {cell!r} 的变体名非法：{variant!r}")
             continue
         if variant in mapping:
-            problems.append(
-                f"{label} 的变体 {variant!r} 同时对应多个格")
+            problems.append(f"{label} 的变体 {variant!r} 同时对应多个格")
             continue
         mapping[variant] = factors
     missing = _GATE_FACTOR_SUBSETS - seen_subsets
@@ -66,28 +68,28 @@ def _audit_factorial_cells(cells, label, problems):
     if missing or extra:
         problems.append(
             f"{label} 未覆盖完整 2^3：缺少 "
-            + (", ".join(sorted("".join(sorted(s)) or "none"
-                                for s in missing)) or "无")
+            + (", ".join(sorted("".join(sorted(s)) or "none" for s in missing)) or "无")
             + "；多出 "
-            + (", ".join(sorted("".join(sorted(s)) or "none"
-                                for s in extra)) or "无"))
+            + (", ".join(sorted("".join(sorted(s)) or "none" for s in extra)) or "无")
+        )
     return mapping
 
 
-def _audit_single_factor_edge(label, factor, direction, candidate, reference,
-                              factors, problems):
+def _audit_single_factor_edge(
+    label, factor, direction, candidate, reference, factors, problems
+):
     """核对指定网格中的一条边确实只沿声明方向改变一个因子。"""
     c = factors.get(candidate)
     r = factors.get(reference)
     if c is None or r is None:
-        problems.append(
-            f"{label} {candidate} vs {reference} 不在对应参数化网格内")
+        problems.append(f"{label} {candidate} vs {reference} 不在对应参数化网格内")
         return False
     diff = frozenset(c.symmetric_difference(r))
     if diff != frozenset({factor}):
         problems.append(
             f"{label} {candidate} vs {reference} 声明为单因素 {factor}，"
-            f"实际改变 {sorted(diff) or '无'}")
+            f"实际改变 {sorted(diff) or '无'}"
+        )
         return False
     if direction == "remove":
         shape_ok = c < r and (r - c) == frozenset({factor})
@@ -95,8 +97,8 @@ def _audit_single_factor_edge(label, factor, direction, candidate, reference,
         shape_ok = r < c and (c - r) == frozenset({factor})
     if not shape_ok:
         problems.append(
-            f"{label} {candidate} vs {reference} 的 {direction} 方向与"
-            f"因子变化不符")
+            f"{label} {candidate} vs {reference} 的 {direction} 方向与" f"因子变化不符"
+        )
         return False
     return True
 
@@ -110,21 +112,24 @@ def _audit_reparameterization_contrasts(normalized, problems):
     对变体，无需重复。
     """
     normalized_cells = _audit_factorial_cells(
-        globals().get("NORMALIZED_FACTORIAL_CELLS"),
-        "NORMALIZED_CELLS", problems)
+        globals().get("NORMALIZED_FACTORIAL_CELLS"), "NORMALIZED_CELLS", problems
+    )
     raw_cells = _audit_factorial_cells(
-        globals().get("RAW_FACTORIAL_CELLS"), "RAW_CELLS", problems)
+        globals().get("RAW_FACTORIAL_CELLS"), "RAW_CELLS", problems
+    )
     for variant, factors in normalized_cells.items():
         if normalized.get(variant) != factors:
             problems.append(
                 f"NORMALIZED_CELLS 的变体 {variant!r} 因子集合为 "
                 f"{sorted(normalized.get(variant, ()))}，"
-                f"应为 {sorted(factors)}")
+                f"应为 {sorted(factors)}"
+            )
     if set(normalized_cells) != set(normalized):
         problems.append(
             "NORMALIZED_CELLS 的变体集合与 GATE_FACTORS 不一致："
             f"cells={sorted(normalized_cells)}，"
-            f"factors={sorted(normalized)}")
+            f"factors={sorted(normalized)}"
+        )
     raw_variants = globals().get("RAW_FACTORIAL_VARIANTS")
     if not isinstance(raw_variants, (tuple, list)):
         problems.append("RAW_FACTORIAL_VARIANTS 必须是变体序列")
@@ -132,53 +137,51 @@ def _audit_reparameterization_contrasts(normalized, problems):
         if len(set(raw_variants)) != len(raw_variants):
             problems.append("RAW_FACTORIAL_VARIANTS 含重复变体")
         if set(raw_variants) != set(raw_cells):
-            problems.append(
-                "RAW_FACTORIAL_VARIANTS 与 RAW_CELLS 的变体集合不一致")
+            problems.append("RAW_FACTORIAL_VARIANTS 与 RAW_CELLS 的变体集合不一致")
     # RAW_CELLS 是实验设计元数据；它必须与 raw 变体实现里实际启用的
     # A/B/C 开关一致。否则把 B 格写成归一化 conc 变体（或把 AB 格写成
     # lega_no_len）仍能通过“格名覆盖 2^3”的检查，却不再是原始参数化边。
     raw_gate_factors = globals().get("RAW_GATE_FACTORS")
     raw_impl = {}
     if not isinstance(raw_gate_factors, dict):
-        problems.append(
-            "RAW_GATE_FACTORS 必须是变体 -> A/B/C 因子集合的映射")
+        problems.append("RAW_GATE_FACTORS 必须是变体 -> A/B/C 因子集合的映射")
     else:
         for variant, raw_factors in raw_gate_factors.items():
             if not isinstance(variant, str):
-                problems.append(
-                    f"RAW_GATE_FACTORS 含非字符串变体键：{variant!r}")
+                problems.append(f"RAW_GATE_FACTORS 含非字符串变体键：{variant!r}")
                 continue
             factors = _gate_factor_set(raw_factors)
             if factors is None:
                 problems.append(
                     f"RAW_GATE_FACTORS[{variant!r}] 不是合法的因子集合："
-                    f"{raw_factors!r}")
+                    f"{raw_factors!r}"
+                )
                 continue
             unknown = factors - frozenset("ABC")
             if unknown:
                 problems.append(
-                    f"RAW_GATE_FACTORS[{variant!r}] 含未知因子："
-                    f"{sorted(unknown)}")
+                    f"RAW_GATE_FACTORS[{variant!r}] 含未知因子：" f"{sorted(unknown)}"
+                )
                 continue
             raw_impl[variant] = factors
         if set(raw_impl) != set(raw_cells):
             problems.append(
                 "RAW_CELLS 的变体集合与 RAW_GATE_FACTORS 不一致："
                 f"cells={sorted(raw_cells)}，"
-                f"factors={sorted(raw_impl)}")
+                f"factors={sorted(raw_impl)}"
+            )
         for variant, factors in raw_cells.items():
             impl = raw_impl.get(variant)
             if impl is not None and impl != factors:
                 problems.append(
                     f"RAW_CELLS 的变体 {variant!r} 因子集合为 "
-                    f"{sorted(factors)}，实现为 {sorted(impl)}")
+                    f"{sorted(factors)}，实现为 {sorted(impl)}"
+                )
     contrasts = globals().get("REPARAMETERIZATION_CONTRASTS")
-    if (not isinstance(contrasts, (tuple, list))
-            or isinstance(contrasts, str)):
+    if not isinstance(contrasts, (tuple, list)) or isinstance(contrasts, str):
         problems.append("REPARAMETERIZATION_CONTRASTS 必须是对比序列")
         return []
-    required = {("A", "remove"), ("B", "remove"),
-                ("C", "remove"), ("B", "add")}
+    required = {("A", "remove"), ("B", "remove"), ("C", "remove"), ("B", "add")}
     seen = set()
     audited = []
     for entry in contrasts:
@@ -190,59 +193,76 @@ def _audit_reparameterization_contrasts(normalized, problems):
             problems.append(f"参数化单因素对比含非字符串字段：{entry!r}")
             continue
         if factor not in ("A", "B", "C") or direction not in ("add", "remove"):
-            problems.append(
-                f"参数化对比存在非 A/B/C 单因素声明：{factor}/{direction}")
+            problems.append(f"参数化对比存在非 A/B/C 单因素声明：{factor}/{direction}")
             continue
         edge = (factor, direction)
         if edge in seen:
-            problems.append(
-                f"重复的参数化单因素对比：{factor}/{direction}")
+            problems.append(f"重复的参数化单因素对比：{factor}/{direction}")
             continue
         seen.add(edge)
         ok = True
         for label, pair, grid in (
-                ("归一化参数化", norm_pair, normalized_cells),
-                ("原始参数化", raw_pair, raw_cells)):
-            if (not isinstance(pair, (tuple, list)) or len(pair) != 2
-                    or not all(isinstance(x, str) for x in pair)):
+            ("归一化参数化", norm_pair, normalized_cells),
+            ("原始参数化", raw_pair, raw_cells),
+        ):
+            if (
+                not isinstance(pair, (tuple, list))
+                or len(pair) != 2
+                or not all(isinstance(x, str) for x in pair)
+            ):
                 problems.append(f"{label}对比结构非法：{pair!r}")
                 ok = False
                 continue
             candidate, reference = pair
             if candidate == reference:
                 problems.append(
-                    f"{label}单因素对比两侧相同：{candidate} vs {reference}")
+                    f"{label}单因素对比两侧相同：{candidate} vs {reference}"
+                )
                 ok = False
                 continue
             if not _audit_single_factor_edge(
-                    label, factor, direction, candidate, reference,
-                    grid, problems):
+                label, factor, direction, candidate, reference, grid, problems
+            ):
                 ok = False
-        sf_pairs = SINGLE_FACTOR_PAIRS if isinstance(
-            SINGLE_FACTOR_PAIRS, (tuple, list)) else ()
+        sf_pairs = (
+            SINGLE_FACTOR_PAIRS
+            if isinstance(SINGLE_FACTOR_PAIRS, (tuple, list))
+            else ()
+        )
         normalized_edges = {
-            (p[0], p[1]) for p in sf_pairs
-            if isinstance(p, (tuple, list)) and len(p) == 2
-            and all(isinstance(x, str) for x in p)}
-        if (isinstance(norm_pair, (tuple, list)) and len(norm_pair) == 2
-                and tuple(norm_pair) not in normalized_edges):
+            (p[0], p[1])
+            for p in sf_pairs
+            if isinstance(p, (tuple, list))
+            and len(p) == 2
+            and all(isinstance(x, str) for x in p)
+        }
+        if (
+            isinstance(norm_pair, (tuple, list))
+            and len(norm_pair) == 2
+            and tuple(norm_pair) not in normalized_edges
+        ):
             problems.append(
-                f"参数化对比的归一化边 {tuple(norm_pair)!r} 未登记为"
-                "单因素对比")
+                f"参数化对比的归一化边 {tuple(norm_pair)!r} 未登记为" "单因素对比"
+            )
         if ok:
-            audited.append({
-                "factor": factor, "direction": direction,
-                "normalized_candidate": norm_pair[0],
-                "normalized_reference": norm_pair[1],
-                "raw_candidate": raw_pair[0],
-                "raw_reference": raw_pair[1],
-            })
+            audited.append(
+                {
+                    "factor": factor,
+                    "direction": direction,
+                    "normalized_candidate": norm_pair[0],
+                    "normalized_reference": norm_pair[1],
+                    "raw_candidate": raw_pair[0],
+                    "raw_reference": raw_pair[1],
+                }
+            )
     missing = required - seen
     if missing:
         problems.append(
             "缺少原始参数化单因素对比："
-            + ", ".join(f"{factor}/{direction}"
-                        for factor, direction in sorted(missing)))
+            + ", ".join(
+                f"{factor}/{direction}" for factor, direction in sorted(missing)
+            )
+        )
     return audited
 
 
@@ -255,32 +275,33 @@ def _audit_single_factor_pair_table(contrasts, problems):
     运行期显形，而不是让组件归因在别处静默失真。
     """
     raw_pairs = globals().get("SINGLE_FACTOR_PAIRS")
-    if (not isinstance(raw_pairs, (tuple, list))
-            or isinstance(raw_pairs, str)):
+    if not isinstance(raw_pairs, (tuple, list)) or isinstance(raw_pairs, str):
         problems.append("SINGLE_FACTOR_PAIRS 必须是对比序列")
         return []
     seen = set()
     pairs = []
     for entry in raw_pairs:
-        if (not isinstance(entry, (tuple, list)) or len(entry) != 2
-                or not all(isinstance(x, str) and x for x in entry)):
+        if (
+            not isinstance(entry, (tuple, list))
+            or len(entry) != 2
+            or not all(isinstance(x, str) and x for x in entry)
+        ):
             problems.append(f"单因素对比对结构非法：{entry!r}")
             continue
         candidate, reference = entry
         pair = (candidate, reference)
         if candidate == reference:
-            problems.append(
-                f"单因素对比对两侧相同：{candidate} vs {reference}")
+            problems.append(f"单因素对比对两侧相同：{candidate} vs {reference}")
             continue
         if pair in seen:
-            problems.append(
-                f"重复的单因素对比对：{candidate} vs {reference}")
+            problems.append(f"重复的单因素对比对：{candidate} vs {reference}")
             continue
         seen.add(pair)
         if single_factor_change(candidate, reference) is None:
             problems.append(
                 f"单因素对比对 {candidate} vs {reference} 实际不改变"
-                "恰好一个 A/B/C 因子")
+                "恰好一个 A/B/C 因子"
+            )
             continue
         pairs.append(pair)
     expected = {(c["candidate"], c["reference"]) for c in contrasts}
@@ -289,11 +310,13 @@ def _audit_single_factor_pair_table(contrasts, problems):
     if missing:
         problems.append(
             "SINGLE_FACTOR_PAIRS 缺少已声明对比："
-            + ", ".join(f"{c} vs {r}" for c, r in sorted(missing)))
+            + ", ".join(f"{c} vs {r}" for c, r in sorted(missing))
+        )
     if extra:
         problems.append(
             "SINGLE_FACTOR_PAIRS 含未声明对比："
-            + ", ".join(f"{c} vs {r}" for c, r in sorted(extra)))
+            + ", ".join(f"{c} vs {r}" for c, r in sorted(extra))
+        )
     return pairs
 
 
@@ -306,8 +329,7 @@ def _audit_inference_permutation_lesions(problems):
     因此这里按病灶 kind / requires / params 逐项核对。
     """
     entries = globals().get("PERMUTATION_LESION_FACTORS")
-    if (not isinstance(entries, (tuple, list))
-            or isinstance(entries, str)):
+    if not isinstance(entries, (tuple, list)) or isinstance(entries, str):
         problems.append("PERMUTATION_LESION_FACTORS 必须是病灶映射序列")
         return []
     lesion_by_id = globals().get("ABLATION_LESION_BY_ID")
@@ -323,27 +345,29 @@ def _audit_inference_permutation_lesions(problems):
     seen_ids = set()
     audited = []
     for entry in entries:
-        if (not isinstance(entry, (tuple, list)) or len(entry) != 3
-                or not all(isinstance(x, str) for x in entry)):
+        if (
+            not isinstance(entry, (tuple, list))
+            or len(entry) != 3
+            or not all(isinstance(x, str) for x in entry)
+        ):
             problems.append(f"单因素置换病灶定义结构非法：{entry!r}")
             continue
         factor, lesion_id, capability = entry
         if factor not in expected:
-            problems.append(
-                f"单因素置换病灶的因子非法：{factor!r}")
+            problems.append(f"单因素置换病灶的因子非法：{factor!r}")
             continue
         if factor in seen_factors:
             problems.append(f"重复的单因素置换因子：{factor}")
         seen_factors.add(factor)
         if lesion_id in seen_ids:
-            problems.append(
-                f"置换病灶 {lesion_id!r} 承担多个单因子映射")
+            problems.append(f"置换病灶 {lesion_id!r} 承担多个单因子映射")
         seen_ids.add(lesion_id)
         expected_kind, expected_capability = expected[factor]
         if capability != expected_capability:
             problems.append(
                 f"置换病灶 {lesion_id!r} 声明为 {factor}，但能力为 "
-                f"{capability!r}，应为 {expected_capability!r}")
+                f"{capability!r}，应为 {expected_capability!r}"
+            )
         spec = lesion_by_id.get(lesion_id)
         if not isinstance(spec, dict):
             problems.append(f"置换病灶 {lesion_id!r} 未定义")
@@ -351,34 +375,40 @@ def _audit_inference_permutation_lesions(problems):
         if spec.get("kind") != expected_kind:
             problems.append(
                 f"置换病灶 {lesion_id!r} 声明为单因素 {factor}，kind 应为 "
-                f"{expected_kind!r}，实际 {spec.get('kind')!r}")
+                f"{expected_kind!r}，实际 {spec.get('kind')!r}"
+            )
         requires = spec.get("requires")
-        if (not isinstance(requires, (tuple, list, set, frozenset))
-                or not all(isinstance(x, str) for x in requires)):
+        if not isinstance(requires, (tuple, list, set, frozenset)) or not all(
+            isinstance(x, str) for x in requires
+        ):
             problems.append(f"置换病灶 {lesion_id!r} 的 requires 结构非法")
         elif set(requires) != {expected_capability}:
             problems.append(
                 f"置换病灶 {lesion_id!r} 依赖 {sorted(set(requires)) or '无'}，"
-                f"单因素 {factor} 应只依赖 {expected_capability}")
+                f"单因素 {factor} 应只依赖 {expected_capability}"
+            )
         params = spec.get("params")
-        if (not isinstance(params, (tuple, list, set, frozenset))
-                or not all(isinstance(x, str) for x in params)):
+        if not isinstance(params, (tuple, list, set, frozenset)) or not all(
+            isinstance(x, str) for x in params
+        ):
             problems.append(f"置换病灶 {lesion_id!r} 的 params 结构非法")
         elif params:
             problems.append(
-                f"置换病灶 {lesion_id!r} 不应清零参数，实际为 "
-                f"{sorted(set(params))}")
+                f"置换病灶 {lesion_id!r} 不应清零参数，实际为 " f"{sorted(set(params))}"
+            )
         if spec.get("factorial_cell") is True:
-            problems.append(
-                f"置换病灶 {lesion_id!r} 不应标记为全因子格")
-        audited.append({"factor": factor, "lesion": lesion_id,
-                        "capability": capability,
-                        "kind": expected_kind})
+            problems.append(f"置换病灶 {lesion_id!r} 不应标记为全因子格")
+        audited.append(
+            {
+                "factor": factor,
+                "lesion": lesion_id,
+                "capability": capability,
+                "kind": expected_kind,
+            }
+        )
     missing = set(expected) - seen_factors
     if missing:
-        problems.append(
-            "缺少单因素置换病灶："
-            + ", ".join(sorted(missing)))
+        problems.append("缺少单因素置换病灶：" + ", ".join(sorted(missing)))
     return audited
 
 
@@ -389,22 +419,25 @@ def _audit_inference_single_factor_design(problems):
         problems.append("LESION_BY_ID 必须是病灶映射")
         return [], [], []
     pairs = globals().get("MATCHED_LESION_PAIRS")
-    if (not isinstance(pairs, (tuple, list)) or isinstance(pairs, str)):
+    if not isinstance(pairs, (tuple, list)) or isinstance(pairs, str):
         problems.append("MATCHED_LESION_PAIRS 必须是配对序列")
         pairs = ()
     matched = []
     seen_factors = set()
     seen_ids = set()
     for entry in pairs:
-        if (not isinstance(entry, (tuple, list)) or len(entry) != 3
-                or not all(isinstance(x, str) for x in entry)):
+        if (
+            not isinstance(entry, (tuple, list))
+            or len(entry) != 3
+            or not all(isinstance(x, str) for x in entry)
+        ):
             problems.append(f"活动匹配病灶配对结构非法：{entry!r}")
             continue
         raw_id, matched_id, factor = entry
         if factor not in ("A", "B", "C"):
             problems.append(
-                f"活动匹配病灶 {raw_id} vs {matched_id} 的因子非法："
-                f"{factor!r}")
+                f"活动匹配病灶 {raw_id} vs {matched_id} 的因子非法：" f"{factor!r}"
+            )
             continue
         if factor in seen_factors:
             problems.append(f"重复的活动匹配因子：{factor}")
@@ -421,59 +454,57 @@ def _audit_inference_single_factor_design(problems):
             problems.append(f"活动匹配病灶 {matched_id!r} 未定义")
             continue
         expected_params = {_FACTOR_PARAM[factor]}
-        expected_capability = {"A": "query", "B": "conc",
-                               "C": "len"}[factor]
+        expected_capability = {"A": "query", "B": "conc", "C": "len"}[factor]
         for label, lid, spec in (
-                ("原始病灶", raw_id, raw_spec),
-                ("活动匹配病灶", matched_id, matched_spec)):
+            ("原始病灶", raw_id, raw_spec),
+            ("活动匹配病灶", matched_id, matched_spec),
+        ):
             if lid in seen_ids:
                 problems.append(f"病灶 {lid!r} 在多条匹配对照中重复使用")
             seen_ids.add(lid)
             params = spec.get("params")
-            if (not isinstance(params, (tuple, list, set, frozenset))
-                    or not all(isinstance(x, str) for x in params)):
+            if not isinstance(params, (tuple, list, set, frozenset)) or not all(
+                isinstance(x, str) for x in params
+            ):
                 problems.append(f"{label} {lid!r} 的 params 结构非法")
                 continue
             if set(params) != expected_params:
                 problems.append(
                     f"{label} {lid!r} 声明为单因素 {factor}，实际清零 "
-                    f"{sorted(set(params)) or '无'}")
+                    f"{sorted(set(params)) or '无'}"
+                )
             requires = spec.get("requires")
-            if (not isinstance(requires, (tuple, list, set, frozenset))
-                    or not all(isinstance(x, str) for x in requires)):
+            if not isinstance(requires, (tuple, list, set, frozenset)) or not all(
+                isinstance(x, str) for x in requires
+            ):
                 problems.append(f"{label} {lid!r} 的 requires 结构非法")
             elif set(requires) != {expected_capability}:
                 problems.append(
                     f"{label} {lid!r} 声明为单因素 {factor}，但依赖 "
                     f"{sorted(set(requires)) or '无'}，应为 "
-                    f"{expected_capability}")
+                    f"{expected_capability}"
+                )
         if raw_spec.get("kind") != "zero":
             problems.append(f"原始病灶 {raw_id!r} 不是单因子清零病灶")
         if matched_spec.get("kind") != "zero_matched":
-            problems.append(
-                f"活动匹配病灶 {matched_id!r} 不是 zero_matched 病灶")
+            problems.append(f"活动匹配病灶 {matched_id!r} 不是 zero_matched 病灶")
         if raw_spec.get("matched_control") is True:
             problems.append(f"原始病灶 {raw_id!r} 不应标为活动匹配对照")
         if matched_spec.get("matched_control") is not True:
-            problems.append(
-                f"活动匹配病灶 {matched_id!r} 未标记 matched_control")
+            problems.append(f"活动匹配病灶 {matched_id!r} 未标记 matched_control")
         if matched_spec.get("matched_of") != raw_id:
             problems.append(
-                f"活动匹配病灶 {matched_id!r} 的 matched_of 不是 "
-                f"{raw_id!r}")
+                f"活动匹配病灶 {matched_id!r} 的 matched_of 不是 " f"{raw_id!r}"
+            )
         if matched_spec.get("matched_factor") != factor:
             problems.append(
-                f"活动匹配病灶 {matched_id!r} 的 matched_factor 与 "
-                f"{factor} 不一致")
-        matched.append({"raw": raw_id, "matched": matched_id,
-                        "factor": factor})
+                f"活动匹配病灶 {matched_id!r} 的 matched_factor 与 " f"{factor} 不一致"
+            )
+        matched.append({"raw": raw_id, "matched": matched_id, "factor": factor})
     missing_factors = {"A", "B", "C"} - seen_factors
     if missing_factors:
-        problems.append(
-            "缺少活动匹配单因素病灶："
-            + ", ".join(sorted(missing_factors)))
-    permutation_lesions = _audit_inference_permutation_lesions(
-        problems)
+        problems.append("缺少活动匹配单因素病灶：" + ", ".join(sorted(missing_factors)))
+    permutation_lesions = _audit_inference_permutation_lesions(problems)
     cells = globals().get("INFERENCE_FACTORIAL_CELLS")
     if not isinstance(cells, dict):
         problems.append("INFERENCE_FACTORIAL_CELLS 必须是 cell -> 病灶映射")
@@ -489,29 +520,27 @@ def _audit_inference_single_factor_design(problems):
         seen_subsets.add(factors)
         if factors == frozenset("ABC"):
             if lesion_id is not None:
-                problems.append(
-                    f"推理期基线格 {cell!r} 不应映射病灶：{lesion_id!r}")
+                problems.append(f"推理期基线格 {cell!r} 不应映射病灶：{lesion_id!r}")
             else:
-                audited_cells.append({"cell": cell, "lesion": None,
-                                      "factors": sorted(factors)})
+                audited_cells.append(
+                    {"cell": cell, "lesion": None, "factors": sorted(factors)}
+                )
             continue
         if not isinstance(lesion_id, str):
-            problems.append(
-                f"推理期全因子格 {cell!r} 的病灶名非法：{lesion_id!r}")
+            problems.append(f"推理期全因子格 {cell!r} 的病灶名非法：{lesion_id!r}")
             continue
         if lesion_id in seen_lesions:
-            problems.append(
-                f"推理期病灶 {lesion_id!r} 同时对应多个全因子格")
+            problems.append(f"推理期病灶 {lesion_id!r} 同时对应多个全因子格")
         seen_lesions.add(lesion_id)
         spec = lesion_by_id.get(lesion_id)
         if not isinstance(spec, dict):
             problems.append(f"推理期全因子格病灶 {lesion_id!r} 未定义")
             continue
         params = spec.get("params")
-        if (not isinstance(params, (tuple, list, set, frozenset))
-                or not all(isinstance(x, str) for x in params)):
-            problems.append(
-                f"推理期病灶 {lesion_id!r} 的 params 结构非法")
+        if not isinstance(params, (tuple, list, set, frozenset)) or not all(
+            isinstance(x, str) for x in params
+        ):
+            problems.append(f"推理期病灶 {lesion_id!r} 的 params 结构非法")
             continue
         expected_zero = frozenset("ABC") - factors
         expected_params = {_FACTOR_PARAM[f] for f in expected_zero}
@@ -519,33 +548,36 @@ def _audit_inference_single_factor_design(problems):
             problems.append(
                 f"推理期格 {cell!r} -> {lesion_id!r} 应清零 "
                 f"{sorted(expected_params) or '无'}，实际清零 "
-                f"{sorted(set(params)) or '无'}")
+                f"{sorted(set(params)) or '无'}"
+            )
         expected_kind = "zero_evidence" if not factors else "zero"
         if spec.get("kind") != expected_kind:
             problems.append(
-                f"推理期格 {cell!r} -> {lesion_id!r} 的 kind 不是 "
-                f"{expected_kind}")
+                f"推理期格 {cell!r} -> {lesion_id!r} 的 kind 不是 " f"{expected_kind}"
+            )
         flagged = spec.get("factorial_cell") is True
         if len(factors) == 1 and not flagged:
             problems.append(
                 f"推理期单因子格 {cell!r} 的病灶 {lesion_id!r} 未标记 "
-                "factorial_cell，可能混入单病灶因果表")
+                "factorial_cell，可能混入单病灶因果表"
+            )
         if len(factors) != 1 and flagged:
             problems.append(
                 f"推理期非单因子格 {cell!r} 的病灶 {lesion_id!r} 不应标记 "
-                "factorial_cell")
-        audited_cells.append({"cell": cell, "lesion": lesion_id,
-                              "factors": sorted(factors)})
+                "factorial_cell"
+            )
+        audited_cells.append(
+            {"cell": cell, "lesion": lesion_id, "factors": sorted(factors)}
+        )
     missing = _GATE_FACTOR_SUBSETS - seen_subsets
     extra = seen_subsets - _GATE_FACTOR_SUBSETS
     if missing or extra:
         problems.append(
             "推理期全因子格未覆盖完整 2^3：缺少 "
-            + (", ".join(sorted("".join(sorted(s)) or "none"
-                                for s in missing)) or "无")
+            + (", ".join(sorted("".join(sorted(s)) or "none" for s in missing)) or "无")
             + "；多出 "
-            + (", ".join(sorted("".join(sorted(s)) or "none"
-                                for s in extra)) or "无"))
+            + (", ".join(sorted("".join(sorted(s)) or "none" for s in extra)) or "无")
+        )
     return matched, permutation_lesions, audited_cells
 
 
@@ -565,8 +597,7 @@ def _audit_dose_response_components(problems):
     if not isinstance(specs, dict):
         problems.append("COMPONENT_SPECS 必须是组件 -> 规格映射")
         specs = {}
-    if (not isinstance(order, (tuple, list))
-            or isinstance(order, str)):
+    if not isinstance(order, (tuple, list)) or isinstance(order, str):
         problems.append("COMPONENT_ORDER 必须是组件序列")
         order_entries = []
     else:
@@ -581,8 +612,7 @@ def _audit_dose_response_components(problems):
         seen_order.add(component)
     missing_order = set(expected) - seen_order
     if missing_order:
-        problems.append(
-            "缺少剂量-反应组件：" + ", ".join(sorted(missing_order)))
+        problems.append("缺少剂量-反应组件：" + ", ".join(sorted(missing_order)))
     for component in specs:
         if not isinstance(component, str):
             problems.append(f"剂量-反应规格含非字符串组件键：{component!r}")
@@ -604,20 +634,20 @@ def _audit_dose_response_components(problems):
         for name, expected_map, label in fields:
             value = spec.get(name)
             if not isinstance(value, str) or not value:
-                problems.append(
-                    f"剂量-反应组件 {component} 的{label}非法：{value!r}")
+                problems.append(f"剂量-反应组件 {component} 的{label}非法：{value!r}")
                 continue
             row[name] = value
             wanted = expected_map[component]
             if value != wanted:
                 problems.append(
                     f"剂量-反应组件 {component} 的{label}为 {value!r}，"
-                    f"应为 {wanted!r}，否则不再是单因素剂量实验")
+                    f"应为 {wanted!r}，否则不再是单因素剂量实验"
+                )
             prior = seen_values[name].get(value)
             if prior is not None and prior != component:
                 problems.append(
-                    f"剂量-反应组件 {component} 与 {prior} 共用{label} "
-                    f"{value!r}")
+                    f"剂量-反应组件 {component} 与 {prior} 共用{label} " f"{value!r}"
+                )
             else:
                 seen_values[name][value] = component
         audited.append(row)
@@ -638,23 +668,21 @@ def _audit_capacity_triple_components(problems, normalized):
     nulls = globals().get("CAPACITY_NULL_VARIANTS")
     offs = globals().get("CAPACITY_OFF_VARIANTS")
     inverse = globals().get("NULL_EVIDENCE_COMPONENT")
-    for label, mapping in (("CAPACITY_NULL_VARIANTS", nulls),
-                           ("CAPACITY_OFF_VARIANTS", offs)):
+    for label, mapping in (
+        ("CAPACITY_NULL_VARIANTS", nulls),
+        ("CAPACITY_OFF_VARIANTS", offs),
+    ):
         if not isinstance(mapping, dict):
             problems.append(f"{label} 必须是组件 -> 变体映射")
             continue
         for component in mapping:
             if not isinstance(component, str):
-                problems.append(
-                    f"{label} 含非字符串组件键：{component!r}")
+                problems.append(f"{label} 含非字符串组件键：{component!r}")
             elif component not in expected:
-                problems.append(
-                    f"{label} 存在未登记组件：{component!r}")
-        missing = set(expected) - {
-            c for c in mapping if isinstance(c, str)}
+                problems.append(f"{label} 存在未登记组件：{component!r}")
+        missing = set(expected) - {c for c in mapping if isinstance(c, str)}
         if missing:
-            problems.append(
-                f"{label} 缺少组件：" + ", ".join(sorted(missing)))
+            problems.append(f"{label} 缺少组件：" + ", ".join(sorted(missing)))
     if not isinstance(nulls, dict):
         nulls = {}
     if not isinstance(offs, dict):
@@ -667,14 +695,16 @@ def _audit_capacity_triple_components(problems, normalized):
         if inverse != reverse:
             problems.append(
                 "NULL_EVIDENCE_COMPONENT 与 CAPACITY_NULL_VARIANTS 不是"
-                f"互逆映射：inverse={inverse!r}，reverse={reverse!r}")
+                f"互逆映射：inverse={inverse!r}，reverse={reverse!r}"
+            )
     if not isinstance(normalized, dict):
         normalized = {}
     full_factors = normalized.get("lega")
     if full_factors != frozenset(expected):
         problems.append(
             f"容量分解的 Full 变体 lega 因子集合为 "
-            f"{sorted(full_factors or ())}，应为 A/B/C")
+            f"{sorted(full_factors or ())}，应为 A/B/C"
+        )
     rows = []
     seen_null = {}
     seen_off = {}
@@ -683,83 +713,93 @@ def _audit_capacity_triple_components(problems, normalized):
         off_variant = offs.get(component)
         if not isinstance(null_variant, str) or not null_variant:
             problems.append(
-                f"容量匹配组件 {component} 的 Null 变体非法："
-                f"{null_variant!r}")
+                f"容量匹配组件 {component} 的 Null 变体非法：" f"{null_variant!r}"
+            )
             null_variant = None
         if not isinstance(off_variant, str) or not off_variant:
             problems.append(
-                f"容量匹配组件 {component} 的 No 变体非法："
-                f"{off_variant!r}")
+                f"容量匹配组件 {component} 的 No 变体非法：" f"{off_variant!r}"
+            )
             off_variant = None
         if null_variant is not None:
             prior = seen_null.get(null_variant)
             if prior is not None:
                 problems.append(
                     f"组件 {component} 与 {prior} 共用容量匹配 Null 变体 "
-                    f"{null_variant!r}")
+                    f"{null_variant!r}"
+                )
             else:
                 seen_null[null_variant] = component
             if null_variant == off_variant:
                 problems.append(
-                    f"组件 {component} 的 Null 与 No 变体相同："
-                    f"{null_variant!r}")
+                    f"组件 {component} 的 Null 与 No 变体相同：" f"{null_variant!r}"
+                )
             if inverse is not None and inverse.get(null_variant) != component:
                 problems.append(
                     f"容量匹配 Null 变体 {null_variant!r} 对应组件为 "
-                    f"{inverse.get(null_variant)!r}，应为 {component!r}")
-            for key, collection in (("RUNNABLE_VARIANTS", RUNNABLE_VARIANTS),
-                                    ("CONTROL_VARIANTS", CONTROL_VARIANTS),
-                                    ("NULL_EVIDENCE_VARIANTS",
-                                     NULL_EVIDENCE_VARIANTS),
-                                    ("_GATED", _GATED),
-                                    ("_LEGA_FAMILY", _LEGA_FAMILY)):
+                    f"{inverse.get(null_variant)!r}，应为 {component!r}"
+                )
+            for key, collection in (
+                ("RUNNABLE_VARIANTS", RUNNABLE_VARIANTS),
+                ("CONTROL_VARIANTS", CONTROL_VARIANTS),
+                ("NULL_EVIDENCE_VARIANTS", NULL_EVIDENCE_VARIANTS),
+                ("_GATED", _GATED),
+                ("_LEGA_FAMILY", _LEGA_FAMILY),
+            ):
                 if null_variant not in collection:
                     problems.append(
                         f"容量匹配 Null 变体 {null_variant!r} 不在 "
-                        f"{key} 中，无法保留全部门控参数/计算")
+                        f"{key} 中，无法保留全部门控参数/计算"
+                    )
             if null_variant in GATE_FACTORS:
                 problems.append(
                     f"容量匹配 Null 变体 {null_variant!r} 混入了主 A/B/C "
-                    "因子表；它只把证据置零，不能当作结构格")
-            if (isinstance(RAW_GATE_FACTORS, dict)
-                    and null_variant in RAW_GATE_FACTORS):
+                    "因子表；它只把证据置零，不能当作结构格"
+                )
+            if isinstance(RAW_GATE_FACTORS, dict) and null_variant in RAW_GATE_FACTORS:
                 problems.append(
-                    f"容量匹配 Null 变体 {null_variant!r} 混入了原始参数化"
-                    "因子表")
+                    f"容量匹配 Null 变体 {null_variant!r} 混入了原始参数化" "因子表"
+                )
         if off_variant is not None:
             prior = seen_off.get(off_variant)
             if prior is not None:
                 problems.append(
                     f"组件 {component} 与 {prior} 共用去一法 No 变体 "
-                    f"{off_variant!r}")
+                    f"{off_variant!r}"
+                )
             else:
                 seen_off[off_variant] = component
             wanted = _FACTOR_LOO_VARIANT.get(component)
             if off_variant != wanted:
                 problems.append(
                     f"容量匹配组件 {component} 的 No 变体为 "
-                    f"{off_variant!r}，应为去一法变体 {wanted!r}")
+                    f"{off_variant!r}，应为去一法变体 {wanted!r}"
+                )
             wanted_factors = frozenset(expected) - frozenset({component})
             actual = normalized.get(off_variant)
             if actual != wanted_factors:
                 problems.append(
                     f"容量匹配组件 {component} 的 No 变体 {off_variant!r} "
                     f"因子集合为 {sorted(actual or ())}，应为 "
-                    f"{sorted(wanted_factors)}")
+                    f"{sorted(wanted_factors)}"
+                )
         if null_variant is not None and off_variant is not None:
-            rows.append({
-                "component": component,
-                "full_variant": "lega",
-                "null_variant": null_variant,
-                "off_variant": off_variant,
-                "evidence_param": _FACTOR_PARAM[component],
-                "evidence_capability": _FACTOR_CAPABILITY[component],
-            })
+            rows.append(
+                {
+                    "component": component,
+                    "full_variant": "lega",
+                    "null_variant": null_variant,
+                    "off_variant": off_variant,
+                    "evidence_param": _FACTOR_PARAM[component],
+                    "evidence_capability": _FACTOR_CAPABILITY[component],
+                }
+            )
     overlap = set(seen_null) & set(seen_off)
     if overlap:
         problems.append(
             "容量匹配 Null 变体不能同时作为去一法 No 变体："
-            + ", ".join(sorted(overlap)))
+            + ", ".join(sorted(overlap))
+        )
     return rows
 
 
@@ -800,13 +840,14 @@ def single_factor_change(candidate, reference):
 # 变体名看起来像：H2–H4 是核心消融假设，若登记表被改成多因子对比
 # （如把 lega_no_conc 换成 lega_conc_only vs lega，同时改 A+C），汇总仍会
 # 按"支持/拒绝"输出一个看似单组件的确认性判定。
-_HYPOTHESIS_SINGLE_FACTOR_MARKERS = ("核心消融", "去一法", "单组件", "单因素",
-                                     "只去掉")
+_HYPOTHESIS_SINGLE_FACTOR_MARKERS = ("核心消融", "去一法", "单组件", "单因素", "只去掉")
 
 # 去一法（从参照去掉该因子）期望候选变差；全因子增量（只加该因子）期望
 # 候选更好。登记表的 direction 与这条边不符时，优效性判定本身会被写反。
-_FACTOR_EDGE_EXPECTED_DIRECTION = {"remove": "candidate_worse",
-                                   "add": "candidate_better"}
+_FACTOR_EDGE_EXPECTED_DIRECTION = {
+    "remove": "candidate_worse",
+    "add": "candidate_better",
+}
 
 
 def _audit_registered_single_factor(contrasts, problems):
@@ -826,15 +867,17 @@ def _audit_registered_single_factor(contrasts, problems):
     rows = []
     try:
         from lega.hypotheses import load_registration
+
         registered = load_registration(HYPOTHESES_PATH)
     except Exception as e:  # pragma: no cover - 缺文件/损坏只在极端环境发生
         return [{"available": False, "reason": f"{type(e).__name__}: {e}"}]
-    hypotheses = (registered.get("hypotheses")
-                  if isinstance(registered, dict) else None)
+    hypotheses = registered.get("hypotheses") if isinstance(registered, dict) else None
     if not isinstance(hypotheses, list):
         return [{"available": False, "reason": "登记表缺少 hypotheses 列表"}]
-    audited_edges = {(c["candidate"], c["reference"]):
-                     (c["factor"], c["direction"]) for c in contrasts}
+    audited_edges = {
+        (c["candidate"], c["reference"]): (c["factor"], c["direction"])
+        for c in contrasts
+    }
     audited_pairs = set(audited_edges)
     for entry in hypotheses:
         if not isinstance(entry, dict):
@@ -846,10 +889,14 @@ def _audit_registered_single_factor(contrasts, problems):
         if not (isinstance(cand, str) and isinstance(ref, str) and cand and ref):
             problems.append(f"登记假设 {hyp_id} 的候选/参照缺失或非法")
             continue
-        row = {"id": hyp_id, "candidate": cand, "reference": ref,
-               "claim": claim, "metric": entry.get("metric")}
-        requires_single = any(m in claim for m in
-                              _HYPOTHESIS_SINGLE_FACTOR_MARKERS)
+        row = {
+            "id": hyp_id,
+            "candidate": cand,
+            "reference": ref,
+            "claim": claim,
+            "metric": entry.get("metric"),
+        }
+        requires_single = any(m in claim for m in _HYPOTHESIS_SINGLE_FACTOR_MARKERS)
         row["claims_single_factor"] = bool(requires_single)
         change = single_factor_change(cand, ref)
         if (cand, ref) in audited_pairs:
@@ -860,7 +907,8 @@ def _audit_registered_single_factor(contrasts, problems):
             if change != factor:
                 problems.append(
                     f"登记假设 {hyp_id} 的对比 {cand} vs {ref} 声明单因素 "
-                    f"{factor}，实际因子差为 {sorted(change) if change else '无'}")
+                    f"{factor}，实际因子差为 {sorted(change) if change else '无'}"
+                )
         elif change is not None:
             # 对称差恰好 1 但未登记：不能当单因素归因，只如实标注
             row["contrast_type"] = "unregistered_single_factor"
@@ -868,26 +916,30 @@ def _audit_registered_single_factor(contrasts, problems):
             if requires_single:
                 problems.append(
                     f"登记假设 {hyp_id} 自称单组件消融，但 {cand} vs {ref} "
-                    f"不在已审计的单因素对比表内")
+                    f"不在已审计的单因素对比表内"
+                )
         else:
             diff = changed_gate_factors(cand, ref)
-            row["contrast_type"] = ("overall" if diff is None else
-                                    "multi_factor")
+            row["contrast_type"] = "overall" if diff is None else "multi_factor"
             row["changed_factors"] = sorted(diff) if diff else []
             if requires_single:
                 problems.append(
                     f"登记假设 {hyp_id} 自称单组件消融，但 {cand} vs {ref} "
-                    + (f"改变了多个因子 {row['changed_factors']}"
-                       if diff else "不在门控 2^3 因子网格内"))
+                    + (
+                        f"改变了多个因子 {row['changed_factors']}"
+                        if diff
+                        else "不在门控 2^3 因子网格内"
+                    )
+                )
         if row["contrast_type"] == "single_factor":
-            expected_dir = _FACTOR_EDGE_EXPECTED_DIRECTION.get(
-                row["edge_direction"])
+            expected_dir = _FACTOR_EDGE_EXPECTED_DIRECTION.get(row["edge_direction"])
             declared_dir = entry.get("direction")
-            if (expected_dir is not None and declared_dir != expected_dir):
+            if expected_dir is not None and declared_dir != expected_dir:
                 problems.append(
                     f"登记假设 {hyp_id} 的 direction={declared_dir!r} 与 "
                     f"{row['edge_direction']} 边（{row['factor']}）的期望"
-                    f"方向 {expected_dir!r} 不符：优效性判定会被写反")
+                    f"方向 {expected_dir!r} 不符：优效性判定会被写反"
+                )
                 row["direction_mismatch"] = True
             else:
                 row["direction_mismatch"] = False
@@ -911,41 +963,48 @@ def _audit_implementation_factors(normalized, problems):
     """
     rows = []
     try:
-        from lega.attention import (_GATED, ALT_CONC_VARIANTS,  # noqa: E501
-                                    NULL_EVIDENCE_VARIANTS,
-                                    PLACEBO_VARIANTS,
-                                    SUPPLEMENTAL_GATE_FACTORS,
-                                    probe_gate_factors)
+        from lega.attention import (
+            _GATED,
+            ALT_CONC_VARIANTS,  # noqa: E501
+            PLACEBO_VARIANTS,
+            SUPPLEMENTAL_GATE_FACTORS,
+            probe_gate_factors,
+        )
     except Exception as e:  # pragma: no cover - 依赖损坏只在极端环境发生
         problems.append(f"无法执行实现级单因素核对：{type(e).__name__}: {e}")
         return rows
     gate_table = GATE_FACTORS if isinstance(GATE_FACTORS, dict) else {}
-    raw_table = (globals().get("RAW_GATE_FACTORS")
-                 if isinstance(globals().get("RAW_GATE_FACTORS"), dict) else {})
-    supplemental = (dict(SUPPLEMENTAL_GATE_FACTORS)
-                    if isinstance(SUPPLEMENTAL_GATE_FACTORS, dict) else {})
+    raw_table = (
+        globals().get("RAW_GATE_FACTORS")
+        if isinstance(globals().get("RAW_GATE_FACTORS"), dict)
+        else {}
+    )
+    supplemental = (
+        dict(SUPPLEMENTAL_GATE_FACTORS)
+        if isinstance(SUPPLEMENTAL_GATE_FACTORS, dict)
+        else {}
+    )
     for variant in supplemental:
         if not isinstance(variant, str):
-            problems.append(
-                f"SUPPLEMENTAL_GATE_FACTORS 含非字符串变体键：{variant!r}")
+            problems.append(f"SUPPLEMENTAL_GATE_FACTORS 含非字符串变体键：{variant!r}")
     for variant, factors in supplemental.items():
         if isinstance(variant, str) and _gate_factor_set(factors) is None:
             problems.append(
                 f"SUPPLEMENTAL_GATE_FACTORS[{variant!r}] 不是合法的因子集合："
-                f"{factors!r}")
+                f"{factors!r}"
+            )
         if isinstance(variant, str) and variant not in _GATED:
-            problems.append(
-                f"带门补充对照 {variant!r} 没有输出门，不应登记因子语义")
+            problems.append(f"带门补充对照 {variant!r} 没有输出门，不应登记因子语义")
     all_params = ["gate_a", "gate_b", "gate_w"]
     for variant in sorted(set(_GATED)):
         probe = probe_gate_factors(variant)
         if probe.get("error"):
-            problems.append(
-                f"实现级单因素核对失败（{variant}）：{probe['error']}")
+            problems.append(f"实现级单因素核对失败（{variant}）：{probe['error']}")
             continue
         if not probe.get("gated"):
             problems.append(
-                f"带门变体 {variant!r} 的前向没有门控 logit，无法做单因素归因")
+                f"带门变体 {variant!r} 的前向没有门控 logit，无法做单因素归因"
+            )
             continue
         effective = frozenset(probe.get("effective") or [])
         params = list(probe.get("params") or [])
@@ -953,15 +1012,13 @@ def _audit_implementation_factors(normalized, problems):
         if variant in gate_table:
             got = _gate_factor_set(gate_table.get(variant))
             if got is None:
-                problems.append(
-                    f"GATE_FACTORS[{variant!r}] 不是合法的因子集合")
+                problems.append(f"GATE_FACTORS[{variant!r}] 不是合法的因子集合")
             else:
                 declared["GATE_FACTORS"] = got
         if variant in raw_table:
             got = _gate_factor_set(raw_table.get(variant))
             if got is None:
-                problems.append(
-                    f"RAW_GATE_FACTORS[{variant!r}] 不是合法的因子集合")
+                problems.append(f"RAW_GATE_FACTORS[{variant!r}] 不是合法的因子集合")
             else:
                 declared["RAW_GATE_FACTORS"] = got
         null_component = probe.get("null_component")
@@ -972,68 +1029,83 @@ def _audit_implementation_factors(normalized, problems):
             if sorted(params) != sorted(all_params):
                 problems.append(
                     f"容量匹配对照 {variant!r} 应保留全部门控参数 "
-                    f"{all_params}，实际 {params}，否则不再是参数匹配的三臂")
-            if sorted(null_component) not in (sorted("A"), sorted("B"),
-                                              sorted("C")):
+                    f"{all_params}，实际 {params}，否则不再是参数匹配的三臂"
+                )
+            if sorted(null_component) not in (sorted("A"), sorted("B"), sorted("C")):
                 problems.append(
-                    f"容量匹配对照 {variant!r} 的置零组件非法：{null_component!r}")
+                    f"容量匹配对照 {variant!r} 的置零组件非法：{null_component!r}"
+                )
         elif variant in PLACEBO_VARIANTS:
             category = "placebo"
             expected = frozenset("ABC")
             if sorted(params) != sorted(all_params):
                 problems.append(
                     f"参数匹配安慰剂 {variant!r} 应保留全部门控参数 "
-                    f"{all_params}，实际 {params}")
+                    f"{all_params}，实际 {params}"
+                )
         elif variant in ALT_CONC_VARIANTS:
             category = "alt_conc"
             expected = frozenset("ABC")
             if sorted(params) != sorted(all_params):
                 problems.append(
                     f"替代集中度 {variant!r} 应保持 lega 的门控参数形状 "
-                    f"{all_params}，实际 {params}")
+                    f"{all_params}，实际 {params}"
+                )
         elif variant in supplemental:
             category = "supplemental_gate"
             expected = supplemental[variant]
-            if (variant in gate_table or variant in raw_table
-                    or variant in CONTROL_VARIANTS):
+            if (
+                variant in gate_table
+                or variant in raw_table
+                or variant in CONTROL_VARIANTS
+            ):
                 problems.append(
-                    f"带门补充对照 {variant!r} 不得混入主/原始因子表或"
-                    "安慰剂表")
+                    f"带门补充对照 {variant!r} 不得混入主/原始因子表或" "安慰剂表"
+                )
         elif declared:
-            table_label = ("GATE_FACTORS" if variant in gate_table
-                           else "RAW_GATE_FACTORS")
-            category = ("gate_factors" if variant in gate_table
-                        else "raw_gate_factors")
+            table_label = (
+                "GATE_FACTORS" if variant in gate_table else "RAW_GATE_FACTORS"
+            )
+            category = "gate_factors" if variant in gate_table else "raw_gate_factors"
             expected = declared[table_label]
             for label, factors in declared.items():
                 if factors != expected:
                     problems.append(
                         f"{label} 与另一张因子表对 {variant!r} 的声明不一致："
-                        f"{sorted(factors)} vs {sorted(expected)}")
+                        f"{sorted(factors)} vs {sorted(expected)}"
+                    )
         else:
             problems.append(
                 f"带门变体 {variant!r} 未登记到任何因子表"
                 "（GATE_FACTORS/RAW_GATE_FACTORS/容量匹配/安慰剂/替代集中度），"
-                "不能静默参与单因素归因")
+                "不能静默参与单因素归因"
+            )
             continue
         if effective != expected:
             problems.append(
                 f"{variant!r} 实现层生效因子为 {sorted(effective) or '无'}，"
                 f"声明为 {sorted(expected) or '无'}：单因素对比可能实际改变了"
-                "多个/过少的门控因子")
+                "多个/过少的门控因子"
+            )
         if probe.get("bias_effective") is not True:
             problems.append(
-                f"{variant!r} 的门控偏置 gate_d 未生效，输出门可能未接入前向")
-        rows.append({
-            "variant": variant, "category": category,
-            "params": params, "effective": sorted(effective),
-            "declared": sorted(expected),
-            "null_component": null_component,
-            "use_raw_conc": bool(probe.get("use_raw_conc")),
-            "conc_mode": probe.get("conc_mode"),
-            "ok": bool(effective == expected
-                       and probe.get("bias_effective") is True),
-        })
+                f"{variant!r} 的门控偏置 gate_d 未生效，输出门可能未接入前向"
+            )
+        rows.append(
+            {
+                "variant": variant,
+                "category": category,
+                "params": params,
+                "effective": sorted(effective),
+                "declared": sorted(expected),
+                "null_component": null_component,
+                "use_raw_conc": bool(probe.get("use_raw_conc")),
+                "conc_mode": probe.get("conc_mode"),
+                "ok": bool(
+                    effective == expected and probe.get("bias_effective") is True
+                ),
+            }
+        )
     return rows
 
 
@@ -1049,7 +1121,7 @@ def _audit_alt_conc_variants(problems):
     rows = []
     alt = globals().get("ALT_CONC_VARIANTS")
     modes = globals().get("ALT_CONC_STATS")
-    if (not isinstance(alt, (tuple, list)) or isinstance(alt, str)):
+    if not isinstance(alt, (tuple, list)) or isinstance(alt, str):
         problems.append("ALT_CONC_VARIANTS 必须是变体序列")
         return rows
     if not isinstance(modes, dict):
@@ -1060,15 +1132,15 @@ def _audit_alt_conc_variants(problems):
     if set(modes) != set(alt):
         problems.append(
             "ALT_CONC_STATS 与 ALT_CONC_VARIANTS 不一致："
-            f"stats={sorted(modes)}，variants={sorted(set(alt))}")
+            f"stats={sorted(modes)}，variants={sorted(set(alt))}"
+        )
     for variant in alt:
         if not isinstance(variant, str):
             problems.append(f"ALT_CONC_VARIANTS 含非字符串变体：{variant!r}")
             continue
         mode = modes.get(variant)
         if mode not in ("l2", "entropy"):
-            problems.append(
-                f"替代集中度 {variant!r} 的统计量 {mode!r} 未实现")
+            problems.append(f"替代集中度 {variant!r} 的统计量 {mode!r} 未实现")
             continue
         if variant in CONTROL_VARIANTS:
             problems.append(f"替代集中度 {variant!r} 不能作为参数安慰剂")
@@ -1079,22 +1151,28 @@ def _audit_alt_conc_variants(problems):
         if variant in GATE_FACTORS:
             problems.append(
                 f"替代集中度 {variant!r} 混入了主 A/B/C 因子表；"
-                "它只替换 B 的统计量，不能当作另一个结构格")
+                "它只替换 B 的统计量，不能当作另一个结构格"
+            )
         if variant in RAW_GATE_FACTORS:
-            problems.append(
-                f"替代集中度 {variant!r} 混入了原始参数化因子表")
-        if variant not in _USE_QUERY or variant not in _USE_CONC \
-                or variant not in _USE_LEN:
-            problems.append(
-                f"替代集中度 {variant!r} 未保持 lega 的 A/B/C 门控结构")
+            problems.append(f"替代集中度 {variant!r} 混入了原始参数化因子表")
+        if (
+            variant not in _USE_QUERY
+            or variant not in _USE_CONC
+            or variant not in _USE_LEN
+        ):
+            problems.append(f"替代集中度 {variant!r} 未保持 lega 的 A/B/C 门控结构")
         if variant not in _GATED or variant not in _LEGA_FAMILY:
-            problems.append(
-                f"替代集中度 {variant!r} 未启用输出门或注意力统计")
+            problems.append(f"替代集中度 {variant!r} 未启用输出门或注意力统计")
         if variant in _USE_RAW_CONC:
-            problems.append(
-                f"替代集中度 {variant!r} 同时启用了原始 B 参数化")
-        rows.append({"variant": variant, "mode": mode,
-                     "replaced_factor": "B", "reference": "lega"})
+            problems.append(f"替代集中度 {variant!r} 同时启用了原始 B 参数化")
+        rows.append(
+            {
+                "variant": variant,
+                "mode": mode,
+                "replaced_factor": "B",
+                "reference": "lega",
+            }
+        )
     return rows
 
 
@@ -1123,13 +1201,12 @@ def single_factor_audit():
         factors = _gate_factor_set(raw_factors)
         if factors is None:
             problems.append(
-                f"GATE_FACTORS[{variant!r}] 不是合法的因子集合："
-                f"{raw_factors!r}")
+                f"GATE_FACTORS[{variant!r}] 不是合法的因子集合：" f"{raw_factors!r}"
+            )
             continue
         unknown = factors - frozenset("ABC")
         if unknown:
-            problems.append(
-                f"GATE_FACTORS[{variant!r}] 含未知因子：{sorted(unknown)}")
+            problems.append(f"GATE_FACTORS[{variant!r}] 含未知因子：{sorted(unknown)}")
             continue
         normalized[variant] = factors
     # 2^3 设计必须真的覆盖八个不同因子集合（含空集），而不只是“有 8 个
@@ -1140,11 +1217,16 @@ def single_factor_audit():
     if missing_subsets or extra_subsets:
         problems.append(
             "GATE_FACTORS 未实现完整 2^3 因子设计：缺少 "
-            + (", ".join(sorted("".join(sorted(s)) or "none"
-                                for s in missing_subsets)) or "无")
+            + (
+                ", ".join(sorted("".join(sorted(s)) or "none" for s in missing_subsets))
+                or "无"
+            )
             + "；多出 "
-            + (", ".join(sorted("".join(sorted(s)) or "none"
-                                for s in extra_subsets)) or "无"))
+            + (
+                ", ".join(sorted("".join(sorted(s)) or "none" for s in extra_subsets))
+                or "无"
+            )
+        )
     # 全因子矩阵的变体集合必须与 GATE_FACTORS 完全一致；否则汇总会拿
     # 未登记因子语义的变体当 2^3 的一格。
     factorial_variants = []
@@ -1152,17 +1234,20 @@ def single_factor_audit():
         problems.append("FACTORIAL_CELLS 必须是 (名称, 变体) 序列")
     else:
         for entry in FACTORIAL_CELLS:
-            if (not isinstance(entry, (tuple, list)) or len(entry) != 2
-                    or not isinstance(entry[1], str)):
+            if (
+                not isinstance(entry, (tuple, list))
+                or len(entry) != 2
+                or not isinstance(entry[1], str)
+            ):
                 problems.append(f"全因子格定义结构非法：{entry!r}")
                 continue
             factorial_variants.append(entry[1])
-    if (len(set(factorial_variants)) != 8
-            or set(factorial_variants) != set(normalized)):
+    if len(set(factorial_variants)) != 8 or set(factorial_variants) != set(normalized):
         problems.append(
             "全因子 8 格与 GATE_FACTORS 不一致："
             f"cells={sorted(set(factorial_variants))}，"
-            f"factors={sorted(normalized)}")
+            f"factors={sorted(normalized)}"
+        )
     # 交互检验使用的 cell -> 变体映射是另一份实验设计元数据，必须与
     # GATE_FACTORS 的因子定义逐格对齐（例如 AB 格必须真的启用 A+B）。
     cell_map = globals().get("_FACTORIAL_CONTRAST_CELLS")
@@ -1174,40 +1259,47 @@ def single_factor_audit():
             for cell, variant in cell_map.items():
                 if cell == "none":
                     cell_factors = frozenset()
-                elif (isinstance(cell, str) and cell
-                        and len(set(cell)) == len(cell)
-                        and all(ch in "ABC" for ch in cell)):
+                elif (
+                    isinstance(cell, str)
+                    and cell
+                    and len(set(cell)) == len(cell)
+                    and all(ch in "ABC" for ch in cell)
+                ):
                     cell_factors = frozenset(cell)
                 else:
                     cell_factors = None
-                if (cell_factors is None
-                        or cell_factors not in _GATE_FACTOR_SUBSETS):
+                if cell_factors is None or cell_factors not in _GATE_FACTOR_SUBSETS:
                     problems.append(f"全因子格名非法：{cell!r}")
                     continue
                 if not isinstance(variant, str):
-                    problems.append(
-                        f"全因子格 {cell!r} 的变体名非法：{variant!r}")
+                    problems.append(f"全因子格 {cell!r} 的变体名非法：{variant!r}")
                     continue
                 cell_variants.add(variant)
                 if normalized.get(variant) != cell_factors:
                     problems.append(
                         f"全因子格 {cell!r} -> {variant!r} 的因子集合为 "
                         f"{sorted(normalized.get(variant, ()))}，"
-                        f"应为 {sorted(cell_factors)}")
+                        f"应为 {sorted(cell_factors)}"
+                    )
             if cell_variants != set(normalized):
                 problems.append(
                     "交互检验的全因子变体集合与 GATE_FACTORS 不一致："
                     f"cells={sorted(cell_variants)}，"
-                    f"factors={sorted(normalized)}")
+                    f"factors={sorted(normalized)}"
+                )
     # 审计表必须恰好覆盖 A/B/C 的“加入/去掉”六条单因素边。只逐条校验
     # 已列出的对比会漏掉“整条对比被删除/重复”这种漂移：表少一行时仍
     # 全部合法，却不再覆盖某个组件的归因。
-    required = {(factor, direction) for factor in ("A", "B", "C")
-                for direction in ("add", "remove")}
+    required = {
+        (factor, direction)
+        for factor in ("A", "B", "C")
+        for direction in ("add", "remove")
+    }
     seen = set()
     seen_pairs = {}
-    if (not isinstance(SINGLE_FACTOR_CONTRASTS, (tuple, list))
-            or isinstance(SINGLE_FACTOR_CONTRASTS, str)):
+    if not isinstance(SINGLE_FACTOR_CONTRASTS, (tuple, list)) or isinstance(
+        SINGLE_FACTOR_CONTRASTS, str
+    ):
         problems.append("SINGLE_FACTOR_CONTRASTS 必须是对比序列")
         contrast_entries = []
     else:
@@ -1225,8 +1317,7 @@ def single_factor_audit():
             problems.append(f"存在非 A/B/C 单因素声明：{factor}/{direction}")
             continue
         if edge in seen:
-            problems.append(
-                f"重复的单因素对比声明：{factor}/{direction}")
+            problems.append(f"重复的单因素对比声明：{factor}/{direction}")
         seen.add(edge)
         if cand == ref:
             problems.append(f"单因素对比两侧相同：{cand} vs {ref}")
@@ -1235,7 +1326,8 @@ def single_factor_audit():
             problems.append(
                 f"重复的单因素对比对：{cand} vs {ref}"
                 f"（已声明为 {seen_pairs[(cand, ref)][0]}/"
-                f"{seen_pairs[(cand, ref)][1]}）")
+                f"{seen_pairs[(cand, ref)][1]}）"
+            )
             continue
         seen_pairs[(cand, ref)] = (factor, direction)
         c = normalized.get(cand)
@@ -1247,45 +1339,56 @@ def single_factor_audit():
         if diff != frozenset({factor}):
             problems.append(
                 f"{cand} vs {ref} 声明为单因素 {factor}，实际改变 "
-                f"{sorted(diff) or '无'}")
+                f"{sorted(diff) or '无'}"
+            )
             continue
         # 方向不只是展示字段：remove 必须从参照中恰好去掉该因子，add 必须
         # 在参照上恰好加入该因子。写反方向会让“加入/去掉”的效应解释颠倒。
         if direction == "remove":
-            direction_ok = (c < r and (r - c) == frozenset({factor}))
+            direction_ok = c < r and (r - c) == frozenset({factor})
             expected_shape = f"{ref} 去掉 {factor} 得到 {cand}"
         else:
-            direction_ok = (r < c and (c - r) == frozenset({factor}))
+            direction_ok = r < c and (c - r) == frozenset({factor})
             expected_shape = f"{ref} 加入 {factor} 得到 {cand}"
         if not direction_ok:
             problems.append(
                 f"{cand} vs {ref} 声明方向 {direction} 与因子变化不符："
-                f"应为 {expected_shape}")
+                f"应为 {expected_shape}"
+            )
             continue
-        contrasts.append({"factor": factor, "direction": direction,
-                          "candidate": cand, "reference": ref,
-                          "changed_factors": sorted(diff)})
+        contrasts.append(
+            {
+                "factor": factor,
+                "direction": direction,
+                "candidate": cand,
+                "reference": ref,
+                "changed_factors": sorted(diff),
+            }
+        )
     missing = required - seen
     extra = seen - required
     if missing:
         problems.append(
             "缺少单因素对比："
-            + ", ".join(f"{factor}/{direction}"
-                        for factor, direction in sorted(missing)))
+            + ", ".join(
+                f"{factor}/{direction}" for factor, direction in sorted(missing)
+            )
+        )
     if extra:
         problems.append(
             "存在非 A/B/C 单因素声明的对比："
-            + ", ".join(f"{factor}/{direction}"
-                        for factor, direction in sorted(extra)))
+            + ", ".join(f"{factor}/{direction}" for factor, direction in sorted(extra))
+        )
     # 汇总/报告实际消费的配对表必须与已声明的 6 条边逐项一致；否则
     # 手工增删 SINGLE_FACTOR_PAIRS 就能让多因子对比混进汇总配对表。
-    single_factor_pairs = _audit_single_factor_pair_table(
-        contrasts, problems)
+    single_factor_pairs = _audit_single_factor_pair_table(contrasts, problems)
     audited_pairs = set(single_factor_pairs)
     # 组件判定实际消费的检验对也必须落在已审计表内；否则改 COMPONENT_TESTS
     # 就能绕开审计去使用多因子对比（运行期而非仅测试期拦截）。
-    audited_edges = {(c["candidate"], c["reference"]):
-                     (c["factor"], c["direction"]) for c in contrasts}
+    audited_edges = {
+        (c["candidate"], c["reference"]): (c["factor"], c["direction"])
+        for c in contrasts
+    }
     component_tests = globals().get("COMPONENT_TESTS")
     if not isinstance(component_tests, (tuple, list)):
         problems.append("COMPONENT_TESTS 必须是组件检验序列")
@@ -1298,8 +1401,7 @@ def single_factor_audit():
         name, loo_pair, add_pair, primary = entry
         token = str(name)[:1] if isinstance(name, str) and name else None
         if token not in ("A", "B", "C"):
-            problems.append(
-                f"组件名 {name!r} 无法映射到 A/B/C，不能作为单组件检验")
+            problems.append(f"组件名 {name!r} 无法映射到 A/B/C，不能作为单组件检验")
             expected = None
         else:
             expected = token
@@ -1307,70 +1409,78 @@ def single_factor_audit():
                 problems.append(f"组件 {expected} 存在重复的检验定义")
             seen_components.add(expected)
         if primary not in _EVIDENCE_METRICS:
-            problems.append(
-                f"组件 {name!r} 的主指标 {primary!r} 不是已登记指标")
+            problems.append(f"组件 {name!r} 的主指标 {primary!r} 不是已登记指标")
         for label, pair, expected_direction in (
-                ("去一法", loo_pair, "remove"),
-                ("全因子", add_pair, "add")):
-            if (not isinstance(pair, (tuple, list)) or len(pair) != 2
-                    or not all(isinstance(x, str) for x in pair)):
-                problems.append(
-                    f"组件 {name!r} 的{label}对比结构非法：{pair!r}")
+            ("去一法", loo_pair, "remove"),
+            ("全因子", add_pair, "add"),
+        ):
+            if (
+                not isinstance(pair, (tuple, list))
+                or len(pair) != 2
+                or not all(isinstance(x, str) for x in pair)
+            ):
+                problems.append(f"组件 {name!r} 的{label}对比结构非法：{pair!r}")
                 continue
             if tuple(pair) not in audited_pairs:
                 problems.append(
                     f"组件 {name!r} 的{label}对比 {pair!r} 不在"
-                    " SINGLE_FACTOR_PAIRS 中")
+                    " SINGLE_FACTOR_PAIRS 中"
+                )
             edge = audited_edges.get(tuple(pair))
             if edge is None:
-                problems.append(
-                    f"组件 {name!r} 使用了未审计的单因素对比：{pair!r}")
+                problems.append(f"组件 {name!r} 使用了未审计的单因素对比：{pair!r}")
                 continue
             factor, direction = edge
             if expected is not None and factor != expected:
                 problems.append(
                     f"组件 {name!r} 的对比 {pair!r} 实际单因素为 {factor}，"
-                    f"与组件 {expected} 不一致")
+                    f"与组件 {expected} 不一致"
+                )
             if direction != expected_direction:
                 problems.append(
                     f"组件 {name!r} 的{label}对比 {pair!r} 方向为 {direction}，"
-                    f"应为 {expected_direction}")
+                    f"应为 {expected_direction}"
+                )
     missing_components = {"A", "B", "C"} - seen_components
     if missing_components:
-        problems.append(
-            "缺少组件检验：" + ", ".join(sorted(missing_components)))
+        problems.append("缺少组件检验：" + ", ".join(sorted(missing_components)))
     reparameterization_contrasts = _audit_reparameterization_contrasts(
-        normalized, problems)
+        normalized, problems
+    )
     dose_components = _audit_dose_response_components(problems)
-    capacity_components = _audit_capacity_triple_components(
-        problems, normalized)
+    capacity_components = _audit_capacity_triple_components(problems, normalized)
     matched_lesions, permutation_lesions, inference_cells = (
-        _audit_inference_single_factor_design(problems))
+        _audit_inference_single_factor_design(problems)
+    )
     alt_conc = _audit_alt_conc_variants(problems)
-    registered_single_factor = _audit_registered_single_factor(
-        contrasts, problems)
+    registered_single_factor = _audit_registered_single_factor(contrasts, problems)
     implementation_factors = _audit_implementation_factors(normalized, problems)
-    return {"ok": not problems, "problems": problems,
-            "contrasts": contrasts,
-            "pairs": [list(p) for p in single_factor_pairs],
-            "factors": {v: sorted(f) for v, f in sorted(normalized.items())},
-            "reparameterization_contrasts": reparameterization_contrasts,
-            "dose_response_components": dose_components,
-            "capacity_components": capacity_components,
-            "inference_matched_lesions": matched_lesions,
-            "inference_permutation_lesions": permutation_lesions,
-            "inference_factorial_cells": inference_cells,
-            "alt_conc_contrasts": alt_conc,
-            "registered_single_factor": registered_single_factor,
-            "implementation_factors": implementation_factors,
-            "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
-                     "X-only vs gate_only；整体对比（vs standard、LEGA vs "
-                     "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
-                     "归一化/原始参数化的单因子边、剂量-反应的 A/B/C 参数"
-                     "映射、训练期容量匹配 Full/Null_X/No_X 三臂、推理期"
-                     "单病灶、活动匹配、A/B/C 分布匹配置换、2^3 格的因子"
-                     "映射，以及替代集中度统计的 B-only 构念对照"
-                     "（lega_l2/lega_entropy 不进入主因子表）。")}
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "contrasts": contrasts,
+        "pairs": [list(p) for p in single_factor_pairs],
+        "factors": {v: sorted(f) for v, f in sorted(normalized.items())},
+        "reparameterization_contrasts": reparameterization_contrasts,
+        "dose_response_components": dose_components,
+        "capacity_components": capacity_components,
+        "inference_matched_lesions": matched_lesions,
+        "inference_permutation_lesions": permutation_lesions,
+        "inference_factorial_cells": inference_cells,
+        "alt_conc_contrasts": alt_conc,
+        "registered_single_factor": registered_single_factor,
+        "implementation_factors": implementation_factors,
+        "note": (
+            "单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
+            "X-only vs gate_only；整体对比（vs standard、LEGA vs "
+            "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
+            "归一化/原始参数化的单因子边、剂量-反应的 A/B/C 参数"
+            "映射、训练期容量匹配 Full/Null_X/No_X 三臂、推理期"
+            "单病灶、活动匹配、A/B/C 分布匹配置换、2^3 格的因子"
+            "映射，以及替代集中度统计的 B-only 构念对照"
+            "（lega_l2/lega_entropy 不进入主因子表）。"
+        ),
+    }
 
 
 def build_comparison_pairs(runs, registered=None):
@@ -1383,13 +1493,11 @@ def build_comparison_pairs(runs, registered=None):
         同时差两个因子（A+C / A+B），不是单组件消融。
     """
     runs = runs if isinstance(runs, dict) else {}
-    pairs = [(cand, "standard") for cand in ALL_VARIANTS
-             if cand != "standard"]
+    pairs = [(cand, "standard") for cand in ALL_VARIANTS if cand != "standard"]
     # 补充对照（raw/detach/null_zero）不在默认矩阵内，但显式运行时同样是
     # “相对 standard”的整体对比；漏掉会让汇总表出现数值却没有任何配对
     # 检验，也与设计层 planned_comparison_pairs（按实际计划变体生成）不一致。
-    pairs += [(cand, "standard") for cand in SUPPLEMENTAL_VARIANTS
-              if cand in runs]
+    pairs += [(cand, "standard") for cand in SUPPLEMENTAL_VARIANTS if cand in runs]
     # 参数匹配安慰剂只在显式运行时才进入对比，且核心对比是 lega vs placebo
     # （不是 vs standard）：二者门控参数/FLOPs 相同，差别只在证据是否有信息。
     if PARAM_CONTROL_VARIANT in runs:
@@ -1403,11 +1511,14 @@ def build_comparison_pairs(runs, registered=None):
             pairs.append((PARAM_CONTROL_VARIANT, "qgate"))
     # gate_only 未运行时，三个“只加 X”的全因子增量对无法估计；去一法对
     # 仍保留（缺 lega 时下游会如实报“未运行”，而不是伪造证据）。
-    pairs += [(cand, ref) for cand, ref in SINGLE_FACTOR_PAIRS
-              if ref != "gate_only" or "gate_only" in runs]
+    pairs += [
+        (cand, ref)
+        for cand, ref in SINGLE_FACTOR_PAIRS
+        if ref != "gate_only" or "gate_only" in runs
+    ]
     registered = _as_dict(registered)
     hypotheses = registered.get("hypotheses")
-    for h in (hypotheses if isinstance(hypotheses, list) else []):
+    for h in hypotheses if isinstance(hypotheses, list) else []:
         if not isinstance(h, dict):
             continue
         c, r = h.get("candidate"), h.get("reference")
@@ -1447,7 +1558,6 @@ def _ablation_coverage(cells, present, rows_by_var):
 # 窗口级 bootstrap 的最低样本量：窗口只有 2~3 个时，重采样分布本身几乎
 # 没有自由度，却可能给出极窄区间和“显著”假象（冒烟配置就会触发）。少于
 # 该门槛只报点估计/区间并明确标注证据不足，不生成显著性措辞。
-
 
 
 def _finite_number(value):
@@ -1579,8 +1689,12 @@ def _jobs_env(jobs: int):
         return None
     env = os.environ.copy()
     n = max(1, (os.cpu_count() or 1) // jobs)
-    for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-              "NUMEXPR_NUM_THREADS"):
+    for k in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
         env[k] = str(n)
     return env
 
@@ -1600,8 +1714,7 @@ def run_many(cmds, jobs: int, env=None) -> None:
     rcs = [None] * len(cmds)
 
     def _one(i, cmd):
-        rcs[i] = subprocess.run(cmd, cwd=ROOT, env=_cmd_env(cmd, env)
-                                ).returncode
+        rcs[i] = subprocess.run(cmd, cwd=ROOT, env=_cmd_env(cmd, env)).returncode
 
     with ThreadPoolExecutor(max_workers=min(jobs, len(cmds))) as ex:
         list(ex.map(lambda t: _one(*t), enumerate(cmds)))
@@ -1615,8 +1728,14 @@ def _repo_path(path: str) -> str:
     return path if os.path.isabs(path) else os.path.abspath(os.path.join(ROOT, path))
 
 
-def mark_repro_failed(results_dir: str, *, error: str, stage: str,
-                      variant: str = None, returncode: int = None) -> bool:
+def mark_repro_failed(
+    results_dir: str,
+    *,
+    error: str,
+    stage: str,
+    variant: str = None,
+    returncode: int = None,
+) -> bool:
     """把本轮 ``repro.json`` 标成 aborted（失败轮次不能看起来仍在运行）。
 
     台账已有 aborted 终态，但全局 repro 是人工/下游最先打开的溯源文件：
@@ -1668,8 +1787,9 @@ def _snapshot_existing_runs(ledger_common: dict) -> list:
         return []
     n_seeds = len(seeds)
     try:
-        start = time.mktime(time.strptime(
-            str(ledger_common.get("time_start")), "%Y-%m-%d %H:%M:%S"))
+        start = time.mktime(
+            time.strptime(str(ledger_common.get("time_start")), "%Y-%m-%d %H:%M:%S")
+        )
     except (TypeError, ValueError, OverflowError):
         # 无法解析本轮开始时刻就无法证明目录属于本轮；宁可少收证据，
         # 也不能把上一轮残留 manifest 当成本轮快照。
@@ -1695,10 +1815,17 @@ def _snapshot_existing_runs(ledger_common: dict) -> list:
     return runs
 
 
-def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
-                          stage: str, variant: str = None,
-                          returncode: int = None, sanity: dict = None,
-                          runs: list = None) -> None:
+def append_aborted_record(
+    ledger: str,
+    ledger_common: dict,
+    *,
+    error: str,
+    stage: str,
+    variant: str = None,
+    returncode: int = None,
+    sanity: dict = None,
+    runs: list = None,
+) -> None:
     """失败轮次的终态记录：附失败阶段/原因/退出码，失败实验也完整留痕。
 
     runs（可选）为失败前已产生的逐 run 证据快照，写入 aborted 记录；
@@ -1709,15 +1836,27 @@ def append_aborted_record(ledger: str, ledger_common: dict, *, error: str,
         extra["variant"] = variant
     if returncode is not None:
         extra["returncode"] = int(returncode)
-    append_record(ledger, build_experiment_record(
-        status="aborted", time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
-        sanity=sanity, runs=runs, extra=extra, **ledger_common))
+    append_record(
+        ledger,
+        build_experiment_record(
+            status="aborted",
+            time_end=time.strftime("%Y-%m-%d %H:%M:%S"),
+            sanity=sanity,
+            runs=runs,
+            extra=extra,
+            **ledger_common,
+        ),
+    )
     # 台账 aborted 与全局 repro 的失败终态必须一起落盘；后者写失败不能
     # 影响前者的完整性，也不能掩盖调用方即将抛出的原始异常。
     try:
         mark_repro_failed(
-            ledger_common.get("results_dir"), error=error, stage=stage,
-            variant=variant, returncode=returncode)
+            ledger_common.get("results_dir"),
+            error=error,
+            stage=stage,
+            variant=variant,
+            returncode=returncode,
+        )
     except Exception as repro_err:  # noqa: BLE001 - 失败路径只告警
         print(f"[repro] ⚠ 失败终态写入 repro.json 异常（{repro_err}）")
 
@@ -1732,19 +1871,26 @@ def abort_ledger_on_failure(ledger: str, ledger_common: dict, stage):
         try:
             runs = _snapshot_existing_runs(ledger_common)
             append_aborted_record(
-                ledger, ledger_common, error="postrun_stage_failed",
+                ledger,
+                ledger_common,
+                error="postrun_stage_failed",
                 stage=str(stage_name),
                 returncode=getattr(e, "returncode", None),
-                runs=runs or None)
+                runs=runs or None,
+            )
         except Exception as ledger_err:
-            print(f"[repro] ⚠ aborted 台账写入失败（{ledger_err}）；"
-                  f"原异常仍将抛出")
+            print(f"[repro] ⚠ aborted 台账写入失败（{ledger_err}）；" f"原异常仍将抛出")
         raise
 
 
-def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
-                          returncode: int, results_dir: str,
-                          reason: str = None) -> dict:
+def record_aborted_sanity(
+    ledger: str,
+    ledger_common: dict,
+    variant: str,
+    returncode: int,
+    results_dir: str,
+    reason: str = None,
+) -> dict:
     """sanity 闸门失败时向台账追写 aborted 记录，返回结果文件摘要。
 
     只留 dangling started 无法区分“被中止”与“崩溃”，也没有失败原因；
@@ -1759,15 +1905,25 @@ def record_aborted_sanity(ledger: str, ledger_common: dict, variant: str,
         if reason != "not_passed":
             failed["passed"] = False
     append_aborted_record(
-        ledger, ledger_common, error="sanity_gate_failed", stage="sanity",
-        variant=variant, returncode=returncode,
-        sanity={"executed": True, "verdict": {variant: "fail"},
-                "reason": reason, "failed": failed})
+        ledger,
+        ledger_common,
+        error="sanity_gate_failed",
+        stage="sanity",
+        variant=variant,
+        returncode=returncode,
+        sanity={
+            "executed": True,
+            "verdict": {variant: "fail"},
+            "reason": reason,
+            "failed": failed,
+        },
+    )
     return failed
 
 
-def check_sanity_results(variants, results_dir: str, not_before: float = None,
-                         expected_seed: int = None):
+def check_sanity_results(
+    variants, results_dir: str, not_before: float = None, expected_seed: int = None
+):
     """读回本次 sanity 结果文件，返回 (verdict, failures)。
 
     子进程退出码 0 不等于闸门通过：结果文件可能缺失/不可解析/仍写着
@@ -1792,14 +1948,13 @@ def check_sanity_results(variants, results_dir: str, not_before: float = None,
             reason = "not_passed"
         elif summary.get("malformed") is True:
             reason = "malformed"
-        elif (summary.get("variant") is not None
-              and str(summary.get("variant")) != str(v)):
+        elif summary.get("variant") is not None and str(summary.get("variant")) != str(
+            v
+        ):
             reason = "variant_mismatch"
-        elif (expected_seed is not None
-              and summary.get("seed") is not None):
+        elif expected_seed is not None and summary.get("seed") is not None:
             try:
-                if strict_int(summary.get("seed"),
-                              "sanity.seed") != int(expected_seed):
+                if strict_int(summary.get("seed"), "sanity.seed") != int(expected_seed):
                     reason = "seed_mismatch"
             except (TypeError, ValueError, OverflowError):
                 reason = "seed_mismatch"
@@ -1812,8 +1967,9 @@ def check_sanity_results(variants, results_dir: str, not_before: float = None,
                 if mtime < float(not_before) - 1.0:
                     reason = "stale_result"
         if reason is not None:
-            failures.append({"variant": v, "reason": reason,
-                             "summary": summary, "path": path})
+            failures.append(
+                {"variant": v, "reason": reason, "summary": summary, "path": path}
+            )
         else:
             verdict[v] = "pass"
     return verdict, failures
@@ -1893,9 +2049,7 @@ def _integral_value(value):
         # 小数/科学计数法字符串必须精确解析：经 float() 往返会让
         # "9007199254740993.0" 变成 9007199254740992，从而伪造种子/步数
         # 身份相等。Decimal 保留十进制精确值，仅在确实为整数时转换。
-        if re.fullmatch(
-                r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?",
-                s) is None:
+        if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", s) is None:
             return None
         try:
             d = Decimal(s)
@@ -1927,8 +2081,7 @@ def _ppl_protocol(d) -> dict:
     """从 eval.json 提取实际生效的评测条件；缺失字段不伪造。"""
     if not isinstance(d, dict):
         return {}
-    return {k: d[k] for k in _PPL_PROTOCOL_KEYS
-            if k in d and d[k] is not None}
+    return {k: d[k] for k in _PPL_PROTOCOL_KEYS if k in d and d[k] is not None}
 
 
 def _ruler_protocol(d) -> dict:
@@ -1942,10 +2095,20 @@ def _ruler_protocol(d) -> dict:
     """
     if not isinstance(d, dict):
         return {}
-    keys = ("ctx_lens", "n_samples", "sample_seed", "corpus_source",
-            "corpus_held_out", "max_new", "fwe_max_new", "vt_chains",
-            "vt_depth", "amp", "depth_stratified",
-            "samples_manifest_sha256")
+    keys = (
+        "ctx_lens",
+        "n_samples",
+        "sample_seed",
+        "corpus_source",
+        "corpus_held_out",
+        "max_new",
+        "fwe_max_new",
+        "vt_chains",
+        "vt_depth",
+        "amp",
+        "depth_stratified",
+        "samples_manifest_sha256",
+    )
     return {k: d[k] for k in keys if k in d and d[k] is not None}
 
 
@@ -1963,8 +2126,11 @@ def _ruler_cell_signature(d):
         return None
     cells = set()
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or task.startswith("_")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or task.startswith("_")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         for ctx, cell in by_ctx.items():
             if not isinstance(cell, dict):

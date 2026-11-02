@@ -1,4 +1,5 @@
 """训练曲线诊断测试：过拟合/欠拟合/发散/NaN 的自动判定与早停空间分析。"""
+
 import json
 import math
 
@@ -7,10 +8,19 @@ import os
 import shutil
 import tempfile
 
-from lega.curves import (LIVE_WARN_EVALS, _finite_points, _step_or_none,
-                         _val_ci_rel, curve_observability_warnings, diagnose_curve,
-                         diagnose_run_dir, live_overfit_hint, load_train_log,
-                         worst_status, STATUS_ORDER)
+from lega.curves import (
+    LIVE_WARN_EVALS,
+    _finite_points,
+    _step_or_none,
+    _val_ci_rel,
+    curve_observability_warnings,
+    diagnose_curve,
+    diagnose_run_dir,
+    live_overfit_hint,
+    load_train_log,
+    worst_status,
+    STATUS_ORDER,
+)
 
 
 def _log(train, val, val_steps=None):
@@ -35,8 +45,7 @@ def test_normal_convergence():
 
 def test_nonfinite_values_with_bad_steps_still_fail_curve():
     """坏 step 上的 NaN 损失/Inf 梯度仍是训练失效证据，不能被当 malformed 吞掉。"""
-    base = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                [4.3, 3.8, 3.3, 2.9, 2.6])
+    base = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
     d = diagnose_curve(base + [{"step": "bad", "loss": float("nan")}])
     assert d["status"] == "NaN/Inf", d
     assert d["nonfinite_values"] >= 1 and d["malformed_records"] >= 1, d
@@ -73,7 +82,9 @@ def test_curve_diagnosis_respects_validation_noise():
     assert d["val_change_above_noise"] is False
     assert d["early_stop_gain_above_noise"] is False
     assert any("评估噪声" in e for e in d["evidence"]), d["evidence"]
-    assert not any("早停可挽回" in r for r in d["recommendations"]), d["recommendations"]
+    assert not any("早停可挽回" in r for r in d["recommendations"]), d[
+        "recommendations"
+    ]
     # 同样的曲线但没有 CI（旧日志）沿用原阈值，仍能识别过拟合
     plain = _log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2], [3.0, 3.2, 3.5])
     d2 = diagnose_curve(plain)
@@ -84,28 +95,31 @@ def test_curve_diagnosis_respects_validation_noise():
 def test_overfitting_trend_train_down_val_stalled():
     """训练仍在实质下降而验证无实质变化：过拟合的早期形态，必须给出
     正则化/早停建议，且不得建议延长训练。"""
-    d = diagnose_curve(_log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2],
-                            [4.3, 4.28, 4.31, 4.27, 4.3]))
+    d = diagnose_curve(
+        _log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2], [4.3, 4.28, 4.31, 4.27, 4.3])
+    )
     assert d["status"] == "过拟合趋势", d
     assert any("验证不再随训练改善" in e for e in d["evidence"]), d["evidence"]
     assert any("正则化" in r for r in d["recommendations"]), d["recommendations"]
-    assert not any("延长训练" in r and "不要" not in r
-                   for r in d["recommendations"]), d["recommendations"]
+    assert not any(
+        "延长训练" in r and "不要" not in r for r in d["recommendations"]
+    ), d["recommendations"]
     # 训练与验证同步下降仍是正常收敛，不得误报趋势
-    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6]))
     assert d2["status"] == "正常收敛", d2
     # 训练停滞（不降）而验证也未降：仍按欠拟合处理，不是过拟合趋势
-    d3 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
-                             [2.0, 2.01, 2.005, 2.02, 2.01]))
+    d3 = diagnose_curve(
+        _log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98], [2.0, 2.01, 2.005, 2.02, 2.01])
+    )
     assert d3["status"] == "欠拟合/学习不充分", d3
     print("  [ok] 过拟合趋势（训练降/验证停滞）判定与建议")
 
 
 def test_plateau_train_rising_val_is_overfitting():
     """训练停滞（平台期）而验证回升同样是过拟合，不能误判为欠拟合并建议延长训练。"""
-    d = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
-                            [3.1, 3.3, 3.6, 4.0, 4.5]))
+    d = diagnose_curve(
+        _log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98], [3.1, 3.3, 3.6, 4.0, 4.5])
+    )
     assert d["status"] == "过拟合", d
     assert any("停滞" in e for e in d["evidence"]), d["evidence"]
     assert any("早停" in r for r in d["recommendations"])
@@ -113,34 +127,43 @@ def test_plateau_train_rising_val_is_overfitting():
     assert not any("增大模型" in r for r in d["recommendations"]), d["recommendations"]
     # 训练不降、验证仅轻微波动（未超噪声阈值）时仍按欠拟合描述，但不得
     # 出现"验证损失同样不降"的错误论断
-    d2 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
-                             [2.0, 2.01, 2.005, 2.02, 2.01]))
+    d2 = diagnose_curve(
+        _log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98], [2.0, 2.01, 2.005, 2.02, 2.01])
+    )
     assert d2["status"] == "欠拟合/学习不充分", d2
-    assert not any("同样不降" in r for r in d2["recommendations"]), \
-        d2["recommendations"]
+    assert not any("同样不降" in r for r in d2["recommendations"]), d2[
+        "recommendations"
+    ]
     # 训练平台期而验证显著下降：更不能说"验证损失同样不降"，并应给出
     # 先自检训练链路的指引（而不是断言停滞或直接建议扩大容量）
-    d3 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98],
-                             [4.0, 3.5, 3.0, 2.6, 2.3]))
+    d3 = diagnose_curve(
+        _log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98], [4.0, 3.5, 3.0, 2.6, 2.3])
+    )
     assert d3["status"] == "欠拟合/学习不充分", d3
-    assert not any("同样不降" in r for r in d3["recommendations"]), \
-        d3["recommendations"]
-    assert any("验证损失仍在下降" in r for r in d3["recommendations"]), \
-        d3["recommendations"]
+    assert not any("同样不降" in r for r in d3["recommendations"]), d3[
+        "recommendations"
+    ]
+    assert any("验证损失仍在下降" in r for r in d3["recommendations"]), d3[
+        "recommendations"
+    ]
     print("  [ok] 平台期验证回升 → 过拟合（不误报欠拟合/延长训练）")
 
 
 def test_underfitting_and_random_level():
     # 训练损失不降且停在 log(V) 随机水平附近 → 欠拟合，指向数据管道/学习率
     lv = math.log(64)
-    recs = _log([lv + 0.01, lv, lv - 0.005, lv + 0.004, lv - 0.002, lv],
-                [lv, lv - 0.004, lv + 0.003, lv - 0.002, lv + 0.001])
+    recs = _log(
+        [lv + 0.01, lv, lv - 0.005, lv + 0.004, lv - 0.002, lv],
+        [lv, lv - 0.004, lv + 0.003, lv - 0.002, lv + 0.001],
+    )
     d = diagnose_curve(recs, log_vocab=lv)
     assert d["status"] == "欠拟合/学习不充分", d
     assert any("数据管道" in r for r in d["recommendations"])
     assert any("学习率" in r for r in d["recommendations"])
     # 远离随机水平的停滞同样是欠拟合（不触发随机水平证据行）
-    d2 = diagnose_curve(_log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98], [2.1, 2.05, 2.08, 2.02, 2.04]))
+    d2 = diagnose_curve(
+        _log([2.0, 1.98, 2.01, 1.99, 2.0, 1.98], [2.1, 2.05, 2.08, 2.02, 2.04])
+    )
     assert d2["status"] == "欠拟合/学习不充分", d2
     print("  [ok] 欠拟合判定（含随机猜测水平识别）")
 
@@ -152,8 +175,9 @@ def test_divergence_and_nan():
     assert any("学习率" in r for r in d["recommendations"])
     # 发散状态下验证仍低于训练：不能把倒挂信号藏起来（状态保留“发散”，
     # 但证据/建议里要并列提示先排查泄漏/口径）。
-    assert d["val_below_train"] is True and any(
-        "倒挂" in e for e in d["evidence"]), d["evidence"]
+    assert d["val_below_train"] is True and any("倒挂" in e for e in d["evidence"]), d[
+        "evidence"
+    ]
     assert any("倒挂" in r for r in d["recommendations"]), d["recommendations"]
     # 任何序列出现 NaN/Inf → NaN/Inf 状态 + 排查路径建议
     recs = _log([4.2, 3.5, 3.0], [4.3, 3.2, 2.9])
@@ -176,8 +200,9 @@ def test_grad_norm_spike_and_nonfinite_reported():
     assert d["has_grad_spike"] and d["grad_spike_ratio"] >= 10
     assert any("尖峰" in e for e in d["evidence"]), d["evidence"]
     assert any("梯度" in r for r in d["recommendations"]), d["recommendations"]
-    assert not any("无需干预" in r for r in d["recommendations"]), \
-        "已有梯度尖峰告警时不得同时建议无需干预"
+    assert not any(
+        "无需干预" in r for r in d["recommendations"]
+    ), "已有梯度尖峰告警时不得同时建议无需干预"
     # 非有限梯度范数（Infinity 写入 jsonl）：即使没有损失 NaN 也要判爆炸
     recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
     recs2.append({"step": 10, "grad_norm": float("inf")})
@@ -186,8 +211,7 @@ def test_grad_norm_spike_and_nonfinite_reported():
     assert d2["has_grad_spike"]
     assert any("非有限" in e for e in d2["evidence"]), d2["evidence"]
     # 旧日志无 grad_norm：字段可缺省且不误报
-    d3 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    d3 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6]))
     assert d3["grad_norm_points"] == 0 and not d3["has_grad_spike"]
     print("  [ok] 梯度范数尖峰/非有限检测（与损失状态独立）")
 
@@ -202,17 +226,25 @@ def test_short_log_is_descriptive_only():
 def test_degenerate_segments_render_without_crash():
     """同一 step 的重复点会让区间均值为 None：证据行必须显示 '-'。"""
     # 训练/验证点都挤在同一 step：区间均值与相对变化均为 None → 欠拟合分支
-    recs = [{"step": 10, "loss": 4.0}, {"step": 10, "loss": 3.9},
-            {"step": 10, "loss": 3.8},
-            {"step": 100, "val_loss": 3.4}, {"step": 100, "val_loss": 3.6}]
+    recs = [
+        {"step": 10, "loss": 4.0},
+        {"step": 10, "loss": 3.9},
+        {"step": 10, "loss": 3.8},
+        {"step": 100, "val_loss": 3.4},
+        {"step": 100, "val_loss": 3.6},
+    ]
     d = diagnose_curve(recs)
     assert d["status"] == "欠拟合/学习不充分", d
     assert d["train_rel_change"] is None
     assert any("-" in e for e in d["evidence"])
     # 训练下降 + val 区间均值为 None，但早停增益显著 → 过拟合分支同样不得崩
-    recs2 = [{"step": 10, "loss": 4.0}, {"step": 20, "loss": 3.0},
-             {"step": 30, "loss": 2.0},
-             {"step": 100, "val_loss": 3.4}, {"step": 100, "val_loss": 3.6}]
+    recs2 = [
+        {"step": 10, "loss": 4.0},
+        {"step": 20, "loss": 3.0},
+        {"step": 30, "loss": 2.0},
+        {"step": 100, "val_loss": 3.4},
+        {"step": 100, "val_loss": 3.6},
+    ]
     d2 = diagnose_curve(recs2)
     assert d2["status"] == "过拟合", d2
     print("  [ok] 退化区间（None 均值/变化率）诊断可正常完成")
@@ -221,10 +253,8 @@ def test_degenerate_segments_render_without_crash():
 def test_transient_loss_spike_detected_even_when_trend_normal():
     """瞬态损失尖峰不能被分段均值掩盖：趋势正常也要单项报告，且不应再给
     “无需干预”的建议（尖峰常对应异常批次/一次梯度爆炸）。"""
-    train = [5.0, 4.8, 4.6, 4.4, 4.2, 4.0, 3.8, 30.0, 3.4, 3.2,
-             3.0, 2.8, 2.6, 2.4, 2.2]
-    recs = _log(train, [5.0, 4.6, 4.2, 3.8, 3.4],
-                val_steps=[90, 180, 270, 360, 450])
+    train = [5.0, 4.8, 4.6, 4.4, 4.2, 4.0, 3.8, 30.0, 3.4, 3.2, 3.0, 2.8, 2.6, 2.4, 2.2]
+    recs = _log(train, [5.0, 4.6, 4.2, 3.8, 3.4], val_steps=[90, 180, 270, 360, 450])
     d = diagnose_curve(recs)
     assert d["status"] == "正常收敛", d
     assert d["has_loss_spike"] and d["loss_spikes"], d
@@ -233,8 +263,13 @@ def test_transient_loss_spike_detected_even_when_trend_normal():
     assert any("尖峰" in r for r in d["recommendations"]), d["recommendations"]
     assert not any("无需干预" in r for r in d["recommendations"]), d["recommendations"]
     # 平滑下降（无尖峰）时不得误报，且保留“无需干预”
-    d2 = diagnose_curve(_log(train[:7] + train[8:], [5.0, 4.6, 4.2, 3.8, 3.4],
-                             val_steps=[90, 180, 270, 360, 450]))
+    d2 = diagnose_curve(
+        _log(
+            train[:7] + train[8:],
+            [5.0, 4.6, 4.2, 3.8, 3.4],
+            val_steps=[90, 180, 270, 360, 450],
+        )
+    )
     assert d2["status"] == "正常收敛" and not d2["has_loss_spike"], d2
     assert any("无需干预" in r for r in d2["recommendations"])
     print("  [ok] 瞬态损失尖峰检测（与趋势独立、平滑曲线不误报）")
@@ -245,16 +280,19 @@ def test_loss_spike_in_short_curve_and_final_point_detected():
     # 10 个训练点：旧实现 range(5, 5) 为空，任何尖峰都检测不到
     train10 = [5.0, 4.8, 4.6, 40.0, 4.2, 4.0, 3.8, 3.6, 3.4, 3.2]
     d = diagnose_curve(_log(train10, [5.0, 4.6, 4.2, 3.8, 3.4]))
-    assert d["has_loss_spike"] and any(
-        s["step"] == 40 for s in d["loss_spikes"]), d["loss_spikes"]
+    assert d["has_loss_spike"] and any(s["step"] == 40 for s in d["loss_spikes"]), d[
+        "loss_spikes"
+    ]
     assert not any("无需干预" in r for r in d["recommendations"])
     # 20 个训练点 + 最后一个点尖峰：旧实现 range(5, 15) 永远扫不到末尾
     train20 = [5.0 - 0.15 * i for i in range(20)]
     train20[-1] = 30.0
-    d2 = diagnose_curve(_log(train20, [5.0, 4.6, 4.2, 3.8, 3.4],
-                             val_steps=[100, 200, 300, 400, 500]))
+    d2 = diagnose_curve(
+        _log(train20, [5.0, 4.6, 4.2, 3.8, 3.4], val_steps=[100, 200, 300, 400, 500])
+    )
     assert d2["has_loss_spike"] and any(
-        s["step"] == 200 for s in d2["loss_spikes"]), d2["loss_spikes"]
+        s["step"] == 200 for s in d2["loss_spikes"]
+    ), d2["loss_spikes"]
     # 局部中位数极小、尖峰极大时 ratio 会溢出；输出必须是有限数并标记封顶，
     # 否则 json.dumps(..., allow_nan=False) 直接失败。
     recs = [{"step": i, "loss": 1e-300} for i in range(10)]
@@ -272,15 +310,13 @@ def test_loss_spike_in_short_curve_and_final_point_detected():
     assert gd["has_grad_spike"], gd
     # 相邻损失点/梯度中位数本身也可能是偶数个 1e308：朴素中位数相加会
     # 溢出成 inf，进而让尖峰判定/JSON 失真；稳定中位数应保持有限。
-    even = [{"step": i, "loss": 1e308, "grad_norm": 1e308}
-            for i in range(10)]
+    even = [{"step": i, "loss": 1e308, "grad_norm": 1e308} for i in range(10)]
     even_diag = diagnose_curve(even)
     assert math.isfinite(even_diag["grad_norm_median"]), even_diag
     json.dumps(even_diag, allow_nan=False)
     # 外部坏日志的 train/val 可能异号且接近 float 上限；泛化差距的减法
     # 溢出时按缺失处理，不能把 inf 写进 JSON。
-    gap_recs = [{"step": i, "loss": -1e308, "val_loss": 1e308}
-                for i in range(10)]
+    gap_recs = [{"step": i, "loss": -1e308, "val_loss": 1e308} for i in range(10)]
     gap_diag = diagnose_curve(gap_recs)
     assert gap_diag["generalization_gap"] is None, gap_diag
     json.dumps(gap_diag, allow_nan=False)
@@ -295,13 +331,21 @@ def test_loss_spike_in_short_curve_and_final_point_detected():
 
 def test_malformed_log_records_do_not_crash_diagnosis():
     """损坏记录（字符串值/非法 step）必须被跳过并计数，不能中断整个诊断。"""
-    recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": "oops"},
-            {"step": "x", "loss": 4.0}, {"step": 30, "loss": 3.0},
-            {"step": 40, "loss": 2.0}, {"step": 50, "loss": 1.5},
-            {"step": "1_0", "loss": 4.0}, {"step": 60, "loss": "1_0"},
-            {"step": 10, "val_loss": 5.0}, {"step": 30, "val_loss": 3.2},
-            {"step": 50, "val_loss": 2.0}, {"step": 60, "val_loss": "bad"},
-            {"step": 70, "val_loss": "1_0"}]
+    recs = [
+        {"step": 10, "loss": 5.0},
+        {"step": 20, "loss": "oops"},
+        {"step": "x", "loss": 4.0},
+        {"step": 30, "loss": 3.0},
+        {"step": 40, "loss": 2.0},
+        {"step": 50, "loss": 1.5},
+        {"step": "1_0", "loss": 4.0},
+        {"step": 60, "loss": "1_0"},
+        {"step": 10, "val_loss": 5.0},
+        {"step": 30, "val_loss": 3.2},
+        {"step": 50, "val_loss": 2.0},
+        {"step": 60, "val_loss": "bad"},
+        {"step": 70, "val_loss": "1_0"},
+    ]
     d = diagnose_curve(recs)
     assert d["status"] in ("正常收敛", "过拟合趋势", "欠拟合/学习不充分"), d
     # "1_0" 若经 int()/float() 会变成第 10 步/损失 10.0，与真实值混淆。
@@ -313,14 +357,16 @@ def test_malformed_log_records_do_not_crash_diagnosis():
 def test_infinite_step_records_do_not_crash_diagnosis():
     """step 为 JSON Infinity（json.loads 接受该非标准字面量）时必须按坏记录
     跳过：int(inf) 抛 OverflowError，不能中断整个诊断。"""
-    recs = [json.loads('{"step": 10, "loss": 5.0}'),
-            json.loads('{"step": Infinity, "loss": 4.0}'),
-            json.loads('{"step": 20, "loss": 3.5}'),
-            json.loads('{"step": 30, "loss": 3.0}'),
-            json.loads('{"step": 40, "loss": 2.0}'),
-            json.loads('{"step": 10, "val_loss": 5.0}'),
-            json.loads('{"step": 20, "val_loss": 4.0}'),
-            json.loads('{"step": 30, "val_loss": 3.0}')]
+    recs = [
+        json.loads('{"step": 10, "loss": 5.0}'),
+        json.loads('{"step": Infinity, "loss": 4.0}'),
+        json.loads('{"step": 20, "loss": 3.5}'),
+        json.loads('{"step": 30, "loss": 3.0}'),
+        json.loads('{"step": 40, "loss": 2.0}'),
+        json.loads('{"step": 10, "val_loss": 5.0}'),
+        json.loads('{"step": 20, "val_loss": 4.0}'),
+        json.loads('{"step": 30, "val_loss": 3.0}'),
+    ]
     d = diagnose_curve(recs)
     assert d["malformed_records"] == 1, d
     assert d["status"] == "正常收敛", d
@@ -330,12 +376,17 @@ def test_infinite_step_records_do_not_crash_diagnosis():
 def test_huge_step_records_do_not_crash_diagnosis():
     """超出 float 范围的巨大整数 step 也必须按坏记录跳过：否则分段均值
     的 step 算术会在 float 转换时 OverflowError。"""
-    recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": 3.5},
-            {"step": 30, "loss": 3.0}, {"step": 40, "loss": 2.0},
-            {"step": 10 ** 400, "loss": 1.0},
-            {"step": 10, "val_loss": 5.0}, {"step": 20, "val_loss": 4.0},
-            {"step": 30, "val_loss": 3.0},
-            {"step": 10 ** 400, "val_loss": 1.0}]
+    recs = [
+        {"step": 10, "loss": 5.0},
+        {"step": 20, "loss": 3.5},
+        {"step": 30, "loss": 3.0},
+        {"step": 40, "loss": 2.0},
+        {"step": 10**400, "loss": 1.0},
+        {"step": 10, "val_loss": 5.0},
+        {"step": 20, "val_loss": 4.0},
+        {"step": 30, "val_loss": 3.0},
+        {"step": 10**400, "val_loss": 1.0},
+    ]
     d = diagnose_curve(recs)
     assert d["status"] == "正常收敛", d
     assert d["malformed_records"] == 2, d
@@ -345,11 +396,16 @@ def test_huge_step_records_do_not_crash_diagnosis():
 def test_huge_early_stop_step_does_not_crash_diagnosis():
     """early_stop 记录的 step 是合法超大整数时 float(step) 会 OverflowError；
     该标记应被忽略并回退到最后一个有限训练点。"""
-    recs = [{"step": 10, "loss": 5.0}, {"step": 20, "loss": 3.5},
-            {"step": 30, "loss": 3.0}, {"step": 40, "loss": 2.0},
-            {"step": 10, "val_loss": 5.0}, {"step": 20, "val_loss": 4.0},
-            {"step": 30, "val_loss": 3.0},
-            {"step": 10 ** 400, "early_stop": True}]
+    recs = [
+        {"step": 10, "loss": 5.0},
+        {"step": 20, "loss": 3.5},
+        {"step": 30, "loss": 3.0},
+        {"step": 40, "loss": 2.0},
+        {"step": 10, "val_loss": 5.0},
+        {"step": 20, "val_loss": 4.0},
+        {"step": 30, "val_loss": 3.0},
+        {"step": 10**400, "early_stop": True},
+    ]
     d = diagnose_curve(recs)
     assert d["status"] == "正常收敛", d
     assert d["early_stop_step"] == 40, d
@@ -359,12 +415,14 @@ def test_huge_early_stop_step_does_not_crash_diagnosis():
 def test_fractional_and_boolean_steps_are_malformed():
     """小数/布尔 step 不能被 int() 截断后参与诊断：1.5→1、True→1 会把
     不同记录折叠到同一步，曲线与早停标记随之错位；按坏记录跳过并计数。"""
-    recs = [{"step": 1, "loss": 4.0},
-            {"step": 1.5, "loss": 3.9},
-            {"step": True, "loss": 3.8},
-            {"step": 2.0, "loss": 3.5},      # 整数值浮点仍是合法 step
-            {"step": "3", "loss": 3.0},
-            {"step": 10 ** 400, "loss": 2.5}]
+    recs = [
+        {"step": 1, "loss": 4.0},
+        {"step": 1.5, "loss": 3.9},
+        {"step": True, "loss": 3.8},
+        {"step": 2.0, "loss": 3.5},  # 整数值浮点仍是合法 step
+        {"step": "3", "loss": 3.0},
+        {"step": 10**400, "loss": 2.5},
+    ]
     pts, bad, malformed = _finite_points(recs, "loss")
     assert [p["step"] for p in pts] == [1, 2, 3], pts
     assert bad == 0 and malformed == 3, (bad, malformed)
@@ -391,23 +449,27 @@ def test_boolean_log_values_are_malformed_not_numeric():
     pts, bad, malformed = _finite_points(recs, "loss")
     assert pts == [{"step": 20, "value": 2.0}]
     assert bad == 0 and malformed == 1, (bad, malformed)
-    assert _val_ci_rel([{"val_loss": 3.0,
-                         "val_loss_ci95": [True, 4.0]}]) is None
-    assert abs(_val_ci_rel([{"val_loss": 3.0,
-                             "val_loss_ci95": [2.0, 4.0]}]) - 1 / 3) < 1e-12
+    assert _val_ci_rel([{"val_loss": 3.0, "val_loss_ci95": [True, 4.0]}]) is None
+    assert (
+        abs(_val_ci_rel([{"val_loss": 3.0, "val_loss_ci95": [2.0, 4.0]}]) - 1 / 3)
+        < 1e-12
+    )
     # 区间两端有限但 hi−lo 溢出成 inf 时，相对半宽不可表示，按缺失处理；
     # 否则 val_ci_rel=inf 会进入 JSON/把全部变化当成噪声。
-    assert _val_ci_rel([{"val_loss": 3.0,
-                         "val_loss_ci95": [-1e308, 1e308]}]) is None
+    assert _val_ci_rel([{"val_loss": 3.0, "val_loss_ci95": [-1e308, 1e308]}]) is None
     d_ci = diagnose_curve(
-        [{"step": i, "loss": 1.0, "val_loss": 1.0,
-          "val_loss_ci95": [-1e308, 1e308]} for i in range(10)])
+        [
+            {"step": i, "loss": 1.0, "val_loss": 1.0, "val_loss_ci95": [-1e308, 1e308]}
+            for i in range(10)
+        ]
+    )
     assert d_ci["val_ci_rel"] is None, d_ci.get("val_ci_rel")
     assert d_ci["val_best_ci_rel"] is None
     assert live_overfit_hint(5, True, 4.0) is None
-    d = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                            [4.3, 3.8, 3.3, 2.9, 2.6])
-                       + [{"step": 55, "loss": True}])
+    d = diagnose_curve(
+        _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
+        + [{"step": 55, "loss": True}]
+    )
     assert d["malformed_records"] == 1, d
     assert d["status"] != "发散", d
     print("  [ok] bool 曲线值按坏记录跳过（不伪造损失/区间/过拟合提示）")
@@ -429,8 +491,9 @@ def test_insufficient_train_coverage_is_not_normal_convergence():
     assert d3["status"] == "正常收敛"
     assert d3["epochs_seen"] is None and d3["train_budget_sufficient"] is None
     # 更严重的状态（过拟合）不被覆盖率信息覆盖
-    d4 = diagnose_curve(_log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2],
-                             [4.3, 3.6, 3.2, 3.4, 3.9]), epochs_seen=0.1)
+    d4 = diagnose_curve(
+        _log([4.2, 3.6, 3.0, 2.4, 1.8, 1.2], [4.3, 3.6, 3.2, 3.4, 3.9]), epochs_seen=0.1
+    )
     assert d4["status"] == "过拟合"
     assert any("epoch" in e for e in d4["evidence"]), d4["evidence"]
     print("  [ok] 训练覆盖 <1 epoch → 训练不足（不误写无需干预）")
@@ -440,8 +503,7 @@ def test_diagnose_curve_tolerates_bad_coverage_metadata():
     """外部 eval.json 的坏覆盖字段不能中断诊断或伪造训练不足。"""
     recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
     for bad in ("bad", True, float("nan"), float("inf"), -0.5):
-        d = diagnose_curve(recs, epochs_seen=bad, train_tokens=bad,
-                           log_vocab=bad)
+        d = diagnose_curve(recs, epochs_seen=bad, train_tokens=bad, log_vocab=bad)
         assert d["status"] == "正常收敛", (bad, d)
         assert d["epochs_seen"] is None and d["train_tokens"] is None, (bad, d)
         assert d["train_budget_sufficient"] is None, (bad, d)
@@ -463,8 +525,12 @@ def test_huge_finite_losses_keep_curve_stats_finite():
     assert d["train_loss_last"] == 1e308, d
     assert d["val_loss_first"] == 1e308, d
     assert d["val_loss_last"] == 1e308, d
-    for key in ("train_rel_change", "val_rel_change",
-                "train_recent_rel_change", "val_recent_rel_change"):
+    for key in (
+        "train_rel_change",
+        "val_rel_change",
+        "train_recent_rel_change",
+        "val_recent_rel_change",
+    ):
         assert d[key] is None or math.isfinite(d[key]), (key, d[key])
     print("  [ok] 巨大有限损失：分段均值/趋势保持有限或显式缺失")
 
@@ -476,13 +542,20 @@ def test_worst_status_ordering():
     assert worst_status(["正常收敛", "过拟合趋势"]) == "过拟合趋势"
     assert worst_status(["过拟合趋势", "过拟合"]) == "过拟合"
     assert worst_status([]) == "数据不足"
-    assert worst_status(["训练不足（数据覆盖不足）", "正常收敛"]) \
+    assert (
+        worst_status(["训练不足（数据覆盖不足）", "正常收敛"])
         == "训练不足（数据覆盖不足）"
-    assert (STATUS_ORDER["NaN/Inf"] > STATUS_ORDER["发散"]
-            > STATUS_ORDER["过拟合"] > STATUS_ORDER["欠拟合/学习不充分"]
-            > STATUS_ORDER["训练不足（数据覆盖不足）"]
-            > STATUS_ORDER["过拟合趋势"] > STATUS_ORDER["数据不足"]
-            > STATUS_ORDER["正常收敛"])
+    )
+    assert (
+        STATUS_ORDER["NaN/Inf"]
+        > STATUS_ORDER["发散"]
+        > STATUS_ORDER["过拟合"]
+        > STATUS_ORDER["欠拟合/学习不充分"]
+        > STATUS_ORDER["训练不足（数据覆盖不足）"]
+        > STATUS_ORDER["过拟合趋势"]
+        > STATUS_ORDER["数据不足"]
+        > STATUS_ORDER["正常收敛"]
+    )
     print("  [ok] worst_status 严重度排序")
 
 
@@ -497,9 +570,15 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
         with open(os.path.join(tmp, "nan_report.json"), "w", encoding="utf-8") as f:
             json.dump({"step": 30, "where": "train_loss"}, f)
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"epochs_seen": 0.05, "train_tokens": 1000,
-                       "val_ppl_ci95": [1.0, 2.0],
-                       "curve_observability_warnings": ["验证点预计仅 2 个"]}, f)
+            json.dump(
+                {
+                    "epochs_seen": 0.05,
+                    "train_tokens": 1000,
+                    "val_ppl_ci95": [1.0, 2.0],
+                    "curve_observability_warnings": ["验证点预计仅 2 个"],
+                },
+                f,
+            )
         d = diagnose_run_dir(tmp)
         assert d["curve_observability_warnings"] == ["验证点预计仅 2 个"]
         assert d["nan_report"]["where"] == "train_loss"
@@ -513,7 +592,9 @@ def test_diagnose_run_dir_reads_log_and_nan_report():
             f.write("{broken\n")
         assert len(load_train_log(os.path.join(tmp, "train_log.jsonl"))) == 5
         # 缺失目录不抛异常
-        assert diagnose_run_dir(os.path.join(tmp, "nonexistent"))["status"] == "数据不足"
+        assert (
+            diagnose_run_dir(os.path.join(tmp, "nonexistent"))["status"] == "数据不足"
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] diagnose_run_dir（日志/nan_report/容错）")
@@ -525,8 +606,8 @@ def test_load_train_log_skips_valid_json_non_object_lines():
     try:
         p = os.path.join(tmp, "train_log.jsonl")
         with open(p, "w", encoding="utf-8") as f:
-            f.write("[1, 2, 3]\n")          # 合法 JSON 数组（无 .get）
-            f.write("42\n")                  # 合法 JSON 标量
+            f.write("[1, 2, 3]\n")  # 合法 JSON 数组（无 .get）
+            f.write("42\n")  # 合法 JSON 标量
             f.write("null\n")
             f.write('{"step": 1, "loss": 2.0}\n')
             f.write("{broken\n")
@@ -545,8 +626,7 @@ def test_load_train_log_tolerates_invalid_utf8():
             f.write(b'{"step": 1, "loss": 2.0}\n')
             f.write(b'{"step": 2, "loss": \xff}\n')
             f.write(b'{"step": 3, "loss": 1.5}\n')
-        assert load_train_log(p) == [
-            {"step": 1, "loss": 2.0}, {"step": 3, "loss": 1.5}]
+        assert load_train_log(p) == [{"step": 1, "loss": 2.0}, {"step": 3, "loss": 1.5}]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("  [ok] load_train_log：非法 UTF-8 字节按坏行跳过")
@@ -555,8 +635,9 @@ def test_load_train_log_tolerates_invalid_utf8():
 def test_rising_train_loss_not_advised_to_train_longer():
     """训练损失缓慢上升（未达发散阈值）时不能给出"延长训练/增大模型"
     这类反向建议：上升更可能来自学习率过大，延长训练会继续恶化。"""
-    d = diagnose_curve(_log([3.0, 3.05, 3.1, 3.15, 3.2, 3.3],
-                            [3.1, 3.2, 3.3, 3.4, 3.5]))
+    d = diagnose_curve(
+        _log([3.0, 3.05, 3.1, 3.15, 3.2, 3.3], [3.1, 3.2, 3.3, 3.4, 3.5])
+    )
     assert d["status"] == "欠拟合/学习不充分", d
     assert any("不降反升" in e for e in d["evidence"]), d["evidence"]
     assert any("降低学习率" in r for r in d["recommendations"]), d["recommendations"]
@@ -580,32 +661,26 @@ def test_live_overfit_hint():
     assert live_overfit_hint(LIVE_WARN_EVALS, None, 2.0, patience=0) is None
     assert live_overfit_hint("bad", 2.0, 2.0, patience=0) is None
     assert live_overfit_hint(float("inf"), 2.0, 2.0, patience=0) is None
-    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5,
-                             patience=float("inf")) is None
-    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5,
-                             patience="bad") is None
+    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5, patience=float("inf")) is None
+    assert live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.5, patience="bad") is None
 
     # 结合训练侧趋势：验证回升但训练仍在降 = 典型过拟合
-    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2,
-                            train_recent=[3.0, 2.9, 2.8])
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2, train_recent=[3.0, 2.9, 2.8])
     assert "训练损失仍在下降" in msg and "典型过拟合" in msg, msg
     # 验证回升且训练也上升：更像优化不稳定/学习率过大，不能建议加正则化
-    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2,
-                            train_recent=[2.8, 2.9, 3.0])
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.2, train_recent=[2.8, 2.9, 3.0])
     assert "学习率" in msg and "不是典型过拟合" in msg, msg
     assert "加正则化" not in msg.split("：")[-1] or "不要盲目加正则化" in msg, msg
     # 验证平台 + 训练仍在降：早期过拟合，而不是欠拟合
-    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0,
-                            train_recent=[3.0, 2.9, 2.8])
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0, train_recent=[3.0, 2.9, 2.8])
     assert "早期过拟合" in msg, msg
     # 两边都停滞：更像欠拟合/优化不足，建议检查学习率而不是正则化
-    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0,
-                            train_recent=[2.8, 2.8, 2.8])
+    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.0, train_recent=[2.8, 2.8, 2.8])
     assert "欠拟合" in msg and "不要盲目加正则化" in msg, msg
     # 回升幅度落在验证抽样噪声内：只要求继续观察，不判过拟合
-    msg = live_overfit_hint(LIVE_WARN_EVALS, 2.0, 2.01,
-                            train_recent=[3.0, 2.9, 2.8],
-                            val_ci95=[1.99, 2.03])
+    msg = live_overfit_hint(
+        LIVE_WARN_EVALS, 2.0, 2.01, train_recent=[3.0, 2.9, 2.8], val_ci95=[1.99, 2.03]
+    )
     assert "抽样噪声" in msg and "不要据此加正则化" in msg, msg
     # 有限损失差值×100 仍可能溢出：提示文案不能写出 inf%。
     msg = live_overfit_hint(LIVE_WARN_EVALS, 1e-300, 1e7)
@@ -641,9 +716,14 @@ def test_curve_observability_warnings():
     w = curve_observability_warnings(100, 0, 10)
     assert any("eval_every=0" in x for x in w), w
     # bool/小数不能被截断成另一个采样间隔（True→1、7.5→7）
-    for bad in ((True, 4, 2), (20, 7.5, 2), (20, 4, 2.5),
-                (20, False, 2), (20, 4, float("nan")),
-                ("1_0", 4, 2)):
+    for bad in (
+        (True, 4, 2),
+        (20, 7.5, 2),
+        (20, 4, 2.5),
+        (20, False, 2),
+        (20, 4, float("nan")),
+        ("1_0", 4, 2),
+    ):
         w = curve_observability_warnings(*bad)
         assert len(w) == 1 and "不是整数" in w[0], (bad, w)
     assert curve_observability_warnings(20.0, 4.0, 2.0) == []
@@ -654,30 +734,57 @@ def test_gate_health_distinguishes_collapse_saturation_and_constant():
     """只看 gate_mean 不够：g→0（关闭）与 g→1（透明）都让机制失效，
     std≈0 则门控没有样本级区分；这些必须作为独立信号进入曲线诊断。"""
     base = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
-    low = base + [{"step": 50, "gate_mean": 0.01, "gate_std": 0.003,
-                   "gate_frac_low": 0.99, "gate_frac_high": 0.0,
-                   "gate_layer_mean": [0.01, 0.012]}]
+    low = base + [
+        {
+            "step": 50,
+            "gate_mean": 0.01,
+            "gate_std": 0.003,
+            "gate_frac_low": 0.99,
+            "gate_frac_high": 0.0,
+            "gate_layer_mean": [0.01, 0.012],
+        }
+    ]
     d = diagnose_curve(low)
     gh = d["gate_health"]
     assert gh["available"] and "塌缩" in gh["status"], gh
-    assert any("机制未生效" in r or "不能归因" in r
-               for r in gh["recommendations"]), gh
+    assert any("机制未生效" in r or "不能归因" in r for r in gh["recommendations"]), gh
     assert not any("无需干预" in r for r in d["recommendations"]), d
 
-    high = base + [{"step": 50, "gate_mean": 0.995, "gate_std": 0.001,
-                    "gate_frac_low": 0.0, "gate_frac_high": 0.99}]
+    high = base + [
+        {
+            "step": 50,
+            "gate_mean": 0.995,
+            "gate_std": 0.001,
+            "gate_frac_low": 0.0,
+            "gate_frac_high": 0.99,
+        }
+    ]
     d = diagnose_curve(high)
     assert "饱和" in d["gate_health"]["status"], d["gate_health"]
     assert any("退化为标准注意力" in e for e in d["evidence"]), d["evidence"]
 
-    const = base + [{"step": 50, "gate_mean": 0.5, "gate_std": 0.001,
-                     "gate_frac_low": 0.0, "gate_frac_high": 0.0}]
+    const = base + [
+        {
+            "step": 50,
+            "gate_mean": 0.5,
+            "gate_std": 0.001,
+            "gate_frac_low": 0.0,
+            "gate_frac_high": 0.0,
+        }
+    ]
     d = diagnose_curve(const)
     assert "常数" in d["gate_health"]["status"], d["gate_health"]
     assert any("样本级" in e for e in d["evidence"]), d["evidence"]
 
-    healthy = base + [{"step": 50, "gate_mean": 0.7, "gate_std": 0.15,
-                       "gate_frac_low": 0.02, "gate_frac_high": 0.03}]
+    healthy = base + [
+        {
+            "step": 50,
+            "gate_mean": 0.7,
+            "gate_std": 0.15,
+            "gate_frac_low": 0.02,
+            "gate_frac_high": 0.03,
+        }
+    ]
     d = diagnose_curve(healthy)
     assert d["gate_health"]["status"] == "健康", d["gate_health"]
     assert not d["gate_health"]["recommendations"]
@@ -696,10 +803,16 @@ def test_gate_health_flags_drift_and_ignores_malformed_stats():
     """门控均值在评测间剧烈变化时，不能只用最终均值解释机制；坏统计值
     必须被跳过，不能让曲线诊断崩溃或伪造门控状态。"""
     recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
-    recs += [{"step": 20, "gate_mean": 0.8, "gate_std": 0.1},
-             {"step": 40, "gate_mean": 0.35, "gate_std": 0.1},
-             {"step": 60, "gate_mean": "bad", "gate_std": True,
-              "gate_frac_low": float("nan")}]
+    recs += [
+        {"step": 20, "gate_mean": 0.8, "gate_std": 0.1},
+        {"step": 40, "gate_mean": 0.35, "gate_std": 0.1},
+        {
+            "step": 60,
+            "gate_mean": "bad",
+            "gate_std": True,
+            "gate_frac_low": float("nan"),
+        },
+    ]
     d = diagnose_curve(recs)
     gh = d["gate_health"]
     assert gh["available"] and "漂移" in gh["status"], gh
@@ -707,8 +820,7 @@ def test_gate_health_flags_drift_and_ignores_malformed_stats():
     assert gh["drift_max"] >= 0.25, gh
     assert any("最终" in e or "过程" in e for e in gh["evidence"]), gh
     # 无门控统计（standard/null 或旧日志）时明确标为不适用，且不误报
-    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6]))
     assert not d2["gate_health"]["available"], d2["gate_health"]
     assert not d2["gate_health"]["recommendations"]
     print("  [ok] 门控漂移检测与坏统计值跳过")
@@ -720,8 +832,7 @@ def test_validation_below_train_flags_leakage_or_mismatch():
     只看两条曲线各自下降会漏掉相对水平；倒挂必须进入状态与建议，且不得
     再写“无需干预”。
     """
-    d = diagnose_curve(_log([4.2, 3.9, 3.6, 3.3, 3.0, 2.8],
-                            [3.5, 3.2, 2.9, 2.6, 2.4]))
+    d = diagnose_curve(_log([4.2, 3.9, 3.6, 3.3, 3.0, 2.8], [3.5, 3.2, 2.9, 2.6, 2.4]))
     assert d["status"] == "验证损失倒挂（疑似泄漏/口径不一致）", d
     assert d["val_below_train"] is True and d["val_below_train_rel"] < -0.03, d
     assert any("泄漏" in e for e in d["evidence"]), d["evidence"]
@@ -729,20 +840,23 @@ def test_validation_below_train_flags_leakage_or_mismatch():
     assert not any("无需干预" in r for r in d["recommendations"]), d
 
     # 正常的“验证略高”与小幅波动不得误报
-    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    d2 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6]))
     assert d2["status"] == "正常收敛" and d2["val_below_train"] is False, d2
     assert any("无需干预" in r for r in d2["recommendations"]), d2
     # 倒挂信号与曲线形状独立：训练仍下降、验证停滞（本会被判为过拟合趋势）
     # 时也必须升级为泄漏/口径排查，不能给出“加正则化”的错误建议。
-    d3 = diagnose_curve(_log(
-        [4.2, 3.9, 3.6, 3.3, 3.0, 2.7, 2.5, 2.35, 2.2, 2.1],
-        [2.0, 2.01, 1.99, 2.0, 2.02, 2.0, 2.01, 2.0, 1.99, 2.0]))
+    d3 = diagnose_curve(
+        _log(
+            [4.2, 3.9, 3.6, 3.3, 3.0, 2.7, 2.5, 2.35, 2.2, 2.1],
+            [2.0, 2.01, 1.99, 2.0, 2.02, 2.0, 2.01, 2.0, 1.99, 2.0],
+        )
+    )
     assert d3["val_below_train"] is True, d3
     assert d3["status"] == "验证损失倒挂（疑似泄漏/口径不一致）", d3
     assert any("泄漏" in e for e in d3["evidence"]), d3["evidence"]
-    assert not any("正则化" in r or "早停" in r
-                   for r in d3["recommendations"]), d3["recommendations"]
+    assert not any("正则化" in r or "早停" in r for r in d3["recommendations"]), d3[
+        "recommendations"
+    ]
     print("  [ok] 验证-训练损失倒挂 → 泄漏/口径排查（正常曲线不误报）")
 
 
@@ -752,8 +866,7 @@ def test_best_checkpoint_selection_noise_is_reported():
     这是 winner's curse 的曲线诊断口径：报告 best 的数字会把它当成真实
     最优，实际可能只是有限窗口抽样噪声。
     """
-    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                [6.0, 4.0, 3.9, 3.95, 4.0])
+    recs = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [6.0, 4.0, 3.9, 3.95, 4.0])
     for r in recs:
         if "val_loss" in r:
             v = r["val_loss"]
@@ -767,8 +880,7 @@ def test_best_checkpoint_selection_noise_is_reported():
     assert not any("无需干预" in r for r in d["recommendations"]), d
 
     # best 就是最终点时不存在“挑早期幸运点”的问题；无 CI 的旧日志不伪造标记
-    recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                 [4.3, 4.0, 3.8, 3.6, 3.4])
+    recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 4.0, 3.8, 3.6, 3.4])
     d2 = diagnose_curve(recs2)
     assert d2["best_checkpoint_within_noise"] is False, d2
     print("  [ok] best checkpoint 选型噪声（winner's curse）诊断")
@@ -802,8 +914,9 @@ def test_recent_tail_detects_late_rebound_and_plateau():
     过拟合误判为正常收敛/欠拟合；末段（后 1/3 vs 中 1/3）必须给出信号。
     """
     # 训练末段已平台，验证末段回升：即使全程验证仍在下降，也按过拟合处理
-    d = diagnose_curve(_log([3.0, 2.0, 1.9, 1.9, 1.9, 1.9],
-                            [3.2, 2.4, 2.0, 1.95, 2.1, 2.4]))
+    d = diagnose_curve(
+        _log([3.0, 2.0, 1.9, 1.9, 1.9, 1.9], [3.2, 2.4, 2.0, 1.95, 2.1, 2.4])
+    )
     assert d["status"] == "过拟合", d
     assert d["recent_trend_available"] is True
     assert d["val_recent_up"] is True and d["recent_overfit_signal"] is True
@@ -811,16 +924,18 @@ def test_recent_tail_detects_late_rebound_and_plateau():
     assert any("早停" in r for r in d["recommendations"]), d["recommendations"]
 
     # 训练末段仍在下降、验证末段停步：全程验证仍下降，但已进入过拟合趋势
-    d2 = diagnose_curve(_log([3.0, 2.7, 2.4, 2.1, 1.8, 1.5],
-                             [3.2, 2.4, 2.0, 1.96, 1.97, 1.98]))
+    d2 = diagnose_curve(
+        _log([3.0, 2.7, 2.4, 2.1, 1.8, 1.5], [3.2, 2.4, 2.0, 1.96, 1.97, 1.98])
+    )
     assert d2["status"] == "过拟合趋势", d2
     assert d2["train_recent_down"] is True
     assert d2["val_recent_unresolved"] is True
-    assert any("末段" in e and "无实质变化" in e for e in d2["evidence"]), d2["evidence"]
+    assert any("末段" in e and "无实质变化" in e for e in d2["evidence"]), d2[
+        "evidence"
+    ]
 
     # 正常同步下降不得误报末段信号
-    d3 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5],
-                             [4.3, 3.8, 3.3, 2.9, 2.6]))
+    d3 = diagnose_curve(_log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6]))
     assert d3["status"] == "正常收敛", d3
     assert not d3["recent_overfit_signal"] and not d3["recent_trend_signal"]
     print("  [ok] 末段趋势：晚期回升/停步不被全程均值掩盖")
@@ -842,8 +957,7 @@ def test_gradient_peak_uses_interval_max_and_reports_step():
 
     # 区间峰值非有限：即使损失曲线正常，也要报非有限梯度并带步号
     recs2 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
-    recs2.append({"step": 10, "grad_norm": 1.0,
-                  "grad_norm_max": float("inf")})
+    recs2.append({"step": 10, "grad_norm": 1.0, "grad_norm_max": float("inf")})
     d2 = diagnose_curve(recs2)
     assert d2["grad_norm_nonfinite"] == 1
     assert d2["grad_norm_nonfinite_steps"] == [10]
@@ -852,8 +966,7 @@ def test_gradient_peak_uses_interval_max_and_reports_step():
     # 峰值有限但末步非有限（或反之）：两个键都要检查，不能因优先键可解析
     # 就漏掉另一个键里的非有限证据。
     recs3 = _log([4.2, 3.9, 3.5, 3.1, 2.8, 2.5], [4.3, 3.8, 3.3, 2.9, 2.6])
-    recs3.append({"step": 10, "grad_norm": float("nan"),
-                  "grad_norm_max": 1.2})
+    recs3.append({"step": 10, "grad_norm": float("nan"), "grad_norm_max": 1.2})
     d3 = diagnose_curve(recs3)
     assert d3["grad_norm_nonfinite_steps"] == [10]
     assert d3["grad_norm_max"] == 1.2
@@ -862,18 +975,22 @@ def test_gradient_peak_uses_interval_max_and_reports_step():
 
 def test_curve_step_beyond_float_exact_range_is_skipped():
     """巨大 step 不能进入分段均值：int→float 溢出会让整份诊断崩溃。"""
-    assert _step_or_none(10 ** 400) is None
+    assert _step_or_none(10**400) is None
     assert _step_or_none(1e308) is None
     assert _step_or_none(-1e308) is None
-    assert _step_or_none(2 ** 53 + 1) is None
+    assert _step_or_none(2**53 + 1) is None
     assert _step_or_none(10) == 10
     # 一段正常曲线混入巨大 step 时，坏记录被跳过，诊断仍能完成。
-    recs = [{"step": 10, "loss": 4.0}, {"step": 20, "loss": 3.0},
-            {"step": 30, "loss": 2.5},
-            {"step": 50, "val_loss": 4.2}, {"step": 100, "val_loss": 3.0},
-            {"step": 150, "val_loss": 2.4},
-            {"step": 1e308, "loss": 1.0},
-            {"step": -1e308, "val_loss": 1.0}]
+    recs = [
+        {"step": 10, "loss": 4.0},
+        {"step": 20, "loss": 3.0},
+        {"step": 30, "loss": 2.5},
+        {"step": 50, "val_loss": 4.2},
+        {"step": 100, "val_loss": 3.0},
+        {"step": 150, "val_loss": 2.4},
+        {"step": 1e308, "loss": 1.0},
+        {"step": -1e308, "val_loss": 1.0},
+    ]
     d = diagnose_curve(recs, log_vocab=10.0)
     assert isinstance(d, dict) and d.get("status")
     print("  [ok] 曲线诊断跳过超出 float 精确范围的巨大 step")

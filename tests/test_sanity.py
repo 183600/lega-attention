@@ -1,18 +1,34 @@
 """过拟合小批量 sanity check 测试：正常模型必须通过、梯度断流必须被拦下。"""
+
 import numpy as np
 import torch
 
 from lega.model import GPT
-from lega.sanity import (active_regularization, batch_contract,
-                         batch_fingerprint, batch_metrics,
-                         gradient_coverage, losses_consistent,
-                         run_overfit_check, _resolve_run_options)
+from lega.sanity import (
+    active_regularization,
+    batch_contract,
+    batch_fingerprint,
+    batch_metrics,
+    gradient_coverage,
+    losses_consistent,
+    run_overfit_check,
+    _resolve_run_options,
+)
 
 
 def _model():
     torch.manual_seed(0)
-    return GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1, n_heads=2,
-               ffn_mult=4, variant="lega", dropout=0.0, attn_dropout=0.0)
+    return GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="lega",
+        dropout=0.0,
+        attn_dropout=0.0,
+    )
 
 
 def _batch():
@@ -24,6 +40,7 @@ def _batch():
 
 def test_batch_metrics_initial_loss_near_log_vocab():
     import math
+
     model = _model()
     x, y = _batch()
     m = batch_metrics(model, x, y)
@@ -41,13 +58,17 @@ def test_sanity_main_blocks_on_stale_data_cache(monkeypatch):
 
     from lega.data import CACHE_SCHEMA
     from lega.sanity import main as sanity_main
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = os.path.join(root, "configs", "tiny.json")
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"cache_schema": CACHE_SCHEMA - 1}, f)
-        monkeypatch.setattr(sys, "argv", [
-            "sanity", "--config", cfg, "--data_dir", d, "--variant", "lega"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["sanity", "--config", cfg, "--data_dir", d, "--variant", "lega"],
+        )
         try:
             sanity_main()
             raise AssertionError("旧缓存协议应阻断 sanity")
@@ -59,9 +80,20 @@ def test_sanity_main_blocks_on_stale_data_cache(monkeypatch):
 def test_overfit_check_passes_on_healthy_model():
     model = _model()
     x, y = _batch()
-    res = run_overfit_check(model, x, y, steps=150, lr=5e-3, device="cpu",
-                            seed=0, warmup=10, log_every=50, grad_clip=10.0,
-                            loss_threshold=0.1, acc_threshold=0.99)
+    res = run_overfit_check(
+        model,
+        x,
+        y,
+        steps=150,
+        lr=5e-3,
+        device="cpu",
+        seed=0,
+        warmup=10,
+        log_every=50,
+        grad_clip=10.0,
+        loss_threshold=0.1,
+        acc_threshold=0.99,
+    )
     assert res["passed"], res["checks"]
     assert res["final"]["loss"] < res["initial"]["loss"]
     assert res["final"]["token_acc"] > 0.95
@@ -77,9 +109,11 @@ def test_overfit_check_passes_on_healthy_model():
     assert res["steps_executed"] == res["steps_planned"] == 150
     assert res["checks"]["loss_requires_grad"] is True
     assert not model.training  # 检查结束后恢复 eval 态，避免污染调用方
-    print(f"  [ok] 健康模型可过拟合固定批: loss="
-          f"{res['initial']['loss']:.3f}->{res['final']['loss']:.4f}, "
-          f"acc={res['final']['token_acc']:.3f}")
+    print(
+        f"  [ok] 健康模型可过拟合固定批: loss="
+        f"{res['initial']['loss']:.3f}->{res['final']['loss']:.4f}, "
+        f"acc={res['final']['token_acc']:.3f}"
+    )
 
 
 def test_overfit_check_rejects_degenerate_and_oov_batches():
@@ -116,12 +150,20 @@ def test_overfit_check_rejects_degenerate_and_oov_batches():
 
 def test_resolve_run_options_honors_config_and_rejects_truncation():
     """sanity 配置块的执行参数必须真正生效，且不能被 int()/float() 截断。"""
-    opt = _resolve_run_options({
-        "steps": 7, "batch_size": 3, "ctx": 16, "lr": 0.001,
-        "warmup": 2, "grad_clip": 0.5, "log_every": 2,
-        "loss_threshold": 0.1, "acc_threshold": 0.9,
-        "initial_loss_tol": 0.5,
-    })
+    opt = _resolve_run_options(
+        {
+            "steps": 7,
+            "batch_size": 3,
+            "ctx": 16,
+            "lr": 0.001,
+            "warmup": 2,
+            "grad_clip": 0.5,
+            "log_every": 2,
+            "loss_threshold": 0.1,
+            "acc_threshold": 0.9,
+            "initial_loss_tol": 0.5,
+        }
+    )
     assert (opt["steps"], opt["batch_size"], opt["ctx"]) == (7, 3, 16)
     assert opt["lr"] == 0.001 and opt["warmup"] == 2
     assert opt["grad_clip"] == 0.5 and opt["log_every"] == 2
@@ -131,17 +173,21 @@ def test_resolve_run_options_honors_config_and_rejects_truncation():
     # 冒烟覆盖只在未提供 CLI/配置时生效的语义保持不变
     smoke = _resolve_run_options({}, {"steps": None}, smoke=True)
     assert smoke["steps"] == 60
-    for bad in (True, np.bool_(True), 1.5, "1.5", float("nan"),
-                float("inf")):
+    for bad in (True, np.bool_(True), 1.5, "1.5", float("nan"), float("inf")):
         try:
             _resolve_run_options({"steps": bad})
         except ValueError:
             pass
         else:
             raise AssertionError(f"非法 sanity.steps 未被拒绝: {bad!r}")
-    for key, bad in (("lr", True), ("lr", float("nan")),
-                     ("grad_clip", -1.0), ("acc_threshold", 1.5),
-                     ("log_every", 0), ("warmup", -1)):
+    for key, bad in (
+        ("lr", True),
+        ("lr", float("nan")),
+        ("grad_clip", -1.0),
+        ("acc_threshold", 1.5),
+        ("log_every", 0),
+        ("warmup", -1),
+    ):
         try:
             _resolve_run_options({key: bad})
         except ValueError:
@@ -153,15 +199,17 @@ def test_resolve_run_options_honors_config_and_rejects_truncation():
 
 def test_overfit_check_rejects_invalid_numeric_args():
     """sanity 数值参数不能被 bool/NaN/Inf/非数值静默改写。"""
-    import math
     model = _model()
     x, y = _batch()
-    base = dict(steps=0, lr=5e-3, device="cpu", seed=0, warmup=0,
-                log_every=1)
-    for name in ("lr", "grad_clip", "loss_threshold", "acc_threshold",
-                 "initial_loss_tol"):
-        for bad in (True, np.bool_(True), float("nan"), float("inf"),
-                    "bad", "1_0"):
+    base = dict(steps=0, lr=5e-3, device="cpu", seed=0, warmup=0, log_every=1)
+    for name in (
+        "lr",
+        "grad_clip",
+        "loss_threshold",
+        "acc_threshold",
+        "initial_loss_tol",
+    ):
+        for bad in (True, np.bool_(True), float("nan"), float("inf"), "bad", "1_0"):
             kwargs = dict(base)
             kwargs[name] = bad
             try:
@@ -181,10 +229,20 @@ def test_overfit_check_rejects_invalid_numeric_args():
             else:
                 raise AssertionError(f"负 {name} 未被拒绝")
     # 数字字符串仍可解析；initial_loss_tol<0 仍是“显式禁用”
-    res = run_overfit_check(model, x, y, steps=0, lr="5e-3", device="cpu",
-                            seed=0, warmup=0, log_every=1,
-                            loss_threshold="0.05", acc_threshold="0.99",
-                            initial_loss_tol="-1.0")
+    res = run_overfit_check(
+        model,
+        x,
+        y,
+        steps=0,
+        lr="5e-3",
+        device="cpu",
+        seed=0,
+        warmup=0,
+        log_every=1,
+        loss_threshold="0.05",
+        acc_threshold="0.99",
+        initial_loss_tol="-1.0",
+    )
     assert res["checks"]["initial_loss_near_log_vocab"] is True
     # steps=0 从未执行 forward/backward：不能把“未检查”写成
     # loss_requires_grad=True，也不能声称计划步数已完成。
@@ -200,8 +258,9 @@ def test_overfit_check_detects_frozen_params():
     for p in model.parameters():
         p.requires_grad_(False)
     x, y = _batch()
-    res = run_overfit_check(model, x, y, steps=20, lr=5e-3, device="cpu",
-                            seed=0, log_every=10)
+    res = run_overfit_check(
+        model, x, y, steps=20, lr=5e-3, device="cpu", seed=0, log_every=10
+    )
     assert not res["passed"]
     assert res["checks"]["loss_requires_grad"] is False
     assert res["checks"]["gradient_nonzero_first_step"] is False
@@ -243,16 +302,19 @@ def test_overfit_check_detects_detached_submodule():
 
     model.ln_f.forward = detached_forward
     x, y = _batch()
-    res = run_overfit_check(model, x, y, steps=5, lr=1e-3, device="cpu",
-                            seed=0, log_every=1)
+    res = run_overfit_check(
+        model, x, y, steps=5, lr=1e-3, device="cpu", seed=0, log_every=1
+    )
     assert not res["passed"]
     assert res["checks"]["loss_requires_grad"] is True
     assert res["checks"]["all_params_get_grads"] is False
     missing = res["grad_coverage"]["missing_grad"]
     assert any("ln_f" in n for n in missing), missing
     assert any(n.startswith("blocks.") for n in missing), missing
-    print(f"  [ok] detach 子模块导致 {len(missing)} 个参数收不到梯度，"
-          "被逐参数覆盖检查拦下")
+    print(
+        f"  [ok] detach 子模块导致 {len(missing)} 个参数收不到梯度，"
+        "被逐参数覆盖检查拦下"
+    )
 
 
 def test_overfit_check_reports_preclip_grad_norm():
@@ -263,8 +325,9 @@ def test_overfit_check_reports_preclip_grad_norm():
     """
     model = _model()
     x, y = _batch()
-    res = run_overfit_check(model, x, y, steps=2, lr=0.0, device="cpu",
-                            seed=0, log_every=1, grad_clip=1e-6)
+    res = run_overfit_check(
+        model, x, y, steps=2, lr=0.0, device="cpu", seed=0, log_every=1, grad_clip=1e-6
+    )
     pre = res["first_grad_norm_preclip"]
     post = res["first_grad_norm_postclip"]
     assert pre is not None and post is not None
@@ -296,14 +359,14 @@ def test_overfit_check_detects_all_zero_grad_submodule():
     handle = model.ln_f.register_full_backward_hook(zero_ln_f_grad)
     try:
         x, y = _batch()
-        res = run_overfit_check(model, x, y, steps=5, lr=1e-3, device="cpu",
-                                seed=0, log_every=1)
+        res = run_overfit_check(
+            model, x, y, steps=5, lr=1e-3, device="cpu", seed=0, log_every=1
+        )
     finally:
         handle.remove()
     assert not res["passed"]
     assert res["checks"]["no_zero_grads_first_step"] is False
-    assert "ln_f.weight" in res["grad_coverage"]["zero_grad"], \
-        res["grad_coverage"]
+    assert "ln_f.weight" in res["grad_coverage"]["zero_grad"], res["grad_coverage"]
     print("  [ok] 首步全零梯度的子模块被 sanity 判为断流")
 
 
@@ -316,6 +379,7 @@ def test_losses_consistent_tolerance():
     # 非数值/bool/下划线数字串不是 loss 观测；负容差不能让 math.isclose
     # 抛异常（调用方在训练链路里，崩溃比判失败更糟）。
     import numpy as np
+
     for bad in (True, np.bool_(True), "1_0", "bad", [1.0]):
         assert not losses_consistent(bad, 1.0), bad
         assert not losses_consistent(1.0, bad), bad
@@ -343,12 +407,14 @@ def test_overfit_check_detects_loss_computation_mismatch():
 
     model.forward = scaled_loss_forward
     x, y = _batch()
-    res = run_overfit_check(model, x, y, steps=40, lr=5e-3, device="cpu",
-                            seed=0, log_every=20)
+    res = run_overfit_check(
+        model, x, y, steps=40, lr=5e-3, device="cpu", seed=0, log_every=20
+    )
     assert not res["passed"]
     assert res["checks"]["train_loss_matches_direct_logits"] is False
-    ratio = (res["loss_consistency"]["train_path"]
-             / res["loss_consistency"]["direct_logits"])
+    ratio = (
+        res["loss_consistency"]["train_path"] / res["loss_consistency"]["direct_logits"]
+    )
     assert abs(ratio - 2.0) < 1e-3, ratio
     print("  [ok] loss 计算错误（训练路径被缩放 2×）被一致性核对拦下")
 
@@ -358,8 +424,9 @@ def test_overfit_check_detects_broken_next_token_shift():
     model = _model()
     x, y = _batch()
     y_broken = y.flip(1)
-    res = run_overfit_check(model, x, y_broken, steps=5, lr=1e-3, device="cpu",
-                            seed=0, log_every=1)
+    res = run_overfit_check(
+        model, x, y_broken, steps=5, lr=1e-3, device="cpu", seed=0, log_every=1
+    )
     assert not res["passed"]
     assert res["checks"]["next_token_shift_consistent"] is False
     print("  [ok] 标签错位（y ≠ x 右移一位）被消费点校验拦下")
@@ -374,14 +441,16 @@ def test_overfit_check_restores_tf32_flags_independently():
     try:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = True
-        run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu", seed=0,
-                          warmup=1, log_every=1)
+        run_overfit_check(
+            model, x, y, steps=1, lr=1e-3, device="cpu", seed=0, warmup=1, log_every=1
+        )
         assert torch.backends.cuda.matmul.allow_tf32 is False
         assert torch.backends.cudnn.allow_tf32 is True, "cudnn 开关被 matmul 的旧值覆盖"
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = False
-        run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu", seed=0,
-                          warmup=1, log_every=1)
+        run_overfit_check(
+            model, x, y, steps=1, lr=1e-3, device="cpu", seed=0, warmup=1, log_every=1
+        )
         assert torch.backends.cuda.matmul.allow_tf32 is True
         assert torch.backends.cudnn.allow_tf32 is False
     finally:
@@ -397,27 +466,51 @@ def test_overfit_check_detects_pathological_initial_logits():
     交叉熵不可能接近均匀分布的对数值，应立即报警而不是盲目开训。
     """
     import math
+
     model = _model()
     with torch.no_grad():
-        model.lm_head.weight.mul_(30.0)          # 权重共享：embedding 同步放大
+        model.lm_head.weight.mul_(30.0)  # 权重共享：embedding 同步放大
     x, y = _batch()
-    res = run_overfit_check(model, x, y, steps=5, lr=1e-3, device="cpu",
-                            seed=0, log_every=1)
+    res = run_overfit_check(
+        model, x, y, steps=5, lr=1e-3, device="cpu", seed=0, log_every=1
+    )
     assert not res["passed"]
     assert res["checks"]["initial_loss_near_log_vocab"] is False
-    assert abs(res["initial_loss_minus_log_vocab"]) > res["thresholds"]["initial_loss_tol"]
+    assert (
+        abs(res["initial_loss_minus_log_vocab"]) > res["thresholds"]["initial_loss_tol"]
+    )
     assert math.isfinite(res["initial_loss_minus_log_vocab"])
     # 容差可配置：放宽到足够大时该检查通过（其余检查仍以各自阈值判定）
-    res2 = run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu",
-                             seed=0, log_every=1, initial_loss_tol=1e6)
+    res2 = run_overfit_check(
+        model,
+        x,
+        y,
+        steps=1,
+        lr=1e-3,
+        device="cpu",
+        seed=0,
+        log_every=1,
+        initial_loss_tol=1e6,
+    )
     assert res2["checks"]["initial_loss_near_log_vocab"] is True
     # 负值显式禁用该检查（偏差仍记录在案）
-    res3 = run_overfit_check(model, x, y, steps=1, lr=1e-3, device="cpu",
-                             seed=0, log_every=1, initial_loss_tol=-1.0)
+    res3 = run_overfit_check(
+        model,
+        x,
+        y,
+        steps=1,
+        lr=1e-3,
+        device="cpu",
+        seed=0,
+        log_every=1,
+        initial_loss_tol=-1.0,
+    )
     assert res3["checks"]["initial_loss_near_log_vocab"] is True
     assert abs(res3["initial_loss_minus_log_vocab"]) > 1.0
-    print(f"  [ok] 病态 logits 初始偏差 "
-          f"{res['initial_loss_minus_log_vocab']:+.2f} 被初始 loss≈log(V) 核对拦下")
+    print(
+        f"  [ok] 病态 logits 初始偏差 "
+        f"{res['initial_loss_minus_log_vocab']:+.2f} 被初始 loss≈log(V) 核对拦下"
+    )
 
 
 def test_overfit_check_requires_regularization_disabled():
@@ -428,15 +521,24 @@ def test_overfit_check_requires_regularization_disabled():
     """
     clean = _model()
     assert active_regularization(clean) == []
-    noisy = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1,
-                n_heads=2, ffn_mult=4, variant="lega", dropout=0.2,
-                attn_dropout=0.1)
+    noisy = GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="lega",
+        dropout=0.2,
+        attn_dropout=0.1,
+    )
     active = active_regularization(noisy)
     assert any("Dropout" in a for a in active)
     assert any("attn_dropout" in a for a in active)
     x, y = _batch()
-    res = run_overfit_check(noisy, x, y, steps=2, lr=1e-3, device="cpu",
-                            seed=0, log_every=1)
+    res = run_overfit_check(
+        noisy, x, y, steps=2, lr=1e-3, device="cpu", seed=0, log_every=1
+    )
     assert not res["passed"]
     assert res["checks"]["regularization_disabled"] is False
     assert res["active_regularization"] == active
@@ -462,19 +564,30 @@ def test_batch_fingerprint_detects_content_and_label_changes():
 
 def test_gradient_coverage_marks_capacity_null_zeros_as_expected():
     """容量匹配对照的置零证据参数：零梯度是设计预期，不是图断流。"""
-    dead = {"lega_null_query": "gate_w", "lega_null_conc": "gate_a",
-            "lega_null_len": "gate_b"}
+    dead = {
+        "lega_null_query": "gate_w",
+        "lega_null_conc": "gate_a",
+        "lega_null_len": "gate_b",
+    }
     x, y = _batch()
     for variant, param in dead.items():
         torch.manual_seed(0)
-        model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1,
-                    n_heads=2, ffn_mult=4, variant=variant)
+        model = GPT(
+            vocab_size=64,
+            block_size=32,
+            d_model=32,
+            n_layers=1,
+            n_heads=2,
+            ffn_mult=4,
+            variant=variant,
+        )
         model(x, targets=y)["loss"].backward()
         cov = gradient_coverage(model)
-        expected = [n for n in cov["expected_zero_grad"]
-                    if n.endswith("." + param)]
+        expected = [n for n in cov["expected_zero_grad"] if n.endswith("." + param)]
         assert expected, (variant, cov)
-        assert not [n for n in cov["zero_grad"] if n.endswith("." + param)], \
-            (variant, cov)
+        assert not [n for n in cov["zero_grad"] if n.endswith("." + param)], (
+            variant,
+            cov,
+        )
         assert not cov["missing_grad"], (variant, cov)
     print("  [ok] lega_null_* 的预期零梯度与真实断流被分开记录")

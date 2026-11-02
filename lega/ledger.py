@@ -24,6 +24,7 @@ callers do not over-claim integrity.  Legacy records written before the chain
 existed are counted as ``legacy_records`` instead of being silently treated as
 verified.
 """
+
 import hashlib
 import json
 
@@ -41,18 +42,19 @@ def record_sha256(record: dict) -> str:
     """
     if not isinstance(record, dict):
         raise TypeError("ledger record must be a dict")
-    payload = {key: value for key, value in record.items()
-               if key != SELF_FIELD}
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":")).encode("utf-8")
+    payload = {key: value for key, value in record.items() if key != SELF_FIELD}
+    blob = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
 
 def chain_record(record: dict, previous: dict = None) -> dict:
     """Return a copy of ``record`` linked to ``previous`` (or genesis)."""
     out = dict(record)
-    out[PREV_FIELD] = (record_sha256(previous) if isinstance(previous, dict)
-                       else GENESIS_SHA256)
+    out[PREV_FIELD] = (
+        record_sha256(previous) if isinstance(previous, dict) else GENESIS_SHA256
+    )
     out[SELF_FIELD] = record_sha256(out)
     return out
 
@@ -65,8 +67,11 @@ def verify_chain(records) -> dict:
     Legacy records without chain fields are tolerated but counted; once a
     chained record appears, every later record must be chained too.
     """
-    valid = [r for r in records if isinstance(r, dict)] \
-        if isinstance(records, (list, tuple)) else []
+    valid = (
+        [r for r in records if isinstance(r, dict)]
+        if isinstance(records, (list, tuple))
+        else []
+    )
     issues, legacy, chained = [], 0, 0
     expected_prev = GENESIS_SHA256
     chain_started = False
@@ -89,19 +94,25 @@ def verify_chain(records) -> dict:
         chained += 1
         actual_prev = record.get(PREV_FIELD)
         if actual_prev != expected_prev:
-            issues.append({
-                "index": index, "issue": "prev_mismatch",
-                "expected": expected_prev,
-                "actual": actual_prev if isinstance(actual_prev, str) else None,
-            })
+            issues.append(
+                {
+                    "index": index,
+                    "issue": "prev_mismatch",
+                    "expected": expected_prev,
+                    "actual": actual_prev if isinstance(actual_prev, str) else None,
+                }
+            )
         computed = record_sha256(record)
         actual_self = record.get(SELF_FIELD)
         if actual_self != computed:
-            issues.append({
-                "index": index, "issue": "self_mismatch",
-                "expected": computed,
-                "actual": actual_self if isinstance(actual_self, str) else None,
-            })
+            issues.append(
+                {
+                    "index": index,
+                    "issue": "self_mismatch",
+                    "expected": computed,
+                    "actual": actual_self if isinstance(actual_self, str) else None,
+                }
+            )
         # Use the computed digest for the next link: editing only the stored
         # self field is still caught by self_mismatch, while editing content
         # breaks both self_mismatch and the next record's prev link.

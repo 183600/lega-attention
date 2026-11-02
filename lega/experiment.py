@@ -14,17 +14,21 @@
 读取：`read_records(path)` 逐行解析，畸形行跳过；消费方按 run_id 取最新的
 status="completed" 记录作为该轮实验的最终档案。
 """
+
 import itertools
 import json
-import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .ledger import chain_record, verify_chain
 from .repro import ROOT, sha256_file
-from .utils import (data_rng_state_fingerprint, expected_rng_state_fingerprint,
-                    seed_int, strict_int)
+from .utils import (
+    data_rng_state_fingerprint,
+    expected_rng_state_fingerprint,
+    seed_int,
+    strict_int,
+)
 
 LEDGER_FILENAME = "experiments.jsonl"
 
@@ -131,14 +135,19 @@ def _fingerprint_issues(fps, expected, prefix: str) -> list:
     issues = []
     for key in ("python_random", "numpy_global", "torch_cpu"):
         value = fps.get(key)
-        if (not isinstance(value, str) or len(value) != 16
-                or any(ch not in "0123456789abcdef" for ch in value)):
+        if (
+            not isinstance(value, str)
+            or len(value) != 16
+            or any(ch not in "0123456789abcdef" for ch in value)
+        ):
             issues.append(f"{prefix}_malformed")
             return issues
     cuda = fps.get("torch_cuda_all")
     if cuda is not None and (
-            not isinstance(cuda, str) or len(cuda) != 16
-            or any(ch not in "0123456789abcdef" for ch in cuda)):
+        not isinstance(cuda, str)
+        or len(cuda) != 16
+        or any(ch not in "0123456789abcdef" for ch in cuda)
+    ):
         issues.append(f"{prefix}_malformed")
     for key in ("python_random", "numpy_global"):
         if isinstance(expected, dict) and fps.get(key) != expected.get(key):
@@ -205,9 +214,13 @@ def _seed_evidence_issues(run, run_seed: int) -> list:
             if sr.get("seed_verified") is True:
                 issues.append("seed_report_rng_fingerprints_missing")
         else:
-            issues.extend(_fingerprint_issues(
-                fps, expected_rng_state_fingerprint(int(run_seed)),
-                "seed_report_rng_fingerprints"))
+            issues.extend(
+                _fingerprint_issues(
+                    fps,
+                    expected_rng_state_fingerprint(int(run_seed)),
+                    "seed_report_rng_fingerprints",
+                )
+            )
     if "rng_fingerprints_match_expected" in sr:
         match = sr.get("rng_fingerprints_match_expected")
         if match is not None and not isinstance(match, bool):
@@ -264,8 +277,7 @@ def _seed_audit_issues(record, declared_seeds) -> list:
         issues.append("seed_audit_scope_mismatch")
     for seed, entry in parsed.items():
         try:
-            recorded_seed = strict_int(entry.get("seed"),
-                                       "seed_audit.seed")
+            recorded_seed = strict_int(entry.get("seed"), "seed_audit.seed")
         except (TypeError, ValueError, OverflowError):
             issues.append("seed_audit_seed_malformed")
             continue
@@ -281,8 +293,7 @@ def _seed_audit_issues(record, declared_seeds) -> list:
             except (TypeError, ValueError, OverflowError):
                 return False
 
-        for key in ("python_random", "numpy_global", "torch_cpu",
-                    "data_order_seed"):
+        for key in ("python_random", "numpy_global", "torch_cpu", "data_order_seed"):
             if not _same_seed_field(key):
                 issues.append(f"seed_audit_{key}_mismatch")
         if entry.get("pythonhashseed_child_env") != str(seed):
@@ -297,10 +308,13 @@ def _seed_audit_issues(record, declared_seeds) -> list:
         # 训练子进程尚未产出 run_manifest 时也有可独立复算的证据。旧计划
         # 没有该字段时保持兼容；存在则必须与本地复算一致。
         if entry.get("rng_fingerprints") is not None:
-            issues.extend(_fingerprint_issues(
-                entry.get("rng_fingerprints"),
-                expected_rng_state_fingerprint(seed),
-                "seed_audit_rng_fingerprints"))
+            issues.extend(
+                _fingerprint_issues(
+                    entry.get("rng_fingerprints"),
+                    expected_rng_state_fingerprint(seed),
+                    "seed_audit_rng_fingerprints",
+                )
+            )
     return issues
 
 
@@ -351,7 +365,7 @@ def _sanity_evidence_issues(record) -> list:
         if any(v != "pass" for v in verdict.values()):
             issues.append("sanity_verdict_not_pass")
     runs = record.get("runs")
-    for run in (runs if isinstance(runs, list) else []):
+    for run in runs if isinstance(runs, list) else []:
         if not isinstance(run, dict):
             continue
         prov = run.get("provenance")
@@ -392,7 +406,8 @@ def _sanity_evidence_issues(record) -> list:
         elif verified is not None and not isinstance(verified, bool):
             issues.append(f"sanity_run_seed_unverified: {tag}")
         if ev.get("variant") is not None and str(ev.get("variant")) != str(
-                run.get("variant")):
+            run.get("variant")
+        ):
             issues.append(f"sanity_run_variant_mismatch: {tag}")
         identity = ev.get("identity")
         if identity is not None and not isinstance(identity, dict):
@@ -419,8 +434,10 @@ def _sanity_evidence_issues(record) -> list:
             issues.append(f"sanity_run_checks_missing: {tag}")
         batch = ev.get("batch_sha256")
         if batch is not None and (
-                not isinstance(batch, str) or len(batch) != 64
-                or any(ch not in "0123456789abcdef" for ch in batch)):
+            not isinstance(batch, str)
+            or len(batch) != 64
+            or any(ch not in "0123456789abcdef" for ch in batch)
+        ):
             issues.append(f"sanity_run_batch_fingerprint_malformed: {tag}")
         steps_complete = ev.get("steps_complete")
         if steps_complete is False:
@@ -430,8 +447,12 @@ def _sanity_evidence_issues(record) -> list:
     return issues
 
 
-def verify_ledger(path: str = None, check_artifacts: bool = False,
-                  root: str = None, max_reported: int = 20) -> dict:
+def verify_ledger(
+    path: str = None,
+    check_artifacts: bool = False,
+    root: str = None,
+    max_reported: int = 20,
+) -> dict:
     """核验台账完整性：生命周期链与（可选）产物哈希。
 
     每个 run_id 应有且仅有 1 条 started、1 条终态（completed/aborted），且
@@ -453,9 +474,13 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
     grouped = {}
     issues = []
     if not chain["ok"]:
-        issues.append({"issue": "ledger_chain_broken",
-                       "chain_issues": chain["issues"][:max_reported],
-                       "chain_issue_count": len(chain["issues"])})
+        issues.append(
+            {
+                "issue": "ledger_chain_broken",
+                "chain_issues": chain["issues"][:max_reported],
+                "chain_issue_count": len(chain["issues"]),
+            }
+        )
     for i, rec in enumerate(recs):
         rid = rec.get("run_id")
         if not isinstance(rid, str) or not rid:
@@ -490,11 +515,9 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
         # 的假设失效。非空字符串以外的值不能因为“不是字符串”就被静默忽略，
         # 否则把 completed 的哈希改成 123/数组即可绕过一致性核对。
         raw_shas = [r.get("config_sha256") for _, r in items]
-        if any(v is not None
-               and (not isinstance(v, str) or not v) for v in raw_shas):
+        if any(v is not None and (not isinstance(v, str) or not v) for v in raw_shas):
             run_issues.append("config_sha256_malformed")
-        shas = sorted({v for v in raw_shas
-                       if isinstance(v, str) and v})
+        shas = sorted({v for v in raw_shas if isinstance(v, str) and v})
         if len(shas) > 1:
             run_issues.append("config_sha256_rewritten")
         # started/completed 声明的 variants×seeds 必须一致：否则可以用
@@ -532,10 +555,12 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
             # 放在 runs 覆盖校验之前：旧记录即使缺 runs，也不能带着
             # 自相矛盾的 sanity 声明通过完整性检查。
             run_issues.extend(_sanity_evidence_issues(r))
-            variants, seeds, runs = (r.get("variants"), r.get("seeds"),
-                                     r.get("runs"))
-            if not (isinstance(variants, list) and isinstance(seeds, list)
-                    and isinstance(runs, list)):
+            variants, seeds, runs = (r.get("variants"), r.get("seeds"), r.get("runs"))
+            if not (
+                isinstance(variants, list)
+                and isinstance(seeds, list)
+                and isinstance(runs, list)
+            ):
                 # 旧台账可能三者都没有（只核验生命周期）；但只要声明了其中
                 # 任一字段，缺字段/类型错误就是不可核对的覆盖声明，不能静默
                 # 跳过而让 completed 记录冒充完整。
@@ -543,8 +568,7 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     run_issues.append("runs_malformed")
                 continue
             try:
-                expected = {(str(v), _ledger_seed(s))
-                            for v in variants for s in seeds}
+                expected = {(str(v), _ledger_seed(s)) for v in variants for s in seeds}
             except (TypeError, ValueError, OverflowError):
                 run_issues.append("runs_expected_unparseable")
                 continue
@@ -573,13 +597,14 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
             if malformed:
                 run_issues.append("runs_malformed")
         if run_issues:
-            issues.append({"run_id": rid, "issues": sorted(set(run_issues)),
-                           "statuses": statuses})
-        run_details.append({"run_id": rid, "statuses": statuses,
-                            "issues": run_issues})
+            issues.append(
+                {"run_id": rid, "issues": sorted(set(run_issues)), "statuses": statuses}
+            )
+        run_details.append({"run_id": rid, "statuses": statuses, "issues": run_issues})
 
     artifact_issues = []
     if check_artifacts:
+
         def _check(rel_key, entry, base):
             if not isinstance(rel_key, str) or not rel_key:
                 return f"malformed_key: {rel_key!r}"
@@ -617,7 +642,7 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     if problem:
                         artifact_issues.append(problem)
             runs = rec.get("runs")
-            for run in (runs if isinstance(runs, list) else []):
+            for run in runs if isinstance(runs, list) else []:
                 if not isinstance(run, dict):
                     continue
                 out_dir = run.get("out_dir") or ""
@@ -626,15 +651,18 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     # TypeError。产物无法定位时记为审计问题并继续其余 run。
                     artifact_issues.append(
                         f"{run.get('variant')}/seed{run.get('seed')}: "
-                        f"malformed_out_dir: {out_dir!r}")
+                        f"malformed_out_dir: {out_dir!r}"
+                    )
                     continue
-                base = out_dir if os.path.isabs(out_dir) \
-                    else os.path.join(root, out_dir)
+                base = (
+                    out_dir if os.path.isabs(out_dir) else os.path.join(root, out_dir)
+                )
                 files = run.get("files")
                 if files is not None and not isinstance(files, dict):
                     artifact_issues.append(
                         f"{run.get('variant')}/seed{run.get('seed')}: "
-                        f"malformed_files: {type(files).__name__}")
+                        f"malformed_files: {type(files).__name__}"
+                    )
                     continue
                 if not isinstance(files, dict):
                     continue
@@ -642,16 +670,15 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
                     problem = _check(key, entry, base)
                     if problem:
                         artifact_issues.append(
-                            f"{run.get('variant')}/seed{run.get('seed')}: "
-                            f"{problem}")
+                            f"{run.get('variant')}/seed{run.get('seed')}: " f"{problem}"
+                        )
     capped = len(issues) + len(artifact_issues) > max_reported
     return {
         "path": os.path.abspath(path),
         "n_records": len(recs),
         "n_runs": len(grouped),
         "ok": not issues and not artifact_issues,
-        "issues": (issues + [{"issue": a} for a in artifact_issues])[
-            :max_reported],
+        "issues": (issues + [{"issue": a} for a in artifact_issues])[:max_reported],
         "runs": run_details,
         "artifacts_checked": bool(check_artifacts),
         "chain": chain,
@@ -667,16 +694,21 @@ def collect_artifacts(paths, rel_to: str = None, known: dict = None) -> dict:
     流水线内已计算过的哈希（如 eval.json 记录的 checkpoint 指纹）时直接
     使用；大小以当前文件为准。
     """
-    entries = [(p, os.path.relpath(p, rel_to) if rel_to else p)
-               for p in paths if os.path.isfile(p)]
+    entries = [
+        (p, os.path.relpath(p, rel_to) if rel_to else p)
+        for p in paths
+        if os.path.isfile(p)
+    ]
     if not entries:
         return {}
 
     def _one(entry):
         p, key = entry
         h = (known or {}).get(p)
-        return key, {"sha256": h if h else sha256_file(p),
-                     "size": int(os.path.getsize(p))}
+        return key, {
+            "sha256": h if h else sha256_file(p),
+            "size": int(os.path.getsize(p)),
+        }
 
     if len(entries) == 1:
         return dict([_one(entries[0])])
@@ -764,28 +796,71 @@ def _compact_eval(ev: dict) -> dict:
     独立评测（held-out test）和训练内 val 评测共用同一口径，额外保留 split
     与 checkpoint 身份字段，避免只有文件哈希、文件被覆盖后最终结论无法还原。
     """
-    return {k: ev.get(k) for k in (
-        "split", "val_ppl", "val_loss", "ppl", "loss",
-        "val_ppl_clamped", "eval_ctx", "eval_iters_requested", "eval_iters",
-        "val_windows", "val_tokens_evaluated", "val_loss_se",
-        "val_loss_ci95", "val_ppl_ci95", "val_loss_min", "val_loss_max",
-        "gate_mean", "gate_std", "gate_frac_low", "gate_frac_high",
-        "n_params", "n_gate_extra", "n_gate_per_head", "n_heads",
-        "n_layers", "d_head", "steps", "steps_planned",
-        "early_stopped", "tokens_seen", "ckpt", "ckpt_sha256",
-        "checkpoint_matches_manifest",
-        "selection_set_is_eval_set", "code_commit", "code_dirty",
-        "data_fingerprint", "train_data_fingerprint",
-        "eval_data_fingerprint", "data_fingerprint_matches_training",
-        "config_sha256", "config_used_sha256",
-        "sanity_passed", "sanity_verified",
-        "data_order_sha256", "train_step_time_ms", "train_tokens_per_sec",
-        "train_peak_mem_mb", "epochs_seen", "training_precision")}
+    return {
+        k: ev.get(k)
+        for k in (
+            "split",
+            "val_ppl",
+            "val_loss",
+            "ppl",
+            "loss",
+            "val_ppl_clamped",
+            "eval_ctx",
+            "eval_iters_requested",
+            "eval_iters",
+            "val_windows",
+            "val_tokens_evaluated",
+            "val_loss_se",
+            "val_loss_ci95",
+            "val_ppl_ci95",
+            "val_loss_min",
+            "val_loss_max",
+            "gate_mean",
+            "gate_std",
+            "gate_frac_low",
+            "gate_frac_high",
+            "n_params",
+            "n_gate_extra",
+            "n_gate_per_head",
+            "n_heads",
+            "n_layers",
+            "d_head",
+            "steps",
+            "steps_planned",
+            "early_stopped",
+            "tokens_seen",
+            "ckpt",
+            "ckpt_sha256",
+            "checkpoint_matches_manifest",
+            "selection_set_is_eval_set",
+            "code_commit",
+            "code_dirty",
+            "data_fingerprint",
+            "train_data_fingerprint",
+            "eval_data_fingerprint",
+            "data_fingerprint_matches_training",
+            "config_sha256",
+            "config_used_sha256",
+            "sanity_passed",
+            "sanity_verified",
+            "data_order_sha256",
+            "train_step_time_ms",
+            "train_tokens_per_sec",
+            "train_peak_mem_mb",
+            "epochs_seen",
+            "training_precision",
+        )
+    }
 
 
-def snapshot_train_run(variant: str, seed: int, out_dir: str,
-                       known_ckpt_sha256=None, known_ckpt_path=None,
-                       heldout_path: str = None) -> dict:
+def snapshot_train_run(
+    variant: str,
+    seed: int,
+    out_dir: str,
+    known_ckpt_sha256=None,
+    known_ckpt_path=None,
+    heldout_path: str = None,
+) -> dict:
     """把一个 (变体, 种子) run 压缩成台账条目。
 
     训练内指标取自 out_dir/eval.json；heldout_path 给定时，把独立评测
@@ -802,8 +877,14 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     model_best.pt 时采信（防止复用旧评测文件导致错配），否则重算。
     out_dir/eval.json 自带的同名字段同样可用。
     """
-    names = ("config_used.json", "train_log.jsonl", "run_manifest.json",
-             "eval.json", "model_best.pt", "model.pt")
+    names = (
+        "config_used.json",
+        "train_log.jsonl",
+        "run_manifest.json",
+        "eval.json",
+        "model_best.pt",
+        "model.pt",
+    )
     ev = _load_json(os.path.join(out_dir, "eval.json"))
     cfg_used = _load_json(os.path.join(out_dir, "config_used.json"))
     manifest = _load_json(os.path.join(out_dir, "run_manifest.json"))
@@ -824,9 +905,14 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
     # 台账条目自含的种子必须是精确整数：int(1.5)==1、int(True)==1 会让
     # 台账记录的身份与真正跑的 run 不一致（且台账是历史证据，写错无法回填）。
     seed = strict_int(seed, "seed")
-    rec = {"variant": variant, "seed": seed, "out_dir": out_dir,
-           "files": collect_artifacts([os.path.join(out_dir, n) for n in names],
-                                      rel_to=out_dir, known=known)}
+    rec = {
+        "variant": variant,
+        "seed": seed,
+        "out_dir": out_dir,
+        "files": collect_artifacts(
+            [os.path.join(out_dir, n) for n in names], rel_to=out_dir, known=known
+        ),
+    }
     curve = _load_train_curve(out_dir)
     if curve is not None:
         rec["train_curve"] = curve
@@ -857,8 +943,7 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             "completion": manifest.get("completion"),
             "artifacts": manifest.get("artifacts"),
             "data_order_sha256": manifest.get("data_order_sha256"),
-            "data_protocol_preflight":
-                manifest.get("data_protocol_preflight"),
+            "data_protocol_preflight": manifest.get("data_protocol_preflight"),
         }
     if isinstance(ev, dict) and ev:
         # eval 身份与本次快照不符（旧 eval.json 被复用）时显式标记：
@@ -866,13 +951,27 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
         mismatches = _eval_identity_mismatches(ev, variant, seed)
         if mismatches:
             rec["eval_identity_mismatches"] = mismatches
-        rec["result"] = {k: ev.get(k) for k in (
-            "val_ppl", "val_loss", "gate_mean", "steps", "steps_planned",
-            "early_stopped", "tokens_seen",
-            "n_params", "code_commit", "code_dirty", "data_fingerprint",
-            "config_sha256", "config_used_sha256",
-            "sanity_passed", "sanity_verified",
-            "data_order_sha256")}
+        rec["result"] = {
+            k: ev.get(k)
+            for k in (
+                "val_ppl",
+                "val_loss",
+                "gate_mean",
+                "steps",
+                "steps_planned",
+                "early_stopped",
+                "tokens_seen",
+                "n_params",
+                "code_commit",
+                "code_dirty",
+                "data_fingerprint",
+                "config_sha256",
+                "config_used_sha256",
+                "sanity_passed",
+                "sanity_verified",
+                "data_order_sha256",
+            )
+        }
         # 训练实际精度嵌在 provenance.training_precision（eval.json 顶层），
         # 台账 result 提升为标量，便于跨 run 直接核对 bf16/fp32。
         prec = ev.get("training_precision")
@@ -898,21 +997,45 @@ def snapshot_train_run(variant: str, seed: int, out_dir: str,
             rec["final_eval_identity_mismatches"] = mismatches
     elif heldout_path:
         # 文件存在但无法解析/为空：显式记录，不能静默当作“未评测”。
-        rec["final_eval"] = {"source": "independent_eval", "available": False,
-                             "reason": ("missing" if not os.path.exists(heldout_path)
-                                        else "unparseable_or_empty")}
+        rec["final_eval"] = {
+            "source": "independent_eval",
+            "available": False,
+            "reason": (
+                "missing"
+                if not os.path.exists(heldout_path)
+                else "unparseable_or_empty"
+            ),
+        }
     return rec
 
 
-def build_experiment_record(*, run_id: str, status: str, tag: str,
-                            config_path: str, config_sha256: str,
-                            variants, seeds, smoke: bool, argv, git,
-                            data_fingerprint, runtime, out_root: str,
-                            results_dir: str, time_start: str,
-                            time_end: str = None, sanity=None, runs=None,
-                            artifacts=None, extra=None,
-                            registration=None, config=None,
-                            worktree=None, seed_audit=None) -> dict:
+def build_experiment_record(
+    *,
+    run_id: str,
+    status: str,
+    tag: str,
+    config_path: str,
+    config_sha256: str,
+    variants,
+    seeds,
+    smoke: bool,
+    argv,
+    git,
+    data_fingerprint,
+    runtime,
+    out_root: str,
+    results_dir: str,
+    time_start: str,
+    time_end: str = None,
+    sanity=None,
+    runs=None,
+    artifacts=None,
+    extra=None,
+    registration=None,
+    config=None,
+    worktree=None,
+    seed_audit=None,
+) -> dict:
     """组装标准台账记录；字段与 config_used.json/run_manifest.json 同口径。
 
     registration（可选）为预注册完整性快照：登记表指纹 + 锁链校验结论
@@ -961,23 +1084,31 @@ def build_experiment_record(*, run_id: str, status: str, tag: str,
 
 def main(argv=None) -> int:
     import argparse
-    import sys
 
     p = argparse.ArgumentParser(
-        description="实验台账核验：started/completed/aborted 生命周期与产物哈希")
-    p.add_argument("--path", default=None,
-                   help="台账路径（默认 results/experiments.jsonl）")
-    p.add_argument("--check_artifacts", action="store_true",
-                   help="重算 completed 记录中全部产物的 SHA-256（较慢）")
+        description="实验台账核验：started/completed/aborted 生命周期与产物哈希"
+    )
+    p.add_argument(
+        "--path", default=None, help="台账路径（默认 results/experiments.jsonl）"
+    )
+    p.add_argument(
+        "--check_artifacts",
+        action="store_true",
+        help="重算 completed 记录中全部产物的 SHA-256（较慢）",
+    )
     args = p.parse_args(argv)
     report = verify_ledger(args.path, check_artifacts=args.check_artifacts)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["ok"]:
-        print(f"[ledger] 通过：{report['n_runs']} 个 run，"
-              f"{report['n_records']} 条记录")
+        print(
+            f"[ledger] 通过：{report['n_runs']} 个 run，"
+            f"{report['n_records']} 条记录"
+        )
         return 0
-    print(f"[ledger] 发现 {len(report['issues'])} 个问题"
-          + ("（已截断）" if report["report_capped"] else ""))
+    print(
+        f"[ledger] 发现 {len(report['issues'])} 个问题"
+        + ("（已截断）" if report["report_capped"] else "")
+    )
     return 1
 
 

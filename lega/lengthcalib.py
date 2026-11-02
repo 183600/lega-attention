@@ -16,6 +16,7 @@
     python -m lega.lengthcalib --ckpt out/small/lega/model_best.pt \
         --data_dir data/wikitext103 --out results/small/length_calibration_lega.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,10 +31,17 @@ import torch
 
 from .data import load_bin
 from .model import load_model
-from .repro import (current_pipeline_run_id, load_provenance, sha256_file)
+from .repro import current_pipeline_run_id, load_provenance, sha256_file
 from .train import _val_eval_indices
-from .utils import (amp_autocast, config_bool, enable_tf32, get_device,
-                    save_json, set_seed, strict_int)
+from .utils import (
+    amp_autocast,
+    config_bool,
+    enable_tf32,
+    get_device,
+    save_json,
+    set_seed,
+    strict_int,
+)
 
 __all__ = [
     "DEFAULT_GROWTH_MODES",
@@ -103,47 +111,57 @@ def parse_growth_modes(value) -> List[str]:
     invalid = [m for m in modes if m not in GROWTH_MODES]
     if invalid:
         raise ValueError(
-            f"未知 growth_mode: {', '.join(invalid)}；可选: {', '.join(GROWTH_MODES)}")
+            f"未知 growth_mode: {', '.join(invalid)}；可选: {', '.join(GROWTH_MODES)}"
+        )
     if len(set(modes)) != len(modes):
         raise ValueError(f"growth_modes 不能重复，收到 {modes}")
     return modes
 
 
-def calibration_window_starts(val_len: int, max_length: int,
-                              n_windows: int) -> List[int]:
+def calibration_window_starts(
+    val_len: int, max_length: int, n_windows: int
+) -> List[int]:
     """与训练评测同口径的等间隔非重叠窗口起点（token 下标）。"""
     indices, _ = _val_eval_indices(
-        val_len, max_length, _integer(n_windows, "n_windows", 1))
+        val_len, max_length, _integer(n_windows, "n_windows", 1)
+    )
     return [int(i) * int(max_length) for i in indices]
 
 
-def _window_ids(val, start: int, length: int, growth: str,
-                window_length: int) -> np.ndarray:
+def _window_ids(
+    val, start: int, length: int, growth: str, window_length: int
+) -> np.ndarray:
     if growth == "suffix":
         end = start + int(window_length)
-        return np.asarray(val[end - length:end], dtype=np.uint16)
-    return np.asarray(val[start:start + length], dtype=np.uint16)
+        return np.asarray(val[end - length : end], dtype=np.uint16)
+    return np.asarray(val[start : start + length], dtype=np.uint16)
 
 
-def _ids_start(start: int, length: int, growth: str,
-               window_length: int) -> int:
+def _ids_start(start: int, length: int, growth: str, window_length: int) -> int:
     if growth == "suffix":
         return start + int(window_length) - int(length)
     return int(start)
 
 
-def collect_calibration_records(model, val, window_starts: List[int],
-                                lengths: List[int], query_positions: int,
-                                growth: str, device: str,
-                                amp: bool = True,
-                                batch_windows: int = 8) -> List[dict]:
+def collect_calibration_records(
+    model,
+    val,
+    window_starts: List[int],
+    lengths: List[int],
+    query_positions: int,
+    growth: str,
+    device: str,
+    amp: bool = True,
+    batch_windows: int = 8,
+) -> List[dict]:
     """逐 (window, length, query_offset, layer, head) 收集注意力统计。"""
     growth = parse_growth_modes(growth)[0]
     lengths = parse_lengths(lengths)
     query_positions = _integer(query_positions, "query_positions", 1)
     if query_positions > min(lengths):
         raise ValueError(
-            f"query_positions={query_positions} 超过最短长度 {min(lengths)}")
+            f"query_positions={query_positions} 超过最短长度 {min(lengths)}"
+        )
     batch_windows = _integer(batch_windows, "batch_windows", 1)
     max_length = max(lengths)
     starts = [_integer(s, "window_start", 0) for s in window_starts]
@@ -152,15 +170,19 @@ def collect_calibration_records(model, val, window_starts: List[int],
     for start in starts:
         if start + max_length > len(val):
             raise ValueError(
-                f"窗口起点 {start} + 最长长度 {max_length} 超出 val 长度 {len(val)}")
+                f"窗口起点 {start} + 最长长度 {max_length} 超出 val 长度 {len(val)}"
+            )
     records: List[dict] = []
     amp_ctx = amp_autocast(device, bool(amp))
     for length in lengths:
         for b0 in range(0, len(starts), batch_windows):
-            batch_starts = starts[b0:b0 + batch_windows]
-            ids_np = np.stack([
-                _window_ids(val, start, length, growth, max_length)
-                for start in batch_starts]).astype(np.int64)
+            batch_starts = starts[b0 : b0 + batch_windows]
+            ids_np = np.stack(
+                [
+                    _window_ids(val, start, length, growth, max_length)
+                    for start in batch_starts
+                ]
+            ).astype(np.int64)
             ids = torch.from_numpy(ids_np)
             if device.startswith("cuda"):
                 ids = ids.to(device)
@@ -191,7 +213,8 @@ def collect_calibration_records(model, val, window_starts: List[int],
                             rec = {
                                 "window": window,
                                 "window_start": _ids_start(
-                                    start, length, growth, max_length),
+                                    start, length, growth, max_length
+                                ),
                                 "length": int(length),
                                 "query_offset": int(offset),
                                 "layer": int(layer),
@@ -206,8 +229,7 @@ def collect_calibration_records(model, val, window_starts: List[int],
                                 if g is not None:
                                     rec["g"] = g
                             if gate_logit is not None:
-                                logit = _finite_float(
-                                    gate_logit[b, head, offset])
+                                logit = _finite_float(gate_logit[b, head, offset])
                                 if logit is not None:
                                     rec["gate_logit"] = logit
                             records.append(rec)
@@ -239,12 +261,14 @@ def _metric_groups(records: List[dict], key: str) -> List[dict]:
         pairs = [(n, v) for n, v in values.items() if v is not None]
         if len(pairs) < 2:
             continue
-        out.append({
-            "window": window,
-            "query_offset": offset,
-            "lengths": np.asarray([p[0] for p in pairs], dtype=np.float64),
-            "values": np.asarray([p[1] for p in pairs], dtype=np.float64),
-        })
+        out.append(
+            {
+                "window": window,
+                "query_offset": offset,
+                "lengths": np.asarray([p[0] for p in pairs], dtype=np.float64),
+                "values": np.asarray([p[1] for p in pairs], dtype=np.float64),
+            }
+        )
     return out
 
 
@@ -317,8 +341,14 @@ def _bootstrap_slope(groups: List[dict], n_bootstrap: int, seed: int):
     lo, hi = np.quantile(arr, [0.025, 0.975])
     neg = float(np.mean(arr <= 0.0))
     pos = float(np.mean(arr >= 0.0))
-    p = min(1.0, 2.0 * min((neg * arr.size + 1.0) / (arr.size + 1.0),
-                           (pos * arr.size + 1.0) / (arr.size + 1.0)))
+    p = min(
+        1.0,
+        2.0
+        * min(
+            (neg * arr.size + 1.0) / (arr.size + 1.0),
+            (pos * arr.size + 1.0) / (arr.size + 1.0),
+        ),
+    )
     return {
         "ci95": [float(lo), float(hi)],
         "p_boot": float(p),
@@ -343,8 +373,11 @@ def _slope_class(slope, ci, tolerance: float):
 
 
 def _summarize_metric(per_head: List[dict], key: str, tolerance: float):
-    slopes = [p[key + "_slope"] for p in per_head
-              if _finite_float(p.get(key + "_slope")) is not None]
+    slopes = [
+        p[key + "_slope"]
+        for p in per_head
+        if _finite_float(p.get(key + "_slope")) is not None
+    ]
     if not slopes:
         return {
             "available": False,
@@ -379,8 +412,9 @@ def _per_length_summary(records: List[dict], lengths: List[int]):
         rows = [r for r in records if r.get("length") == length]
         row = {"n": len(rows)}
         for key in ("c", "max_p", "log_max_p", "log_n", "gate_logit", "g"):
-            vals = [v for v in (_finite_float(r.get(key)) for r in rows)
-                    if v is not None]
+            vals = [
+                v for v in (_finite_float(r.get(key)) for r in rows) if v is not None
+            ]
             if vals:
                 arr = np.asarray(vals, dtype=np.float64)
                 row[key] = {
@@ -392,11 +426,15 @@ def _per_length_summary(records: List[dict], lengths: List[int]):
     return out
 
 
-def analyze_calibration_records(records: List[dict], lengths: Iterable[int],
-                                growth: str = "suffix", *,
-                                tolerance: float = 0.05,
-                                n_bootstrap: int = 400,
-                                seed: int = 0) -> dict:
+def analyze_calibration_records(
+    records: List[dict],
+    lengths: Iterable[int],
+    growth: str = "suffix",
+    *,
+    tolerance: float = 0.05,
+    n_bootstrap: int = 400,
+    seed: int = 0,
+) -> dict:
     lengths = parse_lengths(lengths)
     growth = parse_growth_modes(growth)[0]
     tolerance = _finite_float(tolerance)
@@ -405,33 +443,39 @@ def analyze_calibration_records(records: List[dict], lengths: Iterable[int],
     n_bootstrap = _integer(n_bootstrap, "n_bootstrap", 0)
     seed = _integer(seed, "seed", 0)
     records = [r for r in records if isinstance(r, dict)]
-    heads = sorted({(r.get("layer"), r.get("head")) for r in records
-                    if isinstance(r.get("layer"), int)
-                    and isinstance(r.get("head"), int)})
+    heads = sorted(
+        {
+            (r.get("layer"), r.get("head"))
+            for r in records
+            if isinstance(r.get("layer"), int) and isinstance(r.get("head"), int)
+        }
+    )
     per_head = []
     for layer, head in heads:
-        rows = [r for r in records
-                if r.get("layer") == layer and r.get("head") == head]
+        rows = [r for r in records if r.get("layer") == layer and r.get("head") == head]
         row = {"layer": layer, "head": head}
         for key in METRIC_KEYS:
             groups = _metric_groups(rows, key)
             slope = _slope_from_groups(groups)
             boot = _bootstrap_slope(
-                groups, n_bootstrap,
-                seed + 1000003 * (int(layer) * 1000 + int(head))
-                + sum(ord(ch) for ch in key))
+                groups,
+                n_bootstrap,
+                seed
+                + 1000003 * (int(layer) * 1000 + int(head))
+                + sum(ord(ch) for ch in key),
+            )
             row[key + "_slope"] = slope
             row[key + "_ci95"] = None if boot is None else boot["ci95"]
             row[key + "_p_boot"] = None if boot is None else boot["p_boot"]
             row[key + "_class"] = _slope_class(
-                slope, None if boot is None else boot["ci95"], tolerance)
+                slope, None if boot is None else boot["ci95"], tolerance
+            )
             row[key + "_n_groups"] = len(groups)
             row[key + "_n_obs"] = sum(int(g["lengths"].size) for g in groups)
         windows = {g["window"] for g in _metric_groups(rows, "c")}
         row["n_windows"] = len(windows)
         per_head.append(row)
-    summary = {key: _summarize_metric(per_head, key, tolerance)
-               for key in METRIC_KEYS}
+    summary = {key: _summarize_metric(per_head, key, tolerance) for key in METRIC_KEYS}
     per_length = _per_length_summary(records, lengths)
     log_n_means = []
     for length in lengths:
@@ -444,7 +488,9 @@ def analyze_calibration_records(records: List[dict], lengths: Iterable[int],
         "available": len(log_n_means) == len(lengths),
         "sanity_slope_from_all": (
             _slope_from_points(lengths, log_n_means)
-            if len(log_n_means) == len(lengths) else None),
+            if len(log_n_means) == len(lengths)
+            else None
+        ),
         "n_records": len(records),
     }
     return {
@@ -479,12 +525,21 @@ def _load_config(path: str = None, ckpt_dir: str = None) -> dict:
     return {}
 
 
-def run_length_calibration(ckpt: str, data_dir: str, *, lengths=None,
-                           n_windows: int = 8, query_positions: int = 4,
-                           growth_modes=None, n_bootstrap: int = 400,
-                           tolerance: float = 0.05, seed=None,
-                           device: str = "auto", amp=None,
-                           config: str = None) -> dict:
+def run_length_calibration(
+    ckpt: str,
+    data_dir: str,
+    *,
+    lengths=None,
+    n_windows: int = 8,
+    query_positions: int = 4,
+    growth_modes=None,
+    n_bootstrap: int = 400,
+    tolerance: float = 0.05,
+    seed=None,
+    device: str = "auto",
+    amp=None,
+    config: str = None,
+) -> dict:
     ckpt_dir = os.path.dirname(os.path.abspath(ckpt))
     cfg = _load_config(config, ckpt_dir)
     lc_cfg = cfg.get("length_calibration")
@@ -512,10 +567,12 @@ def run_length_calibration(ckpt: str, data_dir: str, *, lengths=None,
     max_length = max(lengths)
     if max_length > model.block_size:
         raise ValueError(
-            f"最长长度 {max_length} 超过模型 block_size={model.block_size}")
+            f"最长长度 {max_length} 超过模型 block_size={model.block_size}"
+        )
     if query_positions > min(lengths):
         raise ValueError(
-            f"query_positions={query_positions} 超过最短长度 {min(lengths)}")
+            f"query_positions={query_positions} 超过最短长度 {min(lengths)}"
+        )
     if seed is None:
         raw_seed = ck.get("seed")
         seed = 0 if raw_seed is None else _integer(raw_seed, "checkpoint seed", 0)
@@ -528,11 +585,23 @@ def run_length_calibration(ckpt: str, data_dir: str, *, lengths=None,
     results = {}
     for growth in growth_modes:
         records = collect_calibration_records(
-            model, val, starts, lengths, query_positions, growth,
-            device=device, amp=bool(amp))
+            model,
+            val,
+            starts,
+            lengths,
+            query_positions,
+            growth,
+            device=device,
+            amp=bool(amp),
+        )
         results[growth] = analyze_calibration_records(
-            records, lengths, growth, tolerance=tolerance,
-            n_bootstrap=n_bootstrap, seed=seed)
+            records,
+            lengths,
+            growth,
+            tolerance=tolerance,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+        )
         results[growth]["n_records"] = len(records)
     return {
         "schema": 1,
@@ -558,13 +627,16 @@ def run_length_calibration(ckpt: str, data_dir: str, *, lengths=None,
             "fixed_effects": "window + query_offset",
             "suffix_growth": (
                 "固定窗口末尾与 query token，只增加前缀长度；用于控制位置"
-                "与 query 内容混杂"),
+                "与 query 内容混杂"
+            ),
             "prefix_growth": (
                 "固定窗口起点，只增加后缀长度；query token 随长度改变，"
-                "作为敏感性分析"),
+                "作为敏感性分析"
+            ),
             "note": (
                 "观测性审计；不消融门控参数，不替代 RULER 分档或因果干预。"
-                "bootstrap 以窗口为聚类单元，区间为描述性不确定性。"),
+                "bootstrap 以窗口为聚类单元，区间为描述性不确定性。"
+            ),
         },
         "provenance": load_provenance(ckpt_dir, data_dir, device=device),
         "argv": [],
@@ -582,18 +654,32 @@ def main(argv=None) -> int:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", default=None)
-    p.add_argument("--config", default=None,
-                   help="可选配置；默认读取 checkpoint 目录的 config_used.json")
-    p.add_argument("--lengths", default=None,
-                   help="逗号分隔的长度；默认读 length_calibration.lengths，"
-                        "再回退到 length_null.lengths")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="可选配置；默认读取 checkpoint 目录的 config_used.json",
+    )
+    p.add_argument(
+        "--lengths",
+        default=None,
+        help="逗号分隔的长度；默认读 length_calibration.lengths，"
+        "再回退到 length_null.lengths",
+    )
     p.add_argument("--n_windows", type=int, default=None)
     p.add_argument("--query_positions", type=int, default=None)
     p.add_argument("--growth_modes", default=None)
-    p.add_argument("--bootstrap", type=int, default=None,
-                   help="窗口聚类 bootstrap 重采样次数（0 关闭）")
-    p.add_argument("--tolerance", type=float, default=None,
-                   help="判定 slope 为 flat 的绝对阈值（默认 0.05）")
+    p.add_argument(
+        "--bootstrap",
+        type=int,
+        default=None,
+        help="窗口聚类 bootstrap 重采样次数（0 关闭）",
+    )
+    p.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="判定 slope 为 flat 的绝对阈值（默认 0.05）",
+    )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default="auto")
     p.add_argument("--amp", dest="amp", action="store_true", default=None)
@@ -610,23 +696,45 @@ def main(argv=None) -> int:
         lengths = list(DEFAULT_LENGTHS)
     try:
         lengths = parse_lengths(lengths)
-        n_windows = (args.n_windows if args.n_windows is not None
-                     else _config_default(cfg, "n_windows", 8))
-        query_positions = (args.query_positions
-                           if args.query_positions is not None
-                           else _config_default(cfg, "query_positions", 4))
-        n_bootstrap = (args.bootstrap if args.bootstrap is not None
-                       else _config_default(cfg, "bootstrap", 400))
-        tolerance = (args.tolerance if args.tolerance is not None
-                     else _config_default(cfg, "tolerance", 0.05))
-        growth_modes = (args.growth_modes if args.growth_modes is not None
-                        else _config_default(cfg, "growth_modes",
-                                             DEFAULT_GROWTH_MODES))
+        n_windows = (
+            args.n_windows
+            if args.n_windows is not None
+            else _config_default(cfg, "n_windows", 8)
+        )
+        query_positions = (
+            args.query_positions
+            if args.query_positions is not None
+            else _config_default(cfg, "query_positions", 4)
+        )
+        n_bootstrap = (
+            args.bootstrap
+            if args.bootstrap is not None
+            else _config_default(cfg, "bootstrap", 400)
+        )
+        tolerance = (
+            args.tolerance
+            if args.tolerance is not None
+            else _config_default(cfg, "tolerance", 0.05)
+        )
+        growth_modes = (
+            args.growth_modes
+            if args.growth_modes is not None
+            else _config_default(cfg, "growth_modes", DEFAULT_GROWTH_MODES)
+        )
         payload = run_length_calibration(
-            args.ckpt, args.data_dir, lengths=lengths, n_windows=n_windows,
-            query_positions=query_positions, growth_modes=growth_modes,
-            n_bootstrap=n_bootstrap, tolerance=tolerance, seed=args.seed,
-            device=args.device, amp=args.amp, config=args.config)
+            args.ckpt,
+            args.data_dir,
+            lengths=lengths,
+            n_windows=n_windows,
+            query_positions=query_positions,
+            growth_modes=growth_modes,
+            n_bootstrap=n_bootstrap,
+            tolerance=tolerance,
+            seed=args.seed,
+            device=args.device,
+            amp=args.amp,
+            config=args.config,
+        )
         payload["argv"] = list(sys.argv if argv is None else argv)
     except (ValueError, FileNotFoundError, PermissionError) as e:
         p.error(str(e))
@@ -635,13 +743,17 @@ def main(argv=None) -> int:
         print(f"[lengthcalib] -> {args.out}")
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-    print(f"[lengthcalib] {payload['variant']} lengths={payload['lengths']} "
-          f"windows={len(payload['window_starts'])}")
+    print(
+        f"[lengthcalib] {payload['variant']} lengths={payload['lengths']} "
+        f"windows={len(payload['window_starts'])}"
+    )
     for growth, result in payload["results"].items():
         c_sum = result["summary"]["c"]
-        print(f"  - {growth}: c_slope_median="
-              f"{c_sum.get('median')} flat_heads="
-              f"{c_sum.get('n_flat')}/{c_sum.get('n_heads')}")
+        print(
+            f"  - {growth}: c_slope_median="
+            f"{c_sum.get('median')} flat_heads="
+            f"{c_sum.get('n_flat')}/{c_sum.get('n_heads')}"
+        )
     return 0
 
 

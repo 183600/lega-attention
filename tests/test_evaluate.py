@@ -1,4 +1,5 @@
 """语言建模坏案例测试：最差验证窗口转储（预测错误的样本要看得见）。"""
+
 import json
 import math
 import os
@@ -10,12 +11,20 @@ import numpy as np
 import torch
 
 from lega.data import CharTokenizer
-from lega.evaluate import (_positive_int_or_none, checkpoint_selection_info,
-                           collect_worst_windows, json_safe_eval_metrics,
-                           load_train_coverage, load_train_peak_mem_mb,
-                           load_train_throughput, repeated_test_checkpoint,
-                           summarize_window_offsets, window_phase_offsets,
-                           worst_window_screening, worst_windows_allowed)
+from lega.evaluate import (
+    _positive_int_or_none,
+    checkpoint_selection_info,
+    collect_worst_windows,
+    json_safe_eval_metrics,
+    load_train_coverage,
+    load_train_peak_mem_mb,
+    load_train_throughput,
+    repeated_test_checkpoint,
+    summarize_window_offsets,
+    window_phase_offsets,
+    worst_window_screening,
+    worst_windows_allowed,
+)
 from lega.model import GPT
 
 
@@ -23,17 +32,26 @@ def test_collect_worst_windows():
     """按末位下一 token 损失排序取最差窗口，字段齐全且降序。"""
     torch.manual_seed(0)
     tok = CharTokenizer(sorted("abcdefghij "))
-    model = GPT(vocab_size=len(tok.itos), block_size=64, d_model=32, n_layers=1,
-                n_heads=2, variant="lega")
+    model = GPT(
+        vocab_size=len(tok.itos),
+        block_size=64,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        variant="lega",
+    )
     model.eval()
     # 合成验证流：64 token 窗口 × 32 个
     val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
     val = val.astype(np.uint16)
-    rows = collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
-                                 n_worst=3, max_windows=32)
+    rows = collect_worst_windows(
+        model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=32
+    )
     assert len(rows) == 3
-    assert all(set(r) >= {"window", "loss", "context_tail", "gold_next",
-                          "pred_top5"} for r in rows)
+    assert all(
+        set(r) >= {"window", "loss", "context_tail", "gold_next", "pred_top5"}
+        for r in rows
+    )
     assert rows[0]["loss"] >= rows[1]["loss"] >= rows[2]["loss"]
     assert all(len(r["pred_top5"]) == 5 for r in rows)
     # top-5 为全词表 softmax 的截断：逐项概率降序、均在 (0,1]，总和不超过 1
@@ -44,43 +62,60 @@ def test_collect_worst_windows():
         assert probs == sorted(probs, reverse=True)
         assert r["context_tail"] and isinstance(r["gold_next"], str)
     # n_worst=0 表示关闭：返回空列表，而不是“至少转储一条”
-    assert collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
-                                 n_worst=0, max_windows=32) == []
+    assert (
+        collect_worst_windows(
+            model, val, ctx=64, device="cpu", tok=tok, n_worst=0, max_windows=32
+        )
+        == []
+    )
     for bad in (True, 3.5, "bad"):
         try:
-            collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
-                                  n_worst=bad, max_windows=32)
+            collect_worst_windows(
+                model, val, ctx=64, device="cpu", tok=tok, n_worst=bad, max_windows=32
+            )
         except ValueError:
             pass
         else:
             raise AssertionError(f"非法 n_worst 未被拒绝: {bad!r}")
     for bad in (True, 32.5, "bad", 0, -1):
         try:
-            collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
-                                  n_worst=3, max_windows=bad)
+            collect_worst_windows(
+                model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=bad
+            )
         except ValueError:
             pass
         else:
             raise AssertionError(f"非法 max_windows 未被拒绝: {bad!r}")
-    print(f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
-          f"gold={rows[0]['gold_next']!r}）")
+    print(
+        f"  [ok] 最差窗口转储（top loss={rows[0]['loss']:.3f}，"
+        f"gold={rows[0]['gold_next']!r}）"
+    )
 
 
 def test_collect_worst_windows_forces_eval_and_restores_mode():
     """辅助函数必须自己关掉 dropout（否则“最差窗口”不可复现），并恢复调用方模式。"""
     torch.manual_seed(0)
     tok = CharTokenizer(sorted("abcdefghij "))
-    model = GPT(vocab_size=len(tok.itos), block_size=64, d_model=32, n_layers=1,
-                n_heads=2, variant="lega", dropout=0.5)
+    model = GPT(
+        vocab_size=len(tok.itos),
+        block_size=64,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        variant="lega",
+        dropout=0.5,
+    )
     val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
     val = val.astype(np.uint16)
     model.train()
-    rows_train = collect_worst_windows(model, val, ctx=64, device="cpu",
-                                       tok=tok, n_worst=3, max_windows=32)
+    rows_train = collect_worst_windows(
+        model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=32
+    )
     assert model.training, "调用方模式必须恢复"
     model.eval()
-    rows_eval = collect_worst_windows(model, val, ctx=64, device="cpu",
-                                      tok=tok, n_worst=3, max_windows=32)
+    rows_eval = collect_worst_windows(
+        model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=32
+    )
     assert [r["window"] for r in rows_train] == [r["window"] for r in rows_eval]
     for a, b in zip(rows_train, rows_eval):
         assert math.isclose(a["loss"], b["loss"], rel_tol=1e-6, abs_tol=1e-6)
@@ -129,8 +164,14 @@ def test_window_phase_offsets_cover_ctx_and_reject_invalid():
     assert window_phase_offsets(10, 2) == [0, 9]
     assert window_phase_offsets(10, 5) == [0, 2, 4, 6, 9]
     assert window_phase_offsets(10, 10) == list(range(10))
-    for bad_ctx, bad_n in ((1, 2), (10, 1), (10, 11), (10, True),
-                           (10, 2.5), (10, "2_0")):
+    for bad_ctx, bad_n in (
+        (1, 2),
+        (10, 1),
+        (10, 11),
+        (10, True),
+        (10, 2.5),
+        (10, "2_0"),
+    ):
         try:
             window_phase_offsets(bad_ctx, bad_n)
         except ValueError:
@@ -152,10 +193,12 @@ def test_summarize_window_offsets_reports_range_without_pvalues():
     assert out["offsets"] == [0, 3, 9]
     assert out["eval_iters"] == 50
     assert math.isclose(out["val_loss_range"], 0.2, rel_tol=0, abs_tol=1e-12)
-    assert math.isclose(out["max_abs_delta_val_loss_vs_offset0"], 0.2,
-                        rel_tol=0, abs_tol=1e-12)
-    assert math.isclose(out["val_ppl_ratio"], math.exp(0.2),
-                        rel_tol=1e-12, abs_tol=1e-12)
+    assert math.isclose(
+        out["max_abs_delta_val_loss_vs_offset0"], 0.2, rel_tol=0, abs_tol=1e-12
+    )
+    assert math.isclose(
+        out["val_ppl_ratio"], math.exp(0.2), rel_tol=1e-12, abs_tol=1e-12
+    )
     assert out["val_ppl_ratio_clamped"] is False
     assert not any(k in out for k in ("p_value", "p_adj", "ci95"))
     assert summarize_window_offsets([], 50)["val_loss_range"] is None
@@ -164,11 +207,21 @@ def test_summarize_window_offsets_reports_range_without_pvalues():
 
 def test_evaluate_cli_rejects_nonpositive_eval_iters():
     from lega.evaluate import main as evaluate_main
+
     old = sys.argv
     try:
         for bad in ("0", "-3", "1_0", "+1_0"):
-            sys.argv = ["lega.evaluate", "--ckpt", "x", "--data_dir", "x",
-                        "--out", "x", "--eval_iters", bad]
+            sys.argv = [
+                "lega.evaluate",
+                "--ckpt",
+                "x",
+                "--data_dir",
+                "x",
+                "--out",
+                "x",
+                "--eval_iters",
+                bad,
+            ]
             try:
                 evaluate_main()
             except SystemExit as exc:
@@ -186,12 +239,10 @@ def test_load_train_throughput_propagates_and_degrades_safely():
     try:
         assert load_train_throughput(tmp) == (None, None)
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"train_step_time_ms": 12.5,
-                       "train_tokens_per_sec": 81920.0}, f)
+            json.dump({"train_step_time_ms": 12.5, "train_tokens_per_sec": 81920.0}, f)
         assert load_train_throughput(tmp) == (12.5, 81920.0)
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"train_step_time_ms": "1_0",
-                       "train_tokens_per_sec": "1_0"}, f)
+            json.dump({"train_step_time_ms": "1_0", "train_tokens_per_sec": "1_0"}, f)
         assert load_train_throughput(tmp) == (None, None)
         # 旧格式（无该字段）→ None 而非 KeyError
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
@@ -228,7 +279,7 @@ def test_load_train_peak_mem_propagates_and_degrades_safely():
             json.dump({"train_peak_mem_mb": float("inf")}, f)
         assert load_train_peak_mem_mb(tmp) is None
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"train_peak_mem_mb": 10 ** 400}, f)
+            json.dump({"train_peak_mem_mb": 10**400}, f)
         assert load_train_peak_mem_mb(tmp) is None
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             f.write("{broken")
@@ -247,11 +298,15 @@ def test_load_train_coverage_propagates_and_degrades_safely():
     try:
         assert load_train_coverage(tmp) == {}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokens_seen": 20480, "train_tokens": 738388,
-                       "epochs_seen": 0.0277}, f)
+            json.dump(
+                {"tokens_seen": 20480, "train_tokens": 738388, "epochs_seen": 0.0277}, f
+            )
         cov = load_train_coverage(tmp)
-        assert cov == {"train_tokens_seen": 20480, "train_tokens": 738388,
-                       "epochs_seen": 0.0277}
+        assert cov == {
+            "train_tokens_seen": 20480,
+            "train_tokens": 738388,
+            "epochs_seen": 0.0277,
+        }
         # 旧格式/非法值/损坏/结构异常 → 安全降级，不阻塞评测
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             json.dump({"epochs_seen": float("inf"), "train_tokens": "x"}, f)
@@ -260,16 +315,18 @@ def test_load_train_coverage_propagates_and_degrades_safely():
             json.dump({"epochs_seen": "1_0"}, f)
         assert load_train_coverage(tmp) == {}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"epochs_seen": 10 ** 400}, f)
+            json.dump({"epochs_seen": 10**400}, f)
         assert load_train_coverage(tmp) == {}
         # bool/小数/负数不是可信的训练覆盖：不能 int(True)=1 或截断 10.5
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokens_seen": True, "train_tokens": 10.5,
-                       "epochs_seen": False}, f)
+            json.dump(
+                {"tokens_seen": True, "train_tokens": 10.5, "epochs_seen": False}, f
+            )
         assert load_train_coverage(tmp) == {}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokens_seen": -1, "train_tokens": "20480",
-                       "epochs_seen": -0.1}, f)
+            json.dump(
+                {"tokens_seen": -1, "train_tokens": "20480", "epochs_seen": -0.1}, f
+            )
         assert load_train_coverage(tmp) == {"train_tokens": 20480}
         with open(os.path.join(tmp, "eval.json"), "w", encoding="utf-8") as f:
             f.write("{broken")
@@ -286,16 +343,23 @@ def test_collect_worst_windows_gold_in_context_uses_full_window():
     """gold_in_context 必须按完整窗口判定，而不是只看 160 字符的上下文尾部。"""
     torch.manual_seed(0)
     tok = CharTokenizer(sorted("abcdefghij "))
-    model = GPT(vocab_size=len(tok.itos), block_size=64, d_model=32, n_layers=1,
-                n_heads=2, variant="lega")
+    model = GPT(
+        vocab_size=len(tok.itos),
+        block_size=64,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        variant="lega",
+    )
     model.eval()
     val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
     val = val.astype(np.uint16)
-    rows = collect_worst_windows(model, val, ctx=64, device="cpu", tok=tok,
-                                 n_worst=3, max_windows=32)
+    rows = collect_worst_windows(
+        model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=32
+    )
     for r in rows:
         w = int(r["window"])
-        toks = val[w * 64:(w + 1) * 64].tolist()
+        toks = val[w * 64 : (w + 1) * 64].tolist()
         full = tok.decode(toks)
         gold_id = int(val[w * 64 + 64])
         gold = tok.decode([gold_id])
@@ -316,22 +380,27 @@ def test_collect_worst_windows_gold_in_context_uses_full_window():
     # 构造一个 gold 只出现在窗口早段、尾部 160 字符看不到的样本：
     # 摘录必须能让人复核“上下文里到底有没有证据”。
     trend = np.tile(np.arange(len(tok.itos), dtype=np.uint16), 4)[:64]
-    val2 = np.concatenate([trend, np.array([0], dtype=np.uint16),
-                           trend, np.array([0], dtype=np.uint16)])
-    rows2 = collect_worst_windows(model, val2, ctx=64, device="cpu", tok=tok,
-                                  n_worst=2, max_windows=2)
+    val2 = np.concatenate(
+        [trend, np.array([0], dtype=np.uint16), trend, np.array([0], dtype=np.uint16)]
+    )
+    rows2 = collect_worst_windows(
+        model, val2, ctx=64, device="cpu", tok=tok, n_worst=2, max_windows=2
+    )
     for r in rows2:
         if r["gold_in_context"]:
             assert r["gold_context_excerpt"], r
             assert r["gold_distance_tokens"] >= 0, r
-    print("  [ok] 最差窗口 gold_in_context 按完整窗口判定；"
-          "位置/距离/摘录可用于人工复核")
+    print(
+        "  [ok] 最差窗口 gold_in_context 按完整窗口判定；"
+        "位置/距离/摘录可用于人工复核"
+    )
 
 
 def test_checkpoint_selection_info_records_step_and_rejects_garbage():
     """选型步/计划步数必须可审计；旧/坏 checkpoint 字段按缺失处理。"""
     info = checkpoint_selection_info(
-        {"step": 250, "steps_planned": 1000, "val_loss": 3.25})
+        {"step": 250, "steps_planned": 1000, "val_loss": 3.25}
+    )
     assert info["ckpt_step"] == 250
     assert info["steps_planned"] == 1000
     assert math.isclose(info["selection_step_fraction"], 0.25)
@@ -344,15 +413,17 @@ def test_checkpoint_selection_info_records_step_and_rejects_garbage():
     # bool/小数/非有限值不能冒充整数步数；丢失字段返回 None 而非编造
     for bad in (True, 2.5, float("inf"), "x", "1_0"):
         info = checkpoint_selection_info(
-            {"step": bad, "steps_planned": bad, "val_loss": bad})
+            {"step": bad, "steps_planned": bad, "val_loss": bad}
+        )
         assert info["ckpt_step"] is None
         assert info["steps_planned"] is None
         assert info["selection_step_fraction"] is None
         if bad is True or bad == float("inf") or isinstance(bad, str):
             assert info["ckpt_val_loss"] is None
     # val_loss 本身允许小数；2.5 不是“非法步数”
-    assert math.isclose(checkpoint_selection_info(
-        {"step": 2.5, "val_loss": 2.5})["ckpt_val_loss"], 2.5)
+    assert math.isclose(
+        checkpoint_selection_info({"step": 2.5, "val_loss": 2.5})["ckpt_val_loss"], 2.5
+    )
     # 选型步超过计划预算要显式标记（checkpoint/配置不一致的可审计信号）
     info = checkpoint_selection_info({"step": 120, "steps_planned": 100})
     assert info["selection_step_exceeds_planned"] is True
@@ -367,10 +438,13 @@ def test_json_safe_eval_metrics_handles_nonfinite():
     而 bool(nan > 20) 为 False：不做显式处理会把失效 checkpoint 报告为
     "正常但很大"的有限 PPL，且 json.dump 产出非法 JSON 字面量。
     """
-    out = json_safe_eval_metrics({"val_loss": float("nan"),
-                                  "gate_mean": float("nan")})
-    assert out == {"val_ppl": None, "val_loss": None,
-                   "val_ppl_clamped": None, "gate_mean": None}
+    out = json_safe_eval_metrics({"val_loss": float("nan"), "gate_mean": float("nan")})
+    assert out == {
+        "val_ppl": None,
+        "val_loss": None,
+        "val_ppl_clamped": None,
+        "gate_mean": None,
+    }
     # allow_nan=False 不抛异常：产物中不存在 NaN/Infinity 字面量
     json.dumps(out, allow_nan=False)
     for bad in (float("inf"), float("-inf"), True, False):
@@ -392,12 +466,19 @@ def test_collect_worst_windows_small_vocab_clamps_topk():
     """词表 <5 时 top-5 转储按实际词表截断，不能越界崩溃。"""
     torch.manual_seed(0)
     tok = CharTokenizer(list("abc"))
-    model = GPT(vocab_size=3, block_size=16, d_model=8, n_layers=1,
-                n_heads=1, variant="standard")
+    model = GPT(
+        vocab_size=3,
+        block_size=16,
+        d_model=8,
+        n_layers=1,
+        n_heads=1,
+        variant="standard",
+    )
     model.eval()
     val = np.zeros(16 * 33, dtype=np.uint16)
-    rows = collect_worst_windows(model, val, ctx=16, device="cpu", tok=tok,
-                                 n_worst=2, max_windows=4)
+    rows = collect_worst_windows(
+        model, val, ctx=16, device="cpu", tok=tok, n_worst=2, max_windows=4
+    )
     assert len(rows) == 2
     assert all(1 <= len(r["pred_top5"]) <= 3 for r in rows)
     print("  [ok] 小词表最差窗口：top-k 自动截断")
@@ -405,25 +486,30 @@ def test_collect_worst_windows_small_vocab_clamps_topk():
 
 def test_json_safe_eval_metrics_tolerates_malformed_fields():
     """缺失/非数值 val_loss 与 gate_mean 归为 null，不能抛 TypeError。"""
-    empty = {"val_ppl": None, "val_loss": None,
-             "val_ppl_clamped": None, "gate_mean": None}
+    empty = {
+        "val_ppl": None,
+        "val_loss": None,
+        "val_ppl_clamped": None,
+        "gate_mean": None,
+    }
     assert json_safe_eval_metrics({}) == empty
     assert json_safe_eval_metrics(None) == empty
-    assert json_safe_eval_metrics({"val_loss": "bad",
-                                   "gate_mean": "bad"}) == empty
+    assert json_safe_eval_metrics({"val_loss": "bad", "gate_mean": "bad"}) == empty
     out = json_safe_eval_metrics({"val_loss": 2.0, "gate_mean": [1]})
     assert out["val_ppl"] == math.exp(2.0) and out["gate_mean"] is None
     out = json_safe_eval_metrics({"val_loss": 2.0, "gate_mean": "0.5"})
     assert out["gate_mean"] == 0.5
-    assert json_safe_eval_metrics({"val_loss": "1_0",
-                                   "gate_mean": "1_0"}) == empty
+    assert json_safe_eval_metrics({"val_loss": "1_0", "gate_mean": "1_0"}) == empty
     print("  [ok] 评测指标：畸形 val_loss/gate_mean 安全降级")
 
 
 def test_repeated_test_checkpoint_gate():
     """同一 checkpoint 重复在 test 上评测必须可被识别（默认拒绝的依据）。"""
-    summary = {"evaluations": 2, "distinct_checkpoints": 1,
-               "checkpoints_evaluated_multiple_times": ["abc123def4567890"]}
+    summary = {
+        "evaluations": 2,
+        "distinct_checkpoints": 1,
+        "checkpoints_evaluated_multiple_times": ["abc123def4567890"],
+    }
     assert repeated_test_checkpoint(summary, "abc123def4567890" + "0" * 48)
     # 前 16 位不同 → 不判重复
     assert not repeated_test_checkpoint(summary, "ffffffffffffffff" + "0" * 48)
@@ -435,14 +521,19 @@ def test_repeated_test_checkpoint_gate():
     for bad in ([1, 2], "bad", 5, True):
         assert not repeated_test_checkpoint(bad, "a" * 64), bad
     assert not repeated_test_checkpoint(
-        {"checkpoints_evaluated_multiple_times": []}, "a" * 64)
+        {"checkpoints_evaluated_multiple_times": []}, "a" * 64
+    )
 
     # 精确到 test 数据版本：旧版本重复不阻断新版本评测。
     versioned = {
         "checkpoints_evaluated_multiple_times": ["abc123def4567890"],
         "repeated_evaluations": [
-            {"ckpt_prefix": "abc123def4567890", "test_data_fingerprint": "v1",
-             "evaluations": 2}],
+            {
+                "ckpt_prefix": "abc123def4567890",
+                "test_data_fingerprint": "v1",
+                "evaluations": 2,
+            }
+        ],
     }
     ckpt = "abc123def4567890" + "0" * 48
     assert repeated_test_checkpoint(versioned, ckpt, "v1")
@@ -454,16 +545,33 @@ def test_repeated_test_checkpoint_gate():
 def test_evaluate_runs_data_protocol_preflight_before_loading_model():
     """独立评测也不能在 data_report 标记泄露的数据上产出正式指标。"""
     from lega.evaluate import main as evaluate_main
+
     with tempfile.TemporaryDirectory() as d:
-        with open(os.path.join(d, "data_report.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"alerts": [{"level": "warning",
-                                   "code": "split_shuffled",
-                                   "message": "打乱"}]}, f)
+        with open(os.path.join(d, "data_report.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "alerts": [
+                        {
+                            "level": "warning",
+                            "code": "split_shuffled",
+                            "message": "打乱",
+                        }
+                    ]
+                },
+                f,
+            )
         old_argv = sys.argv
-        sys.argv = ["evaluate", "--ckpt", os.path.join(d, "missing.pt"),
-                    "--data_dir", d, "--out", os.path.join(d, "eval.json"),
-                    "--device", "cpu"]
+        sys.argv = [
+            "evaluate",
+            "--ckpt",
+            os.path.join(d, "missing.pt"),
+            "--data_dir",
+            d,
+            "--out",
+            os.path.join(d, "eval.json"),
+            "--device",
+            "cpu",
+        ]
         try:
             evaluate_main()
             raise AssertionError("评测入口应执行数据协议闸门")
@@ -488,22 +596,43 @@ def test_evaluate_window_offsets_records_phase_sensitivity(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         data_dir = os.path.join(d, "data")
         os.makedirs(data_dir)
-        with open(os.path.join(data_dir, "train.txt"), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(data_dir, "train.txt"), "w", encoding="utf-8") as f:
             f.write(train)
-        with open(os.path.join(data_dir, "val.txt"), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(data_dir, "val.txt"), "w", encoding="utf-8") as f:
             f.write(val)
         meta = prepare_bins(data_dir, kind="char", force=True)
         ckpt = os.path.join(d, "run", "model.pt")
-        model = GPT(vocab_size=meta["vocab_size"], block_size=16,
-                    d_model=16, n_layers=1, n_heads=2, variant="standard")
+        model = GPT(
+            vocab_size=meta["vocab_size"],
+            block_size=16,
+            d_model=16,
+            n_layers=1,
+            n_heads=2,
+            variant="standard",
+        )
         save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
         out = os.path.join(d, "eval.json")
-        monkeypatch.setattr(sys, "argv", [
-            "evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
-            "--out", out, "--device", "cpu", "--eval_iters", "4",
-            "--window_offsets", "4", "--split", "val"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "evaluate",
+                "--ckpt",
+                ckpt,
+                "--data_dir",
+                data_dir,
+                "--out",
+                out,
+                "--device",
+                "cpu",
+                "--eval_iters",
+                "4",
+                "--window_offsets",
+                "4",
+                "--split",
+                "val",
+            ],
+        )
         evaluate_main()
         with open(out, encoding="utf-8") as f:
             res = json.load(f)
@@ -548,29 +677,52 @@ def test_evaluate_result_test_access_includes_worst_dump(monkeypatch):
             f.write("the quick red fox leaps over the lazy dog. " * 4)
         meta = prepare_bins(data_dir, kind="char", force=True)
         ckpt = os.path.join(d, "run", "model.pt")
-        model = GPT(vocab_size=meta["vocab_size"], block_size=16, d_model=16,
-                    n_layers=1, n_heads=2, variant="standard")
+        model = GPT(
+            vocab_size=meta["vocab_size"],
+            block_size=16,
+            d_model=16,
+            n_layers=1,
+            n_heads=2,
+            variant="standard",
+        )
         save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
         out = os.path.join(d, "eval.json")
-        monkeypatch.setattr(sys, "argv", [
-            "evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
-            "--out", out, "--device", "cpu", "--worst_n", "1",
-            "--worst_on_test", "--allow_repeat_test"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "evaluate",
+                "--ckpt",
+                ckpt,
+                "--data_dir",
+                data_dir,
+                "--out",
+                out,
+                "--device",
+                "cpu",
+                "--worst_n",
+                "1",
+                "--worst_on_test",
+                "--allow_repeat_test",
+            ],
+        )
         evaluate_main()
         with open(out, encoding="utf-8") as f:
             res = json.load(f)
         ledger = read_test_access_log(data_dir)
         assert res["test_access"]["evaluations"] == 2
         assert res["test_access"]["distinct_checkpoints"] == 1
-        assert sha256_file(ckpt)[:16] in \
-            res["test_access"]["checkpoints_evaluated_multiple_times"]
+        assert (
+            sha256_file(ckpt)[:16]
+            in res["test_access"]["checkpoints_evaluated_multiple_times"]
+        )
         assert len(ledger) == 2
-        assert [r.get("reason") for r in ledger if r.get("reason")] == \
-            ["worst_window_dump_on_test"]
+        assert [r.get("reason") for r in ledger if r.get("reason")] == [
+            "worst_window_dump_on_test"
+        ]
         test_fp = sha256_file(os.path.join(data_dir, "test.bin"))
         assert res["test_access"]["distinct_test_data_versions"] == 1
-        assert [r.get("test_data_fingerprint") for r in ledger] == \
-            [test_fp, test_fp]
+        assert [r.get("test_data_fingerprint") for r in ledger] == [test_fp, test_fp]
     print("  [ok] test 访问摘要包含 worst-window 转储（不瞒报第二次读取）")
 
 
@@ -584,26 +736,47 @@ def test_evaluate_warns_when_data_differs_from_training_manifest(capsys):
     with tempfile.TemporaryDirectory() as d:
         data_dir = os.path.join(d, "data")
         os.makedirs(data_dir)
-        with open(os.path.join(data_dir, "train.txt"), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(data_dir, "train.txt"), "w", encoding="utf-8") as f:
             f.write("the quick brown fox jumps over the lazy dog. " * 6)
-        with open(os.path.join(data_dir, "val.txt"), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(data_dir, "val.txt"), "w", encoding="utf-8") as f:
             f.write("a slow green turtle sleeps under the old oak tree. " * 6)
         meta = prepare_bins(data_dir, kind="char", force=True)
         run_dir = os.path.join(d, "run")
         ckpt = os.path.join(run_dir, "model.pt")
-        model = GPT(vocab_size=meta["vocab_size"], block_size=16, d_model=16,
-                    n_layers=1, n_heads=2, variant="standard")
+        model = GPT(
+            vocab_size=meta["vocab_size"],
+            block_size=16,
+            d_model=16,
+            n_layers=1,
+            n_heads=2,
+            variant="standard",
+        )
         save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
-        with open(os.path.join(run_dir, "run_manifest.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump({"data": {"digest": "0" * 64},
-                       "artifacts": {"model.pt": {"sha256": "f" * 64}}}, f)
+        with open(
+            os.path.join(run_dir, "run_manifest.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump(
+                {
+                    "data": {"digest": "0" * 64},
+                    "artifacts": {"model.pt": {"sha256": "f" * 64}},
+                },
+                f,
+            )
         out = os.path.join(d, "eval.json")
         old_argv = sys.argv
-        sys.argv = ["evaluate", "--ckpt", ckpt, "--data_dir", data_dir,
-                    "--out", out, "--device", "cpu", "--split", "val"]
+        sys.argv = [
+            "evaluate",
+            "--ckpt",
+            ckpt,
+            "--data_dir",
+            data_dir,
+            "--out",
+            out,
+            "--device",
+            "cpu",
+            "--split",
+            "val",
+        ]
         try:
             evaluate_main()
         finally:
@@ -624,10 +797,10 @@ def test_eval_amp_honors_recorded_effective_dtype():
     """评测精度必须优先沿用 checkpoint 记录的 amp_dtype（fp32 回退不能变 bf16）。"""
     from lega.evaluate import _resolve_eval_amp
     from lega.utils import amp_dtype_for
+
     avail = amp_dtype_for("cpu", True) is not None
     assert _resolve_eval_amp({"amp": True, "amp_dtype": None}, "cpu") is False
-    assert (_resolve_eval_amp({"amp": True, "amp_dtype": "bfloat16"}, "cpu")
-            is avail)
+    assert _resolve_eval_amp({"amp": True, "amp_dtype": "bfloat16"}, "cpu") is avail
     assert _resolve_eval_amp({"amp": True, "amp_dtype": "float16"}, "cpu") is False
     # 旧 checkpoint 没有 amp_dtype：回退到请求开关。
     assert _resolve_eval_amp({"amp": True}, "cpu") is avail

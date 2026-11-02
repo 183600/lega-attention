@@ -27,6 +27,7 @@
 本模块只依赖 Python 标准库与 NumPy；输入检查对 bool/字符串/NaN/Inf 严格，
 坏层显式剔除并记账，不按 0 效应补齐。
 """
+
 import math
 from numbers import Real
 
@@ -215,8 +216,9 @@ def _empty_result(k, labels, alpha, min_k, excluded, reason, status="insufficien
     }
 
 
-def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
-                  min_k=MIN_STRATA, leave_one_out=True):
+def meta_analysis(
+    effects, ses, labels=None, alpha=DEFAULT_ALPHA, min_k=MIN_STRATA, leave_one_out=True
+):
     """对分层效应做随机效应 meta 分析，并给出异质性与留一诊断。
 
     ``effects[i]`` 是第 i 层的效应（候选−参照，统一方向由调用方负责），
@@ -233,8 +235,7 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
     if min_k < 2:
         raise ValueError(f"min_k 必须 >= 2，收到 {min_k}")
     if not isinstance(leave_one_out, bool):
-        raise ValueError(
-            f"leave_one_out 必须是 bool，收到 {leave_one_out!r}")
+        raise ValueError(f"leave_one_out 必须是 bool，收到 {leave_one_out!r}")
     try:
         effect_values = list(effects)
         se_values = list(ses)
@@ -242,7 +243,8 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
         raise ValueError("effects/ses 必须可迭代") from exc
     if len(effect_values) != len(se_values):
         raise ValueError(
-            f"effects/ses 长度不一致：{len(effect_values)} != {len(se_values)}")
+            f"effects/ses 长度不一致：{len(effect_values)} != {len(se_values)}"
+        )
     if labels is None:
         label_values = [f"stratum_{i + 1}" for i in range(len(effect_values))]
     else:
@@ -252,7 +254,8 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
             raise ValueError("labels 必须可迭代") from exc
         if len(label_values) != len(effect_values):
             raise ValueError(
-                f"labels 长度不一致：{len(label_values)} != {len(effect_values)}")
+                f"labels 长度不一致：{len(label_values)} != {len(effect_values)}"
+            )
     norm_labels = []
     for i, label in enumerate(label_values):
         text = str(label) if label is not None else f"stratum_{i + 1}"
@@ -265,15 +268,18 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
     kept_effects, kept_ses, kept_labels = [], [], []
     excluded = []
     for idx, (effect, se, label) in enumerate(
-            zip(effect_values, se_values, norm_labels)):
+        zip(effect_values, se_values, norm_labels)
+    ):
         fe, fs = _finite(effect), _finite(se)
         if fe is None:
-            excluded.append({"index": idx, "label": label,
-                             "reason": "effect 非有限或不可表示"})
+            excluded.append(
+                {"index": idx, "label": label, "reason": "effect 非有限或不可表示"}
+            )
             continue
         if fs is None or fs <= 0.0:
-            excluded.append({"index": idx, "label": label,
-                             "reason": "se 必须为有限正数"})
+            excluded.append(
+                {"index": idx, "label": label, "reason": "se 必须为有限正数"}
+            )
             continue
         kept_effects.append(fe)
         kept_ses.append(fs)
@@ -281,39 +287,53 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
 
     k = len(kept_effects)
     if k == 0:
-        return _empty_result(k, norm_labels, alpha, min_k, excluded,
-                             "没有同时具备有限效应与正标准误的层", "invalid")
+        return _empty_result(
+            k,
+            norm_labels,
+            alpha,
+            min_k,
+            excluded,
+            "没有同时具备有限效应与正标准误的层",
+            "invalid",
+        )
     if k < min_k:
         return _empty_result(
-            k, kept_labels, alpha, min_k, excluded,
-            f"有效层数 k={k} < min_k={min_k}，不计算合并效应")
+            k,
+            kept_labels,
+            alpha,
+            min_k,
+            excluded,
+            f"有效层数 k={k} < min_k={min_k}，不计算合并效应",
+        )
 
     weights = [1.0 / (se * se) for se in kept_ses]
     sw = math.fsum(weights)
     if not math.isfinite(sw) or sw <= 0.0:
-        return _empty_result(k, kept_labels, alpha, min_k, excluded,
-                             "固定效应权重不可表示", "invalid")
+        return _empty_result(
+            k, kept_labels, alpha, min_k, excluded, "固定效应权重不可表示", "invalid"
+        )
     weighted = [w * y for w, y in zip(weights, kept_effects)]
     pooled_fixed = math.fsum(weighted) / sw
     se_fixed = math.sqrt(1.0 / sw)
-    q = math.fsum(w * (y - pooled_fixed) ** 2
-                  for w, y in zip(weights, kept_effects))
+    q = math.fsum(w * (y - pooled_fixed) ** 2 for w, y in zip(weights, kept_effects))
     df = k - 1
     q_p = chi2_sf(q, df) if math.isfinite(q) else None
-    i2 = (max(0.0, 1.0 - df / q) if q > 0.0 and math.isfinite(q) else 0.0)
-    h2 = (q / df if df > 0 and math.isfinite(q) else None)
+    i2 = max(0.0, 1.0 - df / q) if q > 0.0 and math.isfinite(q) else 0.0
+    h2 = q / df if df > 0 and math.isfinite(q) else None
     c = sw - math.fsum(w * w for w in weights) / sw
-    tau2 = (max(0.0, (q - df) / c) if c > 0.0 and math.isfinite(q) else 0.0)
+    tau2 = max(0.0, (q - df) / c) if c > 0.0 and math.isfinite(q) else 0.0
     if not math.isfinite(tau2):
         tau2 = 0.0
 
     random_weights = [1.0 / (se * se + tau2) for se in kept_ses]
     sw_random = math.fsum(random_weights)
     if not math.isfinite(sw_random) or sw_random <= 0.0:
-        return _empty_result(k, kept_labels, alpha, min_k, excluded,
-                             "随机效应权重不可表示", "invalid")
-    pooled_random = math.fsum(
-        w * y for w, y in zip(random_weights, kept_effects)) / sw_random
+        return _empty_result(
+            k, kept_labels, alpha, min_k, excluded, "随机效应权重不可表示", "invalid"
+        )
+    pooled_random = (
+        math.fsum(w * y for w, y in zip(random_weights, kept_effects)) / sw_random
+    )
     se_random = math.sqrt(1.0 / sw_random)
     t_crit_mean = _t_critical(df, alpha)
 
@@ -333,44 +353,53 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
             prediction_interval = [lo, hi]
 
     if q_p is not None and q_p < alpha:
-        status = ("heterogeneous" if i2 >= 0.5
-                  else "moderate_heterogeneity")
+        status = "heterogeneous" if i2 >= 0.5 else "moderate_heterogeneity"
     else:
         status = "no_detected_heterogeneity"
 
     per_stratum = []
     for label, effect, se, w, rw in zip(
-            kept_labels, kept_effects, kept_ses, weights, random_weights):
-        per_stratum.append({
-            "label": label,
-            "effect": effect,
-            "se": se,
-            "weight_fixed": w,
-            "weight_random": rw,
-        })
+        kept_labels, kept_effects, kept_ses, weights, random_weights
+    ):
+        per_stratum.append(
+            {
+                "label": label,
+                "effect": effect,
+                "se": se,
+                "weight_fixed": w,
+                "weight_random": rw,
+            }
+        )
 
     loo_rows = []
     if leave_one_out and k > 2:
         for j, label in enumerate(kept_labels):
             sub_effects = [y for i, y in enumerate(kept_effects) if i != j]
             sub_ses = [s for i, s in enumerate(kept_ses) if i != j]
-            sub = meta_analysis(sub_effects, sub_ses,
-                                labels=[x for i, x in enumerate(kept_labels)
-                                        if i != j],
-                                alpha=alpha, min_k=2, leave_one_out=False)
+            sub = meta_analysis(
+                sub_effects,
+                sub_ses,
+                labels=[x for i, x in enumerate(kept_labels) if i != j],
+                alpha=alpha,
+                min_k=2,
+                leave_one_out=False,
+            )
             estimate = _safe_float(sub.get("pooled_random"))
             i2_sub = _safe_float(sub.get("i2"))
-            loo_rows.append({
-                "label": label,
-                "pooled_random": estimate,
-                "i2": i2_sub,
-                "shift": (estimate - pooled_random
-                          if estimate is not None else None),
-            })
-    loo_estimates = [row["pooled_random"] for row in loo_rows
-                     if row["pooled_random"] is not None]
-    loo_i2 = [row["i2"] for row in loo_rows
-              if row["i2"] is not None]
+            loo_rows.append(
+                {
+                    "label": label,
+                    "pooled_random": estimate,
+                    "i2": i2_sub,
+                    "shift": (
+                        estimate - pooled_random if estimate is not None else None
+                    ),
+                }
+            )
+    loo_estimates = [
+        row["pooled_random"] for row in loo_rows if row["pooled_random"] is not None
+    ]
+    loo_i2 = [row["i2"] for row in loo_rows if row["i2"] is not None]
     loo_sign_stable = None
     if loo_estimates and abs(pooled_random) > 1e-12:
         sign = _sign(pooled_random)
@@ -378,14 +407,17 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
     shift_row = None
     for row in loo_rows:
         shift = row.get("shift")
-        if shift is not None and (shift_row is None
-                                  or abs(shift) > abs(shift_row["shift"])):
+        if shift is not None and (
+            shift_row is None or abs(shift) > abs(shift_row["shift"])
+        ):
             shift_row = row
 
-    note = ("随机效应 meta 分析（DerSimonian-Laird）。层间共享种子且层内共享"
-            "评测样例，Q 的卡方 p 值与 I² 仅作描述性异质性指标；"
-            "预测区间回答“换一个同质层效应可能落在哪里”，不是新层效应的"
-            "置信区间。未检出异质性不等于各层效应相同。")
+    note = (
+        "随机效应 meta 分析（DerSimonian-Laird）。层间共享种子且层内共享"
+        "评测样例，Q 的卡方 p 值与 I² 仅作描述性异质性指标；"
+        "预测区间回答“换一个同质层效应可能落在哪里”，不是新层效应的"
+        "置信区间。未检出异质性不等于各层效应相同。"
+    )
     return {
         "status": status,
         "label": _STATUS_CN.get(status, status),
@@ -412,8 +444,9 @@ def meta_analysis(effects, ses, labels=None, alpha=DEFAULT_ALPHA,
         "tau2": tau2,
         "tau": math.sqrt(tau2) if math.isfinite(tau2) else None,
         "leave_one_out": loo_rows,
-        "loo_pooled_random_range": ((min(loo_estimates), max(loo_estimates))
-                                    if loo_estimates else None),
+        "loo_pooled_random_range": (
+            (min(loo_estimates), max(loo_estimates)) if loo_estimates else None
+        ),
         "loo_i2_range": ((min(loo_i2), max(loo_i2)) if loo_i2 else None),
         "loo_sign_stable": loo_sign_stable,
         "loo_max_abs_shift_label": (shift_row["label"] if shift_row else None),
@@ -431,10 +464,14 @@ def _percentile_ci(values, alpha):
     return [lo, hi] if math.isfinite(lo) and math.isfinite(hi) else None
 
 
-def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
-                                   min_k=MIN_STRATA,
-                                   n_bootstrap=DEFAULT_BOOTSTRAP,
-                                   seed=0):
+def meta_analysis_from_seed_matrix(
+    values,
+    labels=None,
+    alpha=DEFAULT_ALPHA,
+    min_k=MIN_STRATA,
+    n_bootstrap=DEFAULT_BOOTSTRAP,
+    seed=0,
+):
     """从“种子 × 层”效应矩阵计算 meta 分析，并按种子 bootstrap。
 
     ``values`` 每行是一个种子、每列是一个层的效应（候选−参照）。矩阵必须
@@ -467,8 +504,7 @@ def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
     else:
         labels = list(labels)
         if len(labels) != width:
-            raise ValueError(
-                f"labels 长度 {len(labels)} != 列数 {width}")
+            raise ValueError(f"labels 长度 {len(labels)} != 列数 {width}")
     matrix = np.empty((len(rows), width), dtype=float)
     for i, row in enumerate(rows):
         for j, value in enumerate(row):
@@ -476,7 +512,8 @@ def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
             if finite is None:
                 raise ValueError(
                     f"values[{i}][{j}] 不是有限实数：{value!r}；"
-                    "调用方必须先对齐/剔除缺失层")
+                    "调用方必须先对齐/剔除缺失层"
+                )
             matrix[i, j] = finite
 
     n_seeds = matrix.shape[0]
@@ -487,14 +524,18 @@ def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
         effects.append(mean)
         sd = float(np.std(col, ddof=1)) if n_seeds >= 2 else None
         tol = 1e-12 * max(1.0, abs(mean))
-        ses.append((sd / math.sqrt(n_seeds)
-                    if sd is not None and sd > tol else 0.0))
+        ses.append((sd / math.sqrt(n_seeds) if sd is not None and sd > tol else 0.0))
     if n_seeds < 2:
-        res = _empty_result(width, labels, alpha, min_k, [],
-                            f"种子数 n={n_seeds} < 2，无法估计层内标准误")
+        res = _empty_result(
+            width,
+            labels,
+            alpha,
+            min_k,
+            [],
+            f"种子数 n={n_seeds} < 2，无法估计层内标准误",
+        )
     else:
-        res = meta_analysis(effects, ses, labels=labels, alpha=alpha,
-                            min_k=min_k)
+        res = meta_analysis(effects, ses, labels=labels, alpha=alpha, min_k=min_k)
     res["n_seeds"] = n_seeds
     res["seed_effects"] = matrix.tolist()
     res["bootstrap"] = {
@@ -504,12 +545,18 @@ def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
         "seed": seed,
         "reason": None,
     }
-    if (n_bootstrap == 0 or n_seeds < 3
-            or res.get("status") in ("insufficient", "invalid")):
+    if (
+        n_bootstrap == 0
+        or n_seeds < 3
+        or res.get("status") in ("insufficient", "invalid")
+    ):
         res["bootstrap"]["reason"] = (
-            "n_bootstrap=0" if n_bootstrap == 0
+            "n_bootstrap=0"
+            if n_bootstrap == 0
             else "种子数 < 3，重采样自由度不足"
-            if n_seeds < 3 else "meta 分析不可用")
+            if n_seeds < 3
+            else "meta 分析不可用"
+        )
         return res
     included = [s["label"] for s in res.get("per_stratum", [])]
     if len(included) < min_k:
@@ -538,9 +585,14 @@ def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
             sub_labels.append(res["labels"][j])
         if len(sub_effects) < min_k:
             continue
-        sub_res = meta_analysis(sub_effects, sub_ses, labels=sub_labels,
-                                alpha=alpha, min_k=min_k,
-                                leave_one_out=False)
+        sub_res = meta_analysis(
+            sub_effects,
+            sub_ses,
+            labels=sub_labels,
+            alpha=alpha,
+            min_k=min_k,
+            leave_one_out=False,
+        )
         if sub_res.get("status") in ("insufficient", "invalid"):
             continue
         i2 = _safe_float(sub_res.get("i2"))
@@ -558,22 +610,26 @@ def meta_analysis_from_seed_matrix(values, labels=None, alpha=DEFAULT_ALPHA,
 
     n_valid = len(i2_values)
     boot = res["bootstrap"]
-    boot.update({
-        "available": bool(n_valid),
-        "n_valid_resamples": n_valid,
-        "reason": None if n_valid else "所有重采样都因层内方差为 0 被跳过",
-        "i2_ci95": _percentile_ci(i2_values, alpha),
-        "tau2_ci95": _percentile_ci(tau2_values, alpha),
-        "pooled_random_ci95": _percentile_ci(pooled_values, alpha),
-        "q_p_ci95": _percentile_ci(qp_values, alpha),
-        "prob_i2_ge_50pct": (float(np.mean(np.asarray(i2_values) >= 0.5))
-                             if i2_values else None),
-    })
+    boot.update(
+        {
+            "available": bool(n_valid),
+            "n_valid_resamples": n_valid,
+            "reason": None if n_valid else "所有重采样都因层内方差为 0 被跳过",
+            "i2_ci95": _percentile_ci(i2_values, alpha),
+            "tau2_ci95": _percentile_ci(tau2_values, alpha),
+            "pooled_random_ci95": _percentile_ci(pooled_values, alpha),
+            "q_p_ci95": _percentile_ci(qp_values, alpha),
+            "prob_i2_ge_50pct": (
+                float(np.mean(np.asarray(i2_values) >= 0.5)) if i2_values else None
+            ),
+        }
+    )
     full_pooled = _safe_float(res.get("pooled_random"))
     if full_pooled is not None and abs(full_pooled) > 1e-12 and pooled_values:
         sign = _sign(full_pooled)
         boot["prob_pooled_random_same_sign"] = float(
-            np.mean([_sign(v) == sign for v in pooled_values]))
+            np.mean([_sign(v) == sign for v in pooled_values])
+        )
     else:
         boot["prob_pooled_random_same_sign"] = None
     return res
@@ -589,15 +645,19 @@ def attach_to_hypotheses(hypotheses, analysis, metric="RULER平均"):
     """
     if not isinstance(hypotheses, list) or not isinstance(analysis, dict):
         return hypotheses
-    outcomes = [o for o in (analysis.get("outcomes") or [])
-                if isinstance(o, dict)]
+    outcomes = [o for o in (analysis.get("outcomes") or []) if isinstance(o, dict)]
     for hyp in hypotheses:
         if not isinstance(hyp, dict) or hyp.get("metric") != metric:
             continue
         outcome = next(
-            (o for o in outcomes
-             if o.get("candidate") == hyp.get("candidate")
-             and o.get("reference") == hyp.get("reference")), None)
+            (
+                o
+                for o in outcomes
+                if o.get("candidate") == hyp.get("candidate")
+                and o.get("reference") == hyp.get("reference")
+            ),
+            None,
+        )
         if outcome is None:
             continue
         axes = outcome.get("axes") if isinstance(outcome.get("axes"), dict) else {}
@@ -621,22 +681,24 @@ def attach_to_hypotheses(hypotheses, analysis, metric="RULER平均"):
                 "n_seeds": row.get("n_seeds"),
                 "bootstrap": row.get("bootstrap"),
             }
-            if row.get("status") in ("heterogeneous",
-                                     "moderate_heterogeneity"):
+            if row.get("status") in ("heterogeneous", "moderate_heterogeneity"):
                 axis_cn = "任务" if axis == "task" else "上下文长度"
                 i2_pct = _safe_float(row.get("i2_pct"))
                 q_p = _safe_float(row.get("q_p"))
                 warnings.append(
                     f"{axis_cn}层异质性（I²="
                     f"{f'{i2_pct:.1f}%' if i2_pct is not None else 'NA'}，"
-                    f"Q p={f'{q_p:.4f}' if q_p is not None else 'NA'}）")
+                    f"Q p={f'{q_p:.4f}' if q_p is not None else 'NA'}）"
+                )
         if attached:
             hyp["ruler_heterogeneity"] = attached
         if warnings:
             detail = hyp.get("detail") or ""
             hyp["detail"] = (
-                detail + "；⚠ RULER 平均不能被解释为各层共同效应："
+                detail
+                + "；⚠ RULER 平均不能被解释为各层共同效应："
                 + "；".join(warnings)
                 + "。须并列逐任务/逐长度结果，不能用 macro 平均掩盖方向"
-                  "相反的层")
+                "相反的层"
+            )
     return hypotheses

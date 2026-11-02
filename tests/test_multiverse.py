@@ -3,10 +3,14 @@
 覆盖：方向取向、方向一致率/同向显著率、翻转与不显著规格、基准为零/规格
 不足、坏输入，以及流水线对 PPL/RULER 口径的适配和预注册假设挂载。
 """
+
 import math
 
-from lega.multiverse import (attach_to_hypotheses, paired_specification,
-                             specification_curve)
+from lega.multiverse import (
+    attach_to_hypotheses,
+    paired_specification,
+    specification_curve,
+)
 from lega.pipeline import _multiverse_analysis
 
 
@@ -14,11 +18,26 @@ def _close(a, b, tol=1e-9):
     return abs(float(a) - float(b)) <= tol
 
 
-def _spec(spec_id, values_a, values_b, lower=True, dimension="scale",
-          choice=None, reference=False, inferential=True):
+def _spec(
+    spec_id,
+    values_a,
+    values_b,
+    lower=True,
+    dimension="scale",
+    choice=None,
+    reference=False,
+    inferential=True,
+):
     spec = paired_specification(
-        spec_id, dimension, choice or spec_id, values_a, values_b,
-        lower_is_better=lower, metric="M", inferential=inferential)
+        spec_id,
+        dimension,
+        choice or spec_id,
+        values_a,
+        values_b,
+        lower_is_better=lower,
+        metric="M",
+        inferential=inferential,
+    )
     spec["reference_spec"] = reference
     return spec
 
@@ -39,11 +58,22 @@ def test_orientation_and_consistency():
 
 def test_sign_flip_is_fragile_and_dimension_is_located():
     # 算术均值候选更差，几何均值候选更好：尺度选择翻转结论。
-    ref = _spec("raw", [1.0, 100.0, 100.0], [50.0, 50.0, 50.0],
-                lower=True, dimension="metric_scale", reference=True)
-    log = _spec("log", [math.log(v) for v in (1.0, 100.0, 100.0)],
-                [math.log(50.0)] * 3, lower=True,
-                dimension="metric_scale", choice="log")
+    ref = _spec(
+        "raw",
+        [1.0, 100.0, 100.0],
+        [50.0, 50.0, 50.0],
+        lower=True,
+        dimension="metric_scale",
+        reference=True,
+    )
+    log = _spec(
+        "log",
+        [math.log(v) for v in (1.0, 100.0, 100.0)],
+        [math.log(50.0)] * 3,
+        lower=True,
+        dimension="metric_scale",
+        choice="log",
+    )
     curve = specification_curve([ref, log], reference_id="raw")
     assert ref["effect"] > 0 and log["effect"] < 0, (ref, log)
     assert curve["status"] == "fragile", curve
@@ -55,10 +85,15 @@ def test_sign_flip_is_fragile_and_dimension_is_located():
 
 
 def test_leave_one_out_nonsignificant_is_directionally_robust():
-    ref = _spec("all", [1.0, 2.0, 3.0, 4.0], [0.0] * 4,
-                lower=True, reference=True)
-    loo = _spec("drop4", [1.0, 2.0, 3.0], [0.0] * 3,
-                lower=True, dimension="seed_subset", choice="drop_seed=4")
+    ref = _spec("all", [1.0, 2.0, 3.0, 4.0], [0.0] * 4, lower=True, reference=True)
+    loo = _spec(
+        "drop4",
+        [1.0, 2.0, 3.0],
+        [0.0] * 3,
+        lower=True,
+        dimension="seed_subset",
+        choice="drop_seed=4",
+    )
     curve = specification_curve([ref, loo], reference_id="all")
     assert curve["status"] == "directionally_robust", curve
     assert _close(curve["direction_consistency"], 1.0)
@@ -124,20 +159,29 @@ def test_bad_inputs_are_rejected():
 
 
 def _eval(ppl, split="test"):
-    return {"ppl": ppl, "split": split, "eval_ctx": 128,
-            "eval_iters": 8, "val_windows": 8,
-            "val_tokens_evaluated": 1024}
+    return {
+        "ppl": ppl,
+        "split": split,
+        "eval_ctx": 128,
+        "eval_iters": 8,
+        "val_windows": 8,
+        "val_tokens_evaluated": 1024,
+    }
 
 
 def _ruler(macro):
-    return {"results": {"niah_synth": {
-        "256": {"em": macro, "n": 10}, "512": {"em": macro, "n": 10}}},
-        "ctx_lens": [256, 512], "n_samples": 10, "sample_seed": 1,
-        "max_new": 8}
+    return {
+        "results": {
+            "niah_synth": {"256": {"em": macro, "n": 10}, "512": {"em": macro, "n": 10}}
+        },
+        "ctx_lens": [256, 512],
+        "n_samples": 10,
+        "sample_seed": 1,
+        "max_new": 8,
+    }
 
 
-def _runs(ppl_a, ppl_b, ruler_a=None, ruler_b=None,
-          seeds=(1, 2, 3)):
+def _runs(ppl_a, ppl_b, ruler_a=None, ruler_b=None, seeds=(1, 2, 3)):
     runs = {"lega": {}, "standard": {}}
     for i, seed in enumerate(seeds):
         runs["lega"][seed] = {"eval": _eval(ppl_a[i])}
@@ -154,14 +198,20 @@ def test_pipeline_multiverse_ppl_flip_and_hypothesis_attachment():
     ppl = next(o for o in multiverse["outcomes"] if o["metric"] == "PPL")
     assert ppl["status"] == "fragile", ppl
     assert any(s["choice"] == "log" for s in ppl["flipped_specs"])
-    loo = [s for s in ppl["specs"]
-           if s["id"].startswith("PPL:raw:drop_seed")]
-    assert loo and all(not s["valid"] for s in loo), \
-        "n=3 时留一规格应显式标为不可检验"
+    loo = [s for s in ppl["specs"] if s["id"].startswith("PPL:raw:drop_seed")]
+    assert loo and all(not s["valid"] for s in loo), "n=3 时留一规格应显式标为不可检验"
     assert multiverse["counts"].get("fragile") == 1
 
-    hyp = [{"id": "H1", "candidate": "lega", "reference": "standard",
-            "metric": "PPL", "status": "支持", "detail": "原判定"}]
+    hyp = [
+        {
+            "id": "H1",
+            "candidate": "lega",
+            "reference": "standard",
+            "metric": "PPL",
+            "status": "支持",
+            "detail": "原判定",
+        }
+    ]
     attach_to_hypotheses(hyp, multiverse)
     assert hyp[0]["multiverse_status"] == "fragile"
     assert "log" in hyp[0]["multiverse_flipped_choices"]
@@ -171,15 +221,17 @@ def test_pipeline_multiverse_ppl_flip_and_hypothesis_attachment():
 
 
 def test_pipeline_multiverse_ruler_macro_micro_and_loo():
-    runs = _runs([10.0, 11.0, 12.0], [12.0, 13.0, 14.0],
-                 ruler_a=[0.5, 0.6, 0.7], ruler_b=[0.4, 0.5, 0.6])
+    runs = _runs(
+        [10.0, 11.0, 12.0],
+        [12.0, 13.0, 14.0],
+        ruler_a=[0.5, 0.6, 0.7],
+        ruler_b=[0.4, 0.5, 0.6],
+    )
     multiverse = _multiverse_analysis(runs, [("lega", "standard")])
-    ruler = next(o for o in multiverse["outcomes"]
-                 if o["metric"] == "RULER平均")
+    ruler = next(o for o in multiverse["outcomes"] if o["metric"] == "RULER平均")
     assert ruler["reference_direction"] == "candidate_better", ruler
     assert any(s["choice"] == "micro" for s in ruler["specs"])
     # 三种子下留一规格 n=2，应显式不可检验而不是伪造成 0 效应。
-    dropped = [s for s in ruler["specs"] if s["id"].startswith(
-        "RULER:macro:drop_seed")]
+    dropped = [s for s in ruler["specs"] if s["id"].startswith("RULER:macro:drop_seed")]
     assert dropped and all(not s["valid"] for s in dropped), dropped
     print("  [ok] 流水线适配 RULER macro/micro，留一规格显式不可检验")

@@ -4,6 +4,7 @@
 存在（并指向同一个种子）。图表的均值/误差棒必须按 repro.json 的命名
 约定只取本次 run 的产物，否则同一次实验会被多算一次、过期结果混入均值。
 """
+
 import json
 import math
 import os
@@ -14,11 +15,22 @@ import warnings
 import numpy as np
 
 import lega.plots as plots
-from lega.plots import (_HAS_MPL, _expected_tagged, _group_by_variant,
-                        _group_items, _load_train_logs, _mean_by_step,
-                        _ppl_split_label, _prefer_seeded, _read_records,
-                        fig_auroc_heads, fig_latency, fig_misleading,
-                        fig_ppl, fig_ruler)
+from lega.plots import (
+    _HAS_MPL,
+    _expected_tagged,
+    _group_by_variant,
+    _group_items,
+    _load_train_logs,
+    _mean_by_step,
+    _ppl_split_label,
+    _prefer_seeded,
+    _read_records,
+    fig_auroc_heads,
+    fig_latency,
+    fig_misleading,
+    fig_ppl,
+    fig_ruler,
+)
 
 
 def _w(rdir, name, obj):
@@ -62,10 +74,8 @@ def test_group_by_variant_keeps_bare_only_variant():
     tmp = tempfile.mkdtemp()
     try:
         _w(tmp, "repro.json", {"seeds": [1, 2]})
-        _w(tmp, "eval_lega_seed1.json",
-           {"variant": "lega", "seed": 1, "val_ppl": 10.0})
-        _w(tmp, "eval_lega_seed2.json",
-           {"variant": "lega", "seed": 2, "val_ppl": 11.0})
+        _w(tmp, "eval_lega_seed1.json", {"variant": "lega", "seed": 1, "val_ppl": 10.0})
+        _w(tmp, "eval_lega_seed2.json", {"variant": "lega", "seed": 2, "val_ppl": 11.0})
         _w(tmp, "eval_standard.json", {"variant": "standard", "val_ppl": 8.0})
         _w(tmp, "eval_broken.json", [1, 2, 3])  # 合法 JSON 非对象：跳过不崩
         g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
@@ -78,8 +88,11 @@ def test_group_by_variant_keeps_bare_only_variant():
 
 
 def _w_log(root, variant, seed, loss):
-    d = os.path.join(root, variant) if seed is None \
+    d = (
+        os.path.join(root, variant)
+        if seed is None
         else os.path.join(root, variant, f"seed{seed}")
+    )
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "train_log.jsonl"), "w", encoding="utf-8") as f:
         f.write(json.dumps({"step": 1, "loss": loss}) + "\n")
@@ -93,8 +106,8 @@ def test_load_train_logs_respects_run_convention():
         _w(tmp, "repro.json", {"seeds": [1, 2]})
         _w_log(tmp, "lega", 1, 1.0)
         _w_log(tmp, "lega", 2, 3.0)
-        _w_log(tmp, "lega", None, 9.0)       # 旧单种子布局的过期日志
-        _w_log(tmp, "standard", None, 8.0)   # 该变体仅有旧布局日志
+        _w_log(tmp, "lega", None, 9.0)  # 旧单种子布局的过期日志
+        _w_log(tmp, "standard", None, 8.0)  # 该变体仅有旧布局日志
         series = _load_train_logs(tmp, rdir=tmp)
         xs, ys = _mean_by_step(series["lega"], "loss")
         # 只取本次的 seed1/seed2（均值 2.0），不得把过期的 9.0 混入（4.33）
@@ -121,10 +134,16 @@ def test_run_scope_filters_stale_seed_and_variant_artifacts():
     try:
         _w(tmp, "repro.json", {"seeds": [7, 9], "variants": ["lega"]})
         for s, ppl in ((7, 10.0), (8, 99.0), (9, 11.0)):
-            _w(tmp, f"eval_lega_seed{s}.json",
-               {"variant": "lega", "seed": s, "val_ppl": ppl})
-        _w(tmp, "eval_standard_seed7.json",
-           {"variant": "standard", "seed": 7, "val_ppl": 1.0})
+            _w(
+                tmp,
+                f"eval_lega_seed{s}.json",
+                {"variant": "lega", "seed": s, "val_ppl": ppl},
+            )
+        _w(
+            tmp,
+            "eval_standard_seed7.json",
+            {"variant": "standard", "seed": 7, "val_ppl": 1.0},
+        )
         g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
         assert set(g) == {"lega"}, g
         assert sorted(d["val_ppl"] for d in g["lega"]) == [10.0, 11.0]
@@ -137,7 +156,7 @@ def test_run_scope_filters_stale_seed_and_variant_artifacts():
         series = _load_train_logs(tmp, rdir=tmp)
         assert set(series) == {"lega"}, series
         _, ys = _mean_by_step(series["lega"], "loss")
-        assert ys == [8.0], ys       # (7+9)/2，而不是 (7+8+9)/3
+        assert ys == [8.0], ys  # (7+9)/2，而不是 (7+8+9)/3
         # 无 repro 信息时保持旧行为（全量发现）
         os.remove(os.path.join(tmp, "repro.json"))
         series = _load_train_logs(tmp, rdir=tmp)
@@ -152,21 +171,24 @@ def test_empty_or_fractional_repro_seeds_do_not_scan_stale_artifacts():
     tmp = tempfile.mkdtemp()
     try:
         _w(tmp, "repro.json", {"seeds": []})
-        _w(tmp, "eval_lega_seed1.json",
-           {"variant": "lega", "seed": 1, "val_ppl": 10.0})
-        _w(tmp, "analysis_lega_seed1.json",
-           {"variant": "lega", "seed": 1, "n_records": 1})
+        _w(tmp, "eval_lega_seed1.json", {"variant": "lega", "seed": 1, "val_ppl": 10.0})
+        _w(
+            tmp,
+            "analysis_lega_seed1.json",
+            {"variant": "lega", "seed": 1, "n_records": 1},
+        )
         assert _expected_tagged(tmp) is False
         from lega.plots import _run_scope
+
         assert _run_scope(tmp)[1] == set()
         assert _group_by_variant(os.path.join(tmp, "eval_*.json")) == {}
         assert _load_train_logs(tmp, rdir=tmp) == {}
         # 小数种子不是整数身份：即使同目录白名单只有整数 1，也不相等
         os.remove(os.path.join(tmp, "eval_lega_seed1.json"))
         _w(tmp, "repro.json", {"seeds": [1]})
-        _w(tmp, "eval_lega.json",
-           {"variant": "lega", "seed": 1.9, "val_ppl": 99.0})
+        _w(tmp, "eval_lega.json", {"variant": "lega", "seed": 1.9, "val_ppl": 99.0})
         from lega.plots import _seed_in_scope
+
         assert _seed_in_scope(1.9, {1}) is False
         assert _seed_in_scope("1", {1}) is True
         g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
@@ -186,9 +208,9 @@ def test_bool_seeds_are_not_integer_seed_one():
     tmp = tempfile.mkdtemp()
     try:
         _w(tmp, "repro.json", {"seeds": [True]})
-        _w(tmp, "eval_lega_seed1.json",
-           {"variant": "lega", "seed": 1, "val_ppl": 10.0})
+        _w(tmp, "eval_lega_seed1.json", {"variant": "lega", "seed": 1, "val_ppl": 10.0})
         from lega.plots import _run_scope, _seed_in_scope, _seed_int
+
         # 白名单里的 bool 不是整数身份 → 视为显式无可用种子，不扫旧产物
         assert _run_scope(tmp)[1] == set()
         assert _group_by_variant(os.path.join(tmp, "eval_*.json")) == {}
@@ -205,8 +227,7 @@ def test_bool_seeds_are_not_integer_seed_one():
         assert _seed_int("9007199254740993") == 2**53 + 1
         # 单种子约定下，带 bool seed 的裸文件不能冒充 seed1 的结果
         _w(tmp, "repro.json", {"seeds": [1]})
-        _w(tmp, "eval_lega.json",
-           {"variant": "lega", "seed": True, "val_ppl": 99.0})
+        _w(tmp, "eval_lega.json", {"variant": "lega", "seed": True, "val_ppl": 99.0})
         g = _group_by_variant(os.path.join(tmp, "eval_*.json"))
         assert [d["val_ppl"] for d in g.get("lega", [])] == [10.0], g
     finally:
@@ -230,8 +251,12 @@ def test_read_records_merges_ragged_headers_by_file_rows():
             3: "g,hit,c,logit\n0.5,1,50,-5\n0.6,0,60,6\n",
         }
         for s, text in rows_by_seed.items():
-            with open(os.path.join(tmp, f"analysis_records_lega_seed{s}.csv"),
-                      "w", encoding="utf-8", newline="") as f:
+            with open(
+                os.path.join(tmp, f"analysis_records_lega_seed{s}.csv"),
+                "w",
+                encoding="utf-8",
+                newline="",
+            ) as f:
                 f.write(text)
         cols = _read_records(tmp, "lega")
         assert cols["g"].tolist() == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -296,25 +321,30 @@ def test_train_logs_skip_non_dict_and_bad_steps():
 def test_mean_by_step_rejects_fractional_and_boolean_steps():
     """1.5/True 不能被 int() 截断后与 step=1 合并到同一 x 坐标；整数值
     浮点与整数字符串仍是合法 step，超大整数按坏点跳过。"""
-    runs = [[{"step": 1, "loss": 2.0},
-             {"step": 1.5, "loss": 99.0},
-             {"step": True, "loss": 99.0},
-             {"step": 2.0, "loss": 1.0},
-             {"step": "3", "loss": 0.5},
-             {"step": "1_0", "loss": 99.0},
-             {"step": 4, "loss": True},
-             {"step": 5, "loss": False},
-             {"step": 10 ** 400, "loss": 0.0}]]
+    runs = [
+        [
+            {"step": 1, "loss": 2.0},
+            {"step": 1.5, "loss": 99.0},
+            {"step": True, "loss": 99.0},
+            {"step": 2.0, "loss": 1.0},
+            {"step": "3", "loss": 0.5},
+            {"step": "1_0", "loss": 99.0},
+            {"step": 4, "loss": True},
+            {"step": 5, "loss": False},
+            {"step": 10**400, "loss": 0.0},
+        ]
+    ]
     xs, ys = _mean_by_step(runs, "loss")
     assert xs == [1, 2, 3], (xs, ys)
     assert ys == [2.0, 1.0, 0.5], ys
     # 巨大但有限的损失点求均值不能溢出成 inf（合法 JSON/坐标轴）。
-    huge = [[{"step": 1, "loss": 1e308},
-             {"step": 1, "loss": 1e308}]]
+    huge = [[{"step": 1, "loss": 1e308}, {"step": 1, "loss": 1e308}]]
     hx, hy = _mean_by_step(huge, "loss")
     assert hx == [1] and math.isfinite(hy[0]) and hy[0] == 1e308, (hx, hy)
-    print("  [ok] 训练曲线均值：小数/布尔/下划线 step 与布尔值不参与均值；"
-          "巨大有限损失不溢出")
+    print(
+        "  [ok] 训练曲线均值：小数/布尔/下划线 step 与布尔值不参与均值；"
+        "巨大有限损失不溢出"
+    )
 
 
 def test_fig_train_curves_skips_unplottable_losses():
@@ -328,12 +358,19 @@ def test_fig_train_curves_skips_unplottable_losses():
         for variant, loss in (("lega", 1e308), ("standard", 1.0)):
             d = os.path.join(root, variant, "seed1")
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, "train_log.jsonl"), "w",
-                      encoding="utf-8") as f:
+            with open(os.path.join(d, "train_log.jsonl"), "w", encoding="utf-8") as f:
                 for step in (1, 2, 3):
-                    f.write(json.dumps({"step": step, "loss": loss,
-                                        "val_loss": loss,
-                                        "val_ppl": loss}) + "\n")
+                    f.write(
+                        json.dumps(
+                            {
+                                "step": step,
+                                "loss": loss,
+                                "val_loss": loss,
+                                "val_ppl": loss,
+                            }
+                        )
+                        + "\n"
+                    )
         rdir = os.path.join(tmp, "res")
         os.makedirs(rdir, exist_ok=True)
         with warnings.catch_warnings():
@@ -352,12 +389,22 @@ def test_fig_latency_uses_each_variant_batch_when_no_common_batch():
         return
     import matplotlib.axes as maxes
     from unittest import mock
+
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "latency.json", {"variants": {
-            "standard": {"prefill_ms": {"256": {"8": 20.0}}},
-            "qgate": {"prefill_ms": {"256": {"1": 12.0}},
-                      "decode_ms_per_tok": {"256": 1.2}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "standard": {"prefill_ms": {"256": {"8": 20.0}}},
+                    "qgate": {
+                        "prefill_ms": {"256": {"1": 12.0}},
+                        "decode_ms_per_tok": {"256": 1.2},
+                    },
+                }
+            },
+        )
         labels = []
         orig = maxes.Axes.plot
 
@@ -381,11 +428,19 @@ def test_fig_latency_does_not_prefer_invalid_batch_one():
         return
     import matplotlib.axes as maxes
     from unittest import mock
+
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "latency.json", {"variants": {
-            "standard": {"prefill_ms": {"256": {"1": "bad", "8": 20.0}}},
-            "qgate": {"prefill_ms": {"256": {"1": 12.0}}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "standard": {"prefill_ms": {"256": {"1": "bad", "8": 20.0}}},
+                    "qgate": {"prefill_ms": {"256": {"1": 12.0}}},
+                }
+            },
+        )
         labels = []
         orig = maxes.Axes.plot
 
@@ -398,8 +453,15 @@ def test_fig_latency_does_not_prefer_invalid_batch_one():
             assert fig_latency(tmp) is True
         assert len(labels) == 2, labels
         # 只有一个变体、且唯一非空档位不是 "1" 时也必须能画出来
-        _w(tmp, "latency.json", {"variants": {
-            "standard": {"prefill_ms": {"256": {"1": "bad", "8": 20.0}}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "standard": {"prefill_ms": {"256": {"1": "bad", "8": 20.0}}}
+                }
+            },
+        )
         labels.clear()
         with mock.patch.object(maxes.Axes, "plot", spy):
             assert fig_latency(tmp) is True
@@ -416,16 +478,34 @@ def test_fig_latency_returns_false_without_plottable_points():
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "latency.json", {"variants": {
-            "lega": {"prefill_ms": {"256": {"1": "bad"}},
-                     "decode_ms_per_tok": {"256": float("nan")}},
-            "standard": [1]}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "lega": {
+                        "prefill_ms": {"256": {"1": "bad"}},
+                        "decode_ms_per_tok": {"256": float("nan")},
+                    },
+                    "standard": [1],
+                }
+            },
+        )
         assert fig_latency(tmp) is False
         assert not os.path.exists(os.path.join(tmp, "fig_latency.png"))
         _w(tmp, "repro.json", {"variants": ["qgate"], "seeds": [1]})
-        _w(tmp, "latency.json", {"variants": {
-            "lega": {"prefill_ms": {"256": {"1": 12.0}},
-                     "decode_ms_per_tok": {"256": 1.2}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "lega": {
+                        "prefill_ms": {"256": {"1": 12.0}},
+                        "decode_ms_per_tok": {"256": 1.2},
+                    }
+                }
+            },
+        )
         assert fig_latency(tmp) is False
         assert not os.path.exists(os.path.join(tmp, "fig_latency.png"))
     finally:
@@ -440,14 +520,26 @@ def test_fig_latency_respects_variant_scope():
         return
     import matplotlib.axes as maxes
     from unittest import mock
+
     tmp = tempfile.mkdtemp()
     try:
         _w(tmp, "repro.json", {"variants": ["lega"], "seeds": [1]})
-        _w(tmp, "latency.json", {"variants": {
-            "lega": {"prefill_ms": {"256": {"1": 12.0}},
-                     "decode_ms_per_tok": {"256": 1.2}},
-            "stale": {"prefill_ms": {"256": {"1": 9.0}},
-                      "decode_ms_per_tok": {"256": 0.9}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "lega": {
+                        "prefill_ms": {"256": {"1": 12.0}},
+                        "decode_ms_per_tok": {"256": 1.2},
+                    },
+                    "stale": {
+                        "prefill_ms": {"256": {"1": 9.0}},
+                        "decode_ms_per_tok": {"256": 0.9},
+                    },
+                }
+            },
+        )
         labels = []
         orig = maxes.Axes.plot
 
@@ -472,12 +564,21 @@ def test_analysis_figures_respect_variant_scope():
     tmp = tempfile.mkdtemp()
     try:
         _w(tmp, "repro.json", {"variants": ["standard"], "seeds": [1]})
-        _w(tmp, "analysis_lega.json", {
-            "variant": "lega", "seed": 1, "n_records": 10,
-            "per_head": [{"layer": 0, "head": 0,
-                          "auroc_qterm": 0.6, "auroc_logit": 0.7}]})
-        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
-                  encoding="utf-8") as f:
+        _w(
+            tmp,
+            "analysis_lega.json",
+            {
+                "variant": "lega",
+                "seed": 1,
+                "n_records": 10,
+                "per_head": [
+                    {"layer": 0, "head": 0, "auroc_qterm": 0.6, "auroc_logit": 0.7}
+                ],
+            },
+        )
+        with open(
+            os.path.join(tmp, "analysis_records_lega.csv"), "w", encoding="utf-8"
+        ) as f:
             f.write("task,g,hit,c,log_n\nx,0.5,1,1,2\n")
         assert _read_records(tmp, "lega") == {}
         assert fig_auroc_heads(tmp, variant="lega") is False
@@ -497,6 +598,7 @@ def test_fig_latency_ignores_noncanonical_ctx_keys():
     import matplotlib.axes as maxes
     from unittest import mock
     from lega.plots import _ctx_int, _ctx_key_int, _finite_float
+
     assert _finite_float("1_0") is None
     assert _ctx_key_int("256") == 256
     assert _ctx_key_int("1_0") is None
@@ -505,11 +607,19 @@ def test_fig_latency_ignores_noncanonical_ctx_keys():
     assert _ctx_int(256.0) == 256 and _ctx_int(256.5) is None
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "latency.json", {"variants": {
-            "lega": {"prefill_ms": {"1_0": {"1": 10.0},
-                                     "256": {"1": 12.0}},
-                     "decode_ms_per_tok": {"1_0": 1.0, "256": 1.2},
-                     "decode_prefill_ctx": {"1_0": "1_0", "256": 256.0}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "lega": {
+                        "prefill_ms": {"1_0": {"1": 10.0}, "256": {"1": 12.0}},
+                        "decode_ms_per_tok": {"1_0": 1.0, "256": 1.2},
+                        "decode_prefill_ctx": {"1_0": "1_0", "256": 256.0},
+                    }
+                }
+            },
+        )
         xs = []
         orig = maxes.Axes.plot
 
@@ -544,15 +654,27 @@ def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "eval_lega.json",
-           {"variant": "lega", "ppl": None, "val_ppl": 10.0, "split": "val"})
-        _w(tmp, "eval_bad.json",
-           {"variant": "bad", "ppl": "oops", "val_ppl": None, "split": "val"})
+        _w(
+            tmp,
+            "eval_lega.json",
+            {"variant": "lega", "ppl": None, "val_ppl": 10.0, "split": "val"},
+        )
+        _w(
+            tmp,
+            "eval_bad.json",
+            {"variant": "bad", "ppl": "oops", "val_ppl": None, "split": "val"},
+        )
         # 两个种子都是合法但接近 float 上限的 PPL：稳定均值/标准差不能溢出。
-        _w(tmp, "eval_huge_seed1.json",
-           {"variant": "huge", "seed": 1, "ppl": 1e308, "split": "val"})
-        _w(tmp, "eval_huge_seed2.json",
-           {"variant": "huge", "seed": 2, "ppl": 1e308, "split": "val"})
+        _w(
+            tmp,
+            "eval_huge_seed1.json",
+            {"variant": "huge", "seed": 1, "ppl": 1e308, "split": "val"},
+        )
+        _w(
+            tmp,
+            "eval_huge_seed2.json",
+            {"variant": "huge", "seed": 2, "ppl": 1e308, "split": "val"},
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             assert fig_ppl(tmp) is True
@@ -564,12 +686,15 @@ def test_fig_ppl_falls_back_to_val_ppl_and_skips_bad_values():
 
 def test_group_items_treats_unhashable_seed_as_missing():
     """JSON seed 为数组/对象时按缺种子信息处理，不能作为字典键崩溃。"""
-    items = [("eval_lega.json", {"variant": "lega", "seed": [1],
-                                 "val_ppl": 9.0}),
-             ("eval_standard.json", {"variant": "standard",
-                                     "seed": {"n": 1}, "val_ppl": 10.0}),
-             ("eval_bad.json", {"variant": ["bad"], "seed": 1}),
-             ("eval_bad2.json", {"variant": {"x": 1}, "seed": 1})]
+    items = [
+        ("eval_lega.json", {"variant": "lega", "seed": [1], "val_ppl": 9.0}),
+        (
+            "eval_standard.json",
+            {"variant": "standard", "seed": {"n": 1}, "val_ppl": 10.0},
+        ),
+        ("eval_bad.json", {"variant": ["bad"], "seed": 1}),
+        ("eval_bad2.json", {"variant": {"x": 1}, "seed": 1}),
+    ]
     groups = _group_items(items)
     assert len(groups["lega"]) == 1
     assert len(groups["standard"]) == 1
@@ -584,40 +709,72 @@ def test_plots_tolerate_malformed_nested_fields():
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "eval_lega_seed1.json", {
-            "variant": "lega", "seed": 1, "val_ppl": 10.0,
-            "split": ["val"]})
-        _w(tmp, "eval_standard_seed1.json", {
-            "variant": "standard", "seed": 1, "val_ppl": float("inf"),
-            "split": "val"})
+        _w(
+            tmp,
+            "eval_lega_seed1.json",
+            {"variant": "lega", "seed": 1, "val_ppl": 10.0, "split": ["val"]},
+        )
+        _w(
+            tmp,
+            "eval_standard_seed1.json",
+            {"variant": "standard", "seed": 1, "val_ppl": float("inf"), "split": "val"},
+        )
         assert fig_ppl(tmp) is True
-        _w(tmp, "ruler_lega_seed1.json", {
-            "variant": "lega", "seed": 1,
-            "results": {"niah_synth": {"x": {"em": 0.5},
-                                       "256": {"em": "bad"}},
-                        "fwe": [1]}})
+        _w(
+            tmp,
+            "ruler_lega_seed1.json",
+            {
+                "variant": "lega",
+                "seed": 1,
+                "results": {
+                    "niah_synth": {"x": {"em": 0.5}, "256": {"em": "bad"}},
+                    "fwe": [1],
+                },
+            },
+        )
         assert fig_ruler(tmp) is True
-        _w(tmp, "latency.json", {"variants": {
-            "lega": [1],
-            "standard": {"prefill_ms": {"256": {}},
-                         "decode_ms_per_tok": {"256": "x"}},
-            "qgate": {"prefill_ms": {"256": {"1": 12.0}},
-                      "decode_ms_per_tok": {"256": 1.2},
-                      "decode_prefill_ctx": {"256": "bad"}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "lega": [1],
+                    "standard": {
+                        "prefill_ms": {"256": {}},
+                        "decode_ms_per_tok": {"256": "x"},
+                    },
+                    "qgate": {
+                        "prefill_ms": {"256": {"1": 12.0}},
+                        "decode_ms_per_tok": {"256": 1.2},
+                        "decode_prefill_ctx": {"256": "bad"},
+                    },
+                }
+            },
+        )
         assert fig_latency(tmp) is True
-        _w(tmp, "analysis_lega_seed1.json", {
-            "variant": "lega", "seed": 1, "n_records": 10,
-            "p_hit_given_conc": "x", "p_hit_given_notconc": 0.2,
-            "misleading_rate": float("nan"),
-            "per_head": ["bad", {"layer": [1], "head": 0},
-                         {"layer": 0, "head": 0,
-                          "auroc_qterm": 0.6, "auroc_logit": 0.7}]})
+        _w(
+            tmp,
+            "analysis_lega_seed1.json",
+            {
+                "variant": "lega",
+                "seed": 1,
+                "n_records": 10,
+                "p_hit_given_conc": "x",
+                "p_hit_given_notconc": 0.2,
+                "misleading_rate": float("nan"),
+                "per_head": [
+                    "bad",
+                    {"layer": [1], "head": 0},
+                    {"layer": 0, "head": 0, "auroc_qterm": 0.6, "auroc_logit": 0.7},
+                ],
+            },
+        )
         assert fig_misleading(tmp) is True
         assert fig_auroc_heads(tmp, variant="lega") is True
-        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
-                  encoding="utf-8") as f:
-            f.write("task,g,hit,c,log_n\nx,zzz,1,1,2\n"
-                    "y,1_0,1,inf,2\n")
+        with open(
+            os.path.join(tmp, "analysis_records_lega.csv"), "w", encoding="utf-8"
+        ) as f:
+            f.write("task,g,hit,c,log_n\nx,zzz,1,1,2\n" "y,1_0,1,inf,2\n")
         cols = _read_records(tmp, "lega")
         assert np.isnan(cols["g"][0])
         # "1_0"（=10.0）与 "inf" 不是规范观测：按缺失处理，不能画出伪点。
@@ -635,13 +792,16 @@ def test_fig_ruler_plots_converted_numeric_string_metric(monkeypatch):
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "ruler_lega.json", {
-            "variant": "lega",
-            "results": {"niah_synth": {
-                "256": {"em": "0.5"}, "512": {"em": 0.25}}}})
+        _w(
+            tmp,
+            "ruler_lega.json",
+            {
+                "variant": "lega",
+                "results": {"niah_synth": {"256": {"em": "0.5"}, "512": {"em": 0.25}}},
+            },
+        )
         captured = []
-        monkeypatch.setattr(plots.plt, "close",
-                            lambda fig: captured.append(fig))
+        monkeypatch.setattr(plots.plt, "close", lambda fig: captured.append(fig))
         assert fig_ruler(tmp) is True
         assert captured
         ys = captured[0].axes[0].lines[0].get_ydata()
@@ -658,18 +818,23 @@ def test_fig_rate_plots_skip_out_of_range_values():
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "analysis_lega_seed1.json", {
-            "variant": "lega", "seed": 1, "n_records": 10,
-            "p_hit_given_conc": 1e308,
-            "p_hit_given_notconc": 0.25,
-            "misleading_rate": -1.0,
-            "per_head": [
-                {"layer": 0, "head": 0,
-                 "auroc_qterm": 0.6, "auroc_logit": 0.7},
-                {"layer": 0, "head": 1,
-                 "auroc_qterm": 1e308, "auroc_logit": -0.1},
-                {"layer": 0, "head": 2,
-                 "auroc_qterm": 1.5, "auroc_logit": 2.0}]})
+        _w(
+            tmp,
+            "analysis_lega_seed1.json",
+            {
+                "variant": "lega",
+                "seed": 1,
+                "n_records": 10,
+                "p_hit_given_conc": 1e308,
+                "p_hit_given_notconc": 0.25,
+                "misleading_rate": -1.0,
+                "per_head": [
+                    {"layer": 0, "head": 0, "auroc_qterm": 0.6, "auroc_logit": 0.7},
+                    {"layer": 0, "head": 1, "auroc_qterm": 1e308, "auroc_logit": -0.1},
+                    {"layer": 0, "head": 2, "auroc_qterm": 1.5, "auroc_logit": 2.0},
+                ],
+            },
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             assert fig_misleading(tmp) is True
@@ -686,16 +851,28 @@ def test_fig_latency_skips_unplottable_finite_values():
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "latency.json", {"variants": {
-            "lega": {"prefill_ms": {"256": 1e308},
-                     "decode_ms_per_tok": {"256": 1e308}},
-            "standard": {"prefill_ms": {"256": 12.0},
-                         "decode_ms_per_tok": {"256": 0.5}}}})
+        _w(
+            tmp,
+            "latency.json",
+            {
+                "variants": {
+                    "lega": {
+                        "prefill_ms": {"256": 1e308},
+                        "decode_ms_per_tok": {"256": 1e308},
+                    },
+                    "standard": {
+                        "prefill_ms": {"256": 12.0},
+                        "decode_ms_per_tok": {"256": 0.5},
+                    },
+                }
+            },
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             assert fig_latency(tmp) is True
-        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
-                  encoding="utf-8") as f:
+        with open(
+            os.path.join(tmp, "analysis_records_lega.csv"), "w", encoding="utf-8"
+        ) as f:
             f.write("task,g,hit,c,log_n\n")
             for i in range(40):
                 f.write(f"x,0.5,{i % 2},1e308,1e308\n")
@@ -714,8 +891,9 @@ def test_fig_gate_and_calibration_skip_out_of_range_g():
         return
     tmp = tempfile.mkdtemp()
     try:
-        with open(os.path.join(tmp, "analysis_records_lega.csv"), "w",
-                  encoding="utf-8") as f:
+        with open(
+            os.path.join(tmp, "analysis_records_lega.csv"), "w", encoding="utf-8"
+        ) as f:
             f.write("task,g,hit,c,log_n\n")
             for i in range(40):
                 f.write(f"x,1e308,{i % 2},{(i / 40.0) * 10},{i}\n")
@@ -735,14 +913,23 @@ def test_fig_ruler_skips_out_of_range_rates(monkeypatch):
         return
     tmp = tempfile.mkdtemp()
     try:
-        _w(tmp, "ruler_lega.json", {
-            "variant": "lega",
-            "results": {"niah_synth": {
-                "256": {"em": 1e308}, "512": {"em": 0.5},
-                "1024": {"em": -0.2}, "2048": {"em": True}}}})
+        _w(
+            tmp,
+            "ruler_lega.json",
+            {
+                "variant": "lega",
+                "results": {
+                    "niah_synth": {
+                        "256": {"em": 1e308},
+                        "512": {"em": 0.5},
+                        "1024": {"em": -0.2},
+                        "2048": {"em": True},
+                    }
+                },
+            },
+        )
         captured = []
-        monkeypatch.setattr(plots.plt, "close",
-                            lambda fig: captured.append(fig))
+        monkeypatch.setattr(plots.plt, "close", lambda fig: captured.append(fig))
         assert fig_ruler(tmp) is True
         ys = captured[0].axes[0].lines[0].get_ydata()
         assert np.all(np.isfinite(np.asarray(ys, dtype=float))), ys
@@ -761,13 +948,22 @@ def test_fig_auroc_heads_tolerates_non_list_per_head():
     try:
         _w(tmp, "analysis_lega.json", {"per_head": 5})
         assert fig_auroc_heads(tmp) is False
-        _w(tmp, "analysis_lega.json", {"per_head": [
-            {"layer": "x", "head": 0, "auroc_logit": 0.5,
-             "auroc_qterm": 0.4},
-            {"layer": 1, "head": 0, "auroc_logit": 0.6,
-             "auroc_qterm": 0.5},
-            {"layer": 10 ** 400, "head": 0, "auroc_logit": 0.7,
-             "auroc_qterm": 0.6}]})
+        _w(
+            tmp,
+            "analysis_lega.json",
+            {
+                "per_head": [
+                    {"layer": "x", "head": 0, "auroc_logit": 0.5, "auroc_qterm": 0.4},
+                    {"layer": 1, "head": 0, "auroc_logit": 0.6, "auroc_qterm": 0.5},
+                    {
+                        "layer": 10**400,
+                        "head": 0,
+                        "auroc_logit": 0.7,
+                        "auroc_qterm": 0.6,
+                    },
+                ]
+            },
+        )
         assert fig_auroc_heads(tmp) is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -19,6 +19,7 @@
 边界：SHA-256 只能证明“拿到的是同一份字节”，不能证明上游数据本身没有
 污染、偏见或许可问题；`main` 之类的可变 revision 必须由正式实验显式固定。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -112,22 +113,33 @@ def _validate_entry(entry, where: str) -> list:
 
 
 def _entry_key(entry: dict):
-    return (str(entry.get("role")), str(entry.get("path")),
-            str(entry.get("location")), str(entry.get("sha256")))
+    return (
+        str(entry.get("role")),
+        str(entry.get("path")),
+        str(entry.get("location")),
+        str(entry.get("sha256")),
+    )
 
 
 def _canonical_payload(provenance: dict) -> dict:
     files = []
-    for entry in (provenance.get("files") or []):
+    for entry in provenance.get("files") or []:
         if isinstance(entry, dict):
             files.append({k: entry.get(k) for k in _ENTRY_KEYS})
-    files.sort(key=lambda e: (str(e.get("role")), str(e.get("path")),
-                              str(e.get("location")), str(e.get("sha256"))))
+    files.sort(
+        key=lambda e: (
+            str(e.get("role")),
+            str(e.get("path")),
+            str(e.get("location")),
+            str(e.get("sha256")),
+        )
+    )
     urls = provenance.get("urls")
     if isinstance(urls, list):
         urls = sorted(
             [u for u in urls if isinstance(u, dict)],
-            key=lambda u: (str(u.get("name")), str(u.get("url"))))
+            key=lambda u: (str(u.get("name")), str(u.get("url"))),
+        )
     payload = {
         "schema": provenance.get("schema"),
         "source": provenance.get("source"),
@@ -142,19 +154,29 @@ def _canonical_payload(provenance: dict) -> dict:
 
 def manifest_digest(provenance: dict) -> str:
     """规范化 manifest 的内容摘要（不含 digest/时间戳/变更历史本身）。"""
-    raw = json.dumps(_canonical_payload(provenance), sort_keys=True,
-                     ensure_ascii=False, separators=(",", ":"))
+    raw = json.dumps(
+        _canonical_payload(provenance),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def build_source_provenance(source: str, files, revision: str = None,
-                            source_path: str = None, urls=None, api=None,
-                            changes=None, previous_digest: str = None) -> dict:
+def build_source_provenance(
+    source: str,
+    files,
+    revision: str = None,
+    source_path: str = None,
+    urls=None,
+    api=None,
+    changes=None,
+    previous_digest: str = None,
+) -> dict:
     """组装来源 manifest；files 必须已包含原始文件与处理后的 split 文本。"""
     if not isinstance(source, str) or not source.strip():
         raise ValueError(f"source 必须是非空字符串，收到 {source!r}")
-    if revision is not None and (not isinstance(revision, str)
-                                 or not revision.strip()):
+    if revision is not None and (not isinstance(revision, str) or not revision.strip()):
         raise ValueError(f"revision 必须是非空字符串或 None，收到 {revision!r}")
     if source_path is not None and not isinstance(source_path, str):
         raise ValueError(f"source_path 必须是字符串或 None，收到 {source_path!r}")
@@ -176,7 +198,8 @@ def build_source_provenance(source: str, files, revision: str = None,
         "api": api if isinstance(api, dict) else None,
         "files": entries,
         "changes": list(changes) if isinstance(changes, list) else [],
-        "previous_digest": previous_digest if isinstance(previous_digest, str)
+        "previous_digest": previous_digest
+        if isinstance(previous_digest, str)
         else None,
     }
     prov["digest"] = manifest_digest(prov)
@@ -186,6 +209,7 @@ def build_source_provenance(source: str, files, revision: str = None,
 def write_source_manifest(data_dir: str, provenance: dict) -> str:
     """原子写入 data_dir/source_manifest.json，返回路径。"""
     from ..utils import save_json
+
     path = os.path.join(data_dir, SOURCE_MANIFEST_NAME)
     save_json(provenance, path)
     return path
@@ -204,8 +228,9 @@ def load_source_manifest(data_dir: str):
     return manifest if isinstance(manifest, dict) else None
 
 
-def verify_source_provenance(provenance, data_dir: str,
-                             check_external: bool = False) -> list:
+def verify_source_provenance(
+    provenance, data_dir: str, check_external: bool = False
+) -> list:
     """复核 manifest 自洽性，并对仍存在的文件重算 size/SHA-256。
 
     返回问题列表；缺失文件不计为问题（原始下载可能已清理、纯 bin 目录
@@ -215,9 +240,11 @@ def verify_source_provenance(provenance, data_dir: str,
     if not isinstance(provenance, dict):
         return ["source_provenance 不是对象"]
     if provenance.get("schema") != SOURCE_PROVENANCE_SCHEMA:
-        issues.append("source_provenance.schema="
-                      f"{provenance.get('schema')!r} 与当前协议 "
-                      f"{SOURCE_PROVENANCE_SCHEMA} 不一致")
+        issues.append(
+            "source_provenance.schema="
+            f"{provenance.get('schema')!r} 与当前协议 "
+            f"{SOURCE_PROVENANCE_SCHEMA} 不一致"
+        )
     files = provenance.get("files")
     if not isinstance(files, list) or not files:
         return issues + ["source_provenance.files 不是非空列表"]
@@ -257,11 +284,14 @@ def verify_source_provenance(provenance, data_dir: str,
             issues.append(f"files[{i}] 无法读取核对: {e}")
             continue
         if actual_size != entry.get("size"):
-            issues.append(f"files[{i}] 大小与 manifest 不一致: "
-                          f"{actual_size} != {entry.get('size')}")
+            issues.append(
+                f"files[{i}] 大小与 manifest 不一致: "
+                f"{actual_size} != {entry.get('size')}"
+            )
         if actual_sha != entry.get("sha256"):
-            issues.append(f"files[{i}] SHA-256 与 manifest 不一致: "
-                          f"{str(entry.get('path'))}")
+            issues.append(
+                f"files[{i}] SHA-256 与 manifest 不一致: " f"{str(entry.get('path'))}"
+            )
     return issues
 
 
@@ -278,8 +308,10 @@ def verify_source_manifest_file(data_dir: str, provenance: dict) -> list:
     if not isinstance(manifest, dict):
         return [f"{SOURCE_MANIFEST_NAME} 顶层不是对象"]
     if manifest.get("digest") != provenance.get("digest"):
-        return [f"{SOURCE_MANIFEST_NAME} 的 digest 与 data_report 内的 "
-                "source_provenance 不一致（两份来源证据不同版）"]
+        return [
+            f"{SOURCE_MANIFEST_NAME} 的 digest 与 data_report 内的 "
+            "source_provenance 不一致（两份来源证据不同版）"
+        ]
     return []
 
 

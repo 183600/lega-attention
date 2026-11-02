@@ -21,6 +21,7 @@ LEGA 文档里“均匀注意力时 c=0”只说明**均匀分布这一特例**�
 
     python -m lega.length_null --lengths 32,64,128,256,512 --out results/length_null.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,13 +71,15 @@ def _positive_float(value, name: str, *, allow_zero: bool = False) -> float:
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{name} 必须是数值，收到 {value!r}") from exc
     if not math.isfinite(out) or out < 0.0 or (out == 0.0 and not allow_zero):
-        raise ValueError(f"{name} 必须是{'非负' if allow_zero else '正'}有限数值，"
-                         f"收到 {value!r}")
+        raise ValueError(
+            f"{name} 必须是{'非负' if allow_zero else '正'}有限数值，" f"收到 {value!r}"
+        )
     return out
 
 
-def _simulate_concentration(length: int, *, score_sd: float, mode: str,
-                            n_trials: int, seed: int) -> np.ndarray:
+def _simulate_concentration(
+    length: int, *, score_sd: float, mode: str, n_trials: int, seed: int
+) -> np.ndarray:
     rng = np.random.default_rng(seed)
     if mode == "uniform":
         scores = np.zeros((n_trials, length), dtype=np.float64)
@@ -95,9 +98,14 @@ def _simulate_concentration(length: int, *, score_sd: float, mode: str,
     return np.log(float(length)) + np.log(np.maximum(max_p, 1e-300))
 
 
-def simulate_concentration(length: int, *, score_sd: float = 1.0,
-                           mode: str = "random", n_trials: int = 2000,
-                           seed: int = 0) -> np.ndarray:
+def simulate_concentration(
+    length: int,
+    *,
+    score_sd: float = 1.0,
+    mode: str = "random",
+    n_trials: int = 2000,
+    seed: int = 0,
+) -> np.ndarray:
     """返回 ``n_trials`` 个 c = log(n) + log(max softmax p) 样本。"""
     length = _positive_lengths([length])[0]
     score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
@@ -105,17 +113,22 @@ def simulate_concentration(length: int, *, score_sd: float = 1.0,
     if mode not in _MODES:
         raise ValueError(f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
     seed = seed_int(seed, "seed")
-    return _simulate_concentration(length, score_sd=score_sd, mode=mode,
-                                   n_trials=n_trials, seed=seed)
+    return _simulate_concentration(
+        length, score_sd=score_sd, mode=mode, n_trials=n_trials, seed=seed
+    )
 
 
 def _summary(values: np.ndarray) -> dict:
     values = np.asarray(values, dtype=np.float64)
     q = np.quantile(values, [0.05, 0.5, 0.95])
-    return {"mean": float(values.mean()), "std": float(values.std(ddof=1))
-            if values.size > 1 else 0.0,
-            "q05": float(q[0]), "median": float(q[1]), "q95": float(q[2]),
-            "n": int(values.size)}
+    return {
+        "mean": float(values.mean()),
+        "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+        "q05": float(q[0]),
+        "median": float(q[1]),
+        "q95": float(q[2]),
+        "n": int(values.size),
+    }
 
 
 def _slope(lengths: List[int], means: List[float]) -> float | None:
@@ -130,9 +143,14 @@ def _slope(lengths: List[int], means: List[float]) -> float | None:
     return float(((xs - xm) * (ys - ym)).sum() / sxx)
 
 
-def length_null_report(lengths: Iterable[int], *, score_sd: float = 1.0,
-                       modes=("random", "repeated", "uniform"),
-                       n_trials: int = 2000, seed: int = 0) -> dict:
+def length_null_report(
+    lengths: Iterable[int],
+    *,
+    score_sd: float = 1.0,
+    modes=("random", "repeated", "uniform"),
+    n_trials: int = 2000,
+    seed: int = 0,
+) -> dict:
     """对每档长度/每种零假设生成 c 分布，并给出随 log2(n) 的斜率。"""
     lengths = _positive_lengths(lengths)
     modes = tuple(modes)
@@ -141,40 +159,48 @@ def length_null_report(lengths: Iterable[int], *, score_sd: float = 1.0,
     seed = seed_int(seed, "seed")
     for mode in modes:
         if mode not in _MODES:
-            raise ValueError(
-                f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
-    out = {"lengths": lengths, "score_sd": float(score_sd),
-           "n_trials": n_trials, "seed": seed,
-           "modes": {}}
+            raise ValueError(f"mode 必须是 random/repeated/uniform，收到 {mode!r}")
+    out = {
+        "lengths": lengths,
+        "score_sd": float(score_sd),
+        "n_trials": n_trials,
+        "seed": seed,
+        "modes": {},
+    }
     for mode in modes:
         per = {}
         means = []
         for i, n in enumerate(lengths):
             vals = _simulate_concentration(
-                n, score_sd=score_sd, mode=mode, n_trials=n_trials,
-                seed=seed + 1000003 * i)
+                n,
+                score_sd=score_sd,
+                mode=mode,
+                n_trials=n_trials,
+                seed=seed + 1000003 * i,
+            )
             per[str(n)] = _summary(vals)
             means.append(per[str(n)]["mean"])
         slope = _slope(lengths, means)
         out["modes"][mode] = {
             "per_length": per,
             "slope_c_per_log2_n": slope,
-            "length_independent": (
-                None if slope is None
-                else bool(abs(slope) <= 0.05)),
+            "length_independent": (None if slope is None else bool(abs(slope) <= 0.05)),
             "note": (
                 "slope=0 是“c 与长度无关”的必要证据；random 模式不仅凭"
-                "均匀特例就宣称长度解耦。"),
+                "均匀特例就宣称长度解耦。"
+            ),
         }
     return out
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="c 的长度零假设诊断")
-    p.add_argument("--lengths", default="32,64,128,256,512,1024",
-                   help="逗号分隔的正整数长度")
-    p.add_argument("--score_sd", type=float, default=1.0,
-                   help="随机打分标准差（0 表示均匀注意力）")
+    p.add_argument(
+        "--lengths", default="32,64,128,256,512,1024", help="逗号分隔的正整数长度"
+    )
+    p.add_argument(
+        "--score_sd", type=float, default=1.0, help="随机打分标准差（0 表示均匀注意力）"
+    )
     p.add_argument("--modes", default="random,repeated,uniform")
     p.add_argument("--n_trials", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
@@ -182,9 +208,13 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     lengths = [int(x) for x in args.lengths.split(",") if x.strip()]
     modes = [x.strip() for x in args.modes.split(",") if x.strip()]
-    report = length_null_report(lengths, score_sd=args.score_sd,
-                                modes=modes, n_trials=args.n_trials,
-                                seed=args.seed)
+    report = length_null_report(
+        lengths,
+        score_sd=args.score_sd,
+        modes=modes,
+        n_trials=args.n_trials,
+        seed=args.seed,
+    )
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

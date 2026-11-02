@@ -15,6 +15,7 @@
   data_report.json        防泄漏/清洗/漂移诊断报告（含 source_provenance）
   source_manifest.json    原始 URL/revision/文件大小/SHA-256 来源清单
 """
+
 import hashlib
 import json
 import math
@@ -24,19 +25,31 @@ from typing import List
 import numpy as np
 import torch
 
-from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
-                        NEAR_DUP_THRESHOLD, build_data_report,
-                        check_vocab_capacity,
-                        decontaminate_documents, decontaminate_near_duplicates,
-                        decontaminate_texts,
-                        distribution_shift, exact_overlap_alerts,
-                        manifest_digest, ngram_overlap, ngram_overlap_exact,
-                        post_cleanup_residual,
-                        read_test_access_log, sanitize_text,
-                        short_ngram_overlap,
-                        summarize_test_access, text_length_stats,
-                        token_id_range_analysis, token_sequence_stats,
-                        token_stream_stats, unknown_char_rate)
+from .datacheck import (
+    UNK_TOKEN,
+    NEAR_DUP_MIN_CHARS,
+    NEAR_DUP_THRESHOLD,
+    build_data_report,
+    check_vocab_capacity,
+    decontaminate_documents,
+    decontaminate_near_duplicates,
+    decontaminate_texts,
+    distribution_shift,
+    exact_overlap_alerts,
+    manifest_digest,
+    ngram_overlap,
+    ngram_overlap_exact,
+    post_cleanup_residual,
+    read_test_access_log,
+    sanitize_text,
+    short_ngram_overlap,
+    summarize_test_access,
+    text_length_stats,
+    token_id_range_analysis,
+    token_sequence_stats,
+    token_stream_stats,
+    unknown_char_rate,
+)
 from .utils import config_bool, config_finite_float, strict_int
 
 _GPT2_CACHE = {}
@@ -111,8 +124,7 @@ def _bin_hashes_ok(data_dir: str, meta: dict):
     return True
 
 
-def _cache_integrity(data_dir: str, meta: dict, report_path: str,
-                     report_enabled: bool):
+def _cache_integrity(data_dir: str, meta: dict, report_path: str, report_enabled: bool):
     """缓存完整性核对：源文本哈希 + 报告哈希 + bin 内容哈希 + 缓存协议版本。
 
     返回 (ok, issue, has_sources)。缓存命中只核对大小无法发现“txt 改了但
@@ -120,24 +132,32 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str,
     漂移诊断也不再对应当前数据。只要存在源文本就强校验；只分发 bin（无
     任何 txt）的场景无法核对也无法重建，按不可判定放行，由调用方提示。
     """
-    has_sources = any(os.path.exists(os.path.join(data_dir, f"{s}.txt"))
-                      for s in ("train", "val", "test"))
+    has_sources = any(
+        os.path.exists(os.path.join(data_dir, f"{s}.txt"))
+        for s in ("train", "val", "test")
+    )
     bin_ok = _bin_hashes_ok(data_dir, meta)
     if bin_ok is False:
-        return (False, "bin 内容与构建时记录的哈希不一致"
-                       "（被替换/篡改/损坏），重建以恢复与源文本一致的 token 流",
-                False)
+        return (
+            False,
+            "bin 内容与构建时记录的哈希不一致"
+            "（被替换/篡改/损坏），重建以恢复与源文本一致的 token 流",
+            False,
+        )
     if not has_sources:
         # 不可判定放行，并把 no_sources 如实返回给调用方（用于提示与缓存判定）
         return True, None, True
     try:
-        cache_schema = strict_int(meta.get("cache_schema", 0),
-                                  "meta.cache_schema")
+        cache_schema = strict_int(meta.get("cache_schema", 0), "meta.cache_schema")
     except (TypeError, ValueError, OverflowError):
         cache_schema = -1
     if cache_schema != CACHE_SCHEMA:
-        return (False, "缓存由旧版数据管线生成（无版本/源哈希记录），"
-                       "重建以应用最新清洗与去污染协议", False)
+        return (
+            False,
+            "缓存由旧版数据管线生成（无版本/源哈希记录），"
+            "重建以应用最新清洗与去污染协议",
+            False,
+        )
     if bin_ok is None:
         return False, "缓存未记录 bin 内容哈希，无法确认 bin 未被替换", False
     recorded = meta.get("source_sha256")
@@ -218,6 +238,7 @@ class CharTokenizer:
 def get_gpt2_tokenizer() -> GPT2Tokenizer:
     if "tok" not in _GPT2_CACHE:
         import tiktoken
+
         _GPT2_CACHE["tok"] = GPT2Tokenizer(tiktoken.get_encoding("gpt2"))
     return _GPT2_CACHE["tok"]
 
@@ -234,7 +255,8 @@ def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
     """
     if not isinstance(kind, str) or kind not in ("gpt2", "auto", "char"):
         raise ValueError(
-            f"tokenizer kind 必须是 'gpt2'/'auto'/'char' 之一，收到 {kind!r}")
+            f"tokenizer kind 必须是 'gpt2'/'auto'/'char' 之一，收到 {kind!r}"
+        )
     if kind in ("gpt2", "auto"):
         try:
             return get_gpt2_tokenizer()
@@ -244,11 +266,14 @@ def get_tokenizer(kind: str, train_text: str = "", val_text: str = ""):
             print(f"[data] tiktoken 不可用({e})，退化为字符级分词")
     chars = sorted(set(train_text))
     if not chars:
-        chars = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,\n")
+        chars = list(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,\n"
+        )
     return CharTokenizer(chars, add_unk=True)
 
 
 # ---------------------------------------------------------------- bin 缓存
+
 
 def tokenizer_fit_source_ok(tokenizer, fit_on) -> bool:
     """分词器种类与 fit_on 声明必须匹配。
@@ -261,14 +286,20 @@ def tokenizer_fit_source_ok(tokenizer, fit_on) -> bool:
     """
     if tokenizer in (None, ""):
         return fit_on in ("train", "gpt2_pretrained")
-    return ((str(tokenizer) == "char" and fit_on == "train")
-            or (str(tokenizer) == "gpt2_bpe" and fit_on == "gpt2_pretrained"))
+    return (str(tokenizer) == "char" and fit_on == "train") or (
+        str(tokenizer) == "gpt2_bpe" and fit_on == "gpt2_pretrained"
+    )
 
 
-def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
-                 report: bool = True, extra_report: dict = None,
-                 near_dup_threshold: float = NEAR_DUP_THRESHOLD,
-                 near_dup_min_chars: int = NEAR_DUP_MIN_CHARS) -> dict:
+def prepare_bins(
+    data_dir: str,
+    kind: str = "auto",
+    force: bool = False,
+    report: bool = True,
+    extra_report: dict = None,
+    near_dup_threshold: float = NEAR_DUP_THRESHOLD,
+    near_dup_min_chars: int = NEAR_DUP_MIN_CHARS,
+) -> dict:
     """把 train.txt/val.txt（以及若存在的 test.txt）编码为 uint16 bin
     （已存在则跳过，force=True 重建）。
 
@@ -287,20 +318,23 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 就命中旧缓存，绕过校验并把不同口径的 bin 静默复用。
     if isinstance(near_dup_threshold, (bool, np.bool_)):
         raise ValueError(
-            f"near_dup_threshold 必须是 (0,1] 内的数值，收到 {near_dup_threshold!r}")
+            f"near_dup_threshold 必须是 (0,1] 内的数值，收到 {near_dup_threshold!r}"
+        )
     try:
         near_dup_threshold = config_finite_float(
-            near_dup_threshold, "near_dup_threshold")
+            near_dup_threshold, "near_dup_threshold"
+        )
     except (TypeError, ValueError, OverflowError) as e:
         raise ValueError(
-            f"near_dup_threshold 必须是 (0,1] 内的数值，收到 {near_dup_threshold!r}") from e
+            f"near_dup_threshold 必须是 (0,1] 内的数值，收到 {near_dup_threshold!r}"
+        ) from e
     if not 0.0 < near_dup_threshold <= 1.0:
         raise ValueError(
-            f"near_dup_threshold 必须在 (0,1] 内，收到 {near_dup_threshold!r}")
+            f"near_dup_threshold 必须在 (0,1] 内，收到 {near_dup_threshold!r}"
+        )
     near_dup_min_chars = strict_int(near_dup_min_chars, "near_dup_min_chars")
     if near_dup_min_chars < 1:
-        raise ValueError(
-            f"near_dup_min_chars 必须 >= 1，收到 {near_dup_min_chars!r}")
+        raise ValueError(f"near_dup_min_chars 必须 >= 1，收到 {near_dup_min_chars!r}")
     meta_path = os.path.join(data_dir, "meta.json")
     report_path = os.path.join(data_dir, "data_report.json")
     train_bin = os.path.join(data_dir, "train.bin")
@@ -308,8 +342,12 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     test_txt_path = os.path.join(data_dir, "test.txt")
     has_test_txt = os.path.exists(test_txt_path)
     test_bin = os.path.join(data_dir, "test.bin")
-    if (os.path.exists(meta_path) and os.path.exists(train_bin)
-            and os.path.exists(val_bin) and not force):
+    if (
+        os.path.exists(meta_path)
+        and os.path.exists(train_bin)
+        and os.path.exists(val_bin)
+        and not force
+    ):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
@@ -335,25 +373,29 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         if isinstance(cached_near, dict):
             try:
                 cached_threshold = config_finite_float(
-                    cached_near.get("threshold"), "meta.near_dup.threshold")
+                    cached_near.get("threshold"), "meta.near_dup.threshold"
+                )
                 cached_min_chars = strict_int(
-                    cached_near.get("min_chars"), "meta.near_dup.min_chars")
+                    cached_near.get("min_chars"), "meta.near_dup.min_chars"
+                )
                 near_ok = (
                     cached_threshold == near_dup_threshold
-                    and cached_min_chars == near_dup_min_chars)
+                    and cached_min_chars == near_dup_min_chars
+                )
             except (TypeError, ValueError, OverflowError):
                 near_ok = False
         # 旧缓存可能是在 val/test 上拟合词表（泄露）或缺少防泄漏报告，必须重建
-        fit_ok = tokenizer_fit_source_ok(meta.get("tokenizer"),
-                                         meta.get("fit_on"))
+        fit_ok = tokenizer_fit_source_ok(meta.get("tokenizer"), meta.get("fit_on"))
         integrity_ok, integrity_issue, no_sources = _cache_integrity(
-            data_dir, meta, report_path, report)
+            data_dir, meta, report_path, report
+        )
         # 原始来源身份：仅当本次调用显式携带 provenance 时核对。没有来源
         # 证据的旧调用（例如只对已有 txt 直接 prepare_bins）不应被误判。
         expected_prov_digest = _source_provenance_digest(extra_report)
-        prov_ok = (expected_prov_digest is None
-                   or meta.get("source_provenance_digest")
-                   == expected_prov_digest)
+        prov_ok = (
+            expected_prov_digest is None
+            or meta.get("source_provenance_digest") == expected_prov_digest
+        )
         if no_sources:
             # 纯 bin 目录无法重建，也无法核对近似去污染参数/源哈希；与
             # _cache_integrity 的“不可判定放行”同口径，保留旧行为并让
@@ -380,23 +422,33 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             except (OverflowError, ValueError):
                 return -1
 
-        train_valid = (os.path.getsize(train_bin)
-                       == _meta_int("train_tokens") * 2)
-        val_valid = (os.path.getsize(val_bin)
-                     == _meta_int("val_tokens") * 2)
+        train_valid = os.path.getsize(train_bin) == _meta_int("train_tokens") * 2
+        val_valid = os.path.getsize(val_bin) == _meta_int("val_tokens") * 2
         # 无源 txt（纯 bin 数据目录）时无法判定 test.bin 是否对应缺失的
         # test.txt：显式保留 test.bin 视为有效，否则该场景会在重建路径上
         # 因缺少 train.txt 直接报错。
-        test_valid = (not has_test_txt and (
-            no_sources or not os.path.exists(test_bin))) or (
+        test_valid = (
+            not has_test_txt and (no_sources or not os.path.exists(test_bin))
+        ) or (
             has_test_txt
             and os.path.exists(test_bin)
-            and os.path.getsize(test_bin) == _meta_int("test_tokens") * 2)
-        if (cached_kind == kind or kind == "auto") and train_valid and val_valid \
-                and test_valid and fit_ok and near_ok and integrity_ok and prov_ok:
+            and os.path.getsize(test_bin) == _meta_int("test_tokens") * 2
+        )
+        if (
+            (cached_kind == kind or kind == "auto")
+            and train_valid
+            and val_valid
+            and test_valid
+            and fit_ok
+            and near_ok
+            and integrity_ok
+            and prov_ok
+        ):
             if no_sources:
-                print("[data] 警告：数据目录只有 bin 没有源 txt，"
-                      "无法核对缓存与源文本一致性（按不可判定放行）")
+                print(
+                    "[data] 警告：数据目录只有 bin 没有源 txt，"
+                    "无法核对缓存与源文本一致性（按不可判定放行）"
+                )
             if kind == "auto":
                 # auto 的实际分词器取决于当前环境（tiktoken 是否可用），
                 # 直接复用缓存可能与本应使用的分词器不一致，必须提示。
@@ -405,8 +457,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                 except Exception:
                     now_tok = "char"
                 if meta.get("tokenizer") != now_tok:
-                    print(f"[data] 警告：kind=auto 复用了 {meta.get('tokenizer')} 缓存，"
-                          f"但当前环境 auto 将使用 {now_tok}；如需一致请 force=True 重建")
+                    print(
+                        f"[data] 警告：kind=auto 复用了 {meta.get('tokenizer')} 缓存，"
+                        f"但当前环境 auto 将使用 {now_tok}；如需一致请 force=True 重建"
+                    )
             return meta
         if not (train_valid and val_valid and test_valid):
             print("[data] 缓存 bin/meta 大小不一致，重建 bin")
@@ -417,8 +471,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         elif not integrity_ok:
             print(f"[data] {integrity_issue}，重建 bin")
         elif not prov_ok:
-            print("[data] 原始来源 provenance 与缓存身份不一致（来源已更新），"
-                  "重建 bin 以更新报告")
+            print(
+                "[data] 原始来源 provenance 与缓存身份不一致（来源已更新），"
+                "重建 bin 以更新报告"
+            )
         else:
             print(f"[data] 缓存分词方式({cached_kind})与请求({kind})不一致，重建 bin")
 
@@ -445,47 +501,63 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 行级删除会改变块结构：删掉块中的长行后，剩余短行可能恰好重新拼成
     # 与 val/test 完全相同的多行块。只做“先块后行”会漏掉这种新生成的
     # 副本，因此行级确有删除时再跑一遍块级去污染（只会继续删，必然终止）。
-    line_dropped = sum(duplicate_stats[k] for k in (
-        "train_lines_dropped_as_duplicates_of_eval",
-        "train_lines_dropped_as_normalized_duplicates_of_eval",
-        "train_intra_split_duplicate_lines_removed",
-        "train_intra_split_normalized_duplicate_lines_removed"))
+    line_dropped = sum(
+        duplicate_stats[k]
+        for k in (
+            "train_lines_dropped_as_duplicates_of_eval",
+            "train_lines_dropped_as_normalized_duplicates_of_eval",
+            "train_intra_split_duplicate_lines_removed",
+            "train_intra_split_normalized_duplicate_lines_removed",
+        )
+    )
     if line_dropped:
         texts, post_doc_stats = decontaminate_documents(texts)
-        for key in ("train_blocks_dropped_as_duplicates_of_eval",
-                    "train_intra_split_duplicate_blocks_removed",
-                    "train_lines_dropped", "train_chars_dropped"):
-            document_stats[key] = (int(document_stats.get(key, 0))
-                                   + int(post_doc_stats.get(key, 0)))
+        for key in (
+            "train_blocks_dropped_as_duplicates_of_eval",
+            "train_intra_split_duplicate_blocks_removed",
+            "train_lines_dropped",
+            "train_chars_dropped",
+        ):
+            document_stats[key] = int(document_stats.get(key, 0)) + int(
+                post_doc_stats.get(key, 0)
+            )
     duplicate_stats["document_level"] = document_stats
     # 近似重复去污染：精确行/块去重只能抓住逐字节（或仅空白/NFKC 差异）
     # 的复制；改了几个词的副本仍会让 train 记住 val/test 的内容、并在 train
     # 内部放大同一段文本的权重。阈值是协议参数（0.80），报告同时给出
     # 0.70/0.80/0.90 三档敏感性与 LSH 理论召回率，删除量对阈值的依赖可见。
     texts, near_stats = decontaminate_near_duplicates(
-        texts, threshold=near_dup_threshold, min_chars=near_dup_min_chars)
+        texts, threshold=near_dup_threshold, min_chars=near_dup_min_chars
+    )
     duplicate_stats["near_duplicate"] = near_stats
     if near_stats["train_blocks_dropped_total"]:
-        print(f"[data] 近似重复去污染：从 train 移除 "
-              f"{near_stats['train_blocks_dropped_as_near_duplicates_of_eval']:,} "
-              f"个与 val/test 近似的块、"
-              f"{near_stats['train_intra_split_near_duplicates_removed']:,} 个 "
-              f"train 内部近似重复块（共 {near_stats['train_lines_dropped']:,} 行；"
-              "val/test 不改写）")
+        print(
+            f"[data] 近似重复去污染：从 train 移除 "
+            f"{near_stats['train_blocks_dropped_as_near_duplicates_of_eval']:,} "
+            f"个与 val/test 近似的块、"
+            f"{near_stats['train_intra_split_near_duplicates_removed']:,} 个 "
+            f"train 内部近似重复块（共 {near_stats['train_lines_dropped']:,} 行；"
+            "val/test 不改写）"
+        )
         # 删除整块可能让相邻块合并成新的精确副本；再跑一次精确块去重到
         # 不动点。结果单列，避免把“近似去重后的补充清理”混进首轮统计。
         texts, post_doc_stats = decontaminate_documents(texts)
-        for key in ("train_blocks_dropped_as_duplicates_of_eval",
-                    "train_intra_split_duplicate_blocks_removed",
-                    "train_lines_dropped", "train_chars_dropped"):
-            document_stats[key] = (int(document_stats.get(key, 0))
-                                   + int(post_doc_stats.get(key, 0)))
+        for key in (
+            "train_blocks_dropped_as_duplicates_of_eval",
+            "train_intra_split_duplicate_blocks_removed",
+            "train_lines_dropped",
+            "train_chars_dropped",
+        ):
+            document_stats[key] = int(document_stats.get(key, 0)) + int(
+                post_doc_stats.get(key, 0)
+            )
         duplicate_stats["post_near_dup_exact_cleanup"] = post_doc_stats
     # 清洗后复核：不只报告“删了多少”，还要证明最终 train 里没有残留的
     # 精确/归一化跨 split 长行或多行块。该核对不改写任何 split，失败只
     # 触发告警（供下游硬闸门/人工复核），不会静默放过。
     duplicate_stats["post_cleanup"] = post_cleanup_residual(
-        texts, min_chars=40, min_lines=2)
+        texts, min_chars=40, min_lines=2
+    )
     # 近似去污染是自动改写训练集，必须防止“阈值/语料异常导致 train 被删空”
     # 被当成一次正常实验静默跑完：>90% 或删空直接失败，要求人工核查。
     if near_stats["removal_fraction_chars"] > 0.90:
@@ -493,44 +565,55 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
             "近似重复去污染将移除 train 可用字符的 "
             f"{near_stats['removal_fraction_chars']:.1%}（>90%）：语料可能"
             "高度重复或阈值过宽，拒绝静默产出几乎为空的训练集；请核查 "
-            "data_report 的 duplicates.near_duplicate 或调整协议阈值")
+            "data_report 的 duplicates.near_duplicate 或调整协议阈值"
+        )
     if near_stats["train_blocks_dropped_total"] and not texts["train"].strip():
         raise ValueError(
             "近似重复去污染后 train 为空：所有训练块都被判为 val/test 的"
-            "近似副本；请核查去污染证据后再决定是否调整阈值/划分")
+            "近似副本；请核查去污染证据后再决定是否调整阈值/划分"
+        )
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
     # 原文此后只由局部变量引用：逐段编码完即释放
     del texts
-    n_doc_cross = document_stats[
-        "train_blocks_dropped_as_duplicates_of_eval"]
-    n_doc_intra = document_stats[
-        "train_intra_split_duplicate_blocks_removed"]
+    n_doc_cross = document_stats["train_blocks_dropped_as_duplicates_of_eval"]
+    n_doc_intra = document_stats["train_intra_split_duplicate_blocks_removed"]
     if n_doc_cross or n_doc_intra:
-        print(f"[data] 块级去污染：从 train 移除 {n_doc_cross:,} 个与 val/test "
-              f"重复的多行块、{n_doc_intra:,} 个内部重复块"
-              f"（共 {document_stats['train_lines_dropped']:,} 行；"
-              "val/test 不改写）")
+        print(
+            f"[data] 块级去污染：从 train 移除 {n_doc_cross:,} 个与 val/test "
+            f"重复的多行块、{n_doc_intra:,} 个内部重复块"
+            f"（共 {document_stats['train_lines_dropped']:,} 行；"
+            "val/test 不改写）"
+        )
     if document_stats["val_test_overlap_blocks"]:
-        print(f"[data] 警告：val 与 test 有 "
-              f"{document_stats['val_test_overlap_blocks']:,} 个多行块重复"
-              "（两侧均未改写；val 选型对 test 的独立性下降）")
-    n_cross = (duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]
-               + duplicate_stats[
-                   "train_lines_dropped_as_normalized_duplicates_of_eval"])
-    n_intra = (duplicate_stats[
-                   "train_intra_split_duplicate_lines_removed"]
-               + duplicate_stats[
-                   "train_intra_split_normalized_duplicate_lines_removed"])
+        print(
+            f"[data] 警告：val 与 test 有 "
+            f"{document_stats['val_test_overlap_blocks']:,} 个多行块重复"
+            "（两侧均未改写；val 选型对 test 的独立性下降）"
+        )
+    n_cross = (
+        duplicate_stats["train_lines_dropped_as_duplicates_of_eval"]
+        + duplicate_stats["train_lines_dropped_as_normalized_duplicates_of_eval"]
+    )
+    n_intra = (
+        duplicate_stats["train_intra_split_duplicate_lines_removed"]
+        + duplicate_stats["train_intra_split_normalized_duplicate_lines_removed"]
+    )
     if n_cross:
-        print(f"[data] 去污染：从 train 移除 {n_cross:,} 条与 val/test "
-              "重复（精确/空白归一化）的长行")
+        print(
+            f"[data] 去污染：从 train 移除 {n_cross:,} 条与 val/test "
+            "重复（精确/空白归一化）的长行"
+        )
     if n_intra:
-        print(f"[data] 去重：从 train 移除 {n_intra:,} 条内部重复长行"
-              "（保留首次出现；val/test 不改写）")
+        print(
+            f"[data] 去重：从 train 移除 {n_intra:,} 条内部重复长行"
+            "（保留首次出现；val/test 不改写）"
+        )
     if duplicate_stats["val_test_overlap_long_lines"]:
-        print(f"[data] 警告：val 与 test 有 "
-              f"{duplicate_stats['val_test_overlap_long_lines']:,} 条长行重复"
-              "（两侧均未改写；val 选型对 test 的独立性下降）")
+        print(
+            f"[data] 警告：val 与 test 有 "
+            f"{duplicate_stats['val_test_overlap_long_lines']:,} 条长行重复"
+            "（两侧均未改写；val 选型对 test 的独立性下降）"
+        )
 
     # 2) 分词器只在 train 上拟合；3) val/test 只做 transform
     tok = get_tokenizer(kind, train_text)
@@ -542,8 +625,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
         if txt is not None:
             unk_rates[name] = unknown_char_rate(tok, txt)
     if unk_rates.get("test") is not None and unk_rates["test"] > 0.001:
-        print(f"[data] 提示：test 字符级 OOV 率 {unk_rates['test']:.4%}，"
-              "未见字符映射 <unk>（词表只用 train 拟合，防止泄露）")
+        print(
+            f"[data] 提示：test 字符级 OOV 率 {unk_rates['test']:.4%}，"
+            "未见字符映射 <unk>（词表只用 train 拟合，防止泄露）"
+        )
 
     def encode_stream(text: str) -> np.ndarray:
         parts: List[np.ndarray] = []
@@ -563,7 +648,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                 if arr.dtype.kind not in "iu":
                     raise ValueError(
                         f"分词器返回非整数 token（dtype={arr.dtype}），"
-                        f"拒绝编码 {pos}:{end}")
+                        f"拒绝编码 {pos}:{end}"
+                    )
                 wide = arr.astype(np.int64)
                 lo, hi = int(wide.min()), int(wide.max())
                 if lo < 0 or hi > 65535:
@@ -571,7 +657,8 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                     # token_stream_stats 只看到合法 id，脏数据被静默接受。
                     raise ValueError(
                         f"token id 越界 uint16（min={lo}, max={hi}，"
-                        f"分块 {pos}:{end}）：拒绝静默环绕，请检查分词器/词表")
+                        f"分块 {pos}:{end}）：拒绝静默环绕，请检查分词器/词表"
+                    )
                 parts.append(wide.astype(np.uint16))
             else:
                 parts.append(np.zeros(0, dtype=np.uint16))
@@ -605,44 +692,48 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     ignore_ids = None
     if tok.name == "char" and UNK_TOKEN in getattr(tok, "stoi", {}):
         ignore_ids = {int(tok.unk_id)}
-    contamination = {"train_val": ngram_overlap(
-        tr, va, ignore_ids=ignore_ids)}
+    contamination = {"train_val": ngram_overlap(tr, va, ignore_ids=ignore_ids)}
     # 短 n-gram 筛查：64-gram 会漏掉“整句/整段复用但 <64 token”的模板化泄露；
     # 短 n 更易命中自然搭配，因此只作诊断告警（见 leakage_alerts）。
-    contamination_short = {"train_val": short_ngram_overlap(
-        tr, va, ignore_ids=ignore_ids)}
+    contamination_short = {
+        "train_val": short_ngram_overlap(tr, va, ignore_ids=ignore_ids)
+    }
     # 采样 64-gram 重叠只是下界：train/eval 两侧都可能漏抽。这里对 train
     # 全量扫描、eval 默认全窗口检查，命中后再逐字节复核，结论不再依赖随机
     # 采样；OOV 窗口仍按 ignore_ids 排除，避免 <unk> 碰撞被当成复制。
-    contamination_exact = {"train_val": ngram_overlap_exact(
-        tr, va, ignore_ids=ignore_ids)}
+    contamination_exact = {
+        "train_val": ngram_overlap_exact(tr, va, ignore_ids=ignore_ids)
+    }
     distribution = {"val_vs_train": distribution_shift(tr, va, tok.n_vocab)}
     if te is not None:
-        contamination["train_test"] = ngram_overlap(
-            tr, te, ignore_ids=ignore_ids)
+        contamination["train_test"] = ngram_overlap(tr, te, ignore_ids=ignore_ids)
         # eval 两侧也要互查：val 用于选 checkpoint，test 用于最终报告；
         # 二者若有共享片段，val 选择会部分“预演”test，test 不再独立。
-        contamination["val_test"] = ngram_overlap(
-            va, te, ignore_ids=ignore_ids)
+        contamination["val_test"] = ngram_overlap(va, te, ignore_ids=ignore_ids)
         contamination_short["train_test"] = short_ngram_overlap(
-            tr, te, ignore_ids=ignore_ids)
+            tr, te, ignore_ids=ignore_ids
+        )
         contamination_short["val_test"] = short_ngram_overlap(
-            va, te, ignore_ids=ignore_ids)
+            va, te, ignore_ids=ignore_ids
+        )
         contamination_exact["train_test"] = ngram_overlap_exact(
-            tr, te, ignore_ids=ignore_ids)
+            tr, te, ignore_ids=ignore_ids
+        )
         contamination_exact["val_test"] = ngram_overlap_exact(
-            va, te, ignore_ids=ignore_ids, reference_split="val")
+            va, te, ignore_ids=ignore_ids, reference_split="val"
+        )
         distribution["test_vs_train"] = distribution_shift(tr, te, tok.n_vocab)
         distribution["test_vs_val"] = distribution_shift(va, te, tok.n_vocab)
     tokenizer_report = {
         "kind": tok.name,
         "fit_on": "train" if tok.name == "char" else "gpt2_pretrained",
         "vocab_size": int(tok.n_vocab),
-        "unk_token": (UNK_TOKEN if getattr(tok, "stoi", {}).get(UNK_TOKEN)
-                      is not None else None),
+        "unk_token": (
+            UNK_TOKEN if getattr(tok, "stoi", {}).get(UNK_TOKEN) is not None else None
+        ),
         "unk_rate": {k: v for k, v in unk_rates.items() if v is not None},
     }
-    
+
     # 收集额外的 token 分布诊断指标
     range_analysis = {}
     sequence_stats = {}
@@ -659,14 +750,18 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                 sequence_stats[name] = ss
         except Exception:
             pass
-    
+
     data_report = build_data_report(
-        tokenizer=tokenizer_report, splits=stream_stats,
-        sanitization=sanitization, duplicates=duplicate_stats,
+        tokenizer=tokenizer_report,
+        splits=stream_stats,
+        sanitization=sanitization,
+        duplicates=duplicate_stats,
         contamination={k: v for k, v in contamination.items()},
         distribution={k: v for k, v in distribution.items()},
-        text_stats=text_stats, extra=extra_report)
-    
+        text_stats=text_stats,
+        extra=extra_report,
+    )
+
     # 额外写入 token 分布诊断
     data_report["token_range_analysis"] = range_analysis
     data_report["token_sequence_stats"] = sequence_stats
@@ -675,6 +770,7 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     data_report["contamination_short_ngram"] = contamination_short
     data_report["contamination_exact"] = contamination_exact
     from .datacheck import short_overlap_alerts
+
     _salerts = short_overlap_alerts(contamination_short)
     if _salerts:
         data_report["alerts"] = list(data_report.get("alerts") or []) + _salerts
@@ -686,15 +782,20 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 读取，不用于任何选择）。显式记录，避免账本 0 次被误读成“test 从未被碰”。
     data_report["test_reads_at_prep"] = {
         "encoded": bool(te is not None),
-        "purpose": ("编码 test.bin + 跨 split 精确/采样 n-gram 重叠、"
-                    "全量精确 n-gram 扫描、近似重复与分布漂移诊断（模型无关）"),
+        "purpose": (
+            "编码 test.bin + 跨 split 精确/采样 n-gram 重叠、"
+            "全量精确 n-gram 扫描、近似重复与分布漂移诊断（模型无关）"
+        ),
         "used_for_selection": False,
     }
-    data_report["test_access"] = summarize_test_access(
-        read_test_access_log(data_dir))
+    data_report["test_access"] = summarize_test_access(read_test_access_log(data_dir))
 
     # 原子替换：重建中断时不会让旧 meta 搭配半成品 bin 继续被当作有效缓存。
-    train_tmp, val_tmp, meta_tmp = train_bin + ".tmp", val_bin + ".tmp", meta_path + ".tmp"
+    train_tmp, val_tmp, meta_tmp = (
+        train_bin + ".tmp",
+        val_bin + ".tmp",
+        meta_path + ".tmp",
+    )
     tr.tofile(train_tmp)
     va.tofile(val_tmp)
     # bin 内容哈希：缓存命中时据此确认二进制流本身未被同尺寸替换/篡改，
@@ -707,21 +808,29 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     # 源文本指纹：缓存命中时据此确认 bin 确实由当前 train/val/test.txt 构建，
     # 防止“txt 改了但 bins 没重建”的静默过期（防泄漏报告也会随之失真）。
     source_sha256 = {}
-    for split, path in (("train", os.path.join(data_dir, "train.txt")),
-                        ("val", os.path.join(data_dir, "val.txt")),
-                        ("test", test_txt_path)):
+    for split, path in (
+        ("train", os.path.join(data_dir, "train.txt")),
+        ("val", os.path.join(data_dir, "val.txt")),
+        ("test", test_txt_path),
+    ):
         if os.path.exists(path):
             source_sha256[split] = _sha256_file(path)
-    meta = {"tokenizer": tok.name, "requested_kind": kind,
-            "vocab_size": tok.n_vocab,
-            "fit_on": tokenizer_report["fit_on"],
-            "text_sanitized": True,
-            "cache_schema": int(CACHE_SCHEMA),
-            "source_sha256": source_sha256,
-            "bin_sha256": bin_sha256,
-            "near_dup": {"threshold": float(near_dup_threshold),
-                         "min_chars": int(near_dup_min_chars)},
-            "train_tokens": int(tr.size), "val_tokens": int(va.size)}
+    meta = {
+        "tokenizer": tok.name,
+        "requested_kind": kind,
+        "vocab_size": tok.n_vocab,
+        "fit_on": tokenizer_report["fit_on"],
+        "text_sanitized": True,
+        "cache_schema": int(CACHE_SCHEMA),
+        "source_sha256": source_sha256,
+        "bin_sha256": bin_sha256,
+        "near_dup": {
+            "threshold": float(near_dup_threshold),
+            "min_chars": int(near_dup_min_chars),
+        },
+        "train_tokens": int(tr.size),
+        "val_tokens": int(va.size),
+    }
     if te is not None:
         meta["test_tokens"] = int(te.size)
     prov_digest = _source_provenance_digest(extra_report)
@@ -775,8 +884,7 @@ def load_meta(data_dir: str) -> dict:
     except ValueError as e:
         raise ValueError(f"{path} 不是合法 JSON: {e}") from e
     if not isinstance(meta, dict):
-        raise ValueError(
-            f"{path} 顶层不是 JSON 对象（实际为 {type(meta).__name__}）")
+        raise ValueError(f"{path} 顶层不是 JSON 对象（实际为 {type(meta).__name__}）")
     return meta
 
 
@@ -785,22 +893,29 @@ def load_tokenizer(data_dir: str):
     kind = meta.get("tokenizer")
     if not isinstance(kind, str) or not kind:
         raise ValueError(
-            f"{os.path.join(data_dir, 'meta.json')} 缺少合法的 tokenizer 字段")
+            f"{os.path.join(data_dir, 'meta.json')} 缺少合法的 tokenizer 字段"
+        )
     if kind == "gpt2_bpe":
         return get_gpt2_tokenizer()
     if kind != "char":
         raise ValueError(
             f"{os.path.join(data_dir, 'meta.json')} 的 tokenizer={kind!r} 未知："
-            "只支持 'gpt2_bpe' 或 'char'（未知类型不能静默按字符级重建）")
+            "只支持 'gpt2_bpe' 或 'char'（未知类型不能静默按字符级重建）"
+        )
     itos = meta.get("itos")
-    if not isinstance(itos, list) or not itos or not all(
-            isinstance(ch, str) for ch in itos):
+    if (
+        not isinstance(itos, list)
+        or not itos
+        or not all(isinstance(ch, str) for ch in itos)
+    ):
         raise ValueError(
-            f"{os.path.join(data_dir, 'meta.json')} 的 itos 不是非空字符串数组")
+            f"{os.path.join(data_dir, 'meta.json')} 的 itos 不是非空字符串数组"
+        )
     # 新缓存显式携带 <unk>（char_unk=True）；旧缓存没有该标记，按原编码方式
     # 重建（未知字符→0），保证与旧 bin 的 id 一一对应。
     return CharTokenizer(
-        itos, add_unk=config_bool(meta.get("char_unk", False), "char_unk"))
+        itos, add_unk=config_bool(meta.get("char_unk", False), "char_unk")
+    )
 
 
 def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
@@ -815,18 +930,20 @@ def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
     # 或绝对路径都会绕过上面的 `split == "test"` 尘封闸门（os.path.join 对
     # 绝对路径还会丢弃 data_dir）。只允许数据协议定义的三个 split。
     if not isinstance(split, str) or split not in ("train", "val", "test"):
-        raise ValueError(
-            f"split 必须是 'train'/'val'/'test' 之一，收到 {split!r}")
+        raise ValueError(f"split 必须是 'train'/'val'/'test' 之一，收到 {split!r}")
     if split == "test" and allow_test is not True:
         # 只接受真正的 bool True：字符串 "false"、1 等真值若按 truthiness
         # 放行，会把“显式开锁”的闸门变成任何非空值都能绕过。
         raise PermissionError(
             "测试集已尘封：load_bin(split='test') 需显式 allow_test=True"
             "（不接受非布尔真值）；test 只用于最终一次性评估"
-            "（lega.evaluate 会写访问账本），训练/调参/选型不得读取")
+            "（lega.evaluate 会写访问账本），训练/调参/选型不得读取"
+        )
     path = os.path.join(data_dir, f"{split}.bin")
     if not os.path.exists(path) or os.path.getsize(path) == 0:
-        raise FileNotFoundError(f"{path} 不存在或为空，请先运行 prepare_bins / prepare_data.py")
+        raise FileNotFoundError(
+            f"{path} 不存在或为空，请先运行 prepare_bins / prepare_data.py"
+        )
     meta_path = os.path.join(data_dir, "meta.json")
     if os.path.exists(meta_path):
         meta = load_meta(data_dir)
@@ -837,7 +954,8 @@ def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:
             if _sha256_file(path) != recorded[split]:
                 raise ValueError(
                     f"{path} 内容与 meta.json 记录的 bin 哈希不一致："
-                    "bin 被替换/篡改/损坏，请重新运行 prepare_bins 重建")
+                    "bin 被替换/篡改/损坏，请重新运行 prepare_bins 重建"
+                )
     return np.memmap(path, dtype=np.uint16, mode="r")
 
 
@@ -880,22 +998,27 @@ def _stage_to_device(src, device: str) -> torch.Tensor:
         tdtype = torch.from_numpy(np.empty(0, dtype=dtype)).dtype
         slot_bytes = torch.empty(0, dtype=tdtype).element_size()
         slot_bytes *= 2 * int(np.prod(shape, dtype=np.int64))
-        if (len(_H2D_STAGE) < 32
-                and _H2D_STAGE_BYTES + slot_bytes <= _H2D_STAGE_MAX_BYTES):
-            slots = [(torch.empty(shape, dtype=tdtype).pin_memory(),
-                      torch.cuda.Event()) for _ in range(2)]
+        if (
+            len(_H2D_STAGE) < 32
+            and _H2D_STAGE_BYTES + slot_bytes <= _H2D_STAGE_MAX_BYTES
+        ):
+            slots = [
+                (torch.empty(shape, dtype=tdtype).pin_memory(), torch.cuda.Event())
+                for _ in range(2)
+            ]
             _H2D_STAGE[key] = slots
             _H2D_TURN[key] = 0
             _H2D_STAGE_BYTES += slot_bytes
         else:
             arr = np.take(src[0], src[1]) if is_span else src
             out = torch.from_numpy(np.ascontiguousarray(arr)).to(
-                device, non_blocking=True)
+                device, non_blocking=True
+            )
             return out if out.dtype == torch.int64 else out.long()
     turn = _H2D_TURN[key]
     buf, ev = slots[turn]
     _H2D_TURN[key] = 1 - turn
-    ev.synchronize()                # 等待该槽上一轮的 H2D 拷贝读完 buf
+    ev.synchronize()  # 等待该槽上一轮的 H2D 拷贝读完 buf
     if is_span:
         # memmap 花式索引进 pinned 缓冲的 np 视图
         np.take(src[0], src[1], out=buf.numpy())
@@ -937,8 +1060,14 @@ def _make_span(rows: np.ndarray, ctx: int) -> np.ndarray:
     return buf
 
 
-def get_train_batch(train: np.memmap, ctx: int, batch_size: int, device: str,
-                    rng: np.random.Generator, order_hasher=None):
+def get_train_batch(
+    train: np.memmap,
+    ctx: int,
+    batch_size: int,
+    device: str,
+    rng: np.random.Generator,
+    order_hasher=None,
+):
     """随机偏移采样 (x, y)，y 为 x 右移一位。
 
     order_hasher（可选）接收本批窗口起点序列的规范化字节流。训练脚本用它
@@ -986,13 +1115,13 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
     try:
         raw = np.atleast_1d(np.asarray(indices))
     except (TypeError, ValueError, OverflowError) as e:
-        raise ValueError(
-            f"indices 必须是整数窗口序号，收到 {indices!r}") from e
+        raise ValueError(f"indices 必须是整数窗口序号，收到 {indices!r}") from e
     int64_max = int(np.iinfo(np.int64).max)
     if raw.dtype.kind in "iu":
         if raw.size and (int(raw.min()) < 0 or int(raw.max()) > int64_max):
             raise ValueError(
-                f"窗口序号必须是 [0, {int64_max}] 内的整数，收到 {indices!r}")
+                f"窗口序号必须是 [0, {int64_max}] 内的整数，收到 {indices!r}"
+            )
         idx = raw.astype(np.int64, copy=False)
     else:
         # 浮点/对象/字符串逐元素走 strict_int：1.5/True/"1_0" 不能被
@@ -1002,11 +1131,11 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
             try:
                 iv = strict_int(v, "窗口序号")
             except (TypeError, ValueError, OverflowError) as e:
-                raise ValueError(
-                    f"窗口序号必须是整数，收到 {indices!r}") from e
+                raise ValueError(f"窗口序号必须是整数，收到 {indices!r}") from e
             if iv < 0 or iv > int64_max:
                 raise ValueError(
-                    f"窗口序号必须在 [0, {int64_max}] 内，收到 {indices!r}")
+                    f"窗口序号必须在 [0, {int64_max}] 内，收到 {indices!r}"
+                )
             vals.append(iv)
         idx = np.asarray(vals, dtype=np.int64)
     n_windows = (len(val) - 1) // ctx
@@ -1033,13 +1162,13 @@ def get_val_windows_at(val: np.memmap, ctx: int, starts, device: str):
     try:
         raw = np.atleast_1d(np.asarray(starts))
     except (TypeError, ValueError, OverflowError) as e:
-        raise ValueError(
-            f"starts 必须是整数 token 下标，收到 {starts!r}") from e
+        raise ValueError(f"starts 必须是整数 token 下标，收到 {starts!r}") from e
     int64_max = int(np.iinfo(np.int64).max)
     if raw.dtype.kind in "iu":
         if raw.size and (int(raw.min()) < 0 or int(raw.max()) > int64_max):
             raise ValueError(
-                f"窗口起点必须是 [0, {int64_max}] 内的整数，收到 {starts!r}")
+                f"窗口起点必须是 [0, {int64_max}] 内的整数，收到 {starts!r}"
+            )
         pos = raw.astype(np.int64, copy=False)
     else:
         vals = []
@@ -1047,11 +1176,9 @@ def get_val_windows_at(val: np.memmap, ctx: int, starts, device: str):
             try:
                 iv = strict_int(v, "窗口起点")
             except (TypeError, ValueError, OverflowError) as e:
-                raise ValueError(
-                    f"窗口起点必须是整数，收到 {starts!r}") from e
+                raise ValueError(f"窗口起点必须是整数，收到 {starts!r}") from e
             if iv < 0 or iv > int64_max:
-                raise ValueError(
-                    f"窗口起点必须在 [0, {int64_max}] 内，收到 {starts!r}")
+                raise ValueError(f"窗口起点必须在 [0, {int64_max}] 内，收到 {starts!r}")
             vals.append(iv)
         pos = np.asarray(vals, dtype=np.int64)
     max_start = len(val) - ctx - 1
@@ -1060,7 +1187,8 @@ def get_val_windows_at(val: np.memmap, ctx: int, starts, device: str):
     if pos.size and int(pos.max()) > max_start:
         raise ValueError(
             f"窗口起点最大 {max_start}（len(val)={len(val)}, ctx={ctx}），"
-            f"收到 {starts!r}")
+            f"收到 {starts!r}"
+        )
     span = _make_span(pos, ctx)
     both = _stage_to_device((val, span), device)
     return both[:, :-1], both[:, 1:]

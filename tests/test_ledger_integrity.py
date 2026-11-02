@@ -1,11 +1,11 @@
 """Hash-chained ledgers: deletion/reordering/content edits must be detectable."""
+
 import json
 import os
 import shutil
 import tempfile
 
-from lega.ledger import (GENESIS_SHA256, chain_record, record_sha256,
-                         verify_chain)
+from lega.ledger import GENESIS_SHA256, chain_record, record_sha256, verify_chain
 
 
 def _write(path, records):
@@ -86,8 +86,13 @@ def test_legacy_records_are_reported_not_silently_verified():
 
 
 def test_test_access_ledger_is_chained_and_tampering_is_visible():
-    from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
-                                read_test_access_log, summarize_test_access)
+    from lega.datacheck import (
+        TEST_ACCESS_LOG,
+        append_test_access,
+        read_test_access_log,
+        summarize_test_access,
+    )
+
     d = tempfile.mkdtemp()
     try:
         append_test_access(d, {"ckpt_sha256": "a", "test_data_fingerprint": "v1"})
@@ -108,7 +113,8 @@ def test_test_access_ledger_is_chained_and_tampering_is_visible():
 
 
 def test_experiment_ledger_is_chained_and_verify_reports_breaks():
-    from lega.experiment import (append_record, read_records, verify_ledger)
+    from lega.experiment import append_record, read_records, verify_ledger
+
     tmp = tempfile.mkdtemp()
     try:
         path = os.path.join(tmp, "experiments.jsonl")
@@ -132,11 +138,14 @@ def test_experiment_ledger_is_chained_and_verify_reports_breaks():
 def test_broken_test_access_chain_downgrades_confirmatory_claims():
     from lega.design.preparation import test_seal_precheck
     from lega.testreuse import apply_test_reuse_gate, test_reuse_report
+
     broken = {
         "looks_by_test_data_fingerprint": {"v1": ["run-1"]},
         "unattributed_records_by_test_data_fingerprint": {},
-        "ledger_integrity": {"ok": False,
-                             "issues": [{"index": 0, "issue": "prev_mismatch"}]},
+        "ledger_integrity": {
+            "ok": False,
+            "issues": [{"index": 0, "issue": "prev_mismatch"}],
+        },
     }
     rep = test_reuse_report(broken, "v1", planned_looks=1)
     assert rep["unverifiable"] is True
@@ -147,26 +156,41 @@ def test_broken_test_access_chain_downgrades_confirmatory_claims():
     assert out[0]["confirmatory_valid"] is False
     assert out[0]["test_ledger_integrity_ok"] is False
     seal = test_seal_precheck(
-        {"summary": broken, "test_data_fingerprint": "v1"}, planned_looks=1)
+        {"summary": broken, "test_data_fingerprint": "v1"}, planned_looks=1
+    )
     assert seal["can_start_confirmatory"] is False
     # 旧账本（有 legacy 记录但链本身一致）不触发降级。
-    legacy = dict(broken, ledger_integrity={
-        "ok": True, "legacy_records": 2, "fully_chained": False, "issues": []})
+    legacy = dict(
+        broken,
+        ledger_integrity={
+            "ok": True,
+            "legacy_records": 2,
+            "fully_chained": False,
+            "issues": [],
+        },
+    )
     rep2 = test_reuse_report(legacy, "v1", planned_looks=1)
     assert rep2["unverifiable"] is False
     print("  [ok] 访问账本链断裂：确认性判定与开跑闸门同步降级")
 
 
 def test_new_records_chain_from_legacy_tail_without_rewriting_history():
-    from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
-                                read_test_access_log, summarize_test_access)
+    from lega.datacheck import (
+        TEST_ACCESS_LOG,
+        append_test_access,
+        read_test_access_log,
+        summarize_test_access,
+    )
+
     d = tempfile.mkdtemp()
     try:
-        legacy = {"ckpt_sha256": "old", "test_data_fingerprint": "v1",
-                  "time": "2026-01-01 00:00:00"}
+        legacy = {
+            "ckpt_sha256": "old",
+            "test_data_fingerprint": "v1",
+            "time": "2026-01-01 00:00:00",
+        }
         _write(os.path.join(d, TEST_ACCESS_LOG), [legacy])
-        append_test_access(d, {"ckpt_sha256": "new",
-                               "test_data_fingerprint": "v1"})
+        append_test_access(d, {"ckpt_sha256": "new", "test_data_fingerprint": "v1"})
         records = read_test_access_log(d)
         assert records[0] == legacy  # 旧记录原样保留
         assert records[1]["prev_record_sha256"] == record_sha256(legacy)

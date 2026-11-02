@@ -6,6 +6,7 @@
   * 新增假设未留痕 → violation（防止看到结果后补登记）；
   * 合法修订（只新增 + --amend 留痕）→ amended 且仍可确认。
 """
+
 import contextlib
 import io
 import json
@@ -13,18 +14,37 @@ import os
 import shutil
 import tempfile
 
-from lega.hypotheses import (HYPOTHESIS_FIELDS, LOCK_PATH, REGISTRY_PATH,
-                             append_amendment, fingerprint,
-                             hypothesis_digest, init_lock, load_registration,
-                             main, transition_problems, upgrade_lock,
-                             validate_registration, verify_registration)
+from lega.hypotheses import (
+    HYPOTHESIS_FIELDS,
+    LOCK_PATH,
+    REGISTRY_PATH,
+    append_amendment,
+    fingerprint,
+    hypothesis_digest,
+    init_lock,
+    load_registration,
+    main,
+    transition_problems,
+    upgrade_lock,
+    validate_registration,
+    verify_registration,
+)
 
 
 def _doc(claims):
-    return {"hypotheses": [
-        {"id": hid, "claim": c, "metric": "PPL", "candidate": "lega",
-         "reference": "standard", "direction": "candidate_better"}
-        for hid, c in claims]}
+    return {
+        "hypotheses": [
+            {
+                "id": hid,
+                "claim": c,
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "standard",
+                "direction": "candidate_better",
+            }
+            for hid, c in claims
+        ]
+    }
 
 
 def _write(path, obj):
@@ -38,11 +58,17 @@ def _pair(tmp):
 
 def test_fingerprint_science_only_and_deterministic():
     """逐假设摘要只看科学字段；辅助注释字段不改变摘要（文档哈希会变）。"""
-    h = {"id": "H1", "claim": "c", "metric": "PPL", "candidate": "a",
-         "reference": "b", "direction": "candidate_better"}
+    h = {
+        "id": "H1",
+        "claim": "c",
+        "metric": "PPL",
+        "candidate": "a",
+        "reference": "b",
+        "direction": "candidate_better",
+    }
     h2 = dict(h, note="补充解释，不影响声明", rationale="x")
     assert hypothesis_digest(h) == hypothesis_digest(h2)
-    h3 = dict(h, candidate="c")           # 变体对调 → 摘要必变
+    h3 = dict(h, candidate="c")  # 变体对调 → 摘要必变
     assert hypothesis_digest(h) != hypothesis_digest(h3)
     # 键序不同、辅助字段不同的等值文档 → 文档哈希相同
     d1 = {"hypotheses": [h], "extra": 1}
@@ -56,18 +82,49 @@ def test_validate_registration_schema():
     assert validate_registration(_doc([("H1", "c")])) == []
     errors = validate_registration({"hypotheses": []})
     assert errors and "非空" in errors[0]
-    bad = {"hypotheses": [
-        {"id": "H1", "claim": "c", "metric": "PPL", "candidate": "a",
-         "reference": "b", "direction": "candidate_better"},
-        {"id": "H1", "claim": "c2", "metric": "PPL", "candidate": "a",
-         "reference": "b", "direction": "candidate_better"},
-        {"id": "H3", "claim": "c3", "metric": "PPL", "candidate": "a",
-         "reference": "b", "direction": "bogus"},
-        {"id": "H4", "claim": "c4", "candidate": "a",
-         "reference": "b", "direction": "candidate_better"},
-        {"id": ["H5"], "claim": "c5", "metric": "PPL", "candidate": "a",
-         "reference": "b", "direction": "candidate_better"},
-    ]}
+    bad = {
+        "hypotheses": [
+            {
+                "id": "H1",
+                "claim": "c",
+                "metric": "PPL",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "candidate_better",
+            },
+            {
+                "id": "H1",
+                "claim": "c2",
+                "metric": "PPL",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "candidate_better",
+            },
+            {
+                "id": "H3",
+                "claim": "c3",
+                "metric": "PPL",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "bogus",
+            },
+            {
+                "id": "H4",
+                "claim": "c4",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "candidate_better",
+            },
+            {
+                "id": ["H5"],
+                "claim": "c5",
+                "metric": "PPL",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "candidate_better",
+            },
+        ]
+    }
     errs = validate_registration(bad)
     assert any("重复" in e for e in errs)
     assert any("direction" in e for e in errs)
@@ -105,9 +162,16 @@ def test_verify_intact_then_silent_tamper_detected():
 
         # 静默新增（未留痕）→ violated（防“看到结果后补预注册”）
         d = load_registration(reg)
-        d["hypotheses"].append({"id": "H9", "claim": "新增", "metric": "PPL",
-                                "candidate": "x", "reference": "y",
-                                "direction": "candidate_better"})
+        d["hypotheses"].append(
+            {
+                "id": "H9",
+                "claim": "新增",
+                "metric": "PPL",
+                "candidate": "x",
+                "reference": "y",
+                "direction": "candidate_better",
+            }
+        )
         _write(reg, d)
         r = verify_registration(registry_path=reg, lock_path=lock)
         assert r["status"] == "violated"
@@ -126,7 +190,7 @@ def test_document_sha_change_warns_without_voiding_confirmatory():
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
         d = load_registration(reg)
-        d["decision_rule"] = {"alpha": 0.5}   # 改写判定参数 → 必须否决
+        d["decision_rule"] = {"alpha": 0.5}  # 改写判定参数 → 必须否决
         _write(reg, d)
         r = verify_registration(registry_path=reg, lock_path=lock)
         assert r["status"] == "violated" and not r["confirmatory_valid"]
@@ -166,11 +230,16 @@ def test_scope_tamper_rejected_and_legacy_lock_upgrade():
         assert not r["locked_document_matches"]
         assert any("upgrade-lock" in p for p in r["problems"]), r
         # 显式升级后锁定当前 scope/decision_rule
-        up = upgrade_lock(registry_path=reg, lock_path=lock,
-                          reason="补锁判定参数", at="2026-01-01 00:00:00")
+        up = upgrade_lock(
+            registry_path=reg,
+            lock_path=lock,
+            reason="补锁判定参数",
+            at="2026-01-01 00:00:00",
+        )
         assert up["upgraded"] is True
         assert verify_registration(registry_path=reg, lock_path=lock)[
-            "confirmatory_valid"]
+            "confirmatory_valid"
+        ]
         # 静默改写 scope → violated
         d = load_registration(reg)
         d["scope"] = {"config": "configs/tiny.json", "seeds": [1]}
@@ -179,9 +248,16 @@ def test_scope_tamper_rejected_and_legacy_lock_upgrade():
         assert r["status"] == "violated" and not r["confirmatory_valid"]
         assert any("scope/decision_rule" in p for p in r["problems"])
         # 追加假设也不能绕过范围锁
-        d["hypotheses"].append({"id": "H2", "claim": "c2", "metric": "PPL",
-                                "candidate": "a", "reference": "b",
-                                "direction": "candidate_worse"})
+        d["hypotheses"].append(
+            {
+                "id": "H2",
+                "claim": "c2",
+                "metric": "PPL",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "candidate_worse",
+            }
+        )
         _write(reg, d)
         try:
             append_amendment(registry_path=reg, lock_path=lock, reason="补 H2")
@@ -236,12 +312,20 @@ def test_amendment_appends_only_and_rejects_forbidden_edits():
         # 恢复原状后合法追加 H2 → amended，仍可确认
         d = load_registration(reg)
         d["hypotheses"][0]["claim"] = "c1"
-        d["hypotheses"].append({"id": "H2", "claim": "c2", "metric": "PPL",
-                                "candidate": "a", "reference": "b",
-                                "direction": "candidate_worse"})
+        d["hypotheses"].append(
+            {
+                "id": "H2",
+                "claim": "c2",
+                "metric": "PPL",
+                "candidate": "a",
+                "reference": "b",
+                "direction": "candidate_worse",
+            }
+        )
         _write(reg, d)
-        link = append_amendment(registry_path=reg, lock_path=lock,
-                                reason="追加 H2（正式实验前）")
+        link = append_amendment(
+            registry_path=reg, lock_path=lock, reason="追加 H2（正式实验前）"
+        )
         assert link["before"]["n_hypotheses"] == 1
         assert link["after"]["n_hypotheses"] == 2
         r = verify_registration(registry_path=reg, lock_path=lock)
@@ -365,15 +449,38 @@ def test_malformed_lock_baseline_and_unhashable_ids_do_not_crash():
         r = verify_registration(registry_path=reg, lock_path=lock)
         assert r["status"] == "missing_registry"
         # 不可哈希 id（数组）→ violated + schema_errors，而非去重时崩溃
-        _write(reg, {"hypotheses": [
-            {"id": ["H1"], "claim": "c", "metric": "PPL", "candidate": "a",
-             "reference": "b", "direction": "candidate_better"}]})
+        _write(
+            reg,
+            {
+                "hypotheses": [
+                    {
+                        "id": ["H1"],
+                        "claim": "c",
+                        "metric": "PPL",
+                        "candidate": "a",
+                        "reference": "b",
+                        "direction": "candidate_better",
+                    }
+                ]
+            },
+        )
         r = verify_registration(registry_path=reg, lock_path=lock)
         assert r["status"] == "violated" and r["schema_errors"]
         # fingerprint 对不可哈希 id 也要能算摘要（报告落盘路径）
-        fp = fingerprint({"hypotheses": [
-            {"id": ["H1"], "claim": "c", "metric": "PPL", "candidate": "a",
-             "reference": "b", "direction": "candidate_better"}]})
+        fp = fingerprint(
+            {
+                "hypotheses": [
+                    {
+                        "id": ["H1"],
+                        "claim": "c",
+                        "metric": "PPL",
+                        "candidate": "a",
+                        "reference": "b",
+                        "direction": "candidate_better",
+                    }
+                ]
+            }
+        )
         assert fp["n_hypotheses"] == 1 and len(fp["hypotheses"]) == 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -417,8 +524,14 @@ def test_cli_verify_exit_codes():
 
 def test_hypothesis_fields_cover_analysis_keys():
     """摘要字段必须覆盖判定所需字段：漏一个就会让改写该字段逃过检测。"""
-    assert set(HYPOTHESIS_FIELDS) >= {"id", "claim", "metric", "candidate",
-                                      "reference", "direction"}
+    assert set(HYPOTHESIS_FIELDS) >= {
+        "id",
+        "claim",
+        "metric",
+        "candidate",
+        "reference",
+        "direction",
+    }
     print("  [ok] HYPOTHESIS_FIELDS 覆盖判定字段")
 
 
@@ -451,11 +564,11 @@ def test_amend_with_null_chain_treated_as_empty():
         lk = json.load(open(lock, encoding="utf-8"))
         lk["chain"] = None
         _write(lock, lk)
-        assert verify_registration(registry_path=reg, lock_path=lock)[
-            "status"] == "intact"
+        assert (
+            verify_registration(registry_path=reg, lock_path=lock)["status"] == "intact"
+        )
         _write(reg, _doc([("H1", "c1"), ("H2", "c2")]))
-        link = append_amendment(registry_path=reg, lock_path=lock,
-                                reason="追加 H2")
+        link = append_amendment(registry_path=reg, lock_path=lock, reason="追加 H2")
         assert link["before"]["n_hypotheses"] == 1
         r = verify_registration(registry_path=reg, lock_path=lock)
         assert r["status"] == "amended" and r["confirmatory_valid"]
@@ -491,18 +604,23 @@ def test_repo_registration_present_and_confirmatory():
     本测试把“登记表与锁必须在 preregistration/ 且完整”变成不可绕过的
     仓库断言。
     """
-    assert os.path.exists(REGISTRY_PATH), (
-        f"预注册登记表缺失：{REGISTRY_PATH}；禁止删除，修正走 --amend 留痕")
-    assert os.path.exists(LOCK_PATH), (
-        f"预注册锁文件缺失：{LOCK_PATH}；没有锁链就无法区分“未登记”与“被静默改写”")
-    rel = os.path.relpath(REGISTRY_PATH, os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))
+    assert os.path.exists(
+        REGISTRY_PATH
+    ), f"预注册登记表缺失：{REGISTRY_PATH}；禁止删除，修正走 --amend 留痕"
+    assert os.path.exists(
+        LOCK_PATH
+    ), f"预注册锁文件缺失：{LOCK_PATH}；没有锁链就无法区分“未登记”与“被静默改写”"
+    rel = os.path.relpath(
+        REGISTRY_PATH, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
     assert rel == os.path.join("preregistration", "hypotheses.json"), rel
-    assert not rel.startswith("docs" + os.sep), (
-        "登记表不能放在 docs/：流水线清理会删除该目录下的非白名单文件")
+    assert not rel.startswith(
+        "docs" + os.sep
+    ), "登记表不能放在 docs/：流水线清理会删除该目录下的非白名单文件"
     report = verify_registration()
-    assert report["confirmatory_valid"], (
-        f"仓库预注册完整性校验失败：{report['status']} {report['problems']}")
+    assert report[
+        "confirmatory_valid"
+    ], f"仓库预注册完整性校验失败：{report['status']} {report['problems']}"
     doc = load_registration()
     ids = [h["id"] for h in doc["hypotheses"]]
     assert "H7" in ids, "H7（AP差机制对照）必须已登记"

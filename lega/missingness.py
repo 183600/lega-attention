@@ -37,6 +37,7 @@
   ``invalid``，不把“无法计算”写成“没有缺失”或“稳健”；0 个完整观测时
   也不报告只由 outcome 范围决定的空 Manski 界。
 """
+
 import math
 from numbers import Real
 
@@ -50,9 +51,11 @@ _STATUS_CN = {
     "insufficient": "计划种子不足，无法判断缺失模式",
     "invalid": "输入不可表示，缺失敏感性无法计算",
     "robust_within_observed_range": (
-        "在观测到的配对差范围内补缺失，不会翻转符号/实际意义判定"),
+        "在观测到的配对差范围内补缺失，不会翻转符号/实际意义判定"
+    ),
     "sensitive_within_observed_range": (
-        "缺失配对差只要落在观测范围内，就可能翻转符号/实际意义判定"),
+        "缺失配对差只要落在观测范围内，就可能翻转符号/实际意义判定"
+    ),
 }
 
 _LABEL_CN = {
@@ -67,7 +70,8 @@ _LABEL_CN = {
 _METHOD = (
     "complete-case tipping-point / observed-range / Manski-bound sensitivity "
     "analysis (缺失值统一取同一配对差 δ；Manski 界只假设 outcome 范围与"
-    "计划种子)")
+    "计划种子)"
+)
 
 
 def _finite(value):
@@ -244,20 +248,20 @@ def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
             sum_hi += hi_b - lo_b
 
     mean_lo = mean_hi = None
-    if (value_bounds is not None and n > 0 and observed_map
-            and not violations):
+    if value_bounds is not None and n > 0 and observed_map and not violations:
         lo_candidate = min(sum_lo / n, sum_hi / n)
         hi_candidate = max(sum_lo / n, sum_hi / n)
         if math.isfinite(lo_candidate) and math.isfinite(hi_candidate):
             mean_lo, mean_hi = lo_candidate, hi_candidate
 
-    signs = [1 if d > 0.0 else -1 if d < 0.0 else 0
-             for d in observed_map.values()]
+    signs = [1 if d > 0.0 else -1 if d < 0.0 else 0 for d in observed_map.values()]
     sign_sum = sum(signs)
-    sign_lo = (_div(float(sign_sum - missing_n), float(n))
-               if n and observed_map else None)
-    sign_hi = (_div(float(sign_sum + missing_n), float(n))
-               if n and observed_map else None)
+    sign_lo = (
+        _div(float(sign_sum - missing_n), float(n)) if n and observed_map else None
+    )
+    sign_hi = (
+        _div(float(sign_sum + missing_n), float(n)) if n and observed_map else None
+    )
     if sign_lo is not None and sign_hi is not None and sign_lo > sign_hi:
         sign_lo, sign_hi = sign_hi, sign_lo
 
@@ -276,8 +280,7 @@ def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
     elif sign_score_identified is True:
         sign_identified = True
         sign_identified_by = "sign_score"
-    elif (mean_sign_identified is False
-          or sign_score_identified is False):
+    elif mean_sign_identified is False or sign_score_identified is False:
         sign_identified = False
 
     within_margin = None
@@ -298,29 +301,40 @@ def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
 
     if not observed_map:
         if value_bounds is None:
-            note = ("没有完整配对观测；无界 outcome 下无法计算符号得分界，"
-                    "不能用 0 个观测做方向判断。")
+            note = (
+                "没有完整配对观测；无界 outcome 下无法计算符号得分界，"
+                "不能用 0 个观测做方向判断。"
+            )
         else:
-            note = ("没有完整配对观测；Manski 界只剩由 outcome 范围决定的"
-                    "空界，未作为分析结果报告，不能用 0 个观测做方向判断。")
+            note = (
+                "没有完整配对观测；Manski 界只剩由 outcome 范围决定的"
+                "空界，未作为分析结果报告，不能用 0 个观测做方向判断。"
+            )
     elif value_bounds is None:
-        note = ("outcome 无界：不计算均值差最坏情形界；符号得分界只假设缺失"
-                "配对方向未知，仍不假设缺失随机。")
+        note = (
+            "outcome 无界：不计算均值差最坏情形界；符号得分界只假设缺失"
+            "配对方向未知，仍不假设缺失随机。"
+        )
     elif violations:
-        note = ("已观测 outcome 超出声明范围，均值差 Manski 界不可信，故不"
-                "计算；符号得分界仍可用。")
+        note = (
+            "已观测 outcome 超出声明范围，均值差 Manski 界不可信，故不"
+            "计算；符号得分界仍可用。"
+        )
     else:
-        note = (f"outcome∈[{lo_b:g}, {hi_b:g}] 下的 sharp Manski 界：只假设"
-                "取值范围与计划种子，不假设缺失随机；界未定≠无效应。")
+        note = (
+            f"outcome∈[{lo_b:g}, {hi_b:g}] 下的 sharp Manski 界：只假设"
+            "取值范围与计划种子，不假设缺失随机；界未定≠无效应。"
+        )
 
     return {
-        "method": ("Manski sharp partial-identification bounds under known "
-                   "outcome range and unrestricted missingness"),
+        "method": (
+            "Manski sharp partial-identification bounds under known "
+            "outcome range and unrestricted missingness"
+        ),
         "value_bounds": ([lo_b, hi_b] if value_bounds is not None else None),
         "outcome_bounds_violations": sorted(violations),
         "mean_diff_bounds": ([mean_lo, mean_hi] if mean_lo is not None else None),
-        "sign_score_bounds": ([sign_lo, sign_hi]
-                              if sign_lo is not None else None),
+        "sign_score_bounds": ([sign_lo, sign_hi] if sign_lo is not None else None),
         "mean_sign_identified": mean_sign_identified,
         "sign_score_identified": sign_score_identified,
         "sign_identified": sign_identified,
@@ -333,10 +347,16 @@ def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
     }
 
 
-def paired_missingness(planned_seeds, candidate_values, reference_values,
-                       *, transform=None, margin=None,
-                       min_seeds: int = MIN_SEEDS,
-                       value_bounds=None) -> dict:
+def paired_missingness(
+    planned_seeds,
+    candidate_values,
+    reference_values,
+    *,
+    transform=None,
+    margin=None,
+    min_seeds: int = MIN_SEEDS,
+    value_bounds=None,
+) -> dict:
     """对一组计划种子做缺失模式 + 临界点 + 观测范围敏感性分析。
 
     ``candidate_values`` / ``reference_values`` 为 ``{seed: value}``；缺失、
@@ -359,15 +379,17 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
     if value_bounds is not None and not identity_transform:
         raise ValueError(
             "value_bounds 只适用于默认 identity transform；自定义尺度需先"
-            "明确该尺度上的差值范围")
+            "明确该尺度上的差值范围"
+        )
     if transform is None:
+
         def transform(a, b):
             return a - b
+
     if not callable(transform):
         raise ValueError("transform 必须可调用或为 None")
 
-    plan, source = _normalise_plan(planned_seeds,
-                                   candidate_values, reference_values)
+    plan, source = _normalise_plan(planned_seeds, candidate_values, reference_values)
     cand = _values_for(candidate_values, plan)
     ref = _values_for(reference_values, plan)
 
@@ -397,17 +419,22 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
     n_planned = len(plan)
     n_observed = len(observed)
     n_missing = n_planned - n_observed
-    missing_fraction = _div(float(n_missing), float(n_planned)) \
-        if n_planned else None
+    missing_fraction = _div(float(n_missing), float(n_planned)) if n_planned else None
     candidate_missing_fraction = (
         _div(float(len(missing_candidate) + len(missing_both)), float(n_planned))
-        if n_planned else None)
+        if n_planned
+        else None
+    )
     reference_missing_fraction = (
         _div(float(len(missing_reference) + len(missing_both)), float(n_planned))
-        if n_planned else None)
+        if n_planned
+        else None
+    )
     differential = None
-    if (candidate_missing_fraction is not None
-            and reference_missing_fraction is not None):
+    if (
+        candidate_missing_fraction is not None
+        and reference_missing_fraction is not None
+    ):
         differential = candidate_missing_fraction - reference_missing_fraction
 
     diffs = [d for _, d in observed]
@@ -436,64 +463,75 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
         "margin": margin,
     }
     result["partial_identification"] = _partial_identification(
-        plan, cand, ref, observed, value_bounds=value_bounds, margin=margin)
+        plan, cand, ref, observed, value_bounds=value_bounds, margin=margin
+    )
 
     if n_planned == 0:
-        result.update({
-            "status": "insufficient",
-            "label": _LABEL_CN["insufficient"],
-            "sign_robust": None,
-            "margin_robust": None,
-            "full_mean_range": None,
-            "missing_mean_for_zero": None,
-            "missing_mean_for_plus_margin": None,
-            "missing_mean_for_minus_margin": None,
-            "tipping_within_observed_range": None,
-            "note": "计划种子为空；无法判断缺失模式，不能写成“没有缺失”。",
-        })
+        result.update(
+            {
+                "status": "insufficient",
+                "label": _LABEL_CN["insufficient"],
+                "sign_robust": None,
+                "margin_robust": None,
+                "full_mean_range": None,
+                "missing_mean_for_zero": None,
+                "missing_mean_for_plus_margin": None,
+                "missing_mean_for_minus_margin": None,
+                "tipping_within_observed_range": None,
+                "note": "计划种子为空；无法判断缺失模式，不能写成“没有缺失”。",
+            }
+        )
         return result
     if n_observed == 0:
-        result.update({
-            "status": "no_observed_pairs",
-            "label": _LABEL_CN["no_observed_pairs"],
-            "sign_robust": None,
-            "margin_robust": None,
-            "full_mean_range": None,
-            "missing_mean_for_zero": None,
-            "missing_mean_for_plus_margin": None,
-            "missing_mean_for_minus_margin": None,
-            "tipping_within_observed_range": None,
-            "note": ("全部计划配对都缺失或不可用：没有完成者估计，"
-                     "不能用 0 个观测做任何方向判断。"),
-        })
+        result.update(
+            {
+                "status": "no_observed_pairs",
+                "label": _LABEL_CN["no_observed_pairs"],
+                "sign_robust": None,
+                "margin_robust": None,
+                "full_mean_range": None,
+                "missing_mean_for_zero": None,
+                "missing_mean_for_plus_margin": None,
+                "missing_mean_for_minus_margin": None,
+                "tipping_within_observed_range": None,
+                "note": (
+                    "全部计划配对都缺失或不可用：没有完成者估计，"
+                    "不能用 0 个观测做任何方向判断。"
+                ),
+            }
+        )
         return result
     if mean is None:
-        result.update({
-            "status": "invalid",
-            "label": _LABEL_CN["invalid"],
-            "sign_robust": None,
-            "margin_robust": None,
-            "full_mean_range": None,
-            "missing_mean_for_zero": None,
-            "missing_mean_for_plus_margin": None,
-            "missing_mean_for_minus_margin": None,
-            "tipping_within_observed_range": None,
-            "note": "完成者均值不可表示；不能伪造敏感性结论。",
-        })
+        result.update(
+            {
+                "status": "invalid",
+                "label": _LABEL_CN["invalid"],
+                "sign_robust": None,
+                "margin_robust": None,
+                "full_mean_range": None,
+                "missing_mean_for_zero": None,
+                "missing_mean_for_plus_margin": None,
+                "missing_mean_for_minus_margin": None,
+                "tipping_within_observed_range": None,
+                "note": "完成者均值不可表示；不能伪造敏感性结论。",
+            }
+        )
         return result
     if n_missing == 0:
-        result.update({
-            "status": "complete",
-            "label": _LABEL_CN["complete"],
-            "sign_robust": True,
-            "margin_robust": True,
-            "full_mean_range": [mean, mean],
-            "missing_mean_for_zero": None,
-            "missing_mean_for_plus_margin": None,
-            "missing_mean_for_minus_margin": None,
-            "tipping_within_observed_range": False,
-            "note": "计划配对全部可用；临界点/边界分析不适用。",
-        })
+        result.update(
+            {
+                "status": "complete",
+                "label": _LABEL_CN["complete"],
+                "sign_robust": True,
+                "margin_robust": True,
+                "full_mean_range": [mean, mean],
+                "missing_mean_for_zero": None,
+                "missing_mean_for_plus_margin": None,
+                "missing_mean_for_minus_margin": None,
+                "tipping_within_observed_range": False,
+                "note": "计划配对全部可用；临界点/边界分析不适用。",
+            }
+        )
         return result
     if n_observed < min_seeds:
         # 仍给出描述性边界，但显式标注种子不足；不做“稳健”判词。
@@ -503,28 +541,35 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
     range_lo = _convex(n_observed, mean, n_missing, lo_diff)
     range_hi = _convex(n_observed, mean, n_missing, hi_diff)
     if range_lo is None or range_hi is None:
-        result.update({
-            "status": "invalid",
-            "label": _LABEL_CN["invalid"],
-            "sign_robust": None,
-            "margin_robust": None,
-            "full_mean_range": None,
-            "missing_mean_for_zero": None,
-            "missing_mean_for_plus_margin": None,
-            "missing_mean_for_minus_margin": None,
-            "tipping_within_observed_range": None,
-            "note": "观测范围边界不可表示；不能伪造敏感性结论。",
-        })
+        result.update(
+            {
+                "status": "invalid",
+                "label": _LABEL_CN["invalid"],
+                "sign_robust": None,
+                "margin_robust": None,
+                "full_mean_range": None,
+                "missing_mean_for_zero": None,
+                "missing_mean_for_plus_margin": None,
+                "missing_mean_for_minus_margin": None,
+                "tipping_within_observed_range": None,
+                "note": "观测范围边界不可表示；不能伪造敏感性结论。",
+            }
+        )
         return result
 
     full_lo, full_hi = sorted((range_lo, range_hi))
     sign_robust = not (full_lo <= 0.0 <= full_hi)
     missing_for_zero = _missing_value_for(0.0, n_observed, mean, n_missing)
-    missing_for_plus = (None if margin is None else
-                        _missing_value_for(margin, n_observed, mean, n_missing))
-    missing_for_minus = (None if margin is None else
-                         _missing_value_for(-margin, n_observed, mean,
-                                            n_missing))
+    missing_for_plus = (
+        None
+        if margin is None
+        else _missing_value_for(margin, n_observed, mean, n_missing)
+    )
+    missing_for_minus = (
+        None
+        if margin is None
+        else _missing_value_for(-margin, n_observed, mean, n_missing)
+    )
 
     def _inside(value):
         if value is None:
@@ -545,35 +590,46 @@ def paired_missingness(planned_seeds, candidate_values, reference_values,
     if margin is not None:
         margin_tipping_within = bool(
             (crosses_plus or crosses_minus)
-            and (_inside(missing_for_plus) or _inside(missing_for_minus)))
+            and (_inside(missing_for_plus) or _inside(missing_for_minus))
+        )
 
-    sensitive = (not sign_robust) or (
-        margin is not None and margin_robust is False)
-    status = ("sensitive_within_observed_range" if sensitive
-              else "robust_within_observed_range")
+    sensitive = (not sign_robust) or (margin is not None and margin_robust is False)
+    status = (
+        "sensitive_within_observed_range"
+        if sensitive
+        else "robust_within_observed_range"
+    )
     if result.get("insufficient_seeds"):
-        note = (f"完整配对只有 {n_observed} 个（< {min_seeds}）：以下临界点/"
-                "边界仅作描述，不足以判定稳健或敏感。")
+        note = (
+            f"完整配对只有 {n_observed} 个（< {min_seeds}）：以下临界点/"
+            "边界仅作描述，不足以判定稳健或敏感。"
+        )
     elif sensitive:
-        note = ("缺失配对差只要落在已观测范围内就可能改变符号/实际意义"
-                "判定；必须报告缺失机制，不能只用完成者样本宣称稳健。")
+        note = (
+            "缺失配对差只要落在已观测范围内就可能改变符号/实际意义"
+            "判定；必须报告缺失机制，不能只用完成者样本宣称稳健。"
+        )
     else:
-        note = ("在“缺失配对差落在已观测范围”这一透明敏感性尺度下，"
-                "符号/实际意义判定不变；这不能证明缺失随机，也不能排除"
-                "更极端的缺失值。")
-    result.update({
-        "status": status,
-        "label": _LABEL_CN[status],
-        "sign_robust": bool(sign_robust),
-        "margin_robust": margin_robust,
-        "full_mean_range": [float(full_lo), float(full_hi)],
-        "missing_mean_for_zero": missing_for_zero,
-        "missing_mean_for_plus_margin": missing_for_plus,
-        "missing_mean_for_minus_margin": missing_for_minus,
-        "tipping_within_observed_range": tipping_within,
-        "margin_tipping_within_observed_range": margin_tipping_within,
-        "note": note,
-    })
+        note = (
+            "在“缺失配对差落在已观测范围”这一透明敏感性尺度下，"
+            "符号/实际意义判定不变；这不能证明缺失随机，也不能排除"
+            "更极端的缺失值。"
+        )
+    result.update(
+        {
+            "status": status,
+            "label": _LABEL_CN[status],
+            "sign_robust": bool(sign_robust),
+            "margin_robust": margin_robust,
+            "full_mean_range": [float(full_lo), float(full_hi)],
+            "missing_mean_for_zero": missing_for_zero,
+            "missing_mean_for_plus_margin": missing_for_plus,
+            "missing_mean_for_minus_margin": missing_for_minus,
+            "tipping_within_observed_range": tipping_within,
+            "margin_tipping_within_observed_range": margin_tipping_within,
+            "note": note,
+        }
+    )
     return result
 
 
@@ -585,11 +641,14 @@ def aggregate_missingness(entries) -> dict:
         status = e.get("status")
         key = status if isinstance(status, str) else "invalid"
         counts[key] = counts.get(key, 0) + 1
-    with_missing = sum(1 for e in rows
-                       if isinstance(e.get("n_missing"), int)
-                       and e.get("n_missing") > 0)
-    sensitive = sum(1 for e in rows
-                    if e.get("status") == "sensitive_within_observed_range")
+    with_missing = sum(
+        1
+        for e in rows
+        if isinstance(e.get("n_missing"), int) and e.get("n_missing") > 0
+    )
+    sensitive = sum(
+        1 for e in rows if e.get("status") == "sensitive_within_observed_range"
+    )
     complete = sum(1 for e in rows if e.get("status") == "complete")
     manski_mean = manski_mean_sign = manski_mean_undetermined = 0
     manski_sign = manski_undetermined = 0
@@ -597,8 +656,7 @@ def aggregate_missingness(entries) -> dict:
         pi = e.get("partial_identification")
         if not isinstance(pi, dict):
             continue
-        has_missing = (isinstance(e.get("n_missing"), int)
-                       and e.get("n_missing") > 0)
+        has_missing = isinstance(e.get("n_missing"), int) and e.get("n_missing") > 0
         if not has_missing:
             continue
         if pi.get("mean_diff_bounds") is not None:
@@ -622,7 +680,9 @@ def aggregate_missingness(entries) -> dict:
         "n_manski_sign_score_identified": manski_sign,
         "n_manski_sign_score_undetermined": manski_undetermined,
         "status_counts": counts,
-        "note": ("计数只覆盖已计算的指标×对比；状态缺失/无法计算的条目不"
-                 "计入“无缺失”，也不按稳健处理。Manski 计数只统计实际"
-                 "计算出的最坏情形界，不把“无法计算”当成已识别。"),
+        "note": (
+            "计数只覆盖已计算的指标×对比；状态缺失/无法计算的条目不"
+            "计入“无缺失”，也不按稳健处理。Manski 计数只统计实际"
+            "计算出的最坏情形界，不把“无法计算”当成已识别。"
+        ),
     }

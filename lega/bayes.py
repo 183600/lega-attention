@@ -41,6 +41,7 @@ SESOI/TOST 回答“差异是否小于实际重要阈值”，复现预测回答
 * n<``min_seeds``（默认 3）时仍给出描述性后验，但 ``decision_eligible``
   为假，不能据此写“数据支持 H1/H0”。
 """
+
 from __future__ import annotations
 
 import math
@@ -174,23 +175,25 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
     ss0 = float(np.sum(z * z))
 
     log_sd = math.log(sd_z)
-    log_sigma = np.linspace(log_sd - _SIGMA_SPAN, log_sd + _SIGMA_SPAN,
-                            n_sigma)
+    log_sigma = np.linspace(log_sd - _SIGMA_SPAN, log_sd + _SIGMA_SPAN, n_sigma)
     sigma = np.exp(log_sigma)
-    loglik0 = (-0.5 * n * math.log(2.0 * math.pi) - n * log_sigma
-               - ss0 / (2.0 * sigma ** 2))
+    loglik0 = (
+        -0.5 * n * math.log(2.0 * math.pi) - n * log_sigma - ss0 / (2.0 * sigma**2)
+    )
 
     u = (np.arange(n_delta) + 0.5) / n_delta
     delta = prior_scale * np.tan(math.pi * (u - 0.5))
     mu_z = np.outer(delta, sigma)
-    sse = ss0 - 2.0 * mu_z * sum_z + n * mu_z ** 2
+    sse = ss0 - 2.0 * mu_z * sum_z + n * mu_z**2
     sse = np.maximum(sse, 0.0)
-    loglik1 = (-0.5 * n * math.log(2.0 * math.pi) - n * log_sigma[None, :]
-               - sse / (2.0 * sigma[None, :] ** 2))
+    loglik1 = (
+        -0.5 * n * math.log(2.0 * math.pi)
+        - n * log_sigma[None, :]
+        - sse / (2.0 * sigma[None, :] ** 2)
+    )
 
     log_l0 = _logsumexp(loglik0) - math.log(n_sigma)
-    log_l1 = (_logsumexp(loglik1.ravel())
-              - math.log(n_sigma * n_delta))
+    log_l1 = _logsumexp(loglik1.ravel()) - math.log(n_sigma * n_delta)
     log_bf10 = log_l1 - log_l0
 
     peak = float(np.max(loglik1))
@@ -206,8 +209,7 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
     zero_mass = float(np.sum(wflat[mflat == 0.0]))
     prob_positive = float(np.sum(wflat[mflat > 0.0])) + 0.5 * zero_mass
     prob_negative = float(np.sum(wflat[mflat < 0.0])) + 0.5 * zero_mass
-    quantiles = _posterior_quantiles(
-        mflat, wflat, (0.025, 0.5, 0.975))
+    quantiles = _posterior_quantiles(mflat, wflat, (0.025, 0.5, 0.975))
     mean_z = float(np.sum(wflat * mflat))
 
     def _raw(value_z):
@@ -231,14 +233,14 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
         # 在标准化尺度上比较，避免 rope/μ 的原始值相乘溢出。
         rope_z = rope / scale
         inside = float(np.sum(wflat[np.abs(mflat) < rope_z]))
-        out.update({
-            "rope": float(rope),
-            "prob_in_rope": inside,
-            "prob_meaningful_positive": float(
-                np.sum(wflat[mflat >= rope_z])),
-            "prob_meaningful_negative": float(
-                np.sum(wflat[mflat <= -rope_z])),
-        })
+        out.update(
+            {
+                "rope": float(rope),
+                "prob_in_rope": inside,
+                "prob_meaningful_positive": float(np.sum(wflat[mflat >= rope_z])),
+                "prob_meaningful_negative": float(np.sum(wflat[mflat <= -rope_z])),
+            }
+        )
     return out
 
 
@@ -298,24 +300,31 @@ def _prior_sensitivity(diffs, prior_scale, factors, rope):
         scale = prior_scale * factor
         result = _grid(diffs, scale, rope, _DELTA_GRID, _SIGMA_GRID)
         if result is None:
-            rows.append({"factor": float(factor), "prior_scale": float(scale),
-                         "log_bf10": None, "bf10": None,
-                         "label": "无法计算"})
+            rows.append(
+                {
+                    "factor": float(factor),
+                    "prior_scale": float(scale),
+                    "log_bf10": None,
+                    "bf10": None,
+                    "label": "无法计算",
+                }
+            )
             continue
         log_bf10 = result["log_bf10"]
-        rows.append({
-            "factor": float(factor),
-            "prior_scale": float(scale),
-            "log_bf10": log_bf10,
-            "bf10": result["bf10"],
-            "label": _label_from_log(log_bf10),
-        })
+        rows.append(
+            {
+                "factor": float(factor),
+                "prior_scale": float(scale),
+                "log_bf10": log_bf10,
+                "bf10": result["bf10"],
+                "label": _label_from_log(log_bf10),
+            }
+        )
     return rows
 
 
 def _sensitivity_verdict(rows):
-    labels = [r.get("label") for r in rows
-              if r.get("label") not in (None, "无法计算")]
+    labels = [r.get("label") for r in rows if r.get("label") not in (None, "无法计算")]
     if not labels:
         return "无法计算"
     if all(lbl.endswith("H1") for lbl in labels):
@@ -329,9 +338,15 @@ def _sensitivity_verdict(rows):
     return "先验尺度可改变证据方向"
 
 
-def bayes_paired_evidence(diffs, rope=None, prior_scale=DEFAULT_PRIOR_SCALE,
-                          prior_scales=None, min_seeds=DEFAULT_MIN_SEEDS,
-                          n_delta=_DELTA_GRID, n_sigma=_SIGMA_GRID):
+def bayes_paired_evidence(
+    diffs,
+    rope=None,
+    prior_scale=DEFAULT_PRIOR_SCALE,
+    prior_scales=None,
+    min_seeds=DEFAULT_MIN_SEEDS,
+    n_delta=_DELTA_GRID,
+    n_sigma=_SIGMA_GRID,
+):
     """配对差的 JZS 贝叶斯因子与后验（补充性证据）。
 
     参数
@@ -369,14 +384,16 @@ def bayes_paired_evidence(diffs, rope=None, prior_scale=DEFAULT_PRIOR_SCALE,
             raw_factors = list(prior_scales)
         except TypeError as exc:
             raise ValueError(
-                f"prior_scales 必须是正数序列，收到 {prior_scales!r}") from exc
+                f"prior_scales 必须是正数序列，收到 {prior_scales!r}"
+            ) from exc
         factors = []
         for factor in raw_factors:
-            if (isinstance(factor, (bool, np.bool_))
-                    or isinstance(factor, (str, bytes))
-                    or not isinstance(factor, Real)):
-                raise ValueError(
-                    f"prior_scales 因子必须是有限正数，收到 {factor!r}")
+            if (
+                isinstance(factor, (bool, np.bool_))
+                or isinstance(factor, (str, bytes))
+                or not isinstance(factor, Real)
+            ):
+                raise ValueError(f"prior_scales 因子必须是有限正数，收到 {factor!r}")
             factors.append(_strict_positive(factor, "prior_scales 因子"))
         if not factors:
             raise ValueError("prior_scales 不能为空")
@@ -387,93 +404,126 @@ def bayes_paired_evidence(diffs, rope=None, prior_scale=DEFAULT_PRIOR_SCALE,
         "n": n,
         "prior_scale": float(prior_scale),
         "min_seeds": int(min_seeds),
-        "method": ("one-sample JZS Bayes factor and posterior on paired "
-                   "differences (Cauchy prior on standardized effect, "
-                   "Jeffreys prior on scale)"),
-        "note": ("补充性证据：不改变预注册判定，也不替代 t/置换/TOST/MDE；"
-                 "BF10=1 表示不区分 H0/H1，不是无效应。"),
+        "method": (
+            "one-sample JZS Bayes factor and posterior on paired "
+            "differences (Cauchy prior on standardized effect, "
+            "Jeffreys prior on scale)"
+        ),
+        "note": (
+            "补充性证据：不改变预注册判定，也不替代 t/置换/TOST/MDE；"
+            "BF10=1 表示不区分 H0/H1，不是无效应。"
+        ),
         "decision_eligible": bool(n >= min_seeds),
     }
     if n < 2:
-        base.update({
-            "status": "insufficient_seeds",
-            "reason": "配对差少于 2 个，无法估计尺度",
-            "bf10": None, "bf01": None, "log_bf10": None,
-            "label": "无法计算",
-            "posterior_mean": None, "posterior_median": None,
-            "posterior_ci95": None,
-            "posterior_prob_positive": None,
-            "posterior_prob_negative": None,
-            "standardized_effect": None,
-            "sensitivity": [], "sensitivity_verdict": "无法计算",
-        })
+        base.update(
+            {
+                "status": "insufficient_seeds",
+                "reason": "配对差少于 2 个，无法估计尺度",
+                "bf10": None,
+                "bf01": None,
+                "log_bf10": None,
+                "label": "无法计算",
+                "posterior_mean": None,
+                "posterior_median": None,
+                "posterior_ci95": None,
+                "posterior_prob_positive": None,
+                "posterior_prob_negative": None,
+                "standardized_effect": None,
+                "sensitivity": [],
+                "sensitivity_verdict": "无法计算",
+            }
+        )
         return base
 
     moments = _mean_sd(values)
     if moments is None:
-        base.update({
-            "status": "invalid",
-            "reason": "配对差的均值/标准差超出 float 表示范围",
-            "bf10": None, "bf01": None, "log_bf10": None,
-            "label": "无法计算",
-            "posterior_mean": None, "posterior_median": None,
-            "posterior_ci95": None,
-            "posterior_prob_positive": None,
-            "posterior_prob_negative": None,
-            "standardized_effect": None,
-            "sensitivity": [], "sensitivity_verdict": "无法计算",
-        })
+        base.update(
+            {
+                "status": "invalid",
+                "reason": "配对差的均值/标准差超出 float 表示范围",
+                "bf10": None,
+                "bf01": None,
+                "log_bf10": None,
+                "label": "无法计算",
+                "posterior_mean": None,
+                "posterior_median": None,
+                "posterior_ci95": None,
+                "posterior_prob_positive": None,
+                "posterior_prob_negative": None,
+                "standardized_effect": None,
+                "sensitivity": [],
+                "sensitivity_verdict": "无法计算",
+            }
+        )
         return base
     mean, sd = moments
     if sd == 0.0:
         prob = 1.0 if mean > 0.0 else (0.0 if mean < 0.0 else 0.5)
-        base.update({
-            "status": "degenerate_zero_variance",
-            "reason": ("所有配对差相同：H1 可用 σ→0 精确拟合，BF 无定义；"
-                       "不能当作强证据"),
-            "bf10": None, "bf01": None, "log_bf10": None,
-            "label": "无法计算",
-            "posterior_mean": mean, "posterior_median": mean,
-            "posterior_ci95": [mean, mean],
-            "posterior_prob_positive": prob,
-            "posterior_prob_negative": 1.0 - prob,
-            "standardized_effect": None,
-            "sensitivity": [], "sensitivity_verdict": "无法计算",
-        })
+        base.update(
+            {
+                "status": "degenerate_zero_variance",
+                "reason": (
+                    "所有配对差相同：H1 可用 σ→0 精确拟合，BF 无定义；" "不能当作强证据"
+                ),
+                "bf10": None,
+                "bf01": None,
+                "log_bf10": None,
+                "label": "无法计算",
+                "posterior_mean": mean,
+                "posterior_median": mean,
+                "posterior_ci95": [mean, mean],
+                "posterior_prob_positive": prob,
+                "posterior_prob_negative": 1.0 - prob,
+                "standardized_effect": None,
+                "sensitivity": [],
+                "sensitivity_verdict": "无法计算",
+            }
+        )
         if rope is not None:
-            base.update({
-                "rope": float(rope),
-                "prob_in_rope": float(abs(mean) < rope),
-                "prob_meaningful_positive": float(mean >= rope),
-                "prob_meaningful_negative": float(mean <= -rope),
-            })
+            base.update(
+                {
+                    "rope": float(rope),
+                    "prob_in_rope": float(abs(mean) < rope),
+                    "prob_meaningful_positive": float(mean >= rope),
+                    "prob_meaningful_negative": float(mean <= -rope),
+                }
+            )
         return base
 
     result = _grid(values, prior_scale, rope, n_delta, n_sigma)
     if result is None:
-        base.update({
-            "status": "invalid",
-            "reason": "后验网格不可归一化（输入过大/不可表示）",
-            "bf10": None, "bf01": None, "log_bf10": None,
-            "label": "无法计算",
-            "posterior_mean": None, "posterior_median": None,
-            "posterior_ci95": None,
-            "posterior_prob_positive": None,
-            "posterior_prob_negative": None,
-            "standardized_effect": None,
-            "sensitivity": [], "sensitivity_verdict": "无法计算",
-        })
+        base.update(
+            {
+                "status": "invalid",
+                "reason": "后验网格不可归一化（输入过大/不可表示）",
+                "bf10": None,
+                "bf01": None,
+                "log_bf10": None,
+                "label": "无法计算",
+                "posterior_mean": None,
+                "posterior_median": None,
+                "posterior_ci95": None,
+                "posterior_prob_positive": None,
+                "posterior_prob_negative": None,
+                "standardized_effect": None,
+                "sensitivity": [],
+                "sensitivity_verdict": "无法计算",
+            }
+        )
         return base
 
-    sensitivity = _prior_sensitivity(
-        values, prior_scale, factors, rope)
-    result.update({
-        "status": "ok" if n >= min_seeds else "insufficient_seeds",
-        "reason": (None if n >= min_seeds
-                   else f"n={n}<{min_seeds}，只作描述性后验"),
-        "label": _label_from_log(result["log_bf10"]),
-        "sensitivity": sensitivity,
-        "sensitivity_verdict": _sensitivity_verdict(sensitivity),
-    })
+    sensitivity = _prior_sensitivity(values, prior_scale, factors, rope)
+    result.update(
+        {
+            "status": "ok" if n >= min_seeds else "insufficient_seeds",
+            "reason": (
+                None if n >= min_seeds else f"n={n}<{min_seeds}，只作描述性后验"
+            ),
+            "label": _label_from_log(result["log_bf10"]),
+            "sensitivity": sensitivity,
+            "sensitivity_verdict": _sensitivity_verdict(sensitivity),
+        }
+    )
     base.update(result)
     return base

@@ -13,33 +13,44 @@
 或过期缓存的 bin 被静默训练；以及数据自检告警（alerts）：阈值触发项与
 划分协议违规（群组跨 split / 字符切分 / 打乱）都必须显式上报。
 """
+
 import json
 import os
-import shutil
 import sys
 import tempfile
 
 import numpy as np
 
-from lega.data import (CACHE_SCHEMA, CharTokenizer, get_tokenizer, load_bin,
-                       load_meta, load_tokenizer, prepare_bins)
-from lega.datacheck import (TEST_ACCESS_LOG, append_test_access,
-                            build_data_report, check_vocab_capacity,
-                            critical_split_alerts, decontaminate_documents,
-                            decontaminate_near_duplicates,
-                            decontaminate_texts,
-                            distribution_shift, ngram_overlap,
-                            CRITICAL_SPLIT_ALERT_CODES,
-                            leakage_alerts, post_cleanup_residual,
-                            read_test_access_log, sanitize_text,
-                            short_ngram_overlap, short_overlap_alerts,
-                            split_protocol_alerts, temporal_split_text,
-                            text_length_stats, token_stream_stats,
-                            unknown_char_rate,
-                            NEAR_DUP_ROWS, _near_dup_band_key)
+from lega.data import (
+    CACHE_SCHEMA,
+    CharTokenizer,
+    get_tokenizer,
+    load_bin,
+    load_tokenizer,
+    prepare_bins,
+)
+from lega.datacheck import (
+    append_test_access,
+    check_vocab_capacity,
+    critical_split_alerts,
+    decontaminate_documents,
+    decontaminate_texts,
+    distribution_shift,
+    ngram_overlap,
+    CRITICAL_SPLIT_ALERT_CODES,
+    leakage_alerts,
+    read_test_access_log,
+    sanitize_text,
+    split_protocol_alerts,
+    temporal_split_text,
+    text_length_stats,
+    token_stream_stats,
+    unknown_char_rate,
+)
 
 
 from tests.datacheck_helpers import _doc, _write_min_splits
+
 
 def test_temporal_split_keeps_documents_whole():
     docs = [_doc(i) for i in range(40)]
@@ -61,8 +72,10 @@ def test_temporal_split_keeps_documents_whole():
 
 def test_temporal_split_handles_crlf_headings():
     """CRLF 语料的标题/空行边界必须被识别，否则文档会跨 split。"""
-    docs = [f"= Doc {i} =\r\n" + " ".join(f"word{j}" for j in range(20)) + "."
-            for i in range(40)]
+    docs = [
+        f"= Doc {i} =\r\n" + " ".join(f"word{j}" for j in range(20)) + "."
+        for i in range(40)
+    ]
     text = "\r\n\r\n".join(docs) + "\r\n"
     train, val, test, info = temporal_split_text(text)
     assert train + val + test == text
@@ -129,8 +142,17 @@ def test_temporal_split_heading_guard_uses_usable_headings():
     窗口内标题上、val 被压空或切序倒置。
     """
     # 触发 A：窗口内 t1 命中 >= t2 的标题（950），p2 命中被压空的 800
-    text = ("\n" + "= H =\n" + "m" * 492 + "\n" + "= K =\n"
-            + "m" * 443 + "\n" + "= Q =\n" + "m" * 44)
+    text = (
+        "\n"
+        + "= H =\n"
+        + "m" * 492
+        + "\n"
+        + "= K =\n"
+        + "m" * 443
+        + "\n"
+        + "= Q =\n"
+        + "m" * 44
+    )
     train, val, test, info = temporal_split_text(text)
     assert train + val + test == text
     assert info["cut_offsets"] == [500, 950], info
@@ -216,9 +238,17 @@ def test_temporal_split_reports_paragraph_crossing():
 
 def test_heading_regex_matches_multilevel_wikitext_headings():
     from lega.datacheck import _HEADING_RE
-    for line in ("= Title =", "== Section ==", "=== Sub ===",
-                 "= = Section = =", "= = = Sub = = =", "==NoSpace==",
-                 "= Title =\r", "== Section ==\r"):
+
+    for line in (
+        "= Title =",
+        "== Section ==",
+        "=== Sub ===",
+        "= = Section = =",
+        "= = = Sub = = =",
+        "==NoSpace==",
+        "= Title =\r",
+        "== Section ==\r",
+    ):
         assert _HEADING_RE.match(line), f"应视为标题: {line!r}"
     for line in ("x = y = z", "plain text", "= = ", "= = =", ""):
         assert not _HEADING_RE.match(line), f"不应视为标题: {line!r}"
@@ -229,13 +259,21 @@ def test_temporal_split_rejects_invalid_fractions():
     """比例非法时必须在切分前报错，不能被 max/min 夹成"看似成功"的空 split。"""
     text = "x" * 1000
     bad_kwargs = [
-        {"train_frac": 0}, {"train_frac": -0.1}, {"train_frac": 1.0},
-        {"train_frac": 1.2}, {"train_frac": float("nan")},
-        {"val_frac": 0}, {"val_frac": -0.1}, {"val_frac": 1.0},
+        {"train_frac": 0},
+        {"train_frac": -0.1},
+        {"train_frac": 1.0},
+        {"train_frac": 1.2},
+        {"train_frac": float("nan")},
+        {"val_frac": 0},
+        {"val_frac": -0.1},
+        {"val_frac": 1.0},
         {"train_frac": 0.95, "val_frac": 0.1},
-        {"window_frac": 0}, {"window_frac": -0.1},
-        {"window_frac": 1.1}, {"window_frac": float("nan")},
-        {"window_frac": float("inf")}, {"train_frac": True},
+        {"window_frac": 0},
+        {"window_frac": -0.1},
+        {"window_frac": 1.1},
+        {"window_frac": float("nan")},
+        {"window_frac": float("inf")},
+        {"train_frac": True},
         {"train_frac": "0_5"},
     ]
     for kwargs in bad_kwargs:
@@ -247,7 +285,8 @@ def test_temporal_split_rejects_invalid_fractions():
             raise AssertionError(f"非法比例未被拒绝: {kwargs}")
     # 合法字符串比例仍可用
     train, val, test, _ = temporal_split_text(
-        text, train_frac="0.8", val_frac="0.1", window_frac="0.02")
+        text, train_frac="0.8", val_frac="0.1", window_frac="0.02"
+    )
     assert train and val and test
     # min_gap 是切片算术参数：bool/小数/非数值/负数必须显式拒绝，
     # 不能 int() 截断后继续切分。
@@ -266,6 +305,7 @@ def test_temporal_split_rejects_invalid_fractions():
 def test_prepare_data_refuses_group_crossing_local_split(monkeypatch):
     """本地时序划分检测到标题文档跨 split 时必须拒绝写出，而非只告警。"""
     from scripts.prepare_data import main as prepare_main
+
     body = "\n".join(f"line {i} padding" for i in range(400))
     text = body + "\n= Late =\nfin\n"
     with tempfile.TemporaryDirectory() as d:
@@ -273,9 +313,19 @@ def test_prepare_data_refuses_group_crossing_local_split(monkeypatch):
         out_dir = os.path.join(d, "out")
         with open(src, "w", encoding="utf-8") as f:
             f.write(text)
-        monkeypatch.setattr(sys, "argv", [
-            "prepare_data", "--out_dir", out_dir, "--local_txt", src,
-            "--source", "local"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "prepare_data",
+                "--out_dir",
+                out_dir,
+                "--local_txt",
+                src,
+                "--source",
+                "local",
+            ],
+        )
         try:
             prepare_main()
             raise AssertionError("群组跨 split 的本地划分应被拒绝")
@@ -289,15 +339,26 @@ def test_prepare_data_refuses_group_crossing_local_split(monkeypatch):
 def test_prepare_data_refuses_paragraph_crossing_local_split(monkeypatch):
     """本地时序划分检测到空行段落跨 split 时同样必须拒绝写出。"""
     from scripts.prepare_data import main as prepare_main
+
     text = "A" * 110000 + "\n\n" + "B" * 10000 + "\n"
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "local.txt")
         out_dir = os.path.join(d, "out")
         with open(src, "w", encoding="utf-8") as f:
             f.write(text)
-        monkeypatch.setattr(sys, "argv", [
-            "prepare_data", "--out_dir", out_dir, "--local_txt", src,
-            "--source", "local"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "prepare_data",
+                "--out_dir",
+                out_dir,
+                "--local_txt",
+                src,
+                "--source",
+                "local",
+            ],
+        )
         try:
             prepare_main()
             raise AssertionError("段落跨 split 的本地划分应被拒绝")
@@ -312,20 +373,34 @@ def test_prepare_data_refuses_val_test_overlap(monkeypatch):
     """val/test 共享长行无法靠只改 train 修复，准备阶段必须拒绝写出。"""
     import lega.datacheck as dc
     from scripts.prepare_data import main as prepare_main
+
     shared = "shared held-out line " + "x" * 80
 
     def fake_split(text, *args, **kwargs):
         train = "train line " + "a" * 120 + "\n"
         val = shared + "\n"
         test = shared + "\n"
-        return train, val, test, {
-            "order": "temporal:train(earliest)->val->test(latest)",
-            "cut_offsets": [len(train), len(train) + len(val)],
-            "cut_kinds": ["newline", "newline"], "window_chars": 1,
-            "fallback_char_cut": False, "shuffled": False, "n_headings": 0,
-            "documents_cross_cut": False, "group_unit": "line_segment",
-            "lengths_chars": {"train": len(train), "val": len(val),
-                              "test": len(test)}}
+        return (
+            train,
+            val,
+            test,
+            {
+                "order": "temporal:train(earliest)->val->test(latest)",
+                "cut_offsets": [len(train), len(train) + len(val)],
+                "cut_kinds": ["newline", "newline"],
+                "window_chars": 1,
+                "fallback_char_cut": False,
+                "shuffled": False,
+                "n_headings": 0,
+                "documents_cross_cut": False,
+                "group_unit": "line_segment",
+                "lengths_chars": {
+                    "train": len(train),
+                    "val": len(val),
+                    "test": len(test),
+                },
+            },
+        )
 
     monkeypatch.setattr(dc, "temporal_split_text", fake_split)
     with tempfile.TemporaryDirectory() as d:
@@ -333,9 +408,19 @@ def test_prepare_data_refuses_val_test_overlap(monkeypatch):
         out_dir = os.path.join(d, "out")
         with open(src, "w", encoding="utf-8") as f:
             f.write("ignored by fake split\n")
-        monkeypatch.setattr(sys, "argv", [
-            "prepare_data", "--out_dir", out_dir, "--local_txt", src,
-            "--source", "local"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "prepare_data",
+                "--out_dir",
+                out_dir,
+                "--local_txt",
+                src,
+                "--source",
+                "local",
+            ],
+        )
         try:
             prepare_main()
             raise AssertionError("val/test 重叠的划分应被拒绝")
@@ -359,8 +444,9 @@ def test_prepare_data_rejects_negative_max_tokens(monkeypatch):
         else:
             raise AssertionError("write_clean_lines 未拒绝负 max_tokens")
         out_dir = os.path.join(d, "out")
-        monkeypatch.setattr(sys, "argv", [
-            "prepare_data", "--out_dir", out_dir, "--max_tokens", "-5"])
+        monkeypatch.setattr(
+            sys, "argv", ["prepare_data", "--out_dir", out_dir, "--max_tokens", "-5"]
+        )
         try:
             prepare_main()
         except SystemExit as e:
@@ -372,13 +458,20 @@ def test_prepare_data_rejects_negative_max_tokens(monkeypatch):
 
 
 def test_decontaminate_drops_train_duplicates_only():
-    shared = ("This is a long duplicated paragraph that appears in both splits "
-              "for testing decontamination behavior.")
-    train_only = "A train-only paragraph with sufficient length to be tracked by checks."
+    shared = (
+        "This is a long duplicated paragraph that appears in both splits "
+        "for testing decontamination behavior."
+    )
+    train_only = (
+        "A train-only paragraph with sufficient length to be tracked by checks."
+    )
     val_only = "A val-only paragraph with sufficient length to be tracked by checks."
     test_only = "A test-only paragraph with sufficient length to be tracked by checks."
-    texts = {"train": f"{shared}\n{train_only}", "val": f"{shared}\n{val_only}",
-             "test": f"{shared}\n{test_only}"}
+    texts = {
+        "train": f"{shared}\n{train_only}",
+        "val": f"{shared}\n{val_only}",
+        "test": f"{shared}\n{test_only}",
+    }
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert shared not in out["train"]
     assert shared in out["val"] and shared in out["test"]
@@ -390,9 +483,11 @@ def test_decontaminate_drops_train_duplicates_only():
 def test_decontaminate_ignores_short_lines():
     short = "= References ="
     long_train = "A long training paragraph repeated twice but not in eval sets at all."
-    texts = {"train": f"{short}\n{long_train}\n{long_train}",
-             "val": f"{short}\nA long validation paragraph not present in train.",
-             "test": ""}
+    texts = {
+        "train": f"{short}\n{long_train}\n{long_train}",
+        "val": f"{short}\nA long validation paragraph not present in train.",
+        "test": "",
+    }
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert short in out["train"]
     assert out["train"].count(long_train) == 1
@@ -408,8 +503,10 @@ def test_decontaminate_ignores_short_lines():
             raise AssertionError(f"非法 min_chars 未被拒绝: {bad!r}")
     _, stats_str = decontaminate_texts(texts, min_chars="40")
     assert stats_str["min_chars"] == 40
-    print("  [ok] 短行不参与去污染；train 内部长行重复被删除且仍计数；"
-          "min_chars 严格整数化")
+    print(
+        "  [ok] 短行不参与去污染；train 内部长行重复被删除且仍计数；"
+        "min_chars 严格整数化"
+    )
 
 
 def test_decontaminate_counts_short_line_duplicates():
@@ -419,8 +516,11 @@ def test_decontaminate_counts_short_line_duplicates():
     train_long = "A train-only paragraph long enough to satisfy the length threshold."
     val_long = "A validation paragraph that is distinct and sufficiently long too."
     test_long = "A test paragraph that is distinct from the others and long enough."
-    texts = {"train": f"{short}\n{short}\n{train_long}",
-             "val": val_long, "test": test_long}
+    texts = {
+        "train": f"{short}\n{short}\n{train_long}",
+        "val": val_long,
+        "test": test_long,
+    }
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert short in out["train"]
     assert stats["train_lines_dropped_as_duplicates_of_eval"] == 0
@@ -446,8 +546,11 @@ def test_decontaminate_reports_short_line_cross_split_overlap():
     assert stats["val_test_overlap_short_lines"] == 0
     assert stats["train_val_short_overlap_rate"] > 0
     # NFKC/空白归一化后的短行同样计入（全角 Ａ + 多空格 vs 普通 A 单空格）
-    texts2 = {"train": "Ａ  shared   short\n" + "x" * 50,
-              "val": "A shared short\n" + "y" * 50, "test": ""}
+    texts2 = {
+        "train": "Ａ  shared   short\n" + "x" * 50,
+        "val": "A shared short\n" + "y" * 50,
+        "test": "",
+    }
     _, stats2 = decontaminate_texts(texts2, min_chars=40)
     assert stats2["train_val_overlap_short_lines"] == 0
     assert stats2["train_val_overlap_normalized_short_lines"] == 1
@@ -456,14 +559,18 @@ def test_decontaminate_reports_short_line_cross_split_overlap():
 
 def test_decontaminate_catches_whitespace_normalized_duplicates():
     """仅空白差异的跨 split 复制同样是泄露，必须只从 train 移除。"""
-    val_line = ("A long paragraph repeated with a whitespace variant that must "
-                "still be caught by decontamination.")
-    train_variant = ("A  long paragraph repeated with a whitespace   variant "
-                     "that must still be caught by decontamination.")
-    train_only = ("A train-only paragraph with sufficient length to be tracked "
-                  "by checks.")
-    texts = {"train": f"{train_variant}\n{train_only}", "val": val_line,
-             "test": ""}
+    val_line = (
+        "A long paragraph repeated with a whitespace variant that must "
+        "still be caught by decontamination."
+    )
+    train_variant = (
+        "A  long paragraph repeated with a whitespace   variant "
+        "that must still be caught by decontamination."
+    )
+    train_only = (
+        "A train-only paragraph with sufficient length to be tracked " "by checks."
+    )
+    texts = {"train": f"{train_variant}\n{train_only}", "val": val_line, "test": ""}
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert train_variant not in out["train"]
     assert train_only in out["train"]
@@ -476,14 +583,18 @@ def test_decontaminate_catches_whitespace_normalized_duplicates():
 
 def test_decontaminate_catches_nfkc_compatibility_duplicates():
     """全角/表意空格等 Unicode 兼容变体不能绕过重复检测。"""
-    val_line = ("Ａ long paragraph with fullwidth A and\u3000an ideographic "
-                "space that must still be caught by decontamination.")
-    train_variant = ("A long paragraph with fullwidth A and an ideographic "
-                     "space that must still be caught by decontamination.")
-    train_only = ("A train-only paragraph with sufficient length to be tracked "
-                  "by checks.")
-    texts = {"train": f"{train_variant}\n{train_only}", "val": val_line,
-             "test": ""}
+    val_line = (
+        "Ａ long paragraph with fullwidth A and\u3000an ideographic "
+        "space that must still be caught by decontamination."
+    )
+    train_variant = (
+        "A long paragraph with fullwidth A and an ideographic "
+        "space that must still be caught by decontamination."
+    )
+    train_only = (
+        "A train-only paragraph with sufficient length to be tracked " "by checks."
+    )
+    texts = {"train": f"{train_variant}\n{train_only}", "val": val_line, "test": ""}
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert train_variant not in out["train"]
     assert train_only in out["train"]
@@ -500,8 +611,11 @@ def test_decontaminate_classifies_long_lines_after_normalization():
     ligature_line = "ﬀ" * 20
     plain_line = "f" * 40
     train_only = "A train-only paragraph with enough characters to survive."
-    texts = {"train": f"{ligature_line}\n{train_only}",
-             "val": plain_line, "test": "A test-only paragraph with enough chars."}
+    texts = {
+        "train": f"{ligature_line}\n{train_only}",
+        "val": plain_line,
+        "test": "A test-only paragraph with enough chars.",
+    }
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert ligature_line not in out["train"]
     assert train_only in out["train"]
@@ -516,8 +630,11 @@ def test_decontaminate_removes_train_internal_duplicates_only():
     train_only = "Another long training paragraph that is unique in the corpus."
     val_only = "A long validation paragraph that must remain completely untouched."
     test_only = "A long test paragraph that must remain completely untouched."
-    texts = {"train": f"{dup}\n{train_only}\n{dup}\n{dup}",
-             "val": val_only, "test": test_only}
+    texts = {
+        "train": f"{dup}\n{train_only}\n{dup}\n{dup}",
+        "val": val_only,
+        "test": test_only,
+    }
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert out["train"].count(dup) == 1
     assert train_only in out["train"]
@@ -531,8 +648,10 @@ def test_decontaminate_documents_catches_multiline_short_line_copies():
     """行级去污染只看 >=40 字符的单行；整段复制由块级逻辑补齐。"""
     block = "Chapter One\nshort a\nshort b"  # 每行都低于行级阈值
     texts = {
-        "train": (f"{block}\n\ntrain-only long line with enough characters to stay.\n\n"
-                  "second train-only long line with enough characters to stay."),
+        "train": (
+            f"{block}\n\ntrain-only long line with enough characters to stay.\n\n"
+            "second train-only long line with enough characters to stay."
+        ),
         "val": (f"{block}\n\nval-only long line with enough characters to stay."),
         "test": "test-only long line with enough characters to stay.",
     }
@@ -574,8 +693,7 @@ def test_decontaminate_documents_removes_newly_merged_eval_blocks():
     """
     train = "= A =\n= X =\nx1\nx2\n\nb\n"
     val = "= A =\nb\n\n= X =\nx1\nx2\n"
-    out, stats = decontaminate_documents(
-        {"train": train, "val": val, "test": ""})
+    out, stats = decontaminate_documents({"train": train, "val": val, "test": ""})
     assert out["train"] == "", repr(out["train"])
     assert stats["train_blocks_dropped_as_duplicates_of_eval"] == 2
     again, _ = decontaminate_documents(out)
@@ -595,9 +713,11 @@ def test_decontaminate_documents_tolerates_missing_or_bad_input():
 def test_decontaminate_diagnoses_val_test_overlap_without_rewriting():
     """val/test 重叠会削弱 final test 的独立性，但两侧尘封，只统计不改写。"""
     shared = "A long paragraph copied into both evaluation splits for diagnosis."
-    texts = {"train": "A long independent training paragraph with enough length.",
-             "val": f"{shared}\nA long val-only paragraph with enough length.",
-             "test": f"{shared}\nA long test-only paragraph with enough length."}
+    texts = {
+        "train": "A long independent training paragraph with enough length.",
+        "val": f"{shared}\nA long val-only paragraph with enough length.",
+        "test": f"{shared}\nA long test-only paragraph with enough length.",
+    }
     out, stats = decontaminate_texts(texts, min_chars=40)
     assert out["val"] == texts["val"] and out["test"] == texts["test"]
     assert stats["val_test_overlap_long_lines"] == 1
@@ -609,10 +729,13 @@ def test_decontaminate_diagnoses_val_test_overlap_without_rewriting():
 def test_leakage_alerts_flags_normalized_only_val_test_overlap():
     """仅空白归一化后才相等的 val/test 长行也必须告警，不能只统计。"""
     out = leakage_alerts(
-        None, None,
-        {"val_test_overlap_long_lines": 0,
-         "val_test_overlap_normalized_long_lines": 1},
-        None, None, None)
+        None,
+        None,
+        {"val_test_overlap_long_lines": 0, "val_test_overlap_normalized_long_lines": 1},
+        None,
+        None,
+        None,
+    )
     hits = [a for a in out if a["code"] == "eval_splits_overlap"]
     assert len(hits) == 1
     assert hits[0]["level"] == "warning"
@@ -622,34 +745,51 @@ def test_leakage_alerts_flags_normalized_only_val_test_overlap():
 
 
 def test_critical_split_alerts_filters_actionable_violations():
-    report = {"alerts": [
-        {"level": "warning", "code": "split_shuffled", "message": "x"},
-        {"level": "warning", "code": "split_char_cut", "message": "y"},
-        {"level": "warning", "code": "split_documents_cross_cut", "message": "z"},
-        {"level": "warning", "code": "ngram_overlap_train_val", "message": "w"},
-        {"level": "warning", "code": "ngram_overlap_train_test", "message": "w"},
-        {"level": "warning", "code": "ngram_overlap_val_test", "message": "w"},
-        {"level": "warning", "code": "eval_splits_overlap", "message": "o"},
-        {"level": "warning", "code": "eval_splits_overlap_documents", "message": "o"},
-        # 分布漂移警告不属“必须先处理的泄露”：temporal split 下正常存在，
-        # 不能因此拦截训练（否则合法时序划分永远无法开跑）。
-        {"level": "warning", "code": "distribution_tv_test_vs_train", "message": "d"},
-        {"level": "info", "code": "decontamination_applied", "message": "v"},
-    ]}
+    report = {
+        "alerts": [
+            {"level": "warning", "code": "split_shuffled", "message": "x"},
+            {"level": "warning", "code": "split_char_cut", "message": "y"},
+            {"level": "warning", "code": "split_documents_cross_cut", "message": "z"},
+            {"level": "warning", "code": "ngram_overlap_train_val", "message": "w"},
+            {"level": "warning", "code": "ngram_overlap_train_test", "message": "w"},
+            {"level": "warning", "code": "ngram_overlap_val_test", "message": "w"},
+            {"level": "warning", "code": "eval_splits_overlap", "message": "o"},
+            {
+                "level": "warning",
+                "code": "eval_splits_overlap_documents",
+                "message": "o",
+            },
+            # 分布漂移警告不属“必须先处理的泄露”：temporal split 下正常存在，
+            # 不能因此拦截训练（否则合法时序划分永远无法开跑）。
+            {
+                "level": "warning",
+                "code": "distribution_tv_test_vs_train",
+                "message": "d",
+            },
+            {"level": "info", "code": "decontamination_applied", "message": "v"},
+        ]
+    }
     picked = critical_split_alerts(report)
     assert [a["code"] for a in picked] == [
-        "split_shuffled", "split_char_cut", "split_documents_cross_cut",
-        "ngram_overlap_train_val", "ngram_overlap_train_test",
+        "split_shuffled",
+        "split_char_cut",
+        "split_documents_cross_cut",
+        "ngram_overlap_train_val",
+        "ngram_overlap_train_test",
         "ngram_overlap_val_test",
-        "eval_splits_overlap", "eval_splits_overlap_documents"]
+        "eval_splits_overlap",
+        "eval_splits_overlap_documents",
+    ]
     assert critical_split_alerts({}) == []
     assert critical_split_alerts(None) == []
     assert critical_split_alerts({"alerts": 5}) == []
     # 清洗后仍残留 train↔eval 精确重复是训练前必须拦截的直接证据
     assert "post_cleanup_residual_overlap" in CRITICAL_SPLIT_ALERT_CODES
     assert split_protocol_alerts("not-a-dict") == []
-    print("  [ok] critical_split_alerts 只筛出必须先处理的泄露（含跨 split 复制），"
-          "分布漂移不拦截")
+    print(
+        "  [ok] critical_split_alerts 只筛出必须先处理的泄露（含跨 split 复制），"
+        "分布漂移不拦截"
+    )
 
 
 def test_split_protocol_alerts_report_unverified_overlap_and_missing_files():
@@ -664,8 +804,7 @@ def test_split_protocol_alerts_report_unverified_overlap_and_missing_files():
     alerts = split_protocol_alerts(overlapping)
     codes = [a["code"] for a in alerts]
     assert "split_overlap_long_lines" in codes
-    msg = next(a["message"] for a in alerts
-               if a["code"] == "split_overlap_long_lines")
+    msg = next(a["message"] for a in alerts if a["code"] == "split_overlap_long_lines")
     assert "train_val" in msg and "val/test" in msg
     missing = {"verified_disjoint": False, "missing_files": ["test"]}
     alerts = split_protocol_alerts(missing)
@@ -676,8 +815,7 @@ def test_split_protocol_alerts_report_unverified_overlap_and_missing_files():
     # 声明“已验证互斥”但实际重叠计数非零：矛盾证据必须告警，不能只看声明。
     contradictory = {
         "verified_disjoint": True,
-        "overlap_long_lines": {"train_val": {"exact_lines": 1,
-                                             "normalized_lines": 0}},
+        "overlap_long_lines": {"train_val": {"exact_lines": 1, "normalized_lines": 0}},
     }
     alerts = split_protocol_alerts(contradictory)
     assert [a["code"] for a in alerts] == ["split_overlap_long_lines"]
@@ -702,16 +840,14 @@ def test_decontaminate_tolerates_non_dict_and_missing_train():
 def test_ngram_overlap_detects_and_clears():
     rng = np.random.default_rng(0)
     leak = rng.integers(0, 1000, size=64).astype(np.uint16)
-    train = np.concatenate(
-        [rng.integers(0, 1000, size=5000).astype(np.uint16), leak])
-    test = np.concatenate(
-        [rng.integers(0, 1000, size=3000).astype(np.uint16), leak])
+    train = np.concatenate([rng.integers(0, 1000, size=5000).astype(np.uint16), leak])
+    test = np.concatenate([rng.integers(0, 1000, size=3000).astype(np.uint16), leak])
     res = ngram_overlap(train, test, n=64, n_samples=20000, seed=0)
     assert res["windows_found_in_train_sample"] >= 1
     assert res["overlap_rate"] > 0
     # 独立随机流不应检出 64-gram 重叠
-    a = rng.integers(10 ** 6, 2 * 10 ** 6, size=5000).astype(np.uint16)
-    b = rng.integers(0, 10 ** 6, size=4000).astype(np.uint16)
+    a = rng.integers(10**6, 2 * 10**6, size=5000).astype(np.uint16)
+    b = rng.integers(0, 10**6, size=4000).astype(np.uint16)
     res2 = ngram_overlap(a, b, n=64, n_samples=20000, seed=0)
     assert res2["windows_found_in_train_sample"] == 0
     print("  [ok] 64-gram 采样筛查：植入的跨 split 复制被检出，独立流为 0")
@@ -732,8 +868,12 @@ def test_ngram_overlap_ignores_unk_collisions():
 def test_prepare_bins_does_not_flag_unk_collision(monkeypatch):
     """字符级 OOV 长串（val/test 各用不同未见字符）不得触发 hard 重叠告警。"""
     import lega.data as data_mod
-    monkeypatch.setattr(data_mod, "get_gpt2_tokenizer",
-                        lambda: (_ for _ in ()).throw(RuntimeError("no tiktoken")))
+
+    monkeypatch.setattr(
+        data_mod,
+        "get_gpt2_tokenizer",
+        lambda: (_ for _ in ()).throw(RuntimeError("no tiktoken")),
+    )
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
             f.write("The quick brown fox jumps over the lazy dog. " * 50)
@@ -745,10 +885,10 @@ def test_prepare_bins_does_not_flag_unk_collision(monkeypatch):
         assert meta["tokenizer"] == "char"
         with open(os.path.join(d, "data_report.json"), encoding="utf-8") as f:
             rep = json.load(f)
-        assert rep["contamination"]["val_test"][
-            "windows_found_in_train_sample"] == 0
-        bad = {a["code"] for a in rep["alerts"]
-               if a["code"].startswith("ngram_overlap")}
+        assert rep["contamination"]["val_test"]["windows_found_in_train_sample"] == 0
+        bad = {
+            a["code"] for a in rep["alerts"] if a["code"].startswith("ngram_overlap")
+        }
         assert not bad, bad
     print("  [ok] prepare_bins：字符级 OOV 碰撞不产生跨 split 重叠告警")
 
@@ -758,17 +898,24 @@ def test_ngram_overlap_rejects_non_token_ids_and_bad_params():
     ok = np.array([0, 1, 2, 3], dtype=np.int64)
     res = ngram_overlap(ok, ok.copy(), n=2, n_samples=8, seed=0)
     assert res["overlap_rate"] == 1.0
-    for bad in (np.array([70000], dtype=np.int64),
-                np.array([-1], dtype=np.int64),
-                np.array([1.5], dtype=np.float64),
-                np.array([True, False])):
+    for bad in (
+        np.array([70000], dtype=np.int64),
+        np.array([-1], dtype=np.int64),
+        np.array([1.5], dtype=np.float64),
+        np.array([True, False]),
+    ):
         try:
             ngram_overlap(bad, ok, n=2)
             raise AssertionError(f"非法 token 流未被拒绝: {bad!r}")
         except ValueError:
             pass
-    for kwargs in ({"n": 0}, {"n": -3}, {"n": True},
-                   {"n": 2, "n_samples": 0}, {"n": 2, "n_samples": True}):
+    for kwargs in (
+        {"n": 0},
+        {"n": -3},
+        {"n": True},
+        {"n": 2, "n_samples": 0},
+        {"n": 2, "n_samples": True},
+    ):
         try:
             ngram_overlap(ok, ok, **kwargs)
             raise AssertionError(f"非法参数未被拒绝: {kwargs}")
@@ -783,12 +930,17 @@ def test_ngram_overlap_rejects_non_token_ids_and_bad_params():
         except ValueError:
             pass
     # 整数值浮点/NumPy 整数仍是合法 token id（与 token_stream_stats 同口径）。
-    res = ngram_overlap(np.array([0, 1, 0, 1], dtype=np.int64),
-                        np.array([0, 1, 0, 1], dtype=np.int64),
-                        n=2, ignore_ids={0.0, np.int64(1)})
+    res = ngram_overlap(
+        np.array([0, 1, 0, 1], dtype=np.int64),
+        np.array([0, 1, 0, 1], dtype=np.int64),
+        n=2,
+        ignore_ids={0.0, np.int64(1)},
+    )
     assert res["eval_windows_sampled"] == 0
-    print("  [ok] 64-gram 筛查：越界/非整数 id、非法 n/n_samples 与 "
-          "ignore_ids 显式拒绝")
+    print(
+        "  [ok] 64-gram 筛查：越界/非整数 id、非法 n/n_samples 与 "
+        "ignore_ids 显式拒绝"
+    )
 
 
 def test_token_stream_hard_checks():
@@ -825,8 +977,12 @@ def test_token_stream_hard_checks():
         raise AssertionError("超 uint16 的 id 应抛 ValueError")
     except ValueError as e:
         assert "65535" in str(e)
-    assert token_stream_stats(np.array([0, 65535], dtype=np.int64),
-                              65536, "train")["max_id"] == 65535
+    assert (
+        token_stream_stats(np.array([0, 65535], dtype=np.int64), 65536, "train")[
+            "max_id"
+        ]
+        == 65535
+    )
     print("  [ok] token 流硬校验：越界/NaN/Inf/空流/非整数/uint16 容量")
 
 
@@ -905,8 +1061,10 @@ def test_sanitize_text_stats():
 
 def test_sanitize_text_line_level_label_noise_stats():
     """行级坏字符统计：标签噪声按行比例报告，而不是只看总字符数。"""
-    raw = ("clean line\nbad \ufffd line\ncontrol \x07 line\n"
-           "both \ufffd and \x01 here\nclean again")
+    raw = (
+        "clean line\nbad \ufffd line\ncontrol \x07 line\n"
+        "both \ufffd and \x01 here\nclean again"
+    )
     clean, st = sanitize_text(raw)
     assert "\ufffd" not in clean and "\x07" not in clean and "\x01" not in clean
     assert st["lines"] == 5
@@ -924,8 +1082,10 @@ def test_text_length_stats_outlier_detection():
     assert st["line_chars_max"] == 200001
     assert st["lines_gt_huge_threshold"] == 1
     # 阈值是审计身份：bool/小数/下划线串不能被 int() 截断成另一个口径。
-    assert text_length_stats(text, huge_line_chars="100000")[
-        "lines_gt_huge_threshold"] == 1
+    assert (
+        text_length_stats(text, huge_line_chars="100000")["lines_gt_huge_threshold"]
+        == 1
+    )
     for bad in (True, 40.5, "1_0", None, -1):
         try:
             text_length_stats(text, huge_line_chars=bad)
@@ -942,8 +1102,7 @@ def test_write_clean_lines_preserves_blank_line_boundaries():
 
     with tempfile.TemporaryDirectory() as d:
         dst = os.path.join(d, "clean.txt")
-        n = write_clean_lines(
-            io.StringIO("first\n\n\nsecond\n  \nthird\n"), dst, 0)
+        n = write_clean_lines(io.StringIO("first\n\n\nsecond\n  \nthird\n"), dst, 0)
         with open(dst, "r", encoding="utf-8") as f:
             text = f.read()
         assert text == "first\n\nsecond\n\nthird"
@@ -965,7 +1124,7 @@ def test_write_clean_lines_preserves_blank_line_boundaries():
         # 合法但极大的整数预算不应因 int→float 溢出而崩溃：语义上等同于
         # “不截断”，两行必须完整写入。
         huge = os.path.join(d, "huge_budget.txt")
-        n_huge = write_clean_lines(io.StringIO("a\nb\n"), huge, 10 ** 400)
+        n_huge = write_clean_lines(io.StringIO("a\nb\n"), huge, 10**400)
         with open(huge, "r", encoding="utf-8") as f:
             assert f.read() == "a\nb"
         assert n_huge == 3
@@ -978,8 +1137,7 @@ def test_verify_splits_disjoint_binds_claim_to_content():
 
     shared = "A shared line with enough characters to count as duplicate."
     with tempfile.TemporaryDirectory() as d:
-        paths = {s: os.path.join(d, f"{s}.txt") for s in
-                 ("train", "val", "test")}
+        paths = {s: os.path.join(d, f"{s}.txt") for s in ("train", "val", "test")}
         # 整洁：三份互不相同
         for s, p in paths.items():
             with open(p, "w", encoding="utf-8") as f:
@@ -1003,8 +1161,12 @@ def test_verify_splits_disjoint_binds_claim_to_content():
         assert r["verified_disjoint"] is False
         assert r["missing_files"] == ["train"]
         # 空路径/空输入同样不能声称已验证
-        assert verify_splits_disjoint({"train": "", "val": paths["val"]})[
-            "verified_disjoint"] is False
+        assert (
+            verify_splits_disjoint({"train": "", "val": paths["val"]})[
+                "verified_disjoint"
+            ]
+            is False
+        )
         assert verify_splits_disjoint({})["verified_disjoint"] is False
         # 注入 val/test 共享长行 → 声明被证伪
         with open(paths["val"], "w", encoding="utf-8") as f:
@@ -1041,8 +1203,10 @@ def test_verify_splits_disjoint_binds_claim_to_content():
         r = verify_splits_disjoint(partial)
         assert r["verified_disjoint"] is False
         assert "test" in r["missing_files"]
-    print("  [ok] verify_splits_disjoint：声明与文本核对，短行不误报，"
-          "缺失文件不伪装成通过")
+    print(
+        "  [ok] verify_splits_disjoint：声明与文本核对，短行不误报，"
+        "缺失文件不伪装成通过"
+    )
 
 
 def test_distribution_shift_metric():
@@ -1063,69 +1227,79 @@ def test_distribution_shift_metric():
     assert d_rare["tokens_train"] == rare.size
     assert d_rare["eval_oov_token_rate"] == 0
     # 显式 max_samples 仍保留有放回采样路径，并标记 count_mode 供审计。
-    d_sample = distribution_shift(rare, np.array([7, 1], dtype=np.uint16), 10,
-                                  max_samples=1000)
+    d_sample = distribution_shift(
+        rare, np.array([7, 1], dtype=np.uint16), 10, max_samples=1000
+    )
     assert d_sample["count_mode"] == "sampled"
     assert d_sample["tokens_train"] == 1000
     # 显式采样预算非法时不能静默退回全量或截断成 1：报告会声称采样
     # 却实际使用另一口径，审计字段失去意义。
     for bad in (True, 0, -1, 1.5, "bad", float("nan"), float("inf")):
         try:
-            distribution_shift(rare, np.array([7, 1], dtype=np.uint16), 10,
-                               max_samples=bad)
+            distribution_shift(
+                rare, np.array([7, 1], dtype=np.uint16), 10, max_samples=bad
+            )
             raise AssertionError(f"非法 max_samples 应报错: {bad!r}")
         except ValueError:
             pass
     # uint16 词表上限：超出后密集直方图会按声明容量做巨额分配（10**12 即
     # TB 级），必须像 prepare_bins 一样显式拒绝，而不是在计数阶段 OOM。
-    for bad_vocab in (0, -1, True, 1.5, "bad", 65537, 10 ** 12):
+    for bad_vocab in (0, -1, True, 1.5, "bad", 65537, 10**12):
         try:
-            distribution_shift(rare, np.array([7, 1], dtype=np.uint16),
-                               bad_vocab)
+            distribution_shift(rare, np.array([7, 1], dtype=np.uint16), bad_vocab)
             raise AssertionError(f"非法 vocab_size 应报错: {bad_vocab!r}")
         except ValueError:
             pass
     # 越界/非整数/hash 伪装的 id 不能改变直方图长度或静默成为合法 token：
     # 两边同样越界时 TV/JS 会看似正常却统计了词表外的类别。
-    for bad_ids in (np.array([0, 1, 3]), np.array([-1, 0]),
-                    np.array([0.5, 1.0]), np.array([np.nan, 1.0]),
-                    np.array([True, False])):
+    for bad_ids in (
+        np.array([0, 1, 3]),
+        np.array([-1, 0]),
+        np.array([0.5, 1.0]),
+        np.array([np.nan, 1.0]),
+        np.array([True, False]),
+    ):
         try:
             distribution_shift(bad_ids, np.array([0, 1]), 3)
             raise AssertionError(f"非法 token id 应报错: {bad_ids!r}")
         except ValueError:
             pass
     # 整数值浮点流仍是合法 token id，不能因硬化误伤。
-    d_float = distribution_shift(np.array([0.0, 1.0]), np.array([0.0, 1.0]),
-                                 3)
+    d_float = distribution_shift(np.array([0.0, 1.0]), np.array([0.0, 1.0]), 3)
     assert d_float["tokens_train"] == 2 and d_float["tv"] == 0.0, d_float
-    print("  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计，"
-          "非法预算/词表显式拒绝")
+    print(
+        "  [ok] 分布漂移：精确计数避免 OOV 假阳性；显式采样可审计，"
+        "非法预算/词表显式拒绝"
+    )
 
 
 def test_test_access_ledger():
     with tempfile.TemporaryDirectory() as d:
         assert read_test_access_log(d) == []
-        s1 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt",
-                                    "test_data_fingerprint": "v1"})
+        s1 = append_test_access(
+            d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt", "test_data_fingerprint": "v1"}
+        )
         assert s1["evaluations"] == 1 and s1["distinct_checkpoints"] == 1
-        s2 = append_test_access(d, {"ckpt_sha256": "bbb", "ckpt": "/x/b.pt",
-                                    "test_data_fingerprint": "v1"})
+        s2 = append_test_access(
+            d, {"ckpt_sha256": "bbb", "ckpt": "/x/b.pt", "test_data_fingerprint": "v1"}
+        )
         assert s2["evaluations"] == 2 and s2["distinct_checkpoints"] == 2
         assert s2["checkpoints_evaluated_multiple_times"] == []
-        s3 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt",
-                                    "test_data_fingerprint": "v1"})
+        s3 = append_test_access(
+            d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt", "test_data_fingerprint": "v1"}
+        )
         assert s3["evaluations"] == 3 and s3["distinct_checkpoints"] == 2
         assert s3["checkpoints_evaluated_multiple_times"] == ["aaa"[:16]]
         # 重建 test.bin 后，同一 checkpoint 在 v2 上是新版本评测，不算重复；
         # 但旧账本仍保留 v1 的重复记录供审计。
-        s4 = append_test_access(d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt",
-                                    "test_data_fingerprint": "v2"})
+        s4 = append_test_access(
+            d, {"ckpt_sha256": "aaa", "ckpt": "/x/a.pt", "test_data_fingerprint": "v2"}
+        )
         assert s4["distinct_test_data_versions"] == 2
         assert s4["checkpoints_evaluated_multiple_times"] == ["aaa"[:16]]
         assert s4["repeated_evaluations"] == [
-            {"ckpt_prefix": "aaa"[:16], "test_data_fingerprint": "v1",
-             "evaluations": 2}]
+            {"ckpt_prefix": "aaa"[:16], "test_data_fingerprint": "v1", "evaluations": 2}
+        ]
         assert len(read_test_access_log(d)) == 4
     print("  [ok] 测试集访问账本：追加、去重统计、按 test 数据版本判定重复")
 
@@ -1134,18 +1308,28 @@ def test_test_access_summary_groups_independent_pipeline_looks():
     """同一流水线运行只算一个 look；旧记录缺 run_id 时显式标记不可归属。"""
     from lega.datacheck import summarize_test_access
 
-    out = summarize_test_access([
-        {"ckpt_sha256": "a", "test_data_fingerprint": "v1",
-         "pipeline_run_id": "run-1"},
-        {"ckpt_sha256": "b", "test_data_fingerprint": "v1",
-         "pipeline_run_id": "run-1"},
-        {"ckpt_sha256": "c", "test_data_fingerprint": "v1",
-         "pipeline_run_id": "run-2"},
-        {"ckpt_sha256": "d", "test_data_fingerprint": "v1"},
-        {"ckpt_sha256": "e"},
-    ])
-    assert out["looks_by_test_data_fingerprint"] == {
-        "v1": ["run-1", "run-2"]}
+    out = summarize_test_access(
+        [
+            {
+                "ckpt_sha256": "a",
+                "test_data_fingerprint": "v1",
+                "pipeline_run_id": "run-1",
+            },
+            {
+                "ckpt_sha256": "b",
+                "test_data_fingerprint": "v1",
+                "pipeline_run_id": "run-1",
+            },
+            {
+                "ckpt_sha256": "c",
+                "test_data_fingerprint": "v1",
+                "pipeline_run_id": "run-2",
+            },
+            {"ckpt_sha256": "d", "test_data_fingerprint": "v1"},
+            {"ckpt_sha256": "e"},
+        ]
+    )
+    assert out["looks_by_test_data_fingerprint"] == {"v1": ["run-1", "run-2"]}
     assert out["unattributed_records_by_test_data_fingerprint"] == {"v1": 1}
     assert out["distinct_pipeline_runs"] == 2
     assert out["records_without_pipeline_run_id"] == 2
@@ -1155,24 +1339,30 @@ def test_test_access_summary_groups_independent_pipeline_looks():
 
 def test_test_reuse_gate_only_downgrades_test_dependent_metrics():
     """超过 look 预算只降级依赖 test 的假设；机制端点不受连带影响。"""
-    from lega.testreuse import (apply_test_reuse_gate, test_dependent_metrics,
-                                test_reuse_report)
+    from lega.testreuse import (
+        apply_test_reuse_gate,
+        test_dependent_metrics,
+        test_reuse_report,
+    )
 
     runs = {
-        "lega": {1: {"eval": {"split": "test"},
-                     "ruler": {"corpus_source": "val"}}},
+        "lega": {1: {"eval": {"split": "test"}, "ruler": {"corpus_source": "val"}}},
     }
     assert test_dependent_metrics(runs) == {"PPL"}
     report = test_reuse_report(
-        {"looks_by_test_data_fingerprint": {"v1": ["run-1", "run-2"]},
-         "unattributed_records_by_test_data_fingerprint": {}},
-        "v1", "run-2", planned_looks=1)
+        {
+            "looks_by_test_data_fingerprint": {"v1": ["run-1", "run-2"]},
+            "unattributed_records_by_test_data_fingerprint": {},
+        },
+        "v1",
+        "run-2",
+        planned_looks=1,
+    )
     assert report["checked"] is True and report["exceeded"] is True
     hyp = [
         {"id": "H1", "metric": "PPL", "confirmatory_valid": True},
         {"id": "H4", "metric": "RULER平均", "confirmatory_valid": True},
-        {"id": "H6", "metric": "AUROC差(logit−仅查询)",
-         "confirmatory_valid": True},
+        {"id": "H6", "metric": "AUROC差(logit−仅查询)", "confirmatory_valid": True},
     ]
     out = apply_test_reuse_gate(hyp, report, {"PPL"})
     assert out[0]["confirmatory_valid"] is False
@@ -1209,10 +1399,13 @@ def test_prepare_bins_rejects_bool_or_fractional_token_counts():
 
 
 def test_prepare_bins_writes_report_and_decontaminates():
-    shared = ("A shared paragraph with enough characters to count as a long "
-              "duplicate line.")
-    train_unique = ("A train-only line that provides enough characters for "
-                    "tokenization checks.")
+    shared = (
+        "A shared paragraph with enough characters to count as a long "
+        "duplicate line."
+    )
+    train_unique = (
+        "A train-only line that provides enough characters for " "tokenization checks."
+    )
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
             f.write(f"{shared}\n{train_unique}\n{train_unique}\n")
@@ -1223,8 +1416,7 @@ def test_prepare_bins_writes_report_and_decontaminates():
         meta = prepare_bins(d, kind="char", force=True)
         assert meta["fit_on"] == "train"
         assert meta["char_unk"] is True
-        with open(os.path.join(d, "data_report.json"), "r",
-                  encoding="utf-8") as f:
+        with open(os.path.join(d, "data_report.json"), "r", encoding="utf-8") as f:
             rep = json.load(f)
         assert rep["duplicates"]["train_lines_dropped_as_duplicates_of_eval"] == 1
         assert rep["tokenizer"]["fit_on"] == "train"
@@ -1248,12 +1440,17 @@ def test_prepare_bins_writes_report_and_decontaminates():
 def test_prepare_bins_applies_document_level_decontamination():
     """多行短行副本必须由 prepare_bins 真正删除并写入报告/告警。"""
     block = "Doc block line one\nDoc block line two"
-    train_unique = ("A train-only paragraph with enough characters to survive "
-                    "line-level decontamination.")
-    val_unique = ("A val-only paragraph with enough characters to survive "
-                  "line-level decontamination.")
-    test_unique = ("A test-only paragraph with enough characters for held-out "
-                   "evaluation.")
+    train_unique = (
+        "A train-only paragraph with enough characters to survive "
+        "line-level decontamination."
+    )
+    val_unique = (
+        "A val-only paragraph with enough characters to survive "
+        "line-level decontamination."
+    )
+    test_unique = (
+        "A test-only paragraph with enough characters for held-out " "evaluation."
+    )
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "train.txt"), "w", encoding="utf-8") as f:
             f.write(f"{block}\n\n{train_unique}\n")
@@ -1262,8 +1459,7 @@ def test_prepare_bins_applies_document_level_decontamination():
         with open(os.path.join(d, "test.txt"), "w", encoding="utf-8") as f:
             f.write(f"{test_unique}\n")
         meta = prepare_bins(d, kind="char", force=True)
-        with open(os.path.join(d, "data_report.json"), "r",
-                  encoding="utf-8") as f:
+        with open(os.path.join(d, "data_report.json"), "r", encoding="utf-8") as f:
             rep = json.load(f)
         doc = rep["duplicates"]["document_level"]
         assert doc["train_blocks_dropped_as_duplicates_of_eval"] == 1
@@ -1276,4 +1472,3 @@ def test_prepare_bins_applies_document_level_decontamination():
         assert "train-only paragraph" in decoded
         assert meta["cache_schema"] == CACHE_SCHEMA
     print("  [ok] prepare_bins：块级去污染删除多行短行副本并写入报告/告警")
-

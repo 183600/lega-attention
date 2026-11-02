@@ -23,6 +23,7 @@ log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 
       --variant lega --out results/tiny_sanity/lega.json
 退出码：0=通过，1=未通过（run_all 会用其阻断后续全量训练）。
 """
+
 import argparse
 import hashlib
 import math
@@ -38,11 +39,16 @@ from .capacity import NULL_EVIDENCE_COMPONENT
 from .data import load_bin, load_meta, get_train_batch
 from .datacheck import check_vocab_capacity
 from .model import GPT, count_params
-from .preflight import (allow_protocol_violations,
-                         data_protocol_preflight)
+from .preflight import allow_protocol_violations, data_protocol_preflight
 from .repro import build_run_manifest
-from .utils import (config_bool, data_rng, load_config_json, save_json,
-                    set_seed, strict_int)
+from .utils import (
+    config_bool,
+    data_rng,
+    load_config_json,
+    save_json,
+    set_seed,
+    strict_int,
+)
 
 # 训练路径 loss 与直接 logits CE 的一致性容差：1e-3 只用于吸收分块/
 # 归约顺序的浮点噪声，真正的计算错误（错误 chunk 边界、错误归一化/
@@ -58,16 +64,28 @@ SMOKE_OVERRIDES = {"steps": 60, "batch_size": 4, "ctx": 64, "log_every": 10}
 # 宽松值，只拦“数量级都不对”的问题，避免误伤正常随机初始化。
 DEFAULT_INITIAL_LOSS_TOL = 1.0
 
-DEFAULTS = {"steps": 300, "batch_size": 8, "ctx": 128, "lr": 3e-3,
-            "warmup": 10, "grad_clip": 1.0, "log_every": 25,
-            "loss_threshold": 0.05, "acc_threshold": 0.99,
-            "initial_loss_tol": DEFAULT_INITIAL_LOSS_TOL}
+DEFAULTS = {
+    "steps": 300,
+    "batch_size": 8,
+    "ctx": 128,
+    "lr": 3e-3,
+    "warmup": 10,
+    "grad_clip": 1.0,
+    "log_every": 25,
+    "loss_threshold": 0.05,
+    "acc_threshold": 0.99,
+    "initial_loss_tol": DEFAULT_INITIAL_LOSS_TOL,
+}
 
 
 @torch.inference_mode()
-def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
-                  max_chunk_tokens: int = 8192,
-                  max_chunk_elems: int = 16_777_216) -> dict:
+def batch_metrics(
+    model,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    max_chunk_tokens: int = 8192,
+    max_chunk_elems: int = 16_777_216,
+) -> dict:
     """固定批的 loss / 下一 token 准确率 / 整条序列全对率（fp32、逐块计算）。
 
     直接消费 logits 计算指标（而非模型的训练路径），因此同时校验了
@@ -86,8 +104,7 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
         V = model.vocab_size
         max_elems = max(1, strict_int(max_chunk_elems, "max_chunk_elems"))
         max_chunk_tokens = strict_int(max_chunk_tokens, "max_chunk_tokens")
-        rows = max(1, min(max_chunk_tokens // max(1, T),
-                          max_elems // max(1, T * V)))
+        rows = max(1, min(max_chunk_tokens // max(1, T), max_elems // max(1, T * V)))
         # 交叉熵/argmax 的逐 token 块：与训练头 _ChunkedLinearCE 的分块一致
         ce_tokens = max(256, min(4096, max_elems // max(1, V)))
         total_loss = 0.0
@@ -95,22 +112,22 @@ def batch_metrics(model, x: torch.Tensor, y: torch.Tensor,
         correct = 0
         exact = 0
         for s in range(0, B, rows):
-            xb, yb = x[s:s + rows], y[s:s + rows]
-            logits = model(xb)["logits"]                # (b, T, V) fp32
+            xb, yb = x[s : s + rows], y[s : s + rows]
+            logits = model(xb)["logits"]  # (b, T, V) fp32
             lf = logits.reshape(-1, V)
             tgt = yb.reshape(-1)
             pred = torch.empty(lf.size(0), dtype=torch.int64, device=lf.device)
             for t0 in range(0, lf.size(0), ce_tokens):
-                lc = lf[t0:t0 + ce_tokens]
-                tc = tgt[t0:t0 + ce_tokens]
+                lc = lf[t0 : t0 + ce_tokens]
+                tc = tgt[t0 : t0 + ce_tokens]
                 # F.cross_entropy 默认把 -100 当作忽略目标；分母与准确率
                 # 必须使用同一批“有效目标”，否则忽略位置会稀释 loss。
                 valid = tc != -100
                 total_loss += float(F.cross_entropy(lc, tc, reduction="sum"))
-                pred[t0:t0 + ce_tokens] = lc.argmax(dim=-1)
-                correct += int(((pred[t0:t0 + ce_tokens] == tc) & valid).sum())
+                pred[t0 : t0 + ce_tokens] = lc.argmax(dim=-1)
+                correct += int(((pred[t0 : t0 + ce_tokens] == tc) & valid).sum())
                 n_tokens += int(valid.sum())
-            valid_rows = (yb != -100)
+            valid_rows = yb != -100
             row_correct = (pred.reshape(xb.shape[0], T) == yb) | (~valid_rows)
             exact += int(row_correct.all(dim=1).sum())
         return {
@@ -153,8 +170,7 @@ def _expected_zero_grad_names(model) -> set:
     """
     expected = set()
     for mod_name, module in model.named_modules():
-        component = NULL_EVIDENCE_COMPONENT.get(
-            getattr(module, "variant", None))
+        component = NULL_EVIDENCE_COMPONENT.get(getattr(module, "variant", None))
         if component is None:
             continue
         param = {"A": "gate_w", "B": "gate_a", "C": "gate_b"}.get(component)
@@ -194,9 +210,13 @@ def gradient_coverage(model) -> dict:
                 expected_zero.append(name)
             else:
                 zero.append(name)
-    return {"n_trainable": n_trainable, "missing_grad": missing,
-            "nonfinite_grad": nonfinite, "zero_grad": zero,
-            "expected_zero_grad": expected_zero}
+    return {
+        "n_trainable": n_trainable,
+        "missing_grad": missing,
+        "nonfinite_grad": nonfinite,
+        "zero_grad": zero,
+        "expected_zero_grad": expected_zero,
+    }
 
 
 def grad_norm(params) -> float | None:
@@ -206,15 +226,22 @@ def grad_norm(params) -> float | None:
     因此需在裁剪后另调本函数才能得到后范数；两者同报，才能区分“本来正常”
     和“爆炸后被截到 grad_clip”。无梯度时返回 None。
     """
-    norms = [torch.linalg.vector_norm(p.grad.detach(), ord=2)
-             for p in params if p.grad is not None]
+    norms = [
+        torch.linalg.vector_norm(p.grad.detach(), ord=2)
+        for p in params
+        if p.grad is not None
+    ]
     if not norms:
         return None
     return float(torch.linalg.vector_norm(torch.stack(norms), ord=2))
 
 
-def losses_consistent(a, b, rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
-                      abs_tol: float = LOSS_CONSISTENCY_ABS_TOL) -> bool:
+def losses_consistent(
+    a,
+    b,
+    rel_tol: float = LOSS_CONSISTENCY_REL_TOL,
+    abs_tol: float = LOSS_CONSISTENCY_ABS_TOL,
+) -> bool:
     """训练路径 loss 与直接 logits 交叉熵的数值一致性判定。
 
     None/非数值/bool/下划线数字串/非有限值一律判失败，而不是让 float() 抛错
@@ -294,7 +321,8 @@ def batch_contract(x, y, vocab_size: int) -> dict:
         out["errors"].append("empty_batch")
     out["integer_dtype"] = bool(
         x.dtype in (torch.int8, torch.int16, torch.int32, torch.int64)
-        and y.dtype in (torch.int8, torch.int16, torch.int32, torch.int64))
+        and y.dtype in (torch.int8, torch.int16, torch.int32, torch.int64)
+    )
     if not out["integer_dtype"]:
         out["errors"].append("non_integer_dtype")
     if out["nonempty"] and out["integer_dtype"]:
@@ -303,13 +331,15 @@ def batch_contract(x, y, vocab_size: int) -> dict:
             out["max_token"] = int(torch.maximum(x.max(), y.max()))
             out["n_out_of_range"] = int(
                 ((x < 0) | (x >= int(vocab_size))).sum()
-                + ((y < 0) | (y >= int(vocab_size))).sum())
+                + ((y < 0) | (y >= int(vocab_size))).sum()
+            )
             out["tokens_in_vocab"] = out["n_out_of_range"] == 0
             if not out["tokens_in_vocab"]:
                 out["errors"].append("token_out_of_range")
             out["n_tokens"] = int(x.numel() + y.numel())
-            out["n_unique_tokens"] = int(torch.unique(torch.cat(
-                [x.reshape(-1), y.reshape(-1)])).numel())
+            out["n_unique_tokens"] = int(
+                torch.unique(torch.cat([x.reshape(-1), y.reshape(-1)])).numel()
+            )
             out["not_constant"] = out["n_unique_tokens"] > 1
             if not out["not_constant"]:
                 out["errors"].append("constant_batch")
@@ -319,10 +349,17 @@ def batch_contract(x, y, vocab_size: int) -> dict:
     return out
 
 
-def _failed_contract_result(contract: dict, *, steps: int, lr: float,
-                            loss_threshold: float, acc_threshold: float,
-                            initial_loss_tol: float, model,
-                            active_reg) -> dict:
+def _failed_contract_result(
+    contract: dict,
+    *,
+    steps: int,
+    lr: float,
+    loss_threshold: float,
+    acc_threshold: float,
+    initial_loss_tol: float,
+    model,
+    active_reg,
+) -> dict:
     checks = {
         "batch_contract_ok": False,
         "batch_nonempty": contract["nonempty"],
@@ -350,9 +387,11 @@ def _failed_contract_result(contract: dict, *, steps: int, lr: float,
         "check": "overfit_small_batch",
         "passed": False,
         "checks": checks,
-        "thresholds": {"loss": float(loss_threshold),
-                       "token_acc": float(acc_threshold),
-                       "initial_loss_tol": float(initial_loss_tol)},
+        "thresholds": {
+            "loss": float(loss_threshold),
+            "token_acc": float(acc_threshold),
+            "initial_loss_tol": float(initial_loss_tol),
+        },
         "initial": None,
         "final": None,
         "log_vocab": math.log(model.vocab_size),
@@ -416,8 +455,7 @@ def _resolve_run_options(sanity_cfg, overrides=None, smoke: bool = False) -> dic
         raise ValueError(f"sanity.steps 必须 >= 0，收到 {opt['steps']!r}")
     opt["batch_size"] = strict_int(opt["batch_size"], "sanity.batch_size")
     if opt["batch_size"] < 1:
-        raise ValueError(
-            f"sanity.batch_size 必须 >= 1，收到 {opt['batch_size']!r}")
+        raise ValueError(f"sanity.batch_size 必须 >= 1，收到 {opt['batch_size']!r}")
     opt["ctx"] = strict_int(opt["ctx"], "sanity.ctx")
     if opt["ctx"] < 1:
         raise ValueError(f"sanity.ctx 必须 >= 1，收到 {opt['ctx']!r}")
@@ -429,32 +467,42 @@ def _resolve_run_options(sanity_cfg, overrides=None, smoke: bool = False) -> dic
         raise ValueError(f"sanity.warmup 必须 >= 0，收到 {opt['warmup']!r}")
     opt["grad_clip"] = _finite_float_arg(opt["grad_clip"], "sanity.grad_clip")
     if opt["grad_clip"] < 0:
-        raise ValueError(
-            f"sanity.grad_clip 必须 >= 0，收到 {opt['grad_clip']!r}")
+        raise ValueError(f"sanity.grad_clip 必须 >= 0，收到 {opt['grad_clip']!r}")
     opt["log_every"] = strict_int(opt["log_every"], "sanity.log_every")
     if opt["log_every"] < 1:
-        raise ValueError(
-            f"sanity.log_every 必须 >= 1，收到 {opt['log_every']!r}")
+        raise ValueError(f"sanity.log_every 必须 >= 1，收到 {opt['log_every']!r}")
     opt["loss_threshold"] = _finite_float_arg(
-        opt["loss_threshold"], "sanity.loss_threshold")
+        opt["loss_threshold"], "sanity.loss_threshold"
+    )
     opt["acc_threshold"] = _finite_float_arg(
-        opt["acc_threshold"], "sanity.acc_threshold")
+        opt["acc_threshold"], "sanity.acc_threshold"
+    )
     if not 0.0 <= opt["acc_threshold"] <= 1.0:
         raise ValueError(
-            f"sanity.acc_threshold 必须在 [0,1] 内，收到 "
-            f"{opt['acc_threshold']!r}")
+            f"sanity.acc_threshold 必须在 [0,1] 内，收到 " f"{opt['acc_threshold']!r}"
+        )
     opt["initial_loss_tol"] = _finite_float_arg(
-        opt["initial_loss_tol"], "sanity.initial_loss_tol")
+        opt["initial_loss_tol"], "sanity.initial_loss_tol"
+    )
     return opt
 
 
-def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
-                      steps: int, lr: float, device: str, seed: int,
-                      warmup: int = 10, grad_clip: float = 1.0,
-                      log_every: int = 25,
-                      loss_threshold: float = 0.05,
-                      acc_threshold: float = 0.99,
-                      initial_loss_tol: float = DEFAULT_INITIAL_LOSS_TOL) -> dict:
+def run_overfit_check(
+    model: GPT,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    steps: int,
+    lr: float,
+    device: str,
+    seed: int,
+    warmup: int = 10,
+    grad_clip: float = 1.0,
+    log_every: int = 25,
+    loss_threshold: float = 0.05,
+    acc_threshold: float = 0.99,
+    initial_loss_tol: float = DEFAULT_INITIAL_LOSS_TOL,
+) -> dict:
     """在同一个固定批上训练 model 并返回可审计的检查结果。
 
     调用方必须已保证 model 的正则化已关闭（dropout=0/attn_dropout=0，
@@ -495,18 +543,24 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     # 准确率门槛必须落在 [0,1]：负值会让 token_acc >= threshold 恒真，
     # 把“几乎全错”的模型放行；>1 则任何模型都不可能通过，属于配置错误。
     if not 0.0 <= acc_threshold <= 1.0:
-        raise ValueError(
-            f"acc_threshold 必须在 [0,1] 内，收到 {acc_threshold!r}")
+        raise ValueError(f"acc_threshold 必须在 [0,1] 内，收到 {acc_threshold!r}")
     initial_loss_tol = _finite_float_arg(initial_loss_tol, "initial_loss_tol")
     set_seed(seed)
     contract = batch_contract(x, y, model.vocab_size)
     if not contract["ok"]:
         return _failed_contract_result(
-            contract, steps=steps, lr=lr, loss_threshold=loss_threshold,
-            acc_threshold=acc_threshold, initial_loss_tol=initial_loss_tol,
-            model=model, active_reg=active_regularization(model))
-    shift_ok = (x.dim() == 2 and x.shape == y.shape
-                and bool(torch.equal(x[:, 1:], y[:, :-1])))
+            contract,
+            steps=steps,
+            lr=lr,
+            loss_threshold=loss_threshold,
+            acc_threshold=acc_threshold,
+            initial_loss_tol=initial_loss_tol,
+            model=model,
+            active_reg=active_regularization(model),
+        )
+    shift_ok = (
+        x.dim() == 2 and x.shape == y.shape and bool(torch.equal(x[:, 1:], y[:, :-1]))
+    )
     active_reg = active_regularization(model)
     # 关闭 TF32：sanity 追求数值上确定地“压到 0”
     prev_tf32_mm = torch.backends.cuda.matmul.allow_tf32
@@ -518,9 +572,14 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         model.train()
         initial = batch_metrics(model, x, y)
         fused = str(device).startswith("cuda")
-        opt = torch.optim.AdamW(model.parameters(), lr=float(lr),
-                                weight_decay=0.0, betas=(0.9, 0.95),
-                                fused=fused, foreach=not fused)
+        opt = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(lr),
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            fused=fused,
+            foreach=not fused,
+        )
         history = []
         first_grad_norm_preclip = None
         first_grad_norm_postclip = None
@@ -532,8 +591,9 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         steps_executed = 0
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         for step in range(int(steps)):
-            cur_lr = float(lr) * (step + 1) / max(1, warmup) \
-                if step < warmup else float(lr)
+            cur_lr = (
+                float(lr) * (step + 1) / max(1, warmup) if step < warmup else float(lr)
+            )
             for g in opt.param_groups:
                 g["lr"] = cur_lr
             opt.zero_grad(set_to_none=True)
@@ -562,8 +622,7 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             # clip_grad_norm_ 返回裁剪前总范数；日志点再取裁剪后的快照。
             # 首步两项都留存，其余步只为 history 计算后范数。
             at_log = (step == 0) or ((step + 1) % int(log_every) == 0)
-            preclip = float(torch.nn.utils.clip_grad_norm_(
-                trainable_params, grad_clip))
+            preclip = float(torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip))
             postclip = grad_norm(trainable_params) if at_log else None
             if step == 0:
                 first_grad_norm_preclip = preclip
@@ -571,14 +630,16 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
             opt.step()
             steps_executed += 1
             if at_log:
-                history.append({
-                    "step": step + 1, "loss": float(loss.detach()),
-                    "lr": cur_lr,
-                    "grad_norm_preclip": preclip,
-                    "grad_norm_postclip": postclip,
-                    "grad_norm_was_clipped": (
-                        preclip > float(grad_clip)),
-                })
+                history.append(
+                    {
+                        "step": step + 1,
+                        "loss": float(loss.detach()),
+                        "lr": cur_lr,
+                        "grad_norm_preclip": preclip,
+                        "grad_norm_postclip": postclip,
+                        "grad_norm_was_clipped": (preclip > float(grad_clip)),
+                    }
+                )
         final = batch_metrics(model, x, y)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_mm
@@ -590,7 +651,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
     # initial_loss_tol < 0 表示显式禁用该检查（仍记录偏差供人工复核）
     initial_loss_ok = (float(initial_loss_tol) < 0) or (
         math.isfinite(initial_loss_gap)
-        and abs(initial_loss_gap) <= float(initial_loss_tol))
+        and abs(initial_loss_gap) <= float(initial_loss_tol)
+    )
     checks = {
         "batch_contract_ok": bool(contract["ok"]),
         "batch_nonempty": bool(contract["nonempty"]),
@@ -610,23 +672,25 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         # 指标碰巧达标，也说明完整训练路径没有被验证过。steps=0 虽与
         # “计划 0 步全部完成”字面相同，但它没有验证任何前向/反向，
         # 同样不能算通过训练路径检查。
-        "all_planned_steps_completed": (int(steps) > 0
-                                        and steps_executed == int(steps)),
+        "all_planned_steps_completed": (
+            int(steps) > 0 and steps_executed == int(steps)
+        ),
         # 用 clip 前范数判断“梯度是否非零”：grad_clip=0 或爆炸被截断时，
         # 后范数可能恒为 0/阈值，不能作为梯度存在的证据。
-        "gradient_nonzero_first_step": (first_grad_norm_preclip is not None
-                                        and first_grad_norm_preclip > 0.0),
-        "all_params_get_grads": (grad_cov is not None
-                                 and not grad_cov["missing_grad"]),
+        "gradient_nonzero_first_step": (
+            first_grad_norm_preclip is not None and first_grad_norm_preclip > 0.0
+        ),
+        "all_params_get_grads": (grad_cov is not None and not grad_cov["missing_grad"]),
         # 全零梯度同样说明该参数与 loss 之间没有有效信号（例如子模块被
         # detach 后再乘 0）：总范数可能仍然正常，只有逐参数检查能发现。
-        "no_zero_grads_first_step": (grad_cov is not None
-                                     and not grad_cov["zero_grad"]),
-        "grads_finite": (grad_cov is not None
-                         and not grad_cov["nonfinite_grad"]),
+        "no_zero_grads_first_step": (
+            grad_cov is not None and not grad_cov["zero_grad"]
+        ),
+        "grads_finite": (grad_cov is not None and not grad_cov["nonfinite_grad"]),
         # 中间结果核对：训练路径 loss 与直接 logits CE 数值一致（损失计算正确性）
         "train_loss_matches_direct_logits": losses_consistent(
-            first_train_loss, initial["loss"]),
+            first_train_loss, initial["loss"]
+        ),
         # 中间结果核对：消费点的标签映射是 next-token 移位（而非错位/换序）
         "next_token_shift_consistent": bool(shift_ok),
         # 中间结果核对：初始 loss 接近 log(V)（初始化/logits 尺度/标签分布正常）
@@ -639,9 +703,11 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "check": "overfit_small_batch",
         "passed": bool(passed),
         "checks": checks,
-        "thresholds": {"loss": float(loss_threshold),
-                       "token_acc": float(acc_threshold),
-                       "initial_loss_tol": float(initial_loss_tol)},
+        "thresholds": {
+            "loss": float(loss_threshold),
+            "token_acc": float(acc_threshold),
+            "initial_loss_tol": float(initial_loss_tol),
+        },
         "initial": initial,
         "final": final,
         "log_vocab": log_vocab,
@@ -655,7 +721,8 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "first_grad_norm_postclip": first_grad_norm_postclip,
         "first_grad_norm_was_clipped": (
             first_grad_norm_preclip is not None
-            and first_grad_norm_preclip > float(grad_clip)),
+            and first_grad_norm_preclip > float(grad_clip)
+        ),
         "grad_clip": float(grad_clip),
         "first_train_loss": first_train_loss,
         "loss_consistency": {
@@ -672,13 +739,15 @@ def run_overfit_check(model: GPT, x: torch.Tensor, y: torch.Tensor, *,
         "steps_executed": steps_executed,
         "lr": float(lr),
         "history": history,
-        "caveat": ("通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
-                   "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
-                   "logits CE（首步）、y=x 右移一位与初始 loss≈log(V)，"
-                   "其余中间结果（clip 前梯度范数>0、逐参数梯度覆盖含全零"
-                   "梯度、逐层统计与 history 中的 clip 前后范数）请结合本 "
-                   "JSON 人工复核，并使用真实数据小规模"
-                   "预跑。"),
+        "caveat": (
+            "通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
+            "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
+            "logits CE（首步）、y=x 右移一位与初始 loss≈log(V)，"
+            "其余中间结果（clip 前梯度范数>0、逐参数梯度覆盖含全零"
+            "梯度、逐层统计与 history 中的 clip 前后范数）请结合本 "
+            "JSON 人工复核，并使用真实数据小规模"
+            "预跑。"
+        ),
     }
 
 
@@ -696,47 +765,77 @@ def main():
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--loss_threshold", type=float, default=None)
     p.add_argument("--acc_threshold", type=float, default=None)
-    p.add_argument("--initial_loss_tol", type=float, default=None,
-                   help="初始 loss 与 log(V) 的允许偏差（nat，默认 1.0）")
+    p.add_argument(
+        "--initial_loss_tol",
+        type=float,
+        default=None,
+        help="初始 loss 与 log(V) 的允许偏差（nat，默认 1.0）",
+    )
     p.add_argument("--smoke", action="store_true")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 标记泄露也继续 sanity（仅用于复现"
-                        "历史实验；结果不得用于正式结论）")
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 标记泄露也继续 sanity（仅用于复现"
+        "历史实验；结果不得用于正式结论）",
+    )
     args = p.parse_args()
 
     data_preflight = data_protocol_preflight(
         args.data_dir,
-        allow_override=allow_protocol_violations(
-            args.allow_data_protocol_violations))
+        allow_override=allow_protocol_violations(args.allow_data_protocol_violations),
+    )
     if not data_preflight["report_present"]:
-        print("[sanity] 警告：数据目录缺少 data_report.json，"
-              "无法执行训练前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[sanity] 警告：数据目录缺少 data_report.json，"
+            "无法执行训练前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif data_preflight["critical_violations"]:
-        print(f"[sanity] ⚠ 数据协议自检发现 "
-              f"{len(data_preflight['critical_violations'])} 个严重问题，"
-              "但已显式放行（结果不得用于正式结论）")
+        print(
+            f"[sanity] ⚠ 数据协议自检发现 "
+            f"{len(data_preflight['critical_violations'])} 个严重问题，"
+            "但已显式放行（结果不得用于正式结论）"
+        )
 
     cfg = load_config_json(args.config, validate=True)
     sanity_cfg = cfg.get("sanity") or {}
     if not isinstance(sanity_cfg, dict):
         raise ValueError(
             "配置 sanity 段必须是 JSON 对象，收到 "
-            f"{type(sanity_cfg).__name__}: {args.config}")
+            f"{type(sanity_cfg).__name__}: {args.config}"
+        )
     opt = _resolve_run_options(
         sanity_cfg,
-        {name: getattr(args, name) for name in
-         ("steps", "batch_size", "ctx", "lr",
-          "loss_threshold", "acc_threshold", "initial_loss_tol")},
-        smoke=args.smoke)
+        {
+            name: getattr(args, name)
+            for name in (
+                "steps",
+                "batch_size",
+                "ctx",
+                "lr",
+                "loss_threshold",
+                "acc_threshold",
+                "initial_loss_tol",
+            )
+        },
+        smoke=args.smoke,
+    )
     # 种子必须是精确整数："seed": true/1.5 若被 int() 截断成 1，sanity 会用
     # 与配置声明不同的种子跑固定批过拟合，而结果 JSON 记录的是截断值。
     seed = strict_int(
-        args.seed if args.seed is not None
-        else (sanity_cfg.get("seed")
-              if sanity_cfg.get("seed") is not None
-              else cfg.get("seed", 1337)), "seed")
-    device = (args.device if args.device != "auto"
-              else ("cuda" if torch.cuda.is_available() else "cpu"))
+        args.seed
+        if args.seed is not None
+        else (
+            sanity_cfg.get("seed")
+            if sanity_cfg.get("seed") is not None
+            else cfg.get("seed", 1337)
+        ),
+        "seed",
+    )
+    device = (
+        args.device
+        if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     set_seed(seed)
 
     def _cfg_positive_int(key, default=None):
@@ -765,69 +864,99 @@ def main():
 
     # 显式关闭正则化：dropout/attn_dropout=0；优化器 weight_decay=0（见上）
     model = GPT(
-        vocab_size=vocab_size, block_size=block_size,
+        vocab_size=vocab_size,
+        block_size=block_size,
         d_model=_cfg_positive_int("d_model"),
         n_layers=_cfg_positive_int("n_layers"),
         n_heads=_cfg_positive_int("n_heads"),
         ffn_mult=_cfg_positive_int("ffn_mult", 4),
-        dropout=0.0, attn_dropout=0.0, variant=args.variant,
+        dropout=0.0,
+        attn_dropout=0.0,
+        variant=args.variant,
         gate_bias_init=_finite_float_arg(
-            cfg.get("gate_bias_init", 2.0), "gate_bias_init"),
+            cfg.get("gate_bias_init", 2.0), "gate_bias_init"
+        ),
         use_sdpa_standard=config_bool(
-            cfg.get("use_sdpa_standard", True), "use_sdpa_standard"),
+            cfg.get("use_sdpa_standard", True), "use_sdpa_standard"
+        ),
     ).to(device)
-    print(f"[sanity] variant={args.variant}({VARIANT_CN[args.variant]}) "
-          f"device={device} params={count_params(model):,}")
+    print(
+        f"[sanity] variant={args.variant}({VARIANT_CN[args.variant]}) "
+        f"device={device} params={count_params(model):,}"
+    )
     # 固定批：整轮训练复用同一批数据（无增强、无重采样）
     rng = data_rng(seed)
     x, y = get_train_batch(train, ctx, batch_size, device, rng)
-    print(f"[sanity] 固定批: {batch_size} 条 x {ctx} tokens，"
-          f"steps={opt['steps']} lr={opt['lr']} seed={seed}")
+    print(
+        f"[sanity] 固定批: {batch_size} 条 x {ctx} tokens，"
+        f"steps={opt['steps']} lr={opt['lr']} seed={seed}"
+    )
 
     res = run_overfit_check(
-        model, x, y, steps=opt["steps"], lr=opt["lr"],
-        device=device, seed=seed, warmup=opt["warmup"],
-        grad_clip=opt["grad_clip"], log_every=opt["log_every"],
+        model,
+        x,
+        y,
+        steps=opt["steps"],
+        lr=opt["lr"],
+        device=device,
+        seed=seed,
+        warmup=opt["warmup"],
+        grad_clip=opt["grad_clip"],
+        log_every=opt["log_every"],
         loss_threshold=opt["loss_threshold"],
         acc_threshold=opt["acc_threshold"],
-        initial_loss_tol=opt["initial_loss_tol"])
+        initial_loss_tol=opt["initial_loss_tol"],
+    )
     sanity_manifest = build_run_manifest(
-        tag="sanity", variant=args.variant, seed=seed,
-        config_path=args.config, data_dir=args.data_dir, device=device)
-    res.update({
-        "variant": args.variant,
-        "variant_cn": VARIANT_CN[args.variant],
-        "seed": seed,
-        "batch_size": batch_size,
-        "ctx": ctx,
-        # 实际消费的固定批内容指纹（与 seed/data_rng 复算结果对账）
-        "batch_sha256": batch_fingerprint(x, y),
-        "data_order_rng_fingerprint":
-            sanity_manifest.get("seed_report", {}).get(
-                "data_order_rng_fingerprint"),
-        "device": device,
-        "config_file": os.path.abspath(args.config),
-        "data_dir": os.path.abspath(args.data_dir),
-        "data_protocol_preflight": data_preflight,
-        "manifest": sanity_manifest,
-    })
+        tag="sanity",
+        variant=args.variant,
+        seed=seed,
+        config_path=args.config,
+        data_dir=args.data_dir,
+        device=device,
+    )
+    res.update(
+        {
+            "variant": args.variant,
+            "variant_cn": VARIANT_CN[args.variant],
+            "seed": seed,
+            "batch_size": batch_size,
+            "ctx": ctx,
+            # 实际消费的固定批内容指纹（与 seed/data_rng 复算结果对账）
+            "batch_sha256": batch_fingerprint(x, y),
+            "data_order_rng_fingerprint": sanity_manifest.get("seed_report", {}).get(
+                "data_order_rng_fingerprint"
+            ),
+            "device": device,
+            "config_file": os.path.abspath(args.config),
+            "data_dir": os.path.abspath(args.data_dir),
+            "data_protocol_preflight": data_preflight,
+            "manifest": sanity_manifest,
+        }
+    )
     last = res["history"][-1]["loss"] if res["history"] else float("nan")
     if res.get("initial") is None or res.get("final") is None:
-        print(f"[sanity] FAIL: 固定批数据契约不满足: "
-              f"{', '.join(res['batch_contract']['errors'])}")
+        print(
+            f"[sanity] FAIL: 固定批数据契约不满足: "
+            f"{', '.join(res['batch_contract']['errors'])}"
+        )
     else:
-        print(f"[sanity] {'PASS' if res['passed'] else 'FAIL'}: "
-              f"loss {res['initial']['loss']:.4f} -> {res['final']['loss']:.4f} "
-              f"(曲线末值 {last:.4f}, logV={res['log_vocab']:.3f}, "
-              f"初始偏差 {res['initial_loss_minus_log_vocab']:+.3f}/"
-              f"±{res['thresholds']['initial_loss_tol']:.2f}), "
-              f"token_acc={res['final']['token_acc']:.4f}, "
-              f"exact={res['final']['exact_match']:.3f}")
+        print(
+            f"[sanity] {'PASS' if res['passed'] else 'FAIL'}: "
+            f"loss {res['initial']['loss']:.4f} -> {res['final']['loss']:.4f} "
+            f"(曲线末值 {last:.4f}, logV={res['log_vocab']:.3f}, "
+            f"初始偏差 {res['initial_loss_minus_log_vocab']:+.3f}/"
+            f"±{res['thresholds']['initial_loss_tol']:.2f}), "
+            f"token_acc={res['final']['token_acc']:.4f}, "
+            f"exact={res['final']['exact_match']:.3f}"
+        )
     if not res["passed"]:
         failed = [k for k, ok in res["checks"].items() if not ok]
-        print(f"[sanity] 未通过项: {', '.join(failed)}；"
-              "若无法过拟合小批量，说明梯度/损失/标签存在严重问题，"
-              "请先排查再开全量训练。")
+        print(
+            f"[sanity] 未通过项: {', '.join(failed)}；"
+            "若无法过拟合小批量，说明梯度/损失/标签存在严重问题，"
+            "请先排查再开全量训练。"
+        )
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         save_json(res, args.out)

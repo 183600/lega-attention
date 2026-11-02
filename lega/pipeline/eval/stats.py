@@ -1,9 +1,11 @@
 """跨种子统计、RULER 长度/样例统计。"""
+
 from collections import Counter
 
 from .._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def _seed_key(path: str, data: dict):
     m = _SEED_RE.search(os.path.splitext(os.path.basename(path))[0])
@@ -44,14 +46,13 @@ def _result_files(results_dir: str, prefix: str, scope_seeds) -> list:
 def _sorted_seeds(mapping) -> list:
     if not isinstance(mapping, dict):
         return []
-    return sorted(mapping.keys(),
-                  key=lambda s: (s is None, s if s is not None else -1))
+    return sorted(mapping.keys(), key=lambda s: (s is None, s if s is not None else -1))
 
 
 def _variant_seed_map(runs: dict, variant: str) -> dict:
     """取某变体的 {seed: slot}；已有带种子的结果时忽略无种子的文件，
     同一次实验不重复计为额外种子。"""
-    m = (runs.get(variant) if isinstance(runs, dict) else None)
+    m = runs.get(variant) if isinstance(runs, dict) else None
     m = m if isinstance(m, dict) else {}
     tagged = {s: slot for s, slot in m.items() if s is not None}
     return tagged if tagged else m
@@ -88,7 +89,7 @@ def _stat(values) -> dict:
     样本量（否则会显示“n=5”但均值实际只来自 4 个种子）。
     """
     vals = []
-    for v in (values if isinstance(values, (list, tuple)) else []):
+    for v in values if isinstance(values, (list, tuple)) else []:
         f = _finite_number(v)
         if f is not None:
             vals.append(f)
@@ -135,8 +136,7 @@ def _ppl_ci_rel_pct(d):
         return None
     ci = d.get("val_ppl_ci95")
     ppl = _ppl_of(d)
-    if (not isinstance(ci, (list, tuple)) or len(ci) != 2
-            or ppl is None or ppl <= 0):
+    if not isinstance(ci, (list, tuple)) or len(ci) != 2 or ppl is None or ppl <= 0:
         return None
     lo, hi = _finite_number(ci[0]), _finite_number(ci[1])
     if lo is None or hi is None or hi < lo:
@@ -153,10 +153,12 @@ def _ppl_ci_rel_pct(d):
 
 def _eval_scalar(key):
     """从 eval.json 提取标量（缺失/非法值返回 None），用于覆盖率汇总。"""
+
     def get(d):
         if not isinstance(d, dict):
             return None
         return _finite_number(d.get(key))
+
     return get
 
 
@@ -184,8 +186,12 @@ def _ruler_task_means(d, metric: str = "em"):
         return {}
     out = {}
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or task.startswith("_")
-                or not isinstance(by_ctx, dict) or not by_ctx):
+        if (
+            not isinstance(task, str)
+            or task.startswith("_")
+            or not isinstance(by_ctx, dict)
+            or not by_ctx
+        ):
             continue
         vals = []
         for m in by_ctx.values():
@@ -241,8 +247,11 @@ def _ruler_avg_micro(d):
     cells = []
     max_weight = 0.0
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or task.startswith("_")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or task.startswith("_")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         for cell in by_ctx.values():
             if not isinstance(cell, dict):
@@ -290,8 +299,11 @@ def _ruler_depth_means(d):
         return {}
     vals = {b: [] for b in ("early", "middle", "late")}
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or not task.startswith("niah")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or not task.startswith("niah")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         for cell in by_ctx.values():
             if not isinstance(cell, dict):
@@ -305,8 +317,7 @@ def _ruler_depth_means(d):
                     continue
                 v = _finite_number(rec.get("em"))
                 n = _integral_value(rec.get("n"))
-                if (v is None or n is None or n <= 0
-                        or not 0.0 <= v <= 1.0):
+                if v is None or n is None or n <= 0 or not 0.0 <= v <= 1.0:
                     continue
                 vals[b].append(v)
     return {b: float(sum(v) / len(v)) for b, v in vals.items() if v}
@@ -336,8 +347,11 @@ def _ruler_min_cell_n(d):
         return None
     ns = []
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or task.startswith("_")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or task.startswith("_")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         for cell in by_ctx.values():
             if not isinstance(cell, dict) or cell.get("n") is None:
@@ -366,8 +380,11 @@ def _ruler_cell_sample_outcomes(d):
     out = {}
     seen = set()
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or task.startswith("_")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or task.startswith("_")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         for ctx, cell in by_ctx.items():
             if not isinstance(cell, dict):
@@ -412,8 +429,11 @@ def _ruler_cell_depth_outcomes(d):
         return None
     out = {}
     for task, by_ctx in results.items():
-        if (not isinstance(task, str) or not task.startswith("niah")
-                or not isinstance(by_ctx, dict)):
+        if (
+            not isinstance(task, str)
+            or not task.startswith("niah")
+            or not isinstance(by_ctx, dict)
+        ):
             continue
         for ctx, cell in by_ctx.items():
             key = (task, str(ctx))
@@ -466,7 +486,6 @@ def _ruler_pair_protocol_ok(ra, rb) -> bool:
     return not (ca is not None and cb is not None and ca != cb)
 
 
-
 # 上下文长度剂量-反应的检验族名。刻意不使用 ``RULER:<task>`` 前缀：
 # 逐任务检验是“同一估计量在任务上的分解”，而长度分层是另一个估计量
 # （每个 ctx 内的 macro），混进同一 Holm 家族会改变既有逐任务校正的家族
@@ -508,25 +527,32 @@ def _length_trend_verdict(t: dict, kind: str) -> str:
             return base
         delta_pp = delta * 100.0
         # 有限输入乘 100 仍可能溢出（如 1e308），不能写出 +inf。
-        pp_text = (f"{delta_pp:+.2f}" if math.isfinite(delta_pp)
-                   else "溢出")
+        pp_text = f"{delta_pp:+.2f}" if math.isfinite(delta_pp) else "溢出"
         if kind == "slope":
             direction = "增大" if delta > 0 else "减小"
-            base = (f"优势随上下文长度显著{direction}"
-                    f"（每翻倍 {pp_text} pp，Holm p={padj:.4f}）")
+            base = (
+                f"优势随上下文长度显著{direction}"
+                f"（每翻倍 {pp_text} pp，Holm p={padj:.4f}）"
+            )
         else:
             direction = "更长上下文更有利" if delta > 0 else "更长上下文更不利"
-            base = (f"长−短上下文优势差显著（{direction}，"
-                    f"{pp_text} pp，Holm p={padj:.4f}）")
+            base = (
+                f"长−短上下文优势差显著（{direction}，"
+                f"{pp_text} pp，Holm p={padj:.4f}）"
+            )
     else:
         base = f"未检出长度趋势（Holm p={padj:.4f}）"
     # 与 _apply_holm 的通用 verdict 一致：t 与符号翻转置换结论冲突时必须
     # 显式披露，不能因为这里重写了措辞就把置换证据的警示丢掉。小样本下
     # 置换 p 的下限可能高于 α，这一句是“显著”结论最重要的稳健性限定。
     perm = _finite_number(t.get("p_perm_adj"))
-    if (padj is not None and perm is not None
-            and isinstance(n, int) and not isinstance(n, bool)
-            and n >= MIN_SEEDS):
+    if (
+        padj is not None
+        and perm is not None
+        and isinstance(n, int)
+        and not isinstance(n, bool)
+        and n >= MIN_SEEDS
+    ):
         if padj < ALPHA and perm >= ALPHA:
             base += "；⚠ 置换检验不显著（见注）"
         elif padj >= ALPHA and perm < ALPHA:
@@ -559,7 +585,7 @@ def _ruler_length_analysis(runs, pairs) -> dict:
     """
     runs = runs if isinstance(runs, dict) else {}
     ctx_tests, slope_tests, span_tests, pair_rows = [], [], [], []
-    for entry in (pairs if isinstance(pairs, list) else []):
+    for entry in pairs if isinstance(pairs, list) else []:
         if not isinstance(entry, (list, tuple)) or len(entry) != 2:
             continue
         cand, ref = entry
@@ -573,8 +599,12 @@ def _ruler_length_analysis(runs, pairs) -> dict:
         seeds = [s for s in _sorted_seeds(cm) if s in rm]
         if not seeds:
             continue
-        excluded = {"protocol_mismatch": 0, "missing_ruler": 0,
-                    "missing_contexts": 0, "non_finite_overall": 0}
+        excluded = {
+            "protocol_mismatch": 0,
+            "missing_ruler": 0,
+            "missing_contexts": 0,
+            "non_finite_overall": 0,
+        }
         seed_rows = []
         for s in seeds:
             sa = cm.get(s) if isinstance(cm.get(s), dict) else {}
@@ -603,13 +633,18 @@ def _ruler_length_analysis(runs, pairs) -> dict:
                 maybe = oa - ob
                 if math.isfinite(maybe):
                     overall = maybe
-            seed_rows.append({
-                "seed": _integral_value(s),
-                "candidate": ca, "reference": cb, "diffs": diffs,
-                "overall_diff": overall,
-                "ctx_average_diff": (
-                    sum(diffs.values()) / len(diffs) if diffs else None),
-            })
+            seed_rows.append(
+                {
+                    "seed": _integral_value(s),
+                    "candidate": ca,
+                    "reference": cb,
+                    "diffs": diffs,
+                    "overall_diff": overall,
+                    "ctx_average_diff": (
+                        sum(diffs.values()) / len(diffs) if diffs else None
+                    ),
+                }
+            )
         if not seed_rows:
             continue
         # 所有被纳入趋势的种子必须共享同一组上下文档位，否则各档的 n 不同，
@@ -634,22 +669,29 @@ def _ruler_length_analysis(runs, pairs) -> dict:
             cand_vals = [r["candidate"][ctx] for r in kept]
             ref_vals = [r["reference"][ctx] for r in kept]
             res = paired_t_test(diffs, [0.0] * len(diffs))
-            res.update({
-                "candidate": cand, "reference": ref,
-                "metric": LENGTH_CTX_METRIC,
-                "lower_is_better": False,
-                "contrast_type": "length_slice",
-                "ruler_ctx": ctx,
-                "n_contexts": len(ctxs),
-                "candidate_mean": (sum(cand_vals) / len(cand_vals)
-                                   if cand_vals else None),
-                "reference_mean": (sum(ref_vals) / len(ref_vals)
-                                   if ref_vals else None),
-                "exploratory": True,
-                "note": ("同一档上下文内的任务等权 macro EM 配对差（候选−"
-                         "参照）；只覆盖训练种子随机性，不覆盖评测样例抽样"
-                         "（后者见 ruler_*.json 的 Wilson CI）。"),
-            })
+            res.update(
+                {
+                    "candidate": cand,
+                    "reference": ref,
+                    "metric": LENGTH_CTX_METRIC,
+                    "lower_is_better": False,
+                    "contrast_type": "length_slice",
+                    "ruler_ctx": ctx,
+                    "n_contexts": len(ctxs),
+                    "candidate_mean": (
+                        sum(cand_vals) / len(cand_vals) if cand_vals else None
+                    ),
+                    "reference_mean": (
+                        sum(ref_vals) / len(ref_vals) if ref_vals else None
+                    ),
+                    "exploratory": True,
+                    "note": (
+                        "同一档上下文内的任务等权 macro EM 配对差（候选−"
+                        "参照）；只覆盖训练种子随机性，不覆盖评测样例抽样"
+                        "（后者见 ruler_*.json 的 Wilson CI）。"
+                    ),
+                }
+            )
             res = _enrich_paired(res, diffs, [0.0] * len(diffs))
             per_context.append(res)
             ctx_tests.append(res)
@@ -667,19 +709,24 @@ def _ruler_length_analysis(runs, pairs) -> dict:
                 slopes.append(sl)
         if len(slopes) >= 1:
             res = paired_t_test(slopes, [0.0] * len(slopes))
-            res.update({
-                "candidate": cand, "reference": ref,
-                "metric": LENGTH_SLOPE_METRIC,
-                "lower_is_better": False,
-                "contrast_type": "length_trend",
-                "ruler_length_trend": "slope",
-                "contexts": ctxs,
-                "unit": "EM per doubling of context length",
-                "exploratory": True,
-                "note": ("逐种子 OLS 斜率 ΔEM~log2(ctx) 的单样本配对检验；"
-                         "正值表示候选相对参照的优势随长度增大。斜率依赖"
-                         "评测点间距，仅作趋势方向证据，不替代逐 ctx 表。"),
-            })
+            res.update(
+                {
+                    "candidate": cand,
+                    "reference": ref,
+                    "metric": LENGTH_SLOPE_METRIC,
+                    "lower_is_better": False,
+                    "contrast_type": "length_trend",
+                    "ruler_length_trend": "slope",
+                    "contexts": ctxs,
+                    "unit": "EM per doubling of context length",
+                    "exploratory": True,
+                    "note": (
+                        "逐种子 OLS 斜率 ΔEM~log2(ctx) 的单样本配对检验；"
+                        "正值表示候选相对参照的优势随长度增大。斜率依赖"
+                        "评测点间距，仅作趋势方向证据，不替代逐 ctx 表。"
+                    ),
+                }
+            )
             res = _enrich_paired(res, slopes, [0.0] * len(slopes))
             if slope_skipped:
                 res["excluded_slope_seeds"] = slope_skipped
@@ -699,20 +746,26 @@ def _ruler_length_analysis(runs, pairs) -> dict:
                 spans.append(sp)
         if len(spans) >= 1:
             res = paired_t_test(spans, [0.0] * len(spans))
-            res.update({
-                "candidate": cand, "reference": ref,
-                "metric": LENGTH_SPAN_METRIC,
-                "lower_is_better": False,
-                "contrast_type": "length_trend",
-                "ruler_length_trend": "span",
-                "contexts": ctxs,
-                "short_ctx": ctxs[0], "long_ctx": ctxs[-1],
-                "unit": "EM(longest) - EM(shortest)",
-                "exploratory": True,
-                "note": ("逐种子“最长−最短上下文”配对差的单样本检验；"
-                         "不假定线性，与斜率方向不一致时说明效应集中在中间"
-                         "档位。"),
-            })
+            res.update(
+                {
+                    "candidate": cand,
+                    "reference": ref,
+                    "metric": LENGTH_SPAN_METRIC,
+                    "lower_is_better": False,
+                    "contrast_type": "length_trend",
+                    "ruler_length_trend": "span",
+                    "contexts": ctxs,
+                    "short_ctx": ctxs[0],
+                    "long_ctx": ctxs[-1],
+                    "unit": "EM(longest) - EM(shortest)",
+                    "exploratory": True,
+                    "note": (
+                        "逐种子“最长−最短上下文”配对差的单样本检验；"
+                        "不假定线性，与斜率方向不一致时说明效应集中在中间"
+                        "档位。"
+                    ),
+                }
+            )
             res = _enrich_paired(res, spans, [0.0] * len(spans))
             if span_skipped:
                 res["excluded_span_seeds"] = span_skipped
@@ -721,14 +774,14 @@ def _ruler_length_analysis(runs, pairs) -> dict:
         else:
             span_row = None
 
-        overall_vals = [r["overall_diff"] for r in kept
-                        if r["overall_diff"] is not None]
-        ctx_avg_vals = [r["ctx_average_diff"] for r in kept
-                        if r["ctx_average_diff"] is not None]
-        overall_mean = (sum(overall_vals) / len(overall_vals)
-                        if overall_vals else None)
-        ctx_avg_mean = (sum(ctx_avg_vals) / len(ctx_avg_vals)
-                        if ctx_avg_vals else None)
+        overall_vals = [
+            r["overall_diff"] for r in kept if r["overall_diff"] is not None
+        ]
+        ctx_avg_vals = [
+            r["ctx_average_diff"] for r in kept if r["ctx_average_diff"] is not None
+        ]
+        overall_mean = sum(overall_vals) / len(overall_vals) if overall_vals else None
+        ctx_avg_mean = sum(ctx_avg_vals) / len(ctx_avg_vals) if ctx_avg_vals else None
         # 平衡性：总体 macro 应等于各档 macro 的等权平均。不等说明任务×
         # 档位有缺失，分层均值不是总体均值的严格分解，必须显式提示。
         balanced = None
@@ -762,109 +815,147 @@ def _ruler_length_analysis(runs, pairs) -> dict:
                 slope_loo_stable = None
             else:
                 sign = slope_mean > 0
-                slope_loo_stable = all(
-                    (v > 0) == sign for v in loo_ctx_means.values())
-        reversal_long = (overall_mean is not None and longest is not None
-                         and overall_mean * longest < 0
-                         and abs(longest) > 1e-12)
-        reversal_slope = (overall_mean is not None and slope_mean is not None
-                          and overall_mean * slope_mean < 0
-                          and abs(slope_mean) > 1e-12)
-        reversal_span = (overall_mean is not None and span_mean is not None
-                         and overall_mean * span_mean < 0
-                         and abs(span_mean) > 1e-12)
+                slope_loo_stable = all((v > 0) == sign for v in loo_ctx_means.values())
+        reversal_long = (
+            overall_mean is not None
+            and longest is not None
+            and overall_mean * longest < 0
+            and abs(longest) > 1e-12
+        )
+        reversal_slope = (
+            overall_mean is not None
+            and slope_mean is not None
+            and overall_mean * slope_mean < 0
+            and abs(slope_mean) > 1e-12
+        )
+        reversal_span = (
+            overall_mean is not None
+            and span_mean is not None
+            and overall_mean * span_mean < 0
+            and abs(span_mean) > 1e-12
+        )
         # 总体在 SESOI 内、最长档却超过 SESOI：总平均“看起来没差别”，
         # 但方法恰在声称有效的长上下文上失效/获益。零与负号不构成严格
         # sign flip，因此单列 masking，避免用“0 组方向相反”掩盖这一情形。
         longest_masking = bool(
-            longest is not None and overall_mean is not None
+            longest is not None
+            and overall_mean is not None
             and abs(longest) >= LENGTH_SESOI
-            and abs(overall_mean) < LENGTH_SESOI)
+            and abs(overall_mean) < LENGTH_SESOI
+        )
         heterogeneity = None
         finite_means = [v for v in per_ctx_means if v is not None]
         if finite_means:
             heterogeneity = max(finite_means) - min(finite_means)
-        pair_rows.append({
-            "candidate": cand, "reference": ref,
-            "n_seeds": n_seeds,
-            "contexts": ctxs,
-            "n_contexts": len(ctxs),
-            "minimum_contexts_ok": len(ctxs) >= LENGTH_MIN_CONTEXTS,
-            "overall_mean_diff": overall_mean,
-            "context_average_mean_diff": ctx_avg_mean,
-            "balanced_contexts": balanced,
-            "per_context": [
-                {"ctx": c.get("ruler_ctx"),
-                 "candidate_mean": c.get("candidate_mean"),
-                 "reference_mean": c.get("reference_mean"),
-                 "mean_diff": c.get("mean_diff"),
-                 "std_diff": c.get("std_diff"),
-                 "mean_diff_ci95": c.get("mean_diff_ci95"),
-                 "mde": c.get("mde"),
-                 "p": c.get("p"), "p_adj": c.get("p_adj"),
-                 "p_perm": c.get("p_perm"),
-                 "p_perm_adj": c.get("p_perm_adj"),
-                 "n": c.get("n"),
-                 "n_seed_wins": c.get("n_seed_wins"),
-                 "n_seed_losses": c.get("n_seed_losses"),
-                 "n_seed_ties": c.get("n_seed_ties"),
-                 "loo_sign_stable": c.get("loo_sign_stable"),
-                 "within_noise": c.get("within_noise"),
-                 "verdict": c.get("verdict")}
-                for c in per_context],
-            "slope_per_doubling": (None if slope_row is None else {
-                "mean_diff": slope_row.get("mean_diff"),
-                "std_diff": slope_row.get("std_diff"),
-                "mean_diff_ci95": slope_row.get("mean_diff_ci95"),
-                "mde": slope_row.get("mde"),
-                "p": slope_row.get("p"), "p_adj": slope_row.get("p_adj"),
-                "p_perm": slope_row.get("p_perm"),
-                "p_perm_adj": slope_row.get("p_perm_adj"),
-                "n": slope_row.get("n"),
-                "n_seed_wins": slope_row.get("n_seed_wins"),
-                "n_seed_losses": slope_row.get("n_seed_losses"),
-                "n_seed_ties": slope_row.get("n_seed_ties"),
-                "loo_sign_stable": slope_row.get("loo_sign_stable"),
-                "within_noise": slope_row.get("within_noise"),
-                "verdict": slope_row.get("verdict")}),
-            "long_minus_short": (None if span_row is None else {
-                "short_ctx": ctxs[0], "long_ctx": ctxs[-1],
-                "mean_diff": span_row.get("mean_diff"),
-                "std_diff": span_row.get("std_diff"),
-                "mean_diff_ci95": span_row.get("mean_diff_ci95"),
-                "mde": span_row.get("mde"),
-                "p": span_row.get("p"), "p_adj": span_row.get("p_adj"),
-                "p_perm": span_row.get("p_perm"),
-                "p_perm_adj": span_row.get("p_perm_adj"),
-                "n": span_row.get("n"),
-                "n_seed_wins": span_row.get("n_seed_wins"),
-                "n_seed_losses": span_row.get("n_seed_losses"),
-                "n_seed_ties": span_row.get("n_seed_ties"),
-                "loo_sign_stable": span_row.get("loo_sign_stable"),
-                "within_noise": span_row.get("within_noise"),
-                "verdict": span_row.get("verdict")}),
-            "direction_consistency": {"positive": pos, "negative": neg,
-                                      "zero": zero},
-            "heterogeneity_pp": (None if heterogeneity is None
-                                 else heterogeneity * 100.0),
-            "overall_vs_longest_sign_flip": bool(reversal_long),
-            "overall_vs_slope_sign_flip": bool(reversal_slope),
-            "overall_vs_span_sign_flip": bool(reversal_span),
-            "long_context_masking": longest_masking,
-            "slope_leave_one_ctx_out": loo_ctx_means,
-            "slope_loo_sign_stable": slope_loo_stable,
-            "per_seed": [
-                {"seed": r["seed"],
-                 "overall_diff": r["overall_diff"],
-                 "context_average_diff": r["ctx_average_diff"],
-                 "slope": log2_slope(ctxs, [r["diffs"][c] for c in ctxs]),
-                 "long_minus_short": span_contrast(
-                     ctxs, [r["diffs"][c] for c in ctxs]),
-                 "diffs": {str(c): r["diffs"][c] for c in ctxs}}
-                for r in kept],
-            "excluded": excluded,
-            "exploratory": True,
-        })
+        pair_rows.append(
+            {
+                "candidate": cand,
+                "reference": ref,
+                "n_seeds": n_seeds,
+                "contexts": ctxs,
+                "n_contexts": len(ctxs),
+                "minimum_contexts_ok": len(ctxs) >= LENGTH_MIN_CONTEXTS,
+                "overall_mean_diff": overall_mean,
+                "context_average_mean_diff": ctx_avg_mean,
+                "balanced_contexts": balanced,
+                "per_context": [
+                    {
+                        "ctx": c.get("ruler_ctx"),
+                        "candidate_mean": c.get("candidate_mean"),
+                        "reference_mean": c.get("reference_mean"),
+                        "mean_diff": c.get("mean_diff"),
+                        "std_diff": c.get("std_diff"),
+                        "mean_diff_ci95": c.get("mean_diff_ci95"),
+                        "mde": c.get("mde"),
+                        "p": c.get("p"),
+                        "p_adj": c.get("p_adj"),
+                        "p_perm": c.get("p_perm"),
+                        "p_perm_adj": c.get("p_perm_adj"),
+                        "n": c.get("n"),
+                        "n_seed_wins": c.get("n_seed_wins"),
+                        "n_seed_losses": c.get("n_seed_losses"),
+                        "n_seed_ties": c.get("n_seed_ties"),
+                        "loo_sign_stable": c.get("loo_sign_stable"),
+                        "within_noise": c.get("within_noise"),
+                        "verdict": c.get("verdict"),
+                    }
+                    for c in per_context
+                ],
+                "slope_per_doubling": (
+                    None
+                    if slope_row is None
+                    else {
+                        "mean_diff": slope_row.get("mean_diff"),
+                        "std_diff": slope_row.get("std_diff"),
+                        "mean_diff_ci95": slope_row.get("mean_diff_ci95"),
+                        "mde": slope_row.get("mde"),
+                        "p": slope_row.get("p"),
+                        "p_adj": slope_row.get("p_adj"),
+                        "p_perm": slope_row.get("p_perm"),
+                        "p_perm_adj": slope_row.get("p_perm_adj"),
+                        "n": slope_row.get("n"),
+                        "n_seed_wins": slope_row.get("n_seed_wins"),
+                        "n_seed_losses": slope_row.get("n_seed_losses"),
+                        "n_seed_ties": slope_row.get("n_seed_ties"),
+                        "loo_sign_stable": slope_row.get("loo_sign_stable"),
+                        "within_noise": slope_row.get("within_noise"),
+                        "verdict": slope_row.get("verdict"),
+                    }
+                ),
+                "long_minus_short": (
+                    None
+                    if span_row is None
+                    else {
+                        "short_ctx": ctxs[0],
+                        "long_ctx": ctxs[-1],
+                        "mean_diff": span_row.get("mean_diff"),
+                        "std_diff": span_row.get("std_diff"),
+                        "mean_diff_ci95": span_row.get("mean_diff_ci95"),
+                        "mde": span_row.get("mde"),
+                        "p": span_row.get("p"),
+                        "p_adj": span_row.get("p_adj"),
+                        "p_perm": span_row.get("p_perm"),
+                        "p_perm_adj": span_row.get("p_perm_adj"),
+                        "n": span_row.get("n"),
+                        "n_seed_wins": span_row.get("n_seed_wins"),
+                        "n_seed_losses": span_row.get("n_seed_losses"),
+                        "n_seed_ties": span_row.get("n_seed_ties"),
+                        "loo_sign_stable": span_row.get("loo_sign_stable"),
+                        "within_noise": span_row.get("within_noise"),
+                        "verdict": span_row.get("verdict"),
+                    }
+                ),
+                "direction_consistency": {
+                    "positive": pos,
+                    "negative": neg,
+                    "zero": zero,
+                },
+                "heterogeneity_pp": (
+                    None if heterogeneity is None else heterogeneity * 100.0
+                ),
+                "overall_vs_longest_sign_flip": bool(reversal_long),
+                "overall_vs_slope_sign_flip": bool(reversal_slope),
+                "overall_vs_span_sign_flip": bool(reversal_span),
+                "long_context_masking": longest_masking,
+                "slope_leave_one_ctx_out": loo_ctx_means,
+                "slope_loo_sign_stable": slope_loo_stable,
+                "per_seed": [
+                    {
+                        "seed": r["seed"],
+                        "overall_diff": r["overall_diff"],
+                        "context_average_diff": r["ctx_average_diff"],
+                        "slope": log2_slope(ctxs, [r["diffs"][c] for c in ctxs]),
+                        "long_minus_short": span_contrast(
+                            ctxs, [r["diffs"][c] for c in ctxs]
+                        ),
+                        "diffs": {str(c): r["diffs"][c] for c in ctxs},
+                    }
+                    for r in kept
+                ],
+                "excluded": excluded,
+                "exploratory": True,
+            }
+        )
 
     ctx_tests = _apply_holm(ctx_tests)
     slope_tests = _apply_holm(slope_tests)
@@ -875,8 +966,7 @@ def _ruler_length_analysis(runs, pairs) -> dict:
         t["verdict"] = _length_trend_verdict(t, "span")
     # 把校正后的 p/结论回填到 pair 行，避免 summary 与 significance.json
     # 出现两套互相矛盾的判定。
-    by_ctx = {(t["candidate"], t["reference"], t["ruler_ctx"]): t
-              for t in ctx_tests}
+    by_ctx = {(t["candidate"], t["reference"], t["ruler_ctx"]): t for t in ctx_tests}
     by_slope = {(t["candidate"], t["reference"]): t for t in slope_tests}
     by_span = {(t["candidate"], t["reference"]): t for t in span_tests}
     for row in pair_rows:
@@ -904,19 +994,25 @@ def _ruler_length_analysis(runs, pairs) -> dict:
         "min_seeds": MIN_SEEDS,
         "alpha": ALPHA,
         "min_contexts": LENGTH_MIN_CONTEXTS,
-        "note": ("RULER 上下文长度分层与剂量-反应（探索性，未预注册）："
-                 "逐 ctx 的 Δmacro EM 配对检验、逐种子斜率（ΔEM~log2 ctx）"
-                 "与首末落差；三个独立 Holm 家族。用于回答“优势是否随长度"
-                 "变化”，不替代预注册的 RULER平均 确认性判定。"
-                 "overall_vs_longest/slope/span_sign_flip 表示总平均与长上下文/"
-                 "趋势方向相反，此时只报总平均会掩盖长上下文失效。"),
+        "note": (
+            "RULER 上下文长度分层与剂量-反应（探索性，未预注册）："
+            "逐 ctx 的 Δmacro EM 配对检验、逐种子斜率（ΔEM~log2 ctx）"
+            "与首末落差；三个独立 Holm 家族。用于回答“优势是否随长度"
+            "变化”，不替代预注册的 RULER平均 确认性判定。"
+            "overall_vs_longest/slope/span_sign_flip 表示总平均与长上下文/"
+            "趋势方向相反，此时只报总平均会掩盖长上下文失效。"
+        ),
     }
 
 
-def _ruler_heterogeneity_analysis(runs, pairs, alpha=ALPHA,
-                                  min_seeds=MIN_SEEDS,
-                                  n_bootstrap: int = 500,
-                                  rng_seed: int = 20261030) -> dict:
+def _ruler_heterogeneity_analysis(
+    runs,
+    pairs,
+    alpha=ALPHA,
+    min_seeds=MIN_SEEDS,
+    n_bootstrap: int = 500,
+    rng_seed: int = 20261030,
+) -> dict:
     """RULER 任务/上下文层的效应异质性（探索性）。
 
     对每个 (候选, 参照) 把同种子 RULER 配对差按两条轴分层：
@@ -934,7 +1030,7 @@ def _ruler_heterogeneity_analysis(runs, pairs, alpha=ALPHA,
     """
     runs = runs if isinstance(runs, dict) else {}
     outcomes = []
-    for entry in (pairs if isinstance(pairs, list) else []):
+    for entry in pairs if isinstance(pairs, list) else []:
         if not isinstance(entry, (list, tuple)) or len(entry) != 2:
             continue
         cand, ref = entry
@@ -971,21 +1067,25 @@ def _ruler_heterogeneity_analysis(runs, pairs, alpha=ALPHA,
             if not ca or not cb:
                 excluded["missing_contexts"] += 1
                 continue
-            rows.append({
-                "seed": _integral_value(s),
-                "task": (ta, tb),
-                "context": (ca, cb),
-            })
+            rows.append(
+                {
+                    "seed": _integral_value(s),
+                    "task": (ta, tb),
+                    "context": (ca, cb),
+                }
+            )
         if not rows:
             continue
         axes = {}
         for axis, axis_cn, unit in (
-                ("task", "RULER 任务", "task macro EM difference"),
-                ("context", "RULER 上下文长度", "context macro EM difference")):
+            ("task", "RULER 任务", "task macro EM difference"),
+            ("context", "RULER 上下文长度", "context macro EM difference"),
+        ):
             all_a = set.union(*[set(r[axis][0]) for r in rows])
             all_b = set.union(*[set(r[axis][1]) for r in rows])
             common = set.intersection(
-                *[set(r[axis][0]) & set(r[axis][1]) for r in rows])
+                *[set(r[axis][0]) & set(r[axis][1]) for r in rows]
+            )
             labels = sorted(common)
             dropped = sorted((all_a | all_b) - common)
             if len(labels) < 2:
@@ -1011,22 +1111,30 @@ def _ruler_heterogeneity_analysis(runs, pairs, alpha=ALPHA,
                 for r in rows
             ]
             res = meta_analysis_from_seed_matrix(
-                matrix, labels=labels, alpha=alpha, min_k=2,
-                n_bootstrap=n_bootstrap, seed=rng_seed)
-            res.update({
-                "axis": axis,
-                "axis_label": axis_cn,
-                "unit": unit,
-                "n_seeds": len(rows),
-                "dropped_labels": dropped,
-                "excluded": dict(excluded),
-                "seed_sufficient": len(rows) >= min_seeds,
-                "exploratory": True,
-            })
+                matrix,
+                labels=labels,
+                alpha=alpha,
+                min_k=2,
+                n_bootstrap=n_bootstrap,
+                seed=rng_seed,
+            )
+            res.update(
+                {
+                    "axis": axis,
+                    "axis_label": axis_cn,
+                    "unit": unit,
+                    "n_seeds": len(rows),
+                    "dropped_labels": dropped,
+                    "excluded": dict(excluded),
+                    "seed_sufficient": len(rows) >= min_seeds,
+                    "exploratory": True,
+                }
+            )
             if len(rows) < min_seeds:
                 res["note"] = (
                     f"种子数 n={len(rows)} < {min_seeds}，仅作描述性展示，"
-                    "不据此判定异质性；" + str(res.get("note") or ""))
+                    "不据此判定异质性；" + str(res.get("note") or "")
+                )
             axes[axis] = res
         if not axes:
             continue
@@ -1039,36 +1147,43 @@ def _ruler_heterogeneity_analysis(runs, pairs, alpha=ALPHA,
             status = "no_detected_heterogeneity"
         else:
             status = "insufficient"
-        outcomes.append({
-            "candidate": cand,
-            "reference": ref,
-            "metric": "RULER平均",
-            "status": status,
-            "axes": axes,
-            "n_seeds": len(rows),
-            "excluded": dict(excluded),
-            "exploratory": True,
-        })
+        outcomes.append(
+            {
+                "candidate": cand,
+                "reference": ref,
+                "metric": "RULER平均",
+                "status": status,
+                "axes": axes,
+                "n_seeds": len(rows),
+                "excluded": dict(excluded),
+                "exploratory": True,
+            }
+        )
     counts = Counter(o["status"] for o in outcomes)
     return {
-        "method": ("RULER 任务/上下文长度分层随机效应 meta 分析"
-                   "（DerSimonian-Laird；I²/Q/预测区间/留一层/bootseed）"),
+        "method": (
+            "RULER 任务/上下文长度分层随机效应 meta 分析"
+            "（DerSimonian-Laird；I²/Q/预测区间/留一层/bootseed）"
+        ),
         "alpha": alpha,
         "min_seeds": min_seeds,
         "min_strata": 2,
         "n_bootstrap": n_bootstrap,
         "counts": dict(counts),
         "outcomes": outcomes,
-        "note": ("探索性、未预注册：任务层与上下文层共享种子及评测样例，"
-                 "不是独立研究，Q 的卡方 p 值与 I² 只作描述性异质性指标；"
-                 "bootstrap 只重采样训练种子。未检出异质性不等于各层同质，"
-                 "I² 高也不表示某一层显著。不改变 H1–H7 的确认性判定，"
-                 "也不能替代逐层检验、长度剂量-反应、SESOI/等价性或 MDE。"),
+        "note": (
+            "探索性、未预注册：任务层与上下文层共享种子及评测样例，"
+            "不是独立研究，Q 的卡方 p 值与 I² 只作描述性异质性指标；"
+            "bootstrap 只重采样训练种子。未检出异质性不等于各层同质，"
+            "I² 高也不表示某一层显著。不改变 H1–H7 的确认性判定，"
+            "也不能替代逐层检验、长度剂量-反应、SESOI/等价性或 MDE。"
+        ),
     }
 
 
-def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOOTSTRAP,
-                              rng_seed: int = 20240517):
+def _ruler_macro_bootstrap_ci(
+    per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOOTSTRAP, rng_seed: int = 20240517
+):
     """RULER macro 的分层 bootstrap 区间（固定种子，单元格内重采样样例）。
 
     预注册的 macro 估计量是“任务等权、任务内上下文档位等权”：先对每个
@@ -1121,9 +1236,9 @@ def _ruler_macro_bootstrap_ci(per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOO
     return [float(lo), float(hi)]
 
 
-def _ruler_macro_hierarchical_bootstrap(per_seed_cell_diffs,
-                                        n_boot: int = RULER_MACRO_BOOTSTRAP,
-                                        rng_seed: int = 20240517):
+def _ruler_macro_hierarchical_bootstrap(
+    per_seed_cell_diffs, n_boot: int = RULER_MACRO_BOOTSTRAP, rng_seed: int = 20240517
+):
     """RULER macro 的双层 bootstrap：同时重采样种子与评测样例。
 
     `_ruler_macro_bootstrap_ci` 固定已观测种子，只覆盖“换一批评测样例”
@@ -1186,8 +1301,7 @@ def _ruler_macro_hierarchical_bootstrap(per_seed_cell_diffs,
                 task_means.append(float(np.mean(cell_means)))
         return float(np.mean(task_means)) if task_means else None
 
-    observed_seed_macros = [m for m in (_macro(bt) for bt in by_seed)
-                            if m is not None]
+    observed_seed_macros = [m for m in (_macro(bt) for bt in by_seed) if m is not None]
     if not observed_seed_macros:
         return None
     observed = float(np.mean(observed_seed_macros))
@@ -1222,14 +1336,15 @@ def _ruler_macro_hierarchical_bootstrap(per_seed_cell_diffs,
         "n_seeds": len(by_seed),
         "n_cells": int(n_cells),
         "n_samples": int(n_samples),
-        "method": ("hierarchical bootstrap: resample training seeds, then "
-                   "resample paired samples within each (task, ctx) cell; "
-                   "task-equal macro"),
+        "method": (
+            "hierarchical bootstrap: resample training seeds, then "
+            "resample paired samples within each (task, ctx) cell; "
+            "task-equal macro"
+        ),
     }
 
 
-def _ruler_macro_variance_components(per_seed_cell_diffs,
-                                     per_seed_cell_ids):
+def _ruler_macro_variance_components(per_seed_cell_diffs, per_seed_cell_ids):
     """RULER macro 的种子/样例方差分解（按单元格等权聚合）。
 
     每个 (任务, 上下文) 单元格内是 seed × sample 的配对差矩阵，可分解为
@@ -1253,16 +1368,18 @@ def _ruler_macro_variance_components(per_seed_cell_diffs,
         if not isinstance(ref_ids, (list, tuple)) or not ref_ids:
             skipped += 1
             continue
-        if any(tuple(ids[i].get(ck) or ()) != tuple(ref_ids)
-               for i in range(1, len(ids))):
+        if any(
+            tuple(ids[i].get(ck) or ()) != tuple(ref_ids) for i in range(1, len(ids))
+        ):
             skipped += 1
             continue
         matrix = []
         ok = True
         for c in diffs:
             vals = c.get(ck)
-            if (not isinstance(vals, (list, tuple, np.ndarray))
-                    or len(vals) != len(ref_ids)):
+            if not isinstance(vals, (list, tuple, np.ndarray)) or len(vals) != len(
+                ref_ids
+            ):
                 ok = False
                 break
             matrix.append(list(vals))
@@ -1284,18 +1401,21 @@ def _ruler_macro_variance_components(per_seed_cell_diffs,
     agg = aggregate_variance_components(comps, weights)
     if agg is None:
         return None
-    agg.update({
-        "n_cells": len(comps),
-        "n_cells_common": len(common),
-        "n_cells_skipped": skipped,
-        "n_seeds": len(diffs),
-        "scope": "RULER macro cells (task-equal, cell-equal)",
-    })
+    agg.update(
+        {
+            "n_cells": len(comps),
+            "n_cells_common": len(common),
+            "n_cells_skipped": skipped,
+            "n_seeds": len(diffs),
+            "scope": "RULER macro cells (task-equal, cell-equal)",
+        }
+    )
     return agg
 
 
-def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP,
-                             rng_seed: int = 20240517):
+def _ruler_macro_absolute_ci(
+    ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP, rng_seed: int = 20240517
+):
     """每个变体 RULER 绝对 macro EM 的分层 bootstrap 区间。
 
     点估计 `ruler_avg` 把任务等权、任务内上下文档位等权；区间必须匹配该
@@ -1355,8 +1475,10 @@ def _ruler_macro_absolute_ci(ruler_payloads, n_boot: int = RULER_MACRO_BOOTSTRAP
         "n_seeds": len(per_seed),
         "n_cells": n_cells,
         "n_samples": n_samples,
-        "method": ("fixed observed seeds; resample samples within each "
-                   "(task, ctx) cell; task-equal macro; average over seeds"),
+        "method": (
+            "fixed observed seeds; resample samples within each "
+            "(task, ctx) cell; task-equal macro; average over seeds"
+        ),
     }
 
 
@@ -1382,7 +1504,7 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
     """
     out = []
     runs = runs if isinstance(runs, dict) else {}
-    for cand, ref in (pairs if isinstance(pairs, list) else []):
+    for cand, ref in pairs if isinstance(pairs, list) else []:
         if cand not in runs or ref not in runs:
             continue
         cm = _variant_seed_map(runs, cand)
@@ -1439,13 +1561,13 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             task_cell_diffs = {}
             for task, diff in cell_diffs:
                 task_cell_diffs.setdefault(task, []).append(diff)
-            macro_seed = (float(np.mean([np.mean(v) for v in
-                                         task_cell_diffs.values()]))
-                          if task_cell_diffs else None)
-            oa = {sid: em for cell_out in ca.values()
-                  for sid, em in cell_out.items()}
-            ob = {sid: em for cell_out in cb.values()
-                  for sid, em in cell_out.items()}
+            macro_seed = (
+                float(np.mean([np.mean(v) for v in task_cell_diffs.values()]))
+                if task_cell_diffs
+                else None
+            )
+            oa = {sid: em for cell_out in ca.values() for sid, em in cell_out.items()}
+            ob = {sid: em for cell_out in cb.values() for sid, em in cell_out.items()}
             for sid in oa:
                 cluster_sums.setdefault(sid, []).append(oa[sid] - ob[sid])
             s_cand = s_ref = s_both1 = s_both0 = 0
@@ -1460,15 +1582,20 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
                 else:
                     s_both0 += 1
             n_s = len(oa)
-            per_seed.append({
-                "seed": _integral_value(s), "n": n_s,
-                "candidate_only": s_cand, "reference_only": s_ref,
-                "both_correct": s_both1, "both_wrong": s_both0,
-                "mean_diff": ((s_cand - s_ref) / n_s) if n_s else None,
-                "macro_mean_diff": macro_seed,
-                "n_cells": len(cell_diffs),
-                "p": _mcnemar_exact_p(s_cand, s_ref),
-            })
+            per_seed.append(
+                {
+                    "seed": _integral_value(s),
+                    "n": n_s,
+                    "candidate_only": s_cand,
+                    "reference_only": s_ref,
+                    "both_correct": s_both1,
+                    "both_wrong": s_both0,
+                    "mean_diff": ((s_cand - s_ref) / n_s) if n_s else None,
+                    "macro_mean_diff": macro_seed,
+                    "n_cells": len(cell_diffs),
+                    "p": _mcnemar_exact_p(s_cand, s_ref),
+                }
+            )
             cand_only += s_cand
             ref_only += s_ref
             both_correct += s_both1
@@ -1476,16 +1603,20 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             n_samples += n_s
         if not per_seed:
             continue
-        wins = sum(1 for r in per_seed
-                   if r["mean_diff"] is not None and r["mean_diff"] > 0)
-        losses = sum(1 for r in per_seed
-                     if r["mean_diff"] is not None and r["mean_diff"] < 0)
+        wins = sum(
+            1 for r in per_seed if r["mean_diff"] is not None and r["mean_diff"] > 0
+        )
+        losses = sum(
+            1 for r in per_seed if r["mean_diff"] is not None and r["mean_diff"] < 0
+        )
         ties = len(per_seed) - wins - losses
         mean_diff = ((cand_only - ref_only) / n_samples) if n_samples else None
-        macro_diffs = [r["macro_mean_diff"] for r in per_seed
-                       if r.get("macro_mean_diff") is not None]
-        macro_mean_diff = (sum(macro_diffs) / len(macro_diffs)
-                           if macro_diffs else None)
+        macro_diffs = [
+            r["macro_mean_diff"]
+            for r in per_seed
+            if r.get("macro_mean_diff") is not None
+        ]
+        macro_mean_diff = sum(macro_diffs) / len(macro_diffs) if macro_diffs else None
         # macro 的抽样不确定性：固定已观测种子，在每个 (任务, 上下文) 单元格
         # 内对配对样例重采样，再任务内、任务间等权平均（与预注册 macro 同口径）。
         # 该区间只覆盖评测样例抽样，不覆盖训练种子随机性（后者见种子级 t 检验）。
@@ -1494,38 +1625,50 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         # 则回答两个来源各自占多少，避免“区间很宽但不知道该补哪一边”。
         macro_hier = _ruler_macro_hierarchical_bootstrap(per_seed_cell_diffs)
         macro_variance = _ruler_macro_variance_components(
-            per_seed_cell_diffs, per_seed_cell_ids)
+            per_seed_cell_diffs, per_seed_cell_ids
+        )
         # 样例聚类（cluster-robust）：每个 sample_id 先跨种子平均，再作为
         # 独立观测做符号翻转检验；只有 1 个样例时不做检验（n<2）。
         cluster_vals = [float(np.mean(v)) for v in cluster_sums.values() if v]
-        cluster_test = paired_sign_flip_test(cluster_vals,
-                                             [0.0] * len(cluster_vals))
+        cluster_test = paired_sign_flip_test(cluster_vals, [0.0] * len(cluster_vals))
         cluster_ci = bootstrap_mean_ci(cluster_vals)
-        n_cells = (per_seed[0].get("n_cells")
-                   if per_seed and len({r.get("n_cells") for r in per_seed}) == 1
-                   else None)
+        n_cells = (
+            per_seed[0].get("n_cells")
+            if per_seed and len({r.get("n_cells") for r in per_seed}) == 1
+            else None
+        )
         res = {
-            "candidate": cand, "reference": ref,
-            "metric": "RULER样例配对", "lower_is_better": False,
-            "sample_level": True, "exploratory": True,
-            "n": len(per_seed), "n_seeds": len(per_seed),
+            "candidate": cand,
+            "reference": ref,
+            "metric": "RULER样例配对",
+            "lower_is_better": False,
+            "sample_level": True,
+            "exploratory": True,
+            "n": len(per_seed),
+            "n_seeds": len(per_seed),
             "n_samples": n_samples,
-            "candidate_only": cand_only, "reference_only": ref_only,
-            "both_correct": both_correct, "both_wrong": both_wrong,
+            "candidate_only": cand_only,
+            "reference_only": ref_only,
+            "both_correct": both_correct,
+            "both_wrong": both_wrong,
             "mean_diff": mean_diff,
             "macro_mean_diff": macro_mean_diff,
             "macro_mean_diff_ci95": macro_ci,
             "macro_ci_method": (
                 "cell-stratified sample bootstrap (seeds fixed): resample "
                 "paired samples within each (task, ctx) cell, keep cells "
-                "equal-weighted, then average over observed seeds"),
+                "equal-weighted, then average over observed seeds"
+            ),
             "macro_mean_diff_ci95_hier": (
-                macro_hier.get("ci95") if macro_hier else None),
+                macro_hier.get("ci95") if macro_hier else None
+            ),
             "macro_p_hier": (macro_hier.get("p") if macro_hier else None),
             "macro_bootstrap_same_sign_hier": (
-                macro_hier.get("same_sign") if macro_hier else None),
+                macro_hier.get("same_sign") if macro_hier else None
+            ),
             "macro_ci95_hier_method": (
-                macro_hier.get("method") if macro_hier else None),
+                macro_hier.get("method") if macro_hier else None
+            ),
             "variance_components": macro_variance,
             "n_cells": n_cells,
             "p": _mcnemar_exact_p(cand_only, ref_only),
@@ -1537,24 +1680,27 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
             "cluster_p_exact": cluster_test.get("exact"),
             "cluster_p_adj": None,
             "cluster_verdict": None,
-            "n_seed_wins": wins, "n_seed_losses": losses,
+            "n_seed_wins": wins,
+            "n_seed_losses": losses,
             "n_seed_ties": ties,
             "per_seed": per_seed,
             "verdict": None,
-            "note": ("同一批 sample_id 上的逐样例配对；只消费 discordant "
-                     "对（候选对/参照错 vs 反之），与跨种子聚合 EM 检验"
-                     "回答不同问题，属探索性证据。mean_diff 为样例等权 "
-                     "micro，macro_mean_diff 为任务等权、任务内上下文档位"
-                     "等权（对应预注册 RULER平均 的 macro 口径）；"
-                     "macro_mean_diff_ci95 为"
-                     "固定种子、单元格内样例重采样的分层 bootstrap 区间"
-                     "（只覆盖评测抽样，不覆盖训练随机性）；"
-                     "macro_mean_diff_ci95_hier 同时重采样种子与样例，"
-                     "给出合并不确定性；variance_components 把 macro 配对"
-                     "差的方差分解为种子/样例/残差三部分。cluster_* 为"
-                     "按 sample_id 聚合跨种子后的样例级稳健性检验：每个"
-                     "样例先平均、再以样例为独立单位做符号翻转，避免把"
-                     "同一样例在多个种子下的重复观测当成独立证据"),
+            "note": (
+                "同一批 sample_id 上的逐样例配对；只消费 discordant "
+                "对（候选对/参照错 vs 反之），与跨种子聚合 EM 检验"
+                "回答不同问题，属探索性证据。mean_diff 为样例等权 "
+                "micro，macro_mean_diff 为任务等权、任务内上下文档位"
+                "等权（对应预注册 RULER平均 的 macro 口径）；"
+                "macro_mean_diff_ci95 为"
+                "固定种子、单元格内样例重采样的分层 bootstrap 区间"
+                "（只覆盖评测抽样，不覆盖训练随机性）；"
+                "macro_mean_diff_ci95_hier 同时重采样种子与样例，"
+                "给出合并不确定性；variance_components 把 macro 配对"
+                "差的方差分解为种子/样例/残差三部分。cluster_* 为"
+                "按 sample_id 聚合跨种子后的样例级稳健性检验：每个"
+                "样例先平均、再以样例为独立单位做符号翻转，避免把"
+                "同一样例在多个种子下的重复观测当成独立证据"
+            ),
         }
         if skipped:
             res["excluded_runs"] = skipped
@@ -1565,18 +1711,27 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         if t.get("n_samples", 0) <= 0 or padj is None:
             t["verdict"] = "无法检验（缺少逐样例结果）"
         elif padj < ALPHA:
-            t["verdict"] = ("样例级显著优于（McNemar 精确，Holm 校正后）"
-                            if t["mean_diff"] > 0 else
-                            "样例级显著劣于（McNemar 精确，Holm 校正后）")
+            t["verdict"] = (
+                "样例级显著优于（McNemar 精确，Holm 校正后）"
+                if t["mean_diff"] > 0
+                else "样例级显著劣于（McNemar 精确，Holm 校正后）"
+            )
         else:
-            t["verdict"] = (f"样例级无显著差异（McNemar 精确，Holm 校正后 "
-                            f"p={padj:.4f}）")
+            t["verdict"] = (
+                f"样例级无显著差异（McNemar 精确，Holm 校正后 " f"p={padj:.4f}）"
+            )
         md_, mc_ = t.get("mean_diff"), t.get("macro_mean_diff")
-        if (md_ is not None and mc_ is not None and md_ != 0
-                and (mc_ == 0 or (md_ > 0) != (mc_ > 0))):
+        if (
+            md_ is not None
+            and mc_ is not None
+            and md_ != 0
+            and (mc_ == 0 or (md_ > 0) != (mc_ > 0))
+        ):
             t["estimand_conflict"] = True
-            t["verdict"] += ("；⚠ micro/macro 方向不一致（macro 为 0 或反向），"
-                             "结论依赖“平均值”定义")
+            t["verdict"] += (
+                "；⚠ micro/macro 方向不一致（macro 为 0 或反向），"
+                "结论依赖“平均值”定义"
+            )
     # 聚类检验独立 Holm 家族：以 sample_id 为独立单位，避免同一样例在
     # 多个训练种子下被重复计数。它只覆盖 micro（样例等权）口径。
     cpads = holm_bonferroni([t.get("cluster_p") for t in out])
@@ -1587,11 +1742,13 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         elif padj < ALPHA:
             t["cluster_verdict"] = (
                 "样例聚类后显著优于（符号翻转，Holm 校正后）"
-                if t["cluster_mean_diff"] > 0 else
-                "样例聚类后显著劣于（符号翻转，Holm 校正后）")
+                if t["cluster_mean_diff"] > 0
+                else "样例聚类后显著劣于（符号翻转，Holm 校正后）"
+            )
         else:
-            t["cluster_verdict"] = (f"样例聚类后无显著差异（Holm 校正后 "
-                                    f"p={padj:.4f}）")
+            t["cluster_verdict"] = (
+                f"样例聚类后无显著差异（Holm 校正后 " f"p={padj:.4f}）"
+            )
     # 双层 bootstrap 也是独立 Holm 家族：它同时覆盖种子与样例，和上面的
     # McNemar（固定题面）及聚类检验（样例等权 micro）回答不同问题。
     hpads = holm_bonferroni([t.get("macro_p_hier") for t in out])
@@ -1603,10 +1760,11 @@ def _ruler_sample_paired_tests(runs, pairs) -> list:
         elif padj < ALPHA:
             t["macro_hier_verdict"] = (
                 "双层 bootstrap 支持候选更优（探索性，Holm 校正后）"
-                if delta > 0 else
-                "双层 bootstrap 支持候选更差（探索性，Holm 校正后）")
+                if delta > 0
+                else "双层 bootstrap 支持候选更差（探索性，Holm 校正后）"
+            )
         else:
             t["macro_hier_verdict"] = (
-                f"双层 bootstrap 未显示差异（探索性，Holm 校正后 "
-                f"p={padj:.4f}）")
+                f"双层 bootstrap 未显示差异（探索性，Holm 校正后 " f"p={padj:.4f}）"
+            )
     return out

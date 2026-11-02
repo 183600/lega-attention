@@ -1,4 +1,5 @@
 """数据卫生与防泄漏检查（拆分模块，对外接口保持不变）。"""
+
 """数据卫生与防泄漏检查：划分协议、清洗、去污染、漂移筛查与测试集访问账本。
 
 实验协议（本模块是实现而不是口号）:
@@ -18,15 +19,8 @@
 
 所有函数只返回 JSON 原生类型（int/float/str/bool/None），可直接写入报告。
 """
-import hashlib
-import json
-import math
-import os
 import re
-import time
-import unicodedata
 import numpy as np
-from ..utils import strict_int
 
 try:
     import fcntl
@@ -40,7 +34,7 @@ TEST_ACCESS_LOG = ".test_access_log.jsonl"
 # 非法控制符（保留 \t \n \r）；U+FFFD 替换为空格（长度不变，不跨词粘连）
 _SANITIZE_TABLE = {i: None for i in range(32) if i not in (9, 10, 13)}
 
-_SANITIZE_TABLE[0x7f] = None
+_SANITIZE_TABLE[0x7F] = None
 
 _SANITIZE_TABLE[ord("\ufffd")] = " "
 
@@ -56,7 +50,8 @@ _BAD_CHAR_RE = re.compile(r"[\ufffd\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # 兼容 `= Title =`、`== Section ==`、`=== Sub ===` 及 WikiText-103 原始
 # 语料的分隔写法 `= = Section = =`、`= = = Sub = = =`。
 _HEADING_RE = re.compile(
-    r"(?m)^[ \t]*(?:=[ \t]*)+[^=\s\r\n][^\r\n]*?(?:[ \t]*=)+[ \t]*\r?$")
+    r"(?m)^[ \t]*(?:=[ \t]*)+[^=\s\r\n][^\r\n]*?(?:[ \t]*=)+[ \t]*\r?$"
+)
 
 # ---------------------------------------------------------------- 近似重复
 #
@@ -139,12 +134,12 @@ SPLIT_FRACTION_TOLERANCE = 0.05
 # 自检告警阈值：不是统计检验的显著性水平，而是“必须人工复核”的操作触发线，
 # 与开放集/结构不同分布下的经验值一致（可通过 extra_report 覆盖记录）。
 ALERT_THRESHOLDS = {
-    "ngram_overlap_rate": 0.0,       # 任何跨 split 长 n-gram 复制都不允许
-    "distribution_tv": 0.1,          # 一元 TV 距离 > 0.1 视为明显漂移
-    "distribution_js_bits": 0.1,     # JS 散度（bit）
-    "eval_oov_token_rate": 0.02,     # eval 中 train 未见 token 质量占比
-    "eval_unk_char_rate": 0.005,     # val/test 字符级 OOV 率
-    "bad_char_line_rate": 0.01,      # 含坏字符的行占比（标签噪声）
+    "ngram_overlap_rate": 0.0,  # 任何跨 split 长 n-gram 复制都不允许
+    "distribution_tv": 0.1,  # 一元 TV 距离 > 0.1 视为明显漂移
+    "distribution_js_bits": 0.1,  # JS 散度（bit）
+    "eval_oov_token_rate": 0.02,  # eval 中 train 未见 token 质量占比
+    "eval_unk_char_rate": 0.005,  # val/test 字符级 OOV 率
+    "bad_char_line_rate": 0.01,  # 含坏字符的行占比（标签噪声）
 }
 
 # 会让 train/val/test 独立性失效的协议违规：run_all 在训练前据此硬失败
@@ -153,15 +148,20 @@ ALERT_THRESHOLDS = {
 # 跨 split 重叠率 >0 是“语料在 split 间被复制”的直接证据——与分布漂移（temporal split
 # 下属正常现象）不同，它必然导致评测读到训练见过的长串，必须训练前拦截。
 CRITICAL_SPLIT_ALERT_CODES = (
-    "split_shuffled", "split_char_cut", "split_documents_cross_cut",
+    "split_shuffled",
+    "split_char_cut",
+    "split_documents_cross_cut",
     "split_paragraphs_cross_cut",
-    "ngram_overlap_train_val", "ngram_overlap_train_test",
+    "ngram_overlap_train_val",
+    "ngram_overlap_train_test",
     "ngram_overlap_val_test",
     # 全量 train 扫描 + 逐字节复核的精确版本：采样筛查可能漏掉占比极低的
     # 复制段，精确命中没有“没抽到”的借口，同样必须在训练前拦截。
-    "ngram_overlap_exact_train_val", "ngram_overlap_exact_train_test",
+    "ngram_overlap_exact_train_val",
+    "ngram_overlap_exact_train_test",
     "ngram_overlap_exact_val_test",
-    "eval_splits_overlap", "eval_splits_overlap_documents",
+    "eval_splits_overlap",
+    "eval_splits_overlap_documents",
     # 清洗后复核发现 train 仍与 val/test 共享精确/归一化长行或多行块：
     # 这是“去污染本应删除却仍残留”的直接证据，必须像 n-gram 重叠一样
     # 在训练前拦截，而不是只在汇总页提示。
@@ -174,4 +174,3 @@ def _install(namespace):
     for key, value in globals().items():
         if key != "_install" and not key.startswith("__"):
             namespace.setdefault(key, value)
-

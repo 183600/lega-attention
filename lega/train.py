@@ -4,6 +4,7 @@
   python -m lega.train --config configs/tiny.json --variant lega \
       --data_dir data/dummy --out_dir out/tiny/lega [--smoke] [--wandb]
 """
+
 import argparse
 import hashlib
 import json
@@ -20,25 +21,59 @@ import numpy as np
 import torch
 
 from .attention import RUNNABLE_VARIANTS, VARIANT_CN
-from .curves import (GATE_SAT_HIGH, GATE_SAT_LOW, LIVE_WARN_EVALS,
-                     curve_observability_warnings, live_overfit_hint)
-from .data import (load_bin, load_meta, get_train_batch, get_val_batch,
-                   get_val_windows, get_val_windows_at)
+from .curves import (
+    GATE_SAT_HIGH,
+    GATE_SAT_LOW,
+    LIVE_WARN_EVALS,
+    curve_observability_warnings,
+    live_overfit_hint,
+)
+from .data import (
+    load_bin,
+    load_meta,
+    get_train_batch,
+    get_val_windows,
+    get_val_windows_at,
+)
 from .datacheck import check_vocab_capacity
-from .model import (GPT, configure_optimizer, count_params,
-                    gate_extra_params, gate_extra_params_per_head,
-                    save_checkpoint)
-from .preflight import (allow_protocol_violations,  # noqa: E402
-                        data_protocol_preflight)
-from .repro import (build_run_manifest, sanity_identity_check, sanity_summary,
-                    sha256_file, write_worktree_patch)
-from .utils import (amp_autocast, amp_dtype_for, config_bool, data_rng,
-                    enable_tf32, load_config_json, now_str, save_json,
-                    set_seed, state_dict_fingerprint, strict_int,
-                    t_critical_95, _stable_median)
+from .model import (
+    GPT,
+    configure_optimizer,
+    count_params,
+    gate_extra_params,
+    gate_extra_params_per_head,
+    save_checkpoint,
+)
+from .preflight import (
+    allow_protocol_violations,  # noqa: E402
+    data_protocol_preflight,
+)
+from .repro import (
+    build_run_manifest,
+    sanity_identity_check,
+    sanity_summary,
+    sha256_file,
+    write_worktree_patch,
+)
+from .utils import (
+    amp_autocast,
+    amp_dtype_for,
+    config_bool,
+    data_rng,
+    enable_tf32,
+    load_config_json,
+    now_str,
+    save_json,
+    set_seed,
+    state_dict_fingerprint,
+    strict_int,
+    t_critical_95,
+    _stable_median,
+)
 
 
 # ---------------------------------------------------------------- NaN 排查路径
+
 
 def _nonfinite_stats(obj) -> dict:
     """递归统计张量结构里的 NaN/Inf 元素数（tuple/list/dict；非张量忽略）。
@@ -71,9 +106,11 @@ def _numerical_hint(module_name: str) -> str:
     """按模块在计算图中的位置给出 log(0)/除零/softmax 溢出的排查指向。"""
     name = module_name or ""
     if name.endswith(".attn"):
-        return ("注意力核心：Q/K/V 投影走函数式 F.linear（不经过子模块钩子，"
-                "溯源到本模块即可能来自投影权重）；复核 max_p→0 时的 log(0)"
-                "（已 clamp_min(1e-30)）、score 缩放、除零与 softmax 溢出")
+        return (
+            "注意力核心：Q/K/V 投影走函数式 F.linear（不经过子模块钩子，"
+            "溯源到本模块即可能来自投影权重）；复核 max_p→0 时的 log(0)"
+            "（已 clamp_min(1e-30)）、score 缩放、除零与 softmax 溢出"
+        )
     if "gate_" in name:
         return "门控参数：复核集中度项 c 与长度项 log n 的输入范围"
     if ".ln" in name or name == "ln_f" or name.endswith("ln1") or name.endswith("ln2"):
@@ -100,11 +137,16 @@ def _hooked_forward(model, x, device: str, amp_dtype, cap: int = 60):
             if len(records) >= cap:
                 return
             in_st = _nonfinite_stats(inputs)
-            records.append({
-                "seq": len(records), "module": name,
-                "output_nan": out_st["nan"], "output_inf": out_st["inf"],
-                "input_nonfinite": in_st["nonfinite"],
-            })
+            records.append(
+                {
+                    "seq": len(records),
+                    "module": name,
+                    "output_nan": out_st["nan"],
+                    "output_inf": out_st["inf"],
+                    "input_nonfinite": in_st["nonfinite"],
+                }
+            )
+
         return _h
 
     for name, mod in model.named_modules():
@@ -128,8 +170,7 @@ def _hooked_forward(model, x, device: str, amp_dtype, cap: int = 60):
     return records, forward_error
 
 
-def audit_activations(model, pending_batches, device: str,
-                      amp_dtype=None) -> dict:
+def audit_activations(model, pending_batches, device: str, amp_dtype=None) -> dict:
     """用前向钩子定位首个“输入有限、输出非有限”的模块（NaN 排查第 2 步的主动检查）。
 
     仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
@@ -156,21 +197,27 @@ def audit_activations(model, pending_batches, device: str,
     """
     candidates = [b for b in (pending_batches or []) if b is not None]
     if not candidates:
-        return {"checked": False, "n_modules_checked": 0, "records": [],
-                "origin": None, "first_nonfinite": None, "forward_error": None,
-                "precision_recheck": None, "n_batches_checked": 0,
-                "checked_batch_index": None,
-                "findings": ["无可用批次（NaN 出现在记录成功批次之前），跳过激活定位"]}
+        return {
+            "checked": False,
+            "n_modules_checked": 0,
+            "records": [],
+            "origin": None,
+            "first_nonfinite": None,
+            "forward_error": None,
+            "precision_recheck": None,
+            "n_batches_checked": 0,
+            "checked_batch_index": None,
+            "findings": ["无可用批次（NaN 出现在记录成功批次之前），跳过激活定位"],
+        }
     cap = 60
     records, forward_error = [], None
     x = candidates[0][0]
     n_batches_checked = 0
     checked_index = 0
-    fallback = None   # 首个"无非有限记录"的结果（优先无前向错误者）
+    fallback = None  # 首个"无非有限记录"的结果（优先无前向错误者）
     first_error = None
     for i, batch in enumerate(candidates):
-        recs, err = _hooked_forward(model, batch[0], device, amp_dtype,
-                                    cap=cap)
+        recs, err = _hooked_forward(model, batch[0], device, amp_dtype, cap=cap)
         n_batches_checked += 1
         if err is not None and first_error is None:
             first_error = err
@@ -196,27 +243,32 @@ def audit_activations(model, pending_batches, device: str,
             findings.append(
                 f"激活定位逐批检查了 {n_batches_checked} 个候选批次"
                 f"（命中第 {checked_index + 1} 个）：NaN 现场在区间中段时"
-                "只用单批会检查错误的输入")
+                "只用单批会检查错误的输入"
+            )
         else:
             findings.append(
                 f"激活定位逐批检查了 {n_batches_checked} 个候选批次，"
-                "均未发现非有限激活")
+                "均未发现非有限激活"
+            )
     if forward_error:
         findings.append(f"激活审计前向失败（{forward_error}），改用参数/数据检查定位")
     if origin is not None:
         findings.append(
             f"首个非有限激活源: {origin['module']}（输入有限，输出 NaN="
-            f"{origin['output_nan']}/Inf={origin['output_inf']}）→ {origin['hint']}")
+            f"{origin['output_nan']}/Inf={origin['output_inf']}）→ {origin['hint']}"
+        )
     elif first is not None:
         findings.append(
             f"第一个非有限模块 {first['module']} 的输入已含非有限值"
             f"（NaN/Inf={first['input_nonfinite']}）：NaN 来自更早的函数式算子或"
-            "输入数据，按模块名检查该模块内部的 log/除零/softmax 路径")
+            "输入数据，按模块名检查该模块内部的 log/除零/softmax 路径"
+        )
     elif not forward_error:
         findings.append(
             f"所有候选批次的模块输出均有限（已检查 {n_batches_checked} 批）——"
             "NaN 产生在损失计算/评测聚合环节（如分块交叉熵的目标越界），"
-            "不是前向算子溢出")
+            "不是前向算子溢出"
+        )
 
     # 混合精度隔离复测：amp 路径出现非有限时，用同一批次在 fp32 下重跑。
     # 这是"先查数据/代码、再查混合精度"顺序里的主动证据，而不是只报 dtype。
@@ -228,26 +280,39 @@ def audit_activations(model, pending_batches, device: str,
         fp_records, fp_err = _hooked_forward(model, x, device, None, cap=cap)
         if fp_err is not None:
             precision_recheck = {
-                "ran": True, "fp32_nonfinite_records": None,
-                "fp32_origin": None, "fp32_forward_error": fp_err,
-                "verdict": ("fp32 复测未能完成（前向失败），无法隔离混合精度因素；"
-                            "先按数据/代码路径排查")}
+                "ran": True,
+                "fp32_nonfinite_records": None,
+                "fp32_origin": None,
+                "fp32_forward_error": fp_err,
+                "verdict": (
+                    "fp32 复测未能完成（前向失败），无法隔离混合精度因素；"
+                    "先按数据/代码路径排查"
+                ),
+            }
         else:
-            fp_origin = next((r for r in fp_records if r["input_nonfinite"] == 0),
-                             None)
+            fp_origin = next((r for r in fp_records if r["input_nonfinite"] == 0), None)
             if fp_records:
-                verdict = (f"fp32 复测同样出现 {len(fp_records)} 个非有限激活 → "
-                           "不是混合精度下溢/上溢，按数据/代码/优化路径排查")
+                verdict = (
+                    f"fp32 复测同样出现 {len(fp_records)} 个非有限激活 → "
+                    "不是混合精度下溢/上溢，按数据/代码/优化路径排查"
+                )
             else:
                 verdict = (
                     f"{str(amp_dtype).replace('torch.', '')} 路径非有限而同一批次 "
                     "fp32 复测全部有限 → 混合精度数值问题：fp16 应加 GradScaler "
-                    "损失缩放或改用 bf16，并对可疑层（见 origin）升精度复测")
+                    "损失缩放或改用 bf16，并对可疑层（见 origin）升精度复测"
+                )
             precision_recheck = {
-                "ran": True, "fp32_nonfinite_records": len(fp_records),
-                "fp32_origin": (dict(fp_origin, hint=_numerical_hint(
-                    fp_origin["module"])) if fp_origin else None),
-                "fp32_forward_error": None, "verdict": verdict}
+                "ran": True,
+                "fp32_nonfinite_records": len(fp_records),
+                "fp32_origin": (
+                    dict(fp_origin, hint=_numerical_hint(fp_origin["module"]))
+                    if fp_origin
+                    else None
+                ),
+                "fp32_forward_error": None,
+                "verdict": verdict,
+            }
         findings.append(precision_recheck["verdict"])
     return {
         # checked = 审计前向成功执行；records/origin 为空表示前向算子全部有限
@@ -265,12 +330,24 @@ def audit_activations(model, pending_batches, device: str,
     }
 
 
-def run_nan_checklist(model, pending_batches, device: str, step: int, where: str,
-                      loss_value, lr: float, grad_norm_history, amp_dtype,
-                      vocab_size: int, consumed_batches=None,
-                      consumed_step_labels=None, peak_lr=None,
-                      first_bad_step=None, interval=None,
-                      optimizer=None) -> dict:
+def run_nan_checklist(
+    model,
+    pending_batches,
+    device: str,
+    step: int,
+    where: str,
+    loss_value,
+    lr: float,
+    grad_norm_history,
+    amp_dtype,
+    vocab_size: int,
+    consumed_batches=None,
+    consumed_step_labels=None,
+    peak_lr=None,
+    first_bad_step=None,
+    interval=None,
+    optimizer=None,
+) -> dict:
     """训练出现非有限值时的系统化排查：数据 → 代码 → 混合精度 → 梯度/学习率。
 
     排查顺序固定（先便宜后昂贵、先外部后内部），每步产出可核对的证据，
@@ -288,14 +365,16 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     优化器，报告会列出非有限状态张量及所属参数。
     """
     report = {
-        "time": now_str(), "step": int(step), "where": str(where),
+        "time": now_str(),
+        "step": int(step),
+        "where": str(where),
         "loss_value": (None if loss_value is None else float(loss_value)),
-        "device": str(device), "lr_at_failure": float(lr),
+        "device": str(device),
+        "lr_at_failure": float(lr),
         "amp_dtype": (str(amp_dtype) if amp_dtype else None),
         # NaN 在 log 点才被检测到：step 是检测点，first_bad_step 才是区间内
         # 首个出现非有限损失的步（两者可能相差最多 log_every-1 步）。
-        "first_bad_step": (int(first_bad_step) if first_bad_step is not None
-                           else None),
+        "first_bad_step": (int(first_bad_step) if first_bad_step is not None else None),
         "interval": ([int(interval[0]), int(interval[1])] if interval else None),
     }
 
@@ -306,10 +385,14 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
         if b is None:
             continue
         lab = labels[i] if i < len(labels) else None
-        labeled.append((f"失败区间批{i}@step{lab}" if lab is not None
-                        else f"失败步批{i}", b, lab))
-    labeled += [(f"待训练批{i}", b, None)
-                for i, b in enumerate(pending_batches or []) if b is not None]
+        labeled.append(
+            (f"失败区间批{i}@step{lab}" if lab is not None else f"失败步批{i}", b, lab)
+        )
+    labeled += [
+        (f"待训练批{i}", b, None)
+        for i, b in enumerate(pending_batches or [])
+        if b is not None
+    ]
     data_findings = []
     bad_data = []
     n_checked = 0
@@ -322,40 +405,61 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                 bad = (lo < 0) or (hi >= vocab_size)
                 data_findings.append(
                     f"{label} {name}: 整数 id 范围 [{lo}, {hi}]，"
-                    + ("**越界 vocab**" if bad else "合法"))
+                    + ("**越界 vocab**" if bad else "合法")
+                )
                 if bad:
-                    bad_data.append({"batch": label, "batch_step": batch_step,
-                                     "tensor": name, "kind": "id_out_of_range",
-                                     "min_id": lo, "max_id": hi})
+                    bad_data.append(
+                        {
+                            "batch": label,
+                            "batch_step": batch_step,
+                            "tensor": name,
+                            "kind": "id_out_of_range",
+                            "min_id": lo,
+                            "max_id": hi,
+                        }
+                    )
             else:
                 n_nan = int(torch.isnan(t).sum())
                 n_inf = int(torch.isinf(t).sum())
                 data_findings.append(
                     f"{label} {name}: 浮点输入 NaN={n_nan}/Inf={n_inf}"
-                    + ("（**数据侧混入非法值**）" if n_nan or n_inf else ""))
+                    + ("（**数据侧混入非法值**）" if n_nan or n_inf else "")
+                )
                 if n_nan or n_inf:
-                    bad_data.append({"batch": label, "batch_step": batch_step,
-                                     "tensor": name, "kind": "nonfinite_input",
-                                     "nan": n_nan, "inf": n_inf})
-    bad_steps = sorted({d["batch_step"] for d in bad_data
-                        if d.get("batch_step") is not None})
+                    bad_data.append(
+                        {
+                            "batch": label,
+                            "batch_step": batch_step,
+                            "tensor": name,
+                            "kind": "nonfinite_input",
+                            "nan": n_nan,
+                            "inf": n_inf,
+                        }
+                    )
+    bad_steps = sorted(
+        {d["batch_step"] for d in bad_data if d.get("batch_step") is not None}
+    )
     report["checklist_data"] = {
         "findings": data_findings,
         "n_tensors_checked": n_checked,
-        "n_consumed_batches": sum(1 for b in (consumed_batches or [])
-                                  if b is not None),
+        "n_consumed_batches": sum(1 for b in (consumed_batches or []) if b is not None),
         "first_bad_step": report["first_bad_step"],
         "bad_batches": bad_data,
         "first_bad_data_step": (bad_steps[0] if bad_steps else None),
         "n_bad_batches": len({d["batch"] for d in bad_data}),
-        "note": ("失败区间批=检测点所在 log 区间内每一步消费的候选批次"
-                 "（优先检查；NaN 可能早在区间中段出现，预取已覆盖 batches）；"
-                 + (f"本区间首个非有限损失步={int(first_bad_step)}，"
-                    "检测点 step 不等于首个失败步；"
-                    if first_bad_step is not None else "")
-                 + "token 流为 uint16 整数且 prepare_bins 入库时已拒绝 "
-                   "NaN/Inf/越界 id（见 data_report.json 的 token 流硬校验）；"
-                   "浮点输入出现 NaN/Inf 才是数据侧问题"),
+        "note": (
+            "失败区间批=检测点所在 log 区间内每一步消费的候选批次"
+            "（优先检查；NaN 可能早在区间中段出现，预取已覆盖 batches）；"
+            + (
+                f"本区间首个非有限损失步={int(first_bad_step)}，"
+                "检测点 step 不等于首个失败步；"
+                if first_bad_step is not None
+                else ""
+            )
+            + "token 流为 uint16 整数且 prepare_bins 入库时已拒绝 "
+            "NaN/Inf/越界 id（见 data_report.json 的 token 流硬校验）；"
+            "浮点输入出现 NaN/Inf 才是数据侧问题"
+        ),
     }
 
     # ---- 2. 代码：定位已含 NaN/Inf 的参数张量（把锅从"玄学"收敛到具体层），
@@ -369,10 +473,12 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             bad_params.append(f"{n} (NaN={n_nan}, Inf={n_inf}, shape={list(p.shape)})")
         if len(bad_params) >= 8:
             break
-    audit_batches = [b for b in (consumed_batches or []) if b is not None] \
-        + [b for b in (pending_batches or []) if b is not None]
-    activation_audit = audit_activations(model, audit_batches, device,
-                                         amp_dtype=amp_dtype)
+    audit_batches = [b for b in (consumed_batches or []) if b is not None] + [
+        b for b in (pending_batches or []) if b is not None
+    ]
+    activation_audit = audit_activations(
+        model, audit_batches, device, amp_dtype=amp_dtype
+    )
     # 参数梯度：反向已经溢出的直接证据（训练循环在失败步保留梯度到排查后
     # 才清零）。它比“参数已经变 NaN”更早、更能定位到具体层。
     bad_grads = []
@@ -382,7 +488,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                 bad_grads.append(
                     f"{n} (NaN={int(torch.isnan(p.grad).sum())}, "
                     f"Inf={int(torch.isinf(p.grad).sum())}, "
-                    f"shape={list(p.grad.shape)})")
+                    f"shape={list(p.grad.shape)})"
+                )
         if len(bad_grads) >= 8:
             break
     # 优化器状态：Adam 动量/二阶矩是非有限值时，即使当前参数仍有限，
@@ -400,7 +507,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                 continue
             for k, v in st.items():
                 if not torch.is_tensor(v) or not (
-                        torch.is_floating_point(v) or torch.is_complex(v)):
+                    torch.is_floating_point(v) or torch.is_complex(v)
+                ):
                     continue
                 n_state_tensors += 1
                 if torch.isfinite(v).all():
@@ -410,15 +518,18 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                         f"{name_by_id.get(id(p), 'param')}.{k} "
                         f"(NaN={int(torch.isnan(v).sum())}, "
                         f"Inf={int(torch.isinf(v).sum())}, "
-                        f"shape={list(v.shape)})")
+                        f"shape={list(v.shape)})"
+                    )
     report["checklist_params"] = {
         "nonfinite_tensors": bad_params,
         "nonfinite_grads": bad_grads,
-        "note": ("非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
-                 "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
-                 "梯度非有限说明反向已溢出（常先于参数变 NaN）；"
-                 "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"
-                 "交叉熵经 log_softmax（数值稳定），除法处均有 clamp_min 兜底"),
+        "note": (
+            "非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
+            "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
+            "梯度非有限说明反向已溢出（常先于参数变 NaN）；"
+            "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"
+            "交叉熵经 log_softmax（数值稳定），除法处均有 clamp_min 兜底"
+        ),
     }
     report["checklist_activations"] = activation_audit
 
@@ -427,17 +538,23 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     if amp_dtype is None:
         prec_note = "未启用 autocast（fp32/TF32 路径）：可排除混合精度下溢因素"
     elif "bfloat16" in str(amp_dtype):
-        prec_note = ("bf16 autocast：动态范围与 fp32 相同，下溢风险低；"
-                     "极大数据仍可能溢出，可对可疑层加 .float() 升精度复测")
+        prec_note = (
+            "bf16 autocast：动态范围与 fp32 相同，下溢风险低；"
+            "极大数据仍可能溢出，可对可疑层加 .float() 升精度复测"
+        )
     else:
-        prec_note = ("fp16 autocast：梯度/激活下溢是常见 NaN 来源，"
-                     "应使用 GradScaler 损失缩放，或改用 bf16 复测")
+        prec_note = (
+            "fp16 autocast：梯度/激活下溢是常见 NaN 来源，"
+            "应使用 GradScaler 损失缩放，或改用 bf16 复测"
+        )
     recheck = activation_audit.get("precision_recheck")
     if recheck and recheck.get("ran"):
         prec_note += "；fp32 隔离复测：" + recheck["verdict"]
-    report["checklist_precision"] = {"amp_dtype": (str(amp_dtype) if amp_dtype
-                                                   else None), "note": prec_note,
-                                     "recheck": recheck}
+    report["checklist_precision"] = {
+        "amp_dtype": (str(amp_dtype) if amp_dtype else None),
+        "note": prec_note,
+        "recheck": recheck,
+    }
 
     # ---- 4. 梯度爆炸 / 学习率：pre-clip 梯度范数历史是否出现尖峰/Inf
     hist = [g for g in (grad_norm_history or []) if g is not None]
@@ -445,11 +562,15 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     # 梯度范数触发的排查（where=grad_norm）时，触发值本身就是非有限的当前范数；
     # 历史只保留有限值（避免 Infinity 写进 JSON），因此不能只靠 hist[-1] 判定，
     # 必须用触发值显式报告"已爆炸"（否则专家信号会退化为"未见尖峰"）。
-    trigger_nonfinite = (where == "grad_norm" and loss_value is not None
-                         and not math.isfinite(float(loss_value)))
+    trigger_nonfinite = (
+        where == "grad_norm"
+        and loss_value is not None
+        and not math.isfinite(float(loss_value))
+    )
     if trigger_nonfinite:
         opt_findings.append(
-            f"本次 pre-clip 梯度范数 {float(loss_value):.3e} 非有限 → 梯度已爆炸")
+            f"本次 pre-clip 梯度范数 {float(loss_value):.3e} 非有限 → 梯度已爆炸"
+        )
     hist_max = hist_med = hist_spike_ratio = None
     if hist:
         finite = [g for g in hist if math.isfinite(g)]
@@ -463,8 +584,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
             else:
                 spike_note = "（未见爆炸性尖峰）"
             opt_findings.append(
-                f"最近 pre-clip 梯度范数 {last:.3e}，此前中位数 {med:.3e}"
-                + spike_note)
+                f"最近 pre-clip 梯度范数 {last:.3e}，此前中位数 {med:.3e}" + spike_note
+            )
         if len(finite) >= 3:
             # 整个有限历史里的最坏峰值：尖峰可能发生在更早的 log 点、
             # 当前已恢复；只看最后一点会漏掉“爆炸后恢复”的脆弱训练。
@@ -475,15 +596,15 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
                     hist_spike_ratio = hist_max / hist_med
                 except (OverflowError, ZeroDivisionError):
                     hist_spike_ratio = None
-                if (hist_spike_ratio is not None
-                        and not math.isfinite(hist_spike_ratio)):
+                if hist_spike_ratio is not None and not math.isfinite(hist_spike_ratio):
                     hist_spike_ratio = None
             if hist_spike_ratio is not None and hist_spike_ratio >= 10:
                 opt_findings.append(
                     f"历史 pre-clip 梯度范数峰值 {hist_max:.3e} 为中位数 "
                     f"{hist_med:.3e} 的 {hist_spike_ratio:.0f} 倍"
                     "（历史上出现过爆炸性尖峰；即使当前已恢复也要检查学习率/"
-                    "grad_clip 与对应步批次）")
+                    "grad_clip 与对应步批次）"
+                )
         if not math.isfinite(last):
             opt_findings.append("最近一次 pre-clip 梯度范数非有限 → 梯度已爆炸")
     else:
@@ -491,12 +612,14 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     if bad_grads:
         opt_findings.append(
             f"参数梯度出现 {len(bad_grads)} 个非有限张量（{bad_grads[0]}）："
-            "反向已溢出/爆炸，下一轮更新会把 NaN 写入参数")
+            "反向已溢出/爆炸，下一轮更新会把 NaN 写入参数"
+        )
     if bad_opt_state:
         opt_findings.append(
             f"优化器状态出现 {len(bad_opt_state)} 个非有限张量（{bad_opt_state[0]}）："
             "Adam 动量/二阶矩已溢出，仅重置参数无效，需恢复 checkpoint 或重建"
-            "优化器状态")
+            "优化器状态"
+        )
     elif optimizer is not None and n_state_tensors == 0:
         opt_findings.append("优化器尚无状态张量（首步即失败或优化器未 step）")
     # peak_lr 为调度峰值（warmup 后的 base lr）：失败步可能仍在 warmup 中，
@@ -504,7 +627,8 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     opt_findings.append(
         f"失败时学习率 {lr:.2e}"
         + (f"（调度峰值 {peak_lr:.2e}）" if peak_lr is not None else "")
-        + "：过大学习率会在 warmup 结束前后率先炸出 NaN")
+        + "：过大学习率会在 warmup 结束前后率先炸出 NaN"
+    )
     report["checklist_optimization"] = {
         "findings": opt_findings,
         "grad_norm_history_tail": hist[-20:],
@@ -533,8 +657,11 @@ def run_nan_checklist(model, pending_batches, device: str, step: int, where: str
     # 固定排查顺序显式落盘：消费方不应依赖 JSON 对象键的插入顺序来恢复
     # “数据→代码→混合精度→优化”的因果链。
     report["checklist_order"] = [
-        "checklist_data", "checklist_params", "checklist_activations",
-        "checklist_precision", "checklist_optimization",
+        "checklist_data",
+        "checklist_params",
+        "checklist_activations",
+        "checklist_precision",
+        "checklist_optimization",
     ]
     return report
 
@@ -547,28 +674,45 @@ def _abort_on_nan(report: dict, out_dir: str) -> None:
     if report.get("first_bad_step") is not None:
         where_bad = f"，本区间首个非有限损失步 {report['first_bad_step']}"
         if report.get("interval"):
-            where_bad += (f"（区间 {report['interval'][0]}~"
-                          f"{report['interval'][1]}；检测点晚于失败步，排查输入"
-                          "已覆盖整个区间）")
-    print(f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}"
-          f"{where_bad}），排查报告 -> {path}")
-    for key, title in (("checklist_data", "数据"), ("checklist_params", "参数定位"),
-                       ("checklist_activations", "激活定位"),
-                       ("checklist_precision", "精度"), ("checklist_optimization", "梯度/学习率")):
+            where_bad += (
+                f"（区间 {report['interval'][0]}~"
+                f"{report['interval'][1]}；检测点晚于失败步，排查输入"
+                "已覆盖整个区间）"
+            )
+    print(
+        f"[train] ❌ 检测到非有限损失（step {report['step']}，{report['where']}"
+        f"{where_bad}），排查报告 -> {path}"
+    )
+    for key, title in (
+        ("checklist_data", "数据"),
+        ("checklist_params", "参数定位"),
+        ("checklist_activations", "激活定位"),
+        ("checklist_precision", "精度"),
+        ("checklist_optimization", "梯度/学习率"),
+    ):
         sec = report.get(key) or {}
         lines = sec.get("findings") or sec.get("nonfinite_tensors") or []
-        print(f"[train] 排查-{title}: " + ("；".join(lines[:3]) if lines
-                                            else sec.get("note", "无异常")))
+        print(
+            f"[train] 排查-{title}: "
+            + ("；".join(lines[:3]) if lines else sec.get("note", "无异常"))
+        )
     print("[train] 建议动作（按顺序）:")
     for a in report["suggested_actions"]:
         print(f"[train]   {a}")
     raise SystemExit(
         f"训练在 step {report['step']} 出现 {report['where']} 非有限值，已中止；"
-        f"按 {path} 中的排查路径定位后重跑")
+        f"按 {path} 中的排查路径定位后重跑"
+    )
+
 
 SMOKE_OVERRIDES = {
-    "steps": 20, "eval_every": 10, "eval_iters": 2, "log_every": 5,
-    "warmup": 5, "batch_size": 8, "train_ctx": 128,
+    "steps": 20,
+    "eval_every": 10,
+    "eval_iters": 2,
+    "log_every": 5,
+    "warmup": 5,
+    "batch_size": 8,
+    "train_ctx": 128,
 }
 
 
@@ -594,13 +738,11 @@ def _val_eval_indices(val_len: int, ctx: int, iters: int):
         # 单窗估计取中间窗口，避免天然偏向验证集开头
         indices = np.array([(n_windows - 1) // 2], dtype=np.int64)
     else:
-        indices = (np.arange(n_eval, dtype=np.int64)
-                   * (n_windows - 1) // (n_eval - 1))
+        indices = np.arange(n_eval, dtype=np.int64) * (n_windows - 1) // (n_eval - 1)
     return indices, n_windows
 
 
-def _val_eval_window_starts(val_len: int, ctx: int, iters: int,
-                            offset: int = 0):
+def _val_eval_window_starts(val_len: int, ctx: int, iters: int, offset: int = 0):
     """相位平移后的验证窗口起始 token 下标（用于窗口边界敏感性诊断）。
 
     与 ``_val_eval_indices`` 用同一套“等间隔、含首尾、不循环”抽样规则，
@@ -625,13 +767,13 @@ def _val_eval_window_starts(val_len: int, ctx: int, iters: int,
     if n_windows <= 0:
         raise ValueError(
             f"验证集只有 {val_len} tokens（offset={offset}），"
-            f"不足以组成 ctx={ctx} 的窗口")
+            f"不足以组成 ctx={ctx} 的窗口"
+        )
     n_eval = min(iters, n_windows)
     if n_eval == 1:
         windows = np.array([(n_windows - 1) // 2], dtype=np.int64)
     else:
-        windows = (np.arange(n_eval, dtype=np.int64)
-                   * (n_windows - 1) // (n_eval - 1))
+        windows = np.arange(n_eval, dtype=np.int64) * (n_windows - 1) // (n_eval - 1)
     return offset + windows * ctx, n_windows
 
 
@@ -653,8 +795,17 @@ def val_audit_batch(val, ctx: int, iters: int, device: str, fallback=None):
         return [b for b in (fallback or []) if b is not None]
 
 
-def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int = None,
-                 collect_window_losses: bool = False, window_offset: int = 0):
+def evaluate_val(
+    model,
+    val,
+    ctx,
+    device,
+    iters,
+    amp=False,
+    batch_windows: int = None,
+    collect_window_losses: bool = False,
+    window_offset: int = 0,
+):
     """在不重复、覆盖全验证集的窗口上同时计算 val_loss 与门控均值。
 
     多个窗口拼成一个批量做前向：每个窗口长度相同，token 加权后的均值
@@ -673,17 +824,18 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
     was_training = model.training
     model.eval()
     try:
-        collect_gate = (model.variant not in ("standard",)
-                        and not getattr(model.blocks[0].attn, "is_null", False))
+        collect_gate = model.variant not in ("standard",) and not getattr(
+            model.blocks[0].attn, "is_null", False
+        )
         starts, n_windows = _val_eval_window_starts(
-            len(val), ctx, iters, offset=window_offset)
+            len(val), ctx, iters, offset=window_offset
+        )
         if batch_windows is None:
             batch_windows = max(1, min(16384 // max(1, ctx), len(starts)))
         else:
             batch_windows = strict_int(batch_windows, "batch_windows")
             if batch_windows <= 0:
-                raise ValueError(
-                    f"batch_windows 必须是正整数，收到 {batch_windows}")
+                raise ValueError(f"batch_windows 必须是正整数，收到 {batch_windows}")
         # 设备端累积，循环结束后统一读取。
         # 窗口等长，权重即窗口数，用 Python int 就地累计。
         # 设备端累积。用 float64：默认初始化下 g 可能逐 token 完全相同，
@@ -711,19 +863,26 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
             n_batches = (len(starts) + batch_windows - 1) // batch_windows
             xy = get_val_windows_at(val, ctx, starts[:batch_windows], device)
             for bi, s in enumerate(range(0, len(starts), batch_windows)):
-                chunk = starts[s:s + batch_windows]
+                chunk = starts[s : s + batch_windows]
                 x, y = xy
                 if bi + 1 < n_batches:
                     xy = get_val_windows_at(
-                        val, ctx,
-                        starts[s + batch_windows:s + 2 * batch_windows],
-                        device)
+                        val,
+                        ctx,
+                        starts[s + batch_windows : s + 2 * batch_windows],
+                        device,
+                    )
                 with amp_ctx:
                     # 验证评测只消费门控均值 g，使用轻量统计；额外取每窗口损失
                     # 用于估计“有限个验证窗口”带来的抽样误差。
-                    out = model(x, targets=y, need_stats=collect_gate,
-                                stats_argmax=False, return_window_losses=True)
-                nb = len(chunk)     # 窗口等长，按窗口数加权即 token 加权
+                    out = model(
+                        x,
+                        targets=y,
+                        need_stats=collect_gate,
+                        stats_argmax=False,
+                        return_window_losses=True,
+                    )
+                nb = len(chunk)  # 窗口等长，按窗口数加权即 token 加权
                 # add_(alpha=nb) 直接按批大小加权累加（loss 前向/门控闭式求和
                 # 本就以 fp32 返回）。
                 loss_acc.add_(out["loss"].detach(), alpha=float(nb))
@@ -745,7 +904,8 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                         highs.append((gf > GATE_SAT_HIGH).to(_gate_dtype).mean())
                         if li >= len(gate_layer_acc):
                             gate_layer_acc.append(
-                                torch.zeros((), dtype=_gate_dtype, device=device))
+                                torch.zeros((), dtype=_gate_dtype, device=device)
+                            )
                         gate_layer_acc[li].add_(means[-1], alpha=float(nb))
                     if means:
                         gate_acc.add_(torch.stack(means).mean(), alpha=float(nb))
@@ -756,8 +916,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
         # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
         # 使 torch.load(weights_only=True) 反序列化失败且不合法
         val_loss = float(float(loss_acc.item()) / total_w)
-        gate_mean = (float(gate_acc.item()) / gate_w_total
-                     if gate_w_total else None)
+        gate_mean = float(gate_acc.item()) / gate_w_total if gate_w_total else None
         gate_std = None
         gate_frac_low = None
         gate_frac_high = None
@@ -768,8 +927,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
             gate_std = math.sqrt(var)
             gate_frac_low = float(gate_low_acc.item()) / gate_w_total
             gate_frac_high = float(gate_high_acc.item()) / gate_w_total
-            gate_layer_mean = [float(x.item()) / gate_w_total
-                               for x in gate_layer_acc]
+            gate_layer_mean = [float(x.item()) / gate_w_total for x in gate_layer_acc]
         # 验证集只评测 eval_iters 个等间隔窗口：点估计本身带抽样误差。这里把
         # 窗口作为抽样单元，报告窗口间标准误与 t 近似 95% CI（小样本比正态
         # 更宽）；CI 不包含窗口间空间相关，也不替代跨随机种子的方差（后者在
@@ -792,8 +950,7 @@ def evaluate_val(model, val, ctx, device, iters, amp=False, batch_windows: int =
                     lo, hi = val_loss - tcrit * se, val_loss + tcrit * se
                     val_loss_se = se
                     val_loss_ci95 = [lo, hi]
-                    val_ppl_ci95 = [math.exp(min(20.0, lo)),
-                                    math.exp(min(20.0, hi))]
+                    val_ppl_ci95 = [math.exp(min(20.0, lo)), math.exp(min(20.0, hi))]
         out = {
             "val_loss": val_loss,
             "val_loss_se": val_loss_se,
@@ -835,6 +992,7 @@ def mean_gate_value(model, val, ctx, device, iters=1, amp=False):
 
 # ---------------------------------------------------------------- 早停（可选）
 
+
 def _config_int(value, name: str, minimum: int) -> int:
     """配置整数：拒绝 bool/小数/非有限值，并检查配置语义下界。
 
@@ -861,8 +1019,7 @@ def _meta_vocab_size(meta: dict) -> int:
     vocab_size = strict_int(meta.get("vocab_size"), "meta.vocab_size")
     check_vocab_capacity(vocab_size)
     if vocab_size <= 0:
-        raise ValueError(
-            f"meta.vocab_size 必须是正整数，收到 {vocab_size}")
+        raise ValueError(f"meta.vocab_size 必须是正整数，收到 {vocab_size}")
     return vocab_size
 
 
@@ -880,11 +1037,9 @@ def _config_nonneg_float(value, name: str) -> float:
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as e:
-        raise ValueError(
-            f"config.{name} 必须是数值，收到 {value!r}") from e
+        raise ValueError(f"config.{name} 必须是数值，收到 {value!r}") from e
     if not math.isfinite(value) or value < 0:
-        raise ValueError(
-            f"config.{name} 必须是有限非负数，收到 {value!r}")
+        raise ValueError(f"config.{name} 必须是有限非负数，收到 {value!r}")
     return value
 
 
@@ -901,11 +1056,9 @@ def _config_finite_float(value, name: str) -> float:
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as e:
-        raise ValueError(
-            f"config.{name} 必须是数值，收到 {value!r}") from e
+        raise ValueError(f"config.{name} 必须是数值，收到 {value!r}") from e
     if not math.isfinite(value):
-        raise ValueError(
-            f"config.{name} 必须是有限数值，收到 {value!r}")
+        raise ValueError(f"config.{name} 必须是有限数值，收到 {value!r}")
     return value
 
 
@@ -918,8 +1071,7 @@ def _config_probability(value, name: str) -> float:
     """
     value = _config_finite_float(value, name)
     if not 0.0 <= value <= 1.0:
-        raise ValueError(
-            f"config.{name} 必须在 [0, 1] 内，收到 {value!r}")
+        raise ValueError(f"config.{name} 必须在 [0, 1] 内，收到 {value!r}")
     return value
 
 
@@ -935,16 +1087,17 @@ def _config_min_delta(value) -> float:
         raise ValueError(f"config.early_stop_min_delta 必须是数值，收到 bool {value!r}")
     # float("0.0_5")==0.05：下划线数字串不是规范配置数值，不能静默改变早停阈值。
     if isinstance(value, str) and "_" in value:
-        raise ValueError(
-            f"config.early_stop_min_delta 必须是数值，收到 {value!r}")
+        raise ValueError(f"config.early_stop_min_delta 必须是数值，收到 {value!r}")
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as e:
         raise ValueError(
-            f"config.early_stop_min_delta 必须是数值，收到 {value!r}") from e
+            f"config.early_stop_min_delta 必须是数值，收到 {value!r}"
+        ) from e
     if not math.isfinite(value) or not 0.0 <= value < 1.0:
         raise ValueError(
-            f"config.early_stop_min_delta 必须在 [0, 1) 内且有限，收到 {value!r}")
+            f"config.early_stop_min_delta 必须在 [0, 1) 内且有限，收到 {value!r}"
+        )
     return value
 
 
@@ -961,8 +1114,13 @@ def _val_ci_rel(vl: float, val_ci95) -> Optional[float]:
         vl = float(vl)
     except (TypeError, ValueError, OverflowError):
         return None
-    if (not math.isfinite(lo) or not math.isfinite(hi)
-            or hi < lo or not math.isfinite(vl) or vl <= 0):
+    if (
+        not math.isfinite(lo)
+        or not math.isfinite(hi)
+        or hi < lo
+        or not math.isfinite(vl)
+        or vl <= 0
+    ):
         return None
     try:
         out = (hi - lo) / 2.0 / vl
@@ -971,9 +1129,14 @@ def _val_ci_rel(vl: float, val_ci95) -> Optional[float]:
     return out if math.isfinite(out) else None
 
 
-def early_stop_update(vl: float, best_val: float, evals_since_improve: int,
-                      min_delta: float = 0.0, patience: int = 0,
-                      val_ci95=None):
+def early_stop_update(
+    vl: float,
+    best_val: float,
+    evals_since_improve: int,
+    min_delta: float = 0.0,
+    patience: int = 0,
+    val_ci95=None,
+):
     """一次验证评测后更新早停状态，返回 (best_val, evals_since_improve, stop)。
 
     口径（与曲线诊断的"过拟合→早停"建议衔接，默认关闭、显式开启才生效）：
@@ -1024,42 +1187,61 @@ def main():
     p.add_argument("--variant", required=True, choices=RUNNABLE_VARIANTS)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out_dir", default=None, help="默认 out/<config名>/<variant>")
-    p.add_argument("--smoke", action="store_true", help="冒烟模式（极少步数，验证流程）")
-    p.add_argument("--wandb", action="store_true", help="可选 W&B 日志（需先 wandb login）")
+    p.add_argument(
+        "--smoke", action="store_true", help="冒烟模式（极少步数，验证流程）"
+    )
+    p.add_argument(
+        "--wandb", action="store_true", help="可选 W&B 日志（需先 wandb login）"
+    )
     p.add_argument("--device", default="auto")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--steps", type=int, default=None, help="覆盖配置中的训练步数")
-    p.add_argument("--early_stop_patience", type=int, default=None,
-                   help="验证损失连续 N 次评测无实质改善则早停（0=关闭，"
-                        "默认读配置 early_stop_patience；启用后各 run 实际步数"
-                        "可能不同，run_all 审计按计划步数核对）")
-    p.add_argument("--sanity_file", default=None,
-                   help="开训前小批量过拟合 sanity 结果 JSON 路径；提供时把"
-                        "“本 run 通过代码正确性闸门”的摘要与哈希写入 "
-                        "run_manifest.json，使 checkpoint 可自证（run_all "
-                        "默认透传）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 检测到打乱/字符切分/文档跨 split/"
-                        "跨 split n-gram 重叠也继续训练（仅用于复现历史实验；"
-                        "run_all 通过同名参数与环境变量向子进程透传）")
+    p.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=None,
+        help="验证损失连续 N 次评测无实质改善则早停（0=关闭，"
+        "默认读配置 early_stop_patience；启用后各 run 实际步数"
+        "可能不同，run_all 审计按计划步数核对）",
+    )
+    p.add_argument(
+        "--sanity_file",
+        default=None,
+        help="开训前小批量过拟合 sanity 结果 JSON 路径；提供时把"
+        "“本 run 通过代码正确性闸门”的摘要与哈希写入 "
+        "run_manifest.json，使 checkpoint 可自证（run_all "
+        "默认透传）",
+    )
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 检测到打乱/字符切分/文档跨 split/"
+        "跨 split n-gram 重叠也继续训练（仅用于复现历史实验；"
+        "run_all 通过同名参数与环境变量向子进程透传）",
+    )
     args = p.parse_args()
 
     # 数据协议闸门必须在任何训练计算之前执行：直接 `python -m lega.train`
     # 与 run_all/调优 trial 共用同一份防泄漏结论，避免“报告有告警但训练照跑”。
-    allow_override = allow_protocol_violations(
-        args.allow_data_protocol_violations)
+    allow_override = allow_protocol_violations(args.allow_data_protocol_violations)
     data_preflight = data_protocol_preflight(
-        args.data_dir, allow_override=allow_override)
+        args.data_dir, allow_override=allow_override
+    )
     if not data_preflight["report_present"]:
-        print("[train] 警告：数据目录缺少 data_report.json，"
-              "无法执行训练前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[train] 警告：数据目录缺少 data_report.json，"
+            "无法执行训练前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif data_preflight["critical_violations"]:
         detail = "；".join(
             f"[{a.get('code')}] {a.get('message')}"
-            for a in data_preflight["critical_violations"][:5])
-        print(f"[train] ⚠ 数据协议自检发现 "
-              f"{len(data_preflight['critical_violations'])} 个严重问题，"
-              f"但已显式放行（结果不得用于正式结论）：{detail}")
+            for a in data_preflight["critical_violations"][:5]
+        )
+        print(
+            f"[train] ⚠ 数据协议自检发现 "
+            f"{len(data_preflight['critical_violations'])} 个严重问题，"
+            f"但已显式放行（结果不得用于正式结论）：{detail}"
+        )
 
     cfg = load_config_json(args.config, validate=True)
     if args.smoke:
@@ -1071,28 +1253,34 @@ def main():
         cfg["early_stop_patience"] = args.early_stop_patience
     patience_raw = cfg.get("early_stop_patience", 0)
     early_stop_patience = _config_int(
-        0 if patience_raw is None else patience_raw, "early_stop_patience", 0)
+        0 if patience_raw is None else patience_raw, "early_stop_patience", 0
+    )
     min_delta_raw = cfg.get("early_stop_min_delta", 0.0)
     early_stop_min_delta = _config_min_delta(
-        0.0 if min_delta_raw is None else min_delta_raw)
+        0.0 if min_delta_raw is None else min_delta_raw
+    )
     # 数值超参数在开训前统一校验：负 lr/weight_decay 会朝反方向优化，
     # 负 grad_clip 会翻转梯度符号，NaN/Inf 会直接污染参数；这些错误不能
     # 等到写出 manifest/config_used 或训练若干步后才暴露。
     lr = _config_nonneg_float(cfg["lr"], "lr")
-    weight_decay = _config_nonneg_float(
-        cfg.get("weight_decay", 0.1), "weight_decay")
+    weight_decay = _config_nonneg_float(cfg.get("weight_decay", 0.1), "weight_decay")
     grad_clip = _config_nonneg_float(cfg.get("grad_clip", 1.0), "grad_clip")
     dropout = _config_probability(cfg.get("dropout", 0.0), "dropout")
-    attn_dropout = _config_probability(
-        cfg.get("attn_dropout", 0.0), "attn_dropout")
+    attn_dropout = _config_probability(cfg.get("attn_dropout", 0.0), "attn_dropout")
     gate_bias_init = _config_finite_float(
-        cfg.get("gate_bias_init", 2.0), "gate_bias_init")
+        cfg.get("gate_bias_init", 2.0), "gate_bias_init"
+    )
     # 种子必须是精确整数：配置里的 "seed": true → 1 或 1.5 → 1 会让本次
     # 训练以与声明不同的种子播种，而 checkpoint/manifest/曲线记的是截断值，
     # 事后无法区分。int(True)==1、int(1.5)==1 都不可接受。
     seed = strict_int(
-        args.seed if args.seed is not None else cfg.get("seed", 1337), "seed")
-    device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+        args.seed if args.seed is not None else cfg.get("seed", 1337), "seed"
+    )
+    device = (
+        args.device
+        if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
 
     # 实际生效精度必须在写 config_used/manifest 之前确定：只记录 "amp": true
     # 无法区分 bf16 autocast 与不可用时的 fp32 回退，事后会把两种数值路径
@@ -1101,8 +1289,9 @@ def main():
     amp_dt = amp_dtype_for(device, amp_enabled)
 
     block_size = _config_int(cfg["block_size"], "block_size", 1)
-    train_ctx = min(_config_int(cfg.get("train_ctx", block_size),
-                                "train_ctx", 1), block_size)
+    train_ctx = min(
+        _config_int(cfg.get("train_ctx", block_size), "train_ctx", 1), block_size
+    )
     d_model = _config_int(cfg["d_model"], "d_model", 1)
     n_layers = _config_int(cfg["n_layers"], "n_layers", 1)
     n_heads = _config_int(cfg["n_heads"], "n_heads", 1)
@@ -1118,31 +1307,42 @@ def main():
     # d_model/n_heads 会在 GPT 构造时才失败，留下一个空的 run 产物目录。
     if d_model % n_heads:
         raise ValueError(
-            f"config.d_model={d_model} 必须能被 config.n_heads={n_heads} 整除")
+            f"config.d_model={d_model} 必须能被 config.n_heads={n_heads} 整除"
+        )
     if (d_model // n_heads) % 2:
         raise ValueError(
-            f"config.d_model/n_heads={d_model // n_heads} 必须是偶数（RoPE）")
+            f"config.d_model/n_heads={d_model // n_heads} 必须是偶数（RoPE）"
+        )
 
-    tag = os.path.splitext(os.path.basename(args.config))[0] + ("_smoke" if args.smoke else "")
+    tag = os.path.splitext(os.path.basename(args.config))[0] + (
+        "_smoke" if args.smoke else ""
+    )
     out_dir = args.out_dir or os.path.join("out", tag, args.variant)
     os.makedirs(out_dir, exist_ok=True)
     cfg_used = dict(cfg)
-    cfg_used.update({"variant": args.variant, "seed": seed, "device": device,
-                     "tag": tag,
-                     # 显式写入实际生效的早停口径：CLI 覆盖也必须进入受控变量审计
-                     "early_stop_patience": early_stop_patience,
-                     "early_stop_min_delta": early_stop_min_delta,
-                     # 记录规范化后的模型正则化超参数：bool/字符串输入
-                     # 不能只在内存里被转换，而让 config_used 复述原始值。
-                     "dropout": dropout,
-                     "attn_dropout": attn_dropout,
-                     "gate_bias_init": gate_bias_init,
-                     # 实际生效精度（None=未启用 autocast，回退 fp32）
-                     "amp": amp_enabled,
-                     "amp_dtype": (str(amp_dt).replace("torch.", "")
-                                   if amp_dt is not None else None),
-                     # 数据协议是否被显式放行：正式结果必须能区分
-                     "data_protocol_override": bool(allow_override)})
+    cfg_used.update(
+        {
+            "variant": args.variant,
+            "seed": seed,
+            "device": device,
+            "tag": tag,
+            # 显式写入实际生效的早停口径：CLI 覆盖也必须进入受控变量审计
+            "early_stop_patience": early_stop_patience,
+            "early_stop_min_delta": early_stop_min_delta,
+            # 记录规范化后的模型正则化超参数：bool/字符串输入
+            # 不能只在内存里被转换，而让 config_used 复述原始值。
+            "dropout": dropout,
+            "attn_dropout": attn_dropout,
+            "gate_bias_init": gate_bias_init,
+            # 实际生效精度（None=未启用 autocast，回退 fp32）
+            "amp": amp_enabled,
+            "amp_dtype": (
+                str(amp_dt).replace("torch.", "") if amp_dt is not None else None
+            ),
+            # 数据协议是否被显式放行：正式结果必须能区分
+            "data_protocol_override": bool(allow_override),
+        }
+    )
 
     set_seed(seed)
     meta = load_meta(args.data_dir)
@@ -1169,15 +1369,20 @@ def main():
                 f"sanity 闸门证据不可用（{args.sanity_file} 缺失或不可解析）："
                 "已显式指定 --sanity_file，不能在全量训练时跳过代码正确性"
                 "闸门。请先运行 `python -m lega.sanity ...`，或移除该参数"
-                "（run_all 默认会先跑闸门）。")
+                "（run_all 默认会先跑闸门）。"
+            )
         if sanity_info.get("passed") is not True:
             failed = sanity_info.get("failed_checks") or []
-            reason = (f"未通过项: {', '.join(failed)}" if failed
-                      else "结果未声明 passed=true，或 passed 与 checks 矛盾")
+            reason = (
+                f"未通过项: {', '.join(failed)}"
+                if failed
+                else "结果未声明 passed=true，或 passed 与 checks 矛盾"
+            )
             raise SystemExit(
                 f"sanity 闸门未通过（{args.sanity_file}）：{reason}。"
                 "固定小批量都无法过拟合说明梯度反传/损失计算/标签对齐存在"
-                "严重问题；中止全量训练，请先排查。")
+                "严重问题；中止全量训练，请先排查。"
+            )
         if sanity_info.get("seed_verified") is False:
             # 新版 sanity 清单会内嵌 seed_report；明确标记“未生效”意味着
             # 这次过拟合不是在该 seed 的确定性随机流下完成的，PASS 不可信。
@@ -1186,10 +1391,17 @@ def main():
             raise SystemExit(
                 f"sanity 闸门证据不可信（{args.sanity_file}）：结果清单的 "
                 "seed_report 明确标记 seed_verified=false，说明检查不是在该"
-                "随机种子的确定性随机流下完成；中止全量训练，请重跑 sanity。")
+                "随机种子的确定性随机流下完成；中止全量训练，请重跑 sanity。"
+            )
     manifest = build_run_manifest(
-        tag=tag, variant=args.variant, seed=seed, config_path=args.config,
-        data_dir=args.data_dir, device=device, sanity=sanity_info)
+        tag=tag,
+        variant=args.variant,
+        seed=seed,
+        config_path=args.config,
+        data_dir=args.data_dir,
+        device=device,
+        sanity=sanity_info,
+    )
     # 训练入口实际执行的防泄漏闸门结论必须随 run 落盘：只打印到 stdout
     # 无法在事后回答“这个 checkpoint 是否在已知泄露的数据上训练”。
     manifest["data_protocol_preflight"] = data_preflight
@@ -1198,14 +1410,21 @@ def main():
     # checkpoint/台账携带的是生效值而不是配置默认值。
     manifest["precision"] = {
         "amp_enabled": amp_enabled,
-        "amp_dtype": (str(amp_dt).replace("torch.", "")
-                      if amp_dt is not None else None),
+        "amp_dtype": (
+            str(amp_dt).replace("torch.", "") if amp_dt is not None else None
+        ),
         "autocast": amp_dt is not None,
         # TF32 仅 CUDA 生效；CPU 上记录布尔默认值会被误读成已启用。
-        "tf32_matmul": (bool(torch.backends.cuda.matmul.allow_tf32)
-                        if str(device).startswith("cuda") else None),
-        "tf32_cudnn": (bool(torch.backends.cudnn.allow_tf32)
-                       if str(device).startswith("cuda") else None),
+        "tf32_matmul": (
+            bool(torch.backends.cuda.matmul.allow_tf32)
+            if str(device).startswith("cuda")
+            else None
+        ),
+        "tf32_cudnn": (
+            bool(torch.backends.cudnn.allow_tf32)
+            if str(device).startswith("cuda")
+            else None
+        ),
     }
     identity = None
     if sanity_info and sanity_info.get("present"):
@@ -1215,20 +1434,25 @@ def main():
         sanity_info["identity"] = identity
         manifest["sanity"] = sanity_info
         if identity["hard_mismatches"]:
-            print("[train] ⚠ sanity 证据身份不一致（"
-                  + ", ".join(identity["hard_mismatches"])
-                  + "）：该 PASS 不属于本 run")
+            print(
+                "[train] ⚠ sanity 证据身份不一致（"
+                + ", ".join(identity["hard_mismatches"])
+                + "）：该 PASS 不属于本 run"
+            )
             # 旧的/别的配置/数据/代码的 PASS 不是本 run 的闸门证据。
             # 已显式要求绑定 sanity 时继续训练，等于用无法验证的结论开跑。
             raise SystemExit(
                 "sanity 证据身份不一致（"
                 + ", ".join(identity["hard_mismatches"])
                 + "）：该结果不是针对本 run 的代码/配置/数据生成的，"
-                "不能作为开训闸门。请用当前配置/数据重跑 `lega.sanity`。")
+                "不能作为开训闸门。请用当前配置/数据重跑 `lega.sanity`。"
+            )
         elif identity["unknown_fields"]:
-            print("[train] ⚠ sanity 证据缺少身份字段（"
-                  + ", ".join(identity["unknown_fields"])
-                  + "）：旧文件无法核对，PASS 原样保留但不标记为已验证")
+            print(
+                "[train] ⚠ sanity 证据缺少身份字段（"
+                + ", ".join(identity["unknown_fields"])
+                + "）：旧文件无法核对，PASS 原样保留但不标记为已验证"
+            )
     # dirty 工作区：把 diff 补丁随 run 落盘，否则仅凭 commit 无法复原代码
     worktree = manifest.get("worktree") or {}
     if worktree.get("dirty") and worktree.get("diff_bytes"):
@@ -1241,8 +1465,11 @@ def main():
     save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
     # 本 run 的 eval.json 也继承闸门结论；硬身份不一致时不得冒充通过
     sanity_passed = None
-    if (sanity_info and sanity_info.get("present")
-            and not (identity and identity["hard_mismatches"])):
+    if (
+        sanity_info
+        and sanity_info.get("present")
+        and not (identity and identity["hard_mismatches"])
+    ):
         sanity_passed = sanity_info.get("passed")
     provenance = {
         "code_commit": manifest["git"]["commit"],
@@ -1256,22 +1483,32 @@ def main():
         "sanity_passed": sanity_passed,
         # 通过值是否由与本 run 同代码/配置/数据的证据支持（旧文件无法核对
         # 时为 None，而不是假称已验证）
-        "sanity_verified": (identity.get("verified")
-                            if isinstance(identity, dict) else None),
+        "sanity_verified": (
+            identity.get("verified") if isinstance(identity, dict) else None
+        ),
         # checkpoint 自含数据协议闸门结论，manifest 被移走也能审计
         "data_protocol_preflight": data_preflight,
     }
 
     # 记录实际生效的数值（含 train_ctx 的 min 截断与字符串/整数值浮点规范化），
     # 保证下游评测复现同一口径，而不是复述未经执行的原始配置。
-    cfg_used.update({
-        "block_size": block_size, "train_ctx": train_ctx,
-        "d_model": d_model, "n_layers": n_layers, "n_heads": n_heads,
-        "ffn_mult": ffn_mult, "steps": steps, "warmup": warmup,
-        "grad_accum": grad_accum, "log_every": log_every,
-        "eval_every": eval_every, "eval_iters": eval_iters,
-        "batch_size": batch_size,
-    })
+    cfg_used.update(
+        {
+            "block_size": block_size,
+            "train_ctx": train_ctx,
+            "d_model": d_model,
+            "n_layers": n_layers,
+            "n_heads": n_heads,
+            "ffn_mult": ffn_mult,
+            "steps": steps,
+            "warmup": warmup,
+            "grad_accum": grad_accum,
+            "log_every": log_every,
+            "eval_every": eval_every,
+            "eval_iters": eval_iters,
+            "batch_size": batch_size,
+        }
+    )
     config_used_path = os.path.join(out_dir, "config_used.json")
     with open(config_used_path, "w", encoding="utf-8") as f:
         json.dump(cfg_used, f, ensure_ascii=False, indent=2)
@@ -1283,15 +1520,19 @@ def main():
     provenance["resolved_config"] = cfg_used
 
     model_cfg = dict(
-        vocab_size=vocab_size, block_size=block_size,
-        d_model=d_model, n_layers=n_layers,
-        n_heads=n_heads, ffn_mult=ffn_mult,
+        vocab_size=vocab_size,
+        block_size=block_size,
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        ffn_mult=ffn_mult,
         dropout=dropout,
         attn_dropout=attn_dropout,
         variant=args.variant,
         gate_bias_init=gate_bias_init,
         use_sdpa_standard=config_bool(
-            cfg.get("use_sdpa_standard", True), "use_sdpa_standard"),
+            cfg.get("use_sdpa_standard", True), "use_sdpa_standard"
+        ),
     )
     model = GPT(**model_cfg)
     init_fp = state_dict_fingerprint(model.state_dict())
@@ -1313,16 +1554,20 @@ def main():
     n_params = count_params(model)
     n_extra = gate_extra_params(model)
     n_per_head = gate_extra_params_per_head(model)
-    print(f"[train] variant={args.variant}({VARIANT_CN[args.variant]}) device={device} "
-          f"params={n_params:,} (门控额外 {n_extra:,}"
-          + (f"，逐头 {n_per_head:g}" if n_per_head is not None else "")
-          + ")")
-    print(f"[train] steps={steps} batch={batch_size} ctx={train_ctx} "
-          f"tokens/step={batch_size * train_ctx:,} seed={seed}")
+    print(
+        f"[train] variant={args.variant}({VARIANT_CN[args.variant]}) device={device} "
+        f"params={n_params:,} (门控额外 {n_extra:,}"
+        + (f"，逐头 {n_per_head:g}" if n_per_head is not None else "")
+        + ")"
+    )
+    print(
+        f"[train] steps={steps} batch={batch_size} ctx={train_ctx} "
+        f"tokens/step={batch_size * train_ctx:,} seed={seed}"
+    )
 
     opt = configure_optimizer(
-        model, lr=lr, weight_decay=weight_decay,
-        fused=(device.startswith("cuda")))
+        model, lr=lr, weight_decay=weight_decay, fused=(device.startswith("cuda"))
+    )
     base_lrs = [g["lr"] for g in opt.param_groups]
     # 梯度裁剪的参数列表与优化器同口径
     clip_params = [p for p in model.parameters() if p.requires_grad]
@@ -1344,11 +1589,15 @@ def main():
     if args.wandb:
         try:
             import wandb
+
             # 名字含 seed：多种子实验在 W&B 上不互相覆盖；config 同时带
             # 代码版本/数据指纹，远端记录也能回答“这条曲线对应哪份代码/数据”
-            wb = wandb.init(project="lega-attention",
-                            name=f"{tag}-{args.variant}-seed{seed}",
-                            config={**cfg_used, **provenance}, reinit=True)
+            wb = wandb.init(
+                project="lega-attention",
+                name=f"{tag}-{args.variant}-seed{seed}",
+                config={**cfg_used, **provenance},
+                reinit=True,
+            )
             print("[train] WandB 已启动")
         except Exception as e:
             print(f"[train] WandB 启动失败（忽略，继续本地训练）: {e}")
@@ -1364,9 +1613,12 @@ def main():
     # 实际采样顺序指纹：与 config/seed 审计互补，证明各变体消费了同一批
     # 训练窗口（同 seed 但采样代码路径/RNG 被提前消耗时 config 审计看不出）。
     data_order_hasher = hashlib.sha256()
-    batches = [get_train_batch(train, train_ctx, batch_size, device, rng,
-                               order_hasher=data_order_hasher)
-               for _ in range(grad_accum)]
+    batches = [
+        get_train_batch(
+            train, train_ctx, batch_size, device, rng, order_hasher=data_order_hasher
+        )
+        for _ in range(grad_accum)
+    ]
     tokens_seen = 0
     best_val = float("inf")
     last_eval_step = None
@@ -1397,7 +1649,7 @@ def main():
     # log 点清空）；interval_first_bad_dev 在设备端标记区间内首个非有限损失步
     # （0-based，-1=无；不每步同步），_nan_guard 触发时把整个区间的候选批次
     # （带步标签）交给排查，而不是用"最后一步批次"冒充失败步批。
-    interval_batches = []   # [(0-based step, [consumed micro-batch, ...])]
+    interval_batches = []  # [(0-based step, [consumed micro-batch, ...])]
     interval_first_bad_dev = torch.full((), -1.0, device=device)
     # 当前训练步的 0 维设备标量：预分配后每步 fill_。
     step_dev = torch.zeros((), device=device)
@@ -1417,8 +1669,14 @@ def main():
                 labels.append(s0 + 1)
         return consumed, labels
 
-    def _nan_guard(where: str, value, step: int, make_consumed=None,
-                   first_bad_step=None, interval=None):
+    def _nan_guard(
+        where: str,
+        value,
+        step: int,
+        make_consumed=None,
+        first_bad_step=None,
+        interval=None,
+    ):
         """log/eval 点检查损失与梯度范数的有限性，异常即触发系统排查。
 
         make_consumed：按需构造"失败输入批次"的函数（val_loss 时应给出真实
@@ -1433,52 +1691,90 @@ def main():
             else:
                 consumed, labels = _interval_candidates()
             report = run_nan_checklist(
-                model, batches, device, step, where, value,
+                model,
+                batches,
+                device,
+                step,
+                where,
+                value,
                 lr=base_lrs[0] * lr_factor(max(0, step - 1)),
-                grad_norm_history=gn_hist, amp_dtype=amp_dt,
+                grad_norm_history=gn_hist,
+                amp_dtype=amp_dt,
                 vocab_size=vocab_size,
-                consumed_batches=consumed, consumed_step_labels=labels,
-                peak_lr=base_lrs[0], first_bad_step=first_bad_step,
-                interval=interval, optimizer=opt)
+                consumed_batches=consumed,
+                consumed_step_labels=labels,
+                peak_lr=base_lrs[0],
+                first_bad_step=first_bad_step,
+                interval=interval,
+                optimizer=opt,
+            )
             _abort_on_nan(report, out_dir)
 
     def do_eval(step):
-        nonlocal best_val, last_eval_step, last_eval_metrics, pending_eval_s, \
-            evals_since_improve, stop_step
+        nonlocal \
+            best_val, \
+            last_eval_step, \
+            last_eval_metrics, \
+            pending_eval_s, \
+            evals_since_improve, \
+            stop_step
         t_eval = time.perf_counter()
-        metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=amp_dt is not None)
+        metrics = evaluate_val(
+            model, val, train_ctx, device, eval_iters, amp=amp_dt is not None
+        )
         pending_eval_s += time.perf_counter() - t_eval
         last_eval_step, last_eval_metrics = step, metrics
         vl = metrics["val_loss"]
         # val 损失非有限时用真实验证窗口做数据/激活排查（本区间训练批次只是回退）
-        _nan_guard("val_loss", vl, step,
-                   make_consumed=lambda: val_audit_batch(
-                       val, train_ctx, eval_iters, device,
-                       fallback=_interval_candidates()[0]))
+        _nan_guard(
+            "val_loss",
+            vl,
+            step,
+            make_consumed=lambda: val_audit_batch(
+                val, train_ctx, eval_iters, device, fallback=_interval_candidates()[0]
+            ),
+        )
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
         prev_best = best_val
         best_val, evals_since_improve, should_stop = early_stop_update(
-            vl, best_val, evals_since_improve, early_stop_min_delta,
-            early_stop_patience, val_ci95=metrics.get("val_loss_ci95"))
+            vl,
+            best_val,
+            evals_since_improve,
+            early_stop_min_delta,
+            early_stop_patience,
+            val_ci95=metrics.get("val_loss_ci95"),
+        )
         gap_s = None
         if math.isfinite(prev_best) and prev_best > 0:
             gap = (vl - prev_best) / prev_best
             if math.isfinite(gap):
                 gap_s = gap
-        rec = {"step": step, **metrics, "val_ppl": ppl,
-               "val_ppl_clamped": bool(vl > 20), "time": now_str(),
-               "evals_since_best": evals_since_improve,
-               # 当前 val 相对历史最优的差距：曲线诊断的原材料，训练中途
-               # 的预警也与它同口径（见 curves.live_overfit_hint）
-               "val_vs_best_rel": gap_s}
+        rec = {
+            "step": step,
+            **metrics,
+            "val_ppl": ppl,
+            "val_ppl_clamped": bool(vl > 20),
+            "time": now_str(),
+            "evals_since_best": evals_since_improve,
+            # 当前 val 相对历史最优的差距：曲线诊断的原材料，训练中途
+            # 的预警也与它同口径（见 curves.live_overfit_hint）
+            "val_vs_best_rel": gap_s,
+        }
         # 只在每个"未改善连击"的第 LIVE_WARN_EVALS 次提示一次（改善后计数
         # 归零，下轮连击会再次提示），避免逐评测刷屏
-        hint = (live_overfit_hint(evals_since_improve, prev_best, vl,
-                                  early_stop_patience,
-                                  train_recent=train_loss_hist[-5:],
-                                  val_ci95=metrics.get("val_loss_ci95"))
-                if evals_since_improve == LIVE_WARN_EVALS else None)
+        hint = (
+            live_overfit_hint(
+                evals_since_improve,
+                prev_best,
+                vl,
+                early_stop_patience,
+                train_recent=train_loss_hist[-5:],
+                val_ci95=metrics.get("val_loss_ci95"),
+            )
+            if evals_since_improve == LIVE_WARN_EVALS
+            else None
+        )
         if hint:
             rec["overfit_hint"] = hint
         if should_stop:
@@ -1489,25 +1785,42 @@ def main():
         if vl < prev_best:
             mark = " (best)"
             # 同步保存最优 checkpoint，避免下游评测只能用到最终步模型
-            save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
-                            extra={"variant": args.variant, "step": step,
-                                   "steps_planned": steps,
-                                   "seed": seed, "val_loss": vl,
-                                   "val_ppl": math.exp(min(20, vl)),
-                                   "val_ppl_clamped": bool(vl > 20),
-                                   **provenance})
+            save_checkpoint(
+                os.path.join(out_dir, "model_best.pt"),
+                model,
+                extra={
+                    "variant": args.variant,
+                    "step": step,
+                    "steps_planned": steps,
+                    "seed": seed,
+                    "val_loss": vl,
+                    "val_ppl": math.exp(min(20, vl)),
+                    "val_ppl_clamped": bool(vl > 20),
+                    **provenance,
+                },
+            )
         if should_stop:
             stop_step = step
-            mark += (f" [early-stop: {evals_since_improve} 次评测无实质改善；"
-                     f"best 在更早的 eval，checkpoint 用 model_best.pt]")
-        print(f"[train] step {step}: val_ppl={ppl:.3f}"
-              + (f" gate_mean={gmean:.3f}" if gmean is not None else "") + mark)
+            mark += (
+                f" [early-stop: {evals_since_improve} 次评测无实质改善；"
+                f"best 在更早的 eval，checkpoint 用 model_best.pt]"
+            )
+        print(
+            f"[train] step {step}: val_ppl={ppl:.3f}"
+            + (f" gate_mean={gmean:.3f}" if gmean is not None else "")
+            + mark
+        )
         if hint:
             print(f"[train] ⚠ {hint}")
         if wb:
-            wb.log({"val_ppl": ppl, "val_loss": vl,
-                    **({"gate_mean": gmean} if gmean is not None else {})},
-                   step=step)
+            wb.log(
+                {
+                    "val_ppl": ppl,
+                    "val_loss": vl,
+                    **({"gate_mean": gmean} if gmean is not None else {}),
+                },
+                step=step,
+            )
         return vl
 
     for step in range(steps):
@@ -1533,8 +1846,13 @@ def main():
             # 指纹包含从未消费的窗口，也会污染 NaN 排查的候选批次列表。
             if step + 1 < steps:
                 batches[mi] = get_train_batch(
-                    train, train_ctx, batch_size, device, rng,
-                    order_hasher=data_order_hasher)
+                    train,
+                    train_ctx,
+                    batch_size,
+                    device,
+                    rng,
+                    order_hasher=data_order_hasher,
+                )
             else:
                 batches[mi] = None
             with amp_ctx:
@@ -1545,16 +1863,16 @@ def main():
             # 设备端标记区间内首个非有限损失步（0-based），log 点统一读取。
             bad_now = ~torch.isfinite(step_loss)
             interval_first_bad_dev = torch.where(
-                (interval_first_bad_dev < 0) & bad_now,
-                step_dev, interval_first_bad_dev)
+                (interval_first_bad_dev < 0) & bad_now, step_dev, interval_first_bad_dev
+            )
             # 区间内单步损失峰值：区间均值会把“一步异常”稀释到阈值以下，
             # 峰值序列供 curves 的瞬态尖峰诊断单独检查。
             finite_step_loss = torch.isfinite(step_loss)
             new_loss_max = finite_step_loss & (
-                (loss_max_dev < 0) | (step_loss > loss_max_dev))
+                (loss_max_dev < 0) | (step_loss > loss_max_dev)
+            )
             loss_max_dev = torch.where(new_loss_max, step_loss, loss_max_dev)
-            loss_max_step_dev = torch.where(new_loss_max, step_dev,
-                                            loss_max_step_dev)
+            loss_max_step_dev = torch.where(new_loss_max, step_dev, loss_max_step_dev)
             loss.backward()
             loss_acc_dev.add_(step_loss, alpha=1.0 / grad_accum)
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
@@ -1578,26 +1896,31 @@ def main():
             loss_acc = float(loss_acc_dev.item())
             # 设备端标记的区间内首个非有限损失步（0-based）→ 1-based 日志步
             first_bad_local = int(interval_first_bad_dev.item())
-            first_bad_step = (first_bad_local + 1 if first_bad_local >= 0
-                              else None)
-            interval = ((interval_batches[0][0] + 1, step + 1)
-                        if interval_batches else None)
+            first_bad_step = first_bad_local + 1 if first_bad_local >= 0 else None
+            interval = (
+                (interval_batches[0][0] + 1, step + 1) if interval_batches else None
+            )
             gn_last = float(gn_dev_recent[-1].item()) if gn_dev_recent else None
-            gn_max = (float(gn_max_dev.item())
-                      if bool((gn_max_dev >= 0).item()) else None)
+            gn_max = (
+                float(gn_max_dev.item()) if bool((gn_max_dev >= 0).item()) else None
+            )
             gn_nonfinite = bool(gn_nonfinite_dev.item())
-            gn_max_step = (int(gn_max_step_dev.item()) + 1
-                           if gn_max_step_dev >= 0 else None)
-            loss_max = (float(loss_max_dev.item())
-                        if bool((loss_max_dev >= 0).item()) else None)
-            loss_max_step = (int(loss_max_step_dev.item()) + 1
-                             if loss_max_step_dev >= 0 else None)
+            gn_max_step = (
+                int(gn_max_step_dev.item()) + 1 if gn_max_step_dev >= 0 else None
+            )
+            loss_max = (
+                float(loss_max_dev.item()) if bool((loss_max_dev >= 0).item()) else None
+            )
+            loss_max_step = (
+                int(loss_max_step_dev.item()) + 1 if loss_max_step_dev >= 0 else None
+            )
             # .item() 已同步本区间全部前向/反向/优化器内核，
             # 此处墙钟差为区间步时（扣除评测）
             t_now = time.perf_counter()
             dt = t_now - interval_t0 - pending_eval_s
-            step_ms = (dt / interval_steps * 1000.0
-                       if interval_steps > 0 and dt > 0 else None)
+            step_ms = (
+                dt / interval_steps * 1000.0 if interval_steps > 0 and dt > 0 else None
+            )
             if step_ms is not None:
                 step_times_ms.append(step_ms)
             interval_t0 = t_now
@@ -1605,24 +1928,36 @@ def main():
             pending_eval_s = 0.0
             # 历史保留区间峰值（有限时）：NaN 排查看“区间内最坏梯度”而不是
             # 恰好落在 log 边界的最后一步。
-            gn_hist_val = (gn_max if (gn_max is not None
-                                      and math.isfinite(gn_max)) else gn_last)
+            gn_hist_val = (
+                gn_max if (gn_max is not None and math.isfinite(gn_max)) else gn_last
+            )
             if gn_hist_val is not None and math.isfinite(gn_hist_val):
                 gn_hist.append(gn_hist_val)
                 if len(gn_hist) > 200:
                     gn_hist.pop(0)
-            _nan_guard("train_loss", loss_acc, step + 1,
-                       first_bad_step=first_bad_step, interval=interval)
+            _nan_guard(
+                "train_loss",
+                loss_acc,
+                step + 1,
+                first_bad_step=first_bad_step,
+                interval=interval,
+            )
             # 区间内任一步非有限时即使最后一步已恢复也要中止（梯度已爆炸）。
-            if gn_nonfinite or (gn_last is not None
-                                and not math.isfinite(gn_last)):
-                gn_guard = (gn_max if (gn_max is not None
-                                       and not math.isfinite(gn_max))
-                            else float("inf"))
+            if gn_nonfinite or (gn_last is not None and not math.isfinite(gn_last)):
+                gn_guard = (
+                    gn_max
+                    if (gn_max is not None and not math.isfinite(gn_max))
+                    else float("inf")
+                )
             else:
                 gn_guard = gn_max if gn_max is not None else gn_last
-            _nan_guard("grad_norm", gn_guard, step + 1,
-                       first_bad_step=first_bad_step, interval=interval)
+            _nan_guard(
+                "grad_norm",
+                gn_guard,
+                step + 1,
+                first_bad_step=first_bad_step,
+                interval=interval,
+            )
             # 本区间现场已检查完毕（异常路径已在中止前写出报告）：清空，
             # 避免跨区间串批、控制引用数量 ≤ log_every 步
             interval_batches.clear()
@@ -1630,8 +1965,13 @@ def main():
             train_loss_hist.append(loss_acc)
             if len(train_loss_hist) > 20:
                 train_loss_hist.pop(0)
-            rec = {"step": step + 1, "loss": loss_acc, "ppl": math.exp(min(20, loss_acc)),
-                   "lr": base_lrs[0] * lr_f, "time": now_str()}
+            rec = {
+                "step": step + 1,
+                "loss": loss_acc,
+                "ppl": math.exp(min(20, loss_acc)),
+                "lr": base_lrs[0] * lr_f,
+                "time": now_str(),
+            }
             if gn_last is not None:
                 rec["grad_norm"] = gn_last
             if gn_max is not None:
@@ -1644,17 +1984,22 @@ def main():
                 rec["step_time_ms"] = round(step_ms, 3)
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             log_f.flush()
-            print(f"[train] step {step+1}/{steps} loss={loss_acc:.4f} "
-                  f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e}"
-                  + (f" gnorm={gn_last:.2f}" if gn_last is not None else ""))
+            print(
+                f"[train] step {step+1}/{steps} loss={loss_acc:.4f} "
+                f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e}"
+                + (f" gnorm={gn_last:.2f}" if gn_last is not None else "")
+            )
             if wb:
-                wb.log({"loss": loss_acc, "lr": base_lrs[0] * lr_f,
+                wb.log(
+                    {
+                        "loss": loss_acc,
+                        "lr": base_lrs[0] * lr_f,
                         **({"grad_norm": gn_last} if gn_last is not None else {}),
-                        **({"grad_norm_max": gn_max}
-                           if gn_max is not None else {}),
-                        **({"loss_max": loss_max}
-                           if loss_max is not None else {})},
-                       step=step + 1)
+                        **({"grad_norm_max": gn_max} if gn_max is not None else {}),
+                        **({"loss_max": loss_max} if loss_max is not None else {}),
+                    },
+                    step=step + 1,
+                )
             # 区间统计已落盘，清空峰值以统计下一个 log 区间。
             gn_max_dev.fill_(-1.0)
             gn_max_step_dev.fill_(-1.0)
@@ -1675,11 +2020,17 @@ def main():
     if last_eval_step == final_step:
         final_metrics = last_eval_metrics
     else:
-        final_metrics = evaluate_val(model, val, train_ctx, device, eval_iters, amp=amp_dt is not None)
-        _nan_guard("val_loss(final)", final_metrics["val_loss"], steps,
-                   make_consumed=lambda: val_audit_batch(
-                       val, train_ctx, eval_iters, device,
-                       fallback=_interval_candidates()[0]))
+        final_metrics = evaluate_val(
+            model, val, train_ctx, device, eval_iters, amp=amp_dt is not None
+        )
+        _nan_guard(
+            "val_loss(final)",
+            final_metrics["val_loss"],
+            steps,
+            make_consumed=lambda: val_audit_batch(
+                val, train_ctx, eval_iters, device, fallback=_interval_candidates()[0]
+            ),
+        )
         # 最终步评测必须同样参与 best-checkpoint 选择，与训练循环内口径一致：
         # 否则 steps 非 eval_every 整数倍（或 steps < eval_every）时，更优的最终
         # 状态不会进 model_best.pt，下游 run_all 会静默回退到最终步模型，却仍按
@@ -1691,20 +2042,28 @@ def main():
         # 的最终评测会被误判为“未改善”而把计数加一。patience 传 0：训练
         # 此刻已结束，早停状态只用于如实记录。
         best_val, evals_since_improve, _ = early_stop_update(
-            final_metrics["val_loss"], best_val, evals_since_improve,
-            early_stop_min_delta, 0,
-            val_ci95=final_metrics.get("val_loss_ci95"))
+            final_metrics["val_loss"],
+            best_val,
+            evals_since_improve,
+            early_stop_min_delta,
+            0,
+            val_ci95=final_metrics.get("val_loss_ci95"),
+        )
         if improved_for_ckpt:
-            save_checkpoint(os.path.join(out_dir, "model_best.pt"), model,
-                            extra={"variant": args.variant, "step": steps,
-                                   "steps_planned": steps,
-                                   "seed": seed,
-                                   "val_loss": final_metrics["val_loss"],
-                                   "val_ppl": math.exp(
-                                       min(20, final_metrics["val_loss"])),
-                                   "val_ppl_clamped": bool(
-                                       final_metrics["val_loss"] > 20),
-                                   **provenance})
+            save_checkpoint(
+                os.path.join(out_dir, "model_best.pt"),
+                model,
+                extra={
+                    "variant": args.variant,
+                    "step": steps,
+                    "steps_planned": steps,
+                    "seed": seed,
+                    "val_loss": final_metrics["val_loss"],
+                    "val_ppl": math.exp(min(20, final_metrics["val_loss"])),
+                    "val_ppl_clamped": bool(final_metrics["val_loss"] > 20),
+                    **provenance,
+                },
+            )
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
     gmean = final_metrics["gate_mean"]
@@ -1716,77 +2075,108 @@ def main():
     data_order_sha256 = data_order_hasher.hexdigest()
     # 步时汇总：区间步时的中位数，抗首区间冷启动与偶发卡顿。
     tokens_per_step = batch_size * train_ctx * grad_accum
-    train_step_ms = (statistics.median(step_times_ms)
-                     if step_times_ms else None)
-    train_tokens_per_sec = (tokens_per_step * 1000.0 / train_step_ms
-                            if train_step_ms else None)
+    train_step_ms = statistics.median(step_times_ms) if step_times_ms else None
+    train_tokens_per_sec = (
+        tokens_per_step * 1000.0 / train_step_ms if train_step_ms else None
+    )
     # 训练进程级高水位统计（CUDA 设备；其他设备为 None）。
     train_peak_mem_mb = None
     if device.startswith("cuda") and torch.cuda.is_available():
         try:
             train_peak_mem_mb = round(
-                torch.cuda.max_memory_allocated() / (1024.0 ** 2), 1)
+                torch.cuda.max_memory_allocated() / (1024.0**2), 1
+            )
         except (RuntimeError, ValueError):
             train_peak_mem_mb = None
-    save_checkpoint(os.path.join(out_dir, "model.pt"), model,
-                    extra={"variant": args.variant, "step": final_step,
-                           "steps_planned": steps,
-                           "early_stopped": stopped_early,
-                           "seed": seed,
-                           "val_ppl": final_ppl, "val_loss": final_val_loss,
-                           "val_ppl_clamped": bool(final_val_loss > 20),
-                           "tokens_seen": tokens_seen,
-                           "train_tokens": train_tokens,
-                           "epochs_seen": (round(epochs_seen, 4)
-                                           if epochs_seen is not None else None),
-                           "data_order_sha256": data_order_sha256,
-                           "n_params": n_params, "n_gate_extra": n_extra,
-                           **provenance})
-    save_json({"variant": args.variant, "val_ppl": final_ppl, "val_loss": final_val_loss,
-               "val_ppl_clamped": bool(final_val_loss > 20),
-               "gate_mean": gmean,
-               "gate_std": final_metrics.get("gate_std"),
-               "gate_frac_low": final_metrics.get("gate_frac_low"),
-               "gate_frac_high": final_metrics.get("gate_frac_high"),
-               "gate_layer_mean": final_metrics.get("gate_layer_mean"),
-               **{k: final_metrics[k] for k in
-                                      ("eval_iters_requested", "eval_iters",
-                                       "val_windows", "val_tokens_evaluated",
-                                       "val_loss_se", "val_loss_ci95",
-                                       "val_ppl_ci95", "val_loss_min",
-                                       "val_loss_max")},
-               "n_params": n_params, "n_gate_extra": n_extra,
-               "train_step_time_ms": (round(train_step_ms, 3)
-                                      if train_step_ms else None),
-               "train_tokens_per_sec": (round(train_tokens_per_sec, 1)
-                                        if train_tokens_per_sec else None),
-               "train_peak_mem_mb": train_peak_mem_mb,
-               "tokens_seen": tokens_seen,
-               "train_tokens": train_tokens,
-               "epochs_seen": (round(epochs_seen, 4)
-                               if epochs_seen is not None else None),
-               "data_order_sha256": data_order_sha256,
-               # steps=实际运行步数（早停时小于计划）；steps_planned=计划步数。
-               # 受控变量审计按 steps_planned 核对，实际步数差异由 early_stopped
-               # 如实暴露，而不是静默伪装成跑满了计划步数。
-               "steps": final_step, "steps_planned": steps,
-               "early_stopped": stopped_early,
-               "early_stop_patience": early_stop_patience,
-               "early_stop_min_delta": early_stop_min_delta,
-               "curve_observability_warnings": curve_warnings,
-               "seed": seed,
-               **provenance},
-              os.path.join(out_dir, "eval.json"))
+    save_checkpoint(
+        os.path.join(out_dir, "model.pt"),
+        model,
+        extra={
+            "variant": args.variant,
+            "step": final_step,
+            "steps_planned": steps,
+            "early_stopped": stopped_early,
+            "seed": seed,
+            "val_ppl": final_ppl,
+            "val_loss": final_val_loss,
+            "val_ppl_clamped": bool(final_val_loss > 20),
+            "tokens_seen": tokens_seen,
+            "train_tokens": train_tokens,
+            "epochs_seen": (round(epochs_seen, 4) if epochs_seen is not None else None),
+            "data_order_sha256": data_order_sha256,
+            "n_params": n_params,
+            "n_gate_extra": n_extra,
+            **provenance,
+        },
+    )
+    save_json(
+        {
+            "variant": args.variant,
+            "val_ppl": final_ppl,
+            "val_loss": final_val_loss,
+            "val_ppl_clamped": bool(final_val_loss > 20),
+            "gate_mean": gmean,
+            "gate_std": final_metrics.get("gate_std"),
+            "gate_frac_low": final_metrics.get("gate_frac_low"),
+            "gate_frac_high": final_metrics.get("gate_frac_high"),
+            "gate_layer_mean": final_metrics.get("gate_layer_mean"),
+            **{
+                k: final_metrics[k]
+                for k in (
+                    "eval_iters_requested",
+                    "eval_iters",
+                    "val_windows",
+                    "val_tokens_evaluated",
+                    "val_loss_se",
+                    "val_loss_ci95",
+                    "val_ppl_ci95",
+                    "val_loss_min",
+                    "val_loss_max",
+                )
+            },
+            "n_params": n_params,
+            "n_gate_extra": n_extra,
+            "train_step_time_ms": (round(train_step_ms, 3) if train_step_ms else None),
+            "train_tokens_per_sec": (
+                round(train_tokens_per_sec, 1) if train_tokens_per_sec else None
+            ),
+            "train_peak_mem_mb": train_peak_mem_mb,
+            "tokens_seen": tokens_seen,
+            "train_tokens": train_tokens,
+            "epochs_seen": (round(epochs_seen, 4) if epochs_seen is not None else None),
+            "data_order_sha256": data_order_sha256,
+            # steps=实际运行步数（早停时小于计划）；steps_planned=计划步数。
+            # 受控变量审计按 steps_planned 核对，实际步数差异由 early_stopped
+            # 如实暴露，而不是静默伪装成跑满了计划步数。
+            "steps": final_step,
+            "steps_planned": steps,
+            "early_stopped": stopped_early,
+            "early_stop_patience": early_stop_patience,
+            "early_stop_min_delta": early_stop_min_delta,
+            "curve_observability_warnings": curve_warnings,
+            "seed": seed,
+            **provenance,
+        },
+        os.path.join(out_dir, "eval.json"),
+    )
     final_gap = None
-    if (final_val_loss is not None and math.isfinite(float(final_val_loss))
-            and math.isfinite(best_val) and best_val > 0):
+    if (
+        final_val_loss is not None
+        and math.isfinite(float(final_val_loss))
+        and math.isfinite(best_val)
+        and best_val > 0
+    ):
         g = (float(final_val_loss) - best_val) / best_val
         final_gap = g if math.isfinite(g) else None
-    final_rec = {"step": final_step, **final_metrics,
-                 "val_ppl": final_ppl,
-                 "val_ppl_clamped": bool(final_val_loss > 20),
-                 "final": True, "evals_since_best": evals_since_improve,
-                 "val_vs_best_rel": final_gap}
+    final_rec = {
+        "step": final_step,
+        **final_metrics,
+        "val_ppl": final_ppl,
+        "val_ppl_clamped": bool(final_val_loss > 20),
+        "final": True,
+        "evals_since_best": evals_since_improve,
+        "val_vs_best_rel": final_gap,
+    }
     if stopped_early:
         final_rec["early_stop"] = True
     log_f.write(json.dumps(final_rec, ensure_ascii=False) + "\n")
@@ -1799,16 +2189,22 @@ def main():
     # 与缺少该字段的 manifest 互相印证，而不是把半成品伪装成完整 run。
     def _artifact_entry(path: str):
         try:
-            return {"sha256": sha256_file(path),
-                    "bytes": int(os.path.getsize(path))}
+            return {"sha256": sha256_file(path), "bytes": int(os.path.getsize(path))}
         except OSError:
             return None
 
-    artifact_names = ("config_used.json", "train_log.jsonl", "eval.json",
-                      "model.pt", "model_best.pt")
+    artifact_names = (
+        "config_used.json",
+        "train_log.jsonl",
+        "eval.json",
+        "model.pt",
+        "model_best.pt",
+    )
     manifest["artifacts"] = {
-        name: entry for name in artifact_names
-        if (entry := _artifact_entry(os.path.join(out_dir, name))) is not None}
+        name: entry
+        for name in artifact_names
+        if (entry := _artifact_entry(os.path.join(out_dir, name))) is not None
+    }
     manifest["data_order_sha256"] = data_order_sha256
     manifest["completion"] = {
         "status": "completed",
@@ -1826,9 +2222,11 @@ def main():
     save_json(manifest, os.path.join(out_dir, "run_manifest.json"))
 
     if stopped_early:
-        print(f"[train] 早停于 step {final_step}/{steps}（连续 "
-              f"{evals_since_improve} 次评测无实质改善）；"
-              f"下游使用 model_best.pt")
+        print(
+            f"[train] 早停于 step {final_step}/{steps}（连续 "
+            f"{evals_since_improve} 次评测无实质改善）；"
+            f"下游使用 model_best.pt"
+        )
     print(f"[train] 完成: val_ppl={final_ppl:.3f} -> {out_dir}")
     if wb:
         wb.finish()

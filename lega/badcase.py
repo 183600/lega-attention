@@ -30,21 +30,20 @@
   python -m lega.badcase --results_dir results/tiny_smoke      # 处理全部 ruler_*.json
   python -m lega.badcase --results_dir results/small --ruler ruler_lega_seed1337.json
 """
+
 import argparse
 import glob
 import json
 import math
 import os
 import re
-import statistics
 from collections import Counter
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from .ruler import standalone_numeric_tokens
-from .utils import (holm_bonferroni, mcnemar_exact_p, mean_std,
-                    wilson_score_ci)
+from .utils import holm_bonferroni, mcnemar_exact_p, mean_std, wilson_score_ci
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
 # \d{4,}，带符号/小数/科学计数法或短数字会被截成不同字符串，误抄会被
@@ -65,14 +64,19 @@ CATEGORY_CN = {
 
 # 错误归属轴：直接回答"标注有错？样本极难？模型盲区？"三问。难度边界不覆盖
 # 具体机制（copy/hallucination 等仍保留在 category 里），只是给出统一的归因轴。
-AXIS_CN = {"数据/构造": "数据/构造", "难度边界": "难度边界（深位）",
-           "模型/方法": "模型/方法", "校准": "校准", "评测/导出": "评测/导出"}
+AXIS_CN = {
+    "数据/构造": "数据/构造",
+    "难度边界": "难度边界（深位）",
+    "模型/方法": "模型/方法",
+    "校准": "校准",
+    "评测/导出": "评测/导出",
+}
 
 # 改进方向合成的显式阈值（可审计，不靠主观读报告）。
-DOMINANT_SHARE = 1.0 / 3.0     # 单一类别占错误总数该份额以上视为主导模式
-DEEP_FAIL_TOL = 0.5            # 深位(>0.75)失败占 niah 错误该比例以上视为难度边界主导
-MIN_PATTERN_CASES = 3          # 少于该样本数时模式不可信，只提示扩大评测
-MAX_ADVICE = 8                 # 单份报告最多输出的改进方向条数
+DOMINANT_SHARE = 1.0 / 3.0  # 单一类别占错误总数该份额以上视为主导模式
+DEEP_FAIL_TOL = 0.5  # 深位(>0.75)失败占 niah 错误该比例以上视为难度边界主导
+MIN_PATTERN_CASES = 3  # 少于该样本数时模式不可信，只提示扩大评测
+MAX_ADVICE = 8  # 单份报告最多输出的改进方向条数
 
 
 def categorize_case(rec: Dict) -> Dict:
@@ -106,14 +110,18 @@ def categorize_case(rec: Dict) -> Dict:
         # 既不能当成 True，也不能当成 False（bool 是 int 子类）。
         if not isinstance(aip, bool):
             r["category"] = "label_unknown"
-            r["explanation"] = ("样例缺少 answer_in_prompt 标注自检字段，"
-                                "或该字段不是布尔值；无法确认 gold 是否在 "
-                                "prompt 中，不计入模型失败")
+            r["explanation"] = (
+                "样例缺少 answer_in_prompt 标注自检字段，"
+                "或该字段不是布尔值；无法确认 gold 是否在 "
+                "prompt 中，不计入模型失败"
+            )
             return r
         if aip is False:
             r["category"] = "label_error"
-            r["explanation"] = "gold 答案未出现在 prompt 中：样例构造或标注有错，" \
-                               "该错误样本不应计入模型失败"
+            r["explanation"] = (
+                "gold 答案未出现在 prompt 中：样例构造或标注有错，"
+                "该错误样本不应计入模型失败"
+            )
             return r
     # 2) fwe：按词表覆盖情况归因
     if task == "fwe":
@@ -128,22 +136,27 @@ def categorize_case(rec: Dict) -> Dict:
             # 外部/旧格式 JSON 缺少 answer_words：没有词表就无法判断漏答/多答，
             # 不能默认“全中”并把所有输出词记成无关词（归因到数据/导出侧）。
             r["category"] = "fwe_no_ref"
-            r["explanation"] = ("样例缺少 answer_words 词表基线（外部/旧格式），"
-                                "无法归因漏答/多答")
+            r["explanation"] = (
+                "样例缺少 answer_words 词表基线（外部/旧格式），" "无法归因漏答/多答"
+            )
         else:
             missing = sorted(top - pred_words)
             spurious = sorted(pred_words - top)
             if missing:
                 r["category"] = "fwe_missing"
                 r["missing_words"] = missing
-                r["explanation"] = f"漏答 {len(missing)} 个高频词: {' '.join(missing[:8])}"
+                r["explanation"] = (
+                    f"漏答 {len(missing)} 个高频词: {' '.join(missing[:8])}"
+                )
                 if spurious:
                     r["spurious_words"] = spurious
                     r["explanation"] += f"；同时多答无关词: {' '.join(spurious[:8])}"
             else:
                 r["category"] = "fwe_spurious"
                 r["spurious_words"] = spurious
-                r["explanation"] = f"高频词全中但多答 {len(spurious)} 个无关词（严格 EM 记错）"
+                r["explanation"] = (
+                    f"高频词全中但多答 {len(spurious)} 个无关词（严格 EM 记错）"
+                )
         return r
     # 3) 数值任务：按输出的第一个数字归因（与 EM 计分口径一致）；
     # pred 可能是数字等非字符串类型，显式 str() 后再解析
@@ -156,12 +169,16 @@ def categorize_case(rec: Dict) -> Dict:
     ctx_nums = _num_set(r.get("context_numbers"))
     if first in ctx_nums:
         r["category"] = "copy_distractor"
-        r["explanation"] = (f"输出了 {first}——这是上下文中的干扰值（gold={r.get('answer')}），"
-                            "注意力检索到了错误位置（同类干扰行/错误链）")
+        r["explanation"] = (
+            f"输出了 {first}——这是上下文中的干扰值（gold={r.get('answer')}），"
+            "注意力检索到了错误位置（同类干扰行/错误链）"
+        )
     else:
         r["category"] = "hallucinated"
-        r["explanation"] = (f"输出了 {first}——上下文中并不存在该数字"
-                            f"（gold={r.get('answer')}），属于幻觉")
+        r["explanation"] = (
+            f"输出了 {first}——上下文中并不存在该数字"
+            f"（gold={r.get('answer')}），属于幻觉"
+        )
     return r
 
 
@@ -210,11 +227,17 @@ def _report_total(reported: int, counts: List[tuple]) -> int:
     return max(total, category_total)
 
 
-def _advice(axis: str, priority: str, trigger: str, suggestion: str,
-            next_experiment: str) -> Dict:
+def _advice(
+    axis: str, priority: str, trigger: str, suggestion: str, next_experiment: str
+) -> Dict:
     """一条可执行的改进方向（字段固定，便于汇总去重与结构化消费）。"""
-    return {"axis": axis, "priority": priority, "trigger": trigger,
-            "suggestion": suggestion, "next_experiment": next_experiment}
+    return {
+        "axis": axis,
+        "priority": priority,
+        "trigger": trigger,
+        "suggestion": suggestion,
+        "next_experiment": next_experiment,
+    }
 
 
 def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
@@ -230,11 +253,16 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     counts = ana.get("category_counts")
     counts = counts if isinstance(counts, dict) else {}
     if n == 0:
-        return [_advice(
-            "评测", "低", "当前评测没有错误样本",
-            "零错误不等于无盲区（样本太少或难度不足都会得到满分），"
-            "不能据此宣称方法更强",
-            "扩大 RULER 的 n_samples 与 ctx 档位、加深 needle 深度后再比较")]
+        return [
+            _advice(
+                "评测",
+                "低",
+                "当前评测没有错误样本",
+                "零错误不等于无盲区（样本太少或难度不足都会得到满分），"
+                "不能据此宣称方法更强",
+                "扩大 RULER 的 n_samples 与 ctx 档位、加深 needle 深度后再比较",
+            )
+        ]
     recs = []
     le = _count_int(ana.get("label_errors")) or 0
     lu = _count_int(counts.get("label_unknown")) or 0
@@ -243,25 +271,38 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
     # 稀释真实模型盲区，甚至把“无法核对”包装成模型方向。
     model_n = max(0, n - le - lu)
     if le:
-        recs.append(_advice(
-            "数据/构造", "高", f"{le}/{n} 条错误的 gold 不在 prompt 中",
-            "先修评测构造/标注再谈模型：构造错误会同时污染 EM、机制分析与"
-            "跨变体对照",
-            "核查 RULER needle 插入与答案抽取逻辑，补 answer_in_prompt 断言后重跑"))
+        recs.append(
+            _advice(
+                "数据/构造",
+                "高",
+                f"{le}/{n} 条错误的 gold 不在 prompt 中",
+                "先修评测构造/标注再谈模型：构造错误会同时污染 EM、机制分析与"
+                "跨变体对照",
+                "核查 RULER needle 插入与答案抽取逻辑，补 answer_in_prompt 断言后重跑",
+            )
+        )
     if lu:
-        recs.append(_advice(
-            "评测/导出", "中",
-            f"{lu}/{n} 条错误缺少可核对的 answer_in_prompt 自检证据",
-            "先补齐/修复导出再归因：无法确认 gold 是否在 prompt 中时，"
-            "这些样本不能计入模型失败",
-            "在 RULER 结果中写入布尔 answer_in_prompt 并重跑归因"))
+        recs.append(
+            _advice(
+                "评测/导出",
+                "中",
+                f"{lu}/{n} 条错误缺少可核对的 answer_in_prompt 自检证据",
+                "先补齐/修复导出再归因：无法确认 gold 是否在 prompt 中时，"
+                "这些样本不能计入模型失败",
+                "在 RULER 结果中写入布尔 answer_in_prompt 并重跑归因",
+            )
+        )
     if model_n < MIN_PATTERN_CASES:
         if model_n > 0:
-            recs.append(_advice(
-                "评测", "低",
-                f"仅 {model_n} 条可归因于模型的错误样本，模式不具统计意义",
-                "先扩大评测规模再按归因下结论（单条错误可能是偶然）",
-                "把 RULER n_samples/ctx_lens 提高到每格 ≥20 个样本"))
+            recs.append(
+                _advice(
+                    "评测",
+                    "低",
+                    f"仅 {model_n} 条可归因于模型的错误样本，模式不具统计意义",
+                    "先扩大评测规模再按归因下结论（单条错误可能是偶然）",
+                    "把 RULER n_samples/ctx_lens 提高到每格 ≥20 个样本",
+                )
+            )
         # 样本不足时任何类别占比/深位比例都只是 1~2 条的偶然结果；继续
         # 输出“高优先级模型改进方向”会把噪声包装成证据。
         return recs[:MAX_ADVICE]
@@ -279,72 +320,114 @@ def synthesize_ruler_improvements(ana: Dict) -> List[Dict]:
         return base if (ci is not None and ci[0] >= DOMINANT_SHARE) else "中"
 
     deep = _finite_float(ana.get("deep_position_fail_ratio"))
-    if (deep is not None and 0.0 <= deep <= 1.0 and deep >= DEEP_FAIL_TOL
-            and model_n >= MIN_PATTERN_CASES):
+    if (
+        deep is not None
+        and 0.0 <= deep <= 1.0
+        and deep >= DEEP_FAIL_TOL
+        and model_n >= MIN_PATTERN_CASES
+    ):
         deep_ci = ana.get("deep_position_fail_ci95")
         deep_note = ""
         if isinstance(deep_ci, (list, tuple)) and len(deep_ci) == 2:
             lo, hi = _finite_float(deep_ci[0]), _finite_float(deep_ci[1])
             if lo is not None and hi is not None and 0.0 <= lo <= hi <= 1.0:
-                deep_note = (f"；Wilson 95% CI {lo:.0%}–{hi:.0%}"
-                             + ("（下界未过 1/2，仅作方向性线索）"
-                                if lo < DEEP_FAIL_TOL else ""))
-        recs.append(_advice(
-            "难度边界", "中",
-            f"niah 失败中 {deep:.0%} 位于 needle 深位 (>0.75){deep_note}",
-            "失败由长程检索边界主导：平均 EM 会掩盖深位退化，应按 depth 分层报告",
-            "增加深位训练样本/更长训练上下文；对门控变体检查深位处门控分布，"
-            "确认长度项 b·log n 校准是否正确"))
+                deep_note = f"；Wilson 95% CI {lo:.0%}–{hi:.0%}" + (
+                    "（下界未过 1/2，仅作方向性线索）" if lo < DEEP_FAIL_TOL else ""
+                )
+        recs.append(
+            _advice(
+                "难度边界",
+                "中",
+                f"niah 失败中 {deep:.0%} 位于 needle 深位 (>0.75){deep_note}",
+                "失败由长程检索边界主导：平均 EM 会掩盖深位退化，应按 depth 分层报告",
+                "增加深位训练样本/更长训练上下文；对门控变体检查深位处门控分布，"
+                "确认长度项 b·log n 校准是否正确",
+            )
+        )
     cd = _count_int(counts.get("copy_distractor")) or 0
     if _share(cd, model_n) >= DOMINANT_SHARE:
-        recs.append(_advice(
-            "模型/方法", _cat_priority(cd),
-            f"误抄干扰值占模型错误 {cd}/{model_n}（检索到错误位置，不是没读到）"
-            f"{_share_ci_text(cd)}",
-            "定位失败：注意力落在同类干扰行/错误链上；先用机制分析确认"
-            "（misleading_rate、P(hit|集中)）再改结构",
-            "在失败样例上对比注意力落点；若属位置混淆，优先改位置编码或"
-            "干扰项抑制，再考虑门控"))
+        recs.append(
+            _advice(
+                "模型/方法",
+                _cat_priority(cd),
+                f"误抄干扰值占模型错误 {cd}/{model_n}（检索到错误位置，不是没读到）"
+                f"{_share_ci_text(cd)}",
+                "定位失败：注意力落在同类干扰行/错误链上；先用机制分析确认"
+                "（misleading_rate、P(hit|集中)）再改结构",
+                "在失败样例上对比注意力落点；若属位置混淆，优先改位置编码或"
+                "干扰项抑制，再考虑门控",
+            )
+        )
     ha = _count_int(counts.get("hallucinated")) or 0
     if _share(ha, model_n) >= DOMINANT_SHARE:
-        recs.append(_advice(
-            "模型/方法", _cat_priority(ha),
-            f"幻觉数字占模型错误 {ha}/{model_n}（输出上下文中不存在的值）"
-            f"{_share_ci_text(ha)}",
-            "模型未 grounding 到上下文：检查训练/评测长度分布是否错配、"
-            "是否存在长程复制的系统性衰减",
-            "统计训练样本中长上下文与复制型任务占比；对门控变体比较 "
-            "gate_mean 是否过低（该写入的信息被压制）"))
+        recs.append(
+            _advice(
+                "模型/方法",
+                _cat_priority(ha),
+                f"幻觉数字占模型错误 {ha}/{model_n}（输出上下文中不存在的值）"
+                f"{_share_ci_text(ha)}",
+                "模型未 grounding 到上下文：检查训练/评测长度分布是否错配、"
+                "是否存在长程复制的系统性衰减",
+                "统计训练样本中长上下文与复制型任务占比；对门控变体比较 "
+                "gate_mean 是否过低（该写入的信息被压制）",
+            )
+        )
     na = _count_int(counts.get("no_answer")) or 0
     if _share(na, model_n) >= DOMINANT_SHARE:
-        recs.append(_advice(
-            "模型/方法", "中",
-            f"无数值回答占模型错误 {na}/{model_n}（复读问题/提前停止）"
-            f"{_share_ci_text(na)}",
-            "先排除解码/格式问题再改模型，否则真实能力会被低估",
-            "检查 prompt 模板与 max_new_tokens/停止条件；贪心解码复测确认"
-            "输出格式"))
+        recs.append(
+            _advice(
+                "模型/方法",
+                "中",
+                f"无数值回答占模型错误 {na}/{model_n}（复读问题/提前停止）"
+                f"{_share_ci_text(na)}",
+                "先排除解码/格式问题再改模型，否则真实能力会被低估",
+                "检查 prompt 模板与 max_new_tokens/停止条件；贪心解码复测确认"
+                "输出格式",
+            )
+        )
     for cat, ax, hi, trig, sugg, nxt in (
-        ("fwe_missing", "模型/方法", "中", "fwe 漏答高频词主导（召回不足）",
-         "长上下文稀释导致高频词被漏掉：先确认不是分词/词形归一问题",
-         "把 fwe 词出现次数 k 分层报告；核对 k≥3 高频词召回与上下文长度的关系"),
-        ("fwe_spurious", "模型/方法", "中", "fwe 多答无关词主导（精确率/停不下来）",
-         "严格 EM 下多答即错：先排除解码缺乏停止条件，再考虑集合口径并报",
-         "检查解码 stop 条件与输出词表约束；同时给出集合评分对照 EM"),
-        ("fwe_no_parse", "评测/导出", "中", "fwe 输出无法解析主导",
-         "模型没输出小写词：可能是格式导出或解析规则问题而非能力问题",
-         "把模型原文随结果落盘复核；核对解析正则与 prompt 模板"),
-        ("fwe_no_ref", "评测/导出", "中", "fwe 缺少 answer_words 词表基线",
-         "没有参考词表时漏答/多答无法归因；这是导出/旧格式问题，"
-         "不能据此评价模型召回或精确率",
-         "在 fwe 结果中补写 answer_words/参考词表并重跑归因，"
-         "确认旧产物不是数据导出缺口"),
+        (
+            "fwe_missing",
+            "模型/方法",
+            "中",
+            "fwe 漏答高频词主导（召回不足）",
+            "长上下文稀释导致高频词被漏掉：先确认不是分词/词形归一问题",
+            "把 fwe 词出现次数 k 分层报告；核对 k≥3 高频词召回与上下文长度的关系",
+        ),
+        (
+            "fwe_spurious",
+            "模型/方法",
+            "中",
+            "fwe 多答无关词主导（精确率/停不下来）",
+            "严格 EM 下多答即错：先排除解码缺乏停止条件，再考虑集合口径并报",
+            "检查解码 stop 条件与输出词表约束；同时给出集合评分对照 EM",
+        ),
+        (
+            "fwe_no_parse",
+            "评测/导出",
+            "中",
+            "fwe 输出无法解析主导",
+            "模型没输出小写词：可能是格式导出或解析规则问题而非能力问题",
+            "把模型原文随结果落盘复核；核对解析正则与 prompt 模板",
+        ),
+        (
+            "fwe_no_ref",
+            "评测/导出",
+            "中",
+            "fwe 缺少 answer_words 词表基线",
+            "没有参考词表时漏答/多答无法归因；这是导出/旧格式问题，"
+            "不能据此评价模型召回或精确率",
+            "在 fwe 结果中补写 answer_words/参考词表并重跑归因，"
+            "确认旧产物不是数据导出缺口",
+        ),
     ):
         c = _count_int(counts.get(cat)) or 0
         if _share(c, model_n) >= DOMINANT_SHARE:
-            recs.append(_advice(ax, hi,
-                                f"{trig}（{c}/{model_n}）{_share_ci_text(c)}",
-                                sugg, nxt))
+            recs.append(
+                _advice(
+                    ax, hi, f"{trig}（{c}/{model_n}）{_share_ci_text(c)}", sugg, nxt
+                )
+            )
     # 文档承诺“按优先级排序”：渲染层按顺序截断，不能把高优先级方向排到
     # 中/低优先级之后。稳定排序保留同优先级内部的插入顺序。
     rank = {"高": 0, "中": 1, "低": 2}
@@ -356,8 +439,11 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
     """坏案例集合 → 归因分布 + 难度/上下文切片 + 结构化个案列表 + 改进方向。"""
     # 外部/旧格式 JSON 的 badcases 列表可能混入 null/标量；跳过坏样本，
     # 不让单条记录中断整份归因（与 process_* 的顶层类型校验同口径）。
-    cases = [categorize_case(c) for c in (badcases if isinstance(badcases, list)
-                                          else []) if isinstance(c, dict)]
+    cases = [
+        categorize_case(c)
+        for c in (badcases if isinstance(badcases, list) else [])
+        if isinstance(c, dict)
+    ]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
     by_task_ctx: Dict[str, Dict] = {}
@@ -377,12 +463,15 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
             category_ci95[k] = [float(ci[0]), float(ci[1])]
     # 深度信息只在 niah 家族存在（vt meta.depth 是链深度而非位置）；给出
     # 深位（>0.75）失败占比用于判断"是样本极难，还是模型系统性盲区"
-    with_depth = [c for c in cases if c.get("depth") is not None
-                  and str(c.get("task") or "").startswith("niah")
-                  and c.get("category") not in ("label_error", "label_unknown")]
+    with_depth = [
+        c
+        for c in cases
+        if c.get("depth") is not None
+        and str(c.get("task") or "").startswith("niah")
+        and c.get("category") not in ("label_error", "label_unknown")
+    ]
     deep_fail = sum(1 for c in with_depth if c["depth"] > 0.75)
-    deep_ci = (wilson_score_ci(deep_fail, len(with_depth))
-               if with_depth else None)
+    deep_ci = wilson_score_ci(deep_fail, len(with_depth)) if with_depth else None
     out = {
         "variant": variant,
         "n_badcases": len(cases),
@@ -393,10 +482,12 @@ def analyze_badcases(badcases: List[Dict], variant: str = None) -> Dict:
         "axis_cn": {k: AXIS_CN.get(k, k) for k in axis_counts},
         "by_task_ctx": {k: dict(v) for k, v in by_task_ctx.items()},
         "hard_sample_ratio": (hard / len(cases)) if cases else None,
-        "deep_position_fail_ratio": (deep_fail / len(with_depth)
-                                      if with_depth else None),
-        "deep_position_fail_ci95": ([float(deep_ci[0]), float(deep_ci[1])]
-                                     if deep_ci is not None else None),
+        "deep_position_fail_ratio": (
+            deep_fail / len(with_depth) if with_depth else None
+        ),
+        "deep_position_fail_ci95": (
+            [float(deep_ci[0]), float(deep_ci[1])] if deep_ci is not None else None
+        ),
         "label_errors": label_errors,
         "cases": cases,
     }
@@ -410,9 +501,11 @@ def format_case(idx: int, c: Dict) -> List[str]:
     c = c if isinstance(c, dict) else {}
     depth = _finite_float(c.get("depth"))
     depth_s = f" depth={depth:.2f}" if depth is not None else ""
-    lines = [f"### 案例 {idx}: {c.get('task')} @ctx={c.get('ctx')}"
-             + depth_s
-             + (" 【难度边界样本：needle 靠后】" if c.get("hard_sample") else "")]
+    lines = [
+        f"### 案例 {idx}: {c.get('task')} @ctx={c.get('ctx')}"
+        + depth_s
+        + (" 【难度边界样本：needle 靠后】" if c.get("hard_sample") else "")
+    ]
     q = str(c.get("question") or "").strip().replace("\n", " ⏎ ")
     if len(q) > 220:
         q = q[:220] + "…"
@@ -431,8 +524,9 @@ def format_case(idx: int, c: Dict) -> List[str]:
     return lines
 
 
-def _render_recommendations(md: List[str], recs: List[Dict],
-                            title: str = "## 改进方向（坏案例驱动）") -> None:
+def _render_recommendations(
+    md: List[str], recs: List[Dict], title: str = "## 改进方向（坏案例驱动）"
+) -> None:
     """把改进方向渲染成 Markdown 小节（触发证据→建议→下一步实验）。"""
     if not isinstance(recs, list) or not recs:
         return
@@ -440,8 +534,10 @@ def _render_recommendations(md: List[str], recs: List[Dict],
     for i, r in enumerate(recs, 1):
         if not isinstance(r, dict):
             continue
-        md.append(f"{i}. **[{r.get('axis')}·{r.get('priority')}]** "
-                  f"触发：{r.get('trigger')}")
+        md.append(
+            f"{i}. **[{r.get('axis')}·{r.get('priority')}]** "
+            f"触发：{r.get('trigger')}"
+        )
         md.append(f"   - 建议：{r.get('suggestion')}")
         md.append(f"   - 下一步实验：{r.get('next_experiment')}")
 
@@ -463,8 +559,12 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
     if not total:
         md.append("本变体无预测错误样本（或评测被跳过）。")
     else:
-        md += [f"共 {total} 条错误样本；归因分布：", "",
-               "| 类别 | 数量 | 占比 |", "|---|---|---|"]
+        md += [
+            f"共 {total} 条错误样本；归因分布：",
+            "",
+            "| 类别 | 数量 | 占比 |",
+            "|---|---|---|",
+        ]
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
         ci_map = analysis.get("category_ci95")
@@ -472,15 +572,22 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
             ci_bits = []
             for cat, n in sorted(clean, key=lambda kv: -kv[1]):
                 ci = ci_map.get(cat)
-                if (isinstance(ci, (list, tuple)) and len(ci) == 2
-                        and all(_finite_float(x) is not None for x in ci)):
+                if (
+                    isinstance(ci, (list, tuple))
+                    and len(ci) == 2
+                    and all(_finite_float(x) is not None for x in ci)
+                ):
                     lo, hi = _finite_float(ci[0]), _finite_float(ci[1])
-                    ci_bits.append(f"{CATEGORY_CN.get(cat, cat)} "
-                                   f"{n}/{total} [{lo:.0%}, {hi:.0%}]")
+                    ci_bits.append(
+                        f"{CATEGORY_CN.get(cat, cat)} "
+                        f"{n}/{total} [{lo:.0%}, {hi:.0%}]"
+                    )
             if ci_bits:
-                md += ["", "各类别占比的 Wilson 95% CI（小样本下比点估计更诚实；"
-                           "区间重叠时不要断言某类别“主导”）："
-                           + "；".join(ci_bits) + "。"]
+                md += [
+                    "",
+                    "各类别占比的 Wilson 95% CI（小样本下比点估计更诚实；"
+                    "区间重叠时不要断言某类别“主导”）：" + "；".join(ci_bits) + "。",
+                ]
         axis = analysis.get("axis_counts")
         axis = axis if isinstance(axis, dict) else {}
         if axis:
@@ -489,34 +596,48 @@ def write_badcase_md(analysis: Dict, path: str, max_cases: int = 40) -> None:
                 n = _count_int(v)
                 if n is not None:
                     clean_axis.append((k, n))
-            axis_s = "；".join(f"{AXIS_CN.get(k, k)}×{v}" for k, v in
-                              sorted(clean_axis, key=lambda kv: -kv[1]))
+            axis_s = "；".join(
+                f"{AXIS_CN.get(k, k)}×{v}"
+                for k, v in sorted(clean_axis, key=lambda kv: -kv[1])
+            )
             md += ["", f"粗归因轴（数据/难度/模型）：{axis_s}。"]
         deep_ratio = _finite_float(analysis.get("deep_position_fail_ratio"))
         if deep_ratio is not None:
             deep_ci = analysis.get("deep_position_fail_ci95")
             ci_s = ""
-            if (isinstance(deep_ci, (list, tuple)) and len(deep_ci) == 2
-                    and all(_finite_float(x) is not None for x in deep_ci)):
-                ci_s = (f"（Wilson 95% CI "
-                        f"[{_finite_float(deep_ci[0]):.0%}, "
-                        f"{_finite_float(deep_ci[1]):.0%}]）")
-            md += ["",
-                   f"needle 深位（>0.75）失败占 niah 类错误的 "
-                   f"{deep_ratio:.0%}{ci_s}——"
-                   "高占比说明是长程检索边界问题，低占比说明是系统性盲区。"]
+            if (
+                isinstance(deep_ci, (list, tuple))
+                and len(deep_ci) == 2
+                and all(_finite_float(x) is not None for x in deep_ci)
+            ):
+                ci_s = (
+                    f"（Wilson 95% CI "
+                    f"[{_finite_float(deep_ci[0]):.0%}, "
+                    f"{_finite_float(deep_ci[1]):.0%}]）"
+                )
+            md += [
+                "",
+                f"needle 深位（>0.75）失败占 niah 类错误的 "
+                f"{deep_ratio:.0%}{ci_s}——"
+                "高占比说明是长程检索边界问题，低占比说明是系统性盲区。",
+            ]
         le_report = _count_int(analysis.get("label_errors")) or 0
         if le_report:
-            md += ["", f"⚠ 有 {le_report} 条 gold 答案不在 prompt 中："
-                        "样例构造或标注有错，须先修 RULER 构造再谈模型。"]
+            md += [
+                "",
+                f"⚠ 有 {le_report} 条 gold 答案不在 prompt 中："
+                "样例构造或标注有错，须先修 RULER 构造再谈模型。",
+            ]
         md.append("")
         cases = analysis.get("cases")
         cases = cases if isinstance(cases, list) else []
         for i, c in enumerate(cases[:max_cases], 1):
             md += [""] + format_case(i, c)
         if total > max_cases:
-            md.append(f"\n（仅展示前 {max_cases} 条，完整结构化数据见同目录 "
-                      "badcase_summary.json）")
+            md.append(
+                f"\n（仅展示前 {max_cases} 条，完整结构化数据见同目录 "
+                "badcase_summary.json）"
+            )
     # 改进方向对"零错误"同样给出（提示零错误的解释边界）
     _render_recommendations(md, analysis.get("recommendations") or [])
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -598,11 +719,14 @@ def categorize_window(rec: Dict) -> Dict:
     gold = r.get("gold_next")
     gold_txt = gold if isinstance(gold, str) else ("" if gold is None else str(gold))
     tail_raw = r.get("context_tail")
-    tail = (tail_raw if isinstance(tail_raw, str)
-            else ("" if tail_raw is None else str(tail_raw)))
+    tail = (
+        tail_raw
+        if isinstance(tail_raw, str)
+        else ("" if tail_raw is None else str(tail_raw))
+    )
     top5_txt = []
     top5_raw = r.get("pred_top5")
-    for item in (top5_raw if isinstance(top5_raw, (list, tuple)) else []):
+    for item in top5_raw if isinstance(top5_raw, (list, tuple)) else []:
         if isinstance(item, (list, tuple)):
             token = _token_text(item[0]) if item else None
         else:
@@ -634,44 +758,61 @@ def categorize_window(rec: Dict) -> Dict:
         return r
     if gold_missing:
         r["category"] = "label_unknown"
-        r["explanation"] = ("窗口记录缺少可用的 gold_next：无法判断预测是否"
-                            "正确，不能归因为模型高置信盲区或样本难度")
+        r["explanation"] = (
+            "窗口记录缺少可用的 gold_next：无法判断预测是否"
+            "正确，不能归因为模型高置信盲区或样本难度"
+        )
         return r
     pick = top1.strip()
-    r["repeats_context"] = bool(pick and len(pick) >= 2 and pick in tail
-                                and gold_txt != top1)
+    r["repeats_context"] = bool(
+        pick and len(pick) >= 2 and pick in tail and gold_txt != top1
+    )
     if gold_txt and top1 == gold_txt:
         # gold 缺失/为空串时不能判"top1 正确"：空串相等会把无 gold 的记录
         # 误标为命中的校准样本（gold 不存在则无从谈"预测正确"）。
         r["category"] = "top1_correct"
-        r["explanation"] = (f"top1 与 gold 一致但概率仅 {p1:.3f}（低置信正确），"
-                            "属输出校准问题而非检索错误"
-                            if p1 is not None else "top1 与 gold 一致")
+        r["explanation"] = (
+            f"top1 与 gold 一致但概率仅 {p1:.3f}（低置信正确），"
+            "属输出校准问题而非检索错误"
+            if p1 is not None
+            else "top1 与 gold 一致"
+        )
     elif p1 is not None and p1 >= TOP1_CONF_TOL and gold_txt != top1:
         r["category"] = "confident_bias"
         r["explanation"] = (
             f"top1={top1!r} 概率 {p1:.2f}（高置信）却非 gold={gold_txt!r}；"
-            + ("且 top1 是上下文里已出现的串（高置信复读）；"
-               if r["repeats_context"] else "")
-            + ("gold 在上下文中出现过但未被复制（检索/复制失败）"
-               if r["gold_in_context"] is True else
-               "gold 在上下文中未出现（真正的预测失败，长尾/分布外）"
-               if r["gold_in_context"] is False else
-               "gold 是否在上下文中出现未记录（无法区分检索失败与长尾）"))
+            + (
+                "且 top1 是上下文里已出现的串（高置信复读）；"
+                if r["repeats_context"]
+                else ""
+            )
+            + (
+                "gold 在上下文中出现过但未被复制（检索/复制失败）"
+                if r["gold_in_context"] is True
+                else "gold 在上下文中未出现（真正的预测失败，长尾/分布外）"
+                if r["gold_in_context"] is False
+                else "gold 是否在上下文中出现未记录（无法区分检索失败与长尾）"
+            )
+        )
     elif r["repeats_context"]:
         r["category"] = "repetition_attractor"
-        r["explanation"] = (f"top1={top1!r} 是上下文里已出现的串（复读），"
-                            f"而 gold 是 {gold_txt!r}——重复/回环失败模式")
+        r["explanation"] = (
+            f"top1={top1!r} 是上下文里已出现的串（复读），"
+            f"而 gold 是 {gold_txt!r}——重复/回环失败模式"
+        )
     else:
         r["category"] = "low_confidence"
         r["explanation"] = (
-            (f"top1={top1!r} 概率仅 {p1:.2f}（多候选平均）"
-             if p1 is not None else f"top1={top1!r} 无概率信息")
-            + ("，且 gold 在上下文中出现过（模型没抄到）"
-               if r["gold_in_context"] is True else
-               "，gold 未在上下文中出现（样本本身难/长尾）"
-               if r["gold_in_context"] is False else
-               "，gold 是否在上下文中出现未记录（无法判断样本难度）"))
+            f"top1={top1!r} 概率仅 {p1:.2f}（多候选平均）"
+            if p1 is not None
+            else f"top1={top1!r} 无概率信息"
+        ) + (
+            "，且 gold 在上下文中出现过（模型没抄到）"
+            if r["gold_in_context"] is True
+            else "，gold 未在上下文中出现（样本本身难/长尾）"
+            if r["gold_in_context"] is False
+            else "，gold 是否在上下文中出现未记录（无法判断样本难度）"
+        )
     return r
 
 
@@ -800,11 +941,16 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     counts = ana.get("category_counts")
     counts = counts if isinstance(counts, dict) else {}
     if n == 0:
-        return [_advice(
-            "评测", "低", "最差窗口记录为空",
-            "PPL 平均分无法替代错误检查：没有 worst_n 转储时无法定位模型"
-            "错在哪句话",
-            "评测时开启 --worst_n（如 5）并复核导出格式")]
+        return [
+            _advice(
+                "评测",
+                "低",
+                "最差窗口记录为空",
+                "PPL 平均分无法替代错误检查：没有 worst_n 转储时无法定位模型"
+                "错在哪句话",
+                "评测时开启 --worst_n（如 5）并复核导出格式",
+            )
+        ]
     recs = []
     up = _count_int(counts.get("unparsed")) or 0
     lu = _count_int(counts.get("label_unknown")) or 0
@@ -812,24 +958,38 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
     # 进入模式占比的分母，也不能因总数够大就让模式结论通过统计门槛。
     model_n = max(0, n - up - lu)
     if up:
-        recs.append(_advice(
-            "评测/导出", "中", f"{up}/{n} 个窗口没有可用的 top5 预测",
-            "先修评测导出再归因：旧格式/导出失败会让错误模式被静默丢弃",
-            "核对 evaluate 的 worst_windows 字段与版本兼容；重跑评测导出"))
+        recs.append(
+            _advice(
+                "评测/导出",
+                "中",
+                f"{up}/{n} 个窗口没有可用的 top5 预测",
+                "先修评测导出再归因：旧格式/导出失败会让错误模式被静默丢弃",
+                "核对 evaluate 的 worst_windows 字段与版本兼容；重跑评测导出",
+            )
+        )
     if lu:
-        recs.append(_advice(
-            "评测/导出", "中", f"{lu}/{n} 个窗口缺少可用的 gold_next",
-            "无真值无法判断预测对错：先修复/重导 gold 再归因，不能把这些"
-            "窗口算成高置信错答或长尾失败",
-            "核对 evaluate 的 worst_windows 是否完整写入 gold_next；"
-            "用当前版本重跑评测并复核导出"))
+        recs.append(
+            _advice(
+                "评测/导出",
+                "中",
+                f"{lu}/{n} 个窗口缺少可用的 gold_next",
+                "无真值无法判断预测对错：先修复/重导 gold 再归因，不能把这些"
+                "窗口算成高置信错答或长尾失败",
+                "核对 evaluate 的 worst_windows 是否完整写入 gold_next；"
+                "用当前版本重跑评测并复核导出",
+            )
+        )
     if model_n < MIN_PATTERN_CASES:
         if model_n > 0:
-            recs.append(_advice(
-                "评测", "低",
-                f"仅 {model_n} 个可归因于模型的最差窗口，模式不具统计意义",
-                "先扩大 worst_n/评测窗口数再按归因下结论",
-                "把 --worst_n 提高到 ≥10 并跨更多窗口采样"))
+            recs.append(
+                _advice(
+                    "评测",
+                    "低",
+                    f"仅 {model_n} 个可归因于模型的最差窗口，模式不具统计意义",
+                    "先扩大 worst_n/评测窗口数再按归因下结论",
+                    "把 --worst_n 提高到 ≥10 并跨更多窗口采样",
+                )
+            )
         # 同 synthesize_ruler_improvements：窗口太少时不下高/中优先级结论。
         return recs[:MAX_ADVICE]
     cb = _count_int(counts.get("confident_bias")) or 0
@@ -839,11 +999,13 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
         # 的 gold 根本没见过"错判成"模型看得到却没抄对"。
         cases = ana.get("cases")
         cases = cases if isinstance(cases, list) else []
-        cb_gic = [c.get("gold_in_context")
-                  for c in cases
-                  if isinstance(c, dict)
-                  and c.get("category") == "confident_bias"
-                  and isinstance(c.get("gold_in_context"), bool)]
+        cb_gic = [
+            c.get("gold_in_context")
+            for c in cases
+            if isinstance(c, dict)
+            and c.get("category") == "confident_bias"
+            and isinstance(c.get("gold_in_context"), bool)
+        ]
         if cb_gic:
             gic = sum(cb_gic) / len(cb_gic)
             scope = "其中"
@@ -858,55 +1020,79 @@ def synthesize_window_improvements(ana: Dict) -> List[Dict]:
         if gic is None:
             # 旧格式/导出缺失 gold_in_context：既不能断言“看得到没抄对”，
             # 也不能把未知当成“gold 从未出现”，先补齐证据再归因。
-            recs.append(_advice(
-                "评测/导出", "中",
-                f"高置信错答占 {cb}/{model_n}，但缺少 gold_in_context 记录，"
-                "无法判断是检索失败还是长尾预测失败",
-                "先补齐窗口级 gold 可见性再决定改结构还是扩数据；把未知"
-                "当成“从未出现”会低估复制/检索机制的问题",
-                "用当前 evaluate 重跑 worst_windows（写入完整窗口的 "
-                "gold_in_context），或从原窗口重新计算 gold 是否出现"))
+            recs.append(
+                _advice(
+                    "评测/导出",
+                    "中",
+                    f"高置信错答占 {cb}/{model_n}，但缺少 gold_in_context 记录，"
+                    "无法判断是检索失败还是长尾预测失败",
+                    "先补齐窗口级 gold 可见性再决定改结构还是扩数据；把未知"
+                    "当成“从未出现”会低估复制/检索机制的问题",
+                    "用当前 evaluate 重跑 worst_windows（写入完整窗口的 "
+                    "gold_in_context），或从原窗口重新计算 gold 是否出现",
+                )
+            )
         elif gic >= 0.5:
-            recs.append(_advice(
-                "模型/方法", "高",
-                f"高置信错答占 {cb}/{model_n}，且{scope} {gic:.0%} 的 gold 在上下文中",
-                "模型看得到却没抄对：优先检查注意力是否落在 gold 跨度"
-                "（复制/检索失败而非知识缺失），这类失败最可能通过结构调整改善",
-                "对这批窗口检查 top-1 注意力位置与 gold 跨度的重叠；区分"
-                "位置编码混淆与干扰串抑制问题后再改注意力"))
+            recs.append(
+                _advice(
+                    "模型/方法",
+                    "高",
+                    f"高置信错答占 {cb}/{model_n}，且{scope} {gic:.0%} 的 gold 在上下文中",
+                    "模型看得到却没抄对：优先检查注意力是否落在 gold 跨度"
+                    "（复制/检索失败而非知识缺失），这类失败最可能通过结构调整改善",
+                    "对这批窗口检查 top-1 注意力位置与 gold 跨度的重叠；区分"
+                    "位置编码混淆与干扰串抑制问题后再改注意力",
+                )
+            )
         else:
-            recs.append(_advice(
-                "模型/方法", "高",
-                f"高置信错答占 {cb}/{model_n}，且 gold 大多不在上下文中",
-                "真正的预测失败/长尾：结构改进收益有限，优先扩大数据"
-                "（或先按训练曲线判断是否过拟合再决定正则化）",
-                "抽样人工复核 gold 可预测性；对照 curve_diagnosis.json 的"
-                "状态决定是增数据还是加正则化"))
+            recs.append(
+                _advice(
+                    "模型/方法",
+                    "高",
+                    f"高置信错答占 {cb}/{model_n}，且 gold 大多不在上下文中",
+                    "真正的预测失败/长尾：结构改进收益有限，优先扩大数据"
+                    "（或先按训练曲线判断是否过拟合再决定正则化）",
+                    "抽样人工复核 gold 可预测性；对照 curve_diagnosis.json 的"
+                    "状态决定是增数据还是加正则化",
+                )
+            )
     rep = _count_int(counts.get("repetition_attractor")) or 0
     if _share(rep, model_n) >= DOMINANT_SHARE:
-        recs.append(_advice(
-            "模型/方法", "中",
-            f"复读吸引子占 {rep}/{model_n}（低置信下退化为抄上下文）",
-            "检查训练语料重复率与重复上下文下的写入行为，而不是只加解码惩罚",
-            "核对 datacheck 报告的重复样本率；对门控变体比较重复上下文中的"
-            "gate_mean（是否错误压制了写入）"))
+        recs.append(
+            _advice(
+                "模型/方法",
+                "中",
+                f"复读吸引子占 {rep}/{model_n}（低置信下退化为抄上下文）",
+                "检查训练语料重复率与重复上下文下的写入行为，而不是只加解码惩罚",
+                "核对 datacheck 报告的重复样本率；对门控变体比较重复上下文中的"
+                "gate_mean（是否错误压制了写入）",
+            )
+        )
     lc = _count_int(counts.get("low_confidence")) or 0
     if _share(lc, model_n) >= DOMINANT_SHARE:
-        recs.append(_advice(
-            "模型/方法", "中",
-            f"低置信占 {lc}/{model_n}（模型在多个候选间平均）",
-            "先按训练曲线判断是欠拟合（调学习率/数据管道）还是样本本身多解，"
-            "再决定扩容或增加数据",
-            "对照 curve_diagnosis.json：欠拟合→调学习率/数据；正常收敛→"
-            "扩充数据或接受该样本的歧义性"))
+        recs.append(
+            _advice(
+                "模型/方法",
+                "中",
+                f"低置信占 {lc}/{model_n}（模型在多个候选间平均）",
+                "先按训练曲线判断是欠拟合（调学习率/数据管道）还是样本本身多解，"
+                "再决定扩容或增加数据",
+                "对照 curve_diagnosis.json：欠拟合→调学习率/数据；正常收敛→"
+                "扩充数据或接受该样本的歧义性",
+            )
+        )
     tc = _count_int(counts.get("top1_correct")) or 0
     if _share(tc, model_n) >= DOMINANT_SHARE:
-        recs.append(_advice(
-            "校准", "低",
-            f"top1 正确但低置信占 {tc}/{model_n}",
-            "排位正确、概率低属校准问题而非检索问题：温度缩放/top-k 校准"
-            "优先于改结构",
-            "在 held-out 窗口上做温度扫描，报告校准后的 NLL/ECE 变化"))
+        recs.append(
+            _advice(
+                "校准",
+                "低",
+                f"top1 正确但低置信占 {tc}/{model_n}",
+                "排位正确、概率低属校准问题而非检索问题：温度缩放/top-k 校准"
+                "优先于改结构",
+                "在 held-out 窗口上做温度扫描，报告校准后的 NLL/ECE 变化",
+            )
+        )
     return recs[:MAX_ADVICE]
 
 
@@ -929,12 +1115,18 @@ def _known_bool_rate(cases: List[Dict], key: str) -> Optional[float]:
 def analyze_worst_windows(windows: List[Dict], variant: str = None) -> Dict:
     """最差窗口集合 → 归因分布 + 校准/复制统计 + 个案列表 + 改进方向。"""
     # 同 analyze_badcases：列表内的 null/数组等坏记录按损坏样本跳过。
-    cases = [categorize_window(w) for w in (windows if isinstance(windows, list)
-                                           else []) if isinstance(w, dict)]
+    cases = [
+        categorize_window(w)
+        for w in (windows if isinstance(windows, list) else [])
+        if isinstance(w, dict)
+    ]
     cat_counts = Counter(c["category"] for c in cases)
     axis_counts = Counter(case_axis(c) for c in cases)
-    distances = [c.get("gold_distance_tokens") for c in cases
-                 if isinstance(c.get("gold_distance_tokens"), (int, float))]
+    distances = [
+        c.get("gold_distance_tokens")
+        for c in cases
+        if isinstance(c.get("gold_distance_tokens"), (int, float))
+    ]
     category_ci95 = {}
     for k, v in cat_counts.items():
         ci = wilson_score_ci(int(v), len(cases))
@@ -977,8 +1169,9 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     """单个最差窗口的 Markdown 行（上下文尾部/模型 top-1/真实续写/归因）。"""
     c = c if isinstance(c, dict) else {}
     p1 = c.get("top1_prob")
-    where = (f"窗口 #{c.get('window')}" +
-             (f"（{c['split']} 集）" if c.get("split") else ""))
+    where = f"窗口 #{c.get('window')}" + (
+        f"（{c['split']} 集）" if c.get("split") else ""
+    )
     loss = c.get("loss")
     # loss 可能缺失、显式为 null、bool 或超出 float 范围（旧格式/外部 JSON）：
     # 一律显示 '-' 而不是崩溃，也不能把 True 显示成 1.000。
@@ -993,9 +1186,13 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     top_s = f"{top1!r}" + p1_s
     lines.append(f"- 模型 top-1: {top_s}")
     gic = c.get("gold_in_context")
-    gic_note = ("　（gold 在上下文中出现过）" if gic is True else
-                "　（gold 未在上下文中出现）" if gic is False else
-                "　（gold 是否在上下文中出现未记录）")
+    gic_note = (
+        "　（gold 在上下文中出现过）"
+        if gic is True
+        else "　（gold 未在上下文中出现）"
+        if gic is False
+        else "　（gold 是否在上下文中出现未记录）"
+    )
     lines.append(f"- 真实续写(gold): {c.get('gold_next')!r}{gic_note}")
     pos = c.get("gold_last_pos")
     dist = c.get("gold_distance_tokens")
@@ -1003,10 +1200,15 @@ def format_window_case(idx: int, c: Dict) -> List[str]:
     dist_i = _safe_int(dist)
     if pos_i is not None and dist_i is not None:
         occ_i = _safe_int(c.get("gold_occurrences"))
-        lines.append(f"- gold 位置: 窗口内第 {pos_i} 个 token，距预测位 "
-                     f"{dist_i} tokens"
-                     + (f"（共出现 {occ_i} 次，取最后一次）"
-                        if occ_i is not None and occ_i > 1 else ""))
+        lines.append(
+            f"- gold 位置: 窗口内第 {pos_i} 个 token，距预测位 "
+            f"{dist_i} tokens"
+            + (
+                f"（共出现 {occ_i} 次，取最后一次）"
+                if occ_i is not None and occ_i > 1
+                else ""
+            )
+        )
         snippet = c.get("gold_context_excerpt")
         if snippet:
             lines.append(f"- gold 附近上下文: …{snippet}…")
@@ -1033,8 +1235,12 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
     if not total:
         md.append("本变体无最差窗口记录（评测被跳过或 --worst_n=0）。")
     else:
-        md += [f"共 {total} 个最差窗口；归因分布：", "",
-               "| 类别 | 数量 | 占比 |", "|---|---|---|"]
+        md += [
+            f"共 {total} 个最差窗口；归因分布：",
+            "",
+            "| 类别 | 数量 | 占比 |",
+            "|---|---|---|",
+        ]
         for cat, n in sorted(clean, key=lambda kv: -kv[1]):
             md.append(f"| {WINDOW_CATEGORY_CN.get(cat, cat)} | {n} | {n / total:.1%} |")
         ci_map = analysis.get("category_ci95")
@@ -1042,35 +1248,51 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
             ci_bits = []
             for cat, n in sorted(clean, key=lambda kv: -kv[1]):
                 ci = ci_map.get(cat)
-                if (isinstance(ci, (list, tuple)) and len(ci) == 2
-                        and all(_finite_float(x) is not None for x in ci)):
+                if (
+                    isinstance(ci, (list, tuple))
+                    and len(ci) == 2
+                    and all(_finite_float(x) is not None for x in ci)
+                ):
                     lo, hi = _finite_float(ci[0]), _finite_float(ci[1])
-                    ci_bits.append(f"{WINDOW_CATEGORY_CN.get(cat, cat)} "
-                                   f"{n}/{total} [{lo:.0%}, {hi:.0%}]")
+                    ci_bits.append(
+                        f"{WINDOW_CATEGORY_CN.get(cat, cat)} "
+                        f"{n}/{total} [{lo:.0%}, {hi:.0%}]"
+                    )
             if ci_bits:
-                md += ["", "各类别占比的 Wilson 95% CI（窗口数少时区间很宽，"
-                           "不能把点估计排序当成稳定模式）："
-                           + "；".join(ci_bits) + "。"]
+                md += [
+                    "",
+                    "各类别占比的 Wilson 95% CI（窗口数少时区间很宽，"
+                    "不能把点估计排序当成稳定模式）：" + "；".join(ci_bits) + "。",
+                ]
         stats = []
         mtp = _finite_float(analysis.get("mean_top1_prob"))
         if mtp is not None:
             stats.append(f"平均 top-1 概率={mtp:.3f}")
+
         def _ci_s(v, key):
             ci = analysis.get(key)
-            if (isinstance(ci, (list, tuple)) and len(ci) == 2
-                    and all(_finite_float(x) is not None for x in ci)):
-                return (f"（Wilson 95% CI {_finite_float(ci[0]):.0%}–"
-                        f"{_finite_float(ci[1]):.0%}）")
+            if (
+                isinstance(ci, (list, tuple))
+                and len(ci) == 2
+                and all(_finite_float(x) is not None for x in ci)
+            ):
+                return (
+                    f"（Wilson 95% CI {_finite_float(ci[0]):.0%}–"
+                    f"{_finite_float(ci[1]):.0%}）"
+                )
             return ""
 
         gic = _finite_float(analysis.get("gold_in_context_rate"))
         if gic is not None:
-            stats.append(f"gold 出现在上下文中的比例={gic:.0%}"
-                         + _ci_s(gic, "gold_in_context_ci95"))
+            stats.append(
+                f"gold 出现在上下文中的比例={gic:.0%}"
+                + _ci_s(gic, "gold_in_context_ci95")
+            )
         git5 = _finite_float(analysis.get("gold_in_top5_rate"))
         if git5 is not None:
-            stats.append(f"gold 进入 top-5 的比例={git5:.0%}"
-                         + _ci_s(git5, "gold_in_top5_ci95"))
+            stats.append(
+                f"gold 进入 top-5 的比例={git5:.0%}" + _ci_s(git5, "gold_in_top5_ci95")
+            )
         # 中位数在偶数个窗口时可以是 12.5 这类小数：不能套 _safe_int，
         # 否则汇总分析算出的距离会在 Markdown 报告里被静默丢掉。
         dist = _finite_float(analysis.get("median_gold_distance_tokens"))
@@ -1080,33 +1302,50 @@ def write_worstcase_md(analysis: Dict, path: str, max_cases: int = 10) -> None:
             md += ["", "；".join(stats) + "。"]
         cases = analysis.get("cases")
         cases = cases if isinstance(cases, list) else []
-        not_ctx = sum(1 for c in cases
-                      if isinstance(c, dict) and c.get("gold_in_context") is False)
-        unknown_ctx = sum(1 for c in cases
-                          if not (isinstance(c, dict)
-                                  and isinstance(c.get("gold_in_context"), bool)))
+        not_ctx = sum(
+            1
+            for c in cases
+            if isinstance(c, dict) and c.get("gold_in_context") is False
+        )
+        unknown_ctx = sum(
+            1
+            for c in cases
+            if not (isinstance(c, dict) and isinstance(c.get("gold_in_context"), bool))
+        )
         if not_ctx:
-            md += ["", f"其中 {not_ctx} 个窗口的 gold 从未出现在上下文中——"
-                       "这些更接近真正的预测失败/长尾，应与“抄不到”的复制失败分开看。"]
+            md += [
+                "",
+                f"其中 {not_ctx} 个窗口的 gold 从未出现在上下文中——"
+                "这些更接近真正的预测失败/长尾，应与“抄不到”的复制失败分开看。",
+            ]
         if unknown_ctx:
-            md += ["", f"另有 {unknown_ctx} 个窗口缺少 gold_in_context 记录——"
-                       "无法判断 gold 是否在上下文中，不能计入“从未出现”。"]
+            md += [
+                "",
+                f"另有 {unknown_ctx} 个窗口缺少 gold_in_context 记录——"
+                "无法判断 gold 是否在上下文中，不能计入“从未出现”。",
+            ]
         md.append("")
         for i, c in enumerate(cases[:max_cases], 1):
             md += [""] + format_window_case(i, c)
         if n_windows > max_cases:
-            md.append(f"\n（仅展示 loss 最高的前 {max_cases} 个窗口，"
-                      "完整数据见 eval_*.json 的 worst_windows）")
-    _render_recommendations(md, analysis.get("recommendations") or [],
-                            title="## 改进方向（最差窗口驱动）")
+            md.append(
+                f"\n（仅展示 loss 最高的前 {max_cases} 个窗口，"
+                "完整数据见 eval_*.json 的 worst_windows）"
+            )
+    _render_recommendations(
+        md, analysis.get("recommendations") or [], title="## 改进方向（最差窗口驱动）"
+    )
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(md))
 
 
-def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
-                      write_md: bool = True,
-                      payload: Optional[Dict] = None) -> Dict:
+def process_eval_json(
+    eval_path: str,
+    out_dir: Optional[str] = None,
+    write_md: bool = True,
+    payload: Optional[Dict] = None,
+) -> Dict:
     """处理一个 eval_*.json 的 worst_windows：归因分析 + 写 md（与源文件同目录）。
 
     payload 已由调用方解析时可直接传入；为 None 时自行读取。
@@ -1118,8 +1357,9 @@ def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
         # 顶层非对象（如坏文件里的 []）：抛 ValueError，调用方统一跳过该文件，
         # 不能让 AttributeError 中断整条流水线
         raise ValueError("JSON 顶层不是对象，无法解析 worst_windows")
-    analysis = analyze_worst_windows(payload.get("worst_windows") or [],
-                                     variant=payload.get("variant"))
+    analysis = analyze_worst_windows(
+        payload.get("worst_windows") or [], variant=payload.get("variant")
+    )
     analysis["seed"] = payload.get("seed")
     analysis["split"] = payload.get("split")
     analysis["source"] = os.path.basename(eval_path)
@@ -1127,7 +1367,7 @@ def process_eval_json(eval_path: str, out_dir: Optional[str] = None,
         out_dir = out_dir or os.path.dirname(os.path.abspath(eval_path))
         base = os.path.splitext(os.path.basename(eval_path))[0]
         # eval_<variant><suffix>.json -> worstcases_<variant><suffix>.md
-        name = base[len("eval_"):] if base.startswith("eval_") else base
+        name = base[len("eval_") :] if base.startswith("eval_") else base
         write_worstcase_md(analysis, os.path.join(out_dir, f"worstcases_{name}.md"))
     return analysis
 
@@ -1177,16 +1417,25 @@ def _case_brief(rec: Dict) -> Dict:
     pred = rec.get("pred")
     if pred is None:
         top1, p1 = _window_top1(rec)
-        pred = (f"{top1!r} (p={p1:.3f})" if top1 is not None and p1 is not None
-                else (repr(top1) if top1 is not None else None))
+        pred = (
+            f"{top1!r} (p={p1:.3f})"
+            if top1 is not None and p1 is not None
+            else (repr(top1) if top1 is not None else None)
+        )
     excerpt = rec.get("question") or rec.get("context_tail") or ""
     cat = _categorize_any(rec) if isinstance(rec, dict) else None
-    return {"key": case_key(rec), "task": rec.get("task"), "ctx": rec.get("ctx"),
-            "window": rec.get("window"), "split": rec.get("split"),
-            "category": (cat or {}).get("category"),
-            "answer": rec.get("answer"), "gold_next": rec.get("gold_next"),
-            "excerpt": str(excerpt)[-160:],
-            "pred": (str(pred)[:80] if pred is not None else None)}
+    return {
+        "key": case_key(rec),
+        "task": rec.get("task"),
+        "ctx": rec.get("ctx"),
+        "window": rec.get("window"),
+        "split": rec.get("split"),
+        "category": (cat or {}).get("category"),
+        "answer": rec.get("answer"),
+        "gold_next": rec.get("gold_next"),
+        "excerpt": str(excerpt)[-160:],
+        "pred": (str(pred)[:80] if pred is not None else None),
+    }
 
 
 def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
@@ -1204,16 +1453,25 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
     if n_unique and _share(shared, n_unique) >= 0.5:
         ci = cross.get("shared_all_ci95")
         ci_s = ""
-        if (isinstance(ci, (list, tuple)) and len(ci) == 2
-                and all(_finite_float(x) is not None for x in ci)):
-            ci_s = (f"；Wilson 95% CI {_finite_float(ci[0]):.0%}–"
-                    f"{_finite_float(ci[1]):.0%}")
-        recs.append(_advice(
-            "数据/难度", "高",
-            f"{shared}/{n_unique} 个失败样本为全体已评测变体共识失败{ci_s}",
-            "失败以共识为主：优先怀疑数据/构造/内在难度，而不是方法本身；"
-            "先修数据再比方法，否则结论会指向错误的对象",
-            "人工复核共识失败样例的标注与可解性；修正后重跑评测再对比"))
+        if (
+            isinstance(ci, (list, tuple))
+            and len(ci) == 2
+            and all(_finite_float(x) is not None for x in ci)
+        ):
+            ci_s = (
+                f"；Wilson 95% CI {_finite_float(ci[0]):.0%}–"
+                f"{_finite_float(ci[1]):.0%}"
+            )
+        recs.append(
+            _advice(
+                "数据/难度",
+                "高",
+                f"{shared}/{n_unique} 个失败样本为全体已评测变体共识失败{ci_s}",
+                "失败以共识为主：优先怀疑数据/构造/内在难度，而不是方法本身；"
+                "先修数据再比方法，否则结论会指向错误的对象",
+                "人工复核共识失败样例的标注与可解性；修正后重跑评测再对比",
+            )
+        )
     ref = cross.get("reference")
     per_variant = cross.get("per_variant")
     per_variant = per_variant if isinstance(per_variant, dict) else {}
@@ -1229,9 +1487,9 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
         p_holm = _finite_float(pv.get("mcnemar_p_holm"))
         sig_s = ""
         if p_holm is not None:
-            sig_s = (f"；配对 McNemar 检验（Holm 校正）p={p_holm:.3g}，"
-                     + ("差异显著" if p_holm < 0.05 else
-                        "差异不显著，只能作方向性线索"))
+            sig_s = f"；配对 McNemar 检验（Holm 校正）p={p_holm:.3g}，" + (
+                "差异显著" if p_holm < 0.05 else "差异不显著，只能作方向性线索"
+            )
         if n_new:
             cats = pv.get("new_category_counts")
             cats = cats if isinstance(cats, dict) else {}
@@ -1243,32 +1501,44 @@ def synthesize_cross_improvements(cross: Dict) -> List[Dict]:
                 if ci is not None and ci > 0:
                     counted.append((cat, ci))
             top = sorted(counted, key=lambda kv: (-kv[1], str(kv[0])))
-            cat_s = (f"，主导类别 {CATEGORY_CN.get(top[0][0], top[0][0])}×{top[0][1]}"
-                     if top else "")
-            recs.append(_advice(
-                "模型/方法", "高" if p_holm is None or p_holm < 0.05 else "中",
-                f"{v} 相对 {ref} 新增 {n_new} 个错误{cat_s}{sig_s}",
-                "特异性新增错误是该方法盲区最直接的线索，优先逐条分析这些样例，"
-                "不要只看平均 EM；新增/改对是同一批样本上的配对结果，"
-                "必须用配对检验判断净差异是否超出抽样波动",
-                f"对 {v} 的 new_vs_reference 样例做注意力/门控可视化，定位与 "
-                f"{ref} 的行为差异；若 p 不显著，先增大评测样本/多种子再下结论；"
-                "若是难度边界样本占比高，先分层再归因"))
+            cat_s = (
+                f"，主导类别 {CATEGORY_CN.get(top[0][0], top[0][0])}×{top[0][1]}"
+                if top
+                else ""
+            )
+            recs.append(
+                _advice(
+                    "模型/方法",
+                    "高" if p_holm is None or p_holm < 0.05 else "中",
+                    f"{v} 相对 {ref} 新增 {n_new} 个错误{cat_s}{sig_s}",
+                    "特异性新增错误是该方法盲区最直接的线索，优先逐条分析这些样例，"
+                    "不要只看平均 EM；新增/改对是同一批样本上的配对结果，"
+                    "必须用配对检验判断净差异是否超出抽样波动",
+                    f"对 {v} 的 new_vs_reference 样例做注意力/门控可视化，定位与 "
+                    f"{ref} 的行为差异；若 p 不显著，先增大评测样本/多种子再下结论；"
+                    "若是难度边界样本占比高，先分层再归因",
+                )
+            )
         # 只有“改对”而没有“新增错误”的变体同样要报告：净收益不能因新增
         # 为 0 就静默丢掉正收益证据。
         if n_fixed:
-            recs.append(_advice(
-                "模型/方法", "低",
-                f"{v} 相对 {ref} 改对 {n_fixed} 个样本{sig_s}",
-                "改对与新增要并看：净收益 = 改对 − 新增，只有单侧数字会误导；"
-                "小样本下改对数本身也可能由评测波动造成",
-                f"结合新增错误看配对净收益与 McNemar/Holm 校正后的 p 值，"
-                "不要仅凭改对条数排序方法"))
+            recs.append(
+                _advice(
+                    "模型/方法",
+                    "低",
+                    f"{v} 相对 {ref} 改对 {n_fixed} 个样本{sig_s}",
+                    "改对与新增要并看：净收益 = 改对 − 新增，只有单侧数字会误导；"
+                    "小样本下改对数本身也可能由评测波动造成",
+                    "结合新增错误看配对净收益与 McNemar/Holm 校正后的 p 值，"
+                    "不要仅凭改对条数排序方法",
+                )
+            )
     return recs[:MAX_ADVICE]
 
 
-def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
-                           reference: str = "standard") -> Dict:
+def cross_variant_analysis(
+    per_variant_cases: Dict[str, List[Dict]], reference: str = "standard"
+) -> Dict:
     """跨变体错误对照：把各变体的错误样本按键对齐，区分三类失败。
 
     输入 per_variant_cases: {variant: [错误样本记录]}（所有变体应使用同一批
@@ -1287,10 +1557,10 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
     # 保留空列表（已评测且零错误）：它们必须进入 all_set，否则任何一个全对
     # 的变体都会让"所有变体都错"的共识判定漏掉它，把方法特异性失败误报成
     # 数据/难度问题。None/非列表值（无此变体数据）才排除；顶层非对象按空对照。
-    per_variant_cases = (per_variant_cases
-                         if isinstance(per_variant_cases, dict) else {})
-    variants = sorted((v for v, cs in per_variant_cases.items()
-                       if isinstance(cs, list)), key=str)
+    per_variant_cases = per_variant_cases if isinstance(per_variant_cases, dict) else {}
+    variants = sorted(
+        (v for v, cs in per_variant_cases.items() if isinstance(cs, list)), key=str
+    )
     items: Dict[str, Dict] = {}
     for v in variants:
         for c in per_variant_cases[v]:
@@ -1301,25 +1571,34 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
             # 每个变体对同一 key 的记录各不相同（预测/归因依赖该变体自身输出），
             # 必须逐变体保存，不能只留一个代表样本——否则相对参照的新增/改对
             # 会拿别的变体的记录去归因，类别统计与个案展示都会张冠李戴。
-            it = items.setdefault(case_key(c),
-                                  {"variants": set(), "example": c, "examples": {}})
+            it = items.setdefault(
+                case_key(c), {"variants": set(), "example": c, "examples": {}}
+            )
             it["variants"].add(v)
             it["examples"][v] = c
     if len(variants) < 2:
-        return {"variants": variants, "reference": reference,
-                "n_unique_failed_items": len(items),
-                "n_shared_all_failures": 0,
-                "shared_all_ci95": None, "shared_failures": [],
-                "per_variant": {}, "recommendations": [],
-                "note": "少于 2 个变体的错误样本，无法做跨变体对照"}
+        return {
+            "variants": variants,
+            "reference": reference,
+            "n_unique_failed_items": len(items),
+            "n_shared_all_failures": 0,
+            "shared_all_ci95": None,
+            "shared_failures": [],
+            "per_variant": {},
+            "recommendations": [],
+            "note": "少于 2 个变体的错误样本，无法做跨变体对照",
+        }
     all_set = set(variants)
     shared = sorted(k for k, it in items.items() if it["variants"] == all_set)
     # 参照变体只有“未评测”（不在 variants 里）才无法计算新增/改对。
     # 若参照已评测且零错误（[]），按定义其余变体的每个失败都是“参照对而
     # 该方法错”，全部计入 new_vs_reference 是正确的，不需要兜底。
     has_ref = reference in variants
-    ref_failed = ({k for k, it in items.items() if reference in it["variants"]}
-                  if has_ref else set())
+    ref_failed = (
+        {k for k, it in items.items() if reference in it["variants"]}
+        if has_ref
+        else set()
+    )
     per_v: Dict[str, Dict] = {}
     for v in variants:
         failed = {k for k, it in items.items() if v in it["variants"]}
@@ -1349,17 +1628,24 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
                     cc[c["category"]] += 1
             return dict(cc)
 
-        discordant = (len(new_keys) + len(fixed_keys)
-                      if has_ref and v != reference else 0)
-        p_raw = (mcnemar_exact_p(len(new_keys), len(fixed_keys))
-                 if has_ref and v != reference else None)
+        discordant = (
+            len(new_keys) + len(fixed_keys) if has_ref and v != reference else 0
+        )
+        p_raw = (
+            mcnemar_exact_p(len(new_keys), len(fixed_keys))
+            if has_ref and v != reference
+            else None
+        )
         per_v[v] = {
             "n_failed": len(failed),
             "n_shared_all": len(failed & set(shared)),
             "n_new_vs_reference": len(new_keys) if has_ref else None,
             "n_fixed_vs_reference": len(fixed_keys) if has_ref else None,
-            "net_fixed_minus_new": ((len(fixed_keys) - len(new_keys))
-                                    if has_ref and v != reference else None),
+            "net_fixed_minus_new": (
+                (len(fixed_keys) - len(new_keys))
+                if has_ref and v != reference
+                else None
+            ),
             # 配对显著性：只统计两侧结果不同的样本。n_new/ n_fixed 本身
             # 就是 discordant 计数，直接送入精确 McNemar；多候选比较再用
             # Holm 校正控制族错误率。
@@ -1368,47 +1654,65 @@ def cross_variant_analysis(per_variant_cases: Dict[str, List[Dict]],
             "mcnemar_p_holm": None,
             "new_category_counts": _cat_counts(new_keys, v),
             "fixed_category_counts": _cat_counts(fixed_keys, reference),
-            "new_vs_reference": [_case_brief(_example_for(k, v))
-                                 for k in new_keys[:CROSS_LIST_LIMIT]],
-            "fixed_vs_reference": [_case_brief(
-                _example_for(k, reference))
-                for k in fixed_keys[:CROSS_LIST_LIMIT]],
+            "new_vs_reference": [
+                _case_brief(_example_for(k, v)) for k in new_keys[:CROSS_LIST_LIMIT]
+            ],
+            "fixed_vs_reference": [
+                _case_brief(_example_for(k, reference))
+                for k in fixed_keys[:CROSS_LIST_LIMIT]
+            ],
         }
     # 同一次对照内对多个候选做配对检验：Holm 逐步校正，避免“多比几次总
     # 有一个显著”。参照自身不检验（p=None）。
-    tested = [v for v in variants
-              if has_ref and v != reference
-              and per_v[v].get("mcnemar_p") is not None]
+    tested = [
+        v
+        for v in variants
+        if has_ref and v != reference and per_v[v].get("mcnemar_p") is not None
+    ]
     adj = holm_bonferroni([per_v[v]["mcnemar_p"] for v in tested])
     for v, p_adj in zip(tested, adj):
         per_v[v]["mcnemar_p_holm"] = p_adj
-    shared_ci = (wilson_score_ci(len(shared), len(items))
-                 if items else None)
+    shared_ci = wilson_score_ci(len(shared), len(items)) if items else None
     out = {
-        "variants": variants, "reference": reference,
+        "variants": variants,
+        "reference": reference,
         "reference_available": has_ref,
         "n_unique_failed_items": len(items),
         "n_shared_all_failures": len(shared),
-        "shared_all_ci95": ([float(shared_ci[0]), float(shared_ci[1])]
-                            if shared_ci is not None else None),
-        "shared_failures": [_case_brief(items[k]["example"])
-                            for k in shared[:CROSS_LIST_LIMIT]],
+        "shared_all_ci95": (
+            [float(shared_ci[0]), float(shared_ci[1])]
+            if shared_ci is not None
+            else None
+        ),
+        "shared_failures": [
+            _case_brief(items[k]["example"]) for k in shared[:CROSS_LIST_LIMIT]
+        ],
         "per_variant": per_v,
-        "note": ("共识失败（所有变体都错，含标准基线）优先怀疑数据/构造/内在"
-                 "难度；相对参照新增的错误才是该方法的特异性盲区，优先分析。"
-                 "新增/改对为同一批样本上的配对计数，已附精确 McNemar 检验"
-                 "（多候选按 Holm 校正）；p 不显著时只能作方向性线索。"
-                 + ("" if has_ref else f"⚠ 参照变体 {reference} 未评测或没有"
-                                        "可用错误清单（不等于零错误），"
-                                        "新增/改对计数不可得。")
-                 + f"个案列表每类最多展示 {CROSS_LIST_LIMIT} 条，计数为完整值。"),
+        "note": (
+            "共识失败（所有变体都错，含标准基线）优先怀疑数据/构造/内在"
+            "难度；相对参照新增的错误才是该方法的特异性盲区，优先分析。"
+            "新增/改对为同一批样本上的配对计数，已附精确 McNemar 检验"
+            "（多候选按 Holm 校正）；p 不显著时只能作方向性线索。"
+            + (
+                ""
+                if has_ref
+                else f"⚠ 参照变体 {reference} 未评测或没有"
+                "可用错误清单（不等于零错误），"
+                "新增/改对计数不可得。"
+            )
+            + f"个案列表每类最多展示 {CROSS_LIST_LIMIT} 条，计数为完整值。"
+        ),
     }
     out["recommendations"] = synthesize_cross_improvements(out)
     return out
 
 
-def process_ruler_json(ruler_path: str, out_dir: Optional[str] = None,
-                       write_md: bool = True, payload: Optional[Dict] = None) -> Dict:
+def process_ruler_json(
+    ruler_path: str,
+    out_dir: Optional[str] = None,
+    write_md: bool = True,
+    payload: Optional[Dict] = None,
+) -> Dict:
     """处理一个 ruler_*.json：归因分析 + 写 md（与源文件同目录）。
 
     payload 已由调用方解析时可直接传入；为 None 时自行读取。
@@ -1418,24 +1722,28 @@ def process_ruler_json(ruler_path: str, out_dir: Optional[str] = None,
             payload = json.load(f)
     if not isinstance(payload, dict):
         raise ValueError("JSON 顶层不是对象，无法解析 badcases")
-    analysis = analyze_badcases(payload.get("badcases") or [],
-                               variant=payload.get("variant"))
+    analysis = analyze_badcases(
+        payload.get("badcases") or [], variant=payload.get("variant")
+    )
     analysis["seed"] = payload.get("seed")
     analysis["source"] = os.path.basename(ruler_path)
     if write_md:
         out_dir = out_dir or os.path.dirname(os.path.abspath(ruler_path))
         base = os.path.splitext(os.path.basename(ruler_path))[0]
         # ruler_<variant><suffix>.json -> badcases_<variant><suffix>.md
-        name = base[len("ruler_"):] if base.startswith("ruler_") else base
+        name = base[len("ruler_") :] if base.startswith("ruler_") else base
         write_badcase_md(analysis, os.path.join(out_dir, f"badcases_{name}.md"))
     return analysis
 
 
 def main():
     p = argparse.ArgumentParser(description="预测错误样本归因分析（RULER + 语言建模）")
-    p.add_argument("--results_dir", required=True, help="含 ruler_*.json / eval_*.json 的结果目录")
-    p.add_argument("--ruler", default=None,
-                   help="只处理指定文件名（默认目录内全部 ruler_*.json）")
+    p.add_argument(
+        "--results_dir", required=True, help="含 ruler_*.json / eval_*.json 的结果目录"
+    )
+    p.add_argument(
+        "--ruler", default=None, help="只处理指定文件名（默认目录内全部 ruler_*.json）"
+    )
     p.add_argument("--no_md", action="store_true", help="不写 Markdown 报告")
     args = p.parse_args()
 
@@ -1464,9 +1772,10 @@ def main():
         if not ana["n_badcases"]:
             print(f"[badcase] {name}: 无错误样本")
             continue
-        top = ", ".join(f"{CATEGORY_CN.get(k, k)}×{v}"
-                        for k, v in sorted(ana["category_counts"].items(),
-                                           key=lambda kv: -kv[1]))
+        top = ", ".join(
+            f"{CATEGORY_CN.get(k, k)}×{v}"
+            for k, v in sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
+        )
         print(f"[badcase] {name}: {ana['n_badcases']} 条错误样本 —— {top}")
         # 直接在终端打印前 3 条个案（预测错误的样本要看得见，而非埋在文件里）
         for i, c in enumerate(ana["cases"][:3], 1):
@@ -1485,9 +1794,10 @@ def main():
             continue
         window_analyses.append(ana)
         name = os.path.splitext(os.path.basename(fp))[0]
-        top = ", ".join(f"{WINDOW_CATEGORY_CN.get(k, k)}×{v}"
-                        for k, v in sorted(ana["category_counts"].items(),
-                                           key=lambda kv: -kv[1]))
+        top = ", ".join(
+            f"{WINDOW_CATEGORY_CN.get(k, k)}×{v}"
+            for k, v in sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
+        )
         print(f"[badcase] {name}: 最差窗口 {ana['n_windows']} 个 —— {top}")
         for i, c in enumerate(ana["cases"][:2], 1):
             for line in format_window_case(i, c):
@@ -1504,7 +1814,8 @@ def main():
         # （与 cross_variant_analysis 的语义一致）；只有缺失/非列表才视为无数据。
         if v and isinstance(payload.get("badcases"), list):
             per_variant_cases.setdefault(v, []).append(
-                (payload.get("seed"), fp, payload["badcases"]))
+                (payload.get("seed"), fp, payload["badcases"])
+            )
 
     def _seed_key(item):
         raw = item[0]
@@ -1531,31 +1842,55 @@ def main():
 
     # 每个变体取“最小种子”（与 run_all.cross_variant_badcase_map 同策略）：
     # paths 是文件名字典序（seed1000 排在 seed999 之前），取首个会选错种子。
-    per_variant = {v: min(cands, key=_seed_key)[2]
-                   for v, cands in per_variant_cases.items()}
+    per_variant = {
+        v: min(cands, key=_seed_key)[2] for v, cands in per_variant_cases.items()
+    }
     if all_analyses or window_analyses:
         merged = {
             "n_files": len(all_analyses),
             "variants": [a.get("variant") for a in all_analyses],
             "total_badcases": sum(a["n_badcases"] for a in all_analyses),
-            "category_counts": dict(sum(
-                (Counter(a["category_counts"]) for a in all_analyses),
-                Counter())),
+            "category_counts": dict(
+                sum((Counter(a["category_counts"]) for a in all_analyses), Counter())
+            ),
             "n_worstcase_files": len(window_analyses),
             "total_worst_windows": sum(a["n_windows"] for a in window_analyses),
-            "worst_category_counts": dict(sum(
-                (Counter(a["category_counts"]) for a in window_analyses),
-                Counter())),
-            "per_file": [{k: a.get(k) for k in
-                          ("variant", "seed", "n_badcases", "category_counts",
-                           "hard_sample_ratio", "deep_position_fail_ratio",
-                           "label_errors", "source")}
-                         for a in all_analyses],
-            "per_worstcase_file": [{k: a.get(k) for k in
-                                    ("variant", "seed", "split", "n_windows",
-                                     "category_counts", "gold_in_context_rate",
-                                     "mean_top1_prob", "mean_loss", "source")}
-                                   for a in window_analyses],
+            "worst_category_counts": dict(
+                sum((Counter(a["category_counts"]) for a in window_analyses), Counter())
+            ),
+            "per_file": [
+                {
+                    k: a.get(k)
+                    for k in (
+                        "variant",
+                        "seed",
+                        "n_badcases",
+                        "category_counts",
+                        "hard_sample_ratio",
+                        "deep_position_fail_ratio",
+                        "label_errors",
+                        "source",
+                    )
+                }
+                for a in all_analyses
+            ],
+            "per_worstcase_file": [
+                {
+                    k: a.get(k)
+                    for k in (
+                        "variant",
+                        "seed",
+                        "split",
+                        "n_windows",
+                        "category_counts",
+                        "gold_in_context_rate",
+                        "mean_top1_prob",
+                        "mean_loss",
+                        "source",
+                    )
+                }
+                for a in window_analyses
+            ],
         }
         # 改进方向：汇总每份分析的合成结果并标注来源，终端只打印高优先级条目
         # （分析不能止步于分类；错误模式必须转成下一步可执行的实验）。
@@ -1584,8 +1919,10 @@ def main():
                     continue
                 seen_a.add(key)
                 shown += 1
-                print(f"[badcase]   [{r.get('source')}][{r.get('axis')}"
-                      f"·{r.get('priority')}] {r.get('suggestion')}")
+                print(
+                    f"[badcase]   [{r.get('source')}][{r.get('axis')}"
+                    f"·{r.get('priority')}] {r.get('suggestion')}"
+                )
                 if shown >= 3:
                     break
         print(f"[badcase] 汇总 -> {out}")

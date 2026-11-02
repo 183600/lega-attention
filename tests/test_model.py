@@ -1,4 +1,5 @@
 """模型级测试：KV 缓存一致性、贪心生成确定性、检查点保存与恢复。"""
+
 import os
 import tempfile
 
@@ -6,17 +7,27 @@ import numpy as np
 import torch
 
 from lega.attention import CausalSelfAttention, VARIANTS
-from lega.data import (_stage_to_device, get_train_batch, get_val_windows,
-                       get_val_windows_at)
+from lega.data import (
+    _stage_to_device,
+    get_train_batch,
+    get_val_windows,
+    get_val_windows_at,
+)
 from lega.model import GPT, load_model, save_checkpoint
-from lega.train import (_val_eval_indices, _val_eval_window_starts,
-                        evaluate_val)
+from lega.train import _val_eval_indices, _val_eval_window_starts, evaluate_val
 
 
 def _tiny(variant):
     torch.manual_seed(0)
-    return GPT(vocab_size=64, block_size=32, d_model=32, n_layers=2, n_heads=2,
-               ffn_mult=4, variant=variant)
+    return GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=32,
+        n_layers=2,
+        n_heads=2,
+        ffn_mult=4,
+        variant=variant,
+    )
 
 
 def test_model_constructor_rejects_invalid_regularization():
@@ -26,20 +37,43 @@ def test_model_constructor_rejects_invalid_regularization():
     latency、外部脚本）会绕过它：``bool`` 被 float 成 0/1、NaN 写入
     gate_d，都会让后续训练/评测结果失去意义。
     """
-    bad_probs = (True, False, np.bool_(True), -0.1, 1.1, float("nan"),
-                 float("inf"), None, "nan")
+    bad_probs = (
+        True,
+        False,
+        np.bool_(True),
+        -0.1,
+        1.1,
+        float("nan"),
+        float("inf"),
+        None,
+        "nan",
+    )
     for kw in ("dropout", "attn_dropout"):
         for bad in bad_probs:
             try:
-                GPT(vocab_size=32, block_size=16, d_model=16, n_layers=1,
-                    n_heads=2, variant="lega", **{kw: bad})
+                GPT(
+                    vocab_size=32,
+                    block_size=16,
+                    d_model=16,
+                    n_layers=1,
+                    n_heads=2,
+                    variant="lega",
+                    **{kw: bad},
+                )
                 raise AssertionError(f"GPT({kw}={bad!r}) 应被拒绝")
             except ValueError as exc:
                 assert kw in str(exc)
     for bad in (True, np.bool_(False), float("nan"), float("inf"), None, "nan"):
         try:
-            GPT(vocab_size=32, block_size=16, d_model=16, n_layers=1,
-                n_heads=2, variant="lega", gate_bias_init=bad)
+            GPT(
+                vocab_size=32,
+                block_size=16,
+                d_model=16,
+                n_layers=1,
+                n_heads=2,
+                variant="lega",
+                gate_bias_init=bad,
+            )
             raise AssertionError(f"GPT(gate_bias_init={bad!r}) 应被拒绝")
         except ValueError as exc:
             assert "gate_bias_init" in str(exc)
@@ -52,13 +86,23 @@ def test_model_constructor_rejects_invalid_regularization():
     for bad in (True, float("nan"), float("inf"), None, "nan"):
         try:
             CausalSelfAttention(16, 2, gate_bias_init=bad)
-            raise AssertionError(f"CausalSelfAttention(gate_bias_init={bad!r}) 应被拒绝")
+            raise AssertionError(
+                f"CausalSelfAttention(gate_bias_init={bad!r}) 应被拒绝"
+            )
         except ValueError as exc:
             assert "gate_bias_init" in str(exc)
 
-    model = GPT(vocab_size=32, block_size=16, d_model=16, n_layers=1,
-                n_heads=2, variant="lega", dropout="0.25",
-                attn_dropout="0.5", gate_bias_init="1.5")
+    model = GPT(
+        vocab_size=32,
+        block_size=16,
+        d_model=16,
+        n_layers=1,
+        n_heads=2,
+        variant="lega",
+        dropout="0.25",
+        attn_dropout="0.5",
+        gate_bias_init="1.5",
+    )
     assert model.dropout_p == 0.25
     assert model.blocks[0].attn.attn_dropout == 0.5
     assert model.gate_bias_init == 1.5
@@ -77,12 +121,13 @@ def test_kv_cache_matches_full_forward():
             past = None
             inc = []
             for t in range(12):
-                out = model(idx[:, t:t + 1], past_kv=past)
+                out = model(idx[:, t : t + 1], past_kv=past)
                 past = out["past_kv"]
                 inc.append(out["logits"])
             inc = torch.cat(inc, dim=1)
-        assert torch.allclose(full, inc, atol=1e-4, rtol=1e-4), \
-            f"{v} KV 缓存不一致, max diff={(full-inc).abs().max().item()}"
+        assert torch.allclose(
+            full, inc, atol=1e-4, rtol=1e-4
+        ), f"{v} KV 缓存不一致, max diff={(full-inc).abs().max().item()}"
         print(f"  [ok] {v}: KV 缓存一致 (max diff {(full-inc).abs().max().item():.2e})")
 
 
@@ -97,13 +142,16 @@ def test_chunked_prefill_matches_full_forward():
             past = None
             inc = []
             for lo in (0, 5, 10):
-                out = model(idx[:, lo:lo + 5], past_kv=past)
+                out = model(idx[:, lo : lo + 5], past_kv=past)
                 past = out["past_kv"]
                 inc.append(out["logits"])
             inc = torch.cat(inc, dim=1)
-        assert torch.allclose(full, inc, atol=1e-4, rtol=1e-4), \
-            f"{v} 分块预填充不一致, max diff={(full - inc).abs().max().item()}"
-        print(f"  [ok] {v}: 分块预填充一致 (max diff {(full - inc).abs().max().item():.2e})")
+        assert torch.allclose(
+            full, inc, atol=1e-4, rtol=1e-4
+        ), f"{v} 分块预填充不一致, max diff={(full - inc).abs().max().item()}"
+        print(
+            f"  [ok] {v}: 分块预填充一致 (max diff {(full - inc).abs().max().item():.2e})"
+        )
 
 
 def test_placebo_evidence_uses_absolute_positions():
@@ -113,8 +161,15 @@ def test_placebo_evidence_uses_absolute_positions():
     每块也从 0 重新开始；默认 gate_a=gate_b=0 时该错误被完全掩盖。
     """
     torch.manual_seed(0)
-    model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=2,
-                n_heads=2, ffn_mult=4, variant="lega_placebo")
+    model = GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=32,
+        n_layers=2,
+        n_heads=2,
+        ffn_mult=4,
+        variant="lega_placebo",
+    )
     with torch.no_grad():
         for name, p in model.named_parameters():
             if "gate_a" in name or "gate_b" in name:
@@ -128,33 +183,43 @@ def test_placebo_evidence_uses_absolute_positions():
         # 分块预填 + KV 缓存
         past, chunks = None, []
         for lo in (0, 5):
-            out = model(idx[:, lo:lo + 5], past_kv=past)
+            out = model(idx[:, lo : lo + 5], past_kv=past)
             past = out["past_kv"]
             chunks.append(out["logits"])
         chunked = torch.cat(chunks, dim=1)
         assert torch.allclose(full, chunked, atol=1e-4, rtol=1e-4), (
             "lega_placebo 分块预填与全量不一致, max diff="
-            f"{(full - chunked).abs().max().item()}")
+            f"{(full - chunked).abs().max().item()}"
+        )
         # 静态 KV 缓存逐 token 解码
-        kv = [(torch.empty(1, 2, 32, 16), torch.empty(1, 2, 32, 16))
-              for _ in range(2)]
+        kv = [(torch.empty(1, 2, 32, 16), torch.empty(1, 2, 32, 16)) for _ in range(2)]
         outs = [model(idx[:, :5], kv_cache=kv, cache_pos=0)["logits"]]
         for pos in range(5, 10):
-            outs.append(model(idx[:, pos:pos + 1], kv_cache=kv,
-                              cache_pos=pos)["logits"])
+            outs.append(
+                model(idx[:, pos : pos + 1], kv_cache=kv, cache_pos=pos)["logits"]
+            )
         decoded = torch.cat(outs, dim=1)
         assert torch.allclose(full, decoded, atol=1e-4, rtol=1e-4), (
             "lega_placebo 逐 token 解码与全量不一致, max diff="
-            f"{(full - decoded).abs().max().item()}")
+            f"{(full - decoded).abs().max().item()}"
+        )
     print("  [ok] lega_placebo 伪证据按绝对位置生成（分块/解码与全量一致）")
 
 
 def test_variants_share_base_weights_same_seed():
     """公平对比前提：同 seed 下所有变体的共享基础参数必须逐元素一致。"""
+
     def build(v):
         torch.manual_seed(123)
-        return GPT(vocab_size=64, block_size=32, d_model=32, n_layers=2,
-                   n_heads=2, ffn_mult=4, variant=v)
+        return GPT(
+            vocab_size=64,
+            block_size=32,
+            d_model=32,
+            n_layers=2,
+            n_heads=2,
+            ffn_mult=4,
+            variant=v,
+        )
 
     ref = build("standard").state_dict()
     for v in VARIANTS:
@@ -190,8 +255,9 @@ def test_generate_rejects_invalid_length_and_top_k():
         except ValueError as exc:
             assert "top_k" in str(exc)
     assert torch.equal(model.generate(idx, max_new_tokens=0), idx)
-    out = model.generate(idx, max_new_tokens=np.int64(2), greedy=False,
-                         top_k=np.int64(4))
+    out = model.generate(
+        idx, max_new_tokens=np.int64(2), greedy=False, top_k=np.int64(4)
+    )
     assert out.shape == (1, 7), out.shape
     print("  [ok] generate：拒绝非法 max_new_tokens/top_k")
 
@@ -200,8 +266,14 @@ def test_generate_eos_stops_per_row_without_batch_coupling():
     """提供 eos_token_id 时各行的 EOS 判定必须独立：批内某行的命中/未命中
     不能改变其它行的生成内容，也不得把「各行不同步命中」误判成不停。"""
     torch.manual_seed(0)
-    m = GPT(vocab_size=12, block_size=32, d_model=16, n_layers=1, n_heads=2,
-            variant="standard")
+    m = GPT(
+        vocab_size=12,
+        block_size=32,
+        d_model=16,
+        n_layers=1,
+        n_heads=2,
+        variant="standard",
+    )
     m.eval()
     T0, max_new, eos = 6, 10, 5
     # 以 prompt 首 token 标识行；值 = 产生 EOS 的生成步下标。行 1 第 1 步、
@@ -212,7 +284,7 @@ def test_generate_eos_stops_per_row_without_batch_coupling():
     def fake_forward(cur, kv_cache=None, cache_pos=0, last_logits_only=True):
         if cur.shape[1] > 1:
             state["rows"] = cur[:, 0].tolist()
-        step = cache_pos + cur.shape[1] - T0     # 本次将产生的 token 的步下标
+        step = cache_pos + cur.shape[1] - T0  # 本次将产生的 token 的步下标
         logits = torch.full((cur.shape[0], 1, m.vocab_size), -5.0)
         for r, key in enumerate(state["rows"]):
             t = eos if hit_at.get(key, -1) == step else (key + 6) % m.vocab_size
@@ -229,12 +301,12 @@ def test_generate_eos_stops_per_row_without_batch_coupling():
     assert ref.shape == (3, T0 + max_new)
     # 所有行都命中后，截到「最后一行首次命中」的步（行 2 第 3 步 → 长度 10）
     assert ab.shape[1] == T0 + 3 + 1
-    assert torch.equal(ab, ref[:2, :T0 + 3 + 1]), "停止只能裁剪，不能改变生成内容"
+    assert torch.equal(ab, ref[:2, : T0 + 3 + 1]), "停止只能裁剪，不能改变生成内容"
     # 有行从不命中时不得提前停止；行内容不随批内其它行改变
     assert ac.shape == (2, T0 + max_new)
     assert torch.equal(ac, ref[::2]), "行内容与批内其它行耦合"
     # 单行行为保持：首次命中即停（第 1 步 → 长度 8）
-    assert torch.equal(single, ref[:1, :T0 + 1 + 1])
+    assert torch.equal(single, ref[:1, : T0 + 1 + 1])
     print("  [ok] EOS 逐行独立停止：批量截断到最晚命中步，单行不受批内影响")
 
 
@@ -252,8 +324,16 @@ def test_last_logits_only_matches_full_logits():
 
 def test_generate_restores_training_mode_on_error():
     """生成中途失败（如超过 block_size）不能把模型永久留在 eval 模式。"""
-    model = GPT(vocab_size=64, block_size=8, d_model=32, n_layers=1, n_heads=2,
-                ffn_mult=4, variant="lega", dropout=0.2)
+    model = GPT(
+        vocab_size=64,
+        block_size=8,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="lega",
+        dropout=0.2,
+    )
     model.train()
     idx = torch.randint(0, 64, (1, 5))
     try:
@@ -269,7 +349,9 @@ def test_checkpoint_roundtrip():
     model = _tiny("lega")
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "model.pt")
-        save_checkpoint(path, model, extra={"variant": "lega", "step": 3, "val_ppl": 1.23})
+        save_checkpoint(
+            path, model, extra={"variant": "lega", "step": 3, "val_ppl": 1.23}
+        )
         m2, ck = load_model(path)
         assert ck["step"] == 3 and ck["variant"] == "lega"
         idx = torch.randint(0, 64, (1, 8))
@@ -300,8 +382,10 @@ def test_checkpoint_save_is_atomic_on_serialization_failure(monkeypatch):
             raise OSError("No space left on device")
 
         monkeypatch.setattr(torch, "save", broken_save)
-        for target, should_exist in ((path, True),
-                                     (os.path.join(d, "model.pt"), False)):
+        for target, should_exist in (
+            (path, True),
+            (os.path.join(d, "model.pt"), False),
+        ):
             try:
                 save_checkpoint(target, model, extra={"variant": "lega"})
             except OSError:
@@ -317,15 +401,22 @@ def test_checkpoint_save_is_atomic_on_serialization_failure(monkeypatch):
         m2, _ = load_model(path)
         idx = torch.randint(0, 64, (1, 8))
         with torch.no_grad():
-            assert torch.allclose(model(idx)["logits"], m2(idx)["logits"],
-                                  atol=1e-6)
+            assert torch.allclose(model(idx)["logits"], m2(idx)["logits"], atol=1e-6)
 
 
 def test_checkpoint_roundtrip_preserves_attention_path():
     """评测恢复必须沿用训练时的注意力实现，不能被默认值静默改写。"""
     torch.manual_seed(0)
-    model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1, n_heads=2,
-                ffn_mult=4, variant="standard", use_sdpa_standard=False)
+    model = GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="standard",
+        use_sdpa_standard=False,
+    )
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "model.pt")
         save_checkpoint(path, model)
@@ -339,8 +430,16 @@ def test_checkpoint_roundtrip_preserves_attention_path():
 def test_load_model_parses_attention_switch_strictly():
     """checkpoint/显式覆盖里的 "false" 不能因 bool("false") 静默变成 True。"""
     torch.manual_seed(0)
-    model = GPT(vocab_size=64, block_size=32, d_model=32, n_layers=1, n_heads=2,
-                ffn_mult=4, variant="standard", use_sdpa_standard=True)
+    model = GPT(
+        vocab_size=64,
+        block_size=32,
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        ffn_mult=4,
+        variant="standard",
+        use_sdpa_standard=True,
+    )
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "model.pt")
         save_checkpoint(path, model)
@@ -392,8 +491,9 @@ def test_compiled_checkpoint_roundtrip():
     except Exception as exc:
         print(f"  [skip] torch.compile 不可用: {exc}")
         return
-    assert any(k.startswith("_orig_mod.") for k in compiled_state), \
-        "环境未产生 _orig_mod 前缀，测试无意义"
+    assert any(
+        k.startswith("_orig_mod.") for k in compiled_state
+    ), "环境未产生 _orig_mod 前缀，测试无意义"
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "model.pt")
         save_checkpoint(path, compiled, extra={"variant": "lega"})
@@ -412,14 +512,14 @@ def test_val_eval_indices_cover_dataset_without_repeats():
     idx, n_windows = _val_eval_indices(1001, 10, 500)
     assert n_windows == 100
     assert len(idx) == 100
-    assert len(set(idx.tolist())) == 100   # 请求窗口数超过可用数时不循环复用
+    assert len(set(idx.tolist())) == 100  # 请求窗口数超过可用数时不循环复用
     assert idx[0] == 0 and idx[-1] == 99
 
     idx, _ = _val_eval_indices(31, 10, 10)
-    assert idx.tolist() == [0, 1, 2]       # 不足 iters 时评估全部可用窗口
+    assert idx.tolist() == [0, 1, 2]  # 不足 iters 时评估全部可用窗口
 
     idx, _ = _val_eval_indices(1001, 10, 1)
-    assert idx.tolist() == [49]            # 单窗估计取中间窗口，避免偏前
+    assert idx.tolist() == [49]  # 单窗估计取中间窗口，避免偏前
 
 
 def test_val_eval_window_starts_phase_shift_matches_indices_at_zero():
@@ -467,7 +567,7 @@ def test_evaluate_val_returns_coverage_and_gate_metrics():
     val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
     metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=50, amp=False)
     assert metrics["eval_iters_requested"] == 50
-    assert metrics["eval_iters"] == 9      # (100-1)//10 个完整窗口，不循环复用
+    assert metrics["eval_iters"] == 9  # (100-1)//10 个完整窗口，不循环复用
     assert metrics["val_windows"] == 9
     assert metrics["val_tokens_evaluated"] == 90
     assert metrics["val_loss"] == metrics["val_loss"]  # not NaN
@@ -481,8 +581,7 @@ def test_evaluate_val_returns_coverage_and_gate_metrics():
     assert all(0.0 <= x <= 1.0 for x in metrics["gate_layer_mean"])
     # 无门的 standard 必须显式为空，而不是伪造 0/1 或复用别变体的统计。
     std_model = _tiny("standard")
-    std_metrics = evaluate_val(std_model, val, ctx=10, device="cpu",
-                               iters=9, amp=False)
+    std_metrics = evaluate_val(std_model, val, ctx=10, device="cpu", iters=9, amp=False)
     assert std_metrics["gate_mean"] is None
     assert std_metrics["gate_std"] is None
     assert std_metrics["gate_layer_mean"] is None
@@ -498,14 +597,12 @@ def test_evaluate_val_accumulates_finite_huge_losses_without_overflow():
     def _huge_forward(x, targets=None, **kwargs):
         out = orig_forward(x, targets=targets, **kwargs)
         out["loss"] = torch.tensor(huge, dtype=torch.float32)
-        out["loss_per_window"] = torch.full((x.shape[0],), huge,
-                                            dtype=torch.float32)
+        out["loss_per_window"] = torch.full((x.shape[0],), huge, dtype=torch.float32)
         return out
 
     model.forward = _huge_forward
     val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
-    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=9,
-                           amp=False)
+    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=9, amp=False)
     assert np.isfinite(metrics["val_loss"]), metrics["val_loss"]
     assert all(np.isfinite(x) for x in metrics["val_loss_ci95"])
     print("  [ok] evaluate_val：有限巨大窗口损失不被 fp32 累加溢出成 inf")
@@ -538,8 +635,7 @@ def test_val_eval_indices_rejects_fractional_bool_specs():
             raise AssertionError(f"非法 eval_iters 应报错: {bad!r}")
         except ValueError:
             pass
-    for val_len, ctx in ((True, 10), (100.5, 10), (101, 10.5),
-                         (101, True), (101, 0)):
+    for val_len, ctx in ((True, 10), (100.5, 10), (101, 10.5), (101, True), (101, 0)):
         try:
             _val_eval_indices(val_len, ctx, 2)
             raise AssertionError(f"非法窗口规格应报错: {val_len!r}, {ctx!r}")
@@ -555,8 +651,14 @@ def test_evaluate_val_restores_mode_on_error():
     model = _tiny("lega")
     model.train()
     try:
-        evaluate_val(model, np.arange(5, dtype=np.int64).astype(np.uint16),
-                     ctx=10, device="cpu", iters=2, amp=False)
+        evaluate_val(
+            model,
+            np.arange(5, dtype=np.int64).astype(np.uint16),
+            ctx=10,
+            device="cpu",
+            iters=2,
+            amp=False,
+        )
         raise AssertionError("过短验证集应报错")
     except ValueError:
         pass
@@ -583,13 +685,11 @@ def test_per_window_losses_match_individual_forwards():
     with torch.inference_mode():
         out = model(idx, targets=y, return_window_losses=True)
     assert out["loss_per_window"].shape == (3,)
-    assert abs(float(out["loss"]) -
-               float(out["loss_per_window"].mean())) < 1e-6
+    assert abs(float(out["loss"]) - float(out["loss_per_window"].mean())) < 1e-6
     for r in range(3):
         with torch.inference_mode():
-            one = model(idx[r:r + 1], targets=y[r:r + 1])
-        assert abs(float(one["loss"]) -
-                   float(out["loss_per_window"][r])) < 1e-5
+            one = model(idx[r : r + 1], targets=y[r : r + 1])
+        assert abs(float(one["loss"]) - float(out["loss_per_window"][r])) < 1e-5
     # 训练/需要梯度的路径不得支持该选项（避免悄悄改变训练图）
     model.train()
     try:
@@ -623,13 +723,17 @@ def test_targets_ignore_index_forward_backward():
 
     chunked = model(idx, targets=targets)["loss"]
     chunked.backward()
-    grads_chunked = {n: p.grad.detach().clone()
-                     for n, p in model.named_parameters() if p.grad is not None}
+    grads_chunked = {
+        n: p.grad.detach().clone()
+        for n, p in model.named_parameters()
+        if p.grad is not None
+    }
     model.zero_grad(set_to_none=True)
 
     logits = model(idx)["logits"]
     ref = torch.nn.functional.cross_entropy(
-        logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
+        logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100
+    )
     ref.backward()
     assert torch.allclose(chunked, ref, atol=1e-6, rtol=1e-6)
     for n, p in model.named_parameters():
@@ -649,7 +753,8 @@ def test_chunked_ce_preserves_float64_dtype_and_value():
     loss = model(idx, targets=idx)["loss"]
     logits = model(idx)["logits"]
     ref = torch.nn.functional.cross_entropy(
-        logits.reshape(-1, logits.size(-1)), idx.reshape(-1))
+        logits.reshape(-1, logits.size(-1)), idx.reshape(-1)
+    )
     assert loss.dtype == torch.float64
     assert torch.allclose(loss, ref, atol=1e-12, rtol=1e-12)
 
@@ -661,13 +766,17 @@ def test_chunked_ce_repeated_backward_does_not_decay_grads():
     idx = torch.randint(0, 64, (2, 9))
     loss = model(idx, targets=idx)["loss"]
     loss.backward(retain_graph=True)
-    first = {n: p.grad.detach().clone() for n, p in model.named_parameters()
-             if p.grad is not None}
+    first = {
+        n: p.grad.detach().clone()
+        for n, p in model.named_parameters()
+        if p.grad is not None
+    }
     loss.backward()
     for n, p in model.named_parameters():
         if n in first:
-            assert torch.allclose(p.grad, 2 * first[n], atol=1e-6, rtol=1e-5), \
-                f"{n}: 重复 backward 梯度不可累加"
+            assert torch.allclose(
+                p.grad, 2 * first[n], atol=1e-6, rtol=1e-5
+            ), f"{n}: 重复 backward 梯度不可累加"
     print("  [ok] ChunkedLinearCE 重复 backward 梯度可累加（无 1/n 衰减）")
 
 
@@ -676,14 +785,17 @@ def test_frozen_embedding_training_backward_under_grad():
     LayerNorm 反向会保存 x（用于 weight/bias 梯度），原地改写 x 会让
     backward 报“变量被 inplace 修改”而直接失败。"""
     model = _tiny("lega")
-    model.tok_emb.weight.requires_grad_(False)   # lm_head 权重与其共享
+    model.tok_emb.weight.requires_grad_(False)  # lm_head 权重与其共享
     model.train()
     idx = torch.randint(0, 64, (2, 10))
     loss = model(idx, targets=idx)["loss"]
     loss.backward()
     assert model.tok_emb.weight.grad is None
-    assert any(p.grad is not None and p.grad.abs().sum() > 0
-               for p in model.parameters() if p.requires_grad)
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in model.parameters()
+        if p.requires_grad
+    )
     print("  [ok] 冻结嵌入时训练 backward 在梯度模式下正常完成")
 
 
@@ -692,8 +804,9 @@ def test_evaluate_val_optional_window_loss_detail_for_pairing():
     torch.manual_seed(0)
     model = _tiny("lega")
     val = (np.arange(100, dtype=np.int64) % 64).astype(np.uint16)
-    metrics = evaluate_val(model, val, ctx=10, device="cpu", iters=9,
-                           amp=False, collect_window_losses=True)
+    metrics = evaluate_val(
+        model, val, ctx=10, device="cpu", iters=9, amp=False, collect_window_losses=True
+    )
     assert len(metrics["window_losses"]) == metrics["eval_iters"] == 9
     assert len(metrics["window_indices"]) == 9
     assert len(set(metrics["window_indices"])) == 9
@@ -702,9 +815,16 @@ def test_evaluate_val_optional_window_loss_detail_for_pairing():
     plain = evaluate_val(model, val, ctx=10, device="cpu", iters=9, amp=False)
     assert "window_losses" not in plain and "window_indices" not in plain
 
-    shifted = evaluate_val(model, val, ctx=10, device="cpu", iters=9,
-                           amp=False, collect_window_losses=True,
-                           window_offset=3)
+    shifted = evaluate_val(
+        model,
+        val,
+        ctx=10,
+        device="cpu",
+        iters=9,
+        amp=False,
+        collect_window_losses=True,
+        window_offset=3,
+    )
     assert shifted["eval_window_offset"] == 3
     assert shifted["eval_iters"] == 9
     assert len(shifted["window_losses"]) == 9
@@ -712,8 +832,7 @@ def test_evaluate_val_optional_window_loss_detail_for_pairing():
     starts = shifted["window_starts"]
     assert len(starts) == 9 and len(set(starts)) == 9
     assert all(s % 10 == 3 for s in starts)
-    assert abs(sum(shifted["window_losses"]) / 9
-               - shifted["val_loss"]) < 1e-6
+    assert abs(sum(shifted["window_losses"]) / 9 - shifted["val_loss"]) < 1e-6
     print("  [ok] evaluate_val 逐窗口明细可选落盘，且均值与 val_loss 一致")
 
 
@@ -725,8 +844,14 @@ def test_forward_zero_length_targets_returns_finite_zero_loss():
         with torch.no_grad():
             out = m(x, targets=x, return_window_losses=True)
         assert out["logits"] is None
-        assert out["loss"].dim() == 0 and float(out["loss"]) == 0.0, (shape, out["loss"])
-        assert out["loss_per_window"].shape == (shape[0],), (shape, out["loss_per_window"].shape)
+        assert out["loss"].dim() == 0 and float(out["loss"]) == 0.0, (
+            shape,
+            out["loss"],
+        )
+        assert out["loss_per_window"].shape == (shape[0],), (
+            shape,
+            out["loss_per_window"].shape,
+        )
         assert torch.isfinite(out["loss_per_window"]).all()
     # 需要梯度的空输入也应能完成 backward（零梯度），而不是抛 TypeError
     x = torch.zeros(2, 0, dtype=torch.long)
@@ -778,7 +903,7 @@ def test_data_sampling_rejects_invalid_window_identity():
         except ValueError:
             raised = True
         assert raised, bad_ctx
-    for bad_idx in (-1, [-1, 2], [1.5], [10 ** 400]):
+    for bad_idx in (-1, [-1, 2], [1.5], [10**400]):
         try:
             get_val_windows(data, 8, bad_idx, "cpu")
             raised = False

@@ -16,6 +16,7 @@
 每个 trial 以子进程调用 `python -m lega.train` 真实训练，产出目录内
 `eval.json` / `train_log.jsonl` / `run_manifest.json` 全量保留，便于审计。
 """
+
 import argparse
 import json
 import math
@@ -27,10 +28,18 @@ import time
 import numpy as np
 
 from .repro import current_pipeline_run_id
-from .utils import (ensure_cublas_workspace_config, load_config_json,
-                    mean_std, save_json, seed_int, strict_int)
+from .utils import (
+    ensure_cublas_workspace_config,
+    load_config_json,
+    mean_std,
+    save_json,
+    seed_int,
+    strict_int,
+)
 
 DEFAULT_LR_MULTS = (0.5, 1.0, 2.0)
+
+
 def _finite_number(value, name: str) -> float:
     """有限浮点超参数/容差；bool/NaN/Inf/非数值显式拒绝。"""
     if isinstance(value, (bool, np.bool_)):
@@ -110,8 +119,7 @@ def trial_env(seed: int, env=None) -> dict:
     return e
 
 
-def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
-               wd_list=None):
+def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS, wd_list=None):
     """生成网格；默认组合 (lr0, wd0) 确保存在且排在首位。"""
     lr0 = _finite_number(lr0, "lr0")
     wd0 = _finite_number(wd0, "wd0")
@@ -120,8 +128,7 @@ def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
     lr_mults = [_finite_number(m, "lr_mults") for m in lr_mults]
     if any(m < 0 for m in lr_mults):
         raise ValueError(f"lr_mults 必须 >= 0，收到 {lr_mults!r}")
-    wds = [wd0] if wd_list is None else [
-        _finite_number(w, "wd_list") for w in wd_list]
+    wds = [wd0] if wd_list is None else [_finite_number(w, "wd_list") for w in wd_list]
     if any(w < 0 for w in wds):
         raise ValueError(f"wd_list 必须 >= 0，收到 {wds!r}")
     if wd0 not in wds:
@@ -134,8 +141,8 @@ def build_grid(lr0: float, wd0: float, lr_mults=DEFAULT_LR_MULTS,
             # trial 配置无法写入合法 JSON/无法训练，必须在建网格时拒绝。
             if not math.isfinite(lr) or not math.isfinite(wd):
                 raise ValueError(
-                    f"网格组合不可表示：lr0={lr0!r} × {m!r} = {lr!r}, "
-                    f"wd={wd!r}")
+                    f"网格组合不可表示：lr0={lr0!r} × {m!r} = {lr!r}, " f"wd={wd!r}"
+                )
             pair = (lr, wd)
             if pair not in grid:
                 grid.append(pair)
@@ -154,9 +161,11 @@ def _trial_name(lr: float, wd: float) -> str:
     被悄悄丢掉。``repr(float)`` 对有限浮点是最短且可往返的表示，不同值必有
     不同字符串；替换仅用于文件名安全（不产生 ``.``/``-``/``+``）。
     """
+
     def fmt(x):
         s = repr(float(x))
         return s.replace("+", "").replace("-", "m").replace(".", "p")
+
     return f"trial_lr{fmt(lr)}_wd{fmt(wd)}"
 
 
@@ -218,9 +227,16 @@ def _manifest_identity(out_dir: str) -> dict:
     这里只提取核对所需字段，缺失/畸形时显式 present=False。
     """
     path = os.path.join(out_dir, "run_manifest.json")
-    out = {"present": False, "seed": None, "seed_verified": None,
-           "config_sha256": None, "git_commit": None, "git_dirty": None,
-           "worktree_diff_sha256": None, "data_fingerprint": None}
+    out = {
+        "present": False,
+        "seed": None,
+        "seed_verified": None,
+        "config_sha256": None,
+        "git_commit": None,
+        "git_dirty": None,
+        "worktree_diff_sha256": None,
+        "data_fingerprint": None,
+    }
     if not os.path.exists(path):
         return out
     try:
@@ -273,10 +289,14 @@ def _trial_identity_summary(trials) -> dict:
     # manifest 字段是外部 JSON：列表/对象不可哈希，直接放进 set 会让整份
     # 调优报告在全部 trial 跑完后崩溃。只接受字符串身份；非字符串记为
     # 不可核对（consistent=False），而不是丢弃后当成“一致”。
-    raw_datas = [m.get("data_fingerprint") for m in manifests
-                 if m.get("data_fingerprint") is not None]
-    raw_commits = [m.get("git_commit") for m in manifests
-                   if m.get("git_commit") is not None]
+    raw_datas = [
+        m.get("data_fingerprint")
+        for m in manifests
+        if m.get("data_fingerprint") is not None
+    ]
+    raw_commits = [
+        m.get("git_commit") for m in manifests if m.get("git_commit") is not None
+    ]
     datas = sorted({v for v in raw_datas if isinstance(v, str)})
     commits = sorted({v for v in raw_commits if isinstance(v, str)})
     malformed_data = any(not isinstance(v, str) for v in raw_datas)
@@ -289,25 +309,32 @@ def _trial_identity_summary(trials) -> dict:
         requested = _as_int(t.get("seed"))
         actual = _as_int(m.get("seed"))
         if actual is None or requested is None or actual != requested:
-            seed_mismatches.append({"lr": t.get("lr"),
-                                    "wd": t.get("weight_decay"),
-                                    "requested_seed": t.get("seed"),
-                                    "manifest_seed": m.get("seed")})
+            seed_mismatches.append(
+                {
+                    "lr": t.get("lr"),
+                    "wd": t.get("weight_decay"),
+                    "requested_seed": t.get("seed"),
+                    "manifest_seed": m.get("seed"),
+                }
+            )
     n_missing = len(successful) - len(manifests)
     checked = bool(manifests)
     consistent = None
     if checked:
-        consistent = (n_missing == 0
-                      and not malformed_data and not malformed_commit
-                      and len(datas) <= 1 and len(commits) <= 1
-                      and all(m.get("data_fingerprint") is not None
-                              for m in manifests)
-                      and all(m.get("git_commit") is not None
-                              for m in manifests)
-                      and not seed_mismatches
-                      and all(m.get("seed_verified") is True
-                              and _as_int(m.get("seed")) is not None
-                              for m in manifests))
+        consistent = (
+            n_missing == 0
+            and not malformed_data
+            and not malformed_commit
+            and len(datas) <= 1
+            and len(commits) <= 1
+            and all(m.get("data_fingerprint") is not None for m in manifests)
+            and all(m.get("git_commit") is not None for m in manifests)
+            and not seed_mismatches
+            and all(
+                m.get("seed_verified") is True and _as_int(m.get("seed")) is not None
+                for m in manifests
+            )
+        )
     return {
         "checked": checked,
         "n_successful": len(successful),
@@ -319,10 +346,12 @@ def _trial_identity_summary(trials) -> dict:
         "malformed_git_commit": malformed_commit,
         "seed_mismatches": seed_mismatches,
         "consistent": consistent,
-        "note": ("consistent=True 要求全部成功 trial 的 manifest 都证明种子"
-                 "已生效，且代码 commit/数据指纹一致；全部缺失 manifest 时为 "
-                 "None（未核对），部分缺失或字段不可核对时为 False，"
-                 "不冒充通过。"),
+        "note": (
+            "consistent=True 要求全部成功 trial 的 manifest 都证明种子"
+            "已生效，且代码 commit/数据指纹一致；全部缺失 manifest 时为 "
+            "None（未核对），部分缺失或字段不可核对时为 False，"
+            "不冒充通过。"
+        ),
     }
 
 
@@ -331,9 +360,18 @@ def _load_config_object(path: str) -> dict:
     return load_config_json(path, validate=True)
 
 
-def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
-              wd: float, steps: int, out_dir: str, device: str = "auto",
-              timeout=None) -> dict:
+def run_trial(
+    config: str,
+    data_dir: str,
+    variant: str,
+    seed: int,
+    lr: float,
+    wd: float,
+    steps: int,
+    out_dir: str,
+    device: str = "auto",
+    timeout=None,
+) -> dict:
     """以子进程真实训练一个 trial；失败不抛异常，返回带 error 的记录。
 
     trial 的 lr/weight_decay 通过写入 trial 专属配置注入训练命令（其余字段
@@ -359,24 +397,49 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
     trial_config = os.path.join(out_dir, "config_trial.json")
     with open(trial_config, "w", encoding="utf-8") as f:
         json.dump(trial_cfg, f, ensure_ascii=False, indent=2)
-    cmd = [sys.executable, "-m", "lega.train",
-           "--config", trial_config, "--variant", variant,
-           "--data_dir", data_dir, "--out_dir", out_dir,
-           "--seed", str(seed), "--steps", str(steps),
-           "--device", device]
+    cmd = [
+        sys.executable,
+        "-m",
+        "lega.train",
+        "--config",
+        trial_config,
+        "--variant",
+        variant,
+        "--data_dir",
+        data_dir,
+        "--out_dir",
+        out_dir,
+        "--seed",
+        str(seed),
+        "--steps",
+        str(steps),
+        "--device",
+        device,
+    ]
     t0 = time.perf_counter()
     run_env = trial_env(seed)
-    rec = {"lr": lr, "weight_decay": wd, "seed": seed,
-           "steps": steps, "out_dir": out_dir,
-           # 逐 trial 的确定性环境也可审计（PYTHONHASHSEED 必须与 seed 对齐）
-           "pythonhashseed": run_env["PYTHONHASHSEED"],
-           "cublas_workspace_config": run_env.get("CUBLAS_WORKSPACE_CONFIG")}
+    rec = {
+        "lr": lr,
+        "weight_decay": wd,
+        "seed": seed,
+        "steps": steps,
+        "out_dir": out_dir,
+        # 逐 trial 的确定性环境也可审计（PYTHONHASHSEED 必须与 seed 对齐）
+        "pythonhashseed": run_env["PYTHONHASHSEED"],
+        "cublas_workspace_config": run_env.get("CUBLAS_WORKSPACE_CONFIG"),
+    }
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, env=run_env)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, env=run_env
+        )
     except subprocess.TimeoutExpired:
-        rec.update({"returncode": None, "error": f"timeout({timeout}s)",
-                    "duration_s": round(time.perf_counter() - t0, 1)})
+        rec.update(
+            {
+                "returncode": None,
+                "error": f"timeout({timeout}s)",
+                "duration_s": round(time.perf_counter() - t0, 1),
+            }
+        )
         return rec
     rec["duration_s"] = round(time.perf_counter() - t0, 1)
     rec["returncode"] = int(proc.returncode)
@@ -388,17 +451,22 @@ def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
         rec["error"] = "训练成功但未找到 val_loss（train_log.jsonl/eval.json 缺失）"
         return rec
     manifest = _manifest_identity(out_dir)
-    rec.update({
-        "val_loss_best": best, "best_step": best_step,
-        "val_loss_final": final,
-        "val_ppl_best": math.exp(min(20.0, best)),
-        "val_loss_source": source,
-        "manifest": manifest,
-        # 父进程请求的种子必须与子进程 manifest 一致且确认生效
-        "seed_identity_ok": bool(
-            manifest["present"] and manifest.get("seed_verified") is True
-            and _as_int(manifest.get("seed")) == int(seed)),
-    })
+    rec.update(
+        {
+            "val_loss_best": best,
+            "best_step": best_step,
+            "val_loss_final": final,
+            "val_ppl_best": math.exp(min(20.0, best)),
+            "val_loss_source": source,
+            "manifest": manifest,
+            # 父进程请求的种子必须与子进程 manifest 一致且确认生效
+            "seed_identity_ok": bool(
+                manifest["present"]
+                and manifest.get("seed_verified") is True
+                and _as_int(manifest.get("seed")) == int(seed)
+            ),
+        }
+    )
     return rec
 
 
@@ -417,9 +485,11 @@ def _grid_stats(grid, trials, seeds):
         seed_list.append(sid)
     out = []
     for lr, wd in grid:
-        ts = [t for t in trials
-              if isinstance(t, dict)
-              and t.get("lr") == lr and t.get("weight_decay") == wd]
+        ts = [
+            t
+            for t in trials
+            if isinstance(t, dict) and t.get("lr") == lr and t.get("weight_decay") == wd
+        ]
 
         def _best(t):
             raw = t.get("val_loss_best")
@@ -446,21 +516,26 @@ def _grid_stats(grid, trials, seeds):
         # 用缩放后的稳定均值/标准差，保持数值尺度不变。
         mean, std = mean_std(vals) if vals else (None, None)
         missing = [s for s in seed_list if str(s) not in per_seed]
-        n_failed = sum(1 for t in ts
-                       if _as_int(t.get("seed")) is None
-                       or _best(t) is None)
-        out.append({
-            "lr": lr, "weight_decay": wd,
-            "n_seeds": len(per_seed), "n_failed": n_failed,
-            "seeds": seed_list, "missing_seeds": missing,
-            # 只有覆盖全部选择种子的配置才与其他配置可比：部分种子成功的
-            # 配置可能只是“留下了幸运种子”，不能参与 min(mean) 选择。
-            "complete": not missing,
-            "val_loss_best": mean,            # 兼容名：多种子时为均值
-            "val_loss_best_mean": mean,
-            "val_loss_best_std": std,
-            "val_loss_best_per_seed": per_seed,
-        })
+        n_failed = sum(
+            1 for t in ts if _as_int(t.get("seed")) is None or _best(t) is None
+        )
+        out.append(
+            {
+                "lr": lr,
+                "weight_decay": wd,
+                "n_seeds": len(per_seed),
+                "n_failed": n_failed,
+                "seeds": seed_list,
+                "missing_seeds": missing,
+                # 只有覆盖全部选择种子的配置才与其他配置可比：部分种子成功的
+                # 配置可能只是“留下了幸运种子”，不能参与 min(mean) 选择。
+                "complete": not missing,
+                "val_loss_best": mean,  # 兼容名：多种子时为均值
+                "val_loss_best_mean": mean,
+                "val_loss_best_std": std,
+                "val_loss_best_per_seed": per_seed,
+            }
+        )
     return out
 
 
@@ -477,8 +552,10 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
     这些是描述性稳定性证据，不是新的显著性检验；LOO 折之间也不独立。
     """
     complete = [
-        g for g in (grid_stats or [])
-        if isinstance(g, dict) and g.get("complete")
+        g
+        for g in (grid_stats or [])
+        if isinstance(g, dict)
+        and g.get("complete")
         and g.get("val_loss_best_mean") is not None
         and isinstance(g.get("val_loss_best_per_seed"), dict)
     ]
@@ -492,8 +569,10 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
         "runner_up": None,
         "selection_flip": None,
         "leave_one_seed_out": None,
-        "note": ("逐种子赢家/支持率与最优−次优差距都是描述性稳定性证据；"
-                 "LOO 折之间不独立，不得把 agreement_rate 当作显著性检验。"),
+        "note": (
+            "逐种子赢家/支持率与最优−次优差距都是描述性稳定性证据；"
+            "LOO 折之间不独立，不得把 agreement_rate 当作显著性检验。"
+        ),
     }
     if not complete or not isinstance(selected, dict):
         return out
@@ -503,8 +582,9 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
         for s in g.get("seeds") or []:
             if str(s) not in seed_order:
                 seed_order.append(str(s))
-    common = [s for s in seed_order
-              if all(s in g["val_loss_best_per_seed"] for g in complete)]
+    common = [
+        s for s in seed_order if all(s in g["val_loss_best_per_seed"] for g in complete)
+    ]
     out["n_seeds"] = len(common)
     out["seeds"] = [int(s) for s in common if str(s).lstrip("-").isdigit()] or common
     if not common:
@@ -514,9 +594,12 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
         return {"lr": g.get("lr"), "weight_decay": g.get("weight_decay")}
 
     def _same(a, b):
-        return (isinstance(a, dict) and isinstance(b, dict)
-                and a.get("lr") == b.get("lr")
-                and a.get("weight_decay") == b.get("weight_decay"))
+        return (
+            isinstance(a, dict)
+            and isinstance(b, dict)
+            and a.get("lr") == b.get("lr")
+            and a.get("weight_decay") == b.get("weight_decay")
+        )
 
     sel_stat = next((g for g in complete if _same(g, selected)), None)
     if sel_stat is None:
@@ -524,19 +607,24 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
     winners = []
     support = 0
     for s in common:
-        vals = [(g["val_loss_best_per_seed"][s], idx, g)
-                for idx, g in enumerate(complete)]
+        vals = [
+            (g["val_loss_best_per_seed"][s], idx, g) for idx, g in enumerate(complete)
+        ]
         best_val = min(v[0] for v in vals)
         # 并列最优按网格顺序取第一个，但支持率把并列者都算作支持。
         tied = [v for v in vals if abs(v[0] - best_val) <= 1e-12]
         win = min(tied, key=lambda v: v[1])[2]
         if any(_same(g, selected) for _, _, g in tied):
             support += 1
-        winners.append({"seed": int(s) if str(s).lstrip("-").isdigit() else s,
-                        "lr": win.get("lr"),
-                        "weight_decay": win.get("weight_decay"),
-                        "val_loss": float(best_val),
-                        "tie": len(tied) > 1})
+        winners.append(
+            {
+                "seed": int(s) if str(s).lstrip("-").isdigit() else s,
+                "lr": win.get("lr"),
+                "weight_decay": win.get("weight_decay"),
+                "val_loss": float(best_val),
+                "tie": len(tied) > 1,
+            }
+        )
     out["per_seed_winners"] = winners
     out["selected_support_count"] = support
     out["selected_support_fraction"] = support / len(common)
@@ -547,15 +635,15 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
         runner = min(others, key=lambda g: g["val_loss_best_mean"])
         # 字段名是 selected − runner-up：selected 是均值最小者，故该值应
         # 为负（越小越好）；逐种子 paired_delta 则按“次优−最优”定义。
-        margin = (sel_stat["val_loss_best_mean"]
-                  - runner["val_loss_best_mean"])
-        deltas = [runner["val_loss_best_per_seed"][s]
-                  - sel_stat["val_loss_best_per_seed"][s] for s in common]
+        margin = sel_stat["val_loss_best_mean"] - runner["val_loss_best_mean"]
+        deltas = [
+            runner["val_loss_best_per_seed"][s] - sel_stat["val_loss_best_per_seed"][s]
+            for s in common
+        ]
         # 与网格均值同一套缩放口径：接近 float 上限的 val_loss 差值
         # 在朴素 sum/平方中会溢出为 inf，使诊断字段成为非法 JSON。
         dmean, dstd = mean_std(deltas)
-        dsem = (dstd / math.sqrt(len(deltas))
-                if dstd is not None else None)
+        dsem = dstd / math.sqrt(len(deltas)) if dstd is not None else None
         out["runner_up"] = {
             **_cfg(runner),
             "val_loss_best_mean": runner["val_loss_best_mean"],
@@ -564,8 +652,7 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
             "paired_delta_std": dstd,
             "paired_delta_sem": dsem,
             # 均值差不超过逐种子配对差的 1 个标准差：差距与种子噪声同量级。
-            "within_seed_noise": (None if dstd is None
-                                  else abs(margin) <= dstd),
+            "within_seed_noise": (None if dstd is None else abs(margin) <= dstd),
         }
 
     if len(common) >= 3 and len(complete) >= 2:
@@ -576,13 +663,16 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
             train = [s for s in common if s != held]
             loo_stat = min(
                 complete,
-                key=lambda g: mean_std(
-                    [g["val_loss_best_per_seed"][s] for s in train])[0])
+                key=lambda g: mean_std([g["val_loss_best_per_seed"][s] for s in train])[
+                    0
+                ],
+            )
             agree = _same(loo_stat, sel_stat)
             agreement += int(agree)
             rec = {
-                "held_out_seed": (int(held) if str(held).lstrip("-").isdigit()
-                                  else held),
+                "held_out_seed": (
+                    int(held) if str(held).lstrip("-").isdigit() else held
+                ),
                 "selected_lr": loo_stat.get("lr"),
                 "selected_weight_decay": loo_stat.get("weight_decay"),
                 "agrees_with_full_selection": agree,
@@ -591,8 +681,11 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
             if isinstance(default, dict) and _same(default, sel_stat):
                 default_loss = default["val_loss_best_per_seed"].get(held)
             else:
-                default_loss = (default.get("val_loss_best_per_seed", {}).get(held)
-                                if isinstance(default, dict) else None)
+                default_loss = (
+                    default.get("val_loss_best_per_seed", {}).get(held)
+                    if isinstance(default, dict)
+                    else None
+                )
             if default_loss is not None:
                 gain = default_loss - rec["heldout_val_loss"]
                 rec["heldout_gain_vs_default"] = gain
@@ -611,22 +704,33 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
         }
         if gains:
             gm, gstd = mean_std(gains)
-            loo.update({
-                "heldout_gain_vs_default_mean": gm,
-                "heldout_gain_vs_default_std": gstd,
-                "wins_vs_default": sum(1 for g in gains if g > 1e-12),
-                "ties_vs_default": sum(1 for g in gains if abs(g) <= 1e-12),
-                "losses_vs_default": sum(1 for g in gains if g < -1e-12),
-            })
+            loo.update(
+                {
+                    "heldout_gain_vs_default_mean": gm,
+                    "heldout_gain_vs_default_std": gstd,
+                    "wins_vs_default": sum(1 for g in gains if g > 1e-12),
+                    "ties_vs_default": sum(1 for g in gains if abs(g) <= 1e-12),
+                    "losses_vs_default": sum(1 for g in gains if g < -1e-12),
+                }
+            )
         out["leave_one_seed_out"] = loo
     return out
 
 
-def tune(config: str, data_dir: str, out_dir: str,
-         variant: str = "standard", seed=None, steps=None,
-         lr_mults=DEFAULT_LR_MULTS, wd_list=None, device: str = "auto",
-         tolerance: float = DEFAULT_TOLERANCE, timeout=None,
-         seeds=None) -> dict:
+def tune(
+    config: str,
+    data_dir: str,
+    out_dir: str,
+    variant: str = "standard",
+    seed=None,
+    steps=None,
+    lr_mults=DEFAULT_LR_MULTS,
+    wd_list=None,
+    device: str = "auto",
+    tolerance: float = DEFAULT_TOLERANCE,
+    timeout=None,
+    seeds=None,
+) -> dict:
     """执行基线网格调优并落盘 `baseline_tuning.json`。
 
     选择口径：seeds=None 时只用配置种子（或显式 seed）；传 seeds=[...]
@@ -643,11 +747,11 @@ def tune(config: str, data_dir: str, out_dir: str,
     if tolerance < 0:
         raise ValueError(f"tolerance 必须 >= 0，收到 {tolerance!r}")
     if seeds is None:
-        seeds = [seed_int(
-            cfg.get("seed", 1337) if seed is None else seed, "seed")]
+        seeds = [seed_int(cfg.get("seed", 1337) if seed is None else seed, "seed")]
     else:
         seeds = [seed_int(s, "seeds") for s in seeds] or [
-            seed_int(cfg.get("seed", 1337), "seed")]
+            seed_int(cfg.get("seed", 1337), "seed")
+        ]
     # 重复种子（如 --seeds 7,7）否则会重复训练同一目录并伪造“多种子证据”。
     seeds = list(dict.fromkeys(seeds))
     seed = seeds[0]  # 兼容字段：报告里的主（第一个）选择种子
@@ -657,46 +761,74 @@ def tune(config: str, data_dir: str, out_dir: str,
     trials = []
     for lr, wd in grid:
         for s in seeds:
-            tdir = os.path.join(out_dir, _trial_name(lr, wd)
-                                + (f"_seed{s}" if len(seeds) > 1 else ""))
+            tdir = os.path.join(
+                out_dir, _trial_name(lr, wd) + (f"_seed{s}" if len(seeds) > 1 else "")
+            )
             print(f"[tuning] trial lr={lr:.3g} wd={wd:.3g} seed={s} -> {tdir}")
-            rec = run_trial(config, data_dir, variant, s, lr, wd, steps, tdir,
-                            device=device, timeout=timeout)
-            status = (f"val_loss={rec['val_loss_best']:.4f}"
-                      if rec.get("val_loss_best") is not None
-                      else f"FAILED: {rec.get('error', '')[:120]}")
+            rec = run_trial(
+                config,
+                data_dir,
+                variant,
+                s,
+                lr,
+                wd,
+                steps,
+                tdir,
+                device=device,
+                timeout=timeout,
+            )
+            status = (
+                f"val_loss={rec['val_loss_best']:.4f}"
+                if rec.get("val_loss_best") is not None
+                else f"FAILED: {rec.get('error', '')[:120]}"
+            )
             print(f"[tuning]   {status}")
             trials.append(rec)
     grid_stats = _grid_stats(grid, trials, seeds)
     ok = [g for g in grid_stats if g["val_loss_best_mean"] is not None]
     if not ok:
-        raise RuntimeError("全部 trial 失败，无法完成基线调优；"
-                           "请检查训练日志（各 trial 目录 stderr 已记录）")
+        raise RuntimeError(
+            "全部 trial 失败，无法完成基线调优；"
+            "请检查训练日志（各 trial 目录 stderr 已记录）"
+        )
     complete = [g for g in ok if g.get("complete")]
     if not complete:
         raise RuntimeError(
             "没有任何配置在所有选择种子上完成评测，无法按均值比较；"
-            "请检查失败 trial 的日志或减少 seeds 后重跑")
+            "请检查失败 trial 的日志或减少 seeds 后重跑"
+        )
     selected = min(complete, key=lambda g: g["val_loss_best_mean"])
-    default = next((g for g in grid_stats
-                    if g["lr"] == lr0 and g["weight_decay"] == wd0), None)
+    default = next(
+        (g for g in grid_stats if g["lr"] == lr0 and g["weight_decay"] == wd0), None
+    )
     gap = None
     default_is_optimal = None
-    if (default is not None and default["val_loss_best_mean"] is not None
-            and default.get("complete")):
+    if (
+        default is not None
+        and default["val_loss_best_mean"] is not None
+        and default.get("complete")
+    ):
         # gap = 最优 − 默认：默认“近优”要求默认不比最优差出容差以上，
         # 即 gap ≥ −tol·|最优|（gap 为负表示最优显著优于默认 → 不近优）。
         gap = selected["val_loss_best_mean"] - default["val_loss_best_mean"]
-        same_as_default = (selected["lr"] == default["lr"]
-                           and selected["weight_decay"] == default["weight_decay"])
+        same_as_default = (
+            selected["lr"] == default["lr"]
+            and selected["weight_decay"] == default["weight_decay"]
+        )
         default_is_optimal = bool(
-            same_as_default
-            or gap >= -tolerance * abs(selected["val_loss_best_mean"]))
+            same_as_default or gap >= -tolerance * abs(selected["val_loss_best_mean"])
+        )
     # 调优报告必须能回答“在哪个代码/数据版本上选出的超参数”。父进程
     # 记录自身身份，逐 trial 则核对子进程 manifest，避免 trial 实际用了
     # 另一份数据/代码（或种子根本没生效）却仍被当作同一实验。
-    from .repro import (data_fingerprint, git_info, runtime_info,
-                        sha256_file, worktree_state)
+    from .repro import (
+        data_fingerprint,
+        git_info,
+        runtime_info,
+        sha256_file,
+        worktree_state,
+    )
+
     try:
         data_digest = data_fingerprint(data_dir).get("digest")
     except FileNotFoundError:
@@ -705,8 +837,10 @@ def tune(config: str, data_dir: str, out_dir: str,
     worktree = worktree_state()
     trial_identity = _trial_identity_summary(trials)
     if trial_identity["consistent"] is False:
-        print("[tuning] ⚠ 成功 trial 的 manifest 身份不一致："
-              f"{trial_identity}；不得把网格结果当作单一版本调优证据")
+        print(
+            "[tuning] ⚠ 成功 trial 的 manifest 身份不一致："
+            f"{trial_identity}；不得把网格结果当作单一版本调优证据"
+        )
     report = {
         "variant": variant,
         "config": os.path.abspath(config),
@@ -722,11 +856,13 @@ def tune(config: str, data_dir: str, out_dir: str,
         "n_runs": len(trials),
         "n_failed": sum(1 for t in trials if t.get("val_loss_best") is None),
         "selection_metric": "val_loss（train_log.jsonl 全评测点最小值，"
-                            "与 model_best.pt 选择口径一致）"
-                            + ("；跨种子取均值" if len(seeds) > 1 else ""),
-        "selection_aggregation": ("单种子（选择可能不可复现，见 "
-                                  "single_seed_selection）" if len(seeds) == 1
-                                  else f"{len(seeds)} 个种子的平均 val_loss"),
+        "与 model_best.pt 选择口径一致）"
+        + ("；跨种子取均值" if len(seeds) > 1 else ""),
+        "selection_aggregation": (
+            "单种子（选择可能不可复现，见 " "single_seed_selection）"
+            if len(seeds) == 1
+            else f"{len(seeds)} 个种子的平均 val_loss"
+        ),
         "tolerance": float(tolerance),
         "selected": selected,
         "default_trial": default,
@@ -745,20 +881,24 @@ def tune(config: str, data_dir: str, out_dir: str,
         "trial_identity": trial_identity,
         # 选择稳定性：多种子均值最优不等于稳定最优；逐种子支持率、
         # 最优−次优差距与留一种子复选必须随报告落盘。
-        "selection_diagnostics": _selection_diagnostics(
-            grid_stats, selected, default),
+        "selection_diagnostics": _selection_diagnostics(grid_stats, selected, default),
         "grid": grid_stats,
         "trials": trials,
     }
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "baseline_tuning.json")
     save_json(report, out_path)
-    print(f"[tuning] 最优 lr={selected['lr']:.3g} "
-          f"wd={selected['weight_decay']:.3g} "
-          f"val_loss={selected['val_loss_best']:.4f}"
-          + ("（单种子选择，结论可能受种子噪声影响）"
-             if len(seeds) == 1 else f"（{len(seeds)} 种子均值）")
-          + f" -> {out_path}")
+    print(
+        f"[tuning] 最优 lr={selected['lr']:.3g} "
+        f"wd={selected['weight_decay']:.3g} "
+        f"val_loss={selected['val_loss_best']:.4f}"
+        + (
+            "（单种子选择，结论可能受种子噪声影响）"
+            if len(seeds) == 1
+            else f"（{len(seeds)} 种子均值）"
+        )
+        + f" -> {out_path}"
+    )
     return report
 
 
@@ -766,31 +906,52 @@ def main():
     p = argparse.ArgumentParser(description="基线（standard）lr/权重衰减网格调优")
     p.add_argument("--config", required=True)
     p.add_argument("--data_dir", required=True)
-    p.add_argument("--out_dir", required=True,
-                   help="trial 目录与 baseline_tuning.json 的输出根目录")
+    p.add_argument(
+        "--out_dir",
+        required=True,
+        help="trial 目录与 baseline_tuning.json 的输出根目录",
+    )
     p.add_argument("--variant", default="standard")
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--seeds", default=None,
-                   type=lambda s: parse_seeds(s, p),
-                   help="逗号分隔的选择种子列表（整数）：每个网格配置在每个种子"
-                        "上各训一次，按平均 val_loss 选择（默认只用 --seed/配置"
-                        "种子；单种子选择可能被噪声左右，正式实验建议 ≥3 个）")
-    p.add_argument("--steps", type=int, default=None,
-                   help="每个 trial 的训练步数（默认用配置值；可先用较小步数）")
+    p.add_argument(
+        "--seeds",
+        default=None,
+        type=lambda s: parse_seeds(s, p),
+        help="逗号分隔的选择种子列表（整数）：每个网格配置在每个种子"
+        "上各训一次，按平均 val_loss 选择（默认只用 --seed/配置"
+        "种子；单种子选择可能被噪声左右，正式实验建议 ≥3 个）",
+    )
+    p.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="每个 trial 的训练步数（默认用配置值；可先用较小步数）",
+    )
     p.add_argument("--lr_mults", default=",".join(str(m) for m in DEFAULT_LR_MULTS))
     p.add_argument("--wd_list", default=None, help="逗号分隔；默认仅配置的 wd")
     p.add_argument("--device", default="auto")
-    p.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE,
-                   help="default_is_optimal 的相对容差（默认 0.005）")
-    p.add_argument("--timeout", type=float, default=None,
-                   help="单个 trial 超时秒数")
+    p.add_argument(
+        "--tolerance",
+        type=float,
+        default=DEFAULT_TOLERANCE,
+        help="default_is_optimal 的相对容差（默认 0.005）",
+    )
+    p.add_argument("--timeout", type=float, default=None, help="单个 trial 超时秒数")
     args = p.parse_args()
-    tune(args.config, args.data_dir, args.out_dir, variant=args.variant,
-         seed=args.seed, steps=args.steps,
-         lr_mults=parse_floats(args.lr_mults),
-         wd_list=(parse_floats(args.wd_list) if args.wd_list else None),
-         device=args.device, tolerance=args.tolerance, timeout=args.timeout,
-         seeds=args.seeds)
+    tune(
+        args.config,
+        args.data_dir,
+        args.out_dir,
+        variant=args.variant,
+        seed=args.seed,
+        steps=args.steps,
+        lr_mults=parse_floats(args.lr_mults),
+        wd_list=(parse_floats(args.wd_list) if args.wd_list else None),
+        device=args.device,
+        tolerance=args.tolerance,
+        timeout=args.timeout,
+        seeds=args.seeds,
+    )
 
 
 if __name__ == "__main__":

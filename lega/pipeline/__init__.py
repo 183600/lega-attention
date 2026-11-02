@@ -15,14 +15,24 @@ from .report import tables
 from . import train
 
 _MODULES = [
-    _shared, common, datacheck, stats, windows, comparisons, factorial,
-    baselines, curves, summary, sections, tables, train,
+    _shared,
+    common,
+    datacheck,
+    stats,
+    windows,
+    comparisons,
+    factorial,
+    baselines,
+    curves,
+    summary,
+    sections,
+    tables,
+    train,
 ]
 
 _merged = {}
 for _m in _MODULES:
-    _merged.update({k: v for k, v in vars(_m).items()
-                    if not k.startswith("__")})
+    _merged.update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
 
 for _m in _MODULES:
     _ns = vars(_m)

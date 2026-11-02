@@ -37,6 +37,7 @@
   python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt \\
       --data_dir data/wikitext103 --out results/small/dose_response_lega_seed1337.json
 """
+
 import argparse
 import json
 import math
@@ -47,18 +48,30 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from .ablate import (_evaluate_once, _finite_or_none, _window_delta_stats,
-                     gate_capabilities, restore_gate_params,
-                     snapshot_gate_params)
+from .ablate import (
+    _evaluate_once,
+    _finite_or_none,
+    _window_delta_stats,
+    gate_capabilities,
+    restore_gate_params,
+    snapshot_gate_params,
+)
 from .data import load_bin
 from .evaluate import _positive_int_or_none, _resolve_eval_amp
 from .model import load_model
-from .preflight import (allow_protocol_violations,
-                        data_protocol_preflight)
+from .preflight import allow_protocol_violations, data_protocol_preflight
 from .repro import current_pipeline_run_id, load_provenance, sha256_file
-from .utils import (bootstrap_mean_ci, enable_tf32, get_device, mean_std,
-                    now_str, paired_t_test, save_json, seed_int, set_seed,
-                    strict_int)
+from .utils import (
+    bootstrap_mean_ci,
+    enable_tf32,
+    get_device,
+    mean_std,
+    now_str,
+    save_json,
+    seed_int,
+    set_seed,
+    strict_int,
+)
 
 COMPONENT_ORDER = ("A", "B", "C")
 
@@ -89,7 +102,8 @@ DOSE_NOTE = (
     "λ 只缩放对应门控系数；λ=1 为训练得到的原始系数，λ=0 等价于该组件的"
     "推理期清零。所有 λ 使用同一 checkpoint、同一批 val 窗口；局部斜率、"
     "二次顶点与网格最优剂量均为描述性诊断，不据此重选 checkpoint，也不"
-    "改写预注册判定。")
+    "改写预注册判定。"
+)
 
 
 def _strict_factor(value, name: str = "factor") -> float:
@@ -180,9 +194,13 @@ def apply_dose(model, component: str, factor, baseline) -> Dict:
         if _component_param_name(name, component):
             names.append(name)
     if not names:
-        return {"applied": False,
-                "reason": f"模型未注册组件 {component} 的参数",
-                "changed_tensors": 0, "max_abs_delta": 0.0, "no_op": False}
+        return {
+            "applied": False,
+            "reason": f"模型未注册组件 {component} 的参数",
+            "changed_tensors": 0,
+            "max_abs_delta": 0.0,
+            "no_op": False,
+        }
     changed = 0
     max_delta = 0.0
     with torch.no_grad():
@@ -197,17 +215,23 @@ def apply_dose(model, component: str, factor, baseline) -> Dict:
             if tuple(base.shape) != tuple(p.shape):
                 raise ValueError(
                     f"基线快照 {name} 形状不一致："
-                    f"{tuple(base.shape)} vs {tuple(p.shape)}")
+                    f"{tuple(base.shape)} vs {tuple(p.shape)}"
+                )
             old = p.detach().clone()
             p.copy_(base.to(device=p.device, dtype=p.dtype) * factor)
             delta = (p.detach() - old).abs()
-            max_delta = max(max_delta,
-                            float(delta.max().item()) if delta.numel() else 0.0)
+            max_delta = max(
+                max_delta, float(delta.max().item()) if delta.numel() else 0.0
+            )
             changed += 1
-    return {"applied": True, "reason": "", "factor": float(factor),
-            "changed_tensors": int(changed),
-            "max_abs_delta": float(max_delta),
-            "no_op": bool(max_delta <= 1e-12)}
+    return {
+        "applied": True,
+        "reason": "",
+        "factor": float(factor),
+        "changed_tensors": int(changed),
+        "max_abs_delta": float(max_delta),
+        "no_op": bool(max_delta <= 1e-12),
+    }
 
 
 def _finite_point_pairs(points):
@@ -253,8 +277,12 @@ def _local_slope(pairs, factor: float = 1.0, base_loss=None):
         w_lo = lo[2].get("window_losses")
         w_hi = hi[2].get("window_losses")
         se = ci = None
-        if (isinstance(w_lo, list) and isinstance(w_hi, list)
-                and len(w_lo) == len(w_hi) and len(w_lo) >= 2):
+        if (
+            isinstance(w_lo, list)
+            and isinstance(w_hi, list)
+            and len(w_lo) == len(w_hi)
+            and len(w_lo) >= 2
+        ):
             diffs = []
             for a, b in zip(w_hi, w_lo):
                 fa, fb = _finite_or_none(a), _finite_or_none(b)
@@ -276,42 +304,65 @@ def _local_slope(pairs, factor: float = 1.0, base_loss=None):
         denom = hi[0] - factor
         if denom <= 0:
             return None, "invalid", None, None, None, None
-        return ((hi[1] - base[1]) / denom, "one_sided_upper", factor,
-                hi[0], None, None)
+        return ((hi[1] - base[1]) / denom, "one_sided_upper", factor, hi[0], None, None)
     lo = max(lower, key=lambda x: x[0])
     if base is None:
         return None, "invalid", None, None, None, None
     denom = factor - lo[0]
     if denom <= 0:
         return None, "invalid", None, None, None, None
-    return ((base[1] - lo[1]) / denom, "one_sided_lower", lo[0], factor,
-            None, None)
+    return ((base[1] - lo[1]) / denom, "one_sided_lower", lo[0], factor, None, None)
 
 
 def _quadratic_fit(pairs):
     """最小二乘拟合 NLL ≈ a·λ² + b·λ + c；返回曲率/顶点/R²。"""
     if len(pairs) < 3:
-        return {"curvature": None, "vertex": None, "vertex_in_grid": False,
-                "r2": None, "n_points": len(pairs)}
+        return {
+            "curvature": None,
+            "vertex": None,
+            "vertex_in_grid": False,
+            "r2": None,
+            "n_points": len(pairs),
+        }
     x = np.asarray([p[0] for p in pairs], dtype=float)
     y = np.asarray([p[1] for p in pairs], dtype=float)
     if not (np.isfinite(x).all() and np.isfinite(y).all()):
-        return {"curvature": None, "vertex": None, "vertex_in_grid": False,
-                "r2": None, "n_points": len(pairs)}
+        return {
+            "curvature": None,
+            "vertex": None,
+            "vertex_in_grid": False,
+            "r2": None,
+            "n_points": len(pairs),
+        }
     x_range = float(x.max() - x.min())
     if x_range <= 0:
-        return {"curvature": None, "vertex": None, "vertex_in_grid": False,
-                "r2": None, "n_points": len(pairs)}
+        return {
+            "curvature": None,
+            "vertex": None,
+            "vertex_in_grid": False,
+            "r2": None,
+            "n_points": len(pairs),
+        }
     design = np.vstack([x * x, x, np.ones_like(x)]).T
     try:
         coef, _residuals, _rank, _sv = np.linalg.lstsq(design, y, rcond=None)
     except np.linalg.LinAlgError:
-        return {"curvature": None, "vertex": None, "vertex_in_grid": False,
-                "r2": None, "n_points": len(pairs)}
+        return {
+            "curvature": None,
+            "vertex": None,
+            "vertex_in_grid": False,
+            "r2": None,
+            "n_points": len(pairs),
+        }
     a, b, c = (float(v) for v in coef)
     if not (math.isfinite(a) and math.isfinite(b) and math.isfinite(c)):
-        return {"curvature": None, "vertex": None, "vertex_in_grid": False,
-                "r2": None, "n_points": len(pairs)}
+        return {
+            "curvature": None,
+            "vertex": None,
+            "vertex_in_grid": False,
+            "r2": None,
+            "n_points": len(pairs),
+        }
     pred = design @ coef
     ss_res = float(np.sum((y - pred) ** 2))
     ss_tot = float(np.sum((y - y.mean()) ** 2))
@@ -326,7 +377,8 @@ def _quadratic_fit(pairs):
         "curvature": 2.0 * a,
         "vertex": vertex,
         "vertex_in_grid": bool(
-            vertex is not None and x.min() - 1e-12 <= vertex <= x.max() + 1e-12),
+            vertex is not None and x.min() - 1e-12 <= vertex <= x.max() + 1e-12
+        ),
         "r2": r2,
         "n_points": len(pairs),
     }
@@ -343,8 +395,7 @@ def dose_curve_diagnostics(points, baseline_loss=None) -> Dict:
     if not pairs:
         return {"available": False, "reason": "没有有效的剂量点"}
     base_factor = 1.0
-    base_point = next((x for x in pairs if abs(x[0] - base_factor) <= 1e-12),
-                      None)
+    base_point = next((x for x in pairs if abs(x[0] - base_factor) <= 1e-12), None)
     base_loss = _finite_or_none(baseline_loss)
     if base_loss is None:
         if base_point is not None:
@@ -358,30 +409,33 @@ def dose_curve_diagnostics(points, baseline_loss=None) -> Dict:
     losses = [p[1] for p in pairs]
     deltas = [p[1] - base_loss for p in pairs]
     slope, side, lower, upper, slope_se, slope_ci = _local_slope(
-        pairs, base_factor, base_loss)
+        pairs, base_factor, base_loss
+    )
     quad = _quadratic_fit(pairs)
     best = min(pairs, key=lambda x: (x[1], abs(x[0] - base_factor), x[0]))
     improvements = [base_loss - v for v in losses]
     loss_diffs = [losses[i + 1] - losses[i] for i in range(len(losses) - 1)]
     nonzero = [d for d in loss_diffs if abs(d) > 1e-12]
     direction_changes = sum(
-        1 for a, b in zip(nonzero, nonzero[1:]) if (a > 0) != (b > 0))
-    zero_delta = next((d for f, d in zip(factors, deltas)
-                       if abs(f) <= 1e-12), None)
-    flip_delta = next((d for f, d in zip(factors, deltas)
-                       if abs(f + 1.0) <= 1e-12), None)
+        1 for a, b in zip(nonzero, nonzero[1:]) if (a > 0) != (b > 0)
+    )
+    zero_delta = next((d for f, d in zip(factors, deltas) if abs(f) <= 1e-12), None)
+    flip_delta = next(
+        (d for f, d in zip(factors, deltas) if abs(f + 1.0) <= 1e-12), None
+    )
     base_ppl = None
     best_ppl = None
-    base_info = next((p[2] for p in pairs
-                      if abs(p[0] - base_factor) <= 1e-12), None)
+    base_info = next((p[2] for p in pairs if abs(p[0] - base_factor) <= 1e-12), None)
     best_info = best[2]
     if isinstance(base_info, dict):
         base_ppl = _finite_or_none(base_info.get("val_ppl"))
     if isinstance(best_info, dict):
         best_ppl = _finite_or_none(best_info.get("val_ppl"))
-    best_ppl_ratio = (best_ppl / base_ppl
-                      if base_ppl and best_ppl and base_ppl > 0
-                      and best_ppl > 0 else None)
+    best_ppl_ratio = (
+        best_ppl / base_ppl
+        if base_ppl and best_ppl and base_ppl > 0 and best_ppl > 0
+        else None
+    )
     return {
         "available": True,
         "baseline_factor": float(base_factor),
@@ -404,54 +458,74 @@ def dose_curve_diagnostics(points, baseline_loss=None) -> Dict:
         "baseline_is_grid_minimum": bool(abs(best[0] - base_factor) <= 1e-12),
         "improvement_vs_baseline": float(base_loss - best[1]),
         "improvement_vs_baseline_pct": (
-            100.0 * (base_loss - best[1]) / base_loss
-            if base_loss != 0 else None),
+            100.0 * (base_loss - best[1]) / base_loss if base_loss != 0 else None
+        ),
         "best_ppl_ratio_vs_baseline": best_ppl_ratio,
         "n_direction_changes": int(direction_changes),
         "monotonic": direction_changes == 0,
         "zero_delta": zero_delta,
         "sign_flip_delta": flip_delta,
-        "note": ("局部斜率=NLL 对 λ 的导数（<0 表示增大系数会降低 NLL，"
-                 "当前系数可能偏小；>0 表示可能偏大）；二次顶点仅在曲率>0 "
-                 "时有定义；网格最优 λ 与改善量是描述性统计，固定网格上"
-                 "挑最优会引入 winner's curse，不据此重选 checkpoint 或"
-                 "改写预注册判定。窗口级斜率区间只描述单 run，相邻窗口"
-                 "可能相关，跨种子检验由 run_all 汇总。"),
+        "note": (
+            "局部斜率=NLL 对 λ 的导数（<0 表示增大系数会降低 NLL，"
+            "当前系数可能偏小；>0 表示可能偏大）；二次顶点仅在曲率>0 "
+            "时有定义；网格最优 λ 与改善量是描述性统计，固定网格上"
+            "挑最优会引入 winner's curse，不据此重选 checkpoint 或"
+            "改写预注册判定。窗口级斜率区间只描述单 run，相邻窗口"
+            "可能相关，跨种子检验由 run_all 汇总。"
+        ),
     }
 
 
 def _metric_subset(metrics: Dict) -> Dict:
     """只保留剂量曲线消费的指标，避免每个点复制整份评测负载。"""
-    keys = ("val_ppl", "val_loss", "val_ppl_clamped", "gate_mean",
-            "gate_std", "gate_frac_low", "gate_frac_high",
-            "gate_layer_mean", "val_loss_se", "val_loss_ci95",
-            "val_ppl_ci95", "val_loss_min", "val_loss_max")
+    keys = (
+        "val_ppl",
+        "val_loss",
+        "val_ppl_clamped",
+        "gate_mean",
+        "gate_std",
+        "gate_frac_low",
+        "gate_frac_high",
+        "gate_layer_mean",
+        "val_loss_se",
+        "val_loss_ci95",
+        "val_ppl_ci95",
+        "val_loss_min",
+        "val_loss_max",
+    )
     return {k: metrics.get(k) for k in keys}
 
 
-def run_dose_response(ckpt: str, data_dir: str, *,
-                      eval_iters: Optional[int] = None,
-                      ctx: Optional[int] = None,
-                      device: str = "auto",
-                      seed: Optional[int] = None,
-                      factors=None,
-                      components=None,
-                      allow_data_protocol_violations: bool = False) -> Dict:
+def run_dose_response(
+    ckpt: str,
+    data_dir: str,
+    *,
+    eval_iters: Optional[int] = None,
+    ctx: Optional[int] = None,
+    device: str = "auto",
+    seed: Optional[int] = None,
+    factors=None,
+    components=None,
+    allow_data_protocol_violations: bool = False,
+) -> Dict:
     """在 val split 上对一个 checkpoint 执行门控剂量-反应扫描。"""
     if not os.path.exists(ckpt):
         raise FileNotFoundError(f"checkpoint 不存在: {ckpt}")
     factors = parse_factors(DEFAULT_FACTORS if factors is None else factors)
-    components = parse_components(COMPONENT_ORDER if components is None
-                                  else components)
+    components = parse_components(COMPONENT_ORDER if components is None else components)
     preflight = data_protocol_preflight(
-        data_dir, allow_override=allow_protocol_violations(
-            allow_data_protocol_violations))
+        data_dir,
+        allow_override=allow_protocol_violations(allow_data_protocol_violations),
+    )
     if not preflight.get("report_present"):
-        print("[dose] 警告：数据目录缺少 data_report.json，"
-              "无法做评测前防泄漏闸门（旧数据或未走统一入口）")
+        print(
+            "[dose] 警告：数据目录缺少 data_report.json，"
+            "无法做评测前防泄漏闸门（旧数据或未走统一入口）"
+        )
     elif preflight.get("critical_violations"):
-        print("[dose] ⚠ 数据协议自检发现严重问题但已显式放行；"
-              "本分析不得用于正式结论")
+        print(
+            "[dose] ⚠ 数据协议自检发现严重问题但已显式放行；" "本分析不得用于正式结论"
+        )
 
     device = get_device(device)
     enable_tf32(device)
@@ -460,7 +534,8 @@ def run_dose_response(ckpt: str, data_dir: str, *,
     if not caps["gated"]:
         raise ValueError(
             f"变体 {model.variant!r} 没有输出门，无法做门控剂量-反应；"
-            "该分析只适用于 gate_only/qgate/lega 及其消融")
+            "该分析只适用于 gate_only/qgate/lega 及其消融"
+        )
 
     ckpt_seed = ck.get("seed")
     if seed is None:
@@ -510,8 +585,7 @@ def run_dose_response(ckpt: str, data_dir: str, *,
     try:
         for component in components:
             spec = COMPONENT_SPECS[component]
-            applicable, reason, _caps = component_applicability(
-                model, component)
+            applicable, reason, _caps = component_applicability(model, component)
             rec = {
                 "component": component,
                 "label": spec["label"],
@@ -528,61 +602,76 @@ def run_dose_response(ckpt: str, data_dir: str, *,
                 restore_gate_params(model, snapshot)
                 point = {"factor": float(factor)}
                 if abs(factor - 1.0) <= 1e-12:
-                    point.update({
-                        "applied": True,
-                        "no_op": True,
-                        "reason": "λ=1 为基线，直接复用基线评测",
-                    })
+                    point.update(
+                        {
+                            "applied": True,
+                            "no_op": True,
+                            "reason": "λ=1 为基线，直接复用基线评测",
+                        }
+                    )
                     point.update(_metric_subset(base))
-                    point.update({
-                        "window_losses": list(base_windows),
-                        "window_indices": list(base_indices),
-                        "delta_loss_mean": 0.0,
-                        "ppl_ratio": 1.0,
-                        "ppl_ratio_clamped": False,
-                        "n_windows": len(base_windows),
-                    })
+                    point.update(
+                        {
+                            "window_losses": list(base_windows),
+                            "window_indices": list(base_indices),
+                            "delta_loss_mean": 0.0,
+                            "ppl_ratio": 1.0,
+                            "ppl_ratio_clamped": False,
+                            "n_windows": len(base_windows),
+                        }
+                    )
                     rec["points"].append(point)
                     continue
                 try:
                     applied = apply_dose(model, component, factor, snapshot)
                     if not applied.get("applied"):
-                        point.update({
-                            "applied": False,
-                            "no_op": False,
-                            "reason": applied.get("reason", "未施加"),
-                        })
+                        point.update(
+                            {
+                                "applied": False,
+                                "no_op": False,
+                                "reason": applied.get("reason", "未施加"),
+                            }
+                        )
                         rec["points"].append(point)
                         continue
                     point.update(applied)
-                    evaluated = _evaluate_once(
-                        model, val, ctx, device, eval_iters, amp)
+                    evaluated = _evaluate_once(model, val, ctx, device, eval_iters, amp)
                 finally:
                     restore_gate_params(model, snapshot)
                 if evaluated.get("window_indices") != base_indices:
-                    point.update({
-                        "applied": False,
-                        "reason": "剂量点评测窗口与基线不一致，拒绝配对",
-                    })
+                    point.update(
+                        {
+                            "applied": False,
+                            "reason": "剂量点评测窗口与基线不一致，拒绝配对",
+                        }
+                    )
                     rec["points"].append(point)
                     continue
                 point.update(_metric_subset(evaluated))
-                point.update({
-                    "window_losses": list(evaluated.get("window_losses") or []),
-                    "window_indices": list(
-                        evaluated.get("window_indices") or []),
-                })
-                point.update(_window_delta_stats(
-                    base_windows, evaluated.get("window_losses") or []))
+                point.update(
+                    {
+                        "window_losses": list(evaluated.get("window_losses") or []),
+                        "window_indices": list(evaluated.get("window_indices") or []),
+                    }
+                )
+                point.update(
+                    _window_delta_stats(
+                        base_windows, evaluated.get("window_losses") or []
+                    )
+                )
                 delta = point.get("delta_loss_mean")
                 point["ppl_ratio"] = (
                     math.exp(min(20.0, max(-20.0, float(delta))))
-                    if delta is not None else None)
+                    if delta is not None
+                    else None
+                )
                 point["ppl_ratio_clamped"] = bool(
-                    delta is not None and not (-20.0 <= float(delta) <= 20.0))
+                    delta is not None and not (-20.0 <= float(delta) <= 20.0)
+                )
                 rec["points"].append(point)
             rec["diagnostics"] = dose_curve_diagnostics(
-                rec["points"], baseline_loss=base.get("val_loss"))
+                rec["points"], baseline_loss=base.get("val_loss")
+            )
             out_components[component] = rec
     finally:
         restore_gate_params(model, snapshot)
@@ -619,28 +708,40 @@ def run_dose_response(ckpt: str, data_dir: str, *,
 
 def main():
     p = argparse.ArgumentParser(
-        description="门控系数的推理期剂量-反应扫描（同一 checkpoint 的连续消融）")
-    p.add_argument("--ckpt", required=True,
-                   help="model_best.pt / model.pt（必须是带输出门的变体）")
+        description="门控系数的推理期剂量-反应扫描（同一 checkpoint 的连续消融）"
+    )
+    p.add_argument(
+        "--ckpt", required=True, help="model_best.pt / model.pt（必须是带输出门的变体）"
+    )
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True, help="输出 JSON 路径")
-    p.add_argument("--eval_iters", default=None,
-                   help="评测窗口数；默认继承 checkpoint 的 config_used.json"
-                        "（缺失时 50，与 lega.evaluate 一致）")
-    p.add_argument("--ctx", default=None,
-                   help="评测上下文；默认继承训练配置的 train_ctx")
+    p.add_argument(
+        "--eval_iters",
+        default=None,
+        help="评测窗口数；默认继承 checkpoint 的 config_used.json"
+        "（缺失时 50，与 lega.evaluate 一致）",
+    )
+    p.add_argument(
+        "--ctx", default=None, help="评测上下文；默认继承训练配置的 train_ctx"
+    )
     p.add_argument("--device", default="auto")
-    p.add_argument("--seed", default=None,
-                   help="覆盖 checkpoint 记录的种子（只影响确定性播种，"
-                        "不改变权重）")
-    p.add_argument("--factors", default=",".join(
-        f"{x:g}" for x in DEFAULT_FACTORS),
-        help="逗号分隔的缩放因子网格（默认 0,0.5,0.75,1,1.25,1.5,2）")
-    p.add_argument("--components", default="A,B,C",
-                   help="要扫描的组件（默认 A,B,C）")
-    p.add_argument("--allow_data_protocol_violations", action="store_true",
-                   help="即使 data_report 有严重泄露告警也继续（仅复现历史；"
-                        "结果不得用于正式结论）")
+    p.add_argument(
+        "--seed",
+        default=None,
+        help="覆盖 checkpoint 记录的种子（只影响确定性播种，" "不改变权重）",
+    )
+    p.add_argument(
+        "--factors",
+        default=",".join(f"{x:g}" for x in DEFAULT_FACTORS),
+        help="逗号分隔的缩放因子网格（默认 0,0.5,0.75,1,1.25,1.5,2）",
+    )
+    p.add_argument("--components", default="A,B,C", help="要扫描的组件（默认 A,B,C）")
+    p.add_argument(
+        "--allow_data_protocol_violations",
+        action="store_true",
+        help="即使 data_report 有严重泄露告警也继续（仅复现历史；"
+        "结果不得用于正式结论）",
+    )
     args = p.parse_args()
     seed = None
     if args.seed is not None:
@@ -655,24 +756,34 @@ def main():
         p.error(str(e))
     try:
         payload = run_dose_response(
-            args.ckpt, args.data_dir, eval_iters=args.eval_iters, ctx=args.ctx,
-            device=args.device, seed=seed, factors=factors,
+            args.ckpt,
+            args.data_dir,
+            eval_iters=args.eval_iters,
+            ctx=args.ctx,
+            device=args.device,
+            seed=seed,
+            factors=factors,
             components=components,
-            allow_data_protocol_violations=args.allow_data_protocol_violations)
+            allow_data_protocol_violations=args.allow_data_protocol_violations,
+        )
     except (ValueError, FileNotFoundError) as e:
         p.error(str(e))
     save_json(payload, args.out)
     base = payload["baseline"]
-    print(f"[dose] {payload['variant']} seed={payload['seed']} "
-          f"val_loss={base.get('val_loss')} val_ppl={base.get('val_ppl')}")
+    print(
+        f"[dose] {payload['variant']} seed={payload['seed']} "
+        f"val_loss={base.get('val_loss')} val_ppl={base.get('val_ppl')}"
+    )
     for name, rec in payload["components"].items():
         if not rec.get("applicable"):
             print(f"  - {name}: 不适用（{rec.get('reason')}）")
             continue
         diag = rec.get("diagnostics") or {}
-        print(f"  - {name}: local_slope={diag.get('local_slope')} "
-              f"vertex={diag.get('quadratic_vertex')} "
-              f"best_factor={diag.get('best_factor')}")
+        print(
+            f"  - {name}: local_slope={diag.get('local_slope')} "
+            f"vertex={diag.get('quadratic_vertex')} "
+            f"best_factor={diag.get('best_factor')}"
+        )
     print(f"[dose] -> {args.out}")
     return 0
 

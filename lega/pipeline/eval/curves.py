@@ -1,7 +1,9 @@
 """训练曲线诊断、效率指标与涨点-增幅权衡。"""
+
 from .._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
     """对每个 (变体, 种子) run 做训练曲线诊断并落盘汇总。
@@ -15,6 +17,7 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
     if os.path.exists(meta_path):
         try:
             import math as _math
+
             with open(meta_path, "r", encoding="utf-8") as f:
                 vocab = _integral_value(json.load(f)["vocab_size"])
             if vocab is None or vocab <= 0:
@@ -28,10 +31,16 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
         diag.setdefault(v, {})[str(seed)] = d
     if diag:
         save_json(diag, os.path.join(results_dir, "curve_diagnosis.json"))
-        n_bad = sum(1 for vs in diag.values() for d in vs.values()
-                    if d["status"] not in ("正常收敛", "数据不足"))
-        print(f"[curves] 训练曲线诊断完成：{n_bad} 个 run 需要关注"
-              f" -> {os.path.join(results_dir, 'curve_diagnosis.json')}")
+        n_bad = sum(
+            1
+            for vs in diag.values()
+            for d in vs.values()
+            if d["status"] not in ("正常收敛", "数据不足")
+        )
+        print(
+            f"[curves] 训练曲线诊断完成：{n_bad} 个 run 需要关注"
+            f" -> {os.path.join(results_dir, 'curve_diagnosis.json')}"
+        )
     return diag
 
 
@@ -53,13 +62,13 @@ def _eff_cell(entry, key, ctx):
         cell = by_ctx.get(str(ctx))
         if not isinstance(cell, dict):
             return None
-        field = ("gate_extra_flops_per_tok" if key == "gate_flops"
-                 else "total_flops_per_tok")
+        field = (
+            "gate_extra_flops_per_tok" if key == "gate_flops" else "total_flops_per_tok"
+        )
         return _num_or_none(cell.get(field))
     if key == "mem":
         by_ctx = eff.get("peak_mem_mb_prefill")
-        return (_num_or_none(by_ctx.get(str(ctx)))
-                if isinstance(by_ctx, dict) else None)
+        return _num_or_none(by_ctx.get(str(ctx))) if isinstance(by_ctx, dict) else None
     if key == "params":
         return _num_or_none(eff.get("n_params") or entry.get("n_params"))
     if key == "params_mb":
@@ -109,8 +118,7 @@ def _lat_noise_pct(entry, metric, ctx, bs="1"):
     """
     if not isinstance(entry, dict):
         return None
-    key = ("prefill_ms_spread_pct" if metric == "prefill"
-           else "decode_ms_spread_pct")
+    key = "prefill_ms_spread_pct" if metric == "prefill" else "decode_ms_spread_pct"
     by_ctx = entry.get(key)
     if not isinstance(by_ctx, dict):
         return None
@@ -130,8 +138,7 @@ def _noise_floor_pct(base_noise, cand_noise):
     """
     base_noise = _num_or_none(base_noise)
     cand_noise = _num_or_none(cand_noise)
-    if (base_noise is None or cand_noise is None
-            or base_noise < 0.0 or cand_noise < 0.0):
+    if base_noise is None or cand_noise is None or base_noise < 0.0 or cand_noise < 0.0:
         return None
     try:
         floor = math.sqrt(base_noise * base_noise + cand_noise * cand_noise)
@@ -145,9 +152,16 @@ def _noise_floor_pct(base_noise, cand_noise):
 # 到 10×；下限 0.5 pp 避免收益趋近 0 时比值判定失效）。
 
 
-def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
-                     n_seeds=None, ruler_benefit_pp=None, ruler_p_adj=None,
-                     ruler_n_seeds=None) -> str:
+def tradeoff_verdict(
+    benefit_pct,
+    p_adj,
+    cost_pct,
+    alpha=ALPHA,
+    n_seeds=None,
+    ruler_benefit_pp=None,
+    ruler_p_adj=None,
+    ruler_n_seeds=None,
+) -> str:
     """涨点-增幅权衡判定：不看增幅的涨点没有意义；收益必须覆盖两个主指标。
 
     两个主指标：PPL（benefit_pct=相对基线的百分比改善，正=更好）与 RULER
@@ -191,50 +205,59 @@ def tradeoff_verdict(benefit_pct, p_adj, cost_pct, alpha=ALPHA,
     lacks = []
     if benefit_pct is not None and n_seeds is not None and n_seeds < MIN_SEEDS:
         lacks.append(f"PPL n={n_seeds}")
-    if (ruler_benefit_pp is not None and ruler_n_seeds is not None
-            and ruler_n_seeds < MIN_SEEDS):
+    if (
+        ruler_benefit_pp is not None
+        and ruler_n_seeds is not None
+        and ruler_n_seeds < MIN_SEEDS
+    ):
         lacks.append(f"RULER n={ruler_n_seeds}")
     if lacks:
         return f"种子不足（{'、'.join(lacks)}<{MIN_SEEDS}），无法判定"
     ppl_sig = p_adj is not None and p_adj < alpha
     rul_sig = ruler_p_adj is not None and ruler_p_adj < alpha
     ppl_up = benefit_pct is not None and benefit_pct > 0 and ppl_sig
-    rul_up = (ruler_benefit_pp is not None and ruler_benefit_pp > 0
-              and rul_sig)
+    rul_up = ruler_benefit_pp is not None and ruler_benefit_pp > 0 and rul_sig
     ppl_down = benefit_pct is not None and benefit_pct < 0 and ppl_sig
-    rul_down = (ruler_benefit_pp is not None and ruler_benefit_pp < 0
-                and rul_sig)
+    rul_down = ruler_benefit_pp is not None and ruler_benefit_pp < 0 and rul_sig
     if ppl_down and rul_up:
-        return (f"权衡：PPL 显著退步 {benefit_pct:.1f}% 但 RULER 显著提升 "
-                f"+{ruler_benefit_pp:.2f} pp（增幅 {cost_pct:.0f}%，"
-                "检索目标改善，须说明 PPL 取舍）")
+        return (
+            f"权衡：PPL 显著退步 {benefit_pct:.1f}% 但 RULER 显著提升 "
+            f"+{ruler_benefit_pp:.2f} pp（增幅 {cost_pct:.0f}%，"
+            "检索目标改善，须说明 PPL 取舍）"
+        )
     if rul_down and ppl_up:
-        return (f"权衡：PPL 显著改善 {benefit_pct:.1f}% 但 RULER 显著退步 "
-                f"{ruler_benefit_pp:.2f} pp（增幅 {cost_pct:.0f}%，"
-                "核心检索目标受损，须说明取舍）")
+        return (
+            f"权衡：PPL 显著改善 {benefit_pct:.1f}% 但 RULER 显著退步 "
+            f"{ruler_benefit_pp:.2f} pp（增幅 {cost_pct:.0f}%，"
+            "核心检索目标受损，须说明取舍）"
+        )
     if ppl_down:
-        extra = (f"，且 RULER 显著退步 {ruler_benefit_pp:+.2f} pp"
-                 if rul_down else "")
-        return (f"不可行：PPL 显著差于基线（{benefit_pct:.1f}%）"
-                f"{extra}")
+        extra = f"，且 RULER 显著退步 {ruler_benefit_pp:+.2f} pp" if rul_down else ""
+        return f"不可行：PPL 显著差于基线（{benefit_pct:.1f}%）" f"{extra}"
     if rul_down:
         return f"不可行：RULER 显著差于基线（{ruler_benefit_pp:+.2f} pp）"
     if ppl_up or rul_up:
         if cost_pct > 50:
             return f"需审视：显著但增幅 {cost_pct:.0f}%"
         if ppl_up and cost_pct > 5 * max(benefit_pct, 0.5):
-            return (f"收益-增幅比不利：PPL 收益 {benefit_pct:.1f}% vs "
-                    f"增幅 {cost_pct:.0f}%")
-        if rul_up and cost_pct > RULER_COST_RATIO * max(ruler_benefit_pp,
-                                                        RULER_RATIO_FLOOR_PP):
-            return (f"收益-增幅比不利：RULER 收益 +{ruler_benefit_pp:.2f} pp vs "
-                    f"增幅 {cost_pct:.0f}%")
+            return (
+                f"收益-增幅比不利：PPL 收益 {benefit_pct:.1f}% vs "
+                f"增幅 {cost_pct:.0f}%"
+            )
+        if rul_up and cost_pct > RULER_COST_RATIO * max(
+            ruler_benefit_pp, RULER_RATIO_FLOOR_PP
+        ):
+            return (
+                f"收益-增幅比不利：RULER 收益 +{ruler_benefit_pp:.2f} pp vs "
+                f"增幅 {cost_pct:.0f}%"
+            )
         basis = "PPL" if ppl_up else "RULER"
         if ppl_up and rul_up:
             basis = "PPL+RULER"
         return "可接受" if basis == "PPL" else f"可接受（依据 {basis} 显著涨点）"
-    any_pos = ((benefit_pct is not None and benefit_pct > 0)
-               or (ruler_benefit_pp is not None and ruler_benefit_pp > 0))
+    any_pos = (benefit_pct is not None and benefit_pct > 0) or (
+        ruler_benefit_pp is not None and ruler_benefit_pp > 0
+    )
     if any_pos:
         if cost_pct > 10:
             return f"不可行：涨点不显著且增幅 {cost_pct:.0f}%"

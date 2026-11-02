@@ -1,4 +1,5 @@
 """极简测试入口（不依赖 pytest）: python -m tests.run_tests（或 python tests/run_tests.py）"""
+
 import contextlib
 import importlib
 import inspect
@@ -12,34 +13,63 @@ from types import SimpleNamespace
 # tests/ 而非仓库根，需要显式把仓库根加入路径才能 import tests.* / lega.*。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
-           "tests.test_latency", "tests.test_length_effect",
-           "tests.test_config_schema",
-           "tests.test_analysis", "tests.test_utils",
-           "tests.test_discovery", "tests.test_uncertainty",
-           "tests.test_sanity", "tests.test_repro",
-           "tests.test_datacheck_protocol", "tests.test_datacheck_bins",
-           "tests.test_datacheck_exact_ngram",
-           "tests.test_datacheck_provenance",
-           "tests.test_pipeline_datacheck", "tests.test_pipeline_audit",
-           "tests.test_pipeline_report", "tests.test_pipeline_baselines",
-           "tests.test_pipeline_ruler", "tests.test_pipeline_train",
-           "tests.test_pipeline_factorial", "tests.test_pipeline_sampling",
-           "tests.test_reparameterization", "tests.test_budget_sensitivity",
-           "tests.test_curves", "tests.test_badcase",
-           "tests.test_nan_checklist", "tests.test_evaluate",
-           "tests.test_experiment", "tests.test_hypotheses",
-           "tests.test_tuning", "tests.test_ngram", "tests.test_early_stop",
-           "tests.test_postrun", "tests.test_plots", "tests.test_probe",
-           "tests.test_ablation_methods", "tests.test_dose_response",
-           "tests.test_output_ablation",
-           "tests.test_equivalence", "tests.test_replication",
-           "tests.test_ledger_integrity", "tests.test_bayes",
-           "tests.test_multiverse",
-           "tests.test_heterogeneity", "tests.test_missingness",
-           "tests.test_design", "tests.test_nested", "tests.test_run_tests",
-           "tests.test_lengthcalib", "tests.test_lengthppl",
-           "tests.test_capacity", "tests.test_ranking"]
+MODULES = [
+    "tests.test_attention",
+    "tests.test_model",
+    "tests.test_ruler",
+    "tests.test_latency",
+    "tests.test_length_effect",
+    "tests.test_config_schema",
+    "tests.test_analysis",
+    "tests.test_utils",
+    "tests.test_discovery",
+    "tests.test_uncertainty",
+    "tests.test_sanity",
+    "tests.test_repro",
+    "tests.test_datacheck_protocol",
+    "tests.test_datacheck_bins",
+    "tests.test_datacheck_exact_ngram",
+    "tests.test_datacheck_provenance",
+    "tests.test_pipeline_datacheck",
+    "tests.test_pipeline_audit",
+    "tests.test_pipeline_report",
+    "tests.test_pipeline_baselines",
+    "tests.test_pipeline_ruler",
+    "tests.test_pipeline_train",
+    "tests.test_pipeline_factorial",
+    "tests.test_pipeline_sampling",
+    "tests.test_reparameterization",
+    "tests.test_budget_sensitivity",
+    "tests.test_curves",
+    "tests.test_badcase",
+    "tests.test_nan_checklist",
+    "tests.test_evaluate",
+    "tests.test_experiment",
+    "tests.test_hypotheses",
+    "tests.test_tuning",
+    "tests.test_ngram",
+    "tests.test_early_stop",
+    "tests.test_postrun",
+    "tests.test_plots",
+    "tests.test_probe",
+    "tests.test_ablation_methods",
+    "tests.test_dose_response",
+    "tests.test_output_ablation",
+    "tests.test_equivalence",
+    "tests.test_replication",
+    "tests.test_ledger_integrity",
+    "tests.test_bayes",
+    "tests.test_multiverse",
+    "tests.test_heterogeneity",
+    "tests.test_missingness",
+    "tests.test_design",
+    "tests.test_nested",
+    "tests.test_run_tests",
+    "tests.test_lengthcalib",
+    "tests.test_lengthppl",
+    "tests.test_capacity",
+    "tests.test_ranking",
+]
 
 
 class _MonkeyPatch:
@@ -69,8 +99,9 @@ class _MonkeyPatch:
         had = hasattr(target, name)
         if not had and raising:
             raise AttributeError(f"{target!r} 无属性 {name!r}")
-        self._dels.setdefault((id(target), name), (target, name,
-                                                    getattr(target, name, None)))
+        self._dels.setdefault(
+            (id(target), name), (target, name, getattr(target, name, None))
+        )
         if had:
             delattr(target, name)
 
@@ -125,8 +156,11 @@ def _run_with_fixtures(fn):
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         params = {}
-    names = [p.name for p in params.values()
-             if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    names = [
+        p.name
+        for p in params.values()
+        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    ]
     kwargs = {}
     mp = None
     cap = None
@@ -143,8 +177,9 @@ def _run_with_fixtures(fn):
             raise TypeError(f"测试函数 {fn.__name__} 需要未知 fixture {n!r}")
     try:
         if cap is not None:
-            with contextlib.redirect_stdout(cap._out), \
-                    contextlib.redirect_stderr(cap._err):
+            with contextlib.redirect_stdout(cap._out), contextlib.redirect_stderr(
+                cap._err
+            ):
                 fn(**kwargs)
         else:
             fn(**kwargs)

@@ -4,13 +4,19 @@
 种子矩阵 bootstrap 确定性，以及 RULER 任务/长度分层在流水线中的适配、
 H4 挂载与汇总渲染。
 """
+
 import math
 
-from lega.heterogeneity import (attach_to_hypotheses, chi2_sf,
-                                meta_analysis,
-                                meta_analysis_from_seed_matrix)
-from lega.pipeline import (_render_ruler_heterogeneity_section,
-                           _ruler_heterogeneity_analysis)
+from lega.heterogeneity import (
+    attach_to_hypotheses,
+    chi2_sf,
+    meta_analysis,
+    meta_analysis_from_seed_matrix,
+)
+from lega.pipeline import (
+    _render_ruler_heterogeneity_section,
+    _ruler_heterogeneity_analysis,
+)
 
 
 def _close(a, b, tol=1e-9):
@@ -31,8 +37,7 @@ def test_chi2_sf_known_value_and_validation():
 
 
 def test_homogeneous_meta_analysis():
-    res = meta_analysis([0.1, 0.1, 0.1], [0.02, 0.02, 0.02],
-                        labels=["a", "b", "c"])
+    res = meta_analysis([0.1, 0.1, 0.1], [0.02, 0.02, 0.02], labels=["a", "b", "c"])
     assert res["status"] == "no_detected_heterogeneity", res
     assert _close(res["pooled_fixed"], 0.1)
     assert _close(res["pooled_random"], 0.1)
@@ -45,8 +50,7 @@ def test_homogeneous_meta_analysis():
 
 
 def test_heterogeneous_meta_analysis_and_prediction_interval():
-    res = meta_analysis([0.30, -0.28, 0.25], [0.02, 0.02, 0.03],
-                        labels=["a", "b", "c"])
+    res = meta_analysis([0.30, -0.28, 0.25], [0.02, 0.02, 0.03], labels=["a", "b", "c"])
     assert res["status"] == "heterogeneous", res
     assert res["q_p"] < 0.001 and res["i2"] > 0.8, res
     assert res["tau2"] > 0 and res["tau"] > 0
@@ -58,8 +62,9 @@ def test_heterogeneous_meta_analysis_and_prediction_interval():
 
 
 def test_invalid_layers_are_excluded_not_zero_filled():
-    res = meta_analysis([0.1, None, "x", 0.2], [0.02, 0.02, 0.03, 0.0],
-                        labels=["a", "b", "c", "d"])
+    res = meta_analysis(
+        [0.1, None, "x", 0.2], [0.02, 0.02, 0.03, 0.0], labels=["a", "b", "c", "d"]
+    )
     assert res["status"] == "insufficient", res
     assert res["k"] == 1 and len(res["excluded"]) == 3, res
     reasons = " ".join(row["reason"] for row in res["excluded"])
@@ -79,8 +84,8 @@ def test_invalid_layers_are_excluded_not_zero_filled():
 
 def test_zero_within_variance_is_not_fabricated():
     res = meta_analysis_from_seed_matrix(
-        [[0.1, 0.2], [0.1, 0.2], [0.1, 0.2]],
-        labels=["a", "b"], n_bootstrap=50)
+        [[0.1, 0.2], [0.1, 0.2], [0.1, 0.2]], labels=["a", "b"], n_bootstrap=50
+    )
     assert res["status"] == "invalid", res
     assert res["pooled_random"] is None
     assert res["bootstrap"]["available"] is False
@@ -88,15 +93,19 @@ def test_zero_within_variance_is_not_fabricated():
 
 
 def test_seed_matrix_bootstrap_is_deterministic():
-    rows = [[0.12, 0.02, -0.03],
-            [-0.02, 0.04, -0.08],
-            [0.10, -0.01, 0.02],
-            [0.04, 0.03, -0.05],
-            [0.08, 0.00, -0.02]]
-    a = meta_analysis_from_seed_matrix(rows, labels=["a", "b", "c"],
-                                       n_bootstrap=200, seed=7)
-    b = meta_analysis_from_seed_matrix(rows, labels=["a", "b", "c"],
-                                       n_bootstrap=200, seed=7)
+    rows = [
+        [0.12, 0.02, -0.03],
+        [-0.02, 0.04, -0.08],
+        [0.10, -0.01, 0.02],
+        [0.04, 0.03, -0.05],
+        [0.08, 0.00, -0.02],
+    ]
+    a = meta_analysis_from_seed_matrix(
+        rows, labels=["a", "b", "c"], n_bootstrap=200, seed=7
+    )
+    b = meta_analysis_from_seed_matrix(
+        rows, labels=["a", "b", "c"], n_bootstrap=200, seed=7
+    )
     assert a["status"] == "heterogeneous", a
     assert a["bootstrap"] == b["bootstrap"]
     assert a["bootstrap"]["available"] is True
@@ -116,26 +125,33 @@ def _ruler(seed, effects, drop_task=None, noisy=True):
             "256": {"em": 0.5 + delta + noise, "n": 10},
             "512": {"em": 0.5 + delta + 0.4 * noise, "n": 10},
         }
-    return {"results": results, "ctx_lens": [256, 512],
-            "n_samples": 10, "sample_seed": 1, "max_new": 8}
+    return {
+        "results": results,
+        "ctx_lens": [256, 512],
+        "n_samples": 10,
+        "sample_seed": 1,
+        "max_new": 8,
+    }
 
 
 def _runs(task_effects=None):
     task_effects = task_effects or {
-        "niah_synth": 0.10, "niah_corpus": 0.00, "niah_multikey": -0.10}
+        "niah_synth": 0.10,
+        "niah_corpus": 0.00,
+        "niah_multikey": -0.10,
+    }
     runs = {"cand": {}, "ref": {}}
     for seed in (1, 2, 3, 4, 5):
         runs["cand"][seed] = {"ruler": _ruler(seed, task_effects)}
-        runs["ref"][seed] = {"ruler": _ruler(seed, {k: 0.0
-                                                    for k in task_effects},
-                                            noisy=False)}
+        runs["ref"][seed] = {
+            "ruler": _ruler(seed, {k: 0.0 for k in task_effects}, noisy=False)
+        }
     return runs
 
 
 def test_pipeline_ruler_task_heterogeneity_and_attachment():
     runs = _runs()
-    analysis = _ruler_heterogeneity_analysis(
-        runs, [("cand", "ref")], n_bootstrap=100)
+    analysis = _ruler_heterogeneity_analysis(runs, [("cand", "ref")], n_bootstrap=100)
     outcome = analysis["outcomes"][0]
     task = outcome["axes"]["task"]
     assert task["status"] == "heterogeneous", task
@@ -146,8 +162,16 @@ def test_pipeline_ruler_task_heterogeneity_and_attachment():
     context = outcome["axes"]["context"]
     assert context["status"] == "no_detected_heterogeneity", context
 
-    hyp = [{"id": "H4", "candidate": "cand", "reference": "ref",
-            "metric": "RULER平均", "status": "支持", "detail": "原判定"}]
+    hyp = [
+        {
+            "id": "H4",
+            "candidate": "cand",
+            "reference": "ref",
+            "metric": "RULER平均",
+            "status": "支持",
+            "detail": "原判定",
+        }
+    ]
     attach_to_hypotheses(hyp, analysis)
     assert hyp[0]["status"] == "支持"
     assert hyp[0]["detail"].startswith("原判定")
@@ -158,11 +182,10 @@ def test_pipeline_ruler_task_heterogeneity_and_attachment():
 
 def test_pipeline_excludes_protocol_mismatch_explicitly():
     runs = _runs()
-    runs["ref"][5]["ruler"] = _ruler(5, {"niah_synth": 0.0,
-                                         "niah_corpus": 0.0},
-                                     drop_task="niah_multikey")
-    analysis = _ruler_heterogeneity_analysis(
-        runs, [("cand", "ref")], n_bootstrap=20)
+    runs["ref"][5]["ruler"] = _ruler(
+        5, {"niah_synth": 0.0, "niah_corpus": 0.0}, drop_task="niah_multikey"
+    )
+    analysis = _ruler_heterogeneity_analysis(runs, [("cand", "ref")], n_bootstrap=20)
     outcome = analysis["outcomes"][0]
     assert outcome["excluded"]["protocol_mismatch"] == 1, outcome
     assert outcome["n_seeds"] == 4, outcome
@@ -173,8 +196,7 @@ def test_pipeline_excludes_protocol_mismatch_explicitly():
 
 
 def test_render_section_reports_boundaries():
-    analysis = _ruler_heterogeneity_analysis(
-        _runs(), [("cand", "ref")], n_bootstrap=50)
+    analysis = _ruler_heterogeneity_analysis(_runs(), [("cand", "ref")], n_bootstrap=50)
     md = "\n".join(_render_ruler_heterogeneity_section(analysis))
     assert "RULER 任务/长度异质性" in md
     assert "I²" in md and "不等于各层同质" in md

@@ -1,19 +1,22 @@
 """训练期容量匹配分解的纯计算测试。"""
-from lega.capacity import (CAPACITY_NULL_VARIANTS, CAPACITY_OFF_VARIANTS,
-                           NULL_EVIDENCE_COMPONENT, component_effects)
+
+from lega.capacity import (
+    CAPACITY_NULL_VARIANTS,
+    CAPACITY_OFF_VARIANTS,
+    NULL_EVIDENCE_COMPONENT,
+    component_effects,
+)
 
 
 def test_component_mapping_is_bijective():
     assert set(CAPACITY_NULL_VARIANTS) == {"A", "B", "C"}
     assert set(CAPACITY_OFF_VARIANTS) == {"A", "B", "C"}
-    assert NULL_EVIDENCE_COMPONENT == {
-        v: k for k, v in CAPACITY_NULL_VARIANTS.items()}
+    assert NULL_EVIDENCE_COMPONENT == {v: k for k, v in CAPACITY_NULL_VARIANTS.items()}
 
 
 def test_ppl_decomposition_identity_and_direction():
     # PPL 越低越好：Full=10、Null=12、No=15 -> 信息 2、容量 3、总 5。
-    out = component_effects([10.0, 11.0], [12.0, 13.0], [15.0, 16.0],
-                            lower_better=True)
+    out = component_effects([10.0, 11.0], [12.0, 13.0], [15.0, 16.0], lower_better=True)
     assert out["n"] == 2
     assert out["effects"]["info"]["values"] == [2.0, 2.0]
     assert out["effects"]["capacity"]["values"] == [3.0, 3.0]
@@ -35,17 +38,20 @@ def test_higher_better_decomposition_identity():
 
 
 def test_component_effects_rejects_misaligned_or_bad_values():
-    for args in (([1.0, 2.0], [1.0], [1.0]),
-                 ([1.0], [1.0], [float("nan")]),
-                 ([True], [1.0], [1.0]),
-                 ([1.0], [1.0], ["x"])):
+    for args in (
+        ([1.0, 2.0], [1.0], [1.0]),
+        ([1.0], [1.0], [float("nan")]),
+        ([True], [1.0], [1.0]),
+        ([1.0], [1.0], ["x"]),
+    ):
         try:
             component_effects(*args, lower_better=True)
         except ValueError:
             continue
         raise AssertionError(f"应拒绝非法输入: {args!r}")
-    assert component_effects([1.0], [1.0], [1.0],
-                             lower_better=True)["info_share"] is None
+    assert (
+        component_effects([1.0], [1.0], [1.0], lower_better=True)["info_share"] is None
+    )
     print("  [ok] 拒绝未对齐/非有限/布尔/非数值输入")
 
 
@@ -60,22 +66,28 @@ def test_single_factor_audit_covers_capacity_triples():
     rows = {r["component"]: r for r in audit["capacity_components"]}
     assert set(rows) == {"A", "B", "C"}
     assert {c: r["full_variant"] for c, r in rows.items()} == {
-        "A": "lega", "B": "lega", "C": "lega"}
-    assert {c: r["null_variant"] for c, r in rows.items()} == \
-        CAPACITY_NULL_VARIANTS
-    assert {c: r["off_variant"] for c, r in rows.items()} == \
-        CAPACITY_OFF_VARIANTS
+        "A": "lega",
+        "B": "lega",
+        "C": "lega",
+    }
+    assert {c: r["null_variant"] for c, r in rows.items()} == CAPACITY_NULL_VARIANTS
+    assert {c: r["off_variant"] for c, r in rows.items()} == CAPACITY_OFF_VARIANTS
     assert {c: r["evidence_param"] for c, r in rows.items()} == {
-        "A": "gate_w", "B": "gate_a", "C": "gate_b"}
+        "A": "gate_w",
+        "B": "gate_a",
+        "C": "gate_b",
+    }
     assert {c: r["evidence_capability"] for c, r in rows.items()} == {
-        "A": "query", "B": "conc", "C": "len"}
+        "A": "query",
+        "B": "conc",
+        "C": "len",
+    }
 
     bad = dict(CAPACITY_NULL_VARIANTS, B="lega_null_len")
     with mock.patch("lega.pipeline.common.CAPACITY_NULL_VARIANTS", bad):
         audit = single_factor_audit()
         assert not audit["ok"], audit
-        assert any("对应组件" in p or "互逆" in p
-                   for p in audit["problems"]), audit
+        assert any("对应组件" in p or "互逆" in p for p in audit["problems"]), audit
 
     bad = dict(CAPACITY_OFF_VARIANTS, C="lega_no_conc")
     with mock.patch("lega.pipeline.common.CAPACITY_OFF_VARIANTS", bad):

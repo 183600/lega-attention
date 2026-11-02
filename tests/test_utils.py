@@ -7,6 +7,7 @@ macro/micro/weighted 口径，用不平衡算例核对三者的差异。paired_t
 “多种子 Mean ± Std + 显著性”协议的核心，用 Student-t 已知临界值核对 p
 值精度；sign-flip 置换检验用独立枚举复算核对精确 p 值。
 """
+
 import json
 import math
 import os
@@ -15,15 +16,31 @@ import tempfile
 
 import numpy as np
 
-from lega.utils import (auroc, average_precision, bootstrap_mean_ci,
-                        calibration_metrics, config_bool, config_finite_float,
-                        config_probability, f1_scores, holm_bonferroni,
-                        load_config_json, mean_std,
-                        mcnemar_exact_p, min_detectable_effect,
-                        paired_sign_flip_test, paired_sign_test,
-                        paired_t_test, pearson,
-                        roc_pr_aucs, save_json, save_text,
-                        student_t_two_sided_p, t_critical_95, wilson_score_ci)
+from lega.utils import (
+    auroc,
+    average_precision,
+    bootstrap_mean_ci,
+    calibration_metrics,
+    config_bool,
+    config_finite_float,
+    config_probability,
+    f1_scores,
+    holm_bonferroni,
+    load_config_json,
+    mean_std,
+    mcnemar_exact_p,
+    min_detectable_effect,
+    paired_sign_flip_test,
+    paired_sign_test,
+    paired_t_test,
+    pearson,
+    roc_pr_aucs,
+    save_json,
+    save_text,
+    student_t_two_sided_p,
+    t_critical_95,
+    wilson_score_ci,
+)
 
 
 def _brute_auroc(scores, labels):
@@ -73,11 +90,9 @@ def test_auroc_ties_and_permutation():
     assert abs(flat - 0.5) < 1e-12, f"全并列应为 0.5，得到 {flat}"
 
     # 完全可分与完全反序
-    sep = auroc(np.array([3.0, 4.0, 5.0, 0.0, 1.0, 2.0]),
-                np.array([1, 1, 1, 0, 0, 0]))
+    sep = auroc(np.array([3.0, 4.0, 5.0, 0.0, 1.0, 2.0]), np.array([1, 1, 1, 0, 0, 0]))
     assert abs(sep - 1.0) < 1e-12, f"完全可分应为 1.0，得到 {sep}"
-    rev = auroc(np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
-                np.array([1, 1, 1, 0, 0, 0]))
+    rev = auroc(np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), np.array([1, 1, 1, 0, 0, 0]))
     assert abs(rev - 0.0) < 1e-12, f"完全反序应为 0.0，得到 {rev}"
     print("  [ok] auroc 并列/排列/极端情形")
 
@@ -122,19 +137,21 @@ def test_score_label_length_mismatch_is_rejected():
     被无声丢弃，AUROC/AP 就在错误的样本集上计算。三个入口统一显式报错。
     """
     for fn in (auroc, average_precision, roc_pr_aucs):
-        for scores, labels in (([0.1, 0.9], [1]),
-                               ([0.1], [1, 0]),
-                               (np.array([[0.1, 0.9]]), np.array([1]))):
+        for scores, labels in (
+            ([0.1, 0.9], [1]),
+            ([0.1], [1, 0]),
+            (np.array([[0.1, 0.9]]), np.array([1])),
+        ):
             try:
                 fn(scores, labels)
             except ValueError:
                 pass
             else:
                 raise AssertionError(
-                    f"{fn.__name__} 未拒绝长度不一致: {scores!r} / {labels!r}")
+                    f"{fn.__name__} 未拒绝长度不一致: {scores!r} / {labels!r}"
+                )
     # 同尺寸多维输入按元素对齐（与 pearson/calibration 的扁平口径一致）
-    got = auroc(np.array([[0.1, 0.2], [0.8, 0.9]]),
-                np.array([[0, 0], [1, 1]]))
+    got = auroc(np.array([[0.1, 0.2], [0.8, 0.9]]), np.array([[0, 0], [1, 1]]))
     assert abs(got - 1.0) < 1e-12, got
     print("  [ok] auroc/average_precision/roc_pr_aucs 拒绝长度不一致")
 
@@ -184,20 +201,31 @@ def test_save_json_writes_strict_json_atomically():
     tmp = tempfile.mkdtemp()
     try:
         p = os.path.join(tmp, "out.json")
-        save_json({"loss": float("nan"),
-                   "x": [float("inf"), {"y": float("-inf")}],
-                   "np": {"nan": np.float32("nan"), "int": np.int64(3),
-                          "bool": np.bool_(True),
-                          "arr": np.array([1.0, np.inf], dtype=np.float32)},
-                   "keep": 0.5}, p)
+        save_json(
+            {
+                "loss": float("nan"),
+                "x": [float("inf"), {"y": float("-inf")}],
+                "np": {
+                    "nan": np.float32("nan"),
+                    "int": np.int64(3),
+                    "bool": np.bool_(True),
+                    "arr": np.array([1.0, np.inf], dtype=np.float32),
+                },
+                "keep": 0.5,
+            },
+            p,
+        )
         txt = open(p, encoding="utf-8").read()
         assert "NaN" not in txt and "Infinity" not in txt
         strict = json.loads(
-            txt, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+            txt, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c))
+        )
         assert strict == {
-            "loss": None, "x": [None, {"y": None}],
+            "loss": None,
+            "x": [None, {"y": None}],
             "np": {"nan": None, "int": 3, "bool": True, "arr": [1.0, None]},
-            "keep": 0.5}
+            "keep": 0.5,
+        }
         assert not [f for f in os.listdir(tmp) if ".tmp" in f]
         # 序列化中途失败也不能留下半截临时文件，否则读者可能误把
         # “上次失败写入的残留”当成有效报告。
@@ -222,8 +250,7 @@ def test_save_text_replaces_atomically_without_leftover_temp():
         save_text("first\n", path)
         assert open(path, encoding="utf-8", newline="").read() == "first\n"
         save_text("second\nline\n", path)
-        assert open(path, encoding="utf-8", newline="").read() == (
-            "second\nline\n")
+        assert open(path, encoding="utf-8", newline="").read() == ("second\nline\n")
         assert not [f for f in os.listdir(tmp) if ".tmp" in f]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -240,7 +267,7 @@ def _brute_ap(scores, labels):
     for i in range(len(pairs)):
         if i + 1 < len(pairs) and pairs[i + 1][0] == pairs[i][0]:
             continue  # 只在并列组末尾结算，保证同分整体进阈值
-        tp = sum(1 for _, y in pairs[:i + 1] if y == 1)
+        tp = sum(1 for _, y in pairs[: i + 1] if y == 1)
         prec = tp / (i + 1)
         rec = tp / n_pos
         ap += (rec - prev_r) * prec
@@ -291,10 +318,18 @@ def test_average_precision_properties():
     assert abs(average_precision(nan_scores, np.array([1, 1, 0, 0])) - 1.0) < 1e-12
     # 非二值标签不能计入累计正类数：否则 TP 可超过 n_pos、AP>1（旧实现
     # 对 [0,1,2,1] 会给出 2.67）。与 auroc 一样只承认 0/1 标签。
-    assert abs(average_precision(
-        np.array([1.0, 2.0, 3.0, 4.0]), np.array([0.0, 1.0, 2.0, 1.0])) - 1.0) < 1e-12
-    assert math.isnan(average_precision(
-        np.array([1.0, 2.0, 3.0]), np.array([1.0, 1.0, 2.0])))
+    assert (
+        abs(
+            average_precision(
+                np.array([1.0, 2.0, 3.0, 4.0]), np.array([0.0, 1.0, 2.0, 1.0])
+            )
+            - 1.0
+        )
+        < 1e-12
+    )
+    assert math.isnan(
+        average_precision(np.array([1.0, 2.0, 3.0]), np.array([1.0, 1.0, 2.0]))
+    )
     print("  [ok] average_precision（随机基线/可分/反序/NaN/非二值标签剔除）")
 
 
@@ -317,11 +352,13 @@ def test_roc_pr_aucs_bitwise_equals_separate_metrics():
         labels = (rng.random(n) < 0.35).astype(np.float64)
         cases.append((scores, labels))
     cases += [
-        (np.array([1.0, 2.0]), np.array([1.0, 1.0])),          # 单一类别
+        (np.array([1.0, 2.0]), np.array([1.0, 1.0])),  # 单一类别
         (np.array([1.0, 2.0]), np.array([0.0, 0.0])),
         (np.ones(6), np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])),
-        (np.array([np.nan, 3.0, 2.0, 1.0, np.inf]),
-         np.array([1.0, 1.0, 0.0, 0.0, 1.0])),
+        (
+            np.array([np.nan, 3.0, 2.0, 1.0, np.inf]),
+            np.array([1.0, 1.0, 0.0, 0.0, 1.0]),
+        ),
         (np.array([-0.0, 0.0, 1.0]), np.array([0.0, 1.0, 1.0])),
         (np.array([]), np.array([])),
         (np.array([1.0, 2.0, 3.0]), np.array([1.0, 1.0, 2.0])),  # 非二值退化为原函数
@@ -332,8 +369,10 @@ def test_roc_pr_aucs_bitwise_equals_separate_metrics():
         got_a, got_p = roc_pr_aucs(scores, labels)
         ok_a = (math.isnan(ref_a) and math.isnan(got_a)) or ref_a == got_a
         ok_p = (math.isnan(ref_p) and math.isnan(got_p)) or ref_p == got_p
-        assert ok_a and ok_p, (f"scores={scores} labels={labels}: "
-                               f"ref=({ref_a}, {ref_p}) got=({got_a}, {got_p})")
+        assert ok_a and ok_p, (
+            f"scores={scores} labels={labels}: "
+            f"ref=({ref_a}, {ref_p}) got=({got_a}, {got_p})"
+        )
         checked += 1
     assert checked == len(cases)
     print(f"  [ok] roc_pr_aucs 与 auroc/average_precision 逐位一致（{checked} 组）")
@@ -372,9 +411,11 @@ def test_f1_scores_three_averages_and_imbalance():
         pass
     # 类别是整数身份：bool/小数/非数值不能被截断成另一个合法类别
     for bad in (True, 1.5, float("nan"), "bad"):
-        for call in (lambda: f1_scores([bad, 0], [0, 1]),
-                     lambda: f1_scores([0, 1], [bad, 0]),
-                     lambda: f1_scores([0, 1], [0, 1], labels=[0, bad])):
+        for call in (
+            lambda: f1_scores([bad, 0], [0, 1]),
+            lambda: f1_scores([0, 1], [bad, 0]),
+            lambda: f1_scores([0, 1], [0, 1], labels=[0, bad]),
+        ):
             try:
                 call()
             except ValueError:
@@ -384,11 +425,13 @@ def test_f1_scores_three_averages_and_imbalance():
     assert f1_scores([1.0, 0.0], [1.0, 1.0])["n"] == 2
     # 单一类别没有可区分的正/负类：聚合 F1 必须为 None（否则全判同一类
     # 会显示成 1.0 的“完美”分类器），逐类明细仍保留。
-    for args in (([1, 1, 1], [1, 1, 1]),
-                 ([0, 0], [0, 0], [0, 1])):
+    for args in (([1, 1, 1], [1, 1, 1]), ([0, 0], [0, 0], [0, 1])):
         single = f1_scores(*args)
-        assert (single["macro"] is None and single["micro"] is None
-                and single["weighted"] is None), single
+        assert (
+            single["macro"] is None
+            and single["micro"] is None
+            and single["weighted"] is None
+        ), single
         assert single["n"] > 0 and single["per_class"], single
     # 重复 labels 会让 per_class 覆盖、macro/weighted 重复计权
     for dup in ([0, 0], [1, 0, 1]):
@@ -397,8 +440,10 @@ def test_f1_scores_three_averages_and_imbalance():
             raise AssertionError(f"重复 labels 应抛 ValueError: {dup!r}")
         except ValueError:
             pass
-    print("  [ok] f1_scores（macro/micro/weighted 分离、多分类、长度校验/"
-          "非法类别与重复 labels 拒绝）")
+    print(
+        "  [ok] f1_scores（macro/micro/weighted 分离、多分类、长度校验/"
+        "非法类别与重复 labels 拒绝）"
+    )
 
 
 def test_pearson_guards():
@@ -419,6 +464,7 @@ def test_pearson_guards():
     xinf[3] = np.inf
     assert abs(pearson(xinf, 2 * x + 1) - 1.0) < 1e-9
     from lega.utils import _obs_array
+
     arr = _obs_array(np.array([1.0, np.inf, -np.inf, np.nan, 2.0]))
     assert np.isfinite(arr[[0, 4]]).all()
     assert np.isnan(arr[[1, 2, 3]]).all()
@@ -468,14 +514,34 @@ def test_bool_not_counted_as_numeric_observation():
 
 def test_config_bool_validation():
     """配置开关不能把任意非空字符串/非零数值静默当成 True。"""
-    for value, expected in ((True, True), (False, False),
-                            (np.bool_(True), True), (np.bool_(False), False),
-                            (1, True), (0, False), (1.0, True), (0.0, False),
-                            (np.int64(1), True), ("true", True), ("FALSE", False),
-                            (" 0 ", False)):
+    for value, expected in (
+        (True, True),
+        (False, False),
+        (np.bool_(True), True),
+        (np.bool_(False), False),
+        (1, True),
+        (0, False),
+        (1.0, True),
+        (0.0, False),
+        (np.int64(1), True),
+        ("true", True),
+        ("FALSE", False),
+        (" 0 ", False),
+    ):
         assert config_bool(value, "x") is expected, (value, expected)
-    for bad in ("yes", "no", "on", "", 2, -1, 0.5, float("nan"),
-                float("inf"), None, []):
+    for bad in (
+        "yes",
+        "no",
+        "on",
+        "",
+        2,
+        -1,
+        0.5,
+        float("nan"),
+        float("inf"),
+        None,
+        [],
+    ):
         try:
             config_bool(bad, "x")
             raise AssertionError(f"config_bool({bad!r}) 应被拒绝")
@@ -486,8 +552,18 @@ def test_config_bool_validation():
 
 def test_config_float_and_probability_validation():
     """模型配置浮点不能把 bool/NaN/Inf 静默转成数值，概率还须落在 [0, 1]。"""
-    for bad in (True, False, np.bool_(True), float("nan"), float("inf"),
-                float("-inf"), None, "abc", "1_0", []):
+    for bad in (
+        True,
+        False,
+        np.bool_(True),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        None,
+        "abc",
+        "1_0",
+        [],
+    ):
         for fn in (config_finite_float, config_probability):
             try:
                 fn(bad, "x")
@@ -506,6 +582,7 @@ def test_config_float_and_probability_validation():
     assert config_probability(1, "p") == 1.0
     assert config_probability("0.25", "p") == 0.25
     from lega.utils import _finite_observation
+
     assert _finite_observation("1_0") is None
     print("  [ok] config_finite_float/config_probability 拒绝 bool/NaN/Inf/越界")
 
@@ -542,20 +619,23 @@ def test_t_critical_95_matches_known_table():
     assert abs(t_critical_95(1000) - 1.96234) < 5e-5
     # 大自由度必须走正态极限：朴素 x=df/(df+t²) 在 df≈1e18 时会舍入到 1，
     # 把 p 错算成 1、临界值错算成 8/90。
-    assert abs(student_t_two_sided_p(2, 10 ** 18)
-               - math.erfc(2 / math.sqrt(2))) < 1e-12
+    assert abs(student_t_two_sided_p(2, 10**18) - math.erfc(2 / math.sqrt(2))) < 1e-12
     # df 略低于正态阈值时 t²/df 仍可能小于 1 附近的 float 分辨率：
     # 朴素 x=df/(df+t²) 会把 x 舍入成 1，使 p 错算成 1（误差 ~1e-5）。
     # 参考值来自 scipy.stats.t.sf(..., df)*2。
-    assert abs(student_t_two_sided_p(
-        1.8214847522781816e-05, 4658237.908688162)
-        - 0.999985466655165) < 1e-12
+    assert (
+        abs(
+            student_t_two_sided_p(1.8214847522781816e-05, 4658237.908688162)
+            - 0.999985466655165
+        )
+        < 1e-12
+    )
     # 合法但超出 float 上限的整数 t：双侧 p 应为 0，不能让 float(t)
     # 的 OverflowError 穿透（符号不影响双侧检验）。
-    assert student_t_two_sided_p(10 ** 400, 3) == 0.0
-    assert student_t_two_sided_p(-10 ** 400, 3) == 0.0
-    assert abs(t_critical_95(10 ** 18) - 1.9599639845) < 1e-6
-    assert abs(t_critical_95(10 ** 400) - 1.9599639845) < 1e-6
+    assert student_t_two_sided_p(10**400, 3) == 0.0
+    assert student_t_two_sided_p(-(10**400), 3) == 0.0
+    assert abs(t_critical_95(10**18) - 1.9599639845) < 1e-6
+    assert abs(t_critical_95(10**400) - 1.9599639845) < 1e-6
     # df 是最小次正规数时 df/2 下溢为 0；t 分布的尾部极限使双侧 p→1，
     # 不能让 lgamma(0) 的 ValueError 穿透；其临界值超出 float 上限，须返回 None。
     tiny_df = 5e-324
@@ -565,16 +645,12 @@ def test_t_critical_95_matches_known_table():
     # 误判成“t 极大、p→0”。参考值来自 mpmath 高精度 betainc。
     assert abs(student_t_two_sided_p(1.0, 1e-323) - 1.0) < 1e-12
     assert abs(student_t_two_sided_p(1e200, 1e-323) - 1.0) < 1e-12
-    assert abs(student_t_two_sided_p(1e200, 1e-6)
-               - 0.9995319916294519) < 1e-12
-    assert abs(student_t_two_sided_p(1e200, 1.0)
-               - 6.3661977236758134e-201) < 1e-213
+    assert abs(student_t_two_sided_p(1e200, 1e-6) - 0.9995319916294519) < 1e-12
+    assert abs(student_t_two_sided_p(1e200, 1.0) - 6.3661977236758134e-201) < 1e-213
     # 中等大 df 且 t 较大时 p 可小到 1e-23；x=df/(df+t²) 仍可表示，
     # 不能改用 1-I_y 的二次补集把尾部抵消成 0。参考值来自 mpmath。
-    assert abs(student_t_two_sided_p(10.0, 1e5)
-               - 1.5633015300321724e-23) < 1e-32
-    assert abs(student_t_two_sided_p(10.0, 1e6)
-               - 1.5278610768050125e-23) < 1e-32
+    assert abs(student_t_two_sided_p(10.0, 1e5) - 1.5633015300321724e-23) < 1e-32
+    assert abs(student_t_two_sided_p(10.0, 1e6) - 1.5278610768050125e-23) < 1e-32
     assert student_t_two_sided_p(1e10, tiny_df) == 1.0
     assert t_critical_95(tiny_df) is None
     # 非法自由度安全返回 None，不抛异常
@@ -604,11 +680,11 @@ def test_paired_t_edge_cases():
     except ValueError:
         pass
     # 显著 vs 不显著：大效应小方差 vs 小效应大方差
-    sig = paired_t_test([10.5 + i * 0.01 for i in range(5)],
-                        [10.0 + i * 0.01 for i in range(5)])
+    sig = paired_t_test(
+        [10.5 + i * 0.01 for i in range(5)], [10.0 + i * 0.01 for i in range(5)]
+    )
     assert sig["p"] < 0.01
-    noise = paired_t_test([1.0, -1.0, 1.0, -1.0, 1.0],
-                          [0.9, -0.9, 0.9, -0.9, 0.9])
+    noise = paired_t_test([1.0, -1.0, 1.0, -1.0, 1.0], [0.9, -0.9, 0.9, -0.9, 0.9])
     assert noise["p"] > 0.05
     # 最小次正规差：std/sqrt(n) 下溢成 0 时不能抛 ZeroDivisionError。
     tiny = [5e-324 if i % 2 == 0 else 0.0 for i in range(4)]
@@ -669,16 +745,16 @@ def test_holm_bonferroni():
     ps = [0.9, 0.001, 0.5, 0.04, None, 0.2]
     adj = holm_bonferroni(ps)
     assert all(a >= p and a <= 1.0 for a, p in zip(adj, ps) if p is not None)
-    order = sorted((i for i in range(len(ps)) if ps[i] is not None),
-                   key=lambda i: ps[i])
+    order = sorted(
+        (i for i in range(len(ps)) if ps[i] is not None), key=lambda i: ps[i]
+    )
     vals = [adj[i] for i in order]
     assert all(b + 1e-12 >= a for a, b in zip(vals, vals[1:])), vals
     # 全 None / 空输入
     assert holm_bonferroni([]) == []
     assert holm_bonferroni([None, None]) == [None, None]
     # 生成器只可消费一次：返回顺序/长度仍须与列表输入一致
-    assert holm_bonferroni(iter([0.01, 0.02, 0.03, 0.04])) == \
-        [0.04, 0.06, 0.06, 0.06]
+    assert holm_bonferroni(iter([0.01, 0.02, 0.03, 0.04])) == [0.04, 0.06, 0.06, 0.06]
     # NaN 与 None 同义：不占家族大小，也不得污染其他 p 的校正值
     adj = holm_bonferroni([float("nan"), 0.01, 0.02, 0.5])
     assert adj[0] is None, adj
@@ -699,21 +775,20 @@ def _brute_signflip_p(diffs):
     n = len(diffs)
     obs = abs(sum(diffs) / n)
     cnt = 0
-    for mask in range(2 ** n):
-        flipped = [(d if (mask >> i) & 1 == 0 else -d)
-                   for i, d in enumerate(diffs)]
+    for mask in range(2**n):
+        flipped = [(d if (mask >> i) & 1 == 0 else -d) for i, d in enumerate(diffs)]
         if abs(sum(flipped) / n) >= obs - 1e-15:
             cnt += 1
-    return cnt / float(2 ** n)
+    return cnt / float(2**n)
 
 
 def test_paired_sign_flip_exact_p_values():
     """n<=16 全枚举：p_perm 必须与定义式独立复算逐位一致。"""
     cases = [
-        [5.0, 4.0, 6.0, 7.0, 5.0],            # 同号大效应
-        [1.0, -1.0, 1.0, -1.0, 1.0],          # 均值近 0 的噪声
-        [0.3, -0.1, 0.2, 0.25, -0.05, 0.4],   # 小效应
-        [2.0, 1.0, 3.0],                      # n=3
+        [5.0, 4.0, 6.0, 7.0, 5.0],  # 同号大效应
+        [1.0, -1.0, 1.0, -1.0, 1.0],  # 均值近 0 的噪声
+        [0.3, -0.1, 0.2, 0.25, -0.05, 0.4],  # 小效应
+        [2.0, 1.0, 3.0],  # n=3
     ]
     for diffs in cases:
         r = paired_sign_flip_test(diffs, [0.0] * len(diffs))
@@ -800,10 +875,16 @@ def test_paired_sign_flip_mc_and_guards():
             pass
         else:
             raise AssertionError(f"非法 seed 未被拒绝: {bad!r}")
-    assert paired_sign_flip_test([1.0, 2.0], [0.0, 0.0],
-                                 n_resamples="1000", seed="3")["p_perm"] is not None
-    print("  [ok] paired_sign_flip_test Monte-Carlo/确定性/边界口径/"
-          "非法重采样与种子拒绝")
+    assert (
+        paired_sign_flip_test([1.0, 2.0], [0.0, 0.0], n_resamples="1000", seed="3")[
+            "p_perm"
+        ]
+        is not None
+    )
+    print(
+        "  [ok] paired_sign_flip_test Monte-Carlo/确定性/边界口径/"
+        "非法重采样与种子拒绝"
+    )
 
 
 def test_bootstrap_mean_ci():
@@ -844,8 +925,9 @@ def test_bootstrap_mean_ci():
         else:
             raise AssertionError(f"非法 seed 未被拒绝: {bad!r}")
     assert bootstrap_mean_ci(vals, n_resamples="200", ci="0.9", seed="3")
-    print("  [ok] bootstrap_mean_ci（覆盖均值/确定性/NaN 剔除/退化样本/"
-          "非法参数拒绝）")
+    print(
+        "  [ok] bootstrap_mean_ci（覆盖均值/确定性/NaN 剔除/退化样本/" "非法参数拒绝）"
+    )
 
 
 def test_min_detectable_effect():
@@ -886,10 +968,10 @@ def test_min_detectable_effect():
     for tiny_alpha in (1e-16, 1e-300, 5e-324):
         mde = min_detectable_effect(1.0, 10, alpha=tiny_alpha)
         assert mde is not None and math.isfinite(mde), (tiny_alpha, mde)
-    assert min_detectable_effect(1.0, 10, alpha=1e-300) > \
-        min_detectable_effect(1.0, 10, alpha=1e-16)
-    print("  [ok] min_detectable_effect（随 n 递减/口径常数/边界/"
-          "非法参数拒绝）")
+    assert min_detectable_effect(1.0, 10, alpha=1e-300) > min_detectable_effect(
+        1.0, 10, alpha=1e-16
+    )
+    print("  [ok] min_detectable_effect（随 n 递减/口径常数/边界/" "非法参数拒绝）")
 
 
 def test_wilson_score_ci():
@@ -937,7 +1019,7 @@ def test_wilson_score_ci():
     assert wilson_score_ci("8", "10", ci="0.95")
     # 合法大整数计数不能让 z²/n 的 int→float 转换溢出；n 极大时区间宽度
     # 在 float 精度下趋近 0，但端点与中心仍必须合法。
-    huge_n = 10 ** 400
+    huge_n = 10**400
     lo0, hi0 = wilson_score_ci(0, huge_n)
     assert lo0 == 0.0 and 0.0 <= hi0 < 1.0, (lo0, hi0)
     lo1, hi1 = wilson_score_ci(huge_n, huge_n)
@@ -959,9 +1041,17 @@ def test_calibration_metrics_brier_ece_and_baseline():
     assert c["brier_skill"] == 1.0
     assert c["ece_adaptive"] == 0.0 and c["mce_adaptive"] == 0.0
     # Murphy 分解是恒等式（标准三项 + 箱内项），且各分量有限
-    assert abs(c["brier_reliability"] - c["brier_resolution"]
-               + c["brier_uncertainty"] + c["brier_within_score"]
-               - 2.0 * c["brier_within_cov"] - c["brier"]) < 1e-12
+    assert (
+        abs(
+            c["brier_reliability"]
+            - c["brier_resolution"]
+            + c["brier_uncertainty"]
+            + c["brier_within_score"]
+            - 2.0 * c["brier_within_cov"]
+            - c["brier"]
+        )
+        < 1e-12
+    )
     assert c["brier_reliability"] == 0.0
     assert abs(c["brier_uncertainty"] - 0.2 * 0.8) < 1e-12
     # 常数基率预测：Brier 恰为 p(1-p)，skill≈0
@@ -976,9 +1066,17 @@ def test_calibration_metrics_brier_ece_and_baseline():
     # 分箱计数/边界：10 箱内计数总和等于样本数
     assert sum(b["n"] for b in c2["bins"]) == len(y)
     assert c2["n"] == len(y) and c2["n_pos"] == 20
-    assert abs(c2["brier_reliability"] - c2["brier_resolution"]
-               + c2["brier_uncertainty"] + c2["brier_within_score"]
-               - 2.0 * c2["brier_within_cov"] - c2["brier"]) < 1e-12
+    assert (
+        abs(
+            c2["brier_reliability"]
+            - c2["brier_resolution"]
+            + c2["brier_uncertainty"]
+            + c2["brier_within_score"]
+            - 2.0 * c2["brier_within_cov"]
+            - c2["brier"]
+        )
+        < 1e-12
+    )
     # 等频分箱：n_bins=4 时每组样本数相差不超过 1（200/4 恰为 50）
     c4 = calibration_metrics(over, y, n_bins=4)
     assert c4["ece_adaptive"] is not None and c4["mce_adaptive"] >= 0.0
@@ -1010,11 +1108,12 @@ def test_calibration_metrics_brier_ece_and_baseline():
         pass
     else:
         raise AssertionError("scores/labels 长度不一致未被拒绝")
-    nstr = calibration_metrics([0.2] * 10, [0.0] * 8 + [1.0] * 2,
-                               n_bins="10")
+    nstr = calibration_metrics([0.2] * 10, [0.0] * 8 + [1.0] * 2, n_bins="10")
     assert nstr["n_bins"] == 10 and len(nstr["bins"]) == 10
-    print("  [ok] calibration_metrics（Brier/ECE/常数基线/边界/"
-          "非法 n_bins 与 bool 观测）")
+    print(
+        "  [ok] calibration_metrics（Brier/ECE/常数基线/边界/"
+        "非法 n_bins 与 bool 观测）"
+    )
 
 
 def test_calibration_metrics_brier_decomposition_within_bin_terms():
@@ -1024,11 +1123,26 @@ def test_calibration_metrics_brier_decomposition_within_bin_terms():
     assert abs(c["brier_within_score"] - 0.0025) < 1e-15
     assert abs(c["brier_within_cov"] - 0.025) < 1e-15
     assert abs(c["brier_binning"] - (-0.0475)) < 1e-15
-    assert abs(c["brier_reliability"] - c["brier_resolution"]
-               + c["brier_uncertainty"] - c["brier"]) > 1e-6
-    assert abs(c["brier_reliability"] - c["brier_resolution"]
-               + c["brier_uncertainty"] + c["brier_within_score"]
-               - 2.0 * c["brier_within_cov"] - c["brier"]) < 1e-15
+    assert (
+        abs(
+            c["brier_reliability"]
+            - c["brier_resolution"]
+            + c["brier_uncertainty"]
+            - c["brier"]
+        )
+        > 1e-6
+    )
+    assert (
+        abs(
+            c["brier_reliability"]
+            - c["brier_resolution"]
+            + c["brier_uncertainty"]
+            + c["brier_within_score"]
+            - 2.0 * c["brier_within_cov"]
+            - c["brier"]
+        )
+        < 1e-15
+    )
     print("  [ok] Brier 分解补箱内方差/协方差项，连续分数下恒等")
 
 
@@ -1036,13 +1150,13 @@ def test_obs_array_string_arrays_use_strict_numeric_parsing():
     """NumPy 字符串数组不能绕过 _finite_observation 的严格解析。"""
     import numpy as np
     from lega.utils import _obs_array, calibration_metrics
+
     for values in (["1_0", "0.5"], np.array(["1_0", "0.5"])):
         arr = _obs_array(values)
         assert np.isnan(arr[0]), (values, arr)
         assert arr[1] == 0.5, (values, arr)
     # 非法字符串按缺失剔除：只剩一个有效 score，不能把 1_0 当成 1.0 置信度。
-    cal = calibration_metrics(np.array(["1_0", "0.5"]),
-                              np.array([1.0, 0.0]))
+    cal = calibration_metrics(np.array(["1_0", "0.5"]), np.array([1.0, 0.0]))
     assert cal["n"] == 1 and cal["n_pos"] == 0, cal
 
 
@@ -1053,6 +1167,7 @@ def test_stats_stable_at_float_limits():
     缺失，不能把 inf/nan 写进 JSON 或让置换检验 p 值失真。
     """
     import math
+
     huge = 1e308
     m, s = mean_std([huge, huge, huge])
     assert m == huge and s == 0.0, (m, s)
@@ -1075,11 +1190,11 @@ def test_stats_stable_at_float_limits():
     mde_huge_sd = min_detectable_effect(1e308, 4)
     assert mde_huge_sd is not None and math.isfinite(mde_huge_sd)
     assert 1e308 < mde_huge_sd < 2e308, mde_huge_sd
-    mde_huge_n = min_detectable_effect(1e308, 10 ** 400)
+    mde_huge_n = min_detectable_effect(1e308, 10**400)
     assert mde_huge_n is not None and 1e108 < mde_huge_n < 1e109, mde_huge_n
     # 合法但超出 float 上限的整数 n：√n 仍可表示（10**400 -> 1e200），
     # 不能因 math.sqrt(int) 的转换溢出而崩溃。
-    m_huge = min_detectable_effect(0.1, 10 ** 400)
+    m_huge = min_detectable_effect(0.1, 10**400)
     assert m_huge is not None and 0.0 < m_huge < 1e-190, m_huge
     print("  [ok] 极大有限观测：均值/方差/中位数/置换/bootstrap 不溢出")
 
@@ -1087,6 +1202,7 @@ def test_stats_stable_at_float_limits():
 def test_auroc_and_ap_parse_non_numeric_scores_strictly():
     """AUROC/AP 的分数也走严格解析：下划线数字串/bool 不能伪装成数值。"""
     import math
+
     # "1_0" 只让一个分数有效：另一类别缺分数 -> AUROC/AP 不可计算，而不是
     # 把 1_0 当成 10.0 后制造“完美排序”。
     assert math.isnan(auroc(["1_0", "0.5"], [1, 0]))
@@ -1102,20 +1218,21 @@ def test_f1_scores_rejects_out_of_range_or_wrapping_class_ids():
     """类别标签是精确整数身份：uint64 回绕/超大 Python int 不能合并类别。"""
     # uint64 > int64 上限若直接 astype(int64) 会回绕成负数并伪造另一个类。
     try:
-        f1_scores(np.array([2 ** 63, 1], dtype=np.uint64),
-                  np.array([1, 1], dtype=np.uint64))
+        f1_scores(
+            np.array([2**63, 1], dtype=np.uint64), np.array([1, 1], dtype=np.uint64)
+        )
         raised = False
     except ValueError:
         raised = True
     assert raised
     try:
-        f1_scores([10 ** 400, 1], [1, 1])
+        f1_scores([10**400, 1], [1, 1])
         raised = False
     except ValueError:
         raised = True
     assert raised
     try:
-        f1_scores([1, 2], [1, 2], labels=[10 ** 400])
+        f1_scores([1, 2], [1, 2], labels=[10**400])
         raised = False
     except ValueError:
         raised = True
@@ -1128,12 +1245,12 @@ def test_f1_scores_rejects_out_of_range_or_wrapping_class_ids():
 
 def test_mcnemar_exact_p_handles_huge_counts_without_overflow_or_hang():
     """巨大计数不能触发 lgamma OverflowError 或 range(k+1) 挂起。"""
-    assert mcnemar_exact_p(10 ** 400, 0) == 0.0
+    assert mcnemar_exact_p(10**400, 0) == 0.0
     assert mcnemar_exact_p(1e308, 0) == 0.0
-    assert mcnemar_exact_p(10 ** 20, 10 ** 20) == 1.0
+    assert mcnemar_exact_p(10**20, 10**20) == 1.0
     # 极端不平衡/平衡在近似下仍落在 [0,1] 且方向正确。
-    assert mcnemar_exact_p(10 ** 20, 1) == 0.0
-    p = mcnemar_exact_p(10 ** 20, 10 ** 20 - 10 ** 10)
+    assert mcnemar_exact_p(10**20, 1) == 0.0
+    p = mcnemar_exact_p(10**20, 10**20 - 10**10)
     assert 0.0 <= p <= 1.0
     # 小计数保持精确枚举口径。
     assert abs(mcnemar_exact_p(5, 0) - 0.0625) < 1e-12
@@ -1142,7 +1259,7 @@ def test_mcnemar_exact_p_handles_huge_counts_without_overflow_or_hang():
 
 def test_calibration_metrics_caps_requested_bins_to_observations():
     """巨大 n_bins 不能构造/遍历无意义的空箱，更不能挂起或耗尽内存。"""
-    c = calibration_metrics([0.1, 0.9], [0.0, 1.0], n_bins=10 ** 400)
+    c = calibration_metrics([0.1, 0.9], [0.0, 1.0], n_bins=10**400)
     assert c["n_bins"] == c["n"] == 2, c
     assert len(c["bins"]) == 2, c["bins"]
     assert sum(b["n"] for b in c["bins"]) == 2

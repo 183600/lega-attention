@@ -38,12 +38,13 @@
   量、SESOI/等价性、MDE 或任何成对检验。所有方案在两两比较中都不显著
   时，仍可能因“相对排序一致”而出现很小的置换 p——反之亦然，必须并读。
 """
+
 from __future__ import annotations
 
 import math
 import random
 from numbers import Real
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Sequence
 
 DEFAULT_ALPHA = 0.05
 MIN_SEEDS = 3
@@ -102,11 +103,12 @@ def _normalise(scores, variants=None, lower_is_better=False):
     让某个方案多一个种子就与其他方案错位配对。
     """
     if not isinstance(scores, Mapping):
-        raise ValueError(f"scores 必须是 variant->seed->value 的映射，收到 "
-                         f"{type(scores).__name__}")
-    if not isinstance(lower_is_better, bool):
         raise ValueError(
-            f"lower_is_better 必须是 bool，收到 {lower_is_better!r}")
+            f"scores 必须是 variant->seed->value 的映射，收到 "
+            f"{type(scores).__name__}"
+        )
+    if not isinstance(lower_is_better, bool):
+        raise ValueError(f"lower_is_better 必须是 bool，收到 {lower_is_better!r}")
     if variants is None:
         variants = list(scores.keys())
     else:
@@ -148,8 +150,7 @@ def _normalise(scores, variants=None, lower_is_better=False):
     common = common or set()
     seeds = sorted(common, key=_seed_sort_key)
     dropped = sorted(union_seeds - common, key=_seed_sort_key)
-    matrix = [[per_variant[variant][seed] for variant in variants]
-              for seed in seeds]
+    matrix = [[per_variant[variant][seed] for variant in variants] for seed in seeds]
     return variants, seeds, matrix, dropped
 
 
@@ -223,8 +224,7 @@ def _base_payload(status, variants, seeds, dropped, lower_is_better, min_seeds):
     }
 
 
-def ranking_table(scores, variants=None, lower_is_better=False,
-                  min_seeds=MIN_SEEDS):
+def ranking_table(scores, variants=None, lower_is_better=False, min_seeds=MIN_SEEDS):
     """逐种子名次与汇总排名（描述性）。
 
     返回 ``rows``（每方案的平均/中位名次、名次分布、逐种子最优次数与
@@ -233,31 +233,53 @@ def ranking_table(scores, variants=None, lower_is_better=False,
     名次，但不给出“最优方案”的推断性措辞。
     """
     min_seeds = _strict_int(min_seeds, "min_seeds", minimum=2)
-    variants, seeds, matrix, dropped = _normalise(
-        scores, variants, lower_is_better)
+    variants, seeds, matrix, dropped = _normalise(scores, variants, lower_is_better)
     if len(variants) < 2:
-        return {**_base_payload("insufficient_variants", variants, seeds,
-                                dropped, lower_is_better, min_seeds),
-                "rows": [], "rank_matrix": [], "leader": None,
-                "leaders": [], "leader_unique": None}
+        return {
+            **_base_payload(
+                "insufficient_variants",
+                variants,
+                seeds,
+                dropped,
+                lower_is_better,
+                min_seeds,
+            ),
+            "rows": [],
+            "rank_matrix": [],
+            "leader": None,
+            "leaders": [],
+            "leader_unique": None,
+        }
     if not seeds:
-        return {**_base_payload("no_common_seeds", variants, seeds, dropped,
-                                lower_is_better, min_seeds),
-                "rows": [], "rank_matrix": [], "leader": None,
-                "leaders": [], "leader_unique": None}
+        return {
+            **_base_payload(
+                "no_common_seeds", variants, seeds, dropped, lower_is_better, min_seeds
+            ),
+            "rows": [],
+            "rank_matrix": [],
+            "leader": None,
+            "leaders": [],
+            "leader_unique": None,
+        }
 
     rank_rows = [_row_ranks(row) for row in matrix]
     per_variant_ranks: Dict[str, List[float]] = {v: [] for v in variants}
     per_variant_scores: Dict[str, List[float]] = {v: [] for v in variants}
     rank_matrix = []
     for seed, row, ranks in zip(seeds, matrix, rank_rows):
-        order = [variant for _, variant in sorted(
-            zip(row, variants), key=lambda pair: (-pair[0], pair[1]))]
-        rank_matrix.append({
-            "seed": seed,
-            "ranks": dict(zip(variants, ranks)),
-            "order": order,
-        })
+        order = [
+            variant
+            for _, variant in sorted(
+                zip(row, variants), key=lambda pair: (-pair[0], pair[1])
+            )
+        ]
+        rank_matrix.append(
+            {
+                "seed": seed,
+                "ranks": dict(zip(variants, ranks)),
+                "order": order,
+            }
+        )
         for variant, value, rank in zip(variants, row, ranks):
             per_variant_scores[variant].append(value)
             per_variant_ranks[variant].append(rank)
@@ -273,40 +295,49 @@ def ranking_table(scores, variants=None, lower_is_better=False,
             counts[key] = counts.get(key, 0) + 1
         best_count = sum(1 for rank in ranks if rank <= 1.0)
         worst_count = sum(1 for rank in ranks if rank >= n_variants)
-        rows.append({
-            "variant": variant,
-            "n": len(ranks),
-            "mean_rank": _mean(ranks),
-            "median_rank": _median(ranks),
-            "min_rank": min(ranks),
-            "max_rank": max(ranks),
-            "rank_counts": counts,
-            "best_seed_count": best_count,
-            "best_seed_rate": best_count / n_seeds,
-            "worst_seed_count": worst_count,
-            "mean_oriented_score": _mean(per_variant_scores[variant]),
-        })
+        rows.append(
+            {
+                "variant": variant,
+                "n": len(ranks),
+                "mean_rank": _mean(ranks),
+                "median_rank": _median(ranks),
+                "min_rank": min(ranks),
+                "max_rank": max(ranks),
+                "rank_counts": counts,
+                "best_seed_count": best_count,
+                "best_seed_rate": best_count / n_seeds,
+                "worst_seed_count": worst_count,
+                "mean_oriented_score": _mean(per_variant_scores[variant]),
+            }
+        )
     rows.sort(key=lambda row: (row["mean_rank"], row["variant"]))
     best_mean = rows[0]["mean_rank"]
-    leaders = [row["variant"] for row in rows
-               if abs(row["mean_rank"] - best_mean) <= 1e-12]
+    leaders = [
+        row["variant"] for row in rows if abs(row["mean_rank"] - best_mean) <= 1e-12
+    ]
     status = "ok" if n_seeds >= min_seeds else "insufficient_seeds"
     return {
-        **_base_payload(status, variants, seeds, dropped, lower_is_better,
-                        min_seeds),
+        **_base_payload(status, variants, seeds, dropped, lower_is_better, min_seeds),
         "rows": rows,
         "rank_matrix": rank_matrix,
         "leader": leaders[0] if len(leaders) == 1 else None,
         "leaders": leaders,
         "leader_unique": len(leaders) == 1,
-        "note": ("名次对单调变换稳健且并列取平均名次；平均名次差不是"
-                 "性能差，必须与成对效应量/SESOI 并读。"),
+        "note": (
+            "名次对单调变换稳健且并列取平均名次；平均名次差不是"
+            "性能差，必须与成对效应量/SESOI 并读。"
+        ),
     }
 
 
-def bootstrap_rank_stability(scores, variants=None, lower_is_better=False,
-                             min_seeds=MIN_SEEDS,
-                             n_bootstrap=DEFAULT_BOOTSTRAP, seed=0):
+def bootstrap_rank_stability(
+    scores,
+    variants=None,
+    lower_is_better=False,
+    min_seeds=MIN_SEEDS,
+    n_bootstrap=DEFAULT_BOOTSTRAP,
+    seed=0,
+):
     """对训练种子做 bootstrap：换一批种子后排名/最优方案是否稳定。
 
     每次有放回地重采样 ``n_seeds`` 个种子，按平均定向分数重新排名，统计
@@ -316,12 +347,17 @@ def bootstrap_rank_stability(scores, variants=None, lower_is_better=False,
     min_seeds = _strict_int(min_seeds, "min_seeds", minimum=2)
     n_bootstrap = _strict_int(n_bootstrap, "n_bootstrap")
     seed = _strict_int(seed, "seed", minimum=0)
-    variants, seeds, matrix, dropped = _normalise(
-        scores, variants, lower_is_better)
-    payload = _base_payload(
-        "ok", variants, seeds, dropped, lower_is_better, min_seeds)
-    payload.update({"n_bootstrap": n_bootstrap, "bootstrap_seed": seed,
-                    "rows": [], "leader": None, "leaders": []})
+    variants, seeds, matrix, dropped = _normalise(scores, variants, lower_is_better)
+    payload = _base_payload("ok", variants, seeds, dropped, lower_is_better, min_seeds)
+    payload.update(
+        {
+            "n_bootstrap": n_bootstrap,
+            "bootstrap_seed": seed,
+            "rows": [],
+            "leader": None,
+            "leaders": [],
+        }
+    )
     if len(variants) < 2:
         payload["status"] = "insufficient_variants"
         payload["status_cn"] = STATUS_CN[payload["status"]]
@@ -339,8 +375,7 @@ def bootstrap_rank_stability(scores, variants=None, lower_is_better=False,
     rank_samples: Dict[str, List[float]] = {v: [] for v in variants}
     for _ in range(n_bootstrap):
         idx = [rng.randrange(n_seeds) for _ in range(n_seeds)]
-        means = [_mean([matrix[i][j] for i in idx])
-                 for j in range(len(variants))]
+        means = [_mean([matrix[i][j] for i in idx]) for j in range(len(variants))]
         ranks = _row_ranks(means)
         best = max(means)
         tied = [j for j, value in enumerate(means) if value == best]
@@ -353,32 +388,52 @@ def bootstrap_rank_stability(scores, variants=None, lower_is_better=False,
     rows = []
     for j, variant in enumerate(variants):
         ranks = rank_samples[variant]
-        rows.append({
-            "variant": variant,
-            "top_probability": top_share[j] / n_bootstrap,
-            "mean_rank_bootstrap": _mean(ranks),
-            "mean_rank_ci95": [_percentile(ranks, 0.025),
-                               _percentile(ranks, 0.975)],
-        })
-    rows.sort(key=lambda row: (-row["top_probability"],
-                               row["mean_rank_bootstrap"], row["variant"]))
-    leaders = [row["variant"] for row in rows
-               if abs(row["top_probability"] - rows[0]["top_probability"])
-               <= 1e-12]
-    payload.update({
-        "rows": rows,
-        "leader": leaders[0] if len(leaders) == 1 else None,
-        "leaders": leaders,
-        "note": ("bootstrap 只重采样训练种子，不覆盖评测抽样；概率是"
-                 "描述性稳定度，不是“方案为真的概率”，也不改变预注册判定。"),
-    })
+        rows.append(
+            {
+                "variant": variant,
+                "top_probability": top_share[j] / n_bootstrap,
+                "mean_rank_bootstrap": _mean(ranks),
+                "mean_rank_ci95": [
+                    _percentile(ranks, 0.025),
+                    _percentile(ranks, 0.975),
+                ],
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -row["top_probability"],
+            row["mean_rank_bootstrap"],
+            row["variant"],
+        )
+    )
+    leaders = [
+        row["variant"]
+        for row in rows
+        if abs(row["top_probability"] - rows[0]["top_probability"]) <= 1e-12
+    ]
+    payload.update(
+        {
+            "rows": rows,
+            "leader": leaders[0] if len(leaders) == 1 else None,
+            "leaders": leaders,
+            "note": (
+                "bootstrap 只重采样训练种子，不覆盖评测抽样；概率是"
+                "描述性稳定度，不是“方案为真的概率”，也不改变预注册判定。"
+            ),
+        }
+    )
     return payload
 
 
-def permutation_selection_test(scores, variants=None, lower_is_better=False,
-                               min_seeds=MIN_SEEDS,
-                               n_permutations=DEFAULT_PERMUTATIONS, seed=0,
-                               alpha=DEFAULT_ALPHA):
+def permutation_selection_test(
+    scores,
+    variants=None,
+    lower_is_better=False,
+    min_seeds=MIN_SEEDS,
+    n_permutations=DEFAULT_PERMUTATIONS,
+    seed=0,
+    alpha=DEFAULT_ALPHA,
+):
     """“方案标签在种子内可交换”的全局零假设置换检验。
 
     统计量：``max_j(mean_j − grand_mean)``（最优方案相对总体平均的改善）
@@ -393,26 +448,26 @@ def permutation_selection_test(scores, variants=None, lower_is_better=False,
     n_permutations = _strict_int(n_permutations, "n_permutations")
     seed = _strict_int(seed, "seed", minimum=0)
     alpha = _strict_alpha(alpha)
-    variants, seeds, matrix, dropped = _normalise(
-        scores, variants, lower_is_better)
-    payload = _base_payload(
-        "ok", variants, seeds, dropped, lower_is_better, min_seeds)
-    payload.update({
-        "n_permutations": n_permutations,
-        "permutation_seed": seed,
-        "alpha": alpha,
-        "exact": False,
-        "p_max": None,
-        "p_range": None,
-        "significant_max": None,
-        "significant_range": None,
-        "winner": None,
-        "runner_up": None,
-        "lead_over_runner_up": None,
-        "observed_max_centered": None,
-        "expected_null_max_centered": None,
-        "selection_inflation": None,
-    })
+    variants, seeds, matrix, dropped = _normalise(scores, variants, lower_is_better)
+    payload = _base_payload("ok", variants, seeds, dropped, lower_is_better, min_seeds)
+    payload.update(
+        {
+            "n_permutations": n_permutations,
+            "permutation_seed": seed,
+            "alpha": alpha,
+            "exact": False,
+            "p_max": None,
+            "p_range": None,
+            "significant_max": None,
+            "significant_range": None,
+            "winner": None,
+            "runner_up": None,
+            "lead_over_runner_up": None,
+            "observed_max_centered": None,
+            "expected_null_max_centered": None,
+            "selection_inflation": None,
+        }
+    )
     if len(variants) < 2:
         payload["status"] = "insufficient_variants"
         payload["status_cn"] = STATUS_CN[payload["status"]]
@@ -433,8 +488,11 @@ def permutation_selection_test(scores, variants=None, lower_is_better=False,
     obs_range = max(means) - min(means)
     winner = ordered[0][1]
     runner_up = ordered[1][1] if n_variants > 1 else None
-    lead = (means[variants.index(winner)]
-            - means[variants.index(runner_up)]) if runner_up else None
+    lead = (
+        (means[variants.index(winner)] - means[variants.index(runner_up)])
+        if runner_up
+        else None
+    )
 
     rng = random.Random(seed)
     ge_max = 0
@@ -465,29 +523,39 @@ def permutation_selection_test(scores, variants=None, lower_is_better=False,
     p_max = (1 + ge_max) / (n_permutations + 1)
     p_range = (1 + ge_range) / (n_permutations + 1)
     expected_null_max = null_max_total / n_permutations
-    payload.update({
-        "p_max": p_max,
-        "p_range": p_range,
-        "significant_max": bool(p_max < alpha),
-        "significant_range": bool(p_range < alpha),
-        "winner": winner,
-        "runner_up": runner_up,
-        "lead_over_runner_up": lead,
-        "observed_max_centered": obs_max,
-        "expected_null_max_centered": expected_null_max,
-        "selection_inflation": obs_max - expected_null_max,
-        "note": ("p_max 检验“是否存在方案差异/领先是否超过纯选择最大值”，"
-                 "不指定哪个方案更好；Monte-Carlo p 分辨率约 "
-                 f"1/{n_permutations + 1}。方案标签交换性不成立（缺失机制/"
-                 "预算/协议不同）时 p 只作线索，不改变预注册判定。"),
-    })
+    payload.update(
+        {
+            "p_max": p_max,
+            "p_range": p_range,
+            "significant_max": bool(p_max < alpha),
+            "significant_range": bool(p_range < alpha),
+            "winner": winner,
+            "runner_up": runner_up,
+            "lead_over_runner_up": lead,
+            "observed_max_centered": obs_max,
+            "expected_null_max_centered": expected_null_max,
+            "selection_inflation": obs_max - expected_null_max,
+            "note": (
+                "p_max 检验“是否存在方案差异/领先是否超过纯选择最大值”，"
+                "不指定哪个方案更好；Monte-Carlo p 分辨率约 "
+                f"1/{n_permutations + 1}。方案标签交换性不成立（缺失机制/"
+                "预算/协议不同）时 p 只作线索，不改变预注册判定。"
+            ),
+        }
+    )
     return payload
 
 
-def analyze_ranking(scores, variants=None, lower_is_better=False,
-                    min_seeds=MIN_SEEDS, n_bootstrap=DEFAULT_BOOTSTRAP,
-                    n_permutations=DEFAULT_PERMUTATIONS, seed=0,
-                    alpha=DEFAULT_ALPHA) -> dict:
+def analyze_ranking(
+    scores,
+    variants=None,
+    lower_is_better=False,
+    min_seeds=MIN_SEEDS,
+    n_bootstrap=DEFAULT_BOOTSTRAP,
+    n_permutations=DEFAULT_PERMUTATIONS,
+    seed=0,
+    alpha=DEFAULT_ALPHA,
+) -> dict:
     """把名次表、种子 bootstrap 与选择校正置换检验合并成一个结果层。
 
     供流水线对每个指标（PPL、RULER 平均等）直接消费；``seed`` 同时驱动
@@ -496,20 +564,29 @@ def analyze_ranking(scores, variants=None, lower_is_better=False,
     """
     try:
         table = ranking_table(
-            scores, variants=variants, lower_is_better=lower_is_better,
-            min_seeds=min_seeds)
+            scores,
+            variants=variants,
+            lower_is_better=lower_is_better,
+            min_seeds=min_seeds,
+        )
     except (TypeError, ValueError) as exc:
         return {
-            "status": "invalid", "status_cn": STATUS_CN["invalid"],
-            "available": False, "reason": str(exc),
-            "table": None, "bootstrap": None, "selection_test": None,
+            "status": "invalid",
+            "status_cn": STATUS_CN["invalid"],
+            "available": False,
+            "reason": str(exc),
+            "table": None,
+            "bootstrap": None,
+            "selection_test": None,
         }
     out = {
         "status": table.get("status"),
         "status_cn": table.get("status_cn"),
         "available": bool(table.get("available")),
-        "method": ("逐种子秩统计 + 种子 bootstrap + 种子内标签置换的"
-                   "选择校正检验（探索性、描述性）"),
+        "method": (
+            "逐种子秩统计 + 种子 bootstrap + 种子内标签置换的"
+            "选择校正检验（探索性、描述性）"
+        ),
         "table": table,
         "bootstrap": None,
         "selection_test": None,
@@ -518,10 +595,20 @@ def analyze_ranking(scores, variants=None, lower_is_better=False,
         out["reason"] = table.get("status_cn")
         return out
     out["bootstrap"] = bootstrap_rank_stability(
-        scores, variants=variants, lower_is_better=lower_is_better,
-        min_seeds=min_seeds, n_bootstrap=n_bootstrap, seed=seed)
+        scores,
+        variants=variants,
+        lower_is_better=lower_is_better,
+        min_seeds=min_seeds,
+        n_bootstrap=n_bootstrap,
+        seed=seed,
+    )
     out["selection_test"] = permutation_selection_test(
-        scores, variants=variants, lower_is_better=lower_is_better,
-        min_seeds=min_seeds, n_permutations=n_permutations, seed=seed,
-        alpha=alpha)
+        scores,
+        variants=variants,
+        lower_is_better=lower_is_better,
+        min_seeds=min_seeds,
+        n_permutations=n_permutations,
+        seed=seed,
+        alpha=alpha,
+    )
     return out

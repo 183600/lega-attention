@@ -3,17 +3,27 @@
 另覆盖机制分析的稳健性协议：τ 敏感性扫描（结论不能挂在单一阈值上）与
 按样例聚类的 bootstrap AUROC 区间（同一样例的记录不是独立观测）。
 """
+
 import math
 
-from lega.analysis import (_bounded_float, _example as _analysis_example,
-                           _float_grid, _int_at_least,
-                           auroc_cluster_bootstrap, collect_records,
-                           resolve_analysis_ctx, summarize, tau_sensitivity)
+from lega.analysis import (
+    _bounded_float,
+    _example as _analysis_example,
+    _float_grid,
+    _int_at_least,
+    auroc_cluster_bootstrap,
+    collect_records,
+    resolve_analysis_ctx,
+    summarize,
+    tau_sensitivity,
+)
 from lega.data import CACHE_SCHEMA, CharTokenizer
 from lega.model import GPT
 
-_TEXT = ("The quick brown fox jumps over the lazy dog. "
-         "A quiet river runs through the old town. 0123456789")
+_TEXT = (
+    "The quick brown fox jumps over the lazy dog. "
+    "A quiet river runs through the old town. 0123456789"
+)
 
 
 def _tok():
@@ -30,17 +40,20 @@ def test_collect_records_batching_matches_per_example():
 
     tok = _tok()
     torch.manual_seed(0)
-    model = GPT(tok.n_vocab, block_size=64, d_model=32, n_layers=2, n_heads=2,
-                variant="lega").eval()
+    model = GPT(
+        tok.n_vocab, block_size=64, d_model=32, n_layers=2, n_heads=2, variant="lega"
+    ).eval()
     # 含重复长度与不同长度：覆盖分组堆叠与原始顺序恢复
     lengths = [(24, 20), (24, 19), (20, 16), (16, 12), (24, 18)]
     examples = [_example(n, qs, tok.n_vocab) for n, qs in lengths]
     task_of = ["niah_synth"] * len(examples)
     ctx_of = [64] * len(examples)
-    r1 = collect_records(model, tok, "cpu", examples, task_of, ctx_of,
-                         amp=False, batch_size=1)
-    r8 = collect_records(model, tok, "cpu", examples, task_of, ctx_of,
-                         amp=False, batch_size=8)
+    r1 = collect_records(
+        model, tok, "cpu", examples, task_of, ctx_of, amp=False, batch_size=1
+    )
+    r8 = collect_records(
+        model, tok, "cpu", examples, task_of, ctx_of, amp=False, batch_size=8
+    )
     assert len(r1) == len(r8) > 0
     for a, b in zip(r1, r8):
         assert a["example"] == b["example"]
@@ -60,16 +73,15 @@ def test_analysis_examples_follow_ruler_depth_stratification():
     from random import Random
 
     from lega.ruler import DEPTH_BINS, _stable_hash, depth_bin
+
     chars = sorted(set(chr(i) for i in range(32, 127)) | {"\n"})
     tok = CharTokenizer(chars)
     ctx, seed = 512, 1234
     for task in ("niah_synth", "niah_multikey"):
         for i in range(9):
             target = DEPTH_BINS[i % len(DEPTH_BINS)]
-            rng = Random(seed * 100003 + _stable_hash(task) % 99991
-                         + ctx * 31 + i)
-            ex = _analysis_example(task, tok, ctx, rng,
-                                   target_depth=target)
+            rng = Random(seed * 100003 + _stable_hash(task) % 99991 + ctx * 31 + i)
+            ex = _analysis_example(task, tok, ctx, rng, target_depth=target)
             assert ex["meta"]["depth_target"] == target
             assert depth_bin(ex["meta"]["depth"]) == target
     print("  [ok] 分析样例的 needle 位置与 RULER 分层目标一致")
@@ -83,15 +95,25 @@ def test_collect_records_c_keeps_length_normalization_for_ablations():
     examples = [_example(24, 20, tok.n_vocab)]
     for variant in ("lega", "lega_no_len", "lega_conc_only"):
         torch.manual_seed(0)
-        model = GPT(tok.n_vocab, block_size=64, d_model=32, n_layers=1,
-                    n_heads=2, variant=variant).eval()
-        recs = collect_records(model, tok, "cpu", examples, ["niah_synth"],
-                               [64], amp=False, batch_size=1)
+        model = GPT(
+            tok.n_vocab,
+            block_size=64,
+            d_model=32,
+            n_layers=1,
+            n_heads=2,
+            variant=variant,
+        ).eval()
+        recs = collect_records(
+            model, tok, "cpu", examples, ["niah_synth"], [64], amp=False, batch_size=1
+        )
         assert recs, variant
         for r in recs:
             expected = r["log_n"] + math.log(max(r["max_p"], 1e-30))
             assert math.isclose(r["c"], expected, rel_tol=1e-9, abs_tol=1e-9), (
-                variant, r["c"], expected)
+                variant,
+                r["c"],
+                expected,
+            )
     print("  [ok] 消融变体的 c 仍保留 log n 归一化")
 
 
@@ -104,17 +126,41 @@ def _mk_records():
     for ex in (0, 1, 2, 3, 4):
         n_pos, n_neg = 4, 4
         for i in range(n_pos):
-            records.append({"example": ex, "hit": 1.0, "max_p": 0.6,
-                            "logit": 2.0 + i * 0.1, "qterm": 0.5,
-                            "c": 1.5, "g": 0.9, "log_n": 4.0,
-                            "task": "niah_synth", "ctx": 256,
-                            "layer": 0, "head": i % 2, "query_pos": i})
+            records.append(
+                {
+                    "example": ex,
+                    "hit": 1.0,
+                    "max_p": 0.6,
+                    "logit": 2.0 + i * 0.1,
+                    "qterm": 0.5,
+                    "c": 1.5,
+                    "g": 0.9,
+                    "log_n": 4.0,
+                    "task": "niah_synth",
+                    "ctx": 256,
+                    "layer": 0,
+                    "head": i % 2,
+                    "query_pos": i,
+                }
+            )
         for i in range(n_neg):
-            records.append({"example": ex, "hit": 0.0, "max_p": 0.2,
-                            "logit": -2.0 - i * 0.1, "qterm": -0.5,
-                            "c": -1.5, "g": 0.2, "log_n": 4.0,
-                            "task": "niah_synth", "ctx": 256,
-                            "layer": 0, "head": i % 2, "query_pos": i})
+            records.append(
+                {
+                    "example": ex,
+                    "hit": 0.0,
+                    "max_p": 0.2,
+                    "logit": -2.0 - i * 0.1,
+                    "qterm": -0.5,
+                    "c": -1.5,
+                    "g": 0.2,
+                    "log_n": 4.0,
+                    "task": "niah_synth",
+                    "ctx": 256,
+                    "layer": 0,
+                    "head": i % 2,
+                    "query_pos": i,
+                }
+            )
     return records
 
 
@@ -137,8 +183,7 @@ def test_analysis_numeric_args_reject_invalid_values():
     assert _bounded_float("0.5", "tau", minimum=0.0, maximum=1.0) == 0.5
     assert _float_grid("0.3, 0.5,", "tau_grid", 0.0, 1.0) == [0.3, 0.5]
     assert _float_grid([], "tau_grid", 0.0, 1.0) == []
-    assert _float_grid(["0.3", "", None, "  ", 0.5], "tau_grid",
-                       0.0, 1.0) == [0.3, 0.5]
+    assert _float_grid(["0.3", "", None, "  ", 0.5], "tau_grid", 0.0, 1.0) == [0.3, 0.5]
     for bad in ("0.5,-1", "0.5,nan", True):
         try:
             _float_grid(bad, "probe_l2", minimum=0.0)
@@ -167,9 +212,16 @@ def test_analysis_ctx_resolution_rejects_empty_room():
     """
     assert resolve_analysis_ctx(256, 512, 12) == 243
     assert resolve_analysis_ctx(256, 64, 12) == 64
-    for args in ((256, 0, 12), (256, -5, 12), (256, 64, 0),
-                 (256, 64, -1), (10, 64, 12), (256, 64, 300),
-                 (True, 64, 12), (256, 1.5, 12)):
+    for args in (
+        (256, 0, 12),
+        (256, -5, 12),
+        (256, 64, 0),
+        (256, 64, -1),
+        (10, 64, 12),
+        (256, 64, 300),
+        (True, 64, 12),
+        (256, 1.5, 12),
+    ):
         try:
             resolve_analysis_ctx(*args)
         except ValueError:
@@ -189,19 +241,34 @@ def test_tau_sensitivity_sweep():
     cr = ts["conc_rate"]
     assert all(cr[i] >= cr[i + 1] for i in range(len(cr) - 1)), cr
     # 合成数据：max_p=0.9（hit）/0.2（miss）→ τ=0.3/0.5 时集中即 hit
-    assert abs(ts["p_hit_given_conc"][0] - 1.0) < 1e-12   # τ=0.3
-    assert abs(ts["p_hit_given_conc"][1] - 1.0) < 1e-12   # τ=0.5
+    assert abs(ts["p_hit_given_conc"][0] - 1.0) < 1e-12  # τ=0.3
+    assert abs(ts["p_hit_given_conc"][1] - 1.0) < 1e-12  # τ=0.5
     # τ=0.7 时无人"集中"→ 条件统计不可算（None）
     assert ts["p_hit_given_conc"][2] is None
-    assert ts["misleading_rate"][2] == 0.0                # P(集中∧看错)=0
+    assert ts["misleading_rate"][2] == 0.0  # P(集中∧看错)=0
     # 与 summarize 主阈值口径逐字段一致
     s = summarize(records, "lega", 0.5)
-    for key in ("conc_rate", "p_hit_given_conc", "p_hit_given_notconc",
-                "misleading_rate", "misleading_given_conc"):
+    for key in (
+        "conc_rate",
+        "p_hit_given_conc",
+        "p_hit_given_notconc",
+        "misleading_rate",
+        "misleading_given_conc",
+    ):
         assert s[key] == ts[key][1], key
     # hit=None（无 gold 跨度）的记录不进统计但不崩溃
-    records.append({"example": 9, "hit": None, "max_p": 0.9, "logit": 1.0,
-                    "qterm": 0.0, "c": 0.5, "g": 0.8, "log_n": 4.0})
+    records.append(
+        {
+            "example": 9,
+            "hit": None,
+            "max_p": 0.9,
+            "logit": 1.0,
+            "qterm": 0.0,
+            "c": 0.5,
+            "g": 0.8,
+            "log_n": 4.0,
+        }
+    )
     ts2 = tau_sensitivity(records, [0.5])
     assert ts2["conc_rate"][0] > 0 and ts2["p_hit_given_conc"][0] is not None
     print("  [ok] tau_sensitivity（单调性/与 summarize 口径一致/None 容错）")
@@ -228,7 +295,7 @@ def test_auroc_cluster_bootstrap_ci():
     ap_logit = out["ci95"]["ap_logit"]
     ap_diff = out["ci95"]["ap_logit_minus_qterm"]
     assert ap_logit and abs(ap_logit[0] - 1.0) < 1e-9 and abs(ap_logit[1] - 1.0) < 1e-9
-    assert (out["ci95"]["ap_qterm"] is not None)
+    assert out["ci95"]["ap_qterm"] is not None
     assert ap_diff and abs(ap_diff[0]) < 1e-9
     # qterm 无信号（hit/miss 分数全部并列）→ AUROC=0.5，logit 区间下界仍高于它
     weak = [dict(r) for r in records]
@@ -244,8 +311,8 @@ def test_auroc_cluster_bootstrap_ci():
     few = auroc_cluster_bootstrap(records[:8], n_resamples=50)
     assert few["ci95"] == {}
     nokey = auroc_cluster_bootstrap(
-        [{"example": i, "hit": 1.0, "max_p": 0.9} for i in range(4)],
-        n_resamples=50)
+        [{"example": i, "hit": 1.0, "max_p": 0.9} for i in range(4)], n_resamples=50
+    )
     assert nokey["ci95"] == {}
     # 重采样次数是计数身份：bool/小数/非数值不能被 int() 截断或崩溃
     for bad in (True, 1.5, "bad", -1):
@@ -267,8 +334,10 @@ def test_auroc_cluster_bootstrap_ci():
             raise AssertionError(f"非法 ci 未被拒绝: {bad!r}")
     ok = auroc_cluster_bootstrap(records, n_resamples=200, ci="0.9")
     assert ok["ci_level"] == 0.9 and ok["ci95"]
-    print("  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错/AP 族/"
-          "非法重采样与置信水平拒绝）")
+    print(
+        "  [ok] auroc_cluster_bootstrap（区间覆盖/确定性/聚类不足容错/AP 族/"
+        "非法重采样与置信水平拒绝）"
+    )
 
 
 def test_auroc_cluster_bootstrap_distinguishes_example_types():
@@ -289,34 +358,78 @@ def test_analysis_tolerates_malformed_external_records():
     records = _mk_records() + [
         "junk",
         # 缺 log_n/layer/head：仍可进入汇总，但不能伪造逐头统计
-        {"example": 90, "hit": 1.0, "max_p": 0.9, "logit": 2.0,
-         "qterm": 0.5, "c": 1.5, "g": 0.8},
+        {
+            "example": 90,
+            "hit": 1.0,
+            "max_p": 0.9,
+            "logit": 2.0,
+            "qterm": 0.5,
+            "c": 1.5,
+            "g": 0.8,
+        },
         # 类型错误的 hit/max_p/layer/head：按缺失处理
-        {"example": 91, "hit": "bad", "max_p": "bad", "log_n": None,
-         "layer": "bad", "head": []},
-        {"example": 92, "hit": 0.0, "max_p": 0.1, "logit": 0.0,
-         "qterm": 0.0, "c": 0.0, "g": 0.2, "log_n": 4.0,
-         "layer": 0, "head": 0},
+        {
+            "example": 91,
+            "hit": "bad",
+            "max_p": "bad",
+            "log_n": None,
+            "layer": "bad",
+            "head": [],
+        },
+        {
+            "example": 92,
+            "hit": 0.0,
+            "max_p": 0.1,
+            "logit": 0.0,
+            "qterm": 0.0,
+            "c": 0.0,
+            "g": 0.2,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 0,
+        },
         # 缺 example：bootstrap 无法聚类，跳过
-        {"hit": 1.0, "max_p": 0.9, "logit": 1.0, "qterm": 0.5,
-         "c": 1.2, "g": 0.9, "log_n": 4.0, "layer": 0, "head": 0},
+        {
+            "hit": 1.0,
+            "max_p": 0.9,
+            "logit": 1.0,
+            "qterm": 0.5,
+            "c": 1.2,
+            "g": 0.9,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 0,
+        },
     ]
     from lega.analysis import _finite_float
+
     assert _finite_float("1_0") is None
     s = summarize(records, "unknown_variant", 0.5)
     assert s["n_records"] == len(records)
     assert s["variant_cn"] == "unknown_variant"
-    assert {(p["layer"], p["head"]) for p in s["per_head"]} == {
-        (0, 0), (0, 1)}
+    assert {(p["layer"], p["head"]) for p in s["per_head"]} == {(0, 0), (0, 1)}
     ts = tau_sensitivity(records, [0.3, 0.5])
     assert len(ts["conc_rate"]) == 2
     out = auroc_cluster_bootstrap(records, n_resamples=50, seed=0)
     assert out["n_examples"] == 7, out
     # max_p 全缺失不能伪装成“从未集中”
-    missing_mp = summarize([{"example": 0, "hit": 1.0, "logit": 1.0,
-                             "qterm": 0.5, "c": 1.2, "g": 0.9,
-                             "log_n": 4.0, "layer": 0, "head": 0}],
-                           "lega", 0.5)
+    missing_mp = summarize(
+        [
+            {
+                "example": 0,
+                "hit": 1.0,
+                "logit": 1.0,
+                "qterm": 0.5,
+                "c": 1.2,
+                "g": 0.9,
+                "log_n": 4.0,
+                "layer": 0,
+                "head": 0,
+            }
+        ],
+        "lega",
+        0.5,
+    )
     assert missing_mp["conc_rate"] is None
     assert missing_mp["misleading_rate"] is None
     print("  [ok] 机制分析：畸形外部记录按缺失跳过，不触发 KeyError")
@@ -325,14 +438,41 @@ def test_analysis_tolerates_malformed_external_records():
 def test_summarize_rejects_non_binary_hit_and_missing_maxp():
     """hit 非 0/1 不能计入标签；逐头缺 max_p 时均值为 None 而非 NaN。"""
     recs = [
-        {"example": 0, "hit": 1.5, "max_p": 0.9, "g": 0.8,
-         "logit": 1.0, "qterm": 0.0, "c": 0.0, "log_n": 4.0,
-         "layer": 0, "head": 0},
-        {"example": 1, "hit": 0.0, "max_p": 0.1, "g": 0.2,
-         "logit": -1.0, "qterm": 0.0, "c": 0.0, "log_n": 4.0,
-         "layer": 0, "head": 0},
-        {"example": 2, "hit": 1.0, "g": 0.7, "logit": 2.0,
-         "qterm": 0.0, "c": 0.0, "log_n": 4.0, "layer": 0, "head": 1},
+        {
+            "example": 0,
+            "hit": 1.5,
+            "max_p": 0.9,
+            "g": 0.8,
+            "logit": 1.0,
+            "qterm": 0.0,
+            "c": 0.0,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 0,
+        },
+        {
+            "example": 1,
+            "hit": 0.0,
+            "max_p": 0.1,
+            "g": 0.2,
+            "logit": -1.0,
+            "qterm": 0.0,
+            "c": 0.0,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 0,
+        },
+        {
+            "example": 2,
+            "hit": 1.0,
+            "g": 0.7,
+            "logit": 2.0,
+            "qterm": 0.0,
+            "c": 0.0,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 1,
+        },
     ]
     s = summarize(recs, "lega", 0.5)
     # 1.5 既不是正类也不是负类，不能进入 n_hit/n_miss 或基率
@@ -345,11 +485,11 @@ def test_summarize_rejects_non_binary_hit_and_missing_maxp():
     # τ 扫描与 summarize 必须同口径：1.5 不是正类，不能让
     # p_hit_given_conc / misleading_rate 越界。
     ts = tau_sensitivity(recs, [0.5])
-    assert ts["p_hit_given_conc"][0] is None, ts   # 唯一的集中样本 hit 非法
+    assert ts["p_hit_given_conc"][0] is None, ts  # 唯一的集中样本 hit 非法
     assert ts["misleading_rate"][0] == 0.0, ts
     assert ts["p_hit_given_notconc"][0] == 0.0, ts  # 未集中样本 hit=0.0
     # 超范围 layer（int64 转换会饱和合并不同头）按畸形记录跳过
-    huge = [dict(r, layer=10 ** 19) for r in recs]
+    huge = [dict(r, layer=10**19) for r in recs]
     assert summarize(huge, "lega", 0.5)["per_head"] == []
     print("  [ok] summarize：非二值 hit 被剔除、缺 max_p 不产生 NaN、超范围层头跳过")
 
@@ -357,12 +497,30 @@ def test_summarize_rejects_non_binary_hit_and_missing_maxp():
 def test_out_of_range_probabilities_are_missing_not_evidence():
     """max_p/g 越界不可能来自 softmax/sigmoid，不能伪造集中率或完美校准。"""
     recs = [
-        {"example": 0, "hit": 1.0, "max_p": 2.0, "g": 2.0,
-         "logit": 2.0, "qterm": 0.5, "c": 1.0, "log_n": 4.0,
-         "layer": 0, "head": 0},
-        {"example": 1, "hit": 0.0, "max_p": -1.0, "g": -1.0,
-         "logit": -2.0, "qterm": -0.5, "c": -1.0, "log_n": 4.0,
-         "layer": 0, "head": 0},
+        {
+            "example": 0,
+            "hit": 1.0,
+            "max_p": 2.0,
+            "g": 2.0,
+            "logit": 2.0,
+            "qterm": 0.5,
+            "c": 1.0,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 0,
+        },
+        {
+            "example": 1,
+            "hit": 0.0,
+            "max_p": -1.0,
+            "g": -1.0,
+            "logit": -2.0,
+            "qterm": -0.5,
+            "c": -1.0,
+            "log_n": 4.0,
+            "layer": 0,
+            "head": 0,
+        },
     ]
     s = summarize(recs, "lega", 0.5)
     assert s["hit_rate"] == 0.5
@@ -382,10 +540,15 @@ def test_bootstrap_filters_missing_scores_per_resample():
     recs = []
     for ex in range(12):
         for k in range(20):
-            recs.append({
-                "example": ex, "hit": float(k < 10),
-                "logit": None if k == 0 else (2.0 if k < 10 else -1.0),
-                "qterm": 0.5 if k < 10 else -0.5, "c": 0.0})
+            recs.append(
+                {
+                    "example": ex,
+                    "hit": float(k < 10),
+                    "logit": None if k == 0 else (2.0 if k < 10 else -1.0),
+                    "qterm": 0.5 if k < 10 else -0.5,
+                    "c": 0.0,
+                }
+            )
     point = summarize(recs, "lega", 0.5)["auroc_logit"]
     assert point == 1.0
     out = auroc_cluster_bootstrap(recs, n_resamples=200, seed=0)
@@ -401,12 +564,23 @@ def test_summarize_reports_imbalance_aware_metrics():
     records = []
     for i in range(400):
         hit = 1.0 if i < 19 else 0.0
-        records.append({
-            "example": i // 8, "hit": hit, "max_p": 0.8 if hit else 0.1,
-            "logit": 2.0 if hit else -1.0, "qterm": 0.5,
-            "c": 1.0, "g": 0.9 if hit else 0.4,
-            "log_n": 4.0, "task": "niah_synth", "ctx": 256,
-            "layer": 0, "head": i % 2, "query_pos": i % 4})
+        records.append(
+            {
+                "example": i // 8,
+                "hit": hit,
+                "max_p": 0.8 if hit else 0.1,
+                "logit": 2.0 if hit else -1.0,
+                "qterm": 0.5,
+                "c": 1.0,
+                "g": 0.9 if hit else 0.4,
+                "log_n": 4.0,
+                "task": "niah_synth",
+                "ctx": 256,
+                "layer": 0,
+                "head": i % 2,
+                "query_pos": i % 4,
+            }
+        )
     s = summarize(records, "lega", 0.5)
     assert s["n_hit"] == 19 and s["n_miss"] == 381
     assert abs(s["hit_base_rate"] - 19 / 400) < 1e-12
@@ -447,25 +621,65 @@ def test_summarize_reports_imbalance_aware_metrics():
     s2 = summarize(mild, "lega", 0.5)
     assert s2["primary_detection_metric"] == "AUROC 与 PR-AUC 并报"
     # 无 hit 标签的记录不产生 F1（None），不崩溃
-    s3 = summarize([{"example": 0, "hit": None, "max_p": 0.9, "logit": 1.0,
-                     "qterm": 0.0, "c": 0.5, "g": 0.8, "log_n": 4.0,
-                     "layer": 0, "head": 0, "query_pos": 0}],
-                   "lega", 0.5)
+    s3 = summarize(
+        [
+            {
+                "example": 0,
+                "hit": None,
+                "max_p": 0.9,
+                "logit": 1.0,
+                "qterm": 0.0,
+                "c": 0.5,
+                "g": 0.8,
+                "log_n": 4.0,
+                "layer": 0,
+                "head": 0,
+                "query_pos": 0,
+            }
+        ],
+        "lega",
+        0.5,
+    )
     assert s3["gate_f1"] is None
-    assert s3["gate_f1_trivial"] is None   # 无标签时不报稻草人对照
+    assert s3["gate_f1_trivial"] is None  # 无标签时不报稻草人对照
     # hit==1 切片 g 全缺：mean_g_hit 必须是 None；整数组守卫会把这里
     # 误判为“有非 NaN”并对空切片 nanmean，返回 nan 且发 RuntimeWarning
     import warnings
+
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        s4 = summarize([
-            {"example": 0, "hit": 1.0, "max_p": 0.9, "logit": 1.0,
-             "qterm": 0.0, "c": 0.5, "g": None, "log_n": 4.0, "layer": 0,
-             "head": 0, "query_pos": 0},
-            {"example": 1, "hit": 0.0, "max_p": 0.1, "logit": 0.0,
-             "qterm": 0.0, "c": 0.5, "g": 0.4, "log_n": 4.0, "layer": 0,
-             "head": 0, "query_pos": 1},
-        ], "lega", 0.5)
+        s4 = summarize(
+            [
+                {
+                    "example": 0,
+                    "hit": 1.0,
+                    "max_p": 0.9,
+                    "logit": 1.0,
+                    "qterm": 0.0,
+                    "c": 0.5,
+                    "g": None,
+                    "log_n": 4.0,
+                    "layer": 0,
+                    "head": 0,
+                    "query_pos": 0,
+                },
+                {
+                    "example": 1,
+                    "hit": 0.0,
+                    "max_p": 0.1,
+                    "logit": 0.0,
+                    "qterm": 0.0,
+                    "c": 0.5,
+                    "g": 0.4,
+                    "log_n": 4.0,
+                    "layer": 0,
+                    "head": 0,
+                    "query_pos": 1,
+                },
+            ],
+            "lega",
+            0.5,
+        )
     assert s4["mean_g_hit"] is None and s4["mean_g_miss"] is not None
     print("  [ok] summarize（正类率/主指标/PR-AUC/三口径门控 F1/全缺 g 切片）")
 
@@ -491,28 +705,60 @@ def test_analysis_payload_binds_checkpoint_hash(monkeypatch):
         text = "The quick brown fox jumps over the lazy dog. 0123456789"
         itos = sorted(set(text))
         with open(os.path.join(data, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"tokenizer": "char", "itos": itos, "char_unk": False,
-                       "vocab_size": len(itos), "cache_schema": CACHE_SCHEMA,
-                       "fit_on": "train"}, f)
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "itos": itos,
+                    "char_unk": False,
+                    "vocab_size": len(itos),
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
         arr = np.array([itos.index(c) for c in text], dtype=np.uint16)
         arr.tofile(os.path.join(data, "train.bin"))
         arr.tofile(os.path.join(data, "val.bin"))
         ckpt = os.path.join(d, "model.pt")
         torch.manual_seed(0)
-        model = GPT(vocab_size=len(itos), block_size=128, d_model=8,
-                    n_layers=1, n_heads=1, ffn_mult=2, variant="lega",
-                    dropout=0.0, attn_dropout=0.0, gate_bias_init=2.0)
+        model = GPT(
+            vocab_size=len(itos),
+            block_size=128,
+            d_model=8,
+            n_layers=1,
+            n_heads=1,
+            ffn_mult=2,
+            variant="lega",
+            dropout=0.0,
+            attn_dropout=0.0,
+            gate_bias_init=2.0,
+        )
         save_checkpoint(ckpt, model, extra={"variant": "lega", "seed": 5})
         out_dir = os.path.join(d, "results")
         os.makedirs(out_dir)
-        monkeypatch.setattr(sys, "argv", [
-            "analysis", "--ckpt", ckpt, "--data_dir", data,
-            "--out_dir", out_dir, "--ctx", "64", "--n_examples", "1",
-            "--device", "cpu"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "analysis",
+                "--ckpt",
+                ckpt,
+                "--data_dir",
+                data,
+                "--out_dir",
+                out_dir,
+                "--ctx",
+                "64",
+                "--n_examples",
+                "1",
+                "--device",
+                "cpu",
+            ],
+        )
         from lega.analysis import main as analysis_main
+
         analysis_main()
-        with open(os.path.join(out_dir, "analysis_lega.json"),
-                  encoding="utf-8") as f:
+        with open(os.path.join(out_dir, "analysis_lega.json"), encoding="utf-8") as f:
             payload = json.load(f)
         assert payload["ckpt"] == os.path.abspath(ckpt)
         assert payload["ckpt_sha256"] == sha256_file(ckpt)

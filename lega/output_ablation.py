@@ -13,6 +13,7 @@
 
 这是**推理期**干预，不重新训练；只支持单条/同构 batch 的答案跨度。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,8 +36,9 @@ def _strict_int(value, name: str, minimum: Optional[int] = None) -> int:
     return value
 
 
-def _answer_positions(seq_len: int, start: int, end: Optional[int]
-                      ) -> Tuple[int, int, int, int]:
+def _answer_positions(
+    seq_len: int, start: int, end: Optional[int]
+) -> Tuple[int, int, int, int]:
     start = _strict_int(start, "answer_start", 1)
     end = seq_len if end is None else _strict_int(end, "answer_end", 1)
     if end <= start:
@@ -50,8 +52,9 @@ def _answer_positions(seq_len: int, start: int, end: Optional[int]
 
 
 @torch.no_grad()
-def score_answer(model, idx: torch.Tensor, answer_start: int,
-                 answer_end: Optional[int] = None) -> Dict:
+def score_answer(
+    model, idx: torch.Tensor, answer_start: int, answer_end: Optional[int] = None
+) -> Dict:
     """返回答案 token 的 NLL/正确概率/margin（干净前向）。"""
     if idx.dim() != 2:
         raise ValueError(f"idx 必须是 (B,T)，收到 {tuple(idx.shape)}")
@@ -61,7 +64,7 @@ def score_answer(model, idx: torch.Tensor, answer_start: int,
     logits = out["logits"]
     if logits is None:
         raise RuntimeError("模型未返回 logits")
-    pred = logits[:, start - 1:end - 1, :].float()
+    pred = logits[:, start - 1 : end - 1, :].float()
     target = idx[:, start:end]
     logp = F.log_softmax(pred, dim=-1)
     nll_tok = -logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
@@ -69,10 +72,12 @@ def score_answer(model, idx: torch.Tensor, answer_start: int,
     # margin = 正确 token logit - 其它 token 最大 logit
     correct = pred.gather(-1, target.unsqueeze(-1))
     other = pred.masked_fill(
-        F.one_hot(target, pred.size(-1)).bool(), float("-inf")).amax(dim=-1)
-    margin = (correct.squeeze(-1) - other)
+        F.one_hot(target, pred.size(-1)).bool(), float("-inf")
+    ).amax(dim=-1)
+    margin = correct.squeeze(-1) - other
     return {
-        "answer_start": int(start), "answer_end": int(end),
+        "answer_start": int(start),
+        "answer_end": int(end),
         "n_answer_tokens": int(end - start),
         "nll": float(nll_tok.mean().item()),
         "prob": float(prob_tok.mean().item()),
@@ -82,14 +87,19 @@ def score_answer(model, idx: torch.Tensor, answer_start: int,
 
 
 @torch.no_grad()
-def _forward_with_head_hook(model, idx: torch.Tensor, layer: int, head: int,
-                            positions: Sequence[int], mode: str = "zero"):
+def _forward_with_head_hook(
+    model,
+    idx: torch.Tensor,
+    layer: int,
+    head: int,
+    positions: Sequence[int],
+    mode: str = "zero",
+):
     block = model.blocks[layer]
     attn = block.attn
     Dh = int(attn.d_head)
     lo, hi = int(head) * Dh, (int(head) + 1) * Dh
-    pos = torch.as_tensor(list(positions), dtype=torch.long,
-                          device=idx.device)
+    pos = torch.as_tensor(list(positions), dtype=torch.long, device=idx.device)
     removed = []
 
     def hook(module, args):
@@ -118,13 +128,16 @@ def _forward_with_head_hook(model, idx: torch.Tensor, layer: int, head: int,
     return out, (removed[0] if removed else 0.0)
 
 
-def head_output_intervention_scan(model, idx: torch.Tensor, answer_start: int,
-                                  answer_end: Optional[int] = None,
-                                  layers: Optional[Iterable[int]] = None,
-                                  heads: Optional[Iterable[int]] = None,
-                                  scope: str = "answer",
-                                  modes: Sequence[str] = ("zero",),
-                                  ) -> Dict:
+def head_output_intervention_scan(
+    model,
+    idx: torch.Tensor,
+    answer_start: int,
+    answer_end: Optional[int] = None,
+    layers: Optional[Iterable[int]] = None,
+    heads: Optional[Iterable[int]] = None,
+    scope: str = "answer",
+    modes: Sequence[str] = ("zero",),
+) -> Dict:
     """逐层/逐头在答案位置干预输出，返回答案 NLL/margin 的配对增量。
 
     ``scope="answer"`` 只改预测答案 token 的位置；``scope="all"`` 改整条
@@ -136,8 +149,7 @@ def head_output_intervention_scan(model, idx: torch.Tensor, answer_start: int,
     B, T = idx.shape
     if B != 1:
         raise ValueError("输出级干预目前只支持 batch=1（同一答案跨度）")
-    start, end, pred_start, pred_end = _answer_positions(
-        T, answer_start, answer_end)
+    start, end, pred_start, pred_end = _answer_positions(T, answer_start, answer_end)
     n_layers = len(model.blocks)
     if layers is None:
         layers = range(n_layers)
@@ -167,50 +179,69 @@ def head_output_intervention_scan(model, idx: torch.Tensor, answer_start: int,
         for hi in heads:
             for mode in modes:
                 out, removed = _forward_with_head_hook(
-                    model, idx, li, hi, positions, mode=mode)
+                    model, idx, li, hi, positions, mode=mode
+                )
                 got = score_answer_from_logits(out["logits"], idx, start, end)
-                rows.append({
-                    "layer": int(li), "head": int(hi), "mode": mode,
-                    "scope": scope,
-                    "n_positions": len(positions),
-                    "mean_abs_removed": float(removed),
-                    "nll": got["nll"], "prob": got["prob"],
-                    "margin": got["margin"],
-                    "delta_nll": float(got["nll"] - base["nll"]),
-                    "delta_prob": float(got["prob"] - base["prob"]),
-                    "delta_margin": float(got["margin"] - base["margin"]),
-                })
-    return {"baseline": base, "interventions": rows,
-            "answer_start": int(start), "answer_end": int(end),
-            "scope": scope}
+                rows.append(
+                    {
+                        "layer": int(li),
+                        "head": int(hi),
+                        "mode": mode,
+                        "scope": scope,
+                        "n_positions": len(positions),
+                        "mean_abs_removed": float(removed),
+                        "nll": got["nll"],
+                        "prob": got["prob"],
+                        "margin": got["margin"],
+                        "delta_nll": float(got["nll"] - base["nll"]),
+                        "delta_prob": float(got["prob"] - base["prob"]),
+                        "delta_margin": float(got["margin"] - base["margin"]),
+                    }
+                )
+    return {
+        "baseline": base,
+        "interventions": rows,
+        "answer_start": int(start),
+        "answer_end": int(end),
+        "scope": scope,
+    }
 
 
-def score_answer_from_logits(logits: torch.Tensor, idx: torch.Tensor,
-                             answer_start: int,
-                             answer_end: Optional[int] = None) -> Dict:
+def score_answer_from_logits(
+    logits: torch.Tensor,
+    idx: torch.Tensor,
+    answer_start: int,
+    answer_end: Optional[int] = None,
+) -> Dict:
     """与 :func:`score_answer` 同口径，但复用已算好的 logits。"""
     B, T = idx.shape
     start, end, _, _ = _answer_positions(T, answer_start, answer_end)
-    pred = logits[:, start - 1:end - 1, :].float()
+    pred = logits[:, start - 1 : end - 1, :].float()
     target = idx[:, start:end]
     logp = F.log_softmax(pred, dim=-1)
     nll_tok = -logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
     prob_tok = nll_tok.exp()
     correct = pred.gather(-1, target.unsqueeze(-1))
     other = pred.masked_fill(
-        F.one_hot(target, pred.size(-1)).bool(), float("-inf")).amax(dim=-1)
+        F.one_hot(target, pred.size(-1)).bool(), float("-inf")
+    ).amax(dim=-1)
     margin = correct.squeeze(-1) - other
-    return {"nll": float(nll_tok.mean().item()),
-            "prob": float(prob_tok.mean().item()),
-            "margin": float(margin.mean().item()),
-            "n_answer_tokens": int(end - start)}
+    return {
+        "nll": float(nll_tok.mean().item()),
+        "prob": float(prob_tok.mean().item()),
+        "margin": float(margin.mean().item()),
+        "n_answer_tokens": int(end - start),
+    }
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="答案 token 的逐头输出干预")
     p.add_argument("--ckpt", required=True)
-    p.add_argument("--idx_json", required=True,
-                   help="包含 input_ids (1,T) 的 JSON；可选 answer_start/end")
+    p.add_argument(
+        "--idx_json",
+        required=True,
+        help="包含 input_ids (1,T) 的 JSON；可选 answer_start/end",
+    )
     p.add_argument("--answer_start", type=int, default=None)
     p.add_argument("--answer_end", type=int, default=None)
     p.add_argument("--layers", default=None, help="逗号分隔，缺省全部层")
@@ -221,26 +252,35 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=None)
     args = p.parse_args(argv)
     from .model import load_model
+
     model, _ = load_model(args.ckpt, args.device)
     model.eval()
     with open(args.idx_json, encoding="utf-8") as f:
         payload = json.load(f)
-    idx = torch.as_tensor(payload["input_ids"], dtype=torch.long,
-                          device=args.device)
-    start = args.answer_start if args.answer_start is not None else payload.get(
-        "answer_start")
-    end = args.answer_end if args.answer_end is not None else payload.get(
-        "answer_end")
+    idx = torch.as_tensor(payload["input_ids"], dtype=torch.long, device=args.device)
+    start = (
+        args.answer_start
+        if args.answer_start is not None
+        else payload.get("answer_start")
+    )
+    end = args.answer_end if args.answer_end is not None else payload.get("answer_end")
     if start is None:
         raise SystemExit("必须提供 answer_start（参数或 JSON）")
-    layers = ([int(x) for x in args.layers.split(",") if x.strip()]
-              if args.layers else None)
-    heads = ([int(x) for x in args.heads.split(",") if x.strip()]
-             if args.heads else None)
+    layers = (
+        [int(x) for x in args.layers.split(",") if x.strip()] if args.layers else None
+    )
+    heads = [int(x) for x in args.heads.split(",") if x.strip()] if args.heads else None
     modes = [x.strip() for x in args.modes.split(",") if x.strip()]
     rep = head_output_intervention_scan(
-        model, idx, start, end,
-        layers=layers, heads=heads, scope=args.scope, modes=modes)
+        model,
+        idx,
+        start,
+        end,
+        layers=layers,
+        heads=heads,
+        scope=args.scope,
+        modes=modes,
+    )
     text = json.dumps(rep, ensure_ascii=False, indent=2)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

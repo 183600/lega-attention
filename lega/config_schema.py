@@ -12,6 +12,7 @@
 字节，前者回答“这两份不同格式的配置是否声明了同一实验”。缺失键仍允许，
 因为代码有显式默认值；但出现未知键或确定非法的值会在正式入口 fail closed。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -167,8 +168,11 @@ def _is_int(value) -> bool:
 
 
 def _is_number(value) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(float(value)))
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def _type_name(value) -> str:
@@ -192,27 +196,29 @@ def _type_name(value) -> str:
 def _check_scalar(kind: str, value):
     """返回 ``(ok, reason)``；不通过时 reason 说明期望与实际类型。"""
     if kind == "bool":
-        return (_is_bool(value),
-                None if _is_bool(value) else "需要 bool")
+        return (_is_bool(value), None if _is_bool(value) else "需要 bool")
     if kind == "str":
-        return (isinstance(value, str),
-                None if isinstance(value, str) else "需要字符串")
+        return (
+            isinstance(value, str),
+            None if isinstance(value, str) else "需要字符串",
+        )
     if kind == "object":
-        return (isinstance(value, dict),
-                None if isinstance(value, dict) else "需要 JSON 对象")
+        return (
+            isinstance(value, dict),
+            None if isinstance(value, dict) else "需要 JSON 对象",
+        )
     if kind in _NUMERIC_TYPES:
         if not _is_number(value):
             return False, "需要有限数值（bool/NaN/Inf 不接受）"
-        if kind in ("int", "positive_int", "nonnegative_int") \
-                and not _is_int(value):
+        if kind in ("int", "positive_int", "nonnegative_int") and not _is_int(value):
             return False, "需要整数（bool/小数不接受）"
         if kind in ("positive_int", "positive_number") and float(value) <= 0:
             return False, "需要 > 0"
-        if kind in ("nonnegative_int", "nonnegative_number") \
-                and float(value) < 0:
+        if kind in ("nonnegative_int", "nonnegative_number") and float(value) < 0:
             return False, "需要 >= 0"
-        if kind in ("probability", "open_probability") \
-                and not (0.0 <= float(value) <= 1.0):
+        if kind in ("probability", "open_probability") and not (
+            0.0 <= float(value) <= 1.0
+        ):
             return False, "需要位于 [0, 1]"
         if kind == "open_probability" and not (0.0 < float(value) < 1.0):
             return False, "需要位于 (0, 1)"
@@ -255,9 +261,14 @@ def _check_scalar(kind: str, value):
 
 
 def _issue(path: str, problem: str, value) -> dict:
-    return {"path": path, "problem": problem, "value_type": _type_name(value),
-            "value": value if isinstance(value, (str, int, float, bool, type(None)))
-            else None}
+    return {
+        "path": path,
+        "problem": problem,
+        "value_type": _type_name(value),
+        "value": value
+        if isinstance(value, (str, int, float, bool, type(None)))
+        else None,
+    }
 
 
 def audit_config(config: dict, *, allow_unknown: bool = False) -> dict:
@@ -291,17 +302,21 @@ def audit_config(config: dict, *, allow_unknown: bool = False) -> dict:
                 sub_path = f"{key}.{sub_key}"
                 sub_kind = spec.get(sub_key)
                 if sub_kind is None:
-                    unknown.append(_issue(
-                        sub_path, "未知配置键（会被代码静默忽略）", sub_value))
+                    unknown.append(
+                        _issue(sub_path, "未知配置键（会被代码静默忽略）", sub_value)
+                    )
                     continue
                 checked += 1
                 sub_ok, sub_reason = _check_scalar(sub_kind, sub_value)
                 if not sub_ok:
-                    item = _issue(sub_path,
-                                  sub_reason or "类型/范围非法", sub_value)
-                    (range_errors if isinstance(sub_value, (int, float))
-                     and not isinstance(sub_value, bool)
-                     and _is_number(sub_value) else type_errors).append(item)
+                    item = _issue(sub_path, sub_reason or "类型/范围非法", sub_value)
+                    (
+                        range_errors
+                        if isinstance(sub_value, (int, float))
+                        and not isinstance(sub_value, bool)
+                        and _is_number(sub_value)
+                        else type_errors
+                    ).append(item)
 
     def _int(key):
         value = config.get(key)
@@ -311,49 +326,68 @@ def audit_config(config: dict, *, allow_unknown: bool = False) -> dict:
     n_heads = _int("n_heads")
     if d_model is not None and n_heads is not None:
         if d_model % n_heads:
-            cross_field.append({
-                "path": "d_model,n_heads",
-                "problem": f"d_model={d_model} 必须能被 n_heads={n_heads} 整除",
-            })
+            cross_field.append(
+                {
+                    "path": "d_model,n_heads",
+                    "problem": f"d_model={d_model} 必须能被 n_heads={n_heads} 整除",
+                }
+            )
         elif (d_model // n_heads) % 2:
-            cross_field.append({
-                "path": "d_model,n_heads",
-                "problem": (f"d_model/n_heads={d_model // n_heads} 必须是偶数"
-                            "（RoPE 实现要求）"),
-            })
+            cross_field.append(
+                {
+                    "path": "d_model,n_heads",
+                    "problem": (
+                        f"d_model/n_heads={d_model // n_heads} 必须是偶数"
+                        "（RoPE 实现要求）"
+                    ),
+                }
+            )
     block_size = _int("block_size")
     train_ctx = _int("train_ctx")
-    if block_size is not None and train_ctx is not None \
-            and train_ctx > block_size:
-        cross_field.append({
-            "path": "train_ctx,block_size",
-            "problem": (f"train_ctx={train_ctx} > block_size={block_size}："
-                        "训练窗口超过位置编码容量"),
-        })
+    if block_size is not None and train_ctx is not None and train_ctx > block_size:
+        cross_field.append(
+            {
+                "path": "train_ctx,block_size",
+                "problem": (
+                    f"train_ctx={train_ctx} > block_size={block_size}："
+                    "训练窗口超过位置编码容量"
+                ),
+            }
+        )
     steps = _int("steps")
     warmup = _int("warmup")
     if steps is not None and warmup is not None and warmup > steps:
-        warnings.append({
-            "path": "warmup,steps",
-            "problem": (f"warmup={warmup} > steps={steps}：学习率尚未完成"
-                        "预热训练就结束了"),
-        })
+        warnings.append(
+            {
+                "path": "warmup,steps",
+                "problem": (
+                    f"warmup={warmup} > steps={steps}：学习率尚未完成"
+                    "预热训练就结束了"
+                ),
+            }
+        )
     seeds = config.get("seeds")
     if isinstance(seeds, (list, tuple)) and not seeds:
         cross_field.append({"path": "seeds", "problem": "显式 seeds 为空"})
     elif isinstance(seeds, (list, tuple)) and len(set(seeds)) != len(seeds):
         warnings.append({"path": "seeds", "problem": "seeds 含重复项，会被去重"})
     ruler = config.get("ruler")
-    if isinstance(ruler, dict) and block_size is not None \
-            and isinstance(ruler.get("ctx_lens"), (list, tuple)):
-        too_long = [c for c in ruler["ctx_lens"]
-                    if _is_int(c) and c > block_size]
+    if (
+        isinstance(ruler, dict)
+        and block_size is not None
+        and isinstance(ruler.get("ctx_lens"), (list, tuple))
+    ):
+        too_long = [c for c in ruler["ctx_lens"] if _is_int(c) and c > block_size]
         if too_long:
-            cross_field.append({
-                "path": "ruler.ctx_lens,block_size",
-                "problem": (f"RULER 上下文 {too_long} 超过 block_size="
-                            f"{block_size}：评测会越过模型容量"),
-            })
+            cross_field.append(
+                {
+                    "path": "ruler.ctx_lens,block_size",
+                    "problem": (
+                        f"RULER 上下文 {too_long} 超过 block_size="
+                        f"{block_size}：评测会越过模型容量"
+                    ),
+                }
+            )
 
     if allow_unknown:
         warnings.extend(unknown)
@@ -370,13 +404,13 @@ def audit_config(config: dict, *, allow_unknown: bool = False) -> dict:
         "cross_field_errors": cross_field,
         "warnings": warnings,
         "allow_unknown": bool(allow_unknown),
-        "summary": _summary(status, unknown, type_errors, range_errors,
-                            cross_field, warnings),
+        "summary": _summary(
+            status, unknown, type_errors, range_errors, cross_field, warnings
+        ),
     }
 
 
-def _summary(status, unknown, type_errors, range_errors, cross_field,
-             warnings) -> str:
+def _summary(status, unknown, type_errors, range_errors, cross_field, warnings) -> str:
     if status == "pass":
         return "配置键与类型全部通过审计"
     parts = []
@@ -398,8 +432,9 @@ def _summary(status, unknown, type_errors, range_errors, cross_field,
     return "；".join(parts) or "配置审计未通过"
 
 
-def assert_config_valid(config: dict, *, source: str = None,
-                        allow_unknown: bool = False) -> dict:
+def assert_config_valid(
+    config: dict, *, source: str = None, allow_unknown: bool = False
+) -> dict:
     """审计并在 ``status=fail`` 时抛 ``ValueError``；返回同一份报告。"""
     report = audit_config(config, allow_unknown=allow_unknown)
     if report["status"] == "fail":
@@ -411,8 +446,11 @@ def assert_config_valid(config: dict, *, source: str = None,
 def _semantic_view(value):
     """递归去掉下划线注释键，只保留会被实验读取的声明。"""
     if isinstance(value, dict):
-        return {k: _semantic_view(v) for k, v in value.items()
-                if not str(k).startswith(COMMENT_PREFIX)}
+        return {
+            k: _semantic_view(v)
+            for k, v in value.items()
+            if not str(k).startswith(COMMENT_PREFIX)
+        }
     if isinstance(value, (list, tuple)):
         return [_semantic_view(v) for v in value]
     return value
@@ -420,8 +458,12 @@ def _semantic_view(value):
 
 def canonical_config_json(config: dict) -> str:
     """稳定序列化：去除注释键、键排序、紧凑分隔符、保留非 ASCII。"""
-    return json.dumps(_semantic_view(config), ensure_ascii=False,
-                      sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        _semantic_view(config),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def config_canonical_sha256(config: dict) -> str:
@@ -430,8 +472,7 @@ def config_canonical_sha256(config: dict) -> str:
     它不是文件 SHA-256 的替代：字节哈希回答“是否同一份文件”，语义哈希
     回答“两份格式不同/被重排的配置是否声明了同一实验”。
     """
-    return hashlib.sha256(
-        canonical_config_json(config).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_config_json(config).encode("utf-8")).hexdigest()
 
 
 def main(argv=None) -> int:
@@ -441,11 +482,15 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(description="实验配置语义审计（未知键/类型/范围）")
     p.add_argument("--config", required=True)
-    p.add_argument("--allow_unknown", action="store_true",
-                   help="把未知键降为警告（仅用于迁移/诊断旧配置）")
+    p.add_argument(
+        "--allow_unknown",
+        action="store_true",
+        help="把未知键降为警告（仅用于迁移/诊断旧配置）",
+    )
     args = p.parse_args(argv)
     try:
         from .utils import load_config_json
+
         cfg = load_config_json(args.config, validate=False)
     except (OSError, ValueError) as e:
         print(f"[config] 读取配置失败：{e}", file=sys.stderr)

@@ -1,0 +1,62 @@
+# Pre-commit hooks for code quality and reproducibility
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Ruff: fast Python linter and formatter (replaces black, isort, flake8)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # MyPy: static type checking (disabled in pre-commit; existing codebase uses dynamic patterns incompatible with strict mode.
+# Run manually: `mypy --strict --show-error-codes lega/artifacts.py` or `mypy lega/ --config-file=pyproject.toml`)
+
+  # Check for common issues
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: forbid-new-submodules
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Prevent large files from being committed
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
+  # Ensure requirements-lock.txt is up to date with requirements.txt
+  - repo: local
+    hooks:
+      - id: check-requirements-lock
+        name: Check requirements-lock.txt consistency
+        entry: bash -c 'python scripts/check_requirements_lock.py'
+        language: system
+        types: [python]
+        files: 'requirements(-ci)?\.txt$'
+        verbose: true
+
+  # Validate JSON configs
+  - repo: local
+    hooks:
+      - id: validate-json-configs
+        name: Validate JSON configs
+        entry: bash -c 'python -c "from lega.utils import load_config_json; [load_config_json(f, validate=True) for f in [\"configs/tiny.json\", \"configs/small.json\"]]"'
+        language: system
+        types: [json]
+        files: 'configs/.*\.json$'
+        verbose: true

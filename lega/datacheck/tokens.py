@@ -1,7 +1,9 @@
 """长度统计、token 流校验与泄漏筛查。"""
+
 from ._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def _iter_line_lengths(text: str):
     """逐行字符长度，与 text.split("\\n") 的长度序列一致，但不构造行字符串列表。"""
@@ -28,7 +30,7 @@ def _utf8_byte_length(text: str, chunk_chars: int = 1 << 20) -> int:
         return len(text.encode("utf-8"))
     total = 0
     for i in range(0, len(text), chunk_chars):
-        total += len(text[i:i + chunk_chars].encode("utf-8"))
+        total += len(text[i : i + chunk_chars].encode("utf-8"))
     return int(total)
 
 
@@ -47,8 +49,9 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
         raise ValueError(f"huge_line_chars 必须 >= 0，收到 {huge_line_chars!r}")
     if not text:
         return {"lines": 0, "chars": 0, "utf8_bytes": 0}
-    lens = np.fromiter(_iter_line_lengths(text), dtype=np.int64,
-                       count=text.count("\n") + 1)
+    lens = np.fromiter(
+        _iter_line_lengths(text), dtype=np.int64, count=text.count("\n") + 1
+    )
     return {
         "lines": int(lens.size),
         "chars": int(len(text)),
@@ -66,14 +69,14 @@ def text_length_stats(text: str, huge_line_chars: int = 100000) -> dict:
 
 # ---------------------------------------------------------------- token 流校验
 
+
 def check_vocab_capacity(vocab_size: int) -> None:
     """token id 以 uint16 存储，词表必须满足 max_id = vocab_size-1 <= 65535。"""
     # 词表大小是整数身份：bool（True→1）、小数（4.9→4）与下划线数字串
     # 都不能被 int() 静默改写成另一个容量后通过 uint16 闸门。
     vocab_size = strict_int(vocab_size, "vocab_size")
     if vocab_size < 1 or vocab_size > 65536:
-        raise ValueError(
-            f"vocab_size={vocab_size} 无法用 uint16 存储（要求 1..65536）")
+        raise ValueError(f"vocab_size={vocab_size} 无法用 uint16 存储（要求 1..65536）")
 
 
 def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
@@ -103,7 +106,8 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
             bad = arr[arr != arr_r].ravel()[:5]
             raise ValueError(
                 f"{split} token 流含非整数 id，例如 {bad.tolist()}；"
-                "浮点流必须是整数值")
+                "浮点流必须是整数值"
+            )
         arr_i = arr_r.astype(np.int64)
     elif arr.dtype.kind in "iu":
         # 整数流的 min/max 在任何整数 dtype 上都是精确运算，无需升位。
@@ -114,7 +118,8 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
     if vmin < 0 or vmax >= int(vocab_size) or vmax > 65535:
         raise ValueError(
             f"{split} token id 越界: [{vmin}, {vmax}] 不在 [0, {vocab_size}) "
-            "或超出 uint16 可存储范围（<= 65535），数据/词表不一致")
+            "或超出 uint16 可存储范围（<= 65535），数据/词表不一致"
+        )
     # 至此 vmax <= 65535 由本函数保证，写入 uint16 无损。
     # 词表覆盖/集中度是“数据退化”的早期信号：重复串、模板化或分词失败
     # 会让少数 token 占据绝大多数位置。它们在 token 流层面确定性可算，
@@ -130,26 +135,42 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
     if total > 0:
         counts_sorted = np.sort(counts[counts > 0])
         ranks = np.arange(1, len(counts_sorted) + 1)
-        zipf_slope = float(np.sum(np.log(counts_sorted) * ranks) / np.sum(np.log(ranks))) if len(counts_sorted) > 1 else 1.0
+        zipf_slope = (
+            float(np.sum(np.log(counts_sorted) * ranks) / np.sum(np.log(ranks)))
+            if len(counts_sorted) > 1
+            else 1.0
+        )
         concentration = float(counts_sorted[-1] / total)
-        top5_share = float(counts_sorted[-5:].sum() / total) if len(counts_sorted) >= 5 else float(counts_sorted.sum() / total)
+        top5_share = (
+            float(counts_sorted[-5:].sum() / total)
+            if len(counts_sorted) >= 5
+            else float(counts_sorted.sum() / total)
+        )
     else:
         zipf_slope = None
         concentration = None
         top5_share = None
     distinct_tokens = int(distinct)
-    return {"split": str(split), "tokens": int(arr.size), "dtype": str(arr.dtype),
-            "min_id": vmin, "max_id": vmax, "nan": n_nan, "inf": n_inf,
-            "distinct_ids": distinct_tokens,
-            "type_token_ratio": float(distinct_tokens / total) if total else 0.0,
-            "token_entropy_bits": entropy_bits,
-            "most_common_token_share": top_share,
-            "singleton_token_mass": singleton_mass,
-            "vocab_coverage": (float(distinct_tokens / int(vocab_size))
-                               if int(vocab_size) > 0 else 0.0),
-            "zipf_slope": zipf_slope,
-            "token_concentration": concentration,
-            "top5_token_share": top5_share}
+    return {
+        "split": str(split),
+        "tokens": int(arr.size),
+        "dtype": str(arr.dtype),
+        "min_id": vmin,
+        "max_id": vmax,
+        "nan": n_nan,
+        "inf": n_inf,
+        "distinct_ids": distinct_tokens,
+        "type_token_ratio": float(distinct_tokens / total) if total else 0.0,
+        "token_entropy_bits": entropy_bits,
+        "most_common_token_share": top_share,
+        "singleton_token_mass": singleton_mass,
+        "vocab_coverage": (
+            float(distinct_tokens / int(vocab_size)) if int(vocab_size) > 0 else 0.0
+        ),
+        "zipf_slope": zipf_slope,
+        "token_concentration": concentration,
+        "top5_token_share": top5_share,
+    }
 
 
 def unknown_char_rate(tok, text: str):
@@ -165,62 +186,70 @@ def unknown_char_rate(tok, text: str):
 
 def token_id_range_analysis(ids, vocab_size: int, split: str) -> dict:
     """对 token id 的范围分布进行更细致的分析。
-    
+
     返回 token id 在词表中位置的分段分布信息，用于诊断分词器是否正常工作。
     """
     vocab_size = strict_int(vocab_size, "vocab_size")
     arr = np.asarray(ids, dtype=np.int64)
     if arr.size == 0:
-        return {"split": str(split), "range_analysis": None, "note": "empty token stream"}
-    
+        return {
+            "split": str(split),
+            "range_analysis": None,
+            "note": "empty token stream",
+        }
+
     min_id, max_id = int(arr.min()), int(arr.max())
     if min_id < 0 or max_id >= vocab_size:
-        return {"split": str(split), "range_analysis": None, 
-                "note": f"id 越界 [{min_id}, {max_id}] 不在 [0, {vocab_size})"}
-    
+        return {
+            "split": str(split),
+            "range_analysis": None,
+            "note": f"id 越界 [{min_id}, {max_id}] 不在 [0, {vocab_size})",
+        }
+
     # 统计 id 在词表各区间的分布
     quarters = [0, vocab_size // 4, vocab_size // 2, 3 * vocab_size // 4, vocab_size]
     counts = np.zeros(4, dtype=np.int64)
     for i, (lo, hi) in enumerate(zip(quarters[:-1], quarters[1:])):
         counts[i] = np.sum((arr >= lo) & (arr < hi))
     total = arr.size
-    
+
     return {
         "split": str(split),
         "vocab_size": vocab_size,
         "id_range": f"[{min_id}, {max_id}]",
         "id_coverage_ratio": float(max_id / max(vocab_size - 1, 1)),
         "quarter_distribution": {
-            f"[{quarters[i]}//[{quarters[i+1]}: {float(counts[i]/total):.4f}" 
+            f"[{quarters[i]}//[{quarters[i+1]}: {float(counts[i]/total):.4f}"
             for i in range(4)
         },
-        "notes": "token id 分布在词表中的位置分布，接近 [0,1] 表示 vocab 被充分利用"
+        "notes": "token id 分布在词表中的位置分布，接近 [0,1] 表示 vocab 被充分利用",
     }
 
 
 def token_sequence_stats(ids) -> dict:
     """计算 token 序列的统计特征，用于诊断 token 流的结构特性。
-    
+
     包括：序列长度统计、重复模式、局部一致性等。
     """
     arr = np.asarray(ids, dtype=np.int64)
     if arr.size == 0:
         return {"tokens": 0, "sequence_stats": None}
-    
+
     n = len(arr)
     # 重复序列诊断：计算相邻 token 相同比例
     repeats = np.sum(arr[1:] == arr[:-1])
     repeat_rate = float(repeats) / max(1, n - 1)
-    
+
     # 局部唯一性：滑动窗口内的唯一度
     window = min(64, n // 10 + 1) if n > 100 else n
     if window > 1 and n >= window:
-        local_unique = np.array([len(np.unique(arr[i:i+window])) 
-                               for i in range(0, n, window)])
+        local_unique = np.array(
+            [len(np.unique(arr[i : i + window])) for i in range(0, n, window)]
+        )
         avg_local_uniqueness = float(np.mean(local_unique)) / window
     else:
         avg_local_uniqueness = 1.0
-    
+
     return {
         "tokens": int(n),
         "adjacent_repeat_rate": repeat_rate,
@@ -230,6 +259,7 @@ def token_sequence_stats(ids) -> dict:
 
 
 # ---------------------------------------------------------------- 泄漏筛查
+
 
 def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
     """采样 n 长 token 窗口的哈希集合（有放回采样，重复可忽略）。
@@ -255,21 +285,20 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
     ids = np.asarray(ids)
     if ids.size:
         if ids.dtype.kind not in "iu":
-            raise ValueError(
-                f"token id 必须是整数流，收到 dtype={ids.dtype}")
+            raise ValueError(f"token id 必须是整数流，收到 dtype={ids.dtype}")
         lo, hi = int(ids.min()), int(ids.max())
         if lo < 0 or hi > 65535:
             raise ValueError(
                 f"token id 越界: [{lo}, {hi}] 不在 uint16 token 范围 "
-                "[0, 65536)，拒绝静默环绕")
+                "[0, 65536)，拒绝静默环绕"
+            )
     L = int(ids.size)
     if L < n:
         return set()
     total = L - n + 1
     rng = np.random.default_rng(seed)
     m = min(n_samples, total)
-    starts = (rng.integers(0, total, size=m) if m < total
-              else np.arange(total))
+    starts = rng.integers(0, total, size=m) if m < total else np.arange(total)
     windows = np.lib.stride_tricks.sliding_window_view(ids, n)
     picked = np.ascontiguousarray(windows[np.asarray(starts, dtype=np.int64)])
     picked = picked.astype(np.uint16, copy=False)
@@ -289,11 +318,9 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
             try:
                 iv = strict_int(value, "ignore_ids")
             except ValueError as e:
-                raise ValueError(
-                    f"ignore_ids 中包含非法 token id: {value!r}") from e
+                raise ValueError(f"ignore_ids 中包含非法 token id: {value!r}") from e
             if iv < 0 or iv > 65535:
-                raise ValueError(
-                    f"ignore_ids 中 token id 越界: {iv} 不在 [0, 65536)")
+                raise ValueError(f"ignore_ids 中 token id 越界: {iv} 不在 [0, 65536)")
             ignore_set.add(iv)
         ignore = np.fromiter(ignore_set, dtype=np.uint16)
         if ignore.size:
@@ -304,8 +331,14 @@ def _window_hashes(ids, n: int, n_samples: int, seed: int, ignore_ids=None):
     return out
 
 
-def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 100000,
-                  seed: int = 0, ignore_ids=None) -> dict:
+def ngram_overlap(
+    train_ids,
+    eval_ids,
+    n: int = 64,
+    n_samples: int = 100000,
+    seed: int = 0,
+    ignore_ids=None,
+) -> dict:
     """采样长 n-gram 哈希筛查 eval 窗口在 train 中出现的比例（泄漏下界指标）。
 
     两侧都采样，因此结果是“采样到的最小重叠”，不是精确上界；>0 即说明存在
@@ -315,24 +348,26 @@ def ngram_overlap(train_ids, eval_ids, n: int = 64, n_samples: int = 100000,
     代价可忽略，覆盖率是 2 万时的 5 倍。
     ignore_ids 见 _window_hashes：字符级 <unk> 不应作为复制证据。
     """
-    train_h = _window_hashes(train_ids, n, n_samples, seed,
-                             ignore_ids=ignore_ids)
-    eval_h = _window_hashes(eval_ids, n, n_samples, seed + 1,
-                            ignore_ids=ignore_ids)
+    train_h = _window_hashes(train_ids, n, n_samples, seed, ignore_ids=ignore_ids)
+    eval_h = _window_hashes(eval_ids, n, n_samples, seed + 1, ignore_ids=ignore_ids)
     if not eval_h:
-        return {"n": int(n),
-                "train_windows_sampled": int(len(train_h)),
-                "eval_windows_sampled": 0,
-                "windows_found_in_train_sample": 0,
-                "overlap_rate": None,
-                "screening": True}
-    hits = len(train_h & eval_h)
-    return {"n": int(n),
+        return {
+            "n": int(n),
             "train_windows_sampled": int(len(train_h)),
-            "eval_windows_sampled": int(len(eval_h)),
-            "windows_found_in_train_sample": int(hits),
-            "overlap_rate": float(hits / len(eval_h)),
-            "screening": True}
+            "eval_windows_sampled": 0,
+            "windows_found_in_train_sample": 0,
+            "overlap_rate": None,
+            "screening": True,
+        }
+    hits = len(train_h & eval_h)
+    return {
+        "n": int(n),
+        "train_windows_sampled": int(len(train_h)),
+        "eval_windows_sampled": int(len(eval_h)),
+        "windows_found_in_train_sample": int(hits),
+        "overlap_rate": float(hits / len(eval_h)),
+        "screening": True,
+    }
 
 
 # 短 n-gram 筛查的默认长度：64-gram（ngram_overlap）是“必须拦截”的强证据，
@@ -366,14 +401,14 @@ def _rolling_window_hashes(ids, n: int, base: int) -> np.ndarray:
     inv_pows[0] = 1
     if length > 1:
         inv_pows[1:] = np.multiply.accumulate(
-            np.full(length - 1, inv_base, dtype=np.uint64))
+            np.full(length - 1, inv_base, dtype=np.uint64)
+        )
     weighted = np.empty(length + 1, dtype=np.uint64)
     weighted[0] = 0
     weighted[1:] = np.add.accumulate(values * inv_pows)
     base_pows = np.empty(length + 1, dtype=np.uint64)
     base_pows[0] = 1
-    base_pows[1:] = np.multiply.accumulate(
-        np.full(length, base, dtype=np.uint64))
+    base_pows[1:] = np.multiply.accumulate(np.full(length, base, dtype=np.uint64))
     prefix = np.empty(length + 1, dtype=np.uint64)
     prefix[0] = 0
     prefix[1:] = base_pows[:length] * weighted[1:]
@@ -381,14 +416,21 @@ def _rolling_window_hashes(ids, n: int, base: int) -> np.ndarray:
 
 
 def _pair_window_hashes(ids, n: int) -> tuple:
-    return (_rolling_window_hashes(ids, n, _EXACT_HASH_BASE1),
-            _rolling_window_hashes(ids, n, _EXACT_HASH_BASE2))
+    return (
+        _rolling_window_hashes(ids, n, _EXACT_HASH_BASE1),
+        _rolling_window_hashes(ids, n, _EXACT_HASH_BASE2),
+    )
 
 
-def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
-                        max_eval_windows: int = 2_000_000,
-                        ignore_ids=None, chunk_tokens: int = 1_000_000,
-                        reference_split: str = "train") -> dict:
+def ngram_overlap_exact(
+    reference_ids,
+    eval_ids,
+    n: int = 64,
+    max_eval_windows: int = 2_000_000,
+    ignore_ids=None,
+    chunk_tokens: int = 1_000_000,
+    reference_split: str = "train",
+) -> dict:
     """全量扫描 reference split 的 n-gram，精确判定 eval 窗口是否出现在其中。
 
     与 ``ngram_overlap`` 的双侧采样不同，本函数对 reference 的所有 n-gram 建
@@ -406,8 +448,10 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
     n = int(n)
     if n <= 0:
         raise ValueError(f"n 必须是正整数，收到 {n!r}")
-    for name, value in (("max_eval_windows", max_eval_windows),
-                        ("chunk_tokens", chunk_tokens)):
+    for name, value in (
+        ("max_eval_windows", max_eval_windows),
+        ("chunk_tokens", chunk_tokens),
+    ):
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
             raise ValueError(f"{name} 必须是正整数，收到 {value!r}")
         if int(value) <= 0:
@@ -416,7 +460,8 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
     chunk_tokens = int(chunk_tokens)
     if reference_split not in ("train", "val", "test"):
         raise ValueError(
-            f"reference_split 必须是 train/val/test，收到 {reference_split!r}")
+            f"reference_split 必须是 train/val/test，收到 {reference_split!r}"
+        )
 
     def _as_token_array(ids, label):
         arr = np.asarray(ids)
@@ -425,12 +470,14 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
         if arr.size:
             if arr.dtype.kind not in "iu":
                 raise ValueError(
-                    f"{label} token id 必须是整数流，收到 dtype={arr.dtype}")
+                    f"{label} token id 必须是整数流，收到 dtype={arr.dtype}"
+                )
             lo, hi = int(arr.min()), int(arr.max())
             if lo < 0 or hi > 65535:
                 raise ValueError(
                     f"{label} token id 越界: [{lo}, {hi}] 不在 uint16 token "
-                    "范围 [0, 65536)，拒绝静默环绕")
+                    "范围 [0, 65536)，拒绝静默环绕"
+                )
         return arr
 
     reference_ids = _as_token_array(reference_ids, reference_split)
@@ -447,11 +494,9 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
             try:
                 iv = strict_int(value, "ignore_ids")
             except ValueError as e:
-                raise ValueError(
-                    f"ignore_ids 中包含非法 token id: {value!r}") from e
+                raise ValueError(f"ignore_ids 中包含非法 token id: {value!r}") from e
             if iv < 0 or iv > 65535:
-                raise ValueError(
-                    f"ignore_ids 中 token id 越界: {iv} 不在 [0, 65536)")
+                raise ValueError(f"ignore_ids 中 token id 越界: {iv} 不在 [0, 65536)")
             ignore_set.add(iv)
 
     reference_total = max(0, int(reference_ids.size) - n + 1)
@@ -472,8 +517,9 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
 
     sampled = eval_available > max_eval_windows
     if sampled:
-        picked = np.linspace(0, eval_available - 1,
-                             num=max_eval_windows).astype(np.int64)
+        picked = np.linspace(0, eval_available - 1, num=max_eval_windows).astype(
+            np.int64
+        )
         starts = starts[picked]
 
     checked = int(starts.size)
@@ -495,10 +541,8 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
             if not candidate.any():
                 continue
             positions = np.flatnonzero(candidate)
-            pairs = np.stack((block_h1[positions], block_h2[positions]),
-                             axis=1)
-            unique_pairs, first = np.unique(
-                pairs, axis=0, return_index=True)
+            pairs = np.stack((block_h1[positions], block_h2[positions]), axis=1)
+            unique_pairs, first = np.unique(pairs, axis=0, return_index=True)
             for row, first_idx in zip(unique_pairs, first):
                 key = (int(row[0]), int(row[1]))
                 if key in resolved:
@@ -512,11 +556,11 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
                 if not matched.size:
                     continue
                 local = int(positions[int(first_idx)])
-                window = block[local:local + n]
+                window = block[local : local + n]
                 for sorted_pos in matched:
                     original = int(order[int(sorted_pos)])
                     start = int(starts[original])
-                    if np.array_equal(eval_ids[start:start + n], window):
+                    if np.array_equal(eval_ids[start : start + n], window):
                         hits[original] = True
 
     found = int(hits.sum())
@@ -537,18 +581,25 @@ def ngram_overlap_exact(reference_ids, eval_ids, n: int = 64,
     }
 
 
-def short_ngram_overlap(train_ids, eval_ids, n: int = SHORT_NGRAM_N,
-                        n_samples: int = 100000, seed: int = 0,
-                        ignore_ids=None) -> dict:
+def short_ngram_overlap(
+    train_ids,
+    eval_ids,
+    n: int = SHORT_NGRAM_N,
+    n_samples: int = 100000,
+    seed: int = 0,
+    ignore_ids=None,
+) -> dict:
     """短 n-gram 重叠诊断（默认 n=32，告警用）。与 ngram_overlap 同口径。"""
-    res = ngram_overlap(train_ids, eval_ids, n=n, n_samples=n_samples, seed=seed,
-                        ignore_ids=ignore_ids)
+    res = ngram_overlap(
+        train_ids, eval_ids, n=n, n_samples=n_samples, seed=seed, ignore_ids=ignore_ids
+    )
     res["diagnostic_only"] = True
     return res
 
 
-def distribution_shift(train_ids, eval_ids, vocab_size: int,
-                       max_samples: int = None, seed: int = 0) -> dict:
+def distribution_shift(
+    train_ids, eval_ids, vocab_size: int, max_samples: int = None, seed: int = 0
+) -> dict:
     """train 与 eval 的一元 token 分布漂移（默认全量精确计数）。
 
     返回 TV 距离、JS 散度（bit）、eval 中 train 未出现的 token 占比（OOV 率）
@@ -571,8 +622,7 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
     else:
         limit = strict_int(max_samples, "max_samples")
         if limit <= 0:
-            raise ValueError(
-                f"max_samples 必须是正整数或 None，收到 {max_samples!r}")
+            raise ValueError(f"max_samples 必须是正整数或 None，收到 {max_samples!r}")
 
     def counts(ids, s):
         arr = np.asarray(ids)
@@ -594,8 +644,8 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
         lo, hi = int(arr.min()), int(arr.max())
         if lo < 0 or hi >= int(vocab_size):
             raise ValueError(
-                f"{s} token id 越界: [{lo}, {hi}] 不在 "
-                f"[0, {vocab_size})")
+                f"{s} token id 越界: [{lo}, {hi}] 不在 " f"[0, {vocab_size})"
+            )
         sampled = limit is not None and limit < L
         if sampled:
             rng = np.random.default_rng(s)
@@ -605,14 +655,19 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
         # 分块计数：内存只与 chunk 和词表大小有关，不随语料线性增长。
         chunk = 5_000_000
         for i in range(0, L, chunk):
-            out += np.bincount(arr[i:i + chunk], minlength=int(vocab_size))
+            out += np.bincount(arr[i : i + chunk], minlength=int(vocab_size))
         return out.astype(np.float64), sampled
 
     c_train, s_train = counts(train_ids, seed)
     c_eval, s_eval = counts(eval_ids, seed + 1)
     if c_train is None or c_eval is None:
-        return {"tv": None, "js_bits": None, "eval_oov_token_rate": None,
-                "top_divergent_token_ids": [], "count_mode": "empty"}
+        return {
+            "tv": None,
+            "js_bits": None,
+            "eval_oov_token_rate": None,
+            "top_divergent_token_ids": [],
+            "count_mode": "empty",
+        }
     p = c_train / max(1.0, c_train.sum())
     q = c_eval / max(1.0, c_eval.sum())
     eps = 1e-12
@@ -628,7 +683,9 @@ def distribution_shift(train_ids, eval_ids, vocab_size: int,
     order = np.argsort(-np.abs(p - q))[:10]
     exact = not (s_train or s_eval)
     return {
-        "tv": tv, "js_bits": js, "eval_oov_token_rate": oov,
+        "tv": tv,
+        "js_bits": js,
+        "eval_oov_token_rate": oov,
         "eval_oov_token_count": int(c_eval[c_train == 0].sum()),
         "top_divergent_token_ids": [int(i) for i in order],
         "count_mode": "exact" if exact else "sampled",
@@ -682,8 +739,11 @@ def _pick_boundary(text: str, target: int, window: int):
             if pos <= 0 or pos >= len(text):
                 continue
             score = (abs(pos - target) - slack * window, pos, kind)
-            if best is None or score[0] < best[0] or (
-                    score[0] == best[0] and score[1] < best[1]):
+            if (
+                best is None
+                or score[0] < best[0]
+                or (score[0] == best[0] and score[1] < best[1])
+            ):
                 best = score
     if best is None:
         return None, None
@@ -721,9 +781,13 @@ def _nearest_paragraph_in_range(paragraphs, target: int, lo: int, hi: int):
     return min(cands, key=lambda p: (abs(p - target), p))
 
 
-def temporal_split_text(text: str, train_frac: float = 0.8,
-                        val_frac: float = 0.1, window_frac: float = 0.02,
-                        min_gap: int = 1):
+def temporal_split_text(
+    text: str,
+    train_frac: float = 0.8,
+    val_frac: float = 0.1,
+    window_frac: float = 0.02,
+    min_gap: int = 1,
+):
     """连续文本的时序划分：train=最早、val=其后、test=最新（绝不随机打乱）。
 
     切点优先落在文档边界（WikiText 标题行 > 空行段落 > 换行），搜索窗口为
@@ -745,8 +809,11 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     # 比例必须能保证三个 split 都非空：负值/零/和 >=1/NaN/Inf 都会被
     # max(1,...) 与 min(n-1,...) 静默夹成看似合法的错误切分。
     ratios = {}
-    for name, value in (("train_frac", train_frac), ("val_frac", val_frac),
-                        ("window_frac", window_frac)):
+    for name, value in (
+        ("train_frac", train_frac),
+        ("val_frac", val_frac),
+        ("window_frac", window_frac),
+    ):
         if isinstance(value, (bool, np.bool_)):
             raise ValueError(f"{name} 必须是数值比例，收到 bool {value!r}")
         if isinstance(value, str) and "_" in value:
@@ -790,15 +857,12 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
     p2, k2 = _pick_boundary(text, t2, window)
     # 同理：窗口内命中的标题若离 p1 太近（<= p1+min_gap，val 会被压空/切序
     # 倒置），也要换到 [p1+min_gap, n-1] 里最近的标题。
-    if heads and (p2 is None or k2 != "heading"
-                  or p2 <= (p1 or 0) + min_gap):
+    if heads and (p2 is None or k2 != "heading" or p2 <= (p1 or 0) + min_gap):
         h = _nearest_heading_in_range(heads, t2, (p1 or 0) + min_gap, n - 1)
         if h is not None:
             p2, k2 = h, "heading"
-    elif paragraphs and (p2 is None or k2 != "blank"
-                         or p2 <= (p1 or 0) + min_gap):
-        h = _nearest_paragraph_in_range(paragraphs, t2,
-                                        (p1 or 0) + min_gap, n - 1)
+    elif paragraphs and (p2 is None or k2 != "blank" or p2 <= (p1 or 0) + min_gap):
+        h = _nearest_paragraph_in_range(paragraphs, t2, (p1 or 0) + min_gap, n - 1)
         if h is not None:
             p2, k2 = h, "blank"
     fallback = False
@@ -816,10 +880,10 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         raise ValueError("时序划分产生了空 split，请检查文本长度与划分比例")
     heading_set = set(heads)
     paragraph_set = set(paragraphs)
-    documents_cross = bool(heads) and (p1 not in heading_set
-                                       or p2 not in heading_set)
+    documents_cross = bool(heads) and (p1 not in heading_set or p2 not in heading_set)
     paragraphs_cross = bool(paragraphs) and (
-        p1 not in paragraph_set or p2 not in paragraph_set)
+        p1 not in paragraph_set or p2 not in paragraph_set
+    )
     if heads:
         group_unit = "heading_document"
     elif paragraphs:
@@ -840,20 +904,23 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         "test": float(len(test_text) / n),
     }
     fraction_deviation = {
-        k: float(actual_fractions[k] - target_fractions[k])
-        for k in target_fractions}
+        k: float(actual_fractions[k] - target_fractions[k]) for k in target_fractions
+    }
     info = {
         "order": "temporal:train(earliest)->val->test(latest)",
-        "cut_offsets": [int(p1), int(p2)], "cut_kinds": [str(k1), str(k2)],
+        "cut_offsets": [int(p1), int(p2)],
+        "cut_kinds": [str(k1), str(k2)],
         "target_offsets": [int(t1), int(t2)],
         "cut_deviation_chars": [int(p1 - t1), int(p2 - t2)],
-        "window_chars": int(window), "fallback_char_cut": bool(fallback),
+        "window_chars": int(window),
+        "fallback_char_cut": bool(fallback),
         "shuffled": False,
         "target_fractions": target_fractions,
         "actual_fractions": actual_fractions,
         "fraction_deviation": fraction_deviation,
         "max_abs_fraction_deviation": float(
-            max(abs(v) for v in fraction_deviation.values())),
+            max(abs(v) for v in fraction_deviation.values())
+        ),
         "fraction_tolerance": float(SPLIT_FRACTION_TOLERANCE),
         # 群组自检：标题定义文档、空行定义段落；为 True 表示群组跨了切点
         "n_headings": int(len(heads)),
@@ -861,9 +928,10 @@ def temporal_split_text(text: str, train_frac: float = 0.8,
         "documents_cross_cut": bool(documents_cross),
         "paragraphs_cross_cut": bool(paragraphs_cross),
         "group_unit": group_unit,
-        "lengths_chars": {"train": len(train_text), "val": len(val_text),
-                          "test": len(test_text)},
+        "lengths_chars": {
+            "train": len(train_text),
+            "val": len(val_text),
+            "test": len(test_text),
+        },
     }
     return train_text, val_text, test_text, info
-
-

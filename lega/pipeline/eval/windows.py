@@ -1,7 +1,9 @@
 """PPL 窗口级配对与 bootstrap。"""
+
 from .._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def _eval_window_losses(d):
     """eval payload → {window_index: loss}；缺失/损坏/重复序号返回 None。
@@ -15,8 +17,12 @@ def _eval_window_losses(d):
         return None
     losses = d.get("window_losses")
     indices = d.get("window_indices")
-    if (not isinstance(losses, list) or not isinstance(indices, list)
-            or not losses or len(losses) != len(indices)):
+    if (
+        not isinstance(losses, list)
+        or not isinstance(indices, list)
+        or not losses
+        or len(losses) != len(indices)
+    ):
         return None
     out = {}
     for loss, idx in zip(losses, indices):
@@ -40,11 +46,10 @@ def _trimmed_mean(values, fraction: float = 0.10):
     if 2 * k >= arr.size:
         return float(np.median(arr))
     arr = np.sort(arr)
-    return float(arr[k:arr.size - k].mean())
+    return float(arr[k : arr.size - k].mean())
 
 
-def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
-                            seed: int = 0) -> dict:
+def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000, seed: int = 0) -> dict:
     """逐窗口配对差的分层 bootstrap（先重采样种子、再重采样窗口）。
 
     输入 seed_diffs 是每个种子的窗口差数组；返回平均差、百分位区间、
@@ -73,7 +78,7 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
     if seed < 0:
         raise ValueError(f"seed 必须 >= 0，收到 {seed!r}")
     arrays = []
-    for d in (seed_diffs or []):
+    for d in seed_diffs or []:
         arr = np.asarray(d, dtype=np.float64).ravel()
         # 窗口差应由调用方保证有限；这里仍独立过滤，避免直接调用方把
         # NaN/Inf 送进均值后让整份探索性证据变成 NaN。
@@ -97,20 +102,17 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
         return None
 
     quantile_levels = (0.10, 0.25, 0.50, 0.75, 0.90)
-    obs_median_scaled = float(np.mean(
-        [float(np.median(d)) for d in arrays_scaled]))
-    obs_trimmed_scaled = float(np.mean(
-        [_trimmed_mean(d, 0.10) for d in arrays_scaled]))
-    obs_win_rate = float(np.mean(
-        [float(np.mean(d < 0.0)) for d in arrays_scaled]))
-    obs_loss_rate = float(np.mean(
-        [float(np.mean(d > 0.0)) for d in arrays_scaled]))
-    obs_tie_rate = float(np.mean(
-        [float(np.mean(d == 0.0)) for d in arrays_scaled]))
+    obs_median_scaled = float(np.mean([float(np.median(d)) for d in arrays_scaled]))
+    obs_trimmed_scaled = float(np.mean([_trimmed_mean(d, 0.10) for d in arrays_scaled]))
+    obs_win_rate = float(np.mean([float(np.mean(d < 0.0)) for d in arrays_scaled]))
+    obs_loss_rate = float(np.mean([float(np.mean(d > 0.0)) for d in arrays_scaled]))
+    obs_tie_rate = float(np.mean([float(np.mean(d == 0.0)) for d in arrays_scaled]))
     obs_quantiles_scaled = {
-        f"p{int(round(q * 100))}": float(np.mean(
-            [float(np.quantile(d, q)) for d in arrays_scaled]))
-        for q in quantile_levels}
+        f"p{int(round(q * 100))}": float(
+            np.mean([float(np.quantile(d, q)) for d in arrays_scaled])
+        )
+        for q in quantile_levels
+    }
 
     rng = np.random.default_rng(seed)
     reps_scaled = np.empty(int(n_resamples), dtype=np.float64)
@@ -151,15 +153,18 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
     if lo is None:
         return None
     ge = int((np.abs(reps_scaled - obs_scaled) >= abs(obs_scaled)).sum())
-    p_boot = (((ge + 1) / (int(n_resamples) + 1))
-              if obs_scaled != 0 else 1.0)
-    same_sign = (float(np.mean((reps_scaled > 0) == (obs_scaled > 0)))
-                 if obs_scaled != 0 else 0.0)
+    p_boot = ((ge + 1) / (int(n_resamples) + 1)) if obs_scaled != 0 else 1.0
+    same_sign = (
+        float(np.mean((reps_scaled > 0) == (obs_scaled > 0)))
+        if obs_scaled != 0
+        else 0.0
+    )
 
     # 移动块 bootstrap：块内保留窗口顺序/相邻相关，块间独立。块长用
     # n^(1/3) 的经验规则；n<4 时块长 1（等价于 i.i.d. 重采样）。
     def _block_len(n):
         return max(1, int(round(int(n) ** (1.0 / 3.0)))) if n >= 4 else 1
+
     block_lengths = [_block_len(d.size) for d in arrays_scaled]
     block_reps_scaled = np.empty(int(n_resamples), dtype=np.float64)
     block_reps_median_scaled = np.empty(int(n_resamples), dtype=np.float64)
@@ -176,8 +181,8 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
             else:
                 n_blocks = (d.size + bl - 1) // bl
                 starts = rng.integers(0, d.size, n_blocks)
-                idx = ((starts[:, None] + np.arange(bl)[None, :]) % d.size)
-                idx = idx.reshape(-1)[:d.size]
+                idx = (starts[:, None] + np.arange(bl)[None, :]) % d.size
+                idx = idx.reshape(-1)[: d.size]
             sample = d[idx]
             means.append(float(sample.mean()))
             medians.append(float(np.median(sample)))
@@ -195,10 +200,12 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
     if not (math.isfinite(b_lo) and math.isfinite(b_hi)):
         return None
     b_ge = int((np.abs(block_reps_scaled - obs_scaled) >= abs(obs_scaled)).sum())
-    p_block = (((b_ge + 1) / (int(n_resamples) + 1))
-               if obs_scaled != 0 else 1.0)
-    b_same_sign = (float(np.mean((block_reps_scaled > 0) == (obs_scaled > 0)))
-                   if obs_scaled != 0 else 0.0)
+    p_block = ((b_ge + 1) / (int(n_resamples) + 1)) if obs_scaled != 0 else 1.0
+    b_same_sign = (
+        float(np.mean((block_reps_scaled > 0) == (obs_scaled > 0)))
+        if obs_scaled != 0
+        else 0.0
+    )
     lag1 = []
     for d in arrays:
         if d.size >= 3:
@@ -214,36 +221,42 @@ def _window_bootstrap_stats(seed_diffs, n_resamples: int = 2000,
                 if math.isfinite(v):
                     lag1.append(v)
     return {
-        "mean_diff": obs, "mean_diff_ci95": [lo, hi],
-        "p": p_boot, "bootstrap_same_sign": same_sign,
+        "mean_diff": obs,
+        "mean_diff_ci95": [lo, hi],
+        "p": p_boot,
+        "bootstrap_same_sign": same_sign,
         "median_diff": float(obs_median_scaled * scale),
         "median_diff_ci95": _scaled_interval(reps_median_scaled),
         "block_median_diff_ci95": _scaled_interval(block_reps_median_scaled),
         "trimmed_mean_diff_10pct": float(obs_trimmed_scaled * scale),
         "trimmed_mean_diff_10pct_ci95": _scaled_interval(reps_trimmed_scaled),
         "block_trimmed_mean_diff_10pct_ci95": _scaled_interval(
-            block_reps_trimmed_scaled),
+            block_reps_trimmed_scaled
+        ),
         "window_win_rate": obs_win_rate,
         "window_loss_rate": obs_loss_rate,
         "window_tie_rate": obs_tie_rate,
         "window_win_rate_ci95": _rate_interval(reps_win_rate),
         "block_window_win_rate_ci95": _rate_interval(block_reps_win_rate),
         "diff_quantiles": {
-            key: float(value * scale)
-            for key, value in obs_quantiles_scaled.items()},
+            key: float(value * scale) for key, value in obs_quantiles_scaled.items()
+        },
         "block_mean_diff_ci95": [b_lo, b_hi],
-        "block_p": p_block, "block_bootstrap_same_sign": b_same_sign,
+        "block_p": p_block,
+        "block_bootstrap_same_sign": b_same_sign,
         "block_length_min": int(min(block_lengths)),
         "block_length_max": int(max(block_lengths)),
         "mean_lag1_autocorr": (float(np.mean(lag1)) if lag1 else None),
         "n_resamples": int(n_resamples),
         "n_seeds": n_seeds,
         "n_windows_min": int(min(d.size for d in arrays)),
-        "n_windows_max": int(max(d.size for d in arrays))}
+        "n_windows_max": int(max(d.size for d in arrays)),
+    }
 
 
-def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
-                             seed: int = 0) -> list:
+def _ppl_window_paired_tests(
+    runs, pairs, n_resamples: int = 2000, seed: int = 0
+) -> list:
     """逐窗口配对 + 种子/窗口分层 bootstrap（探索性评估不确定性证据）。
 
     变体的跨种子 t 检验把“每个种子的 PPL”当作一次观测，只反映训练随机性；
@@ -258,7 +271,7 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
     """
     out = []
     runs = runs if isinstance(runs, dict) else {}
-    for cand, ref in (pairs if isinstance(pairs, list) else []):
+    for cand, ref in pairs if isinstance(pairs, list) else []:
         if cand not in runs or ref not in runs:
             continue
         cm = _variant_seed_map(runs, cand)
@@ -304,14 +317,16 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             # diffs 逐元素有限，但同号巨大值相加会溢出；与分层 bootstrap
             # 同口径用缩放后的稳定均值，避免 per_seed 明细出现 inf。
             seed_mean, _ = mean_std(diffs)
-            per_seed.append({
-                "seed": _integral_value(s),
-                "n_windows": int(diffs.size),
-                "mean_diff": seed_mean,
-                "window_wins": int((diffs < 0).sum()),
-                "window_losses": int((diffs > 0).sum()),
-                "window_ties": int((diffs == 0).sum()),
-            })
+            per_seed.append(
+                {
+                    "seed": _integral_value(s),
+                    "n_windows": int(diffs.size),
+                    "mean_diff": seed_mean,
+                    "window_wins": int((diffs < 0).sum()),
+                    "window_losses": int((diffs > 0).sum()),
+                    "window_ties": int((diffs == 0).sum()),
+                }
+            )
         if not seed_diffs:
             continue
         n_seeds = len(seed_diffs)
@@ -322,8 +337,9 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
         variance = None
         if window_keys_aligned and n_seeds >= 2 and min(window_counts) >= 2:
             variance = two_way_variance_components(seed_diffs)
-        enough = (n_seeds >= MIN_PPL_WINDOW_SEEDS
-                  and min(window_counts) >= MIN_PPL_WINDOWS)
+        enough = (
+            n_seeds >= MIN_PPL_WINDOW_SEEDS and min(window_counts) >= MIN_PPL_WINDOWS
+        )
 
         def _sign(value):
             if value is None:
@@ -331,39 +347,55 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             return 1 if value > 0.0 else (-1 if value < 0.0 else 0)
 
         def _excludes_zero(ci):
-            return bool(ci and ci[0] is not None and ci[1] is not None
-                        and ((ci[0] > 0.0 and ci[1] > 0.0)
-                             or (ci[0] < 0.0 and ci[1] < 0.0)))
+            return bool(
+                ci
+                and ci[0] is not None
+                and ci[1] is not None
+                and ((ci[0] > 0.0 and ci[1] > 0.0) or (ci[0] < 0.0 and ci[1] < 0.0))
+            )
 
         mean_sign = _sign(obs)
         median_sign = _sign(stats.get("median_diff"))
         trimmed_sign = _sign(stats.get("trimmed_mean_diff_10pct"))
-        nonzero_signs = {s for s in (mean_sign, median_sign, trimmed_sign)
-                         if s is not None and s != 0}
+        nonzero_signs = {
+            s
+            for s in (mean_sign, median_sign, trimmed_sign)
+            if s is not None and s != 0
+        }
         direction_consistent = len(nonzero_signs) <= 1
         majority = None
         if obs is not None and obs != 0.0:
             majority = bool(
-                (stats.get("window_win_rate", 0.0) > 0.5) if obs < 0.0
-                else (stats.get("window_loss_rate", 0.0) > 0.5))
+                (stats.get("window_win_rate", 0.0) > 0.5)
+                if obs < 0.0
+                else (stats.get("window_loss_rate", 0.0) > 0.5)
+            )
         mean_ci_sig = _excludes_zero(stats.get("mean_diff_ci95"))
         median_ci_sig = _excludes_zero(stats.get("median_diff_ci95"))
         outlier_sensitive = bool(
-            enough and mean_ci_sig
-            and (not direction_consistent
-                 or majority is False
-                 or not median_ci_sig))
+            enough
+            and mean_ci_sig
+            and (not direction_consistent or majority is False or not median_ci_sig)
+        )
         broad_based = bool(
-            enough and mean_ci_sig and median_ci_sig
-            and direction_consistent and majority is True)
+            enough
+            and mean_ci_sig
+            and median_ci_sig
+            and direction_consistent
+            and majority is True
+        )
         window_wins_total = int(sum((d < 0.0).sum() for d in seed_diffs))
         window_losses_total = int(sum((d > 0.0).sum() for d in seed_diffs))
         window_ties_total = int(sum((d == 0.0).sum() for d in seed_diffs))
         res = {
-            "candidate": cand, "reference": ref,
-            "metric": "PPL窗口配对", "lower_is_better": True,
-            "window_level": True, "exploratory": True,
-            "n": n_seeds, "n_seeds": n_seeds,
+            "candidate": cand,
+            "reference": ref,
+            "metric": "PPL窗口配对",
+            "lower_is_better": True,
+            "window_level": True,
+            "exploratory": True,
+            "n": n_seeds,
+            "n_seeds": n_seeds,
             "n_windows_min": min(window_counts),
             "n_windows_max": max(window_counts),
             "n_window_observations": int(sum(d.size for d in seed_diffs)),
@@ -376,20 +408,17 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "mean_diff_ci95": stats["mean_diff_ci95"],
             "median_diff": stats.get("median_diff"),
             "median_diff_ci95": stats.get("median_diff_ci95"),
-            "block_median_diff_ci95": stats.get(
-                "block_median_diff_ci95"),
-            "trimmed_mean_diff_10pct": stats.get(
-                "trimmed_mean_diff_10pct"),
-            "trimmed_mean_diff_10pct_ci95": stats.get(
-                "trimmed_mean_diff_10pct_ci95"),
+            "block_median_diff_ci95": stats.get("block_median_diff_ci95"),
+            "trimmed_mean_diff_10pct": stats.get("trimmed_mean_diff_10pct"),
+            "trimmed_mean_diff_10pct_ci95": stats.get("trimmed_mean_diff_10pct_ci95"),
             "block_trimmed_mean_diff_10pct_ci95": stats.get(
-                "block_trimmed_mean_diff_10pct_ci95"),
+                "block_trimmed_mean_diff_10pct_ci95"
+            ),
             "window_win_rate": stats.get("window_win_rate"),
             "window_loss_rate": stats.get("window_loss_rate"),
             "window_tie_rate": stats.get("window_tie_rate"),
             "window_win_rate_ci95": stats.get("window_win_rate_ci95"),
-            "block_window_win_rate_ci95": stats.get(
-                "block_window_win_rate_ci95"),
+            "block_window_win_rate_ci95": stats.get("block_window_win_rate_ci95"),
             "window_wins_total": window_wins_total,
             "window_losses_total": window_losses_total,
             "window_ties_total": window_ties_total,
@@ -398,22 +427,29 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
                 "mean_ci_excludes_zero": bool(mean_ci_sig),
                 "median_ci_excludes_zero": bool(median_ci_sig),
                 "mean_median_same_sign": (
-                    None if mean_sign is None or median_sign is None
-                    else bool(mean_sign == median_sign)),
+                    None
+                    if mean_sign is None or median_sign is None
+                    else bool(mean_sign == median_sign)
+                ),
                 "mean_trimmed_same_sign": (
-                    None if mean_sign is None or trimmed_sign is None
-                    else bool(mean_sign == trimmed_sign)),
+                    None
+                    if mean_sign is None or trimmed_sign is None
+                    else bool(mean_sign == trimmed_sign)
+                ),
                 "direction_consistent": bool(direction_consistent),
                 "majority_windows_in_mean_direction": majority,
                 "outlier_sensitive": outlier_sensitive,
                 "broad_based": broad_based,
-                "note": ("均值、中位数、10% 截尾均值与逐窗口胜负用于"
-                         "区分“普遍改善”与“少数窗口驱动”。"
-                         "outlier_sensitive=True 表示均值方向与稳健统计"
-                         "不一致、或多数窗口未朝均值方向改善；"
-                         "broad_based=True 表示均值/中位数/截尾均值同向、"
-                         "中位数区间不含 0 且多数窗口同向。"
-                         "两者均为描述性标记，不改变显著性判定。")},
+                "note": (
+                    "均值、中位数、10% 截尾均值与逐窗口胜负用于"
+                    "区分“普遍改善”与“少数窗口驱动”。"
+                    "outlier_sensitive=True 表示均值方向与稳健统计"
+                    "不一致、或多数窗口未朝均值方向改善；"
+                    "broad_based=True 表示均值/中位数/截尾均值同向、"
+                    "中位数区间不含 0 且多数窗口同向。"
+                    "两者均为描述性标记，不改变显著性判定。"
+                ),
+            },
             "block_mean_diff_ci95": stats.get("block_mean_diff_ci95"),
             "block_p": stats.get("block_p"),
             "block_bootstrap_same_sign": stats.get("block_bootstrap_same_sign"),
@@ -421,16 +457,19 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
             "block_length_max": stats.get("block_length_max"),
             "mean_lag1_autocorr": stats.get("mean_lag1_autocorr"),
             "ppl_ratio": float(math.exp(min(20.0, obs))),
-            "p": stats["p"], "p_adj": None,
+            "p": stats["p"],
+            "p_adj": None,
             "bootstrap_same_sign": stats["bootstrap_same_sign"],
             "n_resamples": int(n_resamples),
             "per_seed": per_seed,
             "verdict": None,
-            "note": ("逐窗口 NLL 差（候选−参照），负值=候选更好；"
-                     "分层 bootstrap 同时重采样种子与窗口；i.i.d. 口径忽略"
-                     "窗口相关，block_* 为移动块重采样（块长 n^(1/3)）的"
-                     "稳健性对照；variance_components 把方差分解为种子/"
-                     "窗口/残差三部分。以上均为探索性证据"),
+            "note": (
+                "逐窗口 NLL 差（候选−参照），负值=候选更好；"
+                "分层 bootstrap 同时重采样种子与窗口；i.i.d. 口径忽略"
+                "窗口相关，block_* 为移动块重采样（块长 n^(1/3)）的"
+                "稳健性对照；variance_components 把方差分解为种子/"
+                "窗口/残差三部分。以上均为探索性证据"
+            ),
         }
         if skipped:
             res["excluded_runs"] = skipped
@@ -439,22 +478,27 @@ def _ppl_window_paired_tests(runs, pairs, n_resamples: int = 2000,
     for t, padj in zip(out, pads):
         t["p_adj"] = padj
         ci = t.get("mean_diff_ci95")
-        ci_s = (f"，95% CI [{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "")
+        ci_s = f"，95% CI [{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else ""
         if t.get("mean_diff") is None or padj is None:
             t["verdict"] = "无法检验"
         elif not t.get("enough_windows"):
-            t["verdict"] = (f"证据不足（种子 {t['n_seeds']}，每种子窗口 "
-                            f"{t['n_windows_min']}–{t['n_windows_max']}；"
-                            f"最低 {MIN_PPL_WINDOW_SEEDS} 种子×"
-                            f"{MIN_PPL_WINDOWS} 窗口），仅报点估计{ci_s}")
+            t["verdict"] = (
+                f"证据不足（种子 {t['n_seeds']}，每种子窗口 "
+                f"{t['n_windows_min']}–{t['n_windows_max']}；"
+                f"最低 {MIN_PPL_WINDOW_SEEDS} 种子×"
+                f"{MIN_PPL_WINDOWS} 窗口），仅报点估计{ci_s}"
+            )
         elif padj < ALPHA:
-            t["verdict"] = ("窗口级显著优于（Holm 校正后）"
-                            if t["mean_diff"] < 0 else
-                            "窗口级显著劣于（Holm 校正后）")
+            t["verdict"] = (
+                "窗口级显著优于（Holm 校正后）"
+                if t["mean_diff"] < 0
+                else "窗口级显著劣于（Holm 校正后）"
+            )
         else:
-            t["verdict"] = (f"窗口级无显著差异（Holm 校正后 p={padj:.4f}"
-                            f"{ci_s}）")
+            t["verdict"] = f"窗口级无显著差异（Holm 校正后 p={padj:.4f}" f"{ci_s}）"
         if (t.get("robustness") or {}).get("outlier_sensitive"):
-            t["verdict"] += ("；⚠ 窗口级稳健性：均值改善与中位数/截尾均值"
-                             "方向不一致或多数窗口未同向，可能由少数窗口驱动")
+            t["verdict"] += (
+                "；⚠ 窗口级稳健性：均值改善与中位数/截尾均值"
+                "方向不一致或多数窗口未同向，可能由少数窗口驱动"
+            )
     return out

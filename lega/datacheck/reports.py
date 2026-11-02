@@ -1,8 +1,10 @@
 """测试集访问账本与数据报告组装。"""
+
 from ..ledger import chain_record, verify_chain
 from ._shared import _install as _shared_install
 
 _shared_install(globals())
+
 
 def read_test_access_log(data_dir: str) -> list:
     path = os.path.join(data_dir, TEST_ACCESS_LOG)
@@ -67,8 +69,11 @@ def summarize_test_access(records) -> dict:
     """
     # 账本可能损坏成 bool/数字（JSON null/true）；不能对非可迭代对象做
     # 列表推导，否则一个坏文件会让评测入口在写访问账本时崩溃。
-    records = ([r for r in records if isinstance(r, dict)]
-               if isinstance(records, (list, tuple)) else [])
+    records = (
+        [r for r in records if isinstance(r, dict)]
+        if isinstance(records, (list, tuple))
+        else []
+    )
     counts = {}
     versions = set()
     looks = {}
@@ -105,11 +110,13 @@ def summarize_test_access(records) -> dict:
         prefix = c[:16]
         if prefix not in repeated:
             repeated.append(prefix)
-        repeated_details.append({
-            "ckpt_prefix": prefix,
-            "test_data_fingerprint": ver,
-            "evaluations": int(n),
-        })
+        repeated_details.append(
+            {
+                "ckpt_prefix": prefix,
+                "test_data_fingerprint": ver,
+                "evaluations": int(n),
+            }
+        )
     ckpts = {c for c, _ in counts}
     return {
         "evaluations": int(len(records)),
@@ -120,9 +127,11 @@ def summarize_test_access(records) -> dict:
         "distinct_test_data_versions": int(len(versions)),
         "test_data_fingerprints": sorted(versions),
         "looks_by_test_data_fingerprint": {
-            ver: sorted(ids) for ver, ids in sorted(looks.items())},
+            ver: sorted(ids) for ver, ids in sorted(looks.items())
+        },
         "unattributed_records_by_test_data_fingerprint": {
-            ver: int(n) for ver, n in sorted(unattributed.items())},
+            ver: int(n) for ver, n in sorted(unattributed.items())
+        },
         "distinct_pipeline_runs": int(len(run_ids_all)),
         "records_without_pipeline_run_id": int(without_run_id),
         "records_without_test_data_fingerprint": int(without_fingerprint),
@@ -140,14 +149,21 @@ def summarize_test_access(records) -> dict:
 # 与开放集/结构不同分布下的经验值一致（可通过 extra_report 覆盖记录）。
 
 
-def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
-                   contamination: dict, distribution: dict,
-                   text_stats: dict = None, thresholds: dict = None) -> list:
+def leakage_alerts(
+    tokenizer: dict,
+    sanitization: dict,
+    duplicates: dict,
+    contamination: dict,
+    distribution: dict,
+    text_stats: dict = None,
+    thresholds: dict = None,
+) -> list:
     """把防泄漏/清洗诊断转成显式告警（供打印与汇总页展示）。
 
     返回 [{"level": "warning"|"info", "code": ..., "message": ...}]。
     没有告警时返回空列表——"无告警"与"没有自检"是两回事，后者由报告缺失表示。
     """
+
     def _num(v):
         if isinstance(v, (bool, np.bool_)):
             return None
@@ -181,123 +197,162 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         alerts.append({"level": level, "code": code, "message": message})
 
     contamination = contamination if isinstance(contamination, dict) else {}
-    for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
-                       ("val_test", "val/test")):
+    for key, label in (
+        ("train_val", "train/val"),
+        ("train_test", "train/test"),
+        ("val_test", "val/test"),
+    ):
         c = contamination.get(key)
         c = c if isinstance(c, dict) else {}
         rate = _num(c.get("overlap_rate"))
         if rate is not None and rate > th["ngram_overlap_rate"]:
-            add("warning", f"ngram_overlap_{key}",
+            add(
+                "warning",
+                f"ngram_overlap_{key}",
                 f"{label} 采样 {c.get('n', '?')}-gram 重叠率 {rate:.4%}"
-                "（>0 表示疑似跨 split 语料复制，须人工核查）")
+                "（>0 表示疑似跨 split 语料复制，须人工核查）",
+            )
     distribution = distribution if isinstance(distribution, dict) else {}
-    for key, label in (("val_vs_train", "val−train"),
-                       ("test_vs_train", "test−train"),
-                       ("test_vs_val", "test−val")):
+    for key, label in (
+        ("val_vs_train", "val−train"),
+        ("test_vs_train", "test−train"),
+        ("test_vs_val", "test−val"),
+    ):
         d = distribution.get(key)
         d = d if isinstance(d, dict) else {}
         tv, js = _num(d.get("tv")), _num(d.get("js_bits"))
         if tv is not None and tv > th["distribution_tv"]:
-            add("warning", f"distribution_tv_{key}",
+            add(
+                "warning",
+                f"distribution_tv_{key}",
                 f"{label} 一元 token TV 距离 {tv:.4f} > "
-                f"{th['distribution_tv']}（分布漂移明显，结论外推需谨慎）")
+                f"{th['distribution_tv']}（分布漂移明显，结论外推需谨慎）",
+            )
         if js is not None and js > th["distribution_js_bits"]:
-            add("warning", f"distribution_js_{key}",
-                f"{label} JS 散度 {js:.4f} bit > {th['distribution_js_bits']}")
+            add(
+                "warning",
+                f"distribution_js_{key}",
+                f"{label} JS 散度 {js:.4f} bit > {th['distribution_js_bits']}",
+            )
         oov = _num(d.get("eval_oov_token_rate"))
         if oov is not None and oov > th["eval_oov_token_rate"]:
-            add("warning", f"eval_oov_{key}",
+            add(
+                "warning",
+                f"eval_oov_{key}",
                 f"{label} 方向 OOV token 质量占比 {oov:.4%} > "
-                f"{th['eval_oov_token_rate']}")
+                f"{th['eval_oov_token_rate']}",
+            )
     tokenizer = tokenizer if isinstance(tokenizer, dict) else {}
     unk_rate = tokenizer.get("unk_rate")
     for split, rate in (unk_rate if isinstance(unk_rate, dict) else {}).items():
         rate = _num(rate)
         if rate is not None and rate > th["eval_unk_char_rate"]:
-            add("warning", f"unk_char_rate_{split}",
+            add(
+                "warning",
+                f"unk_char_rate_{split}",
                 f"{split} 字符级 OOV 率 {rate:.4%} > "
-                f"{th['eval_unk_char_rate']}（该 split 有较多字符映射 <unk>）")
+                f"{th['eval_unk_char_rate']}（该 split 有较多字符映射 <unk>）",
+            )
     sanitization = sanitization if isinstance(sanitization, dict) else {}
     for split, st in sanitization.items():
         st = st if isinstance(st, dict) else {}
         rate = _num(st.get("bad_char_line_rate"))
         if rate is not None and rate > th["bad_char_line_rate"]:
-            add("warning", f"bad_char_lines_{split}",
+            add(
+                "warning",
+                f"bad_char_lines_{split}",
                 f"{split} 含坏字符行占比 {rate:.4%} > "
-                f"{th['bad_char_line_rate']}（标签噪声偏高，建议回查语料）")
+                f"{th['bad_char_line_rate']}（标签噪声偏高，建议回查语料）",
+            )
     dup = duplicates if isinstance(duplicates, dict) else {}
     n_exact = _count(dup.get("train_lines_dropped_as_duplicates_of_eval"))
-    n_norm = _count(
-        dup.get("train_lines_dropped_as_normalized_duplicates_of_eval"))
+    n_norm = _count(dup.get("train_lines_dropped_as_normalized_duplicates_of_eval"))
     if n_exact or n_norm:
-        add("info", "decontamination_applied",
+        add(
+            "info",
+            "decontamination_applied",
             f"已从 train 移除与 val/test 重复的长行：精确 {n_exact} 行、"
-            f"空白归一化后额外 {n_norm} 行（val/test 未改写）")
-    n_train_dup = _count(
-        dup.get("train_intra_split_duplicate_lines_removed"))
+            f"空白归一化后额外 {n_norm} 行（val/test 未改写）",
+        )
+    n_train_dup = _count(dup.get("train_intra_split_duplicate_lines_removed"))
     n_train_dup_norm = _count(
-        dup.get("train_intra_split_normalized_duplicate_lines_removed"))
+        dup.get("train_intra_split_normalized_duplicate_lines_removed")
+    )
     if n_train_dup or n_train_dup_norm:
-        add("info", "train_intra_duplicates_removed",
+        add(
+            "info",
+            "train_intra_duplicates_removed",
             f"已从 train 移除内部重复长行：精确 {n_train_dup} 行、"
-            f"空白归一化后额外 {n_train_dup_norm} 行（保留首次出现）")
+            f"空白归一化后额外 {n_train_dup_norm} 行（保留首次出现）",
+        )
     n_short_tv = _count(dup.get("train_val_overlap_short_lines"))
     n_short_tt = _count(dup.get("train_test_overlap_short_lines"))
     n_short_vt = _count(dup.get("val_test_overlap_short_lines"))
-    n_short_tv_norm = _count(
-        dup.get("train_val_overlap_normalized_short_lines"))
-    n_short_tt_norm = _count(
-        dup.get("train_test_overlap_normalized_short_lines"))
-    n_short_vt_norm = _count(
-        dup.get("val_test_overlap_normalized_short_lines"))
+    n_short_tv_norm = _count(dup.get("train_val_overlap_normalized_short_lines"))
+    n_short_tt_norm = _count(dup.get("train_test_overlap_normalized_short_lines"))
+    n_short_vt_norm = _count(dup.get("val_test_overlap_normalized_short_lines"))
     if n_short_tv or n_short_tt or n_short_tv_norm or n_short_tt_norm:
-        add("warning", "short_line_cross_split_overlap",
+        add(
+            "warning",
+            "short_line_cross_split_overlap",
             f"短行（<{dup.get('min_chars', '?')} 字符）跨 split 重复："
             f"train/val 精确 {n_short_tv} 行、train/test 精确 {n_short_tt} 行"
             f"（空白归一化后 {n_short_tv_norm}/{n_short_tt_norm}）；"
             "为避免误删标题/固定用语未从 train 移除，但重复样本会削弱 "
-            "held-out 独立性，须人工核查")
+            "held-out 独立性，须人工核查",
+        )
     if n_short_vt or n_short_vt_norm:
-        add("warning", "eval_short_lines_overlap",
+        add(
+            "warning",
+            "eval_short_lines_overlap",
             f"val/test 短行重复：精确 {n_short_vt} 行、"
             f"空白归一化后 {n_short_vt_norm} 行；val 选型会部分预演 test，"
-            "test 不再完全独立，须核查来源或重建划分")
+            "test 不再完全独立，须核查来源或重建划分",
+        )
     doc = dup.get("document_level")
     doc = doc if isinstance(doc, dict) else {}
-    n_doc_cross = _count(
-        doc.get("train_blocks_dropped_as_duplicates_of_eval"))
-    n_doc_intra = _count(
-        doc.get("train_intra_split_duplicate_blocks_removed"))
+    n_doc_cross = _count(doc.get("train_blocks_dropped_as_duplicates_of_eval"))
+    n_doc_intra = _count(doc.get("train_intra_split_duplicate_blocks_removed"))
     if n_doc_cross or n_doc_intra:
-        add("info", "document_decontamination_applied",
+        add(
+            "info",
+            "document_decontamination_applied",
             f"已从 train 移除多行块：与 val/test 重复 {n_doc_cross} 个、"
             f"train 内部重复 {n_doc_intra} 个"
             f"（共 {_count(doc.get('train_lines_dropped'))} 行；"
-            "单行块交给行级去污染，val/test 未改写）")
+            "单行块交给行级去污染，val/test 未改写）",
+        )
     n_doc_eval_dup = _count(doc.get("val_test_overlap_blocks"))
     if n_doc_eval_dup:
-        add("warning", "eval_splits_overlap_documents",
+        add(
+            "warning",
+            "eval_splits_overlap_documents",
             f"val 与 test 有 {n_doc_eval_dup} 个多行块重复：两侧均保持尘封"
             "未改写，但 val 选型会部分预演 test，最终 test 指标的独立性下降，"
-            "须核查/重建划分")
+            "须核查/重建划分",
+        )
     near = dup.get("near_duplicate")
     near = near if isinstance(near, dict) else {}
-    n_near_cross = _count(
-        near.get("train_blocks_dropped_as_near_duplicates_of_eval"))
-    n_near_intra = _count(
-        near.get("train_intra_split_near_duplicates_removed"))
+    n_near_cross = _count(near.get("train_blocks_dropped_as_near_duplicates_of_eval"))
+    n_near_intra = _count(near.get("train_intra_split_near_duplicates_removed"))
     if n_near_cross or n_near_intra:
-        add("info", "near_duplicate_decontamination_applied",
+        add(
+            "info",
+            "near_duplicate_decontamination_applied",
             f"已从 train 移除近似重复块：与 val/test 近似 {n_near_cross} 个、"
             f"train 内部近似重复 {n_near_intra} 个"
             f"（共 {_count(near.get('train_lines_dropped'))} 行；"
-            "val/test 未改写；阈值与三档敏感性见 duplicates.near_duplicate）")
+            "val/test 未改写；阈值与三档敏感性见 duplicates.near_duplicate）",
+        )
     n_near_vt = _count(near.get("val_test_near_duplicate_pairs"))
     if n_near_vt:
-        add("warning", "eval_splits_near_duplicates",
+        add(
+            "warning",
+            "eval_splits_near_duplicates",
             f"val 与 test 有 {n_near_vt} 对近似重复块（阈值 "
             f"{near.get('threshold', '?')}）：两侧均保持尘封未改写，但 val 选型"
-            "会部分预演 test，最终 test 指标的独立性下降，须核查/重建划分")
+            "会部分预演 test，最终 test 指标的独立性下降，须核查/重建划分",
+        )
     eval_internal = near.get("eval_internal_near_duplicates")
     eval_internal = eval_internal if isinstance(eval_internal, dict) else {}
     warn_frac = _num(eval_internal.get("warn_fraction_chars"))
@@ -312,34 +367,50 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
         frac = _num(row.get("duplicate_fraction_chars"))
         level = "warning" if frac is not None and frac > warn_frac else "info"
         frac_s = f"{frac:.1%}" if frac is not None else "未知"
-        add(level, f"{split}_internal_near_duplicates",
+        add(
+            level,
+            f"{split}_internal_near_duplicates",
             f"{split} 内部有 {n_clusters} 个近似重复簇，涉及 "
             f"{_count(row.get('blocks_in_near_duplicate_clusters'))} 个块/"
             f"{frac_s} 的可扫描字符；块级有效独立单元 "
             f"{_count(row.get('effective_blocks'))}/"
             f"{_count(row.get('eligible_blocks'))}。"
             "val/test 未被改写，但同簇窗口不是独立重复，名义窗口数会高估"
-            "独立样本量；若该比例越过告警线，须按簇解释区间或重建评测集")
+            "独立样本量；若该比例越过告警线，须按簇解释区间或重建评测集",
+        )
     if eval_internal.get("candidate_pairs_truncated"):
-        add("warning", "eval_internal_near_duplicate_scan_truncated",
+        add(
+            "warning",
+            "eval_internal_near_duplicate_scan_truncated",
             "val/test 内部近似重复扫描触发候选上限，簇统计是下界；"
-            "须降低评测集规模或提高候选上限后复核")
+            "须降低评测集规模或提高候选上限后复核",
+        )
     if near.get("candidate_pairs_truncated") or _count(
-            near.get("oversized_groups_truncated")):
-        add("warning", "near_duplicate_scan_truncated",
+        near.get("oversized_groups_truncated")
+    ):
+        add(
+            "warning",
+            "near_duplicate_scan_truncated",
             "近似重复扫描触发了候选簇/候选总数上限，可能有未核实的近似副本；"
-            "报告中的删除量是下界，须降低语料规模或提高上限后重跑")
+            "报告中的删除量是下界，须降低语料规模或提高上限后重跑",
+        )
     frac = _num(near.get("removal_fraction_chars"))
     if frac is not None and frac > 0.25:
-        add("warning", "near_duplicate_removal_high_fraction",
+        add(
+            "warning",
+            "near_duplicate_removal_high_fraction",
             f"近似去污染将移除 train 可用字符的 {frac:.1%}（>25%）：可能语料"
             "高度重复或阈值过宽，须人工核查 duplicates.near_duplicate 的"
-            "阈值敏感性与示例后再决定是否沿用该预处理")
+            "阈值敏感性与示例后再决定是否沿用该预处理",
+        )
     if _count(near.get("train_blocks_skipped_too_large")):
-        add("warning", "near_duplicate_scan_incomplete",
+        add(
+            "warning",
+            "near_duplicate_scan_incomplete",
             f"有 {_count(near.get('train_blocks_skipped_too_large'))} 个 train 块"
             f"超过 {near.get('max_block_chars', NEAR_DUP_MAX_BLOCK_CHARS)} 字符"
-            "未参与近似重复扫描：该块的近重复无法被排除，须人工核查")
+            "未参与近似重复扫描：该块的近重复无法被排除，须人工核查",
+        )
     # 覆盖率：近重复结论只对“已扫描且达到 min_chars 的字符”成立。低于
     # 协议下限时必须显式说明剩余风险，不能把“未扫描”写成“无近重复”。
     coverage = _num(near.get("train_chars_coverage_fraction"))
@@ -347,7 +418,9 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
     if min_cov is None:
         min_cov = float(NEAR_DUP_MIN_COVERAGE)
     if coverage is not None and coverage < min_cov:
-        add("warning", "near_duplicate_low_coverage",
+        add(
+            "warning",
+            "near_duplicate_low_coverage",
             f"近似重复扫描仅覆盖 train 全部字符的 {coverage:.1%}"
             f"（协议下限 {min_cov:.0%}；短块 "
             f"{_count(near.get('train_chars_skipped_short')):,} 字符、"
@@ -355,54 +428,68 @@ def leakage_alerts(tokenizer: dict, sanitization: dict, duplicates: dict,
             f"{_count(near.get('train_chars_skipped_few_shingles')):,} 字符、"
             f"超大块 "
             f"{_count(near.get('train_chars_skipped_too_large')):,} 字符未扫描）："
-            "近重复结论只对已覆盖部分成立，须人工核查未扫描语料")
+            "近重复结论只对已覆盖部分成立，须人工核查未扫描语料",
+        )
     # 清洗后复核：证明“剩下的已干净”，而不只是“删过一些”。
     post = dup.get("post_cleanup")
     post = post if isinstance(post, dict) else {}
     if post.get("checked_pairs"):
         if post.get("train_eval_clean") is False:
-            add("warning", "post_cleanup_residual_overlap",
+            add(
+                "warning",
+                "post_cleanup_residual_overlap",
                 "清洗后复核发现 train 仍与 val/test 共享精确/归一化长行或多行块："
                 f"长行 {post.get('overlap_long_lines', {})}、多行块 "
                 f"{post.get('overlap_blocks', {})}。去污染并非闭合，"
-                "须核查删除顺序/短行边界并重建数据")
+                "须核查删除顺序/短行边界并重建数据",
+            )
         elif post.get("train_eval_clean") is True:
-            add("info", "post_cleanup_verified",
+            add(
+                "info",
+                "post_cleanup_verified",
                 "清洗后复核：train 与 val/test 已无共享精确/归一化长行或多行块"
-                "（短行与近似重复另见对应条目；val/test 保持尘封未改写）")
+                "（短行与近似重复另见对应条目；val/test 保持尘封未改写）",
+            )
     n_eval_dup = _count(dup.get("val_test_overlap_long_lines"))
-    n_eval_dup_norm = _count(
-        dup.get("val_test_overlap_normalized_long_lines"))
+    n_eval_dup_norm = _count(dup.get("val_test_overlap_normalized_long_lines"))
     if n_eval_dup or n_eval_dup_norm:
-        add("warning", "eval_splits_overlap",
+        add(
+            "warning",
+            "eval_splits_overlap",
             f"val 与 test 有长行重复：精确 {n_eval_dup} 条、空白归一化后共 "
             f"{n_eval_dup_norm} 条（含精确重复）：两侧均保持尘封未改写，但 "
             "val 选型会部分预演 test，最终 test 指标的独立性下降，"
-            "须核查/重建划分")
+            "须核查/重建划分",
+        )
     for split in ("val", "test"):
         n_dup = _count(dup.get(f"{split}_intra_split_duplicate_lines"))
-        n_dup_norm = _count(
-            dup.get(f"{split}_intra_split_normalized_duplicate_lines"))
+        n_dup_norm = _count(dup.get(f"{split}_intra_split_normalized_duplicate_lines"))
         if n_dup or n_dup_norm:
             # 统计键覆盖所有非空行（含短行），且归一化计数包含精确重复；
             # 只读精确计数会漏掉“仅空白/NFKC 差异”的重复，文案也不能写成
             # “长行”（与 decontaminate_texts 的口径不一致）。
             if n_dup_norm:
-                detail = (f"空白归一化后 {n_dup_norm} 条（其中精确 {n_dup} 条）")
+                detail = f"空白归一化后 {n_dup_norm} 条（其中精确 {n_dup} 条）"
             else:
                 detail = f"精确 {n_dup} 条"
-            add("info", f"{split}_intra_duplicates",
+            add(
+                "info",
+                f"{split}_intra_duplicates",
                 f"{split} 内部有重复行：{detail}（未改写，避免破坏尘封；"
-                "重复会高估评测有效样本量，解读置信区间时须注意）")
+                "重复会高估评测有效样本量，解读置信区间时须注意）",
+            )
     text_stats = text_stats if isinstance(text_stats, dict) else {}
     for split, st in text_stats.items():
         st = st if isinstance(st, dict) else {}
         n_huge = _count(st.get("lines_gt_huge_threshold"))
         if n_huge:
-            add("info", f"huge_lines_{split}",
+            add(
+                "info",
+                f"huge_lines_{split}",
                 f"{split} 有 {n_huge} 行超过 "
                 f"{st.get('huge_line_threshold_chars')} 字符"
-                "（异常值已计数未删除，训练窗口可能被其主导）")
+                "（异常值已计数未删除，训练窗口可能被其主导）",
+            )
     return alerts
 
 
@@ -420,9 +507,11 @@ def critical_split_alerts(data_report: dict) -> list:
     alerts = data_report.get("alerts")
     if not isinstance(alerts, list):
         return []
-    return [a for a in alerts
-            if isinstance(a, dict)
-            and a.get("code") in CRITICAL_SPLIT_ALERT_CODES]
+    return [
+        a
+        for a in alerts
+        if isinstance(a, dict) and a.get("code") in CRITICAL_SPLIT_ALERT_CODES
+    ]
 
 
 def split_protocol_alerts(split_protocol: dict) -> list:
@@ -442,34 +531,53 @@ def split_protocol_alerts(split_protocol: dict) -> list:
         alerts.append({"level": level, "code": code, "message": message})
 
     if p.get("shuffled"):
-        add("warning", "split_shuffled",
-            "划分协议声明 shuffled=True：时序先后/群组完整性不可保证，须人工核查")
+        add(
+            "warning",
+            "split_shuffled",
+            "划分协议声明 shuffled=True：时序先后/群组完整性不可保证，须人工核查",
+        )
     dev = p.get("max_abs_fraction_deviation")
     tol = p.get("fraction_tolerance", SPLIT_FRACTION_TOLERANCE)
-    if (isinstance(dev, (int, float)) and not isinstance(dev, bool)
-            and isinstance(tol, (int, float)) and not isinstance(tol, bool)
-            and dev > float(tol)):
-        add("warning", "split_fraction_skew",
+    if (
+        isinstance(dev, (int, float))
+        and not isinstance(dev, bool)
+        and isinstance(tol, (int, float))
+        and not isinstance(tol, bool)
+        and dev > float(tol)
+    ):
+        add(
+            "warning",
+            "split_fraction_skew",
             f"实际 split 比例偏离目标 {dev:.1%}（> {float(tol):.1%}）："
             f"目标 {p.get('target_fractions', '?')}，实际 "
             f"{p.get('actual_fractions', '?')}；切点吸附到文档/段落边界会"
-            "改变实际训练/评测规模，解读“80/10/10”与检验功效时须按实际值")
+            "改变实际训练/评测规模，解读“80/10/10”与检验功效时须按实际值",
+        )
     if p.get("fallback_char_cut"):
-        add("warning", "split_char_cut",
+        add(
+            "warning",
+            "split_char_cut",
             "无可用换行或文档边界，退化为字符切分——同一文档可能跨 split"
-            "（群组泄露），须人工核查")
+            "（群组泄露），须人工核查",
+        )
     if p.get("documents_cross_cut"):
-        add("warning", "split_documents_cross_cut",
+        add(
+            "warning",
+            "split_documents_cross_cut",
             f"切点未落在文档边界：{p.get('group_unit', 'group')} 群组跨 split"
             f"（标题 {p.get('n_headings', '?')} 个、切点类型 "
             f"{p.get('cut_kinds', '?')}），违反“群组整体落在同一侧”，"
-            "须调整划分比例或更换可整体划分的语料")
+            "须调整划分比例或更换可整体划分的语料",
+        )
     if p.get("paragraphs_cross_cut"):
-        add("warning", "split_paragraphs_cross_cut",
+        add(
+            "warning",
+            "split_paragraphs_cross_cut",
             f"切点未落在空行段落边界：{p.get('group_unit', 'group')} 群组跨 "
             f"split（段落边界 {p.get('n_paragraph_boundaries', '?')} 个、"
             f"切点类型 {p.get('cut_kinds', '?')}），违反“段落整体落在同一侧”，"
-            "须调整划分比例或为语料补空行分隔")
+            "须调整划分比例或为语料补空行分隔",
+        )
     short = p.get("overlap_short_lines")
     if isinstance(short, dict):
         bad_short = {}
@@ -479,13 +587,15 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             exact = val.get("exact_lines") or 0
             norm = val.get("normalized_lines") or 0
             if exact or norm:
-                bad_short[str(pair)] = {"exact_lines": exact,
-                                        "normalized_lines": norm}
+                bad_short[str(pair)] = {"exact_lines": exact, "normalized_lines": norm}
         if bad_short:
-            add("warning", "split_overlap_short_lines",
+            add(
+                "warning",
+                "split_overlap_short_lines",
                 f"实际文本存在跨 split 共享短行 {bad_short}"
                 f"（<{p.get('min_chars', '?')} 字符，多为标题/固定用语）；"
-                "未自动删除，但重复样本会削弱 held-out 独立性，须人工核查")
+                "未自动删除，但重复样本会削弱 held-out 独立性，须人工核查",
+            )
     verified = p.get("verified_disjoint")
     overlaps = p.get("overlap_long_lines")
     bad = {}
@@ -496,34 +606,44 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             exact = val.get("exact_lines") or 0
             norm = val.get("normalized_lines") or 0
             if exact or norm:
-                bad[str(pair)] = {"exact_lines": exact,
-                                  "normalized_lines": norm}
+                bad[str(pair)] = {"exact_lines": exact, "normalized_lines": norm}
     if bad:
         if verified is True:
-            add("warning", "split_overlap_long_lines",
+            add(
+                "warning",
+                "split_overlap_long_lines",
                 f"上游声明 verified_disjoint=True，但实际文本存在跨 split "
                 f"共享长行 {bad}：声明与内容矛盾，不能按“已核对互斥”处理；"
                 "去污染只能移除 train 侧副本，val/test 之间或清洗后仍重叠的"
-                "样本会削弱 held-out 独立性，须核查来源或重建划分")
+                "样本会削弱 held-out 独立性，须核查来源或重建划分",
+            )
         else:
-            add("warning", "split_overlap_long_lines",
+            add(
+                "warning",
+                "split_overlap_long_lines",
                 f"上游划分声明并非互斥：实际文本存在跨 split 共享长行 {bad}；"
                 "去污染只能移除 train 侧副本，val/test 之间或清洗后仍重叠的"
-                "样本会削弱 held-out 独立性，须核查来源或重建划分")
+                "样本会削弱 held-out 独立性，须核查来源或重建划分",
+            )
     missing = p.get("missing_files")
     if isinstance(missing, list) and missing:
         prefix = "上游声明 verified_disjoint=True，但" if verified is True else ""
-        add("warning", "split_protocol_unverified",
+        add(
+            "warning",
+            "split_protocol_unverified",
             f"{prefix}缺少 split 文件 {missing}，无法核对“无共享样本”声明；"
-            "缺失 split 的评测指标不可与其他 split 直接比较")
-    if verified is False and not bad and not (
-            isinstance(missing, list) and missing):
+            "缺失 split 的评测指标不可与其他 split 直接比较",
+        )
+    if verified is False and not bad and not (isinstance(missing, list) and missing):
         # verified_disjoint=False 本身就是“未验证通过”。没有重叠明细也没有
         # 缺失文件时不能当成通过：报告被手改/上游漏写证据，同样无法确认
         # 三个 split 互斥。
-        add("warning", "split_protocol_unverified",
+        add(
+            "warning",
+            "split_protocol_unverified",
             "上游声明 verified_disjoint=False，但未记录跨 split 长行重叠或"
-            "缺失文件：无法确认划分互斥性")
+            "缺失文件：无法确认划分互斥性",
+        )
     return alerts
 
 
@@ -553,8 +673,7 @@ def _text_line_digest_sets(text: str, min_chars: int):
     return long_exact, long_norm, short_exact, short_norm
 
 
-def post_cleanup_residual(texts: dict, min_chars: int = 40,
-                          min_lines: int = 2) -> dict:
+def post_cleanup_residual(texts: dict, min_chars: int = 40, min_lines: int = 2) -> dict:
     """清洗后复核：最终 train 里是否仍残留与 val/test 相同的行/多行块。
 
     去污染函数只报告“删了多少”，这不能证明“剩下的已干净”。本函数对清洗
@@ -573,20 +692,18 @@ def post_cleanup_residual(texts: dict, min_chars: int = 40,
     if min_lines < 1:
         raise ValueError(f"min_lines 必须 >= 1，收到 {min_lines!r}")
     texts = texts if isinstance(texts, dict) else {}
-    present = [s for s in ("train", "val", "test")
-               if isinstance(texts.get(s), str)]
+    present = [s for s in ("train", "val", "test") if isinstance(texts.get(s), str)]
     line_sets, block_sets = {}, {}
     for split in present:
         line_sets[split] = _text_line_digest_sets(texts[split], min_chars)
-        block_sets[split] = {d for _, _, d, _ in
-                             _iter_blocks(texts[split], min_lines)}
+        block_sets[split] = {d for _, _, d, _ in _iter_blocks(texts[split], min_lines)}
 
     def _pair(a, b):
         return f"{a}_{b}"
 
     pairs = []
     for i, a in enumerate(present):
-        for b in present[i + 1:]:
+        for b in present[i + 1 :]:
             pairs.append((a, b))
     overlap_long, overlap_short, overlap_blocks = {}, {}, {}
     for a, b in pairs:
@@ -595,10 +712,12 @@ def post_cleanup_residual(texts: dict, min_chars: int = 40,
         key = _pair(a, b)
         overlap_long[key] = {
             "exact_lines": int(len(la & lb)),
-            "normalized_lines": int(len(lan & lbn))}
+            "normalized_lines": int(len(lan & lbn)),
+        }
         overlap_short[key] = {
             "exact_lines": int(len(sa & sb)),
-            "normalized_lines": int(len(san & sbn))}
+            "normalized_lines": int(len(san & sbn)),
+        }
         overlap_blocks[key] = int(len(block_sets[a] & block_sets[b]))
     train_pairs = [p for p in pairs if "train" in p]
     clean = None
@@ -607,11 +726,14 @@ def post_cleanup_residual(texts: dict, min_chars: int = 40,
             overlap_long[_pair(*p)]["exact_lines"] == 0
             and overlap_long[_pair(*p)]["normalized_lines"] == 0
             and overlap_blocks[_pair(*p)] == 0
-            for p in train_pairs)
+            for p in train_pairs
+        )
     vt_key = "val_test"
     return {
-        "scope": ("exact/whitespace-normalized long lines and multi-line "
-                  "blocks after all decontamination passes"),
+        "scope": (
+            "exact/whitespace-normalized long lines and multi-line "
+            "blocks after all decontamination passes"
+        ),
         "min_chars": int(min_chars),
         "min_lines": int(min_lines),
         "checked_splits": present,
@@ -623,15 +745,19 @@ def post_cleanup_residual(texts: dict, min_chars: int = 40,
         # 只能诊断并告警，不能算作“清洗失败”。
         "train_eval_clean": clean,
         "val_test_overlap_long_lines": (
-            overlap_long.get(vt_key, {}).get("normalized_lines", 0)),
+            overlap_long.get(vt_key, {}).get("normalized_lines", 0)
+        ),
         "val_test_overlap_blocks": int(overlap_blocks.get(vt_key, 0)),
-        "note": ("短行重复只计数；val/test 不被改写。本核对不覆盖低于 "
-                 "min_chars 的短行或近似重复，那部分由 near_duplicate 报告"),
+        "note": (
+            "短行重复只计数；val/test 不被改写。本核对不覆盖低于 "
+            "min_chars 的短行或近似重复，那部分由 near_duplicate 报告"
+        ),
     }
 
 
-def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40,
-                           required_splits=("train", "val", "test")) -> dict:
+def verify_splits_disjoint(
+    txt_paths: dict, min_chars: int = 40, required_splits=("train", "val", "test")
+) -> dict:
     """读回已写入的 train/val/test.txt，核对跨 split 无共享长行。
 
     split_protocol 里 "document_disjoint(no_shuffle)" / "无共享样本" 是上游
@@ -664,7 +790,8 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40,
         required = tuple(str(x) for x in required_splits)
     except TypeError as e:
         raise ValueError(
-            f"required_splits 需要字符串序列，收到 {required_splits!r}") from e
+            f"required_splits 需要字符串序列，收到 {required_splits!r}"
+        ) from e
     if not required:
         raise ValueError("required_splits 不能为空")
     missing = []
@@ -701,25 +828,34 @@ def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40,
     # 不能只比较硬编码的 train/val/test 三对：required_splits 允许调用方
     # 声明 dev 等额外 held-out。只比较固定三对会让 train 与 dev 的重复
     # 完全不被检查，却仍返回 verified_disjoint=True。
-    ordered = ([s for s in ("train", "val", "test") if s in sets]
-               + sorted(s for s in sets if s not in ("train", "val", "test")))
+    ordered = [s for s in ("train", "val", "test") if s in sets] + sorted(
+        s for s in sets if s not in ("train", "val", "test")
+    )
     for i, a in enumerate(ordered):
-        for b in ordered[i + 1:]:
+        for b in ordered[i + 1 :]:
             overlaps[f"{a}_{b}"] = {
                 "exact_lines": len(sets[a][0] & sets[b][0]),
-                "normalized_lines": len(sets[a][1] & sets[b][1])}
+                "normalized_lines": len(sets[a][1] & sets[b][1]),
+            }
             overlaps_short[f"{a}_{b}"] = {
                 "exact_lines": len(short_sets[a][0] & short_sets[b][0]),
-                "normalized_lines": len(short_sets[a][1] & short_sets[b][1])}
-    disjoint = (not missing and bool(overlaps)
-                and all(v["exact_lines"] == 0
-                        and v["normalized_lines"] == 0
-                        for v in overlaps.values()))
-    return {"verified_disjoint": bool(disjoint),
-            "overlap_long_lines": overlaps,
-            "overlap_short_lines": overlaps_short,
-            "missing_files": missing,
-            "min_chars": int(min_chars)}
+                "normalized_lines": len(short_sets[a][1] & short_sets[b][1]),
+            }
+    disjoint = (
+        not missing
+        and bool(overlaps)
+        and all(
+            v["exact_lines"] == 0 and v["normalized_lines"] == 0
+            for v in overlaps.values()
+        )
+    )
+    return {
+        "verified_disjoint": bool(disjoint),
+        "overlap_long_lines": overlaps,
+        "overlap_short_lines": overlaps_short,
+        "missing_files": missing,
+        "min_chars": int(min_chars),
+    }
 
 
 def short_overlap_alerts(short_contamination: dict) -> list:
@@ -730,8 +866,11 @@ def short_overlap_alerts(short_contamination: dict) -> list:
     """
     alerts = []
     c = short_contamination if isinstance(short_contamination, dict) else {}
-    for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
-                       ("val_test", "val/test")):
+    for key, label in (
+        ("train_val", "train/val"),
+        ("train_test", "train/test"),
+        ("val_test", "val/test"),
+    ):
         d = c.get(key)
         d = d if isinstance(d, dict) else {}
         raw = d.get("overlap_rate")
@@ -746,11 +885,17 @@ def short_overlap_alerts(short_contamination: dict) -> list:
             continue
         if not np.isfinite(rate) or not 0.0 < rate <= 1.0:
             continue
-        alerts.append({
-            "level": "warning", "code": f"ngram_overlap_short_{key}",
-            "message": (f"{label} 采样 {d.get('n', '?')}-gram 重叠率 "
-                        f"{rate:.4%}（<64 token 的整句/模板复用；短 n 易有"
-                        "自然搭配假阳性，须人工核查而非自动阻断）")})
+        alerts.append(
+            {
+                "level": "warning",
+                "code": f"ngram_overlap_short_{key}",
+                "message": (
+                    f"{label} 采样 {d.get('n', '?')}-gram 重叠率 "
+                    f"{rate:.4%}（<64 token 的整句/模板复用；短 n 易有"
+                    "自然搭配假阳性，须人工核查而非自动阻断）"
+                ),
+            }
+        )
     return alerts
 
 
@@ -771,8 +916,11 @@ def exact_overlap_alerts(exact_contamination: dict, thresholds: dict = None) -> 
                 th[key] = number
     alerts = []
     c = exact_contamination if isinstance(exact_contamination, dict) else {}
-    for key, label in (("train_val", "train/val"), ("train_test", "train/test"),
-                       ("val_test", "val/test")):
+    for key, label in (
+        ("train_val", "train/val"),
+        ("train_test", "train/test"),
+        ("val_test", "val/test"),
+    ):
         d = c.get(key)
         d = d if isinstance(d, dict) else {}
         raw = d.get("overlap_rate")
@@ -792,32 +940,45 @@ def exact_overlap_alerts(exact_contamination: dict, thresholds: dict = None) -> 
         total = d.get("eval_windows_total")
         sampling = d.get("eval_sampling")
         reference = d.get("reference_split", "train")
-        scope = ("全量 eval 窗口" if sampling == "all"
-                 else f"eval 等间隔抽样 {checked}/{total} 窗口")
-        alerts.append({
-            "level": "warning", "code": f"ngram_overlap_exact_{key}",
-            "message": (f"{label} {d.get('n', '?')}-gram 在 {reference} 全量扫描下"
-                        f"重叠率 {rate:.6%}（{scope}，逐字节复核；"
-                        "0 以外的命中均为跨 split 复制证据，须人工核查/重建"
-                        "划分）")})
+        scope = (
+            "全量 eval 窗口"
+            if sampling == "all"
+            else f"eval 等间隔抽样 {checked}/{total} 窗口"
+        )
+        alerts.append(
+            {
+                "level": "warning",
+                "code": f"ngram_overlap_exact_{key}",
+                "message": (
+                    f"{label} {d.get('n', '?')}-gram 在 {reference} 全量扫描下"
+                    f"重叠率 {rate:.6%}（{scope}，逐字节复核；"
+                    "0 以外的命中均为跨 split 复制证据，须人工核查/重建"
+                    "划分）"
+                ),
+            }
+        )
     return alerts
 
 
-def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
-                      duplicates: dict, contamination: dict,
-                      distribution: dict, text_stats: dict = None,
-                      extra: dict = None,
-                      alert_thresholds: dict = None) -> dict:
+def build_data_report(
+    tokenizer: dict,
+    splits: dict,
+    sanitization: dict,
+    duplicates: dict,
+    contamination: dict,
+    distribution: dict,
+    text_stats: dict = None,
+    extra: dict = None,
+    alert_thresholds: dict = None,
+) -> dict:
     """汇总为 data_report.json（只含 JSON 原生类型）。"""
-    alert_thresholds = (alert_thresholds
-                        if isinstance(alert_thresholds, dict) else {})
+    alert_thresholds = alert_thresholds if isinstance(alert_thresholds, dict) else {}
     extra = extra if isinstance(extra, dict) else None
     # “先划分后预处理”只能由上游划分协议证据支撑。缺少 split_protocol 时
     # 写 None（未知）而不是写死 True，避免报告做出无法证实的审计声明；
     # 同时产生告警，让“无法确认”与“已确认”在汇总页可区分。
     split_protocol = extra.get("split_protocol") if extra else None
-    split_first_attested = (isinstance(split_protocol, dict)
-                            and bool(split_protocol))
+    split_first_attested = isinstance(split_protocol, dict) and bool(split_protocol)
     # 划分是否打乱同样只能由上游协议声明：无声明时写 None（未知），
     # 不能把“没记录”当成“没打乱”。
     shuffle_at_split = None
@@ -825,19 +986,28 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
         value = split_protocol.get("shuffled")
         if isinstance(value, bool):
             shuffle_at_split = value
-    alerts = leakage_alerts(tokenizer, sanitization, duplicates,
-                            contamination, distribution, text_stats,
-                            thresholds=alert_thresholds)
+    alerts = leakage_alerts(
+        tokenizer,
+        sanitization,
+        duplicates,
+        contamination,
+        distribution,
+        text_stats,
+        thresholds=alert_thresholds,
+    )
     if not split_first_attested:
-        alerts.append({
-            "level": "warning", "code": "split_first_unattested",
-            "message": "报告缺少 split_protocol 证据：无法确认数据是“先划分"
-                       "后预处理且划分未打乱”，只可确认分词/去污染在 train 上完成"})
+        alerts.append(
+            {
+                "level": "warning",
+                "code": "split_first_unattested",
+                "message": "报告缺少 split_protocol 证据：无法确认数据是“先划分"
+                "后预处理且划分未打乱”，只可确认分词/去污染在 train 上完成",
+            }
+        )
     report = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "protocol": {
-            "split_first_then_preprocess": (True if split_first_attested
-                                            else None),
+            "split_first_then_preprocess": (True if split_first_attested else None),
             "split_first_then_preprocess_attested": bool(split_first_attested),
             # 必须如实记录分词器实际拟合来源：字符级词表在 train 上拟合，
             # 而 GPT-2 BPE 是公开预训练词表（与语料无关、不构成泄露）。统一
@@ -845,8 +1015,9 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             # 的审计声明失真。
             # 缺失时写 None（未知），不能默认成安全的 "train_only"：
             # 报告没有来源证据时，预检必须能区分“未知”与“已在 train 上拟合”。
-            "fit_on": (tokenizer.get("fit_on")
-                       if isinstance(tokenizer, dict) else None),
+            "fit_on": (
+                tokenizer.get("fit_on") if isinstance(tokenizer, dict) else None
+            ),
             "test_sealed": True,
             "shuffle_at_split_time": shuffle_at_split,
             "batch_shuffle_during_training_allowed": True,
@@ -893,7 +1064,8 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "复核提示（见 alert_thresholds），不是显著性检验。",
         ],
     }
-# 语料规模核算：token 数之外同时记录字符数与 UTF-8 字节数。PPL 的
+
+    # 语料规模核算：token 数之外同时记录字符数与 UTF-8 字节数。PPL 的
     # 分母是 token，字符级兜底与 BPE 的 token 粒度不同；bytes/token 与
     # 总字节数让读者能判断不同分词器/不同数据版本的结果是否可比，也便于
     # 发现"token 数正常但字节数异常"的分词/清洗事故。
@@ -940,13 +1112,17 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             entry["token_concentration"] = token_stats.get("token_concentration")
             entry["token_top5_share"] = token_stats.get("top5_token_share")
             entry["token_vocab_coverage"] = token_stats.get("vocab_coverage")
-            entry["token_most_common_share"] = token_stats.get("most_common_token_share")
+            entry["token_most_common_share"] = token_stats.get(
+                "most_common_token_share"
+            )
             entry["token_singleton_mass"] = token_stats.get("singleton_token_mass")
             if tokens:
-                entry["avg_tokens_per_token_entropy"] = float(tokens / max(1, token_stats.get("token_entropy_bits", 0)))
+                entry["avg_tokens_per_token_entropy"] = float(
+                    tokens / max(1, token_stats.get("token_entropy_bits", 0))
+                )
         accounting[split] = entry
     report["accounting"] = accounting
-    
+
     # 新增：数据质量深度诊断指南
     report["quality_guidance"] = {
         "token_distribution_interpretation": {
@@ -954,14 +1130,14 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "zipf_slope": "接近 -1 表示自然语言分布；偏大(>-0.5)表示词汇集中偏低；偏小(<-1.5)表示过度分散",
             "token_concentration": "较高值(>0.1)表示少数token支配大部分文本，可能影响模型泛化；较低值(<0.05)表示分布均匀",
             "top5_token_share": "较高值(>0.3)表示前5个token占比大，需关注是否因分词器问题或语料特性",
-            "token_type_token_ratio": "较低值(<0.1)表示词汇冗余，可能影响模型容量利用"
+            "token_type_token_ratio": "较低值(<0.1)表示词汇冗余，可能影响模型容量利用",
         },
         "recommended_actions": [
             "若 token_entropy_bits 较低：检查分词器是否合适，或数据是否存在大量重复内容",
             "若 zipf_slope 显著偏离 -1：检查语料是否包含特定模板化文本",
             "若 vocab_coverage 较低：检查是否字符级分词器词表拟合不足",
-            "若 token_concentration 过高：考虑数据清洗或增加 diversity"
-        ]
+            "若 token_concentration 过高：考虑数据清洗或增加 diversity",
+        ],
     }
     if isinstance(extra, dict):
         # extra 只允许扩充报告，不能覆盖自检结论本身：否则上游元数据里的
