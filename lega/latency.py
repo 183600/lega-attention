@@ -392,7 +392,7 @@ def main():
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
 
-    cfg = load_config_json(args.config)
+    cfg = load_config_json(args.config, validate=True)
     meta = load_meta(args.data_dir)
     # 随机权重基准会用 meta.vocab_size 建模型；token 流是 uint16，
     # 超过 65536 的词表既与数据不一致，也会先耗尽内存。

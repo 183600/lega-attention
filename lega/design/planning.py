@@ -7,6 +7,8 @@ _shared_install(globals())
 from .scheduling import (DEFAULT_RUN_ORDER, RUN_ORDER_MODES,  # noqa: E402
                          build_run_order, validate_run_order)
 from lega.testreuse import DEFAULT_TEST_LOOK_BUDGET  # noqa: E402
+from lega.config_schema import (audit_config,  # noqa: E402
+                                config_canonical_sha256)
 from .preparation import (data_identity_check,  # noqa: E402
                           test_seal_check, test_seal_precheck)
 
@@ -671,6 +673,16 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "seed_minimum", "种子数下限", "warn",
             f"计划只有 {n_seeds} 个种子（< {MIN_SEEDS}）：只能描述，"
             "不能做显著性/组件有效性判定")]
+
+    # ---- 检查 1b：配置键空间与数值语义。未知键会被 dict.get 静默忽略，
+    # 使“声明的实验”与“实际实验”分离；类型/范围错误则会让运行值偏离
+    # 文件中的可读值。这里在训练前显形，并给出与键顺序无关的语义指纹。
+    config_audit = audit_config(config)
+    checks.append(_check(
+        "config_keys", "配置键与语义审计", config_audit["status"],
+        config_audit["summary"]
+        + "；未知键通常意味着拼写错误或已废弃旋钮，必须删除或改为 "
+          "\"_\" 前缀的注释键"))
 
     look_budget_raw = design_cfg.get("test_look_budget",
                                      DEFAULT_TEST_LOOK_BUDGET)
@@ -1781,6 +1793,8 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "inputs": {
             "config_file": config_file,
             "config_sha256": config_sha256,
+            "config_canonical_sha256": config_canonical_sha256(config),
+            "config_audit": config_audit,
             "analysis_code": _analysis_code_fingerprint(),
             "variants": list(variants),
             "seeds": list(seeds),

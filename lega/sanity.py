@@ -716,7 +716,7 @@ def main():
               f"{len(data_preflight['critical_violations'])} 个严重问题，"
               "但已显式放行（结果不得用于正式结论）")
 
-    cfg = load_config_json(args.config)
+    cfg = load_config_json(args.config, validate=True)
     sanity_cfg = cfg.get("sanity") or {}
     if not isinstance(sanity_cfg, dict):
         raise ValueError(

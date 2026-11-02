@@ -477,13 +477,20 @@ def _reject_duplicate_json_keys(pairs):
     return obj
 
 
-def load_config_json(path: str) -> dict:
-    """读取实验配置：拒绝重复键与非法顶层，避免静默覆盖声明值。
+def load_config_json(path: str, *, validate: bool = False,
+                     allow_unknown: bool = False) -> dict:
+    """读取实验配置：拒绝重复键与非法顶层；可选开启语义审计。
 
     Python 的 ``json`` 默认对重复键“后者覆盖前者”且不报错；同一配置里
     出现两次 ``lr``/``steps`` 时，实际执行值与作者看到的文件可能不同，
     而 config_sha256 只能证明“这份文件被用了”，无法暴露语义歧义。这里
     在解析阶段对所有嵌套对象拒绝重复键，并保持顶层必须是对象。
+
+    ``validate=True`` 时继续做配置契约审计：拼错的键会被 ``dict.get``
+    静默忽略、``true``/小数会被截断成另一个训练条件，因此正式入口在
+    开跑前 fail closed。默认 ``False`` 保持本函数作为低层读取器的兼容
+    语义；run_all/train/sanity/latency/tuning 等正式入口显式开启审计。
+    诊断/迁移旧配置还可传 ``allow_unknown=True`` 只降级未知键。
     """
     with open(path, "r", encoding="utf-8") as f:
         try:
@@ -496,6 +503,9 @@ def load_config_json(path: str) -> dict:
         raise ValueError(
             f"配置文件顶层必须是 JSON 对象，收到 {type(value).__name__}: "
             f"{path}")
+    if validate:
+        from .config_schema import assert_config_valid
+        assert_config_valid(value, source=path, allow_unknown=allow_unknown)
     return value
 
 

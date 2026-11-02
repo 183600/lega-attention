@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MODULES = ["tests.test_attention", "tests.test_model", "tests.test_ruler",
            "tests.test_latency", "tests.test_length_effect",
+           "tests.test_config_schema",
            "tests.test_analysis", "tests.test_utils",
            "tests.test_discovery", "tests.test_uncertainty",
            "tests.test_sanity", "tests.test_repro",

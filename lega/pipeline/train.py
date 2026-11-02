@@ -394,7 +394,7 @@ def main():
     if not os.path.exists(args.config):
         p.error(f"配置文件不存在: {args.config}")
     try:
-        cfg = load_config_json(args.config)
+        cfg = load_config_json(args.config, validate=True)
     except (OSError, ValueError) as e:
         p.error(str(e))
     # 环境锁闸门：manifest 记录 environment_lock 只能事后审计，不能阻止

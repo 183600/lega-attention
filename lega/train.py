@@ -1061,7 +1061,7 @@ def main():
               f"{len(data_preflight['critical_violations'])} 个严重问题，"
               f"但已显式放行（结果不得用于正式结论）：{detail}")
 
-    cfg = load_config_json(args.config)
+    cfg = load_config_json(args.config, validate=True)
     if args.smoke:
         for k, v in SMOKE_OVERRIDES.items():
             cfg[k] = min(v, cfg.get(k, v)) if k in ("batch_size",) else v

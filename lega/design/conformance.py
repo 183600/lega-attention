@@ -803,12 +803,15 @@ def render_design_section(plan: dict, conformance: dict = None,
     inputs = _as_dict(plan.get("inputs"))
     status = plan.get("status")
     icon = {"ok": "✅", "warning": "⚠", "fail": "❌"}.get(status, "•")
+    canonical = inputs.get("config_canonical_sha256")
     md.append(
         f"- {icon} 计划状态：`{status}`；变体 {len(_as_list(inputs.get('variants')))} "
         f"× 种子 {len(_as_list(inputs.get('seeds')))}；"
         f"alpha={_fmt(inputs.get('alpha'), 3)}、"
         f"power={_fmt(inputs.get('power'), 3)}；"
-        f"SHA-256 `{str(plan.get('plan_digest'))[:12]}`（训练前落盘）")
+        f"SHA-256 `{str(plan.get('plan_digest'))[:12]}`（训练前落盘）"
+        + (f"；配置语义指纹 `{str(canonical)[:12]}`（与键顺序/注释无关）"
+           if isinstance(canonical, str) and canonical else ""))
     md.append("- 先验计划只使用配置与预注册范围，不读取任何结果/测试集；"
               "种子数或 RULER 样本量不足时不会在事后被解释成“无效应”。")
     mp = _as_dict(plan.get("multiplicity_plan"))

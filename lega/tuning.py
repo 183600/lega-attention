@@ -328,7 +328,7 @@ def _trial_identity_summary(trials) -> dict:
 
 def _load_config_object(path: str) -> dict:
     """读取配置：拒绝重复键与非对象顶层，数组/标量无法按字段继承。"""
-    return load_config_json(path)
+    return load_config_json(path, validate=True)
 
 
 def run_trial(config: str, data_dir: str, variant: str, seed: int, lr: float,
