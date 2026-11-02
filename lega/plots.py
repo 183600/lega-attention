@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import warnings
 from collections import OrderedDict
 
 try:
@@ -59,6 +60,13 @@ if _HAS_MPL:
             "如需中文图表请安装 fonts-noto-cjk"
         )
     plt.rcParams["axes.unicode_minus"] = False
+    # 过滤 matplotlib 在无 CJK 字体时对 Glyph 缺失的 UserWarning，
+    # 避免因字体缺失产生的警告被当作错误导致测试失败。
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Glyph \d+.*missing from font\(s\) DejaVu Sans",
+        category=UserWarning,
+    )
 
 COLORS = {
     "standard": "#7f8c8d",

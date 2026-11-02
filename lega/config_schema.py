@@ -98,6 +98,15 @@ NESTED = {
         "run_order": "str",
         "run_order_seed": "int",
         "test_look_budget": "positive_int",
+        "length_stratification": {
+            "enabled": "bool",
+            "lengths": "lengths",
+            "n_windows": "positive_int",
+            "query_positions": "positive_int",
+            "growth_modes": "str_or_str_list",
+            "bootstrap": "nonnegative_int",
+            "tolerance": "nonnegative_number",
+        },
         "ppl_paired_sd_rel": "positive_number",
         "ppl_paired_sd_rel_grid": "number_list",
         "ruler_paired_sd": "positive_number",
@@ -260,6 +269,32 @@ def _check_scalar(kind: str, value):
     return False, f"未知类型规格 {kind!r}"
 
 
+def _check_object_subkeys(spec: dict, value: dict, path: str) -> tuple:
+    """递归检查对象的键是否都在规格中且类型正确。
+
+    返回 (ok, reason) 元组。
+    """
+    unknown_keys = []
+    for k, v in value.items():
+        if k.startswith(COMMENT_PREFIX):
+            continue
+        if k not in spec:
+            unknown_keys.append(k)
+            continue
+        sub_kind = spec[k]
+        if isinstance(sub_kind, dict):
+            ok, reason = _check_object_subkeys(sub_kind, v, f"{path}.{k}")
+            if not ok:
+                return False, reason
+        else:
+            sub_ok, sub_reason = _check_scalar(sub_kind, v)
+            if not sub_ok:
+                return False, sub_reason
+    if unknown_keys:
+        return False, f"未知键 {', '.join(unknown_keys)}"
+    return True, None
+
+
 def _issue(path: str, problem: str, value) -> dict:
     return {
         "path": path,
@@ -306,17 +341,30 @@ def audit_config(config: dict, *, allow_unknown: bool = False) -> dict:
                         _issue(sub_path, "未知配置键（会被代码静默忽略）", sub_value)
                     )
                     continue
-                checked += 1
-                sub_ok, sub_reason = _check_scalar(sub_kind, sub_value)
-                if not sub_ok:
-                    item = _issue(sub_path, sub_reason or "类型/范围非法", sub_value)
-                    (
-                        range_errors
-                        if isinstance(sub_value, (int, float))
-                        and not isinstance(sub_value, bool)
-                        and _is_number(sub_value)
-                        else type_errors
-                    ).append(item)
+                if isinstance(sub_kind, dict):
+                    checked += 1
+                    sub_ok, sub_reason = _check_object_subkeys(sub_kind, sub_value, sub_path)
+                    if not sub_ok:
+                        item = _issue(sub_path, sub_reason or "类型/范围非法", sub_value)
+                        (
+                            range_errors
+                            if isinstance(sub_value, (int, float))
+                            and not isinstance(sub_value, bool)
+                            and _is_number(sub_value)
+                            else type_errors
+                        ).append(item)
+                else:
+                    checked += 1
+                    sub_ok, sub_reason = _check_scalar(sub_kind, sub_value)
+                    if not sub_ok:
+                        item = _issue(sub_path, sub_reason or "类型/范围非法", sub_value)
+                        (
+                            range_errors
+                            if isinstance(sub_value, (int, float))
+                            and not isinstance(sub_value, bool)
+                            and _is_number(sub_value)
+                            else type_errors
+                        ).append(item)
 
     def _int(key):
         value = config.get(key)
