@@ -105,11 +105,40 @@ ABC/`lega`）与去一法（Full/Full−A/Full−B/Full−C）全部实现；无
 
 ## 3. 快速开始
 
-### 3.1 安装
+### 3.1 环境要求
+
+- **Python**：3.10+（推荐 3.12）
+- **PyTorch**：>=2.1（建议 2.14.1，参考 `requirements-lock.txt`）
+- **CUDA**：GPU 环境下建议 CUDA 12.1+（计算能力 >= 7.0）
+- **CPU 环境**：可直接使用 PyTorch CPU 版
+
+### 3.2 安装
+
+**首选推荐（使用锁定版本）**：
 
 ```bash
-pip install -r requirements.txt          # torch / numpy / tiktoken / matplotlib
-# 可选: pip install pyarrow wandb
+# 完整可复现安装（CPU 环境）
+pip install -r requirements-lock.txt
+
+# 可选依赖
+pip install pyarrow    # scripts/prepare_data.py 的 parquet 下载路径
+pip install wandb      # 实验日志记录：pip install wandb && wandb login
+```
+
+**灵活开发安装（非正式实验）**：
+
+```bash
+# 基本依赖（最小版本）
+pip install -r requirements.txt
+
+# GPU 环境下（如果需要 CUDA 支持）
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+**可选：开发模式安装**：
+
+```bash
+pip install -e ".[dev]"    # 包含 pytest 等开发依赖
 ```
 
 ### 3.2 冒烟测试（推荐先跑，CPU 几分钟）

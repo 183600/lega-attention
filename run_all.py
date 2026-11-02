@@ -14,5 +14,10 @@ from lega.pipeline import *  # noqa: E402,F401,F403
 from lega.pipeline import main  # noqa: E402
 
 
+def main_entry():
+    """CLI 入口函数，用于 pyproject.toml 中的脚本注册。"""
+    main()
+
+
 if __name__ == "__main__":
     main()

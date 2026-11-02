@@ -1,3 +1,7 @@
+# LEGA Attention 运行依赖（松散版本号，适合开发环境）
+# 使用 requirements-lock.txt 获取可复现的锁定版本
+# 参考 README.md 或 pyproject.toml 获取完整安装指引
+
 torch>=2.1
 numpy>=1.24
 tiktoken>=0.5
