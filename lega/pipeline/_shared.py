@@ -26,7 +26,8 @@ from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
                             _USE_QUERY, _USE_RAW_CONC)
 from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
                            CAPACITY_OFF_VARIANTS, COMPONENT_CN,
-                           EFFECT_CN, EFFECT_ORDER, component_effects)
+                           EFFECT_CN, EFFECT_ORDER, NULL_EVIDENCE_COMPONENT,
+                           component_effects)
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER,

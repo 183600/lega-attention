@@ -624,6 +624,145 @@ def _audit_dose_response_components(problems):
     return audited
 
 
+def _audit_capacity_triple_components(problems, normalized):
+    """核对训练期容量匹配三臂仍是逐组件的单因子对照。
+
+    容量分解把同一组件的 Full/Null_X/No_X 配对成两条边：Full−Null_X 只把
+    X 的证据置零（参数保留），Null_X−No_X 只去掉 X 的参数（两侧证据都为
+    0）。若 ``CAPACITY_NULL_VARIANTS``/``CAPACITY_OFF_VARIANTS`` 把某个
+    组件指到别的变体，或 Null_X 实际没有保留全部门控参数、混进了主 2^3
+    因子表，分解就会把多因子差异写成 info/capacity。这里核对映射恰好覆盖
+    A/B/C、Null_X 与 X 一一对应、No_X 与已审计的去一法变体一致。
+    """
+    expected = ("A", "B", "C")
+    nulls = globals().get("CAPACITY_NULL_VARIANTS")
+    offs = globals().get("CAPACITY_OFF_VARIANTS")
+    inverse = globals().get("NULL_EVIDENCE_COMPONENT")
+    for label, mapping in (("CAPACITY_NULL_VARIANTS", nulls),
+                           ("CAPACITY_OFF_VARIANTS", offs)):
+        if not isinstance(mapping, dict):
+            problems.append(f"{label} 必须是组件 -> 变体映射")
+            continue
+        for component in mapping:
+            if not isinstance(component, str):
+                problems.append(
+                    f"{label} 含非字符串组件键：{component!r}")
+            elif component not in expected:
+                problems.append(
+                    f"{label} 存在未登记组件：{component!r}")
+        missing = set(expected) - {
+            c for c in mapping if isinstance(c, str)}
+        if missing:
+            problems.append(
+                f"{label} 缺少组件：" + ", ".join(sorted(missing)))
+    if not isinstance(nulls, dict):
+        nulls = {}
+    if not isinstance(offs, dict):
+        offs = {}
+    if not isinstance(inverse, dict):
+        problems.append("NULL_EVIDENCE_COMPONENT 必须是变体 -> 组件映射")
+        inverse = None
+    else:
+        reverse = {v: c for c, v in nulls.items() if isinstance(v, str)}
+        if inverse != reverse:
+            problems.append(
+                "NULL_EVIDENCE_COMPONENT 与 CAPACITY_NULL_VARIANTS 不是"
+                f"互逆映射：inverse={inverse!r}，reverse={reverse!r}")
+    if not isinstance(normalized, dict):
+        normalized = {}
+    full_factors = normalized.get("lega")
+    if full_factors != frozenset(expected):
+        problems.append(
+            f"容量分解的 Full 变体 lega 因子集合为 "
+            f"{sorted(full_factors or ())}，应为 A/B/C")
+    rows = []
+    seen_null = {}
+    seen_off = {}
+    for component in expected:
+        null_variant = nulls.get(component)
+        off_variant = offs.get(component)
+        if not isinstance(null_variant, str) or not null_variant:
+            problems.append(
+                f"容量匹配组件 {component} 的 Null 变体非法："
+                f"{null_variant!r}")
+            null_variant = None
+        if not isinstance(off_variant, str) or not off_variant:
+            problems.append(
+                f"容量匹配组件 {component} 的 No 变体非法："
+                f"{off_variant!r}")
+            off_variant = None
+        if null_variant is not None:
+            prior = seen_null.get(null_variant)
+            if prior is not None:
+                problems.append(
+                    f"组件 {component} 与 {prior} 共用容量匹配 Null 变体 "
+                    f"{null_variant!r}")
+            else:
+                seen_null[null_variant] = component
+            if null_variant == off_variant:
+                problems.append(
+                    f"组件 {component} 的 Null 与 No 变体相同："
+                    f"{null_variant!r}")
+            if inverse is not None and inverse.get(null_variant) != component:
+                problems.append(
+                    f"容量匹配 Null 变体 {null_variant!r} 对应组件为 "
+                    f"{inverse.get(null_variant)!r}，应为 {component!r}")
+            for key, collection in (("RUNNABLE_VARIANTS", RUNNABLE_VARIANTS),
+                                    ("CONTROL_VARIANTS", CONTROL_VARIANTS),
+                                    ("NULL_EVIDENCE_VARIANTS",
+                                     NULL_EVIDENCE_VARIANTS),
+                                    ("_GATED", _GATED),
+                                    ("_LEGA_FAMILY", _LEGA_FAMILY)):
+                if null_variant not in collection:
+                    problems.append(
+                        f"容量匹配 Null 变体 {null_variant!r} 不在 "
+                        f"{key} 中，无法保留全部门控参数/计算")
+            if null_variant in GATE_FACTORS:
+                problems.append(
+                    f"容量匹配 Null 变体 {null_variant!r} 混入了主 A/B/C "
+                    "因子表；它只把证据置零，不能当作结构格")
+            if (isinstance(RAW_GATE_FACTORS, dict)
+                    and null_variant in RAW_GATE_FACTORS):
+                problems.append(
+                    f"容量匹配 Null 变体 {null_variant!r} 混入了原始参数化"
+                    "因子表")
+        if off_variant is not None:
+            prior = seen_off.get(off_variant)
+            if prior is not None:
+                problems.append(
+                    f"组件 {component} 与 {prior} 共用去一法 No 变体 "
+                    f"{off_variant!r}")
+            else:
+                seen_off[off_variant] = component
+            wanted = _FACTOR_LOO_VARIANT.get(component)
+            if off_variant != wanted:
+                problems.append(
+                    f"容量匹配组件 {component} 的 No 变体为 "
+                    f"{off_variant!r}，应为去一法变体 {wanted!r}")
+            wanted_factors = frozenset(expected) - frozenset({component})
+            actual = normalized.get(off_variant)
+            if actual != wanted_factors:
+                problems.append(
+                    f"容量匹配组件 {component} 的 No 变体 {off_variant!r} "
+                    f"因子集合为 {sorted(actual or ())}，应为 "
+                    f"{sorted(wanted_factors)}")
+        if null_variant is not None and off_variant is not None:
+            rows.append({
+                "component": component,
+                "full_variant": "lega",
+                "null_variant": null_variant,
+                "off_variant": off_variant,
+                "evidence_param": _FACTOR_PARAM[component],
+                "evidence_capability": _FACTOR_CAPABILITY[component],
+            })
+    overlap = set(seen_null) & set(seen_off)
+    if overlap:
+        problems.append(
+            "容量匹配 Null 变体不能同时作为去一法 No 变体："
+            + ", ".join(sorted(overlap)))
+    return rows
+
+
 def changed_gate_factors(candidate, reference):
     """两个门控变体之间激活因子集合的对称差；任一方不在门控内返回 None。
 
@@ -962,6 +1101,8 @@ def single_factor_audit():
     reparameterization_contrasts = _audit_reparameterization_contrasts(
         normalized, problems)
     dose_components = _audit_dose_response_components(problems)
+    capacity_components = _audit_capacity_triple_components(
+        problems, normalized)
     matched_lesions, permutation_lesions, inference_cells = (
         _audit_inference_single_factor_design(problems))
     alt_conc = _audit_alt_conc_variants(problems)
@@ -971,6 +1112,7 @@ def single_factor_audit():
             "factors": {v: sorted(f) for v, f in sorted(normalized.items())},
             "reparameterization_contrasts": reparameterization_contrasts,
             "dose_response_components": dose_components,
+            "capacity_components": capacity_components,
             "inference_matched_lesions": matched_lesions,
             "inference_permutation_lesions": permutation_lesions,
             "inference_factorial_cells": inference_cells,
@@ -979,9 +1121,10 @@ def single_factor_audit():
                      "X-only vs gate_only；整体对比（vs standard、LEGA vs "
                      "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
                      "归一化/原始参数化的单因子边、剂量-反应的 A/B/C 参数"
-                     "映射、推理期单病灶、活动匹配、A/B/C 分布匹配置换、"
-                     "2^3 格的因子映射，以及替代集中度统计的 B-only 构念"
-                     "对照（lega_l2/lega_entropy 不进入主因子表）。")}
+                     "映射、训练期容量匹配 Full/Null_X/No_X 三臂、推理期"
+                     "单病灶、活动匹配、A/B/C 分布匹配置换、2^3 格的因子"
+                     "映射，以及替代集中度统计的 B-only 构念对照"
+                     "（lega_l2/lega_entropy 不进入主因子表）。")}
 
 
 def build_comparison_pairs(runs, registered=None):
