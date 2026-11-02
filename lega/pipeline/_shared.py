@@ -71,6 +71,9 @@ from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
 from lega.replication import replication_forecast  # noqa: E402
 from lega.multiverse import (attach_to_hypotheses,  # noqa: E402
                              paired_specification, specification_curve)
+from lega.ranking import (analyze_ranking,  # noqa: E402
+                          bootstrap_rank_stability,
+                          permutation_selection_test, ranking_table)
 from lega.missingness import (aggregate_missingness,  # noqa: E402
                               paired_missingness)
 from lega.heterogeneity import (  # noqa: E402

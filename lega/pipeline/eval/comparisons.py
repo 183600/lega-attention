@@ -849,6 +849,156 @@ def _render_missingness_section(analysis) -> list:
     return md
 
 
+def _ranking_analysis(runs, min_seeds=MIN_SEEDS) -> dict:
+    """多方案排名稳定性与选择校正检验（探索性、描述性）。
+
+    现有配对表以 ``standard`` 为参照逐一比较，但“LEGA 是这批方案里最好的”
+    是一个**选择**陈述：最优方案是从多个相关、带噪的方案中挑出的最大值。
+    本层把同一指标下所有变体的逐种子观测放在一起，计算名次、种子
+    bootstrap 的最优概率，以及“方案标签在种子内可交换”的选择校正置换
+    检验。它不替代任何成对检验，也不改变预注册判定。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    variants = [v for v in sorted(runs) if isinstance(v, str)]
+    out = {
+        "method": ("逐种子秩统计 + 种子 bootstrap + 种子内标签置换的"
+                   "选择校正检验（探索性、描述性）"),
+        "min_seeds": min_seeds,
+        "metrics": {},
+        "note": ("排名分析回答“最优方案是否只是从多个方案中挑出的最大值”"
+                 "与“换种子后排名是否稳定”，不回答某个组件是否有效；"
+                 "它不进入 Holm/FWER，不改变预注册判定，也不能替代效应量、"
+                 "SESOI/TOST、MDE 或成对检验。bootstrap 只覆盖训练种子，"
+                 "不覆盖评测窗口/样例抽样。"),
+    }
+    specs = (
+        ("PPL", lambda slot: _ppl_of(slot.get("eval")), True),
+        ("RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")), False),
+    )
+    for metric, extractor, lower_better in specs:
+        scores = {}
+        for variant in variants:
+            seed_slots = runs.get(variant)
+            if not isinstance(seed_slots, dict):
+                continue
+            values = {}
+            for seed, slot in seed_slots.items():
+                if not isinstance(slot, dict):
+                    continue
+                value = _finite_number(extractor(slot))
+                if value is not None:
+                    values[seed] = value
+            if values:
+                scores[variant] = values
+        if len(scores) < 2:
+            out["metrics"][metric] = {
+                "available": False,
+                "status": "insufficient_variants",
+                "reason": "少于两个有该指标观测的变体，无法排名",
+                "table": None, "bootstrap": None, "selection_test": None,
+            }
+            continue
+        try:
+            out["metrics"][metric] = analyze_ranking(
+                scores, lower_is_better=lower_better, min_seeds=min_seeds,
+                n_bootstrap=2000, n_permutations=5000, seed=0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            out["metrics"][metric] = {
+                "available": False,
+                "status": "invalid",
+                "reason": f"排名分析不可用：{exc}",
+                "table": None, "bootstrap": None, "selection_test": None,
+            }
+    return out
+
+
+def _render_ranking_section(ranking) -> list:
+    """渲染多方案排名/选择校正小节；只展示可机读的描述性证据。"""
+    def _fmt_num(value, spec: str = ".3f") -> str:
+        f = _finite_number(value)
+        return "-" if f is None else format(f, spec)
+
+    md = ["", "### 多方案排名与选择校正（winner's curse；探索性）", ""]
+    if not isinstance(ranking, dict):
+        md.append("（本次汇总未计算排名稳定性分析。）")
+        return md
+    md.append("现有配对表逐一回答“候选 vs 参照”，但“最优方案”本身是从多个"
+              "相关、带噪的方案中挑出的最大值。下表按每个种子内的名次分析："
+              "报告平均名次、逐种子最优次数与种子 bootstrap 的“再选一次仍"
+              "最优”概率，并用**种子内标签置换**校验观察到的领先是否超过"
+              "纯选择效应（p_max）。本层不进入 Holm/FWER，不改变预注册判定；"
+              "bootstrap 只重采样训练种子，不覆盖评测抽样。")
+    metrics = ranking.get("metrics")
+    if not isinstance(metrics, dict) or not metrics:
+        md.append("")
+        md.append("（没有可分析的指标。）")
+        return md
+    for metric, payload in metrics.items():
+        md += ["", f"#### {metric}", ""]
+        if not isinstance(payload, dict) or not payload.get("available"):
+            reason = (payload.get("reason") if isinstance(payload, dict)
+                      else None) or "不可用"
+            md.append(f"- 未生成排名证据：{reason}。")
+            continue
+        table = payload.get("table") or {}
+        boot = payload.get("bootstrap") or {}
+        boot_rows = {row.get("variant"): row
+                     for row in (boot.get("rows") or [])
+                     if isinstance(row, dict)}
+        md += ["| 变体 | 平均名次 | 名次范围 | 逐种子最优 | 最优概率(bootstrap) | "
+               "平均名次 95% 区间 |", "|---|---|---|---|---|---|"]
+        for row in (table.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            variant = row.get("variant")
+            brow = boot_rows.get(variant) or {}
+            ci = brow.get("mean_rank_ci95")
+            ci_text = ("-"
+                       if (not isinstance(ci, (list, tuple)) or len(ci) != 2)
+                       else f"[{_fmt_num(ci[0])}, {_fmt_num(ci[1])}]")
+            top = brow.get("top_probability")
+            md.append(
+                f"| {variant} | {_fmt_num(row.get('mean_rank'))} | "
+                f"{_fmt_num(row.get('min_rank'))}–"
+                f"{_fmt_num(row.get('max_rank'))} | "
+                f"{row.get('best_seed_count')}/{row.get('n')} | "
+                f"{f'{top:.0%}' if isinstance(top, (int, float)) else '-'} | "
+                f"{ci_text} |")
+        leader = table.get("leader")
+        if leader is None and table.get("leaders"):
+            md.append("")
+            md.append("- 平均名次并列领先：" + "、".join(
+                str(v) for v in table.get("leaders")) +
+                "；不声称单一最优方案。")
+        elif leader is not None:
+            md.append("")
+            md.append(f"- 平均名次最优：**{leader}**。")
+        test = payload.get("selection_test") or {}
+        if test.get("p_max") is not None:
+            lead = test.get("lead_over_runner_up")
+            inflation = test.get("selection_inflation")
+            md.append(
+                f"- 选择校正置换检验：p_max={test.get('p_max'):.4g}、"
+                f"p_range={test.get('p_range'):.4g}（Monte-Carlo，"
+                f"{test.get('n_permutations')} 次）；最优={test.get('winner')}、"
+                f"次优={test.get('runner_up')}、领先="
+                f"{_fmt_num(lead)}；观察领先相对纯选择期望的增量="
+                f"{_fmt_num(inflation)}。")
+            md.append("  说明：p_max 检验“是否存在任何方案差异/领先是否超过"
+                      "从 V 个方案中挑最大的选择效应”，不指定哪个方案更好；"
+                      "方案标签可交换性不成立（缺失机制/预算/协议不同）时"
+                      "只作线索。")
+        else:
+            md.append("- 选择校正置换检验不可用（共同种子不足）。")
+    md.append("")
+    md.append("注: 名次对单调变换稳健，PPL 不需要先取 log；并列名次取平均值，"
+              "平均名次差不是性能差。排名稳定不能替代成对效应量/SESOI，"
+              "成对检验不显著时也不能仅凭名次一致宣称方法更好。完整逐种子"
+              "名次、bootstrap 区间与选择检验字段见 `significance.json` 的 "
+              "`ranking`。")
+    return md
+
+
 def _render_ruler_heterogeneity_section(analysis) -> list:
     """渲染 RULER 任务/上下文异质性（探索性解释层）。"""
     md = ["", "### RULER 任务/长度异质性（探索性解释；不改变 H4）", ""]

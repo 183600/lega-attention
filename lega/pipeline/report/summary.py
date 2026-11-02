@@ -633,6 +633,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
     # RULER、全种子/留一种子等可辩护口径下重算；只披露结论是否依赖分析
     # 选择，不做多重校正，也不改变确认性判定。
     multiverse = _multiverse_analysis(runs, pairs)
+    ranking = _ranking_analysis(runs)
     # RULER 上下文长度剂量-反应（探索性）：只报跨长度平均会把“短涨长跌”
     # 与“全长度小涨”混成同一个数。独立 Holm 家族，不进入主检验表，也不
     # 改变预注册假设的确认性判定。
@@ -1691,6 +1692,7 @@ def _summary_part_a(results_dir: str, audit: dict = None,
         "missing_cov",
         "missing_evals",
         "multiverse",
+        "ranking",
         "n_short_tt",
         "n_short_tv",
         "n_short_vt",
@@ -1820,6 +1822,7 @@ def build_summary(results_dir: str, audit: dict = None,
         'dose_response': ctx["dose_tests"],
         'budget_sensitivity': ctx["budget_sensitivity"],
         'multiverse': ctx["multiverse"],
+        'ranking': ctx.get("ranking"),
         'test_reuse': ctx.get("test_reuse"),
     }
 

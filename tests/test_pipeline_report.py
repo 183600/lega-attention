@@ -88,6 +88,12 @@ def test_build_summary_worst_windows_and_cross_variant():
         md = out["markdown"]
         assert "跨变体错误对照" in md and "方法特异性" in md
         assert "语言建模最差窗口" in md and "复读吸引子" in md
+        # 多方案排名/选择校正层必须同时进入 Markdown 与 significance.json
+        # （单种子时降级为“不可用”，但字段与解释不能被静默省略）。
+        assert "多方案排名与选择校正" in md
+        sig = json.load(open(os.path.join(tmp, "significance.json"),
+                             encoding="utf-8"))
+        assert "ranking" in sig and "ranking_note" in sig
         cross_path = os.path.join(tmp, "badcase_cross.json")
         assert os.path.exists(cross_path)
         cross = json.load(open(cross_path, encoding="utf-8"))

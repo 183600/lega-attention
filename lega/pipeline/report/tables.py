@@ -220,6 +220,7 @@ def _summary_part_c(**kw):
     if "registered" in kw:
         registered = kw["registered"]
     multiverse = kw.get("multiverse")
+    ranking = kw.get("ranking")
     missingness = kw.get("missingness")
     reparameterization = kw.get("reparameterization")
     if "results_dir" in kw:
@@ -429,6 +430,7 @@ def _summary_part_c(**kw):
     # --- 分析选择多重宇宙（探索性）：结论是否依赖原始/log、macro/micro、
     #     全种子/留一这些同样可辩护的口径。
     md += _render_multiverse_section(multiverse)
+    md += _render_ranking_section(ranking)
 
     # --- 缺失结果敏感性（探索性）：完成者分析是否足以代表计划人群；
     #     只披露缺失模式/临界点/观测范围边界，不改变预注册判定。
@@ -1105,6 +1107,14 @@ def _summary_part_c(**kw):
                        "不替代 t/置换/TOST/MDE；每对比较的完整 BF、后验方向/"
                        "区间、ROPE 质量、先验尺度敏感性见 pairs[].bayes。"),
                    "multiverse": multiverse,
+                   "ranking": ranking,
+                   "ranking_note": (
+                       "多方案排名与选择校正（探索性）：逐种子名次 + 种子 "
+                       "bootstrap 最优概率 + 种子内标签置换的选择校正检验，"
+                       "回答“最优方案是否只是从多个相关方案中挑出的最大值”。"
+                       "不进入 Holm/FWER，不改变预注册判定；bootstrap 只"
+                       "覆盖训练种子，不覆盖评测抽样；p_max 不指定哪个方案"
+                       "更好，不能替代成对效应量/SESOI/MDE。"),
                    "missingness": missingness,
                    "missingness_note": (
                        "缺失结果敏感性（探索性）：计划内 (变体, 种子) 单元"
