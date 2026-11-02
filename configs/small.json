@@ -59,7 +59,15 @@
     "power": 0.8,
     "multiplicity": "holm_worst_case",
     "run_order": "randomized_blocked",
-    "test_look_budget": 1
+    "test_look_budget": 1,
+    "length_stratification": {
+      "enabled": true,
+      "lengths": [64, 128, 256, 512, 1024],
+      "n_windows": 4,
+      "query_positions": 2,
+      "bootstrap": 200,
+      "tolerance": 0.05
+    }
   },
 
   "ruler": {

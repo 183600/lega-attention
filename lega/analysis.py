@@ -1284,5 +1284,76 @@ def main():
     print(f"[analysis] 完成 -> {args.out_dir}")
 
 
+
+
+def length_stratification_analysis(records: List[Dict], n_bins: int = 5) -> Dict:
+    """Separate length-stratified analysis: analyze records stratified by context length.
+    
+    This function is independent of summarize() and robust against malformed records.
+    Returns dict: {bin_key: {"n": int, "hit_rate": float|None, "mean_g": float|None}}.
+    """
+    import numpy as np
+    from typing import List, Dict
+    
+    # Extract ctx values, skip non-dict records
+    ctx_vals = []
+    for r in records:
+        if isinstance(r, dict) and "ctx" in r:
+            try:
+                ctx_vals.append(float(r["ctx"]))
+            except (ValueError, TypeError):
+                ctx_vals.append(np.nan)
+        else:
+            ctx_vals.append(np.nan)
+    ctx_arr = np.array(ctx_vals, dtype=float)
+    
+    # Divide into bins
+    ctx_valid = ctx_arr[~np.isnan(ctx_arr)]
+    if not ctx_valid.any():
+        return {}
+    c_min, c_max = float(ctx_valid.min()), float(ctx_valid.max())
+    if c_min == c_max:
+        bins = {f"len_{int(c_min)}": np.ones_like(ctx_valid, dtype=bool)}
+    else:
+        edges = np.linspace(c_min, c_max, n_bins + 1)
+        bins = {}
+        for i in range(n_bins):
+            lo, hi = edges[i], edges[i + 1]
+            mask = (ctx_arr > lo) & (ctx_arr <= hi)
+            if mask.sum() > 0:
+                band_key = f"len_{int(lo)}-{int(hi)}"
+                bins[band_key] = mask
+        # Boundary bins
+        if (ctx_arr <= edges[1]).sum() > 0:
+            bins.setdefault(f"len_{int(c_min)}-{int(edges[1])}", (ctx_arr <= edges[1]))
+        if (ctx_arr > edges[-2]).sum() > 0:
+            bins.setdefault(f"len_{int(edges[-2])}-{int(c_max)}", (ctx_arr > edges[-2]))
+    
+    # Per-bin statistics
+    result = {}
+    for bin_key, bin_mask in bins.items():
+        n_bin = int(bin_mask.sum())
+        if n_bin == 0:
+            continue
+        # Compute hit_rate
+        hit_vals = []
+        g_vals = []
+        for i, r in enumerate(records):
+            if isinstance(r, dict) and bin_mask[i]:
+                if "hit" in r and r["hit"] is not None:
+                    try:
+                        hit_vals.append(float(r["hit"]))
+                    except (ValueError, TypeError):
+                        pass
+                if "g" in r and r["g"] is not None:
+                    try:
+                        g_vals.append(float(r["g"]))
+                    except (ValueError, TypeError):
+                        pass
+        hit_rate = float(np.nanmean(hit_vals)) if hit_vals else None
+        mean_g = float(np.nanmean(g_vals)) if g_vals and not all(np.isnan(g_vals)) else None
+        result[bin_key] = {"n": n_bin, "hit_rate": hit_rate, "mean_g": mean_g}
+    return result
+
 if __name__ == "__main__":
     main()
