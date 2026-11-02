@@ -1,4 +1,5 @@
 """测试集访问账本与数据报告组装。"""
+from ..ledger import chain_record, verify_chain
 from ._shared import _install as _shared_install
 
 _shared_install(globals())
@@ -41,6 +42,9 @@ def append_test_access(data_dir: str, record: dict) -> dict:
         records = read_test_access_log(data_dir)
         entry = dict(record)
         entry.setdefault("time", time.strftime("%Y-%m-%d %H:%M:%S"))
+        # 附加 SHA-256 链：删除/重排/改写中间记录会破坏链接，而不是被当作
+        # “从未评测过”。链只提供可发现性（非防伪），见 lega.ledger。
+        entry = chain_record(entry, records[-1] if records else None)
         records.append(entry)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -124,6 +128,9 @@ def summarize_test_access(records) -> dict:
         "records_without_test_data_fingerprint": int(without_fingerprint),
         "first_time": records[0].get("time") if records else None,
         "last_time": records[-1].get("time") if records else None,
+        # 链完整性：旧账本没有链字段时 legacy_records>0、fully_chained=False，
+        # 不能把“未记录”当成“未篡改”；issues 非空说明中间记录被改写/删除/重排。
+        "ledger_integrity": verify_chain(records),
     }
 
 

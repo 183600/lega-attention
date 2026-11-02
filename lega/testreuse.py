@@ -78,11 +78,22 @@ def test_reuse_report(test_access, current_test_fingerprint,
         "exceeded": False,
         "unverifiable": False,
         "look_adjusted_alpha": None,
+        "ledger_integrity_ok": None,
+        "ledger_chain_issue_count": 0,
         "reason": None,
     }
     if not isinstance(test_access, dict):
         report["reason"] = "缺少测试集访问摘要，无法核对独立 look 次数"
         return report
+    integrity = test_access.get("ledger_integrity")
+    if isinstance(integrity, dict):
+        report["ledger_integrity_ok"] = integrity.get("ok")
+        issues = integrity.get("issues")
+        report["ledger_chain_issue_count"] = (
+            len(issues) if isinstance(issues, list) else 0)
+    # 链断裂说明账本中间记录被改写/删除/重排，“观测到几个 look”本身不可信。
+    # 旧账本没有链字段时 ok=True、legacy_records>0，不在这里误伤。
+    chain_broken = report["ledger_integrity_ok"] is False
     looks = test_access.get("looks_by_test_data_fingerprint")
     if not isinstance(looks, dict):
         report["reason"] = (
@@ -111,12 +122,16 @@ def test_reuse_report(test_access, current_test_fingerprint,
         "current_run_in_ledger": (None if current is None
                                   else current in run_ids),
         "exceeded": observed > planned,
-        "unverifiable": bool(unattributed),
+        "unverifiable": bool(unattributed or chain_broken),
     })
     if isinstance(alpha, (int, float)) and not isinstance(alpha, bool) \
             and 0.0 < float(alpha) < 1.0:
         report["look_adjusted_alpha"] = float(alpha) / planned
-    if report["exceeded"]:
+    if chain_broken:
+        report["reason"] = (
+            "测试集访问账本的 SHA-256 链断裂（中间记录被改写/删除/重排），"
+            "无法确认独立 look 次数")
+    elif report["exceeded"]:
         report["reason"] = (
             f"当前测试版本已被 {observed} 个独立流水线运行访问，"
             f"超过预注册预算 {planned}")
@@ -159,6 +174,13 @@ def apply_test_reuse_gate(hyp_eval, reuse_report, dependent_metrics,
                 metric.startswith(dep) for dep in deps):
             continue
         if h.get("confirmatory_valid") is False:
+            continue
+        if reuse.get("ledger_integrity_ok") is False:
+            h["confirmatory_valid"] = False
+            h["confirmatory_note"] = (
+                "测试集访问账本的 SHA-256 链断裂：无法确认 test look 次数，"
+                "依赖测试集的确认性判定降级为探索性")
+            h["test_ledger_integrity_ok"] = False
             continue
         if exceeded:
             reason = (

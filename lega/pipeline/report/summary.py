@@ -1538,6 +1538,19 @@ def _summary_part_a(results_dir: str, audit: dict = None,
             md.append(f"- 测试集尘封账本：累计 test 评测 {ta.get('evaluations', 0)} 次、"
                       f"不同 checkpoint {ta.get('distinct_checkpoints', 0)} 个"
                       f"{warn}。测试集只用于最终评估；据此调参即视为泄露。")
+            chain = _as_dict(ta.get("ledger_integrity"))
+            if chain:
+                if chain.get("ok") is False:
+                    md.append(
+                        "- ⚠ 测试集访问账本哈希链断裂：中间记录可能被改写/"
+                        "删除/重排；依赖 test 的确认性判定已降级为探索性。")
+                elif chain.get("legacy_records"):
+                    md.append(
+                        f"- 测试集访问账本链：{chain.get('chained_records', 0)} "
+                        f"条已链接、{chain.get('legacy_records', 0)} 条旧格式"
+                        "记录无链字段（旧记录无法事后补链，不能当作已核验）。")
+                elif chain.get("fully_chained") is True:
+                    md.append("- 测试集访问账本链：全部记录通过 SHA-256 链校验。")
             if test_reuse.get("checked") is True \
                     and test_reuse.get("current_test_data_fingerprint"):
                 planned = test_reuse.get("planned_looks")

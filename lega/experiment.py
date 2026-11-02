@@ -21,6 +21,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from .ledger import chain_record, verify_chain
 from .repro import ROOT, sha256_file
 from .utils import (data_rng_state_fingerprint, expected_rng_state_fingerprint,
                     seed_int, strict_int)
@@ -56,15 +57,35 @@ def new_run_id(tag: str, config_sha256: str = None, ts: str = None) -> str:
 
 
 def append_record(path: str, record: dict) -> None:
-    """把一条记录以一行 JSON 追加到台账；加锁 + fsync，保证并发安全与落盘。"""
-    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    """把一条记录以一行 JSON 追加到台账；加锁 + fsync，保证并发安全与落盘。
+
+    写入前读取最后一条有效记录并附加 SHA-256 链（``prev_record_sha256`` /
+    ``record_sha256``）。链让“删除中间记录、重排记录、手改字段”这类仅靠
+    生命周期检查看不出的篡改变得可发现；读取发生在同一把 flock 内，避免
+    两个并发写者把链链接到同一条旧记录上。
+    """
     d = os.path.dirname(os.path.abspath(path))
     if d:
         os.makedirs(d, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "a+", encoding="utf-8") as f:
         if fcntl is not None:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
+            f.seek(0)
+            previous = None
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    previous = rec
+            entry = chain_record(record, previous)
+            line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
+            f.seek(0, os.SEEK_END)
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
@@ -428,8 +449,13 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
     path = path or ledger_path()
     root = root or ROOT
     recs = read_records(path)
+    chain = verify_chain(recs)
     grouped = {}
     issues = []
+    if not chain["ok"]:
+        issues.append({"issue": "ledger_chain_broken",
+                       "chain_issues": chain["issues"][:max_reported],
+                       "chain_issue_count": len(chain["issues"])})
     for i, rec in enumerate(recs):
         rid = rec.get("run_id")
         if not isinstance(rid, str) or not rid:
@@ -628,6 +654,7 @@ def verify_ledger(path: str = None, check_artifacts: bool = False,
             :max_reported],
         "runs": run_details,
         "artifacts_checked": bool(check_artifacts),
+        "chain": chain,
         "report_capped": capped,
     }
 

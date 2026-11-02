@@ -146,14 +146,19 @@ def test_seal_precheck(raw_test_access, planned_looks=DEFAULT_PLANNED_LOOKS,
     unattributed = (unattributed if isinstance(unattributed, int)
                     and not isinstance(unattributed, bool) else 0)
     exhausted = prior_looks >= planned
+    chain_broken = report.get("ledger_integrity_ok") is False
     can_start = (report.get("checked") is True and fingerprint is not None
-                 and not exhausted and unattributed == 0)
+                 and not exhausted and unattributed == 0
+                 and not chain_broken)
     if not raw:
         reason = "未提供数据目录/访问账本，无法核对测试集尘封"
     elif fingerprint is None:
         reason = "当前数据没有 test.bin 指纹：本轮不消费测试集"
     elif report.get("checked") is not True:
         reason = str(report.get("reason") or "访问账本不可核对")
+    elif chain_broken:
+        reason = ("测试集访问账本哈希链断裂（中间记录被改写/删除/重排），"
+                  "无法确认独立 look 次数")
     elif exhausted:
         reason = (f"开跑前同一测试版本已有 {prior_looks} 个独立 look，"
                   f"达到/超过预算 {planned}；本轮不能再产生确认性 test 证据")
