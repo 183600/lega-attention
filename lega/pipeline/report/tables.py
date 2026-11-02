@@ -1091,15 +1091,20 @@ def _summary_part_c(**kw):
                        "分析、多重宇宙、缺失敏感性与逐 step 预算轨迹。q 不"
                        "改变任何 Holm/FWER 判定，也不把探索性发现升级为"
                        "确认性。"),
-                   "note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
-                            f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
-                            f"n<{MIN_SEEDS} 不判定显著性；"
-                            "d_z 为配对 Cohen's d 效应量。p_perm/p_perm_adj 为"
-                            "符号翻转置换检验（分布无关，n≤16 精确）的原始/家族内"
-                            "Holm 校正值，t 与置换结论冲突时见 t_perm_agree 与"
-                            "verdict 中的 ⚠ 标注；mean_diff_ci95 为配对差 "
-                            "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
-                            "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"),
+"note": (f"同种子配对 t 检验；结论基于同一指标家族内 "
+                         f"Holm–Bonferroni 校正后的 p_adj（alpha={ALPHA}），"
+                         f"n<{MIN_SEEDS} 不判定显著性；"
+                         "d_z 为配对 Cohen's d 效应量。p_perm/p_perm_adj 为"
+                         "符号翻转置换检验（分布无关，n≤16 精确）的原始/家族内"
+                         "Holm 校正值，t 与置换结论冲突时见 t_perm_agree 与"
+                         "verdict 中的 ⚠ 标注；mean_diff_ci95 为配对差 "
+                         "bootstrap 95% 区间；mde 为当前种子数/方差下 80% "
+                         "功效的最小可检测效应（不显著时先对照 MDE 再下结论）"
+                         "；预注册 status: {status}，SHA-256: {sha_256}"
+                         "。仅当 status ∈ {{intact, amended}} 时确认性判定有效。"
+                         "详见 significance.json 的 registration_integrity 字段。").format(
+                             status=integrity.get("status", "unknown"),
+                             sha_256=integrity.get("registry_sha256", "N/A")[:16] + "..." if integrity.get("registry_sha256") else "N/A"),
                    "equivalence": _equivalence_overview(tests),
                    "bayes": _bayes_overview(tests),
                    "bayes_note": (

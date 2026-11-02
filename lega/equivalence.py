@@ -309,6 +309,16 @@ def _one_sided_lower(t, df):
     return p2 / 2.0 if t <= 0 else 1.0 - p2 / 2.0
 
 
+def _cohen_d(mean_diff, std_diff):
+    """配对 Cohen's d = mean_diff / std_diff。
+
+    标准差为 0 时返回 None（无法标准化）。
+    """
+    if std_diff is None or std_diff == 0.0:
+        return None
+    return float(mean_diff / std_diff)
+
+
 def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
                     min_seeds: int = MIN_SEEDS) -> dict:
     """对已变换的配对差做 TOST；返回完整统计量，不依赖原始 a/b。
@@ -342,6 +352,7 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
         "status": "insufficient_seeds" if n < min_seeds else "undetermined",
         "note": ("margin 为分析前声明的 SESOI；等价=差异小于 SESOI，"
                  "不是“效应恰为 0”；n<3 不作判定。"),
+        "cohen_d": None,
     }
     if n == 0:
         result["note"] = "无有效配对观测，无法做等价性检验。"
@@ -383,6 +394,8 @@ def tost_from_diffs(diffs, margin: float, alpha: float = DEFAULT_ALPHA,
         return _invalid_result(result, "标准差超出 float 表示范围")
     df = n - 1
     result.update({"df": df, "std_diff": float(sd)})
+    # 配对 Cohen's d：mean_diff / std_diff；std=0 时为 None
+    result["cohen_d"] = _cohen_d(result["mean_diff"], result["std_diff"])
     if sd == 0.0:
         se = 0.0
         p_low = 0.0 if mean > -margin else 1.0
@@ -511,13 +524,21 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
                               alpha: float = DEFAULT_ALPHA,
                               margin=None,
                               min_seeds: int = MIN_SEEDS,
-                              sensitivity: bool = True):
+                              sensitivity: bool = True,
+                              n_bootstrap: int = 2000,
+                              bootstrap_seed: int = 42):
     """对一组配对观测做“SESOI 解释层”，返回 None 表示该指标未定义 SESOI。
 
     返回 dict 既包含 TOST 原始统计量，也包含方向/是否超过 SESOI/非劣性与
     0.5×/1×/2× 敏感性网格。最终 status 由 ``interpret_equivalence`` 在
     Holm 校正后写入（调用方负责）。
+
+    额外增强：
+    - ``bootstrap_ci95``：配对差的 95% 足位 bootstrap 置信区间（固定种子复现）。
+    - ``cohen_d``：配对 Cohen's d 效应量（从 tost_from_diffs 继承）。
     """
+    import numpy as np
+    from .utils import bootstrap_mean_ci
     spec = metric_margin(metric)
     if spec is None:
         return None
@@ -540,6 +561,9 @@ def assess_paired_equivalence(a, b, metric, lower_is_better: bool = False,
         "replication": replication_forecast(
             diffs, margin=margin, alpha=alpha, min_seeds=min_seeds),
     })
+    # bootstrap CI for mean difference（固定种子复现，描述性不取代 t-CI）
+    bc = bootstrap_mean_ci(diffs, n_resamples=n_bootstrap, seed=bootstrap_seed)
+    out["bootstrap_ci95"] = bc
     mean = out.get("mean_diff")
     if mean is not None:
         if mean == 0.0:
