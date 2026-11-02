@@ -20,6 +20,8 @@ import hashlib
 import json
 import math
 import os
+import platform
+import sys
 from typing import List
 
 import numpy as np
@@ -830,6 +832,10 @@ def prepare_bins(
         },
         "train_tokens": int(tr.size),
         "val_tokens": int(va.size),
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "numpy_version": np.__version__,
+        "torch_version": torch.__version__,
     }
     if te is not None:
         meta["test_tokens"] = int(te.size)
