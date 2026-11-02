@@ -230,6 +230,25 @@ def _optional_positive_int(value, name: str):
         return None, str(e)
 
 
+def _look_adjusted_alpha(alpha, planned_looks):
+    """把确认性阈值再按 test look 预算收紧；不可表示时返回 (None, False)。
+
+    汇总层对依赖 test 的假设比较 ``p_adj_confirmatory`` 与
+    ``alpha/planned_looks``，因此先验功效的最坏情形负担是
+    ``alpha/(m·planned_looks)``。这里只负责 look 这一层乘法，输入已是
+    家族/全局 Holm 校正后的 ``alpha_eff``。
+    """
+    if planned_looks <= 1:
+        return alpha, True
+    try:
+        out = alpha / planned_looks
+    except (OverflowError, ZeroDivisionError):
+        return None, False
+    if not (math.isfinite(out) and out > 0.0):
+        return None, False
+    return float(out), True
+
+
 def _accounting_tokens(data_report, split: str):
     """从 data_report.accounting 读取某 split 的 token 数（损坏则 None）。"""
     report = _as_dict(data_report)
@@ -671,6 +690,32 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "超出后依赖测试集的确认性判定降级为探索性"
             + ("" if explicit_look_budget else "（未显式声明，采用默认 1 次）")))
 
+    # 汇总层对依赖 test 的确认性判定还会施加 alpha/planned_looks 的 look
+    # 校正；先验功效若不把这一层负担算进来，就会系统性高估可确认性。
+    ppl_alpha_look, ppl_look_representable = _look_adjusted_alpha(
+        ppl_alpha, test_look_budget)
+    ruler_alpha_look, ruler_look_representable = _look_adjusted_alpha(
+        ruler_alpha, test_look_budget)
+    if test_look_budget > 1:
+        ppl_look_txt = (f"{ppl_alpha_look:.6g}"
+                        if ppl_alpha_look is not None else "不可表示")
+        ruler_look_txt = (f"{ruler_alpha_look:.6g}"
+                          if ruler_alpha_look is not None else "不可表示")
+        look_detail = (
+            f"声明 {test_look_budget} 次独立 test look：汇总层会把依赖 test "
+            "的确认性阈值再收紧到 alpha/planned_looks，因此先验功效按 "
+            f"PPL α_eff={ppl_look_txt}、RULER α_eff={ruler_look_txt} 规划；"
+            "未乘 look 负担的旧口径仅保留作对照，不能用于判断设计是否足够")
+        if ppl_alpha_look is None or ruler_alpha_look is None:
+            look_detail += "；警告：look 负担过大导致校正阈值不可表示"
+        checks.append(_check(
+            "test_look_planning", "多次 test look 的功效负担", "warn",
+            look_detail))
+    else:
+        checks.append(_check(
+            "test_look_planning", "多次 test look 的功效负担", "info",
+            "test look 预算为 1：确认性功效不需要额外的 look 校正"))
+
     # ---- 开跑前准备：计划必须在消费 test 之前绑定数据字节并核对尘封
     # 账本；这两项写入计划 digest，事后替换数据或补写计划都会被发现。
     test_access = test_seal_precheck(raw_test_access, test_look_budget)
@@ -804,11 +849,20 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             mde_confirm = min_detectable_effect(
                 sd, n_seeds, ppl_alpha, power)
             pw_confirm = paired_t_power(ppl_margin, sd, n_seeds, ppl_alpha)
+            look_alpha = (ppl_alpha_look if ppl_look_representable else None)
+            mde_look = (min_detectable_effect(
+                sd, n_seeds, look_alpha, power)
+                if look_alpha is not None else None)
+            pw_look = (paired_t_power(ppl_margin, sd, n_seeds, look_alpha)
+                       if look_alpha is not None else None)
+            need_look = (required_pairs(ppl_margin, sd, look_alpha, power)
+                         if look_alpha is not None else None)
             pw_nct = (paired_t_power_nct(
                 ppl_margin, sd, n_seeds, alpha, n_sim=20000, seed=0)["power"]
                 if 2 <= n_seeds <= 10 else None)
         else:
             mde = pw = mde_confirm = pw_confirm = pw_nct = None
+            mde_look = pw_look = need_look = None
         ppl_rows.append({
             "paired_sd_relative": sd,
             "mde_relative": mde,
@@ -820,12 +874,18 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "power_for_sesoi_confirmatory": pw_confirm,
             "required_seeds_for_sesoi_confirmatory": required_pairs(
                 ppl_margin, sd, ppl_alpha, power),
+            "mde_relative_test_look_adjusted": mde_look,
+            "power_for_sesoi_test_look_adjusted": pw_look,
+            "required_seeds_for_sesoi_test_look_adjusted": need_look,
         })
     ppl_break_even = (max_sd_for_effect(ppl_margin, n_seeds, alpha, power)
                       if can_power else None)
     ppl_break_even_confirm = (
         max_sd_for_effect(ppl_margin, n_seeds, ppl_alpha, power)
         if can_power else None)
+    ppl_break_even_look = (
+        max_sd_for_effect(ppl_margin, n_seeds, ppl_alpha_look, power)
+        if can_power and ppl_look_representable else None)
     declared_ppl_sd = None
     declared_disc = None
     if "ppl_paired_sd_rel" in design_cfg:
@@ -880,6 +940,39 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "info",
             "未声明 design.ppl_paired_sd_rel；见 sensitivity 中的 "
             "power_for_sesoi_confirmatory"))
+
+    if test_look_budget > 1:
+        if declared_ppl_sd is None:
+            checks.append(_check(
+                "ppl_test_look_power", "PPL 多次 look 计划功效", "info",
+                "未声明 design.ppl_paired_sd_rel；look 校正后的灵敏度见 "
+                "sensitivity 中的 power_for_sesoi_test_look_adjusted"))
+        elif ppl_alpha_look is None:
+            checks.append(_check(
+                "ppl_test_look_power", "PPL 多次 look 计划功效", "warn",
+                f"look 预算={test_look_budget} 使 Alpha_eff 下溢为 0："
+                "无法表示校正阈值，不能据此声称该设计有确认性功效"))
+        else:
+            need_l = required_pairs(ppl_margin, declared_ppl_sd,
+                                    ppl_alpha_look, power)
+            pw_l = (paired_t_power(ppl_margin, declared_ppl_sd,
+                                   n_seeds, ppl_alpha_look)
+                    if can_power else None)
+            ok_l = (can_power and need_l is not None
+                    and need_l <= n_seeds)
+            checks.append(_check(
+                "ppl_test_look_power", "PPL 多次 look 计划功效",
+                "pass" if ok_l else "fail",
+                f"声明配对差 SD={declared_ppl_sd:.4g}；在 {test_look_budget} "
+                f"次 test look 下，确认性阈值 α_eff={ppl_alpha_look:.6g}"
+                f"（Holm α_eff 再除以 look 预算），{n_seeds} 个种子对 "
+                f"{ppl_margin:.2%} SESOI 的功效≈"
+                + (f"{pw_l:.3f}" if pw_l is not None else "无法计算（n<2）")
+                + "，"
+                + (f"需 {need_l} 个种子（当前 {n_seeds}）"
+                   if need_l is not None else "所需种子数超出可计算范围")
+                + ("" if ok_l else "：通过 look 校正后功效不足；"
+                   "应减少 look 次数、增加种子，或把结论降为探索性")))
 
     # 参考 SD 不是数据估计，只用于展示“常见噪声水平下”的设计灵敏度。
     ref_sd = DEFAULT_PPL_SD_REF
@@ -1425,8 +1518,20 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
                 sd, n_seeds, ruler_alpha, power)
             pw_confirm = paired_t_power(
                 ruler_margin, sd, n_seeds, ruler_alpha)
+            look_alpha = (ruler_alpha_look
+                          if ruler_look_representable else None)
+            mde_look = (min_detectable_effect(
+                sd, n_seeds, look_alpha, power)
+                if look_alpha is not None else None)
+            pw_look = (paired_t_power(
+                ruler_margin, sd, n_seeds, look_alpha)
+                if look_alpha is not None else None)
+            need_look = (required_pairs(
+                ruler_margin, sd, look_alpha, power)
+                if look_alpha is not None else None)
         else:
             mde = pw = mde_confirm = pw_confirm = None
+            mde_look = pw_look = need_look = None
         pw_nct = (paired_t_power_nct(
             ruler_margin, sd, n_seeds, alpha, n_sim=20000, seed=0)["power"]
             if 2 <= n_seeds <= 10 else None)
@@ -1441,6 +1546,9 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "power_for_sesoi_confirmatory": pw_confirm,
             "required_seeds_for_sesoi_confirmatory": required_pairs(
                 ruler_margin, sd, ruler_alpha, power),
+            "mde_pp_test_look_adjusted": mde_look,
+            "power_for_sesoi_test_look_adjusted": pw_look,
+            "required_seeds_for_sesoi_test_look_adjusted": need_look,
         })
     ruler_seed_break_even = (
         max_sd_for_effect(ruler_margin, n_seeds, alpha, power)
@@ -1448,6 +1556,9 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
     ruler_seed_break_even_confirm = (
         max_sd_for_effect(ruler_margin, n_seeds, ruler_alpha, power)
         if can_power else None)
+    ruler_seed_break_even_look = (
+        max_sd_for_effect(ruler_margin, n_seeds, ruler_alpha_look, power)
+        if can_power and ruler_look_representable else None)
 
     if declared_ruler_sd is not None:
         need = required_pairs(ruler_margin, declared_ruler_sd,
@@ -1497,6 +1608,42 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "RULER 种子级确认性计划功效（多重比较校正）", "info",
             "未声明 design.ruler_paired_sd；见 seed_level 中的 "
             "power_for_sesoi_confirmatory"))
+
+    if test_look_budget > 1:
+        if declared_ruler_sd is None:
+            checks.append(_check(
+                "ruler_seed_test_look_power",
+                "RULER 种子级多次 look 计划功效", "info",
+                "未声明 design.ruler_paired_sd；look 校正后的灵敏度见 "
+                "seed_level 中的 power_for_sesoi_test_look_adjusted"))
+        elif ruler_alpha_look is None:
+            checks.append(_check(
+                "ruler_seed_test_look_power",
+                "RULER 种子级多次 look 计划功效", "warn",
+                f"look 预算={test_look_budget} 使 Alpha_eff 下溢为 0："
+                "无法表示校正阈值，不能据此声称该设计有确认性功效"))
+        else:
+            need_l = required_pairs(ruler_margin, declared_ruler_sd,
+                                    ruler_alpha_look, power)
+            pw_l = (paired_t_power(ruler_margin, declared_ruler_sd,
+                                   n_seeds, ruler_alpha_look)
+                    if can_power else None)
+            ok_l = can_power and need_l is not None and need_l <= n_seeds
+            checks.append(_check(
+                "ruler_seed_test_look_power",
+                "RULER 种子级多次 look 计划功效",
+                "pass" if ok_l else "fail",
+                f"声明跨种子配对差 SD={declared_ruler_sd:.4g}；在 "
+                f"{test_look_budget} 次 test look 下，确认性阈值 "
+                f"α_eff={ruler_alpha_look:.6g}（Holm α_eff 再除以 look "
+                f"预算），{n_seeds} 个种子对 {ruler_margin:.2%} SESOI 的"
+                "功效≈"
+                + (f"{pw_l:.3f}" if pw_l is not None else "无法计算（n<2）")
+                + "，"
+                + (f"需 {need_l} 个种子（当前 {n_seeds}）"
+                   if need_l is not None else "所需种子数超出可计算范围")
+                + ("" if ok_l else "：通过 look 校正后种子级功效不足；"
+                   "H4 的支持/拒绝只能作探索性线索")))
 
     ref_ruler_sd = DEFAULT_RULER_SD_REF
     ref_ruler_pw = (paired_t_power(ruler_margin, ref_ruler_sd,
@@ -1572,6 +1719,9 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
         "planned_seeds": n_seeds,
         "max_paired_sd_for_sesoi": ppl_break_even,
         "max_paired_sd_for_sesoi_confirmatory": ppl_break_even_confirm,
+        "test_look_budget": test_look_budget,
+        "alpha_effective_with_looks": ppl_alpha_look,
+        "max_paired_sd_for_sesoi_test_look_adjusted": ppl_break_even_look,
         "multiplicity": dict(ppl_multiplicity),
         "sensitivity": ppl_rows,
         "equivalence_plan": ppl_equivalence,
@@ -1607,6 +1757,10 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "max_paired_sd_for_sesoi_pp": ruler_seed_break_even,
             "max_paired_sd_for_sesoi_pp_confirmatory":
                 ruler_seed_break_even_confirm,
+            "test_look_budget": test_look_budget,
+            "alpha_effective_with_looks": ruler_alpha_look,
+            "max_paired_sd_for_sesoi_pp_test_look_adjusted":
+                ruler_seed_break_even_look,
             "multiplicity": dict(ruler_multiplicity),
             "sensitivity": ruler_seed_rows,
             "equivalence_plan": ruler_equivalence,
@@ -1692,10 +1846,15 @@ def build_design_plan(config: dict, seeds, variants, registered: dict = None,
             "alpha_effective": {
                 "PPL": ppl_alpha, "RULER": ruler_alpha,
                 "AUROC": auroc_alpha, "AP": ap_alpha},
+            "test_look_budget": test_look_budget,
+            "alpha_effective_with_looks": {
+                "PPL": ppl_alpha_look, "RULER": ruler_alpha_look},
             "note": (
                 "家族大小按计划内全部同指标配对计算（含探索性对比），"
                 "全局族按计划内可检验的预注册假设计算；缺失产物只会让"
-                "实际家族变小，故这是设计上界/保守口径"),
+                "实际家族变小，故这是设计上界/保守口径。"
+                "依赖 test 的 PPL/RULER 还需除以 planned_looks："
+                "alpha_effective_with_looks 是先验功效使用的最终阈值"),
         },
         "endpoints": {
             "ppl": endpoint_ppl,

@@ -1510,3 +1510,64 @@ def test_design_conformance_detects_data_identity_swap():
     finally:
         shutil.rmtree(data_dir, ignore_errors=True)
     print("  [ok] 设计符合性：数据指纹替换触发降级，旧计划保持向后兼容")
+
+
+def test_design_plan_accounts_for_repeated_test_looks():
+    """多次 test look 必须进入先验功效，而不是只在汇总层事后收紧阈值。"""
+    reg = {"hypotheses": [
+        {"id": "H1", "metric": "PPL", "candidate": "lega",
+         "reference": "standard"}]}
+    base_cfg = {
+        "ruler": {"ctx_lens": [256, 512], "n_samples": 30},
+        "design": {"ppl_paired_sd_rel": 0.01, "ruler_paired_sd": 0.01},
+    }
+    once = build_design_plan(
+        base_cfg, [1, 2, 3, 4, 5], ["lega", "standard"], reg,
+        known_variants={"lega", "standard"})
+    twice_cfg = json.loads(json.dumps(base_cfg))
+    twice_cfg["design"]["test_look_budget"] = 2
+    twice = build_design_plan(
+        twice_cfg, [1, 2, 3, 4, 5], ["lega", "standard"], reg,
+        known_variants={"lega", "standard"})
+
+    once_alpha = once["multiplicity_plan"]["alpha_effective_with_looks"]
+    twice_alpha = twice["multiplicity_plan"]["alpha_effective_with_looks"]
+    assert once_alpha["PPL"] == once["multiplicity_plan"][
+        "alpha_effective"]["PPL"]
+    assert abs(twice_alpha["PPL"] - twice["multiplicity_plan"][
+        "alpha_effective"]["PPL"] / 2.0) < 1e-15
+    assert abs(twice_alpha["RULER"] - twice["multiplicity_plan"][
+        "alpha_effective"]["RULER"] / 2.0) < 1e-15
+
+    row = next(r for r in twice["endpoints"]["ppl"]["sensitivity"]
+               if abs(r["paired_sd_relative"] - 0.01) < 1e-12)
+    assert (row["mde_relative_test_look_adjusted"]
+            > row["mde_relative_confirmatory"])
+    assert (row["power_for_sesoi_test_look_adjusted"]
+            < row["power_for_sesoi_confirmatory"])
+    assert (row["required_seeds_for_sesoi_test_look_adjusted"]
+            > row["required_seeds_for_sesoi_confirmatory"])
+    ppl = twice["endpoints"]["ppl"]
+    assert (ppl["max_paired_sd_for_sesoi_test_look_adjusted"]
+            < ppl["max_paired_sd_for_sesoi_confirmatory"])
+
+    seed_row = next(r for r in twice["endpoints"]["ruler"]["seed_level"][
+        "sensitivity"] if abs(r["paired_sd_pp"] - 0.01) < 1e-12)
+    assert (seed_row["power_for_sesoi_test_look_adjusted"]
+            < seed_row["power_for_sesoi_confirmatory"])
+    assert (seed_row["mde_pp_test_look_adjusted"]
+            > seed_row["mde_pp_confirmatory"])
+
+    by = {c["id"]: c for c in twice["checks"]}
+    assert by["test_look_planning"]["status"] == "warn"
+    assert by["ppl_test_look_power"]["status"] == "fail"
+    assert by["ruler_seed_test_look_power"]["status"] == "fail"
+    once_by = {c["id"]: c for c in once["checks"]}
+    assert once_by["test_look_planning"]["status"] == "info"
+    assert "ppl_test_look_power" not in once_by
+    assert "ruler_seed_test_look_power" not in once_by
+    assert once["plan_digest"] != twice["plan_digest"]
+
+    md = "\n".join(render_design_section(twice, None))
+    assert "look校正" in md
+    print("  [ok] 设计计划：多次 test look 按 alpha/planned 规划先验功效")

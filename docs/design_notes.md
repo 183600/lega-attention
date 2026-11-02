@@ -1288,6 +1288,30 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
 很强，真实功效可能高于此下界。反过来，把探索性配对排除出家族大小会
 系统性低估多重比较负担，因此这里不这么做。
 
+**多次 test look 必须进入先验功效，而不是只在汇总层事后收紧。** 汇总层对
+依赖 test 的假设比较的是已经过 Holm/全局校正的 `p_adj_confirmatory` 与
+`alpha/planned_looks`（`lega/testreuse.py`）。因此最终的最坏情形阈值是
+`alpha/(max(m_family, k_global) · planned_looks)`：先验功效若只乘 Holm
+负担、不乘 look 负担，就会把“计划看两次 test”的设计误报为足够有功效。
+`design.test_look_budget > 1` 时，计划现在额外输出：
+
+- `multiplicity_plan.alpha_effective_with_looks`（PPL/RULER 的最终规划阈值）
+  与 `test_look_budget`；
+- PPL 每行 `mde_relative_test_look_adjusted` /
+  `power_for_sesoi_test_look_adjusted` /
+  `required_seeds_for_sesoi_test_look_adjusted`，以及
+  `max_paired_sd_for_sesoi_test_look_adjusted`；RULER `seed_level` 对应
+  `mde_pp_test_look_adjusted` 等字段；
+- `test_look_planning` 检查与声明 SD 下的 `ppl_test_look_power` /
+  `ruler_seed_test_look_power`：look 校正后功效不足时显式 `fail`，而不是
+  等到汇总才降级；
+- `summary.md` 的 PPL 与 RULER 种子级表在 look>1 时增加三列 look 校正后的
+  MDE/功效/所需种子，并注明设计是否足够应以后三列为准。
+
+look=1 时这些字段仍保留（等于确认性阈值），旧计划没有该字段时汇总保持
+向后兼容。look 预算过大导致 `alpha/looks` 下溢为 0 时，计划明确标为不可
+表示，不会伪造一个有功效的阈值。
+
 ### 计划里必须有什么
 
 `design_plan.json` 在正式训练开始前落盘（基线调优等准备步骤之后；只消费配置、预注册表、数据文件哈希与 test 访问账本，不读取任何评测结果或 test token 内容），字段包括：
@@ -1313,13 +1337,16 @@ p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估
   另记录 `multiplicity` 模式、`run_order` 模式与机制端点声明 SD；
 - `multiplicity_plan`：模式、PPL/RULER/AUROC/AP 家族大小、全局确认族
   大小、计划配对清单与四类指标的 `α_eff`，让摘要绑定“最终要做多少次
-  检验”；AUROC/AP 机制族按每个有分析产物的变体计一个检验；
-- `endpoints.ppl`：SESOI（默认 1%）、各 SD 下的未校正与确认性 MDE/
-  功效/所需种子数、两种口径下可容忍的最大配对差 SD；
+  检验”；AUROC/AP 机制族按每个有分析产物的变体计一个检验；另含
+  `test_look_budget` 与 `alpha_effective_with_looks`（依赖 test 的
+  PPL/RULER 再除以 look 预算后的先验规划阈值）；
+- `endpoints.ppl`：SESOI（默认 1%）、各 SD 下的未校正/确认性/多次 look
+  校正后的 MDE、功效、所需种子数，以及三种口径下可容忍的最大配对差 SD；
 - `endpoints.ruler`：每格样本数、格子数、各不一致率下的未校正与确认性
   McNemar 功效/MDE/所需每格样本数、两种口径下可容忍的最大不一致率
   （评测样本级）；`seed_level` 另给确认性 H4 实际使用的跨种子 macro EM
-  配对差 SD 网格、未校正/确认性 MDE、功效、所需种子数与可容忍最大 SD；
+  配对差 SD 网格、未校正/确认性/多次 look 校正后的 MDE、功效、所需种子数
+  与可容忍最大 SD；
 - `endpoints.auroc` / `endpoints.ap`：机制端点的绝对 SESOI、各跨种子
   配对差 SD 下的未校正/确认性 MDE、功效、所需种子数，以及声明 SD；
 - `endpoints.*.equivalence_plan` / `seed_level.equivalence_plan`：等价性

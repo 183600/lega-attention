@@ -891,18 +891,30 @@ def render_design_section(plan: dict, conformance: dict = None,
 
     ppl = _as_dict(_as_dict(plan.get("endpoints")).get("ppl"))
     if ppl:
+        ppl_looks = ppl.get("test_look_budget")
+        ppl_has_looks = isinstance(ppl_looks, int) and not isinstance(
+            ppl_looks, bool) and ppl_looks > 1
         md += ["", f"**PPL 先验灵敏度**（SESOI={_fmt(ppl.get('sesoi_relative'), 2, pct=True)}；"
                    f"计划 {ppl.get('planned_seeds')} 个种子；"
                    f"未校正 80% 功效下可容忍的配对差 SD≈"
                    f"{_fmt(ppl.get('max_paired_sd_for_sesoi'), 3, pct=True)}；"
                    f"确认性校正后≈"
-                   f"{_fmt(ppl.get('max_paired_sd_for_sesoi_confirmatory'), 3, pct=True)}）", "",
-               "| 配对差SD(相对) | MDE 未校正 | MDE 确认性 | 功效 未校正 | 功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |",
-               "|---|---|---|---|---|---|---|"]
+                   f"{_fmt(ppl.get('max_paired_sd_for_sesoi_confirmatory'), 3, pct=True)}"
+                   + (f"；{ppl_looks} 次 test look 校正后≈"
+                      f"{_fmt(ppl.get('max_paired_sd_for_sesoi_test_look_adjusted'), 3, pct=True)}"
+                      if ppl_has_looks else "")
+                   + "）", ""]
+        header = ("| 配对差SD(相对) | MDE 未校正 | MDE 确认性 | 功效 未校正 | "
+                  "功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |")
+        sep = "|---|---|---|---|---|---|---|"
+        if ppl_has_looks:
+            header += " MDE look校正 | 功效 look校正 | 所需种子 look校正 |"
+            sep += "---|---|---|"
+        md += [header, sep]
         for row in _as_list(ppl.get("sensitivity")):
             if not isinstance(row, dict):
                 continue
-            md.append("| " + " | ".join([
+            cells = [
                 _fmt(row.get("paired_sd_relative"), 3, pct=True),
                 _fmt(row.get("mde_relative"), 3, pct=True),
                 _fmt(row.get("mde_relative_confirmatory"), 3, pct=True),
@@ -910,7 +922,20 @@ def render_design_section(plan: dict, conformance: dict = None,
                 _fmt(row.get("power_for_sesoi_confirmatory"), 3),
                 _fmt(row.get("required_seeds_for_sesoi"), 0),
                 _fmt(row.get("required_seeds_for_sesoi_confirmatory"), 0),
-            ]) + " |")
+            ]
+            if ppl_has_looks:
+                cells += [
+                    _fmt(row.get("mde_relative_test_look_adjusted"), 3,
+                         pct=True),
+                    _fmt(row.get("power_for_sesoi_test_look_adjusted"), 3),
+                    _fmt(row.get("required_seeds_for_sesoi_test_look_adjusted"),
+                         0),
+                ]
+            md.append("| " + " | ".join(cells) + " |")
+        if ppl_has_looks:
+            md.append(
+                "注：最后三列把汇总层实际的 `alpha/planned_looks` 校正也算进"
+                "先验功效；设计是否足够应以后三列为准，不能只看 Holm 校正列。")
         _render_equivalence(md, "PPL 等价/非劣性先验功效",
                             ppl.get("equivalence_plan"))
 
@@ -960,6 +985,9 @@ def render_design_section(plan: dict, conformance: dict = None,
 
         seed = _as_dict(ruler.get("seed_level"))
         if seed:
+            seed_looks = seed.get("test_look_budget")
+            seed_has_looks = isinstance(seed_looks, int) and not isinstance(
+                seed_looks, bool) and seed_looks > 1
             md += ["", "**RULER 种子级先验灵敏度（确认性 H4 的实际检验单位，"
                        "配对 t）**（SESOI=" + _fmt(seed.get("sesoi_pp"), 2, pct=True)
                        + "；"
@@ -967,13 +995,22 @@ def render_design_section(plan: dict, conformance: dict = None,
                        f"未校正 80% 功效下可容忍的跨种子配对差 SD≈"
                        f"{_fmt(seed.get('max_paired_sd_for_sesoi_pp'), 3, pct=True)}；"
                        f"确认性校正后≈"
-                       f"{_fmt(seed.get('max_paired_sd_for_sesoi_pp_confirmatory'), 3, pct=True)}）", "",
-                   "| 跨种子配对差SD | MDE 未校正 | MDE 确认性 | 功效 未校正 | 功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |",
-                   "|---|---|---|---|---|---|---|"]
+                       f"{_fmt(seed.get('max_paired_sd_for_sesoi_pp_confirmatory'), 3, pct=True)}"
+                       + (f"；{seed_looks} 次 test look 校正后≈"
+                          f"{_fmt(seed.get('max_paired_sd_for_sesoi_pp_test_look_adjusted'), 3, pct=True)}"
+                          if seed_has_looks else "")
+                       + "）", ""]
+            header = ("| 跨种子配对差SD | MDE 未校正 | MDE 确认性 | 功效 未校正 | "
+                      "功效 确认性 | 所需种子 未校正 | 所需种子 确认性 |")
+            sep = "|---|---|---|---|---|---|---|"
+            if seed_has_looks:
+                header += " MDE look校正 | 功效 look校正 | 所需种子 look校正 |"
+                sep += "---|---|---|"
+            md += [header, sep]
             for row in _as_list(seed.get("sensitivity")):
                 if not isinstance(row, dict):
                     continue
-                md.append("| " + " | ".join([
+                cells = [
                     _fmt(row.get("paired_sd_pp"), 3, pct=True),
                     _fmt(row.get("mde_pp"), 3, pct=True),
                     _fmt(row.get("mde_pp_confirmatory"), 3, pct=True),
@@ -981,7 +1018,20 @@ def render_design_section(plan: dict, conformance: dict = None,
                     _fmt(row.get("power_for_sesoi_confirmatory"), 3),
                     _fmt(row.get("required_seeds_for_sesoi"), 0),
                     _fmt(row.get("required_seeds_for_sesoi_confirmatory"), 0),
-                ]) + " |")
+                ]
+                if seed_has_looks:
+                    cells += [
+                        _fmt(row.get("mde_pp_test_look_adjusted"), 3,
+                             pct=True),
+                        _fmt(row.get("power_for_sesoi_test_look_adjusted"), 3),
+                        _fmt(row.get("required_seeds_for_sesoi_test_look_adjusted"),
+                             0),
+                    ]
+                md.append("| " + " | ".join(cells) + " |")
+            if seed_has_looks:
+                md.append(
+                    "注：最后三列同样把 `alpha/planned_looks` 计入种子级"
+                    "确认性功效；H4 的设计是否足够应以后三列为准。")
             md.append("")
             md.append(
                 "注：本表的 SD 是换训练种子时 macro RULER EM 配对差的标准差"
