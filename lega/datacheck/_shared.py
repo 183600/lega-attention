@@ -4,7 +4,7 @@
 
 实验协议（本模块是实现而不是口号）:
   * 先划分 train/val/test，再做任何预处理；字符级词表只在 train 上拟合，
-    val/test 只做 transform，未见字符统一映射到 <unk>（见 data.py）；
+    val/test 只做 transform，未见字符统一映射到 ࿀（见 data.py）；
   * 连续文本（--local_txt）按时间先后切分：最早 80% 训练、其后 10% 验证、
     最新 10% 测试；切点对齐文档/段落/行边界，同一文档绝不跨 split；
   * 重复样本：与 val/test 精确重复的长行从 train 移除（去污染），val/test
@@ -19,13 +19,20 @@
 
 所有函数只返回 JSON 原生类型（int/float/str/bool/None），可直接写入报告。
 """
+import math
 import re
+import time
+import unicodedata
 import numpy as np
 
 try:
     import fcntl
 except ImportError:  # Windows 等无 flock 平台：退化为原行为（单进程安全）
     fcntl = None
+
+from lega.utils import strict_int
+
+from lega.utils import strict_int
 
 UNK_TOKEN = "<unk>"
 

@@ -69,6 +69,7 @@ MODULES = [
     "tests.test_lengthppl",
     "tests.test_capacity",
     "tests.test_ranking",
+    "tests.test_artifacts",
 ]
 
 

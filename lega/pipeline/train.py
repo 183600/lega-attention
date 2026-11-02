@@ -1350,8 +1350,7 @@ def main():
                     os.path.join(results_dir, "latency.json"),
                     "--variants",
                     lat_variants,
-                    "--seed",
-                    str(seeds[0]),
+                    "--seed", str(seeds[0]),
                     "--device",
                     args.device,
                 ]

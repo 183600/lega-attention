@@ -28,6 +28,7 @@ from .curves import (
     curve_observability_warnings,
     live_overfit_hint,
 )
+from .utils import strict_int
 from .data import (
     load_bin,
     load_meta,

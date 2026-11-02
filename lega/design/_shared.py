@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 """实验设计与准备（拆分模块，对外接口与命令行保持不变）。"""
 """实验设计与准备：先验功效/灵敏度、分析人群与设计符合性。
 
@@ -32,6 +31,16 @@ from __future__ import annotations
 汇总页 / significance.json；``design_conformance.json`` 记录计划与实际的
 偏差。二者都是可机器读取的证据，而不是文档里的口头约定。
 """
+import argparse
+import hashlib
+import json
+import math
+import operator
+import os
+import statistics
+import sys
+import time
+from numbers import Real
 
 DEFAULT_ALPHA = 0.05
 
@@ -39,7 +48,7 @@ DEFAULT_POWER = 0.8
 
 MIN_SEEDS = 3
 
-MAX_SEED = 2**32 - 1
+MAX_SEED = 2 ** 32 - 1
 
 SCHEMA_VERSION = 1
 
@@ -68,26 +77,14 @@ _PARAM_CONTROL_VARIANT = "lega_placebo"
 # 逐组件容量匹配对照不进入主 Holm 家族（汇总层为它们单独建 Holm 家族），
 # 因此设计层也不能把它们算进“各变体 vs standard”的主配对集合。
 _CAPACITY_NULL_VARIANTS = (
-    "lega_null_query",
-    "lega_null_conc",
-    "lega_null_len",
+    "lega_null_query", "lega_null_conc", "lega_null_len",
 )
 
 _DEFAULT_GATED_FOR_ANALYSIS = (
-    "lega",
-    "qgate",
-    "null",
-    "lega_no_len",
-    "lega_no_conc",
-    "lega_no_query",
-    "lega_conc_only",
-    "lega_len_only",
-    "lega_raw",
-    "lega_raw_no_len",
-    "lega_raw_conc_only",
-    "lega_raw_no_query",
-    "lega_detach_conc",
-    "null_zero",
+    "lega", "qgate", "null", "lega_no_len", "lega_no_conc",
+    "lega_no_query", "lega_conc_only", "lega_len_only",
+    "lega_raw", "lega_raw_no_len", "lega_raw_conc_only",
+    "lega_raw_no_query", "lega_detach_conc", "null_zero",
 )
 
 # 精确 McNemar 功效的规模上限：每增加一个 n 要枚举不一致数 m 与条件拒绝域，
@@ -97,15 +94,8 @@ EXACT_MCNEMAR_MAX_N = 500
 # 预注册 scope 的模型/训练规模字段。与 lega.pipeline._shared._SCOPE_CONFIG_KEYS
 # 保持同一集合（测试核对）：lr/weight_decay 不在此列，因为基线调优按协议在
 # val 上选择后统一注入全部变体，属于预注册流程的一部分。
-SCOPE_CONFIG_KEYS = (
-    "d_model",
-    "n_layers",
-    "n_heads",
-    "ffn_mult",
-    "block_size",
-    "steps",
-    "train_ctx",
-)
+SCOPE_CONFIG_KEYS = ("d_model", "n_layers", "n_heads", "ffn_mult",
+                     "block_size", "steps", "train_ctx")
 
 # 设计检查失败时受影响的端点。只降级真正无法检验的假设（例如 RULER 上下文
 # 超出模型容量只影响 RULER 端点，不连带推翻 PPL 对比）；范围/模型规模错误
@@ -119,16 +109,10 @@ PLAN_FAILURE_ENDPOINTS = {
 
 # 视为全局设计失败的检查 id：这些问题使整轮 run 落在计划/预注册范围之外，
 # 或使训练/评测协议本身不可执行。
-GLOBAL_PLAN_FAILURE_IDS = frozenset(
-    {
-        "seed_scope",
-        "hypothesis_variants",
-        "scope_config",
-        "scope_data",
-        "model_context",
-        "data_budget",
-    }
-)
+GLOBAL_PLAN_FAILURE_IDS = frozenset({
+    "seed_scope", "hypothesis_variants", "scope_config", "scope_data",
+    "model_context", "data_budget",
+})
 
 # 先验灵敏度网格。它们是“展示设计在多大噪声下仍然够用”的横轴，不是从
 # 当前数据估计出来的假设值；调用方可通过配置里的 design 块覆盖。
@@ -158,8 +142,7 @@ _TASKS_FOR_RULER = 5  # 与 lega.ruler.TASKS 一致；用于展示格子数与�
 
 _ANALYSIS_PROTOCOL = {
     "analysis_population": (
-        "全部计划内 (变体, 种子) 单元；每个单元在训练前写入 design_plan.json"
-    ),
+        "全部计划内 (变体, 种子) 单元；每个单元在训练前写入 design_plan.json"),
     "exclusions": [
         "仅允许预先声明的排除：运行在评测前失败、数据/配置/训练预算协议违规、"
         "产物损坏或测试集访问违规",
@@ -167,32 +150,26 @@ _ANALYSIS_PROTOCOL = {
     ],
     "missing_data": (
         "缺失单元必须报告；受影响的确认性假设降级为探索性。可用样本估计"
-        "（available-case）只能作为描述性敏感性分析，不能冒充计划内分析"
-    ),
+        "（available-case）只能作为描述性敏感性分析，不能冒充计划内分析"),
     "stopping_rule": (
         "不做基于结果的提前停止；早停只允许按验证集与预注册 patience 执行，"
-        "且实际训练量不等会使确认性判定降级（见 budget gate）"
-    ),
+        "且实际训练量不等会使确认性判定降级（见 budget gate）"),
     "run_order": (
         "默认随机化区组：种子为区组，每个区块内变体顺序由跑前写死的 order_seed "
         "确定并记录在 design_plan.json；不得在看到结果后改顺序。显式选择 "
-        "variant_major（旧行为）会把变体与时间/硬件漂移混淆，正式实验应避免"
-    ),
+        "variant_major（旧行为）会把变体与时间/硬件漂移混淆，正式实验应避免"),
     "test_sealing": (
         "checkpoint 选择与早停只用 val；test 每次评测写访问账本，重复评测"
-        "需要显式放行"
-    ),
+        "需要显式放行"),
     "test_look_budget": (
         "同一 test 数据版本默认只允许一个独立流水线运行（由 run_id 标识）"
         "产生确认性证据；超过 design.test_look_budget 时，依赖 test 的"
         "确认性假设降级为探索性；声明多次 look 时按 alpha/planned_looks "
-        "保守校正，先验功效也必须按该收紧阈值规划，不能只按 Holm 阈值"
-    ),
+        "保守校正，先验功效也必须按该收紧阈值规划，不能只按 Holm 阈值"),
     "multiplicity": (
         "同一指标家族内 Holm–Bonferroni；预注册确认族再做一次全局 Holm。"
         "先验功效按最坏情形 α/max(家族大小, 全局确认族大小) 规划，"
-        "并同时报告未校正口径，避免用名义 α 高估可确认性"
-    ),
+        "并同时报告未校正口径，避免用名义 α 高估可确认性"),
 }
 
 
@@ -206,24 +183,13 @@ def _analysis_code_fingerprint():
     """
     try:
         from lega.repro import source_tree_fingerprint
-
         fp = source_tree_fingerprint()
     except Exception as e:  # pragma: no cover - 依赖损坏/权限异常
-        return {
-            "algo": None,
-            "digest": None,
-            "files": None,
-            "entries": [],
-            "error": f"{type(e).__name__}: {e}",
-        }
+        return {"algo": None, "digest": None, "files": None,
+                "entries": [], "error": f"{type(e).__name__}: {e}"}
     if not isinstance(fp, dict):
-        return {
-            "algo": None,
-            "digest": None,
-            "files": None,
-            "entries": [],
-            "error": "source_tree_fingerprint 未返回 dict",
-        }
+        return {"algo": None, "digest": None, "files": None,
+                "entries": [], "error": "source_tree_fingerprint 未返回 dict"}
     entries = fp.get("entries")
     return {
         "algo": fp.get("algo"),

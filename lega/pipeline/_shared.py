@@ -1,14 +1,124 @@
 """共享导入与常量（由 run_all.py 拆分而来，保持原定义与语义）。"""
-
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
+import argparse
+import csv
+import glob
+import json
+import math
 import re
-from lega.attention import CONTROL_VARIANTS, VARIANTS
-from lega.dose_response import COMPONENT_SPECS as DOSE_COMPONENT_SPECS
+import subprocess
+import time
+from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
+                            CONTROL_VARIANTS, GATE_FACTORS,
+                            NULL_EVIDENCE_VARIANTS, RAW_GATE_FACTORS,
+                            RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
+                            VARIANTS, VARIANT_CN,
+                            _GATED, _LEGA_FAMILY, _USE_CONC, _USE_LEN,
+                            _USE_QUERY, _USE_RAW_CONC)
+from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
+                           CAPACITY_OFF_VARIANTS, COMPONENT_CN,
+                           EFFECT_CN, EFFECT_ORDER, NULL_EVIDENCE_COMPONENT,
+                           component_effects)
+from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
+                         LESION_BY_ID as ABLATION_LESION_BY_ID,
+                         LESION_ORDER as ABLATION_LESION_ORDER,
+                         MATCHED_LESION_PAIRS, PERMUTATION_LESION_FACTORS)
+from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
+                            decomposition as factorial_decomposition,
+                            oriented_value as factorial_oriented_value)
+from lega.dose_response import (DEFAULT_FACTORS as DOSE_DEFAULT_FACTORS,  # noqa: E402
+                                COMPONENT_ORDER as DOSE_COMPONENT_ORDER,
+                                COMPONENT_SPECS as DOSE_COMPONENT_SPECS,
+                                DOSE_NOTE, parse_components as parse_dose_components,
+                                parse_factors as parse_dose_factors,
+                                run_dose_response)
+from lega.reparameterization import (  # noqa: E402
+    CONTRASTS as REPARAMETERIZATION_CONTRASTS,
+    NORMALIZED_CELLS as NORMALIZED_FACTORIAL_CELLS,
+    RAW_CELLS as RAW_FACTORIAL_CELLS,
+    RAW_FACTORIAL_VARIANTS, RAW_SPECIFIC_VARIANTS,
+    analyze as reparameterization_analyze)
+from lega.lengtheffect import (context_macro_means,  # noqa: E402
+                               log2_slope, span_contrast)
+from lega.budget_sensitivity import (  # noqa: E402
+    analyze_budget_sensitivity, curves_from_runs, load_train_curve)
+from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
+                          WINDOW_CATEGORY_CN, analyze_badcases,
+                          analyze_worst_windows, cross_variant_analysis,
+                          process_eval_json, process_ruler_json)
+from lega.curves import (LOSS_SPIKE_FACTOR, STATUS_ORDER,  # noqa: E402
+                         diagnose_run_dir, worst_status)
+from lega.datacheck import (read_test_access_log,  # noqa: E402
+                            summarize_test_access)
+from lega.discovery import (benjamini_hochberg,  # noqa: E402
+                            benjamini_yekutieli,
+                            collect_seed_level_tests,
+                            exploratory_fdr as analyze_exploratory_fdr,
+                            source_label)
+from lega.bayes import bayes_paired_evidence  # noqa: E402
+from lega.equivalence import (assess_paired_equivalence,  # noqa: E402
+                              interpret_equivalence, metric_margin,
+                              paired_metric_diffs)
+from lega.replication import replication_forecast  # noqa: E402
+from lega.multiverse import (attach_to_hypotheses,  # noqa: E402
+                             paired_specification, specification_curve)
+from lega.ranking import (analyze_ranking,  # noqa: E402
+                          bootstrap_rank_stability,
+                          permutation_selection_test, ranking_table)
+from lega.missingness import (aggregate_missingness,  # noqa: E402
+                              paired_missingness)
+from lega.heterogeneity import (  # noqa: E402
+    attach_to_hypotheses as attach_heterogeneity_to_hypotheses,
+    meta_analysis_from_seed_matrix)
+from lega.design import (apply_design_gate,  # noqa: E402
+                         build_design_plan, build_run_order,
+                         capture_preparation,
+                         design_conformance, load_design_plan,
+                         load_design_plan_history, observed_design_sensitivity,
+                         render_design_section, save_design_plan,
+                         validate_run_order)
+from lega.experiment import (append_record, build_experiment_record,  # noqa: E402
+                             collect_artifacts, ledger_path, new_run_id,
+                             snapshot_train_run)
+from lega.hypotheses import (REGISTRY_PATH as HYPOTHESES_PATH,  # noqa: E402
+                             fingerprint as registration_fingerprint,
+                             load_registration, verify_registration)
+from lega.ngram import evaluate as ngram_evaluate  # noqa: E402
+from lega.preflight import (ALLOW_ENV,  # noqa: E402
+                            allow_protocol_violations,
+                            data_cache_schema_issue,
+                            data_protocol_preflight,
+                            data_report_binding_issue, load_data_report)
+from lega.testreuse import (DEFAULT_TEST_LOOK_BUDGET,  # noqa: E402
+                            apply_test_reuse_gate, repro_test_data_fingerprint,
+                            test_dependent_metrics, test_reuse_report)
+from lega.tuning import DEFAULT_TOLERANCE as TUNE_TOLERANCE  # noqa: E402
+from lega.tuning import parse_floats, tune as tune_baseline  # noqa: E402
+from lega.repro import (PIPELINE_RUN_ID_ENV, data_fingerprint,  # noqa: E402
+                        environment_gate, environment_lock_report, git_info,
+                        provenance_drift, runtime_info, sanity_summary,
+                        sha256_file, source_tree_fingerprint, worktree_state,
+                        write_worktree_patch)
+from lega.ruler import DEPTH_BINS as RULER_DEPTH_BINS  # noqa: E402
+from lega.uncertainty import (aggregate_variance_components,  # noqa: E402
+                              two_way_variance_components)
+from lega.utils import (bootstrap_mean_ci, config_bool,
+                        config_finite_float,
+                        ensure_cublas_workspace_config, get_device,
+                        holm_bonferroni, load_config_json, mcnemar_exact_p,
+                        mean_std, min_detectable_effect,
+                        paired_sign_flip_test, paired_sign_test,
+                        paired_t_test, save_json, save_text,
+                        seed_int, seed_plan, strict_int)  # noqa: E402
 
 ALL_VARIANTS = list(VARIANTS)
 
@@ -20,22 +130,10 @@ PARAM_CONTROL_PAIR = ("lega", PARAM_CONTROL_VARIANT)
 
 # 机制分析不依赖输出门也可计算“集中但看错率/P(hit|集中）”：
 # null 变体虽无 g/logit，仍应纳入；standard 无需诊断，保持跳过。
-GATED_FOR_ANALYSIS = (
-    "lega",
-    "qgate",
-    "null",
-    "lega_no_len",
-    "lega_no_conc",
-    "lega_no_query",
-    "lega_conc_only",
-    "lega_len_only",
-    "lega_raw",
-    "lega_raw_no_len",
-    "lega_raw_conc_only",
-    "lega_raw_no_query",
-    "lega_detach_conc",
-    "null_zero",
-)
+GATED_FOR_ANALYSIS = ("lega", "qgate", "null", "lega_no_len", "lega_no_conc",
+                      "lega_no_query", "lega_conc_only", "lega_len_only",
+                      "lega_raw", "lega_raw_no_len", "lega_raw_conc_only",
+                      "lega_raw_no_query", "lega_detach_conc", "null_zero")
 
 # RULER 逐任务分解的固定任务列表（与 lega.ruler.TASKS 一致，避免导入
 # 评测模块只为拿常量）。
@@ -59,7 +157,9 @@ FACTORIAL_CELLS = (
 # 全因子范围外的无门控基线：用于 H1（LEGA vs 标准注意力）等整体对比。
 # 组件“加入 X”的受控对照是 X-only vs gate_only，不是 vs standard
 # （后者把输出门的存在也混进了 A/B/C 效应）。
-CONTROL_CELLS = (("无门控基线（全因子范围外）", "standard"),)
+CONTROL_CELLS = (
+    ("无门控基线（全因子范围外）", "standard"),
+)
 
 # 去一法（leave-one-out）：Full 及各去掉一个组件的结果。
 LOO_CELLS = (
@@ -84,24 +184,16 @@ SINGLE_FACTOR_CONTRASTS = (
 )
 
 SINGLE_FACTOR_PAIRS = tuple(
-    (cand, ref) for _factor, _direction, cand, ref in SINGLE_FACTOR_CONTRASTS
-)
+    (cand, ref) for _factor, _direction, cand, ref in SINGLE_FACTOR_CONTRASTS)
 
 # 门控内 A/B/C 的八个合法因子集合。单因素审计不仅核对“表里列出的对比”，
 # 还要核对 GATE_FACTORS 本身确实实现了完整的 2^3：若两个变体的因子集合
 # 意外相同（例如新变体复制了旧公式），只比较变体名集合是发现不了的。
-_GATE_FACTOR_SUBSETS = frozenset(
-    {
-        frozenset(),
-        frozenset({"A"}),
-        frozenset({"B"}),
-        frozenset({"C"}),
-        frozenset({"A", "B"}),
-        frozenset({"A", "C"}),
-        frozenset({"B", "C"}),
-        frozenset({"A", "B", "C"}),
-    }
-)
+_GATE_FACTOR_SUBSETS = frozenset({
+    frozenset(), frozenset({"A"}), frozenset({"B"}), frozenset({"C"}),
+    frozenset({"A", "B"}), frozenset({"A", "C"}), frozenset({"B", "C"}),
+    frozenset({"A", "B", "C"}),
+})
 
 # 受控变量核对时允许逐 run 不同的字段（方法与复现标识，不属于受控变量）
 _AUDIT_EXEMPT_KEYS = {"variant", "seed", "device", "tag"}
@@ -124,15 +216,9 @@ _SEED_RE = re.compile(r"_seed(\d+)$")
 # 配对/审计必须共享的 PPL 评测协议：同一 split、同一上下文、同一批复用窗口
 # （eval_iters/val_windows/val_tokens_evaluated）才是同一批 token 上的 PPL。
 # 仅核对训练 config 不够——独立评测可被 --eval_iters 等参数重跑。
-_PPL_PROTOCOL_KEYS = (
-    "split",
-    "eval_ctx",
-    "eval_iters",
-    "eval_iters_requested",
-    "val_windows",
-    "val_tokens_evaluated",
-    "selection_set_is_eval_set",
-)
+_PPL_PROTOCOL_KEYS = ("split", "eval_ctx", "eval_iters",
+                      "eval_iters_requested", "val_windows",
+                      "val_tokens_evaluated", "selection_set_is_eval_set")
 
 RULER_MACRO_BOOTSTRAP = 1000
 
@@ -156,21 +242,15 @@ LENGTH_SESOI = 0.01
 # 若也定义 SESOI 会淹没主线，保留在 significance.json 而不进汇总主段。
 # 这里用与 AUROC_DIFF_METRIC/AP_DIFF_METRIC 相同的字面量，避免常量定义
 # 顺序造成的导入期 NameError（函数体在调用时才解析该元组）。
-_EQ_CORE_METRICS = ("PPL", "RULER平均", "AUROC差(logit−仅查询)", "AP差(logit−仅查询)")
+_EQ_CORE_METRICS = ("PPL", "RULER平均",
+                    "AUROC差(logit−仅查询)", "AP差(logit−仅查询)")
 
 # 因果病灶中“零假设本身有科学含义”的关键对照：分布匹配置换/头置换安慰剂、
 # 阳性对照、门恒开/恒关、证据反号、去全部证据。其余病灶仍以“是否有因果
 # 贡献”为主，不强行套等价性解读。
-_CAUSAL_EQ_LESIONS = (
-    "head_permute",
-    "conc_permute",
-    "query_permute",
-    "len_permute",
-    "gate_open",
-    "gate_closed",
-    "sign_flip",
-    "no_evidence",
-)
+_CAUSAL_EQ_LESIONS = ("head_permute", "conc_permute", "query_permute",
+                      "len_permute", "gate_open", "gate_closed",
+                      "sign_flip", "no_evidence")
 
 # 组件有效性判定所用的检验对：组件 -> (去一法检验, 全因子检验, 主指标)。
 # 去一法: Full−X vs Full；全因子: 仅 X vs gate_only（已有门但无 A/B/C）。
@@ -180,12 +260,7 @@ _CAUSAL_EQ_LESIONS = (
 COMPONENT_TESTS = (
     ("A 查询项", ("lega_no_query", "lega"), ("qgate", "gate_only"), "PPL"),
     ("B 集中度证据", ("lega_no_conc", "lega"), ("lega_conc_only", "gate_only"), "PPL"),
-    (
-        "C 长度校准",
-        ("lega_no_len", "lega"),
-        ("lega_len_only", "gate_only"),
-        "RULER平均",
-    ),
+    ("C 长度校准", ("lega_no_len", "lega"), ("lega_len_only", "gate_only"), "RULER平均"),
 )
 
 _EVIDENCE_METRICS = ("PPL", "RULER平均")
@@ -204,14 +279,9 @@ AUROC_DIFF_REFERENCE = "仅查询项基线"
 # 交互对比必须在同一个门内比较 A/B/C；用无门的 standard 会把门本身
 # 重新混进交互项（正是 gate_only 要隔离的混杂）。
 _FACTORIAL_CONTRAST_CELLS = {
-    "none": "gate_only",
-    "A": "qgate",
-    "B": "lega_conc_only",
-    "C": "lega_len_only",
-    "AB": "lega_no_len",
-    "AC": "lega_no_conc",
-    "BC": "lega_no_query",
-    "ABC": "lega",
+    "none": "gate_only", "A": "qgate", "B": "lega_conc_only",
+    "C": "lega_len_only", "AB": "lega_no_len", "AC": "lega_no_conc",
+    "BC": "lega_no_query", "ABC": "lega",
 }
 
 # 交互对比式（对第三个因子的两个水平取平均）：
@@ -230,7 +300,8 @@ SHAPLEY_PPL_METRIC = "Shapley(PPL)"
 
 SHAPLEY_RULER_METRIC = "Shapley(RULER平均)"
 
-SHAPLEY_FACTOR_LABEL = {"A": "A 查询项", "B": "B 集中度证据", "C": "C 长度校准"}
+SHAPLEY_FACTOR_LABEL = {"A": "A 查询项", "B": "B 集中度证据",
+                        "C": "C 长度校准"}
 
 # 推理期全因子 Shapley：同一 checkpoint 上干预 2^3 个门控格，而不是重新
 # 训练。它回答“训练好的前向里，组件的平均贡献与交互结构是否与训练期
@@ -253,22 +324,14 @@ MATCHED_ABLATION_CONTRAST_METRIC = "因果消融ΔNLL(未匹配−活动匹配)"
 # 它检验的是“λ=1 是否为驻点”，与“某个 λ 相对 1 的差异”不是同一问题。
 DOSE_RESPONSE_METRIC = "剂量反应ΔNLL"
 DOSE_SLOPE_METRIC = "剂量反应局部斜率"
-DOSE_COMPONENT_LABEL = {
-    name: spec["label"] for name, spec in DOSE_COMPONENT_SPECS.items()
-}
+DOSE_COMPONENT_LABEL = {name: spec["label"]
+                        for name, spec in DOSE_COMPONENT_SPECS.items()}
 
 # 预注册 scope 核对的配置字段：模型/训练规模（结论可迁移性的前提）。
 # lr/weight_decay 刻意排除：按本项目协议，基线调优（--tune_baseline）会在
 # 验证集上选定统一超参并注入全部变体，属预注册流程的一部分而非范围外改动。
-_SCOPE_CONFIG_KEYS = (
-    "d_model",
-    "n_layers",
-    "n_heads",
-    "ffn_mult",
-    "block_size",
-    "steps",
-    "train_ctx",
-)
+_SCOPE_CONFIG_KEYS = ("d_model", "n_layers", "n_heads", "ffn_mult",
+                      "block_size", "steps", "train_ctx")
 
 # 机制判别的简单学习基线对照（补充性/探索性）：门控 logit 是语言建模的
 # 副产品、训练时从未见过 hit 标签；线性探针在同一批记录上用 hit 标签监督
