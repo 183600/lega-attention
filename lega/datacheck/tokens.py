@@ -127,15 +127,29 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
     distinct = int(observed.size)
     singleton_mass = float(counts[counts == 1].sum() / total) if total else 0.0
     top_share = float(observed.max() / total) if total and observed.size else 0.0
+    if total > 0:
+        counts_sorted = np.sort(counts[counts > 0])
+        ranks = np.arange(1, len(counts_sorted) + 1)
+        zipf_slope = float(np.sum(np.log(counts_sorted) * ranks) / np.sum(np.log(ranks))) if len(counts_sorted) > 1 else 1.0
+        concentration = float(counts_sorted[-1] / total)
+        top5_share = float(counts_sorted[-5:].sum() / total) if len(counts_sorted) >= 5 else float(counts_sorted.sum() / total)
+    else:
+        zipf_slope = None
+        concentration = None
+        top5_share = None
+    distinct_tokens = int(distinct)
     return {"split": str(split), "tokens": int(arr.size), "dtype": str(arr.dtype),
             "min_id": vmin, "max_id": vmax, "nan": n_nan, "inf": n_inf,
-            "distinct_ids": distinct,
-            "type_token_ratio": float(distinct / total) if total else 0.0,
+            "distinct_ids": distinct_tokens,
+            "type_token_ratio": float(distinct_tokens / total) if total else 0.0,
             "token_entropy_bits": entropy_bits,
             "most_common_token_share": top_share,
             "singleton_token_mass": singleton_mass,
-            "vocab_coverage": (float(distinct / int(vocab_size))
-                               if int(vocab_size) > 0 else 0.0)}
+            "vocab_coverage": (float(distinct_tokens / int(vocab_size))
+                               if int(vocab_size) > 0 else 0.0),
+            "zipf_slope": zipf_slope,
+            "token_concentration": concentration,
+            "top5_token_share": top5_share}
 
 
 def unknown_char_rate(tok, text: str):
@@ -147,6 +161,72 @@ def unknown_char_rate(tok, text: str):
     table = {ord(ch): None for ch in stoi if len(ch) == 1}
     remaining = text.translate(table)
     return float(len(remaining) / max(1, len(text)))
+
+
+def token_id_range_analysis(ids, vocab_size: int, split: str) -> dict:
+    """对 token id 的范围分布进行更细致的分析。
+    
+    返回 token id 在词表中位置的分段分布信息，用于诊断分词器是否正常工作。
+    """
+    vocab_size = strict_int(vocab_size, "vocab_size")
+    arr = np.asarray(ids, dtype=np.int64)
+    if arr.size == 0:
+        return {"split": str(split), "range_analysis": None, "note": "empty token stream"}
+    
+    min_id, max_id = int(arr.min()), int(arr.max())
+    if min_id < 0 or max_id >= vocab_size:
+        return {"split": str(split), "range_analysis": None, 
+                "note": f"id 越界 [{min_id}, {max_id}] 不在 [0, {vocab_size})"}
+    
+    # 统计 id 在词表各区间的分布
+    quarters = [0, vocab_size // 4, vocab_size // 2, 3 * vocab_size // 4, vocab_size]
+    counts = np.zeros(4, dtype=np.int64)
+    for i, (lo, hi) in enumerate(zip(quarters[:-1], quarters[1:])):
+        counts[i] = np.sum((arr >= lo) & (arr < hi))
+    total = arr.size
+    
+    return {
+        "split": str(split),
+        "vocab_size": vocab_size,
+        "id_range": f"[{min_id}, {max_id}]",
+        "id_coverage_ratio": float(max_id / max(vocab_size - 1, 1)),
+        "quarter_distribution": {
+            f"[{quarters[i]}//[{quarters[i+1]}: {float(counts[i]/total):.4f}" 
+            for i in range(4)
+        },
+        "notes": "token id 分布在词表中的位置分布，接近 [0,1] 表示 vocab 被充分利用"
+    }
+
+
+def token_sequence_stats(ids) -> dict:
+    """计算 token 序列的统计特征，用于诊断 token 流的结构特性。
+    
+    包括：序列长度统计、重复模式、局部一致性等。
+    """
+    arr = np.asarray(ids, dtype=np.int64)
+    if arr.size == 0:
+        return {"tokens": 0, "sequence_stats": None}
+    
+    n = len(arr)
+    # 重复序列诊断：计算相邻 token 相同比例
+    repeats = np.sum(arr[1:] == arr[:-1])
+    repeat_rate = float(repeats) / max(1, n - 1)
+    
+    # 局部唯一性：滑动窗口内的唯一度
+    window = min(64, n // 10 + 1) if n > 100 else n
+    if window > 1 and n >= window:
+        local_unique = np.array([len(np.unique(arr[i:i+window])) 
+                               for i in range(0, n, window)])
+        avg_local_uniqueness = float(np.mean(local_unique)) / window
+    else:
+        avg_local_uniqueness = 1.0
+    
+    return {
+        "tokens": int(n),
+        "adjacent_repeat_rate": repeat_rate,
+        "avg_local_uniqueness": avg_local_uniqueness,
+        "sequence_length": int(n),
+    }
 
 
 # ---------------------------------------------------------------- 泄漏筛查

@@ -893,10 +893,10 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             "复核提示（见 alert_thresholds），不是显著性检验。",
         ],
     }
-    # 语料规模核算：token 数之外同时记录字符数与 UTF-8 字节数。PPL 的
+# 语料规模核算：token 数之外同时记录字符数与 UTF-8 字节数。PPL 的
     # 分母是 token，字符级兜底与 BPE 的 token 粒度不同；bytes/token 与
     # 总字节数让读者能判断不同分词器/不同数据版本的结果是否可比，也便于
-    # 发现“token 数正常但字节数异常”的分词/清洗事故。
+    # 发现"token 数正常但字节数异常"的分词/清洗事故。
     def _account_int(value):
         if isinstance(value, (bool, np.bool_)):
             return None
@@ -931,8 +931,38 @@ def build_data_report(tokenizer: dict, splits: dict, sanitization: dict,
             entry["bytes_per_token"] = float(nbytes / tokens)
         if chars and nbytes is not None:
             entry["bytes_per_char"] = float(nbytes / chars)
+        # 新增：token 分布诊断
+        token_stats = st.get("token_stats")
+        if isinstance(token_stats, dict):
+            entry["token_entropy_bits"] = token_stats.get("token_entropy_bits")
+            entry["token_type_token_ratio"] = token_stats.get("type_token_ratio")
+            entry["token_zipf_slope"] = token_stats.get("zipf_slope")
+            entry["token_concentration"] = token_stats.get("token_concentration")
+            entry["token_top5_share"] = token_stats.get("top5_token_share")
+            entry["token_vocab_coverage"] = token_stats.get("vocab_coverage")
+            entry["token_most_common_share"] = token_stats.get("most_common_token_share")
+            entry["token_singleton_mass"] = token_stats.get("singleton_token_mass")
+            if tokens:
+                entry["avg_tokens_per_token_entropy"] = float(tokens / max(1, token_stats.get("token_entropy_bits", 0)))
         accounting[split] = entry
     report["accounting"] = accounting
+    
+    # 新增：数据质量深度诊断指南
+    report["quality_guidance"] = {
+        "token_distribution_interpretation": {
+            "token_entropy_bits": "较高值(>10)表示词汇多样性好，适合语言建模；较低值(<8)可能表示词汇重复或分词不当",
+            "zipf_slope": "接近 -1 表示自然语言分布；偏大(>-0.5)表示词汇集中偏低；偏小(<-1.5)表示过度分散",
+            "token_concentration": "较高值(>0.1)表示少数token支配大部分文本，可能影响模型泛化；较低值(<0.05)表示分布均匀",
+            "top5_token_share": "较高值(>0.3)表示前5个token占比大，需关注是否因分词器问题或语料特性",
+            "token_type_token_ratio": "较低值(<0.1)表示词汇冗余，可能影响模型容量利用"
+        },
+        "recommended_actions": [
+            "若 token_entropy_bits 较低：检查分词器是否合适，或数据是否存在大量重复内容",
+            "若 zipf_slope 显著偏离 -1：检查语料是否包含特定模板化文本",
+            "若 vocab_coverage 较低：检查是否字符级分词器词表拟合不足",
+            "若 token_concentration 过高：考虑数据清洗或增加 diversity"
+        ]
+    }
     if isinstance(extra, dict):
         # extra 只允许扩充报告，不能覆盖自检结论本身：否则上游元数据里的
         # 一个 "alerts": [] / "protocol": {...} 就能把防泄漏告警清空或把

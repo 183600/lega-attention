@@ -35,6 +35,7 @@ from .datacheck import (UNK_TOKEN, NEAR_DUP_MIN_CHARS,
                         read_test_access_log, sanitize_text,
                         short_ngram_overlap,
                         summarize_test_access, text_length_stats,
+                        token_id_range_analysis, token_sequence_stats,
                         token_stream_stats, unknown_char_rate)
 from .utils import config_bool, config_finite_float, strict_int
 
@@ -593,8 +594,10 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
     streams = {"train": tr, "val": va}
     if te is not None:
         streams["test"] = te
-    stream_stats = {name: token_stream_stats(arr, tok.n_vocab, name)
-                    for name, arr in streams.items()}
+    stream_stats = {}
+    for name, arr in streams.items():
+        stats = token_stream_stats(arr, tok.n_vocab, name)
+        stream_stats[name] = stats
     # 字符级分词器把所有未见字符映射到同一个 <unk>：不同 split 的 OOV 长串
     # 会在 token 层变成完全相同的 0 序列，若直接做 n-gram 重叠会被误判为
     # “语料复制”并触发 hard fail。排除含 unk 的窗口，只让真实 token 作为
@@ -639,12 +642,34 @@ def prepare_bins(data_dir: str, kind: str = "auto", force: bool = False,
                       is not None else None),
         "unk_rate": {k: v for k, v in unk_rates.items() if v is not None},
     }
+    
+    # 收集额外的 token 分布诊断指标
+    range_analysis = {}
+    sequence_stats = {}
+    for name, arr in streams.items():
+        try:
+            ra = token_id_range_analysis(arr, tok.n_vocab, name)
+            if ra.get("range_analysis") is not None:
+                range_analysis[name] = ra
+        except Exception:
+            pass
+        try:
+            ss = token_sequence_stats(arr)
+            if ss.get("tokens", 0) > 0:
+                sequence_stats[name] = ss
+        except Exception:
+            pass
+    
     data_report = build_data_report(
         tokenizer=tokenizer_report, splits=stream_stats,
         sanitization=sanitization, duplicates=duplicate_stats,
         contamination={k: v for k, v in contamination.items()},
         distribution={k: v for k, v in distribution.items()},
         text_stats=text_stats, extra=extra_report)
+    
+    # 额外写入 token 分布诊断
+    data_report["token_range_analysis"] = range_analysis
+    data_report["token_sequence_stats"] = sequence_stats
     # 短 n-gram 重叠作为诊断指标随报告落盘（告警在下面产生，不进入训练前
     # 硬闸门）：用于抓 64-gram 漏掉的短模板化复用。
     data_report["contamination_short_ngram"] = contamination_short
