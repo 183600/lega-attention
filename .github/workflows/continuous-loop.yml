@@ -207,6 +207,10 @@ jobs:
             exit 1
           fi
       - name: Configure opencode permissions
+        env:
+          # DeepSeek 官方 API：兜底 provider（免费池全挂时接管），鉴权走该环境变量；
+          # 未配置时不合并 provider、不加入候选，行为与原先一致。
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           mkdir -p ~/.config/opencode
           cat > ~/.config/opencode/opencode.json <<'EOF'
@@ -239,6 +243,38 @@ jobs:
             "model": "opencode/deepseek-v4.1-flash-free"
           }
           EOF
+          if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+            python3 - <<'PYMERGE'
+          import json, os
+          p = os.path.expanduser('~/.config/opencode/opencode.json')
+          try:
+              with open(p) as f:
+                  cfg = json.load(f)
+          except Exception:
+              cfg = {}
+          cfg['$schema'] = 'https://opencode.ai/config.json'
+          cfg.setdefault('provider', {})
+          cfg['provider']['deepseek'] = {
+              'npm': '@ai-sdk/openai-compatible',
+              'name': 'DeepSeek (official API)',
+              'options': {
+                  'baseURL': 'https://api.deepseek.com/v1',
+                  'apiKey': '{env:DEEPSEEK_API_KEY}',
+              },
+              'models': {
+                  'deepseek-flash': {'name': 'DeepSeek Flash'},
+                  'deepseek-chat': {'name': 'DeepSeek Chat'},
+                  'deepseek-reasoner': {'name': 'DeepSeek Reasoner'},
+              },
+          }
+          os.makedirs(os.path.dirname(p), exist_ok=True)
+          with open(p, 'w') as f:
+              json.dump(cfg, f, indent=2, ensure_ascii=False)
+          PYMERGE
+            echo "[info] DEEPSEEK_API_KEY 已配置：DeepSeek 官方 API provider 已合并进 opencode 配置"
+          else
+            echo "[warn] DEEPSEEK_API_KEY 未配置：只用 Zen 免费池"
+          fi
 
       - name: Configure git
         run: |
@@ -252,6 +288,7 @@ jobs:
         timeout-minutes: 180
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           set +e
           set -o pipefail
@@ -303,17 +340,20 @@ jobs:
           DOCS_TIMEOUT=$((3*3600))    # 3h（docs 阶段：优化代码与文档，1/10 概率执行）
 
 
-          # ================= 模型策略：只用 opencode + Zen 免费模型 =================
-          # 已移除 DeepSeek Harness 与 DeepSeek 官方 API 接入：
+          # ================= 模型策略：Zen 免费池优先 + DeepSeek 官方 API 兜底 =================
           #   - 不安装、不调用任何额外 harness，一律只用 opencode；
-          #   - 不读取 DeepSeek 官方 key，不访问 DeepSeek 官方端点；
           #   - 所有阶段都通过 `opencode run -m <model> [--variant ...] "$prompt"` 调用。
           # 主力：Zen 网关免费 deepseek-v4.1-flash-free（免鉴权，支持 tool call 与 reasoning effort）；
           # 次选：Zen 网关免费 glm-5.3-flash-free（主力不可用时优先切换，偶发 429）；
-          # 兜底：同为 Zen 网关免费的 big-pickle（Big Pickle）。
+          # 三选：同为 Zen 网关免费的 big-pickle（Big Pickle）。
+          # 兜底：DeepSeek 官方 API（api.deepseek.com，鉴权走 DEEPSEEK_API_KEY）。免费池健康时
+          #       完全不访问官方端点，零成本不变；只在免费池全部不可用时接管——Zen 网关自
+          #       2026-11-01 起从 runner 上大面积挂起（每轮 12/12 冒烟全部 120s 超时，16+ 小时
+          #       零产出），没有兜底时循环只能空转。未配置 key 时行为与原先完全一致。
           FREE_MODEL="opencode/deepseek-v4.1-flash-free"
           GLM_MODEL="opencode/glm-5.3-flash-free"
           PICKLE_MODEL="opencode/big-pickle"
+          OFFICIAL_MODELS=(deepseek/deepseek-flash deepseek/deepseek-chat deepseek/deepseek-reasoner)
           CURRENT_PROVIDER=""
           BROKEN_PROVIDERS=""
           SELECTED_MODEL=""
@@ -365,6 +405,22 @@ jobs:
                 echo "[warn] $model 冒烟测试失败/超时，换下一个候选"
                 mark_broken "$cand"
               done
+              # 兜底：DeepSeek 官方 API（免费池全部不可用时接管；未配置 key 时跳过）
+              if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+                for model in "${OFFICIAL_MODELS[@]}"; do
+                  if smoke_test "$model"; then
+                    SELECTED_MODEL="$model"
+                    SELECTED_PROVIDER="official"
+                    SELECTED_VARIANT=""
+                    CURRENT_MODEL="$SELECTED_MODEL"
+                    CURRENT_PROVIDER="$SELECTED_PROVIDER"
+                    export SELECTED_MODEL SELECTED_PROVIDER SELECTED_VARIANT CURRENT_MODEL CURRENT_PROVIDER
+                    echo "[provider] 免费池全挂，选定 $model（official），本次 run 内固定使用"
+                    return 0
+                  fi
+                  echo "[warn] $model 冒烟测试失败/超时，换下一个候选"
+                done
+              fi
               # 第一轮全部失效：清空失效标记再试一轮（可能是瞬时故障）
               [ "$pass" -eq 1 ] && BROKEN_PROVIDERS=""
             done
