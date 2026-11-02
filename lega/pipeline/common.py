@@ -796,6 +796,247 @@ def single_factor_change(candidate, reference):
     return None
 
 
+# 登记表里"这条假设在消融某个组件"的措辞标记。预注册的正确性不能只靠
+# 变体名看起来像：H2–H4 是核心消融假设，若登记表被改成多因子对比
+# （如把 lega_no_conc 换成 lega_conc_only vs lega，同时改 A+C），汇总仍会
+# 按"支持/拒绝"输出一个看似单组件的确认性判定。
+_HYPOTHESIS_SINGLE_FACTOR_MARKERS = ("核心消融", "去一法", "单组件", "单因素",
+                                     "只去掉")
+
+# 去一法（从参照去掉该因子）期望候选变差；全因子增量（只加该因子）期望
+# 候选更好。登记表的 direction 与这条边不符时，优效性判定本身会被写反。
+_FACTOR_EDGE_EXPECTED_DIRECTION = {"remove": "candidate_worse",
+                                   "add": "candidate_better"}
+
+
+def _audit_registered_single_factor(contrasts, problems):
+    """核对登记表里自称单组件消融的假设确实只改变一个门控因子。
+
+    ``SINGLE_FACTOR_CONTRASTS`` 管的是流水线内部消费的 6 条边；预注册表
+    （``preregistration/hypotheses.json``）里的 H2–H4 才是对外声明的那几个
+    "核心消融"主张。两者一旦脱节（例如把候选换成与参照差两个因子的
+    B-only 变体），``significance.json`` 仍会给出 支持/拒绝，看起来就像
+    单组件的确认性证据。这里按 claim 措辞识别单组件消融假设，逐条核对：
+    对比必须落在已审计的单因素表内、声明因子与实际因子一致、优效性方向
+    与该边的 add/remove 语义一致；同时把整体方法对比（vs standard、vs
+    qgate、机制 AUROC/AP 差）归为 overall，不误报。
+
+    登记表不可读时如实记录 ``available=false``：这一层缺证据不等于通过。
+    """
+    rows = []
+    try:
+        from lega.hypotheses import load_registration
+        registered = load_registration(HYPOTHESES_PATH)
+    except Exception as e:  # pragma: no cover - 缺文件/损坏只在极端环境发生
+        return [{"available": False, "reason": f"{type(e).__name__}: {e}"}]
+    hypotheses = (registered.get("hypotheses")
+                  if isinstance(registered, dict) else None)
+    if not isinstance(hypotheses, list):
+        return [{"available": False, "reason": "登记表缺少 hypotheses 列表"}]
+    audited_edges = {(c["candidate"], c["reference"]):
+                     (c["factor"], c["direction"]) for c in contrasts}
+    audited_pairs = set(audited_edges)
+    for entry in hypotheses:
+        if not isinstance(entry, dict):
+            problems.append(f"登记表条目不是对象：{entry!r}")
+            continue
+        hyp_id = str(entry.get("id") or "?")
+        claim = str(entry.get("claim") or "")
+        cand, ref = entry.get("candidate"), entry.get("reference")
+        if not (isinstance(cand, str) and isinstance(ref, str) and cand and ref):
+            problems.append(f"登记假设 {hyp_id} 的候选/参照缺失或非法")
+            continue
+        row = {"id": hyp_id, "candidate": cand, "reference": ref,
+               "claim": claim, "metric": entry.get("metric")}
+        requires_single = any(m in claim for m in
+                              _HYPOTHESIS_SINGLE_FACTOR_MARKERS)
+        row["claims_single_factor"] = bool(requires_single)
+        change = single_factor_change(cand, ref)
+        if (cand, ref) in audited_pairs:
+            factor, direction = audited_edges[(cand, ref)]
+            row["contrast_type"] = "single_factor"
+            row["factor"] = factor
+            row["edge_direction"] = direction
+            if change != factor:
+                problems.append(
+                    f"登记假设 {hyp_id} 的对比 {cand} vs {ref} 声明单因素 "
+                    f"{factor}，实际因子差为 {sorted(change) if change else '无'}")
+        elif change is not None:
+            # 对称差恰好 1 但未登记：不能当单因素归因，只如实标注
+            row["contrast_type"] = "unregistered_single_factor"
+            row["factor"] = change
+            if requires_single:
+                problems.append(
+                    f"登记假设 {hyp_id} 自称单组件消融，但 {cand} vs {ref} "
+                    f"不在已审计的单因素对比表内")
+        else:
+            diff = changed_gate_factors(cand, ref)
+            row["contrast_type"] = ("overall" if diff is None else
+                                    "multi_factor")
+            row["changed_factors"] = sorted(diff) if diff else []
+            if requires_single:
+                problems.append(
+                    f"登记假设 {hyp_id} 自称单组件消融，但 {cand} vs {ref} "
+                    + (f"改变了多个因子 {row['changed_factors']}"
+                       if diff else "不在门控 2^3 因子网格内"))
+        if row["contrast_type"] == "single_factor":
+            expected_dir = _FACTOR_EDGE_EXPECTED_DIRECTION.get(
+                row["edge_direction"])
+            declared_dir = entry.get("direction")
+            if (expected_dir is not None and declared_dir != expected_dir):
+                problems.append(
+                    f"登记假设 {hyp_id} 的 direction={declared_dir!r} 与 "
+                    f"{row['edge_direction']} 边（{row['factor']}）的期望"
+                    f"方向 {expected_dir!r} 不符：优效性判定会被写反")
+                row["direction_mismatch"] = True
+            else:
+                row["direction_mismatch"] = False
+        rows.append(row)
+    return rows
+
+
+def _audit_implementation_factors(normalized, problems):
+    """核对门控因子在**实现层**真正生效的集合与声明的因子表一致。
+
+    ``GATE_FACTORS``/``RAW_GATE_FACTORS`` 都从实现的 ``_USE_*`` 开关派生，
+    因此"改公式但忘了改开关"会让元数据与实现一起失真：某个变体名义上是
+    ``A+B``，前向却仍然乘 ``b·log n``，所有纯元数据审计都会通过，而单因素
+    对比在数据上悄悄变成多因子对比。这里用 :func:`lega.attention.probe_gate_factors`
+    做一次微型前向逐参数扰动，把扰动后确实改变门控 logit 的因子与声明集合
+    逐项对照；同时核对带门变体没有漏登记、容量匹配对照保留全部三个门控
+    参数却只置零自己那一条证据通道。
+
+    核对失败（缺依赖/无设备）也显式记入 ``problems``：不能悄悄跳过这一层，
+    让"实现级未核对"看起来像"核对通过"。
+    """
+    rows = []
+    try:
+        from lega.attention import (_GATED, ALT_CONC_VARIANTS,  # noqa: E501
+                                    NULL_EVIDENCE_VARIANTS,
+                                    PLACEBO_VARIANTS,
+                                    SUPPLEMENTAL_GATE_FACTORS,
+                                    probe_gate_factors)
+    except Exception as e:  # pragma: no cover - 依赖损坏只在极端环境发生
+        problems.append(f"无法执行实现级单因素核对：{type(e).__name__}: {e}")
+        return rows
+    gate_table = GATE_FACTORS if isinstance(GATE_FACTORS, dict) else {}
+    raw_table = (globals().get("RAW_GATE_FACTORS")
+                 if isinstance(globals().get("RAW_GATE_FACTORS"), dict) else {})
+    supplemental = (dict(SUPPLEMENTAL_GATE_FACTORS)
+                    if isinstance(SUPPLEMENTAL_GATE_FACTORS, dict) else {})
+    for variant in supplemental:
+        if not isinstance(variant, str):
+            problems.append(
+                f"SUPPLEMENTAL_GATE_FACTORS 含非字符串变体键：{variant!r}")
+    for variant, factors in supplemental.items():
+        if isinstance(variant, str) and _gate_factor_set(factors) is None:
+            problems.append(
+                f"SUPPLEMENTAL_GATE_FACTORS[{variant!r}] 不是合法的因子集合："
+                f"{factors!r}")
+        if isinstance(variant, str) and variant not in _GATED:
+            problems.append(
+                f"带门补充对照 {variant!r} 没有输出门，不应登记因子语义")
+    all_params = ["gate_a", "gate_b", "gate_w"]
+    for variant in sorted(set(_GATED)):
+        probe = probe_gate_factors(variant)
+        if probe.get("error"):
+            problems.append(
+                f"实现级单因素核对失败（{variant}）：{probe['error']}")
+            continue
+        if not probe.get("gated"):
+            problems.append(
+                f"带门变体 {variant!r} 的前向没有门控 logit，无法做单因素归因")
+            continue
+        effective = frozenset(probe.get("effective") or [])
+        params = list(probe.get("params") or [])
+        declared = {}
+        if variant in gate_table:
+            got = _gate_factor_set(gate_table.get(variant))
+            if got is None:
+                problems.append(
+                    f"GATE_FACTORS[{variant!r}] 不是合法的因子集合")
+            else:
+                declared["GATE_FACTORS"] = got
+        if variant in raw_table:
+            got = _gate_factor_set(raw_table.get(variant))
+            if got is None:
+                problems.append(
+                    f"RAW_GATE_FACTORS[{variant!r}] 不是合法的因子集合")
+            else:
+                declared["RAW_GATE_FACTORS"] = got
+        null_component = probe.get("null_component")
+        category = None
+        if null_component is not None:
+            category = "capacity_null"
+            expected = frozenset("ABC") - frozenset({null_component})
+            if sorted(params) != sorted(all_params):
+                problems.append(
+                    f"容量匹配对照 {variant!r} 应保留全部门控参数 "
+                    f"{all_params}，实际 {params}，否则不再是参数匹配的三臂")
+            if sorted(null_component) not in (sorted("A"), sorted("B"),
+                                              sorted("C")):
+                problems.append(
+                    f"容量匹配对照 {variant!r} 的置零组件非法：{null_component!r}")
+        elif variant in PLACEBO_VARIANTS:
+            category = "placebo"
+            expected = frozenset("ABC")
+            if sorted(params) != sorted(all_params):
+                problems.append(
+                    f"参数匹配安慰剂 {variant!r} 应保留全部门控参数 "
+                    f"{all_params}，实际 {params}")
+        elif variant in ALT_CONC_VARIANTS:
+            category = "alt_conc"
+            expected = frozenset("ABC")
+            if sorted(params) != sorted(all_params):
+                problems.append(
+                    f"替代集中度 {variant!r} 应保持 lega 的门控参数形状 "
+                    f"{all_params}，实际 {params}")
+        elif variant in supplemental:
+            category = "supplemental_gate"
+            expected = supplemental[variant]
+            if (variant in gate_table or variant in raw_table
+                    or variant in CONTROL_VARIANTS):
+                problems.append(
+                    f"带门补充对照 {variant!r} 不得混入主/原始因子表或"
+                    "安慰剂表")
+        elif declared:
+            table_label = ("GATE_FACTORS" if variant in gate_table
+                           else "RAW_GATE_FACTORS")
+            category = ("gate_factors" if variant in gate_table
+                        else "raw_gate_factors")
+            expected = declared[table_label]
+            for label, factors in declared.items():
+                if factors != expected:
+                    problems.append(
+                        f"{label} 与另一张因子表对 {variant!r} 的声明不一致："
+                        f"{sorted(factors)} vs {sorted(expected)}")
+        else:
+            problems.append(
+                f"带门变体 {variant!r} 未登记到任何因子表"
+                "（GATE_FACTORS/RAW_GATE_FACTORS/容量匹配/安慰剂/替代集中度），"
+                "不能静默参与单因素归因")
+            continue
+        if effective != expected:
+            problems.append(
+                f"{variant!r} 实现层生效因子为 {sorted(effective) or '无'}，"
+                f"声明为 {sorted(expected) or '无'}：单因素对比可能实际改变了"
+                "多个/过少的门控因子")
+        if probe.get("bias_effective") is not True:
+            problems.append(
+                f"{variant!r} 的门控偏置 gate_d 未生效，输出门可能未接入前向")
+        rows.append({
+            "variant": variant, "category": category,
+            "params": params, "effective": sorted(effective),
+            "declared": sorted(expected),
+            "null_component": null_component,
+            "use_raw_conc": bool(probe.get("use_raw_conc")),
+            "conc_mode": probe.get("conc_mode"),
+            "ok": bool(effective == expected
+                       and probe.get("bias_effective") is True),
+        })
+    return rows
+
+
 def _audit_alt_conc_variants(problems):
     """核对替代集中度统计是 B-only 构念对照，且不混入结构单因素表。
 
@@ -1106,6 +1347,9 @@ def single_factor_audit():
     matched_lesions, permutation_lesions, inference_cells = (
         _audit_inference_single_factor_design(problems))
     alt_conc = _audit_alt_conc_variants(problems)
+    registered_single_factor = _audit_registered_single_factor(
+        contrasts, problems)
+    implementation_factors = _audit_implementation_factors(normalized, problems)
     return {"ok": not problems, "problems": problems,
             "contrasts": contrasts,
             "pairs": [list(p) for p in single_factor_pairs],
@@ -1117,6 +1361,8 @@ def single_factor_audit():
             "inference_permutation_lesions": permutation_lesions,
             "inference_factorial_cells": inference_cells,
             "alt_conc_contrasts": alt_conc,
+            "registered_single_factor": registered_single_factor,
+            "implementation_factors": implementation_factors,
             "note": ("单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
                      "X-only vs gate_only；整体对比（vs standard、LEGA vs "
                      "qgate）可跨多个因子，不作组件归因。同一审计还核对 "

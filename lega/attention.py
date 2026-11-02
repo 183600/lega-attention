@@ -194,6 +194,15 @@ RAW_GATE_FACTORS = {
     or (v in GATE_FACTORS and "B" not in GATE_FACTORS[v])
 }
 
+# 其余带门补充对照的因子语义：它们不进入归一化/原始 2^3 网格（不是结构格），
+# 但仍是"带门"变体，单因素归因的运行期审计必须知道它们的 A/B/C 集合，
+# 否则会出现"带门却未登记因子语义"的漏洞。lega_detach_conc 与 lega 的
+# A/B/C 完全一致，只把 B 的集中度统计从注意力反传图中 detach，属于梯度
+# 路径对照；登记不等于并入 2^3，审计会另行拒绝它混入因子表。
+SUPPLEMENTAL_GATE_FACTORS = {
+    "lega_detach_conc": frozenset("ABC"),
+}
+
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64
@@ -373,6 +382,87 @@ def _placebo_evidence(x: torch.Tensor, n_heads: int, salt: float,
         z = z.view(int(n_heads), T)[0].view(
             *([1] * (x.dim() - 1)), T)
     return z.to(dtype=x.dtype).expand_as(x)
+
+
+# 门控因子在实现层的自证探针：单因素归因要求"声明的因子表"与"实际前向"
+# 同时为真。GATE_FACTORS/RAW_GATE_FACTORS 都从 _USE_* 开关派生，若某个
+# 变体的前向悄悄多用（或少用）了一个门控项，两份元数据会一起失真而任何
+# 纯元数据审计都发现不了。这里用一次微型前向逐参数扰动，回答"改动
+# gate_w/gate_a/gate_b 是否真的改变门控 logit"。
+_GATE_FACTOR_PROBE_PARAMS = (("A", "gate_w"), ("B", "gate_a"), ("C", "gate_b"))
+
+
+def probe_gate_factors(variant: str, *, d_model: int = 32, n_heads: int = 4,
+                       n_pos: int = 12, seed: int = 0) -> dict:
+    """用一次微型前向核对 ``variant`` 的门控因子在实现层真正生效的集合。
+
+    返回：
+
+    * ``gated``：该变体是否有输出门（无门变体的因子集合恒为空）；
+    * ``params``：实际注册的门控参数名（容量匹配对照必须保留全部 w/a/b）；
+    * ``effective``：扰动后确实改变门控 logit 的因子（A/B/C）；
+    * ``bias_effective``：扰动 ``gate_d`` 是否改变 logit（无门偏置的变体为
+      None）；
+    * ``null_component``/``use_raw_conc``/``conc_mode``：该变体的证据通道
+      开关，供审计核对"置零的通道"与"声明的组件"一致。
+
+    整个过程在 ``torch.random.fork_rng`` 内完成，不消耗也不移动调用方的
+    全局随机流；确定性输入，同一变体恒定返回同一结果。
+    """
+    variant = str(variant)
+    if variant not in RUNNABLE_VARIANTS:
+        raise ValueError(f"未知变体: {variant!r}")
+    try:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(seed))
+            m = CausalSelfAttention(d_model=d_model, n_heads=n_heads,
+                                    variant=variant,
+                                    use_sdpa_standard=False)
+            m.eval()
+            gen = torch.Generator().manual_seed(int(seed) + 1)
+            x = torch.randn(1, int(n_pos), int(d_model), generator=gen)
+            with torch.no_grad():
+                _, _, base = m(x, need_stats=True)
+                if base is None or base.get("logit") is None:
+                    # 无输出门（standard/null/null_zero）：没有门控 logit 可扰动。
+                    return {"variant": variant, "gated": False,
+                            "params": [], "effective": [],
+                            "bias_effective": None, "null_component": None,
+                            "use_raw_conc": False, "conc_mode": None}
+                base_logit = base["logit"].clone()
+                params = sorted(name for _factor, name
+                                in _GATE_FACTOR_PROBE_PARAMS
+                                if hasattr(m, name))
+                bias_present = hasattr(m, "gate_d")
+                bias_effective = None
+                if bias_present:
+                    before = base_logit
+                    m.gate_d.add_(0.7)
+                    _, _, s = m(x, need_stats=True)
+                    bias_effective = not torch.allclose(before, s["logit"])
+                    m.gate_d.sub_(0.7)
+                effective = []
+                for factor, name in _GATE_FACTOR_PROBE_PARAMS:
+                    if not hasattr(m, name):
+                        continue
+                    before = base_logit
+                    param = getattr(m, name)
+                    param.add_(0.7)
+                    _, _, s = m(x, need_stats=True)
+                    if not torch.allclose(before, s["logit"]):
+                        effective.append(factor)
+                    param.sub_(0.7)
+    except Exception as e:  # pragma: no cover - 只在极端环境（无 CPU 张量）发生
+        return {"variant": variant, "gated": None, "params": None,
+                "effective": None, "bias_effective": None,
+                "null_component": None, "use_raw_conc": None,
+                "conc_mode": None, "error": f"{type(e).__name__}: {e}"}
+    return {"variant": variant, "gated": True, "params": params,
+            "effective": sorted(effective),
+            "bias_effective": bias_effective,
+            "null_component": NULL_EVIDENCE_COMPONENT.get(variant),
+            "use_raw_conc": bool(m.use_raw_conc),
+            "conc_mode": str(m.conc_mode)}
 
 
 def _ensure_mm_input(t: torch.Tensor) -> torch.Tensor:

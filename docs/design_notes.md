@@ -18,6 +18,21 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对训练期容量匹配 Full/Null_X/No_X 三臂（Null_X 必须保留全部门控参数、只置零对应证据，No_X 必须与已审计的去一法变体一致，且不得混入主因子表）、参数化稳健性使用的 4 条原始/归一化单因子边、剂量-反应的 A/B/C 组件映射（每个组件只能缩放一个 gate 参数，且能力与训练期对照必须对应同一因子；两个组件共用参数或漏掉组件会显式失败），以及推理期单病灶、活动匹配对照、A/B/C 分布匹配置换（`query_permute`/`conc_permute`/`len_permute` 各自只对应一个证据通道）和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验；`RAW_GATE_FACTORS` 同样从 `use_query/use_raw_conc/use_len` 派生，运行期会核对 `RAW_CELLS` 的 B 格确实使用原始 `log max_p` 变体，而不是只核对格名覆盖 2^3。汇总实际消费的 `SINGLE_FACTOR_PAIRS` 也必须与声明的 6 条单因素边逐项一致，不能手工增删或混入多因子对比。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。运行期还会核对 `lega_l2`/`lega_entropy` 保持 `lega` 的 A/B/C 开关和门控参数预算，同时不得混入 `GATE_FACTORS`/`RAW_GATE_FACTORS`；这保证“换 B 的统计量”不会被误解释成“开关 B”，也不会因漏注册而静默退化成标准注意力。
 
+### 实现层因子自证（元数据与实现必须同时为真）
+
+上面所有核对读的都是**声明**：`GATE_FACTORS`/`RAW_GATE_FACTORS` 又都从实现的 `use_query/use_conc/use_len` 派生。若某个变体的前向被改成"多乘一个 `b·log n`"而开关忘了同步，**两份元数据会一起失真**，6 组对比的因子差仍然恰好为 1，审计全绿，而数据上的"单因素对比"实际已经是多因子对比——这正是纯元数据审计结构上发现不了的一类漂移。
+
+`lega.attention.probe_gate_factors` 因此把核对推到实现层：对一个微型确定性输入做前向，逐参数把 `gate_w`/`gate_a`/`gate_b` 扰动 +0.7，看门控 `logit` 是否真的改变，返回"实现层生效因子"、实际注册参数、`gate_d` 是否生效、以及该变体的证据通道开关（`null_component`/`use_raw_conc`/`conc_mode`）。探针在 `torch.random.fork_rng` 内构造模块，不移动调用方的全局随机流，同输入同输出。`single_factor_audit()` 新增 `implementation_factors` 段，对每个**带门**变体逐项核对：
+
+- 主 2^3 与原始参数化网格：生效因子必须等于各自登记表；同一变体出现在两表时两边必须一致；
+- 容量匹配三臂 `lega_null_*`：必须保留全部三个门控参数（否则不再是参数匹配三臂），且生效因子恰为 `ABC − {该组件}`——只有自己那条证据通道失效；
+- 参数匹配安慰剂 `lega_placebo` 与替代集中度 `lega_l2`/`lega_entropy`：参数形状与 `lega` 相同、A/B/C 三项都真正接入前向；
+- 带门补充对照（`SUPPLEMENTAL_GATE_FACTORS`，目前只有 `lega_detach_conc`，因子集合同 `lega`、只把 B 从反传图 detach）：必须有登记语义，且不得混入主/原始因子表或安慰剂表；
+- **任何出现在 `_GATED` 却未登记到上述任一张表的带门变体直接判失败**：新增带门变体必须显式选择登记到哪张表，不能静默获得"未登记因子语义"；
+- 每个带门变体的 `gate_d` 必须真的改变 `logit`（输出门接入前向的阳性检查）。
+
+探针/依赖失败（无张量设备等）也写入 `problems` 而不是静默跳过，避免"实现层未核对"看起来像"核对通过"。审计结果进 `significance.json.single_factor_audit.implementation_factors`，汇总页"单因素消融审计"小节并列渲染变体/登记类别/注册参数/实现层生效因子/声明因子五列，不一致时显式点名该变体不能作为单因素对比的一方。这层核对是构造性保证而非"跑过就有"：`tests/test_attention.py::test_probe_gate_factors_matches_declared_factor_tables` 直接对全部带门变体做实证断言，`tests/test_pipeline_audit.py` 再把探针改成漂移版本，核对审计确实以 `ok=False` 加可读原因拒绝。
+
 ### 参数化稳健性：归一化 c vs 原始 log max_p
 
 默认 B 因子是 $a\,c$，而 $c=\log(n\max_j p_j)$ 可展开为

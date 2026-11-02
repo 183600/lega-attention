@@ -1040,6 +1040,59 @@ def _summary_part_b(**kw):
                   f"| {c['factor']} "
                   f"| {', '.join(c['changed_factors'])} |")
     md.append("")
+    impl_rows = [r for r in (sf_audit.get("implementation_factors") or [])
+                 if isinstance(r, dict)]
+    if impl_rows:
+        category_cn = {"gate_factors": "主 2^3 因子表",
+                       "raw_gate_factors": "原始参数化因子表",
+                       "capacity_null": "容量匹配三臂（Null_X）",
+                       "placebo": "参数匹配安慰剂",
+                       "alt_conc": "替代集中度统计",
+                       "supplemental_gate": "带门补充对照"}
+        bad = [r["variant"] for r in impl_rows if r.get("ok") is not True]
+        md.append("实现层核对（探针前向逐参数扰动 `gate_w/gate_a/gate_b`，"
+                  "看门控 logit 是否真的改变）：")
+        md.append("")
+        md.append("| 变体 | 登记类别 | 注册参数 | 实现层生效因子 | 声明因子 |")
+        md.append("|---|---|---|---|---|")
+        for r in sorted(impl_rows, key=lambda x: str(x.get("variant"))):
+            md.append(
+                f"| {r.get('variant')} "
+                f"| {category_cn.get(r.get('category'), r.get('category'))} "
+                f"| {'/'.join(r.get('params') or []) or '—'} "
+                f"| {', '.join(r.get('effective') or []) or '无'} "
+                f"| {', '.join(r.get('declared') or []) or '无'} |")
+        md.append("")
+        if bad:
+            md.append("⚠ 以下变体的实现层生效因子与声明不一致："
+                      + "、".join(sorted(bad))
+                      + "——它们不能作为单因素对比的一方。")
+        else:
+            md.append("✅ 所有带门变体的实现层生效因子与登记因子集合一致；"
+                      "容量匹配对照（`lega_null_*`）保留全部三个门控参数，"
+                      "只让自己那条证据通道失效。")
+        md.append("")
+    reg_rows = [r for r in (sf_audit.get("registered_single_factor") or [])
+               if isinstance(r, dict) and r.get("id")]
+    if reg_rows:
+        contrast_cn = {"single_factor": "单因素（可归因到单一组件）",
+                       "unregistered_single_factor": "单因子但未登记",
+                       "multi_factor": "多因子（整体方法对比）",
+                       "overall": "因子网格外（整体/机制对比）"}
+        md.append("登记假设与单因素边界（claim 自称单组件消融的必须落在上表"
+                  "六条边内）：")
+        md.append("")
+        md.append("| 假设 | 候选 vs 参照 | 指标 | 对比类型 | 单因子 |")
+        md.append("|---|---|---|---|---|")
+        for r in reg_rows:
+            factor = r.get("factor") or "—"
+            if r.get("contrast_type") == "single_factor":
+                factor = f"{factor}（{r.get('edge_direction')}）"
+            md.append(f"| {r['id']} | {r['candidate']} vs {r['reference']} "
+                      f"| {r.get('metric') or '-'} "
+                      f"| {contrast_cn.get(r.get('contrast_type'), r.get('contrast_type'))} "
+                      f"| {factor} |")
+        md.append("")
     md.append("注: 全因子 2^3 本身是多因子设计（用于 A×B/A×C/B×C 交互检验，"
               "见下表，属探索性）；组件主效应只从上述单因素边估计。"
               "各变体 vs `standard` 与 LEGA vs `qgate` 是整体方法对比，"

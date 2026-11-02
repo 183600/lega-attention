@@ -936,3 +936,114 @@ def test_stat_counts_finite_only():
     assert _stat([float("nan"), float("inf"), None]) is None
     assert _stat([2.5]) == {"mean": 2.5, "std": None, "n": 1}
     print("  [ok] _stat（NaN 不计入 n，与 mean/std 口径一致）")
+
+
+def test_single_factor_audit_covers_implementation_factors():
+    """实现层因子核对：扰动门控参数真正生效的因子集必须等于声明集合。
+
+    ``GATE_FACTORS``/``RAW_GATE_FACTORS`` 从实现的 ``_USE_*`` 开关派生，
+    所以“改前向忘了改开关”会让元数据与实现一起失真：某个变体名义上只有
+    A+B，前向却仍乘 ``b·log n``，单因素对比在数据上悄悄变成多因子对比。
+    这里核对 (1) 每个带门变体都出现且与声明一致，(2) 探针漂移会被判
+    ``ok=False`` 并给出可读原因，(3) 缺参数/置错通道/漏登记同样显形。
+    """
+    import lega.attention as attention_mod
+    audit = single_factor_audit()
+    assert audit["ok"] is True, audit["problems"]
+    rows = {r["variant"]: r for r in audit["implementation_factors"]}
+    assert len(rows) == len(attention_mod._GATED), rows
+    for row in audit["implementation_factors"]:
+        assert row["ok"] is True, row
+        assert row["effective"] == row["declared"], row
+    assert rows["lega"]["effective"] == ["A", "B", "C"]
+    assert rows["lega_conc_only"]["effective"] == ["B"]
+    # 容量匹配对照：参数全保留，只有自己那条证据通道失效
+    for component, variant in (("A", "lega_null_query"),
+                               ("B", "lega_null_conc"),
+                               ("C", "lega_null_len")):
+        row = rows[variant]
+        assert set(row["params"]) == {"gate_w", "gate_a", "gate_b"}, row
+        assert row["effective"] == sorted(
+            set("ABC") - {component}), row
+        assert row["null_component"] == component, row
+
+    real_probe = attention_mod.probe_gate_factors
+
+    def drifted(variant, **kw):
+        probe = real_probe(variant, **kw)
+        if variant == "lega_conc_only":
+            probe["effective"] = ["B", "C"]
+        return probe
+
+    attention_mod.probe_gate_factors = drifted
+    try:
+        drifted_audit = single_factor_audit()
+    finally:
+        attention_mod.probe_gate_factors = real_probe
+    assert drifted_audit["ok"] is False
+    assert any("实现层生效因子" in p for p in drifted_audit["problems"]), (
+        drifted_audit["problems"])
+
+    def broken(variant, **kw):
+        return {"variant": variant, "gated": True, "params": ["gate_w"],
+                "effective": ["A"], "bias_effective": False,
+                "error": None, "null_component": None,
+                "use_raw_conc": False, "conc_mode": "max"}
+
+    attention_mod.probe_gate_factors = broken
+    try:
+        unregistered = single_factor_audit()
+    finally:
+        attention_mod.probe_gate_factors = real_probe
+    assert unregistered["ok"] is False
+    assert any("置零组件" in p or "参数" in p or "生效因子" in p
+               for p in unregistered["problems"]), unregistered["problems"]
+    print("  [ok] 单因素审计覆盖实现层因子（声明漂移/参数缺失/漏登记均显形）")
+
+
+def test_single_factor_audit_covers_registered_ablation_hypotheses():
+    """登记表里自称"核心消融"的假设必须真的只改变一个门控因子。
+
+    H2–H4 是对外声明的单组件确认性主张。若登记表被改成多因子对比
+    （候选换成 B-only 与 Full 比），或优效性 direction 与该边的
+    add/remove 语义写反，汇总仍会输出一个看似单组件的 支持/拒绝。
+    整体方法对比（vs standard、vs qgate）与机制单样本族必须被归为
+    overall/multi_factor 而不误报。
+    """
+    import copy
+    import json
+    import lega.hypotheses as hypotheses_mod
+    audit = single_factor_audit()
+    assert audit["ok"] is True, audit["problems"]
+    rows = {r["id"]: r for r in audit["registered_single_factor"]
+            if isinstance(r, dict) and r.get("id")}
+    assert {"H1", "H2", "H3", "H4", "H5", "H6", "H7"} <= set(rows), rows
+    for hyp_id, factor in (("H2", "A"), ("H3", "B"), ("H4", "C")):
+        assert rows[hyp_id]["claims_single_factor"] is True, rows[hyp_id]
+        assert rows[hyp_id]["contrast_type"] == "single_factor", rows[hyp_id]
+        assert rows[hyp_id]["factor"] == factor, rows[hyp_id]
+        assert rows[hyp_id]["direction_mismatch"] is False, rows[hyp_id]
+    # 整体/多因子对比不得被当成单组件消融，也不得被误报为问题
+    assert rows["H1"]["contrast_type"] == "overall"
+    assert rows["H5"]["contrast_type"] == "multi_factor"
+    assert rows["H5"]["changed_factors"] == ["B", "C"], rows["H5"]
+    assert rows["H6"]["contrast_type"] == "overall"
+    assert not any("H1" in p or "H5" in p or "H6" in p
+                   for p in audit["problems"]), audit["problems"]
+
+    registry = json.load(open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8"))
+    drifted = copy.deepcopy(registry)
+    by_id = {h["id"]: h for h in drifted["hypotheses"]}
+    by_id["H3"]["candidate"] = "lega_conc_only"      # 变成同时改 A+C
+    by_id["H4"]["direction"] = "candidate_better"    # 与 remove 边写反
+    real_loader = hypotheses_mod.load_registration
+    hypotheses_mod.load_registration = lambda path=None: drifted
+    try:
+        bad = single_factor_audit()
+    finally:
+        hypotheses_mod.load_registration = real_loader
+    assert bad["ok"] is False
+    joined = "；".join(bad["problems"])
+    assert "H3" in joined and "多个因子" in joined, joined
+    assert "H4" in joined and "direction" in joined, joined
+    print("  [ok] 单因素审计覆盖登记表消融假设（多因子/方向写反均显形）")

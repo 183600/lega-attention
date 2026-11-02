@@ -16,8 +16,11 @@ import lega.attention as attention_mod
 from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,
                             CONTROL_VARIANTS, CausalSelfAttention,
                             GATE_FACTORS, RAW_GATE_FACTORS,
-                            RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
-                            VARIANTS, VARIANT_CN, _placebo_evidence)
+                            RUNNABLE_VARIANTS, SUPPLEMENTAL_GATE_FACTORS,
+                            SUPPLEMENTAL_VARIANTS,
+                            VARIANTS, VARIANT_CN, _GATED,
+                            PLACEBO_VARIANTS, _placebo_evidence,
+                            probe_gate_factors)
 from lega.capacity import (CAPACITY_NULL_VARIANTS,
                            NULL_EVIDENCE_COMPONENT)
 from lega.model import (GPT, RoPE, expected_gate_extras,
@@ -689,3 +692,68 @@ def test_capacity_null_controls_keep_params_but_zero_evidence():
         assert float(g.abs().max()) == 0.0, (
             f"{variant} 的 {dead_param[component]} 应保留零梯度而不是断流")
     print("  [ok] lega_null_*：参数/形状匹配、证据置零、死参数保留零梯度")
+
+
+def test_probe_gate_factors_matches_declared_factor_tables():
+    """实现层自证：扰动门控参数真正改变 logit 的因子集必须等于声明集合。
+
+    ``GATE_FACTORS``/``RAW_GATE_FACTORS`` 都从实现的 ``_USE_*`` 开关派生，
+    因此"改了前向却忘了改开关"会让元数据与实现一起失真，而任何纯元数据
+    审计都会通过。这里用 :func:`probe_gate_factors` 逐参数扰动一次微型
+    前向，把实际生效的因子与声明表逐项对照；同时确保每个带门变体都被某张
+    表登记（新增带门变体必须显式选择登记到哪一张表）。
+    """
+    tables = [
+        ("GATE_FACTORS", dict(GATE_FACTORS)),
+        ("RAW_GATE_FACTORS", dict(RAW_GATE_FACTORS)),
+        ("SUPPLEMENTAL_GATE_FACTORS", dict(SUPPLEMENTAL_GATE_FACTORS)),
+    ]
+    declared = {}
+    for label, table in tables:
+        for variant, factors in table.items():
+            declared.setdefault(variant, []).append((label, frozenset(factors)))
+    for variant, component in NULL_EVIDENCE_COMPONENT.items():
+        declared.setdefault(variant, []).append(
+            ("capacity_null", frozenset("ABC") - frozenset({component})))
+    for variant in PLACEBO_VARIANTS:
+        declared.setdefault(variant, []).append(("placebo", frozenset("ABC")))
+    for variant in ALT_CONC_VARIANTS:
+        declared.setdefault(variant, []).append(
+            ("alt_conc", frozenset("ABC")))
+    # 每个带门变体都必须有声明，且多张表之间不得互相矛盾
+    assert set(declared) >= set(_GATED), (
+        f"带门变体未登记因子语义：{sorted(set(_GATED) - set(declared))}")
+    all_params = {"gate_w", "gate_a", "gate_b"}
+    for variant in sorted(_GATED):
+        probe = probe_gate_factors(variant)
+        assert probe.get("gated") is True and not probe.get("error"), variant
+        effective = frozenset(probe["effective"])
+        for label, expected in declared[variant]:
+            assert effective == expected, (
+                f"{variant} 在 {label} 声明 {sorted(expected)}，实现层生效 "
+                f"{sorted(effective)}")
+            if label == "capacity_null":
+                assert set(probe["params"]) == all_params, (
+                    f"{variant} 必须保留全部门控参数（参数匹配三臂）")
+                assert probe["null_component"] in ("A", "B", "C")
+        assert probe["bias_effective"] is True, variant
+    # 探针不得移动调用方的全局随机流，且同一变体可复现
+    torch.manual_seed(1234)
+    before = torch.random.get_rng_state().clone()
+    first = probe_gate_factors("lega")
+    assert torch.equal(before, torch.random.get_rng_state()), (
+        "实现级探针必须包在 fork_rng 内，不能移动调用方的全局随机流")
+    again = probe_gate_factors("lega")
+    assert first["effective"] == again["effective"] == ["A", "B", "C"]
+    # 无门变体没有门控 logit，因子集合恒为空
+    for variant in ("standard", "null", "null_zero"):
+        assert variant not in _GATED
+        probe = probe_gate_factors(variant)
+        assert probe["gated"] is False and probe["effective"] == []
+    try:
+        probe_gate_factors("not_a_variant")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("未知变体应显式报错")
+    print("  [ok] 实现层因子探针与声明因子表一致（含带门变体全覆盖）")

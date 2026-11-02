@@ -11,6 +11,7 @@ import time
 from unittest import mock
 
 from lega.data import CACHE_SCHEMA
+import lega.attention as lega_attention
 from tests.pipeline_helpers import _mk, _write_json
 from run_all import (ALPHA, AP_DIFF_METRIC, MIN_SEEDS, _ablation_coverage,
                       _ap_diff_tests, _apply_holm, _auroc_diff_tests, _cmd_env, _effect_status,
@@ -904,10 +905,22 @@ def test_build_summary_renders_confirmatory_sections():
         assert "AUROC差" in md
         # 单因素审计必须进入汇总页与 significance.json
         assert "单因素消融审计" in md
+        # 实现层因子核对（扰动门控参数真正生效的因子）也必须落盘/渲染
+        assert "实现层核对" in md
+        assert "lega_null_query" in md
         sig = json.load(open(os.path.join(tmp, "significance.json"),
                              encoding="utf-8"))
         assert sig["single_factor_audit"]["ok"] is True
         assert len(sig["single_factor_audit"]["contrasts"]) == 6
+        impl = {r["variant"]: r
+                for r in sig["single_factor_audit"]["implementation_factors"]}
+        assert len(impl) == len(lega_attention._GATED)
+        assert all(r["ok"] for r in impl.values())
+        assert impl["lega"]["effective"] == ["A", "B", "C"]
+        assert impl["lega_conc_only"]["effective"] == ["B"]
+        assert impl["lega_null_conc"]["params"] == [
+            "gate_a", "gate_b", "gate_w"]
+        assert impl["lega_null_conc"]["null_component"] == "B"
         assert any(t["metric"] == AUROC_DIFF_METRIC for t in sig["pairs"])
         assert sig["registered_hypotheses"], "注册假设判定必须进 significance.json"
         h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")
