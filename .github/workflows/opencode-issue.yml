@@ -44,6 +44,7 @@ env:
   PYTHONUTF8: '1'
   OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
   NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+  NVIDIA_API_KEY_ALT: ${{ secrets.NVIDIA_API_KEY_ALT }}
 
 jobs:
   opencode:
@@ -268,31 +269,25 @@ jobs:
             CANDIDATES+=("$m")
           }
 
-          # ⭐ 模型策略（2026-11-02 diag v7b 对 NVIDIA 85 模型 + opencode 免费 130 模型全量实测）：
-          #   1) 优先 z-ai/glm-5.3-flash（实测可用：冒烟 43s/工具 136s，波动大偶尔慢，由看门狗兜底）；
-          #   2) 8 个验证池模型（60s 冒烟+工具调用双通过）每次 run 随机轮换（"所有模型随机"策略）；
-          #   3) opencode 免费网关 130 个模型已全部实测失败，仅留 deepseek/glm/pickle 三席兜底（若复活自动可用）。
-          # deepseek-ai/deepseek-v4.1-flash 三次实测挂死（303s 空响应 / 300s / 240s 超时），永久排除。
-          NV_FIRST="nvidia/z-ai/glm-5.3-flash"
-          NV_POOL=(
-            "nvidia/poolside/laguna-xs-2.1"
-            "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
-            "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b"
-            "nvidia/nvidia/nemotron-3-ultra-550b-a55b"
-            "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+          # ⭐ 模型链（2026-11-03 指定，固定顺序，不再随机轮换）：
+          #   全部走 NVIDIA NIM API（opencode 内置 nvidia provider，鉴权 NVIDIA_API_KEY）：
+          #     deepseek-ai/deepseek-v4.1-flash → z-ai/glm-5.3-flash
+          #     → minimaxai/minimax-m3.1-flash → stepfun-ai/step-5-preview
+          #   依序冒烟测试，第一个通过的作为本次 issue 任务的模型；免费池仅作最终兜底。
+          # 注：deepseek-v4.1-flash 有挂死史（303s/300s/240s 空响应），仍按指定放第一位，
+          #     冒烟 75s 不通过即自动落到下一个候选。
+          NV_CHAIN=(
+            "nvidia/deepseek-ai/deepseek-v4.1-flash"
+            "nvidia/z-ai/glm-5.3-flash"
             "nvidia/minimaxai/minimax-m3.1-flash"
-            "nvidia/meta/muse-glimmer-30b"
-            "nvidia/meta/llama-3.2-90b-vision-instruct"
+            "nvidia/stepfun-ai/step-5-preview"
           )
 
           CANDIDATES=()
           RANDOM_POOL=()
 
-          # 主力：NVIDIA NIM 模型链（指定顺序），优先于免费池
-          # ⭐ glm 优先 + 验证池随机轮换（每次 run 打乱，实现所有可用模型随机）
-          add_candidate "$NV_FIRST"
-          mapfile -t NV_SHUF < <(printf '%s\n' "${NV_POOL[@]}" | shuf)
-          for m in "${NV_SHUF[@]}"; do
+          # 主力：NVIDIA NIM 模型链（固定顺序），优先于免费池
+          for m in "${NV_CHAIN[@]}"; do
             add_candidate "$m"
           done
 
@@ -359,25 +354,44 @@ jobs:
           SMOKE_DIR="$RUNNER_TEMP/opencode-smoke"
           mkdir -p "$SMOKE_DIR"
           SELECTED=""
-          for m in "${CANDIDATES[@]}"; do
+          try_smoke() {
+            local m="$1"
             echo "[model] 测试 $m ..."
             # 每个候选都做一次真实冒烟调用，避免选中目录里存在但实际不可用的模型。
             SMK_T=180; case "$m" in nvidia/*) SMK_T=75 ;; esac
             if ( cd "$SMOKE_DIR" && timeout --kill-after=30 $SMK_T opencode run --auto -m "$m" "只回复两个字：OK" ) > "$SMOKE_DIR/smoke.log" 2>&1; then
               echo "[model] 可用：$m"
               SELECTED="$m"
-              break
+              return 0
             fi
             echo "[model] 不可用：$m"
             tail -n 20 "$SMOKE_DIR/smoke.log" 2>/dev/null || true
+            return 1
+          }
+          for m in "${CANDIDATES[@]}"; do
+            if try_smoke "$m"; then
+              break
+            fi
           done
+          # NVIDIA 链在主 key 下全部失败且配置了备用 key：换备用 key 重试整条 NVIDIA 链
+          if [ -z "$SELECTED" ] && [ -n "${NVIDIA_API_KEY_ALT:-}" ] && [ "$NVIDIA_API_KEY_ALT" != "$NVIDIA_API_KEY" ]; then
+            echo "[model] 主 key 候选全部失败，切换备用 NVIDIA key 重试模型链"
+            export NVIDIA_API_KEY="$NVIDIA_API_KEY_ALT"
+            for m in "${NV_CHAIN[@]}"; do
+              if try_smoke "$m"; then
+                break
+              fi
+            done
+          fi
 
           if [ -z "$SELECTED" ]; then
-            echo "[model][error] 所有候选免费模型均不可用" >&2
+            echo "[model][error] 所有候选模型均不可用" >&2
             exit 1
           fi
 
           echo "model=$SELECTED" >> "$GITHUB_OUTPUT"
+          # 实际生效的 NVIDIA key（主或备）传给后续 step：opencode 鉴权用同一把 key
+          echo "nv_key=${NVIDIA_API_KEY}" >> "$GITHUB_OUTPUT"
           echo "[model] 最终选择：$SELECTED"
 
       - name: Pre-OpenCode test gate
@@ -433,6 +447,8 @@ jobs:
         timeout-minutes: 290
         env:
           MODEL: ${{ steps.select.outputs.model }}
+          # select step 实际冒烟通过的那把 NVIDIA key（主或备），覆盖 workflow 级默认
+          NVIDIA_API_KEY: ${{ steps.select.outputs.nv_key }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
