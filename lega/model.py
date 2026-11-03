@@ -714,6 +714,7 @@ class GPT(nn.Module):
                 # 逐位置/逐行统计需要逐 token nll；只要请求其一就走 nll 路径。
                 detailed = bool(return_window_losses or return_position_losses)
                 row_sums = None
+                rows = None
                 if return_window_losses:
                     # 每个输入窗口占一行（B 行、每行 T 个位置）；按行累加
                     # 逐位置 nll，最后除以每行有效位置数。这个统计只服务
@@ -740,7 +741,11 @@ class GPT(nn.Module):
                             lcd, tgt[s : s + CHUNK], int(ignore_index), tgt_has_ignore
                         )
                         total = nll.sum() if total is None else total.add_(nll.sum())
-                        if row_sums is not None:
+                        if rows is not None:
+                            if row_sums is None:
+                                row_sums = torch.zeros(
+                                    B, dtype=nll.dtype, device=nll.device
+                                )
                             row_sums.index_add_(0, rows[s : s + nll.numel()], nll)
                         if position_nll is not None:
                             flat_pos = (
