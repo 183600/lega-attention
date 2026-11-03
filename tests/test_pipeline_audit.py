@@ -4,7 +4,12 @@ import json
 import os
 import shutil
 import tempfile
+from unittest import mock
 
+from lega.ablate import (
+    LESION_ORDER as ABLATION_LESION_ORDER,
+    probe_lesion_channels,
+)
 from tests.pipeline_helpers import _mk, _write_json
 from run_all import (
     ALPHA,
@@ -116,6 +121,33 @@ def test_component_evidence_flags_contradiction():
     a2 = next(c for c in component_evidence(one_sided) if c["component"] == "A 查询项")
     assert a2["verdict"].startswith("证据冲突"), a2
     print("  [ok] component_evidence（任一套显著反向 -> 证据冲突，另一套不显著亦然）")
+
+
+def test_component_evidence_rejects_non_single_factor_tests():
+    """组件判定只能使用被标记为单因素的检验。
+
+    ``_paired_comparisons`` 只给已审计的 6 条边打 ``contrast_type="single_factor"``；
+    其它对比（vs standard、LEGA vs qgate、B-only vs Full 这类同时改两个
+    因子的边）标为 ``overall``。若组件判定误用了这类显著结果，"组件有用"
+    就建立在多因子差异上——单因素边界必须在使用点再拦一次。
+    """
+    tests = [
+        _mk("lega_no_query", "lega", "PPL", 0.4, 0.005),
+        _mk("qgate", "gate_only", "PPL", -0.01, 0.7),
+    ]
+    for t in tests:
+        t["contrast_type"] = "overall"
+    _apply_holm(tests)
+    comp = {c["component"]: c for c in component_evidence(tests)}
+    a = comp["A 查询项"]
+    assert a["supported"] == [], a
+    assert a["verdict"] == "证据不足", a
+    assert "不是单因素" in a["loo"]["PPL"]["reason"], a
+    # 标成 single_factor 的同一条对比才能进入判定
+    tests[0]["contrast_type"] = "single_factor"
+    comp = {c["component"]: c for c in component_evidence(tests)}
+    assert comp["A 查询项"]["supported"] == ["PPL"], comp["A 查询项"]
+    print("  [ok] 组件判定拒绝非单因素对比（overall 不得支撑组件归因）")
 
 
 def test_tradeoff_verdict_rejects_bad_deals():
@@ -1327,3 +1359,67 @@ def test_single_factor_audit_covers_registered_ablation_hypotheses():
     assert "H3" in joined and "多个因子" in joined, joined
     assert "H4" in joined and "direction" in joined, joined
     print("  [ok] 单因素审计覆盖登记表消融假设（多因子/方向写反均显形）")
+
+
+def test_single_factor_audit_covers_lesion_implementation():
+    """推理期病灶必须在实现层只动它声明的证据通道。
+
+    训练期变体已有实现层探针（``probe_gate_factors``）；推理期病灶此前只有
+    元数据核对，元数据与实现一起漂移时（例如把 ``len_permute`` 写成同时
+    错位 ``c`` 里的 log n），单因素推理期实验会悄悄变成多因素实验而审计
+    全绿。这里核对 (1) 每个病灶都实测且与声明一致，(2) 实测漂移会被判
+    ``ok=False`` 并给出可读原因，(3) 探针失败同样显形而不静默跳过。
+    """
+    audit = single_factor_audit()
+    assert audit["ok"] is True, audit["problems"]
+    rows = {r["lesion"]: r for r in audit["inference_lesion_implementation"]}
+    assert set(rows) == set(ABLATION_LESION_ORDER), rows
+    for row in audit["inference_lesion_implementation"]:
+        assert row["ok"] is True, row
+        assert row["affected"] == row["expected"], row
+        assert row["applied"] is True, row
+    assert rows["no_query"]["expected"] == ["A"]
+    assert rows["no_conc_matched"]["expected"] == ["B"]
+    assert rows["len_permute"]["expected"] == ["C"]
+    assert rows["query_only"]["expected"] == ["B", "C"]
+
+    def drifted(lesion_id, **kwargs):
+        probe = {
+            "lesion": lesion_id,
+            "variant": "lega",
+            "applied": True,
+            "reason": "",
+            "affected": ["A", "B"],
+            "expected": ["A"],
+            "no_op": False,
+            "error": None,
+        }
+        if lesion_id != "no_query":
+            real = probe_lesion_channels(lesion_id)
+            probe["affected"] = real["affected"]
+            probe["expected"] = real["expected"]
+        return probe
+
+    with mock.patch("lega.ablate.probe_lesion_channels", drifted):
+        bad = single_factor_audit()
+    assert bad["ok"] is False
+    assert any(
+        "no_query" in p and "实现层实际影响通道" in p for p in bad["problems"]
+    ), bad["problems"]
+
+    def broken(lesion_id, **kwargs):
+        return {
+            "lesion": lesion_id,
+            "affected": [],
+            "expected": [],
+            "applied": False,
+            "error": "RuntimeError: 探针不可用",
+        }
+
+    with mock.patch("lega.ablate.probe_lesion_channels", broken):
+        failed = single_factor_audit()
+    assert failed["ok"] is False
+    assert any(
+        "实现层核对失败" in p for p in failed["problems"]
+    ), failed["problems"]
+    print("  [ok] 单因素审计覆盖推理期病灶实现层（漂移/探针失败均显形）")

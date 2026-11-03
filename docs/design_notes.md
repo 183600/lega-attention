@@ -16,7 +16,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
-单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对训练期容量匹配 Full/Null_X/No_X 三臂（Null_X 必须保留全部门控参数、只置零对应证据，No_X 必须与已审计的去一法变体一致，且不得混入主因子表）、参数化稳健性使用的 4 条原始/归一化单因子边、剂量-反应的 A/B/C 组件映射（每个组件只能缩放一个 gate 参数，且能力与训练期对照必须对应同一因子；两个组件共用参数或漏掉组件会显式失败），以及推理期单病灶、活动匹配对照、A/B/C 分布匹配置换（`query_permute`/`conc_permute`/`len_permute` 各自只对应一个证据通道）和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验；`RAW_GATE_FACTORS` 同样从 `use_query/use_raw_conc/use_len` 派生，运行期会核对 `RAW_CELLS` 的 B 格确实使用原始 `log max_p` 变体，而不是只核对格名覆盖 2^3。汇总实际消费的 `SINGLE_FACTOR_PAIRS` 也必须与声明的 6 条单因素边逐项一致，不能手工增删或混入多因子对比。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。运行期还会核对 `lega_l2`/`lega_entropy` 保持 `lega` 的 A/B/C 开关和门控参数预算，同时不得混入 `GATE_FACTORS`/`RAW_GATE_FACTORS`；这保证“换 B 的统计量”不会被误解释成“开关 B”，也不会因漏注册而静默退化成标准注意力。
+单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对训练期容量匹配 Full/Null_X/No_X 三臂（Null_X 必须保留全部门控参数、只置零对应证据，No_X 必须与已审计的去一法变体一致，且不得混入主因子表）、参数化稳健性使用的 4 条原始/归一化单因子边、剂量-反应的 A/B/C 组件映射（每个组件只能缩放一个 gate 参数，且能力与训练期对照必须对应同一因子；两个组件共用参数或漏掉组件会显式失败），以及推理期单病灶、活动匹配对照、A/B/C 分布匹配置换（`query_permute`/`conc_permute`/`len_permute` 各自只对应一个证据通道）和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验；`RAW_GATE_FACTORS` 同样从 `use_query/use_raw_conc/use_len` 派生，运行期会核对 `RAW_CELLS` 的 B 格确实使用原始 `log max_p` 变体，而不是只核对格名覆盖 2^3。汇总实际消费的 `SINGLE_FACTOR_PAIRS` 也必须与声明的 6 条单因素边逐项一致，不能手工增删或混入多因子对比。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。组件判定在**使用点**再拦一次：`_paired_comparisons` 只给已审计的 6 条边打 `contrast_type="single_factor"`，其余对比标 `overall`；`component_evidence` 遇到标着 `overall` 的检验一律判“对比不是单因素，不能用于组件归因”，即使它显著也不进入组件有效性的判定（旧产物缺该字段时按历史口径放行，字段缺失不等于多因素）。运行期还会核对 `lega_l2`/`lega_entropy` 保持 `lega` 的 A/B/C 开关和门控参数预算，同时不得混入 `GATE_FACTORS`/`RAW_GATE_FACTORS`；这保证“换 B 的统计量”不会被误解释成“开关 B”，也不会因漏注册而静默退化成标准注意力。训练期变体与推理期病灶都另有**实现层自证**（见下两节）：前者逐参数扰动看门控 logit 是否真的改变，后者逐通道隔离测量看病灶是否只动声明的那一条证据通道。
 
 ### 实现层因子自证（元数据与实现必须同时为真）
 
@@ -32,6 +32,24 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - 每个带门变体的 `gate_d` 必须真的改变 `logit`（输出门接入前向的阳性检查）。
 
 探针/依赖失败（无张量设备等）也写入 `problems` 而不是静默跳过，避免"实现层未核对"看起来像"核对通过"。审计结果进 `significance.json.single_factor_audit.implementation_factors`，汇总页"单因素消融审计"小节并列渲染变体/登记类别/注册参数/实现层生效因子/声明因子五列，不一致时显式点名该变体不能作为单因素对比的一方。这层核对是构造性保证而非"跑过就有"：`tests/test_attention.py::test_probe_gate_factors_matches_declared_factor_tables` 直接对全部带门变体做实证断言，`tests/test_pipeline_audit.py` 再把探针改成漂移版本，核对审计确实以 `ok=False` 加可读原因拒绝。
+
+### 推理期病灶的实现层自证（单因素推理期实验也必须只动一条通道）
+
+训练期变体的实现层自证解决的是"改公式忘了改开关"。推理期病灶（`lega/ablate.py` 的 `LESION_SPECS`）有同构的风险：元数据声明"这个病灶只动哪条证据通道"，真正决定前向的是 `apply_lesion` 与注意力前向。若把 `len_permute` 写成同时错位 `c` 里的 `log n`（B 的长度归一化分量）、把 `no_query` 顺手多清零一个 `gate_a`，或让 `query_permute` 也置换集中度证据，**纯元数据审计仍然全绿**，而"单因素推理期实验"已经变成多因素实验：因果消融表里 ΔNLL 的归因对象错了，推理期 2^3/Shapley 的格映射也跟着错。
+
+`lega.ablate.probe_lesion_channels` 因此把核对推到实现层，做一次**逐通道隔离测量**：
+
+1. 构造确定性微型注意力层，把 A/B/C 三个门控系数赋成互不相同的非零值（初始化时 `w=a=b=0`，任何通道级比较都需要非零权重；头置换类病灶还要求逐头取值不同才测得出来）；
+2. 逐通道把**另外两条**通道的门控系数置零，得到该通道单独贡献的门控 `logit`；比较时去掉逐头常数（`gate_d` 偏置与活动匹配对照的 `d` 平移都是逐头常量，否则会被误判成通道变化）；
+3. 施加病灶后重复第 2 步，实测哪些通道的贡献发生了变化，与设计声明（`expected_lesion_channels`：由病灶 kind/params 与置换登记映射派生）逐项对照。
+
+`single_factor_audit()` 新增 `inference_lesion_implementation` 段，对全部 18 个推理期病灶核对：
+
+- 单因素病灶（`no_query`/`no_conc`/`no_len`、三个活动匹配对照 `no_*_matched`、三个分布匹配置换 `query_permute`/`conc_permute`/`len_permute`）必须**只动一条**通道；
+- 多通道对照（`no_evidence`、`gate_open`/`gate_closed`/`gate_constant_mean`、`head_permute`、`sign_flip`）必须确实覆盖 A/B/C 三条，不能退化成"只动一条"而被误当成单因素；
+- 2^3 的单因子格（`query_only`/`conc_only`/`len_only`）必须恰好去掉另外两条通道，否则推理期 Shapley/交互分解的格映射就是错的。
+
+探针失败（无张量设备/依赖损坏）同样写入 `problems`，不静默跳过。审计结果进 `significance.json.single_factor_audit.inference_lesion_implementation`，汇总页"单因素消融审计"小节渲染"病灶/声明通道/实测影响通道/结论"四列，不一致时显式点名该病灶不能作为单因素推理期实验的一方。`tests/test_ablation_methods.py` 直接对全部病灶做实证断言并模拟"多动一条通道"的漂移，`tests/test_pipeline_audit.py` 再把探针换成漂移/失败版本，核对审计确实以 `ok=False` 加可读原因拒绝。
 
 ### 参数化稳健性：归一化 c vs 原始 log max_p
 

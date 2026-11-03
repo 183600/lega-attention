@@ -1412,6 +1412,44 @@ def _summary_part_b(**kw):
                 "只让自己那条证据通道失效。"
             )
         md.append("")
+    lesion_rows = [
+        r
+        for r in (sf_audit.get("inference_lesion_implementation") or [])
+        if isinstance(r, dict) and r.get("lesion")
+    ]
+    if lesion_rows:
+        md.append(
+            "推理期病灶实现层核对（逐通道隔离测量：把另外两条通道的门控"
+            "系数置零，比较病灶施加前后该通道对门控 logit 的位置变化；"
+            "逐头常数 `gate_d` 与活动匹配平移不计入）："
+        )
+        md.append("")
+        md.append("| 病灶 | 声明通道 | 实测影响通道 | 结论 |")
+        md.append("|---|---|---|---|")
+        for r in lesion_rows:
+            md.append(
+                f"| {r['lesion']} "
+                f"| {', '.join(r.get('expected') or []) or '—'} "
+                f"| {', '.join(r.get('affected') or []) or '无'} "
+                f"| {'✅ 一致' if r.get('ok') is True else '⚠ 不一致'} |"
+            )
+        md.append("")
+        bad_lesions = [
+            r["lesion"] for r in lesion_rows if r.get("ok") is not True
+        ]
+        if bad_lesions:
+            md.append(
+                "⚠ 以下病灶的实现层实际影响通道与设计声明不一致："
+                + "、".join(sorted(bad_lesions))
+                + "——它们不能作为单因素推理期实验（或 2^3 格）的一方。"
+            )
+        else:
+            md.append(
+                "✅ 全部推理期病灶的实现层实测通道与设计声明一致："
+                "单因素病灶只动一条通道，多通道对照确实覆盖 A/B/C，"
+                "2^3 单因子格恰好去掉另外两条通道。"
+            )
+        md.append("")
     reg_rows = [
         r
         for r in (sf_audit.get("registered_single_factor") or [])

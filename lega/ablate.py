@@ -69,11 +69,13 @@ import json
 import math
 import os
 import sys
+from types import SimpleNamespace
 from typing import Dict, List, Mapping, Optional
 
 import numpy as np
 import torch
 
+from .attention import CausalSelfAttention
 from .data import get_val_windows, load_bin
 from .evaluate import _positive_int_or_none, _resolve_eval_amp, json_safe_eval_metrics
 from .model import load_model
@@ -339,6 +341,64 @@ PERMUTATION_LESION_FACTORS = (
     ("B", "conc_permute", "conc"),
     ("C", "len_permute", "len"),
 )
+
+# 门控参数 -> 证据通道（A=w·q / B=a·c / C=b·log n）。
+_GATE_PARAM_CHANNEL = {"gate_w": "A", "gate_a": "B", "gate_b": "C"}
+
+# 按设计同时动到全部证据通道的病灶类型：它们是**多通道对照**（去全部
+# 证据、门恒开/恒关、恒为均值、头置换、证据反号），不是单因素实验；运行期
+# 审计要求它们实测确实覆盖 A/B/C 三条通道，防止它们悄悄退化成“只动一条”。
+_LESION_ALL_CHANNEL_KINDS = frozenset({
+    "zero_evidence", "constant", "closed", "constant_mean",
+    "head_permute", "sign_flip",
+})
+
+
+def expected_lesion_channels(lesion_id: str) -> tuple:
+    """病灶按设计应影响的证据通道（A/B/C），元组形式。
+
+    事实来源是病灶自身的定义（``LESION_SPECS`` 的 kind/params）加上置换
+    病灶的登记映射（``PERMUTATION_LESION_FACTORS``）：
+
+    * ``zero``/``zero_matched``：只清零 ``params`` 里列出的门控参数，因此
+      只影响那些参数对应的通道；
+    * ``zero_evidence``/``constant``/``closed``/``constant_mean``/
+      ``head_permute``/``sign_flip``：按设计覆盖全部三条证据通道；
+    * 置换类：按登记映射只错位一条通道的位置对应。
+
+    这张表是**声明**；:func:`probe_lesion_channels` 给出实现层的**实测**，
+    两者不一致说明实现已经漂移（单因素推理期实验被改成多因素）。
+    """
+    spec = LESION_BY_ID.get(lesion_id)
+    if spec is None:
+        raise ValueError(f"未知病灶: {lesion_id!r}")
+    kind = spec.get("kind")
+    if kind in _LESION_ALL_CHANNEL_KINDS:
+        return ("A", "B", "C")
+    if kind in ("zero", "zero_matched"):
+        channels = []
+        for name in spec.get("params") or ():
+            channel = _GATE_PARAM_CHANNEL.get(name)
+            if channel is None:
+                raise ValueError(
+                    f"病灶 {lesion_id!r} 的参数 {name!r} 不属于 A/B/C 证据通道"
+                )
+            channels.append(channel)
+        if not channels:
+            raise ValueError(f"病灶 {lesion_id!r} 未声明任何证据通道")
+        return tuple(sorted(set(channels)))
+    if kind in ("conc_permute", "query_permute", "len_permute"):
+        for factor, pid, _capability in PERMUTATION_LESION_FACTORS:
+            if pid == lesion_id:
+                return (factor,)
+        raise ValueError(f"置换病灶 {lesion_id!r} 未登记到 PERMUTATION_LESION_FACTORS")
+    raise ValueError(f"未知病灶类型: {kind!r}")
+
+
+# 病灶 -> 声明应影响的证据通道（运行期审计与实现层探针共用）。
+LESION_EXPECTED_CHANNELS = {
+    lesion_id: expected_lesion_channels(lesion_id) for lesion_id in LESION_ORDER
+}
 
 # 同一 checkpoint 内的 2^3 全因子干预设计：cell -> 病灶 id。
 # "ABC" 是正常基线（不施加病灶），None 表示调用方读取 baseline 指标。
@@ -739,6 +799,173 @@ def apply_lesion(
         "changed_tensors": int(changed),
         "max_abs_delta": float(max_delta),
         "no_op": no_op,
+    }
+
+
+class _LesionProbeModel:
+    """只含一层注意力的最小模型容器（供 ``apply_lesion`` 就地施加病灶）。
+
+    真实模型是 ``GPT``（多层/多块），但病灶只改门控参数与门控临时属性，
+    与主干结构无关；探针用单层容器即可覆盖 ``gate_modules``/
+    ``snapshot_gate_params`` 需要的接口，且更快更确定。
+    """
+
+    def __init__(self, attn):
+        self.attn = attn
+        self.blocks = [SimpleNamespace(attn=attn)]
+
+    def named_parameters(self, *args, **kwargs):
+        return self.attn.named_parameters(*args, **kwargs)
+
+
+def probe_lesion_channels(
+    lesion_id: str,
+    *,
+    variant: str = "lega",
+    d_model: int = 32,
+    n_heads: int = 4,
+    n_pos: int = 12,
+    seed: int = 0,
+    atol: float = 1e-5,
+    rtol: float = 1e-4,
+) -> dict:
+    """实施层核对：推理期病灶实际影响了哪几条证据通道（A/B/C）。
+
+    元数据（``LESION_SPECS``）只声明“哪个病灶动哪条通道”，真正决定前向
+    的是 ``apply_lesion`` 与注意力前向：若有人把 ``len_permute`` 写成同时
+    错位 ``c`` 里的 log n，或把 ``no_query`` 顺手多清零一个 gate_a，纯
+    元数据审计仍会全绿，而“单因素推理期实验”已经变成多因素实验。
+
+    测量方法（逐通道隔离）：
+
+    1. 构造确定性微型注意力层，给 A/B/C 三个门控系数赋**互不相同**的非零
+       值（初始化时 w=a=b=0，任何通道级比较都需要非零权重）；
+    2. 逐通道把**另外两条**通道的门控系数置零，得到该通道单独贡献的
+       门控 logit；比较时去掉逐头常数（``gate_d`` 偏置与活动匹配对照的
+       d 平移都是逐头常量，否则会被误判成通道变化）；
+    3. 施加病灶后重复第 2 步，实测哪些通道的贡献发生了变化。
+
+    返回 ``affected``（实测影响通道）与 ``expected``（设计声明通道），
+    两者不一致即说明实现与设计漂移。整个过程在 ``torch.random.fork_rng``
+    内进行，不消耗调用方的全局随机流；同一输入恒定返回同一结果。
+    """
+    spec = LESION_BY_ID.get(lesion_id)
+    if spec is None:
+        raise ValueError(f"未知病灶: {lesion_id!r}")
+    expected = LESION_EXPECTED_CHANNELS.get(lesion_id, ())
+    try:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(seed))
+            attn = CausalSelfAttention(
+                d_model=int(d_model),
+                n_heads=int(n_heads),
+                variant=variant,
+                use_sdpa_standard=False,
+            )
+            attn.eval()
+            heads = int(attn.n_heads)
+            missing = [
+                name
+                for name in ("gate_w", "gate_a", "gate_b")
+                if not hasattr(attn, name)
+            ]
+            if missing:
+                # 逐通道隔离要求三条通道同时存在，否则“无通道”会被误读成
+                # “该通道未受影响”。
+                raise ValueError(
+                    f"探针需要同时具备 A/B/C 三条证据通道的变体，"
+                    f"{variant!r} 缺少 {missing}"
+                )
+            with torch.no_grad():
+                # 逐头互不相同：头置换类病灶必须能被测出来。
+                attn.gate_w.copy_(
+                    torch.linspace(0.2, 0.6, heads * attn.d_head).reshape(
+                        heads, attn.d_head
+                    )
+                )
+                attn.gate_a.copy_(torch.linspace(0.3, 0.7, heads))
+                attn.gate_b.copy_(torch.linspace(0.25, 0.65, heads))
+            model = _LesionProbeModel(attn)
+            gen = torch.Generator().manual_seed(int(seed) + 1)
+            x = torch.randn(1, int(n_pos), int(d_model), generator=gen)
+
+            def _gate_values():
+                return {
+                    name: p.detach().clone()
+                    for name, p in attn.named_parameters()
+                    if name.startswith("gate_")
+                }
+
+            def _restore(values):
+                with torch.no_grad():
+                    for name, p in attn.named_parameters():
+                        value = values.get(name)
+                        if value is not None:
+                            p.copy_(value)
+
+            def _isolate(channel):
+                """只保留该通道的门控贡献，返回去掉逐头常数后的 logit。"""
+                with torch.no_grad():
+                    for other in ("A", "B", "C"):
+                        if other == channel:
+                            continue
+                        for name, p in attn.named_parameters():
+                            if _GATE_PARAM_CHANNEL.get(name) == other:
+                                p.zero_()
+                    _, _, stats = attn(x, need_stats=True)
+                logit = stats.get("logit") if isinstance(stats, dict) else None
+                if not torch.is_tensor(logit):
+                    return None
+                # 去掉逐头常数（gate_d / 活动匹配平移），只看位置变化。
+                return (logit - logit.mean(dim=-1, keepdim=True)).detach().clone()
+
+            base_values = _gate_values()
+            before = {}
+            for channel in ("A", "B", "C"):
+                _restore(base_values)
+                before[channel] = _isolate(channel)
+            _restore(base_values)
+            snapshot = snapshot_gate_params(model)
+            extra = {}
+            if spec.get("kind") == "zero_matched":
+                # 活动匹配对照会平移 d；给一个非零常量偏移，验证“只平移
+                # 逐头常数、不动其它通道的位置变化”。
+                extra["matched_gate_d"] = [[0.25] * heads]
+            if spec.get("kind") == "constant_mean":
+                extra["gate_head_mean"] = [[0.7] * heads]
+            record = apply_lesion(model, lesion_id, perm_seed=0, **extra)
+            lesion_values = _gate_values()
+            after = {}
+            for channel in ("A", "B", "C"):
+                # 只恢复病灶自身的参数状态，不能回到基线（否则测不到病灶）。
+                _restore(lesion_values)
+                after[channel] = _isolate(channel)
+            restore_gate_params(model, snapshot)
+    except Exception as e:  # pragma: no cover - 只在极端环境（无 CPU 张量）发生
+        return {
+            "lesion": lesion_id,
+            "variant": variant,
+            "applied": False,
+            "affected": [],
+            "expected": list(expected),
+            "error": f"{type(e).__name__}: {e}",
+        }
+    affected = []
+    for channel in ("A", "B", "C"):
+        old, new = before.get(channel), after.get(channel)
+        if old is None or new is None:
+            continue
+        if not torch.allclose(old, new, atol=float(atol), rtol=float(rtol)):
+            affected.append(channel)
+    return {
+        "lesion": lesion_id,
+        "variant": variant,
+        "applied": bool(record.get("applied")),
+        "reason": record.get("reason", ""),
+        "affected": affected,
+        "expected": list(expected),
+        "no_op": bool(record.get("no_op")),
+        "error": None,
     }
 
 

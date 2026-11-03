@@ -2606,6 +2606,34 @@ def _find_test(tests, pair, metric):
     return None
 
 
+def _component_test_status(t, removing: bool) -> dict:
+    """组件归因只接受**单因素**检验；多因素对比的显著结果不得进入判定。
+
+    ``_paired_comparisons`` 只给已审计的 6 条单因素边打
+    ``contrast_type="single_factor"``，其余对比（各变体 vs standard、
+    LEGA vs qgate、B-only vs Full 这类同时改两个因子的边）标为
+    ``overall``。若组件判定误用了后者的显著结果，"组件有用"就建立在
+    多因子差异上——这是单因素审计要在**使用点**再拦一次的原因。
+
+    旧产物没有该字段时按历史口径放行：字段缺失只说明产物老，不等于
+    这条对比是多因素（真正的多因素由审计层另行判定）。
+    """
+    if isinstance(t, dict):
+        contrast_type = t.get("contrast_type")
+        if contrast_type is not None and contrast_type != "single_factor":
+            return {
+                "supported": False,
+                "opposite": False,
+                "fragile": False,
+                "reason": (
+                    f"对比不是单因素（contrast_type={contrast_type}），"
+                    "不能用于组件归因"
+                ),
+                "p_adj": t.get("p_adj"),
+            }
+    return _effect_status(t, removing)
+
+
 def _effect_status(t, removing: bool) -> dict:
     """单条配对检验 -> “组件有用”的证据状态（须方向正确、显著且稳健）。
 
@@ -2811,10 +2839,10 @@ def component_evidence(tests, audit: dict = None) -> list:
             )
             item["early_stop_runs"] = stopped
         for metric in _EVIDENCE_METRICS:
-            item["loo"][metric] = _effect_status(
+            item["loo"][metric] = _component_test_status(
                 _find_test(tests, loo_pair, metric), True
             )
-            item["add"][metric] = _effect_status(
+            item["add"][metric] = _component_test_status(
                 _find_test(tests, add_pair, metric), False
             )
         loo_p = item["loo"][primary]

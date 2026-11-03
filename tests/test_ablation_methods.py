@@ -19,15 +19,18 @@ from lega.attention import _permute_positions
 from lega.ablate import (
     INFERENCE_FACTORIAL_CELLS,
     LESION_BY_ID,
+    LESION_EXPECTED_CHANNELS,
     LESION_ORDER,
     MATCHED_LESION_IDS,
     MATCHED_LESION_PAIRS,
     PERMUTATION_LESION_FACTORS,
     apply_lesion,
+    expected_lesion_channels,
     gate_capabilities,
     gate_head_means,
     gate_lesion_controls,
     lesion_applicability,
+    probe_lesion_channels,
     restore_gate_params,
     run_ablation,
     snapshot_gate_params,
@@ -1311,3 +1314,67 @@ def test_single_factor_audit_covers_inference_lesion_mappings():
         assert not audit["ok"], audit
         assert any("factorial_cell" in p for p in audit["problems"]), audit
     print("  [ok] 单因素审计覆盖推理期病灶/活动匹配/2^3 单因子格")
+
+
+def test_lesion_implementation_probe_matches_declared_channels():
+    """推理期病灶的实施层实测通道必须与设计声明一致。
+
+    元数据（``LESION_SPECS``）只说明“哪个病灶动哪条通道”；真正决定前向
+    的是 ``apply_lesion`` 与注意力前向。若 ``len_permute`` 顺手把 ``c`` 里
+    的 log n 也错位、或 ``no_query`` 额外清零 gate_a，纯元数据审计会全绿，
+    而单因素推理期实验已经变成多因素实验。这里用逐通道隔离测量做实证核对。
+    """
+    assert set(LESION_EXPECTED_CHANNELS) == set(LESION_ORDER)
+    for lesion_id in LESION_ORDER:
+        probe = probe_lesion_channels(lesion_id)
+        assert probe.get("error") is None, (lesion_id, probe)
+        assert probe["applied"] is True, (lesion_id, probe)
+        assert tuple(probe["affected"]) == tuple(probe["expected"]), (lesion_id, probe)
+        assert tuple(probe["expected"]) == tuple(
+            LESION_EXPECTED_CHANNELS[lesion_id]
+        ), (lesion_id, probe)
+    # 单因素病灶只动一条通道；多通道对照必须真的覆盖 A/B/C。
+    assert LESION_EXPECTED_CHANNELS["no_query"] == ("A",)
+    assert LESION_EXPECTED_CHANNELS["no_conc_matched"] == ("B",)
+    assert LESION_EXPECTED_CHANNELS["len_permute"] == ("C",)
+    assert LESION_EXPECTED_CHANNELS["query_only"] == ("B", "C")
+    assert LESION_EXPECTED_CHANNELS["no_evidence"] == ("A", "B", "C")
+    # 探针是确定性的：同一输入恒定返回同一结果。
+    assert (
+        probe_lesion_channels("conc_permute")["affected"]
+        == probe_lesion_channels("conc_permute")["affected"]
+    )
+    try:
+        expected_lesion_channels("not_a_lesion")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    print("  [ok] 推理期病灶实施层探针与声明通道逐一一致")
+
+
+def test_lesion_implementation_probe_detects_channel_drift():
+    """实现多动一条通道时，探针必须实测出来（而不是继续放行）。"""
+    import lega.ablate as ablate_mod
+
+    real_apply = ablate_mod.apply_lesion
+
+    def drifted_apply(model, lesion_id, **kwargs):
+        record = real_apply(model, lesion_id, **kwargs)
+        if lesion_id == "no_query" and record.get("applied"):
+            # 模拟“顺手多清零一个 gate_a”：单因素病灶变成两因素干预。
+            with torch.no_grad():
+                for m in ablate_mod.gate_modules(model):
+                    if hasattr(m, "gate_a"):
+                        m.gate_a.zero_()
+        return record
+
+    ablate_mod.apply_lesion = drifted_apply
+    try:
+        probe = probe_lesion_channels("no_query")
+    finally:
+        ablate_mod.apply_lesion = real_apply
+    assert probe.get("error") is None, probe
+    assert set(probe["affected"]) == {"A", "B"}, probe
+    assert tuple(probe["expected"]) == ("A",), probe
+    print("  [ok] 推理期病灶实施层探针能识破多动一条通道的漂移")

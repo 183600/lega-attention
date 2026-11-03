@@ -9,6 +9,7 @@ import tempfile
 from unittest import mock
 
 import lega.attention as lega_attention
+from lega.ablate import LESION_ORDER as lesion_order
 from tests.pipeline_helpers import _mk, _write_json
 from run_all import (
     ALPHA,
@@ -1214,6 +1215,18 @@ def test_build_summary_renders_confirmatory_sections():
         assert impl["lega_conc_only"]["effective"] == ["B"]
         assert impl["lega_null_conc"]["params"] == ["gate_a", "gate_b", "gate_w"]
         assert impl["lega_null_conc"]["null_component"] == "B"
+        # 推理期病灶的实现层核对（逐通道隔离测量）也必须落盘/渲染
+        assert "推理期病灶实现层核对" in md
+        lesion_impl = {
+            r["lesion"]: r
+            for r in sig["single_factor_audit"]["inference_lesion_implementation"]
+        }
+        assert set(lesion_impl) == set(lesion_order)
+        assert all(r["ok"] for r in lesion_impl.values())
+        assert lesion_impl["no_query"]["expected"] == ["A"]
+        assert lesion_impl["no_query"]["affected"] == ["A"]
+        assert lesion_impl["len_permute"]["affected"] == ["C"]
+        assert lesion_impl["query_only"]["affected"] == ["B", "C"]
         assert any(t["metric"] == AUROC_DIFF_METRIC for t in sig["pairs"])
         assert sig["registered_hypotheses"], "注册假设判定必须进 significance.json"
         h1 = next(h for h in sig["registered_hypotheses"] if h["id"] == "H1")

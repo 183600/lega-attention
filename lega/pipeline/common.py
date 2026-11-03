@@ -1109,6 +1109,82 @@ def _audit_implementation_factors(normalized, problems):
     return rows
 
 
+def _audit_lesion_implementation(problems):
+    """核对推理期病灶在**实现层**只动它声明的证据通道。
+
+    训练期变体已有 :func:`lega.attention.probe_gate_factors` 做实现层自证；
+    推理期病灶此前只有元数据核对（``LESION_SPECS`` 的 kind/params/requires）。
+    元数据能发现“声明错了”，但发现不了“实现顺手多动了一条通道”：例如把
+    ``len_permute`` 写成同时错位 ``c`` 里的 log n、把 ``no_query`` 额外清零
+    gate_a，或让 ``query_permute`` 也置换集中度证据。这类漂移会让单因素
+    推理期实验悄悄变成多因素实验，而所有纯元数据检查仍然全绿。
+
+    这里用 :func:`lega.ablate.probe_lesion_channels` 做一次确定性微型前向的
+    逐通道隔离测量（把另外两条通道的门控系数置零，比较病灶施加前后的
+    位置变化），把**实测**影响通道与**声明**通道逐项对照：
+
+    * 单因素病灶（no_query/no_conc/no_len、三个活动匹配对照、三个分布匹配
+      置换）必须只动一条通道；
+    * 多通道对照（去全部证据、门恒开/恒关、恒为均值、头置换、证据反号）
+      必须确实覆盖 A/B/C 三条，不能退化成“只动一条”；
+    * 2^3 的单因子格（query_only/conc_only/len_only）必须恰好去掉另外两条
+      通道，否则推理期 Shapley/交互分解的格映射就是错的。
+
+    探针失败（缺依赖/无设备）显式记入 ``problems``：不能悄悄跳过这一层，
+    让“实现级未核对”看起来像“核对通过”。
+    """
+    rows = []
+    lesion_order = globals().get("ABLATION_LESION_ORDER")
+    try:
+        from lega.ablate import (
+            LESION_EXPECTED_CHANNELS,
+            probe_lesion_channels,
+        )
+    except Exception as e:  # pragma: no cover - 依赖损坏只在极端环境发生
+        problems.append(f"无法执行推理期病灶实现层核对：{type(e).__name__}: {e}")
+        return rows
+    if not isinstance(lesion_order, (tuple, list)) or isinstance(lesion_order, str):
+        problems.append("LESION_ORDER 必须是病灶序列")
+        return rows
+    expected_table = LESION_EXPECTED_CHANNELS
+    if not isinstance(expected_table, dict):
+        problems.append("LESION_EXPECTED_CHANNELS 必须是病灶 -> 通道映射")
+        expected_table = {}
+    for lesion_id in lesion_order:
+        expected = expected_table.get(lesion_id)
+        if not isinstance(expected, (tuple, list)) or not expected:
+            problems.append(f"推理期病灶 {lesion_id!r} 没有声明应影响的证据通道")
+            continue
+        probe = probe_lesion_channels(lesion_id)
+        if not isinstance(probe, dict):
+            problems.append(f"推理期病灶 {lesion_id!r} 的实现层核对返回非法结构")
+            continue
+        if probe.get("error"):
+            problems.append(
+                f"推理期病灶实现层核对失败（{lesion_id}）：{probe['error']}"
+            )
+            continue
+        measured = tuple(probe.get("affected") or ())
+        expected = tuple(expected)
+        ok = measured == expected
+        if not ok:
+            problems.append(
+                f"推理期病灶 {lesion_id!r} 实现层实际影响通道 "
+                f"{list(measured) or '无'}，声明为 {list(expected) or '无'}："
+                "单因素推理期实验已被实现漂移破坏"
+            )
+        rows.append(
+            {
+                "lesion": lesion_id,
+                "expected": list(expected),
+                "affected": list(measured),
+                "applied": bool(probe.get("applied")),
+                "ok": ok,
+            }
+        )
+    return rows
+
+
 def _audit_alt_conc_variants(problems):
     """核对替代集中度统计是 B-only 构念对照，且不混入结构单因素表。
 
@@ -1455,6 +1531,7 @@ def single_factor_audit():
     alt_conc = _audit_alt_conc_variants(problems)
     registered_single_factor = _audit_registered_single_factor(contrasts, problems)
     implementation_factors = _audit_implementation_factors(normalized, problems)
+    lesion_implementation = _audit_lesion_implementation(problems)
     return {
         "ok": not problems,
         "problems": problems,
@@ -1470,6 +1547,7 @@ def single_factor_audit():
         "alt_conc_contrasts": alt_conc,
         "registered_single_factor": registered_single_factor,
         "implementation_factors": implementation_factors,
+        "inference_lesion_implementation": lesion_implementation,
         "note": (
             "单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
             "X-only vs gate_only；整体对比（vs standard、LEGA vs "
@@ -1478,7 +1556,10 @@ def single_factor_audit():
             "映射、训练期容量匹配 Full/Null_X/No_X 三臂、推理期"
             "单病灶、活动匹配、A/B/C 分布匹配置换、2^3 格的因子"
             "映射，以及替代集中度统计的 B-only 构念对照"
-            "（lega_l2/lega_entropy 不进入主因子表）。"
+            "（lega_l2/lega_entropy 不进入主因子表）。训练期变体"
+            "与推理期病灶都做实现层自证：变体看逐参数扰动是否真的"
+            "改变门控 logit，病灶看逐通道隔离测量是否只动声明的"
+            "证据通道。"
         ),
     }
 
