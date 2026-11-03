@@ -857,6 +857,7 @@ def build_design_plan(
 
     # ---- Which registered hypotheses use PPL as their metric?
     # Used later in power analysis to explicitly connect MDE/power to H1/H2/H3/H5.
+    # H1,H2,H3 use PPL; H5 also uses PPL vs qgate baseline.
     ppl_hypothesis_ids = []
     for h in hyps:
         metric = h.get("metric") if isinstance(h, dict) else None
@@ -865,6 +866,17 @@ def build_design_plan(
             if pid is not None:
                 ppl_hypothesis_ids.append(pid)
     ppl_hypothesis_ids = list(dict.fromkeys(ppl_hypothesis_ids))  # dedup, keep order
+
+    # ---- Which registered hypotheses use AUROC or AP as their metric?
+    # H6 uses AUROC差(logit−仅查询); H7 uses AP差(logit−仅查询)
+    mechanism_hypothesis_ids = []
+    for h in hyps:
+        metric = h.get("metric") if isinstance(h, dict) else None
+        if metric is not None and ("AUROC" in metric or "AP差" in metric):
+            pid = h.get("id") if isinstance(h, dict) else None
+            if pid is not None:
+                mechanism_hypothesis_ids.append(pid)
+    mechanism_hypothesis_ids = list(dict.fromkeys(mechanism_hypothesis_ids))  # dedup, keep order
 
     mode = (
         multiplicity
@@ -1249,12 +1261,15 @@ def build_design_plan(
             else None
         )
         ok = can_power and need is not None and need <= n_seeds
+        hyp_ref = ""
+        if ppl_hypothesis_ids:
+            hyp_ref = f"（对应预注册假设: {', '.join(ppl_hypothesis_ids)}）"
         checks.append(
             _check(
                 "ppl_declared_power",
                 "PPL 计划功效（声明假设）",
                 "pass" if ok else "fail",
-                f"{ppl_hyp_note}"
+                f"{ppl_hyp_note}{hyp_ref}"
                 f"声明配对差 SD={declared_ppl_sd:.4g}；{n_seeds} 种子对 "
                 f"{ppl_margin:.2%} SESOI 的功效≈"
                 + (f"{pw:.3f}" if pw is not None else "无法计算（n<2）")
@@ -1286,15 +1301,18 @@ def build_design_plan(
             else None
         )
         ok_c = can_power and need_c is not None and need_c <= n_seeds
-        ppl_hyp_note_c = ""
+        hyp_note_c = ""
         if ppl_hypothesis_ids:
-            ppl_hyp_note_c = f"关联预注册 PPL假设: {', '.join(ppl_hypothesis_ids)}；"
+            hyp_note_c = f"（对应预注册假设: {', '.join(ppl_hypothesis_ids)}）"
+        else:
+            hyp_note_c = "（未关联预注册 PPL 假设）"
+
         checks.append(
             _check(
                 "ppl_confirmatory_power",
                 "PPL 确认性计划功效（多重比较校正）",
                 "pass" if ok_c else "fail",
-                f"{ppl_hyp_note_c}"
+                f"{hyp_note_c}"
                 f"声明配对差 SD={declared_ppl_sd:.4g}；按 {mode} 的 "
                 f"α_eff={ppl_alpha:.6g}（家族 m="
                 f"{family_sizes['ppl_family_size']}，全局 k="
@@ -1580,6 +1598,9 @@ def build_design_plan(
                 else None
             )
             ok = can_power and need is not None and need <= n_seeds
+            hyp_ref = ""
+            if mechanism_hypothesis_ids:
+                hyp_ref = f"（对应预注册假设: {', '.join(mechanism_hypothesis_ids)}）"
             checks.append(
                 _check(
                     f"{key}_declared_power",
@@ -2646,6 +2667,17 @@ def build_design_plan(
             }
             for h in hyps
         ],
+        "confirmatory_hypotheses": {
+            "ppl": ppl_hypothesis_ids,
+            "mechanism": mechanism_hypothesis_ids,
+            "note": (
+                "跟踪哪些预注册假设具有确认性设计就绪状态。"
+                "PPL 确认性取决于 ppl_paired_sd_rel 声明与多重比较校正后的 α_eff。"
+                "机制端点 (AUROC/AP) 取决于 design.auroc_paired_sd / design.ap_paired_sd 声明。"
+                "未声明对应设计参数的假设将在汇总页标记为「未声明设计参数」"
+                "，只能作探索性线索。"
+            ),
+        },
         "assumptions": {
             "ppl_paired_sd_rel": declared_ppl_sd,
             "ruler_paired_sd_pp": declared_ruler_sd,
