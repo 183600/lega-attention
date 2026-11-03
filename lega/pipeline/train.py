@@ -640,21 +640,52 @@ def main():
     # 基线调优（可选）：先调 standard 的 lr/权重衰减（只用验证集，test 不加载），
     # 把最优组合注入配置并统一用于所有变体——保证对比是“调过的基线 vs 新方法”，
     # 而不是把超参数红利误归因给模块。证据落盘 results/<tag>/baseline_tuning.json。
-    if args.tune_baseline and args.skip_train:
-        print("[tuning] --skip_train：跳过基线调优（没有要训练的新 run）")
-    elif args.tune_baseline:
-        tune_root = os.path.join(out_root, "_baseline_tuning")
+    #
+    # 种子纪律：调优种子必须与确认性种子互不相交。否则被选中的超参是在
+    # “这批种子自己的噪声”上挑出来的（winner's curse），基线在确认性
+    # 配对检验里因此获得一份并非方法带来的优势，“优于已调优基线”的
+    # 主张不可判定。未显式给出 --tune_seeds 时自动分配与确认性种子不相交
+    # 的开发种子；显式给出且重叠时由设计计划记 fail（见 lega/design/seeds.py）。
+    tune_seeds = None
+    if args.tune_baseline and not args.skip_train:
         tune_seeds = (
             _parse_seed_list(args.tune_seeds, p, "--tune_seeds")
             if args.tune_seeds
             else None
         )
+        if tune_seeds is None:
+            _design_cfg = cfg.get("design") if isinstance(cfg.get("design"), dict) else {}
+            _cfg_dev = _design_cfg.get("development_seeds")
+            if isinstance(_cfg_dev, (list, tuple)) and _cfg_dev:
+                tune_seeds = [int(s) for s in _cfg_dev]
+                print(
+                    f"[tuning] 使用配置 design.development_seeds 作为调优种子: "
+                    f"{tune_seeds}"
+                )
+            else:
+                tune_seeds = derive_development_seeds(seeds, n=1)
+                print(
+                    f"[tuning] 未指定 --tune_seeds：自动分配与确认性种子不相交的"
+                    f"开发种子 {tune_seeds}（避免超参选择偏差进入确认性比较）"
+                )
+        else:
+            overlap = sorted(set(tune_seeds) & set(seeds))
+            if overlap:
+                print(
+                    f"[tuning] ⚠ 调优种子 {tune_seeds} 与确认性种子重叠 "
+                    f"{overlap}：基线超参将在同一批种子上被挑选，"
+                    "确认性比较含选择偏差（设计计划会记 fail）"
+                )
+    if args.tune_baseline and args.skip_train:
+        print("[tuning] --skip_train：跳过基线调优（没有要训练的新 run）")
+    elif args.tune_baseline:
+        tune_root = os.path.join(out_root, "_baseline_tuning")
         tune_report = tune_baseline(
             args.config,
             args.data_dir,
             tune_root,
             variant="standard",
-            seed=seeds[0],
+            seed=tune_seeds[0],
             seeds=tune_seeds,
             steps=args.tune_steps,
             lr_mults=parse_floats(args.tune_lr_mults),
@@ -767,6 +798,7 @@ def main():
             analysis_variants=[v for v in variants if v in GATED_FOR_ANALYSIS],
             data_report=load_data_report(args.data_dir),
             preparation=design_preparation,
+            development_seeds=tune_seeds,
         )
     except ValueError as e:
         p.error(f"设计计划生成失败（检查配置的 design/ruler 字段）：{e}")

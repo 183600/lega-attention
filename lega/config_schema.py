@@ -118,6 +118,14 @@ NESTED = {
         "auroc_paired_sd_grid": "number_list",
         "ap_paired_sd": "positive_number",
         "ap_paired_sd_grid": "number_list",
+        "development_seeds": "int_list",
+        "pilot_seeds": "int_list",
+        "seed_overlap_policy": "str",
+        "calibration": {
+            "enabled": "bool",
+            "n_sim": "positive_int",
+            "seed": "int",
+        },
     },
     "ruler": {
         "ctx_lens": "int_list",

@@ -82,6 +82,7 @@ from lega.heterogeneity import (  # noqa: E402
 from lega.design import (apply_design_gate,  # noqa: E402
                          build_design_plan, build_run_order,
                          capture_preparation,
+                         derive_development_seeds,
                          design_conformance, load_design_plan,
                          load_design_plan_history, observed_design_sensitivity,
                          render_design_section, save_design_plan,

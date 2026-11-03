@@ -109,9 +109,12 @@ PLAN_FAILURE_ENDPOINTS = {
 
 # 视为全局设计失败的检查 id：这些问题使整轮 run 落在计划/预注册范围之外，
 # 或使训练/评测协议本身不可执行。
+# ``seed_partition`` 也在其中：确认性种子与超参搜索种子重叠时，基线获得了
+# 由选择产生的优势，所有“方法 vs 已调优基线”的比较都被污染，不能只降级
+# 其中某一个端点。
 GLOBAL_PLAN_FAILURE_IDS = frozenset({
     "seed_scope", "hypothesis_variants", "scope_config", "scope_data",
-    "model_context", "data_budget",
+    "model_context", "data_budget", "seed_partition",
 })
 
 # 先验灵敏度网格。它们是“展示设计在多大噪声下仍然够用”的横轴，不是从

@@ -21,6 +21,22 @@ from .preparation import (
     test_seal_check,
     test_seal_precheck,
 )
+from .seeds import (  # noqa: E402
+    DEFAULT_DEVELOPMENT_SEED_BASE,
+    SEED_OVERLAP_POLICIES,
+    check_seed_partition,
+    partition_seeds,
+)
+from .calibration import (  # noqa: E402
+    DEFAULT_CALIBRATION_N_SIM,
+    DEFAULT_CALIBRATION_SEED,
+    calibrate_design,
+    check_calibration,
+)
+from .coverage import (  # noqa: E402
+    check_registration_coverage,
+    registration_coverage,
+)
 
 
 def _mechanism_endpoint_sensitivity(
@@ -730,6 +746,9 @@ def build_design_plan(
     multiplicity: str = None,
     data_report=None,
     preparation: dict = None,
+    development_seeds=None,
+    pilot_seeds=None,
+    seed_partition_policy: str = None,
 ) -> dict:
     """根据配置/种子计划/预注册表生成训练前的设计计划。
 
@@ -779,6 +798,50 @@ def build_design_plan(
     run_order = build_run_order(
         variants, seeds, mode=order_mode, order_seed=declared_order_seed
     )
+
+    # ---- 种子空间分区：确认性种子 vs 开发（调优）/试点种子。
+    # 超参搜索与确认性推断共用同一批种子时，被选中的超参在这批种子上
+    # 带有选择偏差（winner's curse），基线因此获得一份并非方法带来的
+    # 优势，“优于已调优基线”的主张不可判定。这里把三段种子显式切开并
+    # 记录到计划里；重叠按 design.seed_overlap_policy 判 fail/warn。
+    overlap_policy = (
+        seed_partition_policy
+        if seed_partition_policy is not None
+        else design_cfg.get("seed_overlap_policy", "fail")
+    )
+    if not isinstance(overlap_policy, str) or overlap_policy not in SEED_OVERLAP_POLICIES:
+        raise ValueError(
+            f"design.seed_overlap_policy 必须是 {SEED_OVERLAP_POLICIES} 之一，"
+            f"收到 {overlap_policy!r}"
+        )
+    declared_dev_seeds = design_cfg.get("development_seeds")
+    declared_pilot_seeds = design_cfg.get("pilot_seeds")
+    if development_seeds is None:
+        development_seeds = declared_dev_seeds
+    if pilot_seeds is None:
+        pilot_seeds = declared_pilot_seeds
+    seed_partition = partition_seeds(
+        seeds, development=development_seeds, pilot=pilot_seeds
+    )
+    seed_partition["overlap_policy"] = overlap_policy
+    seed_partition["development_seed_base"] = DEFAULT_DEVELOPMENT_SEED_BASE
+    seed_partition["sources"] = {
+        "confirmatory": "本次计划种子（预注册 scope.seeds 或 --seeds）",
+        "development": (
+            "命令行显式指定"
+            if development_seeds is not None and declared_dev_seeds is None
+            else (
+                "配置 design.development_seeds"
+                if declared_dev_seeds is not None
+                else "未声明（本次运行不做超参搜索/调优）"
+            )
+        ),
+        "pilot": (
+            "配置 design.pilot_seeds"
+            if declared_pilot_seeds is not None
+            else "未声明（本次运行不做冒烟/预演）"
+        ),
+    }
     ppl_grid = design_cfg.get("ppl_paired_sd_rel_grid", list(PPL_SD_GRID))
     ruler_grid = design_cfg.get("ruler_discordance_grid", list(RULER_DISCORDANCE_GRID))
     ruler_sd_grid = design_cfg.get("ruler_paired_sd_grid", list(RULER_SD_GRID))
@@ -933,6 +996,10 @@ def build_design_plan(
                 "不能做显著性/组件有效性判定",
             )
         ]
+
+    # ---- 检查 1a：种子空间分区。确认性种子与开发（调优）/试点种子重叠时，
+    # 基线超参是在同一批种子上挑出来的，确认性比较会混入选择偏差。
+    checks.append(check_seed_partition(seed_partition, policy=overlap_policy))
 
     # ---- 检查 1b：配置键空间与数值语义。未知键会被 dict.get 静默忽略，
     # 使“声明的实验”与“实际实验”分离；类型/范围错误则会让运行值偏离
@@ -2634,6 +2701,11 @@ def build_design_plan(
             "variants": list(variants),
             "seeds": list(seeds),
             "n_seeds": n_seeds,
+            "seed_roles": {
+                "confirmatory": list(seed_partition["roles"]["confirmatory"]),
+                "development": list(seed_partition["roles"]["development"]),
+                "pilot": list(seed_partition["roles"]["pilot"]),
+            },
             "alpha": alpha,
             "alpha_effective": {
                 "PPL": ppl_alpha,
@@ -2655,6 +2727,7 @@ def build_design_plan(
             "data_report_present": data_report is not None,
         },
         "run_order": run_order,
+        "seed_partition": seed_partition,
         "scope_readiness": scope_readiness,
         "data_budget": data_budget,
         "analysis_protocol": dict(_ANALYSIS_PROTOCOL),
@@ -2739,5 +2812,68 @@ def build_design_plan(
         "status": _checklist_status(checks),
         "warnings": [c["detail"] for c in checks if c["status"] in ("warn", "fail")],
     }
+
+    # ---- 确认性判定管线的蒙特卡洛校准（放在计划组装之后：校准需要计划
+    # 里的家族结构、登记假设、α_eff 与端点 SESOI）。它回答两个解析口径
+    # 回答不了的问题：(1) 整条判定管线在 H0 下的实际整体假阳性率是多少；
+    # (2) 计划里的解析功效（小样本下用正态近似）在真实判定规则下被高估
+    # 多少。校准只做纯数值模拟，不训练、不读数据。
+    calib_cfg = design_cfg.get("calibration")
+    calib_cfg = calib_cfg if isinstance(calib_cfg, dict) else {}
+    calib_enabled = calib_cfg.get("enabled", True)
+    if not isinstance(calib_enabled, bool):
+        checks.append(
+            _check(
+                "decision_calibration",
+                "确认性判定管线仿真校准",
+                "fail",
+                f"design.calibration.enabled 必须是 bool，收到 {calib_enabled!r}",
+            )
+        )
+        calib_enabled = False
+    if calib_enabled:
+        calib_n_sim = calib_cfg.get("n_sim", DEFAULT_CALIBRATION_N_SIM)
+        try:
+            calib_n_sim = _strict_int(calib_n_sim, "design.calibration.n_sim", minimum=100)
+        except ValueError as e:
+            checks.append(
+                _check("decision_calibration", "确认性判定管线仿真校准", "fail", str(e))
+            )
+            calib_n_sim = DEFAULT_CALIBRATION_N_SIM
+        calib_seed = calib_cfg.get("seed", DEFAULT_CALIBRATION_SEED)
+        try:
+            calib_seed = _seed_int(calib_seed, "design.calibration.seed")
+        except ValueError as e:
+            checks.append(
+                _check("decision_calibration", "确认性判定管线仿真校准", "fail", str(e))
+            )
+            calib_seed = DEFAULT_CALIBRATION_SEED
+        try:
+            calibration = calibrate_design(
+                plan, n_sim=calib_n_sim, seed=calib_seed
+            )
+        except ValueError as e:
+            checks.append(
+                _check(
+                    "decision_calibration",
+                    "确认性判定管线仿真校准",
+                    "fail",
+                    f"仿真校准失败：{e}",
+                )
+            )
+            calibration = None
+        if calibration is not None:
+            plan["decision_calibration"] = calibration
+            calib_check = check_calibration(calibration, alpha=alpha)
+            if smoke and calib_check.get("status") == "fail":
+                calib_check["status"] = "warn"
+                calib_check["detail"] += "（冒烟运行：仅检查流程，不作确认性设计）"
+            checks.append(calib_check)
+
+    plan["checks"] = checks
+    plan["status"] = _checklist_status(checks)
+    plan["warnings"] = [
+        c["detail"] for c in checks if c["status"] in ("warn", "fail")
+    ]
     plan["plan_digest"] = plan_digest(plan)
     return plan
