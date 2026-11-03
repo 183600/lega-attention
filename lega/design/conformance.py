@@ -995,6 +995,39 @@ def render_design_section(
             )
         )
 
+    # ---- 登记假设覆盖摘要
+    hyp_inputs = _as_dict(plan.get("inputs"))
+    reg_hyps = _as_list(hyp_inputs.get("registered_hypotheses"))
+    if reg_hyps:
+        covered = []
+        uncovered = []
+        plan_variants = set(_as_list(hyp_inputs.get("variants")))
+        plan_seeds = set(_as_list(hyp_inputs.get("seeds")))
+        for h in reg_hyps:
+            if isinstance(h, dict):
+                cid = h.get("id")
+                cand = h.get("candidate")
+                ref = h.get("reference")
+                cand_covered = cand in plan_variants if isinstance(cand, str) else False
+                ref_covered = ref in plan_variants if isinstance(ref, str) else False
+                if cand_covered or ref_covered:
+                    covered.append(cid)
+                else:
+                    uncovered.append(cid)
+            else:
+                if h in plan_variants or h in plan_seeds:
+                    covered.append(h)
+                else:
+                    uncovered.append(h)
+        cov_str = ", ".join(covered) if covered else "无"
+        unc_str = ", ".join(uncovered) if uncovered else "无"
+        md += [
+            "",
+            f"- **登记假设覆盖**：计划变体 {len(plan_variants)} 个、种子 {len(plan_seeds)} 个。"
+            f"已覆盖: {cov_str}；未覆盖: {unc_str}。"
+            "未覆盖的假设其 confirmatory 判定将自动降级为探索性。",
+        ]
+
     checks = [c for c in _as_list(plan.get("checks")) if isinstance(c, dict)]
     if checks:
         md += ["", "| 设计检查 | 状态 | 说明 |", "|---|---|---|"]

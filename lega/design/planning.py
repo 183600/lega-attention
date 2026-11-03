@@ -855,6 +855,17 @@ def build_design_plan(
         raise ValueError(f"analysis_variants 含计划外变体：{unknown_analysis}")
     n_seeds = len(seeds)
 
+    # ---- Which registered hypotheses use PPL as their metric?
+    # Used later in power analysis to explicitly connect MDE/power to H1/H2/H3/H5.
+    ppl_hypothesis_ids = []
+    for h in hyps:
+        metric = h.get("metric") if isinstance(h, dict) else None
+        if metric == "PPL":
+            pid = h.get("id") if isinstance(h, dict) else None
+            if pid is not None:
+                ppl_hypothesis_ids.append(pid)
+    ppl_hypothesis_ids = list(dict.fromkeys(ppl_hypothesis_ids))  # dedup, keep order
+
     mode = (
         multiplicity
         if multiplicity is not None
@@ -1144,6 +1155,8 @@ def build_design_plan(
     )
 
     # ---- PPL 先验灵敏度：对合理 SD 网格给 MDE/功效/所需种子数
+    # 并明确引用使用 PPL 为指标的预注册假设 H1/H2/H3/H5，便于将灵敏度结论
+    # 直接映射到 confirmatory 判定。
     ppl_margin = 0.01  # 与 lega.equivalence.metric_margin("PPL") 一致
     try:
         from lega.equivalence import metric_margin
@@ -1153,6 +1166,11 @@ def build_design_plan(
             ppl_margin = _finite_float(spec.get("margin"), "PPL SESOI", positive=True)
     except Exception:  # pragma: no cover - 保持模块可独立使用
         pass
+
+    ppl_hyp_note = ""
+    if ppl_hypothesis_ids:
+        ppl_hyp_note = f"关联预注册 PPL假设: {', '.join(ppl_hypothesis_ids)}；"
+
     ppl_rows = []
     can_power = n_seeds >= 2
     for sd in ppl_grid:
@@ -1236,6 +1254,7 @@ def build_design_plan(
                 "ppl_declared_power",
                 "PPL 计划功效（声明假设）",
                 "pass" if ok else "fail",
+                f"{ppl_hyp_note}"
                 f"声明配对差 SD={declared_ppl_sd:.4g}；{n_seeds} 种子对 "
                 f"{ppl_margin:.2%} SESOI 的功效≈"
                 + (f"{pw:.3f}" if pw is not None else "无法计算（n<2）")
@@ -1267,11 +1286,15 @@ def build_design_plan(
             else None
         )
         ok_c = can_power and need_c is not None and need_c <= n_seeds
+        ppl_hyp_note_c = ""
+        if ppl_hypothesis_ids:
+            ppl_hyp_note_c = f"关联预注册 PPL假设: {', '.join(ppl_hypothesis_ids)}；"
         checks.append(
             _check(
                 "ppl_confirmatory_power",
                 "PPL 确认性计划功效（多重比较校正）",
                 "pass" if ok_c else "fail",
+                f"{ppl_hyp_note_c}"
                 f"声明配对差 SD={declared_ppl_sd:.4g}；按 {mode} 的 "
                 f"α_eff={ppl_alpha:.6g}（家族 m="
                 f"{family_sizes['ppl_family_size']}，全局 k="
