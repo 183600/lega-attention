@@ -1356,4 +1356,7 @@ def length_stratification_analysis(records: List[Dict], n_bins: int = 5) -> Dict
     return result
 
 if __name__ == "__main__":
+    from lega.bootstrap import ensure_hash_seed
+
+    ensure_hash_seed()
     main()

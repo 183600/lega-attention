@@ -50,6 +50,9 @@ lega-run = "run_all:main_entry"
 
 [tool.setuptools]
 packages = ["lega", "lega.datacheck", "lega.design", "lega.pipeline", "lega.pipeline.eval", "lega.pipeline.report"]
+# run_all 是顶层模块（不是包），必须显式声明，否则非 editable 安装（wheel）
+# 不会带上它，pyproject 里的 lega-run 控制台脚本随之失效。
+py-modules = ["run_all"]
 
 [tool.setuptools.package-data]
 lega = ["py.typed"]

@@ -39,23 +39,26 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=500']
 
-  # Ensure requirements-lock.txt is up to date with requirements.txt
+  # Ensure requirements-lock.txt / requirements-ci.txt / pyproject.toml agree
+  # with requirements.txt (versions, CI pins, packaging metadata).
+  # Note: no `types:` filter here — requirements*.txt are text files, so a
+  # `types: [python]` filter would silently disable this hook entirely.
   - repo: local
     hooks:
       - id: check-requirements-lock
-        name: Check requirements-lock.txt consistency
+        name: Check dependency declaration consistency
         entry: bash -c 'python scripts/check_requirements_lock.py'
         language: system
-        types: [python]
-        files: 'requirements(-ci)?\.txt$'
+        files: '^(requirements(-ci|-lock)?\.txt|pyproject\.toml)$'
         verbose: true
 
-  # Validate JSON configs
+  # Validate JSON configs: every file in configs/ is checked against the
+  # config contract (unknown keys, type/range, cross-field conflicts).
   - repo: local
     hooks:
       - id: validate-json-configs
         name: Validate JSON configs
-        entry: bash -c 'python -c "from lega.utils import load_config_json; [load_config_json(f, validate=True) for f in [\"configs/tiny.json\", \"configs/small.json\"]]"'
+        entry: bash -c 'python scripts/validate_configs.py'
         language: system
         types: [json]
         files: 'configs/.*\.json$'

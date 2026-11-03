@@ -31,6 +31,7 @@ import random
 import re
 import statistics
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -44,7 +45,135 @@ _ENV_AT_IMPORT = {"PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED")}
 # 最近一次 set_seed 的随机源状态指纹：(seed, fingerprints)，供 seed_report
 # 给出“种子确实生效”的可核对证据，而不是复述传入参数。同时记录确定性算法
 # 的实际启用模式（严格/warn_only），避免把“只警告”审计成“严格确定性”。
-_LAST_SEED = {"seed": None, "fingerprints": None, "deterministic_warn_only": None}
+_LAST_SEED = {
+    "seed": None,
+    "fingerprints": None,
+    "deterministic_warn_only": None,
+    "deterministic_mode": None,
+    "threads": None,
+    "threads_pinned": None,
+}
+
+# 确定性模式与线程配额的环境开关：显式开关必须落到审计字段里，否则
+# “确定性已启用”只是一句无法核对的口头声明。
+DETERMINISM_MODE_ENV = "LEGA_DETERMINISM"
+NUM_THREADS_ENV = "LEGA_NUM_THREADS"
+
+# 统计“本次运行实际触发了多少个无确定性实现的算子”：只声明
+# use_deterministic_algorithms(warn_only=True) 并不能证明本轮没有踩到
+# 非确定性 kernel——该模式下 PyTorch 只告警、照常计算。计数由 warnings 钩子
+# 累积，写入 seed_report 后，读者才能区分“启用了确定性开关”和
+# “本轮确实没有非确定性算子参与计算”。
+_NONDET_WARNINGS = {"count": 0, "samples": []}
+_NONDET_SAMPLE_LIMIT = 20
+_WARN_HOOK_INSTALLED = False
+
+
+def determinism_mode(env=None, strict: bool = True) -> str:
+    """确定性算法的实际模式："strict"（无确定性实现即报错）或 "warn_only"。
+
+    默认 "warn_only"：与历史行为一致（个别算子无确定性实现时只告警），
+    正式实验可用 ``LEGA_DETERMINISTIC=strict`` 收紧为直接失败。显式开关写错
+    时默认直接报错而不是静默退回默认——静默退回会让“严格确定性”的声明名不副实；
+    ``strict=False`` 时改为返回 "invalid"（供只读的环境快照使用，不中断实验）。
+    """
+    env = os.environ if env is None else env
+    raw = str(env.get(DETERMINISM_MODE_ENV, "") or "").strip().lower()
+    if raw in ("", "warn", "warn_only", "0", "false", "off"):
+        return "warn_only"
+    if raw in ("strict", "1", "true", "on"):
+        return "strict"
+    if strict:
+        raise ValueError(
+            f"{DETERMINISM_MODE_ENV} 只能是 strict 或 warn_only，收到 {raw!r}"
+        )
+    return "invalid"
+
+
+def non_deterministic_op_warnings() -> dict:
+    """本进程累计触发的“无确定性实现”告警计数与样本。
+
+    计数来自 PyTorch 在 ``warn_only`` 模式下发出的 UserWarning（消息含
+    “does not have a deterministic implementation”）。计数的是**告警触发
+    次数**：Python 默认过滤器对同一位置只提示一次，用户在终端上看到的条数
+    会少于计数，因此审计字段必须自己留痕，不能依赖终端输出。
+    """
+    return {
+        "count": int(_NONDET_WARNINGS["count"]),
+        "samples": list(_NONDET_WARNINGS["samples"]),
+    }
+
+
+def reset_non_deterministic_op_warnings() -> None:
+    """清零非确定性算子告警计数（每次 set_seed 重新计数）。"""
+    _NONDET_WARNINGS["count"] = 0
+    _NONDET_WARNINGS["samples"] = []
+
+
+def _install_nondeterministic_warning_counter() -> None:
+    """安装告警计数钩子，统计“无确定性实现的算子”告警。
+
+    钩子包裹 ``warnings.warn``（而不是 ``warnings.showwarning``）：pytest 等
+    工具会用 ``catch_warnings`` 临时替换 showwarning，只钩 showwarning 会让
+    计数在测试环境里恒为 0。包裹 warn 并原样转发（stacklevel 相应 +1，
+    保持告警指向原始调用位置），不改变任何告警的展示行为。
+    """
+    global _WARN_HOOK_INSTALLED
+    if _WARN_HOOK_INSTALLED:
+        return
+    original_warn = warnings.warn
+
+    def _warn(message, *args, **kwargs):
+        text = str(message)
+        lowered = text.lower()
+        if "deterministic" in lowered and (
+            "does not have" in lowered or "not deterministic" in lowered
+        ):
+            _NONDET_WARNINGS["count"] += 1
+            sample = text[:200]
+            if (
+                sample not in _NONDET_WARNINGS["samples"]
+                and len(_NONDET_WARNINGS["samples"]) < _NONDET_SAMPLE_LIMIT
+            ):
+                _NONDET_WARNINGS["samples"].append(sample)
+        if "stacklevel" in kwargs and isinstance(kwargs["stacklevel"], int):
+            kwargs = dict(kwargs)
+            kwargs["stacklevel"] += 1
+        elif len(args) >= 3 and isinstance(args[2], int):
+            args = (args[0], args[1], args[2] + 1, *args[3:])
+        else:
+            kwargs = dict(kwargs)
+            kwargs["stacklevel"] = 2
+        original_warn(message, *args, **kwargs)
+
+    warnings.warn = _warn
+    _WARN_HOOK_INSTALLED = True
+
+
+def _apply_thread_limit(env=None) -> dict:
+    """按 ``LEGA_NUM_THREADS`` 固定 torch 线程数（影响归约顺序与浮点结果）。
+
+    CPU 端归约顺序随线程数变化：同一 seed 在 4 核与 32 核机器上可能得到
+    不同的浮点末位。固定线程数并把它写进审计字段，跨机比较才有意义；
+    未显式设置时保持 PyTorch 默认（按机器核数），但同样记录实际值。
+    """
+    env = os.environ if env is None else env
+    raw = env.get(NUM_THREADS_ENV)
+    if raw is None or not str(raw).strip():
+        return {
+            "pinned": False,
+            "threads": int(torch.get_num_threads()),
+            "requested": None,
+        }
+    value = strict_int(raw, NUM_THREADS_ENV)
+    if value < 1:
+        raise ValueError(f"{NUM_THREADS_ENV} 必须 >= 1，收到 {value}")
+    torch.set_num_threads(value)
+    return {
+        "pinned": True,
+        "threads": int(torch.get_num_threads()),
+        "requested": value,
+    }
 
 
 def deterministic_algorithms_warn_only():
@@ -314,6 +443,12 @@ def set_seed(seed: int) -> None:
     种子先经 seed_int 规范化：bool/小数/非整数字符串直接 ValueError，
     负值/超过 2^32-1 也在写入任何全局状态前拒绝；不允许 True 被当成 1、
     1.5 被截断成 1 后“看起来播种成功”，也不允许半途播种。
+
+    确定性模式由 ``LEGA_DETERMINISTIC`` 决定："warn_only"（默认，个别算子
+    无确定性实现时只告警）或 "strict"（直接报错）。无论哪种模式，本函数都会
+    清零并安装“无确定性实现算子”的告警计数，使 seed_report 能回答
+    “本轮是否真的没有非确定性 kernel 参与计算”，而不只是“开关已打开”。
+    ``LEGA_NUM_THREADS`` 可固定 torch 线程数（CPU 归约顺序随线程数变化）。
     """
     seed = seed_int(seed, "seed")
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -323,16 +458,26 @@ def set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     # 训练结论依赖同 seed 的变体间对比；禁用 cudnn 自动调优并启用确定性算法
-    # （warn_only 避免因个别无确定实现的 CUDA 算子直接中断，同时给出警告）。
+    # （默认 warn_only 避免因个别无确定实现的 CUDA 算子直接中断，同时给出警告）。
     ensure_cublas_workspace_config()
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
+    mode = determinism_mode()
     try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-        _LAST_SEED["deterministic_warn_only"] = True
+        torch.use_deterministic_algorithms(True, warn_only=(mode != "strict"))
+        _LAST_SEED["deterministic_warn_only"] = mode != "strict"
     except TypeError:  # 兼容没有 warn_only 参数的旧版 PyTorch
         torch.use_deterministic_algorithms(True)
         _LAST_SEED["deterministic_warn_only"] = False
+        # 旧版没有 warn_only：无确定性实现的算子会直接报错，实际是严格档位，
+        # 审计字段必须如实记录，不能沿用请求的 warn_only。
+        mode = "strict"
+    _LAST_SEED["deterministic_mode"] = mode
+    _install_nondeterministic_warning_counter()
+    reset_non_deterministic_op_warnings()
+    threads = _apply_thread_limit()
+    _LAST_SEED["threads"] = threads["threads"]
+    _LAST_SEED["threads_pinned"] = threads["pinned"]
     _LAST_SEED["seed"] = seed
     _LAST_SEED["fingerprints"] = rng_state_fingerprint()
 
@@ -355,6 +500,17 @@ def seed_report(seed: int) -> dict:
       * ``pythonhashseed_effective``：仅当启动时已带数值且等于 seed 才为
         True；启动时未设置时为 False（等价于“本进程未固定，已显式标注”），
         启动时的值不可解析为整数时为 None。
+
+    另有 ``pythonhashseed_fixed``：当前进程的哈希盐是否**已固定**（与是否
+    等于本次 seed 无关）。启动时带任意合法整数即为固定——哈希盐只决定
+    str/bytes 的哈希值，不影响随机数流，因此“固定但不等于 seed”同样是
+    可复现的，不能与“完全未固定”混为一谈。
+
+    确定性字段同样区分“开关状态”与“实际后果”：
+      * ``deterministic_mode``："strict"（无确定性实现即报错）或 "warn_only"；
+      * ``non_deterministic_op_warnings``：本轮实际触发的非确定性算子告警数
+        （0 表示本轮确实没有非确定性 kernel 参与计算）；
+      * ``torch_threads``/``torch_threads_pinned``：实际线程数与是否被显式固定。
 
     seed 与 set_seed 同口径先经 seed_int 规范化：bool/小数/非整数字符串
     直接 ValueError，负数/超上限同样拒绝，报告里的 "seed" 永远等于真正
@@ -387,6 +543,7 @@ def seed_report(seed: int) -> dict:
         if (fp is None or expected_fp is None)
         else all(fp.get(key) == value for key, value in expected_fp.items())
     )
+    nondet = non_deterministic_op_warnings()
     return {
         "seed": seed,
         "seed_verified": fp is not None,
@@ -399,12 +556,22 @@ def seed_report(seed: int) -> dict:
         "pythonhashseed_effective": (
             None if (at_start is not None and start_int is None) else start_int == seed
         ),
+        # 哈希盐是否已固定：与“是否等于本次 seed”分开记录，固定即足以让
+        # 集合/字典迭代顺序稳定（哈希盐不影响随机数流）。
+        "pythonhashseed_fixed": start_int is not None,
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
         # 严格 / 仅告警：只报 deterministic_algorithms=True 会夸大确定性保证
         "deterministic_algorithms_warn_only": deterministic_algorithms_warn_only(),
+        "deterministic_mode": _LAST_SEED.get("deterministic_mode"),
+        # 本轮实际触发的非确定性算子数：0 才能说明“开关开着且没踩到雷”
+        "non_deterministic_op_warnings": nondet["count"],
+        "non_deterministic_op_warning_samples": nondet["samples"],
+        # 线程数影响 CPU 归约顺序与浮点末位：记录实际值与是否被显式固定
+        "torch_threads": int(torch.get_num_threads()),
+        "torch_threads_pinned": _LAST_SEED.get("threads_pinned"),
         "data_order": "data_rng(seed)=np.random.default_rng(seed) 显式批采样（无 DataLoader worker）",
         # 项目约定：批采样与本审计共用同一 seed（train/sanity/evaluate 均如此），
         # 机器可读字段便于台账/清单自动核对数据顺序来源

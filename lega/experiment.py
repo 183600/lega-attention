@@ -1113,6 +1113,9 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from lega.bootstrap import ensure_hash_seed
+
+    ensure_hash_seed()
     import sys
 
     sys.exit(main())

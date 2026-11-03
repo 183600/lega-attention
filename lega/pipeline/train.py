@@ -1403,6 +1403,13 @@ def main():
         audit = verify_controlled_setup(
             out_root, variants, seeds, n_seeds, expected_data_digest=data_digest
         )
+        # 逐 run 的确定性审计必须在汇总前落盘：汇总页要展示“本轮实际触发
+        # 了多少个无确定性实现的算子、哈希盐是否固定”，而不是只声明
+        # “确定性开关已打开”。汇总读的是磁盘上的 repro.json，因此这里先写。
+        repro["determinism_audit"] = collect_determinism_audit(
+            out_root, variants, seeds
+        )
+        save_json(repro, os.path.join(results_dir, "repro.json"))
         post_stage = "summary"
         build_summary(
             results_dir, audit=audit, data_report=data_report, preloaded=preloaded
@@ -1509,7 +1516,11 @@ def main():
                 sanity={"executed": bool(sanity), "verdict": sanity},
                 runs=run_snapshots,
                 artifacts=collect_artifacts(result_files, rel_to=ROOT),
-                extra={"tracking_end": tracking_end, "environment_gate": env_gate},
+                extra={
+                    "tracking_end": tracking_end,
+                    "environment_gate": env_gate,
+                    "determinism_audit": repro.get("determinism_audit"),
+                },
                 **ledger_common,
             ),
         )

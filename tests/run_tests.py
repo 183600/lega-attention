@@ -70,6 +70,8 @@ MODULES = [
     "tests.test_capacity",
     "tests.test_ranking",
     "tests.test_artifacts",
+    "tests.test_determinism",
+    "tests.test_repo_hygiene",
 ]
 
 

@@ -965,4 +965,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from lega.bootstrap import ensure_hash_seed
+
+    ensure_hash_seed()
     main()

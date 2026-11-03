@@ -373,6 +373,64 @@ def _summary_part_b(**kw):
             f"- 运行环境：python={rt.get('python')} torch={rt.get('torch')} "
             f"device={rt.get('device')} gpu={rt.get('gpu')} cuda={rt.get('cuda')}"
         )
+        hash_state = _as_dict(rt.get("pythonhashseed"))
+        if hash_state:
+            md.append(
+                f"- 进程哈希盐：PYTHONHASHSEED={hash_state.get('env')}"
+                f"（{'已固定' if hash_state.get('fixed') else '未固定'}）；"
+                f"确定性档位：{rt.get('deterministic_mode') or '未记录'}；"
+                f"线程数：{rt.get('torch_threads')}"
+            )
+        det_audit = _as_dict(repro.get("determinism_audit"))
+        if det_audit:
+            modes = _as_dict(det_audit.get("modes"))
+            nondet = det_audit.get("non_deterministic_op_warnings")
+            nondet = nondet if isinstance(nondet, int) else 0
+            md.append(
+                f"- 逐 run 确定性审计：{det_audit.get('runs')} 个 run；档位 "
+                + ("、".join(f"{k}×{v}" for k, v in sorted(modes.items())) or "未记录")
+                + f"；非确定性算子告警合计 {nondet} 次"
+                + (
+                    "（>0：相关 run 触发了无确定性实现的算子，结果不得"
+                    "声称逐位可复现）"
+                    if nondet
+                    else "（0：本轮未触发无确定性实现的算子）"
+                )
+            )
+            unfixed = det_audit.get("pythonhashseed_unfixed_runs")
+            if isinstance(unfixed, list) and unfixed:
+                md.append(
+                    "- ⚠ 以下 run 的**进程哈希盐未固定**（集合/字典迭代顺序可能"
+                    "随进程启动而变）："
+                    + "、".join(str(x) for x in unfixed[:10])
+                    + "；这些 run 的产物顺序类差异不应被当作方法差异。"
+                )
+        else:
+            seed_reports = _as_dict(repro.get("seed_reports"))
+            if seed_reports:
+                modes = {}
+                nondet_total = 0
+                for _rep in seed_reports.values():
+                    if not isinstance(_rep, dict):
+                        continue
+                    _mode = _rep.get("deterministic_mode")
+                    if _mode:
+                        modes[_mode] = modes.get(_mode, 0) + 1
+                    _count = _rep.get("non_deterministic_op_warnings")
+                    if isinstance(_count, int) and not isinstance(_count, bool):
+                        nondet_total += _count
+                if modes:
+                    md.append(
+                        "- 逐 run 确定性审计："
+                        + "、".join(f"{k}×{v}" for k, v in sorted(modes.items()))
+                        + f"；非确定性算子告警合计 {nondet_total} 次"
+                        + (
+                            "（>0：相关 run 触发了无确定性实现的算子，结果不得"
+                            "声称逐位可复现）"
+                            if nondet_total
+                            else "（0：本轮未触发无确定性实现的算子）"
+                        )
+                    )
         gate = _as_dict(repro.get("environment_gate"))
         if gate:
             gate_status = gate.get("status")

@@ -1815,6 +1815,56 @@ def _snapshot_existing_runs(ledger_common: dict) -> list:
     return runs
 
 
+def collect_determinism_audit(out_root: str, variants, seeds) -> dict:
+    """汇总本轮各 run 的确定性审计结论（档位 + 非确定性算子告警数）。
+
+    逐 run 的 ``run_manifest.json`` 里有训练进程自己的 ``seed_report``：
+    确定性档位（strict/warn_only）、本轮实际触发过的“无确定性实现算子”
+    次数、以及进程哈希盐是否固定。汇总页必须展示**实测**结论——“开关已
+    打开”不等于“本轮没有踩到非确定性 kernel”。
+
+    缺失/损坏的清单只跳过，不让审计本身失败：可复现性报告不应因为某个
+    run 目录被手工删掉而整页崩溃。
+    """
+    variants = list(variants or [])
+    seeds = list(seeds or [])
+    n_seeds = len(seeds)
+    modes = {}
+    nondet_total = 0
+    unfixed = []
+    runs = 0
+    for variant in variants:
+        for seed in seeds:
+            try:
+                vdir = _variant_dir(out_root, variant, seed, n_seeds)
+            except (TypeError, ValueError):
+                continue
+            path = os.path.join(vdir, "run_manifest.json")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            except (OSError, ValueError):
+                continue
+            report = manifest.get("seed_report") if isinstance(manifest, dict) else None
+            if not isinstance(report, dict):
+                continue
+            runs += 1
+            mode = report.get("deterministic_mode")
+            if mode:
+                modes[mode] = modes.get(mode, 0) + 1
+            count = report.get("non_deterministic_op_warnings")
+            if isinstance(count, int) and not isinstance(count, bool):
+                nondet_total += count
+            if report.get("pythonhashseed_fixed") is False:
+                unfixed.append(f"{variant}/seed{seed}")
+    return {
+        "runs": runs,
+        "modes": dict(sorted(modes.items())),
+        "non_deterministic_op_warnings": nondet_total,
+        "pythonhashseed_unfixed_runs": unfixed,
+    }
+
+
 def append_aborted_record(
     ledger: str,
     ledger_common: dict,

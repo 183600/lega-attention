@@ -23,10 +23,13 @@ import sys
 import numpy as np
 import torch
 
+from .bootstrap import hash_seed_state
 from .utils import (
     data_rng_state_fingerprint,
     deterministic_algorithms_warn_only,
+    determinism_mode,
     expected_rng_state_fingerprint,
+    non_deterministic_op_warnings,
     seed_int,
     strict_int,
 )
@@ -887,6 +890,13 @@ def runtime_info(device: str = None) -> dict:
         "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
         # True=仅告警而非严格模式；只记 deterministic_algorithms 会夸大数据一致性
         "deterministic_algorithms_warn_only": deterministic_algorithms_warn_only(),
+        # strict / warn_only / invalid：确定性开关的实际档位
+        "deterministic_mode": determinism_mode(strict=False),
+        # 进程哈希盐状态：PYTHONHASHSEED 只在解释器启动前设置才对当前进程
+        # 生效，因此“是否固定”必须单独记录，不能由运行期 env 反推
+        "pythonhashseed": hash_seed_state(),
+        # 本进程实际触发的非确定性算子告警数（0=本轮没有非确定性 kernel 参与）
+        "non_deterministic_op_warnings": non_deterministic_op_warnings()["count"],
         "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
         # cudnn conv 默认 allow_tf32=True：不记录会把“训练实际用 TF32”漏掉
         "tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
@@ -1460,6 +1470,35 @@ def verify_run(run_dir: str, data_dir: str = None, strict: bool = False) -> dict
         elif isinstance(actual_fp, dict):
             record("seed", "pass", "seed 与实际 RNG 状态指纹匹配")
 
+    determinism = manifest.get("seed_report")
+    if not isinstance(determinism, dict):
+        record("determinism", "warn", "旧清单缺少确定性审计字段")
+    else:
+        notes = []
+        count = determinism.get("non_deterministic_op_warnings")
+        if isinstance(count, int) and not isinstance(count, bool):
+            if count > 0:
+                notes.append(
+                    f"本轮触发 {count} 次无确定性实现的算子告警"
+                    "（结果不得声称逐位可复现）"
+                )
+        else:
+            notes.append(
+                "清单缺少 non_deterministic_op_warnings，"
+                "无法核对本轮是否触发过无确定性实现的算子"
+            )
+        if determinism.get("pythonhashseed_fixed") is False:
+            notes.append(
+                "进程哈希盐未固定（集合/字典迭代顺序可能随进程启动而变）"
+            )
+        mode = determinism.get("deterministic_mode")
+        if mode:
+            notes.append(f"确定性档位={mode}")
+        if notes:
+            record("determinism", "warn", "; ".join(notes))
+        else:
+            record("determinism", "pass", "确定性档位与实测告警计数一致")
+
     sanity = manifest.get("sanity")
     if not isinstance(sanity, dict):
         record("sanity", "warn", "清单缺少 sanity 闸门摘要")
@@ -1865,4 +1904,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from lega.bootstrap import ensure_hash_seed
+
+    ensure_hash_seed()
     sys.exit(main())

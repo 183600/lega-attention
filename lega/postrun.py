@@ -20,6 +20,8 @@ import runpy
 import sys
 from typing import List, Optional
 
+from .bootstrap import BOOTSTRAP_GUARD_ENV
+
 GATED_FOR_ANALYSIS_HINT = (
     "机制分析只对门控变体有意义；调用方（run_all）用 --skip_analysis 表达"
 )
@@ -212,9 +214,17 @@ def _run_module(mod_path: str, argv) -> None:
     仅临时替换 sys.argv（argparse 读取处）；runpy 默认不修改 sys.modules，
     被执行的模块不会残留为已导入状态。子模块正常返回或 SystemExit(0/None)
     视作成功；SystemExit(非零) 原样抛出，由 _run_stage 归类为阶段失败。
+
+    进程内执行期间必须禁止子模块的“哈希盐引导”重新执行本进程：子模块的
+    ``__main__`` 块会调用 ``ensure_hash_seed``，若本进程未固定哈希盐，它会
+    以固定盐重启**整个** postrun（参数仍是 postrun 的参数），把一次链式
+    执行变成两次。引导只在真正的进程入口有意义，这里显式置位守卫变量。
     """
     old_argv = sys.argv
+    had_guard = BOOTSTRAP_GUARD_ENV in os.environ
+    old_guard = os.environ.get(BOOTSTRAP_GUARD_ENV)
     sys.argv = [f"-m {mod_path}"] + [str(x) for x in argv]
+    os.environ[BOOTSTRAP_GUARD_ENV] = "1"
     try:
         runpy.run_module(mod_path, run_name="__main__")
     except SystemExit as e:
@@ -222,6 +232,10 @@ def _run_module(mod_path: str, argv) -> None:
             raise
     finally:
         sys.argv = old_argv
+        if had_guard:
+            os.environ[BOOTSTRAP_GUARD_ENV] = old_guard
+        else:
+            os.environ.pop(BOOTSTRAP_GUARD_ENV, None)
 
 
 def _run_stage(name: str, mod_path: str, argv) -> None:
@@ -359,4 +373,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from lega.bootstrap import ensure_hash_seed
+
+    ensure_hash_seed()
     main()
