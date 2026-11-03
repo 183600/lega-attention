@@ -616,13 +616,17 @@ class GPT(nn.Module):
         cache_pos: int = 0,
         ignore_index: int = -100,
         return_window_losses: bool = False,
+        return_position_losses: bool = False,
     ) -> Dict:
         """kv_cache/cache_pos：静态 KV 缓存模式（预分配缓冲 + 写入偏移），
         供 generate 逐 token 解码使用；与 past_kv 的动态拼接缓存互斥。
 
         return_window_losses=True 时，在无梯度评测路径额外返回每行（每个
         输入窗口）的平均损失 ``loss_per_window``，供验证集抽样误差估计；
-        训练/需要梯度的路径不支持该选项（避免改变训练图）。
+        return_position_losses=True 时在无梯度评测路径额外返回逐位置（窗口内
+        第 t 个 token，跨批求和）的 nll 与有效计数 ``position_nll`` /
+        ``position_valid``，供“窗口内位置分层 PPL / 冷启动审计”使用。两者
+        都只服务评测，训练/需要梯度的路径不支持（避免改变训练图）。
         """
         B, T = idx.shape
         past_len = (
@@ -657,6 +661,8 @@ class GPT(nn.Module):
                 stats_all.append(stats)
         loss = None
         loss_per_window = None
+        position_nll = None
+        position_valid = None
         if targets is not None:
             # 标签必须与输入逐位置对齐。允许 (B,T-1) 等更短形状会让展平后的
             # 目标与另一行的位置错配（不报错但损失无意义），比直接拒绝更危险。
@@ -679,9 +685,10 @@ class GPT(nn.Module):
             )
             # 每块 logits 为目标数乘以分块大小，分块大小随设备/词表自适应。
             CHUNK = _ce_chunk_size(self.vocab_size, flat.device, train=needs_grad)
-            if return_window_losses and needs_grad:
+            if (return_window_losses or return_position_losses) and needs_grad:
                 raise RuntimeError(
-                    "return_window_losses 仅支持无梯度评测（inference_mode）"
+                    "return_window_losses/return_position_losses 仅支持无梯度"
+                    "评测（inference_mode）"
                 )
             if tgt.numel() == 0:
                 # 空查询序列/空 batch 没有可评分 token：与 _ChunkedLinearCE
@@ -691,6 +698,9 @@ class GPT(nn.Module):
                 loss = x.sum()
                 if return_window_losses:
                     loss_per_window = x.new_zeros((B,))
+                if return_position_losses:
+                    position_nll = x.new_zeros((T,))
+                    position_valid = x.new_zeros((T,))
             elif needs_grad:
                 # 训练路径：分块前向，交叉熵闭式梯度在前向内求出
                 loss = _ChunkedLinearCE.apply(flat, w, tgt, CHUNK, int(ignore_index))
@@ -701,6 +711,8 @@ class GPT(nn.Module):
                 # 不把有效数取回主机，按有掩码处理。
                 n_valid = (tgt != ignore_index).sum()
                 tgt_has_ignore = True if flat.is_cuda else int(n_valid) != tgt.numel()
+                # 逐位置/逐行统计需要逐 token nll；只要请求其一就走 nll 路径。
+                detailed = bool(return_window_losses or return_position_losses)
                 row_sums = None
                 if return_window_losses:
                     # 每个输入窗口占一行（B 行、每行 T 个位置）；按行累加
@@ -710,20 +722,36 @@ class GPT(nn.Module):
                         (tgt != ignore_index).reshape(B, T).sum(dim=1).clamp_min(1)
                     )
                     rows = torch.arange(flat.size(0), device=flat.device) // T
+                if return_position_losses and T > 0:
+                    # 窗口内第 t 个目标 token 跨批求和：位置 = 展平下标 % T。
+                    # T 很小（=评测 ctx），缓冲为 O(T)，与窗口数无关。
+                    position_nll = torch.zeros(
+                        T, dtype=flat.dtype, device=flat.device
+                    )
+                    position_valid = torch.zeros(
+                        T, dtype=flat.dtype, device=flat.device
+                    )
                 for s in range(0, flat.size(0), CHUNK):
                     lc = F.linear(flat[s : s + CHUNK], w)
                     lcd = _ChunkedLinearCE._loss_dtype(lc)
                     del lc
-                    if return_window_losses:
+                    if detailed:
                         nll = _ChunkedLinearCE._ce_nll(
                             lcd, tgt[s : s + CHUNK], int(ignore_index), tgt_has_ignore
                         )
                         total = nll.sum() if total is None else total.add_(nll.sum())
-                        if row_sums is None:
-                            row_sums = torch.zeros(
-                                B, dtype=nll.dtype, device=nll.device
+                        if row_sums is not None:
+                            row_sums.index_add_(0, rows[s : s + nll.numel()], nll)
+                        if position_nll is not None:
+                            flat_pos = (
+                                torch.arange(s, s + nll.numel(), device=nll.device)
+                                % T
                             )
-                        row_sums.index_add_(0, rows[s : s + nll.numel()], nll)
+                            position_nll.index_add_(0, flat_pos, nll)
+                            valid = (
+                                tgt[s : s + nll.numel()] != ignore_index
+                            ).to(nll.dtype)
+                            position_valid.index_add_(0, flat_pos, valid)
                     else:
                         part = _ChunkedLinearCE._ce_sum(
                             lcd, tgt[s : s + CHUNK], int(ignore_index), tgt_has_ignore
@@ -745,6 +773,8 @@ class GPT(nn.Module):
             "logits": logits,
             "loss": loss,
             "loss_per_window": loss_per_window,
+            "position_nll": position_nll,
+            "position_valid": position_valid,
             "past_kv": new_cache,
             "gate_stats": stats_all if stats_all else None,
         }

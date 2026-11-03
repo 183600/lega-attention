@@ -806,6 +806,7 @@ def evaluate_val(
     batch_windows: int = None,
     collect_window_losses: bool = False,
     window_offset: int = 0,
+    collect_position_losses: bool = False,
 ):
     """在不重复、覆盖全验证集的窗口上同时计算 val_loss 与门控均值。
 
@@ -855,6 +856,11 @@ def evaluate_val(
         total_w = 0
         gate_w_total = 0
         window_losses = []
+        # 窗口内位置分层统计：position_nll 为逐位置 nll 跨窗口求和、
+        # position_valid 为逐位置有效 token 计数，均在设备端用 fp64 累加
+        # （与 loss_acc 同口径，避免跨批 fp32 求和溢出/抵消）。
+        position_nll_acc = None
+        position_valid_acc = None
         amp_ctx = amp_autocast(device, bool(amp))
         # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
         with torch.inference_mode():
@@ -882,7 +888,16 @@ def evaluate_val(
                         need_stats=collect_gate,
                         stats_argmax=False,
                         return_window_losses=True,
+                        return_position_losses=collect_position_losses,
                     )
+                if collect_position_losses and out.get("position_nll") is not None:
+                    pn = out["position_nll"].detach().to(torch.float64)
+                    pv = out["position_valid"].detach().to(torch.float64)
+                    if position_nll_acc is None:
+                        position_nll_acc, position_valid_acc = pn, pv
+                    else:
+                        position_nll_acc.add_(pn)
+                        position_valid_acc.add_(pv)
                 nb = len(chunk)  # 窗口等长，按窗口数加权即 token 加权
                 # add_(alpha=nb) 直接按批大小加权累加（loss 前向/门控闭式求和
                 # 本就以 fp32 返回）。
@@ -976,6 +991,15 @@ def evaluate_val(
                 out["window_indices"] = [int(i // ctx) for i in starts]
             else:
                 out["window_starts"] = [int(i) for i in starts]
+        if collect_position_losses and position_nll_acc is not None:
+            # 逐位置 nll 之和与有效计数；消费方相除得到窗口内第 t 位的平均
+            # NLL（整体平均损失 = 所有位置求和再相除，与 loss_acc 口径一致）。
+            out["position_nll"] = [
+                float(v) for v in position_nll_acc.detach().cpu().tolist()
+            ]
+            out["position_valid"] = [
+                float(v) for v in position_valid_acc.detach().cpu().tolist()
+            ]
         return out
     finally:
         model.train(was_training)

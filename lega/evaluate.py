@@ -24,6 +24,7 @@ from .model import (
     load_model,
     count_params,
 )
+from .positional import position_profile
 from .preflight import allow_protocol_violations, data_protocol_preflight
 from .repro import (
     current_pipeline_run_id,
@@ -605,6 +606,13 @@ def main():
         "只作边界敏感性诊断，不替代预注册的单起点/全量口径",
     )
     p.add_argument(
+        "--position_ppl",
+        action="store_true",
+        help="额外落盘窗口内位置分层 PPL 画像（position_ppl）：逐位置"
+        "平均 NLL/PPL、冷启动位置占比与去冷区后的热区 PPL，量化"
+        "不重叠窗口的“冷启动”伪影；默认关闭，仅作描述性诊断。",
+    )
+    p.add_argument(
         "--worst_n",
         type=int,
         default=0,
@@ -804,10 +812,44 @@ def main():
     # 与训练内评测口径一致：尊重训练配置的 amp/eval_iters 设置（显式参数优先）。
     # evaluate_val 内部会把窗口不重复且均匀铺满整个验证集，避免循环复用样本。
     metrics = evaluate_val(
-        model, val, ctx, device, eval_iters, amp=use_amp, collect_window_losses=True
+        model,
+        val,
+        ctx,
+        device,
+        eval_iters,
+        amp=use_amp,
+        collect_window_losses=True,
+        collect_position_losses=bool(args.position_ppl),
     )
     norm = json_safe_eval_metrics(metrics)
     ppl, vl, gmean = norm["val_ppl"], norm["val_loss"], norm["gate_mean"]
+    # 窗口内位置分层 PPL：量化不重叠窗口的“冷启动”伪影（位置 0 上下文 n=1，
+    # 而长度校准项 b·log n 在此为零）。只在显式开启时计算并落盘。
+    position_ppl = None
+    if args.position_ppl:
+        if metrics.get("position_nll") is not None:
+            position_ppl = position_profile(
+                metrics["position_nll"], metrics["position_valid"]
+            )
+            position_ppl["eval_ctx"] = int(ctx)
+            position_ppl["eval_iters"] = int(metrics["eval_iters"])
+            position_ppl["val_windows"] = int(metrics["val_windows"])
+            if (
+                position_ppl.get("status") == "ok"
+                and position_ppl.get("cold_start")
+                and position_ppl["cold_start"].get("excess_nll_vs_warm") is not None
+            ):
+                cold = position_ppl["cold_start"]
+                print(
+                    f"[eval] 位置 PPL：位置 0 平均 NLL {cold['position0_mean_nll']:.4f}"
+                    f"（热区 {cold['warm_reference_mean_nll']:.4f}，"
+                    f"超额 {cold['excess_nll_vs_warm']:+.4f} nat）"
+                )
+        else:
+            position_ppl = {
+                "status": "unavailable",
+                "note": "评测未返回逐位置损失，无法生成位置画像。",
+            }
     if vl is None:
         print(
             "[eval] 警告：验证损失非有限（NaN/Inf），该 checkpoint 已失效；"
@@ -925,6 +967,9 @@ def main():
         # 可选：窗口边界相位敏感性（--window_offsets）。主指标仍是 offset=0；
         # 这里只描述“把同一网格平移几个 token 后 PPL 的波动范围”。
         "window_offset_sensitivity": offset_sensitivity,
+        # 可选：窗口内位置分层 PPL（--position_ppl）。描述不重叠窗口的冷启动
+        # 伪影与位置贡献，不改变主 PPL 口径，也不进入任何确认性判定。
+        "position_ppl": position_ppl,
         # 有限验证窗口的抽样误差：与 PPL 点估计同源，必须一起传递，否则
         # 下游只看到点估计，无法区分“真实差异”与“窗口抽样噪声”。
         "val_loss_se": metrics.get("val_loss_se"),

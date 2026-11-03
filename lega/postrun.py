@@ -83,6 +83,8 @@ def _eval_argv(a, ckpt: str) -> List[str]:
         argv += ["--full_eval"]
     if getattr(a, "window_offsets", None) is not None:
         argv += ["--window_offsets", str(a.window_offsets)]
+    if getattr(a, "position_ppl", False):
+        argv += ["--position_ppl"]
     if a.worst_on_test:
         argv += ["--worst_on_test"]
     if a.allow_repeat_test:
@@ -308,6 +310,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="N",
         help="透传 evaluate 的窗口相位敏感性诊断（N 个均匀起点）；"
         "默认关闭，不影响主 PPL 口径",
+    )
+    p.add_argument(
+        "--position_ppl",
+        action="store_true",
+        help="透传 evaluate 的窗口内位置分层 PPL 画像（冷启动审计）；"
+        "默认关闭，只作描述性诊断",
     )
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
