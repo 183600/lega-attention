@@ -72,6 +72,7 @@ MODULES = [
     "tests.test_artifacts",
     "tests.test_determinism",
     "tests.test_repo_hygiene",
+    "tests.test_sample_efficiency",
 ]
 
 
