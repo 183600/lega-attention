@@ -1127,10 +1127,15 @@ def _audit_implementation_factors(normalized, problems):
         elif variant in supplemental:
             category = "supplemental_gate"
             expected = supplemental[variant]
+            # 这里核对的是“安慰剂表”本身（PLACEBO_VARIANTS），而不是整个
+            # CONTROL_VARIANTS 类别：容量匹配对照（Null_X）已由上面的分支
+            # 单独归类，而方法设计维度对照（lega_shared/qgate_null）本就属于
+            # CONTROL_VARIANTS，它们作为带门补充对照登记 A/B/C 语义是合法的，
+            # 不能因为同属对照类别就被判成“混入安慰剂表”。
             if (
                 variant in gate_table
                 or variant in raw_table
-                or variant in CONTROL_VARIANTS
+                or variant in PLACEBO_VARIANTS
             ):
                 problems.append(
                     f"带门补充对照 {variant!r} 不得混入主/原始因子表或" "安慰剂表"
