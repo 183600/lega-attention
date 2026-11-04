@@ -14,6 +14,9 @@
   meta.json               {"tokenizer": "gpt2_bpe"|"char", "vocab_size": int, ...}
   data_report.json        防泄漏/清洗/漂移诊断报告（含 source_provenance）
   source_manifest.json    原始 URL/revision/文件大小/SHA-256 来源清单
+  doc_boundaries.json     文档边界侧车：每 split 的文档 token 计数（文档边界
+                          在 token 空间精确可知，用于跨文档窗口审计与文档内
+                          PPL 口径）
 """
 
 import hashlib
@@ -37,7 +40,10 @@ from .datacheck import (
     decontaminate_near_duplicates,
     decontaminate_texts,
     distribution_shift,
+    doc_aligned_windows,
+    document_stats,
     exact_overlap_alerts,
+    grid_window_starts,
     manifest_digest,
     ngram_overlap,
     ngram_overlap_exact,
@@ -45,13 +51,17 @@ from .datacheck import (
     read_test_access_log,
     sanitize_text,
     short_ngram_overlap,
+    split_documents,
     summarize_test_access,
     text_length_stats,
+    token_boundary_positions,
     token_id_range_analysis,
     token_sequence_stats,
     token_stream_stats,
     unknown_char_rate,
+    window_boundary_stats,
 )
+from .datacheck.structure import DOC_STRUCTURE_PROTOCOL, REPORT_CTX_GRID
 from .utils import config_bool, config_finite_float, strict_int
 
 _GPT2_CACHE = {}
@@ -75,7 +85,14 @@ _GPT2_CACHE = {}
 # 继续命中会让汇总页把“未扫描”当成“无重叠”，必须重建。
 # v11：data_report 增加 val/test 内部近似重复簇与块级有效样本量审计；旧
 # 缓存缺少这份“评测窗口是否独立”的证据，继续命中会把未审计当成无重复。
-CACHE_SCHEMA = 11
+# v12：token 流按文档分段编码（文档边界在 token 空间精确可知），并新增
+# doc_boundaries.json（每 split 的文档 token 计数）与 data_report.structure
+# （文档长度分布、跨文档窗口比例随 ctx 的变化）。旧缓存既没有边界证据，
+# 也没有结构审计；继续命中会把“未审计文档结构”当成“没有跨文档窗口”。
+CACHE_SCHEMA = 12
+
+# 文档边界侧车文件：记录每个 split 的文档 token 计数（文档边界 = 累计和）。
+DOC_BOUNDARIES_FILE = "doc_boundaries.json"
 
 
 def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
