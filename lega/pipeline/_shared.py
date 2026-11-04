@@ -28,7 +28,8 @@ from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
                             VARIANTS, VARIANT_CN,
                             _GATED, _LEGA_FAMILY, _USE_CONC, _USE_LEN,
                             _USE_QUERY, _USE_RAW_CONC,
-                            probe_conc_parameterization, probe_gate_factors)
+                            probe_conc_parameterization, probe_gate_factors,
+                            variant_gate_capabilities)
 from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
                            CAPACITY_OFF_VARIANTS, COMPONENT_CN,
                            EFFECT_CN, EFFECT_ORDER, NULL_EVIDENCE_COMPONENT,
@@ -36,7 +37,16 @@ from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
 from lega.ablate import (INFERENCE_FACTORIAL_CELLS,  # noqa: E402
                          LESION_BY_ID as ABLATION_LESION_BY_ID,
                          LESION_ORDER as ABLATION_LESION_ORDER,
-                         MATCHED_LESION_PAIRS, PERMUTATION_LESION_FACTORS)
+                         LESION_CONTRAST_GATE,
+                         LESION_CONTRAST_MULTI,
+                         LESION_CONTRAST_SINGLE,
+                         MATCHED_LESION_PAIRS,
+                         PERMUTATION_LESION_FACTORS,
+                         channels_from_capabilities,
+                         lesion_affected_channels,
+                         lesion_contrast_type,
+                         lesion_intervention_signature,
+                         probe_lesion_param_effects)
 from lega.factorial import (CELL_ORDER as FACTORIAL_CELL_ORDER,  # noqa: E402
                             decomposition as factorial_decomposition,
                             oriented_value as factorial_oriented_value)

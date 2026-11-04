@@ -1276,6 +1276,122 @@ def implementation_single_factor_check(audit, candidate, reference):
     return True, ""
 
 
+def _audit_lesion_variant_effects(problems):
+    """逐变体核对推理期病灶**实际**影响的证据通道，并识别重复干预。
+
+    ``LESION_EXPECTED_CHANNELS`` 是**变体无关**的声明：``no_evidence`` 声明
+    影响 A/B/C 三条通道。但变体实际拥有的通道不同（``qgate`` 只有 A，
+    ``gate_only`` 一条都没有），病灶只能作用在它实际拥有的通道上。
+    :func:`_audit_lesion_implementation` 的通道隔离测量要求变体同时具备
+    A/B/C，因此只在 ``lega`` 上核对——其余变体的实际通道集合从未被核对。
+
+    不核对会留下两类真实缺陷：
+
+    * **多通道对照退化成单通道**：``qgate`` 上 ``no_evidence`` 实际只清零
+      ``gate_w``（A），却仍标着“去全部证据项 A+B+C”；读者会把单通道差异
+      误读成整体证据，或把它当成 A 的第二条单因素证据。
+    * **同一个干预被算成两次**：``qgate`` 上 ``no_evidence`` 与
+      ``no_query`` 的参数级操作完全相同，ΔNLL 恒等，却被当成两个独立
+      检验放进同一个 Holm 家族。
+
+    这里对每个带门变体逐病灶做**参数级**实测（快照 → 施加 → 逐参数比对），
+    核对实测通道是声明通道的子集（允许因变体缺通道而更小），并把同一变体
+    上签名相同的重复干预显式列出。重复干预本身不是实现错误（它由变体结构
+    决定），但必须在结果层被识别并排除出 Holm 家族。
+    """
+    rows = []
+    duplicates = []
+    lesion_order = globals().get("ABLATION_LESION_ORDER")
+    try:
+        from lega.ablate import (
+            LESION_BY_ID,
+            lesion_intervention_signature,
+            probe_lesion_param_effects,
+        )
+        from lega.attention import _GATED
+    except Exception as e:  # pragma: no cover - 依赖损坏只在极端环境发生
+        problems.append(f"无法执行推理期病灶逐变体核对：{type(e).__name__}: {e}")
+        return rows, duplicates
+    if not isinstance(lesion_order, (tuple, list)) or isinstance(lesion_order, str):
+        problems.append("LESION_ORDER 必须是病灶序列")
+        return rows, duplicates
+    if not isinstance(_GATED, (tuple, list)):
+        problems.append("_GATED 必须是带门变体序列")
+        return rows, duplicates
+    for variant in sorted(_GATED):
+        seen = {}
+        for lesion_id in lesion_order:
+            spec = LESION_BY_ID.get(lesion_id)
+            if not isinstance(spec, dict):
+                problems.append(f"推理期病灶 {lesion_id!r} 未定义")
+                continue
+            probe = probe_lesion_param_effects(lesion_id, variant=variant)
+            if probe.get("error"):
+                problems.append(
+                    f"推理期病灶 {lesion_id!r} 在变体 {variant!r} 上的参数级核对"
+                    f"失败：{probe['error']}"
+                )
+                continue
+            measured = tuple(probe.get("affected") or ())
+            declared = tuple(probe.get("declared") or ())
+            expected = tuple(probe.get("expected") or ())
+            if not set(measured).issubset(set(declared)):
+                problems.append(
+                    f"推理期病灶 {lesion_id!r} 在变体 {variant!r} 上实际影响通道 "
+                    f"{list(measured)}，超出设计声明 {list(declared)}："
+                    "单因素推理期实验已被实现漂移破坏"
+                )
+            elif measured != expected:
+                problems.append(
+                    f"推理期病灶 {lesion_id!r} 在变体 {variant!r} 上实测影响通道 "
+                    f"{list(measured)} 与按变体裁剪的元数据口径 {list(expected)} "
+                    "不一致"
+                )
+            signature = lesion_intervention_signature(
+                lesion_id, probe.get("capabilities") or {}
+            )
+            # 只有**真的被施加**的病灶才是实验；不适用（缺能力）的病灶没
+            # 有任何干预，不能与别的病灶构成“重复干预”。2^3 的格
+            # （query_only/conc_only/len_only）不进因果表，也不参与重复
+            # 判定。
+            counted = bool(probe.get("applied")) and not spec.get("factorial_cell")
+            first = seen.get(signature) if counted else None
+            if counted and first is None:
+                seen[signature] = lesion_id
+            elif counted:
+                duplicates.append(
+                    {
+                        "variant": variant,
+                        "lesion": lesion_id,
+                        "duplicate_of": first,
+                        "changed_factors": list(measured),
+                        "reason": (
+                            "同一变体上施加的是同一个干预（参数级操作完全相同），"
+                            "ΔNLL 恒等；结果层必须把它排除出 Holm 家族"
+                        ),
+                    }
+                )
+            rows.append(
+                {
+                    "variant": variant,
+                    "lesion": lesion_id,
+                    "applied": bool(probe.get("applied")),
+                    "changed_factors": list(measured),
+                    "declared_channels": list(declared),
+                    "expected_channels": list(expected),
+                    # 变体缺通道时，多通道对照实际只作用在它有的通道上。
+                    "degraded": bool(
+                        measured and set(measured) != set(declared)
+                    ),
+                    "ok": bool(
+                        set(measured).issubset(set(declared))
+                        and measured == expected
+                    ),
+                }
+            )
+    return rows, duplicates
+
+
 def _audit_lesion_implementation(problems):
     """核对推理期病灶在**实现层**只动它声明的证据通道。
 
@@ -1703,6 +1819,7 @@ def single_factor_audit():
         contrasts, problems, implementation_factors
     )
     lesion_implementation = _audit_lesion_implementation(problems)
+    lesion_variant_effects, lesion_duplicates = _audit_lesion_variant_effects(problems)
     forbidden_contrasts = _forbidden_multi_factor_contrasts(
         registered_single_factor, problems
     )
@@ -1722,6 +1839,8 @@ def single_factor_audit():
         "registered_single_factor": registered_single_factor,
         "implementation_factors": implementation_factors,
         "inference_lesion_implementation": lesion_implementation,
+        "inference_lesion_variant_effects": lesion_variant_effects,
+        "inference_lesion_duplicate_interventions": lesion_duplicates,
         "forbidden_multi_factor_contrasts": forbidden_contrasts,
         "note": (
             "单因素对比 = 去一法 Full−X vs Full，或全因子增量 "

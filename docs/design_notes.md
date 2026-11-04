@@ -16,7 +16,7 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 
 消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
 
-单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对训练期容量匹配 Full/Null_X/No_X 三臂（Null_X 必须保留全部门控参数、只置零对应证据，No_X 必须与已审计的去一法变体一致，且不得混入主因子表）、参数化稳健性使用的 4 条原始/归一化单因子边、剂量-反应的 A/B/C 组件映射（每个组件只能缩放一个 gate 参数，且能力与训练期对照必须对应同一因子；两个组件共用参数或漏掉组件会显式失败），以及推理期单病灶、活动匹配对照、A/B/C 分布匹配置换（`query_permute`/`conc_permute`/`len_permute` 各自只对应一个证据通道）和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验；`RAW_GATE_FACTORS` 同样从 `use_query/use_raw_conc/use_len` 派生，运行期会核对 `RAW_CELLS` 的 B 格确实使用原始 `log max_p` 变体，而不是只核对格名覆盖 2^3。汇总实际消费的 `SINGLE_FACTOR_PAIRS` 也必须与声明的 6 条单因素边逐项一致，不能手工增删或混入多因子对比。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。组件判定在**使用点**再拦一次：`_paired_comparisons` 只给已审计的 6 条边打 `contrast_type="single_factor"`，其余对比按“实际改了几个因子”标成 `unregistered_single_factor`（对称差恰好 1 但未登记）、`multi_factor`（网格内同时改 ≥2 个因子）或 `overall`（因子网格外）；`component_evidence` 遇到任何非 `single_factor` 的检验一律判“对比不是单因素，不能用于组件归因”，即使它显著也不进入组件有效性的判定（旧产物缺该字段时按历史口径放行，字段缺失不等于多因素）。运行期还会核对 `lega_l2`/`lega_entropy` 保持 `lega` 的 A/B/C 开关和门控参数预算，同时不得混入 `GATE_FACTORS`/`RAW_GATE_FACTORS`；这保证“换 B 的统计量”不会被误解释成“开关 B”，也不会因漏注册而静默退化成标准注意力。训练期变体与推理期病灶都另有**实现层自证**（见下两节）：前者逐参数扰动看门控 logit 是否真的改变，后者逐通道隔离测量看病灶是否只动声明的那一条证据通道。
+单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对训练期容量匹配 Full/Null_X/No_X 三臂（Null_X 必须保留全部门控参数、只置零对应证据，No_X 必须与已审计的去一法变体一致，且不得混入主因子表）、参数化稳健性使用的 4 条原始/归一化单因子边、剂量-反应的 A/B/C 组件映射（每个组件只能缩放一个 gate 参数，且能力与训练期对照必须对应同一因子；两个组件共用参数或漏掉组件会显式失败），以及推理期单病灶、活动匹配对照、A/B/C 分布匹配置换（`query_permute`/`conc_permute`/`len_permute` 各自只对应一个证据通道）和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验；`RAW_GATE_FACTORS` 同样从 `use_query/use_raw_conc/use_len` 派生，运行期会核对 `RAW_CELLS` 的 B 格确实使用原始 `log max_p` 变体，而不是只核对格名覆盖 2^3。汇总实际消费的 `SINGLE_FACTOR_PAIRS` 也必须与声明的 6 条单因素边逐项一致，不能手工增删或混入多因子对比。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。组件判定在**使用点**再拦一次：`_paired_comparisons` 只给已审计的 6 条边打 `contrast_type="single_factor"`，其余对比按“实际改了几个因子”标成 `unregistered_single_factor`（对称差恰好 1 但未登记）、`multi_factor`（网格内同时改 ≥2 个因子）或 `overall`（因子网格外）；`component_evidence` 遇到任何非 `single_factor` 的检验一律判“对比不是单因素，不能用于组件归因”，即使它显著也不进入组件有效性的判定（旧产物缺该字段时按历史口径放行，字段缺失不等于多因素）。运行期还会核对 `lega_l2`/`lega_entropy` 保持 `lega` 的 A/B/C 开关和门控参数预算，同时不得混入 `GATE_FACTORS`/`RAW_GATE_FACTORS`；这保证“换 B 的统计量”不会被误解释成“开关 B”，也不会因漏注册而静默退化成标准注意力。训练期变体与推理期病灶都另有**实现层自证**（见下两节）：前者逐参数扰动看门控 logit 是否真的改变，后者逐通道隔离测量看病灶是否只动声明的那一条证据通道。推理期病灶还要**按变体裁剪**：变体实际注册的门控项不同（`qgate` 只有 A，`gate_only` 一条都没有），病灶声明的通道集合只是上界，实际影响通道必须按变体裁剪；同一变体上参数级操作完全相同的两个病灶是同一个干预（如 `qgate` 的 `no_evidence` ≡ `no_query`），保留其一、排除出 Holm 家族，不计为两次独立检验（见下节）。
 
 ### 门控网格内的多因子对比：默认禁止（B-only/C-only vs Full）
 
@@ -60,6 +60,24 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - 2^3 的单因子格（`query_only`/`conc_only`/`len_only`）必须恰好去掉另外两条通道，否则推理期 Shapley/交互分解的格映射就是错的。
 
 探针失败（无张量设备/依赖损坏）同样写入 `problems`，不静默跳过。审计结果进 `significance.json.single_factor_audit.inference_lesion_implementation`，汇总页"单因素消融审计"小节渲染"病灶/声明通道/实测影响通道/结论"四列，不一致时显式点名该病灶不能作为单因素推理期实验的一方。`tests/test_ablation_methods.py` 直接对全部病灶做实证断言并模拟"多动一条通道"的漂移，`tests/test_pipeline_audit.py` 再把探针换成漂移/失败版本，核对审计确实以 `ok=False` 加可读原因拒绝。
+
+### 推理期病灶按变体裁剪（变体缺通道时，"去全部证据"其实只动一条）
+
+上面那层探针要求变体同时具备 A/B/C 三条通道（`probe_lesion_channels` 在缺通道的变体上直接报错），所以它只覆盖 `lega`。但病灶的**声明通道集合**（`LESION_EXPECTED_CHANNELS`）是变体无关的，而变体实际注册的门控项不同：`qgate` 只有 A，`gate_only` 一条都没有，`lega_conc_only` 只有 B。声明集合只是**上界**，真实干预范围必须按变体裁剪，否则会出现两类实质错误：
+
+- **归因对象错**：在 `qgate` 上 `no_evidence` 实际只清零 `gate_w`（A），因果消融表却按标签写成"去全部证据 A+B+C"；读者会把一条单通道差异读成整体证据。
+- **重复计数**：`qgate` 的 `no_evidence` 与 `no_query` 是**同一个干预**（参数级操作完全相同），ΔNLL 恒等，却被当成两次独立检验放进同一个 Holm 家族——"两个病灶各自显著"其实是同一个干预的同一个数。`lega_conc_only` 上 `no_evidence` ≡ `no_conc`、`lega_len_only` 上 `no_evidence` ≡ `no_len`，同理。
+
+`lega.ablate.probe_lesion_param_effects` 用**参数级差分**（快照 → 施加 → 逐参数比对）补上这层：对**任何**带门变体都成立，因此可以逐变体实测"这个病灶到底动了哪几条证据通道"。置换类病灶不改写参数（只写临时前向属性），参数级差分看不到它们，其影响通道按登记映射唯一确定。
+
+由此：
+
+- `lega.ablate.lesion_affected_channels(lesion_id, caps)` 给出**按变体裁剪**后的实际影响通道；`lesion_intervention_signature(lesion_id, caps)` 给出参数级干预签名（签名相同 = 同一个干预）；`lesion_contrast_type(channels)` 沿用训练期同一套口径：恰好 1 条通道 = `single_factor`，≥2 条 = `multi_factor`，0 条 = `gate_level`（只动门控偏置/头—参数对应，本来就不是 A/B/C 因子实验）。
+- `single_factor_audit()` 新增 `inference_lesion_variant_effects`（逐带门变体 × 逐病灶的实测通道，要求实测集合与按变体裁剪的元数据口径一致）与 `inference_lesion_duplicate_interventions`（同一变体上的重复干预清单）两段；不一致写入 `problems`。
+- 结果层 `_ablation_lesion_records` 给每条记录写入 `changed_factors`/`contrast_type`/`declared_channels`/`channels_degraded`；重复干预保留在结果里并标 `duplicate_of`/`excluded_from_family`，但**排除出 Holm 家族**（`p_adj=None` + 显式 verdict），一次实验不计为两次独立检验。
+- 汇总页因果消融表新增"类型（实际影响通道）"列：只有"单因素 A/B/C"的 ΔNLL 才能归因到某个组件；变体缺通道时显式写出"声明 A/B/C，该变体缺通道"。
+
+`tests/test_inference_single_factor.py` 覆盖这条链：变体通道裁剪、对比类型判定、重复签名、参数级探针、逐变体审计（含漂移注入）、结果层标记与 Holm 排除、汇总页渲染。
 
 ### 参数化稳健性：归一化 c vs 原始 log max_p
 

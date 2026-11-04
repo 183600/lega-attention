@@ -707,12 +707,77 @@ def _inference_interaction_tests(ablations):
 # 因果病灶消融（推理期权重干预）的跨种子指标名与判定口径。
 
 
+def _variant_gate_capabilities(seed_map):
+    """取该变体实际注册的门控能力（query/conc/len）。
+
+    优先用产物里的 ``gate_capabilities``（由模型真实参数探测），旧产物
+    缺该字段时按变体名推导（实现开关是同一事实来源）。
+    """
+    for seed in _sorted_seeds(seed_map):
+        payload = seed_map.get(seed)
+        if not isinstance(payload, dict):
+            continue
+        caps = payload.get("gate_capabilities")
+        if isinstance(caps, dict) and caps:
+            return caps
+    for seed in _sorted_seeds(seed_map):
+        payload = seed_map.get(seed)
+        if not isinstance(payload, dict):
+            continue
+        variant = payload.get("variant")
+        if isinstance(variant, str) and variant:
+            return variant_gate_capabilities(variant)
+    return {}
+
+
+def _lesion_declared_channels(lesion_id):
+    """病灶设计声明的通道集合（变体无关的上界）。"""
+    from lega.ablate import LESION_EXPECTED_CHANNELS
+
+    return tuple(LESION_EXPECTED_CHANNELS.get(lesion_id, ()))
+
+
+def _lesion_affected_channels_for(lesion_id, caps):
+    """该变体上该病灶实际影响的证据通道（按实际注册的门控项裁剪）。
+
+    能力字段缺失时退回**声明**集合（保守：宁可多报通道，也不能把多通道
+    对照误标成单因素）。
+    """
+    if not isinstance(caps, dict) or not caps:
+        return _lesion_declared_channels(lesion_id)
+    try:
+        return tuple(lesion_affected_channels(lesion_id, caps))
+    except Exception:
+        return _lesion_declared_channels(lesion_id)
+
+
+def _lesion_intervention_signature(lesion_id, caps):
+    """病灶在该变体上的参数级干预签名（相同签名 = 同一个干预）。"""
+    if not isinstance(caps, dict) or not caps:
+        return ()
+    try:
+        return lesion_intervention_signature(lesion_id, caps)
+    except Exception:
+        return ()
+
+
 def _ablation_lesion_records(ablations):
     """{变体: {种子: payload}} -> 逐 (变体, 病灶) 的跨种子观测。
 
     只消费 payload 中 applied=True 的病灶；不适用/失败/窗口协议不一致的
     记录跳过，并在结果里保留计数。每个种子先聚合成一个 ΔNLL（病灶−正常），
     再对种子做配对检验——窗口级 p 只描述单 run，不进入这里的推断。
+
+    每条记录都带上**该变体上实际影响**的证据通道与 ``contrast_type``：
+
+    * 病灶声明的通道集合是变体无关的上界（``no_evidence`` 声明 A/B/C），
+      但变体实际拥有的通道不同（``qgate`` 只有 A，``gate_only`` 一条都没有）。
+      不按变体裁剪就会把“只动了 A”的干预写成“去全部证据 A+B+C”，读者会
+      把单通道差异误读成整体证据。
+    * 同一变体上签名相同的两个病灶是**同一个干预**（参数级操作完全相同），
+      ΔNLL 恒等：``qgate`` 的 ``no_evidence`` 实际只清零 ``gate_w``，与
+      ``no_query`` 是同一个干预。这类重复记录不进入 Holm 家族（一次实验
+      不能算两次独立检验），但保留在结果里并显式标注来源。
     """
     out = []
     ablations = ablations if isinstance(ablations, dict) else {}
@@ -720,6 +785,8 @@ def _ablation_lesion_records(ablations):
         seed_map = ablations.get(variant)
         if not isinstance(seed_map, dict):
             continue
+        caps = _variant_gate_capabilities(seed_map)
+        seen_signatures = {}
         for lesion_id in ABLATION_LESION_ORDER:
             spec = ABLATION_LESION_BY_ID.get(lesion_id, {})
             # query_only/conc_only/len_only 是同一 checkpoint 2^3 的“只保留
@@ -808,6 +875,32 @@ def _ablation_lesion_records(ablations):
                     ),
                 }
             )
+            # 该变体上实际影响的证据通道：声明集合是变体无关的上界，必须
+            # 按变体实际拥有的通道裁剪，否则“只动了 A”的干预会被写成
+            # “去全部证据 A+B+C”。
+            affected = _lesion_affected_channels_for(lesion_id, caps)
+            res["changed_factors"] = list(affected)
+            res["contrast_type"] = lesion_contrast_type(affected)
+            res["declared_channels"] = list(_lesion_declared_channels(lesion_id))
+            res["channels_match_declared"] = bool(
+                set(affected).issubset(set(res["declared_channels"]))
+            )
+            # 变体缺通道时，多通道病灶实际只作用在它有的通道上：记录里
+            # 必须显式说明“声明覆盖 A/B/C，实际只动了 A”，否则读者会把
+            # 单通道差异误读成整体证据。
+            res["channels_degraded"] = bool(
+                set(affected) != set(res["declared_channels"])
+            )
+            # 同一变体上施加的是同一个干预（参数级操作完全相同）时，两条
+            # 记录的 ΔNLL 恒等：一次实验不能算两次独立检验，重复记录不进入
+            # Holm 家族，但保留在结果里并显式标注来源。
+            signature = _lesion_intervention_signature(lesion_id, caps)
+            first = seen_signatures.get(signature)
+            if first is None:
+                seen_signatures[signature] = lesion_id
+            else:
+                res["duplicate_of"] = first
+                res["excluded_from_family"] = True
             _enrich_paired(res, vals, [0.0] * len(vals))
             # 全部种子 no-op：干预没有真正改变前向，零差不能当“等价证据”。
             if (
@@ -828,8 +921,18 @@ def _ablation_lesion_records(ablations):
                 )
             out.append(res)
     # 判定必须在 Holm 校正之后：p_adj 是“显著”的唯一门槛，提前读取会
-    # 把全部病灶误判成“未检出”。
-    out = _apply_holm(out)
+    # 把全部病灶误判成“未检出”。重复干预不参与校正（它们不是独立检验）。
+    family = [t for t in out if not t.get("excluded_from_family")]
+    _apply_holm(family)
+    for res in out:
+        if res.get("excluded_from_family"):
+            res["p_adj"] = None
+            res["p_perm_adj"] = None
+            res["p_sign_adj"] = None
+            res["verdict"] = (
+                f"重复干预：与 {res.get('duplicate_of')} 施加的是同一组参数操作，"
+                "ΔNLL 恒等，已排除出 Holm 家族（不计为第二次独立检验）"
+            )
     for res in out:
         # _apply_holm 的“显著劣于”在语义上正确（病灶比正常差），但本表
         # 要回答的是“该机制在推理期是否有因果贡献”，故另给 causal_verdict，
@@ -838,7 +941,9 @@ def _ablation_lesion_records(ablations):
         mean_delta = _finite_number(res.get("mean_diff"))
         n = _integral_value(res.get("n"))
         no_op_seeds = _integral_value(res.get("n_no_op_seeds")) or 0
-        if n is None or n < MIN_SEEDS:
+        if res.get("excluded_from_family"):
+            verdict = str(res.get("verdict") or "")
+        elif n is None or n < MIN_SEEDS:
             verdict = f"种子不足（n={n}），不作判定"
         elif no_op_seeds == n:
             verdict = (
@@ -863,7 +968,7 @@ def _ablation_lesion_records(ablations):
             )
         # 部分种子 no-op 时必须在判定里露出，否则读者会把“该组件在部分
         # checkpoint 上根本没被使用”误读成“病灶无效应”。
-        if no_op_seeds and no_op_seeds < n:
+        if no_op_seeds and no_op_seeds < n and not res.get("excluded_from_family"):
             verdict = f"部分种子 no-op（{no_op_seeds}/{n}）；" + verdict
         if res.get("matched_control"):
             verdict = "活动匹配对照：" + verdict
@@ -878,6 +983,7 @@ def _ablation_lesion_records(ablations):
             and not res.get("within_noise")
             and res.get("loo_sign_stable") is not False
             and no_op_seeds < n
+            and not res.get("excluded_from_family")
         )
     return out
 
@@ -976,6 +1082,11 @@ def _matched_ablation_contrasts(ablations):
                     "seeds_used": seeds_used,
                     "n_pairs_missing": n_pairs_missing,
                     "n_no_op_pairs": n_no_op_pairs,
+                    # 原始病灶与活动匹配病灶作用在**同一条**证据通道上
+                    # （两者只差“是否平移 d 匹配平均门控开度”），因此这是
+                    # 单因素推理期对比。
+                    "changed_factors": [factor],
+                    "contrast_type": LESION_CONTRAST_SINGLE,
                 }
             )
             out.append(_enrich_paired(res, vals, [0.0] * len(vals)))

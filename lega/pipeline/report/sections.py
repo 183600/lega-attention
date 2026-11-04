@@ -316,6 +316,89 @@ def _render_dose_response(dose):
     return md
 
 
+def _render_causal_ablation_table(causal_tests) -> list:
+    """推理期因果消融表：逐 (变体, 病灶) 的 ΔNLL 与单因素纪律标注。
+
+    表里必须出现“类型（实际影响通道）”列：只有“单因素 A/B/C”的 ΔNLL
+    才能归因到某个组件；“多因素”覆盖 ≥2 条通道；“门级”不覆盖任何证据
+    通道。通道集合按该变体实际注册的门控项裁剪，并显式标出“声明集合 vs
+    实际集合”，避免读者按标签里的“A+B+C”去解读一条只动了 A 的记录。
+    """
+    causal_tests = causal_tests if isinstance(causal_tests, list) else []
+    if not causal_tests:
+        return [
+            "",
+            "⚠ 未发现推理期因果消融结果（`--skip_ablation`、"
+            "`--ablate_variants` 为空，或变体不含输出门）；"
+            "组件结论目前只有训练期消融证据，不能据此声称“推理期使用了"
+            "该组件”。",
+        ]
+    md = [
+        "",
+        "| 变体 | 病灶 | 类型（实际影响通道） | 目标机制 | ΔNLL均值 ± SD | "
+        "PPL比 | n种子 | 逐种子胜负 | 留一 | p_adj(Holm) | 判定 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for t in causal_tests:
+        delta = _fmt_mean_std(t)
+        ratio = (
+            f"{t['mean_ppl_ratio']:.4f}"
+            + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
+            if t.get("mean_ppl_ratio") is not None
+            else "-"
+        )
+        wl = _seed_winloss_str(t)
+        loo = _loo_stability_str(t)
+        padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
+        md.append(
+            f"| {t['variant']} | {t['lesion_label']} | "
+            f"{_lesion_contrast_cell(t)} | "
+            f"{t.get('target', '-')} | {delta} | {ratio} | {t['n']} | "
+            f"{wl} | {loo} | {padj} | {t.get('causal_verdict', '-')} |"
+        )
+    md.append("")
+    md.append(
+        "注: `PPL比=exp(ΔNLL均值)`（>1 表示病灶更差）；ΔNLL 与 PPL 比"
+        "只在同一变体/同一 checkpoint 内解释，不跨变体比较绝对值。"
+        "`no_op` 表示该组件训练后系数已为 0（推理期未使用），"
+        "此时“无差异”不是“无效应”的证据；`gate_closed` 是阳性对照，"
+        "若关闭注意力输出仍无差异，应先排查实现/评测而非解释方法。"
+        "训练期消融显著而推理期病灶无差异，说明组件收益可能来自训练"
+        "期的优化/正则化而非推理期必需；推理期显著而训练期不显著，"
+        "则提示训练期消融被再训练补偿。两种证据并列，不互相替代。"
+        "`no_len` 只去 b·log n；c 中的 log n 仍随 a·c 保留，"
+        "因此它检验的是“额外长度系数 C”，不是“完全移除长度依赖”。"
+        "`no_*_matched` 是活动匹配对照：去掉同一组件的同时逐层逐头"
+        "平移 d，使平均 g 与基线相同；它只匹配平均门控（一阶矩），"
+        "不匹配方差/饱和比例，故不能把匹配版写成“机制完全匹配”。"
+    )
+    md.append("")
+    md.append(
+        "**类型（实际影响通道）**是单因素纪律在推理期的落点：只有"
+        "“单因素 A/B/C”的 ΔNLL 才能归因到某个组件，“多因素”覆盖 ≥2 条"
+        "通道、“门级”不覆盖任何证据通道（只动门控偏置/头—参数对应）。"
+        "通道集合按**该变体实际注册**的门控项裁剪：变体缺通道时，"
+        "多通道病灶实际只作用在它有的通道上（如 `qgate` 的 `no_evidence` "
+        "实际只动 A），这类记录必须按实际通道解读，不能按标签里的"
+        "“A+B+C”解读。"
+    )
+    dup_rows = [
+        t for t in causal_tests if isinstance(t, dict) and t.get("excluded_from_family")
+    ]
+    if dup_rows:
+        md.append("")
+        md.append(
+            "⚠ **同一变体上存在重复干预**（参数级操作完全相同，ΔNLL 恒等）："
+            + "、".join(
+                f"{t.get('variant')}:{t.get('lesion')}≡{t.get('duplicate_of')}"
+                for t in dup_rows
+            )
+            + "。重复记录已排除出 Holm 家族（一次实验不计为两次独立检验），"
+            "其数值与保留的那条完全相同。"
+        )
+    return md
+
+
 def _summary_part_b(**kw):
     if "audit" in kw:
         audit = kw["audit"]
@@ -1539,6 +1622,45 @@ def _summary_part_b(**kw):
                 "2^3 单因子格恰好去掉另外两条通道。"
             )
         md.append("")
+    variant_rows = [
+        r
+        for r in (sf_audit.get("inference_lesion_variant_effects") or [])
+        if isinstance(r, dict) and r.get("variant") and r.get("lesion")
+    ]
+    duplicate_rows = [
+        r
+        for r in (sf_audit.get("inference_lesion_duplicate_interventions") or [])
+        if isinstance(r, dict)
+    ]
+    if variant_rows:
+        md.append(
+            "推理期病灶逐变体核对（参数级实测：快照 → 施加 → 逐参数比对，"
+            "得到该变体上**实际**影响的证据通道；通道集合按变体实际注册"
+            "的门控项裁剪，因为变体缺通道时多通道对照会退化成单通道/门级"
+            "干预）："
+        )
+        md.append("")
+        degraded = [r for r in variant_rows if r.get("degraded")]
+        bad_variant_rows = [r for r in variant_rows if r.get("ok") is not True]
+        md.append(
+            f"- 带门变体 × 病灶共 {len(variant_rows)} 组实测；"
+            f"其中 {len(degraded)} 组因变体缺通道而少于设计声明，"
+            f"{len(bad_variant_rows)} 组与设计/元数据口径不一致。"
+        )
+        if duplicate_rows:
+            md.append(
+                "- ⚠ 同一变体上存在**重复干预**（参数级操作完全相同，ΔNLL 恒等）："
+                + "、".join(
+                    f"{r.get('variant')}:{r.get('lesion')}≡{r.get('duplicate_of')}"
+                    for r in duplicate_rows
+                )
+                + "。结果层必须把它们排除出 Holm 家族（一次实验不计为两次"
+                "独立检验），并按实际影响通道解读，不能按标签里的“A+B+C”"
+                "解读成整体证据。"
+            )
+        else:
+            md.append("- ✅ 未发现重复干预。")
+        md.append("")
     reg_rows = [
         r
         for r in (sf_audit.get("registered_single_factor") or [])
@@ -1870,53 +1992,7 @@ def _summary_part_b(**kw):
         "故绝对水平偏乐观，本表只作机制定位）。跨种子 p 经 Holm 校正；"
         "窗口级 p 仅描述单 run，不作为确认性证据。"
     )
-    if causal_tests:
-        md += [
-            "",
-            "| 变体 | 病灶 | 目标机制 | ΔNLL均值 ± SD | PPL比 | n种子 | "
-            "逐种子胜负 | 留一 | p_adj(Holm) | 判定 |",
-            "|---|---|---|---|---|---|---|---|---|---|",
-        ]
-        for t in causal_tests:
-            delta = _fmt_mean_std(t)
-            ratio = (
-                f"{t['mean_ppl_ratio']:.4f}"
-                + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
-                if t.get("mean_ppl_ratio") is not None
-                else "-"
-            )
-            wl = _seed_winloss_str(t)
-            loo = _loo_stability_str(t)
-            padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
-            md.append(
-                f"| {t['variant']} | {t['lesion_label']} | "
-                f"{t.get('target', '-')} | {delta} | {ratio} | {t['n']} | "
-                f"{wl} | {loo} | {padj} | {t.get('causal_verdict', '-')} |"
-            )
-        md.append("")
-        md.append(
-            "注: `PPL比=exp(ΔNLL均值)`（>1 表示病灶更差）；ΔNLL 与 PPL 比"
-            "只在同一变体/同一 checkpoint 内解释，不跨变体比较绝对值。"
-            "`no_op` 表示该组件训练后系数已为 0（推理期未使用），"
-            "此时“无差异”不是“无效应”的证据；`gate_closed` 是阳性对照，"
-            "若关闭注意力输出仍无差异，应先排查实现/评测而非解释方法。"
-            "训练期消融显著而推理期病灶无差异，说明组件收益可能来自训练"
-            "期的优化/正则化而非推理期必需；推理期显著而训练期不显著，"
-            "则提示训练期消融被再训练补偿。两种证据并列，不互相替代。"
-            "`no_len` 只去 b·log n；c 中的 log n 仍随 a·c 保留，"
-            "因此它检验的是“额外长度系数 C”，不是“完全移除长度依赖”。"
-            "`no_*_matched` 是活动匹配对照：去掉同一组件的同时逐层逐头"
-            "平移 d，使平均 g 与基线相同；它只匹配平均门控（一阶矩），"
-            "不匹配方差/饱和比例，故不能把匹配版写成“机制完全匹配”。"
-        )
-    else:
-        md.append("")
-        md.append(
-            "⚠ 未发现推理期因果消融结果（`--skip_ablation`、"
-            "`--ablate_variants` 为空，或变体不含输出门）；"
-            "组件结论目前只有训练期消融证据，不能据此声称“推理期使用了"
-            "该组件”。"
-        )
+    md += _render_causal_ablation_table(causal_tests)
 
     # --- 活动匹配对照：原始病灶 − 匹配病灶。若差值显著为正，说明原始
     #     ΔNLL 中有一部分只是“门平均开度变了”，不能全部归因于信息内容；

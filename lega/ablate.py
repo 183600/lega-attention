@@ -345,6 +345,12 @@ PERMUTATION_LESION_FACTORS = (
 # 门控参数 -> 证据通道（A=w·q / B=a·c / C=b·log n）。
 _GATE_PARAM_CHANNEL = {"gate_w": "A", "gate_a": "B", "gate_b": "C"}
 
+# 门控参数 -> 门控能力（与 :func:`gate_capabilities` 的键同名）。
+_PARAM_CAPABILITY = {"gate_w": "query", "gate_a": "conc", "gate_b": "len"}
+
+# 证据通道 -> 门控能力。
+_CHANNEL_CAPABILITY = {"A": "query", "B": "conc", "C": "len"}
+
 # 按设计同时动到全部证据通道的病灶类型：它们是**多通道对照**（去全部
 # 证据、门恒开/恒关、恒为均值、头置换、证据反号），不是单因素实验；运行期
 # 审计要求它们实测确实覆盖 A/B/C 三条通道，防止它们悄悄退化成“只动一条”。
@@ -352,6 +358,168 @@ _LESION_ALL_CHANNEL_KINDS = frozenset({
     "zero_evidence", "constant", "closed", "constant_mean",
     "head_permute", "sign_flip",
 })
+
+# 推理期病灶记录的对比类型（与训练期配对表的 ``contrast_type`` 同一套口径）：
+#   single_factor —— 恰好影响一条证据通道，ΔNLL 可归因到该组件；
+#   multi_factor  —— 同时影响 ≥2 条证据通道，不能归因到单个组件；
+#   gate_level    —— 不影响任何证据通道（只动门控偏置或头—参数对应），
+#                    本来就不是 A/B/C 因子实验。
+LESION_CONTRAST_SINGLE = "single_factor"
+LESION_CONTRAST_MULTI = "multi_factor"
+LESION_CONTRAST_GATE = "gate_level"
+
+
+def lesion_contrast_type(channels) -> str:
+    """按实际影响的证据通道数给出病灶记录的对比类型。"""
+    try:
+        n = len(tuple(channels or ()))
+    except TypeError:
+        n = 0
+    if n == 1:
+        return LESION_CONTRAST_SINGLE
+    if n >= 2:
+        return LESION_CONTRAST_MULTI
+    return LESION_CONTRAST_GATE
+
+
+def _normalized_capabilities(caps) -> dict:
+    """把能力字段补全成 :func:`gate_capabilities` 的完整口径。
+
+    ``any_evidence``/``multi_head`` 是派生字段：产物里可能只记了
+    query/conc/len，这里按同一口径补齐，缺 ``n_heads`` 时按多头处理
+    （探针与审计用的都是多头模型）。
+    """
+    caps = caps if isinstance(caps, dict) else {}
+    out = {
+        "gated": bool(caps.get("gated")),
+        "query": bool(caps.get("query")),
+        "conc": bool(caps.get("conc")),
+        "len": bool(caps.get("len")),
+    }
+    out["any_evidence"] = bool(out["query"] or out["conc"] or out["len"])
+    heads = caps.get("n_heads")
+    if isinstance(heads, bool) or not isinstance(heads, int):
+        out["multi_head"] = True
+    else:
+        out["multi_head"] = heads > 1
+    return out
+
+
+def channels_from_capabilities(caps) -> tuple:
+    """按模型**实际注册**的门控项给出该变体拥有的证据通道。
+
+    变体拥有的通道数决定了推理期病灶能作用在几条通道上：``qgate`` 只有
+    A，``gate_only`` 一条都没有。病灶声明的通道集合是**上界**，实际影响
+    的通道必须按变体裁剪，否则会把“只动了 A”的干预写成“去全部 A+B+C”。
+    """
+    caps = _normalized_capabilities(caps)
+    return tuple(
+        channel
+        for channel, capability in (("A", "query"), ("B", "conc"), ("C", "len"))
+        if caps.get(capability)
+    )
+
+
+def lesion_affected_channels(lesion_id: str, caps) -> tuple:
+    """该变体上该病灶**实际**影响的证据通道（元数据口径）。
+
+    ``LESION_EXPECTED_CHANNELS`` 是**变体无关**的声明；这里按变体实际
+    拥有的通道把它裁剪成实际集合。运行期审计用
+    :func:`probe_lesion_param_effects` 的参数级实测核对本函数，两者必须
+    一致——元数据与实现漂移时显式失败，而不是让单因素推理期实验在数据上
+    变成多因素（或反过来，多通道对照被当成单因素）。
+
+    病灶在该变体上**不适用**（缺少 ``requires`` 声明的能力）时，实际影响
+    的通道恒为空——它根本没被施加。
+    """
+    spec = LESION_BY_ID.get(lesion_id)
+    if spec is None:
+        raise ValueError(f"未知病灶: {lesion_id!r}")
+    caps = _normalized_capabilities(caps)
+    missing = [r for r in spec.get("requires") or () if not caps.get(r)]
+    if missing:
+        return ()
+    own = set(channels_from_capabilities(caps))
+    kind = spec.get("kind")
+    if kind in ("zero", "zero_matched"):
+        channels = set()
+        for name in spec.get("params") or ():
+            channel = _GATE_PARAM_CHANNEL.get(name)
+            if channel is None:
+                raise ValueError(
+                    f"病灶 {lesion_id!r} 的参数 {name!r} 不属于 A/B/C 证据通道"
+                )
+            channels.add(channel)
+        return tuple(sorted(channels & own))
+    if kind in _LESION_ALL_CHANNEL_KINDS:
+        # 这些病灶按设计覆盖全部证据通道；变体缺通道时只能覆盖它有的。
+        return tuple(sorted(own))
+    if kind in ("conc_permute", "query_permute", "len_permute"):
+        for factor, pid, _capability in PERMUTATION_LESION_FACTORS:
+            if pid == lesion_id:
+                return (factor,) if factor in own else ()
+        raise ValueError(
+            f"置换病灶 {lesion_id!r} 未登记到 PERMUTATION_LESION_FACTORS"
+        )
+    raise ValueError(f"未知病灶类型: {kind!r}")
+
+
+def lesion_intervention_signature(lesion_id: str, caps) -> tuple:
+    """病灶在该变体上的参数级干预签名。
+
+    签名相同 = 施加的是**同一个干预**（同一批参数、同一操作），ΔNLL
+    恒等。两个签名相同的病灶不能当成两次独立检验放进同一个 Holm 家族：
+    例如 ``qgate`` 没有 B/C 通道，``no_evidence`` 实际只清零 ``gate_w``，
+    与 ``no_query`` 是同一个干预——两条记录的 ΔNLL 完全相同，却会被当成
+    “两个病灶各自显著”。
+    """
+    spec = LESION_BY_ID.get(lesion_id)
+    if spec is None:
+        raise ValueError(f"未知病灶: {lesion_id!r}")
+    caps = caps if isinstance(caps, dict) else {}
+    kind = spec.get("kind")
+
+    def _present(name):
+        return bool(caps.get(_PARAM_CAPABILITY.get(name, "")))
+
+    ops = []
+    if kind in ("zero", "zero_matched"):
+        for name in spec.get("params") or ():
+            if _present(name):
+                ops.append(("zero", name))
+    elif kind == "zero_evidence":
+        for name in ("gate_w", "gate_a", "gate_b"):
+            if _present(name):
+                ops.append(("zero", name))
+    elif kind in ("constant", "closed", "constant_mean"):
+        for name in ("gate_w", "gate_a", "gate_b"):
+            if _present(name):
+                ops.append(("zero", name))
+        ops.append(
+            (
+                "set_d",
+                {
+                    "constant": "open",
+                    "closed": "closed",
+                    "constant_mean": "mean",
+                }[kind],
+            )
+        )
+    elif kind == "head_permute":
+        for name in ("gate_w", "gate_a", "gate_b", "gate_d"):
+            if name == "gate_d" or _present(name):
+                ops.append(("permute", name))
+    elif kind == "sign_flip":
+        for name in ("gate_w", "gate_a", "gate_b"):
+            if _present(name):
+                ops.append(("neg", name))
+    elif kind in ("conc_permute", "query_permute", "len_permute"):
+        ops.append(("permute_pos", lesion_id))
+    else:
+        raise ValueError(f"未知病灶类型: {kind!r}")
+    if kind == "zero_matched":
+        ops.append(("shift_d", "gate_d"))
+    return tuple(sorted(ops))
 
 
 def expected_lesion_channels(lesion_id: str) -> tuple:
@@ -964,6 +1132,122 @@ def probe_lesion_channels(
         "reason": record.get("reason", ""),
         "affected": affected,
         "expected": list(expected),
+        "no_op": bool(record.get("no_op")),
+        "error": None,
+    }
+
+
+def probe_lesion_param_effects(
+    lesion_id: str,
+    *,
+    variant: str = "lega",
+    d_model: int = 32,
+    n_heads: int = 4,
+    seed: int = 0,
+) -> dict:
+    """参数级实测：该病灶在该变体上改写了哪些门控参数（= 影响哪些证据通道）。
+
+    :func:`probe_lesion_channels` 做的是**通道级**隔离测量，要求变体同时
+    具备 A/B/C 三条通道，因此只能在 ``lega`` 上核对。本探针改用参数级
+    差分（快照 → 施加 → 逐参数比对），对**任何**带门变体都成立，于是
+    “变体缺通道时多通道病灶退化成单通道/门级干预”这类问题可以被逐变体
+    抓出来——例如 ``qgate`` 没有 B/C 通道，``no_evidence`` 实际只清零
+    ``gate_w``，与 ``no_query`` 是同一个干预。
+
+    返回 ``affected``（实测影响通道）、``expected``（按变体裁剪后的元数据
+    口径）、``declared``（变体无关的设计声明）与 ``changed_params``。
+    """
+    spec = LESION_BY_ID.get(lesion_id)
+    if spec is None:
+        raise ValueError(f"未知病灶: {lesion_id!r}")
+    declared = LESION_EXPECTED_CHANNELS.get(lesion_id, ())
+    try:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(seed))
+            attn = CausalSelfAttention(
+                d_model=int(d_model),
+                n_heads=int(n_heads),
+                variant=variant,
+                use_sdpa_standard=False,
+            )
+            attn.eval()
+            heads = int(attn.n_heads)
+            caps = {
+                "gated": hasattr(attn, "gate_d"),
+                "query": hasattr(attn, "gate_w"),
+                "conc": hasattr(attn, "gate_a"),
+                "len": hasattr(attn, "gate_b"),
+            }
+            # 逐头互不相同的非零值：参数差分必须能看出“确实被改写”，
+            # 零值参数即使被清零也观测不到变化。
+            with torch.no_grad():
+                if hasattr(attn, "gate_w"):
+                    attn.gate_w.copy_(
+                        torch.linspace(0.2, 0.6, heads * attn.d_head).reshape(
+                            heads, attn.d_head
+                        )
+                    )
+                if hasattr(attn, "gate_a"):
+                    attn.gate_a.copy_(torch.linspace(0.3, 0.7, heads))
+                if hasattr(attn, "gate_b"):
+                    attn.gate_b.copy_(torch.linspace(0.25, 0.65, heads))
+                if hasattr(attn, "gate_d"):
+                    attn.gate_d.copy_(torch.linspace(0.1, 0.9, heads))
+            model = _LesionProbeModel(attn)
+            before = {
+                name: p.detach().clone()
+                for name, p in attn.named_parameters()
+                if name.startswith("gate_")
+            }
+            snapshot = snapshot_gate_params(model)
+            extra = {}
+            kind = spec.get("kind")
+            if kind == "zero_matched":
+                extra["matched_gate_d"] = [[0.25] * heads]
+            if kind == "constant_mean":
+                extra["gate_head_mean"] = [[0.7] * heads]
+            record = apply_lesion(model, lesion_id, perm_seed=0, **extra)
+            changed = sorted(
+                name
+                for name, p in attn.named_parameters()
+                if name.startswith("gate_")
+                and name in before
+                and not torch.equal(p.detach(), before[name])
+            )
+            restore_gate_params(model, snapshot)
+    except Exception as e:  # pragma: no cover - 只在极端环境（无 CPU 张量）发生
+        return {
+            "lesion": lesion_id,
+            "variant": variant,
+            "applied": False,
+            "changed_params": [],
+            "affected": [],
+            "expected": [],
+            "declared": list(declared),
+            "capabilities": {},
+            "error": f"{type(e).__name__}: {e}",
+        }
+    affected = sorted(
+        {
+            channel
+            for channel in (_GATE_PARAM_CHANNEL.get(name) for name in changed)
+            if channel
+        }
+    )
+    if spec.get("kind") in ("conc_permute", "query_permute", "len_permute"):
+        # 置换类病灶不改写参数，而是写临时前向属性（位置对应关系被错位），
+        # 参数级差分看不到它们；影响通道由登记映射唯一确定。
+        affected = list(lesion_affected_channels(lesion_id, caps))
+    return {
+        "lesion": lesion_id,
+        "variant": variant,
+        "applied": bool(record.get("applied")),
+        "reason": record.get("reason", ""),
+        "changed_params": changed,
+        "affected": affected,
+        "expected": list(lesion_affected_channels(lesion_id, caps)),
+        "declared": list(declared),
+        "capabilities": caps,
         "no_op": bool(record.get("no_op")),
         "error": None,
     }

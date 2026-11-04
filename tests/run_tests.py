@@ -53,6 +53,7 @@ MODULES = [
     "tests.test_plots",
     "tests.test_probe",
     "tests.test_ablation_methods",
+    "tests.test_inference_single_factor",
     "tests.test_dose_response",
     "tests.test_output_ablation",
     "tests.test_equivalence",

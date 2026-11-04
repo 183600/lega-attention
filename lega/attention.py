@@ -299,8 +299,25 @@ SUPPLEMENTAL_GATE_FACTORS = {
     "qgate_null": frozenset("A"),
 }
 
+
+def variant_gate_capabilities(variant: str) -> dict:
+    """该变体实际注册的门控能力（query/conc/len），按实现开关推导。
+
+    与模型里真实注册的门控参数一一对应：``qgate`` 只有 query（A），
+    ``gate_only`` 一条证据通道都没有，容量匹配对照保留全部三条。
+    推理期病灶只能作用在变体**实际拥有**的通道上——多通道病灶在缺通道
+    的变体上会退化成单通道/门级干预，这个事实必须能被机器读到。
+    """
+    variant = str(variant)
+    null_variant = variant in NULL_EVIDENCE_VARIANTS
+    return {
+        "gated": variant in _GATED,
+        "query": bool(variant in _USE_QUERY or null_variant),
+        "conc": bool(variant in _USE_CONC or variant in _USE_RAW_CONC or null_variant),
+        "len": bool(variant in _USE_LEN or null_variant),
+    }
+
 # 门控网格内**允许**的多因子（整体方法）对比白名单。
-#
 # 主 2^3 网格内的多因子对比默认禁止：B-only（lega_conc_only）与
 # C-only（lega_len_only）相对 Full 同时改变两个因子（A+C / A+B），
 # 它们不是整体方法对比（整体对比是与另一套方法比，如 vs standard），

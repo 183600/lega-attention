@@ -255,6 +255,37 @@ def _loo_stability_str(t: dict) -> str:
     return "✅" if t["loo_sign_stable"] else "❌"
 
 
+_LESION_CONTRAST_CN = {
+    "single_factor": "单因素",
+    "multi_factor": "多因素",
+    "gate_level": "门级",
+}
+
+
+def _lesion_contrast_cell(t: dict) -> str:
+    """推理期病灶记录的“类型（实际影响通道）”渲染。
+
+    通道集合按该变体**实际注册**的门控项裁剪：变体缺通道时，多通道病灶
+    实际只作用在它有的通道上，渲染里必须显式带上声明集合，避免读者按
+    标签里的“A+B+C”去解读一条只动了 A 的记录。
+    """
+    if not isinstance(t, dict):
+        return "-"
+    changed = t.get("changed_factors")
+    channels = "/".join(str(c) for c in changed) if isinstance(changed, list) else "-"
+    kind = _LESION_CONTRAST_CN.get(t.get("contrast_type"), t.get("contrast_type"))
+    if not kind:
+        return channels if channels != "-" else "-"
+    cell = f"{kind} {channels}" if channels != "-" else str(kind)
+    if t.get("channels_degraded") and isinstance(t.get("declared_channels"), list):
+        declared = "/".join(str(c) for c in t["declared_channels"])
+        if declared:
+            cell += f"（声明 {declared}，该变体缺通道）"
+    if t.get("excluded_from_family"):
+        cell += "（重复干预，已排除）"
+    return cell
+
+
 def _fmt_eq_value(value, eq) -> str:
     """把 TOST 尺度上的数值换算为报告单位（相对差/对数比/绝对差）。"""
     f = _finite_number(value)
@@ -1316,6 +1347,19 @@ def _causal_eq_note(t) -> str:
     eq = t.get("equivalence")
     if not isinstance(eq, dict):
         return "-"
+    note = _causal_eq_note_body(t, eq)
+    if t.get("excluded_from_family"):
+        # 重复干预：TOST 仍按单条记录给出，但读者必须知道这不是一次新的
+        # 独立实验（参数级操作与另一条记录完全相同）。
+        note = (
+            f"重复干预（与 {t.get('duplicate_of')} 施加的是同一组参数操作，"
+            f"已排除出 Holm 家族）：{note}"
+        )
+    return note
+
+
+def _causal_eq_note_body(t, eq) -> str:
+    """TOST 结论到人话的翻译（不含重复干预标注）。"""
     n = _integral_value(t.get("n"))
     no_op = _integral_value(t.get("n_no_op_seeds"))
     if n is not None and n > 0 and no_op == n:
@@ -1484,11 +1528,14 @@ def _causal_equivalence_overview(causal_tests) -> dict:
     return {
         "method": "TOST on ΔNLL vs 0，SESOI=0.01 nat；同一指标家族 Holm",
         "n_rows": len(rows),
+        "n_duplicate_rows": sum(1 for t in rows if t.get("excluded_from_family")),
         "counts": counts,
         "lesions": list(_CAUSAL_EQ_LESIONS),
         "note": (
             "no_op 不参与等价性判定；安慰剂等价只支持“容量/分布可解释”，"
             "不等于效应恰为 0；gate_closed 等价是阳性对照失败信号。"
+            "n_duplicate_rows 是重复干预行数（同一参数级操作被两个病灶 id "
+            "记录），它们已排除出 Holm 家族，不计为额外的独立实验。"
         ),
     }
 
