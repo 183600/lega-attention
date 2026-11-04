@@ -106,7 +106,16 @@ PLACEBO_VARIANTS = ("lega_placebo",)
 # 证据置零。与 lega_no_* 组成 Full / Null_X / No_X 三臂，用于把单组件
 # LOO 效应精确拆成“信息贡献”和“参数/优化容量贡献”。
 NULL_EVIDENCE_VARIANTS = tuple(NULL_EVIDENCE_COMPONENT)
-CONTROL_VARIANTS = PLACEBO_VARIANTS + NULL_EVIDENCE_VARIANTS
+# 方法设计维度对照（不进主 2^3 网格，需显式点名才训练）：
+# lega_shared：门控标量 (a,b,d) 在层内跨头共享（有效值取各头参数均值），
+#   w 仍逐头。它与 lega 的参数个数、参数形状、初始化、优化器分组完全相同，
+#   唯一差别是“每个头自己校准证据权重”被约束成“整层一个校准”，因此是
+#   “逐头校准是否必要”的严格受控消融，而不是另一个方法的对比。
+# qgate_null：把两个已有工作代表（查询输出门 qgate + 显式空注意力槽 null）
+#   组合成更强的先验基线。已有对比只与“单一机制”比，未回答“把两个先验
+#   机制叠加起来是否已经足够”；该变体回答这个问题。
+DESIGN_CONTROL_VARIANTS = ("lega_shared", "qgate_null")
+CONTROL_VARIANTS = PLACEBO_VARIANTS + NULL_EVIDENCE_VARIANTS + DESIGN_CONTROL_VARIANTS
 # 补充对照：不进入主矩阵/默认 run，但用于回答审稿人要求的“重参数化、
 # detach 反传路径、固定零 value null”三类直接对照。其中 raw_* 用于构成
 # 原始集中度参数化的完整 2^3（与归一化网格逐格配对），但它们不属于
@@ -152,6 +161,8 @@ VARIANT_CN = {
     "lega_l2": "LEGA(集中度改为L2质量)",
     "lega_entropy": "LEGA(集中度改为熵质量)",
     "null_zero": "空注意力(固定零value)",
+    "lega_shared": "LEGA(证据标量跨头共享)",
+    "qgate_null": "查询门控+空注意力(已有机制组合)",
 }
 
 # 各公式项出现的变体
@@ -165,6 +176,8 @@ _USE_QUERY = (
     "lega_raw_no_len",
     "lega_detach_conc",
     "lega_null_query",
+    "lega_shared",
+    "qgate_null",
 ) + ALT_CONC_VARIANTS  # w·q 项
 _USE_CONC = (
     "lega",
@@ -174,6 +187,7 @@ _USE_CONC = (
     "lega_placebo",
     "lega_detach_conc",
     "lega_null_conc",
+    "lega_shared",
 ) + ALT_CONC_VARIANTS  # a*c, c=log(n*q)，q 由 ALT_CONC_STATS 决定
 _USE_RAW_CONC = (
     "lega_raw",
@@ -191,6 +205,7 @@ _USE_LEN = (
     "lega_raw_no_query",
     "lega_detach_conc",
     "lega_null_len",
+    "lega_shared",
 ) + ALT_CONC_VARIANTS  # log n 项
 # 有输出门
 _GATED = (
@@ -212,6 +227,7 @@ _GATED = (
     )
     + ALT_CONC_VARIANTS
     + NULL_EVIDENCE_VARIANTS
+    + DESIGN_CONTROL_VARIANTS
 )
 # 门依赖注意力统计（默认 max_j p_j；alt 变体替换为对应的集中度质量）
 _LEGA_FAMILY = (
@@ -226,12 +242,13 @@ _LEGA_FAMILY = (
         "lega_raw_conc_only",
         "lega_raw_no_query",
         "lega_detach_conc",
+        "lega_shared",
     )
     + ALT_CONC_VARIANTS
     + NULL_EVIDENCE_VARIANTS
 )
 # 固定零 value 的 null 对照：语义上仍是“空注意力”，但 value 槽不学习。
-_IS_NULL = ("null", "null_zero")
+_IS_NULL = ("null", "null_zero", "qgate_null")
 
 # 门控内三因子 A/B/C 的激活表（单一事实来源）：直接从上面的
 # _USE_QUERY/_USE_CONC/_USE_LEN 派生，避免“实验设计元数据”与实现漂移。
@@ -278,6 +295,8 @@ RAW_GATE_FACTORS = {
 # 路径对照；登记不等于并入 2^3，审计会另行拒绝它混入因子表。
 SUPPLEMENTAL_GATE_FACTORS = {
     "lega_detach_conc": frozenset("ABC"),
+    "lega_shared": frozenset("ABC"),
+    "qgate_null": frozenset("A"),
 }
 
 # 门控网格内**允许**的多因子（整体方法）对比白名单。
@@ -659,6 +678,9 @@ class CausalSelfAttention(nn.Module):
         self.use_len = variant in _USE_LEN or variant in NULL_EVIDENCE_VARIANTS
         self.is_null = variant in _IS_NULL
         self.detach_conc = variant == "lega_detach_conc"
+        # 逐层共享标量的对照变体：a/b/d 的有效值取各头参数均值（参数仍按
+        # 逐头形状注册，参数量/形状/优化器分组与 lega 完全一致）。
+        self.gate_shared_scalars = variant == "lega_shared"
         # B 项的具体集中度统计量：主实验用 max_p；构念效度对照换成
         # L2 质量 Σp² 或熵质量 exp(-H(p))，其余 A/C 结构与 lega 完全相同。
         self.conc_mode = ALT_CONC_STATS.get(variant, "max")
@@ -748,6 +770,27 @@ class CausalSelfAttention(nn.Module):
             else:
                 nn.init.zeros_(self.v_null)
 
+    def _gate_scalar(self, param: torch.Tensor) -> torch.Tensor:
+        """门控标量参数 (a/b/d) 的广播视图。
+
+        ``lega_shared`` 把标量约束为层内跨头共享：有效值取各头参数的均值，
+        参数本身仍按逐头形状注册（参数量、形状、优化器分组与 ``lega``
+        完全相同），因此 ``lega`` 与 ``lega_shared`` 的唯一差别就是
+        “是否允许逐头校准证据权重”。取均值而不是新建一个共享参数，是为了让
+        全部逐头参数仍参与反向（sanity 的逐参数梯度覆盖不会被破坏）。
+        """
+        value = param.float()
+        if self.gate_shared_scalars:
+            return value.mean().view(1, 1, 1)
+        return value.view(1, self.n_heads, 1)
+
+    def _effective_gate_bias(self) -> torch.Tensor:
+        """逐头门控偏置的 (1,H,1) 视图；共享标量变体各头取值相同。"""
+        value = self.gate_d.float()
+        if self.gate_shared_scalars:
+            value = value.mean().expand(self.n_heads)
+        return value.view(1, self.n_heads, 1)
+
     def _gate_logit(
         self,
         qterm: Optional[torch.Tensor],
@@ -818,7 +861,7 @@ class CausalSelfAttention(nn.Module):
             elif null_component == "B":
                 # 容量匹配对照：只把 B 证据置零，保留 gate_a 参数/梯度路径。
                 c = c * 0.0
-            a = self.gate_a.float().view(1, H, 1)
+            a = self._gate_scalar(self.gate_a)
             logit = a * c if logit is None else logit.addcmul_(a, c)
         if self.use_len:
             len_term = log_n
@@ -834,9 +877,9 @@ class CausalSelfAttention(nn.Module):
                 # 位置拿到另一位置的长度证据。用半段位移而非一格，避免相邻
                 # 位置 log n 近似不变使干预退化。
                 len_term = _permute_positions(len_term, shift, fraction=True)
-            b = self.gate_b.float().view(1, H, 1)
+            b = self._gate_scalar(self.gate_b)
             logit = b * len_term if logit is None else logit.addcmul_(b, len_term)
-        dterm = self.gate_d.float().view(1, H, 1)
+        dterm = self._gate_scalar(self.gate_d)
         if logit is None:
             # 防御分支：当前全部变体至少含一个门控项，logit 不会为 None。
             logit = dterm.expand(bht[0], H, bht[2]).clone()
@@ -1479,7 +1522,7 @@ class CausalSelfAttention(nn.Module):
                     "g": g,
                     "logit": logit,
                     "gate_bias": (
-                        self.gate_d.float().view(1, H, 1)
+                        self._effective_gate_bias()
                         if self.variant in _GATED
                         else None
                     ),
@@ -1640,7 +1683,7 @@ class CausalSelfAttention(nn.Module):
                     "g": g,
                     "logit": logit,
                     "gate_bias": (
-                        self.gate_d.float().view(1, H, 1)
+                        self._effective_gate_bias()
                         if self.variant in _GATED
                         else None
                     ),
