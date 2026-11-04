@@ -1605,12 +1605,15 @@ def load_registered_hypotheses(path: str = HYPOTHESES_PATH) -> dict:
 def _single_factor_block_reason(hyp_id, audit_rows):
     """登记假设的对比不是已审计单因素边时，给出“不可判定”的原因。
 
-    两条规则：
+    三条规则：
 
     * 门控网格内的多因子对比（B-only/C-only 与 Full 等）——既不是整体
       方法对比，也不能当单组件证据，任何组件归因/确认性判定都不成立；
     * 自称单组件消融（claim 含单因素措辞）却落在已审计的六条单因素边
-      之外——归因对象不成立，方向一致也可能只是巧合。
+      之外——归因对象不成立，方向一致也可能只是巧合；
+    * 对比在元数据上是单因素边，但**实现层实测**没通过（变体前向实际
+      多改/少改了一个门控项）——数据里的对比根本不是单因素，归因对象
+      同样不成立。
 
     审计结果缺失时返回 None：没有证据不等于违规；“未核对”由单因素审计
     自己显式报告，不在这里猜。
@@ -1625,6 +1628,13 @@ def _single_factor_block_reason(hyp_id, audit_rows):
         return (
             f"对比 {cand} vs {ref} 同时改变 {changed}，不是单因素对比："
             "不能用于组件归因，也不能作为确认性判定"
+        )
+    if row.get("implementation_ok") is False:
+        return (
+            f"对比 {cand} vs {ref} 未通过实现层单因素核对："
+            f"{row.get('implementation_reason') or '实现与声明不一致'}"
+            "——该对比在实际前向里不只改变一个因子，不能用于组件归因，"
+            "也不能作为确认性判定"
         )
     if row.get("claims_single_factor") and row.get("contrast_type") != "single_factor":
         return (

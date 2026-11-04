@@ -903,7 +903,7 @@ _FACTOR_EDGE_EXPECTED_DIRECTION = {
 }
 
 
-def _audit_registered_single_factor(contrasts, problems):
+def _audit_registered_single_factor(contrasts, problems, implementation_rows=None):
     """核对登记表里自称单组件消融的假设确实只改变一个门控因子。
 
     ``SINGLE_FACTOR_CONTRASTS`` 管的是流水线内部消费的 6 条边；预注册表
@@ -914,6 +914,10 @@ def _audit_registered_single_factor(contrasts, problems):
     对比必须落在已审计的单因素表内、声明因子与实际因子一致、优效性方向
     与该边的 add/remove 语义一致；同时把整体方法对比（vs standard、vs
     qgate、机制 AUROC/AP 差）归为 overall，不误报。
+
+    已审计的单因素边还要过第二道关：实现层实测（``implementation_rows``）
+    确认两个变体的前向确实只差一个门控项。元数据说“只改一个因子”但实现
+    悄悄多改了一项时，确认性判定必须失效。
 
     登记表不可读时如实记录 ``available=false``：这一层缺证据不等于通过。
     """
@@ -1016,6 +1020,18 @@ def _audit_registered_single_factor(contrasts, problems):
                 row["direction_mismatch"] = True
             else:
                 row["direction_mismatch"] = False
+            # 第二道关：实现层实测。只改元数据表就能让“实现漂移”的对比
+            # 继续拿到确认性判定——这里用实测生效因子把这条边挡住。
+            impl_ok, impl_reason = implementation_single_factor_check(
+                {"implementation_factors": implementation_rows or []}, cand, ref
+            )
+            row["implementation_ok"] = impl_ok
+            row["implementation_reason"] = impl_reason
+            if impl_ok is False:
+                problems.append(
+                    f"登记假设 {hyp_id} 的对比 {cand} vs {ref} 未通过实现层"
+                    f"单因素核对：{impl_reason}"
+                )
         rows.append(row)
     return rows
 
@@ -1079,6 +1095,29 @@ def _audit_implementation_factors(normalized, problems):
                 f"带门变体 {variant!r} 的前向没有门控 logit，无法做单因素归因"
             )
             continue
+        # B 通道的**参数化口径**也要实测：元数据（_USE_CONC/_USE_RAW_CONC）
+        # 只能说明“打算用哪种口径”。raw 变体若实际仍算 log(n*max_p)，原始
+        # 参数化网格会塌陷成归一化网格，单因素边的差异恒为 0。
+        conc_probe = probe_conc_parameterization(variant)
+        conc_form_measured = conc_probe.get("form")
+        conc_form_expected = expected_conc_form(variant)
+        if conc_form_measured is None:
+            problems.append(
+                f"无法实测 {variant!r} 的 B 通道参数化口径："
+                f"{conc_probe.get('detail') or '未知原因'}"
+            )
+        elif conc_form_measured != conc_form_expected:
+            drift_note = (
+                "原始参数化网格的单因素边会退化成归一化口径，"
+                "“参数化稳健性”的差异恒为 0"
+                if CONC_FORM_RAW in (conc_form_measured, conc_form_expected)
+                else "该变体的单因素对比不再只改变一个因子"
+            )
+            problems.append(
+                f"{variant!r} 的 B 通道参数化口径实测为 "
+                f"{conc_form_measured!r}，设计要求 {conc_form_expected!r}："
+                f"{drift_note}"
+            )
         effective = frozenset(probe.get("effective") or [])
         params = list(probe.get("params") or [])
         declared = {}
@@ -1179,12 +1218,62 @@ def _audit_implementation_factors(normalized, problems):
                 "null_component": null_component,
                 "use_raw_conc": bool(probe.get("use_raw_conc")),
                 "conc_mode": probe.get("conc_mode"),
+                "conc_form_measured": conc_form_measured,
+                "conc_form_expected": conc_form_expected,
                 "ok": bool(
-                    effective == expected and probe.get("bias_effective") is True
+                    effective == expected
+                    and probe.get("bias_effective") is True
+                    and conc_form_measured is not None
+                    and conc_form_measured == conc_form_expected
                 ),
             }
         )
     return rows
+
+
+def implementation_single_factor_check(audit, candidate, reference):
+    """按审计的**实现层**实测结果，核对一条对比在数据上是否真的是单因素。
+
+    元数据层（因子表 + 对比表）说“只改一个因子”还不够：变体前向若悄悄
+    多乘/少乘了一个门控项，声明与实现会一起失真，任何纯元数据审计都发现
+    不了。这里用审计的实测生效因子集合再核对一次：
+
+    * 两侧变体都必须出现在实现层核对里，且该变体的核对本身通过；
+    * 两侧**实测**生效因子集合的对称差必须恰好是一个因子。
+
+    返回 ``(ok, reason)``。``ok`` 为 True（核对通过）/ False（核对不通过，
+    reason 说明原因）/ None（审计里没有该变体的实现层记录，即“未核对”）。
+    “未核对”不等于“违规”，但也不能当成已核对：调用方据此决定是否阻断。
+    """
+    rows = audit.get("implementation_factors") if isinstance(audit, dict) else None
+    if not isinstance(rows, list):
+        return None, "单因素审计没有实现层核对记录"
+    by_variant = {row.get("variant"): row for row in rows if isinstance(row, dict)}
+    pairs = (
+        (candidate, by_variant.get(candidate)),
+        (reference, by_variant.get(reference)),
+    )
+    missing = [str(v) for v, row in pairs if row is None]
+    if missing:
+        return False, "实现层核对缺少变体：" + "、".join(missing)
+    failed = [str(v) for v, row in pairs if not row.get("ok")]
+    if failed:
+        details = []
+        for name, row in pairs:
+            if str(name) in failed:
+                details.append(
+                    f"{name}（实测生效因子 {row.get('effective')}，"
+                    f"声明 {row.get('declared')}，"
+                    f"B 通道口径实测 {row.get('conc_form_measured')}／"
+                    f"设计 {row.get('conc_form_expected')}）"
+                )
+        return False, "实现层核对未通过：" + "、".join(details)
+    cand_eff = frozenset(by_variant[candidate].get("effective") or [])
+    ref_eff = frozenset(by_variant[reference].get("effective") or [])
+    diff = cand_eff.symmetric_difference(ref_eff)
+    if len(diff) != 1:
+        return False, (f"实测生效因子差为 {sorted(diff) or '无'}，不是恰好一个因子")
+    return True, ""
 
 
 def _audit_lesion_implementation(problems):
@@ -1607,8 +1696,12 @@ def single_factor_audit():
         _audit_inference_single_factor_design(problems)
     )
     alt_conc = _audit_alt_conc_variants(problems)
-    registered_single_factor = _audit_registered_single_factor(contrasts, problems)
+    # 实现层核对先算：登记假设的单因素边要拿它做第二道关（元数据说“只改
+    # 一个因子”但实现悄悄多改了一项时，确认性判定必须失效）。
     implementation_factors = _audit_implementation_factors(normalized, problems)
+    registered_single_factor = _audit_registered_single_factor(
+        contrasts, problems, implementation_factors
+    )
     lesion_implementation = _audit_lesion_implementation(problems)
     forbidden_contrasts = _forbidden_multi_factor_contrasts(
         registered_single_factor, problems

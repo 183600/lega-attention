@@ -19,12 +19,16 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
                             ALLOWED_MULTI_FACTOR_PAIRS,
+                            CONC_FORM_CUSTOM, CONC_FORM_DISABLED,
+                            CONC_FORM_NONE, CONC_FORM_NORMALIZED,
+                            CONC_FORM_RAW,
                             CONTROL_VARIANTS, GATE_FACTORS,
                             NULL_EVIDENCE_VARIANTS, RAW_GATE_FACTORS,
                             RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
                             VARIANTS, VARIANT_CN,
                             _GATED, _LEGA_FAMILY, _USE_CONC, _USE_LEN,
-                            _USE_QUERY, _USE_RAW_CONC)
+                            _USE_QUERY, _USE_RAW_CONC,
+                            probe_conc_parameterization, probe_gate_factors)
 from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
                            CAPACITY_OFF_VARIANTS, COMPONENT_CN,
                            EFFECT_CN, EFFECT_ORDER, NULL_EVIDENCE_COMPONENT,
@@ -47,7 +51,8 @@ from lega.reparameterization import (  # noqa: E402
     NORMALIZED_CELLS as NORMALIZED_FACTORIAL_CELLS,
     RAW_CELLS as RAW_FACTORIAL_CELLS,
     RAW_FACTORIAL_VARIANTS, RAW_SPECIFIC_VARIANTS,
-    analyze as reparameterization_analyze)
+    analyze as reparameterization_analyze,
+    expected_conc_form)
 from lega.lengtheffect import (context_macro_means,  # noqa: E402
                                log2_slope, span_contrast)
 from lega.budget_sensitivity import (  # noqa: E402

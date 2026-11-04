@@ -1385,31 +1385,53 @@ def _summary_part_b(**kw):
         bad = [r["variant"] for r in impl_rows if r.get("ok") is not True]
         md.append(
             "实现层核对（探针前向逐参数扰动 `gate_w/gate_a/gate_b`，"
-            "看门控 logit 是否真的改变）："
+            "看门控 logit 是否真的改变；并实测 B 通道的参数化口径"
+            "——均匀注意力下 `max_j p_j = 1/(t+1)`，据此可分出"
+            "原始 `log q`、归一化 `log(n*q)`、证据置零与安慰剂噪声）："
         )
         md.append("")
-        md.append("| 变体 | 登记类别 | 注册参数 | 实现层生效因子 | 声明因子 |")
-        md.append("|---|---|---|---|---|")
+        md.append(
+            "| 变体 | 登记类别 | 注册参数 | 实现层生效因子 | 声明因子 "
+            "| B 通道口径（实测／设计） |"
+        )
+        md.append("|---|---|---|---|---|---|")
+        conc_form_cn = {
+            "none": "无 B 通道",
+            "disabled": "证据置零",
+            "normalized": "归一化 log(n·q)",
+            "raw": "原始 log q",
+            "custom": "非证据占位",
+        }
         for r in sorted(impl_rows, key=lambda x: str(x.get("variant"))):
+            measured = r.get("conc_form_measured")
+            expected = r.get("conc_form_expected")
+            form_cell = (
+                f"{conc_form_cn.get(measured, measured)}／"
+                f"{conc_form_cn.get(expected, expected)}"
+            )
+            if measured is not None and measured != expected:
+                form_cell += " ⚠"
             md.append(
                 f"| {r.get('variant')} "
                 f"| {category_cn.get(r.get('category'), r.get('category'))} "
                 f"| {'/'.join(r.get('params') or []) or '—'} "
                 f"| {', '.join(r.get('effective') or []) or '无'} "
-                f"| {', '.join(r.get('declared') or []) or '无'} |"
+                f"| {', '.join(r.get('declared') or []) or '无'} "
+                f"| {form_cell} |"
             )
         md.append("")
         if bad:
             md.append(
-                "⚠ 以下变体的实现层生效因子与声明不一致："
+                "⚠ 以下变体的实现层核对未通过（生效因子或 B 通道口径与登记"
+                "不一致）："
                 + "、".join(sorted(bad))
                 + "——它们不能作为单因素对比的一方。"
             )
         else:
             md.append(
-                "✅ 所有带门变体的实现层生效因子与登记因子集合一致；"
-                "容量匹配对照（`lega_null_*`）保留全部三个门控参数，"
-                "只让自己那条证据通道失效。"
+                "✅ 所有带门变体的实现层生效因子与登记因子集合一致，"
+                "B 通道参数化口径也与设计一致；容量匹配对照（`lega_null_*`）"
+                "保留全部三个门控参数，只让自己那条证据通道失效。"
             )
         md.append("")
     lesion_rows = [
@@ -1555,7 +1577,16 @@ def _summary_part_b(**kw):
     unsupported = [c["component"] for c in comp if not c["supported"]]
     fragile = [c["component"] for c in comp if c.get("fragile")]
     inconsistent = [c["component"] for c in comp if not c.get("consistent")]
+    invalid_comp = [c["component"] for c in comp if c.get("invalid_contrasts")]
     sf_ok = bool(sf_audit["ok"])
+    if invalid_comp:
+        md.append("")
+        md.append(
+            "⚠ 以下组件的消融对比未通过**实现层**单因素核对（变体前向实际"
+            "多改/少改了一个门控项，或 B 通道参数化口径与设计不符）："
+            + "、".join(invalid_comp)
+            + "——这些对比的显著性不能算作组件证据，只能作探索性线索。"
+        )
     if not comp:
         md.append("")
         md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
@@ -1565,6 +1596,7 @@ def _summary_part_b(**kw):
         and not factorial_missing
         and not loo_missing
         and not inconsistent
+        and not invalid_comp
         and sf_ok
     ):
         md.append("")
@@ -1578,6 +1610,7 @@ def _summary_part_b(**kw):
         and not fragile
         and not factorial_missing
         and not loo_missing
+        and not invalid_comp
         and sf_ok
     ):
         md.append("")

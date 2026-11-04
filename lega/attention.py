@@ -605,6 +605,137 @@ def probe_gate_factors(
     }
 
 
+# B 通道（集中度项）的参数化口径。设计契约在 lega.reparameterization
+# （expected_conc_form），这里只定义运行期实测可能返回的取值。
+CONC_FORM_NONE = "none"  # 变体没有 B 通道
+CONC_FORM_DISABLED = "disabled"  # 容量匹配对照：B 证据置零
+CONC_FORM_NORMALIZED = "normalized"  # c = log(n*q)（含 a*log n）
+CONC_FORM_RAW = "raw"  # c = log q（不含 log n）
+CONC_FORM_CUSTOM = "custom"  # 与真实证据无关的占位（参数匹配安慰剂）
+
+
+def probe_conc_parameterization(
+    variant: str,
+    *,
+    d_model: int = 32,
+    n_heads: int = 4,
+    n_pos: int = 12,
+    seed: int = 0,
+    atol: float = 1e-4,
+) -> dict:
+    """实测变体 B 通道的参数化口径（raw / normalized / disabled / custom）。
+
+    元数据（``_USE_CONC``/``_USE_RAW_CONC``）只能说明“代码打算用哪种口径”，
+    发现不了实现漂移：把某个 raw 变体误加进 ``_USE_CONC``，它就会实际计算
+    ``a*(log max_p + log n)``，而元数据仍然显示 raw——原始参数化网格随之
+    塌陷成归一化网格，“参数化稳健性”的差异恒为 0，结论变成同义反复。
+
+    这里用一次确定性微型前向**测功能形式**，不读开关：
+
+    * 把 ``gate_a`` 设为非零常数、``gate_w``/``gate_b`` 清零，门控 logit
+      里只剩 ``a*c``（bias 单独减掉），于是直接读出 c 的形状；
+    * 先在**均匀注意力**下测：``wk`` 权重清零后所有键相同，注意力在因果
+      前缀上均匀分布，``max_j p_j = 1/(t+1)``，故 ``log q = -log n``。此时
+      raw（``c = log q``）给出 ``-a*log n``，normalized（``c = log(n*q)``）
+      给出 0，两者可分；
+    * 再在**一般注意力**下测：normalized 的 ``c = log q + log n`` 一般不为
+      0，而“B 证据置零”的容量匹配对照恒为 0，两者也可分；
+    * 安慰剂把 c 换成与证据无关的确定性噪声，既不等于 ``-a*log n`` 也不
+      为 0，归为 custom。
+
+    返回 ``{"variant", "form", "detail"}``；``form`` 取
+    none/disabled/normalized/raw/custom（出错时为 None）。整个过程在
+    ``torch.random.fork_rng`` 内完成，不消耗调用方的全局随机流；同一变体
+    恒定返回同一结果。
+    """
+    variant = str(variant)
+    if variant not in RUNNABLE_VARIANTS:
+        raise ValueError(f"未知变体: {variant!r}")
+    try:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(seed))
+            m = CausalSelfAttention(
+                d_model=d_model,
+                n_heads=n_heads,
+                variant=variant,
+                use_sdpa_standard=False,
+            )
+            m.eval()
+            if not hasattr(m, "gate_a"):
+                return {
+                    "variant": variant,
+                    "form": CONC_FORM_NONE,
+                    "detail": "变体没有 B 通道（未注册 gate_a 参数）",
+                }
+            gen = torch.Generator().manual_seed(int(seed) + 1)
+            x = torch.randn(1, int(n_pos), int(d_model), generator=gen)
+            with torch.no_grad():
+                m.gate_a.copy_(torch.linspace(0.3, 0.7, int(n_heads)))
+                if hasattr(m, "gate_w"):
+                    m.gate_w.zero_()
+                if hasattr(m, "gate_b"):
+                    m.gate_b.zero_()
+                a = m._gate_scalar(m.gate_a).detach().clone()
+                bias = m._effective_gate_bias().detach().clone()
+                log_n = _log_n(0, int(n_pos), x.device).reshape(1, 1, -1)
+
+                def _residual(module):
+                    _, _, st = module(x, need_stats=True)
+                    logit = st.get("logit") if isinstance(st, dict) else None
+                    if logit is None:
+                        return None
+                    return logit.detach() - bias
+
+                # 均匀注意力：所有键相同 -> max_j p_j = 1/(t+1) -> log q = -log n
+                wk = m.wk.weight
+                saved_wk = wk.detach().clone()
+                wk.zero_()
+                r_uni = _residual(m)
+                wk.copy_(saved_wk)
+                # 一般注意力：max_j p_j 明显大于 1/(t+1)
+                r_gen = _residual(m)
+    except Exception as e:  # pragma: no cover - 只在极端环境（无 CPU 张量）发生
+        return {
+            "variant": variant,
+            "form": None,
+            "detail": f"{type(e).__name__}: {e}",
+            "error": f"{type(e).__name__}: {e}",
+        }
+    if r_uni is None or r_gen is None:
+        return {
+            "variant": variant,
+            "form": None,
+            "detail": "前向没有返回门控 logit，无法测量 B 通道口径",
+            "error": "no gate logit",
+        }
+    dev_zero = float(r_uni.abs().max())
+    dev_raw = float((r_uni + a * log_n).abs().max())
+    dev_gen_zero = float(r_gen.abs().max())
+    if dev_raw <= float(atol):
+        form = CONC_FORM_RAW
+        detail = "均匀注意力下残差 = -a*log n：B 项为原始 log q（不含 log n）"
+    elif dev_zero <= float(atol):
+        if dev_gen_zero <= float(atol):
+            form = CONC_FORM_DISABLED
+            detail = "B 项证据恒为 0（容量匹配对照）"
+        else:
+            form = CONC_FORM_NORMALIZED
+            detail = (
+                "均匀注意力下残差为 0、一般注意力下非 0：B 项为 log(n*q)（含 log n）"
+            )
+    else:
+        form = CONC_FORM_CUSTOM
+        detail = "残差既不等于 -a*log n 也不为 0：B 项与真实集中度证据无关"
+    return {
+        "variant": variant,
+        "form": form,
+        "detail": detail,
+        "dev_zero": dev_zero,
+        "dev_raw": dev_raw,
+        "dev_general_zero": dev_gen_zero,
+    }
+
+
 def _ensure_mm_input(t: torch.Tensor) -> torch.Tensor:
     """仅当批量 matmul 无法直接消费时才连续化。
 

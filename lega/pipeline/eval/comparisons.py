@@ -2632,7 +2632,7 @@ def _find_test(tests, pair, metric):
     return None
 
 
-def _component_test_status(t, removing: bool) -> dict:
+def _component_test_status(t, removing: bool, impl_reason: str = None) -> dict:
     """组件归因只接受**单因素**检验；多因素对比的显著结果不得进入判定。
 
     ``_paired_comparisons`` 只给已审计的 6 条单因素边打
@@ -2640,12 +2640,29 @@ def _component_test_status(t, removing: bool) -> dict:
     ``unregistered_single_factor``（对称差恰好 1 但未审计）、
     ``multi_factor``（网格内同时改两个及以上因子，如 B-only vs Full）
     或 ``overall``（因子网格外，如各变体 vs standard）。若组件判定误用了
-    它们的显著结果，"组件有用"就建立在多因子差异上——这是单因素审计要
+    它们的显著结果，"组件有用"就建立在多因素差异上——这是单因素审计要
     在**使用点**再拦一次的原因。
+
+    ``impl_reason`` 是**实现层**核对不通过的原因（元数据说是单因素边，
+    但变体前向实际多改/少改了一个门控项）。这种对比在数据里根本不是
+    单因素，其显著性不能算作组件证据；此时既不支持也不判“方向相反”
+    ——方向相反是统计反证，实现漂移不是。
 
     旧产物没有该字段时按历史口径放行：字段缺失只说明产物老，不等于
     这条对比是多因素（真正的多因素由审计层另行判定）。
     """
+    if impl_reason:
+        return {
+            "supported": False,
+            "opposite": False,
+            "fragile": False,
+            "invalid_contrast": True,
+            "reason": (
+                f"实现层核对未通过（{impl_reason}）：该对比在数据里不是"
+                "实际的单因素对比，不能用于组件归因"
+            ),
+            "p_adj": t.get("p_adj") if isinstance(t, dict) else None,
+        }
     if isinstance(t, dict):
         contrast_type = t.get("contrast_type")
         if contrast_type is not None and contrast_type != "single_factor":
@@ -2653,6 +2670,7 @@ def _component_test_status(t, removing: bool) -> dict:
                 "supported": False,
                 "opposite": False,
                 "fragile": False,
+                "multi_factor_contrast": True,
                 "reason": (
                     f"对比不是单因素（contrast_type={contrast_type}），"
                     "不能用于组件归因"
@@ -2757,7 +2775,30 @@ def _combine_component_evidence(loo: dict, add: dict) -> dict:
         不能作为确认性结论（confirmatory_supported=False）；
       * 任一套显著反向 -> 证据冲突（即使另一套支持也不能宣称有用）；
       * 都无显著证据；或仅有显著但不稳健的证据 -> 证据不足/不稳健。
+      * 任一套对比**未通过实现层单因素核对** -> 该套不算“未检出”，而是
+        “对比本身不成立”：判定措辞必须写明，否则读者会把实现漂移误读
+        成功效不足。
     """
+    invalid_labels = []
+    if loo.get("invalid_contrast"):
+        invalid_labels.append("去一法")
+    if add.get("invalid_contrast"):
+        invalid_labels.append("全因子")
+    invalid_suffix = (
+        "（" + "、".join(invalid_labels) + "对比未通过实现层单因素核对）"
+        if invalid_labels
+        else ""
+    )
+    loo_missing_label = (
+        "去一法对比未通过实现层单因素核对"
+        if loo.get("invalid_contrast")
+        else "去一法未检出"
+    )
+    add_missing_label = (
+        "全因子对比未通过实现层单因素核对"
+        if add.get("invalid_contrast")
+        else "全因子未检出"
+    )
     # 任一预注册主指标上的显著反向本身就是反证；另一套“未检出”不能把
     # 它稀释成“证据不足”。只有两套都不显著/都不支持时才是证据不足。
     if loo.get("opposite") or add.get("opposite"):
@@ -2769,14 +2810,14 @@ def _combine_component_evidence(loo: dict, add: dict) -> dict:
             "has_evidence": False,
             "consistent": False,
             "fragile": False,
-            "verdict": "证据冲突（一套消融显著反向）",
+            "verdict": "证据冲突（一套消融显著反向）" + invalid_suffix,
         }
     if loo.get("supported") and add.get("supported"):
         return {
             "has_evidence": True,
             "consistent": True,
             "fragile": False,
-            "verdict": "有证据支持（两套消融一致且稳健）",
+            "verdict": "有证据支持（两套消融一致且稳健）" + invalid_suffix,
         }
     if loo.get("supported"):
         if add.get("fragile"):
@@ -2785,13 +2826,13 @@ def _combine_component_evidence(loo: dict, add: dict) -> dict:
                 "consistent": False,
                 "fragile": True,
                 "verdict": "有证据支持（仅去一法稳健；全因子显著但"
-                "落在噪声内/留一翻转）",
+                "落在噪声内/留一翻转）" + invalid_suffix,
             }
         return {
             "has_evidence": True,
             "consistent": False,
             "fragile": False,
-            "verdict": "有证据支持（仅去一法；全因子未检出）",
+            "verdict": f"有证据支持（仅去一法；{add_missing_label}）",
         }
     if add.get("supported"):
         if loo.get("fragile"):
@@ -2800,30 +2841,31 @@ def _combine_component_evidence(loo: dict, add: dict) -> dict:
                 "consistent": False,
                 "fragile": True,
                 "verdict": "有证据支持（仅全因子稳健；去一法显著但"
-                "落在噪声内/留一翻转）",
+                "落在噪声内/留一翻转）" + invalid_suffix,
             }
         return {
             "has_evidence": True,
             "consistent": False,
             "fragile": False,
-            "verdict": "有证据支持（仅全因子；去一法未检出）",
+            "verdict": f"有证据支持（仅全因子；{loo_missing_label}）",
         }
     if loo.get("fragile") or add.get("fragile"):
         return {
             "has_evidence": False,
             "consistent": False,
             "fragile": True,
-            "verdict": "证据不稳健（显著但落在种子噪声内/留一方向翻转）",
+            "verdict": "证据不稳健（显著但落在种子噪声内/留一方向翻转）"
+            + invalid_suffix,
         }
     return {
         "has_evidence": False,
         "consistent": False,
         "fragile": False,
-        "verdict": "证据不足",
+        "verdict": "证据不足" + invalid_suffix,
     }
 
 
-def component_evidence(tests, audit: dict = None) -> list:
+def component_evidence(tests, audit: dict = None, sf_audit: dict = None) -> list:
     """由配对检验结果汇总各组件（A/B/C）是否“有用”的统计证据。
 
     统计口径：
@@ -2839,8 +2881,14 @@ def component_evidence(tests, audit: dict = None) -> list:
         不再具备确认性：每条证据同时带 training_budget_comparable /
         confirmatory_supported / evidence_status，供机器消费时不会把
         探索性结果误读成确认结论。
+      * ``sf_audit``（可选）是单因素消融审计的结果：组件对比还必须在
+        **实现层**实测只差一个门控项。元数据说是单因素边、但变体前向
+        实际多改/少改了一个门控项时，那条对比在数据里不是单因素，其
+        显著性不能算作组件证据（两套消融里任一套如此，整体判定降级
+        为探索性）。
     """
     audit = _as_dict(audit)
+    sf_audit = _as_dict(sf_audit)
     stopped = _as_text_list(audit.get("early_stop_runs"))
     budget_ok = not stopped
     out = []
@@ -2866,12 +2914,38 @@ def component_evidence(tests, audit: dict = None) -> list:
                 + "）：组件证据仅供探索，不能作为确认性结论"
             )
             item["early_stop_runs"] = stopped
+        # 实现层核对：元数据说“只差一个因子”还不够，变体前向必须真的
+        # 只差一个门控项。不通过时该对比的显著性不算组件证据。
+        loo_ok, loo_reason = implementation_single_factor_check(sf_audit, *loo_pair)
+        add_ok, add_reason = implementation_single_factor_check(sf_audit, *add_pair)
+        loo_impl = loo_reason if loo_ok is False else None
+        add_impl = add_reason if add_ok is False else None
+        invalid_edges = []
+        if loo_impl:
+            invalid_edges.append("去一法")
+        if add_impl:
+            invalid_edges.append("全因子")
+        if invalid_edges:
+            item["invalid_contrasts"] = invalid_edges
+            item["implementation_note"] = (
+                "实现层核对未通过（"
+                + "；".join(
+                    part
+                    for part in (
+                        ("去一法 " + loo_impl) if loo_impl else "",
+                        ("全因子 " + add_impl) if add_impl else "",
+                    )
+                    if part
+                )
+                + "）：该对比在数据里不是实际的单因素对比，组件证据只能作"
+                "探索性线索"
+            )
         for metric in _EVIDENCE_METRICS:
             item["loo"][metric] = _component_test_status(
-                _find_test(tests, loo_pair, metric), True
+                _find_test(tests, loo_pair, metric), True, impl_reason=loo_impl
             )
             item["add"][metric] = _component_test_status(
-                _find_test(tests, add_pair, metric), False
+                _find_test(tests, add_pair, metric), False, impl_reason=add_impl
             )
         loo_p = item["loo"][primary]
         add_p = item["add"][primary]
@@ -2880,11 +2954,19 @@ def component_evidence(tests, audit: dict = None) -> list:
             item["supported"].append(primary)
         item.update(combined)
         item["confirmatory_supported"] = bool(
-            combined["has_evidence"] and budget_ok and not combined.get("fragile")
+            combined["has_evidence"]
+            and budget_ok
+            and not combined.get("fragile")
+            and not invalid_edges
         )
         if item["confirmatory_supported"]:
             item["evidence_status"] = "confirmatory"
-        elif combined["has_evidence"] or combined.get("fragile") or not budget_ok:
+        elif (
+            combined["has_evidence"]
+            or combined.get("fragile")
+            or not budget_ok
+            or invalid_edges
+        ):
             item["evidence_status"] = "exploratory"
         item["evidence"] = (
             {

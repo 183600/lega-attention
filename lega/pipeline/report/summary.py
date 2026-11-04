@@ -905,7 +905,10 @@ def _summary_part_a(
     ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
     # PPL 的窗口级配对：评估抽样不确定性，与种子级 PPL 检验互补。
     ppl_window_tests = _ppl_window_paired_tests(runs, pairs)
-    comp = component_evidence(tests, audit=audit)
+    # 组件证据要过单因素审计的**实现层**核对：元数据说是单因素边、但变体
+    # 前向实际多改/少改了一个门控项时，那条对比在数据里不是单因素，其
+    # 显著性不能算作组件证据。
+    comp = component_evidence(tests, audit=audit, sf_audit=sf_audit)
     # 单因素审计失败时，任何“组件有用”的统计证据都不能升级为确认性结论：
     # 对比本身不是单因素，归因对象不成立。证据数值保留供排查。
     for c in comp:

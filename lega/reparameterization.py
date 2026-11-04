@@ -27,6 +27,9 @@ C 因子 ``b*log n`` 因此并不与 B 因子里的长度分量正交。仅凭
 import math
 from typing import Mapping
 
+from .attention import (ALT_CONC_VARIANTS, PLACEBO_VARIANTS,
+                        SUPPLEMENTAL_GATE_FACTORS)
+from .capacity import NULL_EVIDENCE_COMPONENT
 from .factorial import CELL_ORDER, decomposition, oriented_value
 from .utils import holm_bonferroni, mean_std, min_detectable_effect, paired_t_test
 
@@ -56,6 +59,55 @@ RAW_CELLS = {
 }
 
 RAW_FACTORIAL_VARIANTS = tuple(dict.fromkeys(RAW_CELLS[cell] for cell in CELL_ORDER))
+
+# B 通道参数化口径的设计契约。取值与 lega.attention.probe_conc_parameterization
+# 的实测口径同名，便于逐变体对照。
+CONC_FORM_NONE = "none"  # 变体没有 B 通道
+CONC_FORM_DISABLED = "disabled"  # 容量匹配对照：B 证据置零
+CONC_FORM_NORMALIZED = "normalized"  # c = log(n*q)（含 a*log n）
+CONC_FORM_RAW = "raw"  # c = log q（不含 log n）
+CONC_FORM_CUSTOM = "custom"  # 与真实证据无关的占位（参数匹配安慰剂）
+
+# 两套 2^3 里“含 B”的格：这些格的 B 口径由网格归属唯一确定。
+RAW_B_VARIANTS = tuple(
+    dict.fromkeys(RAW_CELLS[cell] for cell in RAW_CELLS if "B" in cell)
+)
+NORMALIZED_B_VARIANTS = tuple(
+    dict.fromkeys(NORMALIZED_CELLS[cell] for cell in NORMALIZED_CELLS if "B" in cell)
+)
+
+
+def expected_conc_form(variant: str) -> str:
+    """设计上该变体的 B 通道应当使用哪种参数化口径。
+
+    这份契约由**设计**推导（两套 2^3 网格 + 对照变体语义），与
+    ``lega/attention.py`` 的实现开关（``_USE_CONC``/``_USE_RAW_CONC``）分开
+    存放。只靠元数据自证发现不了实现漂移：把 raw 变体误加进 ``_USE_CONC``，
+    元数据仍显示 raw、实际前向却算 ``a*(log max_p + log n)``，原始参数化
+    网格塌陷成归一化网格，“参数化稳健性”的差异恒为 0。运行期审计把这里的
+    契约与 :func:`lega.attention.probe_conc_parameterization` 的实测口径
+    逐变体对照，漂移会直接变成审计问题。
+    """
+    variant = str(variant)
+    if variant in PLACEBO_VARIANTS:
+        return CONC_FORM_CUSTOM
+    null_component = NULL_EVIDENCE_COMPONENT.get(variant)
+    if null_component == "B":
+        return CONC_FORM_DISABLED
+    if variant in RAW_B_VARIANTS:
+        return CONC_FORM_RAW
+    if variant in NORMALIZED_B_VARIANTS:
+        return CONC_FORM_NORMALIZED
+    if variant in NULL_EVIDENCE_COMPONENT:
+        # 容量匹配对照只把 A 或 C 置零，B 通道保留归一化口径。
+        return CONC_FORM_NORMALIZED
+    if variant in ALT_CONC_VARIANTS:
+        # 构念效度对照换的是 B 的统计量 q（Σp² / exp(-H)），长度归一化不变。
+        return CONC_FORM_NORMALIZED
+    if "B" in SUPPLEMENTAL_GATE_FACTORS.get(variant, frozenset()):
+        # 带门补充对照（lega_detach_conc/lega_shared）与 lega 同口径。
+        return CONC_FORM_NORMALIZED
+    return CONC_FORM_NONE
 
 # 只属于原始网格、归一化网格没有的变体。判断“是否运行了 raw 对照”必须
 # 看这些变体；none/A/C 等共享格不能作为原始对照已运行的证据。
