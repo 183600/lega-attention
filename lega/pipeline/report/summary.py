@@ -947,8 +947,14 @@ def _summary_part_a(
         apply_design_gate(
             apply_budget_gate(
                 apply_scope_gate(
-                    apply_integrity_gate(
-                        evaluate_registered_hypotheses(registered, tests), integrity
+                    apply_single_factor_gate(
+                        apply_integrity_gate(
+                            evaluate_registered_hypotheses(
+                                registered, tests, audit=sf_audit
+                            ),
+                            integrity,
+                        ),
+                        sf_audit,
                     ),
                     scope_check,
                 ),

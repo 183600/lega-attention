@@ -1423,3 +1423,83 @@ def test_single_factor_audit_covers_lesion_implementation():
         "实现层核对失败" in p for p in failed["problems"]
     ), failed["problems"]
     print("  [ok] 单因素审计覆盖推理期病灶实现层（漂移/探针失败均显形）")
+
+
+def test_registered_multi_factor_contrast_is_blocked_without_wording_hint():
+    """登记成确认性主张的网格内多因子对比必须被拦截（不看 claim 措辞）。
+
+    B-only（`lega_conc_only`）与 Full 同时改变 A+C 两个因子：它既不是
+    整体方法对比，也不能当单组件证据。历史实现只在 claim 里出现
+    “核心消融/去一法/单组件/单因素”等措辞时才报错——换个措辞就能把
+    多因子对比登记成确认性主张，并拿到一个看起来像单组件结论的
+    “支持/拒绝”。这里核对：
+
+    1. 审计按因子差本身（而非中文措辞）显式失败并点名该对比；
+    2. 该对比不进入汇总配对表（否则会进入 Holm 家族并被当成证据）；
+    3. 对应假设判为“不可判定”，确认性资格被撤销；
+    4. 显式批准的整体对比（LEGA vs qgate，预注册 H5）不受影响。
+    """
+    import copy
+    import json
+    import lega.hypotheses as hypotheses_mod
+    from lega.attention import RUNNABLE_VARIANTS
+    from run_all import (
+        apply_single_factor_gate,
+        evaluate_registered_hypotheses,
+    )
+
+    registry = json.load(open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8"))
+    drifted = copy.deepcopy(registry)
+    by_id = {h["id"]: h for h in drifted["hypotheses"]}
+    # 措辞刻意不含“核心消融/去一法/单组件/单因素”等标记词：拦截必须
+    # 来自因子差本身。
+    by_id["H3"]["candidate"] = "lega_conc_only"
+    by_id["H3"]["claim"] = "LEGA 与仅集中度门控变体的 PPL 差异"
+    real_loader = hypotheses_mod.load_registration
+    hypotheses_mod.load_registration = lambda path=None: drifted
+    try:
+        audit = single_factor_audit()
+    finally:
+        hypotheses_mod.load_registration = real_loader
+
+    assert audit["ok"] is False, audit["problems"]
+    assert any(
+        "H3" in p and "多因子" in p for p in audit["problems"]
+    ), audit["problems"]
+    rows = {
+        r["id"]: r for r in audit["registered_single_factor"] if r.get("id")
+    }
+    assert rows["H3"]["contrast_type"] == "multi_factor_forbidden", rows["H3"]
+    assert rows["H3"]["forbidden"] is True, rows["H3"]
+    assert rows["H3"]["changed_factors"] == ["A", "C"], rows["H3"]
+    forbidden = audit["forbidden_multi_factor_contrasts"]
+    assert any(r.get("id") == "H3" for r in forbidden), forbidden
+
+    # 配对表不得包含该对比：多因子差异不能进入同指标 Holm 家族。
+    runs = {v: {1: {}} for v in RUNNABLE_VARIANTS}
+    pairs = build_comparison_pairs(runs, drifted)
+    assert ("lega_conc_only", "lega") not in pairs, pairs
+    assert ("lega_conc_only", "lega") not in build_comparison_pairs(
+        runs, {"hypotheses": []}
+    ), pairs
+    # 显式批准的整体对比（LEGA vs qgate）仍然允许进入配对表。
+    assert ("lega", "qgate") in pairs, pairs
+    assert rows["H5"]["contrast_type"] == "multi_factor", rows["H5"]
+    assert rows["H5"]["forbidden"] is False, rows["H5"]
+
+    # 判定层：没有审计时这条主张会拿到“支持/拒绝”；有审计时必须
+    # 变成“不可判定”，并撤销确认性资格。
+    tests = [
+        {**_mk("lega_conc_only", "lega", "PPL", -0.5, 0.001, 5), "p_adj": 0.01},
+        {**_mk("lega", "standard", "PPL", -0.4, 0.002, 5), "p_adj": 0.01},
+    ]
+    naive = {h["id"]: h for h in evaluate_registered_hypotheses(drifted, tests)}
+    assert naive["H3"]["status"] in ("支持", "拒绝"), naive["H3"]
+    ev = evaluate_registered_hypotheses(drifted, tests, audit=audit)
+    by_hyp = {h["id"]: h for h in ev}
+    assert by_hyp["H3"]["status"] == "不可判定", by_hyp["H3"]
+    assert "不是单因素" in by_hyp["H3"]["detail"], by_hyp["H3"]
+    gated = {h["id"]: h for h in apply_single_factor_gate(ev, audit)}
+    assert gated["H3"]["confirmatory_valid"] is False, gated["H3"]
+    assert gated["H3"]["confirmatory_note"], gated["H3"]
+    print("  [ok] 登记为确认性主张的网格内多因子对比被拦截（不看措辞）")

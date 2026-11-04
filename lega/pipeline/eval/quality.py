@@ -498,6 +498,9 @@ def conclusion_strength(hyp_eval, component_evidence=None, alpha=ALPHA) -> dict:
     rejected = [i for i in items if i.get("status") == "拒绝"]
     undetermined = [i for i in items if i.get("status") == "未定"]
     untested = [i for i in items if i.get("status") == "未检验"]
+    # “不可判定”= 对比不是单因素（归因对象不成立）：与“未定/未检验”不同，
+    # 不能算作“主张未被支持”的证据缺失，也不能算作支持。
+    undecidable = [i for i in items if i.get("status") == "不可判定"]
     invalid = [i for i in items if i.get("confirmatory_valid") is False]
     strong_supported = [i for i in supported if i.get("strength") == "strong"]
     marginal_supported = [i for i in supported if i.get("strength") == "marginal"]
@@ -514,7 +517,7 @@ def conclusion_strength(hyp_eval, component_evidence=None, alpha=ALPHA) -> dict:
         grade = "weak"
     elif supported:
         grade = "weak"
-    elif undetermined or untested:
+    elif undetermined or untested or undecidable:
         grade = "inconclusive"
     else:
         grade = "none"
@@ -523,7 +526,7 @@ def conclusion_strength(hyp_eval, component_evidence=None, alpha=ALPHA) -> dict:
         "moderate": "中：确认性主张成立但带 1 项警示",
         "weak": "弱：确认性主张仅边缘/脆弱成立",
         "none": "无：没有确认性主张被支持",
-        "inconclusive": "未定：主张未获支持且多为功效不足/未检验",
+        "inconclusive": "未定：主张未获支持且多为功效不足/未检验/不可判定",
         "invalid": "无效：预注册完整性/范围门未通过，判定不作数",
         "not_assessable": "无法判定：没有可评估的确认性主张",
     }
@@ -550,6 +553,7 @@ def conclusion_strength(hyp_eval, component_evidence=None, alpha=ALPHA) -> dict:
         "n_rejected": len(rejected),
         "n_undetermined": len(undetermined),
         "n_untested": len(untested),
+        "n_undecidable": len(undecidable),
         "n_invalid": len(invalid),
         "items": items,
         "component_evidence": comp_items,

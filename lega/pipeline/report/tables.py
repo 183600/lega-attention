@@ -347,6 +347,10 @@ def _summary_part_c(**kw):
                 continue
             if t.get("contrast_type") == "single_factor":
                 typ = "单因素 " + "/".join(t.get("changed_factors") or [])
+            elif t.get("contrast_type") == "unregistered_single_factor":
+                typ = "单因素（未登记，不可归因）"
+            elif t.get("contrast_type") == "multi_factor":
+                typ = "网格内多因素 " + "/".join(t.get("changed_factors") or [])
             elif t.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
                 typ = "同 run 机制对比"
             else:
@@ -843,11 +847,16 @@ def _summary_part_c(**kw):
         n_ref = sum(1 for h in hyp_eval if h["status"] == "拒绝")
         n_und = sum(1 for h in hyp_eval if h["status"] == "未定")
         n_untested = sum(1 for h in hyp_eval if h["status"] == "未检验")
+        # “不可判定”与“未定/未检验”不同：对比本身不是单因素（归因对象
+        # 不成立），不能与功效不足混为一谈，必须单独计数。
+        n_undecidable = sum(1 for h in hyp_eval if h["status"] == "不可判定")
         counts = f"支持 {n_sup}、拒绝 {n_ref}、未定 {n_und}"
         if n_untested:
             # “未检验”（对比未运行/指标对不上）与“未定”是不同状态，
             # 必须显式计数，否则四项之和小于登记条数、读者会误以为漏算。
             counts += f"、未检验 {n_untested}"
+        if n_undecidable:
+            counts += f"、不可判定 {n_undecidable}"
         valid = all(h.get("confirmatory_valid") for h in hyp_eval)
         md.append(
             f"预注册文件 `preregistration/hypotheses.json`（登记于正式实验前；"
@@ -858,10 +867,26 @@ def _summary_part_c(**kw):
         )
         if not valid:
             md.append("")
-            md.append(
-                "> ⛔ 预注册完整性校验未通过：下表的“支持/拒绝”不作数，"
-                "已按探索性线索处理（见上方完整性小节）。"
-            )
+            notes = []
+            for h in hyp_eval:
+                note = h.get("confirmatory_note")
+                if (
+                    not h.get("confirmatory_valid")
+                    and isinstance(note, str)
+                    and note
+                    and note not in notes
+                ):
+                    notes.append(note)
+            if notes:
+                md.append(
+                    "> ⛔ 以下原因使部分“支持/拒绝”不作数（已按探索性线索处理）："
+                    + "；".join(notes)
+                )
+            else:
+                md.append(
+                    "> ⛔ 预注册完整性校验未通过：下表的“支持/拒绝”不作数，"
+                    "已按探索性线索处理（见上方完整性小节）。"
+                )
         md.append("")
         md.append(
             "| ID | 主张 | Δ均值 | n | p_adj(家族) | p_adj(全体确认族) | "

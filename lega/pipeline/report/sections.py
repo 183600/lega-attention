@@ -1455,11 +1455,33 @@ def _summary_part_b(**kw):
         for r in (sf_audit.get("registered_single_factor") or [])
         if isinstance(r, dict) and r.get("id")
     ]
+    forbidden_rows = [
+        r
+        for r in (sf_audit.get("forbidden_multi_factor_contrasts") or [])
+        if isinstance(r, dict)
+    ]
+    if forbidden_rows:
+        md.append(
+            "⚠ **门控网格内的多因子对比已被拦截**（既不是整体方法对比，"
+            "也不能用于组件归因；对应登记假设判为“不可判定”）："
+        )
+        md.append("")
+        md.append("| 登记假设 | 候选 vs 参照 | 同时改变的因子 | 处理 |")
+        md.append("|---|---|---|---|")
+        for r in forbidden_rows:
+            md.append(
+                f"| {r.get('id') or '—'} "
+                f"| {r.get('candidate')} vs {r.get('reference')} "
+                f"| {', '.join(r.get('changed_factors') or []) or '—'} "
+                f"| 不进入配对表，判定为不可判定 |"
+            )
+        md.append("")
     if reg_rows:
         contrast_cn = {
             "single_factor": "单因素（可归因到单一组件）",
             "unregistered_single_factor": "单因子但未登记",
             "multi_factor": "多因子（整体方法对比）",
+            "multi_factor_forbidden": "多因子（网格内，禁止）",
             "overall": "因子网格外（整体/机制对比）",
         }
         md.append(
@@ -1484,6 +1506,10 @@ def _summary_part_b(**kw):
         "见下表，属探索性）；组件主效应只从上述单因素边估计。"
         "各变体 vs `standard` 与 LEGA vs `qgate` 是整体方法对比，"
         "可同时含多个因子，不得把差异归因给某一个 A/B/C 组件。"
+        "门控网格内的多因子对比（如 B-only/C-only 与 Full，同时改两个"
+        "因子）默认禁止：它们不是整体方法对比，也不能当单组件证据，"
+        "只有显式白名单（当前仅 LEGA vs `qgate`）允许；被拦截的对比不会"
+        "进入配对表，对应登记假设判为“不可判定”。"
         "单因素审计结果同时写入 `significance.json` 的 "
         "`single_factor_audit`。"
     )

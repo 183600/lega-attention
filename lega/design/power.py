@@ -865,6 +865,37 @@ def _known_variant_names():
         return set()
 
 
+def _forbidden_grid_multi_factor_pair(candidate, reference):
+    """门控网格内的多因子对比是否被设计禁止（与汇总层同一口径）。
+
+    B-only/C-only 与 Full 同时改变两个因子：它们不是整体方法对比，也不
+    能当单组件证据，汇总层不会把它们放进配对表。设计层必须用同一口径，
+    否则计划里的 Holm 家族大小会与实际检验数不一致（功效按错的家族
+    计算）。允许的多因子整体对比取自 lega.attention 的显式白名单。
+    """
+    try:
+        from lega.attention import (
+            ALLOWED_MULTI_FACTOR_PAIRS,
+            GATE_FACTORS,
+        )
+    except Exception:  # pragma: no cover - 导入失败只在极端环境发生
+        return False
+    if not isinstance(GATE_FACTORS, dict):
+        return False
+    c = GATE_FACTORS.get(candidate)
+    r = GATE_FACTORS.get(reference)
+    if not isinstance(c, (set, frozenset)) or not isinstance(r, (set, frozenset)):
+        return False
+    diff = set(c).symmetric_difference(set(r))
+    if len(diff) < 2:
+        return False
+    key = frozenset((candidate, reference))
+    for entry in ALLOWED_MULTI_FACTOR_PAIRS or ():
+        if isinstance(entry, (set, frozenset)) and frozenset(entry) == key:
+            return False
+    return True
+
+
 def _check(check_id: str, title: str, status: str, detail: str) -> dict:
     if status not in ("pass", "warn", "fail", "info"):
         raise ValueError(f"未知检查状态 {status!r}")
@@ -922,6 +953,11 @@ def planned_comparison_pairs(variants, registered: dict = None) -> list:
             and cand in planned_set
             and ref in planned_set
         ):
+            # 门控网格内的多因子对比（B-only/C-only 与 Full）不进配对表：
+            # 汇总层用同一口径拒绝它们，设计层必须同步，否则计划里的
+            # Holm 家族大小会大于实际检验数。
+            if _forbidden_grid_multi_factor_pair(cand, ref):
+                continue
             pairs.append((cand, ref))
     # 顺序稳定（同 run_all 的 dict.fromkeys），便于计划摘要复现。
     return list(dict.fromkeys(pairs))

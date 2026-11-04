@@ -836,6 +836,59 @@ def single_factor_change(candidate, reference):
     return None
 
 
+def _allowed_multi_factor_pair(candidate, reference):
+    """多因子对比是否在显式批准的白名单里（顺序无关）。
+
+    白名单是 ``lega.attention.ALLOWED_MULTI_FACTOR_PAIRS``：网格内只有
+    LEGA vs qgate 这类“与另一套已有方法比”的整体对比被批准；其它网格内
+    多因子对比（B-only/C-only 与 Full）一律禁止。
+    """
+    allowed = globals().get("ALLOWED_MULTI_FACTOR_PAIRS")
+    if not isinstance(allowed, (tuple, list)):
+        return False
+    try:
+        key = frozenset((candidate, reference))
+    except TypeError:
+        return False
+    for entry in allowed:
+        if isinstance(entry, (set, frozenset)) and frozenset(entry) == key:
+            return True
+    return False
+
+
+def grid_contrast_info(candidate, reference):
+    """对比是否落在门控 2^3 网格内、是否同时改变多个因子、是否被批准。
+
+    “网格内”= 两侧都在 ``GATE_FACTORS``（主归一化 2^3）里。网格内的
+    多因子对比（B-only/C-only 与 Full 同时差两个因子）既不是整体方法
+    对比，也不能当单组件证据：设计明确禁止把 B-only/C-only 与 Full
+    配对，否则会产出一个“看起来像单组件”的确认性判定。只有白名单里
+    显式批准的对比才允许作为整体方法对比进入分析。
+
+    返回 dict：
+      * ``grid_internal``：两侧是否都在门控网格内；
+      * ``changed_factors``：实际改变的因子（网格内才有意义）；
+      * ``multi_factor``：是否同时改变 ≥2 个因子；
+      * ``allowed``：多因子时是否在白名单内；
+      * ``forbidden``：是否是“禁止进入分析/确认性判定”的多因子对比。
+    """
+    diff = changed_gate_factors(candidate, reference)
+    changed = sorted(diff) if diff else []
+    multi = bool(diff is not None and len(diff) >= 2)
+    allowed = True if not multi else _allowed_multi_factor_pair(
+        candidate, reference
+    )
+    return {
+        "candidate": candidate,
+        "reference": reference,
+        "grid_internal": diff is not None,
+        "changed_factors": changed,
+        "multi_factor": multi,
+        "allowed": allowed,
+        "forbidden": bool(multi and not allowed),
+    }
+
+
 # 登记表里"这条假设在消融某个组件"的措辞标记。预注册的正确性不能只靠
 # 变体名看起来像：H2–H4 是核心消融假设，若登记表被改成多因子对比
 # （如把 lega_no_conc 换成 lega_conc_only vs lega，同时改 A+C），汇总仍会
@@ -895,6 +948,8 @@ def _audit_registered_single_factor(contrasts, problems):
             "reference": ref,
             "claim": claim,
             "metric": entry.get("metric"),
+            # 该对比是否是“禁止进入确认性判定”的网格内多因子对比。
+            "forbidden": False,
         }
         requires_single = any(m in claim for m in _HYPOTHESIS_SINGLE_FACTOR_MARKERS)
         row["claims_single_factor"] = bool(requires_single)
@@ -920,8 +975,26 @@ def _audit_registered_single_factor(contrasts, problems):
                 )
         else:
             diff = changed_gate_factors(cand, ref)
-            row["contrast_type"] = "overall" if diff is None else "multi_factor"
+            info = grid_contrast_info(cand, ref)
+            row["contrast_type"] = (
+                "overall"
+                if diff is None
+                else ("multi_factor_forbidden" if info["forbidden"] else "multi_factor")
+            )
             row["changed_factors"] = sorted(diff) if diff else []
+            row["forbidden"] = bool(info["forbidden"])
+            if info["forbidden"]:
+                # 网格内的多因子对比（B-only/C-only 与 Full 同时改两个因子）
+                # 既不是整体方法对比，也不能当单组件证据：登记成确认性
+                # 主张会让读者以为某个组件的贡献被单独测出来了。这里不看
+                # claim 措辞，直接按因子差判定。
+                problems.append(
+                    f"登记假设 {hyp_id} 的对比 {cand} vs {ref} 同时改变 "
+                    f"{row['changed_factors']}，属于门控网格内的多因子对比："
+                    "它不是整体方法对比，也不能用于组件归因，必须改用"
+                    "已审计的单因素边（去一法 Full−X vs Full 或 X-only vs "
+                    "gate_only）"
+                )
             if requires_single:
                 problems.append(
                     f"登记假设 {hyp_id} 自称单组件消融，但 {cand} vs {ref} "
@@ -1532,6 +1605,9 @@ def single_factor_audit():
     registered_single_factor = _audit_registered_single_factor(contrasts, problems)
     implementation_factors = _audit_implementation_factors(normalized, problems)
     lesion_implementation = _audit_lesion_implementation(problems)
+    forbidden_contrasts = _forbidden_multi_factor_contrasts(
+        registered_single_factor, problems
+    )
     return {
         "ok": not problems,
         "problems": problems,
@@ -1548,20 +1624,47 @@ def single_factor_audit():
         "registered_single_factor": registered_single_factor,
         "implementation_factors": implementation_factors,
         "inference_lesion_implementation": lesion_implementation,
+        "forbidden_multi_factor_contrasts": forbidden_contrasts,
         "note": (
             "单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
             "X-only vs gate_only；整体对比（vs standard、LEGA vs "
             "qgate）可跨多个因子，不作组件归因。同一审计还核对 "
-            "归一化/原始参数化的单因子边、剂量-反应的 A/B/C 参数"
+            "归一化/原始参数化的单因素边、剂量-反应的 A/B/C 参数"
             "映射、训练期容量匹配 Full/Null_X/No_X 三臂、推理期"
             "单病灶、活动匹配、A/B/C 分布匹配置换、2^3 格的因子"
             "映射，以及替代集中度统计的 B-only 构念对照"
             "（lega_l2/lega_entropy 不进入主因子表）。训练期变体"
             "与推理期病灶都做实现层自证：变体看逐参数扰动是否真的"
             "改变门控 logit，病灶看逐通道隔离测量是否只动声明的"
-            "证据通道。"
+            "证据通道。门控网格内的多因子对比（B-only/C-only 与 "
+            "Full）默认禁止：它们既不是整体方法对比，也不能用于"
+            "组件归因，只有显式白名单（当前仅 LEGA vs qgate）允许。"
         ),
     }
+
+
+def _forbidden_multi_factor_contrasts(registered_rows, problems):
+    """汇总“禁止进入确认性判定”的门控网格内多因子对比。
+
+    登记表里若出现 B-only/C-only 与 Full 这类同时改两个因子的对比，
+    审计必须显式点名：这类对比不是整体方法对比，也不能当单组件证据，
+    汇总层会把它挡在配对表之外，并把对应假设降级为不可判定。
+    """
+    rows = []
+    for row in registered_rows if isinstance(registered_rows, list) else []:
+        if not isinstance(row, dict) or not row.get("forbidden"):
+            continue
+        rows.append(
+            {
+                "id": row.get("id"),
+                "candidate": row.get("candidate"),
+                "reference": row.get("reference"),
+                "changed_factors": list(row.get("changed_factors") or []),
+                "reason": "门控网格内的多因子对比：不是整体方法对比，也不能用于组件归因",
+            }
+        )
+    return rows
+
 
 
 def build_comparison_pairs(runs, registered=None):
@@ -1606,6 +1709,12 @@ def build_comparison_pairs(runs, registered=None):
         if h.get("metric") in (AUROC_DIFF_METRIC, AP_DIFF_METRIC):
             continue  # 单样本机制族，由 _auroc_diff_tests/_ap_diff_tests 覆盖
         if c in RUNNABLE_VARIANTS and r in RUNNABLE_VARIANTS:
+            # 门控网格内的多因子对比（B-only/C-only 与 Full 同时改两个
+            # 因子）不进配对表：它不是整体方法对比，也不能当单组件证据。
+            # 登记成假设也不能绕开这条约束——对应假设会被单因素门降级为
+            # 不可判定，并在单因素审计里显式点名。
+            if grid_contrast_info(c, r)["forbidden"]:
+                continue
             pairs.append((c, r))
     return list(dict.fromkeys(pairs))
 

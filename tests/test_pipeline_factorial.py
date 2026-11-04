@@ -436,7 +436,13 @@ def test_single_factor_audit_rejects_broken_design_metadata():
 
 
 def test_paired_comparisons_marks_contrast_type():
-    """配对结果必须机器可读地标出 single_factor/overall，避免事后误归因。"""
+    """配对结果必须机器可读地标出对比类型，避免事后误归因。
+
+    四类标签：single_factor（已审计的六条边，可归因）、
+    unregistered_single_factor（对称差恰好 1 但未登记，未审计前不可
+    归因）、multi_factor（门控网格内同时改了 ≥2 个因子，既不是整体
+    方法对比也不能当单组件证据）、overall（因子网格外）。
+    """
     runs = {}
     for v, base in (
         ("standard", 12.0),
@@ -468,11 +474,19 @@ def test_paired_comparisons_marks_contrast_type():
         t = by[(c, r)]
         assert t["contrast_type"] == "single_factor", (c, r, t)
         assert len(t["changed_factors"]) == 1, t
+    # 网格外（vs standard）是整体方法对比。
     assert by[("lega", "standard")]["contrast_type"] == "overall"
-    assert by[("lega", "qgate")]["contrast_type"] == "overall"
-    assert by[("lega_conc_only", "lega")]["contrast_type"] == "overall"
-    assert by[("lega", "lega_no_query")]["contrast_type"] == "overall"
-    print("  [ok] 配对检验结果带 single_factor/overall 机器可读标记")
+    # 网格内的多因子对比不能笼统写成 overall：LEGA vs qgate 差 B+C，
+    # B-only vs Full 差 A+C，都不是整体方法对比，也不能当单组件证据。
+    assert by[("lega", "qgate")]["contrast_type"] == "multi_factor"
+    assert by[("lega", "qgate")]["changed_factors"] == ["B", "C"]
+    assert by[("lega_conc_only", "lega")]["contrast_type"] == "multi_factor"
+    assert by[("lega_conc_only", "lega")]["changed_factors"] == ["A", "C"]
+    # 未登记的单因子对：仍是单因素，但没有审计，不能归因。
+    assert by[("lega", "lega_no_query")]["contrast_type"] == (
+        "unregistered_single_factor"
+    )
+    print("  [ok] 配对检验结果带 single_factor/multi_factor/overall 机器可读标记")
 
 
 def test_build_summary_excludes_multifactor_ablation_pairs():

@@ -2038,6 +2038,32 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         # 证据，绕过 SINGLE_FACTOR_CONTRASTS 这个唯一事实来源。
         audited = (cand, ref) in SINGLE_FACTOR_PAIRS
         is_single = bool(audited and change)
+        # 对比类型必须如实反映“改了几个因子”：
+        #   single_factor             —— 已审计的六条边，可用于组件归因；
+        #   unregistered_single_factor —— 对称差恰好 1 但不在审计表内，
+        #                                 仍是单因素，但未审计前不可归因；
+        #   multi_factor              —— 门控网格内同时改了 ≥2 个因子
+        #                                 （如 B-only/C-only 与 Full），既不是
+        #                                 整体方法对比，也不能当单组件证据；
+        #   overall                   —— 因子网格外（vs standard、vs
+        #                                 placebo、机制族）的整体对比。
+        # 只给已审计的六条边打 single_factor：仅凭“对称差=1”会把未登记的
+        # 单因子对（例如方向写反、或临时拼出的对比）也标成可归因证据，
+        # 绕过 SINGLE_FACTOR_CONTRASTS 这个唯一事实来源。
+        info = grid_contrast_info(cand, ref)
+        if is_single:
+            contrast_type = "single_factor"
+        elif info["multi_factor"]:
+            contrast_type = "multi_factor"
+        elif info["grid_internal"]:
+            contrast_type = "unregistered_single_factor"
+        else:
+            contrast_type = "overall"
+        changed_factors = (
+            [change]
+            if is_single
+            else (info["changed_factors"] if info["grid_internal"] else [])
+        )
         res.update(
             {
                 "candidate": cand,
@@ -2047,8 +2073,8 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                 # 单因素标记进入 significance.json：只有单因素对比可用于
                 # 组件归因；vs standard / LEGA vs qgate 等整体对比即使显著
                 # 也不能把差异归给某一个 A/B/C 因子。
-                "contrast_type": ("single_factor" if is_single else "overall"),
-                "changed_factors": ([change] if is_single else []),
+                "contrast_type": contrast_type,
+                "changed_factors": changed_factors,
             }
         )
         if split_skipped:
@@ -2610,10 +2636,12 @@ def _component_test_status(t, removing: bool) -> dict:
     """组件归因只接受**单因素**检验；多因素对比的显著结果不得进入判定。
 
     ``_paired_comparisons`` 只给已审计的 6 条单因素边打
-    ``contrast_type="single_factor"``，其余对比（各变体 vs standard、
-    LEGA vs qgate、B-only vs Full 这类同时改两个因子的边）标为
-    ``overall``。若组件判定误用了后者的显著结果，"组件有用"就建立在
-    多因子差异上——这是单因素审计要在**使用点**再拦一次的原因。
+    ``contrast_type="single_factor"``；其余对比标成
+    ``unregistered_single_factor``（对称差恰好 1 但未审计）、
+    ``multi_factor``（网格内同时改两个及以上因子，如 B-only vs Full）
+    或 ``overall``（因子网格外，如各变体 vs standard）。若组件判定误用了
+    它们的显著结果，"组件有用"就建立在多因子差异上——这是单因素审计要
+    在**使用点**再拦一次的原因。
 
     旧产物没有该字段时按历史口径放行：字段缺失只说明产物老，不等于
     这条对比是多因素（真正的多因素由审计层另行判定）。

@@ -280,6 +280,19 @@ SUPPLEMENTAL_GATE_FACTORS = {
     "lega_detach_conc": frozenset("ABC"),
 }
 
+# 门控网格内**允许**的多因子（整体方法）对比白名单。
+#
+# 主 2^3 网格内的多因子对比默认禁止：B-only（lega_conc_only）与
+# C-only（lega_len_only）相对 Full 同时改变两个因子（A+C / A+B），
+# 它们不是整体方法对比（整体对比是与另一套方法比，如 vs standard），
+# 也不能当单组件消融证据——把这种对比写进确认性判定，读者会以为
+# “B/C 的贡献”已经被单独测出来了。因此只有显式批准的对才允许：
+# 当前仅 LEGA vs qgate（预注册 H5，与最接近的已有门控基线比较，
+# 差的是 B+C 两个因子，属于整体方法对比而非组件归因）。
+#
+# 顺序无关：用 frozenset 存储，便于两侧互换时仍被识别为同一条。
+ALLOWED_MULTI_FACTOR_PAIRS = (frozenset({"lega", "qgate"}),)
+
 # 显式注意力按查询维分块计算 (B,H,T,S) 的打分/概率；训练态配合逐块 checkpoint。
 _CHUNK_TARGET_ELEMS = 8_000_000
 _CHUNK_MIN_T = 64

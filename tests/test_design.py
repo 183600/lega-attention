@@ -2109,3 +2109,58 @@ def test_design_plan_accounts_for_repeated_test_looks():
     md = "\n".join(render_design_section(twice, None))
     assert "look校正" in md
     print("  [ok] 设计计划：多次 test look 按 alpha/planned 规划先验功效")
+
+
+def test_planned_comparison_pairs_excludes_forbidden_multi_factor_contrast():
+    """设计层与汇总层必须用同一口径拒绝门控网格内的多因子对比。
+
+    B-only（`lega_conc_only`）与 Full 同时改变 A+C 两个因子：它不是整体
+    方法对比，也不能当单组件证据。汇总层不会把它放进配对表，设计层若
+    仍把它算进 Holm 家族，先验功效就会按错误的家族大小计算（计划里的
+    检验数大于实际检验数）。
+    """
+    import run_all
+
+    variants = [
+        "standard",
+        "gate_only",
+        "qgate",
+        "null",
+        "lega",
+        "lega_no_len",
+        "lega_no_conc",
+        "lega_no_query",
+        "lega_conc_only",
+        "lega_len_only",
+    ]
+    forbidden = {
+        "hypotheses": [
+            {
+                "id": "HX",
+                "metric": "PPL",
+                "candidate": "lega_conc_only",
+                "reference": "lega",
+            }
+        ]
+    }
+    planned = planned_comparison_pairs(variants, forbidden)
+    assert ("lega_conc_only", "lega") not in planned, planned
+    assert ("lega_conc_only", "lega") not in run_all.build_comparison_pairs(
+        {v: {} for v in variants}, forbidden
+    ), planned
+    # 显式批准的整体对比（LEGA vs qgate）两侧都要保留。
+    overall = {
+        "hypotheses": [
+            {
+                "id": "H5",
+                "metric": "PPL",
+                "candidate": "lega",
+                "reference": "qgate",
+            }
+        ]
+    }
+    assert ("lega", "qgate") in planned_comparison_pairs(variants, overall)
+    assert ("lega", "qgate") in run_all.build_comparison_pairs(
+        {v: {} for v in variants}, overall
+    )
+    print("  [ok] 设计层与汇总层一致拒绝网格内多因子对比")

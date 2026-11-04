@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
+                            ALLOWED_MULTI_FACTOR_PAIRS,
                             CONTROL_VARIANTS, GATE_FACTORS,
                             NULL_EVIDENCE_VARIANTS, RAW_GATE_FACTORS,
                             RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,

@@ -1602,8 +1602,40 @@ def load_registered_hypotheses(path: str = HYPOTHESES_PATH) -> dict:
     return d
 
 
+def _single_factor_block_reason(hyp_id, audit_rows):
+    """登记假设的对比不是已审计单因素边时，给出“不可判定”的原因。
+
+    两条规则：
+
+    * 门控网格内的多因子对比（B-only/C-only 与 Full 等）——既不是整体
+      方法对比，也不能当单组件证据，任何组件归因/确认性判定都不成立；
+    * 自称单组件消融（claim 含单因素措辞）却落在已审计的六条单因素边
+      之外——归因对象不成立，方向一致也可能只是巧合。
+
+    审计结果缺失时返回 None：没有证据不等于违规；“未核对”由单因素审计
+    自己显式报告，不在这里猜。
+    """
+    row = audit_rows.get(str(hyp_id)) if isinstance(audit_rows, dict) else None
+    if not isinstance(row, dict):
+        return None
+    cand = row.get("candidate")
+    ref = row.get("reference")
+    if row.get("forbidden"):
+        changed = "、".join(row.get("changed_factors") or []) or "多个因子"
+        return (
+            f"对比 {cand} vs {ref} 同时改变 {changed}，不是单因素对比："
+            "不能用于组件归因，也不能作为确认性判定"
+        )
+    if row.get("claims_single_factor") and row.get("contrast_type") != "single_factor":
+        return (
+            f"主张自称单组件消融，但对比 {cand} vs {ref} 不在已审计的"
+            f"单因素对比表内（对比类型 {row.get('contrast_type')}）"
+        )
+    return None
+
+
 def evaluate_registered_hypotheses(
-    registered: dict, tests: list, alpha: float = ALPHA
+    registered: dict, tests: list, alpha: float = ALPHA, audit: dict = None
 ) -> list:
     """把预注册假设逐条对照 Holm 校正后的配对检验，判定 支持/拒绝/未定。
 
@@ -1611,10 +1643,19 @@ def evaluate_registered_hypotheses(
     “未定”包括种子不足、对比未运行、校正后不显著——不显著绝不等于
     “假设成立”，也不等于“无效应”，配合 MDE 才能判断是功效不足还是
     真的没有效应。
+
+    ``audit``（可选）是单因素审计的结果：它给出每条登记假设的对比类型。
+    对比不是已审计的单因素边时（门控网格内的多因子对比，或自称单组件
+    消融却落在单因素表之外），判定一律给“不可判定”而不是支持/拒绝——
+    归因对象不成立时，方向一致也只能是巧合，不能写成确认性结论。
     """
     hypotheses = _as_dict(registered).get("hypotheses")
     if not isinstance(hypotheses, list) or not hypotheses:
         return []
+    audit_rows = {}
+    for row in (_as_dict(audit).get("registered_single_factor") or []):
+        if isinstance(row, dict) and row.get("id"):
+            audit_rows[str(row.get("id"))] = row
     out = []
     for h in hypotheses:
         if not isinstance(h, dict):
@@ -1644,7 +1685,12 @@ def evaluate_registered_hypotheses(
             "status": None,
             "detail": None,
         }
-        if t is None:
+        blocked = _single_factor_block_reason(h.get("id"), audit_rows)
+        item["single_factor_blocked"] = blocked
+        if blocked:
+            item["status"] = "不可判定"
+            item["detail"] = blocked
+        elif t is None:
             item["status"] = "未检验"
             item["detail"] = "对应的对比/指标没有检验结果（run 缺失或未评测）"
         else:
@@ -2003,6 +2049,34 @@ def apply_budget_gate(hyp_eval: list, audit: dict) -> list:
         if not isinstance(h, dict):
             continue
         if h.get("confirmatory_valid") is False:
+            continue
+        h["confirmatory_valid"] = False
+        h["confirmatory_note"] = reason
+    return hyp_eval
+
+
+def apply_single_factor_gate(hyp_eval: list, sf_audit: dict) -> list:
+    """对比不是单因素的登记假设，确认性判定显式降级。
+
+    与完整性/范围/预算门同义：登记表本身可能没被篡改，但某条登记主张
+    的对比并没有只改变一个门控因子（门控网格内的多因子对比），或自称
+    单组件消融却落在已审计的六条单因素边之外。这时“支持/拒绝”不能作为
+    确认性结论——归因对象不成立，方向一致也可能只是巧合。证据数值保留
+    供排查，判定本身已在 evaluate_registered_hypotheses 里给“不可判定”。
+    """
+    rows = {}
+    for row in (_as_dict(sf_audit).get("registered_single_factor") or []):
+        if isinstance(row, dict) and row.get("id"):
+            rows[str(row.get("id"))] = row
+    if not rows:
+        return hyp_eval
+    for h in hyp_eval if isinstance(hyp_eval, list) else []:
+        if not isinstance(h, dict):
+            continue
+        if h.get("confirmatory_valid") is False:
+            continue
+        reason = _single_factor_block_reason(h.get("id"), rows)
+        if not reason:
             continue
         h["confirmatory_valid"] = False
         h["confirmatory_note"] = reason
