@@ -1318,14 +1318,77 @@ def test_data_fingerprint(data_dir: str):
         return None
 
 
+# checkpoint 内嵌溯源字段 → run_manifest 中的对应取值路径。训练时 checkpoint
+# 的 provenance 由同一份 manifest 派生写入，未篡改的两侧必然一致；而
+# checkpoint 的字节本身被 manifest.artifacts 的 SHA-256 绑定。因此两侧对不
+# 上，只可能是清单的溯源字段在训练后被改写，或目录里已换上别的权重——这是
+# environment_lock/artifacts 都发现不了的“清单说谎”形态。
+CKPT_PROVENANCE_MAP = (
+    ("variant", ("variant",), "变体"),
+    ("seed", ("seed",), "种子"),
+    ("code_commit", ("git", "commit"), "代码 commit"),
+    ("config_sha256", ("config_sha256",), "配置 SHA-256"),
+    ("config_used_sha256", ("config_used_sha256",), "生效配置 SHA-256"),
+    ("data_fingerprint", ("data", "digest"), "数据指纹"),
+    ("init_state_fingerprint", ("init_state_fingerprint",), "初始化指纹"),
+)
+
+
+def _manifest_at(manifest: dict, path):
+    """按嵌套键路径取值；中途不是对象时返回 None（不抛错）。"""
+    cur = manifest
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def checkpoint_provenance_check(ckpt_meta, manifest) -> dict:
+    """逐字段比较 checkpoint 内嵌溯源与 run_manifest。
+
+    只有双方都有值且不同才计 hard mismatch；任一缺失按 unknown 处理，既不
+    冒充一致，也不因旧 checkpoint 缺字段而误报。``consistent`` 仅在无
+    mismatch 时为真（unknown 不算一致，由调用方按 warning 呈现）。
+    """
+    ck = ckpt_meta if isinstance(ckpt_meta, dict) else {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    mismatches, unknown, matched = [], [], []
+    for ck_key, m_path, label in CKPT_PROVENANCE_MAP:
+        want = _manifest_at(manifest, m_path)
+        got = ck.get(ck_key)
+        if want is None or got is None:
+            unknown.append(label)
+        elif got != want:
+            mismatches.append(
+                {
+                    "field": ck_key,
+                    "label": label,
+                    "checkpoint": got,
+                    "manifest": want,
+                }
+            )
+        else:
+            matched.append(label)
+    return {
+        "mismatches": mismatches,
+        "unknown": unknown,
+        "matched": matched,
+        "consistent": not mismatches,
+    }
+
+
 def verify_run(run_dir: str, data_dir: str = None, strict: bool = False) -> dict:
     """核验单个训练 run 目录的完成状态、产物哈希与溯源证据。
 
     检查项按“能否独立复算”组织：completion/artifacts/config/checkpoint
     证明 run 真的完成且文件未被替换；seed/sanity 证明随机源与代码正确性
     闸门可信；data/source_tree/environment_lock 证明输入、代码与依赖没有
-    漂移。旧清单缺字段时给 warning 而不是 fail，显式矛盾或哈希不匹配才
-    是 issue；``strict=True`` 时 warning 也会让整体失败。
+    漂移；runtime_identity 指出是否在同一数值栈上核验；checkpoint_provenance
+    把清单的溯源字段与 checkpoint 内嵌的那一份交叉核对（后者由产物 SHA-256
+    绑定，清单字段本身没有哈希链保护）。旧清单缺字段时给 warning 而不是
+    fail，显式矛盾或哈希不匹配才是 issue；``strict=True`` 时 warning 也会让
+    整体失败。
     """
     run_dir = os.path.abspath(run_dir)
     checks, issues, warnings = {}, [], []
@@ -1569,8 +1632,9 @@ def verify_run(run_dir: str, data_dir: str = None, strict: bool = False) -> dict
         else:
             record("source_tree", "pass", "源码树指纹匹配")
 
+    runtime = runtime_info()
     manifest_lock = manifest.get("environment_lock")
-    current_lock = environment_lock_report()
+    current_lock = environment_lock_report(runtime=runtime)
     if not isinstance(manifest_lock, dict):
         record("environment_lock", "warn", "清单缺少 environment_lock")
     else:
@@ -1593,6 +1657,97 @@ def verify_run(run_dir: str, data_dir: str = None, strict: bool = False) -> dict
             record("environment_lock", "pass", "训练与当前环境均匹配 lock")
         else:
             record("environment_lock", "warn", "训练时无法核对环境锁，不能声称一致")
+
+    # 运行环境身份（Python/PyTorch/NumPy/CUDA/cuDNN/GPU 型号）：environment_lock
+    # 只覆盖被固定版本的直接依赖，回答不了“是否在同一数值栈上核验”。历史 run
+    # 在另一块 GPU/另一版驱动上复核是预期情况，故只告警不判失败，但必须显式
+    # 指出漂移字段，避免把跨环境复核当成同环境重放。
+    drift = runtime_drift(manifest.get("runtime"), runtime)
+    if drift["matches"] is True:
+        record(
+            "runtime_identity",
+            "pass",
+            "Python/PyTorch/NumPy/CUDA/cuDNN/GPU 与训练清单一致",
+        )
+    elif drift["matches"] is False:
+        detail = ", ".join(
+            f"{m.get('field')}: {m.get('train')} -> {m.get('eval')}"
+            for m in drift["mismatches"]
+            if isinstance(m, dict)
+        )
+        record(
+            "runtime_identity",
+            "warn",
+            f"运行环境身份与训练清单不同（{detail}）：同一 checkpoint 可能因"
+            "浮点内核/算子实现差异得到不同数值，不能声称与训练环境完全相同",
+        )
+    else:
+        record(
+            "runtime_identity",
+            "warn",
+            "清单缺少可比较的运行环境身份字段，无法核对（"
+            + ", ".join(drift.get("unknown_fields") or [])
+            + "）",
+        )
+
+    # checkpoint 自带溯源 vs run_manifest：manifest 的溯源字段没有哈希链保护
+    # （只有它引用的产物/配置被哈希），checkpoint 内容却已被 artifacts 绑定。
+    # 两侧对不上即清单被改写或权重被替换。优先用下游评测实际选择的
+    # model_best.pt，缺失时退回 model.pt。
+    primary_ckpt = next(
+        (
+            name
+            for name in ("model_best.pt", "model.pt")
+            if os.path.isfile(os.path.join(run_dir, name))
+        ),
+        None,
+    )
+    if primary_ckpt is None:
+        record(
+            "checkpoint_provenance",
+            "warn",
+            "无可读取的 checkpoint，无法核对内嵌溯源",
+        )
+    else:
+        try:
+            ckpt_meta = torch.load(
+                os.path.join(run_dir, primary_ckpt),
+                map_location="cpu",
+                weights_only=True,
+            )
+        except Exception as e:  # 旧格式/损坏/非 torch 文件都不应让审计崩溃
+            record(
+                "checkpoint_provenance",
+                "warn",
+                f"{primary_ckpt} 无法解析内嵌溯源（旧格式或文件损坏）: {e}",
+            )
+        else:
+            prov = checkpoint_provenance_check(ckpt_meta, manifest)
+            if prov["mismatches"]:
+                detail = "; ".join(
+                    f"{m['label']} checkpoint={m['checkpoint']!r} != "
+                    f"manifest={m['manifest']!r}"
+                    for m in prov["mismatches"]
+                )
+                record(
+                    "checkpoint_provenance",
+                    "fail",
+                    f"{primary_ckpt} 内嵌溯源与 run_manifest 矛盾（{detail}）："
+                    "清单可能被改写或权重被替换",
+                )
+            elif prov["unknown"]:
+                record(
+                    "checkpoint_provenance",
+                    "warn",
+                    f"{primary_ckpt} 缺少可比较的内嵌溯源字段"
+                    f"（{', '.join(prov['unknown'])}）",
+                )
+            else:
+                record(
+                    "checkpoint_provenance",
+                    "pass",
+                    f"{primary_ckpt} 内嵌溯源与 run_manifest 全部一致",
+                )
 
     return finish()
 

@@ -2306,3 +2306,94 @@ def test_verify_run_passes_complete_run_and_flags_tampering():
         assert report["warnings"]
         assert verify_run(run_dir, data_dir=data, strict=True)["ok"] is False
     print("  [ok] verify_run 通过完整 run，检测产物篡改并兼容旧清单")
+
+
+def test_verify_run_cross_checks_runtime_identity_and_checkpoint_provenance():
+    """单 run 审计：环境身份漂移告警；checkpoint 内嵌溯源与清单矛盾判失败。
+
+    run_manifest 的溯源字段（code_commit/config/data 指纹）本身没有哈希链
+    保护，只有它引用的产物/配置被 SHA-256 绑定。checkpoint 由训练时写入同一
+    份 provenance，因此把清单与 checkpoint 内嵌溯源交叉核对，能发现“清单被
+    事后改写”或“目录里换上了别的权重”这类 environment_lock/artifacts 抓不到
+    的不一致。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        data = os.path.join(d, "data")
+        run_dir = os.path.join(d, "run")
+        os.makedirs(data)
+        os.makedirs(run_dir)
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(64))
+        cfg = os.path.join(d, "config.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 7}, f)
+        config_used = os.path.join(run_dir, "config_used.json")
+        with open(config_used, "w", encoding="utf-8") as f:
+            json.dump({"seed": 7}, f)
+
+        set_seed(7)
+        manifest = build_run_manifest(
+            "tiny", "lega", 7, cfg, data, "cpu", argv=["test"]
+        )
+        manifest["config_used_sha256"] = sha256_file(config_used)
+        manifest["init_state_fingerprint"] = "i" * 16
+        manifest["completion"] = {"status": "completed"}
+        # 真实（可被 weights_only 反序列化）的 checkpoint：内嵌溯源与清单一致
+        ckpt_payload = {
+            "variant": manifest["variant"],
+            "seed": manifest["seed"],
+            "code_commit": manifest["git"]["commit"],
+            "config_sha256": manifest["config_sha256"],
+            "config_used_sha256": manifest["config_used_sha256"],
+            "data_fingerprint": manifest["data"]["digest"],
+            "init_state_fingerprint": manifest["init_state_fingerprint"],
+        }
+        ckpt_path = os.path.join(run_dir, "model_best.pt")
+        torch.save(ckpt_payload, ckpt_path)
+        manifest["artifacts"] = {
+            "model_best.pt": {
+                "sha256": sha256_file(ckpt_path),
+                "bytes": os.path.getsize(ckpt_path),
+            }
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["checkpoint_provenance"]["status"] == "pass", report
+        assert report["checks"]["runtime_identity"]["status"] == "pass", report
+        assert report["issues"] == [], report
+        assert report["ok"] is True, report
+
+        # 清单溯源字段被改写（与 checkpoint 内嵌的不一致）→ 必须判失败
+        manifest["config_sha256"] = "d" * 64
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["checkpoint_provenance"]["status"] == "fail", report
+        assert report["ok"] is False
+
+        # 在另一版数值栈上复核（清单记录的训练环境与当前不同）→ 只告警
+        manifest["config_sha256"] = ckpt_payload["config_sha256"]
+        manifest["runtime"] = dict(manifest["runtime"], torch="0.0.0-drift")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["runtime_identity"]["status"] == "warn", report
+        assert report["ok"] is True, report
+
+        # 无法解析的 checkpoint：只告警，不崩溃也不判失败（更新产物哈希以
+        # 隔离出溯源检查本身，而不是让 artifacts 检查先失败）
+        with open(ckpt_path, "wb") as f:
+            f.write(b"not-a-torch-file")
+        manifest["artifacts"]["model_best.pt"] = {
+            "sha256": sha256_file(ckpt_path),
+            "bytes": os.path.getsize(ckpt_path),
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["checkpoint_provenance"]["status"] == "warn", report
+        assert report["ok"] is True, report
+    print("  [ok] verify_run 交叉核对运行环境身份与 checkpoint 内嵌溯源")
