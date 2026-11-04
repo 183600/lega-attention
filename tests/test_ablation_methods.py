@@ -1044,11 +1044,12 @@ def _inference_ppl_payload(seed, values):
 
 
 def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
-    """推理期交互：可加 PPL 下 A×B/A×C/B×C 为 0；纯 A×B 交互只落在 A×B。
+    """推理期交互：可加 PPL 下 A×B/A×C/B×C/A×B×C 为 0；纯交互只落在对应对比。
 
     这里刻意用原始 PPL（与训练期 `PPL交互` 同尺度），避免把 Shapley 的
     −log 口径直接搬来后与训练期符号不可比。缺格/错窗/非 lega 必须整条
-    剔除，不能按 0 补齐伪造“可加性成立”。
+    剔除，不能按 0 补齐伪造“可加性成立”。三阶对比与二阶“取平均”对比
+    不正交：纯三阶效应 τ 会让每条二阶对比呈现 τ/2，必须并列检验。
     """
     additive = {
         "none": 10.0,
@@ -1062,11 +1063,14 @@ def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
     }
     abl = {"lega": {s: _inference_ppl_payload(s, additive) for s in (1, 2, 3)}}
     out = _inference_interaction_tests(abl)
-    assert len(out) == 3, out
+    assert len(out) == 4, out
     by = {t["interaction"]: t for t in out}
+    assert set(by) == {"A×B", "A×C", "B×C", "A×B×C"}, set(by)
     assert all(t["metric"] == INFERENCE_INTERACTION_METRIC for t in out)
     assert all(abs(t["mean_diff"]) < 1e-9 for t in out), by
     assert all(t["inference_time"] is True and t["no_direction"] is True for t in out)
+    assert by["A×B×C"]["interaction_order"] == 3
+    assert all(t["interaction_order"] == 2 for k, t in by.items() if k != "A×B×C")
 
     pure = dict(additive)
     pure["AB"] += 2.0
@@ -1076,6 +1080,18 @@ def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
     assert abs(by["A×B"]["mean_diff"] - 2.0) < 1e-9, by["A×B"]
     assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
     assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
+    # 纯二阶交互不触碰三阶对比（正交性）。
+    assert abs(by["A×B×C"]["mean_diff"]) < 1e-9, by["A×B×C"]
+
+    # 纯三阶交互：二阶“取平均”对比各呈现 τ/2——这正是必须同时检验
+    # 三阶的原因（只看二阶会把三阶误读成两两协同）。
+    three_way = dict(additive)
+    three_way["ABC"] += 4.0
+    abl = {"lega": {s: _inference_ppl_payload(s, three_way) for s in (1, 2, 3)}}
+    by = {t["interaction"]: t for t in _inference_interaction_tests(abl)}
+    assert abs(by["A×B×C"]["mean_diff"] - 4.0) < 1e-9, by["A×B×C"]
+    for pair in ("A×B", "A×C", "B×C"):
+        assert abs(by[pair]["mean_diff"] - 2.0) < 1e-9, by[pair]
 
     huge = {
         "none": 1.7e308,
@@ -1093,8 +1109,11 @@ def test_inference_interactions_match_training_scale_and_skip_bad_seeds():
     assert by["A×B"]["excluded_protocol_mismatches"] == 0, by["A×B"]
     assert abs(by["A×C"]["mean_diff"]) < 1e-9, by["A×C"]
     assert abs(by["B×C"]["mean_diff"]) < 1e-9, by["B×C"]
+    # huge 夹具的三阶对比真值为 −3.4e308，超出 float 表示范围：该种子
+    # 如实计入排除数，不产出 A×B×C 检验，也不能按 0 补齐。
+    assert "A×B×C" not in by, by.get("A×B×C")
     # 单个交互值溢出只影响该交互；A×C/B×C 的排除数不能被 A×B 的溢出
-    # 累加污染（三对交互各自独立报告样本与排除）。
+    # 累加污染（各对比独立报告样本与排除）。
     assert by["A×C"]["excluded_protocol_mismatches"] == 0, by["A×C"]
     assert by["B×C"]["excluded_protocol_mismatches"] == 0, by["B×C"]
 

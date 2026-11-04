@@ -79,6 +79,28 @@ def _stable_factorial_interaction(cells):
     return out if math.isfinite(out) else None
 
 
+def _stable_factorial_three_way(cells):
+    """标准 2^3 三阶交互对比（按 _FACTORIAL_THREE_WAY_ORDER 的格子顺序）。
+
+    I_ABC = ABC − AB − AC − BC + A + B + C − none。与二阶对比不同，
+    它不平均掉任何因子：三阶交互显著说明“二阶交互本身依赖第三个因子”，
+    组件收益不能只用主效应+二阶交互解释。数值稳定性处理与二阶相同：
+    先按最大幅度缩放再 fsum，避免极端有限格子的和溢出成 inf。
+    """
+    values = [_finite_number(v) for v in cells]
+    if any(v is None for v in values):
+        return None
+    scale = max(abs(v) for v in values)
+    if scale == 0.0:
+        return 0.0
+    total = math.fsum(
+        sign * (v / scale)
+        for v, sign in zip(values, _FACTORIAL_THREE_WAY_SIGNS)
+    )
+    out = scale * total
+    return out if math.isfinite(out) else None
+
+
 def _factorial_slots_protocol_ok(slots, metric) -> bool:
     """一组全因子槽位是否共享同一评测协议。"""
     if not slots:
@@ -142,9 +164,12 @@ def _factorial_interaction_tests(runs) -> list:
     """全因子 2^3 设计的交互效应检验（探索性，独立指标家族）。
 
     组件主效应“有没有用”不等于“效应可加”：A 的收益可能在已有 B 时缩小
-    （次可加）或放大（协同）。逐种子计算标准 2^3 交互对比（对第三个因子
-    取平均），再对该对比做单样本配对 t 检验（H0：交互=0）。交互检验没有
-    预注册方向，因此只报“是否显著偏离可加性”与 Δ 符号，不套用“优/劣”。
+    （次可加）或放大（协同）。逐种子计算标准 2^3 交互对比——三条二阶
+    对比（对第三个因子取平均）与一条三阶对比 I_ABC——再对每条对比做
+    单样本配对 t 检验（H0：交互=0）。二阶与三阶同属“可加性是否成立”
+    这一个问题，放进同一个 Holm 家族；三阶显著时二阶“取平均”对比的
+    数值里混有 τ/2 的三阶成分，必须并列解读。交互检验没有预注册方向，
+    因此只报“是否显著偏离可加性”与 Δ 符号，不套用“优/劣”。
     基准格是 gate_only（有门但无 A/B/C），不是无门的 standard。
     """
     out = []
@@ -181,11 +206,42 @@ def _factorial_interaction_tests(runs) -> list:
                     "lower_is_better": True,
                     "no_direction": True,
                     "interaction": pair,
+                    "interaction_order": 2,
                 }
             )
             if excluded:
                 res["excluded_protocol_mismatches"] = excluded
             out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
+        # 三阶交互：与二阶共用同一组通过协议核对的种子；值本身溢出只
+        # 剔除该种子，不污染二阶对比的 n。
+        three_vals = []
+        three_excluded = 0
+        for s_ in seeds:
+            value = _stable_factorial_three_way(
+                [extractor(maps[cell].get(s_)) for cell in _FACTORIAL_THREE_WAY_ORDER]
+            )
+            if value is not None:
+                three_vals.append(value)
+            else:
+                three_excluded += 1
+        if three_vals:
+            res = paired_t_test(three_vals, [0.0] * len(three_vals))
+            res.update(
+                {
+                    "candidate": "A×B×C 交互",
+                    "reference": "可加性（交互=0）",
+                    "metric": metric + "交互",
+                    "lower_is_better": True,
+                    "no_direction": True,
+                    "interaction": "A×B×C",
+                    "interaction_order": 3,
+                    "n_protocol_seeds": len(three_vals),
+                }
+            )
+            total_excluded = excluded + three_excluded
+            if total_excluded:
+                res["excluded_protocol_mismatches"] = total_excluded
+            out.append(_enrich_paired(res, three_vals, [0.0] * len(three_vals)))
     return out
 
 
@@ -555,13 +611,15 @@ def _inference_shapley_tests(ablations):
 
 
 def _inference_interaction_tests(ablations):
-    """推理期 2^3 干预的 A×B/A×C/B×C 交互检验（探索性，独立 Holm 家族）。
+    """推理期 2^3 干预的 A×B/A×C/B×C/A×B×C 交互检验（探索性，独立 Holm 家族）。
 
     训练期交互检验回答“重新训练时组件收益能否按单组件加总”；这里在同一
     checkpoint 的 8 个推理期格子上回答“训练好的前向里交互结构是否还
-    存在”。使用与训练期相同的标准 2^3 对比（对第三个因子取平均）：
+    存在”。使用与训练期相同的标准 2^3 对比——三条二阶（对第三个因子
+    取平均）与一条三阶 I_ABC：
 
         I_AB = ½[(AB−A−B+none) + (ABC−AC−BC+C)]
+        I_ABC = ABC − AB − AC − BC + A + B + C − none
 
     数值仍用原始 PPL（与训练期 `PPL交互` 同尺度，便于逐交互对照符号），
     不套用方向判定：交互=0 表示可加，显著非零只说明“不能按单组件加总”。
@@ -602,6 +660,7 @@ def _inference_interaction_tests(ablations):
                 "lower_is_better": True,
                 "no_direction": True,
                 "interaction": pair,
+                "interaction_order": 2,
                 "variant": "lega",
                 "inference_time": True,
                 "n_protocol_seeds": len(vals),
@@ -610,6 +669,38 @@ def _inference_interaction_tests(ablations):
             }
         )
         out.append(_enrich_paired(res, vals, [0.0] * len(vals)))
+    # 三阶交互：与二阶共用同一批通过校验的种子；该对比的值溢出只剔除
+    # 本条，不累加到二阶交互的排除数上。
+    three_vals = []
+    three_excluded = 0
+    for seed in ordered:
+        raw = raw_by_seed[seed]
+        value = _stable_factorial_three_way(
+            [raw.get(cell) for cell in _FACTORIAL_THREE_WAY_ORDER]
+        )
+        if value is not None:
+            three_vals.append(value)
+        else:
+            three_excluded += 1
+    if three_vals:
+        res = paired_t_test(three_vals, [0.0] * len(three_vals))
+        res.update(
+            {
+                "candidate": "A×B×C 推理期交互",
+                "reference": "可加性（交互=0）",
+                "metric": INFERENCE_INTERACTION_METRIC,
+                "lower_is_better": True,
+                "no_direction": True,
+                "interaction": "A×B×C",
+                "interaction_order": 3,
+                "variant": "lega",
+                "inference_time": True,
+                "n_protocol_seeds": len(three_vals),
+                "excluded_protocol_mismatches": excluded + three_excluded,
+                "exploratory": True,
+            }
+        )
+        out.append(_enrich_paired(res, three_vals, [0.0] * len(three_vals)))
     return _apply_holm(out)
 
 

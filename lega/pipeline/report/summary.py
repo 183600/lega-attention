@@ -823,6 +823,12 @@ def _summary_part_a(
     budget_sensitivity = analyze_budget_sensitivity(
         budget_curves, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS
     )
+    # 样本效率（探索性）：同一批训练曲线上的 steps-to-target。回答
+    # budget_sensitivity 回答不了的另一半问题——收益是"终点更好"还是
+    # "仅收敛更快"。逐 pair 一条种子级检验，进探索性 FDR 家族。
+    sample_efficiency = analyze_sample_efficiency(
+        budget_curves, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS
+    )
     # 参数化稳健性（探索性）：比较归一化 c 与原始 log max_p 两套完整
     # 2^3 网格上的单因子边与 Shapley 归因。只有显式运行原始对照时才有
     # 内容；缺格/协议不一致会返回可机读原因，不伪造“无差异”。
@@ -1977,6 +1983,7 @@ def _summary_part_a(
         "base_name",
         "budget_curves",
         "budget_sensitivity",
+        "sample_efficiency",
         "by_bs",
         "c",
         "cal_rows",
@@ -2201,6 +2208,7 @@ def build_summary(
         "matched_ablation_contrasts": ctx["matched_ablation_contrasts"],
         "dose_response": ctx["dose_tests"],
         "budget_sensitivity": ctx["budget_sensitivity"],
+        "sample_efficiency": ctx.get("sample_efficiency"),
         "multiverse": ctx["multiverse"],
         "ranking": ctx.get("ranking"),
         "test_reuse": ctx.get("test_reuse"),

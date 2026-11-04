@@ -181,6 +181,7 @@ def _summary_part_c(**kw):
     if "bad_cross" in kw:
         bad_cross = kw["bad_cross"]
     budget_sensitivity = kw.get("budget_sensitivity")
+    sample_efficiency = kw.get("sample_efficiency")
     if "capacity_only_test" in kw:
         capacity_only_test = kw["capacity_only_test"]
     capacity_decomposition = kw.get("capacity_decomposition")
@@ -319,6 +320,7 @@ def _summary_part_c(**kw):
         ngram_comparison=ngram_cmp,
         reparameterization=reparameterization,
         probe_comparison=probe_cmp,
+        sample_efficiency=sample_efficiency,
     )
     exploratory_fdr = analyze_exploratory_fdr(
         fdr_tests, alpha=ALPHA, min_seeds=MIN_SEEDS
@@ -1489,6 +1491,15 @@ def _summary_part_c(**kw):
             "不用于重新选 checkpoint，也不改变预注册终点判定。"
             "缺 train_log.jsonl/共同 step 时 available=false。"
         ),
+        "sample_efficiency": sample_efficiency,
+        "sample_efficiency_note": (
+            "样本效率（steps-to-target，探索性）：以参照逐种子终点 "
+            "val_loss 为目标，log2(到达步数比) 跨种子配对 t + 本分析内 "
+            "Holm 校正，并进探索性 FDR 家族（逐 pair 一条检验，区别于被 "
+            "排除的逐 step 预算轨迹）。步数精确到 eval_every 粒度，"
+            "首次穿越可能为瞬态（已标注）；目标为 val（选型集）。"
+            "收敛更快 ≠ 终点更好，须与终点配对检验并列解读。"
+        ),
         "causal_ablation": causal_tests,
         "causal_ablation_equivalence": _causal_equivalence_overview(causal_tests),
         "matched_ablation_contrasts": (matched_ablation_contrasts),
@@ -1539,7 +1550,7 @@ def _summary_part_c(**kw):
         ),
         "inference_factorial_interactions": inference_interactions,
         "inference_factorial_interactions_note": (
-            "同一 checkpoint 内的 2^3 干预上的 A×B/A×C/B×C 交互"
+            "同一 checkpoint 内的 2^3 干预上的 A×B/A×C/B×C/A×B×C 交互"
             "检验（探索性、独立 Holm 家族）：与训练期 `PPL交互` "
             "同尺度并列，检查“重新训练后的交互结构能否在最终前向"
             "复现”；交互=0 表示可加，显著非零不等于某个组件有用。"
@@ -1581,9 +1592,11 @@ def _summary_part_c(**kw):
             "SESOI 的 TOST 结果，no_op 不作等价性判定"
         ),
         "factorial_interactions_note": (
-            "全因子 2^3 的 A×B/A×C/B×C 交互对比（探索性，独立 "
-            "Holm 家族，基准 gate_only）：交互=0 表示组件效应可加；"
-            "显著非零说明同时加入两个组件时收益不能按单加总"
+            "全因子 2^3 的 A×B/A×C/B×C/A×B×C 交互对比（探索性，独立 "
+            "Holm 家族，基准 gate_only）：二阶交互=0 表示两个组件的"
+            "效应可加，显著非零说明同时加入两个组件时收益不能按单组件"
+            "加总；三阶交互显著说明二阶交互本身随第三个因子改变，"
+            "Shapley 的平均分摊不再有唯一解释，须并列解读。"
         ),
         "auroc_diff_note": (
             f"{AUROC_DIFF_METRIC} 家族为机制主张的正式检验：每个 "
@@ -1623,6 +1636,7 @@ def _summary_part_c(**kw):
         "bci_s",
         "benefit",
         "budget_sensitivity",
+        "sample_efficiency",
         "ci",
         "ci_s",
         "cluster_rows",

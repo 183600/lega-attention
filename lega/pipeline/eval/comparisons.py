@@ -1697,10 +1697,12 @@ def _render_inference_interactions(inference_tests, training_tests) -> list:
         return md
     md.append(
         "训练期交互回答“重新训练时组件收益能否按单组件加总”；本表在同一"
-        "checkpoint 上对 2^3 格子做同样的 A×B/A×C/B×C 对比，回答"
+        "checkpoint 上对 2^3 格子做同样的 A×B/A×C/B×C/A×B×C 对比，回答"
         "“训练好的前向里交互结构是否仍然存在”。数值为原始 PPL 的"
         "标准交互对比（与训练期 `PPL交互` 同尺度），交互=0 表示可加；"
-        "显著非零只说明不能按单组件加总，不套用优/劣方向。"
+        "三阶交互（A×B×C）显著说明二阶交互本身随第三个因子改变，此时"
+        "“按单组件加总”在推理期同样不成立。显著非零只说明不能按单组件"
+        "加总，不套用优/劣方向。"
     )
     train = {}
     for t in training_tests if isinstance(training_tests, list) else []:

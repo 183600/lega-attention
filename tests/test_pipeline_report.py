@@ -1299,7 +1299,7 @@ def test_audit_tolerates_early_stop_actual_steps():
 
 
 def test_factorial_interaction_contrast_math():
-    """2^3 交互对比公式：A×B=2 时 A×C/B×C 应为 0，且标记为无方向检验。"""
+    """2^3 交互对比公式：A×B=2 时 A×C/B×C/A×B×C 应为 0，且标记为无方向检验。"""
     base = {
         "none": 0.0,
         "A": 1.0,
@@ -1314,19 +1314,48 @@ def test_factorial_interaction_contrast_math():
     for cell, variant in _FACTORIAL_CONTRAST_CELLS.items():
         runs[variant] = {s: {"eval": {"val_ppl": base[cell]}} for s in (1, 2, 3)}
     out = _factorial_interaction_tests(runs)
-    assert len(out) == 3, out
+    assert len(out) == 4, out
     ppl = {t["interaction"]: t for t in out if t["metric"] == "PPL交互"}
-    assert len(ppl) == 3, out
+    assert len(ppl) == 4, out
     assert abs(ppl["A×B"]["mean_diff"] - 2.0) < 1e-9, ppl["A×B"]
     assert abs(ppl["A×C"]["mean_diff"]) < 1e-9, ppl["A×C"]
     assert abs(ppl["B×C"]["mean_diff"]) < 1e-9, ppl["B×C"]
+    assert abs(ppl["A×B×C"]["mean_diff"]) < 1e-9, ppl["A×B×C"]
     assert all(t.get("no_direction") for t in out), out
+    assert ppl["A×B×C"]["interaction_order"] == 3
+    # 纯三阶效应 τ：三阶对比精确恢复 τ，二阶“取平均”对比各呈现 τ/2
+    #（不正交），把三阶误读成两两协同正是要避免的解释错误。
+    # 夹具从可加基线出发（α=1, β=2, γ=4，全部二阶交互=0）。
+    additive_base = {
+        "none": 0.0,
+        "A": 1.0,
+        "B": 2.0,
+        "C": 4.0,
+        "AB": 3.0,
+        "AC": 5.0,
+        "BC": 6.0,
+        "ABC": 7.0,
+    }
+    pure_three = dict(additive_base)
+    pure_three["ABC"] += 4.0
+    runs = {}
+    for cell, variant in _FACTORIAL_CONTRAST_CELLS.items():
+        runs[variant] = {s: {"eval": {"val_ppl": pure_three[cell]}} for s in (1, 2, 3)}
+    ppl = {
+        t["interaction"]: t
+        for t in _factorial_interaction_tests(runs)
+        if t["metric"] == "PPL交互"
+    }
+    assert abs(ppl["A×B×C"]["mean_diff"] - 4.0) < 1e-9, ppl["A×B×C"]
+    for pair in ("A×B", "A×C", "B×C"):
+        assert abs(ppl[pair]["mean_diff"] - 2.0) < 1e-9, ppl[pair]
     incomplete = {k: v for k, v in runs.items() if k != "lega"}
     got = [
         t for t in _factorial_interaction_tests(incomplete) if t["metric"] == "PPL交互"
     ]
     assert got == [], got
-    print("  [ok] 全因子交互对比：标准 2^3 对比公式、无方向标记与不完整降级")
+    print("  [ok] 全因子交互对比：标准 2^3 对比公式（含三阶 τ 与 τ/2 关系）、"
+          "无方向标记与不完整降级")
 
 
 def test_factorial_interactions_exclude_protocol_mismatches():
@@ -1348,10 +1377,11 @@ def test_factorial_interactions_exclude_protocol_mismatches():
             s: {"eval": {"val_ppl": base[cell], "split": "test", "eval_ctx": 512}}
             for s in (1, 2, 3)
         }
-    # 一个种子下某格的 split 不同：该种子的三条交互都不可用；另两个仍可检验
+    # 一个种子下某格的 split 不同：该种子的三条二阶交互与三阶交互都不可用；
+    # 另两个种子仍可检验
     runs["lega"][2]["eval"]["split"] = "val"
     out = [t for t in _factorial_interaction_tests(runs) if t["metric"] == "PPL交互"]
-    assert len(out) == 3, out
+    assert len(out) == 4, out
     assert all(t["n"] == 2 for t in out), out
     assert all(t.get("excluded_protocol_mismatches") == 1 for t in out), out
     # 所有种子都混入另一协议：不产出交互检验，不能静默给出显著性
@@ -1372,7 +1402,7 @@ def test_factorial_interactions_exclude_protocol_mismatches():
     for slot in runs["lega"].values():
         slot["ruler"]["results"] = {}
     out = _factorial_interaction_tests(runs)
-    assert len([t for t in out if t["metric"] == "PPL交互"]) == 3, out
+    assert len([t for t in out if t["metric"] == "PPL交互"]) == 4, out
     assert [t for t in out if t["metric"] == "RULER平均交互"] == [], out
     # 恢复 RULER 单元覆盖后，仅让一个种子下某格 n 不同：该种子的交互剔除
     for variant, slots in runs.items():
@@ -1382,7 +1412,7 @@ def test_factorial_interactions_exclude_protocol_mismatches():
     out = [
         t for t in _factorial_interaction_tests(runs) if t["metric"] == "RULER平均交互"
     ]
-    assert len(out) == 3, out
+    assert len(out) == 4, out
     assert all(t["n"] == 2 for t in out), out
     assert all(t.get("excluded_protocol_mismatches") == 1 for t in out), out
     print("  [ok] 全因子交互剔除评测协议/单元/样本数不一致的种子")

@@ -57,6 +57,7 @@ from lega.lengtheffect import (context_macro_means,  # noqa: E402
                                log2_slope, span_contrast)
 from lega.budget_sensitivity import (  # noqa: E402
     analyze_budget_sensitivity, curves_from_runs, load_train_curve)
+from lega.sample_efficiency import analyze_sample_efficiency  # noqa: E402
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,
@@ -300,6 +301,18 @@ _FACTORIAL_CONTRASTS = {
     "A×C": (("AC", "A", "C", "none"), ("ABC", "AB", "BC", "B")),
     "B×C": (("BC", "B", "C", "none"), ("ABC", "AB", "AC", "A")),
 }
+
+# 三阶交互对比：2^3 全因子设计第 7 个（最后一个）自由度，与全部主效应和
+# 二阶“取平均”对比都不同——二阶交互把第三个因子的两个水平平均掉了，而
+# I_ABC 检验“二阶交互本身是否随第三个因子改变”。三阶交互显著时，Shapley
+# 的“把交互平均分摊到参与因子”不再有唯一解释，必须并列披露：
+#   I_ABC = ABC − AB − AC − BC + A + B + C − none
+# 注意：I_ABC 与二阶“取平均”对比不正交——纯三阶效应 τ 会让三条二阶
+# 对比各呈现 τ/2（这就是对第三因子取平均的代价），解读二阶结果时须同时
+# 看三阶是否显著，不能把 τ/2 误读成真实的二阶协同。
+_FACTORIAL_THREE_WAY_ORDER = ("none", "A", "B", "C", "AB", "AC", "BC", "ABC")
+
+_FACTORIAL_THREE_WAY_SIGNS = (-1, 1, 1, 1, -1, -1, -1, 1)
 
 # 全因子 Shapley 分解（探索性）：与交互检验同源，但用全部 8 格把 Full−none
 # 的总效应按所有加入顺序平均分摊到 A/B/C，避免单因素边对参照格的依赖。

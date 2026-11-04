@@ -100,6 +100,72 @@ def _render_budget_sensitivity(budget):
     return out
 
 
+def _render_sample_efficiency(analysis):
+    """渲染样本效率（steps-to-target）；描述收敛速度，不改变终点判定。"""
+    out = ["", "### 样本效率（steps-to-target；探索性）", ""]
+    if not isinstance(analysis, dict):
+        out.append("⚠ 未生成样本效率结果（汇总阶段缺少曲线）。")
+        return out
+    pairs = [p for p in (analysis.get("pairs") or []) if isinstance(p, dict)]
+    available = [p for p in pairs if p.get("available")]
+    if not available:
+        out.append(
+            "⚠ 无可用训练曲线（`train_log.jsonl` 缺失、checkpoint 路径"
+            "不可达，或两侧没有共同种子）；本轮不评估收敛速度，"
+            "不能据此宣称“终点优势伴随样本效率优势”。"
+        )
+        return out
+    out.append(
+        "以**参照逐种子终点 val_loss** 为目标线，比较两侧首次降到目标及"
+        "以下的评测步：比值 <1 表示候选更早到达参照的最终水平（收敛更快），"
+        "比值 >1 更慢，候选从未到达则单独计数。回答的是 budget_sensitivity "
+        "回答不了的另一半问题——终点优势究竟伴随收敛优势，还是只是同水平"
+        "上的“早到”。log2(步数比) 跨种子配对 t + Holm 校正；步数精确到 "
+        "eval_every 评测粒度，首次穿越可能是瞬态（已标注）。目标是 val"
+        "（选型集），全部为探索性证据，不改变终点/预注册判定。"
+    )
+    out.append("")
+    out.append(
+        "| 对比 | 中位步数比 | n可比 | 未到达 | 瞬态穿越 | 更早到达比例 | "
+        "p_adj(Holm) | 结论 |"
+    )
+    out.append("|---|---|---|---|---|---|---|---|")
+
+    def _order(p):
+        return (
+            str(p.get("candidate")),
+            str(p.get("reference")),
+        )
+
+    for p in sorted(available, key=_order)[:14]:
+        ratio = p.get("median_ratio")
+        ratio_s = f"{ratio:.3f}" if isinstance(ratio, (int, float)) else "-"
+        frac = _fmt_pct(p.get("frac_reached_earlier"), ".0%")
+        padj = p.get("p_adj")
+        padj_s = f"{padj:.4f}" if isinstance(padj, (int, float)) else "-"
+        not_reached = p.get("n_not_reached") or 0
+        transient = p.get("n_transient") or 0
+        out.append(
+            f"| {p.get('candidate')} vs {p.get('reference')} "
+            f"| {ratio_s} | {p.get('n_comparable', '-')} | {not_reached} "
+            f"| {transient} | {frac} | {padj_s} | {p.get('verdict', '-')} |"
+        )
+    if len(available) > 14:
+        out.append("")
+        out.append(
+            f"（仅列前 14 组；其余 {len(available) - 14} 组的逐种子明细见 "
+            "`significance.json` 的 `sample_efficiency`。）"
+        )
+    out.append("")
+    out.append(
+        "注: “未到达”是“更慢”的最强形式（候选在自身预算内未追平参照"
+        "终点），不插值外推；中位步数比只统计两侧都到达目标的种子。"
+        "收敛更快 ≠ 终点更好：两者须与终点配对检验并列解读，不能只报"
+        "有利的一侧。"
+    )
+    return out
+
+
 def _render_dose_response(dose):
     """渲染门控系数剂量-反应曲线；只作机制描述，不重选 checkpoint。"""
     if not isinstance(dose, dict):
@@ -265,6 +331,7 @@ def _summary_part_b(**kw):
     matched_ablation_contrasts = kw.get("matched_ablation_contrasts") or []
     dose_response = kw.get("dose_tests")
     budget_sensitivity = kw.get("budget_sensitivity")
+    sample_efficiency = kw.get("sample_efficiency")
     if "ci" in kw:
         ci = kw["ci"]
     if "comp" in kw:
@@ -1537,6 +1604,7 @@ def _summary_part_b(**kw):
     )
 
     md += _render_budget_sensitivity(budget_sensitivity)
+    md += _render_sample_efficiency(sample_efficiency)
 
     # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
     md += [
@@ -1700,9 +1768,12 @@ def _summary_part_b(**kw):
         "### 门控内 2^3 交互效应（探索性，独立 Holm 家族）",
         "",
         "以 `gate_only`（有门但无 A/B/C）为无组件基准，比较 8 个 gated "
-        "单元格；交互=0 表示两个组件的效应可加，显著非零说明同时加入"
-        "两者时收益不能按单组件加总。该检验未预注册方向，只报是否偏离"
-        "可加性与 Δ 符号（PPL 越小越好、RULER 越大越好，符号解释随指标而变）。",
+        "单元格；二阶交互（A×B/A×C/B×C）=0 表示两个组件的效应可加，"
+        "显著非零说明同时加入两者时收益不能按单组件加总；三阶交互"
+        "（A×B×C）显著说明二阶交互本身随第三个因子改变——此时 Shapley "
+        "把交互平均分摊到因子的做法不再有唯一解释，须与 Shapley 表并列"
+        "解读。该检验未预注册方向，只报是否偏离可加性与 Δ 符号（PPL 越"
+        "小越好、RULER 越大越好，符号解释随指标而变）。",
         "",
         "| 交互 | 指标 | Δ均值 ± Δ标准差 | n | p_adj(Holm) | " "结论 |",
         "|---|---|---|---|---|---|",
@@ -1719,9 +1790,11 @@ def _summary_part_b(**kw):
         md.append("（缺少完整 8 格或全部种子不足，无法计算交互对比）")
     md.append("")
     md.append(
-        "注: 交互对比以 gate_only 为无组件基准，对第三个因子的两个水平"
-        "取平均，逐种子单样本配对检验；n<3 或 Holm 校正后不显著只表示"
-        "未检出，不等于交互不存在。"
+        "注: 交互对比以 gate_only 为无组件基准；二阶对比对第三个因子的"
+        "两个水平取平均（与三阶对比不正交：纯三阶效应 τ 会让每条二阶对比"
+        "呈现 τ/2），三阶对比 I_ABC=ABC−AB−AC−BC+A+B+C−none 不平均掉任何"
+        "因子。均逐种子单样本配对检验、同一家族 Holm 校正；n<3 或 Holm "
+        "校正后不显著只表示未检出，不等于交互不存在。"
     )
 
     # --- 全因子 Shapley 分解（探索性）：单因素边依赖参照格，交互非零时
