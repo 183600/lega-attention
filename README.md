@@ -387,6 +387,7 @@ lega-attention/
 - **无证据条件**：`lega/ruler.py` 提供可选 `evidence_absent/evidence_wrong/evidence_conflict`（显式要求不可靠时输出 `NONE`，`NONE` 才记 EM=1）。它们不进入默认 5 任务主表，需在调用 `run_ruler(tasks=...)` 时显式加入；用于检验门控是否在无可靠证据时抑制写回。
 - **长度边界**：训练与评测都受 `block_size`（small=1024）限制；RULER 的 256/512/1024 是**域内**长度扫掠，不是长度外推。任何超过 `block_size` 的位置都应被拒绝，不能把 benchmark 的更长上下文结果当作本模型能力。
 - **补充对照**：`lega_raw`（原始 $\log\max_j p_j$，不并入 $\log n$）、`lega_raw_no_len`（原始集中度且无 $b\log n$）、`lega_detach_conc`（集中度统计不回传 Q/K）、`null_zero`（固定零 value、null 键仍可学）不属于主 2^3 因子设计，默认不训练；它们分别诊断“归一化/重参数化”“反传路径”“空槽写入”替代解释。
+- **受控单维度对照**：`lega_l2`（B 的集中度统计量换成 $\sum_j p_j^2$）、`lega_entropy`（换成 $e^{-H(p)}$）、`lega_detach_conc`（B 的反传路径）、`lega_shared`（证据标量逐头校准 → 层内跨头共享）、`null_zero` vs `null`（空槽 value 可学 → 固定为 0）回答的是“只改这一项会怎样”，与 A/B/C 组件归因不是同一个问题——两侧的 A/B/C 因子集合必须完全相同，因此它们不套用因子差判定。汇总层用实现层探针实测两侧的维度向量，核对每组对照**确实只差一个设计维度**（漂移即显式点名，该对照不能再当受控证据）；这类结果带 `contrast_type="single_dimension"` 标记并进入独立 Holm 家族，属探索性证据，不能当作 A/B/C 组件证据。
 - **已知限制**：30M 模型的 RULER 绝对准确率不高（小模型检索能力有限），关注点是**变体间相对差异**与**机制分析指标**，而非绝对分数；`fwe` 的高频词以 k≥3 次、其它词以 2 次出现，答案按词集合评分，不存在词频并列歧义；ctx 过小时个别 `fwe`/`vt` 样例会因长度空间不足被跳过（JSON `_skipped` 字段如实记录，变体间跳过集合一致）。
 
 ## 6. License

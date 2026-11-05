@@ -906,6 +906,10 @@ def _summary_part_a(
     # 逐组件容量匹配对照（Full / Null_X / No_X）：独立于主配对表与整体
     # 安慰剂，单独 Holm 家族；只有显式训练 null 变体时才有内容。
     capacity_decomposition = _capacity_decomposition(runs)
+    # 受控单维度对照（替代集中度统计量 / 反传路径 / 共享粒度 / 空槽写入）：
+    # 两侧的 A/B/C 因子集合相同，只差一个设计维度；独立 Holm 家族、
+    # 探索性证据，不进入预注册确认族。
+    controlled_dimension = controlled_dimension_analysis(runs)
     # 样例级配对（McNemar）：固定题面上的评测抽样不确定性，与上面的
     # 跨种子聚合 EM 检验互补；独立 Holm 家族、探索性证据。
     ruler_sample_tests = _ruler_sample_paired_tests(runs, pairs)
@@ -2007,6 +2011,7 @@ def _summary_part_a(
         "cov",
         "cross",
         "cshort",
+        "controlled_dimension",
         "ctrl",
         "ctx",
         "d",
@@ -2204,6 +2209,7 @@ def build_summary(
         "inference_interactions": ctx["inference_interactions"],
         "parameter_matched_control": ctx["param_control_test"],
         "capacity_decomposition": ctx["capacity_decomposition"],
+        "controlled_dimension": ctx.get("controlled_dimension"),
         "causal_ablation": ctx["causal_tests"],
         "matched_ablation_contrasts": ctx["matched_ablation_contrasts"],
         "dose_response": ctx["dose_tests"],

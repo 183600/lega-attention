@@ -1535,6 +1535,140 @@ def _audit_alt_conc_variants(problems):
     return rows
 
 
+def _audit_controlled_single_dimension():
+    """核对受控单维度对照在**实现层**确实只差一个设计维度。
+
+    受控单维度对照（``lega.attention.CONTROLLED_DIMENSION_CONTRASTS``）
+    回答的是“只改这一项会怎样”：替代集中度统计量、集中度反传路径、
+    证据标量的共享粒度、空注意力槽的 value 是否可学。它们既不是 A/B/C
+    组件归因，也不是“与另一种方法比”的整体对比，因此**不能**套用
+    ``GATE_FACTORS`` 的因子差判定——两侧的 A/B/C 因子集合本来就必须
+    完全相同。
+
+    只声明不核对的话，一次实现漂移（例如把 ``lega_l2`` 顺手也 detach 了
+    集中度的反传）就会把“单维度对照”变成多维度对照，而汇总层仍会把它
+    当成受控证据报告。这里用
+    :func:`lega.attention.probe_controlled_dimensions` 实测两侧的维度
+    向量，逐项比较：
+
+    * 实际改变的维度必须**恰好一个**，且与登记的维度一致；
+    * 两侧的门控因子集合必须完全相同（否则它同时是因子消融）；
+    * 探针失败显式记入 problems，不能悄悄跳过这一层。
+
+    这些问题不进单因素审计的顶层 ``problems``：受控单维度对照漂移不会
+    让已审计的 6 条 A/B/C 单因素边失效，但它会让**这些对照本身**不能
+    再被当成受控证据，报告层必须显式点名。
+    """
+    problems = []
+    rows = []
+    contrasts = globals().get("CONTROLLED_DIMENSION_CONTRASTS")
+    keys = globals().get("CONTROLLED_DIMENSION_KEYS")
+    if not isinstance(contrasts, (tuple, list)) or isinstance(contrasts, str):
+        problems.append("CONTROLLED_DIMENSION_CONTRASTS 必须是受控对照序列")
+        return {"ok": False, "problems": problems, "contrasts": rows}
+    if not isinstance(keys, (tuple, list)) or isinstance(keys, str) or not keys:
+        problems.append("CONTROLLED_DIMENSION_KEYS 必须是非空的维度名序列")
+        return {"ok": False, "problems": problems, "contrasts": rows}
+    seen = set()
+    for entry in contrasts:
+        if not isinstance(entry, dict):
+            problems.append(f"受控单维度对照定义结构非法：{entry!r}")
+            continue
+        candidate = entry.get("candidate")
+        reference = entry.get("reference")
+        dimension = entry.get("dimension")
+        if not (
+            isinstance(candidate, str)
+            and isinstance(reference, str)
+            and candidate
+            and reference
+        ):
+            problems.append(f"受控单维度对照的候选/参照缺失或非法：{entry!r}")
+            continue
+        if candidate == reference:
+            problems.append(f"受控单维度对照两侧相同：{candidate}")
+            continue
+        key = (candidate, reference)
+        if key in seen:
+            problems.append(f"重复的受控单维度对照：{candidate} vs {reference}")
+            continue
+        seen.add(key)
+        if dimension not in keys:
+            problems.append(
+                f"受控单维度对照 {candidate} vs {reference} 声明的维度 "
+                f"{dimension!r} 不在维度名表内"
+            )
+            continue
+        for name in (candidate, reference):
+            if name not in RUNNABLE_VARIANTS:
+                problems.append(
+                    f"受控单维度对照 {candidate} vs {reference} 的变体 "
+                    f"{name!r} 不可训练/评测"
+                )
+        cand_probe = probe_controlled_dimensions(candidate)
+        ref_probe = probe_controlled_dimensions(reference)
+        row = {
+            "candidate": candidate,
+            "reference": reference,
+            "dimension": dimension,
+            "label": entry.get("label") or dimension,
+            "changed_dimensions": [],
+            "candidate_dimensions": {},
+            "reference_dimensions": {},
+            "gate_factors_candidate": [],
+            "gate_factors_reference": [],
+            "ok": False,
+            "reason": "",
+        }
+        failed = False
+        for name, probe in ((candidate, cand_probe), (reference, ref_probe)):
+            if not isinstance(probe, dict) or probe.get("error"):
+                detail = (
+                    probe.get("error")
+                    if isinstance(probe, dict)
+                    else "探针返回非法结构"
+                )
+                problems.append(
+                    f"受控单维度对照 {candidate} vs {reference} 的 {name!r} "
+                    f"维度探针失败：{detail}"
+                )
+                failed = True
+        if failed:
+            row["reason"] = "维度探针失败，未核对"
+            rows.append(row)
+            continue
+        cand_dims = {k: cand_probe.get(k) for k in keys}
+        ref_dims = {k: ref_probe.get(k) for k in keys}
+        changed = [k for k in keys if cand_dims[k] != ref_dims[k]]
+        row["candidate_dimensions"] = {k: cand_dims[k] for k in keys}
+        row["reference_dimensions"] = {k: ref_dims[k] for k in keys}
+        row["changed_dimensions"] = changed
+        row["gate_factors_candidate"] = list(cand_probe.get("gate_factors") or [])
+        row["gate_factors_reference"] = list(ref_probe.get("gate_factors") or [])
+        if changed != [dimension]:
+            problems.append(
+                f"受控单维度对照 {candidate} vs {reference} 声明只改 "
+                f"{dimension!r}，实现层实际改变的维度为 "
+                f"{changed or '无'}：它已不是单维度对照，不能当作受控证据"
+            )
+            row["reason"] = f"实际改变的维度为 {changed or '无'}"
+            failed = True
+        if row["gate_factors_candidate"] != row["gate_factors_reference"]:
+            problems.append(
+                f"受控单维度对照 {candidate} vs {reference} 同时改变了门控"
+                f"因子集合（{row['gate_factors_candidate']} vs "
+                f"{row['gate_factors_reference']}）：它不是单维度对照，"
+                "而是因子消融，必须走 A/B/C 单因素边"
+            )
+            row["reason"] = "同时改变了门控因子集合"
+            failed = True
+        row["ok"] = not failed
+        if not failed:
+            row["reason"] = "实现层确认只差一个设计维度"
+        rows.append(row)
+    return {"ok": not problems, "problems": problems, "contrasts": rows}
+
+
 def _audit_variant_capability_clipping(problems):
     """核对按变体裁剪推理期病灶所用的能力映射与实现层一致。
 
@@ -1892,6 +2026,10 @@ def single_factor_audit():
     forbidden_contrasts = _forbidden_multi_factor_contrasts(
         registered_single_factor, problems
     )
+    # 受控单维度对照（替代统计量/反传路径/共享粒度/空槽写入）另起一层：
+    # 它们不在 A/B/C 因子网格内，漂移不会让已审计的 6 条单因素边失效，
+    # 但会让这些对照本身不再是“只改一项”的受控证据，因此单独给 ok。
+    controlled_dimension = _audit_controlled_single_dimension()
     return {
         "ok": not problems,
         "problems": problems,
@@ -1912,6 +2050,7 @@ def single_factor_audit():
         "inference_lesion_variant_effects": lesion_variant_effects,
         "inference_lesion_duplicate_interventions": lesion_duplicates,
         "forbidden_multi_factor_contrasts": forbidden_contrasts,
+        "controlled_single_dimension": controlled_dimension,
         "note": (
             "单因素对比 = 去一法 Full−X vs Full，或全因子增量 "
             "X-only vs gate_only；整体对比（vs standard、LEGA vs "
@@ -1926,6 +2065,9 @@ def single_factor_audit():
             "证据通道。门控网格内的多因子对比（B-only/C-only 与 "
             "Full）默认禁止：它们既不是整体方法对比，也不能用于"
             "组件归因，只有显式白名单（当前仅 LEGA vs qgate）允许。"
+            "受控单维度对照（替代统计量/反传路径/共享粒度/空槽写入）"
+            "另起一层核对：它们必须实现层只差一个设计维度，且两侧的"
+            "A/B/C 因子集合完全相同。"
         ),
     }
 

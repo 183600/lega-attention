@@ -22,13 +22,17 @@ from lega.attention import (ALT_CONC_STATS, ALT_CONC_VARIANTS,  # noqa: E402
                             CONC_FORM_CUSTOM, CONC_FORM_DISABLED,
                             CONC_FORM_NONE, CONC_FORM_NORMALIZED,
                             CONC_FORM_RAW,
+                            CONTROLLED_DIMENSION_CONTRASTS,
+                            CONTROLLED_DIMENSION_KEYS,
                             CONTROL_VARIANTS, GATE_FACTORS,
                             NULL_EVIDENCE_VARIANTS, RAW_GATE_FACTORS,
                             RUNNABLE_VARIANTS, SUPPLEMENTAL_VARIANTS,
                             VARIANTS, VARIANT_CN,
                             _GATED, _LEGA_FAMILY, _USE_CONC, _USE_LEN,
                             _USE_QUERY, _USE_RAW_CONC,
-                            probe_conc_parameterization, probe_gate_factors,
+                            probe_conc_parameterization,
+                            probe_controlled_dimensions,
+                            probe_gate_factors,
                             variant_gate_capabilities)
 from lega.capacity import (CAPACITY_NULL_VARIANTS,  # noqa: E402
                            CAPACITY_OFF_VARIANTS, COMPONENT_CN,

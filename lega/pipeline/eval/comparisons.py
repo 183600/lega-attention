@@ -4,6 +4,33 @@ from .._shared import _install as _shared_install
 
 _shared_install(globals())
 
+# 受控单维度对照的对比类型：两侧的 A/B/C 因子集合完全相同，只差一个
+# **设计维度**（替代集中度统计量 / 反传路径 / 共享粒度 / 空槽写入）。
+# 它既不是 A/B/C 组件归因，也不是“与另一种方法比”的整体对比，必须
+# 单独标注：否则读者会把“换一个集中度统计量”的差异误读成某个 A/B/C
+# 组件的贡献，或把“逐头 vs 共享标量”误读成两种方法的优劣。
+CONTRAST_TYPE_SINGLE_DIMENSION = "single_dimension"
+
+
+def _controlled_dimension_registry():
+    """受控单维度对照登记表：``(候选, 参照) -> 登记条目``。
+
+    登记条目来自 :data:`lega.attention.CONTROLLED_DIMENSION_CONTRASTS`
+    （唯一事实来源）。这里只做结构过滤：非法条目由运行期单因素审计
+    显式点名，不在这里静默吞掉。
+    """
+    entries = globals().get("CONTROLLED_DIMENSION_CONTRASTS")
+    out = {}
+    if not isinstance(entries, (tuple, list)) or isinstance(entries, str):
+        return out
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        cand, ref = entry.get("candidate"), entry.get("reference")
+        if isinstance(cand, str) and isinstance(ref, str) and cand and ref:
+            out[(cand, ref)] = entry
+    return out
+
 
 def _stat_series(seed_map, payload_key, extractor):
     vals = []
@@ -2100,8 +2127,13 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
         # 单因子对（例如方向写反、或临时拼出的对比）也标成可归因证据，
         # 绕过 SINGLE_FACTOR_CONTRASTS 这个唯一事实来源。
         info = grid_contrast_info(cand, ref)
+        controlled = _controlled_dimension_registry().get((cand, ref))
         if is_single:
             contrast_type = "single_factor"
+        elif controlled is not None:
+            # 受控单维度对照：两侧的 A/B/C 因子集合相同，只差一个设计
+            # 维度。它不是组件归因，也不是整体方法对比，必须单独标注。
+            contrast_type = CONTRAST_TYPE_SINGLE_DIMENSION
         elif info["multi_factor"]:
             contrast_type = "multi_factor"
         elif info["grid_internal"]:
@@ -2126,6 +2158,9 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
                 "changed_factors": changed_factors,
             }
         )
+        if contrast_type == CONTRAST_TYPE_SINGLE_DIMENSION:
+            res["changed_dimensions"] = [controlled.get("dimension")]
+            res["dimension_label"] = controlled.get("label") or ""
         if split_skipped:
             res["excluded_split_mismatches"] = split_skipped
         if protocol_skipped:
@@ -2134,6 +2169,129 @@ def _paired_comparisons(runs, pairs, metric_name, extractor, lower_better) -> li
             res["excluded_cell_mismatches"] = cell_skipped
         out.append(_enrich_paired(res, a, b))
     return out
+
+
+def controlled_dimension_pairs(runs):
+    """受控单维度对照里两侧都跑了的配对。
+
+    只有两侧变体都产出了 run 才是可检验的对照；缺一侧时如实不报，
+    不能拿“未运行”当成“无差异”。
+    """
+    runs = runs if isinstance(runs, dict) else {}
+    out = []
+    for cand, ref in _controlled_dimension_registry():
+        if cand in runs and ref in runs:
+            out.append((cand, ref))
+    return out
+
+
+def controlled_dimension_tests(runs, min_seeds: int = MIN_SEEDS, alpha: float = ALPHA):
+    """受控单维度对照的跨种子配对检验（**独立** Holm 家族，探索性）。
+
+    这些对照回答的是“只改这一项会怎样”（换一个集中度统计量、换一条
+    反传路径、换一种共享粒度、空槽 value 是否可学），与 A/B/C 组件
+    归因、整体方法对比都不是同一个问题。它们既不在门控 2^3 网格内，
+    也不进入预注册确认族：混进主指标家族会改变预注册检验的校正强度，
+    因此单独成族（每个指标一个家族），标 ``exploratory``，不参与任何
+    确认性判定。
+    """
+    pairs = controlled_dimension_pairs(runs)
+    if not pairs:
+        return []
+    tests = []
+    for metric, extractor, lower_better in (
+        ("PPL", lambda slot: _ppl_of(slot.get("eval")), True),
+        ("RULER平均", lambda slot: _ruler_avg_of(slot.get("ruler")), False),
+    ):
+        for t in _paired_comparisons(runs, pairs, metric, extractor, lower_better):
+            t["exploratory"] = True
+            t["controlled_dimension"] = True
+            tests.append(t)
+    # 只在这一族内部做 Holm 校正：家族大小与主检验族互不影响。
+    return _apply_holm(tests, min_seeds=min_seeds, alpha=alpha)
+
+
+def controlled_dimension_analysis(
+    runs, min_seeds: int = MIN_SEEDS, alpha: float = ALPHA
+):
+    """受控单维度对照的汇总：实现层核对 + 跨种子配对检验 + 判定边界。
+
+    返回 dict：
+
+    * ``audit``：实现层核对结果（两侧是否真的只差一个设计维度）；
+    * ``tests``：独立 Holm 家族的跨种子配对检验；
+    * ``summary``：可读的总体判定与必须遵守的解读边界。
+    """
+    audit = _audit_controlled_single_dimension()
+    tests = controlled_dimension_tests(runs, min_seeds=min_seeds, alpha=alpha)
+    by_pair = {}
+    for t in tests:
+        key = (t.get("candidate"), t.get("reference"), t.get("metric"))
+        by_pair[key] = t
+    rows = []
+    for row in audit.get("contrasts") or []:
+        if not isinstance(row, dict):
+            continue
+        cand, ref = row.get("candidate"), row.get("reference")
+        entry = {
+            "candidate": cand,
+            "reference": ref,
+            "dimension": row.get("dimension"),
+            "label": row.get("label"),
+            "changed_dimensions": list(row.get("changed_dimensions") or []),
+            "gate_factors_candidate": list(row.get("gate_factors_candidate") or []),
+            "gate_factors_reference": list(row.get("gate_factors_reference") or []),
+            "implementation_ok": bool(row.get("ok")),
+            "implementation_reason": row.get("reason"),
+            "ran": bool(cand in runs and ref in runs)
+            if isinstance(runs, dict)
+            else False,
+            "metrics": {},
+        }
+        for metric in ("PPL", "RULER平均"):
+            t = by_pair.get((cand, ref, metric))
+            if t is None:
+                continue
+            entry["metrics"][metric] = {
+                "n": t.get("n"),
+                "mean_diff": t.get("mean_diff"),
+                "p": t.get("p"),
+                "p_adj": t.get("p_adj"),
+                "verdict": t.get("verdict"),
+                "lower_is_better": t.get("lower_is_better"),
+            }
+        rows.append(entry)
+    ran = [r for r in rows if r["ran"]]
+    failed = [r for r in rows if not r["implementation_ok"]]
+    if failed:
+        verdict = (
+            "以下受控单维度对照未通过实现层核对（实际改变的设计维度与"
+            "登记不一致，或同时改变了 A/B/C 因子集合），不能当作受控证据："
+            + "、".join(f"{r['candidate']} vs {r['reference']}" for r in failed)
+        )
+    elif not ran:
+        verdict = (
+            "没有可检验的受控单维度对照（两侧变体均未运行）；"
+            "不能据此声称构造效度/反传路径/共享粒度/空槽写入不影响结论。"
+        )
+    else:
+        verdict = (
+            f"{len(ran)} 组受控单维度对照通过实现层核对并已做跨种子配对检验；"
+            "结论只针对被改动的那一个设计维度，不能外推成 A/B/C 组件归因。"
+        )
+    return {
+        "audit": audit,
+        "tests": tests,
+        "contrasts": rows,
+        "summary": {
+            "n_contrasts": len(rows),
+            "n_ran": len(ran),
+            "n_implementation_failed": len(failed),
+            "verdict": verdict,
+            "exploratory": True,
+            "independent_family": True,
+        },
+    }
 
 
 def _missingness_endpoint(

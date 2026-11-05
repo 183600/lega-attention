@@ -409,6 +409,7 @@ def _summary_part_b(**kw):
     if "capacity_only_test" in kw:
         capacity_only_test = kw["capacity_only_test"]
     capacity_decomposition = kw.get("capacity_decomposition")
+    controlled_dimension = kw.get("controlled_dimension")
     if "causal_tests" in kw:
         causal_tests = kw["causal_tests"]
     matched_ablation_contrasts = kw.get("matched_ablation_contrasts") or []
@@ -1744,6 +1745,8 @@ def _summary_part_b(**kw):
         "`single_factor_audit`。"
     )
 
+    md += _render_controlled_dimension(controlled_dimension)
+
     md += _render_budget_sensitivity(budget_sensitivity)
     md += _render_sample_efficiency(sample_efficiency)
 
@@ -2209,6 +2212,102 @@ def _summary_part_b(**kw):
         "worst_g",
     }
     return {k: v for k, v in locals().items() if k in _assigned}
+
+
+def _render_controlled_dimension(analysis):
+    """受控单维度对照小节：实现层核对 + 跨种子配对检验。
+
+    这些对照（替代集中度统计量 / 反传路径 / 证据标量共享粒度 / 空槽
+    写入）回答的是“只改这一项会怎样”。它们与 A/B/C 组件归因不是同一
+    个问题：两侧的 A/B/C 因子集合**完全相同**，因此既不能进入单因素
+    归因，也不能被当成“与另一种方法比”的整体对比。小节必须同时给出
+
+    * 实现层核对：两侧实测只差**一个**设计维度（否则它已不是受控对照）；
+    * 独立 Holm 家族的跨种子配对检验（不进入预注册确认族）。
+
+    没有这些对照时必须显式说“证据缺失”，不能默认“结论不依赖该维度”。
+    """
+    md = ["", "### 受控单维度对照（只改一项的设计维度；探索性）", ""]
+    if not isinstance(analysis, dict):
+        md.append(
+            "⚠ 未产出受控单维度对照分析：不能据此声称构造效度、反传路径、"
+            "证据标量共享粒度或空槽写入不影响结论。"
+        )
+        return md
+    audit = analysis.get("audit") if isinstance(analysis.get("audit"), dict) else {}
+    rows = [r for r in (analysis.get("contrasts") or []) if isinstance(r, dict)]
+    summary = (
+        analysis.get("summary") if isinstance(analysis.get("summary"), dict) else {}
+    )
+    if not rows:
+        md.append(
+            "⚠ 没有登记的受控单维度对照：不能据此声称构造效度、反传路径、"
+            "证据标量共享粒度或空槽写入不影响结论。"
+        )
+        return md
+    if audit.get("ok") is not True:
+        md.append(
+            "⚠ **受控单维度对照的实现层核对未通过**："
+            + "；".join(str(p) for p in (audit.get("problems") or []))
+            + "。下列对照不能当作受控证据。"
+        )
+    else:
+        md.append(
+            "✅ 实现层核对通过：每一组受控对照实测只差一个设计维度，且两侧的"
+            "A/B/C 因子集合完全相同（它们不是因子消融）。"
+        )
+    md.append("")
+    md.append("| 对照 | 登记维度 | 实测改变维度 | 两侧 A/B/C 因子 | 是否运行 | 结论 |")
+    md.append("|---|---|---|---|---|---|")
+    for r in rows:
+        cand_fac = ",".join(r.get("gate_factors_candidate") or []) or "无"
+        ref_fac = ",".join(r.get("gate_factors_reference") or []) or "无"
+        fac_cell = cand_fac if cand_fac == ref_fac else f"{cand_fac} vs {ref_fac}"
+        md.append(
+            f"| {r.get('candidate')} vs {r.get('reference')} "
+            f"| {r.get('dimension')} "
+            f"| {', '.join(r.get('changed_dimensions') or []) or '无'} "
+            f"| {fac_cell} "
+            f"| {'是' if r.get('ran') else '否'} "
+            f"| {'✅ ' + str(r.get('implementation_reason')) if r.get('implementation_ok') else '⚠ ' + str(r.get('implementation_reason'))} |"
+        )
+    md.append("")
+    tests = [t for t in (analysis.get("tests") or []) if isinstance(t, dict)]
+    if tests:
+        md.append(
+            "| 对照 | 维度 | 指标 | Δ均值 ± SD | n种子 | p_adj(族内Holm) | 判定 |"
+        )
+        md.append("|---|---|---|---|---|---|---|")
+        for t in tests:
+            dims = t.get("changed_dimensions") or []
+            padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
+            md.append(
+                f"| {t.get('candidate')} vs {t.get('reference')} "
+                f"| {', '.join(dims) or '-'} "
+                f"| {t.get('metric')} "
+                f"| {_fmt_mean_std(t)} "
+                f"| {t.get('n')} "
+                f"| {padj} "
+                f"| {t.get('verdict', '-')} |"
+            )
+        md.append("")
+    else:
+        md.append(
+            "⚠ 没有可检验的受控单维度对照（两侧变体均未运行或缺少评测产物）："
+            "“未运行”不等于“无影响”。"
+        )
+        md.append("")
+    if summary.get("verdict"):
+        md.append(str(summary.get("verdict")))
+        md.append("")
+    md.append(
+        "注: 受控单维度对照**不进入** A/B/C 组件归因，也**不进入**预注册"
+        "确认族：它们回答的是被改动的那一个设计维度（统计量口径 / 反传路径 / "
+        "共享粒度 / 空槽写入），与“某个组件是否有用”不是同一个问题。"
+        "检验走独立 Holm 家族（每个指标一族），不改变主检验族的校正强度；"
+        "未检出差异只能写“未检出”，不能写成“等价”或“不影响”。"
+    )
+    return md
 
 
 def _render_reparameterization(reparam):

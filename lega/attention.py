@@ -299,6 +299,57 @@ SUPPLEMENTAL_GATE_FACTORS = {
     "qgate_null": frozenset("A"),
 }
 
+# 受控单维度对照：每一组只改变**一个设计维度**（不是 A/B/C 因子开关），
+# 因此它们既不是 A/B/C 组件归因，也不是“与另一种方法比”的整体对比：
+#   lega_l2 / lega_entropy：只换 B 的集中度统计量（构念效度对照）；
+#   lega_detach_conc：只改 B 的反传路径（梯度路径对照）；
+#   lega_shared：只改证据标量的共享粒度（逐头 → 层内跨头）；
+#   null_zero：只改空注意力槽的 value 是否可学（空槽写入对照）。
+# 这些对照要回答的问题就是“只改这一项会怎样”，因此必须保证实现层确实
+# 只差这一个维度：两侧的门控因子集合必须完全相同，且实测的维度向量只在
+# 声明的那一个维度上不同（见 :func:`probe_controlled_dimensions` 与运行期
+# 单因素审计）。只声明不核对的话，一次复制粘贴式的实现漂移就会把
+# “单维度对照”悄悄变成多维度对照，而汇总层仍会把它当成受控证据报告。
+CONTROLLED_DIMENSION_KEYS = (
+    "conc_stat",
+    "conc_detach",
+    "gate_shared_scalars",
+    "null_value_learnable",
+)
+
+CONTROLLED_DIMENSION_CONTRASTS = (
+    {
+        "candidate": "lega_l2",
+        "reference": "lega",
+        "dimension": "conc_stat",
+        "label": "B 集中度统计量：max_j p_j → Σ_j p_j²",
+    },
+    {
+        "candidate": "lega_entropy",
+        "reference": "lega",
+        "dimension": "conc_stat",
+        "label": "B 集中度统计量：max_j p_j → exp(-H(p))",
+    },
+    {
+        "candidate": "lega_detach_conc",
+        "reference": "lega",
+        "dimension": "conc_detach",
+        "label": "B 反传路径：集中度统计不反传到 Q/K",
+    },
+    {
+        "candidate": "lega_shared",
+        "reference": "lega",
+        "dimension": "gate_shared_scalars",
+        "label": "证据标量共享：逐头校准 → 层内跨头共享",
+    },
+    {
+        "candidate": "null_zero",
+        "reference": "null",
+        "dimension": "null_value_learnable",
+        "label": "空槽写入：null 槽 value 可学 → 固定为 0",
+    },
+)
+
 
 def variant_gate_capabilities(variant: str) -> dict:
     """该变体实际注册的门控能力（query/conc/len），按实现开关推导。
@@ -620,6 +671,70 @@ def probe_gate_factors(
         "use_raw_conc": bool(m.use_raw_conc),
         "conc_mode": str(m.conc_mode),
     }
+
+
+def probe_controlled_dimensions(
+    variant: str, *, d_model: int = 32, n_heads: int = 4, seed: int = 0
+) -> dict:
+    """实测变体的**设计维度向量**（受控单维度对照用）。
+
+    ``GATE_FACTORS`` 只能回答“A/B/C 三条证据通道开没开”，回答不了
+    “集中度用的是哪个统计量”“B 的梯度是否反传”“证据标量是逐头还是
+    层内共享”“空槽的 value 是否可学”这四件事——而受控单维度对照
+    （``CONTROLLED_DIMENSION_CONTRASTS``）恰恰只在这些维度上改动。因此
+    这里对每个变体给出同一口径的维度向量：
+
+    * ``gate_factors``：实现层真正生效的 A/B/C 因子集合（来自
+      :func:`probe_gate_factors`）；
+    * ``conc_stat``：B 通道的集中度统计量（``max``/``l2``/``entropy``；
+      没有 B 通道时为 None）；
+    * ``conc_detach``：B 的集中度统计是否从反传图中 detach；
+    * ``gate_shared_scalars``：门控标量 (a,b,d) 是否层内跨头共享；
+    * ``null_value_learnable``：空注意力槽的 value 是否可学（非 null
+      变体为 None）。
+
+    两侧维度向量逐项比较，就得到“这条受控对照实际改了哪几个维度”：
+    恰好一个、且与声明一致时，它才是名副其实的单维度对照。整个过程在
+    ``torch.random.fork_rng`` 内进行，不消耗调用方的全局随机流。
+    """
+    variant = str(variant)
+    if variant not in RUNNABLE_VARIANTS:
+        raise ValueError(f"未知变体: {variant!r}")
+    factors = probe_gate_factors(variant, d_model=d_model, n_heads=n_heads, seed=seed)
+    if not isinstance(factors, dict) or factors.get("error"):
+        detail = (
+            factors.get("error")
+            if isinstance(factors, dict)
+            else "probe_gate_factors 返回非法结构"
+        )
+        return {"variant": variant, "error": f"门控因子探针失败：{detail}"}
+    try:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(seed))
+            m = CausalSelfAttention(
+                d_model=int(d_model),
+                n_heads=int(n_heads),
+                variant=variant,
+                use_sdpa_standard=False,
+            )
+            null_learnable = None
+            if m.is_null:
+                # null_zero 把 v_null 注册成 buffer（固定零、优化器不更新），
+                # null/qgate_null 注册成可学参数；这正是“空槽写入”这一维度。
+                null_learnable = isinstance(getattr(m, "v_null", None), nn.Parameter)
+            return {
+                "variant": variant,
+                "gate_factors": list(factors.get("effective") or []),
+                "conc_stat": (
+                    str(m.conc_mode) if (m.use_conc or m.use_raw_conc) else None
+                ),
+                "conc_detach": bool(m.detach_conc),
+                "gate_shared_scalars": bool(m.gate_shared_scalars),
+                "null_value_learnable": null_learnable,
+                "error": None,
+            }
+    except Exception as e:  # pragma: no cover - 只在极端环境（无 CPU 张量）发生
+        return {"variant": variant, "error": f"{type(e).__name__}: {e}"}
 
 
 # B 通道（集中度项）的参数化口径。设计契约在 lega.reparameterization

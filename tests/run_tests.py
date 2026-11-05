@@ -54,6 +54,7 @@ MODULES = [
     "tests.test_probe",
     "tests.test_ablation_methods",
     "tests.test_inference_single_factor",
+    "tests.test_controlled_dimension",
     "tests.test_dose_response",
     "tests.test_output_ablation",
     "tests.test_equivalence",
@@ -78,7 +79,7 @@ MODULES = [
 
 
 class _MonkeyPatch:
-    """最小 pytest `monkeypatch` 兼容实现（setattr / delattr / setenv）。
+    """最小 pytest `monkeypatch` 兼容实现（setattr / delattr / setitem / setenv）。
 
     该测试入口不依赖 pytest，但个别测试用 `monkeypatch` fixture 做局部猴子
     补丁；此实现让它们在无 pytest 环境下也能运行并自动回滚，避免“仅在
@@ -87,6 +88,7 @@ class _MonkeyPatch:
 
     def __init__(self):
         self._setattrs = []
+        self._setitems = []
         self._dels = {}
         self._env = []
 
@@ -99,6 +101,17 @@ class _MonkeyPatch:
         had = hasattr(target, name)
         self._setattrs.append((target, name, old, had))
         setattr(target, name, value)
+
+    def setitem(self, dic, name, value):
+        """改映射的某个键（例如模块的 ``__dict__``），undo 时还原原值。
+
+        pytest 的 ``monkeypatch.setitem`` 语义：键原本不存在时，undo 之后
+        该键被删除（而不是留一个 None）。
+        """
+        had = name in dic
+        old = dic[name] if had else None
+        self._setitems.append((dic, name, old, had))
+        dic[name] = value
 
     def delattr(self, target, name, raising=True):
         had = hasattr(target, name)
@@ -122,6 +135,11 @@ class _MonkeyPatch:
         self._env.append((name, old))
 
     def undo(self):
+        for dic, name, old, had in reversed(self._setitems):
+            if had:
+                dic[name] = old
+            else:
+                dic.pop(name, None)
         for target, name, old, had in reversed(self._setattrs):
             if had:
                 setattr(target, name, old)

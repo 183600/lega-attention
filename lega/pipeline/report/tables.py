@@ -256,6 +256,7 @@ def _summary_part_c(**kw):
     ranking = kw.get("ranking")
     missingness = kw.get("missingness")
     reparameterization = kw.get("reparameterization")
+    controlled_dimension = kw.get("controlled_dimension")
     if "results_dir" in kw:
         results_dir = kw["results_dir"]
     if "rows" in kw:
@@ -1524,6 +1525,19 @@ def _summary_part_c(**kw):
             "Null_X 不是分布匹配置换零假设，capacity 混合参数"
             "容量与优化红利；独立 Holm 家族，不改变确认性判定。"
         ),
+        "controlled_dimension": (
+            controlled_dimension
+            if isinstance(controlled_dimension, dict)
+            else {"available": False, "contrasts": [], "tests": []}
+        ),
+        "controlled_dimension_note": (
+            "受控单维度对照（探索性）：替代集中度统计量/反传路径/证据"
+            "标量共享粒度/空槽写入四类对照。两侧的 A/B/C 因子集合完全"
+            "相同，只差一个设计维度，因此既不是组件归因也不是整体方法"
+            "对比；实现层核对要求实测只差一个维度且两侧因子集合一致，"
+            "核对失败时不得当作受控证据。检验走独立 Holm 家族，"
+            "不进入预注册确认族，也不改变主检验族的校正强度。"
+        ),
         "parameter_matched_control": {
             "variant": PARAM_CONTROL_VARIANT,
             "pair": list(PARAM_CONTROL_PAIR),
@@ -1640,6 +1654,7 @@ def _summary_part_c(**kw):
         "ci",
         "ci_s",
         "cluster_rows",
+        "controlled_dimension",
         "cost",
         "counts",
         "cross_out",
