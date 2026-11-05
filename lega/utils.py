@@ -1011,6 +1011,25 @@ def _betai(a: float, b: float, x: float) -> float:
     return 1.0 - front * _betacf(b, a, 1.0 - x) / b
 
 
+def regularized_incomplete_beta(a: float, b: float, x: float) -> float:
+    """正则化不完全 Beta 函数 I_x(a, b) 的公开入口。
+
+    设计层要算非中心 F 的 CDF（非中心 t 功效的解析口径），必须用到同一个
+    I_x 实现；把内部函数直接暴露成公开 API，避免各模块各写一份连分式。
+    """
+    try:
+        fa = float(a)
+        fb = float(b)
+        fx = float(x)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"regularized_incomplete_beta 参数必须是数值：{e}") from None
+    if not (math.isfinite(fa) and math.isfinite(fb) and math.isfinite(fx)):
+        raise ValueError("regularized_incomplete_beta 参数必须是有限值")
+    if fa <= 0.0 or fb <= 0.0:
+        raise ValueError("regularized_incomplete_beta 要求 a>0 且 b>0")
+    return float(_betai(fa, fb, fx))
+
+
 def _betai_small_x_log(a: float, b: float, log_x: float) -> float:
     """x 小到下溢为 0 时的 I_x(a, b)：在对数域计算，避免 front/a 丢失。
 
