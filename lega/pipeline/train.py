@@ -316,6 +316,34 @@ def main():
     p.add_argument("--skip_latency", action="store_true")
     p.add_argument("--skip_analysis", action="store_true")
     p.add_argument(
+        "--eval_split",
+        default="auto",
+        choices=["auto", "test", "val"],
+        help="独立 PPL 评测的 split（默认 auto：有 test.bin 时用 held-out "
+        "test）。试点/方差锚定阶段必须用 val：test 一旦被读入，确认性终点"
+        "就不再是「第一次」被看到",
+    )
+    p.add_argument(
+        "--pilot",
+        action="store_true",
+        help="试点模式：强制只用 val 评测（不访问 test）、不产出坏案例转储，"
+        "并把本轮标记为试点（其结果只能用于估计噪声，不能作确认性证据）",
+    )
+    p.add_argument(
+        "--pilot_anchor",
+        default=None,
+        help="试点方差锚点文件（python -m lega.design.pilot 产物）：绑定进"
+        "训练前设计计划，用实测噪声替换假设噪声网格，并据此判断计划种子数"
+        "是否够检出登记的 SESOI",
+    )
+    p.add_argument(
+        "--compute_budget_gpu_hours",
+        type=float,
+        default=None,
+        help="本轮算力预算（GPU·小时）：与实测/声明单步耗时比较，超预算时按"
+        "预注册的机械取舍阶梯给出削减方案（不含删除确认性对照）",
+    )
+    p.add_argument(
         "--skip_length_calibration",
         action="store_true",
         help="跳过训练后经验长度校准审计（默认按配置 "
@@ -493,6 +521,18 @@ def main():
         p.error(
             f"未知变体: {', '.join(invalid)}；可选: " f"{', '.join(RUNNABLE_VARIANTS)}"
         )
+    if args.pilot:
+        # 试点模式的硬约束：只读 val，不碰 test。test 一旦被读入，确认性
+        # 终点就永远不是"第一次"被看到，后续所有功效/显著性结论都要降级。
+        if args.eval_split not in ("auto", "val"):
+            p.error("--pilot 只允许 --eval_split val/auto（auto 会在有 test 时读 test）")
+        if args.worst_on_test or args.allow_repeat_test:
+            p.error("--pilot 与 --worst_on_test/--allow_repeat_test 冲突：试点不得访问 test")
+        args.eval_split = "val"
+        args.ngram_split = "val"
+        args.worst_n = 0
+        print("[run_all] 试点模式：评测固定在 val，不访问 test；本轮结果只用于"
+            "估计噪声/验证流程，不能作确认性证据")
     ablate_variants = [] if args.skip_ablation else parse_variants(args.ablate_variants)
     invalid_ablate = sorted(set(ablate_variants) - set(GATE_FACTORS))
     if invalid_ablate:
@@ -784,6 +824,61 @@ def main():
     # 它不读取任何结果，只读取测试集哈希与访问账本（不读 test token），
     # 故可作为“开跑前声明”的证据；汇总时据此核对实际分析人群，计划内
     # 单元缺失会使受影响确认性判定降级。
+    # 试点方差锚点：把"假设噪声"换成"试点实测噪声"。锚点文件由
+    # `python -m lega.design.pilot` 生成；显式给了路径却读不出/校验不过时
+    # 必须硬失败——默默忽略等于悄悄退回假设噪声口径。
+    pilot_anchor = None
+    _design_cfg = cfg.get("design") if isinstance(cfg.get("design"), dict) else {}
+    anchor_arg = args.pilot_anchor or _design_cfg.get("pilot_variance_file")
+    if anchor_arg:
+        pilot_anchor_path = _repo_path(anchor_arg)
+        if not os.path.exists(pilot_anchor_path):
+            p.error(f"试点方差锚点文件不存在：{pilot_anchor_path}")
+        pilot_anchor = load_pilot_anchor(pilot_anchor_path)
+        if pilot_anchor is None:
+            p.error(
+                f"试点方差锚点不可用：{pilot_anchor_path}（不是 "
+                "pilot_variance_anchor 产物或已损坏）"
+            )
+        print(
+            f"[design] 试点方差锚点已绑定：status={pilot_anchor.get('status')} "
+            f"digest={str(pilot_anchor.get('anchor_digest'))[:12]}"
+        )
+
+    # 算力预算预检：用实测单步耗时（若有）或声明值估算本轮总开销，并与
+    # 声明预算比较。超预算时给出**机械的、结果无关**的削减阶梯，确认性
+    # 对照不在削减范围内。
+    budget_plan = None
+    budget_hours = args.compute_budget_gpu_hours
+    if budget_hours is None:
+        budget_hours = _design_cfg.get("compute_budget_gpu_hours")
+    step_time_ms = measured_step_time_ms(results_dir)
+    estimate_source = "measured" if step_time_ms is not None else None
+    if step_time_ms is None:
+        step_time_ms = _design_cfg.get("expected_step_time_ms")
+        if step_time_ms is not None:
+            estimate_source = "declared"
+    if budget_hours is not None or step_time_ms is not None:
+        try:
+            budget_plan = build_budget_plan(
+                cfg,
+                variants,
+                seeds,
+                registered=reg_doc,
+                budget_gpu_hours=budget_hours,
+                step_time_ms=step_time_ms,
+                estimate_source=estimate_source,
+                policy=_design_cfg.get("compute_budget_policy", "warn"),
+            )
+        except ValueError as e:
+            p.error(f"算力预算预检失败：{e}")
+        print(
+            f"[budget] 预估总开销上界="
+            f"{budget_plan.get('estimated_gpu_hours_upper')} GPU·小时，"
+            f"预算={budget_plan.get('budget_gpu_hours')}，"
+            f"status={budget_plan.get('status')}"
+        )
+
     try:
         design_plan = build_design_plan(
             cfg,
@@ -799,6 +894,9 @@ def main():
             data_report=load_data_report(args.data_dir),
             preparation=design_preparation,
             development_seeds=tune_seeds,
+            pilot_anchor=pilot_anchor,
+            budget_plan=budget_plan,
+            pilot=bool(args.pilot),
         )
     except ValueError as e:
         p.error(f"设计计划生成失败（检查配置的 design/ruler 字段）：{e}")
@@ -929,9 +1027,21 @@ def main():
         "evaluation": {
             "full_eval": bool(args.full_eval),
             "window_offsets": args.window_offsets,
+            "split": args.eval_split,
             "scope": "independent_eval_only",
             "requirement": (
                 "正式 PPL 结论应使用全量不重叠窗口；" "checkpoint 选择仍只用 val"
+            ),
+        },
+        # 试点模式：本轮只读 val、不访问 test，结果只能用于估计噪声与验证
+        # 流程，不能作确认性证据（设计计划的 seed_scope 也会因试点种子不在
+        # 登记范围而降级）。
+        "pilot": {
+            "enabled": bool(args.pilot),
+            "eval_split": args.eval_split,
+            "note": (
+                "试点模式：只评 val、不访问 test；结果仅用于方差锚定与流程"
+                "验证，不作确认性证据"
             ),
         },
         "smoke": bool(args.smoke),
@@ -1144,6 +1254,8 @@ def main():
         ]
         if args.skip_train:
             cmd += ["--skip_train"]
+        if args.eval_split and args.eval_split != "auto":
+            cmd += ["--eval_split", args.eval_split]
         if args.full_eval:
             cmd += ["--full_eval"]
         if args.window_offsets is not None:

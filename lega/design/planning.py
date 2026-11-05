@@ -37,6 +37,12 @@ from .coverage import (  # noqa: E402
     check_registration_coverage,
     registration_coverage,
 )
+from .pilot import (  # noqa: E402
+    PILOT_KIND,
+    pilot_anchor_digest,
+    pilot_feasibility,
+)
+from .budget import budget_check  # noqa: E402
 
 
 def _mechanism_endpoint_sensitivity(
@@ -749,6 +755,9 @@ def build_design_plan(
     development_seeds=None,
     pilot_seeds=None,
     seed_partition_policy: str = None,
+    pilot_anchor: dict = None,
+    budget_plan: dict = None,
+    pilot: bool = False,
 ) -> dict:
     """根据配置/种子计划/预注册表生成训练前的设计计划。
 
@@ -1001,6 +1010,17 @@ def build_design_plan(
     # 基线超参是在同一批种子上挑出来的，确认性比较会混入选择偏差。
     checks.append(check_seed_partition(seed_partition, policy=overlap_policy))
 
+    if pilot:
+        checks.append(
+            _check(
+                "run_mode",
+                "运行模式",
+                "info",
+                "试点模式：本轮只读 val、不访问 test；结果只能用于估计噪声与"
+                "验证流程，不作确认性证据（试点种子也不在预注册 scope 内）",
+            )
+        )
+
     # ---- 检查 1b：配置键空间与数值语义。未知键会被 dict.get 静默忽略，
     # 使“声明的实验”与“实际实验”分离；类型/范围错误则会让运行值偏离
     # 文件中的可读值。这里在训练前显形，并给出与键顺序无关的语义指纹。
@@ -1086,6 +1106,125 @@ def build_design_plan(
     checks.append(
         _check("data_identity", "数据身份绑定", identity_status, identity_detail)
     )
+
+    # ---- 试点方差锚定：把先验功效从"假设噪声网格"升级为"试点实测噪声"。
+    # 锚点无效（不是锚点文件/摘要对不上/试点种子与确认性种子重叠）记 fail；
+    # 功效不足记 warn——它不推翻统计判定，但明确"未定"不能解释为"无效应"。
+    pilot_feas = None
+    pilot_anchor_payload = None
+    if pilot_anchor is not None:
+        anchor = _as_dict(pilot_anchor)
+        pilot_anchor_payload = anchor
+        anchor_digest = anchor.get("anchor_digest")
+        try:
+            recomputed = pilot_anchor_digest(anchor)
+        except (TypeError, ValueError):
+            recomputed = None
+        if anchor.get("kind") != PILOT_KIND:
+            checks.append(
+                _check(
+                    "pilot_anchor",
+                    "试点方差锚定",
+                    "fail",
+                    "提供的试点锚定不是 pilot_variance_anchor 产物："
+                    "请用 `python -m lega.design.pilot` 生成后再传入",
+                )
+            )
+        elif not anchor_digest or recomputed != anchor_digest:
+            checks.append(
+                _check(
+                    "pilot_anchor",
+                    "试点方差锚定",
+                    "fail",
+                    "试点锚定摘要与内容不一致（可能被改写）："
+                    f"记录 {str(anchor_digest)[:12]} vs 重算 "
+                    f"{str(recomputed)[:12]}",
+                )
+            )
+        else:
+            alpha_by_metric = {
+                "PPL": ppl_alpha_look,
+                "RULER平均": ruler_alpha_look,
+                "AUROC差(logit−仅查询)": auroc_alpha,
+                "AP差(logit−仅查询)": ap_alpha,
+            }
+            pilot_feas = pilot_feasibility(
+                anchor,
+                n_seeds=n_seeds,
+                alpha=alpha,
+                power=power,
+                alpha_by_metric=alpha_by_metric,
+            )
+            verdict = pilot_feas.get("verdict")
+            verdict_status = {
+                "proceed": "pass",
+                "increase_seeds": "warn",
+                "infeasible": "warn",
+                "no_anchor": "warn",
+            }.get(verdict, "warn")
+            rows = pilot_feas.get("rows") or []
+            lines = []
+            for row in rows:
+                mde = row.get("mde_at_planned")
+                pw = row.get("power_at_sesoi")
+                req = row.get("required_seeds")
+                lines.append(
+                    f"{row.get('id')}（{row.get('metric')}）："
+                    f"锚定 SD={row.get('sd_used')}（{row.get('sd_source')}）、"
+                    f"SESOI={row.get('sesoi')}、计划 {n_seeds} 种子下 "
+                    f"MDE={mde}、SESOI 处功效={pw}"
+                    + (f"、达标所需种子数={req}" if req is not None else "")
+                    + f" → {row.get('verdict')}"
+                    + (
+                        f"（点估计口径 {row.get('verdict_point')}）"
+                        if row.get("verdict_point")
+                        else ""
+                    )
+                )
+            detail = (
+                f"试点锚定已绑定（digest={str(anchor_digest)[:12]}，"
+                f"锚点状态={anchor.get('status')}）："
+                + "；".join(lines)
+                if lines
+                else "试点锚定已绑定，但没有可用于功效判定的端点"
+            )
+            if anchor.get("status") == "fail":
+                verdict_status = "fail"
+                detail += "；锚点自身判 fail：" + "；".join(
+                    str(p) for p in (anchor.get("problems") or [])
+                )
+            if verdict == "increase_seeds":
+                detail += (
+                    "；按锚定噪声，当前种子数不足以在登记 SESOI 上达到目标功效，"
+                    "需按上面的「所需种子数」调整计划（或接受「未定」不等于无效应）"
+                )
+            elif verdict == "infeasible":
+                detail += (
+                    "；按锚定噪声，即使把种子数提到上限也达不到目标功效："
+                    "问题在效应/噪声比例，应重新考虑 SESOI、模型规模或数据口径，"
+                    "而不是继续加种子"
+                )
+            elif verdict == "no_anchor":
+                detail += "；没有可用锚点，先验功效仍只有假设噪声口径"
+            checks.append(
+                _check("pilot_anchor", "试点方差锚定", verdict_status, detail)
+            )
+
+    # ---- 算力预算预检：超预算时的取舍必须按预注册的机械阶梯在开跑前决定。
+    budget_payload = None
+    if budget_plan is not None:
+        budget_payload = _as_dict(budget_plan)
+        try:
+            checks.append(budget_check(budget_payload))
+        except (TypeError, ValueError) as e:
+            checks.append(
+                _check(
+                    "compute_budget",
+                    "算力预算预检",
+                    "fail",
+                    f"算力预算计划非法：{e}",
+                )
+            )
 
     # ---- 检查 2：与预注册种子计划一致（少跑不等于“范围外”，但确认性
     # 证据不再覆盖登记的全部种子；必须显式降级/告警）
@@ -2716,6 +2855,7 @@ def build_design_plan(
             "multiplicity": mode,
             "power": power,
             "smoke": bool(smoke),
+            "pilot": bool(pilot),
             "registered_hypotheses": [h.get("id") for h in hyps],
             "registration_scope_seeds": scope_seeds_int,
             "analysis_variants": list(analysis_variants),
@@ -2730,6 +2870,12 @@ def build_design_plan(
         "seed_partition": seed_partition,
         "scope_readiness": scope_readiness,
         "data_budget": data_budget,
+        # 试点方差锚定：把"假设噪声"换成"试点实测噪声"的那一份证据。
+        # 锚点内容与摘要都进计划，参与 plan_digest，事后替换会被发现。
+        "pilot_anchor": pilot_anchor_payload,
+        "pilot_feasibility": pilot_feas,
+        # 算力预算预检与取舍阶梯：超预算时的削减方案在开跑前写死。
+        "compute_budget": budget_payload,
         "analysis_protocol": dict(_ANALYSIS_PROTOCOL),
         # 确认性分析计划的只读快照：计划摘要因此同时绑定“登记了哪些
         # 假设、用什么指标/候选/参照”，不只是一个种子/样本量清单。

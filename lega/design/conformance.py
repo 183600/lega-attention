@@ -1041,6 +1041,72 @@ def render_design_section(
             detail = str(c.get("detail", "")).replace("|", "\\|")
             md.append(f"| {c.get('title')} | {st} | {detail} |")
 
+    feas = _as_dict(plan.get("pilot_feasibility"))
+    if feas:
+        md += [
+            "",
+            "**试点方差锚定（把先验功效的假设噪声换成实测噪声）**",
+            "",
+            "| 假设 | 端点 | SD 点估计 | SD 置信上限 | 计划种子数下 MDE | SESOI 处功效 | 达标所需种子数 | 判定（保守/点估计） |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for row in _as_list(feas.get("rows")):
+            if not isinstance(row, dict):
+                continue
+            md.append(
+                "| {cid} | {metric} | {sd} | {sdu} | {mde} | {pw} | {req} | {v} / {vp} |".format(
+                    cid=row.get("id"),
+                    metric=row.get("metric"),
+                    sd=_fmt(row.get("sd_point"), 5),
+                    sdu=_fmt(row.get("sd_upper"), 5),
+                    mde=_fmt(row.get("mde_at_planned"), 5),
+                    pw=_fmt(row.get("power_at_sesoi"), 3),
+                    req=row.get("required_seeds")
+                    if row.get("required_seeds") is not None
+                    else "-",
+                    v=row.get("verdict"),
+                    vp=row.get("verdict_point"),
+                )
+            )
+        md.append(
+            f"- 整体判定（保守口径）：`{feas.get('verdict')}`；"
+            f"点估计口径：`{feas.get('verdict_point')}`；"
+            f"有锚点端点 {feas.get('n_endpoints_with_anchor')} 个、"
+            f"无锚点端点 {feas.get('n_endpoints_without_anchor')} 个。"
+            "锚定只使用噪声，不使用试点观测到的效应方向；"
+            "判定为 `increase_seeds`/`infeasible` 时，「未定」不能解释为「无效应」。"
+        )
+
+    budget = _as_dict(plan.get("compute_budget"))
+    if budget:
+        md += ["", "**算力预算预检（开跑前的取舍规则）**", ""]
+        md.append(
+            f"- 预算 {budget.get('budget_gpu_hours')} GPU·小时；估算上界 "
+            f"{budget.get('estimated_gpu_hours_upper')} GPU·小时"
+            f"（{budget.get('n_cells')} 个 run 单元，单步耗时来源："
+            f"{budget.get('estimate_source') or '未知'}）；状态 "
+            f"`{budget.get('status')}`。"
+        )
+        ladder = [r for r in _as_list(budget.get("ladder")) if isinstance(r, dict)]
+        if ladder:
+            md += [
+                "",
+                "| 阶梯 | 动作 | 保留单元 | 估算上界（GPU·小时） | 说明 |",
+                "|---|---|---|---|---|",
+            ]
+            for rung in ladder:
+                md.append(
+                    f"| {rung.get('step')} | {rung.get('action')} | "
+                    f"{rung.get('kept_cells')} | "
+                    f"{_fmt(rung.get('estimated_gpu_hours'), 2)} | "
+                    f"{str(rung.get('note', '')).replace('|', '\\|')} |"
+                )
+            md.append(
+                "- 取舍阶梯是机械的、结果无关的：先去掉非确认性可选臂，再按"
+                "计划顺序减少种子；它**不会**删除任何确认性对照——那属于修改"
+                "预注册，必须走修订链留痕。"
+            )
+
     db = _as_dict(plan.get("data_budget"))
     if db:
         md += ["", "**开跑前数据/评测预算**", ""]

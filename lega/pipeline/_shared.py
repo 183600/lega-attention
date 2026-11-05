@@ -101,11 +101,13 @@ from lega.heterogeneity import (  # noqa: E402
     attach_to_hypotheses as attach_heterogeneity_to_hypotheses,
     meta_analysis_from_seed_matrix)
 from lega.design import (apply_design_gate,  # noqa: E402
+                         build_budget_plan,
                          build_design_plan, build_run_order,
                          capture_preparation,
                          derive_development_seeds,
                          design_conformance, load_design_plan,
-                         load_design_plan_history, observed_design_sensitivity,
+                         load_design_plan_history, load_pilot_anchor,
+                         measured_step_time_ms, observed_design_sensitivity,
                          render_design_section, save_design_plan,
                          validate_run_order)
 from lega.experiment import (append_record, build_experiment_record,  # noqa: E402

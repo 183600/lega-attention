@@ -60,6 +60,9 @@
     "multiplicity": "holm_worst_case",
     "run_order": "randomized_blocked",
     "test_look_budget": 1,
+    "pilot_seeds": [900001, 900002, 900003, 900004],
+    "compute_budget_gpu_hours": 300,
+    "compute_budget_policy": "warn",
     "length_stratification": {
       "enabled": true,
       "lengths": [64, 128, 256, 512, 1024],

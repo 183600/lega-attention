@@ -79,6 +79,9 @@ def _eval_argv(a, ckpt: str) -> List[str]:
         "--device",
         a.device,
     ]
+    eval_split = getattr(a, "eval_split", None)
+    if eval_split and eval_split != "auto":
+        argv += ["--split", str(eval_split)]
     if a.full_eval:
         argv += ["--full_eval"]
     if getattr(a, "window_offsets", None) is not None:
@@ -289,8 +292,16 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--worst_on_test",
         action="store_true",
-        help="允许在 test 上转储最差窗口（默认关闭：test 只做最终"
+        help="允许在 test split 上转储最差窗口（默认关闭：test 只做最终"
         "一次性评估，把 test 错误清单交给人工迭代即泄露）",
+    )
+    p.add_argument(
+        "--eval_split",
+        default="auto",
+        choices=["auto", "test", "val"],
+        help="独立 PPL 评测的 split：auto（默认，有 test.bin 时用 held-out "
+        "test，否则回退 val）、val（只评 val，试点/方差锚定阶段必须用这个，"
+        "避免测试集被提前读入）、test（强制 held-out test）",
     )
     p.add_argument(
         "--allow_repeat_test",

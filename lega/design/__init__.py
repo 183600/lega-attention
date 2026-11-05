@@ -6,9 +6,14 @@ from . import power
 from . import scheduling
 from . import seeds
 from . import calibration
+from . import pilot
+from . import budget
 from . import planning
 from . import conformance
 
+# 顺序有意义：conformance 必须排在最后，它提供 `python -m lega.design` 的
+# 命令行入口（main）；pilot/budget 也各自带 main，但只能通过
+# `python -m lega.design.pilot` / `python -m lega.design.budget` 调用。
 _MODULES = [
     _shared,
     preparation,
@@ -16,6 +21,8 @@ _MODULES = [
     scheduling,
     seeds,
     calibration,
+    pilot,
+    budget,
     planning,
     conformance,
 ]

@@ -121,6 +121,10 @@ NESTED = {
         "development_seeds": "int_list",
         "pilot_seeds": "int_list",
         "seed_overlap_policy": "str",
+        "pilot_variance_file": "str",
+        "compute_budget_gpu_hours": "positive_number",
+        "compute_budget_policy": "str",
+        "expected_step_time_ms": "positive_number",
         "calibration": {
             "enabled": "bool",
             "n_sim": "positive_int",
