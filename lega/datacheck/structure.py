@@ -15,6 +15,8 @@
   划分”的**声明**升级为可复核结论（整篇文档/段落重复、行被截断三类）；
 * ``window_boundary_stats``：统计跨文档窗口比例（显式窗口起点，或训练采样
   器“均匀随机起点”口径下的精确期望）；
+* ``window_crossing_flags``：逐窗口给出“是否跨文档边界”的标志（与窗口
+  列表一一对应），供“跨文档 vs 文档内”的效应分层使用；
 * ``doc_aligned_windows``：挑选完全落在单个文档内的窗口（含标签 token 也
   在同一文档内），用于“文档内 PPL”这一独立口径。
 
@@ -563,6 +565,40 @@ def window_boundary_stats(boundaries, n_tokens: int, ctx: int, starts=None) -> d
         "windows_crossing_documents": int(crossing),
         "crossing_window_fraction": float(crossing / total) if total else None,
     }
+
+
+def window_crossing_flags(boundaries, n_tokens: int, ctx: int, starts) -> list:
+    """逐窗口返回是否跨文档边界（与 ``starts`` 同序、同长）。
+
+    与 :func:`window_boundary_stats` 的 ``explicit_starts`` 口径一致：窗口
+    输入是 token ``[s, s+ctx-1]``、标签是 ``[s+1, s+ctx]``；只要存在文档
+    边界 ``b`` 落在 ``[s+1, s+ctx]``，该窗口就跨越了文档边界。
+
+    区别在于这里**不去重也不排序**：输出与调用方给出的窗口列表
+    （``window_losses``/``window_indices`` 的顺序）一一对应，因此可以把
+    跨文档标志直接绑定到逐窗口损失，做“跨文档 vs 文档内”的分层分解。
+    起点越界（``s<0`` 或 ``s+ctx >= n_tokens``，标签 token 不存在）直接
+    报错，不静默产生错误的边界判断。
+    """
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx!r}")
+    n_tokens = strict_int(n_tokens, "n_tokens")
+    if n_tokens < 0:
+        raise ValueError(f"n_tokens 必须 >= 0，收到 {n_tokens!r}")
+    bounds = sorted({int(b) for b in (boundaries or []) if 0 < int(b) < n_tokens})
+    flags = []
+    max_start = n_tokens - ctx - 1
+    for raw in starts if starts is not None else []:
+        s = strict_int(raw, "start")
+        if s < 0 or s > max_start:
+            raise ValueError(
+                f"窗口起点必须落在 [0, {max_start}] 内（n_tokens={n_tokens}, "
+                f"ctx={ctx}），收到 {s}"
+            )
+        idx = bisect.bisect_right(bounds, s)
+        flags.append(bool(idx < len(bounds) and bounds[idx] <= s + ctx))
+    return flags
 
 
 def grid_window_starts(n_tokens: int, ctx: int) -> list:

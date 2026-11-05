@@ -29,7 +29,9 @@ Benjamini–Yekutieli（BY）q 值作为任意依赖下的保守敏感性。
 * n-gram 基线的逐变体单样本配对检验；
 * 参数化稳健性对照/Shapley 与线性探针基线（若运行）；
 * 样本效率 steps-to-target（到达参照终点水平的 log2 步数比，若运行；
-  逐 pair 一条检验，与逐 step 预算轨迹不同——后者因高相关被排除）。
+  逐 pair 一条检验，与逐 step 预算轨迹不同——后者因高相关被排除）；
+* 跨文档 vs 文档内窗口分层交互（同一批评测窗口按是否跨文档边界分层，
+  逐 pair 一条交互检验；两个分层各自的 ΔNLL 只作描述，不重复计入家族）。
 
 排除：预注册确认性检验（由 Holm/FWER 与预注册门单独处理）、样例级
 McNemar、窗口级 PPL、RULER 分层 meta 分析、分析选择多重宇宙、缺失结果
@@ -75,6 +77,7 @@ SOURCE_CN = {
     "reparameterization_shapley": "参数化 Shapley",
     "probe_baseline": "线性探针基线",
     "sample_efficiency": "样本效率(steps-to-target)",
+    "doc_strata": "跨文档/文档内窗口分层",
     "unknown": "未标注来源",
 }
 
@@ -309,8 +312,8 @@ def exploratory_fdr(tests, alpha=DEFAULT_ALPHA, min_seeds=DEFAULT_MIN_SEEDS):
         "family_definition": (
             "所有非预注册的种子级探索性检验：主表未登记项、因果病灶/匹配"
             "对照、剂量-反应、推理期 Shapley/交互、RULER 长度、n-gram "
-            "基线、参数化稳健性、线性探针基线与样本效率(steps-to-target)"
-            "（实际运行时）"
+            "基线、参数化稳健性、线性探针基线、样本效率(steps-to-target)"
+            "与跨文档/文档内窗口分层交互（实际运行时）"
         ),
         "family_size": m,
         "n_tests_total": len(items),
@@ -368,6 +371,7 @@ def collect_seed_level_tests(
     reparameterization=None,
     probe_comparison=None,
     sample_efficiency=None,
+    doc_strata=None,
 ):
     """合并各分析层的种子级探索性检验，并写入 ``fdr_source``。
 
@@ -417,4 +421,6 @@ def collect_seed_level_tests(
         add(probe_comparison.get("tests"), "probe_baseline")
     if isinstance(sample_efficiency, dict):
         add(sample_efficiency.get("pairs"), "sample_efficiency")
+    if isinstance(doc_strata, dict):
+        add(doc_strata.get("interaction_tests"), "doc_strata")
     return out

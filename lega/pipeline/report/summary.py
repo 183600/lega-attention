@@ -829,6 +829,10 @@ def _summary_part_a(
     sample_efficiency = analyze_sample_efficiency(
         budget_curves, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS
     )
+    # 跨文档 vs 文档内窗口分层（探索性）：同一批评测窗口按“是否跨文档边界”
+    # 分层，检验候选收益是否集中在拼接语料注入的无关上下文上。它把最近加入
+    # 的文档结构证据从“描述”升级为“可检验的交互”，但不进入确认性判定。
+    doc_strata = analyze_doc_strata(runs, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS)
     # 参数化稳健性（探索性）：比较归一化 c 与原始 log max_p 两套完整
     # 2^3 网格上的单因子边与 Shapley 归因。只有显式运行原始对照时才有
     # 内容；缺格/协议不一致会返回可机读原因，不伪造“无差异”。
@@ -2051,6 +2055,7 @@ def _summary_part_a(
         "budget_curves",
         "budget_sensitivity",
         "sample_efficiency",
+        "doc_strata",
         "by_bs",
         "c",
         "cal_rows",
@@ -2278,6 +2283,7 @@ def build_summary(
         "dose_response": ctx["dose_tests"],
         "budget_sensitivity": ctx["budget_sensitivity"],
         "sample_efficiency": ctx.get("sample_efficiency"),
+        "doc_strata": ctx.get("doc_strata"),
         "multiverse": ctx["multiverse"],
         "ranking": ctx.get("ranking"),
         "test_reuse": ctx.get("test_reuse"),

@@ -182,6 +182,7 @@ def _summary_part_c(**kw):
         bad_cross = kw["bad_cross"]
     budget_sensitivity = kw.get("budget_sensitivity")
     sample_efficiency = kw.get("sample_efficiency")
+    doc_strata = kw.get("doc_strata")
     if "capacity_only_test" in kw:
         capacity_only_test = kw["capacity_only_test"]
     capacity_decomposition = kw.get("capacity_decomposition")
@@ -322,6 +323,7 @@ def _summary_part_c(**kw):
         reparameterization=reparameterization,
         probe_comparison=probe_cmp,
         sample_efficiency=sample_efficiency,
+        doc_strata=doc_strata,
     )
     exploratory_fdr = analyze_exploratory_fdr(
         fdr_tests, alpha=ALPHA, min_seeds=MIN_SEEDS
@@ -1501,6 +1503,16 @@ def _summary_part_c(**kw):
             "首次穿越可能为瞬态（已标注）；目标为 val（选型集）。"
             "收敛更快 ≠ 终点更好，须与终点配对检验并列解读。"
         ),
+        "doc_strata": doc_strata,
+        "doc_strata_note": (
+            "跨文档 vs 文档内窗口分层（探索性）：同一批评测窗口按 "
+            "window_crossing_documents 分层，交互=跨文档ΔNLL−文档内ΔNLL，"
+            "跨种子配对 t + 独立 Holm；交互显著为负说明收益集中在跨文档"
+            "窗口（拼接语料注入的无关上下文），不显著=未检出分层差异。"
+            "两层共享同一批种子/checkpoint，不是独立研究；该层不进入"
+            "确认性判定，只有交互检验进探索性 FDR 家族。缺逐窗口跨文档"
+            "标志/某一层无窗口时 available=false，不能据此宣称“无分层”。"
+        ),
         "causal_ablation": causal_tests,
         "causal_ablation_equivalence": _causal_equivalence_overview(causal_tests),
         "matched_ablation_contrasts": (matched_ablation_contrasts),
@@ -1651,6 +1663,7 @@ def _summary_part_c(**kw):
         "benefit",
         "budget_sensitivity",
         "sample_efficiency",
+        "doc_strata",
         "ci",
         "ci_s",
         "cluster_rows",

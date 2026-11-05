@@ -18,7 +18,10 @@ from lega.datacheck import (
     sha256_file,
     split_set_digest,
     split_documents,
+    token_boundary_positions,
     verify_split_set,
+    window_boundary_stats,
+    window_crossing_flags,
     write_split_set,
 )
 
@@ -116,6 +119,31 @@ def test_document_structure_report_counts_cross_document_windows():
     assert aligned["n_documents_eligible"] == 4
     assert abs(aligned["token_coverage_fraction"] - (4 * 64 / 400)) < 1e-9
     print("  [ok] 结构报告：跨文档窗口期望比例与文档内覆盖量口径一致")
+
+
+def test_window_crossing_flags_align_with_starts():
+    # 3 篇文档各 10 token：边界在 10、20；总 token=30。
+    counts = [10, 10, 10]
+    bounds = token_boundary_positions(counts)
+    assert bounds == [10, 20]
+    ctx = 4
+    starts = [0, 5, 7, 12, 18, 22]
+    flags = window_crossing_flags(bounds, 30, ctx, starts)
+    # 口径：边界 b 落在 [s+1, s+ctx] 即跨越。
+    # s=0 -> [1,4] 无边界 False；s=5 -> [6,9] False；
+    # s=7 -> [8,11] 含 10 True；s=12 -> [13,16] False；
+    # s=18 -> [19,22] 含 20 True；s=22 -> [23,26] False。
+    assert flags == [False, False, True, False, True, False]
+    # 与 window_boundary_stats 的 explicit_starts 计数一致（且不去重乱序）。
+    stats = window_boundary_stats(bounds, 30, ctx, starts=starts)
+    assert stats["windows_crossing_documents"] == sum(flags)
+    # 越界起点必须显式失败：s+ctx 的标签 token 不存在。
+    try:
+        window_crossing_flags(bounds, 30, ctx, [30])
+        raise AssertionError("越界起点应当报错")
+    except ValueError:
+        pass
+    print("  [ok] 逐窗口跨文档标志：与起点同序、与聚合统计一致、越界报错")
 
 
 def test_split_set_digest_detects_mixed_version_splits():

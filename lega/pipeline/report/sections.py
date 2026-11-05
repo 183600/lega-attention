@@ -166,6 +166,76 @@ def _render_sample_efficiency(analysis):
     return out
 
 
+def _render_doc_strata(doc_strata):
+    """渲染跨文档 vs 文档内窗口分层；检验收益是否集中在拼接伪影上。"""
+    out = ["", "### 跨文档 vs 文档内窗口分层（探索性：收益是否来自拼接伪影）", ""]
+    if not isinstance(doc_strata, dict):
+        out.append("⚠ 未生成文档分层结果（汇总阶段缺少逐窗口跨文档标志）。")
+        return out
+    out.append(
+        "把**同一批**评测窗口按“是否跨文档边界”（`window_crossing_documents`，"
+        "与逐窗口损失同序）分成两层，各自做候选−参照的逐种子配对："
+        "交互 = 跨文档 ΔNLL − 文档内 ΔNLL，跨种子配对 t + 独立 Holm。"
+        "交互显著为负=收益集中在跨文档窗口（可能来自拼接语料注入的无关"
+        "上下文），显著为正=候选在跨文档窗口相对更差，不显著=未检出分层"
+        "差异。两层共享同一批种子与 checkpoint，不是独立研究；该层为探索性"
+        "证据，不进入任何确认性判定。"
+    )
+    pairs = [p for p in (doc_strata.get("pairs") or []) if isinstance(p, dict)]
+    available = [p for p in pairs if p.get("available")]
+    if not available:
+        reasons = sorted({
+            str(p.get("reason") or "不可用") for p in pairs
+        })
+        detail = "；".join(reasons) if reasons else "无配对"
+        out.append(
+            "⚠ 无可用分层结果（缺逐窗口跨文档标志、两侧窗口/协议不一致，"
+            f"或某一层没有窗口）：{detail}。不能据此宣称“收益与跨文档无关”。"
+        )
+        return out
+    out.append("")
+    out.append(
+        "| 对比 | n种子 | 跨文档窗口(数) | 文档内窗口(数) | 交互ΔNLL | "
+        "交互 p_adj(Holm) | 结论 |"
+    )
+    out.append("|---|---|---|---|---|---|---|")
+
+    def _order(p):
+        return (str(p.get("candidate")), str(p.get("reference")))
+
+    for p in sorted(available, key=_order)[:14]:
+        inter = p.get("interaction") or {}
+        cross = p.get("cross") or {}
+        aligned = p.get("aligned") or {}
+        inter_s = _fmt_signed(inter.get("mean_diff"))
+        cross_s = _fmt_signed(cross.get("mean_diff"))
+        aligned_s = _fmt_signed(aligned.get("mean_diff"))
+        padj = p.get("p_adj")
+        padj_s = f"{padj:.4f}" if isinstance(padj, (int, float)) else "-"
+        out.append(
+            f"| {p.get('candidate')} vs {p.get('reference')} "
+            f"| {p.get('n_seeds', '-')} "
+            f"| {cross_s}（{p.get('n_cross_min')}–{p.get('n_cross_max')}） "
+            f"| {aligned_s}（{p.get('n_aligned_min')}–{p.get('n_aligned_max')}） "
+            f"| {inter_s} | {padj_s} | {p.get('verdict', '-')} |"
+        )
+    if len(available) > 14:
+        out.append("")
+        out.append(
+            f"（仅列前 14 组；其余 {len(available) - 14} 组的逐种子明细见 "
+            "`significance.json` 的 `doc_strata`。）"
+        )
+    out.append("")
+    out.append(
+        "注: 跨文档/文档内两列是各自 ΔNLL 的跨种子均值（<0=候选更好）；"
+        "交互检验才是“收益是否分层”的主检验，已进入探索性 FDR 家族。"
+        "文档内窗口集合依赖文档边界切分协议，文档太短时可能没有文档内"
+        "窗口（该对比显式不可用，不按 0 补齐）。本层与 `doc_aligned_eval`"
+        "互补：后者是另一套窗口网格的绝对值，本层是同一窗口集合上的分层。"
+    )
+    return out
+
+
 def _render_dose_response(dose):
     """渲染门控系数剂量-反应曲线；只作机制描述，不重选 checkpoint。"""
     if not isinstance(dose, dict):
@@ -416,6 +486,7 @@ def _summary_part_b(**kw):
     dose_response = kw.get("dose_tests")
     budget_sensitivity = kw.get("budget_sensitivity")
     sample_efficiency = kw.get("sample_efficiency")
+    doc_strata = kw.get("doc_strata")
     if "ci" in kw:
         ci = kw["ci"]
     if "comp" in kw:
@@ -1749,6 +1820,7 @@ def _summary_part_b(**kw):
 
     md += _render_budget_sensitivity(budget_sensitivity)
     md += _render_sample_efficiency(sample_efficiency)
+    md += _render_doc_strata(doc_strata)
 
     # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
     md += [
@@ -2098,6 +2170,7 @@ def _summary_part_b(**kw):
         "diags",
         "direction_cn",
         "dirty",
+        "doc_strata",
         "ep_min",
         "ep_s",
         "eps",

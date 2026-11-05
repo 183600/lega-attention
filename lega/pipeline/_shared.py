@@ -72,6 +72,7 @@ from lega.lengtheffect import (context_macro_means,  # noqa: E402
 from lega.budget_sensitivity import (  # noqa: E402
     analyze_budget_sensitivity, curves_from_runs, load_train_curve)
 from lega.sample_efficiency import analyze_sample_efficiency  # noqa: E402
+from lega.doc_strata import analyze_doc_strata  # noqa: E402
 from lega.badcase import (CATEGORY_CN as BADCASE_CN,  # noqa: E402
                           WINDOW_CATEGORY_CN, analyze_badcases,
                           analyze_worst_windows, cross_variant_analysis,

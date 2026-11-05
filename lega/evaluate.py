@@ -28,6 +28,7 @@ from .datacheck import (
     subsample_starts,
     token_boundary_positions,
     window_boundary_stats,
+    window_crossing_flags,
 )
 from .model import (
     gate_extra_params,
@@ -925,6 +926,7 @@ def main():
     # 确认性判定，也不替代主 PPL 口径。
     structure_audit = None
     doc_aligned_eval = None
+    window_crossing = None
     doc_counts, doc_meta = doc_token_counts_for_split(args.data_dir, split)
     if doc_counts:
         boundaries = token_boundary_positions(doc_counts)
@@ -936,15 +938,27 @@ def main():
         cross = None
         if eval_starts:
             cross = window_boundary_stats(boundaries, len(val), ctx, starts=eval_starts)
+            # 逐窗口跨文档标志（与 window_losses/window_indices 同序同长），
+            # 供“跨文档 vs 文档内”效应分层：同一条拼接流上的窗口只有“是否
+            # 跨文档边界”不同，因此这一分解不改变主 PPL 口径，只是把收益
+            # 拆到两类窗口上。长度对不上时置空，不产生错位绑定。
+            losses = metrics.get("window_losses")
+            if isinstance(losses, list) and len(losses) == len(eval_starts):
+                window_crossing = window_crossing_flags(
+                    boundaries, len(val), ctx, eval_starts
+                )
         structure_audit = {
             "status": "ok",
             "protocol": (doc_meta or {}).get("group_unit"),
             "n_documents": int((doc_meta or {}).get("n_documents") or len(doc_counts)),
             "n_boundaries": int(len(boundaries)),
             "cross_document_windows": cross,
+            "window_crossing_documents_available": window_crossing is not None,
             "note": (
                 "cross_document_windows 统计本次实际评测的窗口里有多少跨过了"
-                "文档边界；比例高说明评测信号里混入了大量“跨文档跳转”损失"
+                "文档边界；比例高说明评测信号里混入了大量“跨文档跳转”损失。"
+                "window_crossing_documents_available 表示逐窗口跨文档标志已"
+                "与逐窗口损失绑定，可用于跨文档/文档内分层"
             ),
         }
         if not args.no_doc_aligned_eval:
@@ -1062,6 +1076,9 @@ def main():
         # 下游可做窗口级配对（评估抽样不确定性），与跨种子方差分开报告。
         "window_losses": metrics.get("window_losses"),
         "window_indices": metrics.get("window_indices"),
+        # 逐窗口“是否跨文档边界”标志：与 window_losses/window_indices 同序；
+        # 缺文档边界侧车或长度不匹配时为 None（不能默认“没有跨文档窗口”）。
+        "window_crossing_documents": window_crossing,
         # 文档结构证据（描述性）：实际评测窗口的跨文档比例，以及“文档内
         # PPL”这一独立口径。缺结构证据时如实标为 unavailable，不能默认
         # “没有跨文档窗口”。
