@@ -135,6 +135,34 @@ def test_audit_detects_variant_level_channel_drift(monkeypatch):
     assert any("no_query" in p and "qgate" in p for p in audit["problems"]), audit
 
 
+def test_audit_detects_variant_capability_clipping_drift(monkeypatch):
+    """名字推导的通道集合与实测注册参数不一致时，审计必须抓出来。"""
+    import lega.attention as attention_mod
+    import lega.pipeline.common as common_mod
+
+    audit = single_factor_audit()
+    rows = {r["variant"]: r for r in audit["inference_variant_capabilities"]}
+    assert rows["qgate"]["named_channels"] == ["A"], rows["qgate"]
+    assert rows["gate_only"]["named_channels"] == [], rows["gate_only"]
+
+    real = attention_mod.variant_gate_capabilities
+
+    def drifted(variant):
+        caps = dict(real(variant))
+        if variant == "qgate":
+            # 多报一条集中度通道：结果层会把 qgate 的 no_evidence 当成
+            # A+B 多因素干预，并漏掉它与 no_query 的重复关系。
+            caps["conc"] = True
+        return caps
+
+    monkeypatch.setitem(common_mod.__dict__, "variant_gate_capabilities", drifted)
+    audit = single_factor_audit()
+    assert not audit["ok"], audit
+    assert any(
+        "qgate" in p and "能力裁剪口径不一致" in p for p in audit["problems"]
+    ), audit["problems"]
+
+
 def _payload(variant, seed, lesion_deltas):
     return {
         "variant": variant,

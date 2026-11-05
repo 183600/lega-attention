@@ -1661,6 +1661,25 @@ def _summary_part_b(**kw):
         else:
             md.append("- ✅ 未发现重复干预。")
         md.append("")
+    cap_rows = [
+        r
+        for r in (sf_audit.get("inference_variant_capabilities") or [])
+        if isinstance(r, dict) and r.get("variant")
+    ]
+    if cap_rows:
+        cap_bad = [r["variant"] for r in cap_rows if r.get("ok") is not True]
+        if cap_bad:
+            md.append(
+                "⚠ 以下变体的能力裁剪口径不一致（名字推导 vs 实测注册参数）："
+                + "、".join(sorted(cap_bad))
+                + "——结果层按变体裁剪推理期病灶会失真，需修正后重跑。"
+            )
+        else:
+            md.append(
+                "✅ 按变体裁剪推理期病灶所用的通道映射与实现层实测注册参数"
+                f"逐变体一致（{len(cap_rows)} 个带门变体）。"
+            )
+        md.append("")
     reg_rows = [
         r
         for r in (sf_audit.get("registered_single_factor") or [])

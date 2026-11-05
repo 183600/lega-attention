@@ -1535,6 +1535,74 @@ def _audit_alt_conc_variants(problems):
     return rows
 
 
+def _audit_variant_capability_clipping(problems):
+    """核对按变体裁剪推理期病灶所用的能力映射与实现层一致。
+
+    结果层（``_ablation_lesion_records``/``_matched_ablation_contrasts``）用
+    :func:`lega.attention.variant_gate_capabilities`（按变体名与实现开关推导）
+    决定一个病灶在该变体上**实际**影响哪几条证据通道；审计层则用
+    :func:`lega.ablate.probe_lesion_param_effects`（快照→施加→逐参数实测）
+    核对。两条路径若漂移——例如名字推导多报一条通道——结果层会把
+    ``qgate`` 上的 ``no_evidence`` 标成多因素 A+B+C、漏掉它与 ``no_query``
+    的重复干预；而探针审计因为走的是另一条路径仍然全绿。这里逐带门变体把
+    “名字推导的通道集合”与“实测注册的 gate 参数所对应的通道集合”对齐，
+    保证单因素推理期实验的裁剪口径只有一套事实来源。
+    """
+    rows = []
+    try:
+        from lega.ablate import _GATE_PARAM_CHANNEL
+        from lega.attention import _GATED, probe_gate_factors
+    except Exception as e:  # pragma: no cover - 依赖损坏只在极端环境发生
+        problems.append(f"无法核对变体能力裁剪映射：{type(e).__name__}: {e}")
+        return rows
+    name_fn = globals().get("variant_gate_capabilities")
+    if not callable(name_fn):
+        problems.append("缺少 variant_gate_capabilities，无法核对推理期通道裁剪")
+        return rows
+    if not isinstance(_GATED, (tuple, list)):
+        problems.append("_GATED 必须是带门变体序列")
+        return rows
+    channel_caps = (("A", "query"), ("B", "conc"), ("C", "len"))
+    for variant in sorted(set(_GATED)):
+        named_caps = name_fn(variant)
+        if not isinstance(named_caps, dict):
+            problems.append(
+                f"variant_gate_capabilities({variant!r}) 返回非法结构："
+                f"{named_caps!r}"
+            )
+            continue
+        named = {c for c, key in channel_caps if named_caps.get(key)}
+        probe = probe_gate_factors(variant)
+        if probe.get("error"):
+            problems.append(
+                f"无法实测变体 {variant!r} 的注册门控参数：{probe['error']}"
+            )
+            continue
+        impl = {
+            _GATE_PARAM_CHANNEL[name]
+            for name in (probe.get("params") or [])
+            if name in _GATE_PARAM_CHANNEL
+        }
+        ok = named == impl
+        if not ok:
+            problems.append(
+                f"变体 {variant!r} 的能力裁剪口径不一致："
+                f"variant_gate_capabilities 给出 {sorted(named) or '无'}，"
+                f"实测注册参数对应 {sorted(impl) or '无'}："
+                "推理期病灶按变体裁剪会失真（多通道对照会被误标成单因素或"
+                "漏掉重复干预）"
+            )
+        rows.append(
+            {
+                "variant": variant,
+                "named_channels": sorted(named),
+                "implementation_channels": sorted(impl),
+                "ok": ok,
+            }
+        )
+    return rows
+
+
 def single_factor_audit():
     """核对“需要单因素的消融对比”确实只改变一个门控因子。
 
@@ -1818,6 +1886,7 @@ def single_factor_audit():
     registered_single_factor = _audit_registered_single_factor(
         contrasts, problems, implementation_factors
     )
+    variant_capabilities = _audit_variant_capability_clipping(problems)
     lesion_implementation = _audit_lesion_implementation(problems)
     lesion_variant_effects, lesion_duplicates = _audit_lesion_variant_effects(problems)
     forbidden_contrasts = _forbidden_multi_factor_contrasts(
@@ -1838,6 +1907,7 @@ def single_factor_audit():
         "alt_conc_contrasts": alt_conc,
         "registered_single_factor": registered_single_factor,
         "implementation_factors": implementation_factors,
+        "inference_variant_capabilities": variant_capabilities,
         "inference_lesion_implementation": lesion_implementation,
         "inference_lesion_variant_effects": lesion_variant_effects,
         "inference_lesion_duplicate_interventions": lesion_duplicates,

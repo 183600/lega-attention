@@ -77,7 +77,9 @@ $$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
 - 结果层 `_ablation_lesion_records` 给每条记录写入 `changed_factors`/`contrast_type`/`declared_channels`/`channels_degraded`；重复干预保留在结果里并标 `duplicate_of`/`excluded_from_family`，但**排除出 Holm 家族**（`p_adj=None` + 显式 verdict），一次实验不计为两次独立检验。
 - 汇总页因果消融表新增"类型（实际影响通道）"列：只有"单因素 A/B/C"的 ΔNLL 才能归因到某个组件；变体缺通道时显式写出"声明 A/B/C，该变体缺通道"。
 
-`tests/test_inference_single_factor.py` 覆盖这条链：变体通道裁剪、对比类型判定、重复签名、参数级探针、逐变体审计（含漂移注入）、结果层标记与 Holm 排除、汇总页渲染。
+**裁剪口径的两条路径必须一致**：结果层用的是名字/开关推导的 `lega.attention.variant_gate_capabilities`，审计层用的是参数级实测的 `probe_lesion_param_effects`。两者是同一事实来源的两条读法，任一路径漂移都会出问题——例如名字推导在 `qgate` 上多报一条集中度通道，结果层就会把 `no_evidence` 标成多因素 A+B、并漏掉它与 `no_query` 的重复关系，而探针审计仍全绿。`single_factor_audit()` 因此新增 `inference_variant_capabilities` 段：逐带门变体要求"名字推导的通道集合 = 实测注册的 gate 参数对应的通道集合"，不一致写入 `problems` 并在汇总页"单因素消融审计"小节点名。
+
+`tests/test_inference_single_factor.py` 覆盖这条链：变体通道裁剪、对比类型判定、重复签名、参数级探针、逐变体审计（含漂移注入）、能力裁剪口径漂移、结果层标记与 Holm 排除、汇总页渲染。
 
 ### 参数化稳健性：归一化 c vs 原始 log max_p
 
