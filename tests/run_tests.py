@@ -30,6 +30,7 @@ MODULES = [
     "tests.test_datacheck_bins",
     "tests.test_datacheck_exact_ngram",
     "tests.test_datacheck_provenance",
+    "tests.test_doc_structure",
     "tests.test_pipeline_datacheck",
     "tests.test_pipeline_audit",
     "tests.test_pipeline_report",

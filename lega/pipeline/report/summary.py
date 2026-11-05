@@ -1582,18 +1582,38 @@ def _summary_part_a(
             group = sp.get("group_unit")
             cross = sp.get("documents_cross_cut")
             pcross = sp.get("paragraphs_cross_cut")
-            if group or cross is not None or pcross is not None:
+            lcross = sp.get("lines_cross_cut")
+            if group or cross is not None or pcross is not None or lcross is not None:
                 warn = ""
                 if cross:
                     warn += "（⚠ 文档群组跨 split，见告警 split_documents_cross_cut）"
                 if pcross:
                     warn += "（⚠ 段落群组跨 split，见告警 split_paragraphs_cross_cut）"
+                if lcross:
+                    warn += "（⚠ 切点落在行中间，见告警 split_lines_cross_cut）"
                 md.append(
                     f"- 群组完整性：群组单位={group or '-'}；"
                     f"标题数={sp.get('n_headings', '-')}；"
                     f"段落边界数={sp.get('n_paragraph_boundaries', '-')}；"
                     f"文档跨切点={cross if cross is not None else '-'}；"
-                    f"段落跨切点={pcross if pcross is not None else '-'}" + warn
+                    f"段落跨切点={pcross if pcross is not None else '-'}"
+                    + (f"；行跨切点={lcross}" if lcross is not None else "")
+                    + warn
+                )
+            # 群组级互斥性审计：把“按文档划分”的声明升级为可复核结论
+            gd = _as_dict(sp.get("group_disjointness"))
+            if gd:
+                verdict = gd.get("verdict", "-")
+                md.append(
+                    f"- 群组级互斥性审计（{gd.get('protocol', '-')}）：{verdict}；"
+                    f"文档群组共享={gd.get('groups_disjoint', '-')}；"
+                    f"段落共享={gd.get('paragraphs_disjoint', '-')}；"
+                    f"行共享={gd.get('line_prefixes_disjoint', '-')}"
+                    + (
+                        ""
+                        if gd.get("groups_disjoint") and gd.get("paragraphs_disjoint")
+                        else "（⚠ 群组/段落级共享属硬证据，训练前应被拦截）"
+                    )
                 )
             actual = _as_dict(sp.get("actual_fractions"))
             target = _as_dict(sp.get("target_fractions"))
@@ -1781,6 +1801,49 @@ def _summary_part_a(
                 )
                 + "。字符级兜底与 BPE 的 token PPL 不可直接比较，"
                 "规模与分母以字节/字符核算为准"
+            )
+        # 文档结构证据：跨文档窗口比例（拼接伪影的规模）与文档内覆盖量。
+        # 跨文档窗口正是“数据拼接注入的无关内容”，占比越高，评测信号里
+        # 越多噪声与门控机制无关——解读 PPL 差异时必须一并给出。
+        struct = _as_dict(data_report.get("structure"))
+        if struct:
+            cross = _as_dict(struct.get("cross_document_windows"))
+            aligned = _as_dict(struct.get("doc_aligned_windows"))
+            if cross:
+                rows = []
+                for ctx_key in sorted(cross, key=lambda x: int(x)):
+                    entry = _as_dict(cross.get(ctx_key))
+                    frac = _finite_number(entry.get("crossing_window_fraction"))
+                    rows.append(
+                        f"ctx={ctx_key}: "
+                        + ("不可用" if frac is None else f"{frac:.1%}")
+                    )
+                md.append(
+                    f"- 文档结构：群组单位={struct.get('group_unit', '-')}；"
+                    f"文档数={_int_or_zero(struct.get('n_documents')):,}；"
+                    f"token 边界数={_int_or_zero(struct.get('n_boundaries')):,}；"
+                    "期望跨文档窗口比例 "
+                    + "、".join(rows)
+                    + "（起点均匀随机的精确期望；比例越高，评测窗口里越多"
+                    "“跨文档跳转”噪声，与门控机制无关）"
+                )
+            if aligned:
+                cov = [
+                    f"ctx={k}: {_int_or_zero(_as_dict(v).get('n_windows')):,} 个窗口/"
+                    f"覆盖 {_fmt_rate(_as_dict(v).get('token_coverage_fraction'))}"
+                    for k, v in sorted(aligned.items(), key=lambda kv: int(kv[0]))
+                ]
+                md.append(
+                    "- 文档内窗口（完全落在单篇文档内）："
+                    + "、".join(cov)
+                    + "（文档内 PPL 对照口径的可用窗口来源）"
+                )
+        split_set = _as_dict(data_report.get("split_set"))
+        if split_set:
+            digest = split_set.get("digest") or "-"
+            md.append(
+                f"- 划分集合指纹（三个 split 来自同一次划分的证据）：{digest}；"
+                "逐 split 哈希见 data_report.json / meta.json；训练前会重算比对"
             )
         md.append(
             f"- 去污染：与 val/test 重复的训练长行移除 "

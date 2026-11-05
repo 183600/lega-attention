@@ -578,6 +578,14 @@ def split_protocol_alerts(split_protocol: dict) -> list:
             f"切点类型 {p.get('cut_kinds', '?')}），违反“段落整体落在同一侧”，"
             "须调整划分比例或为语料补空行分隔",
         )
+    if p.get("lines_cross_cut"):
+        add(
+            "warning",
+            "split_lines_cross_cut",
+            f"切点落在行中间：同一行被劈成两半（切点偏移 "
+            f"{p.get('cut_offsets', '?')}、切点类型 {p.get('cut_kinds', '?')}），"
+            "跨 split 的残片无法互相核对，须调整划分比例或更换可整体划分的语料",
+        )
     short = p.get("overlap_short_lines")
     if isinstance(short, dict):
         bad_short = {}
@@ -596,6 +604,51 @@ def split_protocol_alerts(split_protocol: dict) -> list:
                 f"（<{p.get('min_chars', '?')} 字符，多为标题/固定用语）；"
                 "未自动删除，但重复样本会削弱 held-out 独立性，须人工核查",
             )
+    # 群组级互斥性审计：逐行比较只能发现“两侧行内容完全相同”，文档若被
+    # 从中间切开（行被截断），两侧行不再相等，“按文档划分”的声明就与实际
+    # 内容脱节。群组/段落级共享是硬证据，行前缀级共享只作告警（可能偶然）。
+    group_audit = p.get("group_disjointness")
+    if isinstance(group_audit, dict):
+        pairs = group_audit.get("pairs")
+        if isinstance(pairs, dict):
+            shared_groups = {
+                str(pair): val.get("shared_groups") or 0
+                for pair, val in pairs.items()
+                if isinstance(val, dict) and (val.get("shared_groups") or 0)
+            }
+            shared_paragraphs = {
+                str(pair): val.get("shared_paragraphs") or 0
+                for pair, val in pairs.items()
+                if isinstance(val, dict) and (val.get("shared_paragraphs") or 0)
+            }
+            shared_prefixes = {
+                str(pair): val.get("shared_line_prefixes") or 0
+                for pair, val in pairs.items()
+                if isinstance(val, dict) and (val.get("shared_line_prefixes") or 0)
+            }
+            if shared_groups:
+                add(
+                    "warning",
+                    "split_group_overlap",
+                    f"群组级互斥性审计发现同一份文档同时出现在多个 split："
+                    f"{shared_groups}；文档被复制进两个 split，held-out 独立性"
+                    "不成立，须重建划分",
+                )
+            if shared_paragraphs:
+                add(
+                    "warning",
+                    "split_paragraph_overlap",
+                    f"群组级互斥性审计发现同一段落同时出现在多个 split："
+                    f"{shared_paragraphs}；文档被从段落边界切开，须重建划分",
+                )
+            if shared_prefixes:
+                add(
+                    "warning",
+                    "split_line_prefix_overlap",
+                    f"群组级互斥性审计发现跨 split 共享的行前缀："
+                    f"{shared_prefixes}；提示文档被从行中间切开（逐行比较"
+                    "看不到），也可能含偶然命中，须人工核查样例",
+                )
     verified = p.get("verified_disjoint")
     overlaps = p.get("overlap_long_lines")
     bad = {}

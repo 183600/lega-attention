@@ -8,6 +8,15 @@
     64-gram 重叠筛查、一元分布漂移），结果写 data_report.json；
   * val/test 内容绝不被改写；测试集只在最终评估时访问（访问账本）。
 
+文档结构约定（缓存协议 v13 起）:
+  * token 流**按文档群组分段编码**：token 不跨文档边界，文档边界在 token
+    空间因此精确可知；
+  * doc_boundaries.json 记录每个 split 的逐文档 token 计数；
+  * data_report.structure 给出文档长度分布、跨文档窗口比例（随 ctx 变化）
+    与“完全落在单个文档内”的窗口覆盖量。LEGA 的机制主张是“找不到可靠信息
+    时少写无关内容”，而跨文档窗口正是数据拼接本身注入的无关内容；不把它
+    量化出来，收益就可能来自拼接伪影而不是机制本身。
+
 约定 data_dir 内文件：
   train.txt / val.txt     原始文本（prepare_data.py 或 make_dummy_data.py 生成）
   train.bin / val.bin     uint16 token 流（prepare_bins 生成）
@@ -41,9 +50,11 @@ from .datacheck import (
     decontaminate_texts,
     distribution_shift,
     doc_aligned_windows,
-    document_stats,
+    document_stats as structure_document_stats,
+    document_structure_report,
     exact_overlap_alerts,
     grid_window_starts,
+    group_disjointness_audit,
     manifest_digest,
     ngram_overlap,
     ngram_overlap_exact,
@@ -52,6 +63,7 @@ from .datacheck import (
     sanitize_text,
     short_ngram_overlap,
     split_documents,
+    split_set_digest,
     summarize_test_access,
     text_length_stats,
     token_boundary_positions,
@@ -85,11 +97,15 @@ _GPT2_CACHE = {}
 # 继续命中会让汇总页把“未扫描”当成“无重叠”，必须重建。
 # v11：data_report 增加 val/test 内部近似重复簇与块级有效样本量审计；旧
 # 缓存缺少这份“评测窗口是否独立”的证据，继续命中会把未审计当成无重复。
-# v12：token 流按文档分段编码（文档边界在 token 空间精确可知），并新增
-# doc_boundaries.json（每 split 的文档 token 计数）与 data_report.structure
-# （文档长度分布、跨文档窗口比例随 ctx 的变化）。旧缓存既没有边界证据，
-# 也没有结构审计；继续命中会把“未审计文档结构”当成“没有跨文档窗口”。
-CACHE_SCHEMA = 12
+# v12：data_report 新增 val/test 内部近似重复簇与块级有效样本量审计；旧
+# 缓存缺少这份“评测窗口是否独立”的证据，继续命中会把未审计当成无重复。
+# v13：token 流按文档群组分段编码（token 不跨文档边界），新增
+# doc_boundaries.json（每 split 的逐文档 token 计数）与 data_report.structure
+# （文档长度分布、跨文档窗口比例随 ctx 的变化、文档内窗口覆盖量），并把
+# 群组级 split 互斥性审计（群组/段落/行前缀三层）写进 split_protocol。
+# 旧缓存既没有边界证据也没有结构审计，继续命中会把“未审计文档结构”当成
+# “没有跨文档窗口”，且报告里的群组互斥结论无法复核，必须重建。
+CACHE_SCHEMA = 13
 
 # 文档边界侧车文件：记录每个 split 的文档 token 计数（文档边界 = 累计和）。
 DOC_BOUNDARIES_FILE = "doc_boundaries.json"
@@ -188,6 +204,16 @@ def _cache_integrity(data_dir: str, meta: dict, report_path: str, report_enabled
             continue
         if recorded.get(split) != _sha256_file(path):
             return False, f"{split}.txt 内容与构建 bin 时不一致（缓存过期）", False
+    # 文档边界侧车：token 流按文档分段编码，缺了它就无法回答“窗口跨了多少
+    # 次文档边界”，报告里的结构审计也会与实际 token 流脱节。
+    boundaries_path = os.path.join(data_dir, DOC_BOUNDARIES_FILE)
+    boundaries_sha = meta.get("doc_boundaries_sha256")
+    if not isinstance(boundaries_sha, str) or not boundaries_sha:
+        return False, "缓存未记录文档边界侧车哈希，无法核对结构审计证据", False
+    if not os.path.exists(boundaries_path):
+        return False, "缺少文档边界侧车 doc_boundaries.json", False
+    if _sha256_file(boundaries_path) != boundaries_sha:
+        return False, "文档边界侧车与构建 bin 时记录的不一致（被替换/过期）", False
     if report_enabled:
         if not os.path.exists(report_path):
             return False, "缺少防泄漏诊断报告 data_report.json", False
@@ -215,6 +241,28 @@ class GPT2Tokenizer:
 
     def encode(self, text: str) -> List[int]:
         return list(self.enc.encode(text))
+
+    def encode_batch(self, texts) -> List[List[int]]:
+        """批量编码（按文档分段编码时使用）。
+
+        tiktoken 的 ``encode`` 遇到特殊 token 字符串会抛错；批量接口
+        ``encode_ordinary_batch`` 会把它们当普通文本静默编码。这里先显式
+        扫描并复现同样的拒绝行为，避免脏数据在分段编码路径上被悄悄接受。
+        """
+        items = list(texts)
+        if not items:
+            return []
+        specials = [t for t in (getattr(self.enc, "special_tokens_set", None) or ())]
+        for text in items:
+            for special in specials:
+                if special and special in text:
+                    raise ValueError(
+                        f"文本包含 tiktoken 特殊 token {special!r}，拒绝编码"
+                    )
+        batch = getattr(self.enc, "encode_ordinary_batch", None)
+        if batch is not None:
+            return [list(ids) for ids in batch(items)]
+        return [self.encode(text) for text in items]
 
     def decode(self, ids) -> str:
         return self.enc.decode([int(i) for i in ids])
@@ -249,6 +297,10 @@ class CharTokenizer:
 
     def encode(self, text: str) -> List[int]:
         return [self.stoi.get(ch, self.unk_id) for ch in text]
+
+    def encode_batch(self, texts) -> List[List[int]]:
+        """批量编码：字符级下每个字符独立，批量与逐段结果完全一致。"""
+        return [self.encode(text) for text in texts]
 
     def decode(self, ids) -> str:
         return "".join(self.itos[int(i)] for i in ids)
@@ -506,6 +558,20 @@ def prepare_bins(
         with open(test_txt_path, "r", encoding="utf-8") as f:
             texts["test"] = f.read()
 
+    # 源文本指纹：缓存命中时据此确认 bin 确实由当前 train/val/test.txt 构建，
+    # 防止“txt 改了但 bins 没重建”的静默过期（防泄漏报告也会随之失真）。
+    # 同时算出集合级指纹：逐 split 哈希证明“每个文件没变”，集合级指纹证明
+    # “三个文件来自同一次划分”（混合版本划分逐文件看都没变）。
+    source_sha256 = {}
+    for split, path in (
+        ("train", os.path.join(data_dir, "train.txt")),
+        ("val", os.path.join(data_dir, "val.txt")),
+        ("test", test_txt_path),
+    ):
+        if os.path.exists(path):
+            source_sha256[split] = _sha256_file(path)
+    split_set_digest_value = split_set_digest(source_sha256)
+
     # 1) 清洗 + 去污染：坏字符确定性删除/替换；与 val/test 精确重复的长行
     #    只从 train 移除（val/test 绝不改写，保持尘封）。
     sanitization = {}
@@ -515,7 +581,7 @@ def prepare_bins(
         sanitization[name] = stats
     # 块级去污染先于行级：整块复制（可能由多行短行组成）一旦被行级先删掉
     # 其中一条长行，块哈希就不再与 eval 匹配，剩余短行会漏检。
-    texts, document_stats = decontaminate_documents(texts)
+    texts, doc_dup_stats = decontaminate_documents(texts)
     texts, duplicate_stats = decontaminate_texts(texts, min_chars=40)
     # 行级删除会改变块结构：删掉块中的长行后，剩余短行可能恰好重新拼成
     # 与 val/test 完全相同的多行块。只做“先块后行”会漏掉这种新生成的
@@ -537,10 +603,10 @@ def prepare_bins(
             "train_lines_dropped",
             "train_chars_dropped",
         ):
-            document_stats[key] = int(document_stats.get(key, 0)) + int(
+            doc_dup_stats[key] = int(doc_dup_stats.get(key, 0)) + int(
                 post_doc_stats.get(key, 0)
             )
-    duplicate_stats["document_level"] = document_stats
+    duplicate_stats["document_level"] = doc_dup_stats
     # 近似重复去污染：精确行/块去重只能抓住逐字节（或仅空白/NFKC 差异）
     # 的复制；改了几个词的副本仍会让 train 记住 val/test 的内容、并在 train
     # 内部放大同一段文本的权重。阈值是协议参数（0.80），报告同时给出
@@ -567,7 +633,7 @@ def prepare_bins(
             "train_lines_dropped",
             "train_chars_dropped",
         ):
-            document_stats[key] = int(document_stats.get(key, 0)) + int(
+            doc_dup_stats[key] = int(doc_dup_stats.get(key, 0)) + int(
                 post_doc_stats.get(key, 0)
             )
         duplicate_stats["post_near_dup_exact_cleanup"] = post_doc_stats
@@ -594,19 +660,19 @@ def prepare_bins(
     train_text, val_text, test_text = texts["train"], texts["val"], texts.get("test")
     # 原文此后只由局部变量引用：逐段编码完即释放
     del texts
-    n_doc_cross = document_stats["train_blocks_dropped_as_duplicates_of_eval"]
-    n_doc_intra = document_stats["train_intra_split_duplicate_blocks_removed"]
+    n_doc_cross = doc_dup_stats["train_blocks_dropped_as_duplicates_of_eval"]
+    n_doc_intra = doc_dup_stats["train_intra_split_duplicate_blocks_removed"]
     if n_doc_cross or n_doc_intra:
         print(
             f"[data] 块级去污染：从 train 移除 {n_doc_cross:,} 个与 val/test "
             f"重复的多行块、{n_doc_intra:,} 个内部重复块"
-            f"（共 {document_stats['train_lines_dropped']:,} 行；"
+            f"（共 {doc_dup_stats['train_lines_dropped']:,} 行；"
             "val/test 不改写）"
         )
-    if document_stats["val_test_overlap_blocks"]:
+    if doc_dup_stats["val_test_overlap_blocks"]:
         print(
             f"[data] 警告：val 与 test 有 "
-            f"{document_stats['val_test_overlap_blocks']:,} 个多行块重复"
+            f"{doc_dup_stats['val_test_overlap_blocks']:,} 个多行块重复"
             "（两侧均未改写；val 选型对 test 的独立性下降）"
         )
     n_cross = (
@@ -649,6 +715,40 @@ def prepare_bins(
             "未见字符映射 <unk>（词表只用 train 拟合，防止泄露）"
         )
 
+    # 文档结构：先切分再编码，token 不跨文档边界，文档边界在 token 空间
+    # 精确可知（“跨文档窗口比例”因此是可计算的事实而不是近似）。
+    split_texts = {"train": train_text, "val": val_text}
+    if test_text is not None:
+        split_texts["test"] = test_text
+    doc_segments = {}
+    doc_group_unit = {}
+    for name, txt in split_texts.items():
+        info = split_documents(txt)
+        doc_segments[name] = info["segments"]
+        doc_group_unit[name] = info["group_unit"]
+
+    # 群组级 split 互斥性审计：把“按文档划分”的声明升级为可复核结论。
+    # 整篇文档/段落同时出现在两个 split 是文档被复制的直接证据；行前缀
+    # 共享提示文档被从行中间切开（逐行比较看不到），只作告警并给样例。
+    group_audit = group_disjointness_audit(split_texts, min_chars=40)
+    if group_audit["problems"]:
+        print(
+            f"[data] ⚠ 群组级互斥性审计发现 {group_audit['verdict']}："
+            f"{group_audit['pairs']}"
+        )
+    else:
+        print("[data] 群组级互斥性审计：三个 split 之间无共享文档/段落/行前缀")
+    # 群组互斥性结论并入 split_protocol：它是“按文档划分”声明的可复核证据，
+    # 放在 split_protocol 下才能被预检与汇总页按协议违规口径消费。必须在
+    # build_data_report 之前合并——报告生成时会据此产出协议告警。
+    _extra = extra_report if isinstance(extra_report, dict) else {}
+    _split_protocol = _extra.get("split_protocol")
+    _split_protocol = dict(_split_protocol) if isinstance(_split_protocol, dict) else {}
+    _split_protocol["group_disjointness"] = group_audit
+    _extra = dict(_extra)
+    _extra["split_protocol"] = _split_protocol
+    extra_report = _extra
+
     def encode_stream(text: str) -> np.ndarray:
         parts: List[np.ndarray] = []
         # 分块编码；块边界对齐到换行符，
@@ -684,17 +784,83 @@ def prepare_bins(
             pos = end
         return np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint16)
 
-    tr = encode_stream(train_text)
+    def encode_documents(name: str, text: str):
+        """按文档群组分段编码，返回 (token 流, 逐文档 token 数, 结构审计)。
+
+        分段编码保证没有 token 跨过文档边界；字符级分词器下每个字符独立，
+        逐文档 token 数等于字符数，因此直接按整段流切分即可，无需重复编码。
+        """
+        segments = doc_segments[name]
+        group_unit = doc_group_unit[name]
+        if not segments:
+            return (
+                np.zeros(0, dtype=np.uint16),
+                [],
+                document_structure_report(text, segments, group_unit, []),
+            )
+        if tok.name == "char":
+            stream = encode_stream(text)
+            counts = [int(e) - int(s) for s, e in segments]
+            if int(sum(counts)) != int(stream.size):
+                raise ValueError(
+                    f"{name} 的逐文档 token 数之和（{sum(counts)}）与 token 流长度"
+                    f"（{stream.size}）不一致：文档分段未覆盖全文，拒绝落盘"
+                )
+            return (
+                stream,
+                counts,
+                document_structure_report(text, segments, group_unit, counts),
+            )
+        pieces = tok.encode_batch([text[int(s) : int(e)] for s, e in segments])
+        parts = []
+        counts = []
+        for (s, e), ids in zip(segments, pieces):
+            arr = np.asarray(ids)
+            if arr.size and arr.dtype.kind not in "iu":
+                raise ValueError(
+                    f"分词器返回非整数 token（dtype={arr.dtype}），"
+                    f"拒绝编码 {name} 文档 {s}:{e}"
+                )
+            wide = arr.astype(np.int64) if arr.size else arr
+            if wide.size:
+                lo, hi = int(wide.min()), int(wide.max())
+                if lo < 0 or hi > 65535:
+                    raise ValueError(
+                        f"token id 越界 uint16（min={lo}, max={hi}，"
+                        f"{name} 文档 {s}:{e}）：拒绝静默环绕，请检查分词器/词表"
+                    )
+            counts.append(int(wide.size))
+            parts.append(
+                wide.astype(np.uint16) if wide.size else np.zeros(0, np.uint16)
+            )
+        stream = np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint16)
+        return (
+            stream,
+            counts,
+            document_structure_report(text, segments, group_unit, counts),
+        )
+
+    tr, tr_doc_counts, tr_structure = encode_documents("train", train_text)
     text_stats = {"train": text_length_stats(train_text)}
     train_text = None
-    va = encode_stream(val_text)
+    va, va_doc_counts, va_structure = encode_documents("val", val_text)
     text_stats["val"] = text_length_stats(val_text)
     val_text = None
     te = None
+    te_doc_counts = []
+    te_structure = None
     if test_text is not None:
-        te = encode_stream(test_text)
+        te, te_doc_counts, te_structure = encode_documents("test", test_text)
         text_stats["test"] = text_length_stats(test_text)
         test_text = None
+    doc_token_counts = {"train": tr_doc_counts, "val": va_doc_counts}
+    structure_splits = {"train": tr_structure, "val": va_structure}
+    if te is not None:
+        doc_token_counts["test"] = te_doc_counts
+        structure_splits["test"] = te_structure
+    # 分段编码后原文不再需要：立刻释放，避免大语料常驻内存。
+    split_texts.clear()
+    del split_texts
 
     # 4) token 流硬校验 + 防泄漏诊断
     streams = {"train": tr, "val": va}
@@ -784,6 +950,51 @@ def prepare_bins(
     # 额外写入 token 分布诊断
     data_report["token_range_analysis"] = range_analysis
     data_report["token_sequence_stats"] = sequence_stats
+    # 划分集合级指纹：证明三个 split 来自同一次划分（逐文件哈希证明不了）。
+    data_report["split_set"] = {
+        "digest": split_set_digest_value,
+        "splits": dict(source_sha256),
+    }
+    # 文档结构证据（v13）：文档长度分布、跨文档窗口比例随 ctx 的变化、文档内
+    # 窗口覆盖量。LEGA 的机制主张是“找不到可靠信息时少写无关内容”，而跨
+    # 文档窗口正是数据拼接本身注入的无关内容；不量化它，收益就可能来自
+    # 拼接伪影而不是机制本身。
+    doc_boundaries_path = os.path.join(data_dir, DOC_BOUNDARIES_FILE)
+    doc_boundaries = {
+        "protocol": DOC_STRUCTURE_PROTOCOL,
+        "group_disjointness_protocol": group_audit.get("protocol"),
+        "tokenizer": tok.name,
+        "vocab_size": int(tok.n_vocab),
+        "encoding_mode": "per_document",
+        "splits": {
+            name: {
+                "group_unit": doc_group_unit[name],
+                "n_documents": int(len(doc_token_counts[name])),
+                "tokens_total": int(sum(doc_token_counts[name])),
+                "doc_token_counts": [int(c) for c in doc_token_counts[name]],
+            }
+            for name in doc_token_counts
+        },
+    }
+    doc_boundaries_tmp = doc_boundaries_path + ".tmp"
+    with open(doc_boundaries_tmp, "w", encoding="utf-8") as f:
+        json.dump(doc_boundaries, f, ensure_ascii=False)
+    doc_boundaries_sha256 = _sha256_file(doc_boundaries_tmp)
+    data_report["structure"] = {
+        "protocol": DOC_STRUCTURE_PROTOCOL,
+        "encoding_mode": "per_document",
+        "doc_boundaries_file": DOC_BOUNDARIES_FILE,
+        "doc_boundaries_sha256": doc_boundaries_sha256,
+        "ctx_grid": [int(c) for c in REPORT_CTX_GRID],
+        "splits": structure_splits,
+        "group_disjointness": group_audit,
+        "note": (
+            "token 流按文档群组分段编码：token 不跨文档边界，文档边界在 token "
+            "空间精确可知。cross_document_windows 用训练采样器口径给出跨文档"
+            "窗口的期望比例；doc_aligned_windows 给出完全落在单个文档内的"
+            "窗口数与 token 覆盖量。两者共同界定“数据拼接结构”对结论的影响。"
+        ),
+    }
     # 短 n-gram 重叠作为诊断指标随报告落盘（告警在下面产生，不进入训练前
     # 硬闸门）：用于抓 64-gram 漏掉的短模板化复用。
     data_report["contamination_short_ngram"] = contamination_short
@@ -824,16 +1035,6 @@ def prepare_bins(
         test_tmp = test_bin + ".tmp"
         te.tofile(test_tmp)
         bin_sha256["test"] = _sha256_file(test_tmp)
-    # 源文本指纹：缓存命中时据此确认 bin 确实由当前 train/val/test.txt 构建，
-    # 防止“txt 改了但 bins 没重建”的静默过期（防泄漏报告也会随之失真）。
-    source_sha256 = {}
-    for split, path in (
-        ("train", os.path.join(data_dir, "train.txt")),
-        ("val", os.path.join(data_dir, "val.txt")),
-        ("test", test_txt_path),
-    ):
-        if os.path.exists(path):
-            source_sha256[split] = _sha256_file(path)
     meta = {
         "tokenizer": tok.name,
         "requested_kind": kind,
@@ -842,6 +1043,7 @@ def prepare_bins(
         "text_sanitized": True,
         "cache_schema": int(CACHE_SCHEMA),
         "source_sha256": source_sha256,
+        "split_set_digest": split_set_digest_value,
         "bin_sha256": bin_sha256,
         "near_dup": {
             "threshold": float(near_dup_threshold),
@@ -849,6 +1051,12 @@ def prepare_bins(
         },
         "train_tokens": int(tr.size),
         "val_tokens": int(va.size),
+        # 文档结构证据的协议与哈希：文档边界侧车是 token 流的必要伴随物，
+        # 缺了它就无法回答“评测窗口有多少跨过了文档边界”。
+        "doc_structure_protocol": DOC_STRUCTURE_PROTOCOL,
+        "doc_boundaries_sha256": doc_boundaries_sha256,
+        "encoding_mode": "per_document",
+        "group_disjoint": bool(group_audit.get("groups_disjoint")),
         "python_version": sys.version,
         "platform": platform.platform(),
         "numpy_version": np.__version__,
@@ -871,7 +1079,7 @@ def prepare_bins(
     meta["report_sha256"] = _sha256_file(report_tmp)
     with open(meta_tmp, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
-    # 替换顺序：bin/报告先落位，meta 最后（meta 是缓存有效性的判定依据；
+    # 替换顺序：bin/侧车/报告先落位，meta 最后（meta 是缓存有效性的判定依据；
     # 中断时留下的旧 meta 与新旧混合产物会被大小/哈希核对触发重建）。
     os.replace(train_tmp, train_bin)
     os.replace(val_tmp, val_bin)
@@ -880,6 +1088,7 @@ def prepare_bins(
     elif os.path.exists(test_bin):
         # 本次没有 test.txt 但残留旧 test.bin：删除，避免用过期 split 评测
         os.remove(test_bin)
+    os.replace(doc_boundaries_tmp, doc_boundaries_path)
     os.replace(report_tmp, report_path)
     os.replace(meta_tmp, meta_path)
     msg = f"[data] train {tr.size:,} tokens / val {va.size:,} tokens"
@@ -939,6 +1148,53 @@ def load_tokenizer(data_dir: str):
     return CharTokenizer(
         itos, add_unk=config_bool(meta.get("char_unk", False), "char_unk")
     )
+
+
+def load_doc_boundaries(data_dir: str):
+    """读取 doc_boundaries.json（文档边界侧车）；缺失/损坏返回 None。
+
+    侧车记录每个 split 的逐文档 token 计数：它是“窗口跨了多少次文档边界”
+    与“文档内 PPL”这一独立口径的唯一依据。缺失时下游必须如实标记为
+    “结构证据不可用”，不能默认“没有跨文档窗口”。
+    """
+    path = os.path.join(data_dir, DOC_BOUNDARIES_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def doc_token_counts_for_split(data_dir: str, split: str):
+    """取某个 split 的逐文档 token 计数。
+
+    返回 ``(counts, meta)``：``counts`` 为 None 表示结构证据不可用（侧车
+    缺失、损坏或不含该 split）；``meta`` 为该 split 的侧车元信息。
+    """
+    if not isinstance(split, str) or split not in ("train", "val", "test"):
+        raise ValueError(f"split 必须是 'train'/'val'/'test' 之一，收到 {split!r}")
+    payload = load_doc_boundaries(data_dir)
+    if not payload:
+        return None, None
+    splits = payload.get("splits")
+    if not isinstance(splits, dict):
+        return None, None
+    entry = splits.get(split)
+    if not isinstance(entry, dict):
+        return None, None
+    raw = entry.get("doc_token_counts")
+    if not isinstance(raw, list):
+        return None, None
+    try:
+        counts = [int(c) for c in raw]
+    except (TypeError, ValueError):
+        return None, None
+    if any(c < 0 for c in counts):
+        return None, None
+    return counts, entry
 
 
 def load_bin(data_dir: str, split: str, allow_test: bool = False) -> np.memmap:

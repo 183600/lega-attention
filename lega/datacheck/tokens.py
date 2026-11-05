@@ -800,8 +800,9 @@ def temporal_split_text(
     换行切分（此时行是语义上的完整单位），找不到任何换行时退化为字符切分
     （info 中 fallback_char_cut=True 提示该文件无法做文档级划分）。
 
-    info["documents_cross_cut"] / info["paragraphs_cross_cut"] 是显式自检：
-    为 True 时调用方应告警或拒绝。返回 (train_text, val_text, test_text, info)。
+    info["documents_cross_cut"] / info["paragraphs_cross_cut"] /
+    info["lines_cross_cut"] 是显式自检：为 True 时调用方应告警或拒绝。
+    返回 (train_text, val_text, test_text, info)。
     """
     n = len(text)
     if n < 3:
@@ -884,6 +885,12 @@ def temporal_split_text(
     paragraphs_cross = bool(paragraphs) and (
         p1 not in paragraph_set or p2 not in paragraph_set
     )
+    # 行级自检：切点是否落在换行处。标题/空行边界本身也在行边界上，因此
+    # 正常切点一律满足 text[p-1] == "\n"；只有退回字符切分时才会切开一行，
+    # 把同一个词/句子劈成两半（跨 split 的残片无法互相核对）。
+    lines_cross = any(
+        not (0 < int(p) < n and text[int(p) - 1] == "\n") for p in (p1, p2)
+    )
     if heads:
         group_unit = "heading_document"
     elif paragraphs:
@@ -927,6 +934,7 @@ def temporal_split_text(
         "n_paragraph_boundaries": int(len(paragraphs)),
         "documents_cross_cut": bool(documents_cross),
         "paragraphs_cross_cut": bool(paragraphs_cross),
+        "lines_cross_cut": bool(lines_cross),
         "group_unit": group_unit,
         "lengths_chars": {
             "train": len(train_text),

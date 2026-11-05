@@ -159,6 +159,7 @@ CRITICAL_SPLIT_ALERT_CODES = (
     "split_char_cut",
     "split_documents_cross_cut",
     "split_paragraphs_cross_cut",
+    "split_lines_cross_cut",
     "ngram_overlap_train_val",
     "ngram_overlap_train_test",
     "ngram_overlap_val_test",
@@ -169,6 +170,10 @@ CRITICAL_SPLIT_ALERT_CODES = (
     "ngram_overlap_exact_val_test",
     "eval_splits_overlap",
     "eval_splits_overlap_documents",
+    # 群组级互斥性审计：整篇文档/段落同时出现在两个 split 是“文档被复制
+    # 或被从文档边界切开”的直接证据，与 n-gram 重叠同级，训练前必须拦截。
+    "split_group_overlap",
+    "split_paragraph_overlap",
     # 清洗后复核发现 train 仍与 val/test 共享精确/归一化长行或多行块：
     # 这是“去污染本应删除却仍残留”的直接证据，必须像 n-gram 重叠一样
     # 在训练前拦截，而不是只在汇总页提示。

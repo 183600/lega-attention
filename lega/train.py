@@ -807,6 +807,7 @@ def evaluate_val(
     collect_window_losses: bool = False,
     window_offset: int = 0,
     collect_position_losses: bool = False,
+    window_starts=None,
 ):
     """在不重复、覆盖全验证集的窗口上同时计算 val_loss 与门控均值。
 
@@ -822,6 +823,10 @@ def evaluate_val(
     落在哪里”是否影响 PPL；此时逐窗口明细记为 ``window_starts`` 而非
     ``window_indices``（后者只对 offset=0 的全局窗口序号有定义）。不同
     offset 的窗口相互重叠、不是独立样本。默认 0 保持历史协议不变。
+
+    window_starts 不为 None 时改用**显式** token 起点（用于“完全落在单个
+    文档内”的文档内 PPL 口径）：起点不再来自等间隔网格，窗口集合由调用
+    方定义，输出里 ``window_set`` 标为 ``explicit`` 以免与网格口径混淆。
     """
     was_training = model.training
     model.eval()
@@ -829,9 +834,30 @@ def evaluate_val(
         collect_gate = model.variant not in ("standard",) and not getattr(
             model.blocks[0].attn, "is_null", False
         )
-        starts, n_windows = _val_eval_window_starts(
-            len(val), ctx, iters, offset=window_offset
-        )
+        if window_starts is None:
+            starts, n_windows = _val_eval_window_starts(
+                len(val), ctx, iters, offset=window_offset
+            )
+            window_set = "grid"
+        else:
+            starts = np.asarray(list(window_starts), dtype=np.int64)
+            if starts.ndim != 1 or starts.size == 0:
+                raise ValueError(
+                    "window_starts 必须是非空的一维整数序列，收到 "
+                    f"{type(window_starts).__name__}"
+                )
+            max_start = len(val) - ctx - 1
+            if max_start < 0:
+                raise ValueError(
+                    f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口"
+                )
+            if int(starts.min()) < 0 or int(starts.max()) > max_start:
+                raise ValueError(
+                    f"显式窗口起点必须落在 [0, {max_start}] 内（len(val)="
+                    f"{len(val)}, ctx={ctx}）"
+                )
+            n_windows = int(starts.size)
+            window_set = "explicit"
         if batch_windows is None:
             batch_windows = max(1, min(16384 // max(1, ctx), len(starts)))
         else:
@@ -984,10 +1010,11 @@ def evaluate_val(
             "val_windows": int(n_windows),
             "val_tokens_evaluated": int(len(starts) * ctx),
             "eval_window_offset": int(window_offset),
+            "window_set": window_set,
         }
         if collect_window_losses:
             out["window_losses"] = [float(v) for v in window_losses]
-            if window_offset == 0:
+            if window_offset == 0 and window_set == "grid":
                 out["window_indices"] = [int(i // ctx) for i in starts]
             else:
                 out["window_starts"] = [int(i) for i in starts]

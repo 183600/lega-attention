@@ -30,6 +30,13 @@ import re
 SOURCE_PROVENANCE_SCHEMA = "lega-source-provenance-v1"
 SOURCE_MANIFEST_NAME = "source_manifest.json"
 
+# 划分集合级指纹的协议标识：把 train/val/test 三个文本文件当作**一个整体**
+# 来摘要。逐文件哈希只能说明“每个文件都没变”，无法说明“三个文件来自同一
+# 次划分”——数据准备中途失败时可能留下“新 train/val + 旧 test”的混合版本，
+# 逐文件检查全部通过，实验却已经在混版本语料上跑完。
+SPLIT_SET_SCHEMA = "lega-split-set-v1"
+SPLIT_SET_NAME = "split_set.json"
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LOCATIONS = ("data_dir", "external")
 _ENTRY_KEYS = ("role", "path", "location", "size", "sha256")
@@ -161,6 +168,100 @@ def manifest_digest(provenance: dict) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def split_set_digest(hashes: dict) -> str:
+    """划分集合级指纹：把各 split 的文本哈希当作一个整体来摘要。
+
+    逐 split 的哈希证明“每个文件的内容”，集合级指纹证明“这几个文件来自
+    同一次划分”。数据准备中途失败会留下混合版本（部分新、部分旧），逐文件
+    校验看不出来，集合级指纹能立刻查出来。
+    """
+    payload = {
+        str(k): str(v) for k, v in sorted((hashes or {}).items()) if v is not None
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_split_set(hashes: dict, sizes: dict = None) -> dict:
+    """组装划分集合证据（schema/逐 split 哈希/集合级指纹）。"""
+    entries = {}
+    for split, sha in sorted((hashes or {}).items()):
+        entry = {"sha256": str(sha)}
+        if isinstance(sizes, dict) and split in sizes:
+            try:
+                entry["size"] = int(sizes[split])
+            except (TypeError, ValueError):
+                pass
+        entries[str(split)] = entry
+    payload = {
+        "schema": SPLIT_SET_SCHEMA,
+        "splits": entries,
+        "digest": split_set_digest(hashes),
+    }
+    return payload
+
+
+def write_split_set(data_dir: str, split_set: dict) -> str:
+    """原子写入 data_dir/split_set.json，返回路径。"""
+    from ..utils import save_json
+
+    path = os.path.join(data_dir, SPLIT_SET_NAME)
+    save_json(split_set, path)
+    return path
+
+
+def load_split_set(data_dir: str):
+    """读取 data_dir/split_set.json；缺失/损坏/非对象返回 None。"""
+    path = os.path.join(data_dir, SPLIT_SET_NAME)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def verify_split_set(split_set, hashes: dict) -> list:
+    """核对划分集合证据与当前各 split 文本哈希是否一致。
+
+    返回问题列表：逐 split 不一致说明文件被改写；集合级指纹不一致说明
+    三个文件不是同一批产出的（混合版本划分）。
+    """
+    issues = []
+    if not isinstance(split_set, dict):
+        return ["split_set 不是对象"]
+    if split_set.get("schema") != SPLIT_SET_SCHEMA:
+        issues.append(
+            f"split_set.schema={split_set.get('schema')!r} 与当前协议 "
+            f"{SPLIT_SET_SCHEMA} 不一致"
+        )
+    entries = split_set.get("splits")
+    if not isinstance(entries, dict):
+        return issues + ["split_set.splits 不是对象"]
+    for split, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        expected = entry.get("sha256")
+        actual = (hashes or {}).get(str(split))
+        if isinstance(expected, str) and isinstance(actual, str) and expected != actual:
+            issues.append(
+                f"split_set 记录的 {split}.txt 哈希与当前文件不一致："
+                f"{expected[:12]}… != {actual[:12]}…"
+            )
+    recorded = split_set.get("digest")
+    if not isinstance(recorded, str) or not recorded:
+        issues.append("split_set 缺少集合级指纹")
+    elif recorded != split_set_digest(hashes):
+        issues.append(
+            "split_set 的集合级指纹与当前各 split 哈希不一致："
+            "三个 split 不是同一批产出的（混合版本划分），"
+            "训练/评测会消费互相不匹配的语料"
+        )
+    return issues
 
 
 def build_source_provenance(

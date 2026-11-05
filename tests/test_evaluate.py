@@ -810,3 +810,103 @@ def test_eval_amp_honors_recorded_effective_dtype():
     # 无 amp_dtype 的旧配置里 amp 损坏时同样保守回退 fp32，而不是崩溃。
     for bad in ("maybe", 2, [True], {"on": 1}):
         assert _resolve_eval_amp({"amp": bad}, "cpu") is False, bad
+
+
+def test_evaluate_records_doc_structure_and_aligned_ppl(monkeypatch):
+    """评测结果要能区分“机制收益”与“拼接伪影”：跨文档比例 + 文档内 PPL。"""
+    from lega.data import prepare_bins
+    from lega.evaluate import main as evaluate_main
+    from lega.model import GPT, save_checkpoint
+
+    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
+    alphabet = np.array(list("abcdefghijklmnopqrstuvwxyz "))
+    # 多个“文档”（空行分隔），使评测窗口有机会跨文档
+    docs = []
+    for i in range(12):
+        docs.append(f"= Doc {i} =\n" + "".join(rng.choice(alphabet, 400)))
+    train = "\n\n".join(docs)
+    val = "\n\n".join(
+        f"= Val {i} =\n" + "".join(rng.choice(alphabet, 400)) for i in range(6)
+    )
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "train.txt"), "w", encoding="utf-8") as f:
+            f.write(train)
+        with open(os.path.join(data_dir, "val.txt"), "w", encoding="utf-8") as f:
+            f.write(val)
+        meta = prepare_bins(data_dir, kind="char", force=True)
+        assert os.path.exists(os.path.join(data_dir, "doc_boundaries.json"))
+        ckpt = os.path.join(d, "run", "model.pt")
+        model = GPT(
+            vocab_size=meta["vocab_size"],
+            block_size=16,
+            d_model=16,
+            n_layers=1,
+            n_heads=2,
+            variant="standard",
+        )
+        save_checkpoint(ckpt, model, extra={"variant": "standard", "seed": 0})
+        out = os.path.join(d, "eval.json")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "evaluate",
+                "--ckpt",
+                ckpt,
+                "--data_dir",
+                data_dir,
+                "--out",
+                out,
+                "--device",
+                "cpu",
+                "--eval_iters",
+                "4",
+                "--split",
+                "val",
+            ],
+        )
+        evaluate_main()
+        with open(out, encoding="utf-8") as f:
+            res = json.load(f)
+        audit = res["structure_audit"]
+        assert audit["status"] == "ok"
+        assert audit["n_documents"] >= 1
+        assert audit["cross_document_windows"]["windows_total"] > 0
+        aligned = res["doc_aligned_eval"]
+        assert aligned["status"] == "ok"
+        assert aligned["n_windows"] >= 1
+        assert aligned["n_windows_available"] >= aligned["n_windows"]
+        assert aligned["val_ppl"] is not None
+        assert "不可直接比较" in aligned["note"]
+
+        # 关掉文档内口径后只保留结构审计
+        out2 = os.path.join(d, "eval2.json")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "evaluate",
+                "--ckpt",
+                ckpt,
+                "--data_dir",
+                data_dir,
+                "--out",
+                out2,
+                "--device",
+                "cpu",
+                "--eval_iters",
+                "4",
+                "--split",
+                "val",
+                "--no_doc_aligned_eval",
+            ],
+        )
+        evaluate_main()
+        with open(out2, encoding="utf-8") as f:
+            res2 = json.load(f)
+        assert res2["doc_aligned_eval"] is None
+        assert res2["structure_audit"]["status"] == "ok"
+    print("  [ok] 评测落盘跨文档比例与文档内 PPL 对照口径")

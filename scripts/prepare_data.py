@@ -136,11 +136,13 @@ def from_parquet(
     allow_source_change: bool = False,
     manifest_files: list = None,
     manifest_urls: list = None,
+    publish: bool = True,
 ) -> dict:
-    """下载 parquet 并逐文件逐 batch 流式解析、清洗后直接写入各 split 的 txt。
+    """下载 parquet 并逐文件逐 batch 流式解析、清洗后写入各 split 的 txt。
 
     返回 split -> 写入字符数。manifest_files/manifest_urls 若提供，会追加
     原始文件 entry 与下载 URL，供 source_manifest.json 使用。
+    publish=False 时只写暂存文件，由调用方把三个 split 作为一组发布。
     """
     import pyarrow.parquet as pq
 
@@ -175,7 +177,7 @@ def from_parquet(
         lines = _iter_lines()
         try:
             counts[split] = write_clean_lines(
-                lines, txt_paths[split], max_tokens[split]
+                lines, txt_paths[split], max_tokens[split], publish=publish
             )
         finally:
             lines.close()
@@ -190,6 +192,7 @@ def from_zip(
     allow_source_change: bool = False,
     manifest_files: list = None,
     manifest_urls: list = None,
+    publish: bool = True,
 ) -> dict:
     dst = os.path.join(out_dir, "wikitext-103-raw-v1.zip")
     expected_hashes = expected_hashes or {}
@@ -226,6 +229,7 @@ def from_zip(
                     io.TextIOWrapper(f, encoding="utf-8"),
                     txt_paths[split],
                     max_tokens[split],
+                    publish=publish,
                 )
     return counts
 
@@ -264,7 +268,7 @@ def from_rows_api(max_rows: int, retries: int = 4) -> dict:
     return out
 
 
-def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
+def write_clean_lines(lines, dst: str, max_tokens: int, publish: bool = True) -> int:
     """逐行清洗并流式写入 dst，返回写入的字符数。
 
     清洗口径：行尾 rstrip、跳过空行内容，但**保留至多一个空行作为块分隔**。
@@ -276,6 +280,10 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
     max_tokens 是数据规模身份：bool/小数/下划线数字串经 int()/乘法会变成
     另一个预算（True→1、1.5→1、float("1_0")→10），却仍报告“截断成功”；
     入口先严格整数化，负值显式拒绝。
+
+    publish=False 时只写 ``dst + ".part"`` 暂存文件、不落位：三个 split
+    必须作为**一组**发布，否则准备过程中途失败会留下“新 train/val + 旧
+    test”的混合版本划分——逐文件看都没变，实验却已经在混版本语料上跑完。
     """
     from lega.utils import strict_int
 
@@ -309,8 +317,55 @@ def write_clean_lines(lines, dst: str, max_tokens: int) -> int:
             wrote += sep + len(ln)
             n_parts += 1
             pending_blank = False
-    os.replace(tmp, dst)
+    if publish:
+        os.replace(tmp, dst)
     return wrote
+
+
+def staged_path(dst: str) -> str:
+    """暂存路径（与 write_clean_lines 的落位规则一致）。"""
+    return dst + ".part"
+
+
+def cleanup_staged(txt_paths: dict) -> None:
+    """删除暂存的 split 文件；准备失败时调用，避免留下半成品。"""
+    for path in (txt_paths or {}).values():
+        try:
+            os.remove(staged_path(path))
+        except (FileNotFoundError, OSError):
+            pass
+
+
+def publish_split_set(txt_paths: dict, data_dir: str) -> dict:
+    """把暂存的三个 split 作为一组发布，并写集合级指纹 split_set.json。
+
+    发布顺序：先算完三个文件的哈希 → 逐个 replace 落位 → 最后写
+    split_set.json。任一步中断，磁盘上要么是完整旧集合、要么是
+    “新集合 + 旧 split_set.json”，后者会被集合级指纹立刻查出来。
+    """
+    from lega.datacheck.provenance import (
+        build_split_set,
+        sha256_file,
+        write_split_set,
+    )
+
+    hashes = {}
+    sizes = {}
+    for split, path in (txt_paths or {}).items():
+        staged = staged_path(path)
+        if not os.path.exists(staged):
+            continue
+        hashes[split] = sha256_file(staged)
+        sizes[split] = os.path.getsize(staged)
+    if not hashes:
+        raise RuntimeError("没有可发布的暂存 split 文件")
+    for split, path in (txt_paths or {}).items():
+        staged = staged_path(path)
+        if os.path.exists(staged):
+            os.replace(staged, path)
+    split_set = build_split_set(hashes, sizes)
+    write_split_set(data_dir, split_set)
+    return split_set
 
 
 def verify_splits_disjoint(txt_paths: dict, min_chars: int = 40) -> dict:
@@ -511,6 +566,10 @@ def main():
                 "切点未落在空行段落边界（段落长度大于划分区间），"
                 "有段落跨 split（群组泄露）"
             )
+        if split_info.get("lines_cross_cut"):
+            leaky_reasons.append(
+                "切点落在行中间，同一行被劈成两半（跨 split 残片无法互相核对）"
+            )
         if leaky_reasons:
             detail = "；".join(leaky_reasons)
             if not args.allow_leaky_split:
@@ -529,7 +588,10 @@ def main():
         # 逐行清洗并直接写入 txt
         char_counts = {
             split: write_clean_lines(
-                io.StringIO(t), txt_paths[split], max_tokens[split]
+                io.StringIO(t),
+                txt_paths[split],
+                max_tokens[split],
+                publish=False,
             )
             for split, t in (
                 ("train", train_text),
@@ -552,6 +614,7 @@ def main():
                     allow_source_change=args.allow_source_change,
                     manifest_files=attempt_files,
                     manifest_urls=attempt_urls,
+                    publish=False,
                 )
                 source_used = "parquet"
                 raw_files, raw_urls = attempt_files, attempt_urls
@@ -578,6 +641,7 @@ def main():
                     allow_source_change=args.allow_source_change,
                     manifest_files=attempt_files,
                     manifest_urls=attempt_urls,
+                    publish=False,
                 )
                 source_used = "zip"
                 raw_files, raw_urls = attempt_files, attempt_urls
@@ -610,7 +674,10 @@ def main():
                 }
                 char_counts = {
                     split: write_clean_lines(
-                        lines.get(split) or [], txt_paths[split], max_tokens[split]
+                        lines.get(split) or [],
+                        txt_paths[split],
+                        max_tokens[split],
+                        publish=False,
                     )
                     for split in ("train", "val", "test")
                 }
@@ -634,9 +701,12 @@ def main():
     # 把划分协议声明与实际写出的文本绑定：官方 split 的 "document_disjoint"
     # 是上游声明，时序划分的 "documents_cross_cut" 是切点检查；这里再对三个
     # 文件做一次跨 split 长行核对，把"声明"升级为"已核对"（或如实标为证伪）。
+    # 核对在**暂存文件**上做：泄露的划分不应该被发布到磁盘上，也不应该
+    # 破坏上一份已经一致的划分。
+    staged_paths = {split: staged_path(path) for split, path in txt_paths.items()}
     if split_protocol is None:
         split_protocol = {}
-    split_protocol.update(verify_splits_disjoint(txt_paths))
+    split_protocol.update(verify_splits_disjoint(staged_paths))
     if split_protocol.get("missing_files"):
         print(
             f"[data] 警告：以下 split 文件缺失，无法核对跨 split 长行："
@@ -689,13 +759,10 @@ def main():
             f"空白归一化后 {val_test_overlap['normalized_lines']} 条"
         )
         if not args.allow_leaky_split:
-            # 三个 txt 已经落盘；拒绝时必须删除本次写出的泄露划分，否则
-            # “命令失败但文件仍在”会让后续手动流程误用这份数据。
-            for path in txt_paths.values():
-                try:
-                    os.remove(path)
-                except FileNotFoundError:
-                    pass
+            # 三个 txt 还只是暂存文件；拒绝时删除暂存内容即可——上一份已经
+            # 一致的划分保持原样（比"先落盘再删除"更安全：中途失败不会
+            # 留下半删除的目录）。
+            cleanup_staged(txt_paths)
             raise SystemExit(
                 f"[data] 拒绝写出泄露划分：{detail}。val 用于选 checkpoint、"
                 "test 用于最终报告，两者共享样本会使 test 不再独立；请核查"
@@ -705,6 +772,22 @@ def main():
         print(f"[data] 警告：--allow_leaky_split 显式放行 val/test 重叠：{detail}")
 
     from lega.data import prepare_bins
+
+    # 三个 split 作为**一组**发布：准备过程中途失败（下载失败、磁盘满、
+    # 进程被杀）不会留下“新 train/val + 旧 test”的混合版本划分。
+    try:
+        split_set = publish_split_set(txt_paths, args.out_dir)
+    except Exception:
+        cleanup_staged(txt_paths)
+        raise
+    print(
+        "[data] 划分集合已发布："
+        + "、".join(
+            f"{k}={v['sha256'][:12]}…"
+            for k, v in sorted(split_set.get("splits", {}).items())
+        )
+        + f"（集合指纹 {split_set.get('digest', '')[:12]}…）"
+    )
 
     # 来源清单同时覆盖原始下载/本地输入与清洗后的 split 文本：前者回答
     # “字节从哪来”，后者把报告里的文本哈希与原始文件绑定。文本在
@@ -740,6 +823,14 @@ def main():
         changes=changes,
         previous_digest=previous_digest,
     )
+    # 集合级指纹单独记在 provenance 顶层：它回答“这三个 split 来自同一次
+    # 划分”，逐文件哈希回答不了（混合版本划分逐文件看都没变）。
+    source_provenance["split_set"] = {
+        "digest": split_set.get("digest"),
+        "splits": {
+            k: v.get("sha256") for k, v in (split_set.get("splits") or {}).items()
+        },
+    }
     # force 透传：不传时 prepare_bins 依据源 txt 哈希/协议版本校验缓存，
     # 一致则复用、变化则自动重建；传 --force 则无条件重建。
     prepare_bins(

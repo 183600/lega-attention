@@ -559,10 +559,95 @@ test-test 也做 MinHash/LSH + containment 锚点召回，再逐对精确计算
 覆盖率字段给出该结论的适用边界。正式对比必须固定在同一预处理版本（同一
 `data_report`/bin 哈希）上，不能按测试结果回头挑阈值。
 
+### 文档结构证据（把“拼接伪影”从机制收益里分离出来）
+
+LEGA 的机制主张是“找不到可靠信息时少写无关内容”，而**跨文档窗口**恰恰是
+数据拼接本身注入的无关内容：train/val/test 的文本被清洗后按行拼接成一条
+token 流，窗口在流上滑动，因此相当比例的窗口同时包含两篇文档。若不单独
+量化，就无法区分“门控机制生效”与“拼接语料让跨文档跳转变容易”。此前
+`lega/data.py` 的文档已承诺 `doc_boundaries.json` 侧车与
+`data_report.structure`，但既没有实现，也没有消费方。现在补齐：
+
+- **切分协议**：标题行（`= Title =` 形式）优先作为文档边界，无标题时用空行
+  段落，协议标识 `heading_or_paragraph_v1`；每个 split 的文档数、字符/token
+  分布、文档边界位置都写入 `doc_boundaries.json`，`meta.json` 记录该侧车的
+  SHA-256，缓存命中时逐字节复核（侧车被改写 → 缓存失效 → 必须重建）。
+- **跨文档窗口比例**：`data_report.structure.cross_document_windows` 给出
+  各 ctx 网格（128/256/512/1024）下**期望**跨文档窗口比例——起点在
+  `[0, n_tokens-ctx-1]` 上均匀随机，与训练采样器同口径，跨文档起点集合是各
+  边界对应区间的并集，因此是精确期望而非近似。同时给出
+  `doc_aligned_windows`：完全落在单篇文档内的窗口数与 token 覆盖量。
+- **逐文档分段编码**：GPT-2 BPE 改为按文档分段编码（token 不跨文档边界），
+  `meta.encoding_mode=per_document`；否则“一个词被切成两个 token 分属两篇
+  文档”的情形会让边界计数与实际 token 流不一致。字符级分词器 1 字符 =
+  1 token，逐文档 token 数即字符数，按同样口径分段并校验计数之和等于流长度。
+- **评测侧双口径**：`lega/evaluate.py` 的 `eval.json` 落盘
+  `structure_audit`（本次**实际**评测窗口里跨文档的比例与边界数）与
+  `doc_aligned_eval`（同窗口预算、只在文档内窗口上重算的 PPL）。
+  `--no_doc_aligned_eval` 可关闭后者。两者都是描述性证据，不进入任何确认性
+  判定，也不替代主 PPL 口径；文档内窗口集合由文档边界决定，与主口径的网格
+  窗口不同，绝对值不可直接比较，只有同批变体的**配对差**可比。
+
+**局限**：跨文档比例是**期望**值，具体评测窗口的实测值另记在
+`structure_audit`；文档边界依赖标题/空行的切分协议，WikiText-103 之外的
+语料（无标题、无空行）会退化为行/字符级切分；文档内 PPL 的可用窗口数随
+文档长度分布变化，文档太短时可能没有足够的文档内窗口（此时该口径标记为
+不可用而不是给出偏小的样本）。
+
+### 群组级互斥性审计（把“声明”升级为“可复核结论”）
+
+“官方 split 按文档划分”“时序切分吸附到文档边界”此前只是**声明**：逐行
+比较只能发现两侧行内容完全相同的情形，文档若被从中间切开（行被截断），
+两侧行不再相等，声明与实际内容就脱节。`data_report.split_protocol.group_disjointness`
+（协议 `group_disjointness_v1`）把声明升级为三层可复核结论：
+
+- **群组级**：整篇文档（标题模式）或整段（空行段落模式）同时出现在两个
+  split——同一份文档被复制进两个 split；
+- **段落级**：文档内部的某个段落同时出现在两个 split——文档被从段落边界
+  切开；
+- **行级**：同一行同时出现在两个 split——整行被复制（可能偶然命中，因此
+  只作告警并给出样例）。
+
+群组级/段落级共享是硬证据：作为 `split_group_overlap` /
+`split_paragraph_overlap` 告警进入 `CRITICAL_SPLIT_ALERT_CODES`，训练前
+硬失败（可显式覆盖）。另附 `boundary_continuity`：相邻 split 切点两侧的词
+片段，供人工复核“文档被从行中间切开”的情形；本地划分路径另有**精确**自检
+`split_protocol.lines_cross_cut`（切点是否落在换行处），为 True 时同样进入
+`split_lines_cross_cut` 硬失败。
+
+**局限**：行级与词片段层是启发式证据（没有原始语料时无法区分“真的切开”与
+“原文本来就以半词开头”）；群组级比较按归一化文本做精确匹配，模板化语料
+（固定开头、固定套话）可能触发告警，需要人工复核样例；审计只覆盖本次准备
+的三个 split，不回溯上游数据集的历史版本。
+
+### 划分集合级指纹与原子发布（避免“新 train/val + 旧 test”）
+
+逐 split 的源哈希只能证明“每个文件的内容没变”，证明不了“三个文件来自同
+一次划分”。数据准备中途失败（下载失败、磁盘满、进程被杀）时，逐文件核对
+全部通过，实验却已经在**混合版本**语料上跑完——新 train/val 配旧 test。
+两条措施：
+
+- **原子发布**：三个 split 先写 `*.part` 暂存，互斥性核对在暂存文件上做，
+  全部通过后才统一 `os.replace` 落位；任一步失败都清理暂存文件，上一份
+  已经一致的划分保持原样（不再是“先落盘再删除”，中途失败不会留下半删除
+  的目录）。
+- **集合级指纹**：`split_set.json`（协议 `lega-split-set-v1`）记录逐 split
+  的 SHA-256 与**集合摘要**（把三个哈希当作一个整体来摘要）；
+  `meta.json` 的 `split_set_digest` 把集合摘要纳入 bin 缓存身份，训练前
+  `lega.preflight` 重算当前三个文件的哈希并比对，任何一个文件被替换都会
+  以 `data_split_set` 严重问题拦截训练。
+
+**局限**：集合指纹证明“同一次划分”，不证明划分本身合理（切点是否落在语义
+边界、比例是否合适由 `split_protocol` 与 `accounting` 分别记录）；暂存与
+发布之间仍有极短的窗口（进程在三次 `os.replace` 之间被杀会留下
+“新集合 + 旧 split_set.json”），该状态会被集合指纹立刻查出，不会被静默
+消费。
+
 ## 评测
 
 - WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）。默认只评 `eval_iters` 个抽样窗口，`eval.json` 因此必须落盘 `eval_iters`/`val_windows`/`full_eval`/`eval_window_fraction`，汇总对覆盖率 <1 的 PPL 单独告警；正式 PPL 结论应给 `run_all.py`/`lega.postrun` 加 `--full_eval`，评测全部不重叠窗口（checkpoint 选择仍只用 val）；
 - **窗口边界相位敏感性**（`lega/evaluate.py --window_offsets N` 或 `run_all.py --window_offsets N`，默认关闭）：默认窗口网格固定在 offset=0，窗口边界落在哪里是数据侧任意选择。开启后在 `[0, ctx-1]` 取 N 个均匀相位起点（含首尾），用所有相位都能提供的**公共窗口预算**分别评测，`eval.json.window_offset_sensitivity` 落盘逐相位 `val_loss`/`val_ppl`、范围、离散度、最大相对 offset=0 的偏移与 `val_ppl_ratio`；主指标仍只取 offset=0，训练/选型与 n-gram 对齐口径不变。不同相位的窗口共享大量 token、不是独立重复，因此该字段只作“结论是否依赖窗口切分”的描述性稳健性诊断，不计算 p 值/置信区间，不能替代预注册的单起点或全量窗口分析；
+- **文档结构双口径**（`lega/evaluate.py` 默认开启，`--no_doc_aligned_eval` 关闭）：`eval.json` 额外落盘 `structure_audit`（本次实际评测窗口跨文档的比例）与 `doc_aligned_eval`（同窗口预算、只在文档内窗口上重算的 PPL），用于把门控机制的收益与“拼接语料的跨文档窗口”伪影分开；两者都是描述性证据，不进入确认性判定，文档内口径的窗口集合与主口径不同，绝对值不可直接比较，只有同批变体的配对差可比；
 - 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
   每格 em 附带 Wilson 95% 区间（`em_ci95_wilson`）：n_samples 小时点估计的抽样误差不可忽略；
   niah_corpus 的干扰语句优先取 held-out 的 val/test.txt（train 仅在无 held-out

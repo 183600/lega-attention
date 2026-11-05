@@ -16,8 +16,19 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .data import get_val_windows, load_bin, load_tokenizer
-from .datacheck import append_test_access
+from .data import (
+    doc_token_counts_for_split,
+    get_val_windows,
+    load_bin,
+    load_tokenizer,
+)
+from .datacheck import (
+    append_test_access,
+    doc_aligned_windows,
+    subsample_starts,
+    token_boundary_positions,
+    window_boundary_stats,
+)
 from .model import (
     gate_extra_params,
     gate_extra_params_per_head,
@@ -613,6 +624,13 @@ def main():
         "不重叠窗口的“冷启动”伪影；默认关闭，仅作描述性诊断。",
     )
     p.add_argument(
+        "--no_doc_aligned_eval",
+        action="store_true",
+        help="关闭“文档内 PPL”这一独立口径（默认开启，仅在数据目录存在 "
+        "doc_boundaries.json 时生效）：主 PPL 口径不变，只是少一次前向；"
+        "跨文档窗口比例的结构审计不受该开关影响",
+    )
+    p.add_argument(
         "--worst_n",
         type=int,
         default=0,
@@ -900,6 +918,86 @@ def main():
                 "重叠窗口仅作边界稳健性诊断"
             )
 
+    # 文档结构证据：实际评测窗口跨了多少次文档边界，以及“文档内 PPL”这一
+    # 独立口径。LEGA 的机制主张是“找不到可靠信息时少写无关内容”，而跨文档
+    # 窗口正是数据拼接本身注入的无关内容；不把它单独量化，就无法区分
+    # “机制生效”与“拼接伪影带来的收益”。两者都是描述性证据，不进入任何
+    # 确认性判定，也不替代主 PPL 口径。
+    structure_audit = None
+    doc_aligned_eval = None
+    doc_counts, doc_meta = doc_token_counts_for_split(args.data_dir, split)
+    if doc_counts:
+        boundaries = token_boundary_positions(doc_counts)
+        eval_starts = None
+        if metrics.get("window_starts"):
+            eval_starts = [int(s) for s in metrics["window_starts"]]
+        elif metrics.get("window_indices"):
+            eval_starts = [int(i) * ctx for i in metrics["window_indices"]]
+        cross = None
+        if eval_starts:
+            cross = window_boundary_stats(boundaries, len(val), ctx, starts=eval_starts)
+        structure_audit = {
+            "status": "ok",
+            "protocol": (doc_meta or {}).get("group_unit"),
+            "n_documents": int((doc_meta or {}).get("n_documents") or len(doc_counts)),
+            "n_boundaries": int(len(boundaries)),
+            "cross_document_windows": cross,
+            "note": (
+                "cross_document_windows 统计本次实际评测的窗口里有多少跨过了"
+                "文档边界；比例高说明评测信号里混入了大量“跨文档跳转”损失"
+            ),
+        }
+        if not args.no_doc_aligned_eval:
+            aligned = doc_aligned_windows(doc_counts, ctx)
+            budget = max(1, int(metrics["eval_iters"]))
+            aligned_starts = subsample_starts(aligned["starts"], budget)
+            if aligned_starts:
+                aligned_metrics = evaluate_val(
+                    model,
+                    val,
+                    ctx,
+                    device,
+                    len(aligned_starts),
+                    amp=use_amp,
+                    window_starts=aligned_starts,
+                )
+                safe_aligned = json_safe_eval_metrics(aligned_metrics)
+                doc_aligned_eval = {
+                    "status": "ok",
+                    "split": split,
+                    "eval_ctx": int(ctx),
+                    "n_windows": int(len(aligned_starts)),
+                    "n_windows_available": int(aligned["n_windows"]),
+                    "window_budget": int(budget),
+                    "token_coverage_fraction": aligned["token_coverage_fraction"],
+                    "val_loss": safe_aligned["val_loss"],
+                    "val_ppl": safe_aligned["val_ppl"],
+                    "val_ppl_clamped": safe_aligned["val_ppl_clamped"],
+                    "val_loss_se": aligned_metrics.get("val_loss_se"),
+                    "val_loss_ci95": aligned_metrics.get("val_loss_ci95"),
+                    "val_ppl_ci95": aligned_metrics.get("val_ppl_ci95"),
+                    "note": (
+                        "完全落在单个文档内（输入与标签同属一篇文档）的窗口上"
+                        "的 PPL：与主口径互为独立的“文档内”参考；窗口集合由"
+                        "文档边界决定，与主口径的网格窗口不同，因此绝对值不"
+                        "可直接比较，只有同批变体的配对差可比"
+                    ),
+                }
+                print(
+                    f"[eval] 文档内 PPL（{len(aligned_starts)} 个文档内窗口）："
+                    f"val_ppl={doc_aligned_eval['val_ppl']}；"
+                    f"可用文档内窗口 {aligned['n_windows']} 个，"
+                    f"覆盖 {aligned['token_coverage_fraction']:.1%} token"
+                )
+    else:
+        structure_audit = {
+            "status": "unavailable",
+            "note": (
+                "缺少 doc_boundaries.json（文档边界侧车）：无法核对评测窗口的"
+                "跨文档比例，也没有文档内 PPL 口径；请重建数据缓存"
+            ),
+        }
+
     res = {
         "variant": ck.get("variant", model.variant),
         "seed": seed,
@@ -964,6 +1062,11 @@ def main():
         # 下游可做窗口级配对（评估抽样不确定性），与跨种子方差分开报告。
         "window_losses": metrics.get("window_losses"),
         "window_indices": metrics.get("window_indices"),
+        # 文档结构证据（描述性）：实际评测窗口的跨文档比例，以及“文档内
+        # PPL”这一独立口径。缺结构证据时如实标为 unavailable，不能默认
+        # “没有跨文档窗口”。
+        "structure_audit": structure_audit,
+        "doc_aligned_eval": doc_aligned_eval,
         # 可选：窗口边界相位敏感性（--window_offsets）。主指标仍是 offset=0；
         # 这里只描述“把同一网格平移几个 token 后 PPL 的波动范围”。
         "window_offset_sensitivity": offset_sensitivity,

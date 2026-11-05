@@ -271,6 +271,13 @@ def main():
         "主 PPL 口径。默认关闭。",
     )
     p.add_argument(
+        "--no_doc_aligned_eval",
+        action="store_true",
+        help="关闭评测里的文档内窗口 PPL 对照口径（默认开启）。"
+        "该对照用与主口径相同的窗口预算，在**不跨文档**的窗口上重算 PPL，"
+        "用于把门控机制的收益与“拼接语料的跨文档窗口”伪影分开。",
+    )
+    p.add_argument(
         "--skip_sanity",
         action="store_true",
         help="跳过过拟合小批量 sanity check（默认每变体训练前必跑，"
@@ -1027,6 +1034,7 @@ def main():
         "evaluation": {
             "full_eval": bool(args.full_eval),
             "window_offsets": args.window_offsets,
+            "doc_aligned_eval": not bool(args.no_doc_aligned_eval),
             "split": args.eval_split,
             "scope": "independent_eval_only",
             "requirement": (
@@ -1260,6 +1268,8 @@ def main():
             cmd += ["--full_eval"]
         if args.window_offsets is not None:
             cmd += ["--window_offsets", str(args.window_offsets)]
+        if args.no_doc_aligned_eval:
+            cmd += ["--no_doc_aligned_eval"]
         if args.wandb:
             cmd += ["--wandb"]
         if sanity:

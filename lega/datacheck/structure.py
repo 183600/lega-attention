@@ -11,6 +11,8 @@
 
 * ``split_documents``：把文本切成连续的文档段（标题优先，否则空行段落）；
 * ``document_stats``：文档长度分布；
+* ``group_disjointness_audit``：群组级 split 互斥性审计——把“按文档
+  划分”的**声明**升级为可复核结论（整篇文档/段落重复、行被截断三类）；
 * ``window_boundary_stats``：统计跨文档窗口比例（显式窗口起点，或训练采样
   器“均匀随机起点”口径下的精确期望）；
 * ``doc_aligned_windows``：挑选完全落在单个文档内的窗口（含标签 token 也
@@ -22,7 +24,9 @@
 from __future__ import annotations
 
 import bisect
+import hashlib
 import statistics
+import unicodedata
 
 from ._shared import _install as _shared_install
 
@@ -157,6 +161,312 @@ def document_stats(text: str, segments, group_unit: str = None) -> dict:
         "chars_per_document": _distribution(chars),
         "lines_per_document": _distribution(lines),
         "empty_documents": int(sum(1 for c in chars if c <= 0)),
+    }
+
+
+# ---------------------------------------------------------------- 群组级互斥性
+
+# 群组互斥性审计协议标识：写进 data_report.split_protocol，作为“划分是否
+# 真的按文档/段落切开”的可复核证据的版本号。
+GROUP_DISJOINTNESS_PROTOCOL = "group_disjointness_v1"
+
+# 行前缀探针长度（字符）：用于发现“同一行在两个 split 里被截断”的情形。
+# 逐行逐字节比较看不到共享（两侧行内容不同），但只要截断点在该长度之后，
+# 两侧“≤该长度且按词边界回退”的前缀必然相同——这是判定“上游切分真的落在
+# 文档边界上”的关键证据：文档被从中间切开时，行内容不再相等。
+# 取 80 字符而不是更短：短前缀在真实语料里极易偶然相同（固定句式、
+# 模板化文本），会把告警变成噪声；80 字符仍覆盖绝大多数自然语言行。
+LINE_PREFIX_PROBE_CHARS = 80
+
+
+def normalize_group_text(text: str) -> str:
+    """群组/段落比较键：NFKC + casefold + 空白折叠。
+
+    与近似重复筛查（``text._near_dup_normalize``）同一口径：只做确定性的
+    等价归一化，不做同义词/词干替换，避免把语义不同的文本判成同一群组。
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def group_digest(normalized: str) -> str:
+    """归一化文本的短摘要（16 hex）。只作比较键，不承担完整性证明。"""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _word_boundary_prefix(norm: str, limit: int) -> str:
+    """``norm`` 中长度不超过 ``limit`` 的最长词边界前缀。
+
+    词边界即空格位置：归一化后词与词之间恰好一个空格。截断到某个词之后
+    的行与完整行的“≤limit 词边界前缀”相同，因此该前缀可识别“同一行的
+    同一前缀在两个 split 里同时出现”（整行被复制）。找不到词边界（首个词
+    就超过 limit）时返回空串。
+
+    注意：它**不能**识别“文档被从行中间切开”的情形——切开后的前半段与
+    后半段是同一行的不同片段，前缀摘要并不相同（前半段的前缀属于原行，
+    后半段的前缀属于原行的后半部分）。行中切开的证据由两处给出：本地
+    划分路径在切点处的精确自检（``split_protocol.lines_cross_cut``），
+    以及本模块的边界片段诊断（``boundary_continuity``）。
+    """
+    if not norm:
+        return ""
+    if len(norm) <= limit:
+        return norm
+    cut = norm.rfind(" ", 0, limit + 1)
+    if cut <= 0:
+        return ""
+    return norm[:cut]
+
+
+def _line_prefix_digests(text: str, prefix_chars: int):
+    """逐行的词边界前缀摘要集合（发现被整行复制的共享行）。
+
+    只索引长度不小于 ``prefix_chars`` 的行：更短的行在真实语料里极易
+    偶然相同（标题、固定用语），纳入只会制造噪声。返回集合里的每个摘要
+    都对应“至少 ``prefix_chars`` 个字符的共同前缀”。
+    """
+    out = set()
+    if not text:
+        return out
+    for start, end in _line_spans(text):
+        raw = text[start:end]
+        if not raw.strip():
+            continue
+        norm = normalize_group_text(raw)
+        if len(norm) < prefix_chars:
+            continue
+        pref = _word_boundary_prefix(norm, prefix_chars)
+        if pref:
+            out.add(group_digest(pref))
+    return out
+
+
+def _first_word(text: str) -> str:
+    """首个空白分隔词（跳过开头的空行）。"""
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            parts = stripped.split()
+            return parts[0] if parts else ""
+    return ""
+
+
+def _last_word(text: str) -> str:
+    """末个空白分隔词（跳过结尾的空行）。"""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    parts = lines[-1].split()
+    return parts[-1] if parts else ""
+
+
+def boundary_continuity(texts: dict) -> dict:
+    """相邻 split 的边界片段诊断（时间序 train→val→test）。
+
+    文档被从**行中间**切开时，群组比较与逐行比较都看不出来（两侧的行内容
+    不同），但切点两侧会留下半个词。这里把切点两侧的词片段落盘：
+
+    * ``tail_word`` / ``head_word``：切点两侧的词片段；
+    * ``mid_word_cut_suspected``：切点疑似落在词中间——两侧的词拼在一起
+      既不等于前者的完整词、也不等于后者的完整词，且“两词相邻”在前一个
+      split 末尾附近没有出现过。
+
+    这是**启发式诊断**而非判定：没有原始语料时无法区分“真的切开”与
+    “原文本来就以半词开头”。本地划分路径另有精确自检
+    （``split_protocol.lines_cross_cut``）。
+    """
+    texts = texts or {}
+    order = [s for s in ("train", "val", "test") if s in texts]
+    if len(order) < 2:
+        order = sorted(texts)
+    pairs = []
+    for i, a in enumerate(order[:-1]):
+        b = order[i + 1]
+        ta = texts.get(a) or ""
+        tb = texts.get(b) or ""
+        tail_word = _last_word(ta)
+        head_word = _first_word(tb)
+        joined = f"{tail_word} {head_word}"
+        nearby = False
+        if tail_word and head_word:
+            window = " ".join(ta.split()[-2000:])
+            nearby = joined in window
+        suspected = bool(
+            tail_word
+            and head_word
+            and tail_word != head_word
+            and not nearby
+            and ta.rstrip(" \t").endswith(tail_word[-1])
+            and tb.lstrip(" \t").startswith(head_word[0])
+        )
+        pairs.append(
+            {
+                "pair": _pair_key(a, b),
+                "tail_word": tail_word,
+                "head_word": head_word,
+                "pair_appears_adjacent_nearby": bool(nearby),
+                "mid_word_cut_suspected": bool(suspected),
+            }
+        )
+    return {
+        "order": "->".join(order),
+        "pairs": pairs,
+        "n_suspected": int(sum(1 for p in pairs if p["mid_word_cut_suspected"])),
+        "note": (
+            "切点两侧的词片段诊断：疑似在词中间切开时给出样例供人工复核；"
+            "没有原始语料时无法完全排除原文本身以半词开头的情况"
+        ),
+    }
+
+
+def _paragraph_spans(text: str, start: int, end: int):
+    """群组内部的空行分段（字符偏移，半开区间）。
+
+    段落是“同一文档被切到两个 split”时最细的可核对单位：一个段落整体
+    出现在两个 split 里，说明上游切分没有落在文档边界上。
+    """
+    spans = []
+    cur = int(start)
+    pos = int(start)
+    limit = int(end)
+    while pos < limit:
+        nl = text.find("\n", pos, limit)
+        line_end = limit if nl < 0 else nl
+        if not text[pos:line_end].strip():
+            if cur < pos:
+                spans.append((cur, pos))
+            cur = line_end + 1 if nl >= 0 else limit
+        pos = line_end + 1 if nl >= 0 else limit
+    if cur < limit:
+        spans.append((cur, limit))
+    return spans
+
+
+def _pair_key(a: str, b: str) -> str:
+    return f"{a}|{b}"
+
+
+def group_disjointness_audit(
+    texts: dict,
+    min_chars: int = 40,
+    prefix_chars: int = LINE_PREFIX_PROBE_CHARS,
+) -> dict:
+    """群组级 split 互斥性审计。
+
+    “官方 split 按文档划分”“时序切分吸附到文档边界”这类说法此前只是
+    **声明**：逐行比较只能发现两侧行内容完全相同的情形，文档若被从中间
+    切开（行被截断），两侧行不再相等，声明与实际内容就脱节了。本审计把
+    声明升级为可复核的结论，分三层：
+
+    * **群组级**：整篇文档（标题模式）或整段（空行段落模式）的内容在两个
+      split 里同时出现——同一份文档被复制进两个 split；
+    * **段落级**：文档内部的某个段落同时出现在两个 split——文档被从段落
+      边界切开；
+    * **行级**：同一行（词边界前缀相同）在两个 split 里同时出现——整行被
+      复制。该层可能有偶然命中（固定用语、模板句），因此只作告警证据并
+      给出样例，不单独作为硬失败依据。
+
+    另外给出 ``boundary_continuity``：相邻 split 的切点两侧词片段，用于
+    人工复核“文档被从行中间切开”的情形。
+
+    返回值只含 JSON 原生类型，可直接写进 data_report。
+    """
+    min_chars = int(min_chars)
+    prefix_chars = int(prefix_chars)
+    if min_chars < 1:
+        raise ValueError(f"min_chars 必须 >= 1，收到 {min_chars!r}")
+    if prefix_chars < 1:
+        raise ValueError(f"prefix_chars 必须 >= 1，收到 {prefix_chars!r}")
+    splits = [s for s in sorted(texts or {}) if isinstance((texts or {}).get(s), str)]
+    per_split = {}
+    group_index = {}
+    paragraph_index = {}
+    prefix_index = {}
+    for split in splits:
+        text = texts.get(split) or ""
+        info = split_documents(text)
+        segments = info["segments"]
+        group_unit = info["group_unit"]
+        n_groups = len(segments)
+        n_groups_eligible = 0
+        n_paragraphs_eligible = 0
+        group_hashes = set()
+        paragraph_hashes = set()
+        for gi, (gs, ge) in enumerate(segments):
+            norm = normalize_group_text(text[gs:ge])
+            if len(norm) >= min_chars:
+                n_groups_eligible += 1
+                digest = group_digest(norm)
+                group_hashes.add(digest)
+                where = group_index.setdefault(digest, {})
+                where[split] = where.get(split, 0) + 1
+            for ps, pe in _paragraph_spans(text, gs, ge):
+                pnorm = normalize_group_text(text[ps:pe])
+                if len(pnorm) >= min_chars:
+                    n_paragraphs_eligible += 1
+                    digest = group_digest(pnorm)
+                    paragraph_hashes.add(digest)
+                    where = paragraph_index.setdefault(digest, {})
+                    where[split] = where.get(split, 0) + 1
+        prefixes = _line_prefix_digests(text, prefix_chars)
+        for digest in prefixes:
+            where = prefix_index.setdefault(digest, {})
+            where[split] = where.get(split, 0) + 1
+        per_split[split] = {
+            "group_unit": group_unit,
+            "n_groups": int(n_groups),
+            "n_groups_eligible": int(n_groups_eligible),
+            "n_paragraphs_eligible": int(n_paragraphs_eligible),
+            "n_line_prefixes": int(len(prefixes)),
+        }
+    pairs = {}
+    for i, a in enumerate(splits):
+        for b in splits[i + 1 :]:
+            shared_groups = sorted(
+                d for d, where in group_index.items() if a in where and b in where
+            )
+            shared_paragraphs = sorted(
+                d for d, where in paragraph_index.items() if a in where and b in where
+            )
+            shared_prefixes = sorted(
+                d for d, where in prefix_index.items() if a in where and b in where
+            )
+            pairs[_pair_key(a, b)] = {
+                "shared_groups": int(len(shared_groups)),
+                "shared_groups_examples": shared_groups[:5],
+                "shared_paragraphs": int(len(shared_paragraphs)),
+                "shared_paragraphs_examples": shared_paragraphs[:5],
+                "shared_line_prefixes": int(len(shared_prefixes)),
+                "shared_line_prefixes_examples": shared_prefixes[:5],
+            }
+    groups_disjoint = all(p["shared_groups"] == 0 for p in pairs.values())
+    paragraphs_disjoint = all(p["shared_paragraphs"] == 0 for p in pairs.values())
+    prefixes_disjoint = all(p["shared_line_prefixes"] == 0 for p in pairs.values())
+    problems = []
+    if not groups_disjoint:
+        problems.append("shared_groups")
+    if not paragraphs_disjoint:
+        problems.append("shared_paragraphs")
+    if not prefixes_disjoint:
+        problems.append("shared_line_prefixes")
+    return {
+        "protocol": GROUP_DISJOINTNESS_PROTOCOL,
+        "min_chars": int(min_chars),
+        "prefix_chars": int(prefix_chars),
+        "splits": per_split,
+        "pairs": pairs,
+        "groups_disjoint": bool(groups_disjoint),
+        "paragraphs_disjoint": bool(paragraphs_disjoint),
+        "line_prefixes_disjoint": bool(prefixes_disjoint),
+        "problems": problems,
+        "verdict": "disjoint" if not problems else "shared:" + ",".join(problems),
+        "boundary_continuity": boundary_continuity(texts),
+        "note": (
+            "群组级/段落级共享是文档被复制或被从文档边界切开的直接证据；"
+            "行级共享提示整行被复制，可能含偶然命中，只作告警并给出样例；"
+            "boundary_continuity 给出切点两侧词片段供人工复核行中切开的情形"
+        ),
     }
 
 
@@ -302,6 +612,81 @@ def doc_aligned_windows(doc_token_counts, ctx: int) -> dict:
         "token_coverage_fraction": (
             float(tokens_covered / total_tokens) if total_tokens else None
         ),
+    }
+
+
+def doc_aligned_coverage(doc_token_counts, ctx: int) -> dict:
+    """文档内窗口覆盖量（与 :func:`doc_aligned_windows` 同口径，不物化起点）。
+
+    报告只需要“有多少个窗口完全落在单个文档内、覆盖多少 token”，不需要
+    起点列表本身：大语料在 ctx=128 时起点可达百万级，写进 JSON 报告既
+    臃肿又没有消费方。
+    """
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx!r}")
+    counts = [int(c) for c in (doc_token_counts or [])]
+    n_windows = 0
+    eligible_docs = 0
+    tokens_in_eligible = 0
+    total_tokens = 0
+    for c in counts:
+        total_tokens += c
+        if c > 0 and c >= ctx + 1:
+            eligible_docs += 1
+            tokens_in_eligible += c
+            n_windows += (c - 1) // ctx
+    tokens_covered = n_windows * ctx
+    return {
+        "ctx": int(ctx),
+        "n_windows": int(n_windows),
+        "n_documents_total": len(counts),
+        "n_documents_eligible": int(eligible_docs),
+        "tokens_total": int(total_tokens),
+        "tokens_in_eligible_documents": int(tokens_in_eligible),
+        "tokens_covered": int(tokens_covered),
+        "token_coverage_fraction": (
+            float(tokens_covered / total_tokens) if total_tokens else None
+        ),
+    }
+
+
+def document_structure_report(
+    text: str,
+    segments,
+    group_unit: str,
+    doc_token_counts,
+    ctx_grid=REPORT_CTX_GRID,
+) -> dict:
+    """单个 split 的文档结构审计（长度分布 + 跨文档窗口比例 + 文档内覆盖）。
+
+    ``cross_document_windows`` 用训练采样器的口径（起点在 token 流上均匀
+    随机）给出**期望**跨文档比例；``doc_aligned_windows`` 给出“完全落在
+    单个文档内”的窗口数与 token 覆盖量。两者一起回答：这份语料的拼接结构
+    在多大程度上把“跨文档跳转”注入了训练与评测窗口。
+    """
+    stats = document_stats(text, segments, group_unit)
+    counts = [int(c) for c in (doc_token_counts or [])]
+    n_tokens = int(sum(counts))
+    boundaries = token_boundary_positions(counts)
+    cross = {}
+    aligned = {}
+    for ctx in ctx_grid:
+        ctx = int(ctx)
+        key = str(ctx)
+        cross[key] = window_boundary_stats(boundaries, n_tokens, ctx, starts=None)
+        aligned[key] = doc_aligned_coverage(counts, ctx)
+    return {
+        "group_unit": group_unit,
+        "n_documents": int(stats["n_documents"]),
+        "chars_total": int(stats["chars_total"]),
+        "tokens_total": n_tokens,
+        "chars_per_document": stats["chars_per_document"],
+        "lines_per_document": stats["lines_per_document"],
+        "tokens_per_document": _distribution(counts),
+        "n_boundaries": int(len(boundaries)),
+        "cross_document_windows": cross,
+        "doc_aligned_windows": aligned,
     }
 
 

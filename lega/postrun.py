@@ -88,6 +88,8 @@ def _eval_argv(a, ckpt: str) -> List[str]:
         argv += ["--window_offsets", str(a.window_offsets)]
     if getattr(a, "position_ppl", False):
         argv += ["--position_ppl"]
+    if getattr(a, "no_doc_aligned_eval", False):
+        argv += ["--no_doc_aligned_eval"]
     if a.worst_on_test:
         argv += ["--worst_on_test"]
     if a.allow_repeat_test:
@@ -327,6 +329,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="透传 evaluate 的窗口内位置分层 PPL 画像（冷启动审计）；"
         "默认关闭，只作描述性诊断",
+    )
+    p.add_argument(
+        "--no_doc_aligned_eval",
+        action="store_true",
+        help="关闭 evaluate 的文档内窗口 PPL 对照口径（默认开启，"
+        "用于把机制收益与拼接伪影分开）",
     )
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--wandb", action="store_true")
