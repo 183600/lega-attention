@@ -3,6 +3,7 @@
 # 使用 comprehensive_small 配置，启用参数匹配安慰剂、容量匹配消融、原始参数化对照
 # 以及推理期剂量-反应与因果病灶
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
 CONFIG="${1:-configs/comprehensive_small.json}"
 DATA_DIR="${2:-data/wikitext103}"

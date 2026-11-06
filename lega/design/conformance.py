@@ -1095,11 +1095,12 @@ def render_design_section(
                 "|---|---|---|---|---|",
             ]
             for rung in ladder:
+                note_escaped = str(rung.get('note', '')).replace('|', r'\|')
                 md.append(
                     f"| {rung.get('step')} | {rung.get('action')} | "
                     f"{rung.get('kept_cells')} | "
                     f"{_fmt(rung.get('estimated_gpu_hours'), 2)} | "
-                    f"{str(rung.get('note', '')).replace('|', '\\|')} |"
+                    f"{note_escaped} |"
                 )
             md.append(
                 "- 取舍阶梯是机械的、结果无关的：先去掉非确认性可选臂，再按"
