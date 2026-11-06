@@ -19,12 +19,60 @@ Checks performed:
      (same set, same version specifiers) — otherwise ``pip install .`` and
      ``pip install -r requirements.txt`` install different stacks;
   4. the Python version declared in the lock header is compatible with
-     ``requires-python`` from ``pyproject.toml``.
+     ``requires-python`` from ``pyproject.toml``;
+  5. ``Dockerfile`` builds the *same* environment: the runtime stack comes
+     from ``requirements-lock.txt`` only, every locked package is installed
+     with the locked version (never ``--upgrade``, never a literal that
+     drifts), no undeclared package enters the runtime image, the base image
+     can be pinned by digest, and the image build runs the same environment
+     gate the pipeline applies to formal runs
+     (``python -m lega.repro --check-env``).
+
+Why the container needs the same discipline
+===========================================
+A container that installs "whatever torch is newest" is a *different* research
+environment, not a reproducible one: the pipeline's fail-closed environment
+gate would abort inside such an image (``environment_lock_mismatch``), and if
+the lock were ever relaxed the results would silently come from an undeclared
+dependency stack. The image is therefore held to the lock, and the check is
+executable rather than a convention.
 """
 
 import re
 import sys
 from pathlib import Path
+
+
+# 构建工具本身不属于运行时依赖栈：pip/setuptools/wheel 在镜像里可以按任意
+# 版本安装，它们不参与实验数值，也不进入环境锁审计。
+BUILD_TOOL_PACKAGES = frozenset({"pip", "setuptools", "wheel"})
+
+# 镜像构建期必须执行的环境闸门：与流水线正式实验用的是同一把尺子
+# （lega.repro.environment_gate / environment_lock_report）。
+ENV_GATE_COMMAND = "python -m lega.repro --check-env"
+
+# 会吃掉下一个 token 的 pip 选项：它们的取值不是"要安装的包"。
+PIP_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "-r",
+        "--requirement",
+        "-c",
+        "--constraint",
+        "-f",
+        "--find-links",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "--trusted-host",
+        "-e",
+        "--editable",
+        "--target",
+        "--prefix",
+        "--proxy",
+        "--python-version",
+        "--platform",
+    }
+)
 
 
 def parse_requirements(path: Path) -> dict[str, str]:
@@ -143,6 +191,283 @@ def normalize_spec(spec: str) -> str:
     return text.lower()
 
 
+# --------------------------------------------------------------------------
+# Dockerfile（容器镜像）与依赖锁的一致性检查
+# --------------------------------------------------------------------------
+
+LOCK_FILE_NAME = "requirements-lock.txt"
+
+
+def _logical_lines(text: str) -> list[str]:
+    """把 Dockerfile 文本拼成逻辑行（处理行尾续行 ``\\``）。"""
+    lines: list[str] = []
+    buffer = ""
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.endswith("\\"):
+            buffer += line[:-1] + " "
+            continue
+        buffer += line
+        lines.append(buffer)
+        buffer = ""
+    if buffer:
+        lines.append(buffer)
+    return [line.strip() for line in lines if line.strip()]
+
+
+def _split_tokens(command: str) -> list[str]:
+    """按 shell 词法切分命令（尊重引号；引号本身不进入 token）。"""
+    tokens: list[str] = []
+    current = ""
+    quote = ""
+    for ch in command:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                current += ch
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch.isspace():
+            if current:
+                tokens.append(current)
+                current = ""
+            continue
+        current += ch
+    if current:
+        tokens.append(current)
+    return tokens
+
+
+def parse_dockerfile_stages(text: str) -> tuple[list[str], list[dict]]:
+    """解析 Dockerfile 的构建阶段。
+
+    返回 ``(全局指令, 阶段列表)``：全局指令是第一个 FROM 之前的部分（ARG 等）；
+    每个阶段是 ``{"name", "from_line", "text"}``——``name`` 取 ``AS <name>``，
+    匿名阶段按序号命名；``from_line`` 是该阶段的 FROM 指令原文。
+    """
+    preamble: list[str] = []
+    stages: list[dict] = []
+    for line in _logical_lines(text):
+        if line.upper().startswith("FROM "):
+            tokens = _split_tokens(line)
+            name = ""
+            upper = [token.upper() for token in tokens]
+            if "AS" in upper:
+                index = upper.index("AS")
+                if index + 1 < len(tokens):
+                    name = tokens[index + 1]
+            if not name:
+                name = f"stage{len(stages)}"
+            stages.append({"name": name, "from_line": line, "text": ""})
+            continue
+        if not stages:
+            preamble.append(line)
+        else:
+            stages[-1]["text"] += line + "\n"
+    return preamble, stages
+
+
+def _install_statements(stage_text: str) -> list[dict]:
+    """取出阶段内所有 ``pip install`` 语句。
+
+    先按逻辑行拼接（处理 ``\\`` 续行），再按 ``;``/``&&`` 拆成 shell 语句：
+    一条 RUN 里常有多个 pip 调用，混成一条命令会把后一个命令的参数当成
+    依赖名，凭空造出假告警。每条语句带上它所属的逻辑行——“版本变量是否从
+    lock 文件派生”只能在同一逻辑行（同一个 RUN）里判断。
+    """
+    statements: list[dict] = []
+    for logical in _logical_lines(stage_text):
+        for statement in re.split(r";|&&", logical):
+            statement = statement.strip()
+            if not statement:
+                continue
+            tokens = _split_tokens(statement)
+            if "pip" not in tokens or "install" not in tokens:
+                continue
+            index = tokens.index("install")
+            statements.append(
+                {
+                    "line": logical,
+                    "statement": statement,
+                    "tokens": tokens[index + 1 :],
+                }
+            )
+    return statements
+
+
+def _canonical_name(name: str) -> str:
+    return str(name).strip().lower().replace("_", "-")
+
+
+def _parse_requirement_spec(spec: str) -> tuple[str, str | None]:
+    """``name==version`` → ``(name, version)``；其它写法 → ``(name, None)``。
+
+    无版本约束、范围约束（``>=``/``~=``）与直接 URL（``name @ url``）都按
+    “没有精确版本”处理：它们都无法证明镜像里的包就是锁文件里的那一个。
+    """
+    text = spec.strip()
+    if not text:
+        return "", None
+    if " @ " in text:
+        return _canonical_name(text.split(" @ ", 1)[0]), None
+    match = re.match(r"^([A-Za-z0-9._-]+)(?:\[[^\]]*\])?(.*)$", text)
+    if not match:
+        return _canonical_name(text), None
+    name, rest = match.group(1), match.group(2).strip()
+    if rest.startswith("=="):
+        return _canonical_name(name), rest[2:].strip()
+    return _canonical_name(name), None
+
+
+def _is_path_like(name: str) -> bool:
+    """本地路径/可编辑安装（``.``、``./x``）不是依赖包名。"""
+    return not name or name.startswith(".") or "/" in name or "\\" in name
+
+
+def _requirement_targets(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """从 pip install 的 token 里取出 ``(依赖规格, 引用的 requirements 文件)``。"""
+    specs: list[str] = []
+    files: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("-r", "--requirement", "-c", "--constraint"):
+            index += 1
+            if index < len(tokens):
+                files.append(tokens[index])
+        elif token in PIP_OPTIONS_WITH_VALUE:
+            index += 1
+        elif token.startswith("-"):
+            pass
+        else:
+            specs.append(token)
+        index += 1
+    return specs, files
+
+
+def check_container_lock(
+    dockerfile_text: str,
+    locked: dict[str, str],
+    ci_locked: dict[str, str] | None = None,
+) -> list[str]:
+    """检查 Dockerfile 是否构建了与依赖锁一致的环境；返回问题列表。
+
+    规则：
+
+      * 运行时阶段（文本里出现 ``requirements-lock.txt`` 的阶段）必须执行
+        环境闸门 ``python -m lega.repro --check-env``——镜像构建期就拒绝对
+        不上锁的依赖栈，而不是等正式实验被流水线中止；
+      * 被锁定的包必须按锁定版本安装：不允许无版本约束，不允许字面量版本与
+        lock 不一致；版本写成 shell 变量时，该语句必须从 lock 文件派生
+        （否则“变量里装的是哪个版本”无从核对）；
+      * 不允许 ``--upgrade`` 升级被锁定的包：那会把镜像换成“最新版本”，
+        与流水线自己的 fail-closed 环境闸门直接冲突；
+      * 运行时阶段不得安装 lock/CI 文件之外的包（torchvision/torchaudio 这类
+        未声明依赖会悄悄改变数值栈）；
+      * 外部基础镜像必须经 ARG 传入，才能按 digest 固定成同一个镜像。
+    """
+    ci_locked = ci_locked or {}
+    problems: list[str] = []
+    preamble, stages = parse_dockerfile_stages(dockerfile_text)
+    if not stages:
+        return ["Dockerfile 没有 FROM 指令：无法审计构建环境"]
+
+    declared_args = set()
+    for line in preamble:
+        match = re.match(r"^ARG\s+([A-Za-z0-9_.-]+)", line, re.IGNORECASE)
+        if match:
+            declared_args.add(match.group(1).upper())
+
+    known_stages: set[str] = set()
+    for stage in stages:
+        name = stage["name"]
+        text = stage["text"]
+        from_line = stage["from_line"]
+        tokens = _split_tokens(from_line)
+        image = tokens[1] if len(tokens) >= 2 else ""
+        external = image not in known_stages
+        if external:
+            if "${" not in image:
+                problems.append(
+                    f"阶段 {name} 的基础镜像 {image!r} 是写死的 tag："
+                    "无法按 digest 固定，正式复现请通过 ARG 传入镜像"
+                )
+            else:
+                for arg in re.findall(r"\$\{([A-Za-z0-9_.-]+)\}", image):
+                    if arg.upper() not in declared_args:
+                        problems.append(
+                            f"阶段 {name} 引用了未声明的构建参数 {arg}"
+                        )
+        known_stages.add(name)
+
+        statements = _install_statements(text)
+        # 运行时阶段的判定：文本里引用了 lock 文件，或安装了任何一个被锁定的
+        # 包。只按“引用 lock”判定会漏掉 `FROM base AS gpu` 这种不重复引用
+        # lock、却照样装 torch 的阶段——那里最容易混进未声明依赖。
+        installs_locked_package = False
+        for entry in statements:
+            specs, _ = _requirement_targets(entry["tokens"])
+            for spec in specs:
+                pkg, _version = _parse_requirement_spec(spec)
+                if pkg in locked:
+                    installs_locked_package = True
+        runtime_stage = (LOCK_FILE_NAME in text) or installs_locked_package
+        for entry in statements:
+            statement = entry["statement"]
+            install_tokens = entry["tokens"]
+            specs, files = _requirement_targets(install_tokens)
+            upgrade = any(token in ("--upgrade", "-U") for token in install_tokens)
+            derived_from_lock = any(
+                LOCK_FILE_NAME in referenced for referenced in files
+            ) or LOCK_FILE_NAME in entry["line"]
+            for spec in specs:
+                pkg, version = _parse_requirement_spec(spec)
+                if not pkg:
+                    continue
+                if pkg in locked:
+                    if version is None:
+                        problems.append(
+                            f"阶段 {name} 安装 {pkg} 时没有精确版本：镜像里的"
+                            f"{pkg} 不保证是锁定的 {locked[pkg]}"
+                        )
+                    elif "${" in version:
+                        if not derived_from_lock:
+                            problems.append(
+                                f"阶段 {name} 的 {pkg} 版本来自变量 {version}，"
+                                "但该语句没有从 requirements-lock.txt 派生："
+                                "无法核对镜像里的版本"
+                            )
+                    elif version.split("+", 1)[0] != locked[pkg].split("+", 1)[0]:
+                        problems.append(
+                            f"阶段 {name} 安装 {pkg}=={version}，与锁定的 "
+                            f"{locked[pkg]} 不一致"
+                        )
+                    if upgrade:
+                        problems.append(
+                            f"阶段 {name} 用 --upgrade 安装 {pkg}："
+                            "镜像里的版本会漂移到“最新”，不再是锁定环境"
+                        )
+                elif pkg in ci_locked or pkg in BUILD_TOOL_PACKAGES:
+                    continue
+                elif _is_path_like(pkg):
+                    continue
+                elif runtime_stage:
+                    problems.append(
+                        f"阶段 {name} 安装了未在 requirements-lock.txt/"
+                        "requirements-ci.txt 中声明的包 "
+                        f"{pkg}：未声明依赖会悄悄改变数值栈"
+                    )
+        if runtime_stage and ENV_GATE_COMMAND not in text:
+            problems.append(
+                f"阶段 {name} 安装了锁定运行时依赖却没有执行环境闸门"
+                f"（{ENV_GATE_COMMAND}）：镜像可能带着与 lock 不一致的依赖栈发布"
+            )
+    return problems
+
+
 def main():
     root = Path(__file__).parent.parent
     req_file = root / "requirements.txt"
@@ -188,6 +513,7 @@ def main():
 
     # CI 必须测试被锁定的同一套版本：共享包的固定版本必须完全一致，
     # 否则 CI 通过并不能说明锁定环境可用。
+    ci_locked: dict[str, str] = {}
     if ci_file.exists():
         ci_locked = parse_lock(ci_file)
         for pkg, version in locked.items():
@@ -202,6 +528,17 @@ def main():
                 )
     else:
         warnings.append(f"{ci_file.name} not found: skipped lock/CI cross-check")
+
+    # 容器镜像必须构建同一个环境：镜像里装的是“最新 torch”时，流水线自己的
+    # fail-closed 环境闸门会在正式实验里中止，镜像也就不是可复现环境。
+    dockerfile = root / "Dockerfile"
+    if dockerfile.exists():
+        container_problems = check_container_lock(
+            dockerfile.read_text(encoding="utf-8"), locked, ci_locked
+        )
+        errors.extend(f"Dockerfile: {problem}" for problem in container_problems)
+    else:
+        warnings.append("Dockerfile not found: skipped container/lock cross-check")
 
     # pyproject 与 requirements.txt 必须声明同一套直接依赖：两处各写一份时，
     # `pip install .` 与 `pip install -r requirements.txt` 会装出不同的栈。
@@ -256,6 +593,7 @@ def main():
     print("OK: requirements-lock.txt is consistent with requirements.txt")
     print("OK: requirements-ci.txt pins match requirements-lock.txt")
     print("OK: pyproject.toml dependencies match requirements.txt")
+    print("OK: Dockerfile builds the locked environment (and runs the env gate)")
     return 0
 
 

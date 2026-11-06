@@ -144,6 +144,40 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -e ".[dev]"    # 包含 pytest 等开发依赖
 ```
 
+**可选：容器化复现环境（镜像 = 锁定依赖栈）**：
+
+仓库自带 `Dockerfile` / `docker-compose.yml`。镜像里的运行时依赖**只从
+`requirements-lock.txt` 安装**：torch 的版本在构建时从 lock 文件派生（不写死
+字面量、不 `--upgrade` 拉最新），并且**构建期就执行
+`python -m lega.repro --check-env`**——与流水线正式实验用的是同一把 fail-closed
+环境闸门。依赖栈与 lock 不一致时**镜像直接构建失败**，而不是发布一个跑正式
+实验会被闸门中止的容器。
+
+```bash
+# CPU 环境（默认目标 base）
+docker build -t lega-attention:0.1.0 .
+docker run --rm -it -v "$PWD/data:/app/data" -v "$PWD/results:/app/results" \
+    lega-attention:0.1.0 bash
+
+# GPU 环境：TORCH_INDEX_URL 选择 CUDA wheel 索引；该索引必须提供锁定的 torch
+# 版本，否则构建失败（不会静默换成别的版本）
+docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 \
+    -t lega-attention:0.1.0-cuda .
+docker run --rm -it --gpus all -v "$PWD/data:/app/data" -v "$PWD/results:/app/results" \
+    lega-attention:0.1.0-cuda bash
+
+# 正式复现建议把基础镜像也按 digest 固定（默认浮动 tag 仅供本地开发）
+docker build --build-arg PYTHON_IMAGE=python:3.12-slim@sha256:<digest> \
+    -t lega-attention:0.1.0 .
+
+# compose：docker compose run --rm lega-cpu | lega-gpu | run-small
+```
+
+镜像与 lock 的一致性由 `scripts/check_requirements_lock.py`（`make lock-check`）
+与 `tests/test_docker_repro.py` 强制执行：去掉环境闸门、把 torch 改成不锁版本
+或与 lock 不一致的版本、在运行时阶段装未声明的包（如 `torchvision`）、把基础
+镜像写死成 tag，都会被检查器拒绝。
+
 ### 3.2 冒烟测试（推荐先跑，CPU 几分钟）
 
 ```bash
@@ -229,6 +263,7 @@ python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram
 - **随机种子全覆盖**：`lega.utils.set_seed` 固定 Python `random`、NumPy、PyTorch（CPU/CUDA）、cuDNN 确定性算法（`warn_only`）与 `PYTHONHASHSEED`（子进程）；本项目的批采样使用显式 `np.random.default_rng(seed)`（无 torch DataLoader/worker），数据顺序由 seed 唯一确定，单测覆盖（`tests/test_repro.py`）。`run_all` 还会逐命令把子进程的 `PYTHONHASHSEED` 对齐到该命令自己的 `--seed`（而非统一用第一个种子），每个 run 的 `run_manifest.json` 内嵌 `seed_report` 审计记录：逐随机源的实际种子、**各 RNG 真实状态的短指纹**（同 seed 可被第三方用 `set_seed(seed)+rng_state_fingerprint()` 复算验证，异 seed 必然不同，当前状态不属于该 seed 时为 `null` 而非张冠李戴）、cuDNN/确定性开关（**如实标注严格模式还是 `warn_only`，避免把“只警告”写成“严格确定性”**）、数据顺序机制，并如实区分 `PYTHONHASHSEED` 的“解释器启动时取值 vs 仅对子进程生效的当前 env”（启动时未设置时 `pythonhashseed_effective=false`，不再让字段被 `set_seed` 自身写成 seed 而自证为真），杜绝“声称固定了其实没有”。运行环境快照同时记录 TF32（matmul/cudnn）、torch 线程数与 `CUDA_VISIBLE_DEVICES`；训练清单在 `enable_tf32` **之后**生成，记录的是实际生效值而非默认值。跨硬件架构（不同 GPU/CPU/cuDNN 版本）无法保证逐位一致，但同一台机器上重跑结果稳定。
 - **过拟合小批量 sanity check（训练前闸门）**：`lega.sanity` 抽取固定小批量（默认 8 条 × 128 token），关闭 dropout/weight decay 与全部数据扰动，在**同一批数据**上优化，检查损失能否迅速趋近 0、下一 token 准确率能否接近 100%（阈值可用 `--loss_threshold/--acc_threshold/--initial_loss_tol` 或配置 `sanity` 块调整）。`run_all.py` 在全量训练前对每个变体自动执行，失败立即中止并写入台账 `aborted` 记录（`--skip_sanity` 跳过，`--sanity_steps` 调节步数），通过时把 sanity 结果摘要（路径/SHA-256/判定/未通过项）绑定进该 run 的 `run_manifest.json`，checkpoint 可自证“开训前过了代码正确性闸门”。这是**必要非充分**检查：连小批量都无法过拟合说明梯度反传/损失/标签存在严重 bug；通过也不代表数据增强、特征对齐、标签映射等 bug 不存在。sanity JSON 除损失曲线与首步梯度范数外，还**自动核对**：首步训练路径 loss ≡ 直接 logits CE、标签 y=x 右移一位、初始 loss≈log(V)（默认容差 1.0 nat，负值可禁用），并做**首步逐参数梯度覆盖**（`missing/zero/nonfinite`，可定位“总梯度范数正常但某个子模块没接进计算图”的断流 bug）；同时强制核对 dropout/attn_dropout 已关闭（未关闭即失败，避免把配置错误误判为代码 bug）。sanity 证据绑定到 run 时会核对 variant/config/data/git（含 dirty diff）身份：旧配置/旧数据/旧代码的 PASS 不会被当成本 run 的通过证据。
 - **实验追踪/可追溯**：每次训练自动写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、种子审计、含实际精度开关的 Python/PyTorch/CUDA 环境、完整命令行、sanity 闸门证据），超参数在 `config_used.json`，训练曲线在 `train_log.jsonl`（并汇总为 `fig_train_curves.png`）；`run_all` 写全局 `results/<tag>/repro.json`，并在固定路径 `results/experiments.jsonl` **追加**一轮实验台账记录（开始 `started` + 结束 `completed`，失败为 `aborted`，同一 `run_id`）：代码版本、**解析后的完整超参数（config 文件被改写/删除后仍可还原）**、逐 run 的 `config_used.json` 内容、种子、数据指纹、sanity 结论（含未通过项）、逐 run 最终指标与 `train_log.jsonl`/被评测 checkpoint/全部结果文件的 SHA-256（`eval_*.json` 内亦记录 `ckpt_sha256`，结果与产出的权重一一绑定）。重跑不再丢失上一轮历史；失败轮次（sanity 闸门或训练/评测链）以 `aborted` 记录失败阶段、原因与退出码，失败实验同样完整留痕。台账快照还内嵌逐 run 的 `seed_report`/运行环境/sanity 身份，manifest 被删除后仍可自证；dirty 工作区的补丁与指纹随 run 保存（已跟踪 diff + 未跟踪文件，预算 8 MiB 并显式标记截断），仅凭 commit 无法复原代码时仍可重放。评测结果（eval/ruler/analysis/latency）均内嵌同一份代码/数据溯源字段，不依赖手工记录。
+- **环境锁 fail-closed（含容器镜像）**：正式实验默认在环境与 `requirements-lock.txt` 不一致时**直接中止**（`environment_lock_mismatch`），冒烟/诊断可用 `--allow_env_mismatch` 降级为告警，但该轮结果不得作为正式结论。容器镜像受同一把尺子约束：镜像只从 lock 文件安装运行时依赖，并在**构建期**执行 `python -m lega.repro --check-env`，栈不一致就让镜像构建失败（见 §3.2 的容器化复现环境）。`make env-check` 可随时对照当前环境与 lock。
 
 ```bash
 # 单独运行 sanity check（退出码 0=通过，1=未通过）

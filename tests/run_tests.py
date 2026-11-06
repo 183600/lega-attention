@@ -78,6 +78,7 @@ MODULES = [
     "tests.test_artifacts",
     "tests.test_determinism",
     "tests.test_repo_hygiene",
+    "tests.test_docker_repro",
     "tests.test_sample_efficiency",
     "tests.test_doc_strata",
 ]
