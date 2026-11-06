@@ -17,6 +17,13 @@
     时少写无关内容”，而跨文档窗口正是数据拼接本身注入的无关内容；不把它
     量化出来，收益就可能来自拼接伪影而不是机制本身。
 
+训练采样口径（受控因子 train_sampler）:
+  * ``stream``（默认）：起点在拼接后的 token 流上均匀随机，窗口可以跨文档；
+  * ``doc_aligned``：窗口（输入 + 标签）严格落在同一篇文档内，文档权重
+    ∝ 文档 token 数（与 stream 保持同一份文档混合比例）。它把“跨文档跳转”
+    从隐式拼接伪影变成可单独操控的因子；短文档因装不下窗口而被排除的占比
+    必须在报告中可见。
+
 约定 data_dir 内文件：
   train.txt / val.txt     原始文本（prepare_data.py 或 make_dummy_data.py 生成）
   train.bin / val.bin     uint16 token 流（prepare_bins 生成）
@@ -1374,6 +1381,110 @@ def get_train_batch(
     span = _make_span(ix, ctx)
     both = _stage_to_device((train, span), device)
     return both[:, :-1], both[:, 1:]
+
+
+def get_train_batch_doc_aligned(
+    train: np.memmap,
+    ctx: int,
+    batch_size: int,
+    device: str,
+    rng: np.random.Generator,
+    plan: dict,
+    order_hasher=None,
+):
+    """按文档权重抽取“窗口不跨文档”的训练批次。
+
+    与 :func:`get_train_batch` 的唯一差别是窗口（输入 + 标签）必须完整落在
+    同一篇文档内；文档混合比例保持不变（文档权重 ∝ 文档 token 数），因此
+    “窗口是否跨文档”成为可单独操控的受控因子，而不是与文档长度分布纠缠在
+    一起的隐式差异。
+
+    plan 由 :func:`lega.datacheck.doc_aligned_sampling_plan` 构造；缺少文档
+    边界证据时无法保证“不跨文档”，必须显式失败而不是退回拼接流采样。
+    """
+    ctx = strict_int(ctx, "ctx")
+    batch_size = strict_int(batch_size, "batch_size")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size 必须 >= 1，收到 {batch_size}")
+    if not isinstance(plan, dict):
+        raise ValueError("plan 必须是由 doc_aligned_sampling_plan 构造的采样计划")
+    doc_starts = plan.get("doc_starts")
+    doc_tokens = plan.get("doc_tokens")
+    doc_valid = plan.get("doc_valid_starts")
+    cum_tokens = plan.get("cum_tokens")
+    if doc_starts is None or doc_tokens is None or doc_valid is None:
+        raise ValueError("plan 缺少文档边界数组（doc_starts/doc_tokens/...）")
+    n_docs = int(np.asarray(doc_starts).size)
+    if n_docs == 0:
+        raise ValueError(
+            f"没有任何文档能承载 ctx={ctx} 的窗口（需要至少 {ctx + 1} 个 token）："
+            "无法在“窗口不跨文档”的口径下训练；请改用 train_sampler=stream "
+            "或换用更小的 train_ctx"
+        )
+    if cum_tokens is None:
+        cum_tokens = np.cumsum(np.asarray(doc_tokens, dtype=np.int64))
+    cum = np.asarray(cum_tokens, dtype=np.int64)
+    total = int(cum[-1])
+    if total <= 0:
+        raise ValueError("采样计划的 token 总量为 0：无法采样")
+    # 文档选择：权重 ∝ 文档 token 数（与拼接流均匀采样同一份文档混合比例）。
+    u = rng.random(batch_size) * total
+    idx = np.searchsorted(cum, u, side="right")
+    np.clip(idx, 0, n_docs - 1, out=idx)
+    # 文档内偏移：在该文档的合法起点区间 [0, n_tokens - ctx) 上均匀取值。
+    valid = np.asarray(doc_valid, dtype=np.int64)[idx]
+    offsets = rng.integers(0, valid)
+    starts = np.asarray(doc_starts, dtype=np.int64)[idx] + offsets
+    if order_hasher is not None:
+        order_hasher.update(np.asarray(starts, dtype="<i8").tobytes())
+    span = _make_span(starts, ctx)
+    both = _stage_to_device((train, span), device)
+    return both[:, :-1], both[:, 1:]
+
+
+def make_train_batch_sampler(
+    kind: str,
+    train: np.memmap,
+    ctx: int,
+    batch_size: int,
+    device: str,
+    rng: np.random.Generator,
+    plan: dict = None,
+):
+    """返回训练批次采样函数（闭包），统一 ``stream`` / ``doc_aligned`` 口径。
+
+    kind 是**受控因子**：``stream``（默认，起点在拼接流上均匀随机，窗口可能
+    跨文档）与 ``doc_aligned``（窗口严格落在单个文档内）。两者返回同样的
+    ``(x, y)``，调用方无需分支；order_hasher 语义也一致（记录实际消费的窗口
+    起点序列），因此“同 seed 下各变体消费了同一批训练窗口”的审计在两种口径
+    下都成立。
+    """
+    if not isinstance(kind, str) or kind not in ("stream", "doc_aligned"):
+        raise ValueError(
+            f"train_sampler 必须是 'stream'/'doc_aligned' 之一，收到 {kind!r}"
+        )
+    if kind == "stream":
+
+        def sampler(order_hasher=None):
+            return get_train_batch(
+                train, ctx, batch_size, device, rng, order_hasher=order_hasher
+            )
+
+        return sampler
+    if plan is None:
+        raise ValueError(
+            "train_sampler=doc_aligned 需要文档边界采样计划（plan），"
+            "缺少 doc_boundaries.json 时不能保证窗口不跨文档"
+        )
+
+    def sampler(order_hasher=None):
+        return get_train_batch_doc_aligned(
+            train, ctx, batch_size, device, rng, plan, order_hasher=order_hasher
+        )
+
+    return sampler
 
 
 def get_val_batch(val: np.memmap, ctx: int, idx: int, device: str):

@@ -18,9 +18,13 @@
 * ``window_crossing_flags``：逐窗口给出“是否跨文档边界”的标志（与窗口
   列表一一对应），供“跨文档 vs 文档内”的效应分层使用；
 * ``doc_aligned_windows``：挑选完全落在单个文档内的窗口（含标签 token 也
-  在同一文档内），用于“文档内 PPL”这一独立口径。
+  在同一文档内），用于“文档内 PPL”这一独立口径；
+* ``doc_aligned_sampling_plan``：构造“训练窗口不跨文档”的采样计划（文档
+  权重 ∝ 文档 token 数，与默认拼接流采样保持同一份文档混合比例），把
+  “跨文档跳转”从不可控的拼接伪影变成**受控因子**。
 
-所有函数只返回 JSON 原生类型，可直接写入 data_report/eval.json。
+除 ``doc_aligned_sampling_plan``（内部采样结构，含 numpy 数组）之外，所有
+函数只返回 JSON 原生类型，可直接写入 data_report/eval.json。
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ import bisect
 import hashlib
 import statistics
 import unicodedata
+
+import numpy as np
 
 from ._shared import _install as _shared_install
 
@@ -685,6 +691,103 @@ def doc_aligned_coverage(doc_token_counts, ctx: int) -> dict:
             float(tokens_covered / total_tokens) if total_tokens else None
         ),
     }
+
+
+def doc_aligned_sampling_plan(doc_token_counts, ctx: int) -> dict:
+    """构造“训练窗口不跨文档”的采样计划（几何 + 覆盖率核算）。
+
+    与 :func:`doc_aligned_windows` 的分工：后者产出**评测**用的不重叠窗口
+    起点（每篇文档内按 ctx 步长铺开），本函数产出**训练**用的采样计划——
+    训练窗口允许重叠，起点在合法区间内连续分布。
+
+    采样口径（必须写进报告，否则“只禁止跨文档”这句话无法复核）：
+
+    * 文档权重 ∝ 该文档的 token 数：与默认采样器（起点在拼接流上均匀随机）
+      保持**同一份文档混合比例**，两者唯一的差别是窗口不再跨边界；
+    * 文档内起点在 ``[doc_start, doc_start + n_tokens - ctx - 1]`` 上均匀
+      （标签 token 也必须落在同一文档内，因此文档至少需要 ``ctx + 1`` 个
+      token）；
+    * 短于 ``ctx + 1`` 的文档无法承载任何合法窗口，直接不参与采样；它们的
+      数量与 token 占比必须显式报告——这是该受控因子的代价，而不是可以
+      忽略的实现细节。
+
+    返回值含 numpy 数组（供采样器直接使用），**不是 JSON 安全**的；需要落盘
+    的核算请用 :func:`doc_aligned_sampling_report`。
+    """
+    ctx = strict_int(ctx, "ctx")
+    if ctx < 1:
+        raise ValueError(f"ctx 必须 >= 1，收到 {ctx!r}")
+    counts = []
+    for c in (doc_token_counts or []):
+        n = strict_int(c, "doc_token_counts")
+        if n < 0:
+            raise ValueError(f"文档 token 数不能为负，收到 {c!r}")
+        counts.append(n)
+    doc_starts = []
+    doc_tokens = []
+    doc_valid_starts = []
+    total_tokens = 0
+    dropped_docs = 0
+    dropped_tokens = 0
+    eligible_tokens = 0
+    for c in counts:
+        start = total_tokens
+        total_tokens += c
+        if c >= ctx + 1:
+            doc_starts.append(start)
+            doc_tokens.append(c)
+            # 合法起点数 = 文档 token 数 - ctx（起点 + ctx 必须仍在文档内）
+            doc_valid_starts.append(c - ctx)
+            eligible_tokens += c
+        else:
+            dropped_docs += 1
+            dropped_tokens += c
+    starts_arr = np.asarray(doc_starts, dtype=np.int64)
+    tokens_arr = np.asarray(doc_tokens, dtype=np.int64)
+    valid_arr = np.asarray(doc_valid_starts, dtype=np.int64)
+    cum_arr = np.cumsum(tokens_arr) if tokens_arr.size else np.zeros(0, np.int64)
+    return {
+        "ctx": int(ctx),
+        "n_documents_total": len(counts),
+        "n_documents_eligible": int(starts_arr.size),
+        "n_documents_dropped": int(dropped_docs),
+        "tokens_total": int(total_tokens),
+        "tokens_in_eligible_documents": int(eligible_tokens),
+        "tokens_in_dropped_documents": int(dropped_tokens),
+        "token_coverage_fraction": (
+            float(eligible_tokens / total_tokens) if total_tokens else None
+        ),
+        "n_valid_starts": int(valid_arr.sum()) if valid_arr.size else 0,
+        "doc_starts": starts_arr,
+        "doc_tokens": tokens_arr,
+        "doc_valid_starts": valid_arr,
+        "cum_tokens": cum_arr,
+    }
+
+
+def doc_aligned_sampling_report(plan: dict) -> dict:
+    """把采样计划投影成 JSON 安全的核算字段（可写入报告/manifest）。"""
+    plan = plan if isinstance(plan, dict) else {}
+    keys = (
+        "ctx",
+        "n_documents_total",
+        "n_documents_eligible",
+        "n_documents_dropped",
+        "tokens_total",
+        "tokens_in_eligible_documents",
+        "tokens_in_dropped_documents",
+        "token_coverage_fraction",
+        "n_valid_starts",
+    )
+    out = {k: plan.get(k) for k in keys}
+    out["protocol"] = "doc_aligned_train_sampler_v1"
+    out["note"] = (
+        "训练窗口（含标签 token）严格落在单个文档内；文档权重 ∝ 文档 token "
+        "数，与默认拼接流均匀采样保持同一份文档混合比例，唯一差别是禁止"
+        "跨文档窗口。被丢弃的短文档（token 数 < ctx+1）无法承载合法窗口，"
+        "其占比即本受控因子的代价。"
+    )
+    return out
 
 
 def document_structure_report(
