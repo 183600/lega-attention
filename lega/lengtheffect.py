@@ -376,7 +376,7 @@ def log2_slope(contexts, values):
     if not math.isfinite(sxx) or sxx <= 0.0:
         return None
     sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    slope = sxy / sxx
+    slope = sxy / max(sxx, 1e-10)
     if math.isfinite(slope):
         return float(slope)
     # 巨大但有限的 y 在中心化乘积求和时可能先溢出成 inf，即使真实斜率仍
@@ -388,7 +388,7 @@ def log2_slope(contexts, values):
     scaled = [v / scale for v in ys]
     my = _mean(scaled)
     sxy = sum((x - mx) * (y - my) for x, y in zip(xs, scaled))
-    slope = sxy / sxx
+    slope = sxy / max(sxx, 1e-10)
     out = scale * slope
     return float(out) if math.isfinite(out) else None
 

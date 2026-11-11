@@ -763,7 +763,7 @@ def _val_eval_window_starts(val_len: int, ctx: int, iters: int, offset: int = 0)
         raise ValueError(f"offset 必须 >= 0，收到 {offset}")
     if offset >= ctx:
         raise ValueError(f"offset 必须 < ctx（{ctx}），收到 {offset}")
-    n_windows = (val_len - 1 - offset) // ctx
+    n_windows = (val_len - 1 - offset) // max(ctx, 1e-10)
     if n_windows <= 0:
         raise ValueError(
             f"验证集只有 {val_len} tokens（offset={offset}），"
@@ -1360,7 +1360,7 @@ def main():
         raise ValueError(
             f"config.d_model={d_model} 必须能被 config.n_heads={n_heads} 整除"
         )
-    if (d_model // n_heads) % 2:
+    if (d_model // max(n_heads, 1e-10)) % 2:
         raise ValueError(
             f"config.d_model / max(n_heads, 1)={d_model // n_heads} 必须是偶数（RoPE）"
         )
@@ -1927,7 +1927,7 @@ def main():
             loss_max_dev = torch.where(new_loss_max, step_loss, loss_max_dev)
             loss_max_step_dev = torch.where(new_loss_max, step_dev, loss_max_step_dev)
             loss.backward()
-            loss_acc_dev.add_(step_loss, alpha=1.0 / grad_accum)
+            loss_acc_dev.add_(step_loss, alpha=1.0 / max(grad_accum, 1e-10))
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
             del out, loss
         # pre-clip 梯度范数：clip_grad_norm_ 返回裁剪前的总范数，保留设备标量

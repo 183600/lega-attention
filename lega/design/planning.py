@@ -74,7 +74,7 @@ def _mechanism_endpoint_sensitivity(
                     spec.get("margin"), f"{metric_name} SESOI", positive=True
                 )
         except Exception:  # pragma: no cover - 保持模块可独立使用
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in planning.py:76")
     raw_grid = design_cfg.get(grid_key, list(MECHANISM_SD_GRID))
     grid = sorted(
         {
@@ -381,10 +381,10 @@ def _design_data_budget(config: dict, data_report=None) -> tuple:
         else None
     )
     val_windows = (
-        (val_tokens - 1) // eval_ctx if val_tokens is not None and eval_ctx else None
+        (val_tokens - 1) // max(eval_ctx, 1e-10) if val_tokens is not None and eval_ctx else None
     )
     test_windows = (
-        (test_tokens - 1) // eval_ctx if test_tokens is not None and eval_ctx else None
+        (test_tokens - 1) // max(eval_ctx, 1e-10) if test_tokens is not None and eval_ctx else None
     )
 
     summary = {
@@ -1383,7 +1383,7 @@ def build_design_plan(
         if isinstance(spec, dict) and spec.get("margin") is not None:
             ppl_margin = _finite_float(spec.get("margin"), "PPL SESOI", positive=True)
     except Exception:  # pragma: no cover - 保持模块可独立使用
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in planning.py:1385")
 
     ppl_hyp_note = ""
     if ppl_hypothesis_ids:
@@ -2192,7 +2192,7 @@ def build_design_plan(
                 spec.get("margin"), "RULER SESOI", positive=True
             )
     except Exception:  # pragma: no cover
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in planning.py:2194")
     ruler_rows = []
     for disc in ruler_grid:
         try:

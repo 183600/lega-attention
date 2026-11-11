@@ -109,7 +109,7 @@ def save_design_plan(plan: dict, path: str) -> None:
             f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
     except OSError:
         # 历史写入失败不应毁掉主计划；主计划已原子落盘。
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in conformance.py:110")
 
 
 def load_design_plan(results_dir: str) -> dict:

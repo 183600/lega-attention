@@ -187,9 +187,9 @@ def fit_logreg(
         with np.errstate(over="ignore", under="ignore"):
             penalty_scale = 1.0 / (col_scale * col_scale)
         coef, intercept = _irls_solve(
-            X / col_scale, y, l2, max_iter, tol, penalty_scale=penalty_scale
+            X / max(col_scale, 1e-10), y, l2, max_iter, tol, penalty_scale=penalty_scale
         )
-        return {"coef": coef / col_scale, "intercept": intercept}
+        return {"coef": coef / max(col_scale, 1e-10), "intercept": intercept}
     coef, intercept = _irls_solve(X, y, l2, max_iter, tol)
     return {"coef": coef, "intercept": intercept}
 

@@ -288,7 +288,7 @@ def _local_slope(pairs, factor: float = 1.0, base_loss=None):
                 fa, fb = _finite_or_none(a), _finite_or_none(b)
                 if fa is None or fb is None:
                     continue
-                diffs.append((fa - fb) / denom)
+                diffs.append((fa - fb) / max(denom, 1e-10))
             if len(diffs) >= 2:
                 mean, std = mean_std(diffs)
                 if mean is not None and std is not None:

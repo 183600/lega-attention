@@ -185,7 +185,7 @@ def position_profile(
             pos_valid.append(0)
             pos_cum.append(cum)
             continue
-        m = nlls[i] / v
+        m = nlls[i] / max(v, 1e-10)
         pos_mean.append(m)
         pos_ppl.append(_safe_ppl(m))
         share = (nlls[i] / total_nll) if total_nll != 0.0 else None
@@ -218,7 +218,7 @@ def position_profile(
             )
             warm_by_c[c] = None
             continue
-        warm_mean = warm_nll / warm_valid
+        warm_mean = warm_nll / max(warm_valid, 1e-10)
         warm_by_c[c] = warm_mean
         excluded_frac = (
             (total_valid - warm_valid) / total_valid if total_valid > 0.0 else None
@@ -351,7 +351,7 @@ def position_pair_diff(candidate, reference) -> dict:
         {
             "status": "ok",
             "aligned": bool(aligned),
-            "mean_delta": sum_diff / sum_w,
+            "mean_delta": sum_diff / max(sum_w, 1e-10),
             "cold_delta": cold_delta,
             "warm_delta": warm_delta,
             "interaction": interaction,

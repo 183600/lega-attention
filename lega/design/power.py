@@ -185,7 +185,7 @@ def paired_t_power_nct(
     tcrit = _t_critical(df, alpha)
     z = rng.standard_normal(int(n_sim)) + ncp
     v = rng.chisquare(df, size=int(n_sim))
-    t = z / np.sqrt(v / df)
+    t = z / np.sqrt(v / max(df, 1e-10))
     pw = float(np.mean(np.abs(t) >= tcrit))
     return {
         "power": pw,
@@ -273,7 +273,7 @@ def required_pairs(
     z = _z_sum(alpha, power)
     if z <= 0.0:
         return 2
-    ratio = sd / effect
+    ratio = sd / max(effect, 1e-10)
     if not math.isfinite(ratio):
         return None
     try:
@@ -361,8 +361,8 @@ def _tost_power_normal(
     """TOST 功效的正态近似（大 n；也是 required_pairs 的搜索起点）。"""
     se = sd / math.sqrt(n)
     z = _normal_two_sided_z(2.0 * alpha)
-    a = (margin - effect) / se - z
-    b = (margin + effect) / se - z
+    a = (margin - effect) / max(se, 1e-10) - z
+    b = (margin + effect) / max(se, 1e-10) - z
     return float(min(1.0, max(0.0, _normal_cdf(a) + _normal_cdf(b) - 1.0)))
 
 
@@ -374,10 +374,10 @@ def _tost_power_quadrature(
 
     df = n - 1
     tcrit = _t_critical(df, 2.0 * alpha)  # 单侧 α 临界值
-    c = math.sqrt(n) / sd
+    c = math.sqrt(n) / max(sd, 1e-10)
 
     def conditional(v):
-        scale = np.sqrt(v / df)
+        scale = np.sqrt(v / max(df, 1e-10))
         upper = _normal_cdf_np(c * (margin - effect) - tcrit * scale)
         lower = _normal_cdf_np(-c * (margin + effect) + tcrit * scale)
         return np.maximum(0.0, upper - lower)
@@ -449,7 +449,7 @@ def _required_pairs_from_power(
     """给定单调功效函数，找达到目标功效的最少配对数。"""
     if power_fn(2, effect, sd, margin, alpha) >= power:
         return 2
-    hi = max(2, int(math.ceil((sd * (_z_sum(2.0 * alpha, power) / margin)) ** 2)))
+    hi = max(2, int(math.ceil((sd * (_z_sum(2.0 * alpha, power) / max(margin, 1e-10))) ** 2)))
     hi = min(hi, max_n)
     while power_fn(hi, effect, sd, margin, alpha) < power:
         if hi >= max_n:
@@ -500,7 +500,7 @@ def _noninferiority_power_normal(
 ) -> float:
     se = sd / math.sqrt(n)
     z = _normal_two_sided_z(2.0 * alpha)
-    return float(min(1.0, max(0.0, _normal_cdf((margin - effect) / se - z))))
+    return float(min(1.0, max(0.0, _normal_cdf((margin - effect) / max(se, 1e-10) - z))))
 
 
 def _noninferiority_power_quadrature(
@@ -510,10 +510,10 @@ def _noninferiority_power_quadrature(
 
     df = n - 1
     tcrit = _t_critical(df, 2.0 * alpha)
-    c = math.sqrt(n) / sd
+    c = math.sqrt(n) / max(sd, 1e-10)
 
     def conditional(v):
-        return _normal_cdf_np(c * (margin - effect) - tcrit * np.sqrt(v / df))
+        return _normal_cdf_np(c * (margin - effect) - tcrit * np.sqrt(v / max(df, 1e-10)))
 
     return float(min(1.0, max(0.0, _chi2_expectation(conditional, df))))
 
@@ -834,7 +834,7 @@ def max_discordance_for_effect(
             return 1.0
         out = math.exp(log_out)
     else:
-        scaled = abs(effect / z) * root_n
+        scaled = abs(effect / max(z, 1e-10)) * root_n
         # 结果上界是 1：先比较再平方，避免 ratio 已很大时平方抛
         # OverflowError（有限输入也可能触发）。
         if not math.isfinite(scaled) or scaled >= 1.0:

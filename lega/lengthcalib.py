@@ -294,7 +294,7 @@ def _slope_from_groups(groups: List[dict]):
     sxx = float(np.dot(x, x))
     if not math.isfinite(sxx) or sxx <= 0.0:
         return None
-    slope = float(np.dot(x, y) / sxx)
+    slope = float(np.dot(x, y) / max(sxx, 1e-10))
     if not math.isfinite(slope):
         return None
     return slope
@@ -311,7 +311,7 @@ def _slope_from_points(lengths, values):
     sxx = float(np.dot(xc, xc))
     if not math.isfinite(sxx) or sxx <= 0.0:
         return None
-    slope = float(np.dot(xc, ys - ym) / sxx)
+    slope = float(np.dot(xc, ys - ym) / max(sxx, 1e-10))
     return slope if math.isfinite(slope) else None
 
 

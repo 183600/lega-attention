@@ -100,7 +100,7 @@ def _seed(value):
         if hasattr(value, "__index__") and not isinstance(value, float):
             return int(value.__index__())
     except (TypeError, ValueError, OverflowError):
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in missingness.py:102")
     raise ValueError(f"seed 必须是整数，收到 {value!r}")
 
 

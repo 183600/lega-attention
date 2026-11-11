@@ -716,7 +716,7 @@ def _fsync_dir(path: str) -> None:
     try:
         os.fsync(fd)
     except OSError:
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in utils.py:718")
     finally:
         os.close(fd)
 
@@ -742,7 +742,7 @@ def save_text(text: str, path: str) -> None:
         try:
             os.remove(tmp)
         except OSError:
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in utils.py:744")
 
 
 def save_json(obj, path: str) -> None:
@@ -767,7 +767,7 @@ def save_json(obj, path: str) -> None:
         try:
             os.remove(tmp)
         except OSError:
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in utils.py:769")
 
 
 def get_device(device: str = "auto") -> str:
@@ -969,7 +969,7 @@ def _betacf(a: float, b: float, x: float) -> float:
     d = 1.0 - qab * x / qap
     if abs(d) < FPMIN:
         d = FPMIN
-    d = 1.0 / d
+    d = 1.0 / max(d, 1e-10)
     h = d
     for m in range(1, MAXIT + 1):
         m2 = 2 * m
@@ -977,19 +977,19 @@ def _betacf(a: float, b: float, x: float) -> float:
         d = 1.0 + aa * d
         if abs(d) < FPMIN:
             d = FPMIN
-        c = 1.0 + aa / c
+        c = 1.0 + aa / max(c, 1e-10)
         if abs(c) < FPMIN:
             c = FPMIN
-        d = 1.0 / d
+        d = 1.0 / max(d, 1e-10)
         h *= d * c
         aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
         d = 1.0 + aa * d
         if abs(d) < FPMIN:
             d = FPMIN
-        c = 1.0 + aa / c
+        c = 1.0 + aa / max(c, 1e-10)
         if abs(c) < FPMIN:
             c = FPMIN
-        d = 1.0 / d
+        d = 1.0 / max(d, 1e-10)
         de = d * c
         h *= de
         if abs(de - 1.0) < EPS:
@@ -1532,7 +1532,7 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05, power: float = 
             return None
     if not math.isfinite(root_n) or root_n <= 0.0:
         return None
-    out = float(std * (z / root_n))
+    out = float(std * (z / max(root_n, 1e-10)))
     return out if math.isfinite(out) else None
 
 
@@ -1568,8 +1568,8 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
         return 1.0 / (1.0 + z2_n), 1.0
     p = k / max(n, 1)
     den = 1.0 + z2_n
-    center = (p + z2_n / 2.0) / den
-    half = z * math.sqrt(p * (1.0 - p) * n_inv + z2 * n2_inv / 4.0) / den
+    center = (p + z2_n / 2.0) / max(den, 1e-10)
+    half = z * math.sqrt(p * (1.0 - p) * n_inv + z2 * n2_inv / 4.0) / max(den, 1e-10)
     return max(0.0, center - half), min(1.0, center + half)
 
 
@@ -1765,7 +1765,7 @@ def average_precision(scores, labels) -> float:
     # 组末累计样本数 b 即 tp + fp，故 precision = tp / b。
     tp = np.cumsum(l_sorted)[ends - 1]
     recalled = tp / max(n_pos, 1)
-    precision = tp / ends
+    precision = tp / max(ends, 1e-10)
     # 逐步积分与逐组循环同序累加，保持逐位一致。
     prev_recall = np.concatenate([[0.0], recalled[:-1]])
     return float(np.cumsum((recalled - prev_recall) * precision)[-1])
@@ -1828,7 +1828,7 @@ def roc_pr_aucs(scores, labels):
             tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(g_pos)[:-1]]))[::-1]
             ends_desc = (n - starts)[::-1]
             recalled = tp_desc / max(n_pos, 1)
-            precision = tp_desc / ends_desc
+            precision = tp_desc / max(ends_desc, 1e-10)
             prev_recall = np.concatenate([[0.0], recalled[:-1]])
             ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
         return auc, ap
@@ -1844,7 +1844,7 @@ def roc_pr_aucs(scores, labels):
         tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(lv)[:-1]]))[::-1]
         ends_desc = np.arange(1, n + 1)
         recalled = tp_desc / max(n_pos, 1)
-        precision = tp_desc / ends_desc
+        precision = tp_desc / max(ends_desc, 1e-10)
         prev_recall = np.concatenate([[0.0], recalled[:-1]])
         ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
     return auc, ap

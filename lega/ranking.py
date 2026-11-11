@@ -392,7 +392,7 @@ def bootstrap_rank_stability(
         rows.append(
             {
                 "variant": variant,
-                "top_probability": top_share[j] / n_bootstrap,
+                "top_probability": top_share[j] / max(n_bootstrap, 1e-10),
                 "mean_rank_bootstrap": _mean(ranks),
                 "mean_rank_ci95": [
                     _percentile(ranks, 0.025),

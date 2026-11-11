@@ -98,7 +98,7 @@ def _gammaincc(a, x):
         total = term
         for _ in range(1000):
             ap += 1.0
-            term *= x / ap
+            term *= x / max(ap, 1e-10)
             total += term
             if abs(term) <= abs(total) * 1e-15:
                 break
@@ -313,14 +313,14 @@ def meta_analysis(
             k, kept_labels, alpha, min_k, excluded, "固定效应权重不可表示", "invalid"
         )
     weighted = [w * y for w, y in zip(weights, kept_effects)]
-    pooled_fixed = math.fsum(weighted) / sw
-    se_fixed = math.sqrt(1.0 / sw)
+    pooled_fixed = math.fsum(weighted) / max(sw, 1e-10)
+    se_fixed = math.sqrt(1.0 / max(sw, 1e-10))
     q = math.fsum(w * (y - pooled_fixed) ** 2 for w, y in zip(weights, kept_effects))
     df = k - 1
     q_p = chi2_sf(q, df) if math.isfinite(q) else None
     i2 = max(0.0, 1.0 - df / q) if q > 0.0 and math.isfinite(q) else 0.0
     h2 = q / df if df > 0 and math.isfinite(q) else None
-    c = sw - math.fsum(w * w for w in weights) / sw
+    c = sw - math.fsum(w * w for w in weights) / max(sw, 1e-10)
     tau2 = max(0.0, (q - df) / c) if c > 0.0 and math.isfinite(q) else 0.0
     if not math.isfinite(tau2):
         tau2 = 0.0
@@ -332,9 +332,9 @@ def meta_analysis(
             k, kept_labels, alpha, min_k, excluded, "随机效应权重不可表示", "invalid"
         )
     pooled_random = (
-        math.fsum(w * y for w, y in zip(random_weights, kept_effects)) / sw_random
+        math.fsum(w * y for w, y in zip(random_weights, kept_effects)) / max(sw_random, 1e-10)
     )
-    se_random = math.sqrt(1.0 / sw_random)
+    se_random = math.sqrt(1.0 / max(sw_random, 1e-10))
     t_crit_mean = _t_critical(df, alpha)
 
     def _ci(mean, se):

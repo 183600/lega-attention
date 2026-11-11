@@ -156,7 +156,7 @@ def benjamini_hochberg(pvals):
     running = 1.0
     for rank in range(m, 0, -1):
         i = order[rank - 1]
-        value = norm[i] * m / rank
+        value = norm[i] * m / max(rank, 1e-10)
         running = min(running, value)
         q_sorted[rank - 1] = min(1.0, max(norm[i], running))
     for rank, i in enumerate(order):
@@ -175,7 +175,7 @@ def benjamini_yekutieli(pvals):
     m = sum(1 for q in bh if q is not None)
     if m == 0:
         return bh
-    harmonic = math.fsum(1.0 / i for i in range(1, m + 1))
+    harmonic = math.fsum(1.0 / max(i, 1e-10) for i in range(1, m + 1))
     return [None if q is None else min(1.0, q * harmonic) for q in bh]
 
 
@@ -270,7 +270,7 @@ def exploratory_fdr(tests, alpha=DEFAULT_ALPHA, min_seeds=DEFAULT_MIN_SEEDS):
 
     m = len(included)
     q_bh = benjamini_hochberg([t.get("p") for t in included])
-    harmonic = math.fsum(1.0 / i for i in range(1, m + 1)) if m else None
+    harmonic = math.fsum(1.0 / max(i, 1e-10) for i in range(1, m + 1)) if m else None
     for t, q in zip(included, q_bh):
         t["q_bh"] = q
         t["q_by"] = None if q is None or harmonic is None else min(1.0, q * harmonic)

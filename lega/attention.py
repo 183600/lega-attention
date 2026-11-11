@@ -923,7 +923,7 @@ class CausalSelfAttention(nn.Module):
         gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
         self.d_model = d_model
         self.n_heads = n_heads
-        self.d_head = d_model // n_heads
+        self.d_head = d_model // max(n_heads, 1e-10)
         self.variant = variant
         self.attn_dropout = attn_dropout
         self.use_sdpa = use_sdpa_standard

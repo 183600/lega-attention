@@ -81,7 +81,7 @@ def wilson_interval(successes: int, total: int, z: float = _Z95) -> tuple:
     p = successes / total
     z2 = z * z
     denom = 1.0 + z2 / total
-    center = (p + z2 / (2 * total)) / denom
+    center = (p + z2 / (2 * total)) / max(denom, 1e-10)
     half = (
         z
         * math.sqrt(p * (1.0 - p) / max(total, 1) + z2 / (4.0 * total * total))

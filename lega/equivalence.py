@@ -487,8 +487,8 @@ def tost_from_diffs(
         )
     else:
         se = sd / math.sqrt(n)
-        t_low = (mean + margin) / se
-        t_high = (mean - margin) / se
+        t_low = (mean + margin) / max(se, 1e-10)
+        t_high = (mean - margin) / max(se, 1e-10)
         p_low = _one_sided_upper(t_low, df)  # H0: μ <= −margin
         p_high = _one_sided_lower(t_high, df)  # H0: μ >= +margin
         crit90 = t_critical(df, 2.0 * alpha)

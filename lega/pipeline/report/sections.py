@@ -1368,7 +1368,7 @@ def _summary_part_b(**kw):
                     scopes.add((screened, total))
         if scopes:
             md.append("")
-            lo_cov = min(scr / tot for scr, tot in scopes)
+            lo_cov = min(scr / max(tot, 1e-10) for scr, tot in scopes)
             shown = "；".join(f"{scr}/{tot}" for scr, tot in sorted(scopes)[:3])
             extra = " 等" if len(scopes) > 3 else ""
             md.append(

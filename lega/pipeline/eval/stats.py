@@ -280,7 +280,7 @@ def _ruler_avg_micro(d):
     # (0,1]，加权和与总权重都不会越过 float 上限，均值保持不变。
     num = total = 0.0
     for v, nf in cells:
-        w = nf / max_weight
+        w = nf / max(max_weight, 1e-10)
         num += v * w
         total += w
     return (num / max(total, 1)) if total > 0.0 else None

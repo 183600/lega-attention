@@ -410,7 +410,7 @@ def build_niah(
                 for k in KEY_WORDS
             )
             tok._lega_distract_len = distract_len
-        n_distract = min(n_distract, max(1, room // distract_len))
+        n_distract = min(n_distract, max(1, room // max(distract_len, 1e-10)))
         # 升序插入并跟踪累积位移 shift：保证任何干扰行的结束位置都不越过
         # 最终截断点 room，否则 filler[:room] 会把尾部干扰行截成半句。
         slots = sorted(rng.sample(range(2, room), min(n_distract, room - 2)))
@@ -655,7 +655,7 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
     # 按词均 token 数规划词频结构（高频词 k 次、低频词 2 次），
     # 保证正文能完整放入 token 长度空间，而不是事后硬截断破坏词频分布。
     avg_len = max(1.0, len(tok.encode(" " + " ".join(words))) / max(len(words), 1))
-    k = int(room / avg_len - 2 * len(words)) // 10
+    k = int(room / max(avg_len, 1e-10) - 2 * len(words)) // 10
     if k < 3:
         # k 必须 > 2（否则高频/低频无法区分）；规划放不下时固定 k=3，
         # 交由下方循环删除低频词压缩正文。

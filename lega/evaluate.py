@@ -590,7 +590,7 @@ def load_train_coverage(run_dir: str):
             if math.isfinite(e) and e >= 0:
                 out["epochs_seen"] = e
         except (TypeError, ValueError, OverflowError):
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in evaluate.py:592")
     return out
 
 
@@ -820,7 +820,7 @@ def main():
     # 的独立评测窗口数与训练内评测/选择口径不同，PPL 不可比，run_all 的窗口
     # 对齐检查也会因此回退到全 split 参考。
     if args.full_eval:
-        n_windows = (len(val) - 1) // ctx
+        n_windows = (len(val) - 1) // max(ctx, 1e-10)
         if n_windows < 1:
             p.error(f"val 只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
         eval_iters = int(n_windows)
@@ -886,7 +886,7 @@ def main():
         offsets = window_phase_offsets(ctx, args.window_offsets)
         # 各相位可用窗口数可能差 1（验证集长度不整除 ctx）；用所有相位都能
         # 提供的公共窗口预算比较，避免把“窗口数不同”混进相位差异。
-        common_windows = min((len(val) - 1 - off) // ctx for off in offsets)
+        common_windows = min((len(val) - 1 - off) // max(ctx, 1e-10) for off in offsets)
         if common_windows < 1:
             p.error("验证集太短，无法在全部窗口相位上评测")
         sens_iters = min(int(metrics["eval_iters"]), int(common_windows))

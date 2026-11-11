@@ -148,7 +148,7 @@ def _posterior_quantiles(values, weights, levels):
     total = float(np.sum(w))
     if not math.isfinite(total) or total <= 0.0:
         return [None for _ in levels]
-    cdf = np.cumsum(w) / total
+    cdf = np.cumsum(w) / max(total, 1e-10)
     out = []
     for level in levels:
         idx = int(np.searchsorted(cdf, level, side="left"))
@@ -167,7 +167,7 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
     scale = max(abs(mean), sd)
     if not math.isfinite(scale) or scale <= 0.0:
         return None
-    z = diffs / scale
+    z = diffs / max(scale, 1e-10)
     sum_z = float(np.sum(z))
     sd_z = float(np.std(z, ddof=1))
     if not math.isfinite(sd_z) or sd_z <= 0.0:
@@ -181,7 +181,7 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
         -0.5 * n * math.log(2.0 * math.pi) - n * log_sigma - ss0 / (2.0 * sigma**2)
     )
 
-    u = (np.arange(n_delta) + 0.5) / n_delta
+    u = (np.arange(n_delta) + 0.5) / max(n_delta, 1e-10)
     delta = prior_scale * np.tan(math.pi * (u - 0.5))
     mu_z = np.outer(delta, sigma)
     sse = ss0 - 2.0 * mu_z * sum_z + n * mu_z**2
@@ -231,7 +231,7 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
     }
     if rope is not None:
         # 在标准化尺度上比较，避免 rope/μ 的原始值相乘溢出。
-        rope_z = rope / scale
+        rope_z = rope / max(scale, 1e-10)
         inside = float(np.sum(wflat[np.abs(mflat) < rope_z]))
         out.update(
             {

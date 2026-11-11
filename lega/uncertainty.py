@@ -94,11 +94,11 @@ def two_way_variance_components(rows):
     df_seed = n_seeds - 1
     df_unit = n_units - 1
     df_resid = df_seed * df_unit
-    ms_seed = ss_seed / df_seed
-    ms_unit = ss_unit / df_unit
-    ms_resid = ss_resid / df_resid
-    var_seed_raw = (ms_seed - ms_resid) / n_units
-    var_unit_raw = (ms_unit - ms_resid) / n_seeds
+    ms_seed = ss_seed / max(df_seed, 1e-10)
+    ms_unit = ss_unit / max(df_unit, 1e-10)
+    ms_resid = ss_resid / max(df_resid, 1e-10)
+    var_seed_raw = (ms_seed - ms_resid) / max(n_units, 1e-10)
+    var_unit_raw = (ms_unit - ms_resid) / max(n_seeds, 1e-10)
     var_seed = max(0.0, float(var_seed_raw))
     var_unit = max(0.0, float(var_unit_raw))
     var_resid = max(0.0, float(ms_resid))

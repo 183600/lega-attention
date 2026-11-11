@@ -934,13 +934,13 @@ def prepare_bins(
             if ra.get("range_analysis") is not None:
                 range_analysis[name] = ra
         except Exception:
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in data.py:936")
         try:
             ss = token_sequence_stats(arr)
             if ss.get("tokens", 0) > 0:
                 sequence_stats[name] = ss
         except Exception:
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in data.py:942")
 
     data_report = build_data_report(
         tokenizer=tokenizer_report,
@@ -1527,7 +1527,7 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
                 )
             vals.append(iv)
         idx = np.asarray(vals, dtype=np.int64)
-    n_windows = (len(val) - 1) // ctx
+    n_windows = (len(val) - 1) // max(ctx, 1e-10)
     if n_windows <= 0:
         raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
     # 允许 idx >= n_windows 的循环取用；负值已在上方拒绝。

@@ -392,7 +392,7 @@ def audit_config(config: dict, *, allow_unknown: bool = False) -> dict:
                     "problem": f"d_model={d_model} 必须能被 n_heads={n_heads} 整除",
                 }
             )
-        elif (d_model // n_heads) % 2:
+        elif (d_model // max(n_heads, 1e-10)) % 2:
             cross_field.append(
                 {
                     "path": "d_model,n_heads",

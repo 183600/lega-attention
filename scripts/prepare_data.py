@@ -333,7 +333,7 @@ def cleanup_staged(txt_paths: dict) -> None:
         try:
             os.remove(staged_path(path))
         except (FileNotFoundError, OSError):
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in prepare_data.py:335")
 
 
 def publish_split_set(txt_paths: dict, data_dir: str) -> dict:

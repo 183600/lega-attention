@@ -1039,7 +1039,7 @@ def diagnose_curve(
             status = "发散"
             evidence.append(
                 f"训练损失后期均值 {last_train:.4f} 为前期 {first_train:.4f} 的 "
-                f"{last_train / first_train:.2f} 倍"
+                f"{last_train / max(first_train, 1e-10):.2f} 倍"
             )
             recommendations.append(
                 "疑似发散：优先降低学习率或加强梯度裁剪，" "并检查梯度范数是否出现尖峰"
@@ -1633,7 +1633,7 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
             with open(nan_path, "r", encoding="utf-8") as f:
                 diag["nan_report"] = json.load(f)
         except (OSError, ValueError):
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in curves.py:1635")
     return diag
 
 

@@ -192,7 +192,7 @@ def decomposition(values: Mapping[str, float]) -> Dict:
         # 逐项相加可能中间溢出；按最大幅度缩放后再求和，效率性残差仍可
         # 表示，不能因为求和顺序把有效的分解写成 inf/nan。
         scale = max([abs(total)] + [abs(val) for val in phi.values()])
-        gap = (math.fsum(val / scale for val in phi.values()) - total / scale) * scale
+        gap = (math.fsum(val / max(scale, 1e-10) for val in phi.values()) - total / max(scale, 1e-10)) * scale
         if not math.isfinite(gap):
             raise ValueError("Shapley 效率性残差超出 float 表示范围")
     return {"phi": phi, "total_effect": float(total), "efficiency_gap": float(gap)}

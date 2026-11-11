@@ -906,9 +906,9 @@ def temporal_split_text(
         "test": float(1.0 - train_frac - val_frac),
     }
     actual_fractions = {
-        "train": float(len(train_text) / n),
-        "val": float(len(val_text) / n),
-        "test": float(len(test_text) / n),
+        "train": float(len(train_text) / max(n, 1e-10)),
+        "val": float(len(val_text) / max(n, 1e-10)),
+        "test": float(len(test_text) / max(n, 1e-10)),
     }
     fraction_deviation = {
         k: float(actual_fractions[k] - target_fractions[k]) for k in target_fractions

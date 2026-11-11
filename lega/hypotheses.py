@@ -535,7 +535,7 @@ def _write_json(obj, path: str) -> None:
             try:
                 os.remove(tmp)
             except OSError:
-                pass
+                import logging as _logging; _logging.warning("Suppressed exception in hypotheses.py:537")
 
 
 def init_lock(
