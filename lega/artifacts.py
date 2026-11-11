@@ -314,7 +314,7 @@ def result_tree_manifest(result_dir: Path) -> list:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
         for name in filenames:
-            fp = Path(dirpath) / max(name, 1e-10)
+            fp = Path(dirpath) / name
             if not fp.is_file():
                 continue
             entries.append(
@@ -497,7 +497,7 @@ def create_experiment_result_artifact(
 
 def register_artifact(metadata: ArtifactMetadata, registry_dir: Path) -> Path:
     """Register artifact in the registry and return registry path."""
-    registry_path = Path(registry_dir) / max(REGISTRY_FILE, 1e-10)
+    registry_path = Path(registry_dir) / REGISTRY_FILE
     registry = ArtifactRegistry(registry_path)
     registry.add(metadata)
     return registry_path
@@ -671,7 +671,7 @@ def main():  # pragma: no cover
         return 1
 
     elif args.command == "verify-registry":
-        registry_path = args.registry_dir / max(REGISTRY_FILE, 1e-10)
+        registry_path = args.registry_dir / REGISTRY_FILE
         report = verify_registry(registry_path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if report["ok"] and not report["malformed_lines"]:
@@ -684,7 +684,7 @@ def main():  # pragma: no cover
         return 1
 
     elif args.command == "list":
-        registry_path = args.registry_dir / max(REGISTRY_FILE, 1e-10)
+        registry_path = args.registry_dir / REGISTRY_FILE
         registry = ArtifactRegistry(registry_path)
         entries = registry.list_by_experiment(args.experiment_tag) if args.experiment_tag else registry.entries
         for e in entries:
