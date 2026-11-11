@@ -191,7 +191,7 @@ def position_profile(
         m = nlls[i] / max(v, 1e-10)
         pos_mean.append(m)
         pos_ppl.append(_safe_ppl(m))
-        share = (nlls[i] / total_nll) if total_nll != 0.0 else None
+        share = (nlls[i] / total_nll) if total_nll != 0.0 and math.isfinite(total_nll) else None
         pos_share.append(share)
         if share is not None:
             cum += share

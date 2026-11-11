@@ -348,6 +348,8 @@ def _slope(xs: List[float], ys: List[float]) -> Optional[float]:
     n = len(xs)
     if n < 2:
         return None
+    if n == 0:
+        return float("nan"), float("nan")
     mx, my = sum(xs) / n, sum(ys) / n
     den = sum((x - mx) ** 2 for x in xs)
     if den <= 0.0:

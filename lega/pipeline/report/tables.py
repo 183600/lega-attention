@@ -994,7 +994,7 @@ def _summary_part_c(**kw):
             and total_flops is not None
             and total_flops > 0.0
         ):
-            flop_pct = gate_flops / total_flops * 100.0
+            flop_pct = gate_flops / max(total_flops, 1e-10) * 100.0
             if not math.isfinite(flop_pct):
                 flop_pct = None
         r["gate_param_pct"] = round(param_pct, 4) if param_pct is not None else None
