@@ -1,0 +1,2399 @@
+"""可复现性与溯源测试：种子覆盖、数据批采样确定、文件/数据指纹稳定。"""
+
+import hashlib
+import json
+import os
+import random
+import subprocess
+import sys
+import tempfile
+
+import numpy as np
+import torch
+
+from lega.data import CACHE_SCHEMA, get_train_batch
+from lega.repro import (
+    PIPELINE_RUN_ID_ENV,
+    SANITY_REQUIRED_CHECKS,
+    build_run_manifest,
+    current_pipeline_run_id,
+    data_fingerprint,
+    environment_gate,
+    environment_lock_report,
+    git_info,
+    load_provenance,
+    parse_requirements_lock,
+    provenance_drift,
+    runtime_drift,
+    runtime_info,
+    sanity_identity_check,
+    sha256_file,
+    source_tree_fingerprint,
+    test_data_fingerprint as _test_data_fingerprint,
+    verify_run,
+    worktree_state,
+    write_worktree_patch,
+)
+from lega.utils import (
+    data_rng,
+    data_rng_state_fingerprint,
+    expected_rng_state_fingerprint,
+    set_seed,
+    seed_plan,
+    seed_report,
+    state_dict_fingerprint,
+)
+
+
+def test_set_seed_covers_python_numpy_torch():
+    set_seed(1234)
+    a = (random.random(), float(np.random.rand()), torch.rand(3).tolist())
+    set_seed(1234)
+    b = (random.random(), float(np.random.rand()), torch.rand(3).tolist())
+    assert a == b
+    # 数据顺序同样由 seed 唯一确定（本项目“dataloader”= 显式 rng 的批采样）
+    data = np.arange(4096, dtype=np.uint16)
+    x1, y1 = get_train_batch(data, 16, 4, "cpu", np.random.default_rng(7))
+    x2, y2 = get_train_batch(data, 16, 4, "cpu", np.random.default_rng(7))
+    assert torch.equal(x1, x2) and torch.equal(y1, y2)
+    assert torch.equal(x1[:, 1:], y1[:, :-1])  # y 为 x 右移一位
+    # 数据顺序指纹：同一 seed 必须逐字节一致；不同 seed 必须不同。
+    h1, h2, h3 = hashlib.sha256(), hashlib.sha256(), hashlib.sha256()
+    for hasher, seed in ((h1, 7), (h2, 7), (h3, 8)):
+        rng = np.random.default_rng(seed)
+        for _ in range(3):
+            get_train_batch(data, 16, 4, "cpu", rng, order_hasher=hasher)
+    assert h1.hexdigest() == h2.hexdigest()
+    assert h1.hexdigest() != h3.hexdigest()
+    print("  [ok] set_seed 覆盖 random/np/torch，批采样顺序与顺序指纹由 seed 唯一确定")
+
+
+def test_set_seed_overwrites_stale_child_hashseed():
+    """子进程环境必须对齐本次 seed，而不是保留进程启动时的旧值。
+
+    PYTHONHASHSEED 不能改变当前解释器，但设置 os.environ 后启动的子进程会
+    继承它。若用 setdefault，环境里已有的 PYTHONHASHSEED=0 会让 set_seed(4321)
+    的子进程仍以 0 启动，与 run_manifest 声称的 seed 不一致。
+    """
+    old = os.environ.get("PYTHONHASHSEED")
+    try:
+        os.environ["PYTHONHASHSEED"] = "0"
+        set_seed(4321)
+        assert os.environ["PYTHONHASHSEED"] == "4321"
+        r = subprocess.run(
+            [sys.executable, "-c", "import os; print(os.environ['PYTHONHASHSEED'])"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "4321", r.stdout
+    finally:
+        if old is None:
+            os.environ.pop("PYTHONHASHSEED", None)
+        else:
+            os.environ["PYTHONHASHSEED"] = old
+    print("  [ok] set_seed 覆盖旧 PYTHONHASHSEED，子进程继承本次 seed")
+
+
+def test_set_seed_and_seed_report_reject_fractional_and_bool_seeds():
+    """种子身份不能被 int() 截断：True 当 1、1.5 当 1 都会让审计说谎。
+
+    set_seed(True) 会静默播种到 1 且报告 "seed": 1；set_seed(1.5) 会在
+    np.random.seed 处以 TypeError 半途失败（PYTHONHASHSEED 已被写成 "1"）。
+    两者都必须在入口就显式拒绝。
+    """
+    for bad in (
+        True,
+        False,
+        1.5,
+        -0.5,
+        -1,
+        2**32,
+        float("nan"),
+        float("inf"),
+        "1.5",
+        "abc",
+        "",
+        [1],
+        {"seed": 1},
+        None,
+    ):
+        for fn in (set_seed, seed_report):
+            try:
+                fn(bad)
+                raised = False
+            except ValueError:
+                raised = True
+            assert raised, (fn.__name__, bad)
+    from lega.utils import MAX_SEED, seed_int
+
+    assert seed_int(0) == 0 and seed_int(MAX_SEED) == MAX_SEED
+    for bad in (-1, MAX_SEED + 1):
+        try:
+            seed_int(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    # 整数值浮点/整数字符串语义明确，规范化成同一个 int（不再半途崩溃）
+    set_seed(1337.0)
+    rep = seed_report("1337")
+    assert rep["seed"] == 1337 and rep["seed_verified"] is True
+    assert seed_report(1337)["rng_fingerprints"] == rep["rng_fingerprints"]
+    # 环境里的 PYTHONHASHSEED 不可解析为整数时如实标 None，不截断比较
+    assert seed_report(1337)["pythonhashseed_at_start"] in (None, "1337")
+    print("  [ok] set_seed/seed_report 拒绝 bool/小数/非整数字符串种子")
+
+
+def test_state_dict_fingerprint_tracks_init_seed_and_layout():
+    """初始化指纹必须随真实权重变化，且不受 state_dict 键顺序影响。"""
+    from collections import OrderedDict
+
+    set_seed(7)
+    m1 = torch.nn.Linear(4, 3)
+    fp1 = state_dict_fingerprint(m1.state_dict())
+    assert len(fp1["sha256"]) == 64 and fp1["tensors"] == 2
+    assert fp1["elements"] == 15
+    set_seed(7)
+    m2 = torch.nn.Linear(4, 3)
+    assert state_dict_fingerprint(m2.state_dict()) == fp1
+    set_seed(8)
+    m3 = torch.nn.Linear(4, 3)
+    assert state_dict_fingerprint(m3.state_dict())["sha256"] != fp1["sha256"]
+    # 键顺序不是初始化身份的一部分；按名称排序后必须稳定
+    rev = OrderedDict(reversed(list(m1.state_dict().items())))
+    assert state_dict_fingerprint(rev) == fp1
+    # 形状/字节变化必须反映在摘要里
+    m4 = torch.nn.Linear(4, 2)
+    assert state_dict_fingerprint(m4.state_dict())["sha256"] != fp1["sha256"]
+    try:
+        state_dict_fingerprint({"x": 1})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("非张量 state_dict 值未被拒绝")
+    print("  [ok] 初始化 state_dict 指纹随 seed/形状变化且与键顺序无关")
+
+
+def test_sha256_file_deterministic_and_sensitive():
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "a.bin")
+        with open(p, "wb") as f:
+            f.write(b"lega-attention")
+        h1, h2 = sha256_file(p), sha256_file(p)
+        assert h1 == h2 and len(h1) == 64
+        with open(p, "wb") as f:
+            f.write(b"lega-attention!")
+        assert sha256_file(p) != h1
+    print("  [ok] sha256_file 稳定且对内容变化敏感")
+
+
+def test_data_fingerprint_cache_and_invalidation():
+    with tempfile.TemporaryDirectory() as d:
+        for name, n in (("train.bin", 64), ("val.bin", 16)):
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(bytes(range(n)))
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char", "vocab_size": 8}, f)
+        fp1 = data_fingerprint(d)
+        assert sorted(e["name"] for e in fp1["files"]) == [
+            "meta.json",
+            "train.bin",
+            "val.bin",
+        ]
+        assert data_fingerprint(d)["digest"] == fp1["digest"]  # 缓存命中
+        with open(os.path.join(d, "train.bin"), "ab") as f:
+            f.write(b"\xff")  # 大小/mtime 变化
+        fp2 = data_fingerprint(d)
+        assert fp2["digest"] != fp1["digest"]
+    print("  [ok] 数据指纹缓存命中/内容变化失效")
+
+
+def test_data_fingerprint_detects_mtime_preserving_edit():
+    """同尺寸替换内容并把 mtime 改回旧值，也必须触发重算。
+
+    只看 size+mtime/ctime 的缓存会把这种替换误判为“数据未变”，让 run
+    manifest 用旧 SHA 冒充当前数据版本；部分文件系统时间戳粒度粗，ctime
+    也可能不变，因此缓存命中必须重算内容哈希。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "train.bin")
+        with open(p, "wb") as f:
+            f.write(b"aaaa")
+        fp1 = data_fingerprint(d)
+        st = os.stat(p)
+        with open(p, "wb") as f:
+            f.write(b"bbbb")  # 同尺寸、不同内容
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        fp2 = data_fingerprint(d)
+        assert fp2["digest"] != fp1["digest"]
+        assert fp2["files"][0]["sha256"] != fp1["files"][0]["sha256"]
+    print("  [ok] 数据指纹识别 mtime 回填的同尺寸内容替换")
+
+
+def test_data_fingerprint_rehashes_when_stats_match_stale_cache():
+    """模拟粗粒度时间戳文件系统：stat 三相等也不得复用旧 SHA。
+
+    同尺寸替换内容并把 mtime 改回旧值后，再把缓存里的 size/mtime/ctime
+    伪造成与当前文件一致（等价于 ctime 未变的文件系统/被回填的时间戳）。
+    此时缓存看起来完全新鲜，但 data_fingerprint 仍必须返回新内容哈希。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "train.bin")
+        with open(p, "wb") as f:
+            f.write(b"aaaa")
+        fp1 = data_fingerprint(d)
+        old_st = os.stat(p)
+        with open(p, "wb") as f:
+            f.write(b"bbbb")  # 同尺寸、不同内容
+        os.utime(p, ns=(old_st.st_atime_ns, old_st.st_mtime_ns))
+        # 强制缓存看起来仍与当前 stat 完全一致（模拟 ctime 未变/被回填）。
+        cur_st = os.stat(p)
+        cache = os.path.join(d, ".lega_fingerprint.json")
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for e in raw["files"]:
+            if e["name"] == "train.bin":
+                e["size"] = int(cur_st.st_size)
+                e["mtime_ns"] = int(cur_st.st_mtime_ns)
+                e["ctime_ns"] = int(cur_st.st_ctime_ns)
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        fp2 = data_fingerprint(d)
+        assert fp2["digest"] != fp1["digest"]
+        new_sha = sha256_file(p)
+        assert fp2["files"][0]["sha256"] == new_sha
+        assert fp2["files"][0]["sha256"] != fp1["files"][0]["sha256"]
+    print("  [ok] 数据指纹在 stat 全等但内容已变时强制重算 SHA")
+
+
+def test_data_fingerprint_survives_malformed_cache():
+    """缓存文件语法合法但结构畸形（非对象/files 非列表/元素非对象）时
+    必须视为未命中并重建，而不是让指纹计算崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        cache = os.path.join(d, ".lega_fingerprint.json")
+        ref = data_fingerprint(d)
+        for bad in (
+            [1, 2],
+            "oops",
+            5,
+            {"algo": "sha256-16", "files": None},
+            {"algo": "sha256-16", "files": [1, "x"]},
+        ):
+            with open(cache, "w", encoding="utf-8") as f:
+                json.dump(bad, f)
+            assert data_fingerprint(d)["digest"] == ref["digest"]
+    print("  [ok] 畸形指纹缓存被视为未命中并重建")
+
+
+def test_data_fingerprint_rejects_tampered_cache_metadata():
+    """缓存文件 stat 未变但摘要/分词器字段被改坏时，不能直接信任缓存。
+
+    缓存是派生数据；若只核对文件大小/mtime/ctime，损坏的 digest 或
+    tokenizer 会被原样返回并写入 run_manifest，让溯源信息自相矛盾。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"tokenizer": "char"}, f)
+        ref = data_fingerprint(d)
+        cache = os.path.join(d, ".lega_fingerprint.json")
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        raw["digest"] = "0" * len(ref["digest"])
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        assert data_fingerprint(d)["digest"] == ref["digest"]
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        raw["tokenizer"] = "bogus"
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        assert data_fingerprint(d)["tokenizer"] == "char"
+    print("  [ok] 指纹缓存摘要/分词器被篡改时重建")
+
+
+def test_git_and_runtime_info_json_safe():
+    git = git_info()
+    assert set(git) == {"commit", "commit_short", "branch", "dirty"}
+    if git["commit"] is not None:  # 非 git 环境（如源码包）容忍为 None
+        assert len(git["commit"]) == 40
+    rt = runtime_info("cpu")
+    assert rt["torch"] and rt["python"] and rt["numpy"]
+    assert rt["hostname"] and rt["python_executable"] and rt["cpu_count"]
+    # 影响产物的可选依赖显式记录（未安装为 None，不假装已记录环境）
+    assert "tiktoken" in rt["packages"] and "matplotlib" in rt["packages"]
+    json.dumps({"git": git, "runtime": rt})  # 必须是 JSON 原生类型
+    print(f"  [ok] git/runtime 信息可序列化 (commit={git['commit_short']})")
+
+
+def test_seed_report_covers_all_random_sources():
+    """种子审计：每个随机源以传入 seed 记录在案，且信息可 JSON 序列化。"""
+    set_seed(2024)
+    rep = seed_report(2024)
+    assert rep["seed"] == 2024
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        assert rep[key] == 2024, (key, rep)
+    assert rep["torch_cuda"] in (None, 2024)
+    assert rep["cudnn_deterministic"] is True
+    assert rep["cudnn_benchmark"] is False
+    assert rep["deterministic_algorithms"] is True
+    assert rep["data_order"]
+    assert rep["data_order_seed"] == 2024
+    # 数据顺序 RNG 不仅是"声明用了 seed"：初始状态指纹可由 seed 独立复算，
+    # 且与全局 NumPy RNG 相互独立（全局状态被模型初始化消耗也不影响）。
+    assert rep["data_order_rng_fingerprint"] == data_rng_state_fingerprint(2024)
+    json.dumps(rep)
+    print(
+        "  [ok] seed_report 覆盖 Python/NumPy/Torch(CPU/CUDA)、数据顺序 RNG "
+        "与确定性开关"
+    )
+
+
+def test_seed_plan_is_side_effect_free_audit():
+    """启动期种子计划：逐源声明 + 可复算的数据顺序指纹，且不消耗全局 RNG。"""
+    set_seed(77)
+    before = (random.random(), float(np.random.rand()), torch.rand(2).tolist())
+    set_seed(77)
+    plan = seed_plan(77)
+    after = (random.random(), float(np.random.rand()), torch.rand(2).tolist())
+    # seed_plan 只查询，不改变调用方已播种的随机流（否则会改变实验本身）
+    assert before == after
+    assert plan["seed"] == 77 and plan["is_plan"] is True
+    for key in ("python_random", "numpy_global", "torch_cpu", "data_order_seed"):
+        assert plan[key] == 77, (key, plan)
+    assert plan["torch_cuda"] in (None, 77)
+    assert plan["pythonhashseed_child_env"] == "77"
+    assert plan["data_order_rng_fingerprint"] == data_rng_state_fingerprint(77)
+    # 启动期记录就带可独立复算的全局 RNG 初始状态指纹：即使训练子进程
+    # 还没产出 run_manifest，started 台账也不是只有“声明”。
+    assert plan["rng_fingerprints"] == expected_rng_state_fingerprint(77)
+    json.dumps(plan)
+    # 非法 seed 与 set_seed 同口径拒绝（bool/越界）
+    for bad in (True, -1, 2**32):
+        try:
+            seed_plan(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"seed_plan 未拒绝非法 seed: {bad!r}")
+    print("  [ok] seed_plan 提供逐源声明/数据顺序指纹且无 RNG 副作用")
+
+
+def test_seed_report_rng_fingerprints_are_seed_evidence():
+    """种子生效的证据而非声称：指纹来自 RNG 真实状态，可被第三方复算。
+
+    同 seed 的 set_seed 必然得到相同指纹；不同 seed 得到不同指纹；当前状态
+    属于别的 seed 时，请求旧 seed 的证据必须为 None（不能张冠李戴）。
+    """
+    set_seed(11)
+    fp_a = seed_report(11)["rng_fingerprints"]
+    assert fp_a and {"python_random", "numpy_global", "torch_cpu"} <= set(fp_a)
+    assert all(isinstance(v, str) and len(v) == 16 for v in fp_a.values())
+    set_seed(11)
+    assert seed_report(11)["rng_fingerprints"] == fp_a  # 同 seed 可复算
+    set_seed(12)
+    fp_b = seed_report(12)["rng_fingerprints"]
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        assert fp_b[key] != fp_a[key], key  # 异 seed 状态不同
+    stale = seed_report(11)
+    assert stale["rng_fingerprints"] is None  # 不冒充旧 seed
+    # 逐随机源的 seed 也不能复述请求参数：当前 RNG 属于 seed 12，
+    # 请求 seed 11 的报告必须把各源标为未验证/未知，而不是伪造 11。
+    assert stale["seed_verified"] is False
+    for key in (
+        "python_random",
+        "numpy_global",
+        "torch_cpu",
+        "data_order_seed",
+        "data_order_rng_fingerprint",
+    ):
+        assert stale[key] is None, (key, stale)
+    json.dumps(fp_a)
+    print(
+        "  [ok] seed_report 内嵌 RNG 状态指纹（同 seed 可复算/异 seed 不同/" "不冒充）"
+    )
+
+
+def test_expected_rng_fingerprint_is_recomputable_without_side_effects():
+    """期望指纹必须由 seed 本地复算，且不消耗审计方自己的全局随机流。
+
+    这是“第三方只读核对”的前提：若复算期望值要调用 set_seed，就会改写
+    审计进程的随机源，破坏被审计实验本身。
+    """
+    seed = 4242
+    set_seed(seed)
+    before = (random.getstate(), np.random.get_state(), torch.get_rng_state().clone())
+    expected = expected_rng_state_fingerprint(seed)
+    after = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    assert before[0] == after[0]
+    assert np.array_equal(before[1][1], after[1][1])
+    assert before[1][2] == after[1][2]
+    assert torch.equal(before[2], after[2])
+    rep = seed_report(seed)
+    assert rep["rng_fingerprints_match_expected"] is True
+    assert rep["rng_fingerprints_expected"] == expected
+    for key, value in expected.items():
+        assert rep["rng_fingerprints"][key] == value, (key, rep)
+    # 不同 seed 的期望值必然不同；同 seed 多次复算稳定。
+    other = expected_rng_state_fingerprint(seed + 1)
+    for key in ("python_random", "numpy_global", "torch_cpu"):
+        assert other[key] != expected[key], key
+    assert expected_rng_state_fingerprint(seed) == expected
+    json.dumps(expected)
+    print("  [ok] expected_rng_state_fingerprint：无副作用、可复算、与 seed 绑定")
+
+
+def test_data_rng_is_seeded_and_reproducible():
+    """数据顺序 RNG：同 seed 初始状态/采样逐位一致，异 seed 不同。
+
+    这是“dataloader 种子已固定”的可执行证据：训练不再各自调用
+    np.random.default_rng，而统一走 data_rng(seed)，其状态指纹可由第三方
+    用同一 seed 复算。
+    """
+    data = np.arange(4096, dtype=np.uint16)
+    for seed in (0, 7, 2**32 - 1):
+        r1, r2 = data_rng(seed), data_rng(seed)
+        x1, y1 = get_train_batch(data, 16, 4, "cpu", r1)
+        x2, y2 = get_train_batch(data, 16, 4, "cpu", r2)
+        assert torch.equal(x1, x2) and torch.equal(y1, y2)
+        assert data_rng_state_fingerprint(seed) == data_rng_state_fingerprint(seed)
+    assert data_rng_state_fingerprint(7) != data_rng_state_fingerprint(8)
+    # 非法种子不能被 np.random.default_rng 静默接受（bool/负数/小数）
+    for bad in (True, -1, 1.5, 2**32):
+        try:
+            data_rng(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+    print("  [ok] data_rng 同 seed 可复算、异 seed 不同且拒绝非法种子")
+
+
+def test_seed_report_distinguishes_process_hashseed_from_child_env():
+    """PYTHONHASHSEED 审计不得自证：当前进程与子进程要分开记录。
+
+    set_seed 会写 os.environ（只影响之后启动的子进程）；若审计直接读当前
+    env，字段会永远等于 seed，“当前进程哈希随机化其实没固定”会被掩盖。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import json\n"
+        "from lega.utils import set_seed, seed_report\n"
+        "set_seed(7)\n"
+        "print(json.dumps(seed_report(7)))\n"
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONHASHSEED", None)
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    rep_unset = json.loads(r.stdout.strip().splitlines()[-1])
+    assert rep_unset["pythonhashseed_at_start"] is None
+    assert rep_unset["pythonhashseed_env"] == "7"
+    assert rep_unset["pythonhashseed_effective"] is False
+
+    env["PYTHONHASHSEED"] = "7"
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    rep_set = json.loads(r.stdout.strip().splitlines()[-1])
+    assert rep_set["pythonhashseed_at_start"] == "7"
+    assert rep_set["pythonhashseed_effective"] is True
+    print("  [ok] PYTHONHASHSEED 审计区分解释器启动值/子进程 env（不自证）")
+
+
+def test_set_seed_repairs_invalid_cublas_workspace_config():
+    """继承的非法 CUBLAS 配置会让确定性 CUDA 算法启动失败，必须改写。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import os\n"
+        "from lega.utils import set_seed\n"
+        "set_seed(11)\n"
+        "print(os.environ['CUBLAS_WORKSPACE_CONFIG'])\n"
+    )
+    for bad, want in ((":bad:", ":4096:8"), ("", ":4096:8"), (":16:8", ":16:8")):
+        env = os.environ.copy()
+        env["CUBLAS_WORKSPACE_CONFIG"] = bad
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip().splitlines()[-1] == want, (bad, r.stdout)
+    print("  [ok] set_seed 修正非法 CUBLAS_WORKSPACE_CONFIG 且保留合法值")
+
+
+def test_run_manifest_embeds_seed_report_and_runtime():
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(8))
+        cfg = os.path.join(d, "cfg.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        # manifest 只记录已实际固定到该 seed 的 RNG；调用方须先 set_seed
+        set_seed(5)
+        manifest = build_run_manifest(
+            tag="t", variant="lega", seed=5, config_path=cfg, data_dir=d, device="cpu"
+        )
+        assert manifest["seed_report"]["seed_verified"] is True
+        assert manifest["seed_report"]["python_random"] == 5
+        assert manifest["runtime"]["hostname"]
+        json.dumps(manifest)
+    print("  [ok] run_manifest 内嵌 seed_report 与机器级 runtime 信息")
+
+
+def test_load_provenance_falls_back_for_partial_or_malformed_manifest():
+    """清单缺字段/结构畸形时逐字段补算，不能把 None 写进下游溯源。"""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = os.path.join(d, "config_used.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _manifest(obj):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+
+        base = load_provenance(d)  # 无清单：按当前环境/配置补算
+        assert base["config_sha256"] == sha256_file(cfg)
+        assert base["config_used_sha256"] == sha256_file(cfg)
+        assert base["seed_report"] is None
+        assert base["training_precision"] is None
+        # 语法合法但只是空壳/缺字段：缺失项补算，而不是返回一整排 None
+        _manifest({"tag": "legacy"})
+        p1 = load_provenance(d)
+        assert p1["config_sha256"] == sha256_file(cfg)
+        assert p1["code_commit"] == base["code_commit"]
+        # 已有字段优先于当前环境，数据摘要缺失时保持 None 而不是乱填
+        _manifest(
+            {
+                "git": {"commit": "abc", "branch": "main"},
+                "config_sha256": "deadbeef",
+                "config_used_sha256": "feedface",
+                "artifacts": {
+                    "model.pt": {"sha256": "a" * 64},
+                    "eval.json": {"sha256": "b" * 64},
+                },
+                "seed_report": {"seed": 5, "seed_verified": True},
+                "precision": {"amp_enabled": True, "amp_dtype": "bfloat16"},
+            }
+        )
+        p2 = load_provenance(d)
+        assert p2["code_commit"] == "abc" and p2["code_branch"] == "main"
+        assert p2["config_sha256"] == "deadbeef"
+        assert p2["config_used_sha256"] == "feedface"
+        assert p2["manifest_checkpoint_hashes"] == {"model.pt": "a" * 64}
+        assert p2["data_fingerprint"] is None
+        assert p2["seed_report"]["seed_verified"] is True
+        assert p2["training_precision"]["amp_dtype"] == "bfloat16"
+        # git/data 不是对象（结构畸形）：不崩，回退到当前环境
+        _manifest({"git": "oops", "data": [1, 2], "config_sha256": "x"})
+        p3 = load_provenance(d)
+        assert p3["config_sha256"] == "x"
+        assert p3["code_commit"] == base["code_commit"]
+    print("  [ok] load_provenance：缺字段/畸形清单逐字段回退补算")
+
+
+def test_load_provenance_records_eval_runtime_and_detects_version_drift():
+    """评测结果必须同时带训练/评测环境，并显式标记依赖版本漂移。
+
+    仅继承训练清单的 runtime 会让 eval.json 看起来像在训练环境产生；只记录
+    种子/git 也无法发现“在另一套 PyTorch/NumPy/CUDA 上评测”。旧清单没有
+    runtime 时 matches 必须是 None（无法核对），不能默认 True。
+    """
+    current = runtime_info(device="cpu")
+    with tempfile.TemporaryDirectory() as d:
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _write(obj):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+
+        _write({"runtime": current})
+        p = load_provenance(d, device="cpu")
+        assert p["train_runtime"] == current
+        assert p["eval_runtime"]["torch"] == current["torch"]
+        assert p["runtime_matches_training"] is True
+        assert p["runtime_mismatches"] == []
+
+        # 只改版本字段：必须显式列出漂移项，而不是静默继承训练环境
+        drifted = dict(current)
+        drifted["torch"] = "0.0.0+drifted"
+        drifted["numpy"] = "0.0.1+drifted"
+        _write({"runtime": drifted})
+        p = load_provenance(d, device="cpu")
+        assert p["runtime_matches_training"] is False
+        assert {m["field"] for m in p["runtime_mismatches"]} == {"torch", "numpy"}
+
+        # 旧清单没有任何 runtime：无法核对，不能声称一致
+        _write({"tag": "legacy"})
+        p = load_provenance(d, device="cpu")
+        assert p["train_runtime"] is None
+        assert p["runtime_matches_training"] is None
+        assert p["eval_runtime"]["python"] == current["python"]
+
+        # 清单 runtime 结构损坏：按缺失处理，不崩溃也不伪造一致
+        _write({"runtime": ["not", "a", "dict"]})
+        p = load_provenance(d, device="cpu")
+        assert p["train_runtime"] is None
+        assert p["runtime_matches_training"] is None
+
+        # 身份字段缺项（旧清单只记了部分版本）：matches=None + 列出未核对项
+        _write({"runtime": {"python": current["python"], "torch": current["torch"]}})
+        p = load_provenance(d, device="cpu")
+        assert p["runtime_matches_training"] is None
+        assert set(p["runtime_unknown_fields"]) == {"numpy", "cuda", "cudnn", "gpu"}
+
+    # 直接测试 helper：结构非法/字段缺失都不能被当成“一致”
+    assert runtime_drift(None, {})["matches"] is None
+    assert runtime_drift({}, {})["matches"] is None
+    same = {k: "x" for k in ("python", "torch", "numpy", "cuda", "cudnn", "gpu")}
+    assert runtime_drift(same, dict(same))["matches"] is True
+    one_missing = dict(same)
+    one_missing.pop("cudnn")
+    assert runtime_drift(one_missing, same)["matches"] is None
+    dr = runtime_drift(same, dict(same, python="3.13"))
+    assert dr["matches"] is False
+    assert dr["mismatches"] == [{"field": "python", "train": "x", "eval": "3.13"}]
+    print("  [ok] load_provenance 记录 train/eval runtime 并标记版本漂移")
+
+
+def test_load_provenance_keeps_eval_and_training_data_fingerprints_apart():
+    """用另一份数据评测 checkpoint 时，不能把清单里的训练指纹当评测指纹。"""
+    with tempfile.TemporaryDirectory() as ckpt, tempfile.TemporaryDirectory() as data:
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        eval_fp = data_fingerprint(data)["digest"]
+        train_fp = "0" * 64
+        mpath = os.path.join(ckpt, "run_manifest.json")
+        with open(mpath, "w", encoding="utf-8") as f:
+            json.dump({"data": {"digest": train_fp}}, f)
+
+        p = load_provenance(ckpt, data_dir=data)
+        assert p["data_fingerprint"] == eval_fp
+        assert p["eval_data_fingerprint"] == eval_fp
+        assert p["train_data_fingerprint"] == train_fp
+        assert p["data_fingerprint_matches_training"] is False
+
+        # 同一份数据：显式确认一致。
+        with open(mpath, "w", encoding="utf-8") as f:
+            json.dump({"data": {"digest": eval_fp}}, f)
+        p = load_provenance(ckpt, data_dir=data)
+        assert p["data_fingerprint"] == eval_fp
+        assert p["data_fingerprint_matches_training"] is True
+
+        # 未提供 data_dir 的只读审计仍回退到清单，但不声称已核对。
+        p = load_provenance(ckpt)
+        assert p["data_fingerprint"] == eval_fp
+        assert p["eval_data_fingerprint"] is None
+        assert p["data_fingerprint_matches_training"] is None
+    print("  [ok] load_provenance 区分评测/训练数据指纹并标记是否一致")
+
+
+def test_load_provenance_rejects_stale_sanity_evidence():
+    """下游评测不得把身份不一致的旧 sanity PASS 继承成自己的闸门结论。"""
+    with tempfile.TemporaryDirectory() as d:
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _write(sanity):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump({"sanity": sanity}, f)
+            return load_provenance(d)
+
+        stale = _write(
+            {
+                "present": True,
+                "passed": True,
+                "variant": "lega",
+                "identity": {
+                    "hard_mismatches": ["config_sha256"],
+                    "unknown_fields": [],
+                    "verified": False,
+                },
+            }
+        )
+        assert stale["sanity_passed"] is None
+        assert stale["sanity_verified"] is False
+        # 身份核对通过：PASS 与 verified 都继承
+        fresh = _write(
+            {
+                "present": True,
+                "passed": True,
+                "variant": "lega",
+                "identity": {
+                    "hard_mismatches": [],
+                    "unknown_fields": [],
+                    "verified": True,
+                },
+            }
+        )
+        assert fresh["sanity_passed"] is True
+        assert fresh["sanity_verified"] is True
+        # 即使清单自称 PASS，只要保留失败检查项/标记 malformed，就不能继承。
+        broken = _write(
+            {
+                "present": True,
+                "passed": True,
+                "failed_checks": ["token_acc_above_threshold"],
+                "checks_consistent": False,
+                "identity": {
+                    "hard_mismatches": [],
+                    "unknown_fields": [],
+                    "verified": True,
+                },
+            }
+        )
+        assert broken["sanity_passed"] is False
+        assert broken["sanity_failed_checks"] == ["token_acc_above_threshold"]
+        assert broken["sanity_checks_consistent"] is False
+        malformed_pass = _write(
+            {
+                "present": True,
+                "passed": True,
+                "malformed": True,
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
+        assert malformed_pass["sanity_passed"] is False
+        assert malformed_pass["sanity_malformed"] is True
+        inconsistent = _write(
+            {
+                "present": True,
+                "passed": True,
+                "checks_consistent": False,
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
+        assert inconsistent["sanity_passed"] is False
+        assert inconsistent["sanity_checks_consistent"] is False
+        # 字段存在但类型损坏（非列表/非布尔）不能让 PASS 蒙混过关。
+        bad_fields = _write(
+            {
+                "present": True,
+                "passed": True,
+                "failed_checks": "oops",
+                "checks_consistent": "false",
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
+        assert bad_fields["sanity_passed"] is False
+        assert bad_fields["sanity_malformed"] is True
+        # 旧清单/无法核对：保留 PASS 但不冒充已验证
+        legacy = _write({"present": True, "passed": True, "variant": "lega"})
+        assert legacy["sanity_passed"] is True
+        assert legacy["sanity_verified"] is None
+        # 结构畸形的 identity 也不能让闸门结论崩溃或冒充已验证
+        malformed = _write({"present": True, "passed": True, "identity": "oops"})
+        assert malformed["sanity_passed"] is True
+        assert malformed["sanity_verified"] is None
+        # 非布尔字符串/数字不能经 bool() 伪装成 PASS。
+        fake = _write(
+            {
+                "present": True,
+                "passed": "false",
+                "identity": {"hard_mismatches": [], "verified": "false"},
+            }
+        )
+        assert fake["sanity_passed"] is None
+        assert fake["sanity_verified"] is None
+        fake2 = _write(
+            {
+                "present": True,
+                "passed": 1,
+                "identity": {"hard_mismatches": [], "verified": 1},
+            }
+        )
+        assert fake2["sanity_passed"] is None
+        assert fake2["sanity_verified"] is None
+    print("  [ok] load_provenance：旧 sanity PASS 的身份核对口径与 train 一致")
+
+
+def test_same_seed_training_is_bitwise_reproducible():
+    """同一台机器上，同 seed 的完整训练必须逐位可复现（可复现性门槛）。
+
+    两次独立子进程运行 `lega.train`，覆盖模型初始化（含门控参数）、
+    数据批采样 rng、优化器/反向、checkpoint 序列化整条链路；训练曲线
+    （去掉时间戳）与权重必须逐位一致。跨硬件架构不保证一致属预期
+    （见 set_seed 文档），但本测试固定在本机运行，加回该保证。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=4096, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin")
+        )
+        rng.integers(0, 64, size=512, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 4,
+                    "steps": 2,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 2,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
+        outs = []
+        for name in ("run_a", "run_b"):
+            out_dir = os.path.join(d, name)
+            r = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "lega.train",
+                    "--config",
+                    cfg_path,
+                    "--variant",
+                    "lega",
+                    "--data_dir",
+                    data_dir,
+                    "--out_dir",
+                    out_dir,
+                    "--device",
+                    "cpu",
+                    "--seed",
+                    "5",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            assert r.returncode == 0, r.stderr
+            outs.append(out_dir)
+
+        def curves(p):
+            with open(os.path.join(p, "train_log.jsonl"), encoding="utf-8") as f:
+                recs = [json.loads(ln) for ln in f if ln.strip()]
+            for rec in recs:
+                rec.pop("time", None)  # 时间戳不参与数值比对
+                # 步时是墙钟测量，天然不可逐位复现（与 time 同口径剔除）；
+                # 模型权重与损失数值仍逐位比对
+                rec.pop("step_time_ms", None)
+            return recs
+
+        assert curves(outs[0]) == curves(outs[1])
+        w_a = torch.load(
+            os.path.join(outs[0], "model.pt"), map_location="cpu", weights_only=True
+        )["state_dict"]
+        w_b = torch.load(
+            os.path.join(outs[1], "model.pt"), map_location="cpu", weights_only=True
+        )["state_dict"]
+        assert w_a.keys() == w_b.keys()
+        diff = [k for k in w_a if not torch.equal(w_a[k], w_b[k])]
+        assert diff == [], diff
+    print("  [ok] 同 seed 两次完整训练：曲线与权重逐位一致")
+
+
+def _init_git_repo(d):
+    def git(*args):
+        r = subprocess.run(["git"] + list(args), cwd=d, capture_output=True, text=True)
+        assert r.returncode == 0, (args, r.stderr)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    return git
+
+
+def test_provenance_drift_flags_code_and_data_changes_without_false_positive():
+    """结束快照必须发现 commit/工作区 diff/数据指纹变化，缺失时记 unknown。"""
+    start = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1"},
+        "data_fingerprint": "fp1",
+    }
+    same = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1"},
+        "data_fingerprint": "fp1",
+    }
+    d0 = provenance_drift(start, same)
+    assert d0["changed"] is False and d0["mismatches"] == []
+    assert all(v is True for v in d0["checked"].values())
+    moved = {
+        "git": {"commit": "b" * 40},
+        "worktree": {"available": True, "diff_sha256": "d2"},
+        "data_fingerprint": "fp2",
+    }
+    d1 = provenance_drift(start, moved)
+    assert d1["changed"] is True
+    assert {m["field"] for m in d1["mismatches"]} == {
+        "code_commit",
+        "worktree_diff_sha256",
+        "data_fingerprint",
+    }
+    # 非 git/工作区不可用/数据缺失：unknown 而不是“未变化”
+    unknown = provenance_drift(
+        {"git": {}, "worktree": {"available": False}, "data_fingerprint": None},
+        {"git": {}, "worktree": {"available": False}, "data_fingerprint": None},
+    )
+    assert unknown["changed"] is False
+    assert set(unknown["unknown"]) == {
+        "code_commit",
+        "worktree_diff_sha256",
+        "data_fingerprint",
+    }
+    # commit 不变但工作区改动同样必须被抓到
+    dirty = dict(same, worktree={"available": True, "diff_sha256": "d9"})
+    assert provenance_drift(start, dirty)["changed"] is True
+    print("  [ok] 结束身份核对：commit/工作区/数据变化可发现，缺失记 unknown")
+
+
+def test_provenance_drift_tolerates_malformed_snapshots():
+    """畸形快照必须记为 unknown，而不是 AttributeError 中断收尾。"""
+    res = provenance_drift([], "bad")
+    assert res["changed"] is False
+    assert set(res["unknown"]) == {
+        "code_commit",
+        "worktree_diff_sha256",
+        "data_fingerprint",
+    }
+    assert all(v is None for v in res["checked"].values())
+    print("  [ok] 畸形溯源快照按 unknown 降级")
+
+
+def test_worktree_state_and_patch_capture_dirty_code():
+    """dirty 工作区必须留下 diff 指纹与可重放补丁，而不是只有 dirty=True。"""
+    with tempfile.TemporaryDirectory() as d:
+        git = _init_git_repo(d)
+        src = os.path.join(d, "code.py")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        git("add", "code.py")
+        git("commit", "-q", "-m", "init")
+        clean = worktree_state(d)
+        assert clean["available"] and clean["dirty"] is False
+        assert clean["diff_sha256"] is None and clean["diff_bytes"] == 0
+        # 修改 tracked 文件 + 新增 untracked：两者都要可见
+        with open(src, "a", encoding="utf-8") as f:
+            f.write("y = 2\n")
+        with open(os.path.join(d, "new.py"), "w", encoding="utf-8") as f:
+            f.write("z = 3\n")
+        wt = worktree_state(d)
+        assert wt["dirty"] is True
+        assert "code.py" in wt["changed_files"]
+        assert "new.py" in wt["untracked_files"]
+        assert len(wt["diff_sha256"]) == 64 and wt["diff_bytes"] > 0
+        patch_path = os.path.join(d, "worktree.patch")
+        patch = write_worktree_patch(patch_path, root=d)
+        assert patch["patch_sha256"] == wt["diff_sha256"]  # 同一字节口径
+        with open(patch_path, "rb") as f:
+            raw = f.read()
+        assert raw and sha256_file(patch_path) == patch["patch_sha256"]
+        # 未跟踪的新代码文件也必须进入补丁，否则 commit+tracked diff 仍无法重放
+        assert b"new.py" in raw and b"new file mode" in raw
+        # 再做一次修改：指纹变化（不能拿旧补丁冒充当前状态）
+        with open(src, "a", encoding="utf-8") as f:
+            f.write("w = 4\n")
+        assert worktree_state(d)["diff_sha256"] != wt["diff_sha256"]
+    print("  [ok] worktree_state/write_worktree_patch：diff 指纹与补丁可重放")
+
+
+def test_worktree_failed_untracked_listing_is_marked_truncated(monkeypatch):
+    """git ls-files 失败时补丁不完整，必须标记 truncated 而不是静默漏文件。"""
+    import lega.repro as repro
+
+    with tempfile.TemporaryDirectory() as d:
+        git = _init_git_repo(d)
+        with open(os.path.join(d, "code.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        git("add", "code.py")
+        git("commit", "-q", "-m", "init")
+        with open(os.path.join(d, "new.py"), "w", encoding="utf-8") as f:
+            f.write("z = 3\n")
+        real = repro._git_bytes
+
+        def fake(args, cwd):
+            if args[:1] == ["ls-files"]:
+                return None
+            return real(args, cwd)
+
+        monkeypatch.setattr(repro, "_git_bytes", fake)
+        st = repro.worktree_state(d)
+        assert st["available"] is True and st["dirty"] is True
+        assert st["n_untracked"] == 1
+        assert st["diff_truncated"] is True, st
+    print("  [ok] 未跟踪文件列表失败时补丁显式标记不完整")
+
+
+def test_worktree_state_degrades_outside_git():
+    with tempfile.TemporaryDirectory() as d:
+        st = worktree_state(d)
+        assert st["available"] is False and st["dirty"] is None
+        assert (
+            write_worktree_patch(os.path.join(d, "p.patch"), root=d)["patch_file"]
+            is None
+        )
+    print("  [ok] 非 git 目录：工作区快照显式不可用，不阻塞实验")
+
+
+def test_sanity_identity_check_detects_stale_gate_evidence():
+    """旧配置/旧数据/旧代码的 sanity PASS 不得绑定到当前 run。"""
+    run = {
+        "variant": "lega",
+        "config_sha256": "c" * 64,
+        "seed": 5,
+        "git": {"commit": "a" * 40, "dirty": False},
+        "data": {"digest": "d" * 16},
+        "worktree": {"available": True, "diff_sha256": None},
+    }
+    fresh = {
+        "variant": "lega",
+        "config_sha256": "c" * 64,
+        "seed": 5,
+        "git_commit": "a" * 40,
+        "data_fingerprint": "d" * 16,
+        "worktree_recorded": True,
+        "worktree_diff_sha256": None,
+    }
+    ok = sanity_identity_check(fresh, run)
+    assert ok["hard_mismatches"] == [] and ok["verified"] is True
+    assert ok["unknown_fields"] == []
+    # seed 不同是设计行为（run_all 只用首种子跑 sanity）：不算硬不一致
+    deeper = dict(fresh, seed=9)
+    assert sanity_identity_check(deeper, run)["hard_mismatches"] == []
+    assert sanity_identity_check(deeper, run)["seed_mismatch"] is True
+    for field, bad in (
+        ("config_sha256", "e" * 64),
+        ("data_fingerprint", "f" * 16),
+        ("git_commit", "b" * 40),
+        ("variant", "standard"),
+    ):
+        stale = dict(fresh, **{field: bad})
+        res = sanity_identity_check(stale, run)
+        assert field in res["hard_mismatches"], (field, res)
+        assert res["verified"] is False
+    # 工作区补丁不同（同 commit 但代码不同）同样判硬不一致
+    dirty_run = dict(run, worktree={"available": True, "diff_sha256": "1" * 64})
+    dirty_ok = dict(fresh, worktree_diff_sha256="1" * 64)
+    assert sanity_identity_check(dirty_ok, dirty_run)["verified"] is True
+    assert (
+        "worktree_diff_sha256"
+        in sanity_identity_check(fresh, dirty_run)["hard_mismatches"]
+    )
+    # 旧版 sanity 缺身份字段：记为 unknown，不冒充已验证
+    old = {"variant": "lega", "seed": 5}
+    res_old = sanity_identity_check(old, run)
+    assert res_old["verified"] is False and res_old["hard_mismatches"] == []
+    assert "config_sha256" in res_old["unknown_fields"]
+    # 非 git 目录：两侧工作区都不可用 → unknown，而不是把无法核对当失败
+    nogit_run = dict(run, worktree={"available": False})
+    nogit_sanity = dict(fresh, worktree_available=False)
+    res_nogit = sanity_identity_check(nogit_sanity, nogit_run)
+    assert res_nogit["hard_mismatches"] == []
+    assert "worktree_diff_sha256" in res_nogit["unknown_fields"]
+    # 损坏的布尔字段不能被 truthiness 洗成“已记录/可用”，否则工作区 diff
+    # 会在没有有效记录时被伪造成一致。
+    for key in ("worktree_recorded", "worktree_available"):
+        for bad in ("false", "true", 1, 0):
+            corrupt = dict(fresh, **{key: bad})
+            res_bad = sanity_identity_check(corrupt, run)
+            assert res_bad["hard_mismatches"] == [], (key, bad, res_bad)
+            assert "worktree_diff_sha256" in res_bad["unknown_fields"], (
+                key,
+                bad,
+                res_bad,
+            )
+    bad_run = dict(run, worktree={"available": "true", "diff_sha256": None})
+    res_bad_run = sanity_identity_check(fresh, bad_run)
+    assert res_bad_run["hard_mismatches"] == []
+    assert "worktree_diff_sha256" in res_bad_run["unknown_fields"]
+    print("  [ok] sanity_identity_check：旧配置/数据/代码/工作区不一致被拦下")
+
+
+def test_data_fingerprint_empty_cache_cannot_bypass_missing_files():
+    """目录里只有 files=[] 的缓存时仍须报“无数据文件”，不能返回空指纹。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(
+            os.path.join(d, ".lega_fingerprint.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump(
+                {
+                    "algo": "sha256-16",
+                    "digest": "e3b0c44298fc1c14",  # sha256("")[:16]
+                    "tokenizer": None,
+                    "files": [],
+                },
+                f,
+            )
+        try:
+            data_fingerprint(d)
+            raise AssertionError("空目录 + 空缓存必须报 FileNotFoundError")
+        except FileNotFoundError:
+            pass
+    print("  [ok] 数据指纹：空缓存不能绕过无数据文件报错")
+
+
+def test_test_data_fingerprint_returns_none_when_unreadable():
+    """test.bin 存在但不可读（如目录占位）时返回 None，而不是崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        assert _test_data_fingerprint(d) is None
+        os.mkdir(os.path.join(d, "test.bin"))
+        assert _test_data_fingerprint(d) is None
+    print("  [ok] test_data_fingerprint：缺失/不可读均返回 None")
+
+
+def test_data_fingerprint_tolerates_non_object_meta():
+    """meta.json 是数组/标量时视为无 tokenizer，而不是崩溃。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "train.bin"), "wb") as f:
+            f.write(bytes(32))
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump([1, 2, 3], f)
+        fp = data_fingerprint(d)
+        assert fp["tokenizer"] is None and fp["digest"]
+    print("  [ok] 数据指纹：非对象 meta.json 不崩溃")
+
+
+def test_seed_report_and_runtime_record_warn_only_mode_honestly():
+    """确定性算法只记 True 会夸大保证：必须如实标注 warn_only 而非严格模式。"""
+    from lega.utils import deterministic_algorithms_warn_only
+
+    set_seed(31)
+    rep = seed_report(31)
+    mode = rep["deterministic_algorithms_warn_only"]
+    assert mode in (True, False), rep
+    assert mode == deterministic_algorithms_warn_only()
+    # 本项目为兼容个别无确定实现的算子显式采用 warn_only；若未来改严格模式
+    # 该断言会失败，提醒同步更新文档与审计口径。
+    assert mode is True, "set_seed 当前应运行在 warn_only 模式且如实记录"
+    rt = runtime_info("cpu")
+    assert rt["deterministic_algorithms_warn_only"] == mode
+    json.dumps(rep) and json.dumps(rt)
+    print("  [ok] seed_report/runtime 如实记录确定性算法 warn_only 模式")
+
+
+def test_runtime_info_records_precision_threads_and_device_visibility():
+    """影响数值复现的精度开关/线程数/CUDA 可见性必须进入环境快照。"""
+    rt = runtime_info("cpu")
+    for key in (
+        "tf32_matmul",
+        "tf32_cudnn",
+        "cudnn_enabled",
+        "torch_threads",
+        "torch_interop_threads",
+        "cuda_visible_devices",
+    ):
+        assert key in rt, key
+    assert isinstance(rt["tf32_matmul"], bool)
+    assert isinstance(rt["tf32_cudnn"], bool)
+    assert rt["torch_threads"] >= 1 and rt["torch_interop_threads"] >= 1
+    assert rt["cuda_visible_devices"] in (None, "") or isinstance(
+        rt["cuda_visible_devices"], str
+    )
+    json.dumps(rt)
+    # 精度开关记录的是“当前实际状态”，而不是硬编码默认值：
+    # enable_tf32 之后 runtime_info 必须如实反映
+    from lega.utils import enable_tf32
+
+    prev_mm = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn = torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        enable_tf32("cuda")
+        rt2 = runtime_info("cuda")
+        assert rt2["tf32_matmul"] is True and rt2["tf32_cudnn"] is True
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_mm
+        torch.backends.cudnn.allow_tf32 = prev_cudnn
+    print("  [ok] runtime_info 记录 TF32/线程数/CUDA_VISIBLE_DEVICES")
+
+
+def test_sanity_summary_binds_gate_evidence_to_manifest():
+    """sanity 结果摘要与 manifest 绑定：缺失/畸形不得冒充“通过”。"""
+    from lega.repro import sanity_summary
+
+    with tempfile.TemporaryDirectory() as d:
+        assert sanity_summary(os.path.join(d, "missing.json"))["present"] is False
+        bad = os.path.join(d, "bad.json")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("[1, 2]")
+        assert sanity_summary(bad)["present"] is True
+        assert sanity_summary(bad)["passed"] is None
+        # passed=true 与失败检查项矛盾：以 checks 为准，不能把伪造 PASS
+        # 写进 manifest/台账。
+        contradictory = os.path.join(d, "contradictory.json")
+        with open(contradictory, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 3,
+                    "checks": {"a": False, "b": True},
+                },
+                f,
+            )
+        sc = sanity_summary(contradictory)
+        assert sc["passed"] is False and sc["malformed"] is True
+        assert sc["failed_checks"] == ["a"]
+        assert sc["checks_consistent"] is False
+        # 非布尔 passed 同样不能经 bool() 伪装成 PASS。
+        fake_pass = os.path.join(d, "fake_pass.json")
+        with open(fake_pass, "w", encoding="utf-8") as f:
+            json.dump({"passed": 1, "variant": "lega", "seed": 3}, f)
+        sf = sanity_summary(fake_pass)
+        assert sf["passed"] is None and sf["malformed"] is True
+        # checks 非对象（数组）同样是损坏结构，不能当作“旧文件无 checks”
+        bad_checks = os.path.join(d, "bad_checks.json")
+        with open(bad_checks, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": [True, False]}, f)
+        sb = sanity_summary(bad_checks)
+        assert sb["passed"] is False and sb["malformed"] is True
+        assert sb["checks_consistent"] is False
+        # 空 checks 是“没有任何检查证据”，不能让 vacuous truth 通过闸门。
+        empty_checks = os.path.join(d, "empty_checks.json")
+        with open(empty_checks, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": {}}, f)
+        se = sanity_summary(empty_checks)
+        assert se["passed"] is False and se["malformed"] is True
+        assert se["checks_consistent"] is False
+        # seed_verified 必须是真正的布尔值：字符串 "false" 不能被忽略成
+        # “旧文件无法核对”，否则明确自报未验证的清单仍会被当成 PASS。
+        bad_seed = os.path.join(d, "bad_seed.json")
+        with open(bad_seed, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": {"seed_report": {"seed_verified": "false"}},
+                },
+                f,
+            )
+        ss = sanity_summary(bad_seed)
+        assert ss["passed"] is False and ss["malformed"] is True
+        assert ss["seed_verified"] is None
+        # seed_report 本身或其中的指纹字段类型损坏，也不能当作“无证据”。
+        bad_seed_report = os.path.join(d, "bad_seed_report.json")
+        with open(bad_seed_report, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": {"seed_report": "not-an-object"},
+                },
+                f,
+            )
+        sr = sanity_summary(bad_seed_report)
+        assert sr["passed"] is False and sr["malformed"] is True
+        bad_fp = os.path.join(d, "bad_fp.json")
+        with open(bad_fp, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": {
+                        "seed_report": {
+                            "seed_verified": True,
+                            "data_order_rng_fingerprint": 123,
+                        }
+                    },
+                },
+                f,
+            )
+        sfp = sanity_summary(bad_fp)
+        assert sfp["passed"] is False and sfp["malformed"] is True
+        assert sfp["data_order_rng_fingerprint"] is None
+        # 字符串字段也要是 16 位小写十六进制短哈希：任意字符串不能冒充
+        # 可复算的 RNG 证据，否则损坏/伪造的指纹会原样进入训练闸门。
+        for bad_val in ("", "not-a-fingerprint", "A" * 16, "b" * 64, "0" * 15):
+            fp_path = os.path.join(d, "bad_fp_str.json")
+            with open(fp_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "passed": True,
+                        "checks": {"a": True},
+                        "manifest": {
+                            "seed_report": {
+                                "seed_verified": True,
+                                "data_order_rng_fingerprint": bad_val,
+                            }
+                        },
+                    },
+                    f,
+                )
+            sfs = sanity_summary(fp_path)
+            assert sfs["passed"] is False and sfs["malformed"] is True, bad_val
+            assert sfs["data_order_rng_fingerprint"] is None, bad_val
+        bad_manifest = os.path.join(d, "bad_manifest.json")
+        with open(bad_manifest, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "checks": {"a": True},
+                    "manifest": ["not", "an", "object"],
+                },
+                f,
+            )
+        sm = sanity_summary(bad_manifest)
+        assert sm["passed"] is False and sm["malformed"] is True
+        good = os.path.join(d, "sanity_lega.json")
+        with open(good, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 3,
+                    "checks": {"a": True, "b": True},
+                    "initial": {"loss": 4.1},
+                    "final": {"loss": 0.01, "token_acc": 0.99},
+                    "manifest": {
+                        "config_sha256": "c" * 64,
+                        "git": {"commit": "a" * 40, "dirty": False},
+                        "data": {"digest": "d" * 16},
+                        "worktree": {"available": True, "diff_sha256": None},
+                    },
+                },
+                f,
+            )
+        s = sanity_summary(good)
+        assert s["passed"] is True and s["variant"] == "lega" and s["seed"] == 3
+        assert s["failed_checks"] == [] and s["checks_consistent"] is True
+        assert s["final_loss"] == 0.01 and s["token_acc"] == 0.99
+        assert len(s["sha256"]) == 64
+        # 身份字段提取：train 据此核对闸门是否属于本 run
+        assert s["config_sha256"] == "c" * 64
+        assert s["data_fingerprint"] == "d" * 16
+        assert s["git_commit"] == "a" * 40 and s["git_dirty"] is False
+        assert s["worktree_recorded"] is True
+        assert s["worktree_available"] is True
+        assert s["worktree_diff_sha256"] is None
+        # 现代完整 sanity 产物（带 batch_sha256）：必须覆盖全部必需检查项，
+        # 且计划步数全部执行，才算完整闸门。
+        all_checks = {k: True for k in SANITY_REQUIRED_CHECKS}
+        modern = os.path.join(d, "modern.json")
+        with open(modern, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "checks": all_checks,
+                },
+                f,
+            )
+        sm = sanity_summary(modern)
+        assert sm["passed"] is True and sm["malformed"] is False
+        assert sm["batch_sha256"] == "b" * 64
+        assert sm["missing_checks"] == [] and sm["checks_complete"] is True
+        assert sm["steps_complete"] is True
+        # 只保留一项检查：checks 子集不能冒充完整闸门
+        subset = os.path.join(d, "subset.json")
+        with open(subset, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "checks": {"loss_below_threshold": True},
+                },
+                f,
+            )
+        ss = sanity_summary(subset)
+        assert ss["checks_complete"] is False and ss["missing_checks"]
+        assert ss["passed"] is False and ss["malformed"] is True
+        # 提前中止（执行步数 < 计划步数）却声明 PASS：自相矛盾
+        short = os.path.join(d, "short.json")
+        with open(short, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 5,
+                    "checks": all_checks,
+                },
+                f,
+            )
+        sh = sanity_summary(short)
+        assert sh["steps_complete"] is False
+        assert sh["passed"] is False and sh["malformed"] is True
+        # 固定批指纹格式损坏：不能作为可复算证据
+        badbatch = os.path.join(d, "badbatch.json")
+        with open(badbatch, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "xyz",
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "checks": all_checks,
+                },
+                f,
+            )
+        sb = sanity_summary(badbatch)
+        assert sb["batch_sha256"] is None
+        assert sb["passed"] is False and sb["malformed"] is True
+        # 清单内嵌 + 下游 provenance 继承
+        cfg = os.path.join(d, "cfg.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 3}, f)
+        data = os.path.join(d, "data")
+        os.makedirs(data)
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(8))
+        m = build_run_manifest(
+            tag="t",
+            variant="lega",
+            seed=3,
+            config_path=cfg,
+            data_dir=data,
+            device="cpu",
+            sanity=s,
+        )
+        assert m["sanity"]["sha256"] == s["sha256"]
+        with open(os.path.join(d, "run_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        prov = load_provenance(d)
+        assert prov["sanity_passed"] is True
+        assert prov["sanity_variant"] == "lega"
+    print("  [ok] sanity 摘要绑定 manifest，load_provenance 继承 sanity_passed")
+
+
+def test_train_aborts_on_failed_or_missing_sanity_gate():
+    """端到端：显式 --sanity_file 未通过/缺失时不得进入全量训练。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=1024, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin")
+        )
+        rng.integers(0, 64, size=128, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 2,
+                    "steps": 1,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 1,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
+        sanity_path = os.path.join(d, "sanity_lega.json")
+        with open(sanity_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": False,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"token_acc_above_threshold": False},
+                    "initial": {},
+                    "final": {},
+                },
+                f,
+            )
+        unverified = os.path.join(d, "sanity_unverified.json")
+        with open(unverified, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"overfit": True},
+                    "manifest": {"seed_report": {"seed": 5, "seed_verified": False}},
+                },
+                f,
+            )
+        for label, sfile, needle in (
+            ("failed", sanity_path, "sanity 闸门未通过"),
+            ("missing", os.path.join(d, "missing.json"), "sanity 闸门证据不可用"),
+            ("unverified", unverified, "seed_verified=false"),
+        ):
+            out_dir = os.path.join(d, f"out_{label}")
+            r = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "lega.train",
+                    "--config",
+                    cfg_path,
+                    "--variant",
+                    "lega",
+                    "--data_dir",
+                    data_dir,
+                    "--out_dir",
+                    out_dir,
+                    "--device",
+                    "cpu",
+                    "--seed",
+                    "5",
+                    "--sanity_file",
+                    sfile,
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            assert r.returncode != 0, (label, r.stdout)
+            assert needle in r.stderr, (label, r.stderr)
+            assert not os.path.exists(os.path.join(out_dir, "model.pt"))
+            assert not os.path.exists(os.path.join(out_dir, "eval.json"))
+    print("  [ok] 失败/缺失的 sanity 证据中止训练，不产生 checkpoint")
+
+
+def test_train_aborts_on_stale_sanity_evidence_identity():
+    """端到端：sanity 文件身份与本 run 不一致时必须中止，而不是继续训练。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=1024, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin")
+        )
+        rng.integers(0, 64, size=128, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 2,
+                    "steps": 1,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 1,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
+        sanity_path = os.path.join(d, "sanity_lega.json")
+        with open(sanity_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"overfit": True},
+                    "initial": {},
+                    "final": {},
+                    "manifest": {
+                        "config_sha256": "f" * 64,  # 旧配置
+                        "git": {"commit": "a" * 40, "dirty": False},
+                        "data": {"digest": "d" * 16},
+                        "worktree": {"available": True, "diff_sha256": None},
+                    },
+                },
+                f,
+            )
+        out_dir = os.path.join(d, "out")
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "lega.train",
+                "--config",
+                cfg_path,
+                "--variant",
+                "lega",
+                "--data_dir",
+                data_dir,
+                "--out_dir",
+                out_dir,
+                "--device",
+                "cpu",
+                "--seed",
+                "5",
+                "--sanity_file",
+                sanity_path,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode != 0, r.stdout
+        assert "身份不一致" in r.stderr
+        assert not os.path.exists(os.path.join(out_dir, "eval.json"))
+        assert not os.path.exists(os.path.join(out_dir, "model.pt"))
+    print("  [ok] 旧配置的 sanity PASS 被身份校验拒绝并中止训练")
+
+
+def test_train_manifest_binds_sanity_file_and_actual_tf32_state():
+    """端到端：train --sanity_file 把闸门证据与训练时精度开关写进 manifest。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        data_dir = os.path.join(d, "data")
+        os.makedirs(data_dir)
+        rng = np.random.default_rng(0)
+        rng.integers(0, 64, size=2048, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "train.bin")
+        )
+        rng.integers(0, 64, size=256, dtype=np.uint16).tofile(
+            os.path.join(data_dir, "val.bin")
+        )
+        with open(os.path.join(data_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": "char",
+                    "vocab_size": 64,
+                    "cache_schema": CACHE_SCHEMA,
+                    "fit_on": "train",
+                },
+                f,
+            )
+        cfg_path = os.path.join(d, "cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "d_model": 32,
+                    "n_layers": 1,
+                    "n_heads": 2,
+                    "ffn_mult": 4,
+                    "block_size": 32,
+                    "batch_size": 2,
+                    "steps": 1,
+                    "lr": 1e-3,
+                    "warmup": 1,
+                    "weight_decay": 0.0,
+                    "grad_clip": 1.0,
+                    "train_ctx": 32,
+                    "amp": False,
+                    "seed": 5,
+                    "log_every": 1,
+                    "eval_every": 1,
+                    "eval_iters": 1,
+                    "dropout": 0.0,
+                    "attn_dropout": 0.0,
+                },
+                f,
+            )
+        sanity_path = os.path.join(d, "sanity_lega.json")
+        with open(sanity_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "variant": "lega",
+                    "seed": 5,
+                    "checks": {"overfit": True},
+                    "initial": {},
+                    "final": {},
+                },
+                f,
+            )
+        out_dir = os.path.join(d, "out")
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "lega.train",
+                "--config",
+                cfg_path,
+                "--variant",
+                "lega",
+                "--data_dir",
+                data_dir,
+                "--out_dir",
+                out_dir,
+                "--device",
+                "cpu",
+                "--seed",
+                "5",
+                "--sanity_file",
+                sanity_path,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        with open(os.path.join(out_dir, "run_manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        assert manifest["sanity"]["present"] is True
+        assert manifest["sanity"]["passed"] is True
+        assert manifest["sanity"]["variant"] == "lega"
+        # 训练入口实际执行的防泄漏闸门结论必须进入 manifest
+        assert manifest["data_protocol_preflight"]["report_present"] is False
+        # 精度开关必须如实记录（顺序错误会记成训练前默认值）
+        assert isinstance(manifest["runtime"]["tf32_matmul"], bool)
+        assert isinstance(manifest["runtime"]["tf32_cudnn"], bool)
+        with open(os.path.join(out_dir, "eval.json"), encoding="utf-8") as f:
+            ev = json.load(f)
+        assert ev["sanity_passed"] is True
+        # 成功收尾必须把完成状态与最终产物哈希写回 manifest：checkpoint
+        # 与 eval/train_log 均可由 manifest 直接核对。
+        assert manifest["completion"]["status"] == "completed"
+        assert manifest["completion"]["steps"] == 1
+        assert manifest["data_order_sha256"] == ev["data_order_sha256"]
+        for name in ("config_used.json", "train_log.jsonl", "eval.json", "model.pt"):
+            entry = manifest["artifacts"][name]
+            assert entry["sha256"] == sha256_file(os.path.join(out_dir, name)), name
+            assert entry["bytes"] == os.path.getsize(os.path.join(out_dir, name)), name
+        if os.path.exists(os.path.join(out_dir, "model_best.pt")):
+            assert manifest["artifacts"]["model_best.pt"]["sha256"] == sha256_file(
+                os.path.join(out_dir, "model_best.pt")
+            )
+    print("  [ok] train manifest：sanity 证据 + 精度开关 + 完成态/产物哈希")
+
+
+def test_provenance_drift_truncated_worktree_is_unknown_not_unchanged():
+    """工作区补丁被截断时，相同哈希不能证明“未变化”，必须记 unknown。"""
+    start = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1", "diff_truncated": True},
+        "data_fingerprint": "fp1",
+    }
+    same_truncated = {
+        "git": {"commit": "a" * 40},
+        "worktree": {"available": True, "diff_sha256": "d1", "diff_truncated": True},
+        "data_fingerprint": "fp1",
+    }
+    d = provenance_drift(start, same_truncated)
+    assert d["checked"]["worktree_diff_sha256"] is None, d
+    assert "worktree_diff_sha256" in d["unknown"], d
+    assert d["changed"] is False
+    # 哈希已不同时仍能确认发生变化，不因截断而漏报。
+    moved = dict(
+        same_truncated,
+        worktree={"available": True, "diff_sha256": "d2", "diff_truncated": True},
+    )
+    assert provenance_drift(start, moved)["changed"] is True
+    print("  [ok] 截断的工作区补丁按 unknown 处理，哈希不同仍可确认变化")
+
+
+def test_sanity_summary_rejects_modern_result_without_checks_or_steps():
+    """现代 sanity 产物（带 batch_sha256）不能靠删字段绕过完整性校验。"""
+    from lega.repro import SANITY_REQUIRED_CHECKS, sanity_summary
+
+    all_checks = {k: True for k in SANITY_REQUIRED_CHECKS}
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        # 删除整个 checks 字段：batch_sha256 标记仍是“现代产物”，不能因此
+        # 跳过必需检查项覆盖校验。
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                    "variant": "lega",
+                    "seed": 3,
+                },
+                f,
+            )
+        s = sanity_summary(p)
+        assert s["passed"] is False and s["malformed"] is True
+        assert s["checks_complete"] is False
+        assert set(s["missing_checks"]) == set(SANITY_REQUIRED_CHECKS)
+        # checks 结构损坏（不是对象）同样不能当成“旧文件没写 checks”。
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "passed": True,
+                    "batch_sha256": "b" * 64,
+                    "checks": ["loss_below_threshold"],
+                    "steps_planned": 10,
+                    "steps_executed": 10,
+                },
+                f,
+            )
+        s = sanity_summary(p)
+        assert s["passed"] is False and s["malformed"] is True
+        assert s["checks_complete"] is False
+        # 只删掉计划/执行步数之一：无法证明计划步数全部执行，按不完整处理。
+        for missing in ("steps_planned", "steps_executed"):
+            payload = {
+                "passed": True,
+                "batch_sha256": "b" * 64,
+                "checks": all_checks,
+                "steps_planned": 10,
+                "steps_executed": 10,
+            }
+            payload.pop(missing)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            s = sanity_summary(p)
+            assert s["passed"] is False and s["malformed"] is True
+            assert s["steps_complete"] is False
+        # 旧格式（无 batch_sha256）仍保持兼容：缺少步数字段不误报。
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "checks": all_checks}, f)
+        s = sanity_summary(p)
+        assert s["passed"] is True and s["malformed"] is False
+        assert s["steps_complete"] is None
+
+
+def test_load_provenance_rejects_sanity_present_false():
+    """present=False 的 sanity 证据（文件缺失/不可读）不能被继承成 PASS。"""
+    from lega.repro import load_provenance
+
+    with tempfile.TemporaryDirectory() as d:
+        mpath = os.path.join(d, "run_manifest.json")
+
+        def _write(sanity):
+            with open(mpath, "w", encoding="utf-8") as f:
+                json.dump({"sanity": sanity}, f)
+            return load_provenance(d)
+
+        missing = _write(
+            {
+                "present": False,
+                "passed": True,
+                "identity": {
+                    "hard_mismatches": [],
+                    "unknown_fields": [],
+                    "verified": True,
+                },
+            }
+        )
+        assert missing["sanity_passed"] is False
+        assert missing["sanity_verified"] is False
+        assert missing["sanity_present"] is False
+        assert missing["sanity_malformed"] is True
+        # present 字段类型损坏同样不能当作“旧格式缺字段”放行。
+        bogus = _write(
+            {
+                "present": "false",
+                "passed": True,
+                "identity": {"hard_mismatches": [], "verified": True},
+            }
+        )
+        assert bogus["sanity_passed"] is False
+        assert bogus["sanity_verified"] is False
+        assert bogus["sanity_malformed"] is True
+        # 旧清单没有 present 字段：保持兼容，但仍按身份证据决定是否 verified。
+        legacy = _write(
+            {"passed": True, "identity": {"hard_mismatches": [], "verified": True}}
+        )
+        assert legacy["sanity_passed"] is True
+        assert legacy["sanity_verified"] is True
+        assert legacy["sanity_present"] is None
+
+
+def test_worktree_state_captures_non_utf8_untracked_path():
+    """非 UTF-8 未跟踪文件名也必须进入可重放补丁，而不是静默丢失。"""
+    if os.name != "posix":
+        return
+    with tempfile.TemporaryDirectory() as d:
+
+        def _git(*args):
+            subprocess.run(["git"] + list(args), cwd=d, check=True, capture_output=True)
+
+        _git("init", "-q")
+        _git("config", "user.email", "a@b")
+        _git("config", "user.name", "a")
+        with open(os.path.join(d, "tracked.txt"), "w", encoding="utf-8") as f:
+            f.write("x")
+        _git("add", ".")
+        _git("commit", "-qm", "init")
+        raw_name = b"bad_\xff_name.txt"
+        with open(os.path.join(os.fsencode(d), raw_name), "wb") as f:
+            f.write(b"payload")
+        st = worktree_state(d)
+        assert st["dirty"] is True and st["n_untracked"] == 1
+        assert st["diff_bytes"] > 0 and st["diff_sha256"] is not None
+        assert st["diff_truncated"] is False
+        # 展示字段必须能安全写进 UTF-8 JSON（不能含 surrogate）。
+        json.dumps(st, ensure_ascii=False).encode("utf-8")
+        # 补丁不可用（hash=None + truncated）必须记为 unknown，而不是
+        # 因“两边都是 None”误判为工作区未变化。
+        drift = provenance_drift(
+            {
+                "worktree": {
+                    "available": True,
+                    "diff_sha256": None,
+                    "diff_truncated": True,
+                },
+                "git": {"commit": st["head"]},
+                "data_fingerprint": "d",
+            },
+            {
+                "worktree": {
+                    "available": True,
+                    "diff_sha256": None,
+                    "diff_truncated": True,
+                },
+                "git": {"commit": st["head"]},
+                "data_fingerprint": "d",
+            },
+        )
+        assert drift["checked"]["worktree_diff_sha256"] is None
+        assert "worktree_diff_sha256" in drift["unknown"]
+
+
+def test_source_tree_fingerprint_is_stable_and_sensitive_to_content():
+    """源码树指纹必须可复算、忽略派生文件，并对代码/配置改动敏感。"""
+    with tempfile.TemporaryDirectory() as root:
+        for rel in (
+            "lega/sub",
+            "scripts",
+            "configs",
+            "preregistration",
+            "lega/__pycache__",
+        ):
+            os.makedirs(os.path.join(root, rel), exist_ok=True)
+
+        def _write(rel, data):
+            with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+                f.write(data)
+
+        _write("lega/model.py", "MODEL = 1\n")
+        _write("lega/sub/ops.py", "OPS = 2\n")
+        _write("configs/tiny.json", '{"seed": 1}\n')
+        _write("preregistration/hypotheses.json", '{"hypotheses": []}\n')
+        _write("requirements-ci.txt", "torch==2.14.1\n")
+        _write("lega/__pycache__/model.cpython-312.pyc", "cache")
+        fp1 = source_tree_fingerprint(root)
+        fp2 = source_tree_fingerprint(root)
+        assert fp1["digest"] == fp2["digest"]
+        assert fp1["algo"] == "sha256-tree-v1"
+        paths = {e["path"] for e in fp1["entries"]}
+        assert {
+            "lega/model.py",
+            "lega/sub/ops.py",
+            "configs/tiny.json",
+            "preregistration/hypotheses.json",
+            "requirements-ci.txt",
+        } <= paths
+        assert not any("__pycache__" in p or p.endswith(".pyc") for p in paths)
+        _write("lega/__pycache__/other.pyc", "different cache")
+        assert source_tree_fingerprint(root)["digest"] == fp1["digest"]
+        _write("lega/model.py", "MODEL = 3\n")
+        fp3 = source_tree_fingerprint(root)
+        assert fp3["digest"] != fp1["digest"]
+        old = {e["path"]: e["sha256"] for e in fp1["entries"]}
+        new = {e["path"]: e["sha256"] for e in fp3["entries"]}
+        assert old["lega/model.py"] != new["lega/model.py"]
+        assert old["configs/tiny.json"] == new["configs/tiny.json"]
+    # 非 git 版本时源树仍可提供身份；缺少该字段的旧快照保持兼容。
+    moved = provenance_drift(
+        {"source_tree": {"digest": "old"}}, {"source_tree": {"digest": "new"}}
+    )
+    assert moved["changed"] is True
+    assert {m["field"] for m in moved["mismatches"]} == {"source_tree_digest"}
+    legacy = provenance_drift({"git": {"commit": "a"}}, {"git": {"commit": "a"}})
+    assert "source_tree_digest" not in legacy["checked"]
+    print("  [ok] 源码树指纹稳定、忽略派生文件、对改动敏感且兼容旧快照")
+
+
+def test_manifest_and_load_provenance_carry_pipeline_run_and_source_tree():
+    """run_id 与源码树摘要必须随训练清单进入下游评测溯源。"""
+    old_env = os.environ.get(PIPELINE_RUN_ID_ENV)
+    try:
+        os.environ[PIPELINE_RUN_ID_ENV] = " run-abc "
+        assert current_pipeline_run_id() == "run-abc"
+        with tempfile.TemporaryDirectory() as d:
+            data = os.path.join(d, "data")
+            ckpt = os.path.join(d, "ckpt")
+            os.makedirs(data, exist_ok=True)
+            os.makedirs(ckpt, exist_ok=True)
+            with open(os.path.join(data, "train.bin"), "wb") as f:
+                f.write(bytes(32))
+            cfg = os.path.join(d, "config.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({"seed": 7}, f)
+            manifest = build_run_manifest(
+                "tiny", "lega", 7, cfg, data, "cpu", argv=["test"]
+            )
+            assert manifest["pipeline_run_id"] == "run-abc"
+            assert manifest["environment_lock"]["available"] is True
+            fp = source_tree_fingerprint()
+            assert manifest["source_tree"]["digest"] == fp["digest"]
+            with open(
+                os.path.join(ckpt, "run_manifest.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(manifest, f)
+            p = load_provenance(ckpt, data_dir=data, device="cpu")
+            assert p["pipeline_run_id"] == "run-abc"
+            assert p["train_source_tree_digest"] == fp["digest"]
+            assert p["eval_source_tree_digest"] == fp["digest"]
+            assert p["source_tree_matches_training"] is True
+            assert p["eval_environment_lock"]["available"] is True
+            assert (
+                p["train_environment_lock"]["lock_sha256"]
+                == manifest["environment_lock"]["lock_sha256"]
+            )
+            # 独立/手工评测没有父流水线环境变量时，继承训练清单的 run_id。
+            os.environ.pop(PIPELINE_RUN_ID_ENV, None)
+            assert current_pipeline_run_id() is None
+            p_manual = load_provenance(ckpt, data_dir=data, device="cpu")
+            assert p_manual["pipeline_run_id"] == "run-abc"
+            # 旧清单没有 run_id：不得伪造一个身份。
+            legacy = dict(manifest)
+            legacy.pop("pipeline_run_id")
+            legacy.pop("source_tree")
+            with open(
+                os.path.join(ckpt, "run_manifest.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(legacy, f)
+            p2 = load_provenance(ckpt, data_dir=data, device="cpu")
+            assert p2["pipeline_run_id"] is None
+            assert p2["train_source_tree_digest"] is None
+            assert p2["source_tree_matches_training"] is None
+    finally:
+        if old_env is None:
+            os.environ.pop(PIPELINE_RUN_ID_ENV, None)
+        else:
+            os.environ[PIPELINE_RUN_ID_ENV] = old_env
+    print("  [ok] manifest/load_provenance 继承 run_id 与源码树摘要")
+
+
+def test_requirements_lock_matches_ci_and_detects_environment_drift():
+    """锁文件必须与 CI 固定版本一致，并能区分匹配/缺包/版本/解释器漂移。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lock = parse_requirements_lock(os.path.join(root, "requirements-lock.txt"))
+    ci = parse_requirements_lock(os.path.join(root, "requirements-ci.txt"))
+    assert lock["present"] is True and lock["errors"] == []
+    assert lock["python"] == "3.12"
+    assert lock["packages"]
+    assert set(lock["packages"]).issubset(ci["packages"])
+    for name, version in lock["packages"].items():
+        assert ci["packages"][name] == version
+
+    installed = {name: version for name, version in lock["packages"].items()}
+    installed["torch"] = installed["torch"] + "+cpu"
+    runtime = {"python": "3.12.99", "installed_distributions": installed}
+    report = environment_lock_report(lock["path"], runtime=runtime)
+    assert report["matches"] is True, report
+    assert report["python_matches"] is True
+    assert all(entry["matches"] for entry in report["packages"].values())
+
+    drifted = dict(installed)
+    drifted["numpy"] = "0.0.0"
+    report = environment_lock_report(
+        lock["path"], runtime={"python": "3.12.1", "installed_distributions": drifted}
+    )
+    assert report["matches"] is False
+    assert report["mismatches"][0]["package"] == "numpy"
+
+    missing = dict(installed)
+    missing.pop("torch")
+    report = environment_lock_report(
+        lock["path"], runtime={"python": "3.12.1", "installed_distributions": missing}
+    )
+    assert report["matches"] is False
+    assert "torch" in report["missing"]
+
+    report = environment_lock_report(
+        lock["path"], runtime={"python": "3.11.9", "installed_distributions": installed}
+    )
+    assert report["python_matches"] is False
+    assert report["matches"] is False
+
+    report = environment_lock_report(os.path.join(root, "missing-lock.txt"))
+    assert report["available"] is False
+    assert report["matches"] is None
+    print("  [ok] 环境锁与 CI 版本一致，并检测缺包/版本/Python 漂移")
+
+
+def test_environment_gate_fails_formal_drift_and_allows_smoke_or_override():
+    """环境锁闸门：正式 run 失败关闭；冒烟/显式放行只降级为警告。"""
+    base = {
+        "matches": True,
+        "python_matches": True,
+        "python": "3.12",
+        "runtime_python": "3.12.9",
+        "missing": [],
+        "mismatches": [],
+        "errors": [],
+        "path": "requirements-lock.txt",
+        "lock_sha256": "abc",
+    }
+    gate = environment_gate(base)
+    assert gate["status"] == "pass", gate
+    assert gate["code"] == "environment_lock_matches"
+    assert gate["problems"] == []
+
+    drift = dict(
+        base,
+        matches=False,
+        mismatches=[{"package": "numpy", "expected": "2.1.0", "installed": "0.0.0"}],
+    )
+    gate = environment_gate(drift)
+    assert gate["status"] == "fail", gate
+    assert gate["code"] == "environment_lock_mismatch"
+    assert any("numpy" in p for p in gate["problems"])
+
+    gate = environment_gate(drift, smoke=True)
+    assert gate["status"] == "warn", gate
+    assert gate["code"] == "environment_lock_mismatch_smoke"
+
+    gate = environment_gate(drift, allow_mismatch=True)
+    assert gate["status"] == "warn", gate
+    assert gate["code"] == "environment_lock_mismatch_allowed"
+    assert gate["allow_mismatch"] is True
+
+    unknown = dict(base, matches=None)
+    gate = environment_gate(unknown)
+    assert gate["status"] == "warn", gate
+    assert gate["code"] == "environment_lock_unverifiable"
+
+    missing = dict(
+        base,
+        matches=False,
+        python_matches=False,
+        runtime_python="3.11.9",
+        missing=["torch"],
+        mismatches=[],
+    )
+    gate = environment_gate(missing)
+    assert gate["status"] == "fail", gate
+    assert any("Python" in p for p in gate["problems"])
+    assert any("torch" in p for p in gate["problems"])
+    print("  [ok] 环境锁闸门：正式漂移失败关闭，冒烟/显式放行留痕降级")
+
+
+def test_verify_run_passes_complete_run_and_flags_tampering():
+    """单 run 审计：完整清单通过；产物被替换失败；旧清单仅告警。"""
+    with tempfile.TemporaryDirectory() as d:
+        data = os.path.join(d, "data")
+        run_dir = os.path.join(d, "run")
+        os.makedirs(data)
+        os.makedirs(run_dir)
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(64))
+        cfg = os.path.join(d, "config.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        config_used = os.path.join(run_dir, "config_used.json")
+        with open(config_used, "w", encoding="utf-8") as f:
+            json.dump({"seed": 5}, f)
+        for name, content in (
+            ("model.pt", b"model"),
+            ("model_best.pt", b"best"),
+            ("train_log.jsonl", b"{}\n"),
+            ("eval.json", b"{}\n"),
+        ):
+            with open(os.path.join(run_dir, name), "wb") as f:
+                f.write(content)
+
+        set_seed(5)
+        manifest = build_run_manifest(
+            "tiny", "lega", 5, cfg, data, "cpu", argv=["test"]
+        )
+        manifest["config_used_sha256"] = sha256_file(config_used)
+        artifact_names = (
+            "config_used.json",
+            "model.pt",
+            "model_best.pt",
+            "train_log.jsonl",
+            "eval.json",
+        )
+        manifest["artifacts"] = {
+            name: {
+                "sha256": sha256_file(os.path.join(run_dir, name)),
+                "bytes": os.path.getsize(os.path.join(run_dir, name)),
+            }
+            for name in artifact_names
+        }
+        manifest["completion"] = {"status": "completed"}
+        manifest["sanity"] = {
+            "present": True,
+            "passed": True,
+            "malformed": False,
+            "checks_consistent": True,
+            "identity": {"hard_mismatches": []},
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        report = verify_run(run_dir, data_dir=data)
+        assert report["ok"] is True, report
+        assert report["issues"] == []
+        assert report["checks"]["seed"]["status"] == "pass"
+        assert report["checks"]["environment_lock"]["status"] in ("pass", "warn")
+
+        with open(os.path.join(run_dir, "model.pt"), "ab") as f:
+            f.write(b"tampered")
+        report = verify_run(run_dir, data_dir=data)
+        assert report["ok"] is False
+        assert report["checks"]["artifacts"]["status"] == "fail"
+
+        legacy = dict(manifest)
+        for key in ("completion", "artifacts", "environment_lock", "sanity"):
+            legacy.pop(key, None)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(legacy, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["ok"] is True, report
+        assert report["warnings"]
+        assert verify_run(run_dir, data_dir=data, strict=True)["ok"] is False
+    print("  [ok] verify_run 通过完整 run，检测产物篡改并兼容旧清单")
+
+
+def test_verify_run_cross_checks_runtime_identity_and_checkpoint_provenance():
+    """单 run 审计：环境身份漂移告警；checkpoint 内嵌溯源与清单矛盾判失败。
+
+    run_manifest 的溯源字段（code_commit/config/data 指纹）本身没有哈希链
+    保护，只有它引用的产物/配置被 SHA-256 绑定。checkpoint 由训练时写入同一
+    份 provenance，因此把清单与 checkpoint 内嵌溯源交叉核对，能发现“清单被
+    事后改写”或“目录里换上了别的权重”这类 environment_lock/artifacts 抓不到
+    的不一致。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        data = os.path.join(d, "data")
+        run_dir = os.path.join(d, "run")
+        os.makedirs(data)
+        os.makedirs(run_dir)
+        with open(os.path.join(data, "train.bin"), "wb") as f:
+            f.write(bytes(64))
+        cfg = os.path.join(d, "config.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"seed": 7}, f)
+        config_used = os.path.join(run_dir, "config_used.json")
+        with open(config_used, "w", encoding="utf-8") as f:
+            json.dump({"seed": 7}, f)
+
+        set_seed(7)
+        manifest = build_run_manifest(
+            "tiny", "lega", 7, cfg, data, "cpu", argv=["test"]
+        )
+        manifest["config_used_sha256"] = sha256_file(config_used)
+        manifest["init_state_fingerprint"] = "i" * 16
+        manifest["completion"] = {"status": "completed"}
+        # 真实（可被 weights_only 反序列化）的 checkpoint：内嵌溯源与清单一致
+        ckpt_payload = {
+            "variant": manifest["variant"],
+            "seed": manifest["seed"],
+            "code_commit": manifest["git"]["commit"],
+            "config_sha256": manifest["config_sha256"],
+            "config_used_sha256": manifest["config_used_sha256"],
+            "data_fingerprint": manifest["data"]["digest"],
+            "init_state_fingerprint": manifest["init_state_fingerprint"],
+        }
+        ckpt_path = os.path.join(run_dir, "model_best.pt")
+        torch.save(ckpt_payload, ckpt_path)
+        manifest["artifacts"] = {
+            "model_best.pt": {
+                "sha256": sha256_file(ckpt_path),
+                "bytes": os.path.getsize(ckpt_path),
+            }
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["checkpoint_provenance"]["status"] == "pass", report
+        assert report["checks"]["runtime_identity"]["status"] == "pass", report
+        assert report["issues"] == [], report
+        assert report["ok"] is True, report
+
+        # 清单溯源字段被改写（与 checkpoint 内嵌的不一致）→ 必须判失败
+        manifest["config_sha256"] = "d" * 64
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["checkpoint_provenance"]["status"] == "fail", report
+        assert report["ok"] is False
+
+        # 在另一版数值栈上复核（清单记录的训练环境与当前不同）→ 只告警
+        manifest["config_sha256"] = ckpt_payload["config_sha256"]
+        manifest["runtime"] = dict(manifest["runtime"], torch="0.0.0-drift")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["runtime_identity"]["status"] == "warn", report
+        assert report["ok"] is True, report
+
+        # 无法解析的 checkpoint：只告警，不崩溃也不判失败（更新产物哈希以
+        # 隔离出溯源检查本身，而不是让 artifacts 检查先失败）
+        with open(ckpt_path, "wb") as f:
+            f.write(b"not-a-torch-file")
+        manifest["artifacts"]["model_best.pt"] = {
+            "sha256": sha256_file(ckpt_path),
+            "bytes": os.path.getsize(ckpt_path),
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        report = verify_run(run_dir, data_dir=data)
+        assert report["checks"]["checkpoint_provenance"]["status"] == "warn", report
+        assert report["ok"] is True, report
+    print("  [ok] verify_run 交叉核对运行环境身份与 checkpoint 内嵌溯源")

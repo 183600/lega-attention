@@ -1,0 +1,86 @@
+{
+  "_说明": "tiny 冒烟/快速验证配置 (~6.8M 参数, CPU 可跑)。正式实验用 configs/small.json；use_sdpa_standard=false 使全部变体共用显式注意力路径",
+  "d_model": 128,
+  "n_layers": 2,
+  "n_heads": 2,
+  "ffn_mult": 4,
+  "block_size": 256,
+  "dropout": 0.0,
+  "attn_dropout": 0.0,
+  "gate_bias_init": 2.0,
+  "use_sdpa_standard": false,
+
+  "batch_size": 16,
+  "grad_accum": 1,
+  "steps": 3000,
+  "lr": 0.0006,
+  "warmup": 100,
+  "weight_decay": 0.1,
+  "grad_clip": 1.0,
+  "train_ctx": 256,
+  "amp": true,
+  "seed": 1337,
+  "seeds": [1337, 2024, 42],
+
+  "log_every": 10,
+  "eval_every": 250,
+  "eval_iters": 20,
+  "length_null": {
+    "enabled": true,
+    "lengths": [32, 64, 128, 256],
+    "modes": ["random", "repeated", "uniform"],
+    "score_sd": 1.0,
+    "n_trials": 500,
+    "seed": 1337
+  },
+
+  "length_calibration": {
+    "enabled": true,
+    "lengths": [32, 64, 128, 256],
+    "n_windows": 4,
+    "query_positions": 4,
+    "growth_modes": ["suffix", "prefix"],
+    "bootstrap": 200,
+    "tolerance": 0.05
+  },
+
+  "length_ppl": {
+    "enabled": true,
+    "lengths": [32, 64, 128, 256],
+    "n_windows": 4,
+    "query_positions": 4,
+    "growth_modes": ["suffix", "prefix"],
+    "bootstrap": 200,
+    "tolerance": 0.01
+  },
+
+  "design": {
+    "alpha": 0.05,
+    "power": 0.8,
+    "multiplicity": "holm_worst_case",
+    "run_order": "randomized_blocked"
+  },
+
+  "ruler": {
+    "ctx_lens": [128, 256],
+    "n_samples": 20,
+    "max_new": 12,
+    "fwe_max_new": 40,
+    "vt_chains": 3,
+    "vt_depth": 3,
+    "seed": 1234
+  },
+
+  "analysis": {
+    "n_examples": 20,
+    "tau": 0.5
+  },
+
+  "latency": {
+    "ctx_lens": [128, 256],
+    "batch_sizes": [1],
+    "decode_tokens": 32,
+    "iters": 10,
+    "warmup": 3
+  }
+}

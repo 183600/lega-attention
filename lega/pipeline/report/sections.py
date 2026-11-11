@@ -1,0 +1,2900 @@
+"""汇总报告渲染（第二部分：曲线、坏案例、消融）。"""
+
+from .._shared import _install as _shared_install
+
+_shared_install(globals())
+
+
+def _fmt_pct(value, spec: str = ".0%") -> str:
+    """百分比缺失显示 '-'；有限值乘 100 溢出时显示“溢出”。"""
+    f = _finite_number(value)
+    if f is None:
+        return "-"
+    return "溢出" if not math.isfinite(f * 100.0) else format(f, spec)
+
+
+def _fmt_pct0(value) -> str:
+    return _fmt_pct(value)
+
+
+_BUDGET_PATTERN_CN = {
+    "stable": "稳定",
+    "transient": "中途翻转",
+    "reversal_nonsignificant": "首末翻转（未显著）",
+    "budget_sensitive": "预算敏感",
+    "insufficient_steps": "共同步数不足",
+    "all_zero": "全零差",
+}
+
+
+def _render_budget_sensitivity(budget):
+    """渲染训练预算轨迹；只作描述，不改变终点/确认性判定。"""
+    out = ["", "### 训练预算敏感性（探索性：结论是否只在终点成立）", ""]
+    if not isinstance(budget, dict):
+        out.append("⚠ 未生成训练预算敏感性结果（汇总阶段缺少曲线）。")
+        return out
+    pairs = [p for p in (budget.get("pairs") or []) if isinstance(p, dict)]
+    available = [p for p in pairs if p.get("available")]
+    if not available:
+        out.append(
+            "⚠ 无可用训练曲线（`train_log.jsonl` 缺失、checkpoint "
+            "路径不可达，或两侧没有共同评测步）；本轮不评估对比/消融"
+            "结论是否随训练预算变化，不能据此宣称“终点结论稳定”。"
+        )
+        return out
+    out.append(
+        "只使用训练日志中已有的 **val** 损失，按同种子、同评测步对齐；"
+        "不插值、不重新选 checkpoint、不改变终点检验。val 同时是选型集，"
+        "逐 step p 值高度相关且未做跨 step 校正，故本表全部为探索性证据，"
+        "不能替代 held-out test 上的终点结论。"
+    )
+    out.append("")
+    out.append(
+        "| 对比 | 评测步（首→末） | n种子 | 终点Δ(logPPL) | 符号一致率 | "
+        "符号翻转 | 反向显著步 | 轨迹模式 |"
+    )
+    out.append("|---|---|---|---|---|---|---|---|")
+
+    def _order(p):
+        return (
+            not bool(p.get("budget_sensitive")),
+            -(p.get("n_sign_flips") or 0),
+            str(p.get("candidate")),
+            str(p.get("reference")),
+        )
+
+    for p in sorted(available, key=_order)[:14]:
+        delta = _fmt_signed(p.get("final_mean_diff"))
+        agree = _fmt_pct(p.get("sign_agreement_with_final"), ".0%")
+        flips = p.get("n_sign_flips")
+        flips_s = "-" if flips is None else str(flips)
+        if p.get("budget_sensitive"):
+            reverse = "⚠ 是"
+        elif p.get("sign_reversal"):
+            reverse = "方向翻转"
+        else:
+            reverse = "否"
+        pattern = _BUDGET_PATTERN_CN.get(
+            p.get("trajectory_pattern"), str(p.get("trajectory_pattern") or "-")
+        )
+        out.append(
+            f"| {p.get('candidate')} vs {p.get('reference')} "
+            f"| {p.get('initial_step')}→{p.get('final_step')} "
+            f"| {p.get('n_seeds')} | {delta} | {agree} | {flips_s} "
+            f"| {reverse} | {pattern} |"
+        )
+    if len(available) > 14:
+        out.append("")
+        out.append(
+            f"（仅列前 14 组；其余 {len(available) - 14} 组的逐 step "
+            "明细见 `significance.json` 的 `budget_sensitivity`。）"
+        )
+    out.append("")
+    out.append(
+        "注: Δ(logPPL)=候选−参照（<0 表示候选在该预算更好）；"
+        "“反向显著步”指至少两个评测步以相反符号达到未校正 p<α，"
+        "只提示轨迹不稳定，不是确认性结论。模式 `稳定` 仅表示方向未翻转，"
+        "不代表每个预算都统计显著；`中途翻转` 与 `首末翻转` 才是"
+        "“不能用终点代表整个训练过程”的直接信号。"
+    )
+    return out
+
+
+def _render_sample_efficiency(analysis):
+    """渲染样本效率（steps-to-target）；描述收敛速度，不改变终点判定。"""
+    out = ["", "### 样本效率（steps-to-target；探索性）", ""]
+    if not isinstance(analysis, dict):
+        out.append("⚠ 未生成样本效率结果（汇总阶段缺少曲线）。")
+        return out
+    pairs = [p for p in (analysis.get("pairs") or []) if isinstance(p, dict)]
+    available = [p for p in pairs if p.get("available")]
+    if not available:
+        out.append(
+            "⚠ 无可用训练曲线（`train_log.jsonl` 缺失、checkpoint 路径"
+            "不可达，或两侧没有共同种子）；本轮不评估收敛速度，"
+            "不能据此宣称“终点优势伴随样本效率优势”。"
+        )
+        return out
+    out.append(
+        "以**参照逐种子终点 val_loss** 为目标线，比较两侧首次降到目标及"
+        "以下的评测步：比值 <1 表示候选更早到达参照的最终水平（收敛更快），"
+        "比值 >1 更慢，候选从未到达则单独计数。回答的是 budget_sensitivity "
+        "回答不了的另一半问题——终点优势究竟伴随收敛优势，还是只是同水平"
+        "上的“早到”。log2(步数比) 跨种子配对 t + Holm 校正；步数精确到 "
+        "eval_every 评测粒度，首次穿越可能是瞬态（已标注）。目标是 val"
+        "（选型集），全部为探索性证据，不改变终点/预注册判定。"
+    )
+    out.append("")
+    out.append(
+        "| 对比 | 中位步数比 | n可比 | 未到达 | 瞬态穿越 | 更早到达比例 | "
+        "p_adj(Holm) | 结论 |"
+    )
+    out.append("|---|---|---|---|---|---|---|---|")
+
+    def _order(p):
+        return (
+            str(p.get("candidate")),
+            str(p.get("reference")),
+        )
+
+    for p in sorted(available, key=_order)[:14]:
+        ratio = p.get("median_ratio")
+        ratio_s = f"{ratio:.3f}" if isinstance(ratio, (int, float)) else "-"
+        frac = _fmt_pct(p.get("frac_reached_earlier"), ".0%")
+        padj = p.get("p_adj")
+        padj_s = f"{padj:.4f}" if isinstance(padj, (int, float)) else "-"
+        not_reached = p.get("n_not_reached") or 0
+        transient = p.get("n_transient") or 0
+        out.append(
+            f"| {p.get('candidate')} vs {p.get('reference')} "
+            f"| {ratio_s} | {p.get('n_comparable', '-')} | {not_reached} "
+            f"| {transient} | {frac} | {padj_s} | {p.get('verdict', '-')} |"
+        )
+    if len(available) > 14:
+        out.append("")
+        out.append(
+            f"（仅列前 14 组；其余 {len(available) - 14} 组的逐种子明细见 "
+            "`significance.json` 的 `sample_efficiency`。）"
+        )
+    out.append("")
+    out.append(
+        "注: “未到达”是“更慢”的最强形式（候选在自身预算内未追平参照"
+        "终点），不插值外推；中位步数比只统计两侧都到达目标的种子。"
+        "收敛更快 ≠ 终点更好：两者须与终点配对检验并列解读，不能只报"
+        "有利的一侧。"
+    )
+    return out
+
+
+def _render_doc_strata(doc_strata):
+    """渲染跨文档 vs 文档内窗口分层；检验收益是否集中在拼接伪影上。"""
+    out = ["", "### 跨文档 vs 文档内窗口分层（探索性：收益是否来自拼接伪影）", ""]
+    if not isinstance(doc_strata, dict):
+        out.append("⚠ 未生成文档分层结果（汇总阶段缺少逐窗口跨文档标志）。")
+        return out
+    out.append(
+        "把**同一批**评测窗口按“是否跨文档边界”（`window_crossing_documents`，"
+        "与逐窗口损失同序）分成两层，各自做候选−参照的逐种子配对："
+        "交互 = 跨文档 ΔNLL − 文档内 ΔNLL，跨种子配对 t + 独立 Holm。"
+        "交互显著为负=收益集中在跨文档窗口（可能来自拼接语料注入的无关"
+        "上下文），显著为正=候选在跨文档窗口相对更差，不显著=未检出分层"
+        "差异。两层共享同一批种子与 checkpoint，不是独立研究；该层为探索性"
+        "证据，不进入任何确认性判定。"
+    )
+    pairs = [p for p in (doc_strata.get("pairs") or []) if isinstance(p, dict)]
+    available = [p for p in pairs if p.get("available")]
+    if not available:
+        reasons = sorted({
+            str(p.get("reason") or "不可用") for p in pairs
+        })
+        detail = "；".join(reasons) if reasons else "无配对"
+        out.append(
+            "⚠ 无可用分层结果（缺逐窗口跨文档标志、两侧窗口/协议不一致，"
+            f"或某一层没有窗口）：{detail}。不能据此宣称“收益与跨文档无关”。"
+        )
+        return out
+    out.append("")
+    out.append(
+        "| 对比 | n种子 | 跨文档窗口(数) | 文档内窗口(数) | 交互ΔNLL | "
+        "交互 p_adj(Holm) | 结论 |"
+    )
+    out.append("|---|---|---|---|---|---|---|")
+
+    def _order(p):
+        return (str(p.get("candidate")), str(p.get("reference")))
+
+    for p in sorted(available, key=_order)[:14]:
+        inter = p.get("interaction") or {}
+        cross = p.get("cross") or {}
+        aligned = p.get("aligned") or {}
+        inter_s = _fmt_signed(inter.get("mean_diff"))
+        cross_s = _fmt_signed(cross.get("mean_diff"))
+        aligned_s = _fmt_signed(aligned.get("mean_diff"))
+        padj = p.get("p_adj")
+        padj_s = f"{padj:.4f}" if isinstance(padj, (int, float)) else "-"
+        out.append(
+            f"| {p.get('candidate')} vs {p.get('reference')} "
+            f"| {p.get('n_seeds', '-')} "
+            f"| {cross_s}（{p.get('n_cross_min')}–{p.get('n_cross_max')}） "
+            f"| {aligned_s}（{p.get('n_aligned_min')}–{p.get('n_aligned_max')}） "
+            f"| {inter_s} | {padj_s} | {p.get('verdict', '-')} |"
+        )
+    if len(available) > 14:
+        out.append("")
+        out.append(
+            f"（仅列前 14 组；其余 {len(available) - 14} 组的逐种子明细见 "
+            "`significance.json` 的 `doc_strata`。）"
+        )
+    out.append("")
+    out.append(
+        "注: 跨文档/文档内两列是各自 ΔNLL 的跨种子均值（<0=候选更好）；"
+        "交互检验才是“收益是否分层”的主检验，已进入探索性 FDR 家族。"
+        "文档内窗口集合依赖文档边界切分协议，文档太短时可能没有文档内"
+        "窗口（该对比显式不可用，不按 0 补齐）。本层与 `doc_aligned_eval`"
+        "互补：后者是另一套窗口网格的绝对值，本层是同一窗口集合上的分层。"
+    )
+    return out
+
+
+def _render_dose_response(dose):
+    """渲染门控系数剂量-反应曲线；只作机制描述，不重选 checkpoint。"""
+    if not isinstance(dose, dict):
+        return []
+    comps = [c for c in (dose.get("components") or []) if isinstance(c, dict)]
+    if not dose.get("available"):
+        if dose.get("requested"):
+            return [
+                "",
+                "### 门控系数剂量-反应（推理期连续消融，val split；探索性）",
+                "",
+                "⚠ 本轮请求了剂量-反应分析，但没有找到可配对的 "
+                "`dose_response_*.json`（checkpoint 缺失、变体无输出门，"
+                "或产物不属于本轮）；不能据此推断剂量效应。",
+            ]
+        return []
+    md = ["", "### 门控系数剂量-反应（推理期连续消融，val split；探索性）", ""]
+    md.append(
+        "现有推理期病灶只做全有/全无干预；本表在同一 checkpoint、同一批 val "
+        "窗口上把 A（`gate_w`）、B（`gate_a`）、C（`gate_b`）系数分别乘以 "
+        "λ，逐窗口配对 ΔNLL(λ)=NLL(λ)−NLL(λ=1)。λ=1 是训练得到的原始系数，"
+        "λ=0 精确对应 `no_query/no_conc/no_len` 的推理期清零。局部斜率、"
+        "二次顶点与网格最优 λ 均为**描述性**诊断：固定网格上挑最优会引入 "
+        "winner's curse，不据此重选 checkpoint 或改写预注册判定。"
+    )
+    md.append("")
+    md.append(
+        "跨种子检验按 (变体, 组件) 取共同 λ 交集，先逐种子聚合 ΔNLL "
+        "再对种子做配对 t；A/B/C 与局部斜率各自按 metric 分 Holm 家族。"
+        "窗口级区间只描述单 run，相邻窗口可能相关，不作为确认性证据。"
+    )
+    used_any = False
+    for comp in comps:
+        if not comp.get("available"):
+            if comp.get("reason"):
+                md += [
+                    "",
+                    f"⚠ {comp.get('variant', '-')} · "
+                    f"{comp.get('component', '-')}：{comp['reason']}",
+                ]
+            continue
+        used_any = True
+        variant = comp.get("variant", "-")
+        component = comp.get("component", "-")
+        label = comp.get("label") or component
+        factors = comp.get("common_factors") or []
+        factors_s = "、".join(f"{x:g}" for x in factors if isinstance(x, (int, float)))
+        md += ["", f"**{variant} · {component}（{label}）**", ""]
+        slope_mean = _finite_number(comp.get("local_slope_mean"))
+        slope_sd = _finite_number(comp.get("local_slope_sd"))
+        slope_s = (
+            format(slope_mean, "+.4f")
+            + (f" ± {slope_sd:.4f}" if slope_sd is not None else "")
+            if slope_mean is not None
+            else "-"
+        )
+        vertex = _finite_number(comp.get("quadratic_vertex_mean"))
+        vertex_s = format(vertex, "+.4f") if vertex is not None else "-"
+        rate = _finite_number(comp.get("baseline_is_grid_minimum_rate"))
+        rate_s = f"{rate:.0%}" if rate is not None else "-"
+        counts = comp.get("best_factor_counts") or []
+        counts_s = "、".join(
+            f"{c.get('factor'):g}×{c.get('count')}"
+            for c in counts
+            if isinstance(c, dict)
+            and isinstance(c.get("factor"), (int, float))
+            and isinstance(c.get("count"), int)
+        )
+        md.append(
+            f"- n={comp.get('n_seeds', '-')} 种子；共同 λ={factors_s or '-'}；"
+            f"λ=1 局部斜率={slope_s}（p_adj="
+            f"{_fmt_signed(comp.get('local_slope_p_adj'), '.4f')}）；"
+            f"二次顶点均值={vertex_s}；网格最优 λ 计数={counts_s or '-'}；"
+            f"基线为网格最小点={rate_s}。"
+        )
+        if comp.get("zero_delta_mean") is not None:
+            md.append(
+                f"- λ=0 的 ΔNLL 均值={_fmt_signed(comp.get('zero_delta_mean'), '+.4f')}"
+                f"（应复现对应 `{DOSE_COMPONENT_SPECS.get(component, {}).get('training_variant', '-')}` "
+                "推理期清零；若不一致需先排查实现/窗口协议）。"
+            )
+        tests = [
+            t
+            for t in (dose.get("tests") or [])
+            if isinstance(t, dict)
+            and t.get("dose_variant") == variant
+            and t.get("dose_component") == component
+            and t.get("dose_family") == "factor"
+        ]
+        tests.sort(key=lambda t: _finite_number(t.get("dose_factor")) or 0.0)
+        if tests:
+            md += [
+                "",
+                "| λ | ΔNLL均值 ± SD | 95% CI | PPL比 | no-op种子 | "
+                "逐种子胜负 | p_adj(Holm) | 判定 |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+            for t in tests:
+                ci = t.get("mean_diff_ci95")
+                ci_s = f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-"
+                ratio = (
+                    f"{t['mean_ppl_ratio']:.4f}"
+                    + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
+                    if t.get("mean_ppl_ratio") is not None
+                    else "-"
+                )
+                md.append(
+                    f"| {_fmt_signed(t.get('dose_factor'), 'g')} | "
+                    f"{_fmt_mean_std(t)} | {ci_s} | {ratio} | "
+                    f"{t.get('n_no_op_seeds', '-')}/{t.get('n', '-')} | "
+                    f"{_seed_winloss_str(t)} | "
+                    f"{_fmt_signed(t.get('p_adj'), '.4f')} | "
+                    f"{t.get('dose_verdict', '-')} |"
+                )
+        slope_test = next(
+            (
+                t
+                for t in (dose.get("tests") or [])
+                if isinstance(t, dict)
+                and t.get("dose_variant") == variant
+                and t.get("dose_component") == component
+                and t.get("dose_family") == "local_slope"
+            ),
+            None,
+        )
+        if isinstance(slope_test, dict):
+            md += [
+                "",
+                "局部斜率检验（λ=1，负值=增大系数可降低 NLL）："
+                f"{_fmt_mean_std(slope_test)}，n={slope_test.get('n', '-')}，"
+                f"p_adj={_fmt_signed(slope_test.get('p_adj'), '.4f')}；"
+                f"{slope_test.get('dose_verdict', '-')}",
+            ]
+        if comp.get("verdict"):
+            md += ["", f"**组件摘要**：{comp['verdict']}"]
+    if not used_any:
+        md.append("")
+        md.append("⚠ 没有可用的组件剂量曲线（组件不适用或剂量点不足）。")
+    md.append("")
+    md.append(
+        "注: ΔNLL>0 表示该剂量比 λ=1 更差；PPL比=exp(ΔNLL均值)。"
+        "`no-op` 表示该系数训练后已为 0、干预未改变前向——此时零差"
+        "不是“无效应”的证据。局部斜率显著只说明 λ=1 不是驻点，"
+        "不能单凭曲线在固定网格上的最低点声称“最优剂量”。"
+        "本分析默认只在 val 上做，绝对水平受 checkpoint 选择偏差影响，"
+        "只作机制定位。"
+    )
+    return md
+
+
+def _render_causal_ablation_table(causal_tests) -> list:
+    """推理期因果消融表：逐 (变体, 病灶) 的 ΔNLL 与单因素纪律标注。
+
+    表里必须出现“类型（实际影响通道）”列：只有“单因素 A/B/C”的 ΔNLL
+    才能归因到某个组件；“多因素”覆盖 ≥2 条通道；“门级”不覆盖任何证据
+    通道。通道集合按该变体实际注册的门控项裁剪，并显式标出“声明集合 vs
+    实际集合”，避免读者按标签里的“A+B+C”去解读一条只动了 A 的记录。
+    """
+    causal_tests = causal_tests if isinstance(causal_tests, list) else []
+    if not causal_tests:
+        return [
+            "",
+            "⚠ 未发现推理期因果消融结果（`--skip_ablation`、"
+            "`--ablate_variants` 为空，或变体不含输出门）；"
+            "组件结论目前只有训练期消融证据，不能据此声称“推理期使用了"
+            "该组件”。",
+        ]
+    md = [
+        "",
+        "| 变体 | 病灶 | 类型（实际影响通道） | 目标机制 | ΔNLL均值 ± SD | "
+        "PPL比 | n种子 | 逐种子胜负 | 留一 | p_adj(Holm) | 判定 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for t in causal_tests:
+        delta = _fmt_mean_std(t)
+        ratio = (
+            f"{t['mean_ppl_ratio']:.4f}"
+            + (" ⚠截断" if t.get("ppl_ratio_clamped") else "")
+            if t.get("mean_ppl_ratio") is not None
+            else "-"
+        )
+        wl = _seed_winloss_str(t)
+        loo = _loo_stability_str(t)
+        padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
+        md.append(
+            f"| {t['variant']} | {t['lesion_label']} | "
+            f"{_lesion_contrast_cell(t)} | "
+            f"{t.get('target', '-')} | {delta} | {ratio} | {t['n']} | "
+            f"{wl} | {loo} | {padj} | {t.get('causal_verdict', '-')} |"
+        )
+    md.append("")
+    md.append(
+        "注: `PPL比=exp(ΔNLL均值)`（>1 表示病灶更差）；ΔNLL 与 PPL 比"
+        "只在同一变体/同一 checkpoint 内解释，不跨变体比较绝对值。"
+        "`no_op` 表示该组件训练后系数已为 0（推理期未使用），"
+        "此时“无差异”不是“无效应”的证据；`gate_closed` 是阳性对照，"
+        "若关闭注意力输出仍无差异，应先排查实现/评测而非解释方法。"
+        "训练期消融显著而推理期病灶无差异，说明组件收益可能来自训练"
+        "期的优化/正则化而非推理期必需；推理期显著而训练期不显著，"
+        "则提示训练期消融被再训练补偿。两种证据并列，不互相替代。"
+        "`no_len` 只去 b·log n；c 中的 log n 仍随 a·c 保留，"
+        "因此它检验的是“额外长度系数 C”，不是“完全移除长度依赖”。"
+        "`no_*_matched` 是活动匹配对照：去掉同一组件的同时逐层逐头"
+        "平移 d，使平均 g 与基线相同；它只匹配平均门控（一阶矩），"
+        "不匹配方差/饱和比例，故不能把匹配版写成“机制完全匹配”。"
+    )
+    md.append("")
+    md.append(
+        "**类型（实际影响通道）**是单因素纪律在推理期的落点：只有"
+        "“单因素 A/B/C”的 ΔNLL 才能归因到某个组件，“多因素”覆盖 ≥2 条"
+        "通道、“门级”不覆盖任何证据通道（只动门控偏置/头—参数对应）。"
+        "通道集合按**该变体实际注册**的门控项裁剪：变体缺通道时，"
+        "多通道病灶实际只作用在它有的通道上（如 `qgate` 的 `no_evidence` "
+        "实际只动 A），这类记录必须按实际通道解读，不能按标签里的"
+        "“A+B+C”解读。"
+    )
+    dup_rows = [
+        t for t in causal_tests if isinstance(t, dict) and t.get("excluded_from_family")
+    ]
+    if dup_rows:
+        md.append("")
+        md.append(
+            "⚠ **同一变体上存在重复干预**（参数级操作完全相同，ΔNLL 恒等）："
+            + "、".join(
+                f"{t.get('variant')}:{t.get('lesion')}≡{t.get('duplicate_of')}"
+                for t in dup_rows
+            )
+            + "。重复记录已排除出 Holm 家族（一次实验不计为两次独立检验），"
+            "其数值与保留的那条完全相同。"
+        )
+    return md
+
+
+def _summary_part_b(**kw):
+    if "audit" in kw:
+        audit = kw["audit"]
+    if "c" in kw:
+        c = kw["c"]
+    if "cand" in kw:
+        cand = kw["cand"]
+    if "capacity_only_test" in kw:
+        capacity_only_test = kw["capacity_only_test"]
+    capacity_decomposition = kw.get("capacity_decomposition")
+    controlled_dimension = kw.get("controlled_dimension")
+    if "causal_tests" in kw:
+        causal_tests = kw["causal_tests"]
+    matched_ablation_contrasts = kw.get("matched_ablation_contrasts") or []
+    dose_response = kw.get("dose_tests")
+    budget_sensitivity = kw.get("budget_sensitivity")
+    sample_efficiency = kw.get("sample_efficiency")
+    doc_strata = kw.get("doc_strata")
+    if "ci" in kw:
+        ci = kw["ci"]
+    if "comp" in kw:
+        comp = kw["comp"]
+    if "d" in kw:
+        d = kw["d"]
+    if "e" in kw:
+        e = kw["e"]
+    if "eps" in kw:
+        eps = kw["eps"]
+    if "fmt_stat_cell" in kw:
+        fmt_stat_cell = kw["fmt_stat_cell"]
+    if "fp" in kw:
+        fp = kw["fp"]
+    if "inference_interactions" in kw:
+        inference_interactions = kw["inference_interactions"]
+    if "inference_shapley" in kw:
+        inference_shapley = kw["inference_shapley"]
+    if "k" in kw:
+        k = kw["k"]
+    if "load" in kw:
+        load = kw["load"]
+    if "m" in kw:
+        m = kw["m"]
+    if "md" in kw:
+        md = kw["md"]
+    if "name" in kw:
+        name = kw["name"]
+    if "param_control_test" in kw:
+        param_control_test = kw["param_control_test"]
+    if "r" in kw:
+        r = kw["r"]
+    if "repro" in kw:
+        repro = kw["repro"]
+    reparameterization = kw.get("reparameterization")
+    if "results_dir" in kw:
+        results_dir = kw["results_dir"]
+    if "rows" in kw:
+        rows = kw["rows"]
+    if "runs" in kw:
+        runs = kw["runs"]
+    if "s" in kw:
+        s = kw["s"]
+    if "scope_seeds" in kw:
+        scope_seeds = kw["scope_seeds"]
+    if "scope_variants" in kw:
+        scope_variants = kw["scope_variants"]
+    if "sf_audit" in kw:
+        sf_audit = kw["sf_audit"]
+    if "shapley_tests" in kw:
+        shapley_tests = kw["shapley_tests"]
+    if "shown" in kw:
+        shown = kw["shown"]
+    if "st" in kw:
+        st = kw["st"]
+    if "t" in kw:
+        t = kw["t"]
+    if "tests" in kw:
+        tests = kw["tests"]
+    if "v" in kw:
+        v = kw["v"]
+    if "variants" in kw:
+        variants = kw["variants"]
+
+    md += ["", "## 可复现性与 sanity check", ""]
+    if repro:
+        git = _as_dict(repro.get("git"))
+        data = _as_dict(repro.get("data"))
+        rt = _as_dict(repro.get("runtime"))
+        commit = git.get("commit") or "unknown"
+        dirty = git.get("dirty")
+        md.append(
+            f"- 代码版本：`{str(commit)[:12]}`"
+            + (f"（分支 {git.get('branch')}）" if git.get("branch") else "")
+            + (
+                "；⚠ 工作区 dirty，结果对应未提交状态"
+                if dirty
+                else ("" if dirty is None else "；工作区 clean")
+            )
+        )
+        files = data.get("files")
+        files = (
+            [e for e in files if isinstance(e, dict)] if isinstance(files, list) else []
+        )
+        md.append(
+            f"- 数据指纹：`{data.get('digest')}`"
+            f"（tokenizer={data.get('tokenizer')}，"
+            + "、".join(
+                f"{e.get('name')} " f"sha256:{str(e.get('sha256'))[:12]}…"
+                for e in files
+            )
+            + "）"
+        )
+        md.append(
+            f"- 配置 SHA-256：`{str(repro.get('config_sha256'))[:16]}…`；"
+            f"种子：{repro.get('seeds')}"
+        )
+        src = repro.get("source_tree")
+        if isinstance(src, dict) and isinstance(src.get("digest"), str):
+            md.append(
+                f"- 源码/配置树指纹：`{src['digest']}`"
+                f"（{src.get('files')} 个文件，独立于 git；"
+                "无 git 的源码包也可复算）"
+            )
+        md.append(
+            f"- 运行环境：python={rt.get('python')} torch={rt.get('torch')} "
+            f"device={rt.get('device')} gpu={rt.get('gpu')} cuda={rt.get('cuda')}"
+        )
+        hash_state = _as_dict(rt.get("pythonhashseed"))
+        if hash_state:
+            md.append(
+                f"- 进程哈希盐：PYTHONHASHSEED={hash_state.get('env')}"
+                f"（{'已固定' if hash_state.get('fixed') else '未固定'}）；"
+                f"确定性档位：{rt.get('deterministic_mode') or '未记录'}；"
+                f"线程数：{rt.get('torch_threads')}"
+            )
+        det_audit = _as_dict(repro.get("determinism_audit"))
+        if det_audit:
+            modes = _as_dict(det_audit.get("modes"))
+            nondet = det_audit.get("non_deterministic_op_warnings")
+            nondet = nondet if isinstance(nondet, int) else 0
+            md.append(
+                f"- 逐 run 确定性审计：{det_audit.get('runs')} 个 run；档位 "
+                + ("、".join(f"{k}×{v}" for k, v in sorted(modes.items())) or "未记录")
+                + f"；非确定性算子告警合计 {nondet} 次"
+                + (
+                    "（>0：相关 run 触发了无确定性实现的算子，结果不得"
+                    "声称逐位可复现）"
+                    if nondet
+                    else "（0：本轮未触发无确定性实现的算子）"
+                )
+            )
+            unfixed = det_audit.get("pythonhashseed_unfixed_runs")
+            if isinstance(unfixed, list) and unfixed:
+                md.append(
+                    "- ⚠ 以下 run 的**进程哈希盐未固定**（集合/字典迭代顺序可能"
+                    "随进程启动而变）："
+                    + "、".join(str(x) for x in unfixed[:10])
+                    + "；这些 run 的产物顺序类差异不应被当作方法差异。"
+                )
+        else:
+            seed_reports = _as_dict(repro.get("seed_reports"))
+            if seed_reports:
+                modes = {}
+                nondet_total = 0
+                for _rep in seed_reports.values():
+                    if not isinstance(_rep, dict):
+                        continue
+                    _mode = _rep.get("deterministic_mode")
+                    if _mode:
+                        modes[_mode] = modes.get(_mode, 0) + 1
+                    _count = _rep.get("non_deterministic_op_warnings")
+                    if isinstance(_count, int) and not isinstance(_count, bool):
+                        nondet_total += _count
+                if modes:
+                    md.append(
+                        "- 逐 run 确定性审计："
+                        + "、".join(f"{k}×{v}" for k, v in sorted(modes.items()))
+                        + f"；非确定性算子告警合计 {nondet_total} 次"
+                        + (
+                            "（>0：相关 run 触发了无确定性实现的算子，结果不得"
+                            "声称逐位可复现）"
+                            if nondet_total
+                            else "（0：本轮未触发无确定性实现的算子）"
+                        )
+                    )
+        gate = _as_dict(repro.get("environment_gate"))
+        if gate:
+            gate_status = gate.get("status")
+            gate_msg = gate.get("message") or ""
+            if gate_status == "pass":
+                md.append(f"- 环境锁闸门：pass（{gate_msg}）")
+            else:
+                md.append(
+                    f"- ⚠ 环境锁闸门：{gate_status}（{gate_msg}）；"
+                    "本轮不得声称在锁定环境中产生，正式复现需按 "
+                    "`requirements-lock.txt` 重建环境后重跑。"
+                )
+        # 逐 run 核对评测环境与训练清单：pipeline 内的 eval 通常同环境，但
+        # results 目录可能被另一环境单独补跑（--skip_train/手工 evaluate），
+        # 仅看全局 repro.json 的 pipeline runtime 无法发现这种错配。
+        runtime_drift_rows = []
+        for _v, _seed_map in runs.items():
+            for _seed, _slots in _seed_map.items():
+                _ev = (_slots or {}).get("eval")
+                if (
+                    not isinstance(_ev, dict)
+                    or _ev.get("runtime_matches_training") is not False
+                ):
+                    continue
+                _fields = (
+                    ",".join(
+                        str(m.get("field"))
+                        for m in (_ev.get("runtime_mismatches") or [])
+                        if isinstance(m, dict) and m.get("field")
+                    )
+                    or "unknown"
+                )
+                runtime_drift_rows.append(f"{_v}/seed{_seed}（{_fields}）")
+        if runtime_drift_rows:
+            md.append(
+                "- ⚠ 以下 run 的**评测环境**与训练 `run_manifest.json` "
+                "记录不一致："
+                + "、".join(runtime_drift_rows)
+                + "；同一 checkpoint 在不同 Python/PyTorch/NumPy/CUDA/"
+                "cuDNN/GPU 上可能因浮点内核差异得到不同数值，相关指标不得"
+                "声称与训练环境完全相同（逐项见 `eval_*.json` 的 "
+                "`train_runtime`/`eval_runtime`）。"
+            )
+        source_drift_rows = []
+        for _v, _seed_map in runs.items():
+            for _seed, _slots in _seed_map.items():
+                _ev = (_slots or {}).get("eval")
+                if (
+                    not isinstance(_ev, dict)
+                    or _ev.get("source_tree_matches_training") is not False
+                ):
+                    continue
+                source_drift_rows.append(f"{_v}/seed{_seed}")
+        if source_drift_rows:
+            md.append(
+                "- ⚠ 以下 run 的**评测源码/配置树**与训练 "
+                "`run_manifest.json` 记录不一致："
+                + "、".join(source_drift_rows)
+                + "；评测可能运行在已修改的代码/配置上，相关指标不得"
+                "声称与训练使用同一版本（逐项见 `eval_*.json` 的 "
+                "`train_source_tree_digest`/`eval_source_tree_digest`）。"
+            )
+        md.append(
+            "- 完整记录：`repro.json`（全局）、各 run 目录 `run_manifest.json`"
+            "（代码/数据/环境/命令行）、`config_used.json`（超参数）、"
+            "`train_log.jsonl`（训练曲线）。"
+        )
+    else:
+        md.append(
+            "- ⚠ 未找到 `repro.json`（直接调用 build_summary？）；"
+            "无法核对代码版本与数据指纹。"
+        )
+    sanity_files = sorted(glob.glob(os.path.join(results_dir, "sanity_*.json")))
+
+    def _load_dict(p):
+        d = load(p)
+        return d if isinstance(d, dict) else None
+
+    # 与 runs 同一“本次 run”口径：sanity 虽无“每变体多档种子”，但
+    # run_all 只用首个种子跑 sanity；同一 results 目录被换种子重跑（尤其
+    # --skip_sanity）时，旧种子的 PASS 文件不能在本轮汇总里冒充本次证据。
+    expected_sanity_seed = _integral_value(scope_seeds[0]) if scope_seeds else None
+    if scope_variants is not None:
+        sanity_files = [
+            fp
+            for fp in sanity_files
+            if (_load_dict(fp) or {}).get("variant") in scope_variants
+        ]
+    if expected_sanity_seed is not None:
+        kept = []
+        for fp in sanity_files:
+            d = _load_dict(fp) or {}
+            d_seed = _integral_value(d.get("seed"))
+            # 旧 sanity 文件没有 seed 字段时保留（无法核对，不能伪装成
+            # “已属于本次 run”）；明确记录为其他 seed 的文件必须剔除。
+            if d_seed is not None and d_seed != expected_sanity_seed:
+                continue
+            kept.append(fp)
+        sanity_files = kept
+    if sanity_files:
+        md.append("")
+        md.append("| 变体 | sanity | 初始 loss | 最终 loss | token 准确率 |")
+        md.append("|---|---|---|---|---|")
+        for fp in sanity_files:
+            d = _load_dict(fp)
+            if not d:
+                continue
+            ini = _num_or_none(_as_dict(d.get("initial")).get("loss"))
+            fin = _num_or_none(_as_dict(d.get("final")).get("loss"))
+            acc = _num_or_none(_as_dict(d.get("final")).get("token_acc"))
+            sv = d.get("variant")
+            sv = VARIANT_CN.get(sv, sv) if isinstance(sv, str) else "?"
+            md.append(
+                f"| {sv} | "
+                f"{'✅ 通过' if d.get('passed') else '❌ 未通过'} | "
+                f"{'-' if ini is None else f'{ini:.4f}'} | "
+                f"{'-' if fin is None else f'{fin:.4f}'} | "
+                f"{'-' if acc is None else f'{acc:.4f}'} |"
+            )
+        md.append("")
+        md.append(
+            "注: sanity check 只验证固定小批量的前向/反向/损失/标签链路能被"
+            "优化到接近零损失（必要非充分）；数据增强/特征对齐/标签映射等"
+            "问题仍可能漏网，需配合中间结果检查。"
+        )
+    else:
+        md.append("- ⚠ 未找到 sanity 结果（本次可能跳过了 sanity check）。")
+    if os.path.exists(os.path.join(results_dir, "fig_train_curves.png")):
+        md.append(
+            "- 训练曲线图：`fig_train_curves.png`（各变体训练 loss 与 val PPL，"
+            "多种子取均值）。"
+        )
+
+    # --- 训练曲线诊断：结果分析不能只看最终数值，曲线本身先要过一遍体检
+    md += ["", "## 训练曲线诊断（过拟合/欠拟合/发散/NaN）", ""]
+    curve = load(os.path.join(results_dir, "curve_diagnosis.json"))
+    # 合法 JSON 但非对象（数组/标量）的诊断文件按“无诊断”处理。
+    if not isinstance(curve, dict):
+        curve = None
+    if curve:
+        md.append(
+            "诊断口径：训练降而验证升=过拟合；训练停滞（不再实质下降）而"
+            "验证回升同样判过拟合（平台期泛化先恶化，不按欠拟合处理）；"
+            "训练仍在实质下降而验证无实质变化=过拟合趋势（验证不再随训练"
+            "改善的早期信号，按正则化/早停处理，不据此续训）；"
+            "两者都不降=欠拟合/学习率不当/数据管道问题；"
+            "验证损失显著低于训练损失（倒挂）=泄漏/划分错配/评估口径"
+            "不一致，不能当“验证更好”；best 与次优差距落在评估噪声内="
+            "checkpoint 选型不可靠（winner's curse）；曲线虽在降但"
+            "训练覆盖 <1 epoch=训练不足（还没学完，不能当收敛）；"
+            "出现 NaN=训练失效；"
+            "瞬态损失尖峰（分段均值会掩盖；另查区间单步峰值 loss_max）"
+            "与损坏日志行单独报告；全程首/末之外还比较末段（后 1/3 vs "
+            "中 1/3），晚期平台/回升不被早段大幅改善掩盖。"
+            "逐 run 明细见 `curve_diagnosis.json`。"
+        )
+        md.append("")
+        md.append(
+            "| 变体 | 状态（最差种子） | 训练覆盖(epoch) | 训练损失 首→末 "
+            "| 验证损失 首→最优→末 | 早停空间 | 关键建议 |"
+        )
+        md.append("|---|---|---|---|---|---|---|")
+        any_nan = False
+        any_grad_spike = False
+        any_loss_spike = False
+        any_malformed = False
+        any_inversion = False
+        any_selection_noise = False
+        observability = set()
+        for v in variants:
+            by_seed = curve.get(v)
+            if not isinstance(by_seed, dict):
+                continue
+            diags = [
+                d
+                for d in by_seed.values()
+                if isinstance(d, dict) and isinstance(d.get("status"), str)
+            ]
+            if not diags:
+                continue
+            status = worst_status([d["status"] for d in diags])
+            worst = next(d for d in diags if d["status"] == status)
+            any_nan = any_nan or any(d.get("nonfinite_values") for d in diags)
+            spike = any(d.get("has_grad_spike") for d in diags)
+            any_grad_spike = any_grad_spike or spike
+            lspike = any(d.get("has_loss_spike") for d in diags)
+            any_loss_spike = any_loss_spike or lspike
+            any_malformed = any_malformed or any(
+                d.get("malformed_records") for d in diags
+            )
+            any_inversion = any_inversion or any(
+                d.get("val_below_train") for d in diags
+            )
+            any_selection_noise = any_selection_noise or any(
+                d.get("best_checkpoint_within_noise") for d in diags
+            )
+            for d in diags:
+                for w in d.get("curve_observability_warnings") or []:
+                    if isinstance(w, str) and w.strip():
+                        observability.add(w.strip())
+            es = [
+                x
+                for x in (_num_or_none(d.get("early_stop_gain_rel")) for d in diags)
+                if x is not None
+            ]
+
+            def _f4(x):
+                x = _num_or_none(x)
+                return "-" if x is None else f"{x:.4f}"
+
+            train_s = (
+                f"{_f4(worst.get('train_loss_first'))}→"
+                f"{_f4(worst.get('train_loss_last'))}"
+            )
+            val_s = (
+                f"{_f4(worst.get('val_loss_first'))}→"
+                f"{_f4(worst.get('val_loss_best'))}"
+                f"@s{worst.get('val_best_step')}"
+                f"→{_f4(worst.get('val_loss_last'))}"
+            )
+            es_avg = (sum(es) / max(len(es), 1)) if es else None
+            es_s = (
+                "-"
+                if es_avg is None
+                else _fmt_pct(es_avg, "+.1%")
+                + ("（最终劣于最优，已用 best checkpoint）" if es_avg > 0.02 else "")
+            )
+            eps = [
+                x
+                for x in (_num_or_none(d.get("epochs_seen")) for d in diags)
+                if x is not None
+            ]
+            ep_min = min(eps) if eps else None
+            ep_s = (
+                "-"
+                if ep_min is None
+                else f"{ep_min:.3f}" + (" ⚠<1" if ep_min < 1.0 else "")
+            )
+            rec = worst.get("recommendations")
+            rec = rec[:1] if isinstance(rec, list) else []
+            es_flagged = any(d.get("early_stopped") for d in diags)
+            # 需关注种子的占比：只看"最差种子"分不清系统性异常与单个种子偶发，
+            # 1/5 与 5/5 需要完全不同的处置
+            n_attention = sum(
+                1 for d in diags if d.get("status") not in ("正常收敛", "数据不足")
+            )
+            attention_s = (
+                f"（{n_attention}/{len(diags)} 种子需关注）" if n_attention else ""
+            )
+            status_s = (
+                status
+                + attention_s
+                + ("　（梯度尖峰）" if spike else "")
+                + ("　（损失尖峰）" if lspike else "")
+                + ("　（早停）" if es_flagged else "")
+            )
+            md.append(
+                f"| {VARIANT_CN.get(v, v)} | {status_s} | {ep_s} "
+                f"| {train_s} | {val_s} | {es_s} "
+                f"| {rec[0] if rec else '-'} |"
+            )
+        md.append("")
+        if observability:
+            shown = sorted(observability)
+            more = len(shown) - 2
+            md.append(
+                "⚠ 曲线采样可观测性受限（配置级，所有种子同因）："
+                + "；".join(shown[:2])
+                + (f"；另有 {more} 条同类告警" if more > 0 else "")
+                + "。上述趋势/早停结论的可靠性受此限制，正式实验请"
+                "按告警调整 `eval_every`/`log_every` 后重跑。"
+            )
+            md.append("")
+        if any_nan:
+            md.append(
+                "⚠ 存在出现非有限损失的 run：训练已失效，"
+                "对应 run 目录的 `nan_report.json` 给出了"
+                "数据→代码→混合精度→梯度/学习率的系统排查路径"
+                "（含检测点前的整个 log 区间候选批次与区间内首个非有限"
+                "损失步 `first_bad_step`，排查的是失败现场而非最后一步"
+                "批次），处理前该变体的一切指标都不可信。"
+            )
+        else:
+            md.append(
+                "注：全部 run 的损失曲线无 NaN/Inf（梯度非有限另见下）；"
+                "有异常状态的变体请按建议处理"
+                "（过拟合/过拟合趋势→正则化/增数据/早停，欠拟合→查学习率"
+                "与数据管道，训练不足→延长训练/增大数据覆盖）后重跑，"
+                "再进入对比结论。"
+            )
+        if any_inversion:
+            md.append("")
+            md.append(
+                "⚠ 存在验证损失显著低于训练损失的 run（与泛化差距方向"
+                "相反）：先按 datacheck 审计跨 split 重复/n-gram 重叠与"
+                "划分边界，再核对 train/val 的 dropout 状态、精度与损失"
+                "统计口径；排除泄漏/错配前，该 run 的验证指标不得用于"
+                "方法比较。"
+            )
+        if any_selection_noise:
+            md.append("")
+            md.append(
+                "⚠ 存在 best checkpoint 与次优验证损失差距落在该点 95% CI "
+                "内的 run：最优与次优无法区分（winner's curse），"
+                "不能只报告 best 数字；应同时报告 final/多种子均值，"
+                "并增大 eval_iters 或验证集后再据此选型。"
+            )
+        if any_grad_spike:
+            md.append("")
+            md.append(
+                "⚠ 检测到 pre-clip 梯度范数非有限或爆炸性尖峰"
+                "（区间峰值/中位数 ≥10×）的 run：这是 NaN/发散的早期信号，"
+                "即使损失曲线看似正常也应先降低学习率/收紧 grad_clip "
+                "后重跑；发生步与逐点清单见 `curve_diagnosis.json` 的 "
+                "`grad_norm_max*`/`grad_spikes` 字段。"
+            )
+        if any_loss_spike:
+            md.append("")
+            md.append(
+                f"⚠ 检测到训练损失瞬态尖峰（某点 > 邻近中位数 "
+                f"{LOSS_SPIKE_FACTOR:.0f}×，分段均值会掩盖；"
+                "区间单步峰值 loss_max 另查）：先核对该"
+                "步批次数据与梯度范数，再决定收紧 grad_clip/降低学习率；"
+                "细节见 `curve_diagnosis.json` 的 "
+                "`loss_spikes`/`loss_peak_spikes` 字段。"
+            )
+        if any_malformed:
+            md.append("")
+            md.append(
+                "⚠ 部分 train_log.jsonl 记录无法解析（已跳过并计数）："
+                "日志可能被中断或损坏，曲线结论只基于其余记录点，"
+                "复核前不要把它当作完整训练历史。"
+            )
+        any_early = any(
+            d.get("early_stopped")
+            for vs in curve.values()
+            if isinstance(vs, dict)
+            for d in vs.values()
+            if isinstance(d, dict)
+        )
+        if any_early:
+            md.append("")
+            md.append(
+                "⏹ 上表带「早停」标记的变体触发了早停（验证连续 patience "
+                "次无实质改善即终止，曲线按设计截断，区别于日志缺失/中断）："
+                "下游评测使用的仍是 val 选出的 `model_best.pt`；若其最优"
+                "仍出现在训练早期，应先处理过拟合/学习率问题，而不是"
+                "统一延长所有变体的训练步数。"
+            )
+    else:
+        md.append(
+            "- ⚠ 未找到 `curve_diagnosis.json`：只看最终数值会掩盖训练动态，"
+            "请先运行训练（或 `python -m lega.curves --run_dir <run 目录>`）。"
+        )
+
+    # --- 门控健康：机制是否真的在起作用，不能只看最终 PPL
+    md += ["", "## 门控健康（机制是否真的在起作用）", ""]
+    gate_order = {
+        "健康": 0,
+        "不适用（无门控统计）": 0,
+        "门控近似常数（无样本级区分）": 2,
+        "门控剧烈漂移": 3,
+        "门控塌缩（几乎不写入）": 4,
+        "门控饱和（退化为标准注意力）": 4,
+    }
+    gate_rows = []
+    if isinstance(curve, dict):
+        for v in variants:
+            by_seed = curve.get(v)
+            if not isinstance(by_seed, dict):
+                continue
+            hs = [
+                d.get("gate_health")
+                for d in by_seed.values()
+                if isinstance(d, dict)
+                and isinstance(d.get("gate_health"), dict)
+                and d["gate_health"].get("available")
+            ]
+            if not hs:
+                continue
+            worst_g = max(hs, key=lambda h: gate_order.get(h.get("status"), -1))
+            status_g = worst_g.get("status") or "-"
+            m_last = _num_or_none(worst_g.get("mean_last"))
+            s_last = _num_or_none(worst_g.get("std_last"))
+            lo = _num_or_none(worst_g.get("frac_low_last"))
+            hi = _num_or_none(worst_g.get("frac_high_last"))
+            layers = [
+                x
+                for x in (
+                    _num_or_none(y) for y in (worst_g.get("layer_mean_last") or [])
+                )
+                if x is not None
+            ]
+            layer_s = (
+                "-"
+                if not layers
+                else (
+                    f"{min(layers):.2f}"
+                    if len(layers) == 1
+                    else f"{min(layers):.2f}~{max(layers):.2f}"
+                )
+            )
+            n_bad_gate = sum(1 for h in hs if h.get("status") not in ("健康",))
+            status_s = status_g + (
+                f"（{n_bad_gate}/{len(hs)} 种子需关注）" if n_bad_gate else ""
+            )
+            rec = (worst_g.get("recommendations") or [""])[0]
+            gate_rows.append(
+                f"| {VARIANT_CN.get(v, v)} | {status_s} | "
+                f"{'-' if m_last is None else f'{m_last:.3f}'} | "
+                f"{'-' if s_last is None else f'{s_last:.4f}'} | "
+                f"{_fmt_pct0(lo)} | {_fmt_pct0(hi)} | {layer_s} | {rec} |"
+            )
+    if gate_rows:
+        md.append(
+            "门控健康检查的是方法机制本身：门控塌缩/饱和/常数化时，"
+            "PPL 的涨跌不能归因于查询、集中度或长度校准项。逐 run 数值"
+            "见 `curve_diagnosis.json` 的 `gate_health`。"
+        )
+        md.append("")
+        md.append(
+            "| 变体 | 门控健康（最差种子） | 末点均值 | std | 低饱和比例 "
+            "| 高饱和比例 | 逐层均值范围 | 关键建议 |"
+        )
+        md.append("|---|---|---|---|---|---|---|---|")
+        md += gate_rows
+        bad_gate = [r for r in gate_rows if "健康" not in r.split("|")[2]]
+        if bad_gate:
+            md.append("")
+            md.append(
+                "⚠ 存在门控塌缩/饱和/常数化/漂移：对应的 PPL/RULER 差异"
+                "可能来自“门关闭/门透明”而不是所声称的机制；先按建议"
+                "修复门控再解释结果，必要时改报“机制未生效”。"
+            )
+    else:
+        md.append(
+            "- 暂无门控统计（旧日志或未评测门控变体）；门控均值不能"
+            "替代分布检查，建议用当前版本重跑训练内评测。"
+        )
+
+    # --- 坏案例分析：预测错误的样本逐一归因（改进思路的最重要来源）
+    md += ["", "## 坏案例分析（预测错误的样本与归因）", ""]
+    bad_rows, bad_example_pool = [], []
+    # 跨变体对照要求各变体使用同一批评测样本：取每个变体最小种子的错误
+    # 清单（RULER 样本由配置里的评测种子构造，与训练种子无关，可逐条对齐）
+    per_variant_badcases = cross_variant_badcase_map(runs, variants)
+    corpus_sources = set()
+    for v in variants:
+        for s in _variant_seed_map(runs, v).values():
+            r = s.get("ruler") or {}
+            if r.get("corpus_source"):
+                corpus_sources.add(str(r["corpus_source"]))
+    for v in variants:
+        m = _variant_seed_map(runs, v)
+        cases = []
+        for s in m.values():
+            r = s.get("ruler")
+            if r:
+                badcases = r.get("badcases")
+                if isinstance(badcases, list):
+                    cases += badcases
+        if not cases:
+            continue
+        ana = analyze_badcases(cases, variant=v)
+        cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
+        cat_s = "；".join(f"{BADCASE_CN.get(k, k)}×{n}" for k, n in cats[:3])
+        bad_rows.append((v, ana, cat_s))
+        bad_example_pool += [(v, c) for c in ana["cases"]]
+    if corpus_sources:
+        src_s = "、".join(f"{x}.txt" for x in sorted(corpus_sources))
+        if "train" in corpus_sources:
+            md.append(
+                f"⚠ RULER niah_corpus 干扰语料来自 **{src_s}**："
+                "训练文本进入评测上下文会让长上下文检索偏容易，"
+                "该任务的绝对分数与 held-out 语料运行不可比（见 ruler payload "
+                "的 `corpus_source`）。"
+            )
+        else:
+            md.append(
+                f"RULER niah_corpus 干扰语料来源：{src_s}（held-out，"
+                "未使用训练文本）。"
+            )
+        md.append("")
+    if bad_rows:
+        md.append(
+            "错误样本不是污点而是信息：逐条区分**标注错误**（gold 不在 "
+            "prompt 中→构造错误）、**难度边界样本**（needle 极深）与"
+            "**模型盲区**（误抄干扰值/幻觉数字/无数值回答）。"
+            "逐案例详情见 `badcases_*.md`。"
+        )
+        md.append("")
+        n_seeds_max = max(
+            (len(_variant_seed_map(runs, v)) for v in variants), default=0
+        )
+        if n_seeds_max > 1:
+            md.append(
+                f"注：RULER 样本集跨种子相同（由评测构造种子决定），下表"
+                f"错误样本数为最多 **{n_seeds_max} 个种子的累计频次**"
+                "（同一样本在 k 个种子下错就计 k 次），用于衡量错误的"
+                "稳定性；唯一样本级的对照见下节「跨变体错误对照」"
+                "（取最小种子）。"
+            )
+            md.append("")
+        md.append(
+            "| 变体 | 错误样本数（跨种子累计） | 主要归因 | niah 深位(>0.75)失败占比 "
+            "| 标注/构造错误 |"
+        )
+        md.append("|---|---|---|---|---|")
+        for v, ana, cat_s in bad_rows:
+            dfr = ana.get("deep_position_fail_ratio")
+            md.append(
+                f"| {VARIANT_CN.get(v, v)} | {ana['n_badcases']} | {cat_s} "
+                f"| {_fmt_pct0(dfr)} "
+                f"| {ana['label_errors'] or 0} |"
+            )
+        md.append("")
+        # 摘 3 条代表性个案放进汇总页：错误必须"看得见"，不能只留在文件里
+        shown, seen_cat = 0, set()
+        for v, c in bad_example_pool:
+            if shown >= 3 or c["category"] in seen_cat:
+                continue
+            seen_cat.add(c["category"])
+            shown += 1
+            q = _as_text(c.get("question")).strip().replace("\n", " ")[:120]
+            pred = _as_text(c.get("pred")).strip().replace("\n", " ")[:80]
+            md += [
+                f"- **{VARIANT_CN.get(v, v)} · {c.get('task') or '-'}"
+                f"@ctx{c.get('ctx')}** "
+                f"—— {BADCASE_CN.get(c['category'], c['category'])}",
+                f"  - 问题：{q}…",
+                f"  - 输出：`{pred}` vs gold `{c.get('answer')}`；"
+                f"{c.get('explanation', '')}",
+            ]
+        md.append("")
+        n_label = sum(a["label_errors"] for _, a, _ in bad_rows)
+        if n_label:
+            md.append(
+                f"⚠ 共 {n_label} 条 gold 不在 prompt 中的样本：这是"
+                "构造/标注错误，不是模型失败，须先处理评测再下结论。"
+            )
+        # 错误归因的终点是改进方向：把主导错误模式转成下一步可执行的实验，
+        # 而不是停在分类表（坏案例是提出新思路的最重要来源）。
+        _render_advice(
+            md,
+            [(v, r) for v, a, _ in bad_rows for r in (a.get("recommendations") or [])],
+            "### 坏案例驱动的改进方向（RULER）",
+        )
+    else:
+        md.append(
+            "- 暂无错误样本记录（RULER 未运行或全部命中）。"
+            "全部命中时也建议人工抽查若干正确样本确认没有'碰巧命中'。"
+        )
+
+    # --- 跨变体错误对照：共识失败（数据/难度）vs 方法特异性盲区
+    bad_cross = None
+    if len(per_variant_badcases) >= 2:
+        bad_cross = cross_variant_analysis(per_variant_badcases, reference="standard")
+        md += ["", "### 跨变体错误对照（共识失败 vs 方法特异性）", ""]
+        n_shared = bad_cross["n_shared_all_failures"]
+        shared_ci = bad_cross.get("shared_all_ci95")
+        shared_ci_s = ""
+        if isinstance(shared_ci, (list, tuple)) and len(shared_ci) == 2:
+            shared_ci_s = (
+                f"（Wilson 95% CI {_fmt_pct0(shared_ci[0])}–"
+                f"{_fmt_pct0(shared_ci[1])}）"
+            )
+        md.append(
+            f"各变体取最小种子的错误清单（样本集相同，可逐条对齐；RULER 已"
+            f"评测但零错误的变体按“全部通过”计入，不会被误算作共识失败）：共 "
+            f"{bad_cross['n_unique_failed_items']} 个不同的失败样本，"
+            f"{n_shared} 个为全体（已评测）变体共识失败{shared_ci_s}——"
+            "共识失败（尤其当 "
+            "standard 也错）更可能是数据/构造/内在难度问题，不应算作某一"
+            "方法的问题；相对 standard 的新增错误才是该方法的特异性盲区，"
+            "优先逐条分析。"
+        )
+        md += [
+            "",
+            "| 变体 | 错误样本数 | 全体共识失败 | 相对standard新增 "
+            "| 相对standard改对 | 配对p (Holm) |",
+            "|---|---|---|---|---|---|",
+        ]
+        for v in bad_cross["variants"]:
+            pv = (bad_cross["per_variant"] or {}).get(v) or {}
+
+            def _cnt(x):
+                return "-" if x is None else str(x)
+
+            p_adj = pv.get("mcnemar_p_holm")
+            p_s = f"{p_adj:.3g}" if isinstance(p_adj, (int, float)) else "-"
+            md.append(
+                f"| {VARIANT_CN.get(v, v)} | {_cnt(pv.get('n_failed'))} "
+                f"| {_cnt(pv.get('n_shared_all'))} "
+                f"| {_cnt(pv.get('n_new_vs_reference'))} "
+                f"| {_cnt(pv.get('n_fixed_vs_reference'))} "
+                f"| {p_s} |"
+            )
+        md.append(
+            "注: 新增/改对是同一批样本上的配对计数，p 为精确 McNemar 检验"
+            "（多候选 Holm 校正）；p≥0.05 时只能当方向性线索，不能据此"
+            "断言方法优劣。"
+        )
+        # 展示至多 2 条特异性新增错误（方法盲区的最直接线索）
+        shown = 0
+        for v in bad_cross["variants"]:
+            if v == "standard" or shown >= 2:
+                continue
+            for c in bad_cross["per_variant"][v].get("new_vs_reference") or []:
+                if shown >= 2:
+                    break
+                shown += 1
+                ctx_s = f"@ctx{c['ctx']}" if c.get("ctx") is not None else ""
+                md.append(
+                    f"- **{VARIANT_CN.get(v, v)} · {c.get('task')}{ctx_s} "
+                    f"特异性新增错误**：问题「{str(c.get('excerpt') or '')[-100:]}」；"
+                    f"输出 `{c.get('pred')}` vs gold `{c.get('answer')}`"
+                )
+        if n_shared and bad_cross["shared_failures"]:
+            c0 = bad_cross["shared_failures"][0]
+            ctx_s = f"@ctx{c0['ctx']}" if c0.get("ctx") is not None else ""
+            md.append(
+                f"- 共识失败示例：{c0.get('task')}{ctx_s}，问题"
+                f"「{str(c0.get('excerpt') or '')[-100:]}」；gold "
+                f"`{c0.get('answer')}`（所有变体都错，先检查样本本身）"
+            )
+        md.append("")
+        md.append(
+            "注: 跨变体对照只使用各变体最小种子的错误清单以保证样本集一致，"
+            "多种子时不同种子的失败集合变化属正常波动，不在此表统计。"
+        )
+        _render_advice(
+            md,
+            [("跨变体", r) for r in (bad_cross.get("recommendations") or [])],
+            "### 坏案例驱动的改进方向（跨变体）",
+            max_items=4,
+        )
+    elif per_variant_badcases:
+        md += ["", "（仅一个变体有错误样本，无法做跨变体对照）"]
+
+    # --- 语言建模最差窗口（PPL 坏案例）：PPL 只反映平均，错误必须看得见
+    md += ["", "## 语言建模最差窗口（预测错误的样本）", ""]
+    # 逐变体归因用全部种子的窗口累计（错误模式必须跨种子稳定）；跨变体
+    # 对齐仍只用最小种子的同一批窗口（样本集必须一致）。
+    per_variant_windows = {}
+    per_variant_windows_first = {}
+    window_seed_counts = {}
+    for v in variants:
+        m = _variant_seed_map(runs, v)
+        all_keyed, first_keyed = [], None
+        for s in _sorted_seeds(m):
+            cand = m[s].get("eval") or {}
+            wins = cand.get("worst_windows")
+            if not isinstance(wins, list) or not wins:
+                continue
+            # 评测窗口集合由 (val/test 长度, ctx, eval_iters) 决定，与训练
+            # 种子无关：给每个窗口写入稳定 key，供跨变体对齐。
+            keyed = []
+            for w in wins:
+                if not isinstance(w, dict):
+                    continue
+                w = dict(w)
+                w.setdefault("split", cand.get("split"))
+                w["sample_id"] = f"lm:{w.get('split') or '?'}#w{w.get('window')}"
+                keyed.append(w)
+            all_keyed.extend(keyed)
+            window_seed_counts[v] = window_seed_counts.get(v, 0) + 1
+            if first_keyed is None:
+                first_keyed = keyed
+        if all_keyed:
+            per_variant_windows[v] = all_keyed
+            per_variant_windows_first[v] = first_keyed
+    win_cross = None
+    if per_variant_windows:
+        md.append(
+            "PPL 是所有窗口的平均，看不出「模型究竟错了哪句」。下表按窗口"
+            "末位交叉熵挑出各变体最差的一次 next-token 预测并归因："
+            "高置信错答=top1 概率≥0.5 却错（系统性盲区，含高置信复读）；"
+            "复读吸引子=低置信下首选续写退化为抄上下文已有串；低置信="
+            "模型在多个候选间平均（样本本身多解/噪声，或训练不足）。"
+            "逐案例详情见 `worstcases_*.md`。"
+        )
+        n_win_seeds = max(window_seed_counts.values()) if window_seed_counts else 0
+        if n_win_seeds > 1:
+            md.append("")
+            md.append(
+                f"注：下表按最多 {n_win_seeds} 个种子累计最差窗口——同一窗口"
+                "在 k 个种子中都差就计 k 次，用于判断错误模式是否跨种子"
+                "稳定；跨变体对照仍取各变体最小种子的同一批窗口。"
+            )
+        # 最差窗口的“分母”必须可见：只报 top-10 而不报候选/总窗口数，会把
+        # 候选子集里的最差误读成全量最差，也会让不同覆盖率的变体不可比。
+        scopes = set()
+        for v in variants:
+            for s in _sorted_seeds(_variant_seed_map(runs, v)):
+                cand = _variant_seed_map(runs, v)[s].get("eval") or {}
+                sc = cand.get("worst_window_scope")
+                screened = (
+                    _integral_value(sc.get("screened"))
+                    if isinstance(sc, dict)
+                    else None
+                )
+                total = (
+                    _integral_value(sc.get("total")) if isinstance(sc, dict) else None
+                )
+                # 分母缺失/非法时不能写成 0 再按 100% 覆盖率展示：那会把
+                # “未知筛查范围”伪装成“已覆盖全量窗口”，并输出 30/0。
+                if (
+                    screened is not None
+                    and total is not None
+                    and total > 0
+                    and 0 <= screened <= total
+                ):
+                    scopes.add((screened, total))
+        if scopes:
+            md.append("")
+            lo_cov = min(scr / tot for scr, tot in scopes)
+            shown = "；".join(f"{scr}/{tot}" for scr, tot in sorted(scopes)[:3])
+            extra = " 等" if len(scopes) > 3 else ""
+            md.append(
+                f"注：最差窗口在等间隔候选窗口子集中排序（本次 "
+                f"{shown}{extra}，最低覆盖率 {_fmt_pct0(lo_cov)}），不是全量窗口"
+                "的严格最差；各变体独立选各自的候选窗口，跨变体的归因"
+                "占比是描述性对照，不是同一批样本的配对比较。"
+            )
+        md += [
+            "",
+            "| 变体 | 最差窗口数 | 主要归因 | 平均 top-1 概率 "
+            "| gold 在上下文中 | gold 进 top-5 | 平均 loss |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        window_pool, seen_cat, window_advice = [], set(), []
+        for v, wins in per_variant_windows.items():
+            ana = analyze_worst_windows(wins, variant=v)
+            window_advice += [(v, r) for r in (ana.get("recommendations") or [])]
+            cats = sorted(ana["category_counts"].items(), key=lambda kv: -kv[1])
+            cat_s = "；".join(
+                f"{WINDOW_CATEGORY_CN.get(k, k)}×{n}" for k, n in cats[:3]
+            )
+            mt1 = (
+                "-" if ana["mean_top1_prob"] is None else f"{ana['mean_top1_prob']:.3f}"
+            )
+            gic = _fmt_pct0(ana["gold_in_context_rate"])
+            g5 = _fmt_pct0(ana["gold_in_top5_rate"])
+            ml = "-" if ana["mean_loss"] is None else f"{ana['mean_loss']:.3f}"
+            md.append(
+                f"| {VARIANT_CN.get(v, v)} | {ana['n_windows']} | {cat_s} "
+                f"| {mt1} | {gic} | {g5} | {ml} |"
+            )
+            for c in ana["cases"]:
+                if c["category"] not in seen_cat:
+                    seen_cat.add(c["category"])
+                    window_pool.append((v, c))
+        # 摘 3 条不同类别的个案进汇总页
+        for v, c in window_pool[:3]:
+            tail = str(c.get("context_tail") or "").replace("\n", " ")[-100:]
+            p1 = c.get("top1_prob")
+            p1_s = f"（p={p1:.3f}）" if p1 is not None else ""
+            if c.get("gold_in_context") is True:
+                tag = "gold 在上下文中"
+            elif c.get("gold_in_context") is False:
+                tag = "gold 不在上下文中"
+            else:
+                tag = "gold 是否在上下文中未记录"
+            md += [
+                f"- **{VARIANT_CN.get(v, v)} · 窗口 #{c.get('window')}"
+                + (f"（{c['split']}）" if c.get("split") else "")
+                + f"** —— {WINDOW_CATEGORY_CN.get(c['category'], c['category'])}",
+                f"  - 上下文尾部：…{tail}",
+                f"  - 模型 top-1：`{c.get('top1')}`{p1_s}；真实续写："
+                f"`{c.get('gold_next')}`（{tag}）",
+            ]
+        if len(per_variant_windows_first) >= 2:
+            win_cross = cross_variant_analysis(
+                per_variant_windows_first, reference="standard"
+            )
+            n_shared_w = win_cross["n_shared_all_failures"]
+            md.append("")
+            md.append(
+                f"跨变体看：{win_cross['n_unique_failed_items']} 个不同的最差窗口，"
+                f"其中 {n_shared_w} 个为全体变体共识失败（更可能是数据的局部"
+                "不可预测/噪声，而非某一模型的问题）；"
+                + (
+                    "⚠ 参照 standard 无最差窗口记录，新增/改对计数不可得。"
+                    if not win_cross.get("reference_available")
+                    else "相对 standard 的新增窗口才是该方法引入的预测退化。"
+                )
+            )
+            window_advice += [
+                ("跨变体", r) for r in (win_cross.get("recommendations") or [])
+            ]
+        _render_advice(
+            md, window_advice, "### 坏案例驱动的改进方向（最差窗口）", max_items=4
+        )
+    else:
+        md.append(
+            "- 暂无最差窗口记录（评测未含 --worst_n、评测被跳过，或 test "
+            "split 默认尘封最差窗口转储——需人工迭代请在 val 上做，"
+            "确需 test 错误清单须显式 --worst_on_test 并在报告中披露）。"
+            "PPL 平均分无法替代对错误样本的逐条检查。"
+        )
+
+    # --- 消融矩阵（全因子 + 去一法）
+    present = set(runs.keys())
+    md += ["", "## 消融矩阵（全因子 + 去一法）", ""]
+    rows_by_var = {r["variant"]: r for r in rows}
+    factorial_done, factorial_missing, factorial_under = _ablation_coverage(
+        FACTORIAL_CELLS, present, rows_by_var
+    )
+    loo_done, loo_missing, loo_under = _ablation_coverage(
+        LOO_CELLS, present, rows_by_var
+    )
+    control_done, control_missing, control_under = _ablation_coverage(
+        CONTROL_CELLS, present, rows_by_var
+    )
+    underpowered_cells = factorial_under + loo_under + control_under
+
+    def _cell_label(name, v):
+        r = rows_by_var.get(v)
+        if not r:
+            return name, f"{v}（未运行）"
+        n = _integral_value(r.get("n_seeds"))
+        if n is None or n < 0:
+            n = 0
+        if n < MIN_SEEDS:
+            return name, f"{v}（种子不足 n={n}<{MIN_SEEDS}）"
+        return name, f"{VARIANT_CN.get(v, v)}（n={n}）"
+
+    md.append("| 组合 | 变体 | PPL↓ | RULER平均↑ |")
+    md.append("|---|---|---|---|")
+    for name, v in FACTORIAL_CELLS:
+        label, cell = _cell_label(name, v)
+        r = rows_by_var.get(v)
+        if r:
+            md.append(
+                f"| {label} | {cell} | "
+                f"{fmt_stat_cell(r, 'val_ppl')} | "
+                f"{fmt_stat_cell(r, 'ruler_avg')} |"
+            )
+        else:
+            md.append(f"| {label} | {cell} | - | - |")
+    for name, v in CONTROL_CELLS:
+        label, cell = _cell_label(name, v)
+        r = rows_by_var.get(v)
+        if r:
+            md.append(
+                f"| {label} | {cell} | "
+                f"{fmt_stat_cell(r, 'val_ppl')} | "
+                f"{fmt_stat_cell(r, 'ruler_avg')} |"
+            )
+        else:
+            md.append(f"| {label} | {cell} | - | - |")
+    if (
+        not factorial_missing
+        and not loo_missing
+        and not control_missing
+        and not underpowered_cells
+    ):
+        md.append("")
+        md.append(
+            "全因子（门控内 2^3，none=`gate_only`）覆盖 8/8、去一法覆盖完整、"
+            "无门控 `standard` 外部基线已运行，且每格种子数≥"
+            f"{MIN_SEEDS}；但组合覆盖只是必要条件，"
+            "组件是否有用须以下方统计证据为准。`gate_only` 只含可学习门偏置 d，"
+            "是“有门但无 A/B/C”的对照：standard vs gate_only 度量门本身，"
+            "X-only vs gate_only 才是组件 X 的受控效应。"
+        )
+    elif not factorial_missing and not loo_missing:
+        md.append("")
+        md.append(
+            "全因子（门控内 2^3）8/8、去一法完整；⚠ 缺少无门控 `standard` "
+            "外部基线：H1（LEGA vs 标准注意力）无法估计。组件 A/B/C 的判定"
+            "不依赖 standard，仍以 `gate_only` 为受控对照。"
+        )
+    elif not factorial_missing:
+        md.append("")
+        md.append(
+            "⚠ 全因子（门控内 2^3）覆盖 8/8，但去一法缺失组合："
+            + "、".join(f"{n}({v})" for n, v in loo_missing)
+            + "；Full−X 的组件结论不完整。"
+        )
+    elif not loo_missing:
+        md.append("")
+        md.append(
+            "⚠ 已覆盖去一法（Full/Full−A/Full−B/Full−C），但全因子缺失/种子不足："
+            + "、".join(f"{n}({v})" for n, v in factorial_missing)
+            + "；涉及这些组合的单独组件结论不完整。"
+        )
+    else:
+        md.append("")
+        md.append(
+            "⚠ **消融不完整**：全因子缺失/种子不足 "
+            + "、".join(f"{n}({v})" for n, v in factorial_missing)
+            + "；去一法缺失/种子不足 "
+            + "、".join(f"{n}({v})" for n, v in loo_missing)
+            + (
+                "；无门控 standard 外部基线缺失/种子不足 "
+                + "、".join(v for _, v in control_missing)
+                if control_missing
+                else ""
+            )
+            + "。仅凭部分组合无法支撑“每个组件都有用”，请补齐后重跑。"
+        )
+    if underpowered_cells:
+        md.append("")
+        md.append(
+            "⚠ **消融格种子数不足**（"
+            + f"要求每格≥{MIN_SEEDS} 个种子，单种子无法做配对检验）："
+            + "、".join(f"{n} n={k}" for n, _v, k in underpowered_cells[:8])
+            + (" ..." if len(underpowered_cells) > 8 else "")
+            + "；这些格不参与覆盖完整性宣称。"
+        )
+
+    # --- 单因素消融审计：需要单因素的实验必须每次只改一个因子。
+    md += ["", "### 单因素消融审计（每次只改变一个因子）", ""]
+    if sf_audit["ok"]:
+        md.append(
+            "✅ 组件归因所用的 6 组消融对比均只改变一个门控因子"
+            "（去一法 Full−X vs Full，全因子增量 X-only vs `gate_only`）；"
+            "不存在“B-only/C-only vs Full”这类同时改两个因子却被当作"
+            "单组件证据的对比。"
+        )
+    else:
+        md.append(
+            "⚠ **单因素消融审计未通过**："
+            + "；".join(sf_audit["problems"])
+            + "。这些对比不能用于组件归因，需先修正变体/配对定义。"
+        )
+    md.append("")
+    md.append("| 对比 | 方向 | 改变的因子 | 实际因子差 |")
+    md.append("|---|---|---|---|")
+    direction_cn = {"remove": "去一法：去掉该因子", "add": "全因子增量：只加该因子"}
+    for c in sf_audit["contrasts"]:
+        md.append(
+            f"| {c['candidate']} vs {c['reference']} "
+            f"| {direction_cn.get(c['direction'], c['direction'])} "
+            f"| {c['factor']} "
+            f"| {', '.join(c['changed_factors'])} |"
+        )
+    md.append("")
+    impl_rows = [
+        r for r in (sf_audit.get("implementation_factors") or []) if isinstance(r, dict)
+    ]
+    if impl_rows:
+        category_cn = {
+            "gate_factors": "主 2^3 因子表",
+            "raw_gate_factors": "原始参数化因子表",
+            "capacity_null": "容量匹配三臂（Null_X）",
+            "placebo": "参数匹配安慰剂",
+            "alt_conc": "替代集中度统计",
+            "supplemental_gate": "带门补充对照",
+        }
+        bad = [r["variant"] for r in impl_rows if r.get("ok") is not True]
+        md.append(
+            "实现层核对（探针前向逐参数扰动 `gate_w/gate_a/gate_b`，"
+            "看门控 logit 是否真的改变；并实测 B 通道的参数化口径"
+            "——均匀注意力下 `max_j p_j = 1/(t+1)`，据此可分出"
+            "原始 `log q`、归一化 `log(n*q)`、证据置零与安慰剂噪声）："
+        )
+        md.append("")
+        md.append(
+            "| 变体 | 登记类别 | 注册参数 | 实现层生效因子 | 声明因子 "
+            "| B 通道口径（实测／设计） |"
+        )
+        md.append("|---|---|---|---|---|---|")
+        conc_form_cn = {
+            "none": "无 B 通道",
+            "disabled": "证据置零",
+            "normalized": "归一化 log(n·q)",
+            "raw": "原始 log q",
+            "custom": "非证据占位",
+        }
+        for r in sorted(impl_rows, key=lambda x: str(x.get("variant"))):
+            measured = r.get("conc_form_measured")
+            expected = r.get("conc_form_expected")
+            form_cell = (
+                f"{conc_form_cn.get(measured, measured)}／"
+                f"{conc_form_cn.get(expected, expected)}"
+            )
+            if measured is not None and measured != expected:
+                form_cell += " ⚠"
+            md.append(
+                f"| {r.get('variant')} "
+                f"| {category_cn.get(r.get('category'), r.get('category'))} "
+                f"| {'/'.join(r.get('params') or []) or '—'} "
+                f"| {', '.join(r.get('effective') or []) or '无'} "
+                f"| {', '.join(r.get('declared') or []) or '无'} "
+                f"| {form_cell} |"
+            )
+        md.append("")
+        if bad:
+            md.append(
+                "⚠ 以下变体的实现层核对未通过（生效因子或 B 通道口径与登记"
+                "不一致）："
+                + "、".join(sorted(bad))
+                + "——它们不能作为单因素对比的一方。"
+            )
+        else:
+            md.append(
+                "✅ 所有带门变体的实现层生效因子与登记因子集合一致，"
+                "B 通道参数化口径也与设计一致；容量匹配对照（`lega_null_*`）"
+                "保留全部三个门控参数，只让自己那条证据通道失效。"
+            )
+        md.append("")
+    lesion_rows = [
+        r
+        for r in (sf_audit.get("inference_lesion_implementation") or [])
+        if isinstance(r, dict) and r.get("lesion")
+    ]
+    if lesion_rows:
+        md.append(
+            "推理期病灶实现层核对（逐通道隔离测量：把另外两条通道的门控"
+            "系数置零，比较病灶施加前后该通道对门控 logit 的位置变化；"
+            "逐头常数 `gate_d` 与活动匹配平移不计入）："
+        )
+        md.append("")
+        md.append("| 病灶 | 声明通道 | 实测影响通道 | 结论 |")
+        md.append("|---|---|---|---|")
+        for r in lesion_rows:
+            md.append(
+                f"| {r['lesion']} "
+                f"| {', '.join(r.get('expected') or []) or '—'} "
+                f"| {', '.join(r.get('affected') or []) or '无'} "
+                f"| {'✅ 一致' if r.get('ok') is True else '⚠ 不一致'} |"
+            )
+        md.append("")
+        bad_lesions = [
+            r["lesion"] for r in lesion_rows if r.get("ok") is not True
+        ]
+        if bad_lesions:
+            md.append(
+                "⚠ 以下病灶的实现层实际影响通道与设计声明不一致："
+                + "、".join(sorted(bad_lesions))
+                + "——它们不能作为单因素推理期实验（或 2^3 格）的一方。"
+            )
+        else:
+            md.append(
+                "✅ 全部推理期病灶的实现层实测通道与设计声明一致："
+                "单因素病灶只动一条通道，多通道对照确实覆盖 A/B/C，"
+                "2^3 单因子格恰好去掉另外两条通道。"
+            )
+        md.append("")
+    variant_rows = [
+        r
+        for r in (sf_audit.get("inference_lesion_variant_effects") or [])
+        if isinstance(r, dict) and r.get("variant") and r.get("lesion")
+    ]
+    duplicate_rows = [
+        r
+        for r in (sf_audit.get("inference_lesion_duplicate_interventions") or [])
+        if isinstance(r, dict)
+    ]
+    if variant_rows:
+        md.append(
+            "推理期病灶逐变体核对（参数级实测：快照 → 施加 → 逐参数比对，"
+            "得到该变体上**实际**影响的证据通道；通道集合按变体实际注册"
+            "的门控项裁剪，因为变体缺通道时多通道对照会退化成单通道/门级"
+            "干预）："
+        )
+        md.append("")
+        degraded = [r for r in variant_rows if r.get("degraded")]
+        bad_variant_rows = [r for r in variant_rows if r.get("ok") is not True]
+        md.append(
+            f"- 带门变体 × 病灶共 {len(variant_rows)} 组实测；"
+            f"其中 {len(degraded)} 组因变体缺通道而少于设计声明，"
+            f"{len(bad_variant_rows)} 组与设计/元数据口径不一致。"
+        )
+        if duplicate_rows:
+            md.append(
+                "- ⚠ 同一变体上存在**重复干预**（参数级操作完全相同，ΔNLL 恒等）："
+                + "、".join(
+                    f"{r.get('variant')}:{r.get('lesion')}≡{r.get('duplicate_of')}"
+                    for r in duplicate_rows
+                )
+                + "。结果层必须把它们排除出 Holm 家族（一次实验不计为两次"
+                "独立检验），并按实际影响通道解读，不能按标签里的“A+B+C”"
+                "解读成整体证据。"
+            )
+        else:
+            md.append("- ✅ 未发现重复干预。")
+        md.append("")
+    cap_rows = [
+        r
+        for r in (sf_audit.get("inference_variant_capabilities") or [])
+        if isinstance(r, dict) and r.get("variant")
+    ]
+    if cap_rows:
+        cap_bad = [r["variant"] for r in cap_rows if r.get("ok") is not True]
+        if cap_bad:
+            md.append(
+                "⚠ 以下变体的能力裁剪口径不一致（名字推导 vs 实测注册参数）："
+                + "、".join(sorted(cap_bad))
+                + "——结果层按变体裁剪推理期病灶会失真，需修正后重跑。"
+            )
+        else:
+            md.append(
+                "✅ 按变体裁剪推理期病灶所用的通道映射与实现层实测注册参数"
+                f"逐变体一致（{len(cap_rows)} 个带门变体）。"
+            )
+        md.append("")
+    reg_rows = [
+        r
+        for r in (sf_audit.get("registered_single_factor") or [])
+        if isinstance(r, dict) and r.get("id")
+    ]
+    forbidden_rows = [
+        r
+        for r in (sf_audit.get("forbidden_multi_factor_contrasts") or [])
+        if isinstance(r, dict)
+    ]
+    if forbidden_rows:
+        md.append(
+            "⚠ **门控网格内的多因子对比已被拦截**（既不是整体方法对比，"
+            "也不能用于组件归因；对应登记假设判为“不可判定”）："
+        )
+        md.append("")
+        md.append("| 登记假设 | 候选 vs 参照 | 同时改变的因子 | 处理 |")
+        md.append("|---|---|---|---|")
+        for r in forbidden_rows:
+            md.append(
+                f"| {r.get('id') or '—'} "
+                f"| {r.get('candidate')} vs {r.get('reference')} "
+                f"| {', '.join(r.get('changed_factors') or []) or '—'} "
+                f"| 不进入配对表，判定为不可判定 |"
+            )
+        md.append("")
+    if reg_rows:
+        contrast_cn = {
+            "single_factor": "单因素（可归因到单一组件）",
+            "unregistered_single_factor": "单因子但未登记",
+            "multi_factor": "多因子（整体方法对比）",
+            "multi_factor_forbidden": "多因子（网格内，禁止）",
+            "overall": "因子网格外（整体/机制对比）",
+        }
+        md.append(
+            "登记假设与单因素边界（claim 自称单组件消融的必须落在上表" "六条边内）："
+        )
+        md.append("")
+        md.append("| 假设 | 候选 vs 参照 | 指标 | 对比类型 | 单因子 |")
+        md.append("|---|---|---|---|---|")
+        for r in reg_rows:
+            factor = r.get("factor") or "—"
+            if r.get("contrast_type") == "single_factor":
+                factor = f"{factor}（{r.get('edge_direction')}）"
+            md.append(
+                f"| {r['id']} | {r['candidate']} vs {r['reference']} "
+                f"| {r.get('metric') or '-'} "
+                f"| {contrast_cn.get(r.get('contrast_type'), r.get('contrast_type'))} "
+                f"| {factor} |"
+            )
+        md.append("")
+    md.append(
+        "注: 全因子 2^3 本身是多因子设计（用于 A×B/A×C/B×C 交互检验，"
+        "见下表，属探索性）；组件主效应只从上述单因素边估计。"
+        "各变体 vs `standard` 与 LEGA vs `qgate` 是整体方法对比，"
+        "可同时含多个因子，不得把差异归因给某一个 A/B/C 组件。"
+        "门控网格内的多因子对比（如 B-only/C-only 与 Full，同时改两个"
+        "因子）默认禁止：它们不是整体方法对比，也不能当单组件证据，"
+        "只有显式白名单（当前仅 LEGA vs `qgate`）允许；被拦截的对比不会"
+        "进入配对表，对应登记假设判为“不可判定”。"
+        "单因素审计结果同时写入 `significance.json` 的 "
+        "`single_factor_audit`。"
+    )
+
+    md += _render_controlled_dimension(controlled_dimension)
+
+    md += _render_budget_sensitivity(budget_sensitivity)
+    md += _render_sample_efficiency(sample_efficiency)
+    md += _render_doc_strata(doc_strata)
+
+    # --- 组件有效性判定：只有 Holm 校正后的显著证据才能支撑“组件有用”
+    md += [
+        "",
+        "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）",
+        "",
+    ]
+    md.append(
+        "判定只用预注册主指标（A/B=PPL，C=RULER）；另一指标仅作探索性"
+        "补充，不参与判定，避免两个指标族分别校正后取 OR 放大假阳性。"
+    )
+    md.append("")
+    md.append(
+        "| 组件 | 主指标 | 去一法 Full−X vs Full | 全因子 X vs gate_only | 判定 |"
+    )
+    md.append("|---|---|---|---|---|")
+
+    def _fmt_evidence(st):
+        p = st.get("p_adj")
+        ps = f"p_adj={p:.4f}" if p is not None else "p_adj=-"
+        return f"{'✅' if st['supported'] else '—'} {ps}（{st['reason']}）"
+
+    for c in comp:
+        loo_cells = "；".join(
+            f"{m}: {_fmt_evidence(c['loo'][m])}" for m in _EVIDENCE_METRICS
+        )
+        add_cells = "；".join(
+            f"{m}: {_fmt_evidence(c['add'][m])}" for m in _EVIDENCE_METRICS
+        )
+        verdict = c["verdict"]
+        if not c.get("training_budget_comparable", True):
+            verdict += "（探索性：训练预算不等）"
+        md.append(
+            f"| {c['component']} | {c['primary_metric']} | {loo_cells} | "
+            f"{add_cells} | {verdict} |"
+        )
+    supported = [c["component"] for c in comp if c["supported"]]
+    unsupported = [c["component"] for c in comp if not c["supported"]]
+    fragile = [c["component"] for c in comp if c.get("fragile")]
+    inconsistent = [c["component"] for c in comp if not c.get("consistent")]
+    invalid_comp = [c["component"] for c in comp if c.get("invalid_contrasts")]
+    sf_ok = bool(sf_audit["ok"])
+    if invalid_comp:
+        md.append("")
+        md.append(
+            "⚠ 以下组件的消融对比未通过**实现层**单因素核对（变体前向实际"
+            "多改/少改了一个门控项，或 B 通道参数化口径与设计不符）："
+            + "、".join(invalid_comp)
+            + "——这些对比的显著性不能算作组件证据，只能作探索性线索。"
+        )
+    if not comp:
+        md.append("")
+        md.append("⚠ 无法判定组件有效性（无配对检验结果）。")
+    elif (
+        not unsupported
+        and not fragile
+        and not factorial_missing
+        and not loo_missing
+        and not inconsistent
+        and not invalid_comp
+        and sf_ok
+    ):
+        md.append("")
+        md.append(
+            "✅ 统计证据支持“各组件均有用”：A/B/C 三个组件均在预注册主指标上"
+            "有 Holm 校正后的显著且稳健证据，去一法与全因子两套消融一致，"
+            "且门控内全因子 8/8、去一法完整。"
+        )
+    elif (
+        not unsupported
+        and not fragile
+        and not factorial_missing
+        and not loo_missing
+        and not invalid_comp
+        and sf_ok
+    ):
+        md.append("")
+        md.append(
+            "✅ 统计证据支持各组件有用，但仅部分组件同时得到两套消融支持："
+            + "、".join(inconsistent)
+            + "；另一套未检出可能只是功效不足，报告时不得写成"
+            "“两套消融交叉印证”。"
+        )
+    elif (
+        not unsupported
+        and not factorial_missing
+        and not loo_missing
+        and fragile
+        and sf_ok
+    ):
+        md.append("")
+        md.append(
+            "⚠ **不能下“各组件均有用”的稳健结论**："
+            + "、".join(fragile)
+            + " 的证据虽通过 Holm 校正，但 |Δ|<ΔSD（种子噪声内）或"
+            "留一方向翻转；这类显著结果只能作为探索性线索，"
+            "需增加种子/降低方差后重跑才能确认。"
+        )
+    else:
+        md.append("")
+        if not sf_ok:
+            md.append(
+                "⚠ **不能下组件有效性结论**：单因素消融审计未通过，"
+                "上述对比不满足“每次只改一个因子”，不能用于组件归因。"
+            )
+        if unsupported:
+            md.append(
+                "⚠ **不能下“各组件均有用”的结论**："
+                + "、".join(unsupported)
+                + " 缺少主指标上 Holm 校正后的显著且稳健证据（幅度不足、"
+                "方向相反、噪声内、证据冲突或种子数不够）；"
+                "组合齐全并不等于组件有效。"
+            )
+        if fragile:
+            md.append(
+                "⚠ 不稳健组件："
+                + "、".join(fragile)
+                + "（显著但效应落在种子噪声内或留一翻转）。"
+            )
+        if factorial_missing:
+            md.append(
+                "⚠ 全因子缺失组合："
+                + "、".join(f"{n}({v})" for n, v in factorial_missing)
+                + "，组件单独贡献的覆盖不完整。"
+            )
+        if loo_missing:
+            md.append(
+                "⚠ 去一法缺失："
+                + "、".join(f"{n}({v})" for n, v in loo_missing)
+                + "，Full−X 的组件结论不完整。"
+            )
+    if control_missing:
+        md.append("")
+        md.append(
+            "⚠ 缺少无门控 `standard` 外部基线：H1（LEGA vs 标准注意力）"
+            "无法估计；这不影响门控内 A/B/C 的受控判定。"
+        )
+    stopped_comp = _as_text_list((audit or {}).get("early_stop_runs"))
+    if stopped_comp:
+        md.append("")
+        md.append(
+            f"⚠ 早停导致实际训练量不等（{len(stopped_comp)} 个 run）："
+            "下方组件证据仍按配对检验数值报告，但属于探索性分析；"
+            "确认性结论需在相同实际步数下重跑。"
+        )
+    md.append("")
+    md.append(
+        "注: 去一法证据=去掉该组件的 Full−X 显著差于 Full（去掉有害）；"
+        "全因子证据=仅含该组件的 X 显著优于 gate_only（只加它、且已有"
+        "门偏置时仍有收益）。判定要求方向正确、Holm 校正后 p<0.05、"
+        "种子数≥3，且效应不落在 |Δ|<ΔSD 的种子噪声内、留一法不翻转；"
+        "任一套显著反向记“证据冲突”，以证据不足处理。"
+    )
+
+    # --- 全因子交互效应（探索性）：主效应有用 ≠ 可加。A 的收益可能在已有
+    #     B 时缩小（次可加）或放大（协同）；以 gate_only 为无组件基准，
+    #     逐种子算 8 个 gated 单元格的 2^3 交互对比并检验。
+    inter = [t for t in tests if t.get("interaction")]
+    md += [
+        "",
+        "### 门控内 2^3 交互效应（探索性，独立 Holm 家族）",
+        "",
+        "以 `gate_only`（有门但无 A/B/C）为无组件基准，比较 8 个 gated "
+        "单元格；二阶交互（A×B/A×C/B×C）=0 表示两个组件的效应可加，"
+        "显著非零说明同时加入两者时收益不能按单组件加总；三阶交互"
+        "（A×B×C）显著说明二阶交互本身随第三个因子改变——此时 Shapley "
+        "把交互平均分摊到因子的做法不再有唯一解释，须与 Shapley 表并列"
+        "解读。该检验未预注册方向，只报是否偏离可加性与 Δ 符号（PPL 越"
+        "小越好、RULER 越大越好，符号解释随指标而变）。",
+        "",
+        "| 交互 | 指标 | Δ均值 ± Δ标准差 | n | p_adj(Holm) | " "结论 |",
+        "|---|---|---|---|---|---|",
+    ]
+    if inter:
+        for t in inter:
+            delta = _fmt_mean_std(t)
+            padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
+            md.append(
+                f"| {t['interaction']} | {t['metric']} | {delta} | "
+                f"{t['n']} | {padj} | {t.get('verdict', '-')} |"
+            )
+    else:
+        md.append("（缺少完整 8 格或全部种子不足，无法计算交互对比）")
+    md.append("")
+    md.append(
+        "注: 交互对比以 gate_only 为无组件基准；二阶对比对第三个因子的"
+        "两个水平取平均（与三阶对比不正交：纯三阶效应 τ 会让每条二阶对比"
+        "呈现 τ/2），三阶对比 I_ABC=ABC−AB−AC−BC+A+B+C−none 不平均掉任何"
+        "因子。均逐种子单样本配对检验、同一家族 Holm 校正；n<3 或 Holm "
+        "校正后不显著只表示未检出，不等于交互不存在。"
+    )
+
+    # --- 全因子 Shapley 分解（探索性）：单因素边依赖参照格，交互非零时
+    #     不同参照格给出不同的“X 的贡献”；Shapley 对全部加入顺序取平均，
+    #     且效率性保证 φ_A+φ_B+φ_C 恰等于 Full−none 的总效应。
+    md += ["", "### 全因子 Shapley 效应分解（探索性，交互感知）", ""]
+    md.append(
+        "单因素消融边回答“固定其他因子时删/加 X 会怎样”，但参照格不同"
+        "时结论可能不同；Shapley 值把 Full−none 的总效应按所有加入顺序"
+        "平均分摊给 A/B/C，天然把 A×B/A×C/B×C 交互平均进参与因子。"
+        "PPL 口径在 −log(PPL) 上分解（比值尺度可加），φ>0 表示该因子"
+        "降低 PPL，`exp(−φ)` 即其 PPL 几何均值比；RULER 用原始 EM。"
+        "占比只在每个种子的总效应均为正时报告，否则留空、不强行归一化。"
+        "该分解未预注册，属探索性证据，不替代预注册的单因素确认检验。"
+    )
+    if shapley_tests:
+        md += [
+            "",
+            "| 因子 | 指标 | φ均值 ± SD | 95% CI | 占总效应 | "
+            "PPL几何比 | n | p_adj(Holm) | 结论 |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for t in shapley_tests:
+            factor = t.get("shapley_factor_label") or t.get("shapley_factor")
+            delta = _fmt_mean_std(t)
+            ci = t.get("mean_diff_ci95")
+            ci_s = f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-"
+            share = _fmt_pct(t.get("shapley_share"), ".1%")
+            ratio = (
+                f"{t['shapley_ppl_ratio']:.4f}"
+                if t.get("shapley_ppl_ratio") is not None
+                else "-"
+            )
+            padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
+            md.append(
+                f"| {factor} | {t.get('shapley_metric')} | {delta} | "
+                f"{ci_s} | {share} | {ratio} | {t['n']} | {padj} | "
+                f"{t.get('verdict', '-')} |"
+            )
+        md.append("")
+        md.append(
+            "注: φ 的符号方向=“越大越好”（PPL 已转为 −log）；"
+            "“占总效应”为逐种子 Shapley 份额的均值；总效应为 Full−none，"
+            "效率性残差见 `significance.json` 的 "
+            "`shapley_efficiency_gap_max`（浮点误差量级）。"
+            "Shapley 显著不等于单因素边也显著：若两者方向冲突，"
+            "说明贡献依赖其他因子的水平（交互），必须在报告中并列披露。"
+        )
+    else:
+        md.append("")
+        md.append(
+            "⚠ 无法计算 Shapley 分解：门控内 8 格未全部运行、种子不足，"
+            "或各格评测协议不一致；此时只能参考上面的单因素边与交互表。"
+        )
+
+    md += _render_reparameterization(reparameterization)
+
+    # --- 推理期因果病灶消融（探索性）：训练期消融回答“重新训练时去掉
+    #     组件会怎样”，本表回答“训练好的模型推理时是否真的使用该组件”。
+    md += ["", "### 推理期因果消融（权重病灶，val split；探索性）", ""]
+    md.append(
+        "训练期消融改变优化轨迹，不能证明最终前向仍在**使用**某组件；"
+        "本表在同一 checkpoint、同一批 val 窗口上只改门控参数，"
+        "逐窗口配对比较 ΔNLL=病灶−正常（>0 表示该机制在推理期有用）。"
+        "`no_query/no_conc/no_len/no_evidence` 是训练期去一法的推理期"
+        "对应；`gate_open/closed/constant_mean` 检验门控写回强度与逐位置"
+        "变化；`head_permute` 在参数个数、分布、结构完全不变的前提下打乱"
+        "头—证据对应，是容量解释的安慰剂对照；"
+        "`conc_permute/query_permute/len_permute` 分别把 B/A/C 位置证据"
+        "沿序列维循环移位，保持逐值分布、均值/方差不变而只破坏位置对应；"
+        "`sign_flip` 反转证据方向。"
+        "默认只在 val 上做（test 尘封；val 同时是 checkpoint 选择集，"
+        "故绝对水平偏乐观，本表只作机制定位）。跨种子 p 经 Holm 校正；"
+        "窗口级 p 仅描述单 run，不作为确认性证据。"
+    )
+    md += _render_causal_ablation_table(causal_tests)
+
+    # --- 活动匹配对照：原始病灶 − 匹配病灶。若差值显著为正，说明原始
+    #     ΔNLL 中有一部分只是“门平均开度变了”，不能全部归因于信息内容；
+    #     若差值不显著，也不能反过来说原始效应全部来自信息内容（功效问题）。
+    if matched_ablation_contrasts:
+        md += _render_matched_ablation_contrasts(matched_ablation_contrasts)
+    elif causal_tests:
+        md += [
+            "",
+            "⚠ 未发现可用的活动匹配对照（记录缺失、未成功施加或无法"
+            "配对）；原始组件 ΔNLL 仍可能混入平均门控开度变化，不能单独"
+            "归因给信息内容。",
+        ]
+
+    # --- 关键病灶的等价性解读（尤其安慰剂/阳性对照）：p>0.05 不能直接
+    #     写成“安慰剂无效应”，必须看 TOST 是否把差异限制在 SESOI 内。
+    md += _render_causal_equivalence_section(causal_tests)
+
+    md += _render_dose_response(dose_response)
+
+    # --- 训练期参数匹配安慰剂（容量/优化红利的对照）与同一 checkpoint 内的
+    #     2^3 推理期 Shapley（与训练期 Shapley 并列）。
+    md += _render_parameter_matched_control(
+        param_control_test, capacity_only_test, ran=PARAM_CONTROL_VARIANT in runs
+    )
+    md += _render_capacity_decomposition(capacity_decomposition)
+    md += _render_inference_shapley(inference_shapley)
+    md += _render_inference_interactions(inference_interactions, tests)
+
+    _assigned = {
+        "_cell_label",
+        "_cnt",
+        "_ev",
+        "_f4",
+        "_fields",
+        "_fmt_evidence",
+        "_load_dict",
+        "_seed",
+        "_seed_map",
+        "_slots",
+        "_v",
+        "acc",
+        "add_cells",
+        "all_keyed",
+        "ana",
+        "any_early",
+        "any_grad_spike",
+        "any_inversion",
+        "any_loss_spike",
+        "any_malformed",
+        "any_nan",
+        "any_selection_noise",
+        "attention_s",
+        "bad_cross",
+        "bad_example_pool",
+        "bad_gate",
+        "bad_rows",
+        "badcases",
+        "by_seed",
+        "c",
+        "c0",
+        "cand",
+        "cases",
+        "cat_s",
+        "cats",
+        "cell",
+        "ci",
+        "ci_s",
+        "commit",
+        "control_done",
+        "control_missing",
+        "control_under",
+        "corpus_sources",
+        "ctx_s",
+        "curve",
+        "d",
+        "d_seed",
+        "data",
+        "delta",
+        "dfr",
+        "diags",
+        "direction_cn",
+        "dirty",
+        "doc_strata",
+        "ep_min",
+        "ep_s",
+        "eps",
+        "es",
+        "es_flagged",
+        "es_s",
+        "expected_sanity_seed",
+        "extra",
+        "factor",
+        "factorial_done",
+        "factorial_missing",
+        "factorial_under",
+        "files",
+        "fin",
+        "first_keyed",
+        "fp",
+        "fragile",
+        "g5",
+        "gate_order",
+        "gate_rows",
+        "gic",
+        "git",
+        "hi",
+        "hs",
+        "inconsistent",
+        "ini",
+        "inter",
+        "kept",
+        "keyed",
+        "label",
+        "layer_s",
+        "layers",
+        "lo",
+        "lo_cov",
+        "loo",
+        "loo_cells",
+        "loo_done",
+        "loo_missing",
+        "loo_under",
+        "lspike",
+        "m",
+        "m_last",
+        "md",
+        "ml",
+        "more",
+        "mt1",
+        "n_attention",
+        "n_bad_gate",
+        "n_label",
+        "n_seeds_max",
+        "n_shared",
+        "n_shared_w",
+        "n_win_seeds",
+        "name",
+        "observability",
+        "p1",
+        "p1_s",
+        "p_adj",
+        "p_s",
+        "padj",
+        "per_variant_badcases",
+        "per_variant_windows",
+        "per_variant_windows_first",
+        "pred",
+        "present",
+        "pv",
+        "q",
+        "r",
+        "ratio",
+        "rec",
+        "rows_by_var",
+        "rt",
+        "runtime_drift_rows",
+        "s",
+        "s_last",
+        "sanity_files",
+        "sc",
+        "scopes",
+        "screened",
+        "seen_cat",
+        "sf_ok",
+        "share",
+        "shared_ci",
+        "shared_ci_s",
+        "shown",
+        "spike",
+        "src_s",
+        "status",
+        "status_g",
+        "status_s",
+        "stopped_comp",
+        "supported",
+        "sv",
+        "t",
+        "tag",
+        "tail",
+        "total",
+        "train_s",
+        "underpowered_cells",
+        "unsupported",
+        "v",
+        "val_s",
+        "verdict",
+        "w",
+        "win_cross",
+        "window_advice",
+        "window_pool",
+        "window_seed_counts",
+        "wins",
+        "wl",
+        "worst",
+        "worst_g",
+    }
+    return {k: v for k, v in locals().items() if k in _assigned}
+
+
+def _render_controlled_dimension(analysis):
+    """受控单维度对照小节：实现层核对 + 跨种子配对检验。
+
+    这些对照（替代集中度统计量 / 反传路径 / 证据标量共享粒度 / 空槽
+    写入）回答的是“只改这一项会怎样”。它们与 A/B/C 组件归因不是同一
+    个问题：两侧的 A/B/C 因子集合**完全相同**，因此既不能进入单因素
+    归因，也不能被当成“与另一种方法比”的整体对比。小节必须同时给出
+
+    * 实现层核对：两侧实测只差**一个**设计维度（否则它已不是受控对照）；
+    * 独立 Holm 家族的跨种子配对检验（不进入预注册确认族）。
+
+    没有这些对照时必须显式说“证据缺失”，不能默认“结论不依赖该维度”。
+    """
+    md = ["", "### 受控单维度对照（只改一项的设计维度；探索性）", ""]
+    if not isinstance(analysis, dict):
+        md.append(
+            "⚠ 未产出受控单维度对照分析：不能据此声称构造效度、反传路径、"
+            "证据标量共享粒度或空槽写入不影响结论。"
+        )
+        return md
+    audit = analysis.get("audit") if isinstance(analysis.get("audit"), dict) else {}
+    rows = [r for r in (analysis.get("contrasts") or []) if isinstance(r, dict)]
+    summary = (
+        analysis.get("summary") if isinstance(analysis.get("summary"), dict) else {}
+    )
+    if not rows:
+        md.append(
+            "⚠ 没有登记的受控单维度对照：不能据此声称构造效度、反传路径、"
+            "证据标量共享粒度或空槽写入不影响结论。"
+        )
+        return md
+    if audit.get("ok") is not True:
+        md.append(
+            "⚠ **受控单维度对照的实现层核对未通过**："
+            + "；".join(str(p) for p in (audit.get("problems") or []))
+            + "。下列对照不能当作受控证据。"
+        )
+    else:
+        md.append(
+            "✅ 实现层核对通过：每一组受控对照实测只差一个设计维度，且两侧的"
+            "A/B/C 因子集合完全相同（它们不是因子消融）。"
+        )
+    md.append("")
+    md.append("| 对照 | 登记维度 | 实测改变维度 | 两侧 A/B/C 因子 | 是否运行 | 结论 |")
+    md.append("|---|---|---|---|---|---|")
+    for r in rows:
+        cand_fac = ",".join(r.get("gate_factors_candidate") or []) or "无"
+        ref_fac = ",".join(r.get("gate_factors_reference") or []) or "无"
+        fac_cell = cand_fac if cand_fac == ref_fac else f"{cand_fac} vs {ref_fac}"
+        md.append(
+            f"| {r.get('candidate')} vs {r.get('reference')} "
+            f"| {r.get('dimension')} "
+            f"| {', '.join(r.get('changed_dimensions') or []) or '无'} "
+            f"| {fac_cell} "
+            f"| {'是' if r.get('ran') else '否'} "
+            f"| {'✅ ' + str(r.get('implementation_reason')) if r.get('implementation_ok') else '⚠ ' + str(r.get('implementation_reason'))} |"
+        )
+    md.append("")
+    tests = [t for t in (analysis.get("tests") or []) if isinstance(t, dict)]
+    if tests:
+        md.append(
+            "| 对照 | 维度 | 指标 | Δ均值 ± SD | n种子 | p_adj(族内Holm) | 判定 |"
+        )
+        md.append("|---|---|---|---|---|---|---|")
+        for t in tests:
+            dims = t.get("changed_dimensions") or []
+            padj = f"{t['p_adj']:.4f}" if t.get("p_adj") is not None else "-"
+            md.append(
+                f"| {t.get('candidate')} vs {t.get('reference')} "
+                f"| {', '.join(dims) or '-'} "
+                f"| {t.get('metric')} "
+                f"| {_fmt_mean_std(t)} "
+                f"| {t.get('n')} "
+                f"| {padj} "
+                f"| {t.get('verdict', '-')} |"
+            )
+        md.append("")
+    else:
+        md.append(
+            "⚠ 没有可检验的受控单维度对照（两侧变体均未运行或缺少评测产物）："
+            "“未运行”不等于“无影响”。"
+        )
+        md.append("")
+    if summary.get("verdict"):
+        md.append(str(summary.get("verdict")))
+        md.append("")
+    md.append(
+        "注: 受控单维度对照**不进入** A/B/C 组件归因，也**不进入**预注册"
+        "确认族：它们回答的是被改动的那一个设计维度（统计量口径 / 反传路径 / "
+        "共享粒度 / 空槽写入），与“某个组件是否有用”不是同一个问题。"
+        "检验走独立 Holm 家族（每个指标一族），不改变主检验族的校正强度；"
+        "未检出差异只能写“未检出”，不能写成“等价”或“不影响”。"
+    )
+    return md
+
+
+def _render_reparameterization(reparam):
+    """渲染归一化 c vs 原始 log max_p 的参数化稳健性（探索性）。"""
+    if not isinstance(reparam, dict) or not reparam.get("available"):
+        if not isinstance(reparam, dict) or reparam.get("not_run"):
+            return []
+        md = ["", "### 参数化稳健性（原始 log max_p vs 归一化 c；探索性）", ""]
+        reason = reparam.get("reason") or "原始/归一化网格不完整"
+        md.append("⚠ 参数化稳健性分析不可用：" + str(reason))
+        missing = reparam.get("missing_variants") or []
+        if missing:
+            md.append("")
+            md.append("缺少变体：" + "、".join(str(v) for v in missing))
+        return md
+
+    def _num(value, spec="+.4f"):
+        f = _finite_number(value)
+        return format(f, spec) if f is not None else "-"
+
+    def _ci(test):
+        ci = test.get("mean_diff_ci95")
+        return f"[{ci[0]:+.4f}, {ci[1]:+.4f}]" if ci else "-"
+
+    md = ["", "### 参数化稳健性（原始 log max_p vs 归一化 c；探索性）", ""]
+    md.append(
+        "归一化 c=log(n·max_p) 与原始 log max_p 属于同一线性门控函数族；"
+        "前者把 a·log n 并入 B，导致 B 与显式长度项 C 不正交。本表按同种子"
+        "配对比较两种参数化下的单因子边与 Shapley 贡献：D=原始−归一化，"
+        "PPL 的效应已定向为 −log PPL（正值=候选降低 PPL 更多），RULER 为"
+        "原始 EM 差（正值=原始参数化改善更大）。D 显著非零表示因子归因"
+        "依赖参数化，不能把归一化 c 的效应直接解释为纯集中度；D 不显著"
+        "只表示未拒绝稳健，不证明等价，须对照 MDE。"
+    )
+    metrics = reparam.get("metrics") if isinstance(reparam.get("metrics"), dict) else {}
+    for metric in ("PPL", "RULER平均"):
+        result = metrics.get(metric)
+        if not isinstance(result, dict):
+            continue
+        contrasts = [t for t in (result.get("contrasts") or []) if isinstance(t, dict)]
+        shapley = [t for t in (result.get("shapley") or []) if isinstance(t, dict)]
+        if not contrasts and not shapley:
+            continue
+        summary = (
+            result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        )
+        md += [
+            "",
+            f"**{metric}**（n≈{result.get('n_protocol_seeds', '-')}；"
+            f"{summary.get('verdict', '-')}）",
+            "",
+        ]
+        if contrasts:
+            md += [
+                "| 因子边 | 归一化效应 | 原始效应 | 原始−归一化 [95% CI] | "
+                "n | 种子符号一致 | p_adj(Holm) | 判定 |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+            for t in contrasts:
+                agree = t.get("seed_sign_agreement")
+                agree_s = f"{agree:.0%}" if isinstance(agree, (int, float)) else "-"
+                md.append(
+                    f"| {t.get('factor', '-')}（{t.get('direction', '-')}） "
+                    f"| {_num(t.get('normalized_effect_mean'))} "
+                    f"| {_num(t.get('raw_effect_mean'))} "
+                    f"| {_num(t.get('mean_diff'))} {_ci(t)} "
+                    f"| {t.get('n', '-')} | {agree_s} "
+                    f"| {_num(t.get('p_adj'), '.4f')} "
+                    f"| {t.get('verdict', '-')} |"
+                )
+        if shapley:
+            md += [
+                "",
+                "| Shapley 因子 | 归一化 φ | 原始 φ | 原始−归一化 [95% CI] | "
+                "n | p_adj(Holm) | 判定 |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for t in shapley:
+                md.append(
+                    f"| {t.get('factor_label') or t.get('factor', '-')} "
+                    f"| {_num(t.get('normalized_phi_mean'))} "
+                    f"| {_num(t.get('raw_phi_mean'))} "
+                    f"| {_num(t.get('mean_diff'))} {_ci(t)} "
+                    f"| {t.get('n', '-')} "
+                    f"| {_num(t.get('p_adj'), '.4f')} "
+                    f"| {t.get('verdict', '-')} |"
+                )
+            md.append("")
+            md.append(
+                "注：φ 的符号仍为“越大越好”；效率性残差分别见 "
+                "`normalized_efficiency_gap_max` 与 "
+                "`raw_efficiency_gap_max`。"
+            )
+    return md
+
+
+def _render_length_null(report, stale: bool = False) -> list:
+    """渲染 c~log2(n) 零假设诊断（README 要求的长度主张必要证据）。"""
+    md = ["", "## 长度零假设诊断（c ~ log2 n）", ""]
+    if not isinstance(report, dict):
+        md.append(
+            "- ⚠ 未找到 `length_null.json`：任何“长度解耦/长度校准”"
+            "正式主张都缺少 README 要求的 c~log2(n) 斜率证据；"
+            "不能用均匀注意力特例单元测试替代。请重跑统一流水线生成诊断。"
+        )
+        return md
+    if stale:
+        md.append(
+            "- ⚠ `length_null.json` 不属于本轮 `run_id`（旧结果或手工"
+            "复制）：不得作为本轮长度主张的证据。"
+        )
+    lengths = report.get("lengths")
+    if not isinstance(lengths, list) or not lengths:
+        md.append("- ⚠ 诊断缺少有效长度清单，无法复核斜率。")
+        return md
+    try:
+        score_sd = float(report.get("score_sd"))
+    except (TypeError, ValueError, OverflowError):
+        score_sd = None
+    md.append(
+        f"- 长度档：{', '.join(str(x) for x in lengths)}；"
+        f"每档重复 {report.get('n_trials')} 次；"
+        f"打分标准差={'-' if score_sd is None else f'{score_sd:.3g}'}；"
+        f"随机种子={report.get('seed')}。"
+    )
+    modes = report.get("modes")
+    if not isinstance(modes, dict) or not modes:
+        md.append("- ⚠ 诊断缺少 modes 结果。")
+        return md
+    md += [
+        "",
+        "| 零假设模式 | c 均值范围 | c~log2(n) 斜率 | " "是否长度无关(|slope|≤0.05) |",
+        "|---|---|---|---|",
+    ]
+    slopes = {}
+    for mode in ("uniform", "repeated", "random"):
+        data = modes.get(mode)
+        if not isinstance(data, dict):
+            continue
+        per = data.get("per_length")
+        means = []
+        if isinstance(per, dict):
+            for n in lengths:
+                row = per.get(str(n))
+                if isinstance(row, dict):
+                    try:
+                        means.append(float(row.get("mean")))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+        slope = data.get("slope_c_per_log2_n")
+        try:
+            slope = float(slope)
+        except (TypeError, ValueError, OverflowError):
+            slope = None
+        slopes[mode] = slope
+        span = "-" if not means else f"{min(means):+.4f} … {max(means):+.4f}"
+        indep = data.get("length_independent")
+        md.append(
+            f"| {mode} | {span} | "
+            f"{'-' if slope is None else f'{slope:+.4f}'} | "
+            f"{'-' if indep is None else ('是' if indep else '否')} |"
+        )
+    md.append("")
+    random_slope = slopes.get("random")
+    if isinstance(random_slope, float) and abs(random_slope) > 0.05:
+        md.append(
+            f"- ⚠ 随机上下文下 c 仍随长度增长（slope={random_slope:+.4f}）："
+            "`c=log(n·max_j p_j)` 只在均匀分布特例下与长度无关，不能把 c "
+            "单独解释为“已去除长度混淆的充分证据”。正式结论必须同时报告"
+            "该斜率，并与 `b·log n`、RULER 分档结果合读。"
+        )
+    else:
+        md.append(
+            "- 随机零假设下 slope 未超过 0.05 阈值；仍需按上表报告，"
+            "不能只引用均匀特例。"
+        )
+    anomalies = [
+        m
+        for m in ("uniform", "repeated")
+        if isinstance(slopes.get(m), float) and abs(slopes[m]) > 0.05
+    ]
+    if anomalies:
+        md.append(
+            "- ⚠ 零斜率对照偏离 0："
+            + "、".join(anomalies)
+            + "；这通常意味着诊断实现/样本量异常，先排查再解读 random 斜率。"
+        )
+    md.append(
+        "- 边界：本表是对**合成零假设分布**的诊断，不是对训练模型实际"
+        "注意力分布的测量；它约束“c 本身已长度解耦”的措辞，不替代模型"
+        "级 c 分布与长度分层 RULER 证据。"
+    )
+    return md
+
+
+def _length_calib_median(values):
+    vals = [v for v in (_finite_number(x) for x in values) if v is not None]
+    return float(np.median(vals)) if vals else None
+
+
+def _render_length_calibration(
+    calibrations, requested: bool = False, random_slope=None
+) -> list:
+    md = ["", "## 经验长度校准审计（训练后模型，val split；探索性）", ""]
+    if not isinstance(calibrations, dict) or not calibrations:
+        if requested:
+            md.append(
+                "⚠ 本轮配置请求了经验长度校准审计，但没有找到可用的 "
+                "`length_calibration_*.json`（checkpoint、val 数据或产物 "
+                "归属缺失）；不能据此声称模型注意力已长度校准。"
+            )
+        return md
+    md.append(
+        "本表直接测量训练后模型在真实 val 文本上的 `c=log(n·max_j p_j)` 随 "
+        "`log2(n)` 的斜率，而不是只依赖合成零假设。suffix 增长固定窗口末尾与 "
+        "query token（只增加前缀），并以 `(window, query_offset)` 固定效应估计"
+        "斜率；prefix 增长固定窗口起点（query token 随长度改变），只作敏感性"
+        "分析。斜率 0 表示 `max_j p_j` 按 1/n 收缩；斜率约 1 表示 `c` 仍随长度"
+        "增长。bootstrap 以窗口为聚类单元，下列为跨种子中位数，逐头区间与 "
+        "p 值见 JSON。"
+    )
+    md.append("")
+    md.append(
+        "| 变体 | 增长模式 | 长度档 | c 均值(最短→最长) | "
+        "c~log2(n) 斜率 | 斜率=0 的头占比 | log max_p 斜率 | "
+        "门控 logit 斜率 | 窗口数 |"
+    )
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    any_row = False
+    for variant in sorted(calibrations):
+        per_seed = calibrations.get(variant)
+        if not isinstance(per_seed, dict):
+            continue
+        for growth in ("suffix", "prefix"):
+            entries = []
+            lengths = None
+            n_windows = None
+            for seed in _sorted_seeds(per_seed):
+                payload = per_seed.get(seed)
+                if not isinstance(payload, dict):
+                    continue
+                result = (payload.get("results") or {}).get(growth)
+                if not isinstance(result, dict):
+                    continue
+                summary = result.get("summary") or {}
+                entries.append(
+                    {
+                        "c": (summary.get("c") or {}).get("median"),
+                        "flat": (summary.get("c") or {}).get("fraction_flat"),
+                        "n_heads": (summary.get("c") or {}).get("n_heads"),
+                        "log_max_p": (summary.get("log_max_p") or {}).get("median"),
+                        "gate_logit": (summary.get("gate_logit") or {}).get("median"),
+                        "per_length": result.get("per_length") or {},
+                    }
+                )
+                if lengths is None:
+                    lengths = result.get("lengths")
+                if n_windows is None:
+                    n_windows = len(payload.get("window_starts") or [])
+            if not entries:
+                continue
+            any_row = True
+            c_values = [e["c"] for e in entries]
+            flat = [e["flat"] for e in entries]
+            logmp = [e["log_max_p"] for e in entries]
+            gate = [e["gate_logit"] for e in entries]
+            c_mean = "-"
+            if isinstance(lengths, list) and lengths:
+                first = _length_calib_median(
+                    [
+                        (
+                            (e["per_length"].get(str(min(lengths))) or {}).get("c")
+                            or {}
+                        ).get("mean")
+                        for e in entries
+                    ]
+                )
+                last = _length_calib_median(
+                    [
+                        (
+                            (e["per_length"].get(str(max(lengths))) or {}).get("c")
+                            or {}
+                        ).get("mean")
+                        for e in entries
+                    ]
+                )
+                if first is not None and last is not None:
+                    c_mean = f"{first:+.3f}→{last:+.3f}"
+            lengths_s = (
+                "-"
+                if not isinstance(lengths, list)
+                else ",".join(str(x) for x in lengths)
+            )
+            flat_med = _length_calib_median(flat)
+            flat_s = "-" if flat_med is None else f"{flat_med:.0%}"
+            gate_med = _length_calib_median(gate)
+            label = variant + ("（敏感性）" if growth == "prefix" else "")
+            md.append(
+                f"| {label} | {growth} | {lengths_s} | {c_mean} | "
+                f"{_fmt_signed(_length_calib_median(c_values))} | {flat_s} | "
+                f"{_fmt_signed(_length_calib_median(logmp))} | "
+                f"{_fmt_signed(gate_med)} | "
+                f"{'-' if n_windows is None else n_windows} |"
+            )
+    if not any_row:
+        md.append("⚠ 产物存在，但没有可解析的 suffix/prefix 结果。")
+        return md
+    md.append("")
+    if random_slope is not None:
+        md.append(
+            f"- 合成 `random` 零假设的 c~log2(n) 斜率为 "
+            f"{_fmt_signed(random_slope)}；经验斜率必须与它及 RULER 分档结果"
+            "合读，不能把 `c` 的绝对值当作长度校准的充分证据。"
+        )
+    md.append(
+        "- 边界：这是观测性审计，不改变门控参数；suffix 斜率控制窗口与 query "
+        "位置，prefix 斜率仍可能混入 query token 内容/位置变化。门控 logit 斜率"
+        "是总长度依赖的简化式，不是 `b` 系数的因果估计。"
+    )
+    return md
+
+
+_LENGTH_PPL_CLASS_CN = {
+    "increasing": "随长度变差",
+    "decreasing": "随长度变好",
+    "flat": "平坦",
+    "unresolved": "未定",
+    "no_ci": "无CI",
+    "undefined": "不可算",
+}
+
+
+def _length_ppl_class_counts(entries):
+    counts = {}
+    for entry in entries:
+        cls = (entry.get("nll_slope_per_log2") or {}).get("class")
+        if cls:
+            counts[cls] = counts.get(cls, 0) + 1
+    if not counts:
+        return "-"
+    total = sum(counts.values())
+    cls, n = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    return f"{_LENGTH_PPL_CLASS_CN.get(cls, cls)} {n}/{total}"
+
+
+def _render_length_ppl(ppls, requested: bool = False, interactions=None) -> list:
+    md = ["", "## 自然文本 PPL 长度剂量-反应（训练后模型，val split；探索性）", ""]
+    if not isinstance(ppls, dict) or not ppls:
+        if requested:
+            md.append(
+                "⚠ 本轮配置请求了自然文本 PPL 长度审计，但没有找到可用的 "
+                "`length_ppl_*.json`（checkpoint、val 数据或产物归属缺失）；"
+                "不能据此声称 PPL 随长度已校准。"
+            )
+        return md
+    md.append(
+        "本表在真实 val 文本上固定最后 q 个目标 token，只改变前缀长度，直接"
+        "测量下一 token NLL/PPL 随 `log2(L)` 的变化；这是 `lengthcalib` 的"
+        " `c=log(n·max p)` 审计所缺少的“主指标”对照。suffix 模式同一窗口跨"
+        "长度的目标 token 相同，ΔNLL 是逐窗口配对差；prefix 模式目标随长度"
+        "改变，只作敏感性分析。斜率为正表示 NLL 随长度变差，为负表示变好；"
+        "单位为 nat/log2(L)。bootstrap 以窗口为聚类单元。"
+    )
+    md.append("")
+    md.append(
+        "| 变体 | 模式 | 长度档 | PPL(最短→最长) | "
+        "ΔNLL vs 最长(最短) | NLL~log2(L)斜率 | 斜率类别(种子) | "
+        "目标配对 | 窗口数 |"
+    )
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    any_row = False
+    bad_pairing = []
+    for variant in sorted(ppls):
+        per_seed = ppls.get(variant)
+        if not isinstance(per_seed, dict):
+            continue
+        for growth in ("suffix", "prefix"):
+            entries = []
+            lengths = None
+            for seed in _sorted_seeds(per_seed):
+                payload = per_seed.get(seed)
+                if not isinstance(payload, dict):
+                    continue
+                result = (payload.get("results") or {}).get(growth)
+                if not isinstance(result, dict) or not result.get("available"):
+                    continue
+                entries.append(result)
+                if lengths is None and isinstance(result.get("lengths"), list):
+                    lengths = result.get("lengths")
+            if not entries:
+                continue
+            any_row = True
+            if not isinstance(lengths, list) or not lengths:
+                lengths = [64, 128, 256, 512, 1024]
+            lo, hi = min(lengths), max(lengths)
+            ppl_lo = _length_calib_median(
+                [
+                    ((e.get("per_length") or {}).get(str(lo)) or {}).get("ppl")
+                    for e in entries
+                ]
+            )
+            ppl_hi = _length_calib_median(
+                [
+                    ((e.get("per_length") or {}).get(str(hi)) or {}).get("ppl")
+                    for e in entries
+                ]
+            )
+            ppl_s = (
+                "-"
+                if ppl_lo is None or ppl_hi is None
+                else f"{ppl_lo:.4g}→{ppl_hi:.4g}"
+            )
+            delta_lo = None
+            if lo != hi:
+                delta_lo = _length_calib_median(
+                    [
+                        ((e.get("delta_vs_reference") or {}).get(str(lo)) or {}).get(
+                            "mean_delta_nll"
+                        )
+                        for e in entries
+                    ]
+                )
+            slope = _length_calib_median(
+                [(e.get("nll_slope_per_log2") or {}).get("estimate") for e in entries]
+            )
+            class_s = _length_ppl_class_counts(entries)
+            pair_frac = None
+            if growth == "suffix":
+                pair_frac = _length_calib_median(
+                    [
+                        (e.get("target_pairing") or {}).get("fraction_consistent")
+                        for e in entries
+                    ]
+                )
+                if pair_frac is not None and pair_frac < 1.0:
+                    bad_pairing.append(variant)
+            pair_s = "-" if pair_frac is None else _fmt_pct(pair_frac)
+            n_windows = _length_calib_median([e.get("n_windows") for e in entries])
+            n_s = "-" if n_windows is None else str(int(round(n_windows)))
+            label = variant + ("（敏感性）" if growth == "prefix" else "")
+            md.append(
+                f"| {label} | {growth} | {lo}–{hi} | {ppl_s} | "
+                f"{_fmt_signed(delta_lo)} | {_fmt_signed(slope)} | "
+                f"{class_s} | {pair_s} | {n_s} |"
+            )
+    if not any_row:
+        md.append("⚠ 产物存在，但没有可解析的 suffix/prefix 结果。")
+        return md
+    if bad_pairing:
+        md.append("")
+        md.append(
+            "⚠ suffix 目标配对比例低于 100%（"
+            + "、".join(sorted(set(bad_pairing)))
+            + "）：逐长度目标 token 不一致，ΔNLL 不能当作配对差，"
+            "应先排查窗口构造。"
+        )
+    interactions = [r for r in (interactions or []) if isinstance(r, dict)]
+    if interactions:
+        md += [
+            "",
+            "**跨变体长度交互（探索性）**",
+            "",
+            "下表对同一批窗口逐长度计算 `ΔNLL=NLL_candidate−NLL_reference`，"
+            "再对 `log2(L)` 回归；斜率显著非 0 表示两变体差距随上下文长度"
+            "变化。p 为跨种子配对 t 检验的**未校正**值，不进入主 Holm 家族，"
+            "只作后续预注册线索。",
+            "",
+            "| 对比 | 种子 | ΔNLL@最短 | ΔNLL@最长 | "
+            "ΔNLL~log2(L)斜率 | p(未校正) | 结论 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for row in interactions:
+            lengths = row.get("lengths") or []
+            if not lengths:
+                continue
+            lo, hi = min(lengths), max(lengths)
+            per_length = row.get("per_length_mean_delta") or {}
+            d_lo = per_length.get(str(lo))
+            d_hi = per_length.get(str(hi))
+            slope = _finite_number(row.get("slope_median"))
+            p = _finite_number(row.get("slope_p"))
+            n_seeds = row.get("n_seeds")
+            if (
+                not isinstance(n_seeds, int)
+                or n_seeds < 3
+                or p is None
+                or slope is None
+            ):
+                verdict = "种子不足/未定"
+            elif p < 0.05 and slope < 0:
+                verdict = "候选优势随长度增加"
+            elif p < 0.05 and slope > 0:
+                verdict = "候选优势随长度缩小"
+            else:
+                verdict = "未检测到显著交互（未定≠无交互）"
+            p_s = "-" if p is None else f"{p:.4g}"
+            md.append(
+                f"| {row.get('candidate')} vs {row.get('reference')} | "
+                f"{row.get('n_seeds')} | {_fmt_signed(d_lo)} | "
+                f"{_fmt_signed(d_hi)} | {_fmt_signed(slope)} | {p_s} | "
+                f"{verdict} |"
+            )
+        md += [
+            "",
+            "注：ΔNLL 为负表示候选 NLL 更低；交互斜率负值表示候选相对"
+            "参考的优势随长度增加。跨种子 p 只描述这批种子，不作为确认性"
+            "证据；样本不足时写“未定”，不能写成“无交互”。",
+        ]
+    md.append("")
+    md.append(
+        "- 边界：suffix 固定窗口末尾与最后 q 个目标 token，但 RoPE 绝对位置"
+        "仍随输入长度变化；prefix 的目标 token 也随长度改变。checkpoint 在 "
+        "val 上选择，本曲线只描述长度形状，不是独立 test 集 PPL 证据。该审计"
+        "是观测性描述，不消融门控参数，不替代 RULER 长度分档、`length_null` "
+        "或推理期因果干预；只读 val，不访问 test。"
+    )
+    return md

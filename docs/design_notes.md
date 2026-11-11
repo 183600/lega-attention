@@ -1,0 +1,1735 @@
+# 设计笔记
+
+## LEGA（Length-calibrated Evidence-Gated Attention）
+
+注意力门控同时参考三个因素：查询向量 $q$、注意力集中度 $c=\log(n\cdot\max_j p_j)$、上下文长度的对数 $\log n$：
+
+$$g=\sigma(w^\top q+a\,c+b\log n+d),\qquad o'=g\cdot o$$
+
+- $c$ 在均匀注意力下恒为 0，但这只是一特例；一般情形 $c$ 仍可能随长度增长，不能据此声称已把"读得集中"和"读得长"解耦。`lega/length_null.py` 提供随机/重复/均匀上下文的零假设诊断；任何"长度解耦/长度校准"主张必须同时报告 $c\sim\log_2 n$ 斜率。统一流水线现在会在训练前自动生成 `results/<tag>/length_null.json`（`lengths`/`modes`/`score_sd`/`n_trials`/`seed` 由配置 `length_null` 块控制），写入 `pipeline_run_id` 与 `config_sha256`，并在汇总页新增“长度零假设诊断（c ~ log2 n）”小节；缺失或不属于本轮 run 的诊断会被标为证据不足，不能用均匀特例单元测试替代；
+- $b\log n$ 是长度校准项，让每个头自行学习长上下文中"集中读取"可信度的变化；
+- 初始化 $w=a=b=0,\ d=2.0$，接近标准注意力，训练可稳定启动。
+
+## 变体
+
+`standard`、`gate_only`、`qgate`、`null`、`lega` 及五个消融（`lega_no_len`、`lega_no_conc`、`lega_no_query`、`lega_conc_only`、`lega_len_only`），覆盖全因子与去一法消融矩阵，并以 `gate_only` 隔离门控本身效应，详见 README。另有可选的训练期**参数匹配安慰剂** `lega_placebo`（门控参数/FLOPs 与 `lega` 相同，B/C 证据替换为确定性噪声；默认不进入 10 变体矩阵，用 `--param_control` 开启），用于排除“多几个门控参数的容量/优化红利”这一替代解释；其伪证据仍由绝对位置哈希得到，不能当作分布匹配的置换对照，正式结论需结合推理期 `conc_permute`/`query_permute`/`len_permute`/`head_permute`。补充训练对照 `lega_raw`、`lega_raw_no_len`、`lega_raw_conc_only`、`lega_raw_no_query`、`lega_detach_conc`、`lega_l2`、`lega_entropy`、`null_zero` 默认不运行，分别检验原始集中度/无长度项、原始参数化全因子格、集中度 detach 反传、替代集中度统计、固定零 value null；它们不进入 `GATE_FACTORS` 的归一化 2^3 矩阵。其中 `lega_l2`/`lega_entropy` 与 `lega` 共享 A、C 和全部参数形状，只把 B 的集中度质量从 `max_j p_j` 换成 `Σ_j p_j²` 或 `exp(-H(p))`，并仍按 `c=log(n·q)` 做长度归一化；它们是 B 的构念效度对照，不是主矩阵的另一个结构格。
+
+消融口径按组件严格定义：B 为 $a\,c$（$c=\log(n\max_j p_j)$ 始终保留长度归一化），C 为 $b\log n$；因此 Full−C（`lega_no_len`）只去掉 $b\log n$，不会连带删掉 $a\log n$（否则不再是单组件消融）。汇总同时以 `gate_only` 为无组件基准给出 A×B/A×C/B×C 交互检验，区分“主效应可加”与“协同/次可加”。
+
+单因素审计：组件归因只允许使用每次仅改变一个因子的对比——去一法 Full−X vs Full，以及全因子增量 X-only vs `gate_only`，共 6 组。`B-only`（`lega_conc_only`）与 `C-only`（`lega_len_only`）相对 Full 同时改变两个因子（A+C / A+B），因此不再与 Full 配对；它们与 Full 的差异也不得写成单组件消融结论。因子表 `GATE_FACTORS` 直接从实现里的 `use_query/use_conc/use_len` 派生，运行期审计会核对这 6 组对比的因子差恰好为 1，并把结果写入 `significance.json` 的 `single_factor_audit` 与汇总页。同一审计还核对训练期容量匹配 Full/Null_X/No_X 三臂（Null_X 必须保留全部门控参数、只置零对应证据，No_X 必须与已审计的去一法变体一致，且不得混入主因子表）、参数化稳健性使用的 4 条原始/归一化单因子边、剂量-反应的 A/B/C 组件映射（每个组件只能缩放一个 gate 参数，且能力与训练期对照必须对应同一因子；两个组件共用参数或漏掉组件会显式失败），以及推理期单病灶、活动匹配对照、A/B/C 分布匹配置换（`query_permute`/`conc_permute`/`len_permute` 各自只对应一个证据通道）和 2^3 单因子格的因子映射；原始参数化变体不在 `GATE_FACTORS` 内，因此按 `NORMALIZED_CELLS`/`RAW_CELLS` 两份网格分别校验；`RAW_GATE_FACTORS` 同样从 `use_query/use_raw_conc/use_len` 派生，运行期会核对 `RAW_CELLS` 的 B 格确实使用原始 `log max_p` 变体，而不是只核对格名覆盖 2^3。汇总实际消费的 `SINGLE_FACTOR_PAIRS` 也必须与声明的 6 条单因素边逐项一致，不能手工增删或混入多因子对比。各变体 vs `standard`、LEGA vs `qgate` 属于整体方法对比，可跨多个因子，不参与组件归因。组件判定在**使用点**再拦一次：`_paired_comparisons` 只给已审计的 6 条边打 `contrast_type="single_factor"`，其余对比按“实际改了几个因子”标成 `unregistered_single_factor`（对称差恰好 1 但未登记）、`multi_factor`（网格内同时改 ≥2 个因子）或 `overall`（因子网格外）；`component_evidence` 遇到任何非 `single_factor` 的检验一律判“对比不是单因素，不能用于组件归因”，即使它显著也不进入组件有效性的判定（旧产物缺该字段时按历史口径放行，字段缺失不等于多因素）。运行期还会核对 `lega_l2`/`lega_entropy` 保持 `lega` 的 A/B/C 开关和门控参数预算，同时不得混入 `GATE_FACTORS`/`RAW_GATE_FACTORS`；这保证“换 B 的统计量”不会被误解释成“开关 B”，也不会因漏注册而静默退化成标准注意力。另有第四类对照——只改一项的**受控单维度对照**（`lega_l2`/`lega_entropy`/`lega_detach_conc`/`lega_shared`/`null_zero`），它们既不是 A/B/C 组件归因也不是“与另一种方法比”的整体对比，其实现层自证与结果层分类见下节。训练期变体与推理期病灶都另有**实现层自证**（见下两节）：前者逐参数扰动看门控 logit 是否真的改变，后者逐通道隔离测量看病灶是否只动声明的那一条证据通道。推理期病灶还要**按变体裁剪**：变体实际注册的门控项不同（`qgate` 只有 A，`gate_only` 一条都没有），病灶声明的通道集合只是上界，实际影响通道必须按变体裁剪；同一变体上参数级操作完全相同的两个病灶是同一个干预（如 `qgate` 的 `no_evidence` ≡ `no_query`），保留其一、排除出 Holm 家族，不计为两次独立检验（见下节）。
+
+### 门控网格内的多因子对比：默认禁止（B-only/C-only vs Full）
+
+“不再与 Full 配对”不能只靠默认配对表恰好不写这两行：预注册登记表会追加条目，任何追加的对比都会进入 `build_comparison_pairs`，于是 `lega_conc_only vs lega`（同时改 A+C）这类多因子对比可以被登记成确认性主张，并拿到一个看起来像单组件结论的“支持/拒绝”。因此网格内的多因子对比改为**默认禁止 + 显式白名单**：
+
+- 白名单只有 `LEGA vs qgate`（`lega.attention.ALLOWED_MULTI_FACTOR_PAIRS`）：它是预注册 H5 的整体方法对比（与最接近的已有门控基线比，差 B+C），不是组件归因；
+- 判定只看**因子差**，不看 claim 措辞：两侧都在 `GATE_FACTORS` 内且对称差 ≥2 的对比一律被拦（此前只有 claim 里出现“核心消融/去一法/单组件/单因素”等措辞时才会报错，换个措辞就能绕过）；
+- 被拦的对比**不进入配对表**（因此不会进入同指标 Holm 家族），对应登记假设判为“不可判定”，`apply_single_factor_gate` 同时撤销其确认性资格（`confirmatory_valid=False`），汇总页在“单因素消融审计”小节点名该对比；
+- 设计层的 `planned_comparison_pairs` 用同一口径，保证先验功效按的 Holm 家族大小与实际检验数一致；
+- 配对结果里的 `contrast_type` 给出四类机器可读标签：`single_factor`（已审计的六条边，可归因）、`unregistered_single_factor`（对称差恰好 1 但未登记，未审计前不可归因）、`multi_factor`（网格内多因子，不可归因）、`overall`（因子网格外）。
+
+### 实现层因子自证（元数据与实现必须同时为真）
+
+上面所有核对读的都是**声明**：`GATE_FACTORS`/`RAW_GATE_FACTORS` 又都从实现的 `use_query/use_conc/use_len` 派生。若某个变体的前向被改成"多乘一个 `b·log n`"而开关忘了同步，**两份元数据会一起失真**，6 组对比的因子差仍然恰好为 1，审计全绿，而数据上的"单因素对比"实际已经是多因子对比——这正是纯元数据审计结构上发现不了的一类漂移。
+
+`lega.attention.probe_gate_factors` 因此把核对推到实现层：对一个微型确定性输入做前向，逐参数把 `gate_w`/`gate_a`/`gate_b` 扰动 +0.7，看门控 `logit` 是否真的改变，返回"实现层生效因子"、实际注册参数、`gate_d` 是否生效、以及该变体的证据通道开关（`null_component`/`use_raw_conc`/`conc_mode`）。探针在 `torch.random.fork_rng` 内构造模块，不移动调用方的全局随机流，同输入同输出。`single_factor_audit()` 新增 `implementation_factors` 段，对每个**带门**变体逐项核对：
+
+- 主 2^3 与原始参数化网格：生效因子必须等于各自登记表；同一变体出现在两表时两边必须一致；
+- 容量匹配三臂 `lega_null_*`：必须保留全部三个门控参数（否则不再是参数匹配三臂），且生效因子恰为 `ABC − {该组件}`——只有自己那条证据通道失效；
+- 参数匹配安慰剂 `lega_placebo` 与替代集中度 `lega_l2`/`lega_entropy`：参数形状与 `lega` 相同、A/B/C 三项都真正接入前向；
+- 带门补充对照（`SUPPLEMENTAL_GATE_FACTORS`，目前只有 `lega_detach_conc`，因子集合同 `lega`、只把 B 从反传图 detach）：必须有登记语义，且不得混入主/原始因子表或安慰剂表；
+- **任何出现在 `_GATED` 却未登记到上述任一张表的带门变体直接判失败**：新增带门变体必须显式选择登记到哪张表，不能静默获得"未登记因子语义"；
+- 每个带门变体的 `gate_d` 必须真的改变 `logit`（输出门接入前向的阳性检查）。
+
+探针/依赖失败（无张量设备等）也写入 `problems` 而不是静默跳过，避免"实现层未核对"看起来像"核对通过"。审计结果进 `significance.json.single_factor_audit.implementation_factors`，汇总页"单因素消融审计"小节并列渲染变体/登记类别/注册参数/实现层生效因子/声明因子五列，不一致时显式点名该变体不能作为单因素对比的一方。这层核对是构造性保证而非"跑过就有"：`tests/test_attention.py::test_probe_gate_factors_matches_declared_factor_tables` 直接对全部带门变体做实证断言，`tests/test_pipeline_audit.py` 再把探针改成漂移版本，核对审计确实以 `ok=False` 加可读原因拒绝。
+
+### 受控单维度对照的实现层自证（"只改这一项"必须真的只改这一项）
+
+主 2^3 网格之外还有一组对照，语义是"只改这一项会怎样"：`lega_l2`/`lega_entropy`（只换 B 的集中度统计量）、`lega_detach_conc`（只把 B 从反传图 detach）、`lega_shared`（只把证据标量从逐头校准改为层内跨头共享）、`null_zero` vs `null`（只把空注意力槽的 value 固定为 0）。它们回答的问题与 A/B/C 组件归因**不同**：两侧的 A/B/C 因子集合本来就必须完全相同，因此**不能**套用 `GATE_FACTORS` 的因子差判定，也不该被笼统标成"整体方法对比"。
+
+只声明不核对的话，一次实现漂移（例如把 `lega_l2` 顺手也 detach 了集中度的反传）就会把"单维度对照"变成多维度对照，而汇总层仍会把它当成受控证据报告。`lega.attention.CONTROLLED_DIMENSION_CONTRASTS` 登记每组对照只改哪个设计维度，`lega.attention.probe_controlled_dimensions` 在实现层实测两侧的维度向量（`conc_stat`/`conc_detach`/`gate_shared_scalars`/`null_value_learnable`），`single_factor_audit()` 新增 `controlled_single_dimension` 段逐组核对：
+
+- 实测改变的维度必须**恰好一个**，且与登记维度一致；
+- 两侧的 A/B/C 因子集合必须完全相同（否则它同时是因子消融）；
+- 探针失败写入 `problems`，不静默跳过。
+
+这些核对**不进顶层 `problems`**：受控对照漂移不会让已审计的 6 条 A/B/C 单因素边失效，但它会让**这些对照本身**不能再被当成受控证据，报告层必须显式点名。结果层相应地把这组对照标成 `contrast_type="single_dimension"`（与 `single_factor`/`multi_factor`/`overall` 分开），并进入**独立的 Holm 家族**（每指标一族），因此预注册的确认性 PPL/RULER 家族大小与多重性都不变；`component_evidence` 见到非 `single_factor` 的检验一律判"对比不是单因素，不能用于组件归因"，受控对照因此永远不能冒充 A/B/C 组件证据。汇总页新增"受控单维度对照"小节：实现层核对表（对照/登记维度/实测改变维度/两侧 A/B/C 因子/是否运行/结论）＋族内 Holm 检验表，并写明该层属探索性、不替代预注册的单因素确认检验。`tests/test_controlled_dimension.py` 覆盖登记结构、审计放行、审计拒绝多维度漂移与因子漂移、结果层分类与独立家族、以及报告渲染。
+
+### 推理期病灶的实现层自证（单因素推理期实验也必须只动一条通道）
+
+训练期变体的实现层自证解决的是"改公式忘了改开关"。推理期病灶（`lega/ablate.py` 的 `LESION_SPECS`）有同构的风险：元数据声明"这个病灶只动哪条证据通道"，真正决定前向的是 `apply_lesion` 与注意力前向。若把 `len_permute` 写成同时错位 `c` 里的 `log n`（B 的长度归一化分量）、把 `no_query` 顺手多清零一个 `gate_a`，或让 `query_permute` 也置换集中度证据，**纯元数据审计仍然全绿**，而"单因素推理期实验"已经变成多因素实验：因果消融表里 ΔNLL 的归因对象错了，推理期 2^3/Shapley 的格映射也跟着错。
+
+`lega.ablate.probe_lesion_channels` 因此把核对推到实现层，做一次**逐通道隔离测量**：
+
+1. 构造确定性微型注意力层，把 A/B/C 三个门控系数赋成互不相同的非零值（初始化时 `w=a=b=0`，任何通道级比较都需要非零权重；头置换类病灶还要求逐头取值不同才测得出来）；
+2. 逐通道把**另外两条**通道的门控系数置零，得到该通道单独贡献的门控 `logit`；比较时去掉逐头常数（`gate_d` 偏置与活动匹配对照的 `d` 平移都是逐头常量，否则会被误判成通道变化）；
+3. 施加病灶后重复第 2 步，实测哪些通道的贡献发生了变化，与设计声明（`expected_lesion_channels`：由病灶 kind/params 与置换登记映射派生）逐项对照。
+
+`single_factor_audit()` 新增 `inference_lesion_implementation` 段，对全部 18 个推理期病灶核对：
+
+- 单因素病灶（`no_query`/`no_conc`/`no_len`、三个活动匹配对照 `no_*_matched`、三个分布匹配置换 `query_permute`/`conc_permute`/`len_permute`）必须**只动一条**通道；
+- 多通道对照（`no_evidence`、`gate_open`/`gate_closed`/`gate_constant_mean`、`head_permute`、`sign_flip`）必须确实覆盖 A/B/C 三条，不能退化成"只动一条"而被误当成单因素；
+- 2^3 的单因子格（`query_only`/`conc_only`/`len_only`）必须恰好去掉另外两条通道，否则推理期 Shapley/交互分解的格映射就是错的。
+
+探针失败（无张量设备/依赖损坏）同样写入 `problems`，不静默跳过。审计结果进 `significance.json.single_factor_audit.inference_lesion_implementation`，汇总页"单因素消融审计"小节渲染"病灶/声明通道/实测影响通道/结论"四列，不一致时显式点名该病灶不能作为单因素推理期实验的一方。`tests/test_ablation_methods.py` 直接对全部病灶做实证断言并模拟"多动一条通道"的漂移，`tests/test_pipeline_audit.py` 再把探针换成漂移/失败版本，核对审计确实以 `ok=False` 加可读原因拒绝。
+
+### 推理期病灶按变体裁剪（变体缺通道时，"去全部证据"其实只动一条）
+
+上面那层探针要求变体同时具备 A/B/C 三条通道（`probe_lesion_channels` 在缺通道的变体上直接报错），所以它只覆盖 `lega`。但病灶的**声明通道集合**（`LESION_EXPECTED_CHANNELS`）是变体无关的，而变体实际注册的门控项不同：`qgate` 只有 A，`gate_only` 一条都没有，`lega_conc_only` 只有 B。声明集合只是**上界**，真实干预范围必须按变体裁剪，否则会出现两类实质错误：
+
+- **归因对象错**：在 `qgate` 上 `no_evidence` 实际只清零 `gate_w`（A），因果消融表却按标签写成"去全部证据 A+B+C"；读者会把一条单通道差异读成整体证据。
+- **重复计数**：`qgate` 的 `no_evidence` 与 `no_query` 是**同一个干预**（参数级操作完全相同），ΔNLL 恒等，却被当成两次独立检验放进同一个 Holm 家族——"两个病灶各自显著"其实是同一个干预的同一个数。`lega_conc_only` 上 `no_evidence` ≡ `no_conc`、`lega_len_only` 上 `no_evidence` ≡ `no_len`，同理。
+
+`lega.ablate.probe_lesion_param_effects` 用**参数级差分**（快照 → 施加 → 逐参数比对）补上这层：对**任何**带门变体都成立，因此可以逐变体实测"这个病灶到底动了哪几条证据通道"。置换类病灶不改写参数（只写临时前向属性），参数级差分看不到它们，其影响通道按登记映射唯一确定。
+
+由此：
+
+- `lega.ablate.lesion_affected_channels(lesion_id, caps)` 给出**按变体裁剪**后的实际影响通道；`lesion_intervention_signature(lesion_id, caps)` 给出参数级干预签名（签名相同 = 同一个干预）；`lesion_contrast_type(channels)` 沿用训练期同一套口径：恰好 1 条通道 = `single_factor`，≥2 条 = `multi_factor`，0 条 = `gate_level`（只动门控偏置/头—参数对应，本来就不是 A/B/C 因子实验）。
+- `single_factor_audit()` 新增 `inference_lesion_variant_effects`（逐带门变体 × 逐病灶的实测通道，要求实测集合与按变体裁剪的元数据口径一致）与 `inference_lesion_duplicate_interventions`（同一变体上的重复干预清单）两段；不一致写入 `problems`。
+- 结果层 `_ablation_lesion_records` 给每条记录写入 `changed_factors`/`contrast_type`/`declared_channels`/`channels_degraded`；重复干预保留在结果里并标 `duplicate_of`/`excluded_from_family`，但**排除出 Holm 家族**（`p_adj=None` + 显式 verdict），一次实验不计为两次独立检验。
+- 汇总页因果消融表新增"类型（实际影响通道）"列：只有"单因素 A/B/C"的 ΔNLL 才能归因到某个组件；变体缺通道时显式写出"声明 A/B/C，该变体缺通道"。
+
+**裁剪口径的两条路径必须一致**：结果层用的是名字/开关推导的 `lega.attention.variant_gate_capabilities`，审计层用的是参数级实测的 `probe_lesion_param_effects`。两者是同一事实来源的两条读法，任一路径漂移都会出问题——例如名字推导在 `qgate` 上多报一条集中度通道，结果层就会把 `no_evidence` 标成多因素 A+B、并漏掉它与 `no_query` 的重复关系，而探针审计仍全绿。`single_factor_audit()` 因此新增 `inference_variant_capabilities` 段：逐带门变体要求"名字推导的通道集合 = 实测注册的 gate 参数对应的通道集合"，不一致写入 `problems` 并在汇总页"单因素消融审计"小节点名。
+
+`tests/test_inference_single_factor.py` 覆盖这条链：变体通道裁剪、对比类型判定、重复签名、参数级探针、逐变体审计（含漂移注入）、能力裁剪口径漂移、结果层标记与 Holm 排除、汇总页渲染。
+
+### 参数化稳健性：归一化 c vs 原始 log max_p
+
+默认 B 因子是 $a\,c$，而 $c=\log(n\max_j p_j)$ 可展开为
+$\log\max_j p_j+\log n$。因此 Full−B（`lega_no_conc` vs `lega`）同时
+去掉了 $a\log\max_j p_j$ 与 $a\log n$，Full−C（`lega_no_len` vs `lega`）
+只去掉显式的 $b\log n$；B 与 C 在参数化上并不正交。为把“集中度”与
+“c 中的长度分量”分开，补充网格把 B 改成原始 $a\log\max_j p_j$：
+
+| 格 | 归一化参数化 | 原始参数化 |
+|---|---|---|
+| none | `gate_only` | `gate_only` |
+| A | `qgate` | `qgate` |
+| B | `lega_conc_only`（$a(\log\max p+\log n)$） | `lega_raw_conc_only`（$a\log\max p$） |
+| C | `lega_len_only` | `lega_len_only` |
+| A+B | `lega_no_len` | `lega_raw_no_len` |
+| A+C | `lega_no_conc` | `lega_no_conc` |
+| B+C | `lega_no_query` | `lega_raw_no_query` |
+| A+B+C | `lega` | `lega_raw` |
+
+两种参数化属于同一线性门控函数族，差异是参数化/优化几何与解释，不是
+表达能力。`--raw_factorial` 会追加原始网格缺的 4 个变体，与默认 10 变体
+一起训练；两套网格必须在同一批种子上完整运行，且逐格评测协议一致，才进入
+`lega/reparameterization.py` 的分析。分析对每条单因子边和每个 Shapley
+分量计算同种子差异 $D=\text{raw}-\text{normalized}$，再做配对 t 检验
+（同一指标内 Holm）：PPL 的效应先定向为 $-\log$ PPL（正值=候选降低 PPL
+更多），RULER 用原始 EM 差。结果写入 `significance.json` 的
+`reparameterization` 并在 `summary.md` 单列。
+
+解释规则：
+
+- $D$ 显著非零或方向翻转：因子归因**依赖参数化**，不能把归一化 c 的
+  效应直接写成“纯集中度证据”的贡献；必须同时报告原始网格；
+- $D$ 不显著：只能写“未检出参数化差异”，不能写“稳健等价”；需对照
+  该检验的 MDE 与种子数；
+- 原始网格缺格/协议不一致：`not_run`/`missing_variants` 显式标记，不得
+  把缺失伪装成“无差异”或默认稳健。
+
+该分析属探索性，不替代预注册的单因素确认检验；它的作用是给 B/C 归因
+加上一个可证伪的参数化敏感性边界。
+
+### 全因子 Shapley 分解（交互感知的补充归因）
+
+单因素边依赖参照格：当 A×B/A×C/B×C 交互不为零时，“加入 X 的收益”在
+`gate_only` 基准与 `Full` 基准下并不相同，只报一条边会掩盖这种依赖。
+`lega/factorial.py` 对门控内 8 格做精确 Shapley 分解：
+
+```
+φ_i = Σ_{S ⊆ N\{i}} |S|!(n−|S|−1)!/n! · [v(S∪{i}) − v(S)]
+```
+
+其中 `N={A,B,C}`，`v(S)` 是只保留因子集合 S 时的性能。PPL 用
+`v=−log(PPL)`（比值尺度上可加，`exp(−φ)` 即该因子的 PPL 几何均值比），
+RULER 用原始 EM。性质与口径：
+
+- 效率性 `φ_A+φ_B+φ_C = v(ABC)−v(none)`，总效应不会被漏算或重复计；
+- 交互效应被平均分摊到参与因子，而不是归给某个参照格；
+- 零玩家（所有联盟中都不改变 v）的 φ=0；
+- 占比只在每个种子的总效应均为正时报告，否则留空，不强行归一化；
+- 逐种子算 φ，再对 φ 做同种子单样本配对 t 检验 + 同一指标内 Holm；
+- **探索性**：Shapley 依赖价值函数尺度且未预注册，不能替代预注册的
+  单因素确认性检验；与单因素边方向冲突时并列披露“贡献依赖其他因子”。
+
+### 训练预算敏感性（终点结论是否覆盖整个训练过程）
+
+训练期消融只比较最终 checkpoint，但“某个组件有用”可能只是优化早期更快、
+后段被其他通路追上，或早期有害、后期才转正。`lega/budget_sensitivity.py`
+读取各 run 已落盘的 `train_log.jsonl`，在**同种子、同评测 step** 上对齐
+候选与参照的 `val_loss`，逐预算计算配对差轨迹：
+
+- 只取精确 step 交集，不插值；轨迹使用所有共同种子的共同 step，避免
+  “不同预算对应不同种子组成”。缺日志/共同 step 时 `available=false`，
+  不伪造一条全量 split 曲线；
+- 输出初始/终点 Δ(logPPL)、逐 step 均值与区间、符号翻转次数、与终点
+  符号一致率、最终方向首次稳定 step，以及 `stable` / `transient` /
+  `reversal_nonsignificant` / `budget_sensitive` 轨迹模式；
+- **探索性**：逐 step p 值高度相关且未做跨 step 校正，`budget_sensitive`
+  只表示至少两个 step 以相反方向达到未校正 p<α，不能当作确认性结论；
+- **不重新选 checkpoint**：轨迹只用于诊断“终点是否代表训练过程”，
+  不能挑一个有利 step 改写主结果；终点仍使用预注册的 held-out 指标；
+- val 同时是 checkpoint 选择集，故轨迹诊断不能替代 test 终点，也不能
+  与跨种子终点检验互相替换；两者冲突时在汇总页并列披露。
+
+## 输出级写回效用（不是 hit 代理）
+
+`lega/output_ablation.py` 直接干预答案 token 的预测位置：把某层某头在
+`wo` 输入中的通道置零/置换，重新计算同一批答案 token 的 NLL、正确概率与
+margin，输出 ΔNLL/Δmargin。它回答“该头在该位置的写回是否真的帮助语言建模”，
+而不是“注意力 argmax 是否落在答案跨度”。逐头 hit/AUROC 只能作为机制描述，
+不能替代该干预；输出级干预仍是推理期反事实，不能证明训练期因果。
+
+## 无证据/错误证据/冲突证据（可选条件）
+
+`lega/ruler.py` 的 `EVIDENCE_TASKS` 提供三种 abstention 条件：
+`evidence_absent`（目标键完全缺失）、`evidence_wrong`（只出现错键值）、
+`evidence_conflict`（同一键两个不同值）。问题明确要求无可靠答案时输出
+`NONE`，只有预测 `NONE` 才记 EM=1。它们默认不进入主表，需显式传入
+`run_ruler(tasks=...)`；这是“门控在无可靠证据时是否减少写回”的直接检验，
+不能拿普通 NIAH 的 hit 率代替。
+
+## 推理期因果消融（训练后病灶）
+
+训练期消融回答的是“**重新训练**时去掉组件会怎样”，它改变优化轨迹；
+不能据此断言最终前向仍在**使用**该组件。`lega/ablate.py` 在同一个
+checkpoint、同一批 val 窗口上只改门控参数，逐窗口配对计算
+`ΔNLL = 病灶 − 正常`（>0 表示该机制在推理期有用）：
+
+| 病灶 | 干预 | 回答的问题 |
+|---|---|---|
+| `no_query` | `gate_w := 0` | 推理期去 A（对照训练期 `lega_no_query`） |
+| `no_conc` | `gate_a := 0` | 推理期去 B |
+| `no_len` | `gate_b := 0` | 推理期去 C（只去 b·log n；`c` 里的 log n 仍随 `a·c` 保留，与训练期单因素定义一致） |
+| `no_query_matched` | `gate_w := 0`，逐头平移 d 匹配基线 E[g] | 去 A，但保持平均门控开度；分离“信息内容”与“门控开度” |
+| `no_conc_matched` | `gate_a := 0`，逐头平移 d 匹配基线 E[g] | 去 B 的活动匹配对照 |
+| `no_len_matched` | `gate_b := 0`，逐头平移 d 匹配基线 E[g] | 去 C 的活动匹配对照 |
+| `no_evidence` | `gate_w/a/b := 0` | 推理期退化为 `gate_only`（只留学习到的 d） |
+| `query_only` | `gate_a/b := 0` | 推理期只留 A（`w·q + d`），补齐 2^3 的 A 格 |
+| `conc_only` | `gate_w/b := 0` | 推理期只留 B（`a·c + d`），补齐 B 格 |
+| `len_only` | `gate_w/a := 0` | 推理期只留 C（`b·log n + d`），补齐 C 格 |
+| `gate_open` | 证据项 0，`d := +30` | 门恒开：门控是否在抑制某些写回 |
+| `gate_closed` | 证据项 0，`d := −30` | 阳性对照：关闭注意力输出必须显著变差 |
+| `gate_constant_mean` | 证据项 0，`d_h := logit(E[g_h])` | 去掉逐位置/逐查询变化，保留每个头/层的平均写入强度 |
+| `head_permute` | 门参数在头间置换 | 容量/分布/结构不变，只破坏头—证据对应（安慰剂） |
+| `conc_permute` | 逐位置 `c` 沿序列维循环移位 | c 的逐值分布/均值/方差/长度分布不变，只破坏位置对应；排除容量/尺度解释 |
+| `query_permute` | 逐位置 `w·q` 沿序列维循环移位 | 查询证据的逐值分布不变、注意力打分仍用原位置 q，只阻断门控使用“本位置查询证据” |
+| `len_permute` | `log n` 沿序列维非相邻循环移位 | 长度证据的逐值分布不变，但每个位置拿到约半段以外的长度；避免相邻 log n 近似不变导致干预退化 |
+| `sign_flip` | 证据项反号 | 保留幅度、反转证据方向 |
+
+要点：
+
+- **只改门控参数或前向临时属性**，不动注意力/主干；三类位置证据置换
+  (`conc_permute/query_permute/len_permute`) 分别通过 `conc_permute_shift`、
+  `query_permute_shift`、`len_permute_fraction` 临时属性实现，
+  `restore_gate_params` 会同时清除它们，保证病灶不叠加；
+- **分布匹配的边界**：置换只保持被干预项自身的逐值边际分布（如 `log n`
+  的多重集），Full 模型里其他门控项仍在原位置，因此门控 logit 的联合
+  分布/相关结构会改变；这正是安慰剂要破坏“位置对应”的方式，但不能把
+  它写成“只换了位置、其余分布完全不变”的干预；
+- 与基线使用同一 `ctx/eval_iters/AMP` 口径、同一 `window_indices`，否则拒绝配对；
+- 默认只在 **val** 上做（test 尘封；val 是 checkpoint 选择集，绝对水平
+  偏乐观，只作机制定位）；不写 test 访问账本；
+- 记录 `no_op`：若训练后该系数已为 0，清零不改变前向——“无差异”不是
+  “无效应”的证据；`head_permute` 在全同头时也如实标为 no-op；
+- 窗口级 p 仅描述单 run（相邻窗口可能相关）；正式汇总先按种子聚合
+  ΔNLL，再做跨种子配对 t + Holm（`significance.json.causal_ablation`）；
+- **活动匹配病灶（消融混杂控制）**：直接清零 `gate_w/a/b` 同时改变
+  “使用哪类信息”和“门平均开多大”。`no_*_matched` 在去掉同一组件后，用
+  一次完整统计前向反推 `base_z = logit − d`，减去待去项得到去掉组件后的
+  logit，再逐层逐头二分平移 `d'`，使 `mean(sigmoid(z + d'))` 等于该头
+  基线 `mean(g)`。因此匹配版保持平均门控开度（写回强度的乘性因子），只去掉信息
+  内容；它使用独立 Holm 家族
+  `significance.json.causal_ablation` 中的 `因果消融ΔNLL(活动匹配−normal)`，
+  不与原始病灶混合。跨种子配对差
+  `ΔNLL(raw) − ΔNLL(matched)` 写入
+  `significance.json.matched_ablation_contrasts`（独立家族
+  `因果消融ΔNLL(未匹配−活动匹配)`）：差值显著为正，说明原始效应中有一部分
+  可由平均门控开度变化解释；不显著不能反证“全部来自信息内容”，仍受种子
+  数与 MDE 限制。匹配只控制一阶矩，不保持门控方差、饱和比例或跨层联合
+  分布；匹配偏移又在同一批 val 窗口上估计（每头/层仅一个标量），属于事后
+  均值匹配而非留出样本上的确认性控制，故不能写成“机制完全匹配”，也不能
+  把差值当作精确的“信息效应 + 写回效应”或形式化中介分解；信息特异效应
+  仍应直接阅读匹配病灶相对正常基线的独立检验；
+- **长度边界**：训练/评测都受 `block_size` 限制（small=1024）；RULER 的
+  256/512/1024 是域内扫掠，不是长度外推。超过 `block_size` 的位置必须拒绝，
+  不能把其他模型的长上下文结果归因到本模型。
+- **配对嵌套上下文**：`lega/nested.py` 已实现“同一证据、同一填充流、精确
+  长度”的配对 NIAH，可把证据位置与到问题距离分开；但它是**可选补充评测**，
+  尚未默认接入主流水线/汇总页，长度趋势的主结论仍以预注册的 RULER/长度
+  端点为准，嵌套结果不得单独写成确认性因果结论。
+- **与训练期消融并列**：训练期显著而推理期病灶无差异 → 收益可能来自
+  训练期优化/正则化而非推理期必需；推理期显著而训练期不显著 → 训练期
+  消融可能被再训练补偿。两者不能互相替代。
+- **边界（必须如实声明）**：`head_permute` 是**推理期**的容量/分布安慰剂，
+  `conc_permute/query_permute/len_permute` 分别是 B/A/C 位置证据的分布匹配
+  置换（保持逐值分布，只破坏位置对应），它们都不是训练期的参数量匹配对照；
+  训练期 `lega_placebo` 的伪证据仍含绝对位置哈希，不能替代置换零假设；`no_evidence` 在推理期保留全部参数、只关掉
+  证据输入，能隔离“推理期是否使用证据”，但不能消除“训练期多出的门控参数
+  是否带来优化红利”这一混淆。后者由下面的训练期 `lega_placebo` 对照回答；
+  推理期 Shapley 只回答“最终前向的组件结构”，不能替代训练期因果问题。
+
+### 连续剂量-反应（门控系数缩放）
+
+二值病灶（清零/反号/置换）回答“去掉某通道是否变差”，但不能回答
+“训练得到的系数是否落在合理剂量、效应是否单调、最优剂量在哪个方向”。
+`lega/dose_response.py` 在**同一 checkpoint、同一批 val 窗口**上把
+A（`gate_w`）、B（`gate_a`）、C（`gate_b`）系数分别乘以
+λ ∈ {0, 0.5, 0.75, 1, 1.25, 1.5, 2}（`--dose_factors` 可改），逐窗口配对
+
+    ΔNLL(λ) = NLL(λ) − NLL(λ=1)
+
+λ=1 是训练得到的原始系数；λ=0 精确等价于对应组件的推理期清零，应与
+`no_query/no_conc/no_len` 的 ΔNLL 一致（不一致先排查实现/窗口协议）。
+每次干预都从基线快照重算 `baseline × λ`，不在当前值上累乘；评测后逐位恢复。
+
+诊断量：
+
+- **局部斜率**：λ=1 两侧最近点的中心差分（只有单侧时显式标注单侧）；
+  NLL 对 λ 的导数 <0 表示增大系数可降低 NLL（当前剂量可能偏小），
+  >0 表示可能偏大。逐窗口斜率区间只描述单 run；
+- **二次顶点/曲率**：对网格做 `NLL≈aλ²+bλ+c` 最小二乘；仅在 `a>0` 且
+  顶点落在网格内时报告内部极小值，线性曲线不伪造顶点；
+- **网格最优 λ**：最小 NLL 的 λ、相对基线的改善量、基线是否为网格最小点；
+- **方向变化/单调性**与 **no-op**：全部种子 no-op 时明确标注“干预未改变
+  前向”，零差不是“该剂量无效应”的证据。
+
+跨种子汇总先按 (变体, 组件) 取各种子共同 λ 交集（避免不同 λ 使用不同
+种子子集），每个种子先聚合 ΔNLL，再对 0 做跨种子单样本配对 t；A/B/C 与
+局部斜率各自按 metric 分 Holm 家族。**边界**：固定网格上挑最优 λ 会引入
+winner's curse，局部斜率/顶点/最优剂量都只是描述性诊断，不据此重选
+checkpoint，也不改写预注册判定；剂量曲线不替代训练期消融，它只回答
+“最终前向对系数剂量的敏感性”，不回答“重新训练时去掉组件会怎样”。
+默认只在 val 上做，test 尘封；val 同时是 checkpoint 选择集，绝对水平偏乐观。
+
+### 同一 checkpoint 内的 2^3 全因子与 Shapley
+
+`query_only/conc_only/len_only`、`no_query/no_conc/no_len`、`no_evidence`
+与正常基线 `ABC` 共同构成**同一 checkpoint 内的 8 格干预设计**（`lega/ablate.py`
+的 `INFERENCE_FACTORIAL_CELLS`）。它与训练期全因子消融的关键区别是：
+不重新训练，只清零训练好的门控系数，因此没有“再训练补偿”或优化轨迹改变。
+`run_all` 对齐全 8 格、且与基线共享同一批 `window_indices` 的种子计算
+精确 Shapley 值（PPL 用 `−log` 价值函数），再跨种子配对 t + Holm
+（`significance.json.inference_factorial_shapley`），并与训练期 Shapley
+逐因子并列比较符号。三个单因子格（`query_only/conc_only/len_only`）相对
+Full 同时去掉另外两个因子，因此**不进入**单病灶 ΔNLL 因果表，只用于
+2^3 的全因子/Shapley 分解；否则会把“去掉 B+C”误写成“A 的因果贡献”。
+这样可以把两种冲突显式化：
+
+- 训练期 φ 显著、推理期 φ≈0：收益可能来自训练期优化/正则化，最终前向
+  并未真正使用该组件；
+- 训练期 φ≈0、推理期 φ 显著：训练期消融可能被再训练补偿；
+- 两期符号相反：组件贡献依赖训练轨迹或参照格，不能只报有利的一期。
+
+该分析仍是**探索性**的：干预的是已训练系数，不是重新拟合的反事实；
+推理期 φ 依赖基线/病灶的零点定义，且未预注册。
+
+**推理期交互效应**：Shapley 把交互平均分摊到参与因子，本身不告诉我们是
+哪一对因子不可加。`run_all._inference_interaction_tests` 因此在同一组
+8 格上做与训练期相同的标准 2^3 交互对比（对第三个因子取平均）：
+
+```
+I_AB = ½[(AB−A−B+none) + (ABC−AC−BC+C)]
+I_AC = ½[(AC−A−C+none) + (ABC−AB−BC+B)]
+I_BC = ½[(BC−B−C+none) + (ABC−AB−AC+A)]
+```
+
+数值用原始 PPL（与训练期 `PPL交互` 同尺度，便于逐交互对照符号），逐种子
+计算后做单样本配对 t + 独立 Holm 家族，结果写入
+`significance.json.inference_factorial_interactions` 与汇总页“推理期全因子
+交互效应”表。训练期与推理期交互符号不一致时显式标注 ⚠：这说明“重新训练后
+的交互结构”没有在最终前向复现，不能只报其中一期。该检验未预注册、无方向
+主张；交互=0 表示可加，显著非零只说明不能按单组件加总，**不等于**某个
+组件有用。缺格、未真正施加、窗口不一致或 PPL 非正的种子整条剔除，不按 0
+补齐。
+
+### 参数匹配安慰剂（训练期容量/优化红利对照）
+
+`lega_placebo` 与 `lega` 的门控形状、参数个数、门控 FLOPs、初始化与
+优化器分组完全相同：
+
+```
+lega        : g = sigmoid(w·q + a·c + b·log n + d)
+lega_placebo: g = sigmoid(w·q + a·u + b·v + d)
+```
+
+其中 `u/v` 是由当前前向内的 token 位置与头索引确定性哈希得到的伪随机特征（取值
+[-1,1]，不消耗全局 RNG，训练/推理/逐 token 解码一致），不含任何查询、
+注意力集中度或长度信息。二者唯一的系统差别是 B/C 证据是否有信息，因此
+`lega vs lega_placebo` 的 PPL 配对差用于回答：
+
+- 若 LEGA 显著更低 PPL 且效应不在种子噪声内：B/C 证据的增量不能由
+  “多几个门控参数/一次门控运算”解释；
+- 若二者 TOST 等价：不能把 LEGA 的收益归因于 B/C 证据，容量/优化红利
+  尚未被排除；
+- 若 placebo 反而更好：B/C 证据项可能有害或训练不稳定。
+
+同时报告 `lega_placebo vs qgate`：若噪声特征显著差于 qgate，说明对照本身
+可能“有害”，此时 `lega > placebo` 不能单独证明 B/C 证据有用；若二者等价，
+则额外容量本身无实质影响；若 placebo 反而优于 qgate，则容量/优化红利确实
+存在，`lega vs placebo` 的差异必须在这个背景下解读。
+
+运行方式：`python run_all.py ... --param_control`（或直接在 `--variants`
+中点名 `lega_placebo`）。该变体**不进入**默认 10 变体矩阵、不进入
+`GATE_FACTORS`/全因子 8 格，也不参与组件归因；汇总页在未运行时显式提示
+“容量解释尚未排除”，不会默认已控制。该对照属探索性分析，未预注册，
+不能替代 H2–H5。
+
+
+命令：
+
+```bash
+python -m lega.ablate --ckpt out/small/lega/seed1337/model_best.pt \
+    --data_dir data/wikitext103 --out results/small/ablation_lega_seed1337.json
+# 全流水线默认对 lega,qgate 做（--ablate_variants 可加 gate_only 作对照）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --ablate_variants lega,qgate
+# 追加训练期参数匹配安慰剂（lega vs lega_placebo 容量对照）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --param_control
+# 追加原始集中度参数化的完整 2^3 网格（参数化稳健性）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --raw_factorial
+
+# 连续剂量-反应（默认只扫 lega；同一 checkpoint/同一批 val 窗口）
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+    --dose_response --dose_variants lega
+# 单独运行
+python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt \
+    --data_dir data/wikitext103 --out results/small/dose_response_lega_seed1337.json
+```
+
+输出 `ablation_<variant>[_seed<seed>].json`：基线/各病灶的 val_loss、PPL、
+门控均值/标准差/饱和比例、逐窗口 ΔNLL、窗口级 t/符号检验、`no_op` 标记与
+溯源字段；匹配病灶另含 `matched_control`（逐头 `gate_d` 偏移、目标/实际
+平均 g、最大残差、使用位置数），便于审计“平均门控确实匹配”。`--skip_ablation`
+可关闭；`standard`/`null` 无输出门，不能做该分析。
+
+剂量-反应输出 `results/<tag>/dose_response_<variant>_seed<seed>.json`：
+每个 λ 的 val_loss/PPL、逐窗口 ΔNLL、λ=0/反号剂量、门控统计与 no-op
+标记，以及局部斜率（含单侧标注）、二次曲率/顶点/R²、网格最优 λ 和
+基线是否为网格最小点。`--dose_response` 默认关闭；`--skip_ablation`
+不影响该阶段。
+
+## 数据卫生：精确去重之后的近似重复
+
+精确行/块去重只覆盖逐字节（以及 NFKC/空白归一化后）相同的复制。真实语料中
+“改了几个词、删了一段”的近似复制更常见：它同样会让 train 记住 val/test 的
+内容，也会在 train 内部放大同一段文本的权重。`lega/datacheck/` 的
+`decontaminate_near_duplicates` 在精确去重之后补一层近似重复筛查：
+
+- **表示**：NFKC + casefold + 空白折叠后取 UTF-8 字节 5-gram，集合去重；
+  不依赖分词器，英文/CJK/符号走同一确定性路径；
+- **候选**：18 个 MinHash 签名（6 band × 3 row）做 LSH；对阈值 0.80，至少一个
+  band 相同的理论概率为 `1-(1-0.80³)^6≈98.7%`，漏检只发生在低相似度一侧；
+- **核实**：候选对再精确计算 Jaccard 与 containment。跨 split 用
+  `max(Jaccard, containment)`——val 的一小段被整段抄进更长的 train 文档时，
+  Jaccard 会被长度稀释，containment 才能发现；**train 内部只用 Jaccard**，
+  避免“短段被长文档包含”造成过度删除；
+- **作用域**：只从 train 删除；val/test 逐字节不动。阈值 0.80 是分析前声明的
+  协议参数（`scripts/prepare_data.py --near_dup_threshold/--near_dup_min_chars` 可显式设置），不是从当前数据估计出来的；报告同时落盘 0.70/0.80/0.90 三档
+  **判定对数与真实删除量**（块/行/字符、占 train 字符比例），避免把“判定对
+  数”误当成“删除规模”，也让阈值依赖在汇总页可见；
+- **覆盖率与复核**：只有达到 `min_chars` 且 shingle 数达标的块会进入扫描。
+  `data_report` 因此同时报告 `train_chars_coverage_fraction` 及被短块/少
+  shingle/超大块跳过的字符数；覆盖率低于 80% 时告警，近重复结论只对已覆盖
+  部分成立。清洗完成后 `post_cleanup_residual` 再独立核对最终 train 与
+  val/test 是否仍共享精确/归一化长行或多行块（不改写任何 split），把“删过
+  N 个”升级为“剩余为零”，`train_eval_clean=False` 会进入 alerts，并作为
+  `post_cleanup_residual_overlap` 严重违规在训练前拦截；预检还会独立读取
+  `duplicates.post_cleanup`，所以清空 alerts 不能绕过该结论；
+- **证据位置**：`data_report.json` 的 `duplicates.near_duplicate` 与
+  `duplicates.post_cleanup`，并生成
+  `near_duplicate_decontamination_applied` / `eval_splits_near_duplicates` /
+  `near_duplicate_scan_truncated` / `near_duplicate_low_coverage` /
+  `post_cleanup_residual_overlap` 等告警；bin 缓存协议升至 v8（后续升至
+  v9/v10/v11，见下节），旧缓存必须重建，避免报告声称已做近重复处理而实际
+  token 流未处理。
+
+**评测集内部近重复与块级有效样本量**：跨 split 去污染只回答“train 是否
+抄了 eval”，回答不了“val/test 自己的样本是否相互重复”。后者会让名义上的
+N 个评测窗口共享同一批内容，缩小有效独立样本量并低估抽样方差。
+`duplicates.near_duplicate.eval_internal_near_duplicates` 因此对 val-val /
+test-test 也做 MinHash/LSH + containment 锚点召回，再逐对精确计算
+`max(Jaccard, containment)`；只在 val/test 内部建连通簇，**不改写任何评测
+文本**。对每个 split 落盘 `near_duplicate_clusters`、
+`blocks_in_near_duplicate_clusters`、`largest_cluster_blocks`、
+`clustered_chars`、`duplicate_fraction_chars`、`effective_blocks` 与
+`effective_block_fraction`，其中有效块数把每个非平凡连通簇折叠成一个独立
+单元（`eligible − clustered + clusters`），并同时报告 `split_chars_total`/
+`eligible_coverage_fraction`，避免把未达到 min_chars 的块当成“已验证无
+重复”。三档阈值下都给出同一组簇统计；`candidate_pairs_truncated` 显式标明
+簇统计只是下界。达到协议阈值且 `duplicate_fraction_chars > 5%` 时生成
+`val_internal_near_duplicates` / `test_internal_near_duplicates` 告警，低于
+5% 仍以 info 披露；扫描截断另生成
+`eval_internal_near_duplicate_scan_truncated`。该指标是**块级描述性审计**：
+簇内窗口不独立，但块数不能直接替换 token 窗口数，也不构成对 PPL 方差的
+重加权；正式区间仍须用预注册的窗口/种子层级方法，并把该字段作为解释
+有效样本量与窗口重叠的边界证据。
+
+### 跨 split n-gram：从采样下界到全量精确扫描
+
+`data_report.contamination` 的 64-gram 重叠率原先对 train/eval 两侧都采样，
+只能证明“抽到的窗口里存在复制”，是泄漏下界：覆盖不到的低占比复制段可能被
+漏掉。`ngram_overlap_exact` 改为对 train 的全部 64-gram 建双 64-bit 滚动
+指纹，对 eval 默认全部窗口查询，命中后再逐字节复核；`data_report` 因此新增
+`contamination_exact`，逐对记录 `reference_split`、`reference_windows_scanned`、
+`eval_windows_total`、`eval_windows_excluded_ignore`、
+`eval_windows_checked`、`windows_found_in_reference` 与 `overlap_rate`。
+
+- **对照口径**：`contamination` 保留为采样筛查，`contamination_exact` 是
+  同一 n=64 的全量结论；两者都排除含 `<unk>` 的窗口，避免字符级 OOV 长串被
+  误判为复制。
+- **抽样边界**：eval 窗口超过 200 万时按等间隔抽样，报告写
+  `eval_sampling=evenly_spaced` 且 `screening=True`；只有 `eval_sampling=all`
+  才是全量 eval 结论。基准 split（train，或 val/test 互查时的 val）始终
+  全量扫描，不做二次抽样；报告用 `reference_split` 标明基准。
+- **硬闸门**：`ngram_overlap_exact_train_val/train_test/val_test` 进入
+  `CRITICAL_SPLIT_ALERT_CODES`，与采样重叠告警同级；精确命中没有“采样没抽到”
+  的余地，训练前必须核查/重建划分。
+- **缓存身份**：报告新增字段使 bin 协议升至 v10，旧缓存重建后才能保证报告
+  与实际 token 流同批产出。
+
+**局限**：64-gram 仍会漏掉短于 64 token 的模板复用（由
+`contamination_short_ngram` 告警）与改写型近似复制（由 MinHash/LSH 筛查），
+三者互补而非互相替代；全量扫描的计算/内存随 train token 数线性增长，超大
+语料需按 `max_eval_windows`/`chunk_tokens` 显式控制。评测集内部近重复簇
+同样只覆盖达到 `min_chars`/`min_shingles` 的块，且 LSH 候选可能被上限截断；
+它证明的是“已扫描块中存在多少个近重复簇”，不是“整个 val/test 绝对无
+近重复”。
+
+### 原始数据来源溯源与完整性
+
+`data_report` 记录的是**处理后文本/bin** 的哈希，回答不了“这些文本究竟来自
+哪一份原始下载或本地文件”。HF `resolve/main`、镜像 zip 与本地文件都可能被
+替换/更新；仅凭相同文件名和相同 split 协议，无法证明两次实验消费的是同一
+份字节。`scripts/prepare_data.py` 因此为每次数据准备写
+`source_manifest.json`，并把同一份 `source_provenance` 嵌入
+`data_report.json`：
+
+- **逐文件证据**：原始 parquet/zip/local 输入记录 role、相对/外部路径、
+  字节数、SHA-256；清洗后的 train/val/test.txt 也作为 `text_split` 条目
+  入清单，把报告里的文本哈希与原始字节绑定；
+- **来源身份**：parquet 记录 HF dataset/config/revision 与逐文件下载 URL；
+  zip 记录镜像 URL；local 记录绝对源路径；rows API 记录 dataset/config 与
+  行数预算。`digest` 是规范化清单（文件、URL、revision、API 参数）的
+  SHA-256，不含时间戳，可稳定复算；
+- **可变 revision**：`--hf_revision` 默认 `main` 并显式告警；正式实验应固定
+  到 commit hash。来源仍会记录本次实际使用的 revision，便于事后核对；
+- **fail closed**：重跑时已有原始文件的哈希与上次清单不一致，默认抛
+  `SourceChangedError`，必须显式 `--allow_source_change` 才继续；变更逐项
+  写入 `changes`，不会静默覆盖。`--source auto` 从 parquet 回退 zip 时不会
+  吞掉该错误；
+- **三方绑定**：`meta.json` 的 `source_provenance_digest` 把来源身份纳入
+  bin 缓存身份；训练前 `lega.preflight` 复核 report 内清单的自洽性与仍存在
+  文件的 size/SHA-256、report 与 meta 的 digest、独立
+  `source_manifest.json` 与 report 是否同版，以及 `text_split` 哈希与
+  `meta.source_sha256` 是否一致。任一不一致都会作为
+  `data_source_provenance` 严重问题拦截训练；
+- **缺失文件的口径**：原始下载可能已被清理，纯 bin 目录也可能只分发结果。
+  复核只对仍存在的文件重算哈希，缺失文件跳过，但不会被记成“已核对通过”；
+  报告、meta、独立清单之间的 digest 绑定仍必须存在。bin 缓存协议升至 v9
+  补齐来源证据，v10 再加入全量 n-gram 精确扫描；旧缓存必须重建。
+
+**局限**：SHA-256 只能证明“拿到的是同一份字节”，不能证明上游数据本身没有
+污染、偏见或许可问题；rows API 的响应未逐行留存原始哈希，只以清洗后文本
+哈希为准；local 外部源可能已不在原路径，需自行保存原始文件。来源清单是
+可复核证据，不是数据质量或合规性的替代品。
+
+### 规模核算与划分比例（让“80/10/10”可核对）
+
+`data_report.accounting` 逐 split 记录 token 数、字符数、UTF-8 字节数与
+`bytes/token`。PPL 的分母是 token；字符级兜底与 GPT-2 BPE 的 token 粒度
+不同，token 级 PPL 不能直接跨分词器比较，但字节/字符分母可以。该核算也让
+“清洗后 token 数正常但字节数异常”的分词事故可见。
+
+时序划分把切点吸附到文档/段落边界后，实际比例可能偏离声明的 80/10/10。
+`temporal_split_text` 同时返回目标/实际比例、切点相对目标偏移与
+`max_abs_fraction_deviation`；绝对偏差超过 5 个百分点时生成
+`split_fraction_skew` 告警。该告警不阻断（群组完整性优先），但读者必须按
+实际训练/评测规模解读“80/10/10”与检验功效。
+
+**局限**：LSH 是近似检索，不是精确全对比；containment 对模板化文本/固定
+用语可能偏激进，因此只在跨 split 去污染时启用；三档敏感性只说明“删除量对
+阈值有依赖”，不证明下游 PPL/RULER 对阈值不敏感。`post_cleanup_residual`
+只覆盖精确/归一化行与块，不覆盖低于 `min_chars` 的短行或低相似度近似副本；
+覆盖率字段给出该结论的适用边界。正式对比必须固定在同一预处理版本（同一
+`data_report`/bin 哈希）上，不能按测试结果回头挑阈值。
+
+### 文档结构证据（把“拼接伪影”从机制收益里分离出来）
+
+LEGA 的机制主张是“找不到可靠信息时少写无关内容”，而**跨文档窗口**恰恰是
+数据拼接本身注入的无关内容：train/val/test 的文本被清洗后按行拼接成一条
+token 流，窗口在流上滑动，因此相当比例的窗口同时包含两篇文档。若不单独
+量化，就无法区分“门控机制生效”与“拼接语料让跨文档跳转变容易”。此前
+`lega/data.py` 的文档已承诺 `doc_boundaries.json` 侧车与
+`data_report.structure`，但既没有实现，也没有消费方。现在补齐：
+
+- **切分协议**：标题行（`= Title =` 形式）优先作为文档边界，无标题时用空行
+  段落，协议标识 `heading_or_paragraph_v1`；每个 split 的文档数、字符/token
+  分布、文档边界位置都写入 `doc_boundaries.json`，`meta.json` 记录该侧车的
+  SHA-256，缓存命中时逐字节复核（侧车被改写 → 缓存失效 → 必须重建）。
+- **跨文档窗口比例**：`data_report.structure.cross_document_windows` 给出
+  各 ctx 网格（128/256/512/1024）下**期望**跨文档窗口比例——起点在
+  `[0, n_tokens-ctx-1]` 上均匀随机，与训练采样器同口径，跨文档起点集合是各
+  边界对应区间的并集，因此是精确期望而非近似。同时给出
+  `doc_aligned_windows`：完全落在单篇文档内的窗口数与 token 覆盖量。
+- **逐文档分段编码**：GPT-2 BPE 改为按文档分段编码（token 不跨文档边界），
+  `meta.encoding_mode=per_document`；否则“一个词被切成两个 token 分属两篇
+  文档”的情形会让边界计数与实际 token 流不一致。字符级分词器 1 字符 =
+  1 token，逐文档 token 数即字符数，按同样口径分段并校验计数之和等于流长度。
+- **评测侧双口径**：`lega/evaluate.py` 的 `eval.json` 落盘
+  `structure_audit`（本次**实际**评测窗口里跨文档的比例与边界数）与
+  `doc_aligned_eval`（同窗口预算、只在文档内窗口上重算的 PPL）。
+  `--no_doc_aligned_eval` 可关闭后者。两者都是描述性证据，不进入任何确认性
+  判定，也不替代主 PPL 口径；文档内窗口集合由文档边界决定，与主口径的网格
+  窗口不同，绝对值不可直接比较，只有同批变体的**配对差**可比。
+
+**局限**：跨文档比例是**期望**值，具体评测窗口的实测值另记在
+`structure_audit`；文档边界依赖标题/空行的切分协议，WikiText-103 之外的
+语料（无标题、无空行）会退化为行/字符级切分；文档内 PPL 的可用窗口数随
+文档长度分布变化，文档太短时可能没有足够的文档内窗口（此时该口径标记为
+不可用而不是给出偏小的样本）。
+
+### 跨文档 vs 文档内窗口的效应分层（把“拼接伪影”从机制收益里分离并检验交互）
+
+`doc_aligned_eval` 与 `structure_audit` 此前只是**描述**：前者在另一套
+“文档内”窗口网格上重算 PPL，后者报实际评测窗口的跨文档比例。问题在于
+`doc_aligned_eval` 的窗口集合与主口径不同，只能各自看绝对值，无法直接
+回答“候选的收益是不是只来自跨文档窗口”。`lega/evaluate.py` 因此为**本次
+实际评测的每个窗口**落盘逐窗口跨文档标志 `window_crossing_documents`
+（与 `window_losses`/`window_indices` 同序同长；缺 `doc_boundaries.json`
+或长度对不上时为 `None`，不默认“没有跨文档窗口”）。`lega/doc_strata.py`
+据此把**同一批**窗口分成两层并做候选−参照的逐种子配对：
+
+* **跨文档层** ΔNLL = 候选−参照 在跨文档窗口上的均值；
+* **文档内层** ΔNLL = 候选−参照 在文档内窗口上的均值；
+* **交互** = 跨文档 ΔNLL − 文档内 ΔNLL。
+
+每个种子得到一个交互值，跨种子做同种子配对 t 检验 + 独立 Holm（只有交互
+检验进入探索性 FDR 家族；两个分层各自的 ΔNLL 只作描述，不重复计入家族）。
+交互显著为负说明收益集中在跨文档窗口——这既可能是机制对“无关上下文”起
+作用，也可能说明收益来自拼接伪影，两种读法必须并列；交互不显著说明文档内
+窗口同样改善，不能只用拼接伪影解释；交互显著为正说明候选在跨文档窗口相对
+更差。汇总页新增“跨文档 vs 文档内窗口分层”小节，结果写入
+`significance.json.doc_strata`。
+
+**边界**：两层共享同一批种子与同一个 checkpoint，**不是独立研究**；交互
+检验只描述“两类窗口上的效应差”，不构成新的因果识别；文档内窗口依赖文档
+边界切分协议，文档太短时可能没有文档内窗口，此时该对比显式不可用而不是
+按 0 补齐；两层窗口数与文本难度不同，交互的绝对尺度只在同批变体间可比。
+该层为探索性、未预注册，不进入任何确认性判定，也不能替代逐窗口配对的
+整体稳健性分析。
+
+### 群组级互斥性审计（把“声明”升级为“可复核结论”）
+
+“官方 split 按文档划分”“时序切分吸附到文档边界”此前只是**声明**：逐行
+比较只能发现两侧行内容完全相同的情形，文档若被从中间切开（行被截断），
+两侧行不再相等，声明与实际内容就脱节。`data_report.split_protocol.group_disjointness`
+（协议 `group_disjointness_v1`）把声明升级为三层可复核结论：
+
+- **群组级**：整篇文档（标题模式）或整段（空行段落模式）同时出现在两个
+  split——同一份文档被复制进两个 split；
+- **段落级**：文档内部的某个段落同时出现在两个 split——文档被从段落边界
+  切开；
+- **行级**：同一行同时出现在两个 split——整行被复制（可能偶然命中，因此
+  只作告警并给出样例）。
+
+群组级/段落级共享是硬证据：作为 `split_group_overlap` /
+`split_paragraph_overlap` 告警进入 `CRITICAL_SPLIT_ALERT_CODES`，训练前
+硬失败（可显式覆盖）。另附 `boundary_continuity`：相邻 split 切点两侧的词
+片段，供人工复核“文档被从行中间切开”的情形；本地划分路径另有**精确**自检
+`split_protocol.lines_cross_cut`（切点是否落在换行处），为 True 时同样进入
+`split_lines_cross_cut` 硬失败。
+
+**局限**：行级与词片段层是启发式证据（没有原始语料时无法区分“真的切开”与
+“原文本来就以半词开头”）；群组级比较按归一化文本做精确匹配，模板化语料
+（固定开头、固定套话）可能触发告警，需要人工复核样例；审计只覆盖本次准备
+的三个 split，不回溯上游数据集的历史版本。
+
+### 划分集合级指纹与原子发布（避免“新 train/val + 旧 test”）
+
+逐 split 的源哈希只能证明“每个文件的内容没变”，证明不了“三个文件来自同
+一次划分”。数据准备中途失败（下载失败、磁盘满、进程被杀）时，逐文件核对
+全部通过，实验却已经在**混合版本**语料上跑完——新 train/val 配旧 test。
+两条措施：
+
+- **原子发布**：三个 split 先写 `*.part` 暂存，互斥性核对在暂存文件上做，
+  全部通过后才统一 `os.replace` 落位；任一步失败都清理暂存文件，上一份
+  已经一致的划分保持原样（不再是“先落盘再删除”，中途失败不会留下半删除
+  的目录）。
+- **集合级指纹**：`split_set.json`（协议 `lega-split-set-v1`）记录逐 split
+  的 SHA-256 与**集合摘要**（把三个哈希当作一个整体来摘要）；
+  `meta.json` 的 `split_set_digest` 把集合摘要纳入 bin 缓存身份，训练前
+  `lega.preflight` 重算当前三个文件的哈希并比对，任何一个文件被替换都会
+  以 `data_split_set` 严重问题拦截训练。
+
+**局限**：集合指纹证明“同一次划分”，不证明划分本身合理（切点是否落在语义
+边界、比例是否合适由 `split_protocol` 与 `accounting` 分别记录）；暂存与
+发布之间仍有极短的窗口（进程在三次 `os.replace` 之间被杀会留下
+“新集合 + 旧 split_set.json”），该状态会被集合指纹立刻查出，不会被静默
+消费。
+
+## 评测
+
+- WikiText-103 PPL（有 held-out test 时评 test，缺 test.bin 时回退验证集并提示选择偏差；窗口不重复、等间隔抽样）。默认只评 `eval_iters` 个抽样窗口，`eval.json` 因此必须落盘 `eval_iters`/`val_windows`/`full_eval`/`eval_window_fraction`，汇总对覆盖率 <1 的 PPL 单独告警；正式 PPL 结论应给 `run_all.py`/`lega.postrun` 加 `--full_eval`，评测全部不重叠窗口（checkpoint 选择仍只用 val）；
+- **窗口边界相位敏感性**（`lega/evaluate.py --window_offsets N` 或 `run_all.py --window_offsets N`，默认关闭）：默认窗口网格固定在 offset=0，窗口边界落在哪里是数据侧任意选择。开启后在 `[0, ctx-1]` 取 N 个均匀相位起点（含首尾），用所有相位都能提供的**公共窗口预算**分别评测，`eval.json.window_offset_sensitivity` 落盘逐相位 `val_loss`/`val_ppl`、范围、离散度、最大相对 offset=0 的偏移与 `val_ppl_ratio`；主指标仍只取 offset=0，训练/选型与 n-gram 对齐口径不变。不同相位的窗口共享大量 token、不是独立重复，因此该字段只作“结论是否依赖窗口切分”的描述性稳健性诊断，不计算 p 值/置信区间，不能替代预注册的单起点或全量窗口分析；
+- **文档结构双口径**（`lega/evaluate.py` 默认开启，`--no_doc_aligned_eval` 关闭）：`eval.json` 额外落盘 `structure_audit`（本次实际评测窗口跨文档的比例）与 `doc_aligned_eval`（同窗口预算、只在文档内窗口上重算的 PPL），用于把门控机制的收益与“拼接语料的跨文档窗口”伪影分开；两者都是描述性证据，不进入确认性判定，文档内口径的窗口集合与主口径不同，绝对值不可直接比较，只有同批变体的配对差可比；
+- 简化 RULER 五任务（niah_synth / niah_corpus / niah_multikey / fwe / vt），多档上下文、贪心解码；
+  每格 em 附带 Wilson 95% 区间（`em_ci95_wilson`）：n_samples 小时点估计的抽样误差不可忽略；
+  niah_corpus 的干扰语句优先取 held-out 的 val/test.txt（train 仅在无 held-out
+  文本时回退并显式告警），来源写入 payload/summary 的 `corpus_source`——评测
+  上下文与训练语料重叠会把“检索”变成“回忆”，绝对分数不可比；
+- 机制分析（`lega/analysis.py`）：misleading_rate、P(hit|集中) 对比、门控分数 AUROC 与 PR-AUC、门控决策点 F1（macro/micro/weighted + **恒写/恒不写稻草人对照** `gate_f1_trivial`——门控 F1 不高于无信息固定规则时没有决策价值）。
+- 简单统计基线（`lega/ngram.py`）：与神经模型同 split 的一元/二元/**插值二元**平滑 n-gram PPL。插值模型 `P = λ·P_addα(w|prev) + (1−λ)·P_addα(w)` 让未见上下文回退到一元分布，而不是只回退到近似均匀；α 与 λ 只在 val 上按 mean NLL **联合**选优，`selected_model` 取 val 上最强的简单模型（λ=1 可退化为纯 bigram，因此最强基线不会低于它），正式报告只消费选定参数一次；test split 需显式 `--allow_test` 并写访问账本。流水线 `--ngram_split auto`（有非空 `test.bin` → test，否则 val）与神经评测同一规则，从源头避免 val 评测的模型对比 test 基线这类错位。
+
+### RULER 上下文长度剂量-反应（只报跨长度平均会掩盖长度效应）
+
+方法名与核心主张都是“随上下文长度校准门控”，但只报跨 `ctx_lens` 的
+`RULER平均` 回答不了“优势是否随长度变化”：短上下文涨、长上下文跌，与
+所有长度都小幅涨，可以得到同一个平均分，科学含义却相反。`lega/lengtheffect.py`
+负责把 payload 整形为按上下文分层的 macro EM，`run_all._ruler_length_analysis`
+做三层探索性检验并渲染进汇总页：
+
+- **剂量轴**：以 payload 声明的 `ctx_lens` 为请求档位，而不是每类任务
+  被 clamp 后的 `room_ctx`。不同任务因生成预算不同，同一请求档位可能落到
+  不同实际值（如 niah 1011 vs fwe 979）；若把实际值当档位，会凭空多出
+  “只含 fwe”和“只含 niah/vt”的两档，把任务组成变化误读成长度效应。
+  模块要求每个任务恰好覆盖全部请求档位后按升序对齐；任务缺档/多档时
+  拒绝该对比的分层分析（`ruler_length_pairs` 不含它），不猜映射。旧产物
+  无 `ctx_lens` 时只在所有任务共享同一实际档位集合时回退。
+- **逐 ctx**：每个种子在每个公共请求档位上先算任务等权 macro EM，再
+  对同一档做同种子配对 `Δ=候选−参照`（t + 符号翻转置换 + 配对差
+  bootstrap CI + MDE）；所有对比的同一档位检验合并为一个 Holm 家族
+  （`RULER@ctx`，保守）。逐档表回答“哪一档在驱动结论”，不把跨档平均
+  当成每一档都成立。
+- **斜率**：每个种子独立对 `ΔEM ~ log2(ctx)` 拟合 OLS 斜率（单位
+  `pp/2×`，长度每翻一倍的变化），再跨种子对斜率做单样本配对检验
+  （独立 Holm 家族 `RULER@length_slope`）。先合并各档点估计再拟合会把
+  种子噪声当成确定性趋势，因此坚持逐种子拟合、再做配对。
+- **首末落差**：`ΔEM(最长) − ΔEM(最短)`，不假定线性（独立家族
+  `RULER@length_span`）。斜率显著而首末落差≈0、或二者方向不一致时，效应
+  可能集中在中间档，不能写成“越长越好/越差”。
+- **留一上下文**：只有 2~3 档 ctx 时，斜率可能由某一档的偶然波动驱动。
+  逐种子在删掉任一单个 ctx 后重新拟合斜率，再看跨种子平均斜率符号是否
+  翻转（`slope_loo_sign_stable`）；翻转则标“趋势依赖个别档位”，与留一
+  法检查种子的逻辑同构。
+- **平衡性**：分析只在“每个任务恰好覆盖全部请求档位”的完整网格上进行；
+  此时逐档等权平均严格等于既有 `RULER平均`。运行期仍核对总体 macro 与
+  逐档平均是否一致（`balanced_contexts`），不一致说明对齐/数据异常，
+  分层均值只作描述并在汇总页提示，不冒充总体均值的严格分解。
+- **方向翻转与平均掩盖**：总平均与最长 ctx、斜率或首末落差符号相反时写
+  `overall_vs_longest/slope/span_sign_flip=true`；总平均落在 ±1pp SESOI
+  内、最长档却超出 SESOI 时写 `long_context_masking=true`（零与负号不构成
+  严格翻转，但同样说明总平均不代表长上下文）。汇总页对两者都标
+  “总平均与最长ctx反向 / 平均掩盖长度效应”。此时只报总平均会把
+  “长上下文失效”掩盖成“平均无差异/小涨”，是长度主张最需要防止的读法。
+- **边界**：全部为探索性、未预注册，不改变 H1–H7 的确认性判定；逐 ctx
+  检验只覆盖训练种子随机性，每格 20~30 个样例的评测抽样误差仍由
+  `ruler_*.json` 的 Wilson CI 单独报告；`n<3` 只报描述、不判定；只有 1 个
+  公共上下文档位时明确写“无法检验长度趋势”，不伪造斜率。
+- **产物**：`summary.md` 的“RULER 上下文长度剂量-反应”小节；
+  `summary.json`/`summary.csv` 逐变体增加 `ruler_length_*` 字段（vs
+  `standard`：总体 Δ、最长档 Δ、长−短、斜率、p_adj、方向翻转/掩盖标记、
+  平衡性），便于程序扫描；`significance.json` 的 `ruler_length_pairs`
+  （逐对逐 ctx 的候选/参照均值、Δ、CI、p/p_adj、逐种子斜率与首末落差）与
+  `ruler_length_tests`（`per_context` / `slope` / `long_minus_short`
+  三族完整检验）。
+- **输入卫生**：非规范或重复的 ctx 键（如 `"0512"` 与 `"512"` 同时出现）、
+  越界 EM（>1 或 <0）、非法/非正 `n` 都按缺失或损坏处理；缺 `n` 的旧产物
+  保持兼容。空 payload 与“每档都是 0 分”由 `{}` 与全零值区分，不伪造
+  趋势。
+
+### RULER 分层效应异质性（macro 平均不等于共同效应）
+
+`RULER平均` 是任务等权、任务内上下文档位等权的 macro 估计量。一个显著
+（或不显著）的 macro 配对差，可能来自“所有任务/长度同向小幅变化”，也可
+来自“某些层大涨、另一些层反向抵消”。后者说明平均不是任何一层的共同效应，
+不能写成“方法整体更好/更差”。`lega/heterogeneity.py` 用
+DerSimonian–Laird 随机效应 meta 分析把层间方差显式化，
+`run_all._ruler_heterogeneity_analysis` 对每个对比按两条轴分层：
+
+- **任务层**：每个任务先在上下文档位内求 macro EM，再对同种子
+  `Δ=候选−参照` 求跨种子均值与标准误（`sd/√n`）。回答“macro 平均是否
+  掩盖了某些任务的反向效应”；
+- **上下文长度层**：每个请求档位内的任务等权 macro EM 差。它是既有长度
+  剂量-反应的补充，用 I²/Q/预测区间描述层间方差，**不替代**逐档检验、
+  斜率与首末落差；
+- 每个层输出效应/标准误/固定与随机权重；汇总输出固定/随机效应合并值、
+  随机效应 95% CI、Cochran's Q 与卡方尾概率、I²、tau²、H²、k≥3 时的
+  95% 预测区间、逐个删除一个层后的合并范围与方向稳定性，以及按**种子**
+  重采样的 I²/tau²/合并效应区间。I²≥50% 且 Q p<α 标为显著异质性；
+  Q p<α 但 I²<50% 标为检出异质性（不再细分“中等”，避免把低 I² 的
+  高精度差异误读成强异质性）；
+- **预测区间 vs 置信区间**：随机效应 CI 是合并均值的精度；预测区间回答
+  “换一个同质层，效应可能落在哪里”，通常宽得多，不能当作新层效应的
+  置信区间；
+- **完整矩阵**：只用所有种子都有定义的层；缺失/非完整层显式记入
+  `dropped_labels`，不按 0 补齐；协议/格集合不一致的种子整体剔除并记账；
+- **边界**：任务层与长度层共享同一种子和同一批评测样例，**不是独立
+  研究**；Q 的卡方 p 值与 I² 只作描述性异质性指标，bootstrap 只覆盖训练
+  种子相关性，不覆盖层间共享评测样例。**未检出异质性不等于各层同质**，
+  I² 高也不表示某一层显著。该分析为探索性、未预注册、不做多重校正，
+  不改变 H1–H7 的确认性判定，也不能替代逐层检验、长度剂量-反应、
+  SESOI/等价性或 MDE；
+- **产物**：`summary.md` 的“RULER 任务/长度异质性”小节；
+  `significance.json` 的 `ruler_heterogeneity`（逐对比逐层效应/标准误/
+  权重/留一层/bootstrap）；若登记假设的指标为 `RULER平均` 且候选/参照
+  匹配（H4），在 `registered_hypotheses` 条目附加 `ruler_heterogeneity`
+  摘要，并在 `detail` 追加“macro 平均不能解释为各层共同效应”的警示，
+  但 `status`/`p_adj` 等判定字段保持不变。
+
+### 嵌套上下文配对 NIAH（把长度与证据位置/距离分开）
+
+RULER 的长度剂量-反应仍是对不同随机样例、不同 needle 位置的观测比较；
+“长上下文变差”可能来自长度、证据绝对位置、证据到问题距离或样例内容中的
+任一项。`lega/nested.py` 增加一个可选的配对设计来分离这些因素：
+
+- **同一 pair 不换题**：每个 `pair_id` 在所有上下文长度与 growth 模式下
+  共享同一 key/value、同一填充流和同一局部上下文（needle 前后各取至多
+  `core_window=16` 个 token 做 SHA-256），只改变远端填充量；样例长度必须
+  精确等于请求 `ctx`，超 `block_size - max_new - 1` 直接拒绝，不做静默截断。
+- **三种 growth**：`suffix` 固定前缀、向右加长后缀（证据绝对位置固定，
+  到问题距离增长）；`prefix` 固定后缀、向左加长前缀（位置增长、距离固定）；
+  `split` 两侧各扩展一半（位置与距离同时增长）。因此 `suffix` 与 `prefix`
+  的对照能把“位置”和“距离”两个混淆项分开。
+- **统计口径**：逐 growth×ctx 报 EM 与 Wilson 95% CI；以最短档为基线，
+  在同一批 `pair_id` 上计算 `base_only/ctx_only/both/neither` 与精确 McNemar
+  p；`EM ~ log2(ctx)` 斜率只作描述性汇总（`n<3` 或无逐样例结果时为 null）。
+  候选与参照比较时按 `pair_id` 对齐，逐档做配对 McNemar，并对全部
+  growth×ctx 检验做 Holm 校正；若同一 pair 的 key/value、needle 位置、
+  到问题距离或局部上下文哈希不一致，直接拒绝比较，绝不把不同题面强行配对。
+- **设计自检**：`analysis.checks` 显式落盘 `lengths_exact`、
+  `core_context_consistent`、`pairing_complete`，以及 suffix 的位置是否固定、
+  prefix 的距离是否固定；自检失败时只报告失败，不把该 payload 当作可用
+  配对证据。
+- **边界**：只覆盖 NIAH synth/corpus，不替代 fwe/vt/多键任务；每个
+  checkpoint 单独运行，跨 checkpoint 比较仍受训练种子与评测抽样误差限制；
+  该设计未预注册，属探索性补充证据；默认 CLI 只跑 `suffix,prefix`，
+  `split` 需显式加入。命令示例：
+  `python -m lega.nested --ckpt out/.../model_best.pt --data_dir data/... --out results/.../nested_lega.json --ctx_lens 256,512,1024 --n_samples 30`；
+  结果含 `design`、逐档 `results[*].outcomes`、`analysis` 与坏案例，
+  `compare_nested(candidate, reference)` 可在同一批 pair 上做候选/参照比较。
+
+## 基线与指标口径（先测最简单的，再谈复杂模型）
+
+- **简单基线不可省**：没有无参数基线时，“PPL=xx”无法区分“数据容易”与“模型好”。n-gram 基线与神经变体用同一 train 拟合、同一 held-out split 评测，给出绝对难度参照。
+- **与简单基线的差异也要检验**：n-gram 是确定性基线（无种子方差），逐种子神经 PPL 与同一常数做**单样本配对检验**，按变体家族 Holm 校正，报告比值/相对降低/p_adj/判定（`ngram_baseline_comparison` → `significance.json.ngram_comparison`）。split 不一致的变体单列“未纳入比较”，绝不混表。**同 split 还不够、必须同 token**：神经 PPL 只在 `eval_iters` 个等间隔窗口的目标 token 上计算，n-gram 因此额外报告逐位置对齐口径 `ppl_window_matched`（`lega.ngram.window_positions` 与 `train._val_eval_indices` 同规则，评分位置为每个窗口的 `s·ctx+1..s·ctx+ctx`）；仅同 token 还不够——神经 checkpoint 由窗口 val loss 选择，n-gram 若仍用完整 val 选 α/λ，选参 token 集依旧不同；新产物另在**同一批窗口目标 token** 上独立选参（`window_matched_selection` / `ppl_window_matched_selected`），汇总优先用这套参考，旧产物才回退 `ppl_window_matched`。汇总在全部纳入比较的 run 的 `eval_ctx/eval_iters/val_windows` 与 `window_spec` 一致时优先使用窗口参考，任一不一致即整体回退全 split 并写入 `fallback_reason`（同一 Holm 家族共用同一参考值）。该对比未预注册，标为补充性/探索性证据，不替代变体间受控配对检验。**逐窗口配对**：n-gram 侧同时落盘选定模型的 `window_losses_matched` 与神经评测同规则的 `window_indices_matched`；汇总在逐位置对齐成立时，对同一窗口序号做 `loss_neural − loss_ngram`，并用“先重采样种子、再重采样窗口”的分层 bootstrap 报告 ΔNLL 区间/PPL 比。窗口序号不一致或 n-gram 缺字段时显式跳过并写明原因，不按位置强配。
+- **基线必须调过，调优选择本身也要防噪声**：新方法的涨点可能只是超参数红利。`lega/tuning.py` 对基线（standard）做 lr × weight-decay 小网格（默认 lr×{0.5,1,2}），只用验证集选择（`train_log.jsonl` 全评测点最小值，与 `model_best.pt` 同口径；test 从不加载）；`default_is_optimal` 在默认与网格最优的相对差 ≤0.5% 时为真。单一种子上的网格最大值可能是“幸运种子”选出的假最优（winner's curse）：`--tune_seeds` 让每个组合在多个种子上重复训练、按**平均 val_loss** 选择，报告 `selection_seeds` 与逐种子明细；不指定时只用单一种子（汇总页显式警告），正式实验建议 ≥3 个。`run_all --tune_baseline` 把最优组合注入**全部**变体（受控变量仅整体平移），证据写入 `baseline_tuning.json` 并在汇总页渲染；缺证据时汇总页显式警告“未调优基线”。**调优范围必须披露**：该流程只对 `standard` 做网格；`qgate`/`null` 等“已有工作代表”继承同一组 lr/weight_decay，未各自调优，因此“优于已有工作”只能按**同超参受控对照**解读，不能写成“优于各自最佳调优版本”；差距接近 MDE/种子噪声时更不足以支持优越性结论。
+- **机制判别也要有最简监督基线（线性探针）**：门控 logit 是语言建模的副产品、训练时从未见过 hit 标签；“门控 AUROC/PR-AUC 高”不能排除“`log max_p`、`log n`、`qterm` 这些廉价特征本身线性可分，复杂门控结构没有贡献”。`lega/probe.py` 在同一批记录上训练 L2 逻辑回归，并对简单基线同样做**嵌套、按样例分组、按 hit 标签分层**的交叉验证：同一 (层,头,查询位) 记录不独立，按行切分会“背题”；稀有正类可能让某些折没有正类，分层分组降低空正类折造成的基线低估。λ 与决策阈值只在每个外层训练折的内层 CV 上选择（λ 按与主检验对齐的 PR-AUC/AUROC，阈值按内层 OOF macro-F1），最终 OOF 不再参与选参，避免选择偏差；标准化统计只用训练折拟合。报告 OOF 的 AUROC/PR-AUC、Brier/ECE、以及固定 0.5 与调优阈值两套 F1（macro/micro/weighted 三口径）。`run_all.linear_probe_baseline_comparison` 把逐种子 Δ=探针−门控 做配对检验 + Holm 校正并渲染进基线小节：探针超过门控属预期（判别能力本可由线性模型学得），门控不能在主指标上被探针显著超越，才有资格谈“结构优越性”；单统计量规则（max_p）一并列出作最低档次对照；旧产物缺探针时显式警告而不是当作已有对照。该对比与 n-gram 对比一样属补充性/探索性证据，不替代预注册的确认性检验。
+- **不平衡指标必须并报且注明口径**：hit/¬hit 判别是类别极不平衡的二分类，`hit_base_rate`（正类率）即 PR-AUC 的随机基线。正类率 <5% 时 AUROC 因负样本基数巨大、FPR 增长缓慢而乐观，**以 PR-AUC（average precision）为主指标**（<0.1% 尤甚）；正类率 ≥5% 时两者并报。F1 一律注明平均口径（`gate_f1` 同时给 macro/micro/weighted 与逐类明细；macro 对稀有类最诚实，汇总表列 macro）。**任何学习指标都要有无信息对照**：门控 F1 并报恒写/恒不写固定规则的 `gate_f1_trivial`，打不过固定规则就谈不上“门控学会判断”。RULER 的 EM 为生成式指标、无决策阈值，不受此影响（fwe 另报召回率、精确率与 F1 作诊断）。**排序好不等于概率可信**：门控 g 是 sigmoid 输出且被当作软权重/概率使用，必须另报 Brier 与 ECE（与常数基率 Brier 基线对照；`analysis_*.json` 的 `calibration_g`），AUROC/PR-AUC 不能替代校准证据。ECE 同时给等宽与等频两套箱：等宽箱在分数聚集/小样本时可能大量为空，单个样本独占一箱还会把 ECE 机械压低；等频箱按分数排序均分样本，作为对分箱选择不敏感的第二组证据。Brier 另做 Murphy 分解：等频箱内用箱均值预测时 `Brier_bin = reliability − resolution + uncertainty`；原始分数在箱内不恒定时还须加箱内项 `brier_binning = within_score − 2·within_cov`（`brier = reliability − resolution + uncertainty + brier_binning`），否则三项之和并不等于原始 Brier。该分解把“箱内校准误差”“箱间区分度”“标签固有不确定性”与“分箱引入的箱内方差/协方差”分开；这些仍只是描述性证据，不替代正式检验。RULER 平均同时报 **macro**（任务等权、任务内上下文档位等权，预注册口径）与 **micro**（按每格样本数加权），避免“平均”未注明定义而掩盖任务/格大小不均。两者统一用各任务 **EM**（fwe 为严格集合 EM，与 H4 的“RULER 平均 EM”一致）；fwe 的 recall 仅单列诊断、不进入平均——recall 不惩罚“把上下文词全部列出”的灌水策略；precision/F1 一并单列，才能区分“没找到高频词”与“找对但灌水/漏答”。
+
+训练预算轨迹作为补充证据写入 `significance.json` 的
+`budget_sensitivity`，并在汇总页“训练预算敏感性”表中列出发生方向翻转/
+预算敏感的对比；它不进入确认性判定，也不改变任何预注册假设的状态。
+
+## 统计推断协议（小样本科研口径）
+
+**两种不确定性分开报告**：跨种子检验只看每个种子的聚合指标（训练随机性），
+但 RULER 每格只有 20~30 个样例、PPL 只评测有限个窗口，评测抽样误差不会
+自动进入种子级 t 检验。因此：
+
+- RULER 结果逐单元格落盘 `samples`（`sample_id` 跨变体稳定对齐），汇总时对
+  同一批题面做**样例级配对 McNemar 精确检验**（只消费 discordant 对：候选
+  独对 vs 参照独对），并给出逐种子 discordant 明细；多种子按计数合并只作
+  探索性证据。**样例聚类稳健性**：同一样例在多个训练种子下重复出现，池化
+  McNemar 会把它当成多条独立证据；因此另按 `sample_id` 先跨种子平均配对差，
+  再以样例为独立单位做符号翻转检验（`cluster_*`，独立 Holm 家族），与池化
+  结果并列报告。
+- RULER 同时报告样例等权 micro 与单元格等权 macro 效应量：McNemar 的
+  discordant 计数对应 micro，预注册 `RULER平均` 是 macro，两者方向不一致
+  时结论依赖“平均值”定义，必须并列展示。macro 的抽样区间固定已观测种子，
+  在 (任务, 上下文) 单元格内对配对样例重采样、再保持单元格等权平均
+  （`_ruler_macro_bootstrap_ci`）；它只覆盖评测样例抽样，不覆盖训练种子
+  随机性，不能替代种子级检验。
+- 每个变体的 **RULER 绝对 macro EM** 也报分层 bootstrap 95% 区间
+  （`_ruler_macro_absolute_ci`）：在每个单元格内对样例重采样，按与
+  `ruler_avg` 相同的“任务等权、任务内上下文档位等权”顺序聚合，再对观测
+  种子取平均；同一结果写入汇总表 `RULER评估CI` 与 summary JSON 的
+  `ruler_avg_ci95`。它回答“这个绝对水平在评测抽样下有多不确定”，与
+  “候选−参照差”的区间及跨种子 Mean ± Std 三者不可互相替代；旧产物缺
+  逐样例记录时如实留空。
+- 独立评测落盘 `window_losses`/`window_indices`，汇总时对同序号窗口逐点
+  相减，并用“先重采样种子、再重采样窗口”的分层 bootstrap 给出平均 NLL 差
+  区间与 PPL 比。窗口按时间顺序排列时相邻窗口可能相关，i.i.d. 重采样会
+  低估区间，因此同时报告移动块 bootstrap（块长 `n^(1/3)`，保留块内相邻
+  相关）与 lag-1 自相关；以更宽区间解读稳健性，两者都仍是近似。每个种子
+  不足 8 个窗口或少于 2 个种子时只报点估计/区间，不生成“显著”措辞——
+  小窗口重采样分布的自由度不足以支持显著性声明。
+- **窗口级效应分布而非只看均值**：平均 ΔNLL 改善可能只来自极少数困难
+  窗口；若只看均值，会把“少数窗口的大幅改善”误读成“普遍改善”。因此
+  同一批逐窗口差同时报告逐种子**中位数**、**10% 截尾均值**、**改善/恶化/
+  持平窗口占比**与 ΔNLL 分位数（`median_diff`、
+  `trimmed_mean_diff_10pct`、`window_win_rate`、`diff_quantiles` 等），
+  并用同一套“先重采样种子、再重采样窗口”的分层 bootstrap 给出区间
+  （移动块版本在 `block_*` 字段）。汇总页的“窗口级稳健性”表并列均值与
+  这些稳健统计；当均值区间不含 0、但中位数/截尾均值方向不一致、中位数
+  区间含 0 或多数窗口未朝均值方向改善时，标记 `outlier_sensitive`，并在
+  判定中写明“均值可能由少数窗口驱动”，不得表述为普遍改善。
+  `broad_based=True` 才表示均值/中位数/截尾均值同向、中位数区间不含 0
+  且多数窗口同向。中位数/截尾均值是同一估计量的稳健描述，不构成新的
+  确认性检验，也不参与 Holm 校正或改变预注册结论。
+- **种子与评测单元的方差分解**（`lega/uncertainty.py`）：把同一
+  (种子, 评测单元) 单元格内的配对差视为 `seed × unit` 二维矩阵，用两因素
+  随机效应 ANOVA 矩估计把方差分为种子、评测单元与残差三部分
+  （`two_way_variance_components`），并按预注册 macro 权重聚合多单元格
+  （`aggregate_variance_components`）。同时报告**总方差占比**与**均值方差
+  占比**：前者描述单次观测的波动，后者已按 `1/S`、`1/U` 收缩，才是“补训练
+  种子还是补评测窗口/样例更有效”的依据；汇总页的“不确定性来源分解”表把
+  PPL 窗口与 RULER macro 并列，并在种子/单元均值方差占比 ≥65% 时给出
+  探索性资源分配提示。RULER 另增**双层 bootstrap**：先重采样训练种子，再在
+  被选中种子的每个 (任务, 上下文) 单元格内重采样配对样例，输出
+  `macro_mean_diff_ci95_hier` / `macro_p_hier` / `macro_p_hier_adj` /
+  `macro_bootstrap_same_sign_hier`，补上“固定种子区间”与“种子级 t 检验”
+  各自缺失的合并不确定性（独立 Holm 家族，仍为探索性）；PPL 窗口
+  检验也在 `variance_components` 中报告同一分解，且只在各窗口序号对齐时计算。
+  **边界**：方差分量是矩估计而非最大似然，小样本下可能为负（按 0 截断并
+  标记 `negative_*_component`）；PPL 窗口按时间顺序排列、相邻窗口可能相关，
+  把窗口当独立单元的方差分量只是近似（区间稳健性仍看移动块 bootstrap）；
+  不平衡/缺格/`sample_id` 未对齐时不插补、不按位置强配，只使用所有种子
+  共有的单元格；65% 阈值只是资源分配提示，不参与确认性判定，也不改变
+  预注册的种子级 Holm 结论。
+- 两种证据与种子级检验回答不同问题（固定题面/窗口上的差异 vs 换训练种子
+  的稳定性），冲突时在汇总页并列展示，任何一方都不单独升级为确认性结论；
+  确认性判定仍只走预注册的种子级 Holm 校正检验。
+
+正式实验的种子数只有 3~5，任何单点统计声明都站不住。协议分四层：
+
+1. **主判定**：同种子配对 t 检验，同一指标家族内 Holm–Bonferroni 校正
+   （控制家族 FWER），配对 Cohen's d_z 效应量；n<3 只报描述统计。
+   **确认族整体校正**：预注册的 H1–H7 跨 PPL/RULER/AUROC/AP 多个指标
+   家族，“每个家族各自 5%”并不控制全部确认性结论的整体 FWER；汇总页
+   因此再对全部可检验预注册假设（n≥3）的**原始 p** 做一次 Holm 校正
+   （`apply_global_fwer`）。判定要求家族内 p_adj 与确认族 p_adj 均 < α；
+   仅家族内显著者降级为“未定”，同时保留 `status_family` 供审计。
+   该门只收紧、不放松判定，且不改变既有假设的科学内容。
+2. **稳健性印证**（每组配对同时报告，`significance.json`）：
+   - **符号翻转置换检验** p_perm（分布无关；n≤16 全枚举精确）：t 检验在
+     小样本下依赖正态假设，两套结论冲突时在结论文本中显式标 ⚠ 而非静默
+     采信任何一方。**粒度边界必须知情**：置换双侧 p 的理论下限是 2/2^n
+     （n=3→0.25、n=5→0.0625、n=6→0.03125），种子 <6 时"置换不显著"是
+     粒度所限，此时 t 的显著性完全依赖正态假设；n≥6 后不一致才是真实警报；
+   - **中位数配对差与精确符号检验** p_sign（独立 Holm 家族）：均值/标准差
+     会被单个离群种子主导；Δ中位数与只数方向的符号检验提供对离群值稳健的
+     对照。零差按经典口径从符号检验中剔除（nz=正/负配对数），nz=0 时 p=1；
+     其双侧精确 p 下限同样是 2/2^nz（nz<6 时 >0.05），只作稳健性对照，
+     不参与确认性判定；
+   - **配对差 bootstrap 95% CI**：效应量的不确定范围，防止把点估计当精确值；
+   - **PPL 比值尺度敏感性**（探索性，`PPL(log)` 独立家族）：预注册主指标
+     仍是原始 PPL 的配对差；同时报告 log-PPL 配对差与几何均值比
+     exp(ΔlogPPL)（及其 bootstrap 区间）。算术 PPL 差会被高 PPL 种子主导，
+     两种尺度方向不一致时汇总页显式标为“尺度结论不一致”，不得挑选对主张
+     有利的口径；
+   - **MDE（最小可检测效应）**：(z_{1-α/2}+z_{power})·std/√n。"不显著"
+     必须对照 MDE 解读：观测差远小于 MDE → 功效不足（先补种子），而不是
+     "证明了没有效应"；
+    - **效应/噪声比**：|Δ|/ΔSD（ΔSD 为逐种子配对差的标准差）。|Δ|<ΔSD
+      表示任一种子的符号都可能翻转，结论中显式标注“种子/评测噪声内”的
+      边缘证据；即使 p_adj 显著也不得写成稳健收益。
+    - **JZS 贝叶斯证据**（补充性，`tests[*].bayes`）：对同一配对差拟合
+      Cauchy 先验的一样本 JZS 模型，报告 BF10/BF01、后验方向概率与
+      95% 可信区间；有 SESOI 的指标另报 ROPE 后验质量，并固定披露
+      0.5×/1×/2× 先验尺度敏感性。BF10>3 才写“弱支持 H1”，BF10<1/3
+      才写“弱支持 H0”，其余为“证据不足”；BF 不进入 Holm/FWER，
+      不改变预注册判定，也不能替代 TOST/MDE。详见下文“贝叶斯证据”。
+    - **逐种子胜负与留一方向稳定性**（`n_seed_wins/losses/ties`、
+      `loo_sign_stable`）：n 只有 3~5 时一个“幸运/倒霉种子”就可能决定均值
+      符号。逐种子配对差符号计数不含任何分布假设；留一法检查删掉任一单个
+      种子后均值符号是否翻转，翻转即在结论中标注 ⚠（结论由个别种子决定），
+      即使 p_adj 显著也不算稳健。`component_evidence` 据此把“显著但
+      |Δ|<ΔSD 或留一翻转”的组件证据标为 `fragile`：最多算探索性线索，
+      `confirmatory_supported` 必须为假，不能据此宣称“各组件均有用”。
+    - **RULER 逐任务分解**（探索性，`RULER:<task>` 指标家族）：综合平均会
+      把方向相反的任务效应互相抵消，故对预注册 RULER 对比逐任务各做一次
+      同种子配对检验；每个任务一个独立 Holm 家族，仅作定位/机制线索，
+      不替代预注册的“RULER 平均”确认性判定。
+
+3. **机制主张的正式检验（两种指标口径）**：AUROC(完整 logit) − AUROC(仅查询项)
+   （H6）与 PR-AUC(完整 logit) − PR-AUC(仅查询项)（H7，不平衡主指标口径）
+   各作为独立指标家族做同种子配对检验（`run_all._auroc_diff_tests` /
+   `_ap_diff_tests`）——两个分数指标来自同一批记录，并排放数字不构成证据。
+   与逐 run 的**样例聚类 bootstrap** 区间（`analysis.auroc_cluster_bootstrap`，
+   同时给 AUROC 与 AP 两族及各自差值）互为印证：后者以样例为重采样单元
+   （同一样例的层×头×查询位记录共享难度，不是独立观测），回答"换样例波动
+   多少"；前者回答"换训练种子方向是否稳定"。
+4. **阈值敏感性**：misleading/P(hit|集中) 系指标在多档 τ 上并报
+   （`analysis.tau_sensitivity`，默认 [0.3, 0.5, 0.7] 并入主 τ），
+   机制结论不得只挂在单一任意选定的阈值上。
+
+### 探索性发现的 FDR 控制（seed-level BH/BY；不改变确认性判定）
+
+各指标家族内的 Holm 校正控制的是该家族的 FWER；但汇总页同时展示 PPL、
+RULER、因果病灶、剂量-反应、推理期 Shapley/交互、长度分层、n-gram 基线、
+参数化稳健性与线性探针等多个家族的探索性对比，“每个家族各自 5%”并不
+控制“全部探索性发现中假发现的比例”。`lega/discovery.py` 因此把**非预注册
+的种子级探索性检验**合并为一个显式发现族，计算 Benjamini–Hochberg（BH）
+q 值：
+
+- **纳入**（实际运行并产生 p 值时）：主汇总表中所有未登记为预注册假设的
+  种子级配对检验（整体/单因素、训练期交互、训练期 Shapley、PPL(log)、
+  RULER 逐任务）、推理期因果病灶与活动匹配病灶、原始−匹配病灶对照、
+  剂量-反应、推理期 Shapley/交互、RULER 长度分档/斜率/首末落差、
+  n-gram 基线、参数化稳健性对照/Shapley、线性探针基线；
+- **排除**：预注册确认性检验（由家族内 Holm、确认族 Holm 与预注册门
+  单独处理）、样例级 McNemar、窗口级 PPL、RULER 分层 meta 分析、分析
+  选择多重宇宙、缺失结果敏感性、逐 step 训练预算轨迹。排除项要么推断
+  单位不是训练种子，要么本身是敏感性/描述性分析，混入会改变家族含义；
+- **可检验性**：只有 n≥3 且 p 可解析（有限、0≤p≤1、非 bool）的检验进入
+  家族；n 不足或 p 缺失/非法的检验显式标为排除，不占家族大小，也不被
+  当成“不显著”证据。
+
+BH 的 q 值按升序 p 的 `min_{j>=i} m·p_(j)/j` 计算并保证单调、封顶 1；
+它回答“在这个探索性发现集合中，假发现比例的期望上限”，不是“某条假设为
+真的概率”。BH 在独立或正相关（PRDS）下控制 FDR；共享训练种子、共享
+checkpoint 与共享评测样本会引入依赖，PRDS 未必严格成立，因此同时报告
+Benjamini–Yekutieli（BY）q 值：`q_BY = min(1, H_m·q_BH)`，
+`H_m=Σ_{i=1..m}1/i`，作为任意依赖下的保守敏感性。汇总页以 BH 为主结果，
+BY 只用于判断发现是否依赖“独立/正相关”假设。
+
+`summary.md` 新增“探索性发现的 FDR 控制”小节，报告家族大小、输入/排除
+计数与原因、各来源计数、BH/BY 发现数、BH 阈值、按观测发现数折算的
+期望假发现约 α×R（启发式；BH 保证 E[V/R]≤α，不保证单次 V≤αR）以及
+前 20 条发现；完整列表与逐检验注释在
+`significance.json.exploratory_fdr`。每条纳入/排除的检验就地写入
+`fdr_source`、`q_bh`、`q_by`、`fdr_significant`、`fdr_by_significant`、
+`fdr_family_size` 与 `fdr_excluded_reason`，便于机器读取。
+
+**边界**：q 值不是效应量，也不替代 MDE/TOST/贝叶斯证据；BH/BY 不改变
+任何 Holm/FWER 判定、预注册 支持/拒绝/未定或确认性资格。q<α 只是“值得
+后续验证”的线索，仍须在新种子/新数据上预注册并复现；q≥α 也不能写成
+“无效应”。家族定义由流水线的分析层固定，不由观察到的 p 值挑选，但实际
+运行的层会随 CLI 变化，因此家族大小与来源计数必须如实报告。
+
+## 预注册（confirmatory vs exploratory）
+
+登记表与锁文件位于 `preregistration/`（`hypotheses.json` + `hypotheses.lock.json`）——
+**刻意不放 `docs/`**：流水线自动清理会删除 docs/ 下除 `design_notes.md` 外的
+全部文件。当前登记 H1–H7（H7 为 PR-AUC 口径的机制主张，与 H6 的 AUROC 口径互为印证）。
+
+`run_all` 支持在正式实验前登记方向性主张，汇总时逐条对照
+Holm 校正后的配对检验判定 **支持 / 拒绝（方向相反且显著=被证伪）/ 未定**
+（未定≠无效应，须对照 MDE 解读），结果进 `summary.md` 与
+`significance.json`。未登记的对比一律属事后（exploratory）分析：其 p 值
+只受所在家族内校正保护，"显著"只能作为提出新假设的线索；要升级为结论
+须先登记再在新的种子/数据上检验——把"哪些对比是事先声称的"从记忆变成
+可执行的边界。
+
+**完整性锁链（防事后静默改写/删除）**：登记表配套锁文件记录锁基线（整文档
+SHA-256 + **逐假设科学内容摘要**，只覆盖 id/claim/metric/candidate/reference/
+direction，注释类字段不参与）与**修订链**。既有假设只增不改不删；新增假设
+必须经 `python -m lega.hypotheses --amend --reason ...` 留痕，否则判违反。
+`verify_registration` 的状态为 intact/amended（可确认）与 violated/missing_lock/
+missing_registry（不可确认）；run_all 把登记表指纹与完整性报告写入 `repro.json`、
+实验台账与 `significance.json`，汇总页显式渲染；**violated 时全部确认性判定
+自动降级为探索性**（`apply_integrity_gate`），不假装边界仍成立。局限如实声明：
+本机制防御的是静默/意外改写，无法对抗同时改写登记表、锁文件与 git 历史的
+攻击者——那需要外部审计。
+
+**范围核对（锁链完整 ≠ 实验落在范围内）**：登记表声明 `scope`（正式配置的
+模型规模、数据/分词器、种子计划）。汇总时 `registration_scope_check` 把它与
+本次实跑的 `repro.json`（`config_file` 的规模字段、数据指纹的 tokenizer、种子）
+逐项比对：tiny/冒烟/伪数据/非同登记分词器都判范围外，`apply_scope_gate` 与
+完整性门串联，确认性判定同样降级并写明原因；无法核对（缺 repro/config）也不
+默认通过。调优按协议注入的 lr/weight_decay 改变不算越界（本来是 val 选择）；
+未登记种子只警告不降级。登记表未声明 `scope` 的历史登记表则只警告，不因
+“没有可核对字段”本身推翻已通过的完整性判定。
+
+## 可复现性与 sanity check
+
+- **种子**：`set_seed` 覆盖 Python/NumPy/PyTorch（CPU/CUDA）、cuDNN 确定性算法与子进程 `PYTHONHASHSEED`；批采样由显式 `np.random.default_rng(seed)` 驱动（无 DataLoader worker）。`run_all` 逐命令把 `PYTHONHASHSEED` 对齐到该命令自己的 `--seed`，基线调优的每个 trial 子进程也按 trial seed 设置该变量，`run_manifest.json` 内嵌 `seed_report`（逐随机源的种子、**RNG 真实状态短指纹**、确定性开关、数据顺序机制）供事后审计：指纹可被第三方用 `set_seed(seed)+rng_state_fingerprint()` 复算，当前状态不属于所请求 seed 时为 `null`；`PYTHONHASHSEED` 分“解释器启动值/子进程 env/是否真的对当前进程生效”三字段记录，避免字段被 set_seed 自身写值而自证。确定性算法如实标注严格/`warn_only`；环境快照记录 TF32（matmul/cudnn）、线程数与 `CUDA_VISIBLE_DEVICES`，训练清单在 `enable_tf32` 之后生成以记录实际生效值。跨硬件架构不保证逐位一致，同机重跑稳定。
+- **过拟合小批量**（`lega/sanity.py`）：训练前在固定小批量、关闭正则化与数据扰动的条件下检查损失能否趋近 0、下一 token 准确率能否接近 100%；首步还会做**逐参数梯度覆盖**（missing/zero/nonfinite），可定位“总梯度范数正常但门控等子模块没接进计算图”的断流问题，并强制要求 dropout/attn_dropout 已关闭（未关闭直接失败，避免配置错误被误判为代码错误），同时自动核对三条中间结果：训练路径 loss（lm_head 分块 + 交叉熵）与直接完整 logits 的 `F.cross_entropy` 数值一致（捕捉分块/归一化/ignore 处理错误）、消费点标签满足 `y = x 右移一位`（捕捉错位/换序）、初始 loss ≈ log(V)（默认容差 1.0 nat，负值禁用，捕捉初始化/logits 尺度病态）。不能过拟合或核对失败说明梯度/损失/标签链路存在严重问题，`run_all` 会直接中止全量训练并向台账写 `aborted`；通过时 sanity 摘要（路径/SHA-256/判定/身份）绑定进该 run 的 `run_manifest.json`；绑定前核对 variant/config/data/git（含 dirty diff）身份，旧配置/旧数据/旧代码的 PASS 不会被当作本 run 的通过证据。通过是必要非充分条件，需继续配合中间结果检查。
+- **进程级哈希盐**（`lega/bootstrap.py`）：`PYTHONHASHSEED` 只在**解释器启动前**设置才对当前进程生效，运行期写 `os.environ` 只能影响之后启动的子进程。编排进程（`run_all`）此前始终没有固定哈希盐：任何依赖 `set`/`frozenset` 哈希顺序的路径（集合遍历、由集合构造输出顺序）会随进程启动而变，同一 commit 的两次运行可能产出顺序不同的产物或报告，而“种子相同”的声明覆盖不了这种差异。`lega/bootstrap.py` 因此在进程启动时检查哈希盐状态：未固定时以 `PYTHONHASHSEED=0`（`LEGA_HASH_SEED` 可改）**重新执行自身**，保证盐在解释器启动前即固定。引导是幂等的（已固定则什么都不做）、可关闭（`LEGA_HASH_SEED_BOOTSTRAP=0`）、失败时安全退回（不阻断实验，只如实记录“未固定”），并且**只在真正的 CLI 入口触发**：`run_all.py` 的 `main_entry`/`__main__` 与各 `python -m lega.*` 入口的 `__main__` 块；作为库被 import 时不触发，pytest 环境下也不触发（替换进程会破坏测试框架的输出捕获）。包内脚本（`lega/train.py` 等使用相对导入）以 `-m` 形式重新执行，顶层脚本与安装后的 `lega-run` 控制台脚本同样有确定的重建方式。哈希盐只影响 `str`/`bytes` 的哈希值，**不影响任何随机数流**，因此不影响种子的统计语义。
+- **确定性档位与实测**（`LEGA_DETERMINISM`）：`torch.use_deterministic_algorithms` 只说明“开关打开了”，不能说明“本轮没有踩到无确定性实现的算子”——`warn_only` 模式下 PyTorch 只告警、照常计算。`set_seed` 现在把实际档位（`strict`/`warn_only`）写进 `seed_report`，并安装告警计数钩子统计本轮真正触发过的“无确定性实现”算子次数与样本（钩子包裹 `warnings.warn` 并原样转发、stacklevel 相应 +1，因此不改变任何告警的展示与定位）。`seed_report` 的 `deterministic_mode`、`deterministic_algorithms_warn_only`、`non_deterministic_op_warnings` 三个字段一起回答“确定性开到哪一档、这一档在本轮实际触发了什么”；`runtime_info` 同步记录档位与计数，汇总页的“可复现性与 sanity check”小节按 run 汇总档位分布与非确定性算子告警合计，>0 时明确写明相关 run 不得声称逐位可复现。档位可由 `LEGA_DETERMINISTIC=strict` 收紧为“无确定性实现即失败”，拼错时显式报错而不是静默退回默认档位。
+- **线程配额**（`LEGA_NUM_THREADS`）：CPU 端归约顺序随线程数变化，同 seed 在 4 核与 32 核机器上可能得到不同的浮点末位。`set_seed` 按 `LEGA_NUM_THREADS` 固定 `torch.set_num_threads`，并把实际线程数与“是否被显式固定”写进 `seed_report` 与 `runtime_info`；未设置时保持 PyTorch 默认（按机器核数）但同样记录实际值，跨机比较因此至少能区分“线程数不同”与“线程数相同仍不同”。
+- **工程规范与仓库卫生**：`pyproject.toml` 显式声明 `py-modules = ["run_all"]`——否则 wheel 不含该顶层模块，安装后的 `lega-run` 控制台脚本在非 editable 安装下直接 `ImportError`；`pyproject.toml` 的版本号与 `lega.__version__` 必须一致（由测试核对）。依赖声明只有一处权威来源：`scripts/check_requirements_lock.py` 同时核对 `requirements.txt` ↔ `requirements-lock.txt`（下限与固定版本）、`requirements-ci.txt` ↔ lock（CI 必须测被锁定的同一套版本）、`pyproject.toml` ↔ `requirements.txt`（`pip install .` 与 `pip install -r requirements.txt` 不得装出不同的栈），以及 lock 头部声明的 Python 版本是否满足 `requires-python`；该检查原先的 pre-commit 触发条件带 `types: [python]`，而 `requirements*.txt` 不是 Python 文件，钩子实际上从未触发，现已改为按文件名匹配。配置契约校验从 `configs/tiny.json`/`small.json` 两个文件扩展到 `configs/*.json` 全量（`scripts/validate_configs.py`），新增或修改配置在提交阶段即被拦截，不必等到开跑几十分钟后。`tests/test_repo_hygiene.py` 把仓库不变量变成可执行断言：全部 `README*.md` 与 `.github/`（CI 配置）必须存在、非空且被 git 跟踪，`.github/` 工作区不得有未提交改动；远程仓库不得混入实验结果/`REPORT*`/`autodl_budget*` 等本地产物；`tests/run_tests.py` 的模块清单必须覆盖全部 `tests/test_*.py`（否则无 pytest 环境的默认入口会静默漏测）。
+- **追踪**：训练写 `run_manifest.json`（git commit/dirty、配置 SHA-256、数据指纹、种子审计、环境、命令行、sanity 证据）与 `config_used.json`/`train_log.jsonl`；dirty 工作区额外记录 diff 指纹/文件清单并保存 `worktree.patch`（已跟踪 diff + 未跟踪文件，上限 8 MiB、截断显式标记；仅凭 commit 无法复原代码时可重放）。`run_all` 写全局 `repro.json`，并向固定路径 `results/experiments.jsonl` 追加实验台账（started/completed/aborted 生命周期，记录解析后的完整超参数与逐 run `config_used.json` 内容，config 文件被改写/删除后仍可还原；逐 run 最终指标与曲线/被评测 checkpoint/结果文件 SHA-256；`eval_*.json` 内嵌 `ckpt_sha256` 绑定权重），失败轮次带阶段/原因/退出码，重跑不丢历史，评测 JSON 内嵌同一溯源字段。台账快照还内嵌逐 run 的 `seed_report`/环境/sanity 身份，manifest 丢失后仍可自证；`python -m lega.experiment --check_artifacts` 可核验 started/completed 链、重复终态、悬挂 run 与产物哈希。本轮 `run_id` 在训练前写入 `repro.json`，并经 `LEGA_PIPELINE_RUN_ID` 传给调优/训练/评测/汇总；结果文件内嵌同一 ID，汇总只纳入同 `run_id`（及数据指纹一致）的产物，避免复用 `results/<tag>` 时把 `--skip_*` 留下的旧文件混入本轮统计。训练清单与评测结果另记录**源码树指纹**（`lega/`、`scripts/`、`configs/`、`preregistration/`、`run_all.py`、requirements 的内容哈希，忽略 `__pycache__`/`.pyc`），在无 git 的源码包中仍可复算；评测源码树与训练清单不一致时汇总显式告警。JSON/CSV/Markdown 报告统一以 fsync + `os.replace` 原子落盘，崩溃不会留下半截结果。
+- **环境锁与单 run 核验**：`requirements-lock.txt` 固定正式实验的直接运行时依赖（`torch==2.14.1`、`numpy==2.5.4`、`tiktoken==0.11.0`、`matplotlib==3.11.2`）与 Python 主次版本；`requirements.txt` 保留开发用下限，`requirements-ci.txt` 另固定测试工具；lock 与 CI 固定版本由测试交叉核对。`python -m lega.repro --check-env` 对照 lock 与实际 `importlib.metadata` 版本，忽略 `+cpu` 等本地构建后缀；`run_manifest.json`、`repro.json`、实验台账与下游 `load_provenance` 都记录 lock SHA-256、Python/包匹配结果及训练/评测两端环境锁。`run_all` 在加载配置后、任何训练/调优/评测前执行**环境锁闸门**：正式 run 与 lock 不一致时直接失败关闭，避免只在 manifest 里“记录漂移”却继续产出无法复现的结论；`--smoke` 与显式 `--allow_env_mismatch` 仅把结论降级为 warn，并把 `environment_gate` 写入 `repro.json`/实验台账，汇总页同步显示，禁止把该轮冒充锁定环境结果。`python -m lega.repro --verify-run out/<tag>/<variant>/seed<seed> --data_dir data` 逐项核验 completion、`config_used.json`、artifacts 哈希/字节数、checkpoint、seed 状态指纹、sanity 身份、数据指纹、源码树、运行环境身份与环境锁；显式矛盾/哈希不匹配是 issue，旧清单缺字段只告警，`--strict` 把告警也当失败。lock 只覆盖直接运行时依赖，不证明 OS/驱动/传递依赖完全一致；源码树不一致对历史 run 是预期告警，重放前需 checkout 对应版本。除 lock 外，核验还比对该 run 记录的**运行环境身份**（Python/PyTorch/NumPy/CUDA/cuDNN/GPU 型号）与当前进程——历史 run 在另一块 GPU/另一版驱动上复核是预期情况，故只告警不判失败，但必须显式列出漂移字段，避免把跨环境复核当成同环境重放。此外，`run_manifest.json` 的溯源字段（`code_commit`/`config_sha256`/数据指纹等）本身没有哈希链保护，只有它引用的产物/配置被 SHA-256 绑定；核验因此把清单与 **checkpoint 内嵌 provenance**（训练时由同一份 manifest 派生写入、其字节已被 `artifacts` 绑定）逐字段交叉核对，两侧对不上即判 issue（清单被事后改写或权重被替换），旧 checkpoint 缺字段则只告警。这样“清单自说自话”的形态不再能躲过单 run 审计。
+- **防篡改的追加式账本（SHA-256 链）**：实验台账（`results/experiments.jsonl`）与测试集访问账本（`data_dir/.test_access_log.jsonl`）不仅追加写入，还为每条记录写入 `prev_record_sha256`（前一条有效记录的摘要，首条为 genesis）与 `record_sha256`（本条记录去掉自身摘要后的规范化 JSON 摘要）。`lega.ledger.verify_chain` 逐条复算链接，能发现中间记录被改写、删除或重排——这些操作不会改变“started/completed 各一条”的生命周期形状，却能让历史或 test look 计数失真。`python -m lega.experiment --check_artifacts` 的报告中新增 `chain` 字段，链断裂直接使台账核验失败；测试集访问摘要新增 `ledger_integrity`，链断裂时 `test_reuse_report` 标 `unverifiable`、`apply_test_reuse_gate` 把依赖 test 的确认性判定降级为探索性、`test_seal_precheck` 拒绝开始新的确认性实验，而不是继续按可能被删改的 look 计数放行。旧账本没有链字段时计为 `legacy_records`（`fully_chained=false`），不冒充“已核验”；链开始后缺失链字段则报错。边界必须如实声明：这是可发现性而非防伪，能重写整个文件的人可以重算所有摘要，尾部截断也留下一个合法前缀（`anchored=false`）；必须与 git commit、`worktree.patch`、预注册锁和外部归档合读，不能单凭链通过就宣称历史未被修改。
+- **配置解析**：训练、sanity、latency、调优与 `run_all` 统一经 `load_config_json(validate=True)` 读取配置：在解析阶段拒绝任意层级的重复 JSON 键与非对象顶层。`json` 默认对重复键“后者覆盖前者”，同一文件写两次 `lr`/`steps` 会让实际执行值与作者看到的内容不同，而配置 SHA-256 无法暴露这种语义歧义；现在重复键会在开跑前显式报错。
+- **配置契约与语义指纹**：重复键只解决“同一文件内声明冲突”，不能发现拼错的键（`seed_list`、`length_calib`）被 `dict.get` 静默忽略，也不能发现 `true`/`1.5` 被截断成另一个训练条件。`lega/config_schema.py` 因此为顶层与各嵌套块声明已知键和类型/范围，并检查 `d_model` 与 `n_heads`、`train_ctx` 与 `block_size`、RULER 上下文与模型容量等跨字段约束；下划线前缀键只作注释。正式入口在开跑前 fail closed，`_说明` 等注释键不受影响；诊断/迁移旧配置可显式 `allow_unknown=True`（只降级未知键，不放过类型错误），或 `validate=False` 只读原始内容。`python -m lega.config_schema --config ...` 可单独审计。设计计划同时写入 `config_canonical_sha256`：对键排序、紧凑序列化后的 SHA-256，与文件字节 SHA-256 互补——前者回答“两份格式不同/被重排的配置是否声明了同一实验”，后者仍负责绑定实际读取的字节。缺失键仍允许，因为代码有显式默认值；本层只拒绝“声明了但不会被读到”或“读到的值不可能来自该字段”的配置。
+
+## 结果分析协议
+
+- **训练曲线而非最终值**（`lega/curves.py` → `curve_diagnosis.json`）：训练降/验证升=过拟合（正则化/增数据/早停），**训练停滞而验证回升同样判过拟合**（平台期泛化先于训练损失恶化，不能误判成欠拟合并建议续训/扩容），**训练仍在实质下降而验证无实质变化=过拟合趋势**（验证不再随训练改善的早期信号：按正则化/早停处理，不据此续训；验证仍同步下降才是正常收敛），两者都不降=欠拟合或数据管道/学习率问题，NaN=训练失效；另独立报告 **pre-clip 梯度范数尖峰/非有限**（最大/中位数 ≥10×，NaN/发散的早期信号，可能先于损失曲线异常出现；训练日志按 log 区间记录 `grad_norm_max` 与发生步，避免只采区间末步而漏掉中段爆炸，并给出尖峰 step 清单）与**瞬态损失尖峰**（单步损失 > 邻近 5 点中位数 8×：分段均值会把它平均掉，常对应异常批次或一次梯度爆炸；同时记录区间 `loss_max`/发生步，防止一步异常被均值稀释），并对损坏日志行跳过计数。末段趋势另比较后 1/3 vs 中 1/3，避免“早先大幅改善、末段才平台/回升”被全程首末均值掩盖。训练留档图（`fig_train_curves.png`）除训练 loss 与 val PPL 两个面板外，还有训练(实线)/验证(虚线)损失同轴对照面板，泛化差距与过拟合形态一眼可见。诊断不是事后才能看：每次评测记录 `val_vs_best_rel`（当前 val 与历史最优的差距），连续 3 次无实质改善且未开早停时训练中打印过一次拟合/平台告警（`live_overfit_hint`，改善后计数归零、下轮连击会再次提示），避免“训练 loss 仍在降”的过程信号被忽略。
+- **早停是实际机制而非仅建议**（`train.py` 的 `early_stop_update` + `--early_stop_patience`/配置 `early_stop_min_delta`）：验证连续 patience 次评测无实质改善（相对阈值，不随损失尺度漂移）即终止。默认关闭（0）保证受控对比不受影响；启用时 `eval.json` 同时记录计划/实际步数与 `early_stopped`，train_log 写入 `early_stop` 终标记，曲线诊断据此把截断标注为设计行为（不再建议"增加步数"或"延长训练"），受控变量审计改为按计划步数核对并把逐 run 实际步数如实列出——不让早停把"实际步数不同"伪装成"受控条件一致"。模型选择口径不变：始终用 val 选出的 `model_best.pt`。审计同时核对实际评测协议：PPL 的 `split/eval_ctx/eval_iters/val_windows/val_tokens_evaluated` 必须同批 token，RULER 的 `ctx_lens/n_samples/sample_seed/corpus_source/max_new` 与已评测 (任务, 上下文) 格集合必须一致；配对检验还会逐种子整对剔除协议/格不一致的观测，避免独立重评或不同题面混入“同种子配对”。确认性判定由 `apply_budget_gate` 降级；`component_evidence` 的每条证据也带 `training_budget_comparable`/`fragile`/`confirmatory_supported`/`evidence_status`，机器读取时不会把统计上显著但预算不等或效应不稳健的组件证据当成确认性结论。除声明配置外，审计还核对**实际训练批次序列**：`get_train_batch` 把每批窗口起点写入 SHA-256，`eval.json` 记录 `data_order_sha256`，同 seed 下各变体必须消费完全相同的序列（只比较非早停 run）；并核对 `config_used.json` 的设备类型，CPU/CUDA 混跑直接判失败。消融矩阵的“覆盖完整”同时要求每格种子数 ≥ `MIN_SEEDS`，单种子格显式标为“种子不足”，不再因变体名出现就显示 8/8。
+- **NaN 系统排查**（`train.run_nan_checklist` → `nan_report.json`）：固定顺序 数据（**优先检查失败所在 log 区间的全部候选批次**——NaN 在 log 点才由区间累计损失发现，首个失败步可能早于检测点、预取已覆盖 `batches`，训练循环按区间保存逐步批次引用（≤ log_every 步）并以设备标量标记 `first_bad_step`，传入 `consumed_batches`/`consumed_step_labels` 才不漏罪魁数据；*val 损失非有限时改用真实验证窗口，训练批次仅作取窗失败回退*；NaN/Inf/越界 id）→ 代码（非有限参数定位 + **前向钩子逐批检查候选输入、定位首个“输入有限、输出非有限”的模块**，即 `origin`，附 log(0)/除零/softmax 溢出的排查指向）→ 混合精度（bf16/fp16 下溢-上溢风险；amp 实际生效且出现非有限时，**对命中批次做 fp32 隔离复测**：fp32 全部有限=混合精度数值问题，fp32 同样非有限=排除精度因素）→ 优化（梯度范数尖峰与学习率）。NaN 即中止训练并落盘报告，避免污染曲线；报告显式给出 `checklist_order`、结构化 `bad_batches` 与 `first_bad_data_step`。门控开销另在汇总页单列：实际逐头参数量、额外参数占比、解析门控 FLOPs/token 与总 FLOPs 占比，收益必须对照开销解读。
+- **坏案例**（`lega/badcase.py`）：RULER 错误样本按标注错误/误抄干扰值/幻觉/无数值回答归因，语言建模按最差窗口归因；跨变体对照区分共识失败与特异性盲区，逐案例 Markdown 可读。分析不止步于分类：每个案例附**粗归因轴**（数据/构造、校准、难度边界、评测/导出、模型/方法；排位对但置信低的 top1_correct 归“校准”，先于深位难度判定），主导错误模式再按确定性阈值（占比 1/3、深位失败 1/2、最小样本 3 等）合成为**改进方向**（触发证据→建议→下一步实验，按高/中/低优先级），跨变体侧统计每个变体相对 standard 的新增错误类别，把"共识失败→先修数据、特异性新增→方法盲区"落成可执行条目。改进方向进入逐案例 md、`badcase_summary.json`（带 `source` 标注）与 `summary.md`——坏案例分析是提出新改进思路的最重要来源，不能止于分类表。
+
+### 分析选择多重宇宙（specification curve；结果是否依赖单一分析口径）
+
+主检验只选一种分析口径（PPL 用原始配对差、RULER 用 macro、保留全部种子），
+但同一批观测往往有多个同样可辩护的选择。若换一种口径方向或显著性就消失，
+“显著”实际上依赖研究者的分析选择。`lega/multiverse.py` 因此把这类**研究者
+自由度**显式化：对每个对比分别重算
+
+- **metric_scale**：PPL 原始配对差 vs log-PPL 配对差（几何均值比尺度）；
+- **aggregation**：RULER macro（预注册口径）vs micro（按每格样本数加权）；
+- **seed_subset**：全部种子 vs 逐个留一（检验是否由单一种子驱动）。
+
+每个规格都走与主检验相同的同种子配对 t 检验（`paired_t_test`），并统一
+取向为“正值=候选更好”。汇总输出方向一致率、同向显著率、方向翻转规格、
+同向但不显著规格、按维度分解，以及状态标签（robust / directionally_robust /
+fragile / insufficient / undetermined_reference）。结果写入
+`significance.json` 的 `multiverse`，在 `summary.md` 的“分析选择多重宇宙”
+小节渲染；能匹配 (candidate, reference, metric) 的预注册假设另挂
+`multiverse_*` 描述字段，方向翻转时在 `detail` 追加警示。**它不改变
+支持/拒绝/未定，也不参与任何确认性门。**
+
+边界必须如实声明：规格之间高度相关且未穷尽所有分析选择，因此不做多重
+校正、不产生新的 p 值族；留一规格的 n 少 1，其“不显著”可能是功效下降而非
+反向证据；规格数很少时一致率的小数位没有解释价值；“全部规格同向显著”只
+说明在当前这些选择下结论稳定，不证明效应真实、不等于达到 SESOI，也不能
+替代 MDE、等价性检验或预注册判定。规格不足/基准为零时只报不可判定，不把
+“无法核对”写成“稳健”。
+
+### 多方案排名与选择校正（winner's curse；探索性）
+
+现有配对表以固定参照逐一比较，回答“候选是否优于参照”，但不回答两个
+多方案结果分析的问题：报告中的“最优变体”本身是从多个相关、带噪的
+方案中挑出的**最大值**（选择偏差），以及换一批训练种子后名次是否稳定。
+`lega/ranking.py` 因此把**每个种子内的方案排序**作为分析单位：
+
+- **逐种子名次**：1 = 最好，并列取平均名次；秩统计量对单调变换与离群
+  值稳健，PPL 这类比值尺度不需要先取 log；
+- **名次汇总**：平均/中位名次、名次范围、逐种子最优次数与名次分布；
+- **种子 bootstrap**：有放回重采样训练种子后重新选一次最优，报告每个
+  方案成为最优的概率（并列按 1/k 分摊）与平均名次的 95% 区间——描述性，
+  不假设正态；
+- **选择校正置换检验**：在“方案标签在每个种子内可交换”的全局零假设下，
+  每个种子内独立打乱标签，统计量为最优方案相对总体平均的最大改善
+  `max_j(mean_j − grand)` 与整体名次跨度 `max mean − min mean`。这样
+  “从 V 个方案里挑最大”的选择效应进入零分布；p 为 Monte-Carlo 置换 p
+  （含观测样本 +1 校正）。
+
+结果写入 `significance.json` 的 `ranking`（按指标分 PPL / RULER平均），
+并在 `summary.md` 的“多方案排名与选择校正”小节渲染。
+
+边界必须如实声明：这是**探索性/描述性**证据，不进入 Holm/FWER，不改变
+预注册的 支持/拒绝/未定，也不替代成对效应量、SESOI/TOST、MDE 或 Bayes。
+置换零假设要求方案标签在种子内可交换；不同方案缺失机制/训练预算/评测
+协议不一致时该假设不成立，p 只作线索。bootstrap 只重采样训练种子，不
+覆盖评测窗口/样例抽样。名次不是等距量表，平均名次差不是性能差；成对
+检验都不显著时仍可能因排序一致而出现很小的 p，反之亦然，必须并读。
+n<3 个共同种子或方案数<2 时只报不可用，不伪造 p 值。
+
+### 缺失结果敏感性（完成者分析 vs 计划分析人群；探索性）
+
+设计符合性门只回答“计划矩阵是否齐全”，不回答“跑成功的这些种子是否恰好
+更好/更差”。主检验是 available-case / complete-case：候选或参照任一缺失的
+配对直接不进 t 检验。若缺失与结果相关（更大的模型更容易 NaN、更难的种子
+更容易中止），完成者均值本身可能有方向。`lega/missingness.py` 因此对每个
+对比×指标报告：
+
+- **缺失模式**：计划内 (变体, 种子) 中双方齐全、仅候选缺失、仅参照缺失、
+  双方缺失的数量与种子清单；计划缺失率与两臂缺失率之差
+  （differential attrition）。
+- **临界点（tipping point）**：假设所有缺失配对差取同一值 δ，求使完整均值
+  等于 0、+SESOI、−SESOI 的 δ；PPL 用逐种子相对差对齐 1% SESOI，RULER
+  用绝对 EM 差对齐 1.00 pp。δ 落在已观测配对差范围内时标为敏感。
+- **观测范围边界**：把缺失配对差全部设为观测到的最小/最大配对差，给出完整
+  均值的可能范围；范围跨过 0 或 SESOI 时显式警示。
+- **Manski 最坏情形界（部分识别）**：RULER EM 是有界 outcome（∈[0,1]），
+  因而可对每个缺失配对构造 sharp 差值区间：候选缺/参照 r 为
+  `[0-r, 1-r]`，参照缺/候选 c 为 `[c-1, c]`，双缺为 `[-1, 1]`；在计划
+  种子数上平均得到 `mean_diff_bounds`，并据此判 `mean_sign_identified`。
+  对所有指标还把缺失配对的方向得分（+1/0/−1）取 `[-1, +1]`，得到
+  `sign_score_bounds` 与 `sign_score_identified`。这两类界只假设 outcome
+  范围与计划种子，不假设缺失随机；PPL 无界，只报符号得分界。
+
+计划种子来自 `design_plan.json` 的 `inputs.seeds`，因此能发现“计划了但两侧
+都没产出”的单元；计划缺失，或计划与本次 `repro.json` 的变体/种子集不一致
+（上一轮遗留计划）时，退化为本次 repro 的种子范围（`planned_seeds_source=
+repro_scope`）；连 repro 种子也没有时退化为现有 runs 的种子并集
+（`observed_union`），后者只能发现单臂缺失。只有两侧都至少有一个实际 run 的
+对比进入本层；整臂未运行属于设计符合性问题，由 `analysis_population` /
+设计门单独处理，不能在这里膨胀成大量空配对。协议不一致
+（PPL split/eval_ctx/eval_iters/val_windows vs RULER 上下文/样本/题面签名）
+的配对按缺失处理并单独计数，不静默混入完成者样本。
+
+**边界**：这不是多重插补，也不假设 MAR/MCAR；观测范围只是透明的敏感性
+尺度，不是概率区间，也不是严格最坏情形界——真实缺失值可以比任何已观测
+种子更极端。“观测范围内稳健”不证明缺失随机，也不能写成“无偏”。新增的
+Manski 界是严格最坏情形界，但仅假设 outcome 范围与计划种子；PPL 无界，
+只能给符号得分界，且界会随缺失数线性变宽。均值界跨 0 时只说明均值方向
+未定，不能写成“无效应”；符号得分界跨 0 同理。“观测范围内稳健”但
+Manski 均值界跨 0 时，报告必须并列两者，不能只引用前者宣称稳健。观测
+不足（完整配对 < 3）仍给描述性边界，但显式标 `insufficient_seeds`，不作
+稳健判词；全部缺失时返回 `no_observed_pairs`，不拿 0 个观测做方向判断，
+也不报告只由 outcome 范围决定的空 Manski 界。该层不进入 Holm/FWER，不
+改变预注册的 支持/拒绝/未定，只与设计降级、MDE、TOST 并列披露。结果
+写入 `significance.json` 的 `missingness`，在 `summary.md` 的“缺失结果
+敏感性”小节渲染；机器字段包括逐种子缺失清单、`missing_mean_for_zero`、
+`missing_mean_for_plus_margin`、`missing_mean_for_minus_margin`、
+`full_mean_range`、`partial_identification.mean_diff_bounds`、
+`sign_score_bounds`、`mean_sign_identified`、`sign_score_identified`、
+`within_margin`、`margin_status` 与状态标签。
+
+### SESOI 与等价性/非劣性（TOST；把“不显著”与“无差异”分开）
+
+显著性检验只回答“能否拒绝 Δ=0”。本项目种子数只有 3~5 个，`p>0.05` 既可能
+是“真的没有实际重要差异”，也可能只是功效不足；**不能把两者混写成“无差异”**。
+`lega/equivalence.py` 因此增加一层 SESOI（smallest effect size of interest，
+最小重要差异）解释：
+
+- **SESOI 是分析前声明的协议阈值**，不是从当前数据估计出来的。默认值：
+  PPL 逐种子相对差 **1%**（log-PPL 为几何均值比 1%）、RULER EM **1.00 pp**、
+  AUROC / PR-AUC 差 **0.010**、因果病灶 ΔNLL **0.01 nat**（约 1% PPL）、
+  Shapley 的 PPL 值 **0.01**（−log PPL 单位）与 RULER 值 **1.00 pp**。
+- **等价（TOST）**：对配对差做双单侧 t 检验，H0_low: μ≤−SESOI、
+  H0_high: μ≥+SESOI；只有两个单侧检验都在 α 下显著（等价于
+  100(1−2α)% 区间完全落在 ±SESOI 内）才判“等价”。
+- **非劣**：只检验“候选比参照差不超过 SESOI”这一侧；用于“新方法没有
+  明显更差”的主张，方向随指标好坏翻转（PPL 越小越好，AUROC/RULER 越大越好）。
+- **统计显著但幅度低于 SESOI**：差异可重复，但实际意义有限；不能只报
+  “显著优于”就当作重要收益。
+- **未定**：区间既不能排除 0，也不能排除超过 SESOI 的差异；不能写成
+  “无差异/无效应”，只能写“未定，需补种子或降方差”。
+
+TOST 的 p 与优效性 t 检验是**不同的检验族**：`run_all` 在同一指标家族内对
+TOST 原始 p 单独做 Holm 校正（`_adjust_equivalence_family`），n<3 的对比不占
+家族大小、也不判等价。0.5×/1×/2× 的 SESOI 敏感性网格各自再做一次 Holm；
+若结论随网格翻转，必须在报告中并列披露，不能只挑对主张有利的阈值。等价性
+判定**不改变**预注册假设的 支持/拒绝/未定 状态，只作为“实际意义”补充；
+`significance.json` 的 `pairs[*].equivalence` 保留 `p_tost`、`p_tost_adj`、
+90%/95% 区间、方向、`beyond_margin`、`noninferior`、`sensitivity` 与最终
+`status`；顶层 `equivalence` 给出核心指标的计数与 margin 清单；预注册假设
+另带 `equivalence_status`/`equivalence_label`。
+
+**因果病灶中的零假设**尤其需要这一层：`head_permute` 是推理期容量/分布
+安慰剂，“p>0.05”不能直接写成“安慰剂无效应”。只有 TOST 判等价，才能说
+“差异小于 SESOI，与容量/分布解释一致”；若显著变差且超过 SESOI，才支持
+“头—证据对应有因果作用”。`gate_closed` 是阳性对照，若它与正常等价，
+说明实验灵敏度不足，必须先排查实现/评测；`no_op`（训练后系数已为 0）不参与
+等价性判定，因为干预根本没有改变前向，“无差异”不是“无效应”的证据。
+`summary.md` 的“SESOI 与等价性/非劣性”表与“关键病灶的 SESOI 解读”表分别
+呈现这两类证据。
+
+边界必须如实声明：TOST 仍是 t 分布近似，小样本下与置换检验/MDE 合读；
+SESOI 是协议约定，换一个 margin 结论可能改变，所以敏感性网格是必报项；
+“等价”只说明差异小于某个实际重要阈值，不说明效应恰好为 0，也不替代
+优效性检验或预注册判定。**目前的 SESOI 未写入
+`preregistration/hypotheses.json` 的锁链**，因此所有等价性判定一律按
+补充性/描述性证据处理；若要把某条“等价/非劣”升级为确认性主张，必须先把
+margin 与对比登记进预注册表并走 `--amend` 修订链，再在新的种子/数据上检验。
+
+**先验等价功效（设计阶段，`lega/design/power.py`）**：只在结果出来后算 TOST
+p 值仍然不够，因为“这次没显著”可能从一开始就没有能力判等价。设计计划因此
+为 PPL、RULER 种子级、AUROC、AP 写入 `equivalence_plan`，并生成
+`ppl_equivalence_power` / `ruler_seed_equivalence_power` /
+`auroc_equivalence_power` / `ap_equivalence_power` 四条检查。它们默认只
+`warn`，不阻断正式实验，因为等价/非劣当前仍是补充性证据；但会把“计划种子
+数能支持什么”写死在训练前：
+
+- `tost_power(effect, sd, n, margin)` 对配对差做双单侧检验的功效。小样本用
+  条件 χ² 数值积分（Gauss–Laguerre），n>200 用正态近似；返回
+  `power`、`power_normal` 与 `method`，避免把优效性 `paired_t_power`
+  误当成等价功效。
+- `tost_required_pairs(margin, sd, effect=0)` 给出达到目标功效的最少种子数；
+  真实差异接近或越过 SESOI 时返回 `None`（加种子无法把功效救回来）。
+- `noninferiority_power` / `noninferiority_required_pairs` 单独规划单侧
+  非劣性；它比 TOST 有功效，但**不能替代等价**，报告中必须分开写。
+- 计划表同时列出真实差异为 0、0.5×SESOI 和 SESOI 边界的 TOST 功效。
+  参考 SD=1%、margin=1% 时，5 个种子对“差异=0”的 TOST 功效仅约 0.295
+  （需约 11 个种子才到 80%），非劣性功效约 0.580（需约 8 个）；若真实差异
+  已达 0.5×SESOI，则需约 27 个种子才能有 80% 等价功效。也就是说，
+  **5 种子下 `p>0.05` 既不能写“等价”，通常也不能写“非劣”**；只能写
+  “未检出差异/未定”，并引用 `equivalence_plan` 的所需种子数说明缺口。
+- 这些数字仍依赖声明的配对差 SD 与 margin；换 margin 或 SD 假设会改变
+  结论，所以表按网格给出，不能只挑一行。等价/非劣若要从补充性升级为
+  确认性，仍须先把 margin、对比和种子数登记进预注册锁链，再在新数据上
+  检验；不能在看到结果后静默加种子重算同一个 p 值。
+
+### 新种子复现预测（均值 CI ≠ 单次复现区间）
+
+跨种子 t 检验与均值置信区间回答的是“当前这组种子的**均值**能否拒绝 0”；
+它们不回答“再抽一个新训练种子，候选是否仍会赢”。两者在小样本下差别很大：
+均值的标准误按 `1/√n` 收缩，而单个新种子的预测方差还要加上种子自身方差，
+宽度按 `√(1+1/n)` 放大。把 95% CI 当作“下一个种子有 95% 概率落在其中”
+会系统性过度自信。`lega/replication.py` 因此为每组配对差
+`d_i = 候选_i − 参照_i` 增加一层**描述性**预测：
+
+- **t 预测区间**：`mean ± t_{n−1,1−α/2} · sd · √(1+1/n)`，
+  回答“同配置/同数据/同评测协议下换一个种子，配对差可能落在哪”；
+- **同号概率**：`F_t(|mean| / (sd·√(1+1/n)); n−1)`，即新种子与已观测
+  均值同号的模型预测概率（≥0.95 标“方向稳定可复现”，≥0.8 标“方向
+  可复现”，否则“未定”）；
+- 若该指标有 SESOI，再给三个互斥且穷尽的预测概率：新种子**同向超过
+  SESOI**、**落在 ±SESOI 等价带内**、**反向超过 SESOI**；另有“反号概率”
+  作为更宽的口径（反向但仍在等价带内也计入）；
+- **留一方向一致率**：删掉任一种子后用其余种子均值预测该种子符号的一致
+  比例（零差/留一均值为 0 记 0.5），不含分布假设，只作 t 预测的朴素对照。
+
+集成方式：`_enrich_paired` 在原始指标尺度写入 `tests[*].replication`；
+`assess_paired_equivalence` 在**指标尺度**（PPL 相对差、log 比、RULER 绝对差
+等）写入 `tests[*].equivalence.replication`，避免把原始 PPL 单位的预测
+区间与相对 SESOI 混读。`significance.json.equivalence.replication` 汇总
+状态计数；`summary.md` 的 SESOI 小节后新增“新种子复现预测”表。
+
+边界必须如实声明：这是**预测/描述性**证据，不是新的确认性检验，不改变
+预注册判定；模型假设种子效应独立、可交换且近似正态，3~5 个种子无法检验
+该假设，重尾或种子×数据交互会让概率失真；零方差（所有配对差完全相同）
+单列为 `degenerate_zero_variance`，不能当作强复现证据；n<3 与项目其余
+协议一致不作概率判定；预测只适用于同配置/同数据/同评测协议下的新训练
+种子，不外推到新数据、新超参数、新硬件或更长上下文。
+
+### 贝叶斯证据（JZS Bayes factor；把“不显著”与“支持 H0”分开）
+
+`p>0.05` 仍然不能回答“数据更支持 H0 还是 H1”。TOST 只检验“差异是否小于
+SESOI”，MDE 只说“当前设计能检测多大效应”，都不给出两个假设的相对证据。
+`lega/bayes.py` 因此增加一层**补充性**贝叶斯分析：对配对差
+`d_i = 候选_i − 参照_i` 拟合
+
+```
+d_i ~ Normal(μ, σ²),   δ = μ/σ ~ Cauchy(0, r),   p(σ) ∝ 1/σ
+```
+
+其中 `r=1/√2` 是分析前固定的标准化效应先验尺度（Rouder et al. 2009 的常用
+默认）。在 `(δ, log σ)` 网格上积分得到：
+
+- **BF10 / BF01**：H1（μ≠0）对 H0（μ=0）的边际似然比及其倒数。
+  `BF10>3` 才写“弱支持 H1”，`BF10<1/3` 才写“弱支持 H0”，
+  `1/3≤BF10≤3` 只能写“证据不足”。`BF10=1` 表示数据不区分两个假设，
+  **不是“无效应”**；BF 也不是“H1 为真的后验概率”。
+- **后验方向概率** `P(μ>0)` / `P(μ<0)` 与 μ 的后验中位数/均值/95% 可信
+  区间；它们回答“效应方向有多确定”，与抽样分布下的 CI 不是同一概念。
+- **ROPE 后验质量**：复用该指标的 SESOI 作为实际等价带，报告
+  `P(|μ|<SESOI)`、`P(μ≥SESOI)`、`P(μ≤−SESOI)` 三个互斥区域的后验质量。
+  这是**后验概率**，不是 TOST 的错误率控制；两者可并读，不能互相替代。
+- **先验尺度敏感性**：固定报告 `r` 的 0.5×/1×/2× 三档 BF10 与证据标签。
+  若不同尺度改变证据方向，只能写“结论依赖先验”，不能只报对主张有利的
+  一档；先验必须在看到结果前选定，事后换先验属于选择性分析。
+
+集成方式：`_enrich_paired` 通过 `equivalence.paired_metric_diffs` 把配对差
+变换到与 SESOI 相同的指标尺度（PPL 相对差、log 比、RULER 绝对差等），
+再把 `equivalence.margin` 作为 ROPE，写入 `tests[*].bayes`；未定义 SESOI
+的指标退化为原始配对差且不报 ROPE。`significance.json` 顶层 `bayes` 给出
+核心指标的计数与先验尺度，`pairs[*].bayes` 保留全部字段；`summary.md` 的
+“贝叶斯证据”表只展示核心指标，其余对比仍可从 JSON 读取。
+
+边界必须如实声明：这是**补充性/描述性**证据，不进入 Holm/FWER，不改变
+预注册的 支持/拒绝/未定 判定，也不能替代 t 检验、置换检验、TOST 或 MDE。
+JZS 仍假设配对差独立且近似正态；3~5 个种子无法检验该假设，后验区间和 BF
+都会受先验影响。零方差（所有配对差相同）是模型退化情形：H1 可用 σ→0
+精确拟合，BF 无定义，必须标为 `degenerate_zero_variance`，不能当成强证据；
+n<3 仍给描述性后验但 `decision_eligible=false`。换指标尺度、换 ROPE 或换
+先验后再计算，必须并列披露，不能用“贝叶斯显著”替代预注册结论。
+
+## 实验设计与准备（先验功效、分析人群与设计符合性）
+
+前面几节大多在**结果产生之后**做校正；但“这个实验值不值得跑、能回答什么”
+必须在开跑前决定。`lega/design/` 因此把设计阶段的五件事变成可执行产物：
+
+1. **先验灵敏度**：在花训练算力之前，回答“计划种子数 / RULER 每格样本数
+   能检出多大的效应”。配对 t（PPL/RULER/AUROC/AP 的**种子级**确认性
+   比较）用与 `min_detectable_effect` 同一正态近似：
+   `power = Φ(|Δ|/(σ/√n) − z_{1−α/2}) + Φ(−|Δ|/(σ/√n) − z_{1−α/2})`；
+   `required_pairs` 是它的逆运算。RULER 的逐格配对二值结果另用 McNemar
+   描述**评测样本级**精度：n≤500 时精确枚举 H0 拒绝域与条件二项分布，
+   更大时用 `power ≈ Φ(√n|Δ|/√π − z) + Φ(−√n|Δ|/√π − z)`（π 为
+   不一致率）。两套单位分开规划，不能拿“每格样例数”冒充种子级功效。
+   计划输出的是**对一系列合理 SD/不一致率的灵敏度曲线**，不把某一个
+   任意假设伪装成数据估计；配置 `design.ppl_paired_sd_rel` /
+   `design.ruler_paired_sd` / `design.ruler_discordance` 若显式声明，
+   则额外核对计划种子数或每格样本量是否达到目标功效（声明值必须写死在
+   跑之前，不能事后挑）。
+2. **分析人群**：训练前把“计划内 (变体, 种子) 全集”写进
+   `design_plan.json`，并声明排除规则——只允许运行在评测前失败、数据/
+   配置/训练预算协议违规、产物损坏、测试集访问违规等**与结果无关**的
+   排除；禁止因结果不利、离群或不显著而事后删种子/变体。缺失单元必须
+   报告；可用样本估计（available-case）只能作描述性敏感性分析（实现见
+   “缺失结果敏感性”小节与 `lega/missingness.py`）。
+3. **设计符合性**：汇总时用 `analysis_population` 把实际产物与计划逐格
+   比对。计划内单元缺失时，`apply_design_gate` 只降级**受影响假设**的
+   确认性判定（候选/参照变体或该指标端点涉及缺失单元），未受影响的
+   假设保留原判定；但“少跑预注册种子/计划矩阵缺登记变体”是全局设计
+   违规，全部确认性判定降级——前者使登记范围内仍有未观测种子，后者使
+   部分假设根本无法检验。计划缺失/与本次 `repro.json` 的变体、种子或
+   配置 SHA-256 不一致时（上一轮遗留计划）不据此降级，但显式告警
+   “无法核对分析人群”，避免用旧计划冤枉新实验或反过来放行。
+4. **分析代码冻结与运行期漂移**：计划落盘时把训练/评测代码、配置、
+   预注册表与依赖声明的源码树指纹写入 `inputs.analysis_code`
+   （`lega.repro.source_tree_fingerprint`，逐文件 SHA-256 + 总 digest）。
+   汇总时重新计算；digest 不一致即 `code_freeze_gate=True`，确认性判定
+   全部降级为探索性，并列出变更/新增/删除文件示例——防止“先写计划、
+   跑完再改分析代码/阈值、然后只报显著结果”。若 `repro.json` 的
+   `tracking_end.drift.changed` 为真（实验期间 git/工作区/源码树/数据
+   身份变化），同样触发 `provenance_drift_gate=True`，因为该轮不能
+   声称全程对应单一版本。另外，`repro.json` 的 `design.plan_digest` 是
+   启动时的计划摘要；汇总时磁盘上的 `design_plan.json` 与之不一致，说明
+   计划在结果产生后被改写，触发 `plan_integrity_gate=True`，避免用新
+   计划“追认”旧结果。旧计划没有代码指纹、旧产物没有 `tracking_end`
+   时显式标记“未核对”并告警，但不据此降级；**未记录不能当成未变化**。
+5. **开跑前数据身份与测试集尘封**：设计计划必须在任何 test 消费之前
+   绑定**实际输入字节**。`lega/design/preparation.py` 在计划生成前读取
+   `data_fingerprint`（逐文件 SHA-256 + 合并 digest + `test.bin` 哈希）与
+   `.test_access_log.jsonl`，把 `data_identity`、`test_access` 写入计划并
+   纳入 `plan_digest`。`data_identity` 检查核对数据指纹与访问账本中的
+   `test_data_fingerprint` 是否指向同一 test 版本；`test_access_precheck`
+   按 `test_look_budget` 计算**开跑前**同一 test 版本已被多少个独立
+   `pipeline_run_id` 消费、是否已有无法归属 run 的旧记录。预算已耗尽时
+   计划显式 `fail`，避免先看 test 再补设计或重复烧算力。汇总时
+   `data_identity_gate` 再比对计划 digest 与 `repro.json` 的当前数据
+   digest；重建/替换 bin 后沿用旧计划会直接触发确认性降级。旧计划没有
+   数据身份字段时只告警“未核对”，保持向后兼容。
+   同时，`run_all` 把 n-gram 的 **test split** 评测从训练前延迟到设计
+   计划落盘且全部训练/最终评测之后；val split 仍在训练前给出统计基线。
+   这样统计基线本身不会成为“先访问 test 再决定设计”的通道。
+
+### 执行顺序：种子为区组、区块内随机化
+
+同一台机器上的顺序不是中性的：GPU 温度/降频、文件缓存、驱动状态和后台
+任务都会随轮次漂移。旧的 `for variant: for seed` 让某个变体永远排在固定
+时段，方法效应与时间漂移完全混淆。新计划默认使用**随机化区组**：
+
+- 每个训练种子是一个区组，区内包含全部计划变体各一次；
+- 区内顺序由跑前确定并写入 `design_plan.json` 的 `run_order`，随机流只
+  依赖变体/种子/模式（或显式 `design.run_order_seed`），不读任何结果；
+- `run_all` 按 `run_order.cells` 提交 run，失败归因也按该单元取变体，不再
+  假设变体主序；`design.run_order` 可显式设为 `seed_major` /
+  `variant_major`（旧行为），但后者会在设计检查中告警“可能与时间漂移
+  混淆”；
+- `run_order` 摘要进入 `repro.json` 的 `design` 字段，顺序本身可复算。
+
+**并发限制**：`--jobs>1` 时随机化的是**提交顺序**，多个 run 仍可能重叠
+执行，因此不能把区组随机化当作完全消除漂移。对时间/硬件敏感或需要严格
+区组解释的正式实验，应设 `--jobs 1` 顺序执行；默认 CPU 并发只减少
+“变体主序”这种系统性混淆。
+
+### 机制端点：AUROC/AP 也要先验规划
+
+预注册的 H6/H7 是机制端点（AUROC、AP 的候选−参照配对差），但旧计划只给
+PPL/RULER 算功效，等于对机制主张“先跑再看”。现在 `endpoints.auroc` /
+`endpoints.ap` 与 PPL/RULER 并列给出：
+
+- SESOI 默认 0.01（绝对 AUROC/AP 差），显式配置
+  `design.mechanism_sesoi` 可改；
+- 对 `MECHANISM_SD_GRID` 中每个跨种子配对差 SD 给出未校正与确认性 MDE、
+  功效、所需种子数；
+- 声明 SD 用 `design.auroc_paired_sd` / `design.ap_paired_sd`；声明值在
+  `α_eff` 下功效不足时，`auroc_declared_power` / `ap_declared_power`
+  fail，而不是等到汇总才说“机制结果不显著”；
+- 机制端点的候选变体必须在分析子集内（参照“仅查询项”由同一
+  `analysis_*.json` 内部计算，不是独立变体）；计划阶段
+  `mechanism_endpoint_variants` 会直接检查，避免把“没有分析产物”误当成
+  “无效应”。
+
+这里的 SD 是**换训练种子**时配对差的标准差，不包含单次评测有限样例的
+抽样误差；后者由逐 run 的样例聚类 bootstrap 回答，两者不能互相替代。
+
+### RULER 的两个推断单位：种子级确认 vs 评测样本级精度
+
+RULER 的确认性假设（H4）是对**跨种子 macro EM 配对差**做配对 t 检验，
+推断单位是训练种子；逐格 McNemar 的推断单位是评测样例。旧设计计划只给
+每格样本数算 McNemar 功效，等于用“评测抽样精度”回答“换种子能否复现”，
+两者不能互相替代。现在 `endpoints.ruler` 明确拆成两层：
+
+- `sensitivity`（原有字段）：每格 n 个样例、不同不一致率下的 McNemar
+  MDE/功效/所需每格样本数，只描述**评测抽样精度**；
+- `seed_level`（新增）：按 `RULER_SD_GRID` 中每个跨种子 macro EM 配对差
+  SD（绝对尺度）给出未校正与确认性 MDE、功效、所需种子数，并报告
+  `max_paired_sd_for_sesoi_pp`。这是 H4 实际使用的推断单位。
+
+配置 `design.ruler_paired_sd` / `design.ruler_paired_sd_grid` 分别声明
+计划 SD 与展示网格；声明值在最终 `α_eff` 下功效不足时，
+`ruler_seed_declared_power` / `ruler_seed_confirmatory_power` 直接 fail，
+不会等到汇总才用“逐格样本很多”掩盖种子级功效不足。未声明计划 SD 时，
+`ruler_seed_reference_sensitivity` 只把 1pp 当作展示横轴，
+`ruler_seed_confirmatory_reference` 在参考值功效不足时告警。汇总页同时
+渲染两张表并明确写出“增加每格样例数不会降低种子级方差，反之亦然”。
+
+### 确认性功效：按最终判定阈值规划（不是名义 α）
+
+先验功效最容易犯的错误，是用名义 `α=0.05` 计算“5 个种子能检出 1% SESOI”，
+但最终判定并不是单次检验。`run_all.py` 先在同一指标家族内做 Holm 校正
+（`_apply_holm`：PPL、RULER、AUROC/AP 各自成族），再对全部预注册假设做
+一次全局 Holm（`apply_global_fwer`）。Holm 在**最坏情形**下把任一假设的
+阈值收紧到 `α/m`，因此设计阶段必须用
+
+```
+α_eff = α / max(m_family, k_global)
+```
+
+规划，而不是拿 `α` 直接算。这里 `m_family` 是该指标家族计划内全部配对
+（包括探索性对比；Holm 不会因为对比没预注册就不惩罚），`k_global` 是
+计划内可检验的预注册假设数。`design.multiplicity` 可选
+`holm_worst_case`（默认，取两者最大负担）、`family_only`（只按家族）或
+`none`（仅兼容/展示未校正口径）；正式设计必须用前两者之一。
+
+家族大小由**计划配对矩阵**推导，不靠手填：9 个变体 vs `standard`、
+6 个 `SINGLE_FACTOR_PAIRS`、预注册表追加的整体对比（例如 H5 的
+`lega vs qgate`），当前正式矩阵为 16 个 PPL/RULER 检验；全局确认族为
+7 条预注册假设。设计层因此输出两套并列字段，而不是覆盖旧字段：
+
+- 未校正：`mde_relative`、`power_for_sesoi`、`required_seeds_for_sesoi`
+  （旧口径，保留用于对照/向后兼容）；
+- 确认性：`mde_relative_confirmatory`、
+  `power_for_sesoi_confirmatory`、
+  `required_seeds_for_sesoi_confirmatory`；RULER 对应
+  `mde_pp_confirmatory` 等；端点级还有
+  `max_paired_sd_for_sesoi_confirmatory` /
+  `max_discordance_for_sesoi_confirmatory` 与 `multiplicity` 元数据。
+
+`multiplicity_plan` 会把模式、各家族大小、全局族大小、计划配对清单和
+`α_eff` 一并写进计划摘要，并新增 `multiplicity_plan` /
+`ppl_confirmatory_reference` 等检查；声明假设在 `α_eff` 下功效不足时，
+`ppl_confirmatory_power` 直接 fail（冒烟运行降为 warn）。这样“5 个种子
+够不够”与“5 个种子在最终 Holm 判定下够不够”不会混成同一个结论。
+
+**这是保守规划下界，不是精确 Holm 功效**：实际 Holm 阈值取决于同族其他
+p 值的大小，设计阶段不知道它们，只能用最坏情形避免高估；如果其他假设
+很强，真实功效可能高于此下界。反过来，把探索性配对排除出家族大小会
+系统性低估多重比较负担，因此这里不这么做。
+
+**多次 test look 必须进入先验功效，而不是只在汇总层事后收紧。** 汇总层对
+依赖 test 的假设比较的是已经过 Holm/全局校正的 `p_adj_confirmatory` 与
+`alpha/planned_looks`（`lega/testreuse.py`）。因此最终的最坏情形阈值是
+`alpha/(max(m_family, k_global) · planned_looks)`：先验功效若只乘 Holm
+负担、不乘 look 负担，就会把“计划看两次 test”的设计误报为足够有功效。
+`design.test_look_budget > 1` 时，计划现在额外输出：
+
+- `multiplicity_plan.alpha_effective_with_looks`（PPL/RULER 的最终规划阈值）
+  与 `test_look_budget`；
+- PPL 每行 `mde_relative_test_look_adjusted` /
+  `power_for_sesoi_test_look_adjusted` /
+  `required_seeds_for_sesoi_test_look_adjusted`，以及
+  `max_paired_sd_for_sesoi_test_look_adjusted`；RULER `seed_level` 对应
+  `mde_pp_test_look_adjusted` 等字段；
+- `test_look_planning` 检查与声明 SD 下的 `ppl_test_look_power` /
+  `ruler_seed_test_look_power`：look 校正后功效不足时显式 `fail`，而不是
+  等到汇总才降级；
+- `summary.md` 的 PPL 与 RULER 种子级表在 look>1 时增加三列 look 校正后的
+  MDE/功效/所需种子，并注明设计是否足够应以后三列为准。
+
+look=1 时这些字段仍保留（等于确认性阈值），旧计划没有该字段时汇总保持
+向后兼容。look 预算过大导致 `alpha/looks` 下溢为 0 时，计划明确标为不可
+表示，不会伪造一个有功效的阈值。
+
+### 计划里必须有什么
+
+`design_plan.json` 在正式训练开始前落盘（基线调优等准备步骤之后；只消费配置、预注册表、数据文件哈希与 test 访问账本，不读取任何评测结果或 test token 内容），字段包括：
+
+- `inputs`：配置 SHA-256、变体、种子、α/功效、`multiplicity` 模式与
+  `alpha_effective`、登记假设 id、预注册 `scope.seeds`、可产出机制分析
+  的变体子集 `analysis_variants`（例如 `standard` 无输出门、不产出
+  `analysis_*.json`，不能被误算成缺失）；记录 `run_order_mode` /
+  `run_order_seed` / `run_order_seed_source`、机制端点分析样例数与是否
+  传入 `data_report`；
+- `run_order`：模式、顺序种子及来源、种子区块数与 run 数、逐 run 的
+  `position/block/variant/seed`；`run_all` 直接消费该清单；
+- `scope_readiness`：预注册 `scope.config` 与当前配置的模型/训练规模差异、
+  `scope.data` 声明与 `data_report.tokenizer.kind` 的核对结果；只比较
+  `d_model/n_layers/n_heads/ffn_mult/block_size/steps/train_ctx`，不把
+  按协议统一调优的 lr/weight_decay 误判为范围外；
+- `data_budget`：来自 `data_report.accounting` 的 train/val/test token 数、
+  计划每种子 token 触碰次数（steps × batch × grad_accum × train_ctx）、
+  触碰次数相对 train token 数的倍数、若随机重采样的预期唯一 token 覆盖
+  比例，以及 val/test 在每个 eval_ctx 下的可用窗口数；不读取原始文本，
+  也不访问 test；
+- `assumptions`：显式声明的计划假设与“仅作展示横轴”的参考值，二者分开；
+  另记录 `multiplicity` 模式、`run_order` 模式与机制端点声明 SD；
+- `multiplicity_plan`：模式、PPL/RULER/AUROC/AP 家族大小、全局确认族
+  大小、计划配对清单与四类指标的 `α_eff`，让摘要绑定“最终要做多少次
+  检验”；AUROC/AP 机制族按每个有分析产物的变体计一个检验；另含
+  `test_look_budget` 与 `alpha_effective_with_looks`（依赖 test 的
+  PPL/RULER 再除以 look 预算后的先验规划阈值）；
+- `endpoints.ppl`：SESOI（默认 1%）、各 SD 下的未校正/确认性/多次 look
+  校正后的 MDE、功效、所需种子数，以及三种口径下可容忍的最大配对差 SD；
+- `endpoints.ruler`：每格样本数、格子数、各不一致率下的未校正与确认性
+  McNemar 功效/MDE/所需每格样本数、两种口径下可容忍的最大不一致率
+  （评测样本级）；`seed_level` 另给确认性 H4 实际使用的跨种子 macro EM
+  配对差 SD 网格、未校正/确认性/多次 look 校正后的 MDE、功效、所需种子数
+  与可容忍最大 SD；
+- `endpoints.auroc` / `endpoints.ap`：机制端点的绝对 SESOI、各跨种子
+  配对差 SD 下的未校正/确认性 MDE、功效、所需种子数，以及声明 SD；
+- `endpoints.*.equivalence_plan` / `seed_level.equivalence_plan`：等价性
+  （TOST）与非劣性先验功效、真实差异为 0/0.5×SESOI/SESOI 边界时的功效、
+  达到目标功效所需种子数，以及名义 α 仅作补充性证据的声明；对应
+  `*_equivalence_power` 检查默认只 `warn`，不阻断正式实验；
+- `analysis_protocol`：分析人群、排除规则、缺失数据处理、停止规则、
+  test 封存、多重比较策略；
+- `data_identity`：计划生成前的实际数据指纹（逐文件 name/size/SHA-256、
+  合并 digest、`test.bin` 哈希；不含 mtime，复制到其他机器仍可比）；
+  汇总时与 `repro.json` 的当前数据 digest 比对，不一致即确认性降级；
+- `test_access`：计划生成前读取的 test 访问账本摘要与开跑前预检：
+  `prior_looks`（排除本次已计数的独立 look）、
+  `budget_exhausted_before_run`、`remaining_before_this_run`、
+  `can_start_confirmatory`、无法归属 run 的旧记录数；`test.bin` 不存在时
+  标记“本轮不消费测试集”，但不会把“无测试集”伪造为“已核对 0 次访问”；
+- `test_look_budget`：同一 `test.bin` 版本允许的独立 `pipeline_run_id`
+  数（默认 1）。开跑前先按访问账本核对预算是否已耗尽；汇总再核对实际
+  look，超预算时把依赖 test 的 PPL/RULER 确认性判定降级为探索性；预先
+  声明多次 look 时以 `alpha/planned_looks` 作为保守判定阈值，并单列无法
+  归属 `run_id` 的旧账本记录，避免把“无法核对”当成“只访问过一次”；
+- `registered_plan`：登记假设的 id/指标/候选/参照/方向的只读快照，
+  使计划摘要同时绑定确认性分析计划本身；
+- `inputs.analysis_code`：计划落盘时的分析代码/配置/预注册/依赖源码树
+  指纹（总体 digest + 逐文件 SHA-256）；汇总时不一致即代码冻结失败，
+  不是重新生成一个计划就能掩盖；
+- `checks`：种子数下限、是否覆盖预注册种子、预注册配置规模/数据分词器
+  是否一致、run 顺序是否为随机化区组、登记假设的候选/参照变体是否都在
+  计划矩阵内、机制端点是否有可分析产物、确认性多重比较规划与 `α_eff`、
+  上下文档位是否为合法正整数且至少两档/跨度足够、RULER 最长上下文是否
+  超过 `block_size`/`train_ctx`、`length_null` 是否覆盖最长档位、声明假设
+  下的未校正与确认性功效（含 RULER 种子级 `ruler_seed_declared_power` /
+  `ruler_seed_confirmatory_power`）、训练 token 触碰次数与 val 窗口是否
+  足够、分析规则是否声明；
+- `plan_digest`：排除时间戳/机器路径后的内容 SHA-256，供 reproducible 审计。
+
+每次 `save_design_plan` 还会向同目录的 `design_plan_history.jsonl` 追加一行
+（同一 digest 连续写入去重）；重跑/改种子/改样本量时旧计划不会被
+`design_plan.json` 静默覆盖。汇总页在历史多于一条时显式告警，读者必须
+按最新计划核对当前产物，不得把旧计划下的结果混入。
+
+**关键设计事实（正式 small 配置）**：计划 PPL/RULER 家族各有 16 个检验，
+全局确认族 7 条，因此 `α_eff=0.05/16=0.003125`。在参考配对差 SD=1% 时，
+5 个种子对 1% SESOI 的未校正功效约 0.61、所需约 8 个种子；按确认性
+`α_eff` 只有约 0.24、需约 15 个种子。80% 功效下可容忍的配对差 SD 从
+未校正约 0.80% 收紧到确认性约 0.59%。RULER 每格 30 个样例对 1pp SESOI
+的 McNemar 功效本来极低（参考不一致率 10% 时约 0.002，需每格约 7800 个
+样例），校正后更低；因此 RULER 的 1pp 等价/非劣判定只能作描述性证据。
+但更关键的是种子级：跨种子 macro EM 配对差 SD 若为 1pp，5 个种子对 1pp
+SESOI 的未校正功效也只有约 0.61、确认性约 0.24（需约 15 个种子），
+与 PPL 的 1% 参考同量级；每格 30 个样例再多也不能补上这个缺口。若要升级
+为确认性主张，必须先增加每格样本数/种子数并重新登记，而不是把“未检出”
+写成“无差异”。这也意味着：当前 5 种子设计适合检出明显大于 1% 的 PPL
+差异，不足以确认 1% SESOI；配置里声明 `design.ppl_paired_sd_rel` /
+`design.ruler_paired_sd` 时计划会直接标出这一点。
+
+### 端点级设计失败
+
+设计检查不再只有“全局降级/不影响”两档。`ruler_context_values`、
+`ruler_context_model`、`length_null_coverage` 失败只影响 RULER 端点，
+`eval_budget` 失败只影响 eval 端点；`seed_scope`、`hypothesis_variants`、
+`scope_config`、`scope_data`、空训练集（`data_budget` fail）与不可执行的
+`model_context` 仍按全局失败处理。`design_conformance.json` 新增 `endpoint_plan_failures`；
+`apply_design_gate` 只把对应指标的假设降级为探索性，同一轮里未受影响的
+PPL 对比不会被 RULER 上下文超容量连带推翻。训练前发现这类问题应优先修正
+配置并重新生成计划，而不是等汇总时解释。
+
+### 实测灵敏度（描述性）
+
+汇总页另用本次观测到的配对差 SD 反推 MDE，并与同尺度的 SESOI 比较
+（`observed_design_sensitivity`）。它回答“这次设计实际能分辨多小的效应”，
+不是把 p 值改写成“观测功效”，也不改变任何显著性判定；MDE>SESOI 的对比
+即使显著，也不能证明达到实际重要差异。
+
+### 命令与产物
+
+```bash
+# 训练前单独生成/检查设计计划（退出码 2 表示设计 fail）
+python -m lega.design --config configs/small.json \
+    --seeds 1337,2024,42,7,2025 \
+    --variants standard,gate_only,qgate,null,lega,lega_no_len,lega_no_conc,lega_no_query,lega_conc_only,lega_len_only \
+    --data_dir data \
+    --out results/small/design_plan.json
+```
+
+`configs/small.json` / `configs/tiny.json` 的 `design` 块显式写死
+`alpha`、`power`、`multiplicity`（默认 `holm_worst_case`）与
+`run_order`（默认 `randomized_blocked`）；修改这些字段等同于改设计前提，
+必须重新生成计划而不是只重跑汇总。`run_all.py`
+在训练前自动生成 `results/<tag>/design_plan.json`，并把
+`data_report.json` 的语料规模核算一并传给设计计划（摘要进
+`repro.json` 的 `design` 字段，其中包含 `run_order` 模式、顺序种子与逐
+run 清单），汇总时写 `design_conformance.json`（含 `data_identity` 与
+`data_identity_gate`），并在 `significance.json`
+增加 `design_plan` / `design_conformance` /
+`observed_design_sensitivity`。`summary.md` 新增“实验设计与分析人群（先验
+计划 vs 实际）”小节，逐项列出检查状态、run 顺序、PPL/RULER/AUROC/AP
+灵敏度表、计划内单元缺失、分析代码冻结/运行期漂移状态与确认性降级原因。
+
+### 边界
+
+- 功效公式是正态/t 近似；n=3~5 时它用于设计灵敏度，不是精确功效承诺。
+  McNemar 精确功效的边界在 n≤500 时精确枚举，更大时近似。
+- 确认性功效使用 Holm **最坏情形** `α/max(m_family,k_global)`，是保守
+  下界而非精确 Holm 功效；实际阈值依赖同族其他 p 值。家族大小按计划内
+  全部同指标配对计算（含探索性对比），缺失产物只会让实际家族变小，因此
+  这个口径不会系统性低估多重比较负担。
+- 计划假设（SD、不一致率）若来自历史数据，必须在跑之前声明来源；来自
+  当前结果再回填就是事后选择，计划摘要会让这种改写可见。
+- “缺失单元”与结果可能相关（例如难训练变体更易 NaN），此时
+  available-case 估计本身有偏；设计门只保证不把它冒充确认性证据，不能
+  修复缺失机制。
+- 计划 fail 不硬中止流水线（允许明确标注的探索性/冒烟运行），但会进入
+  汇总页与确认性降级证据；正式实验应把 `status=ok` 当作开跑前的检查项。
+
+## 训练后经验长度校准审计
+
+`lega/length_null.py` 的合成零假设诊断只回答“随机打分下 c 是否仍随长度
+增长”，不能证明训练模型的注意力已经长度校准。`lega/lengthcalib.py` 因此
+在真实 **val** 文本上做配对审计：
+
+- 对每个窗口和长度 \(n\)，收集每个 `(layer, head, query_offset)` 的
+  \(c=\log(n\cdot\max_j p_j)\)；
+- `suffix` 增长固定窗口末尾与 query token，只增加前缀，并显式使用
+  `(window, query_offset)` 固定效应估计 \(c\sim\log_2 n\) 斜率；`prefix`
+  增长固定窗口起点、query token 随长度改变，只作敏感性分析；
+- 以窗口为聚类单元做 bootstrap，报告逐头斜率、95% 区间与区间是否整体
+  落在 `[-tolerance, tolerance]` 内；同时报告 `log max_p` 与门控
+  `logit` 的简化式长度斜率；
+- 长度、窗口数、query 位置数、bootstrap 次数与容差由配置
+  `length_calibration` 块控制；结果写
+  `results/<tag>/length_calibration_<variant><suffix>.json`（`<suffix>` 为种子后缀，单种子时为空），汇总页新增
+  “经验长度校准审计”小节。
+
+解释边界：suffix 斜率接近 0 是该设计下“最大注意力概率按 \(1/n\) 收缩”的
+证据，但不是因果干预；prefix 斜率可能混入 query token 内容/位置变化；
+门控 `logit` 斜率是总长度依赖的简化式，不是 `b·log n` 系数的因果估计。
+因此该审计必须与 `length_null`、RULER 分档、剂量-反应和病灶消融合读，
+不能单独升级为确认性结论。审计只读取 val，不访问 test。
+
+## 自然文本 PPL 长度剂量-反应
+
+`lega/lengthcalib.py` 审计的是注意力统计量 `c=log(n·max_j p_j)`，不是主指标
+PPL。`lega/lengthppl.py` 因此在同一份 **val** 文本上构造嵌套配对窗口，直接
+测量下一 token NLL/PPL 随上下文长度的变化：
+
+- 每个输入窗口只在最后 `query_positions` 个位置计算下一 token NLL，其余
+  目标位置用 `ignore_index` 屏蔽；这样不同长度可以只比较同一批 query
+  token，而不是比较整窗平均（整窗平均会混入前缀 token 难度）；
+- `suffix` 固定窗口末尾与最后 q 个目标 token，只增加前缀，是主分析；
+  `prefix` 固定窗口起点、目标 token 随长度改变，只作敏感性分析；
+- 对每个窗口计算 `NLL(L)-NLL(L_ref)`（默认 `L_ref` 为最长档）与
+  `NLL~log2(L)` 斜率，并以窗口为聚类单元做 bootstrap；跨变体比较对
+  `ΔNLL=NLL_candidate-NLL_reference` 再对 `log2(L)` 回归，斜率非 0 表示
+  两变体差距随长度变化（探索性交互）；
+- 长度、窗口数、query 位置数、growth 模式、bootstrap 次数与容差由配置
+  `length_ppl` 块控制；结果写
+  `results/<tag>/length_ppl_<variant><suffix>.json`，汇总页新增
+  “自然文本 PPL 长度剂量-反应”小节。
+
+解释边界：suffix 固定的是窗口末尾与目标 token，但 RoPE 绝对位置仍随输入
+长度变化；prefix 还改变了目标 token 内容。因此该曲线是观测性描述，不是
+长度因果效应；跨变体交互 p 值为未校正探索性证据，不进入主 Holm 家族，也
+不能替代 RULER 长度分档、`length_null`、`lengthcalib` 或推理期因果干预。
+checkpoint 在 val 上选择，因此该曲线只描述长度形状，不是独立 test 集 PPL
+证据；正式 PPL 结论仍以 held-out test（或明确的 val 回退披露）为准。
+只读 val，不访问 test。
+
+## RULER 题面内容身份指纹
+
+RULER 的跨变体配对原先只核对 `sample_seed`、上下文长度、样本数与生成预算。
+这些字段相同并不能证明两个变体真的拿到同一批 prompt：任务构造代码、模板或
+干扰语料一变，同 seed 也会生成不同题面，而 `sample_id` 仍会逐条对齐，配对
+检验就会把“不同评测数据”误当成“同一批固定样例”。
+
+现在 `lega/ruler.py` 对每个构造结果计算 `sample_content_sha256`：覆盖实际
+`ids`、答案、gold 跨度与 `meta` 的规范化 JSON（排除 `sample_id` 等运行
+标签）；每个单元格再记录 `(sample_id, sample_content_sha256)` 的清单哈希
+`samples_sha256`，payload 顶层记录所有单元格的聚合
+`samples_manifest_sha256`。`run_all` 的 RULER 协议核对与单元格签名都消费
+这些字段：
+
+- 同一 seed/计数但实际题面不同，比较会以 `protocol_mismatch` 排除，而不是
+  继续输出逐样例 McNemar/配对差；
+- 旧产物没有内容指纹时不被伪造补齐；新产物与旧产物混合也不视为同一协议，
+  因为无法证明两边题面一致；
+- `sample_id` 仍只作跨变体对齐标签，内容身份由哈希独立证明，二者不互相
+  替代。
+
+该指纹只证明“评测输入内容相同”，不证明构造器本身的正确性；它也不能替代
+数据协议闸门、test 访问账本或对 RULER 构造逻辑的单元测试。

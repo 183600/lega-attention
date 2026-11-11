@@ -1,0 +1,119 @@
+version: '3.8'
+
+services:
+  # CPU-only research environment (default)
+  lega-cpu:
+    build:
+      context: .
+      target: base
+    container_name: lega-attention-cpu
+    volumes:
+      - ./data:/app/data:ro
+      - ./results:/app/results
+      - ./configs:/app/configs:ro
+      - ./preregistration:/app/preregistration:ro
+    environment:
+      - PYTHONPATH=/app
+      - LEGA_DATA_DIR=/app/data
+      - LEGA_RESULTS_DIR=/app/results
+    working_dir: /app
+    command: bash
+
+  # GPU-enabled research environment
+  lega-gpu:
+    build:
+      context: .
+      target: gpu
+      args:
+        # CUDA wheel index for the *locked* torch version. The image installs
+        # requirements-lock.txt's torch, so this index must publish that
+        # version; the build fails loudly otherwise (never a silent upgrade).
+        TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu126"
+    container_name: lega-attention-gpu
+    volumes:
+      - ./data:/app/data:ro
+      - ./results:/app/results
+      - ./configs:/app/configs:ro
+      - ./preregistration:/app/preregistration:ro
+    environment:
+      - PYTHONPATH=/app
+      - LEGA_DATA_DIR=/app/data
+      - LEGA_RESULTS_DIR=/app/results
+    working_dir: /app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: bash
+
+  # Development environment with extra tools
+  lega-dev:
+    build:
+      context: .
+      target: dev
+    container_name: lega-attention-dev
+    volumes:
+      - .:/app
+      - ./data:/app/data:ro
+      - ./results:/app/results
+    environment:
+      - PYTHONPATH=/app
+      - LEGA_DATA_DIR=/app/data
+      - LEGA_RESULTS_DIR=/app/results
+    working_dir: /app
+    command: bash
+
+  # Run smoke test to verify environment
+  smoke-test:
+    build:
+      context: .
+      target: base
+    container_name: lega-smoke-test
+    volumes:
+      - ./data:/app/data:ro
+      - ./results:/app/results
+    environment:
+      - PYTHONPATH=/app
+    working_dir: /app
+    command: bash scripts/run_smoke.sh
+
+  # Run full pipeline (small config)
+  run-small:
+    build:
+      context: .
+      target: gpu
+      args:
+        TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu126"
+    container_name: lega-run-small
+    volumes:
+      - ./data:/app/data:ro
+      - ./results:/app/results
+      - ./configs:/app/configs:ro
+      - ./preregistration:/app/preregistration:ro
+    environment:
+      - PYTHONPATH=/app
+      - LEGA_DATA_DIR=/app/data
+      - LEGA_RESULTS_DIR=/app/results
+    working_dir: /app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: python run_all.py --config configs/small.json --data_dir /app/data/wikitext103
+
+  # Run tests
+  test:
+    build:
+      context: .
+      target: dev
+    container_name: lega-test
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: python -m pytest tests/ -q --tb=short
