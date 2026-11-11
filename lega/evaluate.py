@@ -112,7 +112,7 @@ def _preserve_eval_mode(fn):
     @functools.wraps(fn)
     def wrapper(model, *args, **kwargs):
         was_training = model.training
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         with torch.no_grad():
             try:
                 return fn(model, *args, **kwargs)
@@ -507,7 +507,7 @@ def _resolve_eval_amp(cfg_used: dict, device: str) -> bool:
     return amp_dtype_for(device, amp_on) is not None
 
 
-def _read_run_eval(run_dir: str) -> dict:  # SECURITY: eval() usage - manual review needed
+def _read_run_eval(run_dir: str) -> dict:
     """读取训练 run 的 eval.json；缺失/损坏/结构异常返回空 dict（不阻塞评测）。"""
     path = os.path.join(run_dir, "eval.json")
     if not os.path.exists(path):
@@ -539,7 +539,7 @@ def load_train_throughput(run_dir: str):
     旧 run 没有该字段时返回 (None, None)，消费方显示 '-' 而不是编造数值。
     文件缺失/损坏同样安全返回 (None, None)，不阻塞评测。
     """
-    d = _read_run_eval(run_dir)  # SECURITY: eval() usage - manual review needed
+    d = _read_run_eval(run_dir)
     return (
         _nonnegative_metric(d.get("train_step_time_ms")),
         _nonnegative_metric(d.get("train_tokens_per_sec")),
@@ -554,7 +554,7 @@ def load_train_peak_mem_mb(run_dir: str):
     """
     # bool/负数/NaN/Inf 都不是真实峰值内存；float(True)=1.0 会让坏记录
     # 在汇总表里冒出一个看似合法的 1 MB。
-    return _nonnegative_metric(_read_run_eval(run_dir).get("train_peak_mem_mb"))  # SECURITY: eval() usage - manual review needed
+    return _nonnegative_metric(_read_run_eval(run_dir).get("train_peak_mem_mb"))
 
 
 def load_train_coverage(run_dir: str):
@@ -564,7 +564,7 @@ def load_train_coverage(run_dir: str):
     epochs_seen<1 的结果不能当作收敛。返回 dict（缺失字段不含该键），
     文件缺失/损坏返回空 dict，不阻塞评测。
     """
-    d = _read_run_eval(run_dir)  # SECURITY: eval() usage - manual review needed
+    d = _read_run_eval(run_dir)
     out = {}
     for src, dst in (
         ("tokens_seen", "train_tokens_seen"),

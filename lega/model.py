@@ -813,7 +813,7 @@ class GPT(nn.Module):
         张量里仍可能带上其 EOS 之后的采样 token，消费方应按各行首个 EOS 截断。
         """
         was_training = self.training
-        self.eval()  # SECURITY: eval() usage - manual review needed
+        self.eval()
         try:
             B, T0 = idx.shape
             if (
@@ -1164,5 +1164,5 @@ def load_model(
     model.load_state_dict(ck["state_dict"])
     ck.pop("state_dict", None)
     model.to(device)
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     return model, ck

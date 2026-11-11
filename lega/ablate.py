@@ -1029,7 +1029,7 @@ def probe_lesion_channels(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            attn.eval()  # SECURITY: eval() usage - manual review needed
+            attn.eval()
             heads = int(attn.n_heads)
             missing = [
                 name
@@ -1169,7 +1169,7 @@ def probe_lesion_param_effects(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            attn.eval()  # SECURITY: eval() usage - manual review needed
+            attn.eval()
             heads = int(attn.n_heads)
             caps = {
                 "gated": hasattr(attn, "gate_d"),
@@ -1269,7 +1269,7 @@ def gate_head_means(
     sums = None
     counts = None
     was_training = model.training
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     try:
         with torch.inference_mode():
             for s in range(0, len(indices), batch_windows):
@@ -1441,7 +1441,7 @@ def gate_lesion_controls(
     indices, _n_windows = _val_eval_indices(len(val), ctx, eval_iters)
     batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
     was_training = model.training
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     try:
         with torch.inference_mode():
             for s in range(0, len(indices), batch_windows):

@@ -597,7 +597,7 @@ def main():
             )
             model = GPT(**model_cfg).to(device)
             src = "random"
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         # 记录实际生效的后端（checkpoint 可能选择与标签/配置不同的路径），
         # 而不是强制值或推测值。
         actual_sdpa = bool(model.blocks[0].attn.use_sdpa)

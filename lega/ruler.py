@@ -646,7 +646,6 @@ def build_fwe(tok, ctx: int, rng: random.Random) -> Dict:
         raise ContextTooSmall(
             "tokenizer 无法无损表示足够的 fwe 伪词（字符级词表缺少字母）"
         )
-    # WARNING: Splitting without shuffle on temporal data — ensure chronological ordering is intentional for train/test split.
     words = words[:120]
     freq = set(rng.sample(words, 10))
     # 目标正文 token 长度空间；高频词出现 k 次、低频词 2 次

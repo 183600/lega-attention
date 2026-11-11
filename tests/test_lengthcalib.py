@@ -130,7 +130,7 @@ def test_collect_calibration_records_batches_without_cross_sample_leakage():
         variant="lega",
         use_sdpa_standard=False,
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     val = np.arange(128, dtype=np.uint16)
     records = collect_calibration_records(
         model,

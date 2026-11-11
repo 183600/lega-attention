@@ -66,7 +66,7 @@ def test_suffix_targets_are_fixed_and_masked_loss_matches_manual_ce():
         attn_dropout=0.0,
         variant="standard",
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     val = np.arange(200, dtype=np.uint16) % 32
     starts = [0, 32, 64]
     lengths = [4, 8, 16]
@@ -107,7 +107,7 @@ def test_prefix_targets_change_with_length():
         attn_dropout=0.0,
         variant="standard",
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     val = np.arange(200, dtype=np.uint16) % 32
     recs = collect_length_ppl_records(
         model, val, [0], [4, 8, 16], 2, "prefix", "cpu", amp=False, batch_windows=1

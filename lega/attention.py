@@ -606,7 +606,7 @@ def probe_gate_factors(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            m.eval()  # SECURITY: eval() usage - manual review needed
+            m.eval()
             gen = torch.Generator().manual_seed(int(seed) + 1)
             x = torch.randn(1, int(n_pos), int(d_model), generator=gen)
             with torch.no_grad():
@@ -791,7 +791,7 @@ def probe_conc_parameterization(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            m.eval()  # SECURITY: eval() usage - manual review needed
+            m.eval()
             if not hasattr(m, "gate_a"):
                 return {
                     "variant": variant,

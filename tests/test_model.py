@@ -114,7 +114,7 @@ def test_kv_cache_matches_full_forward():
     """逐 token 增量解码（带缓存）与一次性全量前向的 logits 一致。"""
     for v in VARIANTS:
         model = _tiny(v)
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         idx = torch.randint(0, 64, (1, 12))
         with torch.no_grad():
             full = model(idx)["logits"]
@@ -135,7 +135,7 @@ def test_chunked_prefill_matches_full_forward():
     """分块预填充（past_kv 非空且 T>1，触发掩码缓存的 past_len>0 分支）与全量前向一致。"""
     for v in VARIANTS:
         model = _tiny(v)
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         idx = torch.randint(0, 64, (2, 15))
         with torch.no_grad():
             full = model(idx)["logits"]
@@ -176,7 +176,7 @@ def test_placebo_evidence_uses_absolute_positions():
                 p.normal_(0, 0.5)
             elif "gate_w" in name:
                 p.normal_(0, 0.1)
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     idx = torch.randint(0, 64, (1, 10))
     with torch.no_grad():
         full = model(idx)["logits"]
@@ -230,7 +230,7 @@ def test_variants_share_base_weights_same_seed():
 
 def test_greedy_generation_deterministic():
     model = _tiny("lega")
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     idx = torch.randint(0, 64, (1, 5))
     a = model.generate(idx, max_new_tokens=8)
     b = model.generate(idx, max_new_tokens=8)
@@ -240,7 +240,7 @@ def test_greedy_generation_deterministic():
 
 def test_generate_rejects_invalid_length_and_top_k():
     model = _tiny("standard")
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     idx = torch.randint(0, 64, (1, 5))
     for bad in (-1, 1.5, True):
         try:
@@ -274,7 +274,7 @@ def test_generate_eos_stops_per_row_without_batch_coupling():
         n_heads=2,
         variant="standard",
     )
-    m.eval()  # SECURITY: eval() usage - manual review needed
+    m.eval()
     T0, max_new, eos = 6, 10, 5
     # 以 prompt 首 token 标识行；值 = 产生 EOS 的生成步下标。行 1 第 1 步、
     # 行 2 第 3 步命中，行 3 从不命中（不同步，无法靠“全体同时命中”停止）。
@@ -313,7 +313,7 @@ def test_generate_eos_stops_per_row_without_batch_coupling():
 def test_last_logits_only_matches_full_logits():
     """快速路径必须与全量 logits 的最后位置完全一致。"""
     model = _tiny("lega")
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     idx = torch.randint(0, 64, (2, 9))
     with torch.no_grad():
         full = model(idx)["logits"]
@@ -466,7 +466,7 @@ def test_gate_stats_shapes():
     """need_stats=True 时诊断统计形状正确（standard 也应返回集中度统计供分析用）。"""
     for v in ("lega", "qgate", "null", "standard"):
         model = _tiny(v)
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         idx = torch.randint(0, 64, (1, 10))
         with torch.no_grad():
             out = model(idx, need_stats=True)
@@ -669,7 +669,7 @@ def test_evaluate_val_restores_mode_on_error():
     assert metrics["val_loss"] == metrics["val_loss"]
     assert model.training, "成功评测后也应恢复 train 模式"
 
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     evaluate_val(model, val, ctx=10, device="cpu", iters=2, amp=False)
     assert not model.training, "原本处于 eval 的模型不得被切回 train"
     print("  [ok] evaluate_val 异常/成功均恢复调用前模式")
@@ -679,7 +679,7 @@ def test_per_window_losses_match_individual_forwards():
     """loss_per_window 每行必须等于单独评测该窗口的损失，且均值等于总损失。"""
     torch.manual_seed(0)
     model = _tiny("lega")
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     idx = torch.randint(0, 64, (3, 10))
     y = torch.randint(0, 64, (3, 10))
     with torch.inference_mode():

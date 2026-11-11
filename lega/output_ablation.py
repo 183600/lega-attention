@@ -257,7 +257,7 @@ def main(argv=None) -> int:
     from .model import load_model
 
     model, _ = load_model(args.ckpt, args.device)
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     with open(args.idx_json, encoding="utf-8") as f:
         payload = json.load(f)
     idx = torch.as_tensor(payload["input_ids"], dtype=torch.long, device=args.device)

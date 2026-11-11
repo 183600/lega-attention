@@ -250,7 +250,7 @@ def test_run_nested_niah_tiny_model():
         ffn_mult=4,
         variant="standard",
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     res = run_nested_niah(
         model,
         tok,

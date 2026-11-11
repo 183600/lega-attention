@@ -721,7 +721,7 @@ def test_tune_dedupes_and_default_mult_present():
     print("  [ok] DEFAULT_LR_MULTS 含 1.0（默认组合必在网格内）")
 
 
-def test_read_best_val_loss_skips_non_dict_and_bad_eval():  # SECURITY: eval() usage - manual review needed
+def test_read_best_val_loss_skips_non_dict_and_bad_eval():
     """日志非对象行/非数值 val_loss、eval 顶层非对象均不能崩溃。"""
     tmp = tempfile.mkdtemp()
     try:

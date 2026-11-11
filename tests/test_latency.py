@@ -61,7 +61,7 @@ def test_latency_bench_runs_on_cpu():
         ffn_mult=4,
         variant="lega",
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     ms = bench_prefill(model, "cpu", ctx=32, batch_size=1, iters=1, warmup=1, vocab=64)
     assert ms > 0, f"prefill 数值异常: {ms}"
     dms, pf_len = bench_decode(
@@ -83,7 +83,7 @@ def test_latency_stats_carry_measurement_noise():
         ffn_mult=4,
         variant="lega",
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     st = bench_prefill_stats(
         model, "cpu", ctx=16, batch_size=1, iters=3, warmup=1, vocab=64
     )
@@ -193,7 +193,7 @@ def test_efficiency_metrics_on_cpu():
     model = GPT(
         vocab_size=64, block_size=64, d_model=32, n_layers=2, n_heads=2, variant="lega"
     )
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     eff = efficiency_metrics(model, "cpu", [32, 64])
     assert eff["n_params"] == sum(p.numel() for p in model.parameters())
     assert eff["params_mb"] > 0

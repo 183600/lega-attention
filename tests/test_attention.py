@@ -229,7 +229,7 @@ def test_alt_conc_forward_matches_reference_and_chunking(monkeypatch):
     for variant in ALT_CONC_VARIANTS:
         torch.manual_seed(3)
         m = _mk_attn(d_model=16, n_heads=2, variant=variant, use_sdpa_standard=False)
-        m.eval()  # SECURITY: eval() usage - manual review needed
+        m.eval()
         with torch.no_grad():
             m.gate_w.zero_()
             m.gate_a.fill_(0.7)
@@ -292,7 +292,7 @@ def test_gate_query_term_uses_pre_rope_query():
     rope = RoPE(head_dim=8, max_len=32)
     suffix = torch.randn(1, 5, 16)
     padded = torch.cat([torch.randn(1, 7, 16), suffix], dim=1)
-    m.eval()  # SECURITY: eval() usage - manual review needed
+    m.eval()
     with torch.no_grad():
         _, _, s1 = m(suffix, rope=rope, need_stats=True)
         _, _, s2 = m(padded, rope=rope, need_stats=True)
@@ -359,7 +359,7 @@ def test_gate_stats_batch_shape_all_variants():
     for variant in VARIANTS:
         for stats_argmax in (True, False):
             m = _mk_attn(d_model=32, n_heads=2, variant=variant)
-            m.eval()  # SECURITY: eval() usage - manual review needed
+            m.eval()
             with torch.no_grad():
                 _, _, stats = m(
                     x, rope=None, need_stats=True, stats_argmax=stats_argmax
@@ -395,8 +395,8 @@ def test_light_stats_parity_sdpa_vs_explicit():
         m_fast = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=True)
         m_slow = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=False)
         m_slow.load_state_dict(m_fast.state_dict())
-        m_fast.eval()  # SECURITY: eval() usage - manual review needed
-        m_slow.eval()  # SECURITY: eval() usage - manual review needed
+        m_fast.eval()
+        m_slow.eval()
         with torch.no_grad():
             o1, _, s1 = m_fast(x, need_stats=True, stats_argmax=False)
             o2, _, s2 = m_slow(x, need_stats=True, stats_argmax=False)
@@ -420,7 +420,7 @@ def test_standard_sdpa_cache_forwards_dropout_in_training():
         32, 2, variant="standard", attn_dropout=0.3, use_sdpa_standard=True
     )
     x = torch.randn(1, 6, 32)
-    m.eval()  # SECURITY: eval() usage - manual review needed
+    m.eval()
     with torch.no_grad():
         _, past, _ = m(x)
     m.train()
@@ -552,9 +552,9 @@ def test_null_zero_sdpa_keeps_null_slot():
         # 给 null 一个非零 value 并同步到 null_zero 无法表达（buffer 固定为零），
         # 因此这里只验证零 value 下的路径等价性。
         ref.v_null.zero_()
-    fast.eval()  # SECURITY: eval() usage - manual review needed
-    slow.eval()  # SECURITY: eval() usage - manual review needed
-    ref.eval()  # SECURITY: eval() usage - manual review needed
+    fast.eval()
+    slow.eval()
+    ref.eval()
     x = torch.randn(1, 12, 32)
     with torch.no_grad():
         o_fast, cache_fast, _ = fast(x)
@@ -659,8 +659,8 @@ def test_placebo_control_matches_capacity_but_not_evidence():
             m.gate_b.fill_(-0.3)
             m.gate_d.fill_(1.0)
     x = torch.randn(2, 12, 32)
-    real.eval()  # SECURITY: eval() usage - manual review needed
-    plac.eval()  # SECURITY: eval() usage - manual review needed
+    real.eval()
+    plac.eval()
     with torch.no_grad():
         o1, _, _ = real(x)
         o2, _, _ = plac(x)
@@ -713,7 +713,7 @@ def test_capacity_null_controls_keep_params_but_zero_evidence():
             model.gate_b.fill_(-0.2)
             model.gate_d.fill_(1.2)
         x = torch.randn(2, 9, 32)
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         with torch.no_grad():
             out1, _, _ = model(x)
             getattr(model, dead_param[component]).add_(10.0)

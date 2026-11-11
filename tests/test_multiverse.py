@@ -158,7 +158,7 @@ def test_bad_inputs_are_rejected():
     print("  [ok] 非法 id/长度/bool/重复规格显式报错")
 
 
-def _eval(ppl, split="test"):  # SECURITY: eval() usage - manual review needed
+def _eval(ppl, split="test"):
     return {
         "ppl": ppl,
         "split": split,
@@ -184,8 +184,8 @@ def _ruler(macro):
 def _runs(ppl_a, ppl_b, ruler_a=None, ruler_b=None, seeds=(1, 2, 3)):
     runs = {"lega": {}, "standard": {}}
     for i, seed in enumerate(seeds):
-        runs["lega"][seed] = {"eval": _eval(ppl_a[i])}  # SECURITY: eval() usage - manual review needed
-        runs["standard"][seed] = {"eval": _eval(ppl_b[i])}  # SECURITY: eval() usage - manual review needed
+        runs["lega"][seed] = {"eval": _eval(ppl_a[i])}
+        runs["standard"][seed] = {"eval": _eval(ppl_b[i])}
         if ruler_a is not None:
             runs["lega"][seed]["ruler"] = _ruler(ruler_a[i])
             runs["standard"][seed]["ruler"] = _ruler(ruler_b[i])

@@ -155,7 +155,7 @@ def _hooked_forward(model, x, device: str, amp_dtype, cap: int = 60):
     was_training = model.training
     forward_error = None
     try:
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         amp_ctx = amp_autocast(device, amp_dtype is not None)
         with torch.no_grad(), amp_ctx:
             # last_logits_only：只对最后位置过 lm_head；注意力/门控（NaN 最
@@ -828,7 +828,7 @@ def evaluate_val(
     方定义，输出里 ``window_set`` 标为 ``explicit`` 以免与网格口径混淆。
     """
     was_training = model.training
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
     try:
         collect_gate = model.variant not in ("standard",) and not getattr(
             model.blocks[0].attn, "is_null", False
@@ -956,7 +956,7 @@ def evaluate_val(
                         gate_w_total += nb
         # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
         # 使 torch.load(weights_only=True) 反序列化失败且不合法
-        val_loss = float(float(loss_acc.item()) / total_w)
+        val_loss = float(float(loss_acc.item()) / total_w) if total_w else float("nan")
         gate_mean = float(gate_acc.item()) / gate_w_total if gate_w_total else None
         gate_std = None
         gate_frac_low = None
@@ -1763,7 +1763,7 @@ def main():
             )
             _abort_on_nan(report, out_dir)
 
-    def do_eval(step):  # SECURITY: eval() usage - manual review needed
+    def do_eval(step):
         nonlocal \
             best_val, \
             last_eval_step, \
@@ -2060,7 +2060,7 @@ def main():
             loss_max_dev.fill_(-1.0)
             loss_max_step_dev.fill_(-1.0)
         if (step + 1) % eval_every == 0:
-            do_eval(step + 1)  # SECURITY: eval() usage - manual review needed
+            do_eval(step + 1)
             # 早停：验证连续 patience 次评测无实质改善即终止（下游评测
             # 本就用 val 选出的 model_best.pt）
             if stop_step is not None:

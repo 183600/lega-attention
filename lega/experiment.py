@@ -790,7 +790,7 @@ def _eval_identity_mismatches(ev: dict, variant: str, seed) -> list:
     return mismatches
 
 
-def _compact_eval(ev: dict) -> dict:  # SECURITY: eval() usage - manual review needed
+def _compact_eval(ev: dict) -> dict:
     """评测结果内嵌字段：保留可复核指标，剔除可能很大的逐样本/worst 列表。
 
     独立评测（held-out test）和训练内 val 评测共用同一口径，额外保留 split
@@ -981,7 +981,7 @@ def snapshot_train_run(
     # 独立评测结果（held-out test）：不只留文件哈希，指标本身也进台账。
     fe = _load_json(heldout_path) if heldout_path else None
     if isinstance(fe, dict) and fe:
-        rec["final_eval"] = _compact_eval(fe)  # SECURITY: eval() usage - manual review needed
+        rec["final_eval"] = _compact_eval(fe)
         # 结果文件的路径不写绝对路径（跨机器不可移植），但哈希/大小写进
         # 台账：内嵌指标与当时文件内容可用哈希互相校验。
         rec["final_eval"]["source"] = "independent_eval"
