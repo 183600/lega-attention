@@ -30,19 +30,9 @@ token 计数）上做**纯计算**，不依赖 torch：
 from __future__ import annotations
 
 import math
-# Reproducibility: Set random seeds
-import random
-import numpy as np
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-try:
-    import torch
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-except ImportError:
-    pass
+# NOTE: Module-level seed setting removed to prevent silent RNG state
+# reset on import. Use the centralized seed function at the experiment
+# entry point instead (e.g., repro.set_all_seeds / seed_everything).
 
 # 默认“热区”截断：绝对位置（token 数）与相对比例（窗口长度的百分比）。
 # 位置 0 上下文 n=1、位置 1 为 n=2……前几个位置的前缀极短，是冷启动伪影

@@ -14,19 +14,9 @@ import torch.nn.functional as F
 
 from .attention import CausalSelfAttention, RUNNABLE_VARIANTS
 from .utils import config_bool, config_finite_float, config_probability
-# Reproducibility: Set random seeds
-import random
-import numpy as np
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-try:
-    import torch
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-except ImportError:
-    pass
+# NOTE: Module-level seed setting removed to prevent silent RNG state
+# reset on import. Use the centralized seed function at the experiment
+# entry point instead (e.g., repro.set_all_seeds / seed_everything).
 
 
 class _RoPERotate(torch.autograd.Function):
@@ -568,7 +558,7 @@ class GPT(nn.Module):
 
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.rope = RoPE(d_model // max(n_heads, 1e-10), block_size)
+        self.rope = RoPE(d_model // n_heads, block_size)  # d_model % n_heads == 0 validated in GPT.__init__
         self.blocks = nn.ModuleList(
             [
                 Block(

@@ -40,19 +40,9 @@ import json
 import os
 import sys
 import time
-# Reproducibility: Set random seeds
-import random
-import numpy as np
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-try:
-    import torch
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-except ImportError:
-    pass
+# NOTE: Module-level seed setting removed to prevent silent RNG state
+# reset on import. Use the centralized seed function at the experiment
+# entry point instead (e.g., repro.set_all_seeds / seed_everything).
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 登记表与锁文件位于 preregistration/：CI 清理只保留 docs/design_notes.md。

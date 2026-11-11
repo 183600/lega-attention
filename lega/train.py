@@ -1360,7 +1360,7 @@ def main():
         raise ValueError(
             f"config.d_model={d_model} 必须能被 config.n_heads={n_heads} 整除"
         )
-    if (d_model // max(n_heads, 1e-10)) % 2:
+    if (d_model // n_heads) % 2:  # d_model % n_heads == 0 validated above
         raise ValueError(
             f"config.d_model / max(n_heads, 1)={d_model // n_heads} 必须是偶数（RoPE）"
         )

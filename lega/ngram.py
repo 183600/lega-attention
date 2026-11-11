@@ -37,19 +37,9 @@ from .datacheck import append_test_access, check_vocab_capacity
 from .preflight import allow_protocol_violations, data_protocol_preflight
 from .repro import current_pipeline_run_id, data_fingerprint, test_data_fingerprint
 from .utils import strict_int
-# Reproducibility: Set random seeds
-import random
-import numpy as np
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-try:
-    import torch
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-except ImportError:
-    pass
+# NOTE: Module-level seed setting removed to prevent silent RNG state
+# reset on import. Use the centralized seed function at the experiment
+# entry point instead (e.g., repro.set_all_seeds / seed_everything).
 
 # α 候选：跨 3 个数量级，覆盖稀疏/密集两种极端；只数 3 档，避免把
 # “选平滑系数”变成又一次大规模调参。
