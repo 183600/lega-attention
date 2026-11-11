@@ -410,7 +410,7 @@ def build_niah(
                 for k in KEY_WORDS
             )
             tok._lega_distract_len = distract_len
-        n_distract = min(n_distract, max(1, room // max(distract_len, 1e-10)))
+        n_distract = min(n_distract, max(1, room // max(distract_len, 1)))
         # 升序插入并跟踪累积位移 shift：保证任何干扰行的结束位置都不越过
         # 最终截断点 room，否则 filler[:room] 会把尾部干扰行截成半句。
         slots = sorted(rng.sample(range(2, room), min(n_distract, room - 2)))

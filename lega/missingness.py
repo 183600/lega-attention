@@ -250,10 +250,7 @@ def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
 
     mean_lo = mean_hi = None
     if value_bounds is not None and n > 0 and observed_map and not violations:
-        lo_candidate = min(sum_lo / max(n, 1), sum_hi / n)
-        lo_candidate = min(sum_lo / max(n, 1), sum_hi / n)
-        hi_candidate = max(sum_lo / n, sum_hi / n)
-        hi_candidate = max(sum_lo / n, sum_hi / n)
+        lo_candidate = min(sum_lo / n, sum_hi / n)
         hi_candidate = max(sum_lo / n, sum_hi / n)
         if math.isfinite(lo_candidate) and math.isfinite(hi_candidate):
             mean_lo, mean_hi = lo_candidate, hi_candidate

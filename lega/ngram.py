@@ -166,7 +166,7 @@ def _context_counts(
     vocab_size = int(vocab_size)
     if len(pair_keys) == 0:
         return np.zeros(max(1, vocab_size), dtype=np.float64)
-    prev = np.asarray(pair_keys, dtype=np.int64) // max(vocab_size, 1e-10)
+    prev = np.asarray(pair_keys, dtype=np.int64) // max(vocab_size, 1)
     return np.bincount(prev, weights=pair_counts, minlength=max(1, vocab_size)).astype(
         np.float64
     )

@@ -763,7 +763,7 @@ def _val_eval_window_starts(val_len: int, ctx: int, iters: int, offset: int = 0)
         raise ValueError(f"offset 必须 >= 0，收到 {offset}")
     if offset >= ctx:
         raise ValueError(f"offset 必须 < ctx（{ctx}），收到 {offset}")
-    n_windows = (val_len - 1 - offset) // max(ctx, 1e-10)
+    n_windows = (val_len - 1 - offset) // max(ctx, 1)
     if n_windows <= 0:
         raise ValueError(
             f"验证集只有 {val_len} tokens（offset={offset}），"

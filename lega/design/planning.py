@@ -381,10 +381,10 @@ def _design_data_budget(config: dict, data_report=None) -> tuple:
         else None
     )
     val_windows = (
-        (val_tokens - 1) // max(eval_ctx, 1e-10) if val_tokens is not None and eval_ctx else None
+        (val_tokens - 1) // max(eval_ctx, 1) if val_tokens is not None and eval_ctx else None
     )
     test_windows = (
-        (test_tokens - 1) // max(eval_ctx, 1e-10) if test_tokens is not None and eval_ctx else None
+        (test_tokens - 1) // max(eval_ctx, 1) if test_tokens is not None and eval_ctx else None
     )
 
     summary = {

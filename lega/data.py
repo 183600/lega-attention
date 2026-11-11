@@ -1530,7 +1530,7 @@ def get_val_windows(val: np.memmap, ctx: int, indices, device: str):
                 )
             vals.append(iv)
         idx = np.asarray(vals, dtype=np.int64)
-    n_windows = (len(val) - 1) // max(ctx, 1e-10)
+    n_windows = (len(val) - 1) // max(ctx, 1)
     if n_windows <= 0:
         raise ValueError(f"验证集只有 {len(val)} tokens，不足以组成 ctx={ctx} 的窗口")
     # 允许 idx >= n_windows 的循环取用；负值已在上方拒绝。
