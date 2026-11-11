@@ -1029,7 +1029,7 @@ def probe_lesion_channels(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            attn.eval()
+            attn.eval()  # SECURITY: eval() usage - manual review needed
             heads = int(attn.n_heads)
             missing = [
                 name
@@ -1169,7 +1169,7 @@ def probe_lesion_param_effects(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            attn.eval()
+            attn.eval()  # SECURITY: eval() usage - manual review needed
             heads = int(attn.n_heads)
             caps = {
                 "gated": hasattr(attn, "gate_d"),
@@ -1269,7 +1269,7 @@ def gate_head_means(
     sums = None
     counts = None
     was_training = model.training
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     try:
         with torch.inference_mode():
             for s in range(0, len(indices), batch_windows):
@@ -1441,7 +1441,7 @@ def gate_lesion_controls(
     indices, _n_windows = _val_eval_indices(len(val), ctx, eval_iters)
     batch_windows = max(1, min(16384 // max(1, ctx), len(indices)))
     was_training = model.training
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     try:
         with torch.inference_mode():
             for s in range(0, len(indices), batch_windows):
@@ -1547,7 +1547,7 @@ def gate_lesion_controls(
                 count = sum(float(item[1]) for item in gs)
                 if count == 0:
                     raise ValueError(f"第 {li} 层的门控权重总和为 0，无法计算目标")
-                target = total / count
+                target = total / max(count, 1)
                 d, achieved, residual = _match_gate_bias(z, target)
                 n_positions += int(z.shape[1])
                 max_residual = max(max_residual, residual)

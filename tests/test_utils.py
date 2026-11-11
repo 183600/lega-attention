@@ -693,7 +693,7 @@ def test_paired_t_edge_cases():
     tiny_odd = [5e-324 if i % 2 == 0 else 0.0 for i in range(5)]
     r = paired_t_test(tiny_odd, [0.0] * 5)
     assert math.isinf(r["t"]) and r["t"] > 0 and r["p"] == 0.0
-    print("  [ok] paired_t_test 边界（全同/零方差/n=1/长度错配/显著与不显著）")
+    print("  [ok] paired_t_test 边界（全同/零方差 / max(n, 1)=1/长度错配/显著与不显著）")
 
 
 def test_paired_t_effect_size():

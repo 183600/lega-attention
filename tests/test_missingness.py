@@ -13,6 +13,19 @@ import tempfile
 from lega.missingness import aggregate_missingness, paired_missingness
 from lega.pipeline import _missingness_analysis, _render_missingness_section
 from run_all import build_summary
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _close(a, b, tol=1e-9):

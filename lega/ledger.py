@@ -27,6 +27,19 @@ verified.
 
 import hashlib
 import json
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 CHAIN_ALGO = "sha256-chain-v1"
 GENESIS_SHA256 = "0" * 64

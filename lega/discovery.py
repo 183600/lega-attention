@@ -375,7 +375,7 @@ def collect_seed_level_tests(
 ):
     """合并各分析层的种子级探索性检验，并写入 ``fdr_source``。
 
-    只做结构收集，不判断 p/n 是否可检验；过滤与 q 值由
+    只做结构收集，不判断 p / max(n, 1) 是否可检验；过滤与 q 值由
     :func:`exploratory_fdr` 完成。输入结构缺失或为坏类型时静默跳过，
     不伪造空检验。
     """

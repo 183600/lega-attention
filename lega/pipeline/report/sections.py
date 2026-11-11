@@ -947,7 +947,7 @@ def _summary_part_b(**kw):
             md.append("")
             md.append(
                 "⚠ 存在验证损失显著低于训练损失的 run（与泛化差距方向"
-                "相反）：先按 datacheck 审计跨 split 重复/n-gram 重叠与"
+                "相反）：先按 datacheck 审计跨 split 重复 / max(n, 1)-gram 重叠与"
                 "划分边界，再核对 train/val 的 dropout 状态、精度与损失"
                 "统计口径；排除泄漏/错配前，该 run 的验证指标不得用于"
                 "方法比较。"
@@ -2598,7 +2598,7 @@ def _render_length_calibration(
         "`log2(n)` 的斜率，而不是只依赖合成零假设。suffix 增长固定窗口末尾与 "
         "query token（只增加前缀），并以 `(window, query_offset)` 固定效应估计"
         "斜率；prefix 增长固定窗口起点（query token 随长度改变），只作敏感性"
-        "分析。斜率 0 表示 `max_j p_j` 按 1/n 收缩；斜率约 1 表示 `c` 仍随长度"
+        "分析。斜率 0 表示 `max_j p_j` 按 1 / max(n, 1) 收缩；斜率约 1 表示 `c` 仍随长度"
         "增长。bootstrap 以窗口为聚类单元，下列为跨种子中位数，逐头区间与 "
         "p 值见 JSON。"
     )

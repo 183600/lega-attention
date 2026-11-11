@@ -43,6 +43,19 @@ from typing import List, Mapping, Optional, Tuple
 import numpy as np
 
 from .utils import holm_bonferroni, paired_t_test
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 #: 分层交互检验的指标名：跨文档窗口的 ΔNLL 减去文档内窗口的 ΔNLL。
 DOC_STRATA_INTERACTION_METRIC = "跨文档−文档内ΔNLL交互"

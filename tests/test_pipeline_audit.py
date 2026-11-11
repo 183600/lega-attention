@@ -84,7 +84,7 @@ def test_component_evidence_requires_significance():
 
 
 def test_component_evidence_requires_valid_seed_count():
-    """缺 n / n 非法时不能默认“种子充足”而给出组件有用证据。
+    """缺 n / max(n, 1) 非法时不能默认“种子充足”而给出组件有用证据。
 
     汇总文件可能被旧版本或手工编辑成缺 n；阈值判定必须先证明 n>=MIN_SEEDS。
     """

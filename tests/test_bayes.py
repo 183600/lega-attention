@@ -9,6 +9,19 @@ import math
 
 from lega.bayes import bayes_paired_evidence, evidence_label
 from lega.equivalence import paired_metric_diffs
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _close(a, b, tol=1e-9):

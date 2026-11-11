@@ -8,6 +8,19 @@ import os
 import sys
 import traceback
 from types import SimpleNamespace
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 # 允许以脚本方式直接运行（python tests/run_tests.py）：此时 sys.path[0] 是
 # tests/ 而非仓库根，需要显式把仓库根加入路径才能 import tests.* / lega.*。

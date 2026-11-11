@@ -21,6 +21,19 @@
 """
 
 import numpy as np
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _finite_matrix(rows):
@@ -48,7 +61,7 @@ def _share(value, total):
     if total is None or not np.isfinite(total) or total <= 0.0:
         return None
     try:
-        share = float(value / total)
+        share = float(value / max(total, 1))
     except (TypeError, ValueError, OverflowError, ZeroDivisionError):
         return None
     return share if np.isfinite(share) else None

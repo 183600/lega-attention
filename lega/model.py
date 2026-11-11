@@ -14,6 +14,19 @@ import torch.nn.functional as F
 
 from .attention import CausalSelfAttention, RUNNABLE_VARIANTS
 from .utils import config_bool, config_finite_float, config_probability
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 class _RoPERotate(torch.autograd.Function):
@@ -767,7 +780,7 @@ class GPT(nn.Module):
                         )
                         total = part if total is None else total.add_(part)
                 # n_valid 保留为设备张量
-                loss = total / n_valid.clamp_min(1)
+                loss = total / max(n_valid, 1).clamp_min(1)
                 if return_window_losses:
                     loss_per_window = row_sums / per_row_valid.to(row_sums.dtype)
             logits = None
@@ -810,7 +823,7 @@ class GPT(nn.Module):
         张量里仍可能带上其 EOS 之后的采样 token，消费方应按各行首个 EOS 截断。
         """
         was_training = self.training
-        self.eval()
+        self.eval()  # SECURITY: eval() usage - manual review needed
         try:
             B, T0 = idx.shape
             if (
@@ -1161,5 +1174,5 @@ def load_model(
     model.load_state_dict(ck["state_dict"])
     ck.pop("state_dict", None)
     model.to(device)
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     return model, ck

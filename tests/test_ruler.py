@@ -278,7 +278,7 @@ def test_run_ruler_dedupes_clamped_ctx():
         ffn_mult=4,
         variant="standard",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     max_new = 12
     room = 320 - max_new - 1
     res = run_ruler(
@@ -325,7 +325,7 @@ def test_run_ruler_collects_badcases():
         ffn_mult=4,
         variant="standard",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     res = run_ruler(
         model,
         tok,
@@ -395,7 +395,7 @@ def test_run_ruler_rejects_fractional_and_bool_params():
         ffn_mult=4,
         variant="standard",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     base = {
         "ctx_lens": [256],
         "n_samples": 1,
@@ -639,7 +639,7 @@ def test_run_ruler_records_per_sample_outcomes():
         ffn_mult=4,
         variant="standard",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     res = run_ruler(
         model,
         tok,

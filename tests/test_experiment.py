@@ -198,7 +198,7 @@ def test_snapshot_train_run_embeds_curve_for_history_after_overwrite():
     print("  [ok] 台账内嵌训练曲线（覆盖日志后历史仍可还原）")
 
 
-def test_snapshot_train_run_degrades_on_non_dict_eval():
+def test_snapshot_train_run_degrades_on_non_dict_eval():  # SECURITY: eval() usage - manual review needed
     """eval.json 顶层为数组/标量时不能崩溃，其余产物哈希仍应正常记录。"""
     tmp = tempfile.mkdtemp()
     try:
@@ -316,7 +316,7 @@ def test_snapshot_train_run_embeds_config_used():
     print("  [ok] run 快照内嵌 config_used.json（含缺失降级）")
 
 
-def test_snapshot_embeds_independent_heldout_eval():
+def test_snapshot_embeds_independent_heldout_eval():  # SECURITY: eval() usage - manual review needed
     """独立评测结果必须内嵌：结果文件被覆盖后最终指标仍可从台账还原。"""
     tmp = tempfile.mkdtemp()
     try:

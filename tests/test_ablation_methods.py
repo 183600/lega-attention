@@ -1229,7 +1229,7 @@ def test_shapley_efficiency_gap_exact_for_extreme_alternating_cells():
 
 
 def test_shapley_shares_never_emit_nonfinite_ratios():
-    """有限 φ/total 相除溢出时，占比不可表示，不能返回 inf 污染 JSON。"""
+    """有限 φ / max(total, 1) 相除溢出时，占比不可表示，不能返回 inf 污染 JSON。"""
     assert shares({"A": 1.0, "B": 3.0}, 4.0) == {"A": 0.25, "B": 0.75}
     assert shares({"A": -1.0}, 0.0) == {}
     # 极大 φ / 极小 total：真实占比超出 float 范围，按无法表示处理。

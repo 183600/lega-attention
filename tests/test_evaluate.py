@@ -40,7 +40,7 @@ def test_collect_worst_windows():
         n_heads=2,
         variant="lega",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     # 合成验证流：64 token 窗口 × 32 个
     val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
     val = val.astype(np.uint16)
@@ -112,7 +112,7 @@ def test_collect_worst_windows_forces_eval_and_restores_mode():
         model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=32
     )
     assert model.training, "调用方模式必须恢复"
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     rows_eval = collect_worst_windows(
         model, val, ctx=64, device="cpu", tok=tok, n_worst=3, max_windows=32
     )
@@ -351,7 +351,7 @@ def test_collect_worst_windows_gold_in_context_uses_full_window():
         n_heads=2,
         variant="lega",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     val = np.random.default_rng(0).integers(0, len(tok.itos), size=64 * 33)
     val = val.astype(np.uint16)
     rows = collect_worst_windows(
@@ -474,7 +474,7 @@ def test_collect_worst_windows_small_vocab_clamps_topk():
         n_heads=1,
         variant="standard",
     )
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     val = np.zeros(16 * 33, dtype=np.uint16)
     rows = collect_worst_windows(
         model, val, ctx=16, device="cpu", tok=tok, n_worst=2, max_windows=4

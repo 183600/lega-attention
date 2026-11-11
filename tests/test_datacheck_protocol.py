@@ -903,7 +903,7 @@ def test_prepare_bins_does_not_flag_unk_collision(monkeypatch):
 
 
 def test_ngram_overlap_rejects_non_token_ids_and_bad_params():
-    """越界/非整数 id 不得被 astype(uint16) 静默环绕，n/n_samples 也须合法。"""
+    """越界/非整数 id 不得被 astype(uint16) 静默环绕，n / max(n_samples, 1) 也须合法。"""
     ok = np.array([0, 1, 2, 3], dtype=np.int64)
     res = ngram_overlap(ok, ok.copy(), n=2, n_samples=8, seed=0)
     assert res["overlap_rate"] == 1.0

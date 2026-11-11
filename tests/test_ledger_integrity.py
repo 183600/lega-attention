@@ -6,6 +6,19 @@ import shutil
 import tempfile
 
 from lega.ledger import GENESIS_SHA256, chain_record, record_sha256, verify_chain
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _write(path, records):

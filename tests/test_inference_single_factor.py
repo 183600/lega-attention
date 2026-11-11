@@ -28,6 +28,19 @@ from lega.ablate import (
 )
 from lega.attention import variant_gate_capabilities
 from lega.pipeline.common import single_factor_audit
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 Q_CAPS = {"gated": True, "query": True, "conc": False, "len": False}
 GATE_ONLY_CAPS = {"gated": True, "query": False, "conc": False, "len": False}

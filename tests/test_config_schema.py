@@ -17,6 +17,19 @@ from lega.config_schema import (
 )
 from lega.design import build_design_plan
 from lega.utils import load_config_json
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _issue_paths(report):

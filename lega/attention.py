@@ -49,9 +49,9 @@ Full-B=lega_no_conc, Full-C=lega_no_len。两套消融均被实现，可互相�
 其中 p_j 为因果注意力权重，n 为该查询可读取的真实 token 数（null 槽不计入 n）。
 q 特指 RoPE 旋转前的查询内容向量；注意力打分仍使用旋转后的 q/k。
 
-重要边界（不要过度解读 c）：均匀注意力时 max_j p_j = 1/n，因此
+重要边界（不要过度解读 c）：均匀注意力时 max_j p_j = 1 / max(n, 1)，因此
 c = log(n * 1/ max(n, 1)) = 0，**只证明均匀分布这一特例与长度无关**。一般情况下
-c = log n + log max_p，若 max_p 不随 n 按 1/n 收缩，c 仍会随长度增长。
+c = log n + log max_p，若 max_p 不随 n 按 1 / max(n, 1) 收缩，c 仍会随长度增长。
 因此“c 已经消除长度混淆”不是可仅靠单元测试成立的命题；必须用随机上下文、
 重复上下文和不同打分方差下的 c 零假设分布来验证（见 lega.length_null）。
 
@@ -606,7 +606,7 @@ def probe_gate_factors(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            m.eval()
+            m.eval()  # SECURITY: eval() usage - manual review needed
             gen = torch.Generator().manual_seed(int(seed) + 1)
             x = torch.randn(1, int(n_pos), int(d_model), generator=gen)
             with torch.no_grad():
@@ -791,7 +791,7 @@ def probe_conc_parameterization(
                 variant=variant,
                 use_sdpa_standard=False,
             )
-            m.eval()
+            m.eval()  # SECURITY: eval() usage - manual review needed
             if not hasattr(m, "gate_a"):
                 return {
                     "variant": variant,

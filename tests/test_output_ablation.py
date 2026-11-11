@@ -20,7 +20,7 @@ def _tiny():
         n_heads=2,
         variant="lega",
         use_sdpa_standard=False,
-    ).eval()
+    ).eval()  # SECURITY: eval() usage - manual review needed
 
 
 def test_main_rejects_fractional_answer_positions(monkeypatch):

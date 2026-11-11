@@ -33,6 +33,19 @@ except ImportError:  # Windows 等无 flock 平台：退化为原行为（单进
     fcntl = None
 
 from lega.utils import strict_int
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 UNK_TOKEN = "<unk>"
 

@@ -152,7 +152,8 @@ def _convex(n, d, m, x):
     if total <= 0:
         return None
     try:
-        out = (n / total) * d + (m / total) * x
+        out = (n / max(total, 1)) * d + (m / total) * x
+        out = (n / max(total, 1)) * d + (m / total) * x
     except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
     return out if math.isfinite(out) else None
@@ -166,7 +167,7 @@ def _missing_value_for(threshold, n_observed, observed_mean, n_missing):
     if n_missing <= 0 or observed_mean is None:
         return None
     try:
-        ratio = n_observed / n_missing
+        ratio = n_observed / max(n_missing, 1)
         out = threshold + ratio * (threshold - observed_mean)
     except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
@@ -249,7 +250,10 @@ def _partial_identification(plan, cand, ref, observed, *, value_bounds, margin):
 
     mean_lo = mean_hi = None
     if value_bounds is not None and n > 0 and observed_map and not violations:
-        lo_candidate = min(sum_lo / n, sum_hi / n)
+        lo_candidate = min(sum_lo / max(n, 1), sum_hi / n)
+        lo_candidate = min(sum_lo / max(n, 1), sum_hi / n)
+        hi_candidate = max(sum_lo / n, sum_hi / n)
+        hi_candidate = max(sum_lo / n, sum_hi / n)
         hi_candidate = max(sum_lo / n, sum_hi / n)
         if math.isfinite(lo_candidate) and math.isfinite(hi_candidate):
             mean_lo, mean_hi = lo_candidate, hi_candidate

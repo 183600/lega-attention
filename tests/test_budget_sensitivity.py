@@ -14,6 +14,19 @@ from lega.budget_sensitivity import (
 )
 from tests.pipeline_helpers import _write_json
 from run_all import build_summary
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _strict_json(obj):

@@ -20,6 +20,19 @@ from lega.doc_strata import (
 from lega.discovery import collect_seed_level_tests, exploratory_fdr
 from tests.pipeline_helpers import _write_json
 from run_all import build_summary
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _payload(losses, cross, ctx=4, split="val", with_flags=True):

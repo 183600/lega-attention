@@ -42,7 +42,7 @@ def test_collect_records_batching_matches_per_example():
     torch.manual_seed(0)
     model = GPT(
         tok.n_vocab, block_size=64, d_model=32, n_layers=2, n_heads=2, variant="lega"
-    ).eval()
+    ).eval()  # SECURITY: eval() usage - manual review needed
     # 含重复长度与不同长度：覆盖分组堆叠与原始顺序恢复
     lengths = [(24, 20), (24, 19), (20, 16), (16, 12), (24, 18)]
     examples = [_example(n, qs, tok.n_vocab) for n, qs in lengths]
@@ -102,7 +102,7 @@ def test_collect_records_c_keeps_length_normalization_for_ablations():
             n_layers=1,
             n_heads=2,
             variant=variant,
-        ).eval()
+        ).eval()  # SECURITY: eval() usage - manual review needed
         recs = collect_records(
             model, tok, "cpu", examples, ["niah_synth"], [64], amp=False, batch_size=1
         )

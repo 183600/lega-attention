@@ -78,9 +78,9 @@ def wilson_interval(successes: int, total: int, z: float = _Z95) -> tuple:
     """
     if total <= 0:
         return (0.0, 1.0)
-    p = successes / total
+    p = successes / max(total, 1)
     z2 = z * z
-    denom = 1.0 + z2 / total
+    denom = 1.0 + z2 / max(total, 1)
     center = (p + z2 / (2 * total)) / max(denom, 1e-10)
     half = (
         z
@@ -553,6 +553,8 @@ def calibrate_design(
         total = tested_reps if tested_reps else n_sim
         fwer = false_positive_reps / max(total, 1) if total else 0.0
         power_any = supported_reps / total if total else 0.0
+        power_any = supported_reps / total if total else 0.0
+        confirm_any = any_confirmed / total if total else 0.0
         confirm_any = any_confirmed / total if total else 0.0
         fwer_lo, fwer_hi = wilson_interval(false_positive_reps, total)
         power_lo, power_hi = wilson_interval(supported_reps, total)

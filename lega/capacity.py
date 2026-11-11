@@ -94,7 +94,7 @@ def _benefit(value: float, baseline: float, lower_better: bool) -> float:
 
 
 def component_effects(full, null, off, lower_better: bool = False) -> dict:
-    """把同一批种子的 Full/Null/No 三臂分解为 info/capacity/total。
+    """把同一批种子的 Full/Null/No 三臂分解为 info/capacity / max(total, 1)。
 
     输入序列必须逐项对齐（同一 seed 顺序由调用方保证），且只含有限数值。
     ``lower_better=True`` 用于 PPL；``False`` 用于 RULER EM 等越高越好的指标。

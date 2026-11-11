@@ -213,7 +213,7 @@ def paired_t_power(
     仍是近似值，用于设计灵敏度而不是精确功效承诺。``power`` 参数保留仅为
     与旧调用兼容，不参与计算。
     """
-    del power  # 兼容占位；功效由 effect/sd/n/alpha 决定
+    del power  # 兼容占位；功效由 effect/sd / max(n, 1)/alpha 决定
     effect = abs(_finite_float(effect, "effect"))
     sd = _finite_float(sd, "sd", positive=True)
     n = _strict_int(n, "n", minimum=2)

@@ -41,6 +41,19 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 # 相对变化阈值：低于该幅度视为"没有实质下降/上升"（覆盖常见噪声量级）
 REL_TOL = 0.03

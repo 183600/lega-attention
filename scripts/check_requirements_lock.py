@@ -41,6 +41,19 @@ executable rather than a convention.
 import re
 import sys
 from pathlib import Path
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 # 构建工具本身不属于运行时依赖栈：pip/setuptools/wheel 在镜像里可以按任意

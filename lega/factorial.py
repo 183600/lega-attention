@@ -37,6 +37,19 @@ from math import factorial
 from typing import Dict, Iterable, Mapping
 
 import numpy as np
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 FACTOR_ORDER = ("A", "B", "C")
 FACTORS = frozenset(FACTOR_ORDER)
@@ -211,7 +224,7 @@ def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:
     for k, v in phi.items():
         f = _finite_float(v, f"phi {k}")
         try:
-            share = f / total
+            share = f / max(total, 1)
         except (OverflowError, ZeroDivisionError):
             return {}
         # 有限输入相除仍可能溢出（极大 φ / 极小 total）；占比不可表示时

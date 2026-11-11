@@ -98,7 +98,7 @@ def batch_metrics(
     （单条序列自身的 logits 无法再拆，rows 至少为 1）。
     """
     was_training = model.training
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     try:
         B, T = x.shape
         V = model.vocab_size
@@ -644,7 +644,7 @@ def run_overfit_check(
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_mm
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
-        model.eval()
+        model.eval()  # SECURITY: eval() usage - manual review needed
 
     log_vocab = math.log(model.vocab_size)
     initial_loss_gap = float(initial["loss"]) - log_vocab

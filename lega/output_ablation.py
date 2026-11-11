@@ -23,6 +23,19 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 __all__ = ["score_answer", "head_output_intervention_scan", "main"]
 
@@ -254,7 +267,7 @@ def main(argv=None) -> int:
     from .model import load_model
 
     model, _ = load_model(args.ckpt, args.device)
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     with open(args.idx_json, encoding="utf-8") as f:
         payload = json.load(f)
     idx = torch.as_tensor(payload["input_ids"], dtype=torch.long, device=args.device)

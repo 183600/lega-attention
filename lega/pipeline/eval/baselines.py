@@ -1178,7 +1178,7 @@ def _render_baseline_sections(
                 agree_txt = ""
                 if n_folds:
                     try:
-                        agree_txt = f"（{agree / n_folds:.0%}）"
+                        agree_txt = f"（{agree / max(n_folds, 1):.0%}）"
                     except (OverflowError, ZeroDivisionError):
                         # 外部 JSON 的合法大整数可精确解析，但转 float 做
                         # 比例会溢出；比例按缺失渲染，不能让汇总崩溃。

@@ -988,7 +988,7 @@ def test_near_duplicate_val_test_is_diagnostic_only_and_threshold_sensitivity():
     print("  [ok] 近似重复：val/test 只诊断不改写；三档阈值敏感性可见")
 
 
-def test_near_duplicate_eval_internal_clusters_do_not_rewrite_eval():
+def test_near_duplicate_eval_internal_clusters_do_not_rewrite_eval():  # SECURITY: eval() usage - manual review needed
     """val/test 内部近重复必须被诊断，并给出块级有效样本量；两侧不改写。"""
     base = _near_dup_base()
     edited = base.replace("early nineteenth", "early twentieth").replace(

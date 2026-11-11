@@ -44,6 +44,19 @@ import numpy as np
 
 from .ruler import standalone_numeric_tokens
 from .utils import holm_bonferroni, mcnemar_exact_p, mean_std, wilson_score_ci
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 # 必须与 RULER 打分器使用同一“完整数值 token”定义：这里若退化成
 # \d{4,}，带符号/小数/科学计数法或短数字会被截成不同字符串，误抄会被

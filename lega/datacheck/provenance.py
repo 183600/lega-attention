@@ -26,6 +26,19 @@ import hashlib
 import json
 import os
 import re
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 SOURCE_PROVENANCE_SCHEMA = "lega-source-provenance-v1"
 SOURCE_MANIFEST_NAME = "source_manifest.json"
