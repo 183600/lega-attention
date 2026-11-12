@@ -51,7 +51,7 @@ def _share(value, total):
     if total is None or not np.isfinite(total) or total <= 0.0:
         return None
     try:
-        share = float(value / max(total, 1))
+        share = float(value / total)
     except (TypeError, ValueError, OverflowError, ZeroDivisionError):
         return None
     return share if np.isfinite(share) else None
