@@ -543,6 +543,23 @@ class GPT(nn.Module):
         super().__init__()
         if variant not in RUNNABLE_VARIANTS:
             raise ValueError(f"未知变体: {variant}")
+        # d_model 和 n_heads 必须是正整数且 d_model 能被 n_heads 整除，
+        # 否则 d_model // n_heads 可能为 0，导致后续 RoPE / attention scale
+        # 出现除零错误（1/sqrt(0)）。
+        if not isinstance(d_model, int) or d_model < 1:
+            raise ValueError(f"d_model 必须是正整数，收到 {d_model!r}")
+        if not isinstance(n_heads, int) or n_heads < 1:
+            raise ValueError(f"n_heads 必须是正整数，收到 {n_heads!r}")
+        if d_model % n_heads != 0:
+            raise ValueError(
+                f"d_model={d_model} 必须能被 n_heads={n_heads} 整除"
+            )
+        if not isinstance(vocab_size, int) or vocab_size < 1:
+            raise ValueError(f"vocab_size 必须是正整数，收到 {vocab_size!r}")
+        if not isinstance(block_size, int) or block_size < 1:
+            raise ValueError(f"block_size 必须是正整数，收到 {block_size!r}")
+        if not isinstance(n_layers, int) or n_layers < 1:
+            raise ValueError(f"n_layers 必须是正整数，收到 {n_layers!r}")
         dropout = config_probability(dropout, "dropout")
         attn_dropout = config_probability(attn_dropout, "attn_dropout")
         gate_bias_init = config_finite_float(gate_bias_init, "gate_bias_init")
@@ -558,7 +575,7 @@ class GPT(nn.Module):
 
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.rope = RoPE(d_model // n_heads, block_size)  # d_model % n_heads == 0 validated in GPT.__init__
+        self.rope = RoPE(d_model // n_heads, block_size)  # d_model % n_heads == 0 已在上方 __init__ 入口校验
         self.blocks = nn.ModuleList(
             [
                 Block(
