@@ -208,13 +208,20 @@ def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:
     占比”没有可解释的分母，不能强行归一化。
     """
     total = _finite_float(total_effect, "total_effect")
-    if total <= 1e-12:
+    if total is None or total <= 1e-12:
+        return {}
+    # 极大 φ / 极小 total 时真实占比溢出 float 范围；提前检测并拒绝。
+    max_phi = max(
+        (abs(_finite_float(v, f"phi {k}") or 0.0) for k, v in phi.items()),
+        default=0.0,
+    )
+    if max_phi > 0 and max_phi / total > 1e300:
         return {}
     out = {}
     for k, v in phi.items():
         f = _finite_float(v, f"phi {k}")
         try:
-            share = f / max(total, 1)
+            share = f / total
         except (OverflowError, ZeroDivisionError):
             return {}
         # 有限输入相除仍可能溢出（极大 φ / 极小 total）；占比不可表示时
