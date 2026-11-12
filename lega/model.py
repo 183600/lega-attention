@@ -770,7 +770,7 @@ class GPT(nn.Module):
                         )
                         total = part if total is None else total.add_(part)
                 # n_valid 保留为设备张量
-                loss = total / max(n_valid, 1).clamp_min(1)
+                loss = total / n_valid.clamp_min(1)
                 if return_window_losses:
                     loss_per_window = row_sums / per_row_valid.to(row_sums.dtype)
             logits = None
