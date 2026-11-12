@@ -716,7 +716,7 @@ def _fsync_dir(path: str) -> None:
     try:
         os.fsync(fd)
     except OSError:
-        import logging as _logging; _logging.warning("Suppressed exception in utils.py:718")
+        import logging as _logging; _logging.warning("Suppressed exception in utils.py:718", exc_info=True)
     finally:
         os.close(fd)
 
@@ -742,7 +742,7 @@ def save_text(text: str, path: str) -> None:
         try:
             os.remove(tmp)
         except OSError:
-            import logging as _logging; _logging.warning("Suppressed exception in utils.py:744")
+            import logging as _logging; _logging.warning("Suppressed exception in utils.py:744", exc_info=True)
 
 
 def save_json(obj, path: str) -> None:
@@ -767,7 +767,7 @@ def save_json(obj, path: str) -> None:
         try:
             os.remove(tmp)
         except OSError:
-            import logging as _logging; _logging.warning("Suppressed exception in utils.py:769")
+            import logging as _logging; _logging.warning("Suppressed exception in utils.py:769", exc_info=True)
 
 
 def get_device(device: str = "auto") -> str:

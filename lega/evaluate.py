@@ -590,7 +590,7 @@ def load_train_coverage(run_dir: str):
             if math.isfinite(e) and e >= 0:
                 out["epochs_seen"] = e
         except (TypeError, ValueError, OverflowError):
-            import logging as _logging; _logging.warning("Suppressed exception in evaluate.py:592")
+            import logging as _logging; _logging.warning("Suppressed exception in evaluate.py:592", exc_info=True)
     return out
 
 

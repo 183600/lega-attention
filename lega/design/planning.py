@@ -74,7 +74,7 @@ def _mechanism_endpoint_sensitivity(
                     spec.get("margin"), f"{metric_name} SESOI", positive=True
                 )
         except Exception:  # pragma: no cover - 保持模块可独立使用
-            import logging as _logging; _logging.warning("Suppressed exception in planning.py:76")
+            import logging as _logging; _logging.warning("Suppressed exception in planning.py:76", exc_info=True)
     raw_grid = design_cfg.get(grid_key, list(MECHANISM_SD_GRID))
     grid = sorted(
         {
@@ -1383,7 +1383,7 @@ def build_design_plan(
         if isinstance(spec, dict) and spec.get("margin") is not None:
             ppl_margin = _finite_float(spec.get("margin"), "PPL SESOI", positive=True)
     except Exception:  # pragma: no cover - 保持模块可独立使用
-        import logging as _logging; _logging.warning("Suppressed exception in planning.py:1385")
+        import logging as _logging; _logging.warning("Suppressed exception in planning.py:1385", exc_info=True)
 
     ppl_hyp_note = ""
     if ppl_hypothesis_ids:
@@ -2192,7 +2192,7 @@ def build_design_plan(
                 spec.get("margin"), "RULER SESOI", positive=True
             )
     except Exception:  # pragma: no cover
-        import logging as _logging; _logging.warning("Suppressed exception in planning.py:2194")
+        import logging as _logging; _logging.warning("Suppressed exception in planning.py:2194", exc_info=True)
     ruler_rows = []
     for disc in ruler_grid:
         try:

@@ -1636,7 +1636,7 @@ def diagnose_run_dir(run_dir: str, log_vocab: Optional[float] = None) -> Dict:
             with open(nan_path, "r", encoding="utf-8") as f:
                 diag["nan_report"] = json.load(f)
         except (OSError, ValueError):
-            import logging as _logging; _logging.warning("Suppressed exception in curves.py:1635")
+            import logging as _logging; _logging.warning("Suppressed exception in curves.py:1635", exc_info=True)
     return diag
 
 

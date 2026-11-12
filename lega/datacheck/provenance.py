@@ -196,7 +196,7 @@ def build_split_set(hashes: dict, sizes: dict = None) -> dict:
             try:
                 entry["size"] = int(sizes[split])
             except (TypeError, ValueError):
-                import logging as _logging; _logging.warning("Suppressed exception in provenance.py:195")
+                import logging as _logging; _logging.warning("Suppressed exception in provenance.py:195", exc_info=True)
         entries[str(split)] = entry
     payload = {
         "schema": SPLIT_SET_SCHEMA,

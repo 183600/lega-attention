@@ -937,13 +937,13 @@ def prepare_bins(
             if ra.get("range_analysis") is not None:
                 range_analysis[name] = ra
         except Exception:
-            import logging as _logging; _logging.warning("Suppressed exception in data.py:936")
+            import logging as _logging; _logging.warning("Suppressed exception in data.py:936", exc_info=True)
         try:
             ss = token_sequence_stats(arr)
             if ss.get("tokens", 0) > 0:
                 sequence_stats[name] = ss
         except Exception:
-            import logging as _logging; _logging.warning("Suppressed exception in data.py:942")
+            import logging as _logging; _logging.warning("Suppressed exception in data.py:942", exc_info=True)
 
     data_report = build_data_report(
         tokenizer=tokenizer_report,
