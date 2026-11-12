@@ -553,8 +553,6 @@ def calibrate_design(
         total = tested_reps if tested_reps else n_sim
         fwer = false_positive_reps / max(total, 1) if total else 0.0
         power_any = supported_reps / total if total else 0.0
-        power_any = supported_reps / total if total else 0.0
-        confirm_any = any_confirmed / total if total else 0.0
         confirm_any = any_confirmed / total if total else 0.0
         fwer_lo, fwer_hi = wilson_interval(false_positive_reps, total)
         power_lo, power_hi = wilson_interval(supported_reps, total)

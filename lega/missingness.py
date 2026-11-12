@@ -153,7 +153,6 @@ def _convex(n, d, m, x):
         return None
     try:
         out = (n / max(total, 1)) * d + (m / total) * x
-        out = (n / max(total, 1)) * d + (m / total) * x
     except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
     return out if math.isfinite(out) else None
