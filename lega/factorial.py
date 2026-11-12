@@ -212,7 +212,7 @@ def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:
         return {}
     # 极大 |φ| / 极小 total 是灾难性抵消的信号：Shapley 值远超总效应
     # 意味着正负大项几乎相消，残留的 total 不能作可靠分母；即使
-    # f / max(total, 1) 在 float 范围内，所得"占比"也远超 1、丧失
+    # f / total 在 float 范围内，所得"占比"也远超 1、丧失
     # 可解释性，不应写入 JSON/汇总。阈值 1e15 ≈ float 精度 (2^53)
     # 的倒数倍，超过此比率即视为数值不稳定。
     if any(abs(fv) / total > 1e15 for fv in phi.values()):
@@ -221,7 +221,9 @@ def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:
     for k, v in phi.items():
         f = _finite_float(v, f"phi {k}")
         try:
-            share = f / max(total, 1)
+            # 分母必须是真实总效应：0 < total < 1 时夹到 1 会压低占比，
+            # 使各分量之和不再为 1，与"占总效应比例"的口径不符。
+            share = f / total
         except (OverflowError, ZeroDivisionError):
             return {}
         # 有限输入相除仍可能溢出（极大 φ / 极小 total）；占比不可表示时
