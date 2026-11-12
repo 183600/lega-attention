@@ -717,7 +717,8 @@ def test_design_cli_writes_plan_and_exit_code():
             ]
         )
         assert rc == 0, rc
-        plan = json.load(open(out, encoding="utf-8"))
+        with open(out, encoding="utf-8") as _fh:
+            plan = json.load(_fh)
         assert plan["inputs"]["seeds"] == [1, 2, 3]
         assert plan["status"] in ("ok", "warning")
         assert plan["data_budget"]["report_present"] is True
@@ -740,7 +741,8 @@ def test_design_cli_writes_plan_and_exit_code():
             ]
         )
         assert rc2 == 2, rc2
-        plan2 = json.load(open(out, encoding="utf-8"))
+        with open(out, encoding="utf-8") as _fh:
+            plan2 = json.load(_fh)
         assert plan2["status"] == "fail"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -769,7 +771,8 @@ def test_design_cli_loads_default_preregistration():
                 "--quiet",
             ]
         )
-        plan = json.load(open(out, encoding="utf-8"))
+        with open(out, encoding="utf-8") as _fh:
+            plan = json.load(_fh)
         assert plan["inputs"]["registered_hypotheses"], plan["inputs"]
         assert any(
             c.get("id") == "scope_config" for c in plan["checks"] if isinstance(c, dict)

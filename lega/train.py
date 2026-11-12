@@ -955,7 +955,7 @@ def evaluate_val(
                         gate_high_acc.add_(torch.stack(highs).mean(), alpha=float(nb))
                         gate_w_total += nb
         # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
-        # 使 torch.load(weights_only=True) 反序列化失败且不合法
+        # 使 torch.load(weights_only=True, map_location="cpu") 反序列化失败且不合法
         val_loss = float(float(loss_acc.item()) / total_w) if total_w else float("nan")
         gate_mean = float(gate_acc.item()) / gate_w_total if gate_w_total else None
         gate_std = None

@@ -1711,7 +1711,7 @@ def verify_run(run_dir: str, data_dir: str = None, strict: bool = False) -> dict
     else:
         try:
             ckpt_meta = torch.load(
-                os.path.join(run_dir, primary_ckpt),
+                os.path.join(run_dir, primary_ckpt, map_location="cpu"),
                 map_location="cpu",
                 weights_only=True,
             )

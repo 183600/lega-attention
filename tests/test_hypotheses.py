@@ -218,7 +218,8 @@ def test_scope_tamper_rejected_and_legacy_lock_upgrade():
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
         # 模拟旧锁：删掉 locked_document（旧版锁只有 baseline+chain）
-        lk = json.load(open(lock, encoding="utf-8"))
+        with open(lock, encoding="utf-8") as _fh:
+            lk = json.load(_fh)
         lk.pop("locked_document")
         if isinstance(lk.get("baseline"), dict):
             lk["baseline"].pop("locked_document_sha256", None)
@@ -338,7 +339,8 @@ def test_amendment_appends_only_and_rejects_forbidden_edits():
         assert r["status"] == "violated"
 
         # 链本身被破坏（起点与上一环不一致）→ 既判 violated，也拒绝继续追加
-        lockobj = json.load(open(lock, encoding="utf-8"))
+        with open(lock, encoding="utf-8") as _fh:
+            lockobj = json.load(_fh)
         lockobj["chain"][0]["before"] = dict(lockobj["chain"][0]["before"])
         lockobj["chain"][0]["before"]["hypotheses"] = {"HX": "deadbeef"}
         _write(lock, lockobj)
@@ -438,7 +440,8 @@ def test_malformed_lock_baseline_and_unhashable_ids_do_not_crash():
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
         for bad in ("corrupted", 42, ["x"], None):
-            lk = json.load(open(lock, encoding="utf-8"))
+            with open(lock, encoding="utf-8") as _fh:
+                lk = json.load(_fh)
             lk["baseline"] = bad
             _write(lock, lk)
             r = verify_registration(registry_path=reg, lock_path=lock)
@@ -542,7 +545,8 @@ def test_missing_registry_with_malformed_baseline_does_not_crash():
         reg, lock = _pair(tmp)
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
-        lk = json.load(open(lock, encoding="utf-8"))
+        with open(lock, encoding="utf-8") as _fh:
+            lk = json.load(_fh)
         lk["baseline"]["hypotheses"] = 42
         _write(lock, lk)
         os.remove(reg)
@@ -561,7 +565,8 @@ def test_amend_with_null_chain_treated_as_empty():
         reg, lock = _pair(tmp)
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
-        lk = json.load(open(lock, encoding="utf-8"))
+        with open(lock, encoding="utf-8") as _fh:
+            lk = json.load(_fh)
         lk["chain"] = None
         _write(lock, lk)
         assert (
@@ -586,7 +591,8 @@ def test_verify_registration_rejects_non_list_chain():
         _write(reg, _doc([("H1", "c1")]))
         init_lock(registry_path=reg, lock_path=lock)
         for bad in ("corrupted-string", 42, {"0": {}}):
-            lk = json.load(open(lock, encoding="utf-8"))
+            with open(lock, encoding="utf-8") as _fh:
+                lk = json.load(_fh)
             lk["chain"] = bad
             _write(lock, lk)
             r = verify_registration(registry_path=reg, lock_path=lock)

@@ -731,7 +731,8 @@ def test_verify_controlled_setup_consistency():
 
         # 篡改数据指纹：同一 config 跑了不同数据不可比，必须报错
         ev_path = os.path.join(tmp, "lega", "eval.json")
-        ev = json.load(open(ev_path, encoding="utf-8"))
+        with open(ev_path, encoding="utf-8") as _fh:
+            ev = json.load(_fh)
         ev["data_fingerprint"] = "different"
         _write_json(ev_path, ev)
         try:
@@ -758,7 +759,8 @@ def test_verify_controlled_setup_consistency():
         ev["steps"] = 10
         _write_json(ev_path, ev)
         cfg_path = os.path.join(tmp, "lega", "config_used.json")
-        cfg = json.load(open(cfg_path, encoding="utf-8"))
+        with open(cfg_path, encoding="utf-8") as _fh:
+            cfg = json.load(_fh)
         cfg["lr"] = 0.002
         _write_json(cfg_path, cfg)
         try:
@@ -1208,7 +1210,8 @@ def test_verify_controlled_setup_rejects_mixed_device_types():
         # 旧产物缺 device 只警告，不伪造“一致”
         tmp3 = fixture(("cpu", "cpu"))
         evpath = os.path.join(tmp3, "lega", "config_used.json")
-        cfg = json.load(open(evpath, encoding="utf-8"))
+        with open(evpath, encoding="utf-8") as _fh:
+            cfg = json.load(_fh)
         cfg.pop("device")
         _write_json(evpath, cfg)
         try:
@@ -1343,7 +1346,8 @@ def test_single_factor_audit_covers_registered_ablation_hypotheses():
         "H1" in p or "H5" in p or "H6" in p for p in audit["problems"]
     ), audit["problems"]
 
-    registry = json.load(open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8"))
+    with open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8") as _fh:
+        registry = json.load(_fh)
     drifted = copy.deepcopy(registry)
     by_id = {h["id"]: h for h in drifted["hypotheses"]}
     by_id["H3"]["candidate"] = "lega_conc_only"  # 变成同时改 A+C
@@ -1448,7 +1452,8 @@ def test_registered_multi_factor_contrast_is_blocked_without_wording_hint():
         evaluate_registered_hypotheses,
     )
 
-    registry = json.load(open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8"))
+    with open(hypotheses_mod.REGISTRY_PATH, encoding="utf-8") as _fh:
+        registry = json.load(_fh)
     drifted = copy.deepcopy(registry)
     by_id = {h["id"]: h for h in drifted["hypotheses"]}
     # 措辞刻意不含“核心消融/去一法/单组件/单因素”等标记词：拦截必须

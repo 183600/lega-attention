@@ -914,10 +914,10 @@ def test_same_seed_training_is_bitwise_reproducible():
 
         assert curves(outs[0]) == curves(outs[1])
         w_a = torch.load(
-            os.path.join(outs[0], "model.pt"), map_location="cpu", weights_only=True
+            os.path.join(outs[0], "model.pt", map_location="cpu"), map_location="cpu", weights_only=True
         )["state_dict"]
         w_b = torch.load(
-            os.path.join(outs[1], "model.pt"), map_location="cpu", weights_only=True
+            os.path.join(outs[1], "model.pt", map_location="cpu"), map_location="cpu", weights_only=True
         )["state_dict"]
         assert w_a.keys() == w_b.keys()
         diff = [k for k in w_a if not torch.equal(w_a[k], w_b[k])]

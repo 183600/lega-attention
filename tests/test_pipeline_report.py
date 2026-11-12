@@ -101,7 +101,8 @@ def test_build_summary_worst_windows_and_cross_variant():
         assert "ranking" in sig and "ranking_note" in sig
         cross_path = os.path.join(tmp, "badcase_cross.json")
         assert os.path.exists(cross_path)
-        cross = json.load(open(cross_path, encoding="utf-8"))
+        with open(cross_path, encoding="utf-8") as _fh:
+            cross = json.load(_fh)
         # lega 相对 standard 多错一题 = 方法特异性新增；standard 无错误清单时
         # 该样本才是共识失败（这里 standard 也错了 #0）
         assert cross["ruler"]["per_variant"]["lega"]["n_new_vs_reference"] == 1

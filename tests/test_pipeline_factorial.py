@@ -519,7 +519,8 @@ def test_build_summary_excludes_multifactor_ablation_pairs():
                     },
                 )
         out = build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        with open(os.path.join(tmp, "significance.json"), encoding="utf-8") as _fh:
+            sig = json.load(_fh)
         pairs = {(t["candidate"], t["reference"]) for t in sig["pairs"]}
         assert ("lega_conc_only", "lega") not in pairs
         assert ("lega_len_only", "lega") not in pairs
@@ -567,7 +568,8 @@ def test_build_summary_only_reuses_ablation_when_scope_is_true_bool():
             },
         )
         build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        with open(os.path.join(tmp, "significance.json"), encoding="utf-8") as _fh:
+            sig = json.load(_fh)
         assert sig["causal_ablation"] == [], sig["causal_ablation"]
         # 显式 executed=true 时才消费同一份文件（n=1 仍会如实报告）。
         _write_json(
@@ -580,7 +582,8 @@ def test_build_summary_only_reuses_ablation_when_scope_is_true_bool():
             },
         )
         build_summary(tmp)
-        sig = json.load(open(os.path.join(tmp, "significance.json"), encoding="utf-8"))
+        with open(os.path.join(tmp, "significance.json"), encoding="utf-8") as _fh:
+            sig = json.load(_fh)
         assert len(sig["causal_ablation"]) == 1, sig["causal_ablation"]
         assert sig["causal_ablation"][0]["lesion"] == "no_query"
     finally:
@@ -642,7 +645,8 @@ def test_verify_controlled_setup_rejects_eval_protocol_mismatch():
             ("split", "val"),
         ):
             p = os.path.join(tmp, "lega", "eval.json")
-            ev = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as _fh:
+                ev = json.load(_fh)
             ev[key] = bad
             _write_json(p, ev)
             try:
@@ -714,7 +718,8 @@ def test_verify_controlled_setup_normalizes_numeric_strings():
                     **base,
                 },
             )
-        ev = json.load(open(os.path.join(tmp, "lega", "eval.json"), encoding="utf-8"))
+        with open(os.path.join(tmp, "lega", "eval.json"), encoding="utf-8") as _fh:
+            ev = json.load(_fh)
         for key in (
             "eval_ctx",
             "eval_iters",
@@ -773,7 +778,8 @@ def test_verify_controlled_setup_rejects_fractional_steps():
             )
         for v, actual in (("standard", 10), ("lega", 10.5)):
             p = os.path.join(tmp, v, "eval.json")
-            ev = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as _fh:
+                ev = json.load(_fh)
             ev["steps_planned"] = 10.5
             ev["steps"] = actual
             _write_json(p, ev)
@@ -787,7 +793,8 @@ def test_verify_controlled_setup_rejects_fractional_steps():
         # 双方都记录相同的小数步数同样不能算“同一预算”：步数必须可解析为整数
         for v in variants:
             p = os.path.join(tmp, v, "eval.json")
-            ev = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as _fh:
+                ev = json.load(_fh)
             ev["steps_planned"] = 10.5
             ev["steps"] = 10.5
             _write_json(p, ev)
@@ -801,7 +808,8 @@ def test_verify_controlled_setup_rejects_fractional_steps():
         # JSON true 不是步数：bool 会被 float() 当成 1，必须显式拒绝
         for v in variants:
             p = os.path.join(tmp, v, "eval.json")
-            ev = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as _fh:
+                ev = json.load(_fh)
             ev["steps_planned"] = True
             ev["steps"] = True
             ev["tokens_seen"] = True
@@ -816,7 +824,8 @@ def test_verify_controlled_setup_rejects_fractional_steps():
         # "1_0" 经 int()/float() 都会变成 10；下划线写法不是训练量。
         for v in variants:
             p = os.path.join(tmp, v, "eval.json")
-            ev = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as _fh:
+                ev = json.load(_fh)
             ev["steps_planned"] = "1_0"
             ev["steps"] = "1_0"
             ev["tokens_seen"] = "1_0"
@@ -872,7 +881,8 @@ def test_verify_controlled_setup_rejects_fractional_seeds():
                 },
             )
         cfg_path = os.path.join(tmp, "lega", "config_used.json")
-        cfg = json.load(open(cfg_path, encoding="utf-8"))
+        with open(cfg_path, encoding="utf-8") as _fh:
+            cfg = json.load(_fh)
         cfg["seed"] = 7.5
         _write_json(cfg_path, cfg)
         try:
@@ -885,7 +895,8 @@ def test_verify_controlled_setup_rejects_fractional_seeds():
         cfg["seed"] = 7
         _write_json(cfg_path, cfg)
         ev_path = os.path.join(tmp, "lega", "eval.json")
-        ev = json.load(open(ev_path, encoding="utf-8"))
+        with open(ev_path, encoding="utf-8") as _fh:
+            ev = json.load(_fh)
         ev["seed"] = 7.5
         _write_json(ev_path, ev)
         try:
@@ -1014,7 +1025,8 @@ def test_controlled_setup_selection_frac_rejects_bad_planned_steps():
             },
         )
         for bad, expect_frac in ((True, None), (10.5, None), ("10", 0.5), (10.0, 0.5)):
-            ev = json.load(open(os.path.join(d, "eval.json"), encoding="utf-8"))
+            with open(os.path.join(d, "eval.json"), encoding="utf-8") as _fh:
+                ev = json.load(_fh)
             ev["steps_planned"] = bad
             ev["steps"] = 10  # 实际步数保持正常，聚焦选型比例解析
             ev["tokens_seen"] = 1024
@@ -1040,7 +1052,8 @@ def test_controlled_setup_selection_frac_rejects_bad_planned_steps():
             assert point[3] == expect_frac, (bad, point)
         # 合法大整数：ckpt_step/计划步数可精确解析，但比例转 float 会溢出；
         # 审计必须继续运行并把比例记为缺失，而不是崩溃。
-        ev = json.load(open(os.path.join(d, "eval.json"), encoding="utf-8"))
+        with open(os.path.join(d, "eval.json"), encoding="utf-8") as _fh:
+            ev = json.load(_fh)
         ev.update(
             {
                 "steps_planned": 10,

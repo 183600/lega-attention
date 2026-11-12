@@ -641,7 +641,8 @@ def test_abort_writes_report_and_exits():
             assert "nan_report.json" in str(e), "中止信息应指向排查报告"
         path = os.path.join(tmp, "nan_report.json")
         assert os.path.exists(path), "中止前必须先落盘排查报告"
-        saved = json.load(open(path, encoding="utf-8"))
+        with open(path, encoding="utf-8") as _fh:
+            saved = json.load(_fh)
         assert saved["step"] == 123 and saved["where"] == "train_loss"
         assert "suggested_actions" in saved and len(saved["suggested_actions"]) == 4
     finally:
