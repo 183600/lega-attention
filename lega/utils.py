@@ -1765,7 +1765,7 @@ def average_precision(scores, labels) -> float:
     # 组末累计样本数 b 即 tp + fp，故 precision = tp / b。
     tp = np.cumsum(l_sorted)[ends - 1]
     recalled = tp / max(n_pos, 1)
-    precision = tp / max(ends, 1e-10)
+    precision = tp / ends
     # 逐步积分与逐组循环同序累加，保持逐位一致。
     prev_recall = np.concatenate([[0.0], recalled[:-1]])
     return float(np.cumsum((recalled - prev_recall) * precision)[-1])
@@ -1828,7 +1828,7 @@ def roc_pr_aucs(scores, labels):
             tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(g_pos)[:-1]]))[::-1]
             ends_desc = (n - starts)[::-1]
             recalled = tp_desc / max(n_pos, 1)
-            precision = tp_desc / max(ends_desc, 1e-10)
+            precision = tp_desc / ends_desc
             prev_recall = np.concatenate([[0.0], recalled[:-1]])
             ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
         return auc, ap
@@ -1844,7 +1844,7 @@ def roc_pr_aucs(scores, labels):
         tp_desc = (n_pos - np.concatenate([[0.0], np.cumsum(lv)[:-1]]))[::-1]
         ends_desc = np.arange(1, n + 1)
         recalled = tp_desc / max(n_pos, 1)
-        precision = tp_desc / max(ends_desc, 1e-10)
+        precision = tp_desc / ends_desc
         prev_recall = np.concatenate([[0.0], recalled[:-1]])
         ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
     return auc, ap
