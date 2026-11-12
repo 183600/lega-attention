@@ -238,4 +238,3 @@ def ensure_hash_seed(argv=None, env=None, quiet: bool = False) -> bool:
                 flush=True,
             )
         return False
-    return False
