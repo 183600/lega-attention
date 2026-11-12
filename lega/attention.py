@@ -915,6 +915,10 @@ class CausalSelfAttention(nn.Module):
         use_sdpa_standard: bool = True,
     ):
         super().__init__()
+        if not isinstance(d_model, int) or d_model < 1:
+            raise ValueError(f"d_model 必须是正整数，收到 {d_model!r}")
+        if not isinstance(n_heads, int) or n_heads < 1:
+            raise ValueError(f"n_heads 必须是正整数，收到 {n_heads!r}")
         if d_model % n_heads != 0:
             raise ValueError("d_model 必须能被 n_heads 整除")
         if variant not in RUNNABLE_VARIANTS:
