@@ -1108,7 +1108,7 @@ def main():
         try:
             os.remove(csv_path)
         except FileNotFoundError:
-            import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1110")
+            import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1110", exc_info=True)
         save_json(
             {
                 "variant": variant,
@@ -1209,7 +1209,7 @@ def main():
         try:
             os.remove(csv_path)
         except FileNotFoundError:
-            import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1211")
+            import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1211", exc_info=True)
     save_json(
         summary, os.path.join(args.out_dir, f"analysis_{variant}{args.suffix}.json")
     )
@@ -1308,17 +1308,17 @@ def length_stratification_analysis(records: List[Dict], n_bins: int = 5) -> Dict
                 try:
                     ctx_vals[i] = float(r["ctx"])
                 except (ValueError, TypeError):
-                    import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1310")
+                    import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1310", exc_info=True)
             if "hit" in r and r["hit"] is not None:
                 try:
                     hit_arr[i] = float(r["hit"])
                 except (ValueError, TypeError):
-                    import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1315")
+                    import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1315", exc_info=True)
             if "g" in r and r["g"] is not None:
                 try:
                     g_arr[i] = float(r["g"])
                 except (ValueError, TypeError):
-                    import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1320")
+                    import logging as _logging; _logging.warning("Suppressed exception in analysis.py:1320", exc_info=True)
 
     # Divide into bins
     valid_mask = ~np.isnan(ctx_vals)

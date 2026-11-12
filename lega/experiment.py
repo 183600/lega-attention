@@ -118,7 +118,7 @@ def read_records(path: str) -> list:
     except (OSError, UnicodeError):
         # 台账损坏（含非 UTF-8 字节）时保留已成功解析的记录，而不是让
         # verify_ledger/snapshot 因一个坏字节整体崩溃。
-        import logging as _logging; _logging.warning("Suppressed exception in experiment.py:118")
+        import logging as _logging; _logging.warning("Suppressed exception in experiment.py:118", exc_info=True)
     return out
 
 
@@ -991,7 +991,7 @@ def snapshot_train_run(
                 "size": int(os.path.getsize(heldout_path)),
             }
         except OSError:
-            import logging as _logging; _logging.warning("Suppressed exception in experiment.py:993")
+            import logging as _logging; _logging.warning("Suppressed exception in experiment.py:993", exc_info=True)
         mismatches = _eval_identity_mismatches(fe, variant, seed)
         if mismatches:
             rec["final_eval_identity_mismatches"] = mismatches

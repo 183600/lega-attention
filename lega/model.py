@@ -415,7 +415,7 @@ def _ce_chunk_size(vocab_size: int, device: torch.device, *, train: bool) -> int
                 total = torch.cuda.get_device_properties(device).total_memory
                 elems = min(max(total // 64, 33_554_432), elems)
             except Exception:
-                import logging as _logging; _logging.warning("Suppressed exception in model.py:414")
+                import logging as _logging; _logging.warning("Suppressed exception in model.py:414", exc_info=True)
     return max(256, min(4096, elems // max(1, int(vocab_size))))
 
 
@@ -1145,7 +1145,7 @@ def save_checkpoint(path: str, model: GPT, extra: Optional[Dict] = None) -> None
         except OSError:
             # 某些网络/特殊文件系统不支持对只读 fd fsync；不能因此让
             # 已完成序列化的 checkpoint 保存失败（原子替换仍然有效）。
-            import logging as _logging; _logging.warning("Suppressed exception in model.py:1125")
+            import logging as _logging; _logging.warning("Suppressed exception in model.py:1125", exc_info=True)
         os.replace(tmp_path, target)
         # POSIX 下目录项本身也需要 fsync，rename 才能在崩溃后持久。
         try:
@@ -1155,7 +1155,7 @@ def save_checkpoint(path: str, model: GPT, extra: Optional[Dict] = None) -> None
             finally:
                 os.close(dfd)
         except OSError:
-            import logging as _logging; _logging.warning("Suppressed exception in model.py:1137")
+            import logging as _logging; _logging.warning("Suppressed exception in model.py:1137", exc_info=True)
     finally:
         # 成功时临时目录已空；失败时删除半截文件，绝不留下可被误读的
         # 伪 checkpoint（也不污染 out/ 目录的 glob/快照）。

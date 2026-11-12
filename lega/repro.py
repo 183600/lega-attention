@@ -816,7 +816,7 @@ def data_fingerprint(data_dir: str, use_cache: bool = True) -> dict:
                 json.dump(fp, f, ensure_ascii=False, indent=2)
             os.replace(cache_path + ".tmp", cache_path)
         except OSError:
-            import logging as _logging; _logging.warning("Suppressed exception in repro.py:818")
+            import logging as _logging; _logging.warning("Suppressed exception in repro.py:818", exc_info=True)
     return fp
 
 
@@ -1801,7 +1801,7 @@ def load_provenance(ckpt_dir: str, data_dir: str = None, device: str = None) -> 
         try:
             current_data = data_fingerprint(data_dir)["digest"]
         except FileNotFoundError:
-            import logging as _logging; _logging.warning("Suppressed exception in repro.py:1803")
+            import logging as _logging; _logging.warning("Suppressed exception in repro.py:1803", exc_info=True)
     # 只读一次 config_used：两次读之间文件若被替换，config_sha256 与
     # config_used_sha256 会指向不同内容，违背“同一份解析后配置”的语义。
     cfg_sha = sha256_file(cfg) if os.path.exists(cfg) else None
