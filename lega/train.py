@@ -1219,7 +1219,7 @@ def early_stop_update(
         best_f = float("inf")
     except (TypeError, ValueError):
         return best_val, evals_since_improve, False
-    if math.isposinf(best_f):
+    if best_f == float("inf"):
         return vl_f, 0, False
     noise_rel = _val_ci_rel(vl_f, val_ci95)
     threshold = max(0.0, float(min_delta), noise_rel or 0.0)

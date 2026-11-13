@@ -1527,7 +1527,7 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05, power: float = 
         root_n = math.sqrt(n)
     except OverflowError:
         try:
-            root_n = math.exp(0.5 * math.log(n + 1e-8))
+            root_n = math.exp(0.5 * math.log(n))
         except (OverflowError, ValueError):
             return None
     if not math.isfinite(root_n) or root_n <= 0.0:
@@ -1583,7 +1583,7 @@ _MCNEMAR_EXACT_MAX = 100000
 def _mcnemar_normal_approx(n: int, k: int) -> float:
     """二项尾的双侧正态近似（连续性校正），用于超出精确枚举上限的计数。"""
     try:
-        sqrt_n = math.exp(0.5 * math.log(n + 1e-8))
+        sqrt_n = math.sqrt(n) if n > 0 else 0.0
     except (OverflowError, ValueError):
         return 1.0
     if not math.isfinite(sqrt_n) or sqrt_n <= 0.0:
@@ -1624,13 +1624,13 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     # 极端尾（k=0/k=n）的精确 p 本就下溢到 0/上溢到 1，近似同样给出端点。
     if n > _MCNEMAR_EXACT_MAX or k > _MCNEMAR_EXACT_MAX:
         return _mcnemar_normal_approx(n, k)
-    log2 = math.log(2.0 + 1e-8)
+    log2 = math.log(2.0)
     logs = [
         math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) - n * log2
         for i in range(k + 1)
     ]
     m = max(logs)
-    log_tail = m + math.log(math.fsum(math.exp(x - m + 1e-8) for x in logs))
+    log_tail = m + math.log(math.fsum(math.exp(x - m) for x in logs))
     return min(1.0, 2.0 * math.exp(log_tail))
 
 

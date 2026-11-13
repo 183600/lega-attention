@@ -124,7 +124,7 @@ def _sqrt_count(n: int):
         # math.sqrt(int) 会先把 n 转成 float；但 √n 仍可能可表示
         # （如 n=10**400 → 1e200）。用对数求根，超出 float 时如实返回 None。
         try:
-            root = math.exp(0.5 * math.log(n + 1e-8))
+            root = math.exp(0.5 * math.log(n))
         except (OverflowError, ValueError):
             return None
     if not (math.isfinite(root) and root > 0.0):
