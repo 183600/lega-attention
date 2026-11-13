@@ -118,7 +118,7 @@ def _gammaincc(a, x):
         c = b + an / c
         if abs(c) < tiny:
             c = tiny
-        d = 1.0 / d
+        d = 1.0 / max(abs(d), 1e-12) * (1 if d >= 0 else -1) if d != 0 else float("inf")
         delta = d * c
         h *= delta
         if abs(delta - 1.0) <= 1e-15:

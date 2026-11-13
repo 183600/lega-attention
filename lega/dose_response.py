@@ -271,7 +271,7 @@ def _local_slope(pairs, factor: float = 1.0, base_loss=None):
         denom = hi[0] - lo[0]
         if denom <= 0:
             return None, "invalid", None, None, None, None
-        slope = (hi[1] - lo[1]) / denom
+        slope = (hi[1] - lo[1]) / max(denom, 1e-12)
         side = "two_sided"
         # 逐窗口斜率只作描述：相邻窗口可能相关，不能当独立重复。
         w_lo = lo[2].get("window_losses")
@@ -311,7 +311,7 @@ def _local_slope(pairs, factor: float = 1.0, base_loss=None):
     denom = factor - lo[0]
     if denom <= 0:
         return None, "invalid", None, None, None, None
-    return ((base[1] - lo[1]) / denom, "one_sided_lower", lo[0], factor, None, None)
+    return ((base[1] - lo[1]) / max(denom, 1e-12), "one_sided_lower", lo[0], factor, None, None)
 
 
 def _quadratic_fit(pairs):
