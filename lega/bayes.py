@@ -111,7 +111,7 @@ def _logsumexp(values):
     peak = float(np.max(arr))
     if not math.isfinite(peak):
         return peak
-    return float(peak + math.log(float(np.sum(np.exp(arr - peak + 1e-8)))))
+    return float(peak + math.log(float(np.sum(np.exp(arr - peak)))))
 
 
 def _safe_exp(log_value):
@@ -174,11 +174,11 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
         return None
     ss0 = float(np.sum(z * z))
 
-    log_sd = math.log(sd_z + 1e-8)
+    log_sd = math.log(sd_z)
     log_sigma = np.linspace(log_sd - _SIGMA_SPAN, log_sd + _SIGMA_SPAN, n_sigma)
     sigma = np.exp(log_sigma)
     loglik0 = (
-        -0.5 * n * math.log(2.0 * math.pi + 1e-8) - n * log_sigma - ss0 / (2.0 * sigma**2)
+        -0.5 * n * math.log(2.0 * math.pi) - n * log_sigma - ss0 / (2.0 * sigma**2)
     )
 
     u = (np.arange(n_delta) + 0.5) / max(n_delta, 1e-10)
@@ -187,13 +187,13 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
     sse = ss0 - 2.0 * mu_z * sum_z + n * mu_z**2
     sse = np.maximum(sse, 0.0)
     loglik1 = (
-        -0.5 * n * math.log(2.0 * math.pi + 1e-8)
+        -0.5 * n * math.log(2.0 * math.pi)
         - n * log_sigma[None, :]
         - sse / (2.0 * sigma[None, :] ** 2)
     )
 
-    log_l0 = _logsumexp(loglik0) - math.log(n_sigma + 1e-8)
-    log_l1 = _logsumexp(loglik1.ravel()) - math.log(n_sigma * n_delta + 1e-8)
+    log_l0 = _logsumexp(loglik0) - math.log(n_sigma)
+    log_l1 = _logsumexp(loglik1.ravel()) - math.log(n_sigma * n_delta)
     log_bf10 = log_l1 - log_l0
 
     peak = float(np.max(loglik1))
@@ -275,21 +275,21 @@ def evidence_label(bf10):
 def _label_from_log(log_bf10):
     if log_bf10 is None or not math.isfinite(log_bf10):
         return "无法计算"
-    if log_bf10 >= math.log(100.0 + 1e-8):
+    if log_bf10 >= math.log(100.0):
         return "极强支持 H1"
-    if log_bf10 >= math.log(30.0 + 1e-8):
+    if log_bf10 >= math.log(30.0):
         return "强支持 H1"
-    if log_bf10 >= math.log(10.0 + 1e-8):
+    if log_bf10 >= math.log(10.0):
         return "中等支持 H1"
-    if log_bf10 > math.log(3.0 + 1e-8):
+    if log_bf10 > math.log(3.0):
         return "弱支持 H1"
-    if log_bf10 >= -math.log(3.0 + 1e-8):
+    if log_bf10 >= -math.log(3.0):
         return "证据不足（不区分 H0/H1）"
-    if log_bf10 > -math.log(10.0 + 1e-8):
+    if log_bf10 > -math.log(10.0):
         return "弱支持 H0"
-    if log_bf10 > -math.log(30.0 + 1e-8):
+    if log_bf10 > -math.log(30.0):
         return "中等支持 H0"
-    if log_bf10 > -math.log(100.0 + 1e-8):
+    if log_bf10 > -math.log(100.0):
         return "强支持 H0"
     return "极强支持 H0"
 

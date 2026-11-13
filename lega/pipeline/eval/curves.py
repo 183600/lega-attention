@@ -22,7 +22,7 @@ def diagnose_training_curves(chain, data_dir: str, results_dir: str) -> dict:
                 vocab = _integral_value(json.load(f)["vocab_size"])
             if vocab is None or vocab <= 0:
                 raise ValueError(f"meta.vocab_size 非法: {vocab!r}")
-            log_vocab = _math.log(vocab + 1e-8)
+            log_vocab = _math.log(vocab)
         except (OSError, ValueError, KeyError, TypeError):
             log_vocab = None
     diag = {}

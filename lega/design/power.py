@@ -622,7 +622,7 @@ def _mcnemar_critical_exact(m: int, alpha: float) -> int:
         math.lgamma(m + 1)
         - math.lgamma(mode + 1)
         - math.lgamma(m - mode + 1)
-        - m * math.log(2.0 + 1e-8)
+        - m * math.log(2.0)
     )
     # 以众数 pmf 为尺度求和，避免 0.5^m 下溢。
     total = 0.0
@@ -632,7 +632,7 @@ def _mcnemar_critical_exact(m: int, alpha: float) -> int:
             math.lgamma(m + 1)
             - math.lgamma(k + 1)
             - math.lgamma(m - k + 1)
-            - m * math.log(2.0 + 1e-8)
+            - m * math.log(2.0)
         )
         v = math.exp(logp - max_log)
         scaled.append(v)

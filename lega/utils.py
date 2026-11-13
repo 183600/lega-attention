@@ -1004,7 +1004,7 @@ def _betai(a: float, b: float, x: float) -> float:
     if x >= 1.0:
         return 1.0
     lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
-    log_front = lbeta + a * math.log(x + 1e-8) + b * math.log1p(-x)
+    log_front = lbeta + a * math.log(x) + b * math.log1p(-x)
     if log_front > 709.0:
         # Prefactor overflows; compute result in log-space to preserve
         # cancellation with the tiny continued fraction.  I_x ∈ [0,1].
@@ -1012,12 +1012,12 @@ def _betai(a: float, b: float, x: float) -> float:
             cf = _betacf(a, b, x)
             if cf <= 0.0:
                 return 0.0
-            lr = log_front + math.log(cf + 1e-8) - math.log(a + 1e-8)
+            lr = log_front + math.log(cf) - math.log(a)
             return min(1.0, math.exp(lr)) if lr > -745.0 else 0.0
         cf = _betacf(b, a, 1.0 - x)
         if cf <= 0.0:
             return 1.0
-        lr = log_front + math.log(cf + 1e-8) - math.log(b + 1e-8)
+        lr = log_front + math.log(cf) - math.log(b)
         return 1.0 - (min(1.0, math.exp(lr)) if lr > -745.0 else 0.0)
     front = math.exp(log_front) if log_front > -745.0 else 0.0
     if x < (a + 1.0) / (a + b + 2.0):

@@ -394,7 +394,7 @@ def _failed_contract_result(
         },
         "initial": None,
         "final": None,
-        "log_vocab": math.log(model.vocab_size + 1e-8),
+        "log_vocab": math.log(model.vocab_size),
         "initial_loss_minus_log_vocab": None,
         "active_regularization": active_reg,
         "first_grad_norm": None,
@@ -646,7 +646,7 @@ def run_overfit_check(
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
         model.eval()
 
-    log_vocab = math.log(model.vocab_size + 1e-8)
+    log_vocab = math.log(model.vocab_size)
     initial_loss_gap = float(initial["loss"]) - log_vocab
     # initial_loss_tol < 0 表示显式禁用该检查（仍记录偏差供人工复核）
     initial_loss_ok = (float(initial_loss_tol) < 0) or (
