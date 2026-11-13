@@ -774,7 +774,9 @@ def test_holm_bonferroni():
 def _brute_signflip_p(diffs):
     """定义式精确 p：枚举 2^n 个符号翻转，数 |mean| >= |观测均值| 的比例。"""
     n = len(diffs)
-    obs = abs(sum(diffs) / (n + 1e-8))
+    if n == 0:
+        return 1.0  # 无观测时约定 p=1
+    obs = abs(sum(diffs) / n)
     cnt = 0
     for mask in range(2**n):
         flipped = [(d if (mask >> i) & 1 == 0 else -d) for i, d in enumerate(diffs)]
