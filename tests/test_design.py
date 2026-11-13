@@ -110,6 +110,7 @@ def test_paired_power_and_required_seeds():
         # 双侧检验只看效应幅度，负方向必须与正方向同功效。
         assert paired_t_power(-0.01, 0.01, n) == paired_t_power(0.01, 0.01, n), n
     n = required_pairs(0.01, 0.01, alpha=0.05, power=0.8)
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     assert n == 8, n
     assert paired_t_power(0.01, 0.01, n) >= 0.8
     assert paired_t_power(0.01, 0.01, n - 1) < 0.8
@@ -1419,6 +1420,7 @@ def test_analysis_population_ignores_variants_without_analysis_support():
 def test_design_power_helpers_handle_nonpositive_z_sum():
     """目标功效低到 z 和 <= 0 时，反推量不能除零或返回负值。"""
     alpha = 0.05
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     z_alpha = statistics.NormalDist().inv_cdf(1.0 - alpha / 2.0)
     at_alpha = statistics.NormalDist().cdf(-z_alpha)
     for power in (at_alpha, at_alpha / 2.0):

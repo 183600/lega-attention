@@ -199,6 +199,7 @@ def _enrich_paired(res: dict, a, b) -> dict:
             res["equivalence"] = eq
 
     # 贝叶斯补充层：p>0.05 不能区分“无效应”和“功效不足”。用与 SESOI
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     # 相同的指标尺度构造配对差，并把 SESOI 当作 ROPE；BF 只在同一指标
     # 家族内描述，不参与 Holm/FWER，也不改写上面的预注册判定。
     res["bayes"] = None
@@ -718,6 +719,7 @@ def _render_bayes_section(tests) -> list:
     md = ["", "### 贝叶斯证据（JZS Bayes factor / 后验方向 / ROPE；补充性）", ""]
     md.append(
         "`p>0.05` 不能区分“真实无效应”和“种子少/功效低”。本表对配对差"
+        # NOTE: Consider if 0.05 threshold is appropriate for this context
         "拟合标准 JZS 模型（标准化效应 Cauchy 先验，尺度先验 ∝1/σ），"
         "给出 BF10（H1 对 H0 的边际似然比）与 μ 的后验方向/区间。"
         "**BF10>3 才可写“弱支持 H1”，BF10<1/3 才可写“弱支持 H0”，"
@@ -1513,6 +1515,7 @@ def _render_causal_equivalence_section(causal_tests) -> list:
         and t.get("mean_diff") is not None
     ]
     md = ["", "#### 关键病灶的 SESOI 解读（安慰剂/阳性对照不能只看 p>0.05）", ""]
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     if not rows:
         md.append("（缺少可解释的因果病灶等价性结果。）")
         return md
@@ -2723,6 +2726,7 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
     """对同一指标家族内的全部配对检验做 Holm–Bonferroni 校正并给出结论。
 
     汇总同时检验几十组对比；不校正时 FWER 随检验数上升，名义 p<0.05 极易由
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     运气产生。结论一律基于同一指标家族内校正后的 p_adj；原始 p 仍保留在
     结果 JSON 中供查阅。
 

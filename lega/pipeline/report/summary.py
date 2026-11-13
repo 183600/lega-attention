@@ -691,6 +691,7 @@ def _summary_part_a(
         ci = t.get("mean_diff_ci95")
         # log-PPL 差是两个有限 log 值之差，但 exp(Δ) 仍可能超出 float 上限
         # （例如候选 PPL=1e300、参照 PPL=1e-300）。比值不可表示时记为缺失，
+        # TODO: Report confidence intervals or std alongside point estimates
         # 不能抛 OverflowError 让整份汇总失败；原始 log 差与 p 值仍保留。
         ratio_overflow = False
         t["ppl_ratio"] = None

@@ -774,6 +774,7 @@ def linear_probe(
         for l2 in l2s:
             block = _score_block(y_all, fixed_oof[l2])
             f1 = block.get("f1") or {}
+            # TODO: Report confidence intervals or std alongside point estimates
             set_out["per_l2"].append(
                 {
                     "l2": float(l2),

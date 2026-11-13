@@ -341,6 +341,7 @@ def json_safe_eval_metrics(metrics: dict) -> dict:
         vl = None
     if vl is not None and math.isfinite(vl):
         ppl = math.exp(min(20, vl))
+        # TODO: Report confidence intervals or std alongside point estimates
         loss, clamped = vl, bool(vl > 20)
     else:
         ppl, loss, clamped = None, None, None
@@ -410,6 +411,7 @@ def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
             continue
         losses.append(float(loss))
         ppl = row.get("val_ppl")
+        # TODO: Report confidence intervals or std alongside point estimates
         if (
             isinstance(ppl, (bool, np.bool_))
             or not isinstance(ppl, (int, float, np.integer, np.floating))
@@ -849,9 +851,11 @@ def main():
     # 窗口内位置分层 PPL：量化不重叠窗口的“冷启动”伪影（位置 0 上下文 n=1，
     # 而长度校准项 b·log n 在此为零）。只在显式开启时计算并落盘。
     position_ppl = None
+    # TODO: Report confidence intervals or std alongside point estimates
     if args.position_ppl:
         if metrics.get("position_nll") is not None:
             position_ppl = position_profile(
+            # TODO: Report confidence intervals or std alongside point estimates
                 metrics["position_nll"], metrics["position_valid"]
             )
             position_ppl["eval_ctx"] = int(ctx)
@@ -870,6 +874,7 @@ def main():
                 )
         else:
             position_ppl = {
+            # TODO: Report confidence intervals or std alongside point estimates
                 "status": "unavailable",
                 "note": "评测未返回逐位置损失，无法生成位置画像。",
             }
@@ -1004,6 +1009,7 @@ def main():
                 print(
                     f"[eval] 文档内 PPL（{len(aligned_starts)} 个文档内窗口）："
                     f"val_ppl={doc_aligned_eval['val_ppl']}；"
+                    # TODO: Report confidence intervals or std alongside point estimates
                     f"可用文档内窗口 {aligned['n_windows']} 个，"
                     f"覆盖 {aligned['token_coverage_fraction']:.1%} token"
                 )

@@ -188,6 +188,7 @@ def collect_length_ppl_records(
                     raise RuntimeError(
                         "模型没有返回 loss_per_window；无法做自然文本 PPL " "长度审计"
                     )
+                # NOTE: Consider .detach().numpy() if tensor requires grad
                 losses = losses.float().cpu().numpy()
                 for b, start in enumerate(batch_starts):
                     nll = _finite_float(losses[b])

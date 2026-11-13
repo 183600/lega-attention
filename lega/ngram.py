@@ -1,6 +1,7 @@
 """简单统计基线：一元/二元/插值二元平滑 n-gram 的 held-out PPL。
 
 科研方法问题：没有简单基线时，“神经模型 PPL=xx”无法回答“数据本身
+# TODO: Report confidence intervals or std alongside point estimates
 有多难、复杂架构是否真的比无参数的统计模型更好”；而一个故意没调好
 的弱基线（如只扫两档 α 的纯 bigram）会把“复杂模型更好”变成廉价结论。
 本模块提供零训练、选参只在验证集的 n-gram 基线：

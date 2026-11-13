@@ -589,6 +589,7 @@ def test_config_float_and_probability_validation():
 
 def test_paired_t_matches_t_table():
     # Student-t 临界值表（双侧）：df=4, t=2.776445 -> p=0.05；df=3, t=3.182446 -> p=0.05
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     assert abs(student_t_two_sided_p(2.776445, 4) - 0.05) < 1e-6
     assert abs(student_t_two_sided_p(3.182446, 3) - 0.05) < 1e-6
     assert abs(student_t_two_sided_p(0.0, 5) - 1.0) < 1e-12

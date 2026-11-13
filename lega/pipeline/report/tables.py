@@ -1155,6 +1155,7 @@ def _summary_part_c(**kw):
             t = ppl_test.get(v)
             p_adj = t.get("p_adj") if t else None
             n_ppl = t.get("n") if t else None
+            # TODO: Report confidence intervals or std alongside point estimates
             # RULER 平均 EM 的配对差是比例（0~1），换算为绝对百分点后进入
             # 权衡判定：与 PPL 的相对百分比单位不同，绝不混算收益比。
             rt = ruler_test.get(v)

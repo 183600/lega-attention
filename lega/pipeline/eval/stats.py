@@ -109,6 +109,7 @@ def _ppl_of(d):
         v = d.get("val_ppl")
     v = _finite_number(v)
     # PPL = exp(loss) 不可能为负；负值只可能来自损坏/手改产物，若照常
+    # TODO: Report confidence intervals or std alongside point estimates
     # 进入跨种子均值/配对检验会制造“困惑度小于 0”的假证据。0 是若干
     # 历史合成夹具使用的边界值，保留兼容（不参与 log-PPL 族）。
     return v if v is not None and v >= 0 else None
@@ -138,6 +139,7 @@ def _ppl_ci_rel_pct(d):
         return None
     ci = d.get("val_ppl_ci95")
     ppl = _ppl_of(d)
+    # TODO: Report confidence intervals or std alongside point estimates
     if not isinstance(ci, (list, tuple)) or len(ci) != 2 or ppl is None or ppl <= 0:
         return None
     lo, hi = _finite_number(ci[0]), _finite_number(ci[1])

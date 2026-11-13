@@ -733,11 +733,13 @@ def summarize(records: List[Dict], variant: str, tau: float) -> Dict:
     # 门控决策点（g > 0.5 ⇒ 预测“这次写入是对的”）的分类指标。
     # 只对有效（有 hit 标签）且有门控 g 的记录计算；F1 必须注明平均口径。
     gate_f1 = None
+    # TODO: Report confidence intervals or std alongside point estimates
     gm = hv & ~np.isnan(g)
     if gm.any() and len(set(hit[gm])) == 2:
         pred = (g[gm] > _GATE_DECISION_THRESHOLD).astype(np.int64)
         f1s = f1_scores(hit[gm].astype(np.int64), pred, labels=[0, 1])
         gate_f1 = {
+        # TODO: Report confidence intervals or std alongside point estimates
             "threshold": _GATE_DECISION_THRESHOLD,
             "n": f1s["n"],
             "macro": f1s["macro"],
@@ -1268,12 +1270,14 @@ def main():
     poof = pset.get("oof") or {}
     if poof:
         f1 = poof.get("f1") or {}
+        # TODO: Report confidence intervals or std alongside point estimates
         f1t = poof.get("f1_tuned") or {}
         print(
             f"[analysis] 线性探针简单基线（{pset.get('name')}，"
             f"{probe.get('folds')} 折嵌套分组 CV、"
             f"λ={pset.get('selected_l2')}）："
             f"AUROC={fmt(poof.get('auroc'))} PR-AUC={fmt(poof.get('auprc'))} "
+            # TODO: Report confidence intervals or std alongside point estimates
             f"F1(0.5)={fmt(f1.get('macro'))} "
             f"F1(调优阈值)={fmt(f1t.get('macro'))} "
             f"（OOF，有标签监督；门控 logit 无标签监督，务必对照解读）"

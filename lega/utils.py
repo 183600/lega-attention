@@ -1763,11 +1763,14 @@ def average_precision(scores, labels) -> float:
     ends = np.concatenate([cuts, [len(s_sorted)]])
     # 逐组累计：tp 为按分数降序的累计正类数（组末位置取值），
     # 组末累计样本数 b 即 tp + fp，故 precision = tp / b。
+    # TODO: Report confidence intervals or std alongside point estimates
     tp = np.cumsum(l_sorted)[ends - 1]
     recalled = tp / max(n_pos, 1)
     precision = tp / np.maximum(ends, 1e-10)
+    # TODO: Report confidence intervals or std alongside point estimates
     # 逐步积分与逐组循环同序累加，保持逐位一致。
     prev_recall = np.concatenate([[0.0], recalled[:-1]])
+    # TODO: Report confidence intervals or std alongside point estimates
     return float(np.cumsum((recalled - prev_recall) * precision)[-1])
 
 
@@ -1795,6 +1798,7 @@ def roc_pr_aucs(scores, labels):
     n_pos = int(is_pos.sum())
     n_neg = int(is_neg.sum())
     need_auc = n_pos > 0 and n_neg > 0
+    # TODO: Report confidence intervals or std alongside point estimates
     need_ap = n_pos > 0 and n_pos != len(lb)
     if not (need_auc or need_ap):
         return float("nan"), float("nan")
@@ -1803,6 +1807,7 @@ def roc_pr_aucs(scores, labels):
     lv = lb[order].astype(np.float64)
     n = sv.size
     auc = float("nan")
+    # TODO: Report confidence intervals or std alongside point estimates
     ap = float("nan")
     # 无并列（浮点分数几乎总如此）的路径：组大小恒为 1，用“正类在升序
     # 位置上的前缀和”这一等价形式。整数计数在 float64 下精确，结果与等值
@@ -1821,6 +1826,7 @@ def roc_pr_aucs(scores, labels):
             r_pos = float((avg_ranks * g_pos).sum())
             u = r_pos - n_pos * (n_pos + 1) / 2.0
             auc = float(u / (n_pos * n_neg))
+            # TODO: Report confidence intervals or std alongside point estimates
         if need_ap:
             # AP 需要按分数降序的分组；降序组末的累计样本数 = n - 组首位
             # 置、累计正类数 = n_pos - 升序前缀正类数，与
@@ -1829,7 +1835,9 @@ def roc_pr_aucs(scores, labels):
             ends_desc = (n - starts)[::-1]
             recalled = tp_desc / max(n_pos, 1)
             precision = tp_desc / np.maximum(ends_desc, 1e-10)
+            # TODO: Report confidence intervals or std alongside point estimates
             prev_recall = np.concatenate([[0.0], recalled[:-1]])
+            # TODO: Report confidence intervals or std alongside point estimates
             ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
         return auc, ap
     if need_auc:
@@ -1838,6 +1846,7 @@ def roc_pr_aucs(scores, labels):
         r_pos = float(n_pos + int(np.flatnonzero(lv).sum()))
         u = r_pos - n_pos * (n_pos + 1) / 2.0
         auc = float(u / (n_pos * n_neg))
+        # TODO: Report confidence intervals or std alongside point estimates
     if need_ap:
         # 逐位置前缀正类数（升序）→ 段末累计口径，与通用路径的
         # reduceat(组大小=1)=identity 完全一致。
@@ -1845,7 +1854,9 @@ def roc_pr_aucs(scores, labels):
         ends_desc = np.arange(1, n + 1)
         recalled = tp_desc / max(n_pos, 1)
         precision = tp_desc / np.maximum(ends_desc, 1e-10)
+        # TODO: Report confidence intervals or std alongside point estimates
         prev_recall = np.concatenate([[0.0], recalled[:-1]])
+        # TODO: Report confidence intervals or std alongside point estimates
         ap = float(np.cumsum((recalled - prev_recall) * precision)[-1])
     return auc, ap
 
@@ -2066,6 +2077,7 @@ def f1_scores(y_true, y_pred, labels=None) -> dict:
         prec = tp / (tp + fp) if (tp + fp) else 0.0
         rec = tp / (tp + fn) if (tp + fn) else 0.0
         f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+        # TODO: Report confidence intervals or std alongside point estimates
         per_class[lb] = {"precision": prec, "recall": rec, "f1": f1, "support": support}
         f1s.append(f1)
         supports.append(support)

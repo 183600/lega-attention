@@ -193,6 +193,7 @@ def test_pilot_feasibility_uses_noise_not_direction():
             confirmatory_seeds=[1337, 2024],
         )
         feas = pilot_feasibility(anchor, n_seeds=5, alpha=0.05, power=0.8)
+        # NOTE: Consider if 0.05 threshold is appropriate for this context
         row = next(r for r in feas["rows"] if r["id"] == "H1")
         # H1 的试点均值差约 -4.8%，远大于 SESOI=1%；但判定必须按"SESOI 处的
         # 功效"给出，而不是按试点均值给功效。

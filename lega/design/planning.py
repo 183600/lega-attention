@@ -278,6 +278,7 @@ def _equivalence_check(check_id, title, plan, *, target_power):
             ""
             if ok_eq
             else "当前设计不足以支持等价结论，p>0.05 不得写成“无差异/等价”；"
+            # NOTE: Consider if 0.05 threshold is appropriate for this context
         )
         + ("" if ok_ni else "非劣性功效也不足，不能写“未明显更差”；")
         + "增加种子后若要重做检验，须按序贯/预注册规则处理，不能看到"
@@ -2766,6 +2767,7 @@ def build_design_plan(
                 c["detail"] += "（冒烟运行：仅检查流程，不作确认性设计）"
 
     endpoint_ppl = {
+    # TODO: Report confidence intervals or std alongside point estimates
         "metric": "PPL",
         "sesoi_relative": ppl_margin,
         "sesoi_source": "predeclared_protocol",

@@ -65,6 +65,7 @@ def registration_coverage(
     config_file=None,
     data_scope=None,
     sesoi_ppl=None,
+    # TODO: Report confidence intervals or std alongside point estimates
     sesoi_ruler=None,
     sesoi_mechanism=None,
     ruler_n_samples=None,

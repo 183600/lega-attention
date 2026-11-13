@@ -75,6 +75,7 @@ def wilson_interval(successes: int, total: int, z: float = _Z95) -> tuple:
 
     小样本下正态近似区间会越界到 [0,1] 之外并给出 0 宽度，Monte Carlo 的
     比例区间必须用 Wilson：n=1000、p=0.05 时它的覆盖率明显优于正态近似。
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     """
     if total <= 0:
         return (0.0, 1.0)
@@ -183,6 +184,7 @@ def _sesoi_effects(plan: dict) -> dict:
         plan.get("assumptions") if isinstance(plan.get("assumptions"), dict) else {}
     )
     ppl = endpoints.get("ppl") if isinstance(endpoints.get("ppl"), dict) else {}
+    # TODO: Report confidence intervals or std alongside point estimates
     ruler = (
         endpoints.get("ruler") if isinstance(endpoints.get("ruler"), dict) else {}
     )
@@ -190,6 +192,7 @@ def _sesoi_effects(plan: dict) -> dict:
         ruler.get("seed_level") if isinstance(ruler.get("seed_level"), dict) else {}
     )
     auroc = endpoints.get("auroc") if isinstance(endpoints.get("auroc"), dict) else {}
+    # TODO: Report confidence intervals or std alongside point estimates
     ap = endpoints.get("ap") if isinstance(endpoints.get("ap"), dict) else {}
 
     def _positive(value):

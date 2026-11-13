@@ -883,6 +883,7 @@ def score_prediction(
         pred = set(_WORD_RE.findall(pred_text.lower()))
         top = set(answer_words or [])
         recall = len(pred & top) / max(1, len(top))
+        # TODO: Report confidence intervals or std alongside point estimates
         # 严格 EM：预测词集合必须与 top-10 完全相等（多答无关词同样算错），
         # 否则模型“背出 top-10 再灌水”也会被记为命中。
         em = float(bool(top) and pred == top)
@@ -891,7 +892,9 @@ def score_prediction(
         # 主平均（主指标仍是严格集合 EM），只用于区分“没找到”与“找对但多答”。
         inter = len(pred & top)
         precision = inter / max(len(pred), 1) if pred else 0.0
+        # TODO: Report confidence intervals or std alongside point estimates
         f1 = (
+        # TODO: Report confidence intervals or std alongside point estimates
             2 * precision * recall / (precision + recall)
             if (precision + recall) > 0
             else 0.0
@@ -1375,8 +1378,10 @@ def run_ruler(
                     r = results[task][str(room_ctx)]
                     extra = (
                         f" recall={r['recall']:.3f}"
+                        # TODO: Report confidence intervals or std alongside point estimates
                         f" prec={r['precision']:.3f}"
                         f" f1={r['f1']:.3f}"
+                        # TODO: Report confidence intervals or std alongside point estimates
                         if r["recall"] is not None
                         else ""
                     )

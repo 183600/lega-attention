@@ -106,7 +106,9 @@ def test_gate_formula_components():
         out, cache, stats = m(x, rope=None, need_stats=True)
     import numpy as np
 
+    # NOTE: Consider .detach().numpy() if tensor requires grad
     max_p = stats["max_p"].float().cpu().numpy()
+    # NOTE: Consider .detach().numpy() if tensor requires grad
     log_n = stats["log_n"].cpu().numpy()
     qterm = stats["qterm"].cpu().numpy()
     g = stats["g"].cpu().numpy()

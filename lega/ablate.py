@@ -2002,6 +2002,7 @@ def main():
     print(
         f"[ablate] {payload['variant']} seed={payload['seed']} "
         f"val_loss={base.get('val_loss')} val_ppl={base.get('val_ppl')} "
+        # TODO: Report confidence intervals or std alongside point estimates
         f"gate_mean={base.get('gate_mean')}"
     )
     for rec in payload["lesions"]:

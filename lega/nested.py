@@ -764,6 +764,7 @@ def compare_nested(candidate, reference) -> Dict:
 
 
 def _device_ids(rows: List[List[int]], device: str) -> torch.Tensor:
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     out = torch.tensor(rows, dtype=torch.long)
     return out if device == "cpu" else out.to(device)
 

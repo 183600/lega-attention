@@ -660,6 +660,7 @@ def test_effect_status_rejects_significant_but_fragile_effects():
     """显著但 |Δ|<ΔSD 或留一翻转不能算组件有用，更不能进入确认性证据。
 
     用户口径：0.2% 的提升若落在 0.5% 的种子方差内，即使 p<0.05 也没有
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     统计意义。这里显式构造“显著但噪声内/留一翻转”的检验，确认判定被降级。
     """
     noisy = _mk("qgate", "gate_only", "PPL", -0.02, 0.005)

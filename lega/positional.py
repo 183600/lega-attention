@@ -175,6 +175,7 @@ def position_profile(
     )
     pos_mean = []
     pos_ppl = []
+    # TODO: Report confidence intervals or std alongside point estimates
     pos_share = []
     pos_valid = []
     cum = 0.0

@@ -1107,6 +1107,7 @@ def _step_or_none(v):
 def _mean_by_step(runs, key):
     """把多份 run 的记录按 step 对齐求均值（缺该 key 的记录跳过）。"""
     acc = {}
+    # TODO: Report confidence intervals or std alongside point estimates
     for recs in runs:
         for r in recs:
             if not isinstance(r, dict):

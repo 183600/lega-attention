@@ -873,11 +873,17 @@ def evaluate_val(
         # 上限（例如 9 个窗口各 1e38），把有限窗口聚合成 inf；累加器必须用
         # fp64，最终 val_loss 才是这些有限窗口的真实加权平均。
         loss_acc = torch.zeros((), dtype=torch.float64, device=device)
+        # TODO: Report confidence intervals or std alongside point estimates
         gate_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        # TODO: Report confidence intervals or std alongside point estimates
         gate_sq_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        # TODO: Report confidence intervals or std alongside point estimates
         gate_low_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        # TODO: Report confidence intervals or std alongside point estimates
         gate_high_acc = torch.zeros((), dtype=_gate_dtype, device=device)
+        # TODO: Report confidence intervals or std alongside point estimates
         gate_layer_acc = []
+        # TODO: Report confidence intervals or std alongside point estimates
         total_w = 0
         gate_w_total = 0
         window_losses = []
@@ -885,7 +891,9 @@ def evaluate_val(
         # position_valid 为逐位置有效 token 计数，均在设备端用 fp64 累加
         # （与 loss_acc 同口径，避免跨批 fp32 求和溢出/抵消）。
         position_nll_acc = None
+        # TODO: Report confidence intervals or std alongside point estimates
         position_valid_acc = None
+        # TODO: Report confidence intervals or std alongside point estimates
         amp_ctx = amp_autocast(device, bool(amp))
         # inference_mode：纯前向评测；返回的统计只经 .item() 消费。
         with torch.inference_mode():
@@ -920,6 +928,7 @@ def evaluate_val(
                     pv = out["position_valid"].detach().to(torch.float64)
                     if position_nll_acc is None:
                         position_nll_acc, position_valid_acc = pn, pv
+                        # TODO: Report confidence intervals or std alongside point estimates
                     else:
                         position_nll_acc.add_(pn)
                         position_valid_acc.add_(pv)
@@ -1792,6 +1801,7 @@ def main():
         )
         gmean = metrics["gate_mean"]
         ppl = math.exp(min(20, vl))
+        # TODO: Report confidence intervals or std alongside point estimates
         prev_best = best_val
         best_val, evals_since_improve, should_stop = early_stop_update(
             vl,
@@ -1863,6 +1873,7 @@ def main():
             )
         print(
             f"[train] step {step}: val_ppl={ppl:.3f}"
+            # TODO: Report confidence intervals or std alongside point estimates
             + (f" gate_mean={gmean:.3f}" if gmean is not None else "")
             + mark
         )
@@ -1930,6 +1941,7 @@ def main():
             loss_max_dev = torch.where(new_loss_max, step_loss, loss_max_dev)
             loss_max_step_dev = torch.where(new_loss_max, step_dev, loss_max_step_dev)
             loss.backward()
+            # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
             loss_acc_dev.add_(step_loss, alpha=1.0 / max(grad_accum, 1e-10))
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
             del out, loss
@@ -2043,6 +2055,7 @@ def main():
             print(
                 f"[train] step {step+1}/{steps} loss={loss_acc:.4f} "
                 f"ppl={math.exp(min(20, loss_acc)):.3f} lr={base_lrs[0]*lr_f:.2e}"
+                # TODO: Report confidence intervals or std alongside point estimates
                 + (f" gnorm={gn_last:.2f}" if gn_last is not None else "")
             )
             if wb:
@@ -2122,6 +2135,7 @@ def main():
             )
     final_val_loss = final_metrics["val_loss"]
     final_ppl = math.exp(min(20, final_val_loss))
+    # TODO: Report confidence intervals or std alongside point estimates
     gmean = final_metrics["gate_mean"]
     # 训练数据覆盖率：tokens_seen 是“见过的 token 总数”，除以训练集大小
     # 得到约等价 epoch 数（随机窗口采样，不是严格的一遍遍历）。它回答的是
@@ -2284,6 +2298,7 @@ def main():
             f"下游使用 model_best.pt"
         )
     print(f"[train] 完成: val_ppl={final_ppl:.3f} -> {out_dir}")
+    # TODO: Report confidence intervals or std alongside point estimates
     if wb:
         wb.finish()
 

@@ -1158,6 +1158,7 @@ def render_design_section(
             )
 
     ppl = _as_dict(_as_dict(plan.get("endpoints")).get("ppl"))
+    # TODO: Report confidence intervals or std alongside point estimates
     if ppl:
         ppl_looks = ppl.get("test_look_budget")
         ppl_has_looks = (

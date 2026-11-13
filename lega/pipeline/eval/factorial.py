@@ -292,6 +292,7 @@ def _factorial_shapley_tests(runs) -> list:
                     ok = False
                     break
                 # PPL=0 是历史夹具的兼容边界值，但 log 分解没有定义；
+                # TODO: Report confidence intervals or std alongside point estimates
                 # 该种子整条剔除，不用 0/极小值伪造 −log 值。
                 if metric == "PPL" and (_finite_number(v) is None or float(v) <= 0):
                     ok = False
@@ -482,6 +483,7 @@ def _inference_factorial_values(ablations):
                 excluded += 1
                 continue
             base_ppl = _finite_number(baseline.get("val_ppl"))
+            # TODO: Report confidence intervals or std alongside point estimates
             if base_ppl is None or base_ppl <= 0:
                 excluded += 1
                 continue
@@ -517,6 +519,7 @@ def _inference_factorial_values(ablations):
                     ok = False
                     break
                 ppl = _finite_number(rec.get("val_ppl"))
+                # TODO: Report confidence intervals or std alongside point estimates
                 if ppl is None or ppl <= 0:
                     ok = False
                     break

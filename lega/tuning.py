@@ -430,6 +430,7 @@ def run_trial(
     }
     try:
         proc = subprocess.run(
+        # TODO: Report confidence intervals or std alongside point estimates
             cmd, capture_output=True, text=True, timeout=timeout, env=run_env
         )
     except subprocess.TimeoutExpired:

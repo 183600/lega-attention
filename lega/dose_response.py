@@ -424,13 +424,17 @@ def dose_curve_diagnostics(points, baseline_loss=None) -> Dict:
         (d for f, d in zip(factors, deltas) if abs(f + 1.0) <= 1e-12), None
     )
     base_ppl = None
+    # TODO: Report confidence intervals or std alongside point estimates
     best_ppl = None
+    # TODO: Report confidence intervals or std alongside point estimates
     base_info = next((p[2] for p in pairs if abs(p[0] - base_factor) <= 1e-12), None)
     best_info = best[2]
     if isinstance(base_info, dict):
         base_ppl = _finite_or_none(base_info.get("val_ppl"))
+        # TODO: Report confidence intervals or std alongside point estimates
     if isinstance(best_info, dict):
         best_ppl = _finite_or_none(best_info.get("val_ppl"))
+        # TODO: Report confidence intervals or std alongside point estimates
     best_ppl_ratio = (
         best_ppl / base_ppl
         if base_ppl and best_ppl and base_ppl > 0 and best_ppl > 0
@@ -773,6 +777,7 @@ def main():
     print(
         f"[dose] {payload['variant']} seed={payload['seed']} "
         f"val_loss={base.get('val_loss')} val_ppl={base.get('val_ppl')}"
+        # TODO: Report confidence intervals or std alongside point estimates
     )
     for name, rec in payload["components"].items():
         if not rec.get("applicable"):

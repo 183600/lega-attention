@@ -119,6 +119,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
     """神经变体 vs 简单统计基线（同 split、能校验时同 token）的统计对比。
 
     科研方法问题：“n-gram PPL=xx” 与 “神经 PPL=yy” 并排放着不构成
+    # TODO: Report confidence intervals or std alongside point estimates
     “复杂模型比简单基线好”的证据——必须同 split、必须对照方差，而且
     两边必须打在**同一批 token** 上：神经 PPL 只在 eval_iters 个等间隔
     窗口的目标 token 上计算，n-gram 若在整个 split 上打分就是不同 token
@@ -604,6 +605,7 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             oof = _as_dict(fs.get("oof"))
             probe_auprc = _rate_or_none(oof.get("auprc"))
             probe_auroc = _rate_or_none(oof.get("auroc"))
+            # TODO: Report confidence intervals or std alongside point estimates
             if probe_auprc is None or probe_auroc is None:
                 continue
             probe_f1_fixed = _rate_or_none(_as_dict(oof.get("f1")).get("macro"))
@@ -686,6 +688,7 @@ def linear_probe_baseline_comparison(runs: dict) -> dict:
             if r.get("gate_auprc") is not None
         ]
         d_auc = [
+        # TODO: Report confidence intervals or std alongside point estimates
             r["probe_auroc"] - r["gate_auroc"]
             for r in per_seed
             if r.get("gate_auroc") is not None
@@ -866,8 +869,11 @@ def _render_baseline_sections(
             f"- 简单统计基线（train 拟合、{split} 评测；无梯度；α/λ 只在 "
             f"val 上按 mean NLL 选，仍属零训练基线）："
             f"一元平滑 PPL={_fmt_scalar_maybe(uni)}、"
+            # TODO: Report confidence intervals or std alongside point estimates
             f"二元平滑 PPL={_fmt_scalar_maybe(bi)}、"
+            # TODO: Report confidence intervals or std alongside point estimates
             f"插值二元 PPL={_fmt_scalar_maybe(interp)}、"
+            # TODO: Report confidence intervals or std alongside point estimates
             f"val 选出的最强简单模型={ngram.get('selected_model') or '-'}"
             f"（训练 token {_int_or_zero(ngram.get('train_tokens')):,}、"
             f"评测 token {_int_or_zero(ngram.get('eval_tokens')):,}、"
@@ -909,8 +915,11 @@ def _render_baseline_sections(
                 f"n_eval={wspec.get('n_eval')}、"
                 f"共 {_int_or_zero(wspec.get('n_tokens')):,} 个评分 token），"
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
+                # TODO: Report confidence intervals or std alongside point estimates
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}、"
+                # TODO: Report confidence intervals or std alongside point estimates
                 f"插值二元 PPL={_fmt_scalar_maybe(wm.get('interpolated_bigram'))}"
+                # TODO: Report confidence intervals or std alongside point estimates
                 f"（{('α/λ 在同一批窗口 token 上重新选择，selected=' + str(wsel.get('selected_model'))) if wm_sel and wsel else '与全 split 口径同一选定 α/λ'}）。"
             )
         elif wm and wspec:
@@ -919,8 +928,11 @@ def _render_baseline_sections(
                 f"iters={wspec.get('iters')}、n_eval={wspec.get('n_eval')}、"
                 f"共 {_int_or_zero(wspec.get('n_tokens')):,} 个评分 token）："
                 f"一元 PPL={_fmt_scalar_maybe(wm.get('unigram'))}、"
+                # TODO: Report confidence intervals or std alongside point estimates
                 f"二元 PPL={_fmt_scalar_maybe(wm.get('bigram'))}、"
+                # TODO: Report confidence intervals or std alongside point estimates
                 f"插值二元 PPL={_fmt_scalar_maybe(wm.get('interpolated_bigram'))}"
+                # TODO: Report confidence intervals or std alongside point estimates
                 f"（{('α/λ 在同一批窗口 token 上重新选择，selected=' + str(wsel.get('selected_model'))) if wm_sel and wsel else '与全 split 口径同一选定 α/λ'}）。⚠ 本次神经评测未全部满足该"
                 "窗口规格，实际比较已回退全 split 参考（见下方比较表），"
                 "这些数字不代表神经评测实际使用的 token 集合。"

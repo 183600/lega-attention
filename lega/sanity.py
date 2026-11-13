@@ -615,6 +615,7 @@ def run_overfit_check(
                 # None，报告不会把未执行的检查写成 True。
                 loss_no_grad = False
             loss.backward()
+            # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
             # 首步逐参数覆盖：总范数正常但个别子模块没拿到梯度（图断流）时，
             # 这里能定位到具体参数名（见 gradient_coverage 文档）。
             if step == 0:
@@ -948,6 +949,7 @@ def main():
             f"初始偏差 {res['initial_loss_minus_log_vocab']:+.3f}/"
             f"±{res['thresholds']['initial_loss_tol']:.2f}), "
             f"token_acc={res['final']['token_acc']:.4f}, "
+            # TODO: Report confidence intervals or std alongside point estimates
             f"exact={res['final']['exact_match']:.3f}"
         )
     if not res["passed"]:

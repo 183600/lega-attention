@@ -1826,6 +1826,7 @@ def _summary_part_b(**kw):
     md += [
         "",
         "### 组件有效性判定（同种子配对 t 检验，Holm 校正后 p<0.05 才算证据）",
+        # NOTE: Consider if 0.05 threshold is appropriate for this context
         "",
     ]
     md.append(
@@ -1971,6 +1972,7 @@ def _summary_part_b(**kw):
         "注: 去一法证据=去掉该组件的 Full−X 显著差于 Full（去掉有害）；"
         "全因子证据=仅含该组件的 X 显著优于 gate_only（只加它、且已有"
         "门偏置时仍有收益）。判定要求方向正确、Holm 校正后 p<0.05、"
+        # NOTE: Consider if 0.05 threshold is appropriate for this context
         "种子数≥3，且效应不落在 |Δ|<ΔSD 的种子噪声内、留一法不翻转；"
         "任一套显著反向记“证据冲突”，以证据不足处理。"
     )
@@ -2102,6 +2104,7 @@ def _summary_part_b(**kw):
         ]
 
     # --- 关键病灶的等价性解读（尤其安慰剂/阳性对照）：p>0.05 不能直接
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     #     写成“安慰剂无效应”，必须看 TOST 是否把差异限制在 SESOI 内。
     md += _render_causal_equivalence_section(causal_tests)
 
@@ -2871,8 +2874,10 @@ def _render_length_ppl(ppls, requested: bool = False, interactions=None) -> list
             ):
                 verdict = "种子不足/未定"
             elif p < 0.05 and slope < 0:
+            # NOTE: Consider if 0.05 threshold is appropriate for this context
                 verdict = "候选优势随长度增加"
             elif p < 0.05 and slope > 0:
+            # NOTE: Consider if 0.05 threshold is appropriate for this context
                 verdict = "候选优势随长度缩小"
             else:
                 verdict = "未检测到显著交互（未定≠无交互）"
