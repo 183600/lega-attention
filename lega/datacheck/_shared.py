@@ -35,7 +35,6 @@ except ImportError:  # Windows 等无 flock 平台：退化为原行为（单进
 from lega.utils import strict_int
 # Reproducibility: Set random seeds
 import random
-import numpy as np
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
