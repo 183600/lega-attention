@@ -954,8 +954,8 @@ def diagnose_curve(
     train_recent_flat = (
         recent_train_delta is not None and abs(recent_train_delta) <= REL_TOL
     )
-    train_recent_up = recent_train_delta is not None and recent_train_delta > REL_TOL
-    val_recent_down = recent_val_delta is not None and recent_val_delta < -val_tol
+    # train_recent_up removed: unused variable (dead code)
+    # val_recent_down removed: unused variable (dead code)
     val_recent_up = recent_val_delta is not None and recent_val_delta > val_tol
     val_recent_unresolved = (
         recent_val_delta is not None and abs(recent_val_delta) <= val_tol

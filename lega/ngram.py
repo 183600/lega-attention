@@ -28,7 +28,7 @@ import json
 import math
 import os
 
-from typing import Optional, Tuple
+# typing imports removed: Optional, Tuple unused in this module
 
 import numpy as np
 

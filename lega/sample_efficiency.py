@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import math
 from numbers import Integral
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 import numpy as np
 

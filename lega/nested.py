@@ -837,7 +837,7 @@ def run_nested_niah(
             continue
         samples.append(sample)
 
-    use_cuda = device.startswith("cuda")
+    # use_cuda removed: unused variable (dead code)
     amp_dt = amp_dtype_for(device, bool(amp))
     amp_ctx = amp_autocast(device, amp_dt is not None)
     results: Dict[str, Dict] = {g: {} for g in growth_modes}

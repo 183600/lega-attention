@@ -413,7 +413,7 @@ def dose_curve_diagnostics(points, baseline_loss=None) -> Dict:
     )
     quad = _quadratic_fit(pairs)
     best = min(pairs, key=lambda x: (x[1], abs(x[0] - base_factor), x[0]))
-    improvements = [base_loss - v for v in losses]
+    # improvements removed: unused variable (dead code)
     loss_diffs = [losses[i + 1] - losses[i] for i in range(len(losses) - 1)]
     nonzero = [d for d in loss_diffs if abs(d) > 1e-12]
     direction_changes = sum(

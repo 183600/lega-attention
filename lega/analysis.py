@@ -1292,7 +1292,7 @@ def length_stratification_analysis(records: List[Dict], n_bins: int = 5) -> Dict
     Returns dict: {bin_key: {"n": int, "hit_rate": float|None, "mean_g": float|None}}.
     """
     import numpy as np
-    from typing import List, Dict
+    # List, Dict removed: unused local typing imports
     
     if not records:
         return {}
