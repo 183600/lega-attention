@@ -91,7 +91,7 @@ def _gammaincc(a, x):
         raise ValueError("gammaincc 需要 a>0 且 x>=0 的有限值")
     if x == 0.0:
         return 1.0
-    log_prefactor = a * math.log(x) - x - math.lgamma(a)
+    log_prefactor = a * math.log(x + 1e-8) - x - math.lgamma(a)
     if x < a + 1.0:
         ap = a
         term = 1.0 / a

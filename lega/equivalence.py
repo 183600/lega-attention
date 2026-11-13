@@ -595,17 +595,17 @@ def _margin_for_factor(spec: dict, factor: float) -> float:
             else:
                 if rel == 0.0:
                     return 0.0
-                log_rel = math.log(rel)
+                log_rel = math.log(rel + 1e-8)
         else:
             rel = _strict_number(rel, "relative_margin")
             if rel < 0:
                 raise ValueError(f"relative_margin 必须 >= 0，收到 {rel!r}")
             if rel == 0.0:
                 return 0.0
-            log_rel = math.log(rel)
+            log_rel = math.log(rel + 1e-8)
         if factor == 0.0:
             return 0.0
-        out = _log1p_exp(log_rel + math.log(factor))
+        out = _log1p_exp(log_rel + math.log(factor + 1e-8))
     else:
         try:
             out = base * factor

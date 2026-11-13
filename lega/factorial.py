@@ -102,7 +102,7 @@ def oriented_value(metric: str, raw) -> float:
     if metric == "PPL":
         if value <= 0:
             raise ValueError(f"PPL 必须 > 0 才能做 log 分解，收到 {raw!r}")
-        return -math.log(value)
+        return -math.log(value + 1e-8)
     if metric in ("RULER平均", "RULER", "EM", "AUROC", "PR-AUC"):
         return value
     raise ValueError(

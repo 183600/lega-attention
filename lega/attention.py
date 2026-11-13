@@ -476,7 +476,7 @@ def _log_n_table(dev, need: int) -> torch.Tensor:
     if table is None or table.numel() < need:
         with torch.inference_mode(False):  # 缓存常量不能是 inference tensor
             n = max(_LOGN_TABLE_INIT, 1 << (need - 1).bit_length())
-            table = torch.log((torch.arange(n, device=dev) + 1).float())
+            table = torch.log((torch.arange(n, device=dev + 1e-8) + 1).float())
         _LOGN_TABLE[dev] = table
     return table
 
