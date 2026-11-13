@@ -312,7 +312,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
             incomparable.append(
                 {
                     "variant": v,
-                    "eval_splits": sorted(eval_splits, key=str),
+                    "eval_splits": sorted(eval_splits, key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x))),
                     "excluded_seeds": [_integral_value(s) for s in excl_seeds],
                 }
             )

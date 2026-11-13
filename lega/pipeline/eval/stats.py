@@ -1279,7 +1279,7 @@ def _ruler_macro_hierarchical_bootstrap(
             payload_samples += int(arr.size)
         if by_task:
             by_seed.append(by_task)
-            structures.append(tuple(sorted(structure, key=str)))
+            structures.append(tuple(sorted(structure)))
             n_cells += payload_cells
             n_samples += payload_samples
     if not by_seed:
@@ -1365,7 +1365,7 @@ def _ruler_macro_variance_components(per_seed_cell_diffs, per_seed_cell_ids):
         return None
     comps, weights, tasks = [], [], []
     skipped = 0
-    for ck in sorted(common, key=str):
+    for ck in sorted(common, key=lambda k: (0, k) if isinstance(k, (int, float)) else (1, str(k)) if isinstance(k, str) else (2, k)):
         ref_ids = ids[0].get(ck)
         if not isinstance(ref_ids, (list, tuple)) or not ref_ids:
             skipped += 1
