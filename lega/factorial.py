@@ -221,7 +221,7 @@ def shares(phi: Mapping[str, float], total_effect: float) -> Dict[str, float]:
     for k, v in phi.items():
         f = _finite_float(v, f"phi {k}")
         try:
-            share = f / total
+            share = f / max(total, 1)
         except (OverflowError, ZeroDivisionError):
             return {}
         # 有限输入相除仍可能溢出（极大 φ / 极小 total）；占比不可表示时
