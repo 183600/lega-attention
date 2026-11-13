@@ -12,7 +12,7 @@
                   除全程首/末分段外，还比较末段（后 1/3 vs 中 1/3）：验证
                   早先大幅下降、后段才平台/回升时，全程变化仍可能显示下降，
                   只看首末会漏掉这一信号；
-  * 欠拟合        训练损失也不下降（或停在 log(V) 随机猜测水平附近）——
+  * 欠拟合        训练损失也不下降（或停在 log(max(V, 1e-300)) 随机猜测水平附近）——
                   学习率不当或数据管道本身有问题（标签错位/特征污染）；
   * 验证倒挂      验证损失显著低于训练损失（与泛化差距方向相反）——
                   优先排查数据泄漏/划分错配，或 train/val 评估口径不一致；
@@ -1178,7 +1178,7 @@ def diagnose_curve(
                 and last_train > RANDOM_LEVEL_TOL * log_vocab
             ):
                 evidence.append(
-                    f"训练损失停在随机猜测水平 log(V)={log_vocab:.3f} 的 "
+                    f"训练损失停在随机猜测水平 log(max(V, 1e-300))={log_vocab:.3f} 的 "
                     f"{RANDOM_LEVEL_TOL:.0%} 以内——学习链路基本未起作用"
                 )
                 recommendations.append(
@@ -1649,7 +1649,7 @@ def main():
         "--log_vocab",
         type=float,
         default=None,
-        help="随机猜测水平 log(V)，用于识别'停在随机水平'的欠拟合",
+        help="随机猜测水平 log(max(V, 1e-300))，用于识别'停在随机水平'的欠拟合",
     )
     p.add_argument("--out", default=None, help="诊断 JSON 输出路径（默认打印）")
     args = p.parse_args()

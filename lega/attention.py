@@ -482,7 +482,7 @@ def _log_n_table(dev, need: int) -> torch.Tensor:
 
 
 def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
-    """log(n) = log(可读取的真实 token 数) = log(past_len + t + 1)，为前缀表切片视图。
+    """log(max(n, 1e-300)) = log(可读取的真实 token 数) = log(past_len + t + 1)，为前缀表切片视图。
 
     通过设备端 log 前缀表切片得到，与原逐次 arange+log 的结果逐项一致（同一
     查表公式 log(i+1)），任意 (past_len, T) 组合共享同一份表。
@@ -1073,7 +1073,7 @@ class CausalSelfAttention(nn.Module):
         qterm 为 RoPE 旋转前的查询内容向量与门控权重 w 的归约结果
         （(B,H,T) 或 None），由调用方在对应路径上计算。conc_stat 为 B 的
         集中度质量 q（主实验为 max_p；lega_l2/lega_entropy 为替代统计量），
-        归一化路径计算 c=log(q)+log n，raw 路径只计算 log q。
+        归一化路径计算 c=log(max(q, 1e-300))+log n，raw 路径只计算 log q。
         keep_terms=False（训练/普通推理/轻量诊断）时各项累加进 logit，
         qterm/logit 不在返回中保留（返回 None）。
         keep_terms=True（完整机制分析）时 qterm 需原样返回给统计，logit 在其
@@ -1186,7 +1186,7 @@ class CausalSelfAttention(nn.Module):
             return p.pow(2).sum(dim=-1)
         if self.conc_mode == "entropy":
             # 先在 fp32 上 clamp 再取 log：autocast 下 p 可能是 fp16/bf16，
-            # 直接 log(0) 会在反向产生 NaN；clamp 后的 0*log(eps)=0，
+            # 直接 log(0) 会在反向产生 NaN；clamp 后的 0*log(max(eps, 1e-300))=0，
             # 而 softmax 对已下溢概率的雅可比为 0，不改变有效梯度。
             return (p * p.clamp_min(1e-30).log()).sum(dim=-1)
         raise ValueError(f"{self.variant!r} 不使用替代集中度统计")
@@ -1500,7 +1500,7 @@ class CausalSelfAttention(nn.Module):
         cat = lambda xs: torch.cat(xs, dim=2) if xs else None
         # 轻量统计（keep_gate_terms=False，契约上只消费 g）：集中度门控在
         # _gate_logit 内对 max_p 原地 clamp_min_/log_，此后 max_p 装的已是
-        # log(max_p) 而不再是概率，不能作为统计返回，
+        # log(max(max_p, 1e-300)) 而不再是概率，不能作为统计返回，
         # 与 SDPA 轻量分支的 max_p=None 口径保持一致。
         return (
             o,

@@ -44,7 +44,7 @@ def test_batch_metrics_initial_loss_near_log_vocab():
     model = _model()
     x, y = _batch()
     m = batch_metrics(model, x, y)
-    # 随机初始化下交叉熵应接近 log(V)（这是排查标签错位的第一中间量）
+    # 随机初始化下交叉熵应接近 log(max(V, 1e-300))（这是排查标签错位的第一中间量）
     assert abs(m["loss"] - math.log(max(64, 1e-10))) < 0.5, m
     assert 0.0 <= m["token_acc"] <= 1.0 and m["n_tokens"] == x.numel()
 
@@ -460,7 +460,7 @@ def test_overfit_check_restores_tf32_flags_independently():
 
 
 def test_overfit_check_detects_pathological_initial_logits():
-    """初始 loss 远离 log(V)（logits 尺度病态）必须被自动中间结果核对拦下。
+    """初始 loss 远离 log(max(V, 1e-300))（logits 尺度病态）必须被自动中间结果核对拦下。
 
     这对应“初始化/标签分布异常”类问题：模型仍可能慢慢过拟合，但初始
     交叉熵不可能接近均匀分布的对数值，应立即报警而不是盲目开训。
@@ -509,7 +509,7 @@ def test_overfit_check_detects_pathological_initial_logits():
     assert abs(res3["initial_loss_minus_log_vocab"]) > 1.0
     print(
         f"  [ok] 病态 logits 初始偏差 "
-        f"{res['initial_loss_minus_log_vocab']:+.2f} 被初始 loss≈log(V) 核对拦下"
+        f"{res['initial_loss_minus_log_vocab']:+.2f} 被初始 loss≈log(max(V, 1e-300)) 核对拦下"
     )
 
 

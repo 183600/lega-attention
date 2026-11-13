@@ -1480,7 +1480,7 @@ def _summary_part_c(**kw):
         ),
         "factorial_shapley_note": (
             "全因子 2^3 的 Shapley 效应分解（探索性）：PPL 在 "
-            "−log(PPL) 上分解（φ>0 降低 PPL，exp(−φ)=PPL 几何"
+            "−log(max(PPL, 1e-300)) 上分解（φ>0 降低 PPL，exp(−φ)=PPL 几何"
             "均值比），RULER 用原始 EM；φ_A+φ_B+φ_C 等于 "
             "Full−none 的总效应（效率性），交互效应被平均分摊到"
             "参与因子；不替代预注册的单因素确认检验"

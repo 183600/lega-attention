@@ -252,7 +252,7 @@ def _factorial_interaction_tests(runs) -> list:
 def _factorial_shapley_tests(runs) -> list:
     """全因子 2^3 的 Shapley 效应分解 + 跨种子检验（探索性）。
 
-    价值函数：PPL 用 v=−log(PPL)（比值尺度上可加，exp(−φ) 即 PPL 几何
+    价值函数：PPL 用 v=−log(max(PPL, 1e-300))（比值尺度上可加，exp(−φ) 即 PPL 几何
     均值比）；RULER 用原始平均 EM（越大越好）。逐种子计算精确 Shapley
     值（3 个因子、8 个格），再对每个因子的 φ 做单样本配对 t 检验
     （H0：φ=0）。同一指标的三因子共用同一 Holm 家族；8 格必须全部运行、
@@ -535,7 +535,7 @@ def _inference_shapley_tests(ablations):
     只保留一个/两个因子的病灶），且每个病灶与基线共享同一批 val 窗口。
     缺格、未真正施加、或窗口不一致的种子整条剔除，不按 0 补齐。
 
-    价值函数与训练期一致：v = −log(PPL)（越大越好），因此 φ>0 表示该
+    价值函数与训练期一致：v = −log(max(PPL, 1e-300))（越大越好），因此 φ>0 表示该
     因子在训练好的前向里降低 PPL；exp(−φ) 为该因子的 PPL 几何均值比。
     """
     out = []

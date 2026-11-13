@@ -150,7 +150,7 @@ def test_plateau_train_rising_val_is_overfitting():
 
 
 def test_underfitting_and_random_level():
-    # 训练损失不降且停在 log(V) 随机水平附近 → 欠拟合，指向数据管道/学习率
+    # 训练损失不降且停在 log(max(V, 1e-300)) 随机水平附近 → 欠拟合，指向数据管道/学习率
     lv = math.log(max(64, 1e-10))
     recs = _log(
         [lv + 0.01, lv, lv - 0.005, lv + 0.004, lv - 0.002, lv],

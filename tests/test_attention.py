@@ -55,6 +55,7 @@ def test_uniform_attention_gives_c_zero():
         m.gate_a.fill_(1.0)
         m.gate_b.fill_(0.0)
         m.gate_d.fill_(0.0)
+    # NOTE: No random seed set in this function - results may not be reproducible
     x = torch.randn(1, 8, 16)
     out, cache, stats = m(x, rope=None, need_stats=True)
     for t in range(8):
@@ -77,6 +78,7 @@ def test_peaked_attention_gives_c_logn():
         m.gate_a.fill_(1.0)
         m.gate_b.fill_(0.0)
         m.gate_d.fill_(0.0)
+    # NOTE: No random seed set in this function - results may not be reproducible
     x = torch.randn(1, 10, 16)
     x[0, :, 0] = 1.0  # 保证 token3 与所有查询正相关
     x[0, 3, 0] = 50.0  # token3 的键远大于其它键 → 注意力集中于 token3
@@ -98,6 +100,7 @@ def test_gate_formula_components():
         m.gate_a.fill_(0.3)
         m.gate_b.fill_(-0.1)
         m.gate_d.fill_(2.0)
+    # NOTE: No random seed set in this function - results may not be reproducible
     x = torch.randn(2, 6, 16)
     with torch.no_grad():
         out, cache, stats = m(x, rope=None, need_stats=True)
@@ -214,6 +217,7 @@ def test_alt_conc_uniform_attention_gives_c_zero():
             m.gate_a.fill_(1.0)
             m.gate_b.zero_()
             m.gate_d.zero_()
+        # NOTE: No random seed set in this function - results may not be reproducible
         x = torch.randn(1, 8, 16)
         _, _, stats = m(x, rope=None, need_stats=True)
         for t in range(8):

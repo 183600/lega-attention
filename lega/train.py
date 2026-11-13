@@ -527,7 +527,7 @@ def run_nan_checklist(
             "非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
             "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
             "梯度非有限说明反向已溢出（常先于参数变 NaN）；"
-            "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"
+            "本仓库已知防护：门控 c 项 log(max(max_p, 1e-300)) 有 clamp_min(1e-30)，"
             "交叉熵经 log_softmax（数值稳定），除法处均有 clamp_min 兜底"
         ),
     }
@@ -957,7 +957,8 @@ def evaluate_val(
         # 必须保持为 Python float：numpy 标量会进 checkpoint extra，
         # 使 torch.load(weights_only=True) 反序列化失败且不合法
         val_loss = float(float(loss_acc.item()) / total_w) if total_w else float("nan")
-        gate_mean = float(gate_acc.item()) / gate_w_total if gate_w_total else None
+        _denom_gate_mean = max(gate_w_total, 1e-12)
+        gate_mean = float(gate_acc.item()) / _denom_gate_mean if gate_w_total else None
         gate_std = None
         gate_frac_low = None
         gate_frac_high = None
@@ -967,8 +968,10 @@ def evaluate_val(
             var = max(0.0, mean_sq - gate_mean * gate_mean)
             gate_std = math.sqrt(var)
             gate_frac_low = float(gate_low_acc.item()) / gate_w_total
-            gate_frac_high = float(gate_high_acc.item()) / gate_w_total
-            gate_layer_mean = [float(x.item()) / gate_w_total for x in gate_layer_acc]
+            _denom_gate_frac_high = max(gate_w_total, 1e-12)
+            gate_frac_high = float(gate_high_acc.item()) / _denom_gate_frac_high
+            _denom_gate_layer_mean = max(gate_w_total, 1e-12)
+            gate_layer_mean = [float(x.item()) / _denom_gate_layer_mean for x in gate_layer_acc]
         # 验证集只评测 eval_iters 个等间隔窗口：点估计本身带抽样误差。这里把
         # 窗口作为抽样单元，报告窗口间标准误与 t 近似 95% CI（小样本比正态
         # 更宽）；CI 不包含窗口间空间相关，也不替代跨随机种子的方差（后者在

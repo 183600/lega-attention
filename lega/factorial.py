@@ -24,7 +24,7 @@ a·c，c=log(n·max_j p_j)）、C（长度项 b·log n）的完整 2^3 矩阵，
 * 因子定义与 `lega.attention.GATE_FACTORS` 完全一致（B 是 a·c，
   其中 c 始终含 log n 的长度归一化；C 才是额外的 b·log n）；
 * PPL 是比值尺度，直接对 PPL 做差会让高 PPL 格主导。这里对有下界的
-  PPL 使用 v = −log(PPL)（等价于在 log 似然上做可加分解），因此
+  PPL 使用 v = −log(max(PPL, 1e-300))（等价于在 log 似然上做可加分解），因此
   exp(−φ_i) 可解释为“该因子带来的 PPL 几何均值比”（<1 表示降低 PPL）；
 * RULER 使用原始 EM（越大越好），φ 的单位是 EM 点数；
 * Shapley 分解是**探索性**证据：它没有预注册，不能替代预注册的
@@ -94,7 +94,7 @@ def cell_key(factors: Iterable[str]) -> str:
 def oriented_value(metric: str, raw) -> float:
     """把原始指标转成“越大越好”的 Shapley 价值函数。
 
-    PPL 必须 >0；返回 −log(PPL)。RULER/EM 等 already-higher-better 的
+    PPL 必须 >0；返回 −log(max(PPL, 1e-300))。RULER/EM 等 already-higher-better 的
     指标原样返回。其他指标名显式拒绝，避免把方向搞反后仍产出看似合理的
     “负贡献”。
     """

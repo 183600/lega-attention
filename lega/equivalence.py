@@ -20,7 +20,7 @@
 ====
 * PPL 主指标：逐种子相对差 ``(candidate − reference) / reference``，阈值
   1%（相对 PPL）；
-* PPL(log)：逐种子 ``log(PPL_candidate) − log(PPL_reference)``，阈值
+* PPL(log)：逐种子 ``log(max(PPL_candidate, 1e-300)) − log(max(PPL_reference, 1e-300))``，阈值
   ``log(1.01)``（几何均值比 1.01）；
 * RULER/EM：绝对差，阈值 1 个百分点；
 * AUROC / PR-AUC 差：绝对差，阈值 0.01；
@@ -587,7 +587,7 @@ def _margin_for_factor(spec: dict, factor: float) -> float:
     if kind == "log_ratio":
         rel = spec.get("relative_margin")
         if rel is None:
-            # base = log1p(rel)；expm1(base) 溢出时 log(rel) ≈ base。
+            # base = log1p(rel)；expm1(base) 溢出时 log(max(rel, 1e-300)) ≈ base。
             try:
                 rel = math.expm1(base)
             except OverflowError:

@@ -167,7 +167,7 @@ def _pilot_chi2_quantile(df: int, p: float) -> float:
 def pilot_sd_upper(sd, n: int, confidence: float = SD_UPPER_CONFIDENCE):
     """配对差标准差的单侧置信上限（卡方口径）。
 
-    ``sigma_upper = sd * sqrt((n-1) / chi2_{1-confidence, n-1})``。试点样本
+    ``sigma_upper = sd * sqrt(max((n-1, 0.0)) / chi2_{1-confidence, n-1})``。试点样本
     极小时该上限非常保守（例如 n=3 时约为点估计的 2~3 倍），这正是想要的
     方向：功效规划不能建立在"试点噪声恰好很小"的乐观假设上。
     """

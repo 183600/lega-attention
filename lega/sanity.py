@@ -8,7 +8,7 @@
 
 通过是**必要不充分**条件：数据增强、特征对齐、标签映射等问题仍可能
 漏网（本检查不含增强与真实数据顺序），需配合中间结果检查（首步 loss ≈
-log(V)、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 作为实验记录。
+log(max(V, 1e-300))、梯度范数 > 0、**逐参数梯度覆盖**等），并保留本 JSON 作为实验记录。
 逐参数梯度覆盖能定位“总梯度范数正常、但某个子模块（如门控）没接进计算
 图”的断流问题：loss 可反传不代表每个参数都能收到梯度；首步全零梯度
 （例如子模块被 detach 后又乘 0）同样视为断流，而不是只统计不判定。
@@ -59,7 +59,7 @@ LOSS_CONSISTENCY_ABS_TOL = 1e-3
 # 冒烟模式：更小批次/更少步数，保持“能快速过拟合”的性质
 SMOKE_OVERRIDES = {"steps": 60, "batch_size": 4, "ctx": 64, "log_every": 10}
 
-# 随机初始化下交叉熵应接近 log(V)：偏差过大意味着 logits 尺度/初始化/标签
+# 随机初始化下交叉熵应接近 log(max(V, 1e-300))：偏差过大意味着 logits 尺度/初始化/标签
 # 分布异常（这是排查标签错位与初始化错误的第一中间量）。容差取 1.0 nat 的
 # 宽松值，只拦“数量级都不对”的问题，避免误伤正常随机初始化。
 DEFAULT_INITIAL_LOSS_TOL = 1.0
@@ -512,7 +512,7 @@ def run_overfit_check(
       * 首步训练路径 loss（模型内部 lm_head 分块 + 交叉熵）与 batch_metrics
         直接对完整 logits 算 F.cross_entropy 的结果一致——loss 计算错误
         （分块边界/归一化/ignore_index）未必妨碍过拟合，但数值会对不上；
-      * 初始 loss ≈ log(V)：随机初始化 + 未见数据下交叉熵应接近均匀分布
+      * 初始 loss ≈ log(max(V, 1e-300))：随机初始化 + 未见数据下交叉熵应接近均匀分布
         的对数值，偏差超过 initial_loss_tol（默认 1.0 nat，只拦数量级错误；
         负值表示显式禁用该检查）说明初始化/logits 尺度/标签分布存在严重问题；
       * 标签映射 y == x 右移一位——在数据消费点再次硬校验。
@@ -693,7 +693,7 @@ def run_overfit_check(
         ),
         # 中间结果核对：消费点的标签映射是 next-token 移位（而非错位/换序）
         "next_token_shift_consistent": bool(shift_ok),
-        # 中间结果核对：初始 loss 接近 log(V)（初始化/logits 尺度/标签分布正常）
+        # 中间结果核对：初始 loss 接近 log(max(V, 1e-300))（初始化/logits 尺度/标签分布正常）
         "initial_loss_near_log_vocab": initial_loss_ok,
         # 配置前提：正则化必须关闭，否则“过拟合失败”无法归因于代码错误
         "regularization_disabled": not active_reg,
@@ -742,7 +742,7 @@ def run_overfit_check(
         "caveat": (
             "通过为必要非充分条件：数据增强/特征对齐/标签映射等问题 "
             "仍可能漏网；本检查已自动核对训练路径 loss 与直接 "
-            "logits CE（首步）、y=x 右移一位与初始 loss≈log(V)，"
+            "logits CE（首步）、y=x 右移一位与初始 loss≈log(max(V, 1e-300))，"
             "其余中间结果（clip 前梯度范数>0、逐参数梯度覆盖含全零"
             "梯度、逐层统计与 history 中的 clip 前后范数）请结合本 "
             "JSON 人工复核，并使用真实数据小规模"
@@ -769,7 +769,7 @@ def main():
         "--initial_loss_tol",
         type=float,
         default=None,
-        help="初始 loss 与 log(V) 的允许偏差（nat，默认 1.0）",
+        help="初始 loss 与 log(max(V, 1e-300)) 的允许偏差（nat，默认 1.0）",
     )
     p.add_argument("--smoke", action="store_true")
     p.add_argument(

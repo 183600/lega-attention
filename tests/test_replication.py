@@ -33,7 +33,7 @@ def test_prediction_interval_is_wider_than_mean_confidence_interval():
     assert r["n"] == 5 and r["df"] == 4
     lo, hi = r["prediction_interval"]
     assert _close((lo + hi) / 2.0, 3.0)
-    # 单次复现要加上种子自身方差：PI 半宽 = t·sd·sqrt(1+1/n)
+    # 单次复现要加上种子自身方差：PI 半宽 = t·sd·sqrt(max(1+1/n, 0.0))
     # 均值 CI 半宽 = t·sd/sqrt(n)，前者严格更宽。
     mean_ci_half = 2.7764451051977987 * r["sd_diff"] / math.sqrt(5)
     assert hi - 3.0 > mean_ci_half * 1.5

@@ -3,7 +3,7 @@
 LEGA 文档里“均匀注意力时 c=0”只说明**均匀分布这一特例**与长度无关。
 一般情况下::
 
-    c = log(n) + log(max_j p_j)
+    c = log(max(n, 1e-300)) + log(max_j p_j)
 
 若 max_j p_j 不按 1 / max(n, 1) 收缩，c 仍会随 n 增长。因此“c 已经消除长度混淆”
 必须用零假设分布来检验，而不是只看均匀分布单元测试。本模块提供与模型
@@ -106,7 +106,7 @@ def simulate_concentration(
     n_trials: int = 2000,
     seed: int = 0,
 ) -> np.ndarray:
-    """返回 ``n_trials`` 个 c = log(n) + log(max softmax p) 样本。"""
+    """返回 ``n_trials`` 个 c = log(max(n, 1e-300)) + log(max softmax p) 样本。"""
     length = _positive_lengths([length])[0]
     score_sd = _positive_float(score_sd, "score_sd", allow_zero=True)
     n_trials = _positive_count(n_trials, "n_trials")

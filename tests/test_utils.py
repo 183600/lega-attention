@@ -487,7 +487,7 @@ def test_pearson_guards():
 
 
 def test_mean_std():
-    # 样本标准差（ddof=1）：np.std([1,2,3,4], ddof=1) = sqrt(5/3)
+    # 样本标准差（ddof=1）：np.std([1,2,3,4], ddof=1) = sqrt(max(5/3, 0.0))
     m, s = mean_std([1, 2, 3, 4])
     assert abs(m - 2.5) < 1e-12
     assert abs(s - math.sqrt(5.0 / 3.0)) < 1e-12
