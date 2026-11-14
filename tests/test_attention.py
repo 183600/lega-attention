@@ -123,7 +123,7 @@ def test_gate_formula_components():
 
 
 def test_concentration_ablations_keep_length_normalization():
-    """消融长度项 b*log n 时，集中度项仍是 c=log(n*max_p)，不能连带删掉
+    """消融长度项 b*log n 时，集中度项仍是 c=log(n*max_p + 1e-8)，不能连带删掉
     a*log n；否则 Full−C 不再是单组件消融，B 格也不再是完整集中度项。"""
     for variant in ("lega_no_len", "lega_conc_only"):
         m = _mk_attn(variant=variant)
@@ -133,12 +133,12 @@ def test_concentration_ablations_keep_length_normalization():
             if m.use_query:
                 m.gate_w.zero_()
         max_p = torch.full((1, 1, 1), 0.25)
-        log_n = torch.full((1, 1, 1), math.log(8.0))
+        log_n = torch.full((1, 1, 1), math.log(8.0 + 1e-8))
         qterm = torch.zeros(1, 1, 1) if m.use_query else None
         _, logit, _ = m._gate_logit(qterm, max_p, log_n, (1, 1, 1), keep_terms=True)
-        expected = 0.5 * (math.log(0.25) + math.log(8.0))
+        expected = 0.5 * (math.log(0.25 + 1e-8) + math.log(8.0))
         assert abs(logit.item() - expected) < 1e-5, (variant, logit.item())
-    print("  [ok] 集中度消融保留 c=log(n*max_p) 的长度归一化")
+    print("  [ok] 集中度消融保留 c=log(n*max_p + 1e-8) 的长度归一化")
 
 
 def _reference_attn_probs(model, x):
@@ -209,7 +209,7 @@ def test_alt_conc_variants_are_b_only_refactors():
 
 
 def test_alt_conc_uniform_attention_gives_c_zero():
-    """L2/熵质量在均匀注意力下也满足 c=log(n*q)=0。"""
+    """L2/熵质量在均匀注意力下也满足 c=log(n*q + 1e-8)=0。"""
     for variant in ALT_CONC_VARIANTS:
         m = _mk_attn(variant=variant, use_sdpa_standard=False)
         torch.nn.init.zeros_(m.wq.weight)

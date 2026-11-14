@@ -1609,7 +1609,7 @@ def _summary_part_b(**kw):
             "实现层核对（探针前向逐参数扰动 `gate_w/gate_a/gate_b`，"
             "看门控 logit 是否真的改变；并实测 B 通道的参数化口径"
             "——均匀注意力下 `max_j p_j = 1/(t+1)`，据此可分出"
-            "原始 `log q`、归一化 `log(n*q)`、证据置零与安慰剂噪声）："
+            "原始 `log q`、归一化 `log(n*q + 1e-8)`、证据置零与安慰剂噪声）："
         )
         md.append("")
         md.append(
@@ -1620,7 +1620,7 @@ def _summary_part_b(**kw):
         conc_form_cn = {
             "none": "无 B 通道",
             "disabled": "证据置零",
-            "normalized": "归一化 log(n·q)",
+            "normalized": "归一化 log(n·q + 1e-8)",
             "raw": "原始 log q",
             "custom": "非证据占位",
         }
@@ -2023,7 +2023,7 @@ def _summary_part_b(**kw):
         "单因素消融边回答“固定其他因子时删/加 X 会怎样”，但参照格不同"
         "时结论可能不同；Shapley 值把 Full−none 的总效应按所有加入顺序"
         "平均分摊给 A/B/C，天然把 A×B/A×C/B×C 交互平均进参与因子。"
-        "PPL 口径在 −log(PPL) 上分解（比值尺度可加），φ>0 表示该因子"
+        "PPL 口径在 −log(PPL + 1e-8) 上分解（比值尺度可加），φ>0 表示该因子"
         "降低 PPL，`exp(−φ)` 即其 PPL 几何均值比；RULER 用原始 EM。"
         "占比只在每个种子的总效应均为正时报告，否则留空、不强行归一化。"
         "该分解未预注册，属探索性证据，不替代预注册的单因素确认检验。"
@@ -2410,7 +2410,7 @@ def _render_reparameterization(reparam):
 
     md = ["", "### 参数化稳健性（原始 log max_p vs 归一化 c；探索性）", ""]
     md.append(
-        "归一化 c=log(n·max_p) 与原始 log max_p 属于同一线性门控函数族；"
+        "归一化 c=log(n·max_p + 1e-8) 与原始 log max_p 属于同一线性门控函数族；"
         "前者把 a·log n 并入 B，导致 B 与显式长度项 C 不正交。本表按同种子"
         "配对比较两种参数化下的单因子边与 Shapley 贡献：D=原始−归一化，"
         "PPL 的效应已定向为 −log PPL（正值=候选降低 PPL 更多），RULER 为"
@@ -2742,7 +2742,7 @@ def _render_length_ppl(ppls, requested: bool = False, interactions=None) -> list
     md.append(
         "本表在真实 val 文本上固定最后 q 个目标 token，只改变前缀长度，直接"
         "测量下一 token NLL/PPL 随 `log2(L)` 的变化；这是 `lengthcalib` 的"
-        " `c=log(n·max p)` 审计所缺少的“主指标”对照。suffix 模式同一窗口跨"
+        " `c=log(n·max p + 1e-8)` 审计所缺少的“主指标”对照。suffix 模式同一窗口跨"
         "长度的目标 token 相同，ΔNLL 是逐窗口配对差；prefix 模式目标随长度"
         "改变，只作敏感性分析。斜率为正表示 NLL 随长度变差，为负表示变好；"
         "单位为 nat/log2(L)。bootstrap 以窗口为聚类单元。"

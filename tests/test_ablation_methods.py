@@ -290,7 +290,7 @@ def test_gate_strength_and_head_permute_lesions():
     restore_gate_params(model, snap)
 
     rec = apply_lesion(model, "gate_constant_mean", gate_mean=0.8)
-    expected = math.log(0.8 / 0.2)
+    expected = math.log(0.8 / 0.2 + 1e-8)
     assert rec["applied"]
     for m in [b.attn for b in model.blocks]:
         assert abs(float(m.gate_d[0].detach()) - expected) < 1e-6
@@ -326,7 +326,7 @@ def test_conc_permute_preserves_values_but_breaks_position_mapping():
         m.gate_a.fill_(1.0)
         m.gate_b.zero_()
     max_p = torch.tensor([[[0.5, 0.25, 0.125, 0.125], [0.25, 0.5, 0.125, 0.125]]])
-    log_n = torch.full((1, 1, 4), math.log(4.0))
+    log_n = torch.full((1, 1, 4), math.log(4.0 + 1e-8))
     qterm = torch.zeros(1, 2, 4)
     _, base, _ = m._gate_logit(qterm, max_p, log_n, (1, 2, 4), keep_terms=True)
     snap = snapshot_gate_params(model)

@@ -88,7 +88,7 @@ def test_analysis_examples_follow_ruler_depth_stratification():
 
 
 def test_collect_records_c_keeps_length_normalization_for_ablations():
-    """集中度 c 在所有含 a·c 的变体中都必须是 log(n·max_p)，不能随 b·log n 消融。"""
+    """集中度 c 在所有含 a·c 的变体中都必须是 log(n·max_p + 1e-8)，不能随 b·log n 消融。"""
     import torch
 
     tok = _tok()

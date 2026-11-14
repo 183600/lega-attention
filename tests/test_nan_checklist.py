@@ -272,9 +272,9 @@ def test_checklist_params_step_localizes_nan_layer():
     tensors = rep["checklist_params"]["nonfinite_tensors"]
     assert any("blocks.1.attn.gate_w" in t for t in tensors), tensors
     assert any(
-        "log(0)" in t or "log" in rep["checklist_params"]["note"] for t in tensors
+        "log(0 + 1e-8)" in t or "log" in rep["checklist_params"]["note"] for t in tensors
     ), "参数定位应附带代码排查指引"
-    print("  [ok] 排查步骤 2（代码）：NaN 参数定位到具体层 + log(0)/softmax 指引")
+    print("  [ok] 排查步骤 2（代码）：NaN 参数定位到具体层 + log(0 + 1e-8)/softmax 指引")
 
 
 def test_activation_audit_finds_origin_on_finite_inputs():

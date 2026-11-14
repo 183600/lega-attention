@@ -21,7 +21,7 @@
 * PPL 主指标：逐种子相对差 ``(candidate − reference) / reference``，阈值
   1%（相对 PPL）；
 * PPL(log)：逐种子 ``log(max(PPL_candidate, 1e-300)) − log(max(PPL_reference, 1e-300))``，阈值
-  ``log(1.01)``（几何均值比 1.01）；
+  ``log(1.01 + 1e-8)``（几何均值比 1.01）；
 * RULER/EM：绝对差，阈值 1 个百分点；
 * AUROC / PR-AUC 差：绝对差，阈值 0.01；
 * 因果病灶 ΔNLL：绝对差，阈值 0.01 nat（约 1% PPL）；
@@ -595,17 +595,17 @@ def _margin_for_factor(spec: dict, factor: float) -> float:
             else:
                 if rel == 0.0:
                     return 0.0
-                log_rel = math.log(rel)
+                log_rel = math.log(rel + 1e-8)
         else:
             rel = _strict_number(rel, "relative_margin")
             if rel < 0:
                 raise ValueError(f"relative_margin 必须 >= 0，收到 {rel!r}")
             if rel == 0.0:
                 return 0.0
-            log_rel = math.log(rel)
+            log_rel = math.log(rel + 1e-8)
         if factor == 0.0:
             return 0.0
-        out = _log1p_exp(log_rel + math.log(factor))
+        out = _log1p_exp(log_rel + math.log(factor + 1e-8))
     else:
         try:
             out = base * factor

@@ -1004,7 +1004,7 @@ def _betai(a: float, b: float, x: float) -> float:
     if x >= 1.0:
         return 1.0
     lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
-    log_front = lbeta + a * math.log(x) + b * math.log1p(-x)
+    log_front = lbeta + a * math.log(x + 1e-8) + b * math.log1p(-x)
     if log_front > 709.0:
         # Prefactor overflows; compute result in log-space to preserve
         # cancellation with the tiny continued fraction.  I_x ∈ [0,1].
@@ -1012,12 +1012,12 @@ def _betai(a: float, b: float, x: float) -> float:
             cf = _betacf(a, b, x)
             if cf <= 0.0:
                 return 0.0
-            lr = log_front + math.log(cf) - math.log(a)
+            lr = log_front + math.log(cf + 1e-8) - math.log(a)
             return min(1.0, math.exp(lr)) if lr > -745.0 else 0.0
         cf = _betacf(b, a, 1.0 - x)
         if cf <= 0.0:
             return 1.0
-        lr = log_front + math.log(cf) - math.log(b)
+        lr = log_front + math.log(cf + 1e-8) - math.log(b)
         return 1.0 - (min(1.0, math.exp(lr)) if lr > -745.0 else 0.0)
     front = math.exp(log_front) if log_front > -745.0 else 0.0
     if x < (a + 1.0) / (a + b + 2.0):
@@ -1527,7 +1527,7 @@ def min_detectable_effect(std_diff, n: int, alpha: float = 0.05, power: float = 
         root_n = math.sqrt(n)
     except OverflowError:
         try:
-            root_n = math.exp(0.5 * math.log(n))
+            root_n = math.exp(0.5 * math.log(n + 1e-8))
         except (OverflowError, ValueError):
             return None
     if not math.isfinite(root_n) or root_n <= 0.0:
@@ -1627,7 +1627,7 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
     # 极端尾（k=0/k=n）的精确 p 本就下溢到 0/上溢到 1，近似同样给出端点。
     if n > _MCNEMAR_EXACT_MAX or k > _MCNEMAR_EXACT_MAX:
         return _mcnemar_normal_approx(n, k)
-    log2 = math.log(2.0)
+    log2 = math.log(2.0 + 1e-8)
     logs = [
         math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) - n * log2
         for i in range(k + 1)

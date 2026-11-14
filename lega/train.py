@@ -103,12 +103,12 @@ def _nonfinite_stats(obj) -> dict:
 
 
 def _numerical_hint(module_name: str) -> str:
-    """按模块在计算图中的位置给出 log(0)/除零/softmax 溢出的排查指向。"""
+    """按模块在计算图中的位置给出 log(0 + 1e-8)/除零/softmax 溢出的排查指向。"""
     name = module_name or ""
     if name.endswith(".attn"):
         return (
             "注意力核心：Q/K/V 投影走函数式 F.linear（不经过子模块钩子，"
-            "溯源到本模块即可能来自投影权重）；复核 max_p→0 时的 log(0)"
+            "溯源到本模块即可能来自投影权重）；复核 max_p→0 时的 log(0 + 1e-8)"
             "（已 clamp_min(1e-30)）、score 缩放、除零与 softmax 溢出"
         )
     if "gate_" in name:
@@ -174,7 +174,7 @@ def audit_activations(model, pending_batches, device: str, amp_dtype=None) -> di
     """用前向钩子定位首个“输入有限、输出非有限”的模块（NaN 排查第 2 步的主动检查）。
 
     仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
-    而来，还是某个算子在**有限输入**上产生（log(0)、除零、softmax 溢出、
+    而来，还是某个算子在**有限输入**上产生（log(0 + 1e-8)、除零、softmax 溢出、
     fp16/bf16 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
     每个模块输出/输入的 NaN/Inf 情况：
 
@@ -464,7 +464,7 @@ def run_nan_checklist(
 
     # ---- 2. 代码：定位已含 NaN/Inf 的参数张量（把锅从"玄学"收敛到具体层），
     #      再用前向钩子定位首个“输入有限、输出非有限”的算子（主动检查
-    #      log(0)/除零/softmax 溢出，而不是只打印已知防护清单）
+    #      log(0 + 1e-8)/除零/softmax 溢出，而不是只打印已知防护清单）
     bad_params = []
     for n, p in model.named_parameters():
         if not torch.isfinite(p).all():
@@ -524,7 +524,7 @@ def run_nan_checklist(
         "nonfinite_tensors": bad_params,
         "nonfinite_grads": bad_grads,
         "note": (
-            "非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
+            "非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0 + 1e-8)、"
             "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
             "梯度非有限说明反向已溢出（常先于参数变 NaN）；"
             "本仓库已知防护：门控 c 项 log(max(max_p, 1e-300)) 有 clamp_min(1e-30)，"
@@ -645,7 +645,7 @@ def run_nan_checklist(
         "1) 数据：核对 data_report.json 的 token 流硬校验与上方批次范围检查；"
         "浮点输入出现 NaN/Inf 才需回查数据管道",
         "2) 代码：先看 checklist_activations 的 origin（首个“输入有限、输出非有限”"
-        "的模块）再对照非有限参数列表，复核该层 log(0)/除零/softmax 溢出路径"
+        "的模块）再对照非有限参数列表，复核该层 log(0 + 1e-8)/除零/softmax 溢出路径"
         "（本仓库门控 c 项已 clamp_min(1e-30)）",
         f"3) 精度：{prec_note}",
         "4) 优化：先看 checklist_optimization 的梯度/优化器状态是否非有限"

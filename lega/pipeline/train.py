@@ -241,7 +241,7 @@ def main():
         "--raw_factorial",
         action="store_true",
         help="追加原始集中度参数化的完整 2^3 对照（用 a*log max_p "
-        "替代 a*log(n*max_p)），与主矩阵的归一化网格逐格配对；"
+        "替代 a*log(n*max_p + 1e-8)），与主矩阵的归一化网格逐格配对；"
         "汇总页给出参数化稳健性（单因子边与 Shapley）分析。"
         "默认关闭（需额外训练 raw_conc_only/raw_no_query/"
         "raw_no_len/raw 等补充变体）",

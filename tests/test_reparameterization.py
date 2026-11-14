@@ -126,10 +126,10 @@ def test_raw_only_variants_forward_and_param_budget():
 def test_raw_gate_formula_does_not_include_log_n_for_b_alone():
     """原始 B 只乘 log max_p；B+C 格才显式加入 b*log n。"""
     max_p = torch.full((1, 1, 1), 0.25)
-    log_n = torch.full((1, 1, 1), math.log(8.0))
+    log_n = torch.full((1, 1, 1), math.log(8.0 + 1e-8))
     for variant, expected in (
-        ("lega_raw_conc_only", 0.5 * math.log(0.25)),
-        ("lega_raw_no_query", 0.5 * math.log(0.25) - 0.25 * math.log(8.0)),
+        ("lega_raw_conc_only", 0.5 * math.log(0.25 + 1e-8)),
+        ("lega_raw_no_query", 0.5 * math.log(0.25 + 1e-8) - 0.25 * math.log(8.0)),
     ):
         m = CausalSelfAttention(16, 1, variant=variant, use_sdpa_standard=False)
         with torch.no_grad():
@@ -150,7 +150,7 @@ def test_contrast_difference_detects_parameterization_shift():
     tests = contrast_parameterization_tests(values, "PPL")
     got = {(t["factor"], t["direction"]): t for t in tests}
     b_add = got[("B", "add")]
-    expected = math.log(10.0 / 7.0) - math.log(10.0 / 8.0)
+    expected = math.log(10.0 / 7.0 + 1e-8) - math.log(10.0 / 8.0)
     assert abs(b_add["mean_diff"] - expected) < 1e-9, b_add
     assert b_add["n"] == 5
     assert b_add["p_adj"] is not None and b_add["p_adj"] < 0.05

@@ -1472,7 +1472,7 @@ def _summary_part_c(**kw):
         "factorial_shapley": shapley_tests,
         "reparameterization": reparameterization,
         "reparameterization_note": (
-            "参数化稳健性（探索性）：归一化 c=log(n*max_p) 与原始 "
+            "参数化稳健性（探索性）：归一化 c=log(n*max_p + 1e-8) 与原始 "
             "log max_p 两套完整 2^3 网格上的单因子边/Shapley 对照。"
             "逐种子 D=raw−normalized 做配对 t 检验并 Holm 校正；"
             "D 显著或方向不一致表示因子归因依赖参数化，不能把 "

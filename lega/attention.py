@@ -31,8 +31,8 @@
                      全因子 B+C 格：集中度与长度，无查询项）
     lega_detach_conc: g = sigmoid(w·q + a*detach(c) + b*log n + d) （补充对照：
                      集中度统计只作为前向特征、不向 Q/K 反传）
-    lega_l2       :  与 lega 相同，但 B 用 q=Σ_j p_j^2、c=log(n*q)
-    lega_entropy  :  与 lega 相同，但 B 用 q=exp(-H(p))、c=log(n*q)
+    lega_l2       :  与 lega 相同，但 B 用 q=Σ_j p_j^2、c=log(n*q + 1e-8)
+    lega_entropy  :  与 lega 相同，但 B 用 q=exp(-H(p))、c=log(n*q + 1e-8)
                      （补充对照：检验结论是否依赖 max_p 这一具体集中度统计量）
     null_zero     :  与 null 相同，但 value 槽固定为 0、不参与训练（补充对照：
                      把“选择 null”与“写入学习到的内容”分开）
@@ -121,7 +121,7 @@ CONTROL_VARIANTS = PLACEBO_VARIANTS + NULL_EVIDENCE_VARIANTS + DESIGN_CONTROL_VA
 # 归一化 A/B/C 因子设计，因此不进入 GATE_FACTORS。
 # 集中度统计量的构念效度对照：门控结构、参数个数与 lega 完全相同，
 # 只把 B 的证据从 max_j p_j 换成另一种集中度质量 q，并仍按
-# c=log(n*q) 做长度归一化。它们回答“结论是否依赖 max_p 这一具体
+# c=log(n*q + 1e-8) 做长度归一化。它们回答“结论是否依赖 max_p 这一具体
 # 统计量”，而不是“换成另一种统计量后效果是否更好”。
 ALT_CONC_VARIANTS = ("lega_l2", "lega_entropy")
 # 每个构念效度变体替换 B 的具体统计量；其它变体保持默认 max_p 路径。
@@ -187,7 +187,7 @@ _USE_CONC = (
     "lega_detach_conc",
     "lega_null_conc",
     "lega_shared",
-) + ALT_CONC_VARIANTS  # a*c, c=log(n*q)，q 由 ALT_CONC_STATS 决定
+) + ALT_CONC_VARIANTS  # a*c, c=log(n*q + 1e-8)，q 由 ALT_CONC_STATS 决定
 _USE_RAW_CONC = (
     "lega_raw",
     "lega_raw_no_len",
@@ -416,7 +416,7 @@ _MASK_CACHE: OrderedDict = OrderedDict()  # (past_len, T, S, device) ->
 # 缓存条目按条目数与总字节数双重上限做 LRU 驱逐。
 _MASK_CACHE_BYTES = 0
 _MASK_CACHE_MAX_BYTES = 128 * 1024 * 1024
-# 设备端 log 前缀表：table[n] = log(n+1)，任意 (past_len, T) 的 log n 恒为其
+# 设备端 log 前缀表：table[n] = log(n+1 + 1e-8)，任意 (past_len, T) 的 log n 恒为其
 # [past_len, past_len+T) 切片。按需倍增扩展。
 _LOGN_TABLE: dict = {}  # device -> (N,) float
 _LOGN_TABLE_INIT = 4096
@@ -471,7 +471,7 @@ def _enforce_tri_cache_bounds() -> None:
 
 
 def _log_n_table(dev, need: int) -> torch.Tensor:
-    """设备端 log 前缀表（table[i] = log(i+1)），不足 need 时倍增重建。"""
+    """设备端 log 前缀表（table[i] = log(i+1 + 1e-8)），不足 need 时倍增重建。"""
     table = _LOGN_TABLE.get(dev)
     if table is None or table.numel() < need:
         with torch.inference_mode(False):  # 缓存常量不能是 inference tensor
@@ -485,7 +485,7 @@ def _log_n(past_len: int, T: int, dev) -> torch.Tensor:
     """log(max(n, 1e-300)) = log(可读取的真实 token 数) = log(past_len + t + 1)，为前缀表切片视图。
 
     通过设备端 log 前缀表切片得到，与原逐次 arange+log 的结果逐项一致（同一
-    查表公式 log(i+1)），任意 (past_len, T) 组合共享同一份表。
+    查表公式 log(i+1 + 1e-8)），任意 (past_len, T) 组合共享同一份表。
     表以 inference_mode(False) 创建，不会被推理期现场污染 autograd。
     """
     return _log_n_table(dev, past_len + T)[past_len : past_len + T]
@@ -740,7 +740,7 @@ def probe_controlled_dimensions(
 # （expected_conc_form），这里只定义运行期实测可能返回的取值。
 CONC_FORM_NONE = "none"  # 变体没有 B 通道
 CONC_FORM_DISABLED = "disabled"  # 容量匹配对照：B 证据置零
-CONC_FORM_NORMALIZED = "normalized"  # c = log(n*q)（含 a*log n）
+CONC_FORM_NORMALIZED = "normalized"  # c = log(n*q + 1e-8)（含 a*log n）
 CONC_FORM_RAW = "raw"  # c = log q（不含 log n）
 CONC_FORM_CUSTOM = "custom"  # 与真实证据无关的占位（参数匹配安慰剂）
 
@@ -767,7 +767,7 @@ def probe_conc_parameterization(
       里只剩 ``a*c``（bias 单独减掉），于是直接读出 c 的形状；
     * 先在**均匀注意力**下测：``wk`` 权重清零后所有键相同，注意力在因果
       前缀上均匀分布，``max_j p_j = 1/(t+1)``，故 ``log q = -log n``。此时
-      raw（``c = log q``）给出 ``-a*log n``，normalized（``c = log(n*q)``）
+      raw（``c = log q``）给出 ``-a*log n``，normalized（``c = log(n*q + 1e-8)``）
       给出 0，两者可分；
     * 再在**一般注意力**下测：normalized 的 ``c = log q + log n`` 一般不为
       0，而“B 证据置零”的容量匹配对照恒为 0，两者也可分；
@@ -852,7 +852,7 @@ def probe_conc_parameterization(
         else:
             form = CONC_FORM_NORMALIZED
             detail = (
-                "均匀注意力下残差为 0、一般注意力下非 0：B 项为 log(n*q)（含 log n）"
+                "均匀注意力下残差为 0、一般注意力下非 0：B 项为 log(n*q + 1e-8)（含 log n）"
             )
     else:
         form = CONC_FORM_CUSTOM

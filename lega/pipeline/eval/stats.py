@@ -126,7 +126,7 @@ def _log_ppl_of(d):
         return None
     # v>0 已由上面保证；PPL<1e-10 的合法正值也必须取真实 log 值，钳制到
     # epsilon 会改变 log-PPL 配对差（几何均值比），并掩盖派生百分比的溢出。
-    return math.log(v)
+    return math.log(v + 1e-8)
 
 
 def _ppl_ci_rel_pct(d):

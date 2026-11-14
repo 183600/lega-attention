@@ -341,7 +341,7 @@ def _logloss(y: np.ndarray, p: np.ndarray) -> Optional[float]:
     if y.size == 0:
         return None
     p = np.clip(p, 1e-12, 1 - 1e-12)
-    return float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
+    return float(-np.mean(y * np.log(p + 1e-8) + (1.0 - y) * np.log(1.0 - p)))
 
 
 def _brier(y: np.ndarray, p: np.ndarray) -> Optional[float]:

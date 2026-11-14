@@ -69,7 +69,7 @@ def test_sign_flip_is_fragile_and_dimension_is_located():
     log = _spec(
         "log",
         [math.log(max(v, 1e-10)) for v in (1.0, 100.0, 100.0)],
-        [math.log(50.0)] * 3,
+        [math.log(50.0 + 1e-8)] * 3,
         lower=True,
         dimension="metric_scale",
         choice="log",

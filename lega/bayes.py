@@ -175,7 +175,7 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
         return None
     ss0 = float(np.sum(z * z))
 
-    log_sd = math.log(sd_z)
+    log_sd = math.log(sd_z + 1e-8)
     log_sigma = np.linspace(log_sd - _SIGMA_SPAN, log_sd + _SIGMA_SPAN, n_sigma)
     sigma = np.exp(log_sigma)
     loglik0 = (
@@ -193,7 +193,7 @@ def _grid(diffs, prior_scale, rope, n_delta, n_sigma):
         - sse / (2.0 * sigma[None, :] ** 2)
     )
 
-    log_l0 = _logsumexp(loglik0) - math.log(n_sigma)
+    log_l0 = _logsumexp(loglik0) - math.log(n_sigma + 1e-8)
     log_l1 = _logsumexp(loglik1.ravel()) - math.log(n_sigma * n_delta)
     log_bf10 = log_l1 - log_l0
 
@@ -276,21 +276,21 @@ def evidence_label(bf10):
 def _label_from_log(log_bf10):
     if log_bf10 is None or not math.isfinite(log_bf10):
         return "无法计算"
-    if log_bf10 >= math.log(100.0):
+    if log_bf10 >= math.log(100.0 + 1e-8):
         return "极强支持 H1"
-    if log_bf10 >= math.log(30.0):
+    if log_bf10 >= math.log(30.0 + 1e-8):
         return "强支持 H1"
-    if log_bf10 >= math.log(10.0):
+    if log_bf10 >= math.log(10.0 + 1e-8):
         return "中等支持 H1"
-    if log_bf10 > math.log(3.0):
+    if log_bf10 > math.log(3.0 + 1e-8):
         return "弱支持 H1"
-    if log_bf10 >= -math.log(3.0):
+    if log_bf10 >= -math.log(3.0 + 1e-8):
         return "证据不足（不区分 H0/H1）"
-    if log_bf10 > -math.log(10.0):
+    if log_bf10 > -math.log(10.0 + 1e-8):
         return "弱支持 H0"
-    if log_bf10 > -math.log(30.0):
+    if log_bf10 > -math.log(30.0 + 1e-8):
         return "中等支持 H0"
-    if log_bf10 > -math.log(100.0):
+    if log_bf10 > -math.log(100.0 + 1e-8):
         return "强支持 H0"
     return "极强支持 H0"
 

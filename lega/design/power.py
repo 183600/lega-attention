@@ -124,7 +124,7 @@ def _sqrt_count(n: int):
         # math.sqrt(int) 会先把 n 转成 float；但 √n 仍可能可表示
         # （如 n=10**400 → 1e200）。用对数求根，超出 float 时如实返回 None。
         try:
-            root = math.exp(0.5 * math.log(n))
+            root = math.exp(0.5 * math.log(n + 1e-8))
         except (OverflowError, ValueError):
             return None
     if not (math.isfinite(root) and root > 0.0):
@@ -622,7 +622,7 @@ def _mcnemar_critical_exact(m: int, alpha: float) -> int:
         math.lgamma(m + 1)
         - math.lgamma(mode + 1)
         - math.lgamma(m - mode + 1)
-        - m * math.log(2.0)
+        - m * math.log(2.0 + 1e-8)
     )
     # 以众数 pmf 为尺度求和，避免 0.5^m 下溢。
     total = 0.0
@@ -632,7 +632,7 @@ def _mcnemar_critical_exact(m: int, alpha: float) -> int:
             math.lgamma(m + 1)
             - math.lgamma(k + 1)
             - math.lgamma(m - k + 1)
-            - m * math.log(2.0)
+            - m * math.log(2.0 + 1e-8)
         )
         v = math.exp(logp - max_log)
         scaled.append(v)

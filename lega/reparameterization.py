@@ -8,7 +8,7 @@ C 因子 ``b*log n`` 因此并不与 B 因子里的长度分量正交。仅凭
 
 本模块把同一组 A/B/C 因子放到两种参数化上：
 
-* 归一化：``a*log(n*max_p) + b*log n``（现有主矩阵）；
+* 归一化：``a*log(n*max_p + 1e-8) + b*log n``（现有主矩阵）；
 * 原始：``a*log max_p + b*log n``（补充矩阵）。
 
 两种参数化都能表示同一个线性门控函数族。比较它们的去一法/单因子边
@@ -64,7 +64,7 @@ RAW_FACTORIAL_VARIANTS = tuple(dict.fromkeys(RAW_CELLS[cell] for cell in CELL_OR
 # 的实测口径同名，便于逐变体对照。
 CONC_FORM_NONE = "none"  # 变体没有 B 通道
 CONC_FORM_DISABLED = "disabled"  # 容量匹配对照：B 证据置零
-CONC_FORM_NORMALIZED = "normalized"  # c = log(n*q)（含 a*log n）
+CONC_FORM_NORMALIZED = "normalized"  # c = log(n*q + 1e-8)（含 a*log n）
 CONC_FORM_RAW = "raw"  # c = log q（不含 log n）
 CONC_FORM_CUSTOM = "custom"  # 与真实证据无关的占位（参数匹配安慰剂）
 
