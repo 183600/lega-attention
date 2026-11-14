@@ -1941,7 +1941,6 @@ def main():
             loss_max_dev = torch.where(new_loss_max, step_loss, loss_max_dev)
             loss_max_step_dev = torch.where(new_loss_max, step_dev, loss_max_step_dev)
             loss.backward()
-            # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
             loss_acc_dev.add_(step_loss, alpha=1.0 / max(grad_accum, 1e-10))
             # backward 已消费完计算图；解除对 out（含逐层 past_kv）与 loss 的引用
             del out, loss

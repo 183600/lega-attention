@@ -710,7 +710,6 @@ def test_inference_mode_then_training_forward_backward():
     model.train()
     loss = model(idx, targets=idx)["loss"]
     loss.backward()
-    # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
     assert any(p.grad is not None for p in model.parameters())
 
 
@@ -774,7 +773,6 @@ def test_chunked_ce_repeated_backward_does_not_decay_grads():
         if p.grad is not None
     }
     loss.backward()
-    # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
     for n, p in model.named_parameters():
         if n in first:
             assert torch.allclose(
@@ -793,7 +791,6 @@ def test_frozen_embedding_training_backward_under_grad():
     idx = torch.randint(0, 64, (2, 10))
     loss = model(idx, targets=idx)["loss"]
     loss.backward()
-    # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
     assert model.tok_emb.weight.grad is None
     assert any(
         p.grad is not None and p.grad.abs().sum() > 0

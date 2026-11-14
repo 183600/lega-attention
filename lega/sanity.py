@@ -615,7 +615,6 @@ def run_overfit_check(
                 # None，报告不会把未执行的检查写成 True。
                 loss_no_grad = False
             loss.backward()
-            # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
             # 首步逐参数覆盖：总范数正常但个别子模块没拿到梯度（图断流）时，
             # 这里能定位到具体参数名（见 gradient_coverage 文档）。
             if step == 0:
