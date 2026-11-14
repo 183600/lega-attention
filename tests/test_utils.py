@@ -1182,7 +1182,7 @@ def test_stats_stable_at_float_limits():
     # 配对 t：全部相同的有限差（std=0）应给出 p=0，而不是 nan。
     t = paired_t_test([huge, huge], [0.0, 0.0])
     assert t["mean_diff"] == huge and t["std_diff"] == 0.0
-    assert t["p"] == 0.0 and t["t"] == float("inf"), t
+    assert t["p"] == 0.0 and (math.isinf(t["t"]) and t["t"] > 0), t
     # 置换检验：p 值只依赖相对大小，缩放后不应溢出。
     p = paired_sign_flip_test([huge, huge, huge], [0.0, 0.0, 0.0])
     assert p["mean_diff"] == huge and p["p_perm"] == 0.25, p

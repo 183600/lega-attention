@@ -90,9 +90,9 @@ def _t_cdf(x: float, df: float):
     """Student-t 分布 CDF；复用双侧 p 值实现，避免引入 scipy。"""
     if math.isnan(x) or not math.isfinite(df) or df <= 0.0:
         return None
-    if x == float("inf"):
+    if (math.isinf(x) and x > 0):
         return 1.0
-    if x == float("-inf"):
+    if (math.isinf(x) and x < 0):
         return 0.0
     if not math.isfinite(x):
         return None

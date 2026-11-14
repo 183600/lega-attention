@@ -418,7 +418,7 @@ def test_checkpoint_selection_info_records_step_and_rejects_garbage():
         assert info["ckpt_step"] is None
         assert info["steps_planned"] is None
         assert info["selection_step_fraction"] is None
-        if bad is True or bad == float("inf") or isinstance(bad, str):
+        if bad is True or (math.isinf(bad) and bad > 0) or isinstance(bad, str):
             assert info["ckpt_val_loss"] is None
     # val_loss 本身允许小数；2.5 不是“非法步数”
     assert math.isclose(
