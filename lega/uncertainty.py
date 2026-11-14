@@ -51,7 +51,9 @@ def _share(value, total):
     if total is None or not np.isfinite(total) or total <= 0.0:
         return None
     try:
-        share = float(value / max(total, 1))
+        # total 上面已校验为正有限值；再用 max(total, 1) 会把 <1 的分母
+        # 强行抬到 1，使各占比之和不再为 1（按尺度归一化的分量常 <1）。
+        share = float(value / total)
     except (TypeError, ValueError, OverflowError, ZeroDivisionError):
         return None
     return share if np.isfinite(share) else None

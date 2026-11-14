@@ -184,12 +184,15 @@ def fit_logreg(
         # 溢出，但按 1/s² 反推惩罚尺度会溢出成 inf（l2=0 时 0×inf=NaN，
         # 使整列系数变成 NaN）。不缩放微小列时其系数与特征同量级，仍可表示。
         col_scale = np.where(col_scale > 1.0, col_scale, 1.0)
+        # col_scale 是逐列向量：下界必须逐元素取，内置 max() 对 ndarray
+        # 会因真值歧义抛 ValueError。
+        col_scale = np.maximum(col_scale, 1e-10)
         with np.errstate(over="ignore", under="ignore"):
             penalty_scale = 1.0 / (col_scale * col_scale)
         coef, intercept = _irls_solve(
-            X / max(col_scale, 1e-10), y, l2, max_iter, tol, penalty_scale=penalty_scale
+            X / col_scale, y, l2, max_iter, tol, penalty_scale=penalty_scale
         )
-        return {"coef": coef / max(col_scale, 1e-10), "intercept": intercept}
+        return {"coef": coef / col_scale, "intercept": intercept}
     coef, intercept = _irls_solve(X, y, l2, max_iter, tol)
     return {"coef": coef, "intercept": intercept}
 

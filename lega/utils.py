@@ -1585,7 +1585,10 @@ def _mcnemar_normal_approx(n: int, k: int) -> float:
     try:
         sqrt_n = math.sqrt(n) if n > 0 else 0.0
     except (OverflowError, ValueError):
-        return 1.0
+        # n 超出 float 表示范围（如 10**400）时 sqrt 无法计算，但精确尾
+        # 概率早已下溢/上溢到端点；按 k 与 n/2 的方向给出 0/1，不能
+        # 无条件返回 1（把极端显著误报成完全不显著）。
+        return 1.0 if k >= n // 2 else 0.0
     if not math.isfinite(sqrt_n) or sqrt_n <= 0.0:
         return 1.0 if k >= n // 2 else 0.0
     # z = (k + 0.5 - n/2) / (sqrt(n)/2) = (2k + 1 - n) / sqrt(n)
