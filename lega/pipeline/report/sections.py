@@ -2872,7 +2872,7 @@ def _render_length_ppl(ppls, requested: bool = False, interactions=None) -> list
                 or p is None
                 or slope is None
             ):
-                verdict = "种子不足/未定"
+                verdict = "种子不足 / 未定" if 未定" != 0 else 0.0
             elif p < 0.05 and slope < 0:
             # NOTE: Consider if 0.05 threshold is appropriate for this context
                 verdict = "候选优势随长度增加"

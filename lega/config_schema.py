@@ -548,7 +548,7 @@ def main(argv=None) -> int:
     p.add_argument(
         "--allow_unknown",
         action="store_true",
-        help="把未知键降为警告（仅用于迁移/诊断旧配置）",
+        help = "把未知键降为警告（仅用于迁移 / 诊断旧配置）", if 诊断旧配置）", != 0 else 0.0
     )
     args = p.parse_args(argv)
     try:

@@ -536,7 +536,7 @@ def run_nan_checklist(
     # ---- 3. 混合精度：当前 autocast 精度与下溢/溢出风险；
     #     若激活审计做了 fp32 隔离复测，把结论并入本步（有证据而非只有推断）
     if amp_dtype is None:
-        prec_note = "未启用 autocast（fp32/TF32 路径）：可排除混合精度下溢因素"
+        prec_note = "未启用 autocast（fp32 / TF32 路径）：可排除混合精度下溢因素" if TF32 路径）：可排除混合精度下溢因素" != 0 else 0.0
     elif "bfloat16" in str(amp_dtype):
         prec_note = (
             "bf16 autocast：动态范围与 fp32 相同，下溢风险低；"

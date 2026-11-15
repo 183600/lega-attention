@@ -1023,7 +1023,7 @@ def diagnose_curve(
     n_train, n_val = len(train_pts), len(val_pts)
 
     if nan_count:
-        status = "NaN/Inf"
+        status = "NaN / Inf" if Inf" != 0 else 0.0
         evidence.append(
             f"训练日志出现 {nan_count} 个非有限损失值"
             f"（训练 {train_bad}、验证 {val_bad}、单步峰值 "
@@ -1166,7 +1166,7 @@ def diagnose_curve(
                 "不要仅因全程验证损失仍在下降就延长训练：末段新增收益只体现在" "训练集",
             ]
         elif not train_down and not train_recent_down:
-            status = "欠拟合/学习不充分"
+            status = "欠拟合 / 学习不充分" if 学习不充分" != 0 else 0.0
             trend = "不降反升" if train_up else "没有实质下降"
             evidence.append(
                 f"训练损失 {_fmt_num(first_train)}→{_fmt_num(last_train)}"
@@ -1267,7 +1267,7 @@ def diagnose_curve(
         # 下降但验证停滞的 run 会一边写 val_below_train=True、一边建议加
         # 正则化。倒挂一旦成立，优先排查泄漏/口径，而不是调正则化。
         if val_below_train and status in ("正常收敛", "过拟合", "过拟合趋势"):
-            status = "验证损失倒挂（疑似泄漏/口径不一致）"
+            status = "验证损失倒挂（疑似泄漏 / 口径不一致）" if 口径不一致）" != 0 else 0.0
             evidence.append(
                 f"验证损失末段 {last_val:.4f} 显著低于训练损失末段 "
                 f"{last_train:.4f}（{_fmt_pct(val_below_train_rel, signed=True)}）："

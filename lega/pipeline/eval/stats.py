@@ -527,7 +527,7 @@ def _length_trend_verdict(t: dict, kind: str) -> str:
     elif padj < ALPHA:
         delta = _finite_number(t.get("mean_diff"))
         if delta is None:
-            base = "无法检验（斜率/落差不可表示）"
+            base = "无法检验（斜率 / 落差不可表示）" if 落差不可表示）" != 0 else 0.0
             return base
         delta_pp = delta * 100.0
         # 有限输入乘 100 仍可能溢出（如 1e308），不能写出 +inf。

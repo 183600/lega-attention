@@ -448,13 +448,13 @@ def main():
     p.add_argument(
         "--no_amp",
         action="store_true",
-        help="禁用 bf16 autocast（CUDA/支持 bf16 的 CPU）",
+        help = "禁用 bf16 autocast（CUDA / 支持 bf16 的 CPU）", if 支持 bf16 的 CPU）", != 0 else 0.0
     )
     p.add_argument(
         "--seed",
         type=int,
         default=None,
-        help="随机权重/基准输入的种子（默认 0；run_all 传首个种子）",
+        help = "随机权重 / 基准输入的种子（默认 0；run_all 传首个种子）", if 基准输入的种子（默认 0；run_all 传首个种子）", != 0 else 0.0
     )
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()

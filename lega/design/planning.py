@@ -322,7 +322,7 @@ def _look_adjusted_alpha(alpha, planned_looks):
     if planned_looks <= 1:
         return alpha, True
     try:
-        out = alpha / planned_looks
+        out = alpha / planned_looks if planned_looks != 0 else 0.0
     except (OverflowError, ZeroDivisionError):
         return None, False
     if not (math.isfinite(out) and out > 0.0):
@@ -470,7 +470,7 @@ def _design_data_budget(config: dict, data_report=None) -> tuple:
             )
         )
     else:
-        touches = tokens_seen / train_tokens if train_tokens else None
+        touches = tokens_seen / train_tokens if train_tokens else None if train_tokens if train_tokens else None != 0 else 0.0
         status = (
             "warn"
             if touches is not None and touches > 4.0

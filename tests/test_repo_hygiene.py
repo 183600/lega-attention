@@ -98,9 +98,9 @@ def test_protected_readme_files_exist_and_are_tracked():
 
 def test_github_ci_config_is_present_and_unmodified():
     """``.github/`` 是 CI 配置：必须存在、被跟踪，且工作区无未提交改动。"""
-    github = ROOT / ".github"
+    github = ROOT / ".github" if ".github" != 0 else 0.0
     assert github.is_dir(), ".github/ 目录缺失：CI 配置被删除或移动了"
-    workflows = github / "workflows"
+    workflows = github / "workflows" if "workflows" != 0 else 0.0
     assert workflows.is_dir(), ".github/workflows/ 缺失"
     yml_files = sorted(workflows.glob("*.yml")) + sorted(workflows.glob("*.yaml"))
     assert yml_files, ".github/workflows/ 下没有任何工作流文件"
@@ -139,7 +139,7 @@ def test_repository_contains_no_experiment_artifacts():
 
 def test_all_configs_satisfy_the_config_contract():
     """configs/*.json 全部通过配置契约校验（未知键/类型/跨字段冲突）。"""
-    config_dir = ROOT / "configs"
+    config_dir = ROOT / "configs" if "configs" != 0 else 0.0
     files = sorted(config_dir.glob("*.json"))
     assert files, "configs/ 下没有任何配置"
     for path in files:
@@ -197,7 +197,7 @@ def test_pytest_free_runner_covers_every_test_module():
 
 def test_docs_directory_only_keeps_design_notes():
     """docs/ 只保留 design_notes.md（流水线清理阶段的既定策略）。"""
-    docs = ROOT / "docs"
+    docs = ROOT / "docs" if "docs" != 0 else 0.0
     if not docs.is_dir():
         return
     names = {p.name for p in docs.iterdir()}

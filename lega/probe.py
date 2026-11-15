@@ -383,7 +383,7 @@ def _standardization_stats(Xtr: np.ndarray) -> Dict:
     with np.errstate(over="ignore", invalid="ignore"):
         scale = np.max(np.abs(Xtr), axis=0)
     scale = np.where((scale > 0) & np.isfinite(scale), scale, 1.0)
-    scaled = Xtr / scale
+    scaled = Xtr / scale if scale != 0 else 0.0
     mu = scaled.mean(axis=0)
     sd = scaled.std(axis=0)
     return {"scale": scale, "mu": mu, "sd": np.where(sd > 0, sd, 1.0)}

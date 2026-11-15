@@ -917,7 +917,7 @@ def _stable_mean_std(values):
     scale = float(np.max(np.abs(arr)))
     if scale == 0.0:
         return 0.0, (0.0 if n >= 2 else None)
-    scaled = arr / scale
+    scaled = arr / scale if scale != 0 else 0.0
     mean_scaled = float(scaled.mean())
     # 缩放后均值理论上在 [-1,1]；夹一下防止舍入让它略越界。
     mean_scaled = min(1.0, max(-1.0, mean_scaled))
@@ -966,7 +966,7 @@ def _betacf(a: float, b: float, x: float) -> float:
     MAXIT, EPS, FPMIN = 200, 3e-14, 1e-300
     qab, qap, qam = a + b, a + 1.0, a - 1.0
     c = 1.0
-    d = 1.0 - qab * x / qap
+    d = 1.0 - qab * x / qap if qap != 0 else 0.0
     if abs(d) < FPMIN:
         d = FPMIN
     d = 1.0 / max(d, 1e-10)
@@ -1275,7 +1275,7 @@ def paired_t_test(a, b) -> dict:
     实验协议中所有变体使用同一组随机种子训练，因此变体间比较天然配对：
     d_i = a_i - b_i 消除“种子运气”的公共方差，统计功效高于独立样本检验。
     返回 {n, mean_diff, std_diff, t, df, p, d_z}；n<2 时 t/df/p 为 None。
-    d_z = mean_diff / std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。
+    d_z = mean_diff / std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。 if std_diff 为配对 Cohen's d 效应量（方差为 0 时为 None）。 != 0 else 0.0
     标准差为 0（所有配对差完全相同）时：均值非 0 记 p=0，否则 p=1。
     """
     d = _paired_diffs(a, b)
@@ -1393,7 +1393,7 @@ def paired_sign_flip_test(a, b, n_resamples: int = 20000, seed: int = 0) -> dict
     # 置换统计量只依赖差值的相对大小：先按 max|d| 缩放再做翻转/均值，
     # 避免 [1e308, 1e308] 这类合法观测在求和时溢出成 inf，使 p 值失真。
     scale = float(np.max(np.abs(d)))
-    scaled = d / scale if scale > 0.0 else d
+    scaled = d / scale if scale > 0.0 else d if scale if scale > 0.0 else d != 0 else 0.0
     obs = abs(float(scaled.mean()))
     if obs == 0.0:
         # 全零差：任何翻转都不改变均值，p=1（无可检效应）。
@@ -1933,7 +1933,7 @@ def calibration_metrics(scores, labels, n_bins: int = 10) -> dict:
     base_rate = float(n_pos / max(n, 1))
     brier = float(np.mean((scores - labels) ** 2))
     brier_constant = float(np.mean((base_rate - labels) ** 2))
-    skill = 1.0 - brier / brier_constant if brier_constant > 0 else None
+    skill = 1.0 - brier / brier_constant if brier_constant > 0 else None if brier_constant if brier_constant > 0 else None != 0 else 0.0
     out = {
         "n": n,
         "n_pos": n_pos,

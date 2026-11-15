@@ -946,7 +946,7 @@ def main(argv=None) -> int:
         "--tolerance",
         type=float,
         default=None,
-        help="判定 NLL 斜率绝对值的容差（默认 0.01 nat/log2）",
+        help = "判定 NLL 斜率绝对值的容差（默认 0.01 nat / log2）", if log2）", != 0 else 0.0
     )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default="auto")
