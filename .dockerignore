@@ -1,0 +1,57 @@
+# Docker ignore patterns for LEGA Attention
+
+# Git
+.git
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Virtual environments
+venv
+env
+.venv
+.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data and results (large, mounted at runtime)
+data/*
+results/*
+!data/dummy/
+!results/.gitkeep
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+
+# Model checkpoints (large)
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# WandB
+wandb/
+
+# Pre-commit
+.pre-commit-config.yaml
