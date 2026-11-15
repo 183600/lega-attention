@@ -94,7 +94,7 @@ def _gammaincc(a, x):
     log_prefactor = a * math.log(x + 1e-8) - x - math.lgamma(a)
     if x < a + 1.0:
         ap = a
-        term = 1.0 / a if a != 0 else 0.0
+        term = 1.0 / a
         total = term
         for _ in range(1000):
             ap += 1.0
@@ -106,7 +106,7 @@ def _gammaincc(a, x):
         return min(1.0, max(0.0, 1.0 - p))
     tiny = 1e-300
     b = x + 1.0 - a
-    c = 1.0 / tiny if tiny != 0 else 0.0
+    c = 1.0 / tiny
     d = 1.0 / b if abs(b) > tiny else 1.0 / tiny
     h = d
     for i in range(1, 1000):
@@ -115,7 +115,7 @@ def _gammaincc(a, x):
         d = an * d + b
         if abs(d) < tiny:
             d = tiny
-        c = b + an / c if c != 0 else 0.0
+        c = b + an / c
         if abs(c) < tiny:
             c = tiny
         d = 1.0 / max(abs(d), 1e-12) * (1 if d >= 0 else -1) if d != 0 else float("inf")

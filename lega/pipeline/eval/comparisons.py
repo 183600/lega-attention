@@ -1667,7 +1667,7 @@ def _render_parameter_matched_control(t, capacity_test=None, ran=False) -> list:
                 "lega > placebo 不能单独证明 B/C 证据有用"
             )
         else:
-            read2 = "未定：容量本身的影响方向 / 显著性不足" if 显著性不足" != 0 else 0.0
+            read2 = "未定：容量本身的影响方向/显著性不足"
         d2 = (
             "-"
             if m2 is None
@@ -2896,7 +2896,7 @@ def _effect_status(t, removing: bool) -> dict:
 
     removing=True（去一法）：候选=去掉组件的 Full−X，显著变差才算证据；
     removing=False（全因子）：候选=仅含该组件的 X，显著变好才算证据。
-    opposite = True 表示检验显著但方向相反——这是“去掉反而更好 / 加入反而 if 加入反而 != 0 else 0.0
+    opposite=True 表示检验显著但方向相反——这是“去掉反而更好/加入反而
     更差”的反证，不能被同一组件的另一套消融静默抵消。
 
     显著不等于稳健：若 |Δ|<ΔSD（效应落在逐种子配对差噪声内）或删掉任一

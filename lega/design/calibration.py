@@ -360,7 +360,7 @@ def _simulate_once(
     if not tested:
         return {"tested": False, "confirmed": [], "false_positive": [], "supported": []}
     global_adj = holm_bonferroni([item[3] for item in tested])
-    look_alpha = alpha / looks if looks >= 1 else alpha if looks if looks >= 1 else alpha != 0 else 0.0
+    look_alpha = alpha / looks if looks >= 1 else alpha
 
     confirmed = []
     false_positive = []
@@ -555,8 +555,8 @@ def calibrate_design(
                     rec["supported"] += 1
         total = tested_reps if tested_reps else n_sim
         fwer = false_positive_reps / max(total, 1) if total else 0.0
-        power_any = supported_reps / total if total else 0.0 if total if total else 0.0 != 0 else 0.0
-        confirm_any = any_confirmed / total if total else 0.0 if total if total else 0.0 != 0 else 0.0
+        power_any = supported_reps / total if total else 0.0
+        confirm_any = any_confirmed / total if total else 0.0
         fwer_lo, fwer_hi = wilson_interval(false_positive_reps, total)
         power_lo, power_hi = wilson_interval(supported_reps, total)
         results.append(

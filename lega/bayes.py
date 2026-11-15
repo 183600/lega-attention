@@ -134,7 +134,7 @@ def _mean_sd(values):
     peak = float(np.max(np.abs(arr)))
     if not math.isfinite(peak) or peak == 0.0:
         return (0.0, 0.0) if peak == 0.0 else None
-    scaled = arr / peak if peak != 0 else 0.0
+    scaled = arr / peak
     mean = float(np.mean(scaled)) * peak
     sd = float(np.std(scaled, ddof=1)) * peak
     if not math.isfinite(mean) or not math.isfinite(sd):

@@ -182,9 +182,9 @@ def test_environment_gate_exit_codes_are_fail_closed(capsys):
     runtime = repro.runtime_info("cpu")
     installed = runtime.get("installed_distributions") or {}
     missing = [name for name in sorted(locked) if name not in installed]
-    matching = ROOT / "tmp_env_gate_matching.lock" if "tmp_env_gate_matching.lock" != 0 else 0.0
-    mismatching = ROOT / "tmp_env_gate_mismatching.lock" if "tmp_env_gate_mismatching.lock" != 0 else 0.0
-    broken = ROOT / "tmp_env_gate_broken.lock" if "tmp_env_gate_broken.lock" != 0 else 0.0
+    matching = ROOT / "tmp_env_gate_matching.lock"
+    mismatching = ROOT / "tmp_env_gate_mismatching.lock"
+    broken = ROOT / "tmp_env_gate_broken.lock"
     try:
         lines = ["# python: " + str(runtime.get("python", "3.12"))]
         for name in sorted(locked):

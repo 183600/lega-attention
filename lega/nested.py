@@ -424,7 +424,7 @@ def analyze_nested(payload, base_ctx: Optional[int] = None) -> Dict:
             if recs is not None:
                 n = len(recs)
                 k = sum(int(r["em"]) for r in recs.values())
-                em = k / n if n else None if n if n else None != 0 else 0.0
+                em = k / n if n else None
                 ci = wilson_score_ci(k, n) if n else None
             else:
                 n = (

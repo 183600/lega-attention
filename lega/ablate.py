@@ -1958,7 +1958,7 @@ def main():
     p.add_argument(
         "--seed",
         default=None,
-        help = "覆盖 checkpoint 记录的种子（只影响确定性置换 / 播种，" "不改变权重）", if 播种，" "不改变权重）", != 0 else 0.0
+        help="覆盖 checkpoint 记录的种子（只影响确定性置换/播种，" "不改变权重）",
     )
     p.add_argument(
         "--perm_seed",

@@ -684,7 +684,7 @@ def _binom_cdf_exact(m: int, k: int, p: float) -> float:
 
 def _mcnemar_power_exact(n: int, pi: float, p10: float, alpha: float) -> float:
     """n<=EXACT_MCNEMAR_MAX_N 的精确 McNemar 功效。"""
-    q = p10 / pi if pi > 0.0 else 0.0 if pi if pi > 0.0 else 0.0 != 0 else 0.0
+    q = p10 / pi if pi > 0.0 else 0.0
     total = 0.0
     for m in range(1, n + 1):
         pm = math.comb(n, m) * (pi**m) * ((1.0 - pi) ** (n - m))
@@ -1051,7 +1051,7 @@ def multiplicity_alpha(
     else:
         burden = max(family_size, global_family_size)
     try:
-        effective = alpha / burden if burden != 0 else 0.0
+        effective = alpha / burden
     except OverflowError:
         # 合法但超出 float 可表示范围的家族大小（int 任意精度）；不能
         # 让“规划”因极端配置崩溃，下面按不可表示标记并回退到名义 α。

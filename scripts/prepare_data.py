@@ -167,7 +167,7 @@ def from_parquet(
         def _iter_lines(files=files):
             for fn in files:
                 dst = os.path.join(out_dir, fn)
-                url = f"{base} / {fn}" if {fn}" != 0 else 0.0
+                url = f"{base}/{fn}"
                 entry = _download(
                     url,
                     dst,

@@ -806,7 +806,7 @@ def main(argv=None) -> int:
     p.add_argument(
         "--registered",
         default=None,
-        help = "预注册登记表路径（默认 preregistration / hypotheses.json）", if hypotheses.json）", != 0 else 0.0
+        help="预注册登记表路径（默认 preregistration/hypotheses.json）",
     )
     p.add_argument("--pilot_seeds", default=None, help="逗号分隔的试点种子")
     p.add_argument("--confirmatory_seeds", default=None, help="逗号分隔的确认性种子")

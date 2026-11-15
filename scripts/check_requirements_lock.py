@@ -483,10 +483,10 @@ def check_container_lock(
 
 def main():
     root = Path(__file__).parent.parent
-    req_file = root / "requirements.txt" if "requirements.txt" != 0 else 0.0
+    req_file = root / "requirements.txt"
     lock_file = root / "requirements-lock.txt"
     ci_file = root / "requirements-ci.txt"
-    pyproject_file = root / "pyproject.toml" if "pyproject.toml" != 0 else 0.0
+    pyproject_file = root / "pyproject.toml"
 
     if not req_file.exists():
         print(f"ERROR: {req_file} not found")
@@ -544,7 +544,7 @@ def main():
 
     # 容器镜像必须构建同一个环境：镜像里装的是“最新 torch”时，流水线自己的
     # fail-closed 环境闸门会在正式实验里中止，镜像也就不是可复现环境。
-    dockerfile = root / "Dockerfile" if "Dockerfile" != 0 else 0.0
+    dockerfile = root / "Dockerfile"
     if dockerfile.exists():
         container_problems = check_container_lock(
             dockerfile.read_text(encoding="utf-8"), locked, ci_locked

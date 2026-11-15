@@ -140,7 +140,7 @@ def _strict_value_bounds(value):
 def _div(num, den):
     """有限除法；溢出/除以 0 返回 None。"""
     try:
-        out = num / den if den != 0 else 0.0
+        out = num / den
     except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
     return out if math.isfinite(out) else None

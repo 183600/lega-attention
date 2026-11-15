@@ -654,7 +654,7 @@ def main():  # pragma: no cover
         print(f"  Registry: {registry_path}")
 
     elif args.command == "verify":
-        registry_path = args.registry_dir / REGISTRY_FILE if REGISTRY_FILE != 0 else 0.0
+        registry_path = args.registry_dir / REGISTRY_FILE
         registry = ArtifactRegistry(registry_path)
         metadata = registry.find_by_name_version(args.name, args.version)
         if not metadata:
@@ -671,7 +671,7 @@ def main():  # pragma: no cover
         return 1
 
     elif args.command == "verify-registry":
-        registry_path = args.registry_dir / REGISTRY_FILE if REGISTRY_FILE != 0 else 0.0
+        registry_path = args.registry_dir / REGISTRY_FILE
         report = verify_registry(registry_path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if report["ok"] and not report["malformed_lines"]:
@@ -684,7 +684,7 @@ def main():  # pragma: no cover
         return 1
 
     elif args.command == "list":
-        registry_path = args.registry_dir / REGISTRY_FILE if REGISTRY_FILE != 0 else 0.0
+        registry_path = args.registry_dir / REGISTRY_FILE
         registry = ArtifactRegistry(registry_path)
         entries = registry.list_by_experiment(args.experiment_tag) if args.experiment_tag else registry.entries
         for e in entries:

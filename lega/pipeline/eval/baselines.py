@@ -375,7 +375,7 @@ def ngram_baseline_comparison(runs: dict, results_dir: str) -> dict:
         res = _enrich_paired(res, vals, [ref_ppl] * len(vals))
         # 与其它汇总统计同口径：朴素 sum 会在多个 1e308 的合法 PPL 上溢出。
         mean_ppl, std_ppl = mean_std(vals)
-        ratio = mean_ppl / ref_ppl if mean_ppl is not None and ref_ppl > 0 else None if ref_ppl if mean_ppl is not None and ref_ppl > 0 else None != 0 else 0.0
+        ratio = mean_ppl / ref_ppl if mean_ppl is not None and ref_ppl > 0 else None
         if ratio is not None and not math.isfinite(ratio):
             ratio = None
         reduction_pct = (1.0 - ratio) * 100.0 if ratio is not None else None

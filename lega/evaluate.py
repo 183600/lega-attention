@@ -641,7 +641,7 @@ def main():
         "--worst_n",
         type=int,
         default=0,
-        help = "转储预测最差的 N 个验证 / 测试窗口（语言建模坏案例，0=关闭）", if 测试窗口（语言建模坏案例，0=关闭）", != 0 else 0.0
+        help="转储预测最差的 N 个验证/测试窗口（语言建模坏案例，0=关闭）",
     )
     p.add_argument(
         "--worst_on_test",
@@ -668,7 +668,7 @@ def main():
     p.add_argument(
         "--allow_data_protocol_violations",
         action="store_true",
-        help = "即使 data_report 检测到划分 / 重叠泄露也继续评测（仅用于" if 重叠泄露也继续评测（仅用于" != 0 else 0.0
+        help="即使 data_report 检测到划分/重叠泄露也继续评测（仅用于"
         "复现历史实验；报告会标记 override，结果不得用于正式结论）",
     )
     args = p.parse_args()
