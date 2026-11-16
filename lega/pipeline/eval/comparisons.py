@@ -4,6 +4,10 @@ from .._shared import _install as _shared_install
 
 _shared_install(globals())
 
+# Auto-detect outcome value bounds for Manski partial identification.
+# RULER EM∈[0,1] 有界，PPL 无界（仅能算符号得分界）。
+from lega.missingness import _metric_value_bounds  # noqa: F401,F811
+
 # 受控单维度对照的对比类型：两侧的 A/B/C 因子集合完全相同，只差一个
 # **设计维度**（替代集中度统计量 / 反传路径 / 共享粒度 / 空槽写入）。
 # 它既不是 A/B/C 组件归因，也不是“与另一种方法比”的整体对比，必须
@@ -2040,6 +2044,18 @@ def _noise_verdict_note(t: dict) -> str:
         return "；效应低于当前种子数可检测的 MDE"
     if t.get("loo_sign_stable") is False:
         return "；⚠ 留一法方向翻转：删掉任一单个种子即改变均值符号，结论依赖个别种子"
+    # 小样本 guidance：当种子数较少时，提示解释局限性
+    n = t.get("n")
+    if n is not None:
+        try:
+            n_int = int(n)
+        except (ValueError, TypeError):
+            n_int = None
+        if n_int is not None and n_int < 5:
+            if n_int < 3:
+                return "；★ 种子极少（n<n_3），不作显著性判定，仅作描述性统计"
+            else:
+                return "；★ 种子较少（n<5），统计功效有限：结论应谨慎解释，建议增种子复现或视为探索性"
     return ""
 
 
@@ -2314,7 +2330,11 @@ def _missingness_endpoint(
 
     缺失一侧写成 None；协议不一致的整对都写成 None。模块只负责“计划了但
     不可用”的统计，不重复解释 PPL/RULER 的协议字段。
+    如果未提供 value_bounds，则根据指标自动探测：RULER EM 已知在 [0,1]，
+    PPL 无界仅能计算符号得分界。
     """
+    if value_bounds is None:
+        value_bounds = _metric_value_bounds(metric_name)
     entries = []
     for cand, ref in pairs:
         cm = _variant_seed_map(runs, cand)
@@ -2822,7 +2842,57 @@ def _apply_holm(tests, min_seeds=MIN_SEEDS, alpha=ALPHA) -> list:
                         eq, t.get("p_adj"), alpha=alpha, min_seeds=min_seeds
                     )
                 )
+            # 整合的科研方法状态：Holm校正 (确认性/FWER控制)、TOST等价性、FDR探索性
+            # 三者在各自家族内独立控制，此字段为阅读者提供统一摘要而非替代各自判定。
+            t["methodological_status"] = _methodological_status(t, alpha, min_seeds)
     return tests
+
+
+def _methodological_status(t, alpha: float, min_seeds: int) -> dict:
+    """为单条配对构造整合的科研方法状态摘要。
+
+    返回三个层次的简要标签，供 significance.json 的 pairs[].methodological_status 使用：
+    - holm: Verdict 与 confirmatory 有效性（依赖 pre-registration complete）。
+    - tost: 等价/非劣/未定 简标（已依 p_adj 重算）。
+    - fdr: q_value 与 exploratory 注记（永不改变 Holm/FWER  verdict）。
+    """
+    # Holm 层： verdict 已在 t 中; confirmatory 仅在 pre-registration complete 时有效
+    holm_verdict = t.get("verdict", "")
+    p_adj = _finite_number(t.get("p_adj"))
+    n = t.get("n")
+    n_ok = isinstance(n, int) and not isinstance(n, bool) and n >= min_seeds
+    holm_confirmatory = bool(p_adj is not None and p_adj < alpha and n_ok)
+    # FDR q_value 简易解析（无 q_value 字段时置为 None，让调用者自行决定）
+    q_val = t.get("q_value")
+    if q_val is not None:
+        try:
+            q_f = float(q_val)
+            q_valid = math.isfinite(q_f) and 0.0 <= q_f <= 1.0
+            q_value = q_f if q_valid else None
+        except (TypeError, ValueError):
+            q_value = None
+    else:
+        q_value = None
+
+    # TOST 层： equivalence/noninferior/undetermined 由 p_adj + n 驱动
+    eq = t.get("equivalence") or {}
+    tost_status = eq.get("status", "undetermined")
+    tost_equivalent = eq.get("equivalent", False)
+    tost_noninferior = eq.get("noninferior", False)
+
+    # FDR 层：q_value 由 discovery.py 计算，永不参与 Holm/FWER 判定
+    q_value = q_value
+    # 安全回退：若 t 为 dict 但没有 q_value 字段，置为 None 让调用者自行决定是否显示
+
+    return {
+        "holm_verdict": holm_verdict,
+        "holm_confirmatory": holm_confirmatory,
+        "tost_status": tost_status,
+        "tost_equivalent": tost_equivalent,
+        "tost_noninferior": tost_noninferior,
+        "q_value": q_value,
+        "fdr_exploratory": True,  # 永远是 exploratory，不影响 confirmatory verdict
+    }
 
 
 # 组件有效性判定所用的检验对：组件 -> (去一法检验, 全因子检验, 主指标)。

@@ -74,6 +74,20 @@ _METHOD = (
 )
 
 
+def _metric_value_bounds(metric: str):
+    """根据指标名称返回默认的 outcome 取值区间，用于 Manski 界计算。
+
+    RULER EM 已知在 [0, 1] 有界；PPL 无界返回 None（只能算符号得分界）。
+    """
+    if not isinstance(metric, str):
+        return None
+    mu = metric.upper()
+    if "RULER" in mu or "EM" in mu:
+        return (0.0, 1.0)
+    # PPL 与其他无界指标保持 None，只能算符号得分界
+    return None
+
+
 def _finite(value):
     """有限实数观测；bool/字符串/非有限/不可表示值按缺失处理。"""
     if value is None or isinstance(value, bool):
