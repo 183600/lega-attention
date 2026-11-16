@@ -433,7 +433,6 @@ def _pilot_relative_diff(cand, ref):
 
 def _pilot_contrast_diffs(contrast: dict, series: dict):
     """按对照口径取配对差（候选 − 参照，方向与登记一致）。"""
-    metric = contrast["metric"]
     kind = contrast["kind"]
     candidate = contrast.get("candidate")
     reference = contrast.get("reference")
