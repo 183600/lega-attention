@@ -175,6 +175,11 @@ def _pair_analysis(
         n_comparable += 1
         if c_hit["step"] < r_hit["step"]:
             reached_earlier += 1
+        if r_hit["step"] == 0:
+            # 参照在起点即达到目标：步数比为 0/0 或 k/0，无定义。
+            rec["log2_ratio"] = None
+            per_seed.append(rec)
+            continue
         ratio = c_hit["step"] / r_hit["step"]
         rec["log2_ratio"] = math.log2(ratio) if ratio > 0 else None
         if rec["log2_ratio"] is not None and math.isfinite(rec["log2_ratio"]):
