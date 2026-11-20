@@ -443,7 +443,7 @@ def summarize_window_offsets(rows, eval_iters: int = None) -> dict:
         return out
     lo, hi = min(losses), max(losses)
     mean = math.fsum(losses) / max(len(losses), 1)
-    std = math.sqrt(max(math.fsum((x - mean, 0.0)) ** 2 for x in losses) / max(len(losses), 1))
+    std = math.sqrt(max(math.fsum((x - mean) ** 2 for x in losses), 0.0) / max(len(losses), 1))
     spread = hi - lo
     out.update(
         {
