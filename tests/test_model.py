@@ -685,16 +685,16 @@ def test_evaluate_val_restores_mode_on_error():
         print("  [ok] evaluate_val 异常/成功均恢复调用前模式")
 
 
-    def test_per_window_losses_match_individual_forwards():
-        """loss_per_window 每行必须等于单独评测该窗口的损失，且均值等于总损失。"""
-        torch.manual_seed(0)
-        model = _tiny("lega")
-        with torch.no_grad():
-            model.eval()
-            idx = torch.randint(0, 64, (3, 10))
-            y = torch.randint(0, 64, (3, 10))
-            with torch.inference_mode():
-                out = model(idx, targets=y, return_window_losses=True)
+def test_per_window_losses_match_individual_forwards():
+    """loss_per_window 每行必须等于单独评测该窗口的损失，且均值等于总损失。"""
+    torch.manual_seed(0)
+    model = _tiny("lega")
+    with torch.no_grad():
+        model.eval()
+        idx = torch.randint(0, 64, (3, 10))
+        y = torch.randint(0, 64, (3, 10))
+        with torch.inference_mode():
+            out = model(idx, targets=y, return_window_losses=True)
     assert out["loss_per_window"].shape == (3,)
     assert abs(float(out["loss"]) - float(out["loss_per_window"].mean())) < 1e-6
     for r in range(3):

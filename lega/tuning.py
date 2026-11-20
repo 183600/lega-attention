@@ -643,7 +643,7 @@ def _selection_diagnostics(grid_stats, selected, default) -> dict:
         # 与网格均值同一套缩放口径：接近 float 上限的 val_loss 差值
         # 在朴素 sum/平方中会溢出为 inf，使诊断字段成为非法 JSON。
         dmean, dstd = mean_std(deltas)
-        dsem = dstd / math.sqrt(max(len(deltas, 0.0))) if dstd is not None else None
+        dsem = dstd / math.sqrt(max(len(deltas), 1)) if dstd is not None else None
         out["runner_up"] = {
             **_cfg(runner),
             "val_loss_best_mean": runner["val_loss_best_mean"],

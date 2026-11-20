@@ -292,7 +292,7 @@ def _local_slope(pairs, factor: float = 1.0, base_loss=None):
             if len(diffs) >= 2:
                 mean, std = mean_std(diffs)
                 if mean is not None and std is not None:
-                    se = float(std / math.sqrt(max(len(diffs, 0.0))))
+                    se = float(std / math.sqrt(max(len(diffs), 1)))
                     if not math.isfinite(se):
                         se = None
                 ci = bootstrap_mean_ci(diffs)

@@ -1569,7 +1569,7 @@ def wilson_score_ci(k: int, n: int, ci: float = 0.95):
     p = k / max(n, 1)
     den = 1.0 + z2_n
     center = (p + z2_n / 2.0) / max(den, 1e-10)
-    half = z * math.sqrt(max(p * (1.0 - p, 0.0)) * n_inv + z2 * n2_inv / 4.0) / max(den, 1e-10)
+    half = z * math.sqrt(max(p * (1.0 - p), 0.0) * n_inv + z2 * n2_inv / 4.0) / max(den, 1e-10)
     return max(0.0, center - half), min(1.0, center + half)
 
 
