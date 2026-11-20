@@ -1,0 +1,13 @@
+# Reproducible runtime dependency lock for formal experiments.
+#
+# Unlike requirements.txt (lower bounds for flexible development), this file
+# records the exact direct runtime dependencies used by the reference CPU
+# environment. Local version suffixes such as torch 2.14.1+cpu match the
+# public 2.14.1 pin. CI test tooling (pytest) is pinned separately in
+# requirements-ci.txt and is not part of the runtime environment identity.
+#
+# python: 3.12
+torch==2.14.1
+numpy==2.5.4
+tiktoken==0.11.0
+matplotlib==3.11.2

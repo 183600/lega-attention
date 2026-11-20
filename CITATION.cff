@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: "LEGA: Length-calibrated Evidence-Gated Attention"
+message: "If you use this software in your research, please cite it as below. Please cite the specific experiment (config, seeds, commit) you used; the preregistration in preregistration/ fixes the confirmatory hypotheses."
+type: software
+authors:
+  - name: "LEG Attention Research Team"
+repository-code: "https://github.com/anomalyco/lega-attention"
+license: MIT
+version: 0.1.0
+date-released: "2026-10-13"
+keywords:
+  - attention
+  - gated attention
+  - long-context language modeling
+  - information theory
+  - reproducibility
+  - preregistration

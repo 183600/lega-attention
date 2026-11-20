@@ -1,0 +1,3 @@
+agent_review.log
+*.pyc
+__pycache__/

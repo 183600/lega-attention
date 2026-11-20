@@ -1,0 +1,104 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lega-attention"
+version = "0.1.0"
+description = "Length-calibrated Evidence-Gated Attention: reducing irrelevant content in residual streams when attention heads find no reliable information"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "LEG Attention Research Team"}
+]
+keywords = ["attention", "transformer", "gated-attention", "long-context", "information-theory"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "tiktoken>=0.5",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+data = [
+    "pyarrow>=14",
+]
+wandb = [
+    "wandb>=0.17",
+]
+
+[project.urls]
+Homepage = "https://github.com/anomalyco/lega-attention"
+Repository = "https://github.com/anomalyco/lega-attention.git"
+
+[project.scripts]
+lega-run = "run_all:main_entry"
+
+[tool.setuptools]
+packages = ["lega", "lega.datacheck", "lega.design", "lega.pipeline", "lega.pipeline.eval", "lega.pipeline.report"]
+# run_all 是顶层模块（不是包），必须显式声明，否则非 editable 安装（wheel）
+# 不会带上它，pyproject 里的 lega-run 控制台脚本随之失效。
+py-modules = ["run_all"]
+
+[tool.setuptools.package-data]
+lega = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests as requiring GPU",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["lega"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/_test.py",
+    "scripts/*",
+    "run_all.py",
+]
+branch = true
+parallel = true
+concurrency = ["multiprocessing"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+precision = 2
+show_missing = true
+skip_covered = false
+fail_under = 80
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true
