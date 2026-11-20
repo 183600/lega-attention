@@ -175,7 +175,7 @@ def fit_logreg(
     # 绝对值缩放后求解，再把系数换回原尺度：Z=X/s 上 beta 对应原系数
     # beta/s，L2 惩罚也按 1/s² 缩放，目标函数完全等价。
     max_abs = float(np.max(np.abs(X)))
-    overflow_safe = math.sqrt(max(np.finfo(np.float64, 0.0)).max / max(n, 1)) * 0.5
+    overflow_safe = math.sqrt(np.finfo(np.float64).max / max(n, 1)) * 0.5
     # 即使 Hessian 尚未溢出，IRLS 的绝对步长容差也会让大尺度特征在
     # 远未收敛时提前停止；超过 1e6 即转入等价缩放问题。
     if max_abs > min(1e6, overflow_safe):

@@ -568,6 +568,7 @@ def run_overfit_check(
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     grad_cov = None
+    _overfit_was_training = model.training
     try:
         model.train()
         initial = batch_metrics(model, x, y)
@@ -645,8 +646,9 @@ def run_overfit_check(
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_mm
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
-        # [FIX] removed no-op model.eval() + model.train() pair;
-        # leave model in the state the training loop left it in.
+        # 训练循环结束后切回 eval 态：避免 dropout 等训练期行为
+        # 污染调用方后续的评测或推理。
+        model.eval()
     log_vocab = math.log(model.vocab_size)
     initial_loss_gap = float(initial["loss"]) - log_vocab
     # initial_loss_tol < 0 表示显式禁用该检查（仍记录偏差供人工复核）
