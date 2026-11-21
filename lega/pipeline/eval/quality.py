@@ -115,7 +115,7 @@ def _qa_skew_kurt(values):
     skew = None
     try:
         g1 = m3 / (m2 ** 1.5)
-        skew = math.sqrt(max(n * (n - 1, 0.0))) / max(n - 2, 1) * g1
+        skew = math.sqrt(max(n * (n - 1), 0.0)) / max(n - 2, 1) * g1
         if not math.isfinite(skew):
             skew = None
     except (ZeroDivisionError, OverflowError, ValueError):

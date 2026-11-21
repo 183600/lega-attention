@@ -260,7 +260,7 @@ def test_apply_and_restore_component_lesions():
     for n, p in model.named_parameters():
         if n in before:
             assert torch.equal(p, before[n]), f"最终恢复失败: {n}"
-    print("  [ok] 组件病灶清零/反号后逐位恢复.clamp_min(1e-10)；重复病灶不叠加")
+    print("  [ok] 组件病灶清零/反号后逐位恢复；重复病灶不叠加")
 
 
 def test_gate_strength_and_head_permute_lesions():
@@ -315,7 +315,7 @@ def test_gate_strength_and_head_permute_lesions():
             m.gate_d.fill_(2.0)
     rec = apply_lesion(model, "head_permute", perm_seed=0)
     assert rec["applied"] is True and rec["no_op"] is True
-    print("  [ok] 门强度/恒定门.clamp_min(1e-10)/头置换病灶.clamp_min(1e-10)；全同头时置换如实报告 no-op")
+    print("  [ok] 门强度/恒定门/头置换病灶；全同头时置换如实报告 no-op")
 
 
 def test_conc_permute_preserves_values_but_breaks_position_mapping():
@@ -393,7 +393,7 @@ def test_query_and_len_permute_match_distribution_but_break_mapping():
     lm = l_model.blocks[0].attn
     with torch.no_grad():
         lm.gate_b.fill_(0.7)
-    log_n = torch.log(torch.arange(1.0, 5.0.clamp(min=1e-8)) + 1e-8)
+    log_n = torch.log(torch.arange(1.0, 5.0) + 1e-8)
     _, l_base, _ = lm._gate_logit(None, None, log_n, (1, 2, 4), keep_terms=True)
     l_snap = snapshot_gate_params(l_model)
     rec = apply_lesion(l_model, "len_permute", perm_seed=0)
@@ -414,7 +414,7 @@ def test_query_and_len_permute_match_distribution_but_break_mapping():
         qm.gate_w.zero_()
     rec = apply_lesion(q_model, "query_permute", perm_seed=0)
     assert rec["applied"] is True and rec["no_op"] is True
-    print("  [ok] A/C.clamp_min(1e-10) 序列维置换：分布匹配、位置错位、可恢复且诚实报告 no-op")
+    print("  [ok] A/C 序列维置换：分布匹配、位置错位、可恢复且诚实报告 no-op")
 
 
 def test_constant_mean_rejects_invalid_gate_mean():
@@ -478,7 +478,7 @@ def test_match_gate_bias_solves_per_head_mean_and_rejects_bad_input():
         raise AssertionError("iters=0 应显式报错")
     except ValueError:
         pass
-    print("  [ok] 活动匹配：逐头二分解出唯一平移，目标越界/非有限.clamp_min(1e-10)/坏形状显式拒绝.clamp_min(1e-10)")
+    print("  [ok] 活动匹配：逐头二分解出唯一平移，目标越界/非有限/坏形状显式拒绝")
 
 
 def test_gate_lesion_controls_match_baseline_mean_activity():
@@ -727,7 +727,7 @@ def test_ablate_numeric_and_seed_guards():
         pass
     restore_gate_params(model, snap)
     print(
-        "  [ok] 病灶消融：坏数值/截断种子显式拒绝.clamp_min(1e-10)，头置换仍确定性非恒等；"
+        "  [ok] 病灶消融：坏数值/截断种子显式拒绝，头置换仍确定性非恒等；"
         "快照形状不符不静默广播"
     )
 

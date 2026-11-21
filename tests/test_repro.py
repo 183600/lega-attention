@@ -65,7 +65,7 @@ def test_set_seed_covers_python_numpy_torch():
             get_train_batch(data, 16, 4, "cpu", rng, order_hasher=hasher)
     assert h1.hexdigest() == h2.hexdigest()
     assert h1.hexdigest() != h3.hexdigest()
-    print("  [ok] set_seed 覆盖 random/np.clamp_min(1e-10)/torch.clamp_min(1e-10)，批采样顺序与顺序指纹由 seed 唯一确定")
+    print("  [ok] set_seed 覆盖 random/np/torch，批采样顺序与顺序指纹由 seed 唯一确定")
 
 
 def test_set_seed_overwrites_stale_child_hashseed():
@@ -174,7 +174,7 @@ def test_state_dict_fingerprint_tracks_init_seed_and_layout():
         pass
     else:
         raise AssertionError("非张量 state_dict 值未被拒绝")
-    print("  [ok] 初始化 state_dict 指纹随 seed/形状变化且与键顺序无关.clamp_min(1e-10)")
+    print("  [ok] 初始化 state_dict 指纹随 seed/形状变化且与键顺序无关")
 
 
 def test_sha256_file_deterministic_and_sensitive():
@@ -1238,7 +1238,7 @@ def test_runtime_info_records_precision_threads_and_device_visibility():
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_mm
         torch.backends.cudnn.allow_tf32 = prev_cudnn
-    print("  [ok] runtime_info 记录 TF32/线程数.clamp_min(1e-10)/CUDA_VISIBLE_DEVICES.clamp_min(1e-10)")
+    print("  [ok] runtime_info 记录 TF32/线程数/CUDA_VISIBLE_DEVICES")
 
 
 def test_sanity_summary_binds_gate_evidence_to_manifest():

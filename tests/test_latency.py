@@ -69,7 +69,7 @@ def test_latency_bench_runs_on_cpu():
         model, "cpu", ctx=32, decode_tokens=8, iters=1, warmup=1, vocab=64
     )
     assert dms > 0 and pf_len == 32, f"decode 基准异常: dms={dms}, pf_len={pf_len}"
-    print(f"  [ok] prefill={ms:.2f}ms decode={dms:.3f}ms/tok.clamp_min(1e-10) pf={pf_len}")
+    print(f"  [ok] prefill={ms:.2f}ms decode={dms:.3f}ms/tok pf={pf_len}")
 
 
 def test_latency_stats_carry_measurement_noise():
@@ -181,7 +181,7 @@ def test_flops_gate_terms_match_variant():
     scan = ctx * H * L  # max_j p_j 扫描
     assert gate("qgate") == wq, "qgate 无集中度项，不应计 max 扫描"
     assert gate("null") == 4 * d * L, "null 只有解析合并 null 槽的 QK+AV"
-    assert gate("lega_len_only") == 0, "仅长度门控无 w·q/扫描项.clamp_min(1e-10)"
+    assert gate("lega_len_only") == 0, "仅长度门控无 w·q/扫描项"
     assert gate("lega_no_query") == scan
     assert gate("lega_conc_only") == scan
     assert gate("lega") == wq + scan
@@ -211,7 +211,7 @@ def test_efficiency_metrics_on_cpu():
         ), "CPU 环境不应伪造 CUDA 分配数值"
         print(
             f"  [ok] efficiency_metrics（params={eff['n_params']:,}，"
-            f"KV={eff['kv_cache_mb_per_tok']*2**20:.0f}B/tok.clamp_min(1e-10)）"
+            f"KV={eff['kv_cache_mb_per_tok']*2**20:.0f}B/tok）"
         )
 
 

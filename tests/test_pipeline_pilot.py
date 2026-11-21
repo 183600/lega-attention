@@ -31,8 +31,8 @@ except ImportError:
 class _Args:
     variant = "lega"
     suffix = "_seed1"
-    results_dir = "results/x.clamp_min(1e-10)"
-    data_dir = "data/x.clamp_min(1e-10)"
+    results_dir = "results/x"
+    data_dir = "data/x"
     device = "cpu"
     worst_n = 0
     full_eval = False

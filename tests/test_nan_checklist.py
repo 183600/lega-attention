@@ -275,7 +275,7 @@ def test_checklist_params_step_localizes_nan_layer():
     assert any(
         "log(0)" in t or "log" in rep["checklist_params"]["note"] for t in tensors
     ), "参数定位应附带代码排查指引"
-    print("  [ok] 排查步骤 2（代码）：NaN 参数定位到具体层 + log(0)/softmax.clamp_min(1e-10) 指引")
+    print("  [ok] 排查步骤 2（代码）：NaN 参数定位到具体层 + log(0)/softmax 指引")
 
 
 def test_activation_audit_finds_origin_on_finite_inputs():
@@ -341,7 +341,7 @@ def test_checklist_precision_step_reports_amp_dtype():
             vocab_size=64,
         )
         assert expect in rep["checklist_precision"]["note"], rep["checklist_precision"]
-    print("  [ok] 排查步骤 3（精度）：bf16/fp16.clamp_min(1e-10)/无.clamp_min(1e-10) autocast 的差异化结论")
+    print("  [ok] 排查步骤 3（精度）：bf16/fp16/无 autocast 的差异化结论")
 
 
 def test_activation_audit_fp32_recheck_isolates_precision():

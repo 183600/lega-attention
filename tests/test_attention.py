@@ -201,7 +201,7 @@ def test_alt_conc_variants_are_b_only_refactors():
         assert torch.allclose(
             logit - base_logit, torch.log(q + 1e-8) - torch.log(p.amax(dim=-1).clamp(min=1e-8)), atol=1e-5
         ), variant
-    print("  [ok] lega_l2/lega_entropy.clamp_min(1e-10) 只替换 B 统计量，A/C.clamp_min(1e-10) 与参数预算不变")
+    print("  [ok] lega_l2/lega_entropy 只替换 B 统计量，A/C 与参数预算不变")
 
 
 def test_alt_conc_uniform_attention_gives_c_zero():
@@ -254,7 +254,7 @@ def test_alt_conc_forward_matches_reference_and_chunking(monkeypatch):
         assert torch.allclose(out, out_chunk, atol=1e-6), variant
         assert torch.allclose(stats["logit"], stats_chunk["logit"], atol=1e-6), variant
         assert torch.allclose(stats["max_p"], stats_chunk["max_p"], atol=1e-6), variant
-    print("  [ok] 替代集中度单块/分块前向与手工.clamp_min(1e-10) B 统计一致")
+    print("  [ok] 替代集中度单块/分块前向与手工 B 统计一致")
 
 
 def test_gate_factor_metadata_matches_variant_formulas():
@@ -733,7 +733,7 @@ def test_capacity_null_controls_keep_params_but_zero_evidence():
         assert (
             float(g.abs().max()) == 0.0
         ), f"{variant} 的 {dead_param[component]} 应保留零梯度而不是断流"
-    print("  [ok] lega_null_*：参数/形状匹配.clamp_min(1e-10)、证据置零、死参数保留零梯度")
+    print("  [ok] lega_null_*：参数/形状匹配、证据置零、死参数保留零梯度")
 
 
 def test_probe_gate_factors_matches_declared_factor_tables():

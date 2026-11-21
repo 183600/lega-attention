@@ -120,7 +120,7 @@ def test_raw_only_variants_forward_and_param_budget():
         for name, p in m.named_parameters():
             if p.grad is not None:
                 assert torch.isfinite(p.grad).all(), (variant, name)
-    print("  [ok] raw_conc_only/raw_no_query.clamp_min(1e-10) 前向、反向与参数预算")
+    print("  [ok] raw_conc_only/raw_no_query 前向、反向与参数预算")
 
 
 def test_raw_gate_formula_does_not_include_log_n_for_b_alone():

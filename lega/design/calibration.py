@@ -568,7 +568,7 @@ def calibrate_design(
                 "fwer": fwer,
                 "fwer_ci95": [fwer_lo, fwer_hi],
                 "fwer_standard_error": (
-                    math.sqrt(max(fwer * (1.0 - fwer, 0.0)) / max(total, 1)) if total else None
+                    math.sqrt(max(fwer * (1.0 - fwer), 0.0) / max(total, 1)) if total else None
                 ),
                 "confirm_any": confirm_any,
                 "power_any": power_any,

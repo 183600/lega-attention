@@ -286,7 +286,7 @@ def test_gradient_coverage_classifies_missing_zero_nonfinite():
     assert cov2["missing_grad"] == [name0]
     assert cov2["zero_grad"] == [name1]
     assert cov2["nonfinite_grad"] == [name2]
-    print("  [ok] gradient_coverage 区分 missing/zero.clamp_min(1e-10)/nonfinite.clamp_min(1e-10) 梯度")
+    print("  [ok] gradient_coverage 区分 missing/zero/nonfinite 梯度")
 
 
 def test_overfit_check_detects_detached_submodule():
@@ -457,13 +457,13 @@ def test_overfit_check_restores_tf32_flags_independently():
     finally:
         torch.backends.cuda.matmul.allow_tf32 = mm
         torch.backends.cudnn.allow_tf32 = cudnn
-    print("  [ok] TF32 开关分别还原（matmul/cudnn.clamp_min(1e-10) 互不覆盖）")
+    print("  [ok] TF32 开关分别还原（matmul/cudnn 互不覆盖）")
 
 
 def test_overfit_check_detects_pathological_initial_logits():
     """初始 loss 远离 log(V)（logits 尺度病态）必须被自动中间结果核对拦下。
 
-    这对应“初始化/标签分布异常.clamp_min(1e-10)”类问题：模型仍可能慢慢过拟合，但初始
+    这对应“初始化/标签分布异常”类问题：模型仍可能慢慢过拟合，但初始
     交叉熵不可能接近均匀分布的对数值，应立即报警而不是盲目开训。
     """
     import math
@@ -560,7 +560,7 @@ def test_batch_fingerprint_detects_content_and_label_changes():
     assert batch_fingerprint(x, x[:, :-1]) != fp
     bad = torch.zeros(1, 1, dtype=torch.long)
     assert batch_contract(bad, bad, 64)["errors"]
-    print("  [ok] sanity 固定批内容指纹对标签/内容变化敏感.clamp_min(1e-10)")
+    print("  [ok] sanity 固定批内容指纹对标签/内容变化敏感")
 
 
 def test_gradient_coverage_marks_capacity_null_zeros_as_expected():

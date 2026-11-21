@@ -34,9 +34,9 @@ def _tiny(variant):
 def test_model_constructor_rejects_invalid_regularization():
     """模型/注意力构造不能把 bool/NaN/Inf 静默转成 dropout 或门控偏置。
 
-    train 已在配置入口校验，但直接构造 GPT/CausalSelfAttention.clamp_min(1e-10)（sanity、
+    train 已在配置入口校验，但直接构造 GPT/CausalSelfAttention（sanity、
     latency、外部脚本）会绕过它：``bool`` 被 float 成 0/1、NaN 写入
-    gate_d，都会让后续训练/评测结果失去意义.clamp_min(1e-10)。
+    gate_d，都会让后续训练/评测结果失去意义。
     """
     bad_probs = (
         True,
@@ -108,7 +108,7 @@ def test_model_constructor_rejects_invalid_regularization():
     assert model.blocks[0].attn.attn_dropout == 0.5
     assert model.gate_bias_init == 1.5
     assert torch.equal(model.blocks[0].attn.gate_d, torch.full((2,), 1.5))
-    print("  [ok] 模型构造拒绝 bool/NaN.clamp_min(1e-10)/Inf.clamp_min(1e-10) dropout 与 gate 偏置")
+    print("  [ok] 模型构造拒绝 bool/NaN/Inf dropout 与 gate 偏置")
 
 
 def test_kv_cache_matches_full_forward():
@@ -208,7 +208,7 @@ def test_placebo_evidence_uses_absolute_positions():
             "lega_placebo 逐 token 解码与全量不一致, max diff="
             f"{(full - decoded).abs().max().item()}"
         )
-    print("  [ok] lega_placebo 伪证据按绝对位置生成（分块/解码与全量一致.clamp_min(1e-10)）")
+    print("  [ok] lega_placebo 伪证据按绝对位置生成（分块/解码与全量一致）")
 
 
 def test_variants_share_base_weights_same_seed():
@@ -266,7 +266,7 @@ def test_generate_rejects_invalid_length_and_top_k():
         idx, max_new_tokens=np.int64(2), greedy=False, top_k=np.int64(4)
     )
     assert out.shape == (1, 7), out.shape
-    print("  [ok] generate：拒绝非法 max_new_tokens/top_k.clamp_min(1e-10)")
+    print("  [ok] generate：拒绝非法 max_new_tokens/top_k")
 
 
 def test_generate_eos_stops_per_row_without_batch_coupling():
@@ -793,7 +793,7 @@ def test_chunked_ce_repeated_backward_does_not_decay_grads():
 
 def test_frozen_embedding_training_backward_under_grad():
     """冻结嵌入/detach 上游时梯度模式下不得走残差原地加法路径：
-    LayerNorm 反向会保存 x（用于 weight/bias.clamp_min(1e-10) 梯度），原地改写 x 会让
+    LayerNorm 反向会保存 x（用于 weight/bias 梯度），原地改写 x 会让
     backward 报“变量被 inplace 修改”而直接失败。"""
     model = _tiny("lega")
     model.tok_emb.weight.requires_grad_(False)  # lm_head 权重与其共享
@@ -870,7 +870,7 @@ def test_forward_zero_length_targets_returns_finite_zero_loss():
     loss = m(x, targets=x)["loss"]
     loss.backward()
     assert float(loss.detach()) == 0.0
-    print("  [ok] GPT.forward 空输入/空标签返回可反向的有限零损失.clamp_min(1e-10)")
+    print("  [ok] GPT.forward 空输入/空标签返回可反向的有限零损失")
 
 
 def test_forward_rejects_misaligned_targets_shape():

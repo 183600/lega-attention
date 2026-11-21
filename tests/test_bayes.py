@@ -37,7 +37,7 @@ def test_known_jzs_values_and_labels():
     assert big["log_bf10"] > math.log(3.0)
     null = bayes_paired_evidence([-0.1, 0.1, -0.05, 0.05, 0.0])
     assert _close(null["bf10"], 0.397362624480641, tol=1e-9), null
-    assert null["label"] == "证据不足（不区分 H0/H1.clamp_min(1e-10)）", null
+    assert null["label"] == "证据不足（不区分 H0/H1）", null
     assert evidence_label(0.01) == "极强支持 H0"
     assert evidence_label(0.05) == "中等支持 H0"
     assert evidence_label(5) == "弱支持 H1"

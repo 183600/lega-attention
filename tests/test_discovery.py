@@ -36,7 +36,7 @@ def test_benjamini_hochberg_hand_calculation():
     assert abs(q[2] - 0.04) < 1e-12
     assert benjamini_hochberg([]) == []
     assert benjamini_hochberg([None, float("nan")]) == [None, None]
-    print("  [ok] benjamini_hochberg（手算/并列.clamp_min(1e-10) p/空输入.clamp_min(1e-10)）")
+    print("  [ok] benjamini_hochberg（手算/并列 p/空输入）")
 
 
 def test_benjamini_hochberg_invalid_p_do_not_enter_family():
