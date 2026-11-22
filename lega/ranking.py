@@ -459,8 +459,12 @@ def permutation_selection_test(
             "exact": False,
             "p_max": None,
             "p_range": None,
+            "p_max_holm": None,
+            "p_range_holm": None,
             "significant_max": None,
             "significant_range": None,
+            "significant_max_holm": None,
+            "significant_range_holm": None,
             "winner": None,
             "runner_up": None,
             "lead_over_runner_up": None,
@@ -524,12 +528,40 @@ def permutation_selection_test(
     p_max = (1 + ge_max) / (n_permutations + 1)
     p_range = (1 + ge_range) / (n_permutations + 1)
     expected_null_max = null_max_total / max(n_permutations, 1)
+
+    # Holm-Bonferroni 多重比较校正：p_max 和 p_range 构成一个含 2 个
+    # 检验的家族，同时以同一 alpha 判定显著性会膨胀 FWER。按 Holm
+    # 逐步法（m=2）：将 p 值升序排列 p_(1) ≤ p_(2)，
+    #   p_(1)_adj = min(1, 2 * p_(1))
+    #   p_(2)_adj = min(1, max(p_(1)_adj, p_(2)))
+    # 原始 p 值保留供单检验场景使用；正式推断应参考 _holm 校正后值。
+    n_tests = 2
+    p_pair = [p_max, p_range]
+    sorted_idx = sorted(range(n_tests), key=lambda i: p_pair[i])
+    p_sorted = [p_pair[i] for i in sorted_idx]
+    p_adj_sorted = [0.0] * n_tests
+    for rank in range(n_tests):
+        raw_p = p_sorted[rank]
+        adjusted = min(1.0, raw_p * (n_tests - rank))
+        if rank > 0:
+            adjusted = max(adjusted, p_adj_sorted[rank - 1])
+        p_adj_sorted[rank] = adjusted
+    # 映射回原始顺序
+    p_adj = [0.0] * n_tests
+    for rank, orig in enumerate(sorted_idx):
+        p_adj[orig] = p_adj_sorted[rank]
+    p_max_holm, p_range_holm = p_adj
+
     payload.update(
         {
             "p_max": p_max,
             "p_range": p_range,
+            "p_max_holm": p_max_holm,
+            "p_range_holm": p_range_holm,
             "significant_max": bool(p_max < alpha),
             "significant_range": bool(p_range < alpha),
+            "significant_max_holm": bool(p_max_holm < alpha),
+            "significant_range_holm": bool(p_range_holm < alpha),
             "winner": winner,
             "runner_up": runner_up,
             "lead_over_runner_up": lead,
@@ -537,10 +569,13 @@ def permutation_selection_test(
             "expected_null_max_centered": expected_null_max,
             "selection_inflation": obs_max - expected_null_max,
             "note": (
-                "p_max 检验“是否存在方案差异/领先是否超过纯选择最大值”，"
+                "p_max 检验\u201c是否存在方案差异/领先是否超过纯选择最大值\u201d，"
                 "不指定哪个方案更好；Monte-Carlo p 分辨率约 "
-                f"1/{n_permutations + 1}。方案标签交换性不成立（缺失机制/"
-                "预算/协议不同）时 p 只作线索，不改变预注册判定。"
+                f"1/{n_permutations + 1}。p_max_holm / p_range_holm 为 "
+                "Holm-Bonferroni 校正后 p 值（家族含 2 个检验：max 与 "
+                "range），正式推断应参考校正值以控制 FWER。原始 p 值保留 "
+                "供单检验场景使用。方案标签交换性不成立（缺失机制/预算/"
+                "协议不同）时 p 只作线索，不改变预注册判定。"
             ),
         }
     )
