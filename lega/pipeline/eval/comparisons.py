@@ -2518,7 +2518,7 @@ def _multiverse_analysis(runs, pairs, alpha=ALPHA, min_seeds=MIN_SEEDS):
                 )
             ]
             log_obs = [
-                (s, math.log(a), math.log(b)) for s, a, b in ppl_obs if a > 0 and b > 0
+                (s, math.log(max(a, 1e-10)), math.log(max(b, 1e-10))) for s, a, b in ppl_obs if a > 0 and b > 0
             ]
             specs.append(
                 _multiverse_spec(

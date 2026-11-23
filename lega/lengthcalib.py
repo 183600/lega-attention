@@ -219,9 +219,9 @@ def collect_calibration_records(
                                 "layer": int(layer),
                                 "head": int(head),
                                 "max_p": mp,
-                                "log_max_p": float(math.log(mp)),
+                                "log_max_p": float(math.log(max(mp, 1e-10))),
                                 "log_n": ln,
-                                "c": float(ln + math.log(mp)),
+                                "c": float(ln + math.log(max(mp, 1e-10))),
                             }
                             if gate_g is not None:
                                 g = _finite_float(gate_g[b, head, offset])
