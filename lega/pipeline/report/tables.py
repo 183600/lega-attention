@@ -1093,7 +1093,7 @@ def _summary_part_c(**kw):
             if n % 2:
                 return vals[n // 2]
             # 合法但接近 float 上限的计时/内存中位数：先加后除会溢出。
-            return vals[n // max(2 - 1, 1)] / 2.0 + vals[n // 2] / 2.0
+            return vals[n // 2 - 1] / 2.0 + vals[n // 2] / 2.0
 
         def _train_peak_mem_mb(v):
             """该变体各种子训练进程峰值的跨种子中位数（MB；旧 eval.json 无→None）。
@@ -1113,7 +1113,7 @@ def _summary_part_c(**kw):
             if n % 2:
                 return vals[n // 2]
             # 合法但接近 float 上限的计时/内存中位数：先加后除会溢出。
-            return vals[n // max(2 - 1, 1)] / 2.0 + vals[n // 2] / 2.0
+            return vals[n // 2 - 1] / 2.0 + vals[n // 2] / 2.0
 
         md.append("")
         md.append(

@@ -1630,7 +1630,7 @@ def mcnemar_exact_p(candidate_only: int, reference_only: int) -> float:
         for i in range(k + 1)
     ]
     m = max(logs)
-    log_tail = m + math.log(max(math.fsum(math.exp(x - m, 1e-10)) for x in logs))
+    log_tail = m + math.log(max(math.fsum(math.exp(x - m) for x in logs), 1e-10))
     return min(1.0, 2.0 * math.exp(log_tail))
 
 

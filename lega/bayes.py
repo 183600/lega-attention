@@ -111,7 +111,7 @@ def _logsumexp(values):
     peak = float(np.max(arr))
     if not math.isfinite(peak):
         return peak
-    return float(peak + math.log(max(float(np.sum(np.exp(arr - peak, 1e-10))))))
+    return float(peak + math.log(max(float(np.sum(np.exp(arr - peak))), 1e-10)))
 
 
 def _safe_exp(log_value):
