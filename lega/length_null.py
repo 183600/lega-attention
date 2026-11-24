@@ -95,7 +95,7 @@ def _simulate_concentration(
     p = np.exp(scores)
     p /= p.sum(axis=1, keepdims=True)
     max_p = p.max(axis=1)
-    return np.log(float(length)) + np.log(np.maximum(max_p, 1e-300))
+    return np.log(np.clip(float(length, 1e-10, None))) + np.log(np.clip(np.maximum(max_p, 1e-300, 1e-10, None)))
 
 
 def simulate_concentration(

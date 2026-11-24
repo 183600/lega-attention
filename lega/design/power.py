@@ -349,7 +349,7 @@ def _chi2_expectation(func, df: int, n_nodes: int = 96) -> float:
     nodes, weights = np.polynomial.laguerre.laggauss(n_nodes)
     # laggauss 积分 ∫_0∞ e^{-x} g(x) dx ≈ Σ w_i g(x_i)；
     # χ²_df 等价于 2·Gamma(df/2, 1)，故 V=2x，密度权重 x^a/Γ(a+1)。
-    logw = a * np.log(np.maximum(nodes, 1e-10)) - math.lgamma(a + 1.0)
+    logw = a * np.log(np.clip(np.maximum(nodes, 1e-10, 1e-10, None))) - math.lgamma(a + 1.0)
     shift = float(np.max(logw))
     vals = func(2.0 * nodes) * np.exp(logw - shift)
     return float(np.sum(weights * vals) * math.exp(shift))
