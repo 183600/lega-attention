@@ -426,7 +426,7 @@ def ppl_unigram(eval_ids: np.ndarray, uni: np.ndarray, alpha: float) -> dict:
     # uint16 流可直接做花式索引
     c = uni[np.asarray(eval_ids)]
     probs = _alpha_probs(c, total, alpha, vocab)
-    mean_nll = float(-np.log(np.clip(np.maximum(probs, 1e-10, 1e-10, None))).mean())
+    mean_nll = float(-np.log(np.maximum(probs, 1e-10)).mean())
     return {
         "ppl": float(math.exp(min(20.0, mean_nll))),
         "mean_nll": mean_nll,
@@ -461,7 +461,7 @@ def _bigram_ppl(
     if n_tokens <= 0:
         return {"ppl": None, "mean_nll": None, "n_tokens": 0}
     probs = _alpha_probs(c_pair, c_prev, alpha, vocab_size)
-    mean_nll = float(-np.log(np.clip(np.maximum(probs, 1e-10, 1e-10, None))).mean())
+    mean_nll = float(-np.log(np.maximum(probs, 1e-10)).mean())
     return {
         "ppl": float(math.exp(min(20.0, mean_nll))),
         "mean_nll": mean_nll,

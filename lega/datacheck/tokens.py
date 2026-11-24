@@ -136,7 +136,7 @@ def token_stream_stats(ids, vocab_size: int, split: str = "train") -> dict:
         counts_sorted = np.sort(counts[counts > 0])
         ranks = np.arange(1, len(counts_sorted) + 1)
         zipf_slope = (
-            float(np.sum(np.log(np.clip(np.maximum(counts_sorted, 1e-10, 1e-10, None))) * np.log(np.clip(np.maximum(ranks, 1e-10, 1e-10, None)))))
+            float(np.sum(np.log(np.maximum(counts_sorted, 1e-10)) * np.log(np.maximum(ranks, 1e-10))))
             if len(counts_sorted) > 1
             else 1.0
         )

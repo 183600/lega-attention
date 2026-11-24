@@ -240,7 +240,7 @@ def test_alt_conc_forward_matches_reference_and_chunking(monkeypatch):
             p = _reference_attn_probs(m, x)
             q = m._finalize_conc_evidence(m._conc_evidence(p))
             T = x.shape[1]
-            log_n = torch.log(torch.clamp(torch.arange(1, T + 1, dtype=torch.float32, min=1e-10)))
+            log_n = torch.log(torch.arange(1, T + 1, dtype=torch.float32))
             expected = (
                 0.7 * (torch.log(q.clamp_min(1e-30)) + log_n.view(1, 1, T))
                 - 0.2 * log_n.view(1, 1, T)
