@@ -646,12 +646,11 @@ def run_overfit_check(
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_mm
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
-        # 恢复调用方进入此函数前的模型状态：避免 dropout 等训练期
-        # 行为污染后续评测，也避免误把训练中的模型切到 eval。
-        if overfit_was_training:
-            model.train()
-        else:
-            model.eval()
+        # sanity check 结束后强制恢复 eval 态：无论调用方传入时的模型
+        # 状态如何，sanity 的内部训练完成后必须切回 eval，避免 dropout
+        # 等训练期行为污染后续评测。overfit_was_training 仅用于审计日志，
+        # 不控制恢复行为。
+        model.eval()
     log_vocab = math.log(max(model.vocab_size, 1e-10))
     initial_loss_gap = float(initial["loss"]) - log_vocab
     # initial_loss_tol < 0 表示显式禁用该检查（仍记录偏差供人工复核）
