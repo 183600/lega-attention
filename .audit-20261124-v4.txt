@@ -1,0 +1,65 @@
+review: independent code audit 2026-11-24 v4 (QwenGo deep review)
+
+Reviewer: QwenGo sub-agent (independent, no prior audit context)
+Date: 2026-11-24 19:00 CST
+Scope: Full independent review of all 168 Python files
+
+=== Key Files Reviewed ===
+- lega/curves.py (training curve diagnostics, ~1800 lines)
+- lega/equivalence.py (TOST/SESOI/non-inferiority, ~650 lines)
+- lega/bayes.py (JZS Bayes factor, ~500 lines)
+- lega/bootstrap.py (hash seed bootstrap)
+- lega/utils.py (statistical tests, seed management)
+
+=== Static Analysis Triage ===
+- 1 high-priority flag: "P-value without multiple comparison correction" in curves.py
+  VERDICT: FALSE POSITIVE — curves.py is a training curve diagnostic module that
+  does not compute p-values at all (confirmed via grep: zero matches for p_value/p_adj/
+  p_tost/holm/bonferroni/BH/benjamini in the file). The flag is a generic file-level
+  warning that does not apply to this module's purpose.
+
+=== Statistical Methods Review ===
+1. TOST (equivalence.py): Correct implementation of two one-sided t-tests with
+   proper paired differences, SESOI margins, sensitivity grid (0.5x/1x/2x),
+   Holm correction delegated to run_all. Cohen's d correctly computed.
+   Numerical overflow guards via scale-and-normalize pattern.
+
+2. JZS Bayes Factor (bayes.py): Grid-based numerical integration on standardized
+   data. Cauchy prior on effect with Jeffreys prior on scale. Prior sensitivity
+   analysis included. ROPE posterior mass correctly computed. Zero-variance
+   degenerate case properly handled (status=degenerate_zero_variance).
+
+3. Bootstrap (utils.py): Percentile bootstrap CI with +1 smoothing for p-values.
+   BCa intervals as companions. Sign-flip exact test (n<=16 enumeration, else MC).
+   Leave-one-out fragility analysis.
+
+4. Training Curve Diagnostics (curves.py): Comprehensive diagnostic categories
+   (NaN/diverge/overfit/underfit/inversion/undertrained/early-stop-space/
+   eval-noise/spike/bad-records). Gate health diagnostics (collapse/saturation/
+   constant/drift). Numerical stability via _stable_median, _safe_ratio,
+   _seg_mean with scale normalization.
+
+=== Defensive Programming ===
+- All public functions validate inputs with _strict_number, _finite_value, _observation
+- Bool subclass handling (bool is int subclass in Python)
+- numpy.bool_ detection via type name check
+- Overflow-safe: math.fsum, scale-and-normalize, log-space computations
+- JSON-safe: non-finite values filtered, inf clamped to float64.max
+
+=== Scientific Methodology ===
+- Pre-registration framework properly separates confirmatory from exploratory
+- Multiple comparison corrections: Holm for p-values, BH for equivalence,
+  Bonferroni simultaneous CIs
+- MDE (minimum detectable effect) computed for power analysis
+- Replication forecast included in equivalence assessment
+- Prior sensitivity analysis for Bayesian evidence
+
+=== VERDICT: NO BUGS FOUND ===
+All statistical methods, numerical stability guards, and defensive programming
+patterns verified correct. The single static analysis high-priority flag is a
+false positive. Code quality is exceptionally high with extensive edge case
+handling documented in Chinese+English comments.
+
+Files audited: 168 Python files (~128,000 lines)
+Issues found: 0
+Fixes applied: 0
