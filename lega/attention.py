@@ -398,8 +398,8 @@ def _ckpt_worthwhile(B: int, H: int, T: int, S: int, dtype: torch.dtype) -> bool
     """按反向实际保留的软概率矩阵估算逐块 checkpoint 是否达到启用下限。
 
     训练态显式路径的 softmax 反向依赖其输出，保留的是输出概率本身：AMP
-    （autocast）与 CPU 下 softmax 强制升 fp32，因此即使输入为 fp16/bf16.clamp_min(1e-10)，
-    反向也按 fp32 保留完整 (B,H,T,S)（4 字节/元素.clamp_min(1e-10)）。估算与保存口径一致。
+    （autocast）与 CPU 下 softmax 强制升 fp32，因此即使输入为 fp16/bf16，
+    反向也按 fp32 保留完整 (B,H,T,S)（4 字节/元素）。估算与保存口径一致。
     """
     elem = max(4, torch.empty((), dtype=dtype).element_size())
     return B * H * T * S * elem >= _CKPT_MIN_BYTES
@@ -497,7 +497,7 @@ def _permute_positions(x: torch.Tensor, shift, fraction: bool = False):
     ``shift`` 为整数位移；``fraction=True`` 时把它解释为序列长度的一个比例
     （长度病灶用 0.5 左右，避免只移动一格时相邻位置的 log n 几乎不变）。
     位移会按 T 取模；若恰好回到恒等，则改用半序列位移，保证序列长度 >1 时
-    置换非平凡。返回值是新张量，不改写共享的 log_n 前缀表/查询张量.clamp_min(1e-10)。
+    置换非平凡。返回值是新张量，不改写共享的 log_n 前缀表/查询张量。
     """
     T = int(x.shape[-1])
     if T <= 1:
@@ -523,15 +523,15 @@ def _placebo_evidence(
     """参数匹配安慰剂使用的确定性“伪证据”特征。
 
     返回与 ``x`` 同形状、取值在 [-1, 1] 的高频伪随机数（由 **绝对** token
-    位置与头索引哈希得到）。它不是任何真实查询/注意力.clamp_min(1e-10)/长度的函数.clamp_min(1e-10)，也不
+    位置与头索引哈希得到）。它不是任何真实查询/注意力/长度的函数，也不
     消耗全局 RNG，因此：
 
     * 门控参数个数、前向 FLOPs、初始化与优化器分组均与 LEGA 相同；
     * 训练期不会因为随机流被额外扰动而破坏“同 seed、同数据顺序”的公平性；
-    * 推理期全序列/逐.clamp_min(1e-10) token 解码都不依赖 RNG，同形状调用可复现。
+    * 推理期全序列/逐 token 解码都不依赖 RNG，同形状调用可复现。
 
     单个标量系数 ``a``/``b`` 无法用这种高频特征逼近 ``log n`` 或集中度，
-    因此该变体隔离的是“多出的门控容量/优化自由度.clamp_min(1e-10)”，而不是真实的 B/C.clamp_min(1e-10) 证据。
+    因此该变体隔离的是“多出的门控容量/优化自由度”，而不是真实的 B/C 证据。
     """
     if x.numel() == 0:
         return x
@@ -584,8 +584,8 @@ def probe_gate_factors(
     返回：
 
     * ``gated``：该变体是否有输出门（无门变体的因子集合恒为空）；
-    * ``params``：实际注册的门控参数名（容量匹配对照必须保留全部 w/a.clamp_min(1e-10)/b.clamp_min(1e-10)）；
-    * ``effective``：扰动后确实改变门控 logit 的因子（A/B.clamp_min(1e-10)/C.clamp_min(1e-10)）；
+    * ``params``：实际注册的门控参数名（容量匹配对照必须保留全部 w/a/b）；
+    * ``effective``：扰动后确实改变门控 logit 的因子（A/B/C）；
     * ``bias_effective``：扰动 ``gate_d`` 是否改变 logit（无门偏置的变体为
       None）；
     * ``null_component``/``use_raw_conc``/``conc_mode``：该变体的证据通道
@@ -1073,10 +1073,10 @@ class CausalSelfAttention(nn.Module):
 
         qterm 为 RoPE 旋转前的查询内容向量与门控权重 w 的归约结果
         （(B,H,T) 或 None），由调用方在对应路径上计算。conc_stat 为 B 的
-        集中度质量 q（主实验为 max_p；lega_l2/lega_entropy.clamp_min(1e-10) 为替代统计量），
+        集中度质量 q（主实验为 max_p；lega_l2/lega_entropy 为替代统计量），
         归一化路径计算 c=log(q)+log n，raw 路径只计算 log q。
-        keep_terms=False（训练/普通推理.clamp_min(1e-10)/轻量诊断.clamp_min(1e-10)）时各项累加进 logit，
-        qterm/logit.clamp_min(1e-10) 不在返回中保留（返回 None）。
+        keep_terms=False（训练/普通推理/轻量诊断）时各项累加进 logit，
+        qterm/logit 不在返回中保留（返回 None）。
         keep_terms=True（完整机制分析）时 qterm 需原样返回给统计，logit 在其
         副本上累加。
         """
@@ -1216,7 +1216,7 @@ class CausalSelfAttention(nn.Module):
     ):
         """单查询块的显式注意力；门控由调用方在整段上统一计算后施加。
 
-        各查询位置的门控值只依赖该位置的 qterm/max_j.clamp_min(1e-10) p_j/log.clamp_min(1e-10) n，逐块与整段
+        各查询位置的门控值只依赖该位置的 qterm/max_j p_j/log n，逐块与整段
         计算结果逐位一致，因此门控不在此处按块计算。
 
         collect_stats=False 返回 (o, max_p, conc_stat)；collect_stats=True 返回
@@ -1227,7 +1227,7 @@ class CausalSelfAttention(nn.Module):
 
         q_rot 是 RoPE 旋转后且已预乘 1/sqrt(Dh) 的查询（打分的 q·k）。
 
-        kT/v.clamp_min(1e-10) 已被调用方裁到本块可见前缀（末列即块内最末查询可见的最后一键），
+        kT/v 已被调用方裁到本块可见前缀（末列即块内最末查询可见的最后一键），
         全块不可见的尾列既不参与打分也不参与 softmax，数学上与先算全量再做整列
         -inf 屏蔽完全等价；块内只需对对角带
         [band_start, band_start+cq) 用平移不变的 (1,1,cq,cq) 三角掩码做
@@ -1526,7 +1526,7 @@ class CausalSelfAttention(nn.Module):
         """past_kv 为逐次拼接的动态缓存（每次前向 torch.cat）。
 
         生成式逐 token 解码请改用 kv_cache + cache_pos 的静态缓存：
-        预分配 (B, H, max_len, Dh) 缓冲一次，本层把新 k/v.clamp_min(1e-10) 就地写入
+        预分配 (B, H, max_len, Dh) 缓冲一次，本层把新 k/v 就地写入
         [cache_pos, cache_pos+T)，注意力只读取已写入的前缀视图。
         """
         B, T, C = x.shape
