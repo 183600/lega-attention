@@ -1,0 +1,396 @@
+# LEGA: Length-calibrated Evidence-Gated Attention
+
+**Length-calibrated Evidence-Gated Attention** — investigating whether an attention head can learn to **write less irrelevant content into the residual stream** when it **cannot find reliable information** in the current context.
+
+> The core novelty is not "adding yet another gate": prior work either gates the attention output (looking only at the query vector) or lets the head choose "not to read" (explicit null attention). LEGA lets **the same gate jointly consider the current query, the concentration of the attention distribution, and the context length**.
+
+[中文说明](README.md) | **English**
+
+---
+
+## 1. Method
+
+### 1.1 Formulation
+
+For each query position $t$ and head $h$, the standard attention output is $o = \sum_j p_j v_j$. LEGA computes, before writing back to the residual stream:
+
+$$
+c = \log\!\bigl(n \cdot \max_j p_j\bigr), \qquad
+g = \sigma\bigl(w^\top q + a\,c + b\log n + d\bigr), \qquad
+o' = g \cdot o
+$$
+
+where $p_j$ are the causal attention weights, $n$ is the number of real tokens readable by the query (i.e., position $t+1$), and $w\in\mathbb{R}^{d_{head}}$ and the scalars $a, b, d$ are all **per-head** parameters.
+
+### 1.2 Design intuition
+
+- **Property of $c$**: under uniform attention $\max_j p_j = 1/n$, so $c = \log(n \cdot 1/n) = 0$. This is only the **uniform special case**: in general $\max_j p_j$ need not shrink as $1/n$, so $c$ can still grow with length. It must not be advertised as a sufficient statistic that is "decoupled from length"; `lega/length_null.py` provides a null diagnostic over random/repeated/uniform contexts, and any claim must report the $c\sim\log_2 n$ slope rather than citing the uniform unit test alone.
+- **$b\log n$ is the length-calibration term**: even at equal concentration $c$, a "focused read" in a long context has different credibility than in a short one. $b$ lets each head learn its own length-calibration curve.
+- **$w \cdot q$ preserves content semantics**: the gate is not a pure statistical rule; the query vector still participates.
+- **Initialization**: $w=a=b=0,\ d=2.0$, giving $g\approx\sigma(2)\approx 0.88$ initially — close to standard attention, so training starts stably.
+
+### 1.3 Relation to prior work
+
+| Method | Gating evidence | Mechanism | Difference from LEGA |
+|---|---|---|---|
+| Output gating (qgate, prior) | query only, $w^\top q$ | $o'=g\cdot o$ | Unaware of "was this read concentrated / how long is the context" |
+| Explicit null attention (null, prior) | learnable null KV slots | attention may skip reading entirely | "Not reading" and "reading but not writing" are two different degrees of freedom |
+| **LEGA (ours)** | query + concentration + length | $o'=g\cdot o$ | Jointly decides "should we write" from three factors |
+
+### 1.4 Variants (all implemented in code)
+
+| Variant | Gate formula | Purpose |
+|---|---|---|
+| `standard` | none | Baseline (no gate) |
+| `gate_only` | $g=\sigma(d)$ | Gate control: learnable bias only, no A/B/C (isolates the gate itself) |
+| `qgate` | $g=\sigma(w^\top q+d)$ | Prior-work representative: query-only output gating |
+| `null` | none (extra null KV slots) | Prior-work representative: explicit "choose not to read" |
+| `lega` | $g=\sigma(w^\top q+a\,c+b\log n+d)$ | **Ours** (full factorial A+B+C) |
+| `lega_no_len` | $g=\sigma(w^\top q+a\,c+d)$ | Leave-one-out: no length term $b\log n$ (A+B) |
+| `lega_no_conc` | $g=\sigma(w^\top q+b\log n+d)$ | Leave-one-out: no concentration evidence (A+C) |
+| `lega_no_query` | $g=\sigma(a\,c+b\log n+d)$ | Leave-one-out: no query term (B+C) |
+| `lega_conc_only` | $g=\sigma(a\,c+d)$ | Factorial: concentration term only (B, $c=\log(n\max_j p_j)$) |
+| `lega_len_only` | $g=\sigma(b\log n+d)$ | Factorial: length term only (C) |
+
+**Ablation completeness**: with query=A, concentration=B, length=C, both the full
+factorial within the gated family (none/`gate_only`, A/`qgate`, B/`lega_conc_only`, C/`lega_len_only`,
+AB/`lega_no_len`, AC/`lega_no_conc`, BC/`lega_no_query`, ABC/`lega`) and the
+leave-one-out set (Full/Full−A/Full−B/Full−C) are implemented. A `gate_only`
+control (learnable bias only, no A/B/C) isolates the effect of adding a gate from
+the contributions of A/B/C. The summary lists the matrix and flags missing cells.
+Component usefulness is never inferred from coverage alone: the summary judges
+each of A/B/C with Holm-corrected significant paired tests (leave-one-out:
+Full−X significantly worse than Full; factorial increment: X vs `gate_only`
+significantly better), using the pre-registered primary metric (A/B: PPL,
+C: RULER); the other metric is reported only as an exploratory sensitivity
+analysis. All variants use the explicit attention path
+(`use_sdpa_standard=false`) so SDPA and explicit softmax are never mixed, and
+the audit rejects such mixing. It explicitly rejects "every component helps"
+when the evidence is missing or points the other way. The full factorial also
+tests A×B/A×C/B×C interactions (exploratory, separate Holm family, with
+`gate_only` as the no-component baseline) to check whether component gains are
+additive or synergistic/sub-additive.
+
+Parameter overhead: gating adds only **$d_{head}+3$ parameters per head** (LEGA), <0.02% of the model (`null` is $2d_{head}$ per head). Scripts print the exact numbers at the start of training. The summary page also has a dedicated "gate overhead" section listing actual per-head parameters, extra-parameter share, analytical gate FLOPs/token, and its share of total FLOPs; the concentration term's `max_j p_j` scan grows linearly with context length, so gains must be read against both overheads.
+
+---
+
+## 2. Experimental design
+
+- **Data protocol (leakage-proof, fully auditable)**:
+  1. **Split first, preprocess second**: train/val/test text is produced before encoding; the character-level vocabulary (feature engineering) is fit on train only, val/test are only transformed, and unseen characters map to `<unk>` (GPT-2 BPE is a public pretrained vocabulary, independent of this project's data);
+  2. **Temporal split**: with `--local_txt`, the earliest 80% is train, the next 10% is val and the latest 10% is test; cut points align to document boundaries (heading lines > blank-line paragraphs > newlines) and are never shuffled at split time (batch-level random sampling of training samples during training is allowed and not leakage); the official WikiText-103 split is document-disjoint and inherently held out;
+  3. **Groups never cross sides**: documents/paragraphs are the group unit and land entirely in one split; training lines/blocks that exactly duplicate val/test lines (including NFKC/whitespace variants) are decontaminated, and **near-duplicates** are screened with UTF-8 byte 5-gram MinHash + LSH candidates followed by exact Jaccard/containment verification (cross-split score = max(Jaccard, containment), train-internal = Jaccard; protocol threshold 0.80, with 0.70/0.80/0.90 sensitivity and the LSH theoretical recall reported). Only train copies are removed (val/test stay sealed and untouched); sampled 64-gram hashing additionally screens for token-level copies across splits;
+  4. **Cleaning & anomaly checks**: corrupt characters (U+FFFD/NUL/illegal control chars) are deterministically removed; token streams are hard-validated (integer, finite, id range); duplicate samples, overlong lines and train-vs-val/test unigram shift (TV/JS, OOV) are all written to `data_report.json`;
+  5. **Test seal**: checkpoint selection and early stopping use val only; test is accessed for final evaluation only, and every test evaluation appends to the `data_dir/.test_access_log.jsonl` ledger; the summary reports the total count and any repeatedly evaluated checkpoint.
+  6. **Document-structure evidence (separating concatenation artifacts from mechanism gains)**: after splitting, document boundaries are cut on heading lines / blank-line paragraphs and written to `doc_boundaries.json` (its hash is recorded in `meta.json` and re-verified byte by byte on cache hits); `data_report.structure` reports the **expected fraction of cross-document windows** per ctx and the within-document window coverage. GPT-2 BPE is now encoded **per document** (tokens never cross a document boundary; `meta.encoding_mode=per_document`), otherwise the boundary counts disagree with the actual token stream. `eval.json` additionally records `structure_audit` (cross-document share of the windows actually evaluated) and `doc_aligned_eval` (PPL recomputed on within-document windows with the same window budget; disable with `--no_doc_aligned_eval`). LEGA claims to "write less irrelevant content", and cross-document windows are exactly the irrelevant content that concatenation injects; without quantifying them separately, a gain cannot be attributed to the mechanism rather than to the artifact. Both are descriptive evidence, enter no confirmatory verdict, and their window sets differ from the main protocol — only paired differences between variants on the same batch are comparable, not absolute values. In addition, `eval.json` records the per-window crossing flag `window_crossing_documents` (aligned with `window_losses`/`window_indices`), and `lega/doc_strata.py` uses it to split the **same** set of evaluation windows into cross-document and document-aligned strata and run a per-seed candidate−reference pairing: interaction = cross-document ΔNLL − document-aligned ΔNLL, tested across seeds with paired t + independent Holm. A significantly negative interaction means the gain is concentrated in cross-document windows (beware of the concatenation artifact); a non-significant one means the gain also holds on document-aligned windows. The two strata share the same seeds and checkpoints (not independent studies), and this is exploratory evidence (only the interaction test enters the exploratory FDR family) that never changes a confirmatory verdict.
+  7. **Group-level disjointness audit (turning a claim into a checkable conclusion)**: "split by document / cuts snapped to document boundaries" used to be a *claim* — line-wise comparison only finds cases where both sides hold the exact same line, so a document cut in the middle went unnoticed. `data_report.split_protocol.group_disjointness` (protocol `group_disjointness_v1`) checks three layers: group level (a whole document appears in two splits), paragraph level (the same paragraph appears in two splits), and line level (the same line appears twice — may be an accidental match, so it only warns). Group/paragraph sharing is hard evidence and fails the pipeline before training as `split_group_overlap`/`split_paragraph_overlap`; the word fragments on both sides of each cut are recorded for manual review, and the local split path additionally performs an exact self-check (`split_protocol.lines_cross_cut`: did the cut land on a newline?).
+  8. **Split-set digest and atomic publication**: per-split source hashes only prove "no individual file changed", not "the three files come from the same split" — a preparation run that fails halfway leaves a mixed-version set (new train/val + stale test) whose per-file checks all pass while the experiment already ran on mismatched data. Therefore the three splits are staged as `*.part` files, the disjointness check runs on the staged files, and only after everything passes are they published together (on failure the previous consistent set is kept); `split_set.json` (protocol `lega-split-set-v1`) records the per-split SHA-256 and a **set-level digest**, `meta.split_set_digest` folds that digest into the bin-cache identity, and `lega.preflight` recomputes and compares it before training — replacing any one file fails with the `data_split_set` critical issue.
+- **Fair comparison (controlled variables)**: all variants × seeds are trained with the same config (same optimizer / LR schedule / steps / data order); after training, two layers are cross-checked automatically: `config_used.json` (hyperparameters item by item) and the `eval.json` provenance (data fingerprint, code commit, config SHA-256, actual steps and tokens_seen, also compared against the pipeline's data fingerprint), plus the **actual evaluation protocol** (PPL must share `split/eval_ctx/eval_iters/val_windows/val_tokens_evaluated`, i.e. the same token batch; RULER must share `ctx_lens/n_samples/sample_seed/corpus_source/max_new` and evaluated cells, otherwise EM is not paired on the same items). Any difference fails the pipeline; the random seed is replayed after model construction so training-time randomness (dropout etc.) is also identical across variants — fairness is an executable assertion, not a verbal promise.
+- **A tuned baseline (avoid misattributing hyperparameter gains)**: with `--tune_baseline`, a small lr × weight-decay grid search is run on the **baseline (`standard`) first**, selected on the validation split only (`lega/tuning.py`; test is never loaded). The winning combination is injected into **all** variants, and the evidence (including `default_is_optimal`, whether the default hyperparameters are within a 0.5% val_loss tolerance of the grid optimum) is written to `results/<tag>/baseline_tuning.json` and rendered in the summary. Without this evidence the summary explicitly warns about an untuned baseline instead of assuming one. The selection itself is noisy: `--tune_seeds` trains every grid combination on multiple seeds and selects by **mean val_loss**, reporting `selection_seeds` and per-seed details; without it only a single seed (the first formal seed) is used and the summary explicitly warns about the winner's curse (a lucky seed can crown a worse configuration) — give ≥3 seeds for formal runs. **Simple statistical baseline**: `lega/ngram.py` reports unigram/bigram/**interpolated-bigram** smoothed n-gram PPL on the same split as the neural models (α and interpolation weight λ jointly selected on val; `selected_model` is the strongest simple model on val), answering how hard the data is in absolute terms and whether the neural models actually beat a fully tuned parameter-free baseline.
+- **Significance against the simple baseline (supplementary)**: `--ngram_split` defaults to `auto` — the same rule as neural evaluation (non-empty `test.bin` → test, else val), so val-evaluated models can never be silently compared against a test-split baseline. **The same split is not enough — the same tokens are required**: the neural PPL is computed only on the target tokens of `eval_iters` evenly spaced windows, so the n-gram baseline additionally reports a position-aligned figure `ppl_window_matched` (`lega.ngram.window_positions`, the same rule as `train._val_eval_indices`, scoring positions `s·ctx+1..s·ctx+ctx` of each window) and the summary prefers it; if any run's `eval_ctx/eval_iters/val_windows` disagrees with the window spec (e.g. historical artifacts), the whole family falls back to the full-split reference with an explicit `fallback_reason` (one Holm family must share one reference). The summary runs a **one-sample paired test of each variant's per-seed PPL against the same constant baseline** (n-gram has no seed variance), Holm-corrected within the variant family, reporting ratio / relative reduction / p_adj / verdict; variants evaluated on a mismatched split are listed separately as "not compared" rather than mixed into the table. This comparison is not pre-registered and is labelled exploratory evidence; it does not replace the controlled same-seed paired tests between variants.
+- **Statistical reliability (multi-seed)**: key metrics are reported as **Mean ± Std** plus the paired Cohen's d effect size across random seeds (`configs/small.json` defaults to 5 seeds; override with `--seeds`). Variants are compared on identical seeds with a two-sided paired t-test, and p-values within each metric family are corrected with **Holm–Bonferroni** (controlling the family-wise error rate); verdicts are based on corrected p-values (`results/<tag>/significance.json`). With n<3 only descriptive statistics are reported and no significance verdict is given, so a "0.2% gain" cannot be mistaken for real when the variance is 0.5%. Each paired test also reports the MDE and the effect-to-noise ratio (|Δ|/ΔSD); **when |Δ| is smaller than the per-seed paired-difference SD, the result is explicitly labelled as within seed/evaluation noise** and is not treated as a robust gain even if Holm-corrected p is significant.
+- **Practical significance and equivalence (SESOI/TOST)**: a significance test only answers "can Δ=0 be rejected"; p>0.05 may mean either no practically important difference or simply insufficient power. `lega/equivalence.py` runs paired TOST against protocol SESOI margins (1% relative PPL, 1.00 pp RULER EM, 0.010 AUROC/PR-AUC difference, 0.01 nat causal ΔNLL): **equivalent** only when the 90% interval lies entirely inside ±SESOI; **non-inferior** when the one-sided bound excludes a worse-than-SESOI difference; **significant but below SESOI** when the effect is reproducible but practically limited; and **undetermined** when the interval covers either 0 or the SESOI boundary — never written as "no difference". TOST p-values are Holm-corrected separately within each metric family, and a 0.5×/1×/2× margin grid is corrected and disclosed per scale; **SESOI is a pre-specified protocol convention, not a data estimate**, and equivalence never changes the pre-registered superiority verdict; this analysis is not yet in the locked pre-registration chain and is therefore supplementary/descriptive — promoting an equivalence/non-inferiority claim to confirmatory requires registering the margin and contrast first and testing on new data. `summary.md` gains a "SESOI and equivalence/non-inferiority" section and a "SESOI interpretation of key lesions" section; `significance.json.pairs[*].equivalence` and the top-level `equivalence` block are machine-readable. In particular, a non-significant `head_permute` placebo may only be called "difference below SESOI" when TOST supports it, not "no placebo effect".
+- **Missing-outcome sensitivity (complete-case vs planned population)**: the primary tests use seeds where both candidate and reference succeeded; if missingness is outcome-related, the complete-case mean can itself be biased. `lega/missingness.py` uses the planned seeds in `design_plan.json` to report per-arm/differential missingness, sign and ±SESOI tipping points, and observed-range bounds, distinguishing missing runs, missing values and protocol mismatches; results go to `summary.md` and `significance.json.missingness`. The observed range is a transparent sensitivity scale, **not MAR/MCAR imputation or a strict worst-case bound**; separately, RULER EM (bounded in [0,1]) gets sharp Manski worst-case bounds on the mean difference and every metric gets a sign-score bound (PPL is unbounded, so it gets only the sign bound). These bounds assume only the outcome range and the planned seeds, not random missingness. "Robust within the observed range" or "Manski sign identified" does not prove missingness is random. This layer does not enter Holm/FWER and never changes pre-registered verdicts.
+- **Causal post-training ablation (does the trained model actually use the component?)**: training-time factorial / leave-one-out ablations change the optimization trajectory and cannot prove that the final forward pass still uses a component. `lega/ablate.py` keeps the **same checkpoint and the same val windows** and changes only gate parameters, pairing per-window losses: `no_query/no_conc/no_len/no_evidence` are the inference-time analogues of the training-time LOO contrasts; `gate_open/gate_closed` probe the write strength (the latter is a positive control: closing attention output must hurt); `gate_constant_mean` keeps each head/layer average write strength but removes per-position/per-query variation; `head_permute` permutes gate parameters across heads, preserving parameter count/distribution/structure and destroying only the head–evidence assignment — a **placebo control** for capacity; `conc_permute` cyclically shifts per-position `c` along the sequence, preserving its value multiset/mean/variance/length distribution and destroying only the position correspondence; `sign_flip` preserves magnitudes and reverses evidence direction. Parameters are restored exactly after each lesion, and `no_op` (coefficient already zero after training) is reported explicitly — “no difference” is not evidence of “no effect”. Window-level p is descriptive only; the summary first aggregates ΔNLL per seed and then runs a cross-seed paired t-test with Holm correction (`significance.json.causal_ablation`). It runs on **val only** (test is sealed; val is the selection split, so absolute levels are optimistic and the analysis is for mechanism localization). If the training-time ablation is significant but the inference-time lesion is not, the gain may come from training-time optimization/regularization; if the inference-time lesion is significant but training-time is not, retraining may have compensated for the removed component. The two lines of evidence are reported side by side and never substitute for each other. Scope: `head_permute` is an **inference-time** capacity/distribution placebo, not a training-time parameter-matched control; `no_evidence` keeps all parameters and only removes the evidence inputs, so it isolates inference-time use of the evidence but cannot eliminate the training-time confound that the extra gate parameters themselves may yield an optimization benefit. Read it together with the parameter overhead and the single-factor ablations.
+- **Continuous dose-response (inference-time coefficient scaling, exploratory)**: binary lesions answer only "does removing/sign-flipping the component hurt", not whether the learned coefficient sits at a sensible dose or whether the effect is monotone. `lega/dose_response.py` keeps the same checkpoint and val windows and multiplies the A (`gate_w`) / B (`gate_a`) / C (`gate_b`) coefficients by λ (default `0,0.5,0.75,1,1.25,1.5,2`), pairing per-window `ΔNLL(λ)=NLL(λ)−NLL(1)`; λ=1 is the trained coefficient and λ=0 exactly reproduces the inference-time `no_query/no_conc/no_len` lesion. It reports the local slope at λ=1 (negative = increasing the coefficient lowers NLL, so the current dose may be too small), quadratic vertex, grid-best λ, direction changes and no-op flags. Each component uses the intersection of λ values available in every seed, aggregates ΔNLL per seed, then runs cross-seed paired t-tests with a separate Holm family; the local slope/vertex/grid-best λ are **descriptive** diagnostics, and selecting the best point on a fixed grid suffers from the winner's curse, so they never re-select the checkpoint or change a pre-registered verdict. Runs on val only and is opt-in via `--dose_response` (default `--dose_variants lega`).
+- **Full-factorial Shapley decomposition (interaction-aware attribution, exploratory)**: single-factor edges depend on the reference cell; with non-zero interactions, “the gain from adding X” differs between the `gate_only` and `Full` baselines. `lega/factorial.py` computes the exact Shapley decomposition over the eight within-gate cells: PPL is decomposed on `−log(PPL)` (φ>0 means lower PPL, `exp(−φ)` is the PPL geometric-mean ratio) and RULER uses raw EM; efficiency guarantees `φ_A+φ_B+φ_C=Full−none`, and interactions are averaged over the participating factors. φ is computed per seed, then tested with a same-seed one-sample paired t-test and Holm correction within each metric; shares are only reported when every seed's total effect is positive, never forced to normalize. This decomposition is unregistered and does not replace the pre-registered single-factor confirmatory tests; conflicts with a single-factor edge are shown side by side (the contribution depends on other factors).
+- **FDR control for exploratory findings (seed-level BH/BY; never changes confirmatory verdicts)**: Holm within each metric family controls that family's FWER, but the summary also shows many exploratory families (PPL, RULER, causal lesions, dose-response, inference-time Shapley/interactions, length strata, n-gram baseline, reparameterization robustness, linear probe), and "5% per family" does not control the false-discovery proportion across all exploratory findings. `lega/discovery.py` pools **non-pre-registered seed-level exploratory tests** into one explicit discovery family and computes Benjamini–Hochberg q-values (ascending p, `min_{j>=i} m·p_(j)/j`, monotone, capped at 1); it includes unregistered main-table contrasts, inference-time causal/matched lesions and raw−matched contrasts, dose-response, inference-time Shapley/interactions, RULER length strata/slope/span, n-gram baseline, reparameterization robustness, linear-probe baseline and the cross-document vs document-aligned window-stratification interaction, while excluding pre-registered confirmatory tests, sample-level McNemar, window-level PPL, RULER heterogeneity meta-analysis, multiverse, missingness sensitivity and per-step budget trajectories; tests with n<3 or missing/invalid p are explicitly excluded, do not enlarge the family and are never treated as "not significant". BH controls FDR under independence/PRDS; shared seeds/checkpoints/evaluation samples induce dependence, so BY `q=min(1,H_m·q_BH)` is also reported as a dependence-robust sensitivity check, with BH as the primary result. A q-value is not the probability that a hypothesis is true and does not replace effect sizes, MDE/TOST, Holm/FWER or pre-registration; q<α is only a lead that must be pre-registered and replicated on new seeds/data. `summary.md` gains an "FDR control for exploratory findings" section reporting family size, input/exclusion counts and reasons, per-source counts, BH/BY discovery counts, the BH threshold, the heuristic expected false discoveries α×R (BH guarantees E[V/R]≤α, not V≤αR in a single realization) and the top 20 discoveries; the full list plus per-test `fdr_source/q_bh/q_by/fdr_significant/fdr_by_significant/fdr_family_size/fdr_excluded_reason` lives in `significance.json.exploratory_fdr`.
+- **Multi-variant ranking and selection correction (winner's curse, exploratory)**: the pairwise table against `standard` answers "is the candidate better than the reference", but the reported "best variant" is itself the maximum selected from several correlated, noisy variants. `lega/ranking.py` therefore analyzes the within-seed ranking: per-seed ranks (ties averaged), mean rank / rank distribution / per-seed best counts, a seed bootstrap of the probability of being selected best again, and a permutation test under "variant labels are exchangeable within each seed" (`p_max` checks whether the observed lead exceeds pure selection). Results are rendered in the summary's "Multi-variant ranking and selection correction" section and written to `significance.json.ranking`. This layer does not enter Holm/FWER and never changes pre-registered verdicts, nor does it replace paired effect sizes/SESOI/MDE; the bootstrap covers training seeds only (not evaluation sampling), ranks are not an interval scale, and `p_max` is only a lead when within-seed label exchangeability fails.
+- **Pre-registration and tamper-evidence (confirmatory vs exploratory)**: directional claims are registered before the formal runs in `preregistration/hypotheses.json` (**deliberately not under `docs/`**: the pipeline cleanup deletes everything there except `design_notes.md`, and repeated auto-clean commits once deleted the registry); at summarization each claim is judged against Holm-corrected same-seed paired tests as supported / rejected (significant in the opposite direction = falsified) / undetermined (undetermined ≠ no effect; read it against the MDE). Results go to `summary.md` and `significance.json`; unregistered comparisons are exploratory leads only. The registry is protected by `preregistration/hypotheses.lock.json`: the lock stores the whole-document SHA-256 and **per-hypothesis scientific-content digests**, and any amendment must be traced on an **amendment chain** via `python -m lega.hypotheses --amend --reason ...` (existing hypotheses may only be added to, never edited or removed). Deleting the registry, rewriting a claim, swapping a variant pair, dropping an entry or adding an unrecorded hypothesis is flagged as `violated` by `--verify`/the summary page, and **all confirmatory verdicts are automatically downgraded to exploratory**. Even the accidental deletion/relocation and restoration of the registry (see `docs/design_notes.md`) must be recorded in `amendments`. An intact chain is not enough: the summary also performs a **pre-registration scope check** — the registry's `scope` (config scale, data/tokenizer, seed plan) must match the actual run (`repro.json`'s `config_file` / data fingerprint / seeds); tiny/smoke/dummy-data/unregistered-tokenizer runs are out of scope and confirmatory verdicts are downgraded as well (tuned lr/weight-decay injected by the tuning step are within protocol and do not count; unregistered seeds only warn).
+- **Three evaluation axes**:
+  1. **Perplexity** (WikiText-103 PPL: checkpoint selection on val, PPL reported on the held-out test split, falling back to val when test.bin is absent); windows are disjoint and evenly sampled across the whole evaluation set (all windows used when too few); `gate_mean` and PPL use the same windows and precision; a **unigram/bigram/interpolated-bigram smoothed n-gram PPL** is reported alongside as a simple statistical baseline (`ngram_baseline.json`; α/λ selected on val, reference is the strongest simple model on val), by default on the same split as the neural evaluation (`--ngram_split auto`, preventing mismatched comparisons), so neural scores are never interpreted without the absolute difficulty reference;
+  2. **RULER long-context retrieval** (simplified reimplementation, 5 tasks): `niah_synth` (synthetic-distractor single-key retrieval), `niah_corpus` (natural-text distractors), `niah_multikey` (multi-key distractors), `fwe` (frequent-word extraction), `vt` (variable tracking); multiple context lengths + greedy decoding; for numeric tasks the EM **only accepts the first numeric answer in the generated text**, so "wrong answer first, lucky guess later" is never scored;
+  3. **Actual inference latency**: prefill (last-position logits only) and token-by-token decode with KV cache, compared against the SDPA fast path.
+- **Core-risk checks (not just "attention sink reduced")**: `lega/analysis.py` performs mechanistic analysis on RULER samples with gold spans:
+  - **misleading_rate**: fraction of highly concentrated attention ($\max_j p_j>\tau$) whose landing point is outside the answer's numeric span (value_span); the hit test uses the exact answer-number token span rather than the whole needle sentence — direct evidence that "concentrated ≠ correct";
+  - **P(hit | concentrated)** vs **P(hit | not concentrated)**;
+  - **AUROC and PR-AUC (both reported under imbalance)**: ability of the gate score to separate "hit / miss", plus **the difference between LEGA's full logit and the query-only term $w^\top q$** in AUROC and in PR-AUC (average precision), directly answering whether length-calibrated attention statistics judge "should we write" better than the query alone. hit/¬hit is a heavily imbalanced binary task (the positive rate is `hit_base_rate`); below 5% positive rate AUROC becomes optimistic because of the huge negative base, so **PR-AUC is the primary metric** (its chance baseline equals the positive rate), especially below 0.1%. The **gate decision-point F1** ($g>0.5$) is reported with **macro / micro / weighted** averages (`gate_f1` in `analysis_*.json`; macro in the summary table) — under imbalance these differ widely, and any table that writes "F1" without the averaging scheme is incomplete; a **fixed-rule straw-man comparison `gate_f1_trivial`** (always-write / never-write) is reported next to it, since a gate that cannot beat the uninformative baseline has no decision value (summary column "always-write baseline F1(macro)"); RULER EM is a generative metric without a threshold (fwe additionally reports recall). **Probability calibration**: the gate g is used as a soft weight/probability, so Brier/ECE are reported against a constant base-rate Brier baseline (`analysis_*.json.calibration_g`)—good ranking does not imply trustworthy probability values; the linear probe reports Brier/ECE too. **RULER averaging**: the summary reports both macro (tasks equally weighted, context bins equally weighted within each task; the pre-registered definition) and micro (weighted by per-cell n), so an undefined "average" cannot hide uneven task/cell sizes.
+
+---
+
+## 3. Quick start
+
+### 3.1 Install
+
+```bash
+pip install -r requirements.txt          # torch / numpy / tiktoken / matplotlib
+# optional: pip install pyarrow wandb
+```
+
+### 3.2 Smoke test (recommended first; a few minutes on CPU)
+
+```bash
+bash scripts/run_smoke.sh
+# equivalent to: unit tests -> generate dummy data (data/dummy) -> run_all --smoke
+```
+
+Smoke mode automatically shrinks: 20 steps/variant, a single seed, ctx=min(256, block_size), 2 examples per task, and runs the overfit-small-batch sanity check (60 steps) — for verifying code correctness, not scientific conclusions.
+
+### 3.3 Full experiments (WikiText-103 + small config)
+
+```bash
+# 1) Data (~300MB download; offline: point --local_txt at local text)
+python scripts/prepare_data.py --out_dir data/wikitext103
+# optional --max_tokens 30000000 to control training size;
+# near-duplicate protocol: --near_dup_threshold 0.8 --near_dup_min_chars 200
+
+# 2) Full pipeline: 10 variants x multiple seeds (5 by default) -> PPL -> RULER
+#    -> latency -> analysis -> plots -> summary (Mean ± Std + paired tests)
+python run_all.py --config configs/small.json --data_dir data/wikitext103
+
+# optional: custom seeds (e.g. 3) or W&B logging
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --seeds 1337,2024,42
+wandb login
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --wandb
+
+# optional (recommended): tune the baseline first — lr/weight-decay grid on
+# `standard` (val only); each combination is trained on the --tune_seeds seeds
+# (defaults to --seeds) and selected by mean val_loss (anti lucky-seed); the
+# winner is injected into all variants and evidence goes to
+# results/<tag>/baseline_tuning.json
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+  --tune_baseline --tune_seeds 1337,2024,42
+
+# optional: inference-time lesion study (default: lega,qgate, so both sides of the
+# core comparison see the same lesions; add gate_only as a control)
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+  --ablate_variants lega,qgate,gate_only
+
+# optional: continuous dose-response (same checkpoint/windows; scale A/B/C)
+python run_all.py --config configs/small.json --data_dir data/wikitext103 \
+  --dose_response --dose_variants lega
+
+# optional: early stopping — stop when val loss shows no material improvement for
+# N consecutive evals (off by default; actual steps may differ across variants,
+# the audit then compares planned steps and the summary marks early-stopped runs)
+python run_all.py --config configs/small.json --data_dir data/wikitext103 --early_stop_patience 5
+
+# the simple statistical baseline can also be run standalone (val by default;
+# test requires an explicit opt-in and writes the access ledger). In the full
+# pipeline --ngram_split auto (default) matches the neural eval split and each
+# variant's per-seed PPL is tested against the baseline (one-sample paired,
+# Holm-corrected) in the summary.
+python -m lega.ngram --data_dir data/wikitext103 --split val --out results/ngram_baseline.json
+```
+
+Outputs:
+
+| Path | Content |
+|---|---|
+| `out/<tag>/<variant>[/seed<seed>]/model.pt` | Checkpoint + training config + code/data provenance fields (seeded subdirs for multi-seed runs) |
+| `out/<tag>/<variant>[/seed<seed>]/train_log.jsonl` | Training/validation curves |
+| `out/<tag>/<variant>[/seed<seed>]/run_manifest.json` | **Provenance: git commit/dirty, dirty-worktree diff fingerprint/file list (incl. untracked files, `worktree.patch` replayable, truncation flagged), config SHA-256, data fingerprint, runtime (incl. TF32/threads/CUDA visibility and strict-vs-warn_only determinism), command line, pre-training sanity-gate verdict/hash/identity check** |
+| `results/<tag>/summary.md` | **Summary (Mean ± Std + ablation matrix + controlled-variable audit + reproducibility/sanity)** |
+| `results/<tag>/repro.json` | Pipeline-level provenance (code version, data fingerprint, seeds, runtime) |
+| `results/experiments.jsonl` | **Append-only experiment ledger: per-run run_id, code version/worktree diff, resolved hyperparameters, per-run seed audit/RNG fingerprints, data fingerprint, sanity verdict+identity, final metrics and artifact hashes (started/completed/aborted lifecycle; failures carry the reason); `python -m lega.experiment --check_artifacts` verifies the chain and hashes** |
+| `data/<data_dir>/data_report.json` | leakage audit (split protocol, vocabulary fit set, exact + near-duplicate decontamination, 64-gram overlap, distribution shift, overlong lines, test-access ledger) |
+| `results/<tag>/sanity_<variant>.json` | Overfit-small-batch sanity check result and thresholds |
+| `results/<tag>/baseline_tuning.json` | Baseline (`standard`) lr/weight-decay tuning evidence (val only; includes the `default_is_optimal` verdict, `selection_seeds`/per-seed val_loss details, and per-trial provenance) |
+| `results/<tag>/ngram_baseline.json` | Simple statistical baseline: unigram/bigram/interpolated-bigram smoothed n-gram held-out PPL (α/λ jointly selected on val, `selected_model` is the strongest on val; test needs an explicit opt-in; the pipeline matches the neural eval split by default) |
+| `results/<tag>/significance.json` | Same-seed paired t-tests (Δ mean ± Δ std, paired Cohen's d_z, raw p, Holm-corrected p_adj, component evidence); includes `registration_integrity` (pre-registration lock-chain check), `registration_scope` (config-scale/tokenizer/seed-plan scope check), `registered_hypotheses` (per-claim verdicts, downgraded when integrity/scope/early-stop budget fails) and `factorial_interactions` (2^3 interaction tests, plus a `training_budget` comparability flag); also `factorial_shapley` (interaction-aware full-factorial Shapley decomposition), `causal_ablation` (cross-seed paired tests of inference-time lesions), `dose_response` (continuous gate-coefficient dose-response, with a `dose_response_note` scope statement) and `equivalence`/`pairs[*].equivalence` (SESOI/TOST equivalence, non-inferiority, 90%/95% intervals, 0.5×/1×/2× margin sensitivity and Holm correction) and `missingness` (planned-population missingness pattern, differential attrition, tipping points/observed-range sensitivity, plus sharp Manski worst-case bounds for the RULER mean difference and sign-score bounds for all metrics; not part of Holm/FWER); also `ngram_comparison` (per-variant one-sample paired tests vs the simple baseline) and `exploratory_fdr` (BH/BY q-values, family size, exclusion reasons and discovery list for non-pre-registered seed-level exploratory tests) and `ranking` (per-seed multi-variant ranks, seed-bootstrap top probability and selection-corrected permutation test) and `doc_strata` (cross-document vs document-aligned stratification of the same evaluation windows: interaction = cross-document ΔNLL − document-aligned ΔNLL, testing whether the gain is concentrated in the concatenation artifact) |
+| `results/<tag>/ablation_*.json` | **Inference-time causal lesion study** (default `lega,qgate`, extend with `--ablate_variants`): `no_query/no_conc/no_len/no_evidence`, `gate_open/closed/constant_mean`, `head_permute` (head-parameter placebo), `conc_permute` (distribution-matched c permutation) and `sign_flip` interventions on the same checkpoint/windows; includes per-window ΔNLL, PPL ratios, gate statistics, `no_op` flags and provenance |
+| `results/<tag>/dose_response_*.json` | **Gate-coefficient dose-response** (`--dose_response`): per-window ΔNLL under A/B/C coefficient × λ on the same checkpoint/windows, PPL ratios, no-op flags, local slope/quadratic vertex/grid-best λ and provenance; λ=0 replicates the inference-time zeroing lesion |
+| `results/<tag>/curve_diagnosis.json` | Per-run training-curve diagnosis (overfitting incl. plateaued-train/rising-val, overfitting trend (train still falling, validation stalled), underfitting/divergence/NaN + grad-norm spikes/non-finite + recommendations; early-stopped runs are flagged as intentionally truncated) |
+| `results/<tag>/badcases_*.md` | RULER error-sample attribution (label error / distractor copy / hallucinated / no numeric answer / fwe) + coarse attribution-axis counts + **improvement directions** (trigger evidence → suggestion → next experiment) |
+| `results/<tag>/worstcases_*.md` | LM worst-window attribution (repetition attractor / confident bias / low confidence; whether gold appeared in context) + **improvement directions** |
+| `results/<tag>/badcase_cross.json` | Cross-variant error comparison (shared failures vs method-specific new/fixed errors relative to standard; includes per-variant new-error category counts and cross-variant improvement directions) |
+| `results/<tag>/eval_*.json` | Held-out test PPL per variant (val fallback when test.bin is absent), with worst_windows bad cases and training throughput/cost (`train_step_time_ms`/`train_tokens_per_sec`/`train_peak_mem_mb`, feeding the efficiency-precision trade-off) plus early-stop records (`steps_planned`/`steps`/`early_stopped`) |
+| `results/<tag>/ruler_*.json` | RULER 5 tasks × context lengths, with badcases error samples |
+| `results/<tag>/latency.json` | prefill / decode latency (per-iteration median + `*_spread_pct=(p90-p10)/median` measurement spread, for telling real differences from noise) |
+| `results/<tag>/analysis_*.csv|json` | Per (layer, head, query position) gate records and aggregates |
+| `results/<tag>/fig_*.png` | All plots (including training curves `fig_train_curves.png`) |
+
+### 3.4 Reproducibility, sanity check and experiment tracking
+
+- **Full seed coverage**: `lega.utils.set_seed` fixes Python `random`, NumPy, PyTorch (CPU/CUDA), cuDNN determinism (`warn_only`) and `PYTHONHASHSEED` (for child processes); batch sampling uses an explicit `np.random.default_rng(seed)` (no torch DataLoader/workers), so data order is uniquely determined by the seed — unit-tested in `tests/test_repro.py`. `run_all` additionally aligns each child command's `PYTHONHASHSEED` with that command's own `--seed` (instead of one shared value), and every `run_manifest.json` embeds a `seed_report` recording the actual seed per random source, **short fingerprints of the real RNG states** (a third party can recompute them with `set_seed(seed)+rng_state_fingerprint()`; identical for the same seed, different across seeds, and `null` whenever the current state does not belong to the requested seed), cuDNN/determinism switches (**honestly labelled strict vs `warn_only`, so "warning only" is never reported as strict determinism**) and the data-order mechanism. The report also separates the `PYTHONHASHSEED` seen at interpreter start from the current env value (which only affects child processes) and sets `pythonhashseed_effective=false` when the running process is not actually fixed — the field can no longer be made self-fulfilling by `set_seed` itself. The runtime snapshot also records TF32 (matmul/cudnn), torch thread counts and `CUDA_VISIBLE_DEVICES`; the training manifest is built **after** `enable_tf32`, so it records the values actually in effect. Bit-exact reproducibility across hardware (different GPU/CPU/cuDNN) is not guaranteed, but reruns on the same machine are stable.
+- **Overfit-small-batch sanity check (pre-training gate)**: `lega.sanity` draws a fixed small batch (8 × 128 tokens by default), disables dropout/weight decay and all data perturbation, and optimizes the **same batch**, checking whether the loss can be driven toward 0 and next-token accuracy toward 100% (thresholds adjustable via `--loss_threshold/--acc_threshold/--initial_loss_tol` or a `sanity` config block). `run_all.py` runs it per variant before full training, aborts on failure with an `aborted` ledger record, and on success binds a summary of the sanity result (path/SHA-256/verdict/failed checks) into that run's `run_manifest.json` so the checkpoint can attest it passed the code-correctness gate (`--skip_sanity` to skip, `--sanity_steps` to change the budget). This is a **necessary but not sufficient** check: failing it means gradients/loss/labels have a serious bug; passing does not rule out data-augmentation, feature-alignment or label-mapping bugs. Besides the loss curve and first-step gradient norm, the sanity JSON **automatically verifies**: first-step training-path loss ≡ direct-logits CE, labels are the x-shift-by-one target, initial loss ≈ log(V) (default tolerance 1.0 nat, negative disables), and **first-step per-parameter gradient coverage** (`missing/zero/nonfinite`, which localizes "total grad norm is fine but a submodule never entered the graph" disconnections); dropout/attn_dropout are required to be off (otherwise the check fails, so a configuration mistake is not misreported as a code bug). Sanity evidence is bound to the run only when variant/config/data/git (including dirty diff) match: a PASS from an old config/data/code is never claimed as this run's gate.
+- **Experiment tracking / traceability**: every training run writes `run_manifest.json` (git commit/dirty, config SHA-256, data fingerprint, seed audit, Python/PyTorch/CUDA environment incl. actual precision switches, exact command line, sanity-gate evidence), hyperparameters live in `config_used.json`, curves in `train_log.jsonl` (aggregated into `fig_train_curves.png`); `run_all` writes a global `results/<tag>/repro.json` and **appends** one ledger record per experiment at the fixed path `results/experiments.jsonl` (`started` at launch + `completed` at the end, `aborted` on failure, same `run_id`): code version, **the resolved full hyperparameters (recoverable even if the config file is later edited/deleted)**, each run's `config_used.json` contents, seeds, data fingerprint, sanity verdict (incl. failed checks), per-run final metrics and SHA-256 of `train_log.jsonl`, the evaluated checkpoint and all result files (`eval_*.json` also embeds `ckpt_sha256`, binding results to the exact weights). Reruns no longer erase the previous run's history; failed rounds (sanity gate or train/eval chain) leave an `aborted` record with stage, reason and exit code. Ledger snapshots also embed each run's `seed_report`, runtime and sanity identity, so the history remains self-attesting if manifests are deleted; for a dirty worktree the patch and fingerprint are saved with the run (tracked diff + untracked files, 8 MiB budget with an explicit truncation flag), making code replayable even when the commit alone is insufficient. All evaluation outputs (eval/ruler/analysis/latency) embed the same code/data provenance fields — no manual bookkeeping.
+
+```bash
+# Run the sanity check standalone (exit code 0 = pass, 1 = fail)
+python -m lega.sanity --config configs/tiny.json --data_dir data/dummy --variant lega \
+    --out results/tiny_sanity/lega.json
+```
+
+### 3.5 Running each stage separately
+
+```bash
+python -m lega.train     --config configs/small.json --variant lega --data_dir data/wikitext103
+python -m lega.evaluate  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out results/small/eval_lega.json
+python -m lega.ruler     --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out results/small/ruler_lega.json
+python -m lega.latency   --config configs/small.json --data_dir data/wikitext103 --ckpt_dir out/small --out results/small/latency.json
+python -m lega.analysis  --ckpt out/small/lega/model.pt --data_dir data/wikitext103 --out_dir results/small
+python -m lega.ablate    --ckpt out/small/lega/seed1337/model_best.pt --data_dir data/wikitext103 --out results/small/ablation_lega_seed1337.json
+python -m lega.dose_response --ckpt out/small/lega/seed1337/model_best.pt --data_dir data/wikitext103 --out results/small/dose_response_lega_seed1337.json
+python -m lega.plots     --results_dir results/small --train_root out/small
+python -m lega.sanity    --config configs/small.json --data_dir data/wikitext103 --variant lega --out results/sanity_lega.json
+python -m lega.experiment --check_artifacts                  # ledger integrity / artifact hashes (0=ok; 1=issues)
+python -m lega.curves    --run_dir out/small/lega/seed1337   # training-curve diagnosis (overfit/underfit/divergence/NaN)
+python -m lega.badcase   --results_dir results/small         # error attribution (RULER + LM worst windows) + improvement synthesis
+python -m lega.hypotheses --verify                           # pre-registration integrity (0=confirmatory-valid; 1=deleted/edited/unrecorded)
+python -m tests.run_tests   # unit tests (no pytest dependency)
+```
+
+Result-analysis protocol (see the matching sections in `summary.md`): diagnose the
+training curves rather than final values only — besides overfitting/underfitting/
+divergence, pre-clip **gradient-norm spikes/non-finite values** are reported
+independently (an early signal of NaN/divergence that the loss curve may not show
+yet; the log records `grad_norm_max` per log interval with its step, so a mid-interval
+explosion is not missed by sampling only the last step) and **single-step loss
+peaks** (`loss_max` prevents a one-step anomalous batch from being diluted by the
+interval mean); a plateaued training loss with rising validation loss is also diagnosed as
+overfitting (generalization degrades before the training loss does, so it is not
+misread as underfitting), while a training loss that is still falling with a
+stalled validation loss is diagnosed separately as an **overfitting trend**
+(regularize/early-stop; do not extend training on that basis); beyond the global
+first/last segments, the tail (last 1/3 vs middle 1/3) is compared so that a late
+plateau/rebound is not hidden by earlier large improvements; for NaN follow the
+checklist order data → code (log(0)/
+division by zero/softmax overflow; forward hooks localize the first module whose
+finite input yields a non-finite output, the `origin`) → mixed-precision underflow →
+gradient explosion/LR (see `nan_report.json`); both the data and the activation
+checks inspect the failing step's batches first (prefetching overwrites the pending
+ones), and a non-finite validation loss switches to the real validation windows
+(training batches are only a fallback when windowing fails); when the mixed-precision
+path produces non-finite values, the same batch is **re-run in fp32 to isolate the
+precision factor** (fp32 finite → mixed-precision numerics; fp32 also non-finite →
+precision ruled out). The "early stopping" recommended for overfitting is an
+**optional, actually implemented mechanism** (`--early_stop_patience N`, or config
+`early_stop_patience`/`early_stop_min_delta`: stop when val loss shows no material
+improvement for N consecutive evals; off by default so controlled comparisons are
+unaffected by it; when enabled, actual steps may differ across runs, `eval.json`
+records both planned and actual steps, the controlled-variable audit compares
+planned steps and the summary marks early-stopped runs; because the actual training
+budget (tokens_seen) then differs across runs, pre-registered confirmatory
+verdicts are automatically downgraded to exploratory (`apply_budget_gate`) and
+can only be restored by rerunning with equal actual steps; `component_evidence`
+in `significance.json` also records `training_budget_comparable=false` /
+`confirmatory_supported=false` / `evidence_status="exploratory"`, so machine
+consumers cannot mistake it for confirmatory evidence. Downstream evaluation
+still uses the val-selected `model_best.pt`). Attribute
+every error case (each case also gets a coarse attribution axis: data/construction,
+difficulty boundary, or model/method), and use the cross-variant
+comparison to separate "shared failures (data/difficulty)" from "method-specific
+blind spots"; the attribution is then **synthesized into actionable improvement
+directions** (trigger evidence → suggestion → next experiment, deterministic
+thresholds in `lega/badcase.py`) that appear in the per-case reports, in
+`badcase_summary.json` and in `summary.md` — error analysis must not stop at the
+category table, since hard cases are the most important source of new ideas; the accuracy-efficiency trade-off is judged explicitly, where the cost
+is the maximum relative increase over the baseline among **prefill/decode inference
+latency, training ms/step, training peak GPU memory, parameters, FLOPs and
+inference peak allocation**. Latency is the median
+of per-iteration timings and **differences within the combined measurement spread
+([p10,p90] added in quadrature) are treated as indistinguishable and excluded from
+the cost (marked †)**; a gain without
+significance, or a cost far exceeding the gain, is flagged — see the
+`tradeoff_verdict` rules in §2. A "0.5% gain at 10× training/inference cost" is
+rejected outright.
+
+---
+
+## 4. Repository structure
+
+```
+lega-attention/
+├── run_all.py                 # one-command pipeline + summary table
+├── configs/
+│   ├── tiny.json              # ~6.8M smoke config (CPU-friendly)
+│   └── small.json             # ~30M full config (hours/variant on one GPU)
+├── lega/
+│   ├── __init__.py            # package entry: research question, CUDA/determinism env defaults and version
+│   ├── attention.py           # core: causal attention for 10 main + 5 supplementary/control variants
+│   ├── model.py               # GPT backbone + RoPE + KV-cache generation + param tools
+│   ├── data.py                # tokenization (GPT-2 BPE / char fallback, vocab fit on train only) + bin cache + batch sampling
+│   ├── datacheck/             # data hygiene and leakage checks (split modules, public interface unchanged)
+│   │   ├── __init__.py        # aggregates the submodule public interface
+│   │   ├── _shared.py         # shared definitions and imports for the split modules
+│   │   ├── text.py            # text cleaning, exact/near-duplicate decontamination
+│   │   ├── tokens.py          # length statistics, token-stream validation and leakage screening
+│   │   └── reports.py         # test-access ledger and data-report assembly
+│   ├── design/                # experiment design and preparation (split modules; public interface and CLI unchanged)
+│   │   ├── __init__.py        # aggregates the submodule public interface
+│   │   ├── __main__.py        # CLI entry point (delegates to main)
+│   │   ├── _shared.py         # shared namespace injection
+│   │   ├── power.py           # a-priori power and sensitivity calculations
+│   │   ├── scheduling.py      # training-run order assignment (randomized block design)
+│   │   ├── planning.py        # design plan and multiple-comparison planning
+│   │   └── conformance.py     # plan history, analysis population, design conformance and rendering/CLI
+│   ├── pipeline/              # experiment pipeline package: split from run_all.py, public names and behavior unchanged
+│   │   ├── __init__.py        # aggregates the submodule public interface
+│   │   ├── _shared.py         # shared imports and constants (split from run_all.py)
+│   │   ├── common.py          # pipeline utilities, single-factor audit and protocol helpers
+│   │   ├── datacheck.py       # controlled-variable and data/eval protocol checks
+│   │   ├── train.py           # one-command pipeline orchestration (argparse, stage scheduling and experiment ledger)
+│   │   ├── eval/              # evaluation, statistics and baseline subpackage
+│   │   │   ├── __init__.py    # aggregates the evaluation submodules
+│   │   │   ├── stats.py       # cross-seed statistics, RULER length/example statistics
+│   │   │   ├── windows.py     # PPL window-level pairing and bootstrap
+│   │   │   ├── comparisons.py # paired tests, formatting, equivalence and component evidence
+│   │   │   ├── factorial.py   # full-factorial/inference-time ablation, preregistration hypotheses and gates
+│   │   │   ├── baselines.py   # simple statistical/linear-probe baselines and baseline sanity rendering
+│   │   │   └── curves.py      # training-curve diagnosis, efficiency metrics and gain-vs-cost tradeoff
+│   │   └── report/            # summary report subpackage
+│   │       ├── __init__.py    # aggregates the report submodules
+│   │       ├── summary.py     # summary statistics and Markdown/JSON report generation (part 1: aggregation and main tables)
+│   │       ├── sections.py    # summary rendering (part 2: curves, bad cases, ablations)
+│   │       └── tables.py      # summary rendering (part 3: test tables and JSON output)
+│   ├── train.py               # training loop (AdamW, cosine, bf16, optional W&B) + systematic NaN audit (activation hooks) + provenance manifest
+│   ├── evaluate.py            # held-out test PPL (val fallback)
+│   ├── ruler.py               # simplified RULER: 5 tasks, token-level construction, gold spans kept
+│   ├── latency.py             # prefill / decode latency benchmark
+│   ├── analysis.py            # mechanism analysis: concentrated≠correct, gate Brier/ECE calibration, AUROC + PR-AUC (primary under imbalance) + gate F1 (three averages + always/never-write straw men)
+│   ├── ablate.py              # inference-time causal lesion study (post-training weight interventions)
+│   ├── dose_response.py       # continuous gate-coefficient dose-response (inference-time scaling, complements binary lesions)
+│   ├── length_null.py         # null diagnostic for c vs length (random/repeated/uniform + slope)
+│   ├── lengtheffect.py        # RULER context-length stratification: recover length calibration from the average score
+│   ├── output_ablation.py     # per-layer/head output intervention on answer tokens (ΔNLL/Δmargin)
+│   ├── doc_strata.py          # cross-document vs document-aligned window stratification: separating the concatenation artifact from mechanism gains via an interaction test
+│   ├── factorial.py           # exact Shapley decomposition over the 2^3 factorial
+│   ├── equivalence.py         # SESOI + TOST equivalence/non-inferiority (Holm, 0.5×/1×/2× sensitivity)
+│   ├── discovery.py           # BH/BY FDR control for non-pre-registered seed-level exploratory tests
+│   ├── uncertainty.py         # seed × evaluation-unit variance decomposition and RULER hierarchical bootstrap (exploratory)
+│   ├── ngram.py               # simple statistical baseline: unigram/bigram/interpolated-bigram smoothed n-gram PPL (α/λ jointly on val; test opt-in + ledger; pipeline matches the neural eval split by default)
+│   ├── probe.py               # simple learned baseline (linear probe): minimal supervised contrast for the "should we write" decision
+│   ├── curves.py              # training-curve diagnosis (overfit/underfit/divergence/NaN + grad spikes) + recommendations
+│   ├── badcase.py             # error attribution (RULER + LM worst windows) + cross-variant comparison + improvement synthesis
+│   ├── sanity.py              # overfit-small-batch sanity check (pre-training gate)
+│   ├── preflight.py           # pre-training data-protocol gate (shared by run_all and direct training entry points)
+│   ├── postrun.py             # single-run pipeline chain: train → standalone eval → RULER → mechanism analysis (sequential, same process)
+│   ├── repro.py               # code version / data fingerprint / runtime / seed audit / provenance
+│   ├── experiment.py          # append-only experiment ledger (code/config/seed/data/result hashes per run)
+│   ├── hypotheses.py          # pre-registration integrity: lock baseline + amendment chain + tamper check (CLI --verify/--init/--amend)
+│   ├── tuning.py              # baseline (`standard`) lr/weight-decay grid (val only; multi-seed mean selection, default_is_optimal verdict)
+│   ├── plots.py               # plots (PNG, including training curves)
+│   └── utils.py               # seed/JSON/AUROC/PR-AUC/F1/Pearson (no scipy)
+├── preregistration/           # deliberately not under docs/ (pipeline cleanup deletes non-whitelisted files there)
+│   ├── hypotheses.json        # pre-registration registry (never delete/move; amendments must be traced)
+│   └── hypotheses.lock.json   # lock baseline + amendment chain (anti silent rewrite/deletion)
+├── docs/
+│   └── design_notes.md        # design notes, statistical-inference and result-analysis protocols
+├── scripts/
+│   ├── prepare_data.py        # WikiText-103 download (parquet→zip→rows fallbacks)
+│   ├── make_dummy_data.py     # offline dummy corpus (smoke)
+│   └── run_smoke.sh           # one-command smoke
+├── tests/                     # unit tests (math properties / KV cache / RULER construction)
+└── results/                   # experiment outputs (gitignored, .gitkeep placeholder)
+```
+
+## 5. Implementation details and caveats
+
+- **PPL display bound**: exact `val_loss` is always saved in JSON; to avoid `exp(loss)` overflow drowning the tables for divergent models, `val_ppl` is recorded as `exp(20)` when `loss>20` with `val_ppl_clamped: true` — compare `val_loss` in that case.
+- **Numerical stability of $c$**: `max_p = exp(zmax − LSE)` is always bounded in (0,1]; clamped to `1e-30` before `log`. Uniform attention → `c=0` is unit-tested (`tests/test_attention.py`).
+- **Definition of $n$**: the number of readable tokens for query position $t$ is $t+1$ (causal); null slots don't count; `null`-variant null keys get no RoPE (position-independent slots).
+- **Gate query term**: the gate's $q$ uses the **pre-RoPE** query content vector; attention scoring still uses rotated $q,k$. Explicit positional encoding does not enter $q$, but token content itself may correlate with position/length, so this is not proof that all positional confounding is removed; $c$ also contains $\log n$ and must be read together with $b\log n$.
+- **Reproducibility**: `set_seed` fixes Python/NumPy/PyTorch (CPU/CUDA) seeds, disables cudnn benchmark and enables deterministic algorithms (`warn_only`) on CUDA, and sets `PYTHONHASHSEED` for child processes; batch sampling is driven by an explicit `np.random.default_rng(seed)` (no DataLoader workers) so data order is reproducible and unit-tested. All variants are trained on the same seed set and compared with same-seed paired statistics (`run_all.py --seeds` / `seeds` in the configs). Bit-exact reproducibility across hardware is not guaranteed, but same-machine reruns are stable; every training run also writes `run_manifest.json` (git/data fingerprint/environment/command) and evaluation JSONs embed the same provenance. An overfit-small-batch sanity check runs by default before training (`--skip_sanity` to skip); each baseline-tuning trial subprocess also aligns `PYTHONHASHSEED` with its own seed.
+- **torch.compile**: `"compile": true` enables torch.compile on CUDA; checkpoints are saved with wrapper-stripped parameter keys so `load_model` (evaluate/ruler/latency/analysis) loads them directly.
+- **Dual paths for standard attention**: SDPA fast path and explicit path are numerically identical (unit-tested); the explicit path is used for variants needing attention statistics and for fair latency comparison (`standard` vs `standard_sdpa` both measured).
+- **KV cache**: gated variants compute the gate token-by-token during incremental decoding; cache equivalence is unit-tested (full forward vs token-by-token).
+- **Tokenization**: default GPT-2 BPE (tiktoken, needs network on first use); offline, `--tokenizer auto` falls back to character level (PPL not directly comparable to literature, but variant comparisons remain valid).
+- **Device**: `small.json` expects GPU + bf16; CPU is only for tiny smoke runs. For full experiments, start with the `lega_no_len` vs `lega` comparison (length calibration is the core claim).
+- **Known limitations**: the 30M model's absolute RULER accuracy is low (small models have limited retrieval ability); the focus is **relative differences between variants** and **mechanistic metrics**, not absolute scores; `fwe` gives high-frequency words k≥3 occurrences vs 2 for the rest and scores the answer as a word set, so frequency ties are structurally impossible; at very small contexts individual `fwe`/`vt` samples are skipped for lack of room (recorded in the JSON `_skipped` field; the skipped set is identical across variants).
+- **Controlled single-dimension contrasts**: `lega_l2` (B's concentration statistic → $\sum_j p_j^2$), `lega_entropy` (→ $e^{-H(p)}$), `lega_detach_conc` (B's backprop path), `lega_shared` (per-head evidence scalars → shared across heads within a layer) and `null_zero` vs `null` (null-slot value learnable → fixed to 0) answer "what if only this one item changes", which is not the same question as A/B/C component attribution — the A/B/C factor sets on both sides must be identical, so they are not judged by factor differences. The summary layer measures both sides' dimension vectors with an implementation-level probe and verifies that each contrast really differs in exactly one design dimension (any drift is named explicitly and that contrast can no longer serve as controlled evidence); such results carry `contrast_type="single_dimension"` and enter an independent Holm family, so they are exploratory evidence and never A/B/C component evidence.
+
+## 6. License
+
+MIT

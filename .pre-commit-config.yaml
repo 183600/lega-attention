@@ -1,0 +1,65 @@
+# Pre-commit hooks for code quality and reproducibility
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Ruff: fast Python linter and formatter (replaces black, isort, flake8)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # MyPy: static type checking (disabled in pre-commit; existing codebase uses dynamic patterns incompatible with strict mode.
+# Run manually: `mypy --strict --show-error-codes lega/artifacts.py` or `mypy lega/ --config-file=pyproject.toml`)
+
+  # Check for common issues
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: forbid-new-submodules
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Prevent large files from being committed
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
+  # Ensure requirements-lock.txt / requirements-ci.txt / pyproject.toml agree
+  # with requirements.txt (versions, CI pins, packaging metadata).
+  # Note: no `types:` filter here — requirements*.txt are text files, so a
+  # `types: [python]` filter would silently disable this hook entirely.
+  - repo: local
+    hooks:
+      - id: check-requirements-lock
+        name: Check dependency declaration consistency
+        entry: bash -c 'python scripts/check_requirements_lock.py'
+        language: system
+        files: '^(requirements(-ci|-lock)?\.txt|pyproject\.toml)$'
+        verbose: true
+
+  # Validate JSON configs: every file in configs/ is checked against the
+  # config contract (unknown keys, type/range, cross-field conflicts).
+  - repo: local
+    hooks:
+      - id: validate-json-configs
+        name: Validate JSON configs
+        entry: bash -c 'python scripts/validate_configs.py'
+        language: system
+        types: [json]
+        files: 'configs/.*\.json$'
+        verbose: true

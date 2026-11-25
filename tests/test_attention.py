@@ -1,0 +1,803 @@
+"""注意力核心数学性质的单元测试。
+
+重点验证：
+  1. 均匀注意力 => max_j p_j = 1/ max(n, 1) => c = log(n * 1/ max(n, 1)) = 0（LEGA 的核心设计性质）
+  2. 完全集中于单键 => c ≈ log n
+  3. 门控公式逐项可复算
+  4. RoPE 平移等变性：score(m, n) 只依赖 m - n
+  5. 全部变体可前向/反向，且额外参数量符合理论值
+"""
+
+import math
+from unittest import mock
+
+import torch
+
+import lega.attention as attention_mod
+from lega.attention import (
+    ALT_CONC_STATS,
+    ALT_CONC_VARIANTS,
+    CONTROL_VARIANTS,
+    CausalSelfAttention,
+    GATE_FACTORS,
+    RAW_GATE_FACTORS,
+    RUNNABLE_VARIANTS,
+    SUPPLEMENTAL_GATE_FACTORS,
+    SUPPLEMENTAL_VARIANTS,
+    VARIANTS,
+    VARIANT_CN,
+    _GATED,
+    PLACEBO_VARIANTS,
+    _placebo_evidence,
+    probe_gate_factors,
+)
+from lega.capacity import CAPACITY_NULL_VARIANTS, NULL_EVIDENCE_COMPONENT
+from lega.model import (
+    GPT,
+    RoPE,
+    expected_gate_extras,
+    gate_extra_params,
+    gate_extra_params_per_head,
+)
+
+
+def _mk_attn(d_model=16, n_heads=1, variant="lega_no_query", **kw):
+    torch.manual_seed(0)
+    return CausalSelfAttention(d_model, n_heads, variant=variant, **kw)
+
+
+def test_uniform_attention_gives_c_zero():
+    """均匀注意力时 c = 0：与上下文长度无关（设计性质）。"""
+    m = _mk_attn(variant="lega_no_query")
+    torch.nn.init.zeros_(m.wq.weight)
+    torch.nn.init.zeros_(m.wk.weight)  # q·k = 0 → softmax 均匀
+    with torch.no_grad():
+        m.gate_a.fill_(1.0)
+        m.gate_b.fill_(0.0)
+        m.gate_d.fill_(0.0)
+    x = torch.randn(1, 8, 16)
+    out, cache, stats = m(x, rope=None, need_stats=True)
+    for t in range(8):
+        n = t + 1
+        assert abs(stats["max_p"][0, 0, t].item() - 1.0 / max(n, 1)) < 1e-5
+        # logit = a*c + b*log n + d = 0（均匀时 c=0 且 b=0, d=0）
+        assert abs(stats["logit"][0, 0, t].item()) < 1e-5
+        assert abs(stats["g"][0, 0, t].item() - 0.5) < 1e-5
+    assert out.shape == (1, 8, 16)
+    assert torch.isfinite(out).all()
+
+
+def test_peaked_attention_gives_c_logn():
+    """完全集中于单键时 c ≈ log n。"""
+    m = _mk_attn(variant="lega_no_query")
+    torch.nn.init.zeros_(m.wq.weight)
+    torch.nn.init.eye_(m.wk.weight)  # k_j = x_j
+    with torch.no_grad():
+        m.wq.weight.copy_(torch.eye(16) * 1.0)  # q_t = x_t
+        m.gate_a.fill_(1.0)
+        m.gate_b.fill_(0.0)
+        m.gate_d.fill_(0.0)
+    x = torch.randn(1, 10, 16)
+    x[0, :, 0] = 1.0  # 保证 token3 与所有查询正相关
+    x[0, 3, 0] = 50.0  # token3 的键远大于其它键 → 注意力集中于 token3
+    out, cache, stats = m(x, rope=None, need_stats=True)
+    for t in range(4, 10):
+        n = t + 1
+        assert (
+            stats["max_p"][0, 0, t].item() > 0.99
+        ), f"位置 {t} 未集中: {stats['max_p'][0,0,t]}"
+        c = stats["logit"][0, 0, t].item()  # a=1 → logit = c = log n + log max_p
+        assert abs(c - math.log(n + 1e-8)) < 0.05, f"c={c} vs log n={math.log(n + 1e-8)}"
+
+
+def test_gate_formula_components():
+    """门控 logit 各分量可复算（w·q + a*c + b*log n + d）。"""
+    m = _mk_attn(d_model=16, n_heads=2, variant="lega")
+    with torch.no_grad():
+        m.gate_w.fill_(0.05)
+        m.gate_a.fill_(0.3)
+        m.gate_b.fill_(-0.1)
+        m.gate_d.fill_(2.0)
+    x = torch.randn(2, 6, 16)
+    with torch.no_grad():
+        out, cache, stats = m(x, rope=None, need_stats=True)
+    import numpy as np
+
+    max_p = stats["max_p"].float().cpu().numpy()
+    log_n = stats["log_n"].cpu().numpy()
+    qterm = stats["qterm"].cpu().numpy()
+    g = stats["g"].cpu().numpy()
+    c = log_n + np.log(np.clip(max_p, 1e-30, None))
+    expected_logit = 2.0 + 0.3 * c - 0.1 * log_n
+    # qterm 已含 w·q；下面完整复算 qterm 与 g
+    q = m.wq(x).view(2, 6, 2, 8).transpose(1, 2).detach().float().cpu().numpy()
+    qterm_manual = (q * 0.05).sum(-1)
+    assert np.allclose(qterm, qterm_manual, atol=1e-5)
+    full = expected_logit + qterm_manual
+    assert np.allclose(g, 1.0 / np.maximum(1.0 + np.exp(-full), 1e-10), atol=1e-5)
+
+
+def test_concentration_ablations_keep_length_normalization():
+    """消融长度项 b*log n 时，集中度项仍是 c=log(n*max_p)，不能连带删掉
+    a*log n；否则 Full−C 不再是单组件消融，B 格也不再是完整集中度项。"""
+    for variant in ("lega_no_len", "lega_conc_only"):
+        m = _mk_attn(variant=variant)
+        with torch.no_grad():
+            m.gate_a.fill_(0.5)
+            m.gate_d.zero_()
+            if m.use_query:
+                m.gate_w.zero_()
+        max_p = torch.full((1, 1, 1), 0.25)
+        log_n = torch.full((1, 1, 1), math.log(8.0))
+        qterm = torch.zeros(1, 1, 1) if m.use_query else None
+        _, logit, _ = m._gate_logit(qterm, max_p, log_n, (1, 1, 1), keep_terms=True)
+        expected = 0.5 * (math.log(0.25) + math.log(8.0))
+        assert abs(logit.item() - expected) < 1e-5, (variant, logit.item())
+    print("  [ok] 集中度消融保留 c=log(n*max_p) 的长度归一化")
+
+
+def _reference_attn_probs(model, x):
+    """按单块显式路径复算注意力概率，供替代集中度统计核对。"""
+    B, T, _ = x.shape
+    H, Dh = model.n_heads, model.d_head
+    q = torch.nn.functional.linear(x, model.wq.weight)
+    k = torch.nn.functional.linear(x, model.wk.weight)
+    q = q.view(B, T, H, Dh).transpose(1, 2) * model.scale
+    k = k.view(B, T, H, Dh).transpose(1, 2)
+    att = torch.matmul(q, k.transpose(-2, -1))
+    att = att.masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf"))
+    return torch.softmax(att, dim=-1)
+
+
+def test_alt_conc_variants_are_b_only_refactors():
+    """替代集中度对照只换 B 的统计量，A/C、参数形状与 lega 完全一致。"""
+    assert set(ALT_CONC_STATS) == set(ALT_CONC_VARIANTS)
+    torch.manual_seed(0)
+    base = _mk_attn(d_model=16, n_heads=2, variant="lega", use_sdpa_standard=False)
+    base_state = {name: tuple(t.shape) for name, t in base.state_dict().items()}
+    p = torch.tensor(
+        [[[[0.5, 0.25, 0.125, 0.125], [0.5, 0.25, 0.125, 0.125]]] * 2]
+    )  # (1,2,2,4)
+    n = p.shape[-1]
+    log_n = torch.full((1, 2, 2), math.log(n + 1e-8))
+    qterm = torch.zeros(1, 2, 2)
+    for variant in ALT_CONC_VARIANTS:
+        assert variant in RUNNABLE_VARIANTS
+        assert variant in SUPPLEMENTAL_VARIANTS
+        assert variant in VARIANT_CN
+        assert variant not in GATE_FACTORS
+        assert variant not in RAW_GATE_FACTORS
+        torch.manual_seed(0)
+        m = _mk_attn(d_model=16, n_heads=2, variant=variant, use_sdpa_standard=False)
+        assert m.use_query and m.use_conc and m.use_len
+        assert getattr(m, "use_raw_conc") is False
+        assert m.conc_mode == ALT_CONC_STATS[variant]
+        assert expected_gate_extras(variant, 16, 2, 1) == expected_gate_extras(
+            "lega", 16, 2, 1
+        )
+        assert {
+            name: tuple(t.shape) for name, t in m.state_dict().items()
+        } == base_state
+        with torch.no_grad():
+            for mod in (base, m):
+                mod.gate_w.zero_()
+                mod.gate_a.fill_(1.0)
+                mod.gate_b.zero_()
+                mod.gate_d.zero_()
+            _, base_logit, _ = base._gate_logit(
+                qterm, p.amax(dim=-1), log_n, (1, 2, 2), keep_terms=True
+            )
+            q = m._finalize_conc_evidence(m._conc_evidence(p))
+            _, logit, _ = m._gate_logit(qterm, q, log_n, (1, 2, 2), keep_terms=True)
+        if variant == "lega_l2":
+            expected_q = (p**2).sum(dim=-1)
+        else:
+            expected_q = (p * p.clamp_min(1e-30).log()).sum(dim=-1).exp()
+        assert torch.allclose(q, expected_q, atol=1e-6), variant
+        assert torch.allclose(logit, torch.log(n * q), atol=1e-5), variant
+        # 与主实验只差 B 的对数项；C 的长度归一化必须保留。
+        assert not torch.allclose(logit, base_logit), variant
+        assert torch.allclose(
+            logit - base_logit, torch.log(q + 1e-8) - torch.log(p.amax(dim=-1)), atol=1e-5
+        ), variant
+    print("  [ok] lega_l2/lega_entropy 只替换 B 统计量，A/C 与参数预算不变")
+
+
+def test_alt_conc_uniform_attention_gives_c_zero():
+    """L2/熵质量在均匀注意力下也满足 c=log(n*q)=0。"""
+    for variant in ALT_CONC_VARIANTS:
+        m = _mk_attn(variant=variant, use_sdpa_standard=False)
+        torch.nn.init.zeros_(m.wq.weight)
+        torch.nn.init.zeros_(m.wk.weight)
+        with torch.no_grad():
+            m.gate_w.zero_()
+            m.gate_a.fill_(1.0)
+            m.gate_b.zero_()
+            m.gate_d.zero_()
+        x = torch.randn(1, 8, 16)
+        _, _, stats = m(x, rope=None, need_stats=True)
+        for t in range(8):
+            assert abs(stats["max_p"][0, 0, t].item() - 1.0 / (t + 1)) < 1e-5
+            assert abs(stats["logit"][0, 0, t].item()) < 1e-5, (variant, t)
+    print("  [ok] 替代集中度在均匀注意力下仍满足 c=0")
+
+
+def test_alt_conc_forward_matches_reference_and_chunking(monkeypatch):
+    """替代集中度在显式单块与分块路径中都与手工统计逐位一致。"""
+    torch.manual_seed(3)
+    x = torch.randn(2, 9, 16)
+    for variant in ALT_CONC_VARIANTS:
+        torch.manual_seed(3)
+        m = _mk_attn(d_model=16, n_heads=2, variant=variant, use_sdpa_standard=False)
+        m.eval()
+        with torch.no_grad():
+            m.gate_w.zero_()
+            m.gate_a.fill_(0.7)
+            m.gate_b.fill_(-0.2)
+            m.gate_d.fill_(0.1)
+            out, _, stats = m(x, need_stats=True)
+            p = _reference_attn_probs(m, x)
+            q = m._finalize_conc_evidence(m._conc_evidence(p))
+            T = x.shape[1]
+            log_n = torch.log(torch.arange(1, T + 1, dtype=torch.float32))
+            expected = (
+                0.7 * (torch.log(q.clamp_min(1e-30)) + log_n.view(1, 1, T))
+                - 0.2 * log_n.view(1, 1, T)
+                + 0.1
+            )
+            assert torch.allclose(stats["logit"], expected, atol=1e-5), variant
+            assert torch.isfinite(out).all(), variant
+            monkeypatch.setattr(attention_mod, "_CHUNK_MIN_T", 1)
+            monkeypatch.setattr(attention_mod, "_chunk_elems", lambda dev: 1)
+            out_chunk, _, stats_chunk = m(x, need_stats=True)
+        assert torch.allclose(out, out_chunk, atol=1e-6), variant
+        assert torch.allclose(stats["logit"], stats_chunk["logit"], atol=1e-6), variant
+        assert torch.allclose(stats["max_p"], stats_chunk["max_p"], atol=1e-6), variant
+    print("  [ok] 替代集中度单块/分块前向与手工 B 统计一致")
+
+
+def test_gate_factor_metadata_matches_variant_formulas():
+    """单因素实验的因子元数据必须与变体实际启用的门控项一致。"""
+    expected = {
+        "gate_only": set(),
+        "qgate": {"A"},
+        "lega_conc_only": {"B"},
+        "lega_len_only": {"C"},
+        "lega_no_len": {"A", "B"},
+        "lega_no_conc": {"A", "C"},
+        "lega_no_query": {"B", "C"},
+        "lega": {"A", "B", "C"},
+    }
+    assert set(GATE_FACTORS) == set(expected)
+    # standard/null 不属于门控内 2^3，不能出现在因子表里
+    assert "standard" not in GATE_FACTORS and "null" not in GATE_FACTORS
+    for variant, factors in expected.items():
+        assert GATE_FACTORS[variant] == frozenset(factors), variant
+        m = _mk_attn(variant=variant)
+        actual = {
+            f
+            for f, on in (("A", m.use_query), ("B", m.use_conc), ("C", m.use_len))
+            if on
+        }
+        assert actual == factors, (variant, actual, factors)
+    print("  [ok] 门控因子元数据与各变体 A/B/C 实际开关一致")
+
+
+def test_gate_query_term_uses_pre_rope_query():
+    """门控查询项 w·q 不应混入 RoPE 绝对位置（注意力打分仍使用 RoPE）。"""
+    torch.manual_seed(0)
+    m = _mk_attn(d_model=16, n_heads=2, variant="lega")
+    with torch.no_grad():
+        m.gate_w.normal_(0, 0.5)
+    rope = RoPE(head_dim=8, max_len=32)
+    suffix = torch.randn(1, 5, 16)
+    padded = torch.cat([torch.randn(1, 7, 16), suffix], dim=1)
+    m.eval()
+    with torch.no_grad():
+        _, _, s1 = m(suffix, rope=rope, need_stats=True)
+        _, _, s2 = m(padded, rope=rope, need_stats=True)
+    assert torch.allclose(
+        s1["qterm"], s2["qterm"][:, :, 7:], atol=1e-6
+    ), "qterm 使用了 RoPE 后的 q，导致门控混入绝对位置"
+
+
+def test_rope_translation_equivalence():
+    """RoPE: score(q@pos m, k@pos n) 只依赖 m-n。"""
+    rope = RoPE(head_dim=16, max_len=64)
+    torch.manual_seed(1)
+    q = torch.randn(1, 1, 1, 16)
+    k = torch.randn(1, 1, 1, 16)
+
+    def score(mpos, npos):
+        qr = rope.rotate(q, past_len=mpos)
+        kr = rope.rotate(k, past_len=npos)
+        return (qr @ kr.transpose(-1, -2)).item()
+
+    assert abs(score(3, 7) - score(10, 14)) < 1e-4
+    assert abs(score(0, 5) - score(20, 25)) < 1e-4
+    assert abs(score(5, 0) - score(9, 4)) < 1e-4
+
+
+def test_all_variants_forward_backward_and_params():
+    """全部变体：前向有限、反向可传、额外参数量符合理论。"""
+    for v in VARIANTS:
+        torch.manual_seed(0)
+        model = GPT(
+            vocab_size=64,
+            block_size=32,
+            d_model=32,
+            n_layers=2,
+            n_heads=2,
+            ffn_mult=4,
+            variant=v,
+        )
+        assert gate_extra_params(model) == expected_gate_extras(v, 16, 2, 2), v
+        per_head = gate_extra_params_per_head(model)
+        assert per_head == expected_gate_extras(v, 16, 2, 2) / (2 * 2), v
+        idx = torch.randint(0, 64, (2, 12))
+        out = model(idx, targets=idx)
+        assert torch.isfinite(out["loss"]).item(), v
+        out["loss"].backward()
+        for n, p in model.named_parameters():
+            if p.grad is not None:
+                assert torch.isfinite(p.grad).all(), f"{v}:{n} 梯度非有限"
+        print(
+            f"  [ok] {v}: params={sum(p.numel() for p in model.parameters()):,} "
+            f"extras={gate_extra_params(model)}"
+        )
+
+
+def test_gate_stats_batch_shape_all_variants():
+    """门控统计必须与输入批次对齐 (B,H,T)。
+
+    lega_len_only 只含 b·log n 一项，若 (1,H,1) 参数与 (T,) 的 log_n 广播会
+    把批次维压成 1，机制分析按批次行取统计时将越界；该测试同时覆盖
+    显式完整路径（stats_argmax=True）与 SDPA 轻量路径（stats_argmax=False）。
+    """
+    torch.manual_seed(5)
+    x = torch.randn(2, 12, 32)
+    for variant in VARIANTS:
+        for stats_argmax in (True, False):
+            m = _mk_attn(d_model=32, n_heads=2, variant=variant)
+            m.eval()
+            with torch.no_grad():
+                _, _, stats = m(
+                    x, rope=None, need_stats=True, stats_argmax=stats_argmax
+                )
+            if not stats:
+                continue
+            for key in ("g", "logit", "qterm", "max_p", "argmax", "p_null"):
+                v = stats.get(key)
+                if v is None:
+                    continue
+                assert v.shape == (2, 2, 12), (variant, stats_argmax, key, v.shape)
+
+
+def test_standard_sdpa_matches_explicit():
+    """standard 的 SDPA 快速路径与显式路径数值一致。"""
+    torch.manual_seed(0)
+    m_fast = CausalSelfAttention(32, 2, variant="standard", use_sdpa_standard=True)
+    m_slow = CausalSelfAttention(32, 2, variant="standard", use_sdpa_standard=False)
+    m_slow.load_state_dict(m_fast.state_dict())
+    x = torch.randn(2, 16, 32)
+    with torch.no_grad():
+        o1, _, _ = m_fast(x)
+        o2, _, _ = m_slow(x)
+    assert torch.allclose(o1, o2, atol=1e-5), (o1 - o2).abs().max()
+
+
+def test_light_stats_parity_sdpa_vs_explicit():
+    """轻量诊断（need_stats=True, stats_argmax=False）在 SDPA 与显式路径上
+    必须返回相同口径的 stats：log_n 等键的存在性与数值都一致。"""
+    torch.manual_seed(1)
+    x = torch.randn(2, 20, 32)
+    for variant in ("standard", "qgate", "lega_no_conc"):
+        m_fast = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=True)
+        m_slow = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=False)
+        m_slow.load_state_dict(m_fast.state_dict())
+        m_fast.eval()
+        m_slow.eval()
+        with torch.no_grad():
+            o1, _, s1 = m_fast(x, need_stats=True, stats_argmax=False)
+            o2, _, s2 = m_slow(x, need_stats=True, stats_argmax=False)
+        assert torch.allclose(o1, o2, atol=1e-5), variant
+        for key in ("max_p", "log_n", "argmax", "qterm", "g", "logit"):
+            a, b = s1.get(key), s2.get(key)
+            assert (a is None) == (b is None), (
+                variant,
+                key,
+                a is not None,
+                b is not None,
+            )
+            if a is not None:
+                assert torch.allclose(a, b, atol=1e-5, rtol=1e-5), (variant, key)
+
+
+def test_standard_sdpa_cache_forwards_dropout_in_training():
+    """训练态 + KV 缓存的 SDPA 分支也必须启用 attention dropout。"""
+    torch.manual_seed(0)
+    m = CausalSelfAttention(
+        32, 2, variant="standard", attn_dropout=0.3, use_sdpa_standard=True
+    )
+    x = torch.randn(1, 6, 32)
+    m.eval()
+    with torch.no_grad():
+        _, past, _ = m(x)
+    m.train()
+    with mock.patch(
+        "torch.nn.functional.scaled_dot_product_attention",
+        wraps=torch.nn.functional.scaled_dot_product_attention,
+    ) as sdpa:
+        m(x[:, -1:], past_kv=past)
+    kwargs = sdpa.call_args.kwargs
+    assert kwargs["dropout_p"] == 0.3
+    # 单查询步所有键必然可见，无需掩码（None 或全 True 均可）
+    if kwargs["attn_mask"] is not None:
+        assert bool(kwargs["attn_mask"].all())
+
+
+def test_query_chunked_attention_matches_unchunked():
+    """查询维分块（逐块 checkpoint / 直接重算两种模式）与单块显式注意力逐位一致（前向/反向）。"""
+    torch.manual_seed(3)
+    ref = CausalSelfAttention(32, 2, variant="lega")
+    with torch.no_grad():
+        ref.gate_w.normal_(0, 0.2)
+        ref.gate_a.normal_(0, 0.2)
+        ref.gate_b.normal_(0, 0.2)
+    x = torch.randn(2, 96, 32)
+
+    old = attention_mod._CHUNK_TARGET_ELEMS
+    old_ckpt = attention_mod._CKPT_MIN_BYTES
+    try:
+        attention_mod._CHUNK_TARGET_ELEMS = 10**12
+        ref.train()
+        o_ref, _, _ = ref(x)
+        (o_ref * o_ref).mean().backward()
+        # 阈值 0 强制逐块 checkpoint；阈值极大走不重算的分块路径。
+        for ckpt_bytes in (0, 10**18):
+            attention_mod._CKPT_MIN_BYTES = ckpt_bytes
+            chk = CausalSelfAttention(32, 2, variant="lega")
+            chk.load_state_dict(ref.state_dict())
+            attention_mod._CHUNK_TARGET_ELEMS = 1024
+            chk.train()
+            o_chk, _, _ = chk(x)
+            (o_chk * o_chk).mean().backward()
+
+            assert torch.equal(o_ref, o_chk)
+            for (n0, p0), (n1, p1) in zip(
+                ref.named_parameters(), chk.named_parameters()
+            ):
+                assert n0 == n1
+                if p0.grad is not None:
+                    assert torch.allclose(p0.grad, p1.grad, atol=1e-5, rtol=1e-5), n0
+    finally:
+        attention_mod._CHUNK_TARGET_ELEMS = old
+        attention_mod._CKPT_MIN_BYTES = old_ckpt
+
+
+def test_chunked_full_stats_matches_unchunked():
+    """完整诊断统计也可分块产生，且与单块结果一致。"""
+    old = attention_mod._CHUNK_TARGET_ELEMS
+    for variant in ("standard", "null", "lega"):
+        torch.manual_seed(4)
+        ref = CausalSelfAttention(32, 2, variant=variant)
+        chk = CausalSelfAttention(32, 2, variant=variant)
+        chk.load_state_dict(ref.state_dict())
+        x = torch.randn(1, 96, 32)
+        try:
+            attention_mod._CHUNK_TARGET_ELEMS = 10**12
+            with torch.no_grad():
+                o_ref, _, s_ref = ref(x, need_stats=True)
+            attention_mod._CHUNK_TARGET_ELEMS = 1024
+            with torch.no_grad():
+                o_chk, _, s_chk = chk(x, need_stats=True)
+        finally:
+            attention_mod._CHUNK_TARGET_ELEMS = old
+
+        assert torch.allclose(o_ref, o_chk, atol=1e-5, rtol=1e-5), variant
+        for key in ("max_p", "log_n", "qterm", "g", "logit", "p_null"):
+            a, b = s_ref.get(key), s_chk.get(key)
+            if a is None:
+                assert b is None, (variant, key)
+            else:
+                assert torch.allclose(a, b, atol=1e-5, rtol=1e-5), (variant, key)
+        assert torch.equal(s_ref["argmax"], s_chk["argmax"]), variant
+
+
+def test_null_variant_max_p_includes_null_slot():
+    """null 主导时 max_p 必须是含 null 槽的联合概率最大值（与 argmax=-1 一致）。"""
+    old = attention_mod._CHUNK_TARGET_ELEMS
+    torch.manual_seed(0)
+    ref = CausalSelfAttention(16, 1, variant="null")
+    chk = CausalSelfAttention(16, 1, variant="null")
+    with torch.no_grad():
+        ref.wq.weight.copy_(torch.eye(16))
+        ref.wk.weight.copy_(torch.eye(16))
+        # k_null 与查询方向高度对齐 → null 槽以接近 1 的概率主导。
+        ref.k_null.copy_(torch.eye(16)[0] * 1000.0)
+        ref.v_null.zero_()
+    chk.load_state_dict(ref.state_dict())
+    x = torch.zeros(1, 40, 16)
+    x[..., 0] = 10.0
+    try:
+        attention_mod._CHUNK_TARGET_ELEMS = 10**12
+        with torch.no_grad():
+            _, _, s_ref = ref(x, need_stats=True)
+        attention_mod._CHUNK_TARGET_ELEMS = 1024
+        with torch.no_grad():
+            _, _, s_chk = chk(x, need_stats=True)
+    finally:
+        attention_mod._CHUNK_TARGET_ELEMS = old
+    for s in (s_ref, s_chk):
+        for t in range(x.shape[1]):
+            assert s["argmax"][0, 0, t].item() == -1
+            assert abs(s["max_p"][0, 0, t].item() - s["p_null"][0, 0, t].item()) < 1e-5
+    assert torch.allclose(s_ref["max_p"], s_chk["max_p"], atol=1e-5, rtol=1e-5)
+
+
+def test_null_zero_sdpa_keeps_null_slot():
+    """null_zero 的 SDPA 快路也必须并入空槽，不能只对真实键做 softmax。
+
+    null 的 v_null 初始为 0，与 null_zero 的固定零 value 等价；两者在同一
+    权重下应给出完全相同的输出（prefill 与增量解码）。
+    """
+    torch.manual_seed(0)
+    fast = CausalSelfAttention(32, 2, variant="null_zero", use_sdpa_standard=True)
+    slow = CausalSelfAttention(32, 2, variant="null_zero", use_sdpa_standard=False)
+    ref = CausalSelfAttention(32, 2, variant="null", use_sdpa_standard=True)
+    with torch.no_grad():
+        fast.k_null.normal_(0, 0.5)
+        slow.load_state_dict(fast.state_dict())
+        ref.load_state_dict(fast.state_dict())
+        # 给 null 一个非零 value 并同步到 null_zero 无法表达（buffer 固定为零），
+        # 因此这里只验证零 value 下的路径等价性。
+        ref.v_null.zero_()
+    fast.eval()
+    slow.eval()
+    ref.eval()
+    x = torch.randn(1, 12, 32)
+    with torch.no_grad():
+        o_fast, cache_fast, _ = fast(x)
+        o_slow, cache_slow, _ = slow(x)
+        o_ref, cache_ref, _ = ref(x)
+    assert torch.allclose(o_fast, o_slow, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(o_fast, o_ref, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(cache_fast[0], cache_slow[0])
+    assert torch.allclose(cache_fast[0], cache_ref[0])
+    # 增量解码：单查询步走显式路径，也必须包含 null 槽。
+    nxt = torch.randn(1, 1, 32)
+    with torch.no_grad():
+        o1, _, _ = fast(nxt, past_kv=cache_fast)
+        o2, _, _ = slow(nxt, past_kv=cache_slow)
+    assert torch.allclose(o1, o2, atol=1e-5, rtol=1e-5)
+
+
+def test_mask_cache_byte_limit_uses_lru():
+    """全局掩码缓存按字节上限驱逐最旧条目。"""
+    old_cap = attention_mod._CACHE_CAP
+    old_limit = attention_mod._MASK_CACHE_MAX_BYTES
+    old_tri_limit = attention_mod._TRI_CACHE_MAX_BYTES
+    mask0 = None
+    try:
+        attention_mod._MASK_CACHE.clear()
+        attention_mod._MASK_CACHE_BYTES = 0
+        attention_mod._TRI_CACHE.clear()
+        attention_mod._TRI_CACHE_BYTES = 0
+        attention_mod._CACHE_CAP = 8
+        attention_mod._MASK_CACHE_MAX_BYTES = 20
+        attention_mod._TRI_CACHE_MAX_BYTES = 6
+        for i in range(2):
+            entry = [
+                torch.ones(1, 1, 4, 4, dtype=torch.bool),
+                torch.ones(1, 1, 4, 1, dtype=torch.bool),
+                None,
+                None,
+            ]
+            if i == 0:
+                mask0 = entry
+            attention_mod._mask_cache_store(("cpu", i), entry)
+        assert len(attention_mod._MASK_CACHE) == 1
+        assert attention_mod._MASK_CACHE_BYTES == 20
+        assert not any(entry is mask0 for entry in attention_mod._MASK_CACHE.values())
+        first_tri = attention_mod._tri_band(2, 2, torch.device("cpu"))
+        attention_mod._tri_band(2, 3, torch.device("cpu"))
+        assert len(attention_mod._TRI_CACHE) == 1
+        assert not any(tri is first_tri for tri in attention_mod._TRI_CACHE.values())
+    finally:
+        attention_mod._MASK_CACHE.clear()
+        attention_mod._MASK_CACHE_BYTES = 0
+        attention_mod._TRI_CACHE.clear()
+        attention_mod._TRI_CACHE_BYTES = 0
+        attention_mod._CACHE_CAP = old_cap
+        attention_mod._MASK_CACHE_MAX_BYTES = old_limit
+        attention_mod._TRI_CACHE_MAX_BYTES = old_tri_limit
+
+
+def test_all_variants_support_zero_length_input():
+    """空查询序列对所有变体都必须返回空输出/缓存，而不是只在部分变体崩溃。"""
+    C = 16
+    x = torch.empty(2, 0, C)
+    for v in VARIANTS:
+        attn = CausalSelfAttention(C, 2, variant=v)
+        out, cache, stats = attn(x)
+        assert out.shape == (2, 0, C), (v, out.shape)
+        assert cache[0].shape == (2, 2, 0, C // 2), (v, cache[0].shape)
+        assert stats is None
+        out2, cache2, stats2 = attn(x, need_stats=True)
+        assert out2.shape == (2, 0, C)
+        assert isinstance(stats2, dict) and stats2["g"] is None
+
+
+def test_placebo_control_matches_capacity_but_not_evidence():
+    """参数匹配安慰剂：同门控参数/FLOPs，但 B/C 证据换成无信息噪声。
+
+    该对照回答“LEGA 的收益是否只是多几个门控参数的优化红利”。测试必须
+    同时验证 (1) 参数预算与 LEGA 完全一致；(2) 它确实不是 LEGA 的等价
+    前向（否则对照没有区分力）；(3) 安慰剂特征确定、有界、不消耗 RNG。
+    """
+    assert "lega_placebo" in RUNNABLE_VARIANTS
+    assert "lega_placebo" in CONTROL_VARIANTS
+    assert "lega_placebo" not in VARIANTS
+    assert "lega_placebo" not in GATE_FACTORS
+    torch.manual_seed(0)
+    real = CausalSelfAttention(32, 2, variant="lega", use_sdpa_standard=False)
+    torch.manual_seed(0)
+    plac = CausalSelfAttention(32, 2, variant="lega_placebo", use_sdpa_standard=False)
+    assert expected_gate_extras("lega_placebo", 16, 2, 2) == expected_gate_extras(
+        "lega", 16, 2, 2
+    )
+    for name in ("gate_w", "gate_a", "gate_b", "gate_d"):
+        assert getattr(real, name).shape == getattr(plac, name).shape, name
+    assert sum(p.numel() for p in real.parameters()) == sum(
+        p.numel() for p in plac.parameters()
+    )
+
+    with torch.no_grad():
+        for m in (real, plac):
+            m.gate_w.normal_(0.0, 0.02)
+            m.gate_a.fill_(0.5)
+            m.gate_b.fill_(-0.3)
+            m.gate_d.fill_(1.0)
+    x = torch.randn(2, 12, 32)
+    real.eval()
+    plac.eval()
+    with torch.no_grad():
+        o1, _, _ = real(x)
+        o2, _, _ = plac(x)
+    assert o1.shape == o2.shape
+    assert not torch.allclose(
+        o1, o2, atol=1e-6
+    ), "安慰剂与 LEGA 前向完全相同，说明证据没有被置换"
+
+    # 特征确定、有界、同形状；同一输入两次调用逐位相同（不消耗全局 RNG）。
+    z = torch.zeros(2, 3, 7)
+    f1 = _placebo_evidence(z, 3, 1.0)
+    f2 = _placebo_evidence(z, 3, 1.0)
+    assert torch.equal(f1, f2)
+    assert f1.shape == z.shape and float(f1.abs().max()) <= 1.0
+    ln = torch.zeros(9)
+    assert _placebo_evidence(ln, 4, 2.0).shape == ln.shape
+
+    # 梯度仍能经 a/b 回传（不是被 detach 的死支路）。
+    plac.train()
+    out, _, _ = plac(x)
+    out.sum().backward()
+    for name in ("gate_a", "gate_b"):
+        g = getattr(plac, name).grad
+        assert g is not None and torch.isfinite(g).all(), name
+    print("  [ok] lega_placebo：参数匹配、证据被置换、梯度可达")
+
+
+def test_capacity_null_controls_keep_params_but_zero_evidence():
+    """容量匹配对照：同参数/同 FLOPs，只把对应证据通道置零。"""
+    assert set(CAPACITY_NULL_VARIANTS.values()) <= set(CONTROL_VARIANTS)
+    torch.manual_seed(0)
+    real = CausalSelfAttention(32, 2, variant="lega", use_sdpa_standard=False)
+    real_state = {n: tuple(t.shape) for n, t in real.state_dict().items()}
+    dead_param = {"A": "gate_w", "B": "gate_a", "C": "gate_b"}
+    for component, variant in CAPACITY_NULL_VARIANTS.items():
+        assert variant in RUNNABLE_VARIANTS
+        assert variant in VARIANT_CN
+        assert variant not in VARIANTS
+        assert variant not in GATE_FACTORS
+        assert NULL_EVIDENCE_COMPONENT[variant] == component
+        torch.manual_seed(0)
+        model = CausalSelfAttention(32, 2, variant=variant, use_sdpa_standard=False)
+        assert {n: tuple(t.shape) for n, t in model.state_dict().items()} == real_state
+        assert expected_gate_extras(variant, 16, 2, 2) == expected_gate_extras(
+            "lega", 16, 2, 2
+        )
+        with torch.no_grad():
+            model.gate_w.normal_(0.0, 0.02)
+            model.gate_a.fill_(0.4)
+            model.gate_b.fill_(-0.2)
+            model.gate_d.fill_(1.2)
+        x = torch.randn(2, 9, 32)
+        model.eval()
+        with torch.no_grad():
+            out1, _, _ = model(x)
+            getattr(model, dead_param[component]).add_(10.0)
+            out2, _, _ = model(x)
+        assert torch.allclose(
+            out1, out2
+        ), f"{variant} 的输出仍依赖被置零的 {component} 证据"
+
+        model.train()
+        model.zero_grad(set_to_none=True)
+        out, _, _ = model(x)
+        out.sum().backward()
+        g = getattr(model, dead_param[component]).grad
+        assert g is not None and torch.isfinite(g).all(), variant
+        assert (
+            float(g.abs().max()) == 0.0
+        ), f"{variant} 的 {dead_param[component]} 应保留零梯度而不是断流"
+    print("  [ok] lega_null_*：参数/形状匹配、证据置零、死参数保留零梯度")
+
+
+def test_probe_gate_factors_matches_declared_factor_tables():
+    """实现层自证：扰动门控参数真正改变 logit 的因子集必须等于声明集合。
+
+    ``GATE_FACTORS``/``RAW_GATE_FACTORS`` 都从实现的 ``_USE_*`` 开关派生，
+    因此"改了前向却忘了改开关"会让元数据与实现一起失真，而任何纯元数据
+    审计都会通过。这里用 :func:`probe_gate_factors` 逐参数扰动一次微型
+    前向，把实际生效的因子与声明表逐项对照；同时确保每个带门变体都被某张
+    表登记（新增带门变体必须显式选择登记到哪一张表）。
+    """
+    tables = [
+        ("GATE_FACTORS", dict(GATE_FACTORS)),
+        ("RAW_GATE_FACTORS", dict(RAW_GATE_FACTORS)),
+        ("SUPPLEMENTAL_GATE_FACTORS", dict(SUPPLEMENTAL_GATE_FACTORS)),
+    ]
+    declared = {}
+    for label, table in tables:
+        for variant, factors in table.items():
+            declared.setdefault(variant, []).append((label, frozenset(factors)))
+    for variant, component in NULL_EVIDENCE_COMPONENT.items():
+        declared.setdefault(variant, []).append(
+            ("capacity_null", frozenset("ABC") - frozenset({component}))
+        )
+    for variant in PLACEBO_VARIANTS:
+        declared.setdefault(variant, []).append(("placebo", frozenset("ABC")))
+    for variant in ALT_CONC_VARIANTS:
+        declared.setdefault(variant, []).append(("alt_conc", frozenset("ABC")))
+    # 每个带门变体都必须有声明，且多张表之间不得互相矛盾
+    assert set(declared) >= set(
+        _GATED
+    ), f"带门变体未登记因子语义：{sorted(set(_GATED) - set(declared))}"
+    all_params = {"gate_w", "gate_a", "gate_b"}
+    for variant in sorted(_GATED):
+        probe = probe_gate_factors(variant)
+        assert probe.get("gated") is True and not probe.get("error"), variant
+        effective = frozenset(probe["effective"])
+        for label, expected in declared[variant]:
+            assert effective == expected, (
+                f"{variant} 在 {label} 声明 {sorted(expected)}，实现层生效 "
+                f"{sorted(effective)}"
+            )
+            if label == "capacity_null":
+                assert (
+                    set(probe["params"]) == all_params
+                ), f"{variant} 必须保留全部门控参数（参数匹配三臂）"
+                assert probe["null_component"] in ("A", "B", "C")
+        assert probe["bias_effective"] is True, variant
+    # 探针不得移动调用方的全局随机流，且同一变体可复现
+    torch.manual_seed(1234)
+    before = torch.random.get_rng_state().clone()
+    first = probe_gate_factors("lega")
+    assert torch.equal(
+        before, torch.random.get_rng_state()
+    ), "实现级探针必须包在 fork_rng 内，不能移动调用方的全局随机流"
+    again = probe_gate_factors("lega")
+    assert first["effective"] == again["effective"] == ["A", "B", "C"]
+    # 无门变体没有门控 logit，因子集合恒为空
+    for variant in ("standard", "null", "null_zero"):
+        assert variant not in _GATED
+        probe = probe_gate_factors(variant)
+        assert probe["gated"] is False and probe["effective"] == []
+    try:
+        probe_gate_factors("not_a_variant")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("未知变体应显式报错")
+    print("  [ok] 实现层因子探针与声明因子表一致（含带门变体全覆盖）")
