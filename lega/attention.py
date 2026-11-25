@@ -1908,7 +1908,7 @@ class CausalSelfAttention(nn.Module):
                     ).float()
 
                 # 诊断统计（null 变体的 max_p/argmax/p_null 等）必须基于 dropout 之前的
-                # softmax 分布，否则会因 dropout 的 1/(1-p) 重标定与置零而失真；
+                # softmax 分布，否则会因 dropout 的 1 / max(1 - p, 1e-12) 重标定与置零而失真；
                 # dropout 只作用于实际输出路径，因此保留一份 dropout 前的引用。
                 # 无完整统计需求时不保留该引用。
                 p_pre = p if full_stats else None
