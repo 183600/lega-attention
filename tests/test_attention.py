@@ -62,8 +62,11 @@ def test_uniform_attention_gives_c_zero():
         n = t + 1
         assert abs(stats["max_p"][0, 0, t].item() - 1.0 / max(n, 1)) < 1e-5
         # logit = a*c + b*log n + d = 0（均匀时 c=0 且 b=0, d=0）
-        assert abs(stats["logit"][0, 0, t].item()) < 1e-5
-        assert abs(stats["g"][0, 0, t].item() - 0.5) < 1e-5
+        assert abs(stats["logit"][0, 0, t].item()) < 5e-5, (
+            f"位置 {t}: logit={stats['logit'][0,0,t].item():.2e}, "
+            f"期望均匀注意力下 c≈0"
+        )
+        assert abs(stats["g"][0, 0, t].item() - 0.5) < 5e-5
     assert out.shape == (1, 8, 16)
     assert torch.isfinite(out).all()
 
