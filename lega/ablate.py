@@ -663,7 +663,7 @@ def snapshot_gate_params(model) -> Dict[str, torch.Tensor]:
 def restore_gate_params(model, snapshot: Mapping[str, torch.Tensor]) -> None:
     """把门控参数恢复到快照；缺失/形状不符显式报错（不能静默留下病灶）。
 
-    同时清除 ``conc_permute/query_permute.clamp_min(1e-10)/len_permute.clamp_min(1e-10)`` 这类不写入参数的
+    同时清除 ``conc_permute/query_permute/len_permute`` 这类不写入参数的
     推理期临时属性，避免病灶在后续评测中残留（仅恢复参数不足以撤销前向
     hook）。
 

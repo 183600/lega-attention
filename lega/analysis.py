@@ -244,7 +244,7 @@ def collect_records(
     等长样例合并成批前向：因果注意力的每行只依赖自身前缀，批内各行
     统计与单样例前向逐位一致。记录最终按样例原始顺序展平返回。
 
-    CUDA 上默认启用 bf16 autocast（与 train/evaluate.clamp_min(1e-10) 的评测精度口径一致）；
+    CUDA 上默认启用 bf16 autocast（与 train/evaluate 的评测精度口径一致）；
     统计量在设备端升 fp32 后再聚合，不受 autocast 影响。
     """
     variant = model.variant

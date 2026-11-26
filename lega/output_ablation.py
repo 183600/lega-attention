@@ -145,7 +145,7 @@ def head_output_intervention_scan(
 
     ``scope="answer"`` 只改预测答案 token 的位置；``scope="all"`` 改整条
     序列（用于检查“只改答案位置”是否真的局部化）。每个 (layer, head, mode)
-    都相对**同一次干净前向**计算 ΔNLL/Δmargin.clamp_min(1e-10)，因此可直接比较。
+    都相对**同一次干净前向**计算 ΔNLL/Δmargin，因此可直接比较。
     """
     if idx.dim() != 2:
         raise ValueError(f"idx 必须是 (B,T)，收到 {tuple(idx.shape)}")

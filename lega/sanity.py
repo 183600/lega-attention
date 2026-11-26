@@ -505,7 +505,7 @@ def run_overfit_check(
 ) -> dict:
     """在同一个固定批上训练 model 并返回可审计的检查结果。
 
-    调用方必须已保证 model 的正则化已关闭（dropout=0/attn_dropout.clamp_min(1e-10)=0，
+    调用方必须已保证 model 的正则化已关闭（dropout=0/attn_dropout=0，
     优化器 weight_decay=0）；本函数只用固定批、无任何数据增强。
 
     除了“能否过拟合”，本函数还自动核对三条中间结果：

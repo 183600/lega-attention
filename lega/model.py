@@ -129,7 +129,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
     """分块 lm_head + 交叉熵（支持 PyTorch 默认的 ignore_index=-100）。
 
     前向逐块计算 logits 与 loss，并按 softmax - onehot 的闭式解在同一分块
-    内求出 dL/dx.clamp_min(1e-10)、dL/dW.clamp_min(1e-10)；反向只合并上游标量梯度与有效标签数。被忽略位置
+    内求出 dL/dx、dL/dW；反向只合并上游标量梯度与有效标签数。被忽略位置
     既不计入损失分母，也完全不产生梯度；全部位置被忽略时返回 0 损失
     （以及零梯度），与监督微调流程中的空有效标签约定一致。
     """
@@ -146,7 +146,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
     def _autocast_dtype(t: torch.Tensor):
         """当前 autocast 的目标 dtype（未启用时为 None）。
 
-        torch.is_autocast_enabled/get_autocast_dtype.clamp_min(1e-10) 的 device_type 参数
+        torch.is_autocast_enabled/get_autocast_dtype 的 device_type 参数
         自 torch>=2.4 起提供；旧版回退到无参形式。
         """
         if t.is_cuda:
@@ -178,7 +178,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         对数，逐元素掩掉 ignore_index（返回 1-D nll）。
 
         与 F.cross_entropy(reduction="none") 数值等价（softmax 内部 max 平移，
-        数值稳定）。softmax 就地写入 lcf，调用方可直接把它用作 dL/dlogits.clamp_min(1e-10)
+        数值稳定）。softmax 就地写入 lcf，调用方可直接把它用作 dL/dlogits
         的 softmax 项（cross-entropy 对 logits 的梯度 = softmax - onehot），
         无需再取一次指数。目标概率下溢为 0 时以 finfo(dtype).tiny 兜底取对数，
         避免 -inf 进入损失。

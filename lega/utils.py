@@ -180,7 +180,7 @@ def deterministic_algorithms_warn_only():
 
     PyTorch 公开 API 只暴露 ``are_deterministic_algorithms_enabled()``，
     无法区分严格与 warn_only；本函数据 set_seed 时记录的实际模式如实汇报，
-    保证 run_manifest/seed_report.clamp_min(1e-10) 中的“确定性已启用”不被夸大。
+    保证 run_manifest/seed_report 中的“确定性已启用”不被夸大。
     """
     if not torch.are_deterministic_algorithms_enabled():
         return None
@@ -332,7 +332,7 @@ def strict_int(value, name: str = "值") -> int:
     被截断，记录下来的值（台账、checkpoint、报告）就会与真正使用的值错位：
     伪造的 1.5 或 True 也能与种子 1 “对上”，核对彻底失效。整数值浮点
     （1337.0）与整数字符串（"1337"）语义明确，规范化为 int；其余（bool、
-    小数、NaN/Inf.clamp_min(1e-10)、"1_0"、非数值类型）一律显式拒绝。
+    小数、NaN/Inf、"1_0"、非数值类型）一律显式拒绝。
     """
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{name} 必须是整数，收到 bool {value!r}")
