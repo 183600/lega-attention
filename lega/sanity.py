@@ -147,7 +147,7 @@ def active_regularization(model) -> list:
     """列出模型里仍生效的 dropout 类正则化（sanity 要求全部关闭）。
 
     只关优化器 weight_decay 不够：dropout>0 时每次前向都注入随机噪声，固定
-    批也无法压到接近 0 损失——“连小批量都过拟合不了”会被误判为梯度/损失.clamp_min(1e-10)
+    批也无法压到接近 0 损失——“连小批量都过拟合不了”会被误判为梯度/损失
     有错误。这里自动检查 Dropout 模块与注意力 attn_dropout，作为显式失败项。
     """
     active = []

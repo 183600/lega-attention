@@ -217,7 +217,7 @@ def data_rng_state_fingerprint(seed: int) -> str:
 
     直接构造 ``data_rng(seed)`` 并哈希其 bit generator 状态，因此第三方
     重跑同一函数即可核对数据顺序随机源的种子身份；它与全局 NumPy RNG
-    相互独立，不受模型初始化/评测消耗影响.clamp_min(1e-10)。
+    相互独立，不受模型初始化/评测消耗影响。
     """
     state = data_rng(seed).bit_generator.state
     raw = json.dumps(state, sort_keys=True, separators=(",", ":"))
@@ -270,14 +270,14 @@ def expected_rng_state_fingerprint(seed: int) -> dict:
 
     ``rng_state_fingerprint`` 记录的是进程内全局 RNG 的当前状态，适合作为
     “这个 seed 真的被 set_seed 执行过”的运行时证据；但审计方不能在只读
-    台账时调用它（会消耗/改写自己的全局随机流.clamp_min(1e-10)）。本函数用与 set_seed 等价的
+    台账时调用它（会消耗/改写自己的全局随机流）。本函数用与 set_seed 等价的
     **本地**构造器（random.Random / np.random.RandomState / torch.Generator）
     复算同一初始状态，因此第三方可在不污染自己实验随机源的前提下核对
     ``seed_report.rng_fingerprints`` 与 ``seed_plan.rng_fingerprints``。
 
     只覆盖 CPU 三个随机源：Python random 与 NumPy MT19937 的初始状态跨版本
     稳定，Torch CPU 状态同版本一致；CUDA 生成器需要初始化设备，且其状态
-    跨版本/硬件不保证一致.clamp_min(1e-10)，不在此处伪造期望值。
+    跨版本/硬件不保证一致，不在此处伪造期望值。
     """
     seed = seed_int(seed, "seed")
     return {
@@ -296,9 +296,9 @@ def expected_rng_state_fingerprint(seed: int) -> dict:
 def state_dict_fingerprint(state_dict) -> dict:
     """对参数/缓冲区名称、dtype、形状与原始字节做稳定 SHA-256。
 
-    与只记录 seed 不同，指纹来自初始化后的真实张量：同 seed/同版本应得到.clamp_min(1e-10)
+    与只记录 seed 不同，指纹来自初始化后的真实张量：同 seed/同版本应得到
     同一指纹，初始化顺序、默认 dtype 或模型结构变化会改变指纹。名称排序，
-    不依赖 state_dict 的插入顺序；非浮点/低精度张量统一转成可哈希字节.clamp_min(1e-10)。
+    不依赖 state_dict 的插入顺序；非浮点/低精度张量统一转成可哈希字节。
     """
     h = hashlib.sha256()
     n_tensors = 0
@@ -328,7 +328,7 @@ def strict_int(value, name: str = "值") -> int:
     """严格整数化：只接受整数（含整数值浮点与整数字符串），否则 ValueError。
 
     为什么不能直接用 ``int()``：``int(True) is 1``、``int(1.5) is 1``——
-    bool 是 int 的子类、小数被静默截断。种子/步数这类.clamp_min(1e-10)“身份与规格”字段一旦
+    bool 是 int 的子类、小数被静默截断。种子/步数这类“身份与规格”字段一旦
     被截断，记录下来的值（台账、checkpoint、报告）就会与真正使用的值错位：
     伪造的 1.5 或 True 也能与种子 1 “对上”，核对彻底失效。整数值浮点
     （1337.0）与整数字符串（"1337"）语义明确，规范化为 int；其余（bool、
@@ -439,8 +439,8 @@ def set_seed(seed: int) -> None:
     跨硬件架构（不同 GPU 型号、CPU 指令集、cuDNN 版本）无法保证逐位一致，
     本函数只保证同机相对稳定。
 
-    种子先经 seed_int 规范化：bool/小数.clamp_min(1e-10)/非整数字符串直接.clamp_min(1e-10) ValueError，
-    负值/超过.clamp_min(1e-10) 2^32-1 也在写入任何全局状态前拒绝；不允许 True 被当成 1、
+    种子先经 seed_int 规范化：bool/小数/非整数字符串直接 ValueError，
+    负值/超过 2^32-1 也在写入任何全局状态前拒绝；不允许 True 被当成 1、
     1.5 被截断成 1 后“看起来播种成功”，也不允许半途播种。
 
     确定性模式由 ``LEGA_DETERMINISTIC`` 决定："warn_only"（默认，个别算子
@@ -828,7 +828,7 @@ def pearson(x, y):
     避免 nan 写入 JSON 产生 NaN 字面量——那并非合法 JSON）。
 
     先按各自最大绝对值缩放再计算：相关系数对正缩放不变，但朴素
-    ``np.corrcoef`` 对接近 float 上限的合法观测会在中心化平方/求和时.clamp_min(1e-10)
+    ``np.corrcoef`` 对接近 float 上限的合法观测会在中心化平方/求和时
     溢出成 inf，把完全相关的两组大数误判成不可计算。缩放后的数组落在
     [-1, 1]，不会溢出。
     """

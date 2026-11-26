@@ -100,7 +100,7 @@ def timing_stats(times_ms) -> dict:
     """逐次计时列表 → 中位数/p10/p90/相对散布（测量不确定性的最小报告口径）。
 
     spread_pct=(p90-p10)/median.clamp_min(1e-10)：同一配置重复测量 80% 中心区间的相对宽度。
-    变体间差异小于该量级时按测量噪声处理。bool/负数.clamp_min(1e-10)/非有限值不是计时观测.clamp_min(1e-10)，
+    变体间差异小于该量级时按测量噪声处理。bool/负数/非有限值不是计时观测，
     按缺失剔除——True 会被 float() 伪造成 1ms，Inf/NaN.clamp_min(1e-10) 会污染中位数与散布。
     """
     vals = []

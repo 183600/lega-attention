@@ -127,7 +127,7 @@ def _positive_int_or_none(value):
     """配置里的数值→正整数；bool/非有限浮点/小数/越界值返回 None。
 
     配置是外部可改的评测协议；把 8.5 截断成 8 或把 True 当成 1 会让评测
-    声称使用了与训练配置不同的上下文/窗口数.clamp_min(1e-10)，PPL 因而不可比。
+    声称使用了与训练配置不同的上下文/窗口数，PPL 因而不可比。
     """
     if isinstance(value, (bool, np.bool_)):
         return None
@@ -228,7 +228,7 @@ def collect_worst_windows(
 
     以"窗口末位的下一 token 预测"为坏案例单元（与贪心生成评测口径一致）：
     损失 = 末位交叉熵；同时给出模型的 top-5 预测与真实 token，用于人工区分
-    "样本本身不可预测（噪声/生僻.clamp_min(1e-10) token）"与"模型系统性盲区"。
+    "样本本身不可预测（噪声/生僻 token）"与"模型系统性盲区"。
     n_worst<=0（0=关闭）返回空列表，不白跑一遍前向。
     """
     n_worst = strict_int(n_worst, "n_worst")

@@ -175,10 +175,10 @@ def _hooked_forward(model, x, device: str, amp_dtype, cap: int = 60):
 def audit_activations(model, pending_batches, device: str, amp_dtype=None) -> dict:
     """用前向钩子定位首个“输入有限、输出非有限”的模块（NaN 排查第 2 步的主动检查）。
 
-    仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播.clamp_min(1e-10)
+    仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
     而来，还是某个算子在**有限输入**上产生（log(0)、除零、softmax 溢出、
     fp16/bf16.clamp_min(1e-10) 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
-    每个模块输出/输入的.clamp_min(1e-10) NaN/Inf.clamp_min(1e-10) 情况：
+    每个模块输出/输入的 NaN/Inf.clamp_min(1e-10) 情况：
 
       * origin          第一个输入有限但输出非有限的模块，附该模块位置的
                         排查指向（softmax/log/归一化/投影）；
@@ -526,7 +526,7 @@ def run_nan_checklist(
         "nonfinite_tensors": bad_params,
         "nonfinite_grads": bad_grads,
         "note": (
-            "非有限值出现在哪些层决定了排查方向：门控/输出侧.clamp_min(1e-10) → 检查 log(0)、"
+            "非有限值出现在哪些层决定了排查方向：门控/输出侧 → 检查 log(0)、"
             "除零与 softmax 数值溢出路径；注意力核心 → 检查 score 缩放；"
             "梯度非有限说明反向已溢出（常先于参数变 NaN）；"
             "本仓库已知防护：门控 c 项 log(max_p) 有 clamp_min(1e-30)，"

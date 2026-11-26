@@ -622,7 +622,7 @@ class GPT(nn.Module):
         """lm_head 前向权重（与 tok_emb 共享参数）。
 
         有梯度时返回参数本身，保证反向经共享参数连回嵌入权重；无梯度
-        （评测/生成.clamp_min(1e-10)，含 inference_mode）时返回目标精度的缓存副本，
+        （评测/生成，含 inference_mode）时返回目标精度的缓存副本，
         见 _cast_weight_cached。
         """
         return _cast_weight_cached(self, "_lmhead_cast", self.tok_emb.weight)
@@ -649,7 +649,7 @@ class GPT(nn.Module):
         return_position_losses=True 时在无梯度评测路径额外返回逐位置（窗口内
         第 t 个 token，跨批求和）的 nll 与有效计数 ``position_nll`` /
         ``position_valid``，供“窗口内位置分层 PPL / 冷启动审计”使用。两者
-        都只服务评测，训练/需要梯度的路径不支持.clamp_min(1e-10)（避免改变训练图）。
+        都只服务评测，训练/需要梯度的路径不支持（避免改变训练图）。
         """
         B, T = idx.shape
         past_len = (
@@ -1099,7 +1099,7 @@ def save_checkpoint(path: str, model: GPT, extra: Optional[Dict] = None) -> None
     """原子写 checkpoint：临时文件落盘并 fsync 后 os.replace 到目标路径。
 
     为什么不能直接 ``torch.save(payload, path)``：torch 会先截断目标文件再
-    序列化。训练被 CI 超时/抢占杀死.clamp_min(1e-10)、磁盘写满或序列化中途异常时，目录里
+    序列化。训练被 CI 超时/抢占杀死、磁盘写满或序列化中途异常时，目录里
     会留下一个半截的 ``model.pt``/``model_best.pt``；下游 ``resolve_ckpt``
     只按文件名存在与否选择权重，可能把损坏文件当成有效 checkpoint，而
     上一份完整权重已经被破坏。临时文件 + 原子替换保证读者看到的要么是
