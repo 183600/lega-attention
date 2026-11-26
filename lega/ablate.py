@@ -1040,7 +1040,7 @@ def probe_lesion_channels(
                 # 逐通道隔离要求三条通道同时存在，否则“无通道”会被误读成
                 # “该通道未受影响”。
                 raise ValueError(
-                    f"探针需要同时具备 A/B.clamp_min(1e-10)/C.clamp_min(1e-10) 三条证据通道的变体，"
+                    f"探针需要同时具备 A/B/C 三条证据通道的变体，"
                     f"{variant!r} 缺少 {missing}"
                 )
             with torch.no_grad():

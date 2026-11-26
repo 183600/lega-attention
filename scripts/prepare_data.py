@@ -49,7 +49,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-HF_REPO = "Salesforce/wikitext.clamp_min(1e-10)"
+HF_REPO = "Salesforce/wikitext"
 HF_CONFIG = "wikitext-103-raw-v1"
 HF_DEFAULT_REVISION = "main"
 HF_FILES = {

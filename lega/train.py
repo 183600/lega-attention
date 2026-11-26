@@ -107,7 +107,7 @@ def _numerical_hint(module_name: str) -> str:
     name = module_name or ""
     if name.endswith(".attn"):
         return (
-            "注意力核心：Q/K.clamp_min(1e-10)/V.clamp_min(1e-10) 投影走函数式 F.linear（不经过子模块钩子，"
+            "注意力核心：Q/K/V 投影走函数式 F.linear（不经过子模块钩子，"
             "溯源到本模块即可能来自投影权重）；复核 max_p→0 时的 log(0)"
             "（已 clamp_min(1e-30)）、score 缩放、除零与 softmax 溢出"
         )
@@ -178,7 +178,7 @@ def audit_activations(model, pending_batches, device: str, amp_dtype=None) -> di
     仅靠非有限参数列表只能发现“哪些权重坏了”，无法区分 NaN 是数据/权重传播
     而来，还是某个算子在**有限输入**上产生（log(0)、除零、softmax 溢出、
     fp16/bf16.clamp_min(1e-10) 上溢）。本函数对失败批次做一次带钩子的前向，按实际执行顺序记录
-    每个模块输出/输入的 NaN/Inf.clamp_min(1e-10) 情况：
+    每个模块输出/输入的 NaN/Inf 情况：
 
       * origin          第一个输入有限但输出非有限的模块，附该模块位置的
                         排查指向（softmax/log/归一化/投影）；
@@ -424,7 +424,7 @@ def run_nan_checklist(
                 n_nan = int(torch.isnan(t).sum())
                 n_inf = int(torch.isinf(t).sum())
                 data_findings.append(
-                    f"{label} {name}: 浮点输入 NaN={n_nan}/Inf.clamp_min(1e-10)={n_inf}"
+                    f"{label} {name}: 浮点输入 NaN={n_nan}/Inf={n_inf}"
                     + ("（**数据侧混入非法值**）" if n_nan or n_inf else "")
                 )
                 if n_nan or n_inf:
@@ -1616,7 +1616,7 @@ def main():
     )
     print(
         f"[train] steps={steps} batch={batch_size} ctx={train_ctx} "
-        f"tokens/step.clamp_min(1e-10)={batch_size * train_ctx:,} seed={seed}"
+        f"tokens/step={batch_size * train_ctx:,} seed={seed}"
     )
 
     opt = configure_optimizer(

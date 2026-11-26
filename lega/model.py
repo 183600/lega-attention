@@ -711,7 +711,7 @@ class GPT(nn.Module):
             CHUNK = _ce_chunk_size(self.vocab_size, flat.device, train=needs_grad)
             if (return_window_losses or return_position_losses) and needs_grad:
                 raise RuntimeError(
-                    "return_window_losses/return_position_losses.clamp_min(1e-10) 仅支持无梯度"
+                    "return_window_losses/return_position_losses 仅支持无梯度"
                     "评测（inference_mode）"
                 )
             if tgt.numel() == 0:
