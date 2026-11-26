@@ -1,57 +1,47 @@
-## Code Review 2026-11-26 (Sixth Round)
+# Code Review Report - lega-attention
+**审查日期**: 2026-11-26
+**审查者**: AI Sub-Agent #1 (Automated Static Analysis)
 
-### Summary
 
-Round 6 deep code review of the lega-attention repository. This round
-focused on:
+## 1. 静态分析发现的Bug
 
-1. **Attention mechanism correctness**: Verified causal masking, gate
-   scalar computation, RoPE application, and the full 2^3 ablation
-   matrix consistency.
-2. **Numerical stability**: Audited all `.log()`, `.sqrt()`, division
-   operations for zero-division guards.
-3. **Statistical methodology**: Verified bootstrap sampling (with
-   replacement), p-value thresholds, multiple comparison corrections,
-   and confidence interval computation.
-4. **Gradient flow**: Checked in-place operations, `.zero_()` calls,
-   and autograd graph integrity.
-5. **Model mode management**: Verified `.eval()`/`.train()` lifecycle
-   in all evaluation/ablation functions.
+未发现明显的静态分析bug
 
-### Findings
+## 2. 科研方法论检查
 
-**No bugs found.** All automated warnings were verified as false
-positives:
+- ✅ 包含多重比较校正 (Bonferroni/FDR)
+- ✅ 包含 Bootstrap 方法
+- ✅ 包含统计功效分析
+- ✅ 包含随机种子控制
 
-- **In-place `.zero_()` calls** (attention.py:809,824,1038; ablate.py):
-  These operate on saved/restored weight copies in diagnostic sanity
-  checks, not on active forward-pass tensors. Autograd graph is
-  unaffected.
+## 3. 深度代码审查
 
-- **`model.eval()` without restore** (ablate.py:1448, model.py:1185):
-  Both save `was_training = model.training` before eval and restore
-  with `model.train(was_training)` at function exit. Correct pattern.
+- **ablate.py:1355**: 函数 `_match_gate_bias` 缺少返回类型注解
+- **ablate.py:1943**: 函数 `main` 缺少返回类型注解
+- **analysis.py:881**: 函数 `main` 过长 (87 条语句)
+- **analysis.py:881**: 函数 `main` 缺少返回类型注解
+- **artifacts.py:574**: 函数 `main` 缺少返回类型注解
+- **attention.py:909**: 函数 `__init__` 缺少返回类型注解
+- **attention.py:1206**: 函数 `_attend_q_chunk` 缺少返回类型注解
+- **attention.py:1329**: 函数 `_attend_chunked` 缺少返回类型注解
+- **attention.py:1516**: 函数 `forward` 缺少返回类型注解
+- **badcase.py:1742**: 函数 `main` 缺少返回类型注解
+- **bayes.py:160**: 函数 `_grid` 缺少返回类型注解
+- **bayes.py:341**: 函数 `bayes_paired_evidence` 缺少返回类型注解
+- **curves.py:824**: 函数 `diagnose_curve` 过长 (98 条语句)
+- **data.py:171**: 函数 `_cache_integrity` 缺少返回类型注解
+- **data.py:374**: 函数 `prepare_bins` 过长 (142 条语句)
+- **data.py:1388**: 函数 `get_train_batch_doc_aligned` 缺少返回类型注解
+- **discovery.py:225**: 函数 `exploratory_fdr` 缺少返回类型注解
+- **discovery.py:361**: 函数 `collect_seed_level_tests` 缺少返回类型注解
+- **dose_response.py:317**: 函数 `_quadratic_fit` 缺少返回类型注解
+- **dose_response.py:708**: 函数 `main` 缺少返回类型注解
 
-- **Floating point comparisons**: All comparisons are on integer
-  configuration values or discrete metrics, not continuous
-  floating-point quantities.
+*... 及其他 69 个发现*
 
-### Methodology Assessment
+## 4. 总结
 
-- **Bootstrap**: `_ruler_macro_bootstrap_ci` correctly samples with
-  replacement via `rng.integers(0, vals.size, size=vals.size)`.
-  Hierarchical bootstrap correctly re-samples seeds before samples.
-- **Ablation matrix**: GATE_FACTORS derived from single source of
-  truth (_USE_QUERY/_USE_CONC/_USE_LEN); no drift between metadata
-  and implementation.
-- **Multiple comparison correction**: BH-adjusted p-values used where
-  appropriate; raw p-values only in exploratory contexts as documented.
-- **Data leakage**: No normalization before train/test split detected.
-  All statistics computed on training data only.
+共发现 0 个潜在代码问题，89 个代码结构建议。
 
-### Conclusion
-
-The lega-attention codebase is of exceptionally high quality. The
-mathematical formulation, implementation, and experimental methodology
-are all correct and consistent across the 168 Python files reviewed.
-No changes required.
+---
+*审查完成于 2026-11-26 22:46:46.468876*
