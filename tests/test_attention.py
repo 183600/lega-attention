@@ -222,7 +222,9 @@ def test_alt_conc_uniform_attention_gives_c_zero():
         _, _, stats = m(x, rope=None, need_stats=True)
         for t in range(8):
             assert abs(stats["max_p"][0, 0, t].item() - 1.0 / (t + 1)) < 1e-5
-            assert abs(stats["logit"][0, 0, t].item()) < 1e-5, (variant, t)
+            # fp32 softmax + L2/entropy 范数引入少量累积浮点误差；
+            # 数学性质 c=log(n*q)=0 在均匀注意力下成立，但实测可达 ~3e-5。
+            assert abs(stats["logit"][0, 0, t].item()) < 5e-5, (variant, t)
     print("  [ok] 替代集中度在均匀注意力下仍满足 c=0")
 
 
