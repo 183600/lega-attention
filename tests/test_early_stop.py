@@ -360,7 +360,7 @@ def test_train_early_stop_end_to_end():
         assert manifest["config_used_sha256"] == cfg_sha
         assert manifest["config_used"] == cfg_used
         ckpt = torch.load(
-            os.path.join(out_dir, "model.pt", map_location="cpu"), map_location="cpu", weights_only=True
+            os.path.join(out_dir, "model.pt"), map_location="cpu", weights_only=True
         )
         assert ckpt["config_used_sha256"] == cfg_sha
         assert ckpt["resolved_config"] == cfg_used
@@ -461,20 +461,20 @@ def test_train_rerun_same_seed_is_bitwise_reproducible_on_cpu():
             {k: v for k, v in r.items() if k not in drop} for r in l2
         ]
         c1 = torch.load(
-            os.path.join(out1, "model.pt", map_location="cpu"), map_location="cpu", weights_only=True
+            os.path.join(out1, "model.pt"), map_location="cpu", weights_only=True
         )
         c2 = torch.load(
-            os.path.join(out2, "model.pt", map_location="cpu"), map_location="cpu", weights_only=True
+            os.path.join(out2, "model.pt"), map_location="cpu", weights_only=True
         )
         s1, s2 = c1["state_dict"], c2["state_dict"]
         assert set(s1) == set(s2)
         for name in s1:
             assert torch.equal(s1[name], s2[name]), name
         b1 = torch.load(
-            os.path.join(out1, "model_best.pt", map_location="cpu"), map_location="cpu", weights_only=True
+            os.path.join(out1, "model_best.pt"), map_location="cpu", weights_only=True
         )
         b2 = torch.load(
-            os.path.join(out2, "model_best.pt", map_location="cpu"), map_location="cpu", weights_only=True
+            os.path.join(out2, "model_best.pt"), map_location="cpu", weights_only=True
         )
         assert set(b1["state_dict"]) == set(b2["state_dict"])
         for name in b1["state_dict"]:
